@@ -820,30 +820,31 @@ doctor_check_log_channel() {
   # rotated channel needs. So the never-delivered warning fires only when
   # neither file exists.
   if [ ! -e "${inbox}" ] && [ ! -e "${one}" ]; then
-    # NEVER DELIVERED -> NO SERVER PRODUCER REGISTERED, one of the three states
-    # of an empty channel (contract -> "Producer registration extends to
-    # platform deliveries"). The three MUST NOT read identically though all look
-    # empty on disk:
+    # NEVER DELIVERED, one of the three states of an empty channel (contract ->
+    # "Producer registration extends to platform deliveries"). The three MUST
+    # NOT read identically though all look empty on disk:
     #   * NO CLIENT CHANNEL DECLARED -> the registry-entry finding
     #     (doctor_check_entry), which now names the resolved repo identity that
     #     found zero;
-    #   * NO SERVER PRODUCER REGISTERED -> HERE (the file never existed), and the
-    #     Fix names WHICH server end must exist -- and that differs by producer:
-    #     a "platform" channel is fed by an athena-events handling rule, a
-    #     "slack" channel by a server-side agent instance;
+    #   * the file never existed -> HERE, and WHICH server end is at fault
+    #     differs by producer:
+    #       - "platform": fed by an athena-events handling rule. The doctor has
+    #         no view of rules, so it reports `never-delivered` "NO SERVER
+    #         PRODUCER REGISTERED" with that Fix. Informational (INFO_SET in
+    #         bin/inbox-doctor): the count path already surfaces it, and a
+    #         second copy flipping `healthy` would double-nag one fault.
+    #       - "slack": fed through a server-side agent instance, which the
+    #         doctor CAN see. doctor_check_slack_producer asks the server
+    #         (DND-923) and reports `producer-unregistered` (fail) or
+    #         `never-routed` (warn), both counting against `healthy`; only the
+    #         unverified form stays `never-delivered` and informational.
     #   * NOTHING ARRIVED -> the live/rotated file exists (handled below): a
     #     quiet channel, not a fault.
-    # Its OWN check name, and informational for the hook's verdict (see
-    # INFO_SET in bin/inbox-doctor): the count path already surfaces
-    # never-delivered via inbox-status's HEALTH_TEXT, so letting THIS finding
-    # flip `healthy` too would double-nag one fault on two separate rate limits.
-    # A hand run still shows it as a warn with the producer-specific Fix.
     if [ "${producer}" = "platform" ]; then
       doctor_finding warn "never-delivered" "platform log channel \"${chan}\" has never received anything (${inbox##*/} does not exist): NO SERVER PRODUCER REGISTERED" \
         "register this channel's server producer -- an athena-events handling rule whose delivery target is this inbox channel (ai/contracts/athena-events.md). A channel declared producer:\"platform\" with no handling rule feeding it is empty and, on disk, indistinguishable from one that is merely quiet."
     else
-      doctor_finding warn "never-delivered" "log channel \"${chan}\" has never received anything (${inbox##*/} does not exist): NO SERVER PRODUCER REGISTERED" \
-        "register this channel's producer -- a server-side agent instance mapped to ${inbox##*/} in the client config; an unregistered producer and an empty channel look identical on disk."
+      doctor_check_slack_producer "${chan}" "${inbox##*/}"
     fi
     return 0
   fi
@@ -902,6 +903,101 @@ doctor_check_log_channel() {
 
   # The consumer lock: a dead-pid lock is REPORTED reapable, never reaped.
   doctor_check_lock "${chan}" "$(inbox_field lock "${resolved}")"
+}
+
+# --- a never-delivered Slack channel: ASK the server (DND-923) --------------
+#
+# An empty Slack log channel is one of three states, and the disk cannot tell
+# them apart. Only the server can:
+#   * this machine has NO agent instance whose inbox_name is the file
+#       -> fail `producer-unregistered`: the server refuses every claim and
+#          delivery for that inbox (both ends or dark). Owner-provisioned.
+#   * the instance EXISTS, nothing was ever routed to it
+#       -> warn `never-routed`, NOT informational: the chain is wired and
+#          still silent. A claim-only channel (custom's `slack`, which receives
+#          only replies to threads a session claimed) stays here until a
+#          claimed thread gets a reply.
+#   * the server could not be asked (--no-server, no machine token, the call
+#     failed, an answer with no single `self` machine)
+#       -> warn `never-delivered` (informational), saying UNVERIFIED and why.
+#          It never claims "not registered" on an answer it did not get.
+#
+# Measured 2026-09-26: this doctor printed "NO SERVER PRODUCER REGISTERED" for
+# custom-slack.jsonl while the server held a live instance for it on this
+# machine and the client had joined it. The client does not need a config
+# mapping either: it writes to the inbox_name the server sends when its config
+# names no override. The real gap was that nothing claimed a thread (DND-491).
+#
+# The answer is list_my_machines on the machine token, asked at most ONCE per
+# run (DOCTOR_MACHINES_ASKED) however many Slack channels are declared. Seam:
+# ATHENA_INBOX_DOCTOR_MACHINES_FILE holds a canned answer (a JSON value, or
+# `UNAVAILABLE:<reason>`) and skips the network.
+
+# doctor_state_producer <list_my_machines-json> <inbox-file-name>
+# Pure. One tab-separated line:
+#   registered<TAB><instance name><TAB><machine name>
+#   unregistered<TAB><machine name><TAB><machine id>
+#   unknown<TAB><why>
+# Server-set names are forced onto one line with no tab, so a name cannot forge
+# a field.
+doctor_state_producer() {
+  printf '%s' "$1" | jq -r --arg i "$2" '
+    def clean: tostring | [explode[] | if . < 32 or . == 127 then 32 else . end] | implode;
+    if type != "array" then "unknown\tthe list_my_machines answer was not a list"
+    else [ .[] | select(type == "object" and .self == true) ] as $s
+      | if ($s | length) != 1 then "unknown\tthe list_my_machines answer names \($s | length) machines as this one"
+        else $s[0] as $m
+          | [ ($m.instances // [])[] | select(type == "object" and .inbox_name == $i) ] as $hit
+          | if ($hit | length) > 0
+            then "registered\t\($hit[0].name // "(unnamed)" | clean)\t\($m.name // "(unnamed)" | clean)"
+            else "unregistered\t\($m.name // "(unnamed)" | clean)\t\($m.id // "<machine-id>" | clean)" end
+        end
+    end' 2>/dev/null || printf 'unknown\tthe list_my_machines answer could not be parsed\n'
+}
+
+DOCTOR_MACHINES_ASKED=""
+DOCTOR_MACHINES_OUT=""
+DOCTOR_MACHINES_RC=""
+
+# doctor_ask_machines -- sets DOCTOR_MACHINES_OUT / DOCTOR_MACHINES_RC in the
+# CURRENT shell (never call it inside $(...): the cache would die with the
+# subshell and every channel would ask again).
+doctor_ask_machines() {
+  [ -z "${DOCTOR_MACHINES_ASKED}" ] || return 0
+  DOCTOR_MACHINES_ASKED=1
+  DOCTOR_MACHINES_OUT="$(doctor_mcp_tool_call list_my_machines '{}' "${ATHENA_INBOX_DOCTOR_MACHINES_FILE:-}")"
+  DOCTOR_MACHINES_RC=$?
+}
+
+# doctor_check_slack_producer <chan> <inbox-file-name>
+doctor_check_slack_producer() {
+  local chan="$1" inbox="$2" why="" st a b
+  if [ "${DOCTOR_NO_SERVER:-0}" = "1" ]; then
+    why="not asked (--no-server)"
+  else
+    doctor_ask_machines
+    case "${DOCTOR_MACHINES_RC}" in
+      0) ;;
+      2) why="not asked: this machine has no inbox client config or no machine token" ;;
+      *) why="the server could not be asked: $(printf '%s' "${DOCTOR_MACHINES_OUT}" | head -n 1)" ;;
+    esac
+  fi
+  if [ -z "${why}" ]; then
+    IFS=$'\t' read -r st a b <<<"$(doctor_state_producer "${DOCTOR_MACHINES_OUT}" "${inbox}")"
+    case "${st}" in
+      registered)
+        doctor_finding warn "never-routed" "log channel \"${chan}\" has never received anything (${inbox} does not exist), yet its server producer IS registered (agent instance \"${a}\" on \"${b}\"): nothing has been ROUTED to it" \
+          "the chain is wired and still silent. A channel fed only by claimed thread replies (custom's slack) stays empty until a session claims a thread and someone replies in it: athena:slack post and dm claim the threads they start, and bin/claim-thread claims one by hand. If replies to a claimed thread still land in another project's file, the server's thread-claim routing is at fault (ai/contracts/athena-events.md, Thread replies route to the thread's claimant)."
+        return 0 ;;
+      unregistered)
+        doctor_finding fail "producer-unregistered" "log channel \"${chan}\" has never received anything, and the server has NO agent instance for ${inbox} on this machine (\"${a}\", ${b}): NO SERVER PRODUCER REGISTERED" \
+          "owner-provisioned: the owner adds an agent instance with inbox_name ${inbox} to this machine in the Athena UI (/machines/${b}/instances/new) or with POST /api/machines/${b}/instances on a user API token. Until it exists the server refuses every claim and delivery for this inbox (both ends or dark); an agent does not create it."
+        return 0 ;;
+      *) why="${a:-the answer was not usable}" ;;
+    esac
+  fi
+  doctor_finding warn "never-delivered" "log channel \"${chan}\" has never received anything (${inbox} does not exist); its server producer registration is UNVERIFIED: ${why}" \
+    "run athena:inbox bin/inbox-doctor without --no-server (it asks the server's list_my_machines for an agent instance whose inbox_name is ${inbox}). An unregistered producer and a channel nothing has been routed to look identical on disk."
 }
 
 doctor_check_maildir_channel() {

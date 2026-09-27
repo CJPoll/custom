@@ -1487,7 +1487,7 @@ inbox_doorbells() {
           if [ "${_wprod}" = "platform" ]; then
             printf '  Fix: no server-side producer is registered for this platform lane — add an athena-events routing rule that writes state-change events to its inbox file (see ai/contracts/athena-events.md). Until then this doorbell can never ring, and a waiter blocked on it is indistinguishable from a quiet week.\n' >&2
           else
-            printf '  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json. Until then this doorbell can never ring, and a waiter blocked on it is indistinguishable from a quiet week.\n' >&2
+            printf '  Fix: register this channel'"'"'s producer — a server-side agent instance on this machine whose inbox_name is this file. Run inbox-doctor: it asks the server whether that instance exists, and tells a missing producer from one nothing has been routed to yet (a claim-only channel stays empty until a claimed thread gets a reply). Until then this doorbell can never ring, and a waiter blocked on it is indistinguishable from a quiet week.\n' >&2
           fi
         fi
         ;;

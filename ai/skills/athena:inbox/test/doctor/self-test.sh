@@ -230,12 +230,69 @@ export ATHENA_INBOX_ROOT="${TMP}/ch"; mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/proj
 R2="${TMP}/repo2"; C2="$(make_repo "${R2}")"
 ENTRY='{"v":1,"repo":"'"${C2}"'","channels":{"slack":{"kind":"log","path":"ch-slack.jsonl"}}}'
 printf '%s' "${ENTRY}" > "${ATHENA_INBOX_ROOT}/projects/ch.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/ch.json"
-# never delivered (no file) -> NO SERVER PRODUCER REGISTERED
+# never delivered (no file). DND-923: WHICH of three states it is depends on
+# the server, so the doctor ASKS it (list_my_machines on the machine token)
+# instead of asserting "NO SERVER PRODUCER REGISTERED" from an empty disk. On
+# 2026-09-26 it printed exactly that for custom-slack.jsonl while the server
+# held a live agent instance for it on this machine and the client had joined
+# it; the real gap was that nothing claimed a thread (DND-491).
+# Here the config holds no token, so the server cannot be asked: UNVERIFIED.
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
 assert_finding "log never delivered -> warn (own check)" "${CH}" warn "never-delivered" "never received"
-assert_finding "slack never-delivered names NO SERVER PRODUCER REGISTERED" "${CH}" warn "never-delivered" "NO SERVER PRODUCER REGISTERED"
-assert_contains "slack never-delivered Fix names the client-config instance, not athena-events" "client config" "${CH}"
+assert_finding "slack never-delivered, server not asked -> producer registration UNVERIFIED" "${CH}" warn "never-delivered" "UNVERIFIED"
+assert_not_contains "an unverified producer is never reported as NOT registered" "NO SERVER PRODUCER REGISTERED" "${CH}"
 assert_not_contains "slack never-delivered Fix does NOT name athena-events" "athena-events" "${CH}"
+assert_not_contains "slack never-delivered Fix does NOT send the reader to the client config (the client routes by the server's inbox_name)" "in the client config" "${CH}"
+
+# DND-923: the server answers. doctor_state_producer is the pure decision.
+MY_ID="11111111-2222-3333-4444-555555555555"
+machines_json() { # machines_json <self-instances-json>
+  jq -n -c --arg id "${MY_ID}" --argjson inst "$1" \
+    '[{id: $id, name: "Test Desktop", self: true, instances: $inst},
+      {id: "other", name: "Other Laptop", self: false, instances: [{name: "o", inbox_name: "ch-slack.jsonl"}]}]'
+}
+HAS="$(machines_json '[{"name":"test-desktop-ch-slack","inbox_name":"ch-slack.jsonl"}]')"
+LACKS="$(machines_json '[{"name":"test-desktop-ch-session","inbox_name":"ch-session.jsonl"}]')"
+assert_eq "producer: this machine has the instance -> registered" \
+  "registered	test-desktop-ch-slack	Test Desktop" "$(doctor_state_producer "${HAS}" ch-slack.jsonl)"
+assert_eq "producer: only ANOTHER machine has it -> unregistered here" \
+  "unregistered	Test Desktop	${MY_ID}" "$(doctor_state_producer "${LACKS}" ch-slack.jsonl)"
+assert_contains "producer: no machine marked self -> unknown" "unknown	" \
+  "$(doctor_state_producer '[{"id":"x","self":false,"instances":[]}]' ch-slack.jsonl)"
+assert_contains "producer: two machines marked self -> unknown" "unknown	" \
+  "$(doctor_state_producer '[{"id":"x","self":true,"instances":[]},{"id":"y","self":true,"instances":[]}]' ch-slack.jsonl)"
+assert_contains "producer: not a list -> unknown" "unknown	" "$(doctor_state_producer '{"oops":1}' ch-slack.jsonl)"
+assert_eq "producer: a server name with a tab or newline cannot forge a field" "registered	a b	Test Desktop" \
+  "$(doctor_state_producer "$(machines_json '[{"name":"a\tb","inbox_name":"ch-slack.jsonl"}]')" ch-slack.jsonl)"
+
+MF="${TMP}/machines.json"
+export DOCTOR_NO_SERVER=0
+printf '%s' "${HAS}" > "${MF}"
+CH="$(cd "${R2}" && ATHENA_INBOX_DOCTOR_MACHINES_FILE="${MF}" doctor_check_channels "${ENTRY}" ".")"
+assert_finding "registered producer, nothing delivered -> warn never-routed (NOT informational)" "${CH}" warn "never-routed" "IS registered"
+assert_contains "never-routed names the instance and the machine" 'agent instance "test-desktop-ch-slack" on "Test Desktop"' "${CH}"
+assert_contains "never-routed Fix points at thread claims (athena:slack post/dm, claim-thread)" "claim-thread" "${CH}"
+assert_not_contains "a registered producer is never reported as NOT registered" "NO SERVER PRODUCER REGISTERED" "${CH}"
+assert_no_finding "a registered producer emits no never-delivered finding" "${CH}" warn "never-delivered" "never received"
+printf '%s' "${LACKS}" > "${MF}"
+CH="$(cd "${R2}" && ATHENA_INBOX_DOCTOR_MACHINES_FILE="${MF}" doctor_check_channels "${ENTRY}" ".")"
+assert_finding "no instance for the inbox on this machine -> FAIL producer-unregistered" "${CH}" fail "producer-unregistered" "NO SERVER PRODUCER REGISTERED"
+assert_contains "producer-unregistered names the inbox and this machine's id" "ch-slack.jsonl" "${CH}"
+assert_contains "producer-unregistered Fix names the sanctioned owner path" "/machines/${MY_ID}/instances/new" "${CH}"
+printf 'UNAVAILABLE:list_my_machines is not available from the server: boom' > "${MF}"
+CH="$(cd "${R2}" && ATHENA_INBOX_DOCTOR_MACHINES_FILE="${MF}" doctor_check_channels "${ENTRY}" ".")"
+assert_finding "server unavailable -> warn never-delivered UNVERIFIED with the reason" "${CH}" warn "never-delivered" "boom"
+assert_no_finding "server unavailable is never a fail" "${CH}" fail "producer-unregistered" ""
+printf '%s' "${LACKS}" > "${MF}"
+CH="$(cd "${R2}" && DOCTOR_NO_SERVER=1 ATHENA_INBOX_DOCTOR_MACHINES_FILE="${MF}" doctor_check_channels "${ENTRY}" ".")"
+assert_finding "--no-server -> warn never-delivered UNVERIFIED, the server is not asked" "${CH}" warn "never-delivered" "--no-server"
+assert_no_finding "--no-server never fails on an answer it did not ask for" "${CH}" fail "producer-unregistered" ""
+unset DOCTOR_NO_SERVER
+# The loud states count against health; the unverified one stays informational.
+INFO_LINE="$(command grep -n '^INFO_SET=' "${BIN}")"
+assert_not_contains "never-routed is not informational (it flips healthy)" " never-routed " "${INFO_LINE}"
+assert_not_contains "producer-unregistered is not informational" " producer-unregistered " "${INFO_LINE}"
+assert_contains "never-delivered (unverified) stays informational" " never-delivered " "${INFO_LINE}"
 # DND-260: a PLATFORM channel that never received distinguishes its Fix -- it
 # names the athena-events server producer (a handling rule), not a client
 # instance. The three empty-channel states must not read identically.

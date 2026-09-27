@@ -1558,14 +1558,28 @@ failure mode by a different second end:
   a rule targets it; **no server producer registered** is the
   `never-delivered` finding on an absent inbox file, whose `Fix:` is
   **producer-aware** — a `platform` channel names the `athena-events.md` handling
-  rule/target that must feed it, a `slack` channel names the server-side agent
-  instance in the client config; and **nothing arrived** is the non-fault
+  rule/target that must feed it; for a `slack` channel the doctor **asks the
+  server** (`list_my_machines` on the machine token) whether this machine has an
+  agent instance whose `inbox_name` is the file, and reports one of three: none
+  (`producer-unregistered`, a `fail`, owner-provisioned), one that nothing has
+  been routed to yet (`never-routed`, a non-informational `warn`), or a
+  registration it could not verify (`never-delivered`, informational, naming
+  why); and **nothing arrived** is the non-fault
   zero-new state on a file that exists — until the channel's last delivery is
   older than its `stale_after_s`, when it becomes the `STALE` fault
   (`freshness:<channel>`, graded `fail`), because past that age "nothing
   arrived" and "the relay is dark" cannot be told apart by count. The
   unprompted count path surfaces a never-delivered channel once and the doctor
   does not nag a second time (see *inbox-doctor*).
+
+  **Later (2026-09-27):** this passage said a `slack` channel's never-delivered
+  `Fix:` "names the server-side agent instance in the client config", and the
+  doctor printed "NO SERVER PRODUCER REGISTERED" for any absent Slack inbox
+  file. Superseded by DND-923. The inbox client needs no config mapping (it
+  writes to the `inbox_name` the server sends when its config names no
+  override), and on 2026-09-26 that verdict was printed for
+  `custom-slack.jsonl` while the server held a live instance for it on this
+  machine. The doctor now asks the server, as described above.
 
   **Later (2026-09-23):** this passage called "nothing arrived" the non-fault
   "last changed" state whatever its age, and the doctor graded a present file's
@@ -2547,9 +2561,12 @@ must not enumerate `projects/`, but the tool someone runs to look may:
   degraded running chain. Folding them into `healthy` would make the SessionStart
   line nag every opted-in repo, every window, about a benign steady state. The
   current informational findings are: an **undeclared live entry**; an
-  **unclaimed server instance**; a **never-delivered log channel** (the count
-  path already surfaces it, so the doctor's copy must not nag a second time on a
-  second rate limit); a **stray non-entry file** in `projects/` (a backup or
+  **unclaimed server instance**; a **never-delivered log channel** whose
+  producer registration the doctor could not verify (the count path already
+  surfaces it, so the doctor's copy must not nag a second time on a second rate
+  limit; a verified `never-routed` or `producer-unregistered` Slack channel is
+  **not** informational — the server was asked and the chain is wired but
+  silent, or dark at the server end); a **stray non-entry file** in `projects/` (a backup or
   swapfile that was never a registry entry); and a **dead-pid consumer lock**
   (the lock file is deliberately left behind on release, so every channel ever
   read carries one — reporting it is a courtesy, not a fault); and the **wedge
