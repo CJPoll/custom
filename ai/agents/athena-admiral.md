@@ -213,7 +213,9 @@ run, its scope and its end to the fleet registry ([[athena:fleet-liveness]] →
 - **State log**: `.../[run-id]/state.md` — per Mission: worktree path, branch,
   status (`UNSTARTED`/`QUEUED`/`IN_PROGRESS`/`BLOCKED`/`PARKED`/`DONE`/`STUCK`),
   dependency edges, MR URL once opened, and **last-known-activity timestamp**. Your
-  single source of truth for resuming and for merge-target sequencing.
+  single source of truth for resuming and for merge-target sequencing. Stamp each
+  entry from `date -u +%H:%MZ` run with the append, never a guessed time: owner
+  approvals cite these stamps (measured: `08:2xZ` entries written at 07:59Z).
 - **Reports directory**: `.../[run-id]/reports/[mission]-report.md` — captains
   write here; you read. Give every captain this exact absolute path at dispatch —
   never let one guess a worktree-relative location.
