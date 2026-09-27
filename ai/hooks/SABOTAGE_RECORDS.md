@@ -791,16 +791,16 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (final, critic rounds 1-18, admiral batches 7-9):** `RESULT: 574
-  passed, 0 failed` / `VERDICT: PASS`. The per-round tables in this and the
-  next few subsections are HISTORICAL, measured on the hook of the round
-  they name; the authoritative final table is "Sabotage rows on the
-  option-A hook" below (574, on the round-18 hook).
+- **After (final, critic rounds 1-20, admiral batches 7-9 + the harness
+  relay):** `RESULT: 577 passed, 0 failed` / `VERDICT: PASS`. The per-round
+  tables in this and the next few subsections are HISTORICAL, measured on
+  the hook of the round they name; the authoritative final table is
+  "Sabotage rows on the option-A hook" below (577, on the round-20 hook).
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
-`RESULT: 526 passed, 31 failed` (on the final suite; the count here was 495
-at round 8, before later rounds added cases). Every failure is an allow
+`RESULT: 539 passed, 38 failed` (the final 577-case suite against the base
+hook; the count here was 495 at round 8 and grew as rounds added cases). Every failure is an allow
 case (QA/QB) or the deny-text check T2, e.g.:
 
 ```
@@ -924,12 +924,12 @@ reached every case they did (their mutants stayed green).
   via DND-775" block. Every deny stays green. Rows 10, 13, 14, 17-22, 24
   and 25 above sabotaged deleted code and are retired.
 
-### Sabotage rows on the option-A hook (final, measured on the round-16
+### Sabotage rows on the option-A hook (final, measured on the round-20
 hook; supersede every table above)
 
-Self-test `RESULT: 571 passed, 0 failed`. One mutant copy each. A-1..A-31
+Self-test `RESULT: 577 passed, 0 failed`. One mutant copy each. A-1..A-31
 were measured on 9e114a6 + the round-12 edits; A-32 on 110ea27; A-33 on the
-round-16 hook; A-34/A-35 on the round-17 hook; A-36 on the round-18 hook.
+round-16 hook; A-34/A-35 on the round-17 hook; A-36 on the round-18 hook; A-37 on the round-20 hook.
 Rows whose mechanisms option A deleted (the old A-3/10/12-14/17-25) are
 retired with that code.
 
@@ -957,6 +957,7 @@ retired with that code.
 | A-34 | Depth counts ignore bracket type, so a `]` closes a `${` and a `}` closes a `$[` (critic round 17) | QX100, QX101, QX102, QX104 — `567 passed, 4 failed` |
 | A-35 | The `${`/`$[` depth is reset at each newline, so a `${` open across a line is missed (critic round 17) | QX103 — `570 passed, 1 failed` |
 | A-36 | The fail-safe on a substitution inside an open expansion is dropped, so a `}` inside `$(...)`/backticks closes the `${` (critic round 18) | QX105, QX106 — `572 passed, 2 failed` |
+| A-37 | The substitution fail-safe is cleared at each newline again, so a newline inside the nested `$(...)`/backticks reopens it (critic round 20) | QX107, QX108 — `575 passed, 2 failed` |
 
 - **Round 11, path-qualified word + stale text.** The critic found that
   `exec_text()` stripped a command word to its basename before the
@@ -1015,3 +1016,15 @@ retired with that code.
   expansion is open (bo>bc or ao>ac), a per-line flag (pxs) forces nohd, so
   `<<` reads as a command line. QX105/QX106; QA81 confirms a substitution
   OUTSIDE any expansion does not trip it. Mutation A-36.
+- **Round 20, the fail-safe must survive a newline.** Round 18's flag was
+  reset per line while the expansion depth it protects carries across
+  lines, so `echo ${x:-$(echo }` then `)<<'E' }` on the next line parsed as
+  a heredoc. Fix: pxs is never cleared; once a substitution opens inside an
+  open expansion, heredoc detection is off for the rest of the text. This
+  is the unwalkable form: no later close or newline can re-enable it.
+  Fail-first: the round-18 hook (32830e8) on the final suite gives
+  `575 passed, 2 failed` (QX107, QX108, status=0, allowed). QX107/QX108;
+  mutation A-37. Also this round: QA82 (harness relay), a `grep -E`
+  alternation `receipt|write.*verdict|INTEGRATION OK`, is allowed (denied
+  on base as a glob command word). The evidence counts above are
+  reconciled to the final suite (577 cases; base 539/38).

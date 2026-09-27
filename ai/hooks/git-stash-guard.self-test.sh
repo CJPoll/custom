@@ -605,9 +605,10 @@ fi
 echo "== Q: quoted payloads and quoted heredoc bodies are data (DND-799) =="
 # A quoted word holding whitespace or a separator, and a heredoc body, is
 # re-read as a command text. Unless the shell may EXECUTE it, it is DATA:
-# only literal findings count there (a literal stash write, stash-ref
-# plumbing, a stash alias), never the expansion findings (a glob or brace
-# command word, an expanded command word or subcommand, an unread config).
+# literal findings count there (a literal stash write, stash-ref plumbing,
+# a stash alias), and so does a glob or brace command word followed by a
+# stash verb; the other expansion findings (a bare glob command word, an
+# expanded command word or subcommand, an unread config) do not.
 # QA: the false positives the fleet recorded on DND-799 (batches 2-5) and
 # DND-853, each denied before this change.
 case_cmd "QA1. gh -q object filter with [] and |" allow "gh pr view 12 -q '{number: .number, checks: [.statusCheckRollup[] | {name: .name, state: .conclusion}]}'"
@@ -1028,6 +1029,21 @@ E"
 case_cmd "QA81. \$(date) then a real data heredoc stays allowed" allow "d=\$(date) && jq -c '.[]' <<'E'
 {}
 E"
+
+# QX107-108: critic round 20. The round-18 fail-safe must survive a newline
+# inside the nested substitution; the expansion depth it protects carries
+# across lines, so the flag does too.
+case_cmd "QX107. a newline inside \$(...) nested in \${x:- ...}" deny "echo \${x:-\$(echo }
+)<<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX108. a newline inside backticks nested in \${x:- ...}" deny "echo \${x:-\`echo }
+\`<<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+# Harness relay (2026-09-27): a read-only grep -E alternation whose middle
+# term is word.*word was read as a glob command word.
+case_cmd "QA82. grep -E alternation with a word.*word middle term" allow "grep -E 'receipt|write.*verdict|INTEGRATION OK' gate.log"
 
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).

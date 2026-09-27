@@ -572,7 +572,11 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         # by bracket TYPE (a `]` cannot close a `${`) and carried ACROSS
         # lines (a `${` may span a newline), like `ar` counts `((`.
         # `$((...))` stays handled by `ar`. Over-setting nohd only reads the
-        # following lines as commands.
+        # following lines as commands. pxs is set once a `$(` or backtick
+        # opens inside an open expansion; the `}`/`]` counts are unreliable
+        # from there on, so it is never cleared (not at a newline, not at a
+        # close) and heredoc detection stays off for the rest of the text
+        # (critic rounds 18, 20). Over-setting only reads lines as commands.
         nohd = (bo > bc) || (ao > ac) || pxs
         if (has && cur !~ /^[0-9]+$/) {
           if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; hdp = 0 } }
@@ -598,7 +602,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         else if (c == ")" && substr(text, i + 1, 1) == ")" && ar > 0) { ar--; i++ }
         if (c !~ /[ \t]/) { ns = 1; skip = 0; hdp = 0 }
         if (c == "\n") {
-          cm = 0; pxs = 0
+          cm = 0
           # The bodies of the heredocs opened on the line just ended, in
           # order, each up to its delimiter line (tabs stripped for `<<-`).
           pos = i + 1
