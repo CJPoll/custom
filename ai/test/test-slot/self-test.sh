@@ -177,6 +177,11 @@ d	e"
   t eq "$(default_signals 0000000000000004)" "INT"
   t eq "$(default_signals 0000000000001002)" "QUIT"
   t eq "$(default_signals '')" "INT,QUIT"
+  t eq "$(ticket_of /p/waiters/q-000000000042.w)" 42
+  t eq "$(ticket_of q-000000000007.w)" 7
+  t eval '! ticket_of /p/waiters/123-1790000000.w >/dev/null'
+  t eval '! ticket_of /p/waiters/.q-5.99.tmp >/dev/null'
+  t eval '! ticket_of /p/waiters/q-.w >/dev/null'
   exit "$f"
 )
 if [ $? -eq 0 ]; then ok; else bad helpers "pure helper cases failed (see above)"; fi
@@ -536,7 +541,8 @@ for sig in TERM INT HUP; do
   case $sig in INT) want=130 ;; TERM) want=143 ;; HUP) want=129 ;; esac
   newpool "p30$sig" 1
   hold "A30$sig" "holder-A30$sig"
-  # B: the queue head, polling the slots. C: behind B, blocked on queue.lock.
+  # B: the queue head, polling the slots. C: behind B, blocked on B's queue
+  # file (queue.lock before DND-823).
   bg "B30$sig" --label "B30$sig" -- sh -c ': > "$1"' _ "$W/B30$sig.ran"
   await_grep "$W/B30$sig.err" "WAITING" 20 || bad "30-$sig-B-wait" "B never waited"
   BG_PRE=("${SIG_DEFAULT[@]}")
@@ -594,6 +600,135 @@ check 31-held-1 eq "$(jq .held <<<"$st")" 1
 check 31-holder-kept eq "$(jq -r '.holders[0].label' <<<"$st")" holder-A31
 check 31-waiting-0 eq "$(jq .waiting <<<"$st")" 0
 release A31; reap A31; check 31-A-rc eq "$RC" 0
+
+# 32 (DND-823, fail-first): slots are granted in ARRIVAL order. N=1, holder
+# A; W1 queues first (the head), then W2, then W3, each seen in the queue
+# before the next starts. W2 renews its wait every second (heartbeat seam 1);
+# W3 uses the default 60 s. Before the fix every waiter blocked on queue.lock
+# in a `flock -w <heartbeat>` and re-joined the kernel's wait list at its
+# back each time that timed out, so the grant order was the order of each
+# waiter's LAST renewal, not of arrival: W3 overtook W2 here, and in the fleet
+# a gate starved for 55 min while later arrivals ran. After the fix: W1 W2 W3.
+# heartbeats FILE — how many heartbeat lines a waiter has printed so far.
+heartbeats() { grep -c "still waiting" "$1" 2>/dev/null; }
+newpool p32 1
+hold A32 holder-A32
+bg W321 --label W321 -- sh -c 'echo W1 >> "$1"' _ "$W/32.order"
+check 32-W1-queued await_waiters 1
+ATHENA_TEST_SLOT_HEARTBEAT=1 bg W322 --label W322 -- sh -c 'echo W2 >> "$1"' _ "$W/32.order"
+check 32-W2-queued await_waiters 2
+bg W323 --label W323 -- sh -c 'echo W3 >> "$1"' _ "$W/32.order"
+check 32-W3-queued await_waiters 3
+# W2 renews its wait twice more AFTER W3 queued (bounded poll).
+hb0="$(heartbeats "$W/W322.err")"
+for ((i = 0; i < 200; i++)); do [ "$(heartbeats "$W/W322.err")" -ge $((hb0 + 2)) ] && break; sleep 0.05; done
+check 32-W2-renewed eval '[ "$(heartbeats "$W/W322.err")" -ge $((hb0 + 2)) ]'
+release A32
+for k in 1 2 3; do reap "W32$k"; check "32-W$k-rc" eq "$RC" 0; done
+reap A32
+check 32-fifo eq "$(tr '\n' ' ' <"$W/32.order" 2>/dev/null)" "W1 W2 W3 "
+
+# 33 (DND-823): --status shows each waiter's queue position; a SIGKILLed
+# queued waiter leaves the queue at once (its place is judged by its flock,
+# never its pid) and blocks nobody behind it; a waiter behind the head still
+# times out with exit 75, and the queue closes up behind it.
+newpool p33 1
+hold A33 holder-A33
+for k in 1 2 3; do
+  bg "W33$k" --label "W33$k" -- sh -c 'echo "$1" >> "$2"' _ "W$k" "$W/33.order"
+  check "33-W$k-queued" await_waiters "$k"
+done
+bg W334 --label W334 --wait-timeout 8 --outcome-file "$W/33.outcome" -- sh -c 'echo W4 >> "$1"' _ "$W/33.order"
+check 33-W4-queued await_waiters 4
+st="$("$BIN" --status --json 2>/dev/null)"
+check 33-json-positions eq "$(jq -c '[.waiters[] | [.position, .label]]' <<<"$st")" \
+  '[[1,"W331"],[2,"W332"],[3,"W333"],[4,"W334"]]'
+check 33-json-tickets-rise eq "$(jq '[.waiters[].ticket] | . == sort' <<<"$st")" true
+txt="$("$BIN" --status 2>/dev/null)"
+check 33-text-positions eval '[[ "$txt" == *"WAITING #1: W331 "*"WAITING #2: W332 "*"WAITING #3: W333 "*"WAITING #4: W334 "* ]]'
+check 33-W4-told-position await_grep "$W/W334.err" "queue position 4 of 4" 20
+kill -9 "$(pid_of_bg W332)"
+reap W332; check 33-W2-killed eq "$RC" 137
+# await_gone LABEL — bounded poll until no live waiter carries LABEL.
+await_gone() {
+  local i
+  for ((i = 0; i < 100; i++)); do
+    [ "$("$BIN" --status --json 2>/dev/null | jq --arg l "$1" '[.waiters[] | select(.label == $l)] | length')" = 0 ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+check 33-W2-left-queue await_gone W332
+st="$("$BIN" --status --json 2>/dev/null)"
+check 33-closed-up eq "$(jq -c '[.waiters[] | [.position, .label]]' <<<"$st")" \
+  '[[1,"W331"],[2,"W333"],[3,"W334"]]'
+reap W334; check 33-W4-timeout-rc eq "$RC" 75
+check 33-W4-timeout-msg has "$W/W334.err" "TIMEOUT"
+check 33-W4-outcome eq "$(cat "$W/33.outcome" 2>/dev/null)" "timeout"
+check 33-W4-left-queue await_waiters 2
+release A33
+reap W331; check 33-W1-rc eq "$RC" 0
+reap W333; check 33-W3-rc eq "$RC" 0
+reap A33
+check 33-order eq "$(tr '\n' ' ' <"$W/33.order" 2>/dev/null)" "W1 W3 "
+check 33-queue-empty eq "$("$BIN" --status --json 2>/dev/null | jq .waiting)" 0
+
+# 34 (DND-823 rollout): pre-fix and fixed test-slot share one live pool while
+# the fix lands. The pre-fix copy (f99806a, the last version before DND-823)
+# queues on queue.lock; the fixed head takes queue.lock too, so there is one
+# slot poller at a time across versions, slots stay flock-exclusive (never
+# two runs at once at N=1), neither version deletes the other's live waiter
+# file, and whichever head queued first is served first.
+OLD_REV=f99806ad299a5ead0b404f0ce19aa7e64e271f60
+OLD="$W/test-slot-pre-dnd-823"
+if git -C "$here" show "$OLD_REV:ai/bin/test-slot" >"$OLD" 2>"$W/34.git.err" && [ -s "$OLD" ]; then
+  chmod +x "$OLD"
+  # oldbg NAME ARGS... — like bg, but runs the pre-fix copy.
+  oldbg() {
+    local name=$1; shift
+    timeout 60 "$OLD" "$@" >"$W/$name.out" 2>"$W/$name.err" &
+    echo $! >"$W/$name.bg"
+    BG_PIDS+=("$!")
+  }
+  # ORDER_CONC NAME ORDERFILE DIR: record the run order, then concurrency.
+  ORDER_CONC='echo "$1" >> "$2"; exec "$3" "$4" 2 20'
+  for first in old new; do
+    newpool "p34$first" 1
+    mkdir -p "$W/c34$first"
+    hold "A34$first" "holder-A34$first"
+    if [ "$first" = old ]; then
+      oldbg "O34$first" --label "O34$first" -- sh -c "$ORDER_CONC" _ old "$W/34$first.order" "$W/conc.sh" "$W/c34$first"
+      check "34-$first-O-waits" await_grep "$W/O34$first.err" "WAITING" 20
+      bg "N34$first" --label "N34$first" -- sh -c "$ORDER_CONC" _ new "$W/34$first.order" "$W/conc.sh" "$W/c34$first"
+      check "34-$first-N-waits" await_grep "$W/N34$first.err" "WAITING" 20
+      want="old new "
+    else
+      bg "N34$first" --label "N34$first" -- sh -c "$ORDER_CONC" _ new "$W/34$first.order" "$W/conc.sh" "$W/c34$first"
+      check "34-$first-N-waits" await_grep "$W/N34$first.err" "WAITING" 20
+      oldbg "O34$first" --label "O34$first" -- sh -c "$ORDER_CONC" _ old "$W/34$first.order" "$W/conc.sh" "$W/c34$first"
+      check "34-$first-O-waits" await_grep "$W/O34$first.err" "WAITING" 20
+      want="new old "
+    fi
+    check "34-$first-both-waiting" await_waiters 2
+    st="$("$BIN" --status --json 2>/dev/null)"
+    check "34-$first-new-positioned" eq "$(jq -r '.waiters[] | select(.label == "N34'"$first"'") | .position' <<<"$st")" 1
+    check "34-$first-old-unordered" eq "$(jq -r '.waiters[] | select(.label == "O34'"$first"'") | .position' <<<"$st")" null
+    check "34-$first-old-status-text" eval '[[ "$("$BIN" --status 2>/dev/null)" == *"WAITING (pre-DND-823 waiter, unordered): O34$first "* ]]'
+    release "A34$first"
+    reap "O34$first"; check "34-$first-O-rc" eq "$RC" 0
+    reap "N34$first"; check "34-$first-N-rc" eq "$RC" 0
+    reap "A34$first"
+    check "34-$first-order" eq "$(tr '\n' ' ' <"$W/34$first.order" 2>/dev/null)" "$want"
+    check "34-$first-max1" eq "$(cat "$W/c34$first/max" 2>/dev/null)" 1
+    timeout 10 "$BIN" --label "E34$first" -- true 2>"$W/E34$first.err"; rc=$?
+    check "34-$first-pool-usable" eq "$rc" 0
+    check "34-$first-no-wait" lacks "$W/E34$first.err" "WAITING"
+    timeout 10 "$OLD" --label "F34$first" -- true 2>"$W/F34$first.err"; rc=$?
+    check "34-$first-pool-usable-old" eq "$rc" 0
+  done
+else
+  bad 34-old-copy "could not extract the pre-fix test-slot at $OLD_REV: $(cat "$W/34.git.err" 2>/dev/null). Fix: run the suite from a git checkout of ~/dev/custom that contains $OLD_REV (git fetch origin)."
+fi
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then

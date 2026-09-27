@@ -23,16 +23,33 @@
 # holder exits. Holder files and pids are diagnostics only, never read to
 # decide availability. Nothing needs reaping.
 #
-# WAITING IS A KERNEL BLOCK. Every acquirer passes through queue.lock. Waiters
-# behind the head block in flock(2) on it. Only the head of the queue polls the
-# N slots, at a 2 s sleep cadence, bounded by --wait-timeout (Hard Rule
-# safe-wait item 3). No spin. The two long waits (the queue flock and the
-# head's poll sleep) run as a child the script `wait`s on, so INT/TERM/HUP
+# WAITERS ARE SERVED IN ARRIVAL ORDER (DND-823). Every acquirer takes a
+# ticket (under seq.lock) and publishes a flock-held waiters/q-<ticket>.w. A
+# waiter blocks in flock(2) on its nearest LIVE predecessor's file and rescans
+# when that returns; only the head (no live predecessor) takes queue.lock and
+# polls the N slots, at a 2 s sleep cadence, bounded by --wait-timeout (Hard
+# Rule safe-wait item 3). No spin. A waiter that dies leaves the queue with its
+# flock, so it blocks nobody. Before DND-823 every waiter blocked on
+# queue.lock itself and re-joined the kernel's wait list at its back each time
+# its `flock -w <heartbeat>` lapsed, so grants followed each waiter's last
+# renewal, not arrival: a gate starved 55 min while later ones ran. The long
+# waits (seq.lock, the predecessor and queue flocks, the head's poll sleep)
+# run as a child the script `wait`s on, so INT/TERM/HUP
 # exit a waiter at once and kill that child with it (DND-815); only the
 # events.lock append (flock -w 5) still defers a signal, by at most 5 s. A
-# waiter prints WAITING with
-# the pool, N, and every holder before it waits, and a heartbeat at least every
+# waiter prints WAITING with the pool, N, every holder, and its queue
+# position before it waits, and a heartbeat (with its position) at least every
 # 60 s, so a queued gate never looks like a stall.
+#
+# MIXED VERSIONS (the rollout). A pre-DND-823 test-slot still queues on
+# queue.lock and never reads q-files. The fixed head takes queue.lock before
+# it polls, so there is one slot poller at a time across both versions, and
+# the slots stay exclusive by their own flocks in either version. Lock order
+# is acyclic: seq.lock (held alone, briefly) -> own q-file -> a predecessor's
+# q-file (shared, lower ticket) -> queue.lock -> slot locks; the old version
+# takes only queue.lock -> slot locks. Either version removes a waiter file
+# only when it can flock it exclusively, i.e. when its owner is dead. Among
+# old-version waiters order stays what it was until they drain.
 #
 # ---------------------------------------------------------------------------
 # STABLE INTERFACE (DND-486 wraps integration-gate's gate and the captain
@@ -52,7 +69,8 @@
 #     75                the wait timed out; CMD NEVER ran (`test-slot: TIMEOUT`)
 #     130/143/129       INT/TERM/HUP arrived while WAITING; CMD NEVER ran
 #     2                 usage/misuse; CMD never ran (bad flag, no `--`/CMD,
-#                       invalid N seam, pool dir unusable)
+#                       invalid N seam, pool dir unusable, cannot register
+#                       in the queue)
 #   --outcome-file PATH: removed at start, then written with exactly one line:
 #     `timeout`         the wait timed out; CMD never ran
 #     `ran exit=<n>`    CMD ran and exited <n>
@@ -68,8 +86,12 @@
 #   Pool: ${XDG_STATE_HOME:-$HOME/.local/state}/athena/test-slots/ (0700):
 #     slot-<i>.lock      flock = liveness; never deleted
 #     slot-<i>.holder    JSON {label,cwd,pid,started_at,exclusive}; diagnostic
-#     queue.lock         waiters block here
-#     waiters/*.w        one per live waiter, flock-held by it; diagnostic
+#     seq.lock           guards ticket issue and the reaping of dead waiters
+#     queue.lock         the queue head (and any pre-DND-823 waiter) blocks here
+#     waiters/q-<ticket>.w  one per live waiter, flock-held by it; ticket
+#                        order = arrival order (DND-823). JSON {label,cwd,pid,
+#                        since,ticket}. waiters/<pid>-<epoch>.w is a
+#                        pre-DND-823 waiter (unordered)
 #     events.jsonl       one JSON line per event {ts,event,slot,label,cwd,pid,
 #                        exclusive,waited_s,ran_s,exit}; event is one of
 #                        waiting|acquired|released|timeout|reentrant; rotated to
@@ -78,6 +100,8 @@
 #     the fleet with it). Holder lines say EXCLUSIVE.
 #   --status [--json]: N and its basis, held/waiting/unslotted counts, load1,
 #     nproc, then each holder, waiter, and heavy run WITHOUT a slot (UNSLOTTED).
+#     Each waiter has its queue position (text `WAITING #<k>:`, JSON
+#     "position": k; 1 = served next; null for a pre-DND-823 waiter).
 #     Read-only: never creates the pool.
 #
 #   Test seams (self-test only): ATHENA_TEST_SLOT_DIR (pool dir);
@@ -112,6 +136,13 @@
 #   * --status probes a lock with a non-blocking SHARED flock on a fresh fd; an
 #     acquirer racing that probe sees the slot busy for microseconds and simply
 #     tries the next slot or the next 2 s poll.
+#   * FIFO is strict, so the queue is head-of-line: every waiter waits behind
+#     the head, including a head that is --exclusive and needs all N slots.
+#     A waiter that is stopped (SIGSTOP) but alive keeps its place, because
+#     it still holds its flock; --status shows it at its position.
+#   * While pre-DND-823 waiters remain queued (the rollout; at most their
+#     --wait-timeout), they are unordered among themselves and compete with
+#     the fixed head for queue.lock. --status lists them without a position.
 #
 # Self-test: ai/test/test-slot/self-test.sh (discovered by harness-gate);
 # `test-slot --self-test` execs it.
@@ -464,44 +495,136 @@ held_count() {
   printf '%s\n' "$c"
 }
 
-# live_waiters — print each live waiter file (flock-held by its waiter).
-# reap_dead_waiters — remove waiter files no live process holds (skipping
-# very young ones, which may be between create and flock).
-live_waiters() {
+# ------------------------------------------------------------ the FIFO queue
+# (DND-823) Every acquirer takes a TICKET: under seq.lock it finds the highest
+# ticket among waiters/q-<ticket>.w, adds one, and publishes its own file
+# already flock-held (created as a dot-temp, locked, then renamed in), so a
+# visible q-file is never unlocked while its owner lives. A waiter is LIVE
+# exactly while its file is flock-held; ticket order among live waiters is
+# arrival order. A waiter blocks in the kernel on its nearest live
+# predecessor's file (a SHARED lock, which cannot be had while the
+# predecessor holds its exclusive one), and rescans each time that returns:
+# the predecessor got a slot, timed out, or died, and in every case its lock
+# is gone. Only the waiter with no live predecessor (the head) goes on to
+# queue.lock and the slot poll. Nothing is judged by a pid.
+
+# ticket_of NAME — the ticket in a q-file's basename (q-000000000042.w -> 42),
+# or return 1 when NAME is not a q-file.
+ticket_of() {
+  local b=${1##*/}
+  [[ $b =~ ^q-([0-9]{1,18})\.w$ ]] || return 1
+  printf '%s\n' $((10#${BASH_REMATCH[1]}))
+}
+
+# queue_lines — "ticket<TAB>file" for each LIVE q-file, in ticket order.
+queue_lines() {
+  local f t
+  for f in "$POOL"/waiters/q-*.w; do
+    [ -e "$f" ] || continue
+    t=$(ticket_of "$f") || continue
+    lock_held "$f" && printf '%s\t%s\n' "$t" "$f"
+  done | sort -n -k1,1
+}
+
+# legacy_waiters — each live waiter file of a pre-DND-823 test-slot
+# (<pid>-<epoch>.w): unordered, shown without a position.
+legacy_waiters() {
   local f
   for f in "$POOL"/waiters/*.w; do
     [ -e "$f" ] || continue
+    ticket_of "$f" >/dev/null && continue
     lock_held "$f" && printf '%s\n' "$f"
   done
 }
 
+# waiter_positions — "position<TAB>file" per live waiter: the queue in order
+# (1 = the head, next to be served), then legacy ones with position "-".
+waiter_positions() {
+  queue_lines | awk -F'\t' '{ sub(/^[^\t]*\t/, ""); print NR "\t" $0 }'
+  legacy_waiters | sed 's/^/-\t/'
+}
+
+# live_waiters — every live waiter file: the queue in order, then legacy ones.
+live_waiters() {
+  queue_lines | cut -f2-
+  legacy_waiters
+}
+
+# reap_dead_waiters — remove waiter files no live process holds. Run under
+# seq.lock, so no new-style registration is mid-flight: a q-file or dot-temp
+# we can lock exclusively is dead. A legacy file is skipped while young (a
+# pre-DND-823 waiter creates it before it flocks it).
 reap_dead_waiters() {
   local f base epoch now fd
   now=$(date +%s)
-  for f in "$POOL"/waiters/*.w; do
+  for f in "$POOL"/waiters/*.w "$POOL"/waiters/.q-*.tmp; do
     [ -e "$f" ] || continue
     base=${f##*/}
-    epoch=${base#*-}
-    epoch=${epoch%.w}
-    [[ $epoch =~ ^[0-9]+$ ]] && ((now - epoch < WAITER_REAP_AGE_S)) && continue
-    { exec {fd}>>"$f"; } 2>/dev/null || continue
+    if [[ $base != .q-* ]] && ! ticket_of "$base" >/dev/null; then
+      epoch=${base#*-}
+      epoch=${epoch%.w}
+      [[ $epoch =~ ^[0-9]+$ ]] && ((now - epoch < WAITER_REAP_AGE_S)) && continue
+    fi
+    { exec {fd}<"$f"; } 2>/dev/null || continue
     if flock -n "$fd"; then rm -f -- "$f"; fi
     exec {fd}>&-
   done
 }
 
+# predecessor — the file of the live waiter just ahead of TICKET (empty when
+# this run is the head).
+predecessor() {
+  local t f pred=""
+  while IFS=$'\t' read -r t f; do
+    [ -n "$t" ] || continue
+    ((t < TICKET)) || break
+    pred=$f
+  done < <(queue_lines)
+  printf '%s\n' "$pred"
+}
+
+# queue_position — 1 + the number of live waiters ahead of TICKET.
+queue_position() {
+  local t f p=1
+  while IFS=$'\t' read -r t f; do
+    [ -n "$t" ] || continue
+    ((t < TICKET)) && p=$((p + 1))
+  done < <(queue_lines)
+  printf '%s\n' "$p"
+}
+
 WAITER_FILE=""
 WAITER_FD=""
-register_waiter() {
-  [ -n "$WAITER_FILE" ] && return 0
+TICKET=""
+# enqueue — take this run's ticket and publish its flock-held q-file.
+enqueue() {
+  local sfd f t max=0 tmp final
+  { exec {sfd}>>"$POOL/seq.lock"; } 2>/dev/null || die_usage "cannot open $POOL/seq.lock." \
+    "check $POOL is yours with mode 0700 and writable."
+  wait_lock "$sfd" -x
   reap_dead_waiters
-  WAITER_FILE="$POOL/waiters/$$-$(date +%s).w"
-  if { exec {WAITER_FD}>"$WAITER_FILE"; } 2>/dev/null && flock -n "$WAITER_FD"; then
-    printf '{"label":%s,"cwd":%s,"pid":%s,"since":"%s"}\n' \
-      "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$(iso_now)" >&"$WAITER_FD"
-  else
-    WAITER_FILE=""
+  for f in "$POOL"/waiters/q-*.w; do
+    [ -e "$f" ] || continue
+    t=$(ticket_of "$f") || continue
+    ((t > max)) && max=$t
+  done
+  TICKET=$((max + 1))
+  tmp="$POOL/waiters/.q-$TICKET.$$.tmp"
+  final=$(printf '%s/waiters/q-%012d.w' "$POOL" "$TICKET")
+  WAITER_FILE=$tmp
+  if ! { exec {WAITER_FD}>"$tmp"; } 2>/dev/null || ! flock -n "$WAITER_FD"; then
+    rm -f -- "$tmp"
+    die_usage "cannot register in the queue at $POOL/waiters." \
+      "check disk space and that $POOL/waiters is yours with mode 0700; test-slot never runs a command out of queue order."
   fi
+  printf '{"label":%s,"cwd":%s,"pid":%s,"since":"%s","ticket":%s}\n' \
+    "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$(iso_now)" "$TICKET" >&"$WAITER_FD"
+  mv -f -- "$tmp" "$final" || {
+    rm -f -- "$tmp"
+    die_usage "cannot publish $final." "check that $POOL/waiters is writable."
+  }
+  WAITER_FILE=$final
+  exec {sfd}>&-
 }
 
 unregister_waiter() {
@@ -512,27 +635,38 @@ unregister_waiter() {
   WAITER_FD=""
 }
 
+position_text() {
+  [ -n "$TICKET" ] || return 0
+  printf 'queue position %s of %s' "$(queue_position)" "$(queue_lines | wc -l)"
+}
+
 ANNOUNCED=0
+LAST_HB=0
 announce_waiting() {
   ((ANNOUNCED)) && return 0
   ANNOUNCED=1
-  register_waiter
-  local held lines waiting
+  LAST_HB=$(now_ms)
+  local held lines waiting pos
   held=$(held_count)
   lines=$(holder_lines)
   waiting=$(live_waiters | wc -l)
+  pos=$(position_text)
   {
     printf '%s: WAITING for a slot -- pool %s, N=%s, %s held:\n' "$PROG" "$POOL" "$N" "$held"
     [ -n "$lines" ] && printf '%s\n' "$lines" | sed 's/^/  /'
-    printf '  %s waiting (this run: %s)\n' "$waiting" "$(one_line "$LABEL")"
+    printf '  %s waiting (this run: %s%s)\n' "$waiting" "$(one_line "$LABEL")" "${pos:+, $pos}"
     ((EXCLUSIVE)) && printf '  this run is --exclusive: it needs all %s slots\n' "$N"
   } >&2
   append_event waiting "" "$(($(now_ms) - START_MS))" "" ""
 }
 
-heartbeat() {
-  local waited_s=$((($(now_ms) - START_MS) / 1000))
-  say "still waiting ${waited_s}s for a slot; $(held_count) of $N held (pool $POOL)"
+# maybe_heartbeat — say we are still waiting, at most once per HEARTBEAT_S.
+maybe_heartbeat() {
+  (($(now_ms) - LAST_HB >= HEARTBEAT_S * 1000)) || return 0
+  local waited_s=$((($(now_ms) - START_MS) / 1000)) pos
+  pos=$(position_text)
+  say "still waiting ${waited_s}s for a slot; ${pos:+$pos; }$(held_count) of $N held (pool $POOL)"
+  LAST_HB=$(now_ms)
 }
 
 remaining_ms() { printf '%s\n' $((DEADLINE_MS - $(now_ms))); }
@@ -564,9 +698,15 @@ timeout_exit() {
 # in a foreground `flock -w 60` answered TERM/INT/HUP up to a minute late
 # (DND-815); the `wait` builtin instead returns at once on a trapped signal.
 # The child holds nothing of its own: a flock it takes lands on the parent's
-# shared open file description. abandon_wait kills it before exiting.
+# shared open file description. abandon_wait kills it before exiting. The
+# child does NOT inherit the waiter file's fd (DND-823): a child orphaned by a
+# SIGKILLed waiter would otherwise keep that waiter live in the queue.
 interruptible() {
-  "$@" &
+  if [ -n "$WAITER_FD" ]; then
+    "$@" {WAITER_FD}>&- &
+  else
+    "$@" &
+  fi
   wait "$!"
 }
 
@@ -589,42 +729,60 @@ abandon_wait() {
   exit "$1"
 }
 
-# acquire — take a slot (or all N with --exclusive), waiting in the queue.
-acquire() {
-  local qfd rem chunk last_hb nap next_hb
-  exec {qfd}>>"$POOL/queue.lock" || die_usage "cannot open $POOL/queue.lock." \
-    "check $POOL is yours with mode 0700 and writable."
-  if ! flock -n "$qfd" && ! interruptible flock -w "$QUEUE_GRACE_S" "$qfd"; then
-    # Others are queued ahead: block in the kernel on queue.lock.
+# wait_lock FD MODE — take flock MODE (-x or -s) on FD, blocking in the kernel
+# in chunks of at most HEARTBEAT_S, bounded by the deadline (timeout_exit).
+# A wait longer than QUEUE_GRACE_S announces WAITING first.
+wait_lock() {
+  local fd=$1 mode=$2 rem chunk
+  flock -n "$mode" "$fd" && return 0
+  if ! ((ANNOUNCED)); then
+    interruptible flock "$mode" -w "$QUEUE_GRACE_S" "$fd" && return 0
     announce_waiting
-    last_hb=$(now_ms)
-    while :; do
-      rem=$(remaining_ms)
-      ((rem > 0)) || timeout_exit
-      chunk=$(((rem + 999) / 1000))
-      ((chunk > HEARTBEAT_S)) && chunk=$HEARTBEAT_S
-      interruptible flock -w "$chunk" "$qfd" && break
-      if (($(now_ms) - last_hb >= HEARTBEAT_S * 1000)); then
-        heartbeat
-        last_hb=$(now_ms)
-      fi
-    done
   fi
-  # Head of the queue: poll the slots at POLL_S, bounded by the deadline.
+  while :; do
+    rem=$(remaining_ms)
+    ((rem > 0)) || timeout_exit
+    chunk=$(((rem + 999) / 1000))
+    ((chunk > HEARTBEAT_S)) && chunk=$HEARTBEAT_S
+    interruptible flock "$mode" -w "$chunk" "$fd" && return 0
+    maybe_heartbeat
+  done
+}
+
+# wait_turn — block until no live waiter is ahead of this run's ticket.
+wait_turn() {
+  local pred pfd
+  while :; do
+    pred=$(predecessor)
+    [ -n "$pred" ] || return 0
+    # Gone between the scan and the open: it left the queue; rescan.
+    { exec {pfd}<"$pred"; } 2>/dev/null || continue
+    wait_lock "$pfd" -s
+    exec {pfd}>&-
+  done
+}
+
+# acquire — take a slot (or all N with --exclusive), in arrival order.
+acquire() {
+  local qfd rem nap next_hb
+  enqueue
+  wait_turn
+  # Head of the queue. queue.lock is where a pre-DND-823 waiter queues, so
+  # taking it keeps one slot poller at a time across old and new versions.
+  { exec {qfd}>>"$POOL/queue.lock"; } 2>/dev/null || die_usage "cannot open $POOL/queue.lock." \
+    "check $POOL is yours with mode 0700 and writable."
+  wait_lock "$qfd" -x
+  # Poll the slots at POLL_S, bounded by the deadline.
   if ! try_acquire; then
     announce_waiting
-    last_hb=$(now_ms)
     while ! try_acquire; do
       rem=$(remaining_ms)
       ((rem > 0)) || timeout_exit
-      if (($(now_ms) - last_hb >= HEARTBEAT_S * 1000)); then
-        heartbeat
-        last_hb=$(now_ms)
-      fi
+      maybe_heartbeat
       # Sleep until the next poll, heartbeat, or the deadline, whichever is
       # first (never less than 1 ms: this loop cannot spin).
       nap=$((POLL_S * 1000))
-      next_hb=$((last_hb + HEARTBEAT_S * 1000 - $(now_ms)))
+      next_hb=$((LAST_HB + HEARTBEAT_S * 1000 - $(now_ms)))
       ((next_hb < nap)) && nap=$next_hb
       ((rem < nap)) && nap=$rem
       ((nap < 1)) && nap=1
@@ -770,7 +928,7 @@ status() {
   if [ "$initialised" = true ]; then
     held=$(held_count)
     lines=$(holder_lines)
-    wfiles=$(live_waiters)
+    wfiles=$(waiter_positions)
     [ -n "$wfiles" ] && waiting=$(printf '%s\n' "$wfiles" | wc -l)
   fi
   local ucount=0 ccount=0 _p _st _rest
@@ -788,9 +946,13 @@ status() {
         holders_json+=("$(jq -c --argjson s "$i" '. + {slot: $s}' "$f" 2>/dev/null ||
           printf '{"slot":%s,"label":null,"diagnostics":"unreadable"}' "$i")")
       done
-      while IFS= read -r w; do
+      local wpos jpos
+      while IFS=$'\t' read -r wpos w; do
         [ -n "$w" ] || continue
-        waiters_json+=("$(jq -c . "$w" 2>/dev/null || printf '{"label":null,"diagnostics":"unreadable"}')")
+        jpos=$wpos
+        [ "$wpos" = - ] && jpos=null
+        waiters_json+=("$(jq -c --argjson p "$jpos" '. + {position: $p}' "$w" 2>/dev/null ||
+          printf '{"position":%s,"label":null,"diagnostics":"unreadable"}' "$jpos")")
       done <<<"$wfiles"
     fi
     while IFS=$'\t' read -r pid st cwd cmd; do
@@ -812,14 +974,15 @@ status() {
     printf 'N=%s (%s) held=%s waiting=%s unslotted=%s in_container=%s load1=%s nproc=%s pool=%s\n' \
       "$N" "$N_BASIS" "$held" "$waiting" "$ucount" "$ccount" "$load1" "$nproc" "$POOL"
     [ -n "$lines" ] && printf '%s\n' "$lines"
-    local w label wcwd since wpid
-    while IFS= read -r w; do
+    local w wpos tag label wcwd since wpid
+    while IFS=$'\t' read -r wpos w; do
       [ -n "$w" ] || continue
+      if [ "$wpos" = - ]; then tag="WAITING (pre-DND-823 waiter, unordered)"; else tag="WAITING #$wpos"; fi
       if IFS=$'\t' read -r label wcwd since wpid < <(jq -r '[.label, .cwd, .since, (.pid|tostring)] | @tsv' "$w" 2>/dev/null) &&
         [ -n "$label" ]; then
-        printf 'WAITING: %s in %s since %s (pid %s, diagnostic)\n' "$(one_line "$label")" "$wcwd" "$since" "$wpid"
+        printf '%s: %s in %s since %s (pid %s, diagnostic)\n' "$tag" "$(one_line "$label")" "$wcwd" "$since" "$wpid"
       else
-        printf 'WAITING: (waiter diagnostics unreadable at %s)\n' "$w"
+        printf '%s: (waiter diagnostics unreadable at %s)\n' "$tag" "$w"
       fi
     done <<<"$wfiles"
   fi
