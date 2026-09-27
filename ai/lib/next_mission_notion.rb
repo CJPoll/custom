@@ -27,6 +27,9 @@ class NextMissionNotion
   EPICS_DATA_SOURCE   = "f4231817-18f3-4c2d-ac5b-b1151a5bb020"
   NOTION_VERSION      = "2025-09-03"
   PAGE_ID_RE          = /\A\h{8}-?\h{4}-?\h{4}-?\h{4}-?\h{12}\z/.freeze
+  # The DND Tickets unique_id prefix. --tickets ids must carry it, because the
+  # unique_id filter matches the number alone.
+  TICKET_PREFIX       = "DND"
 
   Scope = Struct.new(:scope, :external, keyword_init: true)
 
@@ -54,7 +57,8 @@ class NextMissionNotion
         end
         raise ReadError, "HTTP #{code} on #{method.upcase} #{path}: #{error_message(res.body)}"
       end
-    rescue SocketError, SystemCallError, Timeout::Error, OpenSSL::SSL::SSLError, Net::HTTPBadResponse => e
+    rescue SocketError, SystemCallError, Timeout::Error, OpenSSL::SSL::SSLError, Net::HTTPBadResponse,
+           IOError => e # IOError covers EOFError: a connection dropped mid-response
       raise ReadError, "#{e.class} on #{method.upcase} #{path}: #{e.message}"
     end
 
@@ -103,7 +107,12 @@ class NextMissionNotion
     scope_rows.each do |p, tk|
       tk.depends_on = relation_ids(p, "Depends On").map do |dep_page|
         id_of[dep_page] ||= begin
-          ext = parse_page(@t.call(:get, "/v1/pages/#{dep_page}"), external: true)
+          dep = @t.call(:get, "/v1/pages/#{dep_page}")
+          # A trashed dependency keeps its last status, so a trashed Todo would
+          # block its dependent forever with no sign of why.
+          raise ReadError, "#{tk.id} depends on page #{dep_page}, which is in the trash" if dep["in_trash"]
+
+          ext = parse_page(dep, external: true)
           external << ext
           ext.id
         end
@@ -115,7 +124,7 @@ class NextMissionNotion
   private
 
   def resolve_epic(key)
-    return dashed(key) if key.match?(PAGE_ID_RE)
+    return verified_epic_id(dashed(key)) if key.match?(PAGE_ID_RE)
 
     body = { "filter" => { "property" => "Name", "title" => { "equals" => key } }, "page_size" => 10 }
     hits = @t.call(:post, "/v1/data_sources/#{EPICS_DATA_SOURCE}/query", body).fetch("results")
@@ -123,6 +132,21 @@ class NextMissionNotion
     raise ReadError, "#{hits.size} epics are titled #{key.inspect}; pass the epic page id instead" if hits.size > 1
 
     hits.first.fetch("id")
+  end
+
+  # A well-formed id is still only a key: a typo, a ticket's page id, or an
+  # epic from another workspace would make the Epic filter match nothing and
+  # read as an empty epic. So the id must name a live page in DND Epics.
+  def verified_epic_id(id)
+    page = @t.call(:get, "/v1/pages/#{id}")
+    parent = page.dig("parent", "data_source_id")
+    unless parent == EPICS_DATA_SOURCE
+      raise ReadError, "page #{id} is not a DND epic (its parent is #{page['parent'].inspect}); " \
+                       "pass an epic page id or an exact epic title"
+    end
+    raise ReadError, "epic page #{id} is in the trash" if page["in_trash"]
+
+    id
   end
 
   def dashed(key)
@@ -200,6 +224,10 @@ class NextMissionNotion
       path: select(page, "Path"), area: select(page, "Area"),
       depends_on: [], created: page["created_time"]
     )
+  rescue KeyError, NoMethodError, TypeError => e
+    # A null unique_id, title, or status name: the page is not shaped as the
+    # selector reads it. Name it rather than crash (a crash would exit 1).
+    raise ReadError, "page #{page.is_a?(Hash) ? page['id'] : page.inspect} is malformed: #{e.class}: #{e.message}"
   end
 
   def select(page, name)

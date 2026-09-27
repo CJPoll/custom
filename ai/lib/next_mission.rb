@@ -6,8 +6,9 @@
 # that lies outside it), pick the ONE ticket to dispatch next and name the rule
 # that picked it. The rule is the owner-approved priority order of 2026-09-27
 # (ai-artifacts/coordination/2026-09-27-scope-growth-proposal.md, section 6
-# "Priority order", confirmed in section 7); the prose home is
-# athena:ticket-management -> "Priority: critical path first".
+# "Priority order", confirmed in section 7); its prose home is
+# athena:ticket-management -> "Priority: critical path first", as amended by
+# DND-979 (W2), which lands before this tool.
 #
 #   tier 0  Path=Promoted                         (owner order; ID as proxy)
 #   tier 1  Kind=Vulnerability, Severity CRITICAL/HIGH   (exploitable)
@@ -53,11 +54,13 @@ module NextMission
     functional_first:     "functional-first (tier-4 non-Feature held while a Critical/Feature ticket is unfinished)"
   }.freeze
 
-  Result = Struct.new(:pick, :tier, :rule, :funnel, :emptied_by, :held_back, :reason, keyword_init: true) do
+  Result = Struct.new(:pick, :tier, :rule, :funnel, :emptied_by, :held_back, :reason,
+                      :started_not_in_scope, keyword_init: true) do
     def to_h
       { ticket: pick&.id, page_id: pick&.page_id, title: pick&.title, tier: tier, rule: rule,
         funnel: funnel.map { |stage, n| { stage: stage.to_s, label: STAGES.fetch(stage), matched: n } },
-        emptied_by: emptied_by&.to_s, held_back: held_back, reason: reason }
+        emptied_by: emptied_by&.to_s, held_back: held_back, reason: reason,
+        started_not_in_scope: started_not_in_scope }
     end
   end
 
@@ -74,6 +77,10 @@ module NextMission
   def select(scope:, external: [], started: [], harness_lane: false)
     validate!(scope, external)
     status_of = (external + scope).to_h { |x| [x.id, x.status] }
+    # A --started id that names no ticket in scope does nothing; it may be a
+    # typo, which would let the real started ticket be dispatched twice. It is
+    # not an error (the state log spans scopes), but it is reported.
+    stray = (started - scope.map(&:id)).sort_by { |i| id_number(i) }
     started = started.to_set
 
     funnel = []
@@ -86,18 +93,25 @@ module NextMission
     set = keep(funnel, :not_waiting_on_owner, set) { |x| x.status != "Needs Attention" }
     set = keep(funnel, :unblocked, set) { |x| unblocked?(x, status_of) }
 
-    unfinished = scope.select { |x| (x.path == "Critical" || x.kind == "Feature") && !TERMINAL.include?(x.status) }
+    unfinished = scope.select do |x|
+      (x.path == "Critical" || x.kind == "Feature") && x.kind != "Flake" && !TERMINAL.include?(x.status)
+    end
     held = unfinished.empty? ? [] : set.select { |x| tier_of(x) == 4 && !exempt_from_hold?(x) }
     set -= held
     funnel << [:functional_first, set.size]
 
     emptied = funnel.find { |_, n| n.zero? }&.first
-    return empty_result(funnel, emptied, held, unfinished) if set.empty?
+    return empty_result(funnel, emptied, held, unfinished, stray) if set.empty?
 
-    tier, ranked = rank(set, scope)
+    positions = critical_order(scope)
+    tier, ranked = rank(set, positions)
     chosen = ranked.first
-    Result.new(pick: chosen, tier: tier, rule: rule_for(chosen, tier, scope), funnel: funnel,
-               emptied_by: nil, held_back: held.map(&:id).sort_by { |i| id_number(i) }, reason: nil)
+    Result.new(pick: chosen, tier: tier, rule: rule_for(chosen, tier, positions), funnel: funnel,
+               emptied_by: nil, held_back: sorted_ids(held), reason: nil, started_not_in_scope: stray)
+  end
+
+  def sorted_ids(tickets)
+    tickets.map(&:id).sort_by { |i| id_number(i) }
   end
 
   def keep(funnel, stage, set, &blk)
@@ -128,17 +142,15 @@ module NextMission
   end
 
   # -> [tier, candidates of the best tier in pick order]
-  def rank(set, scope)
+  def rank(set, positions)
     by_tier = set.group_by { |x| tier_of(x) }
     tier = by_tier.keys.min
     group = by_tier[tier]
     ordered =
       case tier
       when 0 then group.sort_by { |x| id_number(x.id) }
-      when 1, 2 then group.sort_by { |x| [severity_rank(x), x.created.to_s, id_number(x.id)] }
-      when 3
-        pos = critical_order(scope)
-        group.sort_by { |x| pos.fetch(x.id) }
+      when 1, 2 then group.sort_by { |x| [severity_rank(x), x.created, id_number(x.id)] }
+      when 3 then group.sort_by { |x| positions.fetch(x.id) }
       else tier4_order(group)
       end
     [tier, ordered]
@@ -153,15 +165,16 @@ module NextMission
   end
 
   def tier4_order(tickets)
-    tickets.sort_by { |x| [severity_rank(x), kind_rank(x), x.created.to_s, id_number(x.id)] }
+    tickets.sort_by { |x| [severity_rank(x), kind_rank(x), x.created, id_number(x.id)] }
   end
 
-  # Topological order of the scope's Path=Critical tickets over Depends On
-  # (Kahn's algorithm, lowest ID first among the ready). Tickets on a cycle are
-  # appended by ID; each of them is blocked, so none is ever a candidate.
+  # Topological order of the scope's UNFINISHED Path=Critical tickets over
+  # Depends On (Kahn's algorithm, lowest ID first among the ready). An edge to
+  # a terminal ticket is satisfied, so a finished ticket's ID never moves the
+  # order. validate! has already refused cycles among unfinished tickets.
   # -> { id => 1-based position }
   def critical_order(scope)
-    crit = scope.select { |x| x.path == "Critical" }
+    crit = scope.select { |x| x.path == "Critical" && !TERMINAL.include?(x.status) }
     ids = crit.map(&:id).to_set
     indeg = crit.to_h { |x| [x.id, x.depends_on.count { |d| ids.include?(d) }] }
     dependents = Hash.new { |h, k| h[k] = [] }
@@ -177,35 +190,52 @@ module NextMission
         ready << dep if indeg[dep].zero?
       end
     end
-    order += (ids.to_a - order).sort_by { |i| id_number(i) }
     order.each_with_index.to_h { |id, i| [id, i + 1] }
   end
 
-  def rule_for(ticket, tier, scope)
+  def rule_for(ticket, tier, positions)
     case tier
     when 0 then "tier 0: owner-promoted (Path=Promoted)"
     when 1 then "tier 1: exploitable vulnerability (#{ticket.severity})"
     when 2 then "tier 2: bug blocking functional requirements (Path=Blocking, #{ticket.severity || 'Severity unset'})"
     when 3
-      pos = critical_order(scope)
-      "tier 3: critical path, dependency order ##{pos.fetch(ticket.id)} of #{pos.size}"
+      "tier 3: critical path, dependency order ##{positions.fetch(ticket.id)} of #{positions.size} unfinished"
     else
       what = ticket.path == "Blocking" ? "blocker (Path=Blocking), not held by functional-first" : "other improvements"
       "tier 4: #{what} (#{ticket.severity || 'Severity unset'}, #{ticket.kind || 'Kind unset'}, created #{ticket.created})"
     end
   end
 
-  def empty_result(funnel, emptied, held, unfinished)
+  def empty_result(funnel, emptied, held, unfinished, stray)
     reason =
       if emptied == :functional_first
-        ids = unfinished.map(&:id).sort_by { |i| id_number(i) }
-        "functional-first: #{held.size} tier-4 ticket(s) held (#{held.map(&:id).sort_by { |i| id_number(i) }.join(', ')}) " \
+        ids = sorted_ids(unfinished)
+        "functional-first: #{held.size} tier-4 ticket(s) held (#{sorted_ids(held).join(', ')}) " \
           "while #{ids.size} Critical/Feature ticket(s) are unfinished: #{ids.join(', ')}"
       else
         "no candidate: the #{STAGES.fetch(emptied)} filter matched 0"
       end
     Result.new(pick: nil, tier: nil, rule: nil, funnel: funnel, emptied_by: emptied,
-               held_back: held.map(&:id).sort_by { |i| id_number(i) }, reason: reason)
+               held_back: sorted_ids(held), reason: reason, started_not_in_scope: stray)
+  end
+
+  # A cycle among unfinished tickets can never unblock; "blocked" would send
+  # the admiral to wait for a landing that cannot happen. Refuse it by name.
+  def refuse_cycles!(scope)
+    open = scope.reject { |x| TERMINAL.include?(x.status) }.to_h { |x| [x.id, x] }
+    state = {}
+    visit = lambda do |id, trail|
+      return if state[id] == :done
+      if state[id] == :active
+        cycle = trail.drop_while { |i| i != id } + [id]
+        raise DataError, "Depends On cycle among unfinished tickets: #{cycle.join(' -> ')}"
+      end
+
+      state[id] = :active
+      open[id].depends_on.each { |d| visit.call(d, trail + [id]) if open.key?(d) }
+      state[id] = :done
+    end
+    open.keys.sort_by { |i| id_number(i) }.each { |id| visit.call(id, []) }
   end
 
   def validate!(scope, external)
@@ -228,6 +258,7 @@ module NextMission
         raise DataError, "#{x.id} depends on #{d}, whose status was never read"
       end
     end
+    refuse_cycles!(scope)
   end
 
   def check_ticket!(x)
@@ -238,6 +269,9 @@ module NextMission
     check_value!(x, "Severity", x.severity, SEVERITIES)
     check_value!(x, "Path", x.path, PATHS)
     check_value!(x, "Area", x.area, AREAS)
+    unless x.created.is_a?(String) && !x.created.empty?
+      raise DataError, "#{x.id} has no created time string (tiers 1, 2 and 4 order by age): #{x.created.inspect}"
+    end
     bad = Array(x.depends_on).reject { |d| d.to_s.match?(ID_RE) }
     raise DataError, "#{x.id} has malformed Depends On id(s) #{bad.inspect}" unless bad.empty?
   end

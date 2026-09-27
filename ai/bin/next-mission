@@ -6,13 +6,13 @@
 #
 # Read-only. It reads the DND Tickets data source through the Notion REST API
 # with the notion-personal integration token (~/.claude/notion-personal-token,
-# the same file athena:ticket-management's curl recipe uses), or reads an
+# the file scripts/add-notion wires as the notion-personal token), or reads an
 # offline JSON fixture. It never writes Notion, git, or the state log.
 #
 # The rule (tiers 0-4 and the functional-first hold) lives in
 # ai/lib/next_mission.rb; its prose home is athena:ticket-management ->
-# "Priority: critical path first". The Notion reads live in
-# ai/lib/next_mission_notion.rb.
+# "Priority: critical path first" (as amended by DND-979). The Notion reads
+# live in ai/lib/next_mission_notion.rb.
 #
 # Exit codes -- a failed lookup must never look like an empty one:
 #   0  picked a ticket (stdout: "<ID>\t<rule>")
@@ -20,7 +20,9 @@
 #      count each filter matched
 #   2  usage error (bad flag, bad id, conflicting inputs)
 #   3  could not read (Notion/HTTP failure, missing token, unreadable fixture,
-#      data outside the known vocabulary). Never read as "no candidate".
+#      data outside the known vocabulary, or any unexpected error). Never read
+#      as "no candidate": every exception is caught and routed here, because
+#      Ruby's own exit status for an uncaught exception is 1.
 require "json"
 require_relative "../lib/strict_argv"
 require_relative "../lib/next_mission"
@@ -38,7 +40,7 @@ USAGE = <<~TXT
 
   Scope (at least one; --scope and --tickets combine as a union):
     --scope EPIC        an epic page id (32 hex, dashes optional) or its exact title
-    --tickets IDS       comma-separated ticket ids, e.g. DND-12,DND-40
+    --tickets IDS       comma-separated DND ticket ids, e.g. DND-12,DND-40
     --from-json FILE    offline: read the scope from a JSON fixture instead of Notion
                         ({"tickets":[{id,status,kind,severity,path,area,depends_on,created}],
                           "external":[{id,status}]}); not combinable with --scope/--tickets
@@ -46,14 +48,15 @@ USAGE = <<~TXT
   Options:
     --started IDS       comma-separated ids the state log records as started (added to
                         Notion In Progress; the state log's Mission table is authoritative)
-    --harness-lane      only Area=Harness and Path=Off tickets (the P7 harness lane)
+    --harness-lane      only Area=Harness and Path=Off (or unset) tickets (the P7 lane)
     --json              print the full result as JSON (ticket, tier, rule, funnel, held_back)
     --self-test         run the deterministic suite (no network)
     --help              this text
 
   Tiers: 0 Path=Promoted; 1 Vulnerability CRITICAL/HIGH; 2 Bug + Path=Blocking;
   3 Path=Critical in dependency order; 4 the rest by Severity, Kind, age.
-  Tier-4 non-Features wait while a Critical/Feature ticket in scope is unfinished.
+  Tier-4 non-Features (except Path=Blocking) wait while a Critical/Feature ticket
+  in scope is unfinished. Needs Attention tickets wait on the owner.
 
   Exit: 0 picked; 1 no candidate (names the emptying filter); 2 usage; 3 read failure.
 TXT
@@ -61,6 +64,17 @@ TXT
 SPEC = {
   "--scope" => :value, "--tickets" => :value, "--from-json" => :value, "--started" => :value,
   "--harness-lane" => :switch, "--json" => :switch, "--self-test" => :switch, "--help" => :switch
+}.freeze
+
+EMPTY_FIX = {
+  in_scope: "check that --scope/--tickets name the intended epic; the scope matched no tickets.",
+  not_terminal: "nothing to dispatch: every ticket in scope is terminal, so the epic may be ready to close.",
+  not_flake: "nothing to dispatch here: only Flake tickets remain, and they belong to the flaky lane.",
+  harness_lane: "nothing for the harness lane: no Area=Harness, Path=Off ticket in scope.",
+  not_started: "wait for a started ticket to land; everything open is already started.",
+  not_waiting_on_owner: "report the Needs Attention tickets to the owner; the rest wait on them.",
+  unblocked: "land a blocker first; every remaining ticket waits on an unfinished Depends On.",
+  functional_first: "finish the Critical/Feature tickets named above; tier-4 findings follow them."
 }.freeze
 
 def usage_error(msg)
@@ -76,29 +90,35 @@ def read_error(msg, fix)
   exit 3
 end
 
-def id_list(flag, raw)
+def id_list(flag, raw, prefix: nil)
   ids = raw.split(",").map(&:strip).reject(&:empty?)
   usage_error("#{flag} is empty") if ids.empty?
-  bad = ids.reject { |i| i.match?(NextMission::ID_RE) }
-  usage_error("#{flag} has malformed id(s) #{bad.join(', ')}; expected PREFIX-NUMBER, e.g. DND-12") unless bad.empty?
+  bad = ids.reject { |i| i.match?(NextMission::ID_RE) && (prefix.nil? || i.start_with?("#{prefix}-")) }
+  shape = prefix ? "#{prefix}-NUMBER" : "PREFIX-NUMBER"
+  usage_error("#{flag} has malformed id(s) #{bad.join(', ')}; expected #{shape}, e.g. DND-12") unless bad.empty?
   ids.uniq
 end
 
 def load_fixture(path)
   data = JSON.parse(File.read(path))
+  raise TypeError, "top level is not an object" unless data.is_a?(Hash)
+  raise TypeError, "\"tickets\" must be an array" unless data["tickets"].is_a?(Array)
+  raise TypeError, "\"external\" must be an array" unless data.fetch("external", []).is_a?(Array)
+
   mk = lambda do |h|
+    raise TypeError, "a ticket entry is not an object: #{h.inspect}" unless h.is_a?(Hash)
+
     NextMission::Ticket.new(id: h["id"], page_id: h["page_id"], title: h["title"], status: h["status"],
                             kind: h["kind"], severity: h["severity"], path: h["path"], area: h["area"],
                             depends_on: Array(h["depends_on"]), created: h["created"])
   end
-  NextMissionNotion::Scope.new(scope: Array(data.fetch("tickets")).map(&mk),
-                               external: Array(data["external"]).map(&mk))
-rescue SystemCallError, JSON::ParserError, KeyError, TypeError, NoMethodError => e
+  NextMissionNotion::Scope.new(scope: data["tickets"].map(&mk), external: data.fetch("external", []).map(&mk))
+rescue SystemCallError, JSON::ParserError, TypeError => e
   read_error("fixture #{path}: #{e.class}: #{e.message}",
              "pass a readable JSON file shaped as in --help (a top-level \"tickets\" array).")
 end
 
-def load_notion(opts)
+def load_notion(epic, tickets)
   unless File.readable?(TOKEN_FILE)
     read_error("the notion-personal token file #{TOKEN_FILE} is missing or unreadable",
                "owner-gated: ask the owner to place the notion-personal integration token at " \
@@ -106,8 +126,7 @@ def load_notion(opts)
   end
   token = File.read(TOKEN_FILE).strip
   read_error("#{TOKEN_FILE} is empty", "owner-gated: ask the owner to restore the notion-personal token.") if token.empty?
-  NextMissionNotion.new(NextMissionNotion::HttpTransport.new(token))
-                   .load(epic: opts["--scope"], tickets: opts["--tickets"] && id_list("--tickets", opts["--tickets"]))
+  NextMissionNotion.new(NextMissionNotion::HttpTransport.new(token)).load(epic: epic, tickets: tickets)
 rescue NextMissionNotion::ReadError => e
   read_error(e.message, "check the epic id/title and ticket ids against Notion; on an HTTP 401/403 the " \
                         "notion-personal integration lost access (owner-gated); on 429/5xx re-run shortly.")
@@ -119,52 +138,57 @@ def render_empty(result)
   puts "reason: #{result.reason}"
   puts "funnel (matched at each filter, in order):"
   result.funnel.each { |stage, n| puts "  #{NextMission::STAGES.fetch(stage).split(' (').first}: #{n}" }
-  hint = {
-    in_scope: "the scope matched no tickets; check --scope/--tickets name the intended epic.",
-    not_terminal: "every ticket in scope is terminal; the epic may be ready to close.",
-    not_flake: "only Flake tickets remain; they belong to the flaky lane.",
-    harness_lane: "no Area=Harness, Path=Off ticket in scope; the harness lane has nothing here.",
-    not_started: "everything open is already started; wait for a slot's captain to land.",
-    not_waiting_on_owner: "the rest are Needs Attention; they wait on the owner, so report them.",
-    unblocked: "every remaining ticket waits on an unfinished Depends On; land a blocker first.",
-    functional_first: "finish the Critical/Feature tickets named above; tier-4 findings follow them."
-  }.fetch(result.emptied_by)
-  puts "Fix: none needed if this is expected -- #{hint}"
+  puts "Fix: #{EMPTY_FIX.fetch(result.emptied_by)}"
 end
 
-begin
-  opts = StrictArgv.parse(ARGV, SPEC)
-rescue StrictArgv::UsageError => e
-  usage_error(e.message)
+def main(argv)
+  opts = begin
+    StrictArgv.parse(argv, SPEC)
+  rescue StrictArgv::UsageError => e
+    usage_error(e.message)
+  end
+
+  if opts["--help"]
+    puts USAGE
+    exit 0
+  end
+  exec(SUITE) if opts["--self-test"]
+
+  if opts["--from-json"] && (opts["--scope"] || opts["--tickets"])
+    usage_error("--from-json replaces the Notion read; it cannot be combined with --scope or --tickets")
+  end
+  usage_error("no scope given") unless opts["--from-json"] || opts["--scope"] || opts["--tickets"]
+  started = opts["--started"] ? id_list("--started", opts["--started"]) : []
+  tickets = opts["--tickets"] && id_list("--tickets", opts["--tickets"], prefix: NextMissionNotion::TICKET_PREFIX)
+
+  loaded = opts["--from-json"] ? load_fixture(opts["--from-json"]) : load_notion(opts["--scope"], tickets)
+
+  result = begin
+    NextMission.select(scope: loaded.scope, external: loaded.external, started: started,
+                       harness_lane: opts["--harness-lane"] ? true : false)
+  rescue NextMission::DataError => e
+    read_error(e.message, "the ticket data is outside what next-mission can rank; fix the ticket in " \
+                          "Notion, or update ai/lib/next_mission.rb if the schema gained a value on purpose.")
+  end
+
+  unless result.started_not_in_scope.empty?
+    warn "#{PROG}: note: --started id(s) not in this scope: #{result.started_not_in_scope.join(', ')} " \
+         "(a typo here would let a started ticket be dispatched twice)"
+  end
+
+  if opts["--json"]
+    puts JSON.pretty_generate(result.to_h)
+    warn "Fix: #{EMPTY_FIX.fetch(result.emptied_by)}" unless result.pick
+  elsif result.pick
+    puts "#{result.pick.id}\t#{result.rule}"
+  else
+    render_empty(result)
+  end
+  exit(result.pick ? 0 : 1)
+rescue StandardError => e
+  read_error("unexpected #{e.class}: #{e.message}",
+             "this is a defect in next-mission or its input; re-run once, and if it repeats, file it " \
+             "with this line. Do not dispatch on it.")
 end
 
-if opts["--help"]
-  puts USAGE
-  exit 0
-end
-exec(SUITE) if opts["--self-test"]
-
-if opts["--from-json"] && (opts["--scope"] || opts["--tickets"])
-  usage_error("--from-json replaces the Notion read; it cannot be combined with --scope or --tickets")
-end
-usage_error("no scope given") unless opts["--from-json"] || opts["--scope"] || opts["--tickets"]
-started = opts["--started"] ? id_list("--started", opts["--started"]) : []
-
-loaded = opts["--from-json"] ? load_fixture(opts["--from-json"]) : load_notion(opts)
-
-begin
-  result = NextMission.select(scope: loaded.scope, external: loaded.external, started: started,
-                              harness_lane: opts["--harness-lane"] ? true : false)
-rescue NextMission::DataError => e
-  read_error(e.message, "the ticket data is outside the vocabulary next-mission knows; fix the ticket in " \
-                        "Notion, or update ai/lib/next_mission.rb if the schema gained a value on purpose.")
-end
-
-if opts["--json"]
-  puts JSON.pretty_generate(result.to_h)
-elsif result.pick
-  puts "#{result.pick.id}\t#{result.rule}"
-else
-  render_empty(result)
-end
-exit(result.pick ? 0 : 1)
+main(ARGV)

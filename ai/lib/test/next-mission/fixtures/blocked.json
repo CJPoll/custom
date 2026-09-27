@@ -1,6 +1,8 @@
 {
   "tickets": [
-    {"id": "DND-1", "status": "Todo", "kind": "Bug", "severity": "HIGH", "path": "Off", "depends_on": ["DND-2"]},
-    {"id": "DND-2", "status": "In Progress", "kind": "Bug", "severity": "HIGH", "path": "Off"}
+    {"id": "DND-1", "status": "Todo", "kind": "Bug", "severity": "HIGH", "path": "Off", "depends_on": ["DND-2"],
+     "created": "2026-09-01T00:00:00Z"},
+    {"id": "DND-2", "status": "In Progress", "kind": "Bug", "severity": "HIGH", "path": "Off",
+     "created": "2026-09-02T00:00:00Z"}
   ]
 }

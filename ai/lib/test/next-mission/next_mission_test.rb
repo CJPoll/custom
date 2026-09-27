@@ -82,21 +82,29 @@ check("tier 2: bug blocking functional requirements beats the critical path") do
     r.rule == "tier 2: bug blocking functional requirements (Path=Blocking, MEDIUM)"
 end
 
-check("tier 3: critical path in dependency order, not ID order") do
-  # Topological order over the Critical set, ties by ID: roots DND-6 and DND-8
-  # first, then DND-2 (which depends on DND-8). ID order would pick DND-2.
-  tickets = [t("DND-2", kind: "Feature", path: "Critical", deps: ["DND-8"]),
-             t("DND-8", kind: "Feature", path: "Critical", status: "Done"),
-             t("DND-6", kind: "Feature", path: "Critical")]
+check("tier 3: position is the topological order of the UNFINISHED critical path, ties by ID") do
+  # Unfinished Critical: DND-6 (started), DND-2 (depends on DND-6), DND-9.
+  # Kahn, lowest ID first: 6, then 2 (freed by 6), then 9. DND-9 is the only
+  # ready one, at #3 of 3.
+  tickets = [t("DND-6", kind: "Feature", path: "Critical", status: "In Progress"),
+             t("DND-2", kind: "Feature", path: "Critical", deps: ["DND-6"]),
+             t("DND-9", kind: "Feature", path: "Critical")]
   r = pick(tickets)
-  r.pick.id == "DND-6" && r.tier == 3 && r.rule.start_with?("tier 3: critical path")
+  r.pick.id == "DND-9" && r.tier == 3 &&
+    r.rule == "tier 3: critical path, dependency order #3 of 3 unfinished"
 end
 
-check("tier 3: a dependent sorts after its (done) dependency's other roots by topological depth") do
-  tickets = [t("DND-2", kind: "Feature", path: "Critical", deps: ["DND-8"]),
-             t("DND-8", kind: "Feature", path: "Critical", status: "Done")]
-  r = pick(tickets)
-  r.pick.id == "DND-2" && r.rule == "tier 3: critical path, dependency order #2 of 2"
+check("tier 3: a finished dependency's ID never moves the order") do
+  # Same shape twice; only the Done dependency's ID differs (1 vs 8). With
+  # terminal tickets counted, DND-8 would have pushed DND-2 behind DND-6.
+  a = pick([t("DND-2", kind: "Feature", path: "Critical", deps: ["DND-1"]),
+            t("DND-1", kind: "Feature", path: "Critical", status: "Done"),
+            t("DND-6", kind: "Feature", path: "Critical")])
+  b = pick([t("DND-2", kind: "Feature", path: "Critical", deps: ["DND-8"]),
+            t("DND-8", kind: "Feature", path: "Critical", status: "Done"),
+            t("DND-6", kind: "Feature", path: "Critical")])
+  a.pick.id == "DND-2" && b.pick.id == "DND-2" &&
+    b.rule == "tier 3: critical path, dependency order #1 of 2 unfinished"
 end
 
 check("tier 4: Severity first, then Kind order, then age") do
@@ -252,6 +260,35 @@ check("data: a duplicate ticket in scope is an error") do
   raises?(NM::DataError, /DND-1/) { pick([t("DND-1"), t("DND-1")]) }
 end
 
+check("data: a self-dependency among unfinished tickets is an error naming the cycle, not 'blocked'") do
+  raises?(NM::DataError, /cycle.*DND-1 -> DND-1/) { pick([t("DND-1", kind: "Bug", deps: ["DND-1"])]) }
+end
+
+check("data: a 2-cycle among unfinished tickets is an error naming both") do
+  raises?(NM::DataError, /DND-1 -> DND-2 -> DND-1/) do
+    pick([t("DND-1", kind: "Bug", deps: ["DND-2"]), t("DND-2", kind: "Bug", deps: ["DND-1"])])
+  end
+end
+
+check("data: a cycle through a terminal ticket is not an error (the edge is satisfied)") do
+  r = pick([t("DND-1", kind: "Bug", deps: ["DND-2"]), t("DND-2", kind: "Bug", status: "Done", deps: ["DND-1"])])
+  r.pick&.id == "DND-1"
+end
+
+check("data: a scope ticket with no created time is an error (age orders tiers 1, 2, 4)") do
+  raises?(NM::DataError, /created/) { pick([t("DND-1", kind: "Bug").tap { |x| x.created = nil }]) }
+end
+
+check("started: an id not in scope is reported in started_not_in_scope, not silently dropped") do
+  r = pick([t("DND-1", kind: "Bug")], started: %w[DND-1 DND-77])
+  r.started_not_in_scope == ["DND-77"] && r.to_h[:started_not_in_scope] == ["DND-77"]
+end
+
+check("functional-first: a Flake with Path=Critical does not hold tier 4 (Flake is its own lane)") do
+  r = pick([t("DND-1", kind: "Flake", path: "Critical"), t("DND-40", kind: "Docs", severity: "LOW")])
+  r.pick&.id == "DND-40"
+end
+
 check("result: to_h carries pick, tier, rule, funnel, held_back") do
   h = pick([t("DND-3", kind: "Vulnerability", severity: "HIGH")]).to_h
   h[:ticket] == "DND-3" && h[:tier] == 1 && h[:funnel].is_a?(Array) && h.key?(:held_back)
@@ -278,8 +315,15 @@ end
 class FakeTransport
   attr_reader :calls
 
+  EPIC_PAGE_PATH = "/v1/pages/3e8349da-87fb-8179-991c-cef934dafd95"
+
+  # Every fake answers the epic-id verification with a live DND epic unless a
+  # test overrides that route.
   def initialize(routes)
-    @routes = routes
+    epic = { "object" => "page", "id" => "3e8349da-87fb-8179-991c-cef934dafd95", "in_trash" => false,
+             "parent" => { "type" => "data_source_id",
+                           "data_source_id" => NextMissionNotion::EPICS_DATA_SOURCE } }
+    @routes = { [:get, EPIC_PAGE_PATH] => epic }.merge(routes)
     @calls = []
   end
 
@@ -305,9 +349,46 @@ check("adapter: epic scope paginates the query and parses tickets") do
                                                        "has_more" => false }
   )
   s = NextMissionNotion.new(tr).load(epic: EPIC)
+  query = tr.calls.find { |m, _, _| m == :post }
   s.scope.map(&:id) == %w[DND-1 DND-2] && s.scope.last.depends_on == ["DND-1"] &&
     s.scope.first.kind == "Feature" && s.external.empty? &&
-    tr.calls.first[2]["filter"]["relation"]["contains"] == "3e8349da-87fb-8179-991c-cef934dafd95"
+    tr.calls.first[0..1] == [:get, FakeTransport::EPIC_PAGE_PATH] &&
+    query[2]["filter"]["relation"]["contains"] == "3e8349da-87fb-8179-991c-cef934dafd95"
+end
+
+check("adapter: an epic id whose page is not in DND Epics is an error, never an empty epic") do
+  tr = FakeTransport.new([:get, FakeTransport::EPIC_PAGE_PATH] =>
+                           { "id" => "x", "parent" => { "type" => "data_source_id", "data_source_id" => TDS } })
+  raises?(NextMissionNotion::ReadError, /not a DND epic/) { NextMissionNotion.new(tr).load(epic: EPIC) } &&
+    tr.calls.none? { |m, _, _| m == :post }
+end
+
+check("adapter: an epic id that Notion cannot find (404) is an error") do
+  tr = FakeTransport.new([:get, FakeTransport::EPIC_PAGE_PATH] => NextMissionNotion::ReadError.new("HTTP 404"))
+  raises?(NextMissionNotion::ReadError, /404/) { NextMissionNotion.new(tr).load(epic: EPIC) }
+end
+
+check("adapter: a trashed out-of-scope dependency is an error naming it") do
+  trashed = page(77, status: "Todo").merge("in_trash" => true)
+  tr = FakeTransport.new(
+    [:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [page(2, deps: ["p77"])], "has_more" => false },
+    [:get, "/v1/pages/p77"] => trashed
+  )
+  raises?(NextMissionNotion::ReadError, /DND-2.*trash/) { NextMissionNotion.new(tr).load(epic: EPIC) }
+end
+
+check("adapter: a page with a null unique_id is a ReadError, not a crash") do
+  bad = page(1)
+  bad["properties"]["ID"]["unique_id"] = nil
+  tr = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [bad], "has_more" => false })
+  raises?(NextMissionNotion::ReadError, /malformed/) { NextMissionNotion.new(tr).load(epic: EPIC) }
+end
+
+check("adapter: HttpTransport turns a dropped connection (EOFError) into a ReadError") do
+  tr = Class.new(NextMissionNotion::HttpTransport) do
+    def request(*) = raise(EOFError, "end of file reached")
+  end.new("unused-token")
+  raises?(NextMissionNotion::ReadError, /EOFError/) { tr.call(:get, "/v1/pages/x") }
 end
 
 check("adapter: a dependency outside the scope is fetched by page id into external") do
@@ -448,9 +529,62 @@ end
 check("cli: a fixture with a dangling dependency is exit 3 naming it") do
   Dir.mktmpdir("DND-985") do |d|
     f = File.join(d, "dangling.json")
-    File.write(f, JSON.dump("tickets" => [{ "id" => "DND-1", "status" => "Todo", "depends_on" => ["DND-99"] }]))
+    File.write(f, JSON.dump("tickets" => [{ "id" => "DND-1", "status" => "Todo", "depends_on" => ["DND-99"],
+                                            "created" => "2026-09-01T00:00:00Z" }]))
     _out, err, code = cli("--from-json", f)
     code == 3 && err.include?("DND-99") && err.include?("Fix:")
+  end
+end
+
+def with_fixture(data)
+  Dir.mktmpdir("DND-985") do |d|
+    f = File.join(d, "fixture.json")
+    File.write(f, data.is_a?(String) ? data : JSON.dump(data))
+    yield f
+  end
+end
+
+check("cli: a fixture whose tickets is null is exit 3, never an empty scope") do
+  with_fixture("tickets" => nil) do |f|
+    out, err, code = cli("--from-json", f)
+    code == 3 && err.include?("Fix:") && out.empty?
+  end
+end
+
+check("cli: an unexpected exception exits 3 with Fix:, never Ruby's default 1") do
+  # Validated input cannot reach the catch-all, so preload a file (ruby -r)
+  # that makes the selector raise something no specific rescue names.
+  Dir.mktmpdir("DND-985") do |d|
+    boom = File.join(d, "boom.rb")
+    File.write(boom, <<~RUBY)
+      require #{File.expand_path('../../next_mission', __dir__).inspect}
+      module NextMission
+        def self.select(**) = raise(ZeroDivisionError, "boom")
+      end
+    RUBY
+    out, err, st = Open3.capture3("/usr/bin/ruby", "-r", boom, BIN, "--from-json", File.join(FIX, "tiers.json"))
+    st.exitstatus == 3 && err.include?("ZeroDivisionError") && err.include?("Fix:") && out.empty?
+  end
+end
+
+check("data: a created time that is not a string is an error") do
+  raises?(NM::DataError, /created/) { pick([t("DND-1", kind: "Bug").tap { |x| x.created = {} }]) }
+end
+
+check("cli: --json with no candidate still carries a Fix: line (on stderr) and exit 1") do
+  out, err, code = cli("--from-json", File.join(FIX, "held.json"), "--json")
+  code == 1 && JSON.parse(out)["emptied_by"] == "functional_first" && err.include?("Fix:")
+end
+
+check("cli: a --started id not in scope is reported on stderr, and the pick is unaffected") do
+  out, err, code = cli("--from-json", File.join(FIX, "tiers.json"), "--started", "DND-3,DND-777")
+  code.zero? && out.start_with?("DND-7\t") && err.include?("DND-777")
+end
+
+check("cli: a --tickets id with a non-DND prefix is a usage error (exit 2), before any token read") do
+  Dir.mktmpdir("DND-985") do |home|
+    _out, err, st = Open3.capture3({ "HOME" => home }, "/usr/bin/ruby", BIN, "--tickets", "PT-5")
+    st.exitstatus == 2 && err.include?("DND-NUMBER") && err.include?("Fix:")
   end
 end
 
