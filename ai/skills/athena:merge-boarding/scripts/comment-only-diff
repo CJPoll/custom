@@ -1,0 +1,280 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# comment-only-diff -- prove a diff changes only comments or documentation.
+#
+# The objective check behind ~/.claude/CLAUDE.md -> "Comment- and docs-only
+# changes ship without owner approval". integration-gate exits 4 on a HOT path;
+# when every changed file passes this check, the owner's standing approval
+# waives the wait for their go. It never waives the bar.
+#
+# It reads git OBJECTS (base..head), never the worktree, and parses each side
+# with the language's own parser, which drops comments. Equal parse trees mean
+# the change is comment-only. Anything it has no parser for is NOT covered.
+#
+# Run the MAIN checkout's copy (~/dev/custom/ai/skills/...), never a copy the
+# PR under test can edit (~/dev/custom/CLAUDE.md -> "A check's own bar must not
+# live in the diff it is checking"). A diff that touches this file is refused.
+#
+# Doctrine: ai/skills/athena:merge-boarding/SKILL.md -> exit 4.
+# Self-test: ai/skills/athena:merge-boarding/test/comment-only-diff/self-test.sh
+
+require "open3"
+require "psych"
+require "tmpdir"
+
+PROG = "comment-only-diff"
+HERE = File.expand_path(__dir__)
+
+def usage
+  <<~EOF
+    #{PROG} -- prove a diff changes only comments or documentation.
+
+    Usage:
+      #{PROG} [--repo DIR] [--base REF] [--head REF]
+      #{PROG} --help | --self-test
+
+    Compares git objects, base..head (default: merge-base of origin/main and
+    HEAD, then HEAD). Per changed file:
+      .ex .exs        Elixir AST equal, metadata stripped (Code.string_to_quoted)
+      .yml .yaml      YAML node tree equal (Psych; comments are not nodes; tag,
+                      value, style, anchor all compared)
+      .md .markdown   documentation, UNLESS rule prose: CLAUDE.md, AGENTS.md,
+                      SKILL.md, *.md.in, anything under .claude/ or ai/
+      .tf .tfvars .hcl  NOT verified here: needs a no-change terraform plan
+      anything else   NOT covered (no comment-stripping parser)
+    An added or deleted file is covered only for documentation. A mode change,
+    a submodule, or a change to this verifier itself is never covered.
+
+    Output: one line per file, VERDICT<TAB>path<TAB>reason, then a summary.
+
+    Exit codes:
+      0  every changed file is comment- or doc-only
+      1  at least one file is NOT (listed); the approval does not cover it
+      2  usage / unresolvable ref / empty diff
+      3  COULD NOT MEASURE (git or a parser failed or is missing)
+      5  comment-only except terraform files, which need a no-change plan
+  EOF
+end
+
+def die(code, msg, fix)
+  warn "#{PROG}: #{msg}"
+  warn "Fix: #{fix}"
+  exit code
+end
+
+def git(repo, *args)
+  out, err, st = Open3.capture3("git", "-C", repo, *args)
+  [out, err, st.success?]
+end
+
+repo = Dir.pwd
+base = nil
+head = "HEAD"
+args = ARGV.dup
+until args.empty?
+  a = args.shift
+  case a
+  when "--help", "-h" then puts usage; exit 0
+  when "--self-test"
+    # ai/skills/athena:merge-boarding/test/comment-only-diff/self-test.sh
+    exec(File.join(File.dirname(HERE), "test/comment-only-diff/self-test.sh"))
+  when "--repo" then repo = args.shift or die(2, "--repo needs a directory", "pass --repo <git checkout>")
+  when "--base" then base = args.shift or die(2, "--base needs a ref", "pass --base <ref>, e.g. origin/main")
+  when "--head" then head = args.shift or die(2, "--head needs a ref", "pass --head <ref>, e.g. the PR head SHA")
+  else die(2, "unknown argument: #{a}", "see --help; valid flags are --repo, --base, --head, --self-test")
+  end
+end
+
+_, _, ok = git(repo, "rev-parse", "--git-dir")
+die(2, "not a git repository: #{repo}", "pass --repo <the product checkout or worktree>") unless ok
+
+head_sha, _, ok = git(repo, "rev-parse", "--verify", "#{head}^{commit}")
+die(2, "cannot resolve --head #{head}", "pass a commit that exists locally (git fetch first)") unless ok
+head_sha = head_sha.strip
+if base.nil?
+  base_sha, _, ok = git(repo, "merge-base", "origin/main", head_sha)
+  die(2, "cannot compute merge-base of origin/main and #{head}", "fetch origin, or pass --base <ref> explicitly") unless ok
+else
+  base_sha, _, ok = git(repo, "rev-parse", "--verify", "#{base}^{commit}")
+  die(2, "cannot resolve --base #{base}", "pass a commit that exists locally (git fetch first)") unless ok
+end
+base_sha = base_sha.strip
+
+raw, err, ok = git(repo, "diff", "--raw", "--no-renames", "--no-abbrev", "-z", base_sha, head_sha)
+die(3, "git diff failed: #{err.strip}", "check the repo and refs; nothing was measured") unless ok
+
+# --raw -z: ":<om> <nm> <osha> <nsha> <st>\0<path>\0"
+fields = raw.split("\0")
+entries = []
+until fields.empty?
+  meta = fields.shift
+  path = fields.shift
+  break if meta.nil? || path.nil?
+  om, nm, osha, nsha, st = meta.sub(/\A:/, "").split(" ")
+  entries << { om: om, nm: nm, osha: osha, nsha: nsha, st: st[0], path: path }
+end
+if entries.empty?
+  die(2, "no changed files between #{base_sha[0, 12]} and #{head_sha[0, 12]}",
+      "an empty diff proves nothing; check --base/--head name the PR's base and head")
+end
+
+ZERO = "0" * 40
+
+def blob(repo, sha)
+  return nil if sha == ZERO
+
+  out, err, ok = Open3.capture3("git", "-C", repo, "cat-file", "blob", sha)
+  raise "git cat-file #{sha}: #{err.strip}" unless ok
+
+  out
+end
+
+RULE_PROSE_NAMES = %w[CLAUDE.md AGENTS.md SKILL.md GEMINI.md].freeze
+
+def kind(path)
+  base = File.basename(path)
+  segs = path.split("/")
+  return :self if base == PROG && segs.include?("scripts")
+  return :rule_prose if base.end_with?(".md.in")
+  if base =~ /\.(md|markdown)\z/i
+    return :rule_prose if RULE_PROSE_NAMES.include?(base) || segs.include?(".claude") || segs.first == "ai"
+    return :doc
+  end
+  return :elixir if base =~ /\.exs?\z/
+  return :yaml if base =~ /\.ya?ml\z/
+  return :terraform if base =~ /\.(tf|tfvars|hcl)\z/
+
+  :unsupported
+end
+
+def yaml_tree(node)
+  case node
+  when Psych::Nodes::Scalar
+    [:scalar, node.tag, node.value, node.style, node.anchor, node.plain, node.quoted]
+  when Psych::Nodes::Alias then [:alias, node.anchor]
+  else
+    [node.class.name, (node.respond_to?(:tag) ? node.tag : nil),
+     (node.respond_to?(:anchor) ? node.anchor : nil),
+     node.children.to_a.map { |c| yaml_tree(c) }]
+  end
+end
+
+results = []
+elixir_pairs = []
+entries.each do |e|
+  path = e[:path]
+  k = kind(path)
+  if k == :self
+    results << ["NOT-COVERED", path, "the verifier cannot judge a change to itself"]
+    next
+  end
+  if e[:om] == "160000" || e[:nm] == "160000"
+    results << ["NOT-COVERED", path, "submodule change"]
+    next
+  end
+  if %w[M].include?(e[:st]) && e[:om] != e[:nm]
+    results << ["NOT-COVERED", path, "file mode changed #{e[:om]} -> #{e[:nm]}"]
+    next
+  end
+  if k == :rule_prose
+    results << ["NOT-COVERED", path, "rule prose the harness reads as instructions; lands normally"]
+    next
+  end
+  if k == :doc
+    results << ["COMMENT-ONLY", path, "documentation (#{e[:st] == 'M' ? 'modified' : e[:st] == 'A' ? 'added' : 'deleted'})"]
+    next
+  end
+  unless e[:st] == "M"
+    results << ["NOT-COVERED", path, "file #{e[:st] == 'A' ? 'added' : e[:st] == 'D' ? 'deleted' : e[:st]}; only documentation may be added or deleted"]
+    next
+  end
+  case k
+  when :terraform
+    results << ["NEEDS-PLAN", path, "terraform: covered only by a no-change `terraform plan -detailed-exitcode` (exit 0) per affected root"]
+  when :unsupported
+    results << ["NOT-COVERED", path, "no comment-stripping parser for this file type"]
+  when :yaml
+    begin
+      a = yaml_tree(Psych.parse_stream(blob(repo, e[:osha])))
+      b = yaml_tree(Psych.parse_stream(blob(repo, e[:nsha])))
+      results << (a == b ? ["COMMENT-ONLY", path, "YAML node trees equal"] : ["NOT-COVERED", path, "YAML content changed"])
+    rescue Psych::SyntaxError => ex
+      results << ["NOT-COVERED", path, "YAML does not parse: #{ex.message.lines.first.strip}"]
+    rescue RuntimeError => ex
+      die(3, "COULD NOT MEASURE #{path}: #{ex.message}", "check the repo's objects; nothing was judged")
+    end
+  when :elixir
+    elixir_pairs << e
+  end
+end
+
+unless elixir_pairs.empty?
+  elixir = ENV.fetch("COMMENT_ONLY_DIFF_ELIXIR", "elixir")
+  Dir.mktmpdir("comment-only-diff") do |dir|
+    elixir_pairs.each_with_index do |e, i|
+      File.binwrite(File.join(dir, "#{i}.a"), blob(repo, e[:osha]))
+      File.binwrite(File.join(dir, "#{i}.b"), blob(repo, e[:nsha]))
+    rescue RuntimeError => ex
+      die(3, "COULD NOT MEASURE #{e[:path]}: #{ex.message}", "check the repo's objects; nothing was judged")
+    end
+    script = <<~'EXS'
+      [dir, n] = System.argv()
+      strip = fn ast -> Macro.prewalk(ast, fn {a, m, b} when is_list(m) -> {a, [], b}; o -> o end) end
+      parse = fn p ->
+        case Code.string_to_quoted(File.read!(p), columns: false, emit_warnings: false) do
+          {:ok, ast} -> {:ok, strip.(ast)}
+          {:error, _} -> :error
+        end
+      end
+      for i <- 0..(String.to_integer(n) - 1) do
+        a = parse.(Path.join(dir, "#{i}.a"))
+        b = parse.(Path.join(dir, "#{i}.b"))
+        v = cond do
+          a == :error or b == :error -> "PARSE-ERROR"
+          a == b -> "SAME"
+          true -> "DIFFERENT"
+        end
+        IO.puts("#{i}\t#{v}")
+      end
+    EXS
+    begin
+      out, err, st = Open3.capture3(elixir, "-e", script, dir, elixir_pairs.size.to_s, chdir: repo)
+    rescue Errno::ENOENT
+      die(3, "COULD NOT MEASURE: `#{elixir}` not found, and #{elixir_pairs.size} Elixir file(s) changed",
+          "install Elixir on this host (or set COMMENT_ONLY_DIFF_ELIXIR to its path) and re-run; " \
+          "an unmeasured Elixir file is never read as comment-only")
+    end
+    unless st.success?
+      die(3, "COULD NOT MEASURE: elixir exited #{st.exitstatus}: #{err.strip.lines.last(3).join(' ')}",
+          "fix the Elixir toolchain in #{repo} (asdf .tool-versions) and re-run")
+    end
+    verdicts = out.lines.to_h { |l| l.chomp.split("\t", 2) }
+    elixir_pairs.each_with_index do |e, i|
+      case verdicts[i.to_s]
+      when "SAME" then results << ["COMMENT-ONLY", e[:path], "Elixir AST equal (comments are not AST)"]
+      when "DIFFERENT" then results << ["NOT-COVERED", e[:path], "Elixir AST changed"]
+      when "PARSE-ERROR" then results << ["NOT-COVERED", e[:path], "Elixir does not parse on one side"]
+      else die(3, "COULD NOT MEASURE #{e[:path]}: no verdict from elixir", "re-run; the Elixir helper printed: #{out.strip[0, 200]}")
+      end
+    end
+  end
+end
+
+results.sort_by { |r| r[1] }.each { |r| puts r.join("\t") }
+counts = results.group_by(&:first).transform_values(&:size)
+summary = "#{PROG}: #{results.size} file(s), base #{base_sha[0, 12]}, head #{head_sha[0, 12]}: " +
+          counts.sort.map { |k, v| "#{v} #{k}" }.join(", ")
+if counts["NOT-COVERED"]
+  puts "#{summary} -- NOT comment-only."
+  puts "Fix: the NOT-COVERED files are outside the comment/docs standing approval; " \
+       "an integration-gate exit 4 on them needs the owner's go (or another rule that covers them)."
+  exit 1
+elsif counts["NEEDS-PLAN"]
+  puts "#{summary} -- comment-only except terraform."
+  puts "Fix: run `terraform plan -detailed-exitcode` in each affected root; exit 0 (no changes) " \
+       "completes the check. If you cannot run the plan, that step is the owner's."
+  exit 5
+end
+puts "#{summary} -- comment- or doc-only."
+exit 0

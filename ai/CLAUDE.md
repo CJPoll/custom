@@ -188,11 +188,25 @@ on a human's own machine, merges and deploys where policy requires them, and the
 runner on the owner's laptop is the owner's call because it is the owner's
 machine — a system change under the Hard Rule below — not because of who owns
 the CI/CD lane. "Ownership isn't a gate" never licenses an agent to do an
-owner-gated thing. A security fix's merge and deploy are not on this list; see
-*Security fixes ship without owner approval* below. Nor is a library upgrade's;
-see *Library upgrades ship without owner approval*.
+owner-gated thing. The merge and deploy of a change a standing approval covers
+are not on this list; see *Standing owner approvals* below.
 
-## Security fixes ship without owner approval
+## Standing owner approvals
+
+The owner has given three standing approvals. Each lets a qualifying change
+merge without waiting for the owner's go, including at an `integration-gate`
+exit 4. Each subsection below is its rule's one home. A document that means
+"any standing approval" cites this heading; one that means a single rule cites
+its subsection.
+
+- *Security fixes ship without owner approval*
+- *Library upgrades ship without owner approval*
+- *Comment- and docs-only changes ship without owner approval*
+
+None waives the bar, and none covers what *What no standing approval covers*
+names. A change none of them covers holds for the owner as before.
+
+### Security fixes ship without owner approval
 
 **The rule, owner Cody, 2026-09-24 (~00:33Z, harness coordinator session):**
 "fixing security issues does not require asking approval - just fix them." It
@@ -216,20 +230,40 @@ by name.
   gates throttle merging, not progress*). A read-only step you can already
   run is not owner-only. An audit with a session you already hold is one. Run
   it; do not ask for it.
-- **What counts as a security issue.** A concrete defect that lets someone
-  read, change, or do what they should not: a secret or credential exposure
-  (including a secret in argv, logs, or a world-readable file), an authn or
-  authz bypass, injection (SQL, shell, template, prompt-to-tool), a data leak
-  across a tenant or trust boundary, or privilege escalation. The ticket and the
-  PR name the class and the exposure path, so a reviewer can check the claim.
-  A label does not make a change a security fix. General hardening with no
-  concrete issue, a refactor, or a feature does not qualify. The approval
-  covers only the diff the fix needs; unrelated changes in the same PR do not
+- **What counts as a security issue.** Three classes:
+  - **A concrete defect** that lets someone read, change, or do what they
+    should not: a secret or credential exposure (including a secret in argv,
+    logs, or a world-readable file), an authn or authz bypass, injection (SQL,
+    shell, template, prompt-to-tool), a data leak across a tenant or trust
+    boundary, or privilege escalation. The ticket and the PR name the exposure
+    path.
+  - **A defect in a security control**: a check, scan, guard, or audit that
+    misreports in either direction, false positives included. The ticket and
+    the PR name the control and the misreport.
+  - **General hardening**: a change whose purpose is to make an attack, an
+    exposure, or a secret leak harder or less damaging, even with no concrete
+    issue shown. The ticket and the PR name the threat or failure it reduces
+    and the control it strengthens.
+
+  Each claim is named so a reviewer can check it. A label alone does not make
+  a change qualify. The approval covers only the diff the fix or hardening
+  needs; a feature, a refactor, or an unrelated change in the same PR does not
   ride on it.
+
+  Owner record for the second and third classes: Cody, 2026-09-27, gen_saas
+  coordinator session (terminal). 06:57:35Z, on PR #411 (a dead mode that
+  misreported in the secrets-at-rest audit): "I would consider this a security
+  improvement -- it removes false positives from a security scan (checking for
+  secrets)". 06:58:00Z: "I would like to add general hardening."
+
+  **Later (2026-09-27):** this bullet said "General hardening with no concrete
+  issue … does not qualify". Superseded by the owner record above.
 - **The record.** For a security fix that hits exit 4, pass `integration-gate
   --owner-approval 'security-fix standing approval (~/.claude/CLAUDE.md →
   Security fixes ship without owner approval): "fixing security issues does not
   require asking approval - just fix them" — Cody, 2026-09-24; <class>, <ticket>'`.
+  `<class>` names the defect class (e.g. `authz bypass`), or `security-control
+  defect: <check>`, or `hardening: <threat>`.
   Cite the same rule in the PR body and the state log, and copy the
   `BLAST-RADIUS HOT` block into the PR body and the final report, so the owner
   sees what merging did.
@@ -237,7 +271,7 @@ by name.
   diff could set. It stays a quoted owner record, per `~/dev/custom/CLAUDE.md` →
   *A check's own bar must not live in the diff it is checking*.
 
-## Library upgrades ship without owner approval
+### Library upgrades ship without owner approval
 
 **The rule, owner Cody, 2026-09-27 (~06:37Z, Slack DM D0BU75FE0BB, thread
 1790478928.278559, reply ts 1790491006.113669):** "If they are upgrades of
@@ -266,10 +300,10 @@ approval. This section is its one home; other documents cite it by name.
 - **What does not count.** Adding a package, including a new transitive one.
   Removing one. A downgrade. A git, path, or `in_umbrella` dep. Any source,
   repo, or URL change. A `mix.exs` change outside the deps list. Anything else
-  riding in the same PR. The approval covers only the upgrade lines; a mixed PR
-  gets no coverage for the rest, which holds as any other exit 4 would. Other
-  ecosystems (npm, yarn, and so on) follow the same rule: existing package,
-  version increase only.
+  riding in the same PR. The approval covers only the upgrade lines; the rest
+  of a mixed PR needs its own cover (another standing approval, or the owner's
+  go). Other ecosystems (npm, yarn, and so on) follow the same rule: existing
+  package, version increase only.
 - **The record.** For an upgrade that hits exit 4, pass `integration-gate
   --owner-approval 'library-upgrade standing approval (~/.claude/CLAUDE.md →
   Library upgrades ship without owner approval): "If they are upgrades of
@@ -281,6 +315,67 @@ approval. This section is its one home; other documents cite it by name.
 - **No in-repo switch carries this approval** — no flag, env var, or marker a
   diff could set. It stays a quoted owner record, per `~/dev/custom/CLAUDE.md` →
   *A check's own bar must not live in the diff it is checking*.
+
+### Comment- and docs-only changes ship without owner approval
+
+**The rule, owner Cody, 2026-09-27 (06:55:46Z, gen_saas coordinator session,
+terminal):** "Agreed - a change that only touches comments or docs." It agreed
+to the coordinator's proposal: a change to a HOT file that touches only
+comments or docs ships without asking, provided an objective check passes. It
+is a standing approval. This section is its one home; other documents cite it
+by name.
+
+- **What it waives: the wait for the owner's go** at an `integration-gate` exit
+  4 caused by files whose change the objective check proves comment- or
+  doc-only. Do not hold it, and do not DM for a go-ahead.
+- **The objective check.** Run the MAIN checkout's
+  `~/dev/custom/ai/skills/athena:merge-boarding/scripts/comment-only-diff
+  --repo <worktree> --base <merge-base> --head <PR head SHA>`, never a copy the
+  PR can edit. It reads git objects and compares each file's parse tree,
+  which drops comments. Elixir: `Code.string_to_quoted` ASTs equal with
+  metadata stripped; `@doc`/`@moduledoc` text is AST, so it is not covered.
+  YAML: Psych node trees equal (tag, value, quoting, anchors), so a comment
+  passes and a key or trigger change fails. Markdown: documentation. Exit 0
+  means covered. Exit 5 means comment-only except terraform. Then `terraform
+  plan -detailed-exitcode` must exit 0 (no changes) in every affected root. Exit
+  1, 2 or 3 means not covered. It refuses a diff that edits the verifier itself.
+- **What does not count.** Any non-comment line. A file type the check has no
+  parser for (shell, Dockerfile, Ruby, and so on). A new or deleted code file. A
+  mode change. Docs the harness executes or reads as rules: `CLAUDE.md`,
+  `AGENTS.md`, `SKILL.md`, `*.md.in`, and anything under `.claude/` or
+  `~/dev/custom/ai/`. Those land through their normal path. This approval covers
+  only the owner-go wait, never a harness rule change. The other files of a
+  mixed PR need their own cover.
+- **What it does not waive: the bar.** Green CI, a critic PASS, and the gate.
+  The approval removes the wait, never a check.
+- **What it cannot waive: steps only the owner can perform** (*Library upgrades
+  ship without owner approval* → *What it cannot waive*). A plan that needs
+  credentials you do not hold is one.
+- **The record.** For a change that hits exit 4, pass `integration-gate
+  --owner-approval 'comment/docs-only standing approval (~/.claude/CLAUDE.md →
+  Comment- and docs-only changes ship without owner approval): "Agreed - a
+  change that only touches comments or docs" — Cody, 2026-09-27; comment-only-diff
+  exit <0|5+plan exit 0> at <head SHA>, <ticket>'`. Paste the verifier's output
+  into the PR body and the state log, and copy the `BLAST-RADIUS HOT` block into
+  the PR body and the final report.
+- **No in-repo switch carries this approval** — no flag, env var, or marker a
+  diff could set. It stays a quoted owner record, per `~/dev/custom/CLAUDE.md` →
+  *A check's own bar must not live in the diff it is checking*.
+
+### What no standing approval covers
+
+The three standing approvals waive only the wait for the owner's go at a
+merge gate. The owner-gated list in *Ownership tells you whom to ask, not
+whether you may* wins over all three. An agent still never acts by hand on
+production data, the owner's credentials or secrets, the owner's machine, or
+the host or its system services, whatever the change's class. Escalate that
+step with its exact command; the rest ships.
+
+A library upgrade or a comment/docs-only change never covers a HOT path it does
+not own. If the `BLAST-RADIUS HOT` block names spend, provisioning, or a
+destructive migration beyond the qualifying files, the owner's go is still
+needed. A captain's `Blast radius: IRREVERSIBLE` still holds such a PR
+(`athena:merge-boarding`).
 
 ## Find it, ticket it, fix it, verify it live
 
@@ -310,10 +405,8 @@ the issues." This section is its one home; other documents cite it by name.
 - **Owner-gated steps are not covered.** Credentials, console or account
   actions, and anything on the owner's own machine go to the owner with the
   exact step (*Ownership tells you whom to ask, not whether you may*; *Hard
-  Rule*). So does any other `integration-gate` exit 4, which needs the
-  owner's go. A security fix follows *Security fixes ship without owner
-  approval*; a library upgrade follows *Library upgrades ship without owner
-  approval*. A forge write that cannot run as Athena follows `athena:github` →
+  Rule*). So does an `integration-gate` exit 4 that no standing approval
+  covers (*Standing owner approvals*); it needs the owner's go. A forge write that cannot run as Athena follows `athena:github` →
   *When a forge write can't be done as Athena*. The rest of the fix still ships.
 - **Proportionate.** A LOW finding is filed and queued. It does not interrupt
   the work in hand. Report findings to the owner as one batched summary, not a

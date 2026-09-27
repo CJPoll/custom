@@ -53,9 +53,9 @@ through to completion without them.
    ordered list of the stacked, ready-to-merge PRs, so one manual step lands
    the whole stack. This owner-creds/console class is the ONLY thing that
    cannot be shipped autonomously — everything else, security fixes included,
-   still ships. A security fix needs no owner go even at `integration-gate`
-   exit 4: `~/.claude/CLAUDE.md` → *Security fixes ship without owner approval*.
-   Nor does a library upgrade: *Library upgrades ship without owner approval*.
+   still ships. A change a standing approval covers needs no owner go even at
+   `integration-gate` exit 4: `~/.claude/CLAUDE.md` → *Standing owner
+   approvals*.
 
 ## When the user returns
 

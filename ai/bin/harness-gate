@@ -223,6 +223,8 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/hooks/workflow-phase-guard.sh"  => "ai/hooks/workflow-phase-guard.self-test.sh",
   "ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" =>
     "ai/skills/athena:inbox-attend/test/self-test.sh",
+  "ai/skills/athena:merge-boarding/scripts/comment-only-diff" =>
+    "ai/skills/athena:merge-boarding/test/comment-only-diff/self-test.sh",
   "ai/skills/athena:merge-boarding/scripts/integration-gate" =>
     "ai/skills/athena:merge-boarding/test/self-test.sh",
   "ai/skills/athena:merge-boarding/scripts/locked-merge" =>
