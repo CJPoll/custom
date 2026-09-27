@@ -133,6 +133,33 @@ eq "DST end Monday 08:00 MST (15:00Z) inside, until 01:00Z" "$(dec "${METER_SNAP
 eq "DST end Monday 07:30 MST (14:30Z) outside" "$(dec "${METER_SNAP}" "$(date -u -d '2026-11-02 14:30' +%s)")" "run|default|"
 HOLIDAY="$(jq -c '.metering.holidays = ["2026-09-24"]' <<<"${METER_SNAP}")"
 eq "a holiday is outside" "$(dec "${HOLIDAY}" "${THU_10}")" "run|default|"
+
+# DND-876: `until` is the first instant the in-work-hours answer changes (the
+# server's WorkHours.next_boundary/2), so abutting and overlapping windows on
+# the day read as one span. Before DND-876 the harness answered the end of the
+# latest-ending window covering `now`, and disagreed with the server.
+wins() { jq -c --argjson w "$1" '.metering.work_windows = $w' <<<"${METER_SNAP}"; }
+eq "abutting windows 08-12 + 12-18 at 10:00 MT: until 18:00 MT" \
+  "$(dec "$(wins '[{"days":[4],"start":"08:00","end":"12:00"},{"days":[4],"start":"12:00","end":"18:00"}]')" "${THU_10}")" \
+  "drain|metering:personal|2026-09-25T00:00:00Z"
+eq "overlapping windows 08-12 + 11-14 at 09:00 MT: until 14:00 MT" \
+  "$(dec "$(wins '[{"days":[4],"start":"08:00","end":"12:00"},{"days":[4],"start":"11:00","end":"14:00"}]')" "$(den "2026-09-24 09:00")")" \
+  "drain|metering:personal|2026-09-24T20:00:00Z"
+eq "a chain 12-13 + 08-10 + 10-12 (any order) at 09:00 MT: until 13:00 MT" \
+  "$(dec "$(wins '[{"days":[4],"start":"12:00","end":"13:00"},{"days":[4],"start":"08:00","end":"10:00"},{"days":[4],"start":"10:00","end":"12:00"}]')" "$(den "2026-09-24 09:00")")" \
+  "drain|metering:personal|2026-09-24T19:00:00Z"
+eq "a one-minute gap 08-12 + 12:01-18 is two spans: until 12:00 MT" \
+  "$(dec "$(wins '[{"days":[4],"start":"08:00","end":"12:00"},{"days":[4],"start":"12:01","end":"18:00"}]')" "${THU_10}")" \
+  "drain|metering:personal|2026-09-24T18:00:00Z"
+eq "a window on another weekday never extends the span: until 12:00 MT" \
+  "$(dec "$(wins '[{"days":[4],"start":"08:00","end":"12:00"},{"days":[5],"start":"12:00","end":"18:00"}]')" "${THU_10}")" \
+  "drain|metering:personal|2026-09-24T18:00:00Z"
+eq "a span ending in the spring-forward gap (02:30 MT, 2026-03-08) ends when the clock jumps: 03:00 MDT" \
+  "$(dec "$(wins '[{"days":[7],"start":"01:00","end":"02:30"}]')" "$(date -u -d '2026-03-08 08:30' +%s)")" \
+  "drain|metering:personal|2026-03-08T09:00:00Z"
+eq "a span ending in the fall-back hour (01:30 MT, 2026-11-01) ends at its first pass: 01:30 MDT" \
+  "$(dec "$(wins '[{"days":[7],"start":"00:30","end":"01:30"}]')" "$(date -u -d '2026-11-01 06:45' +%s)")" \
+  "drain|metering:personal|2026-11-01T07:30:00Z"
 eq "blind local rule, personal: drain" "$(fleet_local_rule_blind gen_saas | tr '\t' '|')" "drain|metering:personal|"
 eq "blind local rule, blend: run" "$(fleet_local_rule_blind custom | tr '\t' '|')" "run|default|"
 

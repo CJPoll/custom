@@ -159,7 +159,9 @@ fleet_epoch_iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
 # state*): an unexpired override (a null expires_at never expires); then
 # metering, only when enabled -- a session whose effective domain is metered
 # drains while `now`, in the policy's zone, falls in a work window on a
-# non-holiday (start inclusive, end exclusive), until that window's end; then
+# non-holiday (start inclusive, end exclusive), until the end of its span (the
+# server's WorkHours.next_boundary/2: the first instant the answer changes, so
+# that weekday's windows that abut or overlap read as one span; DND-876); then
 # run with reason `default`. The snapshot must already have passed
 # snapshot_problem and its zone must exist.
 fleet_desired() {
@@ -181,16 +183,36 @@ fleet_desired() {
     read -r day dow hm < <(TZ="${tz}" date -d "@${now}" '+%F %u %H:%M')
     if ! printf '%s' "${snap}" | jq -e --arg d "${day}" '.metering.holidays | index($d) != null' >/dev/null; then
       win="$(printf '%s' "${snap}" | jq -r --argjson dow "${dow}" --arg hm "${hm}" '
-        [ .metering.work_windows[] | select((.days | index($dow)) != null and .start <= $hm and $hm < .end) ]
-        | sort_by(.end) | last | if . == null then "" else .end end')"
+        [ .metering.work_windows[] | select((.days | index($dow)) != null) ] as $w
+        | def reach($e): [ $w[] | select(.start <= $e and $e < .end) | .end ] | max;
+          reach($hm) | if . == null then "" else until(reach(.) == null; reach(.)) end')"
       if [ -n "${win}" ]; then
-        until="$(fleet_epoch_iso "$(TZ="${tz}" date -d "${day} ${win}" +%s)")"
+        until="$(fleet_epoch_iso "$(fleet_wall_epoch "${tz}" "${day}" "${win}")")"
         printf 'drain\tmetering:%s\t%s\n' "${dom}" "${until}"
         return 0
       fi
     fi
   fi
   printf 'run\tdefault\t\n'
+}
+
+# fleet_wall_epoch <zone> <YYYY-MM-DD> <HH:MM>
+# The epoch of local wall time HH:MM on that date in <zone>. A wall time the
+# clock skips (spring forward) never happens, so the answer is the instant the
+# clock jumps past it: the first wall minute after it that exists, as the
+# server's WorkHours resolves a gap. In a repeated hour GNU date takes the
+# first pass, as the server's first boundary does. Status 1 when no wall
+# minute through 23:59 exists (it cannot, for a real zone).
+fleet_wall_epoch() {
+  local tz="$1" day="$2" hm="$3" m
+  m=$(( 10#${hm%%:*} * 60 + 10#${hm##*:} ))
+  while [ "${m}" -lt 1440 ]; do
+    if TZ="${tz}" date -d "${day} $(printf '%02d:%02d' $((m / 60)) $((m % 60)))" +%s 2>/dev/null; then
+      return 0
+    fi
+    m=$((m + 1))
+  done
+  return 1
 }
 
 # fleet_local_rule_blind <project>

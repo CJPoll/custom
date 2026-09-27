@@ -3979,6 +3979,17 @@ Pause, Resume and Keep running. One piece is still owed: an override whose
 `expires_at` lapses emits no `fleet.session.control_changed`, so nothing wakes
 a drained session when a timed pause ends. That wake is DND-448's.
 
+**Later (2026-09-27):** DND-876: the label above left the timed-pause wake to
+DND-448. DND-448 builds it, with metering, in gen_saas PR #434, head
+`6079af9a` (read 2026-09-27). That code is not merged or deployed: it is held
+behind gen_saas #407, and gen_saas `origin/main` `793d5dae` (read 2026-09-27)
+has no `Athena.Fleet.MeteringSweeper`. Every sentence below that names the
+metering sweeper, the two metering switches, the span `until`, or the
+project-not-reported exemption is pinned from that head as written, and is an
+obligation on DND-448 until it merges. Until then no
+`fleet.session.control_changed` marks a timed pause's end, though the resume
+waiter still sees it (*Session control: desired state*, the timed-pause wake).
+
 DND-541 adds hook-driven agent lifecycle and per-run aging. Its tickets are
 DND-556 (this amendment), DND-557 (per-run aging), DND-558 (lifecycle ingest),
 DND-559 (fleet page rendering), DND-560 (`ai/hooks/fleet-lifecycle.sh`, the
@@ -4616,7 +4627,24 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   `Athena.Fleet.ControlPolicy.desired/3`, from the session's override, its
   effective domain and the owner's policy at time `now`, to `{desired, reason,
   until}`. `desired` is `run` or `drain`. Precedence: an unexpired override,
-  then metering (added by the metering phase; skipped until then), then `run`.
+  then metering, then `run`.
+- **Metering applies only when two switches are both on** (DND-448): the
+  server switch, `config :athena, Athena.Fleet.Metering, enabled:` (on only
+  for exactly `true`; `false` in every environment as shipped, so turning it
+  on is a reviewed config change and a deploy), and the owner's policy
+  `enabled`. With either off the metering step is skipped, and the snapshot's
+  `metering` is `{enabled: false}`. With both on, a session drains when its
+  `effective_domain` is in the policy's `metered_domains` and `now` is in work
+  hours, with reason `metering:<domain>` and `until` the end of the work-hours
+  span (*Reading control state and the control cache* → *Recomputing is
+  `desired/3` run locally*).
+- **A session whose project was never reported is never metered.** Such a
+  session has neither `project` nor `repo_key`, because no `session_started`
+  arrived. It runs unless the owner overrides it, whatever the policy says,
+  and its snapshot's `metering` is `{enabled: false}`, so a harness recomputing
+  from that snapshot runs it too. This is not `unclassified`, a reported
+  project no policy maps, which is metered as `personal` (OQ-4). The harness's
+  local rule does not mirror this exemption (*Unknown control state*).
 - **`reason` is one of a closed set of classes.** The drain protocol keys on the
   class (*Enforcement layers* → *Layer 3: the drain protocol*):
   - `override:force_drain` and `override:force_run`: the owner's override;
@@ -4625,14 +4653,35 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   - `default`: nothing overrides or meters, so `run`.
 - **Only the owner changes control.** `Fleet.set_control/3` is authorized by the
   RBAC `control` permission on the session, checked before any write. A
-  non-owner gets `not_found`, with no write and no event. The metering sweeper
-  (metering phase) is the one other writer, and it acts only on the owner's own
-  policy. No inbox line, Slack message or fleet report can change control
-  state.
+  non-owner gets `not_found`, with no write and no event. The metering sweeper,
+  `Athena.Fleet.MeteringSweeper`, is the one other writer. It applies only the
+  owner's own policy and the stored override, and writes only the committed
+  `desired_state`, `desired_reason` and `desired_until`, never the override. No
+  inbox line, Slack message or fleet report can change control state.
 - **Each committed transition emits exactly one `fleet.session.control_changed`**,
   in the transaction that commits the write. That event's model and its direct
   delivery to the session's inbox are in *Declared families beyond the first
   pass*.
+- **The metering sweeper keeps committed state current with the clock.**
+  Desired state depends on `now`, and no request arrives when a boundary
+  passes. Every 60 s by default, the sweeper runs `Fleet.reconcile_control/2`
+  for each session whose liveness is not `ended`. That recomputes `desired/3`
+  at `now` under the session's row lock. When `{desired, reason, until}`
+  differs from the committed row, it commits the new state and emits its one
+  event in that transaction; otherwise it writes and emits nothing. The
+  committed row is its only memory, so a restart emits no second event for a
+  crossing already committed. It runs whether metering is on or off.
+- **The timed-pause wake: the sweeper ends an expired override.** An override
+  whose `expires_at` is at or before `now` no longer counts, and the stored
+  override is left as it was. The first sweep after the expiry commits the
+  session's new state and emits the event that wakes it (*Enforcement layers*
+  → *Layer 4: resume*). With metering off that state is always `run`, so an
+  expired override is the only transition the sweeper can make, and it never
+  drains. With metering on it is whatever metering says at that instant, which
+  can be a drain. The control read does not wait for a sweep: it computes
+  `desired/3` at `now`, never from the committed row, so it answers the new
+  state from the expiry instant, and the event can lag it by up to one sweep
+  interval.
 - **Drain gates fleet spawns only.** It never blocks the human's own turns in a
   top-level session, or any subagent that is not a fleet worker.
 
@@ -4677,8 +4726,31 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   `metering.enabled` is true and `effective_domain` is in `metered_domains`,
   and `now` in `timezone` falls on a work window's weekday, is not a holiday,
   and is at or after `start` and before `end`, it gives
-  `{drain, "metering:<domain>", that window's end}`. Otherwise `{run, default,
-  null}`. P1 has no metering, so its snapshot says `{enabled: false}`.
+  `{drain, "metering:<domain>", until}`. Otherwise `{run, default, null}`.
+  With metering off, and for a project-not-reported session, the snapshot says
+  `{enabled: false}` (*Session control: desired state*).
+- **A metering `until` is the end of the work-hours span**, the first instant
+  after `now` at which the work-hours test above changes (the server's
+  `Athena.Fleet.WorkHours.next_boundary/2`). Windows of `now`'s local weekday
+  that abut or overlap read as one span: start from the latest `end` among the
+  windows holding `now`, and while some window of that weekday has `start` at
+  or before that end and `end` after it, move to that window's `end`. So
+  08:00–12:00 and 12:00–18:00 drain until 18:00, not 12:00; 08:00–12:00 and
+  12:01–18:00 are two spans, and 10:00 drains until 12:00. A window never
+  crosses local midnight (`start` before `end`, both `HH:MM`, `end`
+  exclusive), so a span ends on `now`'s local date, and a holiday never moves
+  it. A span end the clock skips (spring forward) is the instant the clock
+  jumps past it; a span end in a repeated hour (fall back) is its first pass.
+  `ai/bin/fleet-control` computes the same span (`fleet_desired` in
+  `ai/lib/fleet/control-domain.sh`, pinned by its self-test).
+
+  **Later (2026-09-27):** DND-876: `until` was "that window's end", and the
+  harness took the latest end among the windows holding `now`. The server
+  answers the end of the span, so for abutting or overlapping windows the two
+  disagreed (DND-448 captain report, gap 3), and for a window ending in a
+  skipped hour the harness gave no `until` at all. The server's rule is the
+  meaning of `until`, the instant the drain ends, so the contract and the
+  harness now follow it.
 - **`ai/bin/fleet-control` is the one harness reader** (DND-443). The drain
   guard hook, the admiral checkpoint and the resume path all read through it.
   It asks the server first, under a bounded timeout. On an answer it writes the
@@ -4706,6 +4778,20 @@ fail-mode decision (OQ-1, 2026-09-24) applies:
   rule as a built-in snapshot (metering on for `personal` in that window)
   through the same recompute, so a local-rule drain reads reason
   `metering:personal`, until the window's end; the basis says it is local.
+- **The local rule does not apply the server's project-not-reported
+  exemption** (*Session control: desired state*). That exemption rests on a
+  fact only the server holds: it has a row for the session, but no
+  `session_started` reached it. With no usable answer and no cache, the
+  harness cannot learn that. A `not_found` (`session-unregistered`) means the
+  server has no row for the session from this machine at all, so it has no
+  answer to exempt, and an outage reads nothing. The harness takes the project from the session's own cwd
+  instead, and an unmapped project counts as personal. So a personal or
+  unmapped session drains in work hours on the local rule even where the
+  server, once reachable, would have run it. That is the owner's fail-mode
+  rule: unknown state is never loosened toward `run`. The two sides still
+  agree wherever the server has answered, since a cached `{enabled: false}`
+  snapshot recomputes to `run`. The window closes when the server answers
+  again, and `session_started`'s self-heal (DND-497) makes it rarer.
 - **Unknown is never read as `run` silently.** Each basis other than `server`
   prints a warning on stderr naming its cause, and the hook surfaces it to the
   transcript.
