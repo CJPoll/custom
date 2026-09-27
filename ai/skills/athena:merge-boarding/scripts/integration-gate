@@ -16,10 +16,17 @@
 # invisible to both git and the forge. This ADDS a check at a moment where none
 # ran; it never drops, skips, downgrades, or path-excludes one.
 #
-# This script is a PURE ASSERTION: it never rebases, commits, pushes, or
-# otherwise writes to the repo. A rebase can conflict and is a judgement call,
+# This script is an ASSERTION: it never rebases, commits, pushes, or touches
+# the working tree or any ref. A rebase can conflict and is a judgement call,
 # so it reports and the admiral acts. Safe to run anywhere, any number of
-# times.
+# times. Its one write is its RECEIPT (DND-965): on INTEGRATION OK, and only
+# then, it records the pass at <git common dir>/integration-receipts/<head>.json,
+# outside every working tree. locked-merge refuses a head with no such
+# receipt, so "the gate passed on this SHA" no longer rests on the caller's
+# word (gen_saas #468 merged past a RED gate because a prep script printed
+# READY without reading the exit code). Every run that does not end in
+# INTEGRATION OK removes any receipt for its head, so a stale pass cannot
+# outlive a later RED.
 #
 # Run: ai/skills/athena:merge-boarding/scripts/integration-gate [--target <ref>]
 # Self-test: ai/skills/athena:merge-boarding/test/self-test.sh
@@ -41,6 +48,13 @@ Usage: integration-gate [--target <ref>] [--since <ref>] [--gate '<cmd>']
 
 Asserts that HEAD contains the current target ref AND that the local gate is
 green on that integrated head. Exits 0 only when both hold.
+
+On exit 0 (and only then) it writes a RECEIPT for the head, atomically, at
+  <git common dir>/integration-receipts/<head-sha>.json
+recording the head, the target SHA it contained (base), the gate and its
+source, any --critic-override / --owner-approval, the blast-radius verdict, the
+INTEGRATION OK line, and a UTC timestamp. locked-merge requires it. Any other
+outcome removes a receipt for that head. There is no flag that skips it.
 
   --target <ref>   integration target (default: origin/main)
   --since <ref>    the target SHA your branch was last reviewed/gated against
@@ -88,6 +102,8 @@ Exit codes: 0 integration OK | 1 gate RED on the integrated head
             4 merging performs a real-world action -- owner's call, not the
               fleet's (a security fix carries the owner's standing approval;
               see --owner-approval)
+            5 gate green but the receipt could not be written or a stale
+              one could not be removed (no INTEGRATION OK is printed)
 EOF
 }
 
@@ -131,16 +147,53 @@ if [ "$DO_FETCH" -eq 1 ]; then
 fi
 
 # --- 3. resolve the refs ---------------------------------------------------
+if ! HEAD_SHA="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null)"; then
+  echo "${PROG}: HEAD does not resolve to a commit (unborn branch?)." >&2
+  echo "Fix: check out the Mission branch with at least one commit, then re-run." >&2
+  exit 2
+fi
+
+# --- 3a. the receipt (DND-965) ---------------------------------------------
+# One store per REPO, not per checkout: the git common dir is the same for the
+# main checkout and every linked worktree, so locked-merge finds the receipt
+# whichever checkout it runs from. --path-format=absolute because plain
+# --git-common-dir is cwd-relative (".git") in a main checkout.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "${PROG}: jq is not on PATH, so a pass could not be recorded as a receipt." >&2
+  echo "Fix: install jq and re-run. locked-merge refuses a head with no receipt, so a pass this script cannot record is not a pass." >&2
+  exit 2
+fi
+COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+case "$COMMON_DIR" in
+  /*) ;;
+  *) echo "${PROG}: git common dir did not resolve to an absolute path (got '${COMMON_DIR}')." >&2
+     echo "Fix: run from a normal checkout or linked worktree of the repo with git >= 2.31 (--path-format). The receipt store cannot be located otherwise." >&2
+     exit 2 ;;
+esac
+RECEIPT_DIR="${COMMON_DIR}/integration-receipts"
+RECEIPT="${RECEIPT_DIR}/${HEAD_SHA}.json"
+RECEIPT_TMP=""
+# A run that does not end in INTEGRATION OK leaves no pass for its head. The
+# up-front removal covers a run that is killed; the EXIT trap covers a pass
+# another run recorded for this head while this one went RED.
+if ! rm -f "$RECEIPT" 2>/dev/null; then
+  echo "${PROG}: could not remove the earlier receipt ${RECEIPT}." >&2
+  echo "Fix: make ${RECEIPT_DIR} writable (ls -ld '${RECEIPT_DIR}') and re-run. A stale pass this run cannot clear would outlive its result." >&2
+  exit 5
+fi
+clear_receipt_on_failure() {
+  local rc=$?
+  [ -n "$RECEIPT_TMP" ] && rm -f "$RECEIPT_TMP" 2>/dev/null
+  [ "$rc" -ne 0 ] && rm -f "$RECEIPT" 2>/dev/null
+  return "$rc"
+}
+trap clear_receipt_on_failure EXIT
+
 # A target ref that does not resolve is an ERROR, not an empty result: a
 # mistyped or never-fetched ref must never read as "nothing to integrate".
 if ! TARGET_SHA="$(git rev-parse --verify "${TARGET}^{commit}" 2>/dev/null)"; then
   echo "${PROG}: target ref '${TARGET}' does not resolve to a commit in $(pwd)." >&2
   echo "Fix: name a ref that exists here (git remote -v; git branch -r). A wrong ref must not be mistaken for 'no drift' -- this is an error, not an empty result." >&2
-  exit 2
-fi
-if ! HEAD_SHA="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null)"; then
-  echo "${PROG}: HEAD does not resolve to a commit (unborn branch?)." >&2
-  echo "Fix: check out the Mission branch with at least one commit, then re-run." >&2
   exit 2
 fi
 BASE_SHA="$(git merge-base HEAD "$TARGET_SHA" 2>/dev/null)"
@@ -480,8 +533,9 @@ BLAST_ARGS=( --base "$TARGET_SHA" --head "$HEAD_SHA" --repo "$ROOT" --gate-ran "
 if [ -n "$OWNER_APPROVAL" ]; then
   BLAST_ARGS+=( --owner-approval "$OWNER_APPROVAL" )
 fi
-"$BLAST" "${BLAST_ARGS[@]}"
+BLAST_OUT="$("$BLAST" "${BLAST_ARGS[@]}")"
 BLAST_RC=$?
+[ -n "$BLAST_OUT" ] && printf '%s\n' "$BLAST_OUT"
 if [ "$BLAST_RC" -ne 0 ]; then
   echo "${PROG}: NOT safe to merge -- see the BLAST-RADIUS lines above (exit ${BLAST_RC})." >&2
   exit "$BLAST_RC"
@@ -495,5 +549,40 @@ fi
 if [ -n "$OWNER_APPROVAL" ]; then
   SUFFIX="${SUFFIX} (OWNER-APPROVED: ${OWNER_APPROVAL})"
 fi
-echo "INTEGRATION OK ${HEAD_SHA} (GATE: ${GATE_LABEL})${SUFFIX}"
+OK_LINE="INTEGRATION OK ${HEAD_SHA} (GATE: ${GATE_LABEL})${SUFFIX}"
+
+# --- 10. record the pass BEFORE announcing it (DND-965) --------------------
+# The receipt is what locked-merge requires. Printing INTEGRATION OK without it
+# would announce a pass the merge step will refuse, so a failed write is exit 5
+# and no OK line. Written to a temp file in the same directory, then renamed,
+# so a reader sees a whole receipt or none.
+BLAST_LINE="$(grep -m1 '^BLAST-RADIUS ' <<<"$BLAST_OUT")"
+[ -n "$BLAST_LINE" ] || BLAST_LINE="(blast-radius printed no BLAST-RADIUS line)"
+EDITED_JSON=false; [ "$GATE_EDITED" -eq 1 ] && EDITED_JSON=true
+write_receipt() {
+  mkdir -p "$RECEIPT_DIR" 2>/dev/null || return 1
+  RECEIPT_TMP="$(mktemp "${RECEIPT_DIR}/.${HEAD_SHA}.json.tmp.XXXXXX" 2>/dev/null)" || return 1
+  jq -n \
+    --arg head "$HEAD_SHA" --arg target_ref "$TARGET" --arg base "$TARGET_SHA" \
+    --arg gate "$GATE_CMD" --arg gate_source "$GATE_SOURCE" --argjson edited "$EDITED_JSON" \
+    --arg co "$CRITIC_OVERRIDE" --arg co_state "$OVERRIDE_STATE" --arg oa "$OWNER_APPROVAL" \
+    --arg blast "$BLAST_LINE" --arg ok_line "$OK_LINE" --arg checkout "$ROOT" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    'def nul: if . == "" then null else . end;
+     {schema: "integration-receipt/1", verdict: "pass", head: $head,
+      target_ref: $target_ref, base: $base, gate: $gate, gate_source: $gate_source,
+      gate_edited_by_branch: $edited, critic_override: ($co | nul),
+      critic_override_state: ($co_state | nul), owner_approval: ($oa | nul),
+      blast_radius: $blast, integration_ok_line: $ok_line, checkout: $checkout,
+      recorded_at: $at}' > "$RECEIPT_TMP" || return 1
+  mv -f "$RECEIPT_TMP" "$RECEIPT" || return 1
+  RECEIPT_TMP=""
+}
+if ! write_receipt; then
+  echo "${PROG}: the gate is green on $(short "$HEAD_SHA") but its receipt could not be written to ${RECEIPT}." >&2
+  echo "Fix: make ${RECEIPT_DIR} writable (ls -ld '${RECEIPT_DIR}'; df -h '${COMMON_DIR}') and re-run integration-gate. Do not merge: locked-merge requires this receipt, and no INTEGRATION OK was issued." >&2
+  exit 5
+fi
+echo "${PROG}: receipt ${RECEIPT}"
+echo "$OK_LINE"
 exit 0
