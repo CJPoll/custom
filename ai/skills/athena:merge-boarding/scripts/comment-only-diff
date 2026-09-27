@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # comment-only-diff -- prove a diff changes only comments or documentation.
