@@ -20,6 +20,11 @@
 # Feature (and not a blocker) is held while any Path=Critical or Kind=Feature
 # ticket in scope is unfinished. Tiers 0-2 and blockers are never held.
 #
+# The harness lane (DND-987, P7): an Area=Harness, Path=Off (or unset),
+# non-Feature ticket is the lane's (lane_ticket?). --harness-lane keeps only
+# those; without it they are dropped (not_lane) and listed in left_to_lane,
+# except at tier 1: an exploitable vulnerability is never deferred.
+#
 # Inside every tier, a Parked ticket (progress exists, nobody on it) is resumed
 # before a fresh one is started; that key comes before severity, kind and age.
 #
@@ -55,7 +60,8 @@ module NextMission
     in_scope:             "in scope",
     not_terminal:         "not terminal (Done/Cancelled/Won't Fix)",
     not_flake:            "not Kind=Flake (own lane)",
-    harness_lane:         "harness lane (Area=Harness and Path=Off)",
+    not_lane:             "not the harness lane's (Area=Harness, Path=Off, not Feature; tier 1 stays)",
+    harness_lane:         "harness lane (Area=Harness, Path=Off, not Feature)",
     not_started:          "not started (In Progress, In Merge Queue, or --started)",
     not_waiting_on_owner: "not waiting on the owner (Needs Attention)",
     unblocked:            "unblocked (every Depends On Done/Cancelled/Won't Fix)",
@@ -66,12 +72,13 @@ module NextMission
   # when --started was not given (the check could not run; never an empty
   # list standing in for "not checked"). in_progress: the count checked.
   Result = Struct.new(:pick, :tier, :rule, :funnel, :emptied_by, :held_back, :reason,
-                      :started_not_in_scope, :stale_in_progress, :in_progress, keyword_init: true) do
+                      :started_not_in_scope, :stale_in_progress, :in_progress, :left_to_lane,
+                      keyword_init: true) do
     def to_h
       { ticket: pick&.id, page_id: pick&.page_id, title: pick&.title, tier: tier, rule: rule,
         funnel: funnel.map { |stage, n| { stage: stage.to_s, label: STAGES.fetch(stage), matched: n } },
         emptied_by: emptied_by&.to_s, held_back: held_back, reason: reason,
-        started_not_in_scope: started_not_in_scope,
+        started_not_in_scope: started_not_in_scope, left_to_lane: left_to_lane,
         stale_in_progress: stale_in_progress, stale_check: stale_check }
     end
 
@@ -104,7 +111,7 @@ module NextMission
     # In Progress means a captain is on it now. One with no --started entry is
     # stale. A warning only: it stays excluded as started either way.
     in_progress = sorted_ids(scope.select { |x| x.status == "In Progress" })
-    extra = { started_not_in_scope: stray, in_progress: in_progress.size,
+    extra = { started_not_in_scope: stray, in_progress: in_progress.size, left_to_lane: [],
               stale_in_progress: started && (in_progress - ids) }
     started = ids.to_set
 
@@ -113,7 +120,13 @@ module NextMission
     funnel << [:in_scope, set.size]
     set = keep(funnel, :not_terminal, set) { |x| !TERMINAL.include?(x.status) }
     set = keep(funnel, :not_flake, set) { |x| x.kind != "Flake" }
-    set = keep(funnel, :harness_lane, set) { |x| x.area == "Harness" && off?(x) } if harness_lane
+    if harness_lane
+      set = keep(funnel, :harness_lane, set) { |x| lane_ticket?(x) }
+    else
+      lane = set.select { |x| lane_ticket?(x) && tier_of(x) != 1 }
+      extra[:left_to_lane] = sorted_ids(lane)
+      set = keep(funnel, :not_lane, set) { |x| !lane.include?(x) }
+    end
     set = keep(funnel, :not_started, set) { |x| !STARTED.include?(x.status) && !started.include?(x.id) }
     set = keep(funnel, :not_waiting_on_owner, set) { |x| x.status != "Needs Attention" }
     set = keep(funnel, :unblocked, set) { |x| unblocked?(x, status_of) }
@@ -153,6 +166,11 @@ module NextMission
 
   def off?(ticket)
     ticket.path.nil? || ticket.path == "Off"
+  end
+
+  # The harness lane's ticket (P7). A Feature is planned work, never the lane's.
+  def lane_ticket?(ticket)
+    ticket.area == "Harness" && off?(ticket) && ticket.kind != "Feature"
   end
 
   def unblocked?(ticket, status_of)
@@ -245,6 +263,8 @@ module NextMission
         ids = sorted_ids(unfinished)
         "functional-first: #{held.size} tier-4 ticket(s) held (#{sorted_ids(held).join(', ')}) " \
           "while #{ids.size} Critical/Feature ticket(s) are unfinished: #{ids.join(', ')}"
+      elsif emptied == :not_lane
+        "no candidate: every remaining ticket is the harness lane's: #{extra[:left_to_lane].join(', ')}"
       else
         "no candidate: the #{STAGES.fetch(emptied)} filter matched 0"
       end

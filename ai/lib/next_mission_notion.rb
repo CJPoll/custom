@@ -30,6 +30,10 @@ class NextMissionNotion
   # The DND Tickets unique_id prefix. --tickets ids must carry it, because the
   # unique_id filter matches the number alone.
   TICKET_PREFIX       = "DND"
+  # A harness-lane epic (DND-987, P7) is a DND epic whose title starts with
+  # this. athena:epic-clustering names the epics it routes harness clusters to
+  # with it; the harness lane's scope is every such epic not Done/Cancelled.
+  LANE_EPIC_PREFIX    = "Harness lane: "
 
   Scope = Struct.new(:scope, :external, keyword_init: true)
 
@@ -93,12 +97,16 @@ class NextMissionNotion
   end
 
   # epic: an epic page id (32 hex, dashes optional) or an exact epic title.
-  # tickets: ["DND-12", ...]. At least one of the two.
-  def load(epic: nil, tickets: nil)
-    raise ArgumentError, "load needs epic: or tickets:" if epic.nil? && (tickets.nil? || tickets.empty?)
+  # tickets: ["DND-12", ...]. epics: epic page ids already read from DND Epics
+  # (lane_epics), unioned. At least one of the three.
+  def load(epic: nil, tickets: nil, epics: nil)
+    if epic.nil? && (tickets.nil? || tickets.empty?) && (epics.nil? || epics.empty?)
+      raise ArgumentError, "load needs epic:, tickets: or epics:"
+    end
 
     pages = {}
     query_epic(resolve_epic(epic)).each { |p| pages[p["id"]] = p } if epic
+    (epics || []).each { |e| query_epic(e).each { |p| pages[p["id"]] = p } }
     query_ids(tickets).each { |p| pages[p["id"]] = p } if tickets && !tickets.empty?
 
     scope_rows = pages.values.map { |p| [p, parse_page(p)] }
@@ -119,6 +127,26 @@ class NextMissionNotion
       end
     end
     Scope.new(scope: scope_rows.map(&:last), external: external)
+  end
+
+  # The open harness-lane epics -> [[{id:, title:}, ...], [dropped titles]].
+  # Notion's starts_with is looser than the convention, so a hit whose title
+  # does not start with the exact prefix is dropped and returned for the caller
+  # to report. No match is an empty list; the caller says which prefix found
+  # nothing. A failed read raises ReadError.
+  def lane_epics
+    filter = { "and" => [
+      { "property" => "Name", "title" => { "starts_with" => LANE_EPIC_PREFIX } },
+      { "property" => "Status", "select" => { "does_not_equal" => "Done" } },
+      { "property" => "Status", "select" => { "does_not_equal" => "Cancelled" } }
+    ] }
+    rows = query_all({ "filter" => filter }, EPICS_DATA_SOURCE).map do |p|
+      { id: p.fetch("id"), title: prop!(p, "Name", "title")["title"].map { |t| t["plain_text"] }.join }
+    end
+    kept, dropped = rows.partition { |r| r[:title].start_with?(LANE_EPIC_PREFIX) }
+    [kept, dropped.map { |r| r[:title] }]
+  rescue KeyError, NoMethodError, TypeError => e
+    raise ReadError, "malformed DND Epics row: #{e.class}: #{e.message}"
   end
 
   private
@@ -172,13 +200,13 @@ class NextMissionNotion
     found
   end
 
-  def query_all(body)
+  def query_all(body, data_source = TICKETS_DATA_SOURCE)
     out = []
     cursor = nil
     loop do
       req = body.merge("page_size" => 100)
       req["start_cursor"] = cursor if cursor
-      res = @t.call(:post, "/v1/data_sources/#{TICKETS_DATA_SOURCE}/query", req)
+      res = @t.call(:post, "/v1/data_sources/#{data_source}/query", req)
       out.concat(res.fetch("results"))
       break unless res["has_more"]
 

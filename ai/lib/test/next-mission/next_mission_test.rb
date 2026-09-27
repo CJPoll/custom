@@ -223,9 +223,64 @@ check("filter: --harness-lane keeps only Area=Harness and Path=Off") do
   r.pick.id == "DND-3"
 end
 
-check("filter: without --harness-lane, Area=Harness Path=Off is included") do
-  r = pick([t("DND-3", kind: "Docs", area: "Harness", path: "Off")])
-  r.pick&.id == "DND-3"
+# The harness lane (DND-987, P7): an Area=Harness, Path=Off (or unset), non-Feature
+# ticket is the lane's. A feature admiral files it and never starts it, except
+# at tier 1 (an exploitable vulnerability is never deferred to another queue).
+
+check("lane: without --harness-lane, a tier-4 Area=Harness Path=Off ticket is the lane's, never picked") do
+  r = pick([t("DND-3", kind: "Docs", severity: "LOW", area: "Harness", path: "Off"),
+            t("DND-4", kind: "Docs", severity: "LOW", area: "Product", path: "Off")])
+  r.pick&.id == "DND-4" && r.funnel.to_h[:not_lane] == 1 && r.left_to_lane == ["DND-3"]
+end
+
+check("lane: without --harness-lane, Path unset counts as Off (the lane's)") do
+  r = pick([t("DND-3", kind: "Bug", severity: "HIGH", area: "Harness", path: nil)])
+  r.pick.nil? && r.emptied_by == :not_lane && r.left_to_lane == ["DND-3"]
+end
+
+check("lane: a feature scope holding only lane tickets is emptied by :not_lane, naming them") do
+  r = pick([t("DND-8", kind: "Bug", severity: "MEDIUM", area: "Harness"),
+            t("DND-5", kind: "Docs", severity: "LOW", area: "Harness")])
+  r.pick.nil? && r.emptied_by == :not_lane && r.left_to_lane == %w[DND-5 DND-8] &&
+    r.reason.include?("DND-5, DND-8") && r.to_h[:left_to_lane] == %w[DND-5 DND-8]
+end
+
+check("lane: without --harness-lane, a tier-1 Harness vulnerability stays with the feature admiral") do
+  r = pick([t("DND-3", kind: "Vulnerability", severity: "HIGH", area: "Harness", path: "Off")])
+  r.pick&.id == "DND-3" && r.tier == 1 && r.left_to_lane.empty?
+end
+
+check("lane: Harness Path=Blocking, Critical and Promoted stay with the feature admiral") do
+  %w[Blocking Critical Promoted].all? do |p|
+    r = pick([t("DND-3", kind: "Bug", severity: "LOW", area: "Harness", path: p)])
+    r.pick&.id == "DND-3" && r.left_to_lane.empty?
+  end
+end
+
+check("lane: a Harness Kind=Feature with Path=Off is planned work, never the lane's") do
+  feat = t("DND-3", kind: "Feature", area: "Harness", path: "Off")
+  pick([feat]).pick&.id == "DND-3" && pick([feat], harness_lane: true).emptied_by == :harness_lane
+end
+
+check("lane: --harness-lane takes tier 1 before tier 4 in its own queue") do
+  r = pick([t("DND-2", kind: "Bug", severity: "CRITICAL", area: "Harness"),
+            t("DND-9", kind: "Vulnerability", severity: "HIGH", area: "Harness")], harness_lane: true)
+  r.pick.id == "DND-9" && r.tier == 1
+end
+
+check("lane: --harness-lane with a lane-only scope is not held (no Critical/Feature in it)") do
+  r = pick([t("DND-2", kind: "Docs", severity: "LOW", area: "Harness", path: nil)], harness_lane: true)
+  r.pick&.id == "DND-2" && r.held_back.empty?
+end
+
+check("lane: --harness-lane over a scope with an unfinished Feature is held (why the lane scope is lane epics only)") do
+  r = pick([t("DND-1", kind: "Feature", path: "Critical"),
+            t("DND-2", kind: "Docs", severity: "LOW", area: "Harness")], harness_lane: true)
+  r.pick.nil? && r.emptied_by == :functional_first && r.held_back == ["DND-2"]
+end
+
+check("lane: --harness-lane never reports tickets as left to the lane") do
+  pick([t("DND-2", kind: "Docs", severity: "LOW", area: "Harness")], harness_lane: true).left_to_lane.empty?
 end
 
 # ---------------------------------------------------- domain: empty / miss cases
@@ -528,6 +583,53 @@ check("adapter: a page missing a required property is a ReadError naming it") do
   raises?(NextMissionNotion::ReadError, /Kind/) { NextMissionNotion.new(tr).load(epic: EPIC) }
 end
 
+def epic_row(id, title)
+  { "object" => "page", "id" => id,
+    "properties" => { "Name" => { "id" => "title", "type" => "title", "title" => [{ "plain_text" => title }] } } }
+end
+
+LANE = NextMissionNotion::LANE_EPIC_PREFIX
+
+check("adapter: lane_epics queries DND Epics by the title prefix, skips Done/Cancelled, and pages") do
+  tr = FakeTransport.new(
+    [:post, "/v1/data_sources/#{EDS}/query", nil] => { "results" => [epic_row("e1", "#{LANE}evals")],
+                                                      "has_more" => true, "next_cursor" => "k2" },
+    [:post, "/v1/data_sources/#{EDS}/query", "k2"] => { "results" => [epic_row("e2", "#{LANE}guards")],
+                                                       "has_more" => false }
+  )
+  kept, dropped = NextMissionNotion.new(tr).lane_epics
+  f = tr.calls.first[2]["filter"]["and"]
+  kept == [{ id: "e1", title: "#{LANE}evals" }, { id: "e2", title: "#{LANE}guards" }] && dropped.empty? &&
+    f.include?({ "property" => "Name", "title" => { "starts_with" => LANE } }) &&
+    f.include?({ "property" => "Status", "select" => { "does_not_equal" => "Done" } }) &&
+    f.include?({ "property" => "Status", "select" => { "does_not_equal" => "Cancelled" } })
+end
+
+check("adapter: lane_epics drops a hit whose title does not start with the exact prefix, and says so") do
+  tr = FakeTransport.new([:post, "/v1/data_sources/#{EDS}/query"] =>
+                           { "results" => [epic_row("e1", "harness LANE: evals")], "has_more" => false })
+  kept, dropped = NextMissionNotion.new(tr).lane_epics
+  kept.empty? && dropped == ["harness LANE: evals"]
+end
+
+check("adapter: lane_epics with no match is an empty list, not an error (the caller reports it)") do
+  tr = FakeTransport.new([:post, "/v1/data_sources/#{EDS}/query"] => { "results" => [], "has_more" => false })
+  NextMissionNotion.new(tr).lane_epics == [[], []]
+end
+
+check("adapter: a lane_epics HTTP failure is a ReadError, never an empty lane") do
+  tr = FakeTransport.new([:post, "/v1/data_sources/#{EDS}/query"] => NextMissionNotion::ReadError.new("HTTP 503"))
+  raises?(NextMissionNotion::ReadError, /503/) { NextMissionNotion.new(tr).lane_epics }
+end
+
+check("adapter: load(epics:) unions every epic's tickets; a ticket in two epics appears once") do
+  q = "/v1/data_sources/#{TDS}/query"
+  tr = FakeTransport.new([:post, q] => { "results" => [page(1), page(2)], "has_more" => false })
+  s = NextMissionNotion.new(tr).load(epics: %w[e1 e2])
+  posts = tr.calls.select { |m, _, _| m == :post }.map { |_, _, b| b["filter"]["relation"]["contains"] }
+  s.scope.map(&:id) == %w[DND-1 DND-2] && posts == %w[e1 e2]
+end
+
 check("adapter: a malformed epic key (not 32 hex, not a name) with dashes in wrong places still resolves as a name") do
   tr = FakeTransport.new([:post, "/v1/data_sources/#{EDS}/query"] => { "results" => [], "has_more" => false })
   raises?(NextMissionNotion::ReadError, /no epic titled/) { NextMissionNotion.new(tr).load(epic: "3e8349da-zz") }
@@ -581,8 +683,8 @@ check("cli: empty result names the filter that emptied it with counts considered
 end
 
 check("cli: --harness-lane restricts the fixture") do
-  out, _err, code = cli("--from-json", File.join(FIX, "tiers.json"), "--harness-lane")
-  code.zero? && out.start_with?("DND-40\ttier 4")
+  out, _err, code = cli("--from-json", File.join(FIX, "lane.json"), "--harness-lane")
+  code.zero? && out.start_with?("DND-41\ttier 4")
 end
 
 check("cli: unknown flag -> exit 2 with Fix:") do
@@ -707,6 +809,53 @@ check("cli: a missing Notion token file is exit 3 with an owner-gated Fix:, befo
   Dir.mktmpdir("DND-985") do |home|
     out, err, st = Open3.capture3({ "HOME" => home }, "/usr/bin/ruby", BIN, "--scope", EPIC)
     st.exitstatus == 3 && err.include?("notion-personal-token") && err.include?("Fix:") && out.empty?
+  end
+end
+
+check("cli: --harness-lane over lane epics picks the lane ticket and names the lane scope on stderr") do
+  out, err, code = cli("--from-json", File.join(FIX, "lane.json"), "--harness-lane")
+  code.zero? && out.start_with?("DND-41\ttier 4") &&
+    err.include?("harness lane scope: 1 open epic(s)") && err.include?("Harness lane: eval reliability")
+end
+
+check("cli: --harness-lane --json carries the lane epics") do
+  out, _err, code = cli("--from-json", File.join(FIX, "lane.json"), "--harness-lane", "--json")
+  code.zero? && JSON.parse(out)["lane_epics"].map { |e| e["title"] } == ["Harness lane: eval reliability"]
+end
+
+check("cli: zero lane epics is exit 1 naming the prefix searched, never a silent empty") do
+  Dir.mktmpdir("DND-987") do |d|
+    f = File.join(d, "no-lane.json")
+    File.write(f, JSON.generate("lane_epics" => [], "tickets" => []))
+    out, _err, code = cli("--from-json", f, "--harness-lane")
+    code == 1 && out.include?("emptied by: lane_epics") && out.include?(NextMissionNotion::LANE_EPIC_PREFIX.inspect) &&
+      out.include?("Fix:")
+  end
+end
+
+check("cli: a lane_epics fixture without --harness-lane is a usage error") do
+  _out, err, code = cli("--from-json", File.join(FIX, "lane.json"))
+  code == 2 && err.include?("--harness-lane") && err.include?("Fix:")
+end
+
+check("cli: a feature admiral's pick notes the tickets left to the harness lane on stderr") do
+  Dir.mktmpdir("DND-987") do |d|
+    f = File.join(d, "mixed.json")
+    File.write(f, JSON.generate("tickets" => [
+      { "id" => "DND-2", "status" => "Todo", "kind" => "Bug", "severity" => "LOW", "path" => "Off",
+        "area" => "Product", "created" => "2026-09-02T00:00:00Z" },
+      { "id" => "DND-5", "status" => "Todo", "kind" => "Bug", "severity" => "HIGH", "path" => "Off",
+        "area" => "Harness", "created" => "2026-09-05T00:00:00Z" }
+    ]))
+    out, err, code = cli("--from-json", f)
+    code.zero? && out.start_with?("DND-2\t") && err.include?("left to the harness lane: DND-5")
+  end
+end
+
+check("cli: --harness-lane with no scope reads the lane epics from Notion (exit 3 without a token, not 2)") do
+  Dir.mktmpdir("DND-987") do |home|
+    _out, err, st = Open3.capture3({ "HOME" => home }, "/usr/bin/ruby", BIN, "--harness-lane")
+    st.exitstatus == 3 && err.include?("notion-personal-token")
   end
 end
 
