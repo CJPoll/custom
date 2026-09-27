@@ -90,9 +90,10 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    OWN authorization, verbatim, and where it is recorded -- not
                    your reasoning, not an architect sign-off, not a captain
                    report. Printed into the INTEGRATION OK line. A security
-                   fix passes the owner's standing approval here (see
-                   ~/.claude/CLAUDE.md -> "Security fixes ship without owner
-                   approval").
+                   fix or a library upgrade passes the owner's standing
+                   approval here (see ~/.claude/CLAUDE.md -> "Security fixes
+                   ship without owner approval" and "Library upgrades ship
+                   without owner approval").
   --self-test      run the dedicated test suite and exit
 
 Exit codes: 0 integration OK | 1 gate RED on the integrated head
@@ -100,8 +101,8 @@ Exit codes: 0 integration OK | 1 gate RED on the integrated head
               gate refused (a no-op, or not the gate the target declares)
             3 no green critic verdict on the integrated head
             4 merging performs a real-world action -- owner's call, not the
-              fleet's (a security fix carries the owner's standing approval;
-              see --owner-approval)
+              fleet's (a security fix or a library upgrade carries the
+              owner's standing approval; see --owner-approval)
             5 gate green but the receipt could not be written or a stale
               one could not be removed (no INTEGRATION OK is printed)
 EOF
