@@ -395,7 +395,10 @@ The holds:
   - **Destroy:** a `delete` or replace (`delete`+`create`) of any type not on
     its free-and-stateless list. RDS, DynamoDB, S3 buckets, KMS keys, EC2
     instances, EBS/EFS volumes, ECR repositories, EIPs and Secrets Manager
-    secrets are stateful. An unknown type fails wide.
+    secrets are stateful. An unknown type fails wide. Deleting or replacing
+    a type that holds a stored value (an SSM parameter, a secret version, a
+    GitHub Actions secret or variable, S3 versioning) holds too, and so does
+    creating or updating an S3 or ECR lifecycle (expiration) policy.
   - **Cost:** a `create` of any type not on that list, or an `update` that
     changes a sizing attribute (`instance_type`, `instance_class`,
     `allocated_storage`, `iops`, `tier`, and the rest in the tool), up or down,
@@ -411,7 +414,8 @@ The holds:
 
   A secrets update is not held by itself. Creating or updating an SSM
   parameter, a secret version, or a `random_password` ships under its
-  approval. Only a destroy or a cost change holds.
+  approval. Deleting one is not an update and holds. Only a destroy or a cost
+  change holds.
 - **A captain's `Blast radius: IRREVERSIBLE`** holds any change, security fixes
   included (`athena:merge-boarding`).
 - **A HOT path the approval does not own.** A library upgrade or a

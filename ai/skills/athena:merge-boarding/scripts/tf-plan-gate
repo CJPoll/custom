@@ -20,9 +20,9 @@ require "json"
 PROG = "tf-plan-gate"
 HERE = File.expand_path(__dir__)
 
-# Types whose create adds no recurring cost AND whose destroy or replace loses
-# no data. Every other type fails WIDE: its create counts as cost, and its
-# destroy or replace counts as stateful.
+# Types whose create adds no recurring cost. Their destroy or replace loses no
+# data too, EXCEPT the VALUE_HOLDING_TYPES below. Every other type fails WIDE:
+# its create counts as cost, and its destroy or replace counts as stateful.
 FREE_STATELESS_TYPES = %w[
   aws_db_parameter_group aws_db_subnet_group aws_ecr_lifecycle_policy
   aws_ecr_repository_policy aws_eip_association aws_iam_instance_profile
@@ -37,6 +37,18 @@ FREE_STATELESS_TYPES = %w[
   null_resource random_id random_password random_string terraform_data time_sleep
 ].freeze
 FREE_STATELESS_PREFIXES = %w[random_ time_ tls_].freeze
+
+# Free to create or update (a secrets UPDATE ships), but a destroy or replace
+# loses a stored value, often one set out-of-band under ignore_changes, or
+# suspends versioning. Those hold as DESTROY.
+VALUE_HOLDING_TYPES = %w[
+  aws_s3_bucket_versioning aws_secretsmanager_secret_version aws_ssm_parameter
+  github_actions_secret github_actions_variable
+].freeze
+
+# An expiration policy deletes stored objects or images when it runs, so a
+# create or update holds as DESTROY. Removing one deletes nothing.
+EXPIRY_POLICY_TYPES = %w[aws_ecr_lifecycle_policy aws_s3_bucket_lifecycle_configuration].freeze
 
 # Named for the output only; the rule is "not free-stateless".
 STATEFUL_TYPES = %w[
@@ -74,7 +86,9 @@ def usage
 
     HOLD when any managed resource change:
       DESTROY   deletes or replaces (delete+create) a type that is not
-                known free-and-stateless (stateful types fail wide);
+                known free-and-stateless (stateful types fail wide), or one
+                that holds a stored value (#{VALUE_HOLDING_TYPES.first(3).join(', ')}, ...);
+                or creates or updates an expiration policy (#{EXPIRY_POLICY_TYPES.join(', ')});
       COST      creates a type that is not known free-and-stateless, or
                 updates a sizing attribute (#{COST_ATTRS.first(4).join(', ')}, ...)
                 or leaves one unknown until apply.
@@ -149,6 +163,17 @@ def free_stateless?(type)
   FREE_STATELESS_TYPES.include?(type) || FREE_STATELESS_PREFIXES.any? { |p| type.start_with?(p) }
 end
 
+# Free to create is not the same as safe to destroy.
+def safe_destroy?(type)
+  free_stateless?(type) && !VALUE_HOLDING_TYPES.include?(type)
+end
+
+def destroy_label(type)
+  return "holds a stored value" if VALUE_HOLDING_TYPES.include?(type)
+
+  STATEFUL_TYPES.include?(type) ? "stateful" : "not known stateless"
+end
+
 # Paths of COST_ATTRS keys whose values differ between before and after, or
 # are unknown in after.
 def cost_diffs(before, after, unknown, path = [])
@@ -196,10 +221,12 @@ changes.each do |rc|
   considered += 1
   addr = rc["address"]
   type = rc["type"].to_s
-  label = STATEFUL_TYPES.include?(type) ? "stateful" : "not known stateless"
-  if actions.include?("delete") && !free_stateless?(type)
+  if actions.include?("delete") && !safe_destroy?(type)
     verb = actions.include?("create") ? "replace" : "destroy"
-    held << ["DESTROY", addr, "#{verb} of #{type} (#{label})"]
+    held << ["DESTROY", addr, "#{verb} of #{type} (#{destroy_label(type)})"]
+  end
+  if EXPIRY_POLICY_TYPES.include?(type) && (actions.include?("create") || actions.include?("update"))
+    held << ["DESTROY", addr, "#{type} is an expiration policy: it deletes stored objects or images"]
   end
   if actions == ["create"] && !free_stateless?(type)
     held << ["COST", addr, "new #{type} (not known free)"]
@@ -228,10 +255,9 @@ control.each do |rc|
 
   control_only += 1
   type = rc["type"].to_s
-  next if free_stateless?(type)
+  next if safe_destroy?(type)
 
-  label = STATEFUL_TYPES.include?(type) ? "stateful" : "not known stateless"
-  held << ["DESTROY", rc["address"], "#{type} (#{label}) is in the control plan but absent from the change plan: its block was removed"]
+  held << ["DESTROY", rc["address"], "#{type} (#{destroy_label(type)}) is in the control plan but absent from the change plan: its block was removed"]
 end
 
 held.each { |h| puts h.join("\t") }

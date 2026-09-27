@@ -42,6 +42,19 @@ check size-unknown         4 --plan "$(plan l "$(rc aws_instance '["update"]' '{
 check ssm-tier-advanced    4 --plan "$(plan m "$(rc aws_ssm_parameter '["update"]' '{"tier":"Standard"}' '{"tier":"Advanced"}')")"
 check secret-value-update  0 --plan "$(plan n "$(rc aws_ssm_parameter '["update"]' '{"value":"a","tier":"Standard"}' '{"value":"b","tier":"Standard"}')")"
 check secret-version-new   0 --plan "$(plan o "$(rc aws_secretsmanager_secret_version '["create"]' null '{}')")"
+# Free to create or update, but a destroy or replace loses the stored value
+# (often set out-of-band with ignore_changes). The owner's carve-out is
+# secrets UPDATES, not deletes.
+check ssm-param-delete     4 --plan "$(plan ba "$(rc aws_ssm_parameter '["delete"]' '{}' null)")"
+check ssm-param-replace    4 --plan "$(plan bb "$(rc aws_ssm_parameter '["delete","create"]' '{}' '{}')")"
+check secret-version-delete 4 --plan "$(plan bc "$(rc aws_secretsmanager_secret_version '["delete"]' '{}' null)")"
+check gh-secret-delete     4 --plan "$(plan bd "$(rc github_actions_secret '["delete"]' '{}' null)")"
+check s3-versioning-delete 4 --plan "$(plan be "$(rc aws_s3_bucket_versioning '["delete"]' '{}' null)")"
+check control-only-ssm     4 --plan "$(plan bf)" --control "$(plan bg "$(rc aws_ssm_parameter '["create"]' null '{}')")"
+# An expiration policy deletes stored objects or images when it runs.
+check s3-lifecycle-create  4 --plan "$(plan bh "$(rc aws_s3_bucket_lifecycle_configuration '["create"]' null '{}')")"
+check ecr-lifecycle-update 4 --plan "$(plan bi "$(rc aws_ecr_lifecycle_policy '["update"]' '{"policy":"a"}' '{"policy":"b"}')")"
+check ecr-lifecycle-delete 0 --plan "$(plan bj "$(rc aws_ecr_lifecycle_policy '["delete"]' '{}' null)")"
 check random-pw-replace    0 --plan "$(plan p "$(rc random_password '["delete","create"]' '{}' '{}')")"
 check tag-update-clear     0 --plan "$(plan q "$(rc aws_instance '["update"]' '{"tags":{"a":"1"}}' '{"tags":{"a":"2"}}')")"
 check no-op-and-read       0 --plan "$(plan r "$(rc aws_db_instance '["no-op"]' '{}' '{}')" "$(rc aws_db_instance '["read"]' '{}' '{}')")"
