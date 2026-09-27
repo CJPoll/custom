@@ -85,7 +85,19 @@ ticket; this record supplies its per-class data.
 
 ## Measurement: home-office-linux, 2026-09-27
 
-PENDING the quiet window.
+**PARTIAL: the window was cut short because the owner needed the desktop.**
+Pinned gen_saas SHA `37405cbaac5a6d91d66f4b68e38a89bf3facc965`, nproc 16,
+class `gen_saas:prep-commit.sh`, bench output `bench/dnd-489-20260927T025250Z`.
+
+| k | rep | passed | wall s | peak load1 | mean load1 | peak runnable | bg load1 | contaminated |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | 1/1 | 189.2 | 12.09 | 7.07 | 33 | 1.43 | no |
+| 3 | 1 | n/a | n/a | n/a | n/a | n/a | ~8 | stopped during settle, no run |
+| 5, and all of rep 2 | | not run | | | | | | |
+
+One clean rep is below `--min-reps` 2, so no N is decided from this. One gen_saas
+prep-commit alone reaches load1 12.09, which is already the ceiling. N stays at
+the provisional 3 until the remaining levels are measured.
 
 ## Rollout
 
