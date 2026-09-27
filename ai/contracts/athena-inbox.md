@@ -1881,6 +1881,12 @@ lenient about what I receive.
   and the shipwright runner, which sends its stale-dirt report (DND-692) and
   its wedge report (DND-834) through the same `send-mail` path.
 
+  **Later (2026-09-27):** DND-987 adds a third kind of sender on that side:
+  the harness lane's drain request (`-harness-lane-drain.md`). Today an
+  admiral, the owner or a harness session sends it by hand; later the DND-983
+  cron will send it. It goes through the same `send-mail` path and lock
+  (`ai/docs/ticket-lane-action-brief.md` → *The harness lane* → *Senders*).
+
   **Later (2026-09-26):** this item read "Exactly one writer per `write`
   directory per identity". Superseded by DND-692, which added the shipwright
   as a second program on the detector identity. The race the rule prevented is

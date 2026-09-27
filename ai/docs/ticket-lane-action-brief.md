@@ -505,7 +505,7 @@ Progress`, and the other's next-mission then counts it as started.
 | `{{MAX_CAPTAINS}}` | **`1` — the one declared cap, pending the owner's number.** The owner sets it; `0` turns the lane off (no spawn). It is not P3's K_off |
 | `{{MERGE_POLICY}}` | the `~/dev/custom` PR flow: the captain opens a PR, and the lane admiral merges per athena:merge-boarding. **Terminal state = merged** |
 | `{{LANE_CHANNEL}}` | no `log` channel. The trigger is a drain request: one maildir message on custom's `harness-alerts` channel whose filename ends `-harness-lane-drain.md` (athena:inbox-attend → *A fourth writer*). It carries no state, so add/drop comes only from `{{SOURCE_RE_QUERY}}` |
-| `{{CHANNEL_RESOLUTION}}` | `harness-alerts` must resolve in the **live** custom entry, matched by its `repo`. `ai/bin/check-inbox-registry` asserts this read-only. A miss is registry drift (`Fix: scripts/setup-inbox-registry --install`), never a quiet queue. Verified 2026-09-27: the check passed, and in a temp root a detector-side send woke `inbox-wait` with `rang-channels: harness-alerts` |
+| `{{CHANNEL_RESOLUTION}}` | `harness-alerts` must resolve in the **live** custom entry, matched by its `repo`. `ai/bin/check-inbox-registry` asserts this read-only, in every `harness-gate` run. At request time a miss surfaces on the sender side: `send-mail` refuses an undeclared channel with a `Fix:`. A miss is registry drift (`Fix: scripts/setup-inbox-registry --install`), never a quiet queue. Verified 2026-09-27: the check passed, and in a temp root a detector-side send woke `inbox-wait` with `rang-channels: harness-alerts` |
 | `{{LOCK_PATH}}` | `~/.claude/harness-coordinator.lock` |
 | `{{STALE_MARKER_SWEEP}}` | **choice (b), `manual-only`.** Every existing marker is fresh; a human deletes `{{LOCK_PATH}}`. Requests are activity-triggered today, so no age-out is claimed. The 12h clustering cron (DND-983) will send one every run; once that crontab is installed, a later change may move this row to (a) |
 | `{{SOURCE_RE_QUERY}}` | `ai/bin/next-mission --harness-lane --started <state-log ids>`, re-run after each ticket |
@@ -518,7 +518,9 @@ work itself:
 3. Run `ai/bin/next-mission --harness-lane`:
    - exit 0: work is queued. Spin the lane up (*Spinning the lane up*).
    - exit 1: quiet. Record `emptied by: <stage>`; `lane_epics` means no lane
-     epic exists yet.
+     epic exists yet. `functional_first` is not quiet: a Critical or Feature
+     ticket sits in a lane epic. Relay the held ticket ids it names to the
+     owner.
    - exit 2 or 3: a fault. Relay it to the owner; it is never a quiet queue.
 
 **Senders.** Today every request is sent by hand. The sender is an admiral

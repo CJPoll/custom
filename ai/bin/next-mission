@@ -84,7 +84,8 @@ EMPTY_FIX = {
   not_terminal: "nothing to dispatch: every ticket in scope is terminal, so the epic may be ready to close.",
   not_flake: "nothing to dispatch here: only Flake tickets remain, and they belong to the flaky lane.",
   harness_lane: "nothing for the harness lane: no Area=Harness, Path=Off, non-Feature ticket in scope.",
-  not_lane: "the rest are the harness lane's: file them, do not start them " \
+  not_lane: "the rest are the harness lane's; do not start them. Any not on a \"Harness lane: \" epic is in " \
+            "neither queue: ask the architect to move it there, then send a drain request " \
             "(ai/docs/ticket-lane-action-brief.md -> The harness lane).",
   lane_empty: "the lane epics hold no tickets yet: nothing for the harness lane to drain.",
   lane_epics: "nothing for the harness lane to drain. Lane tickets reach the lane only on epics with " \
@@ -96,9 +97,10 @@ EMPTY_FIX = {
   functional_first: "finish the Critical/Feature tickets named above; tier-4 findings follow them."
 }.freeze
 
-def usage_error(msg)
+def usage_error(msg, fix = nil)
   warn "#{PROG}: #{msg}"
-  warn "Fix: run `#{PROG} --help`; pass --scope EPIC and/or --tickets DND-1,DND-2, or --from-json FILE for offline use."
+  warn "Fix: #{fix || "run `#{PROG} --help`; pass --scope EPIC and/or --tickets DND-1,DND-2, --harness-lane " \
+                       'alone, or --from-json FILE for offline use.'}"
   exit 2
 end
 
@@ -237,7 +239,10 @@ def main(argv)
 
   loaded, lane_epics, dropped =
     opts["--from-json"] ? load_fixture(opts["--from-json"]) : load_notion(opts["--scope"], tickets, lane: lane_read)
-  usage_error("the fixture's \"lane_epics\" needs --harness-lane") if lane_epics && !opts["--harness-lane"]
+  if lane_epics && !opts["--harness-lane"]
+    usage_error("the fixture's \"lane_epics\" needs --harness-lane",
+                "add --harness-lane, or remove \"lane_epics\" from the fixture.")
+  end
   unless dropped.empty?
     warn "#{PROG}: note: ignored epic(s) whose title does not start exactly with #{lane_prefix}: #{dropped.join('; ')}"
   end
@@ -267,7 +272,9 @@ def main(argv)
   end
   unless result.left_to_lane.empty?
     warn "#{PROG}: left to the harness lane: #{result.left_to_lane.join(', ')} " \
-         "(Area=Harness, Path=Off; file them, do not start them)"
+         "(Area=Harness, Path=Off, non-Feature; do not start them. If one is not on a \"Harness lane: \" " \
+         "epic, ask the architect to move it there, then send a drain request: " \
+         "ai/docs/ticket-lane-action-brief.md -> The harness lane)"
   end
 
   if opts["--json"]
