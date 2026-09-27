@@ -1407,7 +1407,11 @@ HOT_FIX = <<~FIX.freeze
   SECURITY FIX carries the owner's standing approval (~/.claude/CLAUDE.md -> "Security
   fixes ship without owner approval") -- do not hold it; pass --owner-approval citing that
   rule by name, the owner's quote and date, the security class and the ticket, and merge.
-  The full bar still applies, and a non-security change cannot borrow it.
+  Likewise a LIBRARY UPGRADE (an existing package's version increase, when every HOT path
+  above is a lockfile or deps-list line) carries the owner's standing approval
+  (~/.claude/CLAUDE.md -> "Library upgrades ship without owner approval"), whose record and
+  scope are defined there. The full bar still applies, and no other change can borrow
+  either approval.
 FIX
 
 # --- owner approval grant eligibility (DND-596) -----------------------------
