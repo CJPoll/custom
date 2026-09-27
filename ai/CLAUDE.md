@@ -333,11 +333,11 @@ by name.
   1, 2 or 3 means not covered. It refuses a diff that edits the verifier itself.
 - **What does not count.** Any non-comment line. A file type the check has no
   parser for (shell, Dockerfile, Ruby, and so on). A new or deleted code file. A
-  mode change. A comment a tool reads as a check-suppression directive
+  mode change. Any file with a check-suppression directive on either side
   (`credo:disable`, `sobelow_skip`, `tfsec:ignore`, `checkov:skip`,
-  `zizmor: ignore`, `nosemgrep`, and the like): a directive acts on where it
-  sits, so the verifier marks a file NOT-COVERED when it adds, moves or
-  removes one (a removed `-stop` or `enable` widens its region). Docs
+  `zizmor: ignore`, `nosemgrep`, and the like): a directive's reach (next
+  line, region, counted span) is each tool's own grammar, and a comment edit
+  near one can change it, so the verifier does not judge such a file. Docs
   the harness executes or reads as rules: `CLAUDE.md`,
   `AGENTS.md`, `SKILL.md`, `*.md.in`, and anything under `.claude/` or
   `~/dev/custom/ai/`. Those land through their normal path. This approval covers

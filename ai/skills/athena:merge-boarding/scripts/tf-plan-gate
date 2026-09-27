@@ -564,12 +564,17 @@ changes.each do |rc|
   if EXPIRY_POLICY_TYPES.include?(type) && (actions.include?("create") || actions.include?("update"))
     held << ["DESTROY", addr, "#{type} is an expiration policy: it deletes stored objects or images"]
   end
-  if actions == ["create"] && !free_stateless?(type)
-    held << ["COST", addr, "new #{type} (not known free)"]
-  end
   # Offline (no state) a resize reads as create-vs-create at one address:
   # compare its sizing attributes with the control's create.
   base_create = control.find { |c| c["address"] == addr && c.dig("change", "actions") == ["create"] }
+  if actions == ["create"] && !free_stateless?(type)
+    held << if base_create
+              ["COST", addr, "#{type} (not known free) is in the control but not provably unchanged: " \
+                             "values or configuration differ, so it may be modified or replaced"]
+            else
+              ["COST", addr, "new #{type} (not known free)"]
+            end
+  end
   # A NEW free-listed resource (no control counterpart) is free only at its
   # free sizing.
   if actions.include?("create") && free_stateless?(type) && !base_create

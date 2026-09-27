@@ -47,12 +47,11 @@ def usage
                       file with a heredoc or a /* */ marker on either side
                       is NOT covered
       anything else   NOT covered (no comment-stripping parser)
-    A comment that adds a check-suppression directive (credo:disable,
+    A file with a check-suppression directive on either side (credo:disable,
     sobelow_skip, tfsec:ignore, checkov:skip, zizmor: ignore, nosemgrep,
     markdownlint-disable, any `tool:ignore`/`tool-disable` shape, ...) is
-    NOT covered in any file type, and so is moving or removing one (a moved
-    directive suppresses a new line; a removed `-stop`/`enable` widens its
-    region): any change to a directive line or its next line.
+    NOT covered in any file type: a comment edit near one can change what
+    it suppresses (next line, region, counted span), so it is not judged.
     An added or deleted file is covered only for documentation. A mode change,
     a submodule, or a change to this verifier itself is never covered.
 
@@ -172,9 +171,9 @@ def hcl_code_lines(text)
 end
 
 # A comment a tool reads as an instruction to skip a check (a linter, scanner,
-# or coverage suppression) weakens that check, so adding one is not "only a
-# comment". The region-closing halves (`enable`, `-stop`) count too: removing
-# one widens the region. Two nets: named directives, and the generic
+# or coverage suppression) weakens that check, so a file holding one is not
+# judged (directive_line below). The region-closing halves (`enable`,
+# `-stop`) count too. Two nets: named directives, and the generic
 # `tool:ignore` / `tool-disable` / `tool=skip` / `tool:enable` shape most tools
 # share. Matching is by line on the raw text, so a match inside a string or in
 # prose also counts; that fails closed (such a file is simply not covered).
@@ -188,26 +187,18 @@ SUPPRESSION_DIRECTIVE = Regexp.union(
   /\b[a-z][\w.]*(?::\s?|=|-)(?:ignore|skip|disable|enable|nocheck|allow|start|stop)\b/i
 )
 
-# A directive acts on where it sits: a `next-line` or `ignore` one on the line
-# after it, a `start`/`stop` or `disable`/`enable` pair on the region between.
-# So adding one, moving one to a new neighbour, or removing one (a removed
-# `-stop` widens its region) all change what a check sees. Each directive is
-# keyed by its own text plus the next non-blank line; a file whose ordered key
-# list differs between base and head is changed in a way that matters.
-def directive_contexts(text)
-  lines = text.to_s.lines.map(&:strip)
-  lines.each_index.select { |i| lines[i].match?(SUPPRESSION_DIRECTIVE) }.map do |i|
-    [lines[i], lines[(i + 1)..].find { |l| !l.empty? }]
+# What a directive covers is the tool's own grammar: the next line, a
+# start/stop region, a counted span (`credo:disable-for-lines:N`), a whole
+# file. Modelling each would be a second implementation of every linter.
+# Instead a file with a directive on EITHER side is not judged at all: any
+# comment edit near one can move what it suppresses. Fails wide; such a file
+# lands through the owner's go or another cover.
+def directive_line(old_text, new_text)
+  [new_text, old_text].each do |t|
+    hit = t.to_s.each_line.find { |l| l.match?(SUPPRESSION_DIRECTIVE) }
+    return hit.strip if hit
   end
-end
-
-# The first directive line whose presence or neighbour differs, or nil.
-def changed_directive(old_text, new_text)
-  a = directive_contexts(old_text)
-  b = directive_contexts(new_text)
-  return nil if a == b
-
-  ((b - a) + (a - b)).first&.first || (b.first || a.first)&.first
+  nil
 end
 
 def yaml_tree(node)
@@ -245,12 +236,12 @@ entries.each do |e|
   end
   if %i[doc terraform yaml elixir].include?(k)
     begin
-      changed = changed_directive(blob(repo, e[:osha]), blob(repo, e[:nsha]))
+      changed = directive_line(blob(repo, e[:osha]), blob(repo, e[:nsha]))
     rescue RuntimeError => ex
       die(3, "COULD NOT MEASURE #{path}: #{ex.message}", "check the repo's objects; nothing was judged")
     end
     if changed
-      results << ["NOT-COVERED", path, "adds, moves or removes a check-suppression directive: #{changed[0, 80]}"]
+      results << ["NOT-COVERED", path, "has a check-suppression directive on one side: #{changed[0, 80]}"]
       next
     end
   end
