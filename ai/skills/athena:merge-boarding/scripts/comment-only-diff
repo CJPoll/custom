@@ -41,7 +41,10 @@ def usage
                       value, style, anchor all compared)
       .md .markdown   documentation, UNLESS rule prose: CLAUDE.md, AGENTS.md,
                       SKILL.md, *.md.in, anything under .claude/ or ai/
-      .tf .tfvars .hcl  NOT verified here: needs a no-change terraform plan
+      .tf .tfvars .hcl  non-comment lines equal (whole-line `#`/`//` comments
+                      and blank lines dropped), THEN a no-change terraform
+                      plan; a trailing or block comment, a heredoc, or
+                      .terraform.lock.hcl is NOT covered
       anything else   NOT covered (no comment-stripping parser)
     An added or deleted file is covered only for documentation. A mode change,
     a submodule, or a change to this verifier itself is never covered.
@@ -148,6 +151,17 @@ def kind(path)
   :unsupported
 end
 
+# Terraform/HCL, conservatively. Drop blank lines and WHOLE-LINE `#` / `//`
+# comments; everything else must be byte-identical. HCL quoted strings cannot
+# span lines, so outside a heredoc such a line is always a comment. A heredoc
+# (`<<`) could hold a `#` line that is content, so a file with one is not
+# judged. A trailing comment or a `/* */` block counts as a changed line.
+def hcl_code_lines(text)
+  return nil if text.include?("<<")
+
+  text.lines.map(&:rstrip).reject { |l| l.strip.empty? || l.lstrip.start_with?("#", "//") }
+end
+
 def yaml_tree(node)
   case node
   when Psych::Nodes::Scalar
@@ -191,7 +205,21 @@ entries.each do |e|
   end
   case k
   when :terraform
-    results << ["NEEDS-PLAN", path, "terraform: covered only by a no-change `terraform plan -detailed-exitcode` (exit 0) per affected root"]
+    begin
+      a = hcl_code_lines(blob(repo, e[:osha]))
+      b = hcl_code_lines(blob(repo, e[:nsha]))
+    rescue RuntimeError => ex
+      die(3, "COULD NOT MEASURE #{path}: #{ex.message}", "check the repo's objects; nothing was judged")
+    end
+    results << if File.basename(path) == ".terraform.lock.hcl"
+                 ["NOT-COVERED", path, "provider lock file: a change pins providers, which no plan shows"]
+               elsif a.nil? || b.nil?
+                 ["NOT-COVERED", path, "terraform heredoc: no safe comment check"]
+               elsif a != b
+                 ["NOT-COVERED", path, "terraform non-comment lines changed (a no-change plan cannot prove a comment-only edit)"]
+               else
+                 ["NEEDS-PLAN", path, "terraform: only whole-line comments changed; still needs a no-change `terraform plan -detailed-exitcode` (exit 0) per affected root"]
+               end
   when :unsupported
     results << ["NOT-COVERED", path, "no comment-stripping parser for this file type"]
   when :yaml
