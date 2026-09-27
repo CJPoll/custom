@@ -397,18 +397,21 @@ The holds:
     `prevent_destroy` makes terraform refuse to plan, so a change that
     destroys a protected resource lands here. An agent without prod
     credentials may use the offline control-vs-change plan, passing the base
-    plan as `--control`. `--control` is for that method only: it skips a
-    create the base plan has identically, and the tool refuses it (exit 2)
-    when either plan has an update or a delete. A plan with state is judged
-    whole, drift included, since merging applies all of it. A stateful resource in the
-    control but absent from the change plan holds as a destroy, because an
-    offline plan has no state and shows a removed block only by its absence.
-    Offline, an update and a replace both read as `create`; the same
-    value, tags or description test applies. An attribute unknown in both
-    offline plans is set aside only when its configuration expression is
-    provably the same in both (unset in both, or the same constant, resource
-    reference or variable value); a re-pointed reference, a `local.*`, or a
-    plan with no configuration holds.
+    plan as `--control`. `--control` is for that method only, and the tool
+    refuses it (exit 2) when either plan has an update or a delete. A plan
+    with state is judged whole, drift included, since merging applies all of
+    it. Offline, every reference to another resource is unknown, so values
+    alone cannot show a re-pointed reference. The tool therefore judges
+    "unchanged" on the plan's configuration too. It skips a create only when
+    its values and its configuration are provably the same in both plans:
+    unset in both, the same constant, the same root variable value, or a
+    reference to a resource that is itself unchanged, checked recursively.
+    It sets aside an attribute unknown in both plans on the same test. A
+    re-pointed reference, a `local.*`, or a plan with no configuration
+    holds. A stateful resource in the control but absent from the change
+    plan holds as a destroy, because an offline plan shows a removed block
+    only by its absence. Offline, an update and a replace both read as
+    `create`; the same value, tags or description test applies.
 
   A secrets update is not held by itself. Creating a secret version or
   an SSM parameter, updating an SSM parameter's value in place, or a

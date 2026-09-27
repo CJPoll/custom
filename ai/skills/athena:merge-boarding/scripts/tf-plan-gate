@@ -79,8 +79,11 @@ def usage
     PLAN.json is `terraform show -json <planfile>` for the change.
     --control is the offline control-vs-change method only: the same plan
     for the base commit, both made without state, so every action is
-    create. A create present identically in the control is an existing
-    resource and is skipped. If either plan has an update or a delete it
+    create. A create whose values AND configuration (the plan JSON's
+    configuration block: same expressions, references to resources that
+    are themselves unchanged) are provably the same as the control's is an
+    existing resource and is skipped; values alone never suffice, since
+    offline every reference is unknown. If either plan has an update or a delete it
     has state, and --control is refused (exit 2): merging applies the
     whole plan, drift included, so it is judged whole. A managed resource in the
     control but absent from the change plan (by address and by
@@ -199,19 +202,35 @@ COMPUTED_VALUE_ATTRS = %w[
   updated_at version version_id
 ].freeze
 
-# Offline, "unknown in both plans" does not mean unchanged: an offline plan
-# has no state, so every reference to another resource is unknown in both,
-# and re-pointing one (secret_id from secret a to secret b) changes nothing
-# the values show. So a both-unknown attribute is set aside only when its
-# CONFIGURATION expression is provably the same in both plans:
-#   - the expression (constant_value / references) is identical, and
-#   - every reference is to a resource or data source (whose own change is
-#     judged on its own row), count.index, or a variable whose value is the
-#     same: a root variable's plan value, or a module variable's call
-#     expression, checked the same way one level up.
-# local.*, module.*, each.* and anything else cannot be seen in the plan JSON,
-# so they are never provably the same, and the attribute holds (fail wide).
+
+# Offline (the --control method) values alone cannot show a change: a plan
+# with no state leaves every reference to another resource unknown, so it is
+# absent from `after` in both plans, and re-pointing one (kms_key_id from key a
+# to key b, secret_id from secret a to secret b) leaves `after` identical. So
+# "the same in both plans" is decided on the CONFIGURATION (plan JSON
+# configuration.*.expressions), never on values alone. Two questions:
+#
+#   stable_resource?(addr)  may this create be skipped as an existing,
+#                           untouched resource? Its `after` and
+#                           `after_unknown` equal the control's, and its whole
+#                           configuration is provably the same.
+#   stable_attr?(addr, path) is this one attribute, unknown in both plans,
+#                           provably the same?
+#
+# An expression is provably the same when it is identical in both plans and
+# every reference it makes is itself provably the same:
+#   - unset in both (a provider default), or a constant;
+#   - a resource or data source that is itself stable_resource? (recursively,
+#     so re-pointing what a reference points at is seen);
+#   - count.*; a root variable with the same plan value; a module variable
+#     whose call expression passes the same test one level up (a variable left
+#     at its default compares the declaration).
+# local.*, module.*, each.*, and anything else cannot be seen in the plan
+# JSON, so they are never provably the same (fail wide). No configuration at
+# all: nothing is provably the same.
 class ConfigIndex
+  attr_reader :doc
+
   def initialize(doc)
     @doc = doc
     @root = doc.dig("configuration", "root_module") || {}
@@ -246,14 +265,19 @@ class ConfigIndex
     decl.nil? ? nil : [:default, decl]
   end
 
+  def resource_config(mods, rel)
+    mod = module_at(mods)
+    mod.is_a?(Hash) ? Array(mod["resources"]).find { |r| r.is_a?(Hash) && r["address"] == rel } : nil
+  end
+
+  # The expression at PATH inside a resource's expressions, :unset when the
+  # resource is configured and the attribute is not, nil when the resource is
+  # not in the configuration.
   def resource_expr(address, path)
     mods, rel = self.class.split(address)
-    mod = module_at(mods)
-    res = mod.is_a?(Hash) ? Array(mod["resources"]).find { |r| r.is_a?(Hash) && r["address"] == rel } : nil
+    res = resource_config(mods, rel)
     return [mods, nil] unless res
 
-    # :unset = the resource is in the configuration and this attribute is not
-    # set in it (a provider default). Unset in both plans is the same config.
     expr = path.reduce(res["expressions"] || {}) do |e, k|
       case e
       when Hash then e.key?(k) ? e[k] : :unset
@@ -267,39 +291,111 @@ class ConfigIndex
   def root_var(name)
     @doc.dig("variables", name)
   end
+
+  # Resource changes whose address, indices stripped, is BASE ("module.m.aws_x.y").
+  def changes_for(base)
+    Array(@doc["resource_changes"]).select { |rc| rc["address"].to_s.gsub(/\[[^\]]*\]/, "") == base }
+  end
 end
 
-def same_expr?(ctrl, chg, mods, ec, eh, depth = 0)
-  return false if ec.nil? || eh.nil? || ec != eh || depth > 20
-  return true if eh == :unset
-  return true if eh.is_a?(Array) && eh.first == :default # same declaration, same default
-  return false unless eh.is_a?(Hash) && (eh.key?("constant_value") || eh.key?("references"))
+# Config keys of a resource that decide what it is, beside its expressions.
+RESOURCE_SHAPE_KEYS = %w[count_expression depends_on for_each_expression provider_config_key type].freeze
 
-  Array(eh["references"]).all? do |ref|
-    head, name = ref.split(".", 3)
-    case head
-    when "count" then true
-    when "var"
-      if mods.empty?
-        vc = ctrl.root_var(name)
-        vc && vc == chg.root_var(name)
-      else
-        same_expr?(ctrl, chg, mods[0..-2], ctrl.call_expr(mods, name), chg.call_expr(mods, name), depth + 1)
-      end
-    when "local", "module", "each", "path", "terraform", "self" then false
-    else true # a resource or data source reference: judged on its own row
+class Stability
+  def initialize(ctrl, chg)
+    @ctrl = ctrl
+    @chg = chg
+    @memo = {}
+  end
+
+  # May the create at ADDRESS be skipped as an existing, untouched resource?
+  def stable_resource?(address)
+    base = address.gsub(/\[[^\]]*\]/, "")
+    return @memo[base] if @memo.key?(base)
+
+    @memo[base] = false # a reference cycle is not provably the same
+    @memo[base] = resource_ok?(base)
+  end
+
+  def stable_attr?(address, path)
+    mods, ec = @ctrl.resource_expr(address, path)
+    _, eh = @chg.resource_expr(address, path)
+    same_tree?(mods, ec, eh)
+  end
+
+  private
+
+  def resource_ok?(base)
+    mods, rel = ConfigIndex.split(base)
+    rc_c = @ctrl.changes_for(base)
+    rc_h = @chg.changes_for(base)
+    return false unless rc_c.size == rc_h.size
+
+    values_same = rc_c.sort_by { |r| r["address"].to_s }.zip(rc_h.sort_by { |r| r["address"].to_s }).all? do |c, h|
+      c["address"] == h["address"] &&
+        %w[actions after after_unknown].all? { |k| c.dig("change", k) == h.dig("change", k) }
+    end
+    return false unless values_same
+
+    cfg_c = @ctrl.resource_config(mods, rel)
+    cfg_h = @chg.resource_config(mods, rel)
+    return false if cfg_c.nil? || cfg_h.nil?
+    return false unless RESOURCE_SHAPE_KEYS.all? { |k| cfg_c[k] == cfg_h[k] }
+    return false unless %w[count_expression for_each_expression].all? do |k|
+      cfg_h[k].nil? || same_tree?(mods, cfg_c[k], cfg_h[k])
+    end
+
+    same_tree?(mods, cfg_c["expressions"] || {}, cfg_h["expressions"] || {})
+  end
+
+  # Both sides of an expression tree (leaf expressions, nested blocks as
+  # hashes and arrays) provably the same.
+  def same_tree?(mods, ec, eh, depth = 0)
+    return false if ec.nil? || eh.nil? || ec != eh || depth > 40
+    return true if eh == :unset
+    return true if eh.is_a?(Array) && eh.first == :default # same declaration, same default
+
+    if eh.is_a?(Hash) && (eh.key?("constant_value") || eh.key?("references"))
+      refs_same?(mods, Array(eh["references"]), depth)
+    elsif eh.is_a?(Hash)
+      eh.keys.all? { |k| same_tree?(mods, ec[k], eh[k], depth + 1) }
+    elsif eh.is_a?(Array)
+      eh.each_index.all? { |i| same_tree?(mods, ec[i], eh[i], depth + 1) }
+    else
+      false
     end
   end
+
+  def refs_same?(mods, refs, depth)
+    refs.all? do |ref|
+      segs = ref.split(".")
+      case segs.first
+      when "count" then true
+      when "var"
+        if mods.empty?
+          vc = @ctrl.root_var(segs[1])
+          !vc.nil? && vc == @chg.root_var(segs[1])
+        else
+          same_tree?(mods[0..-2], @ctrl.call_expr(mods, segs[1]), @chg.call_expr(mods, segs[1]), depth + 1)
+        end
+      when "local", "module", "each", "path", "terraform", "self" then false
+      when "data"
+        segs.size >= 3 && stable_resource?(prefix(mods) + segs.first(3).join("."))
+      else
+        segs.size >= 2 && stable_resource?(prefix(mods) + segs.first(2).join("."))
+      end
+    end
+  end
+
+  def prefix(mods)
+    mods.map { |m| "module.#{m}." }.join
+  end
 end
 
-# A proc(path) answering "is this attribute's expression provably the same in
-# the control and the change?" for one resource address.
-def stable_expr_check(ctrl_index, chg_index, address)
-  lambda do |path|
-    mods, ec = ctrl_index.resource_expr(address, path)
-    _, eh = chg_index.resource_expr(address, path)
-    same_expr?(ctrl_index, chg_index, mods, ec, eh)
-  end
+# A proc(path) answering "is this both-unknown attribute provably the same?"
+# for one resource address.
+def stable_expr_check(stability, address)
+  ->(path) { stability.stable_attr?(address, path) }
 end
 
 # An attribute unknown until apply is not the diff's when it is computed, or
@@ -402,9 +498,7 @@ plan_doc = load_plan(plan_path)
 control_doc = control_path ? load_plan(control_path) : nil
 changes = managed(plan_doc)
 control = control_doc ? managed(control_doc) : []
-plan_index = ConfigIndex.new(plan_doc)
-control_index = control_doc ? ConfigIndex.new(control_doc) : nil
-control_keys = control.map { |rc| [rc["address"], rc.dig("change", "actions"), rc.dig("change", "after")] }
+stability = control_doc ? Stability.new(ConfigIndex.new(control_doc), ConfigIndex.new(plan_doc)) : nil
 
 # --control is the offline method only: a plan with no state reads every
 # resource as `create`. An update or delete means a plan with state, and
@@ -429,7 +523,9 @@ changes.each do |rc|
   actions = Array(rc.dig("change", "actions"))
   next if actions.empty? || actions == ["no-op"] || actions == ["read"]
 
-  if actions == ["create"] && control_keys.include?([rc["address"], actions, rc.dig("change", "after")])
+  # Skipped only when values AND configuration are provably unchanged: an
+  # offline re-pointed reference leaves `after` identical (see Stability).
+  if actions == ["create"] && stability&.stable_resource?(rc["address"])
     skipped_control += 1
     next
   end
@@ -458,7 +554,7 @@ changes.each do |rc|
   end
   if actions == ["create"] && base_create
     base_unknown = base_create.dig("change", "after_unknown")
-    stable = stable_expr_check(control_index, plan_index, addr)
+    stable = stable_expr_check(stability, addr)
     cost_diffs(base_create.dig("change", "after"), rc.dig("change", "after"), rc.dig("change", "after_unknown"),
                [], base_unknown, stable).each do |d|
       held << ["COST", addr, "sizing change vs the control: #{d}"]

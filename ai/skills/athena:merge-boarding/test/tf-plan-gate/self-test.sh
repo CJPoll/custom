@@ -82,13 +82,17 @@ check empty-plan-clear     0 --plan "$(plan s)"
 check data-mode-ignored    0 --plan "$(printf '{"format_version":"1.2","resource_changes":[{"address":"data.x.y","mode":"data","type":"aws_db_instance","change":{"actions":["delete"]}}]}' > "${TMP}/t.json"; echo "${TMP}/t.json")"
 
 # --control is the offline method only. An offline plan has no state, so every
-# action is `create`, and a create the base plan has identically is an
-# existing resource, not the diff's. A plan with state (any update or delete,
+# action is `create`, and a create whose values and configuration are
+# provably the same as the base plan's is an existing resource, not the
+# diff's. A plan with state (any update or delete,
 # in either plan) is judged whole, drift included: merging applies the whole
 # plan. --control on one is refused (exit 2), never read as CLEAR.
 inst="$(rc aws_instance '["create"]' null '{"instance_type":"t"}')"
-check control-subtracts-create 0 --plan "$(plan u "$inst")" --control "$(plan v "$inst")"
-check control-keeps-new    4 --plan "$(plan w "$inst" "$(rc aws_db_instance '["create"]' null '{}')")" --control "$(plan x "$inst")"
+icfg='"configuration":{"root_module":{"resources":[{"address":"aws_instance.x","type":"aws_instance","expressions":{"instance_type":{"constant_value":"t"}}}]}}'
+check control-subtracts-create 0 --plan "$(planc u "$icfg" "$inst")" --control "$(planc v "$icfg" "$inst")"
+# Values alone never prove a resource untouched: no configuration, no skip.
+check control-noconfig-no-skip 4 --plan "$(plan ua "$inst")" --control "$(plan va "$inst")"
+check control-keeps-new    4 --plan "$(planc w "$icfg" "${inst},$(rc aws_db_instance '["create"]' null '{}')")" --control "$(planc x "$icfg" "$inst")"
 drift="$(rc aws_instance '["update"]' '{"instance_type":"a"}' '{"instance_type":"b"}')"
 check control-online-sizing-drift 2 --plan "$(plan ua "$drift")" --control "$(plan va "$drift")"
 susp="$(rc aws_s3_bucket_versioning '["update"]' '{"versioning_configuration":[{"status":"Enabled"}]}' '{"versioning_configuration":[{"status":"Suspended"}]}')"
@@ -125,26 +129,49 @@ check offline-secretver-computed 0 --plan "$(planc dc "$SVC" "$(rc aws_secretsma
 check offline-both-unknown-noconfig 4 --plan "$(plan de "$(rc aws_ssm_parameter '["create"]' null '{"value":"b"}' '{"id":true,"name":true}')")" \
                              --control "$(plan df "$(rc aws_ssm_parameter '["create"]' null '{"value":"a"}' '{"id":true,"name":true}')")"
 SV_UNK='{"arn":true,"has_secret_string_wo":true,"id":true,"secret_id":true,"version_id":true,"version_stages":true}'
-sv() { rc aws_secretsmanager_secret_version '["create"]' null "{\"secret_string\":\"$1\"}" "$SV_UNK"; }
-# cfg REF: root-module config for aws_secretsmanager_secret_version.x with secret_id = REF
-cfg() { printf '"configuration":{"root_module":{"resources":[{"address":"aws_secretsmanager_secret_version.x","expressions":{"secret_id":{"references":["%s"]},"secret_string":{"constant_value":"v"}}}]}}' "$1"; }
+# secs NAME_A: two secrets (a, b) as rows; secscfg NAME_A: their configuration.
+secs() { printf '{"address":"aws_secretsmanager_secret.a","mode":"managed","type":"aws_secretsmanager_secret","name":"a","change":{"actions":["create"],"before":null,"after":{"name":"%s"},"after_unknown":{"arn":true,"id":true}}},{"address":"aws_secretsmanager_secret.b","mode":"managed","type":"aws_secretsmanager_secret","name":"b","change":{"actions":["create"],"before":null,"after":{"name":"b"},"after_unknown":{"arn":true,"id":true}}}' "${1-a}"; }
+secscfg() { printf '{"address":"aws_secretsmanager_secret.a","type":"aws_secretsmanager_secret","expressions":{"name":{"constant_value":"%s"}}},{"address":"aws_secretsmanager_secret.b","type":"aws_secretsmanager_secret","expressions":{"name":{"constant_value":"b"}}}' "${1-a}"; }
+# sv VALUE [NAME_A]: the secret rows plus version x whose secret_string is VALUE
+sv() { printf '%s,%s' "$(secs "${2-a}")" "$(rc aws_secretsmanager_secret_version '["create"]' null "{\"secret_string\":\"$1\"}" "$SV_UNK")"; }
+# cfg REF [NAME_A]: configuration with version x's secret_id = REF
+cfg() { printf '"configuration":{"root_module":{"resources":[%s,{"address":"aws_secretsmanager_secret_version.x","type":"aws_secretsmanager_secret_version","expressions":{"secret_id":{"references":["%s"]},"secret_string":{"constant_value":"v"}}}]}}' "$(secscfg "${2-a}")" "$1"; }
 check offline-ref-same     0 --plan "$(planc ea "$(cfg aws_secretsmanager_secret.a.id)" "$(sv b)")" \
                              --control "$(planc eb "$(cfg aws_secretsmanager_secret.a.id)" "$(sv a)")"
 check offline-ref-repointed 4 --plan "$(planc ec "$(cfg aws_secretsmanager_secret.b.id)" "$(sv b)")" \
                              --control "$(planc ed "$(cfg aws_secretsmanager_secret.a.id)" "$(sv a)")"
+# Only the reference moves: `after` is byte-identical in both plans (the
+# unknown secret_id is absent from it), so the row must not be skipped.
+check offline-ref-only-repointed 4 --plan "$(planc eo "$(cfg aws_secretsmanager_secret.b.id)" "$(sv a)")" \
+                             --control "$(planc ep "$(cfg aws_secretsmanager_secret.a.id)" "$(sv a)")"
+# The referenced resource itself changes: the dependent is not untouched.
+check offline-ref-target-changed 4 --plan "$(planc eq "$(cfg aws_secretsmanager_secret.a.id a2)" "$(sv a a2)")" \
+                             --control "$(planc er "$(cfg aws_secretsmanager_secret.a.id)" "$(sv a)")"
 check offline-ref-local    4 --plan "$(planc ee "$(cfg local.sid)" "$(sv b)")" \
                              --control "$(planc ef "$(cfg local.sid)" "$(sv a)")"
 check offline-ref-rootvar-same 0 --plan "$(planc eg "$(cfg var.sid)" "$(sv b)" ',"variables":{"sid":{"value":"s1"}}')" \
                              --control "$(planc eh "$(cfg var.sid)" "$(sv a)" ',"variables":{"sid":{"value":"s1"}}')"
 check offline-ref-rootvar-changed 4 --plan "$(planc ei "$(cfg var.sid)" "$(sv b)" ',"variables":{"sid":{"value":"s2"}}')" \
                              --control "$(planc ej "$(cfg var.sid)" "$(sv a)" ',"variables":{"sid":{"value":"s1"}}')"
+# An RDS instance whose kms_key_id reference moves from key a to key b: a
+# forced replace that loses the database, with `after` identical offline.
+kms() { printf '{"address":"aws_kms_key.%s","mode":"managed","type":"aws_kms_key","name":"%s","change":{"actions":["create"],"before":null,"after":{"description":"%s"},"after_unknown":{"arn":true,"id":true}}}' "$1" "$1" "$1"; }
+kmscfg() { printf '{"address":"aws_kms_key.%s","type":"aws_kms_key","expressions":{"description":{"constant_value":"%s"}}}' "$1" "$1"; }
+db='{"address":"aws_db_instance.d","mode":"managed","type":"aws_db_instance","name":"d","change":{"actions":["create"],"before":null,"after":{"instance_class":"db.t4g.micro"},"after_unknown":{"id":true,"kms_key_id":true}}}'
+dbcfg() { printf '"configuration":{"root_module":{"resources":[%s,%s,{"address":"aws_db_instance.d","type":"aws_db_instance","expressions":{"instance_class":{"constant_value":"db.t4g.micro"},"kms_key_id":{"references":["aws_kms_key.%s.arn","aws_kms_key.%s"]}}}]}}' "$(kmscfg a)" "$(kmscfg b)" "$1" "$1"; }
+check offline-rds-kms-repointed 4 --plan "$(planc es "$(dbcfg b)" "$(kms a),$(kms b),${db}")" \
+                             --control "$(planc et "$(dbcfg a)" "$(kms a),$(kms b),${db}")"
+check offline-rds-untouched 0 --plan "$(planc eu "$(dbcfg a)" "$(kms a),$(kms b),${db}")" \
+                             --control "$(planc ev "$(dbcfg a)" "$(kms a),$(kms b),${db}")"
 # Inside a module, var.sid resolves through the module call's expression.
-mcfg() { printf '"configuration":{"root_module":{"module_calls":{"m":{"expressions":{"sid":{"references":["%s"]}},"module":{"resources":[{"address":"aws_secretsmanager_secret_version.x","expressions":{"secret_id":{"references":["var.sid"]}}}]}}}}}' "$1"; }
-msv() { printf '{"address":"module.m.aws_secretsmanager_secret_version.x[0]","mode":"managed","type":"aws_secretsmanager_secret_version","name":"x","index":0,"change":{"actions":["create"],"before":null,"after":{"secret_string":"%s"},"after_unknown":%s}}' "$1" "$SV_UNK"; }
+mcfg() { printf '"configuration":{"root_module":{"resources":[%s],"module_calls":{"m":{"expressions":{"sid":{"references":["%s"]}},"module":{"resources":[{"address":"aws_secretsmanager_secret_version.x","type":"aws_secretsmanager_secret_version","expressions":{"secret_id":{"references":["var.sid"]}}}]}}}}}' "$(secscfg)" "$1"; }
+msv() { printf '%s,{"address":"module.m.aws_secretsmanager_secret_version.x[0]","mode":"managed","type":"aws_secretsmanager_secret_version","name":"x","index":0,"change":{"actions":["create"],"before":null,"after":{"secret_string":"%s"},"after_unknown":%s}}' "$(secs)" "$1" "$SV_UNK"; }
 check offline-module-var-same 0 --plan "$(planc ek "$(mcfg aws_secretsmanager_secret.a.id)" "$(msv b)")" \
                              --control "$(planc el "$(mcfg aws_secretsmanager_secret.a.id)" "$(msv a)")"
 check offline-module-var-repointed 4 --plan "$(planc em "$(mcfg aws_secretsmanager_secret.b.id)" "$(msv b)")" \
                              --control "$(planc en "$(mcfg aws_secretsmanager_secret.a.id)" "$(msv a)")"
+check offline-module-var-only-repointed 4 --plan "$(planc ew "$(mcfg aws_secretsmanager_secret.b.id)" "$(msv a)")" \
+                             --control "$(planc ex "$(mcfg aws_secretsmanager_secret.a.id)" "$(msv a)")"
 check offline-name-unknown-realistic 4 --plan "$(plan dg "$(rc aws_ssm_parameter '["create"]' null '{"value":"x"}' '{"id":true,"arn":true,"version":true,"name":true}')")" \
                              --control "$(plan dh "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"x"}' "$SSM_CREATE_UNK")")"
 check online-ssm-value-computed 0 --plan "$(plan di "$(rc aws_ssm_parameter '["update"]' '{"id":"/a","name":"/a","value":"a","version":3,"tier":"Standard"}' '{"id":"/a","name":"/a","value":"b","tier":"Standard"}' '{"version":true}')")"
