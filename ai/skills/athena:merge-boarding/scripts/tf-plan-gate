@@ -85,11 +85,11 @@ def usage
     PLAN.json is `terraform show -json <planfile>` for the change.
     --control is the offline control-vs-change method only: the same plan
     for the base commit, both made without state, so every action is
-    create. A create whose values AND configuration (the plan JSON's
-    configuration block: same expressions, references to resources that
-    are themselves unchanged) are provably the same as the control's is an
-    existing resource and is skipped; values alone never suffice, since
-    offline every reference is unknown. If either plan has an update or a delete it
+    create. --control never skips a create: offline, "the same resource
+    as in the control" cannot be proven (a re-pointed reference, a provider
+    region or assumed role can change while every value reads the same).
+    It supplies the control's create at the same address for the UPDATE
+    test below, and finds removed blocks. If either plan has an update or a delete it
     has state, and --control is refused (exit 2): merging applies the
     whole plan, drift included, so it is judged whole. A managed resource in the
     control but absent from the change plan (by address and by
@@ -108,9 +108,8 @@ def usage
                 harmless-update list (description, tags, tags_all; plus the
                 stored value on a value-holding type). Fails wide: an update
                 can destroy data (backup retention to 0, PITR off) or add cost
-                through an attribute no list names. Offline, a
-                create-vs-create that is not provably unchanged is judged the
-                same way.
+                through an attribute no list names. Offline, a free type's
+                create is judged the same way against the control's create.
       COST      creates a type that is not known free-and-stateless, or
                 creates a free one at an explicitly set billed size (an
                 Advanced-tier SSM parameter), or updates a sizing attribute (#{COST_ATTRS.first(4).join(', ')}, ...)
@@ -247,14 +246,16 @@ COMPUTED_VALUE_ATTRS = %w[
 # "the same in both plans" is decided on the CONFIGURATION (plan JSON
 # configuration.*.expressions), never on values alone. Two questions:
 #
-#   stable_resource?(addr)  may this create be skipped as an existing,
-#                           untouched resource? Its `after` and
-#                           `after_unknown` equal the control's, and its whole
-#                           configuration is provably the same.
+#   stable_resource?(addr)  is a REFERENCED resource provably the same? Its
+#                           `after` and `after_unknown` equal the control's,
+#                           and its whole configuration is provably the
+#                           same. (Used only to resolve references; a create
+#                           itself is never skipped.)
 #   stable_attr?(addr, path) is this one attribute, unknown in both plans,
 #                           provably the same?
 #
-# An expression is provably the same when it is identical in both plans and
+# Both first require the provider configuration (region, assumed role) to be
+# identical in both plans. An expression is provably the same when it is identical in both plans and
 # every reference it makes is itself provably the same:
 #   - unset in both (a provider default), or a constant;
 #   - a resource or data source that is itself stable_resource? (recursively,
@@ -345,7 +346,8 @@ class Stability
     @memo = {}
   end
 
-  # May the create at ADDRESS be skipped as an existing, untouched resource?
+  # Is the resource at ADDRESS provably the same in both plans? Used only to
+  # resolve a REFERENCE to it (a create is never skipped on it).
   def stable_resource?(address)
     base = address.gsub(/\[[^\]]*\]/, "")
     return @memo[base] if @memo.key?(base)
@@ -355,6 +357,8 @@ class Stability
   end
 
   def stable_attr?(address, path)
+    return false unless providers_same?
+
     mods, ec = @ctrl.resource_expr(address, path)
     _, eh = @chg.resource_expr(address, path)
     same_tree?(mods, ec, eh)
@@ -362,7 +366,18 @@ class Stability
 
   private
 
+  # Provider configuration (region, assumed role, profile) is configuration
+  # too: a change there moves every resource. Compared whole; a plan without
+  # it is never provably the same.
+  def providers_same?
+    pc = @ctrl.doc.dig("configuration", "provider_config")
+    ph = @chg.doc.dig("configuration", "provider_config")
+    !pc.nil? && pc == ph
+  end
+
   def resource_ok?(base)
+    return false unless providers_same?
+
     mods, rel = ConfigIndex.split(base)
     rc_c = @ctrl.changes_for(base)
     rc_h = @chg.changes_for(base)
@@ -561,17 +576,16 @@ end
 
 held = []
 considered = 0
-skipped_control = 0
+
 changes.each do |rc|
   actions = Array(rc.dig("change", "actions"))
   next if actions.empty? || actions == ["no-op"] || actions == ["read"]
 
-  # Skipped only when values AND configuration are provably unchanged: an
-  # offline re-pointed reference leaves `after` identical (see Stability).
-  if actions == ["create"] && stability&.stable_resource?(rc["address"])
-    skipped_control += 1
-    next
-  end
+  # --control never skips a create. Offline, "the same resource as in the
+  # control" cannot be proven: a re-pointed reference, a provider region or
+  # an assumed role can each change while every value and expression reads
+  # the same. So every create is judged: a non-free one holds, a free one gets
+  # the harmless-list test against the control's create below.
   considered += 1
   addr = rc["address"]
   type = rc["type"].to_s
@@ -587,8 +601,8 @@ changes.each do |rc|
   base_create = control.find { |c| c["address"] == addr && c.dig("change", "actions") == ["create"] }
   if actions == ["create"] && !free_stateless?(type)
     held << if base_create
-              ["COST", addr, "#{type} (not known free) is in the control but not provably unchanged: " \
-                             "values or configuration differ, so it may be modified or replaced"]
+              ["COST", addr, "#{type} (not known free): offline, a create is never proven to be the existing " \
+                             "resource, so it may be a new, modified or replaced one"]
             else
               ["COST", addr, "new #{type} (not known free)"]
             end
@@ -645,7 +659,7 @@ end
 
 held.each { |h| puts h.join("\t") }
 summary = "#{PROG}: #{considered} resource change(s) considered" +
-          (control_path ? ", #{skipped_control} also in the control, skipped, #{control_only} only in the control" : "")
+          (control_path ? ", #{control_only} only in the control" : "")
 if held.empty?
   puts "#{summary}; CLEAR: nothing destroys infrastructure or adds cost."
   exit 0
