@@ -100,6 +100,13 @@ run_case tf-trailing-comment   1         'sed -i "s/{}/{} # note/" tf/main.tf'
 run_case tf-block-comment      1         'printf "/* c */\n" >> tf/main.tf'
 run_case tf-heredoc            1         'printf "locals {\n  s = <<EOT\n# x\nEOT\n}\n" >> tf/main.tf; git add -A; git commit -q -m h; git tag -f base >/dev/null; printf "# y\n" >> tf/main.tf'
 run_case tf-lockfile           1         'printf "# lock\n" > tf/.terraform.lock.hcl; git add -A; git commit -q -m l; git tag -f base >/dev/null; printf "# comment\n" >> tf/.terraform.lock.hcl'
+# A comment a tool reads as a suppression directive weakens a check: it is
+# not "only a comment". Adding one is NOT covered; removing one is.
+run_case yaml-suppress-added   1         'sed -i "s/^jobs:/# zizmor: ignore[unpinned-uses]\njobs:/" .github/workflows/ci.yml'
+run_case tf-suppress-added     1         'printf "# tfsec:ignore:aws-s3-enable-versioning\n" >> tf/main.tf'
+run_case ex-suppress-added     1         'sed -i "s/^  def f/  # credo:disable-for-this-file\n  def f/" lib/a.ex'
+run_case md-suppress-added     1         'printf "<!-- markdownlint-disable -->\n" >> docs/adr/0001.md'
+run_case yaml-suppress-removed 0         'sed -i "s/^jobs:/# nosemgrep\njobs:/" .github/workflows/ci.yml; git add -A; git commit -q -m d; git tag -f base >/dev/null; sed -i "/nosemgrep/d" .github/workflows/ci.yml'
 run_case shell-unsupported     1         'printf "# comment\n" >> run.sh'
 run_case new-code-file         1         'printf "defmodule B do\nend\n" > lib/b.ex'
 run_case deleted-code-file     1         'rm lib/a.ex'

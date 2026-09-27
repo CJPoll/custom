@@ -50,6 +50,12 @@ check ssm-param-replace    4 --plan "$(plan bb "$(rc aws_ssm_parameter '["delete
 check secret-version-delete 4 --plan "$(plan bc "$(rc aws_secretsmanager_secret_version '["delete"]' '{}' null)")"
 check gh-secret-delete     4 --plan "$(plan bd "$(rc github_actions_secret '["delete"]' '{}' null)")"
 check s3-versioning-delete 4 --plan "$(plan be "$(rc aws_s3_bucket_versioning '["delete"]' '{}' null)")"
+# Online, an update of a value-holding type can do what its delete does:
+# suspending versioning is a destroy of the version history's protection.
+# Only a value/tags/description change passes, online as offline.
+check s3-versioning-suspend 4 --plan "$(plan ca "$(rc aws_s3_bucket_versioning '["update"]' '{"versioning_configuration":[{"status":"Enabled"}]}' '{"versioning_configuration":[{"status":"Suspended"}]}')")"
+check ghsecret-repo-update 4 --plan "$(plan cb "$(rc github_actions_secret '["update"]' '{"repository":"a","plaintext_value":"x"}' '{"repository":"b","plaintext_value":"x"}')")"
+check ghsecret-value-update 0 --plan "$(plan cc "$(rc github_actions_secret '["update"]' '{"repository":"a","plaintext_value":"x"}' '{"repository":"a","plaintext_value":"y"}')")"
 check control-only-ssm     4 --plan "$(plan bf)" --control "$(plan bg "$(rc aws_ssm_parameter '["create"]' null '{}')")"
 # An expiration policy deletes stored objects or images when it runs.
 check s3-lifecycle-create  4 --plan "$(plan bh "$(rc aws_s3_bucket_lifecycle_configuration '["create"]' null '{}')")"

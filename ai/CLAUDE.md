@@ -325,7 +325,11 @@ by name.
   1, 2 or 3 means not covered. It refuses a diff that edits the verifier itself.
 - **What does not count.** Any non-comment line. A file type the check has no
   parser for (shell, Dockerfile, Ruby, and so on). A new or deleted code file. A
-  mode change. Docs the harness executes or reads as rules: `CLAUDE.md`,
+  mode change. A comment a tool reads as a check-suppression directive
+  (`credo:disable`, `sobelow_skip`, `tfsec:ignore`, `checkov:skip`,
+  `zizmor: ignore`, `nosemgrep`, and the like): it weakens a check, so the
+  verifier marks a file that adds one NOT-COVERED. Removing one is fine. Docs
+  the harness executes or reads as rules: `CLAUDE.md`,
   `AGENTS.md`, `SKILL.md`, `*.md.in`, and anything under `.claude/` or
   `~/dev/custom/ai/`. Those land through their normal path. This approval covers
   only the owner-go wait, never a harness rule change. The other files of a
@@ -375,8 +379,10 @@ The holds:
     instances, EBS/EFS volumes, ECR repositories, EIPs and Secrets Manager
     secrets are stateful. An unknown type fails wide. Deleting or replacing
     a type that holds a stored value (an SSM parameter, a secret version, a
-    GitHub Actions secret or variable, S3 versioning) holds too, and so does
-    creating or updating an S3 or ECR lifecycle (expiration) policy.
+    GitHub Actions secret or variable, S3 versioning) holds too. So does an
+    update of such a type that changes anything but its value, tags or
+    description (suspending versioning, say), and creating or updating an S3
+    or ECR lifecycle (expiration) policy.
   - **Cost:** a `create` of any type not on that list, or an `update` that
     changes a sizing attribute (`instance_type`, `instance_class`,
     `allocated_storage`, `iops`, `tier`, and the rest in the tool), up or down,
@@ -389,13 +395,12 @@ The holds:
     plan also has; it never skips a delete. A stateful resource in the
     control but absent from the change plan holds as a destroy, because an
     offline plan has no state and shows a removed block only by its absence.
-    Offline, an update and a replace both read as `create`, so a
-    value-holding type holds unless only its value, tags or description
-    changed.
+    Offline, an update and a replace both read as `create`; the same
+    value, tags or description test applies.
 
   A secrets update is not held by itself. Creating or updating an SSM
-  parameter, a secret version, or a `random_password` ships under its
-  approval. Deleting one is not an update and holds. Only a destroy or a cost
+  parameter's or a secret version's value, or a `random_password`, ships
+  under its approval. Deleting one is not an update and holds. Only a destroy or a cost
   change holds.
 - **A captain's `Blast radius: IRREVERSIBLE`** holds any change, security fixes
   included (`athena:merge-boarding`).

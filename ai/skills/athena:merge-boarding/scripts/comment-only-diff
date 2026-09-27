@@ -46,6 +46,10 @@ def usage
                       plan; a trailing or block comment, a heredoc, or
                       .terraform.lock.hcl is NOT covered
       anything else   NOT covered (no comment-stripping parser)
+    A comment that adds a check-suppression directive (credo:disable,
+    sobelow_skip, tfsec:ignore, checkov:skip, zizmor: ignore, nosemgrep,
+    markdownlint-disable, any `tool:ignore`/`tool-disable` shape, ...) is
+    NOT covered in any file type: it weakens a check. Removing one is fine.
     An added or deleted file is covered only for documentation. A mode change,
     a submodule, or a change to this verifier itself is never covered.
 
@@ -162,6 +166,34 @@ def hcl_code_lines(text)
   text.lines.map(&:rstrip).reject { |l| l.strip.empty? || l.lstrip.start_with?("#", "//") }
 end
 
+# A comment a tool reads as an instruction to skip a check (a linter, scanner,
+# or coverage suppression) weakens that check, so adding one is not "only a
+# comment". Two nets: named directives, and the generic `tool:ignore` /
+# `tool-disable` / `tool=skip` shape most tools share. Matching is by line on
+# the raw text, so a match inside a string also counts; that fails closed.
+# Residual: a tool whose directive fits neither net is missed here, and only
+# the critic's read of the diff can catch it.
+SUPPRESSION_DIRECTIVE = Regexp.union(
+  /\b(?:sobelow_skip|coveralls-ignore|nosemgrep|nosec|noqa|nolint|NOSONAR|noinspection)\b/i,
+  /\byamllint\s+disable/i, /\bshellcheck\s+disable/i, /\bpylint:\s*disable/i, /\btype:\s*ignore/i,
+  /\b(?:istanbul|c8)\s+ignore/i, /@ts-(?:ignore|nocheck|expect-error)/i, /\bkics-scan\b/i,
+  /\bpragma:\s*allowlist/i, /\bgitleaks:allow/i, /\bmarkdownlint-disable/i,
+  /\b[a-z][\w.]*(?::\s?|=|-)(?:ignore|skip|disable|nocheck|allow)\b/i
+)
+
+# Lines carrying a suppression directive that the new text adds (a multiset
+# difference, so a moved directive is not "added" and a removed one is fine).
+def added_directives(old_text, new_text)
+  count = Hash.new(0)
+  old_text.to_s.each_line { |l| count[l.strip] += 1 if l.match?(SUPPRESSION_DIRECTIVE) }
+  new_text.to_s.each_line.select do |l|
+    next false unless l.match?(SUPPRESSION_DIRECTIVE)
+
+    key = l.strip
+    count[key].positive? ? (count[key] -= 1; false) : true
+  end.map(&:strip)
+end
+
 def yaml_tree(node)
   case node
   when Psych::Nodes::Scalar
@@ -194,6 +226,17 @@ entries.each do |e|
   if k == :rule_prose
     results << ["NOT-COVERED", path, "rule prose the harness reads as instructions; lands normally"]
     next
+  end
+  if %i[doc terraform yaml elixir].include?(k)
+    begin
+      added = added_directives(blob(repo, e[:osha]), blob(repo, e[:nsha]))
+    rescue RuntimeError => ex
+      die(3, "COULD NOT MEASURE #{path}: #{ex.message}", "check the repo's objects; nothing was judged")
+    end
+    unless added.empty?
+      results << ["NOT-COVERED", path, "adds a check-suppression directive: #{added.first[0, 80]}"]
+      next
+    end
   end
   if k == :doc
     results << ["COMMENT-ONLY", path, "documentation (#{e[:st] == 'M' ? 'modified' : e[:st] == 'A' ? 'added' : 'deleted'})"]

@@ -38,9 +38,10 @@ FREE_STATELESS_TYPES = %w[
 ].freeze
 FREE_STATELESS_PREFIXES = %w[random_ time_ tls_].freeze
 
-# Free to create or update (a secrets UPDATE ships), but a destroy or replace
-# loses a stored value, often one set out-of-band under ignore_changes, or
-# suspends versioning. Those hold as DESTROY.
+# Free to create, and an update of the value ships (a secrets UPDATE). But a
+# destroy or replace loses a stored value, often one set out-of-band under
+# ignore_changes, or suspends versioning, and so can an update of anything
+# but the value, tags or description. Those hold as DESTROY.
 VALUE_HOLDING_TYPES = %w[
   aws_s3_bucket_versioning aws_secretsmanager_secret_version aws_ssm_parameter
   github_actions_secret github_actions_variable
@@ -87,7 +88,8 @@ def usage
     HOLD when any managed resource change:
       DESTROY   deletes or replaces (delete+create) a type that is not
                 known free-and-stateless (stateful types fail wide), or one
-                that holds a stored value (#{VALUE_HOLDING_TYPES.first(3).join(', ')}, ...);
+                that holds a stored value (#{VALUE_HOLDING_TYPES.first(3).join(', ')}, ...),
+                or updates such a type beyond its value, tags or description;
                 or creates or updates an expiration policy (#{EXPIRY_POLICY_TYPES.join(', ')});
       COST      creates a type that is not known free-and-stateless, or
                 updates a sizing attribute (#{COST_ATTRS.first(4).join(', ')}, ...)
@@ -267,6 +269,15 @@ changes.each do |rc|
     ch = rc["change"]
     cost_diffs(ch["before"], ch["after"], ch["after_unknown"]).each do |d|
       held << ["COST", addr, "sizing change: #{d}"]
+    end
+    # Online as offline: a value-holding type passes only a value, tags or
+    # description change. Any other attribute can do what its delete does
+    # (suspending versioning, moving a secret to another repository).
+    if VALUE_HOLDING_TYPES.include?(type)
+      moved = replace_risk_attrs(ch["before"], ch["after"], ch["after_unknown"])
+      unless moved.empty?
+        held << ["DESTROY", addr, "#{type} (holds a stored value): update changes #{moved.join(', ')}, not only its value"]
+      end
     end
   end
 end
