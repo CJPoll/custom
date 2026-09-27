@@ -512,6 +512,12 @@ merged only. Report them; the admiral merges, not you. Read the exit code: **3 =
 UNAVAILABLE**, no list; **4 = the list is COMPLETE, act on it** — only `drift`
 went soft, routine from a cron lane. Reading a 4 as a failure reinstates the outage.
 
+**Count only the fleet's own rows.** Neither tool filters by author, and
+`walt_ui` is shared with human coworkers. A row is fleet work only if Athena
+authored it (`athena-amby`, `athena-harness[bot]`); check with `glab mr view` /
+`gh pr view`. Measured 2026-09-27: of 30 walt_ui "orphans" only 6 were
+Athena's, and all 6 slow lead-time rows were coworkers'.
+
 **Qualify before acting — same discipline as report patterns.** A single slow
 ticket is *watched, not actioned*. Act only on a **recurring shape** (≥2 slow
 tickets sharing a cause — the same slow CI stage, the same back-and-forth) or a
