@@ -1402,13 +1402,17 @@ HOT_FIX = <<~FIX.freeze
   Mission (athena:merge-boarding -> "On exit 3 you get a verdict, or you hold that ONE MR"
   -- the same move), set the Mission to HELD_FOR_OWNER in your state log and Needs
   Attention/Cody in Notion with the PR URL, head SHA and what merging would cause, and
-  surface it in your final report. Merge only after the OWNER'S OWN authorization, replayed
+  request the owner's go with a Block Kit decision DM (athena:slack -> "Asking the owner
+  for a decision"), and surface it in your final report. Merge only after the OWNER'S OWN
+  authorization, replayed
   verbatim via --owner-approval '<the owner's words + where recorded>'. EXCEPTION: a
   change a STANDING OWNER APPROVAL covers -- a security fix, a library upgrade, or a
   comment/docs-only change, each as defined in ~/.claude/CLAUDE.md -> "Standing owner
   approvals" -- is not held; pass --owner-approval with the record that
   rule's own subsection gives, and merge. The full bar still applies, and an approval
-  covers only the files its subsection names.
+  covers only the files its subsection names. No approval covers what "What no standing
+  approval covers" names: a terraform plan that destroys stateful infra or adds cost
+  (run tf-plan-gate), or a captain's IRREVERSIBLE -- those hold and are requested as above.
 FIX
 
 # --- owner approval grant eligibility (DND-596) -----------------------------

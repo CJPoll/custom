@@ -51,9 +51,12 @@ through to completion without them.
    independent piece of work to done and merged as normal. In *When the user
    returns*, give the owner the precise credential/console step **and** the
    ordered list of the stacked, ready-to-merge PRs, so one manual step lands
-   the whole stack. This owner-creds/console class is the ONLY thing that
-   cannot be shipped autonomously — everything else, security fixes included,
-   still ships. A change a standing approval covers needs no owner go even at
+   the whole stack. Besides this owner-creds/console class, only the merge
+   holds in `~/.claude/CLAUDE.md` → *What no standing approval covers* wait on
+   the owner. Those include terraform that destroys stateful infra or adds
+   cost, and a captain's `IRREVERSIBLE`. Request each by Block Kit as that
+   section says. Everything else, security fixes included, still ships. A
+   change a standing approval covers needs no owner go even at
    `integration-gate` exit 4: `~/.claude/CLAUDE.md` → *Standing owner
    approvals*.
 
