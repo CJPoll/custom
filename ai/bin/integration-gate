@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# integration-gate -- the stable ai/bin entry point for
+# ai/skills/athena:merge-boarding/scripts/integration-gate.
+#
+# The real script lives beside the skill that owns its procedure. But admirals,
+# captains, critic-review's Fix: text and test-slot all call it by bare name,
+# and a brief that wrote `~/dev/custom/ai/bin/integration-gate` got exit 127
+# ("No such file or directory") four times across two fleet runs: dnd-405, dnd-487
+# (2026-09-22-harness-gensaas-api), DND-558 and the DND-804 admiral
+# (2026-09-24-harness-epics-ab). DND-752.
+#
+# This is a shim, not a symlink: the real script finds critic-review and
+# blast-radius relative to its own BASH_SOURCE, so it must run from its own
+# path. It forwards argv and stdin unchanged, `--help` included.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REAL="${HERE}/../skills/athena:merge-boarding/scripts/integration-gate"
+
+if [ ! -x "${REAL}" ]; then
+  echo "integration-gate: the real script is missing or not executable: ${REAL}" >&2
+  echo "Fix: run this from a complete ~/dev/custom checkout (or worktree) that has ai/skills/athena:merge-boarding/scripts/integration-gate, or call that path directly." >&2
+  exit 127
+fi
+
+exec "${REAL}" "$@"

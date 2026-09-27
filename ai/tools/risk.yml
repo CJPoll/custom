@@ -87,6 +87,9 @@ tools:
   # harness-gate's default (no-arg) path runs harness-eval bare, which writes
   # ai/eval/scorecard.json, so the gate transitively mutates the repo too.
   harness-gate:            { class: idempotent, reason: gate }
+  # integration-gate is a shim that execs skills/athena:merge-boarding/scripts/
+  # integration-gate (DND-752), so it carries that script's class.
+  integration-gate:        { class: idempotent, reason: gate }
   # harness-metrics writes ai/telemetry/metrics.json on its default path.
   harness-metrics:         { class: idempotent, reason: metrics }
   # variant-eval is proposal-only (stdout by default; --out writes a proposal

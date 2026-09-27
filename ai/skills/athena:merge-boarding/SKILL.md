@@ -271,6 +271,9 @@ ai/skills/athena:merge-boarding/scripts/integration-gate \
     [--target origin/main] [--since <baseline main SHA>] [--gate '<cmd>']
 ```
 
+`~/dev/custom/ai/bin/integration-gate` runs the same script (a shim, DND-752).
+Either path is correct in a brief.
+
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that
 exists on `origin/main` is the repo's declared gate, and it always runs. Omit
