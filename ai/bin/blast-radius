@@ -1406,8 +1406,8 @@ HOT_FIX = <<~FIX.freeze
   for a decision"), and surface it in your final report. Merge only after the OWNER'S OWN
   authorization, replayed
   verbatim via --owner-approval '<the owner's words + where recorded>'. EXCEPTION: a
-  change a STANDING OWNER APPROVAL covers -- a security fix, a library upgrade, or a
-  comment/docs-only change, each as defined in ~/.claude/CLAUDE.md -> "Standing owner
+  change a STANDING OWNER APPROVAL covers -- a security fix or a comment/docs-only
+  change, each as defined in ~/.claude/CLAUDE.md -> "Standing owner
   approvals" -- is not held; pass --owner-approval with the record that
   rule's own subsection gives, and merge. The full bar still applies, and an approval
   covers only the files its subsection names. No approval covers what "What no standing

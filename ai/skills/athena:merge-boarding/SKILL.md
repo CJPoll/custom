@@ -210,7 +210,7 @@ bar is unchanged, and a non-security change cannot borrow the approval.
 
 **Later (2026-09-27):** the exception is now any change a standing owner
 approval covers (`~/.claude/CLAUDE.md` → *Standing owner approvals*): a
-security fix, a library upgrade, or a comment/docs-only change. Scope and
+security fix or a comment/docs-only change. Scope and
 record live in each rule's subsection. For comment/docs-only, the objective
 check is this skill's `scripts/comment-only-diff`, run from the main checkout.
 A part of the PR no approval covers holds as before, and so does anything
