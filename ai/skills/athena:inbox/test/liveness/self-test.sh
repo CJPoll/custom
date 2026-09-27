@@ -168,9 +168,18 @@ jq -n --arg r "${KEY}" '{v:1, repo:$r, channels:{slack:{kind:"log", path:"p-slac
   > "${ATHENA_INBOX_ROOT}/projects/p.json"
 chmod 600 "${ATHENA_INBOX_ROOT}/projects/p.json"
 NOW="$(date -u +%s)"
+# Each channel holds one DELIVERED line, already read (offset at EOF), so the
+# count is zero and the age is the inbox file's -- an empty file is not a
+# delivery (DND-937).
+LINE0='{"v":1,"received_at":"2026-09-01T22:10:00Z","channel":"D01","ts":"1788.0000","event_id":"Ev0","text":"zero"}'
+seed_read() {
+  printf '%s\n' "${LINE0}" > "${ATHENA_INBOX_ROOT}/p-$1.jsonl"
+  printf '{"offset":%s}\n' "$(wc -c < "${ATHENA_INBOX_ROOT}/p-$1.jsonl" | tr -d ' ')" > "${ATHENA_INBOX_ROOT}/p-$1.state.json"
+  chmod 600 "${ATHENA_INBOX_ROOT}/p-$1.jsonl" "${ATHENA_INBOX_ROOT}/p-$1.state.json"
+}
 for c in slack fresh quiet; do
-  printf '' > "${ATHENA_INBOX_ROOT}/p-${c}.jsonl"; : > "${ATHENA_INBOX_ROOT}/p-${c}.event"
-  chmod 600 "${ATHENA_INBOX_ROOT}/p-${c}.jsonl" "${ATHENA_INBOX_ROOT}/p-${c}.event"
+  seed_read "${c}"; : > "${ATHENA_INBOX_ROOT}/p-${c}.event"
+  chmod 600 "${ATHENA_INBOX_ROOT}/p-${c}.event"
 done
 touch -d "@$(( NOW - 94*60 ))" "${ATHENA_INBOX_ROOT}/p-slack.jsonl" "${ATHENA_INBOX_ROOT}/p-slack.event"
 touch -d "@$(( NOW - 94*60 ))" "${ATHENA_INBOX_ROOT}/p-quiet.jsonl" "${ATHENA_INBOX_ROOT}/p-quiet.event"
@@ -186,17 +195,22 @@ assert_not_contains "stale_after_s 0 disables STALE for that channel" "quiet —
 
 J="$(cd "${REPO}" && "${SKILL}/bin/inbox-status" --json)"
 assert_eq "--json: slack stale"       true   "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="slack") | .stale')"
-assert_eq "--json: slack age basis"   doorbell "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="slack") | .age_basis')"
+assert_eq "--json: slack age basis"   inbox "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="slack") | .age_basis')"
 assert_eq "--json: slack threshold"   1800   "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="slack") | .stale_after_s')"
 assert_eq "--json: fresh not stale"   false  "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="fresh") | .stale')"
 JA="$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="fresh") | .last_join_age_s')"
 if [ "${JA}" -ge 180 ] && [ "${JA}" -le 200 ]; then ok "--json: last join age ~180s"; else bad "--json: last join age ~180s" "got ${JA}"; fi
 
-# The doorbell is the age source; a newer inbox file (late-provisioned bell)
-# wins, because the age is of the LAST delivery.
+# The age is the inbox file's (its last append), never the doorbell's
+# (DND-937): a doorbell touched NOW leaves the stale channel stale, and a new
+# append makes it fresh.
+touch -d "@${NOW}" "${ATHENA_INBOX_ROOT}/p-slack.event"
+J="$(cd "${REPO}" && "${SKILL}/bin/inbox-status" --json)"
+assert_eq "a doorbell touched now does not freshen a stale channel" true "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="slack") | .stale')"
+touch -d "@$(( NOW - 94*60 ))" "${ATHENA_INBOX_ROOT}/p-slack.event"
 touch -d "@$(( NOW - 30 ))" "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
 J="$(cd "${REPO}" && "${SKILL}/bin/inbox-status" --json)"
-assert_eq "a newer inbox file wins over an older doorbell" inbox "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="slack") | .age_basis')"
+assert_eq "a recent append is the age source" inbox "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="slack") | .age_basis')"
 assert_eq "... and the channel is no longer stale" false "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="slack") | .stale')"
 touch -d "@$(( NOW - 94*60 ))" "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
 
@@ -215,18 +229,18 @@ touch -d "@$(( NOW - 94*60 ))" "${ATHENA_INBOX_ROOT}/p-slack.jsonl" "${ATHENA_IN
 out="$(cd "${REPO}" && "${SKILL}/bin/inbox-status" 2>/dev/null)"
 assert_contains "STALE with new mail keeps the (+N unreadable) note" "slack — 1 new (+1 unreadable), STALE" "${out}"
 assert_contains "STALE with new mail keeps the unreadable-state Fix:" "counts are NOT deduped" "${out}"
-rm -f "${ATHENA_INBOX_ROOT}/p-slack.state.json"; : > "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+seed_read slack
 touch -d "@$(( NOW - 94*60 ))" "${ATHENA_INBOX_ROOT}/p-slack.jsonl" "${ATHENA_INBOX_ROOT}/p-slack.event"
 
 # A FAILED freshness measurement must never read as a healthy quiet channel.
-# A stat shim fails the mtime read of every .event doorbell (the file exists,
-# its age cannot be read).
+# A stat shim fails the mtime read of every .jsonl inbox file (the delivered
+# content exists, its age cannot be read).
 SHIM="${TMP}/statshim"; mkdir -p "${SHIM}"
 REAL_STAT="$(command -v stat)"
 cat > "${SHIM}/stat" <<SHIMEOF
 #!/usr/bin/env bash
 last="\${@: -1}"
-case "\$*" in *%Y*) case "\${last}" in *.event) echo "stat: cannot stat" >&2; exit 1 ;; esac ;; esac
+case "\$*" in *%Y*) case "\${last}" in *.jsonl) echo "stat: cannot stat" >&2; exit 1 ;; esac ;; esac
 exec "${REAL_STAT}" "\$@"
 SHIMEOF
 chmod +x "${SHIM}/stat"
@@ -240,12 +254,119 @@ assert_contains "read-inbox: a failed freshness measurement says so, never a bar
 BADE='{"v":1,"repo":"/x","channels":{"l":{"kind":"log","path":"l.jsonl"}}}'
 RES="$(printf 'kind\tlog\ninbox\t%s\ndoorbell\t%s\n' "${ATHENA_INBOX_ROOT}/p-fresh.jsonl" "${ATHENA_INBOX_ROOT}/p-fresh.event")"
 if PATH="${SHIM}:${PATH}" liveness_channel_freshness "${BADE}" l "${RES}" >/dev/null 2>&1; then
-  bad "liveness_channel_freshness: an existing but unmeasurable doorbell is an error" "status 0"
+  bad "liveness_channel_freshness: an existing but unmeasurable inbox file is an error" "status 0"
 else
-  ok "liveness_channel_freshness: an existing but unmeasurable doorbell is an error (not 'never delivered')"
+  ok "liveness_channel_freshness: an existing but unmeasurable inbox file is an error (not 'never delivered')"
 fi
 out="$(cd "${REPO}" && "${SKILL}/bin/read-inbox" --peek fresh 2>&1)"
 assert_contains "read-inbox: a fresh channel prints HUMAN ages" "; client last joined 3m ago." "${out}"
+
+
+# ============================================================================
+echo "== DND-937: a doorbell is never a delivery; age comes from delivered content =="
+# On 2026-09-26 inbox-doctor graded `ok freshness:slack ... last delivery
+# 257090s ago (doorbell mtime)` while custom-slack.jsonl did not exist: inbox-wait
+# had PROVISIONED the .event, and its creation read as a delivery. Every case
+# below pins a doorbell touched NOW, so a doorbell-based age would read fresh.
+FR="${TMP}/fr"; mkdir -p "${FR}/md/in/.acked" "${FR}/md/out"; chmod 700 "${FR}"
+NOW="$(date -u +%s)"
+M94=$(( NOW - 5640 ))
+E1='{"v":1,"repo":"/x","channels":{"l":{"kind":"log","path":"l.jsonl"},"m":{"kind":"maildir","read":"in","write":"out","stale_after_s":3600}}}'
+LRES="$(printf 'kind\tlog\ninbox\t%s\nstate\t%s\ndoorbell\t%s\n' "${FR}/l.jsonl" "${FR}/l.state.json" "${FR}/l.event")"
+MRES="$(printf 'kind\tmaildir\nread_dir\t%s\nack_dir\t%s\nread_doorbell\t%s\n' "${FR}/md/in" "${FR}/md/in/.acked" "${FR}/md/in/.event")"
+fr_field() { printf '%s' "$1" | jq -r "$2"; }
+: > "${FR}/l.event"; touch -d "@${NOW}" "${FR}/l.event"
+
+# (1) THE ACCEPTANCE CASE: a touched doorbell, no channel file at all.
+F="$(liveness_channel_freshness "${E1}" l "${LRES}" "${NOW}")"; rc=$?
+assert_eq "doorbell only, no inbox file: measured (status 0)" 0 "${rc}"
+assert_eq "doorbell only, no inbox file: NO delivery age (never fresh)" null "$(fr_field "${F}" .last_delivery_age_s)"
+assert_eq "doorbell only, no inbox file: basis none" none "$(fr_field "${F}" .age_basis)"
+
+# (2) a touched doorbell with an EMPTY channel file -- still nothing delivered.
+: > "${FR}/l.jsonl"; touch -d "@${NOW}" "${FR}/l.jsonl" "${FR}/l.event"
+F="$(liveness_channel_freshness "${E1}" l "${LRES}" "${NOW}")"
+assert_eq "touched doorbell + EMPTY channel file: NO delivery age" null "$(fr_field "${F}" .last_delivery_age_s)"
+assert_eq "touched doorbell + EMPTY channel file: basis none" none "$(fr_field "${F}" .age_basis)"
+
+# (3) a real delivery 94 minutes ago and a doorbell re-provisioned NOW: the
+# doorbell must not hide the staleness.
+printf '{"v":1}\n' > "${FR}/l.jsonl"; touch -d "@${M94}" "${FR}/l.jsonl"; touch -d "@${NOW}" "${FR}/l.event"
+F="$(liveness_channel_freshness "${E1}" l "${LRES}" "${NOW}")"
+assert_eq "delivered 94m ago, doorbell touched now: age is the inbox file's" 5640 "$(fr_field "${F}" .last_delivery_age_s)"
+assert_eq "... basis inbox" inbox "$(fr_field "${F}" .age_basis)"
+assert_eq "... STALE (the re-provisioned doorbell does not rescue it)" true "$(fr_field "${F}" .stale)"
+assert_eq "... an exact age, not a lower bound" false "$(fr_field "${F}" .age_is_lower_bound)"
+
+# (4) rotated, nothing since: the last delivery predates rotated_at, so the age
+# is a LOWER BOUND from the rotation, never the (fresh) doorbell.
+rm -f "${FR}/l.jsonl"; printf '{"v":1}\n' > "${FR}/l.jsonl.1"; touch -d "@${NOW}" "${FR}/l.jsonl.1" "${FR}/l.event"
+printf '{"offset":0,"rotated_at":"%s"}\n' "$(date -u -d "@$(( NOW - 7200 ))" +%Y-%m-%dT%H:%M:%SZ)" > "${FR}/l.state.json"
+F="$(liveness_channel_freshness "${E1}" l "${LRES}" "${NOW}")"
+assert_eq "rotated, nothing since: age from rotated_at" 7200 "$(fr_field "${F}" .last_delivery_age_s)"
+assert_eq "... basis rotation" rotation "$(fr_field "${F}" .age_basis)"
+assert_eq "... flagged a lower bound" true "$(fr_field "${F}" .age_is_lower_bound)"
+assert_eq "... STALE past the threshold" true "$(fr_field "${F}" .stale)"
+# and with an empty live file beside it (nothing since the rotation)
+: > "${FR}/l.jsonl"; touch -d "@${NOW}" "${FR}/l.jsonl"
+F="$(liveness_channel_freshness "${E1}" l "${LRES}" "${NOW}")"
+assert_eq "rotated + EMPTY live file: still the rotation lower bound" rotation "$(fr_field "${F}" .age_basis)"
+
+# (5) rotated but no usable rotated_at: content exists and cannot be aged --
+# "could not look" (status 1), never "never delivered".
+printf '{"offset":0}\n' > "${FR}/l.state.json"
+if liveness_channel_freshness "${E1}" l "${LRES}" "${NOW}" >/dev/null 2>&1; then
+  bad "rotated with no rotated_at is a failed measurement (status 1)" "status 0"
+else
+  ok "rotated with no rotated_at is a failed measurement (status 1), not 'never delivered'"
+fi
+rm -f "${FR}/l.jsonl" "${FR}/l.jsonl.1" "${FR}/l.state.json"
+
+# (6) an unsearchable channel directory is "could not look", not "found nothing".
+LRX="$(printf 'kind\tlog\ninbox\t%s\nstate\t%s\ndoorbell\t%s\n' "${FR}/locked/l.jsonl" "${FR}/locked/l.state.json" "${FR}/locked/l.event")"
+mkdir -p "${FR}/locked"; chmod 000 "${FR}/locked"
+if [ -x "${FR}/locked" ]; then
+  ok "unsearchable channel dir: skipped (running with CAP_DAC_OVERRIDE)"
+elif liveness_channel_freshness "${E1}" l "${LRX}" "${NOW}" >/dev/null 2>&1; then
+  bad "an unsearchable channel directory is a failed measurement" "status 0"
+else
+  ok "an unsearchable channel directory is a failed measurement, not 'never delivered'"
+fi
+chmod 700 "${FR}/locked"
+
+# (7) maildir: the read-side doorbell touched now, no message -> no age.
+: > "${FR}/md/in/.event"; touch -d "@${NOW}" "${FR}/md/in/.event"
+F="$(liveness_channel_freshness "${E1}" m "${MRES}" "${NOW}")"
+assert_eq "maildir, doorbell only: NO delivery age" null "$(fr_field "${F}" .last_delivery_age_s)"
+# a message acked 2h ago is the newest delivery; the doorbell does not count.
+printf 'x\n' > "${FR}/md/in/.acked/20260901T000000Z-001-a.md"; touch -d "@$(( NOW - 7200 ))" "${FR}/md/in/.acked/20260901T000000Z-001-a.md"
+F="$(liveness_channel_freshness "${E1}" m "${MRES}" "${NOW}")"
+assert_eq "maildir: age is the newest message file's (acked counts)" 7200 "$(fr_field "${F}" .last_delivery_age_s)"
+assert_eq "... basis message" message "$(fr_field "${F}" .age_basis)"
+assert_eq "... STALE past its 3600s threshold" true "$(fr_field "${F}" .stale)"
+printf 'y\n' > "${FR}/md/in/20260901T000100Z-002-b.md"; touch -d "@$(( NOW - 60 ))" "${FR}/md/in/20260901T000100Z-002-b.md"
+F="$(liveness_channel_freshness "${E1}" m "${MRES}" "${NOW}")"
+assert_eq "maildir: an unread message 60s old is the newest" 60 "$(fr_field "${F}" .last_delivery_age_s)"
+
+
+# (8) end to end: a rotated channel with nothing since prints its age as a
+# FLOOR, and a channel with nothing on disk prints no delivery age at all.
+rm -f "${ATHENA_INBOX_ROOT}/p-fresh.jsonl"; printf '%s\n' "${LINE0}" > "${ATHENA_INBOX_ROOT}/p-fresh.jsonl.1"
+printf '{"offset":0,"rotated_at":"%s"}\n' "$(date -u -d "@$(( NOW - 7200 ))" +%Y-%m-%dT%H:%M:%SZ)" > "${ATHENA_INBOX_ROOT}/p-fresh.state.json"
+chmod 600 "${ATHENA_INBOX_ROOT}/p-fresh.jsonl.1" "${ATHENA_INBOX_ROOT}/p-fresh.state.json"
+touch -d "@${NOW}" "${ATHENA_INBOX_ROOT}/p-fresh.event"
+out="$(cd "${REPO}" && "${SKILL}/bin/inbox-status" 2>&1)"
+assert_contains "inbox-status: a rotated channel's age is a floor" "fresh — STALE: last delivery at least 2h0m ago (threshold 30m)" "${out}"
+# An EMPTY live file beside the `.1`: read-inbox (like inbox-status's count)
+# still flags an ABSENT live file as never-delivered even when `.1` exists --
+# a separate defect, proposed as its own ticket in the DND-937 report.
+: > "${ATHENA_INBOX_ROOT}/p-fresh.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/p-fresh.jsonl"
+out="$(cd "${REPO}" && "${SKILL}/bin/read-inbox" --peek fresh 2>&1)"
+assert_contains "read-inbox: a rotated channel's age is a floor" "fresh — nothing new; STALE: last delivery at least 2h0m ago" "${out}"
+: > "${ATHENA_INBOX_ROOT}/p-quiet.jsonl"; rm -f "${ATHENA_INBOX_ROOT}/p-quiet.state.json"; touch -d "@${NOW}" "${ATHENA_INBOX_ROOT}/p-quiet.event"
+out="$(cd "${REPO}" && "${SKILL}/bin/read-inbox" --peek quiet 2>&1)"
+assert_contains "read-inbox: no delivery on disk -> no delivery age, a clean join clause" "quiet — nothing new. Client last joined 3m ago." "${out}"
+assert_not_contains "read-inbox: the doorbell touched now is never a delivery age" "Last delivery" "${out}"
 
 printf '\nliveness self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]

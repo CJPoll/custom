@@ -779,12 +779,13 @@ doctor_state_freshness() {
 # FAIL. On 2026-09-22 this doctor printed `log channel "slack" last changed
 # 5632s ago` and graded it ok through a 96-minute outage; a doctor that turns
 # an outage into a clean bill of health is worse than none. The age source is
-# the channel's `.event` doorbell mtime (liveness_channel_freshness), and the
-# threshold is the entry's `stale_after_s` (default 1800 s for `log`, none for
-# `maildir`). Quiet and dark cannot be told apart by age alone, so the Fix
-# points at the two checks that CAN: client-liveness and server-reachability.
+# the channel's own delivered content, never its `.event` doorbell
+# (liveness_channel_freshness, DND-937), and the threshold is the entry's
+# `stale_after_s` (default 1800 s for `log`, none for `maildir`). Quiet and
+# dark cannot be told apart by age alone, so the Fix points at the two checks
+# that CAN: client-liveness and server-reachability.
 doctor_check_freshness() {
-  local entry="$1" chan="$2" resolved="$3" fresh stale age thr basis join
+  local entry="$1" chan="$2" resolved="$3" fresh stale age thr basis join src floor=""
   fresh="$(liveness_channel_freshness "${entry}" "${chan}" "${resolved}" 2>/dev/null)"
   if [ -z "${fresh}" ]; then
     doctor_finding warn "freshness:${chan}" "channel \"${chan}\" freshness could NOT be measured, so quiet and dark cannot be told apart" \
@@ -796,12 +797,19 @@ doctor_check_freshness() {
   thr="$(printf '%s' "${fresh}" | jq -r '.stale_after_s')"
   basis="$(printf '%s' "${fresh}" | jq -r '.age_basis')"
   join="$(printf '%s' "${fresh}" | jq -r 'if .last_join_age_s == null then "" else "; client last joined \(.last_join_age_s)s ago" end')"
+  # Name what the age was read from, and say when it is only a floor.
+  case "${basis}" in
+    inbox)    src="inbox file mtime" ;;
+    rotation) src="rotated, nothing since: the last delivery predates rotated_at"; floor="at least " ;;
+    message)  src="newest message file mtime" ;;
+    *)        src="${basis}" ;;
+  esac
   case "$(doctor_state_freshness "${stale}" "${age}")" in
-    fail) doctor_finding fail "freshness:${chan}" "channel \"${chan}\" is STALE: last delivery ${age}s ago (${basis} mtime), threshold ${thr}s${join}" \
+    fail) doctor_finding fail "freshness:${chan}" "channel \"${chan}\" is STALE: last delivery ${floor}${age}s ago (${src}), threshold ${thr}s${join}" \
             "quiet and dark look identical by age. Read the client-liveness and server-reachability findings: if either is not ok the relay is dark -- capture before restart (never SIGTERM first). If both are ok the channel is only quiet: raise its \"stale_after_s\" in the registry entry (0 or null disables)." ;;
-    ok)   doctor_finding ok "freshness:${chan}" "channel \"${chan}\" last delivery ${age}s ago (${basis} mtime)$( [ "${thr}" = "null" ] && printf '; no staleness threshold' || printf ', threshold %ss' "${thr}")${join}" ;;
+    ok)   doctor_finding ok "freshness:${chan}" "channel \"${chan}\" last delivery ${floor}${age}s ago (${src})$( [ "${thr}" = "null" ] && printf '; no staleness threshold' || printf ', threshold %ss' "${thr}")${join}" ;;
     na)   doctor_finding na "freshness:${chan}" "channel \"${chan}\" has no delivery to age yet" \
-            "nothing has been delivered to this channel, so its freshness cannot be judged; see its never-delivered / channel finding." ;;
+            "nothing delivered is on disk for this channel (no non-empty inbox file or rotated generation, no message file), so its freshness cannot be judged; see its never-delivered / channel finding. A doorbell is never read as a delivery." ;;
   esac
 }
 
@@ -1001,17 +1009,17 @@ doctor_check_slack_producer() {
 }
 
 doctor_check_maildir_channel() {
-  local chan="$1" resolved="$2" read_dir mt now age
+  local chan="$1" resolved="$2" read_dir
   read_dir="$(inbox_field read_dir "${resolved}")"
   if [ ! -d "${read_dir}" ]; then
     # A missing read directory is NORMAL for a maildir (the peer creates it on
     # first send), so this is a fact, not a fault.
     doctor_finding ok "channel:${chan}" "maildir channel \"${chan}\" has no incoming directory yet (awaiting the peer's first message)"
   else
-    if mt="$(fs_mtime_epoch "${read_dir}" 2>/dev/null)"; then
-      now="$(fs_now_epoch)"; age=$(( now - mt ))
-      doctor_finding ok "channel:${chan}" "maildir channel \"${chan}\" incoming directory last changed ${age}s ago"
-    fi
+    # "Present", not "last changed Ns ago": the directory's mtime also moves
+    # when its doorbell is provisioned or a message is acked, so it is no
+    # delivery age (DND-937). freshness:<chan> ages the newest message file.
+    doctor_finding ok "channel:${chan}" "maildir channel \"${chan}\" incoming directory is present"
     local mode st
     mode="$(stat -c '%a' "${read_dir}" 2>/dev/null)"
     st="$(doctor_state_mode "${mode}" "700")"

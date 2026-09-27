@@ -891,12 +891,17 @@ assert_not_contains "inherited FENCED: the inherited value is never printed" "IN
 
 echo "== R2: last-delivery age and STALE cover the session channel =="
 NOW="$(date -u +%s)"
-: > "${LOGF}"; rm -f "${ATHENA_INBOX_ROOT}/cproj-session.state.json"
-touch -d "@$(( NOW - 7200 ))" "${LOGF}" "${ATHENA_INBOX_ROOT}/cproj-session.event"
+# One delivered line, already read (offset at EOF): the age is the inbox file's
+# last append. An empty file is not a delivery, and the doorbell never is one
+# (DND-937), so it is touched NOW to prove it is not the age source.
+printf '{"v":1,"kind":"state-change"}\n' > "${LOGF}"
+printf '{"offset":%s}\n' "$(wc -c < "${LOGF}" | tr -d ' ')" > "${ATHENA_INBOX_ROOT}/cproj-session.state.json"
+chmod 600 "${ATHENA_INBOX_ROOT}/cproj-session.state.json"
+touch -d "@$(( NOW - 7200 ))" "${LOGF}"; touch -d "@${NOW}" "${ATHENA_INBOX_ROOT}/cproj-session.event"
 R="$(cd "${PROJ}" && "${BIN}/read-inbox" session --peek 2>&1)"
 assert_contains "R2: 'nothing new' on the session channel carries its last-delivery age" "session — nothing new. Last delivery 2h" "${R}"
 J="$(cd "${PROJ}" && "${BIN}/inbox-status" --json)"
-assert_eq "R2: inbox-status --json reports the session channel's age basis" "doorbell" \
+assert_eq "R2: inbox-status --json reports the session channel's age basis" "inbox" \
   "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="session") | .age_basis')"
 assert_eq "R2: stale_after_s 0 (on-demand) keeps it from reading STALE" "false" \
   "$(printf '%s' "${J}" | jq -r '.channels[] | select(.name=="session") | .stale')"
