@@ -35,7 +35,7 @@ SRC_ROOT="$(cd "$(dirname "${BIN}")/../.." && pwd)"
 LIB="${SRC_ROOT}/ai/lib/landed.rb"
 SETUP="${SRC_ROOT}/scripts/setup-hooks"
 
-for f in "${BIN}" "${LIB}" "${SETUP}"; do
+for f in "${BIN}" "${LIB}" "${SRC_ROOT}/ai/lib/strict_argv.rb" "${SETUP}"; do
   if [ ! -f "${f}" ]; then
     echo "check-hooks-registered self-test: FAIL -- ${f} does not exist" >&2
     echo "Fix: point CHECK_HOOKS_REGISTERED_UNDER_TEST at a checker inside a checkout that also has ai/lib/landed.rb and scripts/setup-hooks." >&2
@@ -97,6 +97,7 @@ new_fixture() {
   mkdir -p "${d}/main/ai/bin" "${d}/main/ai/lib" "${d}/main/scripts"
   cp "${BIN}" "${d}/main/ai/bin/check-hooks-registered"
   cp "${LIB}" "${d}/main/ai/lib/landed.rb"
+  cp "${SRC_ROOT}/ai/lib/strict_argv.rb" "${d}/main/ai/lib/strict_argv.rb"
   cp "${SETUP}" "${d}/main/scripts/setup-hooks"
   hook "${d}/main" a.sh
   registry "${d}/main" "SessionStart=a.sh"
@@ -190,6 +191,14 @@ D="$(new_fixture origin-unreachable)"
 wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh"
 git -C "${D}/main" remote set-url origin "${D}/no-such-origin.git"
 check "${D}"; expect "landed registry unreadable (origin unreachable) -> could not measure, exit 3" 3 "could not measure"
+expect "...and the output says an offline machine exits 3" 3 "offline machine.*could not measure"
+# 9b. A real failure the check CAN see outranks the bar it cannot read: a wired
+#     hook that cannot run is broken whatever landed, so it is exit 1, not 3.
+D="$(new_fixture unreachable-and-dangling)"
+wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh" "SessionStart=${D}/main/ai/hooks/gone.sh"
+git -C "${D}/main" remote set-url origin "${D}/no-such-origin.git"
+check "${D}"; expect "origin unreachable, but a wired hook is dangling -> FAIL, exit 1" 1 "gone\.sh"
+expect "...and it still says the landed bar was not measured" 1 "could not measure"
 
 # 10. Could not measure: the landed registry is malformed on origin main.
 D="$(new_fixture landed-malformed)"

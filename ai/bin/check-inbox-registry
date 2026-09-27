@@ -160,6 +160,12 @@ def report_pending(pending, out = $stdout)
            "from the MAIN checkout. Not before: the live registry is judged against what landed."
 end
 
+# Printed with every unreadable landed bar. The check needs origin to know
+# which entries landed, before it looks for an inbox root at all, so nobody
+# should read exit 3 on such a machine as a new defect.
+OFFLINE_NOTE = "  Note: the bar is what landed on origin, so an offline machine, or one with no " \
+               "inbox that cannot reach origin, exits 3 (could not measure), never 0."
+
 def unmeasured(lines)
   warn "check-inbox-registry: COULD NOT MEASURE — this is not a pass."
   lines.each { |l| warn l }
@@ -181,7 +187,7 @@ def run(landed: -> { landed_entries })
   note = InboxRegistry.validation_note
 
   bar, entries = measure_landed(landed)
-  return unmeasured(entries) if bar.nil?
+  return unmeasured(entries + [OFFLINE_NOTE]) if bar.nil?
 
   pending = pending_changes(branch, entries)
 

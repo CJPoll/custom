@@ -11,7 +11,11 @@
 #
 # What is proven:
 #   * the committed custom entry (with both harness-alerts sides) validates, and
-#     check-inbox-registry passes against a temp root installed from it;
+#     check-inbox-registry passes against a temp root installed from it. Both
+#     run from a FIXTURE REPO (ai/test/lib/landed-fixture.bash) whose origin/main
+#     is this checkout's registry: the check bars on what landed, so run from
+#     the real checkout it would fail any branch that edits the registry, and
+#     read the real origin over the network (DND-743);
 #   * the alert body carries signature, step, frames, capture path, counts, pid
 #     and uptime — and never the token (a capture carrying it is REFUSED);
 #   * a send lands ONE contract message in harness-alerts/to-custom, from
@@ -91,8 +95,14 @@ if [ "$(jq -r '.projects[] | select(.file=="custom.json") | .entry.channels | ke
   ok "harness-alerts is declared before its mirror (the shared doorbell is attributed to the reader)"
 else bad "harness-alerts is declared before its mirror" "order wrong"; fi
 REG_ROOT="${TMP}/reg-root"
-if ATHENA_INBOX_ROOT="${REG_ROOT}" "${WF_REPO}/scripts/setup-inbox-registry" --install >"${TMP}/reg.out" 2>&1 \
-   && ATHENA_INBOX_ROOT="${REG_ROOT}" "${WF_REPO}/ai/bin/check-inbox-registry" >"${TMP}/chk.out" 2>&1; then
+REG_FIX="${TMP}/reg-fixture"
+# shellcheck source=ai/test/lib/landed-fixture.bash
+. "${WF_REPO}/ai/test/lib/landed-fixture.bash"
+if ! landed_fixture "${WF_REPO}" "${REG_FIX}" ai/bin/check-inbox-registry ai/inbox/lib/registry.rb ai/lib/landed.rb \
+       scripts/setup-inbox-registry "ai/skills/athena:inbox/lib" ai/inbox/registry.json 2>"${TMP}/fix.out"; then
+  bad "check-inbox-registry passes against a temp root" "fixture repo not built: $(cat "${TMP}/fix.out")"
+elif ATHENA_INBOX_ROOT="${REG_ROOT}" "${REG_FIX}/scripts/setup-inbox-registry" --install >"${TMP}/reg.out" 2>&1 \
+   && ATHENA_INBOX_ROOT="${REG_ROOT}" "${REG_FIX}/ai/bin/check-inbox-registry" >"${TMP}/chk.out" 2>&1; then
   ok "check-inbox-registry passes against a temp root installed from the committed registry"
 else bad "check-inbox-registry passes against a temp root" "$(cat "${TMP}/reg.out" "${TMP}/chk.out" | tail -n 5)"; fi
 if (cd "${WF_REPO}" && "${BIN}/inbox-wait" --dry-run >"${TMP}/bells.out" 2>&1) \

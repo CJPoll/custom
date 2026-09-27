@@ -174,9 +174,16 @@ if mode == "install":
         # makes every event it matches fail with exit 127 until the branch
         # lands, and forever if it never does (DND-670, DND-743). Wire it after
         # it lands. check-hooks-registered treats such a hook as pending.
+        # A script that is there but not executable fails the same way (exit
+        # 126), so it is skipped too, and the fix named.
         if not os.path.isfile(cmd):
             print(f'~ {e["event"]:13} {e["matcher"]!r} -> {e["script"]}: skipped, not in the main '
                   f'checkout ({repo}) yet. Land it, then re-run setup-hooks --install there.')
+            continue
+        if not os.access(cmd, os.X_OK):
+            print(f'~ {e["event"]:13} {e["matcher"]!r} -> {e["script"]}: skipped, not executable in '
+                  f'the main checkout ({repo}). Fix: land a `chmod +x` for it, then re-run '
+                  f'setup-hooks --install there.')
             continue
         changes.append(f'+ {e["event"]:13} {e["matcher"]!r} -> {e["script"]}')
         hooks.setdefault(e["event"], []).append(
@@ -245,6 +252,27 @@ case "$ACTION" in
   self-test)
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
+    # The worktree-safety cases below judge the REAL resolution, so keep it.
+    REAL_HOOKS_REPO_DIR="$HOOKS_REPO_DIR"
+    # Everything else runs in a FIXTURE REPO whose origin/main is this tree
+    # (ai/test/lib/landed-fixture.bash). The checker bars on what LANDED, so
+    # run against the real checkout "check passes after install" fails on any
+    # branch that edits the registry, and it reads the real origin over the
+    # network (DND-743). In the fixture, installer and checker see one registry
+    # and the fixture is its own main checkout.
+    # shellcheck source=ai/test/lib/landed-fixture.bash
+    . "${REPO_DIR}/ai/test/lib/landed-fixture.bash"
+    fix="${tmp}/fixture"
+    landed_fixture "$REPO_DIR" "$fix" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks \
+      || { echo "  FAIL could not build the fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
+    if [ "$REGISTRY" != "${REPO_DIR}/ai/hooks/registry.json" ]; then
+      cp "$REGISTRY" "${fix}/ai/hooks/registry.json"
+      landed_fixture_land "$fix" || { echo "  FAIL could not land the registry in the fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
+    fi
+    fix="$(cd -- "$fix" && pwd -P)"
+    REGISTRY="${fix}/ai/hooks/registry.json"
+    CHECKER="${fix}/ai/bin/check-hooks-registered"
+    HOOKS_REPO_DIR="$fix"
     export HOOKS_SETTINGS_FILE="${tmp}/settings.json"
     printf '{\n    "model": "x"\n}\n' > "$HOOKS_SETTINGS_FILE"
     ok=1
@@ -299,6 +327,20 @@ PY2
     grep -q "MARKER:nochange" <<<"$rg" \
       && echo "  ok   a symlink-spelled hook whose file is absent is still seen as wired" \
       || { echo "  FAIL an absent hook file must not make install duplicate the wiring"; ok=0; }
+    # --install never wires a script the main checkout cannot RUN: a file
+    # without the executable bit fails with exit 126 on every event, the same
+    # class as the exit-127 absent script. It is skipped and named.
+    printf '#!/bin/sh\nexit 0\n' > "${fix}/ai/hooks/noexec-fixture.sh"; chmod -x "${fix}/ai/hooks/noexec-fixture.sh"
+    noexecreg="${tmp}/noexec-registry.json"
+    printf '%s\n' '{ "hooks": [ { "event": "SessionStart", "matcher": "", "script": "ai/hooks/noexec-fixture.sh" } ] }' > "$noexecreg"
+    noexec="${tmp}/settings-noexec.json"; printf '{}\n' > "$noexec"
+    rn="$(REGISTRY="$noexecreg" apply install "$noexec" 0)"
+    if grep -q "MARKER:nochange" <<<"$rn" && grep -q "noexec-fixture.sh: skipped" <<<"$rn"; then
+      echo "  ok   install skips, and names, a registry script that is not executable"
+    else
+      echo "  FAIL install must not wire a non-executable script: $rn"; ok=0
+    fi
+    rm -f "${fix}/ai/hooks/noexec-fixture.sh"
     # The checker resolves the same symlink spelling to the main checkout's
     # ai/hooks/ and, since DND-743, names a wired hook whose file is absent as
     # DANGLING (it fails with exit 127 on every event), so it must fail and say
@@ -330,13 +372,13 @@ PY2
 
     # Worktree safety: the wired commands must point at the MAIN checkout, so
     # they survive `wt` cleanup of whatever worktree this was run from.
-    if [ -x "${HOOKS_REPO_DIR}/ai/hooks" ] || [ -d "${HOOKS_REPO_DIR}/ai/hooks" ]; then
-      echo "  ok   main checkout resolves to a real hooks dir (${HOOKS_REPO_DIR})"
+    if [ -x "${REAL_HOOKS_REPO_DIR}/ai/hooks" ] || [ -d "${REAL_HOOKS_REPO_DIR}/ai/hooks" ]; then
+      echo "  ok   main checkout resolves to a real hooks dir (${REAL_HOOKS_REPO_DIR})"
     else
-      echo "  FAIL main checkout has no ai/hooks: ${HOOKS_REPO_DIR}"; ok=0
+      echo "  FAIL main checkout has no ai/hooks: ${REAL_HOOKS_REPO_DIR}"; ok=0
     fi
-    case "$HOOKS_REPO_DIR" in
-      */.local/worktrees/*) echo "  FAIL would wire hooks at a worktree path: ${HOOKS_REPO_DIR}"; ok=0 ;;
+    case "$REAL_HOOKS_REPO_DIR" in
+      */.local/worktrees/*) echo "  FAIL would wire hooks at a worktree path: ${REAL_HOOKS_REPO_DIR}"; ok=0 ;;
       *) echo "  ok   wiring target is not a worktree path" ;;
     esac
     HOOKS_REPO_DIR="$HOOKS_REPO_DIR" SETTINGS="$HOOKS_SETTINGS_FILE" python3 - <<'PY2' \

@@ -180,6 +180,7 @@ check "${D}"; expect "live entry provisioned from the branch, not landed -> FAIL
 D="$(new_fixture origin-unreachable)"
 git -C "${D}/main" remote set-url origin "${D}/no-such-origin.git"
 check "${D}"; expect "origin unreachable -> could not measure, exit 3" 3 "could not measure"
+expect "...and the output says an offline machine, or one with no inbox, exits 3" 3 "offline machine, or one with no inbox.*could not measure"
 
 # 8. Could not measure: the landed registry is malformed on origin main.
 D="$(new_fixture landed-malformed)"

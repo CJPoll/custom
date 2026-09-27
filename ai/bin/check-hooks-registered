@@ -42,7 +42,10 @@
 #      failure: it is wired after it lands, from the main checkout.
 # A bar that cannot be read (origin unreachable, local origin/main disagreeing
 # with origin, a malformed registry or settings file) is COULD NOT MEASURE,
-# exit 3, never a pass.
+# exit 3, never a pass. An offline machine with a settings file is exit 3. When
+# the landed bar cannot be read but a failure is visible without it (dangling,
+# or an inconsistent branch registry), the exit is 1: that failure stands
+# whatever landed, and the missing measurement is printed beside it.
 #
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
@@ -249,6 +252,12 @@ def unmeasured(lines)
   EXIT_UNMEASURED
 end
 
+# Printed with every unreadable landed bar, so nobody reads exit 3 on an
+# offline machine as a new defect.
+OFFLINE_NOTE = "  Note: the bar is what landed on origin, so an offline machine with a settings " \
+               "file exits 3 (could not measure). Only a machine with no settings file passes " \
+               "without origin."
+
 # The settings hash at path. Raises RegistryError when it is not a JSON object.
 def load_settings(path)
   data = JSON.parse(File.read(path))
@@ -306,8 +315,14 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
   dangle = dangling(settings, dirs)
   bar, landed_entries = measure_landed(landed, root)
   if bar.nil?
-    report_failures(path, broken, dangle, [], []) unless broken.empty? && dangle.empty?
-    return unmeasured(landed_entries)
+    # A failure the check can SEE is broken whatever landed (a script that
+    # cannot run exits 127/126 on every event), so it is exit 1, with the
+    # missing measurement still printed. Exit 3 only when nothing is known bad.
+    return unmeasured(landed_entries + [OFFLINE_NOTE]) if broken.empty? && dangle.empty?
+
+    report_failures(path, broken, dangle, [], [])
+    unmeasured(landed_entries + [OFFLINE_NOTE])
+    return EXIT_FAIL
   end
 
   drift   = drift_for(settings, landed_entries, dirs)
@@ -491,6 +506,14 @@ def self_test
     check.call("landed bar unreadable -> exit 3", go.call(f, unreadable) == EXIT_UNMEASURED)
     mismatch = ->(_root) { raise Landed::Mismatch.new("a" * 40, "b" * 40) }
     check.call("local origin/main disagrees with origin -> exit 3", go.call(f, mismatch) == EXIT_UNMEASURED)
+    ghost = abs_script("ai/hooks/definitely-not-on-disk-#{Process.pid}.sh", REPO_DIR)
+    dangling_settings = JSON.parse(wire_here.call(registry))
+    (dangling_settings["hooks"]["SessionStart"] ||= []) << {
+      "matcher" => "", "hooks" => [{ "type" => "command", "command" => ghost }]
+    }
+    File.write(f, JSON.generate(dangling_settings))
+    check.call("landed bar unreadable, but a wired hook is dangling -> exit 1 (a seen failure outranks it)",
+               go.call(f, unreadable) == EXIT_FAIL)
     File.write(f, "{ not json")
     check.call("malformed settings -> exit 3", go.call(f, never) == EXIT_UNMEASURED)
     bad_reg = File.join(dir, "registry.json")
