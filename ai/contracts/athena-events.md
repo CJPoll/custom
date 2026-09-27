@@ -4772,8 +4772,9 @@ app the event arrived on, never from the payload.
   - `failed:<cause>`: the event should have been an item and is not. The
     causes are `no-source-ref` (*Item identity and `source_ref`*),
     `forbidden-field` (*The storage boundary*), `malformed-payload`,
-    `project-unresolved` (*Domain and owner-only items*) and
-    `retries-exhausted`. The re-sync adds `resync-failed` (*Re-sync*).
+    `project-unresolved` and `policy-unreadable` (both *Domain and owner-only
+    items*), and `retries-exhausted`. The re-sync adds `resync-failed`
+    (*Re-sync*).
 - **A skip is counted, and a failure is recorded and reported**
   (`~/.claude/CLAUDE.md` → *A failed lookup must never look like an empty
   one*). Skips are counted per (owner, event type, cause), and the priorities
@@ -5022,6 +5023,17 @@ desired state* uses. It is derived per source, and `domain_basis` records how:
   `source-default`, and the page shows that basis. When `project_resolution`
   is `failed` or absent, the event fails `project-unresolved` and is not
   indexed: an unknown domain is never read as `personal`.
+
+  An owner with no stored policy uses the seed, which is their policy. A
+  stored policy the owner cannot read (a row whose owner role grant is
+  missing) is a different fact: a ticket with a project then fails
+  `policy-unreadable` and is not indexed, and the seed's map is never used in
+  its place. A ticket with no project does not read the map, so it still
+  indexes `personal` by `source-default`. A policy row that no longer parses,
+  or a store error, is a retried crash, not a default. Editing
+  `notion_project_domains` does not reclassify stored items: an item takes
+  the current map on its next write (an event, the backfill, or the re-sync's
+  re-apply).
 
   **Later (2026-09-26):** this bullet read "an `Athena -` project is `blend`",
   decided by the project's name, and said the ticket payload had no project
