@@ -869,15 +869,26 @@ def detect_automation(tree)
       # The directory exists but holds no workflow: fall through to the other
       # forge shapes rather than claiming provable absence.
     else
+      # A workflow this loop cannot parse or cannot classify does not stop the
+      # scan: an EARLIER unparseable/unmodelled workflow must never hide a
+      # LATER one that actually CONFIRMS the automation. Keep scanning every
+      # file; a CONFIRMED hit wins outright the moment it is found (nothing
+      # later can un-confirm it), and only if no file ever confirms do we fall
+      # back to UNDETERMINED, naming the FIRST file that kept us from proving
+      # absence. Both outcomes still fail wide (exit 4) -- this only fixes
+      # which file the detail names and whether a real CONFIRMED gets buried
+      # behind a sibling's parse failure.
+      first_undetermined = nil
       files.each do |rel|
         begin
           doc = YAML.safe_load(tree.read(rel), aliases: true)
         rescue IOError => e
-          return ["UNDETERMINED", "#{rel}: #{e.message} -- cannot prove it does NOT deploy on merge"]
+          first_undetermined ||= "#{rel}: #{e.message} -- cannot prove it does NOT deploy on merge"
+          next
         rescue StandardError => e
-          return ["UNDETERMINED",
-                  "#{rel}: unparseable YAML (#{e.class}) -- cannot prove it does " \
-                  "NOT deploy on merge"]
+          first_undetermined ||= "#{rel}: unparseable YAML (#{e.class}) -- cannot prove it does " \
+                                  "NOT deploy on merge"
+          next
         end
         # workflow_trigger reads `on:` under both "on" and `true`: YAML 1.1
         # parses a bare `on:` key as the BOOLEAN true, and checking only "on"
@@ -886,8 +897,12 @@ def detect_automation(tree)
         trig = workflow_trigger(doc)
         next if trig.nil?
 
-        return [trig.determined ? "CONFIRMED" : "UNDETERMINED", "#{rel}: #{trig.detail}"]
+        return ["CONFIRMED", "#{rel}: #{trig.detail}"] if trig.determined
+
+        first_undetermined ||= "#{rel}: #{trig.detail}"
       end
+      return ["UNDETERMINED", first_undetermined] if first_undetermined
+
       return ["CONFIRMED-ABSENT",
               "#{files.size} GitHub workflow(s) parsed, every trigger is pre-merge " \
               "(#{PRE_MERGE_EVENTS.to_a.join(', ')}, or a push to a non-default branch)"]
@@ -1034,10 +1049,37 @@ def event_hit(event, cfg, label)
   TriggerHit.new(label, true)
 end
 
+# Ref-filter keys a push trigger may carry in place of `branches:`. Any of them
+# present means the push IS filtered, so it must never get the no-filter label.
+PUSH_REF_FILTER_KEYS = %w[branches-ignore tags tags-ignore].freeze
+
+# A ref filter's value as the label shows it: always a list, a valueless key as [].
+def ref_filter_value(value)
+  case value
+  when nil then [].inspect
+  when String then [value].inspect
+  else value.inspect
+  end
+end
+
 def push_hit(push, label)
   unfiltered = TriggerHit.new("#{label} (no branch filter -- fires on the default branch)", true)
   return unfiltered unless push.is_a?(Hash)
-  return unfiltered unless push.key?("branches")
+
+  unless push.key?("branches")
+    # No `branches:` key does not mean "no filter at all": `branches-ignore:`,
+    # `tags:` or `tags-ignore:` alone is each a real ref filter this check
+    # does not evaluate, so the label names THAT shape rather than claim the
+    # generic no-filter case. The verdict is the same either way (a
+    # determined hit that fails wide); only the text naming what fired
+    # differs.
+    ref_filters = PUSH_REF_FILTER_KEYS.select { |k| push.key?(k) }
+    return unfiltered if ref_filters.empty?
+
+    shown = ref_filters.map { |k| "#{label}.#{k}=#{ref_filter_value(push[k])}" }.join(", ")
+    return TriggerHit.new("#{shown} with no `branches:` key (this check does not evaluate " \
+                          "these ref filters -- counted as matching the default branch)", true)
+  end
 
   branches = push["branches"]
   branches = [branches] if branches.is_a?(String)
@@ -2563,6 +2605,83 @@ def self_test
                  code.zero? && out.include?("BLAST-RADIUS WARM") && out.include?("CONFIRMED-ABSENT"),
                  "exit=#{code} out=#{out}")
     end
+
+    # 11c. DND-769: the DETAIL TEXT for a push trigger must name the actual
+    # shape, not the generic "no branch filter" claim -- neither of these has
+    # a `branches:` key, but each is a distinct, real filter this check does
+    # not evaluate. The VERDICT is unchanged (still a determined hit, HOT,
+    # exit 4); only the label was wrong on the unfixed code.
+    out, _, code = trig_case.call("on:\n  push:\n    tags: ['v*']\n")
+    check.call("HOT: push with only `tags:` (no `branches:`) names the tags-only shape, " \
+               "not the generic no-filter claim (DND-769)",
+               code == 4 && out.include?("BLAST-RADIUS HOT") &&
+                 out.include?('on.push.tags=["v*"] with no `branches:` key') &&
+                 !out.include?("no branch filter -- fires on the default branch"),
+               "exit=#{code} out=#{out}")
+    out, _, code = trig_case.call("on:\n  push:\n    branches-ignore: [main]\n")
+    check.call("HOT: push with only `branches-ignore:` names that shape, " \
+               "not the generic no-filter claim (DND-769)",
+               code == 4 && out.include?("BLAST-RADIUS HOT") &&
+                 out.include?('on.push.branches-ignore=["main"]') &&
+                 !out.include?("no branch filter -- fires on the default branch"),
+               "exit=#{code} out=#{out}")
+    # The class, not the two sites: `tags-ignore:` alone is also a ref filter
+    # with no `branches:` key (GitHub runs a tag-filter-only push for tag
+    # pushes, not branch pushes), so it too must be named.
+    out, _, code = trig_case.call("on:\n  push:\n    tags-ignore: ['v1*']\n")
+    check.call("HOT: push with only `tags-ignore:` names that shape, " \
+               "not the generic no-filter claim (DND-769)",
+               code == 4 && out.include?("BLAST-RADIUS HOT") &&
+                 out.include?('on.push.tags-ignore=["v1*"] with no `branches:` key') &&
+                 !out.include?("no branch filter -- fires on the default branch"),
+               "exit=#{code} out=#{out}")
+    # A ref-filter key written with no value is shown as empty, never `=nil`.
+    out, _, code = trig_case.call("on:\n  push:\n    branches-ignore:\n")
+    check.call("HOT: a valueless `branches-ignore:` is named as empty, not rendered " \
+               "as `=nil` (DND-769)",
+               code == 4 && out.include?("BLAST-RADIUS HOT") &&
+                 out.include?("on.push.branches-ignore=[] with no `branches:` key") &&
+                 !out.include?("=nil"),
+               "exit=#{code} out=#{out}")
+    # The genuinely unfiltered shape (no branches/branches-ignore/tags/
+    # tags-ignore key at all) keeps its original label -- this is the one case that label is true
+    # for.
+    out, _, code = trig_case.call("on: push\n")
+    check.call("HOT: a bare `push:` (no filter keys at all) keeps the generic " \
+               "no-branch-filter label (DND-769)",
+               code == 4 && out.include?("BLAST-RADIUS HOT") &&
+                 out.include?("no branch filter -- fires on the default branch"),
+               "exit=#{code} out=#{out}")
+
+    # 11d. DND-769: detect_automation must not stop scanning at the FIRST
+    # unparseable/unmodelled workflow -- a LATER workflow that actually
+    # CONFIRMS merge-time automation must still be found and reported as
+    # CONFIRMED, naming the confirming file, not buried behind the sibling's
+    # parse failure as a false UNDETERMINED.
+    d = File.join(tmp, "scan-past-broken")
+    b, h = mkrepo.call(d, seed: lambda { |r|
+      wf.call(r, "aaa-broken.yml", "name: t\non: [\n  unclosed\n")
+      wf.call(r, "zzz-confirms.yml", deploy_wf)
+    }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("CONFIRMED: a later workflow confirming automation is found past an " \
+               "earlier unparseable sibling (DND-769)",
+               code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?("CONFIRMED") &&
+                 !out.include?("UNDETERMINED") && out.include?("zzz-confirms.yml"),
+               "exit=#{code} out=#{out}")
+    # And when NO workflow ever confirms, the UNDETERMINED detail still names
+    # the (first) file that blocked proving absence -- the exit code and
+    # UNDETERMINED state are unchanged, so this only pins which file is named.
+    d = File.join(tmp, "scan-all-broken")
+    b, h = mkrepo.call(d, seed: lambda { |r|
+      wf.call(r, "aaa-broken.yml", "name: t\non: [\n  unclosed\n")
+      wf.call(r, "zzz-pronly.yml", pr_wf)
+    }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("UNDETERMINED: names the unparseable workflow even after scanning a later, " \
+               "pre-merge-only sibling (DND-769)",
+               code == 4 && out.include?("UNDETERMINED") && out.include?("aaa-broken.yml"),
+               "exit=#{code} out=#{out}")
 
     # 12. deploy-automation class: touching the workflow itself
     d = File.join(tmp, "wfchange")
