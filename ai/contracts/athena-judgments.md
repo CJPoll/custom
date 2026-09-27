@@ -387,8 +387,11 @@ athena:ticket-management → *Before filing a finding*.
   search that could not run is its own unavailable line, never 0 candidates.
 - **An advisory line is printed only above threshold**: for a candidate judged
   `duplicate` or `related`, in mode `on`, whose confidence the owner's
-  eval-produced threshold for that label accepts. Shadow mode advises nothing.
-  The severity is printed as an uncalibrated suggestion.
+  eval-produced threshold for that label accepts. In mode `on` the severity is
+  printed as an uncalibrated suggestion. Shadow mode prints no advice at all,
+  severity included.
+- **A server that answered and refused** (a 4xx) prints its own line with the
+  server's `Fix:`, distinct from a server that could not be reached.
 - **Unavailable is an answer, not an error.** The server answers 200 with
   `status` `unavailable` and a reason from *The closed reason list*
   (`not_configured` for `mode_off` and `key_missing`). The script then exits 3

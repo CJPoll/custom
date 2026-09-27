@@ -69,6 +69,7 @@ USAGE = <<~EOF
       "JUDGMENTS UNAVAILABLE: <reason>. #{UNAVAILABLE_FIX}"
       "CANDIDATES UNAVAILABLE: <why>. #{UNAVAILABLE_FIX}"
       "COULD NOT REACH SERVER: <why>. #{UNAVAILABLE_FIX}"
+      "SERVER REFUSED THE REQUEST: HTTP <status> <error>: <server fix>. #{UNAVAILABLE_FIX}"
 
   Exit codes:
     0  judged (including 0 candidates, and no duplicate found)
@@ -108,6 +109,11 @@ end
 
 def server_unreachable!(why)
   raise Failure.new(3, "COULD NOT REACH SERVER: #{why}. #{UNAVAILABLE_FIX}")
+end
+
+def server_refused!(status, error, fix)
+  detail = [error, fix].compact.join(": ")
+  raise Failure.new(3, "SERVER REFUSED THE REQUEST: HTTP #{status}#{detail.empty? ? '' : " #{detail}"}. #{UNAVAILABLE_FIX}")
 end
 
 def judgments_unavailable!(reason)
@@ -163,7 +169,9 @@ module Triage
     words.reject { |w| STOPWORDS.include?(w) }.uniq.sort_by { |w| [-w.length, w] }.first(MAX_KEYWORDS)
   end
 
-  def truncate(text, max) = text.length > max ? text[0, max] : text
+  def truncate(text, max)
+    text.length > max ? text[0, max] : text
+  end
 
   # tickets_filter(epic_ids, keywords, since) -> the Notion data source filter:
   # in one of the epics AND a title keyword AND (open OR edited since).
@@ -179,7 +187,9 @@ module Triage
     }
   end
 
-  def since(now) = (now - (RECENT_DAYS * 86_400)).utc.strftime("%Y-%m-%d")
+  def since(now)
+    (now - (RECENT_DAYS * 86_400)).utc.strftime("%Y-%m-%d")
+  end
 
   # epic_ids(project_rows, project) -> {ids:, missing:, truncated:}. A mapped
   # Repo / App value no row carries is MISSING (a stale map, never an empty
@@ -207,7 +217,13 @@ module Triage
     return nil unless uid["prefix"].is_a?(String) && uid["number"].is_a?(Integer)
 
     title = Array(row.dig("properties", "Name", "title")).map { |t| t["plain_text"].to_s }.join
-    { ref: "#{uid['prefix']}-#{uid['number']}", title: truncate(title.strip.empty? ? "(untitled)" : title, MAX_TITLE), page_id: row["id"] }
+    { ref: "#{uid['prefix']}-#{uid['number']}", title: truncate(blank?(title) ? "(untitled)" : title, MAX_TITLE), page_id: row["id"] }
+  end
+
+  # blank?(text) -> true for "" and Unicode whitespace only (the server trims
+  # Unicode whitespace, so an ASCII-only strip would send a title it refuses).
+  def blank?(text)
+    text.to_s.gsub(/[[:space:]\u200B\uFEFF]/, "").empty?
   end
 
   # summary(blocks) -> the plain text of the first blocks, at most 500 chars.
@@ -228,6 +244,7 @@ module Triage
     refs = {}
     doc.each_with_index.map do |c, i|
       raise ArgumentError, "entry #{i} is not an object with ref, title and summary" unless c.is_a?(Hash) && c["title"].is_a?(String) && c.fetch("summary", "").is_a?(String)
+      raise ArgumentError, "entry #{i} has a blank title" if blank?(c["title"])
       raise ArgumentError, "entry #{i} has a ref that is not an opaque id (e.g. DND-123)" unless c["ref"].is_a?(String) && REF.match?(c["ref"])
       raise ArgumentError, "entry #{i} repeats an earlier ref" if refs[c["ref"]]
 
@@ -271,7 +288,9 @@ module Triage
     lines
   end
 
-  def security_hint?(title, body) = SECURITY.match?(title) || SECURITY.match?(body)
+  def security_hint?(title, body)
+    SECURITY.match?(title) || SECURITY.match?(body)
+  end
 
   SECURITY_HINT = "hint: this may be a security finding; security findings follow ~/.claude/CLAUDE.md -> " \
                   "Security fixes ship without owner approval (a code and human call, never Jev's)."
@@ -290,7 +309,9 @@ module Effects
   ].freeze
   NOTION_VERSION = "2025-09-03"
 
-  def notion_read?(method, path) = NOTION_READS.any? { |m, re| m == method && re.match?(path) }
+  def notion_read?(method, path)
+    NOTION_READS.any? { |m, re| m == method && re.match?(path) }
+  end
 
   def read_body_file(path)
     usage!("--body-file #{path} does not exist", "pass the path of a file holding the finding's body") unless File.exist?(path)
@@ -300,7 +321,8 @@ module Effects
 
   def read_candidates_file(path)
     usage!("--candidates-file #{path} does not exist", "pass a JSON array of {ref, title, summary}") unless File.exist?(path)
-    File.read(path, encoding: "UTF-8")
+    usage!("--candidates-file #{path} is not a readable file", "check its permissions") unless File.file?(path) && File.readable?(path)
+    File.read(path, encoding: "UTF-8").scrub
   end
 
   def claude_json
@@ -439,15 +461,18 @@ module Manager
 
   # retrieve(opts, now) -> [candidates, scope line text]
   def retrieve(opts, now)
-    if opts[:candidates_file]
-      list = Triage.parse_candidates_file(Effects.read_candidates_file(opts[:candidates_file]))
-      dropped = [list.size - Triage::MAX_CANDIDATES, 0].max
-      scope = "from --candidates-file #{opts[:candidates_file]}" + (dropped.positive? ? "; #{dropped} beyond #{Triage::MAX_CANDIDATES} not sent" : "")
-      return [list.first(Triage::MAX_CANDIDATES), scope]
-    end
+    return file_candidates(opts[:candidates_file]) if opts[:candidates_file]
+
     notion_candidates(opts, now)
+  end
+
+  def file_candidates(path)
+    list = Triage.parse_candidates_file(Effects.read_candidates_file(path))
+    dropped = [list.size - Triage::MAX_CANDIDATES, 0].max
+    scope = "from --candidates-file #{path}" + (dropped.positive? ? "; #{dropped} beyond #{Triage::MAX_CANDIDATES} not sent" : "")
+    [list.first(Triage::MAX_CANDIDATES), scope]
   rescue ArgumentError => e
-    usage!("--candidates-file #{opts[:candidates_file]}: #{e.message}", "pass a JSON array of {\"ref\", \"title\", \"summary\"}")
+    usage!("--candidates-file #{path}: #{e.message}", "pass a JSON array of {\"ref\", \"title\", \"summary\"}")
   end
 
   def notion_candidates(opts, now)
@@ -477,7 +502,9 @@ module Manager
       blocks = Effects.notion_read(origin, token, "GET", "/v1/blocks/#{t[:page_id]}/children?page_size=10")
       { ref: t[:ref], title: t[:title], summary: Triage.summary(Array(blocks["results"])) }
     end
-    scope = "#{base}, title keywords: #{keywords.join(', ')}" + (epics[:truncated] ? "; the project's epic list was truncated by Notion" : "")
+    scope = "#{base}, title keywords: #{keywords.join(', ')}"
+    scope += "; more tickets matched, the #{Triage::MAX_CANDIDATES} most recently edited were sent" if found["has_more"] == true
+    scope += "; the project's epic list was truncated by Notion" if epics[:truncated]
     [candidates, scope]
   end
 
@@ -514,10 +541,21 @@ module Manager
       judgments_unavailable!(safe_reason(doc["reason"])) if doc["status"] == "unavailable"
     end
     server_unreachable!("the Athena server rejected the machine token (HTTP 401; the token is owner-issued)") if status == 401
-    server_unreachable!("the Athena server answered HTTP #{status}#{doc.is_a?(Hash) && doc['error'].is_a?(String) ? " #{safe_reason(doc['error'])}" : ''}")
+    error = doc.is_a?(Hash) && doc["error"].is_a?(String) ? safe_reason(doc["error"]) : nil
+    # A 4xx means the server was reached and refused: never "could not reach".
+    # Its fix names a field and position, never the caller's text.
+    server_refused!(status, error, safe_fix(doc)) if (400..499).cover?(status)
+    server_unreachable!("the Athena server answered HTTP #{status}#{error ? " #{error}" : ''}")
   end
 
-  def safe_reason(value) = value.is_a?(String) && /\A[a-z0-9_:]{1,64}\z/.match?(value) ? value : "unrecognized"
+  def safe_fix(doc)
+    fix = doc.is_a?(Hash) ? doc["fix"] : nil
+    fix.is_a?(String) && fix.length <= 400 && !/[[:cntrl:]]/.match?(fix) ? fix.sub(/\.\z/, "") : nil
+  end
+
+  def safe_reason(value)
+    value.is_a?(String) && /\A[a-z0-9_:]{1,64}\z/.match?(value) ? value : "unrecognized"
+  end
 end
 
 # ── FRAMEWORK ────────────────────────────────────────────────────────────────
@@ -530,10 +568,10 @@ SPEC = {
 def parse_options(argv)
   raw = StrictArgv.parse(argv, SPEC)
   opts = {
-    title: raw["--title"], body_file: raw["--body-file"], project: raw["--project"],
+    title: raw["--title"] && raw["--title"].dup.force_encoding(Encoding::UTF_8).scrub, body_file: raw["--body-file"], project: raw["--project"],
     tracker: raw.fetch("--tracker", "dnd"), candidates_file: raw["--candidates-file"]
   }
-  usage!("--title is required", "pass the finding's title") if opts[:title].nil? || opts[:title].strip.empty?
+  usage!("--title is required", "pass the finding's title") if opts[:title].nil? || Triage.blank?(opts[:title])
   usage!("--body-file is required", "pass a file holding the finding's body") if opts[:body_file].nil?
   usage!("--project is required", "pass one of #{Triage::PROJECTS.join(', ')}") if opts[:project].nil?
   usage!("--project is not a project identifier", "pass one of #{Triage::PROJECTS.join(', ')}") unless Triage::PROJECT.match?(opts[:project])
@@ -555,6 +593,9 @@ def main(argv)
 rescue Failure => e
   (e.stream == :stderr ? $stderr : $stdout).puts e.message
   e.code
+rescue StandardError => e
+  $stdout.puts "#{PROG}: UNEXPECTED ERROR: #{e.class}. #{UNAVAILABLE_FIX}"
+  3
 end
 
 exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

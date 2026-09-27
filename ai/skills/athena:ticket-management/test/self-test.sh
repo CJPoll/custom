@@ -317,6 +317,40 @@ run "${FINDING[@]}" --project harness --candidates-file "${TMP}/cands.json"
 eq "a rejected machine token exits 3" "${RC}" "3"
 has "it names the 401" "${OUT}" "COULD NOT REACH SERVER: the Athena server rejected the machine token (HTTP 401"
 
+# The server was reached and refused: its own line, with the server's Fix:.
+spec triage.json '{"status":422,"body":{"error":"unprocessable_entity","fix":"candidates[0].title is missing, blank or over 300 characters. Fix: send a short title."}}'
+run "${FINDING[@]}" --project harness --candidates-file "${TMP}/cands.json"
+eq "a 422 exits 3" "${RC}" "3"
+has "a 422 is SERVER REFUSED, carrying the server's fix" "${OUT}" "SERVER REFUSED THE REQUEST: HTTP 422 unprocessable_entity: candidates[0].title is missing, blank or over 300 characters. Fix: send a short title. Fix: file the ticket as today; this is advisory."
+lacks "a 422 is never could-not-reach" "${OUT}" "COULD NOT REACH SERVER"
+spec triage.json '{"status":404,"body":{"error":"not_found"}}'
+run "${FINDING[@]}" --project harness --candidates-file "${TMP}/cands.json"
+has "a 404 is SERVER REFUSED too (e.g. the endpoint is not deployed yet)" "${OUT}" "SERVER REFUSED THE REQUEST: HTTP 404 not_found. Fix: file the ticket as today"
+spec triage.json '{"status":500,"body":{"error":"internal_error"}}'
+run "${FINDING[@]}" --project harness --candidates-file "${TMP}/cands.json"
+has "a 5xx is the server failing, not refusing" "${OUT}" "COULD NOT REACH SERVER: the Athena server answered HTTP 500 internal_error"
+
+printf '[{"ref":"DND-1","title":"\xe3\x80\x80 "}]\n' > "${TMP}/blank-title.json"
+run "${FINDING[@]}" --project harness --candidates-file "${TMP}/blank-title.json"
+eq "a candidates-file title of only Unicode whitespace is usage (2)" "${RC}" "2"
+has "it names the entry, not its text" "${ERR}" "entry 0 has a blank title"
+mkdir -p "${TMP}/a-dir"
+run "${FINDING[@]}" --project harness --candidates-file "${TMP}/a-dir"
+eq "a candidates-file that is a directory is usage (2), never a stack trace" "${RC}" "2"
+
+# A ticket search Notion truncated says so.
+spec "query-${PROJECTS_DS}.json" '{"status":200,"body":{"results":[{"properties":{"Repo / App":{"select":{"name":"~/dev/custom"}},"Epics":{"relation":[{"id":"e0000000-0000-0000-0000-000000000001"}],"has_more":false}}}]}}'
+spec "query-${TICKETS_DS}.json" "$(printf '%s' "${TICKETS_TWO}" | jq -c '.body.has_more = true')"
+spec triage.json '{"status":200,"body":{"status":"unavailable","reason":"not_configured"}}'
+run "${FINDING[@]}" --project harness
+has "a truncated ticket search is reported" "${OUT}" "more tickets matched, the 20 most recently edited were sent"
+
+# A title in a non-UTF-8 locale is still sent as UTF-8.
+printf '[]\n' > "${TMP}/none.json"
+: > "${TMP}/server.log"
+LANG=C LC_ALL=C run --title "HIGH: $(printf 'é%.0s' $(seq 1 310))" --body-file "${TMP}/body.txt" --project harness --candidates-file "${TMP}/none.json"
+eq "a C-locale title is cut to 300 characters, not bytes" "$(jq -r 'select(.service == "athena") | .body.finding.title | length' "${TMP}/server.log")" "300"
+
 # A security word prints the hint.
 spec triage.json '{"status":200,"body":{"status":"judged","mode":"on","question_set_version":"finding-triage-v1","model":"jev-1.13.0","candidates":[],"severity":{"level":"CRITICAL","score":3,"confidence":0.9}}}'
 printf '[]\n' > "${TMP}/none.json"
