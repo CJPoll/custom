@@ -47,7 +47,8 @@ USAGE = <<~TXT
 
   Options:
     --started IDS       comma-separated ids with a live captain, from the state log's Mission
-                        table (authoritative). Added to Notion In Progress as "started". It is
+                        table (authoritative). Added to Notion In Progress and In Merge Queue
+                        as "started" (Parked is started only when listed here). It is
                         also the live-captain source for the stale check: an In Progress
                         ticket not listed is warned about on stderr ("stale In Progress").
                         The fleet registry has no read path from harness tooling, so it is

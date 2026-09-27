@@ -37,8 +37,11 @@ module NextMission
 
   # Parked (owner, 2026-09-27): progress exists, the work is undelivered, and
   # nobody is on it. Not terminal, not started unless --started lists it.
+  # In Merge Queue (2026-09-27): review, critic and CI passed; the PR waits in
+  # a merge queue. Active, so started, and exempt from the stale warning.
   STATUSES   = ["Todo", "Attention Given", "Needs Attention", "Parked", "In Progress",
-                "Done", "Cancelled", "Won't Fix"].freeze
+                "In Merge Queue", "Done", "Cancelled", "Won't Fix"].freeze
+  STARTED    = ["In Progress", "In Merge Queue"].freeze
   TERMINAL   = ["Done", "Cancelled", "Won't Fix"].freeze
   SEVERITIES = %w[CRITICAL HIGH MEDIUM LOW].freeze
   KINDS      = %w[Vulnerability Bug Feature Hardening Test Refactor Ops Docs Flake].freeze
@@ -53,7 +56,7 @@ module NextMission
     not_terminal:         "not terminal (Done/Cancelled/Won't Fix)",
     not_flake:            "not Kind=Flake (own lane)",
     harness_lane:         "harness lane (Area=Harness and Path=Off)",
-    not_started:          "not started (In Progress or --started)",
+    not_started:          "not started (In Progress, In Merge Queue, or --started)",
     not_waiting_on_owner: "not waiting on the owner (Needs Attention)",
     unblocked:            "unblocked (every Depends On Done/Cancelled/Won't Fix)",
     functional_first:     "functional-first (tier-4 non-Feature held while a Critical/Feature ticket is unfinished)"
@@ -111,7 +114,7 @@ module NextMission
     set = keep(funnel, :not_terminal, set) { |x| !TERMINAL.include?(x.status) }
     set = keep(funnel, :not_flake, set) { |x| x.kind != "Flake" }
     set = keep(funnel, :harness_lane, set) { |x| x.area == "Harness" && off?(x) } if harness_lane
-    set = keep(funnel, :not_started, set) { |x| x.status != "In Progress" && !started.include?(x.id) }
+    set = keep(funnel, :not_started, set) { |x| !STARTED.include?(x.status) && !started.include?(x.id) }
     set = keep(funnel, :not_waiting_on_owner, set) { |x| x.status != "Needs Attention" }
     set = keep(funnel, :unblocked, set) { |x| unblocked?(x, status_of) }
 

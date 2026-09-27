@@ -328,7 +328,23 @@ check("parked: a Parked Feature still holds tier-4 findings (it is unfinished)")
   r.pick.nil? && r.emptied_by == :functional_first
 end
 
+check("merge queue: In Merge Queue is a known status, counts as started, and is not terminal") do
+  r = pick([t("DND-1", kind: "Bug", status: "In Merge Queue")])
+  r.pick.nil? && r.emptied_by == :not_started && r.funnel.to_h[:not_terminal] == 1
+end
+
+check("merge queue: a ticket depending on an In Merge Queue ticket is still blocked") do
+  r = pick([t("DND-1", kind: "Bug", status: "In Merge Queue"), t("DND-2", kind: "Bug", deps: ["DND-1"])])
+  r.pick.nil? && r.emptied_by == :unblocked
+end
+
 # ------------------------------------------------------ stale In Progress
+
+check("stale: In Merge Queue is active, so it is never reported stale") do
+  r = pick([t("DND-1", kind: "Bug", status: "In Merge Queue"), t("DND-2", kind: "Bug", status: "In Progress")],
+           started: [])
+  r.stale_in_progress == ["DND-2"]
+end
 
 check("stale: an In Progress ticket missing from --started is listed; the pick is unchanged") do
   r = pick([t("DND-1", kind: "Bug", status: "In Progress"), t("DND-2", kind: "Bug", status: "In Progress"),
