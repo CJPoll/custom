@@ -120,13 +120,17 @@ module Effects
     File.read(path, encoding: "UTF-8")
   end
 
-  def sha256(text) = Digest::SHA256.hexdigest(text)
+  def sha256(text)
+    Digest::SHA256.hexdigest(text)
+  end
 
   def client_config_path
     ENV["ATHENA_INBOX_CLIENT_CONFIG"] || File.join(ENV["XDG_CONFIG_HOME"] || File.join(Dir.home, ".config"), "athena-inbox-client", "config.json")
   end
 
-  def claude_json_path = ENV["FLEET_CLAUDE_JSON"] || File.join(Dir.home, ".claude.json")
+  def claude_json_path
+    ENV["FLEET_CLAUDE_JSON"] || File.join(Dir.home, ".claude.json")
+  end
 
   # read_token -> the machine token. Never printed, never in argv.
   def read_token
@@ -238,7 +242,9 @@ module Effects
     fail!(1, "could not write the run file under #{dir}: #{e.class}", "check that directory is writable")
   end
 
-  def pause(seconds) = sleep(seconds)
+  def pause(seconds)
+    sleep(seconds)
+  end
 end
 
 # ── MANAGER ──────────────────────────────────────────────────────────────────
