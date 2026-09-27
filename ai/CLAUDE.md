@@ -222,6 +222,11 @@ by name.
   *What no standing approval covers* names. Do not offer to hold it or
   ask to re-confirm it either. Cody, 2026-09-25: "Please just ship. We just
   ship security fixes."
+- **It governs approval, not scheduling.** When a security fix is worked is
+  [[athena:ticket-management]] → *Priority: critical path first*: an issue the
+  ticket's own change introduces blocks that ticket, and a pre-existing one
+  found along the way is fixed after the critical path unless the owner
+  promotes it. Once it is worked, this rule removes the wait.
 - **What it does not waive: the bar.** The fix has a regression test that
   fails first (*A bug fix starts with a regression test that fails*), a critic
   PASS, green CI, and a live verify in the environment it protects. The
@@ -454,9 +459,25 @@ the issues." This section is its one home; other documents cite it by name.
   Rule*). So does an `integration-gate` exit 4 that no standing approval
   covers (*Standing owner approvals*); it needs the owner's go. A forge write that cannot run as Athena follows `athena:github` →
   *When a forge write can't be done as Athena*. The rest of the fix still ships.
-- **Proportionate.** A LOW finding is filed and queued. It does not interrupt
-  the work in hand. Report findings to the owner as one batched summary, not a
-  narration of each ticket.
+- **Fixed after the critical path.** A finding is filed and queued behind its
+  project's critical path, whatever its severity. It does not interrupt the work
+  in hand, and it blocks a planned ticket only if that ticket cannot meet its
+  requirements without it. A pre-existing security issue waits too, unless the
+  owner promotes it; one the ticket's own change introduces blocks it. The order, the blocking test and
+  the exceptions: [[athena:ticket-management]] → *Priority: critical path
+  first*. Report findings to the owner as one batched summary,
+  not a narration of each ticket.
+
+  **Later (2026-09-27):** this bullet read "**Proportionate.** A LOW finding is
+  filed and queued", which left any higher-severity finding free to jump the
+  planned work and to be wired as a blocker onto it. Superseded by owner
+  directive (Cody): "we prioritize the critical path over side quests in a
+  project, completing the findings and other issues that have been raised after
+  the critical path. Findings should only block previous tickets if they truly
+  prevent the work from completing the intended requirements." Measured
+  2026-09-27 across 17 harness epics: ~114 of 142 tickets created in 48h (80%)
+  were findings or follow-ups, and planned tails sat untouched. Find, ticket and
+  fix are unchanged; only the sequencing moved.
 - **One finding, one ticket.** A finding outside your current unit of work gets
   its own ticket and its own change. Never bundle it into the change in hand; a
   mixed diff is harder to review and to revert.

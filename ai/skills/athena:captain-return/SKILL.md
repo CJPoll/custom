@@ -49,7 +49,8 @@ boarded on the head would have merged a twelve-round-old SHA.
 ## Each return frees a slot
 
 `DONE`, `BLOCKED_ON_DEPENDENCY`, and `STUCK` each free a concurrency slot —
-**immediately dispatch the next `QUEUED` Mission, if any** (via
+**immediately dispatch the next `QUEUED` Mission, if any**, critical path first
+([[athena:ticket-management]] → *Priority: critical path first*; via
 [[athena:dispatch-captain]], whose first step is the control checkpoint).
 
 **`PARKED`** is the fourth return, and only on drain: the captain committed and
