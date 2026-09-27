@@ -171,11 +171,19 @@ assert_no_file()      { if [ -e "$2" ]; then bad "$1" "file exists: $2"; else ok
 # Fix: clauses told the reader to "map this inbox filename to a server-side
 # agent instance in ~/.config/athena-inbox-client/config.json", advice that was
 # never true (the client needs no config mapping) and is now also wrong about
-# the mechanism (the doctor asks the server, not a config file). Discovery is
-# via `git ls-files`, per DND-218: a filesystem walk over this checkout would
-# also count untracked third-party trees (node_modules, vendor/bundle) that are
-# not first-party text to sweep.
+# the mechanism (the doctor asks the server, not a config file). DND-944's own
+# round-1 fix of this guard missed a THIRD copy in the contract
+# (athena-inbox.md:328-331), because it wraps across lines as Markdown prose
+# ("...mapped to that filename in the client's own\n`~/.config/...`") and a
+# one-line regex never sees the two halves together -- so every file's
+# whitespace is collapsed to single spaces before matching, and the pattern is
+# the general shape ("map"/"mapped" ... the client-config path), not one exact
+# sentence, so a fourth rephrasing of the same retired claim still trips it.
+# Discovery is via `git ls-files`, per DND-218: a filesystem walk over this
+# checkout would also count untracked third-party trees (node_modules,
+# vendor/bundle) that are not first-party text to sweep.
 DND944_LABEL="DND-944: retired 'map ... config.json' producer advice is gone from every first-party file"
+DND944_RE='\bmap(ped)?\b.{0,200}athena-inbox-client/config\.json'
 if ! command -v git >/dev/null 2>&1; then
   bad "${DND944_LABEL}" \
     "git is not on PATH, so first-party files could not be discovered -- this check cannot evaluate and must not print ok"
@@ -195,9 +203,24 @@ else
     bad "${DND944_LABEL}" \
       "could not look: 'git -C ${REPO_DIR} ls-files' exited ${DND944_LS_RC} and produced $( [ -s "${DND944_LIST}" ] && echo "output" || echo "no output" ) -- this is not evidence the phrase is absent, only that the tracked-file list could not be obtained"
   else
-    RETIRED_HITS="$(xargs -0 grep -lE \
-      'map (this|it) (this )?inbox filename to a server-side agent instance|instance mapped (to|in) .*inbox-client/config\.json' \
-      -- < "${DND944_LIST}" 2>/dev/null)"
+    RETIRED_HITS=""
+    while IFS= read -r -d '' DND944_F; do
+      [ -f "${REPO_DIR}/${DND944_F}" ] || continue
+      # This guard's OWN file necessarily quotes the retired phrase in its
+      # explanatory comments (this block, and the commit message that
+      # introduced it) -- that quoting is not advice a reader would follow,
+      # unlike a doc or a Fix: string. This file's actual runtime behavior
+      # (the WARN_TEXT it produces) is guarded directly by the R13 and
+      # both-dark assertions above, which require "inbox-doctor" by name.
+      case "${DND944_F}" in
+        ai/hooks/athena-inbox-poll.self-test.sh) continue ;;
+      esac
+      if tr '\n\t\r' '   ' < "${REPO_DIR}/${DND944_F}" 2>/dev/null \
+          | grep -aqE "${DND944_RE}"; then
+        RETIRED_HITS="${RETIRED_HITS}${DND944_F}
+"
+      fi
+    done < "${DND944_LIST}"
     if [ -z "${RETIRED_HITS}" ]; then
       ok "${DND944_LABEL}"
     else

@@ -327,8 +327,9 @@ under *Repo identity: the git common dir* below, not weakened.
 self-service: declare it, and provisioning creates the directories. A `log`
 channel is **not**, because the file exists only if a producer was separately
 configured to write it — for Slack, an agent instance registered server-side
-and mapped to that filename in the client's own
-`~/.config/athena-inbox-client/config.json`. An entry that declares a `log`
+whose `inbox_name` is that filename (asked with `list_my_machines`, per
+*Producer registration extends to platform deliveries* below; no client-side
+config mapping is involved). An entry that declares a `log`
 channel with a brand-new `path` and stops there gets a permanently empty
 channel, and *First run, missing files, and a stale offset* says an empty
 channel is normal — so the misconfiguration is invisible. Therefore:
