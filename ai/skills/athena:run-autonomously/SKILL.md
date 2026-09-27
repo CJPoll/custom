@@ -55,6 +55,7 @@ through to completion without them.
    cannot be shipped autonomously — everything else, security fixes included,
    still ships. A security fix needs no owner go even at `integration-gate`
    exit 4: `~/.claude/CLAUDE.md` → *Security fixes ship without owner approval*.
+   Nor does a library upgrade: *Library upgrades ship without owner approval*.
 
 ## When the user returns
 
