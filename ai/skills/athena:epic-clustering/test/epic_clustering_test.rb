@@ -11,6 +11,7 @@ require "open3"
 require "tmpdir"
 require_relative "../lib/epic_clustering"
 require_relative "../lib/epic_clustering_notion"
+require_relative "../lib/epic_clustering_view"
 
 $failures = []
 $checks = 0
@@ -30,6 +31,7 @@ rescue klass => e
 end
 
 EC = EpicClustering
+ECV = EpicClusteringView
 HERE = __dir__
 BIN = File.expand_path("../scripts/epic-clustering", HERE)
 FIX = File.join(HERE, "fixtures")
@@ -86,7 +88,7 @@ check("proof hit: equal before/after sets hold, and a zero set is printed as 0, 
   after = EC.proof_snapshot([[epic("E1", "Fleet"), [t("DND-1", kind: "Feature")]],
                              [epic("E2", "Empty core"), [t("DND-3"), t("DND-2", epics: ["E2"])]]])
   r = EC.compare_proof(before, after)
-  lines = EC.proof_lines(after)
+  lines = ECV.proof_lines(after)
   r.ok? && r.mismatches.empty? && lines.any? { |l| l.include?("Empty core") && l.include?("0 (none)") } &&
     lines.any? { |l| l.include?("Fleet") && l.include?("1: DND-1") }
 end
@@ -202,7 +204,7 @@ end
 check("ticket hygiene: an unread body (nil) is counted as unread, never as a pass") do
   h = EC.ticket_hygiene([t("DND-1", kind: "Bug", body: nil)])
   h[:unread_reasons] = { "HTTP 429" => 1 }
-  line = EC.hygiene_lines(h).first
+  line = ECV.hygiene_lines(h).first
   h[:scanned].zero? && h[:unread] == ["DND-1"] && h[:flagged].empty? &&
     line.include?("1 UNREAD (not judged): DND-1") && line.include?("1x HTTP 429")
 end
@@ -251,13 +253,13 @@ check("digest: a Feature off the critical path is never queued as tier 4; it is 
   epics, ts = digest_fixture([t("DND-30", kind: "Feature", path: "Off", epics: ["E2"])])
   d = EC.build_digest(tickets: ts, epics: epics, now: NOW)
   d[:next].none? { |x| x[:id] == "DND-30" } && d[:features_off_path] == ["DND-30"] &&
-    EC.digest_text(d).include?("Features with no Path=Critical (not queued here; a planning gap): 1: DND-30")
+    ECV.digest_text(d).include?("Features with no Path=Critical (not queued here; a planning gap): 1: DND-30")
 end
 
 check("digest without won't-fix candidates prints 'None today'") do
   epics, ts = digest_fixture
   d = EC.build_digest(tickets: ts, epics: epics, now: NOW)
-  d[:wont_fix].empty? && EC.digest_text(d).include?("Won't-fix candidates: None today")
+  d[:wont_fix].empty? && ECV.digest_text(d).include?("Won't-fix candidates: None today")
 end
 
 check("digest with won't-fix candidates lists old LOW tier-4 tickets, one line and reason each, oldest first") do
@@ -267,26 +269,26 @@ check("digest with won't-fix candidates lists old LOW tier-4 tickets, one line a
          t("DND-11", kind: "Test", severity: "LOW", epics: ["E2"], created: "2026-08-01T00:00:00Z", blocks: ["DND-9"])]
   epics, ts = digest_fixture(old)
   d = EC.build_digest(tickets: ts, epics: epics, now: NOW)
-  text = EC.digest_text(d)
+  text = ECV.digest_text(d)
   d[:wont_fix].map { |x| x[:id] } == %w[DND-9 DND-8] && d[:wont_fix].all? { |x| x[:reason].include?("open") } &&
     !text.include?("None today")
 end
 
 check("digest: pass summary prints each part, zero as 'none', and a missing summary as 'not given'") do
   epics, ts = digest_fixture
-  given = EC.digest_text(EC.build_digest(tickets: ts, epics: epics, now: NOW,
+  given = ECV.digest_text(EC.build_digest(tickets: ts, epics: epics, now: NOW,
                                          pass_summary: { "moved" => [{ "id" => "DND-3", "from" => "Fleet", "to" => "Evals" }],
                                                          "merged" => [], "closed" => [] }))
-  missing = EC.digest_text(EC.build_digest(tickets: ts, epics: epics, now: NOW))
+  missing = ECV.digest_text(EC.build_digest(tickets: ts, epics: epics, now: NOW))
   given.include?("Moved: DND-3 Fleet -> Evals") && given.include?("Merged (C3): none") &&
     given.include?("Closed as fixed (C4): none") && missing.include?("Pass summary:\n  not given (no --pass-summary")
 end
 
 check("digest blocks: valid Block Kit shape, names the sending session, no buttons, under 50 blocks") do
   epics, ts = digest_fixture
-  b = EC.digest_blocks(EC.build_digest(tickets: ts, epics: epics, now: NOW), session: "harness session -> architect")
+  b = ECV.digest_blocks(EC.build_digest(tickets: ts, epics: epics, now: NOW), session: "harness session -> architect")
   b.is_a?(Array) && b.size <= 50 && b.none? { |x| x["type"] == "actions" } &&
-    b.first.dig("text", "text").include?("harness session -> architect") &&
+    b.first.dig("text", "text").include?("harness session -&gt; architect") &&
     b.all? { |x| x["type"] != "section" || x.dig("text", "text").length <= 3000 }
 end
 
@@ -298,7 +300,7 @@ end
 # ------------------------------------------------------------ approval request
 
 check("request: won't-fix has background, why, options, recommendation; one primary '(recommended)' button") do
-  r = EC.approval_request(type: "wont-fix", ticket: "DND-9", title: "Tidy the README", background: "Open 28 days at LOW.",
+  r = ECV.approval_request(type: "wont-fix", ticket: "DND-9", title: "Tidy the README", background: "Open 28 days at LOW.",
                           why: "Closing it shrinks the epic.", recommend: "yes", session: "harness session")
   btns = r[:blocks].select { |x| x["type"] == "actions" }.flat_map { |x| x["elements"] }
   prim = btns.select { |x| x["style"] == "primary" }
@@ -310,7 +312,7 @@ end
 
 check("request: a missing background or why is refused, not sent thin") do
   raises?(EC::DataError, /background/) do
-    EC.approval_request(type: "promote", ticket: "DND-9", title: "x", background: " ", why: "y", recommend: "no",
+    ECV.approval_request(type: "promote", ticket: "DND-9", title: "x", background: " ", why: "y", recommend: "no",
                         session: "s", tier: 2)
   end
 end
@@ -472,6 +474,95 @@ check("cli: request writes Block Kit JSON to --blocks-out and prints the fallbac
                        "Open 28 days.", "--why", "Shrinks the epic.", "--recommend", "yes", "--blocks-out", f)
     code.zero? && out.include?("DND-9") && JSON.parse(File.read(f)).is_a?(Array)
   end
+end
+
+check("cli: a malformed --started id is a usage error (exit 2, Fix:), never a list that flags every ticket stale") do
+  _, err, code = run("digest", "--from-json", File.join(FIX, "pass.json"), "--started", "dnd-1,garbage", "--no-bodies")
+  code == 2 && err.include?("malformed") && err.include?("Fix:")
+end
+
+check("cli: digest --started flags an In Progress ticket with no live captain and notes a --started id with no open ticket") do
+  out, _, code = run("digest", "--from-json", File.join(FIX, "pass.json"), "--started", "DND-99", "--no-bodies", "--now", NOW)
+  code.zero? && out.include?("stale In Progress (no live captain per --started): 1 of 1") && out.include?("DND-7 ticket 7") &&
+    out.include?("naming no open ticket (typo?): DND-99") && out.include?("ticket bodies not scanned")
+end
+
+check("cli: a malformed snapshot entry is exit 3 naming it, never a crash or a pass") do
+  Dir.mktmpdir do |d|
+    snap = File.join(d, "DND-982-bad.json")
+    File.write(snap, JSON.generate("epics" => { "E1" => { "name" => "Fleet", "count" => 3, "ids" => ["DND-1"] } }))
+    _, err, code = run("proof", "--from-json", File.join(FIX, "pass.json"), "--against", snap)
+    code == 3 && err.include?("entry \"E1\"") && err.include?("Fix:")
+  end
+end
+
+check("cli: proof --against a snapshot epic that cannot be read again is exit 4 (a mismatch), never a pass") do
+  Dir.mktmpdir do |d|
+    snap = File.join(d, "DND-982-gone.json")
+    File.write(snap, JSON.generate("epics" => { "E-gone" => { "name" => "Gone", "count" => 1, "ids" => ["DND-1"] } }))
+    _, err, code = run("proof", "--from-json", File.join(FIX, "pass.json"), "--against", snap)
+    code == 4 && err.include?("could not read epic E-gone again") && err.include?("PROOF MISMATCH Gone")
+  end
+end
+
+check("cli: proof holds prints the before count and the count still there, computed separately") do
+  Dir.mktmpdir do |d|
+    snap = File.join(d, "DND-982-proof.json")
+    run("proof", "--from-json", File.join(FIX, "pass.json"), "--all-open-epics", "--save", snap)
+    out, = run("proof", "--from-json", File.join(FIX, "pass.json"), "--against", snap)
+    out.include?("(3 before, 3 still there)")
+  end
+end
+
+def fixture_with_bodies(dir, &blk)
+  data = JSON.parse(File.read(File.join(FIX, "pass.json")))
+  data["tickets"].each(&blk)
+  path = File.join(dir, "DND-982-bodies.json")
+  File.write(path, JSON.generate(data))
+  path
+end
+
+check("cli: an unreadable body is listed UNREAD with its reason; the digest still drafts") do
+  Dir.mktmpdir do |d|
+    f = fixture_with_bodies(d) { |t| t["body"] = "__unreadable__" if t["id"] == "DND-3" }
+    out, _, code = run("digest", "--from-json", f, "--now", NOW)
+    code.zero? && out.include?("1 UNREAD (not judged): DND-3") && out.include?("1x HTTP 429")
+  end
+end
+
+check("cli: when no body at all can be read the digest is exit 3, not a thin pass") do
+  Dir.mktmpdir do |d|
+    f = fixture_with_bodies(d) { |t| t["body"] = "__unreadable__" unless t["kind"] == "Feature" }
+    _, err, code = run("digest", "--from-json", f, "--now", NOW)
+    code == 3 && err.include?("no ticket body could be read") && err.include?("Fix:")
+  end
+end
+
+check("view: ticket data is escaped for Slack mrkdwn, so a title cannot ping a channel") do
+  r = ECV.approval_request(type: "wont-fix", ticket: "DND-9", title: "<!channel> & co", background: "b <x>",
+                           why: "w", recommend: "no", session: "s")
+  text = r[:blocks].map { |x| x.dig("text", "text").to_s }.join
+  text.include?("&lt;!channel&gt; &amp; co") && !text.include?("<!channel>") && text.include?("b &lt;x&gt;")
+end
+
+check("view: a promote request needs --tier 0-3 and labels the recommended option; --tier on won't-fix is refused") do
+  r = ECV.approval_request(type: "promote", ticket: "DND-9", title: "t", background: "b", why: "w", recommend: "yes",
+                           session: "s", tier: 2)
+  labels = r[:blocks].last["elements"].map { |x| x.dig("text", "text") }
+  labels == ["Promote to tier 2 (recommended)", "Leave in tier 4", "Your call (Promote to tier 2)"] &&
+    raises?(EC::DataError, /tier 0-3/) do
+      ECV.approval_request(type: "promote", ticket: "DND-9", title: "t", background: "b", why: "w", recommend: "yes", session: "s")
+    end &&
+    raises?(EC::DataError, /only to a promote/) do
+      ECV.approval_request(type: "wont-fix", ticket: "DND-9", title: "t", background: "b", why: "w", recommend: "yes",
+                           session: "s", tier: 1)
+    end
+end
+
+check("view: an overlong digest section is clipped under Slack's limit and says how many lines were cut") do
+  long = (1..400).map { |i| "line #{i} of a long section" }.join("\n")
+  c = ECV.clip(long)
+  c.length <= 3000 && c.match?(/more lines in the run log\z/)
 end
 
 if $failures.empty?

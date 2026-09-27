@@ -12,8 +12,8 @@
 #   - status hygiene (In Progress with no live captain) and ticket hygiene
 #     (a body that cannot answer the problem, the repro/exploit path, or the
 #     affected code);
-#   - the daily digest's content, its text and its Block Kit rendering;
-#   - a promote / won't-fix approval request's Block Kit.
+#   - the daily digest's content.
+# Its text and Block Kit, and approval requests, are epic_clustering_view.rb.
 #
 # Tier and tier-4 order are next-mission's (ai/lib/next_mission.rb), called
 # here, never copied. The prose homes are athena:ticket-management ->
@@ -61,9 +61,10 @@ module EpicClustering
 
   def sort_ids(ids) = ids.sort_by { |i| id_number(i) }
 
-  # A tier-1 vulnerability (next-mission's tier 1). "In the epic's own code"
-  # cannot be read from a property, so every tier-1 vulnerability linked to the
-  # epic is treated as its own: the restrictive superset.
+  # The core. For security: any CRITICAL/HIGH Vulnerability, whatever its
+  # Security value, a superset of next-mission's tier 1. "In the epic's own
+  # code" cannot be read from a property, so every such ticket linked to the
+  # epic counts: the restrictive reading.
   def core?(ticket)
     ticket.kind == "Feature" || ON_PATH.include?(ticket.path) ||
       (ticket.kind == "Vulnerability" && TIER1_SEV.include?(ticket.severity))
@@ -95,10 +96,11 @@ module EpicClustering
            .sort_by { |(area, kind), _| [area, NextMission::KIND_ORDER.index(kind) || 99, kind] }
   end
 
-  # The name prefix of a harness-lane epic, the one next-mission's harness
-  # lane reads (DND-987, W10). Every movable Area=Harness, Path=Off ticket
-  # goes to such an epic, singletons included: a harness leftover that stays
-  # on a feature epic is worked by nobody.
+  # The name prefix of a harness-lane epic. The reader is next-mission's
+  # harness lane, DND-987 (W10), in flight when this landed: until it lands,
+  # nothing drains a lane epic. Every movable Area=Harness, Path=Off ticket
+  # goes to such an epic, singletons included (the admiral's decision on the
+  # epic: a harness leftover on a feature epic is worked by nobody).
   LANE_EPIC_PREFIX = "Harness lane: "
 
   def lane_epic?(epic) = epic.name.to_s.start_with?(LANE_EPIC_PREFIX)
@@ -128,13 +130,6 @@ module EpicClustering
     end
   end
 
-  def proof_lines(snapshot)
-    snapshot.map do |id, s|
-      list = s["count"].zero? ? "0 (none)" : "#{s['count']}: #{s['ids'].join(', ')}"
-      "never-movable #{s['name']} (#{id}): #{list}"
-    end
-  end
-
   # Every epic in `before` must be read again, and every id in its before set
   # must still be in its after set: the count of the before set, re-counted
   # after the moves, must be equal. That is the owner's constraint (nothing
@@ -158,7 +153,7 @@ module EpicClustering
         missing = sort_ids(b["ids"] - a["ids"])
         unless missing.empty?
           { epic: id, name: b["name"], before_count: b["count"], still_there: b["count"] - missing.size,
-            missing: missing, reason: "never-movable ticket(s) left the epic" }
+            missing: missing, reason: "never-movable id(s) missing after the moves (left the epic, or no longer core)" }
         end
       end
     end
@@ -218,7 +213,11 @@ module EpicClustering
         fix: "A ticket's status follows its captain: Parked if work exists (branch, PR), " \
              "Needs Attention if blocked on Cody, else Todo" }
     end
-    { checked: in_progress.size, stale: stale, skipped: nil }
+    # A --started id that names no open ticket may be a typo, which would
+    # leave the real live ticket flagged stale. Reported, never dropped.
+    open_ids = tickets.select { |t| open?(t) }.map(&:id).to_set
+    { checked: in_progress.size, stale: stale, skipped: nil,
+      started_not_open: sort_ids(started.uniq.reject { |i| open_ids.include?(i) }) }
   end
 
   PROBLEM_HEAD = /^\#{1,6}\s*(problem|symptom|observed|what happens|context)\b/i.freeze
@@ -279,6 +278,11 @@ module EpicClustering
     seen = Set.new
     tickets.each do |t|
       NextMission.check_ticket!(nm_ticket(t))
+      begin
+        Time.iso8601(t.created)
+      rescue ArgumentError
+        raise DataError, "#{t.id} has created=#{t.created.inspect}, not ISO 8601"
+      end
       raise DataError, "#{t.id} appears twice" unless seen.add?(t.id)
       unless t.security.nil? || SECURITIES.include?(t.security)
         raise DataError, "#{t.id} has Security=#{t.security.inspect}, not one of #{SECURITIES}"
@@ -380,170 +384,5 @@ module EpicClustering
       { id: t.id, title: t.title, days: days,
         reason: "LOW #{t.kind || 'Kind unset'}, open #{days} days, nothing depends on it" }
     end.sort_by { |x| [-x[:days], id_number(x[:id])] }.first(WONT_FIX_MAX)
-  end
-
-  def fmt_counts(counts)
-    counts.sort_by { |k, _| NextMission::KIND_ORDER.index(k) || 99 }.map do |kind, sev|
-      "#{kind} " + sev.sort_by { |s, _| NextMission::SEVERITIES.index(s) || 9 }.map { |s, n| "#{s}:#{n}" }.join(" ")
-    end.join("; ")
-  end
-
-  def digest_sections(d)
-    s = {}
-    s["Tier-4 queue (by project and Area)"] =
-      if d[:tier4_queue].empty? then ["none"]
-      else d[:tier4_queue].map { |g| "#{g[:project]} / #{g[:area]}: #{g[:count]} (#{fmt_counts(g[:counts])})" }
-      end
-    off = Array(d[:features_off_path])
-    s["Tier-4 queue (by project and Area)"] << "Features with no Path=Critical (not queued here; a planning gap): " \
-                                               "#{off.empty? ? 'none' : "#{off.size}: #{off.join(', ')}"}"
-    s["Next #{NEXT_N} in work order (next-mission tier-4 order)"] =
-      if d[:next].empty? then ["none ready"]
-      else d[:next].each_with_index.map { |x, i| "#{i + 1}. #{x[:id]} #{x[:severity] || '-'} #{x[:kind]}: #{x[:title]}" }
-      end
-    s["Why tier 4 is or isn't moving"] = moving_lines(d[:moving])
-    s["Won't-fix candidates"] =
-      d[:wont_fix].empty? ? ["None today"] : d[:wont_fix].map { |x| "#{x[:id]} #{x[:title]}: #{x[:reason]}" }
-    s["Pass summary"] = pass_lines(d[:pass_summary])
-    s["Status hygiene"] = status_lines(d[:status])
-    s["Ticket hygiene (N1)"] = hygiene_lines(d[:hygiene])
-    s
-  end
-
-  def moving_lines(m)
-    c = m[:tier_counts]
-    lines = ["Open tier 1: #{c[1]}, tier 2: #{c[2]}, tier 3: #{c[3]}."]
-    lines << "Started: #{m[:started].empty? ? 'none' : m[:started].join(', ')}."
-    lines << "Blocked on a dependency: #{m[:blocked].empty? ? 'none' : m[:blocked].join(', ')}."
-    lines << if m[:owner_gated].empty?
-               "Owner-gated (Needs Attention): none."
-             else
-               "Owner-gated (Needs Attention): " + m[:owner_gated].map { |x| "#{x[:id]} (tier #{x[:tier]}) #{x[:title]}" }.join("; ") + "."
-             end
-    if m[:held_by_functional_first].empty?
-      lines << "Functional-first holds: none."
-    else
-      m[:held_by_functional_first].each do |h|
-        lines << "Functional-first: #{h[:held]} tier-4 held in #{h[:epic]} until #{h[:unfinished].join(', ')} land."
-      end
-    end
-    lines
-  end
-
-  def pass_lines(p)
-    return ["not given (no --pass-summary; this digest ran without a pass)"] if p.nil?
-
-    moved = Array(p["moved"]).map { |m| "#{m['id']} #{m['from']} -> #{m['to']}" }
-    merged = Array(p["merged"]).map { |m| "#{m['duplicate']} into #{m['keep']}" }
-    closed = Array(p["closed"]).map { |m| "#{m['id']} (#{m['evidence']})" }
-    ["Moved: #{moved.empty? ? 'none' : moved.join('; ')}",
-     "Merged (C3): #{merged.empty? ? 'none' : merged.join('; ')}",
-     "Closed as fixed (C4): #{closed.empty? ? 'none' : closed.join('; ')}"]
-  end
-
-  def status_lines(s)
-    return ["stale In Progress check not run"] if s.nil?
-    return ["stale In Progress check skipped: #{s[:skipped]}"] if s[:stale].nil?
-    return ["stale In Progress: none of #{s[:checked]} (source: --started)"] if s[:stale].empty?
-
-    ["stale In Progress (no live captain per --started): #{s[:stale].size} of #{s[:checked]}"] +
-      s[:stale].map { |x| "#{x[:id]} #{x[:title]}" } + ["Fix per ticket-management: #{s[:stale].first[:fix]}"]
-  end
-
-  def hygiene_lines(h)
-    return ["ticket bodies not scanned"] if h.nil?
-
-    head = "scanned #{h[:scanned]} bodies, flagged #{h[:flagged].size}"
-    unless h[:unread].empty?
-      shown = h[:unread].first(UNREAD_SHOWN)
-      more = h[:unread].size - shown.size
-      head += "; #{h[:unread].size} UNREAD (not judged): #{shown.join(', ')}#{more.positive? ? " and #{more} more" : ''}"
-      why = h[:unread_reasons].to_h
-      head += " [#{why.map { |k, n| "#{n}x #{k}" }.join('; ')}]" unless why.empty?
-    end
-    [head] + h[:flagged].map { |x| "#{x[:id]} (#{x[:kind]}) lacks #{x[:missing].join(', ')}" }
-  end
-
-  def digest_text(d)
-    out = ["Daily digest #{d[:now]}"]
-    digest_sections(d).each do |title, lines|
-      if title == "Won't-fix candidates" && lines == ["None today"]
-        out << "Won't-fix candidates: None today"
-        next
-      end
-      out << "" << "#{title}:"
-      out.concat(lines.map { |l| "  #{l}" })
-    end
-    out.join("\n")
-  end
-
-  SECTION_MAX = 2900
-
-  # Informational Block Kit: header line naming the sending session, one
-  # section per part. No buttons (nothing is asked; approvals are separate).
-  def digest_blocks(d, session:)
-    blocks = [section("*#{session}:*\nDaily ticket digest, #{d[:now]}. Tier 4 is worked after tiers 1-3.")]
-    digest_sections(d).each do |title, lines|
-      blocks << section(clip("*#{title}*\n" + lines.map { |l| "• #{l}" }.join("\n")))
-    end
-    raise DataError, "digest renders #{blocks.size} blocks; Slack allows 50" if blocks.size > 50
-
-    blocks
-  end
-
-  def section(text) = { "type" => "section", "text" => { "type" => "mrkdwn", "text" => text } }
-
-  def clip(text)
-    return text if text.length <= SECTION_MAX
-
-    kept = text[0, SECTION_MAX - 40].rpartition("\n").first
-    "#{kept}\n• … #{text.count("\n") - kept.count("\n")} more lines in the run log"
-  end
-
-  # ---------------------------------------------------------------- requests
-
-  REQUEST_TYPES = {
-    "promote" => { yes: "Promote to tier %<tier>s", no: "Leave in tier 4",
-                   yes_effect: "Sets Path=Promoted; worked ahead of tier 4.",
-                   no_effect: "Stays in tier 4; worked after the critical path." },
-    "wont-fix" => { yes: "Won't fix", no: "Keep",
-                    yes_effect: "Status becomes Won't Fix; the reason and your choice go in the body.",
-                    no_effect: "Stays open in tier 4; worked in turn." }
-  }.freeze
-
-  def approval_request(type:, ticket:, title:, background:, why:, recommend:, session:, tier: nil)
-    spec = REQUEST_TYPES.fetch(type) { raise DataError, "request type #{type.inspect} is not one of #{REQUEST_TYPES.keys}" }
-    { "background" => background, "why" => why, "title" => title }.each do |k, v|
-      raise DataError, "#{k} is empty; an approval request needs background, why and title" if v.to_s.strip.empty?
-    end
-    raise DataError, "recommend must be yes or no, got #{recommend.inspect}" unless %w[yes no].include?(recommend)
-    raise DataError, "a promote request needs --tier 0-3" if type == "promote" && !(0..3).cover?(tier)
-    raise DataError, "ticket #{ticket.inspect} is not an id like DND-12" unless ticket.to_s.match?(NextMission::ID_RE)
-
-    yes = format(spec[:yes], tier: tier)
-    no = spec[:no]
-    rec = recommend == "yes" ? yes : no
-    q = type == "promote" ? "Promote #{ticket} to tier #{tier}?" : "Close #{ticket} as Won't Fix?"
-    body = [
-      "*#{session}:*\n*#{q}*\n#{ticket}: #{title}",
-      "*Background*\n#{background}",
-      "*Why it matters*\n#{why}",
-      "*Options*\n• #{yes}: #{spec[:yes_effect]}\n• #{no}: #{spec[:no_effect]}",
-      "*Recommendation*\n#{rec}. Silence changes nothing."
-    ].map { |t| section(t) }
-    key = type.delete("-")
-    btn = lambda do |label, value, action, primary|
-      b = { "type" => "button", "text" => { "type" => "plain_text", "text" => label },
-            "value" => value, "action_id" => action }
-      b["style"] = "primary" if primary
-      b
-    end
-    buttons = [
-      btn.call(recommend == "yes" ? "#{yes} (recommended)" : yes, "#{key}:yes:#{ticket}", "#{key}_yes", recommend == "yes"),
-      btn.call(recommend == "no" ? "#{no} (recommended)" : no, "#{key}:no:#{ticket}", "#{key}_no", recommend == "no"),
-      btn.call("Your call (#{rec})", "#{key}:#{recommend}:#{ticket}", "#{key}_your_call", false)
-    ]
-    { text: "#{session}: #{q} #{ticket} #{title}. Recommended: #{rec}.",
-      blocks: body + [{ "type" => "actions", "elements" => buttons }] }
   end
 end

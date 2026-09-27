@@ -10,8 +10,12 @@
 # offline JSON fixture. It never writes Notion, never posts to Slack, and never
 # moves a ticket: every write in a clustering pass is the architect's, made per
 # SKILL.md. Its only writes are the local files its caller names (--save,
-# --blocks-out), so risk.yml classes it idempotent. The rules live in lib/epic_clustering.rb; tiers and the tier-4
-# order are next-mission's (ai/lib/next_mission.rb).
+# --blocks-out), so risk.yml classes it idempotent.
+#
+# Buckets: the rules are lib/epic_clustering.rb (domain), the rendering is
+# lib/epic_clustering_view.rb, the reads are lib/epic_clustering_notion.rb and
+# lib/epic_clustering_fixture.rb (adapters); this script orchestrates. Tiers
+# and the tier-4 order are next-mission's (ai/lib/next_mission.rb).
 #
 # Exit codes -- a failed lookup must never look like an empty one:
 #   0  done (read / proof printed or holding / digest or request drafted)
@@ -25,11 +29,14 @@ require "time"
 require_relative "../../../lib/strict_argv"
 require_relative "../lib/epic_clustering"
 require_relative "../lib/epic_clustering_notion"
+require_relative "../lib/epic_clustering_view"
+require_relative "../lib/epic_clustering_fixture"
 
 PROG = "epic-clustering"
 TOKEN_FILE = File.join(Dir.home, ".claude", "notion-personal-token")
 SUITE = File.expand_path("../test/self-test.sh", __dir__)
 EC = EpicClustering
+ECV = EpicClusteringView
 
 USAGE = <<~TXT
   Usage: epic-clustering COMMAND [options]
@@ -116,35 +123,6 @@ end
 
 # ------------------------------------------------------------------ sources
 
-# The offline fixture: the same shapes the Notion adapter returns.
-class FixtureSource
-  def initialize(path)
-    data = JSON.parse(File.read(path))
-    raise TypeError, "top level is not an object" unless data.is_a?(Hash)
-    raise TypeError, "\"epics\" and \"tickets\" must be arrays" unless data["epics"].is_a?(Array) && data["tickets"].is_a?(Array)
-
-    @epics = data["epics"].map { |h| EC::Epic.new(page_id: h.fetch("page_id"), name: h.fetch("name"), status: h["status"], project: h["project"]) }
-    @tickets = data["tickets"].map do |h|
-      EC::Ticket.new(**%w[id page_id title status kind severity security path area created body].to_h { |k| [k.to_sym, h[k]] },
-                     epic_ids: Array(h["epic_ids"]), depends_on: Array(h["depends_on"]), blocks: Array(h["blocks"]))
-    end
-  rescue SystemCallError, JSON::ParserError, TypeError, KeyError => e
-    read_error("fixture #{path}: #{e.class}: #{e.message}", "pass a readable fixture shaped as in --help.")
-  end
-
-  def epic_with_tickets(key)
-    e = @epics.find { |x| x.page_id == key || x.name == key }
-    raise NextMissionNotion::ReadError, "no epic #{key.inspect} in the fixture" if e.nil?
-
-    [e, @tickets.select { |t| t.epic_ids.include?(e.page_id) }]
-  end
-
-  def open_epics = @epics.select { |e| EpicClusteringNotion::OPEN_EPIC_STATUSES.include?(e.status) }
-  def all_epics = @epics
-  def open_tickets = @tickets.select { |t| EC.open?(t) }.map(&:dup)
-  def body(page_id) = @tickets.find { |t| t.page_id == page_id }&.body
-end
-
 def notion_source
   unless File.readable?(TOKEN_FILE)
     read_error("the notion-personal token file #{TOKEN_FILE} is missing or unreadable",
@@ -157,7 +135,11 @@ def notion_source
 end
 
 def source(opts)
-  opts["--from-json"] ? FixtureSource.new(opts["--from-json"]) : notion_source
+  return notion_source unless opts["--from-json"]
+
+  EpicClusteringFixture.new(opts["--from-json"])
+rescue EpicClusteringFixture::FixtureError => e
+  read_error("fixture #{e.message}", "pass a readable fixture shaped as lib/epic_clustering_fixture.rb describes.")
 end
 
 def epic_keys(opts, src)
@@ -172,6 +154,12 @@ def epic_keys(opts, src)
   usage_error("no scope: pass --epic, --epics or --all-open-epics") if keys.empty? && !opts["--all-open-epics"]
   read_error("--all-open-epics matched no open epic", "check the DND Epics Status values; an empty set is not a clean pass.") if keys.empty?
   keys.uniq
+end
+
+def write_file(path, content)
+  File.write(path, content)
+rescue SystemCallError => e
+  read_error("could not write #{path}: #{e.message}", "pass a writable path (a scratch file namespaced with the pass).")
 end
 
 def load_epics(src, keys)
@@ -223,11 +211,18 @@ def cmd_read(opts)
        "#{lane.empty? ? 'none' : "#{lane.size}: #{lane.join(', ')}"}"
 end
 
+# Each entry must be {name: String, count: Integer, ids: [ticket ids]} with
+# count == ids.size; an edited or truncated snapshot proves nothing.
 def load_snapshot(path)
   data = JSON.parse(File.read(path))
-  epics = data["epics"]
+  epics = data.is_a?(Hash) ? data["epics"] : nil
   raise TypeError, "\"epics\" is not an object" unless epics.is_a?(Hash)
 
+  epics.each do |id, e|
+    ok = e.is_a?(Hash) && e["name"].is_a?(String) && e["count"].is_a?(Integer) && e["ids"].is_a?(Array) &&
+         e["ids"].all? { |i| i.is_a?(String) && i.match?(NextMission::ID_RE) } && e["count"] == e["ids"].size
+    raise TypeError, "entry #{id.inspect} is not {name, count, ids} with count == ids.size" unless ok
+  end
   epics
 rescue SystemCallError, JSON::ParserError, TypeError => e
   read_error("snapshot #{path}: #{e.class}: #{e.message}",
@@ -242,37 +237,46 @@ def cmd_proof(opts)
       usage_error("--against re-reads the snapshot's own epics; drop --epic/--epics/--all-open-epics")
     end
     before = load_snapshot(opts["--against"])
-    after = EC.proof_snapshot(load_epics(src, before.keys))
+    pairs = before.keys.filter_map do |id|
+      e, ts = src.epic_with_tickets(id)
+      [e, EC.validate!(ts)]
+    rescue NextMissionNotion::ReadError => err
+      warn "#{PROG}: could not read epic #{id} again: #{err.message}"
+      nil
+    end
+    after = EC.proof_snapshot(pairs)
     result = EC.compare_proof(before, after)
     if opts["--json"]
       puts JSON.pretty_generate(before: before, after: after, mismatches: result.mismatches, joined: result.joined)
     else
       puts "before:"
-      EC.proof_lines(before).each { |l| puts "  #{l}" }
+      ECV.proof_lines(before).each { |l| puts "  #{l}" }
       puts "after:"
-      EC.proof_lines(after).each { |l| puts "  #{l}" }
+      ECV.proof_lines(after).each { |l| puts "  #{l}" }
       result.joined.each do |id, ids|
         puts "joined (reported, not a failure): #{after.dig(id, 'name')} (#{id}) gained #{ids.join(', ')}"
       end
     end
     if result.ok?
+      held = before.sum { |id, b| (b["ids"] & after.fetch(id)["ids"]).size }
       puts "proof holds: #{before.size} epic(s); every before id is still in its epic " \
-           "(#{before.sum { |_, s| s['count'] }} before = #{before.sum { |_, s| s['count'] }} still there)"
+           "(#{before.sum { |_, b| b['count'] }} before, #{held} still there)"
       return
     end
     result.mismatches.each do |m|
       warn "#{PROG}: PROOF MISMATCH #{m[:name]} (#{m[:epic]}): #{m[:reason]}; before #{m[:before_count]}, " \
            "still there #{m[:still_there]}; missing: #{m[:missing].join(', ')}"
     end
-    warn "Fix: move each missing ticket back to the epic named above (a never-movable ticket must not leave), " \
-         "then re-run proof --against. Report the mismatch in the batched summary."
+    warn "Fix: move each missing ticket back to the epic named above, and undo any Path or Kind edit made " \
+         "during the pass (a never-movable ticket must not leave). An epic that could not be read again: " \
+         "re-run proof --against until it reads. Report the mismatch in the batched summary."
     exit 4
   end
   snap = EC.proof_snapshot(load_epics(src, epic_keys(opts, src)))
-  puts(opts["--json"] ? JSON.pretty_generate(snap) : EC.proof_lines(snap))
+  puts(opts["--json"] ? JSON.pretty_generate(snap) : ECV.proof_lines(snap))
   return unless opts["--save"]
 
-  File.write(opts["--save"], JSON.pretty_generate("taken_at" => Time.now.utc.iso8601, "epics" => snap) + "\n")
+  write_file(opts["--save"], JSON.pretty_generate("taken_at" => Time.now.utc.iso8601, "epics" => snap) + "\n")
   puts "snapshot saved: #{opts['--save']} (#{snap.size} epic(s))"
 rescue EC::DataError => e
   read_error(e.message, "take a before snapshot that names the touched epics, then compare against it.")
@@ -287,6 +291,8 @@ def cmd_digest(opts)
   end
   started = opts["--started"]&.split(",")&.map(&:strip)&.reject(&:empty?)
   usage_error("--started is empty") if started&.empty?
+  bad = Array(started).reject { |i| i.match?(NextMission::ID_RE) }
+  usage_error("--started has malformed id(s) #{bad.join(', ')}; expected ids like DND-12") unless bad.empty?
   summary = nil
   if opts["--pass-summary"]
     summary = begin
@@ -316,12 +322,18 @@ def cmd_digest(opts)
     end
     hygiene = EC.ticket_hygiene(tickets)
     hygiene[:unread_reasons] = unread_why
+    if hygiene[:scanned].zero? && !hygiene[:unread].empty?
+      read_error("no ticket body could be read (#{hygiene[:unread].size} tried: " \
+                 "#{unread_why.map { |k, n| "#{n}x #{k}" }.join('; ')})",
+                 "on HTTP 401/403 the notion-personal integration lost access (owner-gated); on 429 re-run later; " \
+                 "or pass --no-bodies and say the hygiene scan was skipped.")
+    end
   end
   d = EC.build_digest(tickets: tickets, epics: epics, now: now, pass_summary: summary,
                       status: EC.status_hygiene(tickets, started: started), hygiene: hygiene)
   session = opts["--session"] || DEFAULT_SESSION
-  blocks = EC.digest_blocks(d, session: session)
-  File.write(opts["--blocks-out"], JSON.pretty_generate(blocks) + "\n") if opts["--blocks-out"]
+  blocks = ECV.digest_blocks(d, session: session)
+  write_file(opts["--blocks-out"], JSON.pretty_generate(blocks) + "\n") if opts["--blocks-out"]
   if opts["--json"]
     puts JSON.pretty_generate(d)
     return
@@ -331,7 +343,7 @@ def cmd_digest(opts)
        "won't-fix candidates #{d[:wont_fix].size}."
   puts "blocks: #{opts['--blocks-out'] ? "#{blocks.size} written to #{opts['--blocks-out']}" : "#{blocks.size} (not written; pass --blocks-out)"}"
   puts
-  puts EC.digest_text(d)
+  puts ECV.digest_text(d)
 rescue EC::DataError => e
   read_error(e.message, "the ticket data is outside what the digest can place; fix the ticket in Notion, " \
                         "or read every epic its tickets link to.")
@@ -341,16 +353,17 @@ def cmd_request(opts)
   %w[--type --ticket --title --background --why --recommend].each do |f|
     usage_error("request needs #{f}") unless opts[f]
   end
-  r = EC.approval_request(type: opts["--type"], ticket: opts["--ticket"], title: opts["--title"],
-                          background: opts["--background"], why: opts["--why"], recommend: opts["--recommend"],
-                          tier: opts["--tier"], session: opts["--session"] || DEFAULT_SESSION)
-  File.write(opts["--blocks-out"], JSON.pretty_generate(r[:blocks]) + "\n") if opts["--blocks-out"]
+  r = ECV.approval_request(type: opts["--type"], ticket: opts["--ticket"], title: opts["--title"],
+                           background: opts["--background"], why: opts["--why"], recommend: opts["--recommend"],
+                           tier: opts["--tier"], session: opts["--session"] || DEFAULT_SESSION)
+  write_file(opts["--blocks-out"], JSON.pretty_generate(r[:blocks]) + "\n") if opts["--blocks-out"]
   puts "DRAFT: #{PROG} never sends. Post with mcp__athena__slack_post and inbox_name (athena:slack)."
   puts "slack text: #{r[:text]}"
   puts "blocks: #{opts['--blocks-out'] ? "#{r[:blocks].size} written to #{opts['--blocks-out']}" : JSON.generate(r[:blocks])}"
 rescue EC::DataError => e
   warn "#{PROG}: #{e.message}"
-  warn "Fix: give the request real background, why and title, --recommend yes|no, and --tier 0-3 for a promote."
+  warn "Fix: give the request real background, why and title (each under 3000 characters), --recommend yes|no, " \
+       "and --tier 0-3 for a promote only."
   exit 2
 end
 

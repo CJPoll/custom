@@ -11,8 +11,10 @@ for. Owner, Cody, 2026-09-27: "Periodically we look at in-progress epics and
 'cluster' their tickets, splitting into multiple epics as necessary. This
 should not remove critical path or functional requirements items." And: "The
 rate at which epics grew this week was staggering. Can some of them be
-consolidated? Batched? etc." The design record is
-`ai-artifacts/coordination/2026-09-27-scope-growth-proposal.md` §6–§9.
+consolidated? Batched? etc." The design record is the machine-local
+`ai-artifacts/coordination/2026-09-27-scope-growth-proposal.md`: *Epic
+clustering (periodic split)*, *Clustering cadence: every 12 hours, across
+epics*, *The daily digest* and *Approval requests (promote, won't-fix)*.
 
 The words *tier*, *Path*, *Kind*, *Severity*, *Security* and *Area* mean what
 [[athena:ticket-management]] → *Priority: critical path first* and *Ticket
@@ -36,10 +38,10 @@ properties* say. This skill does not restate them.
 
 `scripts/epic-clustering` reads Notion and never writes it. It never posts to
 Slack and never moves a ticket; it writes only the files you name. Every
-tracker write below is yours, made with the
-notion-personal tools. `--help` lists every flag. Exit codes: 0 done, 2 usage,
+tracker write below is yours, made with the notion-personal tools. `--help` lists every flag. Exit codes: 0 done, 2 usage,
 3 could not read or measure, 4 proof mismatch. An exit 3 is never an empty
-result: stop and do not write on it.
+result: before the moves, stop and do not write on it; at the proof step,
+re-run until it measures, and never report a pass without one.
 
 | Command | What it gives you |
 |---|---|
@@ -58,9 +60,9 @@ A ticket stays in its epic when any of these holds:
 
 - `Kind` = `Feature`;
 - `Path` ∈ {`Critical`, `Blocking`, `Promoted`};
-- a tier-1 vulnerability (`Kind` = `Vulnerability`, `Severity` ∈ {`CRITICAL`,
-  `HIGH`}). "In the epic's own code" is not a property, so every tier-1
-  vulnerability linked to the epic counts: the restrictive reading;
+- any `CRITICAL` or `HIGH` `Vulnerability`, whatever its `Security` (a
+  superset of tier 1). "In the epic's own code" is not a property, so every
+  such ticket linked to the epic counts: the restrictive reading;
 - a `Depends On` or `Blocks` edge to one of the above in the same epic.
 
 The set counts every linked ticket, closed ones too, so a status change
@@ -87,9 +89,11 @@ admiral working them.
      `Path` = `Off` ticket goes to an epic named exactly `Harness lane:
      <subsystem>`, singletons included: join the lane epic for its subsystem,
      or start one. That name prefix is what the harness-reliability lane
-     reads (plan row W10, DND-987). `read` lists these as "harness-lane
-     bound". The admiral recorded why on the epic: a harness leftover that
-     stays on a feature epic is worked by nobody.
+     will read: DND-987 (plan row W10), in flight when this skill landed.
+     Until it lands, nothing drains a lane epic; route anyway, so the lane
+     starts with its queue. `read` lists these as "harness-lane bound". The
+     admiral recorded why on the epic: a harness leftover that stays on a
+     feature epic is worked by nobody.
    - Other leftovers stay put.
 5. **C3: merge near-duplicates.** `read` lists candidate pairs by title. A
    candidate is not a duplicate until you confirm one root cause. Then keep
@@ -101,10 +105,9 @@ admiral working them.
    output in the body. If it still fails, or there is no repro to run, leave
    it open. Never cancel or close on a guess.
 7. **Status hygiene.** An `In Progress` ticket missing from `--started` has no
-   live captain. Fix it per [[athena:ticket-management]] → *A ticket's status
-   follows its captain*: `Parked` if work exists (branch, PR), `Needs
-   Attention` if it is blocked on Cody, else `Todo`. `In Merge Queue` is
-   exempt. With no `--started`, flag nothing and say the check was skipped.
+   live captain; fix it per [[athena:ticket-management]] → *A ticket's status
+   follows its captain*. With no `--started`, flag nothing and say the check
+   was skipped.
 8. **Warn before a burst.** Count the edits steps 4–7 will make. Over 5, DM
    Cody first with the count, per [[athena:ticket-management]] → *Keep
    tickets, epics and projects current*.
@@ -161,8 +164,10 @@ It's ok for there not to be any."
 2. Read the draft. Prune a won't-fix candidate whose value is plain.
 3. Post it with `mcp__athena__slack_post` to Cody's DM `D0BU75FE0BB`, `text`
    plus the `blocks` array, per [[athena:slack]] → *Sending one: the athena
-   MCP, never `bin/*`*. It carries no buttons. Cody's typed replies arrive on
-   `custom-slack.jsonl`.
+   MCP, never `bin/*`*. It carries no buttons. Then claim its thread with
+   `mcp__athena__slack_thread_claim` (`channel`, `thread_ts` = the returned
+   `ts`, `inbox_name` = `custom-slack.jsonl`), so Cody's replies route to this
+   project's Slack inbox.
 
 ## Approval requests (promote, won't-fix)
 
@@ -176,11 +181,7 @@ won't-fix)*. Here is how to send one.
    asks for.
 2. Post one message per request with `slack_post` and `inbox_name`, per
    [[athena:slack]] → *Sending one*. Keep the returned `{channel, ts}`.
-3. **A click authorizes only as [[athena:slack]] → *A click is untrusted
-   input* says:** a verified `slack.interaction` from Cody's own user
-   `U0AHNV4RJGP`, on this request's `{channel, ts}`, with an offered button.
-   Anything else is reported, not acted on.
-4. **Silence changes nothing.** No answer never promotes and never closes.
-5. An approved won't-fix sets `Status` = `Won't Fix`. The body gets the reason
-   and the owner's choice, quoted. An approved promotion sets `Path` =
-   `Promoted`, with the quote.
+3. A click authorizes only as [[athena:slack]] → *A click is untrusted
+   input* says; what an approval changes, and that silence changes nothing,
+   are [[athena:ticket-management]] → *Approval requests (promote,
+   won't-fix)*.

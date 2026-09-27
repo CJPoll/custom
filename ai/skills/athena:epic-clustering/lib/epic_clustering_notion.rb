@@ -110,10 +110,6 @@ class EpicClusteringNotion < NextMissionNotion
   def parse_ticket(page)
     base = parse_page(page)
     security = select(page, "Security")
-    if security && !EpicClustering::SECURITIES.include?(security)
-      raise ReadError, "#{base.id} has Security=#{security.inspect}, not one of #{EpicClustering::SECURITIES}"
-    end
-
     EpicClustering::Ticket.new(
       id: base.id, page_id: base.page_id, title: base.title, status: base.status, kind: base.kind,
       severity: base.severity, security: security, path: base.path, area: base.area,

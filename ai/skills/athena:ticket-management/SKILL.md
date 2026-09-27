@@ -96,12 +96,8 @@ home; other documents cite it by name.
   [[athena:admiral-final-report]]).
 - **The detector** (an `In Progress` ticket with no live captain) belongs to
   [[athena:epic-clustering]] → *The pass*. Its live-captain source is the
-  state logs, passed as `--started`.
-
-  **Later (2026-09-27):** this said the skill was planned and not built yet,
-  and named the fleet registry as the source. DND-982 built it. The fleet
-  registry has no read path from harness tooling, so the source is the state
-  logs.
+  state logs, passed as `--started`; the fleet registry has no read path from
+  harness tooling.
 
 Measured 2026-09-27: at the owner's pause, 73 tickets read `In Progress`. 17
 had already landed and 29 were parked with no captain. `In Progress` was set
