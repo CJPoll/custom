@@ -258,12 +258,14 @@ module OwnerNotes
                               "Fix: pass a readable file holding the owner's exact words."
              end
            end
+    # Check the encoding first: a regex on invalid UTF-8 raises ArgumentError.
+    text = text.dup.force_encoding(Encoding::UTF_8)
+    unless text.valid_encoding?
+      raise Refused, "the note is not valid UTF-8.\nFix: pass the words as UTF-8 text."
+    end
     text = text.sub(/\n+\z/, "")
     if text.strip.empty?
       raise Refused, "the note is empty.\nFix: pass the owner's exact words; an empty note carries no authority."
-    end
-    unless text.valid_encoding?
-      raise Refused, "the note is not valid UTF-8.\nFix: pass the words as UTF-8 text."
     end
     text
   end
@@ -399,6 +401,17 @@ module OwnerNotes
 
   def main(argv)
     opts = StrictArgv.parse(argv, CLI_SPEC)
+    # Every string op below (strip, sub, regex) raises on invalid UTF-8, so a
+    # bad value is refused here, once, for every flag (DND-988 critic round 3).
+    opts.each do |flag, value|
+      next unless value.is_a?(String)
+      next if value.dup.force_encoding(Encoding::UTF_8).valid_encoding?
+
+      warn "owner-notes: the #{flag} value is not valid UTF-8."
+      warn "Fix: pass #{flag} as UTF-8 text (words in another encoding: convert with iconv, then use --text-file)."
+      return 64
+    end
+    opts = opts.transform_values { |v| v.is_a?(String) ? v.dup.force_encoding(Encoding::UTF_8) : v }
     if opts["--help"] || opts["-h"]
       $stdout.write(usage)
       return 0

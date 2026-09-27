@@ -206,6 +206,33 @@ else
   bad "empty note" "rc=${RC} err=${ERR}"
 fi
 
+# --- non-UTF-8 words are refused with Fix:, not a Ruby backtrace ---------------
+printf 'caf\xe9 \xff\n' > "${TMP}/latin1.txt"
+run "${sd}" --add --source owner --text-file "${TMP}/latin1.txt"
+if [ "${RC}" -eq 1 ] && has "${ERR}" "not valid UTF-8" && has "${ERR}" "Fix:" \
+   && ! has "${ERR}" "ArgumentError" && ! grep -q '^## N3 ' "${f}"; then
+  ok "a non-UTF-8 --text-file is refused with Fix:, nothing written"
+else
+  bad "non-UTF-8 text-file" "rc=${RC} err=${ERR}"
+fi
+
+# The same class on every argv value: --text, --relayed-from, --context.
+bad_bytes="$(printf 'r\xff')"
+for flagset in "--text" "--relayed-from" "--context"; do
+  case "${flagset}" in
+    --text)         args=(--source owner --text "${bad_bytes}") ;;
+    --relayed-from) args=(--source coordinator --relayed-from "${bad_bytes}" --text ok) ;;
+    --context)      args=(--source owner --text ok --context "${bad_bytes}") ;;
+  esac
+  run "${sd}" --add "${args[@]}"
+  if [ "${RC}" -eq 64 ] && has -- "${ERR}" "${flagset}" && has "${ERR}" "UTF-8" && has "${ERR}" "Fix:" \
+     && ! has "${ERR}" "Error)" && ! grep -q '^## N3 ' "${f}"; then
+    ok "a non-UTF-8 ${flagset} value is a usage error with Fix:, nothing written"
+  else
+    bad "non-UTF-8 ${flagset}" "rc=${RC} err=${ERR}"
+  fi
+done
+
 # --- list shows both open; address flips only N1's Status line --------------------
 run "${sd}" --list --open
 if [ "${RC}" -eq 0 ] && has "${OUT}" "2 open of 2 notes" \
