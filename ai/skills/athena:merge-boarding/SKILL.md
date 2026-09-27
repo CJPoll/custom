@@ -247,7 +247,8 @@ an exit 0 never overrides a captain's `IRREVERSIBLE`. No standing approval
 overrides it either, a security fix included; hold it and request the go as for
 exit 4 (`~/.claude/CLAUDE.md` → *What no standing approval covers*).
 
-**A merge that applies terraform holds for the owner**, under every standing
+**A merge whose diff touches a terraform root that merging auto-applies (the
+`BLAST-RADIUS HOT` block's terraform paths/roots) holds for the owner**, under every standing
 approval, security fixes included, and you request the go the same way, with
 the plan's summary. No plan verifier has landed to tell a secrets update from a
 destroy or a cost change. The rule lives in *What no standing approval

@@ -53,8 +53,9 @@ through to completion without them.
    ordered list of the stacked, ready-to-merge PRs, so one manual step lands
    the whole stack. Besides this owner-creds/console class, only the merge
    holds in `~/.claude/CLAUDE.md` → *What no standing approval covers* wait on
-   the owner. Those include any merge that applies terraform
-   and a captain's `IRREVERSIBLE`. Request each by Block Kit as that
+   the owner. Those include a merge whose diff touches a terraform root
+   that merging auto-applies (the `BLAST-RADIUS HOT` block's terraform
+   paths/roots), and a captain's `IRREVERSIBLE`. Request each by Block Kit as that
    section says. Everything else, security fixes included, still ships. A
    change a standing approval covers needs no owner go even at
    `integration-gate` exit 4: `~/.claude/CLAUDE.md` → *Standing owner

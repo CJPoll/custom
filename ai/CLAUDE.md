@@ -333,14 +333,17 @@ as "direct, verified".
 
 The holds:
 
-- **Any merge that applies terraform.** The owner reserved "a terraform
+- **A merge whose diff touches a terraform root that merging auto-applies
+  (the `BLAST-RADIUS HOT` block's terraform paths/roots).** The owner reserved "a terraform
   change [that] will destroy production infrastructure (like RDS) or add
   cost", and carved out "secrets updates". Telling those apart needs a plan
   verifier that can prove a plan only updates secrets. None has landed: one
   was built in DND-978 and dropped before landing, after critic rounds kept
-  finding plans it misread as harmless. So every merge whose automation
-  applies terraform holds for the owner, security fixes and secrets updates
-  included. Request the go with the plan's summary (`terraform show` of the
+  finding plans it misread as harmless. So a merge whose diff touches a
+  terraform root that merging auto-applies (the `BLAST-RADIUS HOT` block's
+  terraform paths/roots) holds for the owner, security fixes and secrets
+  updates included. A merge whose automation runs `terraform apply` but whose
+  diff touches no such root is not held by this rule. Request the go with the plan's summary (`terraform show` of the
   plan for the merged head, or the reason no plan could be made).
 - **A captain's `Blast radius: IRREVERSIBLE`** holds any change, security fixes
   included (`athena:merge-boarding`).

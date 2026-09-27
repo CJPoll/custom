@@ -1410,8 +1410,9 @@ HOT_FIX = <<~FIX.freeze
   ~/.claude/CLAUDE.md -> "Standing owner approvals" -- is not held; pass
   --owner-approval with the record that rule's own subsection gives, and merge. The full
   bar still applies, and the approval covers only the diff the fix needs. No approval
-  covers what "What no standing approval covers" names: any merge that applies
-  terraform, or a captain's IRREVERSIBLE -- those hold and are requested as above.
+  covers what "What no standing approval covers" names: a merge whose diff touches
+  a terraform root that merging auto-applies (the BLAST-RADIUS HOT block's terraform
+  paths/roots), or a captain's IRREVERSIBLE -- those hold and are requested as above.
 FIX
 
 # --- owner approval grant eligibility (DND-596) -----------------------------
