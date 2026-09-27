@@ -34,9 +34,11 @@
 #            PATH or version-manager lookup can redirect. The rule is textual,
 #            so both machines reach the same verdict.
 #   runtime  HARNESS_SHEBANG, executed by the kernel from a scratch directory
-#            that pins ruby HOSTILE_PIN (.tool-versions and .ruby-version), with
-#            ASDF_RUBY_VERSION / RBENV_VERSION / RUBYOPT scrubbed, reports a Ruby
-#            at or above FLOOR. A shebang that does not start at all is a finding.
+#            pinning each of HOSTILE_PINS (.tool-versions and .ruby-version), with
+#            ASDF_RUBY_VERSION / RBENV_VERSION / RUBYOPT / RUBYLIB scrubbed,
+#            loads `json` (so the user gem dir's native extensions load under
+#            it) and reports a Ruby at or above FLOOR. A shebang that does not
+#            start, or crashes loading json, is a finding.
 #   syntax   every tracked Ruby file parses under FLOOR, using the interpreter
 #            the runtime probe found: `ruby -c` per file when its minor IS the
 #            floor; Prism with `version: FLOOR` when it is newer (so 3.5-only
@@ -88,9 +90,15 @@ HARNESS_SHEBANG = "#!/usr/bin/ruby"
 # Harness Ruby executables outside ai/ (owner-run installers of harness state).
 HARNESS_EXTRA = %w[scripts/setup-inbox-registry].freeze
 
-# The version the runtime probe's scratch directory pins: an old Ruby that
-# asdf/rbenv would select there if they were consulted.
-HOSTILE_PIN = "2.7.8"
+# The versions the runtime probe's scratch directories pin, each a Ruby
+# asdf/rbenv would select there if they were consulted. Measured 2026-09-27:
+#   2.7.8  an old Ruby (~/dev/shenron pins 2.7.0): env-ruby tools ran under it,
+#          or died "No version is set" where it was not installed (DND-931).
+#   3.4.7  a SAME-minor asdf Ruby (navigator, beryl, browser pin it): it shares
+#          the user gem dir ~/.gem/ruby/3.4.0 with system ruby 3.4.10, whose
+#          json-2.18.0 ext is linked to /usr/lib64/libruby34.so, so every
+#          `require "json"` died with "linked to incompatible" (DND-958).
+HOSTILE_PINS = %w[2.7.8 3.4.7].freeze
 
 # Variables that override a version manager's per-directory choice. A probe
 # with one set would measure the override, not the shebang.
@@ -106,9 +114,10 @@ USAGE = <<~TXT.freeze
                                          the landed floor is not lowered, every
                                          harness Ruby executable starts with
                                          #{HARNESS_SHEBANG}, that interpreter is
-                                         #{FLOOR}+ from a directory pinning ruby
-                                         #{HOSTILE_PIN}, and every tracked Ruby
-                                         file parses under #{FLOOR}
+                                         #{FLOOR}+ and loads json from directories
+                                         pinning ruby #{HOSTILE_PINS.join(' / ')},
+                                         and every tracked Ruby file parses under
+                                         #{FLOOR}
     ai/bin/check-ruby-floor --self-test  deterministic, hermetic suite
                                          (throwaway git repos only)
     ai/bin/check-ruby-floor --help       this text
@@ -218,13 +227,17 @@ def run_in(env, cmd, dir, timeout = PROBE_TIMEOUT)
   end
 end
 
-# A scratch directory that pins HOSTILE_PIN for asdf and rbenv alike.
-def hostile_dir
+# A scratch directory that pins ruby `pin` for asdf and rbenv alike.
+def hostile_dir(pin)
   dir = Dir.mktmpdir("check-ruby-floor-pin-")
-  File.write(File.join(dir, ".tool-versions"), "ruby #{HOSTILE_PIN}\n")
-  File.write(File.join(dir, ".ruby-version"), "#{HOSTILE_PIN}\n")
+  File.write(File.join(dir, ".tool-versions"), "ruby #{pin}\n")
+  File.write(File.join(dir, ".ruby-version"), "#{pin}\n")
   dir
 end
+
+# What the probe runs: load json (a native extension from the user gem dir
+# when one is installed there), then report the interpreter.
+PROBE_BODY = "require \"json\"\nprint RUBY_VERSION, \"\\n\", RbConfig.ruby, \"\\n\"\n"
 
 def probe_env(path_prefix)
   env = SCRUB_ENV.to_h { |k| [k, nil] }
@@ -232,12 +245,12 @@ def probe_env(path_prefix)
   env
 end
 
-# Executes a script starting with shebang, from a directory pinning HOSTILE_PIN.
+# Executes a script starting with shebang, from a directory pinning ruby pin.
 # -> { ok: true, version:, ruby: } or { ok: false, why: }
-def probe(shebang, path_prefix = nil)
-  dir = hostile_dir
+def probe(shebang, pin, path_prefix = nil, body = PROBE_BODY)
+  dir = hostile_dir(pin)
   script = File.join(dir, "probe")
-  File.write(script, "#{shebang}\nprint RUBY_VERSION, \"\\n\", RbConfig.ruby, \"\\n\"\n")
+  File.write(script, "#{shebang}\n#{body}")
   File.chmod(0o755, script)
   out, err, status = run_in(probe_env(path_prefix), [script], dir)
   return { ok: false, why: "did not finish within #{PROBE_TIMEOUT}s" } unless status
@@ -256,8 +269,8 @@ ensure
 end
 
 # -> [[rel, 1, message]] (empty when the probe reports FLOOR or newer)
-def runtime_findings(result, shebang, floor)
-  where = "run from a directory pinning ruby #{HOSTILE_PIN}"
+def runtime_findings(result, shebang, floor, pin)
+  where = "run from a directory pinning ruby #{pin}"
   return [[shebang, 1, "the harness shebang, #{where}, #{result[:why]} (runtime)"]] unless result[:ok]
   return [] unless below?(result[:version], floor)
 
@@ -331,9 +344,10 @@ FIXES = {
                "through PATH, where asdf picks the Ruby from the CURRENT directory's " \
                ".tool-versions (e.g. ~/dev/shenron pins 2.7.0).",
   "runtime" => "the harness Ruby is system ruby #{FLOOR}+ at #{HARNESS_SHEBANG.delete_prefix('#!')} " \
-               "(Gentoo: eselect ruby). On a machine where that path is missing or older, the " \
-               "owner installs or selects Ruby #{FLOOR}; do not change the shebang to route " \
-               "around it.",
+               "(Gentoo: eselect ruby), the Ruby that built the user gem dir's native " \
+               "extensions. On a machine where that path is missing or older, or cannot load " \
+               "json, the owner installs or selects Ruby #{FLOOR}; do not change the shebang " \
+               "to route around it, and do not edit ~/.gem.",
   "syntax" => "rewrite the named site so Ruby #{FLOOR} parses it (both machines run " \
               "#{FLOOR}). There is no suppression marker."
 }.freeze
@@ -357,6 +371,7 @@ end
 #   floor:       this tree's floor; default FLOOR
 #   shebang:     the shebang to probe; default HARNESS_SHEBANG
 #   path_prefix: prepended to PATH for the runtime probe
+#   pins:        the versions to probe from; default HOSTILE_PINS
 # -> exit code
 def run_check(root = REPO, opts = {})
   floor = opts.fetch(:floor, FLOOR)
@@ -386,21 +401,26 @@ def run_check(root = REPO, opts = {})
   harness = harness_executables(root, files)
   findings.concat(shebang_findings(root, files, shebang))
 
-  result = probe(shebang, opts[:path_prefix])
-  findings.concat(runtime_findings(result, shebang, floor))
+  pins = opts.fetch(:pins, HOSTILE_PINS)
+  results = pins.map { |pin| [pin, probe(shebang, pin, opts[:path_prefix])] }
+  results.each { |pin, result| findings.concat(runtime_findings(result, shebang, floor, pin)) }
 
-  syntax_note = "syntax not read: the harness shebang did not give a #{floor}+ ruby"
-  if result[:ok] && !below?(result[:version], floor)
-    findings.concat(syntax_findings(root, files, result[:ruby], result[:version], floor))
-    syntax_note = "syntax mode #{syntax_mode(result[:version], floor)} under #{result[:ruby]} #{result[:version]}"
+  # Parse under the OLDEST Ruby the shebang gave, and only when every probe
+  # gave a floor-or-newer one.
+  good = results.map(&:last).select { |r| r[:ok] && !below?(r[:version], floor) }
+  syntax_note = "syntax not read: the harness shebang did not give a #{floor}+ ruby from every pinned directory"
+  if good.length == results.length
+    oldest = good.min_by { |r| r[:version].split(".").map(&:to_i) }
+    findings.concat(syntax_findings(root, files, oldest[:ruby], oldest[:version], floor))
+    syntax_note = "syntax mode #{syntax_mode(oldest[:version], floor)} under #{oldest[:ruby]} #{oldest[:version]}"
   end
 
   context = "#{files.length} Ruby file(s), #{harness.length} harness executable(s); #{syntax_note}"
   if findings.empty?
+    seen = results.map { |pin, r| "ruby-#{pin} dir -> #{r[:version]}" }.join(", ")
     puts "check-ruby-floor: OK -- floor #{floor} (landed: #{landed || 'none yet'}); " \
-         "#{harness.length} harness executable(s) on #{shebang}, which runs ruby " \
-         "#{result[:version]} from a ruby-#{HOSTILE_PIN}-pinned directory; " \
-         "#{files.length} Ruby file(s) parse under #{floor} (#{syntax_note})."
+         "#{harness.length} harness executable(s) on #{shebang}, which loads json and runs " \
+         "#{seen}; #{files.length} Ruby file(s) parse under #{floor} (#{syntax_note})."
     return 0
   end
 
@@ -458,13 +478,18 @@ end
 
 # A stand-in for a version manager's `ruby` shim: it honours the CURRENT
 # directory's pin, exactly the behaviour that broke the harness from
-# ~/dev/shenron. It prints what the probe prints, so the probe reads the
-# pinned version; anything else it is asked to run reports that too.
+# ~/dev/shenron (2.7.x) and ~/dev/browser (3.4.7). It prints what the probe
+# prints, so the probe reads the pinned version; under a 3.4.7 pin it fails the
+# way asdf 3.4.7 fails loading the user gem dir's json ext (DND-958).
 def fake_shim_dir
   dir = Dir.mktmpdir("check-ruby-floor-shim-")
   File.write(File.join(dir, "ruby"), <<~SH)
     #!/bin/sh
     v="$(sed -n 's/^ruby //p' .tool-versions 2>/dev/null)"
+    if [ "${v}" = "3.4.7" ]; then
+      echo "json/ext/parser.so: linked to incompatible libruby (LoadError) (fake shim)" >&2
+      exit 1
+    fi
     printf '%s\\n%s\\n' "${v:-3.4.0}" "$0 (fake shim honouring $(pwd)/.tool-versions)"
   SH
   File.chmod(0o755, File.join(dir, "ruby"))
@@ -506,13 +531,19 @@ def run_self_test
 
   # THE REGRESSION (DND-931): a bare `#!/usr/bin/env ruby` harness tool, from a
   # directory pinning an old Ruby, with a cwd-honouring shim first on PATH.
+  # The shim models both measured failures: the 2.7.8 pin runs an old Ruby, the
+  # 3.4.7 pin dies loading a foreign-ABI json extension.
   d = fixture_repo("ai/bin/tool" => "#!/usr/bin/env ruby\nputs 1\n")
   dirs << d
   code, text = check_fixture(d, shebang: "#!/usr/bin/env ruby", path_prefix: shim)
-  report.call(code == 1 && text.include?("runs ruby #{HOSTILE_PIN}") && text.include?("(runtime)") &&
+  report.call(code == 1 && text.include?("pinning ruby 2.7.8, runs ruby 2.7.8") &&
               text.include?("Fix (runtime)"),
-              "runtime: an env-ruby shebang resolves the pinned #{HOSTILE_PIN} and is flagged",
-              "code=#{code} #{text[0, 500]}")
+              "runtime: an env-ruby shebang resolves a 2.7.8 pin and is flagged",
+              "code=#{code} #{text[0, 700]}")
+  report.call(code == 1 && text.include?("pinning ruby 3.4.7, exited 1") &&
+              text.include?("linked to incompatible"),
+              "runtime: an env-ruby shebang that cannot load json under a 3.4.7 pin is flagged",
+              "code=#{code} #{text[0, 700]}")
   # ... and the same shim does not reach the harness shebang.
   d = fixture_repo("ai/bin/tool" => GOOD_TOOL)
   dirs << d
@@ -523,7 +554,7 @@ def run_self_test
   # An inherited override must not mask the pin: the probe scrubs it.
   saved = ENV["ASDF_RUBY_VERSION"]
   ENV["ASDF_RUBY_VERSION"] = "system"
-  env_seen = probe("#!/bin/sh\necho \"${ASDF_RUBY_VERSION:-unset}\"; echo x; exit 0")
+  env_seen = probe("#!/bin/sh", "2.7.8", nil, "echo \"${ASDF_RUBY_VERSION:-unset}\"; echo x; exit 0\n")
   report.call(!env_seen[:ok] && env_seen[:why].include?("unset"),
               "runtime: the probe scrubs ASDF_RUBY_VERSION", env_seen.inspect)
   ENV["ASDF_RUBY_VERSION"] = saved
@@ -588,16 +619,26 @@ def run_self_test
   # Ruby with a cwd-honouring shim first on PATH, runs on the floor.
   # RUBYOPT=-r<file> makes whichever real Ruby starts report its version from
   # inside the tool's own process.
-  pin = hostile_dir
-  dirs << pin
-  reporter = File.join(pin, "report_version.rb")
-  File.write(reporter, "$stderr.puts \"RUBY_UNDER_TEST=\#{RUBY_VERSION}\"\n")
-  out, err, status = run_in(probe_env(shim).merge("RUBYOPT" => "-r#{reporter}"), [File.expand_path(__FILE__), "--help"], pin)
-  seen = err[/RUBY_UNDER_TEST=(\S+)/, 1]
-  report.call(status&.success? && out.include?("Usage:") && !out.include?("fake shim") &&
-              seen && !below?(seen, FLOOR),
-              "end to end: #{SELF_REL} from a #{HOSTILE_PIN}-pinned dir runs under ruby #{seen.inspect} (>= #{FLOOR})",
-              "status=#{status.inspect} out=#{out[0, 200]} err=#{err[0, 200]}")
+  # Each pin runs twice: with the fake shim first on PATH (deterministic on any
+  # machine), and with this machine's real PATH (its real asdf shims and user
+  # gem dir, where the DND-931/DND-958 failures were measured). `-rjson` loads
+  # json the way critic-review does.
+  HOSTILE_PINS.each do |pin_version|
+    pin = hostile_dir(pin_version)
+    dirs << pin
+    reporter = File.join(pin, "report_version.rb")
+    File.write(reporter, "$stderr.puts \"RUBY_UNDER_TEST=\#{RUBY_VERSION}\"\n")
+    [["fake shim", shim], ["real PATH", nil]].each do |label, prefix|
+      env = probe_env(prefix).merge("RUBYOPT" => "-rjson -r#{reporter}")
+      out, err, status = run_in(env, [File.expand_path(__FILE__), "--help"], pin)
+      seen = err[/RUBY_UNDER_TEST=(\S+)/, 1]
+      report.call(status&.success? && out.include?("Usage:") && !out.include?("fake shim") &&
+                  seen && !below?(seen, FLOOR),
+                  "end to end (#{label}): #{SELF_REL} from a ruby-#{pin_version}-pinned dir loads json " \
+                  "and runs under ruby #{seen.inspect} (>= #{FLOOR})",
+                  "status=#{status.inspect} out=#{out[0, 200]} err=#{err[0, 300]}")
+    end
+  end
 
   if fails.zero?
     puts "check-ruby-floor self-test: OK"
