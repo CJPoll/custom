@@ -203,7 +203,12 @@ d	e"
   # provisional default, and the basis names the host that missed.
   t eq "$(n_for_host no-such-host-dnd489)" "$TEST_SLOT_N	provisional, unmeasured on host no-such-host-dnd489"
   t eq "$(n_for_host '')" "$TEST_SLOT_N	provisional, unmeasured on host <unknown>"
-  # Every measured entry is a sane N and cites the sizing record.
+  # Every measured entry is a sane N and cites the sizing record. The host
+  # extraction must find EVERY case arm but the default, so an entry written
+  # in another shape fails here instead of being skipped.
+  arms=$(sed -n '/^n_for_host() {/,/^}/p' "$BIN" | grep -c ') printf')
+  hosts=$(sed -n '/^n_for_host() {/,/^}/p' "$BIN" | sed -n 's/^    \([A-Za-z0-9][A-Za-z0-9._-]*\)) .*/\1/p' | grep -c .)
+  t eq "$hosts" "$((arms - 1))"
   while IFS= read -r h; do
     [ -n "$h" ] || continue
     IFS=$'\t' read -r hn hb < <(n_for_host "$h")

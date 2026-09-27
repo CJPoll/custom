@@ -94,7 +94,7 @@ PENDING.
 ## Known limits
 
 - One gate was measured. gen_saas prep-commit was the heaviest known gate. It
-  is not the commonest slot holder: see the occupancy note below.
+  is not the commonest slot holder: see *Gate classes* above.
 - load1 is a damped 1-minute average. The runnable-count samples show short
   spikes that load1 smooths out.
 - A heavy run inside a container started without a host-side prep-commit or

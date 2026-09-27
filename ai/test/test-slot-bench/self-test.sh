@@ -199,6 +199,13 @@ check h7-default-ceiling has "$W/h7.dec" "DECISION: N=1"
 check h8-rc eq "$rc" 1
 check h8-mixed has "$W/h8.dec" "rows mix gate classes"
 check h8-names-class has "$W/h1.dec" "class: gen_saas:prep-commit.sh"
+# h9: a row of the old 14-column shape is refused and counted, never dropped
+# (dropping it would read as "no baseline").
+{ echo "$HDR"; row 1 1 6 yes no; row 1 2 6 yes no | cut -d, -f1-14; } >"$W/h9.csv"
+"$BIN" --decide "$W/h9.csv" --min-reps 1 >"$W/h9.dec" 2>"$W/h9.err"; rc=$?
+check h9-rc eq "$rc" 1
+check h9-counted has "$W/h9.dec" "1 row(s) do not have the 15 levels.csv columns"
+check h9-fix has "$W/h9.err" "Fix:"
 
 # ------------------------------------------------------------ b1: --help
 out="$(XDG_STATE_HOME="$W/xdg1" "$BIN" --help 2>"$W/b1.err")"; rc=$?

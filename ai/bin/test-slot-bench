@@ -162,7 +162,8 @@ load_stats() {
 # 15 class. A decision is about ONE gate class: rows of two classes refuse.
 decide() {
   awk -F, -v ceil="$1" -v minr="$2" '
-    $1 == "level" || NF < 15 { next }
+    $1 == "level" { next }
+    NF != 15 { bad++; next }
     { if (!($15 in classes)) { classes[$15] = 1; ncls++; clist = clist (clist == "" ? "" : ", ") $15 } }
     { k = $1 + 0; seen[k] = 1
       if ($13 == "yes") { dirty[k]++; next }
@@ -171,6 +172,9 @@ decide() {
       if ($7 == "n/a" || $7 + 0 > ceil + 0) failload[k] = 1
       if ($7 != "n/a" && $7 + 0 > peak[k] + 0) peak[k] = $7 + 0 }
     END {
+      # A row of the wrong shape is refused and counted, never dropped: a
+      # schema mismatch must not read as "no baseline".
+      if (bad) { printf "DECISION: none (%d row(s) do not have the 15 levels.csv columns; re-measure, or pass files this bench version wrote)\n", bad; exit 1 }
       if (ncls > 1) { printf "DECISION: none (rows mix gate classes: %s; decide one class at a time)\n", clist; exit 1 }
       if (ncls == 1) printf "class: %s\n", clist
       n = 0; for (k in seen) ks[++n] = k + 0
@@ -610,7 +614,7 @@ main() {
       done
       unset IFS
       if cat -- "${files[@]}" | decide "$CEILING" "$MIN_REPS"; then exit 0; fi
-      printf 'Fix: measure (or re-measure) level 1 in a quiet window; the rule has no baseline without it.\n' >&2
+      printf 'Fix: read the DECISION line. No baseline: measure (or re-measure) level 1 in a quiet window. Mixed classes or malformed rows: pass levels.csv files of ONE class written by this bench version.\n' >&2
       exit 1
       ;;
   esac
