@@ -215,8 +215,8 @@ else
       case "${DND944_F}" in
         ai/hooks/athena-inbox-poll.self-test.sh) continue ;;
       esac
-      if tr '\n\t\r' '   ' < "${REPO_DIR}/${DND944_F}" 2>/dev/null \
-          | grep -aqE "${DND944_RE}"; then
+      DND944_COLLAPSED="$(tr '\n\t\r' '   ' < "${REPO_DIR}/${DND944_F}" 2>/dev/null)"
+      if grep -aqE "${DND944_RE}" <<<"${DND944_COLLAPSED}"; then
         RETIRED_HITS="${RETIRED_HITS}${DND944_F}
 "
       fi
