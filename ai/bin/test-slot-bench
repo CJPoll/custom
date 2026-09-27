@@ -424,8 +424,50 @@ print_plan() {
 # ============================================================ the measurement
 
 SAMPLER_PID=""
+SLEEP_PID=""
 RUN_PIDS=()
 RUN_TPIDS=()
+SLOT_FDS=()
+BG_LOAD1=unknown
+
+# find_slot_fds — record in SLOT_FDS the fds this (inner) process holds open on
+# the pool's slot locks, inherited from the test-slot wrapper. The bench's own
+# helpers (its sleeps, the sampler) close them, so a helper orphaned by a
+# SIGKILLed bench can never keep the pool held; the runs keep them (a gate
+# still running after the bench died is real load, and holds its slot).
+find_slot_fds() {
+  local held=${ATHENA_TEST_SLOT_HELD:-} pool fd t
+  SLOT_FDS=()
+  if [ -z "$held" ]; then
+    say "WARN ATHENA_TEST_SLOT_HELD is unset: the inner run is not under test-slot, so no slot fd is known to close. Fix: start the bench without --inner-out; it runs itself under test-slot --exclusive."
+    return 0
+  fi
+  pool=${held%:*}
+  for fd in /proc/$$/fd/*; do
+    t=$(readlink -- "$fd" 2>/dev/null) || continue
+    [[ ${t%/*} == "$pool" && ${t##*/} =~ ^slot-[0-9]+\.lock$ ]] && SLOT_FDS+=("${fd##*/}")
+  done
+  ((${#SLOT_FDS[@]})) || say "WARN no fd open on a slot lock of $pool (ATHENA_TEST_SLOT_HELD=$held); helpers have none to close. Fix: check the test-slot beside this bench passes its slot fds to CMD."
+}
+
+# close_slot_fds — in a helper subshell: drop every inherited slot-lock fd.
+close_slot_fds() {
+  local fd
+  for fd in "${SLOT_FDS[@]}"; do exec {fd}>&-; done
+}
+
+# isleep SECS — an interruptible sleep holding no slot fd. bash runs a trap only
+# after its FOREGROUND child returns, and not at all inside a $(...) until the
+# substitution ends, so a foreground `sleep` answered TERM up to SECS late
+# (measured at the 2026-09-27 drain: 60-90 s, then KILLed). `wait` on a
+# background child returns at once on a trapped signal; stop_everything kills
+# the pending sleep on the way out.
+isleep() {
+  (close_slot_fds; exec sleep "$1") &
+  SLEEP_PID=$!
+  wait "$SLEEP_PID"
+  SLEEP_PID=""
+}
 
 # stop_everything — the EXIT path of an interrupted measurement: stop the
 # sampler, TERM each run's wrapper (it forwards to timeout, which signals the
@@ -436,6 +478,8 @@ stop_everything() {
   local i p
   if [ -n "$SAMPLER_PID" ]; then kill "$SAMPLER_PID" 2>/dev/null; wait "$SAMPLER_PID" 2>/dev/null; fi
   SAMPLER_PID=""
+  if [ -n "$SLEEP_PID" ]; then kill "$SLEEP_PID" 2>/dev/null; wait "$SLEEP_PID" 2>/dev/null; fi
+  SLEEP_PID=""
   # TERM the wrapper AND the gate's group directly: a wrapper signalled
   # before it set its trap dies without forwarding.
   for ((i = 0; i < ${#RUN_PIDS[@]}; i++)); do
@@ -453,13 +497,17 @@ stop_everything() {
 
 # sampler FILE STOPFILE MAX — every SAMPLE_S: "ts,elapsed,load1,load5,runnable"
 # and, every PROBE_EVERY samples, the probe to FILE.probe. Bounded by MAX.
+# It holds no slot fd, and stops once the inner bench is gone (its parent
+# changed: reparented after a SIGKILL that left no one to stop it).
 sampler() {
-  local out=$1 stop=$2 max=$3 i l1 l5 rq _r t0 sl=""
+  local out=$1 stop=$2 max=$3 i l1 l5 rq _r t0 sl="" parent=$$ me=$BASHPID
   # Killed by the level (or by stop_everything): take the pending sleep along,
   # so nothing of the sampler outlives it.
   trap 'kill "$sl" 2>/dev/null; exit 0' TERM
+  close_slot_fds
   t0=$(now)
   for ((i = 0; i < max; i++)); do
+    [ "$(ppid_of "$me")" = "$parent" ] || break
     if read -r l1 l5 _r rq _r <"$LOADAVG" 2>/dev/null; then
       printf '%s,%s,%s,%s,%s\n' "$(now)" "$(awk -v a="$(now)" -v b="$t0" 'BEGIN{printf "%.1f", a-b}')" "$l1" "$l5" "${rq%%/*}" >>"$out"
     fi
@@ -471,15 +519,26 @@ sampler() {
   done
 }
 
-# settle — bounded wait for load1 <= BG_THRESHOLD. Prints the final load1.
+# ppid_of PID — PID's parent pid, from /proc (empty when PID is gone).
+ppid_of() {
+  local s
+  s=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+  s=${s##*) }
+  read -r _ s _ <<<"$s"
+  printf '%s\n' "$s"
+}
+
+# settle — bounded wait for load1 <= BG_THRESHOLD; sets BG_LOAD1 to the final
+# load1. Runs in the bench's own shell, never in a $(...), so TERM is answered
+# during the wait (isleep).
 settle() {
   local i l
   for ((i = 0; i < SETTLE_MAX; i++)); do
     l=$(load1_now)
     is_num "$l" && num_le "$l" "$BG_THRESHOLD" && break
-    sleep "$SETTLE_S"
+    isleep "$SETTLE_S"
   done
-  load1_now
+  BG_LOAD1=$(load1_now)
 }
 
 median() { sort -n | awk '{ v[NR] = $1 } END { if (!NR) print "n/a"; else if (NR % 2) print v[(NR + 1) / 2]; else printf "%.1f\n", (v[NR / 2] + v[NR / 2 + 1]) / 2 }'; }
@@ -488,7 +547,8 @@ run_level() { # run_level K REP
   local k=$1 rep=$2 i tag="$1-$2" bg u f reason mid_u lf stopf t_start t_end p
   local max_samples res s e rc wall passed=0 walls=() stats contaminated mu mf pk mn pr
   census "$OUT_DIR/census-$tag-pre.txt"
-  bg=$(settle)
+  settle
+  bg=$BG_LOAD1
   read -r u f < <(probe)
   lf="$OUT_DIR/load-$tag.csv"
   stopf="$OUT_DIR/.stop-$tag"
@@ -527,7 +587,7 @@ run_level() { # run_level K REP
   RUN_PIDS=()
   RUN_TPIDS=()
   t_end=$(now)
-  sleep "$TAIL_S"
+  isleep "$TAIL_S"
   : >"$stopf"
   wait "$SAMPLER_PID" 2>/dev/null
   SAMPLER_PID=""
@@ -574,6 +634,7 @@ inner() {
   trap 'exit 143' TERM
   trap 'exit 130' INT
   trap 'exit 129' HUP
+  find_slot_fds
   printf 'level,rep,run,worktree,wall_s,exit,passed,bg_load1,unslotted,foreign_holders,contaminated,reason,class\n' >"$OUT_DIR/runs.csv"
   printf 'level,rep,runs,passed,median_wall_s,max_wall_s,peak_load1,mean_load1,peak_runnable,bg_load1,unslotted,foreign_holders,contaminated,reason,class\n' >"$OUT_DIR/levels.csv"
   local rep k

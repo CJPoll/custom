@@ -344,8 +344,13 @@ await 20 bash -c '[ "$(find "$1" -maxdepth 1 -name "*.pid" | wc -l)" -ge 3 ]' _ 
 await 10 present "$W/b9/.pids-3-1" || bad b9-setup "no pid record"
 shims=$(cat "$W/shim"/*.pid 2>/dev/null | tr '\n' ' ')
 runs=$(cat "$W/b9/.pids-3-1" | tr '\n' ' ')
-kill -TERM "$B9"
-check b9-bench-exits await 20 gone "$B9"
+# TERM the bench itself, not timeout(1): timeout signals its whole process
+# group, which would stop every helper for the bench and prove nothing.
+O9=$(pgrep -P "$B9" | head -1)
+check b9-found-bench eval '[ -n "$O9" ]'
+kill -TERM "${O9:-$B9}"
+check b9-bench-exits await 20 gone "${O9:-$B9}"
+check b9-timeout-exits await 5 gone "$B9"
 wait "$B9" 2>/dev/null
 # shellcheck disable=SC2086
 for p in $shims; do check "b9-no-orphan-shim-$p" await 20 gone "$p"; done
@@ -356,6 +361,91 @@ check b9-sampler-recorded eval '[ -n "$sp" ]'
 check b9-no-sampler await 20 gone "${sp:-0}"
 check b9-slots-free eq "$("$TS_BIN" --status --json | jq .held)" 0
 export SHIM_MODE=ok
+
+# ------------------------------------------------------------ b10-b12: stop inside a sleep
+# The bench's own waits (the settle before a level, the tail after it) must
+# answer TERM at once and must never hold a slot fd in a helper that outlives
+# the bench. Measured 2026-09-27 at the drain: TERM during `bg=$(settle)` was
+# deferred until the substitution returned (60-90 s, then KILLed), and after the
+# KILL the orphaned settle kept the inherited slot locks held, so --status named
+# the dead wrapper as holder. A distinctive sleep length marks our own sleeps.
+SL=19.73
+held_now() { "$TS_BIN" --status --json 2>/dev/null | jq -r .held; }
+pool_free() { [ "$(held_now)" = 0 ]; }
+reap() { # reap TAG PID... — KILL each still-live pid that is one of ours:
+  # `sleep $SL`, or a bench process whose argv names $W/TAG.
+  local tag=$1 p a; shift
+  for p in "$@"; do
+    a=$(tr '\0' ' ' 2>/dev/null <"/proc/$p/cmdline") || continue
+    case $a in "sleep $SL " | *"$W/$tag"*) kill -9 "$p" 2>/dev/null ;; esac
+  done
+}
+# start_bench TAG BENCH-ARGS... — launch the bench bounded by timeout(1) and
+# set T (the timeout pid), then O (the outer bench), TSW (its test-slot
+# wrapper) and I (the inner bench) once each exists. Signals go to O, never to
+# T: timeout(1) forwards a signal to its whole process group, which would stop
+# the bench's helpers for it and hide exactly what these cases test.
+start_bench() {
+  local tag=$1; shift
+  timeout 60 "$BIN" --worktrees "$WTS" --levels 1 --reps 1 --min-reps 1 --out-dir "$W/$tag" \
+    --sample-s 0.05 --run-timeout 60 --wait-timeout 30 "$@" >/dev/null 2>"$W/$tag.err" &
+  T=$!; BG_PIDS+=("$T")
+  O="" TSW="" I=""
+  await 10 has_child "$T" && O=$(pgrep -P "$T" | head -1)
+  [ -n "$O" ] && await 10 has_child "$O" && TSW=$(pgrep -P "$O" | head -1)
+  [ -n "$TSW" ] && await 10 has_child "$TSW" && I=$(pgrep -P "$TSW" | head -1)
+  [ -n "$I" ] || bad "$tag-setup" "no inner bench under timeout $T: $(cat "$W/$tag.err")"
+}
+has_child() { [ -n "$(pgrep -P "$1")" ]; }
+# finish_bench TAG PID... — reap our leftovers, then the bench's timeout.
+finish_bench() {
+  local tag=$1; shift
+  reap "$tag" "$@"
+  kill -9 "$T" 2>/dev/null; wait "$T" 2>/dev/null
+}
+
+# b10: TERM while the level waits for load to settle (above --bg-threshold).
+setload 5.00
+start_bench b10 --settle-s "$SL" --settle-max 3 --tail-s 0
+await 20 present "$W/b10/census-1-1-pre.txt" || bad b10-setup "the bench never reached the settle: $(cat "$W/b10.err")"
+await 5 has_child "${I:-0}"
+kids=$(pgrep -P "${I:-0}" -d ' ')
+kill -TERM "${O:-0}"
+check b10-term-exits-promptly await 5 gone "${O:-0}"
+check b10-inner-exits-promptly await 5 gone "${I:-0}"
+check b10-slots-released await 5 pool_free
+# shellcheck disable=SC2086
+finish_bench b10 $kids "${I:-0}" "${TSW:-0}" "${O:-0}"
+
+# b11: TERM during the tail sleep, after the level's runs finished.
+setload 0.50
+start_bench b11 --settle-s 0.05 --settle-max 2 --tail-s "$SL"
+await 20 present "$W/b11/.res-1-1-1" || bad b11-setup "the level's run never finished: $(cat "$W/b11.err")"
+kids=$(pgrep -P "${I:-0}" -d ' ')
+sp=$(cat "$W/b11/.sampler-1-1" 2>/dev/null)
+kill -TERM "${O:-0}"
+check b11-term-exits-promptly await 5 gone "${O:-0}"
+check b11-inner-exits-promptly await 5 gone "${I:-0}"
+check b11-slots-released await 5 pool_free
+check b11-no-sampler await 5 gone "${sp:-0}"
+# shellcheck disable=SC2086
+finish_bench b11 $kids "${I:-0}" "${TSW:-0}" "${O:-0}"
+
+# b12: the inner bench is SIGKILLed mid-settle, so it cannot clean up. Its
+# leftover sleep must hold no slot fd: once the wrapper exits the pool is free
+# (the drain's "stale holder": --status named the dead wrapper for as long as
+# the orphaned settle lived, because the settle had inherited the slot locks).
+setload 5.00
+start_bench b12 --settle-s "$SL" --settle-max 3 --tail-s 0
+await 20 present "$W/b12/census-1-1-pre.txt" || bad b12-setup "the bench never reached the settle: $(cat "$W/b12.err")"
+await 5 has_child "${I:-0}"
+kids=$(pgrep -P "${I:-0}" -d ' ')
+[ -n "$I" ] && kill -9 "$I"
+check b12-wrapper-exits await 5 gone "${TSW:-0}"
+check b12-slots-released await 5 pool_free
+# shellcheck disable=SC2086
+finish_bench b12 $kids "${TSW:-0}" "${O:-0}"
+setload 0.50
 
 # ------------------------------------------------------------ summary
 if [ "$FAIL" -eq 0 ]; then
