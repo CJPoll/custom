@@ -35,6 +35,7 @@ require "stringio"
 require "json"
 require "etc"
 require "shellwords"
+require "digest"
 require_relative "../lib/first_party"
 require_relative "../lib/landed"
 require_relative "../lib/reap_tags"
@@ -567,83 +568,143 @@ end
 # recomputing the root a second way: a second implementation could name a
 # DIFFERENT tree than the one that was actually gated, which is exactly the
 # failed-lookup-reads-as-success class this ticket exists to close.
+#
+# WHEN it is read matters as much as how (coordinator-train critic on
+# b8a500b8). The gate runs for minutes, possibly in a shared checkout, so the
+# tree can move under it: a commit, a checkout, an edit. A snapshot read only
+# at report time names the tree as it is THEN, which may be a commit no check
+# ever ran against. So run_gate takes the snapshot BEFORE anything measures
+# the tree, and the report re-reads it: the same tree -> the line names it;
+# a different one -> FAILED with a Fix:, never an OK naming either.
 GateAttributionError = Class.new(StandardError)
 
-# " [tree <root> @ <sha>]", with ", dirty" inside the brackets when the
-# worktree has uncommitted changes (staged, unstaged, or untracked). Raises
-# rather than silently omitting/blanking when the tree or its HEAD cannot be
-# resolved -- a MISSING attribution must never look like "nothing to report".
-def gate_attribution(root = CUSTOM_DIR)
+# One reading of a gated tree. `fingerprint` covers HEAD, the index and
+# working-tree state (`git status`), the content of every tracked change
+# (`git diff HEAD --binary`), and the content of every untracked,
+# not-ignored file, so any edit between two readings changes it -- not just
+# a HEAD move or a newly dirty tree. Ignored files are outside it on purpose:
+# they are build and runtime output, not the tree under review.
+GateSnapshot = Struct.new(:worktree_root, :sha, :dirty, :fingerprint, keyword_init: true) do
+  # " [tree <root> @ <sha>]", with ", dirty" inside the brackets when the
+  # worktree has uncommitted changes (staged, unstaged, or untracked).
+  def attribution
+    " [tree #{worktree_root} @ #{sha}#{dirty ? ', dirty' : ''}]"
+  end
+end
+
+def gate_git!(worktree_root, *args)
+  out, _e, st = Open3.capture3("git", "--no-optional-locks", "-C", worktree_root, *args)
+  raise GateAttributionError, "git -C #{worktree_root} #{args.join(' ')} failed" unless st.success?
+
+  out
+end
+
+# Digest of every untracked file's content, in the order `git status -z`
+# listed them. A symlink contributes its target, a file that vanished between
+# the listing and the read contributes a marker, so neither raises.
+def untracked_content_digest(worktree_root, status_z)
+  paths = status_z.split("\0").select { |e| e.start_with?("?? ") }.map { |e| e[3..] }
+  digest = Digest::SHA256.new
+  paths.each do |rel|
+    path = File.join(worktree_root, rel)
+    digest << rel << "\0"
+    digest << if File.symlink?(path) then "link:#{File.readlink(path)}"
+              elsif File.file?(path) then Digest::SHA256.file(path).hexdigest
+              else "missing"
+              end
+    digest << "\0"
+  end
+  digest.hexdigest
+end
+
+# Raises rather than silently omitting/blanking when the tree or its HEAD
+# cannot be resolved -- a MISSING attribution must never look like "nothing
+# to report".
+def gate_snapshot(root = CUSTOM_DIR)
   identity = git_tree_identity(root)
   raise GateAttributionError,
         "git_tree_identity(#{root}) could not resolve a worktree/common-dir " \
-        "for the tree that was just gated" if identity.nil?
+        "for the tree being gated" if identity.nil?
 
   worktree_root, = identity
-
-  sha, _e, st = Open3.capture3("git", "-C", worktree_root, "rev-parse", "HEAD")
-  raise GateAttributionError, "git -C #{worktree_root} rev-parse HEAD failed" unless st.success?
-
-  sha = sha.strip
+  sha = gate_git!(worktree_root, "rev-parse", "HEAD").strip
   raise GateAttributionError,
         "git -C #{worktree_root} rev-parse HEAD returned an empty SHA" if sha.empty?
 
-  status_out, _e2, st2 = Open3.capture3("git", "-C", worktree_root, "status", "--porcelain")
-  raise GateAttributionError, "git -C #{worktree_root} status --porcelain failed" unless st2.success?
-
-  dirty = !status_out.strip.empty?
-
-  " [tree #{worktree_root} @ #{sha}#{dirty ? ', dirty' : ''}]"
+  status = gate_git!(worktree_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+  diff = gate_git!(worktree_root, "diff", "HEAD", "--binary")
+  fingerprint = Digest::SHA256.hexdigest(
+    [sha, status, Digest::SHA256.hexdigest(diff), untracked_content_digest(worktree_root, status)]
+      .join("\0\0")
+  )
+  GateSnapshot.new(worktree_root: worktree_root, sha: sha, dirty: !status.empty?,
+                   fingerprint: fingerprint)
 rescue Errno::ENOENT
   raise GateAttributionError, "git executable not found on PATH"
+end
+
+def gate_attribution(root = CUSTOM_DIR)
+  gate_snapshot(root).attribution
+end
+
+# The Fix: for any attribution failure, at start or at report time.
+def gate_attribution_fix(root)
+  "  Fix: run `git -C #{root} rev-parse HEAD` and `git -C #{root} status " \
+    "--porcelain` by hand — one of them is failing, or #{root} is not inside a " \
+    "resolvable git worktree."
+end
+
+# run_gate's snapshot of the tree it is about to gate, taken before anything
+# measures it. Returns the GateSnapshot, or nil after printing a FAILED line
+# with a Fix: -- a gate whose result could never be attributed stops before
+# spending minutes on checks.
+def gate_start_snapshot(root)
+  snap = gate_snapshot(root)
+  puts "harness-gate: checks run against#{snap.attribution}"
+  snap
+rescue GateAttributionError => e
+  warn "harness-gate: FAILED — cannot identify the tree being gated, so no result " \
+       "could be attributed to a commit: #{e.message}"
+  warn "#{gate_attribution_fix(root)} No check has run yet."
+  nil
 end
 
 # Byte-identical prefix `harness-gate: OK -- N/N checks PASS; safe to
 # commit.` (consumers may match this prefix) with the tree/HEAD attribution
 # appended.
-def gate_ok_message(passed, total, root: CUSTOM_DIR)
-  "harness-gate: OK — #{passed}/#{total} checks PASS; safe to commit.#{gate_attribution(root)}"
+def gate_ok_message(passed, total, attribution)
+  "harness-gate: OK — #{passed}/#{total} checks PASS; safe to commit.#{attribution}"
 end
 
 # Same idea for the FAILED header line.
-def gate_failed_header(count, total, root: CUSTOM_DIR)
-  "harness-gate: FAILED — #{count} of #{total} check(s) did not pass:#{gate_attribution(root)}"
+def gate_failed_header(count, total, attribution)
+  "harness-gate: FAILED — #{count} of #{total} check(s) did not pass:#{attribution}"
 end
 
-# Prints the OK line, unless attribution itself fails — in which case a bare
-# GateAttributionError would otherwise kill the process with a Ruby backtrace
-# in place of the summary (critic-review round 1, DND-896): every check
-# passed, but WHICH tree they passed for could not be established, so this
-# degrades to a loud FAILED line with a Fix:, never a silent/blank OK and
-# never an uncaught crash. Fails closed: exit 1.
-def report_gate_ok(total, root: CUSTOM_DIR)
-  puts gate_ok_message(total, total, root: root)
-  0
-rescue GateAttributionError => e
-  warn ""
-  warn "harness-gate: FAILED — could not attribute the gated tree/HEAD, so the " \
-       "#{total}/#{total} checks PASS result cannot be trusted: #{e.message}"
-  warn "  Fix: run `git -C #{root} rev-parse HEAD` and `git -C #{root} status " \
-       "--porcelain` by hand — one of them is failing, or #{root} is not inside a " \
-       "resolvable git worktree. Every check already ran and passed; this failure " \
-       "is only about attributing the result, not about re-running anything."
-  1
-end
+# Re-reads root at report time and compares it with `pre`, the snapshot taken
+# before the checks ran. Returns [attribution, nil] when it is the same tree,
+# or [nil, [reason, fix]] when it moved or can no longer be read.
+def verified_attribution(pre, root)
+  post = gate_snapshot(root)
+  if post.worktree_root == pre.worktree_root && post.fingerprint == pre.fingerprint
+    return [pre.attribution, nil]
+  end
 
-# Same idea for the FAILED header: prints it, or, if attribution ALSO fails,
-# a header that says so and still carries a Fix: — critically, this must
-# never raise past the caller, because the per-check failure report (label,
-# argv, failure lines, output tail) is printed by the caller right after this
-# returns, and losing that to an uncaught exception is strictly worse than
-# losing only the attribution suffix.
-def report_gate_failed_header(count, total, root: CUSTOM_DIR)
-  warn gate_failed_header(count, total, root: root)
+  change = if post.sha == pre.sha
+             "HEAD is still #{pre.sha}, but the working tree's contents changed"
+           else
+             "HEAD moved #{pre.sha} -> #{post.sha}"
+           end
+  [nil, ["the tree changed while the checks ran (#{change}), so the result " \
+         "describes neither the tree at the start#{pre.attribution} nor the tree " \
+         "now#{post.attribution}",
+         "  Fix: something committed, checked out, or edited in #{pre.worktree_root} " \
+         "during the run. Commit your work first, then re-run the gate in a tree " \
+         "nothing else is writing to (your own worktree, not a shared checkout). " \
+         "Do not quote either SHA as gated."]]
 rescue GateAttributionError => e
-  warn "harness-gate: FAILED — #{count} of #{total} check(s) did not pass (tree/HEAD " \
-       "attribution also unavailable: #{e.message}):"
-  warn "  Fix: run `git -C #{root} rev-parse HEAD` and `git -C #{root} status " \
-       "--porcelain` by hand to see why attribution failed; the per-check failures " \
-       "below are unaffected and still follow."
+  [nil, ["the gated tree could no longer be identified at report time: #{e.message}",
+         gate_attribution_fix(root)]]
 end
 
 # DND-209: this repo has real self-tests (e.g. scripts/test/athena-inbox-client/
@@ -1149,6 +1210,15 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
   # audited after the fact — see "WHICH TREE AM I GATING?" above.
   puts "harness-gate: gating #{root}"
 
+  # The tree's identity, read BEFORE anything below measures it (DND-896).
+  # The report re-reads it and refuses to name a tree the checks did not see;
+  # see "ATTRIBUTION FOR THE OK/FAILED SUMMARY LINES" above. A dry run never
+  # reports a result, so it takes none.
+  unless dry_run
+    pre = gate_start_snapshot(root)
+    return 1 unless pre
+  end
+
   found = discover_self_tests(root)
   puts "self-tests discovered: #{found.size}"
 
@@ -1231,28 +1301,53 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
          "the same change that renames a check)."
     return 1
   end
-  pin_env, failures = run_checks(CHECKS, jobs: jobs)
+  run_attributed_checks(CHECKS, pre, jobs: jobs)
+end
 
-  moved = landed_moved_note(CUSTOM_DIR, pin_env)
+# Runs `checks` through the gate's own loop and reports the result against
+# `pre`, the snapshot run_gate took before anything measured the tree.
+# Everything run_gate does from run_checks to its return, extracted so
+# --self-test case 7f can drive it against a fixture repo with stub checks.
+def run_attributed_checks(checks, pre, root: CUSTOM_DIR, chdir: CUSTOM_DIR, **run_opts)
+  pin_env, failures = run_checks(checks, root: root, chdir: chdir, **run_opts)
+
+  moved = landed_moved_note(root, pin_env)
   puts moved if moved
 
-  report_check_results(failures, CHECKS.size)
+  report_check_results(failures, checks.size, pre: pre, root: root)
 end
 
 # The tail of a real (non-dry-run) run_gate invocation: report OK/FAILED for
-# whatever CHECKS just ran, plus the full per-check failure detail. Extracted
-# out of run_gate (DND-896, coordinator-train critic t32) so self-test can
-# DRIVE THIS EXACT CODE with a fabricated `failures` list — not just the
-# gate_attribution/report_gate_ok/report_gate_failed_header pieces in
-# isolation — without paying for a real 96-check run_checks(CHECKS)
-# execution. There is nothing left in run_gate's own body, between
-# run_checks and its return, for a regression to hide in: run_gate's only
-# remaining job is to call this with the real failures/count.
-def report_check_results(failures, total, root: CUSTOM_DIR)
-  return report_gate_ok(total, root: root) if failures.empty?
+# whatever checks just ran, plus the full per-check failure detail. `pre` is
+# the snapshot taken before the checks ran; the tree is re-read here and the
+# result is attributed only if it is still that tree (verified_attribution).
+# Otherwise it FAILS with a Fix: -- a passing run is never reported OK for a
+# tree it may not have measured, and a failing run still prints every
+# per-check detail below, since that output is real whichever tree it
+# describes. Exit 0 only for an attributed pass.
+def report_check_results(failures, total, pre:, root: CUSTOM_DIR)
+  attribution, problem = verified_attribution(pre, root)
+
+  if failures.empty?
+    if attribution
+      puts gate_ok_message(total, total, attribution)
+      return 0
+    end
+    warn ""
+    warn "harness-gate: FAILED — #{total}/#{total} checks passed, but #{problem[0]}."
+    warn "#{problem[1]} Every check already ran and passed; this failure is about " \
+         "which tree they passed for."
+    return 1
+  end
 
   warn ""
-  report_gate_failed_header(failures.size, total, root: root)
+  if attribution
+    warn gate_failed_header(failures.size, total, attribution)
+  else
+    warn "harness-gate: FAILED — #{failures.size} of #{total} check(s) did not pass, " \
+         "and #{problem[0]}:"
+    warn "#{problem[1]} The per-check failures below are still real output and follow."
+  end
   failures.each do |(label, argv, out)|
     warn ""
     warn "--- #{label} (#{argv.join(' ')}) ---"
@@ -1931,7 +2026,15 @@ def run_self_test
 
   # 7c (DND-896). The OK/FAILED summary lines name the gated tree and HEAD, so
   #    a report that quotes only that line can be attributed to a commit.
-  real_attribution = gate_attribution(CUSTOM_DIR)
+  #    Every git read here is guarded: a failure is a FAIL line, never an
+  #    uncaught exception that ends the self-test early.
+  real_attribution = begin
+    gate_attribution(CUSTOM_DIR)
+  rescue GateAttributionError => e
+    warn "self-test: FAIL — gate_attribution(CUSTOM_DIR) raised on the real repo: #{e.message}"
+    ok = false
+    nil
+  end
   real_head, _e, real_st = Open3.capture3("git", "-C", CUSTOM_DIR, "rev-parse", "HEAD")
   unless real_st.success?
     warn "self-test: FAIL — could not read the real repo's HEAD to compare " \
@@ -1939,37 +2042,39 @@ def run_self_test
     ok = false
   end
   real_head = real_head.strip
-  unless real_attribution.include?(CUSTOM_DIR) && real_attribution.include?(real_head)
-    warn "self-test: FAIL — gate_attribution(CUSTOM_DIR) is #{real_attribution.inspect}, " \
-         "which does not name #{CUSTOM_DIR.inspect} and its real HEAD " \
-         "#{real_head.inspect} (`git -C #{CUSTOM_DIR} rev-parse HEAD`)"
-    ok = false
-  end
-  ok_line = gate_ok_message(3, 3, root: CUSTOM_DIR)
-  unless ok_line.start_with?("harness-gate: OK — 3/3 checks PASS; safe to commit.")
-    warn "self-test: FAIL — gate_ok_message changed the byte-identical prefix " \
-         "consumers may match on: #{ok_line.inspect}"
-    ok = false
-  end
-  unless ok_line.include?(real_attribution)
-    warn "self-test: FAIL — gate_ok_message did not append gate_attribution's " \
-         "suffix: #{ok_line.inspect}"
-    ok = false
-  end
-  failed_line = gate_failed_header(2, 5, root: CUSTOM_DIR)
-  unless failed_line.start_with?("harness-gate: FAILED — 2 of 5 check(s) did not pass:") &&
-         failed_line.include?(real_attribution)
-    warn "self-test: FAIL — gate_failed_header did not carry the prefix + " \
-         "attribution: #{failed_line.inspect}"
-    ok = false
+  if real_attribution
+    unless real_attribution.include?(CUSTOM_DIR) && real_attribution.include?(real_head)
+      warn "self-test: FAIL — gate_attribution(CUSTOM_DIR) is #{real_attribution.inspect}, " \
+           "which does not name #{CUSTOM_DIR.inspect} and its real HEAD " \
+           "#{real_head.inspect} (`git -C #{CUSTOM_DIR} rev-parse HEAD`)"
+      ok = false
+    end
+    ok_line = gate_ok_message(3, 3, real_attribution)
+    unless ok_line.start_with?("harness-gate: OK — 3/3 checks PASS; safe to commit.")
+      warn "self-test: FAIL — gate_ok_message changed the byte-identical prefix " \
+           "consumers may match on: #{ok_line.inspect}"
+      ok = false
+    end
+    unless ok_line.end_with?(real_attribution)
+      warn "self-test: FAIL — gate_ok_message did not append the attribution " \
+           "suffix: #{ok_line.inspect}"
+      ok = false
+    end
+    failed_line = gate_failed_header(2, 5, real_attribution)
+    unless failed_line.start_with?("harness-gate: FAILED — 2 of 5 check(s) did not pass:") &&
+           failed_line.end_with?(real_attribution)
+      warn "self-test: FAIL — gate_failed_header did not carry the prefix + " \
+           "attribution: #{failed_line.inspect}"
+      ok = false
+    end
   end
 
-  # 7c/7d fixtures below plant a NON-repo dir (not_a_repo) and rely on it
-  # staying a non-repo — same false-red exposure as cases 5/6/6b/6c above if
-  # $TMPDIR resolves inside a real git worktree (a plausible CI/agent/sandbox
-  # setup: an ambient repo would make git_tree_identity(not_a_repo) resolve
-  # to THAT enclosing repo instead of failing to resolve at all). Gated the
-  # same way, for the same reason.
+  # 7c/7d/7f fixtures below plant a NON-repo dir (not_a_repo) and fixture
+  # repos, and rely on a non-repo staying a non-repo — same false-red
+  # exposure as cases 5/6/6b/6c above if $TMPDIR resolves inside a real git
+  # worktree (an ambient repo would make git_tree_identity(not_a_repo)
+  # resolve to THAT enclosing repo instead of failing to resolve at all).
+  # Gated the same way, for the same reason.
   if fixtures_isolated
 
   # THE MISS CASE: a root that resolves to no git tree at all must raise, not
@@ -1985,59 +2090,29 @@ def run_self_test
       nil
     end
 
-    # (critic-review round 1, DND-896): an attribution failure must not kill
-    # run_gate's summary with a bare backtrace, and must not swallow the
-    # per-check failure report either — report_gate_ok/report_gate_failed_header
-    # degrade to a loud FAILED line with a Fix: instead, and never raise past
-    # the caller.
-    code, out, err = capture.call { report_gate_ok(3, root: not_a_repo) }
-    if code != 1
-      warn "self-test: FAIL — report_gate_ok with an unattributable root " \
-           "returned #{code.inspect}, expected 1 (fail closed)"
-      ok = false
-    end
-    unless out.empty?
-      warn "self-test: FAIL — report_gate_ok printed an OK line to stdout " \
-           "despite attribution failing: #{out.inspect}"
-      ok = false
-    end
-    unless err.include?("FAILED") && err.include?("Fix:")
-      warn "self-test: FAIL — report_gate_ok's attribution-failure path " \
-           "carried no FAILED/Fix: message (stderr: #{err.inspect})"
+    # ...and run_gate's start-of-run snapshot turns that into a FAILED line
+    # with a Fix:, returning nil so run_gate stops before any check runs.
+    code0, out0, err0 = capture.call { gate_start_snapshot(not_a_repo) }
+    unless code0.nil? && out0.empty? && err0.include?("FAILED") && err0.include?("Fix:")
+      warn "self-test: FAIL — gate_start_snapshot(<non-git dir>) did not refuse with " \
+           "FAILED + Fix: (returned #{code0.inspect}, stdout #{out0.inspect}, " \
+           "stderr #{err0.inspect})"
       ok = false
     end
 
-    _code2, _out2, err2 = capture.call { report_gate_failed_header(2, 5, root: not_a_repo) }
-    unless err2.include?("2 of 5 check(s) did not pass") && err2.include?("Fix:")
-      warn "self-test: FAIL — report_gate_failed_header's attribution-failure " \
-           "path lost the per-check-count header or its Fix: line (stderr: " \
-           "#{err2.inspect})"
-      ok = false
-    end
-
-    # 7d (coordinator-train critic t32, DND-896): the two assertions above
-    # test report_gate_ok/report_gate_failed_header in ISOLATION, so they
-    # cannot notice if run_gate's own call sites regressed back to the raw,
-    # unrescued gate_ok_message/gate_failed_header builders — nothing here
-    # ever calls the code run_gate itself calls. Drive report_check_results
-    # instead: it is the EXACT function run_gate's body delegates its
-    # entire tail to (see run_gate: `report_check_results(failures,
-    # CHECKS.size)` is the last line, with nothing else between run_checks
-    # and it for a regression to hide in), fed a FABRICATED failures list so
-    # this stays fast instead of paying for a real 96-check run_checks(CHECKS).
-    #
-    # Fail-first evidence: with report_gate_ok/report_gate_failed_header
-    # temporarily removed (reverting to the de06bcc~1 form) and these
-    # report_check_results assertions already in place, self-test crashed
-    # with `undefined method 'report_gate_ok' for main:Object (NoMethodError)`
-    # raised from inside report_check_results's own call to report_gate_ok —
-    # proving this test path actually reaches run_gate's real tail, not a
-    # copy of it. Restored, self-test passes.
+    # 7d (critic-review round 1 and coordinator-train critic t32, DND-896).
+    # An attribution failure at REPORT time must not kill the summary with a
+    # bare backtrace, must not print OK, and must not swallow the per-check
+    # failure report. Driven through report_check_results, the exact function
+    # run_attributed_checks (and so run_gate) reports through, with a
+    # fabricated failures list and a root that no longer resolves.
+    pre = GateSnapshot.new(worktree_root: not_a_repo, sha: "a" * 40, dirty: false,
+                           fingerprint: "fixture")
     fake_failures = [["fixture-check", %w[fixture-check --self-test], "boom\nFAIL: bad\nok\n"]]
 
-    code3, out3, err3 = capture.call { report_check_results([], 3, root: not_a_repo) }
+    code3, out3, err3 = capture.call { report_check_results([], 3, pre: pre, root: not_a_repo) }
     if code3 != 1
-      warn "self-test: FAIL — report_check_results([], 3, root: <unattributable>) " \
+      warn "self-test: FAIL — report_check_results([], 3) with an unattributable root " \
            "returned #{code3.inspect}, expected 1 (fail closed)"
       ok = false
     end
@@ -2047,7 +2122,9 @@ def run_self_test
       ok = false
     end
 
-    _code4, out4, err4 = capture.call { report_check_results(fake_failures, 5, root: not_a_repo) }
+    _code4, out4, err4 = capture.call do
+      report_check_results(fake_failures, 5, pre: pre, root: not_a_repo)
+    end
     unless out4.empty?
       warn "self-test: FAIL — report_check_results(<failures>, ...) printed to " \
            "stdout instead of stderr: #{out4.inspect}"
@@ -2069,47 +2146,156 @@ def run_self_test
   # fixture's mktmpdir PREFIX must not itself contain the substring "dirty" —
   # it would appear inside the `[tree <path> @ <sha>]` attribution and produce
   # a false-positive match on the very check this test exists to make real.
+  # The fixture commit carries its own identity and commit.gpgsign=false, and
+  # its exit status is checked: a failed setup is a FAIL line, not a crash.
   Dir.mktmpdir("harness-gate-attribution-fixture") do |work_repo|
-    Open3.capture3("git", "-c", "init.defaultBranch=main", "init", "-q", work_repo)
+    wr_git = ["git", "-c", "commit.gpgsign=false", "-c", "user.name=t",
+              "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]
     File.write(File.join(work_repo, "f"), "x")
-    Open3.capture3("git", "-C", work_repo, "add", "f")
-    Open3.capture3({ "GIT_AUTHOR_NAME" => "t", "GIT_AUTHOR_EMAIL" => "t@t",
-                     "GIT_COMMITTER_NAME" => "t", "GIT_COMMITTER_EMAIL" => "t@t" },
-                   "git", "-C", work_repo, "commit", "-qm", "init")
-
-    clean_attr = gate_attribution(work_repo)
-    if clean_attr.include?(", dirty")
-      warn "self-test: FAIL — gate_attribution flagged a clean tree as dirty: " \
-           "#{clean_attr.inspect}"
-      ok = false
+    setup = [%w[init -q], ["-C", work_repo, "add", "f"], ["-C", work_repo, "commit", "-qm", "init"]]
+    setup[0] += [work_repo]
+    failed_step = setup.find do |args|
+      _o, _e, st = Open3.capture3(*wr_git, *args)
+      !st.success?
     end
-
-    File.write(File.join(work_repo, "untracked"), "y")
-    dirty_attr = gate_attribution(work_repo)
-    unless dirty_attr.include?(", dirty")
-      warn "self-test: FAIL — gate_attribution did not flag an untracked file as " \
-           "dirty: #{dirty_attr.inspect}"
+    if failed_step
+      warn "self-test: FAIL — could not build the dirty-flag fixture repo " \
+           "(`git #{failed_step.join(' ')}` failed)"
       ok = false
+    else
+      clean_attr = gate_attribution(work_repo)
+      if clean_attr.include?(", dirty")
+        warn "self-test: FAIL — gate_attribution flagged a clean tree as dirty: " \
+             "#{clean_attr.inspect}"
+        ok = false
+      end
+
+      File.write(File.join(work_repo, "untracked"), "y")
+      dirty_attr = gate_attribution(work_repo)
+      unless dirty_attr.include?(", dirty")
+        warn "self-test: FAIL — gate_attribution did not flag an untracked file as " \
+             "dirty: #{dirty_attr.inspect}"
+        ok = false
+      end
     end
   end
 
-  end # fixtures_isolated (7c/7d)
+
+  # 7f (coordinator-train critic on b8a500b8, DND-896). The OK line must name
+  #    the tree the checks RAN against, not the tree as it stands when the
+  #    report is printed. The gate takes minutes and can run in a shared
+  #    checkout, so HEAD can move or the tree can change while it runs. Driven
+  #    through run_attributed_checks, the code run_gate delegates its check
+  #    loop and report to, with a fixture repo and stub checks:
+  #    - control: a check that changes nothing -> exit 0 and an OK line naming
+  #      the fixture's HEAD (proves the negatives below are not vacuous);
+  #    - a check that COMMITS mid-run -> non-zero, no OK line naming either
+  #      SHA, and a Fix:;
+  #    - a check that only writes an untracked file (HEAD unchanged) -> the
+  #      same refusal, since the checked tree is not the reported tree.
+  Dir.mktmpdir("harness-gate-attribution-midrun") do |dir|
+    midrun_fail = lambda do |msg|
+      warn "self-test: FAIL — mid-run attribution (7f): #{msg}"
+      ok = false
+    end
+    # Hermetic enough to never crash on a global commit.gpgsign or a missing
+    # identity: every commit here carries its own -c settings.
+    fx_git = ["git", "-c", "commit.gpgsign=false", "-c", "user.name=t",
+              "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]
+    fx = File.join(dir, "repo")
+    _o, init_err, init_st = Open3.capture3(*fx_git, "init", "-q", fx)
+    _o, base_err, base_st = Open3.capture3(*fx_git, "-C", fx, "commit", "-q",
+                                           "--allow-empty", "-m", "base")
+    head_of = lambda do
+      out, _e, st = Open3.capture3("git", "-C", fx, "rev-parse", "HEAD")
+      st.success? ? out.strip : nil
+    end
+    if !init_st.success? || !base_st.success?
+      midrun_fail.call("could not build the fixture repo (init: #{init_err.inspect}, " \
+                       "commit: #{base_err.inspect})")
+    else
+      stub = lambda do |name, body|
+        path = File.join(dir, name)
+        File.write(path, "#!/bin/sh\n#{body}\n")
+        FileUtils.chmod(0o755, path)
+        path
+      end
+      quoted_git = fx_git.map { |a| "'#{a}'" }.join(" ")
+      noop = stub.call("noop.sh", "exit 0")
+      committer = stub.call("commits.sh",
+                            "exec #{quoted_git} -C '#{fx}' commit -q --allow-empty -m midrun")
+      writer = stub.call("writes.sh", "echo y > '#{File.join(fx, 'appeared')}'")
+
+      # Control.
+      base_sha = head_of.call
+      code, out, err = capture.call { run_attributed_checks([["noop", [noop]]], gate_snapshot(fx), root: fx, chdir: dir, jobs: 1, timings: File::NULL) }
+      unless code.zero? && out.include?("harness-gate: OK") && out.include?("@ #{base_sha}]")
+        midrun_fail.call("the control run (nothing changes mid-run) did not print OK naming " \
+                         "#{base_sha.inspect} (code #{code.inspect}, stdout #{out.inspect}, " \
+                         "stderr #{err.inspect})")
+      end
+
+      # HEAD moves mid-run.
+      pre_sha = head_of.call
+      code, out, err = capture.call { run_attributed_checks([["commits", [committer]]], gate_snapshot(fx), root: fx, chdir: dir, jobs: 1, timings: File::NULL) }
+      post_sha = head_of.call
+      if post_sha.nil? || post_sha == pre_sha
+        midrun_fail.call("the committing stub did not move the fixture's HEAD " \
+                         "(#{pre_sha.inspect} -> #{post_sha.inspect}); the case proves nothing")
+      else
+        midrun_fail.call("HEAD moved mid-run (#{pre_sha[0, 12]} -> #{post_sha[0, 12]}) and " \
+                         "the gate still returned 0") if code.zero?
+        ok_lines = out.lines.grep(/harness-gate: OK/)
+        midrun_fail.call("HEAD moved mid-run and the gate still printed an OK line: " \
+                         "#{ok_lines.inspect}") unless ok_lines.empty?
+        unless err.include?("Fix:") && err.include?(pre_sha) && err.include?(post_sha)
+          midrun_fail.call("the moved-HEAD refusal must name both SHAs and carry a Fix: " \
+                           "(stderr #{err.inspect})")
+        end
+      end
+
+      # The tree changes mid-run, HEAD does not.
+      code, out, err = capture.call { run_attributed_checks([["writes", [writer]]], gate_snapshot(fx), root: fx, chdir: dir, jobs: 1, timings: File::NULL) }
+      if code.zero? || !out.lines.grep(/harness-gate: OK/).empty? || !err.include?("Fix:")
+        midrun_fail.call("the tree changed mid-run (an untracked file appeared) and the gate " \
+                         "did not refuse with a Fix: (code #{code.inspect}, stdout " \
+                         "#{out.inspect}, stderr #{err.inspect})")
+      end
+    end
+  end
+  end # fixtures_isolated (7c/7d/7f)
 
   # 7e (coordinator-train critic t32, DND-896). Static composition check:
-  # run_gate's OWN source must delegate its tail to report_check_results —
-  # the wiring itself, not just report_check_results/report_gate_ok/
-  # report_gate_failed_header in isolation (case 7d proves those; this proves
-  # run_gate actually CALLS them). A regression that reverted run_gate to
-  # call the raw gate_ok_message/gate_failed_header builders directly again
-  # (skipping the safe path entirely) would leave every case-7c/7d assertion
-  # green, since none of them ever invoke run_gate itself — this is the same
-  # non-tautological-composition need as case 7's `CHECKS = STATIC_CHECKS +
-  # self_test_checks` check, applied to run_gate's tail instead of CHECKS.
-  run_gate_source = File.read(__FILE__)[/^def run_gate\b.*?^end$/m]
-  unless run_gate_source && run_gate_source.include?("report_check_results(failures, CHECKS.size)")
-    warn "self-test: FAIL — run_gate no longer delegates its tail to " \
-         "report_check_results(failures, CHECKS.size); the safe OK/FAILED " \
-         "reporting (case 7d) could be bypassed with no test noticing"
+  # run_gate's OWN source must delegate its check loop and report to
+  # run_attributed_checks, and that must report through
+  # report_check_results — the wiring itself, not just the pieces in
+  # isolation (cases 7d/7f drive those; this proves run_gate actually CALLS
+  # them). A regression that reverted run_gate to call run_checks and the raw
+  # gate_ok_message/gate_failed_header builders directly again would leave
+  # every case-7c/7d/7f assertion green, since none of them invoke run_gate
+  # itself — the same non-tautological-composition need as case 7's
+  # `CHECKS = STATIC_CHECKS + self_test_checks` check.
+  gate_source = File.read(__FILE__)
+  run_gate_source = gate_source[/^def run_gate\b.*?^end$/m]
+  attributed_source = gate_source[/^def run_attributed_checks\b.*?^end$/m]
+  unless run_gate_source&.include?("run_attributed_checks(CHECKS, pre, jobs: jobs)") &&
+         attributed_source&.include?("report_check_results(failures, checks.size, pre: pre")
+    warn "self-test: FAIL — run_gate no longer delegates its check loop and report " \
+         "to run_attributed_checks(CHECKS, pre) -> report_check_results(..., pre: pre); " \
+         "the safe, attributed OK/FAILED reporting (cases 7d/7f) could be bypassed " \
+         "with no test noticing"
+    ok = false
+  end
+  # ...and the snapshot it hands over is taken BEFORE the first thing that
+  # measures the tree (discovery), not somewhere later in the run: case 7f
+  # proves a moved tree is refused relative to `pre`, which only means
+  # "the tree the checks ran against" if `pre` really is read first.
+  snap_at = run_gate_source&.index("pre = gate_start_snapshot(root)")
+  discover_at = run_gate_source&.index("discover_self_tests(root)")
+  unless snap_at && discover_at && snap_at < discover_at
+    warn "self-test: FAIL — run_gate must take `pre = gate_start_snapshot(root)` " \
+         "before discover_self_tests(root), the first read of the tree it gates " \
+         "(snapshot at #{snap_at.inspect}, discovery at #{discover_at.inspect})"
     ok = false
   end
 
