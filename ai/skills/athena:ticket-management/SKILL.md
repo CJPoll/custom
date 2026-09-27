@@ -172,6 +172,9 @@ as `notion_person_id`; the flaky-lane tooling already resolves it that way.
   unavailable, so the absence of a comment is never read as an absence of the note.
   [measured 2026-09-20; recurring since at least 2026-09-12 — PT-789, dnd-140,
   PT-1080, DND-219 each rediscovered it]
+  **It is already ticketed as DND-458. Do not file or propose another ticket for
+  it.** DND-586, DND-641 and DND-755 are re-filings of the same defect. A report
+  that hit it says "known, DND-458" and nothing more.
 
 ## Design sub-docs (the architect's deliverables live in Notion)
 

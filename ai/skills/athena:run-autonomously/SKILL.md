@@ -34,7 +34,10 @@ through to completion without them.
    assumption onto the **relevant epic / milestone / project**. Only fall back
    to recording on the ticket if there is no parent epic/milestone/project — if
    one exists, it goes there, not on the ticket. Note what was decided, the
-   options considered, and why.
+   options considered, and why. Append it to the **page body**
+   (`API-patch-block-children`), never as a comment: the Notion comment
+   endpoint fails on every connection (`athena:ticket-management` →
+   *Mechanics*).
 
 6. **Owner-credential gates throttle merging, not progress.** *Ship to
    production* still governs everything you can ship. The one exception is a
