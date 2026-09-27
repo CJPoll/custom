@@ -117,6 +117,8 @@ no_down() { [ -s "${ST}/compose.log" ] && bad "$1 ran compose down" "$(cat "${ST
 fixture t1 dnd-1-x; run --pr 5
 expect t1 0
 has "t1 reports what it removed" "TORN DOWN project dnd-1-x in ${WT}/dnd-1-x (removed 2 container(s), 3 volume(s), 1 network(s))"
+has "t1 names the worktree to remove next" "next: remove the worktree ${WT}/dnd-1-x"
+[ -d "${WT}/dnd-1-x" ] && ok "t1 the tool itself left the worktree" || bad "t1 the tool removed the worktree"
 grep -qxF "CWD ${WT}/dnd-1-x PROJECT dnd-1-x" "${ST}/compose.log" && ok "t1 down ran in the worktree for its project" \
   || bad "t1 compose call" "$(cat "${ST}/compose.log" 2>/dev/null)"
 grep -q -- "-p dnd-1-x down -v --remove-orphans" "${ST}/docker.log" && ok "t1 down -v --remove-orphans" || bad "t1 down flags" "$(cat "${ST}/docker.log")"
@@ -199,6 +201,7 @@ fixture t16 dnd-1-x; run --pr 5 --dry-run; expect "t16 dry run" 0; has "t16 plan
 # t17 parked mode.
 fixture t17 unused; run --worktree "${WT}/dnd-1-x" --parked STUCK; expect "t17 parked" 0; has "t17 torn down" "TORN DOWN project dnd-1-x"
 [ -s "${ST}/gh.log" ] && bad "t17 parked mode consulted the forge" || ok "t17 parked mode needs no merge"
+grep -q "next: remove the worktree" <<<"${out}" && bad "t17 parked mode told the admiral to remove the tree" "${out}" || ok "t17 parked keeps the tree"
 fixture t17b unused; run --worktree "${REPO}" --parked STUCK; expect "t17b parked main checkout" 2; no_down t17b
 fixture t17c unused; mkdir -p "${WT}/dnd-1-x/deep"; run --worktree "${WT}/dnd-1-x/deep" --parked STUCK; expect "t17c not a top level" 2; no_down t17c
 

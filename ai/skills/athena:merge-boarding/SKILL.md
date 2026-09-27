@@ -562,7 +562,8 @@ Owner DMs fire on merge for an epic-boundary crossing — see
 `locked-merge` already ran `teardown-stack` for the PR (exit 10: landed,
 teardown failed). On GitLab, run `ai/bin/teardown-stack --mr <n> --repo
 <repo>` as soon as `confirm-merged` exits 0, for every part of a multi-MR
-Mission as it lands.
+Mission as it lands. Then remove the worktree its `next:` line names, per
+that skill's *Removing the WORKTREE*.
 
 Landed is not working. A post-deploy live verify that disagrees with
 expectation is a finding: ticket it and route it to the fleet

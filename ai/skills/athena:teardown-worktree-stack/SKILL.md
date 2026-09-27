@@ -41,7 +41,10 @@ a script (tier 1 below).
   re-merge, follow the printed `Fix:`.
 - **GitLab:** no wrapper runs the merge. Right after `confirm-merged --mr <n>`
   exits 0, run `teardown-stack --mr <n> --repo <repo>`.
-- **Parked Missions:** `teardown-stack --worktree <wt> --parked <reason>`.
+- **Parked Missions:** `teardown-stack --worktree <wt> --parked <reason>`. The
+  tree stays (*Tear down the STACK; keep the TREE*, below).
+- **Then the worktree:** after a merged change's teardown, remove its worktree
+  per *Removing the WORKTREE*, below. That half stays with you.
 - **What still leaks** is named at the next dispatch by `pool-headroom`
   (*Reclaiming the address pool*, below). That covers another fleet's stack,
   a GitLab merge nobody followed up, and a worktree removed before its merge
@@ -77,7 +80,13 @@ deliberately gone.
 ## Removing the WORKTREE: never over uncommitted work
 
 **Remove a merged Mission's worktree in the same step as its stack**, once the
-merge is confirmed and the tree is clean. A merged worktree has no work left to
+merge is confirmed and the tree is clean. The stack half is `teardown-stack`
+(*The merge drives it*, above): its `TORN DOWN` or "nothing to tear down" line
+ends with a `next:` line naming the worktree, and that is when you remove it by
+hand, with the checks below. The tool does not remove the tree itself: removal
+is the one step here that can destroy uncommitted work, it needs the salvage
+and husk judgment below, and `locked-merge` may be running from inside that
+very worktree. A merged worktree has no work left to
 serve, and each one holds real disk (a gen_saas tree with `deps`/`_build` is
 ~3G). Measured 2026-09-27: one admiral kept 33 merged lane worktrees, `/home`
 hit 100% (ENOSPC), and two fleets' gates and a state-log append failed until a

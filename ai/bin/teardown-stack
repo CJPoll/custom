@@ -251,7 +251,12 @@ def main(argv)
            "If its stack is still up, pool-headroom names it."
       return 0
     end
-    teardown(host, File.directory?(wt) ? File.realpath(wt) : wt, repo, dry)
+    wt = File.realpath(wt) if File.directory?(wt)
+    teardown(host, wt, repo, dry)
+    # The worktree itself is the admiral's to remove (salvage, husks, a live
+    # cwd): name it so the second half of the step is never implicit.
+    puts "teardown-stack: next: remove the worktree #{wt} once `git status --porcelain` is empty " \
+         "(athena:teardown-worktree-stack -> Removing the WORKTREE)" unless dry
   elsif merged.empty? && opts.key?("--parked") && opts.key?("--worktree") && !opts.key?("--repo")
     wt = linked_worktree!(host, realdir(opts["--worktree"], "--worktree"))
     puts "teardown-stack: parked (#{opts['--parked']}): #{wt}"
