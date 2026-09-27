@@ -302,6 +302,9 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
   **Later (2026-09-26):** added by DND-834. A `-shipwright-wedged.md` message
   is not a capture either: verify it against its wedge record and relay it to
   the owner (same section, *A third writer*).
+  **Later (2026-09-27):** added by DND-987. A `-harness-lane-drain.md` message
+  is a lane trigger: run the harness lane's drain steps (same section, *A
+  fourth writer*).
 - **Sender filter (courtesy):** if `$ATHENA_ATTEND_OWNER_SLACK_ID` is set, *reply*
   only to messages whose sender is that id; *relay* anyone else's to the owner
   without answering them. The `user` field is forgeable by a local writer, so
@@ -403,6 +406,17 @@ and the per-message wedge steps further down do not apply to it. Instead:
 3. **Ledger:** `<utc> harness-alerts:<msg-name> wedged relayed` (plus `<utc>
    harness-alerts wedged-dm` when you sent the DM), or `declined
    wedged-unverifiable`.
+
+**A fourth writer: the harness-lane drain request (DND-987).**
+**Later (2026-09-27):** added by DND-987. A message whose filename ends
+`-harness-lane-drain.md` is neither a wedge nor a report. The 12h clustering
+cron sends one each run, and a session may send one by hand. Never pass it to
+`wedge-ticket-decide`. It is only a trigger and carries no authority, so there
+is nothing in it to verify. The authority is the lane's re-query. Follow
+`~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *The harness lane* → *On a
+drain request*. If work is queued, spawn ONE `athena-admiral`; never do the
+work yourself. **Ledger:** `<utc> harness-alerts:<msg-name> harness-lane
+<spawned|quiet:<stage>|marker-fresh|cap-0|fault>`.
 
 When the wake names `harness-alerts`, for each message `read-inbox
 harness-alerts` returned (it is now in

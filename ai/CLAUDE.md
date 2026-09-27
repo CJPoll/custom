@@ -605,6 +605,11 @@ be consulted:
   `{{CHANNEL_RESOLUTION}}`, not settled here.
   For the flaky lane this trigger is **operative**: the count on walt_ui's
   `flaky` `log` channel (`walt_ui-flaky.jsonl`, producer platform).
+- **Harness-lane drain request.** A `-harness-lane-drain.md` message on
+  custom's `harness-alerts` maildir. It reaches the custom session through the
+  same `inbox-wait` waiter, and `athena:inbox-attend` → *A fourth writer*
+  handles it. This is the harness-reliability lane (P7), the brief's second
+  instance (*The harness lane*).
 - **`SessionStart` poll — retired.** `~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`
   is no longer a trigger for any lane. Its removal from walt_ui is walt_ui's
   change.

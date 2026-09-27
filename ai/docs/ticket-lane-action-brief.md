@@ -444,6 +444,72 @@ worked-instantiation table above (which cites the flaky tracker policy rather th
 copying it). The mechanism is the contracts' (cited there); this instance adds no
 new rule.
 
+## The harness lane — the second instantiation
+
+The harness-reliability lane (P7; owner, 2026-09-27: "P7: Approved") gives
+harness work its own capacity instead of feature slots.
+`ai-artifacts/coordination/2026-09-27-scope-growth-proposal.md` §3 P7, §5 *P7
+note* and §6 *Epic clustering* are its dated provenance.
+
+**Who works what.** A *lane ticket* is `Area` = `Harness`, `Path` = `Off` (or
+unset), and not a `Feature`. The properties are athena:ticket-management's
+*Ticket properties*, added by DND-979, which lands before this lane.
+- A feature admiral files lane tickets and does not start them.
+  `ai/bin/next-mission` without `--harness-lane` drops them. It names them on
+  stderr: `left to the harness lane: …`.
+- The feature admiral keeps these, because they block or lead its path:
+  `Path` = `Blocking`, `Critical` or `Promoted`, a planned `Feature`, and a
+  tier-1 exploitable vulnerability. A vulnerability is never deferred to
+  another queue.
+- The lane works its queue in next-mission's tier order. So it never starts
+  tier-4 work while a tier 1–3 ticket in its own queue is ready.
+
+**Scope: lane epics only.** next-mission's functional-first hold counts every
+ticket in the scope. A scope that included feature epics would therefore let
+any unfinished `Feature` hold the lane. So the lane's scope is its own epics:
+every DND epic whose title starts with the exact prefix `Harness lane: `
+(`LANE_EPIC_PREFIX` in `ai/lib/next_mission_notion.rb`) and whose status is not
+Done or Cancelled. `athena:epic-clustering` routes harness clusters to these
+epics. A lane epic holds raised issues only, and a ticket moved into it keeps
+`Path` = `Off`. If a `Critical` or `Feature` ticket lands in a lane epic,
+next-mission reports a functional-first hold that names it. It is never
+silent. A lane ticket still on a feature epic waits until clustering moves it.
+
+| Placeholder | Harness lane value |
+|---|---|
+| `{{LANE_ID}}` | `harness` |
+| `{{LANE_LABEL}}` | harness-reliability |
+| `{{OWNER_NAME}}` / `{{OWNER_ID}}` | the owner, resolved per athena:ticket-management → *Resolving the two accounts*. The filter has no assignee clause: lane membership is epic + properties |
+| `{{TRACKER_CONNECTOR}}` | `notion-personal`. next-mission reads it through the REST token at `~/.claude/notion-personal-token` |
+| `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | DND Tickets and DND Epics. The ids live once, in `ai/lib/next_mission_notion.rb` |
+| `{{SCOPE_FILTER}}` | the lane tickets of the open lane epics: `ai/bin/next-mission --harness-lane` with no `--scope`. The per-clause counts that tell a quiet queue from a narrowed filter are its stderr `harness lane scope: N open epic(s)` line and its funnel |
+| `{{STATUS_VOCAB}}` | athena:ticket-management → *Status → Assignee map*, and *A ticket's status follows its captain* (DND-979) |
+| `{{BLOCKED_SEMANTICS}}` | the `Depends On` relation (next-mission's `unblocked` stage) |
+| `{{MAX_CAPTAINS}}` | **`1` — the one declared cap, pending the owner's number.** The owner sets it; `0` turns the lane off (no spawn). It is not P3's K_off |
+| `{{MERGE_POLICY}}` | the `~/dev/custom` PR flow: the captain opens a PR, and the lane admiral merges per athena:merge-boarding. **Terminal state = merged** |
+| `{{LANE_CHANNEL}}` | no `log` channel. The trigger is a drain request: one maildir message on custom's `harness-alerts` channel whose filename ends `-harness-lane-drain.md` (athena:inbox-attend → *A fourth writer*). It carries no state, so add/drop comes only from `{{SOURCE_RE_QUERY}}` |
+| `{{CHANNEL_RESOLUTION}}` | `harness-alerts` must resolve in the **live** custom entry, matched by its `repo`. `ai/bin/check-inbox-registry` asserts this read-only. A miss is registry drift (`Fix: scripts/setup-inbox-registry --install`), never a quiet queue. Verified 2026-09-27: the check passed, and in a temp root a detector-side send woke `inbox-wait` with `rang-channels: harness-alerts` |
+| `{{LOCK_PATH}}` | `~/.claude/harness-coordinator.lock` |
+| `{{STALE_MARKER_SWEEP}}` | a marker older than 12h is stale; the consumer removes it when a request arrives. The 12h clustering cron (DND-983) sends a request every run, whatever the lane's activity. **Once that crontab is installed, this is choice (a). Until then it is choice (b), `manual-only`:** a human deletes the marker |
+| `{{SOURCE_RE_QUERY}}` | `ai/bin/next-mission --harness-lane --started <state-log ids>`, re-run after each ticket |
+
+**On a drain request** the attendant does these steps, in order, and never the
+work itself:
+1. If the cap is `0`, take no action.
+2. If `{{LOCK_PATH}}` exists and is under 12h old, take no action. If it is
+   older, remove it.
+3. Run `ai/bin/next-mission --harness-lane`:
+   - exit 0: work is queued. Spin the lane up (*Spinning the lane up*).
+   - exit 1: quiet. Record `emptied by: <stage>`; `lane_epics` means no lane
+     epic exists yet.
+   - exit 2 or 3: a fault. Relay it to the owner; it is never a quiet queue.
+
+**Senders.** The clustering cron sends a request after each run. A human or
+session may also send one, from the custom checkout:
+
+    cd ~/dev/custom && ai/skills/athena:inbox/bin/send-mail --local \
+      harness-alerts-detector harness-lane-drain --to custom --body-file <file>
+
 ## Relationship to the existing flaky trigger
 
 The flaky instance was spun by the `SessionStart` poll
