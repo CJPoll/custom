@@ -215,9 +215,8 @@ decision; use slack's block kit to make it easier for me to give a response
 when you do that."*
 
 - **Ask only for a real decision.** If you can decide it, decide it. If you can
-  already run a step, run it. A security fix is not a decision; it ships
-  (`~/.claude/CLAUDE.md` → *Security fixes ship without owner approval*). Nor
-  is a library upgrade (*Library upgrades ship without owner approval*).
+  already run a step, run it. A change a standing approval covers is not a
+  decision; it ships (`~/.claude/CLAUDE.md` → *Standing owner approvals*).
 - **Send it as a Block Kit DM to Cody.** Do not end a terminal reply with a
   list of open questions instead.
 
