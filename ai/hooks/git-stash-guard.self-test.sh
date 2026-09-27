@@ -953,6 +953,12 @@ EOF
 chmod +x d/cat; d/cat x"
 case_cmd "QA71. an absolute-path data tool with a benign payload beside it" allow "/usr/bin/jq --version && echo done"
 
+# QX98: critic round 14. `<<` inside an unclosed ${...} is literal, not a
+# heredoc; the line after runs directly, so it is read as a command.
+case_cmd "QX98. << inside a parameter expansion is not a heredoc" deny "echo \${x#<<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"

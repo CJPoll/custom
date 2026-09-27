@@ -533,7 +533,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # its line (a comment, or a literal `#` word) or inside `((`/`$[`
   # arithmetic (a shift) is not taken as a heredoc: the lines after it are
   # tokenized with the command, as before.
-  function tokenize(text, W, QF, SB, UX, PQ, HB, HQ,    n, i, L, c, st, cur, has, q, ns, skip, ux, wq, hdp, hds, nohd, cm, ar, np, pd, pq, ps, nh, h, pos, nx, line, t, body, bl, term, op) {
+  function tokenize(text, W, QF, SB, UX, PQ, HB, HQ,    n, i, L, c, st, cur, has, q, ns, skip, ux, wq, hdp, hds, nohd, cm, ar, np, pd, pq, ps, nh, h, pos, nx, line, t, body, bl, term, op, _hd) {
     n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; L = length(text)
     wq = 0; hdp = 0; cm = 0; ar = 0; np = 0; nh = 0; HB[0] = 0
     for (i = 1; i <= L; i++) {
@@ -565,8 +565,15 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # redirection: its body is read as a command.
       if (c ~ /[<>]/ || (c == "&" && substr(text, i + 1, 1) == ">")) {
         if (c == "&") i++
-        # `$[1<<...` (zsh arithmetic) is a shift, not a heredoc.
-        nohd = (cur ~ /\$\[/)
+        # `<<` inside `$[...]` (zsh arithmetic) is a shift, and inside an
+        # unclosed `${...}` parameter expansion it is literal text of that
+        # one word (`echo ${x#<<'E' }`), not a heredoc (critic round 14).
+        # `$((...))` arithmetic is already excluded by `ar`. Over-setting
+        # nohd only reads the following lines as commands, which is safe.
+        nohd = 0
+        _hd = cur; gsub(/\001/, "", _hd)
+        if (_hd ~ /\$\[/) nohd = 1
+        else if (gsub(/\$\{/, "", _hd) > gsub(/\}/, "", _hd)) nohd = 1
         if (has && cur !~ /^[0-9]+$/) {
           if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; hdp = 0 } }
           else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; ns = 0 }

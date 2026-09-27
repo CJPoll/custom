@@ -970,3 +970,12 @@ that code.
   from the laptop coordinator session), quoted verbatim in the header
   RESIDUAL. DND-775 closes the class below the text; DND-905 is the
   fallback if its activation slips past 2026-10-04. No code or test change.
+| A-32 | The `${...}` heredoc guard reverted, so `<<` inside a parameter expansion is taken as a heredoc (critic round 14) | QX98 — `556 passed, 1 failed` |
+
+- **Round 14, `<<` inside `${...}`.** The critic found the tokenizer took
+  `<<` inside an unclosed `${...}` parameter expansion as a heredoc, so the
+  next line was read as data and a verb-hiding stash write in it was
+  dropped. The shell runs that line directly (not the owner-accepted
+  residual, which is a string another program executes). Fix: `nohd` is set
+  when the word so far holds `$[` or an unclosed `${`, so those lines are
+  read as commands. QX98; mutation A-32.
