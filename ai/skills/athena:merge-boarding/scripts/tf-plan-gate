@@ -168,6 +168,22 @@ def safe_destroy?(type)
   free_stateless?(type) && !VALUE_HOLDING_TYPES.include?(type)
 end
 
+# Attributes a value-holding type changes IN PLACE: the value itself, tags and
+# description. Any other top-level attribute that differs (or is unknown until
+# apply) may force a replace, which loses the stored value.
+IN_PLACE_VALUE_ATTRS = %w[
+  description encrypted_value insecure_value plaintext_value secret_binary
+  secret_string tags tags_all value
+].freeze
+
+def replace_risk_attrs(before, after, unknown)
+  b = before.is_a?(Hash) ? before : {}
+  a = after.is_a?(Hash) ? after : {}
+  u = unknown.is_a?(Hash) ? unknown : {}
+  (b.keys | a.keys | u.keys).reject { |k| IN_PLACE_VALUE_ATTRS.include?(k) }
+                            .select { |k| u[k] == true || b[k] != a[k] }.sort
+end
+
 def destroy_label(type)
   return "holds a stored value" if VALUE_HOLDING_TYPES.include?(type)
 
@@ -237,6 +253,14 @@ changes.each do |rc|
   if actions == ["create"] && base_create
     cost_diffs(base_create.dig("change", "after"), rc.dig("change", "after"), rc.dig("change", "after_unknown")).each do |d|
       held << ["COST", addr, "sizing change vs the control: #{d}"]
+    end
+    # Offline, an update and a force-new replace look the same. For a type
+    # whose replace loses a value, only a known in-place change is let through.
+    if VALUE_HOLDING_TYPES.include?(type)
+      moved = replace_risk_attrs(base_create.dig("change", "after"), rc.dig("change", "after"), rc.dig("change", "after_unknown"))
+      unless moved.empty?
+        held << ["DESTROY", addr, "#{type} (holds a stored value): offline, #{moved.join(', ')} changed and may force a replace"]
+      end
     end
   end
   if actions.include?("update")
