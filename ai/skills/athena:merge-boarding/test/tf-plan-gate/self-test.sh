@@ -34,6 +34,18 @@ check unknown-type-destroy 4 --plan "$(plan d "$(rc aws_something_new '["delete"
 check sg-replace-clear     0 --plan "$(plan e "$(rc aws_security_group '["delete","create"]' '{}' '{}')")"
 check new-instance-cost    4 --plan "$(plan f "$(rc aws_instance '["create"]' null '{"instance_type":"t4g.small"}')")"
 check new-kms-key-cost     4 --plan "$(plan g "$(rc aws_kms_key '["create"]' null '{}')")"
+# A free-listed type is free only at its free sizing: a new Advanced-tier SSM
+# parameter is billed. Checked online and offline with no control counterpart.
+check new-ssm-advanced     4 --plan "$(plan ea "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"x","tier":"Advanced"}')")"
+check new-ssm-standard     0 --plan "$(plan eb "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"x","tier":"Standard"}')")"
+# An unset tier is unknown on every new SSM parameter: after_unknown below is
+# verbatim from a real plan (AWS provider 5.100.0, terraform 1.14.3,
+# 2026-09-27). It takes the provider/account default, a size the diff did not
+# choose, so it does not hold; the secrets create ships.
+SSM_REAL_UNK='{"arn":true,"data_type":true,"has_value_wo":true,"id":true,"insecure_value":true,"key_id":true,"tags_all":true,"tier":true,"version":true}'
+check new-ssm-tier-default 0 --plan "$(plan ec "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","type":"SecureString","value":"x"}' "$SSM_REAL_UNK")")"
+check offline-new-ssm-advanced 4 --plan "$(plan ed "$(rc aws_ssm_parameter '["create"]' null '{"name":"/b","value":"x","tier":"Advanced"}')")" \
+                             --control "$(plan ee)"
 check new-iam-free         0 --plan "$(plan h "$(rc aws_iam_role_policy '["create"]' null '{"policy":"{}"}')")"
 check resize-instance      4 --plan "$(plan i "$(rc aws_instance '["update"]' '{"instance_type":"t4g.small"}' '{"instance_type":"t4g.medium"}')")"
 check downsize-also-holds  4 --plan "$(plan j "$(rc aws_db_instance '["update"]' '{"instance_class":"db.t4g.medium"}' '{"instance_class":"db.t4g.micro"}')")"

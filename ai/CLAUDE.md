@@ -385,7 +385,9 @@ The holds:
     description (suspending versioning, say), and creating or updating an S3
     or ECR lifecycle (expiration) policy. An attribute the provider computes
     (`id`, `arn`, `version`, `updated_at`) going unknown is not a change.
-  - **Cost:** a `create` of any type not on that list, or an `update` that
+  - **Cost:** a `create` of any type not on that list, a new resource of a
+    listed type that explicitly sets a billed size (an Advanced-tier SSM
+    parameter; an unset size takes the default and does not hold), or an `update` that
     changes a sizing attribute (`instance_type`, `instance_class`,
     `allocated_storage`, `iops`, `tier`, and the rest in the tool), up or down,
     or leaves one unknown until apply.

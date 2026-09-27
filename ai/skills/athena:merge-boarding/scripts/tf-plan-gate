@@ -94,7 +94,8 @@ def usage
                 or updates such a type beyond its value, tags or description;
                 or creates or updates an expiration policy (#{EXPIRY_POLICY_TYPES.join(', ')});
       COST      creates a type that is not known free-and-stateless, or
-                updates a sizing attribute (#{COST_ATTRS.first(4).join(', ')}, ...)
+                creates a free one at an explicitly set billed size (an
+                Advanced-tier SSM parameter), or updates a sizing attribute (#{COST_ATTRS.first(4).join(', ')}, ...)
                 or leaves one unknown until apply.
     A create or update of a secret's value or config is not held by itself.
     prevent_destroy makes terraform refuse to plan. It still writes a plan
@@ -186,7 +187,8 @@ IN_PLACE_VALUE_ATTRS = %w[
 # updated_at). Their unknown-ness says nothing about a replace, so it is
 # ignored; a KNOWN change to one is still compared.
 COMPUTED_VALUE_ATTRS = %w[
-  arn created_at id remote_updated_at updated_at version version_id
+  arn created_at has_secret_string_wo has_value_wo id remote_updated_at
+  updated_at version version_id
 ].freeze
 
 # An attribute unknown until apply is not the diff's when it is computed, or
@@ -244,6 +246,38 @@ def cost_diffs(before, after, unknown, path = [], base_unknown = nil)
   out
 end
 
+# A free-listed type is free only at its free sizing. The value(s) of a
+# COST_ATTRS key at which a free-listed type bills nothing; any other value a
+# NEW resource sets explicitly holds as COST. An unset one is unknown in a
+# real plan (measured: an SSM parameter's tier) and takes the provider or
+# account default, a size the diff did not choose, so it does not hold.
+# "Free" means no fixed recurring charge: usage-driven charges (versioned
+# storage, KMS requests) are not measured here.
+FREE_SIZING_VALUES = { "tier" => ["Standard"] }.freeze
+
+# Paths of COST_ATTRS keys a new resource explicitly sets to a non-free value.
+def new_sizing(after, unknown, path = [])
+  out = []
+  if after.is_a?(Hash) || unknown.is_a?(Hash)
+    a_h = after.is_a?(Hash) ? after : {}
+    u_h = unknown.is_a?(Hash) ? unknown : {}
+    (a_h.keys | u_h.keys).each do |k|
+      a = a_h[k]
+      u = u_h[k]
+      if COST_ATTRS.include?(k) && u != true && !a.nil? && !Array(FREE_SIZING_VALUES[k]).include?(a)
+        out << "#{(path + [k]).join('.')} = #{a.inspect}"
+      end
+      out.concat(new_sizing(a, u, path + [k])) if [a, u].any? { |x| x.is_a?(Hash) || x.is_a?(Array) }
+    end
+  elsif after.is_a?(Array) || unknown.is_a?(Array)
+    n = [after, unknown].map { |x| x.is_a?(Array) ? x.size : 0 }.max
+    n.times do |i|
+      out.concat(new_sizing(after.is_a?(Array) ? after[i] : nil, unknown.is_a?(Array) ? unknown[i] : nil, path + [i.to_s]))
+    end
+  end
+  out
+end
+
 changes = load_plan(plan_path)
 control = control_path ? load_plan(control_path) : []
 control_keys = control.map { |rc| [rc["address"], rc.dig("change", "actions"), rc.dig("change", "after")] }
@@ -291,6 +325,13 @@ changes.each do |rc|
   # Offline (no state) a resize reads as create-vs-create at one address:
   # compare its sizing attributes with the control's create.
   base_create = control.find { |c| c["address"] == addr && c.dig("change", "actions") == ["create"] }
+  # A NEW free-listed resource (no control counterpart) is free only at its
+  # free sizing.
+  if actions.include?("create") && free_stateless?(type) && !base_create
+    new_sizing(rc.dig("change", "after"), rc.dig("change", "after_unknown")).each do |d|
+      held << ["COST", addr, "new #{type} at a billed size: #{d}"]
+    end
+  end
   if actions == ["create"] && base_create
     base_unknown = base_create.dig("change", "after_unknown")
     cost_diffs(base_create.dig("change", "after"), rc.dig("change", "after"), rc.dig("change", "after_unknown"),
