@@ -833,6 +833,16 @@ check("cli: zero lane epics is exit 1 naming the prefix searched, never a silent
   end
 end
 
+check("cli: lane epics holding no tickets get the lane's Fix line, not the --scope one") do
+  Dir.mktmpdir("DND-987") do |d|
+    f = File.join(d, "empty-lane.json")
+    File.write(f, JSON.generate("lane_epics" => [{ "id" => "e1", "title" => "Harness lane: x" }], "tickets" => []))
+    out, _err, code = cli("--from-json", f, "--harness-lane")
+    code == 1 && out.include?("emptied by: in_scope") && out.include?("lane epics hold no tickets") &&
+      !out.include?("--scope")
+  end
+end
+
 check("cli: a lane_epics fixture without --harness-lane is a usage error") do
   _out, err, code = cli("--from-json", File.join(FIX, "lane.json"))
   code == 2 && err.include?("--harness-lane") && err.include?("Fix:")

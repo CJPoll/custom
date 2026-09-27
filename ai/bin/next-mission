@@ -11,7 +11,8 @@
 #
 # The rule (tiers 0-4 and the functional-first hold) lives in
 # ai/lib/next_mission.rb; its prose home is athena:ticket-management ->
-# "Priority: critical path first" (as amended by DND-979). The Notion reads
+# "Priority: critical path first" (pending DND-979; not on main until it
+# lands). The Notion reads
 # live in ai/lib/next_mission_notion.rb.
 #
 # Exit codes -- a failed lookup must never look like an empty one:
@@ -85,6 +86,7 @@ EMPTY_FIX = {
   harness_lane: "nothing for the harness lane: no Area=Harness, Path=Off, non-Feature ticket in scope.",
   not_lane: "the rest are the harness lane's: file them, do not start them " \
             "(ai/docs/ticket-lane-action-brief.md -> The harness lane).",
+  lane_empty: "the lane epics hold no tickets yet: nothing for the harness lane to drain.",
   lane_epics: "nothing for the harness lane to drain. Lane tickets reach the lane only on epics with " \
               "this title prefix (ai/docs/ticket-lane-action-brief.md -> The harness lane); check " \
               "an epic's title if you expected one.",
@@ -163,13 +165,20 @@ rescue NextMissionNotion::ReadError => e
                         "notion-personal integration lost access (owner-gated); on 429/5xx re-run shortly.")
 end
 
-def render_empty(result)
+# The Fix: line for an empty result. A lane read whose epics hold no tickets
+# is not a mistyped --scope, so it gets its own text.
+def fix_for(result, lane)
+  key = lane && result.emptied_by == :in_scope ? :lane_empty : result.emptied_by
+  EMPTY_FIX.fetch(key)
+end
+
+def render_empty(result, lane)
   puts "#{PROG}: no candidate to dispatch"
   puts "emptied by: #{result.emptied_by}"
   puts "reason: #{result.reason}"
   puts "funnel (matched at each filter, in order):"
   result.funnel.each { |stage, n| puts "  #{NextMission::STAGES.fetch(stage).split(' (').first}: #{n}" }
-  puts "Fix: #{EMPTY_FIX.fetch(result.emptied_by)}"
+  puts "Fix: #{fix_for(result, lane)}"
 end
 
 def lane_prefix
@@ -261,11 +270,11 @@ def main(argv)
     h = result.to_h
     h[:lane_epics] = lane_epics if lane_epics
     puts JSON.pretty_generate(h)
-    warn "Fix: #{EMPTY_FIX.fetch(result.emptied_by)}" unless result.pick
+    warn "Fix: #{fix_for(result, lane_epics)}" unless result.pick
   elsif result.pick
     puts "#{result.pick.id}\t#{result.rule}"
   else
-    render_empty(result)
+    render_empty(result, lane_epics)
   end
   exit(result.pick ? 0 : 1)
 rescue StandardError => e

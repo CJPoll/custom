@@ -7,8 +7,8 @@
 # that picked it. The rule is the owner-approved priority order of 2026-09-27
 # (ai-artifacts/coordination/2026-09-27-scope-growth-proposal.md, section 6
 # "Priority order", confirmed in section 7); its prose home is
-# athena:ticket-management -> "Priority: critical path first", as amended by
-# DND-979 (W2), which lands before this tool.
+# athena:ticket-management -> "Priority: critical path first", pending
+# DND-979 (W2): that section is not on main until DND-979 lands.
 #
 #   tier 0  Path=Promoted                         (owner order; ID as proxy)
 #   tier 1  Kind=Vulnerability, Severity CRITICAL/HIGH   (exploitable)

@@ -449,11 +449,15 @@ new rule.
 The harness-reliability lane (P7; owner, 2026-09-27: "P7: Approved") gives
 harness work its own capacity instead of feature slots.
 `ai-artifacts/coordination/2026-09-27-scope-growth-proposal.md` §3 P7, §5 *P7
-note* and §6 *Epic clustering* are its dated provenance.
+note* and §6 *Epic clustering* are its dated provenance. That is a gitignored,
+machine-local record, cited for provenance only; this section is
+self-contained.
 
 **Who works what.** A *lane ticket* is `Area` = `Harness`, `Path` = `Off` (or
 unset), and not a `Feature`. The properties are athena:ticket-management's
-*Ticket properties*, added by DND-979, which lands before this lane.
+*Ticket properties*, **pending DND-979**: that section is not on main until
+DND-979 lands. Until then the values are the proposal's §6 table, and next-mission
+reads the same selects from Notion.
 - A feature admiral files lane tickets and does not start them.
   `ai/bin/next-mission` without `--harness-lane` drops them. It names them on
   stderr: `left to the harness lane: …`.
@@ -496,7 +500,7 @@ Progress`, and the other's next-mission then counts it as started.
 | `{{TRACKER_CONNECTOR}}` | `notion-personal`. next-mission reads it through the REST token at `~/.claude/notion-personal-token` |
 | `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | DND Tickets and DND Epics. The ids live once, in `ai/lib/next_mission_notion.rb` |
 | `{{SCOPE_FILTER}}` | the lane tickets of the open lane epics: `ai/bin/next-mission --harness-lane` with no `--scope`. The per-clause counts that tell a quiet queue from a narrowed filter are its stderr `harness lane scope: N open epic(s)` line and its funnel |
-| `{{STATUS_VOCAB}}` | athena:ticket-management → *Status → Assignee map*, and *A ticket's status follows its captain* (DND-979) |
+| `{{STATUS_VOCAB}}` | athena:ticket-management → *Status → Assignee map*, and *A ticket's status follows its captain* once **pending DND-979** lands it |
 | `{{BLOCKED_SEMANTICS}}` | the `Depends On` relation (next-mission's `unblocked` stage) |
 | `{{MAX_CAPTAINS}}` | **`1` — the one declared cap, pending the owner's number.** The owner sets it; `0` turns the lane off (no spawn). It is not P3's K_off |
 | `{{MERGE_POLICY}}` | the `~/dev/custom` PR flow: the captain opens a PR, and the lane admiral merges per athena:merge-boarding. **Terminal state = merged** |
