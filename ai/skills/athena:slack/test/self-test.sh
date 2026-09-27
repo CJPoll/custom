@@ -1390,6 +1390,48 @@ setup_case; claim_setup; rm -f "${CHOME}/inbox-root/projects/cproj.json"
 claim_fn claim_resolve_inbox "${PROJ}"
 if [[ "${OUT}" == "no-registry-entry" && "${RC}" != 0 ]]; then ok "claim_resolve_inbox: no entry for this repo -> no-registry-entry"
 else bad "claim_resolve_inbox: no entry for this repo -> no-registry-entry" "got '${OUT}' rc=${RC}"; fi
+
+# u11b. DND-491 fix round (critic finding): an UNPARSEABLE other tenant's
+#       registry file, with no entry matching THIS repo, must be
+#       `registry-error` -- never folded into `no-registry-entry`, because the
+#       broken file may be this project's own (fs_registry_records' own
+#       reasoning, restated here as the negative test claim_resolve_inbox never
+#       had).
+setup_case; claim_setup; rm -f "${CHOME}/inbox-root/projects/cproj.json"
+printf 'not valid json' > "${CHOME}/inbox-root/projects/zzbroken.json"
+chmod 600 "${CHOME}/inbox-root/projects/zzbroken.json"
+claim_fn claim_resolve_inbox "${PROJ}"
+if [[ "${OUT}" == "registry-error" && "${RC}" != 0 ]]; then
+  ok "claim_resolve_inbox: an unparseable OTHER registry entry, no match for this repo -> registry-error"
+else bad "claim_resolve_inbox: an unparseable OTHER registry entry, no match for this repo -> registry-error" \
+  "got '${OUT}' rc=${RC}"; fi
+setup_case; claim_setup; rm -f "${CHOME}/inbox-root/projects/cproj.json"
+printf 'not valid json' > "${CHOME}/inbox-root/projects/zzbroken.json"
+chmod 600 "${CHOME}/inbox-root/projects/zzbroken.json"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=registry-error "* && "${ERR}" == *"Fix:"* ]]; then
+  ok "claim-thread: an unparseable OTHER registry entry -> exit 3 reason=registry-error, Fix:"
+else bad "claim-thread: an unparseable OTHER registry entry -> exit 3 reason=registry-error, Fix:" "rc=${RC} err='${ERR}'"; fi
+
+# u11c. DND-491 fix round (critic finding): mcp_registered_url's internal-error
+#       status (2, "a lookup key is not an absolute path") is its own status,
+#       never folded into 1 (not registered) -- this is the status
+#       claim-thread's own case maps to reason mcp-error:registration-key. Not
+#       reachable end-to-end through claim-thread: both callers that compute
+#       the key (inbox_mcp_main_checkout, mcp_toplevel) already realpath their
+#       result, so a real repo can never hand it a relative key. The function
+#       itself is the regression target for the defensive branch.
+setup_case
+claim_fn mcp_registered_url "relative/main" "/abs/top"
+if [[ "${RC}" == 2 ]]; then
+  ok "mcp_registered_url: a non-absolute main-checkout key -> status 2 (internal, never 'not registered')"
+else bad "mcp_registered_url: a non-absolute main-checkout key -> status 2 (internal, never 'not registered')" \
+  "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+setup_case
+claim_fn mcp_registered_url "/abs/main" "relative/top"
+if [[ "${RC}" == 2 ]]; then
+  ok "mcp_registered_url: a non-absolute toplevel key -> status 2"
+else bad "mcp_registered_url: a non-absolute toplevel key -> status 2" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 setup_case; claim_setup
 WT="${CHOME}/wt/cproj-feature"
 ( cd "${PROJ}" && git worktree add -q -b feature "${WT}" ) >/dev/null 2>&1
@@ -1503,6 +1545,24 @@ if [[ "${RC}" == 3 && "${ERR}" == *"reason=no-identity "* ]] && [[ -z "$(mcp_cal
   ok "claim-thread: auth.test without a bot_id -> exit 3 reason=no-identity, no call"
 else bad "claim-thread: auth.test without a bot_id -> exit 3 reason=no-identity, no call" "rc=${RC} err='${ERR}'"; fi
 
+# c8b. DND-491 fix round (critic finding): the SAME refresh-once-then-fail
+#      applies when TEAM_ID (not bot_id) is the field missing from the cached
+#      identity -- only the bot_id half of `slack_load_bot_identity`'s check
+#      was tested before this round.
+setup_case; claim_setup
+printf '{"ok":true,"user":"athena","user_id":"%s","bot_id":"%s"}' "${BOT_USER}" "${BOT_ID}" > "${CACHE}/identity.json"
+fixture auth.test "{\"ok\":true,\"user_id\":\"${BOT_USER}\",\"bot_id\":\"${BOT_ID}\",\"team_id\":\"${TEAM_ID}\"}"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 0 && "$(calls_of auth.test)" == 1 && "$(jq -r .team_id <<<"$(claim_args)")" == "${TEAM_ID}" ]]; then
+  ok "claim-thread: a cached identity without team_id is refreshed once from auth.test"
+else bad "claim-thread: a cached identity without team_id is refreshed once from auth.test" "rc=${RC} auth=$(calls_of auth.test) err='${ERR}'"; fi
+setup_case; claim_setup; rm -f "${CACHE}/identity.json"
+fixture auth.test "{\"ok\":true,\"user_id\":\"${BOT_USER}\",\"bot_id\":\"${BOT_ID}\"}"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=no-identity "* ]] && [[ -z "$(mcp_calls)" ]]; then
+  ok "claim-thread: auth.test without a team_id -> exit 3 reason=no-identity, no call"
+else bad "claim-thread: auth.test without a team_id -> exit 3 reason=no-identity, no call" "rc=${RC} err='${ERR}'"; fi
+
 # p1. post: the ts line, then the claim; exit 0.
 setup_case; claim_setup
 fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790000000.000100\",\"channel\":\"${ENG_CHANNEL}\"}"
@@ -1581,6 +1641,39 @@ if [[ "${RC}" == 3 && "${ERR}" == *"reason=no-registry-entry "*"inbox=none"* && 
 else bad "post: cwd with no registry entry -> posted once, exit 3 reason=no-registry-entry inbox=none" \
   "rc=${RC} err='${ERR}' posts=$(calls_of chat.postMessage)"; fi
 RUN_CWD=""
+
+# p9. DND-491 fix round (critic finding): the ONE untested branch in
+#     slack_claim_started_thread -- claim-thread crashing or exiting a code it
+#     never documents (not 0, 2, or 3). Without this branch, post/dm would
+#     exit 3 with nothing printed at all, which is exactly the silent failure
+#     the header says the branch prevents. A separate bin dir stands in for
+#     the real one, with claim-thread replaced by a stub that exits 1, so
+#     slack_claim_started_thread's `"$1/claim-thread"` call reaches the stub.
+setup_case; claim_setup
+ALTROOT="${TMP}/p9altroot${CASE_N}"; ALTBIN="${ALTROOT}/bin"; mkdir -p "${ALTBIN}"
+ln -s "${ROOT}/lib" "${ALTROOT}/lib"
+cp "${BIN}/post" "${ALTBIN}/post"
+cat > "${ALTBIN}/claim-thread" <<'STUBEOF'
+#!/usr/bin/env bash
+exit 1
+STUBEOF
+chmod +x "${ALTBIN}/claim-thread"
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1.1\",\"channel\":\"${ENG_CHANNEL}\"}"
+set +e
+OUT="$(cd "${RUN_CWD:-${TMP}}" && env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" SHIM_DIR="${SHIM_DIR}" \
+  ATHENA_INBOX_ROOT="${CHOME}/inbox-root" ATHENA_INBOX_CLIENT_CONFIG="${CHOME}/client.json" \
+  SHIM_MCP_BEARER="${MCP_BEARER}" \
+  SLACK_INBOX_STATE="${STATE}" SLACK_INBOX_LEGACY_STATE="${LEGACY}" \
+  "${ALTBIN}/post" "${ENG_CHANNEL}" "hi" 2>"${TMP}/perr${CASE_N}")"
+RC=$?
+set -e
+ERR="$(cat "${TMP}/perr${CASE_N}")"
+if [[ "${RC}" == 3 ]] && [[ "$(head -n1 <<<"${OUT}")" == "ts=1.1 channel=${ENG_CHANNEL}" ]] \
+   && [[ "${ERR}" == *"claim=FAILED reason=mcp-error:claim-thread-exit-1"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+   && [[ "$(calls_of chat.postMessage)" == 1 ]]; then
+  ok "post: claim-thread exiting an undocumented code (1) -> claim=FAILED reason=mcp-error:claim-thread-exit-1, Fix:, exit 3"
+else bad "post: claim-thread exiting an undocumented code (1) -> claim=FAILED reason=mcp-error:claim-thread-exit-1, Fix:, exit 3" \
+  "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 DOCTRINE="${ROOT}/SKILL.md"
 EXAMPLE="$(dirname "${ROOT}")/athena:slack:interactive-messages/SKILL.md"
