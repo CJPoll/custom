@@ -25,6 +25,12 @@
 #     SUCCESS/NEUTRAL/SKIPPED, a commit StatusContext SUCCESS. Zero reported
 #     checks is not green. The pin makes GitHub itself refuse the merge if the
 #     head moves between this read and the merge.
+#   * In a repo whose base-branch tip DECLARES an integration gate
+#     (bin/prep-commit.sh or ai/bin/harness-gate, the rule integration-gate
+#     uses), a merge is also REFUSED unless integration-gate's receipt exists
+#     for exactly the pinned head and exactly that tip, and `--auto` is refused
+#     outright (DND-969; see gmg_receipt_gate). The one recommended merge path
+#     is integration-gate, then locked-merge, which makes this call.
 #   * A gh ALIAS is expanded the way gh expands it (see gmg_expand_alias) and
 #     the EXPANDED argv is what the guard judges, so `gh alias set p pr` then
 #     `p merge 5 --auto` is refused like `pr merge 5 --auto`. A gh shell alias
@@ -94,9 +100,14 @@
 # 2026-09-25), so on a repo that gates only through classic protection `--auto`
 # is refused too. That is deny-by-default working: take the non-auto path.
 #
+# Residual of the receipt check (DND-969): the receipt is a local file, so any
+# local actor can write one (the same trust level as critic-verdicts), and a
+# repo that declares no gate on its base tip is not checked at all.
+#
 # Usage: set GMG_TOOL, then `gmg_guard "$@"`. It returns 0 when the command may
 # run, and exits 3 with a REFUSING line and a Fix: line otherwise. It calls
-# `gh` for its reads, so the caller exports GH_TOKEN/GH_HOST first. After it
+# `gh` for its reads, so the caller exports GH_TOKEN/GH_HOST first, and `git`
+# in the current directory for the receipt check. After it
 # returns, GMG_IS_MERGE is 1 when the command is a merge.
 
 # The endpoint normaliser, the `api` argv parser and the GraphQL scan are
@@ -108,10 +119,23 @@
   exit 3
 }
 
+# The integration-gate receipt and gate-declaration rules, shared with
+# integration-gate and locked-merge so the three cannot drift (DND-969).
+# shellcheck source=integration-receipt.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/integration-receipt.sh" || {
+  echo "gh-athena: REFUSING: cannot load ai/lib/integration-receipt.sh, so no merge can be judged." >&2
+  echo "  Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+  exit 3
+}
+
 GMG_TOOL="${GMG_TOOL:-gh-athena}"
 GMG_IS_MERGE=0
 GMG_ESCALATE='Never merge or move a branch around this (a bare `gh pr merge`, a `gh api` merge or ref write, or the owner'"'"'s token); if the checks cannot go green, escalate to your admiral with the PR number and this output.'
-GMG_SAFE_PATH="assert every check green on the PR's exact head SHA (\`gh pr checks <n>\`, \`gh pr view <n> --json headRefOid,statusCheckRollup\`), then \`~/dev/custom/ai/bin/$GMG_TOOL pr merge <n> --squash --match-head-commit <sha>\` WITHOUT --auto"
+# The one recommended merge path (DND-969): integration-gate, then locked-merge,
+# which makes the pinned `pr merge` call itself under the repo's merge lock.
+GMG_MB="~/dev/custom/ai/skills/athena:merge-boarding/scripts"
+GMG_LAND="run \`$GMG_MB/integration-gate\` on the PR's head from a checkout of its repo, then land it with \`$GMG_MB/locked-merge --pr <n> --head <the SHA its INTEGRATION OK line names>\` (athena:merge-boarding -> Landing onto a moving main)"
+GMG_SAFE_PATH="wait until every check on the PR's exact head SHA is green (\`gh pr checks <n> --watch\`), then $GMG_LAND"
 
 # gh's own top-level commands (gh 2.83). A first word outside this list may be
 # an alias, which is expanded and checked.
@@ -411,6 +435,87 @@ gmg_api_guard() {
   return 0
 }
 
+# ---- the integration-gate receipt (DND-969) ---------------------------------
+# locked-merge requires integration-gate's receipt (DND-965), but a direct
+# `pr merge --match-head-commit <sha>` only asked whether CI was green, so it
+# merged heads integration-gate never passed. Now every merge of a repo that
+# DECLARES a gate needs the receipt for exactly the pinned head, recorded
+# against exactly the base branch's current tip. The declaration rule and the
+# receipt reader are ai/lib/integration-receipt.sh, the ones integration-gate
+# and locked-merge use.
+#
+# The receipt is local (<git common dir>/integration-receipts/), so the merge
+# must run from a checkout of the PR's repo. A cwd that is not one, a base tip
+# the forge will not report, and a base tip that is not in the local object
+# store are each COULD NOT LOOK and refused: none of them may read as "this
+# repo declares no gate". A repo whose base tip declares no gate merges as
+# before. There is no flag or env var that skips this (~/dev/custom/CLAUDE.md
+# -> "A check's own bar must not live in the diff it is checking").
+
+# gmg_checkout_for <owner> <repo> : sets GMG_TOP and GMG_COMMON to the cwd's
+# checkout when one of its remotes is github.com/<owner>/<repo>. Returns 1 with
+# GMG_WHY otherwise.
+gmg_checkout_for() {
+  local want u found=0 urls
+  want="${1,,}/${2,,}"
+  GMG_TOP="" GMG_COMMON="" GMG_WHY=""
+  if ! GMG_TOP="$(git rev-parse --show-toplevel 2>/dev/null)" || [ -z "$GMG_TOP" ]; then
+    GMG_WHY="the current directory ($(pwd)) is not inside a git checkout"; return 1
+  fi
+  GMG_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || GMG_COMMON=""
+  case "$GMG_COMMON" in
+    /*) ;;
+    *) GMG_WHY="the git common dir of ${GMG_TOP} did not resolve to an absolute path (got '${GMG_COMMON}'; git >= 2.31 is needed)"; return 1 ;;
+  esac
+  urls="$(git remote -v 2>/dev/null | awk '{print $2}' | sort -u)" || urls=""
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    u="${u,,}"; u="${u%/}"; u="${u%.git}"
+    case "$u" in *"github.com:$want"|*"github.com/$want") found=1 ;; esac
+  done <<<"$urls"
+  if [ "$found" != 1 ]; then
+    GMG_WHY="${GMG_TOP} is not a checkout of $1/$2 (its remotes: $(tr '\n' ' ' <<<"${urls:-none}"))"; return 1
+  fi
+  return 0
+}
+
+# gmg_receipt_gate <shown> <owner> <repo> <base-branch> <pinned-head|""> :
+# returns 0 when the merge may proceed; exits 3 otherwise. An empty head means
+# `--auto`, which GitHub completes later onto whatever the base is then, so no
+# receipt can cover it: in a gated repo it is refused.
+gmg_receipt_gate() {
+  local shown="$1" owner="$2" repo="$3" base="$4" head="$5" ref_json err rc tip gate why
+  local look="COULD NOT LOOK: $GMG_TOOL cannot tell whether $owner/$repo declares an integration gate"
+  if ! gmg_checkout_for "$owner" "$repo"; then
+    gmg_refuse "$shown" "$look, because $GMG_WHY. The integration-gate receipt lives in the repo's git common dir, so it can only be read from a checkout" \
+      "cd into a checkout or worktree of $owner/$repo (\`git remote -v\` names github.com/$owner/$repo), then $GMG_LAND"
+  fi
+  err="$(mktemp)"
+  if ref_json="$(gh api "repos/$owner/$repo/git/ref/heads/$base" 2>"$err")"; then rc=0; else rc=$?; fi
+  why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
+  tip="$(jq -r '.object.sha // empty' <<<"$ref_json" 2>/dev/null)" || tip=""
+  if [ "$rc" != 0 ] || ! [[ "$tip" =~ ^[0-9a-f]{40}$ ]]; then
+    gmg_refuse "$shown" "$look: the tip of its base branch '$base' could not be read (\`gh api repos/$owner/$repo/git/ref/heads/$base\` exit $rc: ${why:-body '$(head -c 200 <<<"$ref_json" | tr '\n' ' ')'})" \
+      "make the base branch readable (right -R <owner>/<repo>, network up), then $GMG_LAND"
+  fi
+  if gate="$(ir_declared_gate_on "$GMG_TOP" "$tip")"; then rc=0; else rc=$?; fi
+  case "$rc" in
+    1) return 0 ;;   # the base tip declares no gate: merge as before
+    2) gmg_refuse "$shown" "$look: the base tip $tip (origin/$base on the forge) is not in the object store of $GMG_TOP" \
+         "\`cd $GMG_TOP && git fetch origin\` so $tip is local, then $GMG_LAND" ;;
+  esac
+  if [ -z "$head" ]; then
+    gmg_refuse "$shown" "$owner/$repo declares an integration gate ($gate on $base at $tip), and \`--auto\` merges later, when the required checks pass, onto whatever $base is then. No integration-gate receipt can cover that base" \
+      "drop --auto; wait until every check on the PR's head is green (\`gh pr checks <n> --watch\`), then $GMG_LAND"
+  fi
+  if ! ir_read_receipt "$GMG_COMMON" "$head" "$tip"; then
+    gmg_refuse "$shown" "$IR_KIND: $owner/$repo declares an integration gate ($gate on $base at $tip), and $IR_WHY" \
+      "${IR_HOW:+$IR_HOW }$GMG_LAND"
+  fi
+  printf '%s: RECEIPT %s base %s recorded %s\n' "$GMG_TOOL" "$IR_RECEIPT" "$tip" "$IR_RECORDED_AT" >&2
+  return 0
+}
+
 # gmg_guard <gh args...> : the entry point. Returns 0 or exits 3.
 gmg_guard() {
   local shown="gh $*" pr_json err rc url owner repo base head n_prot n_rules bad total w
@@ -455,7 +560,10 @@ gmg_guard() {
       'if type == "array" then [.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?] | length else error("not an array") end' \
       "repos/$owner/$repo/rules/branches/$base?per_page=100")"
     local probes; probes="$(cat "$GMG_PROBE_FILE")"; rm -f "$GMG_PROBE_FILE"
-    if [ "$(( n_prot + n_rules ))" -gt 0 ]; then return 0; fi
+    if [ "$(( n_prot + n_rules ))" -gt 0 ]; then
+      gmg_receipt_gate "$shown" "$owner" "$repo" "$base" ""
+      return 0
+    fi
     gmg_refuse "$shown" "\`--auto\` waits only on the base branch's REQUIRED checks, and $GMG_TOOL could not establish a gate for $owner/$repo:$base: 0 required checks readable. Probes:
 $probes
   With no required set, --auto merges IMMEDIATELY, whatever CI is doing (gen_saas PR #362, 2026-09-25)" \
@@ -487,5 +595,6 @@ $probes
 $bad" \
       "wait for these to conclude (\`gh pr checks <n> --watch\`) and fix any red one, then $GMG_SAFE_PATH"
   fi
+  gmg_receipt_gate "$shown" "$owner" "$repo" "$base" "$head"
   return 0
 }

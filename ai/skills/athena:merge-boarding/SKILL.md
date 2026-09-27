@@ -415,7 +415,8 @@ So the merge step is a critical section on every GitHub-merged repo:
 - **Same machine:** merge through
   `ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>`,
   never a bare `gh-athena pr merge`. `<sha>` is the one `INTEGRATION OK` names.
-  It takes the repo's merge lock (`~/.local/state/athena/<repo>-merge.lock`,
+  (The wrapper refuses that bare call anyway in a repo that declares a gate: it
+  requires the same receipt, DND-969.) It takes the repo's merge lock (`~/.local/state/athena/<repo>-merge.lock`,
   the path fleets already share), re-checks under it that `origin/<base>` is
   contained in the gated head, merges pinned to that head, runs
   `confirm-merged`, and asserts the landed commit's parent is the checked base
@@ -550,21 +551,30 @@ car of a batch you intend to deploy, assert at least the tail MR carries
 
 ## GitHub path (no merge train)
 
-On a `github.com` remote there is **no merge train or queue**: merge with
-`~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --match-head-commit <sha>`,
-after `gh pr checks <n> --watch` shows every check green on that exact head. The
-wrapper is the floor that fires (DND-609): it REFUSES a merge whose pinned head
-is not all green, and REFUSES `--auto` wherever it cannot read a non-empty
-required-checks set. Athena's repos have no branch protection (free private
+On a `github.com` remote there is **no merge train or queue**: once
+`gh pr checks <n> --watch` shows every check green on the exact head, run
+`integration-gate`, then
+`scripts/locked-merge --pr <n> --head <sha>` with the SHA its `INTEGRATION OK`
+names (*Landing onto a moving main*). `locked-merge` makes the pinned
+`gh-athena pr merge <n> --squash --match-head-commit <sha>` call; never make it
+yourself. The wrapper is the floor that fires (DND-609): it REFUSES a merge
+whose pinned head is not all green, and REFUSES `--auto` wherever it cannot read
+a non-empty required-checks set. In a repo that declares a gate it also
+REFUSES a merge with no `integration-gate` receipt for the pinned head and the
+base branch's current tip, and refuses `--auto` outright (DND-969). Athena's repos have no branch protection (free private
 plan), so `--auto` there would merge immediately; it is refused, and branch
 protection is NOT the gate. A refusal is expected, not an auth error: follow its
 `Fix:`. The deploy is the repo's own post-merge Actions workflow — no `Auto-Deploy`
 label; watch it with `gh run watch <run-id>`. See [[athena:github]]; GitLab
 forge mechanics are in [[athena:gitlab]].
 
-**Later (2026-09-26):** the merge command above now runs inside
-`scripts/locked-merge` (*Landing onto a moving main*), which calls the same
-pinned `gh-athena pr merge`. Do not call it bare.
+**Later (2026-09-27, DND-969):** this section named the direct
+`gh-athena pr merge <n> --squash --match-head-commit <sha>` as the merge
+command, with a 2026-09-26 note to run it inside `locked-merge`. Superseded: the
+direct call skipped the receipt `locked-merge` requires. The wrapper now reads
+the same receipt through the same library (`ai/lib/integration-receipt.sh`), so
+the direct call is refused in a gated repo, and the section names
+`integration-gate` then `locked-merge` as the one path.
 
 ## Ride a boarded train to landed (do not end your turn on it)
 

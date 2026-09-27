@@ -111,6 +111,7 @@ check "1c. bare glab mr create" deny
 
 run "$(bash_json 'gh pr merge 5 --squash')"
 check "2a. bare gh pr merge" deny
+check_text "2a2. the deny names integration-gate then locked-merge, not a bare gh-athena merge (DND-969)" 'integration-gate` from the worktree of the PR, then `~/dev/custom/ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>'
 
 run "$(bash_json 'gh -R o/r pr merge 5 --auto')"
 check "2b. gh pr merge with flags before subcommand" deny
@@ -186,7 +187,7 @@ check "2j. bare gh api graphql enqueuePullRequest" deny
 
 run "$(bash_json "gh api graphql -f query='mutation { mergeBranch(input: {repositoryId: \"R\", base: \"main\", head: \"f\"}) { clientMutationId } }'")"
 check "2k. bare gh api graphql mergeBranch" deny
-check_text "2k2. the deny names the guarded path" 'gh-athena pr merge <n> --squash --match-head-commit <sha>'
+check_text "2k2. the deny names the guarded path, integration-gate then locked-merge (DND-969)" 'integration-gate` from the worktree of the PR, then `~/dev/custom/ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>'
 
 run "$(bash_json 'cd /tmp && /usr/bin/gh api -X PUT repos/o/r/pulls/5/merge')"
 check "2l. path-qualified gh after a separator" deny
@@ -208,7 +209,7 @@ check "2p. bare gh api read of a branch named merge-x" allow
 run "$(bash_json 'gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc -F force=true')"
 check "4a. bare gh api PATCH git/refs/heads/main" deny
 check_text "4a2. the deny names the branch-push path" 'gh-athena git push'
-check_text "4a3. ...and the guarded merge path" 'gh-athena pr merge <n> --squash --match-head-commit <sha>'
+check_text "4a3. ...and the guarded merge path, integration-gate then locked-merge (DND-969)" 'integration-gate` from the worktree of the PR, then `~/dev/custom/ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>'
 
 run "$(bash_json 'gh api repos/o/r/git/refs -f ref=refs/heads/x -f sha=abc')"
 check "4b. bare gh api git/refs with fields, no -X (POST)" deny

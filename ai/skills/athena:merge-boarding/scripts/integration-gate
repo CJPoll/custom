@@ -33,6 +33,17 @@
 set -uo pipefail
 
 PROG="integration-gate"
+
+# The receipt schema/path and the gate-declaration rule live in ONE shared
+# library, also read by locked-merge and gh-athena's merge guard, so the three
+# cannot drift (DND-969).
+IR_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/integration-receipt.sh"
+# shellcheck source=../../../lib/integration-receipt.sh
+if ! . "$IR_LIB" 2>/dev/null; then
+  echo "${PROG}: cannot load ${IR_LIB}." >&2
+  echo "Fix: run integration-gate from its committed path in a full ~/dev/custom checkout (ai/skills and ai/lib side by side)." >&2
+  exit 2
+fi
 TARGET="origin/main"
 GATE_CMD=""
 DO_FETCH=1
@@ -228,8 +239,8 @@ case "$COMMON_DIR" in
      echo "Fix: run from a normal checkout or linked worktree of the repo with git >= 2.31 (--path-format). The receipt store cannot be located otherwise." >&2
      exit 2 ;;
 esac
-RECEIPT_DIR="${COMMON_DIR}/integration-receipts"
-RECEIPT="${RECEIPT_DIR}/${HEAD_SHA}.json"
+RECEIPT_DIR="$(ir_store "$COMMON_DIR")"
+RECEIPT="$(ir_receipt_path "$COMMON_DIR" "$HEAD_SHA")"
 RECEIPT_TMP=""
 # A run that does not end in INTEGRATION OK leaves no pass for its head. The
 # up-front removal covers a run that is killed; the EXIT trap covers a pass
@@ -279,21 +290,14 @@ short() { git rev-parse --short "$1"; }
 # these paths that exists on the target ref, read out of git, never the working
 # tree -- and argv cannot replace it. No file in any tenant repo is needed: the
 # convention matches what gen_saas (bin/prep-commit.sh, verify-only since
-# DND-214) and ~/dev/custom (ai/bin/harness-gate) already ship.
-DECLARED_GATES=( bin/prep-commit.sh ai/bin/harness-gate )
+# DND-214) and ~/dev/custom (ai/bin/harness-gate) already ship. The list and
+# the lookup are IR_DECLARED_GATES / ir_declared_gate_on in
+# ai/lib/integration-receipt.sh, which gh-athena's merge guard also asks.
 
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
 
 # A gate path as git names it: no leading ./, no absolute repo-root prefix.
 norm_path() { local p; p="$(trim "$1")"; p="${p#./}"; case "$p" in "$ROOT"/*) p="${p#"$ROOT"/}" ;; esac; printf '%s' "$p"; }
-
-declared_gate_on() { # <sha> -> the declared gate on <sha>, or return 1
-  local g
-  for g in "${DECLARED_GATES[@]}"; do
-    if [ "$(git cat-file -t "${1}:${g}" 2>/dev/null)" = "blob" ]; then printf '%s\n' "$g"; return 0; fi
-  done
-  return 1
-}
 
 # is_noop_simple <command>: one simple command that can never fail. Quote- and
 # grouping-unaware ON PURPOSE: a false positive refuses (fails closed), and the
@@ -348,7 +352,15 @@ is_noop_cmd() {
   return 1
 }
 
-if LANDED_GATE="$(declared_gate_on "$TARGET_SHA")"; then
+if LANDED_GATE="$(ir_declared_gate_on "$ROOT" "$TARGET_SHA")"; then DECL_RC=0; else DECL_RC=$?; fi
+if [ "$DECL_RC" -eq 2 ]; then
+  # TARGET_SHA was verified above, so this is a repository fault, and it must
+  # never read as "no gate declared".
+  echo "${PROG}: ${TARGET} ($(short "$TARGET_SHA")) is not readable in $(pwd), so its declared gate could not be looked up." >&2
+  echo "Fix: repair the object store (git fsck; git fetch origin) and re-run. 'Could not look' is not 'no gate declared'." >&2
+  exit 2
+fi
+if [ "$DECL_RC" -eq 0 ]; then
   if [ -n "$GATE_CMD" ] && [ "$(norm_path "$GATE_CMD")" != "$LANDED_GATE" ]; then
     echo "${PROG}: --gate '${GATE_CMD}' refused -- ${TARGET} ($(short "$TARGET_SHA")) declares this repo's gate as ${LANDED_GATE}, and argv may not replace it." >&2
     echo "Fix: drop --gate; ${LANDED_GATE} (the gate as it stands on ${TARGET}) runs by default. The bar is read from the landed target so neither a caller nor the branch under test can lower it (~/dev/custom/CLAUDE.md -> 'A check's own bar must not live in the diff it is checking'). To change the bar, land that change on ${TARGET} first." >&2
@@ -358,7 +370,7 @@ if LANDED_GATE="$(declared_gate_on "$TARGET_SHA")"; then
   GATE_SOURCE="declared on ${TARGET}"
 else
   if [ -z "$GATE_CMD" ]; then
-    echo "${PROG}: ${TARGET} ($(short "$TARGET_SHA")) declares no gate (looked for: ${DECLARED_GATES[*]}) and no --gate was passed." >&2
+    echo "${PROG}: ${TARGET} ($(short "$TARGET_SHA")) declares no gate (looked for: ${IR_DECLARED_GATES[*]}) and no --gate was passed." >&2
     echo "Fix: pass this repo's real local gate, e.g. --gate 'mix test' or --gate 'cd backend && mix test'. A gate the branch itself adds is not a declaration -- it must be on ${TARGET} first." >&2
     exit 2
   fi
@@ -747,9 +759,9 @@ write_receipt() {
     --arg co "$CRITIC_OVERRIDE" --arg co_state "$OVERRIDE_STATE" --arg oa "$OWNER_APPROVAL" \
     --arg blast "$BLAST_LINE" --arg ok_line "$OK_LINE" --arg checkout "$ROOT" \
     --arg carried "$CRITIC_CARRIED_FROM" --arg upstream "$CRITIC_UPSTREAM" \
-    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg schema "$IR_SCHEMA" \
     'def nul: if . == "" then null else . end;
-     {schema: "integration-receipt/1", verdict: "pass", head: $head,
+     {schema: $schema, verdict: "pass", head: $head,
       target_ref: $target_ref, base: $base, gate: $gate, gate_source: $gate_source,
       gate_edited_by_branch: $edited, critic_override: ($co | nul),
       critic_override_state: ($co_state | nul), critic_carried_from: ($carried | nul),

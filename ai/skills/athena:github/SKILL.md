@@ -1,6 +1,6 @@
 ---
 name: athena:github
-description: Act on GitHub as Athena's own App identity (athena-harness[bot]) via the gh-athena wrapper — PR create/comment/review, Actions-checks watching, and merges (gh-athena pr merge --squash --match-head-commit <sha>; the wrapper refuses a merge whose pinned head is not all green, and refuses --auto where no required checks gate it). The GitHub-forge alternative to athena:gitlab, used when the repo's remote is github.com; GitLab stays Athena's default vocabulary. Reads stay on plain gh. Use whenever a GitHub WRITE should be authored by the agent.
+description: Act on GitHub as Athena's own App identity (athena-harness[bot]) via the gh-athena wrapper — PR create/comment/review, Actions-checks watching, and merges (integration-gate, then athena:merge-boarding's locked-merge, which calls gh-athena pr merge --squash --match-head-commit <sha>; the wrapper refuses a merge whose pinned head is not all green or, in a repo that declares a gate, has no integration-gate receipt, and refuses --auto where no required checks gate it or the repo declares a gate). The GitHub-forge alternative to athena:gitlab, used when the repo's remote is github.com; GitLab stays Athena's default vocabulary. Reads stay on plain gh. Use whenever a GitHub WRITE should be authored by the agent.
 ---
 
 # athena:github
@@ -27,7 +27,7 @@ git remote get-url origin
 - host is **`gitlab.com`** → **athena:gitlab** (the default: `glab`, MR, pipeline,
   merge train).
 - host is **`github.com`** → **this skill** (`gh`, PR, Actions checks,
-  `gh pr merge`).
+  `integration-gate` then `locked-merge`).
 
 ## Two GitHub identities, and which one to use
 
@@ -63,11 +63,11 @@ aliases do not apply; use the real command name. Examples:
 ```sh
 ~/dev/custom/ai/bin/gh-athena pr create --fill --base main
 ~/dev/custom/ai/bin/gh-athena pr comment 42 --body "…"
-~/dev/custom/ai/bin/gh-athena pr merge 42 --squash --match-head-commit <head-sha>
 ~/dev/custom/ai/bin/gh-athena --check          # verify auth + print the reachable installation
 ```
 
-Pushes have their own form — see *Pushing as Athena* below.
+Pushes have their own form — see *Pushing as Athena* below. Merges have one
+path, `integration-gate` then `locked-merge` — see *Merging* below.
 
 ## Pushing as Athena
 
@@ -185,7 +185,7 @@ GitLab terms are primary; reach for the GitHub column only under this skill.
 | `glab mr update --target-branch <b>` (retarget) | `gh-athena pr edit <n> --base <b>` |
 | one **pipeline**; `glab ci status` / poll `.../pipelines/<id>` | Actions **checks** (per-workflow check-runs, no single pipeline object); `gh pr checks <n> --watch` |
 | `detailed_merge_status == mergeable` | every check on the exact head green, asserted by `gh-athena` itself (branch protection only where the plan has it) |
-| **merge train** (`POST merge_trains/...`, boarding) | `gh-athena pr merge <n> --squash --match-head-commit <sha>` (no train/queue — see Merging) |
+| **merge train** (`POST merge_trains/...`, boarding) | `integration-gate`, then `locked-merge --pr <n> --head <sha>`, which makes the pinned `gh-athena pr merge` call (no train/queue — see Merging) |
 | `Auto-Deploy` label + `release:watch` job pace the deploy | the repo's own post-merge deploy workflow (no label convention) |
 
 ## Opening and retargeting a PR
@@ -253,16 +253,24 @@ There is **no merge train and no merge queue** on Athena's GitHub repos (owner
 decision). Merge with:
 
 ```sh
-gh pr checks <n> --watch                         # block until every check concludes
-gh pr view <n> --json headRefOid -q .headRefOid  # the exact head you checked
-~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --match-head-commit <sha>
+MB=~/dev/custom/ai/skills/athena:merge-boarding/scripts
+gh pr checks <n> --watch                   # block until every check concludes
+"$MB/integration-gate"                     # from the PR's worktree; prints INTEGRATION OK <sha>
+"$MB/locked-merge" --pr <n> --head <sha>   # <sha> = the one INTEGRATION OK names
 ```
 
-**Later (2026-09-26):** an admiral runs that last line through
-`athena:merge-boarding`'s `scripts/locked-merge --pr <n> --head <sha>`. A GitHub
-squash onto a base that moved after the gate lands an ungated tree, so the
-merge takes the repo's merge lock (`athena:merge-boarding` → *Landing onto a
-moving main*).
+`locked-merge` takes the repo's merge lock, re-checks the base, and makes the
+pinned `gh-athena pr merge <n> --squash --match-head-commit <sha>` call itself
+(`athena:merge-boarding` → *Landing onto a moving main*). Never call that line
+yourself.
+
+**Later (2026-09-27, DND-969):** this block ended with a direct
+`gh-athena pr merge <n> --squash --match-head-commit <sha>`, and a 2026-09-26
+note said to run it through `locked-merge`. Superseded: the direct call skipped
+`integration-gate`'s receipt, which only `locked-merge` checked. The wrapper now
+checks the receipt too (below), so the direct call is refused in any repo that
+declares a gate, and the only documented path is `integration-gate` then
+`locked-merge`.
 
 - **`--squash` is the default merge method.** The real method is a per-repo
   fact — resolve it from the consumer repo's CLAUDE.md if it states one, and
@@ -276,7 +284,20 @@ moving main*).
   read. A `gh api` merge (REST `PUT …/pulls/<n>/merge`, `…/merges`,
   `…/merge-upstream`, or a GraphQL merge / auto-merge / merge-queue mutation) is
   refused outright by `gh-athena` (DND-728); a bare `gh api` merge is denied by
-  the forge-identity hook. `pr merge` is the one merge path.
+  the forge-identity hook. `pr merge`, made by `locked-merge`, is the one merge
+  path.
+- **In a gated repo the wrapper also requires `integration-gate`'s receipt
+  (DND-969).** A repo declares a gate when the base branch's tip carries
+  `bin/prep-commit.sh` or `ai/bin/harness-gate` (the rule `integration-gate`
+  uses, shared through `ai/lib/integration-receipt.sh`). The wrapper reads that
+  tip from the forge, asks the local checkout, and then requires the receipt at
+  `<git common dir>/integration-receipts/<head>.json` for exactly the pinned
+  head and exactly that tip. It refuses before any merge call, with one of
+  `NO RECEIPT`, `RECEIPT UNREADABLE (COULD NOT LOOK)`, `RECEIPT INVALID` or
+  `RECEIPT FOR ANOTHER BASE`. So a merge must run from a checkout of the PR's
+  repo: a cwd that is not one, or a base tip missing from the local object
+  store, is refused as COULD NOT LOOK, never read as "no gate". A repo whose base
+  declares no gate merges as before. No flag skips the check.
 - **No branch moves by API (DND-741).** `gh-athena` refuses every `gh api`
   write that creates or moves a ref, on ANY branch, not only the default one:
   REST writes to `…/git/refs`, any write to `…/contents/…`,
@@ -299,7 +320,9 @@ moving main*).
   (2026-09-25). So on Athena's repos today `--auto` is refused; merge with the
   pinned form above. The App cannot read classic protection at all (no
   Administration permission), so only a **ruleset** requiring checks can let
-  `--auto` pass.
+  `--auto` pass. In a repo that declares a gate `--auto` is refused even then:
+  GitHub completes it later onto whatever the base is at that moment, and no
+  receipt can cover that base.
 - **A refusal from the wrapper or from GitHub is expected, not an auth error.**
   Do not retry it as an auth failure. Read its `Fix:` and surface what is unmet.
 - **Dry run:** `GH_ATHENA_MERGE_DRY_RUN=1 gh-athena pr merge …` runs the guard

@@ -125,3 +125,47 @@ labels PUT the same way.
 | H4 hook treats an explicit `-X GET` as a write | 4q |
 | H5 hook ignores fields (no default POST) | 4b |
 | H6 hook ignores the method-override header | 4d |
+
+---
+
+## 2026-09-27 — DND-969: a direct `gh-athena pr merge` bypassed the integration-gate receipt
+
+- **Code under test:** `ai/lib/gh-merge-guard.sh` (`gmg_receipt_gate`,
+  `gmg_checkout_for`), `ai/lib/integration-receipt.sh` (shared with
+  integration-gate and locked-merge)
+- **Suite:** `bash ai/test/gh-athena-merge-guard/self-test.sh` (no network;
+  stub `gh` on PATH, fixture checkout with origin `CJPoll/gen_saas`)
+- **Baseline (fixed code):** `RESULT: 159 passed, 0 failed`
+
+### Fail-first: the D-series against the unfixed guard (0436bf0c)
+
+The new cases, run before the guard changed: `RESULT: 142 passed, 17 failed`.
+Every D case that expects a refusal failed, and each one reached the stubbed
+merge call. Verbatim:
+
+```
+FAIL  D1. THE MISS: gated repo, green pinned head, NO receipt -> refused before the merge call
+      rc=0 out=stub:\ MERGED err='' calls=$'pr view 362 --json number,url,baseRefName,headRefOid,statusCheckRollup\npr merge 362 --squash --match-head-commit b712de1d0000000000000000000000000000beef'
+FAIL  D3. a receipt recorded against another base (main moved since the gate) -> refused
+      rc=0 out=stub:\ MERGED ...
+FAIL  D12. --auto in gated repo refused
+      rc=0 out=stub:\ MERGED err='' calls=$'pr view 362 ...\napi repos/CJPoll/gen_saas/branches/main/protection/required_status_checks\napi repos/CJPoll/gen_saas/rules/branches/main?per_page=100\npr merge 362 --squash --auto'
+```
+
+Failed set: D1, D1b, D3, D4, D5, D5b, D6, D7, D9, D9b, D10, D10b, D11, D11b,
+D11c, D12, D15. D2, D8, D13 and D14 passed on both, as they must: they are the
+negatives (a valid receipt, a repo with no gate, the missing pin, a linked
+worktree). D4b and D6b passed vacuously. Every pre-DND-969 case runs with the
+no-gate fixture as cwd and kept its expectation, so the older suite is also the
+"a repo that declares no gate behaves as before" evidence. Their Fix:
+assertions moved from "names `pr merge <n> --squash --match-head-commit <sha>`"
+to "names integration-gate, then locked-merge" (`lands_safely`), because the
+Fix texts were swept to the one recommended path.
+
+### Mutations on the fixed code (applied to a copy of `ai/bin` + `ai/lib`)
+
+| Mutation | Cases that fail |
+| --- | --- |
+| M19 `gmg_receipt_gate` never called (the unfixed guard) | the 17 above |
+| M20 `ir_declared_gate_on` returns "no gate" when the base commit is missing | D10, D10b |
+| M21 `ir_read_receipt` skips the base comparison | D3 |
