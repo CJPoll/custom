@@ -211,8 +211,25 @@ if mode == "install":
     # that resolve to a registry script, on an event the registry wires that
     # script on, are touched; every other entry is left exactly as found
     # (merge, never rewrite).
+    #
+    # Replacing REMOVES a live wiring, so it runs only when the registry being
+    # installed is the main checkout's own. From a worktree's branch copy (or a
+    # HOOKS_REGISTRY_FILE) it would narrow or drop a live guard before the
+    # change is reviewed or landed -- the DND-670 path in reverse (DND-887
+    # critic). There the stale wiring is kept and named, and the checker still
+    # reports it.
+    from_main = os.environ.get("FROM_MAIN") == "1"
     for (event, script), matchers in declared.items():
-        for gone in drop(event, norm(absscript(script)), lambda mm, ms=matchers: mm in ms):
+        target = norm(absscript(script))
+        if not from_main:
+            for m in hooks.get(event, []):
+                if mnorm(m.get("matcher")) not in matchers and any(
+                        norm(h.get("command")) == target for h in m.get("hooks", [])):
+                    print(f'~ {event:13} {m.get("matcher")!r} -> {script}: stale matcher kept; only an '
+                          f'install from the main checkout\'s own registry ({repo}) replaces it, after '
+                          f'the change lands there.')
+            continue
+        for gone in drop(event, target, lambda mm, ms=matchers: mm in ms):
             changes.append(f'~ {event:13} {gone!r} -> {script} (stale matcher, replaced)')
     for e in reg:
         cmd = absscript(e["script"])
@@ -269,7 +286,12 @@ apply() {
   local mode="$1"        # "install" | "remove"
   local settings="$2"
   local dry="$3"
-  REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" SETTINGS="$settings" MODE="$mode" DRY="$dry" python3 -c "$MERGE_PY"
+  # FROM_MAIN=1 only when the registry being installed IS the main checkout's
+  # own: replacing a stale matcher removes a live wiring, so it waits for the
+  # change to land there (DND-887 critic).
+  local from_main=0
+  [ "$(realpath -m -- "$REGISTRY")" = "$(realpath -m -- "${HOOKS_REPO_DIR}/ai/hooks/registry.json")" ] && from_main=1
+  REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" SETTINGS="$settings" MODE="$mode" DRY="$dry" FROM_MAIN="$from_main" python3 -c "$MERGE_PY"
 }
 
 # norm_path <path>  -- print the SHIPPED norm() of one path, by running the
@@ -502,6 +524,22 @@ PY3
     [ "$(matchers_of "$stale")" = "Bash,Edit|Write" ] && two_check "$stale" >/dev/null \
       && echo "  ok   --install replaces a stale matcher with the declared rows" \
       || { echo "  FAIL --install must leave exactly the declared rows, got [$(matchers_of "$stale")]"; ok=0; }
+    # Replacing a stale matcher REMOVES a live wiring, so it is a main-checkout
+    # operation, like wiring a new script (DND-743). From any other registry --
+    # a worktree's branch copy, or a HOOKS_REGISTRY_FILE -- --install must not
+    # narrow or drop a live guard before the branch lands: it keeps the stale
+    # wiring and names it (DND-887 critic, the DND-670 path in reverse).
+    offreg="${tmp}/off-main-two-matcher-registry.json"
+    cp "$tworeg" "$offreg"
+    kept="${tmp}/settings-stale-off-main.json"
+    printf '%s\n' "{ \"hooks\": { \"PreToolUse\": [ { \"matcher\": \"Bash|Edit|Write\", \"hooks\": [ { \"type\": \"command\", \"command\": \"${HOOKS_REPO_DIR}/ai/hooks/dnd-887-two-matchers.sh\" } ] } ] } }" > "$kept"
+    rk="$(REGISTRY="$offreg" apply install "$kept" 0)"
+    km="$(matchers_of "$kept")"
+    if [ "$km" = "Bash,Bash|Edit|Write,Edit|Write" ] && grep -q "stale matcher kept" <<<"$rk"; then
+      echo "  ok   --install from a registry that is not the main checkout's keeps a stale wiring and names it"
+    else
+      echo "  FAIL --install from a non-main registry must keep the stale wiring and name it, got [$km]: $rk"; ok=0
+    fi
     # Match-all spellings: an omitted matcher, "" and "*" all satisfy a "" row,
     # in the installer exactly as in the checker (the two mnorm()s must agree;
     # the checker's own suite pins its side).

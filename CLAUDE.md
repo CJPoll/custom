@@ -573,8 +573,10 @@ and pronoun-guard; nothing detected it. The durable fix:
   required until the change lands, and the new one is pending.
 - **Recover:** `scripts/setup-hooks --install` MERGES the registry into
   `settings.json` (backing it up first, idempotent) — it never rewrites the whole
-  block, because a full rewrite is exactly what caused the outage. It replaces
-  a stale matcher, touching only that registry script's wiring. `--check`
+  block, because a full rewrite is exactly what caused the outage. Run from the
+  main checkout, it replaces a stale matcher, touching only that registry
+  script's wiring; from anywhere else it keeps the stale wiring and names it.
+  `--check`
   delegates to the gate check, `--dry-run` previews, `--remove` unwires,
   `--self-test` verifies install/idempotency/merge-safety on a temp file.
 - **Worktrees:** hooks are always wired at the MAIN checkout's path, never a
