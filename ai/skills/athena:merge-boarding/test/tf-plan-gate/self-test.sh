@@ -52,6 +52,18 @@ check data-mode-ignored    0 --plan "$(printf '{"format_version":"1.2","resource
 drift="$(rc aws_instance '["update"]' '{"instance_type":"a"}' '{"instance_type":"b"}')"
 check control-subtracts    0 --plan "$(plan u "$drift")" --control "$(plan v "$drift")"
 check control-keeps-new    4 --plan "$(plan w "$drift" "$(rc aws_db_instance '["delete"]' '{}' null)")" --control "$(plan x "$drift")"
+# --control never subtracts a destroy: merging applies the whole plan, so a
+# delete the base plan also has (drift) still happens.
+gone="$(rc aws_db_instance '["delete"]' '{}' null)"
+check control-keeps-destroy 4 --plan "$(plan y "$gone")" --control "$(plan z "$gone")"
+# Offline plans have no state, so every resource reads `create`. A change
+# that deletes the resource block leaves it only in the control: a destroy.
+rds_new="$(rc aws_db_instance '["create"]' null '{}')"
+check control-only-destroy 4 --plan "$(plan aa)" --control "$(plan ab "$rds_new")"
+check control-only-free    0 --plan "$(plan ac)" --control "$(plan ad "$(rc aws_iam_role '["create"]' null '{}')")"
+# A `moved` block renames the address; the old one is not a destroy.
+printf '{"format_version":"1.2","resource_changes":[{"address":"aws_db_instance.y","previous_address":"aws_db_instance.x","mode":"managed","type":"aws_db_instance","name":"y","change":{"actions":["no-op"],"before":{},"after":{},"after_unknown":{}}}]}' > "${TMP}/moved.json"
+check control-moved-clear  0 --plan "${TMP}/moved.json" --control "$(plan ae "$(rc aws_db_instance '["no-op"]' '{}' '{}')")"
 
 # Fail closed: not a plan, not JSON, missing file, no --plan.
 printf '{"version":4,"resources":[]}' > "${TMP}/state.json"

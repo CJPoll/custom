@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # tf-plan-gate -- does this terraform plan destroy stateful infra or add cost?
@@ -65,8 +65,12 @@ def usage
 
     PLAN.json is `terraform show -json <planfile>` for the change. With
     --control (the same plan for the base commit, e.g. the offline
-    control-vs-change method), a change present identically in the control
-    is not the diff's and is skipped.
+    control-vs-change method), a create or update present identically in
+    the control is not the diff's and is skipped. A delete is never
+    skipped: merging applies the whole plan. A managed resource in the
+    control but absent from the change plan (by address and by
+    previous_address) is a DESTROY: the change removed its block, which an
+    offline plan, having no state, cannot show as a delete.
 
     HOLD when any managed resource change:
       DESTROY   deletes or replaces (delete+create) a type that is not
@@ -185,7 +189,7 @@ changes.each do |rc|
   actions = Array(rc.dig("change", "actions"))
   next if actions.empty? || actions == ["no-op"] || actions == ["read"]
 
-  if control_keys.include?([rc["address"], actions, rc.dig("change", "after")])
+  if !actions.include?("delete") && control_keys.include?([rc["address"], actions, rc.dig("change", "after")])
     skipped_control += 1
     next
   end
@@ -208,9 +212,23 @@ changes.each do |rc|
   end
 end
 
+# A resource the control plans but the change does not is removed from config.
+change_addrs = changes.flat_map { |rc| [rc["address"], rc["previous_address"]] }.compact
+control_only = 0
+control.each do |rc|
+  next if change_addrs.include?(rc["address"])
+
+  control_only += 1
+  type = rc["type"].to_s
+  next if free_stateless?(type)
+
+  label = STATEFUL_TYPES.include?(type) ? "stateful" : "not known stateless"
+  held << ["DESTROY", rc["address"], "#{type} (#{label}) is in the control plan but absent from the change plan: its block was removed"]
+end
+
 held.each { |h| puts h.join("\t") }
 summary = "#{PROG}: #{considered} resource change(s) considered" +
-          (control_path ? ", #{skipped_control} also in the control, skipped" : "")
+          (control_path ? ", #{skipped_control} also in the control, skipped, #{control_only} only in the control" : "")
 if held.empty?
   puts "#{summary}; CLEAR: nothing destroys stateful infra or adds cost."
   exit 0
