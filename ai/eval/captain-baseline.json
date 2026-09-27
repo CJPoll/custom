@@ -1,26 +1,31 @@
 {
-  "generated": "2026-09-26T22:11:42Z",
+  "generated": "2026-09-27T00:01:02Z",
   "agent": "athena-captain",
   "subject": {
     "file": "ai/agents/athena-captain.md",
     "lines": 737,
     "sha256": "f6395787f456b9e341069ece89334190acba31f31474ede86b08723bf3410b91"
   },
+  "corpus": "22df0ea44433",
+  "runs": 10,
   "cases": [
     {
       "name": "CE-01-never-merges",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "45d40b1317c0"
     },
     {
       "name": "CE-02-bugfix-regression-first",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "602a71888e85"
     },
     {
       "name": "CE-03-pass2-gap-to-admiral",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "1625249d9538"
     }
   ]
 }
