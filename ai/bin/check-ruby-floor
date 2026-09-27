@@ -1,112 +1,157 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 #
-# check-ruby-floor -- every tracked Ruby file in this repo must PARSE under the
-# harness's Ruby floor (FLOOR below), whatever Ruby the host runs.
+# check-ruby-floor -- the harness runs on Ruby FLOOR (3.4) and nothing older,
+# whatever directory a tool is started from, and every tracked Ruby file parses
+# under FLOOR.
 #
 # WHY THIS EXISTS
 #
-# The harness runs on two machines with different Rubies: the desktop pins
-# ruby 2.7.8, the laptop runs 3.4.x. Ruby-3-only syntax passes every check on
-# the laptop, including this repo's own gate, and then fails on the desktop,
-# where the file is a SyntaxError. Measured 2026-09-27 (laptop-harness fleet):
-# DND-710's `ai/bin/judgment-eval` carried three endless defs, passed the
-# laptop gate 96/96, and bounced from the desktop's train t26 (self-test under
-# 2.7: 26 passed, 61 failed). The admiral then made every custom hand-off run
-# a manual `docker run ruby:2.7 ruby -c` (DND-713, DND-775, DND-799, DND-710).
-# A step every captain must remember is a check nobody runs; this is that
-# check.
+# The harness's Ruby is 3.4: system ruby (/usr/bin/ruby -> ruby34, 3.4.10) on
+# both the desktop and the laptop. Owner decision, Cody, 2026-09-27 ~11:00Z:
+# "we want ruby 3.4, not 2.7" and "3.4 is our global default for harness and
+# our projects". Two gaps let a harness tool run under something else:
 #
-# HOW IT MEASURES (the mode is chosen from the host, and printed)
+#   1. A `#!/usr/bin/env ruby` shebang goes through PATH, and in an interactive
+#      session PATH starts with asdf's shims. asdf picks the Ruby from the
+#      CURRENT DIRECTORY's .tool-versions, and harness tools run with cwd in
+#      other projects. Measured 2026-09-27 (DND-931): from ~/dev/shenron (pins
+#      ruby 2.7.0, not installed) every such tool died with "No version is set
+#      for command ruby"; from a directory pinning 2.7.8 it ran under 2.7.8.
+#   2. Syntax newer than a machine's Ruby passes on the machine that has it.
+#      DND-710's judgment-eval did exactly that while the desktop still pinned
+#      2.7.8.
 #
-#   exact  the host Ruby is at or below the floor: each file is compiled with
-#          RubyVM::InstructionSequence.compile_file. Authoritative.
-#   ast    the host Ruby is newer: each file is parsed with Prism (bundled
-#          from Ruby 3.3) and the tree is searched for the post-2.7
-#          constructs in CONSTRUCTS below. A file Prism cannot parse fails too.
-#   (none) newer than the floor but no Prism (Ruby 3.0-3.2 without the gem):
-#          COULD NOT MEASURE, exit 3. It never passes a tree it did not read.
+# (Before DND-931 this check enforced a 2.7 FLOOR, from d8885f80, written on an
+# unratified coordinator rule. The owner reversed it the same day: 3.4.)
+#
+# WHAT IT ENFORCES
+#
+#   floor    FLOOR here must not be LOWER than the FLOOR that landed (origin/main
+#            and merge-base, via ai/lib/landed.rb). Raising it is free.
+#   shebang  every tracked Ruby-shebang file under ai/ (plus HARNESS_EXTRA) starts
+#            with exactly HARNESS_SHEBANG, an absolute interpreter path that no
+#            PATH or version-manager lookup can redirect. The rule is textual,
+#            so both machines reach the same verdict.
+#   runtime  HARNESS_SHEBANG, executed by the kernel from a scratch directory
+#            that pins ruby HOSTILE_PIN (.tool-versions and .ruby-version), with
+#            ASDF_RUBY_VERSION / RBENV_VERSION / RUBYOPT scrubbed, reports a Ruby
+#            at or above FLOOR. A shebang that does not start at all is a finding.
+#   syntax   every tracked Ruby file parses under FLOOR, using the interpreter
+#            the runtime probe found: `ruby -c` per file when its minor IS the
+#            floor; Prism with `version: FLOOR` when it is newer (so 3.5-only
+#            syntax still fails while the other machine runs 3.4).
 #
 # WHICH FILES
 #
-#   Every path `git ls-files --cached` lists (committed or staged), regular
-#   file, not a symlink, that is Ruby by what it IS: extension .rb / .rake /
-#   .gemspec, basename Gemfile or Rakefile, or a first line `#!...ruby`.
-#   An untracked file is not read until it is staged.
+#   Every path `git ls-files --cached` lists (committed or staged), regular file,
+#   not a symlink, that is Ruby by what it IS: extension .rb / .rake / .gemspec,
+#   basename Gemfile or Rakefile, or a first line `#!...ruby` (`#! /usr/bin/env
+#   ruby`, with a space, included: d8885f80's pattern missed that form, so ten
+#   scripts/ and git-custom/ files were never read). The syntax pass
+#   reads all of them. The shebang rule reads the Ruby-shebang files under ai/
+#   and in HARNESS_EXTRA: scripts/ and git-custom/ are the owner's personal
+#   utilities (ai/lib/harness_tools.rb SCOPE), and some load gems only an asdf
+#   Ruby has.
 #
 # KNOWN LIMITS (named, not hidden)
 #
-#   * SYNTAX only. A stdlib method newer than the floor (Hash#except,
-#     Array#intersect?, ...) is not detected; the ast mode also knows only the
-#     constructs listed. A captain adding Ruby still runs its own self-test.
-#   * Ruby embedded in another file (`ruby -e '...'` in a shell script) is not
-#     read.
+#   * `ruby` invoked BY NAME from a shell script, or `ruby -e '...'`, still goes
+#     through PATH and is not read. The repo's .tool-versions (`ruby system`)
+#     covers such calls made with cwd inside this repo or a worktree of it.
+#   * SYNTAX and interpreter only: a stdlib method a newer Ruby adds is not seen.
+#   * The shebang, the pin and this file's enforcement are in the diff. Only
+#     FLOOR is ratcheted against what landed; a diff that edits the ratchet
+#     itself still defeats it (~/dev/custom/CLAUDE.md -> "A check's own bar must
+#     not live in the diff it is checking").
 #
 # There is no suppression marker: a marker is writable by the diff it would
-# excuse. Rewrite the construct.
-#
-# THIS FILE MUST ITSELF PARSE UNDER THE FLOOR: it runs on the desktop's 2.7.
-# Its own tree is one of the files it checks.
+# excuse.
 #
 # Deliberately gem-free (stdlib only; prism is a default gem from 3.3).
 
 require "open3"
 require "tmpdir"
 require "fileutils"
+require_relative "../lib/landed"
 
 REPO = File.expand_path("../..", __dir__)
+SELF_REL = "ai/bin/check-ruby-floor"
 
-# The harness Ruby floor: the oldest Ruby any harness machine runs.
-FLOOR = "2.7"
+# The harness Ruby floor. Ratcheted: a diff may raise it, never lower it.
+FLOOR = "3.4"
+
+# The one shebang a harness Ruby executable may carry. Absolute, so neither
+# PATH nor asdf's per-directory pin can pick another Ruby.
+HARNESS_SHEBANG = "#!/usr/bin/ruby"
+
+# Harness Ruby executables outside ai/ (owner-run installers of harness state).
+HARNESS_EXTRA = %w[scripts/setup-inbox-registry].freeze
+
+# The version the runtime probe's scratch directory pins: an old Ruby that
+# asdf/rbenv would select there if they were consulted.
+HOSTILE_PIN = "2.7.8"
+
+# Variables that override a version manager's per-directory choice. A probe
+# with one set would measure the override, not the shebang.
+SCRUB_ENV = %w[ASDF_RUBY_VERSION RBENV_VERSION RUBYOPT RUBYLIB].freeze
+
+PROBE_TIMEOUT = 30
+
+FLOOR_LINE = /^FLOOR = "(\d+\.\d+)"$/.freeze
 
 USAGE = <<~TXT.freeze
   Usage:
-    ai/bin/check-ruby-floor              fail (naming file:line) on any tracked
-                                         Ruby file that does not parse under
-                                         the harness Ruby floor (#{FLOOR})
+    ai/bin/check-ruby-floor              check the harness Ruby floor (#{FLOOR}):
+                                         the landed floor is not lowered, every
+                                         harness Ruby executable starts with
+                                         #{HARNESS_SHEBANG}, that interpreter is
+                                         #{FLOOR}+ from a directory pinning ruby
+                                         #{HOSTILE_PIN}, and every tracked Ruby
+                                         file parses under #{FLOOR}
     ai/bin/check-ruby-floor --self-test  deterministic, hermetic suite
                                          (throwaway git repos only)
     ai/bin/check-ruby-floor --help       this text
 
-  Exit 0 = every Ruby file parses under #{FLOOR}. Exit 1 = at least one does
-  not (each named), or discovery found no Ruby file. Exit 2 = usage error.
-  Exit 3 = could not measure (no git, or a host newer than #{FLOOR} without
-  Prism).
+  Exit 0 = all of the above hold. Exit 1 = at least one does not (each named),
+  or discovery found no Ruby file. Exit 2 = usage error. Exit 3 = could not
+  measure (no git, the landed floor unreadable, or no way to parse under
+  #{FLOOR}); never a pass.
 TXT
 
-# node type => [what it is, the Ruby that introduced it, how to write it in 2.7]
-CONSTRUCTS = {
-  endless_def: ["endless method definition `def m(...) = expr`", "3.0",
-                "write `def m(...)` / body / `end`"],
-  anon_block_param: ["anonymous block parameter `&`", "3.1",
-                     "name it: `def m(&block)` and pass `&block`"],
-  anon_block_arg: ["anonymous block argument `f(&)`", "3.1",
-                   "name the block parameter and pass `&block`"],
-  anon_splat_arg: ["anonymous rest argument `f(*)`", "3.2",
-                   "name it: `def m(*args)` and pass `*args`"],
-  anon_kwsplat_arg: ["anonymous keyword-rest argument `f(**)`", "3.2",
-                     "name it: `def m(**opts)` and pass `**opts`"],
-  hash_shorthand: ["hash/keyword shorthand `{x:}` / `f(x:)`", "3.1",
-                   "write the value: `{x: x}` / `f(x: x)`"],
-  rightward_match: ["rightward pattern `expr => pattern`", "3.0",
-                    "use `case expr` / `in pattern` / `end`, or a plain assignment"],
-  oneline_in: ["one-line `expr in pattern`", "3.0",
-               "on 2.7 it RAISES on no match instead of returning false; use `case expr` / `in pattern`"],
-  find_pattern: ["find pattern `in [*, x, *]`", "3.0",
-                 "match with `case` plus a guard, or search the array first"],
-  pinned_expression: ["pinned expression `^(expr)`", "3.1",
-                      "bind the value to a local first and pin that: `^local`"],
-  it_param: ["implicit block parameter `it`", "3.4",
-             "use `_1` or a named block parameter `|x|`"]
-}.freeze
-
 class MeasureError < StandardError; end
+
+# --- versions ----------------------------------------------------------------
+
+def minor_of(version)
+  version.to_s.split(".").first(2).map(&:to_i)
+end
+
+def below?(version, floor)
+  (minor_of(version) <=> minor_of(floor)).negative?
+end
+
+# The FLOOR a text of this file declares, or nil.
+def parse_floor(text)
+  text.to_s[FLOOR_LINE, 1]
+end
+
+# The highest landed FLOOR, or nil when this file had not landed at any point.
+# Raises Landed::Unreadable / Landed::Mismatch.
+def landed_floor(root)
+  pts, bars = Landed.read_bar(root, SELF_REL) do |text, label, sha|
+    parse_floor(text) or raise Landed::Unreadable.new(
+      [[label, "#{sha[0, 12]}: landed #{SELF_REL} has no `FLOOR = \"x.y\"` line"]]
+    )
+  end
+  [pts, bars.max_by { |v| minor_of(v) }]
+end
 
 # --- discovery ---------------------------------------------------------------
 
 RUBY_EXT = /\.(?:rb|rake|gemspec)\z/.freeze
 RUBY_NAMES = %w[Gemfile Rakefile].freeze
-RUBY_SHEBANG = /\A#!\S*(?:\/|\s)(?:env\s+(?:-\S+\s+)*)?ruby[\d.]*(?:\s|\z)/.freeze
+RUBY_SHEBANG = %r{\A#!\s*\S*(?:/|\s)(?:env\s+(?:-\S+\s+)*)?ruby[\d.]*(?:\s|\z)}.freeze
 
 def ruby_file?(path, first_line)
   return true if path =~ RUBY_EXT || RUBY_NAMES.include?(File.basename(path))
@@ -132,184 +177,202 @@ rescue Errno::ENOENT
   raise MeasureError, "git executable not found on PATH"
 end
 
-# --- mode --------------------------------------------------------------------
+# The harness Ruby executables among files: a Ruby shebang, under ai/ or named
+# in HARNESS_EXTRA.
+def harness_executables(root, files)
+  files.select do |rel|
+    next false unless rel.start_with?("ai/") || HARNESS_EXTRA.include?(rel)
 
-def minor_of(version)
-  version.to_s.split(".").first(2).map(&:to_i)
+    first_line(File.join(root, rel)) =~ RUBY_SHEBANG
+  end
 end
 
-# host_version: a version string; prism_ok: whether Prism loads.
-# -> :exact, :ast, or nil (cannot measure).
-def mode_for(host_version, prism_ok)
-  return :exact if (minor_of(host_version) <=> minor_of(FLOOR)) <= 0
-  return :ast if prism_ok
+# -> [[rel, 1, message]] for every harness executable not on HARNESS_SHEBANG.
+def shebang_findings(root, files, shebang)
+  harness_executables(root, files).filter_map do |rel|
+    line = first_line(File.join(root, rel)).chomp
+    next if line == shebang
+
+    [rel, 1, "shebang `#{line}` is not the harness shebang `#{shebang}` (shebang)"]
+  end
+end
+
+# --- runtime probe -------------------------------------------------------------
+
+# Runs cmd in dir with env, killing its process group after timeout seconds.
+# -> [stdout, stderr, status or nil on timeout]
+def run_in(env, cmd, dir, timeout = PROBE_TIMEOUT)
+  Open3.popen3(env, *cmd, chdir: dir, pgroup: true) do |stdin, out, err, wait|
+    stdin.close
+    readers = [Thread.new { out.read }, Thread.new { err.read }]
+    status = wait.join(timeout)&.value
+    unless status
+      begin
+        Process.kill("KILL", -wait.pid)
+      rescue Errno::ESRCH
+        nil
+      end
+      wait.join
+    end
+    [readers[0].value, readers[1].value, status]
+  end
+end
+
+# A scratch directory that pins HOSTILE_PIN for asdf and rbenv alike.
+def hostile_dir
+  dir = Dir.mktmpdir("check-ruby-floor-pin-")
+  File.write(File.join(dir, ".tool-versions"), "ruby #{HOSTILE_PIN}\n")
+  File.write(File.join(dir, ".ruby-version"), "#{HOSTILE_PIN}\n")
+  dir
+end
+
+def probe_env(path_prefix)
+  env = SCRUB_ENV.to_h { |k| [k, nil] }
+  env["PATH"] = [path_prefix, ENV["PATH"]].compact.join(":") if path_prefix
+  env
+end
+
+# Executes a script starting with shebang, from a directory pinning HOSTILE_PIN.
+# -> { ok: true, version:, ruby: } or { ok: false, why: }
+def probe(shebang, path_prefix = nil)
+  dir = hostile_dir
+  script = File.join(dir, "probe")
+  File.write(script, "#{shebang}\nprint RUBY_VERSION, \"\\n\", RbConfig.ruby, \"\\n\"\n")
+  File.chmod(0o755, script)
+  out, err, status = run_in(probe_env(path_prefix), [script], dir)
+  return { ok: false, why: "did not finish within #{PROBE_TIMEOUT}s" } unless status
+  unless status.success?
+    return { ok: false, why: "exited #{status.exitstatus.inspect}: #{err.strip.lines.first.to_s.strip}" }
+  end
+
+  version, ruby = out.lines.map(&:strip)
+  return { ok: false, why: "printed no Ruby version (#{out.strip[0, 80].inspect})" } unless version =~ /\A\d+\.\d+/
+
+  { ok: true, version: version, ruby: ruby }
+rescue SystemCallError => e
+  { ok: false, why: "could not be executed (#{e.class}: #{e.message})" }
+ensure
+  FileUtils.rm_rf(dir) if dir
+end
+
+# -> [[rel, 1, message]] (empty when the probe reports FLOOR or newer)
+def runtime_findings(result, shebang, floor)
+  where = "run from a directory pinning ruby #{HOSTILE_PIN}"
+  return [[shebang, 1, "the harness shebang, #{where}, #{result[:why]} (runtime)"]] unless result[:ok]
+  return [] unless below?(result[:version], floor)
+
+  [[shebang, 1, "the harness shebang, #{where}, runs ruby #{result[:version]} " \
+                "(#{result[:ruby]}), below the floor #{floor} (runtime)"]]
+end
+
+# --- syntax -----------------------------------------------------------------
+
+# How to parse under floor with the interpreter ruby_version.
+# -> :exact (`ruby -c`), :prism (Prism, version: floor), or nil (older).
+def syntax_mode(ruby_version, floor)
+  cmp = minor_of(ruby_version) <=> minor_of(floor)
+  return :exact if cmp.zero?
+  return :prism if cmp.positive?
 
   nil
 end
 
-def prism_available?
+# Runs inside the resolved interpreter: ARGV = [floor, root, rel...]. Prints one
+# `rel\tline\tmessage` per file Prism rejects at that version.
+PRISM_SCRIPT = <<~'RUBY'
   require "prism"
-  true
-rescue LoadError
-  false
-end
+  floor, root, *rels = ARGV
+  rels.each do |rel|
+    src = File.binread(File.join(root, rel)).force_encoding("UTF-8")
+    result = Prism.parse(src, version: "#{floor}.0")
+    next if result.errors.empty?
 
-# --- exact mode: compile under the floor-or-older host -----------------------
-
-# -> [[line, message]] (empty when the file compiles)
-def exact_findings(abs)
-  verbose = $VERBOSE
-  $VERBOSE = nil
-  RubyVM::InstructionSequence.compile_file(abs)
-  []
-rescue SyntaxError => e
-  line = e.message[/:(\d+):/, 1].to_i
-  [[line, "SyntaxError under ruby #{RUBY_VERSION}: #{e.message.lines.first.to_s.strip}"]]
-ensure
-  $VERBOSE = verbose
-end
-
-# --- ast mode: search a Prism tree for post-floor constructs ------------------
-
-def build_visitor_class
-  Class.new(Prism::Visitor) do
-    attr_reader :hits
-
-    def initialize
-      @hits = []
-      @pattern_depth = 0
-      super
-    end
-
-    def hit(node, kind)
-      @hits << [node.location.start_line, kind]
-    end
-
-    def in_pattern
-      @pattern_depth += 1
-      yield
-    ensure
-      @pattern_depth -= 1
-    end
-
-    def pattern?
-      @pattern_depth.positive?
-    end
-
-    def visit_def_node(node)
-      hit(node, :endless_def) if node.equal_loc
-      super
-    end
-
-    def visit_block_parameter_node(node)
-      hit(node, :anon_block_param) if node.name.nil?
-      super
-    end
-
-    def visit_block_argument_node(node)
-      hit(node, :anon_block_arg) if node.expression.nil?
-      super
-    end
-
-    # `*` / `**` with no name are 2.7-valid as PARAMETERS (other node types)
-    # and inside patterns (`in [x, *]`); only as call ARGUMENTS are they 3.2.
-    def visit_splat_node(node)
-      hit(node, :anon_splat_arg) if node.expression.nil? && !pattern?
-      super
-    end
-
-    def visit_assoc_splat_node(node)
-      hit(node, :anon_kwsplat_arg) if node.value.nil? && !pattern?
-      super
-    end
-
-    # `in {a:}` is a 2.7-valid hash pattern; outside a pattern it is 3.1.
-    def visit_implicit_node(node)
-      hit(node, :hash_shorthand) unless pattern?
-      super
-    end
-
-    def visit_match_required_node(node)
-      hit(node, :rightward_match)
-      in_pattern { super }
-    end
-
-    def visit_match_predicate_node(node)
-      hit(node, :oneline_in)
-      in_pattern { super }
-    end
-
-    def visit_in_node(node)
-      in_pattern { super }
-    end
-
-    def visit_array_pattern_node(node)
-      in_pattern { super }
-    end
-
-    def visit_hash_pattern_node(node)
-      in_pattern { super }
-    end
-
-    def visit_find_pattern_node(node)
-      hit(node, :find_pattern)
-      in_pattern { super }
-    end
-
-    def visit_pinned_expression_node(node)
-      hit(node, :pinned_expression)
-      super
-    end
-
-    def visit_it_local_variable_read_node(node)
-      hit(node, :it_param)
-      super
-    end
-  end
-end
-
-# -> [[line, message]]
-def ast_findings(abs, visitor_class)
-  result = Prism.parse(File.read(abs, mode: "rb").force_encoding("UTF-8"))
-  unless result.errors.empty?
     err = result.errors.first
-    return [[err.location.start_line, "does not parse on ruby #{RUBY_VERSION}: #{err.message}"]]
+    puts [rel, err.location.start_line, err.message.tr("\t\n", "  ")].join("\t")
   end
+RUBY
 
-  visitor = visitor_class.new
-  result.value.accept(visitor)
-  visitor.hits.uniq.map do |line, kind|
-    what, since, _how = CONSTRUCTS.fetch(kind)
-    [line, "#{what} needs Ruby #{since}+ (#{kind})"]
+# -> [[rel, line, message]]
+def syntax_findings(root, files, ruby, ruby_version, floor)
+  case syntax_mode(ruby_version, floor)
+  when :exact
+    files.filter_map do |rel|
+      _out, err, status = run_in(probe_env(nil), [ruby, "-c", rel], root)
+      raise MeasureError, "`#{ruby} -c #{rel}` did not finish within #{PROBE_TIMEOUT}s" unless status
+      next if status.success?
+
+      msg = err.lines.find { |l| l.include?(rel) } || err.lines.first
+      line = msg.to_s[/:(\d+):/, 1].to_i
+      [rel, line, "does not parse under ruby #{ruby_version} (`ruby -c`): " \
+                  "#{msg.to_s.sub(/\A.*?:\d+:\s*/, '').strip} (syntax)"]
+    end
+  when :prism
+    out, err, status = run_in(probe_env(nil), [ruby, "-e", PRISM_SCRIPT, floor, root, *files], root)
+    unless status&.success?
+      raise MeasureError, "Prism under #{ruby} (#{ruby_version}) could not parse at version #{floor}: " \
+                          "#{err.strip.lines.first.to_s.strip}"
+    end
+    out.lines.map do |row|
+      rel, line, msg = row.chomp.split("\t", 3)
+      [rel, line.to_i, "does not parse as Ruby #{floor} (Prism, host ruby #{ruby_version}): #{msg} (syntax)"]
+    end
+  else
+    raise MeasureError, "the resolved harness ruby #{ruby_version} is older than #{floor}, " \
+                        "so nothing can parse under #{floor}"
   end
 end
 
-# --- the check ---------------------------------------------------------------
+# --- the check ----------------------------------------------------------------
 
-FIX_TAIL = "The harness Ruby floor is #{FLOOR} (the desktop pins ruby 2.7.8), so this " \
-           "file is a SyntaxError there even though it runs here. There is no " \
-           "suppression marker; rewrite the construct."
+FIXES = {
+  "floor" => "FLOOR is ratcheted: it may rise, never fall. Restore the landed value. " \
+             "Lowering it is the owner's call, landed on main by the owner.",
+  "shebang" => "make the first line exactly `#{HARNESS_SHEBANG}`. `#!/usr/bin/env ruby` goes " \
+               "through PATH, where asdf picks the Ruby from the CURRENT directory's " \
+               ".tool-versions (e.g. ~/dev/shenron pins 2.7.0).",
+  "runtime" => "the harness Ruby is system ruby #{FLOOR}+ at #{HARNESS_SHEBANG.delete_prefix('#!')} " \
+               "(Gentoo: eselect ruby). On a machine where that path is missing or older, the " \
+               "owner installs or selects Ruby #{FLOOR}; do not change the shebang to route " \
+               "around it.",
+  "syntax" => "rewrite the named site so Ruby #{FLOOR} parses it (both machines run " \
+              "#{FLOOR}). There is no suppression marker."
+}.freeze
 
-def fix_hints(findings)
-  kinds = findings.map { |_path, _line, msg| msg[/\((\w+)\)\z/, 1] }.compact.uniq
-  hints = kinds.map do |k|
-    entry = CONSTRUCTS[k.to_sym]
-    entry ? "#{k}: #{entry[2]}" : nil
-  end
-  hints.compact
+def emit_findings(findings, context)
+  warn "check-ruby-floor: #{findings.length} finding(s) against the harness Ruby floor " \
+       "#{FLOOR} (#{context}):"
+  findings.each { |rel, line, msg| warn "  #{rel}:#{line}: #{msg}" }
+  kinds = findings.map { |_r, _l, msg| msg[/\((\w+)\)\z/, 1] }.compact.uniq
+  kinds.each { |k| warn "  Fix (#{k}): #{FIXES.fetch(k)}" }
 end
 
+def could_not_measure(lines)
+  warn "check-ruby-floor: COULD NOT MEASURE -- this is not a pass."
+  lines.each { |l| warn l }
+  3
+end
+
+# opts (all optional, for the self-test):
+#   landed:      -> [points, floor or nil]; default reads origin via Landed
+#   floor:       this tree's floor; default FLOOR
+#   shebang:     the shebang to probe; default HARNESS_SHEBANG
+#   path_prefix: prepended to PATH for the runtime probe
 # -> exit code
-def run_check(root = REPO, host_version = RUBY_VERSION, prism_ok = nil)
-  prism_ok = prism_available? if prism_ok.nil?
-  mode = mode_for(host_version, prism_ok)
-  if mode.nil?
-    warn "check-ruby-floor: COULD NOT MEASURE -- host ruby #{host_version} is newer " \
-         "than the floor #{FLOOR} and Prism is not available, so nothing was read."
-    warn "  Fix: run the gate under a Ruby with Prism (3.3+ bundles it), or " \
-         "`gem install prism` for this Ruby, or run it on a #{FLOOR} host. This is " \
-         "not a pass: no file was checked."
-    return 3
+def run_check(root = REPO, opts = {})
+  floor = opts.fetch(:floor, FLOOR)
+  shebang = opts.fetch(:shebang, HARNESS_SHEBANG)
+  findings = []
+
+  begin
+    pts, landed = opts.key?(:landed) ? opts[:landed].call : landed_floor(root)
+  rescue Landed::Unreadable => e
+    return could_not_measure(Landed.unreadable_lines("Ruby floor", e.probes))
+  rescue Landed::Mismatch => e
+    return could_not_measure(Landed.mismatch_lines(e.local, e.remote, e.source))
+  end
+  if landed && below?(floor, landed)
+    findings << [SELF_REL, 1, "FLOOR #{floor} is lower than the landed floor #{landed} " \
+                              "(#{Landed.describe(pts)}) (floor)"]
   end
 
   files = discover(root)
@@ -320,28 +383,33 @@ def run_check(root = REPO, host_version = RUBY_VERSION, prism_ok = nil)
          "ls-files` and the rules in #{__FILE__}."
     return 1
   end
+  harness = harness_executables(root, files)
+  findings.concat(shebang_findings(root, files, shebang))
 
-  visitor_class = mode == :ast ? build_visitor_class : nil
-  findings = []
-  files.each do |rel|
-    abs = File.join(root, rel)
-    got = mode == :exact ? exact_findings(abs) : ast_findings(abs, visitor_class)
-    got.each { |line, msg| findings << [rel, line, msg] }
+  result = probe(shebang, opts[:path_prefix])
+  findings.concat(runtime_findings(result, shebang, floor))
+
+  syntax_note = "syntax not read: the harness shebang did not give a #{floor}+ ruby"
+  if result[:ok] && !below?(result[:version], floor)
+    findings.concat(syntax_findings(root, files, result[:ruby], result[:version], floor))
+    syntax_note = "syntax mode #{syntax_mode(result[:version], floor)} under #{result[:ruby]} #{result[:version]}"
   end
 
+  context = "#{files.length} Ruby file(s), #{harness.length} harness executable(s); #{syntax_note}"
   if findings.empty?
-    puts "check-ruby-floor: OK -- #{files.length} Ruby file(s) parse under #{FLOOR} " \
-         "(mode #{mode}, host ruby #{host_version})."
+    puts "check-ruby-floor: OK -- floor #{floor} (landed: #{landed || 'none yet'}); " \
+         "#{harness.length} harness executable(s) on #{shebang}, which runs ruby " \
+         "#{result[:version]} from a ruby-#{HOSTILE_PIN}-pinned directory; " \
+         "#{files.length} Ruby file(s) parse under #{floor} (#{syntax_note})."
     return 0
   end
 
-  warn "check-ruby-floor: #{findings.length} construct(s) in #{findings.map(&:first).uniq.length} " \
-       "file(s) do not parse under the Ruby floor #{FLOOR} " \
-       "(mode #{mode}, host ruby #{host_version}; #{files.length} file(s) read):"
-  findings.each { |rel, line, msg| warn "  #{rel}:#{line}: #{msg}" }
-  hints = fix_hints(findings)
-  warn "  Fix: rewrite each site in #{FLOOR} syntax#{hints.empty? ? '' : ' -- ' + hints.join('; ')}. #{FIX_TAIL}"
+  emit_findings(findings, context)
   1
+rescue MeasureError => e
+  could_not_measure(["  #{e.message}.",
+                     "  Fix: run from inside the custom repo with git on PATH and system " \
+                     "ruby #{FLOOR}+ at #{HARNESS_SHEBANG.delete_prefix('#!')}."])
 end
 
 # --- self-test ---------------------------------------------------------------
@@ -354,29 +422,28 @@ end
 def fixture_repo(files, untracked = {})
   dir = Dir.mktmpdir("check-ruby-floor-")
   git!(dir, "init", "-q")
-  files.each do |rel, body|
+  write = lambda do |rel, body|
     path = File.join(dir, rel)
     FileUtils.mkdir_p(File.dirname(path))
     File.write(path, body)
+    File.chmod(0o755, path) if body.start_with?("#!")
   end
+  files.each { |rel, body| write.call(rel, body) }
   git!(dir, "add", "--", *files.keys) unless files.empty?
-  untracked.each do |rel, body|
-    path = File.join(dir, rel)
-    FileUtils.mkdir_p(File.dirname(path))
-    File.write(path, body)
-  end
+  untracked.each { |rel, body| write.call(rel, body) }
   dir
 end
 
 # Run run_check against a fixture, capturing both streams.
-def check_fixture(dir, host_version = RUBY_VERSION, prism_ok = nil)
+def check_fixture(dir, opts = {})
+  opts = { landed: -> { [[["fixture", "0" * 40]], nil] } }.merge(opts)
   r_out, w_out = IO.pipe
   r_err, w_err = IO.pipe
   saved_out = $stdout.dup
   saved_err = $stderr.dup
   $stdout.reopen(w_out)
   $stderr.reopen(w_err)
-  code = run_check(dir, host_version, prism_ok)
+  code = run_check(dir, opts)
   [code, nil]
 ensure
   $stdout.reopen(saved_out)
@@ -389,62 +456,22 @@ ensure
   return [code, text]
 end
 
-# Each post-floor construct, one per fixture file, with the kind it must hit.
-# In exact mode (a floor host) every one of these must be a SyntaxError except
-# where noted; see run_self_test.
-BAD_CASES = {
-  endless_def: "def a(x) = x + 1\n",
-  anon_block_param: "def b(&)\n  c(&)\nend\n",
-  anon_splat_arg: "def d(*)\n  e(*)\nend\n",
-  anon_kwsplat_arg: "def d(**)\n  e(**)\nend\n",
-  hash_shorthand: "x = 1\nh = {x:}\n",
-  rightward_match: "1 => z\n",
-  find_pattern: "case [1]\nin [*, 1, *] then 1\nend\n",
-  pinned_expression: "case 1\nin ^(1 + 0) then 1\nend\n"
-}.freeze
+# A stand-in for a version manager's `ruby` shim: it honours the CURRENT
+# directory's pin, exactly the behaviour that broke the harness from
+# ~/dev/shenron. It prints what the probe prints, so the probe reads the
+# pinned version; anything else it is asked to run reports that too.
+def fake_shim_dir
+  dir = Dir.mktmpdir("check-ruby-floor-shim-")
+  File.write(File.join(dir, "ruby"), <<~SH)
+    #!/bin/sh
+    v="$(sed -n 's/^ruby //p' .tool-versions 2>/dev/null)"
+    printf '%s\\n%s\\n' "${v:-3.4.0}" "$0 (fake shim honouring $(pwd)/.tool-versions)"
+  SH
+  File.chmod(0o755, File.join(dir, "ruby"))
+  dir
+end
 
-# Constructs that parse on 2.7 but mean something different there (`it` is a
-# method call; one-line `in` raises on no match), so exact mode cannot see
-# them: only the ast mode flags these.
-AST_ONLY_CASES = {
-  oneline_in: "1 in Integer\n",
-  it_param: "[1].map { it }\n"
-}.freeze
-
-# 2.7-valid code that shares node types with the constructs above.
-GOOD_CASE = <<~'RUBY'
-  def ok(*a, **k, &b)
-    g(*a, **k, &b)
-  end
-  def rest(*)
-    super
-  end
-  def kwrest(**)
-    super
-  end
-  def fwd(...)
-    g(...)
-  end
-  h = { x: 1 }
-  case h
-  in { x:, **rest } then x
-  end
-  case h
-  in { x: Integer => n, **nil } then n
-  end
-  case [1, 2]
-  in [first, *] then first
-  end
-  case [1, 2]
-  in [first, *tail] then tail
-  end
-  v = 1
-  case 1
-  in ^v then v
-  end
-  [1].map { _1 }
-  [1].each_with_object({}) { |(a, b), acc| acc }
-RUBY
+GOOD_TOOL = "#{HARNESS_SHEBANG}\nputs 1\n".freeze
 
 def run_self_test
   fails = 0
@@ -457,22 +484,98 @@ def run_self_test
     end
   end
   dirs = []
-  prism_ok = prism_available?
-  host_mode = mode_for(RUBY_VERSION, prism_ok)
+  shim = fake_shim_dir
+  dirs << shim
 
-  # mode_for is pure: every branch, independent of this host.
-  report.call(mode_for("2.7.8", false) == :exact, "mode: 2.7.8 host is exact")
-  report.call(mode_for("2.7.8", true) == :exact, "mode: 2.7.8 host is exact even with Prism")
-  report.call(mode_for("2.6.10", false) == :exact, "mode: older than the floor is exact")
-  report.call(mode_for("3.4.10", true) == :ast, "mode: 3.4 host with Prism is ast")
-  report.call(mode_for("3.0.6", false).nil?, "mode: 3.0 without Prism cannot measure")
+  # Pure helpers.
+  report.call(syntax_mode("3.4.10", "3.4") == :exact, "syntax mode: 3.4 host is exact (`ruby -c`)")
+  report.call(syntax_mode("3.5.0", "3.4") == :prism, "syntax mode: newer host is Prism at the floor")
+  report.call(syntax_mode("2.7.8", "3.4").nil?, "syntax mode: older host cannot parse under the floor")
+  report.call(below?("2.7.8", "3.4") && below?("3.3.0", "3.4") && !below?("3.4.10", "3.4") &&
+              !below?("3.10.0", "3.4"), "below?: compares minor versions numerically")
+  report.call(parse_floor(File.read(__FILE__)) == FLOOR && parse_floor("FLOOR = \"2.7\"\n") == "2.7" &&
+              parse_floor("x = 1\n").nil?, "parse_floor reads the FLOOR line, nil when absent")
 
-  # could-not-measure is exit 3, and names itself; never reads as a pass.
-  d = fixture_repo("a.rb" => "x = 1\n")
+  # A tree on the harness shebang with 3.4 syntax passes.
+  d = fixture_repo("ai/bin/tool" => "#{HARNESS_SHEBANG}\ndef a(x) = x + 1\n[1].map { it }\n",
+                   "ai/lib/x.rb" => "h = { a: 1 }\nh => { a: }\n")
   dirs << d
-  code, text = check_fixture(d, "3.1.0", false)
+  code, text = check_fixture(d)
+  report.call(code.zero? && text.include?("OK --") && text.include?("1 harness executable(s)"),
+              "3.4 syntax on the harness shebang passes", "code=#{code} #{text[0, 400]}")
+
+  # THE REGRESSION (DND-931): a bare `#!/usr/bin/env ruby` harness tool, from a
+  # directory pinning an old Ruby, with a cwd-honouring shim first on PATH.
+  d = fixture_repo("ai/bin/tool" => "#!/usr/bin/env ruby\nputs 1\n")
+  dirs << d
+  code, text = check_fixture(d, shebang: "#!/usr/bin/env ruby", path_prefix: shim)
+  report.call(code == 1 && text.include?("runs ruby #{HOSTILE_PIN}") && text.include?("(runtime)") &&
+              text.include?("Fix (runtime)"),
+              "runtime: an env-ruby shebang resolves the pinned #{HOSTILE_PIN} and is flagged",
+              "code=#{code} #{text[0, 500]}")
+  # ... and the same shim does not reach the harness shebang.
+  d = fixture_repo("ai/bin/tool" => GOOD_TOOL)
+  dirs << d
+  code, text = check_fixture(d, path_prefix: shim)
+  report.call(code.zero?, "runtime: the harness shebang ignores the cwd-honouring shim",
+              "code=#{code} #{text[0, 400]}")
+
+  # An inherited override must not mask the pin: the probe scrubs it.
+  saved = ENV["ASDF_RUBY_VERSION"]
+  ENV["ASDF_RUBY_VERSION"] = "system"
+  env_seen = probe("#!/bin/sh\necho \"${ASDF_RUBY_VERSION:-unset}\"; echo x; exit 0")
+  report.call(!env_seen[:ok] && env_seen[:why].include?("unset"),
+              "runtime: the probe scrubs ASDF_RUBY_VERSION", env_seen.inspect)
+  ENV["ASDF_RUBY_VERSION"] = saved
+
+  # A shebang that cannot start is a finding, not a pass.
+  d = fixture_repo("ai/bin/tool" => "#!/nonexistent/ruby\nputs 1\n")
+  dirs << d
+  code, text = check_fixture(d, shebang: "#!/nonexistent/ruby")
+  report.call(code == 1 && text.include?("could not be executed") && text.include?("Fix (runtime)"),
+              "runtime: a missing interpreter is flagged", "code=#{code} #{text[0, 400]}")
+
+  # Shebang rule: an env-ruby harness tool is flagged by text on any machine;
+  # a personal script outside ai/ is not; HARNESS_EXTRA is.
+  d = fixture_repo("ai/bin/bad" => "#!/usr/bin/env ruby\nputs 1\n",
+                   "ai/skills/s/bin/bad2" => "#! /usr/bin/env ruby\nputs 1\n",
+                   "scripts/personal" => "#!/usr/bin/env ruby\nputs 1\n",
+                   HARNESS_EXTRA.first => "#!/usr/bin/env ruby\nputs 1\n",
+                   "ai/bin/ok" => GOOD_TOOL)
+  dirs << d
+  code, text = check_fixture(d)
+  report.call(code == 1 && text.include?("ai/bin/bad:1:") && text.include?("ai/skills/s/bin/bad2:1:") &&
+              text.include?("#{HARNESS_EXTRA.first}:1:") && !text.include?("scripts/personal") &&
+              !text.include?("ai/bin/ok:") && text.include?("Fix (shebang)"),
+              "shebang: env-ruby harness tools flagged, personal scripts not", "code=#{code} #{text[0, 600]}")
+
+  # Syntax: something 3.4 cannot parse fails, naming file:line.
+  d = fixture_repo("ai/lib/broken.rb" => "x = 1\ndef a(\n", "ai/bin/ok" => GOOD_TOOL)
+  dirs << d
+  code, text = check_fixture(d)
+  report.call(code == 1 && text.include?("ai/lib/broken.rb:") && text.include?("(syntax)") &&
+              text.include?("Fix (syntax)"), "syntax: an unparseable file fails", "code=#{code} #{text[0, 400]}")
+
+  # Discovery: a ruby-shebang file with no .rb is read; untracked is not.
+  d = fixture_repo({ "tools/t" => "#!/usr/bin/env ruby\ndef a(\n", "ai/bin/ok" => GOOD_TOOL },
+                   "scratch.rb" => "def a(\n")
+  dirs << d
+  code, text = check_fixture(d)
+  report.call(code == 1 && text.include?("tools/t:") && !text.include?("scratch.rb"),
+              "discovery: ruby shebang read; untracked file not", "code=#{code} #{text[0, 400]}")
+
+  # Floor ratchet: lowering fails, equal or new passes, unreadable is exit 3.
+  d = fixture_repo("ai/bin/ok" => GOOD_TOOL)
+  dirs << d
+  pts = [["origin/main (tip)", "a" * 40]]
+  code, text = check_fixture(d, landed: -> { [pts, "3.5"] })
+  report.call(code == 1 && text.include?("lower than the landed floor 3.5") && text.include?("Fix (floor)"),
+              "floor: lower than landed fails", "code=#{code} #{text[0, 400]}")
+  code, = check_fixture(d, landed: -> { [pts, "2.7"] })
+  report.call(code.zero?, "floor: raising it above the landed 2.7 passes")
+  code, text = check_fixture(d, landed: -> { raise Landed::Unreadable.new([["refs/remotes/origin/main", "no such ref"]]) })
   report.call(code == 3 && text.include?("COULD NOT MEASURE") && text.include?("Fix:"),
-              "cannot measure: exit 3 with COULD NOT MEASURE and Fix:", "code=#{code} #{text[0, 200]}")
+              "floor: an unreadable landed bar is exit 3, not a pass", "code=#{code} #{text[0, 400]}")
 
   # found-nothing is a failure, distinct from could-not-measure.
   d = fixture_repo("README.md" => "hi\n")
@@ -481,64 +584,28 @@ def run_self_test
   report.call(code == 1 && text.include?("FOUND NOTHING") && text.include?("Fix:"),
               "no Ruby file: exit 1, FOUND NOTHING, Fix:", "code=#{code} #{text[0, 200]}")
 
-  if host_mode.nil?
-    puts "check-ruby-floor self-test: host ruby #{RUBY_VERSION} has no measuring mode; " \
-         "the fixture cases below cannot run."
-    puts "  Fix: run the self-test under a Ruby with Prism (3.3+) or a #{FLOOR} host."
-    return 1
-  end
-  puts "(fixture cases run in mode #{host_mode}, host ruby #{RUBY_VERSION})"
-
-  # 2.7-valid code passes, including pattern/rest forms that share node types.
-  d = fixture_repo("lib/good.rb" => GOOD_CASE)
-  dirs << d
-  code, text = check_fixture(d)
-  report.call(code.zero? && text.include?("OK -- 1 Ruby file"), "2.7-valid code passes", "code=#{code} #{text[0, 400]}")
-
-  # Each post-floor construct fails, naming its file and (ast) its kind.
-  cases = BAD_CASES.to_a
-  cases += AST_ONLY_CASES.to_a if host_mode == :ast
-  cases.each do |kind, body|
-    d = fixture_repo("lib/#{kind}.rb" => body)
-    dirs << d
-    code, text = check_fixture(d)
-    named = text.include?("lib/#{kind}.rb:")
-    named &&= text.include?("(#{kind})") if host_mode == :ast
-    report.call(code == 1 && named && text.include?("Fix:"),
-                "#{kind}: flagged (exit 1, file:line named, Fix:)", "code=#{code} #{text[0, 300]}")
-  end
-
-  # Discovery: a ruby-shebang executable with no .rb is read; a shell script
-  # and an untracked .rb are not.
-  d = fixture_repo({ "bin/tool" => "#!/usr/bin/env ruby\ndef a(x) = x\n",
-                     "bin/sh-tool" => "#!/bin/sh\necho 'def a(x) = x'\n" },
-                   "scratch.rb" => "def a(x) = x\n")
-  dirs << d
-  code, text = check_fixture(d)
-  report.call(code == 1 && text.include?("bin/tool:") && !text.include?("scratch.rb") &&
-              !text.include?("sh-tool") && text.include?("1 file(s) read"),
-              "discovery: ruby shebang read; shell script and untracked file not",
-              "code=#{code} #{text[0, 400]}")
-
-  # A file the host cannot parse at all fails, never passes silently.
-  d = fixture_repo("lib/broken.rb" => "def a(\n")
-  dirs << d
-  code, text = check_fixture(d)
-  report.call(code == 1 && text.include?("lib/broken.rb:"), "unparseable file fails", "code=#{code} #{text[0, 300]}")
-
-  # This file must itself parse under the floor.
-  d = fixture_repo("ai/bin/check-ruby-floor" => File.read(__FILE__))
-  dirs << d
-  code, text = check_fixture(d)
-  report.call(code.zero?, "check-ruby-floor itself parses under #{FLOOR}", "code=#{code} #{text[0, 400]}")
+  # End to end on a REAL tool: this file, run from a directory pinning an old
+  # Ruby with a cwd-honouring shim first on PATH, runs on the floor.
+  # RUBYOPT=-r<file> makes whichever real Ruby starts report its version from
+  # inside the tool's own process.
+  pin = hostile_dir
+  dirs << pin
+  reporter = File.join(pin, "report_version.rb")
+  File.write(reporter, "$stderr.puts \"RUBY_UNDER_TEST=\#{RUBY_VERSION}\"\n")
+  out, err, status = run_in(probe_env(shim).merge("RUBYOPT" => "-r#{reporter}"), [File.expand_path(__FILE__), "--help"], pin)
+  seen = err[/RUBY_UNDER_TEST=(\S+)/, 1]
+  report.call(status&.success? && out.include?("Usage:") && !out.include?("fake shim") &&
+              seen && !below?(seen, FLOOR),
+              "end to end: #{SELF_REL} from a #{HOSTILE_PIN}-pinned dir runs under ruby #{seen.inspect} (>= #{FLOOR})",
+              "status=#{status.inspect} out=#{out[0, 200]} err=#{err[0, 200]}")
 
   if fails.zero?
     puts "check-ruby-floor self-test: OK"
     0
   else
     puts "check-ruby-floor self-test: #{fails} failure(s)"
-    puts "  Fix: a case above changed verdict; re-check the visitor (ast) or the " \
-         "compile path (exact) before shipping."
+    puts "  Fix: a case above changed verdict; re-check the probe, the shebang rule, " \
+         "the ratchet, or the syntax pass before shipping."
     1
   end
 ensure
@@ -572,10 +639,4 @@ if reason
   exit 2
 end
 
-begin
-  exit(cli["--self-test"] ? run_self_test : run_check)
-rescue MeasureError => e
-  warn "check-ruby-floor: COULD NOT MEASURE -- #{e.message}."
-  warn "  Fix: run from inside the custom repo with git on PATH; this is not a pass."
-  exit 3
-end
+exit(cli["--self-test"] ? run_self_test : run_check)

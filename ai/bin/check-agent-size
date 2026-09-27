@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # check-agent-size — cap the RENDERED size of every agent definition.

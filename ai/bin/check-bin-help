@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 #
 # check-bin-help -- every harness tool MUST answer `--help` on stdout, with

@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # variant-eval — a MEASUREMENT INSTRUMENT for harness variants (DND-174 / C3,
