@@ -88,6 +88,9 @@ ticket; this record supplies its per-class data.
   passed yesterday can fail today in about 20 s, before any heavy stage runs.
   Before every window, one full prep-commit at the pin must pass all stages,
   `advisories` included. A bench whose k=1 run fails measures nothing.
+  The bench now stops there by itself: when every run of the first level
+  fails, it writes `DECISION: ABORTED`, naming each run's failing stage, and
+  exits 3, releasing the pool.
 
 ## Measurement: home-office-linux, 2026-09-27
 
