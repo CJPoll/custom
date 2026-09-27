@@ -963,3 +963,10 @@ that code.
   interpreter-string residual weakens vs base and needs a recorded OWNER
   decision, not a session ruling -- is escalated to the owner (the residual
   predates DND-799; option A only narrowed it).
+- **Round 13, owner decision recorded.** The critic's last finding (a
+  guardrail finding: the data-mode residual reduces what the guard catches
+  and needs a recorded owner decision, not a session ruling) is answered
+  by Cody's recorded acceptance (2026-09-27 ~07:20Z, "approved", relayed
+  from the laptop coordinator session), quoted verbatim in the header
+  RESIDUAL. DND-775 closes the class below the text; DND-905 is the
+  fallback if its activation slips past 2026-10-04. No code or test change.

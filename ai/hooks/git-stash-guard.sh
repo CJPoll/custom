@@ -142,11 +142,19 @@
 #   verb-naming spellings still deny, and a command word holding `/` is
 #   exec. This is the same class NOT CATCHABLE names (a script defined in
 #   one call and run in another; another interpreter building argv).
-#   Accepted by the harness session (2026-09-27, option A after critic
-#   round 10), PENDING a recorded owner decision (it reduces what the guard
-#   catches; critic round 12). DND-775 (the git-level guard on refs/stash,
-#   injected into agent sessions) is the enforcement that closes the whole
-#   class below the text; DND-905 is the text-layer fallback.
+#   OWNER DECISION (the record this reduction needs; critic rounds 12-13):
+#     Owner: Cody. Time: 2026-09-27 ~07:20Z. Source: the laptop
+#     coordinator session (terminal), relayed by the main session.
+#     Question: "Accept the DND-799 text-guard residual (a string or file
+#     written in the same command and then executed — e.g. python3 -c, a
+#     repo hook git fires, a script written then run) until DND-775 is
+#     activated, with DND-905 as the fallback if activation slips past
+#     2026-10-04?"
+#     Answer: "approved".
+#   DND-775 (the git-level guard on refs/stash, injected into agent
+#   sessions) is the enforcement that closes the whole class below the
+#   text; DND-905 is the text-layer fallback if its activation slips past
+#   2026-10-04.
 #
 # PRECISION (DND-780, narrow cut): the leading test bracket `[` / `[[` and
 # the lone brace-group word `{` are not glob command words (as globs they
