@@ -289,6 +289,69 @@ check("functional-first: a Flake with Path=Critical does not hold tier 4 (Flake 
   r.pick&.id == "DND-40"
 end
 
+# ---------------------------------------------------------------- Parked
+
+check("parked: a Parked ticket is not terminal and not started; it is eligible") do
+  r = pick([t("DND-1", kind: "Bug", status: "Parked")])
+  r.pick&.id == "DND-1" && r.funnel.to_h[:not_terminal] == 1 && r.funnel.to_h[:not_started] == 1
+end
+
+check("parked: a Parked ticket listed in --started is started") do
+  r = pick([t("DND-1", kind: "Bug", status: "Parked")], started: ["DND-1"])
+  r.pick.nil? && r.emptied_by == :not_started
+end
+
+check("parked: resuming Parked beats a fresh ticket in the same tier, ahead of severity and age") do
+  r = pick([t("DND-1", kind: "Bug", severity: "HIGH", created: "2026-09-01T00:00:00Z"),
+            t("DND-9", kind: "Docs", severity: "LOW", status: "Parked", created: "2026-09-20T00:00:00Z")])
+  r.pick.id == "DND-9" && r.tier == 4 && r.rule.end_with?("; resume Parked")
+end
+
+check("parked: resume-first applies inside tiers 1-3 too") do
+  t1 = pick([t("DND-1", kind: "Vulnerability", severity: "CRITICAL"),
+             t("DND-9", kind: "Vulnerability", severity: "HIGH", status: "Parked")])
+  t3 = pick([t("DND-1", kind: "Feature", path: "Critical"),
+             t("DND-9", kind: "Feature", path: "Critical", status: "Parked")])
+  t1.pick.id == "DND-9" && t1.rule == "tier 1: exploitable vulnerability (HIGH); resume Parked" &&
+    t3.pick.id == "DND-9" && t3.rule.start_with?("tier 3:") && t3.rule.end_with?("resume Parked")
+end
+
+check("parked: a Parked ticket never jumps a tier") do
+  r = pick([t("DND-1", kind: "Vulnerability", severity: "HIGH"),
+            t("DND-9", kind: "Bug", severity: "HIGH", status: "Parked")])
+  r.pick.id == "DND-1" && r.tier == 1 && !r.rule.include?("Parked")
+end
+
+check("parked: a Parked Feature still holds tier-4 findings (it is unfinished)") do
+  r = pick([t("DND-1", kind: "Feature", path: "Critical", status: "Parked"),
+            t("DND-40", kind: "Docs", severity: "LOW")], started: ["DND-1"])
+  r.pick.nil? && r.emptied_by == :functional_first
+end
+
+# ------------------------------------------------------ stale In Progress
+
+check("stale: an In Progress ticket missing from --started is listed; the pick is unchanged") do
+  r = pick([t("DND-1", kind: "Bug", status: "In Progress"), t("DND-2", kind: "Bug", status: "In Progress"),
+            t("DND-3", kind: "Bug")], started: ["DND-2"])
+  r.stale_in_progress == ["DND-1"] && r.pick.id == "DND-3" && r.funnel.to_h[:not_started] == 1 &&
+    r.to_h[:stale_in_progress] == ["DND-1"] && r.to_h[:stale_check].include?("checked 2")
+end
+
+check("stale: without --started the check is skipped (nil + a reason), never an empty list") do
+  r = pick([t("DND-1", kind: "Bug", status: "In Progress"), t("DND-3", kind: "Bug")])
+  r.stale_in_progress.nil? && r.to_h[:stale_in_progress].nil? && r.to_h[:stale_check].start_with?("skipped")
+end
+
+check("stale: Parked is never reported stale (the warning covers In Progress only)") do
+  r = pick([t("DND-1", kind: "Bug", status: "Parked")], started: [])
+  r.stale_in_progress == [] && r.in_progress.zero?
+end
+
+check("stale: the check also runs on an empty result") do
+  r = pick([t("DND-1", kind: "Bug", status: "In Progress")], started: [])
+  r.pick.nil? && r.stale_in_progress == ["DND-1"]
+end
+
 check("result: to_h carries pick, tier, rule, funnel, held_back") do
   h = pick([t("DND-3", kind: "Vulnerability", severity: "HIGH")]).to_h
   h[:ticket] == "DND-3" && h[:tier] == 1 && h[:funnel].is_a?(Array) && h.key?(:held_back)
@@ -585,6 +648,37 @@ check("cli: a --tickets id with a non-DND prefix is a usage error (exit 2), befo
   Dir.mktmpdir("DND-985") do |home|
     _out, err, st = Open3.capture3({ "HOME" => home }, "/usr/bin/ruby", BIN, "--tickets", "PT-5")
     st.exitstatus == 2 && err.include?("DND-NUMBER") && err.include?("Fix:")
+  end
+end
+
+check("cli: stale In Progress is one stderr line naming its source; stdout stays one line") do
+  with_fixture("tickets" => [
+    { "id" => "DND-1", "status" => "In Progress", "kind" => "Bug", "created" => "2026-09-01T00:00:00Z" },
+    { "id" => "DND-2", "status" => "In Progress", "kind" => "Bug", "created" => "2026-09-01T00:00:00Z" },
+    { "id" => "DND-3", "status" => "Todo", "kind" => "Bug", "created" => "2026-09-01T00:00:00Z" }
+  ]) do |f|
+    out, err, code = cli("--from-json", f, "--started", "DND-2")
+    code.zero? && out.lines.size == 1 && out.start_with?("DND-3\t") &&
+      err.include?("stale In Progress (no live captain per --started): DND-1")
+  end
+end
+
+check("cli: without --started the stale check says it was skipped and why") do
+  _out, err, code = cli("--from-json", File.join(FIX, "tiers.json"))
+  code.zero? && err.include?("stale In Progress check skipped: no --started given")
+end
+
+check("cli: --json carries stale_in_progress and stale_check") do
+  out, _err, code = cli("--from-json", File.join(FIX, "held.json"), "--json", "--started", "DND-9")
+  h = JSON.parse(out)
+  code == 1 && h["stale_in_progress"] == ["DND-1"] && h["stale_check"].start_with?("checked 1")
+end
+
+check("cli: an unknown Status value (e.g. a new option) is exit 3 naming it, not 'not started'") do
+  with_fixture("tickets" => [{ "id" => "DND-1", "status" => "Snoozed", "kind" => "Bug",
+                               "created" => "2026-09-01T00:00:00Z" }]) do |f|
+    _out, err, code = cli("--from-json", f)
+    code == 3 && err.include?("Snoozed") && err.include?("Fix:")
   end
 end
 

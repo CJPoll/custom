@@ -20,6 +20,9 @@
 # Feature (and not a blocker) is held while any Path=Critical or Kind=Feature
 # ticket in scope is unfinished. Tiers 0-2 and blockers are never held.
 #
+# Inside every tier, a Parked ticket (progress exists, nobody on it) is resumed
+# before a fresh one is started; that key comes before severity, kind and age.
+#
 # Pure: no I/O. Every value outside the known vocabularies raises DataError, so
 # a Notion schema change can never be read as "not a candidate".
 require "set"
@@ -32,7 +35,9 @@ module NextMission
   Ticket = Struct.new(:id, :page_id, :title, :status, :kind, :severity, :path, :area,
                       :depends_on, :created, keyword_init: true)
 
-  STATUSES   = ["Todo", "Attention Given", "Needs Attention", "In Progress",
+  # Parked (owner, 2026-09-27): progress exists, the work is undelivered, and
+  # nobody is on it. Not terminal, not started unless --started lists it.
+  STATUSES   = ["Todo", "Attention Given", "Needs Attention", "Parked", "In Progress",
                 "Done", "Cancelled", "Won't Fix"].freeze
   TERMINAL   = ["Done", "Cancelled", "Won't Fix"].freeze
   SEVERITIES = %w[CRITICAL HIGH MEDIUM LOW].freeze
@@ -54,13 +59,23 @@ module NextMission
     functional_first:     "functional-first (tier-4 non-Feature held while a Critical/Feature ticket is unfinished)"
   }.freeze
 
+  # stale_in_progress: in-scope In Progress ids missing from --started, or nil
+  # when --started was not given (the check could not run; never an empty
+  # list standing in for "not checked"). in_progress: the count checked.
   Result = Struct.new(:pick, :tier, :rule, :funnel, :emptied_by, :held_back, :reason,
-                      :started_not_in_scope, keyword_init: true) do
+                      :started_not_in_scope, :stale_in_progress, :in_progress, keyword_init: true) do
     def to_h
       { ticket: pick&.id, page_id: pick&.page_id, title: pick&.title, tier: tier, rule: rule,
         funnel: funnel.map { |stage, n| { stage: stage.to_s, label: STAGES.fetch(stage), matched: n } },
         emptied_by: emptied_by&.to_s, held_back: held_back, reason: reason,
-        started_not_in_scope: started_not_in_scope }
+        started_not_in_scope: started_not_in_scope,
+        stale_in_progress: stale_in_progress, stale_check: stale_check }
+    end
+
+    def stale_check
+      return "skipped: no --started given, so there is no live-captain list to compare against" if stale_in_progress.nil?
+
+      "checked #{in_progress} In Progress ticket(s) against --started"
     end
   end
 
@@ -73,15 +88,22 @@ module NextMission
   # scope:    Tickets in the admiral's scope.
   # external: Tickets outside the scope that some scope ticket depends on
   #           (only their id and status are read).
-  # started:  ticket ids the state log records as started.
-  def select(scope:, external: [], started: [], harness_lane: false)
+  # started:  ticket ids the state log records as started, or nil when the
+  #           caller has no such list (then the stale check is skipped).
+  def select(scope:, external: [], started: nil, harness_lane: false)
     validate!(scope, external)
     status_of = (external + scope).to_h { |x| [x.id, x.status] }
+    ids = started || []
     # A --started id that names no ticket in scope does nothing; it may be a
     # typo, which would let the real started ticket be dispatched twice. It is
     # not an error (the state log spans scopes), but it is reported.
-    stray = (started - scope.map(&:id)).sort_by { |i| id_number(i) }
-    started = started.to_set
+    stray = (ids - scope.map(&:id)).sort_by { |i| id_number(i) }
+    # In Progress means a captain is on it now. One with no --started entry is
+    # stale. A warning only: it stays excluded as started either way.
+    in_progress = sorted_ids(scope.select { |x| x.status == "In Progress" })
+    extra = { started_not_in_scope: stray, in_progress: in_progress.size,
+              stale_in_progress: started && (in_progress - ids) }
+    started = ids.to_set
 
     funnel = []
     set = scope.dup
@@ -101,13 +123,19 @@ module NextMission
     funnel << [:functional_first, set.size]
 
     emptied = funnel.find { |_, n| n.zero? }&.first
-    return empty_result(funnel, emptied, held, unfinished, stray) if set.empty?
+    return empty_result(funnel, emptied, held, unfinished, extra) if set.empty?
 
     positions = critical_order(scope)
     tier, ranked = rank(set, positions)
     chosen = ranked.first
     Result.new(pick: chosen, tier: tier, rule: rule_for(chosen, tier, positions), funnel: funnel,
-               emptied_by: nil, held_back: sorted_ids(held), reason: nil, started_not_in_scope: stray)
+               emptied_by: nil, held_back: sorted_ids(held), reason: nil, **extra)
+  end
+
+  # Resuming a Parked ticket beats starting a fresh one in the same tier; it
+  # is the first key inside every tier, ahead of severity, kind and age.
+  def parked_rank(ticket)
+    ticket.status == "Parked" ? 0 : 1
   end
 
   def sorted_ids(tickets)
@@ -148,9 +176,9 @@ module NextMission
     group = by_tier[tier]
     ordered =
       case tier
-      when 0 then group.sort_by { |x| id_number(x.id) }
-      when 1, 2 then group.sort_by { |x| [severity_rank(x), x.created, id_number(x.id)] }
-      when 3 then group.sort_by { |x| positions.fetch(x.id) }
+      when 0 then group.sort_by { |x| [parked_rank(x), id_number(x.id)] }
+      when 1, 2 then group.sort_by { |x| [parked_rank(x), severity_rank(x), x.created, id_number(x.id)] }
+      when 3 then group.sort_by { |x| [parked_rank(x), positions.fetch(x.id)] }
       else tier4_order(group)
       end
     [tier, ordered]
@@ -165,7 +193,7 @@ module NextMission
   end
 
   def tier4_order(tickets)
-    tickets.sort_by { |x| [severity_rank(x), kind_rank(x), x.created, id_number(x.id)] }
+    tickets.sort_by { |x| [parked_rank(x), severity_rank(x), kind_rank(x), x.created, id_number(x.id)] }
   end
 
   # Topological order of the scope's UNFINISHED Path=Critical tickets over
@@ -194,19 +222,21 @@ module NextMission
   end
 
   def rule_for(ticket, tier, positions)
-    case tier
-    when 0 then "tier 0: owner-promoted (Path=Promoted)"
-    when 1 then "tier 1: exploitable vulnerability (#{ticket.severity})"
-    when 2 then "tier 2: bug blocking functional requirements (Path=Blocking, #{ticket.severity || 'Severity unset'})"
-    when 3
-      "tier 3: critical path, dependency order ##{positions.fetch(ticket.id)} of #{positions.size} unfinished"
-    else
-      what = ticket.path == "Blocking" ? "blocker (Path=Blocking), not held by functional-first" : "other improvements"
-      "tier 4: #{what} (#{ticket.severity || 'Severity unset'}, #{ticket.kind || 'Kind unset'}, created #{ticket.created})"
-    end
+    base =
+      case tier
+      when 0 then "tier 0: owner-promoted (Path=Promoted)"
+      when 1 then "tier 1: exploitable vulnerability (#{ticket.severity})"
+      when 2 then "tier 2: bug blocking functional requirements (Path=Blocking, #{ticket.severity || 'Severity unset'})"
+      when 3
+        "tier 3: critical path, dependency order ##{positions.fetch(ticket.id)} of #{positions.size} unfinished"
+      else
+        what = ticket.path == "Blocking" ? "blocker (Path=Blocking), not held by functional-first" : "other improvements"
+        "tier 4: #{what} (#{ticket.severity || 'Severity unset'}, #{ticket.kind || 'Kind unset'}, created #{ticket.created})"
+      end
+    ticket.status == "Parked" ? "#{base}; resume Parked" : base
   end
 
-  def empty_result(funnel, emptied, held, unfinished, stray)
+  def empty_result(funnel, emptied, held, unfinished, extra)
     reason =
       if emptied == :functional_first
         ids = sorted_ids(unfinished)
@@ -216,7 +246,7 @@ module NextMission
         "no candidate: the #{STAGES.fetch(emptied)} filter matched 0"
       end
     Result.new(pick: nil, tier: nil, rule: nil, funnel: funnel, emptied_by: emptied,
-               held_back: sorted_ids(held), reason: reason, started_not_in_scope: stray)
+               held_back: sorted_ids(held), reason: reason, **extra)
   end
 
   # A cycle among unfinished tickets can never unblock; "blocked" would send
