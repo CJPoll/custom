@@ -194,6 +194,7 @@ d	e"
   t eq "$(parent_state '' 100 "$host")" unknown
   t eq "$(parent_state 100 x "$host")" unknown
   t eq "$(parent_state 1 1 '')" unknown
+  t eq "$(parent_state 100 100 '')" alive
   exit "$f"
 )
 if [ $? -eq 0 ]; then ok; else bad helpers "pure helper cases failed (see above)"; fi
@@ -864,7 +865,7 @@ if read -r s37 <"/proc/${c37:-0}/stat" 2>/dev/null; then
   read -r _ c37_ppid _ <<<"$r37"
 fi
 if [ "$c37_ppid" != 1 ]; then
-  bad 37-born-orphan "C (pid '${c37:-}') has parent '$c37_ppid', not PID 1. Fix: if a child subreaper adopted it, test-slot cannot tell that from a live caller at startup (a named RESIDUAL in ai/bin/test-slot); run the suite outside the subreaper."
+  bad 37-born-orphan "C (pid '${c37:-}') has parent '$c37_ppid', not PID 1. Fix: this case needs a host where an orphan is reparented to PID 1 of the host pid namespace; here a child subreaper (e.g. systemd --user) or a container adopted it, which test-slot cannot tell from a live caller at startup (a named RESIDUAL in ai/bin/test-slot). Run the gate from a login shell outside any subreaper or container."
 fi
 timeout 5 bash -c 'printf "go\n" > "$1"' _ "$W/C37.fifo"
 check 37-exits-promptly exits_within "${c37:-0}" 15
