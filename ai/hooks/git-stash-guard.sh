@@ -141,11 +141,15 @@
 #   `git $S`) inside data that something in the same call evaluates anyway
 #   (an interpreter string such as `python3 -c` / `awk system()`, a
 #   variable a program reads as a command such as GIT_SSH_COMMAND, a
-#   string a shell builtin re-evaluates, a script named by a config FILE
-#   written in the same call and run by a read-only git) was caught before
-#   and is not now.
+#   string a shell builtin re-evaluates, a file written in this call and
+#   later executed by git -- a program named by a config file, or a repo
+#   hook file, which even a read-only git such as `status` can fire) was
+#   caught before and is not now.
 #   It needs both an evaluator the exec lists miss and a spelling that
-#   hides the verb.
+#   hides the verb. Accepted by the harness session (2026-09-27, DND-799
+#   critic round 9 ruling). DND-775 (the git-level reference-transaction
+#   guard on refs/stash) is the enforcement that closes this whole class
+#   below the text; DND-905 is the text-layer fallback.
 #
 # PRECISION (DND-780, narrow cut): the leading test bracket `[` / `[[` and
 # the lone brace-group word `{` are not glob command words (as globs they
@@ -886,8 +890,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # that names a program (--upload-pack, --receive-pack, --exec,
   # -O / --open-files-in-pager, matched by getopt prefix so an abbreviation
   # cannot hide it) or turns on a configured one (--ext-diff, --textconv,
-  # --show-signature, --config). A program git reads from a config FILE
-  # written in the same call is the header RESIDUAL.
+  # --show-signature, --config). A file written in the same call and later
+  # executed by git (a config-named program or a repo hook) is the header
+  # RESIDUAL.
   function git_read(W, SB, n, k,    j, sc, a, lst, mut, nonopt) {
     for (j = k + 1; j <= n && !SB[j]; ) {
       if (W[j] == "-C") { j += 2; continue }

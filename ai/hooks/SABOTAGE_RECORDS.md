@@ -895,3 +895,14 @@ reached every case they did (their mutants stayed green).
   `git diff --text` against `--textconv`. QX85-QX93 deny; QA65-QA70 (--text,
   --exclude, --recurse-submodules, wget -O report, distinct prefix-sharing
   options) stay allowed.
+- **Round 9, a repo hook written in the call.** The critic found that a
+  hook file written as data and later fired by a git read falls in the
+  data-mode residual, while the header named only config files. Kind 1,
+  the same evaluator class as the accepted residual ("a file written in
+  this call and later executed by git"). The harness session ruled it a
+  documented residual (2026-09-27, option A): the header now names both
+  config-file programs and repo hook files, and links DND-775 as the
+  enforcement that closes the class below the text (DND-905 is the
+  text-layer fallback). No code or test change: an accepted residual is
+  not caught by design, and a deny case would claim coverage that does
+  not exist.
