@@ -37,6 +37,7 @@ require "etc"
 require "shellwords"
 require_relative "../lib/first_party"
 require_relative "../lib/landed"
+require_relative "../lib/reap_tags"
 
 CUSTOM_DIR = File.expand_path("../..", __dir__)
 
@@ -691,11 +692,37 @@ end
 # the caller's terminal or a pipe — that is the false-green path). env is
 # merged into the check's environment (a nil value unsets the variable).
 # Returns [ok?, combined_output].
+#
+# DND-818: every check also runs under its own reap tag (ai/lib/reap_tags.rb).
+# Once it has exited, anything still carrying the tag after the grace period
+# is killed and the check FAILS, naming each process. The sweep is in an
+# `ensure`, so it also runs when this gate is interrupted mid-check.
 def run_one(argv, chdir: CUSTOM_DIR, env: {})
-  out, status = Open3.capture2e(env, *argv, chdir: chdir, stdin_data: "")
-  [status.success?, out]
-rescue Errno::ENOENT, Errno::EACCES => e
-  [false, "harness-gate: cannot execute #{argv.first}: #{e.class}: #{e.message}"]
+  tag = ReapTags.new_tag("gate-check")
+  ok = false
+  out = nil
+  begin
+    out, status = Open3.capture2e(env.merge(ReapTags.env_with(tag, env.fetch(ReapTags::VAR, ENV[ReapTags::VAR]))),
+                                  *argv, chdir: chdir, stdin_data: "")
+    ok = status.success?
+  rescue Errno::ENOENT, Errno::EACCES => e
+    out = "harness-gate: cannot execute #{argv.first}: #{e.class}: #{e.message}"
+  ensure
+    leaked = ReapTags.reap(tag)
+  end
+  return [ok, out] if leaked.empty?
+
+  [false, "#{out}#{leak_report(argv, leaked)}"]
+end
+
+def leak_report(argv, leaked)
+  lines = ["harness-gate: FAIL — `#{argv.join(' ')}` exited but left #{leaked.size} process(es) " \
+           "running #{ReapTags::DEFAULT_GRACE_S.to_i}s later (each now killed by pid):"]
+  leaked.each { |(pid, cmd)| lines << "  pid=#{pid} #{cmd}" }
+  lines << "  Fix: the check started these and did not reap them on its exit path. Track every " \
+           "process it starts, or source scripts/test/lib/suite-reaper.bash and call " \
+           "suite_reaper_begin + suite_reap_tagged (DND-818)."
+  "\n#{lines.join("\n")}\n"
 end
 
 # ---------------------------------------------------------------------------
@@ -1861,6 +1888,64 @@ def run_self_test
          "entries seeds them with the injection unset inside its own sandbox (see " \
          "ai/test/agent-stash-guard/self-test.sh), it does not get a gate-wide opt-out."
     ok = false
+  end
+
+  # 13 (DND-818). A check that leaves a process running FAILS, in the run that
+  #    leaked it, naming the process -- and the process is gone afterwards.
+  #    Before this, a leak was only ever caught by check-inbox-mock-orphans,
+  #    by name (blind to anything not called mock-athena-inbox-client.rb) and
+  #    after a 60s margin, so a leak in one gate run turned the NEXT gate run
+  #    on the machine red. The leak is a grandchild whose parent exits first,
+  #    so it is reparented: only the tag can still tie it to its check.
+  Dir.mktmpdir("harness-gate-selftest-reap") do |dir|
+    expect = lambda do |cond, msg|
+      unless cond
+        warn "self-test: FAIL — per-check reap (DND-818): #{msg}"
+        ok = false
+      end
+    end
+    pidfile = File.join(dir, "leak.pid")
+    leaky = File.join(dir, "leaky.sh")
+    File.write(leaky, "#!/bin/sh\nsh -c 'sleep 307 >/dev/null 2>&1 & echo $! >\"$0\"' \"$1\"\nexit 0\n")
+    brief = File.join(dir, "brief.sh")
+    File.write(brief, "#!/bin/sh\nsleep 1 >/dev/null 2>&1 &\nexit 0\n")
+    [leaky, brief].each { |p| FileUtils.chmod(0o755, p) }
+
+    leak_ok, leak_out = run_one([leaky, pidfile], chdir: dir)
+    leak_pid = File.exist?(pidfile) ? File.read(pidfile).strip.to_i : 0
+    alive = leak_pid.positive? && begin
+      Process.kill(0, leak_pid)
+      true
+    rescue Errno::ESRCH
+      false
+    end
+    expect.call(!leak_ok, "a check that exited 0 but left `sleep 307` running was reported PASS")
+    expect.call(leak_out.to_s.include?("left 1 process(es) running") && leak_out.to_s.include?("sleep 307") &&
+                leak_out.to_s.include?("Fix:"),
+                "the failure does not name the leaked process with a Fix: (#{leak_out.inspect})")
+    expect.call(leak_pid.positive? && !alive, "the leaked process (pid #{leak_pid}) is still alive after the check")
+    Process.kill("KILL", leak_pid) if alive
+
+    # A child that finishes inside the grace period is not a leak.
+    brief_ok, brief_out = run_one([brief], chdir: dir)
+    expect.call(brief_ok, "a child that exits 1s after its check was called a leak (#{brief_out.inspect})")
+
+    # Another run's tagged process (a sibling gate) is never touched.
+    other_tag = ReapTags.new_tag("selftest-sibling")
+    sib = Process.spawn(ReapTags.env_with(other_tag), "sleep", "308", out: File::NULL, err: File::NULL)
+    begin
+      sib_ok, = run_one([brief], chdir: dir)
+      sib_alive = begin
+        Process.kill(0, sib)
+        true
+      rescue Errno::ESRCH
+        false
+      end
+      expect.call(sib_ok && sib_alive, "a sibling run's tagged process was reaped by this check's sweep")
+    ensure
+      Process.kill("KILL", sib) rescue nil
+      Process.wait(sib) rescue nil
+    end
   end
 
   # 9. The failure report NAMES the failing case even when a chatty suite has

@@ -5,7 +5,9 @@
 # ruby, so the identity assertion is the production one), the supervisor is a
 # throwaway bash parent, and every path — state dir, XDG_STATE_HOME, the client
 # config — is under a mktemp -d. The live client and supervisor are never
-# probed, signalled or read. Every process this suite starts is reaped BY PID.
+# probed, signalled or read. Every process this suite starts is reaped BY PID,
+# and then by this run's tag (scripts/test/lib/suite-reaper.bash, DND-818) for
+# any whose pid the suite never recorded.
 #
 # What is proven, because each was silent or destructive on 2026-09-22:
 #   * the capture holds the dump, the socket table, the fds, /proc status, the
@@ -37,6 +39,15 @@ set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$(cd -- "${HERE}/../.." && pwd -P)"
+
+# DND-818: tag this run so cleanup reaps EVERY process it started, including
+# one whose pid it never learned (a signal between `&` and the pid append;
+# C-10's fake suite and
+# its mock, which PIDS never holds). Must run before anything is started: it re-execs this
+# suite once. See scripts/test/lib/suite-reaper.bash.
+# shellcheck source=scripts/test/lib/suite-reaper.bash
+. "${SCRIPTS}/test/lib/suite-reaper.bash"
+suite_reaper_begin "$@"
 CAPTURE="${SCRIPTS}/inbox-client-capture"
 MOCK="${HERE}/mock-athena-inbox-client.rb"
 
@@ -53,6 +64,8 @@ cleanup() {
   for p in "${PIDS[@]}"; do pkill -9 -P "${p}" 2>/dev/null; done
   for p in "${PIDS[@]}"; do kill -9 "${p}" 2>/dev/null; done
   for p in "${PIDS[@]}"; do wait "${p}" 2>/dev/null; done
+  # Last: anything still carrying this run's tag was never recorded above.
+  suite_reap_tagged
   rm -rf -- "${TMP}"
 }
 # INT/TERM must END the suite, not just run cleanup and carry on: a handler

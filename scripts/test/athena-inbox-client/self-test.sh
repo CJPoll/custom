@@ -45,6 +45,15 @@ set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$(cd -- "${HERE}/../.." && pwd -P)"
+
+# DND-818: tag this run so cleanup reaps EVERY process it started, including
+# one whose pid it never learned (a signal between `&` and the pid append;
+# a supervisor's relaunched
+# client, read from its ready file too late or not at all). Must run before anything is started: it re-execs this
+# suite once. See scripts/test/lib/suite-reaper.bash.
+# shellcheck source=scripts/test/lib/suite-reaper.bash
+. "${SCRIPTS}/test/lib/suite-reaper.bash"
+suite_reaper_begin "$@"
 RUNNER="${SCRIPTS}/athena-inbox-client-run.sh"
 INSTALLER="${SCRIPTS}/setup-athena-inbox-client"
 
@@ -83,6 +92,10 @@ cleanup() {
   # reaper cannot stop it): children first, then the pids, by PID only.
   for p in ${WD_PIDS[@]+"${WD_PIDS[@]}"}; do [ -n "$p" ] && pkill -9 -P "$p" 2>/dev/null; done
   for p in ${WD_PIDS[@]+"${WD_PIDS[@]}"}; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
+  # Last: anything still carrying this run's tag was never recorded above --
+  # e.g. a relaunched client that ignores SIGTERM and whose ready file the
+  # suite had not read yet (DND-818).
+  suite_reap_tagged
   rm -rf -- "$TMP"
 }
 # INT/TERM must END the suite, not just run cleanup and carry on: a handler
@@ -1072,11 +1085,17 @@ run_watchdog() {
       bash "${RUNNER}" >/dev/null 2>&1
 }
 stop_wd_supervisor() {
+  # The supervisor's current children are read BEFORE it is stopped (DND-818):
+  # once it exits they are reparented, so a `pkill -P <supervisor>` afterwards
+  # matches nothing, and a client that ignored the supervisor's SIGTERM (45c's
+  # relaunch) would outlive the case unless its ready file had been read.
+  local p kids
+  kids="$(pgrep -P "${SUPERVISOR_PID}" 2>/dev/null)"
   kill "${SUPERVISOR_PID}" 2>/dev/null
   timeout 15 tail --pid="${SUPERVISOR_PID}" -f /dev/null 2>/dev/null
   # Children first (a stub's `sleep` would be orphaned to PID 1), then the pids.
-  local p; for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && pkill -9 -P "${p}" 2>/dev/null; done
-  for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && kill -9 "${p}" 2>/dev/null; done
+  for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && pkill -9 -P "${p}" 2>/dev/null; done
+  for p in ${kids} "${WD_PIDS[@]}"; do [ -n "${p}" ] && kill -9 "${p}" 2>/dev/null; done
   SUPERVISOR_PID=""
 }
 # install_alert_registry — the COMMITTED custom registry entry (both

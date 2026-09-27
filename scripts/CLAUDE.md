@@ -374,6 +374,26 @@ loop above.
   and never touches the real crontab (`crontab(1)` is a PATH shim over a
   tmpfile).
 
+### Self-tests that start processes: reap by tag (DND-818)
+
+A self-test that starts a background process must reap it on every exit path,
+including one whose pid it never learned. A pid list cannot promise that. A
+signal that lands between `cmd &` and `PIDS+=("$!")` runs the trap first.
+A relaunched grandchild is known only from a ready file, if at all. Both
+leaked a live client for hours in 2026-09.
+
+- `test/lib/suite-reaper.bash` — source it, call `suite_reaper_begin "$@"`
+  before starting anything (it re-execs the suite once), and call
+  `suite_reap_tagged` last in cleanup. Every descendant inherits the run's tag
+  in `ATHENA_REAP_TAGS`, so cleanup finds it after reparenting and under any
+  name. Self-test: `test/suite-reaper/` (it also runs
+  `repro-real-suites.sh`, which SIGTERMs the two mock-bearing suites at the
+  measured windows).
+- `ai/bin/harness-gate` tags every check the same way. A check that leaves a
+  process running 5s after it exits FAILS in that run, naming the process.
+  `ai/bin/check-inbox-mock-orphans` stays as the backstop for a gate that was
+  itself SIGKILLed.
+
 ### General Guidelines
 - Scripts should be self-documenting with clear usage information
 - Use consistent error handling and exit codes
