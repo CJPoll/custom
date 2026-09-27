@@ -53,8 +53,12 @@ green on that integrated head. Exits 0 only when both hold.
 On exit 0 (and only then) it writes a RECEIPT for the head, atomically, at
   <git common dir>/integration-receipts/<head-sha>.json
 recording the head, the target SHA it contained (base), the gate and its
-source, any --critic-override / --owner-approval, the blast-radius verdict, the
-INTEGRATION OK line, and a UTC timestamp. locked-merge requires it. Any other
+source, any --critic-override / --owner-approval, the SHA a carried critic
+PASS came from (critic_carried_from; the OK line then says CRITIC CARRIED) and
+the upstream range its interaction review covered (critic_upstream_range; the
+OK line then says CRITIC CARRIED + INTERACTION), the
+blast-radius verdict, the INTEGRATION OK line, and a UTC timestamp.
+locked-merge requires it. Any other
 outcome removes a receipt for that head. There is no flag that skips it.
 
   --target <ref>   integration target (default: origin/main)
@@ -555,6 +559,20 @@ VERDICT_RC=$?
 # Same streams as before: the reader's PASS line on stdout, everything else on
 # stderr. It is captured only so the override can NAME the state it overrode.
 if [ "$VERDICT_RC" -eq 0 ]; then printf '%s\n' "$VERDICT_OUT"; else printf '%s\n' "$VERDICT_OUT" >&2; fi
+# A CARRIED PASS (DND-986: critic-review found an identical change that had
+# already passed) is a present verdict, so it gates exactly like a judged one.
+# It is NAMED in the OK line and the receipt, so a post-merge defect can be
+# traced to a carry. The reader's bracketed token is the machine-readable
+# contract; its prose is not parsed. Only ever read from a PASS (exit 0).
+# Round 3 (owner spec): a carried PASS on a moved base is confirmed by an
+# INTERACTION review of the upstream delta; the reader then adds
+# [critic-upstream=<from>..<to>], and the OK line names both.
+CRITIC_CARRIED_FROM=""
+CRITIC_UPSTREAM=""
+if [ "$VERDICT_RC" -eq 0 ]; then
+  CRITIC_CARRIED_FROM="$(grep -oE '\[critic-carried-from=[0-9a-f]{40}\]' <<<"$VERDICT_OUT" | head -n1 | grep -oE '[0-9a-f]{40}')"
+  CRITIC_UPSTREAM="$(grep -oE '\[critic-upstream=[0-9a-f]{40}\.\.[0-9a-f]{40}\]' <<<"$VERDICT_OUT" | head -n1 | grep -oE '[0-9a-f]{40}\.\.[0-9a-f]{40}')"
+fi
 
 if [ -n "$CRITIC_OVERRIDE" ]; then
   if [ "$VERDICT_RC" -eq 2 ]; then
@@ -617,8 +635,15 @@ fi
 
 # --- 9. confirmed ----------------------------------------------------------
 SUFFIX=""
+if [ -n "$CRITIC_CARRIED_FROM" ] && [ -n "$CRITIC_UPSTREAM" ]; then
+  # Plain slices, not `short`: the source commit may be gone from this
+  # object store (rebased away and pruned), and rev-parse would then fail.
+  SUFFIX=" (CRITIC CARRIED + INTERACTION from ${CRITIC_CARRIED_FROM:0:12}; upstream ${CRITIC_UPSTREAM:0:12}..${CRITIC_UPSTREAM:42:12})"
+elif [ -n "$CRITIC_CARRIED_FROM" ]; then
+  SUFFIX=" (CRITIC CARRIED from ${CRITIC_CARRIED_FROM:0:12})"
+fi
 if [ -n "$CRITIC_OVERRIDE" ]; then
-  SUFFIX=" (CRITIC OVERRIDE [${OVERRIDE_STATE}]: ${CRITIC_OVERRIDE})"
+  SUFFIX="${SUFFIX} (CRITIC OVERRIDE [${OVERRIDE_STATE}]: ${CRITIC_OVERRIDE})"
 fi
 if [ -n "$OWNER_APPROVAL" ]; then
   SUFFIX="${SUFFIX} (OWNER-APPROVED: ${OWNER_APPROVAL})"
@@ -641,12 +666,15 @@ write_receipt() {
     --arg gate "$GATE_CMD" --arg gate_source "$GATE_SOURCE" --argjson edited "$EDITED_JSON" \
     --arg co "$CRITIC_OVERRIDE" --arg co_state "$OVERRIDE_STATE" --arg oa "$OWNER_APPROVAL" \
     --arg blast "$BLAST_LINE" --arg ok_line "$OK_LINE" --arg checkout "$ROOT" \
+    --arg carried "$CRITIC_CARRIED_FROM" --arg upstream "$CRITIC_UPSTREAM" \
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     'def nul: if . == "" then null else . end;
      {schema: "integration-receipt/1", verdict: "pass", head: $head,
       target_ref: $target_ref, base: $base, gate: $gate, gate_source: $gate_source,
       gate_edited_by_branch: $edited, critic_override: ($co | nul),
-      critic_override_state: ($co_state | nul), owner_approval: ($oa | nul),
+      critic_override_state: ($co_state | nul), critic_carried_from: ($carried | nul),
+      critic_upstream_range: ($upstream | nul),
+      owner_approval: ($oa | nul),
       blast_radius: $blast, integration_ok_line: $ok_line, checkout: $checkout,
       recorded_at: $at}' > "$RECEIPT_TMP" || return 1
   mv -f "$RECEIPT_TMP" "$RECEIPT" || return 1

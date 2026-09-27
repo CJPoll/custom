@@ -115,6 +115,45 @@ module CriticPrompt
     "#{INSTRUCTION}\n\n#{BUG_FIX_RULE}\n#{commits_section(commit_messages)}\n\n```diff\n#{diff}\n```"
   end
 
+  # --- The INTERACTION review (DND-986 round 3, owner spec) ------------------
+  #
+  # "If a rebase doesn't change the branch itself and the last critic review
+  #  for the branch passed, the critic's job should only be to see if the
+  #  changes from the rebase cause a problem." -- Cody, 2026-09-27.
+  #
+  # Used only by critic-review, after a carry hit. It is NOT a fixture input
+  # (not in INPUTS): critic-eval does not measure this prompt, a stated gap.
+  INTERACTION_INSTRUCTION = <<~TXT.freeze
+    This is an INTERACTION review, not a full review. The branch diff below already PASSED your rubric on its earlier base, and it is byte-identical now. The branch was rebased, and the only new input is the upstream delta the rebase brought in.
+
+    Decide ONLY whether the upstream changes break or invalidate the branch. For example: conflicting semantics between the two; something the branch uses (a function, flag, file, path, constant, section or term) that upstream removed, renamed or changed; a restatement the branch makes of text that upstream changed, which is now stale; a guarantee the branch relies on that upstream weakened. Read the tree as needed.
+
+    Do not re-judge the branch's own diff: it is context, and a finding that would stand without the upstream changes is out of scope here. Do not review the upstream delta on its own merits either.
+
+    End with the FINDINGS trailer, exactly as in a full review: "FINDINGS: none" when the upstream changes do not break the branch, else the finding categories.
+  TXT
+
+  INTERACTION_NO_SHARED = "Files touched by both the upstream delta and the branch: none."
+
+  def self.build_interaction(upstream_range:, upstream_diff:, branch_diff:, shared_files:)
+    shared = if shared_files.empty?
+               INTERACTION_NO_SHARED
+             else
+               "Files touched by both the upstream delta and the branch:\n" + shared_files.map { |f| "- #{f}" }.join("\n")
+             end
+    "#{INTERACTION_INSTRUCTION}\nUpstream range (the rebase brought in): #{upstream_range}\n#{shared}\n\n" \
+      "Upstream delta (what the rebase brought in):\n\n#{fenced(upstream_diff, 'diff')}\n\n" \
+      "Branch diff (CONTEXT ONLY; already passed; do not re-judge):\n\n#{fenced(branch_diff, 'diff')}"
+  end
+
+  # One backtick longer than the longest run inside, so a ``` in the body
+  # cannot close the block early.
+  def self.fenced(body, lang)
+    fence = "`" * [3, (body.to_s.scan(/`+/).map(&:length).max || 0) + 1].max
+    "#{fence}#{lang}\n#{body}\n#{fence}"
+  end
+  private_class_method :fenced
+
   def self.commits_section(commit_messages)
     return COMMITS_NOT_SUPPLIED if commit_messages.nil?
     return COMMITS_NONE if commit_messages.strip.empty?

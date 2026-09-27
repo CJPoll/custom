@@ -67,7 +67,18 @@ captain's worktree is still moving.
   it.** In order: (1) if it reports a run IN PROGRESS, wait for it; (2)
   otherwise re-run the judge yourself in the Mission's worktree
   (`~/dev/custom/ai/bin/critic-review`) — exactly what the DND-212 admiral did
-  ad hoc, now the specified move; (3) if the re-run also fail-opens, the model
+  ad hoc, now the specified move. On a rebased head whose change is identical
+  (same patch bytes, commit messages, prompt and critic definition, and no BLOCK
+  on it anywhere), the owner's rule applies: "If a rebase doesn't change the
+  branch itself and the last critic review for the branch passed, the critic's
+  job should only be to see if the changes from the rebase cause a problem."
+  (Cody, 2026-09-27). The earlier PASS covers the branch's own diff, and the
+  judge reviews ONLY the upstream delta the rebase brought in, against the
+  branch: `PASS (CARRIED + INTERACTION)`, and the gate's OK line says
+  `CRITIC CARRIED + INTERACTION` with the range. An interaction BLOCK is a
+  BLOCK. With nothing new upstream it says `PASS (CARRIED)` with no model call.
+  A changed patch is judged in full, and `--no-carry` forces a fresh full
+  review (DND-986); (3) if the re-run also fail-opens, the model
   really is unreachable: **hold that MR, move to the next Mission, and come back
   to it.** A model outage must never wedge the fleet — and holding one car is
   not wedging it. The captain's own fail-open stays deliberately unchanged, so a

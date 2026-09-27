@@ -757,6 +757,121 @@ fi
 [ -n "$pg" ] && kill -KILL -- "-${pg}" 2>/dev/null
 rm -f "${TMP}/critic-fifo"
 
+# ---------------------------------------------------------------- case 32
+# DND-986: a CARRIED critic PASS (critic-review found an identical change that
+# already passed, and recorded a schema-2 receipt naming it) is a present
+# verdict. The OK line and the receipt must NAME it, so a post-merge defect can
+# be traced to a carry. record_carried forges the on-disk schema-2 shape.
+record_carried() { # <repo dir> <carried_from sha> [sha] [schema]
+  ( cd "$1" && sha="${3:-$(git rev-parse HEAD)}" \
+    && d="$(git rev-parse --git-path critic-verdicts)" && mkdir -p "$d" \
+    && jq -n --arg sha "$sha" --arg src "$2" --argjson schema "${4:-2}" \
+         '{schema:$schema, tool:"critic-review", sha:$sha, base:"main", verdict:"pass", findings:[],
+           dirty:false, at:"2026-09-27T00:00:00Z", merge_base:("a"*40), patch_id:("b"*40),
+           diff_digest:("c"*64), msgs_digest:("d"*64), judge_digest:("e"*64),
+           carried_from:(if $src == "" then null else $src end),
+           carried_receipt:(if $src == "" then null else "/x/\($src).json" end)}' > "${d}/${sha}.json" )
+}
+src_sha="$(printf 'f%.0s' {1..40})"
+R="${TMP}/c32"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_carried "$R" "$src_sha"
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c32 F1 carried PASS: exit 0" || bad "c32 F1 expected exit 0, got $rc" "$out"
+grep -Eq "^INTEGRATION OK ${head_sha} .*\(CRITIC CARRIED from ${src_sha:0:12}\)" <<<"$out" \
+  && ok "c32 F1 OK line names the carried critic PASS" || bad "c32 F1 OK line lacks CRITIC CARRIED" "$out"
+jq -e --arg s "$src_sha" '.critic_carried_from == $s and .schema == "integration-receipt/1"' "$rf" >/dev/null 2>&1 \
+  && ok "c32 F1 receipt records critic_carried_from; schema unchanged" || bad "c32 F1 receipt" "$(cat "$rf" 2>&1)"
+jq -e --arg l "$(grep '^INTEGRATION OK' <<<"$out")" '.integration_ok_line == $l' "$rf" >/dev/null 2>&1 \
+  && ok "c32 F1 receipt carries the OK line verbatim" || bad "c32 F1 integration_ok_line" "$(cat "$rf" 2>&1)"
+
+# F1b a carried PASS gated with a precautionary --critic-override: the OK line
+# names BOTH (the override is UNUSED); the carry must not be dropped from it.
+rf_b="$(receipt_of "$R" "$head_sha")"; rm -f "$rf_b"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'belt and braces' 2>&1 )"; rc=$?
+okl="$(grep '^INTEGRATION OK' <<<"$out")"
+[ "$rc" -eq 0 ] && grep -q "(CRITIC CARRIED from ${src_sha:0:12})" <<<"$okl" && grep -q 'CRITIC OVERRIDE \[UNUSED' <<<"$okl" \
+  && ok "c32 F1b carried PASS + unused override: OK line names both" || bad "c32 F1b OK line dropped the carry or the override (rc $rc)" "$okl"
+
+# F1c a carried PASS confirmed by an INTERACTION review of the upstream delta
+# (round 3, owner spec): the OK line says CARRIED + INTERACTION and names the
+# range; the receipt records it.
+R="${TMP}/c32i"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_carried "$R" "$src_sha"
+up_from="$(printf 'a%.0s' {1..40})"; up_to="$(printf 'c%.0s' {1..40})"
+( cd "$R" && d="$(git rev-parse --git-path critic-verdicts)" && f="${d}/$(git rev-parse HEAD).json" \
+  && jq --arg r "${up_from}..${up_to}" '.upstream_range = $r | .interaction = "pass"' "$f" > "$f.t" && mv "$f.t" "$f" )
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+okl="$(grep '^INTEGRATION OK' <<<"$out")"
+[ "$rc" -eq 0 ] && grep -qF "(CRITIC CARRIED + INTERACTION from ${src_sha:0:12}; upstream ${up_from:0:12}..${up_to:0:12})" <<<"$okl" \
+  && ok "c32 F1c OK line names the interaction-confirmed carry and its range" || bad "c32 F1c OK line (rc $rc)" "$okl"
+jq -e --arg s "$src_sha" --arg r "${up_from}..${up_to}" '.critic_carried_from == $s and .critic_upstream_range == $r' "$rf" >/dev/null 2>&1 \
+  && ok "c32 F1c receipt records critic_upstream_range" || bad "c32 F1c receipt" "$(cat "$rf" 2>&1)"
+jq -e '.critic_upstream_range == null' "$(receipt_of "${TMP}/c32" "$( cd "${TMP}/c32" && git rev-parse HEAD )")" >/dev/null 2>&1 \
+  && ok "c32 F1c a pure carry records critic_upstream_range null" || bad "c32 F1c pure-carry receipt lacks a null range"
+
+# F2 a JUDGED schema-2 PASS: no CRITIC CARRIED, critic_carried_from null.
+R="${TMP}/c32b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_carried "$R" ""
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c32 F2 judged schema-2 PASS: exit 0" || bad "c32 F2 expected exit 0, got $rc" "$out"
+grep -q 'CRITIC CARRIED' <<<"$out" && bad "c32 F2 judged PASS reported as carried" "$out" || ok "c32 F2 no CRITIC CARRIED"
+jq -e '.critic_carried_from == null' "$rf" >/dev/null 2>&1 && ok "c32 F2 critic_carried_from is null" || bad "c32 F2 receipt" "$(cat "$rf" 2>&1)"
+
+# F3 a legacy schema-1 PASS still gates green (record_pass is schema 1).
+R="${TMP}/c32c"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c32 F3 schema-1 PASS: exit 0 (no regression)" || bad "c32 F3 expected exit 0, got $rc" "$out"
+
+# F4 THE MISS: a carried PASS for the PRE-rebase SHA only. The gate never
+# carries: the exact head has no receipt, so exit 3 and no integration receipt.
+R="${TMP}/c32d"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+old_head="$( cd "$R" && git rev-parse HEAD )"
+record_carried "$R" "$src_sha" "$old_head"
+( cd "$R" && git commit -q --amend --no-edit --date=2001-01-01T00:00:00 )
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "c32 F4 no receipt for the exact head: exit 3 (never carried at gate time)" || bad "c32 F4 expected exit 3, got $rc" "$out"
+[ -e "$rf" ] && bad "c32 F4 an integration receipt was written" "$(cat "$rf")" || ok "c32 F4 no integration receipt written"
+
+# F4b a carried receipt whose carried_from is malformed is not a pass.
+R="${TMP}/c32e"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_carried "$R" "not-a-sha"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "c32 F4b malformed carried_from: exit 3" || bad "c32 F4b expected exit 3, got $rc" "$out"
+
+# F5 --with-critic (DND-1010) on a rebased, unchanged branch: the judge the
+# gate runs beside itself is critic-review's own writer, so it carries the
+# earlier PASS and reviews only the upstream delta. No forged receipt: the
+# first PASS and the carry are both real critic-review runs (stubbed judge).
+R="${TMP}/c32f"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f \
+  && TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/critic-pass" "${ROOT}/../../bin/critic-review" --base main >/dev/null 2>&1 \
+  && git checkout -q main && echo u > u.txt && git add u.txt && git commit -qm upstream \
+  && git checkout -q feature && git rebase -q main )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+out="$(wc_gate "$R" "${TMP}/critic-pass" "${R}/g.sh")"; rc=$?
+okl="$(grep '^INTEGRATION OK' <<<"$out")"
+[ "$rc" -eq 0 ] && grep -q 'critic-review: PASS (CARRIED + INTERACTION)' <<<"$out" \
+  && grep -q '(CRITIC CARRIED + INTERACTION from ' <<<"$okl" \
+  && ok "c32 F5 --with-critic on an unchanged rebase: the judge carries + reviews the interaction, OK line names it" \
+  || bad "c32 F5 --with-critic carry (rc $rc)" "$out"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
