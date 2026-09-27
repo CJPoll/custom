@@ -29,9 +29,11 @@ label. Tier 1 relies on the repo script's own contract, plus one check the
 tool can make without knowing the script's project names: no compose
 container is left with its working dir in the worktree. Anything it cannot
 attribute is refused with a `Fix:`, and nothing is touched (`--help` has the
-exit codes). A worktree with compose files only below its root and no script
-(`~/dev/custom`'s `templates/`) is judged by what runs there: nothing running
-is "nothing to tear down".
+exit codes). Both tools share one definition of a worktree that runs a stack:
+a root compose file, or a repo teardown script. Compose files only below the
+root with no script (`~/dev/custom`'s `templates/`) declare no stack, so
+docker is never asked. A repo that runs stacks from below its root must ship
+a script (tier 1 below).
 
 - **GitHub:** `locked-merge` runs it after every confirmed landing, per PR. A
   multi-part Mission reclaims each part's stack as that part lands, not at the

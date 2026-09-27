@@ -160,14 +160,12 @@ fixture t10c old-branch; out="$(cd "${REPO2}" && "${TOOL}" --pr 5 2>&1)"; rc=$?;
 grep -qxF "SCRIPT ${WT}/old-branch" "${ST}/script.log" && ok "t10c main-checkout script ran with the worktree" \
   || bad "t10c script" "$(cat "${ST}/script.log" 2>/dev/null)"
 
-# t11 compose only below the root, no script, and a stack RUNS there: refuse (tier 3).
-fixture t11 sub-only; containers "dnd-1-x=${WT}/dnd-1-x" "odd-name=${WT}/sub-only/backend"
-run --pr 5; expect "t11 stack below the root" 2; no_down t11
-# t11b compose files only below the root (templates) and nothing runs there: 0.
-# This is ~/dev/custom's shape (templates/docker-compose.yml).
-fixture t11b sub-only; run --pr 5; expect "t11b templates only" 0
-has "t11b says nothing runs" "no compose container runs under ${WT}/sub-only"; no_down t11b
-fixture t11c sub-only; touch "${ST}/down"; run --pr 5; expect "t11c templates only, docker down" 3
+# t11 compose files only below the root and no script declare no stack
+# (~/dev/custom's templates/docker-compose.yml): 0, and docker is never asked,
+# so a down daemon cannot turn a custom merge into locked-merge's exit 9.
+fixture t11 sub-only; touch "${ST}/down"; run --pr 5; expect "t11 templates only, docker down" 0
+has "t11 says no stack declared" "declares no per-worktree stack"; no_down t11
+[ -s "${ST}/docker.log" ] && bad "t11 called docker" "$(cat "${ST}/docker.log")" || ok "t11 docker not called"
 
 # t4b docker dies after `down` ran: 4 (ran, unverified), never 3 ("nothing touched").
 fixture t4b dnd-1-x; touch "${ST}/fail_after_down"; run --pr 5; expect "t4b unverifiable after down" 4
@@ -187,7 +185,7 @@ has "t19 names the gone directory" "its directory is gone"
 git -C "${REPO}" worktree prune
 # t12 no compose file: 0 and docker never consulted.
 fixture t12 no-compose; touch "${ST}/down"; run --pr 5; expect t12 0
-has "t12 says no compose file" "no compose file"; [ -s "${ST}/docker.log" ] && bad "t12 called docker" || ok "t12 docker not called"
+has "t12 says no stack declared" "declares no per-worktree stack"; [ -s "${ST}/docker.log" ] && bad "t12 called docker" || ok "t12 docker not called"
 # t13 no worktree has the branch: 0, and the miss is named.
 fixture t13 gone-branch; run --pr 5; expect t13 0; has "t13 names the branch and count" "no worktree of ${REPO} has gone-branch checked out ("
 # t14 branch checked out in the MAIN checkout: refuse.

@@ -32,6 +32,8 @@
 #      (the worktree basename), and every container of <project> has its
 #      working dir inside the worktree;
 #   3. anything else is refused: the repo names its stacks its own way.
+# A worktree with neither a root compose file nor a teardown script declares
+# no stack (pool-headroom's same predicate): exit 0 without asking docker.
 # Afterwards it verifies no container, volume or network carries the label.
 #
 # Exit (every non-zero prints a Fix: line):
@@ -176,24 +178,16 @@ def teardown(host, wt, anchor, dry_run)
          "run `git worktree prune`; if its stack is still up, pool-headroom names it as an ORPHAN for its fleet to reclaim.")
   end
 
-  root, sub = host.compose_layout(wt)
-  unless root || sub
-    return puts("teardown-stack: #{wt} has no compose file at its root or one level down; no stack to tear down")
+  # One definition of "this worktree runs a stack", shared with pool-headroom
+  # (Host#stack_repo?): a root compose file or a repo teardown script. Compose
+  # files only below the root with no script (~/dev/custom's templates/) are
+  # not a stack, so docker is never consulted for them.
+  unless host.stack_repo?(wt)
+    return puts("teardown-stack: #{wt} declares no per-worktree stack (no root compose file, no teardown-worktree-stack.sh); nothing to tear down")
   end
 
   host.docker_reachable!
   containers = compose_containers(host)
-  unless root
-    # Compose files only below the root (templates, fixtures, or a stack the
-    # repo names its own way). Judge by what actually runs there.
-    mine = under_wt(containers, wt)
-    if mine.empty?
-      return puts("teardown-stack: no compose container runs under #{wt} (#{containers.size} scanned); its compose files are below the root; nothing to tear down")
-    end
-
-    stop(2, "#{wt} runs compose project(s) #{mine.map { |c| c[:project] }.uniq.join(', ')} from below its root and ships no teardown script",
-         "follow the repo's documented teardown by hand (athena:teardown-worktree-stack, tier 3), and file a ticket to give it a bin/teardown-worktree-stack.sh.")
-  end
 
   project = DockerStacks.normalize_project(File.basename(wt))
   verdict = DockerStacks.attribute(wt, project, containers)

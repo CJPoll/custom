@@ -110,7 +110,7 @@ fixture m3 0; : > "${ST}/net_ids"; run; expect "m3 zero networks listed" 3
 fixture m4 0; echo '[]' > "${ST}/pools"; run; expect "m4 empty pool list" 3
 fixture m5 0; echo 'not json' > "${ST}/networks.json"; run; expect "m5 unparseable inspect" 3
 
-# Configured pools are honoured: one /24 split into /26 = 4 subnets, 4 held.
+# Configured pools are honoured: 172.16.0.0/12 split into /16s = 16 subnets, 4 held.
 fixture c1 0; echo '[{"Base":"172.16.0.0/12","Size":16}]' > "${ST}/pools"; run
 expect "c1 configured 16-subnet pool" 0; has "c1 configured capacity" "free 12/16 subnets, 4 held, min-free 2, pools configured"
 
