@@ -1369,11 +1369,22 @@ done
 # against the MAIN checkout, where a brand-new hook does not exist until this
 # branch merges, so delegating would make this case measure the state of
 # ~/dev/custom rather than the state of this change.
+#
+# Installer and checker run from a FIXTURE REPO whose origin/main is this tree
+# (ai/test/lib/landed-fixture.bash), which is its own main checkout. The checker
+# bars on what LANDED, so run from this checkout it would fail every branch
+# that retires or re-events a hook, and read the real origin over the network
+# (DND-743).
 setup_case
 SET="${CASE_DIR}/settings.json"
+HFIX="${CASE_DIR}/hooks-fixture"
+# shellcheck source=ai/test/lib/landed-fixture.bash
+. "${REPO_DIR}/ai/test/lib/landed-fixture.bash"
+landed_fixture "${REPO_DIR}" "${HFIX}" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks \
+  || bad "F-11 the fixture repo is built" "landed_fixture failed; every F-11 installer case below is void"
 printf '{\n  "model": "x",\n  "permissions": {"allow": ["Bash(ls:*)"]}\n}\n' > "${SET}"
-( cd "${REPO_DIR}" && HOOKS_SETTINGS_FILE="${SET}" scripts/setup-hooks --install >/dev/null 2>&1 )
-R2="$( cd "${REPO_DIR}" && HOOKS_SETTINGS_FILE="${SET}" scripts/setup-hooks --install 2>&1 )"
+( cd "${HFIX}" && HOOKS_SETTINGS_FILE="${SET}" scripts/setup-hooks --install >/dev/null 2>&1 )
+R2="$( cd "${HFIX}" && HOOKS_SETTINGS_FILE="${SET}" scripts/setup-hooks --install 2>&1 )"
 assert_contains "F-11 a second --install is a no-op (idempotent)" "nothing to do" "${R2}"
 assert_eq "F-11 the merge preserves an unrelated scalar key" "x" \
   "$(jq -r '.model' "${SET}" 2>/dev/null)"
@@ -1390,7 +1401,7 @@ done
 # the checker fail for a reason that has nothing to do with the thing under
 # test. (A failure message that fits both "the check failed" and "the
 # interpreter could not start" must be told apart before it is believed.)
-if ( cd "${REPO_DIR}" && HOME="${REAL_HOME}" HOOKS_SETTINGS_FILE="${SET}" ai/bin/check-hooks-registered >/dev/null 2>&1 ); then
+if ( cd "${HFIX}" && HOME="${REAL_HOME}" HOOKS_SETTINGS_FILE="${SET}" ai/bin/check-hooks-registered >/dev/null 2>&1 ); then
   ok "F-11 check-hooks-registered passes against the installed settings"
 else
   bad "F-11 check-hooks-registered passes against the installed settings" \
