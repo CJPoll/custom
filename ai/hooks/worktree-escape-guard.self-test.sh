@@ -284,13 +284,23 @@ grep -q 'deny' "${LOG}" && ok "denials are logged" || bad "denials are logged" "
 
 echo "== registration: the installer wires this hook for BOTH tool families =="
 # Critic round 6: two registry entries for one script on one event collapsed
-# to the first in scripts/setup-hooks (it dedupes on event + command), so the
-# Edit/Write family was never wired. Install the real registry into a scratch
-# settings file and ask which tool names reach the hook.
+# to the first in scripts/setup-hooks (it deduped on event + command before
+# DND-887), so the Edit/Write family was never wired. Install the real registry
+# into a scratch settings file and ask which tool names reach the hook.
+#
+# The install runs in a FIXTURE REPO whose main checkout is this tree
+# (ai/test/lib/landed-fixture.bash). Since DND-743, setup-hooks wires only
+# scripts the MAIN checkout has, so run from a worktree whose branch adds this
+# hook it skips it and the routing question is never asked.
 REPO="$(cd -- "${HERE}/../.." && pwd -P)"
+# shellcheck source=ai/test/lib/landed-fixture.bash
+. "${REPO}/ai/test/lib/landed-fixture.bash"
+FIX="${TMP}/hooks-fixture"
+landed_fixture "${REPO}" "${FIX}" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks \
+  || bad "build the setup-hooks fixture repo" "landed_fixture failed; see its Fix: above"
 SETTINGS="${TMP}/settings.json"
 printf '{}\n' > "${SETTINGS}"
-if HOOKS_SETTINGS_FILE="${SETTINGS}" "${REPO}/scripts/setup-hooks" --install >/dev/null 2>&1; then
+if HOOKS_SETTINGS_FILE="${SETTINGS}" "${FIX}/scripts/setup-hooks" --install >/dev/null 2>&1; then
   for tool in Bash Edit Write MultiEdit NotebookEdit; do
     hit="$(jq -r --arg t "${tool}" '[.hooks.PreToolUse[]?
         | select(any(.hooks[]?; .command | endswith("/worktree-escape-guard.sh")))
@@ -299,7 +309,7 @@ if HOOKS_SETTINGS_FILE="${SETTINGS}" "${REPO}/scripts/setup-hooks" --install >/d
     else bad "installed settings route ${tool} to worktree-escape-guard" "$(jq -c '.hooks.PreToolUse' "${SETTINGS}")"; fi
   done
 else
-  bad "scripts/setup-hooks --install into a scratch settings file" "$(HOOKS_SETTINGS_FILE="${SETTINGS}" "${REPO}/scripts/setup-hooks" --install 2>&1 | tail -3)"
+  bad "scripts/setup-hooks --install into a scratch settings file" "$(HOOKS_SETTINGS_FILE="${SETTINGS}" "${FIX}/scripts/setup-hooks" --install 2>&1 | tail -3)"
 fi
 
 echo "== --help =="

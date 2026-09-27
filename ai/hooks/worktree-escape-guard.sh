@@ -2,8 +2,9 @@
 # worktree-escape-guard.sh -- PreToolUse hook (ONE registry entry, matcher
 # Bash|Edit|Write|MultiEdit|NotebookEdit; the hook branches on tool_name): an
 # agent dispatched into a worktree may not write the MAIN checkout (DND-840).
-# One entry, not two: scripts/setup-hooks dedupes on event + command, so a
-# second entry for this script on PreToolUse would never be installed.
+# One entry: it was written when scripts/setup-hooks deduped on event +
+# command, which dropped a second PreToolUse entry for one script. Since
+# DND-887 the key includes the matcher, so a split into two rows would also work.
 #
 # ~/dev/custom/CLAUDE.md -> *Agents work in worktrees, not the main checkout*
 # made this doctrine and named this hook as its honest choke point. Motivating
