@@ -16,16 +16,33 @@
 # source of the compare logic, also run by the shipwright gate).
 #
 # Usage:
-#   setup-hooks [--install] [--dry-run]   merge registry hooks into settings (default)
+#   setup-hooks [--install] [--dry-run]   merge registry hooks into settings (default).
+#                                         Hooks only: never the agent-stash env.
+#   setup-hooks --install-env [--dry-run] merge the agent-stash env (DND-775). The
+#                                         OWNER's activation step; restart sessions
+#                                         after. Agents do not run it.
 #   setup-hooks --check                   assert registry hooks are wired (gate check)
 #   setup-hooks --remove [--dry-run]      remove the registry hooks from settings
+#   setup-hooks --remove-env [--dry-run]  remove exactly the agent-stash env keys
+#                                         (DND-775's one-command disable; restart
+#                                         sessions after)
 #   setup-hooks --self-test               verify install/check/idempotency on a temp file
 #   setup-hooks --help
 #
 # Override the target file with HOOKS_SETTINGS_FILE (used by --self-test; default
 # ~/.claude/settings.json).
 #
+# The agent-stash env (DND-775) is ai/hooks/registry.json's `env` section: the
+# GIT_CONFIG_* pairs that register the reference-transaction hook
+# ai/git-hooks/agent-stash-guard.sh, GIT_TRACE2=/dev/null, and ATHENA_AGENT_BIN.
+# Its GIT_CONFIG pairs are APPENDED after any the settings env already holds,
+# never written over an index in use; a key already present with another value
+# is refused, never overwritten. --remove-env deletes exactly those keys and
+# renumbers the rest.
+#
 # Exit codes: 0 ok · 1 usage/arg error · 2 missing prerequisite (no python3/registry)
+# · 3 an unreadable settings file or env · 4 an unquotable main-checkout path
+# · 5 the settings env already holds part of the agent-stash env with other values
 
 set -euo pipefail
 
@@ -66,6 +83,8 @@ while [ $# -gt 0 ]; do
     --install)  ACTION="install" ;;
     --check)    ACTION="check" ;;
     --remove)   ACTION="remove" ;;
+    --install-env) ACTION="install-env" ;;
+    --remove-env) ACTION="remove-env" ;;
     --self-test) ACTION="self-test" ;;
     # Internal: print this tool's normalized form of one path. Used by the
     # self-test to compare against check-hooks-registered's, driving both
@@ -153,6 +172,118 @@ except json.JSONDecodeError as e:
     print(f"error: {path} is not valid JSON ({e}).", file=sys.stderr)
     print("Fix: repair or restore the file, then re-run setup-hooks.", file=sys.stderr)
     sys.exit(3)
+
+if mode in ("install-env", "remove-env"):
+    # THE AGENT-STASH ENV (DND-775): the registry's `env` section, merged into
+    # settings `env`. GIT_CONFIG pairs are APPENDED after any the settings
+    # already hold (never written over an index in use); `remove-env` deletes
+    # exactly these keys and renumbers what is left. {{MAIN}} is the main
+    # checkout (repo, above), never a worktree.
+    import re
+    spec = json.load(open(os.environ["REGISTRY"])).get("env")
+    if spec is None:
+        print("MARKER:nochange")
+        sys.exit(0)
+    if not re.fullmatch(r"/[A-Za-z0-9._/+-]+", repo):
+        print(f"error: the main checkout path {repo!r} holds characters the hook command cannot quote.", file=sys.stderr)
+        print("Fix: move the checkout to a path of letters, digits and . _ / + - and re-run.", file=sys.stderr)
+        sys.exit(4)
+    ex = lambda v: v.replace("{{MAIN}}", repo)
+    pairs = [(e["key"], ex(e["value"])) for e in spec["git_config"]]
+    ours = {k for k, _ in pairs}
+    vars_ = {k: ex(v) for k, v in spec["vars"].items()}
+    env = settings.get("env", {})
+    if not isinstance(env, dict):
+        print(f"error: {path}: \"env\" is not an object.", file=sys.stderr)
+        print("Fix: repair the file by hand; setup-hooks never rewrites a block it cannot read.", file=sys.stderr)
+        sys.exit(3)
+    raw = env.get("GIT_CONFIG_COUNT", "0")
+    if not (isinstance(raw, str) and raw.isdigit()):
+        print(f"error: {path}: env GIT_CONFIG_COUNT is {raw!r}, not a count.", file=sys.stderr)
+        print("Fix: repair it by hand (a string of digits), then re-run.", file=sys.stderr)
+        sys.exit(3)
+    n = int(raw)
+    entries = []
+    for i in range(n):
+        k, v = env.get(f"GIT_CONFIG_KEY_{i}"), env.get(f"GIT_CONFIG_VALUE_{i}")
+        if not (isinstance(k, str) and isinstance(v, str)):
+            print(f"error: {path}: env GIT_CONFIG_KEY_{i}/VALUE_{i} missing under GIT_CONFIG_COUNT={n}.", file=sys.stderr)
+            print("Fix: repair the GIT_CONFIG_* entries by hand, then re-run.", file=sys.stderr)
+            sys.exit(3)
+        entries.append((k, v))
+    changes = []
+    if mode == "install-env":
+        conflicts = []
+        have = dict(entries)
+        for k, v in pairs:
+            if k in have and have[k] != v:
+                conflicts.append(f"{k} is set to a different value")
+        for k, v in vars_.items():
+            if k in env and env[k] != v:
+                conflicts.append(f"{k} is {env[k]!r}, want {v!r}")
+        stray = [key for key in env if re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_\d+", key)
+                 and int(key.rsplit("_", 1)[1]) >= n]
+        for key in stray:
+            conflicts.append(f"{key} sits past GIT_CONFIG_COUNT={n} (git never reads it; appending would overwrite it)")
+        if conflicts:
+            print(f"error: {path} already holds part of the agent-stash env with other values:", file=sys.stderr)
+            for c in conflicts:
+                print(f"  - {c}", file=sys.stderr)
+            print("Fix: run `setup-hooks --remove-env`, then `setup-hooks --install-env` (never overwritten in place).", file=sys.stderr)
+            sys.exit(5)
+        idx = n
+        for k, v in pairs:
+            if k in have:
+                continue
+            env[f"GIT_CONFIG_KEY_{idx}"] = k
+            env[f"GIT_CONFIG_VALUE_{idx}"] = v
+            changes.append(f"+ env GIT_CONFIG_KEY_{idx}={k}")
+            idx += 1
+        if idx != n:
+            env["GIT_CONFIG_COUNT"] = str(idx)
+        for k, v in vars_.items():
+            if k not in env:
+                env[k] = v
+                changes.append(f"+ env {k}={v}")
+    else:  # remove-env
+        keep = [(k, v) for k, v in entries if k not in ours]
+        if len(keep) != len(entries):
+            for i in range(n):
+                env.pop(f"GIT_CONFIG_KEY_{i}", None)
+                env.pop(f"GIT_CONFIG_VALUE_{i}", None)
+            for i, (k, v) in enumerate(keep):
+                env[f"GIT_CONFIG_KEY_{i}"] = k
+                env[f"GIT_CONFIG_VALUE_{i}"] = v
+            for k, _ in entries:
+                if k in ours:
+                    changes.append(f"- env GIT_CONFIG {k}")
+            if keep:
+                env["GIT_CONFIG_COUNT"] = str(len(keep))
+            else:
+                env.pop("GIT_CONFIG_COUNT", None)
+        for k, v in vars_.items():
+            # GIT_TRACE2 is removed only when it is ours (/dev/null): the owner
+            # may set it for other reasons.
+            if k in env and (k != "GIT_TRACE2" or env[k] == v):
+                del env[k]
+                changes.append(f"- env {k}")
+    if env:
+        settings["env"] = env
+    else:
+        settings.pop("env", None)
+    for c in changes:
+        print(c)
+    if not changes:
+        print("MARKER:nochange")
+        sys.exit(0)
+    if dry:
+        print("MARKER:wouldchange")
+        sys.exit(0)
+    with open(path, "w") as f:
+        json.dump(settings, f, indent=4)
+        f.write("\n")
+    print("MARKER:changed")
+    sys.exit(0)
 
 hooks = settings.setdefault("hooks", {})
 
@@ -327,7 +458,7 @@ case "$ACTION" in
     # shellcheck source=ai/test/lib/landed-fixture.bash
     . "${REPO_DIR}/ai/test/lib/landed-fixture.bash"
     fix="${tmp}/fixture"
-    landed_fixture "$REPO_DIR" "$fix" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks \
+    landed_fixture "$REPO_DIR" "$fix" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
       || { echo "  FAIL could not build the fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
     if [ "$REGISTRY" != "${REPO_DIR}/ai/hooks/registry.json" ]; then
       cp "$REGISTRY" "${fix}/ai/hooks/registry.json"
@@ -449,7 +580,7 @@ PY2
     # never drift) and --install skips a script the main checkout lacks, so a
     # synthetic registry that is neither landed nor on disk proves nothing.
     fix887="${tmp}/fixture-887"
-    landed_fixture "$REPO_DIR" "$fix887" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks \
+    landed_fixture "$REPO_DIR" "$fix887" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
       || { echo "  FAIL could not build the DND-887 fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
     fix887="$(cd -- "$fix887" && pwd -P)"
     printf '#!/bin/sh\nexit 0\n' > "${fix887}/ai/hooks/dnd-887-two-matchers.sh"
@@ -594,23 +725,114 @@ PY2
     # The original "model" key must survive install+remove (merge, not clobber).
     python3 -c "import json,sys; sys.exit(0 if json.load(open('$HOOKS_SETTINGS_FILE')).get('model')=='x' else 1)" \
       && echo "  ok   unrelated keys preserved" || { echo "  FAIL merge clobbered unrelated keys"; ok=0; }
+    # THE AGENT-STASH ENV (DND-775): install appends, is idempotent, never
+    # overwrites; --remove-env removes exactly its keys; the checker agrees.
+    envs="${tmp}/settings-env.json"
+    printf '{\n    "model": "x"\n}\n' > "$envs"
+    re1="$(apply install-env "$envs" 0)"
+    SETTINGS="$envs" HOOKS_REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" python3 - <<'PY3' \
+      && echo "  ok   install-env writes the registry env, expanded against the MAIN checkout" \
+      || { echo "  FAIL install-env did not write the expected env"; ok=0; }
+import json, os, sys
+main = os.environ["HOOKS_REPO_DIR"]
+spec = json.load(open(os.environ["REGISTRY"]))["env"]
+env = json.load(open(os.environ["SETTINGS"]))["env"]
+want = {"GIT_CONFIG_COUNT": str(len(spec["git_config"]))}
+for i, e in enumerate(spec["git_config"]):
+    want[f"GIT_CONFIG_KEY_{i}"] = e["key"]
+    want[f"GIT_CONFIG_VALUE_{i}"] = e["value"].replace("{{MAIN}}", main)
+for k, v in spec["vars"].items():
+    want[k] = v.replace("{{MAIN}}", main)
+cmd = next(v for k, v in env.items() if k.startswith("GIT_CONFIG_VALUE_") and "agent-stash-guard.sh" in v)
+sys.exit(0 if env == want and f"{main}/ai/git-hooks/agent-stash-guard.sh" in cmd
+         and "/.local/worktrees/" not in cmd and env["ATHENA_AGENT_BIN"] == f"{main}/ai/agent-bin" else 1)
+PY3
+    grep -q "MARKER:changed" <<<"$re1" || { echo "  FAIL first install-env should change"; ok=0; }
+    re2="$(apply install-env "$envs" 0)"
+    grep -q "MARKER:nochange" <<<"$re2" && echo "  ok   install-env is idempotent" \
+      || { echo "  FAIL second install-env should be a no-op"; ok=0; }
+    # The fixture repo's origin/main is this tree, so the checker's landed env
+    # bar is the one install-env just wrote. Its values must match: ACTIVE, or
+    # (the fixture carries no hook script, wrapper or shell line) the
+    # values-match FAIL that names only runtime problems. Never DRIFT, INACTIVE,
+    # not-landed or could-not-measure.
+    chk="$(HOOKS_SETTINGS_FILE="$envs" "$CHECKER" 2>&1 || true)"
+    if grep -q -e "agent-stash env: ACTIVE" -e "agent-stash env: FAIL — the settings values match" <<<"$chk"; then
+      echo "  ok   check-hooks-registered reads the installed env's values as matching the landed env"
+    else
+      echo "  FAIL check-hooks-registered must read the installed env as matching the landed env: $chk"; ok=0
+    fi
+    ra="$(apply remove-env "$envs" 0)"
+    python3 -c "import json,sys; s=json.load(open('$envs')); sys.exit(0 if 'env' not in s and s.get('model')=='x' else 1)" \
+      && grep -q "MARKER:changed" <<<"$ra" \
+      && echo "  ok   remove-env removes the whole env it added, keeping unrelated keys" \
+      || { echo "  FAIL remove-env left env keys behind or clobbered unrelated ones"; ok=0; }
+    printf '{"env": {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "owner-kept", "FOO": "bar"}}\n' > "$envs"
+    apply install-env "$envs" 0 >/dev/null
+    python3 -c "import json,sys; e=json.load(open('$envs'))['env']; sys.exit(0 if e['GIT_CONFIG_KEY_0']=='user.name' and e['GIT_CONFIG_VALUE_0']=='owner-kept' and e['GIT_CONFIG_KEY_1']=='hook.agentstash.event' and e['GIT_CONFIG_COUNT']=='5' else 1)" \
+      && echo "  ok   install-env APPENDS after the owner's own GIT_CONFIG entry (index 0 kept)" \
+      || { echo "  FAIL install-env must append after existing GIT_CONFIG entries"; ok=0; }
+    apply remove-env "$envs" 0 >/dev/null
+    python3 -c "import json,sys; e=json.load(open('$envs'))['env']; sys.exit(0 if e=={'GIT_CONFIG_COUNT':'1','GIT_CONFIG_KEY_0':'user.name','GIT_CONFIG_VALUE_0':'owner-kept','FOO':'bar'} else 1)" \
+      && echo "  ok   remove-env restores exactly the owner's env" \
+      || { echo "  FAIL remove-env must leave exactly the owner's entries: $(cat "$envs")"; ok=0; }
+    printf '{"env": {"ATHENA_AGENT_BIN": "/elsewhere"}}\n' > "$envs"
+    cp "$envs" "${envs}.before"
+    if apply install-env "$envs" 0 >/dev/null 2>&1; then
+      echo "  FAIL install-env overwrote a differing ATHENA_AGENT_BIN"; ok=0
+    elif cmp -s "$envs" "${envs}.before"; then
+      echo "  ok   install-env refuses (never overwrites) a key set to another value"
+    else
+      echo "  FAIL a refused install-env still changed the file"; ok=0
+    fi
+    printf '{"model": "y"}\n' > "$envs"
+    # --install is the routine hook-drift fix agents run: it must NEVER activate
+    # the guard (critic, DND-775 round 1). Only --install-env does.
+    HOOKS_SETTINGS_FILE="$envs" "$0" --install >/dev/null 2>&1 \
+      && python3 -c "import json,sys; s=json.load(open('$envs')); sys.exit(0 if 'env' not in s and s.get('hooks') else 1)" \
+      && echo "  ok   CLI: --install wires the hooks and never the agent-stash env" \
+      || { echo "  FAIL CLI: --install must not write the agent-stash env"; ok=0; }
+    HOOKS_SETTINGS_FILE="$envs" "$0" --install-env >/dev/null 2>&1 \
+      && python3 -c "import json,sys; s=json.load(open('$envs')); sys.exit(0 if s.get('env',{}).get('ATHENA_AGENT_BIN') else 1)" \
+      && HOOKS_SETTINGS_FILE="$envs" "$0" --remove-env >/dev/null 2>&1 \
+      && python3 -c "import json,sys; s=json.load(open('$envs')); sys.exit(0 if 'env' not in s and s.get('hooks') and s.get('model')=='y' else 1)" \
+      && echo "  ok   CLI: --install-env activates, --remove-env removes only the env" \
+      || { echo "  FAIL CLI --install-env / --remove-env round trip"; ok=0; }
+
     [ "$ok" = 1 ] && { echo "ALL CASES PASS"; exit 0; } || { echo "SELF-TEST FAILED"; exit 1; }
     ;;
 
-  install|remove)
+  install|remove|install-env|remove-env)
     if [ "$DRY_RUN" = 0 ] && [ -f "$SETTINGS" ]; then
       bak="${SETTINGS}.bak-$(date +%Y%m%d-%H%M%S)"
       cp -p "$SETTINGS" "$bak"
       say "backed up ${SETTINGS} -> ${bak}"
     fi
-    out="$(apply "$ACTION" "$SETTINGS" "$DRY_RUN")"
-    echo "$out" | grep -v '^MARKER:' || true
-    if grep -q "MARKER:nochange" <<<"$out"; then
-      say "setup-hooks: nothing to do — all registry hooks already ${ACTION%e}ed."
-    elif grep -q "MARKER:wouldchange" <<<"$out"; then
-      say "setup-hooks: (dry-run) the above would be applied to ${SETTINGS}."
-    else
-      say "setup-hooks: ${ACTION} applied to ${SETTINGS}. Hooks load at session start — reload to activate."
-    fi
+    # --install and --remove touch the hooks only: --install is the routine
+    # hook-drift fix agents are told to run, so it must never activate
+    # anything. --install-env merges the agent-stash env (DND-775): the OWNER's
+    # activation step. --remove-env removes exactly that env (the guard's
+    # one-command disable).
+    case "$ACTION" in
+      install)     steps="install" ;;
+      remove)      steps="remove" ;;
+      install-env) steps="install-env" ;;
+      remove-env)  steps="remove-env" ;;
+    esac
+    for step in $steps; do
+      out="$(apply "$step" "$SETTINGS" "$DRY_RUN")"
+      echo "$out" | grep -v '^MARKER:' || true
+      case "$step" in
+        install-env|remove-env) what="agent-stash env (ai/hooks/registry.json env)" ;;
+        *) what="registry hooks" ;;
+      esac
+      if grep -q "MARKER:nochange" <<<"$out"; then
+        say "setup-hooks: nothing to do for the ${what} (${step})."
+      elif grep -q "MARKER:wouldchange" <<<"$out"; then
+        say "setup-hooks: (dry-run) the above ${what} change (${step}) would be applied to ${SETTINGS}."
+      else
+        say "setup-hooks: ${step} of the ${what} applied to ${SETTINGS}. It loads at session start: restart sessions to activate."
+      fi
+    done
     ;;
 esac

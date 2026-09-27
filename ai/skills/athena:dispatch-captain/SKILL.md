@@ -120,7 +120,11 @@ Give the captain, in the brief:
   git dir), so a captain's `git stash pop` can pop the owner's entry. Measured
   2026-09-25 on walt_ui: the PT-1709 captain popped the owner's PT-822 entry
   (DND-670). The `git-stash-guard` hook denies every stash write; the line saves
-  the captain the denied call.
+  the captain the denied call. Once the owner activates DND-775, git itself
+  refuses stash writes in agent sessions (the `agentstash` reference-transaction
+  hook, ai/git-hooks/agent-stash-guard.sh) and the agent `git` wrapper
+  (ai/agent-bin/git) refuses pop/apply/drop before git runs; the text guard
+  retires after that is verified live.
 - **The test-slot rule.** Every brief carries this line: *"Run every heavy gate
   — a full suite, `bin/prep-commit.sh`, `harness-gate`, `integration-gate` — as
   ONE Bash command that starts in your worktree: `cd <worktree> &&

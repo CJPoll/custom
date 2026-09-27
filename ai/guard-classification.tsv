@@ -23,7 +23,12 @@ ai/hooks/athena-inbox-poll.sh	no-fail-path	SessionStart inbox count; emits a not
 ai/hooks/athena-slack-poll.sh	no-fail-path	SessionStart Slack backstop poll; emits a notice, never denies or fails a turn (its Fix: text is diagnostic guidance, not a denial)
 ai/bin/contention-census	tool	reads and prints host load/contention numbers for a report; never denies, gates, or retries anything
 
+# --- DND-775 agent-stash guard: a git reference-transaction hook and the agent PATH git wrapper. Both refuse with a Fix:.
+ai/git-hooks/agent-stash-guard.sh	guard
+ai/agent-bin/git	guard
+
 # --- Sourced libraries. guard = the library holds refusal text that must keep its Fix:.
+ai/lib/agent_stash_env.rb	guard	
 ai/inbox/lib/registry.rb	guard	
 ai/lib/fleet/control-domain.sh	guard	
 ai/lib/fleet/control-manager.sh	guard	

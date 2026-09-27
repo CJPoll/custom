@@ -35,7 +35,7 @@ SRC_ROOT="$(cd "$(dirname "${BIN}")/../.." && pwd)"
 LIB="${SRC_ROOT}/ai/lib/landed.rb"
 SETUP="${SRC_ROOT}/scripts/setup-hooks"
 
-for f in "${BIN}" "${LIB}" "${SRC_ROOT}/ai/lib/strict_argv.rb" "${SETUP}"; do
+for f in "${BIN}" "${LIB}" "${SRC_ROOT}/ai/lib/strict_argv.rb" "${SRC_ROOT}/ai/lib/agent_stash_env.rb" "${SETUP}"; do
   if [ ! -f "${f}" ]; then
     echo "check-hooks-registered self-test: FAIL -- ${f} does not exist" >&2
     echo "Fix: point CHECK_HOOKS_REGISTERED_UNDER_TEST at a checker inside a checkout that also has ai/lib/landed.rb and scripts/setup-hooks." >&2
@@ -98,6 +98,7 @@ new_fixture() {
   cp "${BIN}" "${d}/main/ai/bin/check-hooks-registered"
   cp "${LIB}" "${d}/main/ai/lib/landed.rb"
   cp "${SRC_ROOT}/ai/lib/strict_argv.rb" "${d}/main/ai/lib/strict_argv.rb"
+  cp "${SRC_ROOT}/ai/lib/agent_stash_env.rb" "${d}/main/ai/lib/agent_stash_env.rb"
   cp "${SETUP}" "${d}/main/scripts/setup-hooks"
   hook "${d}/main" a.sh
   registry "${d}/main" "SessionStart=a.sh"

@@ -57,7 +57,10 @@ STATIC_CHECKS = [
   ["main-session-policy self-test", %w[ai/hooks/main-session-policy.self-test.sh]],
   ["forge-identity-guard self-test", %w[ai/hooks/forge-identity-guard.self-test.sh]],
   ["forge-auth-guard self-test", %w[ai/hooks/forge-auth-guard.self-test.sh]],
-  ["git-stash-guard self-test", %w[ai/hooks/git-stash-guard.self-test.sh]],
+  # Its fixtures write stash entries (the thing it guards), so it runs with the
+  # DND-775 agent-stash injection removed: see stash_fixture_optout_env. Both
+  # retire together in DND-775's second change.
+  ["git-stash-guard self-test", %w[ai/hooks/git-stash-guard.self-test.sh], :stash_fixture_optout],
   # workflow-phase-guard's self-test is a dedicated .self-test.sh (NOT the
   # false-green `<hook>.sh --self-test` form the gate's own self-test forbids);
   # the hook's inline --self-test just execs this file.
@@ -866,6 +869,18 @@ def gate_units(checks)
   [pre, units, final]
 end
 
+# The environment one check runs in: the pinned gate env, plus the adjustment
+# its CHECKS entry names in an optional third element. Only
+# :stash_fixture_optout exists (DND-775); any other value is a declaration
+# error, refused rather than silently run in the plain env.
+def check_env(pin_env, opt)
+  return pin_env if opt.nil?
+  return pin_env.merge(stash_fixture_optout_env) if opt == :stash_fixture_optout
+
+  raise ArgumentError, "harness-gate: unknown check option #{opt.inspect}. " \
+        "Fix: a CHECKS entry's third element is nil or :stash_fixture_optout."
+end
+
 # Runs units on `jobs` threads, longest-first by `durations` (unknown first).
 # Yields each finished check as [label, argv, ok, out, wall_s].
 def run_pool(units, jobs:, durations:, chdir:, env:)
@@ -877,9 +892,9 @@ def run_pool(units, jobs:, durations:, chdir:, env:)
   Array.new([jobs, 1].max) do
     Thread.new do
       while (unit = queue.pop) != :done
-        unit.each do |(label, argv)|
+        unit.each do |(label, argv, opt)|
           t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          ok, out = run_one(argv, chdir: chdir, env: env)
+          ok, out = run_one(argv, chdir: chdir, env: check_env(env, opt))
           wall = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
           lock.synchronize { yield [label, argv, ok, out, wall] }
         end
@@ -897,6 +912,8 @@ end
 # output stays stable and diffable. root/chdir exist for --self-test case 12b:
 # a fixture repo drives this exact loop. Returns [pin_env, failures], failures
 # being [label, argv, output] per failed check, in declared order.
+# An entry's optional third element names an environment adjustment
+# (check_env); the only one is :stash_fixture_optout.
 def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: gate_jobs,
                timings: timings_path)
   dups = checks.map(&:first).tally.select { |_, n| n > 1 }.keys
@@ -908,9 +925,9 @@ def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: g
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   results = {}
   run_serial = lambda do |list|
-    list.each do |(label, argv)|
+    list.each do |(label, argv, opt)|
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      ok, out = run_one(argv, chdir: chdir, env: pin_env)
+      ok, out = run_one(argv, chdir: chdir, env: check_env(pin_env, opt))
       results[label] = [argv, ok, out, Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0]
     end
   end
@@ -940,6 +957,33 @@ def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: g
       "ok" => ok, "jobs" => jobs }
   end)
   [pin_env, failures]
+end
+
+# STASH FIXTURE OPT-OUT (DND-775). Agent sessions carry the agent-stash
+# reference-transaction hook (GIT_CONFIG_COUNT/KEY_n/VALUE_n + GIT_TRACE2) and
+# the PATH git wrapper (ATHENA_AGENT_BIN, prepended by dotfiles/.zshrc). Both
+# refuse every stash-list write. The legacy git-stash-guard suite seeds its
+# fixture repos (under mktemp -d, never a real repo) with real stash entries,
+# so in an activated session it would be refused before it tests anything.
+# This environment drops both layers for that one suite: GIT_CONFIG_COUNT and
+# GIT_TRACE2 unset (the GIT_CONFIG_KEY_n/VALUE_n left behind are inert without
+# a count), and every PATH entry whose `git` is the wrapper removed. It is the
+# opt-out the gh-athena and glab-athena suites take in their own sandboxes
+# (DND-775 condition b). It adds no way to write a real stash list: an agent
+# can already unset its own environment (the documented residual).
+AGENT_GIT_WRAPPER_MARK = "git (agent wrapper)"
+
+def stash_fixture_optout_env(path = ENV.fetch("PATH", ""), agent_bin = ENV["ATHENA_AGENT_BIN"])
+  keep = path.split(":").reject do |d|
+    next true if agent_bin && !agent_bin.empty? && File.expand_path(d) == File.expand_path(agent_bin)
+
+    g = File.join(d, "git")
+    File.file?(g) && File.read(g, 4096).to_s.include?(AGENT_GIT_WRAPPER_MARK)
+  rescue SystemCallError
+    false
+  end
+  { "GIT_CONFIG_COUNT" => nil, "GIT_TRACE2" => nil, "ATHENA_AGENT_BIN" => nil,
+    "ATHENA_AGENT_GIT_SEEN" => nil, "PATH" => keep.join(":") }
 end
 
 def missing_executables
@@ -1786,6 +1830,34 @@ def run_self_test
     end
   end
 
+  # 8b. stash_fixture_optout_env (DND-775) drops exactly the agent-stash layers:
+  #     the injection's count and trace2, and every PATH entry whose `git` is
+  #     the agent wrapper (by ATHENA_AGENT_BIN or by the wrapper's own text),
+  #     keeping every other entry in order. And only the one declared suite
+  #     gets it.
+  Dir.mktmpdir("harness-gate-optout") do |dir|
+    named   = File.join(dir, "agent-bin")
+    unnamed = File.join(dir, "copy")
+    plain   = File.join(dir, "plain")
+    [named, unnamed, plain].each { |d| FileUtils.mkdir_p(d) }
+    File.write(File.join(unnamed, "git"), "#!/bin/sh\n# git (agent wrapper) copy\n")
+    File.write(File.join(plain, "git"), "#!/bin/sh\nexec /usr/bin/git \"$@\"\n")
+    env = stash_fixture_optout_env([named, "/usr/bin", unnamed, plain, "/bin"].join(":"), named)
+    want = { "GIT_CONFIG_COUNT" => nil, "GIT_TRACE2" => nil, "ATHENA_AGENT_BIN" => nil,
+             "ATHENA_AGENT_GIT_SEEN" => nil, "PATH" => ["/usr/bin", plain, "/bin"].join(":") }
+    unless env == want
+      warn "self-test: FAIL — stash_fixture_optout_env gave #{env.inspect}, want #{want.inspect}"; ok = false
+    end
+  end
+  optouts = CHECKS.select { |c| c[2] == :stash_fixture_optout }.map { |c| c[1].first }
+  unless optouts == %w[ai/hooks/git-stash-guard.self-test.sh]
+    warn "self-test: FAIL — the stash fixture opt-out must apply to the legacy git-stash-guard " \
+         "suite alone; it applies to #{optouts.inspect}. Fix: a suite that needs real stash " \
+         "entries seeds them with the injection unset inside its own sandbox (see " \
+         "ai/test/agent-stash-guard/self-test.sh), it does not get a gate-wide opt-out."
+    ok = false
+  end
+
   # 9. The failure report NAMES the failing case even when a chatty suite has
   #    pushed it far beyond the tail. This is the whole point of failure_lines:
   #    a tail-only report of a 119-case suite shows 20 passing cases and a
@@ -2172,6 +2244,43 @@ def run_self_test
     ok = false
   rescue ArgumentError
     nil
+  end
+
+  # 13c. A CHECKS entry's third element (DND-775's :stash_fixture_optout) is
+  #     applied on every path the loop schedules a check on: the pre-pool
+  #     serial run and the worker pool. The pool's units carry whole entries,
+  #     so a runner that destructures only [label, argv] would silently run the
+  #     legacy stash suite with the guard injected. An unknown option is
+  #     refused, never run in the plain env.
+  Dir.mktmpdir("harness-gate-opt") do |dir|
+    mk = lambda do |name|
+      path = File.join(dir, "#{name}.sh")
+      File.write(path, "#!/bin/sh\necho \"${GIT_CONFIG_COUNT-unset}\" > #{dir.shellescape}/#{name}.saw\n")
+      FileUtils.chmod(0o755, path)
+      [path]
+    end
+    fixture = [
+      ["check-inotify-headroom", mk.call("pre"), :stash_fixture_optout],
+      ["pooled-optout", mk.call("pooled"), :stash_fixture_optout],
+      ["pooled-plain", mk.call("plain")],
+    ]
+    with_env("GIT_CONFIG_COUNT" => "0") do
+      run_checks(fixture, root: dir, chdir: dir, io: StringIO.new, jobs: 2, timings: File::NULL)
+    end
+    saw = %w[pre pooled plain].to_h { |n| [n, File.read(File.join(dir, "#{n}.saw")).strip] rescue [n, "missing"] }
+    unless saw == { "pre" => "unset", "pooled" => "unset", "plain" => "0" }
+      warn "self-test: FAIL — case 13c: the per-check env option was not applied on every scheduling " \
+           "path (GIT_CONFIG_COUNT seen: #{saw.inspect}; want pre/pooled unset, plain 0). Fix: every " \
+           "runner in run_checks passes the entry's third element through check_env."
+      ok = false
+    end
+    begin
+      check_env({}, :no_such_option)
+      warn "self-test: FAIL — case 13c: check_env accepted an unknown option"
+      ok = false
+    rescue ArgumentError
+      nil
+    end
   end
 
   # 14. HARNESS_GATE_JOBS: a positive integer, or the default; anything else

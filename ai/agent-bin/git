@@ -1,0 +1,328 @@
+#!/bin/sh
+# git (agent wrapper) — the courtesy early-deny layer in front of git for agent
+# sessions (DND-775). It refuses stash-list writes BEFORE git runs.
+#
+# WHERE IT RUNS. ai/agent-bin/ goes first on PATH only in agent sessions:
+# settings `env` sets ATHENA_AGENT_BIN (merged by scripts/setup-hooks --install-env, the owner's activation step),
+# and the last line of dotfiles/.zshrc prepends it when the wrapper is
+# executable. The owner's terminal never sets ATHENA_AGENT_BIN. This directory
+# holds ONLY this file: anything else here would shadow a real command.
+#
+# WHY A WRAPPER, AND WHY THIS IS NOT THE ENFORCEMENT. The enforcement is the
+# reference-transaction hook ai/git-hooks/agent-stash-guard.sh, which runs
+# inside git. The hook cannot help in two places, and this wrapper covers them:
+#   - pop/apply: the hook refuses them only after git has written the entry's
+#     changes into the agent's worktree. This refuses them before git runs.
+#   - drop (with more than one entry), drop stash@{n}, reflog delete|expire:
+#     git rewrites the reflog with no ref transaction, so the hook never sees
+#     them. This wrapper is the only layer for them.
+# It sees argv AFTER the shell expanded it, so no quoted payload, heredoc, jq,
+# awk, grep or commit message is ever read as a command. It never runs for a
+# command that does not exec git.
+#
+# HOW IT DECIDES (on argv only; it parses no shell text):
+#   1. Real git: the first `git` on PATH that is not this wrapper (`test -ef`,
+#      so a symlinked or re-spelled directory still matches). Wrappers already
+#      passed through are carried in ATHENA_AGENT_GIT_SEEN, so two copies of
+#      the wrapper on PATH never exec each other in a loop. None left: exit 127
+#      with a Fix:.
+#   2. git's global options are parsed by git's own grammar (-C, -c,
+#      --config-env, --git-dir, --work-tree, --namespace, -p/-P/--no-pager, ...).
+#      An option it does not know passes through for git to judge.
+#   3. Aliases are resolved by ASKING git: `<real git> <same global options>
+#      config --get alias.<name>`, in the same cwd and env git will use, so -c
+#      alias.*, --config-env, GIT_CONFIG_* and include files all count. Chains
+#      are followed to depth 10 with loop detection. A builtin name never looks
+#      one up (git ignores an alias that shadows a builtin). rc 1 means not an
+#      alias; any other failure prints `could not resolve alias ... not checked`
+#      and passes through (DND-802: a failed read never reads as an empty one).
+#      A `!` alias is refused only when its body names stash.
+#   4. Refused (exit 1, one stderr line ending in a Fix:):
+#      D1 stash with no verb, an option first, or any verb but list/show/create
+#         (-h/--help alone are allowed);
+#      D2 reflog delete|expire|drop naming stash, stash@{n}, refs/stash* or --all;
+#      D3 update-ref naming refs/stash or stash (--stdin is left to the hook);
+#      D4 symbolic-ref naming refs/stash or stash;
+#      D5 tamper: a -c/--config-env key, or a GIT_CONFIG_PARAMETERS entry, for
+#         hook.agentstash.* or hook.reference-transaction.*; or a GIT_CONFIG_KEY_n
+#         that disables either or names one of them twice.
+#   5. Everything else: exec the real git with argv unchanged.
+#
+# RESIDUAL (accepted by the owner, Q2, 2026-09-27). Bypassed by: absolute-path
+# git (/usr/bin/git), `command -p git`, `env PATH=... git`, the inner git of a
+# `!` alias (git prepends its exec-path to the child's PATH), a non-git library,
+# a typo resolved by help.autocorrect. For push/pop/apply/store/clear and
+# update-ref the hook still refuses all of these. For drop and reflog
+# delete|expire nothing does: the entry stays a dangling commit until
+# gc.pruneExpire (default two weeks), recoverable by the owner.
+#
+# DISABLE (owner only): ~/dev/custom/scripts/setup-hooks --remove-env, then
+# restart sessions. That removes ATHENA_AGENT_BIN, so the .zshrc line no longer
+# prepends this directory.
+
+# COST. The common path (a builtin subcommand, no alias) forks nothing before it
+# execs git: identity is `test -ef`, quoting and case-folding are parameter
+# expansion and glob patterns. Only a non-builtin subcommand pays for one
+# `git config --get` (and an awk split when it is an alias).
+
+set -f
+
+self=$0
+
+FIX_STASH="Fix: agent sessions never write the stash list (every worktree shares ONE list with the owner's main checkout). To park WIP, commit it on your worktree branch (git add -A && git commit -m \"WIP: <what>\"); for a clean tree, git worktree add <path> -b <scratch-branch>. Read-only stash list/show/create stay allowed."
+TAMPER_HINT="Fix: the agent-stash guard's hook config (hook.agentstash.*, hook.reference-transaction.*) is not an agent's to change; drop that option. If the guard is wrong, report it to your admiral; only the owner disables it."
+
+refuse() {
+  printf 'git (agent wrapper): REFUSED %s. %s\n' "$1" "$2" >&2
+  exit 1
+}
+
+# ---- 1. the real git --------------------------------------------------------
+# is_wrapper <path>: the path is this wrapper, or a wrapper already passed
+# through (ATHENA_AGENT_GIT_SEEN, colon-separated paths).
+is_wrapper() {
+  [ "$1" -ef "$self" ] && return 0
+  _ifs=$IFS
+  IFS=:
+  for _w in ${ATHENA_AGENT_GIT_SEEN:-}; do
+    if [ -n "$_w" ] && [ "$1" -ef "$_w" ]; then IFS=$_ifs; return 0; fi
+  done
+  IFS=$_ifs
+  return 1
+}
+
+real=
+old_ifs=$IFS
+IFS=:
+for d in $PATH; do
+  [ -n "$d" ] || d=.
+  [ -f "$d/git" ] && [ -x "$d/git" ] || continue
+  is_wrapper "$d/git" && continue
+  real="$d/git"
+  break
+done
+IFS=$old_ifs
+if [ -z "$real" ]; then
+  printf 'git (agent wrapper): no real git on PATH after skipping the wrapper %s (PATH=%s). Fix: put the directory holding the real git (usually /usr/bin) on PATH after the wrapper directory.\n' \
+    "$self" "$PATH" >&2
+  exit 127
+fi
+ATHENA_AGENT_GIT_SEEN="${ATHENA_AGENT_GIT_SEEN:+$ATHENA_AGENT_GIT_SEEN:}$self"
+export ATHENA_AGENT_GIT_SEEN
+
+# ---- helpers ----------------------------------------------------------------
+# sq <word>: sets SQ to the word single-quoted for eval. No fork.
+sq() {
+  _s=$1
+  SQ=
+  while :; do
+    case "$_s" in
+      *\'*) SQ="$SQ${_s%%\'*}'\\''"; _s=${_s#*\'} ;;
+      *) break ;;
+    esac
+  done
+  SQ="'$SQ$_s'"
+}
+
+# The hook's config keys. The section and variable name are case-insensitive
+# in git; the subsection (agentstash, reference-transaction) is not.
+is_hook_key() {
+  case "$1" in
+    [hH][oO][oO][kK].agentstash.* | [hH][oO][oO][kK].reference-transaction.*) return 0 ;;
+  esac
+  return 1
+}
+
+# check_tamper_key <config key>: D5 on one -c / --config-env key.
+check_tamper_key() {
+  is_hook_key "$1" && refuse "a config override of the agent-stash hook ($1)" "$TAMPER_HINT"
+  return 0
+}
+
+# D5 on the environment config channels. The installer writes exactly these
+# four keys, once each, with these spellings; any other hook.agentstash.* or
+# hook.reference-transaction.* entry, a second copy, or an .enabled that is not
+# `true` is tamper.
+check_env_tamper() {
+  case "${GIT_CONFIG_PARAMETERS:-}" in
+    *[hH][oO][oO][kK].agentstash.* | *[hH][oO][oO][kK].reference-transaction.*)
+      refuse "GIT_CONFIG_PARAMETERS overriding the agent-stash hook" "$TAMPER_HINT" ;;
+  esac
+  _n=${GIT_CONFIG_COUNT:-0}
+  case "$_n" in '' | *[!0-9]*) return 0 ;; esac
+  _i=0
+  _seen=" "
+  while [ "$_i" -lt "$_n" ]; do
+    eval "_k=\${GIT_CONFIG_KEY_$_i:-}; _v=\${GIT_CONFIG_VALUE_$_i:-}"
+    if is_hook_key "$_k"; then
+      case "$_k" in
+        hook.agentstash.event | hook.agentstash.command) ;;
+        hook.agentstash.enabled | hook.reference-transaction.enabled)
+          [ "$_v" = true ] || refuse "GIT_CONFIG_KEY_$_i disabling the agent-stash hook ($_k=$_v)" "$TAMPER_HINT" ;;
+        *) refuse "GIT_CONFIG_KEY_$_i overriding the agent-stash hook ($_k)" "$TAMPER_HINT" ;;
+      esac
+      case "$_seen" in *" $_k "*)
+        refuse "GIT_CONFIG_KEY_$_i setting $_k a second time" "$TAMPER_HINT" ;;
+      esac
+      _seen="$_seen$_k "
+    fi
+    _i=$((_i + 1))
+  done
+}
+
+# split_alias <value>: print git's split of an alias value, one word per line
+# (single quotes, double quotes and backslash, as git's split_cmdline).
+split_alias() {
+  printf '%s' "$1" | awk '
+    BEGIN { RS = "\001" }
+    {
+      s = $0; w = ""; have = 0; q = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q == "") {
+          if (c == " " || c == "\t" || c == "\n") { if (have) print w; w = ""; have = 0; continue }
+          if (c == "\047" || c == "\"") { q = c; have = 1; continue }
+          if (c == "\\") { i++; w = w substr(s, i, 1); have = 1; continue }
+          w = w c; have = 1
+        } else if (c == q) { q = "" }
+        else if (c == "\\" && q == "\"") { i++; w = w substr(s, i, 1) }
+        else { w = w c }
+      }
+      if (have) print w
+    }'
+}
+
+# is_builtin <name>: git never resolves an alias that shadows a builtin.
+is_builtin() {
+  case "$1" in
+    add | am | annotate | apply | archive | bisect | blame | branch | bugreport | bundle | \
+    cat-file | check-attr | check-ignore | check-mailmap | check-ref-format | checkout | \
+    checkout-index | cherry | cherry-pick | clean | clone | column | commit | commit-graph | \
+    commit-tree | config | count-objects | credential | describe | diagnose | diff | diff-files | \
+    diff-index | diff-tree | difftool | fast-export | fast-import | fetch | fetch-pack | \
+    fmt-merge-msg | for-each-ref | for-each-repo | format-patch | fsck | gc | get-tar-commit-id | \
+    grep | hash-object | help | hook | index-pack | init | interpret-trailers | log | ls-files | \
+    ls-remote | ls-tree | mailinfo | mailsplit | maintenance | merge | merge-base | merge-file | \
+    merge-index | merge-tree | mktag | mktree | multi-pack-index | mv | name-rev | notes | \
+    pack-objects | pack-redundant | pack-refs | patch-id | prune | prune-packed | pull | push | \
+    range-diff | read-tree | rebase | receive-pack | reflog | refs | remote | repack | replace | \
+    replay | rerere | reset | restore | rev-list | rev-parse | revert | rm | send-pack | shortlog | \
+    show | show-branch | show-index | show-ref | sparse-checkout | stash | status | stripspace | \
+    submodule | switch | symbolic-ref | tag | unpack-file | unpack-objects | update-index | \
+    update-ref | update-server-info | upload-archive | upload-pack | var | verify-commit | \
+    verify-pack | verify-tag | version | whatchanged | worktree | write-tree) return 0 ;;
+  esac
+  return 1
+}
+
+names_stash_ref() {
+  case "$1" in
+    stash | refs/stash | stash@\{*\} | refs/stash@\{*\}) return 0 ;;
+  esac
+  return 1
+}
+
+# ---- 2-4. parse, resolve, decide --------------------------------------------
+check_env_tamper
+
+# orig: argv, eval-able. words: the words still to judge; replaced by an alias's
+# expansion plus the remaining words. globals: every global option seen, which
+# every alias lookup repeats.
+orig=
+for a in "$@"; do sq "$a"; orig="$orig $SQ"; done
+words=$orig
+globals=
+sub=
+depth=0
+aliases_seen=" "
+
+while :; do
+  eval "set -- $words"
+  # Global options, git's grammar (git.c handle_options).
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -C | --git-dir | --work-tree | --namespace | --super-prefix | --attr-source | -c | --config-env)
+        [ $# -ge 2 ] || break
+        case "$1" in -c | --config-env) check_tamper_key "${2%%=*}" ;; esac
+        sq "$1"; globals="$globals $SQ"; sq "$2"; globals="$globals $SQ"; shift 2 ;;
+      --config-env=*)
+        _v=${1#--config-env=}
+        check_tamper_key "${_v%%=*}"
+        sq "$1"; globals="$globals $SQ"; shift ;;
+      --git-dir=* | --work-tree=* | --namespace=* | --super-prefix=* | --exec-path=* | \
+      --list-cmds=* | --attr-source=* | \
+      -p | -P | --paginate | --no-pager | --bare | --no-replace-objects | --no-lazy-fetch | \
+      --literal-pathspecs | --glob-pathspecs | --noglob-pathspecs | --icase-pathspecs | \
+      --no-optional-locks | --no-advice)
+        sq "$1"; globals="$globals $SQ"; shift ;;
+      *) break ;;
+    esac
+  done
+  if [ $# -eq 0 ]; then sub=; break; fi
+  case "$1" in -*) sub=; break ;; esac   # --version, --help, --exec-path, unknown: git decides
+  sub=$1
+  shift
+  is_builtin "$sub" && break
+  depth=$((depth + 1))
+  if [ "$depth" -gt 10 ]; then
+    printf 'git (agent wrapper): alias chain for %s is deeper than 10; not checked\n' "$sub" >&2
+    sub=
+    break
+  fi
+  case "$aliases_seen" in *" $sub "*) sub=; break ;; esac
+  aliases_seen="$aliases_seen$sub "
+  value=$(eval "\"\$real\" $globals config --get \"alias.\$sub\"" 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 1 ] && break
+  if [ "$rc" -ne 0 ]; then
+    printf 'git (agent wrapper): could not resolve alias %s (rc=%s); not checked\n' "$sub" "$rc" >&2
+    sub=
+    break
+  fi
+  case "$value" in
+    !*)
+      case "$value" in
+        *[sS][tT][aA][sS][hH]*) refuse "the shell alias $sub (!${value#!}), which names stash" "$FIX_STASH" ;;
+      esac
+      sub=
+      break ;;
+  esac
+  rest=
+  for a in "$@"; do sq "$a"; rest="$rest $SQ"; done
+  expanded=
+  IFS='
+'
+  for w in $(split_alias "$value"); do sq "$w"; expanded="$expanded $SQ"; done
+  IFS=$old_ifs
+  words="$expanded$rest"
+done
+
+# $sub is the resolved subcommand; "$@" holds its arguments.
+case "$sub" in
+  stash)
+    case "${1:-}" in
+      list | show | create) ;;
+      -h | --help) [ $# -eq 1 ] || refuse "git stash $*" "$FIX_STASH" ;;
+      '') refuse "git stash (a bare stash is a push)" "$FIX_STASH" ;;
+      pop | apply) refuse "git stash $* before it runs (it would write the entry's changes into this worktree)" "$FIX_STASH" ;;
+      *) refuse "git stash $*" "$FIX_STASH" ;;
+    esac ;;
+  reflog)
+    case "${1:-}" in
+      delete | expire | drop)
+        verb=$1
+        for a in "$@"; do
+          if [ "$a" = --all ] || names_stash_ref "$a"; then
+            refuse "git reflog $verb on $a (it rewrites the stash list with no ref transaction)" "$FIX_STASH"
+          fi
+        done ;;
+    esac ;;
+  update-ref | symbolic-ref)
+    for a in "$@"; do
+      case "$a" in
+        stash | refs/stash) refuse "git $sub on $a" "$FIX_STASH" ;;
+      esac
+    done ;;
+esac
+
+eval "exec \"\$real\" $orig"

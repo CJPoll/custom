@@ -640,6 +640,22 @@ and pronoun-guard; nothing detected it. The durable fix:
   path with no script behind it, and every Bash call failed with exit 127 until
   the branch landed. The bar is now what landed on origin, and wiring waits for
   the landing.
+- **The agent-stash env (DND-775):** `registry.json` also has an `env` section:
+  the GIT_CONFIG_* pairs that register the git reference-transaction hook
+  `ai/git-hooks/agent-stash-guard.sh`, `GIT_TRACE2=/dev/null`, and
+  `ATHENA_AGENT_BIN` (the agent PATH git wrapper `ai/agent-bin/git`, prepended
+  by the last line of `dotfiles/.zshrc`). Plain `--install` never touches it:
+  that is the routine drift fix agents run. `scripts/setup-hooks --install-env`
+  merges it and is the OWNER's activation step; `--remove-env` removes exactly
+  it (the one-command disable). Restart sessions after either. Like a hook,
+  it is installed only after it lands. The expected values are read from the
+  registry AS LANDED, like the hooks' bar.
+  `check-hooks-registered` prints its own agent-stash line: INACTIVE (exit 0),
+  ACTIVE (exit 0, runtime asserted), DRIFT/FAIL (exit 1), or COULD NOT
+  MEASURE (exit 3: guard keys present but the landed env cannot be read).
+  INACTIVE is a fixed rule on the settings (no `hook.agentstash.*` /
+  `hook.reference-transaction.*` GIT_CONFIG key and no `ATHENA_AGENT_BIN`),
+  never read from a branch's registry.
 
 ## Inbox tenancy registry (`$ATHENA_INBOX_ROOT/projects/` is not in git)
 

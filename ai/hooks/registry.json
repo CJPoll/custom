@@ -1,5 +1,5 @@
 {
-  "_meta": "Source of truth for which ai/hooks/*.sh are registered in ~/.claude/settings.json, and on which event/matcher. `ai/bin/check-hooks-registered` asserts these are live (drift is the bug that silently disabled safe-wait-guard + pronoun-guard on 2026-09-17); `scripts/setup-hooks --install` writes them by MERGING (never clobbering the existing block — the clobber is what caused the outage). Paths are repo-relative and expanded to absolute against this repo's location. Matchers are Claude Code tool-name regexes; \"\" matches all (used for non-tool events).",
+  "_meta": "Source of truth for which ai/hooks/*.sh are registered in ~/.claude/settings.json, and on which event/matcher. `ai/bin/check-hooks-registered` asserts these are live (drift is the bug that silently disabled safe-wait-guard + pronoun-guard on 2026-09-17); `scripts/setup-hooks --install` writes them by MERGING (hooks only; the `env` section below is merged only by `--install-env`) (never clobbering the existing block — the clobber is what caused the outage). Paths are repo-relative and expanded to absolute against this repo's location. Matchers are Claude Code tool-name regexes; \"\" matches all (used for non-tool events).",
   "hooks": [
     { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/safe-wait-guard.sh" },
     { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/forge-identity-guard.sh" },
@@ -25,5 +25,30 @@
     { "event": "SessionStart", "matcher": "", "script": "ai/hooks/flaky-marker-sweep.sh" },
     { "event": "SessionStart", "matcher": "", "script": "ai/hooks/fleet-report.sh" },
     { "event": "SessionEnd", "matcher": "", "script": "ai/hooks/fleet-report.sh" }
-  ]
+  ],
+  "env": {
+    "_meta": "DND-775. Environment the Claude Code settings `env` carries for agent sessions. `scripts/setup-hooks --install-env` merges it: the OWNER's activation step, never plain `--install`, which is the routine hook-drift fix agents run (git_config pairs APPENDED after any GIT_CONFIG_* the settings already hold, never overwriting them); `scripts/setup-hooks --remove-env` removes exactly these keys (the one-command disable). `ai/bin/check-hooks-registered` reports it ACTIVE, INACTIVE (none present, exit 0) or DRIFT (partial or differing, exit 1). {{MAIN}} expands to the MAIN checkout's absolute path, never a worktree's. git_config: the reference-transaction hook ai/git-hooks/agent-stash-guard.sh as a config-based hook; its command is an inline sh snippet that fails closed with a Fix: when the script is missing. vars: GIT_TRACE2=/dev/null makes git hand the hook GIT_TRACE2_PARENT_NAME (rule R2); ATHENA_AGENT_BIN names the PATH git wrapper, which the last line of dotfiles/.zshrc prepends to PATH.",
+    "git_config": [
+      {
+        "key": "hook.agentstash.event",
+        "value": "reference-transaction"
+      },
+      {
+        "key": "hook.agentstash.command",
+        "value": "h='{{MAIN}}/ai/git-hooks/agent-stash-guard.sh'; [ -x \"$h\" ] || { echo \"agent-stash-guard: hook script missing or not executable: $h. Every ref update in this agent session is refused until it is back (fail closed). Fix: restore it with git -C '{{MAIN}}' checkout -- ai/git-hooks/agent-stash-guard.sh; if it cannot be restored, the owner disables the guard with {{MAIN}}/scripts/setup-hooks --remove-env, then restarts sessions.\" >&2; exit 1; }; exec \"$h\" \"$@\""
+      },
+      {
+        "key": "hook.agentstash.enabled",
+        "value": "true"
+      },
+      {
+        "key": "hook.reference-transaction.enabled",
+        "value": "true"
+      }
+    ],
+    "vars": {
+      "GIT_TRACE2": "/dev/null",
+      "ATHENA_AGENT_BIN": "{{MAIN}}/ai/agent-bin"
+    }
+  }
 }

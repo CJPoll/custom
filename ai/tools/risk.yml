@@ -70,6 +70,9 @@ tools:
   next-mission:            { class: readOnly, reason: query }
   push-actor-check:        { class: readOnly, reason: query }
   ready-and-idle:          { class: readOnly, reason: analysis }
+  # DND-775: git runs it as a reference-transaction hook; it reads the queued
+  # updates on stdin and refuses (never writes) a stash-list change.
+  git-hooks/agent-stash-guard.sh: { class: readOnly, reason: refuse }
 
   # --- idempotent: deterministic local mutation (writes an in-repo artifact;
   #     re-running yields the same result; no external/irreversible effect) ---
@@ -191,3 +194,6 @@ tools:
   # a judgment_calls row (and, with a key, spends TypeSafe budget). External
   # state, so destructive, like judgment-eval.
   skills/athena:ticket-management/scripts/finding-triage: { class: destructive, reason: judgments }
+  # DND-775: the agent PATH git wrapper. It refuses stash-list writes, then
+  # execs the real git with argv unchanged, so it can do anything git can.
+  agent-bin/git: { class: destructive, reason: git }
