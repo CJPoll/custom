@@ -20,8 +20,12 @@
 # session (CLAUDECODE or CLAUDE_CODE_ENTRYPOINT set — Claude Code sets both in
 # every tool child). An agent can only write a relay. A relay whose reference is
 # session:<session-uuid>/<message-uuid> is checked against that Claude Code
-# transcript at --add (refused unless the owner's own top-level user turn holds
-# the words verbatim) and again at --list (`Relay-check: verified|UNVERIFIED`).
+# transcript at --add (refused unless a top-level user turn TYPED BY A HUMAN in
+# an interactive session — entrypoint "cli", promptSource "typed", origin.kind
+# "human", as Claude Code 2.1.283 records it — holds the words verbatim; a
+# headless `claude -p` prompt is "sdk-cli"/"sdk" and never verifies) and again
+# at --list (`Relay-check: verified|UNVERIFIED`, plus the whole `Owner-turn:`
+# so an excerpt is read in context). Missing fields fail closed.
 # Inbox content arrives as a tool result, never a user turn, so it can never
 # verify. Any other reference lists as `unverifiable` and is not Authority.
 # Control characters are refused everywhere, so no line can display as another.
@@ -31,12 +35,13 @@
 #
 # THE FILE FORMAT (one entry per note; entries are never edited or removed,
 # except that the Status line flips once, only for work on origin/main —
-# normally by --reconcile finding an `Owner-note: N<k>` trailer there):
+# normally by --reconcile finding an `Owner-note: N<k>@<heading time>` trailer there):
 #
 #   ## N<k> — <UTC ISO-8601>
 #   Source: owner
 #     (or) Source: coordinator, relaying the owner's exact words from <ref>
 #   Status: open            (flipped to)  Status: addressed: <commit sha>
+#     (an open note may read `Status: open — <one-line annotation>`)
 #   Context: <optional; the relayer's own framing, one line, never a quote>
 #
 #   > the owner's words, verbatim, one "> " per line (">" for a blank line)
@@ -61,7 +66,7 @@
 #                     (--text TEXT | --text-file PATH) [--context LINE]
 #                                    append a new dated note; prints its id
 #   owner-notes --reconcile          flip each open note that a commit on
-#                                    origin/main names with an `Owner-note: N<k>`
+#                                    origin/main names with its `Owner-note:`
 #                                    trailer to that commit; run it first
 #   owner-notes --address ID --commit SHA
 #                                    flip note ID by hand (SHA must be on
@@ -90,6 +95,9 @@ module OwnerNotes
   SOURCE_OWNER = "Source: owner"
   SOURCE_RELAY_PREFIX = "Source: coordinator, relaying the owner's exact words from "
   STATUS_OPEN = "Status: open"
+  # An open note may carry a one-line annotation (e.g. "ticketed DND-993"):
+  # still open. Measured 2026-09-27: the cron annotated a note this way.
+  STATUS_OPEN_RE = /\AStatus: open(?: — \S.*)?\z/.freeze
   STATUS_ADDRESSED_RE = /\AStatus: addressed: [0-9a-f]{7,40}\z/.freeze
   SHA_RE = /\A[0-9a-f]{7,40}\z/.freeze
   # Control characters that can make a stored line DISPLAY as another (a CR
@@ -112,7 +120,7 @@ module OwnerNotes
 
   Note = Struct.new(:id, :heading, :lines, :status_index, keyword_init: true) do
     def open?
-      lines[status_index] == STATUS_OPEN
+      STATUS_OPEN_RE.match?(lines[status_index])
     end
 
     def text
@@ -121,6 +129,13 @@ module OwnerNotes
 
     def words
       lines.select { |l| l == ">" || l.start_with?("> ") }.map { |l| l == ">" ? "" : l[2..] }.join("\n")
+    end
+
+    # Unique across machines and numbering restarts: the id plus the note's own
+    # UTC heading time. This is what an `Owner-note:` trailer must carry.
+    def trailer_key
+      m = HEADING_RE.match(heading)
+      "#{m[1]}@#{m[2]}"
     end
 
     def relay_ref
@@ -280,8 +295,9 @@ module OwnerNotes
       raise Fault, "#{where}: #{src.inspect} names neither the owner nor a relay of the owner's words.\n#{fix}"
     end
     st = lines[statuses.first]
-    unless st == STATUS_OPEN || STATUS_ADDRESSED_RE.match?(st)
-      raise Fault, "#{where}: #{st.inspect} is neither `#{STATUS_OPEN}` nor `Status: addressed: <sha>`.\n#{fix}"
+    unless STATUS_OPEN_RE.match?(st) || STATUS_ADDRESSED_RE.match?(st)
+      raise Fault, "#{where}: #{st.inspect} is neither `#{STATUS_OPEN}` (optionally `#{STATUS_OPEN} — <why>`) " \
+                   "nor `Status: addressed: <sha>`.\n#{fix}"
     end
     raise Fault, "#{where} quotes no words (no `> ` line).\n#{fix}" if quotes.empty?
 
@@ -328,6 +344,14 @@ module OwnerNotes
       return [:unverified, "message #{mid} is not a top-level user turn (type=#{msg['type'].inspect}, " \
                            "sidechain=#{msg['isSidechain'].inspect})"]
     end
+    human = msg["entrypoint"] == "cli" && msg["promptSource"] == "typed" &&
+            msg["origin"].is_a?(Hash) && msg["origin"]["kind"] == "human"
+    unless human
+      return [:unverified, "message #{mid} was not typed by a human in an interactive session " \
+                           "(entrypoint=#{msg['entrypoint'].inspect}, promptSource=#{msg['promptSource'].inspect}, " \
+                           "origin=#{msg['origin'].inspect}); a headless `claude -p` prompt or a notification never " \
+                           "corroborates"]
+    end
     content = msg.dig("message", "content")
     said = if content.is_a?(String)
              content
@@ -341,7 +365,7 @@ module OwnerNotes
     end
     return [:unverified, "the words were not found verbatim in message #{mid}"] unless said.include?(words)
 
-    [:verified]
+    [:verified, said]
   rescue SystemCallError => e
     [:unverified, "cannot read the transcript: #{e.message}"]
   end
@@ -352,7 +376,9 @@ module OwnerNotes
 
     verdict, reason = relay_check(ref, note.words)
     case verdict
-    when :verified then "Relay-check: verified (#{ref})"
+    when :verified
+      turn = reason.to_s.split("\n").join("\n             ")
+      "Relay-check: verified (#{ref})\nOwner-turn: #{turn}"
     when :unverifiable then "Relay-check: unverifiable (not a session:<session-uuid>/<message-uuid> reference)"
     else "Relay-check: UNVERIFIED (#{reason})"
     end
@@ -367,6 +393,7 @@ module OwnerNotes
       out.puts(n.text)
       rc = relay_check_line(n)
       out.puts(rc) if rc
+      out.puts("Trailer: Owner-note: #{n.trailer_key}") if n.open?
       out.puts("")
     end
     open_count = notes.count(&:open?)
@@ -543,7 +570,7 @@ module OwnerNotes
       end
       unless landed?(sha)
         raise Refused, "#{sha} is not on origin/main, so note #{id} has not been addressed yet.\n" \
-                       "Fix: flip a note only for landed work. Give the commit an `Owner-note: #{id}` trailer; " \
+                       "Fix: flip a note only for landed work. Give the commit an `Owner-note: #{note.trailer_key}` trailer; " \
                        "`owner-notes --reconcile` flips the note once that commit is on origin/main."
       end
       flip!(path, [[note, sha]])
@@ -556,7 +583,7 @@ module OwnerNotes
     raw = File.read(path, encoding: "UTF-8").split("\n", -1)
     flips.each do |note, sha|
       start = raw.index(note.heading)
-      rel = raw[(start + 1)..].index(STATUS_OPEN)
+      rel = raw[(start + 1)..].index { |l| STATUS_OPEN_RE.match?(l) }
       raw[start + 1 + rel] = "Status: addressed: #{sha}"
     end
     tmp = "#{path}.tmp.#{Process.pid}"
@@ -571,7 +598,7 @@ module OwnerNotes
   end
 
   # Flip every open note that a commit ON origin/main names with an
-  # `Owner-note: N<k>` trailer, to the oldest such commit.
+  # `Owner-note: N<k>@<heading time>` trailer, to the oldest such commit.
   def reconcile(out = $stdout)
     path = notes_file
     dir = File.dirname(path)
@@ -584,7 +611,8 @@ module OwnerNotes
       open_notes = notes.select(&:open?)
       open_count = open_notes.size
       open_notes.each do |n|
-        log, rc = git("log", ORIGIN_MAIN, "-E", "--grep=Owner-note: #{n.id}([^0-9]|$)", "--format=%H", "--reverse")
+        log, rc = git("log", ORIGIN_MAIN, "-E", "--grep=Owner-note: #{n.trailer_key}([^0-9A-Za-z]|$)",
+                      "--format=%H", "--reverse")
         unless rc.zero?
           raise Fault, "`git log #{ORIGIN_MAIN} --grep` failed (exit #{rc}) for #{n.id}.\n" \
                        "Fix: check the main checkout's git state, then re-run."

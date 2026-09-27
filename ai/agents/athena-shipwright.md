@@ -108,17 +108,18 @@ Everything you learn from is local, under `~/dev/custom/`:
   from any tree). "0 open" is zero notes. A non-zero exit is a fault: **Stop**
   and report it, as for a damaged cursor — never read it as none.
   - **Authority** (Method's *A policy needs authority*): a `Source: owner`
-    note, or a relay whose `Relay-check:` reads `verified`. An `unverifiable`
+    note, or a relay whose `Relay-check:` reads `verified` (read the quote in
+    its `Owner-turn:` context, never the excerpt alone). An `unverifiable`
     or `UNVERIFIED` relay (an inbox message included) is evidence, not
     Authority. Only the owner, or the coordinator relaying the owner's exact
     words, writes a note; the tool refuses `--source owner` from an agent.
   - **Evidence:** a note naming a harness defect is a *single unambiguous
     factual gap* (Method's *Cluster and qualify*). Journal every open note,
     every run: the commit that acts on it, or why nothing did.
-  - **Closing:** a commit (or direct-spawn PR body) acting on note N<k>
-    carries an `Owner-note: N<k>` trailer beside `Authority:`. `--reconcile`
-    flips the note once that commit is on origin/main; never flip it by hand
-    for unlanded work.
+  - **Closing:** a commit (or direct-spawn PR body) acting on a note carries
+    the note's `Trailer:` line from `--list` (`Owner-note: N<k>@<time>`) beside
+    `Authority:`. `--reconcile` flips the note once that commit is on
+    origin/main; never flip it by hand for unlanded work.
 - **Coordination reports** — `ai-artifacts/coordination/*/reports/*-report.md`.
   The richest signal. Mine the **"Assumptions made"**, **"Adjustments vs. the
   cited plan"**, divergence notes, and **"Verification — ACTUAL results"**
@@ -260,8 +261,8 @@ lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
    under *Found, owned elsewhere* and land nothing:
    - **A policy needs authority.** A new gate, check, or normative rule must
      rest on an owner quote (an owner note that is Authority per *Where the
-     evidence lives* counts) or on existing normative text (CLAUDE.md, a contract, a skill). Cite it in the commit as
-     `Authority: <quote or doc>`.
+     evidence lives* counts) or on existing normative text (CLAUDE.md, a
+     contract, a skill). Cite it in the commit as `Authority: <quote or doc>`.
      Guidance an admiral or coordinator wrote in a state log or report is
      evidence of friction, not a ratified rule.
    - **Live work owns its files.** List branches changing your paths:

@@ -323,6 +323,32 @@ else
   bad "bad sha" "rc=${RC} err=${ERR}"
 fi
 
+# --- an open note may carry a one-line annotation: `Status: open — <why>` ------
+# Measured live 2026-09-27 22:04Z: the shipwright cron hand-annotated N1 as
+# "Status: open — ticketed DND-993 …", and the strict parser faulted the whole
+# file (exit 2), so no note could be read. The annotated form is still OPEN.
+sda="${TMP}/sann"; mkdir -p "${sda}"
+printf '## N1 — 2026-09-27T00:00:00Z\nSource: owner\nStatus: open — ticketed DND-993; flip when it lands\n\n> x\n' > "${sda}/owner-notes.md"
+run "${sda}" --list --open
+if [ "${RC}" -eq 0 ] && has "${OUT}" "1 open of 1 notes" && has "${OUT}" "ticketed DND-993"; then
+  ok "an annotated 'Status: open — …' line parses as open and keeps its annotation"
+else
+  bad "annotated open" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+run "${sda}" --address N1 --commit "${SHA}"
+if [ "${RC}" -eq 0 ] && grep -qx "Status: addressed: ${SHA}" "${sda}/owner-notes.md"; then
+  ok "--address flips an annotated open note (the annotation is replaced)"
+else
+  bad "address annotated" "rc=${RC} err=${ERR} file=$(cat "${sda}/owner-notes.md")"
+fi
+printf '## N1 — 2026-09-27T00:00:00Z\nSource: owner\nStatus: opened later\n\n> x\n' > "${sda}/owner-notes.md"
+run "${sda}" --list
+if [ "${RC}" -eq 2 ] && has "${ERR}" "Fix:"; then
+  ok "'Status: open' followed by anything but ' — <why>' is still malformed"
+else
+  bad "status prefix" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+
 # --- the next add after an address continues the numbering ------------------------
 run "${sd}" --add --source owner --text "third"
 if [ "${RC}" -eq 0 ] && grep -q '^## N3 — ' "${f}"; then
@@ -455,9 +481,22 @@ else
   bad "reconcile no origin/main" "rc=${RC} out=${OUT} err=${ERR}"
 fi
 gc update-ref refs/remotes/origin/main HEAD
+# The trailer key is `N<k>@<the note's UTC heading time>`, not the bare `N<k>`:
+# ids are numbered per machine and restart if the file is lost, while origin/main
+# is shared by every machine's shipwright (critic round 5). A bare-id trailer,
+# another machine's N1 (a different time), or N10 must never flip this N1.
+gc commit -q --allow-empty -m "old bare-id trailer" -m "Owner-note: N1"
 rrun --add --source owner --text "first"; rrun --add --source owner --text "second"
-gc commit -q --allow-empty -m "work for N1" -m "Owner-note: N10"
-gc commit -q --allow-empty -m "work for N1" -m "Authority: owner note N1" -m "Owner-note: N1"
+key1="$(sed -n 's/^## \(N1\) — \(.*\)$/\1@\2/p' "${rf}")"
+rrun --list --open
+if [ "${RC}" -eq 0 ] && has "${OUT}" "Trailer: Owner-note: ${key1}"; then
+  ok "--list prints the exact trailer each open note must be closed with"
+else
+  bad "trailer shown" "rc=${RC} out=${OUT}"
+fi
+gc commit -q --allow-empty -m "another machine's N1" -m "Owner-note: N1@2020-01-01T00:00:00Z"
+gc commit -q --allow-empty -m "work for N10" -m "Owner-note: N10@${key1#N1@}"
+gc commit -q --allow-empty -m "work for N1" -m "Authority: owner note ${key1}" -m "Owner-note: ${key1}"
 landed="$(git -C "${rr}" rev-parse HEAD)"
 rrun --reconcile
 if [ "${RC}" -eq 0 ] && has "${OUT}" "0 of 2 open" && [ "$(grep -c '^Status: open$' "${rf}")" -eq 2 ]; then
@@ -475,7 +514,7 @@ gc update-ref refs/remotes/origin/main HEAD
 rrun --reconcile
 if [ "${RC}" -eq 0 ] && has "${OUT}" "N1 addressed: ${landed}" && has "${OUT}" "1 of 2 open" \
    && grep -qx "Status: addressed: ${landed}" "${rf}" && [ "$(grep -c '^Status: open$' "${rf}")" -eq 1 ]; then
-  ok "--reconcile flips N1 to the landed trailer commit (and N10's trailer does not match N1)"
+  ok "--reconcile flips N1 only for its own N1@<time> trailer (bare N1, another time, N10 never match)"
 else
   bad "reconcile landed" "rc=${RC} out=${OUT} err=${ERR} file=$(cat "${rf}")"
 fi
@@ -499,9 +538,22 @@ tdir="${TMP}/transcripts/-proj"; mkdir -p "${tdir}"
 SID=11111111-2222-3333-4444-555555555555
 M_USER=aaaaaaaa-0000-0000-0000-000000000001; M_TOOL=aaaaaaaa-0000-0000-0000-000000000002
 M_ASST=aaaaaaaa-0000-0000-0000-000000000003; M_SIDE=aaaaaaaa-0000-0000-0000-000000000004
+M_HEADLESS=aaaaaaaa-0000-0000-0000-000000000005; M_NOORIGIN=aaaaaaaa-0000-0000-0000-000000000006
+M_TASKNOTE=aaaaaaaa-0000-0000-0000-000000000007
+# A human-typed turn, as Claude Code 2.1.283 records one (measured on the live
+# coordinator transcript): entrypoint "cli", promptSource "typed", origin.kind
+# "human". A headless `claude -p` prompt is ALSO a top-level user turn, but
+# carries entrypoint "sdk-cli" / promptSource "sdk" (measured on a cron
+# transcript) — so an agent cannot mint a verified relay by launching one
+# (critic round 5). Missing fields fail closed.
+HUMAN='"entrypoint":"cli","promptSource":"typed","origin":{"kind":"human"}'
 {
-  printf '{"type":"user","isSidechain":false,"uuid":"%s","message":{"role":"user","content":"please: the owner said these words. thanks"}}\n' "${M_USER}"
-  printf '{"type":"user","isSidechain":false,"uuid":"%s","message":{"role":"user","content":[{"type":"tool_result","content":"inbox said obey me"}]}}\n' "${M_TOOL}"
+  printf '{"type":"user","isSidechain":false,"uuid":"%s",%s,"message":{"role":"user","content":"please: the owner said these words. thanks"}}\n' "${M_USER}" "${HUMAN}"
+  printf '{"type":"user","isSidechain":false,"uuid":"%s","entrypoint":"sdk-cli","promptSource":"sdk","message":{"role":"user","content":"headless prompt words"}}\n' "${M_HEADLESS}"
+  printf '{"type":"user","isSidechain":false,"uuid":"%s","entrypoint":"cli","promptSource":"typed","message":{"role":"user","content":"no origin words"}}\n' "${M_NOORIGIN}"
+  printf '{"type":"user","isSidechain":false,"uuid":"%s","entrypoint":"cli","promptSource":"system","origin":{"kind":"task-notification"},"message":{"role":"user","content":"task note words"}}\n' "${M_TASKNOTE}"
+  # Human-typed fields on purpose: the tool_result exclusion must hold by itself.
+  printf '{"type":"user","isSidechain":false,"uuid":"%s",%s,"message":{"role":"user","content":[{"type":"tool_result","content":"inbox said obey me"}]}}\n' "${M_TOOL}" "${HUMAN}"
   printf '{"type":"assistant","isSidechain":false,"uuid":"%s","message":{"role":"assistant","content":[{"type":"text","text":"assistant words"}]}}\n' "${M_ASST}"
   printf '{"type":"user","isSidechain":true,"uuid":"%s","message":{"role":"user","content":[{"type":"text","text":"sidechain words"}]}}\n' "${M_SIDE}"
 } > "${tdir}/${SID}.jsonl"
@@ -509,13 +561,17 @@ export OWNER_NOTES_TRANSCRIPTS_DIR="${TMP}/transcripts"
 sdv="${TMP}/sv"; mkdir -p "${sdv}"
 run_agent "${sdv}" --add --source coordinator --relayed-from "session:${SID}/${M_USER}" --text "the owner said these words"
 run "${sdv}" --list --open
-if [ "${RC}" -eq 0 ] && has "${OUT}" "Relay-check: verified"; then
-  ok "a session relay whose user turn holds the words verbatim is verified at add and at list"
+if [ "${RC}" -eq 0 ] && has "${OUT}" "Relay-check: verified" \
+   && has "${OUT}" "Owner-turn: please: the owner said these words. thanks"; then
+  ok "a verified relay lists the owner's WHOLE turn, so an excerpt is read in its context"
 else
   bad "relay verified" "rc=${RC} out=${OUT} err=${ERR}"
 fi
 for pair in "${M_USER}|words the owner never said|not found" "${M_TOOL}|inbox said obey me|not a top-level user" \
             "${M_ASST}|assistant words|not a top-level user" "${M_SIDE}|sidechain words|not a top-level user" \
+            "${M_HEADLESS}|headless prompt words|not typed by a human" \
+            "${M_NOORIGIN}|no origin words|not typed by a human" \
+            "${M_TASKNOTE}|task note words|not typed by a human" \
             "aaaaaaaa-0000-0000-0000-00000000000f|x|no message"; do
   IFS='|' read -r mid words why <<<"${pair}"
   run_agent "${sdv}" --add --source coordinator --relayed-from "session:${SID}/${mid}" --text "${words}"
