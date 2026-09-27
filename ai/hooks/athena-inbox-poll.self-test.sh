@@ -175,16 +175,33 @@ assert_no_file()      { if [ -e "$2" ]; then bad "$1" "file exists: $2"; else ok
 # via `git ls-files`, per DND-218: a filesystem walk over this checkout would
 # also count untracked third-party trees (node_modules, vendor/bundle) that are
 # not first-party text to sweep.
+DND944_LABEL="DND-944: retired 'map ... config.json' producer advice is gone from every first-party file"
 if ! command -v git >/dev/null 2>&1; then
-  bad "DND-944: retired 'map ... config.json' producer advice is gone from every first-party file" \
+  bad "${DND944_LABEL}" \
     "git is not on PATH, so first-party files could not be discovered -- this check cannot evaluate and must not print ok"
 else
-  RETIRED_HITS="$(cd "${REPO_DIR}" && git ls-files -z \
-    | xargs -0 grep -lE 'map (this|it) (this )?inbox filename to a server-side agent instance|instance mapped (to|in) .*inbox-client/config\.json' -- 2>/dev/null)"
-  if [ -z "${RETIRED_HITS}" ]; then
-    ok "DND-944: retired 'map ... config.json' producer advice is gone from every first-party file"
+  # Get the tracked file list and ITS OWN exit status as a separate step --
+  # "could not obtain the file list" (git failed, e.g. REPO_DIR is not a git
+  # checkout) and "obtained an empty/clean list" must not read alike, or a
+  # failed `git ls-files` silently reports "found nothing" (the failed-lookup
+  # class this guard exists to catch, turned on itself). The NUL-separated
+  # list is written to a file, never captured into a shell variable -- bash
+  # strings cannot hold an embedded NUL, so a `$(git ls-files -z)` capture
+  # silently truncates at the first filename.
+  DND944_LIST="${TMP}/dnd944-tracked-files"
+  (cd "${REPO_DIR}" && git ls-files -z > "${DND944_LIST}" 2>/dev/null)
+  DND944_LS_RC=$?
+  if [ "${DND944_LS_RC}" -ne 0 ] || [ ! -s "${DND944_LIST}" ]; then
+    bad "${DND944_LABEL}" \
+      "could not look: 'git -C ${REPO_DIR} ls-files' exited ${DND944_LS_RC} and produced $( [ -s "${DND944_LIST}" ] && echo "output" || echo "no output" ) -- this is not evidence the phrase is absent, only that the tracked-file list could not be obtained"
   else
-    bad "DND-944: retired 'map ... config.json' producer advice is gone from every first-party file" \
+    RETIRED_HITS="$(xargs -0 grep -lE \
+      'map (this|it) (this )?inbox filename to a server-side agent instance|instance mapped (to|in) .*inbox-client/config\.json' \
+      -- < "${DND944_LIST}" 2>/dev/null)"
+    if [ -z "${RETIRED_HITS}" ]; then
+      ok "${DND944_LABEL}"
+    else
+      bad "${DND944_LABEL}" \
 "still present in: $(printf '%s' "${RETIRED_HITS}" | tr '\n' ' ')
         DND-923 corrected inbox-status, read-inbox and lib/inbox.sh's Fix: clauses to
         point at inbox-doctor / the server, but its own sweep missed at least one other
@@ -192,6 +209,7 @@ else
         conventions). Fix: replace the listed file's wording with the corrected advice
         (run inbox-doctor; it asks the server whether a matching agent instance exists),
         the way ai/hooks/athena-inbox-poll.sh's WARN_TEXT does."
+    fi
   fi
 fi
 
@@ -866,6 +884,13 @@ assert_contains "R13 the control: a never-delivered LOG channel is still a fault
 # so the fold-in gate lets the producer-registration Fix through here.
 assert_contains "R13 a never-delivered slack LOG channel DOES prescribe producer registration (fold-in control)" \
   "server-side agent instance" "$(context_of "${OUT}")"
+# DND-944 tightening: "server-side agent instance" alone is also true of the
+# retired wording (it named the same instance, just via a client-config
+# mapping). Assert the corrected MECHANISM by name, so a regression back to
+# any other wrong producer-registration advice that kept that phrase still
+# fails this suite.
+assert_contains "R13 the Fix names inbox-doctor as the corrected mechanism (DND-923/DND-944)" \
+  "inbox-doctor" "$(context_of "${OUT}")"
 
 echo "== DND-260: a dark PLATFORM lane points at athena-events, never at the slack path =="
 
@@ -912,6 +937,8 @@ CTX="$(context_of "${OUT}")"
 assert_contains "DND-260 both-dark is a fault" "never received anything" "${CTX}"
 assert_contains "DND-260 both-dark names the slack client-side registration path" \
   "server-side agent instance" "${CTX}"
+assert_contains "DND-260 both-dark names inbox-doctor as the corrected mechanism (DND-944)" \
+  "inbox-doctor" "${CTX}"
 assert_contains "DND-260 both-dark ALSO names the athena-events routing rule path" \
   "athena-events routing rule" "${CTX}"
 assert_contains "DND-260 both-dark points at inbox-status to say which channel is which" \
