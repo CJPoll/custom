@@ -82,6 +82,12 @@ ticket; this record supplies its per-class data.
   plus a 60 s tail, because load1 lags. Mean load1 is over the run window.
 - Raw data: `~/.local/state/athena/test-slots/bench/<utc>/` on the measuring
   machine (`runs.csv`, `levels.csv`, `load-*.csv`, census snapshots).
+- **A pin goes stale.** prep-commit's first stage, `advisories`, checks the
+  pinned `mix.lock` against live OSV data and against the advisory baseline
+  landed on gen_saas main. Those move while the pin stays still, so a pin that
+  passed yesterday can fail today in about 20 s, before any heavy stage runs.
+  Before every window, one full prep-commit at the pin must pass all stages,
+  `advisories` included. A bench whose k=1 run fails measures nothing.
 
 ## Measurement: home-office-linux, 2026-09-27
 
@@ -98,6 +104,13 @@ class `gen_saas:prep-commit.sh`, bench output `bench/dnd-489-20260927T025250Z`.
 One clean rep is below `--min-reps` 2, so no N is decided from this. One gen_saas
 prep-commit alone reaches load1 12.09, which is already the ceiling. N stays at
 the provisional 3 until the remaining levels are measured.
+
+**Second window, 08:00-08:10Z: no data.** At pin `37405cba` every one of the
+18 runs failed in the `advisories` stage after 19-28 s. mint 1.7.1, hpax
+1.0.2 and req 0.5.15 had new advisories that gen_saas main had since fixed by
+upgrading. `--decide` scored nothing (`DECISION: none`). Bench output:
+`bench/dnd-489-window2-20260927T080041Z`. The worktrees were re-pinned to
+gen_saas `edd3c55d` outside a window.
 
 ## Rollout
 
