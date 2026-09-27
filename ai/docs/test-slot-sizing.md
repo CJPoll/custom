@@ -45,9 +45,32 @@ would hold dispatch for as long as it is full. So the ceiling is 12. The bench
 records the peak for every level, so the nproc reading can still be done from
 the same data.
 
+## Gate classes
+
+What a slot costs depends on which gate holds it. On 2026-09-27 ~01:40Z, with
+the pool full and read with no load added, three gen_saas prep-commits used
+1-9 cores each (docker CPU 100-880%), and load1 reached 28-37. At ~01:30Z,
+three custom harness-gates used 0.4-0.9 host cores each, and load1 was about
+6. A single N sized for the heavy class leaves the machine idle when light
+gates hold the slots. A single N sized for the light class overloads it when
+heavy gates do.
+
+So every run records its **gate class**, and `test-slot` itself derives it:
+`"<repo>:<tool>"`, from the command's argv and the cwd only
+(`test-slot --class -- CMD`, and the `class` field in holder JSON and
+`events.jsonl`). A caller label never enters it. A shell running a string
+(`bash -c ...`) is its own class, `<repo>:opaque`, and never a known tool's.
+The bench records the class exactly as `test-slot` derives it, and `--decide`
+refuses data that mixes classes. Weighted admission by class is a separate
+ticket; this record supplies its per-class data.
+
 ## Method
 
-- Gate: gen_saas `bin/prep-commit.sh`, default check mode (no `--fix`).
+- Gate: gen_saas `bin/prep-commit.sh`, default check mode (no `--fix`),
+  class `gen_saas:prep-commit.sh`. N comes from this class, the heaviest.
+- Second class, measured for the weights ticket and not for N: custom
+  `timeout 1500 ./ai/bin/harness-gate`, class `custom:harness-gate`, levels
+  1, 3, 5, one rep, in five detached custom worktrees at one SHA.
 - Five gen_saas worktrees (`~/.local/worktrees/gen_saas/dnd-489-bench-{1..5}`),
   all at one pinned SHA. Each was bootstrapped (deps, compile, test DB) and
   warmed with one untimed prep-commit before measuring. So every measured run
