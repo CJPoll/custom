@@ -469,11 +469,24 @@ ticket in the scope. A scope that included feature epics would therefore let
 any unfinished `Feature` hold the lane. So the lane's scope is its own epics:
 every DND epic whose title starts with the exact prefix `Harness lane: `
 (`LANE_EPIC_PREFIX` in `ai/lib/next_mission_notion.rb`) and whose status is not
-Done or Cancelled. `athena:epic-clustering` routes harness clusters to these
-epics. A lane epic holds raised issues only, and a ticket moved into it keeps
-`Path` = `Off`. If a `Critical` or `Feature` ticket lands in a lane epic,
-next-mission reports a functional-first hold that names it. It is never
-silent. A lane ticket still on a feature epic waits until clustering moves it.
+Done or Cancelled. A lane epic holds raised issues only, and a ticket moved
+into it keeps `Path` = `Off`. If a `Critical` or `Feature` ticket lands in a
+lane epic, next-mission reports a functional-first hold that names it. It is
+never silent.
+
+**Getting lane tickets into lane epics.** A lane ticket on a feature epic is in
+neither queue until it moves. The feature admiral's next-mission names it on
+stderr (`left to the harness lane: …`).
+- **Once DND-982 (`athena:epic-clustering`) lands**, its pass moves every
+  movable lane ticket, singletons included, into a `Harness lane: ` epic.
+- **Until then, and between passes**, the feature admiral asks the
+  athena-architect to make that move. The architect owns epic writes, and a
+  move inside the never-movable constraint is a standing owner go (proposal
+  §7). The admiral then sends a drain request (*Senders*).
+
+A tier-1 vulnerability is in both queues when it sits on a lane epic that a
+feature admiral also scopes. Whichever admiral starts it first sets `In
+Progress`, and the other's next-mission then counts it as started.
 
 | Placeholder | Harness lane value |
 |---|---|
@@ -504,11 +517,14 @@ work itself:
      epic exists yet.
    - exit 2 or 3: a fault. Relay it to the owner; it is never a quiet queue.
 
-**Senders.** The clustering cron sends a request after each run. A human or
-session may also send one, from the custom checkout:
+**Senders.** Today every request is sent by hand. The sender is an admiral
+after a lane move, the owner, or a session. Send it from the custom checkout:
 
     cd ~/dev/custom && ai/skills/athena:inbox/bin/send-mail --local \
       harness-alerts-detector harness-lane-drain --to custom --body-file <file>
+
+The 12h clustering cron (DND-983, pending) is to send one after each run. Until
+it lands and its crontab is installed, nothing sends a request automatically.
 
 ## Relationship to the existing flaky trigger
 

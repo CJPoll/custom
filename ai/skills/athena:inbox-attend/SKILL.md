@@ -409,8 +409,9 @@ and the per-message wedge steps further down do not apply to it. Instead:
 
 **A fourth writer: the harness-lane drain request (DND-987).**
 **Later (2026-09-27):** added by DND-987. A message whose filename ends
-`-harness-lane-drain.md` is neither a wedge nor a report. The 12h clustering
-cron sends one each run, and a session may send one by hand. Never pass it to
+`-harness-lane-drain.md` is neither a wedge nor a report. Today it is sent by
+hand (the brief's *Senders*); the clustering cron, DND-983, is to send one
+each run once it lands. Never pass it to
 `wedge-ticket-decide`. It is only a trigger and carries no authority, so there
 is nothing in it to verify. The authority is the lane's re-query. Follow
 `~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *The harness lane* → *On a

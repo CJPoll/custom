@@ -85,8 +85,9 @@ EMPTY_FIX = {
   harness_lane: "nothing for the harness lane: no Area=Harness, Path=Off, non-Feature ticket in scope.",
   not_lane: "the rest are the harness lane's: file them, do not start them " \
             "(ai/docs/ticket-lane-action-brief.md -> The harness lane).",
-  lane_epics: "nothing for the harness lane to drain. athena:epic-clustering routes harness clusters " \
-              "to epics with this title prefix; check an epic's title if you expected one.",
+  lane_epics: "nothing for the harness lane to drain. Lane tickets reach the lane only on epics with " \
+              "this title prefix (ai/docs/ticket-lane-action-brief.md -> The harness lane); check " \
+              "an epic's title if you expected one.",
   not_started: "wait for a started ticket to land; everything open is already started.",
   not_waiting_on_owner: "report the Needs Attention tickets to the owner; the rest wait on them.",
   unblocked: "land a blocker first; every remaining ticket waits on an unfinished Depends On.",

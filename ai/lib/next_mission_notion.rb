@@ -31,8 +31,8 @@ class NextMissionNotion
   # unique_id filter matches the number alone.
   TICKET_PREFIX       = "DND"
   # A harness-lane epic (DND-987, P7) is a DND epic whose title starts with
-  # this. athena:epic-clustering names the epics it routes harness clusters to
-  # with it; the harness lane's scope is every such epic not Done/Cancelled.
+  # this. The harness lane's scope is every such epic not Done/Cancelled
+  # (ai/docs/ticket-lane-action-brief.md -> The harness lane).
   LANE_EPIC_PREFIX    = "Harness lane: "
 
   Scope = Struct.new(:scope, :external, keyword_init: true)
