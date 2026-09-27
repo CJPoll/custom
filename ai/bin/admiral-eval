@@ -673,7 +673,13 @@ def invoke_subject(scenario, mode, bin, argv, agent = eval_agent, usage_log = []
   parsed = JSON.parse(out)
   usage_log << extract_usage(parsed)
   text = parsed["result"]
-  warn "  ! #{agent.key} invocation succeeded but its --output-format json result had no `result` text " \
+  # A missing `result` field is a CALL failure (the --output-format json
+  # envelope didn't carry the text this scorer needs), never the subject's own
+  # answer — it must read as "invocation failed" so variant-eval's
+  # T2_INVOCATION_FAILED (`/^\s*! admiral invocation failed/`) counts it as a
+  # failed call, not a scored FAIL misattributed to #{agent.key} (critic
+  # finding on ffd8309).
+  warn "  ! #{agent.key} invocation failed: --output-format json envelope had no `result` text " \
        "(raw, first 200 bytes): #{out.to_s[0, 200]}" if text.nil?
   text
 rescue JSON::ParserError => e
@@ -2012,6 +2018,16 @@ def self_test
   # stubbed `claude` on PATH so the whole model_argv -> invoke_subject ->
   # run_model wiring is proven end to end without a real model call in the
   # gate.
+  #
+  # (critic finding on ffd8309): the stubbed `claude` below ignores its argv
+  # and always answers in the --output-format json shape, so the CLI probe
+  # alone can't tell "model_argv passes --output-format json" from "it
+  # doesn't" — a regression there would stay green there and only break a REAL
+  # claude call (plain text, so every real case would JSON::ParserError and
+  # FAIL). Assert the flag directly on the built argv.
+  fail.("model_argv must pass --output-format json (else a real claude call answers in plain text, " \
+        "which the stubbed self-test claude above can't catch since it ignores its argv)") \
+    unless model_argv(default_agent_file).each_cons(2).include?(%w[--output-format json])
   fail.("extract_usage must read the --output-format json usage/cost fields") \
     unless extract_usage({ "usage" => { "input_tokens" => 5, "output_tokens" => 7,
                                          "cache_read_input_tokens" => 9, "cache_creation_input_tokens" => 11 },
@@ -2069,11 +2085,13 @@ def self_test
     fail.("a measured call must report its usage on stderr, got:\n#{err_a}") \
       unless err_a.include?(expected_a)
 
-    # (b) usage absent from an otherwise-successful call -> n/a, never 0. This
-    # is the DND-524 regression case: the OLD invoke_subject never asked for
-    # --output-format json at all, so this is what every call looked like
-    # before the fix (and would still look like against a `claude` too old to
-    # emit `usage`).
+    # (b) usage absent from an otherwise-successful, well-formed call -> n/a,
+    # never 0. This is the n/a path (a `claude` too old to emit `usage` under
+    # --output-format json, or one that omits it for some other reason) — NOT
+    # a reproduction of the pre-fix code, which never asked for
+    # --output-format json at all and so got plain text, not a JSON envelope
+    # missing one field (critic finding on ffd8309: the real regression
+    # evidence for that is in the commit message, not this fixture).
     File.write(File.join(stub_bin, "claude"), <<~SH)
       #!/bin/sh
       cat <<'JSON'
@@ -2086,6 +2104,31 @@ def self_test
                                      "--agent-file", agent_file)
     fail.("a call with no `usage` field must read n/a, not 0, got:\n#{err_b}") \
       unless err_b.include?("admiral-eval: usage — n/a (no model call in this run reported usage tokens)")
+
+    # (c) a --output-format json envelope with NO `result` text (exit 0) is a
+    # CALL failure, not a scored subject miss (critic finding on ffd8309): the
+    # stderr line must carry variant-eval's exact `! admiral invocation
+    # failed` prefix (T2_INVOCATION_FAILED = /^\s*! admiral invocation
+    # failed/), never "invocation succeeded" — a mismatch there would make
+    # collect_t2_counts count this as a real admiral miss instead of a failed
+    # model call.
+    File.write(File.join(stub_bin, "claude"), <<~SH)
+      #!/bin/sh
+      cat <<'JSON'
+      {"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":1,"cache_creation_input_tokens":1},"total_cost_usd":0.001}
+      JSON
+    SH
+    FileUtils.chmod(0o755, File.join(stub_bin, "claude"))
+    out_c, err_c, = Open3.capture3(env, RbConfig.ruby, File.expand_path(__FILE__),
+                                    "--run", "--only", "AE-01-confirm-before-done", "--runs", "1",
+                                    "--agent-file", agent_file)
+    fail.("a --output-format json envelope with no `result` text must read as an invocation failure " \
+          "(variant-eval's T2_INVOCATION_FAILED pattern), got stderr:\n#{err_c}") \
+      unless err_c.match?(/^\s*! admiral invocation failed/)
+    fail.("that stderr line must never say 'invocation succeeded' (critic finding on ffd8309)") \
+      if err_c.include?("invocation succeeded")
+    fail.("the case must score as an invocation failure, not a subject FAIL, got stdout:\n#{out_c}") \
+      unless out_c.include?("produced no output (invocation failed)")
   end
 
   if ok
