@@ -883,10 +883,11 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # only -C <dir>, --no-pager, -P and the pathspec switches; any other
   # global option (`-c core.fsmonitor=./p.sh`, --exec-path, --config-env,
   # --git-dir) makes it exec, and so does an option after the subcommand
-  # that names a program or turns on a configured one (--upload-pack,
-  # --receive-pack, --exec, -O / --open-files-in-pager, --ext-diff,
-  # --textconv, --show-signature, --config). A program git reads from a
-  # config FILE written in the same call is the header RESIDUAL.
+  # that names a program (--upload-pack, --receive-pack, --exec,
+  # -O / --open-files-in-pager, matched by getopt prefix so an abbreviation
+  # cannot hide it) or turns on a configured one (--ext-diff, --textconv,
+  # --show-signature, --config). A program git reads from a config FILE
+  # written in the same call is the header RESIDUAL.
   function git_read(W, SB, n, k,    j, sc, a, lst, mut, nonopt) {
     for (j = k + 1; j <= n && !SB[j]; ) {
       if (W[j] == "-C") { j += 2; continue }
@@ -896,8 +897,18 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     }
     if (j > n || SB[j]) return 1
     sc = W[j]
-    for (a = j + 1; a <= n && !SB[a]; a++)
-      if (W[a] ~ /^(--upload-pack|--receive-pack|--exec|-O|--open-files-in-pager|--ext-diff|--textconv|--show-signature|--config|-c$)/) return 0
+    for (a = j + 1; a <= n && !SB[a]; a++) {
+      # Path-taking options accept a program on the command line, so an
+      # abbreviated or `=`-joined spelling smuggles it: match by getopt
+      # prefix (critic round 8).
+      if (long_pre(W[a], "upload-pack receive-pack exec open-files-in-pager")) return 0
+      # `-O<cmd>` (git grep) bundles the pager command onto the short flag.
+      if (short_has(W[a], "O")) return 0
+      # Config toggles take no path (they turn on a config-defined program,
+      # the header RESIDUAL), so exact spelling is enough and prefix-matching
+      # them would over-deny `--text` (git diff) against `--textconv`.
+      if (W[a] ~ /^--(ext-diff|textconv|show-signature|config)(=|$)/ || W[a] == "-c") return 0
+    }
     if (sc ~ /^(log|status|diff|show|rev-parse|ls-files|ls-tree|ls-remote|grep|blame|for-each-ref|describe|shortlog|cat-file|merge-base|rev-list|name-rev|show-ref|count-objects|var|help|version|whatchanged|range-diff|cherry|diff-tree|diff-files|diff-index)$/) return 1
     lst = 0; mut = 0; nonopt = 0
     for (a = j + 1; a <= n && !SB[a]; a++) {
@@ -922,13 +933,44 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # that names a program for it to run (critic round 6; the sweep read
   # the --help and man page of each listed tool for such options): rg --pre,
   # sort --compress-program, wget -e/--execute/--use-askpass/--config (a
-  # wgetrc command can set use_askpass).
+  # wgetrc command can set use_askpass). Options are matched by getopt
+  # prefix and short-bundle split (critic round 8), so an abbreviation
+  # (`--use-ask=`, `-qe`) cannot hide one.
   function prog_opt(t, W, SB, n, k,    j) {
     for (j = k + 1; j <= n && !SB[j]; j++) {
-      if (t == "rg" && W[j] ~ /^--pre(=|$)/) return 1
-      if (t == "sort" && W[j] ~ /^--compress-program/) return 1
-      if (t == "wget" && W[j] ~ /^(-e|--execute|--use-askpass|--config)/) return 1
+      if (t == "rg" && long_pre(W[j], "pre")) return 1
+      if (t == "sort" && long_pre(W[j], "compress-program")) return 1
+      if (t == "wget") {
+        if (long_pre(W[j], "execute use-askpass config")) return 1
+        if (short_has(W[j], "e")) return 1
+      }
     }
+    return 0
+  }
+  # long_pre(tok, names): tok is `--name` or `--name=val`; 1 when name is a
+  # nonempty prefix of a space-delimited entry in names. getopt_long and
+  # git parse-options accept any unambiguous prefix of an option, so a
+  # program option cannot be hidden by abbreviating it; every prefix a
+  # user could type is itself a prefix of the full option name, so this is
+  # complete. Over-matching a prefix a benign option also shares only
+  # over-denies (critic round 8).
+  function long_pre(tok, names,    nm, i, a, na) {
+    if (tok !~ /^--[^=]/) return 0
+    nm = tok; sub(/=.*/, "", nm); sub(/^--/, "", nm)
+    if (nm == "") return 0
+    na = split(names, a, " ")
+    for (i = 1; i <= na; i++) if (substr(a[i], 1, length(nm)) == nm) return 1
+    return 0
+  }
+  # short_has(tok, letters): tok is a `-xyz` short bundle; 1 when any char of
+  # letters is in the bundle (before `=`). A short flag that takes a value
+  # bundles it (`-euse_askpass=...`, `-Ocmd`), and other flags bundle too
+  # (`-qe`), so scanning the whole bundle is complete. A letter that is
+  # really the value of a preceding value-taking short only over-denies.
+  function short_has(tok, letters,    b, i, c) {
+    if (tok !~ /^-[^-]/) return 0
+    b = tok; sub(/=.*/, "", b); sub(/^-/, "", b)
+    for (i = 1; i <= length(b); i++) { c = substr(b, i, 1); if (index(letters, c)) return 1 }
     return 0
   }
   # sed_runs(W, SB, n, k): the sed at word k may run a command: a script

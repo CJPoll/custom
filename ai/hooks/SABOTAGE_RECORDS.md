@@ -791,12 +791,12 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (critic rounds 1-6, admiral batches 7-8):** `RESULT: 536 passed,
+- **After (critic rounds 1-8, admiral batches 7-8):** `RESULT: 551 passed,
   0 failed` / `VERDICT: PASS`.
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
-`RESULT: 483 passed, 53 failed`. Every failure is an allow case (QA/QB) or
+`RESULT: 495 passed, 56 failed`. Every failure is an allow case (QA/QB) or
 the deny-text check T2, e.g.:
 
 ```
@@ -839,6 +839,8 @@ reached every case they did (their mutants stayed green).
 | S-DND799-20 | git options skipped unchecked again (critic round 5) | QX53, QX72, QX73, QX74, QX75 — `531 passed, 5 failed` |
 | S-DND799-21 | `docker_read()` always true (critic round 5) | QX76 — `535 passed, 1 failed` |
 | S-DND799-22 | `prog_opt()` off: rg --pre, sort --compress-program, wget -e (critic round 6) | QX77, QX78, QX79, QX80 — `532 passed, 4 failed` |
+| S-DND799-24 | `long_pre()` matches an option only by exact spelling, not getopt prefix (critic round 8) | QX86, QX87, QX88, QX89, QX90, QX91, QX92 — `544 passed, 7 failed` |
+| S-DND799-25 | `short_has()` never fires (no short-bundle split; critic round 8) | QX80, QX85, QX93 — `548 passed, 3 failed` |
 
 ### Critic rounds (each a kind-1 finding; convergence check run from round 2)
 
@@ -874,3 +876,22 @@ reached every case they did (their mutants stayed green).
   shift left the list. The mutation sweep then showed `git_in_cmd` and the
   runner-word list could no longer fire on their own, so both were
   deleted rather than patched.
+- **Round 8, program options read by exact spelling.**
+  `prog_opt()` and `git_read()` matched a program-naming option by its full
+  name, so getopt_long / git parse-options abbreviations and bundled short
+  options slipped past: `wget -qe use_askpass=./p.sh`, `wget --use-ask=`,
+  `sort --compress=`, `git ls-remote --upload=` all ran a script written as
+  data in the same call. Kind 1, the same "list reads a runner wrong" class
+  as rounds 1-6, reached through spelling rather than a missing entry.
+  Confirmed fail-first against the pre-round-8 hook (d16cf71): all seven
+  probe forms ALLOW. Fixed at the class: `long_pre()` matches any getopt
+  prefix of a program option (every prefix a user can type is a prefix of
+  the full name, so it is complete; a prefix shared with a benign option
+  only over-denies), and `short_has()` scans the whole short bundle (a
+  value bundled after a value-taking flag only over-denies). Path-taking
+  git options (--upload-pack, --receive-pack, --exec, -O) are prefix-
+  matched; the config toggles (--ext-diff, --textconv, --show-signature,
+  --config) take no path, so they stay exact, which also avoids over-denying
+  `git diff --text` against `--textconv`. QX85-QX93 deny; QA65-QA70 (--text,
+  --exclude, --recurse-submodules, wget -O report, distinct prefix-sharing
+  options) stay allowed.

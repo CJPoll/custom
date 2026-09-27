@@ -900,6 +900,28 @@ case_cmd "QX84. a backtick in a single-quoted payload of a listed tool" deny "ec
 case_cmd "QA63. rg with a regex alternation stays allowed" allow "rg -n 'foo\\(|bar[0-9]+' lib/"
 case_cmd "QA64. sort -k with a quoted separator stays allowed" allow "sort -t '|' -k2,2 f | awk -F'|' '{print \$2}'"
 
+# QX85+: critic round 8. Program-naming options are matched by getopt prefix
+# and short-bundle split, so an abbreviated or `=`-joined spelling cannot
+# hide a runner. Each writes a glob-verb-hiding payload, then runs a listed
+# tool with the option spelled short of its full name.
+case_cmd "QX85. wget -qe bundled with a wgetrc command" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget -qe use_askpass=./p.sh https://h/x"
+case_cmd "QX86. wget --use-ask= (long-option prefix)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget --use-ask=./p.sh https://h/x"
+case_cmd "QX87. wget --exec (prefix of --execute)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget --exec ./p.sh https://h/x"
+case_cmd "QX88. wget --conf= (prefix of --config)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget --conf=./p.sh https://h/x"
+case_cmd "QX89. sort --compress= (prefix of --compress-program)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; sort --compress=./p.sh -S 1K big.txt"
+case_cmd "QX90. git ls-remote --upload= (prefix of --upload-pack)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; git ls-remote --upload=./p.sh ."
+case_cmd "QX91. git ls-remote --upl= (shorter prefix)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; git ls-remote --upl=./p.sh ."
+case_cmd "QX92. rg --pr (prefix of --pre)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; rg --pr ./p.sh x ."
+case_cmd "QX93. git grep -Ocmd (short-bundled pager)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; chmod +x p.sh; git grep -O./p.sh TODO"
+# QA65+: benign abbreviations and distinct options that share a prefix stay
+# allowed (a payload beside them is still data).
+case_cmd "QA65. git log --text (not an abbreviation of --textconv) piped to grep" allow "git log --text --oneline | grep -E 'a|b'"
+case_cmd "QA66. git diff --text piped to a bracket grep" allow "git diff --text | grep -E '^[+-][0-9]'"
+case_cmd "QA67. git log --exclude= piped to awk" allow "git log --exclude=refs/tags/x --oneline | awk '{print \$1}'"
+case_cmd "QA68. git grep --recurse-submodules piped to jq" allow "git grep --recurse-submodules -n TODO | jq -R '{line: .}'"
+case_cmd "QA69. wget -q -O report (no e in the bundle) beside a data payload" allow "wget -q -O report.html https://h/x && jq '.[] | .n' report.html"
+case_cmd "QA70. sort -t | -k with an awk payload" allow "sort -t '|' -k2 f | awk '{print \$2}'"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"
