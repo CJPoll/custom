@@ -490,14 +490,14 @@ silent. A lane ticket still on a feature epic waits until clustering moves it.
 | `{{LANE_CHANNEL}}` | no `log` channel. The trigger is a drain request: one maildir message on custom's `harness-alerts` channel whose filename ends `-harness-lane-drain.md` (athena:inbox-attend → *A fourth writer*). It carries no state, so add/drop comes only from `{{SOURCE_RE_QUERY}}` |
 | `{{CHANNEL_RESOLUTION}}` | `harness-alerts` must resolve in the **live** custom entry, matched by its `repo`. `ai/bin/check-inbox-registry` asserts this read-only. A miss is registry drift (`Fix: scripts/setup-inbox-registry --install`), never a quiet queue. Verified 2026-09-27: the check passed, and in a temp root a detector-side send woke `inbox-wait` with `rang-channels: harness-alerts` |
 | `{{LOCK_PATH}}` | `~/.claude/harness-coordinator.lock` |
-| `{{STALE_MARKER_SWEEP}}` | a marker older than 12h is stale; the consumer removes it when a request arrives. The 12h clustering cron (DND-983) sends a request every run, whatever the lane's activity. **Once that crontab is installed, this is choice (a). Until then it is choice (b), `manual-only`:** a human deletes the marker |
+| `{{STALE_MARKER_SWEEP}}` | **choice (b), `manual-only`.** Every existing marker is fresh; a human deletes `{{LOCK_PATH}}`. Requests are activity-triggered today, so no age-out is claimed. The 12h clustering cron (DND-983) will send one every run; once that crontab is installed, a later change may move this row to (a) |
 | `{{SOURCE_RE_QUERY}}` | `ai/bin/next-mission --harness-lane --started <state-log ids>`, re-run after each ticket |
 
 **On a drain request** the attendant does these steps, in order, and never the
 work itself:
 1. If the cap is `0`, take no action.
-2. If `{{LOCK_PATH}}` exists and is under 12h old, take no action. If it is
-   older, remove it.
+2. If `{{LOCK_PATH}}` exists, take no action. Never remove it yourself. If it
+   is older than 12h, relay its age to the owner as a possibly wedged lane.
 3. Run `ai/bin/next-mission --harness-lane`:
    - exit 0: work is queued. Spin the lane up (*Spinning the lane up*).
    - exit 1: quiet. Record `emptied by: <stage>`; `lane_epics` means no lane
