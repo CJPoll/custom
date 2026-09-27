@@ -4186,16 +4186,19 @@ own children, so it cannot count orphans.
   - the match is unique both ways: the spawn has exactly one such agent, and
     the agent exactly one such spawn. An unjoined spawn that already ended is
     never paired but still counts as a rival, so a foreground API death's
-    dead agent (above) is never taken by a sibling. A denied spawn started no
+    dead agent (*A foreground child's API death leaves two unjoined rows*,
+    below) is never taken by a sibling. A denied spawn started no
     agent and counts for nothing.
 
   Anything ambiguous pairs with nothing, never a guess. The pair is derived
   at read time, never stored, and a later `agent_bound` replaces it. It
   decides only a mission's captain state and lifecycle time (*Reported and
   hook missions merge*). A run's captains, its activity and its orphan count
-  still use joined spawns only (*Fleet liveness*). A wrong pair needs three
-  lost reports in one minute: this spawn's `agent_bound`, its child's
-  `agent_start`, and both of another worker's reports.
+  still use joined spawns only (*Fleet liveness*). A wrong pair needs four
+  lost reports within one window: this spawn's `agent_bound` and its child's
+  `agent_start`, plus another worker's `agent_spawn` and `agent_bound`. Either
+  of that worker's two reports would give it a spawn row, joined or a rival,
+  so its agent would not pair.
 - **Every lifecycle report is an order-independent upsert.** Hook reports are
   detached and can arrive in any order; measured: SubagentStop before the
   caller's PostToolUse. An `agent_end` for an unknown `agent_id` creates the
