@@ -4316,8 +4316,81 @@ never sent.
 
 A `run_id`, once bound, never changes. A captain's `run_hint` naming a
 `run_id` another run in the session already holds binds nothing, and the server
-logs a warning naming both runs. The caller's run is the run whose admiral
-agent made the spawn (`caller_agent_id`).
+logs a warning naming both runs. For binding, the caller's run is the run the
+spawn's caller (`caller_agent_id`) holds now: the run its agent row points at,
+else its latest started run, else its placeholder. Which run a captain spawn
+counts toward is a separate question with its own rule (*Captain
+attribution*).
+
+**Later (2026-09-27):** DND-804 (gen_saas #443): this paragraph ended "The
+caller's run is the run whose admiral agent made the spawn", which also read as
+the rule for which run a captain belongs to. An agent can hold several runs, so
+that phrase named none of them in particular. The binding behaviour is
+unchanged and now stated exactly; attribution is *Captain attribution*.
+
+#### Captain attribution
+
+Each captain spawn counts toward at most one run of its session, chosen by
+`Athena.Fleet.Lifecycle.attribute_spawn/3` (DND-804). Admiral spawns are not
+attributed; they bind (*Run binding*).
+
+- **Candidates** are the session's runs that have the spawn's caller
+  (`caller_agent_id`) among their admiral agents (*Run binding*).
+- **No candidate:** the spawn belongs to no run and is not a miss. The
+  top-level session spawned it, or no run knows its caller yet.
+- **One candidate:** that run takes the spawn. Neither `run_hint` nor time is
+  checked. Reports arrive in any order, so a run's row can be created after
+  its captain's `agent_spawn`, with a `started_at` later than the spawn's
+  `requested_at`.
+- **Several candidates**, first match wins:
+  1. the candidate whose `run_id` equals the spawn's `run_hint`. A hint that
+     names no candidate decides nothing;
+  2. the one candidate whose window holds the spawn's `requested_at`.
+  3. Otherwise the spawn is a **miss**.
+- **A run's window** is `[started_at, ended_at]`. Both ends are inclusive,
+  and the window is open while `ended_at` is empty. `started_at` is when the
+  run's row was created. `admiral_state` `finished` sets `ended_at`; any other
+  `admiral_state`, and every re-arm, clears it. So a window spans a run's first
+  start to its last finish, and a re-armed run's window can cover another
+  run's. The tenures inside a window are not recorded.
+- **An overlap is a miss, never ordered.** When two or more windows hold
+  `requested_at`, nothing recorded says which run was open at that time.
+  Neither start time nor anything else breaks the tie, so the spawn is a miss
+  even when every overlapping run is the caller's own. Only a `run_hint` naming
+  one of them decides it (step 1).
+- **`requested_at`** is when the server received the spawn's `agent_spawn`
+  (*Fleet report kinds and their closed schema*: the body carries no time).
+  A hint-less spawn reported after its run finished can fall outside the run's
+  window, and is then a miss.
+- **Until its `agent_spawn` arrives, a spawn has no caller.** `agent_spawn`
+  alone carries `caller_agent_id`, `run_hint` and `requested_at`, so a spawn
+  known only from `agent_bound` or `agent_end` has no candidate and counts
+  toward no run, without being listed as a miss. It is attributed once its
+  `agent_spawn` arrives.
+- **A miss has one of three reasons:** `outside_windows` (no candidate window
+  holds it), `overlapping_windows` (two or more do) or `no_request_time`
+  (several candidates and no `requested_at`). Ingest stamps `requested_at`
+  from the same `agent_spawn` that names the caller, so a stored spawn does
+  not reach `no_request_time`; it keeps a row read without its time from
+  being attributed by guess. The attribution itself is never stored. It is
+  recomputed from the rows on every read (the fleet page, ingest's live
+  promotion and each liveness sweep), so a miss can resolve when a late
+  report arrives.
+- **A miss counts toward no run.** It appears in no run's mission rows, no run's
+  activity (*Fleet liveness* step 5) and no run's "N captains still running".
+- **A miss is shown, never dropped.** The fleet page lists each miss under its
+  session as a `captain in no run` row: the spawn's `ticket_ref` (or
+  `unmapped`), its reason in words, the caller's `agent_id`, and the
+  candidates' `run_id`s ("an unnamed run" for a placeholder).
+  `Athena.Fleet.Lifecycle.attribution_misses/3` computes the list.
+- **A run's captains** are the captain agents joined to the spawns attributed
+  to it. Every reader of them takes all of the session's runs, and a run
+  missing from that list raises with a `Fix:` rather than reading as a run
+  with no captains.
+
+A captain brief always carries its coordination path
+(`athena:dispatch-captain`), so its `run_hint` normally decides. A miss is
+expected only for a spawn with no hint.
 
 ### Fleet identity: owner and machine are stamped from the token
 
@@ -4400,7 +4473,8 @@ shows three ways:
   `fleet-lifecycle: this athena-captain spawn names no ticket, so the fleet page shows it as an unmapped captain. Fix: start the Agent description with the Mission's ticket ref (for example DND-541 captain) and put a line of the form Mission: DND-541 in the brief.`
 
 **Reported and hook missions merge by `ticket_ref`.** Hook missions come from
-the spawns whose caller is any admiral agent of the run. A mission's captain
+the captain spawns attributed to the run (*Agent lifecycle* → *Captain
+attribution*). A mission's captain
 state from the hooks is the lifecycle of its latest spawn's agent: `running`,
 `ended`, `ended_unexpectedly` with its basis, `lost` (still `running` but
 silent past the lost window of *Fleet liveness*), or `denied`. A spawn not
@@ -4422,6 +4496,15 @@ admiral's run stayed live. Now only an unpaired spawn follows its run. A
 paired one reads its agent's own state: a finished captain reads `ended`, and
 a live background captain reads `running` on its own activity, never `lost`
 with its run.
+
+**Later (2026-09-27):** DND-804 (gen_saas #443): hook missions came from "the
+spawns whose caller is any admiral agent of the run", and *Fleet liveness*
+step 5 counted each running captain "whose spawn's caller is an admiral agent
+of the run". One admiral agent can hold several runs in a session (a new run
+after its old one finished), so both runs took all of that agent's captains:
+each showed the other's missions, and each stayed live on the other's
+captains. Both now read the captains attributed to the run, and a spawn no
+single run takes is a listed `captain in no run` (*Captain attribution*).
 
 **A reported status older than hook evidence is `stale`.** The fleet page marks
 a mission's reported `status` `stale` when a lifecycle report for that ticket is
@@ -4474,9 +4557,9 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   5. The run is silent past the lost window: `lost`. Silent past the live
      window: `quiet`. The run's silence is measured from the latest of its own
      last-seen time, the last-seen time of each admiral agent of the run, and
-     the last-seen time of each captain still `running` whose spawn's caller is
-     an admiral agent of the run. An ended captain's last-seen time never
-     keeps a run live.
+     the last-seen time of each of the run's captains still `running`
+     (*Agent lifecycle* → *Captain attribution*). An ended captain's
+     last-seen time never keeps a run live.
   6. Otherwise the reported state (`running` or `draining`).
 
   Until the lifecycle hook reports on a machine, a run there has no admiral
@@ -4508,7 +4591,8 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
 - **`quiet` is a normal wait,** rendered neutral ("waiting, no activity for
   Xm"), never as an alarm.
 - **Orphaned captains are shown, not reported.** A run at step 2 or 3 with
-  captains still `running` shows "N captains still running".
+  captains still `running` shows "N captains still running". N counts only
+  the captains attributed to the run (*Captain attribution*).
 - **`scope unreported`** is an admiral run that never sent `admiral_scope`. It
   MUST read differently from an empty scope (`no missions`), which is a
   reported fact. An `admiral_seen` whose `agent_id` matches no started run
