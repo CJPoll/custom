@@ -108,6 +108,14 @@ So compact when EITHER passes its threshold: ~22KB or ~190 lines. Line count is
 cut by merging related lines (same rule as below: one line, every file linked);
 trimming descriptions only cuts bytes.
 
+**Measure it with `scripts/index-budget`** (beside this file; `--help` for
+usage). It reads the index and exits 0 within budget, 1 over it (either
+threshold), and 2 when it cannot find or read the index. Exit 2 is never
+"small enough": a wrong project slug must not read as a healthy index. The
+shipwright runs it every run, so an overflow is caught by the next run rather
+than by whichever captain notices first (DND-522, 2026-09-27: 196 lines,
+25039 bytes, past the byte cut, one day after a compaction).
+
 **Who compacts it:** the shipwright, on its cadence, when the file passes
 ~22KB. It is the reviewer this skill names, so it proposes and applies in one
 pass. Any other session that finds the file over the limit reports it rather

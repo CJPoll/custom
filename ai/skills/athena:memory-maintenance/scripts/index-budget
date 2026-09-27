@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# index-budget -- is the auto-memory index (MEMORY.md) inside its load budget?
+#
+# MEMORY.md is loaded into every session, but the loader cuts its TAIL past
+# 200 lines or ~24.4KB, whichever comes first, and the tail holds the NEWEST
+# lessons. Nothing errors; the entries just stop loading. The file is appended
+# by every session, so it refills between compactions. This check makes the
+# over-budget state a named exit code instead of something a captain happens
+# to notice (measured: DND-241, DND-774, DND-761, the 2026-09-26 18:00Z
+# shipwright run, and DND-522 on 2026-09-27 at 196 lines / 25039 bytes).
+#
+# It only READS. Compacting is judgement (which lines merge) and stays with
+# the athena:memory-maintenance skill -> *Index budget*.
+#
+# Usage:
+#   index-budget                 # this repo's project memory index
+#   index-budget --file <path>   # any MEMORY.md
+#   index-budget --help
+#
+# Budget (the skill's compaction trigger, below the loader's cut):
+#   lines  > 190    or    bytes > 22528 (22KB)   -> over budget
+#
+# Exit codes:
+#   0  within budget
+#   1  over budget: compact it this run
+#   2  the index could not be measured (not found, unreadable, bad argument).
+#      Never read as "within budget": a failed lookup is not an empty one.
+set -uo pipefail
+
+MAX_LINES=190
+MAX_BYTES=22528
+LOADER_LINES=200
+LOADER_BYTES=24986
+
+usage() { sed -n '2,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --file)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "index-budget: --file needs a path. Fix: pass --file <path/to/MEMORY.md>." >&2
+        exit 2
+      fi
+      file="$2"; shift 2 ;;
+    *)
+      echo "index-budget: unknown argument: $1. Fix: run index-budget --help for usage." >&2
+      exit 2 ;;
+  esac
+done
+
+if [ -z "$file" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  common="$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  if [ -z "$common" ]; then
+    echo "index-budget: cannot resolve this repo's main checkout from $here. Fix: pass --file <path/to/MEMORY.md>." >&2
+    exit 2
+  fi
+  main="$(dirname "$common")"
+  slug="$(printf '%s' "$main" | tr '/' '-')"
+  file="$HOME/.claude/projects/$slug/memory/MEMORY.md"
+fi
+
+if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+  echo "index-budget: no readable index at $file. Fix: check the project slug (main checkout path with / as -) or pass --file; a missing index is not a small one." >&2
+  exit 2
+fi
+
+lines="$(wc -l < "$file" | tr -d ' ')"
+bytes="$(wc -c < "$file" | tr -d ' ')"
+echo "index-budget: $file: $lines lines (compact above $MAX_LINES; loader cuts at $LOADER_LINES), $bytes bytes (compact above $MAX_BYTES; loader cuts at ~$LOADER_BYTES)"
+
+over=""
+[ "$lines" -gt "$MAX_LINES" ] && over="lines"
+[ "$bytes" -gt "$MAX_BYTES" ] && over="${over:+$over and }bytes"
+if [ -n "$over" ]; then
+  echo "index-budget: OVER budget on $over. Fix: compact it now, losslessly, per athena:memory-maintenance -> Index budget (merge related lines, trim descriptions, assert the linked-file set is unchanged)."
+  exit 1
+fi
+echo "index-budget: within budget"
+exit 0
