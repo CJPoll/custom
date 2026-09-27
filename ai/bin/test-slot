@@ -41,6 +41,20 @@
 # position before it waits, and a heartbeat (with its position) at least every
 # 60 s, so a queued gate never looks like a stall.
 #
+# A WAITER WHOSE CALLER DIED LEAVES THE QUEUE (DND-925). When the process that
+# started test-slot dies, the kernel reparents test-slot and sends it no
+# signal, so before DND-925 it kept its queue place, later took a slot, and ran
+# a gate nobody was waiting on (measured 2026-09-27, DND-794: a killed zsh left
+# a queued harness-gate waiter under PID 1). Now a waiter compares its CURRENT
+# parent pid (the kernel's, from /proc/$$/stat) with the one it started with
+# ($PPID): a reparent changes it, and no pid reuse can change it back, so no
+# pid or start time is trusted. It checks before it queues, after every
+# blocking wait (capped at PARENT_CHECK_S), before every slot poll, and once
+# more after it acquires; on a change it drops its queue file, logs
+# `orphaned`, and exits 129 without running CMD. A caller already gone before
+# the first check shows as a start under PID 1 in the host pid namespace,
+# refused the same way.
+#
 # MIXED VERSIONS (the rollout). A pre-DND-823 test-slot still queues on
 # queue.lock and never reads q-files. The fixed head takes queue.lock before
 # it polls, so there is one slot poller at a time across both versions, and
@@ -68,15 +82,18 @@
 #     <CMD's own code>  CMD ran (including 128+n when a signal killed it)
 #     75                the wait timed out; CMD NEVER ran (`test-slot: TIMEOUT`)
 #     130/143/129       INT/TERM/HUP arrived while WAITING; CMD NEVER ran
+#     129               also: the caller died while this run was WAITING
+#                       (`test-slot: ORPHANED`, DND-925); CMD NEVER ran
 #     2                 usage/misuse; CMD never ran (bad flag, no `--`/CMD,
 #                       invalid N seam, pool dir unusable, cannot register
-#                       in the queue)
+#                       in the queue, cannot read its own parent pid)
 #   --outcome-file PATH: removed at start, then written with exactly one line:
 #     `timeout`         the wait timed out; CMD never ran
 #     `ran exit=<n>`    CMD ran and exited <n>
 #     (file absent)     no outcome recorded: test-slot refused (exit 2), a
-#                       signal ended it while WAITING (exit 128+n; CMD never
-#                       ran), or the wrapper was SIGKILLed (see RESIDUALS)
+#                       signal or its caller's death ended it while WAITING
+#                       (exit 128+n; CMD never ran), or the wrapper was
+#                       SIGKILLed (see RESIDUALS)
 #   This is how a caller tells "CMD exited 75" from "the wait timed out".
 #
 #   Environment set for CMD: ATHENA_TEST_SLOT_HELD=<pool dir>:<slot>. A nested
@@ -94,7 +111,8 @@
 #                        pre-DND-823 waiter (unordered)
 #     events.jsonl       one JSON line per event {ts,event,slot,label,cwd,pid,
 #                        exclusive,waited_s,ran_s,exit}; event is one of
-#                        waiting|acquired|released|timeout|reentrant; rotated to
+#                        waiting|acquired|released|timeout|reentrant|orphaned
+#                        (orphaned: DND-925, the caller died); rotated to
 #                        events.jsonl.1 past 1 MiB (one generation kept)
 #   --exclusive: holds ALL N slots before CMD runs (DND-489's bench quiesces
 #     the fleet with it). Holder lines say EXCLUSIVE.
@@ -140,6 +158,16 @@
 #     the head, including a head that is --exclusive and needs all N slots.
 #     A waiter that is stopped (SIGSTOP) but alive keeps its place, because
 #     it still holds its flock; --status shows it at its position.
+#   * Parent death is watched only while WAITING (DND-925). Once CMD runs,
+#     test-slot waits on it without a timer, so a killed caller leaves a
+#     RUNNING gate running to completion in its slot.
+#   * A caller that dies before test-slot's bash starts is caught only when
+#     test-slot then starts under PID 1 in the host pid namespace. If a child
+#     subreaper adopts it first, that subreaper is indistinguishable from a
+#     live caller at startup, so the run proceeds.
+#   * A caller that deliberately detaches a QUEUED run (`nohup test-slot ...
+#     &` and then exits) now loses it. Give the run a parent that waits, e.g.
+#     `setsid bash -c 'test-slot -- CMD; exit $?' &`.
 #   * While pre-DND-823 waiters remain queued (the rollout; at most their
 #     --wait-timeout), they are unordered among themselves and compete with
 #     the fixed head for queue.lock. --status lists them without a position.
@@ -160,6 +188,11 @@ DEFAULT_WAIT_TIMEOUT_S=7200
 DEFAULT_HEARTBEAT_S=60
 QUEUE_GRACE_S=1
 WAITER_REAP_AGE_S=10
+# DND-925: a blocked waiter re-checks its caller at least this often.
+PARENT_CHECK_S=5
+# PROC_PID_INIT_INO: the kernel's fixed inode for the initial (host) pid
+# namespace, so "parent is PID 1" means init only when this matches.
+HOST_PID_NS='pid:[4026531836]'
 EVENTS_MAX_BYTES=1048576
 
 usage() {
@@ -181,7 +214,8 @@ CMD's argv, stdin, stdout, stderr, and exit code pass through unchanged.
   --status [--json]     show N, holders, waiters, and UNSLOTTED heavy runs
   --self-test           run the hermetic self-test suite
 
-Exit: CMD's code if it ran | 75 wait timed out, CMD never ran | 2 usage.
+Exit: CMD's code if it ran | 75 wait timed out, CMD never ran | 2 usage |
+      129 caller died while waiting (ORPHANED), CMD never ran.
 Pool: ${XDG_STATE_HOME:-~/.local/state}/athena/test-slots/ (flock liveness).
 Invoke the main checkout's copy by absolute path: ~/dev/custom/ai/bin/test-slot
 TXT
@@ -298,6 +332,20 @@ default_signals() {
   ((mask & 0x2)) || out="INT"
   ((mask & 0x4)) || out="${out:+$out,}QUIT"
   printf '%s\n' "$out"
+}
+
+# parent_state ORIG CUR NS: is the caller that started test-slot still its
+# parent? ORIG is the parent pid at start ($PPID), CUR the parent pid now
+# (/proc/$$/stat), NS this process's pid namespace link. The kernel changes a
+# process's parent only by reparenting it when the parent dies, so CUR != ORIG
+# means the caller is gone. ORIG == 1 in the host namespace means the caller
+# was gone before test-slot started (only init's own children start there).
+# Prints alive | gone | unknown (an unreadable input is never "alive").
+parent_state() {
+  [[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ && -n $3 ]] || { printf 'unknown\n'; return; }
+  if [ "$1" != "$2" ]; then printf 'gone\n'; return; fi
+  if [ "$1" = 1 ] && [ "$3" = "$HOST_PID_NS" ]; then printf 'gone\n'; return; fi
+  printf 'alive\n'
 }
 
 # ============================================================ side effects
@@ -677,6 +725,55 @@ write_outcome() { # write_outcome KIND [EXIT]
     say "WARN could not write --outcome-file $OUTCOME_FILE. Fix: pass a path in a directory you own."
 }
 
+# current_ppid: this process's parent pid now, read from the kernel (bash's
+# $PPID is fixed at startup). A builtin read: no fork. Empty when unreadable.
+current_ppid() {
+  local stat rest ppid=""
+  if read -r stat 2>/dev/null <"/proc/$$/stat"; then
+    rest=${stat##*) }
+    read -r _ ppid _ <<<"$rest"
+  fi
+  printf '%s\n' "$ppid"
+}
+
+# orphan_exit WHY: the caller is gone (or cannot be confirmed). Leave the
+# queue FIRST (its stderr may be a dead pipe that kills us on write), then
+# log, then say so. Exits 129; CMD never ran; no outcome file.
+orphan_exit() {
+  local waited_ms=$(($(now_ms) - START_MS))
+  unregister_waiter
+  append_event orphaned "" "$waited_ms" "" ""
+  {
+    printf '%s: ORPHANED after %ss waiting: %s. Left the queue; the command did NOT run.\n' \
+      "$PROG" "$((waited_ms / 1000))" "$1"
+    printf 'Fix: keep the caller alive until test-slot returns (block on it). To run it detached on purpose, give it a parent that waits: setsid bash -c '"'"'test-slot -- CMD; exit $?'"'"' &\n'
+  } >&2
+  exit 129
+}
+
+# check_parent [startup]: return 0 while the caller that started test-slot
+# is still its parent; otherwise orphan_exit (DND-925). At startup an
+# unreadable parent is a refusal (exit 2) rather than a guess.
+check_parent() {
+  local cur st
+  cur=$(current_ppid)
+  st=$(parent_state "$ORIG_PPID" "$cur" "$PID_NS")
+  case $st in
+    alive) return 0 ;;
+    gone)
+      if [ "$ORIG_PPID" = "$cur" ]; then
+        orphan_exit "it started under PID 1 (its caller was already gone)"
+      fi
+      orphan_exit "its caller (pid $ORIG_PPID) is gone; it was reparented to pid $cur"
+      ;;
+  esac
+  if [ "${1:-}" = startup ]; then
+    die_usage "cannot read this process's parent pid (/proc/$$/stat: '$cur', pid ns: '$PID_NS'); test-slot never queues a run it cannot tie to a live caller." \
+      "run test-slot on Linux with /proc mounted and readable."
+  fi
+  orphan_exit "its parent pid can no longer be read (/proc/$$/stat), so its caller cannot be confirmed alive"
+}
+
 timeout_exit() {
   local waited_ms=$(($(now_ms) - START_MS)) lines
   lines=$(holder_lines)
@@ -737,6 +834,7 @@ wait_lock() {
   flock -n "$mode" "$fd" && return 0
   if ! ((ANNOUNCED)); then
     interruptible flock "$mode" -w "$QUEUE_GRACE_S" "$fd" && return 0
+    check_parent
     announce_waiting
   fi
   while :; do
@@ -744,7 +842,9 @@ wait_lock() {
     ((rem > 0)) || timeout_exit
     chunk=$(((rem + 999) / 1000))
     ((chunk > HEARTBEAT_S)) && chunk=$HEARTBEAT_S
+    ((chunk > PARENT_CHECK_S)) && chunk=$PARENT_CHECK_S
     interruptible flock "$mode" -w "$chunk" "$fd" && return 0
+    check_parent
     maybe_heartbeat
   done
 }
@@ -753,6 +853,7 @@ wait_lock() {
 wait_turn() {
   local pred pfd
   while :; do
+    check_parent
     pred=$(predecessor)
     [ -n "$pred" ] || return 0
     # Gone between the scan and the open: it left the queue; rescan.
@@ -765,6 +866,7 @@ wait_turn() {
 # acquire — take a slot (or all N with --exclusive), in arrival order.
 acquire() {
   local qfd rem nap next_hb
+  check_parent startup
   enqueue
   wait_turn
   # Head of the queue. queue.lock is where a pre-DND-823 waiter queues, so
@@ -772,10 +874,12 @@ acquire() {
   { exec {qfd}>>"$POOL/queue.lock"; } 2>/dev/null || die_usage "cannot open $POOL/queue.lock." \
     "check $POOL is yours with mode 0700 and writable."
   wait_lock "$qfd" -x
-  # Poll the slots at POLL_S, bounded by the deadline.
+  # Poll the slots at POLL_S, bounded by the deadline; a slot is never taken
+  # for a caller that is gone (DND-925).
+  check_parent
   if ! try_acquire; then
     announce_waiting
-    while ! try_acquire; do
+    while check_parent && ! try_acquire; do
       rem=$(remaining_ms)
       ((rem > 0)) || timeout_exit
       maybe_heartbeat
@@ -1097,6 +1201,9 @@ main() {
   START_MS=$(now_ms)
   DEADLINE_MS=$((START_MS + WAIT_TIMEOUT_S * 1000))
   SLOT=""
+  # DND-925: the caller this run belongs to, and this pid namespace.
+  ORIG_PPID=$PPID
+  PID_NS=$(readlink /proc/self/ns/pid 2>/dev/null)
 
   local rc
   if reentrant_slot; then
@@ -1112,6 +1219,9 @@ main() {
   trap 'abandon_wait 143' TERM
   trap 'abandon_wait 129' HUP
   acquire
+  # The last wait may have ended as the caller died: never run CMD for it.
+  # (Its slot fds close with this process.)
+  check_parent
   trap - INT TERM HUP
 
   local waited_ms=$(($(now_ms) - START_MS)) ran_start
