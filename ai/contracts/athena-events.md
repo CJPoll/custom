@@ -4853,12 +4853,29 @@ departures (*Poller (fallback only)*), so the index cannot rely on it.
   DND-439 declares the forge read. `slack_ask` and `manual` items have no
   source state to re-read, and only the owner or a lease closes them.
 - **What the read finds decides the close.** A page the source reports
-  archived, trashed or definitively not found closes `closed_by:
-  source_deleted`. A page that is no longer in the database its subscription
-  binds, or whose subscription binding the owner removed, closes `closed_by:
-  source_out_of_scope`. A transient read failure is retried under a bounded
-  budget. After that the item fails with `resync-failed` in the index-failure
-  record, and it stays as it was.
+  archived or trashed closes `closed_by: source_deleted`. A page that is no
+  longer in the database its subscription binds, or whose subscription binding
+  the owner removed, closes `closed_by: source_out_of_scope`. So does a page
+  read that answers not found (`404`/`410`): Notion gives that answer both for
+  a deleted page and for one moved somewhere the integration cannot read, and
+  a read cannot tell the two apart. The reversible close is the default,
+  because a newer event for the page reopens a `source_out_of_scope` close
+  (*States*), and a wrong `source_deleted` could never reopen. Only the
+  source's own delete event (`notion.ticket.deleted`) or a read that shows the
+  page archived or trashed closes `source_deleted`. This rule is the
+  re-sync's. A `404` on a change webhook's enrichment fetch still resolves to
+  the ingress's identity-only delete event (*Sender verification and payload
+  completeness*), a race this section does not change. A transient read failure
+  is retried under a bounded budget. After that the item fails with
+  `resync-failed` in the index-failure record, and it stays as it was.
+
+  **Later (2026-09-27):** DND-897 (gen_saas #472): this bullet said a page
+  the source reports "archived, trashed or definitively not found" closes
+  `source_deleted`. Superseded: a not-found read now closes
+  `source_out_of_scope`. A `404` also answers for a page moved out of the
+  integration's sight, so a moved ticket closed `source_deleted`, which only
+  `notion.ticket.undeleted` reopens, and moving it back never reopened it. The
+  implementation recorded that as a residual (DND-762); this removes it.
 - **Each run is recorded on its own,** per (owner, source): when it ran, how
   many items it read, how many it closed, and how many failed. A run that read
   zero items still records that. The priorities page shows each source's last
@@ -4991,8 +5008,8 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | `active` → `done` | the lease holder, through `priority_complete` | `closed_by: lease_complete` |
 | `active` → `done` | the owner | `closed_by: owner` |
 | `active` → `done` | ingest, when the source status is terminal | `closed_by: source_status` |
-| `active` → `done` | ingest, on the source's delete event; or the re-sync, when the source reports the item gone | `closed_by: source_deleted` |
-| `active` → `done` | the re-sync, when the item left its subscription's scope | `closed_by: source_out_of_scope` |
+| `active` → `done` | ingest, on the source's delete event; or the re-sync, when a read shows the page archived or trashed | `closed_by: source_deleted` |
+| `active` → `done` | the re-sync, when the item left its subscription's scope, or its page read answers not found | `closed_by: source_out_of_scope` |
 | `done` → `active` (reopen) | ingest, for `closed_by` `source_status` or `source_out_of_scope`, on an event whose revision is later than the row's and whose status is non-terminal | |
 | `done` → `active` (reopen) | ingest, for `closed_by: source_deleted`, on `notion.ticket.undeleted` only | |
 
