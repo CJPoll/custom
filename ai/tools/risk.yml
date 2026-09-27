@@ -128,6 +128,10 @@ tools:
   # wrapped CMD; DND-486 (wiring into integration-gate / captain Verify) must
   # account for this.
   test-slot:               { class: destructive, reason: wrapper }
+  # test-slot-bench (DND-489) runs a caller-supplied gate command (default
+  # gen_saas bin/prep-commit.sh, which starts docker stacks) k at a time while
+  # holding every slot. Worst case it executes whatever --cmd is: destructive.
+  test-slot-bench:         { class: destructive, reason: wrapper }
 
   # --- skill executables (DND-508), keyed by their path under ai/ ---
   # readOnly

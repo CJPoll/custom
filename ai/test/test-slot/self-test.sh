@@ -182,6 +182,17 @@ d	e"
   t eval '! ticket_of /p/waiters/123-1790000000.w >/dev/null'
   t eval '! ticket_of /p/waiters/.q-5.99.tmp >/dev/null'
   t eval '! ticket_of /p/waiters/q-.w >/dev/null'
+  # DND-489: N is per machine. A host with no measured entry gets the
+  # provisional default, and the basis names the host that missed.
+  t eq "$(n_for_host no-such-host-dnd489)" "$TEST_SLOT_N	provisional, unmeasured on host no-such-host-dnd489"
+  t eq "$(n_for_host '')" "$TEST_SLOT_N	provisional, unmeasured on host <unknown>"
+  # Every measured entry is a sane N and cites the sizing record.
+  while IFS= read -r h; do
+    [ -n "$h" ] || continue
+    IFS=$'\t' read -r hn hb < <(n_for_host "$h")
+    t parse_n "$hn"
+    t eval '[[ $hb == "measured "* && $hb == *"ai/docs/test-slot-sizing.md"* ]]'
+  done < <(sed -n '/^n_for_host() {/,/^}/p' "$BIN" | sed -n 's/^    \([A-Za-z0-9][A-Za-z0-9._-]*\)) .*/\1/p')
   exit "$f"
 )
 if [ $? -eq 0 ]; then ok; else bad helpers "pure helper cases failed (see above)"; fi
@@ -215,11 +226,17 @@ for bad_n in 0 x; do
 done
 
 # 5: ATHENA_TEST_SLOTS without the dir seam (or with the dir seam = the
-# default path) is ignored: N shown is the script constant.
+# default path) is ignored: N shown is this host's N (DND-489: n_for_host).
+host_nb="$(bash -c 'source "$1"; n_for_host "${HOSTNAME:-}"' _ "$BIN")"
+host_n="${host_nb%%	*}"; host_basis="${host_nb#*	}"
 out="$(env -u ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS=9 XDG_STATE_HOME="$W/xdg5" "$BIN" --status 2>&1)"
-check 5-const eval '[[ "$out" == *"N=3 (provisional, unmeasured)"* && "$out" != *"N=9"* ]]'
+check 5-const eval '[[ "$out" == *"N=$host_n ($host_basis)"* && "$out" != *"N=9"* ]]'
 out="$(ATHENA_TEST_SLOT_DIR="$W/xdg5b/athena/test-slots" ATHENA_TEST_SLOTS=9 XDG_STATE_HOME="$W/xdg5b" "$BIN" --status 2>&1)"
-check 5-default-path-const eval '[[ "$out" == *"N=3 (provisional, unmeasured)"* && "$out" != *"N=9"* ]]'
+check 5-default-path-const eval '[[ "$out" == *"N=$host_n ($host_basis)"* && "$out" != *"N=9"* ]]'
+# 5c: an unknown host gets the provisional default, named in --status/--json.
+out="$(env -u ATHENA_TEST_SLOT_DIR HOSTNAME=no-such-host-dnd489 XDG_STATE_HOME="$W/xdg5c" "$BIN" --status --json 2>/dev/null)"
+check 5c-unknown-host-basis eq "$(jq -r .n_basis <<<"$out")" "provisional, unmeasured on host no-such-host-dnd489"
+check 5c-unknown-host-provisional eq "$(jq .provisional <<<"$out")" true
 check 5-status-created-nothing absent "$W/xdg5/athena"
 
 # 6: an existing pool dir with mode 0755 is refused with a chmod Fix.

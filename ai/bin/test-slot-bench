@@ -1,0 +1,625 @@
+#!/usr/bin/env bash
+# test-slot-bench — measure load and wall-clock of a heavy gate at several
+# concurrency levels, and derive test-slot's N for THIS machine from the data.
+# DND-489 (DND-474 part 3). Design: Notion DND-489 A&E (architect-474-450).
+#
+# WHY THIS EXISTS
+# test-slot (DND-485) bounds how many heavy gates share one machine at N. N
+# shipped as a guess (3). This bench replaces the guess with a measurement: it
+# runs the same gate, at the same pinned SHA, k at a time for each level k,
+# and records per run the wall-clock and exit, and per level the load. N must
+# come from measurement, and the machine can change, so the bench is committed
+# and re-runnable.
+#
+# FASTER, NEVER WEAKER (ai/blocks/ops/safety-checks.md). The bench runs the
+# gate exactly as a captain would (gen_saas bin/prep-commit.sh in its default
+# check mode, no --fix). It changes no gate. A run that fails at k>1 and passes
+# at k=1 is a contention signal: it is recorded and disqualifies that level. It
+# is never retried away.
+#
+# QUIET BOX, AND CONTAMINATION IS n/a, NEVER A NUMBER. The whole measurement
+# runs inside `test-slot --exclusive`, so every slotted gate on the machine
+# waits (visibly) while it runs. Before each level the bench waits (bounded)
+# for load1 to settle at or under --bg-threshold, then samples the BACKGROUND:
+# load1, heavy runs outside any slot (UNSLOTTED), and slot holders the bench
+# does not own (a held slot-<i>.lock with i > N, left by a test-slot with a
+# different N). It probes the same again every 6th load sample during the
+# level. A level-rep whose background was over the threshold, or that saw a
+# foreign heavy run or holder, or whose probe could not be read, is labelled
+# CONTAMINATED with the reason. The decision rule skips it, and says so.
+#
+# DECISION RULE (fixed before measuring; --decide re-applies it to any data):
+#   A level k is SCORED from its clean (uncontaminated) reps; it needs at least
+#   --min-reps of them, else it is n/a. It QUALIFIES when every run of every
+#   clean rep passed AND every clean rep's peak load1 <= --ceiling.
+#   N = the largest scored k such that it and every lower scored k qualify.
+#   k=1 must be scored and qualify, else there is no baseline: refuse.
+#   If the first failing level is more than one above N, REQUEST the midpoint
+#   (e.g. 3 qualifies, 5 fails -> measure 4). Never extrapolate above the
+#   largest measured k.
+#   --ceiling defaults to 12, the owner's dispatch threshold (hold dispatch
+#   while 1-min load > 12; memory captain-capacity-hardware-bound): a slot
+#   pool that by itself pushes load over 12 would hold dispatch forever.
+#
+# Usage:
+#   test-slot-bench --worktrees W1,W2,... [--levels 1,3,5] [--reps 2]
+#                   [--cmd 'bin/prep-commit.sh'] [--out-dir DIR]
+#                   [--bg-threshold 2.0] [--ceiling 12] [--min-reps 2]
+#                   [--settle-s 15] [--settle-max 40] [--sample-s 5]
+#                   [--tail-s 60] [--run-timeout 3600] [--wait-timeout 3600]
+#                   [--label TEXT] [--dry-run]
+#   test-slot-bench --decide LEVELS_CSV[,LEVELS_CSV...] [--ceiling X] [--min-reps R]
+#   test-slot-bench --help | --self-test
+#
+#   --worktrees   pre-bootstrapped checkouts, all at the SAME commit (the
+#                 pinned SHA; refused otherwise), at least max(--levels) of
+#                 them. Level k runs in the first k. Bootstrap (deps, compile,
+#                 test DB, one warm-up run) is the caller's and is not timed.
+#   --cmd         run in each worktree with `bash -c`; a relative first word
+#                 must be executable in every worktree.
+#   --out-dir     default ${XDG_STATE_HOME:-~/.local/state}/athena/test-slots/bench/<utc>
+#   --dry-run     print the pinned SHA, nproc, worktrees, and plan; create
+#                 nothing, run nothing.
+#
+# Output (in --out-dir): meta.txt, runs.csv (one row per run: level, rep, run,
+# worktree, wall_s, exit, passed, background load1/unslotted/foreign holders,
+# contaminated), levels.csv (one row per level-rep: peak/mean load1, peak
+# runnable, median/max wall, contamination and reason), load-<k>-<rep>.csv
+# (every sample), census-<k>-<rep>-{pre,post}.txt, run-<k>-<rep>-<i>.log,
+# decision.txt and summary.md.
+#
+# Exit: 0 measured (see decision.txt) | 2 usage or refused input | 75 the
+# exclusive slot wait timed out (nothing ran) | 1 --decide refused (no
+# baseline) | 128+n interrupted.
+#
+# Test seams (self-test only; honored ONLY while ATHENA_TEST_SLOT_DIR points at
+# a non-default pool, the same rule test-slot uses): TEST_SLOT_BENCH_TEST_SLOT
+# (test-slot binary), TEST_SLOT_BENCH_LOADAVG (a loadavg file),
+# TEST_SLOT_BENCH_CENSUS (census command), TEST_SLOT_BENCH_FAKE_UNSLOTTED
+# (probe's unslotted count).
+#
+# Self-test: ai/test/test-slot-bench/self-test.sh (discovered by harness-gate);
+# `test-slot-bench --self-test` execs it.
+
+set -u -o pipefail
+
+PROG=test-slot-bench
+EXIT_USAGE=2
+EXIT_TIMEOUT=75
+PROBE_EVERY=6
+
+usage() {
+  awk 'NR == 1 { next } /^# Usage:/ { on = 1 } /^# Output/ { on = 0 } on { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+}
+
+say() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+die_usage() { # die_usage MESSAGE FIX
+  printf '%s: %s\n' "$PROG" "$1" >&2
+  printf 'Fix: %s\n' "$2" >&2
+  exit "$EXIT_USAGE"
+}
+
+# ============================================================ pure helpers
+
+is_pos_int() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
+is_num() { [[ $1 =~ ^[0-9]+([.][0-9]+)?$ ]]; }
+
+# num_le A B — 0 when number A <= number B.
+num_le() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 <= b + 0) }'; }
+
+# parse_levels CSV — sorted unique positive ints, space separated; 1 if bad.
+parse_levels() {
+  local IFS=, v out=()
+  for v in $1; do is_pos_int "$v" || return 1; out+=("$v"); done
+  ((${#out[@]})) || return 1
+  printf '%s\n' "${out[@]}" | sort -n -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# contamination_reason THRESHOLD BG_LOAD1 UNSLOTTED FOREIGN_HOLDERS
+# Prints "" for a clean start, else the reasons joined by ';'. A value that
+# could not be read ("unknown") contaminates: not measured is not clean.
+contamination_reason() {
+  local thr=$1 l=$2 u=$3 f=$4 r=()
+  if ! is_num "$l"; then r+=("load1=unknown")
+  elif ! num_le "$l" "$thr"; then r+=("bg_load1=$l>$thr"); fi
+  if ! [[ $u =~ ^[0-9]+$ ]]; then r+=("unslotted=unknown")
+  elif ((u > 0)); then r+=("unslotted=$u"); fi
+  if ! [[ $f =~ ^[0-9]+$ ]]; then r+=("foreign_holders=unknown")
+  elif ((f > 0)); then r+=("foreign_holders=$f"); fi
+  local IFS=';'
+  printf '%s\n' "${r[*]}"
+}
+
+# parse_unslotted STATUS_JSON — the "unslotted" count from `test-slot --status
+# --json`, or "unknown" when it cannot be read.
+parse_unslotted() {
+  local v
+  v=$(jq -r '.unslotted // "unknown"' <<<"$1" 2>/dev/null) || v=unknown
+  [[ $v =~ ^[0-9]+$ ]] || v=unknown
+  printf '%s\n' "$v"
+}
+
+# load_stats LOAD_CSV START END — "peak_load1 mean_load1 peak_runnable".
+# Peak over every sample (the tail catches load1's lag); mean over the run
+# window [START, END]. Empty sample set -> "n/a n/a n/a".
+load_stats() {
+  awk -F, -v s="$2" -v e="$3" '
+    NR == 1 { next }
+    { n++; if ($3 + 0 > p || n == 1) p = $3 + 0; if ($5 + 0 > r) r = $5 + 0
+      if ($1 + 0 >= s + 0 && $1 + 0 <= e + 0) { m += $3; mn++ } }
+    END { if (!n) { print "n/a n/a n/a"; exit }
+          printf "%.2f %s %d\n", p, (mn ? sprintf("%.2f", m / mn) : "n/a"), r }' "$1"
+}
+
+# decide CEILING MIN_REPS < levels.csv rows (header lines skipped). Prints one
+# line per level, then `DECISION: N=<n>` (exit 0) or `DECISION: none` (exit 1),
+# then an optional `REQUEST: measure k=<k>`.
+# Columns used: 1 level, 3 runs, 4 passed, 7 peak_load1, 13 contaminated.
+decide() {
+  awk -F, -v ceil="$1" -v minr="$2" '
+    $1 == "level" || NF < 13 { next }
+    { k = $1 + 0; seen[k] = 1
+      if ($13 == "yes") { dirty[k]++; next }
+      clean[k]++
+      if ($4 + 0 != $3 + 0) failpass[k] = 1
+      if ($7 == "n/a" || $7 + 0 > ceil + 0) failload[k] = 1
+      if ($7 != "n/a" && $7 + 0 > peak[k] + 0) peak[k] = $7 + 0 }
+    END {
+      n = 0; for (k in seen) ks[++n] = k + 0
+      for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (ks[j] < ks[i]) { t = ks[i]; ks[i] = ks[j]; ks[j] = t }
+      N = 0; stop = 0; failk = 0; base = 0
+      for (i = 1; i <= n; i++) {
+        k = ks[i]
+        if (clean[k] + 0 < minr) {
+          printf "level %d: n/a (clean reps %d < %d; contaminated reps %d, excluded)\n", k, clean[k], minr, dirty[k]
+          continue
+        }
+        ok = !(failpass[k] || failload[k])
+        why = ""
+        if (failpass[k]) why = why " a run failed;"
+        if (failload[k]) why = why sprintf(" peak load1 > ceiling %s;", ceil)
+        printf "level %d: %s (clean reps %d, contaminated reps %d excluded, peak load1 %.2f)%s\n", k, (ok ? "qualifies" : "FAILS:" why), clean[k], dirty[k], peak[k], ""
+        if (k == 1) base = ok
+        if (stop) continue
+        if (ok) N = k; else { stop = 1; failk = k }
+      }
+      if (!base || N == 0) { print "DECISION: none (k=1 is not a scored, qualifying baseline)"; exit 1 }
+      printf "DECISION: N=%d\n", N
+      if (failk && failk - N > 1) printf "REQUEST: measure k=%d (between qualifying %d and failing %d)\n", int((N + failk) / 2), N, failk
+    }'
+}
+
+# ============================================================ side effects
+
+now() { printf '%s\n' "$EPOCHREALTIME"; }
+iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+canon() { realpath -m -- "$1" 2>/dev/null || printf '%s\n' "$1"; }
+
+default_pool_dir() {
+  local base=${XDG_STATE_HOME:-}
+  [[ $base == /* ]] || base="${HOME:-/nonexistent}/.local/state"
+  printf '%s/athena/test-slots\n' "$base"
+}
+
+# resolve_seams — sets TS (test-slot), LOADAVG, CENSUS, FAKE_UNSLOTTED. Seams
+# are honored only with ATHENA_TEST_SLOT_DIR set to a non-default pool.
+resolve_seams() {
+  local here
+  here=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
+  TS="$HOME/dev/custom/ai/bin/test-slot"
+  LOADAVG=/proc/loadavg
+  CENSUS="$here/contention-census"
+  FAKE_UNSLOTTED=""
+  local seam=${ATHENA_TEST_SLOT_DIR:-}
+  if [ -n "$seam" ] && [ "$(canon "$seam")" != "$(canon "$(default_pool_dir)")" ]; then
+    TS=${TEST_SLOT_BENCH_TEST_SLOT:-$TS}
+    LOADAVG=${TEST_SLOT_BENCH_LOADAVG:-$LOADAVG}
+    CENSUS=${TEST_SLOT_BENCH_CENSUS:-$CENSUS}
+    FAKE_UNSLOTTED=${TEST_SLOT_BENCH_FAKE_UNSLOTTED:-}
+  elif [ -n "${TEST_SLOT_BENCH_TEST_SLOT:-}${TEST_SLOT_BENCH_LOADAVG:-}${TEST_SLOT_BENCH_CENSUS:-}${TEST_SLOT_BENCH_FAKE_UNSLOTTED:-}" ]; then
+    say "WARN ignoring TEST_SLOT_BENCH_* seams: they apply only with ATHENA_TEST_SLOT_DIR set to a non-default pool."
+  fi
+}
+
+load1_now() { local l _r; read -r l _r <"$LOADAVG" 2>/dev/null && printf '%s\n' "$l" || printf 'unknown\n'; }
+
+# probe — "unslotted foreign_holders" right now ("unknown" when unreadable).
+probe() {
+  local st u n pool f i fd fh=0
+  st=$("$TS" --status --json 2>/dev/null) || st=""
+  if [ -n "$FAKE_UNSLOTTED" ]; then u=$FAKE_UNSLOTTED; else u=$(parse_unslotted "$st"); fi
+  n=$(jq -r '.n // empty' <<<"$st" 2>/dev/null)
+  pool=$(jq -r '.pool // empty' <<<"$st" 2>/dev/null)
+  if ! is_pos_int "${n:-x}" || [ -z "$pool" ]; then
+    printf '%s unknown\n' "$u"
+    return
+  fi
+  for f in "$pool"/slot-*.lock; do
+    [ -e "$f" ] || continue
+    i=${f##*/slot-}
+    i=${i%.lock}
+    [[ $i =~ ^[0-9]+$ ]] && ((i > n)) || continue
+    { exec {fd}<"$f"; } 2>/dev/null || continue
+    flock -n -s "$fd" || fh=$((fh + 1))
+    exec {fd}<&-
+  done
+  printf '%s %s\n' "$u" "$fh"
+}
+
+census() { # census FILE
+  if [ -x "$CENSUS" ] || command -v "$CENSUS" >/dev/null 2>&1; then
+    "$CENSUS" >"$1" 2>&1 || printf 'census exited %s\n' "$?" >>"$1"
+  else
+    printf 'census unavailable: %s not executable\n' "$CENSUS" >"$1"
+  fi
+}
+
+# ============================================================ argument parsing
+
+LEVELS_RAW=1,3,5
+REPS=2
+CMD_STR=bin/prep-commit.sh
+OUT_DIR=""
+BG_THRESHOLD=2.0
+CEILING=12
+MIN_REPS=""
+SETTLE_S=15
+SETTLE_MAX=40
+SAMPLE_S=5
+TAIL_S=60
+RUN_TIMEOUT=3600
+WAIT_TIMEOUT=3600
+LABEL="DND-489 bench"
+DRY_RUN=0
+WORKTREES_RAW=""
+DECIDE_RAW=""
+INNER=0
+MODE=run
+
+parse_args() {
+  local seen=" " flag v
+  while (($#)); do
+    flag=${1%%=*}
+    case $flag in
+      --*) case $seen in *" $flag "*) die_usage "$flag given more than once." "pass $flag once." ;; esac
+        seen="$seen$flag " ;;
+    esac
+    case $1 in
+      -h | --help) usage; exit 0 ;;
+      --self-test) MODE=selftest ;;
+      --dry-run) DRY_RUN=1 ;;
+      --worktrees | --levels | --reps | --cmd | --out-dir | --bg-threshold | --ceiling | --min-reps | \
+        --settle-s | --settle-max | --sample-s | --tail-s | --run-timeout | --wait-timeout | --label | \
+        --decide | --inner-out)
+        { (($# >= 2)) && [ -n "$2" ] && [ "${2#--}" = "$2" ]; } || die_usage "$1 needs a value." "pass $1 VALUE."
+        v=$2
+        case $1 in
+          --worktrees) WORKTREES_RAW=$v ;;
+          --levels) LEVELS_RAW=$v ;;
+          --reps) REPS=$v ;;
+          --cmd) CMD_STR=$v ;;
+          --out-dir) OUT_DIR=$v ;;
+          --bg-threshold) BG_THRESHOLD=$v ;;
+          --ceiling) CEILING=$v ;;
+          --min-reps) MIN_REPS=$v ;;
+          --settle-s) SETTLE_S=$v ;;
+          --settle-max) SETTLE_MAX=$v ;;
+          --sample-s) SAMPLE_S=$v ;;
+          --tail-s) TAIL_S=$v ;;
+          --run-timeout) RUN_TIMEOUT=$v ;;
+          --wait-timeout) WAIT_TIMEOUT=$v ;;
+          --label) LABEL=$v ;;
+          --decide) DECIDE_RAW=$v; MODE=decide ;;
+          --inner-out) OUT_DIR=$v; INNER=1 ;;
+        esac
+        shift
+        ;;
+      *) die_usage "unknown argument '$1'." "see test-slot-bench --help for the accepted flags." ;;
+    esac
+    shift
+  done
+  [ -n "$MIN_REPS" ] || MIN_REPS=$REPS
+  is_pos_int "$REPS" || die_usage "--reps '$REPS' is not a positive integer." "pass e.g. --reps 2."
+  is_pos_int "$MIN_REPS" || die_usage "--min-reps '$MIN_REPS' is not a positive integer." "pass e.g. --min-reps 2."
+  is_num "$CEILING" || die_usage "--ceiling '$CEILING' is not a number." "pass a load1 value, e.g. --ceiling 12."
+  is_num "$BG_THRESHOLD" || die_usage "--bg-threshold '$BG_THRESHOLD' is not a number." "pass a load1 value, e.g. --bg-threshold 2.0."
+  local n
+  for n in SETTLE_MAX RUN_TIMEOUT WAIT_TIMEOUT; do
+    is_pos_int "${!n}" || die_usage "${n,,} '${!n}' is not a positive integer." "pass whole units, e.g. 60."
+  done
+  for n in SETTLE_S SAMPLE_S TAIL_S; do
+    is_num "${!n}" || die_usage "${n,,} '${!n}' is not a number of seconds." "pass seconds, e.g. 5."
+  done
+  num_le "$SAMPLE_S" 0 && die_usage "--sample-s must be above 0." "pass e.g. --sample-s 5."
+  LEVELS=$(parse_levels "$LEVELS_RAW") || die_usage "--levels '$LEVELS_RAW' is not a list of positive integers." \
+    "pass e.g. --levels 1,3,5."
+}
+
+# validate_worktrees — sets WTS (array) and SHA; refuses bad input with Fix.
+validate_worktrees() {
+  local IFS=, w first max top sha rel
+  [ -n "$WORKTREES_RAW" ] || die_usage "--worktrees is required." \
+    "pass the pre-bootstrapped checkouts, comma separated: --worktrees /path/a,/path/b,..."
+  WTS=()
+  for w in $WORKTREES_RAW; do WTS+=("$(canon "$w")"); done
+  max=${LEVELS##* }
+  ((${#WTS[@]} >= max)) || die_usage "--levels needs $max worktrees; got ${#WTS[@]}." \
+    "pass at least $max worktrees (one per concurrent run), or lower --levels."
+  [ "$(printf '%s\n' "${WTS[@]}" | sort -u | wc -l)" -eq "${#WTS[@]}" ] || die_usage \
+    "--worktrees names one checkout twice." "pass distinct worktrees: two runs sharing a tree share its build and compose stack."
+  first=${CMD_STR%% *}
+  SHA=""
+  for w in "${WTS[@]}"; do
+    [ -d "$w" ] || die_usage "worktree $w does not exist." "create it (e.g. ~/dev/custom/scripts/wt-preflight <branch> gen_saas) and bootstrap it."
+    if [[ $first != /* ]]; then
+      rel="$w/$first"
+      [ -x "$rel" ] || die_usage "$w has no executable $first (--cmd '$CMD_STR')." \
+        "pass gen_saas checkouts (they carry bin/prep-commit.sh), or a --cmd whose first word exists in each."
+    fi
+    sha=$(git -C "$w" rev-parse HEAD 2>/dev/null) || die_usage "$w is not a git checkout." \
+      "pass git worktrees of the repo under test."
+    top=$(git -C "$w" rev-parse --show-toplevel 2>/dev/null)
+    [ "$(canon "$top")" = "$w" ] || die_usage "$w is not a checkout's top level (top is $top)." \
+      "pass each worktree's root directory."
+    if [ -z "$SHA" ]; then SHA=$sha
+    elif [ "$sha" != "$SHA" ]; then
+      die_usage "worktrees are at different commits ($SHA vs $sha in $w)." \
+        "pin one SHA: \`git -C <wt> checkout --detach $SHA\` in every worktree, then re-bootstrap if deps changed."
+    fi
+  done
+}
+
+print_plan() {
+  local k rep i
+  printf 'pinned SHA: %s\n' "$SHA"
+  printf 'host: %s  nproc: %s\n' "${HOSTNAME:-unknown}" "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
+  printf 'cmd: %s\n' "$CMD_STR"
+  printf 'levels: %s  reps: %s  (rep-major: every level once, then again)\n' "$LEVELS" "$REPS"
+  printf 'bg-threshold: %s  ceiling: %s  min-reps: %s  settle: %s x %ss  sample: %ss  tail: %ss  run-timeout: %ss\n' \
+    "$BG_THRESHOLD" "$CEILING" "$MIN_REPS" "$SETTLE_MAX" "$SETTLE_S" "$SAMPLE_S" "$TAIL_S" "$RUN_TIMEOUT"
+  printf 'held under: %s --exclusive --label %q --wait-timeout %s\n' "$TS" "$LABEL" "$WAIT_TIMEOUT"
+  printf 'worktrees:\n'
+  for ((i = 0; i < ${#WTS[@]}; i++)); do printf '  %d %s\n' "$((i + 1))" "${WTS[i]}"; done
+  for ((rep = 1; rep <= REPS; rep++)); do
+    for k in $LEVELS; do printf 'step: rep %d level %d -> worktrees 1..%d\n' "$rep" "$k" "$k"; done
+  done
+}
+
+# ============================================================ the measurement
+
+SAMPLER_PID=""
+RUN_PIDS=()
+RUN_TPIDS=()
+
+# stop_everything — the EXIT path of an interrupted measurement: stop the
+# sampler, TERM each run's wrapper (it forwards to timeout, which signals the
+# gate's whole group), wait (bounded) for each; a wrapper still alive after
+# that has its gate's group KILLed. A wrapper that exited is never followed by
+# a group KILL, so a recycled group id cannot be hit.
+stop_everything() {
+  local i p
+  if [ -n "$SAMPLER_PID" ]; then kill "$SAMPLER_PID" 2>/dev/null; wait "$SAMPLER_PID" 2>/dev/null; fi
+  SAMPLER_PID=""
+  # TERM the wrapper AND the gate's group directly: a wrapper signalled
+  # before it set its trap dies without forwarding.
+  for ((i = 0; i < ${#RUN_PIDS[@]}; i++)); do
+    kill -TERM "${RUN_PIDS[i]}" 2>/dev/null
+    read -r p <"${RUN_TPIDS[i]}" 2>/dev/null && [[ $p =~ ^[0-9]+$ ]] && kill -TERM -- "-$p" 2>/dev/null
+  done
+  for ((i = 0; i < ${#RUN_PIDS[@]}; i++)); do
+    timeout 90 tail --pid="${RUN_PIDS[i]}" -f /dev/null 2>/dev/null && continue
+    read -r p <"${RUN_TPIDS[i]}" 2>/dev/null && [[ $p =~ ^[0-9]+$ ]] && kill -KILL -- "-$p" 2>/dev/null
+    kill -KILL "${RUN_PIDS[i]}" 2>/dev/null
+  done
+  RUN_PIDS=()
+  RUN_TPIDS=()
+}
+
+# sampler FILE STOPFILE MAX — every SAMPLE_S: "ts,elapsed,load1,load5,runnable"
+# and, every PROBE_EVERY samples, the probe to FILE.probe. Bounded by MAX.
+sampler() {
+  local out=$1 stop=$2 max=$3 i l1 l5 rq _r t0 sl=""
+  # Killed by the level (or by stop_everything): take the pending sleep along,
+  # so nothing of the sampler outlives it.
+  trap 'kill "$sl" 2>/dev/null; exit 0' TERM
+  t0=$(now)
+  for ((i = 0; i < max; i++)); do
+    if read -r l1 l5 _r rq _r <"$LOADAVG" 2>/dev/null; then
+      printf '%s,%s,%s,%s,%s\n' "$(now)" "$(awk -v a="$(now)" -v b="$t0" 'BEGIN{printf "%.1f", a-b}')" "$l1" "$l5" "${rq%%/*}" >>"$out"
+    fi
+    if ((i % PROBE_EVERY == 0)); then printf '%s %s\n' "$(now)" "$(probe)" >>"$out.probe"; fi
+    [ -e "$stop" ] && break
+    sleep "$SAMPLE_S" &
+    sl=$!
+    wait "$sl"
+  done
+}
+
+# settle — bounded wait for load1 <= BG_THRESHOLD. Prints the final load1.
+settle() {
+  local i l
+  for ((i = 0; i < SETTLE_MAX; i++)); do
+    l=$(load1_now)
+    is_num "$l" && num_le "$l" "$BG_THRESHOLD" && break
+    sleep "$SETTLE_S"
+  done
+  load1_now
+}
+
+median() { sort -n | awk '{ v[NR] = $1 } END { if (!NR) print "n/a"; else if (NR % 2) print v[(NR + 1) / 2]; else printf "%.1f\n", (v[NR / 2] + v[NR / 2 + 1]) / 2 }'; }
+
+run_level() { # run_level K REP
+  local k=$1 rep=$2 i tag="$1-$2" bg u f reason mid_u lf stopf t_start t_end p
+  local max_samples res s e rc wall passed=0 walls=() stats contaminated mu mf pk mn pr
+  census "$OUT_DIR/census-$tag-pre.txt"
+  bg=$(settle)
+  read -r u f < <(probe)
+  lf="$OUT_DIR/load-$tag.csv"
+  stopf="$OUT_DIR/.stop-$tag"
+  printf 'ts,elapsed_s,load1,load5,runnable\n' >"$lf"
+  max_samples=$(awk -v a="$RUN_TIMEOUT" -v b="$TAIL_S" -v s="$SAMPLE_S" 'BEGIN { printf "%d", (a + b + 120) / s + 1 }')
+  say "level $k rep $rep: background load1=$bg unslotted=$u foreign_holders=$f; starting $k run(s)"
+  sampler "$lf" "$stopf" "$max_samples" &
+  SAMPLER_PID=$!
+  printf '%s\n' "$SAMPLER_PID" >"$OUT_DIR/.sampler-$tag"
+  t_start=$(now)
+  RUN_PIDS=()
+  RUN_TPIDS=()
+  for ((i = 1; i <= k; i++)); do
+    # timeout(1) makes itself a process-group leader, so the gate's whole tree
+    # is one group: TERM to this wrapper is forwarded to timeout, which passes
+    # it to that group (prep-commit then reaps its own stages).
+    bash -c '
+      cd "$1" || exit 97
+      s=$EPOCHREALTIME
+      timeout --kill-after=60 "$5" bash -c "$2" >"$3" 2>&1 </dev/null &
+      tp=$!
+      printf "%s\n" "$tp" >"$4.tpid"
+      trap "kill -TERM $tp 2>/dev/null" TERM INT HUP
+      while :; do
+        wait "$tp"
+        rc=$?
+        kill -0 "$tp" 2>/dev/null || break
+      done
+      printf "%s %s %s\n" "$s" "$EPOCHREALTIME" "$rc" >"$4"' \
+      _ "${WTS[i - 1]}" "$CMD_STR" "$OUT_DIR/run-$tag-$i.log" "$OUT_DIR/.res-$tag-$i" "$RUN_TIMEOUT" &
+    RUN_PIDS+=("$!")
+    RUN_TPIDS+=("$OUT_DIR/.res-$tag-$i.tpid")
+  done
+  printf '%s\n' "${RUN_PIDS[@]}" >"$OUT_DIR/.pids-$tag"
+  for p in "${RUN_PIDS[@]}"; do wait "$p"; done
+  RUN_PIDS=()
+  RUN_TPIDS=()
+  t_end=$(now)
+  sleep "$TAIL_S"
+  : >"$stopf"
+  wait "$SAMPLER_PID" 2>/dev/null
+  SAMPLER_PID=""
+  rm -f -- "$stopf"
+  # The mid-level probes: any foreign heavy run or holder seen while running.
+  mid_u="unknown unknown"
+  [ -s "$lf.probe" ] && mid_u=$(awk '{ if ($2 !~ /^[0-9]+$/) u = "unknown"; else if (u != "unknown" && $2 + 0 > u + 0) u = $2 + 0
+                 if ($3 !~ /^[0-9]+$/) h = "unknown"; else if (h != "unknown" && $3 + 0 > h + 0) h = $3 + 0 }
+               END { printf "%s %s\n", (u == "" ? 0 : u), (h == "" ? 0 : h) }' "$lf.probe" 2>/dev/null)
+  read -r mu mf <<<"${mid_u:-unknown unknown}"
+  # Worst of the pre-level and mid-level probes.
+  [[ $u =~ ^[0-9]+$ && $mu =~ ^[0-9]+$ ]] && ((mu > u)) && u=$mu
+  [[ $mu =~ ^[0-9]+$ ]] || u=unknown
+  [[ $f =~ ^[0-9]+$ && $mf =~ ^[0-9]+$ ]] && ((mf > f)) && f=$mf
+  [[ $mf =~ ^[0-9]+$ ]] || f=unknown
+  census "$OUT_DIR/census-$tag-post.txt"
+  reason=$(contamination_reason "$BG_THRESHOLD" "$bg" "$u" "$f")
+  contaminated=no
+  [ -n "$reason" ] && contaminated=yes
+  for ((i = 1; i <= k; i++)); do
+    res="$OUT_DIR/.res-$tag-$i"
+    if read -r s e rc <"$res" 2>/dev/null; then
+      wall=$(awk -v a="$e" -v b="$s" 'BEGIN { printf "%.1f", a - b }')
+    else
+      wall=n/a; rc=unknown
+    fi
+    [ "$rc" = 0 ] && passed=$((passed + 1))
+    [ "$wall" != n/a ] && walls+=("$wall")
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$k" "$rep" "$i" "${WTS[i - 1]}" "$wall" "$rc" \
+      "$([ "$rc" = 0 ] && echo yes || echo no)" "$bg" "$u" "$f" "$contaminated" "$reason" >>"$OUT_DIR/runs.csv"
+  done
+  stats=$(load_stats "$lf" "$t_start" "$t_end")
+  local med mx
+  med=$(printf '%s\n' "${walls[@]}" | grep -v '^$' | median)
+  mx=$(printf '%s\n' "${walls[@]}" | grep -v '^$' | sort -n | tail -1)
+  read -r pk mn pr <<<"$stats"
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$k" "$rep" "$k" "$passed" "${med:-n/a}" "${mx:-n/a}" \
+    "$pk" "$mn" "$pr" "$bg" "$u" "$f" "$contaminated" "$reason" >>"$OUT_DIR/levels.csv"
+  say "level $k rep $rep: passed $passed/$k, max wall ${mx:-n/a}s, peak load1 $pk, mean load1 $mn${reason:+, CONTAMINATED: $reason}"
+}
+
+inner() {
+  trap 'stop_everything' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
+  printf 'level,rep,run,worktree,wall_s,exit,passed,bg_load1,unslotted,foreign_holders,contaminated,reason\n' >"$OUT_DIR/runs.csv"
+  printf 'level,rep,runs,passed,median_wall_s,max_wall_s,peak_load1,mean_load1,peak_runnable,bg_load1,unslotted,foreign_holders,contaminated,reason\n' >"$OUT_DIR/levels.csv"
+  local rep k
+  for ((rep = 1; rep <= REPS; rep++)); do
+    for k in $LEVELS; do run_level "$k" "$rep"; done
+  done
+  decide "$CEILING" "$MIN_REPS" <"$OUT_DIR/levels.csv" >"$OUT_DIR/decision.txt"
+  write_summary
+  return 0
+}
+
+write_summary() {
+  {
+    printf '# test-slot-bench %s\n\n' "$(basename -- "$OUT_DIR")"
+    sed 's/^/    /' "$OUT_DIR/meta.txt"
+    printf '\n| k | rep | passed | median wall s | max wall s | peak load1 | mean load1 | peak runnable | bg load1 | contaminated |\n'
+    printf '|---|---|---|---|---|---|---|---|---|---|\n'
+    awk -F, 'NR > 1 { printf "| %s | %s | %s/%s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $4, $3, $5, $6, $7, $8, $9, $10, ($13 == "yes" ? "yes: " $14 : "no") }' "$OUT_DIR/levels.csv"
+    printf '\nDecision (ceiling %s, min clean reps %s):\n\n' "$CEILING" "$MIN_REPS"
+    sed 's/^/    /' "$OUT_DIR/decision.txt"
+  } >"$OUT_DIR/summary.md"
+}
+
+main() {
+  parse_args "$@"
+  case $MODE in
+    selftest)
+      local suite
+      suite="$(cd "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")/.." && pwd)/test/test-slot-bench/self-test.sh"
+      [ -x "$suite" ] || die_usage "self-test suite missing: $suite." "restore ai/test/test-slot-bench/self-test.sh (chmod +x)."
+      exec "$suite"
+      ;;
+    decide)
+      local IFS=, files=() f
+      for f in $DECIDE_RAW; do
+        [ -r "$f" ] || die_usage "--decide: cannot read $f." "pass levels.csv files written by test-slot-bench."
+        files+=("$f")
+      done
+      unset IFS
+      if cat -- "${files[@]}" | decide "$CEILING" "$MIN_REPS"; then exit 0; fi
+      printf 'Fix: measure (or re-measure) level 1 in a quiet window; the rule has no baseline without it.\n' >&2
+      exit 1
+      ;;
+  esac
+  resolve_seams
+  validate_worktrees
+  if ((INNER)); then
+    inner
+    exit 0
+  fi
+  if ((DRY_RUN)); then
+    print_plan
+    exit 0
+  fi
+  [ -n "$OUT_DIR" ] || OUT_DIR="$(default_pool_dir)/bench/$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p -- "$OUT_DIR" || die_usage "cannot create $OUT_DIR." "pass a writable --out-dir."
+  OUT_DIR=$(canon "$OUT_DIR")
+  { printf 'started: %s\n' "$(iso_now)"; print_plan; } >"$OUT_DIR/meta.txt"
+  say "output in $OUT_DIR; acquiring every slot (--exclusive, wait up to ${WAIT_TIMEOUT}s)"
+  local tspid rc outcome
+  "$TS" --exclusive --label "$LABEL" --wait-timeout "$WAIT_TIMEOUT" --outcome-file "$OUT_DIR/outcome" -- \
+    "$(realpath -- "${BASH_SOURCE[0]}")" "$@" --inner-out "$OUT_DIR" &
+  tspid=$!
+  trap 'kill -TERM "$tspid" 2>/dev/null' TERM HUP
+  trap 'kill -INT "$tspid" 2>/dev/null' INT
+  while :; do
+    wait "$tspid"
+    rc=$?
+    kill -0 "$tspid" 2>/dev/null || break
+  done
+  trap - TERM HUP INT
+  outcome=$(cat "$OUT_DIR/outcome" 2>/dev/null)
+  if [ "$outcome" = timeout ]; then
+    say "TIMEOUT: the pool never came free for --exclusive within ${WAIT_TIMEOUT}s; nothing ran."
+    printf 'Fix: re-run when the fleet is idler (check `%s --status`), or pass a longer --wait-timeout.\n' "$TS" >&2
+    exit "$EXIT_TIMEOUT"
+  fi
+  [ -e "$OUT_DIR/summary.md" ] && cat "$OUT_DIR/summary.md"
+  exit "$rc"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

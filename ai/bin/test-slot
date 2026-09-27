@@ -150,9 +150,10 @@
 set -u -o pipefail
 
 PROG=test-slot
-# N: provisional, unmeasured -- DND-489 sets it from data.
+# N is PER MACHINE (DND-489): each machine has its own pool, and what a slot
+# costs depends on that machine's hardware. n_for_host holds every measured
+# value; a host it does not name gets TEST_SLOT_N, labelled provisional.
 TEST_SLOT_N=3
-TEST_SLOT_N_BASIS="provisional, unmeasured"
 EXIT_USAGE=2
 EXIT_TIMEOUT=75
 POLL_S=2
@@ -300,6 +301,16 @@ default_signals() {
   printf '%s\n' "$out"
 }
 
+# n_for_host HOST — "N<TAB>BASIS" for HOST. A measured entry comes from
+# ai/bin/test-slot-bench run on that machine and cites its record. Any other
+# host, or an empty one, gets the provisional default, and the basis names the
+# host it looked up, so a miss shows in --status instead of passing silently.
+n_for_host() {
+  case $1 in
+    *) printf '%s\tprovisional, unmeasured on host %s\n' "$TEST_SLOT_N" "${1:-<unknown>}" ;;
+  esac
+}
+
 # ============================================================ side effects
 
 now_ms() { local t=${EPOCHREALTIME/./}; printf '%s\n' $((10#$t / 1000)); }
@@ -329,8 +340,7 @@ resolve_pool() {
   local def seam
   def=$(canon "$(default_pool_dir)")
   POOL=$def
-  N=$TEST_SLOT_N
-  N_BASIS=$TEST_SLOT_N_BASIS
+  IFS=$'\t' read -r N N_BASIS < <(n_for_host "${HOSTNAME:-}")
   HEARTBEAT_S=$DEFAULT_HEARTBEAT_S
   seam=${ATHENA_TEST_SLOT_DIR:-}
   if [ -n "$seam" ]; then
@@ -922,8 +932,9 @@ status() {
   load1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo unknown)
   nproc=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)
   unslotted=$(scan_unslotted)
-  local provisional=false
-  [[ $TEST_SLOT_N_BASIS == provisional* ]] && provisional=true
+  # Anything but a measured entry (the default, a test seam) is provisional.
+  local provisional=true
+  [[ $N_BASIS == measured* ]] && provisional=false
 
   if [ "$initialised" = true ]; then
     held=$(held_count)

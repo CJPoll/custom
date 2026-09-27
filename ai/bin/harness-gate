@@ -217,6 +217,7 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/bin/fleet-report"          => "ai/lib/fleet/test/self-test.sh",
   "ai/bin/fleet-resume"          => "ai/lib/fleet/test/resume/self-test.sh",
   "ai/bin/test-slot"             => "ai/test/test-slot/self-test.sh",
+  "ai/bin/test-slot-bench"       => "ai/test/test-slot-bench/self-test.sh",
   "ai/hooks/fleet-drain-guard.sh"     => "ai/hooks/fleet-drain-guard.self-test.sh",
   "ai/hooks/fleet-report.sh"          => "ai/hooks/fleet-report.self-test.sh",
   "ai/hooks/inbox-untrusted-guard.sh" => "ai/hooks/inbox-untrusted-guard.self-test.sh",
