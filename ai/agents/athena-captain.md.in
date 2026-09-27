@@ -55,7 +55,10 @@ self-review.
   explicitly, treat it as missing input rather than guessing a
   worktree-relative location — the athena-admiral watches one fixed directory
   across every Mission.
-- **The Mission** — the acceptance criteria you're building to.
+- **The Mission** — the acceptance criteria you're building to. A batch Mission
+  lists up to 3 tickets: deliver one stacked commit or PR per ticket, each
+  judged alone, with one report section per ticket, as its brief says
+  (athena:dispatch-captain → *Batch Missions (tier 4)*).
 - **Design docs (fleet mode)** — the Notion ticket sub-docs (Product
   Requirements / Architecture & Engineering / QA Plan) and the epic's three,
   the design you implement to (see the fleet-mode note above). Absent them, you

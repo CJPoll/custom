@@ -1,6 +1,6 @@
 ---
 name: athena:dispatch-captain
-description: The checklist for building an athena-captain's dispatch brief — everything the brief must carry so a captain never has to ask (worktree path, Mission, domain context, reports-dir path, MR target branch, the admiral's own agentId as reply-to, the Notion status values, and the fleet-mode design sub-docs). Use each time you dispatch a captain into a prepared worktree. Model choice: [[athena:model-tiering]]; worktree creation and the ≤5 cap stay resident on the admiral. Also the machine-capacity gate every dispatch passes (1-min load threshold, test-slot, lowering the cap on a load-based failure).
+description: The checklist for building an athena-captain's dispatch brief — everything the brief must carry so a captain never has to ask (worktree path, Mission, domain context, reports-dir path, MR target branch, the admiral's own agentId as reply-to, the Notion status values, and the fleet-mode design sub-docs). Use each time you dispatch a captain into a prepared worktree. Model choice: [[athena:model-tiering]]; worktree creation and the ≤5 cap stay resident on the admiral. Also batch Missions for tier-4 tickets (up to 3 same-Area tickets, stacked, one slot) and the machine-capacity gate every dispatch passes (1-min load threshold, test-slot, lowering the cap on a load-based failure).
 ---
 
 # athena:dispatch-captain
@@ -189,6 +189,65 @@ one-line reason into the state log** next to the dispatch.
 
 Every environment fact you put in the brief must be VERIFIED, not inferred —
 see [[athena:brief-verification]].
+
+## Batch Missions (tier 4)
+
+Tier 4 is defined in [[athena:ticket-management]] → *Priority: critical path
+first*, which also sets when those tickets run. Owner, 2026-09-27: "findings do
+get a captain, but only after the functional requirements are met." A batch is
+how such tier-4 tickets get that captain cheaply. Do not batch any other tier.
+
+- **What may be batched.** Up to **3** tier-4 tickets with the same `Area` and
+  the same subsystem, given to ONE captain as one batch Mission. Same
+  subsystem means the same skill, tool, or app module, so one context load
+  covers every ticket.
+- **One slot.** The batch counts as one captain slot against the concurrency
+  cap, however many tickets it carries.
+- **One ticket, one change.** The captain delivers a stacked series: one commit
+  (a repo that ships by fast-forward) or one PR (a forge repo) per ticket, in the order the brief lists
+  them. Each ticket gets its own critic PASS. The critic blocks bundled
+  unrelated changes, so the batch saves the dispatch, the worktree and the
+  context load, never the per-ticket review.
+- **Landing.** In order, lowest ticket first.
+  - **A repo that ships by fast-forward** (no forge PRs; the captain's *Repos
+    with no MR/CI system*): one fast-forward of the tip lands the series.
+    `integration-gate` reads only the verdict of the head it gates, so first
+    run `critic-review --verdict-for <sha>` on every ticket's head. Each must be
+    a PASS whose recorded `base` is the ticket below it (main, for the first).
+  - **A forge repo, `~/dev/custom` included:** one PR at a time, per
+    [[athena:merge-boarding]] → *Landing onto a moving main*. `locked-merge`
+    squashes one PR, so each later ticket is rebased onto the landed main
+    before its own `integration-gate`.
+  - Any rebase rewrites the ticket SHAs and orphans their critic receipts, so
+    each rebased ticket is judged again.
+
+The batch brief carries everything above for one Mission, plus:
+
+- **The tickets, in stack order**, each with its own Notion page and design
+  sub-docs.
+- **The branches.** One worktree, one branch per ticket, each cut from the
+  branch of the ticket below it. The worktree's own branch is the first ticket's.
+  In a forge repo, each PR targets the branch of the ticket below it; the first
+  targets the MR target branch.
+- **The critic line:** *"Judge each ticket alone: on that ticket's head, run
+  `~/dev/custom/ai/bin/critic-review --base <the branch of the ticket below>`
+  (the first ticket: the MR target branch). Without `--base`, the diff is the
+  whole stack and the critic blocks it as bundled."*
+- **The gate line:** one heavy gate on the tip of the stack, per the test-slot
+  line.
+- **The report.** One file, named for the batch (e.g. `DND-539+538-report.md`),
+  with one section per ticket: status, head SHA, the recorded critic verdict
+  line, the PR URL, files changed, and its own proposed findings. A STUCK
+  ticket holds every ticket stacked above it; its section says so.
+- **The Notion transitions, per ticket.** Move each ticket to `In Progress` with
+  Athena as `Assignee` at dispatch. The captain's `In Review` rule (or "set NO
+  Notion status at all") applies to each ticket as its own PR opens. You move
+  each ticket on its own merge.
+
+**Precedent** (harness-epics-ab): 00:51Z, "DND-539+538 dispatched to one captain
+… as stacked branches"; 01:07Z, "one ff lands 508+539+538". That
+fast-forward predates `locked-merge`; in `~/dev/custom` today the forge path
+above applies.
 
 ## Machine capacity gates every dispatch
 
