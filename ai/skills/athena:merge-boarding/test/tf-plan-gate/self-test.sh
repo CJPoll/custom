@@ -61,6 +61,12 @@ check control-keeps-destroy 4 --plan "$(plan y "$gone")" --control "$(plan z "$g
 rds_new="$(rc aws_db_instance '["create"]' null '{}')"
 check control-only-destroy 4 --plan "$(plan aa)" --control "$(plan ab "$rds_new")"
 check control-only-free    0 --plan "$(plan ac)" --control "$(plan ad "$(rc aws_iam_role '["create"]' null '{}')")"
+# Offline, a resize reads as create-vs-create: compare the sizing attributes
+# against the control's create at the same address.
+check offline-ssm-tier     4 --plan "$(plan af "$(rc aws_ssm_parameter '["create"]' null '{"tier":"Advanced"}')")" \
+                             --control "$(plan ag "$(rc aws_ssm_parameter '["create"]' null '{"tier":"Standard"}')")"
+check offline-value-clear  0 --plan "$(plan ah "$(rc aws_ssm_parameter '["create"]' null '{"value":"b","tier":"Standard"}')")" \
+                             --control "$(plan ai "$(rc aws_ssm_parameter '["create"]' null '{"value":"a","tier":"Standard"}')")"
 # A `moved` block renames the address; the old one is not a destroy.
 printf '{"format_version":"1.2","resource_changes":[{"address":"aws_db_instance.y","previous_address":"aws_db_instance.x","mode":"managed","type":"aws_db_instance","name":"y","change":{"actions":["no-op"],"before":{},"after":{},"after_unknown":{}}}]}' > "${TMP}/moved.json"
 check control-moved-clear  0 --plan "${TMP}/moved.json" --control "$(plan ae "$(rc aws_db_instance '["no-op"]' '{}' '{}')")"
