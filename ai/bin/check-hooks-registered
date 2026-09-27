@@ -186,10 +186,6 @@ def landed_registry(root = REPO_DIR)
   [pts, bars.flatten(1).uniq { |e| row_key(e) }]
 end
 
-def pair_key(entry)
-  [entry["event"], entry["script"]]
-end
-
 # A registry row's identity (DND-887): (event, normalized matcher, script).
 def row_key(entry)
   [entry["event"], mnorm(entry["matcher"]), entry["script"]]
