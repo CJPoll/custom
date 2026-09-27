@@ -399,7 +399,10 @@ The holds:
     `prevent_destroy` makes terraform refuse to plan, so a change that
     destroys a protected resource lands here. An agent without prod
     credentials may use the offline control-vs-change plan, passing the base
-    plan as `--control`.
+    plan as `--control`. `--control` skips only a create or update the base
+    plan also has; it never skips a delete. A stateful resource in the
+    control but absent from the change plan holds as a destroy, because an
+    offline plan has no state and shows a removed block only by its absence.
 
   A secrets update is not held by itself. Creating or updating an SSM
   parameter, a secret version, or a `random_password` ships under its
