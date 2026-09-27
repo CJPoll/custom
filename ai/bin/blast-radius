@@ -83,6 +83,10 @@
 #                [--repo <dir>]
 #   blast-radius --self-test
 #
+#   --repo <dir>        the repository whose object store holds both refs
+#                       (default: cwd). Its checkout is never read: every term
+#                       comes from the --base and --head commits (DND-794).
+#
 #   --grant-eligible <class>  a different question (DND-596): may an owner
 #                       approval grant of <class> cover this head? Prints
 #                       GRANT-ELIGIBLE (exit 0) or NOT ELIGIBLE with a reason
@@ -1179,21 +1183,36 @@ def norm_dir(dir)
   d.empty? ? "." : d
 end
 
-# Returns { applies: [{dir:, where:}], scanned: n_workflows, steps: n_apply_steps }.
+# Returns { applies: [{dir:, where:}], scanned: n_workflows, steps: n_apply_steps,
+# unread: [String] }.
 # Only workflows whose later runs execute the merged code count (workflow_trigger);
 # each apply names the trigger, so a cron apply never reads as the merge push.
 #
 # Read from the head COMMIT (a RevTree), never the working tree (DND-794).
+# `unread` names every workflow this parse could not look inside: a symlink,
+# submodule or directory (the working tree used to follow a link), YAML that
+# does not parse, a document that is not a mapping, and a linked
+# .github/workflows. apply_note turns any of them into UNKNOWN, so "could not
+# look" never reads as "no apply found" -- the verdict is HOT either way, but
+# the owner deciding an approval reads this note.
 def terraform_apply_roots(tree)
   applies = []
   scanned = 0
+  unread = []
+  if (link = tree.link_on(".github/workflows"))
+    unread << "#{link} (a symlink or submodule: the workflows behind it are not in the commit)"
+  end
   tree.workflows.each do |rel|
     doc = begin
       YAML.safe_load(tree.read(rel), aliases: true)
-    rescue StandardError
-      nil # detect_automation already reports an unreadable or unparseable workflow as UNDETERMINED
+    rescue StandardError => e
+      unread << "#{rel} (#{e.is_a?(IOError) ? e.message : "unparseable YAML: #{e.class}"})"
+      next
     end
-    next unless doc.is_a?(Hash)
+    unless doc.is_a?(Hash)
+      unread << "#{rel} (not a YAML mapping: #{doc.class})"
+      next
+    end
 
     trig = workflow_trigger(doc)
     next if trig.nil?
@@ -1214,7 +1233,17 @@ def terraform_apply_roots(tree)
       end
     end
   end
-  { applies: applies, scanned: scanned, steps: applies.size }
+  { applies: applies, scanned: scanned, steps: applies.size, unread: unread }
+end
+
+# The UNKNOWN note for a hit no readable apply covers when some workflow could
+# not be read (see terraform_apply_roots), or nil when every one was read.
+def unread_apply_note(dir, roots)
+  return nil if roots[:unread].to_a.empty?
+
+  "whether merging applies #{dir} is UNKNOWN: #{roots[:unread].size} workflow(s) could not be read " \
+    "from the head commit (#{roots[:unread].join('; ')}), and any of them may run `terraform apply` " \
+    "there -- still HOT."
 end
 
 # The `./x` module sources declared by the top-level .tf files of `root` at head,
@@ -1249,10 +1278,18 @@ def apply_note(path, roots, repo, head)
              "#{a[:where]} applies"
     end
 
+    if (unknown = unread_apply_note(dir, roots))
+      return unknown
+    end
+
     return "no merge-time `terraform apply` runs in #{dir}: it sits under auto-applied root " \
            "#{a[:dir]} (#{a[:where]}) but that root's top-level .tf files do not source " \
            "./#{rel} as a module. Likely a separate owner-applied root, so merging may be " \
            "inert -- still HOT: an unproven negative fails closed."
+  end
+
+  if (unknown = unread_apply_note(dir, roots))
+    return unknown
   end
 
   "no merge-time `terraform apply` runs in #{dir} (scanned #{roots[:scanned]} merge-triggered " \
@@ -2599,35 +2636,49 @@ def self_test
     # directory entry; a commit holds the link itself. Each shape the working
     # tree read as automation is still HOT when read from the commit.
     shape_n = 0
-    shape_hot = lambda do |desc, seed|
+    # `words` pins WHICH mechanism fired, so a later path that reaches HOT some
+    # other way cannot stand in for it.
+    shape_hot = lambda do |desc, seed, words|
       shape_n += 1
       dir = File.join(tmp, "shape794-#{shape_n}")
       sb, sh = mkrepo.call(dir, seed: seed) { |r| put.call(r, "main.tf", "resource\n") }
       so, se, sc = run_br.call(["--base", sb, "--head", sh, "--repo", dir])
       check.call("HOT: #{desc} (DND-794 non-narrowing)",
-                 sc == 4 && so.include?("BLAST-RADIUS HOT"), "exit=#{sc} out=#{so} err=#{se}")
+                 sc == 4 && so.include?("BLAST-RADIUS HOT") && words.all? { |w| so.include?(w) },
+                 "exit=#{sc} out=#{so} err=#{se}")
     end
     shape_hot.call("a SYMLINKED .github/workflows directory holding a deploy workflow", lambda { |r|
       put.call(r, "deploy/post-merge.yml", deploy_wf)
       FileUtils.mkdir_p(File.join(r, ".github"))
       File.symlink("../deploy", File.join(r, ".github", "workflows"))
-    })
+    }, ["merge-time automation: UNDETERMINED (.github/workflows is a symlink or submodule",
+        "apply: whether merging applies . is UNKNOWN"])
     shape_hot.call("a SYMLINKED .github directory holding a deploy workflow", lambda { |r|
       put.call(r, "gh/workflows/post-merge.yml", deploy_wf)
       File.symlink("gh", File.join(r, ".github"))
-    })
+    }, ["merge-time automation: UNDETERMINED (.github is a symlink or submodule"])
     shape_hot.call("a SYMLINKED .circleci directory (an unmodelled forge)", lambda { |r|
       put.call(r, "circle/config.yml", "version: 2\n")
       File.symlink("circle", File.join(r, ".circleci"))
-    })
+    }, ["merge-time automation: UNDETERMINED (.circleci/ present"])
     shape_hot.call("a SYMLINKED .gitlab/ci directory", lambda { |r|
       put.call(r, "glci/deploy.yml", "deploy: {}\n")
       FileUtils.mkdir_p(File.join(r, ".gitlab"))
       File.symlink("../glci", File.join(r, ".gitlab", "ci"))
-    })
+    }, ["merge-time automation: CONFIRMED (.gitlab-ci.yml present"])
     shape_hot.call("a DIRECTORY named like a workflow (.github/workflows/x.yml/)", lambda { |r|
       put.call(r, ".github/workflows/x.yml/inner.txt", "x\n")
-    })
+    }, ["merge-time automation: UNDETERMINED (.github/workflows/x.yml: mode 040000 is not a regular file"])
+    # The apply NOTE must not narrow either: the working tree read a symlinked
+    # apply workflow through its link and named the root AUTO-APPLIED. The
+    # commit holds only the link, so the note says UNKNOWN -- never "likely
+    # owner-applied, so merging may be inert".
+    shape_hot.call("a SYMLINKED apply workflow: the apply note is UNKNOWN, never 'may be inert'", lambda { |r|
+      put.call(r, "deploy/post-merge.yml", deploy_wf)
+      FileUtils.mkdir_p(File.join(r, ".github", "workflows"))
+      File.symlink("../../deploy/post-merge.yml", File.join(r, ".github", "workflows", "post-merge.yml"))
+    }, ["apply: whether merging applies . is UNKNOWN: 1 workflow(s) could not be read",
+        ".github/workflows/post-merge.yml (mode 120000"])
 
     # The ticket's own case: a composite action under .github/actions, which the
     # workflow does not even have to name -- the conventional location is enough.
