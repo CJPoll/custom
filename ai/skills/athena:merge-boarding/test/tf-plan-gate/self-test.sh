@@ -86,6 +86,28 @@ check offline-ssm-tier     4 --plan "$(plan af "$(rc aws_ssm_parameter '["create
                              --control "$(plan ag "$(rc aws_ssm_parameter '["create"]' null '{"tier":"Standard"}')")"
 check offline-value-clear  0 --plan "$(plan ah "$(rc aws_ssm_parameter '["create"]' null '{"value":"b","tier":"Standard"}')")" \
                              --control "$(plan ai "$(rc aws_ssm_parameter '["create"]' null '{"value":"a","tier":"Standard"}')")"
+# Real plans mark computed attributes unknown: a create's id/arn/version, an
+# update's recomputed version or updated_at. Those are not config and must
+# not hold the secrets updates the owner said ship. An unknown attribute that
+# IS config (name) still holds, and so does one unknown only in the change.
+SSM_CREATE_UNK='{"id":true,"arn":true,"version":true}'
+check offline-value-computed 0 --plan "$(plan da "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"b"}' "$SSM_CREATE_UNK")")" \
+                             --control "$(plan db "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"a"}' "$SSM_CREATE_UNK")")"
+check offline-secretver-computed 0 --plan "$(plan dc "$(rc aws_secretsmanager_secret_version '["create"]' null '{"secret_id":"s","secret_string":"b"}' '{"id":true,"arn":true,"version_id":true,"version_stages":true}')")" \
+                             --control "$(plan dd "$(rc aws_secretsmanager_secret_version '["create"]' null '{"secret_id":"s","secret_string":"a"}' '{"id":true,"arn":true,"version_id":true,"version_stages":true}')")"
+check offline-both-unknown-config 0 --plan "$(plan de "$(rc aws_ssm_parameter '["create"]' null '{"value":"b"}' '{"id":true,"name":true}')")" \
+                             --control "$(plan df "$(rc aws_ssm_parameter '["create"]' null '{"value":"a"}' '{"id":true,"name":true}')")"
+check offline-name-unknown-realistic 4 --plan "$(plan dg "$(rc aws_ssm_parameter '["create"]' null '{"value":"x"}' '{"id":true,"arn":true,"version":true,"name":true}')")" \
+                             --control "$(plan dh "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"x"}' "$SSM_CREATE_UNK")")"
+check online-ssm-value-computed 0 --plan "$(plan di "$(rc aws_ssm_parameter '["update"]' '{"id":"/a","name":"/a","value":"a","version":3,"tier":"Standard"}' '{"id":"/a","name":"/a","value":"b","tier":"Standard"}' '{"version":true}')")"
+check online-ghsecret-value-computed 0 --plan "$(plan dj "$(rc github_actions_secret '["update"]' '{"repository":"r","plaintext_value":"a","updated_at":"t1"}' '{"repository":"r","plaintext_value":"b"}' '{"updated_at":true}')")"
+check online-ssm-name-unknown 4 --plan "$(plan dk "$(rc aws_ssm_parameter '["update"]' '{"name":"/a","value":"a"}' '{"value":"a"}' '{"name":true}')")"
+# Offline sizing: an attribute unknown in BOTH creates (a provider default,
+# e.g. a root volume size) is not the diff's; one unknown only in the change is.
+check offline-size-unknown-both 0 --plan "$(plan dl "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"b"}' '{"id":true,"tier":true}')")" \
+                             --control "$(plan dm "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"a"}' '{"id":true,"tier":true}')")"
+check offline-size-unknown-change 4 --plan "$(plan dn "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"b"}' '{"id":true,"tier":true}')")" \
+                             --control "$(plan do "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"a","tier":"Standard"}' '{"id":true}')")"
 # Offline, a value-holding type's update and its force-new replace both read
 # create-vs-create. Only a value/tags/description change is known in place;
 # any other differing attribute may force a replace, so it holds.

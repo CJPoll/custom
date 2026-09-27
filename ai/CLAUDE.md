@@ -382,7 +382,8 @@ The holds:
     GitHub Actions secret or variable, S3 versioning) holds too. So does an
     update of such a type that changes anything but its value, tags or
     description (suspending versioning, say), and creating or updating an S3
-    or ECR lifecycle (expiration) policy.
+    or ECR lifecycle (expiration) policy. An attribute the provider computes
+    (`id`, `arn`, `version`, `updated_at`) going unknown is not a change.
   - **Cost:** a `create` of any type not on that list, or an `update` that
     changes a sizing attribute (`instance_type`, `instance_class`,
     `allocated_storage`, `iops`, `tier`, and the rest in the tool), up or down,
@@ -396,7 +397,8 @@ The holds:
     control but absent from the change plan holds as a destroy, because an
     offline plan has no state and shows a removed block only by its absence.
     Offline, an update and a replace both read as `create`; the same
-    value, tags or description test applies.
+    value, tags or description test applies, and an attribute unknown in
+    both plans is not the change's.
 
   A secrets update is not held by itself. Creating or updating an SSM
   parameter's or a secret version's value, or a `random_password`, ships

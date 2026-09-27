@@ -172,17 +172,34 @@ end
 
 # Attributes a value-holding type changes IN PLACE: the value itself, tags and
 # description. Any other top-level attribute that differs (or is unknown until
-# apply) may force a replace, which loses the stored value.
+# apply, bar ignorable_unknown? below) may force a replace, which loses the
+# stored value.
 IN_PLACE_VALUE_ATTRS = %w[
   description encrypted_value insecure_value plaintext_value secret_binary
   secret_string tags tags_all value
 ].freeze
 
-def replace_risk_attrs(before, after, unknown)
+# Attributes the provider computes, never config. A real plan marks them
+# unknown on a create (id, arn, version) and on a value update (a new version,
+# updated_at). Their unknown-ness says nothing about a replace, so it is
+# ignored; a KNOWN change to one is still compared.
+COMPUTED_VALUE_ATTRS = %w[
+  arn created_at id remote_updated_at updated_at version version_id
+].freeze
+
+# An attribute unknown until apply is not the diff's when it is computed, or
+# (offline) when the control's create has it unknown too. Any other unknown
+# attribute holds: it could be config that forces a replace.
+def ignorable_unknown?(key, unknown, base_unknown)
+  unknown == true && (COMPUTED_VALUE_ATTRS.include?(key) || base_unknown == true)
+end
+
+def replace_risk_attrs(before, after, unknown, base_unknown = nil)
   b = before.is_a?(Hash) ? before : {}
   a = after.is_a?(Hash) ? after : {}
   u = unknown.is_a?(Hash) ? unknown : {}
-  (b.keys | a.keys | u.keys).reject { |k| IN_PLACE_VALUE_ATTRS.include?(k) }
+  bu = base_unknown.is_a?(Hash) ? base_unknown : {}
+  (b.keys | a.keys | u.keys).reject { |k| IN_PLACE_VALUE_ATTRS.include?(k) || ignorable_unknown?(k, u[k], bu[k]) }
                             .select { |k| u[k] == true || b[k] != a[k] }.sort
 end
 
@@ -193,8 +210,10 @@ def destroy_label(type)
 end
 
 # Paths of COST_ATTRS keys whose values differ between before and after, or
-# are unknown in after.
-def cost_diffs(before, after, unknown, path = [])
+# are unknown in after. Offline, BASE_UNKNOWN is the control create's
+# after_unknown: a sizing attribute unknown in both (a provider default) is
+# not the diff's; one unknown only in the change still holds.
+def cost_diffs(before, after, unknown, path = [], base_unknown = nil)
   out = []
   keys = ((before.is_a?(Hash) ? before.keys : []) | (after.is_a?(Hash) ? after.keys : []) |
           (unknown.is_a?(Hash) ? unknown.keys : []))
@@ -203,11 +222,12 @@ def cost_diffs(before, after, unknown, path = [])
       b = before.is_a?(Hash) ? before[k] : nil
       a = after.is_a?(Hash) ? after[k] : nil
       u = unknown.is_a?(Hash) ? unknown[k] : nil
+      bu = base_unknown.is_a?(Hash) ? base_unknown[k] : nil
       if COST_ATTRS.include?(k)
-        out << "#{(path + [k]).join('.')} unknown until apply" if u == true
+        out << "#{(path + [k]).join('.')} unknown until apply" if u == true && bu != true
         out << "#{(path + [k]).join('.')} #{b.inspect} -> #{a.inspect}" if u != true && b != a
       end
-      out.concat(cost_diffs(b, a, u, path + [k])) if [b, a, u].any? { |x| x.is_a?(Hash) || x.is_a?(Array) }
+      out.concat(cost_diffs(b, a, u, path + [k], bu)) if [b, a, u].any? { |x| x.is_a?(Hash) || x.is_a?(Array) }
     end
   elsif before.is_a?(Array) || after.is_a?(Array) || unknown.is_a?(Array)
     n = [before, after, unknown].map { |x| x.is_a?(Array) ? x.size : 0 }.max
@@ -215,7 +235,8 @@ def cost_diffs(before, after, unknown, path = [])
       b = before.is_a?(Array) ? before[i] : nil
       a = after.is_a?(Array) ? after[i] : nil
       u = unknown.is_a?(Array) ? unknown[i] : nil
-      out.concat(cost_diffs(b, a, u, path + [i.to_s]))
+      bu = base_unknown.is_a?(Array) ? base_unknown[i] : nil
+      out.concat(cost_diffs(b, a, u, path + [i.to_s], bu))
     end
   end
   out
@@ -253,13 +274,16 @@ changes.each do |rc|
   # compare its sizing attributes with the control's create.
   base_create = control.find { |c| c["address"] == addr && c.dig("change", "actions") == ["create"] }
   if actions == ["create"] && base_create
-    cost_diffs(base_create.dig("change", "after"), rc.dig("change", "after"), rc.dig("change", "after_unknown")).each do |d|
+    base_unknown = base_create.dig("change", "after_unknown")
+    cost_diffs(base_create.dig("change", "after"), rc.dig("change", "after"), rc.dig("change", "after_unknown"),
+               [], base_unknown).each do |d|
       held << ["COST", addr, "sizing change vs the control: #{d}"]
     end
     # Offline, an update and a force-new replace look the same. For a type
     # whose replace loses a value, only a known in-place change is let through.
     if VALUE_HOLDING_TYPES.include?(type)
-      moved = replace_risk_attrs(base_create.dig("change", "after"), rc.dig("change", "after"), rc.dig("change", "after_unknown"))
+      moved = replace_risk_attrs(base_create.dig("change", "after"), rc.dig("change", "after"),
+                                 rc.dig("change", "after_unknown"), base_unknown)
       unless moved.empty?
         held << ["DESTROY", addr, "#{type} (holds a stored value): offline, #{moved.join(', ')} changed and may force a replace"]
       end
