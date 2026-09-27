@@ -4330,6 +4330,80 @@ err="$(cd "${uproj}" && inbox_unread_refs alerts . 2>&1 >/dev/null)"; rc=$?
 if [ "${rc}" -ne 0 ] && grep -q 'Fix:' <<<"${err}"; then ok "U-6 a log channel is refused with a Fix: (it has no re:)"; else bad "U-6 a log channel is refused" "rc=${rc} ${err}"; fi
 
 echo
+echo "== DND-942: a rotated, quiet log channel HAS been delivered to =="
+
+# Rotation renames <channel>.jsonl to <channel>.jsonl.1. Until the next append
+# there is no live file, and a check that looks only at the live file reads the
+# channel as "nothing has EVER been delivered": a false producer-registration
+# fault on a channel that is merely quiet. The live file and the rotated
+# generation together are the channel's delivery history
+# (fs_log_delivery_history).
+# setup_rotated_case: the setup_log_case channel, rotated, nothing since.
+setup_rotated_case() {
+  setup_log_case
+  mv "${LINBOX}" "${LINBOX}.1"
+  jq -n --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{v:1, offset:0, rotated_at:$t, seen_event_ids:["Ev1","Ev2"], seen_keys:[]}' > "${LSTATE}"
+  chmod 600 "${LSTATE}" "${LINBOX}.1"
+}
+
+# The predicate itself: one outcome per state.
+setup_rotated_case
+assert_eq "R-1 predicate: only .1 -> rotated (delivered, quiet)" "rotated" "$(fs_log_delivery_history "${LINBOX}")"
+printf 'x\n' > "${LINBOX}"
+assert_eq "R-2 predicate: a live file -> live" "live" "$(fs_log_delivery_history "${LINBOX}")"
+rm -f "${LINBOX}" "${LINBOX}.1"
+assert_eq "R-3 predicate (the miss): neither file -> never" "never" "$(fs_log_delivery_history "${LINBOX}")"
+# COULD NOT LOOK is its own outcome, never "never". Every file in a directory
+# this process cannot search reads as absent to `[ -e ]`.
+R_DARK="${CASE_DIR}/dark"; mkdir -p "${R_DARK}"; : > "${R_DARK}/c.jsonl"; chmod 000 "${R_DARK}"
+r_out="$(fs_log_delivery_history "${R_DARK}/c.jsonl" 2>"${CASE_DIR}/r-err")"; r_rc=$?
+chmod 700 "${R_DARK}"
+assert_eq "R-4 predicate: an unsearchable directory is a FAILURE (could not look)" "1" "${r_rc}"
+assert_eq "R-4 and it prints no verdict at all" "" "${r_out}"
+assert_contains "R-4 and the refusal carries a Fix:" "Fix:" "$(cat "${CASE_DIR}/r-err")"
+r_out="$(fs_log_delivery_history "" 2>/dev/null)"; r_rc=$?
+assert_eq "R-5 predicate: an empty path is a FAILURE, not 'never'" "1" "${r_rc}"
+
+# COUNT (inbox_status_json + bin/inbox-status).
+setup_rotated_case
+st="$(cd "${LPROJ}" && inbox_status_json)"
+assert_eq "R-6 count: a rotated, quiet channel is NOT never_delivered" "false" \
+  "$(jq -r '.channels[] | select(.name=="slack") | .never_delivered' <<<"${st}")"
+assert_eq "R-6 count: and it counts zero new (the .1 content is never counted)" "0" \
+  "$(jq -r '.channels[] | select(.name=="slack") | .new' <<<"${st}")"
+out="$(cd "${LPROJ}" && "${BIN}/inbox-status" 2>&1)"
+assert_not_contains "R-7 status: a rotated, quiet channel does not say nothing was EVER delivered" \
+  "EVER been delivered" "${out}"
+
+# READ (inbox_read_json + bin/read-inbox --peek).
+rd="$(cd "${LPROJ}" && inbox_read_json slack)"
+assert_eq "R-8 read: a rotated, quiet channel is NOT never_delivered" "false" \
+  "$(jq -r '.never_delivered' <<<"${rd}")"
+out="$(cd "${LPROJ}" && "${BIN}/read-inbox" --peek slack 2>&1)"
+assert_not_contains "R-9 read-inbox: a rotated, quiet channel does not say nothing was EVER delivered" \
+  "EVER been delivered" "${out}"
+assert_contains "R-9 read-inbox: it reads as nothing new" "nothing new" "${out}"
+
+# WAIT (bin/inbox-wait arming notice).
+err="$(cd "${LPROJ}" && timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"
+assert_not_contains "R-10 inbox-wait: a rotated, quiet channel arms without the never-delivered notice" \
+  "EVER been delivered" "${err}"
+
+# THE MISS, through every path: truly nothing delivered still says so.
+setup_log_case
+rm -f "${LINBOX}" "${LINBOX}.1"
+st="$(cd "${LPROJ}" && inbox_status_json)"
+assert_eq "R-11 count (miss): nothing delivered IS never_delivered" "true" \
+  "$(jq -r '.channels[] | select(.name=="slack") | .never_delivered' <<<"${st}")"
+out="$(cd "${LPROJ}" && "${BIN}/inbox-status" 2>&1)"
+assert_contains "R-11 status (miss): it says nothing was EVER delivered" "EVER been delivered" "${out}"
+rd="$(cd "${LPROJ}" && inbox_read_json slack)"
+assert_eq "R-12 read (miss): nothing delivered IS never_delivered" "true" "$(jq -r '.never_delivered' <<<"${rd}")"
+err="$(cd "${LPROJ}" && timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"
+assert_contains "R-13 inbox-wait (miss): the never-delivered notice still fires" "EVER been delivered" "${err}"
+
+echo
 if [ "${FAIL}" -eq 0 ]; then
   echo "VERDICT: PASS (${PASS} cases)"
   exit 0

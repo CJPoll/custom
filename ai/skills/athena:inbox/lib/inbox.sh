@@ -227,7 +227,13 @@ _inbox_count_log() {
   # stream on the way past.
   fs_assert_no_nul "${inbox}" || return 1
 
-  [ -e "${inbox}" ] || never="true"
+  # The live file AND the rotated generation, through the one shared predicate
+  # (DND-942): a rotated, quiet channel is not a never-delivered one, and a
+  # history that could not be examined fails the count rather than reading as
+  # "never".
+  local history
+  history="$(fs_log_delivery_history "${inbox}")" || return 1
+  [ "${history}" = "never" ] && never="true"
   size="$(fs_size "${inbox}")"
 
   # A CORRUPT STATE FILE IS RECOVERED AND REPORTED, never silently absorbed.
@@ -675,6 +681,10 @@ _inbox_retain() {
   # until there is something to record (*First run*) -- on precisely the
   # channel whose real problem is that its producer was never registered, so
   # the operator would then have a state file to explain as well.
+  # (A rotated, quiet channel has no live file either. It HAS been delivered to
+  # -- fs_log_delivery_history says `rotated` -- but there is still nothing to
+  # rotate, and its `rotated_at` is already set, so `{}` is right for it too.
+  # This test is "is there a live file to rotate", not "was it ever delivered".)
   if [ ! -e "${inbox}" ]; then
     printf '{}\n'
     return 0
@@ -790,8 +800,11 @@ _inbox_read_log() {
   # not, and the read is the command an operator reaches for when a channel
   # looks quiet, so it was the one place the distinction was most needed and
   # least present.
-  local never_delivered=false
-  [ -f "${inbox}" ] || never_delivered=true
+  # Asked of the shared predicate, never of the live file alone (DND-942): a
+  # rotated channel with nothing since has no live file and HAS been delivered.
+  local never_delivered=false history
+  history="$(fs_log_delivery_history "${inbox}")" || return 1
+  [ "${history}" = "never" ] && never_delivered=true
   size="$(fs_size "${inbox}")"
   offset="$(_inbox_offset_of "${state_json}" "${size}")"
   seen_ev="$(printf '%s' "${state_json}" | jq -r '(.seen_event_ids // [])[]' 2>/dev/null)"
@@ -1469,7 +1482,14 @@ inbox_doorbells() {
         bells+=("${bell}")
 
         inbox_path="$(_inbox_path inbox "${resolved}")"
-        if [ ! -e "${inbox_path}" ]; then
+        # The shared predicate (DND-942): the live file OR its rotated
+        # generation is a delivery history. One that cannot be examined is
+        # said so (the predicate printed its Fix: above), and the waiter still
+        # arms: refusing would take the other channels down with it.
+        local _whist
+        if ! _whist="$(fs_log_delivery_history "${inbox_path}")"; then
+          printf 'athena:inbox: could not tell whether %s was ever delivered to — arming anyway.\n' "${chan}" >&2
+        elif [ "${_whist}" = "never" ]; then
           # NOT a refusal: an empty channel is normal, and a waiter that
           # refused to arm over one would take the OTHER channels down with
           # it. But it is not silence either. A `log` channel whose file has
