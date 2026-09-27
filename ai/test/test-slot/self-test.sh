@@ -874,6 +874,43 @@ check 37-says-orphaned has "$W/O37.err" "ORPHANED"
 check 37-fix has "$W/O37.err" "Fix:"
 check 37-never-queued eq "$(event_count waiting O37)$(event_count acquired O37)" 00
 
+# 38 (DND-925): check_parent end to end, with the script sourced in a
+# subshell whose parent is this suite ($$). A live parent returns 0; a start
+# parent that is not the current one exits 129 ORPHANED; an UNREADABLE parent
+# pid is never read as alive: exit 2 with a Fix at startup (nothing logged,
+# nothing queued), exit 129 ORPHANED mid-wait.
+newpool p38 1
+mkdir -m 0700 "$POOL"
+# Never call cp_run inside $(...): its subshell must be a direct child of $$.
+cp_run() { # cp_run LABEL ORIG STUB ARG: run check_parent ARG in a sourced subshell
+  (
+    # shellcheck source=/dev/null
+    source "$BIN"
+    resolve_pool
+    LABEL=$1 EXCLUSIVE=0 START_MS=$(now_ms) ORIG_PPID=$2
+    PID_NS=$(readlink /proc/self/ns/pid 2>/dev/null)
+    [ "$3" = unreadable ] && read_ppid() { CUR_PPID=""; }
+    check_parent ${4:+"$4"}
+    echo returned
+  )
+}
+cp_run L38a "$$" real "" >"$W/38a.out" 2>"$W/38a.err"; rc=$?; out38="$(cat "$W/38a.out")"
+check 38-alive-rc eq "$rc" 0
+check 38-alive-returned eq "$out38" returned
+cp_run L38b "$(($$ + 1))" real "" >"$W/38b.out" 2>"$W/38b.err"; rc=$?; out38="$(cat "$W/38b.out")"
+check 38-gone-rc eq "$rc" 129
+check 38-gone-not-returned eq "$out38" ""
+check 38-gone-orphaned has "$W/38b.err" "ORPHANED"
+check 38-gone-event eq "$(event_count orphaned L38b)" 1
+cp_run L38c "$$" unreadable startup >"$W/38c.out" 2>"$W/38c.err"; rc=$?; out38="$(cat "$W/38c.out")"
+check 38-unreadable-startup-rc eq "$rc" 2
+check 38-unreadable-startup-fix has "$W/38c.err" "Fix:"
+check 38-unreadable-startup-no-event eq "$(event_count orphaned L38c)" 0
+cp_run L38d "$$" unreadable "" >"$W/38d.out" 2>"$W/38d.err"; rc=$?; out38="$(cat "$W/38d.out")"
+check 38-unreadable-wait-rc eq "$rc" 129
+check 38-unreadable-wait-orphaned has "$W/38d.err" "ORPHANED"
+check 38-unreadable-wait-event eq "$(event_count orphaned L38d)" 1
+
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then
   echo "test-slot: self-test OK ($PASS checks)"
