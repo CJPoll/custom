@@ -4155,7 +4155,7 @@ own children, so it cannot count orphans.
   but a foreground spawn only when it ends, because its PostToolUse fires then
   (measured). Until then its spawn and its agent are separate rows.
 - **A lost `agent_bound` leaves the same two rows, so a second key pairs
-  them for display** (DND-884). `agent_bound` is a detached report and can be
+  them** (DND-884). `agent_bound` is a detached report and can be
   lost (`report-failures.log`). Neither row records whether the spawn was
   foreground or background: PreToolUse's `tool_input.run_in_background` is
   absent when the harness backgrounds a spawn itself (*Enforcement layers* →
@@ -4178,14 +4178,33 @@ own children, so it cannot count orphans.
     agent and counts for nothing.
 
   Anything ambiguous pairs with nothing, never a guess. The pair is derived
-  at read time, never stored, and a later `agent_bound` replaces it. It
-  decides only a mission's captain state and lifecycle time (*Reported and
-  hook missions merge*). A run's captains, its activity and its orphan count
-  still use joined spawns only (*Fleet liveness*). A wrong pair needs four
+  at read time, never stored, and a later `agent_bound` replaces it. A
+  paired spawn counts as joined everywhere a run's captains are read (*A
+  run's captains are one answer*, next). A wrong pair needs four
   lost reports within one window: this spawn's `agent_bound` and its child's
   `agent_start`, plus another worker's `agent_spawn` and `agent_bound`. Either
   of that worker's two reports would give it a spawn row, joined or a rival,
   so its agent would not pair.
+- **A run's captains are one answer** (DND-885, DND-968). A run's captains
+  are the captain spawns attributed to it, each reaching its agent one of
+  three ways: joined (by `agent_bound`), paired (the second key, above), or
+  not at all (unjoined, or joined to an agent whose row has not arrived).
+  Each captain's state is the one *Mission pointers are metadata only* →
+  *Reported and hook missions merge* gives it. Every run-level view reads
+  this one answer and never re-derives it: the run's mission rows, its
+  orphan count, and its activity (*Fleet liveness*). A ticket's **deciding
+  captain** is its latest spawn not denied, or, when every spawn for it was
+  denied, its latest spawn. "Latest" orders spawns by the receive time of
+  their `agent_spawn` (else of their latest report), then their latest
+  report. A re-dispatch replaces the earlier captain; a
+  denied re-dispatch replaces nothing, so it never hides a captain still
+  working. The captains a run **shows** are each ticket's deciding captain
+  plus every unmapped captain; a spawn whose mapping has not arrived is
+  neither. The mission rows and the orphan count read the captains it
+  shows. The run's activity reads all of its captains, replaced ones
+  included, because liveness is recency: a replaced captain still
+  reporting is still evidence the run is working, and an ended one never
+  keeps it live.
 - **Every lifecycle report is an order-independent upsert.** Hook reports are
   detached and can arrive in any order; measured: SubagentStop before the
   caller's PostToolUse. An `agent_end` for an unknown `agent_id` creates the
@@ -4344,7 +4363,8 @@ shows three ways:
 
 **Reported and hook missions merge by `ticket_ref`.** Hook missions come from
 the spawns whose caller is any admiral agent of the run. A mission's captain
-state from the hooks is the lifecycle of its latest spawn's agent: `running`,
+state from the hooks is the lifecycle of its deciding captain's agent (*Agent
+lifecycle* → *A run's captains are one answer*): `running`,
 `ended`, `ended_unexpectedly` with its basis, `lost` (still `running` but
 silent past the lost window of *Fleet liveness*), or `denied`. A spawn not
 yet joined to an agent, with no end, reads the agent it is paired with, if
@@ -4356,7 +4376,8 @@ reads `lost` when its run reads `lost` or `ended_unexpectedly`, and
 `session_ended` ends it (*Agent lifecycle*). The hook captain state wins over
 the reported `captain_state` when it is newer. A hook mission whose `ticket_ref`
 more than one reported entry carries (two trackers) merges with none and shows
-on its own row.
+on its own row. The run's orphan count (*Fleet liveness*) reads the same
+deciding captains, so a mission row and the count never disagree.
 
 **Later (2026-09-27):** DND-884: this said every spawn not yet joined, with no
 end, reads `running`, or `lost` with its run. Then a lost `agent_bound` left a
@@ -4365,6 +4386,13 @@ admiral's run stayed live. Now only an unpaired spawn follows its run. A
 paired one reads its agent's own state: a finished captain reads `ended`, and
 a live background captain reads `running` on its own activity, never `lost`
 with its run.
+
+**Later (2026-09-27):** DND-885: this said a mission's hook state is its
+latest spawn's agent. The server already skipped a denied spawn when it
+picked the latest (gen_saas `Athena.Fleet.MissionRows`, before DND-885 moved
+the rule to `Athena.Fleet.RunCaptains.deciding/1`), because a denied
+re-dispatch would otherwise hide the captain still working. The text now
+names the deciding captain, which says so.
 
 **A reported status older than hook evidence is `stale`.** The fleet page marks
 a mission's reported `status` `stale` when a lifecycle report for that ticket is
@@ -4417,13 +4445,21 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   5. The run is silent past the lost window: `lost`. Silent past the live
      window: `quiet`. The run's silence is measured from the latest of its own
      last-seen time, the last-seen time of each admiral agent of the run, and
-     the last-seen time of each captain still `running` whose spawn's caller is
-     an admiral agent of the run. An ended captain's last-seen time never
-     keeps a run live.
+     the last-seen time of each of the run's captains (*Agent lifecycle* →
+     *A run's captains are one answer*) still `running`, joined or paired:
+     all of them, not only the captains it shows, since a replaced captain
+     still reporting is still activity. An ended captain's last-seen time
+     never keeps a run live.
   6. Otherwise the reported state (`running` or `draining`).
 
   Until the lifecycle hook reports on a machine, a run there has no admiral
   agent, so steps 2 and 3 never match and step 5 is its only backstop.
+
+  **Later (2026-09-27):** DND-968: step 5 counted joined captains only. A
+  live captain whose `agent_bound` was lost, or a foreground captain the
+  second key pairs, let its silent admiral's run age to `lost` while its
+  mission row read `running`. Paired captains now count too, so the row and
+  the run agree.
 
   **Later (2026-09-25):** DND-541: this bullet said an admiral run reads its
   reported state, except that a `running` or `draining` run reads `lost` when
@@ -4439,19 +4475,33 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   reports, and its live captains refresh the run in between. So one set of
   windows serves sessions and runs, and the lost window MUST exceed 2700 s for
   runs too.
-- **A foreground captain is the known limit.** An admiral blocked on a
-  foreground captain makes no tool call until that captain ends, and the
-  captain's own activity cannot refresh the run, because a foreground spawn is
-  joined to its agent only when it ends (*Agent lifecycle*). Such a run reads
-  `quiet`, then `lost` past the lost window, while the captain works. An
-  admiral runs up to five captains in parallel (athena-admiral), which takes
-  background spawns, so this is not the normal case. The display pairing of
-  *Agent lifecycle* does not change this: a paired captain's mission row
-  reads its own state, but the run still ages on joined captains only.
+- **An unpaired foreground captain is the known limit.** An admiral blocked
+  on a foreground captain makes no tool call until that captain ends, and a
+  foreground spawn is joined to its agent only when it ends (*Agent
+  lifecycle*). When the second key pairs the spawn with its agent, the
+  captain's own activity refreshes the run (step 5). Unpaired (ambiguous, or
+  no agent near its request), it cannot: such a run reads `quiet`, then
+  `lost` past the lost window, while the captain works. An admiral runs up
+  to five captains in parallel (athena-admiral), which takes background
+  spawns, so this is not the normal case.
+
+  **Later (2026-09-27):** DND-968: this limit covered every foreground
+  captain. A paired one now keeps its run live, so it covers unpaired ones
+  only.
 - **`quiet` is a normal wait,** rendered neutral ("waiting, no activity for
   Xm"), never as an alarm.
-- **Orphaned captains are shown, not reported.** A run at step 2 or 3 with
-  captains still `running` shows "N captains still running".
+- **Orphaned captains are shown, not reported.** A run at step 2 or 3 shows
+  "N captains not ended": of the captains it shows (*Agent lifecycle* → *A
+  run's captains are one answer*), those reading `running` or `lost`. A
+  `lost` captain counts because no end was reported for it; the owner still
+  has to look at it.
+
+  **Later (2026-09-27):** DND-885: this counted joined captains still
+  `running` and read "N captains still running". An unjoined or paired
+  captain was left out, so a background captain whose bind was lost read
+  `running` on its row and was not counted, and a captain a re-dispatch
+  replaced could be counted beside its ticket's `ended` row. The count now
+  reads the rows' own captains.
 - **`scope unreported`** is an admiral run that never sent `admiral_scope`. It
   MUST read differently from an empty scope (`no missions`), which is a
   reported fact. An `admiral_seen` whose `agent_id` matches no started run
