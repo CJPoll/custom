@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # critic-eval — measure a standing LLM-judge critic (athena-diff-critic) against
