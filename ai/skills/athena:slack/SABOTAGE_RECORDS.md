@@ -386,3 +386,34 @@ returned to `VERDICT: PASS (117 cases)`.
 | S68 | the `**Background**` step deleted from the structure list | 1 | `FAIL doctrine: athena:slack carries decision rule '**Background**'` |
 
 After each row the suite returned to `VERDICT: PASS (124 cases)`.
+
+## Thread claim on post/dm (DND-491, 2026-09-27)
+
+- **Code under test:** `bin/claim-thread`, `lib/claim.sh`,
+  `lib/slack.sh` (`slack_load_bot_identity`, `slack_claim_started_thread`),
+  `bin/post`, `bin/dm`; and athena:inbox `lib/logchan.sh` + `bin/read-inbox`
+  (the `thread_ts` / `route` render).
+- **Suite run:** `bash test/self-test.sh` (athena:slack) and
+  `bash ../athena:inbox/test/self-test.sh` (reader row S77).
+- **Baseline:** `VERDICT: PASS (173 cases)` (athena:slack),
+  `VERDICT: PASS (883 cases)` (athena:inbox).
+- **Runner:** one mutation at a time by an exact-anchor replace asserted to
+  occur once, full suite, restored byte-for-byte from a backup.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S69 | `post` no longer calls the claim | 3 | `FAIL post: prints the ts line, then claims that (channel, ts): claim=claimed, exit 0` / `FAIL post: cwd with no registry entry -> posted once, exit 3 reason=no-registry-entry inbox=none` |
+| S70 | an empty MCP answer parsed as `claimed` | 2 | `FAIL claim_parse_result: an empty answer -> mcp-error:no-answer` |
+| S71 | the producer filter dropped (a platform log channel is a candidate) | 18 | `FAIL claim_resolve_inbox: only a platform log channel -> no-slack-channel` / `FAIL claim_resolve_inbox: one slack log channel -> cproj-slack.jsonl` |
+| S72 | `machine_id` added to the claim arguments | 1 | `FAIL claim-thread: claimed -> claim=claimed, exit 0, exactly bot_id/team_id/channel/thread_ts/inbox_name` |
+| S73 | a failed claim exits 0 from post/dm | 2 | `FAIL post: a failed claim -> ts line printed, claim=FAILED on stderr, exit 3, posted exactly once` |
+| S74 | `dm --thread_ts` claims | 1 | `FAIL dm --thread_ts: no MCP call, no claim line, exit 0` |
+| S75 | the server's `not found` folded into `mcp-error` | 4 | `FAIL claim_parse_result: a tool error 'not found' -> not-found` / `FAIL claim-thread: not found -> exit 3 reason=not-found key=<team>/<chan>/<ts> inbox=<inbox>` |
+| S76 | a cached identity without `bot_id` is never refreshed | 1 | `FAIL claim-thread: a cached identity without bot_id is refreshed once from auth.test` |
+| S77 | the reader projects `route` as always null | 3 | `FAIL DND-491 r1 a claimed reply shows thread_ts and route=thread_claim` / `FAIL DND-491 r3 a non-string route is rendered as a string` |
+
+S71 first ran the suite to an early stop with no `VERDICT` line: two test
+helpers (`claim_args`, `mcp_calls`) returned `cat`'s non-zero status under the
+suite's `set -e`, so a missing MCP record aborted the run instead of failing
+one case. Both now end `|| true`, and S71 was re-applied: `VERDICT: FAIL (18 of
+173 cases)`. After each row the suites returned to their baselines.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# post <channel_id|#name> [text] [--blocks <json>]
+# post <channel_id|#name> [text] [--blocks <json>] [--no-claim]
 #
 # Posts a NEW top-level message. Text may be the trailing argument or stdin --
 # stdin is the one to reach for with anything multi-line, because argv quoting
@@ -8,6 +8,16 @@
 # Prints ts/channel/permalink so a follow-up `reply` can thread onto it. The ts
 # printed here is the parent ts: that is the ONLY value chat.postMessage's
 # thread_ts accepts.
+#
+# Then it CLAIMS the thread it started for this session's project inbox
+# (bin/claim-thread), so replies in the thread come back to this project
+# rather than to the channel route. One more line follows:
+#   claim=claimed|already_yours ...   exit 0
+#   claim=skipped                     exit 0   (--no-claim: no reply expected)
+#   claim=FAILED reason=... + Fix:    exit 3   (stderr) POSTED, NOT CLAIMED.
+# Exit 3 never means the post failed: the message is in Slack and the ts line
+# above is real. Do not re-post; fix the cause and run
+# `claim-thread <channel> <ts>`. Any other non-zero exit is a failed post.
 set -eu
 SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 . "$SELF_DIR/../lib/slack.sh"
@@ -15,7 +25,7 @@ case "${1:-}" in -h|--help) slack_help "$0"; exit 0 ;; esac
 slack_need_tools
 
 usage() {
-  printf 'usage: post <channel_id|#name> [text] [--blocks <json>]\n' >&2
+  printf 'usage: post <channel_id|#name> [text] [--blocks <json>] [--no-claim]\n' >&2
   exit 2
 }
 
@@ -23,9 +33,11 @@ usage() {
 CHAN_ARG="$1"; shift
 TEXT=""
 BLOCKS=""
+CLAIM=true
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --blocks) [ "$#" -ge 2 ] || usage; BLOCKS="$2"; shift 2 ;;
+    --no-claim) CLAIM=false; shift ;;
     --) shift; TEXT="${1:-}"; break ;;
     -*) usage ;;
     *) TEXT="$1"; shift ;;
@@ -46,3 +58,5 @@ OUT_CHAN="$(printf '%s' "$RESP" | jq -r '.channel')"
 printf 'ts=%s channel=%s\n' "$TS" "$OUT_CHAN"
 PERMALINK="$(slack_permalink "$OUT_CHAN" "$TS" || printf '')"
 if [ -n "$PERMALINK" ]; then printf 'permalink=%s\n' "$PERMALINK"; fi
+if [ "$CLAIM" = true ]; then slack_claim_started_thread "$SELF_DIR" "$OUT_CHAN" "$TS"; fi
+printf 'claim=skipped\n'

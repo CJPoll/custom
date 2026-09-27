@@ -75,9 +75,10 @@ can thread onto it.
 | Script | What it does |
 |---|---|
 | `whoami` | `auth.test` — prints user, user_id, bot_id, team. Which identity is this? |
-| `post <channel\|#name> [text] [--blocks JSON]` | New top-level message. Text from the argument or stdin. |
+| `post <channel\|#name> [text] [--blocks JSON] [--no-claim]` | New top-level message. Text from the argument or stdin. Then **claims the thread** it started (`claim=...` line). Exit **3** = posted but NOT claimed: do not re-post; fix the cause and run `claim-thread`. See *Thread replies come back to the session that started the thread*. |
 | `reply <channel> <thread_ts> [text] [--broadcast]` | Threaded reply. `thread_ts` is the **parent** ts. |
-| `dm <user_id> [text] [--thread_ts TS]` | `conversations.open` then post. User **id**, not name. |
+| `dm <user_id> [text] [--thread_ts TS] [--no-claim]` | `conversations.open` then post. User **id**, not name. A new DM claims its thread like `post` (exit 3 = posted, not claimed); `--thread_ts` replies into an existing thread and never claims. |
+| `claim-thread <channel_id> <thread_ts>` | Claims a thread for this session's project Slack inbox, so its replies route here. `post`/`dm` run it; run it by hand to retry a failed claim without re-posting. Exit 0 claimed / already yours, 3 failed (`claim=FAILED reason=...` + `Fix:`), 2 a malformed channel or ts. |
 | `update <channel> <ts> [text]` | Edit — bot's own messages only. |
 | `delete <channel> <ts>` | Delete — bot's own messages only. No undo. |
 | `react <channel> <ts> <emoji> [--remove]` | Add/remove a reaction. Bare name (`eyes`, not `:eyes:`). |
@@ -88,6 +89,39 @@ can thread onto it.
 | `channels [--types CSV] [--member] [--json]` | Conversation list with ids. `--types im,mpim` for DMs. |
 | `upload <channel> <file> [--title T] [--thread_ts TS] [--comment C]` | Three-step external upload (`files.upload` is sunset). |
 | `permalink <channel> <ts>` | Shareable URL for one message. |
+
+### Thread replies come back to the session that started the thread
+
+A reply in a Slack thread is routed by the server to whichever inbox
+**claimed** that thread; an unclaimed thread's replies follow the channel
+route (walt_ui's `slack` channel today). The rule and the server side are in
+`ai/contracts/athena-events.md` → *Thread replies route to the thread's
+claimant*. So `post`, and `dm` without `--thread_ts`, claim the thread they
+start for **this session's project** (DND-491): cwd → realpath of the git
+common dir → this project's inbox registry entry → its one Slack `log`
+channel (no `producer`, or `producer: "slack"`) → its path, e.g.
+`custom-slack.jsonl`. The call is the athena MCP tool `slack_thread_claim`
+with the bot's `bot_id`/`team_id` (auth.test, cached); the machine token is
+read from the inbox client config and reaches curl only on stdin, as
+`send-mail --routed` sends it.
+
+After the `ts=... channel=...` line, exactly one of:
+
+- `claim=claimed inbox=<inbox>` or `claim=already_yours inbox=<inbox>` — exit 0;
+- `claim=skipped` — `--no-claim`, exit 0 (use it when no reply is expected);
+- on stderr, `claim=FAILED reason=<token> key=<team>/<channel>/<ts> inbox=<inbox|none>`
+  then `Fix: ...` — exit **3**. The message **was posted**; never re-post.
+  Reasons, each distinct: `no-registry-entry`, `registry-error`,
+  `no-slack-channel`, `ambiguous-slack-channel`, `no-identity`, `no-token`,
+  `mcp-unregistered`, `mcp-error:<words>`, `not-found`, `refused` (with the
+  server's words on a `server:` line), `already-claimed`, `invalid`.
+
+`reply` and `dm --thread_ts` never claim: the thread belongs to whoever
+started it. A claim needs the project's Slack channel declared in its
+registry entry **and** a matching server-side AgentInstance for that inbox
+on this machine (both ends, or the reply goes dark). Posts made through
+`mcp__athena__slack_post` are not claimed by this path; claim them with the
+athena MCP `slack_thread_claim` when their replies should come back.
 
 **Later (2026-09-25):** `post --blocks` renders display-only blocks, but a
 **button** posted through it carries no server-stamped return address. A click
@@ -454,8 +488,9 @@ count is `im + mpim` (a legacy `dm` in older persisted state is still counted).
 
 **`thread_reply` has no backstop.** The API poll recovers **DMs and mentions
 only**. A `thread_reply` the file channel misses is simply lost: it depends on
-`slack_thread_participations`, which only the receiver populates, and there is
-no second path to it. If a threaded reply to Athena seems to have gone
+`slack_thread_participations`, which the receiver populates and a thread claim
+(DND-491, *Thread replies come back to the session that started the thread*)
+now seeds too, and there is no second path to it. If a threaded reply to Athena seems to have gone
 unheard, it will not turn up here.
 
 **This gap is about what the poll can fetch, not about `kind`.** The file
@@ -570,13 +605,17 @@ recover after the file path has been down.
 
 ## Tests
 
-`bash test/self-test.sh` — 124 cases, no network (curl is a PATH shim). Covers
+`bash test/self-test.sh` — 173 cases, no network (curl is a PATH shim). Covers
 the ok:false convention, the token never reaching argv or a URL, request shapes,
 pagination, 429 backoff, the users cache, unreadable conversations, every branch
 of the hook and the inbox scan, the cross-source `seen_keys` dedupe (drop + add),
 the legacy-cache migration, the SessionStart output contract and marker family,
 the `read-inbox --json` array contract (`[]` vs. a failure), and the `im`/`mpim`
-kind vocabulary, and `status`'s request shape, flag order and miss paths. Seven
+kind vocabulary, and `status`'s request shape, flag order and miss paths, and
+the thread claim (DND-491): the result parser, the per-reason `Fix:` texts, the
+inbox resolution (worktree, subdirectory, platform channel skipped, ambiguity),
+`claim-thread`'s request and failure lines, the machine token staying off argv
+and disk, and `post`/`dm`/`reply` claiming only the threads they start. Seven
 text-presence cases keep the owner's decision-question rules in this file and
 the "your call" button in the worked example; they cannot check a sent message. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
 each of them.

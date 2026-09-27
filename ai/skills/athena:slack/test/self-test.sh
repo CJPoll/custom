@@ -28,6 +28,10 @@ BOT_USER="U0BU75F8EUR"
 CODY="U0AHNV4RJGP"
 ENG_CHANNEL="C07A6E3CBFH"
 FAKE_TOKEN="xoxb-fake-000-111-abcdefghijklmnop"
+MCP_BEARER="fixture-machine-token-5e1d"
+MCP_URL="https://athena.example.test/mcp"
+BOT_ID="B0BOTFIX01"
+TEAM_ID="T06UD7W5HGX"
 
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
@@ -55,6 +59,39 @@ d="${SHIM_DIR}"
 mkdir -p "$d"/{rc,body,url,resp,http,hdr,count,calls.d} 2>/dev/null
 
 printf '%s\n' "$*" >> "$d/argv"
+
+# --- the athena MCP (DND-491): config on STDIN, never a file ----------------
+# Answers initialize / notifications / tools/call from $d/mcp/, and records
+# mcp.calls (method + tool), mcp.args.<tool>.json, and mcp.bearer ("ok" when
+# the stdin config carried the expected Authorization header).
+if [[ " $* " == *" --config - "* ]]; then
+  mkdir -p "$d/mcp"
+  cfg="$(cat)"
+  field() { printf '%s\n' "${cfg}" | sed -n "s/^$1 = \"\\(.*\\)\"$/\\1/p" | head -n 1; }
+  req="$(field data-binary)"; req="${req#@}"
+  hdr="$(field dump-header)"; out="$(field output)"
+  printf '%s\n' "${cfg}" | grep -qx "header = \"Authorization: Bearer ${SHIM_MCP_BEARER:-}\"" \
+    && echo ok >> "$d/mcp.bearer"
+  m="$(jq -r '.method' "${req}")"
+  case "${m}" in
+    initialize)
+      echo initialize >> "$d/mcp.calls"
+      printf 'HTTP/1.1 200 OK\r\nmcp-session-id: k3Jz9vQm+Pq/7XbL2wYtR0aC5dE=\r\n\r\n' > "${hdr}"
+      printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26"}}' > "${out}"
+      printf 200 ;;
+    notifications/initialized)
+      echo initialized >> "$d/mcp.calls"; : > "${hdr}"; : > "${out}"; printf 202 ;;
+    tools/call)
+      tool="$(jq -r '.params.name' "${req}")"
+      echo "tools/call ${tool}" >> "$d/mcp.calls"
+      jq -c '.params.arguments' "${req}" > "$d/mcp.args.${tool}.json"
+      : > "${hdr}"
+      cp "$d/mcp/${tool}.answer" "${out}" 2>/dev/null || : > "${out}"
+      cat "$d/mcp/${tool}.code" 2>/dev/null || printf 200 ;;
+    *) printf 400 ;;
+  esac
+  exit 0
+fi
 
 conf=""; prev=""; lasturl=""; databin=""
 for a in "$@"; do
@@ -115,6 +152,7 @@ chmod +x "${SHIMBIN}/curl"
 CASE_N=0
 setup_case() {
   CASE_N=$((CASE_N+1))
+  RUN_CWD=""
   CHOME="${TMP}/home${CASE_N}"
   CACHE="${CHOME}/.cache/athena-slack"
   mkdir -p "${CHOME}/.claude" "${CACHE}"
@@ -162,7 +200,9 @@ any_curl() { [[ -s "${SHIM_DIR}/calls" ]]; }
 run_bin() { # run_bin <script> [args...]
   local script="$1"; shift
   set +e
-  OUT="$(env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" SHIM_DIR="${SHIM_DIR}" \
+  OUT="$(cd "${RUN_CWD:-${TMP}}" && env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" SHIM_DIR="${SHIM_DIR}" \
+    ATHENA_INBOX_ROOT="${CHOME}/inbox-root" ATHENA_INBOX_CLIENT_CONFIG="${CHOME}/client.json" \
+    SHIM_MCP_BEARER="${MCP_BEARER}" \
     SLACK_INBOX_STATE="${STATE}" SLACK_INBOX_LEGACY_STATE="${LEGACY}" \
     SLACK_MAX_RETRIES="${SLACK_MAX_RETRIES_OVERRIDE:-3}" \
     "${BIN}/${script}" "$@" 2>"${TMP}/err${CASE_N}")"
@@ -174,7 +214,9 @@ run_bin() { # run_bin <script> [args...]
 run_bin_stdin() { # run_bin_stdin <stdin> <script> [args...]
   local input="$1" script="$2"; shift 2
   set +e
-  OUT="$(printf '%s' "${input}" | env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" \
+  OUT="$(cd "${RUN_CWD:-${TMP}}" && printf '%s' "${input}" | env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" \
+  ATHENA_INBOX_ROOT="${CHOME}/inbox-root" ATHENA_INBOX_CLIENT_CONFIG="${CHOME}/client.json" \
+  SHIM_MCP_BEARER="${MCP_BEARER}" \
     SHIM_DIR="${SHIM_DIR}" SLACK_INBOX_STATE="${STATE}" \
     SLACK_INBOX_LEGACY_STATE="${LEGACY}" "${BIN}/${script}" "$@" 2>"${TMP}/err${CASE_N}")"
   RC=$?
@@ -408,7 +450,7 @@ setup_case
 fixture_http_seq chat.postMessage 1 429
 fixture_hdr_seq chat.postMessage 1 "Retry-After: 1"
 fixture_seq chat.postMessage 2 '{"ok":true,"ts":"9.9","channel":"C1"}'
-run_bin post "${ENG_CHANNEL}" "retry me"
+run_bin post "${ENG_CHANNEL}" "retry me" --no-claim
 if [[ "${RC}" == 0 ]] && [[ "$(calls_of chat.postMessage)" == "2" ]] \
    && [[ "${OUT}" == *"ts=9.9"* ]] && [[ "${ERR}" == *"rate limited"* ]]; then
   ok "429: waits out Retry-After and retries, then succeeds"
@@ -1231,6 +1273,315 @@ done
 # 84. The owner's decision-question rules (2026-09-25) stay in the doctrine,
 #     and the worked example obeys them. A text-presence check only: it
 #     proves the rules were not dropped, not that a sent message follows them.
+echo
+echo "-- DND-491: claim the thread a post/dm starts ------------------------------"
+
+INBOX_LIB_DIR="$(dirname "${ROOT}")/athena:inbox/lib"
+# claim_fn <fn> [args...] -- one claim.sh function in a fresh bash with the
+# libraries claim-thread sources, the per-case env, and RUN_CWD as cwd. Sets
+# OUT, ERR, RC.
+claim_fn() {
+  set +e
+  OUT="$(cd "${RUN_CWD:-${TMP}}" && env HOME="${CHOME}" ATHENA_INBOX_ROOT="${CHOME}/inbox-root" \
+    ATHENA_INBOX_CLIENT_CONFIG="${CHOME}/client.json" INBOX_LIB_DIR="${INBOX_LIB_DIR}" CLAIM_LIB="${ROOT}/lib/claim.sh" \
+    bash -c 'for f in err.sh names.sh descriptor.sh logchan.sh maildir.sh fence.sh session.sh fs.sh lock.sh inbox.sh; do . "${INBOX_LIB_DIR}/${f}"; done; . "${CLAIM_LIB}"; "$@"' \
+    claim_fn "$@" 2>"${TMP}/cerr${CASE_N}")"
+  RC=$?
+  set -e
+  ERR="$(cat "${TMP}/cerr${CASE_N}")"
+}
+
+SLACK_CH='{"slack":{"kind":"log","path":"cproj-slack.jsonl","dedupe":["event_id","channel+ts"],"schema_v":[1],"stale_after_s":0},"session":{"kind":"log","path":"cproj-session.jsonl","producer":"platform","stale_after_s":0}}'
+mcp_answer() { # mcp_answer <tool> <json-rpc-message>  (served as an SSE event)
+  mkdir -p "${SHIM_DIR}/mcp"
+  printf 'event: message\ndata: %s\n\n' "$2" > "${SHIM_DIR}/mcp/$1.answer"
+}
+claim_ok_answer() { # claim_ok_answer <status>
+  mcp_answer slack_thread_claim "$(jq -n -c --arg s "$1" \
+    '{jsonrpc:"2.0", id:2, result:{isError:false, content:[{type:"text", text:({status:$s, claim_id:"c-1", inbox_name:"cproj-slack.jsonl"}|tojson)}]}}')"
+}
+claim_err_answer() { # claim_err_answer <tool-error-text>
+  mcp_answer slack_thread_claim "$(jq -n -c --arg t "$1" \
+    '{jsonrpc:"2.0", id:2, result:{isError:true, content:[{type:"text", text:$t}]}}')"
+}
+mcp_calls() { cat "${SHIM_DIR}/mcp.calls" 2>/dev/null || true; }
+claim_args() { cat "${SHIM_DIR}/mcp.args.slack_thread_claim.json" 2>/dev/null || true; }
+
+# claim_setup [channels-json] -- a project repo with a registry entry, the MCP
+# registered for it, a machine token, the bot identity cached, cwd = the repo,
+# and a default `claimed` answer.
+claim_setup() {
+  seed_caches
+  printf '{"ok":true,"user":"athena","user_id":"%s","bot_id":"%s","team_id":"%s"}' \
+    "${BOT_USER}" "${BOT_ID}" "${TEAM_ID}" > "${CACHE}/identity.json"
+  PROJ="${CHOME}/dev/cproj"; mkdir -p "${PROJ}/sub/dir"
+  ( cd "${PROJ}" && git init -q . && git config user.email t@t && git config user.name t \
+    && git commit -q --allow-empty -m init )
+  COMMON="$(cd "${PROJ}" && realpath "$(git rev-parse --git-common-dir)")"
+  MAIN="$(dirname "${COMMON}")"
+  mkdir -p "${CHOME}/inbox-root/projects"; chmod 700 "${CHOME}/inbox-root" "${CHOME}/inbox-root/projects"
+  jq -n --arg r "${COMMON}" --argjson c "${1:-${SLACK_CH}}" '{v:1, repo:$r, channels:$c}' \
+    > "${CHOME}/inbox-root/projects/cproj.json"
+  chmod 600 "${CHOME}/inbox-root/projects/cproj.json"
+  jq -n --arg p "${MAIN}" --arg u "${MCP_URL}" '{projects: {($p): {mcpServers: {athena: {type: "http", url: $u}}}}}' \
+    > "${CHOME}/.claude.json"
+  jq -n --arg t "${MCP_BEARER}" '{token: $t, server_url: "wss://athena.example.test/machine/websocket"}' \
+    > "${CHOME}/client.json"; chmod 600 "${CHOME}/client.json"
+  RUN_CWD="${PROJ}"
+  claim_ok_answer claimed
+}
+
+# u1-u4. claim_parse_result: the tool's answer, one token. An empty or garbled
+#        answer is never `claimed` and never `not-found`.
+setup_case
+parse_case() { # parse_case <label> <message> <want>
+  claim_fn claim_parse_result "$2"
+  if [[ "${OUT}" == "$3" ]]; then ok "claim_parse_result: $1 -> $3"
+  else bad "claim_parse_result: $1 -> $3" "got '${OUT}' rc=${RC}"; fi
+}
+ok_msg() { jq -n -c --arg s "$1" '{jsonrpc:"2.0", id:2, result:{isError:false, content:[{type:"text", text:({status:$s}|tojson)}]}}'; }
+err_msg() { jq -n -c --arg t "$1" '{jsonrpc:"2.0", id:2, result:{isError:true, content:[{type:"text", text:$t}]}}'; }
+parse_case "claimed" "$(ok_msg claimed)" "claimed"
+parse_case "already_yours" "$(ok_msg already_yours)" "already_yours"
+parse_case "structuredContent claimed" '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"status":"claimed"}}}' "claimed"
+parse_case "a tool error 'not found'" "$(err_msg 'not found')" "not-found"
+parse_case "refused: ... Fix: ..." "$(err_msg 'refused: inbox_name is not one of this machine'"'"'s Slack inboxes. Fix: use lookup_inbox')" "refused"
+parse_case "already_claimed: ..." "$(err_msg 'already_claimed: another inbox holds this thread')" "already-claimed"
+parse_case "invalid: thread_ts ..." "$(err_msg 'invalid: thread_ts must be digits.digits')" "invalid"
+parse_case "'not found' with a trailing newline" "$(err_msg $'not found\n')" "not-found"
+parse_case "an empty answer" "" "mcp-error:no-answer"
+parse_case "a non-JSON answer" "<html>502</html>" "mcp-error:no-answer"
+parse_case "a result with no status" '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"claim_id\":\"x\"}"}]}}' "mcp-error:no-status-in-result"
+parse_case "an unknown status" "$(ok_msg released)" "mcp-error:unexpected-status released"
+parse_case "a JSON-RPC error" '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}' "mcp-error:Method not found"
+parse_case "an unrecognised tool error, multi-line" "$(err_msg $'boom\nsecond line')" "mcp-error:boom second line"
+
+# u5. claim_reason_fix: every reason has its own non-empty Fix text.
+setup_case
+FIXES=""
+for r in no-registry-entry registry-error no-slack-channel ambiguous-slack-channel no-identity no-token \
+         mcp-unregistered mcp-error:x not-found refused already-claimed invalid; do
+  claim_fn claim_reason_fix "${r}"
+  if [[ -z "${OUT}" ]]; then bad "claim_reason_fix: ${r} has a Fix text" "empty"; continue; fi
+  FIXES="${FIXES}${OUT}"$'\n'
+done
+if [[ "$(printf '%s' "${FIXES}" | sort | uniq -d | wc -l)" -eq 0 ]] \
+   && [[ "$(printf '%s' "${FIXES}" | grep -c .)" -eq 12 ]]; then
+  ok "claim_reason_fix: all 12 reasons have a non-empty, distinct Fix text"
+else bad "claim_reason_fix: all 12 reasons have a non-empty, distinct Fix text" "$(printf '%s' "${FIXES}" | sort | uniq -c | sort -rn | head -3)"; fi
+
+# u6-u11. claim_resolve_inbox: the project's ONE Slack log channel, from the
+#         registry entry the cwd resolves -- never a platform channel, never a
+#         guess among two, and the same from a worktree or a subdirectory.
+resolve_case() { # resolve_case <label> <want> [channels-json]
+  setup_case; claim_setup "${3:-}"
+  claim_fn claim_resolve_inbox "$(cd "${RUN_CWD}" && pwd -P)"
+  if [[ "${OUT}" == "$2" ]]; then ok "claim_resolve_inbox: $1 -> $2"
+  else bad "claim_resolve_inbox: $1 -> $2" "got '${OUT}' rc=${RC} err='${ERR}'"; fi
+}
+resolve_case "one slack log channel" "cproj-slack.jsonl"
+resolve_case "only a platform log channel" "no-slack-channel" \
+  '{"session":{"kind":"log","path":"cproj-session.jsonl","producer":"platform","stale_after_s":0}}'
+resolve_case "an explicit producer:slack channel" "cproj-slack.jsonl" \
+  '{"s":{"kind":"log","path":"cproj-slack.jsonl","producer":"slack"}}'
+resolve_case "two slack log channels" "ambiguous-slack-channel" \
+  '{"a":{"kind":"log","path":"cproj-slack.jsonl"},"b":{"kind":"log","path":"cproj-other.jsonl"}}'
+setup_case; claim_setup; rm -f "${CHOME}/inbox-root/projects/cproj.json"
+claim_fn claim_resolve_inbox "${PROJ}"
+if [[ "${OUT}" == "no-registry-entry" && "${RC}" != 0 ]]; then ok "claim_resolve_inbox: no entry for this repo -> no-registry-entry"
+else bad "claim_resolve_inbox: no entry for this repo -> no-registry-entry" "got '${OUT}' rc=${RC}"; fi
+setup_case; claim_setup
+WT="${CHOME}/wt/cproj-feature"
+( cd "${PROJ}" && git worktree add -q -b feature "${WT}" ) >/dev/null 2>&1
+RUN_CWD="${WT}"; claim_fn claim_resolve_inbox "$(cd "${WT}" && pwd -P)"
+if [[ "${OUT}" == "cproj-slack.jsonl" ]]; then ok "claim_resolve_inbox: a worktree resolves the main checkout's entry"
+else bad "claim_resolve_inbox: a worktree resolves the main checkout's entry" "got '${OUT}' rc=${RC} err='${ERR}'"; fi
+setup_case; claim_setup
+RUN_CWD="${PROJ}/sub/dir"; claim_fn claim_resolve_inbox "$(cd "${PROJ}/sub/dir" && pwd -P)"
+if [[ "${OUT}" == "cproj-slack.jsonl" ]]; then ok "claim_resolve_inbox: a subdirectory of the main checkout (relative git common dir) still resolves"
+else bad "claim_resolve_inbox: a subdirectory of the main checkout (relative git common dir) still resolves" "got '${OUT}' rc=${RC} err='${ERR}'"; fi
+setup_case; claim_setup
+claim_fn claim_resolve_inbox "relative/path"
+if [[ "${OUT}" == "no-registry-entry" && "${RC}" != 0 ]]; then ok "claim_resolve_inbox: a relative cwd key is refused, never looked up"
+else bad "claim_resolve_inbox: a relative cwd key is refused, never looked up" "got '${OUT}' rc=${RC}"; fi
+
+# c1. claim-thread: the whole call, and exactly the fields the server takes.
+#     No machine_id / owner / agent_instance_id: the server derives those, and
+#     a value for any of them is refused.
+setup_case; claim_setup
+run_bin claim-thread D0DMCHAN 1790360915.000100
+ARGS="$(claim_args)"
+if [[ "${RC}" == 0 && "${OUT}" == "claim=claimed inbox=cproj-slack.jsonl" ]] \
+   && [[ "$(jq -r '[.bot_id,.team_id,.channel,.thread_ts,.inbox_name]|join(" ")' <<<"${ARGS}")" == "${BOT_ID} ${TEAM_ID} D0DMCHAN 1790360915.000100 cproj-slack.jsonl" ]] \
+   && [[ "$(jq -r 'keys|sort|join(",")' <<<"${ARGS}")" == "bot_id,channel,inbox_name,team_id,thread_ts" ]] \
+   && [[ "$(mcp_calls | tr '\n' '|')" == "initialize|initialized|tools/call slack_thread_claim|" ]]; then
+  ok "claim-thread: claimed -> claim=claimed, exit 0, exactly bot_id/team_id/channel/thread_ts/inbox_name"
+else bad "claim-thread: claimed -> claim=claimed, exit 0, exactly bot_id/team_id/channel/thread_ts/inbox_name" \
+  "rc=${RC} out='${OUT}' err='${ERR}' args=${ARGS} calls=$(mcp_calls | tr '\n' '|')"; fi
+
+# c1b. already_yours is success too: re-claiming your own thread is a no-op.
+setup_case; claim_setup; claim_ok_answer already_yours
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 0 && "${OUT}" == "claim=already_yours inbox=cproj-slack.jsonl" ]]; then
+  ok "claim-thread: already_yours -> exit 0"
+else bad "claim-thread: already_yours -> exit 0" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# c2. No machine token: its own reason, and nothing is sent.
+setup_case; claim_setup; rm -f "${CHOME}/client.json"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=no-token "* && "${ERR}" == *"Fix:"* ]] && [[ -z "$(mcp_calls)" ]]; then
+  ok "claim-thread: no machine token -> exit 3 reason=no-token, Fix:, no MCP call"
+else bad "claim-thread: no machine token -> exit 3 reason=no-token, Fix:, no MCP call" "rc=${RC} err='${ERR}' calls=$(mcp_calls)"; fi
+
+# c3. The machine token travels only in the stdin curl config: never argv,
+#     never a file left behind, never the environment.
+setup_case; claim_setup
+run_bin claim-thread D0DMCHAN 1.2
+LEFT="$(grep -rl "${MCP_BEARER}" "${TMP}" 2>/dev/null | grep -v "/client.json$" | grep -v "/shim${CASE_N}/" || true)"
+if ! grep -q "${MCP_BEARER}" "${SHIM_DIR}/argv" 2>/dev/null \
+   && [[ "$(cat "${SHIM_DIR}/mcp.bearer" 2>/dev/null | sort -u)" == "ok" ]] && [[ -z "${LEFT}" ]]; then
+  ok "claim-thread: the machine token is sent as a Bearer header via stdin only (not argv, no file left)"
+else bad "claim-thread: the machine token is sent as a Bearer header via stdin only (not argv, no file left)" \
+  "argv=$(grep -c "${MCP_BEARER}" "${SHIM_DIR}/argv" 2>/dev/null) bearer=$(cat "${SHIM_DIR}/mcp.bearer" 2>/dev/null) left='${LEFT}'"; fi
+
+# c4. The server's `not found`: its own reason, with the full key and inbox.
+setup_case; claim_setup; claim_err_answer "not found"
+run_bin claim-thread D0DMCHAN 1790.1
+if [[ "${RC}" == 3 && "${ERR}" == *"claim=FAILED reason=not-found key=${TEAM_ID}/D0DMCHAN/1790.1 inbox=cproj-slack.jsonl"* && "${ERR}" == *"Fix:"* ]]; then
+  ok "claim-thread: not found -> exit 3 reason=not-found key=<team>/<chan>/<ts> inbox=<inbox>"
+else bad "claim-thread: not found -> exit 3 reason=not-found key=<team>/<chan>/<ts> inbox=<inbox>" "rc=${RC} err='${ERR}'"; fi
+
+# c4b. A refusal carries the server's own words on a server: line.
+setup_case; claim_setup; claim_err_answer "refused: inbox_name is not live. Fix: lookup_inbox"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=refused "* && "${ERR}" == *"server: refused: inbox_name is not live. Fix: lookup_inbox"* ]]; then
+  ok "claim-thread: refused -> exit 3 reason=refused, the server's words on a server: line"
+else bad "claim-thread: refused -> exit 3 reason=refused, the server's words on a server: line" "rc=${RC} err='${ERR}'"; fi
+
+# c5. A malformed ts or channel: exit 2, Fix:, no call of any kind.
+for bad_args in "D0DMCHAN abc" "D0DMCHAN 1790" "U0AHNV4RJGP 1.2" "d0dm 1.2"; do
+  setup_case; claim_setup
+  # shellcheck disable=SC2086
+  run_bin claim-thread ${bad_args}
+  if [[ "${RC}" == 2 && "${ERR}" == *"reason=invalid"* && "${ERR}" == *"Fix:"* ]] && [[ -z "$(mcp_calls)" ]] && ! any_curl; then
+    ok "claim-thread: '${bad_args}' -> exit 2 reason=invalid, Fix:, no call"
+  else bad "claim-thread: '${bad_args}' -> exit 2 reason=invalid, Fix:, no call" "rc=${RC} err='${ERR}'"; fi
+done
+
+# c6. A 500 or garbage from the server is an mcp-error, never claimed.
+setup_case; claim_setup; mkdir -p "${SHIM_DIR}/mcp"; printf 500 > "${SHIM_DIR}/mcp/slack_thread_claim.code"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=mcp-error:"*"HTTP 500"* ]]; then
+  ok "claim-thread: HTTP 500 -> exit 3 reason=mcp-error:..."
+else bad "claim-thread: HTTP 500 -> exit 3 reason=mcp-error:..." "rc=${RC} err='${ERR}'"; fi
+setup_case; claim_setup; mkdir -p "${SHIM_DIR}/mcp"; printf 'garbage' > "${SHIM_DIR}/mcp/slack_thread_claim.answer"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=mcp-error:"* && "${OUT}" != *"claim=claimed"* ]]; then
+  ok "claim-thread: a garbage answer -> exit 3 reason=mcp-error, never claimed"
+else bad "claim-thread: a garbage answer -> exit 3 reason=mcp-error, never claimed" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# c7. The MCP not registered for this project: its own reason, no call.
+setup_case; claim_setup; rm -f "${CHOME}/.claude.json"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=mcp-unregistered "* ]] && [[ -z "$(mcp_calls)" ]]; then
+  ok "claim-thread: MCP unregistered -> exit 3 reason=mcp-unregistered, no call"
+else bad "claim-thread: MCP unregistered -> exit 3 reason=mcp-unregistered, no call" "rc=${RC} err='${ERR}'"; fi
+
+# c8. An identity cache written before bot_id was read is refreshed once; an
+#     auth.test that still lacks it is no-identity, never an empty bot_id.
+setup_case; claim_setup
+printf '{"ok":true,"user":"athena","user_id":"%s","team_id":"%s"}' "${BOT_USER}" "${TEAM_ID}" > "${CACHE}/identity.json"
+fixture auth.test "{\"ok\":true,\"user_id\":\"${BOT_USER}\",\"bot_id\":\"${BOT_ID}\",\"team_id\":\"${TEAM_ID}\"}"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 0 && "$(calls_of auth.test)" == 1 && "$(jq -r .bot_id <<<"$(claim_args)")" == "${BOT_ID}" ]]; then
+  ok "claim-thread: a cached identity without bot_id is refreshed once from auth.test"
+else bad "claim-thread: a cached identity without bot_id is refreshed once from auth.test" "rc=${RC} auth=$(calls_of auth.test) err='${ERR}'"; fi
+setup_case; claim_setup; rm -f "${CACHE}/identity.json"
+fixture auth.test "{\"ok\":true,\"user_id\":\"${BOT_USER}\",\"team_id\":\"${TEAM_ID}\"}"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=no-identity "* ]] && [[ -z "$(mcp_calls)" ]]; then
+  ok "claim-thread: auth.test without a bot_id -> exit 3 reason=no-identity, no call"
+else bad "claim-thread: auth.test without a bot_id -> exit 3 reason=no-identity, no call" "rc=${RC} err='${ERR}'"; fi
+
+# p1. post: the ts line, then the claim; exit 0.
+setup_case; claim_setup
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790000000.000100\",\"channel\":\"${ENG_CHANNEL}\"}"
+run_bin post "${ENG_CHANNEL}" "hi"
+if [[ "${RC}" == 0 && "$(head -n1 <<<"${OUT}")" == "ts=1790000000.000100 channel=${ENG_CHANNEL}" && "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-slack.jsonl" ]] \
+   && [[ "$(jq -r '.channel + " " + .thread_ts' <<<"$(claim_args)")" == "${ENG_CHANNEL} 1790000000.000100" ]]; then
+  ok "post: prints the ts line, then claims that (channel, ts): claim=claimed, exit 0"
+else bad "post: prints the ts line, then claims that (channel, ts): claim=claimed, exit 0" "rc=${RC} out='${OUT}' err='${ERR}' args=$(claim_args)"; fi
+
+# p2. A failed claim never undoes or repeats the post: exit 3, one post.
+setup_case; claim_setup; claim_err_answer "not found"
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1.1\",\"channel\":\"${ENG_CHANNEL}\"}"
+run_bin post "${ENG_CHANNEL}" "hi"
+if [[ "${RC}" == 3 && "$(head -n1 <<<"${OUT}")" == "ts=1.1 channel=${ENG_CHANNEL}" && "${ERR}" == *"claim=FAILED reason=not-found"* ]] \
+   && [[ "$(calls_of chat.postMessage)" == 1 && "${OUT}" != *"claim="* ]]; then
+  ok "post: a failed claim -> ts line printed, claim=FAILED on stderr, exit 3, posted exactly once"
+else bad "post: a failed claim -> ts line printed, claim=FAILED on stderr, exit 3, posted exactly once" \
+  "rc=${RC} out='${OUT}' err='${ERR}' posts=$(calls_of chat.postMessage)"; fi
+
+# p3. dm without --thread_ts starts a thread: claims (channel from
+#     conversations.open, ts from chat.postMessage).
+setup_case; claim_setup
+fixture conversations.open '{"ok":true,"channel":{"id":"D0PENED"}}'
+fixture chat.postMessage '{"ok":true,"ts":"1790.5","channel":"D0PENED"}'
+run_bin dm "${CODY}" "hi"
+if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-slack.jsonl" ]] \
+   && [[ "$(jq -r '.channel + " " + .thread_ts' <<<"$(claim_args)")" == "D0PENED 1790.5" ]]; then
+  ok "dm: a new DM claims (D... from conversations.open, ts from the post)"
+else bad "dm: a new DM claims (D... from conversations.open, ts from the post)" "rc=${RC} out='${OUT}' err='${ERR}' args=$(claim_args)"; fi
+
+# p4. dm --thread_ts replies into someone's thread: no claim, no claim line.
+setup_case; claim_setup
+fixture conversations.open '{"ok":true,"channel":{"id":"D0PENED"}}'
+fixture chat.postMessage '{"ok":true,"ts":"1790.6","channel":"D0PENED"}'
+run_bin dm "${CODY}" "hi" --thread_ts 1790.5
+if [[ "${RC}" == 0 && "${OUT}" != *"claim="* && -z "$(mcp_calls)" ]]; then
+  ok "dm --thread_ts: no MCP call, no claim line, exit 0"
+else bad "dm --thread_ts: no MCP call, no claim line, exit 0" "rc=${RC} out='${OUT}' calls=$(mcp_calls)"; fi
+
+# p5. reply never claims.
+setup_case; claim_setup
+fixture chat.postMessage '{"ok":true,"ts":"1790.7","channel":"C1"}'
+run_bin reply "${ENG_CHANNEL}" 1790.5 "threaded"
+if [[ "${RC}" == 0 && -z "$(mcp_calls)" && "${OUT}" != *"claim="* ]]; then ok "reply: never claims"
+else bad "reply: never claims" "rc=${RC} out='${OUT}' calls=$(mcp_calls)"; fi
+
+# p6. --no-claim: claim=skipped, no MCP call, on post and dm.
+setup_case; claim_setup
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1.1\",\"channel\":\"${ENG_CHANNEL}\"}"
+run_bin post "${ENG_CHANNEL}" "hi" --no-claim
+if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=skipped" && -z "$(mcp_calls)" ]]; then
+  ok "post --no-claim: claim=skipped, no MCP call, exit 0"
+else bad "post --no-claim: claim=skipped, no MCP call, exit 0" "rc=${RC} out='${OUT}' calls=$(mcp_calls)"; fi
+setup_case; claim_setup
+fixture conversations.open '{"ok":true,"channel":{"id":"D0PENED"}}'
+fixture chat.postMessage '{"ok":true,"ts":"1790.6","channel":"D0PENED"}'
+run_bin dm "${CODY}" "hi" --no-claim
+if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=skipped" && -z "$(mcp_calls)" ]]; then
+  ok "dm --no-claim: claim=skipped, no MCP call, exit 0"
+else bad "dm --no-claim: claim=skipped, no MCP call, exit 0" "rc=${RC} out='${OUT}' calls=$(mcp_calls)"; fi
+
+# p7. A failed post is the post's failure, as before: no claim is attempted.
+setup_case; claim_setup
+fixture chat.postMessage '{"ok":false,"error":"channel_not_found"}'
+run_bin post "${ENG_CHANNEL}" "hi"
+if [[ "${RC}" == 1 && "${ERR}" == *"channel_not_found"* && -z "$(mcp_calls)" && "${ERR}" != *"claim="* ]]; then
+  ok "post: a failed post exits 1 as before, and no claim is attempted"
+else bad "post: a failed post exits 1 as before, and no claim is attempted" "rc=${RC} err='${ERR}' calls=$(mcp_calls)"; fi
+
+# p8. No registry entry for the cwd: posted once, exit 3 reason=no-registry-entry.
+setup_case; claim_setup; RUN_CWD="${TMP}"
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1.1\",\"channel\":\"${ENG_CHANNEL}\"}"
+run_bin post "${ENG_CHANNEL}" "hi"
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=no-registry-entry "*"inbox=none"* && "$(calls_of chat.postMessage)" == 1 && -z "$(mcp_calls)" ]]; then
+  ok "post: cwd with no registry entry -> posted once, exit 3 reason=no-registry-entry inbox=none"
+else bad "post: cwd with no registry entry -> posted once, exit 3 reason=no-registry-entry inbox=none" \
+  "rc=${RC} err='${ERR}' posts=$(calls_of chat.postMessage)"; fi
+RUN_CWD=""
+
 DOCTRINE="${ROOT}/SKILL.md"
 EXAMPLE="$(dirname "${ROOT}")/athena:slack:interactive-messages/SKILL.md"
 for needle in "### Asking the owner for a decision" "5–15 words" \
