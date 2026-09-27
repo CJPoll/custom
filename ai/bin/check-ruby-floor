@@ -343,11 +343,14 @@ FIXES = {
   "shebang" => "make the first line exactly `#{HARNESS_SHEBANG}`. `#!/usr/bin/env ruby` goes " \
                "through PATH, where asdf picks the Ruby from the CURRENT directory's " \
                ".tool-versions (e.g. ~/dev/shenron pins 2.7.0).",
-  "runtime" => "the harness Ruby is system ruby #{FLOOR}+ at #{HARNESS_SHEBANG.delete_prefix('#!')} " \
-               "(Gentoo: eselect ruby), the Ruby that built the user gem dir's native " \
-               "extensions. On a machine where that path is missing or older, or cannot load " \
-               "json, the owner installs or selects Ruby #{FLOOR}; do not change the shebang " \
-               "to route around it, and do not edit ~/.gem.",
+  "runtime" => "the harness Ruby is system ruby #{FLOOR}+ at #{HARNESS_SHEBANG.delete_prefix('#!')}, " \
+               "the Ruby that built the user gem dir's native extensions. On Gentoo that path is " \
+               "an eselect symlink, so `eselect ruby set` to an older Ruby moves the whole harness " \
+               "with no other signal; this finding is that signal. Where the path is missing, " \
+               "older than #{FLOOR}, or cannot load json, restoring it is an OWNER step on the " \
+               "system (e.g. `sudo eselect ruby set ruby34`, or installing Ruby #{FLOOR}); an " \
+               "agent reports it and does not run it. Do not change the shebang to route around " \
+               "it (no Gentoo-specific /usr/bin/ruby34), and do not edit ~/.gem.",
   "syntax" => "rewrite the named site so Ruby #{FLOOR} parses it (both machines run " \
               "#{FLOOR}). There is no suppression marker."
 }.freeze
@@ -357,7 +360,9 @@ def emit_findings(findings, context)
        "#{FLOOR} (#{context}):"
   findings.each { |rel, line, msg| warn "  #{rel}:#{line}: #{msg}" }
   kinds = findings.map { |_r, _l, msg| msg[/\((\w+)\)\z/, 1] }.compact.uniq
-  kinds.each { |k| warn "  Fix (#{k}): #{FIXES.fetch(k)}" }
+  # Each advice line carries the literal `Fix:` marker (~/dev/custom/CLAUDE.md ->
+  # "Guard/error messages are written for the LLM").
+  kinds.each { |k| warn "  Fix: (#{k}) #{FIXES.fetch(k)}" }
 end
 
 def could_not_measure(lines)
@@ -537,7 +542,7 @@ def run_self_test
   dirs << d
   code, text = check_fixture(d, shebang: "#!/usr/bin/env ruby", path_prefix: shim)
   report.call(code == 1 && text.include?("pinning ruby 2.7.8, runs ruby 2.7.8") &&
-              text.include?("Fix (runtime)"),
+              text.include?("Fix: (runtime)"),
               "runtime: an env-ruby shebang resolves a 2.7.8 pin and is flagged",
               "code=#{code} #{text[0, 700]}")
   report.call(code == 1 && text.include?("pinning ruby 3.4.7, exited 1") &&
@@ -553,18 +558,35 @@ def run_self_test
 
   # An inherited override must not mask the pin: the probe scrubs it.
   saved = ENV["ASDF_RUBY_VERSION"]
-  ENV["ASDF_RUBY_VERSION"] = "system"
-  env_seen = probe("#!/bin/sh", "2.7.8", nil, "echo \"${ASDF_RUBY_VERSION:-unset}\"; echo x; exit 0\n")
+  begin
+    ENV["ASDF_RUBY_VERSION"] = "system"
+    env_seen = probe("#!/bin/sh", "2.7.8", nil, "echo \"${ASDF_RUBY_VERSION:-unset}\"; echo x; exit 0\n")
+  ensure
+    ENV["ASDF_RUBY_VERSION"] = saved
+  end
   report.call(!env_seen[:ok] && env_seen[:why].include?("unset"),
               "runtime: the probe scrubs ASDF_RUBY_VERSION", env_seen.inspect)
-  ENV["ASDF_RUBY_VERSION"] = saved
 
   # A shebang that cannot start is a finding, not a pass.
   d = fixture_repo("ai/bin/tool" => "#!/nonexistent/ruby\nputs 1\n")
   dirs << d
   code, text = check_fixture(d, shebang: "#!/nonexistent/ruby")
-  report.call(code == 1 && text.include?("could not be executed") && text.include?("Fix (runtime)"),
+  report.call(code == 1 && text.include?("could not be executed") && text.include?("Fix: (runtime)"),
               "runtime: a missing interpreter is flagged", "code=#{code} #{text[0, 400]}")
+
+  # /usr/bin/ruby follows eselect: a harness interpreter re-pointed to an older
+  # Ruby (here a stand-in reporting 3.3.9) is flagged, and the Fix names the
+  # owner's system step.
+  old = File.join(shim, "ruby33")
+  File.write(old, "#!/bin/sh\nprintf '3.3.9\\n/usr/bin/ruby33\\n'\n")
+  File.chmod(0o755, old)
+  d = fixture_repo("ai/bin/tool" => "#!#{old}\nputs 1\n")
+  dirs << d
+  code, text = check_fixture(d, shebang: "#!#{old}")
+  report.call(code == 1 && text.include?("runs ruby 3.3.9") && text.include?("below the floor #{FLOOR}") &&
+              text.include?("eselect ruby set") && text.include?("OWNER step"),
+              "runtime: a harness interpreter re-pointed below the floor is flagged, Fix names the owner step",
+              "code=#{code} #{text[0, 700]}")
 
   # Shebang rule: an env-ruby harness tool is flagged by text on any machine;
   # a personal script outside ai/ is not; HARNESS_EXTRA is.
@@ -577,7 +599,7 @@ def run_self_test
   code, text = check_fixture(d)
   report.call(code == 1 && text.include?("ai/bin/bad:1:") && text.include?("ai/skills/s/bin/bad2:1:") &&
               text.include?("#{HARNESS_EXTRA.first}:1:") && !text.include?("scripts/personal") &&
-              !text.include?("ai/bin/ok:") && text.include?("Fix (shebang)"),
+              !text.include?("ai/bin/ok:") && text.include?("Fix: (shebang)"),
               "shebang: env-ruby harness tools flagged, personal scripts not", "code=#{code} #{text[0, 600]}")
 
   # Syntax: something 3.4 cannot parse fails, naming file:line.
@@ -585,7 +607,7 @@ def run_self_test
   dirs << d
   code, text = check_fixture(d)
   report.call(code == 1 && text.include?("ai/lib/broken.rb:") && text.include?("(syntax)") &&
-              text.include?("Fix (syntax)"), "syntax: an unparseable file fails", "code=#{code} #{text[0, 400]}")
+              text.include?("Fix: (syntax)"), "syntax: an unparseable file fails", "code=#{code} #{text[0, 400]}")
 
   # Discovery: a ruby-shebang file with no .rb is read; untracked is not.
   d = fixture_repo({ "tools/t" => "#!/usr/bin/env ruby\ndef a(\n", "ai/bin/ok" => GOOD_TOOL },
@@ -600,7 +622,7 @@ def run_self_test
   dirs << d
   pts = [["origin/main (tip)", "a" * 40]]
   code, text = check_fixture(d, landed: -> { [pts, "3.5"] })
-  report.call(code == 1 && text.include?("lower than the landed floor 3.5") && text.include?("Fix (floor)"),
+  report.call(code == 1 && text.include?("lower than the landed floor 3.5") && text.include?("Fix: (floor)"),
               "floor: lower than landed fails", "code=#{code} #{text[0, 400]}")
   code, = check_fixture(d, landed: -> { [pts, "2.7"] })
   report.call(code.zero?, "floor: raising it above the landed 2.7 passes")
