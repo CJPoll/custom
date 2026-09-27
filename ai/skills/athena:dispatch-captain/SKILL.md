@@ -198,56 +198,66 @@ get a captain, but only after the functional requirements are met." A batch is
 how such tier-4 tickets get that captain cheaply. Do not batch any other tier.
 
 - **What may be batched.** Up to **3** tier-4 tickets with the same `Area` and
-  the same subsystem, given to ONE captain as one batch Mission. Same
-  subsystem means the same skill, tool, or app module, so one context load
-  covers every ticket.
+  the same subsystem, given to ONE captain as one batch Mission. Same subsystem
+  means the same skill, tool, or app module. That is your judgment, and nothing
+  checks it; the aim is one context load for every ticket.
 - **One slot.** The batch counts as one captain slot against the concurrency
   cap, however many tickets it carries.
 - **One ticket, one change.** The captain delivers a stacked series: one commit
-  (a repo that ships by fast-forward) or one PR (a forge repo) per ticket, in the order the brief lists
-  them. Each ticket gets its own critic PASS. The critic blocks bundled
-  unrelated changes, so the batch saves the dispatch, the worktree and the
-  context load, never the per-ticket review.
-- **Landing.** In order, lowest ticket first.
-  - **A repo that ships by fast-forward** (no forge PRs; the captain's *Repos
-    with no MR/CI system*): one fast-forward of the tip lands the series.
-    `integration-gate` reads only the verdict of the head it gates, so first
-    run `critic-review --verdict-for <sha>` on every ticket's head. Each must be
-    a PASS whose recorded `base` is the ticket below it (main, for the first).
-  - **A forge repo, `~/dev/custom` included:** one PR at a time, per
-    [[athena:merge-boarding]] → *Landing onto a moving main*. `locked-merge`
-    squashes one PR, so each later ticket is rebased onto the landed main
-    before its own `integration-gate`.
-  - Any rebase rewrites the ticket SHAs and orphans their critic receipts, so
-    each rebased ticket is judged again.
+  (a repo that ships by fast-forward) or one PR (a forge repo) per ticket, in
+  the order the brief lists them. Each ticket gets its own critic PASS, judged
+  alone with `--base`. The critic may block bundled unrelated changes as
+  `[scope]`. The batch saves the dispatch, the worktree and the context load,
+  never the per-ticket review.
+- **Landing: one ticket at a time, bottom of the stack first.** Each ticket
+  lands only on its own `integration-gate` pass, per [[athena:merge-boarding]]
+  → *Landing onto a moving main*. `integration-gate` reads only the verdict of
+  the head it gates, so landing the tip alone would leave the lower tickets'
+  verdicts unchecked. Never land a stack in one step.
+  - **A repo that ships by fast-forward** (the captain's *Repos with no MR/CI
+    system*): fast-forward main to ticket 1's head, then to ticket 2's, each
+    after its own `integration-gate`. The heads already stack, so nothing is
+    rebased.
+  - **A forge repo, `~/dev/custom` included:** `locked-merge` squash-merges one
+    PR into that PR's own base. So after ticket N lands, retarget PR N+1 to
+    the MR target branch (`gh-athena pr edit <n> --base <branch>`, as in
+    [[athena:captain-return]]). Then rebase it onto the landed squash with
+    `git rebase --onto origin/<branch> <old head SHA of ticket N>`, and push
+    as Athena. A plain rebase would replay ticket N's commits. A retarget alone
+    starts no CI run; the push does.
+  - A rebase rewrites the ticket's SHA and orphans its critic receipt. You
+    re-run `critic-review` in the Mission's worktree for the new head, per the
+    *On exit 3* bullet of [[athena:merge-boarding]] → *The merge bar*; the
+    captain has ended by then.
 
 The batch brief carries everything above for one Mission, plus:
 
 - **The tickets, in stack order**, each with its own Notion page and design
   sub-docs.
 - **The branches.** One worktree, one branch per ticket, each cut from the
-  branch of the ticket below it. The worktree's own branch is the first ticket's.
-  In a forge repo, each PR targets the branch of the ticket below it; the first
-  targets the MR target branch.
+  branch of the ticket below it. The worktree's own branch is the first
+  ticket's. In a forge repo, each PR targets the branch of the ticket below it;
+  the first targets the MR target branch.
 - **The critic line:** *"Judge each ticket alone: on that ticket's head, run
   `~/dev/custom/ai/bin/critic-review --base <the branch of the ticket below>`
   (the first ticket: the MR target branch). Without `--base`, the diff is the
-  whole stack and the critic blocks it as bundled."*
+  whole stack."*
 - **The gate line:** one heavy gate on the tip of the stack, per the test-slot
   line.
 - **The report.** One file, named for the batch (e.g. `DND-539+538-report.md`),
   with one section per ticket: status, head SHA, the recorded critic verdict
-  line, the PR URL, files changed, and its own proposed findings. A STUCK
-  ticket holds every ticket stacked above it; its section says so.
+  line, the PR URL (forge repos), files changed, and its own proposed findings.
+  A STUCK ticket holds every ticket stacked above it; its section says so.
 - **The Notion transitions, per ticket.** Move each ticket to `In Progress` with
-  Athena as `Assignee` at dispatch. The captain's `In Review` rule (or "set NO
-  Notion status at all") applies to each ticket as its own PR opens. You move
-  each ticket on its own merge.
+  Athena as `Assignee` at dispatch. In a forge repo, the captain's `In Review`
+  rule (or "set NO Notion status at all") applies to each ticket as its own PR
+  opens. You move each ticket on its own landing.
 
 **Precedent** (harness-epics-ab): 00:51Z, "DND-539+538 dispatched to one captain
-… as stacked branches"; 01:07Z, "one ff lands 508+539+538". That
-fast-forward predates `locked-merge`; in `~/dev/custom` today the forge path
-above applies.
+… as stacked branches"; 01:07Z, "one ff lands 508+539+538". That was one
+fast-forward of the tip, before `locked-merge` existed. It is history, not the
+pattern: land one ticket at a time, as above.
+
 
 ## Machine capacity gates every dispatch
 
