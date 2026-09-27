@@ -209,10 +209,8 @@ not hold it. Replay that record via `--owner-approval` (below) and merge. The
 bar is unchanged, and a non-security change cannot borrow the approval.
 
 **Later (2026-09-27):** the exception is now any change a standing owner
-approval covers (`~/.claude/CLAUDE.md` → *Standing owner approvals*): a
-security fix or a comment/docs-only change. Scope and
-record live in each rule's subsection. For comment/docs-only, the objective
-check is this skill's `scripts/comment-only-diff`, run from the main checkout.
+approval covers (`~/.claude/CLAUDE.md` → *Standing owner approvals*); today
+that is a security fix only. Scope and record live in the rule's subsection.
 A part of the PR no approval covers holds as before, and so does anything
 *What no standing approval covers* names.
 
@@ -249,11 +247,11 @@ an exit 0 never overrides a captain's `IRREVERSIBLE`. No standing approval
 overrides it either, a security fix included; hold it and request the go as for
 exit 4 (`~/.claude/CLAUDE.md` → *What no standing approval covers*).
 
-**A merge that applies terraform runs `scripts/tf-plan-gate` first**, on the
-plan for the merged head. Exit 4 or 3 holds under every standing approval, and
-you request the go the same way. Exit 2 measured nothing (bad arguments, or
-`--control` on a plan with state): fix the call per its `Fix:` and re-run. The rule and the plan's sources live in
-*What no standing approval covers*.
+**A merge that applies terraform holds for the owner**, under every standing
+approval, security fixes included, and you request the go the same way, with
+the plan's summary. No plan verifier has landed to tell a secrets update from a
+destroy or a cost change. The rule lives in *What no standing approval
+covers*.
 
 **A destructive migration is PLANNED, so its authorization is too.** The
 `destructive-migration` surface gates a merge whose deploy drops a table or a

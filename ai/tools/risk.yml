@@ -154,8 +154,6 @@ tools:
   skills/athena:slack/bin/whoami:                     { class: readOnly, reason: identity }
   skills/athena:memory-maintenance/scripts/index-budget: { class: readOnly, reason: measure }
   skills/athena:standup/scripts/standup-window.sh:    { class: readOnly, reason: compute }
-  skills/athena:merge-boarding/scripts/comment-only-diff: { class: readOnly, reason: check }
-  skills/athena:merge-boarding/scripts/tf-plan-gate:  { class: readOnly, reason: check }
   # idempotent: local state only. inbox-wait provisions this machine's doorbell
   # files; slack read-inbox advances its own seen-state file; integration-gate
   # fetches and runs the gate (--gate), which writes ai/eval/scorecard.json like

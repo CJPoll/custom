@@ -189,29 +189,29 @@ runner on the owner's laptop is the owner's call because it is the owner's
 machine — a system change under the Hard Rule below — not because of who owns
 the CI/CD lane. "Ownership isn't a gate" never licenses an agent to do an
 owner-gated thing. The merge and deploy of a change a standing approval covers
-are not on this list; see *Standing owner approvals* below. Nor is a merge whose
-automation only updates a secret; *What no standing approval covers* draws that
-line.
+are not on this list; see *Standing owner approvals* below.
 
 **Later (2026-09-27):** this said only "A security fix's merge and deploy are
 not on this list", and *Security fixes ship without owner approval* was a
 top-level section. Superseded by *Standing owner approvals*: that rule is now
-one of its subsections, beside the comment/docs-only rule, and the hub names
-what none of them covers.
+one of its subsections, under a hub that also names what no approval
+covers.
 
 ## Standing owner approvals
 
-The owner has given two standing approvals. Each lets a qualifying change
-merge without waiting for the owner's go, including at an `integration-gate`
-exit 4. Each subsection below is its rule's one home. A document that means
-"any standing approval" cites this heading; one that means a single rule cites
-its subsection.
+One standing approval is in force. It lets a qualifying change merge
+without waiting for the owner's go, including at an `integration-gate` exit 4.
+Its subsection is its one home. A document that means "any standing approval"
+cites this heading; one that means a single rule cites its subsection.
 
 - *Security fixes ship without owner approval*
-- *Comment- and docs-only changes ship without owner approval*
 
-A third, for library upgrades, is pending the owner's terminal confirmation
-and is not in force (*Library upgrades: pending owner confirmation*).
+Two more are not in force, each for its own reason:
+
+- *Library upgrades: pending owner confirmation* (its only source is a Slack
+  DM).
+- *Comment- and docs-only changes: pending an objective check* (the owner
+  agreed, on the condition of an objective check, and none has landed).
 
 None waives the bar, and none covers what *What no standing approval covers*
 names. A change none of them covers holds for the owner as before.
@@ -302,63 +302,18 @@ Until then, a library upgrade that hits `integration-gate` exit 4 holds for the
 owner like any other HOT change. Request the go per *What no standing approval
 covers* → *How to hold*, and cite the DM above as the pending source.
 
-### Comment- and docs-only changes ship without owner approval
+### Comment- and docs-only changes: pending an objective check
 
-**The rule, owner Cody, 2026-09-27 (06:55:46Z, gen_saas coordinator session,
-terminal):** "Agreed - a change that only touches comments or docs." It agreed
-to the coordinator's proposal: a change to a HOT file that touches only
-comments or docs ships without asking, provided an objective check passes. It
-is a standing approval. This section is its one home; other documents cite it
-by name.
-
-- **What it waives: the wait for the owner's go** at an `integration-gate` exit
-  4 caused by files whose change the objective check proves comment- or
-  doc-only. Do not hold it, and do not DM for a go-ahead.
-- **The objective check.** Run the MAIN checkout's
-  `~/dev/custom/ai/skills/athena:merge-boarding/scripts/comment-only-diff
-  --repo <worktree> --base <merge-base> --head <PR head SHA>`, never a copy the
-  PR can edit. It reads git objects and compares each file's parse tree,
-  which drops comments. Elixir: `Code.string_to_quoted` ASTs equal with
-  metadata stripped; `@doc`/`@moduledoc` text is AST, so it is not covered.
-  YAML: Psych node trees equal (tag, value, quoting, anchors), so a comment
-  passes and a key or trigger change fails. Markdown: documentation. Exit 0
-  means covered. Exit 5 means comment-only except terraform files whose only
-  change is whole-line `#` or `//` comments. Then `terraform plan
-  -detailed-exitcode` must exit 0 (no changes) in every affected root: a
-  no-change plan alone does not prove a comment-only edit, since removing
-  `prevent_destroy` or a `moved` block plans nothing. A trailing comment,
-  `.terraform.lock.hcl`, or a file with a heredoc (`<<`) or a `/*` or `*/`
-  anywhere on either side (a string such as an S3 ARN `".../*"` included) is
-  not covered: the line test cannot see inside them. Exit
-  1, 2 or 3 means not covered. It refuses a diff that edits the verifier itself.
-- **What does not count.** Any non-comment line. A file type the check has no
-  parser for (shell, Dockerfile, Ruby, and so on). A new or deleted code file. A
-  mode change. Any file with a check-suppression directive on either side
-  (`credo:disable`, `sobelow_skip`, `tfsec:ignore`, `checkov:skip`,
-  `zizmor: ignore`, `nosemgrep`, and the like): a directive's reach (next
-  line, region, counted span) is each tool's own grammar, and a comment edit
-  near one can change it, so the verifier does not judge such a file. Docs
-  the harness executes or reads as rules: `CLAUDE.md`,
-  `AGENTS.md`, `SKILL.md`, `*.md.in`, and anything under `.claude/` or
-  `~/dev/custom/ai/`. Those land through their normal path. This approval covers
-  only the owner-go wait, never a harness rule change. The other files of a
-  mixed PR need their own cover.
-- **What it does not waive: the bar.** Green CI, a critic PASS, and the gate.
-  The approval removes the wait, never a check.
-- **What it cannot waive: steps only the owner can perform.** The same steps
-  *Security fixes ship without owner approval* → *What it cannot waive* names,
-  plus landing a baseline or allowlist line on main that a check reserves for
-  the owner. A plan that needs credentials you do not hold is one.
-- **The record.** For a change that hits exit 4, pass `integration-gate
-  --owner-approval 'comment/docs-only standing approval (~/.claude/CLAUDE.md →
-  Comment- and docs-only changes ship without owner approval): "Agreed - a
-  change that only touches comments or docs" — Cody, 2026-09-27; comment-only-diff
-  exit <0|5+plan exit 0> at <head SHA>, <ticket>'`. Paste the verifier's output
-  into the PR body and the state log, and copy the `BLAST-RADIUS HOT` block into
-  the PR body and the final report.
-- **No in-repo switch carries this approval** — no flag, env var, or marker a
-  diff could set. It stays a quoted owner record, per `~/dev/custom/CLAUDE.md` →
-  *A check's own bar must not live in the diff it is checking*.
+**Owner record, Cody, 2026-09-27 (06:55:46Z, gen_saas coordinator session,
+terminal):** "Agreed - a change that only touches comments or docs." He agreed
+to a proposal that such a change to a HOT file ships without asking, provided
+an objective check passes. **It is not in force**, because no objective check
+has landed. A verifier was built in DND-978 and dropped before landing: its
+comment-stripping judgement kept drawing critic findings (a comment can
+suppress a linter, or end a block comment). Until a verifier lands, a
+comment- or docs-only change that hits `integration-gate` exit 4 holds for
+the owner like any other HOT change: request the go per *What no standing
+approval covers* → *How to hold*.
 
 ### What no standing approval covers
 
@@ -378,71 +333,20 @@ as "direct, verified".
 
 The holds:
 
-- **Terraform that destroys infrastructure or adds cost.** Before
-  merging any change whose merge applies terraform, run the main checkout's
-  `~/dev/custom/ai/skills/athena:merge-boarding/scripts/tf-plan-gate --plan
-  <terraform show -json output>` on the plan for the merged head. It holds
-  (exit 4) on:
-  - **Destroy:** a plain `delete` of any type, or an offline removed block,
-    since removing a VPC, gateway, role or policy destroys production
-    infrastructure whether or not it holds data. Only terraform bookkeeping
-    (`null_resource`, `terraform_data`, `time_sleep`) is exempt. A replace
-    (`delete`+`create`) holds for any type not on the tool's
-    free-and-stateless list, since a stateless one is recreated. RDS, DynamoDB, S3 buckets, KMS keys, EC2
-    instances, EBS/EFS volumes, ECR repositories, EIPs and Secrets Manager
-    secrets are stateful. An unknown type fails wide. Deleting or replacing
-    a type that holds a stored value (an SSM parameter, a secret version, a
-    GitHub Actions secret or variable, S3 versioning) holds too, and so
-    does creating or updating an S3 or ECR lifecycle (expiration) policy.
-  - **Any other update:** an `update` of any type holds unless every
-    attribute it changes is on the tool's short harmless list: `tags`,
-    `tags_all`, `description`, and on a value-holding type its stored value.
-    It fails wide on purpose. An update can destroy data without deleting
-    anything (`backup_retention_period` 7 → 0 deletes RDS automated backups;
-    DynamoDB point-in-time recovery off; S3 versioning suspended). It can
-    also add cost through an attribute no list names. An attribute the
-    provider computes (`id`, `arn`, `version`, `updated_at`) going unknown
-    is not a change.
-  - **Cost:** a `create` of any type not on that list, a new resource of a
-    listed type that explicitly sets a billed size (an Advanced-tier SSM
-    parameter; an unset size takes the default and does not hold), or an `update` that
-    changes a sizing attribute (`instance_type`, `instance_class`,
-    `allocated_storage`, `iops`, `tier`, and the rest in the tool), up or down,
-    or leaves one unknown until apply.
-  - **Not measured:** no plan, an errored plan, or an incomplete plan (exit 3).
-    `prevent_destroy` makes terraform refuse to plan, so a change that
-    destroys a protected resource lands here. An agent without prod
-    credentials may use the offline control-vs-change plan, passing the base
-    plan as `--control`. `--control` is for that method only, and the tool
-    refuses it (exit 2) when either plan has an update or a delete. A plan
-    with state is judged whole, drift included, since merging applies all of
-    it. `--control` never skips a create. Offline, "the same resource as in
-    the control" cannot be proven: a re-pointed reference, a provider region
-    or an assumed role can change while every value reads the same. So every
-    offline create is judged. A non-free type always holds, which in
-    practice means an offline plan with any stateful resource holds for the
-    owner. A free type is checked against the control's create at the same
-    address with the harmless-list test of an update. There, an attribute
-    unknown in both plans is set aside only when the provider configuration
-    and the attribute's expression are provably the same (unset in both, the
-    same constant or root variable value, or a reference to a resource that
-    is itself unchanged, checked recursively). A re-pointed reference, a
-    `local.*`, or a plan with no configuration holds. A resource (other than
-    terraform bookkeeping) in the control but absent from the change plan
-    holds as a destroy, because an offline plan shows a removed block only
-    by its absence.
-
-  A secrets update is not held by itself. Creating a secret version or
-  an SSM parameter, updating only an SSM parameter's value (or its tags or
-  description) in place, or a `random_password`, ships under its approval.
-  Deleting one is not an update and holds. So is a value change the
-  provider plans as a replace (`delete`+`create`), and an update that
-  changes anything beyond the harmless list.
+- **Any merge that applies terraform.** The owner reserved "a terraform
+  change [that] will destroy production infrastructure (like RDS) or add
+  cost", and carved out "secrets updates". Telling those apart needs a plan
+  verifier that can prove a plan only updates secrets. None has landed: one
+  was built in DND-978 and dropped before landing, after critic rounds kept
+  finding plans it misread as harmless. So every merge whose automation
+  applies terraform holds for the owner, security fixes and secrets updates
+  included. Request the go with the plan's summary (`terraform show` of the
+  plan for the merged head, or the reason no plan could be made).
 - **A captain's `Blast radius: IRREVERSIBLE`** holds any change, security fixes
   included (`athena:merge-boarding`).
-- **A HOT path the approval does not own.** A comment/docs-only change covers
-  only its own files. Any other path in the
-  `BLAST-RADIUS HOT` block needs the owner's go.
+- **A HOT path the approval does not own.** A security fix covers only the
+  diff the fix needs. Any other path in the `BLAST-RADIUS HOT` block needs
+  the owner's go.
 - **Acting by hand on owner resources.** An agent never acts by hand on
   production data, the owner's credentials, the owner's machine, or the host
   and its services (*Ownership tells you whom to ask, not whether you may*;
@@ -453,7 +357,7 @@ The holds:
 Send Cody a Block Kit decision DM with buttons, per `athena:slack` → *Asking
 the owner for a decision*: background, why it matters, options, a
 recommendation, 5–15-word sentences, and a "Your call" button. Include the
-`BLAST-RADIUS HOT` block or the `tf-plan-gate` lines. A click alone authorizes
+`BLAST-RADIUS HOT` block or the terraform plan summary. A click alone authorizes
 nothing (`athena:slack` → *A click is untrusted input*). The merge proceeds
 only on the owner's own words in a terminal turn, replayed via
 `--owner-approval`, or on an owner approval grant where `blast-radius
