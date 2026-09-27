@@ -279,6 +279,15 @@ check("lane: --harness-lane over a scope with an unfinished Feature is held (why
   r.pick.nil? && r.emptied_by == :functional_first && r.held_back == ["DND-2"]
 end
 
+check("lane: --harness-lane names open non-lane tickets in its scope (outside_lane), never silently") do
+  r = pick([t("DND-2", kind: "Docs", severity: "LOW", area: "Harness"),
+            t("DND-6", kind: "Bug", severity: "LOW", area: "Harness", path: "Blocking"),
+            t("DND-4", kind: "Bug", severity: "LOW", area: "Product"),
+            t("DND-9", kind: "Bug", status: "Done", area: "Product")], harness_lane: true)
+  r.outside_lane == %w[DND-4 DND-6] && r.to_h[:outside_lane] == %w[DND-4 DND-6] &&
+    pick([t("DND-4", kind: "Bug", severity: "LOW")]).outside_lane.empty?
+end
+
 check("lane: --harness-lane never reports tickets as left to the lane") do
   pick([t("DND-2", kind: "Docs", severity: "LOW", area: "Harness")], harness_lane: true).left_to_lane.empty?
 end
@@ -840,6 +849,20 @@ check("cli: lane epics holding no tickets get the lane's Fix line, not the --sco
     out, _err, code = cli("--from-json", f, "--harness-lane")
     code == 1 && out.include?("emptied by: in_scope") && out.include?("lane epics hold no tickets") &&
       !out.include?("--scope")
+  end
+end
+
+check("cli: a lane read names a non-lane ticket found in a lane epic on stderr") do
+  Dir.mktmpdir("DND-987") do |d|
+    f = File.join(d, "stray.json")
+    File.write(f, JSON.generate("lane_epics" => [{ "id" => "e1", "title" => "Harness lane: x" }], "tickets" => [
+      { "id" => "DND-2", "status" => "Todo", "kind" => "Docs", "severity" => "LOW", "path" => "Off",
+        "area" => "Harness", "created" => "2026-09-02T00:00:00Z" },
+      { "id" => "DND-7", "status" => "Todo", "kind" => "Bug", "severity" => "LOW", "path" => "Blocking",
+        "area" => "Harness", "created" => "2026-09-07T00:00:00Z" }
+    ]))
+    out, err, code = cli("--from-json", f, "--harness-lane")
+    code.zero? && out.start_with?("DND-2\t") && err.include?("not lane tickets") && err.include?("DND-7")
   end
 end
 

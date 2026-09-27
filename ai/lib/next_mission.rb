@@ -72,13 +72,13 @@ module NextMission
   # when --started was not given (the check could not run; never an empty
   # list standing in for "not checked"). in_progress: the count checked.
   Result = Struct.new(:pick, :tier, :rule, :funnel, :emptied_by, :held_back, :reason,
-                      :started_not_in_scope, :stale_in_progress, :in_progress, :left_to_lane,
+                      :started_not_in_scope, :stale_in_progress, :in_progress, :left_to_lane, :outside_lane,
                       keyword_init: true) do
     def to_h
       { ticket: pick&.id, page_id: pick&.page_id, title: pick&.title, tier: tier, rule: rule,
         funnel: funnel.map { |stage, n| { stage: stage.to_s, label: STAGES.fetch(stage), matched: n } },
         emptied_by: emptied_by&.to_s, held_back: held_back, reason: reason,
-        started_not_in_scope: started_not_in_scope, left_to_lane: left_to_lane,
+        started_not_in_scope: started_not_in_scope, left_to_lane: left_to_lane, outside_lane: outside_lane,
         stale_in_progress: stale_in_progress, stale_check: stale_check }
     end
 
@@ -111,7 +111,7 @@ module NextMission
     # In Progress means a captain is on it now. One with no --started entry is
     # stale. A warning only: it stays excluded as started either way.
     in_progress = sorted_ids(scope.select { |x| x.status == "In Progress" })
-    extra = { started_not_in_scope: stray, in_progress: in_progress.size, left_to_lane: [],
+    extra = { started_not_in_scope: stray, in_progress: in_progress.size, left_to_lane: [], outside_lane: [],
               stale_in_progress: started && (in_progress - ids) }
     started = ids.to_set
 
@@ -121,6 +121,7 @@ module NextMission
     set = keep(funnel, :not_terminal, set) { |x| !TERMINAL.include?(x.status) }
     set = keep(funnel, :not_flake, set) { |x| x.kind != "Flake" }
     if harness_lane
+      extra[:outside_lane] = sorted_ids(set.reject { |x| lane_ticket?(x) })
       set = keep(funnel, :harness_lane, set) { |x| lane_ticket?(x) }
     else
       lane = set.select { |x| lane_ticket?(x) && tier_of(x) != 1 }

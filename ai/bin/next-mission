@@ -261,6 +261,10 @@ def main(argv)
          "(a typo here would let a started ticket be dispatched twice)"
   end
 
+  if lane_epics && !result.outside_lane.empty?
+    warn "#{PROG}: in lane epics but not lane tickets (the lane skips them; only a feature admiral " \
+         "scoping that epic takes them): #{result.outside_lane.join(', ')}"
+  end
   unless result.left_to_lane.empty?
     warn "#{PROG}: left to the harness lane: #{result.left_to_lane.join(', ')} " \
          "(Area=Harness, Path=Off; file them, do not start them)"

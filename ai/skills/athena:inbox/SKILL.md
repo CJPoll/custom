@@ -577,6 +577,11 @@ checks now answer the question a pid cannot:
   never read or send on it. The shipwright runner sends its one-per-signature
   stale-dirt report on it too (DND-692), and its one-per-episode wedge report
   (DND-834).
+  **Later (2026-09-27):** "never read or send on it" now has one exception
+  (DND-987). A session may send the harness lane's drain request on it
+  (`ticket-lane-action-brief.md` → *The harness lane* → *Senders*). It is
+  attributed to the detector identity deliberately, because the request
+  carries no authority. Never read it.
 - `watchdog` fails when any of the supervisor's watchdog tools is missing: the
   liveness library, `scripts/inbox-client-capture` or `scripts/inbox-client-alert`
   (the supervisor keeps the client running, but a wedge is then restarted
