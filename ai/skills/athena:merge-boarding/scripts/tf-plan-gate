@@ -1,0 +1,221 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# tf-plan-gate -- does this terraform plan destroy stateful infra or add cost?
+#
+# The objective check behind ~/.claude/CLAUDE.md -> "Standing owner approvals"
+# -> "What no standing approval covers": a plan that DESTROYS or REPLACES a
+# stateful resource, or ADDS COST, holds for the owner under every standing
+# approval. A secrets update (a new value or config on an existing secret) is
+# not held by itself.
+#
+# Input is `terraform show -json <planfile>`. It never runs terraform, never
+# touches AWS, and reads nothing from the diff under test.
+#
+# Doctrine: ai/skills/athena:merge-boarding/SKILL.md -> exit 4.
+# Self-test: ai/skills/athena:merge-boarding/test/tf-plan-gate/self-test.sh
+
+require "json"
+
+PROG = "tf-plan-gate"
+HERE = File.expand_path(__dir__)
+
+# Types whose create adds no recurring cost AND whose destroy or replace loses
+# no data. Every other type fails WIDE: its create counts as cost, and its
+# destroy or replace counts as stateful.
+FREE_STATELESS_TYPES = %w[
+  aws_db_parameter_group aws_db_subnet_group aws_ecr_lifecycle_policy
+  aws_ecr_repository_policy aws_eip_association aws_iam_instance_profile
+  aws_iam_openid_connect_provider aws_iam_policy aws_iam_role aws_iam_role_policy
+  aws_iam_role_policy_attachment aws_internet_gateway aws_kms_alias aws_route
+  aws_route_table aws_route_table_association aws_s3_bucket_lifecycle_configuration
+  aws_s3_bucket_ownership_controls aws_s3_bucket_policy aws_s3_bucket_public_access_block
+  aws_s3_bucket_server_side_encryption_configuration aws_s3_bucket_versioning
+  aws_secretsmanager_secret_version aws_security_group aws_security_group_rule
+  aws_ssm_parameter aws_subnet aws_vpc aws_vpc_security_group_egress_rule
+  aws_vpc_security_group_ingress_rule github_actions_secret github_actions_variable
+  null_resource random_id random_password random_string terraform_data time_sleep
+].freeze
+FREE_STATELESS_PREFIXES = %w[random_ time_ tls_].freeze
+
+# Named for the output only; the rule is "not free-stateless".
+STATEFUL_TYPES = %w[
+  aws_db_instance aws_dynamodb_table aws_ebs_volume aws_ecr_repository aws_efs_file_system
+  aws_eip aws_elasticache_cluster aws_elasticache_replication_group aws_instance
+  aws_kms_key aws_rds_cluster aws_rds_cluster_instance aws_s3_bucket
+  aws_secretsmanager_secret
+].freeze
+
+# An update that changes any of these, at any depth, is a sizing change. Sizes
+# have no reliable order, so any change holds, up or down.
+COST_ATTRS = %w[
+  allocated_storage billing_mode desired_capacity desired_count instance_class
+  instance_count instance_type iops max_allocated_storage max_size min_size
+  multi_az node_type num_cache_nodes read_capacity storage_throughput storage_type
+  throughput tier volume_size volume_type write_capacity
+].freeze
+
+def usage
+  <<~EOF
+    #{PROG} -- does a terraform plan destroy stateful infra or add cost?
+
+    Usage:
+      #{PROG} --plan PLAN.json [--control CONTROL.json]
+      #{PROG} --help | --self-test
+
+    PLAN.json is `terraform show -json <planfile>` for the change. With
+    --control (the same plan for the base commit, e.g. the offline
+    control-vs-change method), a change present identically in the control
+    is not the diff's and is skipped.
+
+    HOLD when any managed resource change:
+      DESTROY   deletes or replaces (delete+create) a type that is not
+                known free-and-stateless (stateful types fail wide);
+      COST      creates a type that is not known free-and-stateless, or
+                updates a sizing attribute (#{COST_ATTRS.first(4).join(', ')}, ...)
+                or leaves one unknown until apply.
+    A create or update of a secret's value or config is not held by itself.
+    prevent_destroy makes terraform refuse to plan. It still writes a plan
+    file, marked errored and missing the refused resource; an errored or
+    incomplete plan is exit 3, never CLEAR.
+
+    Output: one line per held change, VERDICT<TAB>address<TAB>reason.
+
+    Exit codes:
+      0  CLEAR: nothing destroys stateful infra or adds cost
+      4  HOLD: the owner's go is needed (listed)
+      2  usage / unreadable file
+      3  COULD NOT MEASURE: not a plan JSON, or an errored/incomplete plan
+  EOF
+end
+
+def die(code, msg, fix)
+  warn "#{PROG}: #{msg}"
+  warn "Fix: #{fix}"
+  exit code
+end
+
+plan_path = nil
+control_path = nil
+args = ARGV.dup
+until args.empty?
+  a = args.shift
+  case a
+  when "--help", "-h" then puts usage; exit 0
+  when "--self-test"
+    # ai/skills/athena:merge-boarding/test/tf-plan-gate/self-test.sh
+    exec(File.join(File.dirname(HERE), "test/tf-plan-gate/self-test.sh"))
+  when "--plan" then plan_path = args.shift or die(2, "--plan needs a file", "pass --plan <terraform show -json output>")
+  when "--control" then control_path = args.shift or die(2, "--control needs a file", "pass --control <base plan JSON>")
+  else die(2, "unknown argument: #{a}", "see --help; valid flags are --plan, --control, --self-test")
+  end
+end
+die(2, "--plan is required", "run `terraform plan -out=p && terraform show -json p > plan.json`, then pass --plan plan.json") unless plan_path
+
+def load_plan(path)
+  raw = File.read(path)
+rescue SystemCallError => e
+  die(2, "cannot read #{path}: #{e.message}", "pass a readable plan JSON file")
+else
+  begin
+    doc = JSON.parse(raw)
+  rescue JSON::ParserError => e
+    die(3, "COULD NOT MEASURE: #{path} is not JSON (#{e.message.lines.first.strip})",
+        "pass `terraform show -json <planfile>` output, not the human plan text")
+  end
+  unless doc.is_a?(Hash) && doc.key?("format_version") && doc["resource_changes"].is_a?(Array)
+    die(3, "COULD NOT MEASURE: #{path} has no format_version/resource_changes array",
+        "pass `terraform show -json <planfile>` output for a saved plan; a state file or an empty file measures nothing")
+  end
+  # terraform writes a plan file even when planning fails (e.g. prevent_destroy
+  # refusing a destroy), and the refused resource is absent from it.
+  if doc["errored"] == true
+    die(3, "COULD NOT MEASURE: #{path} is an ERRORED plan; the resources that failed to plan are missing from it",
+        "run `terraform plan` and read its error. `Instance cannot be destroyed` means the change destroys a " \
+        "prevent_destroy resource: hold for the owner. Anything else: fix the plan and re-run.")
+  end
+  if doc["complete"] == false
+    die(3, "COULD NOT MEASURE: #{path} is an incomplete plan (complete:false, deferred changes)",
+        "a partial plan can hide destroys; plan until complete, or hold for the owner")
+  end
+  doc["resource_changes"].select { |rc| rc["mode"] == "managed" }
+end
+
+def free_stateless?(type)
+  FREE_STATELESS_TYPES.include?(type) || FREE_STATELESS_PREFIXES.any? { |p| type.start_with?(p) }
+end
+
+# Paths of COST_ATTRS keys whose values differ between before and after, or
+# are unknown in after.
+def cost_diffs(before, after, unknown, path = [])
+  out = []
+  keys = ((before.is_a?(Hash) ? before.keys : []) | (after.is_a?(Hash) ? after.keys : []) |
+          (unknown.is_a?(Hash) ? unknown.keys : []))
+  if before.is_a?(Hash) || after.is_a?(Hash) || unknown.is_a?(Hash)
+    keys.each do |k|
+      b = before.is_a?(Hash) ? before[k] : nil
+      a = after.is_a?(Hash) ? after[k] : nil
+      u = unknown.is_a?(Hash) ? unknown[k] : nil
+      if COST_ATTRS.include?(k)
+        out << "#{(path + [k]).join('.')} unknown until apply" if u == true
+        out << "#{(path + [k]).join('.')} #{b.inspect} -> #{a.inspect}" if u != true && b != a
+      end
+      out.concat(cost_diffs(b, a, u, path + [k])) if [b, a, u].any? { |x| x.is_a?(Hash) || x.is_a?(Array) }
+    end
+  elsif before.is_a?(Array) || after.is_a?(Array) || unknown.is_a?(Array)
+    n = [before, after, unknown].map { |x| x.is_a?(Array) ? x.size : 0 }.max
+    n.times do |i|
+      b = before.is_a?(Array) ? before[i] : nil
+      a = after.is_a?(Array) ? after[i] : nil
+      u = unknown.is_a?(Array) ? unknown[i] : nil
+      out.concat(cost_diffs(b, a, u, path + [i.to_s]))
+    end
+  end
+  out
+end
+
+changes = load_plan(plan_path)
+control = control_path ? load_plan(control_path) : []
+control_keys = control.map { |rc| [rc["address"], rc.dig("change", "actions"), rc.dig("change", "after")] }
+
+held = []
+considered = 0
+skipped_control = 0
+changes.each do |rc|
+  actions = Array(rc.dig("change", "actions"))
+  next if actions.empty? || actions == ["no-op"] || actions == ["read"]
+
+  if control_keys.include?([rc["address"], actions, rc.dig("change", "after")])
+    skipped_control += 1
+    next
+  end
+  considered += 1
+  addr = rc["address"]
+  type = rc["type"].to_s
+  label = STATEFUL_TYPES.include?(type) ? "stateful" : "not known stateless"
+  if actions.include?("delete") && !free_stateless?(type)
+    verb = actions.include?("create") ? "replace" : "destroy"
+    held << ["DESTROY", addr, "#{verb} of #{type} (#{label})"]
+  end
+  if actions == ["create"] && !free_stateless?(type)
+    held << ["COST", addr, "new #{type} (not known free)"]
+  end
+  if actions.include?("update")
+    ch = rc["change"]
+    cost_diffs(ch["before"], ch["after"], ch["after_unknown"]).each do |d|
+      held << ["COST", addr, "sizing change: #{d}"]
+    end
+  end
+end
+
+held.each { |h| puts h.join("\t") }
+summary = "#{PROG}: #{considered} resource change(s) considered" +
+          (control_path ? ", #{skipped_control} also in the control, skipped" : "")
+if held.empty?
+  puts "#{summary}; CLEAR: nothing destroys stateful infra or adds cost."
+  exit 0
+end
+puts "#{summary}; HOLD: #{held.size} change(s) need the owner's go."
+puts "Fix: hold the MR and request the owner's go with a Block Kit DM " \
+     "(athena:slack -> Asking the owner for a decision); no standing approval covers these."
+exit 4

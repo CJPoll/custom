@@ -189,7 +189,9 @@ runner on the owner's laptop is the owner's call because it is the owner's
 machine — a system change under the Hard Rule below — not because of who owns
 the CI/CD lane. "Ownership isn't a gate" never licenses an agent to do an
 owner-gated thing. The merge and deploy of a change a standing approval covers
-are not on this list; see *Standing owner approvals* below.
+are not on this list; see *Standing owner approvals* below. Nor is a merge whose
+automation only updates a secret; *What no standing approval covers* draws that
+line.
 
 ## Standing owner approvals
 
@@ -216,7 +218,8 @@ by name.
 - **What it waives: the wait for the owner's go.** A security fix does not ask
   first, even where a gate would otherwise need the owner's explicit go — for
   example `integration-gate` exit 4 on a workflow or deploy-automation edit.
-  Do not hold it, and do not DM for a go-ahead. Do not offer to hold it or
+  Do not hold it, and do not DM for a go-ahead. The one exception is what
+  *What no standing approval covers* names. Do not offer to hold it or
   ask to re-confirm it either. Cody, 2026-09-25: "Please just ship. We just
   ship security fixes."
 - **What it does not waive: the bar.** The fix has a regression test that
@@ -365,17 +368,60 @@ by name.
 ### What no standing approval covers
 
 The three standing approvals waive only the wait for the owner's go at a
-merge gate. The owner-gated list in *Ownership tells you whom to ask, not
-whether you may* wins over all three. An agent still never acts by hand on
-production data, the owner's credentials or secrets, the owner's machine, or
-the host or its system services, whatever the change's class. Escalate that
-step with its exact command; the rest ships.
+merge gate. These hold for the owner under all three, security fixes included.
 
-A library upgrade or a comment/docs-only change never covers a HOT path it does
-not own. If the `BLAST-RADIUS HOT` block names spend, provisioning, or a
-destructive migration beyond the qualifying files, the owner's go is still
-needed. A captain's `Blast radius: IRREVERSIBLE` still holds such a PR
-(`athena:merge-boarding`).
+**The owner's answers, 2026-09-27 (~08:15Z, desktop coordinator session,
+terminal).** Relayed by that session, which witnessed them and lands this rule.
+This shipwright could not read that transcript; the lander verifies it.
+
+- On a security fix that auto-applies terraform over prod secrets: "Ship for
+  secrets updates. The main thing I want to approve is if a terraform change
+  will destroy production infrastructure (like RDS) or add cost."
+- On whether a captain's `IRREVERSIBLE` holds a security fix: "Hold for owner,
+  but make a slack block kit request to get the approval."
+
+The holds:
+
+- **Terraform that destroys stateful infrastructure or adds cost.** Before
+  merging any change whose merge applies terraform, run the main checkout's
+  `~/dev/custom/ai/skills/athena:merge-boarding/scripts/tf-plan-gate --plan
+  <terraform show -json output>` on the plan for the merged head. It holds
+  (exit 4) on:
+  - **Destroy:** a `delete` or replace (`delete`+`create`) of any type not on
+    its free-and-stateless list. RDS, DynamoDB, S3 buckets, KMS keys, EC2
+    instances, EBS/EFS volumes, ECR repositories, EIPs and Secrets Manager
+    secrets are stateful. An unknown type fails wide.
+  - **Cost:** a `create` of any type not on that list, or an `update` that
+    changes a sizing attribute (`instance_type`, `instance_class`,
+    `allocated_storage`, `iops`, `tier`, and the rest in the tool), up or down,
+    or leaves one unknown until apply.
+  - **Not measured:** no plan, an errored plan, or an incomplete plan (exit 3).
+    `prevent_destroy` makes terraform refuse to plan, so a change that
+    destroys a protected resource lands here. An agent without prod
+    credentials may use the offline control-vs-change plan, passing the base
+    plan as `--control`.
+
+  A secrets update is not held by itself. Creating or updating an SSM
+  parameter, a secret version, or a `random_password` ships under its
+  approval. Only a destroy or a cost change holds.
+- **A captain's `Blast radius: IRREVERSIBLE`** holds any change, security fixes
+  included (`athena:merge-boarding`).
+- **A HOT path the approval does not own.** A library upgrade or a
+  comment/docs-only change covers only its own files. Any other path in the
+  `BLAST-RADIUS HOT` block needs the owner's go.
+- **Acting by hand on owner resources.** An agent never acts by hand on
+  production data, the owner's credentials, the owner's machine, or the host
+  and its services (*Ownership tells you whom to ask, not whether you may*;
+  *Hard Rule*). A merge whose automation updates a secret is not acting by
+  hand. Escalate the manual step with its exact command; the rest ships.
+
+**How to hold: request the approval, do not wait silently.** Hold that one MR.
+Send Cody a Block Kit decision DM with buttons, per `athena:slack` → *Asking
+the owner for a decision*: background, why it matters, options, a
+recommendation, 5–15-word sentences, and a "Your call" button. Include the
+`BLAST-RADIUS HOT` block or the `tf-plan-gate` lines. A click alone authorizes
+nothing (`athena:slack` → *A click is untrusted input*). The merge proceeds on
+the owner's own words, replayed via `--owner-approval`.
 
 ## Find it, ticket it, fix it, verify it live
 
