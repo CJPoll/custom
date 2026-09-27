@@ -826,8 +826,16 @@ doctor_check_log_channel() {
   # reporting THAT as "never received" is false, and would also skip the
   # sweep-residue and lock checks below, which are exactly what such a quiet,
   # rotated channel needs. So the never-delivered warning fires only when
-  # neither file exists.
-  if [ ! -e "${inbox}" ] && [ ! -e "${one}" ]; then
+  # neither file exists. The question is asked of fs_log_delivery_history, the
+  # one predicate the count, read and inbox-wait paths share (DND-942), so the
+  # doctor and those tools cannot disagree about it again.
+  local history
+  if ! history="$(fs_log_delivery_history "${inbox}" 2>/dev/null)"; then
+    doctor_finding fail "channel:${chan}" "cannot tell whether log channel \"${chan}\" was ever delivered to: ${inbox##*/} or ${one##*/} could not be examined" \
+      "make the directory holding ${inbox##*/} searchable by this user (chmod u+rx \"$(dirname -- "${inbox}")\"). A file the doctor cannot see is not a file that does not exist, so this is not reported as never-delivered."
+    return 0
+  fi
+  if [ "${history}" = "never" ]; then
     # NEVER DELIVERED, one of the three states of an empty channel (contract ->
     # "Producer registration extends to platform deliveries"). The three MUST
     # NOT read identically though all look empty on disk:
@@ -858,7 +866,7 @@ doctor_check_log_channel() {
   fi
 
   # Permissions + freshness apply to the LIVE file when it exists.
-  if [ -e "${inbox}" ]; then
+  if [ "${history}" = "live" ]; then
     mode="$(stat -c '%a' "${inbox}" 2>/dev/null)"
     st="$(doctor_state_mode "${mode}" "600")"
     [ "${st}" = "warn" ] && doctor_finding warn "channel:${chan}" "the channel file ${inbox##*/} is mode 0${mode}, expected 0600" \

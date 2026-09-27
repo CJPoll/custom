@@ -1592,3 +1592,27 @@ A bug fix, so the evidence is the unfixed code going red, not a mutation.
   command did not exist. The new never-delivered text names it on purpose, so
   the assertion now reads only the failed-candidate block it was written for,
   with a companion case proving that block was found (not vacuous).
+
+## DND-942 (2026-09-27): a rotated, quiet log channel is not a never-delivered one
+
+A bug fix, so the evidence is the unfixed code going red, not a mutation.
+
+- **Code under test:** `lib/fs.sh` (`fs_log_delivery_history`, the one shared
+  "ever delivered" predicate), and its callers: the count
+  (`_inbox_count_log`), the read (`_inbox_read_log`), `inbox-wait`'s arming
+  notice, and `doctor_check_log_channel`.
+- **Suite run:** `bash test/self-test.sh` (cases R-1 .. R-13) and
+  `bash test/doctor/self-test.sh`.
+- **Before the fix:** `VERDICT: FAIL (12 of 896 cases)`. The defining
+  failures, on a channel whose only file is `p-slack.jsonl.1`:
+  `FAIL R-6 count: a rotated, quiet channel is NOT never_delivered` --
+  `expected [false], got [true]`; `FAIL R-8 read: ...` -- `expected [false],
+  got [true]`; `FAIL R-9 read-inbox: ... does not say nothing was EVER
+  delivered` -- got `athena:inbox: slack is declared, but nothing has EVER been
+  delivered to it.`; `FAIL R-10 inbox-wait: ...` -- got `... nothing has EVER
+  been delivered to it — arming anyway.` R-1 .. R-5 failed with
+  `fs_log_delivery_history: command not found`. The miss cases (R-11 .. R-13,
+  truly nothing delivered) passed before and after.
+- **After:** `VERDICT: PASS (896 cases)`; doctor `VERDICT: PASS (380 cases)`,
+  including the new could-not-look case (an unsearchable directory is a `fail`
+  "could not be examined", never `never-delivered`).

@@ -338,6 +338,21 @@ channel is normal — so the misconfiguration is invisible. Therefore:
   MUST distinguish that from "nothing new", and say so with a `Fix:` clause
   naming producer registration. "Nobody registered the writer" and "nothing
   arrived" look identical on disk and must not look identical in output.
+- **"Has this `log` channel ever been delivered to" is one question with one
+  answer**, and every tool asks it the same way: the channel has been delivered
+  to when its live inbox file **or** its rotated generation
+  (`<channel>.jsonl.1`, *The rotated generation*) exists. Rotation renames the
+  live file away, and the writer re-creates it only on its next append, so a
+  rotated, quiet channel has no live file and MUST NOT read as never-delivered.
+  The answer has three outcomes that MUST NOT read alike: **delivered** (live,
+  or rotated and quiet), **never delivered** (neither file exists, and that
+  absence was observed), and **could not look** (a probe failed for any reason
+  but "no such file", such as a directory the reader cannot search). Could-not-look
+  is a failure with a `Fix:`, never "never delivered". The implementation is
+  `fs_log_delivery_history` in `ai/skills/athena:inbox/lib/fs.sh`; the count,
+  the read, `inbox-wait`'s arming notice and `inbox-doctor` all call it (DND-942).
+  Its one residual: once the sweep deletes a `.1` and nothing has arrived since,
+  no file records the channel's history, and it reads never-delivered again.
 - A tool reporting on a channel whose **last delivery is older than the
   channel's staleness threshold** (`stale_after_s`, *Schema*) MUST say `STALE`
   with the age, even when nothing is new, and a diagnostic MUST grade it a
@@ -2288,8 +2303,11 @@ Between losing evidence and flooding the owner with duplicates, take the
 former.
 
 **Nothing ever reads `.jsonl.1`.** It is not counted, not deduped against, and
-never resumed from. It exists so a human can answer *"did that message actually
-arrive?"* after the fact — cheap insurance against a reader that acked past
+never resumed from. Only its **existence** and its metadata are consulted: it
+is half of a channel's delivery history (*Tenancy: the registry*, the "ever
+been delivered to" rule), and a non-empty `.1` dates the last delivery for
+freshness. Neither looks at its content. It exists so a human can answer *"did
+that message actually arrive?"* after the fact — cheap insurance against a reader that acked past
 content it never delivered, which *Reader obligations* names as the single
 easiest way to reintroduce silent loss. Rotation-as-deletion would destroy that
 evidence in the same breath as the bug that created it.

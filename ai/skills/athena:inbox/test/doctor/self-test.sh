@@ -343,6 +343,16 @@ printf '{"offset":0,"rotated_at":"2020-01-01T00:00:00Z"}' > "${STATE}"; chmod 60
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
 assert_no_finding "rotated+quiet: NOT reported as never-received" "${CH}" warn "channel:slack" "never received"
 assert_finding "rotated+quiet: overdue .1 still reported" "${CH}" warn "channel:slack" "past its 14-day sweep window"
+# DND-942: the doctor asks the shared predicate, and says which delivered state.
+assert_finding "rotated+quiet: reported as rotated and quiet" "${CH}" ok "channel:slack" "rotated and quiet"
+assert_no_finding "rotated+quiet: no never-delivered finding" "${CH}" warn "never-delivered" "never received"
+# DND-942 COULD NOT LOOK: an inbox in a directory this user cannot search is a
+# fail naming that, never a never-delivered finding.
+DARK="${TMP}/dark-ch"; mkdir -p "${DARK}"; chmod 000 "${DARK}"
+DCH="$(doctor_check_log_channel slack "$(printf 'inbox\t%s\nstate\t%s\n' "${DARK}/d.jsonl" "${DARK}/d.state.json")" slack)"
+chmod 700 "${DARK}"
+assert_finding "unsearchable dir -> fail, could not examine" "${DCH}" fail "channel:slack" "could not be examined"
+assert_no_finding "unsearchable dir -> NOT never-delivered" "${DCH}" warn "never-delivered" "never received"
 # a .1 whose rotated_at is UNKNOWN (older reader, or unparseable) -> na, named,
 # never a silent "fine".
 printf '{"offset":0}' > "${STATE}"; chmod 600 "${STATE}"   # no rotated_at

@@ -384,6 +384,69 @@ fs_write_state() {
 # fs_rotated_name <inbox-path>  -- exactly one generation, `<channel>.jsonl.1`.
 fs_rotated_name() { printf '%s.1\n' "$1"; }
 
+# fs_log_delivery_history <inbox-path>
+#
+# THE ONE ANSWER to "has this log channel EVER been delivered to?" (DND-942).
+# Count, read, inbox-wait and inbox-doctor all ask it here; none tests the live
+# file on its own. Prints exactly one verdict on stdout:
+#   live      the live inbox file exists (delivered; quiet or not);
+#   rotated   no live file, but the rotated generation exists: delivered, then
+#             rotated, and nothing has arrived since. Quiet, NOT never-delivered;
+#   never     neither exists, and the absence was actually observed.
+# Status 1, with a Fix: on stderr and nothing on stdout, when it CANNOT LOOK:
+# an empty path, or a probe that fails for any reason but "no such file" (an
+# unsearchable directory makes `[ -e ]` false for every file in it, which would
+# otherwise read as "never").
+#
+# WHY BOTH FILES. Rotation renames `<channel>.jsonl` to `<channel>.jsonl.1`, and
+# the writer re-creates the live file only on its next append. A check of the
+# live file alone read a rotated, quiet channel as "nothing has EVER been
+# delivered" and sent the operator to register a producer that was registered
+# all along. The `.1` is only probed for existence: its CONTENT is still never
+# read, counted or deduped against (contract -> "The rotated generation").
+#
+# EXISTENCE, NOT SIZE. The writer creates the file on its first append, so an
+# existing file is a delivery. Freshness asks a different question (how old is
+# the last delivery) and reads non-emptiness in liveness.sh.
+#
+# RESIDUAL: once the sweep deletes a `.1` (14 days past `rotated_at`) and no
+# delivery has arrived since, nothing on disk records that the channel was ever
+# delivered to, and this reads `never`. `rotated_at` cannot rescue it: the first
+# state write stamps it on a channel that has never rotated.
+fs_log_delivery_history() {
+  local inbox="$1" p rc
+  if [ -z "${inbox}" ]; then
+    inbox_fail "cannot tell whether a log channel was ever delivered to: its inbox path is empty" \
+      "check the channel's \"path\" in \$ATHENA_INBOX_ROOT/projects/<project>.json; an empty path is a resolution failure, not an empty channel."
+    return 1
+  fi
+  for p in "${inbox}" "$(fs_rotated_name "${inbox}")"; do
+    _fs_probe_exists "${p}"; rc=$?
+    case "${rc}" in
+      0) if [ "${p}" = "${inbox}" ]; then printf 'live\n'; else printf 'rotated\n'; fi; return 0 ;;
+      1) ;;
+      *)
+        inbox_fail "cannot tell whether \"${inbox##*/}\" was ever delivered to: \"${p}\" could not be examined" \
+          "make \"$(dirname -- "${p}")\" searchable by this user (chmod u+rx). Until it is, this channel is reported as unreadable rather than as never delivered, because a file the reader cannot see is not a file that does not exist."
+        return 1
+        ;;
+    esac
+  done
+  printf 'never\n'
+}
+
+# _fs_probe_exists <path>  -- 0 exists (a symlink counts; fs_assert_regular
+# refuses it separately), 1 definitively absent (ENOENT/ENOTDIR), 2 could not
+# look (EACCES or anything else). `[ -e ]` cannot tell 1 from 2.
+_fs_probe_exists() {
+  local err
+  err="$(LC_ALL=C stat -c %i -- "$1" 2>&1 >/dev/null)" && return 0
+  case "${err}" in
+    *"No such file or directory"*|*"Not a directory"*) return 1 ;;
+  esac
+  return 2
+}
+
 # fs_rotate_log <inbox-path> <offset>
 #
 # MUST be called with the consumer lock held. Status 0 = rotated; status 2 =
