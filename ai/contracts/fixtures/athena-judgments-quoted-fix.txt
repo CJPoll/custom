@@ -1,0 +1,18 @@
+# The exact Fix: text ai/contracts/athena-judgments.md quotes, per section.
+# `@section <heading>` starts a section (the heading text, without the #s).
+# Each following line is one quoted span, in document order, whitespace
+# collapsed. A span is pinned when it contains `Fix:` and is more than the bare
+# word.
+#
+# PINNED ON BOTH SIDES (DND-713):
+#   - here, by ai/contracts/test/self-test.sh: every such span in each listed
+#     section must equal these lines exactly;
+#   - in the script's own suite, ai/skills/athena:ticket-management/test/
+#     self-test.sh, which reads this line from this file and asserts
+#     finding-triage prints it when the server answers not_configured.
+# Changing a line means changing the contract, this file and the script
+# together.
+
+@section Finding triage: the harness script
+# the inert answer: every mode off, no key (DND-711 is the owner's step)
+JUDGMENTS UNAVAILABLE: not_configured. Fix: file the ticket as today; this is advisory.

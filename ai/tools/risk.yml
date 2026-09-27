@@ -170,3 +170,8 @@ tools:
   skills/athena:slack/bin/status:                     { class: destructive, reason: slack }
   skills/athena:slack/bin/update:                     { class: destructive, reason: slack }
   skills/athena:slack/bin/upload:                     { class: destructive, reason: slack }
+  # finding-triage (DND-713) only READS Notion (its Notion effect refuses any
+  # other request), but it posts the finding to the Athena server, which records
+  # a judgment_calls row (and, with a key, spends TypeSafe budget). External
+  # state, so destructive, like judgment-eval.
+  skills/athena:ticket-management/scripts/finding-triage: { class: destructive, reason: judgments }

@@ -1,6 +1,6 @@
 ---
 name: athena:ticket-management
-description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work).
+description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also use before filing a finding: run the finding-triage script for the Jev advisory (advisory only).
 ---
 
 # athena:ticket-management
@@ -115,6 +115,34 @@ When the status you would set does not exist:
    no status" and "this tracker has no such status" must never read the same —
    per `~/.claude/CLAUDE.md` → *A failed lookup must never look like an empty
    one*.
+
+## Before filing a finding
+
+A **finding** is an anomaly you observed and are about to ticket (`~/.claude/CLAUDE.md`
+→ *Find it, ticket it, fix it, verify it live*; that rule is unchanged). Before you
+create its ticket, ask Jev whether it duplicates or relates to an existing one
+(DND-713; contract `ai/contracts/athena-judgments.md` → *Finding triage: the
+harness script*):
+
+1. **Run the script.** Write the draft body to a file, then:
+   `~/dev/custom/ai/skills/athena:ticket-management/scripts/finding-triage --title "<TITLE>" --body-file <FILE> --project <athena|harness|walt_ui|dnd|lms|admiral>`.
+   It searches the DND tracker for candidates itself (same project, open or edited
+   in the last 90 days, at most 20) and prints how many it considered, even 0.
+2. **Paste its output verbatim** into the new ticket body under a heading
+   **"Jev advisory (not a decision)"**. That includes an unavailable line.
+3. **The filer decides.** A `duplicate` or `related` line is advice to check the
+   named ticket, never a verdict. The advisory never blocks filing.
+4. **Never auto-close, auto-merge or auto-cancel** anything on the strength of it,
+   the new ticket or the candidate. The script writes nothing to Notion.
+5. **When it is unavailable, file as today.** Exit 3 prints one line ending
+   `Fix: file the ticket as today; this is advisory.` Today every call prints
+   `JUDGMENTS UNAVAILABLE: not_configured`, because the feature ships inert (no key,
+   mode off; DND-711 is the owner's step). `COULD NOT REACH SERVER` and
+   `CANDIDATES UNAVAILABLE` mean the same for filing: file it.
+
+Exit 2 is a usage error: fix the command and rerun. If the Notion search cannot
+run on your machine, `--candidates-file` takes a JSON array of
+`{"ref","title","summary"}` instead.
 
 ## Resolving the two accounts (per active connection)
 
