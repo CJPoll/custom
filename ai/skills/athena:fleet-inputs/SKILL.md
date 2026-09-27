@@ -63,7 +63,9 @@ match):
   with it)
 - Green, reviewed, and deliberately **not mergeable by the fleet** — merging
   would perform a real-world action (see [[athena:merge-boarding]] → *Merging is
-  not always landing code*) → **`HELD_FOR_OWNER`** in your state log, and in
+  not always landing code*) and no standing approval covers it
+  (`~/.claude/CLAUDE.md` → *Standing owner approvals*) →
+  **`HELD_FOR_OWNER`** in your state log, and in
   Notion `Needs Attention` assigned to **Cody**, with the context on the Mission
   body. This is a distinct terminal state, not a flavour of the others: `Stuck`
   means the fleet could not finish the work, `Blocked` means it waits on another

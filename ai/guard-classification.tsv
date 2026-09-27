@@ -86,6 +86,7 @@ ai/skills/athena:inbox/bin/inbox-status	guard
 ai/skills/athena:inbox/bin/inbox-wait	guard	
 ai/skills/athena:inbox/bin/read-inbox	guard	
 ai/skills/athena:inbox/bin/send-mail	guard	
+ai/skills/athena:merge-boarding/scripts/comment-only-diff	guard	
 ai/skills/athena:merge-boarding/scripts/integration-gate	guard	
 ai/skills/athena:merge-boarding/scripts/locked-merge	guard	
 ai/skills/athena:memory-maintenance/scripts/index-budget	guard	
