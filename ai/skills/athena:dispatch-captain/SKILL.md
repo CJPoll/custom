@@ -120,11 +120,21 @@ Give the captain, in the brief:
   the captain the denied call.
 - **The test-slot rule.** Every brief carries this line: *"Run every heavy gate
   — a full suite, `bin/prep-commit.sh`, `harness-gate`, `integration-gate` — as
-  `~/dev/custom/ai/bin/test-slot -- <cmd>`. To bound the command, put `timeout`
-  INSIDE the slot: `test-slot -- timeout 1500 <cmd>`. Exit 75 with `test-slot:
-  TIMEOUT` means it never ran: run it again; never count it as a pass."*
+  ONE Bash command that starts in your worktree: `cd <worktree> &&
+  ~/dev/custom/ai/bin/test-slot -- timeout 1500 <cmd>`. For `harness-gate`,
+  `<cmd>` is your worktree's own `./ai/bin/harness-gate`. Quote its `gating
+  <root>` line with the result. Exit 75 with `test-slot: TIMEOUT` means it
+  never ran: run it again; never count it as a pass."*
   Nothing in the harness wraps a captain's gates yet (DND-486 is unlanded), so
   this line is the only thing that does.
+- **Why the `cd` is in the same command.** A subagent's Bash cwd resets to the
+  session root between calls, and that is often the main checkout. A gate
+  named by its main-checkout path, or run after a `cd` in an earlier call,
+  gates the main checkout. `harness-gate` refuses that run
+  (`foreign_gate_tree`), so the attempt is lost, not wrong. Measured twice in
+  two runs: DND-840/DND-896 (harness-epics-ab, 2026-09-26) and DND-864
+  (slack-interactive, 2026-09-27, "It ran the main checkout's binary and was
+  REFUSED").
 - **Never put `timeout` outside `test-slot`.** `timeout 1500 test-slot -- <cmd>`
   counts the queue wait against the command's budget, so a deep queue kills a
   gate that never started (rc 124). Measured 2026-09-26: DND-814's harness-gate
