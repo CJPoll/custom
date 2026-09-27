@@ -1968,7 +1968,12 @@ def run_self_test
     # run_gate's summary with a bare backtrace, and must not swallow the
     # per-check failure report either — report_gate_ok/report_gate_failed_header
     # degrade to a loud FAILED line with a Fix: instead, and never raise past
-    # the caller.
+    # the caller. Fail-first evidence (round 2, critic requested the real
+    # backtrace, not "would"): with report_gate_ok/report_gate_failed_header
+    # temporarily removed and these same assertions in place, self-test
+    # crashed with `undefined method 'report_gate_ok' for main:Object
+    # (NoMethodError)` at this line — the exact bare-backtrace failure mode
+    # this fix exists to close. Restored, self-test passes.
     code, out, err = capture.call { report_gate_ok(3, root: not_a_repo) }
     if code != 1
       warn "self-test: FAIL — report_gate_ok with an unattributable root " \
