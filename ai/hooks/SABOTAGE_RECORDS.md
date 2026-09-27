@@ -906,3 +906,38 @@ reached every case they did (their mutants stayed green).
   text-layer fallback). No code or test change: an accepted residual is
   not caught by design, and a deny case would claim coverage that does
   not exist.
+- **Round 10, per-tool lists deleted (admiral decision, option A).** Round
+  10 found two more cases in the class rounds 1, 2, 4, 5, 6 and 8 walked:
+  a per-tool read list reading a runner wrong. Seven of ten rounds were
+  that class. The admiral chose to delete the mechanism rather than patch
+  it: a text is data only when every command word is a PURE DATA tool
+  (`safe_word()`); git, gh, glab, docker, sed, rg, sort and wget make the
+  text exec whatever their subcommand or options. `git_read()`,
+  `gh_read()`, `docker_read()`, `sed_runs()`, `prog_opt()`, `long_pre()`
+  and `short_has()` are gone. This is strictly stricter: it only denies
+  more. 25 allow cases (git/gh/docker/sed/rg/sort/wget pipelines) now
+  deny; they are kept, flipped, in a "QA-A: denied under option A; relief
+  via DND-775" block. Every deny stays green. Rows 10, 13, 14, 17-22, 24
+  and 25 above sabotaged deleted code and are retired.
+
+### Sabotage rows on the option-A hook (final; supersede the table above)
+
+Self-test `RESULT: 551 passed, 0 failed`. One mutant copy each.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| A-1 | Every quoted payload and heredoc read as data | 115 cases (O103c, QX1-QX93 exec cases) — `436 passed, 115 failed` |
+| A-2 | `exec_text()` off | 105 QX cases — `446 passed, 105 failed` |
+| A-4 | A payload holding a command substitution no longer exec | O103c, QX29, QX30, QX35, QX81, QX84 — `545 passed, 6 failed` |
+| A-5 | Unquoted or unterminated heredoc read as data | QX27, QX28 — `549 passed, 2 failed` |
+| A-6 | `<<` after `#` or in `((` taken as a heredoc | QX32, QX33 — `549 passed, 2 failed` |
+| A-7 | Alias self-expansion guard removed | QB1 — `550 passed, 1 failed` |
+| A-8 | Test arguments no longer data | QA24, QA25 — `549 passed, 2 failed` |
+| A-9 | Data drops every finding | QD6-QD9, QL1-QL3, QL5, QL6 — `542 passed, 9 failed` |
+| A-11 | A payload nested in data no longer data | QA20, QA60, QA62 — `548 passed, 3 failed` |
+| A-15 | Data drops named writes again | QD6-QD9 — `547 passed, 4 failed` |
+| A-16 | Data judges a glob command word as exec does (no relief) | 27 QA/QB allow cases — `524 passed, 27 failed` |
+| A-26 | Pure-data list gains sh, bash, zsh | QX1, QX2, QX12, QX13, QX21, QX22, QX31 — `544 passed, 7 failed` |
+| A-27 | Pure-data list gains git, gh, docker | 40 cases (QX19-QX76 git/gh/docker forms, QX90-QX93) — `511 passed, 40 failed` |
+| A-28 | Pure-data list gains sed, rg, sort, wget | QX57-QX61, QX77-QX80, QX85-QX89, QX92 and six flipped QA-A cases — `530 passed, 21 failed` |
+| A-29 | Pure-data list gains at, sg, tar, watchexec | QX36, QX37, QX39, QX40, QX42 — `546 passed, 5 failed` |

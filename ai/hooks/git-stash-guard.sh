@@ -114,42 +114,34 @@
 # pop`, `$GIT stash pop`). What data mode drops is the rest of the
 # expansion rules: a glob or brace command word with no arguments or with
 # expanded ones (`.[]`, `{print $1}`, `{{.A}} {{.B}}`), a subcommand built
-# by expansion (`git $SUB`), and an unread config. So jq/awk/sed/grep/curl/
-# docker/gh payloads and python/ruby heredocs with brackets and braces are
-# allowed. Data mode FAILS CLOSED: a payload is data only when every
-# command word in its text is a known non-runner (a data tool, a text or
-# file utility, a keyword, an interpreter; git, gh, glab and docker only
-# with a read-only subcommand and, for git, no option that names or turns
-# on a program; sed only without an `e` command). Any other command
-# word makes it EXEC and read in full: a shell or other runner (sh/bash/zsh
-# -c, eval, source, xargs, watch, ssh, su, sudo, env -S, trap, alias, `...
-# | sh`, a heredoc fed to a shell), a script by path or bare name, an
-# expanded command word (`$SHELL -c`, `$l`), and any program not on the
-# list. So are a git command with an option that names a program (`-c
-# core.pager=...`, an alias value), a listed tool given a program option
-# (rg --pre, sort --compress-program, wget -e), a payload holding a command
-# substitution (double-quoted, or single-quoted where zsh re-evaluates it:
-# `read`, `shift`, `return`, `[[ -eq ]]` run `$(...)` inside a quoted
-# subscript), and an unquoted or unterminated heredoc. The
-# arguments of a test (`[`, `[[`, `test`) are data too. The lists are in
-# the awk block (safe_word(), git_read(), gh_read(), docker_read(),
-# sed_runs(), prog_opt(), exec_text()).
+# by expansion (`git $SUB`), and an unread config. So jq/awk/grep/curl
+# payloads and python/ruby heredocs with brackets and braces are allowed.
+# Data mode FAILS CLOSED: a payload is data only when every command word in
+# its text is a PURE DATA tool (safe_word(): a tool that runs no program in
+# any form, a text or file utility, a keyword, an interpreter). Any other
+# command word makes it EXEC and read in full, including git, gh, glab,
+# docker, sed, rg, sort and wget whatever their subcommand (admiral
+# decision after critic round 10: per-tool read lists were deleted; the
+# relief they gave for git/gh/docker/sed pipelines returns with DND-775).
+# So is a payload holding a command substitution, and an unquoted or
+# unterminated heredoc. The arguments of a test (`[`, `[[`, `test`) are
+# data too.
 #   RESIDUAL (data mode), a deliberate reduction from cbac851/d8cf63e,
 #   which read every payload in full: a stash write that names NO stash
 #   verb (a glob git-stash word bare or with options only, `git-st*sh -u`;
 #   a glob or expanded git word with an expanded subcommand, `g?t $S`,
-#   `git $S`) inside data that something in the same call evaluates anyway
-#   (an interpreter string such as `python3 -c` / `awk system()`, a
-#   variable a program reads as a command such as GIT_SSH_COMMAND, a
-#   string a shell builtin re-evaluates, a file written in this call and
-#   later executed by git -- a program named by a config file, or a repo
-#   hook file, which even a read-only git such as `status` can fire) was
-#   caught before and is not now.
-#   It needs both an evaluator the exec lists miss and a spelling that
-#   hides the verb. Accepted by the harness session (2026-09-27, DND-799
-#   critic round 9 ruling). DND-775 (the git-level reference-transaction
-#   guard on refs/stash) is the enforcement that closes this whole class
-#   below the text; DND-905 is the text-layer fallback.
+#   `git $S`) inside an INTERPRETER string that runs it (`python3 -c`,
+#   `ruby -e`, `perl -e`, `node -e`, awk `system()`) was caught before and
+#   is not now. The literal and verb-naming spellings still deny.
+#   Narrowed by the option-A decision (after critic round 10): git, gh,
+#   docker and the other program-running tools are no longer on the
+#   pure-data list, so a text holding git is always read in full. A file
+#   written in this call and later executed by git (a config-named program
+#   or a repo hook) and a variable git reads as a command are therefore
+#   caught again, and leave this residual. Accepted by the harness session
+#   (2026-09-27). DND-775 (the git-level guard on refs/stash) is the
+#   enforcement that closes the class below the text; DND-905 is the
+#   text-layer fallback.
 #
 # PRECISION (DND-780, narrow cut): the leading test bracket `[` / `[[` and
 # the lone brace-group word `{` are not glob command words (as globs they
@@ -818,11 +810,8 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   #     `bash <<\047EOF\047`, eval, source, `.`, xargs, sudo, env -S, trap,
   #     alias), a script by path or bare name, a command word built by
   #     expansion (`$SHELL -c`, `while read l; do $l; done`), or any program
-  #     not listed (at, sg, tar, watchexec, ...);
-  #   * a git, gh, glab or docker command that is not a known read
-  #     (git_read(), gh_read(), docker_read(): `git -c core.pager=...`,
-  #     `gh pr checkout`, `docker exec`), a sed with an `e` command, or a
-  #     listed tool given a program option (prog_opt());
+  #     not on the pure-data list (git, gh, docker, sed, rg, sort, wget
+  #     included);
   #   * it holds a command substitution (`$(`, a backtick, `${(`): the
   #     shell runs it while expanding a double-quoted word, and a builtin
   #     may re-evaluate a single-quoted one;
@@ -831,167 +820,15 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # A payload nested in a data payload is data too. A payload nested in an
   # exec payload is decided again from the text it sits in.
   function weak(r) { return r ~ /^(expanded|unread-config)$/ }
-  # safe_word(t): a command word known NOT to run a string it is given (a
-  # data consumer, a file or text utility, a shell keyword or builtin that
-  # runs nothing). An interpreter is here on purpose: its string is data to
-  # this guard (see RESIDUAL in the header). Anything else, a script by path
-  # or bare name included, is unknown and makes the text EXEC (fail closed:
-  # critic round 1 named at, batch, sg -c, tar --to-command, sched,
-  # watchexec, entr, npx -c, nodemon --exec). Left out on purpose because
-  # each can run a string (critic round 2 class sweep): sed (the GNU `e`
-  # command and `s///e` flag; judged by sed_runs() instead), ack and ag
-  # (--pager), and local, declare, typeset and readonly (an integer
-  # attribute evaluates arithmetic, which in bash runs a `$(...)` inside
-  # an array subscript).
+  # safe_word(t): a PURE DATA tool: runs no program in any form, or a shell
+  # keyword or builtin that runs nothing. An interpreter is here on purpose:
+  # its string is data to this guard (see RESIDUAL in the header). Anything
+  # else is unknown and makes the text EXEC (fail closed). Tools that can
+  # run a program in some form stay off the list (DND-799 critic rounds
+  # 1-10), as do builtins that re-evaluate an arithmetic subscript.
   function safe_word(t) {
-    return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|grep|egrep|fgrep|rg|curl|wget|echo|printf|cat|tac|head|tail|sort|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|unset|set|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|wait|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
+    return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|grep|egrep|fgrep|curl|echo|printf|cat|tac|head|tail|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|unset|set|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|wait|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
       || t == "[\001" || t == "[\001[\001" || t == "{\001" || t == "}"
-  }
-  # gh_read(W, SB, n, k): the gh or glab at word k runs a read-only
-  # (command, subcommand) pair that runs no local git, alias or extension:
-  # `pr view`, `run list`, `api`, `search ...`. A group is not enough:
-  # `gh pr checkout` runs git and its hooks (critic round 4).
-  function gh_read(W, SB, n, k,    j, c1, c2) {
-    c1 = ""; c2 = ""
-    for (j = k + 1; j <= n && !SB[j]; j++) {
-      if (W[j] ~ /^-/) continue
-      if (c1 == "") c1 = W[j]; else { c2 = W[j]; break }
-    }
-    if (c1 == "api" || c1 == "search" || c1 == "status") return 1
-    if (c1 == "auth") return c2 == "status"
-    if (c1 ~ /^(pr|mr)$/) return c2 ~ /^(view|list|diff|checks|status)$/
-    if (c1 == "issue") return c2 ~ /^(view|list|status)$/
-    if (c1 ~ /^(run|ci)$/) return c2 ~ /^(list|view|watch|status|get)$/
-    if (c1 ~ /^(repo|release|workflow|ruleset|project)$/) return c2 ~ /^(view|list)$/
-    if (c1 ~ /^(label|cache|secret|variable)$/) return c2 ~ /^(list|get)$/
-    return 0
-  }
-  # docker_read(W, SB, n, k): the docker at word k only reads (ps, inspect,
-  # images, logs, ...). exec, run, compose run and the rest run commands.
-  function docker_read(W, SB, n, k,    j, c1, c2) {
-    c1 = ""; c2 = ""
-    for (j = k + 1; j <= n && !SB[j]; j++) {
-      if (W[j] ~ /^-/) continue
-      if (c1 == "") c1 = W[j]; else { c2 = W[j]; break }
-    }
-    if (c1 ~ /^(ps|inspect|images|logs|stats|version|info|top|port|diff|history|events)$/) return 1
-    if (c1 ~ /^(container|image|network|volume|context)$/) return c2 ~ /^(ls|list|inspect|logs|ps)$/
-    if (c1 == "compose") return c2 ~ /^(ps|logs|config|images|ls|top|port|version)$/
-    return 0
-  }
-  # git_read(W, SB, n, k): the git at word k runs a read-only subcommand
-  # that runs no alias, hook or configured command from the text: a
-  # builtin reader, or a listing form of branch, tag, stash, worktree,
-  # remote or config (DND-799 batch 7: `git branch -a | grep -E ...`).
-  # Options are allowlisted too (critic round 5): before the subcommand
-  # only -C <dir>, --no-pager, -P and the pathspec switches; any other
-  # global option (`-c core.fsmonitor=./p.sh`, --exec-path, --config-env,
-  # --git-dir) makes it exec, and so does an option after the subcommand
-  # that names a program (--upload-pack, --receive-pack, --exec,
-  # -O / --open-files-in-pager, matched by getopt prefix so an abbreviation
-  # cannot hide it) or turns on a configured one (--ext-diff, --textconv,
-  # --show-signature, --config). A file written in the same call and later
-  # executed by git (a config-named program or a repo hook) is the header
-  # RESIDUAL.
-  function git_read(W, SB, n, k,    j, sc, a, lst, mut, nonopt) {
-    for (j = k + 1; j <= n && !SB[j]; ) {
-      if (W[j] == "-C") { j += 2; continue }
-      if (W[j] ~ /^(--no-pager|-P|--no-optional-locks|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs)$/) { j++; continue }
-      if (W[j] ~ /^-/) return 0
-      break
-    }
-    if (j > n || SB[j]) return 1
-    sc = W[j]
-    for (a = j + 1; a <= n && !SB[a]; a++) {
-      # Path-taking options accept a program on the command line, so an
-      # abbreviated or `=`-joined spelling smuggles it: match by getopt
-      # prefix (critic round 8).
-      if (long_pre(W[a], "upload-pack receive-pack exec open-files-in-pager")) return 0
-      # `-O<cmd>` (git grep) bundles the pager command onto the short flag.
-      if (short_has(W[a], "O")) return 0
-      # Config toggles take no path (they turn on a config-defined program,
-      # the header RESIDUAL), so exact spelling is enough and prefix-matching
-      # them would over-deny `--text` (git diff) against `--textconv`.
-      if (W[a] ~ /^--(ext-diff|textconv|show-signature|config)(=|$)/ || W[a] == "-c") return 0
-    }
-    if (sc ~ /^(log|status|diff|show|rev-parse|ls-files|ls-tree|ls-remote|grep|blame|for-each-ref|describe|shortlog|cat-file|merge-base|rev-list|name-rev|show-ref|count-objects|var|help|version|whatchanged|range-diff|cherry|diff-tree|diff-files|diff-index)$/) return 1
-    lst = 0; mut = 0; nonopt = 0
-    for (a = j + 1; a <= n && !SB[a]; a++) {
-      if (W[a] ~ /^(-l|--list|-a|--all|-r|--remotes|-v|-vv|--verbose|--contains|--no-contains|--merged|--no-merged|--points-at|--show-current|--get|--get-all|--get-regexp|--show-origin|--name-only)$/) lst = 1
-      else if (W[a] ~ /^-/) { if (W[a] !~ /^(--format|--sort|--color|--no-color|--column|--no-column|--abbrev)(=|$)/) mut = 1 }
-      else if (W[a - 1] !~ /^(--contains|--no-contains|--merged|--no-merged|--points-at|--sort|--format|--get|--get-all|--get-regexp)$/) nonopt++
-    }
-    if (sc == "branch") return !mut && (nonopt == 0 || lst)
-    # tag: -a annotates (opens core.editor), -s/-v run gpg.program; only
-    # `tag`, `tag -l` and `tag --list` list (critic round 4).
-    if (sc == "tag") {
-      for (a = j + 1; a <= n && !SB[a]; a++) if (W[a] ~ /^-/ && W[a] !~ /^(-l|--list|--sort=.*|--format=.*|--contains|--merged|--points-at|--column|--no-column)$/) return 0
-      return nonopt == 0 || W[j + 1] ~ /^(-l|--list)$/
-    }
-    if (sc == "stash") return j + 1 <= n && !SB[j + 1] && W[j + 1] ~ /^(list|show)$/
-    if (sc == "worktree") return j + 1 <= n && !SB[j + 1] && W[j + 1] == "list"
-    if (sc == "remote") return !mut && (nonopt == 0 || (W[j + 1] ~ /^(show|get-url)$/))
-    if (sc == "config") return lst && !mut && nonopt <= 1
-    return 0
-  }
-  # prog_opt(t, W, SB, n, k): listed tool t at word k is given an option
-  # that names a program for it to run (critic round 6; the sweep read
-  # the --help and man page of each listed tool for such options): rg --pre,
-  # sort --compress-program, wget -e/--execute/--use-askpass/--config (a
-  # wgetrc command can set use_askpass). Options are matched by getopt
-  # prefix and short-bundle split (critic round 8), so an abbreviation
-  # (`--use-ask=`, `-qe`) cannot hide one.
-  function prog_opt(t, W, SB, n, k,    j) {
-    for (j = k + 1; j <= n && !SB[j]; j++) {
-      if (t == "rg" && long_pre(W[j], "pre")) return 1
-      if (t == "sort" && long_pre(W[j], "compress-program")) return 1
-      if (t == "wget") {
-        if (long_pre(W[j], "execute use-askpass config")) return 1
-        if (short_has(W[j], "e")) return 1
-      }
-    }
-    return 0
-  }
-  # long_pre(tok, names): tok is `--name` or `--name=val`; 1 when name is a
-  # nonempty prefix of a space-delimited entry in names. getopt_long and
-  # git parse-options accept any unambiguous prefix of an option, so a
-  # program option cannot be hidden by abbreviating it; every prefix a
-  # user could type is itself a prefix of the full option name, so this is
-  # complete. Over-matching a prefix a benign option also shares only
-  # over-denies (critic round 8).
-  function long_pre(tok, names,    nm, i, a, na) {
-    if (tok !~ /^--[^=]/) return 0
-    nm = tok; sub(/=.*/, "", nm); sub(/^--/, "", nm)
-    if (nm == "") return 0
-    na = split(names, a, " ")
-    for (i = 1; i <= na; i++) if (substr(a[i], 1, length(nm)) == nm) return 1
-    return 0
-  }
-  # short_has(tok, letters): tok is a `-xyz` short bundle; 1 when any char of
-  # letters is in the bundle (before `=`). A short flag that takes a value
-  # bundles it (`-euse_askpass=...`, `-Ocmd`), and other flags bundle too
-  # (`-qe`), so scanning the whole bundle is complete. A letter that is
-  # really the value of a preceding value-taking short only over-denies.
-  function short_has(tok, letters,    b, i, c) {
-    if (tok !~ /^-[^-]/) return 0
-    b = tok; sub(/=.*/, "", b); sub(/^-/, "", b)
-    for (i = 1; i <= length(b); i++) { c = substr(b, i, 1); if (index(letters, c)) return 1 }
-    return 0
-  }
-  # sed_runs(W, SB, n, k): the sed at word k may run a command: a script
-  # file (-f, --file), or a script word holding `e` where GNU sed reads a
-  # command or an s/// flag (after an address, a separator, a brace, a
-  # slash or another flag letter). Over-matches on purpose: a false exec
-  # only reads the script in full, as before DND-799.
-  function sed_runs(W, SB, n, k,    j, t) {
-    for (j = k + 1; j <= n && !SB[j]; j++) {
-      t = W[j]
-      if (t ~ /^(-[a-zA-Z]*f|--file)/) return 1
-      if (t ~ /^--expression=/) sub(/^--expression=/, "", t)
-      else if (t ~ /^-/) continue
-      if (t ~ /(^|[;{}\n0-9$\/!,[:space:]gpIiMmw])e/) return 1
-    }
-    return 0
   }
   # exec_text(W, SB, UX, n): 1 when the text may run a string it holds:
   # any command word safe_word() does not know (a runner, a script, a word
@@ -1005,11 +842,6 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
       if (!cp || is_assign(W[k])) continue
       t = W[k]; sub(/^.*\//, "", t)
-      if (t == "git") { if (!git_read(W, SB, n, k)) return 1; continue }
-      if (t == "sed" || t == "gsed") { if (sed_runs(W, SB, n, k)) return 1; continue }
-      if (prog_opt(t, W, SB, n, k)) return 1
-      if (t == "gh" || t == "glab") { if (!gh_read(W, SB, n, k)) return 1; continue }
-      if (t == "docker") { if (!docker_read(W, SB, n, k)) return 1; continue }
       if (!safe_word(t)) return 1
     }
     return 0
