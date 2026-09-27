@@ -791,11 +791,11 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (final, critic rounds 1-17, admiral batches 7-9):** `RESULT: 571
+- **After (final, critic rounds 1-18, admiral batches 7-9):** `RESULT: 574
   passed, 0 failed` / `VERDICT: PASS`. The per-round tables in this and the
   next few subsections are HISTORICAL, measured on the hook of the round
   they name; the authoritative final table is "Sabotage rows on the
-  option-A hook" below (571, on the round-17 hook).
+  option-A hook" below (574, on the round-18 hook).
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
@@ -929,8 +929,9 @@ hook; supersede every table above)
 
 Self-test `RESULT: 571 passed, 0 failed`. One mutant copy each. A-1..A-31
 were measured on 9e114a6 + the round-12 edits; A-32 on 110ea27; A-33 on the
-round-16 hook; A-34/A-35 on the round-17 hook. Rows whose mechanisms option
-A deleted (the old A-3/10/12-14/17-25) are retired with that code.
+round-16 hook; A-34/A-35 on the round-17 hook; A-36 on the round-18 hook.
+Rows whose mechanisms option A deleted (the old A-3/10/12-14/17-25) are
+retired with that code.
 
 | id | Mutation | Observed failure |
 |---|---|---|
@@ -955,6 +956,7 @@ A deleted (the old A-3/10/12-14/17-25) are retired with that code.
 | A-33 | `nohd` no longer set from the `${`/`$[` depth, so `<<` inside a parameter expansion is a heredoc (critic rounds 14, 16) | QX98, QX99, QX100 — `563 passed, 3 failed` |
 | A-34 | Depth counts ignore bracket type, so a `]` closes a `${` and a `}` closes a `$[` (critic round 17) | QX100, QX101, QX102, QX104 — `567 passed, 4 failed` |
 | A-35 | The `${`/`$[` depth is reset at each newline, so a `${` open across a line is missed (critic round 17) | QX103 — `570 passed, 1 failed` |
+| A-36 | The fail-safe on a substitution inside an open expansion is dropped, so a `}` inside `$(...)`/backticks closes the `${` (critic round 18) | QX105, QX106 — `572 passed, 2 failed` |
 
 - **Round 11, path-qualified word + stale text.** The critic found that
   `exec_text()` stripped a command word to its basename before the
@@ -1005,3 +1007,11 @@ A deleted (the old A-3/10/12-14/17-25) are retired with that code.
   open. QX101-QX104 add the shapes; QA80 confirms a genuinely-closed `${x}`
   on a prior line still allows a real data heredoc. Mutations A-34
   (type-blind close) and A-35 (per-line reset).
+- **Round 18, a substitution nested in an open expansion.** A `}` inside a
+  `$(...)` or backtick nested in an open `${...}` wrongly closed the `${`
+  (`echo ${x:-$(echo })<<'E' }`), because the counter counts every unquoted
+  `}`. Rather than track substitution nesting precisely (the walking tail of
+  rounds 14-17), the fix fails safe: once a `$(` or backtick opens while an
+  expansion is open (bo>bc or ao>ac), a per-line flag (pxs) forces nohd, so
+  `<<` reads as a command line. QX105/QX106; QA81 confirms a substitution
+  OUTSIDE any expansion does not trip it. Mutation A-36.

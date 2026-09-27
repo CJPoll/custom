@@ -1014,6 +1014,21 @@ jq -c '.[]' <<'E'
 {}
 E"
 
+# QX105-106: critic round 18. A `}` inside a `$(...)` or backtick nested in
+# an open ${...} does not close it; the counter fails safe (reads the line
+# as a command) once a substitution opens inside an expansion.
+case_cmd "QX105. a } inside \$(...) nested in \${x:- ...}" deny "echo \${x:-\$(echo })<<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX106. a } inside backticks nested in \${x:- ...}" deny "echo \${x:-\`echo }\`<<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+# A substitution OUTSIDE any expansion does not trip the fail-safe: a real
+# data heredoc after it still parses.
+case_cmd "QA81. \$(date) then a real data heredoc stays allowed" allow "d=\$(date) && jq -c '.[]' <<'E'
+{}
+E"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"
