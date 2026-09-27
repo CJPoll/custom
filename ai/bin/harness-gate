@@ -1236,10 +1236,23 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
   moved = landed_moved_note(CUSTOM_DIR, pin_env)
   puts moved if moved
 
-  return report_gate_ok(CHECKS.size) if failures.empty?
+  report_check_results(failures, CHECKS.size)
+end
+
+# The tail of a real (non-dry-run) run_gate invocation: report OK/FAILED for
+# whatever CHECKS just ran, plus the full per-check failure detail. Extracted
+# out of run_gate (DND-896, coordinator-train critic t32) so self-test can
+# DRIVE THIS EXACT CODE with a fabricated `failures` list — not just the
+# gate_attribution/report_gate_ok/report_gate_failed_header pieces in
+# isolation — without paying for a real 96-check run_checks(CHECKS)
+# execution. There is nothing left in run_gate's own body, between
+# run_checks and its return, for a regression to hide in: run_gate's only
+# remaining job is to call this with the real failures/count.
+def report_check_results(failures, total, root: CUSTOM_DIR)
+  return report_gate_ok(total, root: root) if failures.empty?
 
   warn ""
-  report_gate_failed_header(failures.size, CHECKS.size)
+  report_gate_failed_header(failures.size, total, root: root)
   failures.each do |(label, argv, out)|
     warn ""
     warn "--- #{label} (#{argv.join(' ')}) ---"
@@ -1431,7 +1444,7 @@ def run_self_test
       !probe_status.success?
     end
   unless fixtures_isolated
-    warn "self-test: NOTE — skipping cases 5/6/6b/6c: Dir.mktmpdir resolves " \
+    warn "self-test: NOTE — skipping cases 5/6/6b/6c/7c/7d: Dir.mktmpdir resolves " \
          "inside a git worktree in this environment (check $TMPDIR), so the " \
          "tracked-file filter would treat every fixture there as a real repo " \
          "and produce false reds unrelated to this code. Not counted as a " \
@@ -1951,6 +1964,14 @@ def run_self_test
     ok = false
   end
 
+  # 7c/7d fixtures below plant a NON-repo dir (not_a_repo) and rely on it
+  # staying a non-repo — same false-red exposure as cases 5/6/6b/6c above if
+  # $TMPDIR resolves inside a real git worktree (a plausible CI/agent/sandbox
+  # setup: an ambient repo would make git_tree_identity(not_a_repo) resolve
+  # to THAT enclosing repo instead of failing to resolve at all). Gated the
+  # same way, for the same reason.
+  if fixtures_isolated
+
   # THE MISS CASE: a root that resolves to no git tree at all must raise, not
   # silently produce a blank or wrong attribution — a wrongly computed root
   # must be impossible to pass off as a real one.
@@ -1968,12 +1989,7 @@ def run_self_test
     # run_gate's summary with a bare backtrace, and must not swallow the
     # per-check failure report either — report_gate_ok/report_gate_failed_header
     # degrade to a loud FAILED line with a Fix: instead, and never raise past
-    # the caller. Fail-first evidence (round 2, critic requested the real
-    # backtrace, not "would"): with report_gate_ok/report_gate_failed_header
-    # temporarily removed and these same assertions in place, self-test
-    # crashed with `undefined method 'report_gate_ok' for main:Object
-    # (NoMethodError)` at this line — the exact bare-backtrace failure mode
-    # this fix exists to close. Restored, self-test passes.
+    # the caller.
     code, out, err = capture.call { report_gate_ok(3, root: not_a_repo) }
     if code != 1
       warn "self-test: FAIL — report_gate_ok with an unattributable root " \
@@ -1996,6 +2012,54 @@ def run_self_test
       warn "self-test: FAIL — report_gate_failed_header's attribution-failure " \
            "path lost the per-check-count header or its Fix: line (stderr: " \
            "#{err2.inspect})"
+      ok = false
+    end
+
+    # 7d (coordinator-train critic t32, DND-896): the two assertions above
+    # test report_gate_ok/report_gate_failed_header in ISOLATION, so they
+    # cannot notice if run_gate's own call sites regressed back to the raw,
+    # unrescued gate_ok_message/gate_failed_header builders — nothing here
+    # ever calls the code run_gate itself calls. Drive report_check_results
+    # instead: it is the EXACT function run_gate's body delegates its
+    # entire tail to (see run_gate: `report_check_results(failures,
+    # CHECKS.size)` is the last line, with nothing else between run_checks
+    # and it for a regression to hide in), fed a FABRICATED failures list so
+    # this stays fast instead of paying for a real 96-check run_checks(CHECKS).
+    #
+    # Fail-first evidence: with report_gate_ok/report_gate_failed_header
+    # temporarily removed (reverting to the de06bcc~1 form) and these
+    # report_check_results assertions already in place, self-test crashed
+    # with `undefined method 'report_gate_ok' for main:Object (NoMethodError)`
+    # raised from inside report_check_results's own call to report_gate_ok —
+    # proving this test path actually reaches run_gate's real tail, not a
+    # copy of it. Restored, self-test passes.
+    fake_failures = [["fixture-check", %w[fixture-check --self-test], "boom\nFAIL: bad\nok\n"]]
+
+    code3, out3, err3 = capture.call { report_check_results([], 3, root: not_a_repo) }
+    if code3 != 1
+      warn "self-test: FAIL — report_check_results([], 3, root: <unattributable>) " \
+           "returned #{code3.inspect}, expected 1 (fail closed)"
+      ok = false
+    end
+    unless out3.empty? && err3.include?("FAILED") && err3.include?("Fix:")
+      warn "self-test: FAIL — report_check_results([], ...)'s attribution-failure " \
+           "path did not degrade cleanly (stdout #{out3.inspect}, stderr #{err3.inspect})"
+      ok = false
+    end
+
+    _code4, out4, err4 = capture.call { report_check_results(fake_failures, 5, root: not_a_repo) }
+    unless out4.empty?
+      warn "self-test: FAIL — report_check_results(<failures>, ...) printed to " \
+           "stdout instead of stderr: #{out4.inspect}"
+      ok = false
+    end
+    unless err4.include?("1 of 5 check(s) did not pass") && err4.include?("Fix:") &&
+           err4.include?("--- fixture-check (fixture-check --self-test) ---") &&
+           err4.include?("boom")
+      warn "self-test: FAIL — report_check_results(<failures>, ...) lost the " \
+           "per-check failure detail (label, argv, or output) when attribution " \
+           "ALSO failed — the exact regression this test exists to catch " \
+           "(stderr: #{err4.inspect})"
       ok = false
     end
   end
@@ -2027,6 +2091,26 @@ def run_self_test
            "dirty: #{dirty_attr.inspect}"
       ok = false
     end
+  end
+
+  end # fixtures_isolated (7c/7d)
+
+  # 7e (coordinator-train critic t32, DND-896). Static composition check:
+  # run_gate's OWN source must delegate its tail to report_check_results —
+  # the wiring itself, not just report_check_results/report_gate_ok/
+  # report_gate_failed_header in isolation (case 7d proves those; this proves
+  # run_gate actually CALLS them). A regression that reverted run_gate to
+  # call the raw gate_ok_message/gate_failed_header builders directly again
+  # (skipping the safe path entirely) would leave every case-7c/7d assertion
+  # green, since none of them ever invoke run_gate itself — this is the same
+  # non-tautological-composition need as case 7's `CHECKS = STATIC_CHECKS +
+  # self_test_checks` check, applied to run_gate's tail instead of CHECKS.
+  run_gate_source = File.read(__FILE__)[/^def run_gate\b.*?^end$/m]
+  unless run_gate_source && run_gate_source.include?("report_check_results(failures, CHECKS.size)")
+    warn "self-test: FAIL — run_gate no longer delegates its tail to " \
+         "report_check_results(failures, CHECKS.size); the safe OK/FAILED " \
+         "reporting (case 7d) could be bypassed with no test noticing"
+    ok = false
   end
 
   # 8. run_one reports PASS/FAIL correctly and closes stdin.
