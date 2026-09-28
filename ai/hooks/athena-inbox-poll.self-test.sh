@@ -165,6 +165,78 @@ assert_file()         { if [ -e "$2" ]; then ok "$1"; else bad "$1" "no such fil
 assert_no_file()      { if [ -e "$2" ]; then bad "$1" "file exists: $2"; else ok "$1"; fi; }
 
 # ---------------------------------------------------------------------------
+# DND-944: the retired "client config" producer-registration advice must not
+# come back. DND-923 replaced it with "run inbox-doctor: it asks the server",
+# but DND-923's own sweep missed this hook (found by DND-942) -- this file's
+# Fix: clauses told the reader to "map this inbox filename to a server-side
+# agent instance in ~/.config/athena-inbox-client/config.json", advice that was
+# never true (the client needs no config mapping) and is now also wrong about
+# the mechanism (the doctor asks the server, not a config file). DND-944's own
+# round-1 fix of this guard missed a THIRD copy in the contract
+# (athena-inbox.md:328-331), because it wraps across lines as Markdown prose
+# ("...mapped to that filename in the client's own\n`~/.config/...`") and a
+# one-line regex never sees the two halves together -- so every file's
+# whitespace is collapsed to single spaces before matching, and the pattern is
+# the general shape ("map"/"mapped" ... the client-config path), not one exact
+# sentence, so a fourth rephrasing of the same retired claim still trips it.
+# Discovery is via `git ls-files`, per DND-218: a filesystem walk over this
+# checkout would also count untracked third-party trees (node_modules,
+# vendor/bundle) that are not first-party text to sweep.
+DND944_LABEL="DND-944: retired 'map ... config.json' producer advice is gone from every first-party file"
+DND944_RE='\bmap(ped)?\b.{0,200}athena-inbox-client/config\.json'
+if ! command -v git >/dev/null 2>&1; then
+  bad "${DND944_LABEL}" \
+    "git is not on PATH, so first-party files could not be discovered -- this check cannot evaluate and must not print ok"
+else
+  # Get the tracked file list and ITS OWN exit status as a separate step --
+  # "could not obtain the file list" (git failed, e.g. REPO_DIR is not a git
+  # checkout) and "obtained an empty/clean list" must not read alike, or a
+  # failed `git ls-files` silently reports "found nothing" (the failed-lookup
+  # class this guard exists to catch, turned on itself). The NUL-separated
+  # list is written to a file, never captured into a shell variable -- bash
+  # strings cannot hold an embedded NUL, so a `$(git ls-files -z)` capture
+  # silently truncates at the first filename.
+  DND944_LIST="${TMP}/dnd944-tracked-files"
+  (cd "${REPO_DIR}" && git ls-files -z > "${DND944_LIST}" 2>/dev/null)
+  DND944_LS_RC=$?
+  if [ "${DND944_LS_RC}" -ne 0 ] || [ ! -s "${DND944_LIST}" ]; then
+    bad "${DND944_LABEL}" \
+      "could not look: 'git -C ${REPO_DIR} ls-files' exited ${DND944_LS_RC} and produced $( [ -s "${DND944_LIST}" ] && echo "output" || echo "no output" ) -- this is not evidence the phrase is absent, only that the tracked-file list could not be obtained"
+  else
+    RETIRED_HITS=""
+    while IFS= read -r -d '' DND944_F; do
+      [ -f "${REPO_DIR}/${DND944_F}" ] || continue
+      # This guard's OWN file necessarily quotes the retired phrase in its
+      # explanatory comments (this block, and the commit message that
+      # introduced it) -- that quoting is not advice a reader would follow,
+      # unlike a doc or a Fix: string. This file's actual runtime behavior
+      # (the WARN_TEXT it produces) is guarded directly by the R13 and
+      # both-dark assertions above, which require "inbox-doctor" by name.
+      case "${DND944_F}" in
+        ai/hooks/athena-inbox-poll.self-test.sh) continue ;;
+      esac
+      DND944_COLLAPSED="$(tr '\n\t\r' '   ' < "${REPO_DIR}/${DND944_F}" 2>/dev/null)"
+      if grep -aqE "${DND944_RE}" <<<"${DND944_COLLAPSED}"; then
+        RETIRED_HITS="${RETIRED_HITS}${DND944_F}
+"
+      fi
+    done < "${DND944_LIST}"
+    if [ -z "${RETIRED_HITS}" ]; then
+      ok "${DND944_LABEL}"
+    else
+      bad "${DND944_LABEL}" \
+"still present in: $(printf '%s' "${RETIRED_HITS}" | tr '\n' ' ')
+        DND-923 corrected inbox-status, read-inbox and lib/inbox.sh's Fix: clauses to
+        point at inbox-doctor / the server, but its own sweep missed at least one other
+        restatement (the amendment-sweep class, ~/dev/custom/CLAUDE.md -> Documentation
+        conventions). Fix: replace the listed file's wording with the corrected advice
+        (run inbox-doctor; it asks the server whether a matching agent instance exists),
+        the way ai/hooks/athena-inbox-poll.sh's WARN_TEXT does."
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Per-case isolation.
 # ---------------------------------------------------------------------------
 CASE_N=0
@@ -214,8 +286,8 @@ LOG_CHANNEL='{"slack":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id",
 # state-change schema. It carries NO dedupe key (keyless change stream), so it
 # declares none. Never delivered to (no p-lane.jsonl planted), it is a real
 # never-delivered fault whose Fix must point at an athena-events routing rule,
-# NOT at the slack client-side registration -- the misdirection DND-260 exists
-# to prevent.
+# NOT at the slack server-side agent-instance registration (asked via
+# inbox-doctor) -- the misdirection DND-260 exists to prevent.
 PLATFORM_CHANNEL='{"lane":{"kind":"log","path":"p-lane.jsonl","producer":"platform","schema_v":[1]}}'
 # Both kinds dark at once: a slack channel AND a platform lane, neither ever
 # delivered to. NEVER_SLACK>0 AND NEVER_PLATFORM>0, so the hook cannot know
@@ -835,14 +907,22 @@ assert_contains "R13 the control: a never-delivered LOG channel is still a fault
 # so the fold-in gate lets the producer-registration Fix through here.
 assert_contains "R13 a never-delivered slack LOG channel DOES prescribe producer registration (fold-in control)" \
   "server-side agent instance" "$(context_of "${OUT}")"
+# DND-944 tightening: "server-side agent instance" alone is also true of the
+# retired wording (it named the same instance, just via a client-config
+# mapping). Assert the corrected MECHANISM by name, so a regression back to
+# any other wrong producer-registration advice that kept that phrase still
+# fails this suite.
+assert_contains "R13 the Fix names inbox-doctor as the corrected mechanism (DND-923/DND-944)" \
+  "inbox-doctor" "$(context_of "${OUT}")"
 
 echo "== DND-260: a dark PLATFORM lane points at athena-events, never at the slack path =="
 
 # The whole reason DND-260 splits NEVER_PLATFORM from NEVER_SLACK: a never-
 # delivered PLATFORM lane needs an athena-events routing rule, while a slack
-# channel needs a client-side instance in the inbox-client config. Pointing a
-# platform-lane operator at the slack file is the exact misdirection the split
-# exists to prevent -- and until this case existed, `grep -n platform` in this
+# channel needs a server-side agent instance whose inbox_name is this file
+# (DND-923: asked with inbox-doctor, never a client-side config mapping).
+# Pointing a platform-lane operator at the slack path is the exact misdirection
+# the split exists to prevent -- and until this case existed, `grep -n platform` in this
 # suite returned ZERO hits, so the platform branch (NEVER_PLATFORM>0 &&
 # NEVER_SLACK==0) was structurally 0 in every fixture and nothing proved it.
 #
@@ -860,10 +940,10 @@ assert_contains "DND-260 the Fix names the athena-events routing rule for a plat
 assert_contains "DND-260 ...and points at the athena-events contract" \
   "ai/contracts/athena-events.md" "${CTX}"
 # THE MISDIRECTION GUARD. If the hook selected the SLACK Fix for a dark platform
-# lane, "server-side agent instance in ~/.config/athena-inbox-client" would
-# appear -- the operator sent to the wrong file. This assertion is what makes
+# lane, "server-side agent instance" would appear -- the operator sent to
+# inbox-doctor for the wrong channel kind. This assertion is what makes
 # the test fail on the exact bug the NEVER_PLATFORM/NEVER_SLACK split prevents.
-assert_not_contains "DND-260 a dark platform lane does NOT prescribe the slack client-side registration" \
+assert_not_contains "DND-260 a dark platform lane does NOT prescribe the slack agent-instance registration" \
   "server-side agent instance" "${CTX}"
 
 # BOTH KINDS DARK (NEVER_PLATFORM>0 && NEVER_SLACK>0). This is the third
@@ -878,8 +958,10 @@ register "${BOTH_DARK_CHANNELS}"
 run_hook
 CTX="$(context_of "${OUT}")"
 assert_contains "DND-260 both-dark is a fault" "never received anything" "${CTX}"
-assert_contains "DND-260 both-dark names the slack client-side registration path" \
+assert_contains "DND-260 both-dark names the slack agent-instance registration path" \
   "server-side agent instance" "${CTX}"
+assert_contains "DND-260 both-dark names inbox-doctor as the corrected mechanism (DND-944)" \
+  "inbox-doctor" "${CTX}"
 assert_contains "DND-260 both-dark ALSO names the athena-events routing rule path" \
   "athena-events routing rule" "${CTX}"
 assert_contains "DND-260 both-dark points at inbox-status to say which channel is which" \

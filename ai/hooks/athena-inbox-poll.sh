@@ -488,7 +488,8 @@ if [ "${POLL_OK}" -eq 1 ]; then
   # Which PRODUCER kinds are among the never-delivered channels. This hook is
   # counts-only for tenant privacy, so it cannot name the channel -- but the
   # registration a reader must do differs by producer (a platform lane wants an
-  # athena-events routing rule; a slack channel wants a client-side instance),
+  # athena-events routing rule; a slack channel wants a server-side agent
+  # instance, asked for via inbox-doctor, never a client-side config mapping),
   # and a Fix that names only the slack path sends a platform-lane operator to
   # the wrong file. It cannot say WHICH channel, so when both kinds are dark it
   # names BOTH paths rather than guessing one. `.producer` rides the count doc
@@ -558,9 +559,9 @@ elif [ "${OPTED_IN}" -eq 1 ] && [ -n "${HEALTH_TEXT}" ]; then
     if [ "${NEVER_PLATFORM}" -gt 0 ] && [ "${NEVER_SLACK}" -eq 0 ]; then
       WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a platform lane nothing has ever been delivered to usually means no server-side producer is registered — add an athena-events routing rule that writes state-change events to its inbox file (see ai/contracts/athena-events.md). Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel."
     elif [ "${NEVER_PLATFORM}" -gt 0 ]; then
-      WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — for a slack channel, map this inbox filename to a server-side agent instance in ~/.config/athena-inbox-client/config.json; for a platform lane, add an athena-events routing rule (see ai/contracts/athena-events.md). Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel is which."
+      WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — for a slack channel, run inbox-doctor: it asks the server whether this machine has a server-side agent instance whose inbox_name is this file (an unregistered producer needs the owner to create one; a claim-only channel stays empty until a claimed thread gets a reply); for a platform lane, add an athena-events routing rule (see ai/contracts/athena-events.md). Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel is which."
     elif [ "${NEVER_SLACK}" -gt 0 ]; then
-      WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — map this inbox filename to a server-side agent instance in ~/.config/athena-inbox-client/config.json. Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel."
+      WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — run inbox-doctor: it asks the server whether this machine has a server-side agent instance whose inbox_name is this file (an unregistered producer needs the owner to create one; a claim-only channel stays empty until a claimed thread gets a reply). Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel."
     else
       # HEALTH_TEXT is a NON-never-delivered clause (a channel that could not be
       # counted, or an unreadable state file). Point at the per-channel detail;

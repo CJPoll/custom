@@ -1499,8 +1499,9 @@ inbox_doorbells() {
           printf 'athena:inbox: %s is declared, but nothing has EVER been delivered to it — arming anyway.\n' "${chan}" >&2
           # Name the RIGHT producer to register for this lane kind: a platform
           # lane wants an athena-events routing rule, a slack channel a
-          # client-side instance. `entry` is validated above, so the marker is
-          # read from it rather than guessed.
+          # server-side agent instance (asked for via inbox-doctor, never a
+          # client-side config mapping). `entry` is validated above, so the
+          # marker is read from it rather than guessed.
           local _wprod
           _wprod="$(printf '%s' "${entry}" | jq -r --arg c "${chan}" \
             '(.channels[$c].producer // "slack")')"
