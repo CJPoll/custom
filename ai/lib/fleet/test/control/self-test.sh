@@ -160,6 +160,9 @@ eq "a span ending in the spring-forward gap (02:30 MT, 2026-03-08) ends when the
 eq "a span ending in the fall-back hour (01:30 MT, 2026-11-01) ends at its first pass: 01:30 MDT" \
   "$(dec "$(wins '[{"days":[7],"start":"00:30","end":"01:30"}]')" "$(date -u -d '2026-11-01 06:45' +%s)")" \
   "drain|metering:personal|2026-11-01T07:30:00Z"
+eq "a span ending in the fall-back hour, with now in the SECOND pass (01:15 MST, 08:15Z) of that same window, ends at the second pass: 01:30 MST" \
+  "$(dec "$(wins '[{"days":[7],"start":"00:30","end":"01:30"}]')" "$(date -u -d '2026-11-01 08:15' +%s)")" \
+  "drain|metering:personal|2026-11-01T08:30:00Z"
 eq "blind local rule, personal: drain" "$(fleet_local_rule_blind gen_saas | tr '\t' '|')" "drain|metering:personal|"
 eq "blind local rule, blend: run" "$(fleet_local_rule_blind custom | tr '\t' '|')" "run|default|"
 
