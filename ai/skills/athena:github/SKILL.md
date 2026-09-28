@@ -34,7 +34,7 @@ git remote get-url origin
 | | Acts as | Use it for |
 |---|---|---|
 | **plain `gh`** (Cody's OAuth) | Cody Poll | **reads** — `pr view`, `pr checks`, `run view`, `api` GETs |
-| **`gh-athena` wrapper** (the `athena-harness` GitHub App, shows as `athena-harness[bot]`) | the Athena bot | **writes** — PR create, comment, review replies, thread resolves, label edits, re-runs, merges, authenticated pushes |
+| **`gh-athena` wrapper** (the `athena-harness` GitHub App, shows as `athena-harness[bot]`) | the Athena bot | **writes** — PR create, comment, review replies, thread resolves, label edits, CI re-triggers (close + reopen; see *Expected refusals*), merges, authenticated pushes |
 
 Writing through plain `gh` puts **Cody's name** on actions Athena took. That is
 the one thing the wrapper exists to prevent, so: **every GitHub write that
@@ -346,8 +346,14 @@ each is recorded with the response it actually returns.
 
 | You run | You get | What it means | What to do instead |
 |---|---|---|---|
-| `gh-athena run rerun <id>` (`--failed` too) | `Resource not accessible by integration` | The Athena App has no `actions:write`. Permanent; no token refresh or `forge-preflight` clears it. | Trigger a **fresh run with a branch push** (see *Pushing as Athena*) — Athena's own path, and it re-runs against current code rather than replaying a stale SHA. A literal re-run of that same run needs the **owner's** `gh` (plain, not `gh-athena`), which makes it an owner step to surface, not a retry to attempt. |
+| `gh-athena run rerun <id>` (`--failed` too) | `Resource not accessible by integration` | The Athena App has no `actions:write`. Permanent; no token refresh or `forge-preflight` clears it. | Diagnose first (athena:diagnose-github-actions-failure; a test flake goes to athena:flaky-ticket, never a re-trigger). For an **infra** failure on unchanged code, re-trigger on the **same SHA**: `gh-athena pr close <n>` then `gh-athena pr reopen <n>`. A workflow `on: pull_request` with no `types:` filter runs on `reopened`, so the head, the critic verdict and the `integration-gate` receipt all stay valid. Check the workflow's `on:` first; with a `types:` filter that omits `reopened`, nothing runs. Push a new commit (*Pushing as Athena*) only when the code must change: a new SHA re-gates. A literal re-run of the old run needs the **owner's** plain `gh`: an owner step to surface, not a retry. |
 | `gh api repos/<owner>/<repo>/branches/<b>/protection` | HTTP 403 `Upgrade to GitHub Pro` | This repo is on a **free private** plan, where branch protection does not exist. | Treat the merge bar as entirely your own — see below. |
+
+**Later (2026-09-28):** the rerun row said to trigger "a fresh run with a
+branch push". Superseded: a push needs a new commit, so a new SHA and a re-gate.
+Measured 2026-09-28: run 36399144420 is a `pull_request` run on f5c9f2ca, the
+same head as failed run 36395215259, fired by close + reopen. Captains who did
+not know it left Test red on infra (DND-100, DND-101, DND-302).
 
 **The second one is why `--auto` is refused here.** With no protection, the
 required set is **empty**: there is nothing for `--auto` to wait on, and a **red
