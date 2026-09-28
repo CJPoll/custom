@@ -1113,6 +1113,11 @@ NOBIN2="${CASE_DIR}/nobin2"; mkdir -p "${NOBIN2}"
 for b in bash dirname date mkdir wc tail mv rm stat sed grep cat timeout jq cut git realpath awk; do
   src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOBIN2}/${b}"
 done
+# The REAL git, never the agent PATH wrapper: linked alone here it has no git to
+# reach and exits 127, which fails the key for the wrong reason (DND-1103).
+. "${REPO_DIR}/ai/lib/agent-free-git.sh"
+REAL_GIT="$(agent_free_git)" || exit 1
+ln -sf "${REAL_GIT}" "${NOBIN2}/git"
 OLD_PATH="${PATH}"
 PATH="${NOBIN2}" run_hook
 PATH="${OLD_PATH}"
@@ -1147,6 +1152,7 @@ NOCUT="${CASE_DIR}/nocut"; mkdir -p "${NOCUT}"
 for b in bash dirname date mkdir wc tail mv rm stat sed grep cat timeout jq git realpath awk sha256sum; do
   src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOCUT}/${b}"
 done
+ln -sf "${REAL_GIT}" "${NOCUT}/git"   # the real git, not the agent wrapper (DND-1103)
 OLD_PATH="${PATH}"
 PATH="${NOCUT}" run_hook
 PATH="${OLD_PATH}"

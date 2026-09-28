@@ -260,6 +260,15 @@ else
       ok "FT7. ${s} ahead of the wrapper: a refused form is still refused"
     else bad "FT7. ${s} ahead of the wrapper still refuses" "rc=${rc} out=$(printf '%s' "${out}" | head -c 200)"; fi
   done
+  # ai/lib/agent-free-git.sh, the fixtures' way to the real git (DND-1103):
+  # it skips the wrapper, and a PATH holding only the wrapper is a named miss.
+  out="$(PATH="${WBIN}:${GDIR}" bash -c '. "$1"; agent_free_git' _ "${ROOT}/ai/lib/agent-free-git.sh" 2>&1)"; rc=$?
+  if [ "${rc}" -eq 0 ] && [ "${out}" = "${GDIR}/git" ]; then ok "FT8. agent_free_git skips the wrapper and names the git after it"
+  else bad "FT8. agent_free_git skips the wrapper" "rc=${rc} out=${out}"; fi
+  out="$(PATH="${WBIN}" "${BASH}" -c '. "$1"; agent_free_git' _ "${ROOT}/ai/lib/agent-free-git.sh" 2>&1)"; rc=$?
+  if [ "${rc}" -eq 1 ] && [[ "${out}" == *"no git on PATH besides the agent wrapper"*"Fix:"* ]]; then
+    ok "FT9. agent_free_git with only the wrapper on PATH: exit 1 with a Fix:, never the wrapper's path"
+  else bad "FT9. agent_free_git names the miss" "rc=${rc} out=${out}"; fi
 fi
 
 echo "--- false-positive corpus: non-git commands never reach git (DND-799/800/786) ---"

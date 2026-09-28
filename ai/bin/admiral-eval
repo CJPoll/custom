@@ -541,7 +541,10 @@ def build_sandbox(dir)
   # git: forward reads to the real git, but BLOCK `push` (the one git mutation
   # that could escape the sandbox). Scans only the first positional token so a
   # commit message containing "push" is not blocked.
-  real_git = which("git") || "/usr/bin/git"
+  # The REAL git, never the agent PATH wrapper (DND-1103): this shim sits ahead
+  # of the wrapper on PATH, so exec'ing the wrapper hands it a PATH whose first
+  # "other" git is this shim again.
+  real_git = which("git", skip_marked: AGENT_GIT_WRAPPER_MARK) || "/usr/bin/git"
   gitpath = File.join(bin, "git")
   # NOTE: do NOT `shift` here — `for a in "$@"` iterates a snapshot, but `shift`
   # mutates "$@", so the trailing `exec real_git "$@"` would forward corrupted
@@ -569,12 +572,26 @@ def build_sandbox(dir)
   bin
 end
 
-def which(cmd)
+# The text that marks the agent PATH git wrapper (ai/agent-bin/git, DND-775).
+AGENT_GIT_WRAPPER_MARK = "git (agent wrapper)"
+
+# The first executable `cmd` on PATH. With skip_marked, a file whose first 4 KiB
+# carry that text is passed over (used to skip the agent git wrapper).
+def which(cmd, skip_marked: nil)
   ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |d|
     p = File.join(d, cmd)
-    return p if File.executable?(p) && !File.directory?(p)
+    next unless File.executable?(p) && !File.directory?(p)
+    next if skip_marked && marked?(p, skip_marked)
+
+    return p
   end
   nil
+end
+
+def marked?(path, mark)
+  File.read(path, 4096).to_s.include?(mark)
+rescue SystemCallError
+  false
 end
 
 # The env the model child runs under: the stub bin prepended to PATH. HOME is

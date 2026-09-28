@@ -232,6 +232,11 @@ mkdir -p "${TMP}/bin"
 for c in bash jq git realpath dirname date mktemp cat grep tr sed stat timeout flock mkdir chmod mv rm head cut awk env printf; do
   p="$(command -v "${c}" 2>/dev/null)" && [ -n "${p}" ] && [ "${p#/}" != "${p}" ] && ln -sf "${p}" "${TMP}/bin/${c}"
 done
+# The REAL git, never the agent PATH wrapper, which has no git to reach on a
+# PATH of links (DND-1103).
+. "${HERE}/../lib/agent-free-git.sh"
+REAL_GIT="$(agent_free_git)" || exit 1
+ln -sf "${REAL_GIT}" "${TMP}/bin/git"
 OUT="$(printf '%s' "$(stdin athena-captain)" | PATH="${TMP}/bin" "${HOOK}" 2>/dev/null)"; RC=$?
 eq "fleet-control error (exit 1): deny" "${RC}:$(decision)" "0:deny"
 has "... names the exit" "$(reason)" "exit 1"

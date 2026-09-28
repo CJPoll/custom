@@ -28,6 +28,7 @@ ai/git-hooks/agent-stash-guard.sh	guard
 ai/agent-bin/git	guard
 
 # --- Sourced libraries. guard = the library holds refusal text that must keep its Fix:.
+ai/lib/agent-free-git.sh	guard	
 ai/lib/agent_stash_env.rb	guard	
 ai/inbox/lib/registry.rb	guard	
 ai/lib/fleet/control-domain.sh	guard	

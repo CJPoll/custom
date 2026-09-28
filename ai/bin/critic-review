@@ -2307,10 +2307,16 @@ def run_carry_self_test
   end
 
   # M18 the source commit is gone from the object store.
-  fixture.call do |_f1, _f2, _root|
+  # F1 is held only by ORIG_HEAD and the reflogs of HEAD, feat and main (the
+  # fixture's only refs), so those are expired BY NAME. Never `--all`: the agent
+  # git wrapper refuses `reflog expire --all` (DND-775 rule D2) and this suite
+  # must pass with it first on PATH (DND-1103).
+  fixture.call do |f1, _f2, _root|
     git.call("update-ref", "-d", "ORIG_HEAD")
-    git.call("reflog", "expire", "--expire=now", "--all")
+    git.call("reflog", "expire", "--expire=now", "HEAD", "refs/heads/feat", "refs/heads/main")
     git.call("gc", "-q", "--prune=now")
+    check.call("M18 fixture: the source commit is gone before the run",
+               !Open3.capture3("git", "cat-file", "-e", "#{f1}^{commit}")[2].success?)
     rc, _o, err = go.call(["--base", "main"], block_out)
     check.call("M18 pruned source: judge ran, source commit missing", rc == 2 && err.include?("source commit missing"))
   end

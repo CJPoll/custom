@@ -63,6 +63,8 @@ trap cleanup EXIT INT TERM
 export ATHENA_INBOX_ROOT="${TMP}/inbox-root"
 unset CLAUDE_AGENT_ID CLAUDE_AGENT_TYPE
 REPO_ROOT="$(cd -- "${SCRIPTS}/.." && pwd -P)"
+# agent_free_git: the git-stub fixtures below delegate to the REAL git (DND-1103).
+. "${REPO_ROOT}/ai/lib/agent-free-git.sh"
 INBOX_REGISTRY="${REPO_ROOT}/ai/inbox/registry.json"
 install_inbox_registry() { # <root>
   local common
@@ -549,7 +551,7 @@ done
 exec git.real "$@"
 EOS
   chmod +x "$1/git"
-  ln -sf "$(command -v git)" "$1/git.real"
+  ln -sf "$(agent_free_git)" "$1/git.real"   # the real git, not the agent wrapper (DND-1103)
 }
 
 r="$(new_repo)"; sdir="$(dirname "$r")/gitstub"
@@ -590,7 +592,7 @@ done
 exec git.real "$@"
 EOS
   chmod +x "$1/git"
-  ln -sf "$(command -v git)" "$1/git.real"
+  ln -sf "$(agent_free_git)" "$1/git.real"   # the real git, not the agent wrapper (DND-1103)
 }
 
 r="$(new_repo)"; sdir="$(dirname "$r")/gitstub2"
