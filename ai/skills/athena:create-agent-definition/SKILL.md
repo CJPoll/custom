@@ -20,7 +20,7 @@ anyway, to avoid confusion.
 
 This is the whole reason this skill is separate from [[athena:create-skill]].
 
-**Skills** namespace with a colon (`athena:standup`). **Agents cannot** — the
+**Skills** namespace with a colon (`athena:slack`). **Agents cannot** — the
 colon is reserved as the plugin namespace separator (`plugin:agent`) and is
 forbidden in the `name:` field. The published validation regex for agent names
 is:
@@ -45,7 +45,7 @@ hyphens.**
 
 Because `:` is illegal, the Athena harness prefix for **agents** is
 **`athena-`** (hyphen), the parallel of the skills' `athena:`. So the same
-identity that gives a skill `athena:standup` gives an agent `athena-admiral`.
+identity that gives a skill `athena:slack` gives an agent `athena-admiral`.
 
 ### Default and alternatives
 

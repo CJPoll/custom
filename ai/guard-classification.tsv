@@ -127,7 +127,6 @@ ai/skills/athena:slack/bin/status	tool	Slack Web API action wrapper; fails only 
 ai/skills/athena:slack/bin/update	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/upload	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/whoami	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
-ai/skills/athena:standup/scripts/standup-window.sh	tool	computes the standup time window; fails only on an unknown argument
 ai/skills/athena:ticket-management/scripts/finding-triage	guard	
 ai/skills/athena:ticket-management/scripts/ticket-classify	guard	
 

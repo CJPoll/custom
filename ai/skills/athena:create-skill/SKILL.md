@@ -13,7 +13,7 @@ directory there registers automatically (no per-skill linking needed).
 ## Naming: the harness prefix
 
 Skill names are namespaced with a **harness/application prefix** followed by a
-colon, e.g. `athena:standup`, `athena:ticket-management`. The colon is the
+colon, e.g. `athena:slack`, `athena:ticket-management`. The colon is the
 skill namespace delimiter (Claude Code allows `:` in skill names; note that
 **agent** names cannot use it — see [[athena:create-agent-definition]]).
 
@@ -104,7 +104,7 @@ doubt, consult the **[[athena:harness-placement]]** skill before scaffolding.
 
 ## Conventions to match
 
-- Follow the tone and structure of existing skills (`athena:standup`,
+- Follow the tone and structure of existing skills (`athena:slack`,
   `athena:ticket-management`) — imperative instructions, short sections,
   concrete examples over abstract description.
 - Prefer one dense `SKILL.md` over sprawling files; split into supporting files
