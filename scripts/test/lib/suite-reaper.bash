@@ -122,11 +122,12 @@ suite_tagged_pids() {
   suite_env_pids tag "${ATHENA_SUITE_REAPER_TAG}"
 }
 
-# A scan that could not run found nothing because it did not look: that is a
-# failure to reap, never "none left".
+# A scan that could not look is a failure to reap, never "none left". It may
+# have looked at everything but a few pids (status 4): the matches it did
+# confirm are still killed, and the reap still fails.
 _suite_reap_scan_failed() {
-  echo "suite-reaper: FAILED -- the process scan could not run (its reason is above), so whether anything outlived this suite is unknown." >&2
-  echo "  Fix: repair the scan's reason above and re-run; nothing was reaped." >&2
+  echo "suite-reaper: FAILED -- the process scan could not look at everything (its reason is above), so whether anything else outlived this suite is unknown; any tagged process it did find was killed." >&2
+  echo "  Fix: repair the scan's reason above and re-run." >&2
 }
 
 # suite_reap_tagged -- SIGKILL every tagged process until none is left
@@ -135,15 +136,19 @@ _suite_reap_scan_failed() {
 # rather than silently tidied. Status 0 when none remain, 1 when the bound ran
 # out with some still alive or the scan could not run (named, with a Fix:).
 suite_reap_tagged() {
-  local pass p pids left=""
+  local pass p pids left="" rc blind=0
   if [ -z "${ATHENA_SUITE_REAPER_TAG:-}" ]; then
     echo "suite-reaper: suite_reap_tagged called without suite_reaper_begin; nothing was tagged, so nothing can be reaped." >&2
     echo "  Fix: call suite_reaper_begin \"\$@\" at the top of the suite, before it starts any process." >&2
     return 1
   fi
   for pass in 1 2 3 4 5 6 7 8 9 10; do
-    pids="$(suite_tagged_pids)" || { _suite_reap_scan_failed; return 1; }
-    [ -z "${pids}" ] && return 0
+    pids="$(suite_tagged_pids)"; rc=$?
+    case "${rc}" in 0) ;; 4) blind=1 ;; *) _suite_reap_scan_failed; return 1 ;; esac
+    if [ -z "${pids}" ]; then
+      [ "${blind}" = 0 ] && return 0
+      _suite_reap_scan_failed; return 1
+    fi
     for p in ${pids}; do
       [ "${pass}" = 1 ] && printf 'suite-reaper: killing pid %s that outlived this suite'"'"'s own cleanup: %s\n' \
         "${p}" "$(tr '\0' ' ' <"/proc/${p}/cmdline" 2>/dev/null)" >&2
@@ -152,8 +157,12 @@ suite_reap_tagged() {
     left="${pids}"
     sleep 0.1
   done
-  pids="$(suite_tagged_pids)" || { _suite_reap_scan_failed; return 1; }
-  [ -z "${pids}" ] && return 0
+  pids="$(suite_tagged_pids)"; rc=$?
+  case "${rc}" in 0) ;; 4) blind=1 ;; *) _suite_reap_scan_failed; return 1 ;; esac
+  if [ -z "${pids}" ]; then
+    [ "${blind}" = 0 ] && return 0
+    _suite_reap_scan_failed; return 1
+  fi
   echo "suite-reaper: FAILED -- still alive after 10 kill passes: ${pids//$'\n'/ } (last seen: ${left//$'\n'/ })" >&2
   echo "  Fix: something keeps forking new tagged processes; find which from the pids above and stop it at its source." >&2
   return 1

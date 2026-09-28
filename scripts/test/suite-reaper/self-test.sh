@@ -334,10 +334,26 @@ real="${_SUITE_REAPER_SCAN}"; _SUITE_REAPER_SCAN="/nonexistent/proc-env-scan.awk
 suite_reap_tagged; echo "rc=$?"
 _SUITE_REAPER_SCAN="${real}"; suite_reap_tagged 2>/dev/null'
 S14="$(cat "${TMP}/s14.out")"
-if [ "${S14}" = "rc=1" ] && grep -q 'scan could not run' "${FX_ERR}" && grep -q 'Fix:' "${FX_ERR}" && gone "${MARK}"; then
+if [ "${S14}" = "rc=1" ] && grep -q 'scan could not look' "${FX_ERR}" && grep -q 'Fix:' "${FX_ERR}" && gone "${MARK}"; then
   ok "S14 a scan that cannot run fails the reap (status 1, with a Fix:), never 'none left'"
 else
   bad "S14 a scan that cannot run fails the reap loudly" "${S14:-no output} survivors=$(survivors "${MARK}") err=$(head -c 400 "${FX_ERR}")"
+fi
+# ...and a PARTIAL scan (status 4: it confirmed some matches, but one pid never
+# settled) still kills what it confirmed, then fails. Dropping the matches
+# would leave the very orphan DND-1016 is about. The scan is stubbed to report
+# the real leak plus an unknown, as the awk does.
+run_fixture s14b '. "${LIB}"; suite_reaper_begin "$@"
+sleep 310 & leak=$!
+suite_tagged_pids() { kill -0 "${leak}" 2>/dev/null && echo "${leak}"; echo "proc-env-scan: pid 1 ... UNKNOWN" >&2; return 4; }
+suite_reap_tagged; rc=$?
+kill -0 "${leak}" 2>/dev/null && alive=yes || alive=no
+echo "rc=${rc} alive=${alive}"'
+S14B="$(cat "${TMP}/s14b.out")"
+if [ "${S14B}" = "rc=1 alive=no" ] && grep -q 'could not look' "${FX_ERR}" && gone "${MARK}"; then
+  ok "S14 a partial scan (status 4) kills the matches it confirmed, then fails the reap"
+else
+  bad "S14 a partial scan kills the matches it confirmed, then fails" "${S14B:-no output} survivors=$(survivors "${MARK}") err=$(head -c 400 "${FX_ERR}")"
 fi
 
 # S15: the scan's verdicts on a fixture /proc (root=), one state each, so the

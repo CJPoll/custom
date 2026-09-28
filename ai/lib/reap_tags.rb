@@ -36,8 +36,19 @@ module ReapTags
   DEFAULT_SETTLE_S = 5.0
   SETTLE_POLL_S = 0.05
 
-  # The scan cannot run at all (no env bounds, no /proc): never "none found".
-  class ScanError < StandardError; end
+  # The scan could not look at everything (no env bounds, a malformed stat, a
+  # pid that never settled): never "none found". `found` holds the matches it
+  # did confirm, so a caller can still kill them; `reap` sets `killed`.
+  class ScanError < StandardError
+    attr_reader :found
+    attr_accessor :killed
+
+    def initialize(msg = nil, found: [])
+      super(msg)
+      @found = found
+      @killed = []
+    end
+  end
 
   module_function
 
@@ -100,10 +111,10 @@ module ReapTags
     return found if unknown.empty?
 
     named = unknown.map { |pid| "pid=#{pid} #{cmdline(pid, proc_root: proc_root)}" }.join("; ")
-    raise ScanError, "#{unknown.size} process(es) stayed unreadable for #{settle}s (environment bounds never " \
-                     "settled), so whether they carry #{tag} is UNKNOWN: #{named}. Fix: find what those " \
-                     "processes are doing (stuck in execve, or an unreadable environ) and re-run; the scan " \
-                     "could not look, so it did not report 'none left'."
+    raise ScanError.new("#{unknown.size} process(es) stayed unreadable for #{settle}s (environment bounds " \
+                        "never settled), so whether they carry #{tag} is UNKNOWN: #{named}. Fix: find what " \
+                        "those processes are doing (stuck in execve, or an unreadable environ) and re-run; the " \
+                        "scan could not look, so it did not report 'none left'.", found: found)
   end
 
   # [state, starttime, env_start, env_end] from /proc/<pid>/stat, or nil when
@@ -197,14 +208,23 @@ module ReapTags
   # Wait up to `grace` seconds for tagged processes to exit on their own, then
   # SIGKILL whatever is left (repeating, bounded, for anything mid-fork).
   # Returns [[pid, cmdline], ...] for each process it had to kill -- empty when
-  # nothing outlived the grace period. Raises ScanError when the scan could
-  # not look (tagged_pids), which the caller must report as a failure.
+  # nothing outlived the grace period. When any scan could not look
+  # (tagged_pids raised), the matches it DID confirm are still killed, and
+  # then that ScanError is raised with `killed` set: the caller reports both
+  # the failure and what was killed, never "nothing leaked".
   def reap(tag, grace: DEFAULT_GRACE_S, proc_root: "/proc")
+    scan_error = nil
+    scan = lambda do
+      tagged_pids(tag, proc_root: proc_root)
+    rescue ScanError => e
+      scan_error ||= e
+      e.found
+    end
     deadline = monotonic + grace
-    left = tagged_pids(tag, proc_root: proc_root)
+    left = scan.call
     while !left.empty? && monotonic < deadline
       sleep POLL_S
-      left = tagged_pids(tag, proc_root: proc_root)
+      left = scan.call
     end
     killed = []
     KILL_PASSES.times do
@@ -219,7 +239,11 @@ module ReapTags
         end
       end
       sleep POLL_S
-      left = tagged_pids(tag, proc_root: proc_root)
+      left = scan.call
+    end
+    if scan_error
+      scan_error.killed = killed
+      raise scan_error
     end
     killed
   end
