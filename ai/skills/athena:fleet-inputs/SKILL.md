@@ -87,6 +87,9 @@ transition unsatisfiable. When no `In Review`-equivalent exists:
 - **Tell the captain in its dispatch to set NO Notion status at all.**
 - **Hold the Mission yourself at `In Progress`** from dispatch until the MR/PR
   is merged, then move it to `Done` per [[athena:ticket-management]].
+  **Later (2026-09-27):** it leaves `In Progress` for `In Merge Queue` when
+  queued, or `Parked` if you stop first: [[athena:ticket-management]] → *A
+  ticket's status follows its captain*.
 - **Record the substitution as an assumption** in your state log and **report
   the vocabulary gap to the architect**.
 - Do **NOT** invent a new `In Review` option in someone's DB to satisfy the

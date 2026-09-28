@@ -80,6 +80,8 @@ Do these in order.
    the usual way, and handle each return per [[athena:captain-return]]. A
    return frees a slot, but a draining admiral does not refill it.
 5. **When no captain runs**, in this order:
+   - move every `In Progress` ticket in your scope off it
+     ([[athena:ticket-management]] → *A ticket's status follows its captain*);
    - report `fleet-report admiral-state --state drained`;
    - write the final report with reason `drained`
      ([[athena:admiral-final-report]]);

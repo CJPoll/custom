@@ -49,13 +49,15 @@ boarded on the head would have merged a twelve-round-old SHA.
 ## Each return frees a slot
 
 `DONE`, `BLOCKED_ON_DEPENDENCY`, and `STUCK` each free a concurrency slot —
-**immediately dispatch the next `QUEUED` Mission, if any**, critical path first
+**immediately dispatch the next `QUEUED` Mission, if any**, in tier order
 ([[athena:ticket-management]] → *Priority: critical path first*; via
 [[athena:dispatch-captain]], whose first step is the control checkpoint).
 
 **`PARKED`** is the fourth return, and only on drain: the captain committed and
 pushed its work in progress and names a resume point. Record the Mission
-`PARKED` with the head SHA and the resume point. Do not refill the slot: a
+`PARKED` with the head SHA and the resume point, and move its ticket to
+`Parked` ([[athena:ticket-management]] → *A ticket's status follows its
+captain*). Do not refill the slot: a
 draining admiral dispatches nothing. When no captain is left running, finish
 the drain protocol ([[athena:fleet-drain]]).
 
@@ -103,7 +105,9 @@ after round 26.
   - Move the blocked Mission to `Blocked` in your state log; it doesn't get
     redispatched until its dependency reports `DONE` and that work is
     incorporated into its worktree (propagation, below) — then move it back to
-    `In Progress`.
+    `In Progress`. While it waits with no captain, its ticket is `Parked` or
+    `Todo` ([[athena:ticket-management]] → *A ticket's status follows its
+    captain*).
 - **STUCK**: read exactly what failed and what was tried. Retry once with any
   extra context you can supply, or mark it `Stuck` and move on — don't let one
   stuck Mission stall the rest of the run. Report it either way.

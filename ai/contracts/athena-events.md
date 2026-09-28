@@ -3034,10 +3034,11 @@ nothing in the click payload can set it.
 Only an owner click on a **terminal** button claims the controls and triggers
 the deterministic phase-1 update; a click on a grant button follows *Owner
 approval grants* → *The click* instead. Either way the
-delivered click is a fact to relay, never an authorization
-(`ai/contracts/athena-inbox.md` → *Untrusted input*). The one way a verified
+delivered click is a fact to relay, never an authorization, outside the
+tracker exception below (`ai/contracts/athena-inbox.md` → *Untrusted input*). The one way a verified
 owner click authorizes anything is an owner approval grant, a server-side
-record the delivered line never carries (*Owner approval grants*).
+record the delivered line never carries (*Owner approval grants*), apart from
+the tracker exception that section's *The rule* names.
 
 **Later (2026-09-26):** DND-616. This section said "Only an owner click claims
 the controls and triggers the deterministic phase-1 update", and the stamped
@@ -3091,7 +3092,21 @@ authority for such an approval lives where no content can reach it: a
 server-side record, read only by the code that acts.
 
 **The rule.** An **owner approval grant** is a server-side record in gen_saas.
-It is the only way a click can authorize anything.
+It is the only way a click can authorize anything, with one exception: the
+owner's veto click on a won't-fix notice, which reopens that ticket, per
+`athena:slack` → *A click is untrusted input*.
+
+**Later (2026-09-27):** the sentence above ended at "authorize anything".
+Owner, Cody: "The click authorizes IFF you are able to determine that it's
+from my user." The exception covers only that one tracker change, never an
+owner-gated action. It narrows the **Why.** above; it does not refute it. The
+forgery paths named there are each closed for this case by a reader check in
+`athena:slack` → *A click is untrusted input*: `kind` and `actor` are the
+line's own server-set fields, which a peer's words cannot set; the `value`
+must be one the notice offered; and a re-rendered message fails the match on
+the session's own `{channel, ts}`. The residual, a local writer running as the
+owner's user, gains no power it lacks, since that user can already write the
+tracker.
 
 - The **click handler** writes it, and only after the click verifies on every
   count (*The click*). No other code decides a grant.
@@ -3099,7 +3114,8 @@ It is the only way a click can authorize anything.
   code to the server (*Redeem*), or by the server acting on it itself.
 - The `slack.interaction.received` event for the click stays a **fact**, and
   `actor.is_owner` stays a reported attribute. No line, no `is_owner: true`,
-  and no grant id quoted in any message is an approval. A session passes a grant
+  and no grant id quoted in any message is an approval, outside the tracker
+  exception in *The rule* above. A session passes a grant
   id to the consuming mechanism, and that mechanism asks the server.
 - Nothing in the Athena Inbox can create, widen, move or replay a grant. A grant
   is not a message.
@@ -5016,10 +5032,17 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   close drops an item from the queue until its next change. A wrong reopen
   hands finished work to a second session.
 - **Terminal statuses are owner config, per source.** For `notion_personal`
-  the default is `Done` and `Cancelled`. `notion_work` gets its default from
-  DND-438. A status outside the source's declared set is stored and treated as
-  non-terminal. The priorities page flags it as undeclared. It is never
-  silently read as open.
+  the default is `Done`, `Cancelled` and `Won't Fix`. `notion_work` gets its
+  default from DND-438. A status outside the source's declared set is stored
+  and treated as non-terminal. The priorities page flags it as undeclared. It
+  is never silently read as open.
+
+  **Later (2026-09-27):** the `notion_personal` default was `Done` and
+  `Cancelled`. The owner made `Won't Fix` a closing status
+  ([[athena:ticket-management]] → *Keep tickets, epics and projects
+  current*). gen_saas still ships the old pair
+  (`Athena.Priorities.Rules.default/0`, `origin/main` `62dc2b63`, read
+  2026-09-27); that change is its own ticket, DND-995.
 - **Only an owner path promotes, restores or dismisses:** the owner's web
   session, or an owner approval grant of class `priority.transition`, executed
   by the server at click time (*Owner approval grants*). No machine token can

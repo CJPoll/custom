@@ -108,11 +108,11 @@ Give the captain, in the brief:
 - **The findings rule, cited by name.** Every brief carries this line: *"An
   anomaly you find outside this Mission follows `~/dev/custom/ai/CLAUDE.md` →
   *Find it, ticket it, fix it, verify it live*: list it in your report as a
-  proposed ticket with a priority, and say whether this Mission fails its
-  requirements without it; do not fix it in this MR."* Cite it; do not restate
-  it. That answer is the blocking test in [[athena:ticket-management]] →
-  *Priority: critical path first*, which decides whether you wire the finding
-  as a blocker when you file it.
+  proposed ticket with its `Kind`, `Severity`, `Security` and `Area`, and say
+  whether this Mission fails its requirements without it; do not fix it in
+  this MR."* Cite it; do not restate it. The properties and that answer (the
+  blocking test, which sets `Path`) are [[athena:ticket-management]] →
+  *Priority: critical path first*; you file the finding with them.
 
 - **The no-stash rule.** Every brief carries this line: *"Never `git stash`. To
   park WIP, commit it to your worktree branch."* A linked worktree shares ONE

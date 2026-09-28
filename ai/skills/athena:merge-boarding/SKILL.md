@@ -418,6 +418,10 @@ The cost of losing differs: in `~/dev/custom` (no CI) it is one local re-gate;
 in gen_saas (~50 min CI on one runner) it is a CI cycle and can reorder
 deploys. The lock is required in both.
 
+**Later (2026-09-27):** a PR waiting its turn for the token, the lock or a
+coordinator train moves its ticket to `In Merge Queue`
+([[athena:ticket-management]] → *A ticket's status follows its captain*).
+
 **Later (2026-09-26):** when you are queued behind another PR, whether for the
 merge token or for the lock, **do not merge main forward until you are next.**
 Main moves again when the PR ahead of you lands, so a forward made at position

@@ -39,6 +39,9 @@ terminal status, and **diff them in both directions**:
 
 - Every merged MR must have its Mission at `Done` / `Ready for Release`.
 - Every Mission still at `In Progress` must have unmerged work.
+  **Later (2026-09-27):** at run end no captain works it, so it leaves
+  `In Progress` for `Parked`, `Needs Attention` or `Todo`:
+  [[athena:ticket-management]] → *A ticket's status follows its captain*.
 - **Every MR you OPENED is merged, or named as a live hand-off.** An open MR
   that is non-draft, green on its head SHA, with no unresolved discussion and no
   unmet approval is **not** "unmerged work in progress" — the direction above

@@ -1,6 +1,6 @@
 ---
 name: athena:ticket-management
-description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority rule: critical path first, and when a finding may block a planned ticket — use when choosing which ticket to assign a captain next, or filing a finding.
+description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket.
 ---
 
 # athena:ticket-management
@@ -25,6 +25,9 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
 | `Done` | **Cody** | Cody's to review / verify / close |
 | `Ready for Release` | **Cody** | work workspace only — a mobile ticket that has cleared dev but not yet the app-store process |
 | `Cancelled` | leave as-is | dropped |
+| `Won't Fix` | leave as-is | closed: not to be done (*Promote and won't-fix* below); reason in the body |
+| `Parked` | **Athena** | work exists but is undelivered, and no captain is on it (*A ticket's status follows its captain*) |
+| `In Merge Queue` | **Athena** | its PR passed review, critic and CI, and waits in a merge queue for its turn, or is merged and not yet verified live (*A ticket's status follows its captain*) |
 
 ## The transitions an orchestrator performs
 
@@ -32,6 +35,9 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    takes ownership: set each ticket's `Assignee` = **Athena**, and if the ticket is in
    `Backlog`, move it to `Todo`. A scoped ticket that no engineer is on yet sits at
    `Todo` (or keeps `In Progress` if it was already there).
+   **Later (2026-09-27):** a ticket with no captain no longer keeps
+   `In Progress`. It is `Todo`, or `Parked` if work exists (*A ticket's status
+   follows its captain*).
 2. **Assigning an engineer** — when an athena-captain is dispatched to the ticket, move
    the status to `In Progress`; the assignee stays **Athena**.
 3. **→ `Needs Attention`** — set `Assignee` = **Cody**, write the decision/context
@@ -53,6 +59,50 @@ A scoped ticket is Athena's from the moment it enters scope (`Backlog`→`Todo`�
 waiting-on-Cody state (`Needs Attention`, `Attention Given`, `Done`,
 `Ready for Release`).
 
+## A ticket's status follows its captain (owner rule)
+
+Owner, Cody, 2026-09-27: "There's a difference between a ticket being
+unblocked vs in progress. An unblocked ticket that hasn't been started should
+be "Todo", not "In Progress"." And: "Let's add a "Parked" status, indicating
+progress has been made, but the ticket is incomplete (or at least undelivered)
+and not actively being worked on. A ticket which is blocked on something from
+me should be "Needs Attention" instead of "Parked"". This section is its one
+home; other documents cite it by name.
+
+- **`In Progress` means a captain is working it right now,** or its admiral
+  is boarding the captain's finished PR (below). Unblocked alone is `Todo`.
+- **When the captain stops** (a park, an admiral stop, or a merge not yet
+  delivered):
+  - work exists → `Parked`, Assignee Athena. The body names the branch, the
+    head SHA and the PR;
+  - blocked on Cody → `Needs Attention`, Assignee Cody (transition 3);
+  - no work yet → `Todo`.
+- **A captain's `DONE`** hands the ticket to its admiral, who holds it at
+  `In Progress` while boarding it (*When the tracker lacks a status this
+  skill names*). If the admiral stops first, the ticket is `Parked`.
+- **`In Merge Queue`** (owner, 2026-09-27: "Please add an "In Merge Queue"
+  status."): the PR passed review, critic and CI, and waits in a merge queue
+  for its turn (the gen_saas merge-token queue, or a coordinator train). The
+  admiral sets it when it queues the PR (`athena:merge-boarding`). It counts
+  as active, so the live-captain check exempts it. Out of the queue on a red
+  gate or critic → `Parked`.
+- **Merged but not yet verified live:** it stays `In Merge Queue` while the
+  admiral verifies, then goes `Done`. If only Cody can verify it,
+  `Needs Attention` (transition 4). If the admiral stops first, `Parked`,
+  with the verify step on the body.
+- **Merged and verified live → `Done`** (transition 4).
+- **An admiral that stops or drains reconciles** every `In Progress` ticket in
+  its scope by these rules before it ends ([[athena:fleet-drain]],
+  [[athena:admiral-final-report]]).
+- **The detector** (an `In Progress` ticket with no live captain in the fleet
+  registry) belongs to `athena:epic-clustering`'s pass. That skill is planned
+  (plan row W5) and not built yet, so until it lands only the admiral's own
+  reconcile enforces this.
+
+Measured 2026-09-27: at the owner's pause, 73 tickets read `In Progress`. 17
+had already landed and 29 were parked with no captain. `In Progress` was set
+at dispatch and nothing reset it.
+
 ## Keep tickets, epics and projects current (owner rule)
 
 Owner, Cody, 2026-09-26: "Yes, please keep projects, epics, and tickets up to
@@ -60,12 +110,20 @@ date." The owner reads Notion to see what is happening. A stale status misleads
 him and raises nothing, so drift is a defect.
 
 - **Tickets** follow the transitions above at the moment they happen. Moving a
-  ticket to `In Progress` is part of dispatching its captain.
+  ticket to `In Progress` is part of dispatching its captain. Moving it off
+  `In Progress` when the captain stops is *A ticket's status follows its
+  captain*.
 - **Epics.** Set `In Progress` when the first ticket starts. Set `Done` only
   when every linked ticket, follow-ups included, is `Done` or `Cancelled`. A
   follow-up filed under a `Done` epic moves the epic back to `In Progress`.
   On the DND Epics DB, `Status` is a `select`, not a `status`:
   `{"Status": {"select": {"name": "In Progress"}}}`.
+
+  **Later (2026-09-27):** `Won't Fix` closes a ticket too, so an epic goes
+  `Done` when every linked ticket is `Done`, `Cancelled` or `Won't Fix`. The
+  owner made won't-fix a status (*Promote and won't-fix* below). `Parked` keeps
+  the epic open. Match by option name, never by Notion's status group: a
+  group's membership is edited in the UI, and it moved on 2026-09-27.
 - **Projects** move with their epics.
 - **Sweep the epic** against its tickets at each epic transition and when you
   resume. Before you trust an empty filter result, confirm the filter with a
@@ -80,6 +138,24 @@ owner with a couple dozen notifications.
 
 ## Priority: critical path first (owner rule)
 
+**The principle behind the tiers.** Owner, Cody, 2026-09-27: "Our highest
+priority is getting scope management and prioritization under control. I think
+of development as having 3 concentric wheels, each inner one driving the next
+outer one: 1. Ticket completion & Delivery (fantastic! dozens to hundreds per
+day right now) 2. Project/epic delivery: things a customer (in this case
+myself) wants; each is a bet for the outcome it achieves. 3. Company/personal
+outcomes, driven by the projects/epics we deliver (revenue growth, personal
+growth, etc.) Right now, wheels 1 and 2 are out of alignment; we're spinning
+wheel 1 super fast, but we're not completing the functional requirements of a
+project to get it to a point where we're getting actual outcomes out of the
+work being done. Once we have the two inner wheels aligned and spinning right,
+then we can start iterating on projects to get the actual company / personal
+growth outcomes and achievements" Clarified: "Delivery of a _ticket_ is the
+innermost wheel. Completion of a _project or epic_ is the second wheel."
+
+The measure of success is epics reaching their functional requirements, not
+ticket throughput.
+
 Owner, Cody, 2026-09-27 (~10:30Z, coordinator terminal): "we prioritize the
 critical path over side quests in a project, completing the findings and other
 issues that have been raised after the critical path. Findings should only
@@ -89,14 +165,21 @@ consider an epic closed when critical path is done; but we should at least be
 getting value out of an epic even while we're doing follow-ups and addressing
 discoveries. And yes, I would argue that we should block a ticket that
 introduces security issues, but should address discovered pre-existing security
-issues after the critical path is complete." This section is its one home;
+issues after the critical path is complete." 2026-09-27, later the same day:
+"We want to prioritize functional requirements first; if a bug is blocking
+functional requirements (or indicates the requirements are not met), then it
+should be prioritized. Highest priority: Exploitable security vulnerabilities.
+Next: Bugs blocking functional requirements Next: Critical path, next: other
+improvements." And: "Not quite right - findings do get a captain, but only
+after the functional requirements are met." This section is its one home;
 other documents cite it by name.
 
 - **The critical path** is the planned tickets whose completion delivers the
-  epic's intended requirements, in dependency order. The architect names them
-  in the epic body under a `Critical path` heading, in that order. A ticket not
-  on that list is off the path: a finding, a follow-up, a flake, or any other
-  raised issue.
+  epic's intended requirements. Each carries `Path` = `Critical` (*Ticket
+  properties* below), and the property is authoritative. The architect also
+  lists them in the epic body under a `Critical path` heading, in dependency
+  order, citing the property. A ticket not on the path is off it: a finding, a
+  follow-up, a flake, or any other raised issue.
 - **Deliver value early.** Sequence the path so it ships usable value early:
   shipped, live-verified increments. Follow-ups and discoveries continue after
   that and never hold the value back.
@@ -110,48 +193,172 @@ other documents cite it by name.
   raised along the way in that epic is off the path, filed and worked after
   the functionality ships, unless it blocks by the test below. Features follow `~/.claude/CLAUDE.md` → *TDD
   Workflow*.
-- **Order.** Within a project or epic, the critical path goes first. Off-path
-  tickets are worked after it, except as below. This decides which unblocked
-  ticket an admiral assigns to a captain next. It does not order merges: a
-  finished PR boards per `athena:merge-boarding`, where a finished security
-  fix goes first (*A finished security fix merges first*). Owner, ~10:45Z:
-  "I'm not talking about the merge queue; I'm talking about the order in which
-  an admiral assigns tickets to captains."
+- **Order: the tiers.** This decides which unblocked ticket an admiral
+  assigns to a captain next. Take the lowest tier with a ready ticket.
+
+  | Tier | Selector (*Ticket properties*) | Order within the tier |
+  |---|---|---|
+  | 0 | `Path` = `Promoted`: the owner's explicit order, or an admiral's promotion (*Promote and won't-fix*) | the owner's order first, then admiral promotions, oldest first |
+  | 1 | `Kind` = `Vulnerability`, `Security` = `pre-existing`, `Severity` ∈ {`CRITICAL`, `HIGH`}: exploitable | Severity, then age |
+  | 2 | `Kind` = `Bug` and `Path` = `Blocking` | just ahead of the ticket it blocks |
+  | 3 | `Path` = `Critical` | the epic's dependency order |
+  | 4 | everything else, once its epic's critical path is met | Severity (empty last), then the Kind order, then age (oldest first) |
+
+  - **A blocker that is not a Bug** (`Path` = `Blocking`, another Kind, such
+    as a gate flake that stops the path) sorts just ahead of the ticket it
+    blocks, in that ticket's tier.
+  - **Tiers 1–3 are never capped.** No cap on tier 4 is decided yet.
+  - **Findings get captains once the functional requirements are met.** A
+    finding raised while working an epic is filed on that epic. Once the
+    epic's Features, its critical path, are met, its findings get captains
+    in tier order. Exploitable vulnerabilities and true blockers go at once.
+    Until then a tier-4 ticket is not ready, even for an idle slot; report
+    the idle slot and what holds the path. An epic with no `Critical`
+    ticket (a scope of raised issues) has met its path.
+  - **Merges are not ordered here.** A finished PR boards per
+    `athena:merge-boarding`, where a finished security fix goes first (*A
+    finished security fix merges first*). Owner, ~10:45Z: "I'm not talking
+    about the merge queue; I'm talking about the order in which an admiral
+    assigns tickets to captains."
 - **A finding blocks only if it truly prevents the work.** The test: does the
   planned ticket fail its acceptance criteria or intended requirements without
-  this fix? If yes, wire `Depends On`↔`Blocks` onto that ticket; the finding is
-  then on the critical path and goes first. If no, file it as a normal ticket in
-  the project with **no** `Depends On` / `Blocks` edge onto a critical-path
-  ticket, and work it after the path. Severity alone does not make a finding
-  block. Edges between off-path tickets are fine.
+  this fix? If yes, set `Path` = `Blocking` and wire `Depends On`↔`Blocks` onto
+  that ticket. A Bug that shows a `Done` Feature's requirement is unmet blocks
+  too: reopen that Feature to `Parked` (its work exists; it goes `In Progress`
+  when a captain takes it) and wire the edge. If no, file it
+  with `Path` = `Off` and **no** `Depends On` / `Blocks` edge onto a
+  critical-path ticket. Severity alone does not make a finding block. Edges
+  between off-path tickets are fine.
 - **Security, split by origin.**
-  - **A security issue the ticket's own change introduces blocks that ticket.**
-    It is fixed before the ticket ships: a change that introduces a
-    vulnerability does not meet its requirements, so it fails the test above.
-  - **A pre-existing security issue found during the work** is filed and fixed
-    after the critical path by default, like any other finding, whatever its
-    severity.
-  - **Promoting one needs no approval.** For a high-severity or actively
-    exploitable pre-existing issue, the admiral promotes it on its own
-    judgment and names it in the digest (`~/.claude/CLAUDE.md` → *Owner
-    approval policy* → *Dropped*).
-
-    **Later (2026-09-28):** promotion waited on Cody's terminal turn, requested
-    by a Block Kit Approve button (owner, 2026-09-27 ~10:50Z). Superseded by
-    *Owner approval policy*, which drops "promoting a security issue".
+  - **A security issue the ticket's own change introduces blocks that ticket,**
+    whatever its severity. It is fixed inside that ticket's work, before it
+    ships: a change that introduces a vulnerability does not meet its
+    requirements. It never enters the queue separately.
+  - **A pre-existing exploitable one (`CRITICAL`/`HIGH`) is tier 1.** It goes
+    ahead of the critical path with no Slack ask. This supersedes the owner's
+    ~10:50Z answer ("Assume no, but ask in slack for approval to prioritize an
+    important fix"). Owner, same day, asked whether tier 1 supersedes it:
+    "2. yes".
+  - **A pre-existing `MEDIUM` or `LOW` one is tier 4.** When its turn comes
+    it is worked with no owner wait. If an admiral thinks a `MEDIUM` one is
+    urgent, it promotes it itself (*Promote and won't-fix* below) and keeps
+    working.
   - `~/.claude/CLAUDE.md` → *Owner approval policy* governs **approval**, not
     **scheduling**. A security fix ships without waiting for the owner; when it
     is worked is decided here.
 - **What else keeps its priority:**
   - **A fleet-wide flake or outage that stops the critical path itself**, such
     as a gate flake that reddens every merge. It blocks by the test above.
-  - **An owner-directed priority.** The owner's order wins.
+  - **An owner-directed priority** is tier 0.
 - **A lane whose scope is raised issues** (the flaky lane) has no planned path
   to defer to. Its queue is its path, and it drains per its brief.
 - **Epic status is unchanged.** The epic still goes `Done` only per *Keep
   tickets, epics and projects current* above: every linked ticket, follow-ups
-  included, `Done` or `Cancelled`. A finished critical path does not close the
-  epic.
+  included, `Done`, `Cancelled` or `Won't Fix`. A finished critical path does
+  not close the epic.
+
+**Later (2026-09-28, DND-979):** this section, as DND-978 and the owner
+approval policy landed it, said three things the tiers above replace:
+- "**Order.** Within a project or epic, the critical path goes first", a flat
+  order. Now tiers 0–4, and findings wait for the epic's functional
+  requirements.
+- "The architect names them in the epic body under a `Critical path`
+  heading": the list was the authority. Now the `Path` property is, and the
+  epic-body list cites it.
+- "A pre-existing security issue found during the work is filed and fixed
+  after the critical path by default … whatever its severity", with
+  "Promoting one needs no approval": the admiral promoted a high-severity or
+  exploitable one on its own judgment. Now a pre-existing `CRITICAL`/`HIGH`
+  one is tier 1 with no promotion, and an admiral may promote a `MEDIUM` one
+  per *Promote and won't-fix* below.
+
+The owner set the tiers on 2026-09-27; the quotes are at the top of this
+section.
+
+### Ticket properties
+
+The DND Tickets data source carries these. The values are stated here once.
+
+| Property | Type | Values |
+|---|---|---|
+| `Kind` | select | `Feature` · `Bug` · `Vulnerability` · `Hardening` · `Refactor` · `Test` · `Flake` · `Docs` · `Ops` |
+| `Severity` | select | `CRITICAL` · `HIGH` · `MEDIUM` · `LOW` |
+| `Security` | select | `none` · `introduced` · `pre-existing` |
+| `Path` | select | `Critical` · `Blocking` · `Promoted` · `Off` |
+| `Area` | select | `Product` · `Harness` |
+| `Found while` | relation → Tickets | the ticket being worked when it was found |
+
+- **`Kind`** names what the ticket is. How it was found is `Found while`;
+  where the fix lands is `Area`. So a bug in a gate is `Bug` + `Harness`.
+  - **Feature:** a planned functional requirement the architect authored.
+  - **Bug:** it does something other than its requirements or intended
+    behaviour: a wrong result, a crash, a lost event, a miss that reads as
+    success.
+  - **Vulnerability:** a concrete security defect with a nameable path, or a
+    security control that misreports.
+  - **Hardening:** makes an attack or a failure harder or less damaging, with
+    no concrete defect shown.
+  - **Refactor:** structure, not behaviour: architecture drift, dead code,
+    duplication, naming.
+  - **Test:** missing or weak tests, or test infrastructure, with no known bug.
+  - **Flake:** a non-deterministic test; its own lane (`athena:flaky-ticket`).
+  - **Docs:** doc, contract or prose drift, no behaviour change.
+  - **Ops:** infra, deploy, retention, capacity or cost work, no defect.
+  - **One Kind per ticket.** When two fit, take the first in this order, which
+    is also tier 4's Kind order: Vulnerability > Bug > Feature > Hardening >
+    Test > Refactor > Ops > Docs. A Bug that leaks data is a Vulnerability.
+  - **Bug or the rest?** Ask "does it do something wrong today?" Yes is Bug
+    (or Vulnerability). "It could be better" is Hardening, Refactor, Test,
+    Docs or Ops.
+- **`Severity`** (empty on a Feature):
+  - **CRITICAL:** prod down, data loss, or an actively exploitable exposure.
+  - **HIGH:** a wrong result or a security exposure with a real path and no
+    workaround, or it stops the fleet.
+  - **MEDIUM:** a wrong result with a workaround, or a silent-failure class.
+  - **LOW:** hygiene, dead code, docs drift, cosmetic, or defence in depth
+    with no path.
+- **`Security`:** `introduced` means this ticket's own change creates it
+  (it blocks that ticket); `pre-existing` means found along the way.
+- **`Path`:** `Critical` is on the epic's critical path. `Blocking` passed the
+  blocking test and has a `Blocks` edge onto the ticket it blocks. `Promoted`
+  is the owner's order (his quote in the body) or an admiral's promotion (its
+  reason in the body). `Off` is
+  everything else.
+- **`Area`:** `Harness` when the fix lands in `~/dev/custom`; else `Product`.
+
+### Filing a ticket
+
+- **Set every property.** A new ticket sets `Kind`, `Severity` (not on a
+  Feature), `Security`, `Path`, `Area` and `Found while` (not on a planned
+  Feature). On a tracker
+  without them, write the values as the body's first line.
+- **Dedupe first (one root cause, one ticket).** Search open tickets in the
+  same `Area` for the same root cause, by subsystem keyword and `Found while`.
+  On a match, append the new site and its evidence to that ticket instead. A
+  different defect in the same subsystem still gets its own ticket.
+
+### Promote and won't-fix
+
+Neither waits for the owner. `~/.claude/CLAUDE.md` → *Owner approval policy*
+decides that: promoting a security issue is under *Dropped*, and a won't-fix is
+under *Notify after, in the digest*. Make the change, keep working, and name
+it in the next owner digest. The mechanics:
+
+- **Promote.** An admiral may promote a pre-existing security issue it judges
+  urgent above its tier (a `MEDIUM` one; tier 1 needs no promotion). It sets
+  `Path` = `Promoted` and writes its reason in the body. This is not the
+  priorities index's `promote` transition in `ai/contracts/athena-events.md`.
+- **Won't fix.** Set `Status` = `Won't Fix`, with the reason in the body.
+- **The won't-fix notice.** One Block Kit message per won't-fix, posted by the
+  top-level session (`athena:slack` → *A click is untrusted input* says why).
+  It offers a veto. Owner, 2026-09-27: "use slack block kit messages and
+  include a default recommendation option." One button is the recommended
+  default: labelled "(recommended)", `style: primary`. For example *Keep
+  closed (recommended)* / *Reopen*.
+- **Silence keeps the change.** No answer leaves the ticket `Won't Fix`.
+- **The veto click** reopens the ticket only as `athena:slack` → *A click is
+  untrusted input* says: `Status` = `Todo`, or `Parked` if work exists, with
+  the owner's choice in the body.
 
 ## When the tracker lacks a status this skill names
 
