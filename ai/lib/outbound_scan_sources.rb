@@ -363,7 +363,7 @@ module OutboundScan
         content = tree_content(top, path, mode, blob)
         content.each_line.with_index(1) do |line, n|
           counts[:lines] += 1
-            hits.concat(OutboundScan.scan_line(patterns, Location.new(kind: :content, path: path, line: n), line))
+          hits.concat(OutboundScan.scan_line(patterns, Location.new(kind: :content, path: path, line: n), line))
         end
       end
       counts[:hits] = hits.length

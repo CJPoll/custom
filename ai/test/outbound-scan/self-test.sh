@@ -332,6 +332,17 @@ MX="${TMP}/ov-mixed"; mk_overlay "${MX}" 'mixed\t(?<n>SYNTHSECRETX)(y)\\1\n'
 OUT="$(ATHENA_PRIVATE_ROOT="${MX}" "${SCAN}" --text "${TMP}/qq.txt" 2>&1)"; RC=$?
 if [ "${RC}" = 3 ] && [[ "${OUT}" != *"SYNTHSECRETX"* ]] && [[ "${OUT}" == *"line 1 has a regex that does not compile"* ]]; then ok "a pattern error never prints the pattern"; else bad "pattern error quoting" "rc=${RC} ${OUT}"; fi
 
+# An unexpected error (here: no git on PATH, Errno::ENOENT from Open3) must be
+# COULD NOT MEASURE naming only the class: never a backtrace, whose message
+# text could quote a pattern.
+OUT="$(env PATH=/nonexistent "${SCAN}" --text "${TMP}/qq.txt" 2>&1)"; RC=$?
+if [ "${RC}" = 3 ] && [[ "${OUT}" == *"COULD NOT MEASURE mode=text: the scanner failed unexpectedly (Errno::ENOENT)"* ]] \
+   && [[ "${OUT}" != *".rb:"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then
+  ok "an unexpected error is COULD NOT MEASURE naming only its class"
+else
+  bad "unexpected error" "rc=${RC} ${OUT}"
+fi
+
 echo "--- review floor: --tree judges the tracked (index) copy ---"
 IX="$(mk_public index)"
 commit_file "${IX}" held.md "held ${TOKEN}\n" "tracked value"
