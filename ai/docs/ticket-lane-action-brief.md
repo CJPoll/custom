@@ -485,8 +485,9 @@ stderr (`left to the harness lane: …`).
   movable lane ticket, singletons included, into a `Harness lane: ` epic.
 - **Until then, and between passes**, the feature admiral asks the
   athena-architect to make that move. The architect owns epic writes, and a
-  move inside the never-movable constraint is a standing owner go (proposal
-  §7). The admiral then sends a drain request (*Senders*).
+  move inside the never-movable constraint needs no owner approval
+  (ai/CLAUDE.md → *Owner approval policy*). The admiral then sends a drain
+  request (*Senders*).
 
 A tier-1 vulnerability is in both queues when it sits on a lane epic that a
 feature admiral also scopes. Whichever admiral starts it first sets `In
@@ -502,7 +503,7 @@ Progress`, and the other's next-mission then counts it as started.
 | `{{SCOPE_FILTER}}` | the lane tickets of the open lane epics: `ai/bin/next-mission --harness-lane` with no `--scope`. The per-clause counts that tell a quiet queue from a narrowed filter are its stderr `harness lane scope: N open epic(s)` line and its funnel |
 | `{{STATUS_VOCAB}}` | athena:ticket-management → *Status → Assignee map*, and *A ticket's status follows its captain* once **pending DND-979** lands it |
 | `{{BLOCKED_SEMANTICS}}` | the `Depends On` relation (next-mission's `unblocked` stage) |
-| `{{MAX_CAPTAINS}}` | **`1` — the one declared cap, pending the owner's number.** The owner sets it; `0` turns the lane off (no spawn). It is not P3's K_off |
+| `{{MAX_CAPTAINS}}` | **`1`**, the one declared cap. `0` turns the lane off (no spawn). A change to it is not an approval item (ai/CLAUDE.md → *Owner approval policy*): notify the owner, do not ask. It is not P3's K_off |
 | `{{MERGE_POLICY}}` | the `~/dev/custom` PR flow: the captain opens a PR, and the lane admiral merges per athena:merge-boarding. **Terminal state = merged** |
 | `{{LANE_CHANNEL}}` | no `log` channel. The trigger is a drain request: one maildir message on custom's `harness-alerts` channel whose filename ends `-harness-lane-drain.md` (athena:inbox-attend → *A fourth writer*). It carries no state, so add/drop comes only from `{{SOURCE_RE_QUERY}}` |
 | `{{CHANNEL_RESOLUTION}}` | `harness-alerts` must resolve in the **live** custom entry, matched by its `repo`. `ai/bin/check-inbox-registry` asserts this read-only, in every `harness-gate` run. At request time a miss surfaces on the sender side: `send-mail` refuses an undeclared channel with a `Fix:`. A miss is registry drift (`Fix: scripts/setup-inbox-registry --install`), never a quiet queue. Verified 2026-09-27: the check passed, and in a temp root a detector-side send woke `inbox-wait` with `rang-channels: harness-alerts` |
