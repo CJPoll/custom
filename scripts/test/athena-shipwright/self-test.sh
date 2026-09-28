@@ -889,6 +889,65 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — with an origin, only LANDED work reaches the main checkout (DND-1008)'
+
+# A repo with a real origin (a bare fixture remote). On 2026-09-27 a run put its
+# fix up as a PR branch rather than pushing main; teardown still fast-forwarded
+# the main checkout to the lane tip, so the live harness ran unreviewed code
+# and local main diverged from origin/main the moment anything else landed.
+with_origin() { # <repo> ; adds a bare origin beside it holding main
+  local o; o="$(aux "$1")/origin.git"
+  git init -q --bare -b main "$o" >&2
+  git -C "$1" remote add origin "$o"
+  git -C "$1" push -q origin main >&2
+  git -C "$1" fetch -q origin >&2
+}
+
+# PR-only: the session pushes its commit to a review branch, not main.
+r="$(new_repo)"; a="$(aux "$r")"; with_origin "$r"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "pr work"; git push -q origin HEAD:refs/heads/pr-branch'
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r")"
+if [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]; then
+  ok "a run published only as a PR branch does NOT move the main checkout"
+else
+  bad "PR-only run leaves main alone" "before=$before after=$(git -C "$r" rev-parse HEAD) $(cat "$a/runner.err")"
+fi
+if [ "$rc" -eq 0 ] && grep -q 'not landed on origin/main' "$a/runner.err"; then
+  ok "and says so: the run succeeded, its work is published for review, not landed"
+else
+  bad "PR-only run reported" "rc=$rc err=$(cat "$a/runner.err")"
+fi
+if [ "$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null || echo 0)" = "0" ]; then
+  ok "a PR-published run is not a stranded failure (its commits are on origin)"
+else
+  bad "PR-only is not stranded" "counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null)"
+fi
+
+# Landed: the session pushes to origin main. The main checkout follows.
+r="$(new_repo)"; a="$(aux "$r")"; with_origin "$r"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "landed work"; git push -q origin HEAD:refs/heads/main'
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ "$(git -C "$r" rev-parse HEAD)" = "$(git -C "$(aux "$r")/origin.git" rev-parse main)" ] \
+   && [ "$(git -C "$r" log -1 --format=%s)" = "landed work" ]; then
+  ok "a run that landed on origin/main fast-forwards the main checkout to it"
+else
+  bad "landed run fast-forwards main" "rc=$rc head=$(git -C "$r" log -1 --format=%s) err=$(cat "$a/runner.err")"
+fi
+
+# Neither: committed, pushed nowhere. Still stranded, main untouched.
+r="$(new_repo)"; a="$(aux "$r")"; with_origin "$r"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "unpushed work"'
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r")"
+if [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && grep -q 'kept stranded branch' "$a/runner.err" \
+   && [ "$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null)" = "1" ]; then
+  ok "an unpushed run with an origin is stranded: branch kept, main untouched, counted as a failure"
+else
+  bad "unpushed run stranded" "rc=$rc head-moved=$([ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && echo no || echo yes) err=$(cat "$a/runner.err")"
+fi
+
+# ---------------------------------------------------------------------------
 case_ 'athena-shipwright-run.sh — the wedge counter escalates on FAILURES (what the old skip counter missed)'
 
 # The headline superset: a session that RUNS and FAILS on a clean tree is

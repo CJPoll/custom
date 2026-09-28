@@ -3,7 +3,9 @@
 # setup-hooks — wire the harness hooks into ~/.claude/settings.json.
 #
 # Source of truth is ai/hooks/registry.json. This installer MERGES those entries
-# into the existing settings (adding any that are missing, de-duplicated),
+# into the existing settings (adding any that are missing, de-duplicated on
+# (event, matcher, script), and replacing a registry script's wiring under a
+# matcher the registry no longer declares for it),
 # NEVER rewriting the whole "hooks" block — a full rewrite is exactly what
 # silently dropped safe-wait-guard + pronoun-guard on 2026-09-17. It backs up
 # settings.json (timestamped) before any change, so there is always an undo path
@@ -154,19 +156,84 @@ except json.JSONDecodeError as e:
 
 hooks = settings.setdefault("hooks", {})
 
-def has(event, cmd):
-    target = norm(cmd)
+# A wiring is identified by (event, matcher, script) -- DND-887. Keyed on
+# (event, script) alone, a second registry row for the same script on the same
+# event with a different matcher collapsed into the first: it was never
+# installed, and check-hooks-registered could not see it. Claude Code treats an
+# omitted matcher, "" and "*" alike (match everything), so they compare equal.
+# check-hooks-registered's `mnorm` makes the same choice; the two must agree.
+def mnorm(matcher):
+    return "" if matcher in (None, "", "*") else matcher
+
+def has(event, matcher, cmd):
+    target, want = norm(cmd), mnorm(matcher)
     for m in hooks.get(event, []):
+        if mnorm(m.get("matcher")) != want:
+            continue
         for h in m.get("hooks", []):
             if norm(h.get("command")) == target:
                 return True
     return False
 
+def drop(event, target, keep):
+    """Remove every wiring of `target` on `event` whose group matcher `keep`
+    rejects, then drop only the groups THIS call emptied (and the event, if
+    that leaves it empty). A group that was already empty is someone else's
+    content and stays. Returns the matchers removed, so the caller reports
+    each one."""
+    removed, emptied = [], []
+    for m in hooks.get(event, []):
+        if keep(mnorm(m.get("matcher"))):
+            continue
+        before = len(m.get("hooks", []))
+        m["hooks"] = [h for h in m.get("hooks", []) if norm(h.get("command")) != target]
+        if len(m["hooks"]) != before:
+            removed.append(m.get("matcher"))
+            if not m["hooks"]:
+                emptied.append(id(m))
+    if emptied:
+        hooks[event] = [m for m in hooks[event] if id(m) not in emptied]
+        if not hooks[event]:
+            del hooks[event]
+    return removed
+
+# The matchers the registry declares for each (event, script) pair.
+declared = {}
+for e in reg:
+    declared.setdefault((e["event"], e["script"]), set()).add(mnorm(e["matcher"]))
+
 changes = []
 if mode == "install":
+    # Stale wiring first: a registry script wired on its event under a matcher
+    # the registry does not declare for it -- a row whose matcher changed, or
+    # two rows that were once one combined matcher (DND-840). Left in place it
+    # double-fires beside the declared rows, so it is replaced. Only commands
+    # that resolve to a registry script, on an event the registry wires that
+    # script on, are touched; every other entry is left exactly as found
+    # (merge, never rewrite).
+    #
+    # Replacing REMOVES a live wiring, so it runs only when the registry being
+    # installed is the main checkout's own. From a worktree's branch copy (or a
+    # HOOKS_REGISTRY_FILE) it would narrow or drop a live guard before the
+    # change is reviewed or landed -- the DND-670 path in reverse (DND-887
+    # critic). There the stale wiring is kept and named, and the checker still
+    # reports it.
+    from_main = os.environ.get("FROM_MAIN") == "1"
+    for (event, script), matchers in declared.items():
+        target = norm(absscript(script))
+        if not from_main:
+            for m in hooks.get(event, []):
+                if mnorm(m.get("matcher")) not in matchers and any(
+                        norm(h.get("command")) == target for h in m.get("hooks", [])):
+                    print(f'~ {event:13} {m.get("matcher")!r} -> {script}: stale matcher kept; only an '
+                          f'install from the main checkout\'s own registry ({repo}) replaces it, after '
+                          f'the change lands there.')
+            continue
+        for gone in drop(event, target, lambda mm, ms=matchers: mm in ms):
+            changes.append(f'~ {event:13} {gone!r} -> {script} (stale matcher, replaced)')
     for e in reg:
         cmd = absscript(e["script"])
-        if has(e["event"], cmd):
+        if has(e["event"], e["matcher"], cmd):
             continue
         # Never wire a script the MAIN checkout does not have. Run from a
         # worktree whose branch adds a hook, the registry names a script that
@@ -189,18 +256,10 @@ if mode == "install":
         hooks.setdefault(e["event"], []).append(
             {"matcher": e["matcher"], "hooks": [{"type": "command", "command": cmd}]}
         )
-else:  # remove
-    for e in reg:
-        cmd = absscript(e["script"])
-        if not has(e["event"], cmd):
-            continue
-        changes.append(f'- {e["event"]:13} {e["matcher"]!r} -> {e["script"]}')
-        target = norm(cmd)
-        for m in hooks.get(e["event"], []):
-            m["hooks"] = [h for h in m.get("hooks", []) if norm(h.get("command")) != target]
-        hooks[e["event"]] = [m for m in hooks.get(e["event"], []) if m.get("hooks")]
-        if not hooks[e["event"]]:
-            del hooks[e["event"]]
+else:  # remove: every wiring of a registry script on its event, whatever the matcher
+    for (event, script) in declared:
+        for gone in drop(event, norm(absscript(script)), lambda mm: False):
+            changes.append(f'- {event:13} {gone!r} -> {script}')
 
 for c in changes:
     print(c)
@@ -227,7 +286,12 @@ apply() {
   local mode="$1"        # "install" | "remove"
   local settings="$2"
   local dry="$3"
-  REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" SETTINGS="$settings" MODE="$mode" DRY="$dry" python3 -c "$MERGE_PY"
+  # FROM_MAIN=1 only when the registry being installed IS the main checkout's
+  # own: replacing a stale matcher removes a live wiring, so it waits for the
+  # change to land there (DND-887 critic).
+  local from_main=0
+  [ "$(realpath -m -- "$REGISTRY")" = "$(realpath -m -- "${HOOKS_REPO_DIR}/ai/hooks/registry.json")" ] && from_main=1
+  REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" SETTINGS="$settings" MODE="$mode" DRY="$dry" FROM_MAIN="$from_main" python3 -c "$MERGE_PY"
 }
 
 # norm_path <path>  -- print the SHIPPED norm() of one path, by running the
@@ -369,6 +433,139 @@ PY2
       [ "$py" = "$rb" ] || { echo "  FAIL the two norm() implementations disagree on [$probe]: setup-hooks=[$py] checker=[$rb]"; ok=0; norm_agrees=0; }
     done
     [ "$norm_agrees" -eq 1 ] && echo "  ok   setup-hooks and check-hooks-registered normalize a path identically"
+
+    # DND-887: a wiring is keyed on (event, matcher, script). Two registry rows
+    # for ONE script on ONE event with different matchers are two wirings; keyed
+    # on (event, script) the second collapsed into the first, was never
+    # installed, and the checker could not see it. Every case below drives the
+    # SHIPPED installer and checker against a two-row registry.
+    tworeg="${tmp}/two-matcher-registry.json"
+    printf '%s\n' '{ "hooks": [
+      { "event": "PreToolUse", "matcher": "Bash",       "script": "ai/hooks/dnd-887-two-matchers.sh" },
+      { "event": "PreToolUse", "matcher": "Edit|Write", "script": "ai/hooks/dnd-887-two-matchers.sh" } ] }' > "$tworeg"
+    # These cases get their own fixture repo, whose LANDED registry is the
+    # two-row one and whose main checkout has the script. Since DND-743 the
+    # checker bars on what landed (a row only the branch declares is pending,
+    # never drift) and --install skips a script the main checkout lacks, so a
+    # synthetic registry that is neither landed nor on disk proves nothing.
+    fix887="${tmp}/fixture-887"
+    landed_fixture "$REPO_DIR" "$fix887" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks \
+      || { echo "  FAIL could not build the DND-887 fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
+    fix887="$(cd -- "$fix887" && pwd -P)"
+    printf '#!/bin/sh\nexit 0\n' > "${fix887}/ai/hooks/dnd-887-two-matchers.sh"
+    chmod +x "${fix887}/ai/hooks/dnd-887-two-matchers.sh"
+    cp "$tworeg" "${fix887}/ai/hooks/registry.json"
+    landed_fixture_land "$fix887" || { echo "  FAIL could not land the two-row registry in the DND-887 fixture"; echo "SELF-TEST FAILED"; exit 1; }
+    tworeg="${fix887}/ai/hooks/registry.json"
+    main_fix_repo="$HOOKS_REPO_DIR"; main_fix_checker="$CHECKER"
+    HOOKS_REPO_DIR="$fix887"; CHECKER="${fix887}/ai/bin/check-hooks-registered"
+    two="${tmp}/settings-two.json"
+    printf '{}\n' > "$two"
+    # matchers_of <settings>: the sorted PreToolUse matchers the script is wired under.
+    matchers_of() {
+      SETTINGS="$1" python3 - <<'PY3'
+import json, os
+s = json.load(open(os.environ["SETTINGS"]))
+ms = sorted(m.get("matcher", "") for m in s.get("hooks", {}).get("PreToolUse", [])
+            for h in m.get("hooks", []) if h.get("command", "").endswith("/dnd-887-two-matchers.sh"))
+print(",".join(ms))
+PY3
+    }
+    two_check() { HOOKS_REGISTRY_FILE="$tworeg" HOOKS_SETTINGS_FILE="$1" "$CHECKER" 2>&1; }
+    REGISTRY="$tworeg" apply install "$two" 0 >/dev/null
+    [ "$(matchers_of "$two")" = "Bash,Edit|Write" ] \
+      && echo "  ok   two same-script rows with different matchers are both installed" \
+      || { echo "  FAIL both matcher rows must be installed, got [$(matchers_of "$two")]"; ok=0; }
+    two_check "$two" >/dev/null \
+      && echo "  ok   the checker passes with both matcher rows wired" \
+      || { echo "  FAIL the checker must pass with both matcher rows wired"; ok=0; }
+    rt="$(REGISTRY="$tworeg" apply install "$two" 0)"
+    grep -q "MARKER:nochange" <<<"$rt" \
+      && echo "  ok   a second install of the two-matcher registry changes nothing" \
+      || { echo "  FAIL a second install must be a no-op: $rt"; ok=0; }
+    # Sabotage: remove one of the two wirings; the checker must go red, naming it.
+    sab="${tmp}/settings-sabotaged.json"
+    SRC="$two" DST="$sab" python3 - <<'PY3'
+import json, os
+s = json.load(open(os.environ["SRC"]))
+s["hooks"]["PreToolUse"] = [m for m in s["hooks"]["PreToolUse"] if m.get("matcher") != "Edit|Write"]
+json.dump(s, open(os.environ["DST"], "w"), indent=4)
+PY3
+    if out="$(two_check "$sab")"; then
+      echo "  FAIL the checker must go red when one matcher row is removed"; ok=0
+    elif grep -q '"Edit|Write"' <<<"$out" && grep -q 'dnd-887-two-matchers.sh' <<<"$out"; then
+      echo "  ok   one matcher row removed -> checker red, naming it"
+    else
+      echo "  FAIL the red checker must name the missing matcher row: $out"; ok=0
+    fi
+    # Migration: a file the OLD keying installed holds ONE wiring where the
+    # registry now has two (that is exactly the sabotaged file). It must read
+    # as drift, and --install must add the missing row, not report "wired".
+    mig="${tmp}/settings-migration.json"
+    cp "$sab" "$mig"
+    rmig="$(REGISTRY="$tworeg" apply install "$mig" 0)"
+    grep -q "MARKER:changed" <<<"$rmig" && [ "$(matchers_of "$mig")" = "Bash,Edit|Write" ] \
+      && echo "  ok   an old-keying file (one row of two) is migrated by --install" \
+      || { echo "  FAIL --install must add the row the old keying dropped: $rmig"; ok=0; }
+    # Stale matcher: the script wired under a matcher the registry does not
+    # declare for it (DND-840's one combined matcher, before the split). The
+    # checker names it; --install replaces it rather than leaving it to
+    # double-fire beside the declared rows.
+    stale="${tmp}/settings-stale.json"
+    printf '%s\n' "{ \"hooks\": { \"PreToolUse\": [ { \"matcher\": \"Bash|Edit|Write\", \"hooks\": [ { \"type\": \"command\", \"command\": \"${HOOKS_REPO_DIR}/ai/hooks/dnd-887-two-matchers.sh\" } ] } ] } }" > "$stale"
+    if out="$(two_check "$stale")"; then
+      echo "  FAIL the checker must go red on a stale combined matcher"; ok=0
+    else
+      grep -q '"Bash|Edit|Write"' <<<"$out" \
+        && echo "  ok   a stale matcher wiring is named by the checker" \
+        || { echo "  FAIL the red checker must name the stale matcher: $out"; ok=0; }
+    fi
+    REGISTRY="$tworeg" apply install "$stale" 0 >/dev/null
+    [ "$(matchers_of "$stale")" = "Bash,Edit|Write" ] && two_check "$stale" >/dev/null \
+      && echo "  ok   --install replaces a stale matcher with the declared rows" \
+      || { echo "  FAIL --install must leave exactly the declared rows, got [$(matchers_of "$stale")]"; ok=0; }
+    # Replacing a stale matcher REMOVES a live wiring, so it is a main-checkout
+    # operation, like wiring a new script (DND-743). From any other registry --
+    # a worktree's branch copy, or a HOOKS_REGISTRY_FILE -- --install must not
+    # narrow or drop a live guard before the branch lands: it keeps the stale
+    # wiring and names it (DND-887 critic, the DND-670 path in reverse).
+    offreg="${tmp}/off-main-two-matcher-registry.json"
+    cp "$tworeg" "$offreg"
+    kept="${tmp}/settings-stale-off-main.json"
+    printf '%s\n' "{ \"hooks\": { \"PreToolUse\": [ { \"matcher\": \"Bash|Edit|Write\", \"hooks\": [ { \"type\": \"command\", \"command\": \"${HOOKS_REPO_DIR}/ai/hooks/dnd-887-two-matchers.sh\" } ] } ] } }" > "$kept"
+    rk="$(REGISTRY="$offreg" apply install "$kept" 0)"
+    km="$(matchers_of "$kept")"
+    if [ "$km" = "Bash,Bash|Edit|Write,Edit|Write" ] && grep -q "stale matcher kept" <<<"$rk"; then
+      echo "  ok   --install from a registry that is not the main checkout's keeps a stale wiring and names it"
+    else
+      echo "  FAIL --install from a non-main registry must keep the stale wiring and name it, got [$km]: $rk"; ok=0
+    fi
+    # Match-all spellings: an omitted matcher, "" and "*" all satisfy a "" row,
+    # in the installer exactly as in the checker (the two mnorm()s must agree;
+    # the checker's own suite pins its side).
+    allreg="${tmp}/match-all-registry.json"
+    printf '%s\n' '{ "hooks": [ { "event": "SessionStart", "matcher": "", "script": "ai/hooks/dnd-887-two-matchers.sh" } ] }' > "$allreg"
+    allok=1
+    for spelling in '' '"matcher": "", ' '"matcher": "*", '; do
+      f="${tmp}/settings-match-all.json"
+      printf '%s\n' "{ \"hooks\": { \"SessionStart\": [ { ${spelling}\"hooks\": [ { \"type\": \"command\", \"command\": \"${HOOKS_REPO_DIR}/ai/hooks/dnd-887-two-matchers.sh\" } ] } ] } }" > "$f"
+      r="$(REGISTRY="$allreg" apply install "$f" 0)"
+      grep -q "MARKER:nochange" <<<"$r" || { echo "  FAIL install must treat [${spelling:-omitted}] as the registry's \"\" matcher: $r"; ok=0; allok=0; }
+    done
+    [ "$allok" -eq 1 ] && echo "  ok   install treats an omitted / \"\" / \"*\" matcher as the registry's \"\""
+    # Replacing a stale wiring is a MERGE: an unrelated group on the same event
+    # -- here one already empty before install ran -- is left exactly as found.
+    bystander="${tmp}/settings-bystander.json"
+    printf '%s\n' "{ \"hooks\": { \"PreToolUse\": [ { \"matcher\": \"Unrelated\", \"hooks\": [] }, { \"matcher\": \"Bash|Edit|Write\", \"hooks\": [ { \"type\": \"command\", \"command\": \"${HOOKS_REPO_DIR}/ai/hooks/dnd-887-two-matchers.sh\" } ] } ] } }" > "$bystander"
+    REGISTRY="$tworeg" apply install "$bystander" 0 >/dev/null
+    SETTINGS="$bystander" python3 - <<'PY3' \
+      && echo "  ok   replacing a stale matcher leaves unrelated groups on the event alone" \
+      || { echo "  FAIL replacing a stale matcher removed an unrelated group"; ok=0; }
+import json, os, sys
+s = json.load(open(os.environ["SETTINGS"]))
+sys.exit(0 if any(m.get("matcher") == "Unrelated" for m in s["hooks"]["PreToolUse"]) else 1)
+PY3
+    HOOKS_REPO_DIR="$main_fix_repo"; CHECKER="$main_fix_checker"
 
     # Worktree safety: the wired commands must point at the MAIN checkout, so
     # they survive `wt` cleanup of whatever worktree this was run from.

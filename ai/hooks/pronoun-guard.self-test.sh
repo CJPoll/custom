@@ -193,6 +193,37 @@ check "6d. no tool_input key -> allow (fail-open)" allow
 run '{"tool_name":"Bash","tool_input":null}'
 check "6e. null tool_input -> allow" allow
 
+# ---- registration: the registry's matcher is the owner-decided scope (DND-932) ----
+# pronoun-guard.sh never checks the tool name, so its registry matcher IS its
+# scope. Owner decision (Cody, 2026-09-27 ~07:40Z): "Write tools only" -- the
+# five Notion write tools the live settings wire, plus Bash and SendMessage.
+REGISTRY="$(dirname "$HOOK")/registry.json"
+WANT='Bash|SendMessage|mcp__notion-(work|personal)__(API-post-page|API-patch-block-children|API-update-page-markdown|API-patch-page|API-create-a-comment)'
+if REG_OUT=$(REGISTRY="$REGISTRY" WANT="$WANT" python3 - 2>&1 <<'PY'
+import json, os, re, sys
+rows = [e for e in json.load(open(os.environ["REGISTRY"]))["hooks"]
+        if e["script"] == "ai/hooks/pronoun-guard.sh"]
+if [(e["event"], e["matcher"]) for e in rows] != [("PreToolUse", os.environ["WANT"])]:
+    sys.exit("pronoun-guard rows are %r, want one PreToolUse row with matcher %r"
+             % ([(e["event"], e["matcher"]) for e in rows], os.environ["WANT"]))
+m = rows[0]["matcher"]
+routed = ["Bash", "SendMessage"] + ["mcp__notion-%s__%s" % (c, t) for c in ("work", "personal")
+          for t in ("API-post-page", "API-patch-block-children", "API-update-page-markdown",
+                    "API-patch-page", "API-create-a-comment")]
+not_routed = ["mcp__notion-work__API-retrieve-a-page", "mcp__notion-personal__API-query-data-source",
+              "mcp__notion-work__API-post-search", "Edit"]
+bad = [n for n in routed if not re.fullmatch("(?:%s)" % m, n)] + \
+      ["%s (should not route)" % n for n in not_routed if re.fullmatch("(?:%s)" % m, n)]
+sys.exit("routing wrong for: %s" % ", ".join(bad) if bad else 0)
+PY
+); then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "9a. registry routes pronoun-guard on Bash, SendMessage and the five Notion write tools only"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "9a. registry routes pronoun-guard on Bash, SendMessage and the five Notion write tools only"
+  echo "      $REG_OUT"
+  echo "      Fix: set the pronoun-guard row's matcher in ai/hooks/registry.json to exactly the WANT string above (owner decision, DND-932)."
+fi
+
 echo
 echo "----- evidence: block-then-allow for the same message -----"
 echo "first send  (deny):  $FIRST_DENY_OUT"

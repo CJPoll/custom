@@ -238,6 +238,11 @@ if [ "${RC}" -eq 1 ]; then ok "a malformed --tickets is a usage error"; else bad
 jq -n --arg t "Inbox client wedge [wedge:${SIG8}]: stalled at tls" --arg b "Signature: ${SIG}" '[{id:"DND-1",status:"Done",title:$t,body:$b}]' >"${TMP}/done.json"
 run --message "${MSG}" --tickets "${TMP}/done.json" --now "${NOW}"
 if [ "$(field "${OUT}" decision)" = "create" ]; then ok "a Done ticket is not matched: a recurrence after the fix files a new ticket"; else bad "a Done ticket is not matched" "${OUT}"; fi
+# DND-979: Won't Fix is a closing status, so the closed ticket is never
+# matched or incremented. A recurrence files a new ticket, as after Done.
+jq -n --arg t "Inbox client wedge [wedge:${SIG8}]: stalled at tls" --arg b "Signature: ${SIG}" '[{id:"DND-1",status:"Won'"'"'t Fix",title:$t,body:$b}]' >"${TMP}/wontfix.json"
+run --message "${MSG}" --tickets "${TMP}/wontfix.json" --now "${NOW}"
+if [ "$(field "${OUT}" decision)" = "create" ]; then ok "a Won't Fix ticket is not matched: it is closed, never incremented"; else bad "a Won't Fix ticket is not matched" "${OUT}"; fi
 jq -n --arg t "Inbox client wedge [wedge:${SIG8}]: stalled at tls" '[{id:"DND-1",status:"Todo",title:$t,body:""},{id:"DND-2",status:"Todo",title:$t,body:""}]' >"${TMP}/twoopen.json"
 run --message "${MSG}" --tickets "${TMP}/twoopen.json" --now "${NOW}"
 if [ "${RC}" -eq 3 ] && grep -q 'DND-1, DND-2' <<<"${ERR}" && [ "$(field "${OUT}" refusal)" = "ambiguous" ]; then ok "two open tickets with one signature are refused, named"; else bad "two open tickets with one signature are refused" "rc=${RC} ${ERR}"; fi

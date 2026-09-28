@@ -200,7 +200,9 @@ Fleet: read the architect's `Depends On`↔`Blocks` edges rather than rebuilding
 map, and feed any dependency a captain later surfaces back to the architect.
 Standalone: query Notion for the in-scope Missions, determine which are unblocked,
 and build a dependency map — you need it for MR merge-target sequencing regardless
-of whether new dependencies surface later.
+of whether new dependencies surface later. Assign captains in tier order, and
+file findings with their properties: [[athena:ticket-management]] →
+*Priority: critical path first*.
 
 ### 3. Tracking state (the anchor many steps cite)
 

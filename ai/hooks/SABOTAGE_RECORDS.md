@@ -744,3 +744,28 @@ After the fix: `RESULT: 258 passed, 0 failed`.
 | --- | --- |
 | drop the inline-setting deny | AC1-AC3 |
 | ignore help.autocorrect read from config | AC5, AC8 |
+
+## 2026-09-26 — DND-560, fleet-lifecycle hook and the drain guard's spawn_denied
+
+- **Domain:** the fleet-worker lifecycle reporter (`ai/hooks/fleet-lifecycle.sh`)
+  and the drain guard's new `agent_end spawn_denied` report
+  (`ai/hooks/fleet-drain-guard.sh`).
+- **Suite run:** `bash ai/hooks/fleet-lifecycle.self-test.sh` and
+  `bash ai/hooks/fleet-drain-guard.self-test.sh` (loopback fake server,
+  `mktemp -d` state; never prod). Restored with `git checkout --` each time.
+- **Fail-first (domain, before `ai/lib/fleet/domain.sh` had the lifecycle
+  functions):** `FLEET_SELF_TEST_ONLY=domain bash ai/lib/fleet/test/self-test.sh`
+  gave `110 passed, 79 failed`; after, `189 passed, 0 failed`. The large-prompt
+  cases failed first too (`ref: a 200 KB prompt still parses` expected
+  `mapped DND-77`, got `unmapped`) while the prompt rode jq's argv.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND560-1 | The top-level StopFailure skip (`no agent_id -> exit 0`) removed | `StopFailure without agent_id: not a failure either (nothing logged)` |
+| S-DND560-2 | The unmapped notice also prints `permissionDecision: "allow"` | `unmapped: stdout is exactly one PreToolUse additionalContext`, `unmapped: no permissionDecision anywhere in stdout` |
+| S-DND560-3 | The `trap 'exit 0' EXIT` removed and the jq-missing refusal exits 1 | `jq missing: exit 0, no stdout` |
+| S-DND560-4 | `setsid -f` (detached) replaced by `setsid -w` (waits) | `never adds latency: returned in 3127 ms while the server sleeps 3 s` |
+| S-DND560-5 | PostToolUseFailure's class read with `fleet_error_class` instead of the failure text's `error type` | the b1.5, b2.8 and b3.4 replays: `sends exactly the contract body` |
+| S-DND560-6 | The unmapped failure-log line not written | `unmapped: one failure-log line`, `... carries Fix:`, `... names the spawn` |
+| S-DND560-7 | `--caller-agent-id` dropped from a nested spawn | the b1.3 replay: `sends exactly the contract body` |
+| S-DND560-8 | The drain guard's `report_denied` call removed | `the two denies above each sent one report`, `the deny sent exactly one fleet report`, `that report is agent_end spawn_denied …` (6 FAIL) |

@@ -67,6 +67,7 @@ tools:
   forge-preflight:         { class: readOnly, reason: probe }
   harness-signals:         { class: readOnly, reason: signals }
   lead-time:               { class: readOnly, reason: analysis }
+  next-mission:            { class: readOnly, reason: query }
   push-actor-check:        { class: readOnly, reason: query }
   ready-and-idle:          { class: readOnly, reason: analysis }
 
@@ -128,13 +129,20 @@ tools:
   # is classified destructive. FLAGGED for owner ratification (DND-172); shipped
   # destructive because over-restrictive is the safe direction for C2's gating.
   notion-athena-mcp:       { class: destructive, reason: mcp }
+  # owner-notes (DND-988) writes only a machine-local file, but a note it
+  # appends is `Authority:` for the shipwright cron's next harness change: by
+  # worst-case capability it grants policy authority to something else. Local
+  # --list/--path reads are harmless; the class follows --add.
+  owner-notes:             { class: destructive, reason: authority }
   # test-slot (DND-485) runs an arbitrary caller-supplied CMD once a machine
   # slot is free. Its own writes are local pool state, but by worst-case
   # capability it executes whatever CMD is: classifying it lower would let a
   # phase that permits only readOnly/idempotent tools run `test-slot -- <any
   # destructive command>`. Destructive until a phase gate can classify by the
-  # wrapped CMD; DND-486 (wiring into integration-gate / captain Verify) must
-  # account for this.
+  # wrapped CMD. DND-486 wires it into integration-gate, which stays
+  # idempotent: it passes test-slot only the gate it would have run unslotted
+  # (the landed target's declared gate or a vetted --gate), so its capability
+  # is unchanged.
   test-slot:               { class: destructive, reason: wrapper }
 
   # --- skill executables (DND-508), keyed by their path under ai/ ---
@@ -152,10 +160,13 @@ tools:
   # idempotent: local state only. inbox-wait provisions this machine's doorbell
   # files; slack read-inbox advances its own seen-state file; integration-gate
   # fetches and runs the gate (--gate), which writes ai/eval/scorecard.json like
-  # harness-gate does.
+  # harness-gate does. epic-clustering reads Notion and writes only the files
+  # its caller names (a proof snapshot, Block Kit JSON); it never writes Notion
+  # or Slack.
   skills/athena:inbox/bin/inbox-wait:                 { class: idempotent, reason: doorbell }
   skills/athena:slack/bin/read-inbox:                 { class: idempotent, reason: state }
   skills/athena:merge-boarding/scripts/integration-gate: { class: idempotent, reason: gate }
+  skills/athena:epic-clustering/scripts/epic-clustering: { class: idempotent, reason: snapshot }
   skills/athena:merge-boarding/scripts/locked-merge: { class: destructive, reason: forge }
   # destructive: Slack writes, routed mail through the Athena server, and the
   # inbox ack, which consumes messages from a view other sessions share (see the
@@ -171,3 +182,8 @@ tools:
   skills/athena:slack/bin/status:                     { class: destructive, reason: slack }
   skills/athena:slack/bin/update:                     { class: destructive, reason: slack }
   skills/athena:slack/bin/upload:                     { class: destructive, reason: slack }
+  # finding-triage (DND-713) only READS Notion (its Notion effect refuses any
+  # other request), but it posts the finding to the Athena server, which records
+  # a judgment_calls row (and, with a key, spends TypeSafe budget). External
+  # state, so destructive, like judgment-eval.
+  skills/athena:ticket-management/scripts/finding-triage: { class: destructive, reason: judgments }

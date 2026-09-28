@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # setup-inbox-registry — materialise the Athena Inbox tenancy registry

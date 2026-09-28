@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # harness-gate — run the whole shipwright gate in one shot, in the verified-
@@ -32,6 +32,9 @@ require "open3"
 require "fileutils"
 require "tmpdir"
 require "stringio"
+require "json"
+require "etc"
+require "shellwords"
 require_relative "../lib/first_party"
 require_relative "../lib/landed"
 
@@ -69,6 +72,10 @@ STATIC_CHECKS = [
   # matrix is a dedicated .self-test.sh; the fleet-control suite
   # (ai/lib/fleet/test/control/self-test.sh) is discovered, not declared.
   ["fleet-drain-guard self-test", %w[ai/hooks/fleet-drain-guard.self-test.sh]],
+  # fleet-lifecycle (DND-560): the PreToolUse/PostToolUse/PostToolUseFailure
+  # (Agent|Task), SubagentStart/Stop and StopFailure lifecycle reporter. Replays
+  # DND-541's measured payloads against the loopback fake server (never prod).
+  ["fleet-lifecycle hook self-test", %w[ai/hooks/fleet-lifecycle.self-test.sh]],
   ["athena-inbox-poll self-test", %w[ai/hooks/athena-inbox-poll.self-test.sh]],
   # flaky-marker-sweep is a SessionStart side-effect hook (DND-277): it ages out
   # a >12h-stale flaky-coordinator marker, independent of lane activity. Its
@@ -93,10 +100,13 @@ STATIC_CHECKS = [
   # green when negated. Hermetic (fixtures + a live 141 reproduction).
   ["check-pipefail-grep",       %w[ai/bin/check-pipefail-grep]],
   ["check-pipefail-grep self-test", %w[ai/bin/check-pipefail-grep --self-test]],
-  # The harness Ruby floor (2.7, the desktop's pinned Ruby). A laptop on 3.4
-  # passed Ruby-3-only syntax through this gate 96/96 and it bounced from the
-  # desktop train as a SyntaxError (DND-710, 2026-09-27). Exact on a 2.7 host,
-  # a Prism AST search on a newer one; no measuring mode is exit 3, not a pass.
+  # The harness Ruby floor, 3.4 (owner decision 2026-09-27, DND-931; it was a
+  # 2.7 floor from d8885f80 until then). Every harness Ruby executable carries
+  # the absolute `#!/usr/bin/ruby` shebang, so asdf's per-directory pin in
+  # another project (~/dev/shenron: 2.7.0) cannot pick its Ruby; that shebang,
+  # run from a 2.7.8-pinned dir, must report 3.4+; every Ruby file must parse
+  # under 3.4. The floor is ratcheted against what landed; a bar it cannot
+  # read is exit 3, not a pass.
   ["check-ruby-floor",          %w[ai/bin/check-ruby-floor]],
   ["check-ruby-floor self-test", %w[ai/bin/check-ruby-floor --self-test]],
   ["check-tool-risk",           %w[ai/bin/check-tool-risk]],
@@ -222,11 +232,15 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/bin/fleet-control"         => "ai/lib/fleet/test/control/self-test.sh",
   "ai/bin/fleet-report"          => "ai/lib/fleet/test/self-test.sh",
   "ai/bin/fleet-resume"          => "ai/lib/fleet/test/resume/self-test.sh",
+  "ai/bin/next-mission"          => "ai/lib/test/next-mission/self-test.sh",
   "ai/bin/test-slot"             => "ai/test/test-slot/self-test.sh",
   "ai/hooks/fleet-drain-guard.sh"     => "ai/hooks/fleet-drain-guard.self-test.sh",
+  "ai/hooks/fleet-lifecycle.sh"       => "ai/hooks/fleet-lifecycle.self-test.sh",
   "ai/hooks/fleet-report.sh"          => "ai/hooks/fleet-report.self-test.sh",
   "ai/hooks/inbox-untrusted-guard.sh" => "ai/hooks/inbox-untrusted-guard.self-test.sh",
   "ai/hooks/workflow-phase-guard.sh"  => "ai/hooks/workflow-phase-guard.self-test.sh",
+  "ai/skills/athena:epic-clustering/scripts/epic-clustering" =>
+    "ai/skills/athena:epic-clustering/test/self-test.sh",
   "ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" =>
     "ai/skills/athena:inbox-attend/test/self-test.sh",
   "ai/skills/athena:merge-boarding/scripts/integration-gate" =>
@@ -752,23 +766,179 @@ ensure
   saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
 
+# ---------------------------------------------------------------------------
+# PARALLEL EXECUTION (lead time)
+#
+# The gate ran its ~100 checks one after another: 13.4 min median, at 0.48
+# CPU-seconds per second, because the slow suites mostly wait on their own
+# 1-6 s timeouts. Measured 2026-09-27
+# (ai-artifacts/coordination/2026-09-27-gate-timing-parallelism.md). The checks
+# are already hermetic: three gates in three worktrees run concurrently every
+# day. So the gate runs them on a bounded worker pool. The set of checks, each
+# check's argv and environment, and "one red check fails the gate" are
+# unchanged. Only the schedule changes.
+#
+# Three ordering edges survive parallelism:
+# - PRE_POOL checks run before the pool starts. check-inotify-headroom measures
+#   the machine's live inotify instances; run beside suites that hold instances,
+#   it would measure its siblings.
+# - CHAINS run in one worker, in order. check-agent-size reads the rendered
+#   agent files, so it follows build-agents --check.
+# - FINAL_CHECKS run after the pool drains (check-inbox-mock-orphans backstops
+#   every suite that starts mock clients).
+PRE_POOL_LABELS = ["check-inotify-headroom"].freeze
+CHAINS = [["build-agents --check", "check-agent-size"]].freeze
+
+# Results are keyed by label, and every ordering edge above is matched by
+# label. So a duplicate label would let one check's result overwrite
+# another's, and a renamed check would silently drop its edge. Both are
+# refused before anything runs. Returns one message per problem; [] is sound.
+def schedule_errors(checks)
+  labels = checks.map(&:first)
+  dups = labels.tally.select { |_, n| n > 1 }.keys
+  errors = dups.map { |l| "label #{l.inspect} is declared #{labels.count(l)} times" }
+  edge_labels = PRE_POOL_LABELS + CHAINS.flatten + FINAL_CHECKS.map(&:first)
+  errors + (edge_labels - labels).map { |l| "ordering edge names #{l.inspect}, which no declared check has" }
+end
+
+# Workers: HARNESS_GATE_JOBS, else half the cores, capped at 8. At 8 workers the
+# measured makespan equals the longest suite (~124 s), so more buys nothing.
+# test-slot still caps how many gates run at once; this is per gate.
+def gate_jobs(env = ENV, cores: Etc.nprocessors)
+  raw = env["HARNESS_GATE_JOBS"]
+  return [[cores / 2, 1].max, 8].min if raw.nil? || raw.empty?
+  raise ArgumentError, "HARNESS_GATE_JOBS=#{raw.inspect} is not a positive integer" unless raw.match?(/\A[1-9]\d*\z/)
+
+  raw.to_i
+end
+
+# Per-check timings, one JSON line per check per run, so a slow gate can be
+# explained from records (Cody, 2026-09-27: "our tooling should always have
+# observability baked in"). The same file orders the next run longest-first.
+def timings_path(env = ENV)
+  base = env["XDG_STATE_HOME"].to_s.empty? ? File.join(Dir.home, ".local/state") : env["XDG_STATE_HOME"]
+  File.join(base, "athena/harness-gate/timings.jsonl")
+end
+
+# label -> last recorded wall_s. Unreadable or absent -> {} (every check is
+# then "unknown" and scheduled first, the safe order for a long unknown).
+def last_durations(path)
+  return {} unless File.readable?(path)
+
+  File.foreach(path).each_with_object({}) do |line, h|
+    rec = JSON.parse(line) rescue next
+    h[rec["label"]] = rec["wall_s"].to_f if rec.is_a?(Hash) && rec["label"]
+  end
+end
+
+# ~100 rows per run; keep about a week of runs, so the file (read in full on
+# every run) stays near 2 MB instead of growing without bound.
+TIMINGS_MAX_ROWS = 60_000
+TIMINGS_KEEP_ROWS = 40_000
+
+def record_timings(path, rows)
+  FileUtils.mkdir_p(File.dirname(path))
+  File.open(path, "a") { |f| rows.each { |r| f.puts(JSON.generate(r)) } }
+  lines = File.readlines(path)
+  if lines.size > TIMINGS_MAX_ROWS
+    tmp = "#{path}.#{Process.pid}.tmp"
+    File.write(tmp, lines.last(TIMINGS_KEEP_ROWS).join)
+    File.rename(tmp, path)
+  end
+  nil
+rescue SystemCallError => e
+  warn "harness-gate: NOTE — could not record per-check timings to #{path} (#{e.class}: #{e.message}); " \
+       "the verdict is unaffected. Fix: make #{File.dirname(path)} writable."
+  nil
+end
+
+# Split checks into [pre, pooled_units, final]. A unit is an array of [label,
+# argv] run in order by one worker. Every check lands in exactly one place.
+def gate_units(checks)
+  final_labels = FINAL_CHECKS.map(&:first)
+  pre = checks.select { |(l, _)| PRE_POOL_LABELS.include?(l) }
+  final = checks.select { |(l, _)| final_labels.include?(l) }
+  rest = checks.reject { |(l, _)| PRE_POOL_LABELS.include?(l) || final_labels.include?(l) }
+  by_label = rest.to_h { |c| [c.first, c] }
+  chained = CHAINS.flatten
+  units = CHAINS.map { |chain| chain.filter_map { |l| by_label[l] } }.reject(&:empty?)
+  units += rest.reject { |(l, _)| chained.include?(l) }.map { |c| [c] }
+  [pre, units, final]
+end
+
+# Runs units on `jobs` threads, longest-first by `durations` (unknown first).
+# Yields each finished check as [label, argv, ok, out, wall_s].
+def run_pool(units, jobs:, durations:, chdir:, env:)
+  cost = ->(u) { u.sum { |(l, _)| durations.fetch(l, Float::INFINITY) } }
+  queue = Queue.new
+  units.sort_by { |u| -cost.call(u) }.each { |u| queue << u }
+  jobs.times { queue << :done }
+  lock = Mutex.new
+  Array.new([jobs, 1].max) do
+    Thread.new do
+      while (unit = queue.pop) != :done
+        unit.each do |(label, argv)|
+          t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          ok, out = run_one(argv, chdir: chdir, env: env)
+          wall = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
+          lock.synchronize { yield [label, argv, ok, out, wall] }
+        end
+      end
+    end
+  end.each(&:join)
+end
+
 # The gate's check loop (DND-735). Reads the landed-ref pin ONCE from root's
 # origin, prints it, then runs every check in chdir with that pin in its
-# environment, printing PASS/FAIL as each finishes. The pin always replaces
-# whatever the caller exported (landed_pin_env sets both variables, or clears
-# both), so a check never measures an inherited pin. root/chdir exist for
-# --self-test case 12b: a fixture repo drives this exact loop. Returns
-# [pin_env, failures], failures being [label, argv, output] per failed check.
-def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout)
+# environment. The pin always replaces whatever the caller exported
+# (landed_pin_env sets both variables, or clears both), so a check never
+# measures an inherited pin. Checks run on a bounded pool (see PARALLEL
+# EXECUTION); results print in DECLARED order, each with its wall time, so the
+# output stays stable and diffable. root/chdir exist for --self-test case 12b:
+# a fixture repo drives this exact loop. Returns [pin_env, failures], failures
+# being [label, argv, output] per failed check, in declared order.
+def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: gate_jobs,
+               timings: timings_path)
+  dups = checks.map(&:first).tally.select { |_, n| n > 1 }.keys
+  raise ArgumentError, "run_checks: duplicate check label(s) #{dups.inspect}" unless dups.empty?
+
   pin_env, pin_probes = landed_pin_env(root)
   io.puts landed_pin_line(pin_env, pin_probes)
 
+  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  results = {}
+  run_serial = lambda do |list|
+    list.each do |(label, argv)|
+      t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      ok, out = run_one(argv, chdir: chdir, env: pin_env)
+      results[label] = [argv, ok, out, Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0]
+    end
+  end
+  pre, units, final = gate_units(checks)
+  run_serial.call(pre)
+  run_pool(units, jobs: jobs, durations: last_durations(timings), chdir: chdir, env: pin_env) do |label, argv, ok, out, wall|
+    results[label] = [argv, ok, out, wall]
+  end
+  run_serial.call(final)
+  elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
   failures = []
   checks.each do |(label, argv)|
-    ok, out = run_one(argv, chdir: chdir, env: pin_env)
-    io.printf("%-28s %s\n", label, ok ? "PASS" : "FAIL")
+    _argv, ok, out, wall = results.fetch(label) { [argv, false, "harness-gate: check never ran (scheduler fault)", 0.0] }
+    io.printf("%-28s %s %7.1fs\n", label, ok ? "PASS" : "FAIL", wall)
     failures << [label, argv, out] unless ok
   end
+
+  serial = results.values.sum { |r| r[3] }
+  slowest = results.sort_by { |_, r| -r[3] }.first(3).map { |l, r| "#{l} #{r[3].round}s" }.join(", ")
+  io.puts "harness-gate: #{checks.size} checks in #{elapsed.round(1)}s wall on #{jobs} worker(s) " \
+          "(serial sum #{serial.round(1)}s); slowest: #{slowest}; timings: #{timings}"
+  head = `git -C #{chdir.shellescape} rev-parse HEAD 2>/dev/null`.strip
+  at = Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+  record_timings(timings, results.map do |label, (_a, ok, _o, wall)|
+    { "at" => at, "tree" => chdir, "head" => head, "label" => label, "wall_s" => wall.round(2),
+      "ok" => ok, "jobs" => jobs }
+  end)
   [pin_env, failures]
 end
 
@@ -882,7 +1052,22 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
     return 1
   end
 
-  pin_env, failures = run_checks(CHECKS)
+  jobs = begin
+    gate_jobs
+  rescue ArgumentError => e
+    warn "harness-gate: usage error — #{e.message}."
+    warn "  Fix: set HARNESS_GATE_JOBS to a positive integer (worker count), or unset it " \
+         "for the default (half the cores, at most 8)."
+    return 2
+  end
+  unless (errs = schedule_errors(CHECKS)).empty?
+    warn "harness-gate: FAILED — the check schedule is unsound: #{errs.join('; ')}."
+    warn "  Fix: give every check in CHECKS a unique label, and keep PRE_POOL_LABELS, " \
+         "CHAINS and FINAL_CHECKS naming labels that exist in CHECKS (update them in " \
+         "the same change that renames a check)."
+    return 1
+  end
+  pin_env, failures = run_checks(CHECKS, jobs: jobs)
 
   moved = landed_moved_note(CUSTOM_DIR, pin_env)
   puts moved if moved
@@ -1808,7 +1993,8 @@ def run_self_test
     bogus = { Landed::PIN_SHA_ENV => "b" * 40, Landed::PIN_REPO_ENV => File.join(dir, "inherited.git") }
     loop_io = StringIO.new
     loop_env, loop_failures = with_env(bogus) do
-      run_checks([["record-pin", [record]]], root: root, chdir: dir, io: loop_io)
+      run_checks([["record-pin", [record]]], root: root, chdir: dir, io: loop_io,
+                 timings: File.join(dir, "timings.jsonl"))
     end
     saw = File.exist?(seen) ? File.read(seen).strip : "(the check never ran)"
     want = "sha=#{p_sha} repo=#{File.realpath(File.join(root, '.git'))}"
@@ -1848,7 +2034,10 @@ def run_self_test
     # 12c. The same loop with origin unreadable: the inherited pin is CLEARED
     #      for the check, not passed through.
     File.delete(seen) if File.exist?(seen)
-    with_env(bogus) { run_checks([["record-pin", [record]]], root: root, chdir: dir, io: StringIO.new) }
+    with_env(bogus) do
+      run_checks([["record-pin", [record]]], root: root, chdir: dir, io: StringIO.new,
+                 timings: File.join(dir, "timings.jsonl"))
+    end
     saw = File.exist?(seen) ? File.read(seen).strip : "(the check never ran)"
     expect.call(saw == "sha= repo=",
                 "with origin unreadable, a check run by the gate's loop saw #{saw.inspect}; " \
@@ -1897,6 +2086,109 @@ def run_self_test
 
     warn "self-test: FAIL — parse_cli(#{args.inspect}) must accept and select #{want}, got #{reason.inspect}"
     ok = false
+  end
+
+  # 13 (lead time). The parallel loop keeps every guarantee of the serial one.
+  #    A fixture drives run_checks on 4 workers:
+  #    - every check runs, exactly once;
+  #    - one red check fails the run and is reported, in declared order;
+  #    - the pre-pool check sees no sibling running, the chained pair keeps its
+  #      order, and the final check sees every other check done;
+  #    - four 1 s checks overlap (proof it is parallel at all);
+  #    - each check's wall time is printed and recorded.
+  Dir.mktmpdir("harness-gate-par") do |dir|
+    done = File.join(dir, "done")
+    started = File.join(dir, "started")
+    FileUtils.mkdir_p([done, started])
+    mk = lambda do |name, body|
+      path = File.join(dir, "#{name}.sh")
+      File.write(path, "#!/bin/sh\ntouch #{started.shellescape}/#{name}\n#{body}\n")
+      FileUtils.chmod(0o755, path)
+      [path]
+    end
+    count = "ls #{done.shellescape} | wc -l | tr -d ' '"
+    fixture = [
+      ["check-inotify-headroom", mk.call("pre", "sleep 0.3; ls #{started.shellescape} | grep -vx pre | wc -l | tr -d ' ' > #{dir}/pre-saw")],
+      ["build-agents --check", mk.call("build", "sleep 0.3; touch #{dir}/built; touch #{done}/build")],
+      ["check-agent-size", mk.call("size", "[ -f #{dir}/built ] || exit 1; touch #{done}/size")],
+      ["slow-1", mk.call("s1", "sleep 1; touch #{done}/s1")],
+      ["slow-2", mk.call("s2", "sleep 1; touch #{done}/s2")],
+      ["slow-3", mk.call("s3", "sleep 1; touch #{done}/s3")],
+      ["slow-4", mk.call("s4", "sleep 1; touch #{done}/s4")],
+      ["red-one", mk.call("red", "echo 'FAIL: fixture case'; touch #{done}/red; exit 1")],
+      ["check-inbox-mock-orphans", mk.call("final", "echo $(#{count}) > #{dir}/final-saw")],
+    ]
+    io = StringIO.new
+    timings = File.join(dir, "timings.jsonl")
+    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    _env, failures = run_checks(fixture, root: dir, chdir: dir, io: io, jobs: 4, timings: timings)
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
+    ran = Dir.children(done).sort
+    want_ran = %w[build red s1 s2 s3 s4 size]
+    lines = io.string.lines.grep(/\s(PASS|FAIL)\s+\d+\.\d+s$/).map { |l| l.split.first }
+    rows = File.exist?(timings) ? File.readlines(timings).map { |l| JSON.parse(l) } : []
+    checks13 = {
+      "every pooled check ran once (#{ran.inspect})" => ran == want_ran,
+      "exactly the red check failed (#{failures.map(&:first).inspect})" => failures.map(&:first) == ["red-one"],
+      "check-agent-size ran after build-agents --check" => failures.none? { |f| f.first == "check-agent-size" },
+      "the pre-pool check saw no other check started" => File.read(File.join(dir, "pre-saw")).strip == "0",
+      "the final check saw all #{want_ran.size} done" =>
+        File.read(File.join(dir, "final-saw")).strip == want_ran.size.to_s,
+      "four 1 s checks overlapped (took #{elapsed.round(2)}s)" => elapsed < 3.0,
+      "results printed in declared order with times (#{lines.inspect})" =>
+        lines == fixture.map { |(l, _)| l.split.first },
+      "one timing row per check (#{rows.size})" =>
+        rows.map { |r| r["label"] }.sort == fixture.map(&:first).sort && rows.all? { |r| r["wall_s"].is_a?(Numeric) },
+    }
+    checks13.each do |what, good|
+      next if good
+
+      warn "self-test: FAIL — case 13 (parallel loop): #{what}. Fix: keep run_checks' pre-pool / " \
+           "CHAINS / FINAL_CHECKS edges, declared-order output, and per-check timing rows."
+      ok = false
+    end
+  end
+
+  # 13b. The schedule is keyed by label, so the real CHECKS must have unique
+  #     labels and must name every label an ordering edge uses. A fixture with
+  #     a duplicate and a renamed edge must be refused, and run_checks itself
+  #     must refuse a duplicate rather than let one result overwrite another.
+  unless (errs = schedule_errors(CHECKS)).empty?
+    warn "self-test: FAIL — case 13b: the real CHECKS schedule is unsound: #{errs.join('; ')}"
+    ok = false
+  end
+  bad_schedule = [["a", ["x"]], ["a", ["y"]], ["check-agent-size", ["z"]]]
+  errs = schedule_errors(bad_schedule)
+  unless errs.any? { |e| e.include?('"a" is declared 2 times') } &&
+         errs.any? { |e| e.include?('"build-agents --check"') } &&
+         errs.any? { |e| e.include?('"check-inotify-headroom"') }
+    warn "self-test: FAIL — case 13b: schedule_errors missed a duplicate or a renamed edge: #{errs.inspect}"
+    ok = false
+  end
+  begin
+    run_checks(bad_schedule, root: Dir.tmpdir, chdir: Dir.tmpdir, io: StringIO.new, jobs: 1,
+                             timings: File::NULL)
+    warn "self-test: FAIL — case 13b: run_checks accepted a duplicate label"
+    ok = false
+  rescue ArgumentError
+    nil
+  end
+
+  # 14. HARNESS_GATE_JOBS: a positive integer, or the default; anything else
+  #     is refused (a typo must not silently run serial or unbounded).
+  { { "HARNESS_GATE_JOBS" => "3" } => 3, {} => [[16 / 2, 1].max, 8].min }.each do |env, want|
+    got = gate_jobs(env, cores: 16)
+    next if got == want
+
+    warn "self-test: FAIL — gate_jobs(#{env.inspect}) = #{got}, want #{want}"
+    ok = false
+  end
+  %w[0 -1 x 2.5].each do |bad|
+    gate_jobs({ "HARNESS_GATE_JOBS" => bad })
+    warn "self-test: FAIL — HARNESS_GATE_JOBS=#{bad} was accepted; it must raise"
+    ok = false
+  rescue ArgumentError
+    next
   end
 
   if ok

@@ -1,0 +1,605 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# finding-triage -- the Jev advisory for a finding about to be filed (DND-713).
+# Normative home: ~/dev/custom/ai/contracts/athena-judgments.md ->
+# *Purpose and non-goals* (finding triage) and *Finding triage: the harness
+# script*. The server is gen_saas Athena.Judgments.Triage
+# (POST /api/v1/judgments/finding_triage). The procedure that runs it is
+# athena:ticket-management -> *Before filing a finding*.
+#
+# ADVISORY ONLY. This script never writes to Notion: its Notion effect admits
+# exactly two READ requests (a data source query and a block-children list),
+# and refuses any other method or path before a byte is sent. It never closes,
+# merges, cancels or files a ticket. The filer decides.
+#
+# Buckets: DOMAIN (pure: keywords, the Notion filter, candidate shaping, the
+# output lines), EFFECTS (files, the two token sources, curl), MANAGER
+# (retrieve candidates, ask the server, render) and FRAMEWORK (argv).
+#
+# TOKENS NEVER TOUCH ARGV OR THE ENVIRONMENT. Each is read in this process and
+# written into a curl config that curl reads on STDIN (`--config -`), as
+# judgment-eval and fleet-report do. The self-test proves it by scanning /proc
+# while a request is in flight. No token is ever printed.
+#
+# Deliberately gem-free (stdlib only).
+
+require "json"
+require "open3"
+require "time"
+require "tmpdir"
+require_relative "../../../lib/strict_argv"
+
+PROG = "finding-triage"
+HARNESS = File.expand_path("../../../..", __dir__)
+UNAVAILABLE_FIX = "Fix: file the ticket as today; this is advisory."
+
+USAGE = <<~EOF
+  Usage: finding-triage --title T --body-file F --project P [--tracker dnd]
+                        [--candidates-file FILE]
+         finding-triage --help
+
+  The Jev advisory for a finding about to be filed (DND-713). ADVISORY ONLY:
+  it prints advice and writes nothing anywhere but the server's own call
+  record. It never writes to Notion. The filer decides.
+
+    --title T              the finding's title (at most 300 characters are sent)
+    --body-file F          a file holding the finding's body. Only this path is
+                           read; at most 2,000 characters are sent.
+    --project P            athena | harness | walt_ui | dnd | lms | admiral.
+                           The server derives the content domain from it; an
+                           unknown project is refused (domain_not_permitted).
+    --tracker dnd          the tracker searched for candidates (only dnd today)
+    --candidates-file FILE a JSON array of {"ref","title","summary"} to use
+                           INSTEAD of the Notion search (at most 20 are sent)
+
+  Candidates are retrieved in code: a Notion query of the DND Tickets data
+  source for tickets in an epic of the same project whose title contains a
+  keyword from --title, and that are open or were edited in the last 90 days;
+  at most 20, most recently edited first. Tickets in no epic cannot be scoped
+  to a project and are not searched.
+
+  Output (stdout), always in this order:
+    "<N> candidates considered (...)" -- printed even when N is 0
+    then either the advisory:
+      "Jev advisory (not a decision) ..." and one line per candidate the
+      server judged duplicate or related AT OR ABOVE its threshold (or a line
+      saying none is), then "severity suggestion: <LEVEL> ..."
+    or one unavailable line, ending "#{UNAVAILABLE_FIX}"
+      "JUDGMENTS UNAVAILABLE: <reason>. #{UNAVAILABLE_FIX}"
+      "CANDIDATES UNAVAILABLE: <why>. #{UNAVAILABLE_FIX}"
+      "COULD NOT REACH SERVER: <why>. #{UNAVAILABLE_FIX}"
+      "SERVER REFUSED THE REQUEST: HTTP <status> <error>: <server fix>. #{UNAVAILABLE_FIX}"
+      "UNREADABLE SERVER ANSWER: ... #{UNAVAILABLE_FIX}"
+
+  Exit codes:
+    0  judged (including 0 candidates, and no duplicate found)
+    2  usage
+    3  unavailable: the judgment, the candidate search or the server; file the
+       ticket as today
+
+  The Athena server URL is the origin of the `athena` MCP entry in
+  ~/.claude.json and its token is read from
+  ~/.config/athena-inbox-client/config.json. The Notion token is the file the
+  `notion-personal` MCP entry launches with (its NOTION_ATHENA_TOKEN_FILE).
+  Both are fed to curl on stdin, never argv. Environment (optional):
+  ATHENA_INBOX_CLIENT_CONFIG, FLEET_CLAUDE_JSON, FINDING_TRIAGE_NOTION_API
+  (a loopback URL, for tests), FINDING_TRIAGE_MAX_TIME_S (per request,
+  default 60).
+EOF
+
+# A failure that ends the run: exit `code`, printing `line` (stdout for the
+# unavailable lines a filer pastes, stderr for usage).
+class Failure < StandardError
+  attr_reader :code, :stream
+
+  def initialize(code, line, stream: :stdout)
+    super(line)
+    @code = code
+    @stream = stream
+  end
+end
+
+def usage!(what, fix)
+  raise Failure.new(2, "#{PROG}: #{what}. Fix: #{fix}", stream: :stderr)
+end
+
+def candidates_unavailable!(why)
+  raise Failure.new(3, "CANDIDATES UNAVAILABLE: #{why}. #{UNAVAILABLE_FIX}")
+end
+
+def server_unreachable!(why)
+  raise Failure.new(3, "COULD NOT REACH SERVER: #{why}. #{UNAVAILABLE_FIX}")
+end
+
+def server_refused!(status, error, fix)
+  detail = [error, fix].compact.join(": ")
+  raise Failure.new(3, "SERVER REFUSED THE REQUEST: HTTP #{status}#{detail.empty? ? '' : " #{detail}"}. #{UNAVAILABLE_FIX}")
+end
+
+def judgments_unavailable!(reason)
+  raise Failure.new(3, "JUDGMENTS UNAVAILABLE: #{reason}. #{UNAVAILABLE_FIX}")
+end
+
+# ── DOMAIN (pure) ────────────────────────────────────────────────────────────
+
+module Triage
+  module_function
+
+  PROJECTS = %w[athena harness walt_ui dnd lms admiral].freeze
+  TRACKERS = %w[dnd].freeze
+  PROJECT = /\A[a-z0-9_]{1,32}\z/
+  REF = /\A[A-Za-z0-9_:.#\/-]{1,64}\z/
+  MAX_TITLE = 300
+  MAX_BODY = 2_000
+  MAX_SUMMARY = 500
+  MAX_CANDIDATES = 20
+  MAX_KEYWORDS = 8
+  RECENT_DAYS = 90
+
+  # The DND tracker (notion-personal). Read 2026-09-27.
+  TICKETS_DATA_SOURCE = "219349da-87fb-8063-8f36-000b362fbd60"
+  PROJECTS_DATA_SOURCE = "3e2349da-87fb-809a-a93e-000b167fd855"
+  OPEN_STATUSES = ["Todo", "In Progress", "Needs Attention", "Attention Given"].freeze
+  # project -> the DND Projects rows' "Repo / App" values it covers. admiral
+  # has no DND project row today, so it searches nothing, and says so.
+  REPO_APPS = {
+    "athena" => ["gen_saas / Athena", "gen_saas/apps/athena"],
+    "harness" => ["~/dev/custom"],
+    "walt_ui" => ["walt_ui"],
+    "dnd" => ["gen_saas/apps/dnd"],
+    "lms" => ["gen_saas/apps/lms"],
+    "admiral" => []
+  }.freeze
+
+  STOPWORDS = %w[
+    about after again also when where which while with without from into onto that this
+    these those there their then than have has had does done doing must should would could
+    only just never ever every each over under still some more most less many much very
+    what work fails fail failed failing issue issues ticket tickets finding using used uses
+    low medium high critical
+  ].freeze
+
+  SEVERITY_PREFIX = /\A\s*(LOW|MEDIUM|HIGH|CRITICAL)\s*:\s*/i
+  SECURITY = /\b(secret|secrets|credential|credentials|token|tokens|password|authz|authn|authori[sz]ation|authentication|injection|leak|leaks|bypass|privilege|cross-tenant|tenant)\b/i
+
+  # keywords(title) -> the words the title search uses: the severity prefix
+  # dropped, lowercased, 4+ letters, no stopwords, longest first, at most 8.
+  def keywords(title)
+    words = title.sub(SEVERITY_PREFIX, "").downcase.scan(/[a-z0-9][a-z0-9_-]{3,}/)
+    words.reject { |w| STOPWORDS.include?(w) }.uniq.sort_by { |w| [-w.length, w] }.first(MAX_KEYWORDS)
+  end
+
+  def truncate(text, max)
+    text.length > max ? text[0, max] : text
+  end
+
+  # tickets_filter(epic_ids, keywords, since) -> the Notion data source filter:
+  # in one of the epics AND a title keyword AND (open OR edited since).
+  # Two levels deep, the most Notion allows.
+  def tickets_filter(epic_ids, keywords, since)
+    {
+      "and" => [
+        { "or" => epic_ids.map { |id| { "property" => "Epic", "relation" => { "contains" => id } } } },
+        { "or" => keywords.map { |k| { "property" => "Name", "title" => { "contains" => k } } } },
+        { "or" => OPEN_STATUSES.map { |s| { "property" => "Status", "status" => { "equals" => s } } } +
+          [{ "timestamp" => "last_edited_time", "last_edited_time" => { "on_or_after" => since } }] }
+      ]
+    }
+  end
+
+  def since(now)
+    (now - (RECENT_DAYS * 86_400)).utc.strftime("%Y-%m-%d")
+  end
+
+  # epic_ids(project_rows, project) -> {ids:, missing:, truncated:}. A mapped
+  # Repo / App value no row carries is MISSING (a stale map, never an empty
+  # search). A relation Notion reports has_more on is TRUNCATED.
+  def epic_ids(project_rows, project)
+    wanted = REPO_APPS.fetch(project)
+    seen = {}
+    ids = []
+    truncated = false
+    project_rows.each do |row|
+      app = row.dig("properties", "Repo / App", "select", "name")
+      next unless wanted.include?(app)
+
+      seen[app] = true
+      rel = row.dig("properties", "Epics") || {}
+      truncated ||= rel["has_more"] == true
+      ids.concat(Array(rel["relation"]).map { |r| r["id"] }.compact)
+    end
+    { ids: ids.uniq, missing: wanted.reject { |a| seen[a] }, truncated: truncated }
+  end
+
+  # ticket(row) -> {ref:, title:, page_id:} or nil when the row has no DND id.
+  def ticket(row)
+    uid = row.dig("properties", "ID", "unique_id") || {}
+    return nil unless uid["prefix"].is_a?(String) && uid["number"].is_a?(Integer)
+
+    title = Array(row.dig("properties", "Name", "title")).map { |t| t["plain_text"].to_s }.join
+    { ref: "#{uid['prefix']}-#{uid['number']}", title: truncate(blank?(title) ? "(untitled)" : title, MAX_TITLE), page_id: row["id"] }
+  end
+
+  # blank?(text) -> true for "" and Unicode whitespace only (the server trims
+  # Unicode whitespace, so an ASCII-only strip would send a title it refuses).
+  def blank?(text)
+    text.to_s.gsub(/[[:space:]\u200B\uFEFF]/, "").empty?
+  end
+
+  # summary(blocks) -> the plain text of the first blocks, at most 500 chars.
+  def summary(blocks)
+    text = blocks.filter_map do |b|
+      rich = b.dig(b["type"].to_s, "rich_text")
+      rich.is_a?(Array) ? rich.map { |t| t["plain_text"].to_s }.join : nil
+    end.join(" ").gsub(/\s+/, " ").strip
+    truncate(text, MAX_SUMMARY)
+  end
+
+  # parse_candidates_file(text) -> [{ref:, title:, summary:}]; raises
+  # ArgumentError naming the entry at fault (never its text).
+  def parse_candidates_file(text)
+    doc = JSON.parse(text)
+    raise ArgumentError, "it is not a JSON array" unless doc.is_a?(Array)
+
+    refs = {}
+    doc.each_with_index.map do |c, i|
+      raise ArgumentError, "entry #{i} is not an object with ref, title and summary" unless c.is_a?(Hash) && c["title"].is_a?(String) && c.fetch("summary", "").is_a?(String)
+      raise ArgumentError, "entry #{i} has a blank title" if blank?(c["title"])
+      raise ArgumentError, "entry #{i} has a ref that is not an opaque id (e.g. DND-123)" unless c["ref"].is_a?(String) && REF.match?(c["ref"])
+      raise ArgumentError, "entry #{i} repeats an earlier ref" if refs[c["ref"]]
+
+      refs[c["ref"]] = true
+      { ref: c["ref"], title: truncate(c["title"], MAX_TITLE), summary: truncate(c.fetch("summary", ""), MAX_SUMMARY) }
+    end
+  rescue JSON::ParserError
+    raise ArgumentError, "it is not valid JSON"
+  end
+
+  def request_body(title, body, project, candidates)
+    {
+      "finding" => { "title" => truncate(title, MAX_TITLE), "body" => truncate(body, MAX_BODY), "project" => project },
+      "candidates" => candidates.first(MAX_CANDIDATES).map { |c| { "ref" => c[:ref], "title" => c[:title], "summary" => c[:summary] } }
+    }
+  end
+
+  def considered_line(count, scope)
+    noun = count == 1 ? "candidate" : "candidates"
+    "#{count} #{noun} considered (#{scope})"
+  end
+
+  # advisory_lines(result, titles) -> the judged output, after the count line.
+  def advisory_lines(result, titles)
+    lines = ["Jev advisory (not a decision): question set #{result['question_set_version']}, model #{result['model']}, mode #{result['mode']}"]
+    if result["mode"] != "on"
+      lines << "  mode #{result['mode']}: judged and recorded; nothing is advised until the mode is on."
+      return lines
+    end
+
+    hits = Array(result["candidates"]).select { |c| c["above_threshold"] == true && %w[duplicate related].include?(c["relation"]) }
+    if hits.empty?
+      lines << "  no candidate is a duplicate or related at or above its threshold."
+    else
+      hits.each do |c|
+        lines << format("  %s: %s (confidence %.2f) -- %s", c["ref"], c["relation"], c["confidence"].to_f, titles.fetch(c["ref"], "(title not retrieved)"))
+      end
+    end
+    sev = result["severity"] || {}
+    lines << format("  severity suggestion: %s (confidence %.2f; a suggestion, not calibrated)", sev["level"], sev["confidence"].to_f)
+    lines
+  end
+
+  def security_hint?(title, body)
+    SECURITY.match?(title) || SECURITY.match?(body)
+  end
+
+  SECURITY_HINT = "hint: this may be a security finding; security findings follow ~/.claude/CLAUDE.md -> " \
+                  "Owner approval policy -> Security fixes (a code and human call, never Jev's)."
+end
+
+# ── EFFECTS ──────────────────────────────────────────────────────────────────
+
+module Effects
+  module_function
+
+  # Notion requests this script may make: READS only. Anything else is refused
+  # before it is sent, so there is no code path to a Notion write.
+  NOTION_READS = [
+    ["POST", %r{\A/v1/data_sources/[0-9a-f-]{36}/query\z}],
+    ["GET", %r{\A/v1/blocks/[0-9a-f-]{36}/children\?page_size=\d{1,3}\z}]
+  ].freeze
+  NOTION_VERSION = "2025-09-03"
+
+  def notion_read?(method, path)
+    NOTION_READS.any? { |m, re| m == method && re.match?(path) }
+  end
+
+  def read_body_file(path)
+    usage!("--body-file #{path} does not exist", "pass the path of a file holding the finding's body") unless File.exist?(path)
+    usage!("--body-file #{path} is not a readable file", "check its permissions") unless File.file?(path) && File.readable?(path)
+    File.read(path, encoding: "UTF-8").scrub
+  end
+
+  def read_candidates_file(path)
+    usage!("--candidates-file #{path} does not exist", "pass a JSON array of {ref, title, summary}") unless File.exist?(path)
+    usage!("--candidates-file #{path} is not a readable file", "check its permissions") unless File.file?(path) && File.readable?(path)
+    File.read(path, encoding: "UTF-8").scrub
+  end
+
+  def claude_json
+    path = ENV["FLEET_CLAUDE_JSON"] || File.join(Dir.home, ".claude.json")
+    return nil unless File.exist?(path)
+
+    JSON.parse(File.read(path))
+  rescue JSON::ParserError, SystemCallError
+    nil
+  end
+
+  def main_checkout(dir)
+    out, status = Open3.capture2e("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return nil unless status.success?
+
+    common = out.strip
+    common.start_with?("/") ? common.delete_suffix("/.git") : nil
+  rescue SystemCallError
+    nil
+  end
+
+  # mcp_entry(doc, name) -> the MCP entry: local scope for this repo, then the
+  # harness repo, then user scope.
+  def mcp_entry(doc, name)
+    keys = [main_checkout(Dir.pwd), main_checkout(HARNESS)].compact.uniq
+    keys.lazy.map { |k| doc.dig("projects", k, "mcpServers", name) }.find(&:itself) || doc.dig("mcpServers", name)
+  end
+
+  # safe_origin(url) -> scheme://authority; https, or http only to loopback.
+  def safe_origin(url)
+    m = %r{\A(https?)://([^/?#@]*)(?:[/?#]|\z)}.match(url.to_s)
+    return nil unless m
+    return nil if m[1] == "http" && !/\A(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?\z/.match?(m[2])
+
+    "#{m[1]}://#{m[2]}"
+  end
+
+  # athena -> [origin, token] or server_unreachable! with the reason.
+  def athena
+    doc = claude_json
+    server_unreachable!("no readable ~/.claude.json (or FLEET_CLAUDE_JSON)") if doc.nil?
+    entry = mcp_entry(doc, "athena")
+    origin = entry.is_a?(Hash) ? safe_origin(entry["url"]) : nil
+    server_unreachable!("no athena MCP entry with an https URL (register it with scripts/add-athena-mcp)") if origin.nil?
+    [origin, athena_token]
+  end
+
+  def athena_token
+    path = ENV["ATHENA_INBOX_CLIENT_CONFIG"] || File.join(ENV["XDG_CONFIG_HOME"] || File.join(Dir.home, ".config"), "athena-inbox-client", "config.json")
+    token = begin
+      JSON.parse(File.read(path))["token"]
+    rescue JSON::ParserError, SystemCallError, TypeError, NoMethodError
+      nil
+    end
+    server_unreachable!("no machine token in #{path} (the inbox client config is owner-issued)") unless token.is_a?(String) && !token.empty?
+    token
+  end
+
+  # notion -> [origin, token] or candidates_unavailable! with the reason.
+  def notion
+    doc = claude_json
+    candidates_unavailable!("no readable ~/.claude.json to find the notion-personal MCP entry") if doc.nil?
+    entry = mcp_entry(doc, "notion-personal")
+    path = entry.is_a?(Hash) ? entry.dig("env", "NOTION_ATHENA_TOKEN_FILE") : nil
+    candidates_unavailable!("the notion-personal MCP entry names no NOTION_ATHENA_TOKEN_FILE") unless path.is_a?(String) && path.start_with?("/")
+    token = begin
+      File.read(path).strip
+    rescue SystemCallError
+      nil
+    end
+    candidates_unavailable!("the Notion token file #{path} is missing or unreadable (owner-gated)") if token.nil? || token.empty?
+    origin = ENV["FINDING_TRIAGE_NOTION_API"] ? safe_origin(ENV["FINDING_TRIAGE_NOTION_API"]) : "https://api.notion.com"
+    candidates_unavailable!("FINDING_TRIAGE_NOTION_API is not https or loopback http") if origin.nil?
+    [origin, token]
+  end
+
+  def max_time
+    value = ENV["FINDING_TRIAGE_MAX_TIME_S"].to_s
+    /\A[1-9]\d{0,3}\z/.match?(value) ? value : "60"
+  end
+
+  # request(method, url, headers, body) -> {curl_rc:, status:, body:}. Every
+  # header value (the tokens included) goes into a curl config on STDIN.
+  def request(method, url, headers, body)
+    ([url] + headers).each do |value|
+      raise Failure.new(3, "#{PROG}: a request value contains a quote, backslash or control character. #{UNAVAILABLE_FIX}") if /["\\[:cntrl:]]/.match?(value)
+    end
+    Dir.mktmpdir("finding-triage-") do |dir|
+      File.chmod(0o700, dir)
+      resp = File.join(dir, "resp")
+      config = +""
+      config << %(url = "#{url}"\n)
+      config << %(request = "#{method}"\n)
+      headers.each { |h| config << %(header = "#{h}"\n) }
+      if body
+        req = File.join(dir, "req.json")
+        File.write(req, JSON.generate(body), perm: 0o600)
+        config << %(data-binary = "@#{req}"\n)
+      end
+      config << %(output = "#{resp}"\n)
+      config << %(write-out = "%{http_code}"\n)
+      config << "connect-timeout = 10\nmax-time = #{max_time}\nsilent\n"
+      out, _err, status = Open3.capture3("curl", "--config", "-", stdin_data: config)
+      config.clear
+      { curl_rc: status.exitstatus, status: out.strip.to_i, body: File.exist?(resp) ? File.read(resp) : "" }
+    end
+  rescue Errno::ENOENT
+    raise Failure.new(3, "COULD NOT REACH SERVER: curl is not on PATH. #{UNAVAILABLE_FIX}")
+  end
+
+  # notion_read(origin, token, method, path, body) -> parsed JSON. Refuses any
+  # request that is not an allow-listed READ, before sending it.
+  def notion_read(origin, token, method, path, body = nil)
+    raise Failure.new(3, "#{PROG}: refused a Notion #{method} #{path}: this script only reads. #{UNAVAILABLE_FIX}") unless notion_read?(method, path)
+
+    headers = ["Authorization: Bearer #{token}", "Notion-Version: #{NOTION_VERSION}", "Accept: application/json"]
+    headers << "Content-Type: application/json" if body
+    reply = request(method, "#{origin}#{path}", headers, body)
+    candidates_unavailable!("could not reach Notion (curl exit #{reply[:curl_rc]})") if reply[:curl_rc] != 0
+    candidates_unavailable!("Notion answered HTTP #{reply[:status]} to #{method} #{path.sub(/\?.*/, '')}") unless reply[:status] == 200
+    JSON.parse(reply[:body])
+  rescue JSON::ParserError
+    candidates_unavailable!("Notion answered a body that is not JSON")
+  end
+
+  def athena_post(origin, token, path, body)
+    headers = ["Authorization: Bearer #{token}", "Accept: application/json", "Content-Type: application/json"]
+    request("POST", "#{origin}#{path}", headers, body)
+  end
+end
+
+# ── MANAGER ──────────────────────────────────────────────────────────────────
+
+module Manager
+  module_function
+
+  # retrieve(opts, now) -> [candidates, scope line text]
+  def retrieve(opts, now)
+    return file_candidates(opts[:candidates_file]) if opts[:candidates_file]
+
+    notion_candidates(opts, now)
+  end
+
+  def file_candidates(path)
+    list = Triage.parse_candidates_file(Effects.read_candidates_file(path))
+    dropped = [list.size - Triage::MAX_CANDIDATES, 0].max
+    scope = "from --candidates-file #{path}" + (dropped.positive? ? "; #{dropped} beyond #{Triage::MAX_CANDIDATES} not sent" : "")
+    [list.first(Triage::MAX_CANDIDATES), scope]
+  rescue ArgumentError => e
+    usage!("--candidates-file #{path}: #{e.message}", "pass a JSON array of {\"ref\", \"title\", \"summary\"}")
+  end
+
+  def notion_candidates(opts, now)
+    keywords = Triage.keywords(opts[:title])
+    base = "DND, project #{opts[:project]}, open or edited in the last #{Triage::RECENT_DAYS} days"
+    # An unknown project is sent as is: the server refuses and records it.
+    return [[], "#{base}; #{opts[:project]} is not a project this search knows, so nothing was searched"] unless Triage::REPO_APPS.key?(opts[:project])
+    return [[], "#{base}; no DND project maps to #{opts[:project]}, so nothing was searched"] if Triage::REPO_APPS.fetch(opts[:project]).empty?
+    return [[], "#{base}; the title has no search keyword of 4+ letters, so nothing was searched"] if keywords.empty?
+
+    origin, token = Effects.notion
+    projects = Effects.notion_read(origin, token, "POST", "/v1/data_sources/#{Triage::PROJECTS_DATA_SOURCE}/query", { "page_size" => 100 })
+    rows = Array(projects["results"])
+    candidates_unavailable!("the DND Projects data source returned no rows (a failed lookup, not an empty project)") if rows.empty?
+    epics = Triage.epic_ids(rows, opts[:project])
+    candidates_unavailable!("no DND Projects row has Repo / App #{epics[:missing].join(', ')} (the project map in finding-triage is stale)") unless epics[:missing].empty?
+    return [[], "#{base}; project #{opts[:project]} has no epics, so nothing was searched"] if epics[:ids].empty?
+
+    query = {
+      "filter" => Triage.tickets_filter(epics[:ids], keywords, Triage.since(now)),
+      "sorts" => [{ "timestamp" => "last_edited_time", "direction" => "descending" }],
+      "page_size" => Triage::MAX_CANDIDATES
+    }
+    found = Effects.notion_read(origin, token, "POST", "/v1/data_sources/#{Triage::TICKETS_DATA_SOURCE}/query", query)
+    tickets = Array(found["results"]).filter_map { |row| Triage.ticket(row) }.first(Triage::MAX_CANDIDATES)
+    candidates = tickets.map do |t|
+      blocks = Effects.notion_read(origin, token, "GET", "/v1/blocks/#{t[:page_id]}/children?page_size=10")
+      { ref: t[:ref], title: t[:title], summary: Triage.summary(Array(blocks["results"])) }
+    end
+    scope = "#{base}, title keywords: #{keywords.join(', ')}"
+    scope += "; more tickets matched, the #{Triage::MAX_CANDIDATES} most recently edited were sent" if found["has_more"] == true
+    scope += "; the project's epic list was truncated by Notion" if epics[:truncated]
+    [candidates, scope]
+  end
+
+  def run(opts, out)
+    body = Effects.read_body_file(opts[:body_file])
+    candidates, scope = retrieve(opts, Time.now.utc)
+    out.puts Triage.considered_line(candidates.size, scope)
+
+    origin, token = Effects.athena
+    reply = Effects.athena_post(origin, token, "/api/v1/judgments/finding_triage", Triage.request_body(opts[:title], body, opts[:project], candidates))
+    token = nil
+    result = classify(reply)
+    titles = candidates.to_h { |c| [c[:ref], c[:title]] }
+    Triage.advisory_lines(result, titles).each { |line| out.puts line }
+    out.puts Triage::SECURITY_HINT if Triage.security_hint?(opts[:title], body)
+    0
+  ensure
+    token = nil
+  end
+
+  # classify(reply) -> the judged result, or raises the unavailable Failure.
+  def classify(reply)
+    server_unreachable!("curl exit #{reply[:curl_rc]} reaching the Athena server") if reply[:curl_rc] != 0
+
+    doc = begin
+      JSON.parse(reply[:body])
+    rescue JSON::ParserError
+      nil
+    end
+    status = reply[:status]
+    if status == 200
+      return doc if doc.is_a?(Hash) && doc["status"] == "judged"
+
+      judgments_unavailable!(safe_reason(doc["reason"])) if doc.is_a?(Hash) && doc["status"] == "unavailable"
+      # Reached, answered 200, but not in the contract's shape: its own line.
+      raise Failure.new(3, "UNREADABLE SERVER ANSWER: HTTP 200 with no judged or unavailable status. #{UNAVAILABLE_FIX}")
+    end
+    error = doc.is_a?(Hash) && doc["error"].is_a?(String) ? safe_reason(doc["error"]) : nil
+    # A 4xx means the server was reached and refused: never "could not reach".
+    # Its fix names a field and position, never the caller's text. A 401 is
+    # the machine token (owner-issued; never mint one).
+    server_refused!(status, error, "the machine token was rejected; it is owner-issued, never mint one") if status == 401
+    server_refused!(status, error, safe_fix(doc)) if (400..499).cover?(status)
+    server_unreachable!("the Athena server answered HTTP #{status}#{error ? " #{error}" : ''}")
+  end
+
+  def safe_fix(doc)
+    fix = doc.is_a?(Hash) ? doc["fix"] : nil
+    fix.is_a?(String) && fix.length <= 400 && !/[[:cntrl:]]/.match?(fix) ? fix.sub(/\.\z/, "") : nil
+  end
+
+  def safe_reason(value)
+    value.is_a?(String) && /\A[a-z0-9_:]{1,64}\z/.match?(value) ? value : "unrecognized"
+  end
+end
+
+# ── FRAMEWORK ────────────────────────────────────────────────────────────────
+
+SPEC = {
+  "--help" => :switch, "-h" => :switch, "--title" => :value, "--body-file" => :value,
+  "--project" => :value, "--tracker" => :value, "--candidates-file" => :value
+}.freeze
+
+def parse_options(argv)
+  raw = StrictArgv.parse(argv, SPEC)
+  opts = {
+    title: raw["--title"] && raw["--title"].dup.force_encoding(Encoding::UTF_8).scrub, body_file: raw["--body-file"], project: raw["--project"],
+    tracker: raw.fetch("--tracker", "dnd"), candidates_file: raw["--candidates-file"]
+  }
+  usage!("--title is required", "pass the finding's title") if opts[:title].nil? || Triage.blank?(opts[:title])
+  usage!("--body-file is required", "pass a file holding the finding's body") if opts[:body_file].nil?
+  usage!("--project is required", "pass one of #{Triage::PROJECTS.join(', ')}") if opts[:project].nil?
+  usage!("--project is not a project identifier", "pass one of #{Triage::PROJECTS.join(', ')}") unless Triage::PROJECT.match?(opts[:project])
+  usage!("--tracker #{opts[:tracker]} is not supported", "only dnd is searched today") unless Triage::TRACKERS.include?(opts[:tracker])
+  opts
+rescue StrictArgv::UsageError => e
+  usage!(e.message, "run #{PROG} --help for the flags")
+end
+
+def main(argv)
+  # --help anywhere wins, before anything else runs.
+  if argv.include?("--help") || argv.include?("-h")
+    $stdout.puts USAGE
+    return 0
+  end
+
+  opts = parse_options(argv)
+  Manager.run(opts, $stdout)
+rescue Failure => e
+  (e.stream == :stderr ? $stderr : $stdout).puts e.message
+  e.code
+rescue StandardError => e
+  $stdout.puts "#{PROG}: UNEXPECTED ERROR: #{e.class}. #{UNAVAILABLE_FIX}"
+  3
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

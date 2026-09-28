@@ -70,7 +70,7 @@ DETECTOR="inbox-client-detector"
 READER="custom"
 WINDOW_S=$(( 7 * 24 * 3600 ))
 THRESHOLD=3
-CLOSED_STATUSES='["Done","Cancelled"]'
+CLOSED_STATUSES='["Done","Cancelled","Won'"'"'t Fix"]'
 
 MESSAGE=""; TICKETS=""; NOW=""; VERIFY_ONLY=0
 need() { [ $# -ge 2 ] && [ -n "$2" ] || { echo "error: $1 needs a value" >&2; echo "  Fix: see wedge-ticket-decide --help." >&2; exit 1; }; }

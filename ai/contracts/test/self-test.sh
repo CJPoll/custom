@@ -81,6 +81,18 @@ expect "unbalanced backticks cannot be measured" 2 "${TMP}/odd.md" "${TMP}/fence
 grep '^#' "${FIXTURE}" > "${TMP}/empty-fixture.txt"
 expect "an empty fixture cannot be measured" 2 "${CONTRACT}" "${TMP}/empty-fixture.txt"
 
+echo "contract refusal-quote pins (athena-judgments.md, DND-713)"
+JCONTRACT="${CONTRACTS}/athena-judgments.md"
+JFIXTURE="${CONTRACTS}/fixtures/athena-judgments-quoted-fix.txt"
+expect "real judgments contract quotes match the pinned text" 0 "${JCONTRACT}" "${JFIXTURE}"
+cp "${JCONTRACT}" "${TMP}/judgments-mutated.md"
+ruby -e 'p = ARGV[0]; File.write(p, File.read(p).sub(/file\s+the\s+ticket\s+as\s+today;\s+this\s+is\s+advisory\.`/, "file it later.`"))' "${TMP}/judgments-mutated.md"
+if cmp -s "${JCONTRACT}" "${TMP}/judgments-mutated.md"; then
+  bad "judgments mutation applied" "the pinned quote is gone from athena-judgments.md; update this test"
+else
+  expect "a reworded judgments quote is drift" 1 "${TMP}/judgments-mutated.md" "${JFIXTURE}"
+fi
+
 printf '%d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then
   echo "Fix: read the FAIL lines above; case 1 red means the contract quote and the fixture drifted (see the fixture header for which side to change)."

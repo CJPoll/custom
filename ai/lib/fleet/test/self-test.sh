@@ -161,6 +161,133 @@ if printf '%s\n' "${all_bodies}" | jq -e 'has("owner") or has("owner_id") or has
   bad "no body carries owner/machine"
 else ok "no body carries owner/machine"; fi
 
+echo "== domain: lifecycle kinds (DND-560)"
+# Contract: athena-events.md -> *Fleet report kinds and their closed schema*,
+# *Agent lifecycle*, *Mission pointers are metadata only*.
+D="${LIB}/domain.sh"
+eq "the eleven kinds" "$(printf '%s\n' ${FLEET_KINDS} | sort | tr '\n' ' ')" \
+  "admiral_scope admiral_seen admiral_started admiral_state agent_bound agent_end agent_spawn agent_start session_ended session_seen session_started "
+check "admiral state: parked"       fleet_valid_admiral_state parked
+check "admiral state: lost is not reportable" bash -c '. "$0"; ! fleet_valid_admiral_state lost' "${D}"
+check "fleet worker: athena-admiral" fleet_is_fleet_worker athena-admiral
+check "fleet worker: athena-captain" fleet_is_fleet_worker athena-captain
+for t in "" general-purpose athena-architect "athena-captain x" athena; do
+  check "not a fleet worker: ${t@Q}" bash -c '. "$0"; ! fleet_is_fleet_worker "$1"' "${D}" "${t}"
+done
+
+for r in DND-541 PT-1289 AB-1 A1-9999999 ABCDEFGHIJ-5; do
+  check "ticket ref valid: ${r}" fleet_valid_ticket_ref "${r}"
+done
+for r in "" dnd-5 DND-0 DND- DND-12345678 "DND-5:x" "DND-5 " " DND-5" A-5 ABCDEFGHIJK-5 "DND-05" $'DND-5\n'; do
+  check "ticket ref refused: ${r@Q}" bash -c '. "$0"; ! fleet_valid_ticket_ref "$1"' "${D}" "${r}"
+done
+
+# fleet_parse_ticket_ref <description> <prompt> -> "mapped <REF>" | "unmapped"
+eq "ref: description names one"      "$(fleet_parse_ticket_ref 'DND-541 captain' 'no ref here')" "mapped DND-541"
+eq "ref: the same ref twice is one"  "$(fleet_parse_ticket_ref 'DND-541 captain for DND-541' '')" "mapped DND-541"
+eq "ref: two refs in the description are ambiguous" "$(fleet_parse_ticket_ref 'DND-541 and DND-542' 'Mission: DND-9')" "unmapped"
+eq "ref: prompt Mission line when the description has none" "$(fleet_parse_ticket_ref 'captain' "$(printf 'You are a captain.\nMission: DND-9\nMission: DND-10')")" "mapped DND-9"
+eq "ref: bold **Mission:**"          "$(fleet_parse_ticket_ref 'captain' "$(printf 'x\n**Mission:** PT-1289 (MEDIUM)')")" "mapped PT-1289"
+eq "ref: bold **Mission**:"          "$(fleet_parse_ticket_ref 'captain' "$(printf '  **Mission**: DND-7')")" "mapped DND-7"
+eq "ref: neither"                    "$(fleet_parse_ticket_ref 'captain' 'do the work')" "unmapped"
+eq "ref: lower case is not a ref"    "$(fleet_parse_ticket_ref 'dnd-5 captain' 'Mission: dnd-5')" "unmapped"
+eq "ref: a ref inside a longer token does not count" "$(fleet_parse_ticket_ref 'XDND-5Y captain' '')" "unmapped"
+eq "ref: 8 digits is not a ref"      "$(fleet_parse_ticket_ref 'DND-12345678' '')" "unmapped"
+eq "ref: a Mission line mid-sentence does not count" "$(fleet_parse_ticket_ref 'captain' 'Your Mission: DND-9 is set')" "unmapped"
+eq "ref: a Mission line with a bad ref does not count" "$(fleet_parse_ticket_ref 'captain' 'Mission: DND-0')" "unmapped"
+eq "ref: refs in the prompt body alone do not count" "$(fleet_parse_ticket_ref 'captain' 'see DND-541 and PT-1')" "unmapped"
+eq "ref: punctuation is a boundary"  "$(fleet_parse_ticket_ref '[DND-560]: hook' '')" "mapped DND-560"
+
+# fleet_parse_run_hint <prompt> -> the one distinct coordination dir, else nothing (status 1)
+CP="/home/u/dev/custom/ai-artifacts/coordination"
+eq "run hint: one path"              "$(fleet_parse_run_hint "reports: ${CP}/2026-09-24-p1-fleet/reports/x.md")" "2026-09-24-p1-fleet"
+eq "run hint: the same dir twice"    "$(fleet_parse_run_hint "${CP}/r1/reports/ and ${CP}/r1/state.md")" "r1"
+eq "run hint: a relative path"       "$(fleet_parse_run_hint "write to ai-artifacts/coordination/r2/reports/")" "r2"
+eq "run hint: two distinct dirs give none" "$(fleet_parse_run_hint "${CP}/r1/reports/ ${CP}/r2/reports/")" ""
+check "run hint: none -> status 1"   bash -c '. "$0"; ! fleet_parse_run_hint "no path" >/dev/null' "${D}"
+eq "run hint: .. gives none"         "$(fleet_parse_run_hint "${CP}/../etc/x")" ""
+eq "run hint: a bad dir beside a good one gives none" "$(fleet_parse_run_hint "${CP}/r1/x ${CP}/.hidden/y")" ""
+eq "run hint: no trailing slash is not a coordination path" "$(fleet_parse_run_hint "see ai-artifacts/coordination/r1 for it")" ""
+eq "run hint: a quoted path"         "$(fleet_parse_run_hint "\`${CP}/r3/reports/\`")" "r3"
+
+# A brief longer than one argv string may be (Linux MAX_ARG_STRLEN, 128 KiB)
+# must still parse: the prompt never rides argv.
+BIG="$(head -c 200000 /dev/zero | tr '\0' 'x')"
+eq "ref: a 200 KB prompt still parses (not passed through argv)" \
+  "$(fleet_parse_ticket_ref 'captain' "$(printf '%s\nMission: DND-77\n' "${BIG}")")" "mapped DND-77"
+eq "run hint: a 200 KB prompt still parses" \
+  "$(fleet_parse_run_hint "$(printf '%s ai-artifacts/coordination/big-run/x\n' "${BIG}")")" "big-run"
+unset BIG
+
+# fleet_error_class <value> -> itself when in the measured enum, else other
+for c in rate_limit overloaded authentication_failed oauth_org_not_allowed account_on_hold \
+  verification_required billing_error invalid_request model_not_found server_error \
+  max_output_tokens cloud_credential_error unknown other; do
+  eq "error class: ${c}" "$(fleet_error_class "${c}")" "${c}"
+done
+eq "error class: teapot -> other"   "$(fleet_error_class teapot)" "other"
+eq "error class: empty -> other"    "$(fleet_error_class "")" "other"
+eq "error class: a prefix is not a member" "$(fleet_error_class rate_limit_x)" "other"
+# fleet_failure_error_class <PostToolUseFailure error text> (measured shape, DND-541 case-b1)
+MEASURED_FAIL='Agent terminated early due to an API error: API Error: Server is temporarily limiting requests (not your usage limit) · DND-541 probe injected 429 (error type rate_limit, HTTP 429, model sent to the API: claude-sonnet-5)'
+eq "failure class: measured 429 text -> rate_limit" "$(fleet_failure_error_class "${MEASURED_FAIL}")" "rate_limit"
+eq "failure class: error type unknown" "$(fleet_failure_error_class 'x (error type unknown, HTTP 400)')" "unknown"
+eq "failure class: an unlisted type -> other" "$(fleet_failure_error_class 'x (error type teapot, HTTP 418)')" "other"
+eq "failure class: no error type -> other" "$(fleet_failure_error_class 'Interrupted by user')" "other"
+eq "failure class: empty -> other"   "$(fleet_failure_error_class '')" "other"
+
+# Combination rules (closed; the server refuses the same).
+check "spawn ok: captain mapped"     fleet_agent_spawn_problem athena-captain mapped DND-5
+check "spawn ok: captain unmapped"   fleet_agent_spawn_problem athena-captain unmapped ""
+check "spawn ok: admiral n/a"        fleet_agent_spawn_problem athena-admiral not_applicable ""
+spawn_bad() { local p rc=0; p="$(fleet_agent_spawn_problem "$@")" || rc=$?; [ "${rc}" -ne 0 ] && [ -n "${p}" ]; }
+check "spawn refused: admiral mapped"       spawn_bad athena-admiral mapped DND-5
+check "spawn refused: captain not_applicable" spawn_bad athena-captain not_applicable ""
+check "spawn refused: mapped, no ref"       spawn_bad athena-captain mapped ""
+check "spawn refused: unmapped with a ref"  spawn_bad athena-captain unmapped DND-5
+check "spawn refused: bad ref grammar"      spawn_bad athena-captain mapped dnd-5
+check "spawn refused: mapping teapot"       spawn_bad athena-captain teapot ""
+check "spawn refused: general-purpose"      spawn_bad general-purpose unmapped ""
+check "end ok: stopped by agent"     fleet_agent_end_problem A "" athena-captain stopped ""
+check "end ok: api_error by agent"   fleet_agent_end_problem A "" athena-admiral api_error rate_limit
+check "end ok: spawn_failed by spawn" fleet_agent_end_problem "" T athena-captain spawn_failed other
+check "end ok: spawn_denied by spawn" fleet_agent_end_problem "" T athena-captain spawn_denied ""
+end_bad() { local p rc=0; p="$(fleet_agent_end_problem "$@")" || rc=$?; [ "${rc}" -ne 0 ] && [ -n "${p}" ]; }
+check "end refused: both keys"       end_bad A T athena-captain stopped ""
+check "end refused: neither key"     end_bad "" "" athena-captain stopped ""
+check "end refused: stopped by spawn" end_bad "" T athena-captain stopped ""
+check "end refused: spawn_denied by agent" end_bad A "" athena-captain spawn_denied ""
+check "end refused: api_error without class" end_bad A "" athena-captain api_error ""
+check "end refused: stopped with a class" end_bad A "" athena-captain stopped rate_limit
+check "end refused: class teapot"    end_bad A "" athena-captain api_error teapot
+check "end refused: outcome teapot"  end_bad A "" athena-captain teapot ""
+check "end refused: non-fleet type"  end_bad A "" general-purpose stopped ""
+
+# Body builders: exactly the contract row, optional fields omitted (never null).
+eq "body agent_spawn mapped, caller, hint" \
+  "$(fleet_body_agent_spawn S T athena-captain C mapped DND-5 r1)" \
+  '{"kind":"agent_spawn","claude_session_id":"S","tool_use_id":"T","subagent_type":"athena-captain","mapping":"mapped","caller_agent_id":"C","ticket_ref":"DND-5","run_hint":"r1"}'
+eq "body agent_spawn top-level admiral: optional fields omitted" \
+  "$(fleet_body_agent_spawn S T athena-admiral "" not_applicable "" "")" \
+  '{"kind":"agent_spawn","claude_session_id":"S","tool_use_id":"T","subagent_type":"athena-admiral","mapping":"not_applicable"}'
+eq "body agent_bound" "$(fleet_body_agent_bound S T A athena-captain)" \
+  '{"kind":"agent_bound","claude_session_id":"S","tool_use_id":"T","agent_id":"A","agent_type":"athena-captain"}'
+eq "body agent_start" "$(fleet_body_agent_start S A athena-admiral)" \
+  '{"kind":"agent_start","claude_session_id":"S","agent_id":"A","agent_type":"athena-admiral"}'
+eq "body agent_end stopped" "$(fleet_body_agent_end S A "" athena-captain stopped "")" \
+  '{"kind":"agent_end","claude_session_id":"S","agent_id":"A","agent_type":"athena-captain","outcome":"stopped"}'
+eq "body agent_end spawn_failed" "$(fleet_body_agent_end S "" T athena-captain spawn_failed rate_limit)" \
+  '{"kind":"agent_end","claude_session_id":"S","tool_use_id":"T","agent_type":"athena-captain","outcome":"spawn_failed","error_class":"rate_limit"}'
+life_bodies="$(fleet_body_agent_spawn S T athena-captain C mapped DND-5 r1; fleet_body_agent_bound S T A athena-captain
+  fleet_body_agent_start S A athena-captain; fleet_body_agent_end S A "" athena-captain api_error rate_limit)"
+if printf '%s\n' "${life_bodies}" | jq -e 'has("owner") or has("machine_id") or has("prompt") or has("description") or has("last_assistant_message") or has("transcript_path")' >/dev/null 2>&1; then
+  bad "no lifecycle body carries identity or prompt fields"
+else ok "no lifecycle body carries identity or prompt fields"; fi
+
+pinned_unmapped="$(awk '/^@section Mission pointers are metadata only$/ {s=1; next} /^@section / {s=0} s && /^fleet-lifecycle: /' "${AI}/contracts/fixtures/athena-events-quoted-fix.txt")"
+[ -n "${pinned_unmapped}" ] || bad "the fixture pins the unmapped-captain notice"
+eq "the unmapped-captain notice is the pinned line" "$(fleet_unmapped_notice)" "${pinned_unmapped}"
+
 if [ "${FLEET_SELF_TEST_ONLY:-}" = "domain" ]; then
   printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
   [ "${FAIL}" -eq 0 ] || { echo "Fix: make lib/fleet/domain.sh satisfy the failing cases above."; exit 1; }
@@ -339,6 +466,64 @@ run admiral-state --run-id r1 --state finished
 eq "admiral_state body" "$(fleet_last_request | jq -c '.body | [.kind, .run_id, .state]')" '["admiral_state","r1","finished"]'
 run session-end --reason other
 eq "session_ended body" "$(fleet_last_request | jq -c '.body | [.kind, .end_reason]')" '["session_ended","other"]'
+
+echo "== fleet-report CLI: lifecycle subcommands (DND-560)"
+run admiral-state --run-id r1 --state parked
+eq "admiral-state parked sends (0)" "${RC}" "0"
+eq "admiral_state parked body" "$(fleet_last_request | jq -c '.body | [.kind, .state]')" '["admiral_state","parked"]'
+TU="toolu_01FxUwz9M5UTfB9pfoMbBTYn"
+# The --dry-run body of each subcommand is exactly the contract row: the keys
+# below and nothing else.
+dry() { run "$@" --dry-run; printf '%s' "${OUT}"; }
+eq "agent-spawn mapped captain: exact body" \
+  "$(dry agent-spawn --tool-use-id "${TU}" --subagent-type athena-captain --caller-agent-id a81c553e42da805c2 --mapping mapped --ticket-ref DND-541 --run-hint 2026-09-24-p1-fleet)" \
+  "{\"kind\":\"agent_spawn\",\"claude_session_id\":\"${SID}\",\"tool_use_id\":\"${TU}\",\"subagent_type\":\"athena-captain\",\"mapping\":\"mapped\",\"caller_agent_id\":\"a81c553e42da805c2\",\"ticket_ref\":\"DND-541\",\"run_hint\":\"2026-09-24-p1-fleet\"}"
+eq "agent-spawn top-level admiral: exact body" \
+  "$(dry agent-spawn --subagent-type athena-admiral --mapping not_applicable --tool-use-id "${TU}")" \
+  "{\"kind\":\"agent_spawn\",\"claude_session_id\":\"${SID}\",\"tool_use_id\":\"${TU}\",\"subagent_type\":\"athena-admiral\",\"mapping\":\"not_applicable\"}"
+eq "agent-bound: exact body" "$(dry agent-bound --tool-use-id "${TU}" --agent-id a274de64afdf9e8a2 --agent-type athena-captain)" \
+  "{\"kind\":\"agent_bound\",\"claude_session_id\":\"${SID}\",\"tool_use_id\":\"${TU}\",\"agent_id\":\"a274de64afdf9e8a2\",\"agent_type\":\"athena-captain\"}"
+eq "agent-start: exact body" "$(dry agent-start --agent-id a274de64afdf9e8a2 --agent-type athena-admiral)" \
+  "{\"kind\":\"agent_start\",\"claude_session_id\":\"${SID}\",\"agent_id\":\"a274de64afdf9e8a2\",\"agent_type\":\"athena-admiral\"}"
+eq "agent-end api_error: exact body" "$(dry agent-end --agent-id a8810 --agent-type athena-captain --outcome api_error --error-class rate_limit)" \
+  "{\"kind\":\"agent_end\",\"claude_session_id\":\"${SID}\",\"agent_id\":\"a8810\",\"agent_type\":\"athena-captain\",\"outcome\":\"api_error\",\"error_class\":\"rate_limit\"}"
+eq "agent-end spawn_denied: exact body" "$(dry agent-end --tool-use-id "${TU}" --agent-type athena-captain --outcome spawn_denied)" \
+  "{\"kind\":\"agent_end\",\"claude_session_id\":\"${SID}\",\"tool_use_id\":\"${TU}\",\"agent_type\":\"athena-captain\",\"outcome\":\"spawn_denied\"}"
+eq "agent-end maps an unknown --error-class to other before sending" \
+  "$(dry agent-end --agent-id a1 --agent-type athena-captain --outcome api_error --error-class teapot | jq -r .error_class)" "other"
+n="$(fleet_log_count)"
+# refused <name> <args...> -- usage error (2), one stderr line carrying Fix:, nothing sent.
+refused() {
+  local name="$1"; shift
+  run "$@"
+  eq "${name}: usage (2)" "${RC}" "2"
+  case "${ERR}" in *"Fix: "*) ok "${name}: says why with Fix:" ;; *) bad "${name}: says why with Fix:" "${ERR}" ;; esac
+}
+refused "agent-spawn with no --mapping" agent-spawn --tool-use-id "${TU}" --subagent-type athena-captain
+refused "agent-spawn mapped with no ref" agent-spawn --tool-use-id "${TU}" --subagent-type athena-captain --mapping mapped
+refused "agent-spawn with a bad ref" agent-spawn --tool-use-id "${TU}" --subagent-type athena-captain --mapping mapped --ticket-ref dnd-5
+refused "agent-spawn admiral mapped" agent-spawn --tool-use-id "${TU}" --subagent-type athena-admiral --mapping mapped --ticket-ref DND-5
+refused "agent-spawn general-purpose" agent-spawn --tool-use-id "${TU}" --subagent-type general-purpose --mapping unmapped
+refused "agent-spawn with a bad run hint" agent-spawn --tool-use-id "${TU}" --subagent-type athena-captain --mapping unmapped --run-hint ../x
+refused "agent-spawn with an unsafe tool_use_id" agent-spawn --tool-use-id "a/b" --subagent-type athena-captain --mapping unmapped
+refused "agent-bound without --agent-type" agent-bound --tool-use-id "${TU}" --agent-id a1
+refused "agent-start with a non-fleet type" agent-start --agent-id a1 --agent-type Explore
+refused "agent-end with both keys" agent-end --agent-id a1 --tool-use-id "${TU}" --agent-type athena-captain --outcome stopped
+refused "agent-end stopped by tool_use_id" agent-end --tool-use-id "${TU}" --agent-type athena-captain --outcome stopped
+refused "agent-end api_error with no class" agent-end --agent-id a1 --agent-type athena-captain --outcome api_error
+refused "agent-end stopped with a class" agent-end --agent-id a1 --agent-type athena-captain --outcome stopped --error-class rate_limit
+refused "agent-start takes no --outcome" agent-start --agent-id a1 --agent-type athena-captain --outcome stopped
+refused "agent-spawn takes no --prompt (prompt text never leaves)" agent-spawn --tool-use-id "${TU}" --subagent-type athena-captain --mapping unmapped --prompt x
+refused "agent-spawn takes no --description" agent-spawn --tool-use-id "${TU}" --subagent-type athena-captain --mapping unmapped --description x
+# The DND-813 strict parser covers the lifecycle flags too.
+refused "a repeated --tool-use-id" agent-spawn --tool-use-id "${TU}" --tool-use-id other --subagent-type athena-captain --mapping unmapped
+refused "a valueless --mapping (next word is a flag)" agent-spawn --tool-use-id "${TU}" --mapping --subagent-type athena-captain
+refused "a repeated --outcome" agent-end --agent-id a1 --agent-type athena-captain --outcome stopped --outcome api_error --error-class rate_limit
+refused "a trailing --error-class with no value" agent-end --agent-id a1 --agent-type athena-captain --outcome api_error --error-class
+eq "no refused lifecycle report reached the server" "$(fleet_log_count)" "${n}"
+run agent-end --agent-id a8810 --agent-type athena-captain --outcome stopped
+eq "agent-end sends (0)" "${RC}" "0"
+eq "agent_end reached the server" "$(fleet_last_request | jq -c '.body | [.kind, .agent_id, .outcome]')" '["agent_end","a8810","stopped"]'
 
 fleet_respond '{"status":422,"body":{"error":"unprocessable_entity","fix":"remove the field owner; it is stamped server-side"}}'
 run session-seen

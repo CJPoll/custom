@@ -574,9 +574,13 @@ checks now answer the question a pid cannot:
   harness session verifies it against the capture and files or increments the
   `[wedge:<sig8>]` ticket (`athena:inbox-attend` → *harness-alerts*). The
   mirror channel `harness-alerts-detector` is the detector's sending side:
-  never read or send on it. The shipwright runner sends its one-per-signature
-  stale-dirt report on it too (DND-692), and its one-per-episode wedge report
-  (DND-834).
+  never read it, and send on it only the harness lane's drain request
+  (`ticket-lane-action-brief.md` → *The harness lane* → *Senders*). The
+  shipwright runner sends its one-per-signature stale-dirt report on it too
+  (DND-692), and its one-per-episode wedge report (DND-834).
+  **Later (2026-09-27):** this read "never read or send on it". DND-987
+  replaced that, because a session sends the drain request here. The request
+  carries no authority, so the detector identity on it is harmless.
 - `watchdog` fails when any of the supervisor's watchdog tools is missing: the
   liveness library, `scripts/inbox-client-capture` or `scripts/inbox-client-alert`
   (the supervisor keeps the client running, but a wedge is then restarted

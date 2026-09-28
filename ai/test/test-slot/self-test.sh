@@ -182,6 +182,19 @@ d	e"
   t eval '! ticket_of /p/waiters/123-1790000000.w >/dev/null'
   t eval '! ticket_of /p/waiters/.q-5.99.tmp >/dev/null'
   t eval '! ticket_of /p/waiters/q-.w >/dev/null'
+  # DND-925: parent_state ORIG_PPID CURRENT_PPID PID_NS
+  host='pid:[4026531836]'
+  t eq "$(parent_state 100 100 "$host")" alive
+  t eq "$(parent_state 100 1 "$host")" gone
+  t eq "$(parent_state 100 4242 "$host")" gone
+  t eq "$(parent_state 1 1 "$host")" gone
+  t eq "$(parent_state 1 1 'pid:[4026532999]')" alive
+  t eq "$(parent_state 0 0 "$host")" alive
+  t eq "$(parent_state 100 '' "$host")" unknown
+  t eq "$(parent_state '' 100 "$host")" unknown
+  t eq "$(parent_state 100 x "$host")" unknown
+  t eq "$(parent_state 1 1 '')" unknown
+  t eq "$(parent_state 100 100 '')" alive
   exit "$f"
 )
 if [ $? -eq 0 ]; then ok; else bad helpers "pure helper cases failed (see above)"; fi
@@ -729,6 +742,174 @@ if git -C "$here" show "$OLD_REV:ai/bin/test-slot" >"$OLD" 2>"$W/34.git.err" && 
 else
   bad 34-old-copy "could not extract the pre-fix test-slot at $OLD_REV: $(cat "$W/34.git.err" 2>/dev/null). Fix: run the suite from a git checkout of ~/dev/custom that contains $OLD_REV (git fetch origin)."
 fi
+
+# ------------------------------------------------- parent death (DND-925)
+# A queued test-slot whose caller died used to keep its queue place (the
+# kernel reparents it and sends it no signal), later take a slot and run a
+# gate nobody was waiting on. Measured 2026-09-27 (DND-794): a killed zsh left
+# a queued harness-gate waiter under PID 1. Now it leaves the queue within a
+# bound and never runs CMD. These cases wait with blocking pid waits or 1 s
+# polls, never sub-second ones (DND-875 tracks the older 0.05 s polls above).
+# await_grep_s FILE STRING SECONDS / await_waiters_s N SECONDS: 1 s polls.
+await_grep_s() {
+  local i
+  for ((i = 0; i < $3; i++)); do has "$1" "$2" && return 0; sleep 1; done
+  has "$1" "$2"
+}
+await_waiters_s() {
+  local i
+  for ((i = 0; i < $2; i++)); do
+    [ "$("$BIN" --status --json 2>/dev/null | jq .waiting)" = "$1" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+# parent.sh BIN W NAME: a caller that WAITS on test-slot (bash does not exec
+# a command that is followed by another), so killing it orphans the waiter.
+cat >"$W/parent.sh" <<'EOF'
+#!/usr/bin/env bash
+bin=$1 w=$2 name=$3
+"$bin" --label "$name" -- sh -c 'echo "$1" >> "$2"' _ "$name" "$w/$name.order" 2>"$w/$name.err"
+echo "rc=$?" >"$w/$name.parentrc"
+EOF
+chmod +x "$W/parent.sh"
+# orphan_start NAME: start parent.sh NAME and wait until its test-slot is
+# WAITING; sets PARENT_PID (the caller) and ORPHAN_PID (test-slot under it).
+orphan_start() {
+  "$W/parent.sh" "$BIN" "$W" "$1" &
+  PARENT_PID=$!
+  BG_PIDS+=("$PARENT_PID")
+  await_grep_s "$W/$1.err" "WAITING" 20 || bad "$1-wait" "never waited: $(cat "$W/$1.err" 2>/dev/null)"
+  ORPHAN_PID="$(pgrep -P "$PARENT_PID" | head -n 1)"
+  # Recorded as a .pid so cleanup kills it even if the fix regresses.
+  [ -n "$ORPHAN_PID" ] && echo "$ORPHAN_PID" >"$W/$1.orphan.pid"
+}
+
+# 35: the queue HEAD (polling the slots) loses its caller. It must leave the
+# queue within a bound, say ORPHANED with a Fix, log `orphaned`, and never run
+# CMD, even once the slot frees.
+newpool p35 1
+hold A35 holder-A35
+orphan_start O35
+check 35-orphan-pid eval '[ -n "$ORPHAN_PID" ]'
+kill -9 "$PARENT_PID"
+wait "$PARENT_PID" 2>/dev/null
+check 35-exits-promptly exits_within "${ORPHAN_PID:-0}" 15
+check 35-left-queue await_waiters_s 0 5
+check 35-says-orphaned has "$W/O35.err" "ORPHANED"
+check 35-fix has "$W/O35.err" "Fix:"
+check 35-event eq "$(event_count orphaned O35)" 1
+release A35; reap A35; check 35-A-rc eq "$RC" 0
+exits_within "${ORPHAN_PID:-0}" 15
+check 35-never-ran absent "$W/O35.order"
+check 35-no-acquire eq "$(event_count acquired O35)" 0
+
+# 36: a waiter in the MIDDLE of the queue (blocked in the kernel on its
+# predecessor's queue file) loses its caller. It leaves within the parent
+# check bound (5 s), not the 60 s heartbeat chunk, and the waiter behind it
+# moves up.
+newpool p36 1
+hold A36 holder-A36
+bg W361 --label W361 -- sh -c 'echo W1 >> "$1"' _ "$W/36.order"
+check 36-W1-queued await_waiters_s 1 20
+orphan_start O36
+check 36-O-queued await_waiters_s 2 20
+bg W363 --label W363 -- sh -c 'echo W3 >> "$1"' _ "$W/36.order"
+check 36-W3-queued await_waiters_s 3 20
+kill -9 "$PARENT_PID"
+wait "$PARENT_PID" 2>/dev/null
+check 36-exits-promptly exits_within "${ORPHAN_PID:-0}" 15
+st="$("$BIN" --status --json 2>/dev/null)"
+check 36-closed-up eq "$(jq -c '[.waiters[] | [.position, .label]]' <<<"$st")" '[[1,"W361"],[2,"W363"]]'
+check 36-event eq "$(event_count orphaned O36)" 1
+release A36
+reap W361; check 36-W1-rc eq "$RC" 0
+reap W363; check 36-W3-rc eq "$RC" 0
+reap A36
+exits_within "${ORPHAN_PID:-0}" 15
+check 36-order eq "$(tr '\n' ' ' <"$W/36.order" 2>/dev/null)" "W1 W3 "
+check 36-never-ran absent "$W/O36.order"
+
+# 37: the MISSING case: the caller is already gone when test-slot starts (its
+# first check). C blocks on a FIFO under parent P; P is killed, so C is
+# reparented to PID 1; then C execs test-slot on a FREE pool. It must refuse
+# to run, before it ever queues.
+newpool p37 1
+mkfifo "$W/C37.fifo" "$W/P37.fifo"
+cat >"$W/c37.sh" <<'EOF'
+#!/usr/bin/env bash
+# c37.sh FIFO BIN RAN ERR: block on FIFO, then become test-slot.
+read -t 20 _ <"$1"
+exec "$2" --label O37 -- sh -c ': > "$1"' _ "$3" 2>"$4"
+EOF
+cat >"$W/p37.sh" <<'EOF'
+#!/usr/bin/env bash
+# p37.sh PIDFILE HOLDFIFO C37ARGS...: start c37.sh, record its pid, block.
+pidfile=$1 hold=$2; shift 2
+"$@" &
+echo $! >"$pidfile"
+exec 3<>"$hold"
+read -t 30 -u 3 _
+EOF
+chmod +x "$W/c37.sh" "$W/p37.sh"
+"$W/p37.sh" "$W/C37.orphan.pid" "$W/P37.fifo" "$W/c37.sh" "$W/C37.fifo" "$BIN" "$W/O37.ran" "$W/O37.err" &
+p37=$!
+BG_PIDS+=("$p37")
+await_grep_s "$W/C37.orphan.pid" "" 20
+c37="$(cat "$W/C37.orphan.pid" 2>/dev/null)"
+kill -9 "$p37"
+wait "$p37" 2>/dev/null
+c37_ppid=""
+if read -r s37 <"/proc/${c37:-0}/stat" 2>/dev/null; then
+  r37=${s37##*) }
+  read -r _ c37_ppid _ <<<"$r37"
+fi
+if [ "$c37_ppid" != 1 ]; then
+  bad 37-born-orphan "C (pid '${c37:-}') has parent '$c37_ppid', not PID 1. Fix: this case needs a host where an orphan is reparented to PID 1 of the host pid namespace; here a child subreaper (e.g. systemd --user) or a container adopted it, which test-slot cannot tell from a live caller at startup (a named RESIDUAL in ai/bin/test-slot). Run the gate from a login shell outside any subreaper or container."
+fi
+timeout 5 bash -c 'printf "go\n" > "$1"' _ "$W/C37.fifo"
+check 37-exits-promptly exits_within "${c37:-0}" 15
+check 37-never-ran absent "$W/O37.ran"
+check 37-says-orphaned has "$W/O37.err" "ORPHANED"
+check 37-fix has "$W/O37.err" "Fix:"
+check 37-never-queued eq "$(event_count waiting O37)$(event_count acquired O37)" 00
+
+# 38 (DND-925): check_parent end to end, with the script sourced in a
+# subshell whose parent is this suite ($$). A live parent returns 0; a start
+# parent that is not the current one exits 129 ORPHANED; an UNREADABLE parent
+# pid is never read as alive: exit 2 with a Fix at startup (nothing logged,
+# nothing queued), exit 129 ORPHANED mid-wait.
+newpool p38 1
+mkdir -m 0700 "$POOL"
+# Never call cp_run inside $(...): its subshell must be a direct child of $$.
+cp_run() { # cp_run LABEL ORIG STUB ARG: run check_parent ARG in a sourced subshell
+  (
+    # shellcheck source=/dev/null
+    source "$BIN"
+    resolve_pool
+    LABEL=$1 EXCLUSIVE=0 START_MS=$(now_ms) ORIG_PPID=$2
+    PID_NS=$(readlink /proc/self/ns/pid 2>/dev/null)
+    [ "$3" = unreadable ] && read_ppid() { CUR_PPID=""; }
+    check_parent ${4:+"$4"}
+    echo returned
+  )
+}
+cp_run L38a "$$" real "" >"$W/38a.out" 2>"$W/38a.err"; rc=$?; out38="$(cat "$W/38a.out")"
+check 38-alive-rc eq "$rc" 0
+check 38-alive-returned eq "$out38" returned
+cp_run L38b "$(($$ + 1))" real "" >"$W/38b.out" 2>"$W/38b.err"; rc=$?; out38="$(cat "$W/38b.out")"
+check 38-gone-rc eq "$rc" 129
+check 38-gone-not-returned eq "$out38" ""
+check 38-gone-orphaned has "$W/38b.err" "ORPHANED"
+check 38-gone-event eq "$(event_count orphaned L38b)" 1
+cp_run L38c "$$" unreadable startup >"$W/38c.out" 2>"$W/38c.err"; rc=$?; out38="$(cat "$W/38c.out")"
+check 38-unreadable-startup-rc eq "$rc" 2
+check 38-unreadable-startup-fix has "$W/38c.err" "Fix:"
+check 38-unreadable-startup-no-event eq "$(event_count orphaned L38c)" 0
+cp_run L38d "$$" unreadable "" >"$W/38d.out" 2>"$W/38d.err"; rc=$?; out38="$(cat "$W/38d.out")"
+check 38-unreadable-wait-rc eq "$rc" 129
+check 38-unreadable-wait-orphaned has "$W/38d.err" "ORPHANED"
+check 38-unreadable-wait-event eq "$(event_count orphaned L38d)" 1
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then

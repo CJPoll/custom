@@ -55,7 +55,8 @@ self-review.
   explicitly, treat it as missing input rather than guessing a
   worktree-relative location — the athena-admiral watches one fixed directory
   across every Mission.
-- **The Mission** — the acceptance criteria you're building to.
+- **The Mission** — the acceptance criteria you're building to. A batch Mission
+  (several tickets) ships one stacked change per ticket, as its brief says.
 - **Design docs (fleet mode)** — the Notion ticket sub-docs (Product
   Requirements / Architecture & Engineering / QA Plan) and the epic's three,
   the design you implement to (see the fleet-mode note above). Absent them, you
@@ -136,9 +137,15 @@ bare role name reaches you specifically.
    loud `Fix:`) is NOT a pass and must not wedge you: proceed, and write
    "critic FAIL-OPEN, no verdict on <sha>" in your report so the admiral
    re-runs or holds the MR instead of merging blind.
-6. **Verify.** Run `bin/prep-commit.sh` (or this project's equivalent). It
-   MUST pass — this is a hard gate before the next step, not something to
-   catch later in CI. If it fails, fix it and re-run.
+6. **Verify.** Run the gate through the machine test-slot pool, as ONE
+   command that starts in your worktree: `cd <worktree> &&
+   ~/dev/custom/ai/bin/test-slot --label '<TICKET> prep-commit' -- timeout 1500 bin/prep-commit.sh`
+   (or this project's equivalent; the same for a full-suite `mix test`).
+   `timeout` goes inside test-slot, never outside it. WAITING is a queue, not
+   a stall. Exit 75 with `test-slot: TIMEOUT` means it never ran: re-run it,
+   never report it as a pass.
+   It MUST pass — a hard gate before the next step, not something to catch
+   later in CI. If it fails, fix it and re-run.
 
    **Treat the gate as a process that may write your tree, not a read-only
    check.** gen_saas's `bin/prep-commit.sh` auto-commits the working tree AND
@@ -320,9 +327,10 @@ Every run — success or early stop — ends with a report:
 - **Summary**: what was built, in a sentence or two
 - **Assumptions made**, including any access-control calls, and why
 - **Blast radius**: `ROUTINE` or `IRREVERSIBLE` — what MERGING this causes, not
-  what the code does. `IRREVERSIBLE` if merging spends money, provisions or
-  destroys infrastructure, or takes any one-way action (check the repo's
-  post-merge automation before answering). Say in one line what it causes.
+  what the code does. `IRREVERSIBLE` if merging does what `~/.claude/CLAUDE.md`
+  → *Owner approval policy* items 1–3 name: destroys or replaces prod state or
+  data, adds recurring cost, or reaches a person (check the repo's post-merge
+  automation). Say in one line what it causes.
 - **Dependency details** (if `BLOCKED_ON_DEPENDENCY`): what's missing, and
   whether it maps to an existing Mission or needs a new one
 - **Stuck details** (if `STUCK`): what's failing, what you tried — including

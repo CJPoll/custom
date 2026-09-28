@@ -65,8 +65,9 @@
 #
 # Exported to the session:
 #   SHIPWRIGHT_STATE_DIR      the ONE canonical state directory (cursor.txt,
-#                             journal.md, runs/), always in the MAIN checkout,
-#                             never in whichever tree this run happens to use
+#                             journal.md, runs/, owner-notes.md), always in the
+#                             MAIN checkout, never in whichever tree this run
+#                             happens to use. ai/bin/owner-notes reads it.
 #
 # Exit codes:
 #   0   the session ran and exited 0, OR this tick was skipped (a run already in
@@ -109,8 +110,11 @@ set -euo pipefail
 # cron runs died with "asdf: not found" while the gate/telemetry fail-opened
 # and ran blind. The ruby gate tools (build-agents, harness-metrics/signals/eval,
 # check-generic-skills, check-guard-messages) are all deliberately gem-free
-# `#!/usr/bin/env ruby` stdlib scripts, so the system ruby at /usr/bin/ruby
-# (the eselect default, currently ruby34 / 3.4.10) satisfies them completely.
+# stdlib scripts, so the system ruby at /usr/bin/ruby (the eselect default,
+# currently ruby34 / 3.4.10) satisfies them completely. Since DND-931 they name
+# it directly (`#!/usr/bin/ruby`, enforced by ai/bin/check-ruby-floor), so PATH
+# no longer picks their Ruby. A `ruby` called by name (in a spawned session or
+# test suite) still uses PATH, which here is /usr/bin/ruby.
 # We therefore deliberately EXCLUDE the asdf shims from PATH so `ruby` resolves
 # to /usr/bin/ruby. ${HOME}/bin held only the asdf launcher, so it is dropped too.
 export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:${PATH}}"
@@ -428,17 +432,29 @@ rm -f "${RECEIPT}"
 
 # --- reachability + reaping helpers -----------------------------------------
 #
-# A commit is "landed" (safe to drop its lane branch) once it is reachable from
-# the main checkout's branch OR from origin/main. A branch holding commits that
-# are on NEITHER is "stranded" — the push failed — and is KEPT so the work is
-# never silently discarded.
+# A commit is "landed" once it is reachable from origin/main. Only a repo with
+# NO origin remote (the no-network fixture case) lands locally, and there the
+# main checkout's branch is the landing target. With an origin, local main is
+# NOT evidence of landing (DND-1008): teardown used to fast-forward it to any
+# lane tip, so "reachable from local main" read unreviewed, unpushed work as
+# landed. A branch holding commits that are neither landed nor published is
+# "stranded" — the push failed — and is KEPT so the work is never silently
+# discarded.
+has_origin() { git -C "${MAIN_CHECKOUT}" remote get-url origin >/dev/null 2>&1; }
 commit_reachable() { # commit-ish
   local c="$1"
-  git -C "${MAIN_CHECKOUT}" merge-base --is-ancestor "$c" "${MAIN_BRANCH}" 2>/dev/null && return 0
-  if git -C "${MAIN_CHECKOUT}" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-    git -C "${MAIN_CHECKOUT}" merge-base --is-ancestor "$c" origin/main 2>/dev/null && return 0
+  if has_origin; then
+    git -C "${MAIN_CHECKOUT}" rev-parse --verify --quiet origin/main >/dev/null 2>&1 || return 1
+    git -C "${MAIN_CHECKOUT}" merge-base --is-ancestor "$c" origin/main 2>/dev/null
+    return
   fi
-  return 1
+  git -C "${MAIN_CHECKOUT}" merge-base --is-ancestor "$c" "${MAIN_BRANCH}" 2>/dev/null
+}
+# Published for review: not landed, but on some origin branch (a PR). The work
+# is safe on the remote, so it is not stranded and its local lane branch may go.
+commit_published() { # commit-ish
+  has_origin || return 1
+  [ -n "$(git -C "${MAIN_CHECKOUT}" for-each-ref --contains "$1" --format='%(refname)' refs/remotes/origin 2>/dev/null)" ]
 }
 
 # Remove one lane's worktree, and delete its branch unless the branch is
@@ -452,10 +468,10 @@ retire_lane() { # run-id worktree-path context-label
   git -C "${MAIN_CHECKOUT}" worktree remove --force "${wt}" >>"${log}" 2>&1 || rm -rf "${wt}"
   git -C "${MAIN_CHECKOUT}" worktree prune >>"${log}" 2>&1 || true
   if git -C "${MAIN_CHECKOUT}" show-ref --verify --quiet "refs/heads/${br}"; then
-    if commit_reachable "${br}"; then
+    if commit_reachable "${br}" || commit_published "${br}"; then
       git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${log}" 2>&1 || true
     else
-      echo "athena-shipwright: kept stranded branch ${br} (${ctx}); its commits are on neither ${MAIN_BRANCH} nor origin/main." >&2
+      echo "athena-shipwright: kept stranded branch ${br} (${ctx}); its commits are neither landed (origin/main; ${MAIN_BRANCH} when there is no origin) nor on any origin branch." >&2
       echo "  Fix: the work is NOT lost. Inspect it ('git -C ${MAIN_CHECKOUT} log ${MAIN_BRANCH}..${br}'), then land it ('git -C ${MAIN_CHECKOUT} merge --ff-only ${br}', or cherry-pick) and delete it ('git -C ${MAIN_CHECKOUT} branch -D ${br}'). It is deliberately not auto-deleted so a failed push never silently discards a run's work." >&2
       return 1
     fi
@@ -988,9 +1004,26 @@ fi
 # that already contains main's history, it never creates or rewrites a commit,
 # and git refuses it outright rather than overwrite a locally-modified file. A
 # failure here is reported and NOT retried or forced.
+#
+# With an origin, only LANDED work is published this way (DND-1008): the tip
+# must already be on origin/main. A run that put its work up for review (a PR
+# branch) leaves the main checkout alone, so the live harness never runs
+# unreviewed code and local main never diverges from origin/main.
 tip="$(git -C "${WORKTREE}" rev-parse HEAD 2>/dev/null || true)"
+publish_tip=0
 if [ "${status}" -eq 0 ] && [ -n "${tip}" ] && [ "${tip}" != "${BASE_COMMIT}" ]; then
-  git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || true
+  publish_tip=1
+  if has_origin; then
+    git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || true
+    if ! commit_reachable "${tip}"; then
+      publish_tip=0
+      if commit_published "${tip}"; then
+        echo "athena-shipwright: run ${ts} published ${tip} for review; it is not landed on origin/main, so ${MAIN_CHECKOUT} was left where it is." >&2
+      fi
+    fi
+  fi
+fi
+if [ "${publish_tip}" -eq 1 ]; then
   if ! git -C "${MAIN_CHECKOUT}" merge --ff-only "${tip}" >>"${log}" 2>&1; then
     echo "athena-shipwright: run ${ts} landed, but ${MAIN_CHECKOUT} could not be fast-forwarded to ${tip}." >&2
     echo "  Fix: the run's commits are already pushed (if the session pushed), so nothing is lost — but this machine's live harness (~/.claude/skills and ~/.claude/hooks resolve into ${MAIN_CHECKOUT}) stays on the older code until it catches up. Run 'git -C ${MAIN_CHECKOUT} merge --ff-only ${tip}' once the blocker is cleared; git's reason is at the end of ${log}. Usual causes: a locally-modified file the fast-forward would overwrite, or main having diverging commits — do NOT force either." >&2
@@ -1001,7 +1034,7 @@ fi
 # main/origin/main? If so it is stranded — an unsuccessful outcome even if the
 # session exited 0, because the harness work never reached the machine.
 stranded=0
-if [ -n "${tip}" ] && [ "${tip}" != "${BASE_COMMIT}" ] && ! commit_reachable "${tip}"; then
+if [ -n "${tip}" ] && [ "${tip}" != "${BASE_COMMIT}" ] && ! commit_reachable "${tip}" && ! commit_published "${tip}"; then
   stranded=1
 fi
 

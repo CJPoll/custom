@@ -124,8 +124,13 @@ ai/bin/lead-time --self-test            # pure date/marker logic, no network
 - `--repo`'s `origin` remote selects the backend: `github.com` → `gh`,
   `gitlab.com` → `glab`. `--pr` and `--mr` are synonyms.
 - Pure date/marker math lives in module `LeadTime` (Ruby stdlib only, runs on the
-  system's Ruby 2.7) and is covered by `ai/test/lead-time/self-test.sh`,
-  discovered and run by `harness-gate`.
+  harness Ruby, system ruby 3.4 via `#!/usr/bin/ruby`) and is covered by
+  `ai/test/lead-time/self-test.sh`, discovered and run by `harness-gate`.
+
+  **Later (2026-09-27, DND-931):** this said the module runs on "the system's
+  Ruby 2.7". Superseded by the owner's decision that the harness Ruby is 3.4
+  (Cody, 2026-09-27: "3.4 is our global default for harness and our
+  projects"); `ai/bin/check-ruby-floor` enforces it.
 - Run ad hoc, or on a cadence (e.g. a shipwright pass) redirecting `--json` into a
   local ledger under `ai-artifacts/` if a running history is wanted. Because it
   derives, re-running is idempotent and back-datable.

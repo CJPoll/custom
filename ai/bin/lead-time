@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # lead-time — derive a fleet ticket's LEAD TIME from durable artifacts only.

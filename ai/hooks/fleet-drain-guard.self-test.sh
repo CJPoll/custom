@@ -36,8 +36,13 @@ done
 
 TMP="$(mktemp -d)" || { echo "FAIL mktemp"; exit 1; }
 SERVER_PID=""
+PIDS="${TMP}/pids"
 cleanup() {
   [ -n "${SERVER_PID}" ] && kill "${SERVER_PID}" 2>/dev/null
+  # Detached spawn_denied reporters this suite started, by recorded pid only.
+  if [ -f "${PIDS}" ]; then
+    while read -r p; do [ -n "${p}" ] && kill "${p}" 2>/dev/null; done < "${PIDS}"
+  fi
   rm -rf "${TMP}"
 }
 trap cleanup EXIT INT TERM
@@ -50,6 +55,12 @@ trap cleanup EXIT INT TERM
 . "${AI}/lib/fleet/control-domain.sh"
 fleet_fixture_env
 export FLEET_CONNECT_TIMEOUT_S=2 FLEET_MAX_TIME_S=3
+export FLEET_HOOK_PIDFILE="${PIDS}"
+# The fake server logs both the guard's control reads (GET) and the detached
+# spawn_denied reports (POST /api/v1/fleet/reports); these split them.
+reports()          { jq -c 'select(.method == "POST")' "${TMP}/server.log" 2>/dev/null; }
+report_count()     { local c; c="$(reports | grep -c .)"; printf '%s\n' "${c:-0}"; }
+control_requests() { jq -c 'select(.method == "GET")' "${TMP}/server.log" 2>/dev/null; }
 
 SID="ca4aa9d6-cc9f-46b8-bcba-b62afb5ea534"
 CACHE="${XDG_STATE_HOME}/athena/fleet/${SID}.json"
@@ -76,6 +87,7 @@ DRAIN_ANS="$(answer drain override:force_drain '"2026-09-24T18:30:00Z"' "${OVD}"
 stdin() {
   jq -n -c --arg t "$1" --arg s "${2-${SID}}" --arg c "${CU}" '
     {session_id: $s, cwd: $c, hook_event_name: "PreToolUse", tool_name: "Agent",
+     tool_use_id: "toolu_01DrainGuardSpawn0000001",
      agent_id: "a5a8eb5540d6e6ab3", agent_type: "athena-admiral", permission_mode: "default",
      tool_input: ({description: "x", prompt: "y"} + (if $t == "" then {} else {subagent_type: $t} end))}
     | if $s == "" then del(.session_id) else . end'
@@ -118,14 +130,42 @@ for t in athena-captain athena-admiral; do
   eq "[${t}] drain: reason is the pinned line, filled in" "$(reason)" \
     "$(fleet_drain_fix "${SID}" override:force_drain 2026-09-24T18:30:00Z server)"
 done
-has "the guard asked the server with the hook's session_id" "$(jq -r .path <<<"$(fleet_last_request)")" "/sessions/${SID}/control"
+has "the guard asked the server with the hook's session_id" "$(control_requests | tail -n 1 | jq -r .path)" "/sessions/${SID}/control"
 has "the deny is logged" "$(tail -n 1 "${GLOG}")" "athena-admiral	deny	server"
+
+echo "== a deny is reported as agent_end spawn_denied (DND-560)"
+fleet_wait_pids "${PIDS}" 2   # the two denies above report too; let them land first
+eq "the two denies above each sent one report" "$(report_count)" "2"
+: > "${PIDS}"; r0="$(report_count)"
+hook "$(stdin athena-captain)"
+eq "drain: still a deny" "${RC}:$(decision)" "0:deny"
+fleet_wait_pids "${PIDS}" 1
+eq "the deny sent exactly one fleet report" "$(report_count)" "$((r0 + 1))"
+eq "that report is agent_end spawn_denied by the spawn's tool_use_id" \
+  "$(reports | tail -n 1 | jq -c '.body | del(.claude_session_id)')" \
+  '{"kind":"agent_end","tool_use_id":"toolu_01DrainGuardSpawn0000001","agent_type":"athena-captain","outcome":"spawn_denied"}'
+eq "... for the hook's session" "$(reports | tail -n 1 | jq -r .body.claude_session_id)" "${SID}"
+fleet_respond '{"status":422,"body":{"error":"unprocessable_entity","fix":"the spawn_denied report was refused"}}'
+: > "${PIDS}"; FLOG="${XDG_STATE_HOME}/athena/fleet/report-failures.log"
+jq -c --arg t "${FRESH}" '.fetched_at = $t' <<<"${DRAIN_ANS}" > "${CACHE}"
+hook "$(stdin athena-admiral)"
+eq "a refused spawn_denied report never changes the decision" "${RC}:$(decision)" "0:deny"
+fleet_wait_pids "${PIDS}" 1
+has "... and its failure is logged with the server's Fix:" "$(tail -n 1 "${FLOG}" 2>/dev/null)" "Fix: the spawn_denied report was refused"
+fleet_respond "{\"status\":200,\"body\":${DRAIN_ANS}}"
+: > "${PIDS}"; r0="$(report_count)"
+hook "$(stdin athena-captain | jq -c 'del(.tool_use_id)')"
+eq "a deny with no tool_use_id: still a deny" "${RC}:$(decision)" "0:deny"
+eq "... sends no report (it could not be joined)" "$(grep -c . "${PIDS}" 2>/dev/null || true):$(report_count)" "0:${r0}"
+has "... and says so in the failure log with Fix:" "$(tail -n 1 "${FLOG}" 2>/dev/null)" "no usable tool_use_id"
 
 echo "== run passes silently"
 fleet_respond "{\"status\":200,\"body\":${RUN_ANS}}"
+: > "${PIDS}"; r0="$(report_count)"
 hook "$(stdin athena-captain)"
 eq "run on basis server: exit 0, no output" "${RC}:${OUT}" "0:"
 has "the allow is logged" "$(tail -n 1 "${GLOG}")" "athena-captain	allow	server"
+eq "an allow sends no fleet report" "$(grep -c . "${PIDS}" 2>/dev/null || true):$(report_count)" "0:${r0}"
 
 echo "== resume: the server's run beats a stale drain cache"
 jq -c --arg t "${FRESH}" '.fetched_at = $t' <<<"${DRAIN_ANS}" > "${CACHE}"

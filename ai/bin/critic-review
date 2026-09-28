@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # critic-review — run the standing read-only judge (athena-diff-critic) over the
@@ -39,6 +39,21 @@
 # worktree is found from the main checkout too -- see "The READ side" below
 # (DND-457).
 #
+# Carry (DND-986, owner-approved P4). A review run on a head with NO receipt in
+# any checkout first looks for a PASS recorded on an IDENTICAL change -- same
+# patch-id, same patch bytes, same commit messages, same prompt and critic
+# definition -- and, finding one with no BLOCK on the same change in any
+# checkout of the repo, carries it. What the carry MEANS is the owner's rule
+# (round 3): "If a rebase doesn't change the branch itself and the last critic
+# review for the branch passed, the critic's job should only be to see if the
+# changes from the rebase cause a problem." -- Cody, 2026-09-27. So the carried
+# PASS covers the branch's own diff, and the judge then reviews ONLY the
+# upstream delta the rebase brought in (an INTERACTION review); the head is
+# PASS only if that passes. With nothing new upstream the carried PASS stands
+# with no model call. Every doubt runs a FULL review. Only the writer carries;
+# the reader (--verdict-for) still needs a receipt for exactly the SHA it is
+# given. See "Carry (DND-986): side effects" below and ai/lib/critic_carry.rb.
+#
 # Usage: see the USAGE constant below, or run `ai/bin/critic-review --help`.
 # It is stated once, there, so the text a caller is shown cannot drift from the
 # text a reader of this header believes.
@@ -53,16 +68,29 @@ require "time"
 
 AI_DIR = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "critic_prompt")
+require File.join(AI_DIR, "lib", "critic_carry")
 
 CRITIC = "athena-diff-critic"
 
 USAGE = <<~TXT.freeze
   Usage:
-    ai/bin/critic-review [--base BRANCH]   review HEAD's diff vs BRANCH (default
+    ai/bin/critic-review [--base BRANCH] [--no-carry]
+                                           review HEAD's diff vs BRANCH (default
                                            origin/HEAD or main); exit 0 pass /
                                            2 block / 0 fail-open(loud). Invokes
                                            the model -- slow, and records a
-                                           per-SHA verdict receipt.
+                                           per-SHA verdict receipt. First, a
+                                           head with NO receipt carries a PASS
+                                           recorded on an IDENTICAL change
+                                           (same patch bytes, commit messages,
+                                           prompt and agent definition; no
+                                           BLOCK on it anywhere) and reviews
+                                           ONLY the upstream delta the rebase
+                                           brought in: PASS (CARRIED +
+                                           INTERACTION), or PASS (CARRIED) with
+                                           no model call when nothing came in
+                                           (DND-986). --no-carry skips that and
+                                           always runs a full review.
     ai/bin/critic-review --verdict-for SHA read the RECORDED verdict for SHA;
                                            exit 0 pass / 2 block / 3 no green
                                            verdict (none / running / fail-open /
@@ -97,7 +125,7 @@ TXT
 # lookup must never look like an empty one": an unrecognised key must not
 # resolve to the most expensive default action and report nothing about it.
 VALUE_FLAGS = %w[--base --verdict-for].freeze
-BOOL_FLAGS  = %w[--self-test --help -h].freeze
+BOOL_FLAGS  = %w[--self-test --help -h --no-carry].freeze
 
 # -> nil when argv is well-formed, else a one-line reason.
 #
@@ -118,6 +146,12 @@ def usage_error(argv)
       return "unrecognised argument #{arg.inspect}."
     end
   end
+  # --no-carry only means something on a review run. Silently ignoring it
+  # beside --verdict-for (which never carries) or --self-test would read as
+  # honoured, so the combination is refused.
+  if argv.include?("--no-carry") && (argv.include?("--verdict-for") || argv.include?("--self-test"))
+    return "--no-carry applies only to a review run, not to --verdict-for or --self-test."
+  end
   nil
 end
 
@@ -137,7 +171,7 @@ def decide(findings, trailer_ok, invoke_ok)
   ["block", 2]
 end
 
-VERDICT_SCHEMA = 1
+VERDICT_SCHEMA = 2
 
 # Resolving the receipt directory is its OWN step with its OWN outcome.
 # `git rev-parse --git-path` returns a CWD-RELATIVE path in a main checkout and
@@ -222,7 +256,24 @@ def warn_report_pointer(path, sha)
   end
 end
 
-def write_verdict(sha, base, action, findings, dirty)
+# Schema 2 (DND-986) adds the carry keys to every receipt: merge_base,
+# patch_id, diff_digest, msgs_digest, judge_digest (each null when it could not
+# be computed; a receipt with a null key is never a carry source), plus
+# carried_from (the ORIGINALLY judged SHA, for a carried PASS) and
+# carried_receipt (the receipt it matched). The reader treats schema 1 and 2
+# alike; only the carry lookup needs the keys.
+#
+# -> the receipt path written, or false.
+#
+# exclusive: true (the carried write) never replaces a receipt: the carry
+# decided "HEAD has no receipt", and a verdict that appeared since (a judge run
+# in another shell) must win. It writes a temp file and hard-links it into
+# place, which fails if the name exists -- the check and the write are one step.
+#
+# interaction: { range: "<from>..<to>", verdict: } (round 3) records the
+# interaction review that decided a carried head: upstream_range and
+# interaction are null on every other receipt.
+def write_verdict(sha, base, action, findings, dirty, keys: nil, carried: nil, exclusive: false, interaction: nil)
   dir = verdict_dir
   unless dir && sha
     warn "critic-review: NOTE no verdict receipt written (not inside a resolvable git work tree)."
@@ -230,13 +281,33 @@ def write_verdict(sha, base, action, findings, dirty)
     return false
   end
   FileUtils.mkdir_p(dir)
-  File.write(File.join(dir, "#{sha}.json"), JSON.generate(
-    "schema" => VERDICT_SCHEMA, "tool" => "critic-review", "sha" => sha,
-    "base" => base.to_s, "verdict" => action, "findings" => findings,
-    "dirty" => dirty, "at" => Time.now.utc.iso8601
-  ))
+  path = File.join(dir, "#{sha}.json")
+  key_fields = CriticCarry::HEAD_KEYS.to_h { |k| [k, keys && CriticCarry.key_ok?(keys[k]) ? keys[k] : nil] }
+  body = JSON.generate(
+    { "schema" => VERDICT_SCHEMA, "tool" => "critic-review", "sha" => sha,
+      "base" => base.to_s, "verdict" => action, "findings" => findings,
+      "dirty" => dirty, "at" => Time.now.utc.iso8601 }
+      .merge(key_fields)
+      .merge("carried_from" => carried&.fetch(:root), "carried_receipt" => carried&.fetch(:receipt))
+      .merge("upstream_range" => interaction&.fetch(:range), "interaction" => interaction&.fetch(:verdict))
+  )
+  if exclusive
+    tmp = File.join(dir, ".#{sha}.json.tmp.#{Process.pid}")
+    begin
+      File.write(tmp, body)
+      File.link(tmp, path)
+    rescue SystemCallError => e
+      warn "critic-review: NOTE the carried receipt was not written to #{path} (#{e.message})."
+      warn "  Fix: nothing to do by hand -- a receipt that appeared meanwhile is kept, and the judge runs instead."
+      return false
+    ensure
+      FileUtils.rm_f(tmp)
+    end
+    return path
+  end
+  File.write(path, body)
   FileUtils.rm_f(File.join(dir, "#{sha}.running"))
-  true
+  path
 end
 
 # --- The READ side: every checkout of the repo (DND-457) ---------------------
@@ -312,11 +383,34 @@ def judge_receipt(sha, full)
     return [3, :err, ["critic-review: the verdict for #{sha} was recorded against a DIRTY working tree — it did not judge what you are about to merge.",
                       "  Fix: commit or discard the working-tree changes, then re-run ai/bin/critic-review so the verdict matches the head being merged."]]
   end
+  carried = data["carried_from"]
+  unless carried.nil? || carried.to_s.match?(CriticCarry::SHA40)
+    return [3, :err, ["critic-review: verdict receipt for #{sha} names a malformed carried_from #{carried.inspect}.",
+                      "  Fix: delete #{full} and re-run ai/bin/critic-review. A carried PASS that cannot name the commit the judge actually passed is never a pass."]]
+  end
+  upstream = data["upstream_range"]
+  if upstream && carried.nil?
+    return [3, :err, ["critic-review: verdict receipt for #{sha} names an upstream_range #{upstream.inspect} but no carried_from.",
+                      "  Fix: delete #{full} and re-run ai/bin/critic-review. An interaction review only ever follows a carry; a receipt claiming one without its source is malformed, never a pass."]]
+  end
+  if upstream && data["interaction"] != data["verdict"]
+    return [3, :err, ["critic-review: verdict receipt for #{sha} records verdict #{data['verdict'].inspect} but interaction #{data['interaction'].inspect}.",
+                      "  Fix: delete #{full} and re-run ai/bin/critic-review. A head's verdict after a carry IS its interaction review's verdict; a receipt where they differ is malformed, never a pass."]]
+  end
+  unless upstream.nil? || upstream.to_s.match?(/\A[0-9a-f]{40}\.\.[0-9a-f]{40}\z/)
+    return [3, :err, ["critic-review: verdict receipt for #{sha} names a malformed upstream_range #{upstream.inspect}.",
+                      "  Fix: delete #{full} and re-run ai/bin/critic-review. An interaction verdict that cannot name the upstream delta it reviewed is never a pass."]]
+  end
   case data["verdict"]
   when "pass"
-    [0, :out, ["critic-review: VERDICT PASS for #{sha} (recorded #{data['at']}, base #{data['base']}; receipt #{full})."]]
+    # The bracketed tokens are the machine-readable contract integration-gate
+    # reads (DND-986); the prose around them may change, the tokens may not.
+    token = carried ? " [critic-carried-from=#{carried}]" : ""
+    token += " [critic-upstream=#{upstream}]" if upstream
+    [0, :out, ["critic-review: VERDICT PASS for #{sha} (recorded #{data['at']}, base #{data['base']}; receipt #{full}).#{token}"]]
   when "block"
-    [2, :err, ["critic-review: VERDICT BLOCK for #{sha} — findings: #{Array(data['findings']).join(', ')}",
+    what = upstream ? " (interaction review of the upstream delta #{upstream})" : ""
+    [2, :err, ["critic-review: VERDICT BLOCK for #{sha}#{what} — findings: #{Array(data['findings']).join(', ')}",
                "  Fix: the standing judge found issues on this head. Have them addressed and re-run ai/bin/critic-review before merging."]]
   when "fail-open"
     [3, :err, ["critic-review: NO VERDICT for #{sha} — the judge FAILED OPEN (infra/model error) at #{data['at']}; it did not look at this diff.",
@@ -439,10 +533,22 @@ ARTIFACT_CEILING_ROUND = 12
 #
 # Returns [count, shas] or nil. nil is an ERROR the caller must say out loud,
 # never a silent "round 1".
+#
+# A PURE carry (DND-986) is not a round: no judge looked. An interaction
+# review (round 3) is one -- a model gave a verdict. Only a receipt that parses,
+# names a carried_from and records no interaction is excluded; an unreadable
+# one still counts, so a corrupt file can never make the count read low.
 def rounds_recorded
   dir = verdict_dir
   return nil unless dir && Dir.exist?(dir)
-  shas = Dir.glob(File.join(dir, "*.json")).map { |p| File.basename(p, ".json") }.sort
+  carried = lambda do |p|
+    r = JSON.parse(File.read(p))
+    !r["carried_from"].nil? && r["interaction"].nil?
+  rescue StandardError
+    false
+  end
+  shas = Dir.glob(File.join(dir, "*.json")).reject { |p| carried.call(p) }
+            .map { |p| File.basename(p, ".json") }.sort
   [shas.size, shas]
 end
 
@@ -486,11 +592,15 @@ end
 # (e.g. a diff of uncommitted work); nil means the log could NOT be read, which
 # is said out loud here and reaches the judge as "NOT SUPPLIED" -- never as an
 # empty log, which would read as "no fix was claimed".
-def commit_log(base)
-  out, err, st = Open3.capture3("git", "log", "--reverse", "--format=commit %H%n%B", "#{base}..HEAD")
+#
+# `head` defaults to HEAD; run() passes the head SHA it resolved once, so the
+# judge's input, the receipt's key and the carry keys all describe ONE commit
+# even if HEAD moves while the model is thinking.
+def commit_log(base, head = "HEAD")
+  out, err, st = Open3.capture3("git", "log", "--reverse", "--format=commit %H%n%B", "#{base}..#{head}")
   return out if st.success?
 
-  warn "critic-review: NOTE could not read the commit messages for #{base}..HEAD (#{err.strip})."
+  warn "critic-review: NOTE could not read the commit messages for #{base}..#{head} (#{err.strip})."
   warn "  Fix: pass a --base that resolves in this repo. Until then the judge cannot see a bug-fix claim or its evidence."
   nil
 end
@@ -506,23 +616,363 @@ end
 # explicitly rather than trusting git's ambient config. Kept apart from
 # `critic_output` so self-test can exercise it directly, under a hermetic
 # config that FORCES the failure mode, without invoking `claude`.
-def diff_for(base)
-  diff_flags = ["--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/"]
-  diff, _e, dst = Open3.capture3("git", "diff", *diff_flags, "#{base}...HEAD")
-  diff = Open3.capture3("git", "diff", *diff_flags, base)[0] if !dst.success? || diff.strip.empty?
+DIFF_FLAGS = ["--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/"].freeze
+
+# The hermetic three-dot diff alone -> [text, usable]. usable is false when git
+# failed or the diff is empty; the carry keys are only ever computed from a
+# usable three-dot diff, never from the fallback below.
+def three_dot_diff(base, head = "HEAD")
+  diff, _e, st = Open3.capture3("git", "diff", *DIFF_FLAGS, "#{base}...#{head}")
+  [diff, st.success? && !diff.strip.empty?]
+end
+
+def diff_for(base, head = "HEAD")
+  diff, usable = three_dot_diff(base, head)
+  diff = Open3.capture3("git", "diff", *DIFF_FLAGS, base)[0] unless usable
   diff
 end
 
-def critic_output(base)
-  stub = ENV["CRITIC_REVIEW_STUB"]
+# The judge's input is built by the caller (run), so the carry keys can be
+# computed from the very same text. Kept as critic_output's own call so the
+# single-copy prompt checks in --self-test still find it here.
+def critic_output(diff, log)
+  judge_call(CriticPrompt.build(diff: diff, commit_messages: log), :full)
+end
+
+# ONE judge invocation. kind is :full or :interaction (DND-986 round 3).
+# Testing hooks: CRITIC_REVIEW_STUB answers a :full call and
+# CRITIC_REVIEW_STUB_INTERACTION an :interaction call (falling back to
+# CRITIC_REVIEW_STUB); CRITIC_REVIEW_PROMPT_LOG=<file> appends each prompt
+# under a "=== PROMPT <kind>" line, so a self-test can assert which review ran.
+def judge_call(prompt, kind)
+  log = ENV["CRITIC_REVIEW_PROMPT_LOG"]
+  if log && !log.empty?
+    begin
+      File.open(log, "a") { |f| f.write("=== PROMPT #{kind}\n#{prompt}\n") }
+    rescue StandardError => e
+      warn "critic-review: NOTE CRITIC_REVIEW_PROMPT_LOG=#{log} could not be written (#{e.message}); the judge still runs."
+      warn "  Fix: unset CRITIC_REVIEW_PROMPT_LOG (a self-test hook) or point it at a writable file."
+    end
+  end
+  stub = kind == :interaction ? (ENV["CRITIC_REVIEW_STUB_INTERACTION"] || ENV["CRITIC_REVIEW_STUB"]) : ENV["CRITIC_REVIEW_STUB"]
   return [File.read(stub), true] if stub && File.file?(stub)
 
   return ["", false] unless system("command -v claude >/dev/null 2>&1")
-  prompt = CriticPrompt.build(diff: diff_for(base), commit_messages: commit_log(base))
   out, _err, st = Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt)
   [out, st.success?]
 rescue StandardError => e
   [+"error: #{e.message}", false]
+end
+
+# --- Carry (DND-986): side effects -----------------------------------------
+#
+# The decision is CriticCarry.decide (ai/lib/critic_carry.rb, pure). What
+# lives here is only what needs git or the filesystem: the head's keys, the
+# receipts to compare against, and the recompute that makes a source with
+# wrongly recorded keys fail closed.
+
+# `git patch-id --stable` over a diff text -> 40-hex or nil (git failed, or the
+# diff was empty and git printed nothing).
+def patch_id_for(diff_text)
+  return nil if diff_text.to_s.strip.empty?
+  out, _e, st = Open3.capture3("git", "patch-id", "--stable", stdin_data: diff_text)
+  id = out.split.first
+  st.success? && id.to_s.match?(CriticCarry::SHA40) ? id : nil
+end
+
+def merge_base_of(base, head)
+  out, _e, st = Open3.capture3("git", "merge-base", base, head)
+  st.success? && out.strip.match?(CriticCarry::SHA40) ? out.strip : nil
+end
+
+# Commit bodies of range, oldest first -> [bodies] or nil. `-z` NUL-terminates
+# each body, so the final element after split is the terminator's empty tail.
+def commit_bodies(range)
+  out, _e, st = Open3.capture3("git", "log", "-z", "--reverse", "--format=%B", range)
+  return nil unless st.success?
+  parts = out.split("\0", -1)
+  parts.pop if parts.last == ""
+  parts
+end
+
+# The two file locations this harness installs the critic definition in: the
+# project's .claude/agents (first) and the user's ~/.claude/agents. Digesting
+# both means a wrong guess at the CLI's precedence only makes carry MORE
+# conservative. Other sources the CLI supports (plugins, managed settings,
+# --agents) are not used to install this critic and are deliberately out of
+# scope; that residual is stated, not claimed closed.
+#
+# Each is framed by its ROLE ("project" / "user"), never by its absolute path:
+# the project path differs per checkout, and a path-keyed digest made keys
+# from two checkouts of one repo never match -- so a BLOCK recorded in another
+# worktree could never veto (DND-986 review round; M10 in --self-test).
+# -> [[role, bytes_or_nil], ...] or nil when a file exists but cannot be read
+# (never read as ABSENT).
+def critic_agent_defs
+  top, _e, st = Open3.capture3("git", "rev-parse", "--show-toplevel")
+  return nil unless st.success? && !top.strip.empty?
+  roles = [["project", File.join(top.strip, ".claude", "agents", "#{CRITIC}.md")],
+           ["user", File.join(Dir.home, ".claude", "agents", "#{CRITIC}.md")]]
+  roles.map do |role, p|
+    next [role, nil] unless File.exist?(p)
+    return nil unless File.file?(p) && File.readable?(p)
+    [role, File.binread(p)]
+  end
+rescue StandardError
+  nil
+end
+
+# The head's five carry keys, computed from the SAME diff text the judge is
+# shown. -> [keys, nil] or [keys_with_nils, reason] where reason is the first
+# key that could not be computed, worded for the NOT ATTEMPTED line.
+def head_carry_keys(base, sha, diff_text = nil)
+  keys = CriticCarry::HEAD_KEYS.to_h { |k| [k, nil] }
+  diff_text, usable = three_dot_diff(base, sha) if diff_text.nil?
+  return [keys, "three-dot diff empty or failed"] if usable == false || diff_text.to_s.strip.empty?
+  keys["merge_base"] = merge_base_of(base, sha)
+  return [keys, "merge-base of #{base} and HEAD could not be computed"] unless keys["merge_base"]
+  keys["patch_id"] = patch_id_for(diff_text)
+  return [keys, "patch-id could not be computed"] unless keys["patch_id"]
+  keys["diff_digest"] = CriticCarry.diff_digest(diff_text)
+  bodies = commit_bodies("#{base}..#{sha}")
+  return [keys, "commit log unreadable"] unless bodies
+  keys["msgs_digest"] = CriticCarry.msgs_digest(bodies)
+  defs = critic_agent_defs
+  return [keys, "agent definition unreadable"] unless defs
+  keys["judge_digest"] = CriticCarry.judge_digest(CriticPrompt.build(diff: "", commit_messages: ""), defs)
+  [keys, nil]
+end
+
+# D8: recompute a same-key PASS source from the object store. A receipt whose
+# recorded keys do not reproduce from its own commits fails closed.
+# -> [true, nil] or [false, reason]
+def revalidate_source(r)
+  sha = r["sha"].to_s
+  mb = r["merge_base"].to_s
+  present = ->(c) { Open3.capture3("git", "cat-file", "-e", "#{c}^{commit}")[2].success? }
+  return [false, "source commit missing"] unless sha.match?(CriticCarry::SHA40) && present.call(sha)
+  return [false, "source commit missing (its merge-base #{mb[0, 12]})"] unless mb.match?(CriticCarry::SHA40) && present.call(mb)
+  diff, _e, st = Open3.capture3("git", "diff", *DIFF_FLAGS, mb, sha)
+  return [false, "recompute mismatch (git diff failed)"] unless st.success?
+  return [false, "recompute mismatch (patch_id)"] unless patch_id_for(diff) == r["patch_id"]
+  return [false, "recompute mismatch (diff_digest)"] unless CriticCarry.diff_digest(diff) == r["diff_digest"]
+  bodies = commit_bodies("#{mb}..#{sha}")
+  return [false, "recompute mismatch (msgs_digest)"] unless bodies && CriticCarry.msgs_digest(bodies) == r["msgs_digest"]
+  [true, nil]
+end
+
+# An UNKEYED BLOCK -- schema 1 (written before carry keys existed), an
+# unknown schema, or schema 2 with a null veto key (a key could not be computed
+# when it was judged, though the judge still saw the real diff) -- on the SAME
+# PATCH must still veto. Its patch is recomputed from its commit against its
+# recorded merge-base, else its merge-base with the current base.
+# -> :same, :different, :landed, or a String naming why it could not be
+# recomputed. The String is doubt, and CriticCarry.decide fails closed on it.
+#
+# :landed -- no recorded merge-base, and the commit is already an ancestor of
+# the HEAD's merge-base. Its merge-base with the base is then itself, so the
+# recompute is an empty diff that says nothing about the patch it was judged
+# on; but a commit in the head's base is upstream of the head's diff, never in
+# it. Before this, each such receipt stopped every carry in the repo for good
+# (measured 2026-09-28: 8 in ~/dev/custom's stores; M30). A receipt WITH a
+# recorded merge-base is always recomputed from it, so an empty recorded patch
+# (a judge shown uncommitted work) stays doubt.
+def unkeyed_block_state(r, base, head_patch_id, head_merge_base = nil)
+  sha = r["sha"].to_s
+  return "its sha #{sha.inspect} is not a 40-hex commit" unless sha.match?(CriticCarry::SHA40)
+  return "its commit #{sha[0, 12]} is gone from this object store" unless
+    Open3.capture3("git", "cat-file", "-e", "#{sha}^{commit}")[2].success?
+  recorded = r["merge_base"].to_s.match?(CriticCarry::SHA40)
+  # Only a CLEAN receipt (dirty == false exactly): a dirty run whose three-dot
+  # diff was empty showed the judge UNCOMMITTED work, which never landed and
+  # might be this very change (M30b). A missing flag is doubt too.
+  if !recorded && r["dirty"] == false && head_merge_base.to_s.match?(CriticCarry::SHA40) &&
+     Open3.capture3("git", "merge-base", "--is-ancestor", sha, head_merge_base)[2].success?
+    return :landed
+  end
+  mb = recorded ? r["merge_base"] : merge_base_of(base, sha)
+  return "its merge-base with #{base} could not be computed" unless mb
+  diff, _e, st = Open3.capture3("git", "diff", *DIFF_FLAGS, mb, sha)
+  return "git diff #{mb[0, 12]} #{sha[0, 12]} failed" unless st.success?
+  pid = patch_id_for(diff)
+  return "its patch-id could not be computed" unless pid
+  pid == head_patch_id ? :same : :different
+end
+
+# Resolve every store the READER searches, via the reader's own functions, so
+# the writer never carries from a store set the reader would not agree on.
+# -> [existing_stores, candidate_count, nil] or [nil, nil, reason]
+def carry_stores
+  common, why = git_common_dir
+  stores, why = verdict_stores(common) unless why
+  return [nil, nil, why] if why
+  own = own_store
+  return [nil, nil, "this checkout's store is not among the reader's #{stores.size} store(s)"] unless own && stores.include?(own)
+  bad = stores.find { |d| File.exist?(d) && !(File.readable?(d) && File.executable?(d)) }
+  return [nil, nil, "#{bad} exists but cannot be listed"] if bad
+  existing = stores.select { |d| File.directory?(d) }
+  [([own] & existing) + (existing - [own]), stores.size, nil]
+end
+
+# The verdict (or "running") HEAD already has in any store, else nil.
+def existing_head_state(stores, sha)
+  stores.each do |d|
+    path = File.join(d, "#{sha}.json")
+    next unless File.exist?(path)
+    begin
+      return (JSON.parse(File.read(path))["verdict"] || "unknown").to_s
+    rescue StandardError
+      return "unreadable"
+    end
+  end
+  stores.any? { |d| File.exist?(File.join(d, "#{sha}.running")) } ? "running" : nil
+end
+
+def short12(sha) = sha.to_s[0, 12]
+
+def carry_not_attempted(reason)
+  warn "critic-review: CARRY NOT ATTEMPTED — #{reason}; running the judge."
+  nil
+end
+
+# The carry step. -> 0 when a PASS was carried with nothing new upstream
+# (receipt written, nothing else to do); a Hash, the interaction plan, on a hit
+# whose base moved forward (see carry_hit); else nil, and the caller runs a
+# FULL review. Every path prints exactly one of the distinct outcome lines
+# (PASS (CARRIED) / CARRY HIT / CARRY MISS / CARRY REFUSED / CARRY NOT ATTEMPTED).
+def attempt_carry(base, sha, dirty, keys, key_reason)
+  return carry_not_attempted("no resolvable HEAD commit") unless sha
+  stores, candidate_stores, why = carry_stores
+  return carry_not_attempted("verdict store could not be resolved: #{why}") if why
+  if (state = existing_head_state(stores, sha))
+    return carry_not_attempted("HEAD already has a receipt (#{state})")
+  end
+  return carry_not_attempted("dirty tree") if dirty
+  return carry_not_attempted(key_reason) if key_reason
+
+  candidates = stores.flat_map { |d| Dir.glob(File.join(d, "*.json")).sort }.map do |path|
+    r = begin
+      JSON.parse(File.read(path))
+    rescue StandardError
+      nil
+    end
+    { receipt: r, path: path, validated: false, invalid_reason: nil }
+  end
+  candidates.each do |c|
+    r = c[:receipt]
+    next unless r.is_a?(Hash)
+    if r["verdict"] == "block" && !CriticCarry.keyed_block?(r)
+      c[:unkeyed_block] = unkeyed_block_state(r, base, keys["patch_id"], keys["merge_base"])
+    end
+    next unless r["schema"] == 2 && r["verdict"] == "pass"
+    next unless CriticCarry::MATCH_KEYS.all? { |k| r[k] == keys[k] }
+    c[:validated], c[:invalid_reason] = revalidate_source(r)
+  end
+
+  dec = CriticCarry.decide(keys, candidates)
+  landed = dec.report ? Array(dec.report[:landed_blocks]) : []
+  unless landed.empty?
+    warn "critic-review: NOTE #{landed.size} BLOCK receipt(s) with no usable carry keys are on commits already in this head's base " \
+         "(#{short12(keys['merge_base'])}); their change is upstream of this diff, so they were not treated as this change:"
+    landed.each { |p| warn "  set aside: #{p}" }
+  end
+  case dec.outcome
+  when :not_attempted
+    carry_not_attempted(dec.reason)
+  when :refused
+    warn "critic-review: CARRY REFUSED — receipt #{dec.candidate[:path]} records a BLOCK on this identical change; running the judge."
+    nil
+  when :miss
+    rep = dec.report
+    warn "critic-review: CARRY MISS — no usable PASS for patch-id #{short12(keys['patch_id'])} (base #{base}, merge-base #{short12(keys['merge_base'])}); " \
+         "#{rep[:considered]} receipt(s) in #{stores.size} of #{candidate_stores} candidate store(s) considered, #{rep[:share_patch_id]} share the patch-id."
+    CriticCarry.miss_lines(rep).each { |l| warn l }
+    warn "Running the judge."
+    nil
+  when :carry
+    carry_hit(base, sha, keys, dec)
+  end
+end
+
+# A carry HIT (DND-986 round 3, owner spec: "If a rebase doesn't change the
+# branch itself and the last critic review for the branch passed, the
+# critic's job should only be to see if the changes from the rebase cause a
+# problem."). The carried PASS covers the branch's own diff only.
+#   - nothing came in upstream (same base, or an upstream range that changes
+#     no file): the carried PASS stands, no model call -> 0
+#   - a forward rebase: -> an interaction plan for run_interaction
+#   - anything that cannot be assembled (a non-forward rebase, an unreadable
+#     upstream delta): NOT ATTEMPTED -> nil, and the caller runs a FULL review
+def carry_hit(base, sha, keys, dec)
+  src = dec.candidate[:receipt]
+  judged = src["carried_from"] ? "carried #{src['at']} via #{short12(src['sha'])}" : "judged #{src['at']}"
+  from, to = CriticCarry.upstream_range(src, keys)
+  if from
+    anc = Open3.capture3("git", "merge-base", "--is-ancestor", from, to)[2]
+    unless anc.success?
+      return carry_not_attempted("the source's base #{short12(from)} is not an ancestor of the new base #{short12(to)} " \
+                                 "(not a forward rebase), so there is no upstream delta to review on its own")
+    end
+    up_diff, _e, st1 = Open3.capture3("git", "diff", *DIFF_FLAGS, from, to)
+    up_paths, _e, st2 = Open3.capture3("git", "diff", "--no-ext-diff", "--name-only", from, to)
+    br_paths, _e, st3 = Open3.capture3("git", "diff", "--no-ext-diff", "--name-only", keys["merge_base"], sha)
+    br_diff, _e, st4 = Open3.capture3("git", "diff", *DIFF_FLAGS, keys["merge_base"], sha)
+    unless [st1, st2, st3, st4].all?(&:success?)
+      return carry_not_attempted("the upstream delta #{short12(from)}..#{short12(to)} or the branch diff could not be read")
+    end
+  end
+  if from.nil? || up_diff.strip.empty?
+    path = write_verdict(sha, base, "pass", [], false, keys: keys,
+                         carried: { root: dec.root, receipt: dec.candidate[:path] }, exclusive: true)
+    return carry_not_attempted("the carried receipt could not be written (see the NOTE above)") unless path
+    puts "critic-review: PASS (CARRIED) — identical change already passed at #{short12(dec.root)} " \
+         "(patch-id #{short12(keys['patch_id'])}; #{judged}, merge-base #{short12(src['merge_base'])}); no model call. Receipt #{path}."
+    puts "  NOTE nothing came in upstream (#{from ? 'the upstream range changes no file' : 'the base did not move'}); integration-gate still gates the integrated head."
+    return 0
+  end
+
+  up = up_paths.split("\n").reject(&:empty?)
+  shared = CriticCarry.shared_files(up, br_paths.split("\n").reject(&:empty?))
+  warn "critic-review: CARRY HIT — identical change already passed at #{short12(dec.root)} (patch-id #{short12(keys['patch_id'])}; #{judged}); " \
+       "the branch's own diff is not re-judged. Reviewing ONLY the upstream delta #{short12(from)}..#{short12(to)} " \
+       "(#{up.size} file(s) changed upstream, #{shared.size} also touched by the branch) for what it breaks in the branch."
+  { root: dec.root, receipt: dec.candidate[:path], range: "#{from}..#{to}",
+    prompt: CriticPrompt.build_interaction(upstream_range: "#{from}..#{to}", upstream_diff: up_diff,
+                                           branch_diff: br_diff, shared_files: shared) }
+end
+
+# Run the interaction review a carry hit planned. -> exit code, like run().
+def run_interaction(base, sha, keys, plan)
+  mark_running(sha)
+  raw, invoke_ok = judge_call(plan[:prompt], :interaction)
+  findings, trailer_ok = parse_findings(raw)
+  iaction, = decide(findings || [], trailer_ok, invoke_ok)
+  action, code, label = CriticCarry.interaction_outcome(iaction)
+  from, to = plan[:range].split("..")
+  range12 = "#{short12(from)}..#{short12(to)}"
+  path = write_verdict(sha, base, action, findings || [], false, keys: keys,
+                       carried: { root: plan[:root], receipt: plan[:receipt] },
+                       interaction: { range: plan[:range], verdict: iaction })
+  case action
+  when "pass"
+    puts "critic-review: #{label} — the branch's diff passed at #{short12(plan[:root])}; the upstream delta #{range12} " \
+         "does not break it. Receipt #{path || '(not written)'}."
+  when "block"
+    warn "critic-review: BLOCKED (INTERACTION) — the upstream delta #{range12} breaks the branch: #{findings.join(', ')}"
+    body = raw.to_s.lines
+    trailer = body.rindex { |l| l =~ /^\s*FINDINGS:/i }
+    body = body[0...trailer] if trailer
+    text = body.join.strip
+    warn(text.empty? ? "  (the critic returned a verdict with no body -- re-run to see it)" : text)
+    warn "  Fix: the branch's own diff already passed; what is reported is what the rebase brought in breaking it. Adapt the branch to the upstream change (or say why a finding is wrong in the MR), then re-run."
+    warn_round_notice(sha)
+    warn_report_pointer(write_report(sha, raw), sha)
+  else
+    warn "critic-review: FAIL-OPEN — the interaction review of the upstream delta #{range12} did not return a usable verdict (infra/model error); NOT blocking, and NO green verdict is recorded."
+    warn "  Fix: re-run ai/bin/critic-review once `claude` is reachable; the carried PASS covers only the branch's own diff, not what the rebase brought in. This head now has a (fail-open) receipt, so the re-run is a FULL review, not another interaction review."
+    raw.to_s.strip.empty? ? warn("  NOTE the critic produced NO output at all, so there is no report to record.") : warn_report_pointer(write_report(sha, raw), sha)
+  end
+  code
 end
 
 def default_base
@@ -535,11 +985,32 @@ def run(argv)
   base = (i = argv.index("--base")) ? argv[i + 1] : default_base
   sha = head_sha
   dirty = tree_dirty?
+  # The judge's input is built ONCE, pinned to the resolved head, and the carry
+  # keys are computed from that same text -- a receipt's keys must describe
+  # exactly what its judge was shown. The fallback diff (uncommitted work vs
+  # base) is never keyed.
+  pinned = sha || "HEAD"
+  td, td_usable = three_dot_diff(base, pinned)
+  judge_diff = td_usable ? td : diff_for(base, pinned)
+  log = commit_log(base, pinned)
+  keys, key_reason = sha ? head_carry_keys(base, sha, td_usable ? td : "") : [nil, "no resolvable HEAD commit"]
+  key_reason ||= "commit log unreadable" if log.nil?
+
+  if argv.include?("--no-carry")
+    warn "critic-review: CARRY SKIPPED (--no-carry); running the judge."
+  elsif (carried = attempt_carry(base, sha, dirty, keys, key_reason))
+    # 0: a carried PASS with nothing new upstream. A Hash: a hit whose upstream
+    # delta must be reviewed for interaction (round 3). nil falls through to a
+    # FULL review, as every fail-closed path does.
+    return carried if carried.is_a?(Integer)
+    return run_interaction(base, sha, keys, carried)
+  end
+
   mark_running(sha)
-  raw, invoke_ok = critic_output(base)
+  raw, invoke_ok = critic_output(judge_diff, log)
   findings, trailer_ok = parse_findings(raw)
   action, code = decide(findings || [], trailer_ok, invoke_ok)
-  write_verdict(sha, base, action, findings || [], dirty)
+  write_verdict(sha, base, action, findings || [], dirty, keys: key_reason ? nil : keys)
 
   case action
   when "pass"
@@ -1083,10 +1554,720 @@ def run_cross_checkout_self_test
   ok
 end
 
+# DND-986 DOMAIN: the pure carry-key and decision functions in
+# ai/lib/critic_carry.rb. Every case names itself on failure. The cases marked
+# MISS feed a key that is absent or wrongly matching and assert the code SAYS
+# so -- a carry that cannot be attempted must never read as "found nothing".
+def run_carry_domain_self_test
+  ok = true
+  check = lambda do |name, cond|
+    warn "critic-review --self-test: FAILED carry domain case: #{name}" unless cond
+    ok &&= cond
+  end
+  cc = CriticCarry
+
+  # normalize_diff
+  d_a = "diff --git a/x b/x\nindex 1111111..2222222 100644\n--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n a\n+b\n c\n"
+  d_b = "diff --git a/x b/x\nindex 3333333..4444444 100644\n--- a/x\n+++ b/x\n@@ -7,2 +9,3 @@\n a\n+b\n c\n"
+  check.call("D1 index lines and hunk numbers are normalised away", cc.normalize_diff(d_a) == cc.normalize_diff(d_b))
+  check.call("D2 a one-space indentation change is NOT normalised away",
+             cc.normalize_diff(d_a) != cc.normalize_diff(d_a.sub("+b\n", "+ b\n")))
+  check.call("D3 hunk function context is kept",
+             cc.normalize_diff("@@ -3,4 +9,4 @@ def foo\n").start_with?("@@ @@ def foo"))
+  check.call("D4 an added body line that looks like an index line is kept",
+             cc.normalize_diff("+index 1..2\n").include?("+index 1..2"))
+  check.call("D4b a single-line hunk header normalises too", cc.normalize_diff("@@ -3 +9 @@\n") == "@@ @@\n")
+  check.call("D4c digests differ exactly when normalised text differs",
+             cc.diff_digest(d_a) == cc.diff_digest(d_b) && cc.diff_digest(d_a) =~ /\A[0-9a-f]{64}\z/)
+
+  # msgs_digest / judge_digest
+  check.call("D5 a body with failing-first evidence digests differently",
+             cc.msgs_digest(["fix: a\n"]) != cc.msgs_digest(["fix: a\n\nFailing before: x\n"]))
+  check.call("D6 the digest reads bodies only (no SHAs), so a rebase keeps it",
+             cc.msgs_digest(%W[one\n two\n]) == cc.msgs_digest(%W[one\n two\n]))
+  check.call("D7 bodies are NUL-separated: [a,b] != [ab]", cc.msgs_digest(%w[a b]) != cc.msgs_digest(%w[ab]))
+  check.call("D7b a trailing empty body is not the same as no body", cc.msgs_digest(["a", ""]) != cc.msgs_digest(["a"]))
+  check.call("D8 an ABSENT agent definition differs from a present one",
+             cc.judge_digest("T", [["p1", "X"], ["p2", nil]]) != cc.judge_digest("T", [["p1", "X"], ["p2", "Y"]]))
+  check.call("D8b the location's role label is part of the digest",
+             cc.judge_digest("T", [["project", "X"]]) != cc.judge_digest("T", [["user", "X"]]))
+  check.call("D9 a one-byte template change differs", cc.judge_digest("T", []) != cc.judge_digest("U", []))
+
+  # decide
+  sha1 = "1" * 40
+  keys = { "merge_base" => "a" * 40, "patch_id" => "b" * 40, "diff_digest" => "c" * 64,
+           "msgs_digest" => "d" * 64, "judge_digest" => "e" * 64 }
+  rec = lambda do |verdict: "pass", sha: sha1, **over|
+    { "schema" => 2, "sha" => sha, "verdict" => verdict, "dirty" => false,
+      "carried_from" => nil }.merge(keys).merge(over.transform_keys(&:to_s))
+  end
+  cand = ->(r, path: "/s/#{r['sha']}.json", validated: true, why: nil) { { receipt: r, path: path, validated: validated, invalid_reason: why } }
+  near = ->(dec) { dec.report[:near_misses].map { |_p, reason| reason }.join(" | ") }
+
+  dec = cc.decide(keys, [cand.call(rec.call)])
+  check.call("D10 a validated schema-2 PASS with equal keys carries", dec.outcome == :carry && dec.root == sha1)
+  pass_c = cand.call(rec.call)
+  block_c = cand.call(rec.call(verdict: "block", sha: "2" * 40))
+  [[pass_c, block_c], [block_c, pass_c]].each_with_index do |cands, i|
+    dec = cc.decide(keys, cands)
+    check.call("D11.#{i} a BLOCK on the identical change vetoes regardless of order",
+               dec.outcome == :refused && dec.candidate.equal?(block_c))
+  end
+  other_judge_block = cand.call(rec.call(verdict: "block", sha: "5" * 40, judge_digest: "0" * 64))
+  dec = cc.decide(keys, [pass_c, other_judge_block])
+  check.call("D11d a BLOCK under ANOTHER judge version still vetoes (veto ignores judge_digest)",
+             dec.outcome == :refused && dec.candidate.equal?(other_judge_block))
+  unreadable = { receipt: nil, path: "/s/broken.json", validated: false, invalid_reason: nil }
+  dec = cc.decide(keys, [pass_c, unreadable])
+  check.call("D25 MISS an unreadable receipt is NOT ATTEMPTED naming it (it might be a BLOCK)",
+             dec.outcome == :not_attempted && dec.reason.include?("/s/broken.json"))
+  # An UNKEYED BLOCK (schema 1, or schema 2 with a null veto key) is judged
+  # by the caller's recompute of its patch: :same, :different, or a String
+  # saying why it could not be recomputed.
+  legacy_block = cand.call({ "schema" => 1, "sha" => "4" * 40, "verdict" => "block", "dirty" => false })
+  legacy_block[:unkeyed_block] = :same
+  dec = cc.decide(keys, [pass_c, legacy_block])
+  check.call("D11b a schema-1 BLOCK on the same patch (recomputed) vetoes", dec.outcome == :refused && dec.candidate.equal?(legacy_block))
+  legacy_block[:unkeyed_block] = :different
+  dec = cc.decide(keys, [pass_c, legacy_block])
+  check.call("D11c a schema-1 BLOCK on another patch does not veto", dec.outcome == :carry)
+  nullkey_block = cand.call(rec.call(verdict: "block", sha: "6" * 40, patch_id: nil, diff_digest: nil,
+                                     msgs_digest: nil, judge_digest: nil, merge_base: nil))
+  nullkey_block[:unkeyed_block] = :same
+  dec = cc.decide(keys, [pass_c, nullkey_block])
+  check.call("D26 a schema-2 BLOCK with null keys on the same patch (recomputed) vetoes",
+             dec.outcome == :refused && dec.candidate.equal?(nullkey_block))
+  nullkey_block[:unkeyed_block] = nil
+  dec = cc.decide(keys, [pass_c, nullkey_block])
+  check.call("D26b an unkeyed BLOCK the caller never classified is NOT ATTEMPTED (fail closed)",
+             dec.outcome == :not_attempted && dec.reason.include?("/s/#{'6' * 40}.json"))
+  nullkey_block[:unkeyed_block] = "source commit missing"
+  dec = cc.decide(keys, [pass_c, nullkey_block])
+  check.call("D27 an unkeyed BLOCK whose patch cannot be recomputed is NOT ATTEMPTED naming it and why",
+             dec.outcome == :not_attempted && dec.reason.include?("/s/#{'6' * 40}.json") && dec.reason.include?("source commit missing"))
+  # D29 an unkeyed BLOCK whose commit is already in the head's base (:landed)
+  # is not this change: it does not stop the carry, and it is COUNTED, so the
+  # caller can say how many it set aside (never a silent drop).
+  nullkey_block[:unkeyed_block] = :landed
+  dec = cc.decide(keys, [pass_c, nullkey_block])
+  check.call("D29 an unkeyed BLOCK already in the head's base does not stop the carry, and is counted",
+             dec.outcome == :carry && dec.report[:landed_blocks] == [nullkey_block[:path]])
+  legacy_block[:unkeyed_block] = :same
+  dec = cc.decide(keys, [pass_c, nullkey_block, legacy_block])
+  check.call("D29b a landed BLOCK never masks a same-patch BLOCK beside it", dec.outcome == :refused && dec.candidate.equal?(legacy_block))
+  # --- Round 3: the INTERACTION review (owner spec). On a hit the carried PASS
+  # covers only the branch's own diff; the judge then reviews only what the
+  # rebase brought in.
+  mb_old = "a" * 40
+  mb_new = "c" * 40
+  check.call("I1 same base: no upstream range (plain carry, no model call)",
+             cc.upstream_range({ "merge_base" => mb_old }, { "merge_base" => mb_old }).nil?)
+  check.call("I2 moved base: the range is source base .. new base",
+             cc.upstream_range({ "merge_base" => mb_old }, { "merge_base" => mb_new }) == [mb_old, mb_new])
+  check.call("I3 files touched by both sides, sorted, no duplicates",
+             cc.shared_files(%w[b.rb a.rb x.md a.rb], %w[a.rb z.rb b.rb]) == %w[a.rb b.rb])
+  check.call("I4 interaction PASS -> head PASS labelled CARRIED + INTERACTION",
+             cc.interaction_outcome("pass") == ["pass", 0, "PASS (CARRIED + INTERACTION)"])
+  check.call("I5 interaction BLOCK -> head BLOCK (exit 2)", cc.interaction_outcome("block")[0, 2] == ["block", 2])
+  check.call("I6 interaction fail-open -> no green verdict (fail-open)", cc.interaction_outcome("fail-open")[0] == "fail-open")
+  check.call("I6b an unknown interaction action is never a pass", cc.interaction_outcome("weird")[0] == "fail-open")
+  ip = CriticPrompt.build_interaction(upstream_range: "#{mb_old}..#{mb_new}", upstream_diff: "UPSTREAMBODY",
+                                      branch_diff: "BRANCHBODY", shared_files: %w[a.rb b.rb])
+  check.call("I7 interaction prompt leads with its own instruction", ip.start_with?(CriticPrompt::INTERACTION_INSTRUCTION))
+  check.call("I8 the instruction scopes the judge to the upstream delta and forbids re-judging the branch",
+             CriticPrompt::INTERACTION_INSTRUCTION.include?("upstream") &&
+             CriticPrompt::INTERACTION_INSTRUCTION.match?(/do not re-judge/i) &&
+             CriticPrompt::INTERACTION_INSTRUCTION.include?("FINDINGS"))
+  check.call("I9 names the upstream range", ip.include?("#{mb_old}..#{mb_new}"))
+  check.call("I10 carries the upstream diff, then the branch diff as context",
+             ip.include?("UPSTREAMBODY") && ip.include?("BRANCHBODY") && ip.index("UPSTREAMBODY") < ip.index("BRANCHBODY"))
+  check.call("I11 lists the files both sides touch", ip.include?("a.rb") && ip.include?("b.rb"))
+  none_shared = CriticPrompt.build_interaction(upstream_range: "x..y", upstream_diff: "U", branch_diff: "B", shared_files: [])
+  check.call("I12 no shared file is said, not left blank", none_shared.include?(CriticPrompt::INTERACTION_NO_SHARED))
+  fenced = CriticPrompt.build_interaction(upstream_range: "x..y", upstream_diff: "a\n```\nb", branch_diff: "B", shared_files: [])
+  check.call("I13 a ``` inside a diff cannot close its block", fenced.include?("````diff\na\n```\nb\n````"))
+  check.call("I14 the interaction prompt does not carry the full-review bug-fix addendum",
+             !ip.include?(CriticPrompt::BUG_FIX_RULE))
+
+  odd = cand.call({ "sha" => "7" * 40, "verdict" => "pass" })
+  odd2 = cand.call({ "schema" => 3, "sha" => "8" * 40, "verdict" => "pass" })
+  dec = cc.decide(keys, [odd, odd2])
+  check.call("D28 unknown or missing schemas are counted and named in the miss",
+             dec.outcome == :miss && dec.report[:unknown_schema] == 2 && cc.miss_lines(dec.report).join.include?("unknown or missing schema"))
+  %w[diff_digest msgs_digest judge_digest].each_with_index do |k, i|
+    dec = cc.decide(keys, [cand.call(rec.call(k => "f" * 64))])
+    check.call("D#{12 + i} a differing #{k} is a miss that names it (#{near.call(dec)})",
+               dec.outcome == :miss && near.call(dec).include?(k) && dec.report[:share_patch_id] == 1)
+  end
+  legacy = { "schema" => 1, "sha" => sha1, "verdict" => "pass", "dirty" => false }
+  dec = cc.decide(keys, [cand.call(legacy)])
+  check.call("D15 a schema-1 PASS is never a source and the miss names schema 1",
+             dec.outcome == :miss && dec.report[:schema1] == 1 && cc.miss_lines(dec.report).join("\n").include?("schema 1"))
+  %w[source\ commit\ missing recompute\ mismatch].each do |why|
+    dec = cc.decide(keys, [cand.call(rec.call, validated: false, why: why)])
+    check.call("D16 an unvalidated source is a miss naming #{why}", dec.outcome == :miss && near.call(dec).include?(why))
+  end
+  dec = cc.decide(keys, [cand.call(rec.call(dirty: true))])
+  check.call("D17 a dirty-tree PASS is a miss", dec.outcome == :miss && near.call(dec).include?("dirty"))
+  dec = cc.decide(keys, [cand.call(rec.call(verdict: "fail-open"))])
+  check.call("D18 a fail-open is counted, never used", dec.outcome == :miss && dec.report[:fail_open] == 1)
+  dec = cc.decide(keys.merge("patch_id" => nil), [cand.call(rec.call)])
+  check.call("D19 MISS a nil head key is NOT ATTEMPTED, never a miss",
+             dec.outcome == :not_attempted && dec.reason.include?("patch_id"))
+  dec = cc.decide(keys.merge("merge_base" => ""), [])
+  check.call("D19b an empty head key is NOT ATTEMPTED", dec.outcome == :not_attempted)
+  dec = cc.decide(keys, [])
+  check.call("D20 zero candidates is a miss with count 0",
+             dec.outcome == :miss && dec.report[:considered].zero? && dec.report[:share_patch_id].zero?)
+  s0 = "0" * 40
+  dec = cc.decide(keys, [cand.call(rec.call(carried_from: s0))])
+  check.call("D21 a carried source passes its ROOT through (chains never nest)", dec.outcome == :carry && dec.root == s0)
+  carried_c = cand.call(rec.call(carried_from: s0, sha: "3" * 40))
+  judged_c = cand.call(rec.call(sha: s0))
+  dec = cc.decide(keys, [carried_c, judged_c])
+  check.call("D21b with several usable sources the judged one is named", dec.outcome == :carry && dec.candidate.equal?(judged_c))
+  dec = cc.decide(keys, [cand.call(rec.call("merge_base" => nil))])
+  check.call("D22 a source with a null key is never used", dec.outcome == :miss && near.call(dec).include?("null key"))
+  dec = cc.decide(keys, [cand.call(rec.call(carried_from: "not-a-sha"))])
+  check.call("D23 a source with a malformed carried_from is never used", dec.outcome == :miss)
+  other = cand.call(rec.call("patch_id" => "9" * 40))
+  dec = cc.decide(keys, [other, cand.call(legacy)])
+  check.call("D24 counts: considered all, share only the equal patch-id",
+             dec.report[:considered] == 2 && dec.report[:share_patch_id].zero? && dec.report[:near_misses].empty?)
+  ok
+end
+
+# DND-986 MANAGER: carry inside a real throwaway repo with a stubbed judge.
+#
+# Two stubs: CRITIC_REVIEW_STUB answers a FULL review, and
+# CRITIC_REVIEW_STUB_INTERACTION answers an INTERACTION review (round 3, owner
+# spec). Cases that expect a carry set the full stub to BLOCK, so a run that
+# fell back to a full review would exit 2. CRITIC_REVIEW_PROMPT_LOG records
+# which kind of prompt each judge call was sent, so "no model call" and
+# "interaction only" are asserted directly. Every miss case sets the full stub
+# to BLOCK too, so "the judge ran" is observable as exit 2.
+#
+# HOME is a throwaway so the judge digest reads a fixture agent definition,
+# never the machine's real ~/.claude/agents.
+def run_carry_self_test
+  require "tmpdir"
+  ok = true
+  check = lambda do |name, cond|
+    warn "critic-review --self-test: FAILED carry case: #{name}" unless cond
+    ok &&= cond
+  end
+  stubs = Dir.mktmpdir("critic-review-carry-stubs-")
+  pass_out = File.join(stubs, "p"); File.write(pass_out, "fine\nFINDINGS: none\n")
+  block_out = File.join(stubs, "b"); File.write(block_out, "- [correctness] x:1 — wrong\nFINDINGS: correctness\n")
+  home = Dir.mktmpdir("critic-review-carry-home-")
+  agent_def = File.join(home, ".claude", "agents", "#{CRITIC}.md")
+  FileUtils.mkdir_p(File.dirname(agent_def))
+  File.write(agent_def, "fixture critic v1\n")
+  prev_home = ENV["HOME"]
+  ENV["HOME"] = home
+  git = ->(*a) { system("git", "-c", "commit.gpgsign=false", *a, out: File::NULL, err: File::NULL) }
+  sha_of = ->(ref) { Open3.capture3("git", "rev-parse", ref)[0].strip }
+  broken_out = File.join(stubs, "x"); File.write(broken_out, "model crashed, no trailer\n")
+  plog = File.join(stubs, "prompts.log")
+  go = lambda do |argv, stub, inter = pass_out|
+    ENV["CRITIC_REVIEW_STUB"] = stub
+    ENV["CRITIC_REVIEW_STUB_INTERACTION"] = inter
+    ENV["CRITIC_REVIEW_PROMPT_LOG"] = plog
+    File.write(plog, "")
+    (rc, out), err = capture_err { capture_out { run(argv) } }
+    [rc, out, err]
+  end
+  kinds = -> { File.read(plog).scan(/^=== PROMPT (\w+)$/).flatten }
+  last_prompt = -> { File.read(plog).split(/^=== PROMPT \w+$/).last.to_s }
+  receipt = ->(sha) { JSON.parse(File.read(File.join(verdict_dir, "#{sha}.json"))) }
+
+  # The common setup: main has a seed; feature commit F1 ("fix: x" with
+  # evidence) is judged PASS vs main; main advances; feature rebases -> F2, an
+  # identical patch with a new SHA and no receipt. Yields [f1, f2] inside it.
+  fixture = lambda do |two_commits: false, &blk|
+    Dir.mktmpdir("critic-review-carry-") do |root|
+      repo = File.join(root, "repo")
+      FileUtils.mkdir_p(repo)
+      Dir.chdir(repo) do
+        git.call("init", "-q", "-b", "main", ".")
+        git.call("config", "user.email", "t@example.invalid")
+        git.call("config", "user.name", "t")
+        File.write("seed.txt", "seed\n")
+        git.call("add", "-A"); git.call("commit", "-qm", "seed")
+        git.call("checkout", "-qb", "feat")
+        if two_commits
+          File.write("f.txt", "a\n"); git.call("add", "-A"); git.call("commit", "-qm", "part one")
+          File.write("f.txt", "a\nb\n"); git.call("add", "-A"); git.call("commit", "-qm", "part two")
+        else
+          File.write("f.txt", "a\nb\n"); git.call("add", "-A")
+          git.call("commit", "-qm", "fix: x\n\nFailing before: y")
+        end
+        f1 = head_sha
+        go.call(["--base", "main"], pass_out)
+        git.call("checkout", "-q", "main")
+        File.write("m.txt", "m\n"); git.call("add", "-A"); git.call("commit", "-qm", "main moves")
+        git.call("checkout", "-q", "feat")
+        git.call("rebase", "-q", "main")
+        blk.call(f1, head_sha, root)
+      end
+    end
+  end
+
+  fixture.call do |f1, f2, _root|
+    r1 = receipt.call(f1)
+    # M1 a judged receipt is schema 2 and carries every key.
+    check.call("M1 judged receipt is schema 2", r1["schema"] == 2)
+    check.call("M1 judged receipt has all five keys",
+               CriticCarry::HEAD_KEYS.all? { |k| CriticCarry.key_ok?(r1[k]) })
+    check.call("M1 judged receipt carried_from is null", r1.key?("carried_from") && r1["carried_from"].nil?)
+    check.call("M1 merge_base is the seed", r1["merge_base"] == sha_of.call("main~1"))
+    check.call("M0 the rebase made a new SHA", f1 != f2 && !f2.to_s.empty?)
+
+    # M2 the identical rebased change: the carried PASS covers the branch's
+    # diff, and ONLY an interaction review of the upstream delta runs.
+    mb1 = r1["merge_base"]
+    mb2 = sha_of.call("main")
+    rc, out, err = go.call(["--base", "main"], block_out)
+    check.call("M2 hit + interaction PASS exits 0 although a full review would BLOCK (exit #{rc}; #{err.lines.first})", rc == 0)
+    check.call("M2 stdout starts PASS (CARRIED + INTERACTION)", out.start_with?("critic-review: PASS (CARRIED + INTERACTION)"))
+    check.call("M2 exactly one judge call, and it was the interaction review (#{kinds.call.inspect})", kinds.call == ["interaction"])
+    ip = last_prompt.call
+    check.call("M2 the interaction prompt names the upstream range", ip.include?("#{mb1}..#{mb2}"))
+    check.call("M2 it carries the upstream delta (m.txt) and the branch diff as context (f.txt)",
+               ip.include?("+++ b/m.txt") && ip.include?("+++ b/f.txt") && ip.index("+++ b/m.txt") < ip.index("+++ b/f.txt"))
+    check.call("M2 the carry-hit line names the source and range", err.include?("CARRY HIT") && err.include?(f1[0, 12]))
+    r2 = receipt.call(f2)
+    check.call("M2 receipt: pass, carried from F1", r2["carried_from"] == f1 && r2["verdict"] == "pass" && r2["schema"] == 2)
+    check.call("M2 receipt: upstream range and interaction verdict", r2["upstream_range"] == "#{mb1}..#{mb2}" && r2["interaction"] == "pass")
+    check.call("M2 receipt records its own keys", r2["merge_base"] == mb2 && r2["patch_id"] == r1["patch_id"])
+    check.call("M2 receipt names the matched receipt", r2["carried_receipt"] == File.join(own_store, "#{f1}.json"))
+    check.call("M2 no .running marker left", !File.exist?(File.join(verdict_dir, "#{f2}.running")))
+    # M21 an interaction PASS, like a full PASS, writes no report file.
+    check.call("M21 an interaction PASS writes no report file", !File.exist?(File.join(verdict_dir, "#{f2}.report.txt")))
+    # M20 an interaction review IS a judge round (a model looked); only a pure
+    # carry is excluded.
+    check.call("M20 rounds count the interaction review (#{rounds_recorded.inspect})", rounds_recorded&.first == 2)
+
+    # M3 the reader returns 0 and names the root and the range in stable tokens.
+    (code, rout), = capture_err { capture_out { verdict_for(f2) } }
+    check.call("M3 verdict_for an interaction-passed head is 0", code == 0)
+    check.call("M3 the PASS line carries both tokens",
+               rout.include?("[critic-carried-from=#{f1}]") && rout.include?("[critic-upstream=#{mb1}..#{mb2}]"))
+    (code, rout), = capture_err { capture_out { verdict_for(f1) } }
+    check.call("M3 a judged PASS has no token", code == 0 && !rout.include?("critic-carried-from"))
+    # M3b an upstream_range with no carried_from is malformed: an interaction
+    # review only ever follows a carry, and integration-gate needs both.
+    p1 = File.join(verdict_dir, "#{f1}.json")
+    saved = File.read(p1)
+    File.write(p1, JSON.generate(JSON.parse(saved).merge("upstream_range" => "#{mb1}..#{mb2}")))
+    (code, _o), rerr = capture_err { capture_out { verdict_for(f1) } }
+    File.write(p1, saved)
+    check.call("M3b upstream_range without carried_from is refused (exit 3, Fix:)",
+               code == 3 && rerr.include?("upstream_range") && rerr.include?("Fix:"))
+    # M3c a PASS whose recorded interaction verdict is not a pass is malformed.
+    p2 = File.join(verdict_dir, "#{f2}.json")
+    saved = File.read(p2)
+    File.write(p2, JSON.generate(JSON.parse(saved).merge("interaction" => "block")))
+    (code, _o), rerr = capture_err { capture_out { verdict_for(f2) } }
+    File.write(p2, saved)
+    check.call("M3c verdict pass with interaction block is refused (exit 3, Fix:)",
+               code == 3 && rerr.include?("interaction") && rerr.include?("Fix:"))
+
+    # M4 a chain passes its ROOT through; with the judged receipt preferred as
+    # the source, the range starts at ITS base (the widest delta).
+    git.call("checkout", "-q", "main")
+    File.write("m2.txt", "m\n"); git.call("add", "-A"); git.call("commit", "-qm", "main moves again")
+    git.call("checkout", "-q", "feat"); git.call("rebase", "-q", "main")
+    f3 = head_sha
+    mb3 = sha_of.call("main")
+    rc, = go.call(["--base", "main"], block_out)
+    r3 = receipt.call(f3)
+    check.call("M4 second hit exits 0", rc == 0)
+    check.call("M4 carried_from is the root F1, not F2", r3["carried_from"] == f1)
+    check.call("M4 with both usable, the judged receipt is named", r3["carried_receipt"] == File.join(own_store, "#{f1}.json"))
+    check.call("M4 the range runs from the judged source's base", r3["upstream_range"] == "#{mb1}..#{mb3}")
+    # M4b the chain: F1's receipt gone, F2's receipt is the source, the range
+    # is F2's base .. new base, and the ROOT is still F1.
+    FileUtils.rm_f(File.join(verdict_dir, "#{f3}.json"))
+    FileUtils.mv(File.join(verdict_dir, "#{f1}.json"), File.join(stubs, "f1-receipt.json"))
+    rc, = go.call(["--base", "main"], block_out)
+    r3 = receipt.call(f3)
+    check.call("M4b hit from a carried source exits 0", rc == 0)
+    check.call("M4b carried_from stays the root F1", r3["carried_from"] == f1)
+    check.call("M4b carried_receipt is F2's", r3["carried_receipt"] == File.join(own_store, "#{f2}.json"))
+    check.call("M4b the range is F2's base .. new base", r3["upstream_range"] == "#{mb2}..#{mb3}")
+    FileUtils.mv(File.join(stubs, "f1-receipt.json"), File.join(verdict_dir, "#{f1}.json"))
+
+    # M11 a head with its own receipt is judged, never carried over.
+    rc, _o, err = go.call(["--base", "main"], pass_out)
+    check.call("M11 a carried head re-run is NOT ATTEMPTED (#{err.lines.first})",
+               err.include?("CARRY NOT ATTEMPTED — HEAD already has a receipt (pass)"))
+    File.write(File.join(verdict_dir, "#{f3}.json"), JSON.generate(r3.merge("verdict" => "block", "carried_from" => nil)))
+    rc, _o, err = go.call(["--base", "main"], pass_out)
+    check.call("M11 own BLOCK: not attempted, judged", err.include?("HEAD already has a receipt (block)") && rc == 0)
+    check.call("M11 the receipt now reflects the judge", receipt.call(f3)["verdict"] == "pass" && receipt.call(f3)["carried_from"].nil?)
+
+    # M12 a running marker is a receipt state too.
+    git.call("commit", "-q", "--amend", "--no-edit", "--date=2001-01-01T00:00:00")
+    f4 = head_sha
+    File.write(File.join(verdict_dir, "#{f4}.running"), "x")
+    _rc, _o, err = go.call(["--base", "main"], pass_out)
+    check.call("M12 running marker: NOT ATTEMPTED (running)", err.include?("CARRY NOT ATTEMPTED — HEAD already has a receipt (running)"))
+  end
+
+  # M2b the interaction review BLOCKS: the head is BLOCK, its receipt is keyed,
+  # and it vetoes the next carry of this patch.
+  fixture.call do |_f1, f2, _root|
+    rc, _o, err = go.call(["--base", "main"], pass_out, block_out)
+    check.call("M2b interaction BLOCK: exit 2 (#{err.lines.first.to_s.strip})", rc == 2)
+    check.call("M2b says the upstream delta breaks the branch", err.include?("BLOCKED (INTERACTION)"))
+    check.call("M2b one judge call, the interaction review", kinds.call == ["interaction"])
+    r2 = receipt.call(f2)
+    check.call("M2b receipt: block, interaction block, keyed",
+               r2["verdict"] == "block" && r2["interaction"] == "block" && CriticCarry.keyed_block?(r2))
+    check.call("M2b a report body is recorded", File.file?(File.join(verdict_dir, "#{f2}.report.txt")))
+    code, = capture_err { capture_out { verdict_for(f2) }[0] }
+    check.call("M2b the reader says BLOCK", code == 2)
+    git.call("checkout", "-q", "main")
+    File.write("m3.txt", "m\n"); git.call("add", "-A"); git.call("commit", "-qm", "main moves on")
+    git.call("checkout", "-q", "feat"); git.call("rebase", "-q", "main")
+    rc, out, err = go.call(["--base", "main"], pass_out, pass_out)
+    check.call("M2b the next rebase is REFUSED by that BLOCK and fully reviewed (#{err.lines.first.to_s.strip})",
+               err.include?("CARRY REFUSED — receipt #{File.join(own_store, "#{f2}.json")}") &&
+               kinds.call == ["full"] && rc == 0 && out.start_with?("critic-review: PASS —"))
+  end
+
+  # M2c the interaction review FAILS OPEN: no green verdict for the head.
+  fixture.call do |_f1, f2, _root|
+    rc, _o, err = go.call(["--base", "main"], pass_out, broken_out)
+    check.call("M2c interaction fail-open: exit 0, loud", rc == 0 && err.include?("FAIL-OPEN"))
+    code, = capture_err { capture_out { verdict_for(f2) }[0] }
+    check.call("M2c the reader gives no green verdict", code == 3)
+  end
+
+  # M2d same base (an amend that keeps patch, message and base): nothing came
+  # in upstream, so the carried PASS stands with NO model call.
+  fixture.call do |f1, _f2, _root|
+    git.call("reset", "-q", "--hard", f1)
+    git.call("commit", "-q", "--amend", "--no-edit", "--date=2001-01-01T00:00:00")
+    rc, out, _err = go.call(["--base", "main"], block_out, block_out)
+    check.call("M2d same base: PASS (CARRIED), exit 0", rc == 0 && out.start_with?("critic-review: PASS (CARRIED) —"))
+    check.call("M2d no judge call at all (#{kinds.call.inspect})", kinds.call.empty?)
+    check.call("M2d receipt has no upstream range", receipt.call(head_sha)["upstream_range"].nil?)
+  end
+
+  # M2e a NON-forward rebase (the source's base is not an ancestor of the new
+  # base) has no "upstream delta": fail closed to a full review.
+  fixture.call do |f1, _f2, _root|
+    go.call(["--base", "main", "--no-carry"], pass_out)   # F2 judged on the moved base
+    FileUtils.rm_f(File.join(verdict_dir, "#{f1}.json"))
+    git.call("rebase", "-q", "--onto", "main~1", "main")  # back onto the seed
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M2e non-forward: NOT ATTEMPTED, full review (#{err.lines.first.to_s.strip})",
+               err.include?("CARRY NOT ATTEMPTED — the source's base") && kinds.call == ["full"] && rc == 2)
+  end
+
+  # M5 a changed patch (a conflict resolved by editing a line) is judged.
+  fixture.call do |_f1, _f2, _root|
+    File.write("f.txt", "a\nB\n"); git.call("commit", "-qa", "--amend", "--no-edit")
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M5 changed patch: judge ran (exit #{rc})", rc == 2)
+    check.call("M5 CARRY MISS with 0 sharing the patch-id", err.include?("CARRY MISS") && err.include?("0 share the patch-id"))
+    check.call("M5 miss names the key and counts", err.include?("receipt(s) in 1 of 1 candidate store(s) considered") && err.include?("Running the judge."))
+  end
+
+  # M6 a re-indented line: patch-id equal, bytes differ.
+  fixture.call do |_f1, _f2, _root|
+    File.write("f.txt", "a\n  b\n"); git.call("commit", "-qa", "--amend", "--no-edit")
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M6 re-indent: judge ran (exit #{rc})", rc == 2)
+    check.call("M6 miss names diff_digest (#{err.lines.grep(/near miss|MISS/).join.strip})",
+               err.include?("1 share the patch-id") && err.include?("diff_digest"))
+  end
+
+  # M7 a reworded message.
+  fixture.call do |_f1, _f2, _root|
+    git.call("commit", "-q", "--amend", "-m", "fix: x reworded")
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M7 reworded: judge ran, miss names msgs_digest", rc == 2 && err.include?("msgs_digest"))
+  end
+
+  # M8 a squash keeps the total diff but not the messages.
+  fixture.call(two_commits: true) do |_f1, _f2, _root|
+    git.call("reset", "-q", "--soft", "main")
+    git.call("commit", "-qm", "part one\n\npart two")
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M8 squash: judge ran, miss names msgs_digest", rc == 2 && err.include?("msgs_digest"))
+  end
+
+  # M9 an edited agent definition.
+  fixture.call do |_f1, _f2, _root|
+    File.write(agent_def, "fixture critic v2\n")
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    File.write(agent_def, "fixture critic v1\n")
+    check.call("M9 agent edit: judge ran, miss names judge_digest", rc == 2 && err.include?("judge_digest"))
+  end
+
+  # M10 a BLOCK on the identical change in ANOTHER checkout vetoes. The BLOCK
+  # is recorded by a REAL review run in that checkout, so its keys are the ones
+  # that checkout actually computes -- a receipt copied from this checkout
+  # would share this checkout's keys and prove nothing about the cross-checkout
+  # case (the judge digest once hashed the checkout's own path, and a copied
+  # fixture hid that the veto could never fire across checkouts).
+  fixture.call do |f1, _f2, root|
+    wt = File.join(root, "wt2")
+    git.call("worktree", "add", "-q", "--detach", wt, f1)
+    other = Dir.chdir(wt) do
+      go.call(["--base", "main", "--no-carry"], block_out)
+      File.realpath(verdict_dir)
+    end
+    check.call("M10 fixture: the other checkout recorded a BLOCK", File.file?(File.join(other, "#{f1}.json")))
+    rc, out, err = go.call(["--base", "main"], pass_out)
+    check.call("M10 CARRY REFUSED names the other checkout's BLOCK receipt (#{err.lines.first.to_s.strip})",
+               err.include?("CARRY REFUSED — receipt #{File.join(other, "#{f1}.json")}"))
+    check.call("M10 the judge ran (stub PASS, not carried)", rc == 0 && out.start_with?("critic-review: PASS —"))
+  end
+
+  # M10b a PASS recorded in ANOTHER checkout carries here (the keys agree
+  # across checkouts of one repo).
+  fixture.call do |f1, f2, root|
+    wt = File.join(root, "wt2")
+    git.call("worktree", "add", "-q", "--detach", wt, f1)
+    other = Dir.chdir(wt) do
+      go.call(["--base", "main", "--no-carry"], pass_out)
+      File.realpath(verdict_dir)
+    end
+    FileUtils.rm_f(File.join(verdict_dir, "#{f1}.json"))
+    rc, out, err = go.call(["--base", "main"], block_out)
+    check.call("M10b a PASS from another checkout carries (exit #{rc}; #{err.lines.first.to_s.strip})",
+               rc == 0 && out.start_with?("critic-review: PASS (CARRIED + INTERACTION)"))
+    check.call("M10b names the other checkout's receipt",
+               receipt.call(f2)["carried_receipt"] == File.join(other, "#{f1}.json"))
+  end
+
+  # M28 A SCHEMA-2 BLOCK WITH NULL KEYS still vetoes. A judged run records null
+  # keys when a key could not be computed (here: the agent definition is
+  # unreadable) although the judge saw the real diff and can BLOCK. Recorded by
+  # a REAL run, then the definition is restored and the branch rebased.
+  unless Process.uid.zero?
+    fixture.call do |f1, _f2, root|
+      wt = File.join(root, "wt2")
+      git.call("worktree", "add", "-q", "--detach", wt, f1)
+      File.chmod(0o000, agent_def)
+      blk = begin
+        Dir.chdir(wt) do
+          go.call(["--base", "main", "--no-carry"], block_out)
+          File.join(File.realpath(verdict_dir), "#{f1}.json")
+        end
+      ensure
+        File.chmod(0o644, agent_def)
+      end
+      r = JSON.parse(File.read(blk))
+      check.call("M28 fixture: a schema-2 BLOCK with null keys was recorded",
+                 r["schema"] == 2 && r["verdict"] == "block" && r["patch_id"].nil?)
+      rc, out, err = go.call(["--base", "main"], pass_out)
+      check.call("M28 null-key BLOCK: CARRY REFUSED naming it (#{err.lines.first.to_s.strip})",
+                 err.include?("CARRY REFUSED — receipt #{blk}"))
+      check.call("M28 the judge ran", rc == 0 && out.start_with?("critic-review: PASS —"))
+    end
+  end
+
+  # M29 an unkeyed BLOCK whose commit is gone cannot be recomputed: fail closed.
+  fixture.call do |_f1, _f2, _root|
+    gone = "a" * 40
+    File.write(File.join(verdict_dir, "#{gone}.json"), JSON.generate(
+      "schema" => 1, "tool" => "critic-review", "sha" => gone, "base" => "main", "verdict" => "block",
+      "findings" => ["correctness"], "dirty" => false, "at" => "2026-09-20T00:00:00Z"
+    ))
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M29 unrecomputable BLOCK: NOT ATTEMPTED naming it (#{err.lines.first.to_s.strip})",
+               err.include?("CARRY NOT ATTEMPTED — BLOCK receipt #{File.join(own_store, "#{gone}.json")}") && rc == 2)
+  end
+
+  # M30 a LEGACY BLOCK on a commit that is already in the head's base (it
+  # landed) is not this change. Its patch cannot be recovered -- with no
+  # recorded merge-base, its merge-base with the base is itself, an empty diff
+  # -- and it used to stop every carry in the repo for good. Measured live
+  # 2026-09-28: 8 such receipts in ~/dev/custom's stores, so no carry could
+  # ever fire there (7 of them clean). It is set aside, and the NOTE names it.
+  # Only a CLEAN receipt: its judge saw committed content, which is upstream.
+  fixture.call do |_f1, f2, _root|
+    landed = sha_of.call("main~1")
+    File.write(File.join(verdict_dir, "#{landed}.json"), JSON.generate(
+      "schema" => 1, "tool" => "critic-review", "sha" => landed, "base" => "origin/main", "verdict" => "block",
+      "findings" => ["convention"], "dirty" => false, "at" => "2026-09-21T04:12:05Z"
+    ))
+    rc, out, err = go.call(["--base", "main"], block_out)
+    check.call("M30 a BLOCK already in the base does not stop the carry (exit #{rc}; #{err.lines.first.to_s.strip})",
+               rc == 0 && out.start_with?("critic-review: PASS (CARRIED + INTERACTION)"))
+    check.call("M30 the NOTE counts the landed BLOCK it set aside",
+               err.include?("NOTE 1 BLOCK receipt(s) with no usable carry keys are on commits already in this head's base"))
+    check.call("M30 the NOTE names the receipt it set aside",
+               err.include?(File.join(own_store, "#{landed}.json")))
+    check.call("M30 receipt carried", receipt.call(f2)["carried_from"].to_s.match?(CriticCarry::SHA40))
+  end
+
+  # M30b a DIRTY unkeyed BLOCK at a commit in the base is NOT set aside. Its
+  # judge was shown uncommitted work (the fallback diff), which never landed
+  # and might be this very change. Reviewer repro on 162d3285: uncommitted X
+  # BLOCKed at the base tip, X then committed, passed and rebased -> PASS
+  # (CARRIED + INTERACTION), a BLOCK turned into a PASS. Fail closed.
+  fixture.call do |_f1, _f2, _root|
+    tip = sha_of.call("main~1")
+    File.write(File.join(verdict_dir, "#{tip}.json"), JSON.generate(
+      "schema" => 1, "tool" => "critic-review", "sha" => tip, "base" => "origin/main", "verdict" => "block",
+      "findings" => ["convention"], "dirty" => true, "at" => "2026-09-21T04:12:05Z"
+    ))
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M30b a dirty BLOCK in the base: NOT ATTEMPTED naming it (exit #{rc}; #{err.lines.first.to_s.strip})",
+               rc == 2 && err.include?("CARRY NOT ATTEMPTED — BLOCK receipt #{File.join(own_store, "#{tip}.json")}") &&
+               !err.include?("set aside"))
+  end
+
+  # M10c a LEGACY (schema-1) BLOCK on the same patch still vetoes: receipts
+  # written before schema 2 carry no keys, so the patch is recomputed from the
+  # commit. Matching on patch-id alone can only add vetoes.
+  fixture.call do |f1, _f2, root|
+    wt = File.join(root, "wt2")
+    git.call("worktree", "add", "-q", "--detach", wt, f1)
+    other = Dir.chdir(wt) { File.join(File.realpath(File.dirname(verdict_dir)), "critic-verdicts") }
+    FileUtils.mkdir_p(other)
+    File.write(File.join(other, "#{f1}.json"), JSON.generate(
+      "schema" => 1, "tool" => "critic-review", "sha" => f1, "base" => "main", "verdict" => "block",
+      "findings" => ["correctness"], "dirty" => false, "at" => "2026-09-20T00:00:00Z"
+    ))
+    rc, out, err = go.call(["--base", "main"], pass_out)
+    check.call("M10c legacy BLOCK: CARRY REFUSED (#{err.lines.first.to_s.strip})",
+               err.include?("CARRY REFUSED — receipt #{File.join(other, "#{f1}.json")}"))
+    check.call("M10c the judge ran", rc == 0 && out.start_with?("critic-review: PASS —"))
+  end
+
+  # M25/M26 MISS: a receipt that cannot be read might be a BLOCK on this very
+  # change (a truncated file is what a concurrent non-atomic write looks like),
+  # so it can never silently drop out of the veto.
+  [["truncated", ->(p) { File.write(p, File.read(p)[0, 40]) }],
+   (["chmod 000", ->(p) { File.chmod(0o000, p) }] unless Process.uid.zero?)].compact.each do |label, damage|
+    fixture.call do |f1, _f2, root|
+      wt = File.join(root, "wt2")
+      git.call("worktree", "add", "-q", "--detach", wt, f1)
+      blk = Dir.chdir(wt) do
+        go.call(["--base", "main", "--no-carry"], block_out)
+        File.join(File.realpath(verdict_dir), "#{f1}.json")
+      end
+      damage.call(blk)
+      rc, _o, err = go.call(["--base", "main"], block_out)
+      File.chmod(0o644, blk)
+      check.call("M25 #{label} receipt: NOT ATTEMPTED naming it, judge ran (#{err.lines.first.to_s.strip})",
+                 err.include?("CARRY NOT ATTEMPTED — receipt #{blk} is unreadable") && rc == 2)
+    end
+  end
+
+  # M27 the carried write never overwrites a receipt that appeared meanwhile.
+  fixture.call do |_f1, f2, _root|
+    path = File.join(verdict_dir, "#{f2}.json")
+    File.write(path, "{\"verdict\":\"block\"}")
+    wrote, = capture_err { write_verdict(f2, "main", "pass", [], false, exclusive: true) }
+    check.call("M27 an exclusive write refuses an existing receipt", wrote == false && File.read(path) == "{\"verdict\":\"block\"}")
+    check.call("M27 and leaves no temp file behind", Dir.glob(File.join(verdict_dir, ".*tmp*")).empty?)
+  end
+
+  # M13 dirty tree.
+  fixture.call do |_f1, _f2, _root|
+    File.write("untracked.txt", "x\n")
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M13 dirty: NOT ATTEMPTED — dirty tree; judge ran", err.include?("CARRY NOT ATTEMPTED — dirty tree") && rc == 2)
+  end
+
+  # M14 HEAD == base: nothing to key.
+  fixture.call do |_f1, _f2, _root|
+    rc, _o, err = go.call(["--base", "feat"], block_out)
+    check.call("M14 empty three-dot diff: NOT ATTEMPTED (#{err.lines.first})",
+               err.include?("CARRY NOT ATTEMPTED — three-dot diff empty or failed") && rc == 2)
+  end
+
+  # M15 --no-carry forces the judge.
+  fixture.call do |_f1, _f2, _root|
+    rc, _o, err = go.call(["--base", "main", "--no-carry"], block_out)
+    check.call("M15 --no-carry: SKIPPED and judged", err.include?("CARRY SKIPPED (--no-carry); running the judge.") && rc == 2)
+  end
+
+  # M16 a schema-1 source is never used, and the reader still reads it.
+  fixture.call do |f1, _f2, _root|
+    legacy = receipt.call(f1).slice("tool", "sha", "base", "verdict", "findings", "dirty", "at").merge("schema" => 1)
+    File.write(File.join(verdict_dir, "#{f1}.json"), JSON.generate(legacy))
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M16 schema 1: judge ran, miss names schema 1", rc == 2 && err.include?("schema 1"))
+    code, = capture_err { capture_out { verdict_for(f1) }[0] }
+    check.call("M16 the reader still passes a schema-1 PASS", code == 0)
+  end
+
+  # M17 MISS: a source whose recorded keys do not recompute.
+  fixture.call do |f1, _f2, _root|
+    File.write("f.txt", "a\nZ\n"); git.call("commit", "-qa", "--amend", "--no-edit")
+    keys, = head_carry_keys("main", head_sha)
+    File.write(File.join(verdict_dir, "#{f1}.json"), JSON.generate(receipt.call(f1).merge(keys.slice(*CriticCarry::MATCH_KEYS))))
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M17 tampered keys: judge ran, recompute mismatch", rc == 2 && err.include?("recompute mismatch"))
+  end
+
+  # M18 the source commit is gone from the object store.
+  fixture.call do |_f1, _f2, _root|
+    git.call("update-ref", "-d", "ORIG_HEAD")
+    git.call("reflog", "expire", "--expire=now", "--all")
+    git.call("gc", "-q", "--prune=now")
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M18 pruned source: judge ran, source commit missing", rc == 2 && err.include?("source commit missing"))
+  end
+
+  # M19 MISS: an unlistable store is COULD NOT LOOK, never a miss.
+  unless Process.uid.zero?
+    fixture.call do |_f1, _f2, root|
+      git.call("worktree", "add", "-q", "--detach", File.join(root, "wt3"), "HEAD")
+      wts = File.join(git_common_dir[0], "worktrees")
+      File.chmod(0o000, wts)
+      begin
+        rc, _o, err = go.call(["--base", "main"], block_out)
+      ensure
+        File.chmod(0o755, wts)
+      end
+      check.call("M19 unlistable store: NOT ATTEMPTED — verdict store could not be resolved (#{err.lines.first})",
+                 err.include?("CARRY NOT ATTEMPTED — verdict store could not be resolved") && rc == 2)
+      check.call("M19 never reads as a miss", !err.include?("CARRY MISS"))
+    end
+  end
+
+  ENV.delete("CRITIC_REVIEW_STUB")
+
+  # M22 / M23 argument handling for --no-carry.
+  check.call("M22 --no-carry with --verdict-for is refused",
+             capture_err { capture_out { main(["--no-carry", "--verdict-for", "a" * 40]) }[0] }[0] == 64)
+  check.call("M22 --no-carry with --self-test is refused",
+             capture_err { capture_out { main(["--self-test", "--no-carry"]) }[0] }[0] == 64)
+  check.call("M22 --no-carry alone is well-formed", usage_error(["--no-carry", "--base", "main"]).nil?)
+  rc, shown = capture_out { main(["--help"]) }
+  check.call("M23 --help lists --no-carry", rc == 0 && shown.include?("--no-carry"))
+
+  # M24 carry cannot contaminate critic-eval (DND-888): it never touches receipts.
+  eval_src = File.read(File.join(__dir__, "critic-eval")) rescue nil
+  check.call("M24 critic-eval is readable", !eval_src.nil?)
+  %w[critic-verdicts verdict_dir write_verdict CriticCarry].each do |tok|
+    check.call("M24 critic-eval does not reference #{tok}", eval_src.to_s.include?(tok) == false)
+  end
+  ok
+ensure
+  ENV["HOME"] = prev_home if prev_home
+  %w[CRITIC_REVIEW_STUB CRITIC_REVIEW_STUB_INTERACTION CRITIC_REVIEW_PROMPT_LOG].each { |k| ENV.delete(k) }
+  FileUtils.remove_entry(stubs) if stubs
+  FileUtils.remove_entry(home) if home
+end
+
 def run_self_test
   require "tmpdir"
   ok = true
-  ok &&= run_cross_checkout_self_test
+  # Every sub-suite runs, so one failing suite never hides another's failures.
+  ok = run_carry_domain_self_test && ok
+  ok = run_carry_self_test && ok
+  ok = run_cross_checkout_self_test && ok
   Dir.mktmpdir("critic-review-selftest-") do |d|
     findings_out = File.join(d, "f"); File.write(findings_out, "- [access-control] x.ex:1 — no authz\nFINDINGS: access-control\n")
     clean_out    = File.join(d, "c"); File.write(clean_out, "looks good\nFINDINGS: none\n")
@@ -1305,7 +2486,7 @@ def run_self_test
       end
     end
   end
-  ok &&= run_receipt_self_test
+  ok = run_receipt_self_test && ok
   if ok
     puts "critic-review: self-test OK"
     0

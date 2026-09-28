@@ -12,12 +12,28 @@
 #
 # Source order: this file only. Requires jq.
 
-# The kinds and admiral states this reporter sends today, as the contract
-# names them. The contract (*Fleet report kinds and their closed schema*) also
-# names the lifecycle kinds agent_spawn, agent_bound, agent_start and agent_end,
-# and admiral_state parked; DND-560 adds them here (DND-541).
-FLEET_KINDS="session_started session_seen session_ended admiral_started admiral_scope admiral_seen admiral_state"
-FLEET_ADMIRAL_STATES="draining drained finished"
+# The eleven kinds and the reportable admiral states, exactly as the contract
+# (*Fleet report kinds and their closed schema*) names them. The four lifecycle
+# kinds and admiral_state parked are DND-560's (DND-541).
+FLEET_KINDS="session_started session_seen session_ended admiral_started admiral_scope admiral_seen admiral_state agent_spawn agent_bound agent_start agent_end"
+FLEET_ADMIRAL_STATES="draining drained finished parked"
+
+# The fleet workers: the only subagent_type / agent_type the lifecycle kinds
+# carry, and the spawns the drain guard gates.
+FLEET_WORKER_TYPES="athena-admiral athena-captain"
+
+# The lifecycle kinds' closed enums (contract, same section). FLEET_ERROR_CLASSES
+# is what Claude Code 2.1.282's StopFailure reports in `error` (measured,
+# DND-541) plus `other`, the class any unlisted value is mapped to.
+FLEET_MAPPINGS="mapped unmapped not_applicable"
+FLEET_END_OUTCOMES="stopped api_error spawn_failed spawn_denied"
+FLEET_ERROR_CLASSES="rate_limit overloaded authentication_failed oauth_org_not_allowed account_on_hold verification_required billing_error invalid_request model_not_found server_error max_output_tokens cloud_credential_error unknown other"
+
+# The ticket-ref grammar (contract: `ticket_ref` on agent_spawn), and the same
+# ref word-bounded for a scan of free text (*Mission pointers are metadata
+# only*: a ref inside a longer token, such as XDND-5Y, does not count).
+FLEET_TICKET_REF_RE='^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,6}$'
+FLEET_TICKET_REF_SCAN='(?<![A-Za-z0-9_])[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,6}(?![A-Za-z0-9_])'
 FLEET_TRACKERS='["notion-personal","notion-work"]'
 FLEET_CAPTAIN_STATES='["queued","running","parked","done","blocked","stuck"]'
 FLEET_MISSION_KEYS='["tracker","ticket_ref","url","title","status","captain_state"]'
@@ -52,6 +68,153 @@ fleet_valid_notion_id() {
 # fleet_valid_admiral_state <state>
 fleet_valid_admiral_state() {
   case " ${FLEET_ADMIRAL_STATES} " in *" ${1:-} "*) [ -n "${1:-}" ] ;; *) return 1 ;; esac
+}
+
+# fleet_member <word> <space-separated list> -- status 0 when <word> is one of
+# the list's words (never for an empty word).
+fleet_member() {
+  [ -n "${1:-}" ] || return 1
+  case " ${2:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# fleet_is_fleet_worker <type> -- status 0 for athena-admiral / athena-captain.
+fleet_is_fleet_worker() {
+  fleet_member "${1:-}" "${FLEET_WORKER_TYPES}"
+}
+
+# --- lifecycle kinds (DND-560) ------------------------------------------------
+# Normative home: athena-events.md -> *Fleet report kinds and their closed
+# schema*, *Agent lifecycle* (and its *Run binding*), *Mission pointers are
+# metadata only*. The description and prompt are parsed HERE, locally; only
+# the parsed ref and run hint ever leave the machine.
+
+# fleet_valid_ticket_ref <ref> -- the contract's ref grammar, whole string.
+fleet_valid_ticket_ref() {
+  local LC_ALL=C
+  [[ "${1:-}" =~ ${FLEET_TICKET_REF_RE} ]]
+}
+
+# fleet_parse_ticket_ref <description> <prompt>
+# Prints `mapped <REF>` or `unmapped` (contract, *Hook missions carry
+# `ticket_ref` only*):
+#   1. the distinct word-bounded refs in the description: exactly one maps;
+#      two or more are ambiguous and give `unmapped` without reading the prompt;
+#   2. none: the first prompt line of the form `Mission: <REF>` (optional
+#      markdown bold around `Mission`; leading whitespace and text after the
+#      ref are allowed, the ref itself must be word-bounded) maps;
+#   3. otherwise `unmapped`.
+# A jq failure (it is used as a pure function) reads as `unmapped`, never a guess.
+fleet_parse_ticket_ref() {
+  local out
+  # The prompt goes in on stdin (-Rs), never argv: a brief can exceed one
+  # argv string's limit (MAX_ARG_STRLEN, 128 KiB), and exec would fail.
+  out="$(printf '%s' "${2:-}" | jq -rRs --arg d "${1:-}" --arg scan "${FLEET_TICKET_REF_SCAN}" \
+    --arg line '^[ \t]*(?:\*\*Mission:\*\*|\*\*Mission\*\*:|Mission:)[ \t]*(?<r>[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,6})(?![A-Za-z0-9_])' '
+    . as $p
+    | ([$d | scan($scan)] | unique) as $refs
+    | if ($refs | length) == 1 then "mapped \($refs[0])"
+      elif ($refs | length) > 1 then "unmapped"
+      else
+        (first($p | splits("\n") | capture($line) | .r) // null) as $m
+        | if $m == null then "unmapped" else "mapped \($m)" end
+      end' 2>/dev/null)" || out=""
+  case "${out}" in
+    "mapped "*) fleet_valid_ticket_ref "${out#mapped }" && { printf '%s\n' "${out}"; return 0; } ;;
+  esac
+  printf 'unmapped\n'
+}
+
+# fleet_parse_run_hint <prompt>
+# Prints the run hint and returns 0, or prints nothing and returns 1 (contract,
+# *Run binding*): the one distinct `ai-artifacts/coordination/<dir>/` in the
+# prompt, where <dir> has the run-id shape (fleet_valid_id, the grammar
+# fleet-report holds every run id to). Zero dirs, several distinct ones, or a
+# single one of the wrong shape (`..`, `.hidden`) give no hint.
+fleet_parse_run_hint() {
+  local dirs
+  # stdin (-Rs), never argv, for the same reason as fleet_parse_ticket_ref.
+  dirs="$(printf '%s' "${1:-}" | jq -rRs --arg re 'ai-artifacts/coordination/([^/\s`'"'"'"]+)/' '
+    [scan($re) | .[0]] | unique | .[]' 2>/dev/null)" || return 1
+  [ -n "${dirs}" ] || return 1
+  case "${dirs}" in *$'\n'*) return 1 ;; esac
+  fleet_valid_id "${dirs}" || return 1
+  printf '%s\n' "${dirs}"
+}
+
+# fleet_error_class <value> -- the value when it is a known error class, else
+# `other` (the harness maps before sending, so a Claude Code upgrade that adds
+# a class never gets a report refused).
+fleet_error_class() {
+  if fleet_member "${1:-}" "${FLEET_ERROR_CLASSES}"; then printf '%s\n' "$1"; else printf 'other\n'; fi
+}
+
+# fleet_failure_error_class <PostToolUseFailure error text>
+# The class a foreground spawn's failure text names as `error type <class>`
+# (measured, DND-541: "... (error type rate_limit, HTTP 429, ...)"), mapped
+# through fleet_error_class; `other` when the text names none (an interrupt,
+# a shape Claude Code has changed).
+fleet_failure_error_class() {
+  local LC_ALL=C re='error type ([a-z_]+)'
+  if [[ "${1:-}" =~ ${re} ]]; then fleet_error_class "${BASH_REMATCH[1]}"; else printf 'other\n'; fi
+}
+
+# fleet_agent_spawn_problem <subagent_type> <mapping> <ticket_ref-or-empty>
+# Prints the first combination the contract refuses and returns 1; silent 0
+# otherwise. mapping is not_applicable exactly for an admiral; ticket_ref is
+# present exactly when mapped, and then matches the grammar.
+fleet_agent_spawn_problem() {
+  local t="${1:-}" m="${2:-}" r="${3:-}"
+  fleet_is_fleet_worker "${t}" || { printf 'subagent_type %s is not a fleet worker (%s)\n' "${t@Q}" "${FLEET_WORKER_TYPES}"; return 1; }
+  fleet_member "${m}" "${FLEET_MAPPINGS}" || { printf 'mapping %s is not one of: %s\n' "${m@Q}" "${FLEET_MAPPINGS}"; return 1; }
+  if [ "${t}" = "athena-admiral" ] && [ "${m}" != "not_applicable" ]; then
+    printf 'an athena-admiral spawn carries mapping not_applicable (got %s)\n' "${m}"; return 1
+  fi
+  if [ "${t}" = "athena-captain" ] && [ "${m}" = "not_applicable" ]; then
+    printf 'an athena-captain spawn carries mapping mapped or unmapped, never not_applicable\n'; return 1
+  fi
+  if [ "${m}" = "mapped" ]; then
+    [ -n "${r}" ] || { printf 'mapping mapped needs a ticket ref\n'; return 1; }
+    fleet_valid_ticket_ref "${r}" || { printf 'ticket ref %s does not match %s\n' "${r@Q}" "${FLEET_TICKET_REF_RE}"; return 1; }
+  elif [ -n "${r}" ]; then
+    printf 'a ticket ref is allowed only with mapping mapped (got %s)\n' "${m}"; return 1
+  fi
+  return 0
+}
+
+# fleet_agent_end_problem <agent_id> <tool_use_id> <agent_type> <outcome> <error_class>
+# Prints the first combination the contract refuses and returns 1; silent 0
+# otherwise. Exactly one key; stopped/api_error go by agent_id and
+# spawn_failed/spawn_denied by tool_use_id; error_class exactly with api_error
+# or spawn_failed, and then a known class.
+fleet_agent_end_problem() {
+  local a="${1:-}" u="${2:-}" t="${3:-}" o="${4:-}" c="${5:-}"
+  fleet_is_fleet_worker "${t}" || { printf 'agent_type %s is not a fleet worker (%s)\n' "${t@Q}" "${FLEET_WORKER_TYPES}"; return 1; }
+  fleet_member "${o}" "${FLEET_END_OUTCOMES}" || { printf 'outcome %s is not one of: %s\n' "${o@Q}" "${FLEET_END_OUTCOMES}"; return 1; }
+  if [ -n "${a}" ] && [ -n "${u}" ]; then
+    printf 'an agent_end carries exactly one of agent_id and tool_use_id\n'; return 1
+  fi
+  if [ -z "${a}" ] && [ -z "${u}" ]; then
+    printf 'an agent_end carries exactly one of agent_id and tool_use_id\n'; return 1
+  fi
+  case "${o}" in
+    stopped|api_error) [ -n "${a}" ] || { printf 'outcome %s goes by agent_id, not tool_use_id\n' "${o}"; return 1; } ;;
+    *) [ -n "${u}" ] || { printf 'outcome %s goes by tool_use_id, not agent_id\n' "${o}"; return 1; } ;;
+  esac
+  case "${o}" in
+    api_error|spawn_failed)
+      [ -n "${c}" ] || { printf 'outcome %s needs an error class\n' "${o}"; return 1; }
+      fleet_member "${c}" "${FLEET_ERROR_CLASSES}" || { printf 'error class %s is not one of: %s\n' "${c@Q}" "${FLEET_ERROR_CLASSES}"; return 1; } ;;
+    *) [ -z "${c}" ] || { printf 'an error class is allowed only with api_error or spawn_failed (got %s)\n' "${o}"; return 1; } ;;
+  esac
+  return 0
+}
+
+# fleet_unmapped_notice -- the exact PreToolUse additionalContext for a captain
+# spawn that names no ticket. Pinned in
+# ai/contracts/fixtures/athena-events-quoted-fix.txt (*Mission pointers are
+# metadata only*); the domain self-test asserts equality.
+fleet_unmapped_notice() {
+  printf '%s\n' "fleet-lifecycle: this athena-captain spawn names no ticket, so the fleet page shows it as an unmapped captain. Fix: start the Agent description with the Mission's ticket ref (for example DND-541 captain) and put a line of the form Mission: DND-541 in the brief."
 }
 
 # fleet_reports_url <mcp-url>
@@ -289,4 +452,38 @@ fleet_body_admiral_state() {
   local sid="$1" run_id="$2" state="$3"
   jq -n -c --arg s "${sid}" --arg r "${run_id}" --arg st "${state}" \
     '{kind: "admiral_state", claude_session_id: $s, run_id: $r, state: $st}'
+}
+
+# fleet_body_agent_spawn <sid> <tool_use_id> <subagent_type> <caller_agent_id> <mapping> <ticket_ref> <run_hint>
+# caller_agent_id, ticket_ref and run_hint are omitted when empty.
+fleet_body_agent_spawn() {
+  jq -n -c --arg s "$1" --arg u "$2" --arg t "$3" --arg c "${4:-}" --arg m "$5" --arg r "${6:-}" --arg h "${7:-}" \
+    '{kind: "agent_spawn", claude_session_id: $s, tool_use_id: $u, subagent_type: $t, mapping: $m}
+     + (if $c == "" then {} else {caller_agent_id: $c} end)
+     + (if $r == "" then {} else {ticket_ref: $r} end)
+     + (if $h == "" then {} else {run_hint: $h} end)'
+}
+
+# fleet_body_agent_bound <sid> <tool_use_id> <agent_id> <agent_type>
+fleet_body_agent_bound() {
+  jq -n -c --arg s "$1" --arg u "$2" --arg a "$3" --arg t "$4" \
+    '{kind: "agent_bound", claude_session_id: $s, tool_use_id: $u, agent_id: $a, agent_type: $t}'
+}
+
+# fleet_body_agent_start <sid> <agent_id> <agent_type>
+fleet_body_agent_start() {
+  jq -n -c --arg s "$1" --arg a "$2" --arg t "$3" \
+    '{kind: "agent_start", claude_session_id: $s, agent_id: $a, agent_type: $t}'
+}
+
+# fleet_body_agent_end <sid> <agent_id> <tool_use_id> <agent_type> <outcome> <error_class>
+# Exactly one of agent_id / tool_use_id is non-empty (fleet_agent_end_problem);
+# the empty key and an empty error_class are omitted.
+fleet_body_agent_end() {
+  jq -n -c --arg s "$1" --arg a "${2:-}" --arg u "${3:-}" --arg t "$4" --arg o "$5" --arg c "${6:-}" \
+    '{kind: "agent_end", claude_session_id: $s}
+     + (if $a == "" then {} else {agent_id: $a} end)
+     + (if $u == "" then {} else {tool_use_id: $u} end)
+     + {agent_type: $t, outcome: $o}
+     + (if $c == "" then {} else {error_class: $c} end)'
 }
