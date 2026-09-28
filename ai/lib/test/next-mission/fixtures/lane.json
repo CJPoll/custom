@@ -1,0 +1,28 @@
+{
+  "lane_epics": [
+    {
+      "id": "3e9349da-87fb-8000-8000-000000000001",
+      "title": "Harness lane: eval reliability"
+    }
+  ],
+  "tickets": [
+    {
+      "id": "DND-40",
+      "status": "Done",
+      "kind": "Bug",
+      "severity": "LOW",
+      "path": "Off",
+      "area": "Harness",
+      "created": "2026-09-10T00:00:00Z"
+    },
+    {
+      "id": "DND-41",
+      "status": "Todo",
+      "kind": "Docs",
+      "severity": "LOW",
+      "path": "Off",
+      "area": "Harness",
+      "created": "2026-09-11T00:00:00Z"
+    }
+  ]
+}

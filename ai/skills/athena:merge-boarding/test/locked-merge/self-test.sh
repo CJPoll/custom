@@ -267,5 +267,13 @@ hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?
 grep -q '^  9 ' <<<"${hout}" && ok "c14 --help documents exit 9" || bad "c14 --help lacks exit 9" "${hout}"
 grep -q '^  10 ' <<<"${hout}" && ok "c14 --help documents exit 10 (DND-864 teardown)" || bad "c14 --help lacks exit 10" "${hout}"
 
+# c15 DND-986: integration-gate's receipt gains critic_carried_from when the
+# critic PASS was carried. The field is additive, so locked-merge must accept a
+# receipt carrying it exactly as before (it checks schema/verdict/head/base).
+fixture c15
+f="$(receipt_path "${H}")"
+jq --arg s "$(printf 'f%.0s' {1..40})" '.critic_carried_from = $s' "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c15.lock"; expect c15-carried-receipt 0
+
 echo "locked-merge self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]

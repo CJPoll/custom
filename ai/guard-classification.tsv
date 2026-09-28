@@ -50,13 +50,21 @@ ai/skills/athena:inbox/lib/routed.sh	guard
 scripts/wt-lib/push.sh	guard	
 ai/lib/forge-api-scan.sh	library	sourced by ai/lib/gh-merge-guard.sh and ai/lib/glab-merge-guard.sh; returns status codes with a why and a how, and each guard composes the exit-3 refusal that carries Fix:
 ai/lib/critic_prompt.rb	library	prompt-text constants required by ai/bin/critic-review; emits nothing and has no failure path of its own
+ai/lib/critic_carry.rb	library	pure carry-key and decision functions required by ai/bin/critic-review; no I/O, no failure path
 ai/lib/strict_argv.rb	library	required by the Ruby ai/bin tools that refuse unknown arguments (DND-505/526/813); raises StrictArgv::UsageError with a one-line reason, and each caller composes the exit-2 refusal that carries Fix:
+ai/lib/owner_turn.rb	library	owner-turn verifier required by ai/bin/owner-notes (relay check) and ai/bin/blast-radius (--owner-approval record); returns a verdict tuple and each caller prints the refusal that carries Fix:
 ai/lib/judgment_eval.rb	library	pure domain required by ai/bin/judgment-eval (DND-710); raises JudgmentEval::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/first_party.rb	library	first-party discovery required by ai/bin/harness-gate; raises FirstParty::MeasureError and the caller prints the Fix:
 ai/lib/harness_tools.rb	library	harness-tool scope required by ai/bin/check-bin-help / check-tool-risk; raises FirstParty::MeasureError and the caller prints the Fix:
 ai/lib/fleet/control-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
 ai/lib/fleet/resume-domain.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
 ai/lib/fleet/resume-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
+ai/lib/next_mission.rb	library	pure selection rule required by ai/bin/next-mission (DND-985); raises NextMission::DataError naming the bad value, and the bin prints the exit-3 refusal that carries Fix:
+ai/lib/next_mission_notion.rb	library	Notion read adapter required by ai/bin/next-mission (DND-985); raises NextMissionNotion::ReadError naming the miss, and the bin prints the exit-3 refusal that carries Fix:
+ai/skills/athena:epic-clustering/lib/epic_clustering.rb	library	pure clustering rules required by scripts/epic-clustering (DND-982); raises EpicClustering::DataError naming the bad value, and the script prints the exit-3 refusal that carries Fix:
+ai/skills/athena:epic-clustering/lib/epic_clustering_notion.rb	library	Notion read adapter required by scripts/epic-clustering (DND-982); raises NextMissionNotion::ReadError naming the miss, and the script prints the exit-3 refusal that carries Fix:
+ai/skills/athena:epic-clustering/lib/epic_clustering_fixture.rb	library	offline fixture source required by scripts/epic-clustering --from-json (DND-982); raises FixtureError or NextMissionNotion::ReadError naming the miss, and the script prints the exit-3 refusal that carries Fix:
+ai/skills/athena:epic-clustering/lib/epic_clustering_view.rb	library	rendering required by scripts/epic-clustering (DND-982); raises EpicClustering::DataError naming the bad input, and the script prints the refusal that carries Fix:
 ai/skills/athena:inbox/lib/fence.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
 ai/skills/athena:inbox/lib/fs.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
 ai/skills/athena:inbox/lib/liveness.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
@@ -80,6 +88,7 @@ scripts/wt-lib/tmux.sh	library	sourced by scripts/wt; worktree/stack operations 
 scripts/wt-lib/worktree.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
 
 # --- Skill executables.
+ai/skills/athena:epic-clustering/scripts/epic-clustering	guard	
 ai/skills/athena:inbox-attend/bin/wedge-ticket-decide	guard	
 ai/skills/athena:inbox/bin/inbox-doctor	guard	
 ai/skills/athena:inbox/bin/inbox-status	guard	
@@ -104,6 +113,7 @@ ai/skills/athena:slack/bin/update	tool	Slack Web API action wrapper; fails only 
 ai/skills/athena:slack/bin/upload	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/whoami	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:standup/scripts/standup-window.sh	tool	computes the standup time window; fails only on an unknown argument
+ai/skills/athena:ticket-management/scripts/finding-triage	guard	
 
 # --- scripts/: guards (deny, check, gate, or preflight).
 scripts/athena	guard
@@ -111,6 +121,7 @@ scripts/athena-mcp-headers	guard
 scripts/athena-inbox-client-run.sh	guard	
 scripts/athena-shipwright-commit.sh	guard	
 scripts/athena-shipwright-run.sh	guard	
+scripts/athena-clustering-run.sh	guard	
 scripts/check	guard	
 scripts/check-stack	guard	
 scripts/inbox-client-alert	guard	
@@ -121,6 +132,7 @@ scripts/reap-orphan-dbus	guard
 scripts/setup-athena-inbox-client	guard	
 scripts/setup-hooks	guard	
 scripts/setup-inbox-registry	guard	
+scripts/setup-clustering-cron	guard	
 scripts/setup-shipwright-cron	guard	
 scripts/wt	guard	
 scripts/wt-preflight	guard	

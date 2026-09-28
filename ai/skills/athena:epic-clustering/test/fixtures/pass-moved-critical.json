@@ -1,0 +1,146 @@
+{
+  "epics": [
+    {
+      "page_id": "E1",
+      "name": "Fleet",
+      "status": "In Progress",
+      "project": "Athena"
+    },
+    {
+      "page_id": "E2",
+      "name": "Evals",
+      "status": "In Progress",
+      "project": "Athena"
+    }
+  ],
+  "tickets": [
+    {
+      "id": "DND-1",
+      "page_id": "page-DND-1",
+      "title": "ticket 1",
+      "status": "Todo",
+      "kind": "Feature",
+      "severity": null,
+      "security": "none",
+      "path": "Critical",
+      "area": "Harness",
+      "epic_ids": [
+        "E1"
+      ],
+      "depends_on": [],
+      "blocks": [],
+      "created": "2026-09-21T00:00:00Z",
+      "body": ""
+    },
+    {
+      "id": "DND-2",
+      "page_id": "page-DND-2",
+      "title": "ticket 2",
+      "status": "Todo",
+      "kind": "Bug",
+      "severity": "MEDIUM",
+      "security": "none",
+      "path": "Critical",
+      "area": "Harness",
+      "epic_ids": [
+        "E2"
+      ],
+      "depends_on": [],
+      "blocks": [],
+      "created": "2026-09-22T00:00:00Z",
+      "body": "## Problem\nThe gate reads a stale receipt and passes a head it never judged, so an unreviewed change can merge today.\n## Repro\n```\nai/bin/critic-review --head x\n```\n## Affected code\n`ai/bin/critic-review:120`\n"
+    },
+    {
+      "id": "DND-3",
+      "page_id": "page-DND-3",
+      "title": "ticket 3",
+      "status": "Todo",
+      "kind": "Docs",
+      "severity": "LOW",
+      "security": "none",
+      "path": "Off",
+      "area": "Harness",
+      "epic_ids": [
+        "E1"
+      ],
+      "depends_on": [
+        "page-DND-1"
+      ],
+      "blocks": [],
+      "created": "2026-09-23T00:00:00Z",
+      "body": "Fix the doc."
+    },
+    {
+      "id": "DND-4",
+      "page_id": "page-DND-4",
+      "title": "old stale log line in gate output",
+      "status": "Todo",
+      "kind": "Bug",
+      "severity": "LOW",
+      "security": "none",
+      "path": "Off",
+      "area": "Harness",
+      "epic_ids": [
+        "E1"
+      ],
+      "depends_on": [],
+      "blocks": [],
+      "created": "2026-09-01T00:00:00Z",
+      "body": "## Problem\nThe gate reads a stale receipt and passes a head it never judged, so an unreviewed change can merge today.\n## Repro\n```\nai/bin/critic-review --head x\n```\n## Affected code\n`ai/bin/critic-review:120`\n"
+    },
+    {
+      "id": "DND-5",
+      "page_id": "page-DND-5",
+      "title": "critic-review verdict receipt lost on rebase of the head",
+      "status": "Todo",
+      "kind": "Bug",
+      "severity": "MEDIUM",
+      "security": "none",
+      "path": "Off",
+      "area": "Harness",
+      "epic_ids": [
+        "E1"
+      ],
+      "depends_on": [],
+      "blocks": [],
+      "created": "2026-09-25T00:00:00Z",
+      "body": "## Problem\nThe gate reads a stale receipt and passes a head it never judged, so an unreviewed change can merge today.\n## Repro\n```\nai/bin/critic-review --head x\n```\n## Affected code\n`ai/bin/critic-review:120`\n"
+    },
+    {
+      "id": "DND-6",
+      "page_id": "page-DND-6",
+      "title": "critic-review verdict receipt lost after rebase of head",
+      "status": "Todo",
+      "kind": "Bug",
+      "severity": "MEDIUM",
+      "security": "none",
+      "path": "Off",
+      "area": "Harness",
+      "epic_ids": [
+        "E1"
+      ],
+      "depends_on": [],
+      "blocks": [],
+      "created": "2026-09-26T00:00:00Z",
+      "body": "## Problem\nThe gate reads a stale receipt and passes a head it never judged, so an unreviewed change can merge today.\n## Repro\n```\nai/bin/critic-review --head x\n```\n## Affected code\n`ai/bin/critic-review:120`\n"
+    },
+    {
+      "id": "DND-7",
+      "page_id": "page-DND-7",
+      "title": "ticket 7",
+      "status": "In Progress",
+      "kind": "Test",
+      "severity": "LOW",
+      "security": "none",
+      "path": "Off",
+      "area": "Harness",
+      "epic_ids": [
+        "E2"
+      ],
+      "depends_on": [],
+      "blocks": [],
+      "created": "2026-09-27T00:00:00Z",
+      "body": "## Problem\nThe gate reads a stale receipt and passes a head it never judged, so an unreviewed change can merge today.\n## Repro\n```\nai/bin/critic-review --head x\n```\n## Affected code\n`ai/bin/critic-review:120`\n"
+    }
+  ]
+}

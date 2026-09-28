@@ -3114,6 +3114,12 @@ class; ratified 2026-09-25:
 | `merge.pr_only_workflow` | `{repo, base_ref, head_sha}` | `integration-gate --owner-approval-grant`, the requesting machine | `integration-gate` passes its exit 4 for that one head SHA, and only when the diff is eligible (*Eligibility for `merge.pr_only_workflow`*) |
 | `priority.transition` | `{item_id, transition}` | the gen_saas server, at click time | one `promote`, `restore` or `dismiss` of one priority item (*Priority index*) |
 
+**Later (2026-09-28):** `merge.pr_only_workflow` was built to pass the exit 4
+a workflow edit raised. Under `~/.claude/CLAUDE.md` → *Owner approval policy*
+the `deploy-automation` surface is report-only, so such an edit no longer exits
+4 and this class has nothing left to pass. Its tickets (T2–T5, DND-597) need
+re-scoping or closing; the class stays ratified until the owner retires it.
+
 **The target is typed, and validated per class before anything is written.**
 
 - `repo` is `<owner>/<name>`, lowercased, matching `\A[a-z0-9._-]+/[a-z0-9._-]+\z`
@@ -3552,7 +3558,10 @@ A grant has **exactly two consumers**. No other code redeems one.
 1. **`integration-gate --owner-approval-grant <id>`**, through
    `ai/bin/owner-grant`.
    - The flag is refused together with `--owner-approval` (exit 2). The
-     free-text `--owner-approval` stays, for the owner's own in-session words.
+     `--owner-approval` record stays, for the owner's own in-session words: a
+     transcript reference `blast-radius` verifies (`integration-gate --help`).
+     **Later (2026-09-28):** this read "The free-text `--owner-approval`
+     stays". Superseded: free text is refused (*Owner approval policy*).
    - **The base is fetched fresh.** Under the flag the fetch of the target's
      remote is mandatory. `--no-fetch` with the flag is exit 2. A failed fetch
      is exit 4, `GRANT UNVERIFIABLE (base not fetched)`, and nothing is sent.
@@ -5007,10 +5016,17 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   close drops an item from the queue until its next change. A wrong reopen
   hands finished work to a second session.
 - **Terminal statuses are owner config, per source.** For `notion_personal`
-  the default is `Done` and `Cancelled`. `notion_work` gets its default from
-  DND-438. A status outside the source's declared set is stored and treated as
-  non-terminal. The priorities page flags it as undeclared. It is never
-  silently read as open.
+  the default is `Done`, `Cancelled` and `Won't Fix`. `notion_work` gets its
+  default from DND-438. A status outside the source's declared set is stored
+  and treated as non-terminal. The priorities page flags it as undeclared. It
+  is never silently read as open.
+
+  **Later (2026-09-27):** the `notion_personal` default was `Done` and
+  `Cancelled`. The owner made `Won't Fix` a closing status
+  ([[athena:ticket-management]] → *Keep tickets, epics and projects
+  current*). gen_saas still ships the old pair
+  (`Athena.Priorities.Rules.default/0`, `origin/main` `62dc2b63`, read
+  2026-09-27); that change is its own ticket, DND-995.
 - **Only an owner path promotes, restores or dismisses:** the owner's web
   session, or an owner approval grant of class `priority.transition`, executed
   by the server at click time (*Owner approval grants*). No machine token can
