@@ -56,9 +56,10 @@ module TriageCorpus
   MAX_CITATIONS = 8
 
   REF = /\bDND-(\d+)\b/
-  # "duplicate of DND-12", "duplicates DND-12", "dup of DND-12": the ref
-  # within 60 characters of the word, on the same line and sentence.
-  DUPLICATE = /\b(?:duplicat\w*|dup)\b[^\n.]{0,60}?\bDND-(\d+)\b/i
+  # "duplicate of DND-12", "duplicates DND-12", "a duplicate: DND-12", "dup
+  # of DND-12": the ref right after the phrase. "duplicated by DND-n" (code
+  # a change duplicated) is not a ticket duplicate, so it does not match.
+  DUPLICATE = /\b(?:duplicate\s+of|duplicates|duplicate|dup\s+of)\s*:?\s*(?:ticket\s+)?\bDND-(\d+)\b/i
   # "not a duplicate of", "isn't a duplicate", "no duplicate": a negation just
   # before the word voids the match.
   NEGATED = /\b(?:not|no|isn't|isnt|never)\s+(?:an?\s+|the\s+)?\z/i
@@ -145,11 +146,21 @@ module TriageCorpus
     out
   end
 
-  # project_of(ticket, epic_projects) -> the ticket's project, or nil when it
-  # has no epic, an unmapped epic, or epics in two projects.
+  # project_of(ticket, epic_projects) -> the ticket's project, or nil.
+  # An epic mapped to exactly one project decides it. When no epic maps, a
+  # ticket whose Area is Harness is the harness project: the Area is a
+  # recorded property naming the harness repo, so this is a mapping, not a
+  # guess. Anything else (no mapped epic and another or no Area, or epics in
+  # two projects) has no project and is excluded.
   def project_of(ticket, epic_projects)
-    projects = Array(ticket["epic_ids"]).map { |id| epic_projects[id] }.uniq
-    projects.size == 1 ? projects.first : nil
+    epics = Array(ticket["epic_ids"])
+    return nil if epics.any? { |id| epic_projects.key?(id) && epic_projects[id].nil? } # an ambiguous epic
+
+    projects = epics.filter_map { |id| epic_projects[id] }.uniq
+    return projects.first if projects.size == 1
+    return nil if projects.size > 1
+
+    ticket["area"] == "Harness" ? "harness" : nil
   end
 
   def number(ref)
@@ -259,10 +270,13 @@ module TriageCorpus
     !a["area"].nil? && !b["area"].nil? && a["area"] != b["area"]
   end
 
-  # build(snapshot, unrelated: N, seed: S) -> {labels:, corpus:, severity:,
-  # counts:, excluded:}. Deterministic: the same snapshot, N and seed give the
-  # same output, byte for byte.
-  def build(snapshot, unrelated:, seed:)
+  # build(snapshot, unrelated: N, related: M, seed: S) -> {labels:, corpus:,
+  # severity:, counts:, excluded:}. Every duplicate is kept; at most M related
+  # pairs are (a sample, so related does not swamp the other labels and make
+  # its precision a base rate); at most N unrelated pairs per provenance.
+  # Deterministic: the same snapshot, N, M and seed give the same output,
+  # byte for byte.
+  def build(snapshot, unrelated:, related:, seed:)
     tickets = Array(snapshot["tickets"])
     raise InputError.new("the snapshot holds no tickets", "re-run triage-corpus --fetch; zero tickets is a failed read, not an empty tracker") if tickets.empty?
 
@@ -275,42 +289,41 @@ module TriageCorpus
     linked, stats = links(tickets, by_page, by_ref)
     stats.each { |k, v| excluded[k] += v }
 
-    labels = []
-    corpus = []
-    add = lambda do |finding, candidate, label, provenance, rule|
-      f = by_ref[finding]
-      c = by_ref[candidate]
-      if f["body_read"] != true || c["body_read"] != true
-        excluded[:body_unread] += 1
-      elsif projects[finding].nil? || projects[candidate].nil?
-        excluded[:no_project] += 1
-      elsif projects[finding] != projects[candidate]
-        excluded[:cross_project] += 1
-      else
-        id = "#{finding}:#{candidate}"
-        labels << { "id" => id, "label" => label, "provenance" => provenance, "rule" => rule, "labeler" => LABELER, "labeled_at" => labeled_at }
-        corpus << { "id" => id, "content_domain" => DOMAINS.fetch(projects[finding]), "input" => input(f, c, projects[finding]) }
+    # why_not(finding, candidate) -> the exclusion reason, or nil when usable.
+    why_not = lambda do |finding, candidate|
+      if by_ref[finding]["body_read"] != true || by_ref[candidate]["body_read"] != true then :body_unread
+      elsif projects[finding].nil? || projects[candidate].nil? then :no_project
+      elsif projects[finding] != projects[candidate] then :cross_project
       end
     end
 
+    kept = { "duplicate" => [], "related" => [] }
     linked.sort_by { |k, _| k }.each do |key, e|
       label, rule = relation(e[:rules])
       next if label.nil?
 
-      finding, candidate = if label == "duplicate"
-                             [e[:finding], e[:candidate]]
-                           else
-                             key.split("|").reverse # the later ticket is the finding
-                           end
-      add.call(finding, candidate, label, "tracker_record", rule)
-    end
+      # The duplicate's declarer is the finding; otherwise the later ticket.
+      finding, candidate = label == "duplicate" ? [e[:finding], e[:candidate]] : key.split("|").reverse
+      reason = why_not.call(finding, candidate)
+      next excluded[reason] += 1 if reason
 
+      kept[label] << [finding, candidate, label, "tracker_record", rule]
+    end
+    sampled = kept["related"].sort_by { |row| sample_key(seed, row[0, 2].join(":")) }.first(related)
+    excluded[:related_not_sampled] += kept["related"].size - sampled.size if kept["related"].size > sampled.size
+    rows = kept["duplicate"] + sampled
     unrelated_pairs(tickets, projects, linked, unrelated, seed).each do |a, b, provenance|
-      add.call(a, b, "unrelated", provenance, provenance == "proposed" ? nil : UNRELATED_RULE)
+      rows << [a, b, "unrelated", provenance, provenance == "proposed" ? nil : UNRELATED_RULE]
     end
 
-    order = ->(row) { [LABELS.index(row["label"]), row["id"]] }
-    labels.sort_by!(&order)
+    labels = rows.map do |finding, candidate, label, provenance, rule|
+      { "id" => "#{finding}:#{candidate}", "label" => label, "provenance" => provenance, "rule" => rule, "labeler" => LABELER, "labeled_at" => labeled_at }
+    end
+    corpus = rows.map do |finding, candidate, _label, _provenance, _rule|
+      project = projects[finding]
+      { "id" => "#{finding}:#{candidate}", "content_domain" => DOMAINS.fetch(project), "input" => input(by_ref[finding], by_ref[candidate], project) }
+    end
+    labels.sort_by! { |row| [LABELS.index(row["label"]), row["id"]] }
     corpus.sort_by! { |row| row["id"] }
     { labels: labels, corpus: corpus, severity: severity_labels(tickets, projects, labeled_at),
       counts: counts(labels, corpus), excluded: excluded.sort.to_h }
@@ -319,9 +332,12 @@ module TriageCorpus
   # unrelated_pairs -> [[finding, candidate, provenance]]: up to N
   # rule_confirmed pairs and up to N proposed ones, sampled from unlinked
   # same-project pairs of readable tickets. The finding is the later ticket.
+  # Pairs whose titles share a keyword are sampled first: a live candidate is
+  # found by a title keyword, so these are the negatives triage actually sees.
   def unrelated_pairs(tickets, projects, linked, n, seed)
     readable = tickets.select { |t| t["body_read"] == true && projects[t["ref"]] }
     by_project = readable.group_by { |t| projects[t["ref"]] }
+    words = readable.to_h { |t| [t["ref"], title_words(t["title"])] }
     confirmable = []
     other = []
     by_project.each_value do |group|
@@ -329,13 +345,31 @@ module TriageCorpus
         key = pair_key(x["ref"], y["ref"])
         next if linked.key?(key)
 
-        (rule_confirms_unrelated?(x, y) ? confirmable : other) << key
+        shared = words[x["ref"]].intersect?(words[y["ref"]]) ? 0 : 1
+        (rule_confirms_unrelated?(x, y) ? confirmable : other) << [shared, key]
       end
     end
-    pick = ->(keys) { keys.sort_by { |k| sample_key(seed, k) }.first(n) }
+    pick = ->(pairs) { pairs.sort_by { |shared, k| [shared, sample_key(seed, k)] }.first(n).map(&:last) }
     pick.call(confirmable).map { |k| k.split("|").reverse + ["rule_confirmed"] } +
       pick.call(other).map { |k| k.split("|").reverse + ["proposed"] }
   end
+
+  # title_words(title) -> the title's search words, as finding-triage's
+  # candidate search takes them: severity prefix dropped, lowercased, 4+
+  # characters, no stopwords.
+  def title_words(title)
+    words = title.to_s.sub(SEVERITY_PREFIX, "").downcase.scan(/[a-z0-9][a-z0-9_-]{3,}/)
+    (words - STOPWORDS).uniq
+  end
+
+  # finding-triage's stopword list (its Triage::STOPWORDS).
+  STOPWORDS = %w[
+    about after again also when where which while with without from into onto that this
+    these those there their then than have has had does done doing must should would could
+    only just never ever every each over under still some more most less many much very
+    what work fails fail failed failing issue issues ticket tickets finding using used uses
+    low medium high critical
+  ].freeze
 
   def input(finding, candidate, project)
     {

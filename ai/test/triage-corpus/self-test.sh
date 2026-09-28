@@ -63,6 +63,18 @@ ruby_eq "duplicate: 'dup of DND-7' and 'duplicates DND-8' both count" \
   "DND-7,DND-8" 'TriageCorpus.duplicate_refs("a dup of DND-7\nthis duplicates DND-8").join(",")'
 ruby_eq "duplicate: a negation voids it ('not a duplicate of DND-12') [ticket]" \
   "" 'TriageCorpus.duplicate_refs("This is not a duplicate of DND-12.").join(",")'
+ruby_eq "duplicate: 'Closed as a duplicate of DND-473' and 'appears to duplicate DND-639'" \
+  "DND-473,DND-639" 'TriageCorpus.duplicate_refs("Closed as a duplicate of DND-473 (x).\nthis appears to duplicate DND-639 (MEDIUM)").join(",")'
+ruby_eq "duplicate: code 'duplicated by DND-599' is not a ticket duplicate" \
+  "" 'TriageCorpus.duplicate_refs("remove the guard now duplicated by DND-599 scopes").join(",")'
+ruby_eq "duplicate: 'Related, not a duplicate: DND-765' is negated" \
+  "" 'TriageCorpus.duplicate_refs("Related, not a duplicate: DND-765 changes it").join(",")'
+ruby_eq "project: no epic + Area Harness is the harness project (a recorded property, not a guess)" \
+  "harness" 'TriageCorpus.project_of({"epic_ids"=>[],"area"=>"Harness"}, {}).to_s'
+ruby_eq "project: no epic + Area Product (or none) has no project" \
+  "nil nil" '[TriageCorpus.project_of({"epic_ids"=>[],"area"=>"Product"}, {}).inspect, TriageCorpus.project_of({"epic_ids"=>[],"area"=>nil}, {}).inspect].join(" ")'
+ruby_eq "project: an unmapped epic + Area Harness is harness; a mapped epic wins" \
+  "harness walt_ui" '[TriageCorpus.project_of({"epic_ids"=>["EX"],"area"=>"Harness"}, {}), TriageCorpus.project_of({"epic_ids"=>["EW"],"area"=>"Harness"}, {"EW"=>"walt_ui"})].join(" ")'
 ruby_eq "duplicate: a ref in the next sentence is not the duplicate" \
   "" 'TriageCorpus.duplicate_refs("Checked for a duplicate. See DND-4.").join(",")'
 ruby_eq "refs: distinct, first-mention order, leading zeros dropped" \
@@ -87,7 +99,7 @@ ruby_eq "ticket_from_row: a row with no DND id is skipped" \
 #   13 Harness  cites DND-11                       -> related 13:11 citation
 #   14 Product  nothing                            -> unrelated rule_confirmed with Harness tickets
 #   15 walt_ui  cites DND-10                       -> cross_project, excluded
-#   16 (no epic) cites DND-10                      -> no_project, excluded
+#   16 (no epic, Product) cites DND-10           -> no_project, excluded
 #   17 Harness  UNREAD, Depends On 10              -> body_unread, excluded
 #   18 Harness  Found while 10                     -> linked, never related, never unrelated
 #   19 Harness  "not a duplicate of DND-12"        -> related 19:12 citation, not duplicate
@@ -107,7 +119,7 @@ ruby -rjson -e '
     t(13, "EH", "Harness", ["Follow-up to DND-11."]),
     t(14, "EH", "Product", ["Unrelated billing page copy."]),
     t(15, "EW", "Product", ["Mirrors DND-10 in walt_ui."]),
-    t(16, nil, "Harness", ["Also about DND-10."]),
+    t(16, nil, "Product", ["Also about DND-10."]),
     t(17, "EH", "Harness", [], "body_read" => false, "depends_on" => ["p10"]),
     t(18, "EH", "Harness", ["Found during other work."], "found_while" => ["p10"]),
     t(19, "EH", "Harness", ["This is not a duplicate of DND-12."]),
@@ -123,7 +135,7 @@ ruby -rjson -e '
   File.write(ARGV[0], JSON.generate(snap))
 ' "${TMP}/evals/finding-triage-snapshot.json"
 
-build() { ruby -rjson -r "${LIBRB}" -e "r = TriageCorpus.build(JSON.parse(File.read('${TMP}/evals/finding-triage-snapshot.json')), unrelated: 3, seed: 's'); $1"; }
+build() { ruby -rjson -r "${LIBRB}" -e "r = TriageCorpus.build(JSON.parse(File.read('${TMP}/evals/finding-triage-snapshot.json')), unrelated: 3, related: 100, seed: 's'); $1"; }
 
 eq "build: duplicate from the body text [ticket]" \
   "$(build 'puts r[:labels].select { |l| l["label"] == "duplicate" }.map { |l| [l["id"], l["provenance"], l["rule"]].join(" ") }')" \
@@ -158,9 +170,15 @@ eq "build: severity labels are weak, from the title prefix" \
 eq "build: counts by relation/provenance" \
   "duplicate/tracker_record 1, related/tracker_record 3, unrelated/proposed 3, unrelated/rule_confirmed 3" \
   "$(build 'puts r[:counts]["by_label_provenance"].map { |k, v| "#{k} #{v}" }.join(", ")')"
+eq "build: --related caps the related pairs (a deterministic sample), duplicates are all kept" \
+  "1 2 related_not_sampled 1" \
+  "$(ruby -rjson -r "${LIBRB}" -e "r = TriageCorpus.build(JSON.parse(File.read('${TMP}/evals/finding-triage-snapshot.json')), unrelated: 0, related: 2, seed: 's'); c = r[:labels].group_by { |l| l['label'] }.transform_values(&:size); puts [c['duplicate'], c['related'], 'related_not_sampled', r[:excluded][:related_not_sampled]].join(' ')")"
+eq "unrelated: pairs sharing a title keyword are sampled first (live candidates share one)" \
+  "DND-3:DND-1" \
+  "$(ruby -r "${LIBRB}" -e 't = ->(n, a, title) { {"ref"=>"DND-#{n}","area"=>a,"title"=>title,"body_read"=>true} }; ts = [t.(1,"Harness","inbox waiter hangs"), t.(2,"Harness","billing copy"), t.(3,"Product","inbox waiter crash"), t.(4,"Product","colour theme")]; pr = ts.to_h { |x| [x["ref"], "harness"] }; puts TriageCorpus.unrelated_pairs(ts, pr, {}, 1, "s").select { |p| p[2] == "rule_confirmed" }.map { |p| p[0,2].join(":") }.join(",")')"
 eq "build: a snapshot with no tickets is an error, not an empty corpus" \
   "InputError: the snapshot holds no tickets" \
-  "$(ruby -r "${LIBRB}" -e 'begin; TriageCorpus.build({"tickets"=>[],"epic_projects"=>{},"fetched_at"=>"x"}, unrelated: 1, seed: "s"); rescue TriageCorpus::InputError => e; puts "InputError: #{e.message}"; end')"
+  "$(ruby -r "${LIBRB}" -e 'begin; TriageCorpus.build({"tickets"=>[],"epic_projects"=>{},"fetched_at"=>"x"}, unrelated: 1, related: 1, seed: "s"); rescue TriageCorpus::InputError => e; puts "InputError: #{e.message}"; end')"
 
 echo "== build (bin) + judgment-eval --dry-run"
 

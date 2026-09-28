@@ -34,7 +34,7 @@ HARNESS = File.expand_path("../..", __dir__)
 
 USAGE = <<~EOF
   Usage: triage-corpus --fetch [--dir DIR]
-         triage-corpus --build [--unrelated N] [--seed S] [--dry-run] [--dir DIR]
+         triage-corpus --build [--related M] [--unrelated N] [--seed S] [--dry-run] [--dir DIR]
          triage-corpus --help
 
   Build the finding triage eval corpus from the DND tracker (DND-714). One
@@ -62,16 +62,21 @@ USAGE = <<~EOF
                            On, Blocks, Found while) and no citation either
                            way: rule_confirmed, #{TriageCorpus::UNRELATED_RULE}, when the two
                            tickets carry different Areas; otherwise proposed
-                           (excluded from any eval until someone confirms it)
-              Only same-project pairs of tickets whose project is known are
-              kept (a live candidate is always same-project); the content
+                           (excluded from any eval until someone confirms it).
+                           Pairs whose titles share a search keyword come
+                           first: live candidates are found by one.
+              A ticket's project is its epic's (DND Projects); with no mapped
+              epic, Area Harness is the harness project. Only same-project
+              pairs of tickets whose project is known are kept (a live candidate is always same-project); the content
               domain comes from the project, never guessed. The finding is the
               later ticket (the duplicate's declarer for duplicates). Ticket
               refs and lines naming a duplicate are redacted from the text
               sent, so a case is judged on content, not on a label leak.
+  --related M    at most M related pairs, a deterministic sample (default
+                 300); every duplicate is kept
   --unrelated N  at most N rule_confirmed and N proposed unrelated pairs
-                 (default 60)
-  --seed S       the sampling seed (default dnd-714); same snapshot, N and
+                 (default 300)
+  --seed S       the sampling seed (default dnd-714); same snapshot, M, N and
                  seed give byte-identical files
   --dry-run      with --build: print the counts, write nothing
   --dir DIR      default ${XDG_DATA_HOME:-~/.local/share}/athena/evals
@@ -300,7 +305,7 @@ module Manager
       fail!(1, "the snapshot is not JSON", "re-run triage-corpus --fetch")
     end
     fail!(1, "the snapshot is not a JSON object", "re-run triage-corpus --fetch") unless snapshot.is_a?(Hash)
-    result = TriageCorpus.build(snapshot, unrelated: opts[:unrelated], seed: opts[:seed])
+    result = TriageCorpus.build(snapshot, unrelated: opts[:unrelated], related: opts[:related], seed: opts[:seed])
     report(result, snapshot, out)
     return 0 if opts[:dry_run]
 
@@ -341,7 +346,7 @@ end
 
 SPEC = {
   "--help" => :switch, "-h" => :switch, "--fetch" => :switch, "--build" => :switch, "--dry-run" => :switch,
-  "--unrelated" => :integer, "--seed" => :value, "--dir" => :value
+  "--unrelated" => :integer, "--related" => :integer, "--seed" => :value, "--dir" => :value
 }.freeze
 
 def parse_options(argv)
@@ -355,11 +360,13 @@ def parse_options(argv)
   end
   dir = raw["--dir"] || Effects.default_dir
   fail!(2, "--dir must be an absolute path", "pass an absolute directory") unless dir.start_with?("/")
-  unrelated = raw.fetch("--unrelated", 60)
+  unrelated = raw.fetch("--unrelated", 300)
   fail!(2, "--unrelated must be 0..5000", "pass a pair count") unless (0..5000).cover?(unrelated)
+  related = raw.fetch("--related", 300)
+  fail!(2, "--related must be 0..5000", "pass a pair count") unless (0..5000).cover?(related)
   seed = raw.fetch("--seed", "dnd-714")
   fail!(2, "--seed must be 1..64 letters, digits, _ or -", "pass a short seed") unless /\A[A-Za-z0-9_-]{1,64}\z/.match?(seed)
-  { mode: mode, dir: dir, unrelated: unrelated, seed: seed, dry_run: raw["--dry-run"] || false }
+  { mode: mode, dir: dir, unrelated: unrelated, related: related, seed: seed, dry_run: raw["--dry-run"] || false }
 rescue StrictArgv::UsageError => e
   fail!(2, e.message, "run #{PROG} --help for the flags")
 end
