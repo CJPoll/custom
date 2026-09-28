@@ -72,10 +72,6 @@ new_case() {
   c="$(mktemp -d -p "$TMP" case.XXXXXX)"; r="$c/repo"
   mkdir -p "$r/ai/skills/athena:epic-clustering"
   printf -- '---\nname: athena:epic-clustering\n---\n' >"$r/ai/skills/athena:epic-clustering/SKILL.md"
-  # The drain request's reader (DND-987), present by default.
-  mkdir -p "$r/ai/skills/athena:inbox-attend"
-  printf 'A message whose filename ends `-harness-lane-drain.md` wakes the harness lane.\n' \
-    >"$r/ai/skills/athena:inbox-attend/SKILL.md"
   git -C "$r" init -q -b main >&2
   git -C "$r" -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false \
     commit -q --allow-empty -m seed >&2
@@ -268,13 +264,27 @@ if [ "$(grep -c . "$TMP/quiet-calls")" = 1 ] && grep -q '^alert: already sent fo
 else
   bad "unnamed delivery" "calls=$(cat "$TMP/quiet-calls" 2>&1) rec=$(cat "$(newest "$cq" wedged)" 2>&1)"
 fi
-c2="$(new_case)"; rm -r "$(repo_of "$c2")/ai/skills/athena:inbox-attend"; rm -f "$TMP/send-mail-calls"
+# The reader has landed (DND-987), so the request is unconditional: the
+# runner no longer looks for a reader in the main checkout before sending.
+c2="$(new_case)"; rm -f "$TMP/send-mail-calls"
 rc="$(run_runner "$c2" CLUSTERING_SEND_MAIL="$TMP/fake-send-mail")"
-if [ "$rc" = 0 ] && [ ! -e "$TMP/send-mail-calls" ] && grep -q '^drain: skipped (no reader' "$(newest "$c2" run)" \
-   && grep -q 'Fix:' "$c2/runner.err"; then
-  ok "with no drain reader in the main checkout (DND-987 not landed) the request is skipped and the record says why"
+if [ "$rc" = 0 ] && [ "$(grep -c . "$TMP/send-mail-calls")" = 1 ] && grep -qx 'drain: sent 0001-fake-harness-lane-drain.md' "$(newest "$c2" run)" \
+   && ! grep -q '^drain: skipped' "$(newest "$c2" run)"; then
+  ok "the drain request is always sent: there is no reader gate to skip it"
 else
-  bad "drain without reader" "rc=$rc calls=$(cat "$TMP/send-mail-calls" 2>&1) run=$(cat "$(newest "$c2" run)" 2>&1)"
+  bad "drain unconditional" "rc=$rc calls=$(cat "$TMP/send-mail-calls" 2>&1) run=$(cat "$(newest "$c2" run)" 2>&1)"
+fi
+# Writer and reader agree: the slug this runner sends is the filename suffix
+# the landed reader (athena:inbox-attend -> A fourth writer) handles, and the
+# lane brief it routes to has its drain steps.
+slug="$(sed -n 3p "$TMP/send-mail-args")"
+if [ "$slug" = harness-lane-drain ] \
+   && grep -qF -- "-${slug}.md" "${REPO_ROOT}/ai/skills/athena:inbox-attend/SKILL.md" \
+   && grep -qF -- '**A fourth writer: the harness-lane drain request' "${REPO_ROOT}/ai/skills/athena:inbox-attend/SKILL.md" \
+   && grep -qF -- '**On a drain request**' "${REPO_ROOT}/ai/docs/ticket-lane-action-brief.md"; then
+  ok "the drain slug is the one the landed reader handles (athena:inbox-attend -> A fourth writer)"
+else
+  bad "drain reader contract" "slug=$slug; the reader in ${REPO_ROOT} does not handle -${slug}.md"
 fi
 rm -f "$TMP/send-mail-calls"; mkdir -p "$(sd "$c")"; echo 5 >"$(sd "$c")/consecutive-failures"
 rc="$(run_runner "$c" CLUSTERING_SEND_MAIL="$TMP/fake-send-mail")"

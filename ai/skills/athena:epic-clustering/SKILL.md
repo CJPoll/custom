@@ -27,8 +27,10 @@ properties* say. This skill does not restate them.
 - **The athena-architect runs it.** It owns epic and ticket writes. An admiral
   that sees the trigger below asks its architect for a pass. An admiral never
   moves a ticket between epics itself.
-- **Every 12 hours**, from a cron that spawns an architect with this skill
-  (plan row W6; until it lands, an admiral or the coordinator asks for it).
+- **Every 12 hours**, from the cron `scripts/athena-clustering-run.sh`,
+  which spawns an architect with this skill (`~/dev/custom/CLAUDE.md` →
+  *Epic-clustering cron*). Between runs, an admiral or the coordinator asks
+  for it.
 - **On the trigger:** an epic's open `Path` = `Off` count exceeds its open
   on-path count (`Critical`, `Blocking`, `Promoted`). `read` prints it per
   epic.

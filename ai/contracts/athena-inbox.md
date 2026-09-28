@@ -1884,9 +1884,10 @@ lenient about what I receive.
   harness-lane drain request (DND-983), sent the same way.
 
   **Later (2026-09-27):** DND-987 adds a third kind of sender on that side:
-  the harness lane's drain request (`-harness-lane-drain.md`). Today an
-  admiral, the owner or a harness session sends it by hand; later the DND-983
-  cron will send it. It goes through the same `send-mail` path and lock
+  the harness lane's drain request (`-harness-lane-drain.md`). An
+  admiral, the owner or a harness session sends it by hand, and
+  `scripts/athena-clustering-run.sh` (DND-983) sends one at the end of each
+  run. It goes through the same `send-mail` path and lock
   (`ai/docs/ticket-lane-action-brief.md` → *The harness lane* → *Senders*).
 
   **Later (2026-09-26):** this item read "Exactly one writer per `write`
@@ -2719,9 +2720,7 @@ also reports:
   `.blocked` record in the same directory; there is no re-arm to relay. It
   also sends ONE `harness-lane-drain` request at the end of every run that
   spawned a session, re: that run's `.run` record. Its reader is
-  `athena:inbox-attend`'s harness-lane handling (DND-987). Until that is in the
-  main checkout's copy of the skill, the runner sends no request and records
-  `drain: skipped (no reader ...)` in the `.run` record instead.
+  `athena:inbox-attend` → *A fourth writer* (DND-987).
 - **`watchdog`** — the watchdog's three tools (the liveness library,
   `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
   Missing any, the supervisor keeps the client running, but a wedge is then

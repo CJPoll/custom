@@ -132,7 +132,6 @@ LANES_DIR="${STATE_DIR}/lanes"
 LOCK="${STATE_DIR}/run.lock"
 FAIL_COUNT="${STATE_DIR}/consecutive-failures"
 WEDGE_STATE="${STATE_DIR}/wedged"
-DRAIN_READER="${MAIN_CHECKOUT}/ai/skills/athena:inbox-attend/SKILL.md"
 BLOCK_COUNT="${STATE_DIR}/consecutive-blocked"
 BLOCK_STATE="${STATE_DIR}/blocked"
 BLOCK_ESCALATE="${CLUSTERING_BLOCK_ESCALATE:-2}"
@@ -513,15 +512,11 @@ finish() {
     printf 'It carries no instruction. The run record named in re: says what ran.\n'
   } >"${body}"
   err="$(mktemp)" || err=/dev/null
-  # The request's only reader is athena:inbox-attend's harness-lane block
-  # (DND-987). Until that has landed in the main checkout, the attendant would
-  # ack the message and refuse it as an unverifiable wedge, so the request is
-  # skipped and the record says why. It starts on its own once DND-987 lands.
-  if ! grep -qF -- '-harness-lane-drain.md' "${DRAIN_READER}" 2>/dev/null; then
-    printf 'drain: skipped (no reader: %s does not handle -harness-lane-drain.md; DND-987 not landed)\n' "${DRAIN_READER}" >>"${run}" 2>/dev/null || true
-    echo "${ME}: no harness-lane drain request sent: ${DRAIN_READER} has no reader for it yet." >&2
-    echo "  Fix: land DND-987 on main and fast-forward ${MAIN_CHECKOUT}; later runs then send it. Record: ${run}" >&2
-  elif [ -n "${body:-}" ] && name="$(harness_alert_send "${run}" harness-lane-drain "${body}" 2>"${err}")"; then
+  # The request's reader is athena:inbox-attend → *A fourth writer*, which
+  # routes a `-harness-lane-drain.md` message to
+  # ai/docs/ticket-lane-action-brief.md → *The harness lane* → *On a drain
+  # request*. The self-test asserts that landed reader handles this slug.
+  if [ -n "${body:-}" ] && name="$(harness_alert_send "${run}" harness-lane-drain "${body}" 2>"${err}")"; then
     printf 'drain: sent %s\n' "${name}" >>"${run}" 2>/dev/null || true
   else
     printf 'drain: FAILED to send\n' >>"${run}" 2>/dev/null || true

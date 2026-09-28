@@ -507,7 +507,7 @@ Progress`, and the other's next-mission then counts it as started.
 | `{{LANE_CHANNEL}}` | no `log` channel. The trigger is a drain request: one maildir message on custom's `harness-alerts` channel whose filename ends `-harness-lane-drain.md` (athena:inbox-attend → *A fourth writer*). It carries no state, so add/drop comes only from `{{SOURCE_RE_QUERY}}` |
 | `{{CHANNEL_RESOLUTION}}` | `harness-alerts` must resolve in the **live** custom entry, matched by its `repo`. `ai/bin/check-inbox-registry` asserts this read-only, in every `harness-gate` run. At request time a miss surfaces on the sender side: `send-mail` refuses an undeclared channel with a `Fix:`. A miss is registry drift (`Fix: scripts/setup-inbox-registry --install`), never a quiet queue. Verified 2026-09-27: the check passed, and in a temp root a detector-side send woke `inbox-wait` with `rang-channels: harness-alerts` |
 | `{{LOCK_PATH}}` | `~/.claude/harness-coordinator.lock` |
-| `{{STALE_MARKER_SWEEP}}` | **choice (b), `manual-only`.** Every existing marker is fresh; a human deletes `{{LOCK_PATH}}`. Requests are activity-triggered today, so no age-out is claimed. The 12h clustering cron (DND-983) will send one every run; once that crontab is installed, a later change may move this row to (a) |
+| `{{STALE_MARKER_SWEEP}}` | **choice (b), `manual-only`.** Every existing marker is fresh; a human deletes `{{LOCK_PATH}}`. Requests are activity-triggered today, so no age-out is claimed. The 12h clustering cron (`scripts/athena-clustering-run.sh`) sends one every run once its crontab is installed; a later change may then move this row to (a) |
 | `{{SOURCE_RE_QUERY}}` | `ai/bin/next-mission --harness-lane --started <state-log ids>`, re-run after each ticket |
 
 **On a drain request** the attendant does these steps, in order, and never the
@@ -523,14 +523,15 @@ work itself:
      owner.
    - exit 2 or 3: a fault. Relay it to the owner; it is never a quiet queue.
 
-**Senders.** Today every request is sent by hand. The sender is an admiral
-after a lane move, the owner, or a session. Send it from the custom checkout:
+**Senders.** By hand, the sender is an admiral after a lane move, the owner,
+or a session. Send it from the custom checkout:
 
     cd ~/dev/custom && ai/skills/athena:inbox/bin/send-mail --local \
       harness-alerts-detector harness-lane-drain --to custom --body-file <file>
 
-The 12h clustering cron (DND-983, pending) is to send one after each run. Until
-it lands and its crontab is installed, nothing sends a request automatically.
+The 12h clustering cron, `scripts/athena-clustering-run.sh`, sends one after
+each run that spawned a session (`CLAUDE.md` → *Epic-clustering cron*). It
+sends nothing until its crontab is installed (`scripts/setup-clustering-cron`).
 
 ## Relationship to the existing flaky trigger
 

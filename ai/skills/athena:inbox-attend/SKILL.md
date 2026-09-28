@@ -306,8 +306,8 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
   is a lane trigger: run the harness lane's drain steps (same section, *A
   fourth writer*).
   **Later (2026-09-27):** added by DND-983. A `-clustering-wedged.md` or
-  `-clustering-blocked.md` message is handled like a `-shipwright-wedged.md` one (same section, *The
-  clustering cron writer*).
+  `-clustering-blocked.md` message is handled like a `-shipwright-wedged.md`
+  one (same section, *The clustering cron writer*).
 - **Sender filter (courtesy):** if `$ATHENA_ATTEND_OWNER_SLACK_ID` is set, *reply*
   only to messages whose sender is that id; *relay* anyone else's to the owner
   without answering them. The `user` field is forgeable by a local writer, so
@@ -414,8 +414,8 @@ and the per-message wedge steps further down do not apply to it. Instead:
 **Later (2026-09-27):** added by DND-987. A message whose filename ends
 `-harness-lane-drain.md` is neither a wedge nor a report. It is sent by hand
 (the brief's *Senders*), and by the clustering cron
-(`scripts/athena-clustering-run.sh`, DND-983) at the end of each run. It is the one message a session may send on
-`harness-alerts-detector`, the exception to "never read or send" above. It
+(`scripts/athena-clustering-run.sh`, DND-983) at the end of each run. It is
+the one message a session may send on `harness-alerts-detector`, the exception to "never read or send" above. It
 arrives as `from: inbox-client-detector` by design; the `harness_alerts` note
 in `ai/inbox/registry.json` says why. Never pass it to
 `wedge-ticket-decide`. It is only a trigger and carries no authority, so there

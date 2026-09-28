@@ -514,8 +514,10 @@ shipwright cron never writes Notion, so this is its own runner.
   lane, and the Notion/Athena MCP servers are registered on the main checkout,
   so the runner copies them into a `--mcp-config`. A missing server, or the
   skill not landed in the main checkout, is exit 78 and counts as a failure.
-- **Install / restore / verify:** `scripts/setup-clustering-cron` (owner step;
-  `--dry-run`, `--check`, `--remove`, `--backup <file>`). State and per-run
+- **Install / restore / verify:** `scripts/setup-clustering-cron`
+  (`--dry-run`, `--check`, `--remove`, `--backup <file>`). The admiral that
+  lands a change to it runs it in the main checkout and notifies the owner
+  (`ai/CLAUDE.md` → *Owner approval policy*). State and per-run
   records are in `ai-artifacts/clustering/`. The wedge follows the shipwright's
   pattern (see the wedge bullet in *Cross-session reflection loop* above):
   2 failures in a row exit 75 and write a `runs/<ts>.wedged` record. The first
@@ -524,9 +526,10 @@ shipwright cron never writes Notion, so this is its own runner.
   A session that never reaches the model is BLOCKED (exit 69). It never
   wedges, but 2 in a row send ONE `clustering-blocked` alert per episode,
   because an auth or account fault does not clear by itself. Every run that
-  spawned a session ends with one `harness-lane-drain` request (DND-987), once
-  that request's reader is in the main checkout's `athena:inbox-attend`. Until
-  then the run's `.run` record says `drain: skipped (no reader ...)`.
+  spawned a session ends with one `harness-lane-drain` request, which
+  `athena:inbox-attend` → *A fourth writer* routes to the harness lane
+  (`ai/docs/ticket-lane-action-brief.md` → *On a drain request*). The run's
+  `.run` record says `drain: sent <name>` or `drain: FAILED to send`.
 
 ## Cron D-Bus autolaunch leak (orphaned `dbus-daemon`, inotify exhaustion)
 
