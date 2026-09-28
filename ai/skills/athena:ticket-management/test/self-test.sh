@@ -109,9 +109,12 @@ ruby_eq "advisory: no hit names only the enabled relations [DND-714]" \
 ruby_eq "advisory: an unset relation says insufficient evidence (no threshold) [DND-714]" \
   "  related: insufficient evidence (no threshold); not advised." \
   'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"unset"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[1]'
-ruby_eq "advisory: no threshold state from the server is said, never read as enabled [DND-714]" \
-  "  duplicate: threshold state not reported by the server; treat as insufficient evidence.|  related: threshold state not reported by the server; treat as insufficient evidence.|4" \
-  'l = Triage.advisory_lines({"mode"=>"on","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l[1], l[2], l.size - 1].join("|")'
+ruby_eq "advisory: no threshold state from the server is said, never read as enabled, and nothing is advised [DND-714 review d]" \
+  "  duplicate: threshold state not reported by the server; treat as insufficient evidence.|  related: threshold state not reported by the server; treat as insufficient evidence.|3|false" \
+  'l = Triage.advisory_lines({"mode"=>"on","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l[1], l[2], l.size - 1, l.any? { |x| x.include?("DND-5") }].join("|")'
+ruby_eq "advisory: a hit on a relation that is not enabled is never printed, whatever above_threshold says [DND-714 review d]" \
+  "false|  no candidate is related at or above its threshold." \
+  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l.any? { |x| x.include?("DND-5") }, l[2]].join("|")'
 ruby_eq "advisory: shadow mode advises nothing" \
   "2|  mode shadow: judged and recorded; nothing is advised until the mode is on." \
   'l = Triage.advisory_lines({"mode"=>"shadow","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>1,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l.size, l[1]].join("|")'

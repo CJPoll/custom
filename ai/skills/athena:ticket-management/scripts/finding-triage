@@ -281,7 +281,9 @@ module Triage
 
     states = ADVISORY.to_h { |rel| [rel, threshold_state(result, rel)] }
     states.each { |rel, state| lines << evidence_line(rel, state) unless state == "enabled" }
-    hits = Array(result["candidates"]).select { |c| c["above_threshold"] == true && ADVISORY.include?(c["relation"]) }
+    # A hit needs its relation enabled too: above_threshold on an n/a, unset
+    # or unreported relation is never advice (DND-714 review).
+    hits = Array(result["candidates"]).select { |c| c["above_threshold"] == true && states[c["relation"]] == "enabled" }
     if hits.empty?
       enabled = ADVISORY.select { |rel| states[rel] == "enabled" }
       lines << "  no candidate is #{enabled.map { |rel| RELATION_NOUN[rel] }.join(' or ')} at or above its threshold." unless enabled.empty?
