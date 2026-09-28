@@ -134,6 +134,10 @@ tools:
   # file; --propose re-derives it deterministically and keeps every owner
   # confirmation. No forge, tracker, server or remote write.
   judgment-label:          { class: idempotent, reason: labels }
+  # triage-corpus (DND-714) only READS Notion (its Notion effect refuses any
+  # other request) and writes machine-local snapshot/label/corpus files; a
+  # rebuild from one snapshot is byte-identical. No forge, tracker or server write.
+  triage-corpus:           { class: idempotent, reason: labels }
   # notion-athena-mcp launches an MCP server that EXPOSES Notion writes. It does
   # not itself write, but its worst-case capability is a tracker mutation, so it
   # is classified destructive. FLAGGED for owner ratification (DND-172); shipped

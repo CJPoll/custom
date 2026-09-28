@@ -49,7 +49,9 @@ USAGE = <<~EOF
     --use-case U        finding_triage | slack_routing | priority_scoring
     --labels FILE       JSONL, one per line: {"id", "label", "provenance",
                         "labeler", "labeled_at"}; provenance is forward_record,
-                        owner_confirmed or proposed. proposed rows are excluded
+                        owner_confirmed, tracker_record, rule_confirmed or
+                        proposed (see ai/bin/triage-corpus and judgment-label
+                        for how each is made). proposed rows are excluded
                         from the run (they never select a threshold) and counted.
     --corpus FILE       JSONL the labels were made from. A row joins on "id"
                         ("event_id" for slack_routing); its "input" member is
@@ -72,7 +74,8 @@ USAGE = <<~EOF
                         With --dry-run, prints the body and sends nothing.
 
   Output: "scored S / unscored U (reasons)", then per label either
-  "threshold T (precision, lb, coverage, n)" or "n/a (n=K, needs 10)". With
+  "threshold T (precision, lb, coverage, n)" or "n/a (n=K, needs 10) --
+  insufficient evidence" (the label stays disabled). With
   nothing scored no label line is printed: a run with no key never shows a
   precision. The run file is ${XDG_DATA_HOME:-~/.local/share}/athena/evals/
   runs/<utc>-<U>.json (0600): ids, labels, outcomes and the report, never an
@@ -384,7 +387,7 @@ module Manager
     data = outcome[:data]
     out.puts "#{PROG}: applied run #{data['eval_run_id']} to #{data['use_case']} (question set #{data['question_set_version']}, model #{data['model']})"
     data["thresholds"].each do |t|
-      out.puts(t["enabled"] ? format("  %s: enabled at %.2f (lb %.3f, coverage %.3f, n %d)", t["label"], t["threshold"], t["precision_lb"], t["coverage"], t["n"]) : "  #{t['label']}: disabled (n/a, n #{t['n']})")
+      out.puts(t["enabled"] ? format("  %s: enabled at %.2f (lb %.3f, coverage %.3f, n %d)", t["label"], t["threshold"], t["precision_lb"], t["coverage"], t["n"]) : "  #{t['label']}: disabled (n/a, n #{t['n']})#{JudgmentEval::INSUFFICIENT}")
     end
     0
   end

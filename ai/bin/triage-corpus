@@ -1,0 +1,381 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# triage-corpus -- build the finding triage eval corpus from the DND tracker's
+# own history (DND-714), for ai/bin/judgment-eval --use-case finding_triage.
+#
+# Design: epic "Jev judgments" A&E sections 5a and 6; contract
+# ~/dev/custom/ai/contracts/athena-judgments.md -> *Threshold provenance, n/a
+# and the pinned model* (*One case, one label*; *Finding triage labels*).
+#
+# Buckets: the pure DOMAIN is ai/lib/triage_corpus.rb; below are the EFFECTS
+# (Notion READS, files), the MANAGER (fetch; build; counts) and the FRAMEWORK
+# (argv).
+#
+# READ ONLY toward Notion: the Notion effect admits a data source query and a
+# block-children list, and refuses any other request before it is sent. The
+# token is read in this process and fed to curl on STDIN, never argv.
+#
+# Ticket text is untrusted data. It is written only to the machine-local
+# snapshot and corpus files (0600, never committed); the labels file holds ids.
+#
+# Deliberately gem-free (stdlib only).
+
+require "fileutils"
+require "json"
+require "open3"
+require "time"
+require "tmpdir"
+require_relative "../lib/triage_corpus"
+require_relative "../lib/strict_argv"
+
+PROG = "triage-corpus"
+HARNESS = File.expand_path("../..", __dir__)
+
+USAGE = <<~EOF
+  Usage: triage-corpus --fetch [--dir DIR]
+         triage-corpus --build [--unrelated N] [--seed S] [--dry-run] [--dir DIR]
+         triage-corpus --help
+
+  Build the finding triage eval corpus from the DND tracker (DND-714). One
+  case is one (finding, candidate) pair, labelled with the candidate's
+  relation: duplicate, related or unrelated.
+
+  --fetch     Read every DND ticket (the Tickets data source), the DND
+              Projects rows (to scope each ticket to a project through its
+              epic) and each ticket's first 100 blocks, pacing Notion calls
+              (0.4 s). Writes DIR/finding-triage-snapshot.json. READS only.
+              A body that could not be read (after 3 tries on HTTP 429) is
+              recorded UNREAD and its pairs are excluded, never passed.
+  --build     From the snapshot, write:
+                DIR/finding-triage-labels.jsonl    ids and labels only
+                DIR/finding-triage-corpus.jsonl    the inputs the eval sends
+                DIR/finding-triage-severity.jsonl  weak severity labels
+              and print the counts. Rules (provenance, rule):
+                duplicate  tracker_record, duplicate_text: the ticket's title
+                           or body says "duplicate of DND-n" (not negated)
+                related    tracker_record, depends_on | blocks | citation:
+                           a Depends On/Blocks link, or the body cites the
+                           other ticket (a body citing more than #{TriageCorpus::MAX_CITATIONS}
+                           tickets is a list; its citations are skipped)
+                unrelated  sampled same-project pairs with no link (Depends
+                           On, Blocks, Found while) and no citation either
+                           way: rule_confirmed, #{TriageCorpus::UNRELATED_RULE}, when the two
+                           tickets carry different Areas; otherwise proposed
+                           (excluded from any eval until someone confirms it)
+              Only same-project pairs of tickets whose project is known are
+              kept (a live candidate is always same-project); the content
+              domain comes from the project, never guessed. The finding is the
+              later ticket (the duplicate's declarer for duplicates). Ticket
+              refs and lines naming a duplicate are redacted from the text
+              sent, so a case is judged on content, not on a label leak.
+  --unrelated N  at most N rule_confirmed and N proposed unrelated pairs
+                 (default 60)
+  --seed S       the sampling seed (default dnd-714); same snapshot, N and
+                 seed give byte-identical files
+  --dry-run      with --build: print the counts, write nothing
+  --dir DIR      default ${XDG_DATA_HOME:-~/.local/share}/athena/evals
+                 (machine-local, 0600 files, never committed)
+
+  Then: judgment-eval --use-case finding_triage --labels DIR/finding-triage-labels.jsonl
+          --corpus DIR/finding-triage-corpus.jsonl
+
+  Exit codes:
+    0  done
+    1  an input is missing, empty or malformed, or Notion could not be read
+    2  usage
+
+  Every failure prints one stderr line carrying Fix:. The Notion token is the
+  file the `notion-personal` MCP entry in ~/.claude.json launches with (its
+  NOTION_ATHENA_TOKEN_FILE). Environment (optional): FLEET_CLAUDE_JSON,
+  XDG_DATA_HOME, TRIAGE_CORPUS_NOTION_API (a loopback URL, for tests),
+  TRIAGE_CORPUS_PACE_S (seconds between Notion calls, default 0.4).
+EOF
+
+class Failure < StandardError
+  attr_reader :code
+
+  def initialize(code, message)
+    super(message)
+    @code = code
+  end
+end
+
+def fail!(code, what, fix)
+  raise Failure.new(code, "#{PROG}: #{what}. Fix: #{fix}")
+end
+
+# ── EFFECTS ──────────────────────────────────────────────────────────────────
+
+module Effects
+  module_function
+
+  TICKETS_DATA_SOURCE = "219349da-87fb-8063-8f36-000b362fbd60"
+  PROJECTS_DATA_SOURCE = "3e2349da-87fb-809a-a93e-000b167fd855"
+  NOTION_VERSION = "2025-09-03"
+  NOTION_READS = [
+    ["POST", %r{\A/v1/data_sources/[0-9a-f-]{36}/query\z}],
+    ["GET", %r{\A/v1/blocks/[0-9a-f-]{36}/children\?page_size=\d{1,3}\z}]
+  ].freeze
+  TRIES = 3
+
+  def default_dir
+    base = ENV["XDG_DATA_HOME"].to_s
+    base = File.join(Dir.home, ".local", "share") if base.empty?
+    fail!(1, "XDG_DATA_HOME is not absolute", "set it to an absolute path or unset it") unless base.start_with?("/")
+    File.join(base, "athena", "evals")
+  end
+
+  def pace
+    value = ENV["TRIAGE_CORPUS_PACE_S"].to_s
+    /\A\d{1,2}(\.\d{1,3})?\z/.match?(value) ? value.to_f : 0.4
+  end
+
+  def main_checkout(dir)
+    out, status = Open3.capture2e("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return nil unless status.success?
+
+    common = out.strip
+    common.start_with?("/") ? common.delete_suffix("/.git") : nil
+  rescue SystemCallError
+    nil
+  end
+
+  # notion -> [origin, token]; every miss names what it looked for.
+  def notion
+    path = ENV["FLEET_CLAUDE_JSON"] || File.join(Dir.home, ".claude.json")
+    doc = begin
+      JSON.parse(File.read(path))
+    rescue JSON::ParserError, SystemCallError
+      fail!(1, "cannot read #{path} to find the notion-personal MCP entry", "register notion-personal (its env names NOTION_ATHENA_TOKEN_FILE)")
+    end
+    keys = [main_checkout(Dir.pwd), main_checkout(HARNESS)].compact.uniq
+    entry = keys.lazy.map { |k| doc.dig("projects", k, "mcpServers", "notion-personal") }.find(&:itself) || doc.dig("mcpServers", "notion-personal")
+    token_file = entry.is_a?(Hash) ? entry.dig("env", "NOTION_ATHENA_TOKEN_FILE") : nil
+    fail!(1, "the notion-personal MCP entry in #{path} names no absolute NOTION_ATHENA_TOKEN_FILE", "repair that entry (owner-gated credential); this tool only reads it") unless token_file.is_a?(String) && token_file.start_with?("/")
+    token = begin
+      File.read(token_file).strip
+    rescue SystemCallError
+      nil
+    end
+    fail!(1, "the Notion token file #{token_file} is missing or empty", "the token is owner-issued; never mint one") if token.nil? || token.empty?
+    origin = ENV["TRIAGE_CORPUS_NOTION_API"] ? loopback(ENV["TRIAGE_CORPUS_NOTION_API"]) : "https://api.notion.com"
+    [origin, token]
+  end
+
+  def loopback(url)
+    m = %r{\Ahttp://(127\.0\.0\.1|localhost)(:\d{1,5})?/?\z}.match(url)
+    fail!(2, "TRIAGE_CORPUS_NOTION_API must be a loopback http URL", "unset it (tests only)") unless m
+    "http://#{m[1]}#{m[2]}"
+  end
+
+  # read(origin, token, method, path, body) -> parsed JSON, or raises
+  # Failure. Anything but an allow-listed READ is refused before it is sent.
+  def read(origin, token, method, path, body = nil)
+    unless NOTION_READS.any? { |m, re| m == method && re.match?(path) }
+      fail!(1, "refused a Notion #{method} #{path}: this tool only reads", "this is a bug in triage-corpus")
+    end
+    reply = nil
+    TRIES.times do |i|
+      sleep(pace) if pace.positive?
+      reply = request(method, "#{origin}#{path}", token, body)
+      break unless reply[:status] == 429 && i < TRIES - 1
+
+      sleep([reply[:retry_after], 10].min)
+    end
+    fail!(1, "could not reach Notion (curl exit #{reply[:curl_rc]})", "check the network, then re-run --fetch") if reply[:curl_rc] != 0
+    fail!(1, "Notion answered HTTP #{reply[:status]} to #{method} #{path.sub(/\?.*/, '')}", "re-run --fetch; on 401/403 the token or the page share is the owner's to fix") unless reply[:status] == 200
+    JSON.parse(reply[:body])
+  rescue JSON::ParserError
+    fail!(1, "Notion answered a body that is not JSON", "re-run --fetch")
+  end
+
+  def request(method, url, token, body)
+    [url, token].each do |value|
+      fail!(1, "a request value contains a quote, backslash or control character", "repair the Notion token file or the URL") if /["\\[:cntrl:]]/.match?(value)
+    end
+    Dir.mktmpdir("triage-corpus-") do |dir|
+      File.chmod(0o700, dir)
+      resp = File.join(dir, "resp")
+      hdrs = File.join(dir, "hdrs")
+      config = +""
+      config << %(url = "#{url}"\nrequest = "#{method}"\n)
+      config << %(header = "Authorization: Bearer #{token}"\nheader = "Notion-Version: #{NOTION_VERSION}"\nheader = "Accept: application/json"\n)
+      if body
+        req = File.join(dir, "req.json")
+        File.write(req, JSON.generate(body), perm: 0o600)
+        config << %(header = "Content-Type: application/json"\ndata-binary = "@#{req}"\n)
+      end
+      config << %(output = "#{resp}"\ndump-header = "#{hdrs}"\nwrite-out = "%{http_code}"\n)
+      config << "connect-timeout = 10\nmax-time = 60\nsilent\n"
+      out, _err, status = Open3.capture3("curl", "--config", "-", stdin_data: config)
+      config.clear
+      retry_after = File.exist?(hdrs) ? File.read(hdrs)[/^retry-after:\s*(\d+)/i, 1].to_i : 0
+      { curl_rc: status.exitstatus, status: out.strip.to_i, body: File.exist?(resp) ? File.read(resp) : "", retry_after: [retry_after, 1].max }
+    end
+  rescue Errno::ENOENT
+    fail!(1, "curl is not on PATH", "install curl")
+  end
+
+  # query_all(origin, token, data_source) -> every row, following the cursor.
+  def query_all(origin, token, data_source)
+    rows = []
+    cursor = nil
+    loop do
+      body = { "page_size" => 100 }
+      body["start_cursor"] = cursor if cursor
+      page = read(origin, token, "POST", "/v1/data_sources/#{data_source}/query", body)
+      rows.concat(Array(page["results"]))
+      break unless page["has_more"] == true && page["next_cursor"].is_a?(String)
+
+      cursor = page["next_cursor"]
+    end
+    rows
+  end
+
+  def read_input(path, what)
+    fail!(1, "#{what} #{path} does not exist", "run triage-corpus --fetch first (or pass --dir)") unless File.exist?(path)
+    fail!(1, "#{what} #{path} is not a readable file", "check its permissions") unless File.file?(path) && File.readable?(path)
+    File.read(path, encoding: "UTF-8")
+  end
+
+  def write_private(path, text)
+    FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+    File.write("#{path}.tmp", text, perm: 0o600)
+    File.chmod(0o600, "#{path}.tmp")
+    File.rename("#{path}.tmp", path)
+  rescue SystemCallError => e
+    fail!(1, "could not write #{path}: #{e.class}", "check that directory is writable")
+  end
+end
+
+# ── MANAGER ──────────────────────────────────────────────────────────────────
+
+module Manager
+  module_function
+
+  def snapshot_path(dir) = File.join(dir, "finding-triage-snapshot.json")
+
+  def fetch(opts, out)
+    origin, token = Effects.notion
+    project_rows = Effects.query_all(origin, token, Effects::PROJECTS_DATA_SOURCE).map { |r| TriageCorpus.project_row(r) }
+    fail!(1, "the DND Projects data source returned no rows", "a failed lookup, not an empty tracker: check the share, then re-run") if project_rows.empty?
+    epic_projects = TriageCorpus.epic_projects(project_rows)
+    rows = Effects.query_all(origin, token, Effects::TICKETS_DATA_SOURCE)
+    tickets = rows.filter_map { |r| TriageCorpus.ticket_from_row(r) }
+    fail!(1, "the DND Tickets data source returned no ticket with a DND id (#{rows.size} rows)", "a failed lookup, not an empty tracker: check the share, then re-run") if tickets.empty?
+    unread = []
+    tickets.each_with_index do |t, i|
+      out.puts "  bodies: #{i} of #{tickets.size}" if (i % 100).zero? && i.positive?
+      begin
+        blocks = Effects.read(origin, token, "GET", "/v1/blocks/#{t['page_id']}/children?page_size=100")
+        t["blocks_text"] = Array(blocks["results"]).filter_map { |b| TriageCorpus.block_text(b) }.reject(&:empty?)
+        t["body_read"] = true
+      rescue Failure => e
+        t["blocks_text"] = []
+        t["body_read"] = false
+        unread << { "ref" => t["ref"], "why" => e.message[/answered HTTP \d+|curl exit \d+|not JSON/] || "read failed" }
+      end
+    end
+    token = nil
+    snapshot = { "fetched_at" => Time.now.utc.iso8601, "tickets_rows" => rows.size, "epic_projects" => epic_projects,
+                 "unread" => unread, "tickets" => tickets }
+    path = snapshot_path(opts[:dir])
+    Effects.write_private(path, JSON.generate(snapshot) + "\n")
+    out.puts "#{PROG}: #{tickets.size} tickets (#{rows.size} rows), #{epic_projects.size} epics mapped to projects, " \
+             "#{unread.size} bodies UNREAD#{unread.empty? ? '' : " (#{unread.map { |u| "#{u['ref']} #{u['why']}" }.join(', ')})"}, " \
+             "#{tickets.count { |t| t['relations_truncated'] }} with a truncated relation"
+    out.puts "snapshot: #{path}"
+    fail!(1, "every ticket body was UNREAD", "Notion refused every body read; re-run later") if unread.size == tickets.size
+    0
+  ensure
+    token = nil
+  end
+
+  def build(opts, out)
+    text = Effects.read_input(snapshot_path(opts[:dir]), "snapshot")
+    snapshot = begin
+      JSON.parse(text)
+    rescue JSON::ParserError
+      fail!(1, "the snapshot is not JSON", "re-run triage-corpus --fetch")
+    end
+    fail!(1, "the snapshot is not a JSON object", "re-run triage-corpus --fetch") unless snapshot.is_a?(Hash)
+    result = TriageCorpus.build(snapshot, unrelated: opts[:unrelated], seed: opts[:seed])
+    report(result, snapshot, out)
+    return 0 if opts[:dry_run]
+
+    files = {
+      "finding-triage-labels.jsonl" => result[:labels], "finding-triage-corpus.jsonl" => result[:corpus],
+      "finding-triage-severity.jsonl" => result[:severity]
+    }
+    files.each do |name, rows|
+      path = File.join(opts[:dir], name)
+      Effects.write_private(path, rows.map { |r| JSON.generate(r) }.join("\n") + "\n")
+      out.puts "wrote #{path} (#{rows.size} rows)"
+    end
+    0
+  rescue TriageCorpus::InputError => e
+    fail!(1, e.message, e.fix)
+  rescue KeyError => e
+    fail!(1, "the snapshot lacks #{e.key}", "re-run triage-corpus --fetch")
+  end
+
+  def report(result, snapshot, out)
+    c = result[:counts]
+    out.puts "#{PROG}: snapshot #{snapshot['fetched_at']}, #{Array(snapshot['tickets']).size} tickets, #{Array(snapshot['unread']).size} UNREAD"
+    out.puts "labels by relation/provenance: #{fmt(c['by_label_provenance'])}"
+    out.puts "eval-usable by relation/domain: #{fmt(c['by_label_domain'])}"
+    out.puts "by rule: #{fmt(c['by_rule'])}"
+    out.puts "excluded: #{fmt(result[:excluded])}"
+    out.puts "eval-usable cases: #{c['eval_usable']} (proposed excluded: #{result[:labels].count { |l| l['provenance'] == 'proposed' }})"
+    sev = result[:severity].group_by { |r| r["label"] }.transform_values(&:size).sort.to_h
+    out.puts "severity (weak, not evaluated): #{fmt(sev)}"
+  end
+
+  def fmt(hash)
+    hash.empty? ? "none" : hash.map { |k, v| "#{k} #{v}" }.join(", ")
+  end
+end
+
+# ── FRAMEWORK ────────────────────────────────────────────────────────────────
+
+SPEC = {
+  "--help" => :switch, "-h" => :switch, "--fetch" => :switch, "--build" => :switch, "--dry-run" => :switch,
+  "--unrelated" => :integer, "--seed" => :value, "--dir" => :value
+}.freeze
+
+def parse_options(argv)
+  raw = StrictArgv.parse(argv, SPEC)
+  modes = %w[--fetch --build].select { |m| raw[m] }
+  fail!(2, "pass exactly one of --fetch or --build", "run #{PROG} --help") unless modes.size == 1
+  mode = modes.first
+  if mode == "--fetch"
+    extra = raw.keys - %w[--fetch --dir]
+    fail!(2, "--fetch takes only --dir (got #{extra.join(', ')})", "run #{PROG} --help") unless extra.empty?
+  end
+  dir = raw["--dir"] || Effects.default_dir
+  fail!(2, "--dir must be an absolute path", "pass an absolute directory") unless dir.start_with?("/")
+  unrelated = raw.fetch("--unrelated", 60)
+  fail!(2, "--unrelated must be 0..5000", "pass a pair count") unless (0..5000).cover?(unrelated)
+  seed = raw.fetch("--seed", "dnd-714")
+  fail!(2, "--seed must be 1..64 letters, digits, _ or -", "pass a short seed") unless /\A[A-Za-z0-9_-]{1,64}\z/.match?(seed)
+  { mode: mode, dir: dir, unrelated: unrelated, seed: seed, dry_run: raw["--dry-run"] || false }
+rescue StrictArgv::UsageError => e
+  fail!(2, e.message, "run #{PROG} --help for the flags")
+end
+
+def main(argv)
+  # --help anywhere wins, before anything else runs (check-bin-help).
+  if argv.include?("--help") || argv.include?("-h")
+    $stdout.puts USAGE
+    return 0
+  end
+
+  opts = parse_options(argv)
+  opts[:mode] == "--fetch" ? Manager.fetch(opts, $stdout) : Manager.build(opts, $stdout)
+rescue Failure => e
+  $stderr.puts e.message
+  e.code
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

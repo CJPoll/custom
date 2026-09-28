@@ -18,7 +18,7 @@ require "json"
 
 module JudgmentEval
   USE_CASES = %w[finding_triage slack_routing priority_scoring].freeze
-  PROVENANCES = %w[forward_record owner_confirmed proposed].freeze
+  PROVENANCES = %w[forward_record owner_confirmed tracker_record rule_confirmed proposed].freeze
   DOMAINS = %w[work blend personal].freeze
   MAX_BATCH = 50
   # The corpus key a label's id joins on. Slack routing joins the inbox's own
@@ -158,16 +158,21 @@ module JudgmentEval
            c: chosen["coverage"].nil? ? "n/a" : format("%.3f", chosen["coverage"]), n: chosen["n"])
   end
 
+  # n_a(n_a) -> the n/a text. Every n/a reads "insufficient evidence"
+  # (DND-714): the label stays disabled, and that is not a precision of 0.
   def n_a(n_a)
-    case n_a && n_a["reason"]
-    when "too_few_routed" then "n/a (n=#{n_a['n']}, needs #{n_a['needs']})"
-    when "precision_below_target"
-      best = n_a["best_precision_lb"]
-      best_text = best.nil? ? "no case routed" : format("best lb %.3f", best)
-      format("n/a (%s < %.2f at every threshold)", best_text, n_a["target"])
-    else "n/a (#{safe(n_a)})"
-    end
+    why = case n_a && n_a["reason"]
+          when "too_few_routed" then "n/a (n=#{n_a['n']}, needs #{n_a['needs']})"
+          when "precision_below_target"
+            best = n_a["best_precision_lb"]
+            best_text = best.nil? ? "no case routed" : format("best lb %.3f", best)
+            format("n/a (%s < %.2f at every threshold)", best_text, n_a["target"])
+          else "n/a (#{safe(n_a)})"
+          end
+    "#{why}#{INSUFFICIENT}"
   end
+
+  INSUFFICIENT = " -- insufficient evidence"
 
   # only_not_configured?(report) -- every case fell back for want of the key.
   def only_not_configured?(report)

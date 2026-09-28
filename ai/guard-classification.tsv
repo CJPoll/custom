@@ -62,6 +62,7 @@ ai/lib/strict_argv.rb	library	required by the Ruby ai/bin tools that refuse unkn
 ai/lib/owner_turn.rb	library	owner-turn verifier required by ai/bin/owner-notes (relay check) and ai/bin/blast-radius (--owner-approval record); returns a verdict tuple and each caller prints the refusal that carries Fix:
 ai/lib/judgment_eval.rb	library	pure domain required by ai/bin/judgment-eval (DND-710); raises JudgmentEval::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/judgment_label.rb	library	pure domain required by ai/bin/judgment-label (DND-715); raises JudgmentLabel::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
+ai/lib/triage_corpus.rb	library	pure domain required by ai/bin/triage-corpus (DND-714); raises TriageCorpus::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/first_party.rb	library	first-party discovery required by ai/bin/harness-gate; raises FirstParty::MeasureError and the caller prints the Fix:
 ai/lib/harness_tools.rb	library	harness-tool scope required by ai/bin/check-bin-help / check-tool-risk; raises FirstParty::MeasureError and the caller prints the Fix:
 ai/lib/fleet/control-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:

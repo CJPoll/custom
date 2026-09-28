@@ -363,15 +363,38 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   is written disabled, so an earlier run's enabled label cannot survive. A run
   that scored nothing cannot be applied, and an applied run takes no more
   cases.
-- **Proposed labels** (not yet confirmed by the owner) never enter a run, so
-  they never select a threshold. A label whose id the corpus lacks is
-  reported by count and id.
+- **Proposed labels** (confirmed by no owner, record or rule) never enter a
+  run, so they never select a threshold. A label whose id the corpus lacks is
+  reported by count and id. A run's provenances are `forward_record`,
+  `owner_confirmed`, `tracker_record` and `rule_confirmed`; each names what
+  confirmed it, and only `owner_confirmed` means the owner did.
+
+  **Later (2026-09-28):** this read "Proposed labels (not yet confirmed by the
+  owner)", which read as if only the owner's confirmation lets a label into a
+  run. Replaced by the text above (DND-714). Why: `forward_record` already
+  entered runs unconfirmed by the owner, and finding triage adds
+  `tracker_record` and `rule_confirmed`; the rule that `proposed` never
+  enters is unchanged.
 - **Slack routing labels** (DND-715, `ai/bin/judgment-label`) cover the
   owner's new-conversation roots only (D7), one row per `event_id`, in the
   machine-local `slack-routing-labels.jsonl`. The corpus is
   `walt_ui-slack.jsonl` itself, so the text is never copied. A root that an R4
   forward record names is `forward_record`; the owner confirms the rest one
   message at a time at a terminal.
+- **Finding triage labels** (DND-714, `ai/bin/triage-corpus`) come from the
+  DND tracker's own history, in the machine-local
+  `finding-triage-labels.jsonl` (ids only) and `finding-triage-corpus.jsonl`
+  (the inputs sent, redacted of ticket refs and of lines naming a duplicate).
+  A pair is kept only when both tickets are in one known project, and its
+  content domain comes from that project, never guessed (E12). Provenance:
+  `tracker_record` for a `duplicate` (the body names it) or a `related` (a
+  Depends On or Blocks link, or a body citation); `rule_confirmed` for an
+  `unrelated` pair that the mechanical rule `different_area_unlinked`
+  confirms (different Areas, no link, no citation). `rule_confirmed` is never
+  `owner_confirmed`. Every other sampled pair stays `proposed`. Severity labels
+  are weak (an agent assigned them) and are not evaluated.
+- **n/a reads "insufficient evidence"** in `judgment-eval`'s run and apply
+  lines: the label stays disabled.
 - **One case, one label.** A question set's eval reading names exactly one
   answer as the label, so a set that asks several questions defines its eval
   case unit. `finding_triage` (DND-713): one case is ONE (finding, candidate)

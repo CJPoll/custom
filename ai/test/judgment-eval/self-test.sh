@@ -60,11 +60,11 @@ ruby_eq "summary: all not_configured is scored 0 / unscored N (not_configured) [
 ruby_eq "summary: scored 0 prints no label line even if the report had labels" \
   "scored 0 / unscored 2 (not_configured 1, timeout 1)" \
   'JudgmentEval.summary_lines({"scored"=>0,"unscored"=>{"timeout"=>1,"not_configured"=>1},"labels"=>[{"label"=>"x","chosen"=>nil,"n_a"=>{"reason"=>"too_few_routed","n"=>0,"needs"=>10}}]}).join("|")'
-ruby_eq "summary: a label under 10 cases is n/a (n=<k>, needs 10) [ticket]" \
-  "  harness: n/a (n=7, needs 10)" \
+ruby_eq "summary: a label under 10 cases is n/a (n=<k>, needs 10), insufficient evidence [ticket] [DND-714]" \
+  "  harness: n/a (n=7, needs 10) -- insufficient evidence" \
   'JudgmentEval.label_line({"label"=>"harness","chosen"=>nil,"n_a"=>{"reason"=>"too_few_routed","n"=>7,"needs"=>10}})'
-ruby_eq "summary: a label whose bound misses the target names the best bound" \
-  "  harness: n/a (best lb 0.898 < 0.90 at every threshold)" \
+ruby_eq "summary: a label whose bound misses the target names the best bound, insufficient evidence [DND-714]" \
+  "  harness: n/a (best lb 0.898 < 0.90 at every threshold) -- insufficient evidence" \
   'JudgmentEval.label_line({"label"=>"harness","chosen"=>nil,"n_a"=>{"reason"=>"precision_below_target","best_precision_lb"=>0.8984,"target"=>0.9}})'
 ruby_eq "summary: a chosen label prints its threshold and provenance figures" \
   "  harness: threshold 0.35 (precision 1.000, lb 0.901, coverage 1.000, n 35)" \
@@ -78,6 +78,12 @@ ruby_eq "labels: a bad row names its line, never its text" \
 ruby_eq "labels: an unknown provenance is refused" \
   "InputError: L:1 has provenance guess" \
   'JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"guess"}\n), "L")'
+ruby_eq "labels: tracker_record and rule_confirmed are provenances [DND-714]" \
+  "tracker_record rule_confirmed" \
+  'JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"tracker_record"}\n{"id":"b","label":"y","provenance":"rule_confirmed"}\n), "L").map { |l| l[:provenance] }.join(" ")'
+ruby_eq "join: only proposed is excluded; tracker_record and rule_confirmed enter the run [DND-714]" \
+  "2 1" \
+  'l = JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"tracker_record"}\n{"id":"b","label":"x","provenance":"rule_confirmed"}\n{"id":"c","label":"x","provenance":"proposed"}\n), "L"); c = JudgmentEval.parse_corpus(%({"id":"a"}\n{"id":"b"}\n{"id":"c"}\n), "C", "finding_triage"); j = JudgmentEval.join(l, c); [j[:cases].size, j[:proposed]].join(" ")'
 ruby_eq "labels: a repeated id is refused" \
   "InputError: L:2 repeats id of line 1" \
   'JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"proposed"}\n{"id":"a","label":"y","provenance":"proposed"}\n), "L")'
@@ -296,7 +302,7 @@ eq "--apply is PUT /api/v1/judgments/thresholds" "$(jq -r '.method + " " + .path
 eq "--apply sends only the run id, never thresholds" "$(jq -c .body <<<"${last}")" '{"eval_run_id":"5f0c3a1e-8b2d-4c6f-9a7e-1d2b3c4d5e6f"}'
 eq "--apply keeps the token out of argv" "$(jq -c .argv_leak <<<"${last}")" "[]"
 has "--apply prints an enabled label" "${OUT}" "duplicate: enabled at 0.35 (lb 0.901, coverage 1.000, n 35)"
-has "--apply prints a disabled label as n/a" "${OUT}" "related: disabled (n/a, n 7)"
+has "--apply prints a disabled label as n/a, insufficient evidence [DND-714]" "${OUT}" "related: disabled (n/a, n 7) -- insufficient evidence"
 respond '{"status":404,"body":{"error":"not_found"}}'
 run --apply "5f0c3a1e-8b2d-4c6f-9a7e-1d2b3c4d5e6f"
 eq "--apply of a run that is absent or another owner's exits 5" "${RC}" "5"
