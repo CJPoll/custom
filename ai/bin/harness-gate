@@ -2649,6 +2649,18 @@ def run_self_test
     expect.call(unknown_err.to_s.include?("pid=4202") && unknown_err.to_s.include?("UNKNOWN") &&
                 unknown_err.to_s.include?("Fix:"),
                 "a pid whose environment bounds never settle was not reported as UNKNOWN (#{unknown_err.inspect})")
+
+    # ...and run_one turns a sweep that could not look into a FAILED check,
+    # never "nothing leaked". The sweep is stubbed to raise for one call.
+    real_reap = ReapTags.method(:reap)
+    ReapTags.define_singleton_method(:reap) { |*_a, **_k| raise ReapTags::ScanError, "probe pid=4202 UNKNOWN. Fix: none" }
+    begin
+      blind_ok, blind_out = run_one(["true"], chdir: dir)
+    ensure
+      ReapTags.define_singleton_method(:reap, real_reap)
+    end
+    expect.call(!blind_ok && blind_out.to_s.include?("could not look") && blind_out.to_s.include?("pid=4202"),
+                "a leak sweep that could not look was reported as a PASS (#{blind_ok.inspect}, #{blind_out.inspect})")
   end
 
   # 9. The failure report NAMES the failing case even when a chatty suite has
