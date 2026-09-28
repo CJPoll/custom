@@ -6,6 +6,7 @@
 # alive, including one that ignores TERM and one that holds the pipes open.
 
 require "tmpdir"
+require "rbconfig"
 require_relative "../../lib/bounded_command"
 
 $pass = 0
@@ -59,6 +60,46 @@ Dir.mktmpdir do |tmp|
   survivors = recorded.select { |p| alive?(p) }
   check("b5 no process of the group survives (TERM-ignoring child included)", survivors.empty?, survivors.inspect)
   survivors.each { |p| Process.kill("KILL", p) rescue nil } # rubocop:disable Style/RescueModifier
+
+  # b7 the leader exits 0 in time, but a helper it started keeps stdout open
+  # (a keyring/credential helper): the bound covers the reads, so this is
+  # timed_out and the helper is killed, never a 15s (or endless) block.
+  hpids = File.join(tmp, "helper")
+  r, secs = elapsed { BoundedCommand.run(["bash", "-c", "sleep 300 & echo $! > #{hpids}; echo hi"], timeout: 1) }
+  check("b7 exit 0 with a helper holding stdout is timed_out", r.timed_out && !r.success?, r.inspect)
+  check("b7 returns within the bound plus grace (#{secs.round(1)}s <= #{bound}s)", secs <= bound)
+  helper = File.exist?(hpids) ? File.read(hpids).to_i : 0
+  check("b7 the helper holding stdout was killed", helper.positive? && !alive?(helper), helper.to_s)
+
+  # b8 the CALLER is interrupted (Ctrl-C, an outer timeout) while the child
+  # hangs: the child is in its own group, so the caller must kill it on the way
+  # out, and must not wait for it.
+  lib = File.expand_path("../../lib/bounded_command", __dir__)
+  cpid = File.join(tmp, "caller-child")
+  caller = Process.spawn(RbConfig.ruby, "-r", lib, "-e",
+                         "BoundedCommand.run(['bash', '-c', 'echo $$ > #{cpid}; exec sleep 300'], timeout: 120)",
+                         %i[out err] => File::NULL)
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 10
+  sleep 0.05 until File.size?(cpid) || Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+  child = File.size?(cpid) ? File.read(cpid).to_i : 0
+  check("b8 the hung child started", child.positive?)
+  Process.kill("INT", caller)
+  gone = nil
+  _, secs = elapsed do
+    50.times do
+      gone = Process.waitpid(caller, Process::WNOHANG)
+      break if gone
+
+      sleep 0.2
+    end
+  end
+  check("b8 an interrupted caller exits promptly (#{secs.round(1)}s)", !gone.nil?)
+  check("b8 an interrupted caller leaves no hung child", child.positive? && !alive?(child), child.to_s)
+  unless gone
+    Process.kill("KILL", caller)
+    Process.wait(caller)
+  end
+  Process.kill("KILL", child) if child.positive? && alive?(child)
 
   [0, -1, nil, "5"].each do |bad|
     raised = begin

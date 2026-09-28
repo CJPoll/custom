@@ -16,6 +16,10 @@
 #
 # A missing executable is a Result with status 127 and the error text, not a
 # raise, so callers keep one shape.
+#
+# Because the child is not in the terminal's foreground group, a CLI that
+# prompts on /dev/tty stops (SIGTTIN) until the bound kills it. That is the
+# intent: these callers are unattended, and a prompt is a hang.
 
 require "open3"
 
@@ -40,27 +44,60 @@ module BoundedCommand
   end
 
   # -> Result. argv is an Array of Strings; chdir is optional.
+  #
+  # The bound covers the reads too. A command that exits in time while a
+  # helper it started still holds stdout/stderr open is timed_out (its output
+  # cannot be known complete), and its group is killed. An exception while
+  # waiting (SIGINT, an outer timeout's TERM) kills the group before it
+  # propagates: the child is in its own group, so a terminal's Ctrl-C never
+  # reaches it.
+  #
+  # Residuals: a member that calls setsid() leaves the group and is not killed
+  # (the call still returns); a process in uninterruptible sleep (D state)
+  # survives KILL, and Open3's own cleanup then waits for the kernel to
+  # release it.
   def self.run(argv, timeout:, chdir: nil, env: {})
     check_bound!(timeout)
     opts = { pgroup: true }
     opts[:chdir] = chdir if chdir
+    deadline = now + timeout
     Open3.popen3(env, *argv, **opts) do |stdin, out, err, wait|
-      stdin.close
-      readers = [Thread.new { out.read }, Thread.new { err.read }]
-      status = wait.join(timeout)&.value
-      if status
-        return Result.new(out: readers[0].value, err: readers[1].value,
-                          exitstatus: status.exitstatus || (128 + status.termsig.to_i),
-                          timed_out: false, seconds: timeout)
-      end
+      settled = false
+      readers = []
+      begin
+        stdin.close
+        readers = [Thread.new { read_all(out) }, Thread.new { read_all(err) }]
+        status = wait.join(timeout)&.value
+        drained = status && readers.all? { |t| t.join([deadline - now, 0].max + READER_GRACE_S) }
+        if drained
+          settled = true
+          return Result.new(out: readers[0].value, err: readers[1].value,
+                            exitstatus: status.exitstatus || (128 + status.termsig.to_i),
+                            timed_out: false, seconds: timeout)
+        end
 
-      kill_group(wait)
-      texts = readers.map { |t| t.join(READER_GRACE_S) ? t.value.to_s : "" }
-      readers.each { |t| t.kill if t.alive? }
-      return Result.new(out: texts[0], err: texts[1], exitstatus: nil, timed_out: true, seconds: timeout)
+        kill_group(wait)
+        settled = true
+        texts = readers.map { |t| t.join(READER_GRACE_S) ? t.value.to_s : "" }
+        return Result.new(out: texts[0], err: texts[1], exitstatus: nil, timed_out: true, seconds: timeout)
+      ensure
+        kill_group(wait) unless settled
+        readers.each { |t| t.kill if t.alive? }
+      end
     end
   rescue SystemCallError => e
     Result.new(out: "", err: e.message, exitstatus: 127, timed_out: false, seconds: timeout)
+  end
+
+  def self.now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  # A pipe closed under a reader (Open3's cleanup) ends the read quietly.
+  def self.read_all(io)
+    io.read
+  rescue IOError
+    ""
   end
 
   # KILL follows TERM whether or not the leader died: a group member that
@@ -69,7 +106,7 @@ module BoundedCommand
     signal_group("TERM", wait.pid)
     wait.join(KILL_GRACE_S)
     signal_group("KILL", wait.pid)
-    wait.join
+    wait.join(KILL_GRACE_S)
   end
 
   def self.signal_group(sig, pid)
@@ -77,5 +114,5 @@ module BoundedCommand
   rescue Errno::ESRCH, Errno::EPERM
     nil
   end
-  private_class_method :kill_group, :signal_group
+  private_class_method :now, :read_all, :kill_group, :signal_group
 end

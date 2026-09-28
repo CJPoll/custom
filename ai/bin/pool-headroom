@@ -28,13 +28,16 @@
 # only), is an orphan (worktree gone), or is live.
 #
 # Every docker, git and forge call is bounded (DND-1088; forge 20s, docker
-# 30s): a hung glab once held every wt-preflight for 28 minutes. A forge
-# lookup that fails or times out marks that stack merge state UNKNOWN, with
-# a Fix: line naming the command. UNKNOWN never changes the verdict: OK or
-# LOW is docker's pool arithmetic alone. An UNKNOWN stack is listed, never
-# dropped, and gets no teardown line, so it is never counted as reclaimable.
-# A CLI that timed out is not run again this invocation. A hung docker is
-# exit 3, like any unreadable docker.
+# 30s, git 30s): a hung glab once held every wt-preflight for 28 minutes. A
+# git or forge lookup that fails or times out marks that stack merge state
+# UNKNOWN. UNKNOWN never changes the verdict: OK or LOW is docker's pool
+# arithmetic alone. An UNKNOWN stack is listed, never dropped, and gets no
+# teardown line, so it is never counted as reclaimable. A LOW run's Fix:
+# names every command that hung (an OK --list run prints it as a note). A
+# forge CLI or docker that timed out is not run again this invocation. A hung
+# docker read of the pool (info, network ls/inspect) is exit 3, like any
+# unreadable docker; a hung container read after the pool was measured
+# leaves the holders without owners, and the Fix: names that command too.
 #
 # Exit (every non-zero prints a Fix: line):
 #   0 headroom at or above --min-free (or the repo runs no compose stack)
@@ -112,16 +115,19 @@ end
 
 # What to do about stacks whose merge state is UNKNOWN, naming each command
 # that hung; nil when every holder was attributed.
-def unknown_note(errors)
-  return nil if errors.empty?
+# unknown: how many holders are merge state UNKNOWN. errors: every lookup
+# error behind them, plus a failed container read (which leaves holders
+# without owners), so each hung command is named with its own bound.
+def unknown_note(unknown, errors)
+  return nil if unknown.zero? && errors.empty?
 
-  hung = errors.grep(DockerStacks::TimedOut).map(&:command).uniq
-  text = "#{errors.size} stack(s) have merge state UNKNOWN. They are neither counted as reclaimable nor dropped, " \
+  hung = errors.grep(DockerStacks::TimedOut).map { |e| [e.command, e.seconds] }.uniq
+  text = "#{unknown} stack(s) have merge state UNKNOWN. They are neither counted as reclaimable nor dropped, " \
          "and the OK/LOW verdict (docker's pool count) does not depend on them. "
   unless hung.empty?
-    text += "Hung past its bound and killed: #{hung.map { |c| "`#{c}`" }.join(', ')} " \
-            "(a wedged forge CLI, e.g. glab blocked on its keyring, DND-914). Re-run it by hand under `timeout 20` in the stack's worktree, " \
-            "or read the branch's merge state in the forge UI. "
+    text += "Hung past its bound and killed: #{hung.map { |c, s| "`#{c}` (#{s}s)" }.join(', ')}; " \
+            "a wedged CLI or daemon (glab blocked on its keyring was DND-914). Re-run each by hand under `timeout <its bound>` " \
+            "in the stack's worktree, or read the branch's merge state in the forge UI. "
   end
   text + "Tear an UNKNOWN stack down only after `~/dev/custom/ai/bin/confirm-merged` says its change merged."
 end
@@ -172,18 +178,21 @@ def probe(opts, host)
     return 0
   end
 
+  owners_error = nil
   begin
     workdirs = host.compose_containers.group_by { |c| c[:project] }
                    .transform_values { |cs| cs.map { |c| c[:working_dir] }.compact.uniq }
   rescue DockerStacks::Unreadable => e
     workdirs = {}
+    owners_error = e
     warn "pool-headroom: could not read compose containers (#{e.message}); holders shown without owners"
   end
   lines = room[:holders].map { |n| describe(host, n, workdirs) }
   out = low ? $stderr : $stdout
   out.puts(low ? "pool-headroom LOW: #{summary}" : "pool-headroom OK: #{summary}")
   lines.each { |text, _| out.puts "  #{text}" }
-  unknown = unknown_note(lines.map { |l| l[2] }.compact)
+  lookup_errors = lines.map { |l| l[2] }.compact
+  unknown = unknown_note(lookup_errors.size, [owners_error, *lookup_errors].compact)
   unless low
     out.puts "  note: #{unknown}" if unknown
     return 0

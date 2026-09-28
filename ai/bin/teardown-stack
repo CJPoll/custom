@@ -81,7 +81,8 @@ end
 # ---- merged mode -------------------------------------------------------------
 def confirm_merged!(kind, number, repo)
   tool = File.join(__dir__, "confirm-merged")
-  out, err, status = DockerStacks::Host.new.run_code([tool, "--#{kind}", number.to_s, "--repo", repo])
+  out, err, status = DockerStacks::Host.new.run_code([tool, "--#{kind}", number.to_s, "--repo", repo],
+                                                     timeout: DockerStacks::Host::CONFIRM_TIMEOUT_S)
   case status
   when 0 then out.strip
   when 1 then stop(1, "#{kind.upcase} #{number} is not merged: #{err.lines.first.to_s.strip}",

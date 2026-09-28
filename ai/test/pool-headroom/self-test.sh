@@ -24,6 +24,8 @@ cat > "${STUBS}/docker" <<'EOF'
 #!/usr/bin/env bash
 # docker stub: answers from files in $ST; logs every call.
 echo "$*" >> "${ST}/docker.log"
+# docker_hang: every call hangs; ps_hang: only the container listing hangs.
+if [ -f "${ST}/ps_hang" ] && [ "$1 $2" = "ps -aq" ]; then touch "${ST}/docker_hang"; fi
 if [ -f "${ST}/docker_hang" ]; then echo $$ >> "${ST}/hung.pids"; sleep 300 & echo $! >> "${ST}/hung.pids"; wait; fi
 [ -f "${ST}/down" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
 case "$1 $2" in
@@ -139,10 +141,13 @@ grep -q "LIVE project feat-merged" <<<"${out}" && bad "h5 read a keyless entry a
 # timeout(1), so the unfixed code fails these cases (124) instead of hanging
 # the suite. ATHENA_*_TIMEOUT_S are test seams that shorten the bound.
 run_bounded() { out="$(ATHENA_FORGE_TIMEOUT_S=2 ATHENA_DOCKER_TIMEOUT_S=2 timeout 40 "${TOOL}" "$@" 2>&1)"; rc=$?; }
+# running <pid>: alive and not a zombie. kill -0 answers for an unreaped
+# zombie, and a killed orphan can be one for a moment before init reaps it.
+running() { [ -r "/proc/$1/stat" ] && ! grep -q ') Z ' "/proc/$1/stat" 2>/dev/null; }
 no_survivors() { # <label>: every hung stub process was killed, none orphaned
   local alive=""
   [ -s "${ST}/hung.pids" ] || { bad "$1: the stub never recorded a hung pid" ""; return; }
-  while read -r p; do kill -0 "$p" 2>/dev/null && alive="${alive} ${p}"; done < "${ST}/hung.pids"
+  while read -r p; do running "$p" && alive="${alive} ${p}"; done < "${ST}/hung.pids"
   if [ -z "${alive}" ]; then ok "$1 left no hung process behind"; else bad "$1 left hung process(es):${alive}" ""; kill -9 ${alive} 2>/dev/null; fi
 }
 # t1 GitLab: glab hangs -> the stack is UNKNOWN within the bound, with a Fix naming the command.
@@ -179,6 +184,17 @@ no_survivors t3
 fixture t4 16; out="$(ATHENA_FORGE_TIMEOUT_S=soon timeout 40 "${TOOL}" --min-free 12 2>&1)"; rc=$?
 expect "t4 malformed ATHENA_FORGE_TIMEOUT_S" 3
 has "t4 names the malformed seam" "ATHENA_FORGE_TIMEOUT_S"
+# t5 a seam above the default is refused: a test seam may only shorten the bound.
+fixture t5 16; out="$(ATHENA_FORGE_TIMEOUT_S=99999 timeout 40 "${TOOL}" --min-free 12 2>&1)"; rc=$?
+expect "t5 ATHENA_FORGE_TIMEOUT_S above the default" 3
+has "t5 says a seam only shortens" "may only shorten the bound"
+# t6 the container listing hangs after the pool was measured: the verdict
+# stands (LOW, 1), the holders lose their owners, and the Fix: names the command.
+fixture t6 16; touch "${ST}/ps_hang"; run_bounded --min-free 12
+[ "${rc}" -ne 124 ] && ok "t6 hung docker ps did not hang pool-headroom" || bad "t6 pool-headroom hung on a hung docker ps (timeout 124)" "${out}"
+expect t6 1
+grep -q "^Fix: .*docker ps -aq --no-trunc" <<<"${out}" && ok "t6 Fix: names the hung docker ps" || bad "t6 Fix: does not name the hung docker ps" "${out}"
+no_survivors t6
 
 # THE MISSES: docker cannot be read -> 3, never 0.
 fixture m1 0; touch "${ST}/down"; run; expect "m1 docker down" 3

@@ -17,7 +17,11 @@
 # Test seams (self-tests only): ATHENA_DOCKER_BIN, ATHENA_GH_BIN,
 # ATHENA_GLAB_BIN name stub executables in place of docker / gh / glab;
 # ATHENA_FORGE_TIMEOUT_S and ATHENA_DOCKER_TIMEOUT_S shorten those bounds. A
-# malformed seam value raises; it never means "no bound".
+# malformed value, or one above the default, raises: a seam can only tighten
+# a bound, never lengthen or remove it.
+#
+# git is bounded but not remembered: a wedged git is usually one checkout (a
+# lock, a dead mount), so one hang does not skip git for every other stack.
 
 require "json"
 require "shellwords"
@@ -59,7 +63,7 @@ module DockerStacks
 
     # -> [stdout, stderr, exit status]; a missing executable is 127. A command
     # past its bound raises TimedOut.
-    def run_code(argv, timeout: CONFIRM_TIMEOUT_S)
+    def run_code(argv, timeout:)
       r = bounded(argv, timeout)
       [r.out, r.err, r.exitstatus]
     end
@@ -215,9 +219,11 @@ module DockerStacks
     def seam_seconds(env, name, default)
       raw = env[name]
       return default if raw.nil?
-      return Integer(raw, 10) if raw.match?(/\A[1-9][0-9]*\z/)
+      value = raw.match?(/\A[1-9][0-9]*\z/) ? Integer(raw, 10) : nil
+      return value if value && value <= default
 
-      raise ArgumentError, "#{name} must be a positive whole number of seconds, got #{raw.inspect}"
+      raise ArgumentError, "#{name} must be a whole number of seconds from 1 to #{default} " \
+                           "(a test seam may only shorten the bound), got #{raw.inspect}"
     end
 
     def first_line(*texts)

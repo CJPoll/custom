@@ -191,7 +191,8 @@ out="$(cd "${REPO}" && ATHENA_FORGE_TIMEOUT_S=2 timeout 60 "${TOOL}" --pr 5 2>&1
 expect "t20 hung forge lookup" 3; no_down t20
 has "t20 names the timed-out command" "\`gh pr view 5 --json headRefName\` timed out after 2s"
 grep -q "^Fix: .*gh pr view 5 --json headRefName" <<<"${out}" && ok "t20 Fix: names the hung command" || bad "t20 Fix: does not name the hung command" "${out}"
-alive=""; while read -r p; do kill -0 "$p" 2>/dev/null && alive="${alive} ${p}"; done < "${ST}/hung.pids"
+# Alive and not a zombie: kill -0 answers for an unreaped orphan.
+alive=""; while read -r p; do [ -r "/proc/${p}/stat" ] && ! grep -q ') Z ' "/proc/${p}/stat" 2>/dev/null && alive="${alive} ${p}"; done < "${ST}/hung.pids"
 [ -z "${alive}" ] && ok "t20 left no hung process behind" || { bad "t20 left hung process(es):${alive}"; kill -9 ${alive} 2>/dev/null; }
 
 # t19 worktree registered but its directory is gone, no script: refuse with a Fix.
