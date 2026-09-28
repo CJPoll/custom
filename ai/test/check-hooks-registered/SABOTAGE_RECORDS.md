@@ -64,3 +64,29 @@ check-hooks-registered landed-bar suite: 6 passed, 9 failed
 | M3: an unreadable landed bar returns `EXIT_OK` | origin unreachable; landed registry malformed (2 failed) |
 | M4: setup-hooks `--install` no longer skips a script absent from the main checkout | setup-hooks --install skips a hook not on the main checkout (1 failed) |
 | M5: `broken = []` (no branch consistency check) | branch registry names a script that does not exist; ... a non-executable script (2 failed) |
+
+## 2026-09-28 — DND-1080 (the agent git wrapper never reached a fresh session's PATH)
+
+- **Defect:** the DND-775 wrapper was put on PATH by the last line of
+  `dotfiles/.zshrc`. Claude Code's shell snapshot ends with
+  `export PATH=<Claude Code's own process PATH>`, so that line never reached
+  the Bash tool. The fix delivers it through settings env `CLAUDE_ENV_FILE` ->
+  `ai/agent-env/session-env.sh`, which runs after the snapshot.
+- **Before the fix** (`scripts/setup-hooks --self-test`, fresh-session fixture):
+
+```
+  FAIL a fresh session built from the installed env must have .../ai/agent-bin/git first on PATH, got [/usr/bin/git] (CLAUDE_ENV_FILE=[]) (DND-1080)
+SELF-TEST FAILED
+```
+
+- **After the fix:** `setup-hooks --self-test` ALL CASES PASS;
+  `ai/bin/check-hooks-registered --self-test` ALL CASES PASS; this suite
+  `32 passed, 0 failed` (adds the two fresh-session cases).
+
+| Mutation (on a scratch copy of the fixed code) | Caught by |
+| --- | --- |
+| M1: registry env without `CLAUDE_ENV_FILE` (the pre-fix delivery) | setup-hooks: a fresh session built from the installed env has the wrapper first (the "before" above) |
+| M2: `env_file_problems` returns `[]` | script without the PATH line; script missing; a line besides the PATH line; landed env with no CLAUDE_ENV_FILE; runtime problem beside the stale PATH (5 failed) |
+| M3: lines besides `ENV_LINE` tolerated | script running a line besides the PATH line (1 failed) |
+| M4: `CLAUDE_ENV_FILE` dropped from `SHARED_VARS` | the owner's own CLAUDE_ENV_FILE beside the guard -> DRIFT whose Fix: says remove it by hand (1 failed). "CLAUDE_ENV_FILE alone -> INACTIVE" still passes: `any_guard_key?`'s fixed rule decides INACTIVE first, and it never counted CLAUDE_ENV_FILE |
+| M5: no shared-key `Fix:` on DRIFT | the owner's own CLAUDE_ENV_FILE beside the guard (1 failed) |
