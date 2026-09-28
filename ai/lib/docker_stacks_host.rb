@@ -7,43 +7,68 @@
 # A command that fails raises DockerStacks::Unreadable naming the command, so a
 # daemon that is down never reads as "no networks" or "no containers".
 #
+# Every process runs under a wall-clock bound (DND-1088): a hung glab once held
+# every wt-preflight on a machine for 28 minutes. Past its bound a command's
+# whole process group is killed and DockerStacks::TimedOut (an Unreadable) is
+# raised naming the command, so a hang reads as UNKNOWN, never as an answer.
+# A forge CLI or docker that timed out is not run again by this Host: the next
+# call raises TimedOut at once ("not run"), so N stacks cost one bound, not N.
+#
 # Test seams (self-tests only): ATHENA_DOCKER_BIN, ATHENA_GH_BIN,
-# ATHENA_GLAB_BIN name stub executables in place of docker / gh / glab.
+# ATHENA_GLAB_BIN name stub executables in place of docker / gh / glab;
+# ATHENA_FORGE_TIMEOUT_S and ATHENA_DOCKER_TIMEOUT_S shorten those bounds. A
+# malformed seam value raises; it never means "no bound".
 
-require "open3"
 require "json"
+require "shellwords"
+require_relative "bounded_command"
 require_relative "docker_stacks"
 
 module DockerStacks
   class Host
+    # gitlab.com and github.com answer a list in about a second; 20s is a hung
+    # CLI, not a slow network.
+    FORGE_TIMEOUT_S = 20
+    # docker reads (info, ls, inspect, ps) against a live daemon.
+    DOCKER_TIMEOUT_S = 30
+    # `compose down -v`: each container gets docker's 10s stop grace.
+    COMPOSE_DOWN_TIMEOUT_S = 300
+    # A repo's own teardown script (walt_ui: several compose projects).
+    SCRIPT_TIMEOUT_S = 600
+    # Local git reads.
+    GIT_TIMEOUT_S = 30
+    # ai/bin/confirm-merged: forge reads plus a git ancestry check.
+    CONFIRM_TIMEOUT_S = 120
+
     def initialize(env = ENV)
       @docker = env["ATHENA_DOCKER_BIN"] || "docker"
       @gh = env["ATHENA_GH_BIN"] || "gh"
       @glab = env["ATHENA_GLAB_BIN"] || "glab"
+      @forge_timeout = seam_seconds(env, "ATHENA_FORGE_TIMEOUT_S", FORGE_TIMEOUT_S)
+      @docker_timeout = seam_seconds(env, "ATHENA_DOCKER_TIMEOUT_S", DOCKER_TIMEOUT_S)
+      @hung = {} # executable -> the TimedOut it raised
     end
 
-    # -> [stdout, stderr, success?]; a missing executable is a failure, not a raise.
-    def run(argv, chdir: nil)
-      opts = chdir ? { chdir: chdir } : {}
-      out, err, status = Open3.capture3(*argv, **opts)
-      [out, err, status.success?]
-    rescue SystemCallError => e
-      ["", e.message, false]
+    # -> [stdout, stderr, success?]; a missing executable is a failure, not a
+    # raise. A command past its bound raises TimedOut. With no timeout given,
+    # the bound follows the executable (forge, docker, git, else a script).
+    def run(argv, chdir: nil, timeout: nil)
+      r = bounded(argv, timeout || timeout_for(argv), chdir: chdir)
+      [r.out, r.err, r.success?]
     end
 
-    # -> [stdout, stderr, exit status]; a missing executable is 127.
-    def run_code(argv)
-      out, err, status = Open3.capture3(*argv)
-      [out, err, status.exitstatus]
-    rescue SystemCallError => e
-      ["", e.message, 127]
+    # -> [stdout, stderr, exit status]; a missing executable is 127. A command
+    # past its bound raises TimedOut.
+    def run_code(argv, timeout: CONFIRM_TIMEOUT_S)
+      r = bounded(argv, timeout)
+      [r.out, r.err, r.exitstatus]
     end
 
     def run!(argv, chdir: nil)
       out, err, ok = run(argv, chdir: chdir)
       return out if ok
 
-      raise Unreadable, "`#{argv.join(' ')}` failed: #{first_line(err, out)}"
+      raise Unreadable, "`#{display(argv)}` failed: #{first_line(err, out)}"
     end
 
     # ---- docker ---------------------------------------------------------------
@@ -87,7 +112,7 @@ module DockerStacks
     end
 
     def compose_down(project, dir)
-      run([@docker, "compose", "-p", project, "down", "-v", "--remove-orphans"], chdir: dir)
+      run([@docker, "compose", "-p", project, "down", "-v", "--remove-orphans"], chdir: dir, timeout: COMPOSE_DOWN_TIMEOUT_S)
     end
 
     # ---- filesystem -----------------------------------------------------------
@@ -106,6 +131,8 @@ module DockerStacks
       run!(["git", "-C", repo, "worktree", "list", "--porcelain"])
     end
 
+    # -> stripped stdout, or nil when git fails. A git past its bound raises
+    # TimedOut: a hung read is not "not a git checkout".
     def git(dir, *args)
       out, _err, ok = run(["git", "-C", dir, *args])
       ok ? out.strip : nil
@@ -129,6 +156,7 @@ module DockerStacks
     end
 
     # The merged PR/MR number whose head is <branch>, or nil when none merged.
+    # A forge that fails or hangs raises (TimedOut for a hang): never nil.
     def merged_change_for(branch, dir, forge)
       if forge == :github
         raw = run!([@gh, "pr", "list", "--head", branch, "--state", "merged", "--json", "number", "--limit", "1"], chdir: dir)
@@ -149,6 +177,48 @@ module DockerStacks
     end
 
     private
+
+    # Run argv under a bound. A forge CLI or docker that already timed out in
+    # this Host is not run again: the call raises at once, naming why.
+    def bounded(argv, seconds, chdir: nil)
+      exe = argv.first.to_s
+      if (prior = @hung[exe])
+        raise TimedOut.new("`#{display(argv)}` not run: `#{File.basename(exe)}` timed out earlier in this run " \
+                           "(`#{prior.command}` after #{prior.seconds}s)", command: prior.command, seconds: prior.seconds)
+      end
+
+      r = BoundedCommand.run(argv, timeout: seconds, chdir: chdir)
+      return r unless r.timed_out
+
+      where = chdir ? " (run in #{chdir})" : ""
+      err = TimedOut.new("`#{display(argv)}` timed out after #{seconds}s#{where} and was killed",
+                         command: display(argv), seconds: seconds)
+      @hung[exe] = err if [@gh, @glab, @docker].include?(exe)
+      raise err
+    end
+
+    def timeout_for(argv)
+      case argv.first
+      when @gh, @glab then @forge_timeout
+      when @docker then @docker_timeout
+      when "git" then GIT_TIMEOUT_S
+      else SCRIPT_TIMEOUT_S
+      end
+    end
+
+    # The command as a person would type it: the executable's basename, so a
+    # test stub or an absolute path reads as the tool it stands for.
+    def display(argv)
+      Shellwords.join([File.basename(argv.first.to_s), *argv.drop(1).map(&:to_s)])
+    end
+
+    def seam_seconds(env, name, default)
+      raw = env[name]
+      return default if raw.nil?
+      return Integer(raw, 10) if raw.match?(/\A[1-9][0-9]*\z/)
+
+      raise ArgumentError, "#{name} must be a positive whole number of seconds, got #{raw.inspect}"
+    end
 
     def first_line(*texts)
       texts.map(&:to_s).map(&:strip).find { |t| !t.empty? }.to_s.lines.first.to_s.strip

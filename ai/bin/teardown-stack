@@ -272,6 +272,16 @@ rescue Stop => e
   report(e)
 rescue DockerStacks::Refused => e
   report(Stop.new(2, e.message, "tear this stack down by hand after checking whose it is (athena:teardown-worktree-stack)."))
+rescue DockerStacks::TimedOut => e
+  # A hung forge CLI, docker or script (DND-1088): bounded, killed, named.
+  hung = "`#{e.command}` hung past #{e.seconds}s and was killed; check it by hand with `timeout #{e.seconds} #{e.command}` " \
+         "(a wedged forge CLI, e.g. glab on its keyring, DND-914; or a wedged docker daemon)"
+  if $destroying
+    report(Stop.new(4, "teardown ran but could not be verified: #{e.message}",
+                    "#{hung}, then inspect the stack by hand (docker ps -a / volume ls / network ls), remove what lingers, and re-run."))
+  else
+    report(Stop.new(3, "could not determine: #{e.message}", "#{hung}, then re-run. Nothing was torn down."))
+  end
 rescue StandardError => e
   # DockerStacks::Unreadable, and anything unexpected (EACCES, a forge answer of
   # the wrong shape). Never Ruby's default exit 1, which means "not merged".

@@ -56,6 +56,8 @@ case "$*" in
     if [ -f "${ST}/merged" ]; then echo '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z"}'
     else echo '{"state":"OPEN","mergedAt":null}'; fi ;;
   *"--json headRefName"*)
+    # head_hang: the branch lookup hangs (DND-1088); a child holds stdout open.
+    if [ -f "${ST}/head_hang" ]; then echo $$ >> "${ST}/hung.pids"; sleep 300 & echo $! >> "${ST}/hung.pids"; wait; fi
     if [ -f "${ST}/wrong_shape" ]; then echo '["not","an","object"]'
     else printf '{"headRefName":"%s"}\n' "$(cat "${ST}/branch")"; fi ;;
   *) echo "gh stub: unexpected $*" >&2; exit 99 ;;
@@ -179,6 +181,18 @@ run --pr 5; expect "t10d script left a container" 4
 
 # t18 a forge answer of the wrong shape: 3, never Ruby's default 1 ("not merged").
 fixture t18 dnd-1-x; touch "${ST}/wrong_shape"; run --pr 5; expect "t18 wrong-shape forge answer" 3; no_down t18
+
+# t20 a forge lookup that hangs (DND-1088): 3 within the bound, the command
+# named in a Fix:, nothing torn down, no hung process left. Bounded by
+# timeout(1) so a regression fails (124) instead of hanging the suite.
+fixture t20 dnd-1-x; touch "${ST}/head_hang"
+out="$(cd "${REPO}" && ATHENA_FORGE_TIMEOUT_S=2 timeout 60 "${TOOL}" --pr 5 2>&1)"; rc=$?
+[ "${rc}" -ne 124 ] && ok "t20 hung gh did not hang teardown-stack" || bad "t20 teardown-stack hung on a hung gh (timeout 124)" "${out}"
+expect "t20 hung forge lookup" 3; no_down t20
+has "t20 names the timed-out command" "\`gh pr view 5 --json headRefName\` timed out after 2s"
+grep -q "^Fix: .*gh pr view 5 --json headRefName" <<<"${out}" && ok "t20 Fix: names the hung command" || bad "t20 Fix: does not name the hung command" "${out}"
+alive=""; while read -r p; do kill -0 "$p" 2>/dev/null && alive="${alive} ${p}"; done < "${ST}/hung.pids"
+[ -z "${alive}" ] && ok "t20 left no hung process behind" || { bad "t20 left hung process(es):${alive}"; kill -9 ${alive} 2>/dev/null; }
 
 # t19 worktree registered but its directory is gone, no script: refuse with a Fix.
 git -C "${REPO}" worktree add -q -b vanished "${WT}/vanished"; rm -rf "${WT}/vanished"

@@ -24,6 +24,7 @@ cat > "${STUBS}/docker" <<'EOF'
 #!/usr/bin/env bash
 # docker stub: answers from files in $ST; logs every call.
 echo "$*" >> "${ST}/docker.log"
+if [ -f "${ST}/docker_hang" ]; then echo $$ >> "${ST}/hung.pids"; sleep 300 & echo $! >> "${ST}/hung.pids"; wait; fi
 [ -f "${ST}/down" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
 case "$1 $2" in
   "info --format")
@@ -38,6 +39,9 @@ EOF
 cat > "${STUBS}/gh" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "${ST}/gh.log"
+# gh_hang: a hung forge CLI (DND-1088). A child holds stdout open, as a real
+# CLI's helper would, so only a process-group kill ends the read.
+if [ -f "${ST}/gh_hang" ]; then echo $$ >> "${ST}/hung.pids"; sleep 300 & echo $! >> "${ST}/hung.pids"; wait; fi
 [ -f "${ST}/gh_fail" ] && { echo "gh: HTTP 502" >&2; exit 1; }
 b=""; prev=""
 for a in "$@"; do [ "${prev}" = "--head" ] && b="${a}"; prev="${a}"; done
@@ -48,6 +52,7 @@ cat > "${STUBS}/glab" <<'EOF'
 #!/usr/bin/env bash
 # glab stub: only `mr list --source-branch B --merged -F json`, answering iid.
 echo "$*" >> "${ST}/glab.log"
+if [ -f "${ST}/glab_hang" ]; then echo $$ >> "${ST}/hung.pids"; sleep 300 & echo $! >> "${ST}/hung.pids"; wait; fi
 case "$*" in "mr list --source-branch "*" --merged -F json") ;; *) echo "glab stub: unexpected $*" >&2; exit 99 ;; esac
 b="$4"
 if [ -f "${ST}/merged_${b}" ]; then printf '[{"iid":%s,"state":"merged"}]\n' "$(cat "${ST}/merged_${b}")"; else echo '[]'; fi
@@ -128,6 +133,52 @@ grep -qxF "mr list --source-branch gl-merged --merged -F json" "${ST}/glab.log" 
 fixture h5 16; touch "${ST}/wrong_key"; run --min-free 12; expect h5 1
 has "h5 unknown merge state" "merge state UNKNOWN"
 grep -q "LIVE project feat-merged" <<<"${out}" && bad "h5 read a keyless entry as not merged" "${out}" || ok "h5 keyless entry not read as live"
+
+# HUNG CALLS (DND-1088): a forge CLI that never answers must not hang the
+# tool, and must not read as "nothing merged". Each run is itself bounded by
+# timeout(1), so the unfixed code fails these cases (124) instead of hanging
+# the suite. ATHENA_*_TIMEOUT_S are test seams that shorten the bound.
+run_bounded() { out="$(ATHENA_FORGE_TIMEOUT_S=2 ATHENA_DOCKER_TIMEOUT_S=2 timeout 40 "${TOOL}" "$@" 2>&1)"; rc=$?; }
+no_survivors() { # <label>: every hung stub process was killed, none orphaned
+  local alive=""
+  [ -s "${ST}/hung.pids" ] || { bad "$1: the stub never recorded a hung pid" ""; return; }
+  while read -r p; do kill -0 "$p" 2>/dev/null && alive="${alive} ${p}"; done < "${ST}/hung.pids"
+  if [ -z "${alive}" ]; then ok "$1 left no hung process behind"; else bad "$1 left hung process(es):${alive}" ""; kill -9 ${alive} 2>/dev/null; fi
+}
+# t1 GitLab: glab hangs -> the stack is UNKNOWN within the bound, with a Fix naming the command.
+fixture t1 16; echo 12 > "${ST}/merged_gl-merged"; touch "${ST}/glab_hang"
+ruby -rjson -e 'f = ARGV[0]; c = JSON.parse(File.read(f))
+  c[1]["Config"]["Labels"]["com.docker.compose.project.working_dir"] = ARGV[1]; File.write(f, JSON.dump(c))' \
+  "${ST}/containers.json" "${TMP}/wt/gl-merged"
+run_bounded --min-free 12
+[ "${rc}" -ne 124 ] && ok "t1 hung glab did not hang pool-headroom" || bad "t1 pool-headroom hung on a hung glab (timeout 124)" "${out}"
+expect t1 1
+has "t1 merge state UNKNOWN" "merge state UNKNOWN"
+has "t1 names the timed-out command" "\`glab mr list --source-branch gl-merged --merged -F json\` timed out after 2s"
+grep -q "^Fix: .*glab mr list --source-branch gl-merged --merged -F json" <<<"${out}" && ok "t1 Fix: names the hung command" || bad "t1 Fix: does not name the hung command" "${out}"
+grep -q "gl-merged.*nothing merged" <<<"${out}" && bad "t1 read a hung glab as nothing merged" "${out}" || ok "t1 hung glab not read as nothing merged"
+grep -q "teardown-stack --mr" <<<"${out}" && bad "t1 offered a teardown for an UNKNOWN stack" "${out}" || ok "t1 no teardown line for the UNKNOWN stack"
+no_survivors t1
+# t2 GitHub: gh hangs; two github stacks -> both UNKNOWN, and gh is run ONCE
+# (a CLI that timed out is not asked again this run, so N stacks cost one bound).
+fixture t2 16; touch "${ST}/gh_hang"; run_bounded --min-free 12
+[ "${rc}" -ne 124 ] && ok "t2 hung gh did not hang pool-headroom" || bad "t2 pool-headroom hung on a hung gh (timeout 124)" "${out}"
+expect t2 1
+[ "$(grep -c "project feat-.*merge state UNKNOWN" <<<"${out}")" -eq 2 ] && ok "t2 both github stacks UNKNOWN" || bad "t2 expected 2 UNKNOWN stacks" "${out}"
+[ "$(wc -l < "${ST}/gh.log")" -eq 1 ] && ok "t2 gh run once after it timed out" || bad "t2 gh run $(wc -l < "${ST}/gh.log") times" "$(cat "${ST}/gh.log")"
+has "t2 skipped call says why" "not run: \`gh\` timed out earlier in this run"
+grep -q "LIVE project feat-live" <<<"${out}" && bad "t2 read a hung gh as live" "${out}" || ok "t2 hung gh not read as live"
+no_survivors t2
+# t3 docker hangs: the pool cannot be measured -> 3 within the bound, never 0.
+fixture t3 0; touch "${ST}/docker_hang"; run_bounded
+[ "${rc}" -ne 124 ] && ok "t3 hung docker did not hang pool-headroom" || bad "t3 pool-headroom hung on a hung docker (timeout 124)" "${out}"
+expect t3 3
+has "t3 names the timed-out docker command" "timed out after 2s"
+no_survivors t3
+# t4 a malformed bound is refused, never read as "no bound".
+fixture t4 16; out="$(ATHENA_FORGE_TIMEOUT_S=soon timeout 40 "${TOOL}" --min-free 12 2>&1)"; rc=$?
+expect "t4 malformed ATHENA_FORGE_TIMEOUT_S" 3
+has "t4 names the malformed seam" "ATHENA_FORGE_TIMEOUT_S"
 
 # THE MISSES: docker cannot be read -> 3, never 0.
 fixture m1 0; touch "${ST}/down"; run; expect "m1 docker down" 3

@@ -27,6 +27,15 @@
 # compose stack whether its worktree's branch has a MERGED PR/MR (gh/glab, read
 # only), is an orphan (worktree gone), or is live.
 #
+# Every docker, git and forge call is bounded (DND-1088; forge 20s, docker
+# 30s): a hung glab once held every wt-preflight for 28 minutes. A forge
+# lookup that fails or times out marks that stack merge state UNKNOWN, with
+# a Fix: line naming the command. UNKNOWN never changes the verdict: OK or
+# LOW is docker's pool arithmetic alone. An UNKNOWN stack is listed, never
+# dropped, and gets no teardown line, so it is never counted as reclaimable.
+# A CLI that timed out is not run again this invocation. A hung docker is
+# exit 3, like any unreadable docker.
+#
 # Exit (every non-zero prints a Fix: line):
 #   0 headroom at or above --min-free (or the repo runs no compose stack)
 #   1 headroom LOW: do not dispatch a stack-running captain
@@ -55,8 +64,18 @@ def fail_with(code, message, fix)
 end
 
 
-# One line describing who holds a network, and the teardown command if merged.
+# [text, teardown command or nil, error or nil] for one network holder. A
+# lookup that fails or hangs anywhere in the attribution (git or forge) makes
+# the holder UNKNOWN and carries its error, so the caller can name it.
 def describe(host, net, workdirs)
+  attribute_holder(host, net, workdirs)
+rescue DockerStacks::Unreadable => e
+  ["#{net[:name]} #{net[:subnets].join(',')} running=#{net[:containers]}  project #{net[:project]}: " \
+   "merge state UNKNOWN: #{e.message}", nil, e]
+end
+
+# One line describing who holds a network, and the teardown command if merged.
+def attribute_holder(host, net, workdirs)
   base = "#{net[:name]} #{net[:subnets].join(',')} running=#{net[:containers]}"
   return ["#{base}  not a compose network", nil] if net[:project].nil?
 
@@ -82,13 +101,29 @@ def describe(host, net, workdirs)
   begin
     num = host.merged_change_for(branch, top, forge)
   rescue DockerStacks::Unreadable => e
-    return ["#{base}  project #{net[:project]}: #{top} (#{branch}), merge state UNKNOWN: #{e.message}", nil]
+    return ["#{base}  project #{net[:project]}: #{top} (#{branch}), merge state UNKNOWN: #{e.message}", nil, e]
   end
   return ["#{base}  LIVE project #{net[:project]}: #{top} (#{branch}), nothing merged", nil] if num.nil?
 
   flag = forge == :github ? "--pr" : "--mr"
   cmd = "~/dev/custom/ai/bin/teardown-stack #{flag} #{num} --repo #{top}"
   ["#{base}  MERGED-BUT-UP project #{net[:project]}: #{top} (#{branch}, #{flag.delete('-')} #{num} merged)", cmd]
+end
+
+# What to do about stacks whose merge state is UNKNOWN, naming each command
+# that hung; nil when every holder was attributed.
+def unknown_note(errors)
+  return nil if errors.empty?
+
+  hung = errors.grep(DockerStacks::TimedOut).map(&:command).uniq
+  text = "#{errors.size} stack(s) have merge state UNKNOWN. They are neither counted as reclaimable nor dropped, " \
+         "and the OK/LOW verdict (docker's pool count) does not depend on them. "
+  unless hung.empty?
+    text += "Hung past its bound and killed: #{hung.map { |c| "`#{c}`" }.join(', ')} " \
+            "(a wedged forge CLI, e.g. glab blocked on its keyring, DND-914). Re-run it by hand under `timeout 20` in the stack's worktree, " \
+            "or read the branch's merge state in the forge UI. "
+  end
+  text + "Tear an UNKNOWN stack down only after `~/dev/custom/ai/bin/confirm-merged` says its change merged."
 end
 
 def main(argv)
@@ -104,6 +139,11 @@ def main(argv)
   probe(opts, DockerStacks::Host.new)
 rescue SystemExit
   raise
+rescue DockerStacks::TimedOut => e
+  fail_with(3, "cannot measure the address pool: #{e.message}",
+            "`#{e.command}` hung past #{e.seconds}s: docker's daemon is wedged. Check with `timeout #{e.seconds} #{e.command}` " \
+            "and restart the daemon if it still hangs (an owner step if it needs sudo). An unmeasured pool is not headroom: " \
+            "do not dispatch a stack-running captain until this passes.")
 rescue StandardError => e
   # Unreadable docker, or anything unexpected (EACCES on --repo, a malformed
   # answer). Never Ruby's default exit 1, which here means "LOW".
@@ -143,10 +183,15 @@ def probe(opts, host)
   out = low ? $stderr : $stdout
   out.puts(low ? "pool-headroom LOW: #{summary}" : "pool-headroom OK: #{summary}")
   lines.each { |text, _| out.puts "  #{text}" }
-  return 0 unless low
+  unknown = unknown_note(lines.map { |l| l[2] }.compact)
+  unless low
+    out.puts "  note: #{unknown}" if unknown
+    return 0
+  end
 
-  cmds = lines.map(&:last).compact
+  cmds = lines.map { |l| l[1] }.compact
   cmds.each { |c| warn "  teardown: #{c}" }
+  warn "Fix: #{unknown}" if unknown
   warn "Fix: for each MERGED-BUT-UP stack of YOUR fleet, run its teardown line above (#{cmds.size} found); " \
        "another fleet's stack is its admiral's to tear down, so tell that admiral or the session that launched you. " \
        "Anyone may reclaim ORPHAN or idle networks with `docker network prune -f`, which docker refuses for any network a container still references " \

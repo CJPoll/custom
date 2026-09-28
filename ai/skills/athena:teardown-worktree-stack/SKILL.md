@@ -195,7 +195,12 @@ stop with no actor permitted to clear it.
 configured pools (the built-in pools hold 31). It exits 1 below `--min-free`
 (default 2) and names each holder: `MERGED-BUT-UP` with its `teardown-stack`
 line, `ORPHAN` (worktree gone), or `LIVE`. A docker it cannot read is exit 3,
-never headroom. `scripts/wt-preflight` runs it first for any repo whose
+never headroom. Every docker, git and forge call it makes is bounded (DND-1088:
+a hung `glab` once held every `wt-preflight` for 28 minutes). A holder whose
+merge lookup fails or times out is merge state `UNKNOWN`, with a `Fix:` naming
+the hung command. `UNKNOWN` never moves the OK/LOW verdict, which is docker's
+pool count alone; the stack is listed, gets no teardown line, and is torn down
+only after `confirm-merged` says it merged. `scripts/wt-preflight` runs it first for any repo whose
 worktrees run a stack (a root compose file, or a repo teardown script), so no
 stack-running worktree is created while the pool is out. Run it by hand with
 `--list` to see every holder. Tear down only YOUR fleet's `MERGED-BUT-UP`

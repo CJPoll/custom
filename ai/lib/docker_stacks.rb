@@ -16,6 +16,19 @@ require "ipaddr"
 module DockerStacks
   # A probe's answer could not be read. Callers exit 3 ("cannot measure").
   class Unreadable < StandardError; end
+  # A command ran past its bound and was killed, or was not run because the
+  # same executable already timed out this run (DND-1088). `command` is the
+  # argv as a shell-readable string, for the caller's Fix: line. It is an
+  # Unreadable: a hung lookup is an unanswered one, never an empty answer.
+  class TimedOut < Unreadable
+    attr_reader :command, :seconds
+
+    def initialize(message, command:, seconds:)
+      @command = command
+      @seconds = seconds
+      super(message)
+    end
+  end
   # An input is malformed for its type, or attribution is unsafe. Callers exit 2.
   class Refused < StandardError; end
 
