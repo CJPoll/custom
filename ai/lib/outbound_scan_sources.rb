@@ -9,8 +9,9 @@
 #                  No overlay, no git history, no committed copy, or zero
 #                  patterns raises Unmeasurable: it is never an empty pass.
 #   pre_push       the commits a `git push` would publish (git's pre-push stdin):
-#                  each commit's added diff lines, its new/renamed paths, and
-#                  its message.
+#                  the lines and paths each commit INTRODUCES (a merge: only
+#                  what differs from every parent; see diff_argv and the
+#                  contract's Surfaces), and its message.
 #   tree           every tracked file of the current repo: content and path.
 #   text           one file's lines (gh-athena's title/body scan).
 #

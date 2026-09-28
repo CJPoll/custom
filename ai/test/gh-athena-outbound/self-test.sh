@@ -135,6 +135,27 @@ if [ "${RC}" = 1 ] && not_sent "pr create"; then ok "every --body occurrence is 
 gha pr create --body "clean" --body "x${TOKEN}"
 if [ "${RC}" = 1 ] && not_sent "pr create"; then ok "every --body occurrence is scanned (last dirty)"; else bad "repeat last" "rc=${RC} ${OUT}"; fi
 
+echo "--- pr merge: a squash subject/body becomes a server-side commit (critic round 2) ---"
+for spelling in "--subject x${TOKEN}" "--subject=x${TOKEN}" "-t x${TOKEN}" "--body x${TOKEN}"; do
+  # shellcheck disable=SC2086
+  gha pr merge 5 --squash ${spelling}
+  if [ "${RC}" = 1 ] && [[ "${CALLS}" != *"pr merge"* ]] && [[ "${OUT}" == *"REFUSED"* ]] && [[ "${OUT}" == *"label=synth-token"* ]] && no_literal; then
+    ok "refused: pr merge ${spelling%%x*}"
+  else
+    bad "refused: pr merge ${spelling%%x*}" "rc=${RC} calls=[${CALLS}] ${OUT}"
+  fi
+done
+
+echo "--- a scratch-file write failure refuses (critic round 2: it used to skip the scan) ---"
+# ulimit -f 0 makes the wrapper's `printf > file` fail with EFBIG (SIGXFSZ is
+# ignored so the shell sees an error, not a signal); mktemp -d still succeeds.
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && (trap '' XFSZ; ulimit -f 0; "${WRAPPER}" pr create --body "clean") 2>&1)"; RC=$?
+if [ "${RC}" = 3 ] && [[ "${OUT}" == *"could not write the body"* ]] && [[ "${OUT}" == *"Fix:"* ]] && [[ "${OUT}" != *"stub: SENT"* ]]; then
+  ok "write failure refused, gh never sent"
+else
+  bad "write failure" "rc=${RC} ${OUT}"
+fi
+
 for cmd in "pr comment 5" "pr edit 5" "pr review 5 --comment" "issue create" "issue comment 7" "issue edit 7"; do
   # shellcheck disable=SC2086
   gha ${cmd} --body "x${TOKEN}"

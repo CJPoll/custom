@@ -7,9 +7,12 @@
 # through git; a PR or issue title and body reach it through the API. Before gh
 # runs one of these writes against a PUBLIC repository:
 #
-#   pr create | pr edit | pr comment | pr review | issue create | issue edit | issue comment
+#   pr create | pr edit | pr comment | pr review | pr merge | issue create | issue edit | issue comment
 #
-# the guard scans --title/-t, --body/-b and --body-file/-F (a `-` body file is
+# (`pr merge` because a squash merge's --subject/--body become a commit on the
+# public default branch, made server-side where no pre-push hook runs)
+#
+# the guard scans --title/--subject/-t, --body/-b and --body-file/-F (a `-` body file is
 # read from stdin into a private file, scanned, and handed to gh in its place)
 # with `ai/bin/outbound-scan --text`, and:
 #
@@ -33,7 +36,7 @@
 # commands (release notes, gist), a value no pattern describes, and the waiver.
 #
 # Test seam: none of its own. ai/test/gh-athena-outbound/self-test.sh drives the
-# real wrapper with a stub gh on PATH and GH_ATHENA_MERGE_DRY_RUN=1.
+# real wrapper with a stub gh on PATH that records every call.
 
 GOS_BIN_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../bin"
 
@@ -85,7 +88,7 @@ gos_guard() {
   GOS_ARGV=("$@")
   local group="${1:-}" verb="${2:-}"
   case "$group $verb" in
-    "pr create" | "pr edit" | "pr comment" | "pr review" | "issue create" | "issue edit" | "issue comment") ;;
+    "pr create" | "pr edit" | "pr comment" | "pr review" | "pr merge" | "issue create" | "issue edit" | "issue comment") ;;
     *) return 0 ;;
   esac
   GOS_WHAT="$group $verb"
@@ -96,7 +99,8 @@ gos_guard() {
     a="${argv[$i]}"
     case "$a" in
       --) break ;;
-      --title=*) titles+=("${a#--title=}") ;;
+      --title=* | --subject=*) titles+=("${a#--*=}") ;;
+      --subject) i=$((i + 1)); titles+=("${argv[$i]:-}") ;;
       --body=*) bodies+=("${a#--body=}") ;;
       --body-file=*) bf_idx+=("$i"); bf_pre+=("--body-file="); bf_path+=("${a#--body-file=}") ;;
       --repo=*) repo="${a#--repo=}" ;;

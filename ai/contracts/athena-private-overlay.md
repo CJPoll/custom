@@ -172,9 +172,16 @@ path that itself matches a pattern is never printed.
 - `--pre-push --remote NAME [--url URL]` — git's pre-push stdin. For each pushed
   ref, the commits in `<remote sha>..<local sha>` (a new ref, or a remote tip
   not present locally: every commit not on a `refs/remotes/<NAME>/*` ref). For
-  each commit: the added lines of its diff against its first parent, its new or
-  renamed paths, and its message. A deleted ref publishes nothing. Binary files
-  are skipped and counted (`binary_skipped=N`). Tag messages are not scanned.
+  each commit: the lines and paths it **introduces**, and its message. A root
+  commit introduces its whole tree. A one-parent commit introduces the added
+  lines and new or renamed paths of its diff against that parent. A merge
+  introduces only what differs from **every** parent (a combined diff, `--cc`):
+  a conflict resolution, or text found in no parent. Content a merge carries in
+  from a parent is that parent's. It is scanned where that parent's commits are
+  in the pushed range, and it is already on the remote where they are not, so
+  skipping it at the merge publishes nothing new. A deleted ref publishes
+  nothing. Binary files are skipped and counted (`binary_skipped=N`). Tag
+  messages are not scanned.
 - `--tree` — every tracked file of the current repository: content and path.
   It is not in `harness-gate` yet: the tree still carries work values until
   DND-704, DND-705 and DND-706 land, and wiring it earlier would turn every
@@ -188,9 +195,12 @@ scanner, never a branch's copy. A missing scanner refuses the push (exit 3). An
 installed hook marks a machine that must measure, so an ABSENT overlay refuses
 the push there.
 
-**The forge path.** `ai/bin/gh-athena` scans the `--title`, `--body` and
-`--body-file` of `pr create|edit|comment|review` and `issue create|edit|comment`
-before gh runs, when the target repository is PUBLIC or its visibility cannot be
+**The forge path.** `ai/bin/gh-athena` scans every `--title`/`--subject`,
+`--body` and `--body-file` (each gh spelling, including `-bVALUE`) of
+`pr create|edit|comment|review|merge` and `issue create|edit|comment` before gh
+runs; a squash merge's subject and body become a commit made on the server,
+where no pre-push hook runs. A short-flag cluster that could hide one of these
+fields is refused. The scan runs when the target repository is PUBLIC or its visibility cannot be
 read. HITS refuse (exit 1). COULD NOT MEASURE refuses (exit 3), except where the
 overlay is ABSENT and the machine is not marked (no outbound pre-push hook in
 the harness checkout's common git dir): there the write proceeds with a

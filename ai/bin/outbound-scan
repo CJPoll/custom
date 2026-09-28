@@ -11,8 +11,9 @@
 #
 # Modes (exactly one):
 #   --pre-push --remote NAME [--url URL]   git's pre-push hook: reads git's
-#       ref lines on stdin and scans each pushed commit's added lines, new or
-#       renamed paths, and message. Installed as ai/git-hooks/outbound-pre-push.sh.
+#       ref lines on stdin and scans the lines and paths each pushed commit
+#       introduces (a merge: only what differs from every parent), and its
+#       message. Installed as ai/git-hooks/outbound-pre-push.sh.
 #   --tree                                 every tracked file of the current repo.
 #   --text FILE [--label NAME]             one file's lines (gh-athena scans PR and
 #       issue titles and bodies this way before a PUBLIC write).
