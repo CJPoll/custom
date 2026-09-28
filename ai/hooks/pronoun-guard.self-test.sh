@@ -22,7 +22,7 @@ FAIL=0
 
 # run <json> -> stdout of the hook (stderr discarded); exit status in $STATUS
 run() {
-  OUT=$(printf '%s' "$1" | HOME="$SANDBOX" sh "$HOOK" 2>/dev/null)
+  OUT=$(printf '%s' "$1" | HOME="$SANDBOX" XDG_STATE_HOME="$SANDBOX/state" sh "$HOOK" 2>/dev/null)
   STATUS=$?
 }
 
@@ -193,35 +193,121 @@ check "6d. no tool_input key -> allow (fail-open)" allow
 run '{"tool_name":"Bash","tool_input":null}'
 check "6e. null tool_input -> allow" allow
 
-# ---- registration: the registry's matcher is the owner-decided scope (DND-932) ----
+# ---- registration: the guard fires on EVERY tool (DND-932) ----
 # pronoun-guard.sh never checks the tool name, so its registry matcher IS its
-# scope. Owner decision (Cody, 2026-09-27 ~07:40Z): "Write tools only" -- the
-# five Notion write tools the live settings wire, plus Bash and SendMessage.
+# scope. Owner decision (Cody, 2026-09-27 ~10:20Z): "the pronoun blocker should
+# block on all write-tools, not just notion. If it's easier to keep to that
+# intent, we can just have it fire on all tools, not just specific known
+# tools." So: ONE PreToolUse row, matcher "*" (Claude Code's match-all), and no
+# second row for the same script, which would double-fire.
 REGISTRY="$(dirname "$HOOK")/registry.json"
-WANT='Bash|SendMessage|mcp__notion-(work|personal)__(API-post-page|API-patch-block-children|API-update-page-markdown|API-patch-page|API-create-a-comment)'
-if REG_OUT=$(REGISTRY="$REGISTRY" WANT="$WANT" python3 - 2>&1 <<'PY'
-import json, os, re, sys
-rows = [e for e in json.load(open(os.environ["REGISTRY"]))["hooks"]
+if REG_OUT=$(REGISTRY="$REGISTRY" python3 - 2>&1 <<'PY'
+import json, os, sys
+rows = [(e["event"], e.get("matcher")) for e in json.load(open(os.environ["REGISTRY"]))["hooks"]
         if e["script"] == "ai/hooks/pronoun-guard.sh"]
-if [(e["event"], e["matcher"]) for e in rows] != [("PreToolUse", os.environ["WANT"])]:
-    sys.exit("pronoun-guard rows are %r, want one PreToolUse row with matcher %r"
-             % ([(e["event"], e["matcher"]) for e in rows], os.environ["WANT"]))
-m = rows[0]["matcher"]
-routed = ["Bash", "SendMessage"] + ["mcp__notion-%s__%s" % (c, t) for c in ("work", "personal")
-          for t in ("API-post-page", "API-patch-block-children", "API-update-page-markdown",
-                    "API-patch-page", "API-create-a-comment")]
-not_routed = ["mcp__notion-work__API-retrieve-a-page", "mcp__notion-personal__API-query-data-source",
-              "mcp__notion-work__API-post-search", "Edit"]
-bad = [n for n in routed if not re.fullmatch("(?:%s)" % m, n)] + \
-      ["%s (should not route)" % n for n in not_routed if re.fullmatch("(?:%s)" % m, n)]
-sys.exit("routing wrong for: %s" % ", ".join(bad) if bad else 0)
+sys.exit(0 if rows == [("PreToolUse", "*")] else
+         "pronoun-guard rows are %r, want exactly [('PreToolUse', '*')]" % rows)
 PY
 ); then
-  PASS=$((PASS + 1)); printf '  PASS  %s\n' "9a. registry routes pronoun-guard on Bash, SendMessage and the five Notion write tools only"
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "9a. registry: one pronoun-guard row, PreToolUse, matcher \"*\" (every tool)"
 else
-  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "9a. registry routes pronoun-guard on Bash, SendMessage and the five Notion write tools only"
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "9a. registry: one pronoun-guard row, PreToolUse, matcher \"*\" (every tool)"
   echo "      $REG_OUT"
-  echo "      Fix: set the pronoun-guard row's matcher in ai/hooks/registry.json to exactly the WANT string above (owner decision, DND-932)."
+  echo "      Fix: replace every pronoun-guard row in ai/hooks/registry.json with one {\"event\": \"PreToolUse\", \"matcher\": \"*\"} row (owner decision, DND-932)."
+fi
+
+# The installer writes that row as ONE match-all wiring. Installed from a
+# fixture repo that is its own main checkout (setup-hooks wires only scripts
+# the main checkout has, DND-743), so this runs the same from any worktree.
+REPO_ROOT="$(CDPATH= cd "$(dirname "$HOOK")/../.." && pwd -P)"
+FIXTURE="${SANDBOX}/hooks-fixture"
+INSTALL_OUT=$(
+  . "${REPO_ROOT}/ai/test/lib/landed-fixture.bash" &&
+  landed_fixture "$REPO_ROOT" "$FIXTURE" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks &&
+  printf '{}\n' > "${SANDBOX}/installed.json" &&
+  HOOKS_SETTINGS_FILE="${SANDBOX}/installed.json" "${FIXTURE}/scripts/setup-hooks" --install 2>&1 &&
+  SETTINGS="${SANDBOX}/installed.json" python3 - <<'PY'
+import json, os, sys
+s = json.load(open(os.environ["SETTINGS"]))
+w = [(ev, g.get("matcher")) for ev, gs in s.get("hooks", {}).items() for g in gs
+     for h in g.get("hooks", []) if h.get("command", "").endswith("/pronoun-guard.sh")]
+sys.exit(0 if w == [("PreToolUse", "*")] else "installed pronoun-guard wirings: %r" % w)
+PY
+) 2>&1
+if [ $? -eq 0 ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "9b. setup-hooks installs exactly one match-all pronoun-guard wiring"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "9b. setup-hooks installs exactly one match-all pronoun-guard wiring"
+  printf '%s\n' "$INSTALL_OUT" | tail -3 | sed 's/^/      /'
+fi
+
+# --- Case 10: any tool's input shape (it now runs on every tool) ---
+run '{"tool_name":"Read","tool_input":{"file_path":"/home/x/src/app.ex","offset":10,"limit":50}}'
+check "10a. Read of a plain path -> allow" allow
+run '{"tool_name":"Grep","tool_input":{"pattern":"did he say","path":"docs","-i":true}}'
+check "10b. Grep pattern with prose he -> deny" deny
+run '{"tool_name":"Edit","tool_input":{"file_path":"a.md","old_string":"They said","new_string":"he said it was done"}}'
+check "10c. Edit new_string with prose he -> deny" deny
+run '{"tool_name":"Write","tool_input":{"file_path":"notes.md","content":"Meeting notes\n\nhis PR landed"}}'
+check "10d. Write content with a line-initial his -> deny" deny
+run '{"tool_name":"mcp__x__y","tool_input":{"a":{"b":[1,true,null,{"c":["ask him first"]}]},"n":3.5}}'
+check "10e. unknown mcp__x__y, pronoun nested in arrays/objects -> deny" deny
+run '{"tool_name":"mcp__x__y","tool_input":{"a":[1,2,{"b":false}],"c":null}}'
+check "10f. unknown tool with no strings at all -> allow" allow
+run '{"tool_name":"mcp__x__y","tool_input":"he wrote a bare string input"}'
+check "10g. a bare-string tool_input is scanned -> deny" deny
+
+# Malformed input fails OPEN and leaves a note with a Fix: in the guard's log.
+LOG="${SANDBOX}/state/athena/pronoun-guard.log"
+rm -f "$LOG"
+run '{"tool_name":"Bash","tool_input":{"command":"echo he'
+if is_allow && grep -q 'unparseable' "$LOG" 2>/dev/null && grep -q 'Fix:' "$LOG" 2>/dev/null; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "10h. malformed JSON -> allow, logged with a Fix:"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s out=[%s] log=[%s]\n' "10h. malformed JSON -> allow, logged with a Fix:" "$STATUS" "$OUT" "$(cat "$LOG" 2>/dev/null)"
+fi
+
+# Huge input: never an error, never truncated. The whole input is scanned
+# (no cap: a cap would stop catching prose the guard caught before).
+HUGE="${SANDBOX}/huge.json"
+python3 - "$HUGE" <<'PY'
+import json, sys
+json.dump({"tool_name": "Write", "tool_input": {"file_path": "big.txt",
+           "content": "he said " + "x" * (6 * 1024 * 1024)}}, open(sys.argv[1], "w"))
+PY
+rm -f "$LOG"
+T0=$(date +%s%N)
+OUT=$(HOME="$SANDBOX" XDG_STATE_HOME="$SANDBOX/state" sh "$HOOK" < "$HUGE" 2>"${SANDBOX}/huge.err"); STATUS=$?
+T1=$(date +%s%N)
+MS=$(( (T1 - T0) / 1000000 ))
+if is_deny && [ ! -s "${SANDBOX}/huge.err" ] && [ "$MS" -lt 5000 ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s (%sms)\n' "10i. 6 MiB input, pronoun at the start -> deny within 5s, no stderr" "$MS"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s %sms err=[%s] out=[%s]\n' "10i. 6 MiB input, pronoun at the start -> deny within 5s, no stderr" "$STATUS" "$MS" "$(head -c 200 "${SANDBOX}/huge.err")" "$(printf '%s' "$OUT" | head -c 80)"
+fi
+python3 - "$HUGE" <<'PY'
+import json, sys
+json.dump({"tool_name": "Write", "tool_input": {"file_path": "big.txt",
+           "content": "x " * (400 * 1024) + "and then he left"}}, open(sys.argv[1], "w"))
+PY
+OUT=$(HOME="$SANDBOX" XDG_STATE_HOME="$SANDBOX/state" sh "$HOOK" < "$HUGE" 2>/dev/null); STATUS=$?
+check "10j. pronoun at the END of an 800 KiB input -> deny (the whole text is scanned)" deny
+python3 - "$HUGE" <<'PY'
+import json, sys
+json.dump({"tool_name": "Write", "tool_input": {"file_path": "big.txt",
+           "content": "he left early\n" + "x " * (400 * 1024)}}, open(sys.argv[1], "w"))
+PY
+OUT=$(HOME="$SANDBOX" XDG_STATE_HOME="$SANDBOX/state" sh "$HOOK" < "$HUGE" 2>/dev/null); STATUS=$?
+check "10k. 800 KiB input, pronoun at the start -> deny" deny
+
+# Binary-ish content (NUL and control bytes in a JSON string) never errors:
+# NULs are dropped, grep -a reads every other byte as text.
+OUT=$(printf '%s' '{"tool_name":"Write","tool_input":{"content":"\u0000\u0001ÿ bytes\u0000 then he spoke"}}' \
+      | HOME="$SANDBOX" XDG_STATE_HOME="$SANDBOX/state" sh "$HOOK" 2>"${SANDBOX}/bin.err"); STATUS=$?
+if is_deny && [ ! -s "${SANDBOX}/bin.err" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "10l. NUL/control bytes in a string -> scanned, no stderr (deny)"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s out=[%s] err=[%s]\n' "10l. NUL/control bytes in a string -> scanned, no stderr (deny)" "$STATUS" "$OUT" "$(head -c 200 "${SANDBOX}/bin.err")"
 fi
 
 echo

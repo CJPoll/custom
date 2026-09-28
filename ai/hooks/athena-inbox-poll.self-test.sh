@@ -107,8 +107,8 @@ REAL_SETTINGS="${REAL_HOME}/.claude/settings.json"
 # The SET of hook commands registered in the real settings.json, as sorted JSON
 # triples. Sorted and structural, so a re-serialization by the live writer
 # cannot trip it; JSON-encoded rather than "event|matcher|command" because a
-# live matcher legitimately CONTAINS the pipe (pronoun-guard's is
-# "Bash|SendMessage|mcp__notion-(work|personal)__(...)") -- a delimiter that
+# live matcher legitimately CONTAINS the pipe (inbox-untrusted-guard's is
+# "Edit|Write|MultiEdit|NotebookEdit") -- a delimiter that
 # occurs inside the value is the exact bug class this repo keeps re-finding.
 #
 # Reading races the live writer's own rewrite, so a parse failure is retried
