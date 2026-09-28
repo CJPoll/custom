@@ -758,7 +758,8 @@ eq "--rule-default labels the no-evidence roots walt_ui default_walt_ui [DND-717
 has "the report prints the rule_confirmed count" "${OUT}" "walt_ui rule_confirmed 2"
 run "${EVAL}" --dry-run --use-case slack_routing --labels "${RLABELS}" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
 eq "judgment-eval joins rule_confirmed rows (exit 0)" "${RC}" "0"
-has "rule_confirmed rows are usable eval cases, not excluded [DND-717]" "${OUT}" "cases: 3 (gen_saas 1, walt_ui 2)"
+has "rule_confirmed default_walt_ui rows are usable eval cases [DND-717]" "${OUT}" "cases: 2 (walt_ui 2)"
+has "a session-mention root is not an eval case: the router never judges it [DND-717]" "${OUT}" "session-mention excluded: 1"
 run "${BIN}" --confirm --rule-default --labels "${RLABELS}"
 eq "--rule-default outside --propose is a usage error" "${RC}" "2"
 has "that usage error carries Fix:" "${ERR}" "Fix:"

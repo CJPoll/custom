@@ -90,6 +90,12 @@ ruby_eq "use cases: ticket_kind, ticket_severity and ticket_security are evaluab
 ruby_eq "join: only proposed is excluded; tracker_record and rule_confirmed enter the run [DND-714]" \
   "2 1" \
   'l = JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"tracker_record"}\n{"id":"b","label":"x","provenance":"rule_confirmed"}\n{"id":"c","label":"x","provenance":"proposed"}\n), "L"); c = JudgmentEval.parse_corpus(%({"id":"a"}\n{"id":"b"}\n{"id":"c"}\n), "C", "finding_triage"); j = JudgmentEval.join(l, c); [j[:cases].size, j[:proposed]].join(" ")'
+ruby_eq "slack_routing: a session-addressed root leaves the run, whatever its provenance, and is counted [DND-717]" \
+  "a 1" \
+  'cs = [{"case_id" => "a", "input" => {"text" => "a plain question"}}, {"case_id" => "m", "input" => {"text" => "harness session: hi"}}]; k, n = JudgmentEval.without_rule_routed(cs, "slack_routing"); [k.map { |c| c["case_id"] }.join, n].join(" ")'
+ruby_eq "other use cases never apply the Slack router's rule [DND-717]" \
+  "2 0" \
+  'cs = [{"case_id" => "a", "input" => {"text" => "x"}}, {"case_id" => "m", "input" => {"text" => "harness session: hi"}}]; k, n = JudgmentEval.without_rule_routed(cs, "finding_triage"); [k.size, n].join(" ")'
 ruby_eq "labels: a repeated id is refused" \
   "InputError: L:2 repeats id of line 1" \
   'JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"proposed"}\n{"id":"a","label":"y","provenance":"proposed"}\n), "L")'

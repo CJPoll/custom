@@ -444,7 +444,11 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   `rule_confirmed` with `"rule": "default_walt_ui"` (the owner's rule 3);
   without it that root stays `proposed`. `--confirm` presents
   `rule_confirmed` rows with the `proposed` ones, and the owner's answer
-  replaces them. An agent never writes `owner_confirmed`. An eval case carries the context the
+  replaces them. An agent never writes `owner_confirmed`. A session-addressed
+  root is routed by the rule and never judged, so `judgment-eval` leaves it
+  out of a `slack_routing` run, whatever its provenance, and counts it
+  (`session-mention excluded: N`): its label records the router's rule, not
+  ground truth for the judge. An eval case carries the context the
   server's `POST /api/v1/judgments/slack_routing/context` builds (DND-1048),
   which runs the router's own selection over the local inbox lines (anyone
   but the owner with the text emptied) and the app's claims. The rule is the

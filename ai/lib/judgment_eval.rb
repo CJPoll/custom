@@ -16,6 +16,7 @@
 
 require "json"
 require_relative "judgment_context"
+require_relative "judgment_label"
 
 module JudgmentEval
   USE_CASES = %w[finding_triage slack_routing priority_scoring ticket_kind ticket_severity ticket_security].freeze
@@ -107,6 +108,22 @@ module JudgmentEval
       end
     end
     { cases: cases, proposed: proposed.size, missing: missing }
+  end
+
+  # without_rule_routed(cases, use_case) -> [cases, excluded_count]
+  # slack_routing only: a root whose text addresses a session is routed by
+  # the router's rule (athena-events.md step 2b', session-mention-v1), never
+  # judged, so scoring it would measure the judge on input it never gets
+  # (DND-717). Such a case leaves the run, whatever its provenance, and is
+  # counted.
+  def without_rule_routed(cases, use_case)
+    return [cases, 0] unless use_case == "slack_routing"
+
+    kept, routed = cases.partition do |c|
+      input = c["input"]
+      JudgmentLabel.session_mention(input.is_a?(Hash) ? input["text"] : nil).nil?
+    end
+    [kept, routed.size]
   end
 
   # with_domain(cases, default) -> [cases, count_without_domain]

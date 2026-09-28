@@ -58,6 +58,10 @@ USAGE = <<~EOF
                         ai/bin/ticket-corpus and judgment-label for how each
                         is made). proposed rows are excluded from the run
                         (they never select a threshold) and counted.
+                        slack_routing: a root whose text addresses a session
+                        (session-mention-v1) is excluded and counted too,
+                        whatever its provenance: the router routes it by
+                        rule and never judges it (DND-717).
     --corpus FILE       JSONL the labels were made from. A row joins on "id"
                         ("event_id" for slack_routing); its "input" member is
                         sent, or the whole row if it has none (slack_routing
@@ -349,9 +353,10 @@ module Manager
     labels = JudgmentEval.parse_labels(labels_text, opts[:labels])
     corpus = JudgmentEval.parse_corpus(corpus_text, opts[:corpus], opts[:use_case])
     joined = JudgmentEval.join(labels, corpus)
-    cases, lacking = JudgmentEval.with_domain(joined[:cases], opts[:content_domain])
+    judged, rule_routed = JudgmentEval.without_rule_routed(joined[:cases], opts[:use_case])
+    cases, lacking = JudgmentEval.with_domain(judged, opts[:content_domain])
     {
-      labels: labels, corpus: corpus, joined: joined, cases: cases, lacking_domain: lacking,
+      labels: labels, corpus: corpus, joined: joined, cases: cases, lacking_domain: lacking, rule_routed: rule_routed,
       labels_sha256: Effects.sha256(labels_text), corpus_sha256: Effects.sha256(corpus_text)
     }
   rescue JudgmentEval::InputError => e
@@ -363,11 +368,17 @@ module Manager
     corpus = loaded[:corpus]
     out.puts "labels: #{loaded[:labels].size} (#{JudgmentEval.provenance_counts(loaded[:labels]).map { |k, v| "#{k} #{v}" }.join(', ')}); " \
              "proposed excluded: #{joined[:proposed]}"
+    if loaded[:rule_routed].positive?
+      out.puts "session-mention excluded: #{loaded[:rule_routed]} (the router routes these by rule, step 2b', and never judges them)"
+    end
     out.puts "corpus: #{corpus[:rows].size} rows with #{corpus[:id_key]}" + (corpus[:without_id].positive? ? ", #{corpus[:without_id]} without #{corpus[:id_key]} (ignored)" : "")
     unless joined[:missing].empty?
       usable = loaded[:labels].size - joined[:proposed]
       err.puts "#{PROG}: join: #{joined[:missing].size} of #{usable} labels have no corpus row with that #{corpus[:id_key]}: " \
                "#{joined[:missing].join(', ')}. Fix: point --corpus at the file these labels were made from, or drop the stale labels; they are not in this run."
+    end
+    if loaded[:cases].empty? && loaded[:rule_routed].positive?
+      fail!(1, "every joined label is a session-mention root (#{loaded[:rule_routed]}), which the router never judges", "label roots that name no session; there is nothing to score")
     end
     fail!(1, "no label joined the corpus (0 of #{loaded[:labels].size - joined[:proposed]})", "check --corpus and --use-case (the join key is #{corpus[:id_key]})") if loaded[:cases].empty?
     if loaded[:lacking_domain].positive?
@@ -457,7 +468,8 @@ module Manager
       "started_at" => started.iso8601, "finished_at" => Time.now.utc.iso8601,
       "labels_file" => File.expand_path(opts[:labels]), "labels_sha256" => loaded[:labels_sha256],
       "corpus_file" => File.expand_path(opts[:corpus]), "corpus_sha256" => loaded[:corpus_sha256],
-      "proposed_excluded" => loaded[:joined][:proposed], "join_missing" => loaded[:joined][:missing],
+      "proposed_excluded" => loaded[:joined][:proposed], "session_mention_excluded" => loaded[:rule_routed],
+      "join_missing" => loaded[:joined][:missing],
       "batches" => { "planned" => batch_count, "sent" => state[:sent], "stopped" => state[:stopped] && state[:stopped][:line] },
       "labels" => loaded[:cases].to_h { |c| [c["case_id"], c["label"]] },
       "results" => state[:results] + context_results(loaded[:context]), "report" => data["report"]
