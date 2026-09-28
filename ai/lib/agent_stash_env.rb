@@ -32,9 +32,10 @@
 # PENDING RESTART (DND-1036) is ACTIVE for a session that predates the install.
 # Claude Code hot-reloads the settings env into a running session, so after
 # --install-env an old session carries ATHENA_AGENT_BIN, but its Bash tool
-# read CLAUDE_ENV_FILE once, when the session began, and caches what it read
-# (Claude Code 2.1.283), so its PATH still has no wrapper. That session is not
-# drift: a restart fixes it.
+# need not pick up CLAUDE_ENV_FILE: Claude Code 2.1.283 reads it at the
+# session's first Bash command and caches the result for the session (read
+# from its bundle, not measured on a hot-reload). So its PATH can still lack
+# the wrapper. That session is not drift: a restart fixes it.
 #
 # HOW THE WRAPPER REACHES THE BASH TOOL'S PATH (DND-1080). The Bash tool runs
 # each command as `zsh -c "source <snapshot> && <CLAUDE_ENV_FILE text> ... &&
@@ -58,8 +59,8 @@
 #     the branch's. settings.json's mtime is not used: any later edit moves it,
 #     which would read a session started after the install as pending.
 #   - session time: "session start" means the SNAPSHOT. The snapshot is built
-#     once, at session start, and CLAUDE_ENV_FILE is read at the session's
-#     first Bash command, so the snapshot's build time (the epoch ms in its
+#     once, at session start, and CLAUDE_ENV_FILE is read no earlier (see
+#     above), so the snapshot's build time (the epoch ms in its
 #     file name) is the earliest moment this session's PATH could have been
 #     fixed. The nearest ancestor naming a snapshot in its argv
 #     wins, so a gate run under test-slot/harness-gate, or a nested session,
@@ -222,8 +223,9 @@ module AgentStashEnv
     out
   end
 
-  # The CLAUDE_ENV_FILE script the landed env names must carry ENV_LINE: it is
-  # the only thing that puts the wrapper on the Bash tool's PATH (DND-1080).
+  # The CLAUDE_ENV_FILE script the landed env names must carry ENV_LINE, and
+  # nothing else but comments: it is the only thing that puts the wrapper on
+  # the Bash tool's PATH (DND-1080).
   def env_file_problems(exp, main)
     file = exp[:vars][ENV_FILE].to_s
     if file.empty?
@@ -235,10 +237,21 @@ module AgentStashEnv
     restore = "Fix: restore ai/agent-env/session-env.sh in #{main} (git -C #{main} checkout -- " \
               "ai/agent-env/session-env.sh), then restart sessions."
     begin
-      return [] if File.read(file).lines.any? { |l| l.strip == ENV_LINE }
+      code = File.read(file).lines.map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
+      unless code.include?(ENV_LINE)
+        return ["#{ENV_FILE} #{file} does not carry the agent PATH line, so the wrapper never reaches the Bash " \
+                "tool's PATH. #{restore}"]
+      end
+      # The text runs before every Bash command in every session, and every
+      # such process sees CLAUDE_ENV_FILE pointing here, so a stray
+      # `>> "$CLAUDE_ENV_FILE"` would land here. Anything but ENV_LINE is
+      # foreign: it runs in every session, and one that fails breaks the `&&`
+      # chain Claude Code builds around the command.
+      extra = code - [ENV_LINE]
+      return [] if extra.empty?
 
-      ["#{ENV_FILE} #{file} does not carry the agent PATH line, so the wrapper never reaches the Bash " \
-       "tool's PATH. #{restore}"]
+      ["#{ENV_FILE} #{file} runs #{extra.size} line(s) besides the agent PATH line (first: " \
+       "#{extra.first[0, 80].inspect}); they run before every Bash command in every session. #{restore}"]
     rescue SystemCallError => e
       ["#{ENV_FILE} #{file} cannot be read (#{e.class}), so the wrapper never reaches the Bash tool's PATH. " \
        "#{restore}"]

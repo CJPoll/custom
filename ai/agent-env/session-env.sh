@@ -14,7 +14,8 @@
 # restart sessions. ai/bin/check-hooks-registered asserts the line below is
 # present verbatim (AgentStashEnv::ENV_LINE).
 #
-# Nothing writes here. Claude Code hands SessionStart, CwdChanged and
+# Nothing writes here, and check-hooks-registered FAILs an ACTIVE install when
+# this file runs any line but the one below (comments and blanks aside). Claude Code hands SessionStart, CwdChanged and
 # FileChanged hooks their OWN CLAUDE_ENV_FILE to append exports to; every
 # other process in the session (the Bash tool, other hooks) sees this path, so
 # a script that appends to "$CLAUDE_ENV_FILE" outside those three hooks would
