@@ -318,18 +318,21 @@ here**, because copying them into a second tracked file is exactly the staleness
 the *Documentation conventions* rule below warns of (drift was already present
 before these citations replaced the copies). Each has one home:
 
-- **The lane's Notion target** — connector, database name and id, label, the
-  status a flaky ticket is filed at (`queued_status`), and the statuses the lane
-  drains (`drain_statuses`) — lives in `<repo-root>/.claude/flaky-lane.json`
-  (for the flaky lane, `~/dev/walt_ui/.claude/flaky-lane.json`). **Both sides
-  read it.** The athena-captain resolves its filing target from it and **never
-  hardcodes the database id** (`athena:flaky-ticket` → *Filing mechanics*). The
-  spawn text fills its scope placeholders from
-  `.claude/hooks/flaky-lane-target.sh`, which validates the file and prints
-  `UNRESOLVED — <reason>` on any gap, including a `queued_status` outside
-  `drain_statuses`. An UNRESOLVED target is a fault the spawned admiral
-  reports, never an empty queue. `flaky-lane-target.self-test.sh` fails if the
-  spawn text or `walt_ui/CLAUDE.md` restates a target value.
+- **The lane's Notion target** — connector, database name and id, data
+  source id, label, the status a flaky ticket is filed at (`queued_status`),
+  and the statuses the lane drains (`drain_statuses`) — lives in
+  `<repo-root>/.claude/flaky-lane.json` (for the flaky lane,
+  `~/dev/walt_ui/.claude/flaky-lane.json`). **Both sides read it.** The
+  athena-captain resolves its filing target from it and **never hardcodes the
+  database id** (`athena:flaky-ticket` → *Filing mechanics*); walt_ui's own
+  Captain and Admiral agents do the same. The spawn text fills its scope
+  placeholders from `.claude/hooks/flaky-lane-target.sh`, which validates the
+  file and prints `UNRESOLVED — <reason>` on any gap, including a
+  `queued_status` outside `drain_statuses`. An UNRESOLVED target is a fault
+  the spawned admiral reports, never an empty queue.
+  `flaky-lane-target.self-test.sh` fails if the spawn text, `walt_ui/CLAUDE.md`
+  or a walt_ui agent definition restates a target value. No walt_ui CI job
+  runs that suite yet, so it catches a restatement only when someone runs it.
 - **The drain policy** — the scope filter's shape, blocked semantics, status
   values, concurrency, merge policy — lives in the admiral brief
   **`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt`**, which
@@ -356,8 +359,8 @@ values do not yet live here. The two sweeps were split because pointing the
 carriers at the brief (H-3) is independent of, and precedes, moving the
 constants into one home (DND-276).
 
-**Later (2026-09-28):** DND-276 landed. The paragraph above said the drain
-policy was "today carried across **several homes**", and that making
+**Later (2026-09-28):** DND-276 landed. This section's tracker-constants
+paragraph said the drain policy was "today carried across **several homes**", and that making
 `flaky-lane.json` the single machine-readable home "has **not** happened yet".
 Superseded by the one-home list above. The spawn text had held its own copy of
 the database id, connector, label and drained statuses; it now fills them from
