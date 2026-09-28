@@ -861,6 +861,7 @@ def run_one(argv, chdir: CUSTOM_DIR, env: {})
   tag = ReapTags.new_tag("gate-check")
   ok = false
   out = nil
+  scan_failure = nil
   begin
     out, status = Open3.capture2e(env.merge(ReapTags.env_with(tag, env.fetch(ReapTags::VAR, ENV[ReapTags::VAR]))),
                                   *argv, chdir: chdir, stdin_data: "")
@@ -868,8 +869,14 @@ def run_one(argv, chdir: CUSTOM_DIR, env: {})
   rescue Errno::ENOENT, Errno::EACCES => e
     out = "harness-gate: cannot execute #{argv.first}: #{e.class}: #{e.message}"
   ensure
-    leaked = ReapTags.reap(tag)
+    begin
+      leaked = ReapTags.reap(tag)
+    rescue ReapTags::ScanError => e
+      # DND-1016: the sweep could not look, so "nothing leaked" is unknown.
+      scan_failure = "\nharness-gate: FAIL — the leak sweep after `#{argv.join(' ')}` could not look: #{e.message}\n"
+    end
   end
+  return [false, "#{out}#{scan_failure}"] if scan_failure
   return [ok, out] if leaked.empty?
 
   [false, "#{out}#{leak_report(argv, leaked)}"]
@@ -2599,6 +2606,49 @@ def run_self_test
       Process.kill("KILL", sib) rescue nil
       Process.wait(sib) rescue nil
     end
+
+    # DND-1016: a tagged process caught inside execve is still found. Its
+    # environ reads empty (or is cut short) mid-exec; the old scan read that
+    # as untagged and missed this spinner in 11-15% of scans (22, 29 and 31 of
+    # 200 in three runs), so a leak caught mid-exec by the sweep outlived it.
+    spin = File.join(dir, "spin.sh")
+    File.write(spin, "#!/bin/bash\nexec /bin/bash \"$0\"\n")
+    FileUtils.chmod(0o755, spin)
+    spin_tag = ReapTags.new_tag("selftest-exec-spinner")
+    spinner = Process.spawn(ReapTags.env_with(spin_tag), spin, out: File::NULL, err: File::NULL)
+    begin
+      # Until its first exec the child is a fork of this gate, with this
+      # gate's (untagged) environment: it does not carry the tag yet, so
+      # scanning then would be measuring the spawn, not the exec window.
+      spawned_by = ReapTags.monotonic + 5
+      until (File.binread("/proc/#{spinner}/cmdline").include?(spin) rescue false) || ReapTags.monotonic > spawned_by
+        sleep 0.01
+      end
+      misses = 200.times.count { !ReapTags.tagged_pids(spin_tag).include?(spinner) }
+      expect.call(misses.zero?, "a tagged process that re-execs itself was missing from #{misses} of 200 scans " \
+                                "(a mid-exec environ read counted as untagged)")
+    ensure
+      Process.kill("KILL", spinner) rescue nil
+      Process.wait(spinner) rescue nil
+    end
+
+    # A process whose bounds never settle (0 0 on a fixture /proc) cannot be
+    # told: the scan raises ScanError naming it, never returns "none left".
+    fake = File.join(dir, "fakeproc", "4202")
+    FileUtils.mkdir_p(fake)
+    File.write(File.join(fake, "stat"), "4202 (fake) S#{' 0' * 18} 100#{' 0' * 27} 0 0 0\n")
+    File.write(File.join(fake, "status"), "Name:\tfake\nUid:\t#{Process.uid}\t#{Process.uid}\t#{Process.uid}\t#{Process.uid}\n")
+    File.write(File.join(fake, "environ"), "#{ReapTags::VAR}=#{spin_tag}\0")
+    File.write(File.join(fake, "cmdline"), "fake\0")
+    unknown_err = begin
+      ReapTags.tagged_pids(spin_tag, proc_root: File.dirname(fake), since: 0, settle: 0.2)
+      nil
+    rescue ReapTags::ScanError => e
+      e.message
+    end
+    expect.call(unknown_err.to_s.include?("pid=4202") && unknown_err.to_s.include?("UNKNOWN") &&
+                unknown_err.to_s.include?("Fix:"),
+                "a pid whose environment bounds never settle was not reported as UNKNOWN (#{unknown_err.inspect})")
   end
 
   # 9. The failure report NAMES the failing case even when a chatty suite has

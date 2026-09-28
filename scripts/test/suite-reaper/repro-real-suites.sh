@@ -49,17 +49,18 @@ FAIL=0
 NORUN=0   # cases whose suite was still running when the wait ran out
 TRACK=()
 
-# pids_with_env <VAR=value> -- own-uid pids whose environ holds exactly it.
+# pids_with_env <VAR=value> -- own-uid pids whose environ holds exactly it,
+# read through the reaper's scan (DND-1016): a plain environ read misses a
+# survivor caught mid-exec and gives a false PASS. It runs inside $(...),
+# where an exit is lost, so a scan that cannot run prints the token
+# SCAN-FAILED in place of a pid: the caller reads "something outlived the
+# suite" and the case FAILs, never "no survivors".
+. "${REPO}/scripts/test/lib/suite-reaper.bash"
 pids_with_env() {
-  local want="$1" d e
-  for d in /proc/[0-9]*; do
-    [ -O "${d}" ] || continue
-    {
-      while IFS= read -r -d '' e; do
-        if [ "${e}" = "${want}" ]; then printf '%s\n' "${d#/proc/}"; break; fi
-      done <"${d}/environ"
-    } 2>/dev/null
-  done
+  suite_env_pids exact "$1" && return 0
+  echo "repro: the process scan could not run, so survivors cannot be counted." >&2
+  echo "  Fix: repair the scan's reason above (scripts/lib/proc-env-scan.awk)." >&2
+  echo "SCAN-FAILED"
 }
 
 report_survivors() { # report_survivors <label> <marker>
