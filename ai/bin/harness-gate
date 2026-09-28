@@ -786,6 +786,18 @@ end
 PRE_POOL_LABELS = ["check-inotify-headroom"].freeze
 CHAINS = [["build-agents --check", "check-agent-size"]].freeze
 
+# Results are keyed by label, and every ordering edge above is matched by
+# label. So a duplicate label would let one check's result overwrite
+# another's, and a renamed check would silently drop its edge. Both are
+# refused before anything runs. Returns one message per problem; [] is sound.
+def schedule_errors(checks)
+  labels = checks.map(&:first)
+  dups = labels.tally.select { |_, n| n > 1 }.keys
+  errors = dups.map { |l| "label #{l.inspect} is declared #{labels.count(l)} times" }
+  edge_labels = PRE_POOL_LABELS + CHAINS.flatten + FINAL_CHECKS.map(&:first)
+  errors + (edge_labels - labels).map { |l| "ordering edge names #{l.inspect}, which no declared check has" }
+end
+
 # Workers: HARNESS_GATE_JOBS, else half the cores, capped at 8. At 8 workers the
 # measured makespan equals the longest suite (~124 s), so more buys nothing.
 # test-slot still caps how many gates run at once; this is per gate.
@@ -812,7 +824,7 @@ def last_durations(path)
 
   File.foreach(path).each_with_object({}) do |line, h|
     rec = JSON.parse(line) rescue next
-    h[rec["label"]] = rec["wall_s"].to_f if rec["label"]
+    h[rec["label"]] = rec["wall_s"].to_f if rec.is_a?(Hash) && rec["label"]
   end
 end
 
@@ -873,6 +885,9 @@ end
 # being [label, argv, output] per failed check, in declared order.
 def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: gate_jobs,
                timings: timings_path)
+  dups = checks.map(&:first).tally.select { |_, n| n > 1 }.keys
+  raise ArgumentError, "run_checks: duplicate check label(s) #{dups.inspect}" unless dups.empty?
+
   pin_env, pin_probes = landed_pin_env(root)
   io.puts landed_pin_line(pin_env, pin_probes)
 
@@ -1030,6 +1045,13 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
     warn "  Fix: set HARNESS_GATE_JOBS to a positive integer (worker count), or unset it " \
          "for the default (half the cores, at most 8)."
     return 2
+  end
+  unless (errs = schedule_errors(CHECKS)).empty?
+    warn "harness-gate: FAILED — the check schedule is unsound: #{errs.join('; ')}."
+    warn "  Fix: give every check in CHECKS a unique label, and keep PRE_POOL_LABELS, " \
+         "CHAINS and FINAL_CHECKS naming labels that exist in CHECKS (update them in " \
+         "the same change that renames a check)."
+    return 1
   end
   pin_env, failures = run_checks(CHECKS, jobs: jobs)
 
@@ -2110,6 +2132,31 @@ def run_self_test
            "CHAINS / FINAL_CHECKS edges, declared-order output, and per-check timing rows."
       ok = false
     end
+  end
+
+  # 13b. The schedule is keyed by label, so the real CHECKS must have unique
+  #     labels and must name every label an ordering edge uses. A fixture with
+  #     a duplicate and a renamed edge must be refused, and run_checks itself
+  #     must refuse a duplicate rather than let one result overwrite another.
+  unless (errs = schedule_errors(CHECKS)).empty?
+    warn "self-test: FAIL — case 13b: the real CHECKS schedule is unsound: #{errs.join('; ')}"
+    ok = false
+  end
+  bad_schedule = [["a", ["x"]], ["a", ["y"]], ["check-agent-size", ["z"]]]
+  errs = schedule_errors(bad_schedule)
+  unless errs.any? { |e| e.include?('"a" is declared 2 times') } &&
+         errs.any? { |e| e.include?('"build-agents --check"') } &&
+         errs.any? { |e| e.include?('"check-inotify-headroom"') }
+    warn "self-test: FAIL — case 13b: schedule_errors missed a duplicate or a renamed edge: #{errs.inspect}"
+    ok = false
+  end
+  begin
+    run_checks(bad_schedule, root: Dir.tmpdir, chdir: Dir.tmpdir, io: StringIO.new, jobs: 1,
+                             timings: File::NULL)
+    warn "self-test: FAIL — case 13b: run_checks accepted a duplicate label"
+    ok = false
+  rescue ArgumentError
+    nil
   end
 
   # 14. HARNESS_GATE_JOBS: a positive integer, or the default; anything else
