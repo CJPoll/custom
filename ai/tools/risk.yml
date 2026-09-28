@@ -140,8 +140,9 @@ tools:
   # phase that permits only readOnly/idempotent tools run `test-slot -- <any
   # destructive command>`. Destructive until a phase gate can classify by the
   # wrapped CMD. DND-486 wires it into integration-gate, which stays
-  # idempotent: it passes test-slot only the gate it already ran (the landed
-  # target's declared gate or a vetted --gate), so its capability is unchanged.
+  # idempotent: it passes test-slot only the gate it would have run unslotted
+  # (the landed target's declared gate or a vetted --gate), so its capability
+  # is unchanged.
   test-slot:               { class: destructive, reason: wrapper }
 
   # --- skill executables (DND-508), keyed by their path under ai/ ---

@@ -349,16 +349,17 @@ past a RED gate because a prep script printed READY without reading the exit
 code.
 
 **The gate runs in a machine test slot (DND-486).** `integration-gate` wraps the
-resolved gate in `~/dev/custom/ai/bin/test-slot`, which bounds heavy runs per
-machine; you do nothing extra. A `test-slot: WAITING` line is a queue, not a
+resolved gate in the main checkout's `ai/bin/test-slot` (`~/dev/custom`, found
+from the script's own git common dir, so a worktree copy never sets N), which
+bounds heavy runs per machine; you do nothing extra. A `test-slot: WAITING` line is a queue, not a
 stall. **Exit 6 means GATE NOT RUN**: no slot freed within the wait window (or
 test-slot left no outcome). Nothing was checked, so it is neither OK nor RED.
 Re-run `integration-gate`; never merge on it. A `--with-critic` judge is still
 joined first, so its verdict is recorded and the re-run does not pay for it
 again. `test-slot --status` names what holds the pool. A test-slot missing
 beside the script is exit 2: update the custom checkout; the gate never runs
-unslotted. `--slot-wait-timeout <secs>` shortens the wait. It can only turn a
-wait into exit 6, never into a pass. Running `integration-gate` itself under
+unslotted. `--slot-wait-timeout <secs>` sets the wait. It can only turn a wait
+into exit 6, never into a pass. Running `integration-gate` itself under
 `test-slot` (the captain brief's form) is safe: the inner wrap sees the slot it
 already holds and does not queue again.
 

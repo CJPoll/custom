@@ -128,9 +128,10 @@ Give the captain, in the brief:
   `<cmd>` is your worktree's own `./ai/bin/harness-gate`. Quote its `gating
   <root>` line with the result. Exit 75 with `test-slot: TIMEOUT` means it
   never ran: run it again; never count it as a pass."*
-  `integration-gate` wraps its own declared gate in test-slot (DND-486), and
-  the captain definition's Verify step names test-slot. Nothing wraps a
-  captain's other heavy runs mechanically, so this line is still what does.
+  `integration-gate` wraps its own declared gate in test-slot (DND-486); its
+  own "never ran" is exit 6, `GATE NOT RUN`, and never a pass either. The
+  captain definition's Verify step names test-slot. Nothing wraps a captain's
+  other heavy runs mechanically, so this line is still what does.
 - **Why the `cd` is in the same command.** A subagent's Bash cwd resets to the
   session root between calls, and that is often the main checkout. A gate
   named by its main-checkout path, or run after a `cd` in an earlier call,

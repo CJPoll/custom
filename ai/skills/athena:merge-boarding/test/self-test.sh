@@ -885,10 +885,10 @@ okl="$(grep '^INTEGRATION OK' <<<"$out")"
 # DND-486: the gate runs inside a machine test slot, and a gate that never ran
 # (no slot within the wait window, or no outcome recorded) is exit 6 -- never
 # INTEGRATION OK, never "gate RED". A missing wrapper is exit 2, never an
-# unslotted run. Cases s1..s8 follow the DND-486 QA plan.
+# unslotted run. Cases s1..s8 follow the DND-486 QA plan; s9..s12 extend it.
 
 # await_file PATH -- bounded poll (<= 20 s) for a file to appear.
-await_file() { local i; for ((i = 0; i < 400; i++)); do [ -e "$1" ] && return 0; sleep 0.05; done; return 1; }
+await_file() { local i; for ((i = 0; i < 100; i++)); do [ -e "$1" ] && return 0; sleep 0.2; done; return 1; }
 
 # slot_repo <dir> <gate body> -- a repo whose landed main declares
 # ai/bin/harness-gate with <gate body> (sh), on a feature branch with a PASS.
@@ -936,9 +936,11 @@ grep -q 'GATE NOT RUN' <<<"$out" && bad "s4 read the gate's own 75 as a slot tim
 
 # layout_copy <dir> -- a copy of the checkout layout integration-gate resolves
 # its siblings from: the script copied (so realpath lands here), critic-review
-# and blast-radius linked to the real ones.
+# and blast-radius linked to the real ones. It is a git repo, so its own main
+# checkout (where test-slot is resolved) is the layout itself.
 layout_copy() {
   mkdir -p "$1/ai/skills/athena:merge-boarding/scripts" "$1/ai/bin"
+  git init -q "$1"
   cp "$GATE" "$1/ai/skills/athena:merge-boarding/scripts/integration-gate"
   ln -s "$(cd "${ROOT}/../../bin" && pwd)/critic-review" "$1/ai/bin/critic-review"
   ln -s "$(cd "${ROOT}/../../bin" && pwd)/blast-radius" "$1/ai/bin/blast-radius"
@@ -1007,6 +1009,30 @@ grep -q '^critic-review: PASS' <<<"$out" && ok "s11 the judge was joined and its
 ( cd "$R" && "${ROOT}/../../bin/critic-review" --verdict-for "$(git rev-parse HEAD)" >/dev/null 2>&1 ) \
   && ok "s11 the judge's PASS is recorded for the re-run" || bad "s11 no PASS recorded after GATE NOT RUN"
 [ ! -f "${R}/GATE_RAN" ] && ok "s11 the gate did not run" || bad "s11 the gate ran despite the timeout"
+
+# s12: run from a LINKED WORKTREE of the custom repo, the gate uses the MAIN
+# checkout's test-slot, never the worktree's copy (test-slot's stable
+# interface: every caller agrees on N). Each copy marks which one ran, then
+# execs the real test-slot.
+L="${TMP}/s12-layout"; layout_copy "$L"
+REAL_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
+printf '#!/bin/sh\ntouch "%s"\nexec "%s" "$@"\n' "${TMP}/s12.MAIN_USED" "$REAL_SLOT" > "$L/ai/bin/test-slot"; chmod +x "$L/ai/bin/test-slot"
+( cd "$L" && git add -A && git commit -qm layout && git worktree add -q "${TMP}/s12-wt" )
+printf '#!/bin/sh\ntouch "%s"\nexec "%s" "$@"\n' "${TMP}/s12.WT_USED" "$REAL_SLOT" > "${TMP}/s12-wt/ai/bin/test-slot"
+R="${TMP}/s12"; slot_repo "$R" "exit 0"
+out="$( cd "$R" && "${TMP}/s12-wt/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "s12 exit 0 from a worktree copy of the script" || bad "s12 expected exit 0, got $rc" "$out"
+[ -f "${TMP}/s12.MAIN_USED" ] && [ ! -f "${TMP}/s12.WT_USED" ] \
+  && ok "s12 the main checkout's test-slot ran, not the worktree's" \
+  || bad "s12 wrong test-slot copy (main=$([ -f "${TMP}/s12.MAIN_USED" ] && echo y || echo n) wt=$([ -f "${TMP}/s12.WT_USED" ] && echo y || echo n))" "$out"
+# ...and a script checkout that is not a git repo cannot name its main
+# checkout: exit 2 with Fix:, the gate never runs unslotted.
+L="${TMP}/s12-nogit"; layout_copy "$L"; rm -rf "$L/.git"
+printf '#!/bin/sh\nexit 0\n' > "$L/ai/bin/test-slot"; chmod +x "$L/ai/bin/test-slot"
+R="${TMP}/s12b"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q '^Fix:' <<<"$out" && [ ! -f "${R}/GATE_RAN" ] \
+  && ok "s12 an unresolvable script checkout is exit 2 with Fix:, gate not run" || bad "s12 no-git layout expected exit 2, got $rc" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

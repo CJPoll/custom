@@ -229,7 +229,8 @@ bare role name reaches you specifically.
    ~/dev/custom/ai/bin/test-slot --label '<TICKET> prep-commit' -- timeout 1500 bin/prep-commit.sh`
    (or this project's equivalent; the same for a full-suite `mix test`).
    `timeout` goes inside test-slot, never outside it. WAITING is a queue, not
-   a stall. Exit 75 means it never ran: re-run it, never report it as a pass.
+   a stall. Exit 75 with `test-slot: TIMEOUT` means it never ran: re-run it,
+   never report it as a pass.
    It MUST pass — a hard gate before the next step, not something to catch
    later in CI. If it fails, fix it and re-run.
 

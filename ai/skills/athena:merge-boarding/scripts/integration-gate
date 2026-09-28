@@ -92,7 +92,8 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    round returns both sets of findings.
   --slot-wait-timeout <secs>
                    the gate runs inside the machine's heavy-test slot pool
-                   (~/dev/custom/ai/bin/test-slot, beside this script); give up
+                   (ai/bin/test-slot in the MAIN checkout of the repo that
+                   holds this script, i.e. ~/dev/custom); give up
                    waiting for a slot after <secs> (default: test-slot's own).
                    A give-up is exit 6, GATE NOT RUN -- never OK, never RED.
   --critic-override <reason>
@@ -120,7 +121,9 @@ Exit codes: 0 integration OK | 1 gate RED on the integrated head
             2 usage / unresolvable ref / branch behind target /
               gate refused (a no-op, or not the gate the target declares) /
               working tree is not HEAD (uncommitted or untracked paths,
-              before the gate or left by it; ignored files do not count)
+              before the gate or left by it; ignored files do not count) /
+              the main checkout's ai/bin/test-slot cannot be found or run,
+              or its outcome temp dir cannot be created (gate not run)
             3 no green critic verdict on the integrated head
             4 merging performs a real-world action -- owner's call, not the
               fleet's (see --owner-approval)
@@ -154,15 +157,29 @@ done
 # --- 0. the machine test-slot pool (DND-486) -------------------------------
 # The gate is the heaviest run an admiral starts, and ~23 unbounded heavy runs
 # at once took this box to load 54 and flaked timing-sensitive suites (DND-473).
-# So the gate runs inside test-slot, which bounds heavy runs per machine. It is
-# resolved from THIS script's own checkout (realpath, so a symlinked skills dir
-# still lands in the custom checkout), never from PATH. A missing wrapper is a
-# refusal, never a silent fallback to an unslotted run. test-slot changes only
-# WHEN the gate starts: command, source, and exit semantics are unchanged.
-TEST_SLOT="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../../../bin" 2>/dev/null && pwd)/test-slot"
+# So the gate runs inside test-slot, which bounds heavy runs per machine.
+#
+# WHICH test-slot: the MAIN checkout's copy of the custom repo that holds this
+# script, never a worktree's and never PATH. test-slot's stable interface
+# requires that, so every caller agrees on N; a worktree copy on a branch that
+# edits N would gate against the shared pool with its own N. The main checkout
+# is found from the git common dir of THIS script's checkout (realpath first,
+# so ~/.claude/skills still lands in ~/dev/custom), which is the same for the
+# main checkout, every worktree, and every shipwright lane. A checkout that
+# cannot be resolved, or a wrapper missing there, is a refusal (exit 2), never
+# a silent fallback to an unslotted run. test-slot changes only WHEN the gate
+# starts: command, source, and exit semantics are unchanged.
+SELF_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+SELF_COMMON="$(git -C "$SELF_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+case "$SELF_COMMON" in
+  /*/.git) TEST_SLOT="$(dirname "$SELF_COMMON")/ai/bin/test-slot" ;;
+  *) echo "${PROG}: cannot locate the main checkout that holds this script (${SELF_DIR}); git common dir resolved to '${SELF_COMMON}'." >&2
+     echo "Fix: run integration-gate from a git checkout (or worktree) of ~/dev/custom whose main checkout is a normal clone with a .git directory. It needs that main checkout's ai/bin/test-slot and never runs a gate outside the machine slot pool (DND-474)." >&2
+     exit 2 ;;
+esac
 if [ ! -x "$TEST_SLOT" ]; then
   echo "${PROG}: cannot run the gate: test-slot is not executable at ${TEST_SLOT}." >&2
-  echo "Fix: ai/bin/test-slot is missing beside this script (${TEST_SLOT}); update the ~/dev/custom checkout (git -C ~/dev/custom pull --ff-only) and re-run. integration-gate never runs a gate outside the machine slot pool (DND-474)." >&2
+  echo "Fix: the main checkout's ai/bin/test-slot is missing (${TEST_SLOT}); update that checkout (git -C '$(dirname "$SELF_COMMON")' pull --ff-only) and re-run. integration-gate never runs a gate outside the machine slot pool (DND-474)." >&2
   exit 2
 fi
 
@@ -492,10 +509,11 @@ fi
 
 # --- 8. run the gate ON THE INTEGRATED HEAD, inside a machine test slot ----
 # GATE_CMD was resolved in step 3b: the target's declared gate, or a vetted
-# caller-supplied one. It is evaluated exactly as before: eval in bash at
-# $ROOT under this script's own `set -uo pipefail` (a caller gate like
-# `make test | tee log` must stay RED when make fails); test-slot only decides
-# when it starts (DND-486). The outcome is READ from test-slot's outcome file,
+# caller-supplied one. The same command string is eval'd in bash at $ROOT
+# under `set -uo pipefail` (a caller gate like `make test | tee log` must stay
+# RED when make fails); test-slot only decides when it starts (DND-486). One
+# difference from the old in-process subshell: it runs in a child bash, so it
+# sees exported variables only (no declared gate reads this script's own). The outcome is READ from test-slot's outcome file,
 # never inferred from the exit code: a gate that itself exits 75 ran and
 # failed, while a wait timeout never ran it at all. A missing or unreadable
 # outcome is "not run" (exit 6), never RED and never OK -- a failed lookup
