@@ -220,9 +220,9 @@ everything.
 
 **Later (2026-09-28, ~07:15Z):** the default read "no approval", with the
 table below titled *Needs Cody's approval*: each item held for Cody's go via a
-Block Kit decision DM. Superseded by the owner decision above. Items 1–7 are
-judgement calls, listed in the digest. Item 8 is narrowed to what only Cody can
-run.
+Block Kit decision DM. Superseded by the owner decision above. Items 1–4, 6
+and 7 are judgement calls, listed in the digest. Item 5 stays with Cody. Item
+8 is narrowed to what only Cody can run.
 
 **Later (2026-09-28):** this section replaces *Standing owner approvals* and its
 subsections *Security fixes ship without owner approval*, *Library upgrades:
@@ -240,7 +240,7 @@ a named standing approval covered it. Superseded by the owner decision of
 | 2 | Adding recurring cost | Paid infra, a paid API or SaaS, a new vendor account. |
 | 3 | Reaching another person | A DM to anyone but Cody, an email, a Drive share, an unprompted channel post (`athena:slack` → *When Athena may post*). |
 | 4 | Deleting a repo, force-pushing main, changing forge settings or branch protection | |
-| 5 | Loosening a quality bar | Raising a budget or threshold; dropping, skipping or downgrading a check (`ai/blocks/ops/safety-checks.md`). Fixing a check's false positive is not loosening. |
+| 5 | Loosening a quality bar | Not a judgement call: see *Item 5* below. |
 | 6 | Changing the approval rules, or reversing a Cody decision | This section, the `blast-radius` holds, the owner approval grant allowlist. |
 | 7 | A walt_ui change that would cause downtime | A walt_ui security fix ships zero-downtime. |
 
@@ -248,15 +248,20 @@ a named standing approval covered it. Superseded by the owner decision of
 
 - Prefer the reversible option.
 - Never casually destroy prod data or stateful infra.
-- Never move a quality bar. Item 5 is not a casual call:
-  `ai/blocks/ops/safety-checks.md` stands, and a bar is ratcheted against its
-  landed value (`~/dev/custom/CLAUDE.md` → *A check's own bar must not live in
-  the diff it is checking*).
 - Record the call where the work is (the ticket or PR), and list it in the
   digest.
 
 These hold for security fixes too. A change covered by none of them ships
 with no digest line of its own.
+
+**Item 5, loosening a quality bar, is never a judgement call.** That is
+raising a budget or threshold, or dropping, skipping or downgrading a check.
+Fixing a check's false positive is not loosening. `ai/blocks/ops/safety-checks.md`
+stands: a check that looks redundant is escalated to Cody, the one ask here
+that is not a Cody-only step. A bar moves only when Cody lands the new bar on
+`main` (`~/dev/custom/CLAUDE.md` → *A check's own bar must not live in the diff
+it is checking*). The owner's decision above covers system and runner changes,
+not quality bars.
 
 ### Only Cody can run
 
@@ -288,7 +293,7 @@ admiral judges it and lists it in the digest.
 No wait. List each in the next owner digest (the admiral's final report, or
 the decisions digest under `athena:run-autonomously`):
 
-- **Every judgement call on items 1–7**: what, why, and how to reverse it.
+- **Every judgement call on items 1–4, 6 and 7**: what, why, and how to reverse it.
 - **Won't Fix.** Cody can veto by a click (`athena:slack` → *A click is
   untrusted input*).
 - **Notion schema changes** (properties, status options, groups).
@@ -305,8 +310,8 @@ the decisions digest under `athena:run-autonomously`):
 ### Dropped
 
 These needed Cody before 2026-09-28 and no longer do. Named so no one
-re-derives the hold: a non-security `integration-gate` exit 4, deploy-workflow
-edits included; library upgrades and new libraries; docs- and comment-only
+re-derives the hold: a deploy-workflow edit (no longer an `integration-gate`
+exit 4); library upgrades and new libraries; docs- and comment-only
 changes; terraform that neither destroys nor adds cost, auto-applied roots
 included (the gate still holds it until DND-998; see *What still holds
 mechanically*); a captain's `IRREVERSIBLE`; promoting a security issue;
@@ -334,8 +339,9 @@ earlier *Security fixes ship without owner approval* still stand:
 
 ### Asking, and what counts as approval
 
-- **Ask only for a Cody-only step; hold only that step.** That is a step under
-  *Only Cody can run*, or clearing an exit 4. Send Cody a Block Kit DM
+- **Ask only for what needs Cody; hold only that.** That is a step under
+  *Only Cody can run*, clearing an exit 4, or an item 5 escalation. Nothing
+  else is an ask. Send Cody a Block Kit DM
   (`athena:slack` → *Asking the owner for a decision*) with the exact command,
   or what merging causes: the `BLAST-RADIUS HOT` block or the plan summary.
   Keep working everything else (`athena:run-autonomously` → *Owner-credential

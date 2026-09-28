@@ -249,9 +249,9 @@ Cody, verbatim (2026-09-25): *"slack me if you actually need me to make a
 decision; use slack's block kit to make it easier for me to give a response
 when you do that."*
 
-- **Ask only for a step only Cody can run.** That is `~/.claude/CLAUDE.md` →
-  *Owner approval policy* → *Only Cody can run*, or clearing an
-  `integration-gate` exit 4. Everything else, the policy's judgement calls
+- **Ask only for what needs Cody.** `~/.claude/CLAUDE.md` → *Owner approval
+  policy* → *Asking, and what counts as approval* names it: chiefly a step
+  only Cody can run. Everything else, the policy's judgement calls
   included, you decide on best judgement and list in the digest. If you can
   already run a step, run it.
 

@@ -20,7 +20,7 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
 | `Backlog` | leave as-is until scoped | not yet in an athena-admiral's scope; on scope-in, normalize to `Todo` |
 | `Todo` | **Athena** once in scope | in an athena-admiral's scope, queued; no engineer on it yet |
 | `In Progress` | **Athena** | an athena-captain has been dispatched and is actively working it |
-| `Needs Attention` | **Cody** | blocked on a step only Cody can run (`~/.claude/CLAUDE.md` → *Owner approval policy* → *Only Cody can run*), or on clearing an `integration-gate` exit 4 — put the exact step in the ticket body |
+| `Needs Attention` | **Cody** | blocked on what needs Cody (`~/.claude/CLAUDE.md` → *Owner approval policy* → *Asking, and what counts as approval*), chiefly a step only Cody can run — put the exact step in the ticket body |
 | `Attention Given` | **Cody** | Cody has answered; awaiting the owning athena-admiral to pick it back up (stays Cody until reopened) |
 | `Done` | **Cody** | Cody's to review / verify / close |
 | `Ready for Release` | **Cody** | work workspace only — a mobile ticket that has cleared dev but not yet the app-store process |
@@ -40,8 +40,7 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    follows its captain*).
 2. **Assigning an engineer** — when an athena-captain is dispatched to the ticket, move
    the status to `In Progress`; the assignee stays **Athena**.
-3. **→ `Needs Attention`** (only for a step only Cody can run; see the Notes
-   rule) — set `Assignee` = **Cody**, write the exact step
+3. **→ `Needs Attention`** (only for what needs Cody; see the Notes rule) — set `Assignee` = **Cody**, write the exact step
    Cody needs onto the ticket body (that is the whole point of the status), and
    **DM Cody** as Athena that the ticket needs him (see the Notes "Needs Attention
    DM" rule). This is one of the three owner-notification events; it fires on the
@@ -563,6 +562,6 @@ authoritative.
   decision Cody's input could settle, so this DM fired for approval asks too.
   Superseded by owner decision (`~/.claude/CLAUDE.md` → *Owner approval
   policy*): "I would prefer you not even dm me unless it's something that only
-  I can run." `Needs Attention`, and so this DM, is now only for a step only
-  Cody can run, or clearing an exit 4. Any other decision is made on best
+  I can run." `Needs Attention`, and so this DM, is now only for what that
+  policy's *Asking, and what counts as approval* names. Any other decision is made on best
   judgement, recorded on the ticket, and listed in the digest.
