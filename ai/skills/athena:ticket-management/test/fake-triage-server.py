@@ -8,8 +8,12 @@ ai/skills/athena:ticket-management/test/self-test.sh; never prod.
     GET  /v1/blocks/<id>/children?...     answered from SPEC_DIR/blocks.json
   Athena:
     POST /api/v1/judgments/finding_triage answered from SPEC_DIR/triage.json
+    POST /api/v1/judgments/ticket_classification
+                                          answered from SPEC_DIR/classify.json
+                                          (ticket-classify, DND-1054)
 
-A spec file is {"status": N, "body": {...}}. A missing spec is a 599, so a
+A spec file is {"status": N, "body": {...}}, or {"status": N, "raw": "..."}
+to answer a body that is not JSON. A missing spec is a 599, so a
 test that forgot one fails loudly. ANY other method or path is logged with
 "unexpected": true and answered 405: the suite asserts none happened (there
 is no code path to a Notion write).
@@ -69,6 +73,8 @@ def route(method, path):
         return "notion", spec("blocks.json")
     if method == "POST" and path == "/api/v1/judgments/finding_triage":
         return "athena", spec("triage.json")
+    if method == "POST" and path == "/api/v1/judgments/ticket_classification":
+        return "athena", spec("classify.json")
     return None, {"status": 405, "body": {"error": "unexpected"}}
 
 
@@ -114,7 +120,10 @@ class Handler(BaseHTTPRequestHandler):
         }
         with open(LOG_FILE, "a") as fh:
             fh.write(json.dumps(entry) + "\n")
-        data = json.dumps(answer.get("body", {})).encode()
+        if "raw" in answer:
+            data = str(answer["raw"]).encode()
+        else:
+            data = json.dumps(answer.get("body", {})).encode()
         self.send_response(int(answer.get("status", 200)))
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))

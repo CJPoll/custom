@@ -9,10 +9,18 @@
 #     section must equal these lines exactly;
 #   - in the script's own suite, ai/skills/athena:ticket-management/test/
 #     self-test.sh, which reads this line from this file and asserts
-#     finding-triage prints it when the server answers not_configured.
+#     finding-triage prints it when the server answers not_configured;
+#   - for the ticket-classification section (DND-1054), in
+#     ai/skills/athena:ticket-management/test/ticket-classify/self-test.sh,
+#     which asserts every ticket-classify unavailable line ends with it.
 # Changing a line means changing the contract, this file and the script
 # together.
 
 @section Finding triage: the harness script
 # the inert answer: finding_triage mode off (not_configured covers mode_off and key_missing)
 JUDGMENTS UNAVAILABLE: not_configured. Fix: file the ticket as today; this is advisory.
+
+@section Ticket classification: the harness script
+# the clause every ticket-classify unavailable line ends with (exit 3), pinned
+# in ai/skills/athena:ticket-management/test/ticket-classify/self-test.sh
+Fix: file the ticket as today; this is advisory.

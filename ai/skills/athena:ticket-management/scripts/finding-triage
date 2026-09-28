@@ -14,7 +14,8 @@
 # merges, cancels or files a ticket. The filer decides.
 #
 # Buckets: DOMAIN (pure: keywords, the Notion filter, candidate shaping, the
-# output lines), EFFECTS (files, the two token sources, curl), MANAGER
+# output lines), EFFECTS (files, the two token sources, curl; the Athena
+# server's share lives in ../lib/athena_server.rb since DND-1054), MANAGER
 # (retrieve candidates, ask the server, render) and FRAMEWORK (argv).
 #
 # TOKENS NEVER TOUCH ARGV OR THE ENVIRONMENT. Each is read in this process and
@@ -25,13 +26,11 @@
 # Deliberately gem-free (stdlib only).
 
 require "json"
-require "open3"
 require "time"
-require "tmpdir"
 require_relative "../../../lib/strict_argv"
+require_relative "../lib/athena_server"
 
 PROG = "finding-triage"
-HARNESS = File.expand_path("../../../..", __dir__)
 UNAVAILABLE_FIX = "Fix: file the ticket as today; this is advisory."
 
 USAGE = <<~EOF
@@ -356,60 +355,18 @@ module Effects
     File.read(path, encoding: "UTF-8").scrub
   end
 
-  def claude_json
-    path = ENV["FLEET_CLAUDE_JSON"] || File.join(Dir.home, ".claude.json")
-    return nil unless File.exist?(path)
-
-    JSON.parse(File.read(path))
-  rescue JSON::ParserError, SystemCallError
-    nil
-  end
-
-  def main_checkout(dir)
-    out, status = Open3.capture2e("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    return nil unless status.success?
-
-    common = out.strip
-    common.start_with?("/") ? common.delete_suffix("/.git") : nil
-  rescue SystemCallError
-    nil
-  end
-
-  # mcp_entry(doc, name) -> the MCP entry: local scope for this repo, then the
-  # harness repo, then user scope.
-  def mcp_entry(doc, name)
-    keys = [main_checkout(Dir.pwd), main_checkout(HARNESS)].compact.uniq
-    keys.lazy.map { |k| doc.dig("projects", k, "mcpServers", name) }.find(&:itself) || doc.dig("mcpServers", name)
-  end
-
-  # safe_origin(url) -> scheme://authority; https, or http only to loopback.
-  def safe_origin(url)
-    m = %r{\A(https?)://([^/?#@]*)(?:[/?#]|\z)}.match(url.to_s)
-    return nil unless m
-    return nil if m[1] == "http" && !/\A(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?\z/.match?(m[2])
-
-    "#{m[1]}://#{m[2]}"
-  end
+  # The Athena server's shared effects live in ../lib/athena_server.rb
+  # (DND-1054), used by ticket-classify too. These wrappers map its two
+  # exceptions to this script's unavailable lines, unchanged.
+  def claude_json = AthenaServer.claude_json
+  def mcp_entry(doc, name) = AthenaServer.mcp_entry(doc, name)
+  def safe_origin(url) = AthenaServer.safe_origin(url)
 
   # athena -> [origin, token] or server_unreachable! with the reason.
   def athena
-    doc = claude_json
-    server_unreachable!("no readable ~/.claude.json (or FLEET_CLAUDE_JSON)") if doc.nil?
-    entry = mcp_entry(doc, "athena")
-    origin = entry.is_a?(Hash) ? safe_origin(entry["url"]) : nil
-    server_unreachable!("no athena MCP entry with an https URL (register it with scripts/add-athena-mcp)") if origin.nil?
-    [origin, athena_token]
-  end
-
-  def athena_token
-    path = ENV["ATHENA_INBOX_CLIENT_CONFIG"] || File.join(ENV["XDG_CONFIG_HOME"] || File.join(Dir.home, ".config"), "athena-inbox-client", "config.json")
-    token = begin
-      JSON.parse(File.read(path))["token"]
-    rescue JSON::ParserError, SystemCallError, TypeError, NoMethodError
-      nil
-    end
-    server_unreachable!("no machine token in #{path} (the inbox client config is owner-issued)") unless token.is_a?(String) && !token.empty?
-    token
+    AthenaServer.endpoint
+  rescue AthenaServer::Unreachable => e
+    server_unreachable!(e.message)
   end
 
   # notion -> [origin, token] or candidates_unavailable! with the reason.
@@ -430,38 +387,22 @@ module Effects
     [origin, token]
   end
 
-  def max_time
-    value = ENV["FINDING_TRIAGE_MAX_TIME_S"].to_s
-    /\A[1-9]\d{0,3}\z/.match?(value) ? value : "60"
-  end
-
   # request(method, url, headers, body) -> {curl_rc:, status:, body:}. Every
   # header value (the tokens included) goes into a curl config on STDIN.
   def request(method, url, headers, body)
-    ([url] + headers).each do |value|
-      raise Failure.new(3, "#{PROG}: a request value contains a quote, backslash or control character. #{UNAVAILABLE_FIX}") if /["\\[:cntrl:]]/.match?(value)
-    end
-    Dir.mktmpdir("finding-triage-") do |dir|
-      File.chmod(0o700, dir)
-      resp = File.join(dir, "resp")
-      config = +""
-      config << %(url = "#{url}"\n)
-      config << %(request = "#{method}"\n)
-      headers.each { |h| config << %(header = "#{h}"\n) }
-      if body
-        req = File.join(dir, "req.json")
-        File.write(req, JSON.generate(body), perm: 0o600)
-        config << %(data-binary = "@#{req}"\n)
-      end
-      config << %(output = "#{resp}"\n)
-      config << %(write-out = "%{http_code}"\n)
-      config << "connect-timeout = 10\nmax-time = #{max_time}\nsilent\n"
-      out, _err, status = Open3.capture3("curl", "--config", "-", stdin_data: config)
-      config.clear
-      { curl_rc: status.exitstatus, status: out.strip.to_i, body: File.exist?(resp) ? File.read(resp) : "" }
-    end
-  rescue Errno::ENOENT
-    raise Failure.new(3, "COULD NOT REACH SERVER: curl is not on PATH. #{UNAVAILABLE_FIX}")
+    curl { AthenaServer.request(method, url, headers, body, max_time: max_time) }
+  end
+
+  def max_time = AthenaServer.max_time("FINDING_TRIAGE_MAX_TIME_S")
+
+  # curl { ... } -> the block's result, with the library's two refusals
+  # mapped to this script's unavailable lines.
+  def curl
+    yield
+  rescue AthenaServer::UnsafeValue => e
+    raise Failure.new(3, "#{PROG}: #{e.message}. #{UNAVAILABLE_FIX}")
+  rescue AthenaServer::Unreachable => e
+    raise Failure.new(3, "COULD NOT REACH SERVER: #{e.message}. #{UNAVAILABLE_FIX}")
   end
 
   # notion_read(origin, token, method, path, body) -> parsed JSON. Refuses any
@@ -480,8 +421,7 @@ module Effects
   end
 
   def athena_post(origin, token, path, body)
-    headers = ["Authorization: Bearer #{token}", "Accept: application/json", "Content-Type: application/json"]
-    request("POST", "#{origin}#{path}", headers, body)
+    curl { AthenaServer.post_json(origin, token, path, body, max_time: max_time) }
   end
 end
 

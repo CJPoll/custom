@@ -92,6 +92,15 @@ if cmp -s "${JCONTRACT}" "${TMP}/judgments-mutated.md"; then
 else
   expect "a reworded judgments quote is drift" 1 "${TMP}/judgments-mutated.md" "${JFIXTURE}"
 fi
+# The ticket-classification section's quote (DND-1054) is pinned on its own:
+# reword only the LAST occurrence, which is in that section.
+cp "${JCONTRACT}" "${TMP}/judgments-mutated-tc.md"
+ruby -e 'p = ARGV[0]; s = File.read(p); i = s.rindex(/Fix:\s+file\s+the\s+ticket\s+as\s+today;\s+this\s+is\s+advisory\.`/); abort("no quote") unless i && s[0...i].include?("## Ticket classification: the harness script"); s[i, 9] = "Fix: skip"; File.write(p, s)' "${TMP}/judgments-mutated-tc.md"
+if cmp -s "${JCONTRACT}" "${TMP}/judgments-mutated-tc.md"; then
+  bad "ticket-classification mutation applied" "the pinned quote is gone from its section of athena-judgments.md; update this test"
+else
+  expect "a reworded ticket-classification quote is drift" 1 "${TMP}/judgments-mutated-tc.md" "${JFIXTURE}"
+fi
 
 printf '%d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then

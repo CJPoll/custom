@@ -74,6 +74,7 @@ ai/lib/next_mission.rb	library	pure selection rule required by ai/bin/next-missi
 ai/lib/next_mission_notion.rb	library	Notion read adapter required by ai/bin/next-mission (DND-985); raises NextMissionNotion::ReadError naming the miss, and the bin prints the exit-3 refusal that carries Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering.rb	library	pure clustering rules required by scripts/epic-clustering (DND-982); raises EpicClustering::DataError naming the bad value, and the script prints the exit-3 refusal that carries Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering_notion.rb	library	Notion read adapter required by scripts/epic-clustering (DND-982); raises NextMissionNotion::ReadError naming the miss, and the script prints the exit-3 refusal that carries Fix:
+ai/skills/athena:ticket-management/lib/athena_server.rb	library	Athena server effects required by scripts/finding-triage and scripts/ticket-classify (DND-1054); raises AthenaServer::Unreachable or UnsafeValue naming the reason, and each script prints the exit-3 unavailable line that carries Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering_fixture.rb	library	offline fixture source required by scripts/epic-clustering --from-json (DND-982); raises FixtureError or NextMissionNotion::ReadError naming the miss, and the script prints the exit-3 refusal that carries Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering_view.rb	library	rendering required by scripts/epic-clustering (DND-982); raises EpicClustering::DataError naming the bad input, and the script prints the refusal that carries Fix:
 ai/skills/athena:inbox/lib/fence.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
@@ -127,6 +128,7 @@ ai/skills/athena:slack/bin/upload	tool	Slack Web API action wrapper; fails only 
 ai/skills/athena:slack/bin/whoami	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:standup/scripts/standup-window.sh	tool	computes the standup time window; fails only on an unknown argument
 ai/skills/athena:ticket-management/scripts/finding-triage	guard	
+ai/skills/athena:ticket-management/scripts/ticket-classify	guard	
 
 # --- scripts/: guards (deny, check, gate, or preflight).
 scripts/athena	guard

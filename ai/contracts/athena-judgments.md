@@ -29,7 +29,8 @@ Sections are cited **by name**, never by number.
 
 **Conformance language.** MUST / MUST NOT / SHOULD / MAY carry their usual force.
 A **use case** is one fixed purpose Athena judges for (`finding_triage`,
-`slack_routing`, `priority_scoring`, or `eval:<use_case>`). A **question set** is
+`slack_routing`, `priority_scoring`, `ticket_kind`, `ticket_severity`,
+`ticket_security`, or `eval:<use_case>`). A **question set** is
 the versioned code that turns a use case's input into the request. A **caller**
 is the consumer that asked for a judgment and acts on the result. An
 implementation that violates a MUST is non-conformant.
@@ -40,7 +41,8 @@ corrective action (*Fallback: every error equals today's behaviour, loudly*
 says which fallbacks are faults), per `~/dev/custom/CLAUDE.md` →
 *Guard/error messages are written for the LLM*. This contract quotes exact
 `Fix:` text only where a fixture pins it: *Finding triage: the harness script*
-(`ai/contracts/fixtures/athena-judgments-quoted-fix.txt`, DND-713). When an
+(DND-713) and *Ticket classification: the harness script* (DND-1054), both in
+`ai/contracts/fixtures/athena-judgments-quoted-fix.txt`. When an
 implementation pins more exact text, the ticket that ships it adds the quote
 and its pin together (`ai/contracts/test/check-quoted-fix.rb`, DND-411).
 
@@ -49,7 +51,7 @@ and its pin together (`ai/contracts/test/check-quoted-fix.rb`, DND-411).
 ## Purpose and non-goals
 
 A judgment answers a narrow typed question — a choice among fixed options, or a
-score on a fixed scale — with a confidence. Three consumers use it today:
+score on a fixed scale — with a confidence. Four consumers use it today:
 
 - **Finding triage** (DND-713): before a finding is filed, advise whether it
   duplicates or relates to an existing ticket, and suggest a severity.
@@ -59,6 +61,10 @@ score on a fixed scale — with a confidence. Three consumers use it today:
   topic judgment*.
 - **Priority scoring** (DND-718): add bounded urgency and importance reasons to
   an indexed item's rank (`ai/contracts/athena-events.md` → *Ranking*).
+- **Ticket classification** (DND-991, DND-1054): when a ticket is filed, decide
+  its `Kind`, `Severity` and `Security` by deterministic policy from the
+  filer's values and three judgments (`ticket_kind`, `ticket_severity`,
+  `ticket_security`).
 
 Non-goals. A judgment never:
 
@@ -96,6 +102,10 @@ Concretely:
   ticket. The filer decides.
 - **Priority adds bounded reason deltas.** An owner override always wins, and
   the default `vip_asker` weight exceeds the largest combined judged delta.
+- **Ticket classification sets only Kind, Severity and Security**, through
+  deterministic policy. It never lowers a security classification, never
+  assigns or replaces `Feature`, and never touches `Status` or `Path`. Every
+  fallback is the filer's own value.
 - **Arithmetic, dates, sender identity and all policy stay in code.** jev-1.13
   is unreliable at counting, math, dates and indirection, so none of them is
   asked of it.
@@ -123,6 +133,7 @@ the request's `state`.
 | `finding_triage` | the finding's title, body (at most 2,000 characters) and project; up to 20 candidate tickets as ref, title and summary (at most 500 characters each) |
 | `slack_routing` | the owner's own message text and its line `kind` (`im`, `mpim` or `mention`) |
 | `priority_scoring` | the item's `title`, `source` and `status`, plus `message_text` for a `slack_ask`; never a date and never the asker |
+| `ticket_kind`, `ticket_severity`, `ticket_security` | the ticket's title, body (at most 2,000 characters) and project; never its status, dates, assignee or author |
 | `eval:<use_case>` | the same request the product use case builds, for a labelled case |
 
 **What is stored: no text.** gen_saas stores no state text for any judgment.
@@ -308,7 +319,9 @@ version, pinned model) hold at least one ENABLED row, produced by an eval run,
 for an **advisory label**: a label the use case may act on. A run where every
 label is n/a, or where only a non-advisory label is enabled, cannot turn a use
 case on. Finding triage's advisory labels are `duplicate` and `related`;
-`unrelated` is never advice, so an enabled `unrelated` alone does not count. A
+`unrelated` is never advice, so an enabled `unrelated` alone does not count.
+Every option of `ticket_kind`, `ticket_severity` and `ticket_security` is an
+advisory label, since the policy may act on each. A
 use case whose question set declares no advisory label cannot be turned on.
 **`shadow` is refused** unless the use case has a registered question set,
 because shadow makes real calls. **`off` is never refused.** A use case MAY
@@ -449,8 +462,16 @@ athena:ticket-management → *Before filing a finding*.
   list) and refuses any other request before sending it. It never closes,
   merges or cancels a ticket. The filer decides.
 - **The owner is the machine token's**; another owner's token judges with that
-  owner's key, or answers `not_configured`. Only `finding_triage` is served
-  over REST; any other use case is `not_found`.
+  owner's key, or answers `not_configured`. Over REST, `finding_triage` is
+  served at `POST /api/v1/judgments/finding_triage` and ticket classification
+  at its own path (*Ticket classification: the harness script*); any other
+  use case is `not_found`.
+
+  **Later (2026-09-28):** this read "Only `finding_triage` is served over
+  REST". Superseded by DND-991 (gen_saas PR #505), which serves ticket
+  classification at `POST /api/v1/judgments/ticket_classification` for
+  DND-1054's `ticket-classify` script. `finding_triage` is still the only use
+  case the generic `:use_case` path serves.
 - **The content domain is derived server-side from the project**, never taken
   from the caller: `athena` and `harness` are `blend`, `walt_ui` is `work`,
   `dnd`, `lms` and `admiral` are `personal`. An unknown project is judged with
@@ -487,6 +508,54 @@ athena:ticket-management → *Before filing a finding*.
   lines (`COULD NOT REACH SERVER`, `CANDIDATES UNAVAILABLE`), so neither reads
   as not configured or as no duplicates.
 
+## Ticket classification: the harness script
+
+The second product consumer (DND-991, DND-1054). The server is gen_saas
+`Athena.Judgments.TicketClassification` behind
+`POST /api/v1/judgments/ticket_classification`; the harness caller is
+`ai/skills/athena:ticket-management/scripts/ticket-classify`; the procedure is
+athena:ticket-management → *Filing a ticket* (the Classify bullet).
+
+- **The script writes nothing.** It has no tracker client: it reads no ticket
+  and writes to no tracker. The filer sets the properties. It adds no policy of
+  its own and prints what the server decided.
+- **The filer's values are required.** The caller sends its own `Kind`,
+  `Severity` and `Security` (tracker spelling; a `Feature` sends no Severity).
+  Every fallback answers with them, so a fallback is always defined and is
+  today's behaviour.
+- **The owner is the machine token's**, never the body's: the closed body
+  schema refuses any unlisted key, identity fields included.
+- **The content domain is derived server-side from the project**, as for
+  finding triage. An unknown project is judged with no domain, so each
+  property falls back as `domain_not_permitted`.
+- **The policy is the server's** (DND-991 → `TicketClassificationPolicy`).
+  An accepted judgment may set Kind (never over a filer's `Feature` or
+  `Vulnerability`), raise Security from `none`, and set Severity, but for a
+  security-relevant ticket never below the filer's. A decided `Vulnerability`
+  with Security `none` is lifted to `pre-existing`; when no judgment made the
+  ticket a Vulnerability, that lift's source is `policy`.
+- **The output is the server's decision**: one line per property with its
+  source, then the server's provenance line verbatim, which the filer pastes
+  into the ticket body. A source is `jev` (an accepted judgment set, raised or
+  confirmed it), `filer`, or `policy` (the policy changed the filer's value
+  with no judgment). A `filer` or `policy` value carries a reason: a reason
+  from *The closed reason list*, or one of four that are not fallbacks
+  (`shadow`, `policy_guard`, `vulnerability_floor`, `feature`). While the
+  feature is inert (every mode `off`) each property is the filer's with reason
+  `mode_off`, and the script exits 0.
+- **Unavailable is exit 3 with the filer's values.** An unreachable server, a
+  server that answered and refused (any 4xx; a 404 while the endpoint is not
+  deployed), and a 200 outside the judged shape each print their own first
+  line (`COULD NOT REACH SERVER`, `SERVER REFUSED THE REQUEST`,
+  `UNREADABLE SERVER ANSWER`), ending with
+  `Fix: file the ticket as today; this is advisory.` The filer's own values
+  follow under `Decided (filer; classification unavailable):`. None of the
+  three prints a provenance line, so none reads as a decision. A per-property
+  fallback inside a 200 is not unavailable: it is a decision with source
+  `filer`.
+- **The machine token never reaches argv or the environment**; it goes to curl
+  on stdin, as for finding triage.
+
 ## Budget
 
 **D3 (owner, 2026-09-25, RESOLVED): a dollar cap.** Cody, verbatim: "Let's put a
@@ -498,8 +567,17 @@ $10 / month cap".
 - **Daily pacing guard: $10 / days-in-month × 3** (about $0.97 in a 31-day
   month), so one day cannot spend the month. The day is the UTC day.
 - **Per-use-case shares** of both caps: `slack_routing` 10%, `finding_triage`
-  30%, `priority_scoring` 20%, `eval:*` 40%. A call must fit both its use case's
-  share and the total.
+  20%, `priority_scoring` 20%, `ticket_classification` 10%, `eval:*` 40%.
+  `ticket_classification` is one share group for `ticket_kind`,
+  `ticket_severity` and `ticket_security` together. A call must fit both its
+  use case's share and the total.
+
+  **Later (2026-09-28):** this read `finding_triage` 30% and had no
+  `ticket_classification` share. Superseded by DND-991 (decision J-991-5),
+  which takes 10% from finding triage for ticket classification. The $10
+  monthly total is unchanged. Measured basis: triage's eval run cost $0.039
+  for 601 cases, and classification is about three calls of ~1.2k tokens per
+  ticket.
 - **The check runs before the call.** Spend so far in the window plus the
   request's estimated cost must not exceed the cap. Spend is the sum of the
   recorded costs in the window.
@@ -568,5 +646,10 @@ with it.
       when 0, derives the content domain from the project server-side, and
       distinguishes not configured, an unreachable server and a failed
       candidate search.
+- [ ] Ticket classification writes nothing to any tracker, requires the
+      filer's values, prints the server's decision and provenance line, never
+      lowers a security classification or replaces `Feature`, and on an
+      unreachable server, a refusal or an unreadable answer exits 3 with a
+      distinct line and the filer's values.
 - [ ] A question set with several questions defines its eval case unit; a
       finding triage case is one (finding, candidate) pair.

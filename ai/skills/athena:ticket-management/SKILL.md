@@ -1,6 +1,6 @@
 ---
 name: athena:ticket-management
-description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only).
+description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only); when filing any ticket, run the ticket-classify script with your own Kind, Severity and Security and set the values it prints.
 ---
 
 # athena:ticket-management
@@ -334,12 +334,31 @@ The DND Tickets data source carries these. The values are stated here once.
   everything else.
 - **`Area`:** `Harness` when the fix lands in `~/dev/custom`; else `Product`.
 
+These definitions are the criteria the ticket-classification question sets
+restate (gen_saas `TicketKind`, `TicketSeverity`, `TicketSecurity`, DND-991).
+Changing one needs a new question-set version there.
+
 ### Filing a ticket
 
 - **Set every property.** A new ticket sets `Kind`, `Severity` (not on a
   Feature), `Security`, `Path`, `Area` and `Found while` (not on a planned
   Feature). On a tracker
   without them, write the values as the body's first line.
+- **Classify.** Write the draft body to a file, then run
+  `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-classify --title "<TITLE>" --body-file <FILE> --project <athena|harness|walt_ui|dnd|lms|admiral> --kind <KIND> --severity <SEVERITY|none> --security <none|introduced|pre-existing>`
+  with the values you would file (`--severity none` only on a Feature). It
+  prints the decided `Kind`, `Severity` and `Security`, each with its source,
+  then a `Jev classification:` line.
+  - **Exit 0:** set the three properties exactly as printed, and paste the
+    `Jev classification:` line into the body.
+  - **Exit 3:** the classification is unavailable. File with your own values,
+    and write the first line (it ends
+    `Fix: file the ticket as today; this is advisory.`) into the body instead.
+  - **Exit 2:** a usage error. Fix the command and rerun.
+  - The script reads no ticket and writes nothing (contract
+    `ai/contracts/athena-judgments.md` → *Ticket classification: the harness
+    script*). For a finding, run *Before filing a finding* first: triage, then
+    classify.
 - **Dedupe first (one root cause, one ticket).** Search open tickets in the
   same `Area` for the same root cause, by subsystem keyword and `Found while`.
   On a match, append the new site and its evidence to that ticket instead. A
