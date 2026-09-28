@@ -771,6 +771,12 @@ run "${EVAL}" --dry-run --use-case slack_routing --labels "${RLABELS}" --corpus 
 eq "judgment-eval joins rule_confirmed rows (exit 0)" "${RC}" "0"
 has "rule_confirmed default_walt_ui rows are usable eval cases [DND-717]" "${OUT}" "cases: 2 (walt_ui 2)"
 has "a session-mention root is not an eval case: the router never judges it [DND-717]" "${OUT}" "session-mention excluded: 1"
+jq -c 'select(.id=="EvM1")' "${RLABELS}" >"${TMP}/mention-only.jsonl"
+run "${EVAL}" --dry-run --use-case slack_routing --labels "${TMP}/mention-only.jsonl" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
+eq "a run whose every label is a session-mention root is refused (exit 1) [DND-717]" "${RC}" "1"
+has "... naming why: the router never judges those roots, not a failed join" "${ERR}" "every joined label is a session-mention root (1)"
+has "... with Fix:" "${ERR}" "Fix:"
+lacks "... and not the generic join refusal" "${ERR}" "no label joined the corpus"
 run "${BIN}" --confirm --rule-default --labels "${RLABELS}"
 eq "--rule-default outside --propose is a usage error" "${RC}" "2"
 has "that usage error carries Fix:" "${ERR}" "Fix:"
