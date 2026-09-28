@@ -166,6 +166,14 @@ end
 OFFLINE_NOTE = "  Note: the bar is what landed on origin, so an offline machine, or one with no " \
                "inbox that cannot reach origin, exits 3 (could not measure), never 0."
 
+# Who may run the installer a Fix: names. The gate runs in every captain's
+# worktree, so without this a captain that hit drift mid-gate could follow the
+# Fix: and edit machine state unasked (the DND-864 fix3 class, 2026-09-28).
+INSTALLER_WHO = "Who runs it: a session on this machine that its own owner turn or its own " \
+                "admiral's brief authorizes (~/.claude/CLAUDE.md -> Owner approval policy -> " \
+                "Notify after). A captain or other subagent without that brief reports it to its " \
+                "admiral instead and does not run the installer."
+
 def unmeasured(lines)
   warn "check-inbox-registry: COULD NOT MEASURE — this is not a pass."
   lines.each { |l| warn l }
@@ -205,6 +213,7 @@ def run(landed: -> { landed_entries })
       warn "Fix: run `scripts/setup-inbox-registry --install` from the MAIN checkout to recreate " \
            "the root and the declared entries. If this machine should no longer be a tenant, " \
            "remove its entry from #{REGISTRY_REL} and land that."
+      warn INSTALLER_WHO
       report_pending(pending, $stderr)
       return EXIT_FAIL
     end
@@ -236,6 +245,7 @@ def run(landed: -> { landed_entries })
        "the committed file is the source of truth, and a live entry that exists " \
        "nowhere in git is exactly the state this check exists to prevent. A change " \
        "only this branch makes is listed as pending below and is never the cause."
+  warn INSTALLER_WHO
   report_pending(pending, $stderr)
   EXIT_FAIL
 end
@@ -261,6 +271,19 @@ def self_test
       $stdout.close
       $stdout, $stderr = o, e
     end
+  end
+
+  capture = lambda do |&blk|
+    require "stringio"
+    o, e = $stdout, $stderr
+    buf = StringIO.new
+    $stdout = $stderr = buf
+    begin
+      blk.call
+    ensure
+      $stdout, $stderr = o, e
+    end
+    buf.string
   end
 
   Dir.mktmpdir("check-inbox-registry-selftest") do |dir|
@@ -306,6 +329,10 @@ def self_test
     File.chmod(0o600, path)
     d = InboxRegistry.drift
     check.call("hand-edited entry -> drift names it", d.size == 1 && d.first.include?("demo.json") && d.first.include?("channels"))
+    # The Fix: names who may run the installer, so a captain that hits it
+    # mid-gate reports instead of editing machine state (DND-864 fix3).
+    check.call("drift Fix: says a subagent reports it to its admiral",
+               capture.call { run(landed: as_landed.call(src)) }.include?("reports it to its admiral"))
 
     # 5. A wrong file mode is drift on its own (0600 is a contract MUST).
     File.write(path, InboxRegistry.render(entry))
@@ -366,6 +393,8 @@ def self_test
     File.write(src, JSON.pretty_generate({ "projects" => [{ "file" => "here.json", "entry" => here }] }))
     FileUtils.rm_rf(root)
     check.call("absent root + a declared repo checked out here -> exit 1", go.call == 1)
+    check.call("absent-root Fix: says a subagent reports it to its admiral",
+               capture.call { run(landed: as_landed.call(src)) }.include?("reports it to its admiral"))
 
     # 13. A malformed source of truth exits 2 (a code error, not machine state).
     File.write(src, "{ not json")

@@ -297,6 +297,14 @@ OFFLINE_NOTE = "  Note: the bar is what landed on origin, so an offline machine 
                "file exits 3 (could not measure). Only a machine with no settings file passes " \
                "without origin."
 
+# Who may run the installer a Fix: names. The gate runs in every captain's
+# worktree, so without this a captain that hit drift mid-gate followed the
+# Fix: and edited the machine's settings unasked (DND-864 fix3, 2026-09-28).
+INSTALLER_WHO = "  Who runs it: a session on this machine that its own owner turn or its own " \
+                "admiral's brief authorizes (~/.claude/CLAUDE.md -> Owner approval policy -> " \
+                "Notify after). A captain or other subagent without that brief reports it to its " \
+                "admiral instead and does not run the installer."
+
 # The settings hash at path. Raises RegistryError when it is not a JSON object.
 def load_settings(path)
   data = JSON.parse(File.read(path))
@@ -418,6 +426,7 @@ def report_failures(path, broken, dangle, drift, pending, stale = [])
          "it adds each missing (event, matcher, script) row). If a hook was intentionally retired or " \
          "its matcher changed, change #{REGISTRY_REL} and land that; if main already did so after " \
          "your merge-base, rebase onto origin/main."
+    warn INSTALLER_WHO
   end
   unless stale.empty?
     warn "  #{stale.size} wiring(s) in #{path} use a matcher neither the landed nor this branch's " \
@@ -426,6 +435,7 @@ def report_failures(path, broken, dangle, drift, pending, stale = [])
     warn "  Fix: run `scripts/setup-hooks --install` from the MAIN checkout; it replaces a stale " \
          "matcher, touching only that registry script's wiring on that event. If the matcher is " \
          "intended, declare it in #{REGISTRY_REL} and land that."
+    warn INSTALLER_WHO
   end
   report_pending(pending, $stderr)
 end
@@ -489,6 +499,10 @@ def matcher_key_cases(check)
     check.call("one of two same-script rows removed -> drift (exit 1)", rc == EXIT_FAIL)
     check.call("the drift line names the missing matcher and script",
                out.include?('"Edit|Write"') && out.include?(script))
+    # The drift Fix: names who may run the installer, so a captain that hits it
+    # mid-gate reports instead of editing the machine's settings (DND-864 fix3).
+    check.call("the drift Fix: says a subagent reports it to its admiral",
+               out.include?("reports it to its admiral"))
 
     rc, out = probe.call(two, two, ["Edit|Write"])
     check.call("the other row removed -> drift naming it",
@@ -500,6 +514,9 @@ def matcher_key_cases(check)
     rc, out = probe.call(two, two, ["Bash|Edit|Write"])
     check.call("combined matcher where the registry has two rows -> drift, named stale",
                rc == EXIT_FAIL && out.include?('"Bash|Edit|Write"') && out.include?("stale"))
+    rc, out = probe.call(two, two, ["Bash", "Edit|Write", "Other"])
+    check.call("the stale-only Fix: says a subagent reports it to its admiral",
+               rc == EXIT_FAIL && !out.include?("NOT wired") && out.include?("reports it to its admiral"))
     rc, out = probe.call(two, two, ["Bash", "Edit|Write", "Other"])
     check.call("declared rows wired plus an undeclared matcher -> stale (exit 1)",
                rc == EXIT_FAIL && out.include?('"Other"') && out.include?("stale"))
