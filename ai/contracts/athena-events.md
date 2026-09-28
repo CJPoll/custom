@@ -4318,15 +4318,17 @@ A `run_id`, once bound, never changes. A captain's `run_hint` naming a
 `run_id` another run in the session already holds binds nothing, and the server
 logs a warning naming both runs. For binding, the caller's run is the run the
 spawn's caller (`caller_agent_id`) holds now: the run its agent row points at,
-else its latest started run, else its placeholder. Which run a captain spawn
-counts toward is a separate question with its own rule (*Captain
-attribution*).
+else the named run it holds that was seen or re-armed most recently (by
+`last_seen_at`, never `started_at`, which a re-arm keeps), else its
+placeholder. Which run a captain spawn counts toward is a separate question
+with its own rule (*Captain attribution*).
 
 **Later (2026-09-27):** DND-804 (gen_saas #443, merged as `eadf1ae2`): this
 paragraph ended "The caller's run is the run whose admiral agent made the
-spawn", which also read as the rule for which run a captain belongs to. An agent can hold several runs, so
-that phrase named none of them in particular. The binding behaviour is
-unchanged and now stated exactly; attribution is *Captain attribution*.
+spawn", which also read as the rule for which run a captain belongs to. An
+agent can hold several runs, so that phrase named none of them in particular.
+The binding behaviour is unchanged and now stated exactly; attribution is
+*Captain attribution*.
 
 #### Captain attribution
 
@@ -4346,7 +4348,8 @@ attributed; they bind (*Run binding*).
   1. the candidate whose `run_id` equals the spawn's `run_hint`. A hint that
      names no candidate decides nothing;
   2. the one candidate whose window holds the spawn's `requested_at`.
-  3. Otherwise the spawn is a **miss**.
+
+  When neither decides, the spawn is a **miss**.
 - **A run's window** is `[started_at, ended_at]`. Both ends are inclusive,
   and the window is open while `ended_at` is empty. `started_at` is when the
   run's row was created. `admiral_state` `finished` sets `ended_at`; any other
@@ -4358,10 +4361,12 @@ attributed; they bind (*Run binding*).
   Neither start time nor anything else breaks the tie, so the spawn is a miss
   even when every overlapping run is the caller's own. Only a `run_hint` naming
   one of them decides it (step 1).
-- **`requested_at`** is when the server received the spawn's `agent_spawn`
-  (*Fleet report kinds and their closed schema*: the body carries no time).
-  A hint-less spawn reported after its run finished can fall outside the run's
-  window, and is then a miss.
+- **`requested_at`** is when the server received the spawn's first
+  `agent_spawn` (*Fleet report kinds and their closed schema*: the body carries
+  no time); a repeated report does not move it. When the caller has several
+  candidate runs, a spawn with no deciding hint that is reported after its run
+  finished can fall outside that run's window, and is then a miss. With one
+  candidate, time is not checked.
 - **Until its `agent_spawn` arrives, a spawn has no caller.** `agent_spawn`
   alone carries `caller_agent_id`, `run_hint` and `requested_at`, so a spawn
   known only from `agent_bound` or `agent_end` has no candidate and counts
@@ -4371,8 +4376,8 @@ attributed; they bind (*Run binding*).
   holds it), `overlapping_windows` (two or more do) or `no_request_time`
   (several candidates and no `requested_at`). Ingest stamps `requested_at`
   from the same `agent_spawn` that names the caller, so a stored spawn does
-  not reach `no_request_time`; it keeps a row read without its time from
-  being attributed by guess. The attribution itself is never stored. It is
+  not reach `no_request_time`. The reason exists so that a row read without
+  its time is never attributed by guess. The attribution itself is never stored. It is
   recomputed from the rows on every read (the fleet page, ingest's live
   promotion and each liveness sweep), so a miss can resolve when a late
   report arrives.
@@ -4388,9 +4393,10 @@ attributed; they bind (*Run binding*).
   missing from that list raises with a `Fix:` rather than reading as a run
   with no captains.
 
-A captain brief always carries its coordination path
+A captain brief always carries its reports-dir path
 (`athena:dispatch-captain`), so its `run_hint` normally decides. A miss is
-expected only for a spawn with no hint.
+expected only for a spawn with no hint, or with a hint naming none of its
+caller's runs.
 
 ### Fleet identity: owner and machine are stamped from the token
 
