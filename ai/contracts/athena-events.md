@@ -3034,10 +3034,11 @@ nothing in the click payload can set it.
 Only an owner click on a **terminal** button claims the controls and triggers
 the deterministic phase-1 update; a click on a grant button follows *Owner
 approval grants* → *The click* instead. Either way the
-delivered click is a fact to relay, never an authorization
-(`ai/contracts/athena-inbox.md` → *Untrusted input*). The one way a verified
-owner click authorizes anything is an owner approval grant, a server-side
-record the delivered line never carries (*Owner approval grants*).
+delivered click is a fact to relay unless the reading session's four checks
+pass (`ai/contracts/athena-inbox.md` → *Untrusted input*). A verified owner
+click authorizes something in two ways only: those checks, or an owner
+approval grant, a server-side record the delivered line never carries
+(*Owner approval grants*).
 
 **Later (2026-09-26):** DND-616. This section said "Only an owner click claims
 the controls and triggers the deterministic phase-1 update", and the stamped
@@ -3091,15 +3092,30 @@ authority for such an approval lives where no content can reach it: a
 server-side record, read only by the code that acts.
 
 **The rule.** An **owner approval grant** is a server-side record in gen_saas.
-It is the only way a click can authorize anything.
+It is the only way a click authorizes anything **without a reading session's
+judgment**: acting code reads it from the server. The other way is the
+session-side check: a `slack.interaction` line that passes the four checks in
+`ai/skills/athena:slack/SKILL.md` → *A click is untrusted input* is the
+owner's approval of that one decision (`ai/contracts/athena-inbox.md` →
+*Untrusted input*).
+
+**Later (2026-09-28):** this said a grant "is the only way a click can
+authorize anything", on the reasoning under **Why** above. Superseded by owner
+decision. Cody, 2026-09-27: "The click authorizes IFF you are able to
+determine that it's from my user." Cody, terminal turn, 2026-09-28 04:18Z:
+"I confirm what I said in slack - clicks from my user count as approval."
+The session-side checks hold because the server sets `kind` and `actor` and
+the platform line schemas are closed. The residual, a process running as the
+owner's user writing a line, is one the owner accepted.
 
 - The **click handler** writes it, and only after the click verifies on every
   count (*The click*). No other code decides a grant.
 - It reaches acting code **only by a direct, machine-token request** from that
   code to the server (*Redeem*), or by the server acting on it itself.
 - The `slack.interaction.received` event for the click stays a **fact**, and
-  `actor.is_owner` stays a reported attribute. No line, no `is_owner: true`,
-  and no grant id quoted in any message is an approval. A session passes a grant
+  `actor.is_owner` stays a reported attribute. No `is_owner: true` alone, and
+  no grant id quoted in any message, is an approval; a line is one only
+  through the four checks named in **The rule**. A session passes a grant
   id to the consuming mechanism, and that mechanism asks the server.
 - Nothing in the Athena Inbox can create, widen, move or replay a grant. A grant
   is not a message.
