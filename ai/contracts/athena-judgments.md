@@ -457,9 +457,10 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   counted). A root that an R4 forward record names is `forward_record`. With
   `--propose --rule-default`, a root nothing else labels is `walt_ui`,
   `rule_confirmed` with `"rule": "default_walt_ui"` (the owner's rule 3);
-  without it that root stays `proposed`. `--confirm` presents
-  `rule_confirmed` rows with the `proposed` ones, and the owner's answer
-  replaces them. An agent never writes `owner_confirmed`. A session-addressed
+  without it that root stays `proposed`. `--confirm` presents the
+  `default_walt_ui` rows with the `proposed` ones, and the owner's answer
+  replaces them; it never presents a `session_mention` row, which no run
+  scores. An agent never writes `owner_confirmed`. A session-addressed
   root is routed by the rule and never judged, so `judgment-eval` leaves it
   out of a `slack_routing` run, whatever its provenance, and counts it
   (`session-mention excluded: N`): its label records the router's rule, not

@@ -77,8 +77,10 @@ USAGE = <<~EOF
                   session, over a forward record that disagrees (counted);
                 - rule 3, default_walt_ui, only with --rule-default: a root
                   no other evidence labels is walt_ui.
-              A rule_confirmed row enters the eval; --confirm presents it
-              with the proposed rows, and the owner's answer replaces it.
+              A default_walt_ui row enters the eval, and --confirm presents
+              it with the proposed rows; the owner's answer replaces it. A
+              session_mention row does neither: the router routes that root
+              by rule and never judges it, so judgment-eval leaves it out.
   --confirm   Show the proposed rows ONE message at a time, at a terminal, and
               record the owner's answer as owner_confirmed. Keys: w walt_ui,
               h harness, g gen_saas, u unclear, Enter keeps the proposal,

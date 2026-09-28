@@ -336,9 +336,10 @@ module JudgmentLabel
   end
 
   # pending(rows, mode) -> the rows a confirm mode presents, in file order.
-  #   :proposed  rows the owner has not answered: proposed, and rule_confirmed
-  #              (the owner's rule applied mechanically; the owner's own
-  #              answer replaces it)
+  #   :proposed  rows the owner has not answered: proposed, and
+  #              rule_confirmed default_walt_ui (the owner's rule applied
+  #              mechanically; the owner's own answer replaces it). A
+  #              session_mention row is never shown: no run scores it.
   #   :forward   forward_record rows, for the owner to review
   #   :recheck   owner_confirmed rows whose context was not shown (confirmed
   #              before DND-1047, or while Slack was unreachable); their
