@@ -343,7 +343,9 @@ The DND Tickets data source carries these. The values are stated here once.
 - **Dedupe first (one root cause, one ticket).** Search open tickets in the
   same `Area` for the same root cause, by subsystem keyword and `Found while`.
   On a match, append the new site and its evidence to that ticket instead. A
-  different defect in the same subsystem still gets its own ticket.
+  different defect in the same subsystem still gets its own ticket. For a
+  finding, also run *Before filing a finding* (the Jev advisory); it informs
+  this search and never replaces it.
 
 ### Promote and won't-fix
 
@@ -425,9 +427,11 @@ harness script*):
 4. **Never auto-close, auto-merge or auto-cancel** anything on the strength of it,
    the new ticket or the candidate. The script writes nothing to Notion.
 5. **When it is unavailable, file as today.** Exit 3 prints one line ending
-   `Fix: file the ticket as today; this is advisory.` Today every call prints
-   `JUDGMENTS UNAVAILABLE: not_configured`, because the feature ships inert (no key,
-   mode off; DND-711 is the owner's step). `COULD NOT REACH SERVER` and
+   `Fix: file the ticket as today; this is advisory.` While `finding_triage`'s
+   mode is `off` every call prints `JUDGMENTS UNAVAILABLE: not_configured`. The
+   owner's key exists (DND-711), but the contract refuses mode `on` without an
+   eval-produced threshold (post-key verification is DND-714). An unknown `--project` prints `domain_not_permitted`.
+   `COULD NOT REACH SERVER` and
    `CANDIDATES UNAVAILABLE` mean the same for filing: file it.
 
 Exit 2 is a usage error: fix the command and rerun. If the Notion search cannot
