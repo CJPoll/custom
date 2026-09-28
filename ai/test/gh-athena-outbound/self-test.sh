@@ -224,7 +224,12 @@ OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && XDG_STATE_HOME="${TMP}/state" ATHENA
 if [ "${RC}" = 0 ] && sent "pr create" && [[ "${OUT}" == *"WAIVED - NOT SCANNED"* ]] && [[ "${OUT}" != *"CLEAN"* ]]; then ok "waiver"; else bad "waiver" "rc=${RC} ${OUT}"; fi
 
 echo "--- overlay ABSENT on an unmarked machine: sent with a loud UNSCANNED warning ---"
-OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && env -u ATHENA_PRIVATE_ROOT "${WRAPPER}" pr create --body "x" 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+# Hermetic: the mark is read from the wrapper's OWN checkout's hooks dir, so the
+# case runs a copy of ai/bin + ai/lib inside a fixture repo with no pre-push
+# hook, never this checkout (whose common .git/hooks is the host's).
+UM="${TMP}/unmarked"; git init -q "${UM}"; mkdir -p "${UM}/ai"
+cp -r "${AI_DIR}/bin" "${AI_DIR}/lib" "${UM}/ai/"
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && env -u ATHENA_PRIVATE_ROOT "${UM}/ai/bin/gh-athena" pr create --body "x" 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
 if [ "${RC}" = 0 ] && sent "pr create" && [[ "${OUT}" == *"COULD NOT MEASURE"* ]] && [[ "${OUT}" == *"went out UNSCANNED"* ]] \
    && [[ "${OUT}" == *"not a clean result"* ]] && [[ "${OUT}" != *"CLEAN mode"* ]]; then
   ok "absent + unmarked: sent, warned"
