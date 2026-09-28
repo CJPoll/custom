@@ -703,6 +703,75 @@ stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"; record_pass "$R"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$out" && ok "c30 ignored files are not dirt" || bad "c30 ignored file refused (rc=$rc)" "$out"
 
+# ---------------------------------------------------------------- case 31
+# DND-1010 REUSE. A second run on the SAME head, SAME target SHA, SAME gate,
+# with a clean-tree pass whose gate ran < 1 h ago, does not re-run the gate --
+# and says so. Any changed input re-runs it.
+R="${TMP}/c31"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"; record_pass "$R"
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ -f "${R}/GATE_RAN" ] && ok "c31 first run gates and passes" || bad "c31 first run (rc=$rc)" "$out"
+jq -e '.tree_clean == true and (.gate_ran_at | test("^[0-9]{4}-"))' "$rf" >/dev/null 2>&1 \
+  && ok "c31 receipt records tree_clean and gate_ran_at" || bad "c31 receipt fields" "$(cat "$rf" 2>&1)"
+ran1="$(jq -r '.gate_ran_at' "$rf" 2>/dev/null)"
+rm -f "${R}/GATE_RAN"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ ! -f "${R}/GATE_RAN" ] && grep -q 'gate REUSED' <<<"$out" \
+  && ok "c31 identical second run reuses the pass (gate not re-run) and says so" || bad "c31 reuse (rc=$rc ran=$([ -f "${R}/GATE_RAN" ] && echo yes || echo no))" "$out"
+grep -q "^INTEGRATION OK ${head_sha} (GATE: .*REUSED pass that ran ${ran1})" <<<"$out" \
+  && ok "c31 OK line names the reuse and when the gate ran" || bad "c31 OK line" "$out"
+[ "$(jq -r '.gate_ran_at' "$rf" 2>/dev/null)" = "$ran1" ] \
+  && ok "c31 a reuse carries the original gate_ran_at (cannot extend its window)" || bad "c31 gate_ran_at moved" "$(cat "$rf")"
+# The verdict is still read fresh: a BLOCK recorded since the pass is refused.
+record_verdict "$R" block
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "c31 a reused gate does not reuse the critic: a new BLOCK is refused" || bad "c31 reuse skipped the verdict (rc=$rc)" "$out"
+# Each changed input forces a real run. Re-seed a clean pass each time.
+reseed() { record_pass "$R"; rm -f "${R}/GATE_RAN"; ( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" >/dev/null 2>&1 ); rm -f "${R}/GATE_RAN"; }
+must_rerun() { # <label> <jq edit of the receipt> [gate]
+  reseed; jq "$2" "$rf" > "${rf}.x" && mv "${rf}.x" "$rf"
+  o="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${3:-${R}/g.sh}" 2>&1 )"; c=$?
+  if [ "$c" -eq 0 ] && [ -f "${R}/GATE_RAN" ] && ! grep -q 'gate REUSED' <<<"$o"; then ok "c31 re-runs when $1"; else bad "c31 reused when $1 (rc=$c)" "$o"; fi
+}
+must_rerun "the target SHA differs" '.base = "0000000000000000000000000000000000000000"'
+must_rerun "the gate ran over an hour ago" '.gate_ran_at = "2000-01-01T00:00:00Z"'
+must_rerun "the receipt predates tree_clean" 'del(.tree_clean)'
+must_rerun "the gate ran in the future (clock skew)" '.gate_ran_at = "2999-01-01T00:00:00Z"'
+must_rerun "the prior pass used a critic override" '.critic_override = "x"'
+cp "${R}/g.sh" "${R}/g2.sh"; printf '/g2.sh\n' >> "${R}/.git/info/exclude"
+must_rerun "the gate command differs" '.' "${R}/g2.sh"
+
+# ---------------------------------------------------------------- case 32
+# DND-1010 --with-critic. The judge runs beside the gate; the verdict step
+# then reads its receipt exactly as it would have. Stubbed via critic-review's
+# own CRITIC_REVIEW_STUB hook, so the real receipt writer and reader run.
+printf 'looks good\nFINDINGS: none\n' > "${TMP}/critic-pass"
+printf 'bad\nFINDINGS: correctness\n' > "${TMP}/critic-block"
+R="${TMP}/c32"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"   # no verdict recorded
+out="$( cd "$R" && CRITIC_REVIEW_STUB="${TMP}/critic-pass" "$GATE" --target main --no-fetch --gate "${R}/g.sh" --with-critic 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ -f "${R}/GATE_RAN" ] && grep -q '^INTEGRATION OK' <<<"$out" \
+  && ok "c32 --with-critic: judge + gate both run, a PASS lands INTEGRATION OK" || bad "c32 with-critic pass (rc=$rc)" "$out"
+grep -q 'beside the gate' <<<"$out" && ok "c32 says the judge ran beside the gate" || bad "c32 no concurrency line" "$out"
+out="$( cd "$R" && CRITIC_REVIEW_STUB="${TMP}/critic-block" "$GATE" --target main --no-fetch --gate "${R}/g.sh" --with-critic 2>&1 )"; rc=$?
+grep -q 'not re-run' <<<"$out" && ok "c32 a PASS already recorded for the head is not re-judged" || bad "c32 re-judged a PASS" "$out"
+R="${TMP}/c32b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+out="$( cd "$R" && CRITIC_REVIEW_STUB="${TMP}/critic-block" "$GATE" --target main --no-fetch --gate "${R}/g.sh" --with-critic 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ! grep -q '^INTEGRATION OK' <<<"$out" && ok "c32 a BLOCK from the concurrent judge is refused (exit 3)" || bad "c32 block (rc=$rc)" "$out"
+R="${TMP}/c32c"; new_repo "$R"
+stub_gate_pair "${R}/gp.sh"
+( cd "$R" && echo a > a.txt && git add a.txt && git commit -qm a && git checkout -qb feature && echo b > b.txt && git add b.txt && git commit -qm b )
+out="$( cd "$R" && CRITIC_REVIEW_STUB="${TMP}/critic-block" "$GATE" --target main --no-fetch --gate "${R}/gp.sh" --with-critic 2>&1 )"; rc=$?
+[ "$rc" -eq 1 ] && grep -q 'FINDINGS: correctness\|critic-review: BLOCKED' <<<"$out" \
+  && ok "c32 a RED gate still joins the judge: one round returns both results" || bad "c32 red gate + judge (rc=$rc)" "$out"
+[ -z "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'integration-gate-critic.*' -newer "${TMP}/critic-pass" 2>/dev/null)" ] \
+  && ok "c32 the judge's temp log is removed" || bad "c32 temp log left behind"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

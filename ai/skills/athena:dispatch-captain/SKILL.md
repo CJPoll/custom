@@ -144,6 +144,17 @@ Give the captain, in the brief:
   timed out after 900 s of its 1500 s spent queued, and DND-790's timed out with
   3/3 slots held and the gate never run. Bound the wait with
   `--wait-timeout` instead.
+- **The one-command final check.** Every brief carries this line: *"Your
+  final check is ONE command on your final commit: `cd <worktree> &&
+  ~/dev/custom/ai/bin/test-slot -- timeout 1500
+  ~/dev/custom/ai/bin/integration-gate --with-critic`. It runs the standing
+  judge beside the gate, so it costs the slower of the two, not their sum. It
+  refuses a dirty tree, and it records both receipts I land on. Quote its
+  INTEGRATION OK line. On a RED gate or a BLOCK, fix every finding from both
+  in one round, commit, and run it again."* It replaces a separate
+  `critic-review` then gate on the final commit. When `origin/main` has not
+  moved by landing, the admiral's re-run reuses this pass in seconds
+  (`athena:merge-boarding` → *Landing onto a moving main*).
 - **The don't-chase-main rule.** Every brief carries this line: *"Your gate bar
   is ONE green gate on a head that contained `origin/main` when the gate
   started. If main moves after that, do not rebase and re-gate to catch it:

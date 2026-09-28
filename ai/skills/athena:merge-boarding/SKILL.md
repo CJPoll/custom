@@ -303,7 +303,26 @@ exists on `origin/main` is the repo's declared gate, and it always runs. Omit
 `--gate 'cd backend && mix test'`). A command that can never fail — `true`, `:`,
 `exit 0`, `echo …`, an empty string, or a real check masked by `|| true`,
 `; true` or a trailing `&` — is refused (exit 2). "The gate already ran on this
-head" is not a reason to skip it: the integrated head is the one being judged.
+head" is not a reason for YOU to skip it: the integrated head is the one being
+judged, so always run `integration-gate`. The tool itself may reuse a pass, and
+only one that is the same check on the same inputs. That means a receipt for
+this exact head, on this exact target SHA, with the same gate and source, from
+a clean tree, with no override or approval, whose gate ran within the hour. It
+prints `gate REUSED`, and the OK line names when the gate ran. The judge's
+verdict and the blast radius are always read fresh.
+
+**Later (2026-09-28, DND-1010):** this said the gate is never skipped. It is
+now skipped only by `integration-gate`'s own identical-input reuse above,
+because re-running the same check on the same inputs cost minutes per landing
+and bought nothing. A caller still never skips it.
+
+**Run the judge beside the gate: `integration-gate --with-critic`.** It starts
+`critic-review --base <target>` on this head concurrently with the gate,
+unless a PASS is already recorded, joins it even on a RED gate, and then reads
+the verdict exactly as without the flag. Use it for a captain's final check and
+after every rebase (a new SHA needs both a new gate and a new verdict). It
+changes the wall time, max(gate, critic) instead of the sum, and nothing
+else.
 (DND-479: `--gate true` on gen_saas PR #337 printed `INTEGRATION OK` exactly like
 a real run.) A branch that edits its own gate still runs its own copy, but the
 run warns and the OK line says `EDITED BY THIS BRANCH` — review that diff.

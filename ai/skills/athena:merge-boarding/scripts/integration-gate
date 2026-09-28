@@ -36,6 +36,7 @@ PROG="integration-gate"
 TARGET="origin/main"
 GATE_CMD=""
 DO_FETCH=1
+WITH_CRITIC=0
 SINCE=""
 CRITIC_OVERRIDE=""
 OVERRIDE_STATE=""
@@ -76,6 +77,20 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    from, and marks it EDITED BY THIS BRANCH when the branch
                    changes the gate script itself.
   --no-fetch       skip the fetch; compare against the target ref as-is
+  --with-critic    also run the standing judge (critic-review --base <target>)
+                   on this head, CONCURRENTLY with the gate, unless a PASS is
+                   already recorded for it. Both finish before the verdict
+                   step reads the judge's receipt exactly as without the flag,
+                   so wall time is max(gate, critic), not the sum. On a RED
+                   gate the critic is still joined, so one round returns both
+                   sets of findings.
+
+Reuse of an identical pass (DND-1010): the gate is NOT re-run when this
+head's receipt already records a pass of this exact head, on this exact
+target SHA, with this exact gate and source, on a clean tree, with no
+override or approval, whose gate ran within the last hour. The same inputs
+give the same check; the OK line says REUSED and names when it ran. The
+judge's verdict and the blast radius are always read fresh.
   --critic-override <reason>
                    merge WITHOUT a standing-judge verdict on this head -- and
                    ONLY that: the receipt is read first either way, and a
@@ -116,6 +131,7 @@ while [ $# -gt 0 ]; do
     --since)  SINCE="${2-}"; [ -n "$SINCE" ] || { echo "${PROG}: --since needs a ref." >&2; echo "Fix: pass the target SHA your branch was last gated against, e.g. --since 2e0eff3." >&2; exit 2; }; shift 2 ;;
     --gate)   GATE_CMD="${2-}"; [ -n "$GATE_CMD" ] || { echo "${PROG}: --gate needs a command." >&2; echo "Fix: pass a command, e.g. --gate 'ai/bin/harness-gate'." >&2; exit 2; }; shift 2 ;;
     --no-fetch) DO_FETCH=0; shift ;;
+    --with-critic) WITH_CRITIC=1; shift ;;
     --critic-override) CRITIC_OVERRIDE="${2-}"; [ -n "$CRITIC_OVERRIDE" ] || { echo "${PROG}: --critic-override needs a REASON." >&2; echo "Fix: pass why you are merging with no judge verdict, e.g. --critic-override 'model unreachable for 3 re-runs; hotfix cannot wait'. An unrecorded bypass is the exact failure this flag exists to replace. Note it cannot cover a recorded BLOCK -- that is refused with or without the flag." >&2; exit 2; }; shift 2 ;;
     --owner-approval) OWNER_APPROVAL="${2-}"; [ -n "$OWNER_APPROVAL" ] || { echo "${PROG}: --owner-approval needs the OWNER'S AUTHORIZATION." >&2; echo "Fix: pass a verifiable record of the owner's own words: --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>' (see --help). An empty value is not an approval, and no agent message is ever your user's consent." >&2; exit 2; }; shift 2 ;;
     --self-test)
@@ -123,7 +139,7 @@ while [ $# -gt 0 ]; do
       exec bash "$(dirname "${HERE}")/test/self-test.sh" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "${PROG}: unknown argument '$1'." >&2
-       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --critic-override, --owner-approval, --self-test." >&2
+       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --with-critic, --critic-override, --owner-approval, --self-test." >&2
        exit 2 ;;
   esac
 done
@@ -179,13 +195,22 @@ RECEIPT_TMP=""
 # A run that does not end in INTEGRATION OK leaves no pass for its head. The
 # up-front removal covers a run that is killed; the EXIT trap covers a pass
 # another run recorded for this head while this one went RED.
+# A pass recorded earlier for this head is read BEFORE it is cleared: step 8
+# may reuse it (DND-1010) when every input that decides the gate is the same.
+PRIOR_RECEIPT=""
+[ -f "$RECEIPT" ] && PRIOR_RECEIPT="$(cat "$RECEIPT" 2>/dev/null || true)"
 if ! rm -f "$RECEIPT" 2>/dev/null; then
   echo "${PROG}: could not remove the earlier receipt ${RECEIPT}." >&2
   echo "Fix: make ${RECEIPT_DIR} writable (ls -ld '${RECEIPT_DIR}') and re-run. A stale pass this run cannot clear would outlive its result." >&2
   exit 5
 fi
+CRITIC_PID=""; CRITIC_LOG=""
 clear_receipt_on_failure() {
   local rc=$?
+  # A --with-critic judge still running when this script dies must not be
+  # orphaned (the PT-919 class): stop it with us.
+  [ -n "$CRITIC_PID" ] && kill "$CRITIC_PID" 2>/dev/null
+  [ -n "$CRITIC_LOG" ] && rm -f "$CRITIC_LOG" 2>/dev/null
   [ -n "$RECEIPT_TMP" ] && rm -f "$RECEIPT_TMP" 2>/dev/null
   [ "$rc" -ne 0 ] && rm -f "$RECEIPT" 2>/dev/null
   return "$rc"
@@ -462,8 +487,53 @@ if [ -n "$DIRT" ]; then
   echo "Fix: commit the paths above (or remove them, or gitignore build output), then re-run. A pass on uncommitted content is not a pass of $(short "$HEAD_SHA")." >&2
   exit 2
 fi
-echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA"): ${GATE_LABEL}"
-if ! ( cd "$ROOT" && eval "$GATE_CMD" ); then
+CRITIC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/critic-review"
+if [ "$WITH_CRITIC" -eq 1 ]; then
+  if [ ! -x "$CRITIC" ]; then
+    echo "${PROG}: --with-critic cannot locate critic-review (expected ${CRITIC})." >&2
+    echo "Fix: run this script from its committed path under ~/dev/custom, or drop --with-critic and run ~/dev/custom/ai/bin/critic-review yourself." >&2
+    exit 3
+  fi
+  if "$CRITIC" --verdict-for "$HEAD_SHA" >/dev/null 2>&1; then
+    echo "${PROG}: --with-critic: a PASS is already recorded for $(short "$HEAD_SHA"); the judge is not re-run."
+  else
+    CRITIC_LOG="$(mktemp "${TMPDIR:-/tmp}/integration-gate-critic.XXXXXX")"
+    echo "${PROG}: --with-critic: running the standing judge on $(short "$HEAD_SHA") beside the gate (log ${CRITIC_LOG})"
+    ( cd "$ROOT" && exec "$CRITIC" --base "$TARGET" ) >"$CRITIC_LOG" 2>&1 &
+    CRITIC_PID=$!
+  fi
+fi
+# Joins the concurrent judge and prints its verdict lines. Called on every path
+# out of the gate step, so a RED gate still returns the judge's findings.
+join_critic() {
+  [ -n "$CRITIC_PID" ] || return 0
+  wait "$CRITIC_PID" 2>/dev/null
+  CRITIC_PID=""
+  grep -E '^critic-review:|^FINDINGS:' "$CRITIC_LOG" >&2 || tail -5 "$CRITIC_LOG" >&2
+}
+
+# REUSE (DND-1010). Every input that decides the gate is in the receipt: the
+# head's content, the target SHA the landed pins come from, the gate command
+# and its source, and a clean tree (DND-1011). When all match, re-running is
+# the same check on the same inputs. gate_ran_at is carried from the run that
+# actually executed, so a reuse can never extend its own freshness window.
+REUSE_MAX_AGE_S=3600
+GATE_RAN_AT=""
+if [ -n "$PRIOR_RECEIPT" ] && GATE_RAN_AT="$(jq -er \
+     --arg head "$HEAD_SHA" --arg base "$TARGET_SHA" --arg gate "$GATE_CMD" \
+     --arg src "$GATE_SOURCE" --argjson now "$(date -u +%s)" --argjson max "$REUSE_MAX_AGE_S" \
+     'select(.schema == "integration-receipt/1" and .verdict == "pass"
+             and .head == $head and .base == $base and .gate == $gate
+             and .gate_source == $src and .tree_clean == true
+             and .critic_override == null and .owner_approval == null
+             and (.gate_ran_at | type) == "string"
+             and ($now - (.gate_ran_at | fromdateiso8601)) <= $max
+             and ($now - (.gate_ran_at | fromdateiso8601)) >= 0)
+      | .gate_ran_at' <<<"$PRIOR_RECEIPT" 2>/dev/null)"; then
+  echo "${PROG}: gate REUSED on $(short "$HEAD_SHA"): a clean-tree pass of this exact head on this exact target ($(short "$TARGET_SHA")) with this gate ran at ${GATE_RAN_AT}; not re-run."
+  GATE_LABEL="${GATE_LABEL}; REUSED pass that ran ${GATE_RAN_AT}"
+elif ! { echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA"): ${GATE_LABEL}"; GATE_RAN_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; ( cd "$ROOT" && eval "$GATE_CMD" ); }; then
+  join_critic
   echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA")." >&2
   echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA") although your branch passed alone. A disjoint file set does not imply a disjoint gate (shared budgets/registries). Fix it on this branch and re-run; do not merge." >&2
   exit 1
@@ -476,6 +546,7 @@ if [ "$AFTER_SHA" != "$HEAD_SHA" ] || [ -n "$DIRT" ]; then
   echo "Fix: the green run was of content other than $(short "$HEAD_SHA"), so it certifies nothing. Review what the gate wrote or committed, keep it on this branch if it is right, then re-run integration-gate on the new head." >&2
   exit 2
 fi
+join_critic
 
 # --- 8b. the standing judge's verdict ON THE HEAD WE ARE DECLARING MERGEABLE -
 # A judge that never ran, fail-opened, or had not finished yet used to be
@@ -495,7 +566,6 @@ fi
 # copies verbatim into its state log as the attributable record. The record
 # then said the opposite of what happened. Reading first is a STRICT
 # TIGHTENING: it can only ever REFUSE a merge the flag used to allow.
-CRITIC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/critic-review"
 if [ ! -x "$CRITIC" ]; then
   echo "${PROG}: cannot locate critic-review (expected ${CRITIC})." >&2
   echo "Fix: run this script from its committed path under ~/dev/custom so the judge's verdict reader resolves. A judge that cannot be found is an ERROR, never a pass -- and --critic-override does NOT apply here, because with no reader 'no BLOCK recorded' cannot be told apart from 'nothing was read'." >&2
@@ -592,14 +662,14 @@ write_receipt() {
     --arg gate "$GATE_CMD" --arg gate_source "$GATE_SOURCE" --argjson edited "$EDITED_JSON" \
     --arg co "$CRITIC_OVERRIDE" --arg co_state "$OVERRIDE_STATE" --arg oa "$OWNER_APPROVAL" \
     --arg blast "$BLAST_LINE" --arg ok_line "$OK_LINE" --arg checkout "$ROOT" \
-    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg ran "$GATE_RAN_AT" \
     'def nul: if . == "" then null else . end;
      {schema: "integration-receipt/1", verdict: "pass", head: $head,
       target_ref: $target_ref, base: $base, gate: $gate, gate_source: $gate_source,
       gate_edited_by_branch: $edited, critic_override: ($co | nul),
       critic_override_state: ($co_state | nul), owner_approval: ($oa | nul),
       blast_radius: $blast, integration_ok_line: $ok_line, checkout: $checkout,
-      recorded_at: $at}' > "$RECEIPT_TMP" || return 1
+      recorded_at: $at, gate_ran_at: $ran, tree_clean: true}' > "$RECEIPT_TMP" || return 1
   mv -f "$RECEIPT_TMP" "$RECEIPT" || return 1
   RECEIPT_TMP=""
 }
