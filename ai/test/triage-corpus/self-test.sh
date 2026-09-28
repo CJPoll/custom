@@ -85,12 +85,34 @@ ruby_eq "redact: refs become [ref] and duplicate lines are dropped [ticket]" \
 ruby_eq "redact: a duplicate word with no ref is content and stays (regression: DND-1012's title went blank)" \
   "C3 (near-duplicate merge) may cancel [ref]|a near-duplicate merge" \
   'i = TriageCorpus.input({"title"=>"C3 (near-duplicate merge) may cancel DND-5","blocks_text"=>["a near-duplicate merge"]}, {"ref"=>"DND-5","title"=>"t","blocks_text"=>["s"]}, "harness"); [i["finding"]["title"], i["finding"]["body"]].join("|")'
-ruby_eq "input: a title is never dropped, only its refs replaced" \
-  "Duplicate of [ref]" \
-  'TriageCorpus.input({"title"=>"Duplicate of DND-9","blocks_text"=>[]}, {"ref"=>"DND-5","title"=>"t","blocks_text"=>[]}, "harness")["finding"]["title"]'
+ruby_eq "input: a title naming a duplicate is neutralised to [ref], never kept as a label leak [review f]" \
+  "[ref]|[ref]: widget save" \
+  '["Duplicate of DND-9", "Not a duplicate of DND-3: widget save"].map { |t| TriageCorpus.input({"title"=>t,"blocks_text"=>[]}, {"ref"=>"DND-5","title"=>"t","blocks_text"=>[]}, "harness")["finding"]["title"] }.join("|")'
+ruby_eq "redact: a duplicate phrase whose ref is on the next line is removed by its span [review f]" \
+  "false" \
+  'r = TriageCorpus.redact("Possible duplicate of\nDND-4 in the widget."); (r.include?("duplicat") || r.include?("[ref]")).to_s'
+ruby_eq "duplicate: a bare 'duplicate DND-n' (an adjective) is not a declaration [review nit]" \
+  "" 'TriageCorpus.duplicate_refs("fix the duplicate DND-5 guard").join(",")'
+ruby_eq "duplicate: 'a duplicate: DND-12' still counts" \
+  "DND-12" 'TriageCorpus.duplicate_refs("This is a duplicate: DND-12").join(",")'
 eq "build: a case whose sent title would be blank is excluded as blank_title, never sent" \
   "blank_title 1" \
   "$(ruby -rjson -r "${LIBRB}" -e 't = ->(n, title, text) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>title,"area"=>"Harness","epic_ids"=>[],"depends_on"=>[],"blocks"=>[],"found_while"=>[],"blocks_text"=>text,"body_read"=>true} }; s = {"fetched_at"=>"x","epic_projects"=>{},"tickets"=>[t.(1,"  ",["b"]), t.(2,"Real",["Follows DND-1."])]}; r = TriageCorpus.build(s, unrelated: 0, related: 10, seed: "s"); puts r[:excluded].select { |k, _| k == :blank_title }.map { |k, v| "#{k} #{v}" }.join(",")')"
+# small -- build over a Harness-epic snapshot of t.(n, area, blocks_text, extra) rows.
+SMALL='t = ->(n, area, text, extra = {}) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>"Ticket #{n} widget","area"=>area,"epic_ids"=>["EH"],"depends_on"=>[],"blocks"=>[],"found_while"=>[],"relations_truncated"=>false,"blocks_text"=>text,"body_read"=>true}.merge(extra) }; snap = ->(ts) { {"fetched_at"=>"x","epic_projects"=>{"EH"=>"harness"},"tickets"=>ts} }'
+small() { ruby -rjson -r "${LIBRB}" -e "${SMALL}; $1" 2>&1; }
+eq "build: a citation-list ticket is linked to what it cites, never sampled unrelated with it [review g]" \
+  "$(small 'ts = (1..9).map { |n| t.(n, "Product", ["body #{n}"]) } + [t.(20, "Harness", ["Sweep: " + (1..9).map { |i| "DND-#{i}" }.join(" ")])]; r = TriageCorpus.build(snap.(ts), unrelated: 100, related: 0, seed: "s"); puts [r[:labels].count { |l| l["id"].start_with?("DND-20:") }, "citation_list_skipped", r[:excluded][:citation_list_skipped]].join(" ")')" \
+  "0 citation_list_skipped 1"
+eq "build: a truncated relation or body keeps a ticket out of the unrelated pool, counted [review h]" \
+  "$(small 'ts = [t.(1, "Product", ["a"], "relations_truncated"=>true), t.(2, "Product", ["b"], "body_truncated"=>true), t.(3, "Harness", ["c"]), t.(4, "Harness", ["d"])]; r = TriageCorpus.build(snap.(ts), unrelated: 100, related: 0, seed: "s"); puts [r[:labels].count { |l| l["id"] =~ /DND-[12]\b/ }, "unrelated_pool_truncated", r[:excluded][:unrelated_pool_truncated]].join(" ")')" \
+  "0 unrelated_pool_truncated 2"
+eq "build: a mutual-duplicate pair takes the higher-numbered ticket as the finding [review nit]" \
+  "$(small 'ts = [t.(5, "Harness", ["Duplicate of DND-8."]), t.(8, "Harness", ["Duplicate of DND-5."])]; r = TriageCorpus.build(snap.(ts), unrelated: 0, related: 0, seed: "s"); puts r[:labels].select { |l| l["label"] == "duplicate" }.map { |l| l["id"] }.join(",")')" \
+  "DND-8:DND-5"
+eq "build: empty sent finding bodies are counted per relation [review nit]" \
+  "$(small 'ts = [t.(5, "Harness", ["x"]), t.(8, "Harness", ["Duplicate of DND-5."])]; r = TriageCorpus.build(snap.(ts), unrelated: 0, related: 0, seed: "s"); puts r[:counts]["empty_body_by_label"].map { |k, v| "#{k} #{v}" }.join(", ")')" \
+  "duplicate 1"
 ruby_eq "epic_projects: an epic claimed by two projects is ambiguous (nil)" \
   "harness nil" \
   'rows = TriageCorpus::REPO_APPS.values.flatten.map { |a| {"repo_app"=>a,"epic_ids"=>[]} }; rows << {"repo_app"=>"~/dev/custom","epic_ids"=>["E1","E2"]}; rows << {"repo_app"=>"walt_ui","epic_ids"=>["E2"]}; m = TriageCorpus.epic_projects(rows); [m["E1"], m["E2"].inspect].join(" ")'
@@ -196,6 +218,7 @@ RC=$?
 eq "--build exits 0" "${RC}" "0"
 has "--build prints counts by relation/provenance" "${OUT}" "labels by relation/provenance: duplicate/tracker_record 1, related/tracker_record 3"
 has "--build prints eval-usable cases and proposed excluded" "${OUT}" "eval-usable cases: 7 (proposed excluded: 3)"
+has "--build prints the empty finding bodies per relation" "${OUT}" "empty finding body by relation: "
 MODE="$(stat -c '%a' "${TMP}/evals/finding-triage-corpus.jsonl" 2>/dev/null)"
 eq "--build writes the corpus 0600 (machine-local ticket text)" "${MODE}" "600"
 LTEXT="$(cat "${TMP}/evals/finding-triage-labels.jsonl")"
@@ -249,6 +272,17 @@ eq "only reads were made (POST query, GET children)" \
 eq "a 429 body read was tried 3 times" "$(grep -c '0429/children' "${TMP}/notion.log")" "3"
 OUT="$("${BIN}" --build --unrelated 1 --dir "${TMP}/fetched" 2>&1)"
 has "a fetched snapshot builds: the duplicate from the fake bodies" "${OUT}" "duplicate/tracker_record 1"
+eq "the snapshot records a body with more than one page of blocks as body_truncated [review h]" \
+  "$(jq -r '[(.tickets[] | select(.ref=="DND-3") | .body_truncated), (.tickets[] | select(.ref=="DND-1") | .body_truncated)] | map(tostring) | join(" ")' "${SNAP}" 2>/dev/null)" "true false"
+has "--fetch counts truncated bodies" "$(cd "${TMP}" && FLEET_CLAUDE_JSON="${TMP}/claude.json" TRIAGE_CORPUS_NOTION_API="http://127.0.0.1:${PORT}" TRIAGE_CORPUS_PACE_S=0 "${BIN}" --fetch --dir "${TMP}/fetched2" 2>&1)" "1 with a truncated body"
+: > "${TMP}/notion.log.drop_walt"
+OUT="$(cd "${TMP}" && FLEET_CLAUDE_JSON="${TMP}/claude.json" TRIAGE_CORPUS_NOTION_API="http://127.0.0.1:${PORT}" TRIAGE_CORPUS_PACE_S=0 \
+  "${BIN}" --fetch --dir "${TMP}/fetched3" 2>&1)"
+RC=$?
+rm -f "${TMP}/notion.log.drop_walt"
+eq "--fetch with a Repo / App no Projects row carries exits 1 [review e]" "${RC}" "1"
+has "--fetch prints the domain InputError as one Fix: line [review e]" "${OUT}" "no DND Projects row has Repo / App walt_ui. Fix: update REPO_APPS"
+lacks "--fetch prints no backtrace [review e]" "${OUT}" "triage_corpus.rb:"
 
 echo
 echo "triage-corpus self-test: ${PASS} passed, ${FAIL} failed"

@@ -66,7 +66,9 @@ USAGE = <<~EOF
                            Pairs whose titles share a search keyword come
                            first: live candidates are found by one.
               A ticket's project is its epic's (DND Projects); with no mapped
-              epic, Area Harness is the harness project. Only same-project
+              epic, Area Harness is the harness project. A ticket whose
+              links or body were truncated (has_more) never enters the
+              unrelated pool; it is counted as unrelated_pool_truncated. Only same-project
               pairs of tickets whose project is known are kept (a live candidate is always same-project); the content
               domain comes from the project, never guessed. The finding is the
               later ticket (the duplicate's declarer for duplicates). Ticket
@@ -275,6 +277,7 @@ module Manager
       begin
         blocks = Effects.read(origin, token, "GET", "/v1/blocks/#{t['page_id']}/children?page_size=100")
         t["blocks_text"] = Array(blocks["results"]).filter_map { |b| TriageCorpus.block_text(b) }.reject(&:empty?)
+        t["body_truncated"] = blocks["has_more"] == true
         t["body_read"] = true
       rescue Failure => e
         t["blocks_text"] = []
@@ -289,10 +292,13 @@ module Manager
     Effects.write_private(path, JSON.generate(snapshot) + "\n")
     out.puts "#{PROG}: #{tickets.size} tickets (#{rows.size} rows), #{epic_projects.size} epics mapped to projects, " \
              "#{unread.size} bodies UNREAD#{unread.empty? ? '' : " (#{unread.map { |u| "#{u['ref']} #{u['why']}" }.join(', ')})"}, " \
-             "#{tickets.count { |t| t['relations_truncated'] }} with a truncated relation"
+             "#{tickets.count { |t| t['relations_truncated'] }} with a truncated relation, " \
+             "#{tickets.count { |t| t['body_truncated'] }} with a truncated body"
     out.puts "snapshot: #{path}"
     fail!(1, "every ticket body was UNREAD", "Notion refused every body read; re-run later") if unread.size == tickets.size
     0
+  rescue TriageCorpus::InputError => e
+    fail!(1, e.message, e.fix)
   ensure
     token = nil
   end
@@ -333,6 +339,7 @@ module Manager
     out.puts "by rule: #{fmt(c['by_rule'])}"
     out.puts "excluded: #{fmt(result[:excluded])}"
     out.puts "eval-usable cases: #{c['eval_usable']} (proposed excluded: #{result[:labels].count { |l| l['provenance'] == 'proposed' }})"
+    out.puts "empty finding body by relation: #{fmt(c['empty_body_by_label'])}"
     sev = result[:severity].group_by { |r| r["label"] }.transform_values(&:size).sort.to_h
     out.puts "severity (weak, not evaluated): #{fmt(sev)}"
   end

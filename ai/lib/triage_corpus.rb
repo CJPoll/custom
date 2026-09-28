@@ -56,13 +56,21 @@ module TriageCorpus
   MAX_CITATIONS = 8
 
   REF = /\bDND-(\d+)\b/
-  # "duplicate of DND-12", "duplicates DND-12", "a duplicate: DND-12", "dup
-  # of DND-12": the ref right after the phrase. "duplicated by DND-n" (code
-  # a change duplicated) is not a ticket duplicate, so it does not match.
-  DUPLICATE = /\b(?:duplicate\s+of|duplicates|duplicate|dup\s+of)\s*:?\s*(?:ticket\s+)?\bDND-(\d+)\b/i
+  # "duplicate of DND-12", "duplicates DND-12", "a duplicate: DND-12", "to
+  # duplicate DND-12", "dup of DND-12": the ref right after the phrase. A bare
+  # "duplicate DND-n" is an adjective ("the duplicate DND-5 guard"), and
+  # "duplicated by DND-n" (code a change duplicated) is not a ticket
+  # duplicate; neither matches.
+  DUP_PHRASE = /(?:\bduplicate\s+of|\bduplicates|\bduplicate\s*:|\bto\s+duplicate|\bdup\s+of)\s*:?\s*(?:ticket\s+)?\bDND-(\d+)\b/i
+  DUPLICATE = DUP_PHRASE
   # "not a duplicate of", "isn't a duplicate", "no duplicate": a negation just
   # before the word voids the match.
-  NEGATED = /\b(?:not|no|isn't|isnt|never)\s+(?:an?\s+|the\s+)?\z/i
+  NEGATION = /\b(?:not|no|isn't|isnt|never)\s+(?:an?\s+|the\s+)?/i
+  NEGATED = /#{NEGATION.source}\z/i
+  # The span redaction removes: a duplicate phrase and its ref, negated or
+  # not, across a line break. A negated one leaks the label as surely as a
+  # plain one ("not a duplicate of DND-3" says related-or-unrelated).
+  LEAK_SPAN = /(?:#{NEGATION.source})?#{DUP_PHRASE.source}/i
   DUP_WORD = /duplicat|\bdup\b/i
   SEVERITY_PREFIX = /\A\s*(LOW|MEDIUM|HIGH|CRITICAL)\s*:/
 
@@ -188,18 +196,25 @@ module TriageCorpus
     refs.uniq
   end
 
-  # redact(text) -> body text as the eval sends it: every line that names a
-  # duplicate AND cites a ticket is dropped, and every other ref becomes
-  # "[ref]". A live finding does not yet cite the ticket it duplicates, so a
-  # case that did would be judged on a label leak, not on content. A line
-  # that only uses the word ("a near-duplicate merge") is content and stays.
+  # redact(text) -> body text as the eval sends it. Every line that names a
+  # duplicate AND cites a ticket is dropped; then every duplicate phrase left
+  # with its ref is removed by its match span (the span may cross a line
+  # break, as the phrase match does), and a line left with no word is
+  # dropped; then every other ref becomes "[ref]". A live finding does not
+  # yet cite the ticket it duplicates, so a case that did would be judged on
+  # a label leak, not on content. A line that only uses the word ("a
+  # near-duplicate merge") is content and stays.
   def redact(text)
-    text.to_s.each_line.reject { |l| DUP_WORD.match?(l) && REF.match?(l) }.join.gsub(REF, "[ref]").strip
+    lines = text.to_s.each_line.reject { |l| DUP_WORD.match?(l) && REF.match?(l) }.join
+    spans = lines.gsub(LEAK_SPAN, "").each_line.select { |l| l.match?(/[[:alnum:]]/) }.join
+    spans.gsub(REF, "[ref]").strip
   end
 
-  # redact_title(text) -> a title as sent: refs replaced, never dropped.
+  # redact_title(text) -> a title as sent: a duplicate phrase and its ref
+  # become "[ref]" (so "Duplicate of DND-9" leaks no label), other refs
+  # "[ref]". A title is never dropped.
   def redact_title(text)
-    text.to_s.gsub(REF, "[ref]").strip
+    text.to_s.gsub(LEAK_SPAN, "[ref]").gsub(REF, "[ref]").strip
   end
 
   # blank_title?(ticket) -> true when the title as sent would be blank (the
@@ -241,8 +256,12 @@ module TriageCorpus
 
         e = out[pair_key(a, b)]
         e[:rules] << "duplicate_text"
-        e[:finding] ||= a
-        e[:candidate] ||= b
+        # A mutual declaration (each names the other) takes the later,
+        # higher-numbered ticket as the finding, whatever the scan order.
+        if e[:finding].nil? || number(a) > number(e[:finding])
+          e[:finding] = a
+          e[:candidate] = b
+        end
       end
       { "depends_on" => t["depends_on"], "blocks" => t["blocks"], "found_while" => t["found_while"] }.each do |rule, ids|
         Array(ids).each do |pid|
@@ -255,7 +274,10 @@ module TriageCorpus
       end
       cited = refs_in(text) - dups - [a]
       if cited.size > MAX_CITATIONS
+        # A list is no relation label, but its pairs ARE linked: they must
+        # never be sampled as unrelated.
         stats[:citation_list_skipped] += 1
+        cited.each { |b| out[pair_key(a, b)][:rules] << "citation_list" if by_ref.key?(b) }
         next
       end
       cited.each do |b|
@@ -332,6 +354,8 @@ module TriageCorpus
     sampled = kept["related"].sort_by { |row| sample_key(seed, row[0, 2].join(":")) }.first(related)
     excluded[:related_not_sampled] += kept["related"].size - sampled.size if kept["related"].size > sampled.size
     rows = kept["duplicate"] + sampled
+    pool_truncated = tickets.count { |t| t["body_read"] == true && projects[t["ref"]] && truncated?(t) }
+    excluded[:unrelated_pool_truncated] += pool_truncated if pool_truncated.positive?
     unrelated_pairs(tickets, projects, linked, unrelated, seed).each do |a, b, provenance|
       rows << [a, b, "unrelated", provenance, provenance == "proposed" ? nil : UNRELATED_RULE]
     end
@@ -349,13 +373,21 @@ module TriageCorpus
       counts: counts(labels, corpus), excluded: excluded.sort.to_h }
   end
 
+  # truncated?(ticket) -> true when its links or body were not read whole: a
+  # relation with has_more, or a body past the first page of blocks. A link or
+  # citation may hide in the unread part, so such a ticket never enters the
+  # unrelated pool (it could be sampled "unrelated" with a ticket it names).
+  def truncated?(ticket)
+    ticket["relations_truncated"] == true || ticket["body_truncated"] == true
+  end
+
   # unrelated_pairs -> [[finding, candidate, provenance]]: up to N
   # rule_confirmed pairs and up to N proposed ones, sampled from unlinked
   # same-project pairs of readable tickets. The finding is the later ticket.
   # Pairs whose titles share a keyword are sampled first: a live candidate is
   # found by a title keyword, so these are the negatives triage actually sees.
   def unrelated_pairs(tickets, projects, linked, n, seed)
-    readable = tickets.select { |t| t["body_read"] == true && projects[t["ref"]] && !blank_title?(t) }
+    readable = tickets.select { |t| t["body_read"] == true && projects[t["ref"]] && !blank_title?(t) && !truncated?(t) }
     by_project = readable.group_by { |t| projects[t["ref"]] }
     words = readable.to_h { |t| [t["ref"], title_words(t["title"])] }
     confirmable = []
@@ -421,10 +453,15 @@ module TriageCorpus
     end.sort_by { |r| number(r["id"]) }
   end
 
-  # counts -> {by_label_provenance: {"duplicate/tracker_record" => n}, by_domain: {...}, eval_usable: n}
+  # counts -> {by_label_provenance: {"duplicate/tracker_record" => n},
+  # by_label_domain:, by_rule:, empty_body_by_label: {label => n}, eval_usable: n}.
+  # An empty sent finding body (redaction left nothing) is counted per label,
+  # so a relation judged mostly on titles is visible.
   def counts(labels, corpus)
     domain = corpus.to_h { |r| [r["id"], r["content_domain"]] }
+    empty = corpus.select { |r| r.dig("input", "finding", "body").to_s.empty? }.to_h { |r| [r["id"], true] }
     {
+      "empty_body_by_label" => labels.select { |l| empty[l["id"]] }.group_by { |l| l["label"] }.transform_values(&:size).sort.to_h,
       "by_label_provenance" => labels.group_by { |l| "#{l['label']}/#{l['provenance']}" }.transform_values(&:size).sort.to_h,
       "by_label_domain" => labels.reject { |l| l["provenance"] == "proposed" }
                                  .group_by { |l| "#{l['label']}/#{domain[l['id']]}" }.transform_values(&:size).sort.to_h,

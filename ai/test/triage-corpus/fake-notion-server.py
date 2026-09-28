@@ -5,7 +5,8 @@ ai/bin/triage-corpus makes (DND-714). Test fixture only, never Notion.
   POST /v1/data_sources/<projects>/query   the DND Projects rows
   POST /v1/data_sources/<tickets>/query    two pages, joined by a cursor
   GET  /v1/blocks/<page>/children          a page's blocks; the page id
-                                           ending "0429" always answers 429
+                                           ending "0429" always answers 429;
+                                           page 3 says has_more (truncated)
 
 Every request is logged as "METHOD PATH AUTH_OK" to LOG_FILE, so the suite can
 assert that only reads were made and that the token was sent.
@@ -52,8 +53,12 @@ REPO_APPS = ["gen_saas / Athena", "gen_saas/apps/athena", "~/dev/custom", "walt_
 
 
 def project_rows():
+    # LOG_FILE.drop_walt present: omit the walt_ui row (a stale REPO_APPS map).
+    drop = os.path.exists(LOG_FILE + ".drop_walt")
     rows = []
     for app in REPO_APPS:
+        if drop and app == "walt_ui":
+            continue
         epics = [E_HARNESS] if app == "~/dev/custom" else ([E_WALT] if app == "walt_ui" else [])
         rows.append({"properties": {"Repo / App": {"select": {"name": app}},
                                     "Epics": {"relation": [{"id": e} for e in epics], "has_more": False}}})
@@ -108,7 +113,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(429, {"object": "error"}, {"Retry-After": "1"})
         texts = BLOCKS.get(pid, [])
         results = [{"type": "paragraph", "paragraph": {"rich_text": [{"plain_text": t}]}} for t in texts]
-        return self._send(200, {"results": results, "has_more": False})
+        # page 3's body has a second page of blocks (the fetch reads only one).
+        return self._send(200, {"results": results, "has_more": pid == page(3)})
 
 
 server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
