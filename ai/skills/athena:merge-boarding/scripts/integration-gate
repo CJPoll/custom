@@ -16,12 +16,13 @@
 # invisible to both git and the forge. This ADDS a check at a moment where none
 # ran; it never drops, skips, downgrades, or path-excludes one.
 #
-# This script is an ASSERTION: it never rebases, commits, pushes, or touches
-# the working tree or any ref. A rebase can conflict and is a judgement call,
-# so it reports and the admiral acts. Safe to run anywhere, any number of
-# times. Its one write is its RECEIPT (DND-965): on INTEGRATION OK, and only
-# then, it records the pass at <git common dir>/integration-receipts/<head>.json,
-# outside every working tree. locked-merge refuses a head with no such
+# This script is an ASSERTION: without --rebase it never rebases, commits,
+# pushes, or touches the working tree or any ref. A conflicting rebase is a
+# judgement call, so --rebase only ever replays a clean branch onto the target
+# and REFUSES on a conflict (DND-1064); it never resolves one. Safe to run
+# anywhere, any number of times. Its one other write is its RECEIPT
+# (DND-965): on INTEGRATION OK, and only then, it records the pass at
+# <git common dir>/integration-receipts/<head>.json, outside every working tree. locked-merge refuses a head with no such
 # receipt, so "the gate passed on this SHA" no longer rests on the caller's
 # word (gen_saas #468 merged past a RED gate because a prep script printed
 # READY without reading the exit code). Every run that does not end in
@@ -53,15 +54,23 @@ CRITIC_OVERRIDE=""
 OVERRIDE_STATE=""
 OWNER_APPROVAL=""
 SLOT_WAIT=""
+REBASE=0
+# The argv as given, for the re-run inside the test slot (DND-1064).
+ORIG_ARGS=( "$@" )
 
 usage() {
   cat <<'EOF'
 Usage: integration-gate [--target <ref>] [--since <ref>] [--gate '<cmd>']
-                        [--no-fetch] [--with-critic] [--slot-wait-timeout <secs>]
-                        [--self-test]
+                        [--no-fetch] [--with-critic] [--rebase]
+                        [--slot-wait-timeout <secs>] [--self-test]
 
 Asserts that HEAD contains the current target ref AND that the local gate is
 green on that integrated head. Exits 0 only when both hold.
+
+It takes its machine test slot FIRST (DND-1064), then fetches and judges
+containment inside the slot, so "HEAD contains <target>" is evaluated when the
+gate starts, never before a queue wait that main can move during. Run under
+test-slot already (the captain form), it re-enters the held slot at once.
 
 On exit 0 (and only then) it writes a RECEIPT for the head, atomically, at
   <git common dir>/integration-receipts/<head-sha>.json
@@ -107,6 +116,15 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    holds this script, i.e. ~/dev/custom); give up
                    waiting for a slot after <secs> (default: test-slot's own).
                    A give-up is exit 6, GATE NOT RUN -- never OK, never RED.
+  --rebase         inside the slot, after the fetch, if HEAD does not contain
+                   the target: rebase the checked-out branch onto it, then
+                   gate (and judge) the rebased head. Refuses a dirty tree
+                   before touching anything; on a conflict it aborts the
+                   rebase, names the conflicting paths, and exits 2 with the
+                   branch at its original head -- it never resolves one.
+                   Without --since, the intersection is measured from the
+                   pre-rebase branch point. The containment bar is unchanged:
+                   the gated head contains the target read at gate start.
   --critic-override <reason>
                    merge WITHOUT a standing-judge verdict on this head -- and
                    ONLY that: the receipt is read first either way, and a
@@ -130,6 +148,7 @@ outcome removes a receipt for that head. There is no flag that skips it.
 
 Exit codes: 0 integration OK | 1 gate RED on the integrated head
             2 usage / unresolvable ref / branch behind target /
+              --rebase refused (dirty tree) or REBASE CONFLICT /
               gate refused (a no-op, or not the gate the target declares) /
               working tree is not HEAD (uncommitted or untracked paths,
               before the gate or left by it; ignored files do not count) /
@@ -152,6 +171,7 @@ while [ $# -gt 0 ]; do
     --gate)   GATE_CMD="${2-}"; [ -n "$GATE_CMD" ] || { echo "${PROG}: --gate needs a command." >&2; echo "Fix: pass a command, e.g. --gate 'ai/bin/harness-gate'." >&2; exit 2; }; shift 2 ;;
     --no-fetch) DO_FETCH=0; shift ;;
     --with-critic) WITH_CRITIC=1; shift ;;
+    --rebase) REBASE=1; shift ;;
     --slot-wait-timeout) SLOT_WAIT="${2-}"; [[ "$SLOT_WAIT" =~ ^[1-9][0-9]*$ ]] || { echo "${PROG}: --slot-wait-timeout needs whole seconds (got '${SLOT_WAIT}')." >&2; echo "Fix: pass a positive integer, e.g. --slot-wait-timeout 3600, or omit it to use test-slot's default wait." >&2; exit 2; }; shift 2 ;;
     --critic-override) CRITIC_OVERRIDE="${2-}"; [ -n "$CRITIC_OVERRIDE" ] || { echo "${PROG}: --critic-override needs a REASON." >&2; echo "Fix: pass why you are merging with no judge verdict, e.g. --critic-override 'model unreachable for 3 re-runs; hotfix cannot wait'. An unrecorded bypass is the exact failure this flag exists to replace. Note it cannot cover a recorded BLOCK -- that is refused with or without the flag." >&2; exit 2; }; shift 2 ;;
     --owner-approval) OWNER_APPROVAL="${2-}"; [ -n "$OWNER_APPROVAL" ] || { echo "${PROG}: --owner-approval needs the OWNER'S AUTHORIZATION." >&2; echo "Fix: pass a verifiable record of the owner's own words: --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>' (see --help). An empty value is not an approval, and no agent message is ever your user's consent." >&2; exit 2; }; shift 2 ;;
@@ -160,7 +180,7 @@ while [ $# -gt 0 ]; do
       exec bash "$(dirname "${HERE}")/test/self-test.sh" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "${PROG}: unknown argument '$1'." >&2
-       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --with-critic, --slot-wait-timeout, --critic-override, --owner-approval, --self-test." >&2
+       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --with-critic, --rebase, --slot-wait-timeout, --critic-override, --owner-approval, --self-test." >&2
        exit 2 ;;
   esac
 done
@@ -203,16 +223,224 @@ fi
 ROOT="$(git rev-parse --show-toplevel)" || exit 2
 cd "$ROOT" || exit 2
 
-# --- 2. fetch --------------------------------------------------------------
-if [ "$DO_FETCH" -eq 1 ]; then
+short() { git rev-parse --short "$1"; }
+tree_dirt() { git -C "$ROOT" status --porcelain 2>&1; }
+CRITIC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/critic-review"
+
+fetch_target() {
+  [ "$DO_FETCH" -eq 1 ] || return 0
+  local remote
   case "$TARGET" in
-    */*) REMOTE="${TARGET%%/*}" ;;
-    *)   REMOTE="" ;;
+    */*) remote="${TARGET%%/*}" ;;
+    *)   remote="" ;;
   esac
-  if [ -n "$REMOTE" ] && grep -qx -- "$REMOTE" <<<"$(git remote)"; then
-    git fetch "$REMOTE" >/dev/null 2>&1 || \
-      echo "${PROG}: WARN fetch of '${REMOTE}' failed; comparing against the ref as it stands locally." >&2
+  if [ -n "$remote" ] && grep -qx -- "$remote" <<<"$(git remote)"; then
+    git fetch "$remote" >/dev/null 2>&1 || \
+      echo "${PROG}: WARN fetch of '${remote}' failed; comparing against the ref as it stands locally." >&2
   fi
+}
+
+# refuse_dirty_tree <head sha> -- the gate runs in the WORKING TREE but the
+# receipt certifies the committed HEAD (DND-1011), and --rebase must never
+# replay over uncommitted work. So the tree must be exactly HEAD.
+refuse_dirty_tree() {
+  local dirt
+  dirt="$(tree_dirt)"
+  [ -z "$dirt" ] && return 0
+  echo "${PROG}: the working tree is not HEAD ($(short "$1")), so a gate run here would not judge the commit being certified. Uncommitted or untracked paths:" >&2
+  printf '%s\n' "$dirt" | head -20 >&2
+  echo "Fix: commit the paths above (or remove them, or gitignore build output), then re-run. A pass on uncommitted content is not a pass of $(short "$1")." >&2
+  exit 2
+}
+
+# require_critic_tools -- --with-critic needs critic-review and setsid.
+require_critic_tools() {
+  if [ ! -x "$CRITIC" ]; then
+    echo "${PROG}: --with-critic cannot locate critic-review (expected ${CRITIC})." >&2
+    echo "Fix: run this script from its committed path under ~/dev/custom, or drop --with-critic and run ~/dev/custom/ai/bin/critic-review yourself." >&2
+    exit 3
+  fi
+  if ! command -v setsid >/dev/null 2>&1; then
+    echo "${PROG}: --with-critic needs setsid (util-linux) to run the judge in its own process group." >&2
+    echo "Fix: install util-linux, or drop --with-critic and run ~/dev/custom/ai/bin/critic-review yourself before this script." >&2
+    exit 2
+  fi
+}
+
+# start_critic <head sha> -- the standing judge on <head>, in its own process
+# group. setsid execs in place (a background subshell is not a group leader),
+# so $! is the judge's pid AND its process-group id.
+start_critic() {
+  CRITIC_LOG="$(mktemp "${TMPDIR:-/tmp}/integration-gate-critic.XXXXXX")"
+  ( cd "$ROOT" && exec setsid "$CRITIC" --base "$TARGET" ) >"$CRITIC_LOG" 2>&1 &
+  CRITIC_PGID=$!
+  CRITIC_ADOPTED=0; CRITIC_ACTIVE=1
+  echo "${PROG}: --with-critic: running the standing judge on $(short "$1") beside the gate (pgid ${CRITIC_PGID}, log ${CRITIC_LOG})"
+}
+
+# Joins the judge and prints its verdict lines. Called on every path out of
+# the gate step that reports a result, so a RED gate still returns the judge's
+# findings; any other exit stops it through the EXIT trap. A judge started
+# before the slot wait was started by the outer run, so it is not this
+# process's child: block on its pid instead of `wait`.
+join_critic() {
+  [ "$CRITIC_ACTIVE" -eq 1 ] || return 0
+  if [ -n "$CRITIC_PGID" ]; then
+    if [ "$CRITIC_ADOPTED" -eq 1 ]; then
+      tail --pid="$CRITIC_PGID" -f /dev/null 2>/dev/null
+    else
+      wait "$CRITIC_PGID" 2>/dev/null
+    fi
+  fi
+  CRITIC_PGID=""; CRITIC_ACTIVE=0
+  grep -E '^critic-review:|^FINDINGS:' "$CRITIC_LOG" >&2 || tail -5 "$CRITIC_LOG" >&2
+}
+
+# --- 1b. take the slot FIRST (DND-1064) --------------------------------------
+# The containment bar is "the gated head contains <target> when the gate
+# starts". It used to be read before the test-slot wait, and waits of 5-26 min
+# now exceed the gap between landings (2026-09-28: DND-907, DND-896+945 and
+# DND-902 each refused twice; the admiral lost three landing windows). So this
+# run re-executes itself inside test-slot and does everything from the fetch on
+# there: the fetch, the containment check, --rebase, the gate, the verdict.
+# Called under test-slot already, test-slot re-enters the held slot at once.
+#
+# The cheap refusals (dirty tree, --with-critic tools) run before the wait so
+# they never cost a queue, and are checked again inside it. The judge on the
+# current head starts BEFORE the wait, as it always has (DND-1010), and the
+# run inside the slot adopts it when the head is unchanged; after a --rebase
+# it stops it and judges the new head. The inner run is recognised only while
+# a slot is held (ATHENA_TEST_SLOT_HELD), so the marker cannot skip the slot.
+CRITIC_PGID=""; CRITIC_LOG=""; CRITIC_ADOPTED=0; CRITIC_ACTIVE=0; SLOT_TMP=""
+IN_SLOT=0
+if [ "${INTEGRATION_GATE_IN_SLOT:-}" = 1 ] && [ -n "${ATHENA_TEST_SLOT_HELD:-}" ]; then IN_SLOT=1; fi
+PRESTARTED="${INTEGRATION_GATE_PRESTARTED_CRITIC:-}"
+unset INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC
+
+if [ "$IN_SLOT" -eq 0 ]; then
+  HEAD0="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)"
+  # A tree `git status` cannot even read (a corrupt object) is left for the run
+  # inside the slot, which names the exact failure; only a readable dirty tree
+  # is refused here, before it costs a queue wait.
+  if [ -n "$HEAD0" ] && git -C "$ROOT" status --porcelain >/dev/null 2>&1; then
+    refuse_dirty_tree "$HEAD0"
+    # A run killed while queued must leave no earlier pass for its head: the
+    # receipt removal used to run before the gate's slot wait, so it still
+    # does. The run inside the slot removes (and checks) again for its head.
+    OUTER_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+    case "$OUTER_COMMON" in /*) rm -f "$(ir_receipt_path "$OUTER_COMMON" "$HEAD0")" 2>/dev/null ;; esac
+    if [ "$WITH_CRITIC" -eq 1 ]; then
+      require_critic_tools
+      fetch_target
+      if ! "$CRITIC" --verdict-for "$HEAD0" >/dev/null 2>&1; then
+        start_critic "$HEAD0"
+        export INTEGRATION_GATE_PRESTARTED_CRITIC="${CRITIC_PGID} ${HEAD0} ${CRITIC_LOG}"
+      fi
+    fi
+  fi
+  outer_cleanup() {
+    local rc=$?
+    [ -n "$CRITIC_PGID" ] && kill -TERM -- "-${CRITIC_PGID}" 2>/dev/null
+    [ -n "$CRITIC_LOG" ] && rm -f "$CRITIC_LOG" 2>/dev/null
+    [ -n "$SLOT_TMP" ] && rm -rf "$SLOT_TMP" 2>/dev/null
+    return "$rc"
+  }
+  trap outer_cleanup EXIT
+  SLOT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/integration-gate-slot.XXXXXX")" || {
+    SLOT_TMP=""
+    echo "${PROG}: cannot create a private temp dir for the test-slot outcome." >&2
+    echo "Fix: make ${TMPDIR:-/tmp} writable, then re-run. Nothing was checked." >&2
+    exit 2
+  }
+  OUTCOME="${SLOT_TMP}/outcome"
+  SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") ${HEAD0:0:8}" --outcome-file "$OUTCOME" )
+  [ -n "$SLOT_WAIT" ] && SLOT_ARGS+=( --wait-timeout "$SLOT_WAIT" )
+  echo "${PROG}: taking a machine test slot first; the fetch and the containment check run inside it (DND-1064)"
+  "$TEST_SLOT" "${SLOT_ARGS[@]}" -- env INTEGRATION_GATE_IN_SLOT=1 bash "$(realpath "${BASH_SOURCE[0]}")" "${ORIG_ARGS[@]}"
+  SLOT_RC=$?
+  OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
+  if [[ "$OUTCOME_LINE" =~ ^ran\ exit=([0-9]+)$ ]]; then
+    # The run inside the slot joined or stopped the judge itself.
+    exit "${BASH_REMATCH[1]}"
+  fi
+  join_critic
+  if [ "$OUTCOME_LINE" = timeout ]; then
+    echo "${PROG}: GATE NOT RUN on ${HEAD0:0:12}: no machine test slot within the wait window." >&2
+    echo "Fix: the machine's heavy-test slot pool stayed full (see test-slot's holder lines above, or run ~/dev/custom/ai/bin/test-slot --status). Nothing was checked, so this is neither OK nor RED. Re-run integration-gate; do not merge on it." >&2
+  else
+    echo "${PROG}: GATE NOT RUN on ${HEAD0:0:12}: test-slot left no outcome (exit ${SLOT_RC}; outcome '${OUTCOME_LINE:-<absent>}')." >&2
+    echo "Fix: test-slot left no outcome, so whether the gate ran is unknown; this is neither OK nor RED. Read test-slot's lines above (a refusal names its own Fix:), check ${TEST_SLOT} --help, then re-run integration-gate; do not merge on it." >&2
+  fi
+  exit 6
+fi
+
+# Inside the slot. A judge the outer run started is adopted only if it is what
+# it claims to be: a live critic-review process group, on a 40-hex head, with
+# a temp log this script's mktemp pattern names.
+PRE_PGID=""; PRE_SHA=""; PRE_LOG=""
+if [ -n "$PRESTARTED" ]; then
+  read -r p_pgid p_sha p_log <<<"$PRESTARTED"
+  if [[ "$p_pgid" =~ ^[1-9][0-9]*$ ]] && [[ "$p_sha" =~ ^[0-9a-f]{40}$ ]] \
+     && [[ "$(basename "${p_log:-x}")" == integration-gate-critic.* ]] && [ -f "$p_log" ] \
+     && tr '\0' ' ' <"/proc/${p_pgid}/cmdline" 2>/dev/null | grep -q 'critic-review'; then
+    PRE_PGID="$p_pgid"; PRE_SHA="$p_sha"; PRE_LOG="$p_log"
+  elif [ -f "${p_log:-}" ] && [[ "$(basename "$p_log")" == integration-gate-critic.* ]]; then
+    # The judge already finished (its verdict is on disk): adopt only the log.
+    PRE_SHA="$p_sha"; PRE_LOG="$p_log"
+  fi
+fi
+
+# --- 2. fetch (inside the slot) ----------------------------------------------
+fetch_target
+
+# --- 2b. --rebase: replay a clean branch onto the fetched target (DND-1064) --
+# Only when HEAD does not already contain it. A dirty tree is refused before
+# anything moves; a conflict is aborted and named, never resolved. The branch
+# point before the rebase becomes the intersection anchor when no --since was
+# given, so the file sets stay measurable after the replay.
+if [ "$REBASE" -eq 1 ] \
+   && R_TARGET="$(git rev-parse --verify -q "${TARGET}^{commit}" 2>/dev/null)" \
+   && R_HEAD="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)" \
+   && ! git merge-base --is-ancestor "$R_TARGET" "$R_HEAD" 2>/dev/null; then
+  refuse_dirty_tree "$R_HEAD"
+  # The judge started before the wait reads this tree with git (index.lock),
+  # and it judges a head the rebase replaces, so stop its whole process group
+  # and let it drain BEFORE the rebase touches the index. Bounded: 30 s at a
+  # 0.2 s cadence, then KILL.
+  if [ -n "$PRE_PGID" ]; then
+    kill -TERM -- "-${PRE_PGID}" 2>/dev/null
+    for _ in $(seq 1 150); do kill -0 -- "-${PRE_PGID}" 2>/dev/null || break; sleep 0.2; done
+    kill -KILL -- "-${PRE_PGID}" 2>/dev/null
+    echo "${PROG}: --with-critic: stopped the judge started on ${PRE_SHA:0:12} before the slot wait; the rebased head is judged instead"
+    PRE_PGID=""
+  fi
+  R_BASE="$(git merge-base "$R_HEAD" "$R_TARGET" 2>/dev/null)"
+  R_ERR="$(git -c rerere.enabled=false -c rebase.autoStash=false rebase --quiet "$R_TARGET" 2>&1)"
+  R_RC=$?
+  if [ "$R_RC" -ne 0 ]; then
+    R_CONFLICTS="$(git diff --name-only --diff-filter=U 2>/dev/null)"
+    if git rev-parse -q --verify REBASE_HEAD >/dev/null 2>&1 || [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
+      git rebase --abort >/dev/null 2>&1 || {
+        echo "${PROG}: REBASE CONFLICT, and 'git rebase --abort' also failed; the rebase is still in progress in ${ROOT}." >&2
+        echo "Fix: run 'git rebase --abort' in ${ROOT} by hand (or 'git status' to see what is left), confirm HEAD is back at $(short "$R_HEAD"), then rebase onto ${TARGET} and resolve the conflict yourself." >&2
+        exit 2
+      }
+    fi
+    if [ -n "$R_CONFLICTS" ]; then
+      echo "${PROG}: REBASE CONFLICT rebasing $(short "$R_HEAD") onto ${TARGET} ($(short "$R_TARGET")); the rebase was aborted and the branch is back at $(git rev-parse --short HEAD). Conflicting paths:" >&2
+      printf '%s\n' "$R_CONFLICTS" | sed 's/^/    /' >&2
+      echo "Fix: rebase onto ${TARGET} yourself (git rebase ${TARGET}), resolve the conflicts above, run the local gate, commit, and re-run integration-gate. --rebase never resolves a conflict." >&2
+    else
+      # Not a conflict: git refused to start or continue (a held index.lock,
+      # a hook). Never report that as a conflict -- there is nothing to resolve.
+      echo "${PROG}: REBASE FAILED (not a conflict) rebasing $(short "$R_HEAD") onto ${TARGET} ($(short "$R_TARGET")); the branch is at $(git rev-parse --short HEAD). git said:" >&2
+      printf '%s\n' "$R_ERR" | head -20 | sed 's/^/    /' >&2
+      echo "Fix: read git's error above (a stale .git/index.lock left by a killed git process, or a failing hook), clear its cause, confirm 'git status' is clean at $(short "$R_HEAD"), then re-run integration-gate --rebase." >&2
+    fi
+    exit 2
+  fi
+  echo "${PROG}: rebased $(short "$R_HEAD") onto ${TARGET} ($(short "$R_TARGET")) inside the slot -> $(git rev-parse --short HEAD)"
+  [ -z "$SINCE" ] && [ -n "$R_BASE" ] && SINCE="$R_BASE"
 fi
 
 # --- 3. resolve the refs ---------------------------------------------------
@@ -250,7 +478,6 @@ if ! rm -f "$RECEIPT" 2>/dev/null; then
   echo "Fix: make ${RECEIPT_DIR} writable (ls -ld '${RECEIPT_DIR}') and re-run. A stale pass this run cannot clear would outlive its result." >&2
   exit 5
 fi
-CRITIC_PGID=""; CRITIC_LOG=""; SLOT_TMP=""
 clear_receipt_on_failure() {
   local rc=$?
   # A --with-critic judge still running when this script leaves must not be
@@ -278,8 +505,6 @@ if [ -z "$BASE_SHA" ]; then
   echo "Fix: confirm you are in the right worktree and that '${TARGET}' is this repo's integration target." >&2
   exit 2
 fi
-
-short() { git rev-parse --short "$1"; }
 
 # --- 3b. resolve the gate from the LANDED target (DND-479) ---------------
 # The gate command used to be caller-supplied, so `--gate true` turned this
@@ -515,7 +740,7 @@ fi
 # --- 7. HEAD must CONTAIN the target --------------------------------------
 if ! git merge-base --is-ancestor "$TARGET_SHA" HEAD; then
   echo "${PROG}: HEAD ($(short "$HEAD_SHA")) does not contain ${TARGET} ($(short "$TARGET_SHA")). NOT safe to merge." >&2
-  echo "Fix: your branch does not contain ${TARGET} ($(short "$TARGET_SHA")). Rebase onto it (git rebase ${TARGET}), resolve conflicts, re-run the local gate, then re-run this script (passing --since $(short "$TARGET_SHA") to keep the intersection meaningful)." >&2
+  echo "Fix: your branch does not contain ${TARGET} ($(short "$TARGET_SHA")), read inside the test slot just now. Re-run with --rebase to rebase onto it inside the slot (it refuses on a conflict), or rebase yourself (git rebase ${TARGET}), resolve conflicts, re-run the local gate, then re-run this script (passing --since $(short "$TARGET_SHA") to keep the intersection meaningful)." >&2
   exit 2
 fi
 
@@ -536,46 +761,27 @@ fi
 # be exactly HEAD after it. Untracked files count: a forgotten `git add` is how
 # a head ships broken while its tree passes. Ignored files (build output,
 # deps) do not.
-tree_dirt() { git -C "$ROOT" status --porcelain 2>&1; }
-DIRT="$(tree_dirt)"
-if [ -n "$DIRT" ]; then
-  echo "${PROG}: the working tree is not HEAD ($(short "$HEAD_SHA")), so a gate run here would not judge the commit being certified. Uncommitted or untracked paths:" >&2
-  printf '%s\n' "$DIRT" | head -20 >&2
-  echo "Fix: commit the paths above (or remove them, or gitignore build output), then re-run. A pass on uncommitted content is not a pass of $(short "$HEAD_SHA")." >&2
-  exit 2
-fi
-CRITIC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/critic-review"
+refuse_dirty_tree "$HEAD_SHA"
 if [ "$WITH_CRITIC" -eq 1 ]; then
-  if [ ! -x "$CRITIC" ]; then
-    echo "${PROG}: --with-critic cannot locate critic-review (expected ${CRITIC})." >&2
-    echo "Fix: run this script from its committed path under ~/dev/custom, or drop --with-critic and run ~/dev/custom/ai/bin/critic-review yourself." >&2
-    exit 3
-  fi
-  if ! command -v setsid >/dev/null 2>&1; then
-    echo "${PROG}: --with-critic needs setsid (util-linux) to run the judge in its own process group." >&2
-    echo "Fix: install util-linux, or drop --with-critic and run ~/dev/custom/ai/bin/critic-review yourself before this script." >&2
-    exit 2
-  fi
-  if "$CRITIC" --verdict-for "$HEAD_SHA" >/dev/null 2>&1; then
-    echo "${PROG}: --with-critic: a PASS is already recorded for $(short "$HEAD_SHA"); the judge is not re-run."
+  require_critic_tools
+  if [ -n "$PRE_LOG" ] && [ "$PRE_SHA" = "$HEAD_SHA" ]; then
+    # The judge the outer run started before the slot wait is on this very
+    # head: adopt it (running, or already finished with its verdict on disk).
+    CRITIC_PGID="$PRE_PGID"; CRITIC_LOG="$PRE_LOG"; CRITIC_ADOPTED=1; CRITIC_ACTIVE=1
+    echo "${PROG}: --with-critic: the judge started on $(short "$HEAD_SHA") before the slot wait is adopted${PRE_PGID:+ (pgid ${PRE_PGID}, still running beside the gate)}"
   else
-    CRITIC_LOG="$(mktemp "${TMPDIR:-/tmp}/integration-gate-critic.XXXXXX")"
-    # setsid execs in place (a background subshell is not a group leader), so
-    # $! is the judge's pid AND its process-group id.
-    ( cd "$ROOT" && exec setsid "$CRITIC" --base "$TARGET" ) >"$CRITIC_LOG" 2>&1 &
-    CRITIC_PGID=$!
-    echo "${PROG}: --with-critic: running the standing judge on $(short "$HEAD_SHA") beside the gate (pgid ${CRITIC_PGID}, log ${CRITIC_LOG})"
+    if [ -n "$PRE_PGID" ]; then
+      kill -TERM -- "-${PRE_PGID}" 2>/dev/null
+      echo "${PROG}: --with-critic: stopped the judge started on ${PRE_SHA:0:12} before the slot wait; the head is now $(short "$HEAD_SHA")"
+    fi
+    [ -n "$PRE_LOG" ] && rm -f "$PRE_LOG" 2>/dev/null
+    if "$CRITIC" --verdict-for "$HEAD_SHA" >/dev/null 2>&1; then
+      echo "${PROG}: --with-critic: a PASS is already recorded for $(short "$HEAD_SHA"); the judge is not re-run."
+    else
+      start_critic "$HEAD_SHA"
+    fi
   fi
 fi
-# Joins the concurrent judge and prints its verdict lines. Called on every
-# path out of the gate step that reports a result, so a RED gate still returns
-# the judge's findings; any other exit stops it through the EXIT trap.
-join_critic() {
-  [ -n "$CRITIC_PGID" ] || return 0
-  wait "$CRITIC_PGID" 2>/dev/null
-  CRITIC_PGID=""
-  grep -E '^critic-review:|^FINDINGS:' "$CRITIC_LOG" >&2 || tail -5 "$CRITIC_LOG" >&2
-}
 
 echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA") in a machine test slot: ${GATE_LABEL}"
 SLOT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/integration-gate-slot.XXXXXX")" || {

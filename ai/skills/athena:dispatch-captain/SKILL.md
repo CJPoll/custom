@@ -153,9 +153,11 @@ Give the captain, in the brief:
 - **The one-command final check.** Every brief carries this line: *"Your
   final check is ONE command on your final commit: `cd <worktree> &&
   ~/dev/custom/ai/bin/test-slot -- timeout 1500
-  ~/dev/custom/ai/bin/integration-gate --with-critic`. It runs the standing
-  judge beside the gate, so it costs the slower of the two, not their sum. It
-  refuses a dirty tree, and it records both receipts I land on. Quote its
+  ~/dev/custom/ai/bin/integration-gate --with-critic --rebase`. It runs the
+  standing judge beside the gate, so it costs the slower of the two, not their
+  sum. It refuses a dirty tree, and it records both receipts I land on. If
+  main moved while it queued, it rebases your branch onto it inside the slot
+  and gates the rebased head; push that head (`--force-with-lease`). Quote its
   INTEGRATION OK line. On a RED gate or a BLOCK, fix every finding from both
   in one round, commit, and run it again."* It replaces a separate
   `critic-review` then gate on the final commit (`athena:merge-boarding` →
@@ -164,9 +166,11 @@ Give the captain, in the brief:
   is ONE green gate on a head that contained `origin/main` when the gate
   started. If main moves after that, do not rebase and re-gate to catch it:
   report the gated SHA and the main it contained. I forward and re-gate the
-  integrated head when it lands. If the gate refuses because main moved while
-  you queued, rebase once and run it once more; if it refuses again, stop and
-  report. Rebase earlier only on a real conflict or when I ask."* This is the
+  integrated head when it lands. The final check's `--rebase` absorbs a main
+  that moved while you queued. If it refuses with REBASE CONFLICT, rebase onto
+  `origin/main` yourself, resolve the named paths, commit, and run it once
+  more; if it refuses again, stop and report. Rebase earlier only on a real
+  conflict or when I ask."* This is the
   captain half of `athena:merge-boarding` → *Landing onto a moving main*; the
   merge bar is unchanged, since you still re-gate the integrated head under
   the lock. Measured 2026-09-26/27 (harness-epics-ab): DND-838 re-gated three
@@ -174,6 +178,14 @@ Give the captain, in the brief:
   three times and never got a clean run, and DND-887 hit the same cycle. Two
   admirals then issued this rule by hand, mid-run (15:23Z to DND-497, 02:32Z
   to DND-785).
+
+  **Later (2026-09-28, DND-1064):** the final check had no `--rebase`, and
+  this line said "If the gate refuses because main moved while you queued,
+  rebase once and run it once more". Superseded: `integration-gate` read
+  `origin/main` before a test-slot wait that now runs 5-26 min, longer than
+  the gap between landings, so the retry refused too (DND-907, DND-896+945 and
+  DND-902 each refused twice on 2026-09-28). It now takes the slot first and
+  reads main inside it, and `--rebase` replays the branch there.
 
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)

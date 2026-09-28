@@ -339,8 +339,9 @@ is green on that integrated head. It prints `INTEGRATION OK <sha> (GATE: <cmd>
 -- <source>)` — merge *that* SHA, and copy the line whole so the record says
 which gate ran (the same SHA-match discipline as the merge bar's "confirm the head
 you are landing is the one the report names"). Any other exit tells you what to
-do next. It never rebases or touches the working tree or a ref; a rebase can
-conflict and is your judgement call. Its one write is its **receipt**: on exit 0,
+do next. Without `--rebase` it never rebases or touches the working tree or a
+ref; with it, it rebases only a clean branch and refuses on a conflict (below).
+Its one other write is its **receipt**: on exit 0,
 and only then, it records the pass at
 `<git common dir>/integration-receipts/<head-sha>.json` (head, the target SHA it
 contained, gate and source, any override or owner approval, blast radius, the OK
@@ -354,11 +355,14 @@ gate passed on this SHA" rested on the caller's word, and gen_saas #468 merged
 past a RED gate because a prep script printed READY without reading the exit
 code.
 
-**The gate runs in a machine test slot (DND-486).** `integration-gate` wraps the
-resolved gate in the main checkout's `ai/bin/test-slot` (`~/dev/custom`, found
-from the script's own git common dir, so a worktree copy never sets N), which
-bounds heavy runs per machine; you do nothing extra. A `test-slot: WAITING` line is a queue, not a
-stall. **Exit 6 means GATE NOT RUN**: no slot freed within the wait window (or
+**The gate runs in a machine test slot (DND-486), taken first (DND-1064).**
+`integration-gate` takes a slot of the main checkout's `ai/bin/test-slot`
+(`~/dev/custom`, found from the script's own git common dir, so a worktree copy
+never sets N) before it fetches. The fetch, the containment check, `--rebase`,
+the gate and the verdict all run inside that slot, so "HEAD contains
+`origin/main`" is judged when the gate starts, never before the queue wait. The
+bar is unchanged; only when it is read moved. You do nothing extra. A
+`test-slot: WAITING` line is a queue, not a stall. **Exit 6 means GATE NOT RUN**: no slot freed within the wait window (or
 test-slot left no outcome). Nothing was checked, so it is neither OK nor RED.
 Re-run `integration-gate`; never merge on it. A `--with-critic` judge is still
 joined first, so its verdict is recorded and the re-run does not pay for it
@@ -367,7 +371,31 @@ from the main checkout (`~/dev/custom/ai/bin/test-slot`) is exit 2: update that
 checkout; the gate never runs unslotted. `--slot-wait-timeout <secs>` sets the wait. It can only turn a wait
 into exit 6, never into a pass. Running `integration-gate` itself under
 `test-slot` (the captain brief's form) is safe: the inner wrap sees the slot it
-already holds and does not queue again.
+already holds and does not queue again. A dirty tree and missing `--with-critic`
+tools are refused before the wait, so they never cost a queue. The
+`--with-critic` judge still starts before the wait on the current head; after a
+`--rebase` it is stopped and the rebased head is judged.
+
+**`--rebase`: absorb a main that moved while you queued.** Inside the slot,
+after the fetch, if HEAD does not contain the target, it rebases the checked-out
+branch onto it and gates (and judges) the rebased head. It refuses a dirty tree
+before anything moves. On a conflict it aborts, names the conflicting paths as
+`REBASE CONFLICT`, and exits 2 with the branch at its original head; it never
+resolves one. With no `--since`, the intersection is measured from the
+pre-rebase branch point. Push a rebased captain branch before landing it. Without
+`--rebase`, a head that does not contain the target read inside the slot is
+refused exactly as before, and the `Fix:` offers `--rebase`.
+
+**Later (2026-09-28, DND-1064):** the gate read `origin/main` and judged
+containment before its test-slot wait, and a caller that wrapped it in
+test-slot read it after a wait it rebased before. Queue waits of 5-26 min now
+exceed the gap between landings, so DND-907, DND-896+945 and DND-902 each
+refused twice, and the admiral lost three landing windows in a row. Unwrapped,
+the same order let a gate start on a head that no longer contained the main
+of gate start. The admiral's workaround was
+`ai-artifacts/coordination/2026-09-28-harness-lane/helpers/gate-in-slot.sh`
+(take the slot, rebase inside it, re-enter it); the slot-first order and
+`--rebase` replace it.
 
 **Green-alone is not green-merged.** Two MRs with entirely disjoint file sets
 can each pass the gate and fail together: the admiral's rendered-line budget is

@@ -48,7 +48,7 @@ APPROVAL="session:${FX_SID}/${FX_MID} quote:yes, provision the KMS key"
 # real pool, whatever fleet is running.
 # A suite launched from inside a real slot (a captain's wrapped harness-gate)
 # must not carry that slot into its fixtures.
-unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT
+unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC
 export ATHENA_TEST_SLOT_DIR="${TMP}/slots" ATHENA_TEST_SLOTS=1
 TEST_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
 
@@ -1045,6 +1045,179 @@ R="${TMP}/s12c"; slot_repo "$R" "touch '${R}/GATE_RAN'"
 out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && grep -q 'cannot load .*integration-receipt.sh' <<<"$out" && grep -q '^Fix:' <<<"$out" && [ ! -f "${R}/GATE_RAN" ] \
   && ok "s12 a missing receipt library is exit 2 with Fix:, gate not run" || bad "s12 missing library expected exit 2 naming it, got $rc" "$out"
+
+# ---------------------------------------------------------------- DND-1064
+# The containment bar ("HEAD contains the target when the gate starts") was
+# evaluated BEFORE the test-slot wait, so a queue wait longer than the gap
+# between landings either refused a wrapped caller twice (the captain form,
+# `test-slot -- integration-gate`) or, unwrapped, let the gate start on a head
+# that no longer contained main. Now the slot is taken FIRST and the fetch,
+# the containment check, and an opt-in --rebase all happen inside it.
+#
+# remote_repo <dir> <gate body> -- a bare origin whose main declares
+# ai/bin/harness-gate with <gate body>, a clone at <dir>/wt on branch feature
+# with one commit, and a pusher clone at <dir>/up for moving origin/main.
+remote_repo() {
+  local d="$1"
+  new_repo "$d/seed"; mkdir -p "$d/seed/ai/bin"
+  printf '#!/bin/sh\n%s\n' "$2" > "$d/seed/ai/bin/harness-gate"; chmod +x "$d/seed/ai/bin/harness-gate"
+  ( cd "$d/seed" && git add -A && git commit -qm gate && echo shared-v1 > shared.txt && git add shared.txt && git commit -qm shared )
+  git clone -q --bare "$d/seed" "$d/origin.git"
+  git clone -q "$d/origin.git" "$d/wt"
+  git clone -q "$d/origin.git" "$d/up"
+  printf '/g.sh\n/gp.sh\n/GATE_RAN\n/log\n' >> "$d/wt/.git/info/exclude"
+  ( cd "$d/wt" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+}
+# move_main <dir> <file> <content> -- land one commit on origin/main.
+move_main() { ( cd "$1/up" && git pull -q --ff-only origin main && echo "$3" > "$2" && git add "$2" && git commit -qm "move $2" && git push -q origin HEAD:main ); }
+# await_grep <file> <pattern> -- bounded poll (<= 20 s) for a line in a file.
+await_grep() { local i; for ((i = 0; i < 100; i++)); do grep -q -- "$2" "$1" 2>/dev/null && return 0; sleep 0.2; done; return 1; }
+# hold_slot <name> -- a foreign run holds the one test slot until release_slot.
+hold_slot() {
+  mkfifo "${TMP}/$1.fifo"
+  "$TEST_SLOT" --label "$1 foreign holder" -- bash -c ': > "$1"; exec 3<>"$2"; read -t 60 -u 3 _x' _ "${TMP}/$1.started" "${TMP}/$1.fifo" 2>/dev/null &
+  HOLDER=$!
+  await_file "${TMP}/$1.started" || bad "$1 fixture: the foreign holder never started"
+}
+release_slot() { timeout 5 bash -c 'printf "go\n" > "$1"' _ "${TMP}/$1.fifo"; wait "$HOLDER" 2>/dev/null; }
+# gate_behind_moving_main <name> <dir> <cmd...> -- start <cmd> in <dir>/wt
+# while the slot is held, land a commit on origin/main once the run is queued,
+# then free the slot and wait for the run. Sets OUT (its output) and RC.
+gate_behind_moving_main() {
+  local name="$1" d="$2"; shift 2
+  hold_slot "$name"
+  ( cd "$d/wt" && TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/critic-pass" "$@" ) > "${TMP}/${name}.out" 2>&1 &
+  local gpid=$!
+  await_grep "${TMP}/${name}.out" 'WAITING' || bad "${name} fixture: the run never queued for the slot" "$(cat "${TMP}/${name}.out")"
+  move_main "$d" moved.txt "landed during the wait"
+  release_slot "$name"
+  wait "$gpid"; RC=$?
+  OUT="$(cat "${TMP}/${name}.out")"
+}
+
+# r1: unwrapped, no --rebase. main moves while the run waits for its slot.
+# Before DND-1064 the containment check had already passed before the wait, so
+# the gate started (and printed INTEGRATION OK) on a head that did not contain
+# the main of gate start. The bar is now evaluated inside the slot: refused.
+D="${TMP}/r1"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+gate_behind_moving_main r1 "$D" "$GATE" --with-critic
+[ "$RC" -eq 2 ] && grep -q 'does not contain origin/main' <<<"$OUT" \
+  && ok "r1 main moved during the slot wait: containment is judged at gate start and refuses" \
+  || bad "r1 expected exit 2 'does not contain origin/main', got $RC" "$OUT"
+grep -q '^INTEGRATION OK' <<<"$OUT" && bad "r1 printed INTEGRATION OK on a head that did not contain main at gate start" "$OUT" || ok "r1 no INTEGRATION OK"
+[ ! -f "${D}.GATE_RAN" ] && ok "r1 the gate never started on the stale head" || bad "r1 the gate ran on a head that did not contain main at gate start"
+grep -q 'Fix:.*--rebase' <<<"$OUT" && ok "r1 Fix: names --rebase" || bad "r1 Fix: does not offer --rebase" "$OUT"
+
+# r2: unwrapped, --rebase. The same move is absorbed: the head is rebased
+# inside the slot, the judge and the gate run on the rebased head, and the
+# receipt records the NEW main as the base it contained.
+D="${TMP}/r2"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+gate_behind_moving_main r2 "$D" "$GATE" --with-critic --rebase
+new_main="$(git -C "$D/up" rev-parse HEAD)"; head_sha="$(git -C "$D/wt" rev-parse HEAD)"
+[ "$RC" -eq 0 ] && grep -q "^INTEGRATION OK ${head_sha} " <<<"$OUT" \
+  && ok "r2 --rebase: main moved during the wait, one run ends INTEGRATION OK" \
+  || bad "r2 expected INTEGRATION OK on the rebased head, got $RC" "$OUT"
+git -C "$D/wt" merge-base --is-ancestor "$new_main" HEAD && ok "r2 the gated head contains the main that landed during the wait" || bad "r2 the head does not contain the new main"
+[ "$(git -C "$D/wt" symbolic-ref -q --short HEAD)" = feature ] && ok "r2 the branch itself was rebased (still on feature)" || bad "r2 HEAD left detached or on another branch"
+rcpt="$(git -C "$D/wt" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${head_sha}.json"
+[ "$(jq -r .base "$rcpt" 2>/dev/null)" = "$new_main" ] && ok "r2 the receipt's base is the main contained at gate start" || bad "r2 receipt base is not the new main ($(jq -r .base "$rcpt" 2>/dev/null))"
+grep -q 'rebased .* onto origin/main' <<<"$OUT" && ok "r2 the rebase is reported" || bad "r2 the rebase was not reported" "$OUT"
+sect="$( sed -n '/^--- intersection/,$p' <<<"$OUT" )"
+grep -q 'UNAVAILABLE' <<<"$sect" && bad "r2 intersection UNAVAILABLE although the pre-rebase branch point was known" "$sect" || ok "r2 intersection measured from the pre-rebase branch point"
+( cd "$D/wt" && "${ROOT}/../../bin/critic-review" --verdict-for "$head_sha" >/dev/null 2>&1 ) \
+  && ok "r2 the judge's PASS is recorded for the rebased head" || bad "r2 no PASS recorded for the rebased head" "$OUT"
+
+# r3: the captain form, `test-slot -- integration-gate --rebase`. The move
+# lands during the OUTER wait; the gate re-enters the held slot and rebases.
+D="${TMP}/r3"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+gate_behind_moving_main r3 "$D" "$TEST_SLOT" -- "$GATE" --with-critic --rebase
+new_main="$(git -C "$D/up" rev-parse HEAD)"
+[ "$RC" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$OUT" && git -C "$D/wt" merge-base --is-ancestor "$new_main" HEAD \
+  && ok "r3 wrapped in test-slot: a move during the outer wait still ends in one INTEGRATION OK" \
+  || bad "r3 expected INTEGRATION OK on a head containing the new main, got $RC" "$OUT"
+# ...and without --rebase the wrapped form still refuses: the bar did not move.
+D="${TMP}/r3b"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+gate_behind_moving_main r3b "$D" "$TEST_SLOT" -- "$GATE" --with-critic
+[ "$RC" -eq 2 ] && grep -q 'does not contain origin/main' <<<"$OUT" && [ ! -f "${D}.GATE_RAN" ] \
+  && ok "r3 wrapped, no --rebase: still refused, gate not run" || bad "r3b expected exit 2 refusal, got $RC" "$OUT"
+
+# r4: --rebase onto a CONFLICTING move refuses, names the conflict, never
+# auto-resolves, and leaves the branch exactly where it was.
+D="${TMP}/r4"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+( cd "$D/wt" && echo mine > shared.txt && git commit -qam "edit shared" )
+before="$(git -C "$D/wt" rev-parse HEAD)"
+move_main "$D" shared.txt "theirs"
+out="$( cd "$D/wt" && CRITIC_REVIEW_STUB="${TMP}/critic-pass" "$GATE" --rebase 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q 'REBASE CONFLICT' <<<"$out" && grep -q 'shared.txt' <<<"$out" \
+  && ok "r4 a conflicting move is exit 2 REBASE CONFLICT naming the path" || bad "r4 expected exit 2 REBASE CONFLICT naming shared.txt, got $rc" "$out"
+grep -q '^Fix:' <<<"$out" && ok "r4 carries Fix:" || bad "r4 missing Fix:" "$out"
+[ "$(git -C "$D/wt" rev-parse HEAD)" = "$before" ] && [ "$(git -C "$D/wt" symbolic-ref -q --short HEAD)" = feature ] \
+  && ok "r4 the branch is back at its original head" || bad "r4 the branch moved or was left detached"
+[ ! -d "$(git -C "$D/wt" rev-parse --git-path rebase-merge)" ] && [ ! -d "$(git -C "$D/wt" rev-parse --git-path rebase-apply)" ] \
+  && [ -z "$(git -C "$D/wt" status --porcelain)" ] \
+  && ok "r4 no rebase left in progress, tree clean" || bad "r4 rebase left in progress or tree dirty" "$(git -C "$D/wt" status)"
+[ ! -f "${D}.GATE_RAN" ] && ok "r4 the gate did not run" || bad "r4 the gate ran after a conflict"
+
+# r5: --rebase refuses a dirty tree before touching anything.
+D="${TMP}/r5"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+move_main "$D" moved.txt "landed"
+echo wip > "$D/wt/wip.txt"
+before="$(git -C "$D/wt" rev-parse HEAD)"
+out="$( cd "$D/wt" && "$GATE" --rebase 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q 'wip.txt' <<<"$out" && grep -q '^Fix:' <<<"$out" && [ "$(git -C "$D/wt" rev-parse HEAD)" = "$before" ] \
+  && ok "r5 --rebase refuses a dirty tree with Fix:, branch untouched" || bad "r5 expected exit 2 naming wip.txt, got $rc" "$out"
+[ -f "$D/wt/wip.txt" ] && ok "r5 the uncommitted file is left in place" || bad "r5 the uncommitted file was removed"
+
+# r6: --rebase on a head that already contains main rebases nothing.
+D="${TMP}/r6"; remote_repo "$D" "exit 0"
+before="$(git -C "$D/wt" rev-parse HEAD)"; record_pass "$D/wt"
+out="$( cd "$D/wt" && "$GATE" --rebase 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ "$(git -C "$D/wt" rev-parse HEAD)" = "$before" ] && ! grep -q 'rebased ' <<<"$out" \
+  && ok "r6 --rebase on a head that already contains main is a no-op rebase" || bad "r6 expected OK on the unchanged head, got $rc" "$out"
+
+# r8: the judge started before the slot wait is still RUNNING when the run
+# inside the slot reaches it: it is adopted (not re-run) and joined, though it
+# is not that process's child. Its stub is a FIFO answered only after the
+# adoption line appears, so the join must really block on it.
+D="${TMP}/r8"; remote_repo "$D" "exit 0"
+mkfifo "${TMP}/r8-critic.fifo"
+( cd "$D/wt" && TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/r8-critic.fifo" "$GATE" --with-critic ) > "${TMP}/r8.out" 2>&1 &
+r8pid=$!
+await_grep "${TMP}/r8.out" 'still running beside the gate' || bad "r8 the running judge was not adopted" "$(cat "${TMP}/r8.out")"
+timeout 10 bash -c 'cat "$1" > "$2"' _ "${TMP}/critic-pass" "${TMP}/r8-critic.fifo"
+wait "$r8pid"; rc=$?; out="$(cat "${TMP}/r8.out")"
+[ "$rc" -eq 0 ] && grep -q '^critic-review: PASS' <<<"$out" && grep -q '^INTEGRATION OK' <<<"$out" \
+  && ok "r8 a judge still running at slot entry is adopted, joined, and its PASS gates the run" || bad "r8 adopted judge (rc=$rc)" "$out"
+[ "$(grep -c 'running the standing judge on' <<<"$out")" -eq 1 ] && ok "r8 the judge ran once, not twice" || bad "r8 the judge was started more than once" "$out"
+rm -f "${TMP}/r8-critic.fifo"
+
+# r9: --rebase while the judge started before the wait is still running. That
+# judge runs git in the same tree, and a rebase beside it collided on
+# index.lock (seen in this suite's own r3). It is stopped and drained BEFORE
+# the rebase, and the rebased head gets a judge of its own.
+D="${TMP}/r9"; remote_repo "$D" "exit 0"
+mkfifo "${TMP}/r9-critic.fifo"
+hold_slot r9
+( cd "$D/wt" && TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/r9-critic.fifo" "$GATE" --with-critic --rebase ) > "${TMP}/r9.out" 2>&1 &
+r9pid=$!
+await_grep "${TMP}/r9.out" 'WAITING' || bad "r9 fixture: the run never queued for the slot" "$(cat "${TMP}/r9.out")"
+move_main "$D" moved.txt "landed during the wait"
+release_slot r9
+await_grep "${TMP}/r9.out" 'inside the slot ->' || bad "r9 the rebase did not run beside a still-running judge" "$(cat "${TMP}/r9.out")"
+timeout 10 bash -c 'cat "$1" > "$2"' _ "${TMP}/critic-pass" "${TMP}/r9-critic.fifo"
+wait "$r9pid"; rc=$?; out="$(cat "${TMP}/r9.out")"
+[ "$rc" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$out" \
+  && ok "r9 --rebase beside a still-running judge: one INTEGRATION OK on the rebased head" || bad "r9 expected INTEGRATION OK, got $rc" "$out"
+stop_ln="$(grep -n 'stopped the judge started on' <<<"$out" | head -1 | cut -d: -f1)"
+reb_ln="$(grep -n 'inside the slot ->' <<<"$out" | head -1 | cut -d: -f1)"
+[ -n "$stop_ln" ] && [ -n "$reb_ln" ] && [ "$stop_ln" -lt "$reb_ln" ] \
+  && ok "r9 the old head's judge is stopped before the rebase touches the tree" || bad "r9 judge not stopped before the rebase (stop=${stop_ln:-none} rebase=${reb_ln:-none})" "$out"
+[ "$(grep -c 'running the standing judge on' <<<"$out")" -eq 2 ] && ok "r9 the rebased head got its own judge" || bad "r9 expected two judge starts (old head, rebased head)" "$out"
+rm -f "${TMP}/r9-critic.fifo"
+
+# r7: --help documents --rebase and takes no slot.
+out="$( cd "$TMP" && "${TMP}/s5-layout/ai/skills/athena:merge-boarding/scripts/integration-gate" --help 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q -- '--rebase' <<<"$out" && ok "r7 --help documents --rebase" || bad "r7 --help missing --rebase (rc=$rc)" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
