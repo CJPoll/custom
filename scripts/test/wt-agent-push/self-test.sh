@@ -40,6 +40,12 @@ log="${tmp}/calls.log"
 cat > "${shim}/git" <<EOF
 #!/usr/bin/env bash
 # git shim: record a push; pass through to real git only when asked.
+# Drop this shim's own dir from PATH first. In an agent session real_git is the
+# agent-bin wrapper (ai/agent-bin/git), which execs the first OTHER git on PATH:
+# with the shim still on PATH that is this shim again, an exec loop that never
+# ends and hangs harness-gate.
+self_dir=":${shim}:"; PATH=":\${PATH}:"; PATH="\${PATH//"\${self_dir}"/:}"
+PATH="\${PATH#:}"; PATH="\${PATH%:}"
 for a in "\$@"; do
   case "\$a" in
     push) echo "git \$*" >> "${log}"
