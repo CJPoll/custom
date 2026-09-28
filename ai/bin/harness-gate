@@ -2942,8 +2942,8 @@ def run_self_test
     #     (`ruby <fixture>/ai/bin/harness-gate`, no flags -- the exact
     #     invocation a captain types) against a minimal fixture: just the
     #     currently-running script itself (copied via __FILE__, so this
-    #     always tests whatever code is actually present) plus its three
-    #     require_relative dependencies, and one dummy self-test.sh to clear
+    #     always tests whatever code is actually present) plus every file it
+    #     require_relative's (transitively), and one dummy self-test.sh to clear
     #     the zero-discovery guard. That is enough, because the freshness
     #     preflight runs BEFORE inline-self-test-coverage/missing_executables/
     #     run_checks -- a stale (or fresh, or unreadable) verdict is reached
@@ -2954,9 +2954,29 @@ def run_self_test
     FileUtils.mkdir_p(File.join(fixture, "some/test"))
     FileUtils.cp(File.expand_path(__FILE__), File.join(fixture, "ai/bin/harness-gate"))
     FileUtils.chmod(0o755, File.join(fixture, "ai/bin/harness-gate"))
-    FileUtils.cp(File.join(CUSTOM_DIR, "ai/lib/first_party.rb"), File.join(fixture, "ai/lib/first_party.rb"))
-    FileUtils.cp(File.join(CUSTOM_DIR, "ai/lib/landed.rb"), File.join(fixture, "ai/lib/landed.rb"))
-    FileUtils.cp(File.join(CUSTOM_DIR, "ai/lib/strict_argv.rb"), File.join(fixture, "ai/lib/strict_argv.rb"))
+    # Every file the script require_relative's, followed transitively, read
+    # from the sources themselves: a hand-kept list went stale the day
+    # DND-818 added ai/lib/reap_tags.rb, and the fixture died on LoadError.
+    lib_deps = []
+    pending = [File.expand_path(__FILE__)]
+    until pending.empty?
+      src = pending.shift
+      File.read(src).scan(/^\s*require_relative\s+["']([^"']+)["']/).flatten.each do |rel|
+        dep = File.expand_path(rel.end_with?(".rb") ? rel : "#{rel}.rb", File.dirname(src))
+        next if lib_deps.include?(dep)
+
+        lib_deps << dep
+        pending << dep
+      end
+    end
+    expect.call(lib_deps.any? { |d| d.end_with?("/ai/lib/landed.rb") },
+                "the require_relative scan found no ai/lib/landed.rb (found #{lib_deps.inspect}); " \
+                "the fixture copy list is wrong")
+    lib_deps.each do |dep|
+      rel = dep.delete_prefix("#{CUSTOM_DIR}/")
+      FileUtils.mkdir_p(File.dirname(File.join(fixture, rel)))
+      FileUtils.cp(dep, File.join(fixture, rel))
+    end
     File.write(File.join(fixture, "some/test/self-test.sh"), "#!/bin/sh\nexit 0\n")
     FileUtils.chmod(0o755, File.join(fixture, "some/test/self-test.sh"))
     git.call("-c", "init.defaultBranch=main", "init", "-q", fixture)
@@ -2970,7 +2990,7 @@ def run_self_test
     git.call("-C", fixture, "push", "-q", "origin", "HEAD:refs/heads/main")
     git.call("-C", fixture, "fetch", "-q", "origin")
 
-    run_fixture = lambda { Open3.capture3("ruby", File.join(fixture, "ai/bin/harness-gate"), chdir: fixture) }
+    run_fixture = lambda { Open3.capture3(RbConfig.ruby, File.join(fixture, "ai/bin/harness-gate"), chdir: fixture) }
 
     # FRESH, through the real subprocess: must print the OK line and proceed
     # PAST the gate. It will fail LATER, for an unrelated and EXPECTED reason
