@@ -14,5 +14,5 @@
 # together.
 
 @section Finding triage: the harness script
-# the inert answer: every mode off, no key (DND-711 is the owner's step)
+# the inert answer: finding_triage mode off (not_configured covers mode_off and key_missing)
 JUDGMENTS UNAVAILABLE: not_configured. Fix: file the ticket as today; this is advisory.

@@ -294,7 +294,7 @@ module Triage
   end
 
   SECURITY_HINT = "hint: this may be a security finding; security findings follow ~/.claude/CLAUDE.md -> " \
-                  "Security fixes ship without owner approval (a code and human call, never Jev's)."
+                  "Owner approval policy -> Security fixes (a code and human call, never Jev's)."
 end
 
 # ── EFFECTS ──────────────────────────────────────────────────────────────────

@@ -360,7 +360,7 @@ eq "a C-locale title is cut to 300 characters, not bytes" "$(jq -r 'select(.serv
 spec triage.json '{"status":200,"body":{"status":"judged","mode":"on","question_set_version":"finding-triage-v1","model":"jev-1.13.0","candidates":[],"severity":{"level":"CRITICAL","score":3,"confidence":0.9}}}'
 printf '[]\n' > "${TMP}/none.json"
 run --title "CRITICAL: token printed in argv" --body-file "${TMP}/body.txt" --project harness --candidates-file "${TMP}/none.json"
-has "a security finding prints the hint" "${OUT}" "Security fixes ship without owner approval"
+has "a security finding prints the hint" "${OUT}" "Owner approval policy -> Security fixes"
 
 echo
 echo "finding-triage self-test: ${PASS} passed, ${FAIL} failed"
