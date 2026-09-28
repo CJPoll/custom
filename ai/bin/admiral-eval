@@ -563,13 +563,14 @@ def build_sandbox(dir)
       echo "admiral-eval: INERT STUB 'git push' blocked in the eval sandbox. No real action taken." >&2
       exit #{INERT_EXIT}
     fi
-    # Drop this shim's own dir from PATH before handing off (DND-1103). In an
+    # Mark this shim as passed through before handing off (DND-1103). In an
     # agent session real_git is the agent PATH wrapper; a wrapper that predates
     # DND-1103 execs the first OTHER git on PATH, which is this shim again: an
-    # exec loop that ends at ARG_MAX. The wrapper stays in the chain.
-    _p=; _ifs=$IFS; IFS=:
-    for _d in $PATH; do [ "$_d" = #{Shellwords.escape(bin)} ] || _p="${_p:+$_p:}$_d"; done
-    IFS=$_ifs; PATH=$_p; export PATH
+    # exec loop that ends at ARG_MAX. Every wrapper skips a git named in
+    # ATHENA_AGENT_GIT_SEEN. PATH is left whole, so git's own children (a `!`
+    # alias, a hook) still resolve `git` and the other stubs to this sandbox.
+    ATHENA_AGENT_GIT_SEEN="${ATHENA_AGENT_GIT_SEEN:+$ATHENA_AGENT_GIT_SEEN:}"#{Shellwords.escape(gitpath)}
+    export ATHENA_AGENT_GIT_SEEN
     exec #{real_git} "$@"
   SH
   FileUtils.chmod(0o755, gitpath)
@@ -1706,6 +1707,18 @@ def self_test
     push_out, push_st = Open3.capture2e(env, "git", "push", "origin", "main", stdin_data: "")
     fail.("git push must be blocked by the sandbox") if push_st.success?
     fail.("git push block must announce INERT STUB") unless push_out.include?("INERT STUB 'git push'")
+    # git's own children resolve through the sandbox PATH too (DND-1103): a
+    # `!` alias that calls gh hits the stub, not the real tool. (The inner
+    # `git` of a `!` alias is not covered: git puts its exec-path first on the
+    # child's PATH, so it reaches git-core's git, with or without this shim.)
+    repo = File.join(d, "repo")
+    _o, init_st = Open3.capture2e(env, "git", "init", "-q", repo, stdin_data: "")
+    fail.("the sandbox git must init a fixture repo") unless init_st.success?
+    [["!gh pr create", "INERT STUB 'gh'"], ["!docker ps", "INERT STUB 'docker'"]].each do |body, want|
+      al_out, al_st = Open3.capture2e(env, "git", "-c", "alias.p=#{body}", "p", chdir: repo, stdin_data: "")
+      fail.("a git alias running `#{body}` must still hit the sandbox stub (got: #{al_out.inspect})") \
+        if al_st.success? || !al_out.include?(want)
+    end
   end
 
   # -- 10. plan-only framing is appended for T2 modes ----------------------
