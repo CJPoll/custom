@@ -286,6 +286,9 @@ module Manager
       end
     end
     token = nil
+    # Refuse BEFORE the write: an all-UNREAD snapshot would replace the last
+    # good one and build as an empty corpus, a failed read that looks empty.
+    fail!(1, "every ticket body was UNREAD (#{unread.first(3).map { |u| "#{u['ref']} #{u['why']}" }.join(', ')}); the last snapshot is kept", "Notion refused every body read; re-run later") if unread.size == tickets.size
     snapshot = { "fetched_at" => Time.now.utc.iso8601, "tickets_rows" => rows.size, "epic_projects" => epic_projects,
                  "unread" => unread, "tickets" => tickets }
     path = snapshot_path(opts[:dir])
@@ -295,7 +298,6 @@ module Manager
              "#{tickets.count { |t| t['relations_truncated'] }} with a truncated relation, " \
              "#{tickets.count { |t| t['body_truncated'] }} with a truncated body"
     out.puts "snapshot: #{path}"
-    fail!(1, "every ticket body was UNREAD", "Notion refused every body read; re-run later") if unread.size == tickets.size
     0
   rescue TriageCorpus::InputError => e
     fail!(1, e.message, e.fix)

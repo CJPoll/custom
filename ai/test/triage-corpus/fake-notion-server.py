@@ -6,7 +6,9 @@ ai/bin/triage-corpus makes (DND-714). Test fixture only, never Notion.
   POST /v1/data_sources/<tickets>/query    two pages, joined by a cursor
   GET  /v1/blocks/<page>/children          a page's blocks; the page id
                                            ending "0429" always answers 429;
-                                           page 3 says has_more (truncated)
+                                           page 3 says has_more (truncated);
+                                           LOG_FILE.all_401 present: every
+                                           block read answers 401
 
 Every request is logged as "METHOD PATH AUTH_OK" to LOG_FILE, so the suite can
 assert that only reads were made and that the token was sent.
@@ -109,6 +111,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._log()
         pid = self.path.split("/")[3] if self.path.startswith("/v1/blocks/") else ""
+        if os.path.exists(LOG_FILE + ".all_401"):
+            return self._send(401, {"object": "error"})
         if pid.endswith("0429"):
             return self._send(429, {"object": "error"}, {"Retry-After": "1"})
         texts = BLOCKS.get(pid, [])

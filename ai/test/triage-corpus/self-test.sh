@@ -283,6 +283,15 @@ rm -f "${TMP}/notion.log.drop_walt"
 eq "--fetch with a Repo / App no Projects row carries exits 1 [review e]" "${RC}" "1"
 has "--fetch prints the domain InputError as one Fix: line [review e]" "${OUT}" "no DND Projects row has Repo / App walt_ui. Fix: update REPO_APPS"
 lacks "--fetch prints no backtrace [review e]" "${OUT}" "triage_corpus.rb:"
+cp "${SNAP}" "${TMP}/snap.good"
+: > "${TMP}/notion.log.all_401"
+OUT="$(cd "${TMP}" && FLEET_CLAUDE_JSON="${TMP}/claude.json" TRIAGE_CORPUS_NOTION_API="http://127.0.0.1:${PORT}" TRIAGE_CORPUS_PACE_S=0 \
+  "${BIN}" --fetch --dir "${TMP}/fetched" 2>&1)"
+RC=$?
+rm -f "${TMP}/notion.log.all_401"
+eq "--fetch with every body UNREAD exits 1 [critic]" "${RC}" "1"
+has "--fetch with every body UNREAD says so, with Fix: [critic]" "${OUT}" "the last snapshot is kept. Fix:"
+if cmp -s "${TMP}/snap.good" "${SNAP}"; then ok "--fetch with every body UNREAD keeps the last good snapshot [critic]"; else bad "--fetch with every body UNREAD keeps the last good snapshot [critic]" "the snapshot was replaced"; fi
 
 echo
 echo "triage-corpus self-test: ${PASS} passed, ${FAIL} failed"
