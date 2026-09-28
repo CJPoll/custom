@@ -51,9 +51,10 @@ its `database_id` via its `connector`, with:
 - **Title**: `Flaky: <module> — <symptom>` (include the failure string, the
   run reference, and the suspected mechanism in the description).
 - **Labels** (multi_select): add the config's `label` (e.g. `flaky-tests`) —
-  this is what makes the flaky lane's dispatch poll see it.
-- **Status**: the config's `queued_status` (e.g. `Todo`) — the queued state
-  the lane drains from.
+  this is what the lane's scope filter matches. The lane's spawn text reads
+  the same file, so the two cannot drift.
+- **Status**: the config's `queued_status` (e.g. `Todo`) — one of the
+  config's `drain_statuses`, the set the lane drains.
 - **Assignee** (people): the **human OWNER of this machine's harness**,
   resolved dynamically — never hardcode a person:
   1. Read your agent identity, first hit wins: `$AGENT_MESSAGES_IDENTITY`,
