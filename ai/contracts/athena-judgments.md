@@ -385,8 +385,10 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   DND tracker's own history, in the machine-local
   `finding-triage-labels.jsonl` (ids only) and `finding-triage-corpus.jsonl`
   (the inputs sent, redacted of ticket refs and of lines naming a duplicate).
-  A pair is kept only when both tickets are in one known project, and its
-  content domain comes from that project, never guessed (E12). Provenance:
+  A pair is kept only when both tickets are in one known project (an epic's
+  DND Projects row, or, with no mapped epic, Area Harness for the harness
+  project), and its content domain comes from that project, never guessed
+  (E12). Provenance:
   `tracker_record` for a `duplicate` (the body names it) or a `related` (a
   Depends On or Blocks link, or a body citation); `rule_confirmed` for an
   `unrelated` pair that the mechanical rule `different_area_unlinked`
