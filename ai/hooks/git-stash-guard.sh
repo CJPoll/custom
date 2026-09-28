@@ -876,9 +876,10 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # stash git or shell alias, a glob or expanded command word followed by a
   # stash verb), never the rest of the expansion findings (a glob or brace
   # command word with no or expanded arguments, a subcommand built by
-  # expansion, an unread config). So `jq \047.[] | .x\047`, `awk \047{print $1}\047`,
-  # `docker ps --format \047{{.Names}} {{.ID}}\047` and a python heredoc
-  # with brackets are data, while `grep \047git stash pop\047` still denies
+  # expansion, an unread config). So `jq \047.[] | .x\047`, `awk \047{print $1}\047`
+  # and a python heredoc with brackets are data (every command word in the
+  # text is a pure data tool), while `docker ps --format \047{{.Names}} {{.ID}}\047`
+  # is exec (docker is not one), and `grep \047git stash pop\047` still denies
   # (the accepted false positive in the header).
   # A payload is EXEC (read in full, as before) when any of these holds:
   #   * the text it sits in has a command word safe_word() does not know

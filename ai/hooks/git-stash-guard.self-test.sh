@@ -834,13 +834,15 @@ case_ga "QA46. git stash list piped to grep" allow "git stash list | grep -E 'On
 case_cmd "QA48. jq slice and object" allow "jq '.items[2:5] | {name: .n, tags: [.t[]]}' f.json"
 case_ga "QA49. grep -P lookbehind" allow "grep -oP '(?<=sha: )[0-9a-f]{7,}' log.txt"
 case_ga "QA50. grep with a POSIX class" allow "grep -E '^[[:space:]]*(def|defp) [a-z_]+' lib/x.ex"
-# Listing forms only: a mutating branch/config/stash keeps the text exec.
+# git is not a pure data tool, so any git word keeps the text exec (option A,
+# round 10): each payload beside it is read in full and denies.
 case_cmd "QX65. git branch -m after writing a payload" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > .git/hooks/reference-transaction; git branch -m a b"
 case_cmd "QX66. git config set after writing a payload" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > h.sh; git config core.hooksPath ."
 case_cmd "QX67. a git worktree add (runs a checkout hook) after writing a payload" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > h.sh; git stash show -p; git worktree add x"
 
-# QX68+: critic round 4. A read-only list is judged by (command,
-# subcommand), and by the options that make a git listing mutate.
+# QX68+: critic round 4. Each text holds gh or git, neither a pure data
+# tool, so the text is exec and its payload is read in full (option A,
+# round 10, replaced the per-subcommand read lists these first tested).
 case_cmd "QX68. a heredoc hook, then gh pr checkout (runs git hooks)" deny "cat > .git/hooks/post-checkout <<'EOF'
 true; /usr/libexec/git-core/git-st*sh
 EOF
@@ -849,8 +851,9 @@ case_cmd "QX69. GIT_EDITOR exported, then git tag -a (opens the editor)" deny "e
 case_cmd "QX70. a payload beside git tag -v (runs gpg.program)" deny "export GPG='true; /usr/libexec/git-core/git-st*sh'; git tag -v v1"
 case_cmd "QX71. a payload beside gh pr merge" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > h; gh pr merge 3"
 
-# QX72+: critic round 5. git options are allowlisted too: an unquoted -c
-# or program-naming option under a read subcommand makes the text exec.
+# QX72+: critic round 5. A program-naming git option (-c, --upload-pack,
+# --exec-path) or docker. Both are exec words, so the payload is read in
+# full whatever the option (option A, round 10).
 case_cmd "QX72. git -c core.fsmonitor=<script> status" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; chmod +x p.sh; git -c core.fsmonitor=./p.sh status"
 case_cmd "QX73. git -c diff.external=<script> diff" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; git -c diff.external=./p.sh diff"
 case_cmd "QX74. git ls-remote --upload-pack=<script>" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; git ls-remote --upload-pack=./p.sh ."
@@ -867,9 +870,11 @@ xs = {'a': [1]}
 print(f\"{xs['a'][0]} #{1}\", [x for x in xs])
 EOF"
 
-# QX77+: critic round 6. Listed tools with a program-naming option, and
-# builtins that re-evaluate a quoted subscript (measured on zsh 2026-09-26:
-# read, shift, return and [[ -eq ]] run a $(...) inside 'a[...]').
+# QX77+: critic round 6. rg, sort and wget with a program-naming option
+# (none is a pure data tool, so the text is exec), and builtins that
+# re-evaluate a quoted subscript (measured on zsh 2026-09-26: read, shift,
+# return and [[ -eq ]] run a $(...) inside 'a[...]'; a payload holding a
+# substitution is exec).
 case_cmd "QX77. rg --pre <script>" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; chmod +x p.sh; rg --pre ./p.sh x ."
 case_cmd "QX78. sort --compress-program=<script>" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; sort --compress-program=./p.sh -S 1K big.txt"
 case_cmd "QX79. wget --use-askpass=<script>" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget --use-askpass=./p.sh https://h/x"
@@ -877,12 +882,13 @@ case_cmd "QX80. wget -e with a wgetrc command" deny "echo 'true; /usr/libexec/gi
 case_cmd "QX81. a quoted subscript [[ -eq ]] re-evaluates" deny "[[ 1 -eq 'a[\$(true; /usr/libexec/git-core/git-st*sh)1]' ]]"
 case_cmd "QX82. a quoted subscript shift re-evaluates" deny "shift 'a[\$(true; /usr/libexec/git-core/git-st*sh)1]'"
 case_cmd "QX83. a quoted subscript read re-evaluates" deny "read 'a[\$(true; /usr/libexec/git-core/git-st*sh)1]' < /dev/null"
-case_cmd "QX84. a backtick in a single-quoted payload of a listed tool" deny "echo 'a[\`true; /usr/libexec/git-core/git-st*sh\`]' | grep x"
+case_cmd "QX84. a backtick in a single-quoted payload of grep" deny "echo 'a[\`true; /usr/libexec/git-core/git-st*sh\`]' | grep x"
 
-# QX85+: critic round 8. Program-naming options are matched by getopt prefix
-# and short-bundle split, so an abbreviated or `=`-joined spelling cannot
-# hide a runner. Each writes a glob-verb-hiding payload, then runs a listed
-# tool with the option spelled short of its full name.
+# QX85+: critic round 8. An abbreviated, bundled or `=`-joined spelling of
+# a program-naming option cannot hide a runner. Each writes a
+# glob-verb-hiding payload, then runs wget, sort, rg or git; none is a pure
+# data tool, so the text is exec and denies however the option is spelled
+# (option A, round 10, replaced the option matching these first tested).
 case_cmd "QX85. wget -qe bundled with a wgetrc command" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget -qe use_askpass=./p.sh https://h/x"
 case_cmd "QX86. wget --use-ask= (long-option prefix)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget --use-ask=./p.sh https://h/x"
 case_cmd "QX87. wget --exec (prefix of --execute)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget --exec ./p.sh https://h/x"
@@ -892,8 +898,9 @@ case_cmd "QX90. git ls-remote --upload= (prefix of --upload-pack)" deny "echo 't
 case_cmd "QX91. git ls-remote --upl= (shorter prefix)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; git ls-remote --upl=./p.sh ."
 case_cmd "QX92. rg --pr (prefix of --pre)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; rg --pr ./p.sh x ."
 case_cmd "QX93. git grep -Ocmd (short-bundled pager)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; chmod +x p.sh; git grep -O./p.sh TODO"
-# QA65+: benign abbreviations and distinct options that share a prefix stay
-# allowed (a payload beside them is still data).
+# QA65+: benign options that share a prefix with a program-naming one. The
+# git word makes each text exec, which is read in full; they stay allowed
+# because nothing in them is a glob, expanded or stash-writing command word.
 case_cmd "QA65. git log --text (not an abbreviation of --textconv) piped to grep" allow "git log --text --oneline | grep -E 'a|b'"
 case_cmd "QA66. git diff --text piped to a bracket grep" allow "git diff --text | grep -E '^[+-][0-9]'"
 case_cmd "QA68. git grep --recurse-submodules piped to jq" allow "git grep --recurse-submodules -n TODO | jq -R '{line: .}'"
