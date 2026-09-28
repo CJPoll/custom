@@ -5621,7 +5621,8 @@ address, so no click from a digest can be routed until DND-440 adds that path.
 rules editor:
 
 - `digest_enabled` (default `true`);
-- `digest_time`, `HH:MM` (default `07:00`);
+- `digest_time`, `HH:MM` from `00:00` to `20:59` (default `07:00`), so the
+  3 h retry window ends on the same local date;
 - `digest_weekdays`, ISO weekdays with 1 = Monday (default Monday to Friday,
   never empty);
 - `digest_top_n`, 1 to 20 (default 5).
@@ -5637,10 +5638,13 @@ after the gap.
 it inserts `sending`, or takes over a `failed` row or a `sending` row whose
 claim is older than 10 minutes. A `sent` or `missed` day is never claimed
 again. A failed send is retried each pass (every 60 s) until 3 h after the
-send time. Then the day is recorded `missed`, keeping its last cause (or
-`no_attempt`). A crash between Slack's reply and the `sent` write can send a
-second message once the claim goes stale. That at-least-once edge is
-accepted.
+send time. Then the day is recorded `missed`, keeping its last cause:
+`no_attempt` when no pass ran in the window, `crashed` when the pass that
+held the claim died. `missed` never closes a live claim. The `sent` and
+`failed` writes land only while the row is still the writer's own claim, so a
+pass that outlived its claim writes nothing. A crash between Slack's reply
+and the `sent` write can send a second message once the claim goes stale.
+That at-least-once edge is accepted.
 
 **The send log holds no content.** Each row has the owner, local date, status
 (`sending`, `sent`, `failed`, `missed`), attempts, the last cause (a closed
