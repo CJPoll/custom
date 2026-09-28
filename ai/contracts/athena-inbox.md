@@ -1879,7 +1879,16 @@ lenient about what I receive.
   takes the lock) and treats a refused lock as a failed send, never as sent.
   Today that is the `harness-alerts-detector` side: the inbox-client watchdog
   and the shipwright runner, which sends its stale-dirt report (DND-692) and
-  its wedge report (DND-834) through the same `send-mail` path.
+  its wedge report (DND-834) through the same `send-mail` path, and the
+  epic-clustering runner's wedge and blocked reports and its per-run
+  harness-lane drain request (DND-983), sent the same way.
+
+  **Later (2026-09-27):** DND-987 adds a third kind of sender on that side:
+  the harness lane's drain request (`-harness-lane-drain.md`). An
+  admiral, the owner or a harness session sends it by hand, and
+  `scripts/athena-clustering-run.sh` (DND-983) sends one at the end of each
+  run. It goes through the same `send-mail` path and lock
+  (`ai/docs/ticket-lane-action-brief.md` → *The harness lane* → *Senders*).
 
   **Later (2026-09-26):** this item read "Exactly one writer per `write`
   directory per identity". Superseded by DND-692, which added the shipwright
@@ -2700,6 +2709,18 @@ also reports:
   capture, so retention ignores it. The reader relays it to the owner with a
   re-arm command it composes itself, never one copied from the record or the
   message.
+  A third program, `scripts/athena-clustering-run.sh` (the 12h epic-clustering
+  cron, DND-983), sends ONE `clustering-wedged` message per wedge episode on
+  the same terms. Its `re:` is the tick's `.wedged` record in
+  `ai-artifacts/clustering/runs/`, which is that message's authority; it names
+  no capture, so retention ignores it. The reader relays it like
+  `shipwright-wedged`, composing the re-arm command itself. The same runner
+  sends ONE `clustering-blocked` message per BLOCKED episode (consecutive
+  ticks whose session never reached the model). Its `re:` is the tick's
+  `.blocked` record in the same directory; there is no re-arm to relay. It
+  also sends ONE `harness-lane-drain` request at the end of every run that
+  spawned a session, re: that run's `.run` record. Its reader is
+  `athena:inbox-attend` → *A fourth writer* (DND-987).
 - **`watchdog`** — the watchdog's three tools (the liveness library,
   `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
   Missing any, the supervisor keeps the client running, but a wedge is then

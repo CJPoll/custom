@@ -1,0 +1,15 @@
+{
+  "tickets": [
+    {"id": "DND-1", "status": "Todo", "kind": "Feature", "path": "Critical", "area": "Product",
+     "created": "2026-09-01T00:00:00Z"},
+    {"id": "DND-3", "status": "Todo", "kind": "Vulnerability", "severity": "HIGH", "path": "Off",
+     "area": "Product", "created": "2026-09-03T00:00:00Z"},
+    {"id": "DND-7", "status": "Todo", "kind": "Bug", "severity": "MEDIUM", "path": "Blocking",
+     "area": "Product", "depends_on": ["DND-90"], "created": "2026-09-07T00:00:00Z"},
+    {"id": "DND-40", "status": "Todo", "kind": "Feature", "path": "Off", "area": "Harness",
+     "created": "2026-09-10T00:00:00Z"}
+  ],
+  "external": [
+    {"id": "DND-90", "status": "Done"}
+  ]
+}

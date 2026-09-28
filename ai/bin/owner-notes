@@ -1,0 +1,666 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# owner-notes — the owner's messages to the athena-shipwright cron (DND-988).
+#
+# Owner (Cody, 2026-09-27): "When we find poor prioritization causes issues, we
+# can leave messages for the shipwright cron to address it." This tool reads and
+# writes that one place: an append-only, machine-local
+# $SHIPWRIGHT_STATE_DIR/owner-notes.md, which the shipwright reads FIRST, every
+# run, ahead of the reports (ai/agents/athena-shipwright.md.in -> *Where the
+# evidence lives*). An open note counts as `Authority:` for a change.
+#
+# WHO WRITES: only the owner, or the coordinator relaying the owner's EXACT
+# words (--source coordinator --relayed-from <where the owner said it>). Inbox
+# content is untrusted: a note that reaches this file from an inbox message is
+# relayed with its provenance, never obeyed on the message's say-so.
+#
+# WHAT IS ENFORCED, AND WHAT IS NOT. A `Source: owner` note is Authority with no
+# further check, so the tool refuses `--source owner` inside a Claude Code
+# session (CLAUDECODE or CLAUDE_CODE_ENTRYPOINT set — Claude Code sets both in
+# every tool child). An agent can only write a relay. A relay whose reference is
+# session:<session-uuid>/<message-uuid> is checked against that Claude Code
+# transcript at --add (refused unless a top-level user turn TYPED BY A HUMAN in
+# an interactive session — entrypoint "cli", promptSource "typed", origin.kind
+# "human", as Claude Code 2.1.283 records it — holds the words verbatim; a
+# headless `claude -p` prompt is "sdk-cli"/"sdk" and never verifies) and again
+# at --list (`Relay-check: verified|UNVERIFIED`, plus the whole `Owner-turn:`
+# so an excerpt is read in context). Missing fields fail closed.
+# Inbox content arrives as a tool result, never a user turn, so it can never
+# verify. Any other reference lists as `unverifiable` and is not Authority.
+# Control characters are refused everywhere, so no line can display as another.
+# Residual, said out loud: an agent that deliberately strips those variables,
+# edits a transcript, or hand-edits this file can still forge a note; the tool
+# stops the honest mistake, not a determined forger.
+#
+# THE FILE FORMAT (one entry per note; entries are never edited or removed,
+# except that the Status line flips once, only for work on origin/main —
+# normally by --reconcile finding an `Owner-note: N<k>@<heading time>` trailer there):
+#
+#   ## N<k> — <UTC ISO-8601>
+#   Source: owner
+#     (or) Source: coordinator, relaying the owner's exact words from <ref>
+#   Status: open            (flipped to)  Status: addressed: <commit sha>
+#     (an open note may read `Status: open — <one-line annotation>`)
+#   Context: <optional; the relayer's own framing, one line, never a quote>
+#
+#   > the owner's words, verbatim, one "> " per line (">" for a blank line)
+#
+# WHERE THE FILE IS: $SHIPWRIGHT_STATE_DIR (exported by
+# scripts/athena-shipwright-run.sh; must be absolute) or, when unset, the MAIN
+# checkout's ai-artifacts/shipwright, found through the git common dir of the
+# checkout THIS SCRIPT lives in — so a lane's copy, run from any cwd, resolves
+# the main checkout, never its own gitignored (and so empty) ai-artifacts/.
+#
+# OUTCOMES, kept distinct (~/dev/custom/ai/CLAUDE.md -> "A failed lookup must
+# never look like an empty one"):
+#   no file in an existing state dir  -> 0 notes, exit 0, said with the path
+#   state dir missing / unresolvable  -> exit 2 (a wrong key, not an empty one)
+#   file unreadable or malformed      -> exit 2 (never a silently skipped note)
+#
+# Usage:
+#   owner-notes --list [--open]      print notes (--open: only unaddressed) and
+#                                    a count line; exit 0
+#   owner-notes --add --source owner (--text TEXT | --text-file PATH)
+#   owner-notes --add --source coordinator --relayed-from REF
+#                     (--text TEXT | --text-file PATH) [--context LINE]
+#                                    append a new dated note; prints its id
+#   owner-notes --reconcile          flip each open note that a commit on
+#                                    origin/main names with its `Owner-note:`
+#                                    trailer to that commit; run it first
+#   owner-notes --address ID --commit SHA
+#                                    flip note ID by hand (SHA must be on
+#                                    origin/main)
+#   owner-notes --path               print the resolved file path
+#   owner-notes --help               this text
+#
+#   --text-file /dev/stdin reads the words from stdin; words that begin with
+#   "-" must use --text-file. --source owner is refused inside a Claude Code
+#   session: an agent relays. A relay written --relayed-from
+#   session:<session-uuid>/<message-uuid> is checked against that Claude Code
+#   transcript (the owner's own top-level user turn must contain the words
+#   verbatim), at --add and again at --list (`Relay-check:`). Any other
+#   reference is accepted and lists as `unverifiable`. Flag order never matters.
+#
+# Exit codes: 0 ok; 1 refused (bad note input, unknown/addressed id);
+#             2 cannot resolve/read/parse the file; 64 usage error.
+
+require "json"
+require "time"
+require_relative "../lib/strict_argv"
+require_relative "../lib/owner_turn"
+
+module OwnerNotes
+  FILE_NAME = "owner-notes.md"
+  HEADING_RE = /\A## (N[1-9]\d*) — (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\z/.freeze
+  SOURCE_OWNER = "Source: owner"
+  SOURCE_RELAY_PREFIX = "Source: coordinator, relaying the owner's exact words from "
+  STATUS_OPEN = "Status: open"
+  # An open note may carry a one-line annotation (e.g. "ticketed DND-993"):
+  # still open. Measured 2026-09-27: the cron annotated a note this way.
+  STATUS_OPEN_RE = /\AStatus: open(?: — \S.*)?\z/.freeze
+  STATUS_ADDRESSED_RE = /\AStatus: addressed: [0-9a-f]{7,40}\z/.freeze
+  SHA_RE = /\A[0-9a-f]{7,40}\z/.freeze
+  # Control characters that can make a stored line DISPLAY as another (a CR
+  # before "Source: owner", a Unicode line separator). Newline and tab are
+  # allowed in the owner's words; a one-line field allows neither.
+  CONTROL_IN_TEXT = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029]/.freeze
+  CONTROL_IN_LINE = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/.freeze
+  ONE_LINE_FLAGS = %w[--relayed-from --context --source --address --commit --text-file].freeze
+  SESSION_REF_RE = OwnerTurn::SESSION_REF_RE
+  ORIGIN_MAIN = "refs/remotes/origin/main"
+  PREAMBLE = <<~MD
+    # Owner notes for the athena-shipwright cron
+
+    Written only by the owner, or the coordinator relaying the owner's exact words.
+    Append with `ai/bin/owner-notes --add`; the shipwright reads this first, every run.
+  MD
+
+  class Refused < StandardError; end   # exit 1
+  class Fault < StandardError; end     # exit 2
+
+  Note = Struct.new(:id, :heading, :lines, :status_index, keyword_init: true) do
+    def open?
+      STATUS_OPEN_RE.match?(lines[status_index])
+    end
+
+    def text
+      ([heading] + lines).join("\n").rstrip
+    end
+
+    def words
+      lines.select { |l| l == ">" || l.start_with?("> ") }.map { |l| l == ">" ? "" : l[2..] }.join("\n")
+    end
+
+    # Unique across machines and numbering restarts: the id plus the note's own
+    # UTC heading time. This is what an `Owner-note:` trailer must carry.
+    def trailer_key
+      m = HEADING_RE.match(heading)
+      "#{m[1]}@#{m[2]}"
+    end
+
+    def relay_ref
+      src = lines.find { |l| l.start_with?(SOURCE_RELAY_PREFIX) }
+      src && src[SOURCE_RELAY_PREFIX.length..]
+    end
+  end
+
+  module_function
+
+  def usage
+    lines = File.readlines(__FILE__, encoding: "UTF-8")
+    first = lines.index("# Usage:\n")
+    last = lines.index { |l| l.start_with?("#             2 cannot resolve") }
+    lines[first..last].map { |l| l.sub(/^# ?/, "") }.join
+  end
+
+  # --- resolution ------------------------------------------------------------
+  def state_dir(env = ENV)
+    sd = env["SHIPWRIGHT_STATE_DIR"]
+    unless sd.nil? || sd.empty?
+      unless sd.start_with?("/")
+        raise Fault, "SHIPWRIGHT_STATE_DIR is #{sd.inspect}, not an absolute path.\n" \
+                     "Fix: unset it (the tool then resolves the main checkout itself) or set it to " \
+                     "the absolute main-checkout path, e.g. ~/dev/custom/ai-artifacts/shipwright."
+      end
+      return sd
+    end
+    File.join(main_checkout, "ai-artifacts", "shipwright")
+  end
+
+  def main_checkout
+    here = File.realpath(__dir__)
+    out = IO.popen(["git", "-C", here, "rev-parse", "--git-common-dir"], err: File::NULL, &:read).to_s.strip
+    if !$?.success? || out.empty?
+      raise Fault, "could not resolve the main checkout: `git -C #{here} rev-parse --git-common-dir` failed.\n" \
+                   "Fix: run the copy of owner-notes inside a git checkout of ~/dev/custom, or set " \
+                   "SHIPWRIGHT_STATE_DIR to the absolute state dir."
+    end
+    common = out.start_with?("/") ? out : File.join(here, out)
+    File.dirname(File.realpath(common))
+  end
+
+  # git in the MAIN checkout, with any inherited GIT_DIR & co. cleared so a hook
+  # or `rebase --exec` environment cannot point it at another repository.
+  GIT_ENV_CLEAR = %w[GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE].to_h { |k| [k, nil] }.freeze
+
+  def git(*args)
+    out = IO.popen(GIT_ENV_CLEAR, ["git", "-C", main_checkout, *args], err: File::NULL, &:read).to_s
+    [out, $?.exitstatus]
+  end
+
+  def require_origin_main!
+    _, rc = git("rev-parse", "--verify", "--quiet", "#{ORIGIN_MAIN}^{commit}")
+    return if rc.zero?
+
+    raise Fault, "cannot tell what has landed: #{ORIGIN_MAIN} does not resolve in #{main_checkout}.\n" \
+                 "Fix: run `git -C #{main_checkout} fetch origin` and re-run; a note is flipped only for a " \
+                 "commit that is on origin/main."
+  end
+
+  def landed?(sha)
+    require_origin_main!
+    _, rc = git("cat-file", "-e", "#{sha}^{commit}")
+    unless rc.zero?
+      raise Refused, "#{sha} is not a commit in #{main_checkout}.\n" \
+                     "Fix: fetch first (`git -C #{main_checkout} fetch origin`), and pass the sha of the commit " \
+                     "that landed on origin/main."
+    end
+    _, rc = git("merge-base", "--is-ancestor", sha, ORIGIN_MAIN)
+    return rc.zero? if [0, 1].include?(rc)
+
+    raise Fault, "`git merge-base --is-ancestor #{sha} #{ORIGIN_MAIN}` failed (exit #{rc}).\n" \
+                 "Fix: check the main checkout's git state, then re-run."
+  end
+
+  def notes_file(env = ENV)
+    File.join(state_dir(env), FILE_NAME)
+  end
+
+  def require_state_dir!(dir)
+    return if File.directory?(dir)
+
+    raise Fault, "state dir #{dir} does not exist, so #{FILE_NAME} cannot be looked up there — " \
+                 "that is a wrong or missing location, not zero notes.\n" \
+                 "Fix: check SHIPWRIGHT_STATE_DIR (unset it to resolve the main checkout); on a genuine " \
+                 "first run create it with `mkdir -p #{dir}`."
+  end
+
+  # --- parsing ---------------------------------------------------------------
+  # -> [notes, file_existed]
+  def load(path)
+    dir = File.dirname(path)
+    require_state_dir!(dir)
+    return [[], false] unless File.exist?(path)
+    unless File.file?(path) && File.readable?(path)
+      raise Fault, "#{path} exists but is unreadable (or not a regular file); its notes cannot be read.\n" \
+                   "Fix: `chmod u+r #{path}` (it should be a plain file owned by you), then re-run."
+    end
+
+    begin
+      raw = File.read(path, encoding: "UTF-8")
+    rescue SystemCallError => e
+      raise Fault, "#{path} is unreadable: #{e.message}\nFix: make #{path} a readable plain file, then re-run."
+    end
+    [parse(raw, path), true]
+  end
+
+  def parse(raw, path)
+    unless raw.valid_encoding?
+      raise Fault, "#{path} is not valid UTF-8.\nFix: repair the bytes by hand; append new notes only with `owner-notes --add`."
+    end
+
+    notes = []
+    current = nil
+    raw.split("\n", -1).each_with_index do |line, i|
+      if line.start_with?("## ")
+        m = HEADING_RE.match(line)
+        unless m
+          raise Fault, "#{path}:#{i + 1}: heading #{line.inspect} is not `## N<k> — <UTC ISO-8601>`.\n" \
+                       "Fix: correct that heading by hand; add notes only with `owner-notes --add`."
+        end
+        current = { id: m[1], heading: line, lines: [], lineno: i + 1 }
+        notes << current
+      elsif current
+        current[:lines] << line
+      end
+      # Lines before the first heading are the preamble; free text.
+    end
+    ids = notes.map { |n| n[:id] }
+    dup = ids.find { |id| ids.count(id) > 1 }
+    raise Fault, "#{path}: note id #{dup} appears twice.\nFix: renumber one of them by hand." if dup
+
+    notes.map { |n| validate(n, path) }
+  end
+
+  def validate(n, path)
+    where = "#{path}: note #{n[:id]} (line #{n[:lineno]})"
+    fix = "Fix: repair that entry by hand to the format in `owner-notes --help`; append new notes only with `owner-notes --add`."
+    lines = n[:lines]
+    lines = lines[0...-1] while !lines.empty? && lines.last.strip.empty?
+    bad_line = lines.find { |l| l.match?(CONTROL_IN_TEXT) }
+    if bad_line || n[:heading].match?(CONTROL_IN_TEXT)
+      raise Fault, "#{where} carries a control character (e.g. a carriage return), which can make one line " \
+                   "display as another.\n#{fix}"
+    end
+    sources = lines.each_index.select { |i| lines[i].start_with?("Source:") }
+    statuses = lines.each_index.select { |i| lines[i].start_with?("Status:") }
+    quotes = lines.select { |l| l == ">" || l.start_with?("> ") }
+    contexts = lines.each_index.select { |i| lines[i].start_with?("Context: ") }
+    raise Fault, "#{where} has #{contexts.size} Context: lines, expected at most 1.\n#{fix}" if contexts.size > 1
+    raise Fault, "#{where} has #{sources.size} Source: lines, expected 1.\n#{fix}" unless sources.size == 1
+    raise Fault, "#{where} has #{statuses.size} Status: lines, expected 1.\n#{fix}" unless statuses.size == 1
+
+    src = lines[sources.first]
+    unless src == SOURCE_OWNER || (src.start_with?(SOURCE_RELAY_PREFIX) && src.length > SOURCE_RELAY_PREFIX.length)
+      raise Fault, "#{where}: #{src.inspect} names neither the owner nor a relay of the owner's words.\n#{fix}"
+    end
+    st = lines[statuses.first]
+    unless STATUS_OPEN_RE.match?(st) || STATUS_ADDRESSED_RE.match?(st)
+      raise Fault, "#{where}: #{st.inspect} is neither `#{STATUS_OPEN}` (optionally `#{STATUS_OPEN} — <why>`) " \
+                   "nor `Status: addressed: <sha>`.\n#{fix}"
+    end
+    raise Fault, "#{where} quotes no words (no `> ` line).\n#{fix}" if quotes.empty?
+
+    stray = lines.reject.with_index do |l, i|
+      l.strip.empty? || i == sources.first || i == statuses.first || contexts.include?(i) ||
+        l == ">" || l.start_with?("> ")
+    end
+    raise Fault, "#{where} has an unrecognised line #{stray.first.inspect}.\n#{fix}" unless stray.empty?
+
+    Note.new(id: n[:id], heading: n[:heading], lines: lines, status_index: statuses.first)
+  end
+
+  # --- relay corroboration --------------------------------------------------
+  def transcripts_dir(env = ENV)
+    d = env["OWNER_NOTES_TRANSCRIPTS_DIR"].to_s
+    d.empty? ? File.join(Dir.home, ".claude", "projects") : d
+  end
+
+  # -> [:verified, said] | [:unverified, reason] | [:unverifiable]
+  # The verifier is shared with blast-radius's --owner-approval record check
+  # (ai/lib/owner_turn.rb), so the two never disagree about what the owner said.
+  def relay_check(ref, words)
+    OwnerTurn.check(ref, words, dir: transcripts_dir)
+  end
+
+  def relay_check_line(note)
+    ref = note.relay_ref
+    return nil unless ref
+
+    verdict, reason = relay_check(ref, note.words)
+    case verdict
+    when :verified
+      turn = reason.to_s.split("\n").join("\n             ")
+      "Relay-check: verified (#{ref})\nOwner-turn: #{turn}"
+    when :unverifiable then "Relay-check: unverifiable (not a session:<session-uuid>/<message-uuid> reference)"
+    else "Relay-check: UNVERIFIED (#{reason})"
+    end
+  end
+
+  # --- commands --------------------------------------------------------------
+  def list(open_only, out = $stdout)
+    path = notes_file
+    notes, existed = load(path)
+    shown = open_only ? notes.select(&:open?) : notes
+    shown.each do |n|
+      out.puts(n.text)
+      rc = relay_check_line(n)
+      out.puts(rc) if rc
+      out.puts("Trailer: Owner-note: #{n.trailer_key}") if n.open?
+      out.puts("")
+    end
+    open_count = notes.count(&:open?)
+    where = existed ? "in #{path}" : "(no file at #{path})"
+    out.puts "owner-notes: #{open_count} open of #{notes.size} notes #{where}"
+  end
+
+  def with_lock(dir)
+    lock = File.join(dir, "#{FILE_NAME}.lock")
+    begin
+      f = File.open(lock, File::RDWR | File::CREAT, 0o600)
+    rescue SystemCallError => e
+      raise Fault, "cannot open the lock #{lock}: #{e.message}\n" \
+                   "Fix: make #{dir} writable by you (`chmod u+w #{dir}`), then re-run."
+    end
+    begin
+      f.flock(File::LOCK_EX)
+      yield
+    ensure
+      f.close
+    end
+  end
+
+  def write_fault(path, err)
+    Fault.new("cannot write #{path}: #{err.message}\n" \
+              "Fix: make #{path} and its directory writable by you (`chmod u+w`), then re-run; nothing was changed.")
+  end
+
+  def read_text(opts)
+    given = %w[--text --text-file].select { |k| opts.key?(k) }
+    unless given.size == 1
+      raise Refused, "--add needs exactly one of --text or --text-file (got #{given.empty? ? 'neither' : 'both'}).\n" \
+                     "Fix: pass the owner's words with --text \"...\" or --text-file PATH (/dev/stdin for stdin)."
+    end
+    text = if opts.key?("--text")
+             opts["--text"]
+           else
+             begin
+               File.read(opts["--text-file"], encoding: "UTF-8")
+             rescue SystemCallError => e
+               raise Refused, "cannot read --text-file #{opts['--text-file']}: #{e.message}\n" \
+                              "Fix: pass a readable file holding the owner's exact words."
+             end
+           end
+    # Check the encoding first: a regex on invalid UTF-8 raises ArgumentError.
+    text = text.dup.force_encoding(Encoding::UTF_8)
+    unless text.valid_encoding?
+      raise Refused, "the note is not valid UTF-8.\nFix: pass the words as UTF-8 text."
+    end
+    text = text.sub(/\n+\z/, "")
+    if text.match?(CONTROL_IN_TEXT)
+      raise Refused, "the note contains a control character other than newline or tab (e.g. a carriage return).\n" \
+                     "Fix: pass the words as plain text; convert CRLF files with `tr -d '\r'`."
+    end
+    if text.strip.empty?
+      raise Refused, "the note is empty.\nFix: pass the owner's exact words; an empty note carries no authority."
+    end
+    text
+  end
+
+  # Claude Code sets these in every tool child (Bash tool, subagents, claude -p).
+  AGENT_MARKERS = %w[CLAUDECODE CLAUDE_CODE_ENTRYPOINT].freeze
+
+  def agent_marker?(name, env = ENV)
+    !env[name].to_s.empty?
+  end
+
+  def agent_session?(env = ENV)
+    AGENT_MARKERS.any? { |k| agent_marker?(k, env) }
+  end
+
+  def source_line(opts)
+    case opts["--source"]
+    when "owner"
+      if agent_session?
+        raise Refused, "--source owner is refused inside a Claude Code session " \
+                       "(#{AGENT_MARKERS.select { |k| agent_marker?(k) }.join(', ')} set): an agent is never the owner, " \
+                       "and `Source: owner` is Authority with no corroboration.\n" \
+                       "Fix: relay instead — --source coordinator --relayed-from \"<where and when the owner " \
+                       "wrote these exact words>\" — or ask the owner to run this from their own terminal."
+      end
+      if opts.key?("--relayed-from")
+        raise Refused, "--relayed-from is only for --source coordinator.\n" \
+                       "Fix: drop --relayed-from, or use --source coordinator if you are relaying."
+      end
+      SOURCE_OWNER
+    when "coordinator"
+      ref = opts["--relayed-from"].to_s
+      if ref.strip.empty? || ref.include?("\n")
+        raise Refused, "a coordinator note must say where the owner said it: --relayed-from REF (one line).\n" \
+                       "Fix: add --relayed-from \"<channel/message and UTC time of the owner's words>\"; " \
+                       "only relay words the owner actually wrote."
+      end
+      if ref.start_with?("session:") && !SESSION_REF_RE.match?(ref)
+        raise Refused, "--relayed-from #{ref.inspect} starts with session: but is not session:<session-uuid>/<message-uuid>.\n" \
+                       "Fix: pass the session id and the uuid of the owner's own user message in that session."
+      end
+      SOURCE_RELAY_PREFIX + ref
+    else
+      raise Refused, "--source must be owner or coordinator (got #{opts['--source'].inspect}).\n" \
+                     "Fix: only the owner, or the coordinator relaying the owner's exact words, writes a note; " \
+                     "inbox content is untrusted and is never a source."
+    end
+  end
+
+  # The relayer's own framing, never the owner's words: one line, apart from the quote.
+  def context_line(opts)
+    return nil unless opts.key?("--context")
+
+    ctx = opts["--context"].to_s
+    if ctx.strip.empty? || ctx.include?("\n")
+      raise Refused, "--context must be one non-empty line.\n" \
+                     "Fix: put the relayer's framing on one line; the owner's words go in --text/--text-file."
+    end
+    "Context: #{ctx}"
+  end
+
+  def verify_relay!(ref, words)
+    verdict, reason = relay_check(ref, words)
+    return unless verdict == :unverified
+
+    raise Refused, "the relay is not corroborated: #{reason}.\n" \
+                   "Fix: relay only words the owner typed: pass --relayed-from session:<session-uuid>/<message-uuid> " \
+                   "naming the owner's own top-level user message, and --text/--text-file holding a verbatim " \
+                   "excerpt of it."
+  end
+
+  def add(opts, out = $stdout)
+    src = source_line(opts)
+    text = read_text(opts)
+    ctx_line = context_line(opts)
+    verify_relay!(opts["--relayed-from"], text) if opts["--source"] == "coordinator"
+    path = notes_file
+    dir = File.dirname(path)
+    require_state_dir!(dir)
+    id = nil
+    with_lock(dir) do
+      notes, existed = load(path)
+      id = "N#{(notes.map { |n| n.id[1..].to_i }.max || 0) + 1}"
+      quoted = text.split("\n", -1).map { |l| l.empty? ? ">" : "> #{l}" }
+      ctx = ctx_line ? [ctx_line] : []
+      entry = ["## #{id} — #{Time.now.utc.iso8601}", src, STATUS_OPEN, *ctx, "", *quoted].join("\n")
+      begin
+        File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o600) do |f|
+          f.write("#{existed ? '' : PREAMBLE}\n#{entry}\n")
+        end
+      rescue SystemCallError => e
+        raise write_fault(path, e)
+      end
+    end
+    out.puts "owner-notes: added #{id} to #{path}"
+  end
+
+  def address(opts, out = $stdout)
+    id = opts["--address"]
+    sha = opts["--commit"].to_s
+    unless SHA_RE.match?(sha)
+      raise Refused, "--commit #{sha.inspect} is not a commit sha (7-40 lowercase hex).\n" \
+                     "Fix: pass the sha of the commit that addresses the note, e.g. `git rev-parse HEAD`."
+    end
+    path = notes_file
+    dir = File.dirname(path)
+    require_state_dir!(dir)
+    with_lock(dir) do
+      notes, = load(path)
+      note = notes.find { |n| n.id == id }
+      unless note
+        raise Refused, "no note #{id} in #{path} (ids: #{notes.map(&:id).join(', ').then { |s| s.empty? ? 'none' : s }}).\n" \
+                       "Fix: run `owner-notes --list --open` and pass one of the listed ids."
+      end
+      unless note.open?
+        raise Refused, "note #{id} is already #{note.lines[note.status_index].sub('Status: ', '')}.\n" \
+                       "Fix: nothing to do; a note is addressed once. Journal any follow-up instead."
+      end
+      unless landed?(sha)
+        raise Refused, "#{sha} is not on origin/main, so note #{id} has not been addressed yet.\n" \
+                       "Fix: flip a note only for landed work. Give the commit an `Owner-note: #{note.trailer_key}` trailer; " \
+                       "`owner-notes --reconcile` flips the note once that commit is on origin/main."
+      end
+      flip!(path, [[note, sha]])
+    end
+    out.puts "owner-notes: #{id} addressed: #{sha}"
+  end
+
+  # Rewrites only the Status line of each [note, sha]; one atomic write.
+  def flip!(path, flips)
+    raw = File.read(path, encoding: "UTF-8").split("\n", -1)
+    flips.each do |note, sha|
+      start = raw.index(note.heading)
+      rel = raw[(start + 1)..].index { |l| STATUS_OPEN_RE.match?(l) }
+      raw[start + 1 + rel] = "Status: addressed: #{sha}"
+    end
+    tmp = "#{path}.tmp.#{Process.pid}"
+    begin
+      File.write(tmp, raw.join("\n"), perm: 0o600)
+      File.rename(tmp, path)
+    rescue SystemCallError => e
+      raise write_fault(path, e)
+    ensure
+      File.unlink(tmp) if File.exist?(tmp)
+    end
+  end
+
+  # Flip every open note that a commit ON origin/main names with an
+  # `Owner-note: N<k>@<heading time>` trailer, to the oldest such commit.
+  def reconcile(out = $stdout)
+    path = notes_file
+    dir = File.dirname(path)
+    require_state_dir!(dir)
+    require_origin_main!
+    flips = []
+    open_count = 0
+    body = lambda do
+      notes, = load(path)
+      open_notes = notes.select(&:open?)
+      open_count = open_notes.size
+      open_notes.each do |n|
+        log, rc = git("log", ORIGIN_MAIN, "-E", "--grep=Owner-note: #{n.trailer_key}([^0-9A-Za-z]|$)",
+                      "--format=%H", "--reverse")
+        unless rc.zero?
+          raise Fault, "`git log #{ORIGIN_MAIN} --grep` failed (exit #{rc}) for #{n.id}.\n" \
+                       "Fix: check the main checkout's git state, then re-run."
+        end
+        sha = log.lines.first.to_s.strip
+        flips << [n, sha] unless sha.empty?
+      end
+      flip!(path, flips) unless flips.empty?
+    end
+    File.exist?(path) ? with_lock(dir, &body) : body.call
+    flips.each { |n, sha| out.puts "owner-notes: #{n.id} addressed: #{sha}" }
+    out.puts "owner-notes: reconciled #{flips.size} of #{open_count} open notes against #{ORIGIN_MAIN}"
+  end
+
+  CLI_SPEC = {
+    "--help" => :switch, "-h" => :switch, "--list" => :switch, "--open" => :switch,
+    "--add" => :switch, "--source" => :value, "--relayed-from" => :value,
+    "--text" => :value, "--text-file" => :value, "--context" => :value,
+    "--address" => :value, "--commit" => :value, "--path" => :switch, "--reconcile" => :switch
+  }.freeze
+  ACTIONS = %w[--list --add --address --reconcile --path].freeze
+  ALLOWED = {
+    "--list" => %w[--open], "--add" => %w[--source --relayed-from --text --text-file --context],
+    "--address" => %w[--commit], "--reconcile" => [], "--path" => []
+  }.freeze
+
+  def usage_error(msg)
+    warn "owner-notes: #{msg}"
+    if msg.start_with?("--text needs a value")
+      warn "Fix: words that begin with \"-\" go through --text-file PATH (or --text-file /dev/stdin)."
+    else
+      warn "Fix: see `owner-notes --help`; pass exactly one of #{ACTIONS.join(', ')} with its own flags."
+    end
+    64
+  end
+
+  def main(argv)
+    if argv.include?("--help") || argv.include?("-h")
+      $stdout.write(usage)
+      return 0
+    end
+    opts = StrictArgv.parse(argv, CLI_SPEC)
+    # Every string op below (strip, sub, regex) raises on invalid UTF-8, so a
+    # bad value is refused here, once, for every flag (DND-988 critic round 3).
+    opts.each do |flag, value|
+      next unless value.is_a?(String)
+      next if value.dup.force_encoding(Encoding::UTF_8).valid_encoding?
+
+      warn "owner-notes: the #{flag} value is not valid UTF-8."
+      warn "Fix: pass #{flag} as UTF-8 text (words in another encoding: convert with iconv, then use --text-file)."
+      return 64
+    end
+    opts = opts.transform_values { |v| v.is_a?(String) ? v.dup.force_encoding(Encoding::UTF_8) : v }
+    opts.each do |flag, value|
+      next unless value.is_a?(String)
+
+      re = ONE_LINE_FLAGS.include?(flag) ? CONTROL_IN_LINE : CONTROL_IN_TEXT
+      next unless value.match?(re)
+
+      warn "owner-notes: the #{flag} value contains a control character (e.g. a carriage return or line break)."
+      warn "Fix: pass #{flag} as one line of plain text#{flag == '--text' ? ' (newlines and tabs are fine in --text)' : ''}."
+      return 64
+    end
+    if opts["--help"] || opts["-h"]
+      $stdout.write(usage)
+      return 0
+    end
+    actions = ACTIONS.select { |a| opts.key?(a) }
+    return usage_error("no action given") if actions.empty?
+    return usage_error("more than one action given (#{actions.join(' ')})") if actions.size > 1
+
+    action = actions.first
+    extra = opts.keys - [action] - ALLOWED[action]
+    return usage_error("#{extra.join(' ')} does not apply to #{action}") unless extra.empty?
+    return usage_error("--address needs --commit SHA") if action == "--address" && !opts.key?("--commit")
+    return usage_error("--add needs --source owner|coordinator") if action == "--add" && !opts.key?("--source")
+
+    case action
+    when "--list" then list(opts.key?("--open"))
+    when "--add" then add(opts)
+    when "--address" then address(opts)
+    when "--reconcile" then reconcile
+    when "--path" then puts notes_file
+    end
+    0
+  rescue StrictArgv::UsageError => e
+    usage_error(e.message)
+  rescue Refused => e
+    warn "owner-notes: #{e.message}"
+    1
+  rescue Fault => e
+    warn "owner-notes: #{e.message}"
+    2
+  end
+end
+
+exit OwnerNotes.main(ARGV) if $PROGRAM_NAME == __FILE__

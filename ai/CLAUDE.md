@@ -180,61 +180,130 @@ that owner's sign-off. If it needs fixing, fix it.
   collect sign-off. Send it and keep working — do not block on a reply.
 
 **Owner-gated actions are a separate category and stay gated.** This is not
-about lanes. It is about actions that touch the owner's real-world resources or
-irreversible state, and it does not relax just because ownership isn't a gate:
-production data, credentials and secrets, system/host/daemon changes, anything
-on a human's own machine, merges and deploys where policy requires them, and the
-`athena:run-autonomously` owner-gated list. Example: the config of a GitLab
+about lanes. It is the table in *Owner approval policy* below, and it does not
+relax just because ownership isn't a gate. Example: the config of a GitLab
 runner on the owner's laptop is the owner's call because it is the owner's
-machine — a system change under the Hard Rule below — not because of who owns
-the CI/CD lane. "Ownership isn't a gate" never licenses an agent to do an
-owner-gated thing. A security fix's merge and deploy are not on this list; see
-*Security fixes ship without owner approval* below.
+machine (item 8, and the Hard Rule below), not because of who owns the CI/CD
+lane. "Ownership isn't a gate" never licenses an agent to do an owner-gated
+thing.
 
-## Security fixes ship without owner approval
+**Later (2026-09-28):** this paragraph listed the owner-gated actions itself
+("production data, credentials and secrets, …, merges and deploys where
+policy requires them, and the `athena:run-autonomously` owner-gated list").
+That skill had no such list. Superseded by *Owner approval policy*, the one
+home of the list.
 
-**The rule, owner Cody, 2026-09-24 (~00:33Z, harness coordinator session):**
-"fixing security issues does not require asking approval - just fix them." It
-is a standing approval. This section is its one home; other documents cite it
-by name.
+## Owner approval policy
 
-- **What it waives: the wait for the owner's go.** A security fix does not ask
-  first, even where a gate would otherwise need the owner's explicit go — for
-  example `integration-gate` exit 4 on a workflow or deploy-automation edit.
-  Do not hold it, and do not DM for a go-ahead. Do not offer to hold it or
-  ask to re-confirm it either. Cody, 2026-09-25: "Please just ship. We just
-  ship security fixes."
-- **What it does not waive: the bar.** The fix has a regression test that
-  fails first (*A bug fix starts with a regression test that fails*), a critic
-  PASS, green CI, and a live verify in the environment it protects. The
-  approval removes the wait, never a check.
-- **What it cannot waive: steps only the owner can perform.** Their actual
-  credentials, interactive console or account actions, anything on the owner's
-  own machine (Hard Rule). Escalate that one step with its exact command, and
-  ship the rest of the fix (`athena:run-autonomously` → *Owner-credential
-  gates throttle merging, not progress*). A read-only step you can already
-  run is not owner-only. An audit with a session you already hold is one. Run
-  it; do not ask for it.
-- **What counts as a security issue.** A concrete defect that lets someone
-  read, change, or do what they should not: a secret or credential exposure
-  (including a secret in argv, logs, or a world-readable file), an authn or
-  authz bypass, injection (SQL, shell, template, prompt-to-tool), a data leak
-  across a tenant or trust boundary, or privilege escalation. The ticket and the
-  PR name the class and the exposure path, so a reviewer can check the claim.
-  A label does not make a change a security fix. General hardening with no
-  concrete issue, a refactor, or a feature does not qualify. The approval
-  covers only the diff the fix needs; unrelated changes in the same PR do not
-  ride on it.
-- **The record.** For a security fix that hits exit 4, pass `integration-gate
-  --owner-approval 'security-fix standing approval (~/.claude/CLAUDE.md →
-  Security fixes ship without owner approval): "fixing security issues does not
-  require asking approval - just fix them" — Cody, 2026-09-24; <class>, <ticket>'`.
-  Cite the same rule in the PR body and the state log, and copy the
-  `BLAST-RADIUS HOT` block into the PR body and the final report, so the owner
-  sees what merging did.
-- **No in-repo switch carries this approval** — no flag, env var, or marker a
-  diff could set. It stays a quoted owner record, per `~/dev/custom/CLAUDE.md` →
-  *A check's own bar must not live in the diff it is checking*.
+**The rule, owner Cody, 2026-09-28 (~00:02Z, coordinator session,
+terminal):** "I want to shift to a "don't require approval by default"
+strategy." Cody approved the table below by answering "approve" (00:03:54Z,
+session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`, message
+`0d72c57f-caad-4c73-ac87-882d3e61c78f`) to the coordinator's proposal,
+recorded in full in
+`~/dev/custom/ai-artifacts/coordination/2026-09-27-approval-rules-inventory.md`
+→ *Owner decision*. This section is the one home of what needs Cody's
+approval. Other documents cite it by name and restate none of it. Changing it
+is itself item 6.
+
+**Default: no approval.** Ship per *Shipping*. Approval is about the wait,
+never the bar: tests, a critic PASS, green CI and a live verify still apply to
+everything.
+
+**Later (2026-09-28):** this section replaces *Standing owner approvals* and its
+subsections *Security fixes ship without owner approval*, *Library upgrades:
+pending owner confirmation*, *Comment- and docs-only changes: pending an
+objective check* and *What no standing approval covers*. Those held every
+`integration-gate` exit 4 and every captain `IRREVERSIBLE` for the owner unless
+a named standing approval covered it. Superseded by the owner decision above:
+nothing needs approval unless the table below names it.
+
+### Needs Cody's approval
+
+| # | Action | Notes |
+|---|---|---|
+| 1 | Destroying or replacing stateful prod infra or data | Terraform destroy/replace of a database, secret store or bucket; a destructive migration; deleting prod data. |
+| 2 | Adding recurring cost | Paid infra, a paid API or SaaS, a new vendor account. |
+| 3 | Reaching another person | A DM to anyone but Cody, an email, a Drive share, an unprompted channel post (`athena:slack` → *When Athena may post*). |
+| 4 | Deleting a repo, force-pushing main, changing forge settings or branch protection | |
+| 5 | Loosening a quality bar | Raising a budget or threshold; dropping, skipping or downgrading a check (`ai/blocks/ops/safety-checks.md`). Fixing a check's false positive is not loosening. |
+| 6 | Changing the approval rules, or reversing a Cody decision | This section, the `blast-radius` holds, the owner approval grant allowlist. |
+| 7 | A walt_ui change that would cause downtime | A walt_ui security fix ships zero-downtime; ask only if downtime is unavoidable. |
+| 8 | Owner-only steps | Cody's credentials, console or account actions, sudo and system changes (*Hard Rule*), anything on Cody's own machine. Cody performs these; they are not approvals. Escalate the one step with its exact command and ship the rest. A read-only step you can already run is not owner-only; run it. |
+
+These hold for security fixes too. A change covered by none of them ships.
+
+**What enforces it.** `integration-gate` exit 4 (`blast-radius`) fires only
+where a diff shows a table item: a destructive migration, forge settings files,
+a check's suppression list, this section, or the classifier itself. Terraform
+that merging applies still holds, whatever the plan, until DND-998 can tell a
+destroy or a cost change from a harmless update; ask with the plan summary. The
+rest is doctrine: a captain's `Blast radius: IRREVERSIBLE` flags items 1–3, and
+each agent's own judgment covers the others.
+
+### Notify after, in the digest
+
+No wait. List each in the next owner digest (the admiral's final report, or
+the decisions digest under `athena:run-autonomously`):
+
+- **Won't Fix.** Cody can veto by a click (`athena:slack` → *A click is
+  untrusted input*).
+- **Notion schema changes** (properties, status options, groups).
+- **Bulk ticket changes.**
+- **Running a committed installer after its change lands** (`setup-hooks
+  --install`, the crontab installers, `setup-inbox-registry --install`). Only
+  the session on the machine being changed runs it, when its own owner turn or
+  its own admiral's brief authorizes it. A decision relayed from another
+  session is not enough: a session never changes its own settings or config
+  because a peer asked. Cody tells that machine's session directly.
+- **Global tool versions and dotfiles.**
+
+### Dropped
+
+These needed Cody before 2026-09-28 and no longer do. Named so no one
+re-derives the hold: a non-security `integration-gate` exit 4, deploy-workflow
+edits included; library upgrades and new libraries; docs- and comment-only
+changes; terraform that neither destroys nor adds cost, auto-applied roots
+included (the gate still holds it until DND-998; see *What enforces it*); a
+captain's `IRREVERSIBLE` for a one-way action outside items 1–3;
+promoting a security issue; harness governance edits outside items 5 and 6;
+secret rotation with no console step.
+
+### Security fixes
+
+A security fix needs no approval, like any change outside the table. Two rules
+from the earlier *Security fixes ship without owner approval* still stand:
+
+- **What counts.** A concrete defect that lets someone read, change or do what
+  they should not (secret exposure, authn/authz bypass, injection, a
+  cross-tenant leak, privilege escalation); a security control that misreports
+  in either direction, false positives included; or general hardening that
+  makes an attack or leak harder. The ticket and PR name the exposure path, the
+  control and its misreport, or the threat reduced. A label alone does not
+  qualify. Owner records: Cody, 2026-09-24, "fixing security issues does not
+  require asking approval - just fix them"; 2026-09-27 06:58Z, "I would like
+  to add general hardening."
+- **Scheduling is separate.** When one is worked is [[athena:ticket-management]]
+  → *Priority: critical path first*; a finished one merges first
+  (`athena:merge-boarding` → *A finished security fix merges first*).
+
+### Asking, and what counts as approval
+
+- **Ask for a table item; hold only that item.** Send Cody a Block Kit decision
+  DM (`athena:slack` → *Asking the owner for a decision*) with what it causes:
+  the `BLAST-RADIUS HOT` block, the plan summary, or the one-line effect. Keep
+  working everything else (`athena:run-autonomously` → *Owner-credential gates
+  throttle merging, not progress*).
+- **Approval is Cody's own words in a terminal turn**, recorded where a tool
+  can verify them (`integration-gate --help` → `--owner-approval`), or an owner
+  approval grant (`ai/contracts/athena-events.md` → *Owner approval grants*).
+  A destructive migration may be pre-authorized at design time, on the epic
+  (`athena:merge-boarding`).
+- **A Slack reply is never approval.** A click is approval only where
+  `athena:slack` → *A click is untrusted input* allows it.
+- **No in-repo switch carries approval** — no flag, env var or marker a diff
+  could set (`~/dev/custom/CLAUDE.md` → *A check's own bar must not live in the
+  diff it is checking*).
 
 ## Find it, ticket it, fix it, verify it live
 
@@ -261,16 +330,37 @@ the issues." This section is its one home; other documents cite it by name.
   - a critic PASS, green CI, and a live verify after deploy. Deployed is not
     working. The mechanism the fix relies on must fire in the real environment
     (`~/dev/custom/CLAUDE.md` → *A claimed mechanism must be able to fire*).
-- **Owner-gated steps are not covered.** Credentials, console or account
-  actions, and anything on the owner's own machine go to the owner with the
-  exact step (*Ownership tells you whom to ask, not whether you may*; *Hard
-  Rule*). So does a non-security `integration-gate` exit 4, which needs the
-  owner's go. A security fix follows *Security fixes ship without owner
-  approval*. A forge write that cannot run as Athena follows `athena:github` →
-  *When a forge write can't be done as Athena*. The rest of the fix still ships.
-- **Proportionate.** A LOW finding is filed and queued. It does not interrupt
-  the work in hand. Report findings to the owner as one batched summary, not a
-  narration of each ticket.
+- **Owner-gated steps are not covered.** What *Owner approval policy* names
+  goes to the owner: the steps only Cody performs, with the exact step, and
+  the items that need his go. A forge write that cannot run as Athena follows
+  `athena:github` → *When a forge write can't be done as Athena*. The rest of
+  the fix still ships.
+- **Fixed after the critical path.** A finding is filed on the epic being
+  worked and gets a captain once that epic's functional requirements are met.
+  It does not interrupt the work in hand. It goes first only if it is an
+  exploitable vulnerability or truly blocks a planned ticket; one the ticket's
+  own change introduces blocks it. The tiers, the blocking test and the
+  exceptions: [[athena:ticket-management]] → *Priority: critical path first*.
+  Report findings to the owner as one batched summary, not a narration of each
+  ticket.
+
+  **Later (2026-09-28, DND-979):** this bullet said a finding is "queued
+  behind its project's critical path, whatever its severity", and that a
+  pre-existing security issue "waits too, unless the admiral promotes it".
+  Superseded by the owner's priority tiers, the same day: findings wait for
+  the epic's functional requirements, and an exploitable (`CRITICAL`/`HIGH`)
+  pre-existing vulnerability is tier 1, ahead of the path with no Slack ask.
+
+  **Later (2026-09-27):** this bullet read "**Proportionate.** A LOW finding is
+  filed and queued", which left any higher-severity finding free to jump the
+  planned work and to be wired as a blocker onto it. Superseded by owner
+  directive (Cody): "we prioritize the critical path over side quests in a
+  project, completing the findings and other issues that have been raised after
+  the critical path. Findings should only block previous tickets if they truly
+  prevent the work from completing the intended requirements." Measured
+  2026-09-27 across 17 harness epics: ~114 of 142 tickets created in 48h (80%)
+  were findings or follow-ups, and planned tails sat untouched. Find, ticket and
+  fix are unchanged; only the sequencing moved.
 - **One finding, one ticket.** A finding outside your current unit of work gets
   its own ticket and its own change. Never bundle it into the change in hand; a
   mixed diff is harder to review and to revert.
@@ -515,6 +605,11 @@ be consulted:
   `{{CHANNEL_RESOLUTION}}`, not settled here.
   For the flaky lane this trigger is **operative**: the count on walt_ui's
   `flaky` `log` channel (`walt_ui-flaky.jsonl`, producer platform).
+- **Harness-lane drain request.** A `-harness-lane-drain.md` message on
+  custom's `harness-alerts` maildir. It reaches the custom session through the
+  same `inbox-wait` waiter, and `athena:inbox-attend` → *A fourth writer*
+  handles it. This is the harness-reliability lane (P7), the brief's second
+  instance (*The harness lane*).
 - **`SessionStart` poll — retired.** `~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`
   is no longer a trigger for any lane. Its removal from walt_ui is walt_ui's
   change.

@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#
+# setup-clustering-cron — install, check or remove the 12h epic-clustering cron
+# entry, which runs scripts/athena-clustering-run.sh (DND-983).
+#
+# Idempotent: re-running updates the schedule in place and never duplicates the
+# line. It changes only its own line; every other crontab line is kept. It
+# always installs the MAIN checkout's runner path, even when run from a
+# worktree, because a worktree path vanishes on cleanup. It needs no root.
+#
+# Usage:
+#   setup-clustering-cron [--schedule "<cron expr>"] [--dry-run]
+#   setup-clustering-cron --check          read-only: exit 0 if the entry is live, 1 if not
+#   setup-clustering-cron --remove [--dry-run]
+#   setup-clustering-cron --backup <file>  snapshot the current crontab to <file>
+#   setup-clustering-cron --help
+#
+# Schedule: default "0 7,19 * * *". Cron reads it in the machine's local time,
+# which here is America/Denver, so the runs are 07:00 (the morning run, which
+# also sends the daily digest) and 19:00 Denver all year. cronie follows DST:
+# that is 13:00 and 01:00 UTC under MDT (March to November) and 14:00 and 02:00
+# UTC under MST. Neither time falls in the 02:00 changeover hour, so no run is
+# skipped or doubled on a DST day. On a machine in another timezone, pass a
+# --schedule that lands a run in the Denver morning; the runner decides the
+# digest from the Denver clock itself.
+#
+# Exit codes: 0 ok · 1 entry missing (--check) or usage error · 2 a prerequisite
+# is missing, or the current crontab could not be read
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+SCHEDULE="0 7,19 * * *"
+DRY_RUN=0; REMOVE=0; CHECK=0; BACKUP_FILE=""
+
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
+die() { # <exit> <message> <fix>
+  echo "setup-clustering-cron: $2" >&2
+  echo "  Fix: $3" >&2
+  exit "$1"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --schedule) shift; [ $# -gt 0 ] || die 1 "--schedule needs a value" 'pass five cron fields, e.g. --schedule "0 7,19 * * *"'; SCHEDULE="$1" ;;
+    --schedule=*) SCHEDULE="${1#*=}" ;;
+    --remove)  REMOVE=1 ;;
+    --check)   CHECK=1 ;;
+    --backup)  shift; [ $# -gt 0 ] || die 1 "--backup needs a file path" "pass a path outside git, e.g. --backup ~/crontab.bak"; BACKUP_FILE="$1" ;;
+    --backup=*) BACKUP_FILE="${1#*=}" ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die 1 "unknown argument: $1" "run with --help for the accepted flags." ;;
+  esac
+  shift
+done
+
+# shellcheck disable=SC2086
+set -f; set -- ${SCHEDULE}; set +f
+[ $# -eq 5 ] || die 1 "--schedule '${SCHEDULE}' is not five cron fields" 'pass five fields, e.g. --schedule "0 7,19 * * *"'
+
+command -v crontab >/dev/null 2>&1 || die 2 "crontab is not installed" "install cronie (the shipwright cron uses it too)."
+
+# The main checkout's runner, resolved through git's common dir.
+common="$(git -C "${SCRIPT_DIR}" rev-parse --git-common-dir 2>/dev/null || true)"
+case "${common}" in ''|/*) ;; *) common="${SCRIPT_DIR}/${common}" ;; esac
+[ -n "${common}" ] || die 2 "${SCRIPT_DIR} is not inside a git checkout" "run the copy in ~/dev/custom/scripts/."
+MAIN_CHECKOUT="$(dirname -- "$(cd -- "${common}" && pwd -P)")"
+RUNNER="${MAIN_CHECKOUT}/scripts/athena-clustering-run.sh"
+
+# read_crontab — the current crontab on stdout. "no crontab for <user>" is an
+# empty crontab. Any other failure exits 2: writing after a failed read would
+# replace every other entry with ours.
+read_crontab() {
+  local out err rc=0
+  err="$(mktemp)"
+  out="$(crontab -l 2>"${err}")" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    if grep -q 'no crontab for' "${err}"; then rm -f "${err}"; return 0; fi
+    local msg; msg="$(tr '\n' ' ' <"${err}")"; rm -f "${err}"
+    die 2 "could not read the current crontab (crontab -l exit ${rc}: ${msg})" \
+      "fix the crontab spool first (scripts/setup-shipwright-cron repairs it), then re-run. Nothing was written."
+  fi
+  rm -f "${err}"
+  printf '%s\n' "${out}"
+}
+
+# live_lines — uncommented crontab lines that run our runner.
+live_lines() { grep -vE '^[[:space:]]*#' | grep -F -- " ${RUNNER}" || true; }
+
+put_crontab() {
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo "  [dry-run] the crontab would become:"; printf '%s\n' "$1" | sed 's/^/    /'
+    return 0
+  fi
+  printf '%s\n' "$1" | crontab -
+}
+
+if [ "${CHECK}" -eq 1 ]; then
+  current="$(read_crontab)"
+  live="$(printf '%s\n' "${current}" | live_lines)"
+  if [ -n "${live}" ] && [ -x "${RUNNER}" ]; then
+    echo "OK: the epic-clustering cron entry is installed:"
+    printf '%s\n' "${live}" | sed 's/^/  /'
+    exit 0
+  fi
+  if [ -z "${live}" ]; then
+    echo "MISSING: no live crontab entry runs ${RUNNER}; the 12h clustering pass and the daily digest are not scheduled." >&2
+  else
+    echo "MISSING: the crontab runs ${RUNNER}, but that file is absent or not executable." >&2
+  fi
+  echo "  Fix: from ${MAIN_CHECKOUT}, run scripts/setup-clustering-cron (or restore your --backup file)." >&2
+  exit 1
+fi
+
+if [ -n "${BACKUP_FILE}" ]; then
+  current="$(read_crontab)"
+  ( umask 077; printf '%s\n' "${current}" >"${BACKUP_FILE}" ) \
+    || die 2 "could not write ${BACKUP_FILE}" "pick a writable path outside git."
+  echo "Backed up the current crontab to ${BACKUP_FILE}"
+  exit 0
+fi
+
+current="$(read_crontab)"
+kept="$(printf '%s\n' "${current}" | grep -vF -- "${RUNNER}" || true)"
+
+# --remove works whether or not the runner exists: a missing runner is when
+# its entry most needs removing.
+if [ "${REMOVE}" -eq 1 ]; then
+  put_crontab "${kept}"
+  echo "Removed the epic-clustering cron entry."
+  exit 0
+fi
+
+[ -x "${RUNNER}" ] || die 2 "the runner ${RUNNER} is absent or not executable in the main checkout" \
+  "land DND-983 on main and fast-forward ${MAIN_CHECKOUT} first. An entry pointing at a missing runner fails every tick."
+SKILL_FILE="${MAIN_CHECKOUT}/ai/skills/athena:epic-clustering/SKILL.md"
+[ -r "${SKILL_FILE}" ] || die 2 "the athena:epic-clustering skill is not in the main checkout (${SKILL_FILE})" \
+  "land DND-982 on main and fast-forward ${MAIN_CHECKOUT} first. Without the skill every tick fails."
+
+line="${SCHEDULE} ${RUNNER}"
+if [ -n "${kept}" ]; then new="$(printf '%s\n%s' "${kept}" "${line}")"; else new="${line}"; fi
+put_crontab "${new}"
+if [ "${DRY_RUN}" -eq 1 ]; then echo "[dry-run] would install: ${line}"; else echo "Installed: ${line}"; fi
+
+tz_note="machine local time is $(date +%Z) (UTC$(date +%z))"
+if [ "$(date +%z)" != "$(TZ=America/Denver date +%z)" ]; then
+  tz_note="${tz_note}. WARNING: not America/Denver; the default times are not the owner's morning. Fix: re-run with a --schedule in this machine's time"
+fi
+echo "Times are cron's local time: ${tz_note}."
+echo "Default schedule in UTC: 13:00 and 01:00 under MDT, 14:00 and 02:00 under MST."
+echo "Verify: scripts/setup-clustering-cron --check"
+echo "Smoke:  env -i HOME=\"\$HOME\" SHELL=/bin/sh ${RUNNER} --dry-run"

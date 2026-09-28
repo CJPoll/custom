@@ -1,0 +1,296 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+#
+# next-mission -- pick the ONE ticket an admiral dispatches next, and name the
+# rule that picked it (DND-985, epic "Harness: scope-growth rules", W8).
+#
+# Read-only. It reads the DND Tickets data source through the Notion REST API
+# with the notion-personal integration token (~/.claude/notion-personal-token,
+# the file scripts/add-notion wires as the notion-personal token), or reads an
+# offline JSON fixture. It never writes Notion, git, or the state log.
+#
+# The rule (tiers 0-4 and the functional-first hold) lives in
+# ai/lib/next_mission.rb; its prose home is athena:ticket-management ->
+# "Priority: critical path first" (as amended by DND-979). The Notion reads
+# live in ai/lib/next_mission_notion.rb.
+#
+# Exit codes -- a failed lookup must never look like an empty one:
+#   0  picked a ticket (stdout: "<ID>\t<rule>")
+#   1  no candidate: the output names the filter that emptied the set and the
+#      count each filter matched
+#   2  usage error (bad flag, bad id, conflicting inputs)
+#   3  could not read (Notion/HTTP failure, missing token, unreadable fixture,
+#      data outside the known vocabulary, or any unexpected error). Never read
+#      as "no candidate": every exception is caught and routed here, because
+#      Ruby's own exit status for an uncaught exception is 1.
+require "json"
+require_relative "../lib/strict_argv"
+require_relative "../lib/next_mission"
+require_relative "../lib/next_mission_notion"
+
+PROG = "next-mission"
+TOKEN_FILE = File.join(Dir.home, ".claude", "notion-personal-token")
+SUITE = File.expand_path("../lib/test/next-mission/self-test.sh", __dir__)
+
+USAGE = <<~TXT
+  Usage: ai/bin/next-mission (--scope EPIC | --tickets IDS | --from-json FILE) [options]
+
+  Pick the next ticket to dispatch from a scope and print it with the rule that
+  picked it. Read-only.
+
+  Scope (at least one, or --harness-lane alone; --scope and --tickets combine as a union):
+    --scope EPIC        an epic page id (32 hex, dashes optional) or its exact title
+    --tickets IDS       comma-separated DND ticket ids, e.g. DND-12,DND-40
+    --from-json FILE    offline: read the scope from a JSON fixture instead of Notion
+                        ({"tickets":[{id,status,kind,severity,path,area,depends_on,created}],
+                          "external":[{id,status}], "lane_epics":[{id,title}]}); not combinable
+                        with --scope/--tickets. "lane_epics" stands in for the lane-epic read
+                        and needs --harness-lane.
+
+  Options:
+    --started IDS       comma-separated ids with a live captain, from the state log's Mission
+                        table (authoritative). Added to Notion In Progress and In Merge Queue
+                        as "started" (Parked is started only when listed here). It is
+                        also the live-captain source for the stale check: an In Progress
+                        ticket not listed is warned about on stderr ("stale In Progress").
+                        The fleet registry has no read path from harness tooling, so it is
+                        not consulted. Without --started the stale check is skipped (said so).
+    --harness-lane      the P7 harness lane: only Area=Harness, Path=Off (or unset), non-Feature
+                        tickets. With no --scope/--tickets the scope is every open epic titled
+                        "Harness lane: ..." (ai/docs/ticket-lane-action-brief.md -> The harness
+                        lane). Without this flag those tickets are the lane's: left out (tier 1
+                        excepted) and named on stderr.
+    --json              print the full result as JSON (ticket, tier, rule, funnel, held_back)
+    --self-test         run the deterministic suite (no network)
+    --help              this text
+
+  Tiers: 0 Path=Promoted; 1 Vulnerability CRITICAL/HIGH; 2 Bug + Path=Blocking;
+  3 Path=Critical in dependency order; 4 the rest by Severity, Kind, age.
+  Tier-4 non-Features (except Path=Blocking) wait while a Critical/Feature ticket
+  in scope is unfinished. Needs Attention tickets wait on the owner. Within a tier,
+  a Parked ticket is resumed before a fresh one is started ("resume Parked").
+
+  Exit: 0 picked; 1 no candidate (names the emptying filter); 2 usage; 3 read failure.
+TXT
+
+SPEC = {
+  "--scope" => :value, "--tickets" => :value, "--from-json" => :value, "--started" => :value,
+  "--harness-lane" => :switch, "--json" => :switch, "--self-test" => :switch, "--help" => :switch
+}.freeze
+
+EMPTY_FIX = {
+  in_scope: "check that --scope/--tickets name the intended epic; the scope matched no tickets.",
+  not_terminal: "nothing to dispatch: every ticket in scope is terminal, so the epic may be ready to close.",
+  not_flake: "nothing to dispatch here: only Flake tickets remain, and they belong to the flaky lane.",
+  harness_lane: "nothing for the harness lane: no Area=Harness, Path=Off, non-Feature ticket in scope.",
+  not_lane: "the rest are the harness lane's; do not start them. Any not on a \"Harness lane: \" epic is in " \
+            "neither queue: ask the architect to move it there, then send a drain request " \
+            "(ai/docs/ticket-lane-action-brief.md -> The harness lane).",
+  lane_empty: "the lane epics hold no tickets yet: nothing for the harness lane to drain.",
+  lane_epics: "nothing for the harness lane to drain. Lane tickets reach the lane only on epics with " \
+              "this title prefix (ai/docs/ticket-lane-action-brief.md -> The harness lane); check " \
+              "an epic's title if you expected one.",
+  not_started: "wait for a started ticket to land; everything open is already started.",
+  not_waiting_on_owner: "report the Needs Attention tickets to the owner; the rest wait on them.",
+  unblocked: "land a blocker first; every remaining ticket waits on an unfinished Depends On.",
+  functional_first: "finish the Critical/Feature tickets named above; tier-4 findings follow them."
+}.freeze
+
+def usage_error(msg, fix = nil)
+  warn "#{PROG}: #{msg}"
+  warn "Fix: #{fix || "run `#{PROG} --help`; pass --scope EPIC and/or --tickets DND-1,DND-2, --harness-lane " \
+                       'alone, or --from-json FILE for offline use.'}"
+  exit 2
+end
+
+def read_error(msg, fix)
+  warn "#{PROG}: could not read the scope: #{msg}"
+  warn "Fix: #{fix}"
+  warn "This is a read failure, not an empty queue: do not dispatch on it."
+  exit 3
+end
+
+def id_list(flag, raw, prefix: nil)
+  ids = raw.split(",").map(&:strip).reject(&:empty?)
+  usage_error("#{flag} is empty") if ids.empty?
+  bad = ids.reject { |i| i.match?(NextMission::ID_RE) && (prefix.nil? || i.start_with?("#{prefix}-")) }
+  shape = prefix ? "#{prefix}-NUMBER" : "PREFIX-NUMBER"
+  usage_error("#{flag} has malformed id(s) #{bad.join(', ')}; expected #{shape}, e.g. DND-12") unless bad.empty?
+  ids.uniq
+end
+
+def load_fixture(path)
+  data = JSON.parse(File.read(path))
+  raise TypeError, "top level is not an object" unless data.is_a?(Hash)
+  raise TypeError, "\"tickets\" must be an array" unless data["tickets"].is_a?(Array)
+  raise TypeError, "\"external\" must be an array" unless data.fetch("external", []).is_a?(Array)
+
+  mk = lambda do |h|
+    raise TypeError, "a ticket entry is not an object: #{h.inspect}" unless h.is_a?(Hash)
+
+    NextMission::Ticket.new(id: h["id"], page_id: h["page_id"], title: h["title"], status: h["status"],
+                            kind: h["kind"], severity: h["severity"], path: h["path"], area: h["area"],
+                            depends_on: Array(h["depends_on"]), created: h["created"])
+  end
+  lane = data["lane_epics"]
+  unless lane.nil? || (lane.is_a?(Array) && lane.all? { |e| e.is_a?(Hash) && e["id"].is_a?(String) && e["title"].is_a?(String) })
+    raise TypeError, "\"lane_epics\" must be an array of {id, title} strings"
+  end
+
+  [NextMissionNotion::Scope.new(scope: data["tickets"].map(&mk), external: data.fetch("external", []).map(&mk)),
+   lane&.map { |e| { id: e["id"], title: e["title"] } }, []]
+rescue SystemCallError, JSON::ParserError, TypeError => e
+  read_error("fixture #{path}: #{e.class}: #{e.message}",
+             "pass a readable JSON file shaped as in --help (a top-level \"tickets\" array).")
+end
+
+# -> [scope, lane epics or nil, dropped lane-epic titles]. lane: the scope is
+# the open harness-lane epics (--harness-lane with no --scope/--tickets).
+def load_notion(epic, tickets, lane: false)
+  unless File.readable?(TOKEN_FILE)
+    read_error("the notion-personal token file #{TOKEN_FILE} is missing or unreadable",
+               "owner-gated: ask the owner to place the notion-personal integration token at " \
+               "#{TOKEN_FILE}; never mint or rotate one yourself.")
+  end
+  token = File.read(TOKEN_FILE).strip
+  read_error("#{TOKEN_FILE} is empty", "owner-gated: ask the owner to restore the notion-personal token.") if token.empty?
+  reader = NextMissionNotion.new(NextMissionNotion::HttpTransport.new(token))
+  return [reader.load(epic: epic, tickets: tickets), nil, []] unless lane
+
+  epics, dropped = reader.lane_epics
+  return [NextMissionNotion::Scope.new(scope: [], external: []), epics, dropped] if epics.empty?
+
+  [reader.load(epics: epics.map { |e| e[:id] }), epics, dropped]
+rescue NextMissionNotion::ReadError => e
+  read_error(e.message, "check the epic id/title and ticket ids against Notion; on an HTTP 401/403 the " \
+                        "notion-personal integration lost access (owner-gated); on 429/5xx re-run shortly.")
+end
+
+# The Fix: line for an empty result. A lane read whose epics hold no tickets
+# is not a mistyped --scope, so it gets its own text.
+def fix_for(result, lane)
+  key = lane && result.emptied_by == :in_scope ? :lane_empty : result.emptied_by
+  EMPTY_FIX.fetch(key)
+end
+
+def render_empty(result, lane)
+  puts "#{PROG}: no candidate to dispatch"
+  puts "emptied by: #{result.emptied_by}"
+  puts "reason: #{result.reason}"
+  puts "funnel (matched at each filter, in order):"
+  result.funnel.each { |stage, n| puts "  #{NextMission::STAGES.fetch(stage).split(' (').first}: #{n}" }
+  puts "Fix: #{fix_for(result, lane)}"
+end
+
+def lane_prefix
+  NextMissionNotion::LANE_EPIC_PREFIX.inspect
+end
+
+# Zero open lane epics: the lane has no queue. Said by name, never an empty funnel.
+def render_no_lane(json)
+  reason = "no open epic in DND Epics has a title starting #{lane_prefix}"
+  if json
+    puts JSON.pretty_generate(ticket: nil, emptied_by: "lane_epics", reason: reason, lane_epics: [])
+    warn "Fix: #{EMPTY_FIX.fetch(:lane_epics)}"
+  else
+    puts "#{PROG}: no candidate to dispatch"
+    puts "emptied by: lane_epics"
+    puts "reason: #{reason}"
+    puts "Fix: #{EMPTY_FIX.fetch(:lane_epics)}"
+  end
+  exit 1
+end
+
+# One stderr line, always: the stale list, "none" with the count checked, or
+# why the check was skipped. Never an empty list.
+def stale_line(result)
+  stale = result.stale_in_progress
+  if stale.nil?
+    "stale In Progress check skipped: no --started given (source would be --started; the fleet " \
+      "registry has no read path from harness tooling)"
+  elsif stale.empty?
+    "stale In Progress (source: --started): none; all #{result.in_progress} In Progress ticket(s) are listed"
+  else
+    "stale In Progress (no live captain per --started): #{stale.join(', ')}"
+  end
+end
+
+def main(argv)
+  opts = begin
+    StrictArgv.parse(argv, SPEC)
+  rescue StrictArgv::UsageError => e
+    usage_error(e.message)
+  end
+
+  if opts["--help"]
+    puts USAGE
+    exit 0
+  end
+  exec(SUITE) if opts["--self-test"]
+
+  if opts["--from-json"] && (opts["--scope"] || opts["--tickets"])
+    usage_error("--from-json replaces the Notion read; it cannot be combined with --scope or --tickets")
+  end
+  lane_read = opts["--harness-lane"] && !(opts["--from-json"] || opts["--scope"] || opts["--tickets"])
+  usage_error("no scope given") unless lane_read || opts["--from-json"] || opts["--scope"] || opts["--tickets"]
+  started = opts["--started"] ? id_list("--started", opts["--started"]) : nil
+  tickets = opts["--tickets"] && id_list("--tickets", opts["--tickets"], prefix: NextMissionNotion::TICKET_PREFIX)
+
+  loaded, lane_epics, dropped =
+    opts["--from-json"] ? load_fixture(opts["--from-json"]) : load_notion(opts["--scope"], tickets, lane: lane_read)
+  if lane_epics && !opts["--harness-lane"]
+    usage_error("the fixture's \"lane_epics\" needs --harness-lane",
+                "add --harness-lane, or remove \"lane_epics\" from the fixture.")
+  end
+  unless dropped.empty?
+    warn "#{PROG}: note: ignored epic(s) whose title does not start exactly with #{lane_prefix}: #{dropped.join('; ')}"
+  end
+  if lane_epics
+    render_no_lane(opts["--json"]) if lane_epics.empty?
+    warn "#{PROG}: harness lane scope: #{lane_epics.size} open epic(s) titled #{lane_prefix}...: " \
+         "#{lane_epics.map { |e| e[:title] }.join('; ')}"
+  end
+
+  result = begin
+    NextMission.select(scope: loaded.scope, external: loaded.external, started: started,
+                       harness_lane: opts["--harness-lane"] ? true : false)
+  rescue NextMission::DataError => e
+    read_error(e.message, "the ticket data is outside what next-mission can rank; fix the ticket in " \
+                          "Notion, or update ai/lib/next_mission.rb if the schema gained a value on purpose.")
+  end
+
+  warn "#{PROG}: #{stale_line(result)}"
+  unless result.started_not_in_scope.empty?
+    warn "#{PROG}: note: --started id(s) not in this scope: #{result.started_not_in_scope.join(', ')} " \
+         "(a typo here would let a started ticket be dispatched twice)"
+  end
+
+  if lane_epics && !result.outside_lane.empty?
+    warn "#{PROG}: in lane epics but not lane tickets (the lane skips them; only a feature admiral " \
+         "scoping that epic takes them): #{result.outside_lane.join(', ')}"
+  end
+  unless result.left_to_lane.empty?
+    warn "#{PROG}: left to the harness lane: #{result.left_to_lane.join(', ')} " \
+         "(Area=Harness, Path=Off, non-Feature; do not start them. If one is not on a \"Harness lane: \" " \
+         "epic, ask the architect to move it there, then send a drain request: " \
+         "ai/docs/ticket-lane-action-brief.md -> The harness lane)"
+  end
+
+  if opts["--json"]
+    h = result.to_h
+    h[:lane_epics] = lane_epics if lane_epics
+    puts JSON.pretty_generate(h)
+    warn "Fix: #{fix_for(result, lane_epics)}" unless result.pick
+  elsif result.pick
+    puts "#{result.pick.id}\t#{result.rule}"
+  else
+    render_empty(result, lane_epics)
+  end
+  exit(result.pick ? 0 : 1)
+rescue StandardError => e
+  read_error("unexpected #{e.class}: #{e.message}",
+             "this is a defect in next-mission or its input; re-run once, and if it repeats, file it " \
+             "with this line. Do not dispatch on it.")
+end
+
+main(ARGV)

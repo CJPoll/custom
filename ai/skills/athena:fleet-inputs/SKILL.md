@@ -62,8 +62,10 @@ match):
   see your own state log for which one this run settled on, and stay consistent
   with it)
 - Green, reviewed, and deliberately **not mergeable by the fleet** — merging
-  would perform a real-world action (see [[athena:merge-boarding]] → *Merging is
-  not always landing code*) → **`HELD_FOR_OWNER`** in your state log, and in
+  hits an `integration-gate` exit 4 (see [[athena:merge-boarding]] → *Merging is
+  not always landing code*), or a captain reported `IRREVERSIBLE`
+  (`~/.claude/CLAUDE.md` → *Owner approval policy*) →
+  **`HELD_FOR_OWNER`** in your state log, and in
   Notion `Needs Attention` assigned to **Cody**, with the context on the Mission
   body. This is a distinct terminal state, not a flavour of the others: `Stuck`
   means the fleet could not finish the work, `Blocked` means it waits on another
@@ -85,6 +87,9 @@ transition unsatisfiable. When no `In Review`-equivalent exists:
 - **Tell the captain in its dispatch to set NO Notion status at all.**
 - **Hold the Mission yourself at `In Progress`** from dispatch until the MR/PR
   is merged, then move it to `Done` per [[athena:ticket-management]].
+  **Later (2026-09-27):** it leaves `In Progress` for `In Merge Queue` when
+  queued, or `Parked` if you stop first: [[athena:ticket-management]] → *A
+  ticket's status follows its captain*.
 - **Record the substitution as an assumption** in your state log and **report
   the vocabulary gap to the architect**.
 - Do **NOT** invent a new `In Review` option in someone's DB to satisfy the

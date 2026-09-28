@@ -116,6 +116,7 @@ require "fileutils"
 require "set"
 require "stringio"
 require_relative "../lib/strict_argv"
+require_relative "../lib/owner_turn"
 
 PROG = "blast-radius"
 
@@ -152,6 +153,28 @@ KNOWN_CONTENT_KEYS = %w[
 # by relative path are hits too (see ci_references).
 CI_REFERENCES_EVALUATOR = "ci-local-references-v1"
 KNOWN_REFERENCES_KEYS = %w[evaluator comment known_gaps].freeze
+
+# Owner approval policy, 2026-09-28 (~/.claude/CLAUDE.md -> "Owner approval
+# policy"): a surface declares whether its hit HOLDS the merge for the owner.
+#   always              -- HOT whatever merging triggers. A policy or forge
+#                          settings file needs the owner even in a repo with
+#                          no merge-time automation (custom has none).
+#   on-merge-automation -- HOT only when merging triggers automation: the
+#                          original rule, and the default when `hold` is absent
+#                          (a default of "never" would be a silent narrowing).
+#   never               -- the hit is REPORTED on every run, never held.
+HOLD_MODES = %w[always on-merge-automation never].freeze
+DEFAULT_HOLD = "on-merge-automation"
+
+# A content rule over a Markdown file: a hit when a declared SECTION's text
+# differs between base and head, so one section of a large document (the
+# approval table in ai/CLAUDE.md) can hold while the rest stays COLD.
+MARKDOWN_SECTION_EVALUATOR = "markdown-section-v1"
+KNOWN_SECTION_KEYS = %w[evaluator comment sections].freeze
+
+def hold_of(surface)
+  surface.fetch("hold", DEFAULT_HOLD)
+end
 
 def die(msg, fix, code = 2)
   warn "#{PROG}: #{msg}"
@@ -211,10 +234,27 @@ def load_manifest(path)
           "become either a path-only gate or no gate at all.")
     end
 
+    if c["evaluator"] == MARKDOWN_SECTION_EVALUATOR
+      unknown = c.keys - KNOWN_SECTION_KEYS
+      unless unknown.empty?
+        die("surface '#{s['class']}' declares unknown content key(s): #{unknown.join(', ')}.",
+            "this script would IGNORE those keys. Remove them, or implement them in section_hit?.")
+      end
+      secs = c["sections"]
+      valid = secs.is_a?(Hash) && !secs.empty? &&
+              secs.all? { |k, v| k.is_a?(String) && v.is_a?(Array) && !v.empty? && v.all? { |h| h.is_a?(String) && !h.strip.empty? } }
+      unless valid
+        die("surface '#{s['class']}' declares `content.sections` that is not a non-empty map of path -> [heading, ...].",
+            "list each file the surface's patterns match with the headings whose text holds the merge, e.g. " \
+            "{\"ai/CLAUDE.md\": [\"Owner approval policy\"]}. A section rule that names nothing can never hit.")
+      end
+      next
+    end
+
     unless c["evaluator"] == ECTO_MIGRATION_EVALUATOR
       die("surface '#{s['class']}' declares content evaluator #{c['evaluator'].inspect}, " \
           "which this blast-radius does not implement.",
-          "this script implements '#{ECTO_MIGRATION_EVALUATOR}' only. Either update " \
+          "this script implements '#{ECTO_MIGRATION_EVALUATOR}' and '#{MARKDOWN_SECTION_EVALUATOR}' only. Either update " \
           "blast-radius to implement that evaluator, or correct the manifest. An " \
           "unevaluable content rule is an ERROR -- never a path-only gate (which " \
           "would flag every routine migration) and never a silent miss.")
@@ -260,6 +300,26 @@ def load_manifest(path)
         "this script would IGNORE those keys. Remove them, or implement them in " \
         "ci_references. Silently ignoring part of a safety rule is the defect this " \
         "check exists to prevent.")
+  end
+
+  # `hold` (owner approval policy, 2026-09-28). An unknown value is refused:
+  # read as "never" it would silently stop holding; read as anything else it
+  # would mean something the manifest did not say.
+  surfaces.each do |s|
+    next if HOLD_MODES.include?(hold_of(s))
+
+    die("surface '#{s['class']}' declares hold #{s['hold'].inspect}, which this blast-radius does not implement.",
+        "use one of #{HOLD_MODES.join(', ')} (absent means #{DEFAULT_HOLD}). An unknown hold is an ERROR, " \
+        "never a guess at whether the surface holds the merge.")
+  end
+  # hits_for gives a path to the FIRST surface that matches it, so a report-only
+  # surface ahead of a holding one would take the path and silently release the
+  # hold (a destructive migration that CI happens to name, read report-only).
+  first_never = surfaces.index { |s| hold_of(s) == "never" }
+  if first_never && surfaces[first_never..].any? { |s| hold_of(s) != "never" }
+    die("manifest #{path} lists report-only surface '#{surfaces[first_never]['class']}' before a holding surface.",
+        "move every `\"hold\": \"never\"` surface to the END of the surfaces list. A path goes to the first " \
+        "surface it matches, so a report-only surface first would release a hold the manifest declares.")
   end
 
   pattern_count = surfaces.sum { |s| (s["patterns"] || []).size }
@@ -391,6 +451,80 @@ def ecto_regions(text, rule)
   out
 end
 
+# A Markdown heading line for `heading`, at any level.
+def heading_line?(line, heading)
+  line.match?(/\A#+[ \t]+#{Regexp.escape(heading)}[ \t]*\r?\n?\z/)
+end
+
+# Indices of the lines OUTSIDE fenced code blocks (``` or ~~~). A `# comment`
+# inside a shell block is not a heading: read as one, it would end the
+# section early, and every later edit to the section would read COLD.
+# A fence closes only on a run of the SAME character at least as long as the
+# one that opened it (CommonMark), so a ``` line inside a ```` block does not
+# close it early.
+def prose_line_indices(lines)
+  fence = nil
+  lines.each_index.select do |i|
+    marker = lines[i][/\A[ \t]*(`{3,}|~{3,})/, 1]
+    if marker && fence.nil?
+      fence = marker
+      next false
+    end
+    if marker && marker[0] == fence[0] && marker.size >= fence.size && lines[i].strip == marker
+      fence = nil
+      next false
+    end
+    fence.nil?
+  end
+end
+
+# How many prose (unfenced) heading lines name `heading`.
+def heading_count(text, heading)
+  lines = text.lines
+  prose_line_indices(lines).count { |i| heading_line?(lines[i], heading) }
+end
+
+# The section under `heading`: its heading line through the line before the
+# next prose heading of the same or a higher level.
+def markdown_section(text, heading)
+  lines = text.lines
+  prose = prose_line_indices(lines)
+  idx = prose.find { |i| heading_line?(lines[i], heading) }
+  return nil unless idx
+
+  level = lines[idx][/\A#+/].size
+  stop = prose.find { |i| i > idx && (m = lines[i][/\A#+(?=[ \t])/]) && m.size <= level }
+  lines[idx...(stop || lines.size)].join
+end
+
+# [:hit, detail] / [:miss, detail] for a markdown-section-v1 rule. Both sides
+# are read from their COMMITS, never the checkout. Every undecidable state --
+# no base, a side unreadable or absent, a heading that is missing or appears
+# more than once (a duplicate earlier heading could shadow an edit to the real
+# one) -- is a hit: an unproven "unchanged" fails closed.
+def section_hit?(repo, base, head, path, rule)
+  heads = rule["sections"][path]
+  return [:hit, "#{path} matches this surface but declares no section -- fails closed"] unless heads
+  return [:hit, "no base commit to compare against -- fails closed"] unless base
+
+  texts = {}
+  { "base" => base, "head" => head }.each do |side, rev|
+    t, _, ok = git(repo, "show", "#{rev}:#{path}")
+    return [:hit, "#{path} is absent or unreadable at #{side} -- fails closed"] unless ok
+
+    texts[side] = t
+  end
+  heads.each do |hd|
+    counts = texts.transform_values { |t| heading_count(t, hd) }
+    unless counts.values.all? { |c| c == 1 }
+      return [:hit, "section '#{hd}' appears #{counts['base']}x at base and #{counts['head']}x at head " \
+                    "(must be exactly once on both sides) -- fails closed"]
+    end
+    return [:hit, "section '#{hd}' changed"] if markdown_section(texts["base"], hd) != markdown_section(texts["head"], hd)
+  end
+  [:miss, "only text outside #{heads.map { |x| "'#{x}'" }.join(', ')} changed"]
+end
+
 # [:hit, detail] / [:miss, nil] / [:skipped, detail]
 #
 # Content is read from the file AT HEAD, never from diff text. A diff hunk may
@@ -399,7 +533,9 @@ end
 # convention, so the diff usually IS the whole file -- reading at head makes that
 # structural rather than lucky, and for an edited already-deployed migration it
 # is strictly more correct (the deploy runs the file as it is at head).
-def content_hit?(repo, head, path, rule)
+def content_hit?(repo, head, path, rule, base = nil)
+  return section_hit?(repo, base, head, path, rule) if rule["evaluator"] == MARKDOWN_SECTION_EVALUATOR
+
   _, _, exists = git(repo, "cat-file", "-e", "#{head}:#{path}")
   unless exists
     # DELETED at head. A migration that is not there does not execute on deploy,
@@ -495,22 +631,22 @@ def hits_for(files, surfaces, repo = nil, head = nil, refs = {}, base = nil)
         via = base_via(f, refs, repo, base) unless via || refs[:result][:present].include?(f)
         next unless via
 
-        hits << { path: f, class: s["class"], why: s["why"], via: via, root: root_label(refs, f) }
+        hits << { path: f, class: s["class"], why: s["why"], via: via, root: root_label(refs, f), hold: hold_of(s) }
         break
       end
 
       if (rule = s["content"])
-        verdict, detail = content_hit?(repo, head, f, rule)
+        verdict, detail = content_hit?(repo, head, f, rule, base)
         examined << { path: f, class: s["class"], verdict: verdict, detail: detail }
         # A path hit alone is NOT a surface hit for a content surface: routine
         # migrations touch these paths on every feature MR and must stay COLD.
         next unless verdict == :hit
 
-        hits << { path: f, class: s["class"], why: s["why"], detail: detail }
+        hits << { path: f, class: s["class"], why: s["why"], detail: detail, hold: hold_of(s) }
         break
       end
 
-      hits << { path: f, class: s["class"], why: s["why"] }
+      hits << { path: f, class: s["class"], why: s["why"], hold: hold_of(s) }
       break
     end
   end
@@ -1304,6 +1440,12 @@ def short(sha)
   sha.to_s[0, 7]
 end
 
+HOLD_LABELS = {
+  "always" => "yes, always (~/.claude/CLAUDE.md -> Owner approval policy)",
+  "on-merge-automation" => "yes when merging triggers automation",
+  "never" => "no -- report-only (owner approval policy, 2026-09-28)"
+}.freeze
+
 def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, automation, examined = [], notes = {}, refs = nil)
   puts "BLAST-RADIUS #{verdict} #{short(head)}"
   puts "  manifest: #{manifest} (#{surfaces.size} class(es), #{pattern_count} pattern(s))"
@@ -1391,23 +1533,21 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
            "inconsistency, file a ticket, do not treat this hit as COLD>"
     end
     puts "      apply: #{notes[path]}" if notes[path]
+    puts "      hold: #{HOLD_LABELS.fetch(h[:hold] || DEFAULT_HOLD)}"
   end
 end
 
 HOT_FIX = <<~FIX.freeze
-  do NOT merge. This is not a code-quality finding and there is no admiral override for it
-  -- the authority to spend money, provision or destroy infrastructure, or take a one-way
-  action is the OWNER's alone (~/.claude/CLAUDE.md -> Hard Rule, "NEVER make system-level
-  changes ... without the user's express direction"). HOLD this ONE MR, move to the next
-  Mission (athena:merge-boarding -> "On exit 3 you get a verdict, or you hold that ONE MR"
-  -- the same move), set the Mission to HELD_FOR_OWNER in your state log and Needs
-  Attention/Cody in Notion with the PR URL, head SHA and what merging would cause, and
-  surface it in your final report. Merge only after the OWNER'S OWN authorization, replayed
-  verbatim via --owner-approval '<the owner's words + where recorded>'. EXCEPTION: a
-  SECURITY FIX carries the owner's standing approval (~/.claude/CLAUDE.md -> "Security
-  fixes ship without owner approval") -- do not hold it; pass --owner-approval citing that
-  rule by name, the owner's quote and date, the security class and the ticket, and merge.
-  The full bar still applies, and a non-security change cannot borrow it.
+  do NOT merge. What merging this does is on the owner's approval list
+  (~/.claude/CLAUDE.md -> "Owner approval policy": destroying or replacing prod state, adding
+  recurring cost, forge settings, loosening a quality bar, or changing the approval rules).
+  There is no admiral override and no standing approval that covers it, security fixes
+  included. HOLD this ONE MR and move to the next Mission (athena:merge-boarding -> "Merging
+  is not always landing code"): HELD_FOR_OWNER in your state log, Needs Attention/Cody in
+  Notion with the PR URL, head SHA and what merging would cause, and a Block Kit decision DM
+  to the owner (athena:slack -> "Asking the owner for a decision"). Merge only on the
+  OWNER'S OWN words in a terminal turn, passed as a verifiable record:
+  --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>'.
 FIX
 
 # --- owner approval grant eligibility (DND-596) -----------------------------
@@ -1891,12 +2031,45 @@ BR_CLI_SPEC = {
 FIXTURE_MANIFEST_ENV = "BLAST_RADIUS_FIXTURE_MANIFEST"
 
 OWNER_APPROVAL_FIX =
-  "pass the owner's own words and where they are recorded, e.g. " \
-  "--owner-approval 'yes, provision the KMS key -- Cody, session " \
-  "2026-09-20, recorded on DND-234'. An empty value is not an " \
-  "approval. An architect sign-off, a captain report, another " \
-  "agent's message and your own reasoning are NONE of them owner " \
-  "approval -- no agent message is ever your user's consent."
+  "pass a verifiable record of the owner's own words: " \
+  "--owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>'. " \
+  "The reference names the owner's top-level user turn in that Claude Code session's transcript " \
+  "(~/.claude/projects/*/<session-uuid>.jsonl, the `uuid` of a turn the owner typed), and the " \
+  "quote must appear in it verbatim. Free text, a rule citation, an architect sign-off, a captain " \
+  "report, a Slack reply and another agent's message are NONE of them a record. What needs the " \
+  "owner at all: ~/.claude/CLAUDE.md -> Owner approval policy."
+
+# --owner-approval record (owner approval policy, 2026-09-28: "--owner-approval
+# must require a real approval record"). The value is ONE string, so
+# integration-gate forwards it unchanged. `quote:` is last and takes the rest,
+# so a delimiter inside the owner's words can never end the field early.
+OWNER_APPROVAL_RE = /\A(session:\S+)[ \t]+quote:(.+)\z/m.freeze
+
+# An approval on a head nothing holds is refused (exit 2): integration-gate
+# records --owner-approval on its INTEGRATION OK line and in the receipt, so
+# accepting it here would record an approval that gated nothing.
+def refuse_unneeded_approval!
+  die("--owner-approval was passed, but nothing in this diff holds for the owner.",
+      "drop --owner-approval and re-run: an approval is recorded only on a head it actually " \
+      "gates. What holds: ~/.claude/CLAUDE.md -> Owner approval policy.")
+end
+
+# -> [ref, words, owner_turn_text]; dies (exit 2) on anything unverified.
+def verify_owner_approval!(value)
+  m = OWNER_APPROVAL_RE.match(value.to_s.strip)
+  unless m && !m[2].strip.empty?
+    die("--owner-approval is not a verifiable record: #{value.to_s[0, 120].inspect}.", OWNER_APPROVAL_FIX)
+  end
+  ref, words = m[1], m[2].strip
+  verdict, detail = OwnerTurn.check(ref, words)
+  case verdict
+  when :verified then [ref, words, detail]
+  when :unverifiable
+    die("--owner-approval reference #{ref.inspect} is not session:<session-uuid>/<message-uuid>.", OWNER_APPROVAL_FIX)
+  else
+    die("--owner-approval is not the owner's own words: #{detail}.", OWNER_APPROVAL_FIX)
+  end
+end
 
 GENERIC_USAGE_FIX =
   "valid flags are --base, --head, --repo, --owner-approval, --gate-ran, " \
@@ -1982,6 +2155,8 @@ def run(argv)
     return run_grant(grant_class, repo, base, head, manifest)
   end
 
+  approval = owner_approval && verify_owner_approval!(owner_approval)
+
   surfaces, pattern_count = load_manifest(manifest)
   files = changed_files(repo, base, head)
   refs = {}
@@ -1990,6 +2165,7 @@ def run(argv)
 
   if hits.empty?
     print_report("COLD", head, manifest, surfaces, pattern_count, files, hits, nil, examined, {}, refs)
+    refuse_unneeded_approval! if approval
     return 0
   end
 
@@ -1997,9 +2173,24 @@ def run(argv)
   head_tree = RevTree.new(repo, head, "head")
   automation = merge_time_automation(head_tree, RevTree.new(repo, base))
 
-  if automation[0] == "CONFIRMED-ABSENT"
+  # Which hits HOLD (owner approval policy, 2026-09-28): an `always` hit holds
+  # whatever merging triggers; an `on-merge-automation` hit holds unless merging
+  # provably triggers nothing; a `never` hit is reported, never held.
+  report_only = hits.select { |hh| hh[:hold] == "never" }
+  on_merge = hits.select { |hh| hh[:hold] == DEFAULT_HOLD }
+  held = hits.select { |hh| hh[:hold] == "always" }
+  held += on_merge unless automation[0] == "CONFIRMED-ABSENT"
+
+  if held.empty?
     print_report("WARM", head, manifest, surfaces, pattern_count, files, hits, automation, examined, {}, refs)
-    puts "  -> a declared surface is touched, but merging triggers no automation: merging lands code only."
+    unless on_merge.empty?
+      puts "  -> a declared surface is touched, but merging triggers no automation: merging lands code only."
+    end
+    unless report_only.empty?
+      puts "  -> report-only surface(s) touched (#{report_only.map { |hh| hh[:class] }.uniq.join(', ')}): " \
+           "reported, not held (~/.claude/CLAUDE.md -> Owner approval policy)."
+    end
+    refuse_unneeded_approval! if approval
     return 0
   end
 
@@ -2013,9 +2204,13 @@ def run(argv)
   # authorized.
   print_report("HOT", head, manifest, surfaces, pattern_count, files, hits, automation, examined, notes, refs)
 
-  if owner_approval
+  if approval
+    ref, words, turn = approval
     gate_note = gate_ran ? " (GATE: #{gate_ran})" : ""
-    puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: #{owner_approval})#{gate_note}"
+    puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: #{ref} quote:#{words})#{gate_note}"
+    # The whole turn, so the quote is read in context, never as an excerpt.
+    puts "  owner-turn (#{ref}, verified human-typed):"
+    turn.to_s.each_line { |l| puts "    > #{l.chomp}" }
     return 0
   end
 
@@ -2040,8 +2235,16 @@ def self_test
 
   # Run the script as a subprocess so exit codes and stderr are exercised
   # exactly as integration-gate will see them.
-  run_br = lambda do |args|
-    out, err, st = Open3.capture3(RbConfig.ruby, script, *args)
+  # Most cases below test the CLASSIFIER (patterns, the reference walk, renames,
+  # automation), so they run against `classifier_manifest`: the committed
+  # manifest with every surface holding on merge automation, as before the
+  # 2026-09-28 owner approval policy made deploy-automation report-only. The
+  # POLICY is tested separately, against the committed manifest itself
+  # (--manifest DEFAULT_MANIFEST). A case that passes its own --manifest keeps it.
+  classifier_manifest = nil
+  run_br = lambda do |args, env: {}|
+    args = args + ["--manifest", classifier_manifest] if classifier_manifest && !args.include?("--manifest")
+    out, err, st = Open3.capture3(env, RbConfig.ruby, script, *args)
     [out, err, st.exitstatus]
   end
 
@@ -2087,6 +2290,33 @@ def self_test
     # every sabotage case reads as a FAIL rather than as the mutation it names.
     FileUtils.mkdir_p([File.join(tmp, "bin"), File.join(tmp, "lib")])
     FileUtils.cp(File.expand_path("../lib/strict_argv.rb", __dir__), File.join(tmp, "lib", "strict_argv.rb"))
+    FileUtils.cp(File.expand_path("../lib/owner_turn.rb", __dir__), File.join(tmp, "lib", "owner_turn.rb"))
+    classifier_manifest = File.join(tmp, "classifier-surfaces.json")
+    cm = JSON.parse(File.read(DEFAULT_MANIFEST))
+    cm["surfaces"].each { |sf| sf["hold"] = DEFAULT_HOLD if sf["hold"] == "never" }
+    File.write(classifier_manifest, JSON.dump(cm))
+
+    # A fixture HOME holding one Claude Code transcript, for the --owner-approval
+    # record cases: an owner turn typed by a human, an assistant turn, and a
+    # headless (sdk-cli) prompt. OwnerTurn reads ~/.claude/projects via Dir.home.
+    fake_home = File.join(tmp, "home")
+    sid = "11111111-2222-3333-4444-555555555555"
+    owner_mid = "aaaaaaaa-0000-0000-0000-000000000001"
+    asst_mid = "aaaaaaaa-0000-0000-0000-000000000002"
+    sdk_mid = "aaaaaaaa-0000-0000-0000-000000000003"
+    FileUtils.mkdir_p(File.join(fake_home, ".claude", "projects", "proj"))
+    File.write(File.join(fake_home, ".claude", "projects", "proj", "#{sid}.jsonl"), [
+      { "type" => "user", "uuid" => owner_mid, "isSidechain" => false, "entrypoint" => "cli",
+        "promptSource" => "typed", "origin" => { "kind" => "human" },
+        "message" => { "role" => "user", "content" => "yes, drop the widgets table. approve" } },
+      { "type" => "assistant", "uuid" => asst_mid, "isSidechain" => false,
+        "message" => { "role" => "assistant", "content" => [{ "type" => "text", "text" => "approve" }] } },
+      { "type" => "user", "uuid" => sdk_mid, "isSidechain" => false, "entrypoint" => "sdk-cli",
+        "promptSource" => "sdk", "origin" => { "kind" => "human" },
+        "message" => { "role" => "user", "content" => "approve" } }
+    ].map { |j| JSON.dump(j) }.join("\n") + "\n")
+    fx_env = { "HOME" => fake_home }
+    good_approval = "session:#{sid}/#{owner_mid} quote:yes, drop the widgets table"
 
     # 1. the REAL manifest loads and is non-trivial
     surfaces, pc = nil
@@ -2470,7 +2700,7 @@ def self_test
     mutant = File.join(tmp, "bin", "blast-radius-no-renames-mutant")
     File.write(mutant, mutant_src)
     _, _, _, rd, rb, rh = listing_case.call("rn-sabotage", seed: two_wf_seed) { |r| git_mv.call(r, ".github/workflows/guard.yml", "docs.txt") }
-    mout, _, mst = Open3.capture3(RbConfig.ruby, mutant, "--base", rb, "--head", rh, "--repo", rd, "--manifest", DEFAULT_MANIFEST)
+    mout, _, mst = Open3.capture3(RbConfig.ruby, mutant, "--base", rb, "--head", rh, "--repo", rd, "--manifest", classifier_manifest)
     check.call("sabotage: without --no-renames the rename-out case reads COLD (the cases discriminate)",
                mutant_src != src && mst.exitstatus.zero? && mout.include?("BLAST-RADIUS COLD"),
                "mutated=#{mutant_src != src} exit=#{mst.exitstatus} out=#{mout}")
@@ -2573,7 +2803,7 @@ def self_test
     base_mutant = File.join(tmp, "bin", "blast-radius-head-only-mutant")
     File.write(base_mutant, base_mutant_src)
     _, _, _, bd, bb, bh = listing_case.call("rm774-sabotage", seed: deploy_seed) { |r| wf_rm.call(r, "post-merge.yml") }
-    bout, _, bst = Open3.capture3(RbConfig.ruby, base_mutant, "--base", bb, "--head", bh, "--repo", bd, "--manifest", DEFAULT_MANIFEST)
+    bout, _, bst = Open3.capture3(RbConfig.ruby, base_mutant, "--base", bb, "--head", bh, "--repo", bd, "--manifest", classifier_manifest)
     check.call("sabotage: reading the base side at head reads the sole-workflow deletion WARM (the cases discriminate)",
                base_mutant_src != src && bst.exitstatus.zero? && bout.include?("BLAST-RADIUS WARM"),
                "mutated=#{base_mutant_src != src} exit=#{bst.exitstatus} out=#{bout}")
@@ -2973,7 +3203,7 @@ def self_test
       ci_n += 1
       d = File.join(tmp, "ci-rm#{ci_n}")
       b2, h2 = mkrepo.call(d, seed: guard_seed) { |r| rm.call(r, ".pkg/prod/bin/deploy-guard.sh") }
-      mo, _, ms = Open3.capture3(RbConfig.ruby, mpath, "--base", b2, "--head", h2, "--repo", d, "--manifest", DEFAULT_MANIFEST)
+      mo, _, ms = Open3.capture3(RbConfig.ruby, mpath, "--base", b2, "--head", h2, "--repo", d, "--manifest", classifier_manifest)
       check.call("sabotage (#{label}): the deleted-guard case reads COLD (the cases discriminate, DND-793)",
                  msrc != src && ms.exitstatus.zero? && mo.include?("BLAST-RADIUS COLD"),
                  "mutated=#{msrc != src} exit=#{ms.exitstatus} out=#{mo}")
@@ -3074,19 +3304,120 @@ def self_test
     # 13. --owner-approval records without hiding
     d = File.join(tmp, "approved")
     b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
-    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", "owner said go"])
-    check.call("--owner-approval exits 0 but STILL prints the full HOT block",
-               code.zero? && out.include?("BLAST-RADIUS HOT") && out.include?("HOT-OWNER-APPROVED") && out.include?("owner said go"),
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", good_approval], env: fx_env)
+    check.call("a VERIFIED --owner-approval exits 0 but STILL prints the full HOT block and the owner's whole turn",
+               code.zero? && out.include?("BLAST-RADIUS HOT") && out.include?("HOT-OWNER-APPROVED") &&
+                 out.include?("quote:yes, drop the widgets table") && out.include?("> yes, drop the widgets table. approve"),
                "exit=#{code} out=#{out}")
     # 13b. --gate-ran names the gate on the approval line (DND-479), display only
-    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", "owner said go",
-                                "--gate-ran", "ai/bin/harness-gate"])
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", good_approval,
+                                "--gate-ran", "ai/bin/harness-gate"], env: fx_env)
     check.call("--gate-ran names the gate on the HOT-OWNER-APPROVED line",
-               code.zero? && out.include?("(OWNER-APPROVED: owner said go) (GATE: ai/bin/harness-gate)"),
+               code.zero? && out.include?("quote:yes, drop the widgets table) (GATE: ai/bin/harness-gate)"),
                "exit=#{code} out=#{out}")
+    # 13c. a record that is not the owner's own words is REFUSED (exit 2), never
+    # an approval (owner approval policy, 2026-09-28: "--owner-approval must
+    # require a real approval record"). Each is a miss the old free-text flag
+    # accepted.
+    [["free text", "owner said go"],
+     ["the retired security-rule citation",
+      "security-fix standing approval (~/.claude/CLAUDE.md -> Security fixes ship without owner approval): " \
+      "\"fixing security issues does not require asking approval - just fix them\" -- Cody, 2026-09-24"],
+     ["a malformed reference", "session:not-a-uuid quote:yes"],
+     ["an ASSISTANT turn", "session:#{sid}/#{asst_mid} quote:approve"],
+     ["a headless (sdk-cli) prompt", "session:#{sid}/#{sdk_mid} quote:approve"],
+     ["a quote the owner's turn does not contain", "session:#{sid}/#{owner_mid} quote:drop the users table"],
+     ["an unknown session", "session:99999999-2222-3333-4444-555555555555/#{owner_mid} quote:approve"],
+     ["an empty quote", "session:#{sid}/#{owner_mid} quote:  "]].each do |label, value|
+      out, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", value], env: fx_env)
+      check.call("--owner-approval refuses #{label} (exit 2, Fix:, no HOT-OWNER-APPROVED)",
+                 code == 2 && err.include?("Fix:") && !out.include?("HOT-OWNER-APPROVED"),
+                 "exit=#{code} out=#{out} err=#{err}")
+    end
     _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--gate-ran", " "])
     check.call("an empty --gate-ran is a usage error with Fix:",
                code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    # 13d. POLICY (owner approval policy, 2026-09-28), against the COMMITTED
+    # manifest: which hits hold.
+    real = ["--manifest", DEFAULT_MANIFEST]
+    d = File.join(tmp, "policy-deploy")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) { |r| wf.call(r, "post-merge.yml", deploy_wf + "# edited\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d] + real)
+    check.call("policy: a deploy-automation-only diff in a deploy-on-merge repo exits 0 WARM, still naming the hit and `hold: no`",
+               code.zero? && out.include?("BLAST-RADIUS WARM") && out.include?(".github/workflows/post-merge.yml") &&
+                 out.include?("[deploy-automation]") && out.include?("hold: no") && out.include?("report-only"),
+               "exit=#{code} out=#{out}")
+    out, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", good_approval] + real, env: fx_env)
+    check.call("policy: a verified approval on a WARM head (nothing holds) is REFUSED, exit 2 -- never recorded as used",
+               code == 2 && err.include?("nothing in this diff holds") && err.include?("Fix:") &&
+                 !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    dc = File.join(tmp, "policy-cold-approved")
+    bc, hc = mkrepo.call(dc) { |r| File.write(File.join(r, "app.rb"), "x\n") }
+    out, err, code = run_br.call(["--base", bc, "--head", hc, "--repo", dc, "--owner-approval", good_approval] + real, env: fx_env)
+    check.call("policy: a verified approval on a COLD head is REFUSED, exit 2",
+               code == 2 && out.include?("BLAST-RADIUS COLD") && err.include?("nothing in this diff holds"),
+               "exit=#{code} out=#{out} err=#{err}")
+    d = File.join(tmp, "policy-tf")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d] + real)
+    check.call("policy: terraform under merge automation still holds (exit 4) until DND-998",
+               code == 4 && out.include?("[infrastructure-as-code]") && out.include?("hold: yes"), "exit=#{code} out=#{out}")
+    # always-holding classes, in a repo with NO merge-time automation (custom's shape)
+    [["forge settings (.github/settings.yml)", ".github/settings.yml", "[forge-settings]"],
+     ["CODEOWNERS", "CODEOWNERS", "[forge-settings]"],
+     ["a dialyzer ignore list", ".dialyzer_ignore.exs", "[quality-bar]"],
+     ["the blast-radius manifest", "ai/blast-radius/surfaces.json", "[owner-approval-policy]"],
+     ["the blast-radius classifier", "ai/bin/blast-radius", "[owner-approval-policy]"],
+     ["the owner-turn verifier", "ai/lib/owner_turn.rb", "[owner-approval-policy]"]].each do |label, path, cls|
+      dd = File.join(tmp, "policy-#{path.tr('/.', '__')}")
+      bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
+      out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
+      check.call("policy: #{label} holds (exit 4) with no merge automation at all",
+                 code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?(cls) && out.include?("hold: yes, always"),
+                 "exit=#{code} out=#{out}")
+    end
+    # the approval table: only its SECTION holds
+    claude = lambda do |extra_policy, extra_other, dup: false|
+      "# Top\n\n## Shipping\n\nship it#{extra_other}\n\n## Owner approval policy\n\n| 1 | destroy |#{extra_policy}\n\n" \
+        "### Needs Cody's approval\n\nrows\n\n#{dup ? "## Owner approval policy\n\ncopy\n\n" : ''}## Find it\n\nfind\n"
+    end
+    sec_case = lambda do |label, head_text, want_code, want|
+      dd = File.join(tmp, "policy-sec-#{label.tr(' ', '-')}")
+      bb, hh = mkrepo.call(dd, seed: ->(r) { FileUtils.mkdir_p(File.join(r, "ai")); File.write(File.join(r, "ai", "CLAUDE.md"), claude.call("", "")) }) do |r|
+        File.write(File.join(r, "ai", "CLAUDE.md"), head_text)
+      end
+      out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
+      check.call("policy: ai/CLAUDE.md #{label} -> exit #{want_code}",
+                 code == want_code && out.include?(want), "exit=#{code} out=#{out}")
+    end
+    sec_case.call("approval-section edit holds", claude.call(" |2| cost |", ""), 4, "section 'Owner approval policy' changed")
+    sec_case.call("approval-subsection edit holds", claude.call("", "").sub("rows", "fewer rows"), 4, "changed")
+    sec_case.call("sibling-section edit is COLD", claude.call("", " now"), 0, "BLAST-RADIUS COLD")
+    sec_case.call("deleted heading holds", claude.call("", "").sub("## Owner approval policy\n", ""), 4, "fails closed")
+    sec_case.call("duplicate heading holds", claude.call("", "", dup: true), 4, "must be exactly once")
+    fenced = claude.call("", "").sub("rows", "rows\n\n````md\n```sh\n# a shell comment, not a heading\n```\n````\n\nafter the fence")
+    dd = File.join(tmp, "policy-sec-fence")
+    bb, hh = mkrepo.call(dd, seed: ->(r) { FileUtils.mkdir_p(File.join(r, "ai")); File.write(File.join(r, "ai", "CLAUDE.md"), fenced) }) do |r|
+      File.write(File.join(r, "ai", "CLAUDE.md"), fenced.sub("after the fence", "after the fence, edited"))
+    end
+    out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
+    check.call("policy: an edit below a fenced `# comment` in the approval section still holds (the fence is not a heading)",
+               code == 4 && out.include?("section 'Owner approval policy' changed"), "exit=#{code} out=#{out}")
+    # manifest validation for `hold`
+    [["an unknown hold", [{ "class" => "x", "why" => "y", "hold" => "sometimes", "patterns" => ["**/*"] }], "hold"],
+     ["a report-only surface ahead of a holding one",
+      [{ "class" => "n", "why" => "y", "hold" => "never", "patterns" => ["a/**"] },
+       { "class" => "x", "why" => "y", "hold" => "always", "patterns" => ["**/*"] }], "END"],
+     ["a section rule with no sections",
+      [{ "class" => "x", "why" => "y", "hold" => "always", "patterns" => ["**/*"],
+         "content" => { "evaluator" => "markdown-section-v1", "sections" => {} } }], "sections"]].each do |label, sfs, word|
+      mf = File.join(tmp, "hold-#{label.tr(' ', '-')}.json")
+      File.write(mf, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => sfs }))
+      _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", mf])
+      check.call("manifest: #{label} is refused (exit 2, Fix:)",
+                 code == 2 && err.include?("Fix:") && err.include?(word), "exit=#{code} err=#{err}")
+    end
 
     # 14. empty --owner-approval is a usage error
     _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", ""])
@@ -3366,7 +3697,7 @@ def self_test
     ob = `git -C #{mig_d2} rev-parse HEAD~1`.strip
     oh = `git -C #{mig_d2} rev-parse HEAD`.strip
     out, _, code = run_br.call(["--base", ob, "--head", oh, "--repo", mig_d2,
-                                "--owner-approval", "yes, drop it -- Cody, recorded on DND-999"])
+                                "--owner-approval", good_approval], env: fx_env)
     check.call("destructive-migration under --owner-approval exits 0 but STILL prints the HOT hit",
                code.zero? && out.include?("BLAST-RADIUS HOT") && out.include?("destructive-migration"),
                "exit=#{code} out=#{out}")

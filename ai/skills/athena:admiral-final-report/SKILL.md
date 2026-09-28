@@ -39,6 +39,9 @@ terminal status, and **diff them in both directions**:
 
 - Every merged MR must have its Mission at `Done` / `Ready for Release`.
 - Every Mission still at `In Progress` must have unmerged work.
+  **Later (2026-09-27):** at run end no captain works it, so it leaves
+  `In Progress` for `Parked`, `Needs Attention` or `Todo`:
+  [[athena:ticket-management]] → *A ticket's status follows its captain*.
 - **Every MR you OPENED is merged, or named as a live hand-off.** An open MR
   that is non-draft, green on its head SHA, with no unresolved discussion and no
   unmet approval is **not** "unmerged work in progress" — the direction above
@@ -113,14 +116,14 @@ goes nowhere unless the owner acts. Per Mission:
   spend, but the owner wants to know it exists);
 - the decision you need, in one sentence;
 - **the exact command that lands it once the owner says yes** —
-  `integration-gate --owner-approval '<their words>'`, run from the named
-  worktree.
+  `integration-gate --owner-approval 'session:<sid>/<mid> quote:<their
+  words>'` (the reference to the turn they type), run from the named worktree.
 
-A security fix is here only for a step only the owner can perform (their
-credentials, a console action). An exit 4 alone does not hold it: it merges
-under the owner's standing approval (`~/.claude/CLAUDE.md` → *Security fixes
-ship without owner approval*). List it among the merged work with its `BLAST-RADIUS HOT` block and the approval line
-it merged under.
+Only what `~/.claude/CLAUDE.md` → *Owner approval policy* keeps is held here,
+with the Block Kit request you sent. What that policy lists under *Notify
+after* (a Won't Fix, a Notion schema change, a bulk ticket change, an installer
+run, a tool-version or dotfile change) gets one line each in a **Notify-after**
+list: what changed and where.
 
 A held Mission reported only as a status string leaves the owner to reconstruct
 the merge, which is how a held MR becomes a forgotten one.

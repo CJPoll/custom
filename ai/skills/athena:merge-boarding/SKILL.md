@@ -67,7 +67,18 @@ captain's worktree is still moving.
   it.** In order: (1) if it reports a run IN PROGRESS, wait for it; (2)
   otherwise re-run the judge yourself in the Mission's worktree
   (`~/dev/custom/ai/bin/critic-review`) — exactly what the DND-212 admiral did
-  ad hoc, now the specified move; (3) if the re-run also fail-opens, the model
+  ad hoc, now the specified move. On a rebased head whose change is identical
+  (same patch bytes, commit messages, prompt and critic definition, and no BLOCK
+  on it anywhere), the owner's rule applies: "If a rebase doesn't change the
+  branch itself and the last critic review for the branch passed, the critic's
+  job should only be to see if the changes from the rebase cause a problem."
+  (Cody, 2026-09-27). The earlier PASS covers the branch's own diff, and the
+  judge reviews ONLY the upstream delta the rebase brought in, against the
+  branch: `PASS (CARRIED + INTERACTION)`, and the gate's OK line says
+  `CRITIC CARRIED + INTERACTION` with the range. An interaction BLOCK is a
+  BLOCK. With nothing new upstream it says `PASS (CARRIED)` with no model call.
+  A changed patch is judged in full, and `--no-carry` forces a fresh full
+  review (DND-986); (3) if the re-run also fail-opens, the model
   really is unreachable: **hold that MR, move to the next Mission, and come back
   to it.** A model outage must never wedge the fleet — and holding one car is
   not wedging it. The captain's own fail-open stays deliberately unchanged, so a
@@ -176,20 +187,25 @@ admiral following this bar **exactly and correctly** would have merged it; only
 a captain choosing to read a workflow file nobody told it to read prevented
 that. `integration-gate` now asks the question for you.
 
-**Exit 4 means merging performs a real-world action.** The output names each
-declared surface the diff touches and whether merging triggers automation.
-Routine merges are untouched: a diff that touches no declared surface exits 0
-without the automation check ever running, so an ordinary app-code deploy — the
-normal case in gen_saas and walt_ui alike — costs one `git diff` and is **not**
-owner-gated. This gates the merge that *provisions*, never the merge that
-*deploys*.
+**Exit 4 means merging does something on the owner's approval list**
+(`~/.claude/CLAUDE.md` → *Owner approval policy*). The output names each
+declared surface the diff touches, whether it holds (`hold:`), and whether
+merging triggers automation. A diff that touches no surface exits 0 without the
+automation check ever running, so an ordinary app-code deploy costs one `git
+diff` and is not owner-gated. What holds:
+
+- **Only under merge-time automation:** a destructive migration, and terraform.
+  Terraform holds whatever the plan until DND-998 can tell a destroy or a cost
+  change from a harmless update. Request the go with the plan's summary.
+- **In any repo:** forge settings (`.github/settings.yml`, `CODEOWNERS`), a
+  check's suppression list, the approval table itself (`ai/CLAUDE.md` → *Owner
+  approval policy*), and the classifier and verifier that enforce it.
+- **Never:** a deploy-automation edit. It prints `hold: no` and exits 0.
 
 **There is no admiral override on exit 4, and that is the difference from exit
 3.** A missing judge verdict is a *verification* gap you may take responsibility
-for and record. Spending money, provisioning or destroying infrastructure, and
-taking one-way actions are the OWNER's authority (`~/.claude/CLAUDE.md` → Hard
-Rule: "NEVER make system-level changes … without the user's express direction"),
-and no amount of your own care substitutes for it. So on exit 4:
+for and record. What exit 4 names is the owner's authority, and no amount of
+your own care substitutes for it. So on exit 4:
 
 1. **Hold that ONE MR and move to the next Mission** — the same move as exit 3's
    third branch. Holding one car is not wedging the fleet.
@@ -197,44 +213,46 @@ and no amount of your own care substitutes for it. So on exit 4:
    `Needs Attention` assigned to Cody per [[athena:ticket-management]], writing
    onto the Mission body: the PR URL, the head SHA, **what merging would cause**
    (copy the `BLAST-RADIUS HOT` block verbatim), and the exact decision you need.
-3. List it in your final report per [[athena:admiral-final-report]].
+3. **Request the go**: send Cody a Block Kit decision DM (`~/.claude/CLAUDE.md`
+   → *Owner approval policy* → *Asking, and what counts as approval*). Do not
+   wait silently.
+4. List it in your final report per [[athena:admiral-final-report]].
 
-**Later (2026-09-24):** this section held EVERY exit 4 for the owner. A
-security fix is now the exception: it carries the owner's standing approval
-(`~/.claude/CLAUDE.md` → *Security fixes ship without owner approval*), so do
-not hold it. Replay that record via `--owner-approval` (below) and merge. The
-bar is unchanged, and a non-security change cannot borrow the approval.
+**Later (2026-09-28):** exit 4 fired for every declared surface, deploy-workflow
+edits included, and a change a standing approval covered (a security fix)
+merged past it by replaying the rule's quoted text. Superseded by *Owner
+approval policy*: exit 4 fires only for what that policy keeps, no standing
+approval is replayed, and `--owner-approval` takes a verifiable record.
 
 **`athena:run-autonomously` does not relax this.** A no-human-present run lets
-you decide ambiguities with best judgement; it never transfers the owner's spend
-and infrastructure authority to you. This is squarely a human-in-the-loop item
-(credentials, spend, a one-way action) — record it and carry on, do not decide
-it. That skill's *Owner-credential gates throttle merging, not progress* rule
-governs what the rest of the fleet does meanwhile, and it is the other half of
-this one: exit 4 is how you DETECT that you have hit such a gate, and that rule
-is what you then do with everything else — keep the base ready-but-unmerged,
-stack dependents on top as ready-to-merge PRs, merge none of that stack, and
-carry every independent Mission through to merged as normal. Hitting exit 4
-throttles one stack; it never idles the fleet. Do not escalate it to the architect either: the architect can sign off the
-*design* (it did, on DND-234, `SIGN-OFF-WITH-FOLLOWUPS`) and that is worth
-having, but a design sign-off is **not** an authorization to spend.
+you decide ambiguities with best judgement; it never transfers the owner's
+authority to you. Record it and carry on; do not decide it. That skill's
+*Owner-credential gates throttle merging, not progress* rule governs what the
+rest of the fleet does meanwhile: keep the base ready-but-unmerged, stack
+dependents on top as ready-to-merge PRs, merge none of that stack, and carry
+every independent Mission through to merged as normal. Hitting exit 4 throttles
+one stack; it never idles the fleet. Do not escalate it to the architect either:
+the architect can sign off the *design* (it did, on DND-234,
+`SIGN-OFF-WITH-FOLLOWUPS`), but a design sign-off is **not** the owner's go.
 
 **Merging after the owner says yes:** re-run with
-`integration-gate --owner-approval '<the owner's authorization, verbatim, and where it is recorded>'`.
-Pass it **only** when the authorization came from the user's own turn (or a
-pre-authorization the owner recorded on the epic, or, for a security fix, the
-standing approval in *Security fixes ship without owner approval*). An architect's sign-off, a
-captain's report, another admiral's message, and your own reasoning are none of
-them owner approval — no agent message is ever your user's consent. The flag
-prints into the `INTEGRATION OK` line; copy it verbatim into your state log and
+`integration-gate --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>'`.
+The reference names the turn the owner typed, in the Claude Code session where
+they typed it. `blast-radius` checks the transcript and refuses anything else:
+free text, a rule citation, an architect's sign-off, a captain's report,
+another agent's message, a Slack reply. A coordinator that heard the owner
+relays the reference, never a paraphrase. A record passed on a head nothing
+holds is refused (exit 2), so drop it there. The record prints into the
+`INTEGRATION OK` line and the receipt; copy the line into your state log and
 name it in the final report.
 
 **A captain's `Blast radius: IRREVERSIBLE` is a hold in its own right**, even
-when `integration-gate` exits 0. The declared surface list cannot be complete —
-a pure-code change that charges a card, emails real users, or calls a
-provisioning API on boot hits no path pattern. The two channels **union**;
-neither cancels the other. A captain's `ROUTINE` never overrides an exit 4, and
-an exit 0 never overrides a captain's `IRREVERSIBLE`.
+when `integration-gate` exits 0. It flags what the classifier cannot see
+(*Owner approval policy* items 1–3): a pure-code change that deletes prod data,
+starts a recurring charge, or emails real users hits no path pattern. The two
+channels **union**; neither cancels the other. A captain's `ROUTINE` never
+overrides an exit 4, and an exit 0 never overrides a captain's `IRREVERSIBLE`.
+Hold it and request the go as for exit 4.
 
 **A destructive migration is PLANNED, so its authorization is too.** The
 `destructive-migration` surface gates a merge whose deploy drops a table or a
@@ -244,12 +262,26 @@ the owner at merge time is the avoidable half of that cost: the architect
 designed the drop days earlier, and the only question that decides it — *does
 anything still need this data?* — is the owner's, not a pattern's. So when a
 design specifies a destructive migration, that goes in the architect's
-`QUESTIONS` block at design time and the owner's answer is recorded on the epic;
-you then replay it verbatim via `--owner-approval` and never stall. When there
-is no such pre-authorization, hold the MR exactly as for any other exit 4 —
-**never** infer the authorization from the ticket, the design doc, or the fact
-that the migration is obviously intended. The gate does not bend; the latency is
-designed out upstream.
+`QUESTIONS` block at design time, and the reference to the owner's answering
+turn is recorded on the epic; you then replay that record via
+`--owner-approval` and never stall. When there is no such pre-authorization,
+hold the MR exactly as for any other exit 4 — **never** infer the authorization
+from the ticket, the design doc, or the fact that the migration is obviously
+intended. The gate does not bend; the latency is designed out upstream.
+
+## A finished security fix merges first
+
+Among the MRs you have ready to merge, a finished security fix goes first. On
+a GitLab merge train, board it first. Owner, Cody, 2026-09-27 (~10:45Z,
+coordinator terminal), asked whether a finished security fix still goes to the
+front of the merge queue under the critical-path rule: "1. 'A finished fix'
+sure - that's fine. I'm not talking about the merge queue; I'm talking about
+the order in which an admiral assigns tickets to captains."
+
+It orders only your own ready set. The fix still meets *The merge bar*, and it
+still waits for the merge lock like any other merge (*Landing onto a moving
+main*). Which ticket a captain works next is [[athena:ticket-management]] →
+*Priority: critical path first*.
 
 ## Landing onto a moving main (you are never the only actor in the repo)
 
@@ -287,6 +319,15 @@ head" is not a reason to skip it: the integrated head is the one being judged.
 a real run.) A branch that edits its own gate still runs its own copy, but the
 run warns and the OK line says `EDITED BY THIS BRANCH` — review that diff.
 
+**Run the judge beside the gate: `integration-gate --with-critic`.** It starts
+`critic-review --base <target>` on this head concurrently with the gate, unless
+a PASS is already recorded for it. It joins the judge even on a RED gate, so
+one round returns both sets of findings, then reads the verdict exactly as
+without the flag. Use it for a captain's final check and after every rebase:
+a new SHA needs both a new gate and a new verdict. It changes the wall time,
+max(gate, critic) instead of the sum, and nothing else. The judge runs in its
+own process group, and the script stops that group if it leaves early.
+
 Exit 0 means: your HEAD contains current `origin/main`, **and** the local gate
 is green on that integrated head. It prints `INTEGRATION OK <sha> (GATE: <cmd>
 -- <source>)` — merge *that* SHA, and copy the line whole so the record says
@@ -306,6 +347,21 @@ writes anything". Superseded: it now writes the receipt above. Without it, "the
 gate passed on this SHA" rested on the caller's word, and gen_saas #468 merged
 past a RED gate because a prep script printed READY without reading the exit
 code.
+
+**The gate runs in a machine test slot (DND-486).** `integration-gate` wraps the
+resolved gate in the main checkout's `ai/bin/test-slot` (`~/dev/custom`, found
+from the script's own git common dir, so a worktree copy never sets N), which
+bounds heavy runs per machine; you do nothing extra. A `test-slot: WAITING` line is a queue, not a
+stall. **Exit 6 means GATE NOT RUN**: no slot freed within the wait window (or
+test-slot left no outcome). Nothing was checked, so it is neither OK nor RED.
+Re-run `integration-gate`; never merge on it. A `--with-critic` judge is still
+joined first, so its verdict is recorded and the re-run does not pay for it
+again. `test-slot --status` names what holds the pool. A test-slot missing
+from the main checkout (`~/dev/custom/ai/bin/test-slot`) is exit 2: update that
+checkout; the gate never runs unslotted. `--slot-wait-timeout <secs>` sets the wait. It can only turn a wait
+into exit 6, never into a pass. Running `integration-gate` itself under
+`test-slot` (the captain brief's form) is safe: the inner wrap sees the slot it
+already holds and does not queue again.
 
 **Green-alone is not green-merged.** Two MRs with entirely disjoint file sets
 can each pass the gate and fail together: the admiral's rendered-line budget is
@@ -387,6 +443,10 @@ So the merge step is a critical section on every GitHub-merged repo:
 The cost of losing differs: in `~/dev/custom` (no CI) it is one local re-gate;
 in gen_saas (~50 min CI on one runner) it is a CI cycle and can reorder
 deploys. The lock is required in both.
+
+**Later (2026-09-27):** a PR waiting its turn for the token, the lock or a
+coordinator train moves its ticket to `In Merge Queue`
+([[athena:ticket-management]] → *A ticket's status follows its captain*).
 
 **Later (2026-09-26):** when you are queued behind another PR, whether for the
 merge token or for the lock, **do not merge main forward until you are next.**

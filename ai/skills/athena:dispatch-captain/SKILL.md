@@ -1,6 +1,6 @@
 ---
 name: athena:dispatch-captain
-description: The checklist for building an athena-captain's dispatch brief — everything the brief must carry so a captain never has to ask (worktree path, Mission, domain context, reports-dir path, MR target branch, the admiral's own agentId as reply-to, the Notion status values, and the fleet-mode design sub-docs). Use each time you dispatch a captain into a prepared worktree. Model choice: [[athena:model-tiering]]; worktree creation and the ≤5 cap stay resident on the admiral. Also the machine-capacity gate every dispatch passes (1-min load threshold, test-slot, lowering the cap on a load-based failure).
+description: The checklist for building an athena-captain's dispatch brief — everything the brief must carry so a captain never has to ask (worktree path, Mission, domain context, reports-dir path, MR target branch, the admiral's own agentId as reply-to, the Notion status values, and the fleet-mode design sub-docs). Use each time you dispatch a captain into a prepared worktree. Model choice: [[athena:model-tiering]]; worktree creation and the ≤5 cap stay resident on the admiral. Also batch Missions for tier-4 tickets (up to 3 same-Area tickets, stacked, one slot) and the machine-capacity gate every dispatch passes (1-min load threshold, test-slot, lowering the cap on a load-based failure).
 ---
 
 # athena:dispatch-captain
@@ -108,8 +108,11 @@ Give the captain, in the brief:
 - **The findings rule, cited by name.** Every brief carries this line: *"An
   anomaly you find outside this Mission follows `~/dev/custom/ai/CLAUDE.md` →
   *Find it, ticket it, fix it, verify it live*: list it in your report as a
-  proposed ticket with a priority; do not fix it in this MR."* Cite it; do not
-  restate it.
+  proposed ticket with its `Kind`, `Severity`, `Security` and `Area`, and say
+  whether this Mission fails its requirements without it; do not fix it in
+  this MR."* Cite it; do not restate it. The properties and that answer (the
+  blocking test, which sets `Path`) are [[athena:ticket-management]] →
+  *Priority: critical path first*; you file the finding with them.
 
 - **The no-stash rule.** Every brief carries this line: *"Never `git stash`. To
   park WIP, commit it to your worktree branch."* A linked worktree shares ONE
@@ -125,8 +128,10 @@ Give the captain, in the brief:
   `<cmd>` is your worktree's own `./ai/bin/harness-gate`. Quote its `gating
   <root>` line with the result. Exit 75 with `test-slot: TIMEOUT` means it
   never ran: run it again; never count it as a pass."*
-  Nothing in the harness wraps a captain's gates yet (DND-486 is unlanded), so
-  this line is the only thing that does.
+  `integration-gate` wraps its own declared gate in test-slot (DND-486); its
+  own "never ran" is exit 6, `GATE NOT RUN`, and never a pass either. The
+  captain definition's Verify step names test-slot. Nothing wraps a captain's
+  other heavy runs mechanically, so this line is still what does.
 - **Why the `cd` is in the same command.** A subagent's Bash cwd resets to the
   session root between calls, and that is often the main checkout. A gate
   named by its main-checkout path, or run after a `cd` in an earlier call,
@@ -141,6 +146,16 @@ Give the captain, in the brief:
   timed out after 900 s of its 1500 s spent queued, and DND-790's timed out with
   3/3 slots held and the gate never run. Bound the wait with
   `--wait-timeout` instead.
+- **The one-command final check.** Every brief carries this line: *"Your
+  final check is ONE command on your final commit: `cd <worktree> &&
+  ~/dev/custom/ai/bin/test-slot -- timeout 1500
+  ~/dev/custom/ai/bin/integration-gate --with-critic`. It runs the standing
+  judge beside the gate, so it costs the slower of the two, not their sum. It
+  refuses a dirty tree, and it records both receipts I land on. Quote its
+  INTEGRATION OK line. On a RED gate or a BLOCK, fix every finding from both
+  in one round, commit, and run it again."* It replaces a separate
+  `critic-review` then gate on the final commit (`athena:merge-boarding` →
+  *Landing onto a moving main*).
 - **The don't-chase-main rule.** Every brief carries this line: *"Your gate bar
   is ONE green gate on a head that contained `origin/main` when the gate
   started. If main moves after that, do not rebase and re-gate to catch it:
@@ -176,6 +191,75 @@ one-line reason into the state log** next to the dispatch.
 
 Every environment fact you put in the brief must be VERIFIED, not inferred —
 see [[athena:brief-verification]].
+
+## Batch Missions (tier 4)
+
+Tier 4 is defined in [[athena:ticket-management]] → *Priority: critical path
+first* (its tier table), which also sets when those tickets run. Owner, 2026-09-27: "findings do
+get a captain, but only after the functional requirements are met." A batch is
+how such tier-4 tickets get that captain cheaply. Do not batch any other tier.
+
+- **What may be batched.** Up to **3** tier-4 tickets with the same `Area` and
+  the same subsystem, given to ONE captain as one batch Mission. Same subsystem
+  means the same skill, tool, or app module. That is your judgment, and nothing
+  checks it; the aim is one context load for every ticket.
+- **One slot.** The batch counts as one captain slot against the concurrency
+  cap, however many tickets it carries.
+- **One ticket, one change.** The captain delivers a stacked series: one commit
+  (a repo that ships by fast-forward) or one PR (a forge repo) per ticket, in
+  the order the brief lists them. Each ticket gets its own critic PASS, judged
+  alone with `--base`. The critic may block bundled unrelated changes as
+  `[scope]`. The batch saves the dispatch, the worktree and the context load,
+  never the per-ticket review.
+- **Landing: one ticket at a time, bottom of the stack first.** Each ticket
+  lands only on its own `integration-gate` pass, per [[athena:merge-boarding]]
+  → *Landing onto a moving main*. `integration-gate` reads only the verdict of
+  the head it gates, so landing the tip alone would leave the lower tickets'
+  verdicts unchecked. Never land a stack in one step.
+  - **A repo that ships by fast-forward** (the captain's *Repos with no MR/CI
+    system*): fast-forward main to ticket 1's head, then to ticket 2's, each
+    after its own `integration-gate`. The heads already stack, so nothing is
+    rebased.
+  - **A forge repo, `~/dev/custom` included:** `locked-merge` squash-merges one
+    PR into that PR's own base. So after ticket N lands, retarget PR N+1 to
+    the MR target branch (`gh-athena pr edit <n> --base <branch>`, as in
+    [[athena:captain-return]]). Then rebase it onto the landed squash with
+    `git rebase --onto origin/<branch> <old head SHA of ticket N>`, and push
+    as Athena. A plain rebase would replay ticket N's commits. A retarget alone
+    starts no CI run; the push does.
+  - A rebase rewrites the ticket's SHA and orphans its critic receipt. You
+    re-run `critic-review` in the Mission's worktree for the new head, per the
+    *On exit 3* bullet of [[athena:merge-boarding]] → *The merge bar*; the
+    captain has ended by then.
+
+The batch brief carries everything above for one Mission, plus:
+
+- **The tickets, in stack order**, each with its own Notion page and design
+  sub-docs.
+- **The branches.** One worktree, one branch per ticket, each cut from the
+  branch of the ticket below it. The worktree's own branch is the first
+  ticket's. In a forge repo, each PR targets the branch of the ticket below it;
+  the first targets the MR target branch.
+- **The critic line:** *"Judge each ticket alone: on that ticket's head, run
+  `~/dev/custom/ai/bin/critic-review --base <the branch of the ticket below>`
+  (the first ticket: the MR target branch). Without `--base`, the diff is the
+  whole stack."*
+- **The gate line:** one heavy gate on the tip of the stack, per the test-slot
+  line.
+- **The report.** One file, named for the batch (e.g. `DND-539+538-report.md`),
+  with one section per ticket: status, head SHA, the recorded critic verdict
+  line, the PR URL (forge repos), files changed, and its own proposed findings.
+  A STUCK ticket holds every ticket stacked above it; its section says so.
+- **The Notion transitions, per ticket.** Move each ticket to `In Progress` with
+  Athena as `Assignee` at dispatch. In a forge repo, the captain's `In Review`
+  rule (or "set NO Notion status at all") applies to each ticket as its own PR
+  opens. You move each ticket on its own landing.
+
+**Precedent** (harness-epics-ab): 00:51Z, "DND-539+538 dispatched to one captain
+… as stacked branches"; 01:07Z, "one ff lands 508+539+538". That was one
+fast-forward of the tip, before `locked-merge` existed. It is history, not the
+pattern: land one ticket at a time, as above.
+
 
 ## Machine capacity gates every dispatch
 

@@ -1,0 +1,398 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+#
+# epic-clustering -- the READ helper behind athena:epic-clustering (DND-982,
+# epic "Harness: scope-growth rules", plan row W5).
+#
+# It reads the DND Tickets and DND Epics data sources through the Notion REST
+# API with the notion-personal integration token
+# (~/.claude/notion-personal-token, read in-process, never on argv), or an
+# offline JSON fixture. It never writes Notion, never posts to Slack, and never
+# moves a ticket: every write in a clustering pass is the architect's, made per
+# SKILL.md. Its only writes are the local files its caller names (--save,
+# --blocks-out), so risk.yml classes it idempotent.
+#
+# Buckets: the rules are lib/epic_clustering.rb (domain), the rendering is
+# lib/epic_clustering_view.rb, the reads are lib/epic_clustering_notion.rb and
+# lib/epic_clustering_fixture.rb (adapters); this script orchestrates. Tiers
+# and the tier-4 order are next-mission's (ai/lib/next_mission.rb).
+#
+# Exit codes -- a failed lookup must never look like an empty one:
+#   0  done (read / proof printed or holding / digest or notice drafted)
+#   2  usage error
+#   3  could not read or could not measure (Notion/HTTP failure, missing
+#      token, unreadable fixture or snapshot, data outside the vocabulary)
+#   4  proof MISMATCH: a never-movable ticket left its epic, or an epic in the
+#      snapshot could not be read again
+require "json"
+require "time"
+require_relative "../../../lib/strict_argv"
+require_relative "../lib/epic_clustering"
+require_relative "../lib/epic_clustering_notion"
+require_relative "../lib/epic_clustering_view"
+require_relative "../lib/epic_clustering_fixture"
+
+PROG = "epic-clustering"
+TOKEN_FILE = File.join(Dir.home, ".claude", "notion-personal-token")
+SUITE = File.expand_path("../test/self-test.sh", __dir__)
+EC = EpicClustering
+ECV = EpicClusteringView
+
+USAGE = <<~TXT
+  Usage: epic-clustering COMMAND [options]
+
+  The read helper for athena:epic-clustering. It never writes Notion, never
+  posts to Slack, never moves a ticket. It writes only the files you name
+  (--save, --blocks-out).
+
+  Commands:
+    read      per epic: the clustering trigger, the never-movable set, the
+              movable tickets grouped by Area / Kind; then C3 candidates
+    proof     print each epic's never-movable count and ids; --save a
+              snapshot before the moves, --against it after (exit 4 when a
+              never-movable ticket left its epic)
+    digest    draft the daily digest (text, and Block Kit with --blocks-out)
+    notice    draft one won't-fix notice (a close already made, with a veto) as Block Kit
+
+  Scope (read, proof --save):
+    --epic KEY          one epic: page id or exact title
+    --epics IDS         comma-separated epic page ids
+    --all-open-epics    every epic with Status Todo, In Progress or Needs Attention
+
+  Source (read, proof, digest):
+    --from-json FILE    offline fixture {"epics":[...],"tickets":[...]} instead of Notion
+
+  proof:
+    --save FILE         write the never-movable snapshot (before the moves)
+    --against FILE      re-read the snapshot's epics and compare (after the moves)
+
+  digest:
+    --started IDS       ids with a live captain, from each live run's state log
+                        (athena:fleet-liveness). Without it the stale In Progress
+                        check is skipped, and says so.
+    --pass-summary FILE {"moved":[{id,from,to}],"merged":[{keep,duplicate}],"closed":[{id,evidence}],
+                         "wont_fix":[{id,reason}]}
+    --no-bodies         skip reading ticket bodies (ticket hygiene then says "not scanned")
+    --now ISO8601       the digest's clock (default: now, UTC)
+
+  notice:
+    --ticket DND-N  --title TEXT  --background TEXT  --why TEXT
+
+  Output (digest, notice):
+    --session NAME      the sending session named on the first line
+                        (default "harness session -> architect (epic-clustering)")
+    --blocks-out FILE   write the Block Kit blocks as a JSON array
+    --json              read/proof/digest: print the result as JSON
+
+    --self-test         run the deterministic suite (no network)
+    --help              this text
+
+  Exit: 0 done; 2 usage; 3 could not read or measure; 4 proof mismatch.
+TXT
+
+SPEC = {
+  "--epic" => :value, "--epics" => :value, "--all-open-epics" => :switch, "--from-json" => :value,
+  "--save" => :value, "--against" => :value, "--started" => :value, "--pass-summary" => :value,
+  "--no-bodies" => :switch, "--now" => :value, "--ticket" => :value, "--title" => :value,
+  "--background" => :value, "--why" => :value,
+  "--session" => :value, "--blocks-out" => :value, "--json" => :switch, "--self-test" => :switch,
+  "--help" => :switch
+}.freeze
+
+ALLOWED = {
+  "read" => %w[--epic --epics --all-open-epics --from-json --json],
+  "proof" => %w[--epic --epics --all-open-epics --from-json --save --against --json],
+  "digest" => %w[--from-json --started --pass-summary --no-bodies --now --session --blocks-out --json],
+  "notice" => %w[--ticket --title --background --why --session --blocks-out]
+}.freeze
+
+DEFAULT_SESSION = "harness session -> architect (epic-clustering)"
+
+def usage_error(msg)
+  warn "#{PROG}: #{msg}"
+  warn "Fix: run `#{PROG} --help`; give one command (read, proof, digest, notice) and only its flags."
+  exit 2
+end
+
+def read_error(msg, fix)
+  warn "#{PROG}: could not read or measure: #{msg}"
+  warn "Fix: #{fix}"
+  warn "This is a failure, not an empty result: do not move, merge or close tickets on it."
+  exit 3
+end
+
+# ------------------------------------------------------------------ sources
+
+def notion_source
+  unless File.readable?(TOKEN_FILE)
+    read_error("the notion-personal token file #{TOKEN_FILE} is missing or unreadable",
+               "owner-gated: ask the owner to place the notion-personal integration token at #{TOKEN_FILE}; " \
+               "never mint or rotate one yourself.")
+  end
+  token = File.read(TOKEN_FILE).strip
+  read_error("#{TOKEN_FILE} is empty", "owner-gated: ask the owner to restore the notion-personal token.") if token.empty?
+  EpicClusteringNotion.new(NextMissionNotion::HttpTransport.new(token))
+end
+
+def source(opts)
+  return notion_source unless opts["--from-json"]
+
+  EpicClusteringFixture.new(opts["--from-json"])
+rescue EpicClusteringFixture::FixtureError => e
+  read_error("fixture #{e.message}", "pass a readable fixture shaped as lib/epic_clustering_fixture.rb describes.")
+end
+
+def epic_keys(opts, src)
+  keys = []
+  keys << opts["--epic"] if opts["--epic"]
+  if opts["--epics"]
+    ids = opts["--epics"].split(",").map(&:strip).reject(&:empty?)
+    usage_error("--epics is empty") if ids.empty?
+    keys.concat(ids)
+  end
+  keys.concat(src.open_epics.map(&:page_id)) if opts["--all-open-epics"]
+  usage_error("no scope: pass --epic, --epics or --all-open-epics") if keys.empty? && !opts["--all-open-epics"]
+  read_error("--all-open-epics matched no open epic", "check the DND Epics Status values; an empty set is not a clean pass.") if keys.empty?
+  keys.uniq
+end
+
+def write_file(path, content)
+  File.write(path, content)
+rescue SystemCallError => e
+  read_error("could not write #{path}: #{e.message}", "pass a writable path (a scratch file namespaced with the pass).")
+end
+
+def load_epics(src, keys)
+  seen = {}
+  keys.each do |k|
+    e, ts = src.epic_with_tickets(k)
+    seen[e.page_id] ||= [e, EC.validate!(ts)]
+  end
+  seen.values
+end
+
+# ------------------------------------------------------------------ commands
+
+def cmd_read(opts)
+  src = source(opts)
+  pairs = load_epics(src, epic_keys(opts, src))
+  if opts["--json"]
+    puts JSON.pretty_generate(pairs.map do |e, ts|
+      { epic: e.to_h, trigger: EC.trigger(ts), never_movable: EC.never_movable(ts),
+        movable: EC.movable(ts).map { |t| t.to_h.except(:body) } }
+    end)
+    return
+  end
+  pairs.each do |e, ts|
+    tr = EC.trigger(ts)
+    nm = EC.never_movable(ts)
+    mv = EC.movable(ts)
+    lane = EC.lane_epic?(e) ? ", harness lane epic" : ""
+    puts "== #{e.name} (#{e.page_id}) [#{e.status || 'Status unset'}, project #{e.project || 'none'}#{lane}]"
+    puts "tickets linked: #{ts.size} (#{ts.count { |t| EC.open?(t) }} open)"
+    cmp = tr[:trips] ? ">" : "<="
+    puts "trigger: open Path=Off #{tr[:open_off]} #{cmp} on-path #{tr[:open_on_path]}: #{tr[:trips] ? 'TRIPS' : 'no trip'}"
+    puts "never-movable #{nm.size.zero? ? '0 (none)' : "#{nm.size}: #{nm.join(', ')}"}"
+    puts "movable #{mv.size} (open, outside the never-movable set, not started):"
+    puts "  none" if mv.empty?
+    EC.cluster_groups(mv).each do |(area, kind), group|
+      puts "  #{area} / #{kind} (#{group.size}):"
+      group.each { |t| puts "    #{t.id} #{t.severity || '-'} #{t.status}: #{t.title}" }
+    end
+    puts
+  end
+  all_movable = pairs.flat_map { |_, ts| EC.movable(ts) }.uniq(&:id)
+  dups = EC.duplicate_candidates(pairs.flat_map { |_, ts| ts }.uniq(&:id))
+  puts "C3 candidates (same Area, similar titles; confirm one root cause before merging): #{dups.empty? ? 'none' : dups.size}"
+  dups.each { |d| puts "  keep #{d[:keep]}, duplicate? #{d[:duplicate]} (score #{d[:score]}; shared: #{d[:shared].join(' ')})" }
+  puts "movable across the read epics: #{all_movable.size}"
+  lane = EC.lane_bound(pairs)
+  puts "harness-lane bound (movable Area=Harness, Path=Off, not already in a #{EC::LANE_EPIC_PREFIX.inspect} epic): " \
+       "#{lane.empty? ? 'none' : "#{lane.size}: #{lane.join(', ')}"}"
+end
+
+# Each entry must be {name: String, count: Integer, ids: [ticket ids]} with
+# count == ids.size; an edited or truncated snapshot proves nothing.
+def load_snapshot(path)
+  data = JSON.parse(File.read(path))
+  epics = data.is_a?(Hash) ? data["epics"] : nil
+  raise TypeError, "\"epics\" is not an object" unless epics.is_a?(Hash)
+
+  epics.each do |id, e|
+    ok = e.is_a?(Hash) && e["name"].is_a?(String) && e["count"].is_a?(Integer) && e["ids"].is_a?(Array) &&
+         e["ids"].all? { |i| i.is_a?(String) && i.match?(NextMission::ID_RE) } && e["count"] == e["ids"].size
+    raise TypeError, "entry #{id.inspect} is not {name, count, ids} with count == ids.size" unless ok
+  end
+  epics
+rescue SystemCallError, JSON::ParserError, TypeError => e
+  read_error("snapshot #{path}: #{e.class}: #{e.message}",
+             "take the before snapshot with `#{PROG} proof --save FILE` and pass that same FILE to --against.")
+end
+
+def cmd_proof(opts)
+  usage_error("--save and --against are exclusive (before vs after)") if opts["--save"] && opts["--against"]
+  src = source(opts)
+  if opts["--against"]
+    if opts["--epic"] || opts["--epics"] || opts["--all-open-epics"]
+      usage_error("--against re-reads the snapshot's own epics; drop --epic/--epics/--all-open-epics")
+    end
+    before = load_snapshot(opts["--against"])
+    pairs = before.keys.filter_map do |id|
+      e, ts = src.epic_with_tickets(id)
+      [e, EC.validate!(ts)]
+    rescue NextMissionNotion::ReadError => err
+      warn "#{PROG}: could not read epic #{id} again: #{err.message}"
+      nil
+    end
+    after = EC.proof_snapshot(pairs)
+    result = EC.compare_proof(before, after)
+    if opts["--json"]
+      puts JSON.pretty_generate(before: before, after: after, mismatches: result.mismatches, joined: result.joined)
+    else
+      puts "before:"
+      ECV.proof_lines(before).each { |l| puts "  #{l}" }
+      puts "after:"
+      ECV.proof_lines(after).each { |l| puts "  #{l}" }
+      result.joined.each do |id, ids|
+        puts "joined (reported, not a failure): #{after.dig(id, 'name')} (#{id}) gained #{ids.join(', ')}"
+      end
+    end
+    if result.ok?
+      held = before.sum { |id, b| (b["ids"] & after.fetch(id)["ids"]).size }
+      puts "proof holds: #{before.size} epic(s); every before id is still in its epic " \
+           "(#{before.sum { |_, b| b['count'] }} before, #{held} still there)"
+      return
+    end
+    result.mismatches.each do |m|
+      warn "#{PROG}: PROOF MISMATCH #{m[:name]} (#{m[:epic]}): #{m[:reason]}; before #{m[:before_count]}, " \
+           "still there #{m[:still_there]}; missing: #{m[:missing].join(', ')}"
+    end
+    warn "Fix: move each missing ticket back to the epic named above, and undo any Path or Kind edit made " \
+         "during the pass (a never-movable ticket must not leave). An epic that could not be read again: " \
+         "re-run proof --against until it reads. Report the mismatch in the batched summary."
+    exit 4
+  end
+  snap = EC.proof_snapshot(load_epics(src, epic_keys(opts, src)))
+  puts(opts["--json"] ? JSON.pretty_generate(snap) : ECV.proof_lines(snap))
+  return unless opts["--save"]
+
+  write_file(opts["--save"], JSON.pretty_generate("taken_at" => Time.now.utc.iso8601, "epics" => snap) + "\n")
+  puts "snapshot saved: #{opts['--save']} (#{snap.size} epic(s))"
+rescue EC::DataError => e
+  read_error(e.message, "take a before snapshot that names the touched epics, then compare against it.")
+end
+
+def cmd_digest(opts)
+  now = opts["--now"] || Time.now.utc.iso8601
+  begin
+    Time.iso8601(now)
+  rescue ArgumentError
+    usage_error("--now #{now.inspect} is not ISO 8601")
+  end
+  started = opts["--started"]&.split(",")&.map(&:strip)&.reject(&:empty?)
+  usage_error("--started is empty") if started&.empty?
+  bad = Array(started).reject { |i| i.match?(NextMission::ID_RE) }
+  usage_error("--started has malformed id(s) #{bad.join(', ')}; expected ids like DND-12") unless bad.empty?
+  summary = nil
+  if opts["--pass-summary"]
+    summary = begin
+      JSON.parse(File.read(opts["--pass-summary"]))
+    rescue SystemCallError, JSON::ParserError => e
+      read_error("pass summary #{opts['--pass-summary']}: #{e.message}", "write the summary JSON shaped as in --help.")
+    end
+    read_error("pass summary is not an object", "write the summary JSON shaped as in --help.") unless summary.is_a?(Hash)
+  end
+
+  src = source(opts)
+  tickets = EC.validate!(src.open_tickets)
+  epics = src.all_epics
+  hygiene = nil
+  unless opts["--no-bodies"]
+    unread_why = Hash.new(0)
+    tickets.each do |t|
+      next if t.kind == "Feature"
+
+      begin
+        t.body = src.body(t.page_id)
+      rescue NextMissionNotion::ReadError => e
+        # One unreadable body (a 429 past the retries) must not sink the
+        # digest; the ticket is listed as unread, never as a pass.
+        unread_why[e.message.sub(/ on GET .*/, "")] += 1
+      end
+    end
+    hygiene = EC.ticket_hygiene(tickets)
+    hygiene[:unread_reasons] = unread_why
+    if hygiene[:scanned].zero? && !hygiene[:unread].empty?
+      read_error("no ticket body could be read (#{hygiene[:unread].size} tried: " \
+                 "#{unread_why.map { |k, n| "#{n}x #{k}" }.join('; ')})",
+                 "on HTTP 401/403 the notion-personal integration lost access (owner-gated); on 429 re-run later; " \
+                 "or pass --no-bodies and say the hygiene scan was skipped.")
+    end
+  end
+  d = EC.build_digest(tickets: tickets, epics: epics, now: now, pass_summary: summary,
+                      status: EC.status_hygiene(tickets, started: started), hygiene: hygiene)
+  session = opts["--session"] || DEFAULT_SESSION
+  blocks = ECV.digest_blocks(d, session: session)
+  write_file(opts["--blocks-out"], JSON.pretty_generate(blocks) + "\n") if opts["--blocks-out"]
+  if opts["--json"]
+    puts JSON.pretty_generate(d)
+    return
+  end
+  puts "DRAFT: #{PROG} never sends. The architect posts it with mcp__athena__slack_post (athena:slack)."
+  puts "slack text: #{ECV.esc(session)}: daily ticket digest #{now}; tier-4 queue #{d[:tier4_queue].sum { |g| g[:count] }}, " \
+       "won't-fix candidates #{d[:wont_fix].size}."
+  puts "blocks: #{opts['--blocks-out'] ? "#{blocks.size} written to #{opts['--blocks-out']}" : "#{blocks.size} (not written; pass --blocks-out)"}"
+  puts
+  puts ECV.digest_text(d)
+rescue EC::DataError => e
+  read_error(e.message, "the ticket data is outside what the digest can place; fix the ticket in Notion, " \
+                        "or read every epic its tickets link to.")
+end
+
+def cmd_notice(opts)
+  %w[--ticket --title --background --why].each do |f|
+    usage_error("notice needs #{f}") unless opts[f]
+  end
+  r = ECV.wont_fix_notice(ticket: opts["--ticket"], title: opts["--title"], background: opts["--background"],
+                          why: opts["--why"], session: opts["--session"] || DEFAULT_SESSION)
+  write_file(opts["--blocks-out"], JSON.pretty_generate(r[:blocks]) + "\n") if opts["--blocks-out"]
+  puts "DRAFT: #{PROG} never sends. The top-level session posts it (athena:slack -> A click is untrusted input -> Who posts it)."
+  puts "slack text: #{r[:text]}"
+  puts "blocks: #{opts['--blocks-out'] ? "#{r[:blocks].size} written to #{opts['--blocks-out']}" : JSON.generate(r[:blocks])}"
+rescue EC::DataError => e
+  warn "#{PROG}: #{e.message}"
+  warn "Fix: give the notice real background, why and title (each under 3000 characters) and a ticket id like DND-12."
+  exit 2
+end
+
+def main(argv)
+  if argv.include?("--help")
+    puts USAGE
+    exit 0
+  end
+  exec(SUITE) if argv == ["--self-test"]
+
+  cmd, *rest = argv
+  usage_error("no command given") if cmd.nil?
+  usage_error("unknown command #{cmd.inspect}") unless ALLOWED.key?(cmd)
+  opts = begin
+    StrictArgv.parse(rest, SPEC)
+  rescue StrictArgv::UsageError => e
+    usage_error(e.message)
+  end
+  stray = opts.keys - ALLOWED.fetch(cmd)
+  usage_error("#{cmd} does not take #{stray.join(', ')}") unless stray.empty?
+
+  send("cmd_#{cmd}", opts)
+  exit 0
+rescue NextMissionNotion::ReadError => e
+  read_error(e.message, "check the epic id/title against DND Epics; on HTTP 401/403 the notion-personal " \
+                        "integration lost access (owner-gated); on 429/5xx re-run shortly.")
+rescue SystemExit
+  raise
+rescue StandardError => e
+  read_error("unexpected #{e.class}: #{e.message}",
+             "a defect in #{PROG} or its input; re-run once, and if it repeats, file it with this line.")
+end
+
+main(ARGV)
