@@ -88,6 +88,7 @@
 require "json"
 require "time"
 require_relative "../lib/strict_argv"
+require_relative "../lib/owner_turn"
 
 module OwnerNotes
   FILE_NAME = "owner-notes.md"
@@ -106,7 +107,7 @@ module OwnerNotes
   CONTROL_IN_TEXT = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029]/.freeze
   CONTROL_IN_LINE = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/.freeze
   ONE_LINE_FLAGS = %w[--relayed-from --context --source --address --commit --text-file].freeze
-  SESSION_REF_RE = %r{\Asession:([0-9a-f-]{36})/([0-9a-f-]{36})\z}.freeze
+  SESSION_REF_RE = OwnerTurn::SESSION_REF_RE
   ORIGIN_MAIN = "refs/remotes/origin/main"
   PREAMBLE = <<~MD
     # Owner notes for the athena-shipwright cron
@@ -316,58 +317,11 @@ module OwnerNotes
     d.empty? ? File.join(Dir.home, ".claude", "projects") : d
   end
 
-  # -> [:verified] | [:unverified, reason] | [:unverifiable]
+  # -> [:verified, said] | [:unverified, reason] | [:unverifiable]
+  # The verifier is shared with blast-radius's --owner-approval record check
+  # (ai/lib/owner_turn.rb), so the two never disagree about what the owner said.
   def relay_check(ref, words)
-    m = SESSION_REF_RE.match(ref)
-    return [:unverifiable] unless m
-
-    sid, mid = m[1], m[2]
-    dir = transcripts_dir
-    files = Dir.glob(File.join(dir, "*", "#{sid}.jsonl"))
-    return [:unverified, "transcript for session #{sid} not found under #{dir}"] if files.empty?
-    return [:unverified, "#{files.size} transcripts for session #{sid} under #{dir}"] if files.size > 1
-
-    msg = nil
-    File.foreach(files.first, encoding: "UTF-8") do |line|
-      j = begin
-        JSON.parse(line)
-      rescue JSON::ParserError
-        next
-      end
-      next unless j.is_a?(Hash) && j["uuid"] == mid
-
-      msg = j
-      break
-    end
-    return [:unverified, "no message #{mid} in #{files.first}"] unless msg
-    unless msg["type"] == "user" && msg["isSidechain"] != true
-      return [:unverified, "message #{mid} is not a top-level user turn (type=#{msg['type'].inspect}, " \
-                           "sidechain=#{msg['isSidechain'].inspect})"]
-    end
-    human = msg["entrypoint"] == "cli" && msg["promptSource"] == "typed" &&
-            msg["origin"].is_a?(Hash) && msg["origin"]["kind"] == "human"
-    unless human
-      return [:unverified, "message #{mid} was not typed by a human in an interactive session " \
-                           "(entrypoint=#{msg['entrypoint'].inspect}, promptSource=#{msg['promptSource'].inspect}, " \
-                           "origin=#{msg['origin'].inspect}); a headless `claude -p` prompt or a notification never " \
-                           "corroborates"]
-    end
-    content = msg.dig("message", "content")
-    said = if content.is_a?(String)
-             content
-           elsif content.is_a?(Array)
-             content.select { |b| b.is_a?(Hash) && b["type"] == "text" }.map { |b| b["text"].to_s }.join("\n")
-           else
-             ""
-           end
-    if said.strip.empty?
-      return [:unverified, "message #{mid} is not a top-level user turn with text (tool results never corroborate)"]
-    end
-    return [:unverified, "the words were not found verbatim in message #{mid}"] unless said.include?(words)
-
-    [:verified, said]
-  rescue SystemCallError => e
-    [:unverified, "cannot read the transcript: #{e.message}"]
+    OwnerTurn.check(ref, words, dir: transcripts_dir)
   end
 
   def relay_check_line(note)

@@ -448,6 +448,7 @@ git -C "${main}" worktree add -q -b lane "${lane}" main
 mkdir -p "${lane}/ai/bin" "${lane}/ai/lib" "${main}/ai-artifacts/shipwright"
 cp "${BIN}" "${lane}/ai/bin/owner-notes"
 cp "${AI_DIR}/lib/strict_argv.rb" "${lane}/ai/lib/strict_argv.rb"
+cp "${AI_DIR}/lib/owner_turn.rb" "${lane}/ai/lib/owner_turn.rb"
 o="$(cd "${TMP}" && env -u SHIPWRIGHT_STATE_DIR "${lane}/ai/bin/owner-notes" --path 2>"${TMP}/err")"; rc=$?
 want="$(cd "${main}" && pwd -P)/ai-artifacts/shipwright/owner-notes.md"
 if [ "${rc}" -eq 0 ] && [ "${o}" = "${want}" ]; then
@@ -470,7 +471,7 @@ git -C "${rr}" init -q -b main
 gc() { git -C "${rr}" -c user.name=t -c user.email=t@t "$@"; }
 gc commit -q --allow-empty -m base
 mkdir -p "${rr}/ai/bin" "${rr}/ai/lib" "${rr}/ai-artifacts/shipwright"
-cp "${BIN}" "${rr}/ai/bin/owner-notes"; cp "${AI_DIR}/lib/strict_argv.rb" "${rr}/ai/lib/strict_argv.rb"
+cp "${BIN}" "${rr}/ai/bin/owner-notes"; cp "${AI_DIR}/lib/strict_argv.rb" "${rr}/ai/lib/strict_argv.rb"; cp "${AI_DIR}/lib/owner_turn.rb" "${rr}/ai/lib/owner_turn.rb"
 RB="${rr}/ai/bin/owner-notes"; rf="${rr}/ai-artifacts/shipwright/owner-notes.md"
 rrun() { OUT="$(cd "${TMP}" && env -u SHIPWRIGHT_STATE_DIR -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT "${RB}" "$@" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"; }
 
