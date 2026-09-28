@@ -2095,6 +2095,11 @@ NOFLOCK_DIR="$(mktemp -d)"
 for c in jq awk sed date stat mv rm mkdir touch cat printf ls find sort wc tr grep cp chmod realpath git; do
   p="$(command -v "$c" 2>/dev/null)" && ln -sf "$p" "${NOFLOCK_DIR}/$c"
 done
+# The REAL git, never the agent PATH wrapper, which has no git to reach on a
+# PATH of links (DND-1103).
+. "${ROOT}/../../lib/agent-free-git.sh"
+REAL_GIT="$(agent_free_git)" || exit 1
+ln -sf "${REAL_GIT}" "${NOFLOCK_DIR}/git"
 NO_FLOCK="$(timeout 20 bash -c '
   PATH="'"${NOFLOCK_DIR}"'"
   . "'"${LIB}"'/err.sh"; . "'"${LIB}"'/fs.sh"; . "'"${LIB}"'/lock.sh"
@@ -3542,6 +3547,7 @@ SHIM_DIR="$(mktemp -d)"
 for c in bash env dirname basename mktemp head cut seq sleep ln jq awk sed date stat mv rm mkdir touch cat printf ls find sort wc tr grep cp chmod realpath git flock paste timeout inotifywait; do
   cp_p="$(command -v "$c" 2>/dev/null)" && ln -sf "${cp_p}" "${SHIM_DIR}/$c"
 done
+ln -sf "${REAL_GIT}" "${SHIM_DIR}/git"   # the real git, not the agent wrapper (DND-1103)
 for missing in inotifywait timeout; do
   rm -f "${SHIM_DIR}/${missing}"
   ERR="$(cd "${BREPO}" && PATH="${SHIM_DIR}" "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?

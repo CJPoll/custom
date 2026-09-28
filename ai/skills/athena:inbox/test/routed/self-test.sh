@@ -831,6 +831,11 @@ for d in "${PATH_DIRS[@]}"; do
     [ -x "${f}" ] && [ ! -e "${NOTIMEOUT}/${b}" ] && ln -s "${f}" "${NOTIMEOUT}/${b}"
   done
 done
+# The REAL git, never the agent PATH wrapper: linked alone here it has no git to
+# reach and exits 127, so the key fails before the timeout check (DND-1103).
+. "${SKILL}/../../lib/agent-free-git.sh"
+REAL_GIT="$(agent_free_git)" || exit 1
+ln -sf "${REAL_GIT}" "${NOTIMEOUT}/git"
 shim_reset; printf '%s' "${LIST_NAMED}" > "${SHIM}/list_my_machines.answer"
 assert_eq "manager: no timeout on PATH -> its own reason; the lookup is never run unbounded" \
   "timeout (coreutils) is not on PATH, so the lookup cannot be bounded" "$(PATH="${NOTIMEOUT}" MN "${PROJ}")"
