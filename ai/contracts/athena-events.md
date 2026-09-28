@@ -4322,9 +4322,9 @@ else its latest started run, else its placeholder. Which run a captain spawn
 counts toward is a separate question with its own rule (*Captain
 attribution*).
 
-**Later (2026-09-27):** DND-804 (gen_saas #443): this paragraph ended "The
-caller's run is the run whose admiral agent made the spawn", which also read as
-the rule for which run a captain belongs to. An agent can hold several runs, so
+**Later (2026-09-27):** DND-804 (gen_saas #443, merged as `eadf1ae2`): this
+paragraph ended "The caller's run is the run whose admiral agent made the
+spawn", which also read as the rule for which run a captain belongs to. An agent can hold several runs, so
 that phrase named none of them in particular. The binding behaviour is
 unchanged and now stated exactly; attribution is *Captain attribution*.
 
@@ -4497,13 +4497,13 @@ paired one reads its agent's own state: a finished captain reads `ended`, and
 a live background captain reads `running` on its own activity, never `lost`
 with its run.
 
-**Later (2026-09-27):** DND-804 (gen_saas #443): hook missions came from "the
-spawns whose caller is any admiral agent of the run", and *Fleet liveness*
-step 5 counted each running captain "whose spawn's caller is an admiral agent
-of the run". One admiral agent can hold several runs in a session (a new run
-after its old one finished), so both runs took all of that agent's captains:
-each showed the other's missions, and each stayed live on the other's
-captains. Both now read the captains attributed to the run, and a spawn no
+**Later (2026-09-27):** DND-804 (gen_saas #443, merged as `eadf1ae2`): hook
+missions came from "the spawns whose caller is any admiral agent of the run",
+and *Fleet liveness* step 5 counted each running captain "whose spawn's caller
+is an admiral agent of the run". One admiral agent can hold several runs in a
+session (a new run after its old one finished), so both runs took all of that
+agent's captains: each showed the other's missions, and each stayed live on
+the other's captains. Both now read the captains attributed to the run, and a spawn no
 single run takes is a listed `captain in no run` (*Captain attribution*).
 
 **A reported status older than hook evidence is `stale`.** The fleet page marks
