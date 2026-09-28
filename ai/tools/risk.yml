@@ -74,20 +74,21 @@ tools:
   push-actor-check:        { class: readOnly, reason: query }
   # private-overlay (DND-702) reads the on-machine overlay; it never writes.
   private-overlay:         { class: readOnly, reason: query }
-  # outbound-scan (DND-699) reads the overlay and git; its one write is a
-  # waiver line appended to a local log (never the repo or a remote).
-  outbound-scan:           { class: idempotent, reason: scan }
   ready-and-idle:          { class: readOnly, reason: analysis }
   # DND-775: git runs it as a reference-transaction hook; it reads the queued
   # updates on stdin and refuses (never writes) a stash-list change.
   git-hooks/agent-stash-guard.sh: { class: readOnly, reason: refuse }
-  # DND-699: git runs it as the pre-push hook; it runs the main checkout's
-  # outbound-scan, which may append a waiver line to a local log.
-  git-hooks/outbound-pre-push.sh: { class: idempotent, reason: refuse }
 
   # --- idempotent: deterministic local mutation (writes an in-repo artifact;
   #     re-running yields the same result; no external/irreversible effect) ---
   build-agents:            { class: idempotent, reason: render }
+  # outbound-scan (DND-699) reads the overlay and git. Its one write is a
+  # waiver line appended to a LOCAL log (never the repo, a forge or a remote);
+  # nothing stricter than local mutation, so idempotent by the class order.
+  outbound-scan:           { class: idempotent, reason: scan }
+  # DND-699: git runs it as the pre-push hook; it runs the main checkout's
+  # outbound-scan, so it carries that tool's class.
+  git-hooks/outbound-pre-push.sh: { class: idempotent, reason: refuse }
   # Kills only this uid's mock-athena-inbox-client.rb processes with no live
   # self-test.sh/fake-suite.sh ancestor anywhere in their process lineage
   # (unambiguous orphans by that measure -- a live parent that is not itself

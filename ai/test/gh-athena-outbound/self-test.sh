@@ -51,6 +51,11 @@ cat > "${TMP}/bin/gh" <<'STUB'
 printf '%s\n' "$*" >> "${STUB_LOG}"
 case "$*" in
   "repo view"*"--json visibility"*)
+    # A per-repo fixture (visibility.<owner>_<repo>) wins over the default.
+    if [ "$3" != "--json" ]; then
+      f="${STUB_VIS}.$(printf '%s' "$3" | tr '/' '_')"
+      if [ -s "$f" ]; then cat "$f"; exit 0; fi
+    fi
     if [ -s "${STUB_VIS}" ]; then cat "${STUB_VIS}"; exit 0; fi
     echo "stub: no visibility" >&2; exit 1 ;;
   "alias list"*) exit 0 ;;
@@ -181,6 +186,29 @@ if [ "${RC}" = 0 ] && sent "pr create" && [[ "${OUT}" != *"outbound-scan:"* ]]; 
 gha pr create -R some/repo --body "x${TOKEN}"
 if [ "${RC}" = 0 ] && [[ "${CALLS}" == *"repo view some/repo --json visibility"* ]]; then ok "-R names the repo whose visibility is read"; else bad "-R repo" "calls=[${CALLS}]"; fi
 
+echo "--- the target is every repo the write can reach (critic round 3: a URL positional) ---"
+echo PRIVATE > "${STUB_VIS}"                 # the current directory's repo
+echo PUBLIC > "${STUB_VIS}.synth-owner_pub"
+echo PRIVATE > "${STUB_VIS}.synth-owner_priv"
+gha pr comment https://github.com/synth-owner/pub/pull/3 --body "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr comment" && [[ "${CALLS}" == *"repo view synth-owner/pub --json visibility"* ]] && no_literal; then
+  ok "a PR URL to a PUBLIC repo is scanned from a PRIVATE cwd"
+else
+  bad "PR URL public" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+gha issue comment https://github.com/synth-owner/priv/issues/9 --body "x${TOKEN}"
+if [ "${RC}" = 0 ] && sent "issue comment"; then ok "an issue URL to a PRIVATE repo is not scanned"; else bad "issue URL private" "rc=${RC} ${OUT}"; fi
+gha pr comment -R synth-owner/priv https://github.com/synth-owner/pub/pull/3 --body "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr comment"; then ok "-R private plus a PUBLIC URL is scanned"; else bad "-R + URL" "rc=${RC} ${OUT}"; fi
+gha pr comment https://github.com/ --body "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr comment" && [[ "${OUT}" == *"cannot parse; scanning as PUBLIC"* ]]; then ok "an unparsable URL is scanned as PUBLIC"; else bad "unparsable URL" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && GH_REPO=synth-owner/pub "${WRAPPER}" pr comment 3 --body "x${TOKEN}" 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if [ "${RC}" = 1 ] && not_sent "pr comment" && [[ "${CALLS}" == *"repo view synth-owner/pub"* ]]; then ok "GH_REPO names the target"; else bad "GH_REPO" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gha pr comment --body "x${TOKEN}" -- https://github.com/synth-owner/pub/pull/3
+if [[ "${CALLS}" == *"repo view synth-owner/pub"* ]]; then ok "a URL after -- is still a target"; else bad "URL after --" "calls=[${CALLS}] ${OUT}"; fi
+rm -f "${STUB_VIS}".synth-owner_*
+echo PUBLIC > "${STUB_VIS}"
+
 echo "--- visibility unreadable: scanned as PUBLIC ---"
 : > "${STUB_VIS}"
 gha pr create --body "x${TOKEN}"
@@ -218,6 +246,13 @@ if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"overlay is ABSENT
 else
   bad "absent + marked" "rc=${RC} ${OUT}"
 fi
+
+echo "--- a scanner that exits 1 without reporting HITS is a failure, not a result (critic round 3) ---"
+CR="${TMP}/crash"; git init -q "${CR}"; mkdir -p "${CR}/ai"
+cp -r "${AI_DIR}/bin" "${AI_DIR}/lib" "${CR}/ai/"
+printf '#!/bin/sh\necho "Traceback: boom" >&2\nexit 1\n' > "${CR}/ai/bin/outbound-scan"
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && "${CR}/ai/bin/gh-athena" pr create --body "clean" 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"without reporting HITS"* ]]; then ok "a crash reads as a failure"; else bad "crash" "rc=${RC} ${OUT}"; fi
 
 echo "--- an unreadable body file is refused ---"
 gha pr create --body-file "${TMP}/no-such-file"

@@ -200,8 +200,12 @@ the push there.
 `pr create|edit|comment|review|merge` and `issue create|edit|comment` before gh
 runs; a squash merge's subject and body become a commit made on the server,
 where no pre-push hook runs. A short-flag cluster that could hide one of these
-fields is refused. The scan runs when the target repository is PUBLIC or its visibility cannot be
-read. HITS refuse (exit 1). COULD NOT MEASURE refuses (exit 3), except where the
+fields is refused. The scan runs unless every repository the write can reach
+reads PRIVATE or INTERNAL: each `-R`/`--repo`, the repository of each PR or
+issue URL given positionally, `GH_REPO` when no `-R` is given, and otherwise
+the current directory's. A visibility that cannot be read, or a URL that cannot
+be parsed, counts as PUBLIC. HITS refuse (exit 1); a scanner exit 1 that does
+not report HITS is a failure (exit 3), never a result. COULD NOT MEASURE refuses (exit 3), except where the
 overlay is ABSENT and the machine is not marked (no outbound pre-push hook in
 the harness checkout's common git dir): there the write proceeds with a
 WARNING that the text went out unscanned, never a CLEAN line.

@@ -62,7 +62,14 @@ gos_scan() {
   printf '%s\n' "$out" | sed 's/^/gh-athena: /' >&2
   case "$rc" in
     0) return 0 ;;
-    1) gos_refuse 1 "the $label of this $GOS_WHAT to a PUBLIC repository carries work-domain values (locations and labels above). Fix: remove them from the $label, or read them from the private overlay instead of pasting them (ai/contracts/athena-private-overlay.md -> Consumer obligation), then retry." ;;
+    1)
+      # Exit 1 is HITS only when the scanner says so; a crash (a Ruby
+      # exception is also exit 1) is a scanner failure, never read as a result.
+      case "$out" in
+        *"outbound-scan: HITS mode="*) ;;
+        *) gos_refuse 3 "the outbound scanner exited 1 on the $label without reporting HITS (a crash, output above). Fix: run \`$GOS_BIN_DIR/outbound-scan --help\` and report the defect." ;;
+      esac
+      gos_refuse 1 "the $label of this $GOS_WHAT to a PUBLIC repository carries work-domain values (locations and labels above). Fix: remove them from the $label, or read them from the private overlay instead of pasting them (ai/contracts/athena-private-overlay.md -> Consumer obligation), then retry." ;;
     3)
       local st=0
       "$GOS_BIN_DIR/private-overlay" status >/dev/null 2>&1 || st=$?
@@ -75,6 +82,29 @@ gos_scan() {
   esac
 }
 
+# gos_positional <word> : a positional that is a URL adds its repository to the
+# caller's `targets` (dynamic scope). github.com URLs become OWNER/REPO; another
+# host becomes HOST/OWNER/REPO; a URL without an owner and repo becomes "?"
+# (unknown, scanned as PUBLIC).
+gos_positional() {
+  local w="$1" rest host owner repo
+  case "$w" in
+    http://* | https://*) ;;
+    *) return 0 ;;
+  esac
+  rest="${w#*://}"
+  host="${rest%%/*}"; rest="${rest#*/}"
+  owner="${rest%%/*}"; rest="${rest#*/}"
+  repo="${rest%%[/?#]*}"
+  if [ -z "$host" ] || [ -z "$owner" ] || [ -z "$repo" ] || [ "$owner" = "$w" ] || [ "$repo" = "$owner" ]; then
+    targets+=("?")
+  elif [ "$host" = github.com ] || [ "$host" = www.github.com ]; then
+    targets+=("$owner/${repo%.git}")
+  else
+    targets+=("$host/$owner/${repo%.git}")
+  fi
+}
+
 # gos_guard <gh argv...> : sets GOS_ARGV to the argv gh must run (a `-` body
 # file is replaced by the scanned private copy).
 #
@@ -84,6 +114,14 @@ gos_scan() {
 # cluster that carries t, b, F or R after its first letter (`-dbX`, `-Bmain`
 # with a t in it) could hide a field inside it, so it is REFUSED with a Fix
 # rather than guessed at. Everything after `--` is positional.
+#
+# The TARGET repository is every repository the write could reach: each
+# -R/--repo value, the owner/repo of every PR or issue URL given positionally
+# (gh acts on the URL's repo, whatever the current directory is), GH_REPO when
+# no -R is given, and the current directory's repo when none of these names
+# one. The text is scanned unless EVERY target reads PRIVATE or INTERNAL; a
+# target whose visibility cannot be read, or a URL it cannot parse, counts as
+# PUBLIC.
 gos_guard() {
   GOS_ARGV=("$@")
   local group="${1:-}" verb="${2:-}"
@@ -93,46 +131,58 @@ gos_guard() {
   esac
   GOS_WHAT="$group $verb"
 
-  local i=2 n=$# a repo=""
-  local -a argv=("$@") titles=() bodies=() bf_idx=() bf_pre=() bf_path=()
+  local i=2 n=$# a have_r=""
+  local -a argv=("$@") titles=() bodies=() bf_idx=() bf_pre=() bf_path=() targets=()
   while [ "$i" -lt "$n" ]; do
     a="${argv[$i]}"
     case "$a" in
-      --) break ;;
+      --)
+        for a in "${argv[@]:$((i + 1))}"; do gos_positional "$a"; done
+        break ;;
       --title=* | --subject=*) titles+=("${a#--*=}") ;;
       --subject) i=$((i + 1)); titles+=("${argv[$i]:-}") ;;
       --body=*) bodies+=("${a#--body=}") ;;
       --body-file=*) bf_idx+=("$i"); bf_pre+=("--body-file="); bf_path+=("${a#--body-file=}") ;;
-      --repo=*) repo="${a#--repo=}" ;;
+      --repo=*) targets+=("${a#--repo=}"); have_r=1 ;;
       -t | --title) i=$((i + 1)); titles+=("${argv[$i]:-}") ;;
       -b | --body) i=$((i + 1)); bodies+=("${argv[$i]:-}") ;;
       -F | --body-file) i=$((i + 1)); bf_idx+=("$i"); bf_pre+=(""); bf_path+=("${argv[$i]:-}") ;;
-      -R | --repo) i=$((i + 1)); repo="${argv[$i]:-}" ;;
+      -R | --repo) i=$((i + 1)); targets+=("${argv[$i]:-}"); have_r=1 ;;
       -t?*) titles+=("${a#-t}") ;;
       -b?*) bodies+=("${a#-b}") ;;
       -F?*) bf_idx+=("$i"); bf_pre+=("-F"); bf_path+=("${a#-F}") ;;
-      -R?*) repo="${a#-R}" ;;
+      -R?*) targets+=("${a#-R}"); have_r=1 ;;
       --*) ;;
       -?*)
         if [ "${#a}" -gt 2 ] && [[ "${a:2}" == *[tbFR]* ]]; then
           gos_refuse 3 "the short-flag cluster \`${a:0:2}…\` in this $GOS_WHAT may carry a title, body or repo the outbound scan cannot separate. Fix: write each short flag as its own word (\`-d -b <text>\`, \`-B <branch>\`), or use the long flags (--title, --body, --body-file, --repo)."
         fi ;;
+      *) gos_positional "$a" ;;
     esac
     i=$((i + 1))
   done
   [ "$((${#titles[@]} + ${#bodies[@]} + ${#bf_path[@]}))" -gt 0 ] || return 0
 
-  local vis
-  if [ -n "$repo" ]; then
-    vis="$(gh repo view "$repo" --json visibility --jq .visibility 2>/dev/null)" || vis=""
-  else
-    vis="$(gh repo view --json visibility --jq .visibility 2>/dev/null)" || vis=""
-  fi
-  case "$vis" in
-    PRIVATE | INTERNAL) return 0 ;;
-    PUBLIC) ;;
-    *) printf 'gh-athena: the target repository visibility could not be read; scanning as PUBLIC.\n' >&2 ;;
-  esac
+  if [ -z "$have_r" ] && [ -n "${GH_REPO:-}" ]; then targets+=("$GH_REPO"); fi
+  [ "${#targets[@]}" -gt 0 ] || targets=("")
+  local t vis public=""
+  for t in "${targets[@]}"; do
+    if [ "$t" = "?" ]; then
+      printf 'gh-athena: a positional URL names a repository this guard cannot parse; scanning as PUBLIC.\n' >&2
+      public=1; continue
+    fi
+    if [ -n "$t" ]; then
+      vis="$(gh repo view "$t" --json visibility --jq .visibility 2>/dev/null)" || vis=""
+    else
+      vis="$(gh repo view --json visibility --jq .visibility 2>/dev/null)" || vis=""
+    fi
+    case "$vis" in
+      PRIVATE | INTERNAL) ;;
+      PUBLIC) public=1 ;;
+      *) printf 'gh-athena: the visibility of %s could not be read; scanning as PUBLIC.\n' "${t:-the current directory repository}" >&2; public=1 ;;
+    esac
+  done
+  [ -n "$public" ] || return 0
 
   local dir="${FCI_CFG_DIR:?gh-athena: outbound scan needs the private config dir}/outbound-scan"
   mkdir -p "$dir" || gos_refuse 3 "could not create $dir for the outbound scan. Fix: make \$TMPDIR writable and retry."
