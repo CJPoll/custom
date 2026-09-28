@@ -31,6 +31,13 @@ module ReapTags
   DEFAULT_GRACE_S = 5.0
   POLL_S = 0.1
   KILL_PASSES = 10
+  # How long a process that cannot be read yet (mid-exec) is re-read before it
+  # is named as unknown, and how often (DND-1016).
+  DEFAULT_SETTLE_S = 5.0
+  SETTLE_POLL_S = 0.05
+
+  # The scan cannot run at all (no env bounds, no /proc): never "none found".
+  class ScanError < StandardError; end
 
   module_function
 
@@ -46,26 +53,139 @@ module ReapTags
   end
 
   # Pids of this uid (never this process) whose ATHENA_REAP_TAGS holds `tag`
-  # as a whole element. Processes that vanish or cannot be read mid-scan are
-  # skipped: they are not ours to judge.
-  def tagged_pids(tag, proc_root: "/proc", uid: Process.uid, exclude: [Process.pid])
-    needle = "#{VAR}="
-    Dir.glob(File.join(proc_root, "[0-9]*")).filter_map do |dir|
+  # as a whole element, started at or after `since` (a starttime in clock
+  # ticks; default: this process's own, since nothing older can carry a tag it
+  # made). A process that vanishes mid-scan is not ours to judge.
+  #
+  # DND-1016: /proc/<pid>/environ is NOT a stable read while the process is
+  # inside execve -- it reads EMPTY (or fails EACCES) until the kernel has laid
+  # out the new stack, and a read that straddles an exec is cut short at a
+  # page. The suite reaper's measured orphan was
+  # `asdf exec ruby .../mock-athena-inbox-client.rb`, read as untagged
+  # between the asdf shim chain's execs. So a read is an answer only when the
+  # kernel's own bounds for the environment (env_start/env_end, fields 50-51
+  # of /proc/<pid>/stat) are set, the same before and after the read, and span
+  # exactly the bytes read (#classify). Anything else is re-read every
+  # SETTLE_POLL_S for up to `settle` seconds, and a pid still unreadable after
+  # that raises ScanError naming it -- never silently counted as untagged.
+  # scripts/lib/proc-env-scan.awk applies the same rule for shell readers, and
+  # its header states the limits (a non-dumpable process cannot be read and
+  # is skipped; the equal-bounds rule assumes ASLR).
+  #
+  # `since` defaults to this process's own start, read from the real /proc
+  # even when `proc_root` points at a fixture.
+  def tagged_pids(tag, proc_root: "/proc", uid: Process.uid, exclude: [Process.pid],
+                  since: own_starttime, settle: DEFAULT_SETTLE_S)
+    found = []
+    unknown = []
+    seen_empty = {}
+    Dir.glob(File.join(proc_root, "[0-9]*")).each do |dir|
       pid = File.basename(dir).to_i
       next if exclude.include?(pid)
 
-      begin
-        next unless File.stat(dir).uid == uid
-
-        env = File.binread(File.join(dir, "environ"))
-      rescue SystemCallError, IOError
-        next
+      case classify(pid, tag, proc_root, uid, since, seen_empty)
+      when :match then found << pid
+      when :unknown then unknown << pid
       end
-      entry = env.split("\0").find { |e| e.start_with?(needle) }
-      next unless entry && entry.byteslice(needle.bytesize..-1).split(",").include?(tag)
-
-      pid
     end
+    deadline = monotonic + settle
+    until unknown.empty? || monotonic >= deadline
+      sleep SETTLE_POLL_S
+      unknown = unknown.select do |pid|
+        verdict = classify(pid, tag, proc_root, uid, since, seen_empty)
+        found << pid if verdict == :match
+        verdict == :unknown
+      end
+    end
+    return found if unknown.empty?
+
+    named = unknown.map { |pid| "pid=#{pid} #{cmdline(pid, proc_root: proc_root)}" }.join("; ")
+    raise ScanError, "#{unknown.size} process(es) stayed unreadable for #{settle}s (environment bounds never " \
+                     "settled), so whether they carry #{tag} is UNKNOWN: #{named}. Fix: find what those " \
+                     "processes are doing (stuck in execve, or an unreadable environ) and re-run; the scan " \
+                     "could not look, so it did not report 'none left'."
+  end
+
+  # [state, starttime, env_start, env_end] from /proc/<pid>/stat, or nil when
+  # the process is gone. Raises when the line is not the kernel's format or
+  # this kernel has no env bounds: a scan that cannot tell mid-exec from
+  # untagged must not run at all.
+  def stat_fields(pid, proc_root)
+    path = File.join(proc_root, pid.to_s, "stat")
+    line = begin
+      File.binread(path)
+    rescue SystemCallError, IOError
+      return nil
+    end
+    cut = line.rindex(") ")
+    raise ScanError, "#{path} is not in the kernel's format (no \") \" after the comm). Fix: run on Linux with /proc mounted." unless cut
+
+    f = line.byteslice((cut + 2)..-1).split(" ")
+    if f.size < 49
+      raise ScanError, "#{proc_root}/#{pid}/stat has #{f.size + 2} fields; env_start/env_end (fields 50-51, " \
+                       "Linux 3.5+) are missing. Fix: run on Linux 3.5 or later; the reap must not fall back " \
+                       "to an unbracketed read."
+    end
+    [f[0], f[19].to_i, f[47].to_i, f[48].to_i]
+  end
+
+  def real_uid(pid, proc_root)
+    File.foreach(File.join(proc_root, pid.to_s, "status")) do |l|
+      return l.split[1].to_i if l.start_with?("Uid:")
+    end
+    nil
+  rescue SystemCallError, IOError
+    nil
+  end
+
+  # :match, :no (or cannot be ours), or :unknown (cannot tell yet).
+  def classify(pid, tag, proc_root, uid, since, seen_empty)
+    s = stat_fields(pid, proc_root) or return :no
+    state, start, b0, b1 = s
+    return :no if %w[Z X x].include?(state) || start < since || real_uid(pid, proc_root) != uid
+
+    path = File.join(proc_root, pid.to_s, "environ")
+    # Non-dumpable (sudo, ssh-agent): root owns its /proc files, its bounds
+    # read 0 0 forever and its environ is unreadable. Skipped at once, not
+    # waited out; a same-uid exec keeps a process dumpable throughout.
+    owner = begin
+      File.stat(path).uid
+    rescue SystemCallError
+      return :no # gone
+    end
+    return :no if owner != uid
+    return :unknown if b0.zero? && b1.zero? # mid-exec: no bounds yet
+
+    if b0 == b1
+      # Equal bounds are ALSO mid-exec (the kernel sets env_end = env_start
+      # before it walks the new environment): empty only if a re-read at
+      # least SETTLE_POLL_S later still shows the same ones.
+      key = "#{start}:#{b0}"
+      return :no if seen_empty[pid] == key
+
+      seen_empty[pid] = key
+      return :unknown
+    end
+    env = begin
+      File.binread(path)
+    rescue SystemCallError, IOError
+      nil
+    end
+    after = stat_fields(pid, proc_root) or return :no
+    return :unknown unless after[2] == b0 && after[3] == b1 # an exec happened during the read
+
+    return :unknown if env.nil? # unreadable with settled bounds: transient
+    return :unknown unless env.bytesize == b1 - b0 # a short read
+
+    entry = env.split("\0").find { |e| e.start_with?("#{VAR}=") }
+    entry && entry.byteslice(VAR.bytesize + 1..-1).split(",").include?(tag) ? :match : :no
+  end
+
+  def own_starttime
+    s = stat_fields(Process.pid, "/proc")
+    raise ScanError, "cannot read /proc/#{Process.pid}/stat for this process's start time. Fix: run on Linux with /proc mounted." unless s
+
+    s[1]
   end
 
   def cmdline(pid, proc_root: "/proc")
@@ -77,7 +197,8 @@ module ReapTags
   # Wait up to `grace` seconds for tagged processes to exit on their own, then
   # SIGKILL whatever is left (repeating, bounded, for anything mid-fork).
   # Returns [[pid, cmdline], ...] for each process it had to kill -- empty when
-  # nothing outlived the grace period.
+  # nothing outlived the grace period. Raises ScanError when the scan could
+  # not look (tagged_pids), which the caller must report as a failure.
   def reap(tag, grace: DEFAULT_GRACE_S, proc_root: "/proc")
     deadline = monotonic + grace
     left = tagged_pids(tag, proc_root: proc_root)

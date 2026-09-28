@@ -1096,9 +1096,17 @@ stop_wd_supervisor() {
   # Children first (a stub's `sleep` would be orphaned to PID 1), then the pids.
   for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && pkill -9 -P "${p}" 2>/dev/null; done
   # A read-before-stop child may have exited since, and its pid been reused:
-  # kill it only while it still carries this run's reap tag.
+  # kill it only while it still carries this run's reap tag. The tag is read
+  # through the reaper's scan (DND-1016): a plain environ read of a child
+  # caught mid-exec reads empty, and the child would be left alive.
+  # A scan that cannot look kills nothing here and says so; the suite's final
+  # suite_reap_tagged then fails loudly for the same reason.
+  local tagged
+  tagged="$(suite_tagged_pids)" \
+    || echo "stop_wd_supervisor: the tag scan could not look; the final suite_reap_tagged will fail for it." >&2
+  tagged=" $(printf '%s' "${tagged}" | tr '\n' ' ') "
   for p in ${kids}; do
-    grep -qsFz -- "${ATHENA_SUITE_REAPER_TAG}" "/proc/${p}/environ" && kill -9 "${p}" 2>/dev/null
+    case "${tagged}" in *" ${p} "*) kill -9 "${p}" 2>/dev/null ;; esac
   done
   for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && kill -9 "${p}" 2>/dev/null; done
   SUPERVISOR_PID=""
