@@ -128,6 +128,9 @@ eq "16 labels and corpus rows are ordered by ticket number (deterministic)" \
 eq "17 a truncated body with no provenance line is provenance_unread: Jev's line may be past the page [review 2]" \
   "provenance_unread 1" \
   "$(rb 'puts ex.(TicketCorpus.labels(snap.([t.(19, POST, "body_truncated"=>true)])), "ticket_kind")')"
+eq "17b a truncated body is provenance_unread even with an early line: a newer line may be past the page [critic]" \
+  "provenance_unread 1" \
+  "$(rb 'l = "Jev classification: " + JSON.generate(%w[kind severity security].to_h { |k| [k, {"value"=>nil,"source"=>"filer","judged"=>nil,"confidence"=>nil,"accepted"=>false,"mode"=>"off","reason"=>"mode_off"}] }); puts ex.(TicketCorpus.labels(snap.([t.(19, POST, "body_truncated"=>true, "blocks_text"=>["x", l])])), "ticket_kind")')"
 eq "18 severity words in either order and with a dash are redacted [review 4]" \
   "This is a [classification] bug.|[classification]|Filed as a [classification], [classification]." \
   "$(rb 'puts ["This is a HIGH severity bug.", "Severity — HIGH", "Filed as a Bug, severity HIGH."].map { |s| TicketCorpus.redact_body(s) }.join("|")')"
@@ -207,6 +210,9 @@ eq "s14 a truncated body with no line is provenance_unread (the line may be past
   "provenance_unread 1 no_provenance 0" \
   "$(sh 'r = TicketCorpus.shadow_report(snap.([t.(1, POST, "body_truncated"=>true)]), SINCE); puts "provenance_unread #{r[:provenance_unread].size} no_provenance #{r[:no_provenance].size}"')"
 
+eq "s14b a truncated body with a line is provenance_unread, never tallied: the line read may not be the last [critic]" \
+  "provenance_unread 1 lines 0 accepted 0" \
+  "$(sh 'r = TicketCorpus.shadow_report(snap.([t.(1, POST, "body_truncated"=>true, "blocks_text"=>[line.("Bug", true)])]), SINCE); puts "provenance_unread #{r[:provenance_unread].size} lines #{r[:lines]} accepted #{r[:use_cases]["ticket_kind"][:accepted]}"')"
 eq "s15 an accepted judgment in mode on is not a shadow case (Jev agreeing with itself) [review 1]" \
   "accepted 0 mode_on 1" \
   "$(sh 'l = line.("Bug", true).sub("\"mode\":\"shadow\"", "\"mode\":\"on\"").sub("\"source\":\"filer\"", "\"source\":\"jev\""); r = TicketCorpus.shadow_report(snap.([t.(1, POST, "blocks_text"=>[l])]), SINCE); k = r[:use_cases]["ticket_kind"]; puts "accepted #{k[:accepted]} mode_on #{k[:excluded]["mode_on"]}"')"

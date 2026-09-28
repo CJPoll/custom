@@ -463,8 +463,8 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
     guessed), `body_unread`, `blank_title`, `jev_decided` (a ticket whose
     provenance line says Jev set that property is excluded for that use
     case, a title prefix included), `provenance_unparseable`, and
-    `provenance_unread` (a truncated body with no line, which may lie past
-    the page read). A snapshot whose rows lack a Kind, Severity or Security
+    `provenance_unread` (a truncated body: its last provenance line may lie
+    past the page read; the shadow report skips it the same way). A snapshot whose rows lack a Kind, Severity or Security
     select (a renamed property) is refused, never read as unset.
   - The input sent is the title without its severity prefix, and the title
     and body without the `Jev classification:` line or any classification

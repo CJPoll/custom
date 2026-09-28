@@ -151,6 +151,10 @@ tools:
   # other request) and writes machine-local snapshot/label/corpus files; a
   # rebuild from one snapshot is byte-identical. No forge, tracker or server write.
   triage-corpus:           { class: idempotent, reason: labels }
+  # ticket-corpus (DND-1055) makes no network call: it reads triage-corpus's
+  # snapshot and writes machine-local label/corpus files; a rebuild from one
+  # snapshot is byte-identical. --shadow-report only prints.
+  ticket-corpus:           { class: idempotent, reason: labels }
   # notion-athena-mcp launches an MCP server that EXPOSES Notion writes. It does
   # not itself write, but its worst-case capability is a tracker mutation, so it
   # is classified destructive. FLAGGED for owner ratification (DND-172); shipped

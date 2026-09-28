@@ -52,8 +52,8 @@ USAGE = <<~EOF
              unknown_value, unknown_project (never guessed), body_unread,
              blank_title, jev_decided (a property Jev set: never its own
              label, title prefix included), provenance_unparseable, and
-             provenance_unread (a truncated body with no line: the line may
-             be past the page read). The title sent drops its severity
+             provenance_unread (a truncated body: the last provenance line
+             may be past the page read). The title sent drops its severity
              prefix; title and body drop classification statements ("Kind
              Bug", "Severity: HIGH", "a HIGH severity", "Bug MEDIUM") and the
              Jev classification line; at most #{TicketCorpus::MAX_BODY} characters of body.
