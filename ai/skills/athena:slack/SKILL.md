@@ -441,7 +441,11 @@ Notion ticket body, the PR body. Write
 <action_id>=<value>`. Those are ids, not bodies. At `integration-gate` exit 4
 this record is not enough: `--owner-approval` verifies only a human-typed
 transcript turn (`integration-gate --help`), so a click-approved exit-4 merge
-still holds until the gate can verify a click.
+still holds until the gate can verify a click. Nor does a click lift
+`inbox-untrusted-guard`: an unattended session that read inbox content still
+cannot edit `CLAUDE.md`, settings, hooks or skills. An item 5 or 6 change
+that needs such an edit there waits for an attended session or the owner's
+terminal turn.
 
 What that means for the session:
 
