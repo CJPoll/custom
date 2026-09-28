@@ -99,7 +99,9 @@ outcome removes a receipt for that head. There is no flag that skips it.
 
 Exit codes: 0 integration OK | 1 gate RED on the integrated head
             2 usage / unresolvable ref / branch behind target /
-              gate refused (a no-op, or not the gate the target declares)
+              gate refused (a no-op, or not the gate the target declares) /
+              working tree is not HEAD (uncommitted or untracked paths,
+              before the gate or left by it; ignored files do not count)
             3 no green critic verdict on the integrated head
             4 merging performs a real-world action -- owner's call, not the
               fleet's (see --owner-approval)
@@ -446,11 +448,33 @@ fi
 # --- 8. run the gate ON THE INTEGRATED HEAD -------------------------------
 # GATE_CMD was resolved in step 3b: the target's declared gate, or a vetted
 # caller-supplied one.
+#
+# The gate runs in the WORKING TREE, but the receipt certifies the committed
+# HEAD (DND-1011). So the tree must be exactly HEAD before the gate, and still
+# be exactly HEAD after it. Untracked files count: a forgotten `git add` is how
+# a head ships broken while its tree passes. Ignored files (build output,
+# deps) do not.
+tree_dirt() { git -C "$ROOT" status --porcelain 2>&1; }
+DIRT="$(tree_dirt)"
+if [ -n "$DIRT" ]; then
+  echo "${PROG}: the working tree is not HEAD ($(short "$HEAD_SHA")), so a gate run here would not judge the commit being certified. Uncommitted or untracked paths:" >&2
+  printf '%s\n' "$DIRT" | head -20 >&2
+  echo "Fix: commit the paths above (or remove them, or gitignore build output), then re-run. A pass on uncommitted content is not a pass of $(short "$HEAD_SHA")." >&2
+  exit 2
+fi
 echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA"): ${GATE_LABEL}"
 if ! ( cd "$ROOT" && eval "$GATE_CMD" ); then
   echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA")." >&2
   echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA") although your branch passed alone. A disjoint file set does not imply a disjoint gate (shared budgets/registries). Fix it on this branch and re-run; do not merge." >&2
   exit 1
+fi
+AFTER_SHA="$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null)"
+DIRT="$(tree_dirt)"
+if [ "$AFTER_SHA" != "$HEAD_SHA" ] || [ -n "$DIRT" ]; then
+  echo "${PROG}: the gate changed the tree it judged: HEAD $(short "$HEAD_SHA") -> $(short "${AFTER_SHA:-unresolved}")${DIRT:+, with uncommitted paths:}" >&2
+  [ -n "$DIRT" ] && printf '%s\n' "$DIRT" | head -20 >&2
+  echo "Fix: the green run was of content other than $(short "$HEAD_SHA"), so it certifies nothing. Review what the gate wrote or committed, keep it on this branch if it is right, then re-run integration-gate on the new head." >&2
+  exit 2
 fi
 
 # --- 8b. the standing judge's verdict ON THE HEAD WE ARE DECLARING MERGEABLE -

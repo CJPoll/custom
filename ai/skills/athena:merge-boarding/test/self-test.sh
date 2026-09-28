@@ -71,8 +71,13 @@ record_pass() { record_verdict "$1" pass "${2-}"; }
 # new_repo <dir> -- a repo on branch `main` with one commit.
 new_repo() {
   mkdir -p "$1"; ( cd "$1" && git init -q -b main . && echo seed > seed.txt \
-    && git add seed.txt && git commit -qm seed )
+    && git add seed.txt && git commit -qm seed \
+    && printf '/g.sh\n/gp.sh\n/GATE_RAN\n/PREP_RAN\n/HARNESS_RAN\n/log\n' >> .git/info/exclude )
 }
+# The fixture gate stubs (g.sh, gp.sh), the markers they touch, and the `log`
+# a `| tee log` gate writes live in the repo root but are the harness's, not
+# the tree under test: excluded, so the DND-1011 clean-tree check judges only
+# what the case itself leaves uncommitted.
 
 # ---------------------------------------------------------------- case 1
 # Target unchanged since the branch point: exit 0, says "unchanged", and the
@@ -653,6 +658,50 @@ grep -q '^Fix:' <<<"$out" && ok "c28 carries a Fix: line" || bad "c28 missing Fi
 hout="$("$GATE" --help 2>/dev/null)"
 grep -q 'integration-receipts' <<<"$hout" && ok "c29 --help names the receipt store" || bad "c29 --help lacks the receipt" "$hout"
 grep -q '5 gate green but the receipt' <<<"$hout" && ok "c29 --help documents exit 5" || bad "c29 --help lacks exit 5" "$hout"
+
+# ---------------------------------------------------------------- case 30
+# DND-1011: the gate runs in the WORKING TREE, but the receipt certifies the
+# committed HEAD. An uncommitted edit (or an un-added file) that turns a red
+# head green must not become that head's pass.
+stub_gate_needs_fixed() { printf '#!/bin/sh\n[ "$(cat f.txt 2>/dev/null)" = fixed ] || { echo "f.txt not fixed"; exit 1; }\nexit 0\n' > "$1"; chmod +x "$1"; }
+R="${TMP}/c30"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo broken > f.txt && git add f.txt && git commit -qm f )
+stub_gate_needs_fixed "${R}/g.sh"; record_pass "$R"
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+echo fixed > "${R}/f.txt"   # the tracked edit that is never committed
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c30 exit 2: a modified tracked file is refused before the gate" || bad "c30 expected exit 2, got $rc" "$out"
+grep -q '^INTEGRATION OK' <<<"$out" && bad "c30 certified a head its gate never saw (dirty tree)" "$out" || ok "c30 no INTEGRATION OK on a dirty tree"
+[ -e "$rf" ] && bad "c30 wrote a receipt for a dirty tree" "$(cat "$rf")" || ok "c30 no receipt for a dirty tree"
+grep -q 'f.txt' <<<"$out" && grep -q '^Fix:' <<<"$out" && ok "c30 names the dirty path, with a Fix:" || bad "c30 dirty path / Fix: missing" "$out"
+
+# An UNTRACKED file counts too: forgetting `git add` is how a committed head
+# ships broken while its working tree passes.
+R="${TMP}/c30u"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo x > x.txt && git add x.txt && git commit -qm x )
+stub_gate_needs_fixed "${R}/g.sh"; record_pass "$R"
+echo fixed > "${R}/f.txt"   # never added
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ! grep -q '^INTEGRATION OK' <<<"$out" && ok "c30 an untracked file is refused too" || bad "c30 untracked file passed (rc=$rc)" "$out"
+
+# A gate that CHANGES the tree or HEAD (gen_saas prep-commit auto-commits)
+# passed on something other than the head it would certify: refused.
+R="${TMP}/c30c"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo x > x.txt && git add x.txt && git commit -qm x )
+printf '#!/bin/sh\necho y > y.txt && git add y.txt && git commit -qm auto-fix\nexit 0\n' > "${R}/g.sh"; chmod +x "${R}/g.sh"
+record_pass "$R"
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ! grep -q '^INTEGRATION OK' <<<"$out" && ok "c30 a gate that moved HEAD is not a pass of the old head" || bad "c30 gate moved HEAD and still passed (rc=$rc)" "$out"
+[ -e "$rf" ] && bad "c30 receipt written for a head the gate moved off" "$(cat "$rf")" || ok "c30 no receipt when the gate moved HEAD"
+
+# Ignored files are not dirt (build output, deps): a clean head still passes.
+R="${TMP}/c30i"; new_repo "$R"
+( cd "$R" && printf 'build/\n' > .gitignore && git add .gitignore && git commit -qm ignore \
+  && git checkout -qb feature && echo x > x.txt && git add x.txt && git commit -qm x && mkdir build && echo o > build/out )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"; record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$out" && ok "c30 ignored files are not dirt" || bad "c30 ignored file refused (rc=$rc)" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
