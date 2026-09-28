@@ -22,11 +22,10 @@ carriers are not yet rewritten. Rewriting the existing flaky/ticket-lane **actio
 this brief is **DND-247 / H-3** (named for provenance); the
 `~/dev/custom/ai/CLAUDE.md` home is a trigger-pointer *into* this brief, not an
 instance that binds its placeholders — the flaky instance is this brief's own
-parameter table below. DND-247 does
-**not** collapse the tracker constants into a single home
-or flip the citations to it; that collapse is **DND-276** and has not happened
-yet (see *The flaky lane — the worked instantiation* and *Relationship to the
-existing flaky trigger* below). A second lane, or a
+parameter table below. The lane's Notion target has one machine-readable home,
+`<repo-root>/.claude/flaky-lane.json`, which both the captain and the lane's
+spawn text read (**DND-276**; see *The flaky lane — the worked instantiation*
+below). A second lane, or a
 second project, is another instantiation of the same template with different
 parameter values — no new prose, no new code.
 
@@ -317,25 +316,37 @@ The **tracker-management constants** — owner id, connector, scope DB + id, sco
 filter, status vocabulary, blocked semantics, merge policy — are **not copied
 here**, because copying them into a second tracked file is exactly the staleness
 the *Documentation conventions* rule below warns of (drift was already present
-before these citations replaced the copies). The machine-readable tracker
-*target* the captain reads — connector, database id, label, queued status — is
-declared in `<repo-root>/.claude/flaky-lane.json` (for the flaky lane,
-`~/dev/walt_ui/.claude/flaky-lane.json`), which is how the athena-captain template
-resolves it and **never hardcodes the database id**. The fuller drain policy is
-today carried across **several homes** — canonically in the admiral brief
-**`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt`** (scope filter,
-blocked semantics, status values, concurrency, merge policy), which
-`walt_ui/CLAUDE.md` → "Flaky-test lane automation" points at. The owner's Notion
-id resolves from walt_ui's `.claude/agent-messages/roster.json`; the harness
-bot's from the machine-local `~/.claude/flaky-assignee-id`, which that spawn
-text reads. `~/.claude/CLAUDE.md` → *Ticket-driven lanes (per-machine
-automation, flaky = one instance)* is the trigger-pointer that routes a session
-into this brief, not a copy of that policy. So the rows below **cite the flaky tracker policy** rather
+before these citations replaced the copies). Each has one home:
+
+- **The lane's Notion target** — connector, database name and id, data
+  source id, label, the status a flaky ticket is filed at (`queued_status`),
+  and the statuses the lane drains (`drain_statuses`) — lives in
+  `<repo-root>/.claude/flaky-lane.json` (for the flaky lane,
+  `~/dev/walt_ui/.claude/flaky-lane.json`). **Both sides read it.** The
+  athena-captain resolves its filing target from it and **never hardcodes the
+  database id** (`athena:flaky-ticket` → *Filing mechanics*); walt_ui's own
+  Captain and Admiral agents do the same. The spawn text fills its scope
+  placeholders from `.claude/hooks/flaky-lane-target.sh`, which validates the
+  file and prints `UNRESOLVED — <reason>` on any gap, including a
+  `queued_status` outside `drain_statuses`. An UNRESOLVED target is a fault
+  the spawned admiral reports, never an empty queue.
+  `flaky-lane-target.self-test.sh` fails if the spawn text, `walt_ui/CLAUDE.md`
+  or a walt_ui agent definition restates a target value. No walt_ui CI job
+  runs that suite yet, so it catches a restatement only when someone runs it.
+- **The drain policy** — the scope filter's shape, blocked semantics, status
+  values, concurrency, merge policy — lives in the admiral brief
+  **`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt`**, which
+  `walt_ui/CLAUDE.md` → "Flaky-test lane automation" points at. Nothing else
+  reads these values, so a JSON copy would add a second home, not remove one.
+- **The assignees.** The owner's Notion id resolves from walt_ui's
+  `.claude/agent-messages/roster.json`; the harness bot's from the machine-local
+  `~/.claude/flaky-assignee-id`. The spawn text reads both.
+
+`~/.claude/CLAUDE.md` → *Ticket-driven lanes (per-machine automation, flaky =
+one instance)* is the trigger-pointer that routes a session into this brief, not
+a copy of that policy. So the rows below **cite the flaky tracker policy** rather
 than copy it, and give concrete values only for the **lane-shape** placeholders
-this template introduces. Collapsing the dispatch side to also read from
-`flaky-lane.json` — making it the single machine-readable home — and flipping
-every citation to it is **DND-276**; it has **not** happened yet, so the values
-do **not** yet live here and the citations do **not** yet flip.
+this template introduces.
 
 **Later (2026-09-21):** ownership of the tracker-constants collapse moved from
 **DND-247** to **DND-276**. The prior rule made DND-247 the collapse owner
@@ -348,14 +359,22 @@ values do not yet live here. The two sweeps were split because pointing the
 carriers at the brief (H-3) is independent of, and precedes, moving the
 constants into one home (DND-276).
 
+**Later (2026-09-28):** DND-276 landed. This section's tracker-constants
+paragraph said the drain policy was "today carried across **several homes**", and that making
+`flaky-lane.json` the single machine-readable home "has **not** happened yet".
+Superseded by the one-home list above. The spawn text had held its own copy of
+the database id, connector, label and drained statuses; it now fills them from
+`flaky-lane-target.sh`. The ticket also listed the drain policy for the JSON
+file; that stays in the spawn text, its only reader.
+
 | Placeholder | Flaky lane value |
 |---|---|
 | `{{LANE_ID}}` | `flaky` |
 | `{{LANE_LABEL}}` | flaky-test |
 | `{{OWNER_NAME}}` / `{{OWNER_ID}}` | per the flaky tracker policy above (the owner is one of the two assignees its scope filter ORs; see `{{SCOPE_FILTER}}`) |
-| `{{TRACKER_CONNECTOR}}` | per the flaky tracker policy above |
-| `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | per the flaky tracker policy above (the "Tickets" DB + its id) |
-| `{{SCOPE_FILTER}}` | per the flaky tracker policy above, whose assignee clause is an OR of the owner and the harness bot. Run it whole: an owner-only filter silently misses bot-assigned tickets. The admiral reports the count per assignee (*The inner admiral brief* → "State the filter you ran") |
+| `{{TRACKER_CONNECTOR}}` | `connector` in `flaky-lane.json` (the lane's Notion target above) |
+| `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | `database_name` / `database_id` in `flaky-lane.json` |
+| `{{SCOPE_FILTER}}` | per the flaky tracker policy above; its label and status set are `label` and `drain_statuses` in `flaky-lane.json`, and its assignee clause is an OR of the owner and the harness bot. Run it whole: an owner-only filter silently misses bot-assigned tickets. The admiral reports the count per assignee (*The inner admiral brief* → "State the filter you ran") |
 | `{{STATUS_VOCAB}}` | per the flaky tracker policy above |
 | `{{BLOCKED_SEMANTICS}}` | per the flaky tracker policy above (the `Blocked By` relation) |
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
@@ -602,8 +621,8 @@ examples.** The current flaky policy is carried in more than one file — the
 this brief, already rewritten by this change — not a policy carrier awaiting
 rewrite). This list is illustrative,
 not exhaustive; DND-247 owns the complete carrier inventory and each carrier's
-rewrite **to point at this brief** (collapsing the tracker constants into a
-single machine-readable home is the separate **DND-276**), so a carrier not named
+rewrite **to point at this brief** (the lane's Notion target was collapsed into
+`flaky-lane.json` separately, by **DND-276**), so a carrier not named
 here is not thereby out of scope (`~/dev/custom/
 CLAUDE.md` → *Documentation conventions* — enumerating carriers is how the one
 nobody listed gets through).

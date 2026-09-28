@@ -40,7 +40,10 @@ and recorded with that analysis — never "add a retry".
 
 First resolve THIS repo's flaky-lane target from
 `<repo-root>/.claude/flaky-lane.json` — a JSON object with `connector` (the
-Notion MCP connector to use), `database_id`, `label`, and `queued_status`. Do
+Notion MCP connector to use), `database_id`, `label`, and `queued_status`
+(walt_ui's also carries `database_name`, `data_source_id` and
+`drain_statuses`, and ships `.claude/hooks/flaky-lane-target.sh`, which
+validates the file and prints them). Do
 NOT hardcode a database id: the flaky lane is a per-repo automation, and a
 captain in a different repo must never file into another repo's tracker. **If
 that file is absent, this repo has no flaky lane:** do not file anywhere —
@@ -51,9 +54,10 @@ its `database_id` via its `connector`, with:
 - **Title**: `Flaky: <module> — <symptom>` (include the failure string, the
   run reference, and the suspected mechanism in the description).
 - **Labels** (multi_select): add the config's `label` (e.g. `flaky-tests`) —
-  this is what makes the flaky lane's dispatch poll see it.
+  this is what the lane's scope filter matches. In walt_ui the lane's spawn
+  text reads the same file, so the two cannot drift.
 - **Status**: the config's `queued_status` (e.g. `Todo`) — the queued state
-  the lane drains from.
+  the lane drains from (in walt_ui, one of `drain_statuses`).
 - **Assignee** (people): the **human OWNER of this machine's harness**,
   resolved dynamically — never hardcode a person:
   1. Read your agent identity, first hit wins: `$AGENT_MESSAGES_IDENTITY`,

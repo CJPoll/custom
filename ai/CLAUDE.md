@@ -584,15 +584,22 @@ brief, the coordinator-marker semantics, the channel-resolution assertion, the
 read mechanics, and the add/drop handling all live in
 `~/dev/custom/ai/docs/ticket-lane-action-brief.md` (the *ticket-lane action brief*
 template; the flaky lane is its *worked instantiation*), which **cites** the
-tracker constants (scope/status/blocked/merge policy) rather than holding them —
-the brief owns those citations, and the constants live across several homes
-today; collapsing them to a single machine-readable home is **DND-276** and has
-not happened yet. This
+tracker constants (scope/status/blocked/merge policy) rather than holding them.
+The lane's Notion target — connector, database, label, the status a flaky
+ticket is filed at, and the statuses the lane drains — has one home,
+`<repo-root>/.claude/flaky-lane.json`; the brief's *The flaky lane — the worked
+instantiation* names who reads it. This
 section is ONLY the machine-level **trigger** summary that routes a session into
 that brief — beyond naming the triggers and the spin-up/resolution routing it
 points at, it states no lane mechanics (the marker semantics, channel resolution,
 read mechanics, and add/drop handling are the brief's); on any detail the brief
 wins.
+
+**Later (2026-09-28):** this paragraph said the constants "live across several
+homes today; collapsing them to a single machine-readable home is **DND-276**
+and has not happened yet". Superseded: DND-276 landed. The walt_ui spawn text
+now fills its scope from `flaky-lane.json` through
+`.claude/hooks/flaky-lane-target.sh` instead of holding a copy.
 
 **What routes a session into the brief — the inbox count; the `SessionStart`
 poll is retired.** Any signal means lane state may have changed and the brief should
