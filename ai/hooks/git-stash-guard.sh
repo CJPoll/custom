@@ -145,15 +145,23 @@
 #   verb-naming spellings still deny, and a command word holding `/` is
 #   exec. This is the same class NOT CATCHABLE names (a script defined in
 #   one call and run in another; another interpreter building argv).
-#   OWNER DECISION (the record this reduction needs; critic rounds 12-13):
-#     Owner: Cody. Time: 2026-09-28T03:36:36Z. Source: Cody's own
-#     terminal turn in session 062722c9-9552-47d4-9c0b-717f3291dc3e,
-#     message 1170f3ef-b277-46a9-9319-e6cb654f82fd (verifiable with
-#     integration-gate --owner-approval). Verbatim: "Please just ship -
-#     get the things done without bugging me for things. If something is
-#     truly blocked on me doing a thing, but otherwise just ship".
-#     It supersedes the 2026-09-27 ~07:20Z "approved", which was relayed
-#     by the main session and could not be verified.
+#   OWNER DECISION (the record this reduction needs; critic rounds 12-13,
+#   22). This reduction is Owner approval policy item 5. Two records:
+#     1. Named, not tool-verifiable. Cody, 2026-09-27 ~07:20Z, the laptop
+#        coordinator session (terminal), relayed by the main session.
+#        Question: "Accept the DND-799 text-guard residual (a string or
+#        file written in the same command and then executed -- e.g.
+#        python3 -c, a repo hook git fires, a script written then run)
+#        until DND-775 is activated, with DND-905 as the fallback if
+#        activation slips past 2026-10-04?" Answer: "approved".
+#     2. Tool-verifiable, blanket. Cody, 2026-09-28T03:36:36Z, own
+#        terminal turn, session 062722c9-9552-47d4-9c0b-717f3291dc3e,
+#        message 1170f3ef-b277-46a9-9319-e6cb654f82fd. Verbatim: "Please
+#        just ship - get the things done without bugging me for things.
+#        If something is truly blocked on me doing a thing, but otherwise
+#        just ship". It names no item. The admiral reads it as covering
+#        this one; the lander passes it with integration-gate
+#        --owner-approval, where the gate checks it.
 #   DND-775 (the git-level guard on refs/stash, injected into agent
 #   sessions) is the enforcement that closes the whole class below the
 #   text; DND-905 is the text-layer fallback if its activation slips past

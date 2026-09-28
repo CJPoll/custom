@@ -791,17 +791,19 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (final, critic rounds 1-21, admiral batches 7-9 + the harness
-  relay):** `RESULT: 580 passed, 0 failed` / `VERDICT: PASS`. The per-round
+- **After (final, critic rounds 1-22, admiral batches 7-9 + the harness
+  relay):** `RESULT: 588 passed, 0 failed` / `VERDICT: PASS`. The per-round
   tables in this and the next few subsections are HISTORICAL, measured on
   the hook of the round they name; the authoritative final table is
-  "Sabotage rows on the option-A hook" below (580, on the round-21 hook).
+  "Sabotage rows on the option-A hook" below (588, on the round-22 hook).
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
-`RESULT: 541 passed, 39 failed` (the final 580-case suite against the base
-hook; the count here was 495 at round 8 and grew as rounds added cases). Every failure is an allow
-case (QA/QB) or the deny-text check T2, e.g.:
+`RESULT: 552 passed, 36 failed` (the final 588-case suite against the base
+hook; the count here was 495 at round 8 and grew as rounds added cases;
+round 22 turned QA72/QA80/QA81/QA83 back to deny, as on base, so they no
+longer fail against it). Every failure is an allow case (QA/QB) or the
+deny-text check T2, e.g.:
 
 ```
 FAIL  QA8. awk print field (expected allow)
@@ -986,6 +988,10 @@ retired with that code.
   from the laptop coordinator session), quoted verbatim in the header
   RESIDUAL. DND-775 closes the class below the text; DND-905 is the
   fallback if its activation slips past 2026-10-04. No code or test change.
+  **Later (round 22):** the relayed 07:20Z "approved" could not be
+  verified by a tool. The header now records it alongside Cody's
+  verifiable 2026-09-28T03:36:36Z terminal turn; see the header OWNER
+  DECISION for what each one covers.
 - **Round 14, `<<` inside `${...}`.** The critic found the tokenizer took
   `<<` inside an unclosed `${...}` parameter expansion as a heredoc, so the
   next line was read as data and a verb-hiding stash write in it was
