@@ -9,9 +9,11 @@
 # GIT_TRACE2=/dev/null, and ATHENA_AGENT_BIN (the PATH git wrapper's directory).
 # {{MAIN}} in a value is the MAIN checkout's absolute path, never a worktree's.
 #
-# Three states, and they must never read alike:
-#   INACTIVE  none of the guard's keys (its four GIT_CONFIG keys, or
-#             ATHENA_AGENT_BIN) is in the settings env. Exit 0 with its own
+# Three states of the settings env, and they must never read alike (a fourth,
+# PENDING RESTART, is about the session, below):
+#   INACTIVE  none of the guard's keys (its four GIT_CONFIG keys,
+#             ATHENA_AGENT_BIN, or the install stamp ATHENA_AGENT_ENV_INSTALLED_AT)
+#             is in the settings env. Exit 0 with its own
 #             line: the guard lands inert and the owner activates it
 #             (condition e). Not activated is a state, not "fine" and not a
 #             failure.
@@ -37,10 +39,13 @@
 # one, the only problem is the first git on PATH, and the snapshot this
 # process's shell sourced was built BEFORE the install. Both times are read:
 #   - install time: ATHENA_AGENT_ENV_INSTALLED_AT in the settings env, an ISO
-#     UTC second the installer writes in the same file write that completes the
-#     env. It is machine state, never the branch's. settings.json's mtime is not
-#     used: any later edit moves it, which would read a session started after
-#     the install as pending.
+#     UTC second the installer writes in the same file write that adds
+#     ATHENA_AGENT_BIN (the key whose arrival puts the wrapper on a new
+#     session's PATH), and at no other time: a later --install-env that only
+#     adds GIT_CONFIG pairs leaves it alone, so a session started after the
+#     wrapper arrived cannot be re-dated as pending. It is machine state, never
+#     the branch's. settings.json's mtime is not used: any later edit moves it,
+#     which would read a session started after the install as pending.
 #   - session time: "session start" means the SNAPSHOT. The PATH this check
 #     sees is the one the Bash tool's `zsh -c "source <snapshot> ..."` restored,
 #     and the snapshot is built once, at session start, from ~/.zshrc and the
@@ -67,8 +72,12 @@ module AgentStashEnv
   INSTALLED_AT = "ATHENA_AGENT_ENV_INSTALLED_AT"
   STAMP_RE     = /\A(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z\z/.freeze
   # Claude Code's Bash tool runs `zsh -c "source <home>/.claude/shell-snapshots/
-  # snapshot-<shell>-<epoch ms>-<id>.sh ..."`.
-  SNAPSHOT_RE  = %r{(/\S*/shell-snapshots/snapshot-[A-Za-z0-9]+-(\d{12,})-[A-Za-z0-9]+\.sh)}.freeze
+  # snapshot-<shell>-<epoch ms>-<id>.sh ..."`. Matched structurally: a shell's
+  # `-c` script that STARTS by sourcing the snapshot. A path merely mentioned
+  # elsewhere in some ancestor's argv (a grep, a prompt, `ls <path>; ...`) is
+  # not the snapshot that shell sourced, and would date the session wrongly.
+  SNAPSHOT_RE  = %r{\A\s*(?:source|\.)\s+(/\S*/shell-snapshots/snapshot-[A-Za-z0-9]+-(\d{12,})-[A-Za-z0-9]+\.sh)(?:\s|;|\z)}.freeze
+  SHELLS       = %w[zsh bash sh dash].freeze
   # Clock skew tolerated before a time "in the future" is refused.
   SKEW_S       = 300
 
@@ -277,12 +286,12 @@ module AgentStashEnv
     while pid.positive? && !seen[pid]
       seen[pid] = true
       argv = begin
-        File.binread(File.join(proc_root, pid.to_s, "cmdline")).tr("\0", " ")
+        File.binread(File.join(proc_root, pid.to_s, "cmdline")).split("\0")
       rescue SystemCallError => e
         raise Unmeasured, "cannot read #{File.join(proc_root, pid.to_s, 'cmdline')} (#{e.class}) while looking " \
                           "for this session's shell snapshot"
       end
-      if (m = argv.match(SNAPSHOT_RE))
+      if (m = sourced_snapshot(argv))
         ms = m[2].to_i
         t = Time.at(ms / 1000, ms % 1000, :millisecond).utc
         raise Unmeasured, "the shell snapshot #{m[1]} claims a build time #{iso(t)}, in the future" if t > now + SKEW_S
@@ -294,6 +303,16 @@ module AgentStashEnv
     end
     raise Unmeasured, "no ancestor of this process sourced a Claude Code shell snapshot (walked pids " \
                       "#{walked.join(' ')}), so when this session's PATH was fixed is unknown"
+  end
+
+  # The SNAPSHOT_RE match when argv is a shell (by basename, a login `-zsh`
+  # included) run with `-c <script>` whose script starts by sourcing a
+  # snapshot; else nil.
+  def sourced_snapshot(argv)
+    return nil unless SHELLS.include?(File.basename(argv.first.to_s).delete_prefix("-"))
+
+    i = argv.index("-c")
+    i && argv[i + 1] ? argv[i + 1].match(SNAPSHOT_RE) : nil
   end
 
   # The PPid field of /proc/<pid>/stat (the field after the state, which

@@ -662,9 +662,13 @@ and pronoun-guard; nothing detected it. The durable fix:
   snapshot built at its start, so git is not yet the wrapper. It requires
   everything ACTIVE requires except the PATH, and a snapshot built before the
   install. The install time is `ATHENA_AGENT_ENV_INSTALLED_AT`, which
-  `--install-env` writes into the settings env; the snapshot time is in the
-  name of the snapshot an ancestor shell sourced. Both are machine state, and
-  either one unreadable is COULD NOT MEASURE. The rule and its reasons live in
+  `--install-env` writes into the settings env when it adds
+  `ATHENA_AGENT_BIN`; the snapshot time is in the name of the snapshot an
+  ancestor shell sourced. Both are machine state, and either one unreadable is
+  COULD NOT MEASURE. An install made before DND-1036 has no stamp, so its old
+  sessions read COULD NOT MEASURE: restart them. Re-stamping such an install
+  dates it now and reads every session since as pending, so do it only
+  together with restarting every session. The rule and its reasons live in
   `ai/lib/agent_stash_env.rb`.
 
   **Later (2026-09-28, DND-1036):** a session started before

@@ -38,7 +38,7 @@
 # Its GIT_CONFIG pairs are APPENDED after any the settings env already holds,
 # never written over an index in use; a key already present with another value
 # is refused, never overwritten. --remove-env deletes exactly those keys and
-# renumbers the rest. An --install-env that changes the env also writes
+# renumbers the rest. An --install-env that adds ATHENA_AGENT_BIN also writes
 # ATHENA_AGENT_ENV_INSTALLED_AT (UTC, to the second) in the same write, so
 # check-hooks-registered can tell a session started before the install
 # (PENDING RESTART) from drift (DND-1036); --remove-env removes it too.
@@ -247,16 +247,21 @@ if mode in ("install-env", "remove-env"):
             idx += 1
         if idx != n:
             env["GIT_CONFIG_COUNT"] = str(idx)
+        bin_added = False
         for k, v in vars_.items():
             if k not in env:
                 env[k] = v
                 changes.append(f"+ env {k}={v}")
+                bin_added = bin_added or k == "ATHENA_AGENT_BIN"
         # The install time (DND-1036), written in the same file write that
-        # completes the env, and only when this run changed it: a session whose
-        # shell snapshot predates it is a pending restart, not drift. A no-op
-        # run never backfills it: stamping "now" onto an older install would
-        # read sessions started between the two as pending.
-        if changes:
+        # adds ATHENA_AGENT_BIN, and at no other time: a session whose shell
+        # snapshot predates it is a pending restart, not drift. ATHENA_AGENT_BIN
+        # is the key whose arrival puts the wrapper on a new session's PATH. A
+        # run that only adds GIT_CONFIG pairs (a grown landed env, a partial
+        # env) never moves it, and a no-op run never backfills it: stamping
+        # "now" onto an older install would read sessions started between the
+        # two -- whose missing wrapper is a real failure -- as pending.
+        if bin_added:
             import datetime
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             env[STAMP_KEY] = stamp
@@ -786,6 +791,23 @@ PY3
       exit((Time.now - t).between?(-5, 60) ? 0 : 1)' 2>/dev/null \
       && echo "  ok   check-hooks-registered reads the install time install-env wrote" \
       || { echo "  FAIL the checker cannot read the install time install-env wrote"; ok=0; }
+    # A later install-env that only adds GIT_CONFIG pairs (a grown landed env,
+    # or a partial one) keeps the stamp: moving it would date sessions started
+    # after the wrapper arrived as pending (review, DND-1036).
+    SETTINGS="$envs" python3 - <<'PY4'
+import json, os
+p = os.environ["SETTINGS"]; s = json.load(open(p)); e = s["env"]
+for i in range(int(e["GIT_CONFIG_COUNT"])):
+    e.pop(f"GIT_CONFIG_KEY_{i}"); e.pop(f"GIT_CONFIG_VALUE_{i}")
+e.pop("GIT_CONFIG_COUNT")
+e["ATHENA_AGENT_ENV_INSTALLED_AT"] = "2026-01-02T03:04:05Z"
+json.dump(s, open(p, "w"))
+PY4
+    re3="$(apply install-env "$envs" 0)"
+    python3 -c "import json,sys; e=json.load(open('$envs'))['env']; sys.exit(0 if e['ATHENA_AGENT_ENV_INSTALLED_AT']=='2026-01-02T03:04:05Z' and e['GIT_CONFIG_COUNT']=='4' else 1)" \
+      && grep -q "MARKER:changed" <<<"$re3" \
+      && echo "  ok   install-env adding only GIT_CONFIG pairs keeps the install time (ATHENA_AGENT_BIN was already there)" \
+      || { echo "  FAIL install-env moved the install time without adding ATHENA_AGENT_BIN: $(cat "$envs")"; ok=0; }
     # The fixture repo's origin/main is this tree, so the checker's landed env
     # bar is the one install-env just wrote. Its values must match: ACTIVE, or
     # (the fixture carries no hook script, wrapper or shell line) the

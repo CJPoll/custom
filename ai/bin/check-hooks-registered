@@ -718,10 +718,13 @@ rescue AgentStashEnv::Unmeasured => e
   err.puts "#{tag}: COULD NOT MEASURE — this is not a pass."
   err.puts "  - #{path_problem}"
   err.puts "  - whether that is a pending restart could not be decided: #{e.message}."
-  err.puts "  Fix: restart this session (a fresh session's snapshot carries the wrapper). If the install time is " \
-           "missing or wrong, the owner re-applies the env from the MAIN checkout so it records one: " \
-           "`#{File.join(main, 'scripts/setup-hooks')} --remove-env && " \
-           "#{File.join(main, 'scripts/setup-hooks')} --install-env`, then restarts sessions."
+  err.puts "  Fix: restart this Claude Code session: a fresh session's snapshot carries the wrapper, and ACTIVE " \
+           "needs neither time. A process outside any Claude Code session (a tmux or cron shell that inherited " \
+           "ATHENA_AGENT_BIN) has no snapshot: unset ATHENA_AGENT_BIN there, or run the check from a session. " \
+           "Do not re-stamp an older install to make this read pending: `#{File.join(main, 'scripts/setup-hooks')} " \
+           "--remove-env && #{File.join(main, 'scripts/setup-hooks')} --install-env` dates the install NOW, which " \
+           "reads every session started since the real install as pending, so it is safe only together with " \
+           "restarting every session."
   EXIT_UNMEASURED
 end
 
@@ -882,6 +885,16 @@ def agent_stash_env_self_test(check)
     t, path = AgentStashEnv.session_snapshot(pid: 40, proc_root: proc_root, now: now)
     check.call("walk: the nearest snapshot ancestor, time from its file name (ms), odd comm parsed",
                path == outer && t == Time.at(1_790_451_069, 47, :millisecond).utc)
+    # A mention is not a source (review, DND-1036): an intermediate ancestor
+    # whose argv merely names an OLDER snapshot must not date the session.
+    old_mention = "/home/u/.claude/shell-snapshots/snapshot-zsh-1000000000000-old.sh"
+    mkproc.call(35, 30, ["/bin/bash", "-c", "ls #{old_mention}; ai/bin/harness-gate"])
+    mkproc.call(36, 35, ["ruby", "-e", "source #{old_mention}"])
+    mkproc.call(37, 36, ["claude", "-p", "source #{old_mention}"])
+    mkproc.call(38, 37, ["ruby", "check-hooks-registered"])
+    _t, path = AgentStashEnv.session_snapshot(pid: 38, proc_root: proc_root, now: now)
+    check.call("walk: a snapshot path only mentioned (ls, ruby -e, a prompt) is skipped; the sourcing shell wins",
+               path == outer)
     mkproc.call(50, 40, ["/bin/bash", "-c", "source #{inner}; claude -p"])
     mkproc.call(60, 50, ["ruby", "check-hooks-registered"])
     _t, path = AgentStashEnv.session_snapshot(pid: 60, proc_root: proc_root, now: now)

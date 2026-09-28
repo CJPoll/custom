@@ -315,6 +315,9 @@ session_check() {
   local d="$1" ms="$2" mode="$3" path="/usr/bin:/bin"
   [ "${mode}" = "wrapper" ] && path="${d}/main/ai/agent-bin:${path}"
   local snap="${d}/home/.claude/shell-snapshots/snapshot-zsh-${ms}-fx0001.sh"
+  # Keep the trailing `exit $?`: without it bash execs the checker in place of
+  # itself, the fixture parent vanishes from the ancestry, and the walk reads
+  # the LIVE session's snapshot instead of this one.
   OUT="$(env HOME="${d}/home" HOOKS_SETTINGS_FILE="${d}/settings.json" \
       ATHENA_AGENT_BIN="${d}/main/ai/agent-bin" PATH="${path}" \
       bash -c "source ${snap} 2>/dev/null || true; \"\$0\"; exit \$?" \
