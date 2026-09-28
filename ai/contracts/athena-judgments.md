@@ -351,6 +351,12 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
 - **Proposed labels** (not yet confirmed by the owner) never enter a run, so
   they never select a threshold. A label whose id the corpus lacks is
   reported by count and id.
+- **Slack routing labels** (DND-715, `ai/bin/judgment-label`) cover the
+  owner's new-conversation roots only (D7), one row per `event_id`, in the
+  machine-local `slack-routing-labels.jsonl`. The corpus is
+  `walt_ui-slack.jsonl` itself, so the text is never copied. A root that an R4
+  forward record names is `forward_record`; the owner confirms the rest one
+  message at a time at a terminal.
 
 ## Budget
 
