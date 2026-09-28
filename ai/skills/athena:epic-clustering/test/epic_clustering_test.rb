@@ -474,6 +474,13 @@ check("cli: digest from a fixture prints the draft banner, won't-fix candidates 
     out.include?("stale In Progress check skipped")
 end
 
+check("cli: the digest's slack fallback text escapes --session, so it cannot ping a channel") do
+  out, _, code = run("digest", "--from-json", File.join(FIX, "pass.json"), "--now", NOW, "--no-bodies",
+                     "--session", "<!here> s")
+  line = out.lines.find { |l| l.start_with?("slack text:") }.to_s
+  code.zero? && line.start_with?("slack text: &lt;!here&gt; s:") && !line.include?("<!here>")
+end
+
 check("cli: notice writes Block Kit JSON to --blocks-out and prints the fallback text; request is gone") do
   Dir.mktmpdir do |d|
     f = File.join(d, "DND-982-notice.json")
@@ -551,7 +558,10 @@ check("view: ticket data is escaped for Slack mrkdwn, so a title cannot ping a c
   r = ECV.wont_fix_notice(ticket: "DND-9", title: "<!channel> & co", background: "b <x>",
                           why: "w", session: "s")
   text = r[:blocks].map { |x| x.dig("text", "text").to_s }.join
-  text.include?("&lt;!channel&gt; &amp; co") && !text.include?("<!channel>") && text.include?("b &lt;x&gt;")
+  s = ECV.wont_fix_notice(ticket: "DND-9", title: "t", background: "b", why: "w", session: "<!here>")
+  text.include?("&lt;!channel&gt; &amp; co") && !text.include?("<!channel>") && text.include?("b &lt;x&gt;") &&
+    r[:text].include?("&lt;!channel&gt; &amp; co") && !r[:text].include?("<!channel>") &&
+    s[:text].start_with?("&lt;!here&gt;:") && !s[:text].include?("<!here>")
 end
 
 check("view: an overlong digest section is clipped under Slack's limit and says how many lines were cut") do

@@ -184,7 +184,7 @@ module EpicClusteringView
       b["style"] = "primary" if primary
       b
     end
-    { text: "#{session}: Closed #{ticket} #{title} as Won't Fix. Reopen to veto; silence keeps it closed.",
+    { text: "#{esc(session)}: Closed #{ticket} #{esc(title)} as Won't Fix. Reopen to veto; silence keeps it closed.",
       blocks: body.map { |t| section(t) } + [{ "type" => "actions", "elements" => buttons }] }
   end
 end

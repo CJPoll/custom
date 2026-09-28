@@ -339,7 +339,7 @@ def cmd_digest(opts)
     return
   end
   puts "DRAFT: #{PROG} never sends. The architect posts it with mcp__athena__slack_post (athena:slack)."
-  puts "slack text: #{session}: daily ticket digest #{now}; tier-4 queue #{d[:tier4_queue].sum { |g| g[:count] }}, " \
+  puts "slack text: #{ECV.esc(session)}: daily ticket digest #{now}; tier-4 queue #{d[:tier4_queue].sum { |g| g[:count] }}, " \
        "won't-fix candidates #{d[:wont_fix].size}."
   puts "blocks: #{opts['--blocks-out'] ? "#{blocks.size} written to #{opts['--blocks-out']}" : "#{blocks.size} (not written; pass --blocks-out)"}"
   puts
