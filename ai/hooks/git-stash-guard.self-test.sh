@@ -1128,18 +1128,24 @@ if printf '%s' "$OUT" | grep -q 'git worktree add' && printf '%s' "$OUT" | grep 
 else
   record "T1. Fix: names a WIP commit and git worktree add" FAIL
 fi
-# T2 (DND-799): the deny text names only actions a captain can take. Captain
-# and admiral sessions have no Grep tool, so a Fix: naming it cannot be
-# followed. Checked over every deny reason the hook can emit.
+# T2 (DND-799): the deny text names only actions a captain can take, and
+# only escapes that cannot run the command. Captain and admiral sessions
+# have no Grep tool, so a Fix: naming it cannot be followed. A Fix: that
+# says to run the text (`bash <file>`) hands the "only MENTIONS" call to the
+# agent, and a wrong call runs a real stash write the guard never reads
+# (critic round 22). The Fix names the text passed as data instead:
+# `git commit -F <file>` and `grep -f <file>`. Checked over every deny
+# reason the hook can emit.
 _t2=0
 for _c in 'git stash pop' 'gstp' 'git sp' '/usr/bin/g?t stash pop' 'git $SUB' '$GIT stash' 'git update-ref -d refs/stash' 'git -c help.autocorrect=1 x' 'git -c gc.reflogExpire=now gc' 'git -c alias.p=stash p' 'git --git-dir=x zz'; do
   run "$(json "$WT" "$_c")"
-  if ! is_deny || printf '%s' "$OUT" | grep -qi 'grep tool'; then _t2=1; fi
+  if ! is_deny || printf '%s' "$OUT" | grep -qi 'grep tool' || printf '%s' "$OUT" | grep -qE 'bash <file>|sh <file>|script file'; then _t2=1; fi
+  if ! printf '%s' "$OUT" | grep -qF 'git commit -F <file>' || ! printf '%s' "$OUT" | grep -qF 'grep -f <file>'; then _t2=1; fi
 done
-if [ "$_t2" -eq 0 ] && printf '%s' "$OUT" | grep -q 'bash <file>'; then
-  record "T2. no deny reason names the Grep tool; the Fix names a script file run with bash" PASS
+if [ "$_t2" -eq 0 ]; then
+  record "T2. every deny Fix offers only data escapes (git commit -F, grep -f), no Grep tool, no run-a-script" PASS
 else
-  record "T2. no deny reason names the Grep tool; the Fix names a script file run with bash" FAIL
+  record "T2. every deny Fix offers only data escapes (git commit -F, grep -f), no Grep tool, no run-a-script" FAIL
 fi
 
 echo "== B: inputs past one exec argument's limit (MAX_ARG_STRLEN, 128 KiB) =="

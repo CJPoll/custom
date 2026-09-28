@@ -101,10 +101,12 @@
 # ACCEPTED FALSE POSITIVE (the class forge-auth-guard documents): matching is
 # lexical, so a command that only MENTIONS a LITERAL mutating stash (a
 # heredoc, a `git commit -m`, a `grep`) is denied too. That costs one retry:
-# write the command to a script file with the Write tool and run `bash
-# <file>` (a commit message goes to a file passed to `git commit -F`). The
-# deny text names no tool a captain lacks (no Grep tool; DND-799). A miss
-# costs the owner's saved work.
+# put the text in a file with the Write tool and pass the file as DATA
+# (`git commit -F <file>`, `grep -f <file>`). The deny text names no tool a
+# captain lacks (no Grep tool; DND-799) and no escape that runs the text:
+# `bash <file>` would leave the "only MENTIONS" call to the agent, and the
+# guard never reads the file (critic round 22). A miss costs the owner's
+# saved work.
 #
 # QUOTED PAYLOADS ARE DATA (DND-799): a quoted argument or a quoted heredoc
 # body that the shell will not execute is read in DATA mode. Every spelling
@@ -349,7 +351,7 @@ alias_read() {
 }
 
 deny() {
-  jq -cn --arg r "git-stash-guard: $1 Every linked worktree shares ONE stash list with the main checkout (refs/stash lives in the common git dir), so a stash push/pop/apply/drop from a fleet worktree can apply, drop or clobber the OWNER's saved work with no error (DND-670: a captain's \`git stash pop\` popped the owner's PT-822 entry). Agent sessions never write the stash list. Fix: to park WIP, commit it on your worktree branch (\`git add -A && git commit -m \"WIP: <what>\"\`; squash or amend it later); for a clean tree to experiment in, add a scratch tree with \`git worktree add <path> -b <scratch-branch>\` and remove it after. Read-only \`git stash list\`, \`git stash show\` and \`git stash create\` stay allowed. If this command only MENTIONS stash text (a heredoc, a commit message, a grep) and writes no stash, write the command to a script file with the Write tool and run \`bash <file>\` (for a commit message, write it to a file and pass \`git commit -F <file>\`); never rephrase a real stash command to slip past this guard." \
+  jq -cn --arg r "git-stash-guard: $1 Every linked worktree shares ONE stash list with the main checkout (refs/stash lives in the common git dir), so a stash push/pop/apply/drop from a fleet worktree can apply, drop or clobber the OWNER's saved work with no error (DND-670: a captain's \`git stash pop\` popped the owner's PT-822 entry). Agent sessions never write the stash list. Fix: to park WIP, commit it on your worktree branch (\`git add -A && git commit -m \"WIP: <what>\"\`; squash or amend it later); for a clean tree to experiment in, add a scratch tree with \`git worktree add <path> -b <scratch-branch>\` and remove it after. Read-only \`git stash list\`, \`git stash show\` and \`git stash create\` stay allowed. If this command only MENTIONS stash text (a heredoc, a commit message, a grep) and writes no stash, put the text in a file with the Write tool and pass the file as data, never run it: a commit message with \`git commit -F <file>\`, a search pattern with \`grep -f <file>\`; never rephrase a real stash command to slip past this guard." \
     '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}' \
     2>/dev/null
   exit 0

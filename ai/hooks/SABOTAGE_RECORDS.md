@@ -810,7 +810,7 @@ FAIL  QA8. awk print field (expected allow)
 FAIL  QB1. grep -i stash under a self-referential grep alias (expected allow)
 FAIL  QA24. DND-853: a test after a cd to an expanded dir (expected allow)
 FAIL  QA44. git branch -a piped to a grep -E alternation (expected allow)
-FAIL  T2. no deny reason names the Grep tool; the Fix names a script file run with bash
+FAIL  T2. every deny Fix offers only data escapes (git commit -F, grep -f), no Grep tool, no run-a-script
 ```
 
 Every QX (exec context), QD (named write in data) and QL (literal in data)
@@ -1086,3 +1086,14 @@ retired with that code.
   QX111, QX112 and QX114. The fix gives `588 passed, 0 failed`. Mutations
   A-39 (re-measured) to A-45. Final counts: 588 cases, base 81ba7c2
   552/36.
+- **Round 22 (second BLOCK), the deny text's escape could run the text.**
+  The Fix: line told a denied agent to write the command to a script file
+  and run `bash <file>`. The guard sees only `bash x.sh` and never reads
+  the file, so a wrong "only MENTIONS" call would run a real stash write.
+  Fix: the Fix: line offers only escapes that pass the text as data,
+  `git commit -F <file>` and `grep -f <file>`, and T2 now asserts that
+  every deny reason names both and names no Grep tool and no run-a-script
+  escape. Fail-first: the prior hook (52c2fb8) on the new T2 gives
+  `587 passed, 1 failed` (`FAIL  T2. every deny Fix offers only data
+  escapes ...`, status=0 on the old wording). The fix gives `588 passed,
+  0 failed`.
