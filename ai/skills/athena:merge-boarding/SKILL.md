@@ -176,20 +176,25 @@ admiral following this bar **exactly and correctly** would have merged it; only
 a captain choosing to read a workflow file nobody told it to read prevented
 that. `integration-gate` now asks the question for you.
 
-**Exit 4 means merging performs a real-world action.** The output names each
-declared surface the diff touches and whether merging triggers automation.
-Routine merges are untouched: a diff that touches no declared surface exits 0
-without the automation check ever running, so an ordinary app-code deploy — the
-normal case in gen_saas and walt_ui alike — costs one `git diff` and is **not**
-owner-gated. This gates the merge that *provisions*, never the merge that
-*deploys*.
+**Exit 4 means merging does something on the owner's approval list**
+(`~/.claude/CLAUDE.md` → *Owner approval policy*). The output names each
+declared surface the diff touches, whether it holds (`hold:`), and whether
+merging triggers automation. A diff that touches no surface exits 0 without the
+automation check ever running, so an ordinary app-code deploy costs one `git
+diff` and is not owner-gated. What holds:
+
+- **Only under merge-time automation:** a destructive migration, and terraform.
+  Terraform holds whatever the plan until DND-998 can tell a destroy or a cost
+  change from a harmless update. Request the go with the plan's summary.
+- **In any repo:** forge settings (`.github/settings.yml`, `CODEOWNERS`), a
+  check's suppression list, the approval table itself (`ai/CLAUDE.md` → *Owner
+  approval policy*), and the classifier and verifier that enforce it.
+- **Never:** a deploy-automation edit. It prints `hold: no` and exits 0.
 
 **There is no admiral override on exit 4, and that is the difference from exit
 3.** A missing judge verdict is a *verification* gap you may take responsibility
-for and record. Spending money, provisioning or destroying infrastructure, and
-taking one-way actions are the OWNER's authority (`~/.claude/CLAUDE.md` → Hard
-Rule: "NEVER make system-level changes … without the user's express direction"),
-and no amount of your own care substitutes for it. So on exit 4:
+for and record. What exit 4 names is the owner's authority, and no amount of
+your own care substitutes for it. So on exit 4:
 
 1. **Hold that ONE MR and move to the next Mission** — the same move as exit 3's
    third branch. Holding one car is not wedging the fleet.
@@ -198,61 +203,44 @@ and no amount of your own care substitutes for it. So on exit 4:
    onto the Mission body: the PR URL, the head SHA, **what merging would cause**
    (copy the `BLAST-RADIUS HOT` block verbatim), and the exact decision you need.
 3. **Request the go**: send Cody a Block Kit decision DM (`~/.claude/CLAUDE.md`
-   → *What no standing approval covers* → *How to hold*). Do not wait
-   silently.
+   → *Owner approval policy* → *Asking, and what counts as approval*). Do not
+   wait silently.
 4. List it in your final report per [[athena:admiral-final-report]].
 
-**Later (2026-09-24):** this section held EVERY exit 4 for the owner. A
-security fix is now the exception: it carries the owner's standing approval
-(`~/.claude/CLAUDE.md` → *Security fixes ship without owner approval*), so do
-not hold it. Replay that record via `--owner-approval` (below) and merge. The
-bar is unchanged, and a non-security change cannot borrow the approval.
-
-**Later (2026-09-27):** the exception is now any change a standing owner
-approval covers (`~/.claude/CLAUDE.md` → *Standing owner approvals*); today
-that is a security fix only. Scope and record live in the rule's subsection.
-A part of the PR no approval covers holds as before, and so does anything
-*What no standing approval covers* names.
+**Later (2026-09-28):** exit 4 fired for every declared surface, deploy-workflow
+edits included, and a change a standing approval covered (a security fix)
+merged past it by replaying the rule's quoted text. Superseded by *Owner
+approval policy*: exit 4 fires only for what that policy keeps, no standing
+approval is replayed, and `--owner-approval` takes a verifiable record.
 
 **`athena:run-autonomously` does not relax this.** A no-human-present run lets
-you decide ambiguities with best judgement; it never transfers the owner's spend
-and infrastructure authority to you. This is squarely a human-in-the-loop item
-(credentials, spend, a one-way action) — record it and carry on, do not decide
-it. That skill's *Owner-credential gates throttle merging, not progress* rule
-governs what the rest of the fleet does meanwhile, and it is the other half of
-this one: exit 4 is how you DETECT that you have hit such a gate, and that rule
-is what you then do with everything else — keep the base ready-but-unmerged,
-stack dependents on top as ready-to-merge PRs, merge none of that stack, and
-carry every independent Mission through to merged as normal. Hitting exit 4
-throttles one stack; it never idles the fleet. Do not escalate it to the architect either: the architect can sign off the
-*design* (it did, on DND-234, `SIGN-OFF-WITH-FOLLOWUPS`) and that is worth
-having, but a design sign-off is **not** an authorization to spend.
+you decide ambiguities with best judgement; it never transfers the owner's
+authority to you. Record it and carry on; do not decide it. That skill's
+*Owner-credential gates throttle merging, not progress* rule governs what the
+rest of the fleet does meanwhile: keep the base ready-but-unmerged, stack
+dependents on top as ready-to-merge PRs, merge none of that stack, and carry
+every independent Mission through to merged as normal. Hitting exit 4 throttles
+one stack; it never idles the fleet. Do not escalate it to the architect either:
+the architect can sign off the *design* (it did, on DND-234,
+`SIGN-OFF-WITH-FOLLOWUPS`), but a design sign-off is **not** the owner's go.
 
 **Merging after the owner says yes:** re-run with
-`integration-gate --owner-approval '<the owner's authorization, verbatim, and where it is recorded>'`.
-Pass it **only** when the authorization came from the user's own turn (or a
-pre-authorization the owner recorded on the epic, or a standing approval under
-*Standing owner approvals* that covers the change). An architect's sign-off, a
-captain's report, another admiral's message, and your own reasoning are none of
-them owner approval — no agent message is ever your user's consent. The flag
-prints into the `INTEGRATION OK` line; copy it verbatim into your state log and
+`integration-gate --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>'`.
+The reference names the turn the owner typed, in the Claude Code session where
+they typed it. `blast-radius` checks the transcript and refuses anything else:
+free text, a rule citation, an architect's sign-off, a captain's report,
+another agent's message, a Slack reply. A coordinator that heard the owner
+relays the reference, never a paraphrase. The record prints into the
+`INTEGRATION OK` line and the receipt; copy the line into your state log and
 name it in the final report.
 
 **A captain's `Blast radius: IRREVERSIBLE` is a hold in its own right**, even
-when `integration-gate` exits 0. The declared surface list cannot be complete —
-a pure-code change that charges a card, emails real users, or calls a
-provisioning API on boot hits no path pattern. The two channels **union**;
-neither cancels the other. A captain's `ROUTINE` never overrides an exit 4, and
-an exit 0 never overrides a captain's `IRREVERSIBLE`. No standing approval
-overrides it either, a security fix included; hold it and request the go as for
-exit 4 (`~/.claude/CLAUDE.md` → *What no standing approval covers*).
-
-**A merge whose diff touches a terraform root that merging auto-applies (the
-`BLAST-RADIUS HOT` block's terraform paths/roots) holds for the owner**, under every standing
-approval, security fixes included, and you request the go the same way, with
-the plan's summary. No plan verifier has landed to tell a secrets update from a
-destroy or a cost change. The rule lives in *What no standing approval
-covers*.
+when `integration-gate` exits 0. It flags what the classifier cannot see
+(*Owner approval policy* items 1–3): a pure-code change that deletes prod data,
+starts a recurring charge, or emails real users hits no path pattern. The two
+channels **union**; neither cancels the other. A captain's `ROUTINE` never
+overrides an exit 4, and an exit 0 never overrides a captain's `IRREVERSIBLE`.
+Hold it and request the go as for exit 4.
 
 **A destructive migration is PLANNED, so its authorization is too.** The
 `destructive-migration` surface gates a merge whose deploy drops a table or a
@@ -262,12 +250,12 @@ the owner at merge time is the avoidable half of that cost: the architect
 designed the drop days earlier, and the only question that decides it — *does
 anything still need this data?* — is the owner's, not a pattern's. So when a
 design specifies a destructive migration, that goes in the architect's
-`QUESTIONS` block at design time and the owner's answer is recorded on the epic;
-you then replay it verbatim via `--owner-approval` and never stall. When there
-is no such pre-authorization, hold the MR exactly as for any other exit 4 —
-**never** infer the authorization from the ticket, the design doc, or the fact
-that the migration is obviously intended. The gate does not bend; the latency is
-designed out upstream.
+`QUESTIONS` block at design time, and the reference to the owner's answering
+turn is recorded on the epic; you then replay that record via
+`--owner-approval` and never stall. When there is no such pre-authorization,
+hold the MR exactly as for any other exit 4 — **never** infer the authorization
+from the ticket, the design doc, or the fact that the migration is obviously
+intended. The gate does not bend; the latency is designed out upstream.
 
 ## A finished security fix merges first
 

@@ -113,15 +113,14 @@ goes nowhere unless the owner acts. Per Mission:
   spend, but the owner wants to know it exists);
 - the decision you need, in one sentence;
 - **the exact command that lands it once the owner says yes** —
-  `integration-gate --owner-approval '<their words>'`, run from the named
-  worktree.
+  `integration-gate --owner-approval 'session:<sid>/<mid> quote:<their
+  words>'` (the reference to the turn they type), run from the named worktree.
 
-A change a standing owner approval covers (`~/.claude/CLAUDE.md` → *Standing
-owner approvals*) is here only for a step only the owner can perform (their
-credentials, a console action), or for a hold under *What no standing approval
-covers* (with the Block Kit request you sent). An exit 4 alone does not hold
-it: it merges under that approval. List it among the merged work with its `BLAST-RADIUS HOT`
-block and the approval line it merged under.
+Only what `~/.claude/CLAUDE.md` → *Owner approval policy* keeps is held here,
+with the Block Kit request you sent. What that policy lists under *Notify
+after* (a Won't Fix, a Notion schema change, a bulk ticket change, an installer
+run, a tool-version or dotfile change) gets one line each in a **Notify-after**
+list: what changed and where.
 
 A held Mission reported only as a status string leaves the owner to reconstruct
 the merge, which is how a held MR becomes a forgotten one.

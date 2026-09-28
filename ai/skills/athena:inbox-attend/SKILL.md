@@ -487,8 +487,8 @@ Attention) is the hand-off; the owner or a lane takes it from there.
   This is *enforced*, not just doctrine: the attendant runs unattended and
   `read-inbox` marks the session, so `inbox-untrusted-guard` denies these edits.
 - **Code changes / merges / deploys** — the same main-session doctrine every
-  main session follows, plus everything on `athena:run-autonomously`'s
-  owner-gated list. A non-harness file edit or a shell side effect from inside a
+  main session follows, plus everything `~/.claude/CLAUDE.md` → *Owner
+  approval policy* keeps for the owner. A non-harness file edit or a shell side effect from inside a
   wake is doctrine-only, exactly as `inbox-untrusted-guard.sh` records under
   *What stays doctrine*; hold to it.
 

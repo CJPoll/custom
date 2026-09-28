@@ -597,7 +597,8 @@ and pronoun-guard; nothing detected it. The durable fix:
   yet, so every matching event fails with exit 127 (DND-670); `--install` now
   skips such an entry and names it. Do not hand-write the `settings.json` hooks
   block (that is the clobber path). Hooks load at session start, so reload a
-  session to activate.
+  session to activate. Who may run the installer, and on whose word:
+  `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify after*.
 
   **Later (2026-09-26):** this bullet read "change `registry.json` and run
   `scripts/setup-hooks --install`", and *Detect drift* compared the live
@@ -647,6 +648,8 @@ failure, no diff, no `git` undo. The same three artifacts answer it:
   `$XDG_STATE_HOME/athena/inbox-registry-backups/` first. It **merges**: it
   writes only the *entries* the committed list declares (plus the root and
   `projects/` themselves), so another project's entry is never moved or removed.
+  Who may run it: `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify
+  after*.
   `--check` delegates to the check, `--dry-run` previews, `--remove` reverts,
   `--self-test` runs `ai/inbox/test/self-test.sh`.
 - **Repo identity is resolved at the point of capture** — `git rev-parse
@@ -731,14 +734,14 @@ it per `athena:merge-boarding`:
 3. merge, then confirm it landed (`ai/bin/confirm-merged`);
 4. fast-forward the main checkout (`git merge --ff-only`).
 
-The author still never pushes to main and never merges its own PR. Owner-gated
-merges stay gated: an `integration-gate` exit 4 is held for the owner unless a
-standing approval covers it (`~/.claude/CLAUDE.md` → *Standing owner
-approvals*).
+The author still never pushes to main and never merges its own PR. An
+`integration-gate` exit 4 is held for the owner; it fires only for what
+`~/.claude/CLAUDE.md` → *Owner approval policy* keeps.
 
-**Later (2026-09-27):** this read "unless it is a security fix". Superseded:
-the exception is any change a standing owner approval covers, which the hub
-section lists.
+**Later (2026-09-28):** this read "held for the owner unless a standing
+approval covers it (*Standing owner approvals*)". Superseded by *Owner
+approval policy*: nothing needs approval by default, and exit 4 fires only
+for the items that policy keeps.
 
 **Later (2026-09-24):** this rule said a hand-spawned agent "opens a PR for the
 owner to merge rather than pushing to main", so its green PRs sat until the

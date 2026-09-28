@@ -3114,6 +3114,12 @@ class; ratified 2026-09-25:
 | `merge.pr_only_workflow` | `{repo, base_ref, head_sha}` | `integration-gate --owner-approval-grant`, the requesting machine | `integration-gate` passes its exit 4 for that one head SHA, and only when the diff is eligible (*Eligibility for `merge.pr_only_workflow`*) |
 | `priority.transition` | `{item_id, transition}` | the gen_saas server, at click time | one `promote`, `restore` or `dismiss` of one priority item (*Priority index*) |
 
+**Later (2026-09-28):** `merge.pr_only_workflow` was built to pass the exit 4
+a workflow edit raised. Under `~/.claude/CLAUDE.md` → *Owner approval policy*
+the `deploy-automation` surface is report-only, so such an edit no longer exits
+4 and this class has nothing left to pass. Its tickets (T2–T5, DND-597) need
+re-scoping or closing; the class stays ratified until the owner retires it.
+
 **The target is typed, and validated per class before anything is written.**
 
 - `repo` is `<owner>/<name>`, lowercased, matching `\A[a-z0-9._-]+/[a-z0-9._-]+\z`
@@ -3552,7 +3558,10 @@ A grant has **exactly two consumers**. No other code redeems one.
 1. **`integration-gate --owner-approval-grant <id>`**, through
    `ai/bin/owner-grant`.
    - The flag is refused together with `--owner-approval` (exit 2). The
-     free-text `--owner-approval` stays, for the owner's own in-session words.
+     `--owner-approval` record stays, for the owner's own in-session words: a
+     transcript reference `blast-radius` verifies (`integration-gate --help`).
+     **Later (2026-09-28):** this read "The free-text `--owner-approval`
+     stays". Superseded: free text is refused (*Owner approval policy*).
    - **The base is fetched fresh.** Under the flag the fetch of the target's
      remote is mandatory. `--no-fetch` with the flag is exit 2. A failed fetch
      is exit 4, `GRANT UNVERIFIABLE (base not fetched)`, and nothing is sent.
