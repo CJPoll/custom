@@ -946,7 +946,8 @@ layout_copy() {
   ln -s "$(cd "${ROOT}/../../bin" && pwd)/blast-radius" "$1/ai/bin/blast-radius"
 }
 
-# s5: test-slot is not executable beside the script -> exit 2, gate never ran.
+# s5: test-slot is not executable in the script's main checkout (the layout)
+# -> exit 2, gate never ran.
 L="${TMP}/s5-layout"; layout_copy "$L"
 printf '#!/bin/sh\nexit 0\n' > "$L/ai/bin/test-slot"; chmod -x "$L/ai/bin/test-slot"
 R="${TMP}/s5"; slot_repo "$R" "touch '${R}/GATE_RAN'"

@@ -357,8 +357,8 @@ test-slot left no outcome). Nothing was checked, so it is neither OK nor RED.
 Re-run `integration-gate`; never merge on it. A `--with-critic` judge is still
 joined first, so its verdict is recorded and the re-run does not pay for it
 again. `test-slot --status` names what holds the pool. A test-slot missing
-beside the script is exit 2: update the custom checkout; the gate never runs
-unslotted. `--slot-wait-timeout <secs>` sets the wait. It can only turn a wait
+from the main checkout (`~/dev/custom/ai/bin/test-slot`) is exit 2: update that
+checkout; the gate never runs unslotted. `--slot-wait-timeout <secs>` sets the wait. It can only turn a wait
 into exit 6, never into a pass. Running `integration-gate` itself under
 `test-slot` (the captain brief's form) is safe: the inner wrap sees the slot it
 already holds and does not queue again.
