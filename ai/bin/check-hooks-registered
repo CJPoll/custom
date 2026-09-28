@@ -613,7 +613,7 @@ end
 # landed env) comes from the diff under check (critic round 4).
 def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO_DIR,
                         landed_env: ->(r) { landed_env_section(r) },
-                        zshrc: File.join(Dir.home, ".zshrc"), proc_env: ENV,
+                        proc_env: ENV,
                         session_snapshot: ->(now) { AgentStashEnv.session_snapshot(now: now) },
                         now: -> { Time.now }, out: $stdout, err: $stderr)
   tag = "check-hooks-registered: agent-stash env"
@@ -667,12 +667,12 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
     return EXIT_FAIL
   end
 
-  problems = AgentStashEnv.runtime_problems(env, exp, main: main, zshrc: zshrc)
+  problems = AgentStashEnv.runtime_problems(env, exp, main: main)
   notes, session, path_problem = AgentStashEnv.session_state(exp, proc_env: proc_env)
   problems += session
   if problems.empty? && path_problem.nil?
     out.puts "#{tag}: ACTIVE — settings values match #{bar}; hook script, `git hook list` (agentstash), " \
-             "wrapper and shell line verified. OK."
+             "wrapper and CLAUDE_ENV_FILE PATH line verified. OK."
     notes.each { |n| out.puts "  note: #{n}" }
     return EXIT_OK
   end
@@ -711,14 +711,15 @@ def report_session_path(path_problem, env, tag:, main:, snapshot:, now:, out:, e
   err.puts "#{tag}: FAIL — the settings values match (active), but:"
   err.puts "  - #{path_problem}"
   err.puts "  - this session's shell snapshot #{snap_path} was built #{AgentStashEnv.iso(snap_time)}, at or after " \
-           "the env install at #{AgentStashEnv.iso(installed)}: this is not a pending restart, the shell line did " \
-           "not take effect."
+           "the env install at #{AgentStashEnv.iso(installed)}: this is not a pending restart, the " \
+           "#{AgentStashEnv::ENV_FILE} PATH line did not take effect."
   EXIT_FAIL
 rescue AgentStashEnv::Unmeasured => e
   err.puts "#{tag}: COULD NOT MEASURE — this is not a pass."
   err.puts "  - #{path_problem}"
   err.puts "  - whether that is a pending restart could not be decided: #{e.message}."
-  err.puts "  Fix: restart this Claude Code session: a fresh session's snapshot carries the wrapper, and ACTIVE " \
+  err.puts "  Fix: restart this Claude Code session: a fresh session runs the CLAUDE_ENV_FILE script that puts the " \
+           "wrapper first, and ACTIVE " \
            "needs neither time. A process outside any Claude Code session (a tmux or cron shell that inherited " \
            "ATHENA_AGENT_BIN) has no snapshot: unset ATHENA_AGENT_BIN there, or run the check from a session. " \
            "Do not re-stamp an older install to make this read pending: `#{File.join(main, 'scripts/setup-hooks')} " \
@@ -739,21 +740,30 @@ def combined_exit(hook, env)
 end
 
 # The agent-stash env cases (DND-775), in-process against a fixture main
-# checkout, settings file and shell profile. Returns true when all pass.
+# checkout, settings file and CLAUDE_ENV_FILE script. Returns true when all pass.
 def agent_stash_env_self_test(check)
   require "fileutils"
   registry = JSON.parse(File.read(REGISTRY))
-  tracked = File.join(REPO_DIR, "dotfiles", ".zshrc")
-  last = File.exist?(tracked) ? File.readlines(tracked).map(&:strip).reject(&:empty?).last : nil
-  check.call("env: the tracked dotfiles/.zshrc ENDS with the agent PATH line (earlier lines reset PATH)",
-             last == AgentStashEnv::ZSHRC_LINE)
+  # DND-1080: the wrapper reaches the Bash tool's PATH through the
+  # CLAUDE_ENV_FILE script, never ~/.zshrc (the shell snapshot ends with
+  # Claude Code's own PATH, so a profile PATH change is discarded).
+  env_rel = "ai/agent-env/session-env.sh"
+  tracked = File.join(REPO_DIR, env_rel)
+  check.call("env: the tracked #{env_rel} carries the agent PATH line",
+             File.exist?(tracked) && File.readlines(tracked).map(&:strip).include?(AgentStashEnv::ENV_LINE))
+  check.call("env: the registry env points CLAUDE_ENV_FILE at {{MAIN}}/#{env_rel}",
+             registry.dig("env", "vars", AgentStashEnv::ENV_FILE) == "{{MAIN}}/#{env_rel}")
+  profile = File.join(REPO_DIR, "dotfiles", ".zshrc")
+  check.call("env: dotfiles/.zshrc no longer carries the dead agent PATH line (it never reached the Bash tool)",
+             File.exist?(profile) && !File.read(profile).include?("ATHENA_AGENT_BIN"))
   Dir.mktmpdir("agent-stash-env-selftest") do |dir|
     main = File.join(dir, "main")
-    FileUtils.mkdir_p([File.join(main, "ai", "git-hooks"), File.join(main, "ai", "agent-bin")])
+    FileUtils.mkdir_p([File.join(main, "ai", "git-hooks"), File.join(main, "ai", "agent-bin"),
+                       File.join(main, "ai", "agent-env")])
     FileUtils.cp(File.join(REPO_DIR, AgentStashEnv::HOOK_REL), File.join(main, AgentStashEnv::HOOK_REL))
     FileUtils.cp(File.join(REPO_DIR, "ai", "agent-bin", "git"), File.join(main, "ai", "agent-bin", "git"))
-    zshrc = File.join(dir, "zshrc")
-    File.write(zshrc, "export FOO=1\n#{AgentStashEnv::ZSHRC_LINE}\n")
+    env_file = File.join(main, env_rel)
+    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
     reg = File.join(dir, "registry.json")
     File.write(reg, JSON.generate(registry))
     exp = AgentStashEnv.expected(registry, main)
@@ -771,7 +781,7 @@ def agent_stash_env_self_test(check)
       File.write(settings, JSON.generate(env.nil? ? {} : { "env" => env }))
       o = StringIO.new
       e = StringIO.new
-      code = run_agent_stash_env(path: settings, main: main, zshrc: zshrc, landed_env: landed_env,
+      code = run_agent_stash_env(path: settings, main: main, landed_env: landed_env,
                                  proc_env: proc_env, session_snapshot: snapshot, now: -> { now }, out: o, err: e)
       [code, o.string + e.string]
     end
@@ -816,10 +826,25 @@ def agent_stash_env_self_test(check)
     code, text = run.call(full)
     File.delete(File.join(main, "ai", "agent-bin", "ls"))
     check.call("env: a second file in the wrapper dir -> FAIL", code == 1 && text.include?("besides git"))
-    File.write(zshrc, "export FOO=1\n")
+    File.write(env_file, "# fixture\n")
     code, text = run.call(full)
-    File.write(zshrc, "export FOO=1\n#{AgentStashEnv::ZSHRC_LINE}\n")
-    check.call("env: shell profile without the PATH line -> FAIL", code == 1 && text.include?("agent PATH line"))
+    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
+    check.call("env: CLAUDE_ENV_FILE script without the PATH line -> FAIL", code == 1 && text.include?("agent PATH line"))
+    File.delete(env_file)
+    code, text = run.call(full)
+    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
+    check.call("env: CLAUDE_ENV_FILE script missing -> FAIL, never ACTIVE",
+               code == 1 && text.include?("cannot be read") && !text.include?("ACTIVE —"))
+    code, text = run.call({ AgentStashEnv::ENV_FILE => "/owner/own-env.sh", "OTHER" => "x" })
+    check.call("env: CLAUDE_ENV_FILE alone is not the guard -> INACTIVE", code.zero? && text.include?("INACTIVE"))
+    code, text = run.call(full.reject { |k, _| k == AgentStashEnv::ENV_FILE })
+    check.call("env: an install without CLAUDE_ENV_FILE (the pre-DND-1080 shape) -> DRIFT naming it",
+               code == 1 && text.include?("DRIFT") && text.include?("CLAUDE_ENV_FILE is missing"))
+    no_file = { "env" => registry["env"].merge("vars" => registry["env"]["vars"].reject { |k, _| k == AgentStashEnv::ENV_FILE }) }
+    code, text = run.call(full.reject { |k, _| k == AgentStashEnv::ENV_FILE },
+                          landed_env: ->(_root) { ["fixture landed", no_file["env"]] })
+    check.call("env: a landed env with no CLAUDE_ENV_FILE -> FAIL (nothing delivers the wrapper), never ACTIVE",
+               code == 1 && text.include?("sets no CLAUDE_ENV_FILE"))
 
     bin = File.join(main, "ai", "agent-bin")
     good = { "ATHENA_AGENT_BIN" => bin, "PATH" => "#{bin}:/usr/bin:/bin" }
@@ -840,9 +865,9 @@ def agent_stash_env_self_test(check)
     code, text = run.call(installed, proc_env: stale.merge("ATHENA_AGENT_BIN" => "/elsewhere"))
     check.call("pending: an old session with the wrong ATHENA_AGENT_BIN -> FAIL, never pending",
                code == 1 && !text.include?("PENDING"))
-    File.write(zshrc, "export FOO=1\n")
+    File.write(env_file, "# fixture\n")
     code, text = run.call(installed, proc_env: stale)
-    File.write(zshrc, "export FOO=1\n#{AgentStashEnv::ZSHRC_LINE}\n")
+    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
     check.call("pending: a runtime problem beside the stale PATH -> FAIL naming both, never pending",
                code == 1 && text.include?("agent PATH line") && text.include?("first git on PATH") &&
                !text.include?("PENDING"))
@@ -958,7 +983,7 @@ def agent_stash_env_self_test(check)
     check.call("env: ATHENA_AGENT_BIN alone is a guard trace, never INACTIVE", code == EXIT_FAIL && !text.include?("INACTIVE"))
     File.write(settings, JSON.generate({ "env" => "not-an-object" }))
     o = StringIO.new
-    code = run_agent_stash_env(path: settings, main: main, zshrc: zshrc, landed_env: landed, proc_env: {}, out: o, err: o)
+    code = run_agent_stash_env(path: settings, main: main, landed_env: landed, proc_env: {}, out: o, err: o)
     check.call("env: an env that is not an object is never INACTIVE", code != EXIT_OK && !o.string.include?("INACTIVE"))
     src = File.read(__FILE__)
     body = src[/^def run_agent_stash_env.*?^end$/m].to_s

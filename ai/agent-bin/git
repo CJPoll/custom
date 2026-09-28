@@ -4,8 +4,10 @@
 #
 # WHERE IT RUNS. ai/agent-bin/ goes first on PATH only in agent sessions:
 # settings `env` sets ATHENA_AGENT_BIN (merged by scripts/setup-hooks --install-env, the owner's activation step),
-# and the last line of dotfiles/.zshrc prepends it when the wrapper is
-# executable. The owner's terminal never sets ATHENA_AGENT_BIN. This directory
+# and settings `env` CLAUDE_ENV_FILE names ai/agent-env/session-env.sh, which
+# Claude Code runs after the Bash tool's shell snapshot and which prepends it
+# when the wrapper is executable (DND-1080: a ~/.zshrc PATH change never reaches
+# the tool shell). The owner's terminal never sets ATHENA_AGENT_BIN. This directory
 # holds ONLY this file: anything else here would shadow a real command.
 #
 # WHY A WRAPPER, AND WHY THIS IS NOT THE ENFORCEMENT. The enforcement is the
@@ -57,8 +59,8 @@
 # gc.pruneExpire (default two weeks), recoverable by the owner.
 #
 # DISABLE (owner only): ~/dev/custom/scripts/setup-hooks --remove-env, then
-# restart sessions. That removes ATHENA_AGENT_BIN, so the .zshrc line no longer
-# prepends this directory.
+# restart sessions. That removes ATHENA_AGENT_BIN and CLAUDE_ENV_FILE, so
+# nothing prepends this directory.
 
 # COST. The common path (a builtin subcommand, no alias) forks nothing before it
 # execs git: identity is `test -ef`, quoting and case-folding are parameter

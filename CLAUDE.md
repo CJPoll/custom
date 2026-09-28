@@ -657,9 +657,12 @@ and pronoun-guard; nothing detected it. The durable fix:
   the landing.
 - **The agent-stash env (DND-775):** `registry.json` also has an `env` section:
   the GIT_CONFIG_* pairs that register the git reference-transaction hook
-  `ai/git-hooks/agent-stash-guard.sh`, `GIT_TRACE2=/dev/null`, and
-  `ATHENA_AGENT_BIN` (the agent PATH git wrapper `ai/agent-bin/git`, prepended
-  by the last line of `dotfiles/.zshrc`). Plain `--install` never touches it:
+  `ai/git-hooks/agent-stash-guard.sh`, `GIT_TRACE2=/dev/null`,
+  `ATHENA_AGENT_BIN` (the directory of the agent PATH git wrapper
+  `ai/agent-bin/git`), and `CLAUDE_ENV_FILE`, which names
+  `ai/agent-env/session-env.sh`. Claude Code runs that script in the Bash
+  tool's shell after the shell snapshot and before each command; it prepends
+  `ATHENA_AGENT_BIN` to PATH. Plain `--install` never touches it:
   that is the routine drift fix agents run. `scripts/setup-hooks --install-env`
   merges it and is the OWNER's activation step; `--remove-env` removes exactly
   it (the one-command disable). Restart sessions after either. Like a hook,
@@ -673,12 +676,12 @@ and pronoun-guard; nothing detected it. The durable fix:
   `hook.reference-transaction.*` GIT_CONFIG key, no `ATHENA_AGENT_BIN` and no
   `ATHENA_AGENT_ENV_INSTALLED_AT`), never read from a branch's registry.
   PENDING RESTART is a session started before the install: Claude Code
-  hot-reloads the settings env, but the session's Bash tool keeps the shell
-  snapshot built at its start, so git is not yet the wrapper. It requires
-  everything ACTIVE requires except the PATH, and a snapshot built before the
-  install. The install time is `ATHENA_AGENT_ENV_INSTALLED_AT`, which
-  `--install-env` writes into the settings env when it adds
-  `ATHENA_AGENT_BIN`; the snapshot time is in the name of the snapshot an
+  hot-reloads the settings env, but the session's Bash tool read
+  `CLAUDE_ENV_FILE` once, at its start, so git is not yet the wrapper. It
+  requires everything ACTIVE requires except the PATH, and a snapshot built
+  before the install. The install time is `ATHENA_AGENT_ENV_INSTALLED_AT`,
+  which `--install-env` writes into the settings env when it adds
+  `ATHENA_AGENT_BIN` or `CLAUDE_ENV_FILE`; the snapshot time is in the name of the snapshot an
   ancestor shell sourced. Both are machine state, and either one unreadable is
   COULD NOT MEASURE. An install made before DND-1036 has no stamp, so its old
   sessions read COULD NOT MEASURE: restart them. Re-stamping such an install
@@ -692,6 +695,19 @@ and pronoun-guard; nothing detected it. The durable fix:
   installing the env redded the check in every running session, so every
   harness-gate on the machine failed until a fleet-wide restart. A session
   whose snapshot was built after the install still FAILs.
+
+  **Later (2026-09-28, DND-1080):** this bullet said the last line of
+  `dotfiles/.zshrc` prepends `ATHENA_AGENT_BIN` to PATH. Superseded by
+  `CLAUDE_ENV_FILE` and `ai/agent-env/session-env.sh`; the `.zshrc` line is
+  removed. That line never reached the Bash tool: the shell snapshot ends with
+  `export PATH=<Claude Code's own process PATH>`, so a PATH change made while
+  `~/.zshrc` is sourced is discarded. Measured 09:53Z-09:55Z that day: a fresh
+  headless session had `ATHENA_AGENT_BIN` set but `command -v git` =
+  `/usr/sbin/git`, so activation redded every fresh session's gate. With the
+  settings env carrying `CLAUDE_ENV_FILE`, a fresh session's first git is the
+  wrapper. An install made before this change lacks `CLAUDE_ENV_FILE` and
+  reads DRIFT; re-run `--install-env` (it adds the key and re-stamps the
+  install time), then restart sessions.
 
 ## Inbox tenancy registry (`$ATHENA_INBOX_ROOT/projects/` is not in git)
 
