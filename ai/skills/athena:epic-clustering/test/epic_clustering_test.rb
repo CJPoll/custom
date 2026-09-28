@@ -118,6 +118,10 @@ check("proof mismatch: a ticket pinned by an edge that leaves its epic fails lik
   !r.ok? && r.mismatches.first[:missing] == ["DND-5"] && r.mismatches.first[:still_there] == 1
 end
 
+check("lane: the prefix this pass routes to is the one next-mission's harness lane reads") do
+  EC::LANE_EPIC_PREFIX == NextMissionNotion::LANE_EPIC_PREFIX
+end
+
 check("lane: every movable Area=Harness, Path=Off ticket outside a 'Harness lane: ' epic is lane-bound, singletons too") do
   pairs = [[epic("E1", "Fleet"), [t("DND-1", kind: "Feature"), t("DND-2"), t("DND-3", area: "Product"),
                                   t("DND-4", path: "Blocking")]],

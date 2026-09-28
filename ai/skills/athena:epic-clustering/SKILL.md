@@ -92,9 +92,8 @@ admiral working them.
      `Path` = `Off` ticket goes to an epic named exactly `Harness lane:
      <subsystem>`, singletons included: join the lane epic for its subsystem,
      or start one. That name prefix is what the harness-reliability lane
-     will read: DND-987 (plan row W10), in flight when this skill landed.
-     Until it lands, nothing drains a lane epic; route anyway, so the lane
-     starts with its queue. `read` lists these as "harness-lane bound". The
+     reads: `ai/docs/ticket-lane-action-brief.md` → *Scope: lane epics
+     only*. `read` lists these as "harness-lane bound". The
      admiral recorded why on the epic: a harness leftover that stays on a
      feature epic is worked by nobody.
    - Other leftovers stay put.

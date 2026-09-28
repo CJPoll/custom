@@ -97,8 +97,10 @@ module EpicClustering
   end
 
   # The name prefix of a harness-lane epic. The reader is next-mission's
-  # harness lane, DND-987 (W10), in flight when this landed: until it lands,
-  # nothing drains a lane epic. Every movable Area=Harness, Path=Off ticket
+  # harness lane (ai/docs/ticket-lane-action-brief.md -> Scope: lane epics
+  # only), whose adapter holds the same value as
+  # NextMissionNotion::LANE_EPIC_PREFIX; the domain cannot require an adapter,
+  # so the suite asserts the two are equal. Every movable Area=Harness, Path=Off ticket
   # goes to such an epic, singletons included (the admiral's decision on the
   # epic: a harness leftover on a feature epic is worked by nobody).
   LANE_EPIC_PREFIX = "Harness lane: "

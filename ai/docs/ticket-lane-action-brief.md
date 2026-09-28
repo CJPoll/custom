@@ -480,9 +480,9 @@ never silent.
 **Getting lane tickets into lane epics.** A lane ticket on a feature epic is in
 neither queue until it moves. The feature admiral's next-mission names it on
 stderr (`left to the harness lane: …`).
-- **Once DND-982 (`athena:epic-clustering`) lands**, its pass moves every
+- **The clustering pass** (`athena:epic-clustering` → *The pass*) moves every
   movable lane ticket, singletons included, into a `Harness lane: ` epic.
-- **Until then, and between passes**, the feature admiral asks the
+- **Between passes**, the feature admiral asks the
   athena-architect to make that move. The architect owns epic writes, and a
   move inside the never-movable constraint needs no owner approval
   (ai/CLAUDE.md → *Owner approval policy*). The admiral then sends a drain
