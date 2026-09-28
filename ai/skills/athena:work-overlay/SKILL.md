@@ -40,9 +40,9 @@ Say which piece is missing, quote its line, and give its Fix:
 | plugin missing or disabled | The owner runs `~/dev/custom/scripts/setup-private-overlay --install`. |
 | everything present, but the `work:` skill you need is not listed | The skill has not moved into the overlay yet; say so. |
 
-Who may run `--init` and `--install` is the contract's *Installer* → *Who
-runs it*. Without the owner's explicit direction, report the command for the
-owner instead of running it.
+Who may run `--init` and `--install`: `~/.claude/CLAUDE.md` → *Owner
+approval policy* → *Notify after*. When that does not authorize you, report
+the command for the owner instead of running it.
 
 If the task cannot proceed without the work value or procedure, stop and say
 so. That report is the result.

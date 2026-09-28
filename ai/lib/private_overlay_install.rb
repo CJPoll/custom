@@ -87,7 +87,14 @@ module PrivateOverlayInstall
       return Verdict.new(component: "marketplace", state: :conflict,
                          detail: "#{MARKETPLACE} is registered from source #{entry['source'].inspect}, not the overlay directory")
     end
-    if root && !same_path?(path, root)
+    # With no validated root there is nothing to compare the path with, so the
+    # marketplace cannot be vouched for as ours. That is UNVERIFIED, never OK:
+    # an OK here would let --remove delete a marketplace it may not have added.
+    if root.nil?
+      return Verdict.new(component: "marketplace", state: :unverified,
+                         detail: "#{MARKETPLACE} is registered from #{path}, but with no valid overlay root it cannot be confirmed as this overlay's")
+    end
+    unless same_path?(path, root)
       return Verdict.new(component: "marketplace", state: :conflict,
                          detail: "#{MARKETPLACE} is registered from #{path}, not the overlay root #{root}")
     end
@@ -99,8 +106,15 @@ module PrivateOverlayInstall
   def plugin_verdict(plugins, reason)
     return Verdict.new(component: "plugin", state: :unmeasured, detail: reason) if plugins.nil?
 
-    entry = plugins.find { |p| p["id"] == PLUGIN_ID }
-    return Verdict.new(component: "plugin", state: :missing, detail: "#{PLUGIN_ID} is not installed") if entry.nil?
+    # This installer manages the USER-scope install only; a project- or
+    # local-scope copy is someone else's and does not count as installed.
+    matches = plugins.select { |p| p["id"] == PLUGIN_ID }
+    entry = matches.find { |p| p["scope"] == "user" }
+    if entry.nil?
+      other = matches.map { |p| p["scope"].to_s }.uniq
+      detail = other.empty? ? "#{PLUGIN_ID} is not installed" : "#{PLUGIN_ID} is not installed at user scope (only at: #{other.join(', ')})"
+      return Verdict.new(component: "plugin", state: :missing, detail: detail)
+    end
     return Verdict.new(component: "plugin", state: :disabled, detail: "#{PLUGIN_ID} is installed but disabled") unless entry["enabled"] == true
 
     Verdict.new(component: "plugin", state: :ok, detail: "#{PLUGIN_ID} enabled (scope #{entry['scope'] || 'unknown'})")
@@ -172,7 +186,7 @@ module PrivateOverlayInstall
 
   CHECK_LABEL = {
     ok: "OK", absent: "ABSENT", malformed: "MALFORMED", missing: "MISSING",
-    disabled: "DISABLED", conflict: "CONFLICT", stale: "STALE", inert: "INERT",
+    disabled: "DISABLED", conflict: "CONFLICT", stale: "STALE", inert: "INERT", unverified: "UNVERIFIED",
     unmeasured: "COULD NOT MEASURE"
   }.freeze
 
@@ -201,6 +215,8 @@ module PrivateOverlayInstall
       "Fix: run `#{installer} --install`."
     in ["marketplace", :conflict]
       "Fix: another marketplace named #{MARKETPLACE} is registered. Remove it with `claude plugin marketplace remove #{MARKETPLACE}`, then run `#{installer} --install`."
+    in ["marketplace", :unverified]
+      "Fix: restore the overlay first (see the overlay line); or, if #{MARKETPLACE} should go regardless, run `claude plugin uninstall #{PLUGIN_ID}` and `claude plugin marketplace remove #{MARKETPLACE}` yourself."
     in ["plugin", :conflict]
       "Fix: this installer did not install it from this overlay; if it should go, run `claude plugin uninstall #{PLUGIN_ID}` yourself."
     in ["hook", :missing] | ["hook", :stale]
@@ -224,7 +240,7 @@ module PrivateOverlayInstall
     plan = []
     case marketplace.state
     when :missing then plan << [:marketplace_add, root]
-    when :conflict, :unmeasured then plan << [:refuse, marketplace]
+    when :conflict, :unmeasured, :unverified then plan << [:refuse, marketplace]
     end
 
     # The plugin is installed only from OUR marketplace. When custom-work is
@@ -240,7 +256,7 @@ module PrivateOverlayInstall
 
     case hook.state
     when :missing, :stale
-      plan << (hook_ready[:ready] ? [:hook_write] : [:refuse, Verdict.new(component: "hook", state: :inert, detail: "NOT ACTIVE: the hook is not installed because the scanner cannot measure: #{hook_ready[:detail]}")])
+      plan << (hook_ready[:ready] ? [:hook_write, hook.state == :stale ? :replace : :create] :[:refuse, Verdict.new(component: "hook", state: :inert, detail: "NOT ACTIVE: the hook is not installed because the scanner cannot measure: #{hook_ready[:detail]}")])
     when :conflict, :unmeasured, :inert then plan << [:refuse, hook]
     end
     plan
@@ -260,7 +276,7 @@ module PrivateOverlayInstall
     end
     plan << [:refuse, plugin] if plugin.unmeasured?
     plan << [:marketplace_remove, MARKETPLACE] if marketplace.state == :ok
-    plan << [:refuse, marketplace] if %i[conflict unmeasured].include?(marketplace.state)
+    plan << [:refuse, marketplace] if %i[conflict unmeasured unverified].include?(marketplace.state)
     plan
   end
 

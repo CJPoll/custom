@@ -18,6 +18,8 @@ require_relative "private_overlay_resolver"
 
 module PrivateOverlayInstall
   HostError = Class.new(StandardError)
+  # --init found its target already created by someone else; nothing was written.
+  InitRaced = Class.new(HostError)
 
   module Host
     module_function
@@ -60,12 +62,24 @@ module PrivateOverlayInstall
       :unreadable
     end
 
-    def write_hook(path, body)
+    # replace: false (a missing hook) links the new file into place, which
+    # fails if a hook appeared after it was observed, so a hook someone else
+    # wrote in the meantime is never overwritten. replace: true (our own stale
+    # hook) renames over it.
+    def write_hook(path, body, replace:)
       FileUtils.mkdir_p(File.dirname(path))
       tmp = "#{path}.setup-private-overlay.#{Process.pid}"
       File.write(tmp, body)
       File.chmod(0o755, tmp)
-      File.rename(tmp, path)
+      if replace
+        File.rename(tmp, path)
+      else
+        File.link(tmp, path)
+        File.delete(tmp)
+      end
+    rescue Errno::EEXIST
+      FileUtils.rm_f(tmp)
+      raise HostError, "a pre-push hook appeared at #{path} while installing; it was left untouched"
     rescue SystemCallError => e
       FileUtils.rm_f(tmp) if tmp
       raise HostError, "could not write #{path} (#{e.class.name.split('::').last})"
@@ -157,7 +171,12 @@ module PrivateOverlayInstall
 
       parent = File.dirname(target)
       FileUtils.mkdir_p(parent, mode: 0o700)
-      Dir.mkdir(target, 0o700)
+      begin
+        Dir.mkdir(target, 0o700)
+      rescue Errno::EEXIST
+        # It appeared after the caller's existence check: not ours to touch.
+        raise InitRaced, "#{target} appeared while --init was starting"
+      end
       File.chmod(0o700, target)
       FileUtils.cp_r(File.join(skeleton_dir, "."), target)
       Dir.glob(File.join(target, "**", "*"), File::FNM_DOTMATCH).each do |p|

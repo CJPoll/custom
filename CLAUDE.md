@@ -117,7 +117,7 @@ bodies. Tests use synthetic values (`UFAKE00001`).
 - `scripts/setup-private-overlay` creates the overlay from the public skeleton
   (`--init`), wires its `work` plugin and the pre-push hook (`--install`), and
   reports each piece (`--check`, read-only). Who may run `--init` and
-  `--install`: the contract's *Installer* → *Who runs it*.
+  `--install`: `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify after*.
 - Contract: `ai/contracts/athena-private-overlay.md` → *Discovery*, *States and
   exit codes*, *Consumer obligation*, *Installer*.
 

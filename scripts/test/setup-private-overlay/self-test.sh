@@ -20,7 +20,9 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SRC="$(cd "${HERE}/../../.." && pwd -P)"
 
-TMP="$(mktemp -d)" || { echo "FAIL: mktemp"; exit 1; }
+# A space in every fixture path exercises the hook's quoted exec line and the
+# marketplace path comparison.
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/setup private overlay.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
 trap 'rm -rf "${TMP}"' EXIT INT TERM
 PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
@@ -196,7 +198,7 @@ printf 'synthwork-id\tSYNTHWORK-[0-9]+\n' >> "${OVERLAY}/outbound/patterns.tsv"
 git -C "$OVERLAY" commit --quiet -am "synthetic pattern"
 reset_calls; run "$INST" --install
 if [ "$RC" = 0 ] && [ -x "$HOOK" ] && grep -qxF "# athena-outbound-pre-push: installed by scripts/setup-private-overlay (DND-703)." "$HOOK" \
-   && grep -qF "exec ${REPO}/ai/git-hooks/outbound-pre-push.sh" "$HOOK" && [ -z "$(writes_in_log)" ]; then
+   && grep -qF "exec $(printf '%q' "${REPO}/ai/git-hooks/outbound-pre-push.sh")" "$HOOK" &&[ -z "$(writes_in_log)" ]; then
   ok "11 --install with a committed pattern writes the hook (exec of the MAIN checkout's script); no plugin re-install"
 else bad "11 install hook" "rc=$RC out=$OUT hook=$(cat "$HOOK" 2>/dev/null)"; fi
 
@@ -248,7 +250,7 @@ if [ "$RC" = 1 ] && has "hook: NOT ACTIVE" "$OUT" && ! has "hook: OK" "$OUT"; th
 else bad "16b foreign check" "rc=$RC out=$OUT"; fi
 
 # 17. This installer's hook aimed at another checkout is STALE and refreshed.
-sed "s#${REPO}#/elsewhere/checkout#" "${TMP}/ours.hook" > "$HOOK"
+{ sed -n '1,2p' "${TMP}/ours.hook"; printf 'exec /elsewhere/checkout/ai/git-hooks/outbound-pre-push.sh "$@"\n'; } > "$HOOK"
 run "$INST" --check; stale_rc=$RC; stale_out="$OUT"
 run "$INST" --install
 if [ "$stale_rc" = 1 ] && has "hook: NOT ACTIVE" "$stale_out" && [ "$RC" = 0 ] && cmp -s "$HOOK" "${TMP}/ours.hook"; then
@@ -259,7 +261,7 @@ else bad "17 stale hook" "check_rc=$stale_rc check=$stale_out rc=$RC out=$OUT"; 
 sed -i 's/\ttrue$/\tfalse/' "${STATE}/plugins"
 run "$INST" --check; dis_out="$OUT"
 reset_calls; run "$INST" --install
-if has "plugin: DISABLED" "$dis_out" && [ "$RC" = 0 ] && grep -q "^plugin enable work@custom-work$" "${STATE}/calls.log"; then
+if has "plugin: DISABLED" "$dis_out" && [ "$RC" = 0 ] && grep -q "^plugin enable work@custom-work --scope user$" "${STATE}/calls.log"; then
   ok "18 a disabled plugin is reported DISABLED and enabled by --install"
 else bad "18 disabled" "check=$dis_out rc=$RC calls=$(calls)"; fi
 
@@ -314,14 +316,25 @@ if [ "$RC" = 1 ] && has "hook: NOT ACTIVE" "$OUT" && has "cannot measure" "$OUT"
   ok "22 hook present but the scanner cannot measure: NOT ACTIVE, never OK"
 else bad "22 inert hook" "rc=$RC out=$OUT"; fi
 
+# 22b. The overlay gone (ABSENT) while custom-work is registered: the installer
+#      cannot vouch for the marketplace, so --check says UNVERIFIED (never OK)
+#      and --remove leaves marketplace and plugin in place.
+run env ATHENA_PRIVATE_ROOT="${TMP}/no-such-overlay" "$INST" --check; unv_check="$OUT"
+reset_calls; run env HOME="${TMP}/other-home" "$INST" --remove --dry-run
+if has "marketplace: UNVERIFIED" "$unv_check" && ! has "marketplace: OK" "$unv_check" \
+   && has "marketplace: UNVERIFIED" "$OUT" && ! has "would uninstall" "$OUT" && ! has "would remove marketplace" "$OUT" \
+   && [ -z "$(writes_in_log)" ]; then
+  ok "22b overlay missing, custom-work registered: UNVERIFIED on --check; --remove keeps marketplace and plugin"
+else bad "22b unverified" "check=$unv_check remove=$OUT"; fi
+
 # 23. --remove --dry-run changes nothing; --remove undoes all three, keeps the overlay.
 reset_calls; run "$INST" --remove --dry-run
 if [ -z "$(writes_in_log)" ] && [ -e "$HOOK" ] && has "(dry-run) would remove the pre-push hook" "$OUT"; then
   ok "23a --remove --dry-run writes nothing"
 else bad "23a remove dry-run" "rc=$RC out=$OUT"; fi
 reset_calls; run "$INST" --remove
-if [ "$RC" = 0 ] && [ ! -e "$HOOK" ] && grep -q "^plugin uninstall work@custom-work$" "${STATE}/calls.log" \
-   && grep -q "^plugin marketplace remove custom-work$" "${STATE}/calls.log" && [ -f "${OVERLAY}/athena-overlay.json" ]; then
+if [ "$RC" = 0 ] && [ ! -e "$HOOK" ] && grep -q "^plugin uninstall work@custom-work --scope user$" "${STATE}/calls.log" \
+   && grep -q "^plugin marketplace remove custom-work --scope user$" "${STATE}/calls.log" && [ -f "${OVERLAY}/athena-overlay.json" ]; then
   ok "23b --remove removes hook, plugin and marketplace; the overlay directory stays"
 else bad "23b remove" "rc=$RC out=$OUT calls=$(calls)"; fi
 

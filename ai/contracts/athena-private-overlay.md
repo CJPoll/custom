@@ -53,10 +53,9 @@ A valid root is a directory (a symlink is resolved to its realpath) that:
 - holds the marker described in *Marker*.
 
 The overlay is **optional**. The public harness MUST work with it absent. It is
-created by the owner, or on the owner's explicit direction, from the public
-skeleton with `scripts/setup-private-overlay --init` (see *Installer*). No agent
-creates it on its own initiative, and no installer creates it as a side effect
-of another mode. It is never pushed anywhere: it keeps local-only git history
+created from the public skeleton with `scripts/setup-private-overlay --init`,
+run as *Installer* → *Who runs it* says. No agent creates it on its own
+initiative, and no installer creates it as a side effect of another mode. It is never pushed anywhere: it keeps local-only git history
 (no remote) and is synced between the owner's machines over ssh.
 
 **Later (2026-09-28):** this paragraph said the overlay is "created by the
@@ -149,8 +148,9 @@ marker, `overlay/slack.json` and `overlay/notion.json` as empty objects,
 synthetic `work:overlay-probe` skill for the plugin-loading measurement, and a
 README carrying *No credentials*. It MUST NOT carry a work-domain value.
 
-**`--init`.** Resolves the root by the *Discovery* rule and refuses a path that
-already exists (exit 5), whatever is there. Otherwise it copies the skeleton
+**`--init`.** Resolves the root by the *Discovery* rule. A root that cannot be
+computed (an empty or relative `ATHENA_PRIVATE_ROOT`, a bad `HOME`) is exit 4.
+It refuses a path that already exists (exit 5), whatever is there. Otherwise it copies the skeleton
 (root and directories `0700`, files `0600`), runs `git init`, and makes one
 local commit. It never adds a remote. It ends by reading the root back through
 the resolver, and a root that does not read PRESENT is exit 4.
@@ -181,19 +181,23 @@ with no committed pattern, an installed hook would refuse every push.
 `marketplace`, `plugin` and `hook`, each `OK` or its gap, with a Fix. The hook
 line is `hook: OK` only when this installer's hook is present, targets this
 main checkout, and the scanner can measure. Anything else is `hook: NOT
-ACTIVE (<why>)`, never OK. Exit 0 when all four are OK, 3 when any read
+ACTIVE (<why>)`, never OK. With no valid overlay root to compare against, a
+registered `custom-work` is `marketplace: UNVERIFIED`, never OK. Exit 0 when all four are OK, 3 when any read
 failed (`COULD NOT MEASURE`: no `claude` on PATH, unparseable `claude` JSON,
 an unresolvable hook path), else 1.
 
 **`--remove`** removes this installer's hook, uninstalls the plugin and removes
 the marketplace. It never deletes the overlay directory, a foreign hook, or a
-`custom-work` marketplace registered from another source, nor the plugin while
-such a marketplace holds the name.
+`custom-work` marketplace registered from another source or one it cannot
+confirm as this overlay's (UNVERIFIED), nor the plugin while such a
+marketplace holds the name. It manages the user-scope plugin only.
 
 **Who runs it.** `--init` and `--install` change the owner's machine: its
-Claude Code user settings and the main checkout's `.git/hooks`. The owner runs
-them, or an agent on the owner's explicit direction. Tests use a fixture repo,
-a temp `HOME`, a temp `CLAUDE_CONFIG_DIR` and a stub `claude`.
+Claude Code user settings and the main checkout's `.git/hooks`. Who may run
+them: `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify after*, as for
+the other committed installers. `--check` is read-only and anyone may run it.
+Tests use a fixture repo, a temp `HOME`, a temp `CLAUDE_CONFIG_DIR` and a stub
+`claude`.
 
 ## Outbound-scan interface
 

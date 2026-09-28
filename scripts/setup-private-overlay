@@ -63,8 +63,9 @@ end
 
 # Observe everything --check / --install / --remove judge. Read-only.
 def observe
-  overlay = PO.overlay_verdict(HOST.overlay)
-  root = overlay.ok? ? HOST.overlay.root : nil
+  resolved = HOST.overlay
+  overlay = PO.overlay_verdict(resolved)
+  root = overlay.ok? ? resolved.root : nil
   mkts, mreason = HOST.marketplaces
   plugs, preason = HOST.plugins
   main, mwhy = HOST.main_checkout
@@ -127,6 +128,9 @@ def cmd_init(dry)
        "Fix: add at least one `label<TAB>regex` line to #{File.join(target, 'outbound', 'patterns.tsv')} and " \
        "commit it in the overlay, then run `#{INSTALLER} --install`."
   PO::EXIT[:ok]
+rescue PrivateOverlayInstall::InitRaced => e
+  warn "#{PROG}: --init: #{e.message}; refusing to overwrite it, and nothing was written. Fix: run `#{INSTALLER} --check` to see its state."
+  PO::EXIT[:conflict]
 rescue PrivateOverlayInstall::HostError => e
   warn "#{PROG}: --init failed: #{e.message}. Fix: remove the partial directory only if you created nothing else in it, then run `#{INSTALLER} --init` again."
   PO::EXIT[:conflict]
@@ -156,10 +160,10 @@ def apply(step, o, dry)
   case action
   when :marketplace_add then HOST.claude!("plugin", "marketplace", "add", arg, "--scope", "user")
   when :plugin_install then HOST.claude!("plugin", "install", arg, "--scope", "user")
-  when :plugin_enable then HOST.claude!("plugin", "enable", arg)
-  when :plugin_uninstall then HOST.claude!("plugin", "uninstall", arg)
-  when :marketplace_remove then HOST.claude!("plugin", "marketplace", "remove", arg)
-  when :hook_write then HOST.write_hook(o[:hook_path], PO.hook_body(o[:main]))
+  when :plugin_enable then HOST.claude!("plugin", "enable", arg, "--scope", "user")
+  when :plugin_uninstall then HOST.claude!("plugin", "uninstall", arg, "--scope", "user")
+  when :marketplace_remove then HOST.claude!("plugin", "marketplace", "remove", arg, "--scope", "user")
+  when :hook_write then HOST.write_hook(o[:hook_path], PO.hook_body(o[:main]), replace: arg == :replace)
   when :hook_delete then HOST.delete_hook(o[:hook_path])
   end
   puts "#{PROG}: did #{what}"
