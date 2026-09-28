@@ -102,6 +102,21 @@ To create symlinks:
 sudo ln -sf ~/dev/custom/system-files/greetd-config.toml /etc/greetd/config.toml
 ```
 
+## This repo is public: work values live in the private overlay
+
+`CJPoll/custom` is PUBLIC. Never commit a work-domain value: work people and
+contacts, work Slack ids, work Notion ids, work ticket ids and bodies, or work
+repo internals. That covers code, prose, tests, fixtures, commit messages and PR
+bodies. Tests use synthetic values (`UFAKE00001`).
+
+- Work values live in the **private overlay**, an on-machine directory
+  (`~/.config/athena/work`, or `ATHENA_PRIVATE_ROOT`). It is optional, and it
+  is never pushed.
+- Read a value with `ai/bin/private-overlay get <file> <.key.path>`. A non-zero
+  exit is reported with its Fix. Never replace it with a guess.
+- Contract: `ai/contracts/athena-private-overlay.md` → *Discovery*, *States and
+  exit codes*, *Consumer obligation*.
+
 ## Development Guidelines
 
 ### Adding New Tools

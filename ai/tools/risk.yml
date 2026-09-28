@@ -72,6 +72,8 @@ tools:
   lead-time:               { class: readOnly, reason: analysis }
   next-mission:            { class: readOnly, reason: query }
   push-actor-check:        { class: readOnly, reason: query }
+  # private-overlay (DND-702) reads the on-machine overlay; it never writes.
+  private-overlay:         { class: readOnly, reason: query }
   ready-and-idle:          { class: readOnly, reason: analysis }
   # DND-775: git runs it as a reference-transaction hook; it reads the queued
   # updates on stdin and refuses (never writes) a stash-list change.

@@ -1,0 +1,106 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# private-overlay -- resolve a work-domain value from the private overlay
+# (DND-702). Contract: ai/contracts/athena-private-overlay.md.
+#
+# This repo is PUBLIC. Work-domain values (people, Slack ids, work Notion ids,
+# work ticket ids) live in an on-machine overlay directory, never in a tracked
+# file. Consumers read a value with `private-overlay get`, and a non-zero exit
+# is reported with its Fix, never replaced by a guess.
+#
+# The overlay is OPTIONAL: a machine without it gets ABSENT (exit 3) and a
+# message that names the probed path and says the feature is unavailable here.
+# ABSENT, MALFORMED and KEY_NOT_FOUND are three distinct exits and messages, so
+# a missing overlay never reads as an empty value
+# (~/dev/custom/CLAUDE.md -> "A failed lookup must never look like an empty one").
+#
+# Bucket placement: this file is Framework (argv -> exit code). The rules are
+# Domain (ai/lib/private_overlay.rb); the env/fs reads are the Side Effect
+# (ai/lib/private_overlay_resolver.rb). Tests: ai/test/private-overlay/self-test.sh.
+
+require_relative "../lib/private_overlay_resolver"
+
+HELP = <<~HELP
+  private-overlay -- read a work-domain value from the private overlay (DND-702)
+
+  Usage:
+    private-overlay status                 PRESENT root=... | ABSENT probed=... | MALFORMED reason=...
+    private-overlay root                   print the validated root
+    private-overlay get <file> <.key.path> print one value from overlay/<file>.json
+                                           e.g. get slack .people.owner.user_id
+    private-overlay --help                 this text (stdout, exit 0, no side effects)
+
+  Discovery: ATHENA_PRIVATE_ROOT when set (authoritative: set-but-invalid is
+  MALFORMED, never a fallthrough), else $HOME/.config/athena/work. The root must
+  be a 0700 directory owned by you, holding athena-overlay.json with
+  {"kind":"athena-private-overlay","schema":1}.
+
+  Exit codes:
+    0 FOUND          value on stdout, non-empty
+    2 USAGE          bad arguments; <file> not [a-z0-9-]+; path not .key.key[0]
+    3 ABSENT         ATHENA_PRIVATE_ROOT unset and the default directory missing
+    4 MALFORMED      bad root, marker, overlay file, or an empty/wrong-typed value
+    5 KEY_NOT_FOUND  valid overlay, but the file or key is missing or null
+
+  Every non-zero exit writes ONE stderr line naming the state, the key, the
+  root or probed path, and a Fix:. A value is never written to stderr.
+  Contract: ai/contracts/athena-private-overlay.md
+HELP
+
+def usage!(reason)
+  r = PrivateOverlay::Result.new(state: :usage, root: nil, reason: reason)
+  warn PrivateOverlay.failure_line(r, nil)
+  exit PrivateOverlay::EXIT[:usage]
+end
+
+def fail_with(result, key)
+  warn PrivateOverlay.failure_line(result, key)
+  exit result.exit_code
+end
+
+def cmd_status
+  r = PrivateOverlay::Resolver.root
+  case r.state
+  when :found
+    puts "PRESENT root=#{r.root}"
+    exit 0
+  when :absent
+    puts "ABSENT probed=#{r.root}"
+  else
+    puts "MALFORMED reason=#{r.reason}"
+  end
+  fail_with(r, nil)
+end
+
+def cmd_root
+  r = PrivateOverlay::Resolver.root
+  fail_with(r, nil) unless r.state == :found
+  puts r.root
+  exit 0
+end
+
+def cmd_get(file, path)
+  r = PrivateOverlay::Resolver.get(file, path)
+  fail_with(r, "#{file}#{path}") unless r.state == :found
+  puts r.value
+  exit 0
+rescue PrivateOverlay::UsageError => e
+  usage!(e.message)
+end
+
+args = ARGV.dup
+if args.include?("--help") || args.include?("-h")
+  puts HELP
+  exit 0
+end
+
+case args
+in ["status"] then cmd_status
+in ["root"] then cmd_root
+in ["get", String => file, String => path] then cmd_get(file, path)
+in []
+  usage!("no command given")
+else
+  usage!("unrecognised arguments #{args.first(3).map(&:inspect).join(' ')}")
+end

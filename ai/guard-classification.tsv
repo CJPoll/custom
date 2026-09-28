@@ -274,3 +274,5 @@ system-files/lib/initd-reap-exec	guard
 ai/lib/landed.rb	library	landed-bar resolution required by ai/bin/check-guard-messages / check-tool-risk / check-bin-help / check-hooks-registered / check-inbox-registry; raises Landed::Unreadable or Landed::Mismatch and each caller prints the Fix:
 ai/lib/docker_stacks.rb	library	pure pool/attribution logic required by ai/bin/pool-headroom and ai/bin/teardown-stack (DND-864); raises DockerStacks::Unreadable or Refused and each caller prints the Fix:
 ai/lib/docker_stacks_host.rb	library	docker/git/gh/glab adapter required by ai/bin/pool-headroom and ai/bin/teardown-stack (DND-864); raises DockerStacks::Unreadable and each caller prints the Fix:
+ai/lib/private_overlay.rb	guard
+ai/lib/private_overlay_resolver.rb	library	env/filesystem adapter required by ai/bin/private-overlay (DND-702); returns a PrivateOverlay::Result and the caller prints the one stderr line that carries Fix:
