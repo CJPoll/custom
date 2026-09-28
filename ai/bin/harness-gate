@@ -86,6 +86,10 @@ STATIC_CHECKS = [
   # asserts BOTH the hit (stale swept) and the miss (fresh kept).
   ["flaky-marker-sweep self-test", %w[ai/hooks/flaky-marker-sweep.self-test.sh]],
   ["inbox-untrusted-guard self-test", %w[ai/hooks/inbox-untrusted-guard.self-test.sh]],
+  # worktree-escape-guard (DND-840): the PreToolUse guard that keeps an agent
+  # dispatched into a worktree out of the MAIN checkout. Dedicated .self-test.sh
+  # against throwaway repos under a fake HOME (never the live checkout).
+  ["worktree-escape-guard self-test", %w[ai/hooks/worktree-escape-guard.self-test.sh]],
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
   ["check-generic-skills self-test", %w[ai/bin/check-generic-skills --self-test]],
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
@@ -242,6 +246,7 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/hooks/fleet-report.sh"          => "ai/hooks/fleet-report.self-test.sh",
   "ai/hooks/inbox-untrusted-guard.sh" => "ai/hooks/inbox-untrusted-guard.self-test.sh",
   "ai/hooks/workflow-phase-guard.sh"  => "ai/hooks/workflow-phase-guard.self-test.sh",
+  "ai/hooks/worktree-escape-guard.sh" => "ai/hooks/worktree-escape-guard.self-test.sh",
   "ai/skills/athena:epic-clustering/scripts/epic-clustering" =>
     "ai/skills/athena:epic-clustering/test/self-test.sh",
   "ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" =>
