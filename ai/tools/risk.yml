@@ -124,6 +124,10 @@ tools:
   # records judgment_calls and eval-run rows (and, with a key, spends TypeSafe
   # budget); --apply writes the owner's judgment_thresholds. External state.
   judgment-eval:           { class: destructive, reason: judgments }
+  # judgment-label (DND-715) writes only the machine-local slack routing labels
+  # file; --propose re-derives it deterministically and keeps every owner
+  # confirmation. No forge, tracker, server or remote write.
+  judgment-label:          { class: idempotent, reason: labels }
   # notion-athena-mcp launches an MCP server that EXPOSES Notion writes. It does
   # not itself write, but its worst-case capability is a tracker mutation, so it
   # is classified destructive. FLAGGED for owner ratification (DND-172); shipped

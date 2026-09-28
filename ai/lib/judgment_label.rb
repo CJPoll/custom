@@ -26,8 +26,11 @@ module JudgmentLabel
   LABELS = %w[walt_ui harness gen_saas unclear].freeze
   PROVENANCES = %w[forward_record owner_confirmed proposed].freeze
   ROOT_KINDS = %w[dm im mpim mention].freeze
-  # A label with no forward evidence, and a root forwarded to two sessions.
-  NO_EVIDENCE = "unclear"
+  # The proposal for a root no forward record names: it stayed in walt_ui, the
+  # session whose inbox it landed in (today's channel route, A&E D6).
+  NO_EVIDENCE = "walt_ui"
+  # The proposal for a root forwarded to two different sessions.
+  CONFLICT = "unclear"
   TOOL = "judgment-label"
   # A Slack message ts: 10 digits, a dot, 6 digits, standing alone.
   SLACK_TS = /(?<![\d.])\d{10}\.\d{6}(?![\d.])/
@@ -111,13 +114,14 @@ module JudgmentLabel
   end
 
   # slack_ts(text) -> every Slack ts the text names, in order, once.
+  # Invalid UTF-8 in untrusted text is scrubbed, never a crash.
   def slack_ts(text)
-    text.to_s.scan(SLACK_TS).uniq
+    text.to_s.scrub("?").scan(SLACK_TS).uniq
   end
 
   # mail_label(body) -> the label a walt_ui->custom record stands for.
   def mail_label(body)
-    GEN_SAAS_RELAY.match?(body.to_s) ? "gen_saas" : "harness"
+    GEN_SAAS_RELAY.match?(body.to_s.scrub("?")) ? "gen_saas" : "harness"
   end
 
   # mail_record(source, body) -> {source:, label:, ts:} or nil (no ts: not a record).
@@ -140,20 +144,24 @@ module JudgmentLabel
   end
 
   # match(records, lines, roots) -> {forward: {event_id => label}, conflicts: [event_id],
-  #                                   matched: n, thread_only: n, unmatched: [[source, [ts]]]}
+  #                                   matched: n, thread_only: n, ambiguous: [ts],
+  #                                   unmatched: [[source, [ts]]]}
   # A record matches the roots whose ts it names. A record naming no root but
   # a line or a thread in the inbox is thread_only (a reply under a bot post,
   # or a non-owner root). A record whose ts match no line at all is UNMATCHED,
-  # reported by ts, never dropped.
+  # reported by ts, never dropped. Records carry no channel, so a ts two roots
+  # share (in different channels) labels neither: AMBIGUOUS, reported by ts.
   def match(records, lines, roots)
     known = {}
     lines.each do |l|
       known[l[:ts]] = true if l[:ts].is_a?(String)
       known[l[:thread_ts]] = true if l[:thread_ts].is_a?(String)
     end
-    root_by_ts = roots.to_h { |r| [r[:ts], r[:event_id]] }
+    by_ts = roots.group_by { |r| r[:ts] }
+    ambiguous = by_ts.select { |_, rs| rs.size > 1 }.keys.sort
+    root_by_ts = by_ts.reject { |_, rs| rs.size > 1 }.transform_values { |rs| rs.first[:event_id] }
     votes = Hash.new { |h, k| h[k] = [] }
-    out = { matched: 0, thread_only: 0, unmatched: [] }
+    out = { matched: 0, thread_only: 0, unmatched: [], ambiguous: ambiguous }
     records.each do |rec|
       hits = rec[:ts].filter_map { |t| root_by_ts[t] }
       if !hits.empty?
@@ -176,18 +184,21 @@ module JudgmentLabel
   # parse_labels(text, path) -> [row]. The file this tool writes; an empty one
   # has no rows. A malformed row names its line, never guessed around.
   def parse_labels(text, path)
+    seen = {}
     jsonl(text, path, "labels").map do |line_no, row|
       where = "#{path}:#{line_no}"
       fix = "repair or remove that line; the file is judgment-label's own output"
       raise InputError.new("#{where} has no event id", fix) unless row["id"].is_a?(String) && EVENT_ID.match?(row["id"])
       raise InputError.new("#{where} has a label outside #{LABELS.join('|')}", fix) unless LABELS.include?(row["label"])
       raise InputError.new("#{where} has an unknown provenance", fix) unless PROVENANCES.include?(row["provenance"])
+      raise InputError.new("#{where} repeats the id of line #{seen[row['id']]}", "keep one row per id (judgment-eval refuses a repeat)") if seen.key?(row["id"])
 
+      seen[row["id"]] = line_no
       row.slice("id", "label", "provenance", "labeler", "labeled_at")
     end
   end
 
-  # build(roots, matched, existing, now) -> {rows:, kept_orphans:, disagreements:}
+  # build(roots, matched, existing, now) -> {rows:, kept_orphans:, dropped:, disagreements:}
   # owner_confirmed rows are the owner's work: never overwritten or dropped.
   # A recomputed row keeps its labeled_at when its label and provenance are
   # unchanged, so an unchanged input writes a byte-identical file.
@@ -204,21 +215,29 @@ module JudgmentLabel
         disagreements += 1 if forward && forward != old["label"]
         next old
       end
-      label, provenance = forward ? [forward, "forward_record"] : [NO_EVIDENCE, "proposed"]
+      label, provenance =
+        if forward then [forward, "forward_record"]
+        elsif matched[:conflicts].include?(id) then [CONFLICT, "proposed"]
+        else [NO_EVIDENCE, "proposed"]
+        end
       stamp = old && old["label"] == label && old["provenance"] == provenance ? old["labeled_at"] : now
       { "id" => id, "label" => label, "provenance" => provenance, "labeler" => TOOL, "labeled_at" => stamp }
     end
-    orphans = existing.select { |r| r["provenance"] == "owner_confirmed" && !root_ids.key?(r["id"]) }
-    { rows: rows + orphans, kept_orphans: orphans.size, disagreements: disagreements }
+    gone = existing.reject { |r| root_ids.key?(r["id"]) }
+    orphans = gone.select { |r| r["provenance"] == "owner_confirmed" }
+    { rows: rows + orphans, kept_orphans: orphans.size, dropped: gone.size - orphans.size, disagreements: disagreements }
   end
 
   # confirm(rows, id, label, owner, now) -> rows with that row owner_confirmed.
+  # A row no longer in rows (a re-propose dropped it meanwhile) is appended:
+  # an owner answer is never lost.
   def confirm(rows, id, label, owner, now)
     raise ArgumentError, "not a label: #{label}" unless LABELS.include?(label)
 
-    rows.map do |r|
-      r["id"] == id ? { "id" => id, "label" => label, "provenance" => "owner_confirmed", "labeler" => owner, "labeled_at" => now } : r
-    end
+    row = { "id" => id, "label" => label, "provenance" => "owner_confirmed", "labeler" => owner, "labeled_at" => now }
+    return rows + [row] unless rows.any? { |r| r["id"] == id }
+
+    rows.map { |r| r["id"] == id ? row : r }
   end
 
   # counts(rows) -> [[label, provenance, n]] in LABELS x PROVENANCES order, nonzero only.
@@ -241,10 +260,17 @@ module JudgmentLabel
     out
   end
 
-  # printable(text) -> the text with control characters (terminal escapes in
-  # untrusted content) replaced, newlines and tabs kept.
+  # printable(text) -> untrusted text made safe for a terminal: invalid UTF-8
+  # scrubbed; control (Cc, so ESC/CSI) and format (Cf, so bidi overrides)
+  # characters replaced; tabs kept. One-line fields only.
   def printable(text)
-    text.to_s.gsub(/[^\n\t[:^cntrl:]]/, "?")
+    text.to_s.scrub("?").gsub(/[\p{Cc}\p{Cf}&&[^\t]]/, "?")
+  end
+
+  # fenced(text) -> the message body, each line prefixed "| " so the text can
+  # never forge the end-of-message fence.
+  def fenced(text)
+    text.to_s.scrub("?").split("\n", -1).map { |l| "| #{printable(l)}" }.join("\n")
   end
 
   def render(rows)
@@ -271,6 +297,7 @@ module JudgmentLabel
   def jsonl(text, path, what)
     rows = []
     text.each_line.with_index(1) do |line, line_no|
+      raise InputError.new("#{path}:#{line_no} is not valid UTF-8", "the #{what} file must be UTF-8 JSONL; repair that line") unless line.valid_encoding?
       next if line.strip.empty?
 
       row = begin

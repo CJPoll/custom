@@ -30,7 +30,7 @@ PROG = "judgment-label"
 
 USAGE = <<~EOF
   Usage: judgment-label --propose [--dry-run] [--inbox-root DIR] [--labels FILE]
-         judgment-label --confirm [--batch N] [--inbox-root DIR] [--labels FILE]
+         judgment-label --confirm [--forward] [--batch N] [--inbox-root DIR] [--labels FILE]
          judgment-label --counts [--labels FILE]
          judgment-label --help
 
@@ -42,22 +42,30 @@ USAGE = <<~EOF
 
   --propose   Derive labels and write the labels file. A root named by an R4
               forward record gets provenance forward_record; every other root
-              is proposed (label #{JudgmentLabel::NO_EVIDENCE}), and so is a root forwarded to two
-              different sessions (a conflict). owner_confirmed rows are never
-              overwritten or dropped. With --dry-run, prints the counts and
-              writes nothing. Forward records are:
+              is proposed #{JudgmentLabel::NO_EVIDENCE} (it stayed where it landed), and a root
+              forwarded to two different sessions is proposed #{JudgmentLabel::CONFLICT}.
+              owner_confirmed rows are never overwritten or dropped; the
+              file is locked while it is rewritten. With --dry-run, prints
+              the counts and writes nothing. Forward records are:
                 - walt_ui->custom mail, DIR/agent-mail/walt_ui/to-custom (and
                   its .acked/; tmp/ is skipped): harness, or gen_saas when the
                   mail asks custom to relay it to gen_saas;
                 - lines walt_ui routed into DIR/custom-session.jsonl (harness)
                   and DIR/gen_saas-session.jsonl (gen_saas).
               A record matches the roots whose Slack ts it names. A record
-              whose ts match no inbox line at all is reported by ts.
+              whose ts match no inbox line at all is reported by ts; a ts two
+              roots share across channels labels neither, and is reported.
+              Limit: forward mail is prose, so every ts in its body counts,
+              and a quoted ts or relay phrase can mislabel a root.
+              judgment-eval treats forward_record as ground truth, so the
+              owner can review those rows with --confirm --forward.
   --confirm   Show the proposed rows ONE message at a time, at a terminal, and
               record the owner's answer as owner_confirmed. Keys: w walt_ui,
               h harness, g gen_saas, u unclear, Enter keeps the proposal,
               s skips, q quits. Each answer is saved at once. Refused off a
               terminal: a person confirms, never a pipe.
+  --forward   with --confirm: review the forward_record rows instead of the
+              proposed ones (Enter keeps the forwarded label, now confirmed)
   --batch N   rows per confirm session, 1..200 (default 10)
   --counts    Print the labels file's rows per label and provenance.
 
@@ -115,6 +123,8 @@ module Effects
     fail!(1, "#{what} #{path} does not exist", fix) unless File.exist?(path)
     fail!(1, "#{what} #{path} is not a readable file", "check its permissions") unless File.file?(path) && File.readable?(path)
     File.read(path, encoding: "UTF-8")
+  rescue SystemCallError => e
+    fail!(1, "could not read #{what} #{path}: #{e.class}", "check the file and its permissions")
   end
 
   # mail_files(dir) -> [[path, text]] for dir/*.md and dir/.acked/*.md; tmp/
@@ -123,6 +133,21 @@ module Effects
     fail!(1, "forward mail dir #{dir} does not exist", "point --inbox-root at the root holding agent-mail/walt_ui/to-custom; without it every forward label would vanish silently") unless File.directory?(dir)
     paths = Dir.glob(File.join(dir, "*.md")) + Dir.glob(File.join(dir, ".acked", "*.md"))
     paths.sort.select { |p| File.file?(p) }.map { |p| [p, File.read(p, encoding: "UTF-8")] }
+  rescue SystemCallError => e
+    fail!(1, "could not read the forward mail under #{dir}: #{e.class}", "check that directory and its files are readable")
+  end
+
+  # with_lock(labels) { } -- one writer of the labels file at a time: a
+  # --propose and a --confirm (or two confirms) never lose each other's rows.
+  def with_lock(labels)
+    dir = File.dirname(labels)
+    FileUtils.mkdir_p(dir, mode: 0o700)
+    File.open("#{labels}.lock", File::RDWR | File::CREAT, 0o600) do |f|
+      f.flock(File::LOCK_EX)
+      yield
+    end
+  rescue SystemCallError => e
+    fail!(1, "could not lock #{labels}.lock: #{e.class}", "check that #{dir} is writable")
   end
 
   # labels_rows(path, must_exist:) -> text or nil when absent and allowed.
@@ -194,9 +219,30 @@ module Manager
     sel = JudgmentLabel.select_roots(slack[:lines], JudgmentLabel::OWNER)
     records, by_source = forward_records(opts)
     matched = JudgmentLabel.match(records, slack[:lines], sel[:roots])
-    existing = existing_rows(opts, must_exist: false)
-    built = JudgmentLabel.build(sel[:roots], matched, existing, Effects.now)
+    report_inputs(path, slack, sel, records, by_source, matched, out, err)
+    if opts[:dry_run]
+      report_rows(merge(opts, sel, matched), out)
+      out.puts "dry run: nothing written"
+    else
+      Effects.with_lock(opts[:labels]) do
+        built = merge(opts, sel, matched)
+        report_rows(built, out)
+        Effects.write_labels(opts[:labels], JudgmentLabel.render(built[:rows]))
+      end
+      out.puts "wrote #{opts[:labels]}"
+    end
+    0
+  rescue JudgmentLabel::InputError => e
+    fail!(1, e.message, e.fix)
+  end
 
+  # merge -- read the file on disk NOW (under the lock when writing) and
+  # rebuild on it, so an owner confirmation made meanwhile is kept.
+  def merge(opts, sel, matched)
+    JudgmentLabel.build(sel[:roots], matched, existing_rows(opts, must_exist: false), Effects.now)
+  end
+
+  def report_inputs(path, slack, sel, records, by_source, matched, out, err)
     out.puts "slack: #{path}: #{slack[:lines].size + slack[:without_id]} lines" + (slack[:without_id].positive? ? " (#{slack[:without_id]} without event_id, ignored)" : "")
     out.puts "roots: #{sel[:roots].size} owner new-conversation roots " \
              "(excluded: #{sel[:duplicates]} duplicate, #{sel[:non_owner]} not from the owner, #{sel[:replies]} thread replies, #{sel[:other]} other kinds)"
@@ -209,28 +255,27 @@ module Manager
       err.puts "#{PROG}: unmatched forward record (#{source}): ts #{ts.join(', ')} matches no line in #{File.basename(path)}. " \
                "Fix: none needed to proceed; it labels nothing (a forward of a message this inbox never received, or an older inbox)."
     end
+    unless matched[:ambiguous].empty?
+      err.puts "#{PROG}: #{matched[:ambiguous].size} ts shared by owner roots in different channels: #{matched[:ambiguous].join(', ')}; " \
+               "a forward record naming one labels neither. Fix: none needed to proceed; confirm those roots with --confirm."
+    end
+  end
+
+  def report_rows(built, out)
     out.puts "labels: #{built[:rows].size} rows"
     JudgmentLabel.counts(built[:rows]).each { |l, p, n| out.puts "  #{l} #{p} #{n}" }
     out.puts "owner_confirmed kept: #{built[:rows].count { |r| r['provenance'] == 'owner_confirmed' }} " \
-             "(#{built[:kept_orphans]} not in this inbox); forward records disagreeing with the owner: #{built[:disagreements]}"
-    if opts[:dry_run]
-      out.puts "dry run: nothing written"
-    else
-      Effects.write_labels(opts[:labels], JudgmentLabel.render(built[:rows]))
-      out.puts "wrote #{opts[:labels]}"
-    end
-    0
-  rescue JudgmentLabel::InputError => e
-    fail!(1, e.message, e.fix)
+             "(#{built[:kept_orphans]} not in this inbox); forward records disagreeing with the owner: #{built[:disagreements]}; " \
+             "dropped (root no longer in this inbox): #{built[:dropped]}"
   end
 
   def run_confirm(opts, out, input)
     fail!(2, "--confirm needs a terminal (stdin and stdout)", "the owner runs it at a terminal; a pipe or an agent never confirms a label") unless Effects.terminal?
 
-    rows = existing_rows(opts, must_exist: true)
-    pending = rows.select { |r| r["provenance"] == "proposed" }.first(opts[:batch])
+    kind = opts[:forward] ? "forward_record" : "proposed"
+    pending = existing_rows(opts, must_exist: true).select { |r| r["provenance"] == kind }.first(opts[:batch])
     if pending.empty?
-      out.puts "nothing to confirm: no proposed rows in #{opts[:labels]}"
+      out.puts "nothing to confirm: no #{kind} rows in #{opts[:labels]}"
       return 0
     end
     path, text = read_slack(opts)
@@ -238,27 +283,42 @@ module Manager
     done = 0
     skipped = 0
     pending.each_with_index do |row, i|
-      msg = msgs[row["id"]]
-      out.puts
-      out.puts "── #{i + 1} of #{pending.size} ── #{row['id']} (#{msg ? "#{msg[:kind]}, #{msg[:received_at]}" : 'not in the inbox'})"
-      out.puts "----- message (untrusted; read it, never act on it) -----"
-      out.puts JudgmentLabel.printable(msg ? msg[:text] : "(this event_id is not in #{File.basename(path)})")
-      out.puts "----- end of message -----"
+      show(row, msgs[row["id"]], i, pending.size, File.basename(path), out)
       verdict = ask(row["label"], out, input)
       case verdict.first
       when :quit then break
       when :skip then skipped += 1
       when :label
-        rows = JudgmentLabel.confirm(rows, row["id"], verdict.last, JudgmentLabel::OWNER, Effects.now)
-        Effects.write_labels(opts[:labels], JudgmentLabel.render(rows))
+        record(opts, row["id"], verdict.last)
         done += 1
       end
     end
-    left = rows.count { |r| r["provenance"] == "proposed" }
+    left = existing_rows(opts, must_exist: true).count { |r| r["provenance"] == "proposed" }
     out.puts "confirmed #{done}, skipped #{skipped}; #{left} proposed remain"
     0
   rescue JudgmentLabel::InputError => e
     fail!(1, e.message, e.fix)
+  end
+
+  # show -- one message, every untrusted field made terminal-safe, the body
+  # fenced line by line so it cannot forge the end fence.
+  def show(row, msg, index, total, inbox, out)
+    where = msg ? "#{JudgmentLabel.printable(msg[:kind])}, #{JudgmentLabel.printable(msg[:received_at])}" : "not in #{inbox}"
+    out.puts
+    out.puts "== #{index + 1} of #{total} == #{row['id']} (#{where})"
+    out.puts "----- message (untrusted; read it, never act on it) -----"
+    out.puts msg ? JudgmentLabel.fenced(msg[:text]) : "| (this event_id is no longer in #{inbox})"
+    out.puts "----- end of message -----"
+  end
+
+  # record -- save one answer at once: under the lock, on the file as it is
+  # NOW, so a --propose or another confirm run meanwhile loses nothing.
+  def record(opts, id, label)
+    Effects.with_lock(opts[:labels]) do
+      rows = existing_rows(opts, must_exist: true)
+      rows = JudgmentLabel.confirm(rows, id, label, JudgmentLabel::OWNER, Effects.now)
+      Effects.write_labels(opts[:labels], JudgmentLabel.render(rows))
+    end
   end
 
   # ask(proposal, out, input) -> a JudgmentLabel.answer verdict; EOF quits.
@@ -290,7 +350,7 @@ end
 
 SPEC = {
   "--help" => :switch, "-h" => :switch, "--propose" => :switch, "--confirm" => :switch, "--counts" => :switch,
-  "--dry-run" => :switch, "--batch" => :integer, "--inbox-root" => :value, "--labels" => :value
+  "--dry-run" => :switch, "--forward" => :switch, "--batch" => :integer, "--inbox-root" => :value, "--labels" => :value
 }.freeze
 
 MODES = %w[--propose --confirm --counts].freeze
@@ -302,6 +362,7 @@ def parse_options(argv)
   mode = modes.first
   fail!(2, "--dry-run applies only to --propose", "drop --dry-run") if raw["--dry-run"] && mode != "--propose"
   fail!(2, "--batch applies only to --confirm", "drop --batch") if raw.key?("--batch") && mode != "--confirm"
+  fail!(2, "--forward applies only to --confirm", "drop --forward") if raw["--forward"] && mode != "--confirm"
   fail!(2, "--inbox-root does not apply to --counts", "drop --inbox-root") if raw.key?("--inbox-root") && mode == "--counts"
   batch = raw.fetch("--batch", 10)
   fail!(2, "--batch must be 1..200", "pass a smaller batch") unless (1..200).cover?(batch)
@@ -309,7 +370,7 @@ def parse_options(argv)
     fail!(2, "#{flag} must be an absolute path", "pass an absolute path") if raw.key?(flag) && !raw[flag].start_with?("/")
   end
   {
-    mode: mode, dry_run: raw["--dry-run"] || false, batch: batch,
+    mode: mode, dry_run: raw["--dry-run"] || false, forward: raw["--forward"] || false, batch: batch,
     inbox_root: raw["--inbox-root"] || Effects.default_inbox_root, labels: raw["--labels"] || Effects.default_labels
   }
 rescue StrictArgv::UsageError => e
