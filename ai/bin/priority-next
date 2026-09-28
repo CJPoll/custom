@@ -65,14 +65,13 @@ unreachable() {
 }
 
 # ---- arguments (all checked before any request) -----------------------------
+# Flags and the positional item id may come in any order. `--domains` given
+# with an empty value is refused: "given but empty" must never read as "not
+# given", which would widen the lease to every domain the session serves.
 SUB="${1:-}"; shift || true
-ITEM=""; DOMAINS=""; JSON_OUT=0
+ITEM=""; ITEM_GIVEN=0; DOMAINS=""; DOMAINS_GIVEN=0; JSON_OUT=0
 case "${SUB}" in
-  next) ;;
-  release|complete)
-    ITEM="${1:-}"; shift || true
-    [[ "${ITEM}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] \
-      || misuse "item_id=invalid" "pass the item_id \`priority-next next\` printed (a UUID)." ;;
+  next|release|complete) ;;
   "") misuse "subcommand=missing" "run: priority-next next | release <item_id> | complete <item_id> (see --help)." ;;
   *) misuse "subcommand=unknown" "run: priority-next next | release <item_id> | complete <item_id> (see --help)." ;;
 esac
@@ -83,15 +82,24 @@ while [ "$#" -gt 0 ]; do
     --domains)
       [ "${SUB}" = "next" ] || misuse "flag=--domains" "--domains belongs to \`next\` only."
       [ "$#" -ge 2 ] || misuse "domains=missing" "pass --domains with a comma-separated list of work, blend, personal."
-      DOMAINS="$2"; shift 2 ;;
-    *) misuse "argument=unknown" "run priority-next --help for the arguments each subcommand takes." ;;
+      DOMAINS="$2"; DOMAINS_GIVEN=1; shift 2 ;;
+    -*) misuse "argument=unknown" "run priority-next --help for the arguments each subcommand takes." ;;
+    *)
+      [ "${SUB}" != "next" ] && [ "${ITEM_GIVEN}" -eq 0 ] \
+        || misuse "argument=unexpected" "\`next\` takes no item id, and release/complete take exactly one."
+      ITEM="$1"; ITEM_GIVEN=1; shift ;;
   esac
 done
 
+if [ "${SUB}" != "next" ]; then
+  [[ "${ITEM}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] \
+    || misuse "item_id=invalid" "pass the item_id \`priority-next next\` printed (a UUID)."
+fi
+
 DOMAINS_JSON="null"
-if [ -n "${DOMAINS}" ]; then
+if [ "${DOMAINS_GIVEN}" -eq 1 ]; then
+  [ -n "${DOMAINS}" ] || misuse "domains=empty" "pass at least one of work, blend, personal, or omit --domains to serve the session's effective domain."
   IFS=',' read -r -a parts <<<"${DOMAINS}"
-  [ "${#parts[@]}" -gt 0 ] || misuse "domains=empty" "pass at least one of work, blend, personal."
   for d in "${parts[@]}"; do
     case "${d}" in work|blend|personal) ;; *)
       misuse "domains=invalid" "each --domains value is one of work, blend, personal." ;;
@@ -169,11 +177,21 @@ RPCERR="$(printf '%s' "${MSG}" | jq -r 'if .error then (.error.message // "an MC
 ANSWER="$(printf '%s' "${MSG}" | jq -c '(.result.structuredContent // (.result.content[0].text | fromjson? // null)) | select(type == "object")' 2>/dev/null)"
 RESULT="$(printf '%s' "${ANSWER}" | jq -r '.result // empty | select(type == "string")' 2>/dev/null)"
 
-expect_result() { # the results a subcommand may answer; anything else is unreadable
+# The results a subcommand may answer, each with the fields it must carry;
+# anything else is unreadable (exit 5), never a lease or a `none` read from
+# half an answer.
+expect_result() {
+  local shape
   case "${SUB}:${RESULT}" in
-    next:leased|next:none|release:ok|complete:ok) return 0 ;;
+    next:leased)
+      shape='(.item.item_id | type == "string" and test("^[0-9a-fA-F-]{36}$"))' ;;
+    next:none)
+      shape='([.considered, .excluded.owner_only, .excluded.leased, .excluded.domain, .ingest_failures_unread] | all(type == "number"))' ;;
+    release:ok|complete:ok) return 0 ;;
     *) unreachable "unreadable-answer" "the server's ${TOOL} answer carried no result this client knows (got '$(oneline "${RESULT}")'); check the athena server version." ;;
   esac
+  jq -e "${shape}" <<<"${ANSWER}" >/dev/null 2>&1 \
+    || unreachable "unreadable-answer" "the server's ${TOOL} answer said ${RESULT} but lacks the fields it carries; check the athena server version."
 }
 expect_result
 
