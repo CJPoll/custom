@@ -5421,6 +5421,10 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   equals the row's, or that has none, never reopens a `source_status` close.
   A family with no revision token declares how it orders a reopen when it
   registers, and cannot reopen an item until it does.
+  No update reopens a `source_deleted` close: a pre-delete update delivered
+  again after the delete must not bring the item back. A delete that carries a
+  revision sets `source_revision`, and an `undeleted` older than it is not
+  applied.
 - **The forge family closes by event, not by status** (DND-439). A reviewer
   removal has no status, and no terminal status is configured for
   `forge_review`. So `removed`, `merged` and `closed` close an `active` item
@@ -5436,13 +5440,9 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   request's next change. That is the safe direction of *A close needs an
   event no older than the row*, accepted.
 
-  **Later (2026-09-28):** the bullet before this one named "the forge family,
-  DND-439" as a family with no revision token. Superseded: the family
+  **Later (2026-09-28):** the reopen bullet before this one named "the forge
+  family, DND-439" as a family with no revision token. Superseded: the family
   declares `updated_at` as its revision, and this bullet is its order.
-  No update reopens a `source_deleted` close: a pre-delete update delivered
-  again after the delete must not bring the item back. A delete that carries a
-  revision sets `source_revision`, and an `undeleted` older than it is not
-  applied.
 - **A close needs an event no older than the row.** An older event is not
   applied at all, so it cannot close an item. An event with an equal revision
   can: within one minute, a redelivered terminal status can close an item that
