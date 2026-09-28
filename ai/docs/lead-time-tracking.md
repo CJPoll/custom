@@ -78,6 +78,19 @@ under-reports**. Worked example, GitHub PR #14 (DND-185): first commit
 `04:42:59Z`, PR opened `05:19:29Z`, admiral dispatched earlier still. We accept
 the under-report rather than invent a start we cannot prove.
 
+**A commit's time is its AUTHOR date as well as its committer date.** START is
+the minimum over both.
+
+**Later (2026-09-28):** START read the committer date only (`committedDate` on
+GitHub, `created_at` on GitLab). Superseded: a rebase rewrites the committer
+date to the rebase time and keeps the author date, and every landing rebases
+onto `origin/main` first. So START moved to the last rebase, and the under-report
+was not slight. Measured 2026-09-27: custom PR #90 (DND-978) first authored
+`06:58:52Z`, rebased `22:50:12Z`, merged `23:43:13Z`, read **53m** instead of
+**16h 44m** and never crossed `--slow 90`; gen_saas PR #478 read 5h 1m instead
+of 9h 43m. A cherry-picked commit keeps its author date too, so a ticket built
+from another branch's commits over-reports, like the stacked case below.
+
 **Known limitation — stacked branches over-report.** For a **stacked** MR/PR
 whose branch still contains an unmerged parent's commits, the forge's commit list
 includes those ancestor commits, so `min(commit time)` reaches back to the

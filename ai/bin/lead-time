@@ -19,8 +19,9 @@
 # Nothing about a specific repo is hardcoded; deploy detection is per-ticket.
 #
 # Markers (derived, durable):
-#   START = earliest commit on the ticket's branch (min commit time over the
-#           PR/MR commits; survives squash merge). It LAGS true dispatch by the
+#   START = earliest commit on the ticket's branch (min AUTHOR/commit time
+#           over the PR/MR commits; survives squash merge AND rebase, which
+#           resets only the committer date). It LAGS true dispatch by the
 #           first work chunk, so lead time computed this way slightly
 #           UNDER-reports. It is the honest durable floor.
 #   END   = 3-tier, matching Cody's definition exactly:
@@ -239,7 +240,8 @@ class GitHubForge
     {
       number: d["number"], title: d["title"], branch: d["headRefName"],
       merged_at: d["mergedAt"], merge_sha: merge_sha,
-      commit_times: (d["commits"] || []).map { |c| c["committedDate"] },
+      # Author AND committer date: a rebase resets only the committer date.
+      commit_times: (d["commits"] || []).flat_map { |c| [c["authoredDate"], c["committedDate"]] },
       deploy_at: deploy_at, pipeline_at: pipeline_at,
     }
   end
@@ -308,7 +310,8 @@ class GitLabForge
     {
       number: d["iid"], title: d["title"], branch: d["source_branch"],
       merged_at: d["merged_at"], merge_sha: merge_sha,
-      commit_times: commits.map { |c| c["created_at"] },
+      # authored_date survives a rebase; created_at is the committer date.
+      commit_times: commits.flat_map { |c| [c["authored_date"], c["committed_date"], c["created_at"]] },
       deploy_at: deploy_at, pipeline_at: pipeline_at,
     }
   end
@@ -504,6 +507,45 @@ def self_test
              gl_paths.first.include?("updated_after="), true)
   check.call("gitlab saturated merged list marks the scan incomplete", ProbeFailures.any?, true)
   ProbeFailures.reset!
+
+  # START must survive a rebase. A rebase (and every land here rebases onto
+  # origin/main first) rewrites each commit's COMMITTER date to the rebase
+  # time and keeps its AUTHOR date. Keyed on the committer date, START moved
+  # to the last rebase and the ticket read short. Measured 2026-09-27:
+  # custom PR #90 (DND-978) first authored 06:58:52Z, rebased 22:50:12Z,
+  # merged 23:43:13Z, read 53m instead of 16h44m, so it never crossed
+  # --slow 90; gen_saas PR #478 read 5h1m instead of 9h43m.
+  gh_rb = GitHubForge.new(".")
+  gh_rb.define_singleton_method(:run_json) do |cmd, _dir|
+    next [] if cmd[1] == "run"
+
+    { "number" => 90, "title" => "t", "headRefName" => "b",
+      "mergedAt" => "2026-09-27T23:43:13Z", "mergeCommit" => { "oid" => "m90" },
+      "commits" => [
+        { "authoredDate" => "2026-09-27T06:58:52Z", "committedDate" => "2026-09-27T22:50:12Z" },
+        { "authoredDate" => "2026-09-27T23:06:17Z", "committedDate" => "2026-09-27T23:06:17Z" },
+      ] }
+  end
+  f_rb = gh_rb.facts(90)
+  check.call("gh start survives a rebase (author date, not committer date)",
+             LeadTime.pick_start(f_rb[:commit_times])&.utc&.iso8601, "2026-09-27T06:58:52Z")
+
+  gl_rb = GitLabForge.allocate
+  gl_rb.instance_variable_set(:@proj, "g%2Fr")
+  gl_rb.define_singleton_method(:ci_ends) { |_mr| [nil, nil] }
+  gl_rb.define_singleton_method(:api) do |path|
+    if path.end_with?("/commits")
+      [{ "authored_date" => "2026-09-27T06:58:52.000-00:00",
+         "committed_date" => "2026-09-27T22:50:12.000-00:00",
+         "created_at" => "2026-09-27T22:50:12.000-00:00" }]
+    else
+      { "iid" => 9, "title" => "t", "source_branch" => "b",
+        "merged_at" => "2026-09-27T23:43:13Z", "merge_commit_sha" => "m9" }
+    end
+  end
+  f_gl = gl_rb.facts(9)
+  check.call("gitlab start survives a rebase (authored_date, not created_at)",
+             LeadTime.pick_start(f_gl[:commit_times])&.utc&.iso8601, "2026-09-27T06:58:52Z")
 
   if failures.empty?
     puts "lead-time --self-test: PASS (pure-logic assertions)"
