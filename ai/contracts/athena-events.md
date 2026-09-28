@@ -5661,6 +5661,8 @@ nothing else. It shows:
 - a footer link to `/priorities`.
 
 An empty index sends one line, "Nothing needs you today.", never silence.
+That line replaces the owner-queue and per-domain sections; only the header
+and the footer link stay.
 
 **Stored metadata only** (*The storage boundary*). A row is the source label,
 the item's ref linked to its `url`, the title and the reason ids. A
@@ -5700,8 +5702,13 @@ rules editor:
   never empty);
 - `digest_top_n`, 1 to 20 (default 5).
 
-The time zone is the owner's fleet policy (`Athena.Fleet.Policy.timezone`),
-never a second copy. The day is the owner's **local date**. A send time that
+The time zone is the owner's fleet policy time zone, never a second copy. In
+the server it is `Athena.Fleet.Policy.timezone`, the policy value the metering
+policy's `timezone` is read from, and it exists whether metering is on or
+off: an owner with no stored policy has the seed, `America/Denver`. A stored
+policy the owner may not read (DND-798) is not the seed: the digest sends
+nothing that day and records it `failed` with cause `policy_unreadable`, shown
+on `/priorities` with its `Fix:`, the same as the Slack causes above. The day is the owner's **local date**. A send time that
 occurs twice (the fall-back hour) is due at its first occurrence. A send time
 that does not exist (the spring-forward hour) is due at the first instant
 after the gap.
