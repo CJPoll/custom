@@ -240,6 +240,26 @@ else
   if [ "${rc}" -eq 1 ] && [[ "${out}" == *REFUSED* ]] && list_intact; then
     ok "FT5. a symlinked wrapper directory skips itself and still refuses"
   else bad "FT5. symlinked wrapper dir" "rc=${rc} out=${out}"; fi
+  # DND-1103: a shim AHEAD of the wrapper on PATH that delegates back to it
+  # (admiral-eval's sandbox git, a test's git.real symlink). The wrapper must
+  # exec the git after its own entry, never the shim again: an exec loop ends
+  # only at ARG_MAX ("Argument list too long") or the timeout.
+  mkdir -p "${TMP}/shim" "${TMP}/shim2"
+  printf '#!/bin/sh\nexec "%s/git" "$@"\n' "${WBIN}" > "${TMP}/shim/git"
+  printf '#!/bin/sh\nexec git.real "$@"\n' > "${TMP}/shim2/git"
+  ln -s "${WBIN}/git" "${TMP}/shim2/git.real"
+  chmod +x "${TMP}/shim/git" "${TMP}/shim2/git"
+  for s in shim shim2; do
+    out="$(PATH="${TMP}/${s}:${WBIN}:${GDIR}" timeout 10 git --version 2>&1)"; rc=$?
+    if [ "${rc}" -eq 0 ] && [[ "${out}" == "git version"* ]]; then
+      ok "FT6. ${s} ahead of the wrapper execs it back: reaches the git after the wrapper"
+    else bad "FT6. ${s} ahead of the wrapper" "rc=${rc} (124 = looped) out=$(printf '%s' "${out}" | head -c 200)"; fi
+    fresh
+    out="$(PATH="${TMP}/${s}:${WBIN}:${GDIR}" timeout 10 git stash pop 2>&1)"; rc=$?
+    if [ "${rc}" -eq 1 ] && [[ "${out}" == *REFUSED*"Fix:"* ]] && list_intact; then
+      ok "FT7. ${s} ahead of the wrapper: a refused form is still refused"
+    else bad "FT7. ${s} ahead of the wrapper still refuses" "rc=${rc} out=$(printf '%s' "${out}" | head -c 200)"; fi
+  done
 fi
 
 echo "--- false-positive corpus: non-git commands never reach git (DND-799/800/786) ---"

@@ -23,8 +23,11 @@
 # command that does not exec git.
 #
 # HOW IT DECIDES (on argv only; it parses no shell text):
-#   1. Real git: the first `git` on PATH that is not this wrapper (`test -ef`,
-#      so a symlinked or re-spelled directory still matches). Wrappers already
+#   1. Real git: the first `git` on PATH AFTER this wrapper's own entry that is
+#      not a wrapper (`test -ef`, so a symlinked or re-spelled directory still
+#      matches); a git ahead of the wrapper is a shim that may exec it back
+#      (DND-1103). With no entry of its own on PATH, or none after it, the
+#      first non-wrapper git anywhere on PATH. Wrappers already
 #      passed through are carried in ATHENA_AGENT_GIT_SEEN, so two copies of
 #      the wrapper on PATH never exec each other in a loop. None left: exit 127
 #      with a Fix:.
@@ -93,17 +96,28 @@ is_wrapper() {
   return 1
 }
 
+# The real git is the first non-wrapper git AFTER this wrapper's own PATH entry:
+# the one PATH would reach if the wrapper were not there. A git BEFORE that
+# entry is a shim someone put in front of the wrapper (an eval sandbox, a test
+# fixture); when it delegates back to the wrapper by path, exec'ing it again is
+# an exec loop that ends only at ARG_MAX (DND-1103). Only when the wrapper is
+# not on PATH at all (invoked by path), or nothing follows its entry, does the
+# first non-wrapper git anywhere on PATH stand in.
 real=
+before=
+past_self=
 old_ifs=$IFS
 IFS=:
 for d in $PATH; do
   [ -n "$d" ] || d=.
   [ -f "$d/git" ] && [ -x "$d/git" ] || continue
+  if [ "$d/git" -ef "$self" ]; then past_self=1; continue; fi
   is_wrapper "$d/git" && continue
-  real="$d/git"
-  break
+  if [ -n "$past_self" ]; then real="$d/git"; break; fi
+  [ -n "$before" ] || before="$d/git"
 done
 IFS=$old_ifs
+[ -n "$real" ] || real=$before
 if [ -z "$real" ]; then
   printf 'git (agent wrapper): no real git on PATH after skipping the wrapper %s (PATH=%s). Fix: put the directory holding the real git (usually /usr/bin) on PATH after the wrapper directory.\n' \
     "$self" "$PATH" >&2
