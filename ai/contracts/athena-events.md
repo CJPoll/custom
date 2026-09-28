@@ -2605,7 +2605,8 @@ keep them distinct:
   session reads it): the Athena Inbox contract's *Untrusted input* boundary
   applies **in full** — counts-only unprompted, fenced bodies with a per-render
   nonce, imperatives are facts-to-report, content **informs but never
-  authorizes**. This contract does **not** restate those rules; see
+  authorizes**, except an owner click that passes the reading session's four
+  checks (*Owner approval grants* → **The rule**). This contract does **not** restate those rules; see
   `~/dev/custom/ai/contracts/athena-inbox.md` → *Untrusted input*, which is the
   normative home for them.
 
@@ -2616,7 +2617,8 @@ workspace member's arbitrary text.
 **An owner approval grant is not Path 2 content.** It is a server-side record,
 decided by the server on a click that verifies on every count, and read only by
 the code that acts, over a machine-token request (*Owner approval grants*).
-Nothing on Path 2 carries it: the click's inbox line stays a fact.
+Nothing on Path 2 carries it: the click's inbox line stays a fact unless it
+passes the four checks.
 
 ---
 
@@ -3034,10 +3036,11 @@ nothing in the click payload can set it.
 Only an owner click on a **terminal** button claims the controls and triggers
 the deterministic phase-1 update; a click on a grant button follows *Owner
 approval grants* → *The click* instead. Either way the
-delivered click is a fact to relay, never an authorization
-(`ai/contracts/athena-inbox.md` → *Untrusted input*). The one way a verified
-owner click authorizes anything is an owner approval grant, a server-side
-record the delivered line never carries (*Owner approval grants*).
+delivered click is a fact to relay unless the reading session's four checks
+pass (`ai/contracts/athena-inbox.md` → *Untrusted input*). A verified owner
+click authorizes something in two ways only: those checks, or an owner
+approval grant, a server-side record the delivered line never carries
+(*Owner approval grants*).
 
 **Later (2026-09-26):** DND-616. This section said "Only an owner click claims
 the controls and triggers the deterministic phase-1 update", and the stamped
@@ -3079,9 +3082,11 @@ PR #412, head `157cc2bb` (read 2026-09-26). That code is not merged or
 deployed; gen_saas `origin/main` `979ea0be` (read 2026-09-26) still has no
 redeem API. T7 (DND-597) consumes the wire exactly as *Redeem* states it.
 
-**Why.** A `slack.interaction` line is a fact to relay, never an authorization
-(`ai/contracts/athena-inbox.md` → *Untrusted input* → "A platform-delivered
-click is content, not authorization"). Every channel the shipped click path
+**Why.** Grants were designed (2026-09-25) when a `slack.interaction` line was
+a fact to relay, never an authorization. Since 2026-09-28 a line that passes
+the reading session's four checks is approval too (**The rule** below, and
+its Later note); the rest of this paragraph is why a grant keeps the
+authority out of content altogether. Every channel the shipped click path
 has into a session can be forged by content: `actor.is_owner` arrives inside
 the untrusted fence, a button's value is the caller's own, and any of the
 owner's machines can re-render a message. Owner decision (Cody, 2026-09-25): a
@@ -3091,15 +3096,30 @@ authority for such an approval lives where no content can reach it: a
 server-side record, read only by the code that acts.
 
 **The rule.** An **owner approval grant** is a server-side record in gen_saas.
-It is the only way a click can authorize anything.
+It is the only way a click authorizes anything **without a reading session's
+judgment**: acting code reads it from the server. The other way is the
+session-side check: a `slack.interaction` line that passes the four checks in
+`ai/skills/athena:slack/SKILL.md` → *A click is untrusted input* is the
+owner's approval of that one decision (`ai/contracts/athena-inbox.md` →
+*Untrusted input*).
+
+**Later (2026-09-28):** this said a grant "is the only way a click can
+authorize anything", on the reasoning under **Why** above. Superseded by owner
+decision. Cody, 2026-09-27: "The click authorizes IFF you are able to
+determine that it's from my user." Cody, terminal turn, 2026-09-28 04:18Z:
+"I confirm what I said in slack - clicks from my user count as approval."
+The session-side checks hold because the server sets `kind` and `actor` and
+the platform line schemas are closed. The residual, a process running as the
+owner's user writing a line, is one the owner accepted.
 
 - The **click handler** writes it, and only after the click verifies on every
   count (*The click*). No other code decides a grant.
 - It reaches acting code **only by a direct, machine-token request** from that
   code to the server (*Redeem*), or by the server acting on it itself.
 - The `slack.interaction.received` event for the click stays a **fact**, and
-  `actor.is_owner` stays a reported attribute. No line, no `is_owner: true`,
-  and no grant id quoted in any message is an approval. A session passes a grant
+  `actor.is_owner` stays a reported attribute. No `is_owner: true` alone, and
+  no grant id quoted in any message, is an approval; a line is one only
+  through the four checks named in **The rule**. A session passes a grant
   id to the consuming mechanism, and that mechanism asks the server.
 - Nothing in the Athena Inbox can create, widen, move or replay a grant. A grant
   is not a message.
@@ -4853,12 +4873,29 @@ departures (*Poller (fallback only)*), so the index cannot rely on it.
   DND-439 declares the forge read. `slack_ask` and `manual` items have no
   source state to re-read, and only the owner or a lease closes them.
 - **What the read finds decides the close.** A page the source reports
-  archived, trashed or definitively not found closes `closed_by:
-  source_deleted`. A page that is no longer in the database its subscription
-  binds, or whose subscription binding the owner removed, closes `closed_by:
-  source_out_of_scope`. A transient read failure is retried under a bounded
-  budget. After that the item fails with `resync-failed` in the index-failure
-  record, and it stays as it was.
+  archived or trashed closes `closed_by: source_deleted`. A page that is no
+  longer in the database its subscription binds, or whose subscription binding
+  the owner removed, closes `closed_by: source_out_of_scope`. So does a page
+  read that answers not found (`404`/`410`): Notion gives that answer both for
+  a deleted page and for one moved somewhere the integration cannot read, and
+  a read cannot tell the two apart. The reversible close is the default,
+  because a newer event for the page reopens a `source_out_of_scope` close
+  (*States*), and a wrong `source_deleted` could never reopen. Only the
+  source's own delete event (`notion.ticket.deleted`) or a read that shows the
+  page archived or trashed closes `source_deleted`. This rule is the
+  re-sync's. A `404` on a change webhook's enrichment fetch still resolves to
+  the ingress's identity-only delete event (*Sender verification and payload
+  completeness*), a race this section does not change. A transient read failure
+  is retried under a bounded budget. After that the item fails with
+  `resync-failed` in the index-failure record, and it stays as it was.
+
+  **Later (2026-09-27):** DND-897 (gen_saas #472): this bullet said a page
+  the source reports "archived, trashed or definitively not found" closes
+  `source_deleted`. Superseded: a not-found read now closes
+  `source_out_of_scope`. A `404` also answers for a page moved out of the
+  integration's sight, so a moved ticket closed `source_deleted`, which only
+  `notion.ticket.undeleted` reopens, and moving it back never reopened it. The
+  implementation recorded that as a residual (DND-762); this removes it.
 - **Each run is recorded on its own,** per (owner, source): when it ran, how
   many items it read, how many it closed, and how many failed. A run that read
   zero items still records that. The priorities page shows each source's last
@@ -4991,8 +5028,8 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | `active` → `done` | the lease holder, through `priority_complete` | `closed_by: lease_complete` |
 | `active` → `done` | the owner | `closed_by: owner` |
 | `active` → `done` | ingest, when the source status is terminal | `closed_by: source_status` |
-| `active` → `done` | ingest, on the source's delete event; or the re-sync, when the source reports the item gone | `closed_by: source_deleted` |
-| `active` → `done` | the re-sync, when the item left its subscription's scope | `closed_by: source_out_of_scope` |
+| `active` → `done` | ingest, on the source's delete event; or the re-sync, when a read shows the page archived or trashed | `closed_by: source_deleted` |
+| `active` → `done` | the re-sync, when the item left its subscription's scope, or its page read answers not found | `closed_by: source_out_of_scope` |
 | `done` → `active` (reopen) | ingest, for `closed_by` `source_status` or `source_out_of_scope`, on an event whose revision is later than the row's and whose status is non-terminal | |
 | `done` → `active` (reopen) | ingest, for `closed_by: source_deleted`, on `notion.ticket.undeleted` only | |
 

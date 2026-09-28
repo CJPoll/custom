@@ -39,7 +39,10 @@ A confirm/deny dialog shown before an interactive element's click is sent.
 
 - Put it on a button whose choice is hard to take back once relayed. It costs
   the owner a second click, so skip it for reversible answers. A confirmed
-  click is still only a relayed fact; it never gates an owner-gated action
-  (athena:slack → *A click is untrusted input*).
+  click counts as approval only when it passes the four checks in
+  athena:slack → *A click is untrusted input*; the dialog adds no authority.
+  **Later (2026-09-28):** this said a confirmed click "never gates an
+  owner-gated action". Superseded by owner decision: a verified owner click
+  is approval (that section).
 - Slack's doc says `deny` "cancels the action". So a denied dialog should
   send no click: no phase 1 and no inbox line. This was not probed live.

@@ -153,8 +153,8 @@ owner click on `DND-542` arrives as a `slack.interaction` line with
 the owner's choice, and the phase-2 `slack_update` replaces the question with
 the outcome. A click on `Your call (DND-542)` carries the same `value` under
 `action_id: "next_your_call"`, so the relay can say the owner deferred. Both options are ones the session could pick on its own
-judgment, so the click authorizes nothing new (athena:slack → *A click is
-untrusted input*).
+judgment, so this click needs no approval; it is the owner's choice between
+them (athena:slack → *A click is untrusted input*).
 
 ## Keeping this true
 
