@@ -7,8 +7,8 @@
 # hook; every later case runs the hook as git runs it.
 #
 # The design's QA table (cases 1-12; case 11, the gh-athena body scan, is
-# ai/test/gh-athena-outbound/self-test.sh; case 13, tree mode at 0 hits in the
-# gate, waits for DND-704/705/706) plus the parser and state edges.
+# ai/test/gh-athena-outbound/self-test.sh; case 13, tree mode in the gate, is
+# ai/test/check-outbound-tree/self-test.sh) plus the parser and state edges.
 #
 # Hermetic: fixture repos and a fixture overlay under mktemp -d, a fake HOME,
 # GIT_ALLOW_PROTOCOL=file, the global/system git config replaced. Synthetic

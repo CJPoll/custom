@@ -118,6 +118,12 @@ STATIC_CHECKS = [
   # read is exit 3, not a pass.
   ["check-ruby-floor",          %w[ai/bin/check-ruby-floor]],
   ["check-ruby-floor self-test", %w[ai/bin/check-ruby-floor --self-test]],
+  # DND-699: no tracked file carries a work-domain value. The bar (the
+  # patterns) lives in the private overlay, outside the diff. A machine with no
+  # overlay and no outbound pre-push hook passes NOT MEASURED, never CLEAN; a
+  # marked machine without one fails. Its suite is the discovered
+  # ai/test/check-outbound-tree/self-test.sh.
+  ["check-outbound-tree",       %w[ai/bin/check-outbound-tree]],
   ["check-tool-risk",           %w[ai/bin/check-tool-risk]],
   ["check-tool-risk self-test", %w[ai/bin/check-tool-risk --self-test]],
   # Live per-user inotify INSTANCE headroom. When orphaned autolaunched

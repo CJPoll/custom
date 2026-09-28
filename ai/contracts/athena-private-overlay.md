@@ -280,10 +280,41 @@ the error's class, never its message, which could quote a pattern.
 - `--tree` — every tracked file of the current repository: its path and its
   INDEX copy (what is tracked, not an unstaged working-tree edit). Binary
   content is scanned too, as bytes split on newlines: no file opts out.
-  It is not in `harness-gate` yet: the tree still carries work values until
-  DND-704, DND-705 and DND-706 land, and wiring it earlier would turn every
-  gate red.
+  `harness-gate` runs it through `ai/bin/check-outbound-tree` (see *The gate
+  check* below).
 - `--text FILE [--label NAME]` — one file's lines (gh-athena's title and body).
+
+**Later (2026-09-28):** the `--tree` bullet said "It is not in `harness-gate`
+yet: the tree still carries work values until DND-704, DND-705 and DND-706
+land". Superseded: with those deletions the tree scans 0 hits, and DND-699
+wired the check described in *The gate check*.
+
+**The gate check.** `ai/bin/check-outbound-tree`, declared in `harness-gate`,
+runs tree mode over the checkout under test. Verdict rules:
+`ai/lib/outbound_tree_check.rb`; the mark probe: `ai/lib/outbound_mark.rb`;
+tests: `ai/test/check-outbound-tree/self-test.sh`. It reads the same mark as
+the forge path below: the outbound pre-push hook in the checkout's common git
+dir, as `git rev-parse --git-path hooks/pre-push` resolves it. A mark that
+cannot be determined counts as marked.
+
+| Overlay | Marked (or undeterminable) | Unmarked |
+|---|---|---|
+| ABSENT | FAIL, `COULD NOT MEASURE` | pass, `NOT MEASURED (no overlay on this unmarked machine; …)` |
+| MALFORMED, zero patterns, no committed floor, unreadable tree | FAIL, `COULD NOT MEASURE` | FAIL, `COULD NOT MEASURE` |
+| HITS | FAIL: `file:line label=<label>`, never the text, with `Fix:` | the same |
+| CLEAN | pass, `CLEAN` + the `SCANNED` line | the same |
+
+`NOT MEASURED` is textually distinct from `CLEAN`: it prints no `CLEAN`, no
+`OK` and no `SCANNED` line. The check calls the scan's libraries, not the CLI,
+so `ATHENA_OUTBOUND_WAIVE` does not waive it: the waiver is for a push. The
+bar is the overlay's pattern list, outside the diff (`~/dev/custom/CLAUDE.md`
+→ *A check's own bar must not live in the diff it is checking*).
+
+Residual, stated: removing the hook mark from a machine with no overlay turns
+the check into `NOT MEASURED`, a pass. The mark is outside the diff too (it is
+in the common git dir, not a tracked file), so a branch cannot remove it; an
+agent or human acting on the machine can. A gate on a machine that never held
+the overlay (the laptop today, a fresh clone) measures nothing.
 
 **The pre-push hook.** `ai/git-hooks/outbound-pre-push.sh`. Once installed at
 the main checkout's `.git/hooks/pre-push`, it serves every linked worktree and

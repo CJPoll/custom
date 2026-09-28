@@ -1,0 +1,93 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# check-outbound-tree -- the harness-gate check that no tracked file of this
+# PUBLIC repo carries a work-domain value (DND-699 part 2). Contract:
+# ai/contracts/athena-private-overlay.md -> Outbound-scan interface.
+#
+# It runs the outbound scan's tree mode over the repository it is started in
+# (the gate starts it in the checkout under test) and turns the result into a
+# gate verdict. The bar is the private overlay's pattern list, which lives
+# outside the public diff (~/dev/custom/CLAUDE.md -> A check's own bar must
+# not live in the diff it is checking).
+#
+# Machine without an overlay: the outbound pre-push hook is the mark of a
+# machine that holds one. Marked (or a mark that cannot be determined) and the
+# overlay ABSENT fails. Unmarked and ABSENT passes with a NOT MEASURED line,
+# never CLEAN. MALFORMED, zero patterns, no committed floor, or an unreadable
+# tree fails on every machine.
+#
+# The outbound waiver (ATHENA_OUTBOUND_WAIVE) is a push-time escape and is not
+# honoured here: this check calls the scan's libraries, not the waivable CLI.
+#
+# Bucket placement: this file is the Manager + Framework. Verdict:
+# ai/lib/outbound_tree_check.rb (Domain). Reads: ai/lib/outbound_mark.rb,
+# ai/lib/private_overlay_resolver.rb, ai/lib/outbound_scan_sources.rb (Side
+# Effects). Tests: ai/test/check-outbound-tree/self-test.sh.
+
+require_relative "../lib/outbound_tree_check"
+require_relative "../lib/outbound_mark"
+require_relative "../lib/outbound_scan_sources"
+
+HELP = <<~HELP
+  check-outbound-tree -- harness-gate check: no tracked file carries a work-domain value (DND-699)
+
+  Usage:
+    check-outbound-tree          scan every tracked file of the repository in the current directory
+    check-outbound-tree --help   this text (stdout, exit 0, no side effects)
+
+  Patterns: the private overlay's outbound/patterns.tsv (see `ai/bin/outbound-scan --help`).
+
+  Exit / first line:
+    0 "check-outbound-tree: CLEAN: ..."         scanned; zero hits (a SCANNED counts line follows)
+    0 "check-outbound-tree: NOT MEASURED (...)" the overlay is ABSENT and this machine is not marked
+                                                (no outbound pre-push hook); nothing was scanned
+    1 "check-outbound-tree: FAIL: HITS: ..."    each hit as file:line + label, never the matched text
+    1 "check-outbound-tree: FAIL: COULD NOT MEASURE: ..."
+                                                a marked (or undeterminable) machine with no overlay,
+                                                a malformed overlay, zero patterns, no committed floor,
+                                                or a tree that could not be read
+    2 usage error
+
+  ATHENA_OUTBOUND_WAIVE is not honoured: the waiver is for a push, not the gate.
+  Contract: ai/contracts/athena-private-overlay.md -> Outbound-scan interface
+HELP
+
+def scan_result
+  patterns = OutboundScan::Sources.patterns
+  surface = OutboundScan::Sources.scan_tree(patterns)
+  return { state: :clean, counts: surface.counts } if surface.hits.empty?
+
+  rendered = surface.hits.map { |h| "#{OutboundScan.render_location(h.location, patterns)} label=#{h.label}" }
+  { state: :hits, counts: surface.counts, hits: rendered }
+rescue OutboundScan::Unmeasurable => e
+  { state: :unmeasured, reason: e.message }
+rescue StandardError => e
+  # Never e.message: a Regexp or git error can quote a pattern, and a pattern
+  # IS a work value.
+  { state: :unmeasured,
+    reason: "the scanner failed unexpectedly (#{e.class}); no message is printed because it could quote a pattern" }
+end
+
+def run
+  mark, = OutboundMark.probe(Dir.pwd)
+  overlay = PrivateOverlay::Resolver.root
+  detail = overlay.state == :absent ? overlay.root : overlay.reason
+  scan = overlay.state == :found ? scan_result : nil
+  verdict = OutboundTreeCheck.decide(mark: mark, overlay: overlay.state, detail: detail, scan: scan)
+  puts verdict.lines
+  exit(verdict.ok ? 0 : 1)
+end
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts HELP
+  exit 0
+end
+
+unless ARGV.empty?
+  puts "check-outbound-tree: USAGE: unexpected argument(s) #{ARGV.first(3).map(&:inspect).join(' ')}. " \
+       "Fix: run it with no arguments from the repository to scan (see --help)."
+  exit 2
+end
+
+run
