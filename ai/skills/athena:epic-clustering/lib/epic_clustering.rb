@@ -13,7 +13,7 @@
 #     (a body that cannot answer the problem, the repro/exploit path, or the
 #     affected code);
 #   - the daily digest's content.
-# Its text and Block Kit, and approval requests, are epic_clustering_view.rb.
+# Its text and Block Kit, and the won't-fix notice, are epic_clustering_view.rb.
 #
 # Tier and tier-4 order are next-mission's (ai/lib/next_mission.rb), called
 # here, never copied. The prose homes are athena:ticket-management ->

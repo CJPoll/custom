@@ -18,7 +18,7 @@
 # and the tier-4 order are next-mission's (ai/lib/next_mission.rb).
 #
 # Exit codes -- a failed lookup must never look like an empty one:
-#   0  done (read / proof printed or holding / digest or request drafted)
+#   0  done (read / proof printed or holding / digest or notice drafted)
 #   2  usage error
 #   3  could not read or could not measure (Notion/HTTP failure, missing
 #      token, unreadable fixture or snapshot, data outside the vocabulary)
@@ -52,7 +52,7 @@ USAGE = <<~TXT
               snapshot before the moves, --against it after (exit 4 when a
               never-movable ticket left its epic)
     digest    draft the daily digest (text, and Block Kit with --blocks-out)
-    request   draft one promote / won't-fix approval request as Block Kit
+    notice    draft one won't-fix notice (a close already made, with a veto) as Block Kit
 
   Scope (read, proof --save):
     --epic KEY          one epic: page id or exact title
@@ -70,15 +70,15 @@ USAGE = <<~TXT
     --started IDS       ids with a live captain, from each live run's state log
                         (athena:fleet-liveness). Without it the stale In Progress
                         check is skipped, and says so.
-    --pass-summary FILE {"moved":[{id,from,to}],"merged":[{keep,duplicate}],"closed":[{id,evidence}]}
+    --pass-summary FILE {"moved":[{id,from,to}],"merged":[{keep,duplicate}],"closed":[{id,evidence}],
+                         "wont_fix":[{id,reason}]}
     --no-bodies         skip reading ticket bodies (ticket hygiene then says "not scanned")
     --now ISO8601       the digest's clock (default: now, UTC)
 
-  request:
-    --type promote|wont-fix  --ticket DND-N  --title TEXT  --background TEXT
-    --why TEXT  --recommend yes|no  [--tier 0-3 for promote]
+  notice:
+    --ticket DND-N  --title TEXT  --background TEXT  --why TEXT
 
-  Output (digest, request):
+  Output (digest, notice):
     --session NAME      the sending session named on the first line
                         (default "harness session -> architect (epic-clustering)")
     --blocks-out FILE   write the Block Kit blocks as a JSON array
@@ -93,8 +93,8 @@ TXT
 SPEC = {
   "--epic" => :value, "--epics" => :value, "--all-open-epics" => :switch, "--from-json" => :value,
   "--save" => :value, "--against" => :value, "--started" => :value, "--pass-summary" => :value,
-  "--no-bodies" => :switch, "--now" => :value, "--type" => :value, "--ticket" => :value, "--title" => :value,
-  "--background" => :value, "--why" => :value, "--recommend" => :value, "--tier" => :integer,
+  "--no-bodies" => :switch, "--now" => :value, "--ticket" => :value, "--title" => :value,
+  "--background" => :value, "--why" => :value,
   "--session" => :value, "--blocks-out" => :value, "--json" => :switch, "--self-test" => :switch,
   "--help" => :switch
 }.freeze
@@ -103,14 +103,14 @@ ALLOWED = {
   "read" => %w[--epic --epics --all-open-epics --from-json --json],
   "proof" => %w[--epic --epics --all-open-epics --from-json --save --against --json],
   "digest" => %w[--from-json --started --pass-summary --no-bodies --now --session --blocks-out --json],
-  "request" => %w[--type --ticket --title --background --why --recommend --tier --session --blocks-out]
+  "notice" => %w[--ticket --title --background --why --session --blocks-out]
 }.freeze
 
 DEFAULT_SESSION = "harness session -> architect (epic-clustering)"
 
 def usage_error(msg)
   warn "#{PROG}: #{msg}"
-  warn "Fix: run `#{PROG} --help`; give one command (read, proof, digest, request) and only its flags."
+  warn "Fix: run `#{PROG} --help`; give one command (read, proof, digest, notice) and only its flags."
   exit 2
 end
 
@@ -349,21 +349,19 @@ rescue EC::DataError => e
                         "or read every epic its tickets link to.")
 end
 
-def cmd_request(opts)
-  %w[--type --ticket --title --background --why --recommend].each do |f|
-    usage_error("request needs #{f}") unless opts[f]
+def cmd_notice(opts)
+  %w[--ticket --title --background --why].each do |f|
+    usage_error("notice needs #{f}") unless opts[f]
   end
-  r = ECV.approval_request(type: opts["--type"], ticket: opts["--ticket"], title: opts["--title"],
-                           background: opts["--background"], why: opts["--why"], recommend: opts["--recommend"],
-                           tier: opts["--tier"], session: opts["--session"] || DEFAULT_SESSION)
+  r = ECV.wont_fix_notice(ticket: opts["--ticket"], title: opts["--title"], background: opts["--background"],
+                          why: opts["--why"], session: opts["--session"] || DEFAULT_SESSION)
   write_file(opts["--blocks-out"], JSON.pretty_generate(r[:blocks]) + "\n") if opts["--blocks-out"]
-  puts "DRAFT: #{PROG} never sends. Post with mcp__athena__slack_post and inbox_name (athena:slack)."
+  puts "DRAFT: #{PROG} never sends. The top-level session posts it (athena:slack -> A click is untrusted input -> Who posts it)."
   puts "slack text: #{r[:text]}"
   puts "blocks: #{opts['--blocks-out'] ? "#{r[:blocks].size} written to #{opts['--blocks-out']}" : JSON.generate(r[:blocks])}"
 rescue EC::DataError => e
   warn "#{PROG}: #{e.message}"
-  warn "Fix: give the request real background, why and title (each under 3000 characters), --recommend yes|no, " \
-       "and --tier 0-3 for a promote only."
+  warn "Fix: give the notice real background, why and title (each under 3000 characters) and a ticket id like DND-12."
   exit 2
 end
 

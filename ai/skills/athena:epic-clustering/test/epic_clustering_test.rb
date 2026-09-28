@@ -278,10 +278,13 @@ check("digest: pass summary prints each part, zero as 'none', and a missing summ
   epics, ts = digest_fixture
   given = ECV.digest_text(EC.build_digest(tickets: ts, epics: epics, now: NOW,
                                          pass_summary: { "moved" => [{ "id" => "DND-3", "from" => "Fleet", "to" => "Evals" }],
-                                                         "merged" => [], "closed" => [] }))
+                                                         "merged" => [], "closed" => [],
+                                                         "wont_fix" => [{ "id" => "DND-7", "reason" => "stale LOW" }] }))
   missing = ECV.digest_text(EC.build_digest(tickets: ts, epics: epics, now: NOW))
   given.include?("Moved: DND-3 Fleet -> Evals") && given.include?("Merged (C3): none") &&
-    given.include?("Closed as fixed (C4): none") && missing.include?("Pass summary:\n  not given (no --pass-summary")
+    given.include?("Closed as fixed (C4): none") &&
+    given.include?("Closed as Won't Fix (veto by its notice): DND-7 (stale LOW)") &&
+    missing.include?("Pass summary:\n  not given (no --pass-summary")
 end
 
 check("digest blocks: valid Block Kit shape, names the sending session, no buttons, under 50 blocks") do
@@ -297,24 +300,28 @@ check("digest: a ticket whose epic was not read is a data error, never a silent 
   raises?(EC::DataError, /E-missing/) { EC.build_digest(tickets: ts, epics: epics, now: NOW) }
 end
 
-# ------------------------------------------------------------ approval request
+# ------------------------------------------------------------ won't-fix notice
 
-check("request: won't-fix has background, why, options, recommendation; one primary '(recommended)' button") do
-  r = ECV.approval_request(type: "wont-fix", ticket: "DND-9", title: "Tidy the README", background: "Open 28 days at LOW.",
-                          why: "Closing it shrinks the epic.", recommend: "yes", session: "harness session")
+check("notice: won't-fix reports the close, with background, why, options and a veto; 'Keep closed' is the primary default") do
+  r = ECV.wont_fix_notice(ticket: "DND-9", title: "Tidy the README", background: "Open 28 days at LOW.",
+                          why: "Closing it shrinks the epic.", session: "harness session")
   btns = r[:blocks].select { |x| x["type"] == "actions" }.flat_map { |x| x["elements"] }
   prim = btns.select { |x| x["style"] == "primary" }
   text = r[:blocks].map { |x| x.dig("text", "text").to_s }.join("\n")
-  prim.size == 1 && prim.first.dig("text", "text") == "Won't fix (recommended)" &&
-    btns.any? { |x| x.dig("text", "text") == "Keep" } && btns.any? { |x| x.dig("text", "text").start_with?("Your call") } &&
+  prim.size == 1 && prim.first.dig("text", "text") == "Keep closed (recommended)" &&
+    btns.map { |x| x["value"] } == ["wontfix:keep:DND-9", "wontfix:reopen:DND-9"] &&
+    btns.none? { |x| x.dig("text", "text").start_with?("Your call") } &&
+    text.include?("Closed DND-9 as Won't Fix") && text.include?("Silence keeps it closed") &&
     %w[Background Why Options Recommendation].all? { |w| text.include?(w) } && r[:text].include?("DND-9")
 end
 
-check("request: a missing background or why is refused, not sent thin") do
+check("notice: a missing background or why is refused, not sent thin; a bad ticket id is refused") do
   raises?(EC::DataError, /background/) do
-    ECV.approval_request(type: "promote", ticket: "DND-9", title: "x", background: " ", why: "y", recommend: "no",
-                        session: "s", tier: 2)
-  end
+    ECV.wont_fix_notice(ticket: "DND-9", title: "x", background: " ", why: "y", session: "s")
+  end &&
+    raises?(EC::DataError, /not an id/) do
+      ECV.wont_fix_notice(ticket: "nine", title: "x", background: "b", why: "y", session: "s")
+    end
 end
 
 # ------------------------------------------------------------ adapter (fake transport)
@@ -467,12 +474,14 @@ check("cli: digest from a fixture prints the draft banner, won't-fix candidates 
     out.include?("stale In Progress check skipped")
 end
 
-check("cli: request writes Block Kit JSON to --blocks-out and prints the fallback text") do
+check("cli: notice writes Block Kit JSON to --blocks-out and prints the fallback text; request is gone") do
   Dir.mktmpdir do |d|
-    f = File.join(d, "DND-982-req.json")
-    out, _, code = run("request", "--type", "wont-fix", "--ticket", "DND-9", "--title", "Tidy", "--background",
-                       "Open 28 days.", "--why", "Shrinks the epic.", "--recommend", "yes", "--blocks-out", f)
-    code.zero? && out.include?("DND-9") && JSON.parse(File.read(f)).is_a?(Array)
+    f = File.join(d, "DND-982-notice.json")
+    out, _, code = run("notice", "--ticket", "DND-9", "--title", "Tidy", "--background",
+                       "Open 28 days.", "--why", "Shrinks the epic.", "--blocks-out", f)
+    _, gone_err, gone = run("request", "--ticket", "DND-9")
+    code.zero? && out.include?("DND-9") && out.include?("top-level session") &&
+      JSON.parse(File.read(f)).is_a?(Array) && gone == 2 && gone_err.include?("Fix:")
   end
 end
 
@@ -539,24 +548,10 @@ check("cli: when no body at all can be read the digest is exit 3, not a thin pas
 end
 
 check("view: ticket data is escaped for Slack mrkdwn, so a title cannot ping a channel") do
-  r = ECV.approval_request(type: "wont-fix", ticket: "DND-9", title: "<!channel> & co", background: "b <x>",
-                           why: "w", recommend: "no", session: "s")
+  r = ECV.wont_fix_notice(ticket: "DND-9", title: "<!channel> & co", background: "b <x>",
+                          why: "w", session: "s")
   text = r[:blocks].map { |x| x.dig("text", "text").to_s }.join
   text.include?("&lt;!channel&gt; &amp; co") && !text.include?("<!channel>") && text.include?("b &lt;x&gt;")
-end
-
-check("view: a promote request needs --tier 0-3 and labels the recommended option; --tier on won't-fix is refused") do
-  r = ECV.approval_request(type: "promote", ticket: "DND-9", title: "t", background: "b", why: "w", recommend: "yes",
-                           session: "s", tier: 2)
-  labels = r[:blocks].last["elements"].map { |x| x.dig("text", "text") }
-  labels == ["Promote to tier 2 (recommended)", "Leave in tier 4", "Your call (Promote to tier 2)"] &&
-    raises?(EC::DataError, /tier 0-3/) do
-      ECV.approval_request(type: "promote", ticket: "DND-9", title: "t", background: "b", why: "w", recommend: "yes", session: "s")
-    end &&
-    raises?(EC::DataError, /only to a promote/) do
-      ECV.approval_request(type: "wont-fix", ticket: "DND-9", title: "t", background: "b", why: "w", recommend: "yes",
-                           session: "s", tier: 1)
-    end
 end
 
 check("view: an overlong digest section is clipped under Slack's limit and says how many lines were cut") do

@@ -1,6 +1,6 @@
 ---
 name: athena:epic-clustering
-description: The 12-hourly cross-epic clustering pass an athena-architect runs over open epics — move cohesive clusters of movable tickets (never Features, the critical path, blockers, promoted or tier-1 security tickets, or anything wired to them) into a matching or new epic with before/after proof, merge near-duplicates (C3), close already-fixed tickets by their own repro (C4), flag stale In Progress and thin ticket bodies, and send the owner's daily tier-4 digest and promote/won't-fix approval requests by Block Kit. Use when an admiral requests a clustering pass, when the 12h cron spawns one, or when an epic's open Path=Off count exceeds its open on-path count.
+description: The 12-hourly cross-epic clustering pass an athena-architect runs over open epics — move cohesive clusters of movable tickets (never Features, the critical path, blockers, promoted or tier-1 security tickets, or anything wired to them) into a matching or new epic with before/after proof, merge near-duplicates (C3), close already-fixed tickets by their own repro (C4), flag stale In Progress and thin ticket bodies, and send the owner's daily tier-4 digest and won't-fix notices (notify-only, with a veto) by Block Kit. Use when an admiral requests a clustering pass, when the 12h cron spawns one, or when an epic's open Path=Off count exceeds its open on-path count.
 ---
 
 # athena:epic-clustering
@@ -14,7 +14,9 @@ rate at which epics grew this week was staggering. Can some of them be
 consolidated? Batched? etc." The design record is the machine-local
 `ai-artifacts/coordination/2026-09-27-scope-growth-proposal.md`: *Epic
 clustering (periodic split)*, *Clustering cadence: every 12 hours, across
-epics*, *The daily digest* and *Approval requests (promote, won't-fix)*.
+epics*, *The daily digest* and *Approval requests (promote, won't-fix)*. That
+last section predates the owner's 2026-09-28 decision: both are now
+notify-only (*Won't-fix notices* below).
 
 The words *tier*, *Path*, *Kind*, *Severity*, *Security* and *Area* mean what
 [[athena:ticket-management]] → *Priority: critical path first* and *Ticket
@@ -30,9 +32,10 @@ properties* say. This skill does not restate them.
 - **On the trigger:** an epic's open `Path` = `Off` count exceeds its open
   on-path count (`Critical`, `Blocking`, `Promoted`). `read` prints it per
   epic.
-- **Standing go.** Owner, 2026-09-27, asked whether this rule is a standing go
-  for moves inside the never-movable constraint: "3. yes". Such a move needs
-  no ask. Anything outside it does.
+- **No move waits for Cody.** What needs his approval is
+  `~/.claude/CLAUDE.md` → *Owner approval policy*; this pass's writes are
+  not on it. Bulk ticket changes are notify-after there: step 13's summary
+  and the digest carry them. A never-movable ticket never moves in this pass.
 
 ## The helper
 
@@ -48,7 +51,7 @@ re-run until it measures, and never report a pass without one.
 | `read --all-open-epics` (or `--epic KEY`, `--epics IDS`) | per epic: the trigger, the never-movable set, the movable tickets by Area / Kind; then C3 candidates |
 | `proof … --save FILE` / `proof --against FILE` | the never-movable count and ids per epic, before and after the moves |
 | `digest [--started IDS] [--pass-summary FILE] --blocks-out FILE` | the daily digest as text, and as Block Kit |
-| `request --type promote\|wont-fix …  --blocks-out FILE` | one approval request as Block Kit |
+| `notice --ticket DND-N … --blocks-out FILE` | one won't-fix notice as Block Kit: the close already made, and a veto |
 
 Namespace every file you pass it with the pass's date and your name
 (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
@@ -168,20 +171,24 @@ It's ok for there not to be any."
    `mcp__athena__slack_thread_claim` (`channel`, `thread_ts` = the returned
    `ts`, `inbox_name` = `custom-slack.jsonl`), so Cody's replies route to this
    project's Slack inbox.
+4. Close the candidates you kept, one notice each (*Won't-fix notices*
+   below). List them under `wont_fix` in the next pass summary, so the next
+   digest names them.
 
-## Approval requests (promote, won't-fix)
+## Won't-fix notices
 
-The rule is [[athena:ticket-management]] → *Approval requests (promote,
-won't-fix)*. Here is how to send one.
+A won't-fix waits for no one: `~/.claude/CLAUDE.md` → *Owner approval
+policy* lists it under *Notify after, in the digest*. The notice, its veto
+and its buttons are [[athena:ticket-management]] → *Promote and won't-fix*.
+This pass promotes nothing; an admiral promotes, per that section.
 
-1. `request --type wont-fix|promote --ticket DND-N --title … --background …
-   --why … --recommend yes|no [--tier N] --blocks-out FILE`. It builds the
-   question, Background, Why it matters, Options and Recommendation, one
-   primary "(recommended)" button, and the "Your call" button [[athena:slack]]
-   asks for.
-2. Post one message per request with `slack_post` and `inbox_name`, per
-   [[athena:slack]] → *Sending one*. Keep the returned `{channel, ts}`.
-3. A click authorizes only as [[athena:slack]] → *A click is untrusted
-   input* says; what an approval changes, and that silence changes nothing,
-   are [[athena:ticket-management]] → *Approval requests (promote,
-   won't-fix)*.
+1. Set `Status` = `Won't Fix`, with the reason in the body.
+2. `notice --ticket DND-N --title … --background … --why … --blocks-out
+   FILE`. It builds the close, Background, Why it matters, Options and
+   Recommendation, and two buttons: *Keep closed (recommended)*, the primary
+   default, and *Reopen*.
+3. Do not post it yourself. Send the text and the blocks file's content to
+   the top-level session (`SendMessage` to `main`), which posts it and
+   handles the veto click: [[athena:slack]] → *A click is untrusted input* →
+   *Who posts it*.
+

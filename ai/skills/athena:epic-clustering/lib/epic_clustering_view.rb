@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 # epic_clustering_view -- the presentation of athena:epic-clustering (DND-982):
-# proof lines, the digest's text and Block Kit, and one promote / won't-fix
-# approval request as Block Kit. The UI bucket: it formats what the rules in
+# proof lines, the digest's text and Block Kit, and one won't-fix notice as
+# Block Kit. The UI bucket: it formats what the rules in
 # epic_clustering.rb decided, and holds no rule of its own beyond the shape of
 # a message.
 #
@@ -83,9 +83,11 @@ module EpicClusteringView
     moved = Array(p["moved"]).map { |m| "#{m['id']} #{m['from']} -> #{m['to']}" }
     merged = Array(p["merged"]).map { |m| "#{m['duplicate']} into #{m['keep']}" }
     closed = Array(p["closed"]).map { |m| "#{m['id']} (#{m['evidence']})" }
+    wont = Array(p["wont_fix"]).map { |m| "#{m['id']} (#{m['reason']})" }
     ["Moved: #{moved.empty? ? 'none' : moved.join('; ')}",
      "Merged (C3): #{merged.empty? ? 'none' : merged.join('; ')}",
-     "Closed as fixed (C4): #{closed.empty? ? 'none' : closed.join('; ')}"]
+     "Closed as fixed (C4): #{closed.empty? ? 'none' : closed.join('; ')}",
+     "Closed as Won't Fix (veto by its notice): #{wont.empty? ? 'none' : wont.join('; ')}"]
   end
 
   def status_lines(s)
@@ -130,7 +132,7 @@ module EpicClusteringView
   SECTION_MAX = 2900
 
   # Informational Block Kit: header line naming the sending session, one
-  # section per part. No buttons (nothing is asked; approvals are separate).
+  # section per part. No buttons (nothing is asked; a won't-fix notice is separate).
   def digest_blocks(d, session:)
     blocks = [section("*#{esc(session)}:*\nDaily ticket digest, #{esc(d[:now])}. Tier 4 is worked after tiers 1-3.")]
     digest_sections(d).each do |title, lines|
@@ -150,55 +152,39 @@ module EpicClusteringView
     "#{kept}\n• … #{text.count("\n") - kept.count("\n")} more lines in the run log"
   end
 
-  # ---------------------------------------------------------------- requests
+  # ---------------------------------------------------------------- notice
 
-  REQUEST_TYPES = {
-    "promote" => { yes: "Promote to tier %<tier>s", no: "Leave in tier 4",
-                   yes_effect: "Sets Path=Promoted; worked ahead of tier 4.",
-                   no_effect: "Stays in tier 4; worked after the critical path." },
-    "wont-fix" => { yes: "Won't fix", no: "Keep",
-                    yes_effect: "Status becomes Won't Fix; the reason and your choice go in the body.",
-                    no_effect: "Stays open in tier 4; worked in turn." }
-  }.freeze
+  # A won't-fix needs no approval (~/.claude/CLAUDE.md -> Owner approval
+  # policy). The notice reports a close already made and offers the owner a
+  # veto; its buttons are athena:ticket-management -> Promote and won't-fix.
+  NOTICE_BUTTONS = [
+    ["Keep closed (recommended)", "keep", true],
+    ["Reopen", "reopen", false]
+  ].freeze
 
-  def approval_request(type:, ticket:, title:, background:, why:, recommend:, session:, tier: nil)
-    spec = REQUEST_TYPES.fetch(type) { raise DataError, "request type #{type.inspect} is not one of #{REQUEST_TYPES.keys}" }
+  def wont_fix_notice(ticket:, title:, background:, why:, session:)
     { "background" => background, "why" => why, "title" => title }.each do |k, v|
-      raise DataError, "#{k} is empty; an approval request needs background, why and title" if v.to_s.strip.empty?
+      raise DataError, "#{k} is empty; a won't-fix notice needs background, why and title" if v.to_s.strip.empty?
     end
-    raise DataError, "recommend must be yes or no, got #{recommend.inspect}" unless %w[yes no].include?(recommend)
-    raise DataError, "a promote request needs --tier 0-3" if type == "promote" && !(0..3).cover?(tier)
-    raise DataError, "--tier applies only to a promote request" if type == "wont-fix" && !tier.nil?
     raise DataError, "ticket #{ticket.inspect} is not an id like DND-12" unless ticket.to_s.match?(NextMission::ID_RE)
 
-    yes = format(spec[:yes], tier: tier)
-    no = spec[:no]
-    rec = recommend == "yes" ? yes : no
-    q = type == "promote" ? "Promote #{ticket} to tier #{tier}?" : "Close #{ticket} as Won't Fix?"
     body = [
-      "*#{esc(session)}:*\n*#{q}*\n#{ticket}: #{esc(title)}",
+      "*#{esc(session)}:*\n*Closed #{ticket} as Won't Fix.*\n#{ticket}: #{esc(title)}",
       "*Background*\n#{esc(background)}",
       "*Why it matters*\n#{esc(why)}",
-      "*Options*\n• #{yes}: #{spec[:yes_effect]}\n• #{no}: #{spec[:no_effect]}",
-      "*Recommendation*\n#{rec}. Silence changes nothing."
+      "*Options*\n• Keep closed: nothing changes.\n• Reopen: Status goes back to Todo, or Parked if work exists.",
+      "*Recommendation*\nKeep closed. Silence keeps it closed."
     ]
     long = body.find { |t| t.length > SECTION_TEXT_MAX }
-    raise DataError, "a request section is #{long.length} characters; Slack allows #{SECTION_TEXT_MAX}" if long
+    raise DataError, "a notice section is #{long.length} characters; Slack allows #{SECTION_TEXT_MAX}" if long
 
-    body = body.map { |t| section(t) }
-    key = type.delete("-")
-    btn = lambda do |label, value, action, primary|
+    buttons = NOTICE_BUTTONS.map do |label, choice, primary|
       b = { "type" => "button", "text" => { "type" => "plain_text", "text" => label },
-            "value" => value, "action_id" => action }
+            "value" => "wontfix:#{choice}:#{ticket}", "action_id" => "wontfix_#{choice}" }
       b["style"] = "primary" if primary
       b
     end
-    buttons = [
-      btn.call(recommend == "yes" ? "#{yes} (recommended)" : yes, "#{key}:yes:#{ticket}", "#{key}_yes", recommend == "yes"),
-      btn.call(recommend == "no" ? "#{no} (recommended)" : no, "#{key}:no:#{ticket}", "#{key}_no", recommend == "no"),
-      btn.call("Your call (#{rec})", "#{key}:#{recommend}:#{ticket}", "#{key}_your_call", false)
-    ]
-    { text: "#{session}: #{q} #{ticket} #{title}. Recommended: #{rec}.",
-      blocks: body + [{ "type" => "actions", "elements" => buttons }] }
+    { text: "#{session}: Closed #{ticket} #{title} as Won't Fix. Reopen to veto; silence keeps it closed.",
+      blocks: body.map { |t| section(t) } + [{ "type" => "actions", "elements" => buttons }] }
   end
 end
