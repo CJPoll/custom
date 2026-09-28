@@ -459,12 +459,19 @@ end
 # Indices of the lines OUTSIDE fenced code blocks (``` or ~~~). A `# comment`
 # inside a shell block is not a heading: read as one, it would end the
 # section early, and every later edit to the section would read COLD.
+# A fence closes only on a run of the SAME character at least as long as the
+# one that opened it (CommonMark), so a ``` line inside a ```` block does not
+# close it early.
 def prose_line_indices(lines)
   fence = nil
   lines.each_index.select do |i|
-    marker = lines[i][/\A[ \t]*(```|~~~)/, 1]
-    if marker && (fence.nil? || marker == fence)
-      fence = fence ? nil : marker
+    marker = lines[i][/\A[ \t]*(`{3,}|~{3,})/, 1]
+    if marker && fence.nil?
+      fence = marker
+      next false
+    end
+    if marker && marker[0] == fence[0] && marker.size >= fence.size && lines[i].strip == marker
+      fence = nil
       next false
     end
     fence.nil?
@@ -3389,7 +3396,7 @@ def self_test
     sec_case.call("sibling-section edit is COLD", claude.call("", " now"), 0, "BLAST-RADIUS COLD")
     sec_case.call("deleted heading holds", claude.call("", "").sub("## Owner approval policy\n", ""), 4, "fails closed")
     sec_case.call("duplicate heading holds", claude.call("", "", dup: true), 4, "must be exactly once")
-    fenced = claude.call("", "").sub("rows", "rows\n\n```sh\n# a shell comment, not a heading\n```\n\nafter the fence")
+    fenced = claude.call("", "").sub("rows", "rows\n\n````md\n```sh\n# a shell comment, not a heading\n```\n````\n\nafter the fence")
     dd = File.join(tmp, "policy-sec-fence")
     bb, hh = mkrepo.call(dd, seed: ->(r) { FileUtils.mkdir_p(File.join(r, "ai")); File.write(File.join(r, "ai", "CLAUDE.md"), fenced) }) do |r|
       File.write(File.join(r, "ai", "CLAUDE.md"), fenced.sub("after the fence", "after the fence, edited"))

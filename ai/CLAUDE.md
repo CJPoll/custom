@@ -339,7 +339,7 @@ the issues." This section is its one home; other documents cite it by name.
   project's critical path, whatever its severity. It does not interrupt the work
   in hand, and it blocks a planned ticket only if that ticket cannot meet its
   requirements without it. A pre-existing security issue waits too, unless the
-  owner promotes it; one the ticket's own change introduces blocks it. The
+  admiral promotes it; one the ticket's own change introduces blocks it. The
   order, the blocking test and the exceptions: [[athena:ticket-management]] →
   *Priority: critical path first*. Report findings to the owner as one batched
   summary, not a narration of each ticket.
