@@ -41,10 +41,10 @@ the one thing the wrapper exists to prevent, so: **every GitHub write that
 represents Athena's own work goes through `gh-athena`.** Reads may stay on plain
 `gh` — there's nothing to misattribute in a GET.
 
-No write needs an owner DM. Deleting a repo, force-pushing `main`, and
-changing repo settings or branch protection are judgement calls listed in the
-digest, and a forge-settings file still holds at `integration-gate` exit 4:
-`~/.claude/CLAUDE.md` → *Owner approval policy*, item 4.
+Deleting a repo, force-pushing `main`, and changing repo settings or branch
+protection are `~/.claude/CLAUDE.md` → *Owner approval policy*, item 4: read
+it before any of them. A forge-settings file still holds at `integration-gate`
+exit 4.
 
 ## The wrapper
 

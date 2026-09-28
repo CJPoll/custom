@@ -213,15 +213,16 @@ Other documents cite it by name and restate none of it. Changing it is itself
 item 6.
 
 **Default: decide on best judgement, then list it in the digest.** Ship per
-*Shipping*. The fleet does not DM Cody to ask for approval. The one DM is for a
-step only Cody can run (*Only Cody can run*). Judgement is about the wait,
+*Shipping*. The fleet DMs Cody only for what *Asking, and what counts as
+approval* names, chiefly a step only Cody can run. Judgement is about the wait,
 never the bar: tests, a critic PASS, green CI and a live verify still apply to
 everything.
 
 **Later (2026-09-28, ~07:15Z):** the default read "no approval", with the
 table below titled *Needs Cody's approval*: each item held for Cody's go via a
 Block Kit decision DM. Superseded by the owner decision above. Items 1–4 and
-7 are judgement calls, listed in the digest. Items 5 and 6 stay with Cody.
+7 are judgement calls, listed in the digest, except a force-push to `main`.
+Items 5 and 6 stay with Cody.
 Item 8 is narrowed to what only Cody can run.
 
 **Later (2026-09-28):** this section replaces *Standing owner approvals* and its
@@ -239,7 +240,7 @@ a named standing approval covered it. Superseded by the owner decision of
 | 1 | Destroying or replacing stateful prod infra or data | Terraform destroy/replace of a database, secret store or bucket; a destructive migration; deleting prod data. |
 | 2 | Adding recurring cost | Paid infra, a paid API or SaaS, a new vendor account. |
 | 3 | Reaching another person | A DM to anyone but Cody, an email, a Drive share, an unprompted channel post (`athena:slack` → *When Athena may post*). |
-| 4 | Deleting a repo, force-pushing main, changing forge settings or branch protection | |
+| 4 | Deleting a repo, force-pushing main, changing forge settings or branch protection | A force-push to `main` skips the merge bar, so it is never a judgement call. A settings or protection change that loosens a check or review is item 5. |
 | 5 | Loosening a quality bar | Not a judgement call: see *Items 5 and 6* below. |
 | 6 | Changing the approval rules, or reversing a Cody decision | Not a judgement call: see *Items 5 and 6* below. |
 | 7 | A walt_ui change that would cause downtime | A walt_ui security fix ships zero-downtime. |
@@ -353,7 +354,7 @@ earlier *Security fixes ship without owner approval* still stand:
   gates throttle merging, not progress*).
 
   **Later (2026-09-28, ~07:15Z):** this read "Ask for a table item; hold only
-  that item." Superseded by the owner decision above: table items are
+  that item." Superseded by the owner decision above: items 1–4 and 7 are
   judgement calls, not asks.
 - **Approval is Cody's own words in a terminal turn**, recorded where a tool
   can verify them (`integration-gate --help` → `--owner-approval`); **or

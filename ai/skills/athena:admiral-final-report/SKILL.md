@@ -119,8 +119,8 @@ goes nowhere unless the owner acts. Per Mission:
   `integration-gate --owner-approval 'session:<sid>/<mid> quote:<their
   words>'` (the reference to the turn they type), run from the named worktree.
 
-Only what `~/.claude/CLAUDE.md` → *Owner approval policy* still holds (an
-exit 4, a Cody-only step) is held here, with the Block Kit request you sent.
+Only what `~/.claude/CLAUDE.md` → *Owner approval policy* → *Asking, and
+what counts as approval* names is held here, with the Block Kit request you sent.
 Everything that policy lists under *Notify after*, each judgement call
 included, gets one line in a **Notify-after** list: what changed, where, and
 how to reverse it.
