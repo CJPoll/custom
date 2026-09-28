@@ -30,6 +30,18 @@ export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t
 export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 
+# --owner-approval takes a VERIFIABLE record of the owner's own words (owner
+# approval policy, 2026-09-28): session:<session-uuid>/<message-uuid>
+# quote:<words>, checked against a Claude Code transcript under
+# $HOME/.claude/projects. This fixture HOME holds one human-typed owner turn.
+FIXTURE_HOME="${TMP}/home"
+FX_SID=11111111-2222-3333-4444-555555555555
+FX_MID=aaaaaaaa-0000-0000-0000-000000000001
+mkdir -p "${FIXTURE_HOME}/.claude/projects/proj"
+printf '%s\n' '{"type":"user","uuid":"'"${FX_MID}"'","isSidechain":false,"entrypoint":"cli","promptSource":"typed","origin":{"kind":"human"},"message":{"role":"user","content":"yes, provision the KMS key"}}' \
+  > "${FIXTURE_HOME}/.claude/projects/proj/${FX_SID}.jsonl"
+APPROVAL="session:${FX_SID}/${FX_MID} quote:yes, provision the KMS key"
+
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [ -n "${2-}" ] && printf '       %s\n' "$2"; }
 
@@ -277,13 +289,17 @@ grep -q 'INTEGRATION OK' <<<"$out" && bad "c14 printed INTEGRATION OK on a HOT h
 grep -q 'Fix:' <<<"$out" && ok "c14 carries an actionable Fix:" || bad "c14 missing Fix:" "$out"
 
 # ...and the owner's own authorization lands it, RECORDED, never hidden.
-out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval 'owner said go' 2>&1 )"; rc=$?
+out="$( cd "$R" && HOME="$FIXTURE_HOME" "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval "$APPROVAL" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c14 --owner-approval lands the HOT head" || bad "c14 expected exit 0, got $rc" "$out"
-grep -q 'INTEGRATION OK .*(OWNER-APPROVED: owner said go)' <<<"$out" && ok "c14 the approval is attributable in the OK line" || bad "c14 approval not in the OK line" "$out"
+grep -qF "(OWNER-APPROVED: ${APPROVAL})" <<<"$(grep 'INTEGRATION OK' <<<"$out")" && ok "c14 the approval is attributable in the OK line" || bad "c14 approval not in the OK line" "$out"
 grep -q 'BLAST-RADIUS HOT' <<<"$out" && ok "c14 approval RECORDS without hiding what was approved" || bad "c14 approval suppressed the HOT block" "$out"
 # ...and it is never silently available.
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval '' 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && ok "c14 an empty --owner-approval is a usage error" || bad "c14 expected exit 2, got $rc" "$out"
+# ...and free text is not a record: refused, no OK line, no receipt.
+out="$( cd "$R" && HOME="$FIXTURE_HOME" "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval 'owner said go' 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c14 a free-text --owner-approval is REFUSED (exit 2)" || bad "c14 free text: expected exit 2, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "c14 free text printed INTEGRATION OK" "$out" || ok "c14 free text prints no INTEGRATION OK"
 
 # ---------------------------------------------------------------- case 15
 # THE OVERRIDE'S SCOPE. --critic-override covers the ABSENCE of a verdict, not
@@ -460,10 +476,10 @@ mkdir -p "${R}/.github/workflows"
   && git add -A && git commit -qm wf && git checkout -q feature && git rebase -q main \
   && mkdir -p infra && echo 'resource {}' > infra/kms.tf && git add infra/kms.tf && git commit -qm tf )
 record_pass "$R"
-out="$( cd "$R" && "$GATE" --target main --no-fetch --owner-approval 'owner said go' 2>&1 )"; rc=$?
+out="$( cd "$R" && HOME="$FIXTURE_HOME" "$GATE" --target main --no-fetch --owner-approval "$APPROVAL" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c20 owner-approved HOT head lands" || bad "c20 expected exit 0, got $rc" "$out"
 grep -q 'BLAST-RADIUS HOT-OWNER-APPROVED .*(GATE: ai/bin/harness-gate -- declared on main)' <<<"$out" && ok "c20 HOT-OWNER-APPROVED names the gate" || bad "c20 HOT-OWNER-APPROVED line does not name the gate" "$out"
-grep -q 'INTEGRATION OK [0-9a-f]* (GATE: ai/bin/harness-gate -- declared on main) (OWNER-APPROVED: owner said go)' <<<"$out" && ok "c20 OK line names the gate beside the approval" || bad "c20 OK line missing gate beside approval" "$out"
+grep -qF "(GATE: ai/bin/harness-gate -- declared on main) (OWNER-APPROVED: ${APPROVAL})" <<<"$(grep 'INTEGRATION OK' <<<"$out")" && ok "c20 OK line names the gate beside the approval" || bad "c20 OK line missing gate beside approval" "$out"
 
 # ---------------------------------------------------------------- case 21
 # DND-457: the verdict for a head is found from ANY checkout of the repo. The
