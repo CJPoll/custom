@@ -4,8 +4,8 @@
 # pushed refs on stdin; it runs the MAIN CHECKOUT's ai/bin/outbound-scan, which
 # refuses a push that carries a work-domain value.
 #
-# Installed (by DND-703's installer, never by hand from a worktree) at the main
-# checkout's .git/hooks/pre-push. That one file serves every linked worktree and
+# To be installed (by DND-703's installer, which does not exist yet; never by
+# hand from a worktree) at the main checkout's .git/hooks/pre-push. That one file serves every linked worktree and
 # shipwright lane, because hooks live in the common git dir. It runs the
 # scanner that LANDED in the main checkout, never a worktree's copy, so a
 # branch cannot weaken the scan that judges its own push.

@@ -320,6 +320,39 @@ else
   bad "modified-path redaction" "rc=${RC} ${OUT}"
 fi
 
+echo "--- review floor: each pattern matches on its own; errors never quote a pattern ---"
+BR="${TMP}/ov-backref"; mk_overlay "${BR}" 'first\t(x)\\1\nsecond\t(q)\\1\n'
+printf 'qq\n' > "${TMP}/qq.txt"
+QQ="$(mk_public qq)"; commit_file "${QQ}" q.md "qq\n" "qq"
+OUT="$(cd "${QQ}" && ATHENA_PRIVATE_ROOT="${BR}" "${SCAN}" --tree 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"q.md:1 label=second"* ]]; then ok "a backreference in a later pattern still matches (tree)"; else bad "backreference tree" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${QQ}" && printf 'refs/heads/main %s refs/heads/main %s\n' "$(git rev-parse HEAD)" "$(git rev-parse origin/main)" | ATHENA_PRIVATE_ROOT="${BR}" "${SCAN}" --pre-push --remote origin 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"q.md:1 (commit "*"label=second"* ]]; then ok "a backreference in a later pattern still matches (pre-push)"; else bad "backreference push" "rc=${RC} ${OUT}"; fi
+MX="${TMP}/ov-mixed"; mk_overlay "${MX}" 'mixed\t(?<n>SYNTHSECRETX)(y)\\1\n'
+OUT="$(ATHENA_PRIVATE_ROOT="${MX}" "${SCAN}" --text "${TMP}/qq.txt" 2>&1)"; RC=$?
+if [ "${RC}" = 3 ] && [[ "${OUT}" != *"SYNTHSECRETX"* ]] && [[ "${OUT}" == *"line 1 has a regex that does not compile"* ]]; then ok "a pattern error never prints the pattern"; else bad "pattern error quoting" "rc=${RC} ${OUT}"; fi
+
+echo "--- review floor: --tree judges the tracked (index) copy ---"
+IX="$(mk_public index)"
+commit_file "${IX}" held.md "held ${TOKEN}\n" "tracked value"
+printf 'edited away\n' > "${IX}/held.md"   # working tree only, not staged
+OUT="$(cd "${IX}" && "${SCAN}" --tree 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"held.md:1 label=synth-token"* ]]; then ok "an unstaged removal does not hide the tracked copy"; else bad "index copy" "rc=${RC} ${OUT}"; fi
+
+echo "--- review floor: a path with a space is redacted under an anchored pattern ---"
+AN="${TMP}/ov-anchored"; mk_overlay "${AN}" "${PATTERNS}anchored-path\tSYNTHPATH\\\\.md\$\n"
+SP="$(mk_public space)"
+commit_file "${SP}" "sp ace/SYNTHPATH.md" "and ${TOKEN}\n" "space path"
+OUT="$(cd "${SP}" && printf 'refs/heads/main %s refs/heads/main %s\n' "$(git rev-parse HEAD)" "$(git rev-parse origin/main)" | ATHENA_PRIVATE_ROOT="${AN}" "${SCAN}" --pre-push --remote origin 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [[ "${OUT}" != *"SYNTHPATH"* ]] && [[ "${OUT}" == *"<path redacted: it matches a pattern>:1"* ]]; then ok "anchored path pattern redacts a spaced path"; else bad "spaced path" "rc=${RC} ${OUT}"; fi
+
+echo "--- review floor: a push by URL uses that remote's tracking refs ---"
+UR="$(mk_public byurl)"
+commit_file "${UR}" u.md "clean\n" "one new commit"
+URL="$(git -C "${UR}" remote get-url origin)"
+OUT="$(cd "${UR}" && printf 'refs/heads/main %s refs/heads/main 0000000000000000000000000000000000000000\n' "$(git rev-parse HEAD)" | "${SCAN}" --pre-push --remote "${URL}" --url "${URL}" 2>&1)"; RC=$?
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"SCANNED commits=1 "* ]]; then ok "URL remote mapped to origin: only the new commit"; else bad "URL remote" "rc=${RC} ${OUT}"; fi
+
 echo "--- merges: only what differs from every parent is new ---"
 MG="$(mk_public merges)"
 git -C "${MG}" checkout -q -b feature

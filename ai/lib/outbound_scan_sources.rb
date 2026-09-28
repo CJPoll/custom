@@ -21,6 +21,7 @@
 # Deliberately gem-free (stdlib only).
 
 require "open3"
+require "fileutils"
 require_relative "outbound_scan"
 require_relative "private_overlay_resolver"
 
@@ -108,6 +109,25 @@ module OutboundScan
     end
 
     # git's pre-push stdin -> list of new commit shas (deduplicated, stable).
+    # git passes the URL as the remote name when a push names a URL. Map it
+    # back to the configured remote whose url/pushurl is that URL, so its
+    # tracking refs bound the range; unmatched stays as given (then every
+    # commit not on any tracking ref of it is scanned: conservative).
+    def resolve_remote(remote, url)
+      return remote unless remote.include?("/") || remote.include?(":")
+
+      out, _e, st = Open3.capture3("git", "config", "--get-regexp", '^remote\..*\.(push)?url$')
+      return remote unless st.success?
+
+      out.each_line do |line|
+        key, val = line.chomp.split(" ", 2)
+        next unless val == remote || (url && val == url)
+
+        return key.sub(/\Aremote\./, "").sub(/\.(push)?url\z/, "")
+      end
+      remote
+    end
+
     def pre_push_commits(stdin_text, remote)
       shas = []
       deletes = 0
@@ -147,24 +167,21 @@ module OutboundScan
     def scan_commits(patterns, shas)
       counts = { commits: 0, lines: 0, patterns: patterns.length, hits: 0 }
       hits = []
-      matcher = quick_matcher(patterns)
       shas.each do |sha|
         counts[:commits] += 1
-        scan_message(patterns, matcher, sha, hits, counts)
+        scan_message(patterns, sha, hits, counts)
         ps = parents(sha)
         scan_paths(patterns, sha, ps, hits)
-        scan_diff(patterns, matcher, sha, ps, hits, counts)
+        scan_diff(patterns, sha, ps, hits, counts)
       end
       counts[:hits] = hits.length
       Surface.new(hits: hits, counts: counts)
     end
 
-    def scan_message(patterns, matcher, sha, hits, counts)
+    def scan_message(patterns, sha, hits, counts)
       msg = git!("show", "-s", "--format=%B", sha, what: "read the message of commit #{sha[0, 12]}")
       msg.each_line.with_index(1) do |line, n|
         counts[:lines] += 1
-        next unless quick?(matcher, line)
-
         loc = Location.new(kind: :message, line: n, commit: sha)
         hits.concat(OutboundScan.scan_line(patterns, loc, line))
       end
@@ -230,12 +247,10 @@ module OutboundScan
       paths
     end
 
-    def scan_diff(patterns, matcher, sha, ps, hits, counts)
+    def scan_diff(patterns, sha, ps, hits, counts)
       out = git!(*diff_argv(sha, ps, %w[-p --unified=0]), what: "read the diff of #{sha[0, 12]}")
       each_added_line(out, [ps.length, 1].max) do |path, n, text|
         counts[:lines] += 1
-        next unless quick?(matcher, text)
-
         loc = Location.new(kind: :content, path: path, line: n, commit: sha)
         hits.concat(OutboundScan.scan_line(patterns, loc, text))
       end
@@ -292,6 +307,7 @@ module OutboundScan
     def diff_path(spec)
       return nil if spec == "/dev/null"
 
+      spec = spec.chomp("\t") # git appends a TAB when the path has a space
       s = spec.start_with?('"') ? unquote(spec) : spec
       s.sub(%r{\Ab/}, "").dup.force_encoding(Encoding::UTF_8)
     end
@@ -327,7 +343,6 @@ module OutboundScan
       listing = git!("-C", top, "ls-files", "-z", "-s", what: "list the tracked files")
       counts = { commits: 0, lines: 0, patterns: patterns.length, hits: 0, files: 0 }
       hits = []
-      matcher = quick_matcher(patterns)
       entries = listing.split("\0").reject(&:empty?)
       raise Unmeasurable, "git ls-files listed zero tracked files" if entries.empty?
 
@@ -348,23 +363,25 @@ module OutboundScan
         content = tree_content(top, path, mode, blob)
         content.each_line.with_index(1) do |line, n|
           counts[:lines] += 1
-          next unless quick?(matcher, line)
-
-          hits.concat(OutboundScan.scan_line(patterns, Location.new(kind: :content, path: path, line: n), line))
+            hits.concat(OutboundScan.scan_line(patterns, Location.new(kind: :content, path: path, line: n), line))
         end
       end
       counts[:hits] = hits.length
       Surface.new(hits: hits, counts: counts)
     end
 
-    def tree_content(top, path, mode, blob)
-      abs = File.join(top, path)
-      return File.readlink(abs).b if mode == "120000" && File.symlink?(abs)
-      return File.binread(abs) if mode != "120000" && File.file?(abs) && !File.symlink?(abs)
+    # The INDEX copy (what is tracked and will be committed), never the
+    # working-tree file: an uncommitted edit that removes a value must not
+    # hide the copy git still holds. A symlink's blob is its target text.
+    def tree_content(top, _path, _mode, blob)
+      git!("-C", top, "cat-file", "blob", blob, what: "read the index copy of a tracked file")
+    end
 
-      git!("-C", top, "cat-file", "blob", blob, what: "read the index copy of a tracked file")
-    rescue SystemCallError
-      git!("-C", top, "cat-file", "blob", blob, what: "read the index copy of a tracked file")
+    # ---- the waiver log ----------------------------------------------------------
+
+    def record_waiver(path, fields)
+      FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+      File.open(path, "a", 0o600) { |f| f.puts fields.join("\t") }
     end
 
     # ---- text mode --------------------------------------------------------------
@@ -383,18 +400,6 @@ module OutboundScan
       end
       counts[:hits] = hits.length
       Surface.new(hits: hits, counts: counts)
-    end
-
-    # ---- a cheap pre-filter -------------------------------------------------------
-
-    def quick_matcher(patterns)
-      Regexp.new(Regexp.union(patterns.map(&:regex)).source, timeout: MATCH_TIMEOUT)
-    end
-
-    def quick?(matcher, text)
-      matcher.match?(OutboundScan.normalise(text))
-    rescue Regexp::TimeoutError
-      raise Unmeasurable, "a pattern exceeded the #{MATCH_TIMEOUT}s match budget"
     end
   end
 end

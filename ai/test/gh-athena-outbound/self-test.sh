@@ -254,6 +254,29 @@ printf '#!/bin/sh\necho "Traceback: boom" >&2\nexit 1\n' > "${CR}/ai/bin/outboun
 OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && "${CR}/ai/bin/gh-athena" pr create --body "clean" 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
 if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"without reporting HITS"* ]]; then ok "a crash reads as a failure"; else bad "crash" "rc=${RC} ${OUT}"; fi
 
+echo "--- review floor: every body file is copied; gh reads the scanned copy ---"
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && "${WRAPPER}" pr create --body-file <(printf 'from a pipe\n') 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if [ "${RC}" = 0 ] && sent "pr create" && [[ "${OUT}" == *"stub-body:from a pipe"* ]]; then ok "a process-substitution body reaches gh intact"; else bad "pipe body" "rc=${RC} ${OUT}"; fi
+gha pr create --body-file "${TMP}/body-clean.md"
+if [ "${RC}" = 0 ] && [[ "${CALLS}" != *"${TMP}/body-clean.md"* ]] && [[ "${OUT}" == *"stub-body:a clean body"* ]]; then ok "gh is handed the scanned copy, not the original path"; else bad "copy handed" "calls=[${CALLS}] ${OUT}"; fi
+
+echo "--- review floor: close/reopen comments are scanned ---"
+for cmd in "pr close 5 --comment" "pr reopen 5 -c" "issue close 7 --comment" "issue reopen 7 -c"; do
+  # shellcheck disable=SC2086
+  gha ${cmd} "x${TOKEN}"
+  if [ "${RC}" = 1 ] && not_sent "${cmd%% *}" && no_literal; then ok "refused: ${cmd}"; else bad "refused: ${cmd}" "rc=${RC} ${OUT}"; fi
+done
+gha pr close 5 "--comment=x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr close"; then ok "refused: pr close --comment="; else bad "pr close --comment=" "rc=${RC} ${OUT}"; fi
+gha pr review 5 --comment --body "clean"
+if [ "${RC}" = 0 ] && sent "pr review"; then ok "pr review --comment stays a switch"; else bad "pr review --comment switch" "rc=${RC} ${OUT}"; fi
+
+echo "--- review floor: 'is this machine marked?' failing reads as MUST measure ---"
+NG="${TMP}/not-a-repo"; mkdir -p "${NG}/ai"
+cp -r "${AI_DIR}/bin" "${AI_DIR}/lib" "${NG}/ai/"
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && env -u ATHENA_PRIVATE_ROOT GIT_CEILING_DIRECTORIES="${TMP}" "${NG}/ai/bin/gh-athena" pr create --body "x" 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"this machine must measure"* ]]; then ok "an undeterminable mark refuses"; else bad "undeterminable mark" "rc=${RC} ${OUT}"; fi
+
 echo "--- an unreadable body file is refused ---"
 gha pr create --body-file "${TMP}/no-such-file"
 if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"is not readable"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "unreadable body file"; else bad "unreadable body file" "rc=${RC} ${OUT}"; fi

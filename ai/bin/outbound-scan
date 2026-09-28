@@ -53,6 +53,7 @@ HELP = <<~HELP
   Exit / state:
     0 CLEAN                 scanned, no hits; prints SCANNED commits=.. lines=.. patterns=.. hits=0
     1 HITS                  each hit as file:line (or commit <sha> message:<n>) + label; never the text
+                            (labels: [a-z0-9][a-z0-9_.-], at most 64 characters)
     2 USAGE                 bad arguments
     3 COULD NOT MEASURE     overlay absent/malformed, no committed floor, zero patterns, or an unreadable surface
     0 WAIVED - NOT SCANNED  ATHENA_OUTBOUND_WAIVE=<reason> is set; the reason is printed and appended to
@@ -100,10 +101,7 @@ def waive!(mode, reason)
   $stdin.read if mode == "pre-push" # drain git's ref lines
   path = waiver_log_path
   begin
-    FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
-    File.open(path, "a", 0o600) do |f|
-      f.puts [Time.now.utc.iso8601, mode, Dir.pwd, clean_reason].join("\t")
-    end
+    OutboundScan::Sources.record_waiver(path, [Time.now.utc.iso8601, mode, Dir.pwd, clean_reason])
   rescue SystemCallError, IOError => e
     puts "#{PROG}: COULD NOT MEASURE mode=#{mode}: a waiver was requested but could not be recorded at #{path} " \
          "(#{e.class.name.split('::').last}), so it is refused. Fix: make #{File.dirname(path)} writable, or unset " \
@@ -147,7 +145,8 @@ def run(opts)
   surface =
     case mode
     when "pre-push"
-      shas, _deletes = OutboundScan::Sources.pre_push_commits(stdin_text, opts["--remote"])
+      remote = OutboundScan::Sources.resolve_remote(opts["--remote"], opts["--url"])
+      shas, _deletes = OutboundScan::Sources.pre_push_commits(stdin_text, remote)
       OutboundScan::Sources.scan_commits(patterns, shas)
     when "tree"
       OutboundScan::Sources.scan_tree(patterns)
@@ -157,6 +156,10 @@ def run(opts)
   report!(mode, surface, patterns)
 rescue OutboundScan::Unmeasurable => e
   unmeasured!(mode || "unknown", e.message)
+rescue StandardError => e
+  # Never e.message: a Regexp or git error can quote a pattern, and a
+  # pattern IS a work value. The class name is enough to report the defect.
+  unmeasured!(mode || "unknown", "the scanner failed unexpectedly (#{e.class}); no message is printed because it could quote a pattern")
 end
 
 if ARGV.include?("--help") || ARGV.include?("-h")

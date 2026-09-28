@@ -164,15 +164,20 @@ overlay that is not a git repository, has no commits, or has no committed
 A run that measured prints `SCANNED commits=N lines=M patterns=P hits=H`.
 
 A hit is printed as a location and the pattern label: `path:line (commit <sha>)`,
-`commit <sha> message:<n>`, `commit <sha> path <redacted>`, or `<field>:<n>`. A
-path that itself matches a pattern is never printed: every rendered path is
-checked against the patterns at render time.
+`path:line` (tree mode), `commit <sha> message:<n>`, `commit <sha> path
+<redacted>`, `tracked path <redacted>`, or `<field>:<n>`. A path that itself
+matches a pattern is never printed: every rendered path is checked against the
+patterns at render time. Each pattern is matched on its own, never through a
+combined regex. An unexpected scanner error is COULD NOT MEASURE and names only
+the error's class, never its message, which could quote a pattern.
 
 **Surfaces.** Three modes of `ai/bin/outbound-scan`, exactly one per run:
 
 - `--pre-push --remote NAME [--url URL]` — git's pre-push stdin. For each pushed
   ref, the commits in `<remote sha>..<local sha>` (a new ref, or a remote tip
-  not present locally: every commit not on a `refs/remotes/<NAME>/*` ref). For
+  not present locally: every commit not on a `refs/remotes/<NAME>/*` ref). When
+  git passes a URL as NAME, it is mapped back to the configured remote with that
+  url or pushurl. For
   each commit: the lines and paths it **introduces**, and its message. A root
   commit introduces its whole tree. A one-parent commit introduces the added
   lines and new or renamed paths of its diff against that parent. A merge
@@ -183,42 +188,59 @@ checked against the patterns at render time.
   skipping it at the merge publishes nothing new. A deleted ref publishes
   nothing. Every file is diffed as text (`--text`, no textconv, no external
   diff), so a `.gitattributes` in the pushed commit cannot mark its own content
-  binary and skip the scan. Tag messages are not scanned.
-- `--tree` — every tracked file of the current repository: content and path.
-  Binary content is scanned too, as bytes split on newlines: no file opts out.
+  binary and skip the scan. Tag messages and the author and committer
+  identities are not scanned.
+- `--tree` — every tracked file of the current repository: its path and its
+  INDEX copy (what is tracked, not an unstaged working-tree edit). Binary
+  content is scanned too, as bytes split on newlines: no file opts out.
   It is not in `harness-gate` yet: the tree still carries work values until
   DND-704, DND-705 and DND-706 land, and wiring it earlier would turn every
   gate red.
 - `--text FILE [--label NAME]` — one file's lines (gh-athena's title and body).
 
-**The pre-push hook.** `ai/git-hooks/outbound-pre-push.sh`, installed by
-DND-703's installer at the main checkout's `.git/hooks/pre-push`. It serves
-every linked worktree and lane, and it runs the **main checkout's** (landed)
-scanner, never a branch's copy. A missing scanner refuses the push (exit 3). An
-installed hook marks a machine that must measure, so an ABSENT overlay refuses
-the push there.
+**The pre-push hook.** `ai/git-hooks/outbound-pre-push.sh`. Once installed at
+the main checkout's `.git/hooks/pre-push`, it serves every linked worktree and
+lane, and it runs the **main checkout's** (landed) scanner, never a branch's
+copy. A missing scanner refuses the push (exit 3). An installed hook marks a
+machine that must measure, so an ABSENT overlay refuses the push there.
+**Nothing installs it yet:** the installer is DND-703. Until DND-703 lands and
+the owner runs it, no push is scanned on any machine, no machine is marked, and
+the forge path below runs in its unmarked mode everywhere.
 
 **The forge path.** `ai/bin/gh-athena` scans every `--title`/`--subject`,
-`--body` and `--body-file` (each gh spelling, including `-bVALUE`) of
-`pr create|edit|comment|review|merge` and `issue create|edit|comment` before gh
-runs; a squash merge's subject and body become a commit made on the server,
-where no pre-push hook runs. A short-flag cluster that could hide one of these
-fields is refused. The scan runs unless every repository the write can reach
+`--body`, `--body-file` and (on close/reopen) `--comment` (each gh spelling,
+including `-bVALUE`) of `pr create|edit|comment|review|merge|close|reopen` and
+`issue create|edit|comment|close|reopen` before gh runs; a squash merge's
+subject and body become a commit made on the server, where no pre-push hook
+runs. Every body file is copied once, the copy is scanned, and gh is handed the
+copy, so a pipe or a changing file cannot differ from what was scanned. A
+short-flag cluster that could hide one of these fields is refused. The scan runs unless every repository the write can reach
 reads PRIVATE or INTERNAL: each `-R`/`--repo`, the repository of each PR or
 issue URL given positionally, `GH_REPO` when no `-R` is given, and otherwise
 the current directory's. A visibility that cannot be read, or a URL that cannot
 be parsed, counts as PUBLIC. HITS refuse (exit 1); a scanner exit 1 that does
-not report HITS is a failure (exit 3), never a result. COULD NOT MEASURE refuses (exit 3), except where the
-overlay is ABSENT and the machine is not marked (no outbound pre-push hook in
-the harness checkout's common git dir): there the write proceeds with a
-WARNING that the text went out unscanned, never a CLEAN line.
+not report HITS is a failure (exit 3), never a result. COULD NOT MEASURE
+refuses (exit 3), except where the overlay is ABSENT and the machine is
+known not to be marked (the harness checkout's `hooks/pre-push`, as
+`git rev-parse --git-path` resolves it, holds no outbound hook): there the
+write proceeds with a WARNING that the text went out unscanned, never a CLEAN
+line. A mark that cannot be determined counts as marked.
 
-**Residuals, stated.** An agent or a human can push with `--no-verify`, set the
-waiver, edit the main checkout's scanner, or commit a pattern removal in the
-overlay. `gh pr create --fill`, an editor or `--web` body, `gh api` writes, and
-other commands (release notes, gists) are not scanned by the forge path. No
-scan catches a value it has no pattern for. Each bypass raises the cost or
-leaves a trace; none is impossible.
+**Residuals, stated.**
+
+- An agent or a human can push with `--no-verify`, set the waiver, edit the
+  main checkout's scanner, or move the overlay's `HEAD` to drop a pattern.
+- The waiver is self-granted and is written to a local log that nothing reads
+  today. It leaves a record, not an alert.
+- The forge path does not scan `gh pr create --fill`, an editor or `--web`
+  body, `gh api` writes, or other commands (release notes, gists, repository or
+  label descriptions). An unknown flag whose value is a field flag's name
+  (`-l -b -t X`) is read differently by gh and by the guard.
+- gh-athena runs the scanner beside it, so a worktree's gh-athena runs that
+  branch's scanner. Only the pre-push hook pins the landed scanner.
+- No scan catches a value it has no pattern for.
+
+Each bypass raises the cost or leaves a trace; none is impossible.
 
 **Consequence for this repo.** The owner's scope (2026-09-25) puts work ticket
 ids in the pattern list. Once the overlay holds that pattern and the hook is

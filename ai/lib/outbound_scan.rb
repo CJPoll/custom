@@ -20,7 +20,9 @@ module OutboundScan
 
   LABEL_RE = /\A[a-z0-9][a-z0-9_.-]{0,63}\z/.freeze
   # Per-match budget: a pathological pattern must not hang a push. A timeout
-  # is COULD NOT MEASURE, never a miss.
+  # is COULD NOT MEASURE, never a miss. Each pattern is matched on its own:
+  # a combined union regex renumbers capture groups, so a backreference in
+  # one pattern would silently stop matching (a miss read as CLEAN).
   MATCH_TIMEOUT = 2.0
 
   Pattern = Struct.new(:label, :source, :regex, keyword_init: true)
@@ -125,8 +127,7 @@ module OutboundScan
             "commit (git commit --amend for the tip) and push again. Never print or paste the matched text to find it: the labels and locations are enough."
 
   def unmeasured_fix(reason)
-    "Fix: #{reason_fix(reason)} Until then nothing is refused or allowed on this scan's say-so; " \
-      "a deliberate, recorded waiver is ATHENA_OUTBOUND_WAIVE=<reason> (see `outbound-scan --help`)."
+    "Fix: #{reason_fix(reason)} Until then this scan cannot call anything clean."
   end
 
   def reason_fix(reason)

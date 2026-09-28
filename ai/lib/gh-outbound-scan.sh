@@ -7,13 +7,15 @@
 # through git; a PR or issue title and body reach it through the API. Before gh
 # runs one of these writes against a PUBLIC repository:
 #
-#   pr create | pr edit | pr comment | pr review | pr merge | issue create | issue edit | issue comment
+#   pr create | pr edit | pr comment | pr review | pr merge | pr close | pr reopen
+#   issue create | issue edit | issue comment | issue close | issue reopen
 #
 # (`pr merge` because a squash merge's --subject/--body become a commit on the
 # public default branch, made server-side where no pre-push hook runs)
 #
-# the guard scans --title/--subject/-t, --body/-b and --body-file/-F (a `-` body file is
-# read from stdin into a private file, scanned, and handed to gh in its place)
+# the guard scans --title/--subject/-t, --body/-b, --comment/-c (close/reopen)
+# and --body-file/-F (every body file, `-` included, is copied into a private
+# file, scanned, and handed to gh in its place)
 # with `ai/bin/outbound-scan --text`, and:
 #
 #   CLEAN / WAIVED - NOT SCANNED   gh runs (the scanner's line is shown on stderr)
@@ -33,7 +35,12 @@
 #
 # Residuals, stated: `pr create --fill` (the body is commit messages, which the
 # pre-push hook scans), an interactive editor or --web, `gh api` writes, other
-# commands (release notes, gist), a value no pattern describes, and the waiver.
+# commands (release notes, gists, repo/label descriptions), an unknown flag
+# whose value is a field flag's name (`-l -b -t X`: gh reads X as the title,
+# this guard as positional), a value no pattern describes, and the waiver. The
+# scanner run is the one beside the gh-athena invoked, so a worktree's
+# gh-athena runs that branch's scanner (the pre-push hook avoids this by
+# running the main checkout's).
 #
 # Test seam: none of its own. ai/test/gh-athena-outbound/self-test.sh drives the
 # real wrapper with a stub gh on PATH that records every call.
@@ -48,11 +55,20 @@ gos_refuse() {
 
 # gos_machine_marked : 0 when the harness checkout holding this wrapper has the
 # outbound pre-push hook installed in its common git dir.
+#
+# Three outcomes, never two: 0 marked, 1 not marked (the hook path resolved
+# and holds no outbound hook), 2 could not determine (git could not resolve
+# the hook path, or the hook exists but cannot be read). The caller treats 2
+# as "must measure": a failed lookup never reads as "not marked". The hook
+# path honours core.hooksPath (git rev-parse --git-path).
 gos_machine_marked() {
-  local common hook
-  common="$(git -C "$GOS_BIN_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
-  hook="$common/hooks/pre-push"
-  [ -f "$hook" ] && grep -q 'outbound-scan\|outbound-pre-push' "$hook" 2>/dev/null
+  local hook
+  hook="$(git -C "$GOS_BIN_DIR" rev-parse --path-format=absolute --git-path hooks/pre-push 2>/dev/null)" || return 2
+  [ -n "$hook" ] || return 2
+  [ -e "$hook" ] || return 1
+  [ -r "$hook" ] || return 2
+  if grep -q -e outbound-scan -e outbound-pre-push "$hook" 2>/dev/null; then return 0; fi
+  return 1
 }
 
 # gos_scan <label> <file> : run the scanner on one field; handles the outcome.
@@ -73,11 +89,13 @@ gos_scan() {
     3)
       local st=0
       "$GOS_BIN_DIR/private-overlay" status >/dev/null 2>&1 || st=$?
-      if [ "$st" = 3 ] && ! gos_machine_marked; then
-        printf 'gh-athena: WARNING: the %s of this %s went out UNSCANNED: the private overlay is ABSENT and this machine is not marked as one that holds it (no outbound pre-push hook installed). This is not a clean result. Fix: none needed on a machine without the overlay; on one that should hold it, the owner creates it and installs the hook (DND-703).\n' "$label" "$GOS_WHAT" >&2
+      local marked=0
+      gos_machine_marked || marked=$?
+      if [ "$st" = 3 ] && [ "$marked" = 1 ]; then
+        printf 'gh-athena: WARNING: the %s of this %s went out UNSCANNED: the private overlay is ABSENT and this machine is not marked as one that holds it (no outbound pre-push hook installed). This is not a clean result. Fix: none needed on a machine without the overlay; on one that should hold it, the owner creates it and installs the hook once DND-703 ships an installer.\n' "$label" "$GOS_WHAT" >&2
         return 0
       fi
-      gos_refuse 3 "the outbound scan of the $label could not measure (above), and this machine must measure. Fix: the Fix: line above names the problem; correct it and retry, or set ATHENA_OUTBOUND_WAIVE=<reason> for a recorded waiver." ;;
+      gos_refuse 3 "the outbound scan of the $label could not measure (above), and this machine must measure. Fix: the Fix: line above names the problem; correct it and retry." ;;
     *) gos_refuse 3 "the outbound scanner failed (exit $rc) on the $label. Fix: run \`$GOS_BIN_DIR/outbound-scan --help\` and correct the call; report the defect if the call was right." ;;
   esac
 }
@@ -93,16 +111,28 @@ gos_positional() {
     *) return 0 ;;
   esac
   rest="${w#*://}"
-  host="${rest%%/*}"; rest="${rest#*/}"
-  owner="${rest%%/*}"; rest="${rest#*/}"
-  repo="${rest%%[/?#]*}"
-  if [ -z "$host" ] || [ -z "$owner" ] || [ -z "$repo" ] || [ "$owner" = "$w" ] || [ "$repo" = "$owner" ]; then
+  local re='^([^/]+)/([^/?#]+)/([^/?#]+)'
+  if [[ "$rest" =~ $re ]]; then
+    host="${BASH_REMATCH[1]}"; owner="${BASH_REMATCH[2]}"; repo="${BASH_REMATCH[3]}"
+  else
+    host=""; owner=""; repo=""
+  fi
+  if [ -z "$host" ] || [ -z "$owner" ] || [ -z "$repo" ]; then
     targets+=("?")
   elif [ "$host" = github.com ] || [ "$host" = www.github.com ]; then
     targets+=("$owner/${repo%.git}")
   else
     targets+=("$host/$owner/${repo%.git}")
   fi
+}
+
+# gos_comment_verb : true for the commands whose -c means --comment (a public
+# comment posted with the close/reopen). Reads GOS_WHAT.
+gos_comment_verb() {
+  case "$GOS_WHAT" in
+    "pr close" | "pr reopen" | "issue close" | "issue reopen") return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # gos_guard <gh argv...> : sets GOS_ARGV to the argv gh must run (a `-` body
@@ -126,7 +156,8 @@ gos_guard() {
   GOS_ARGV=("$@")
   local group="${1:-}" verb="${2:-}"
   case "$group $verb" in
-    "pr create" | "pr edit" | "pr comment" | "pr review" | "pr merge" | "issue create" | "issue edit" | "issue comment") ;;
+    "pr create" | "pr edit" | "pr comment" | "pr review" | "pr merge" | "pr close" | "pr reopen" | \
+      "issue create" | "issue edit" | "issue comment" | "issue close" | "issue reopen") ;;
     *) return 0 ;;
   esac
   GOS_WHAT="$group $verb"
@@ -142,6 +173,9 @@ gos_guard() {
       --title=* | --subject=*) titles+=("${a#--*=}") ;;
       --subject) i=$((i + 1)); titles+=("${argv[$i]:-}") ;;
       --body=*) bodies+=("${a#--body=}") ;;
+      # --comment takes text only on close/reopen; on `pr review` it is a switch.
+      --comment=*) if gos_comment_verb; then bodies+=("${a#--comment=}"); fi ;;
+      --comment) if gos_comment_verb; then i=$((i + 1)); bodies+=("${argv[$i]:-}"); fi ;;
       --body-file=*) bf_idx+=("$i"); bf_pre+=("--body-file="); bf_path+=("${a#--body-file=}") ;;
       --repo=*) targets+=("${a#--repo=}"); have_r=1 ;;
       -t | --title) i=$((i + 1)); titles+=("${argv[$i]:-}") ;;
@@ -150,11 +184,13 @@ gos_guard() {
       -R | --repo) i=$((i + 1)); targets+=("${argv[$i]:-}"); have_r=1 ;;
       -t?*) titles+=("${a#-t}") ;;
       -b?*) bodies+=("${a#-b}") ;;
+      -c) if gos_comment_verb; then i=$((i + 1)); bodies+=("${argv[$i]:-}"); fi ;;
+      -c?*) if gos_comment_verb; then bodies+=("${a#-c}"); fi ;;
       -F?*) bf_idx+=("$i"); bf_pre+=("-F"); bf_path+=("${a#-F}") ;;
       -R?*) targets+=("${a#-R}"); have_r=1 ;;
       --*) ;;
       -?*)
-        if [ "${#a}" -gt 2 ] && [[ "${a:2}" == *[tbFR]* ]]; then
+        if [ "${#a}" -gt 2 ] && { [[ "${a:2}" == *[tbFR]* ]] || { gos_comment_verb && [[ "${a:2}" == *c* ]]; }; }; then
           gos_refuse 3 "the short-flag cluster \`${a:0:2}…\` in this $GOS_WHAT may carry a title, body or repo the outbound scan cannot separate. Fix: write each short flag as its own word (\`-d -b <text>\`, \`-B <branch>\`), or use the long flags (--title, --body, --body-file, --repo)."
         fi ;;
       *) gos_positional "$a" ;;
@@ -184,7 +220,8 @@ gos_guard() {
   done
   [ -n "$public" ] || return 0
 
-  local dir="${FCI_CFG_DIR:?gh-athena: outbound scan needs the private config dir}/outbound-scan"
+  [ -n "${FCI_CFG_DIR:-}" ] || gos_refuse 3 "the private config dir (FCI_CFG_DIR) is unset, so the outbound scan has nowhere to copy the text. Fix: run gh-athena as a whole (it sets the dir up before this guard); report a defect if it did."
+  local dir="$FCI_CFG_DIR/outbound-scan"
   mkdir -p "$dir" || gos_refuse 3 "could not create $dir for the outbound scan. Fix: make \$TMPDIR writable and retry."
   local k f
   for k in "${!titles[@]}"; do
@@ -198,14 +235,17 @@ gos_guard() {
     gos_scan body "$f"
   done
   for k in "${!bf_path[@]}"; do
-    f="${bf_path[$k]}"
-    if [ "$f" = "-" ]; then
-      f="$dir/body-stdin-$k"
+    # Every body file is COPIED once and gh is handed the copy: a pipe
+    # (-F <(...), /dev/fd/N, a FIFO) can be read only once, and a regular
+    # file can change between the scan and gh's own read.
+    f="$dir/body-file-$k"
+    if [ "${bf_path[$k]}" = "-" ]; then
       cat > "$f" || gos_refuse 3 "could not read the body from stdin. Fix: pass --body-file <path> instead."
-      GOS_ARGV[${bf_idx[$k]}]="${bf_pre[$k]}$f"
     else
-      [ -r "$f" ] || gos_refuse 3 "the body file $f is not readable, so it cannot be scanned. Fix: pass a readable --body-file."
+      [ -r "${bf_path[$k]}" ] || gos_refuse 3 "the body file ${bf_path[$k]} is not readable, so it cannot be scanned. Fix: pass a readable --body-file."
+      cat -- "${bf_path[$k]}" > "$f" || gos_refuse 3 "could not copy the body file ${bf_path[$k]} for the outbound scan. Fix: pass a readable regular file and retry."
     fi
+    GOS_ARGV[${bf_idx[$k]}]="${bf_pre[$k]}$f"
     gos_scan body-file "$f"
   done
   return 0
