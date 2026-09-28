@@ -365,7 +365,15 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   is the label (its eval reading). A use case whose question set has not
   shipped is refused as such, never read as an empty run.
 - **The owner is the machine token's**, never the body's. An eval run belongs
-  to one owner; another owner's run id reads exactly as an absent one.
+  to one owner; another owner's run id reads exactly as an absent one. The
+  one run a token does not start is priority scoring's owner-action run
+  (below): an operator starts it by rpc for one owner, and it reads only
+  that owner's index. Its thresholds are applied like any other run's.
+
+  **Later (2026-09-28):** this said only that the owner is the machine
+  token's. Replaced by the text above (DND-719). Why: owner-action labels are
+  read from the index on the server, so no request body carries them, and
+  an operator starts that run in system context.
 - **What a run stores**: the caller's opaque case id, the owner's label, and
   the chosen label with its confidence, or the unscored reason. Never the
   input.
@@ -383,8 +391,15 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
 - **Proposed labels** (confirmed by no owner, record or rule) never enter a
   run, so they never select a threshold. A label whose id the corpus lacks is
   reported by count and id. A run's provenances are `forward_record`,
-  `owner_confirmed`, `tracker_record` and `rule_confirmed`; each names what
-  confirmed it, and only `owner_confirmed` means the owner did.
+  `owner_confirmed`, `tracker_record`, `rule_confirmed` and `owner_action`;
+  each names what confirmed it. Only `owner_confirmed` (the owner confirmed
+  the label) and `owner_action` (the owner acted on the item) come from the
+  owner.
+
+  **Later (2026-09-28):** this ended "only `owner_confirmed` means the owner
+  did". Replaced by the text above (DND-719). Why: priority scoring's labels
+  are `owner_action`, read from what the owner did on the index, which is the
+  owner's own evidence without a confirmation step.
 
   **Later (2026-09-28):** this read "Proposed labels (not yet confirmed by the
   owner)", which read as if only the owner's confirmation lets a label into a
@@ -425,6 +440,50 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   confirms (different Areas, no link, no citation). `rule_confirmed` is never
   `owner_confirmed`. Every other sampled pair stays `proposed`. Severity labels
   are weak (an agent assigned them) and are not evaluated.
+- **Priority scoring labels come from the owner's actions** (DND-719, gen_saas
+  `Athena.Priorities.OwnerActionEvaluation`). Provenance `owner_action`: what
+  the owner did on the priority index, as the index records it now. An active
+  item's `pin_top`, `pin_bottom` or `score` override, and a `dismissed` item,
+  are actions; an active item with no override is `unmarked`. The index keeps
+  no action history, so a promotion and a completion are not labels. The
+  server reads these from the owner's own index and builds the run itself; a
+  request body carrying an owner-action label is refused, so the label cannot
+  be supplied by a caller. One case is one (item, dimension).
+  - **`unmarked` is inferred, not confirmed.** The owner never said an
+    unmarked item belongs below a pin; it is the list the pin was placed
+    against. It is the weakest side of any pair, and it enters only as a
+    pin's or a dismissal's partner.
+  - **Pairs.** "The owner put A above B": `pin_top` above a score override,
+    `pin_bottom` and `dismissed`; a score override above the overrides with
+    the next lower value (not every lower one) and above `pin_bottom` and
+    `dismissed`; each pin or dismissal against up to five `unmarked` items.
+    Other combinations say nothing about order and are not pairs.
+  - **Pairs share items, so every item's pairs are capped.** A pair reuses
+    both sides' judgments, so the pairs are not independent trials. To bound
+    that, each acted item is the upper side of at most five acted pairs and
+    takes at most five unmarked partners, the other sides spread by a fixed
+    rotation. The Wilson bound below is computed over pairs anyway: the cap
+    limits how far one judgment can be counted, and it does not make the
+    pairs independent. A dimension clears the bar only with at least 35
+    decisive pairs; the gen_saas readiness check counts the pairs an index
+    implies before any call.
+  - **The curve is pairwise, per dimension.** At threshold t an item's delta
+    is its judged level when accepted at t, else 0, as the product ranks it.
+    A pair is correct when the deltas order it as the owner did, wrong when
+    they reverse it, and decides nothing on a tie; ties are counted and
+    excluded. For a pairwise curve, `n` is the decisive pairs, precision is
+    correct over decisive, and coverage is correct over the scored pairs.
+    The chosen threshold follows *How a threshold is chosen* with decisive
+    pairs in place of routed cases. A pair with an unscored side is
+    excluded, never scored as wrong.
+  - **Rows.** A dimension's result is written to each of its level labels,
+    because the product accepts a level by its label's row: one threshold per
+    dimension, with no per-level precision. A dimension with too few pairs is
+    `n/a` on every level label, its row carrying the point with the most
+    decisive pairs. A run holds owner-action labels or level labels, never
+    both, and a mixed run cannot be applied.
+  - **Paced.** Eval calls count toward the local rate limit (*Budget*), so
+    the run pauses a minute between batches of at most 50 cases.
 - **n/a reads "insufficient evidence"** in `judgment-eval`'s run and apply
   lines: the label stays disabled.
 - **One case, one label.** A question set's eval reading names exactly one
