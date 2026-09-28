@@ -703,6 +703,60 @@ stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"; record_pass "$R"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$out" && ok "c30 ignored files are not dirt" || bad "c30 ignored file refused (rc=$rc)" "$out"
 
+# ---------------------------------------------------------------- case 31
+# DND-1010 --with-critic. The judge runs beside the gate; the verdict step
+# then reads its receipt exactly as it would have. Stubbed via critic-review's
+# own CRITIC_REVIEW_STUB hook, so the real receipt writer and reader run. A
+# private TMPDIR keeps the temp-log check immune to other runs on the machine.
+C31TMP="${TMP}/c31tmp"; mkdir -p "$C31TMP"
+printf 'looks good\nFINDINGS: none\n' > "${TMP}/critic-pass"
+printf 'bad\nFINDINGS: correctness\n' > "${TMP}/critic-block"
+wc_gate() { ( cd "$1" && TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="$2" "$GATE" --target main --no-fetch --gate "$3" --with-critic 2>&1 ); }
+R="${TMP}/c31"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"   # no verdict recorded
+out="$(wc_gate "$R" "${TMP}/critic-pass" "${R}/g.sh")"; rc=$?
+[ "$rc" -eq 0 ] && [ -f "${R}/GATE_RAN" ] && grep -q '^INTEGRATION OK' <<<"$out" \
+  && ok "c31 --with-critic: judge + gate both run, a PASS lands INTEGRATION OK" || bad "c31 with-critic pass (rc=$rc)" "$out"
+grep -q 'beside the gate' <<<"$out" && ok "c31 says the judge ran beside the gate" || bad "c31 no concurrency line" "$out"
+out="$(wc_gate "$R" "${TMP}/critic-block" "${R}/g.sh")"; rc=$?
+[ "$rc" -eq 0 ] && grep -q 'not re-run' <<<"$out" && ok "c31 a PASS already recorded for the head is not re-judged" || bad "c31 re-judged a PASS (rc=$rc)" "$out"
+R="${TMP}/c31b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+out="$(wc_gate "$R" "${TMP}/critic-block" "${R}/g.sh")"; rc=$?
+[ "$rc" -eq 3 ] && ! grep -q '^INTEGRATION OK' <<<"$out" && ok "c31 a BLOCK from the concurrent judge is refused (exit 3)" || bad "c31 block (rc=$rc)" "$out"
+R="${TMP}/c31c"; new_repo "$R"
+stub_gate_pair "${R}/gp.sh"
+( cd "$R" && echo a > a.txt && git add a.txt && git commit -qm a && git checkout -qb feature && echo b > b.txt && git add b.txt && git commit -qm b )
+out="$(wc_gate "$R" "${TMP}/critic-block" "${R}/gp.sh")"; rc=$?
+[ "$rc" -eq 1 ] && grep -q 'critic-review: BLOCKED' <<<"$out" \
+  && ok "c31 a RED gate still joins the judge: one round returns both results" || bad "c31 red gate + judge (rc=$rc)" "$out"
+[ -z "$(find "$C31TMP" -maxdepth 1 -name 'integration-gate-critic.*' 2>/dev/null)" ] \
+  && ok "c31 the judge's temp log is removed" || bad "c31 temp log left behind" "$(ls "$C31TMP")"
+
+# No orphan. The judge is blocked (its stub is a FIFO nobody writes) when the
+# gate step exits 2 without joining it (the gate moved HEAD). The EXIT trap
+# must stop the judge's whole process group.
+R="${TMP}/c31d"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo x > x.txt && git add x.txt && git commit -qm x )
+printf '#!/bin/sh\necho y > y.txt && git add y.txt && git commit -qm auto-fix\nexit 0\n' > "${R}/g.sh"; chmod +x "${R}/g.sh"
+mkfifo "${TMP}/critic-fifo"
+out="$(wc_gate "$R" "${TMP}/critic-fifo" "${R}/g.sh")"; rc=$?
+pg="$(sed -n 's/.*beside the gate (pgid \([0-9]*\),.*/\1/p' <<<"$out")"
+gone=0
+if [ -n "$pg" ]; then
+  for _ in $(seq 1 50); do
+    kill -0 -- "-${pg}" 2>/dev/null || { gone=1; break; }
+    sleep 0.1
+  done
+fi
+[ "$rc" -eq 2 ] && [ -n "$pg" ] && [ "$gone" -eq 1 ] \
+  && ok "c31 a gate step that exits early stops the judge's process group (no orphan)" \
+  || bad "c31 judge left running (rc=$rc pgid=${pg:-none} gone=$gone)" "$out"
+[ -n "$pg" ] && kill -KILL -- "-${pg}" 2>/dev/null
+rm -f "${TMP}/critic-fifo"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

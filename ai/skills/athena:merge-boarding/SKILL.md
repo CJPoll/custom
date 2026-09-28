@@ -308,6 +308,15 @@ head" is not a reason to skip it: the integrated head is the one being judged.
 a real run.) A branch that edits its own gate still runs its own copy, but the
 run warns and the OK line says `EDITED BY THIS BRANCH` — review that diff.
 
+**Run the judge beside the gate: `integration-gate --with-critic`.** It starts
+`critic-review --base <target>` on this head concurrently with the gate, unless
+a PASS is already recorded for it. It joins the judge even on a RED gate, so
+one round returns both sets of findings, then reads the verdict exactly as
+without the flag. Use it for a captain's final check and after every rebase:
+a new SHA needs both a new gate and a new verdict. It changes the wall time,
+max(gate, critic) instead of the sum, and nothing else. The judge runs in its
+own process group, and the script stops that group if it leaves early.
+
 Exit 0 means: your HEAD contains current `origin/main`, **and** the local gate
 is green on that integrated head. It prints `INTEGRATION OK <sha> (GATE: <cmd>
 -- <source>)` — merge *that* SHA, and copy the line whole so the record says

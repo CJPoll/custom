@@ -36,6 +36,7 @@ PROG="integration-gate"
 TARGET="origin/main"
 GATE_CMD=""
 DO_FETCH=1
+WITH_CRITIC=0
 SINCE=""
 CRITIC_OVERRIDE=""
 OVERRIDE_STATE=""
@@ -76,6 +77,13 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    from, and marks it EDITED BY THIS BRANCH when the branch
                    changes the gate script itself.
   --no-fetch       skip the fetch; compare against the target ref as-is
+  --with-critic    also run the standing judge (critic-review --base <target>)
+                   on this head, CONCURRENTLY with the gate, unless a PASS is
+                   already recorded for it. It is joined before the verdict
+                   step, which then reads the judge's receipt exactly as
+                   without the flag, so wall time is max(gate, critic), not
+                   the sum. On a RED gate the judge is still joined, so one
+                   round returns both sets of findings.
   --critic-override <reason>
                    merge WITHOUT a standing-judge verdict on this head -- and
                    ONLY that: the receipt is read first either way, and a
@@ -116,6 +124,7 @@ while [ $# -gt 0 ]; do
     --since)  SINCE="${2-}"; [ -n "$SINCE" ] || { echo "${PROG}: --since needs a ref." >&2; echo "Fix: pass the target SHA your branch was last gated against, e.g. --since 2e0eff3." >&2; exit 2; }; shift 2 ;;
     --gate)   GATE_CMD="${2-}"; [ -n "$GATE_CMD" ] || { echo "${PROG}: --gate needs a command." >&2; echo "Fix: pass a command, e.g. --gate 'ai/bin/harness-gate'." >&2; exit 2; }; shift 2 ;;
     --no-fetch) DO_FETCH=0; shift ;;
+    --with-critic) WITH_CRITIC=1; shift ;;
     --critic-override) CRITIC_OVERRIDE="${2-}"; [ -n "$CRITIC_OVERRIDE" ] || { echo "${PROG}: --critic-override needs a REASON." >&2; echo "Fix: pass why you are merging with no judge verdict, e.g. --critic-override 'model unreachable for 3 re-runs; hotfix cannot wait'. An unrecorded bypass is the exact failure this flag exists to replace. Note it cannot cover a recorded BLOCK -- that is refused with or without the flag." >&2; exit 2; }; shift 2 ;;
     --owner-approval) OWNER_APPROVAL="${2-}"; [ -n "$OWNER_APPROVAL" ] || { echo "${PROG}: --owner-approval needs the OWNER'S AUTHORIZATION." >&2; echo "Fix: pass a verifiable record of the owner's own words: --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>' (see --help). An empty value is not an approval, and no agent message is ever your user's consent." >&2; exit 2; }; shift 2 ;;
     --self-test)
@@ -123,7 +132,7 @@ while [ $# -gt 0 ]; do
       exec bash "$(dirname "${HERE}")/test/self-test.sh" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "${PROG}: unknown argument '$1'." >&2
-       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --critic-override, --owner-approval, --self-test." >&2
+       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --with-critic, --critic-override, --owner-approval, --self-test." >&2
        exit 2 ;;
   esac
 done
@@ -184,8 +193,14 @@ if ! rm -f "$RECEIPT" 2>/dev/null; then
   echo "Fix: make ${RECEIPT_DIR} writable (ls -ld '${RECEIPT_DIR}') and re-run. A stale pass this run cannot clear would outlive its result." >&2
   exit 5
 fi
+CRITIC_PGID=""; CRITIC_LOG=""
 clear_receipt_on_failure() {
   local rc=$?
+  # A --with-critic judge still running when this script leaves must not be
+  # orphaned (the PT-919 class). It runs as its own process-group leader, so
+  # one group signal reaches critic-review AND the `claude -p` it spawns.
+  [ -n "$CRITIC_PGID" ] && kill -TERM -- "-${CRITIC_PGID}" 2>/dev/null
+  [ -n "$CRITIC_LOG" ] && rm -f "$CRITIC_LOG" 2>/dev/null
   [ -n "$RECEIPT_TMP" ] && rm -f "$RECEIPT_TMP" 2>/dev/null
   [ "$rc" -ne 0 ] && rm -f "$RECEIPT" 2>/dev/null
   return "$rc"
@@ -462,8 +477,42 @@ if [ -n "$DIRT" ]; then
   echo "Fix: commit the paths above (or remove them, or gitignore build output), then re-run. A pass on uncommitted content is not a pass of $(short "$HEAD_SHA")." >&2
   exit 2
 fi
+CRITIC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/critic-review"
+if [ "$WITH_CRITIC" -eq 1 ]; then
+  if [ ! -x "$CRITIC" ]; then
+    echo "${PROG}: --with-critic cannot locate critic-review (expected ${CRITIC})." >&2
+    echo "Fix: run this script from its committed path under ~/dev/custom, or drop --with-critic and run ~/dev/custom/ai/bin/critic-review yourself." >&2
+    exit 3
+  fi
+  if ! command -v setsid >/dev/null 2>&1; then
+    echo "${PROG}: --with-critic needs setsid (util-linux) to run the judge in its own process group." >&2
+    echo "Fix: install util-linux, or drop --with-critic and run ~/dev/custom/ai/bin/critic-review yourself before this script." >&2
+    exit 2
+  fi
+  if "$CRITIC" --verdict-for "$HEAD_SHA" >/dev/null 2>&1; then
+    echo "${PROG}: --with-critic: a PASS is already recorded for $(short "$HEAD_SHA"); the judge is not re-run."
+  else
+    CRITIC_LOG="$(mktemp "${TMPDIR:-/tmp}/integration-gate-critic.XXXXXX")"
+    # setsid execs in place (a background subshell is not a group leader), so
+    # $! is the judge's pid AND its process-group id.
+    ( cd "$ROOT" && exec setsid "$CRITIC" --base "$TARGET" ) >"$CRITIC_LOG" 2>&1 &
+    CRITIC_PGID=$!
+    echo "${PROG}: --with-critic: running the standing judge on $(short "$HEAD_SHA") beside the gate (pgid ${CRITIC_PGID}, log ${CRITIC_LOG})"
+  fi
+fi
+# Joins the concurrent judge and prints its verdict lines. Called on every
+# path out of the gate step that reports a result, so a RED gate still returns
+# the judge's findings; any other exit stops it through the EXIT trap.
+join_critic() {
+  [ -n "$CRITIC_PGID" ] || return 0
+  wait "$CRITIC_PGID" 2>/dev/null
+  CRITIC_PGID=""
+  grep -E '^critic-review:|^FINDINGS:' "$CRITIC_LOG" >&2 || tail -5 "$CRITIC_LOG" >&2
+}
+
 echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA"): ${GATE_LABEL}"
 if ! ( cd "$ROOT" && eval "$GATE_CMD" ); then
+  join_critic
   echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA")." >&2
   echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA") although your branch passed alone. A disjoint file set does not imply a disjoint gate (shared budgets/registries). Fix it on this branch and re-run; do not merge." >&2
   exit 1
@@ -476,6 +525,7 @@ if [ "$AFTER_SHA" != "$HEAD_SHA" ] || [ -n "$DIRT" ]; then
   echo "Fix: the green run was of content other than $(short "$HEAD_SHA"), so it certifies nothing. Review what the gate wrote or committed, keep it on this branch if it is right, then re-run integration-gate on the new head." >&2
   exit 2
 fi
+join_critic
 
 # --- 8b. the standing judge's verdict ON THE HEAD WE ARE DECLARING MERGEABLE -
 # A judge that never ran, fail-opened, or had not finished yet used to be
@@ -495,7 +545,6 @@ fi
 # copies verbatim into its state log as the attributable record. The record
 # then said the opposite of what happened. Reading first is a STRICT
 # TIGHTENING: it can only ever REFUSE a merge the flag used to allow.
-CRITIC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/critic-review"
 if [ ! -x "$CRITIC" ]; then
   echo "${PROG}: cannot locate critic-review (expected ${CRITIC})." >&2
   echo "Fix: run this script from its committed path under ~/dev/custom so the judge's verdict reader resolves. A judge that cannot be found is an ERROR, never a pass -- and --critic-override does NOT apply here, because with no reader 'no BLOCK recorded' cannot be told apart from 'nothing was read'." >&2
