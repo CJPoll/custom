@@ -136,7 +136,8 @@ scanned.
 
 **Patterns file.** `<root>/outbound/patterns.tsv`. One pattern per line:
 `<label><TAB><regex>`. Blank lines and lines starting with `#` are skipped. The
-label matches `[a-z0-9][a-z0-9_.-]*` and is non-sensitive (`slack-person-3`,
+label matches `[a-z0-9][a-z0-9_.-]{0,63}` (at most 64 characters) and is
+non-sensitive (`slack-person-3`,
 `work-ticket-id`). The regex is a Ruby regular expression (ERE-compatible for
 ordinary patterns). Any other line makes the whole file unreadable, reported by
 source and line number, never by content.
@@ -144,8 +145,9 @@ source and line number, never by content.
 **Union rule.** The pattern set is the **union** of the working-tree
 `outbound/patterns.tsv` and the latest committed copy,
 `git -C <root> show HEAD:outbound/patterns.tsv`. A local uncommitted edit can
-only add a pattern. Removing one needs a commit in the overlay's local history.
-Residual, stated: a deliberate local commit can still lower the floor. An
+only add a pattern. Removing one means moving the overlay's `HEAD` to a copy
+without it. Residual, stated: anything that moves `HEAD` can lower the floor
+(a commit, a `reset`, a `checkout` of an older commit or another branch). An
 overlay that is not a git repository, has no commits, or has no committed
 `patterns.tsv` has **no floor**, and the scan says so as COULD NOT MEASURE.
 
@@ -155,7 +157,8 @@ overlay that is not a git repository, has no commits, or has no committed
 |---|---|---|
 | 0 | CLEAN | the surface was scanned with at least one pattern, and nothing matched |
 | 1 | HITS | at least one match; each is reported as a location plus the pattern **label**, never the matched text |
-| 3 | COULD NOT MEASURE | the overlay is absent or malformed, the floor is missing, the pattern set is empty or unreadable, or the surface could not be read; the reason names which |
+| 2 | USAGE | the scanner was called wrongly (no mode, two modes, a bad flag); nothing was scanned |
+| 3 | COULD NOT MEASURE | the overlay is absent or malformed, the floor is missing, the pattern set is empty or unreadable, a pattern exceeded its match-time budget, or the surface could not be read; the reason names which |
 | 0 | WAIVED - NOT SCANNED | `ATHENA_OUTBOUND_WAIVE=<reason>` was set; the reason is printed and logged; this is never printed as CLEAN |
 
 A run that measured prints `SCANNED commits=N lines=M patterns=P hits=H`.
