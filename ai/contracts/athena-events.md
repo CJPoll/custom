@@ -4139,39 +4139,13 @@ conversation before them.
 
 **Later (2026-09-28):** step 2b went straight to 2c: every owner-written new
 conversation was judged. Superseded by DND-717 (gen_saas
-`Athena.SlackEvents.SessionMention`), which adds step 2b′. Why: the owner's
+`Athena.SlackEvents.SessionMention`), which adds step 2b'. Why: the owner's
 routing rule (Cody, 2026-09-28 ~04:25Z): "if I'm replying to a message, the
 session that sent it is the intended recipient. If I specify a session, then
 great. Most messages from slack will be for walt_ui." Rule 1 is step 1 (the
-thread claim) and rule 3 is the channel route; step 2b′ is rule 2, so the
+thread claim) and rule 3 is the channel route; step 2b' is rule 2, so the
 judgment is left as the tiebreak for a new conversation that names no
 session.
-
-**The session mention (step 2b′).** Grammar `session-mention-v1`, in code and
-versioned. Only the start of the owner's text is read, and only an ADDRESS
-counts, ending in a colon: the tag form (`harness session:`,
-`*gen_saas session (laptop):*`, as routing agreement R1 tags posts), or a
-single-line lead-in of at most 80 characters ending `for the <names>
-session:`. The word `session` is required. Names: `walt_ui` (`walt ui`) is
-walt_ui; `harness` and `custom` are harness; `gen_saas` (`gen saas`) and
-`laptop` are gen_saas; `desktop` names none. Names joined by `/` must name
-one label, or there is no mention. A message that talks ABOUT a session
-("ask the harness session to …") is not one and is judged as before.
-
-- **No threshold and no tokens.** The mention is the owner's own words, not
-  a judgment, so no `judgment_calls` row is written and no context is read.
-  Its topic route is looked up exactly as an accepted judgment's, under the
-  same authorization: it selects only among the owner's own topic routes.
-- **The line.** In `on` with a live route, `route: session_mention` and a
-  `topic` of `{label, confidence: null, model: null, reason: null}`. In
-  `shadow`, the channel route with that same `topic`; the outcome record says
-  `by=session_mention` and names the would-be route. A missing route is
-  `label_disabled`, as for a judgment.
-- **One grammar.** The harness applies the same grammar when it labels the
-  eval corpus (`ai/lib/judgment_label.rb`, `rule_confirmed` with
-  `"rule": "session_mention"`; `ai/contracts/athena-judgments.md` →
-  *Threshold provenance, n/a and the pinned model*). Both test suites carry one vector list; a change
-  to either is a new grammar version in both.
 
 - **Only the owner's own text is judged.** A new conversation from anyone else
   follows the channel route by code, with no judgment and no tokens. The
@@ -4186,6 +4160,39 @@ one label, or there is no mention. A message that talks ABOUT a session
   that overruns falls back as `timeout`.
 - **The content domain is `work`**, because the connected Slack is the work
   Slack (*Domain and owner-only items*).
+
+**The session mention (step 2b').** Grammar `session-mention-v1`, in code and
+versioned. Only the first 400 characters of the owner's text are read, and
+only an ADDRESS counts, ending in a colon. Unicode space separators read as a
+space, and leading Slack user-mention tokens (`<@U…>`, as a channel mention
+of the bot begins) are skipped. Then either the tag form (`harness session:`,
+`*gen_saas session (laptop):*`, as routing agreement R1 tags posts), or a
+single-line lead-in of at most 80 characters ending `for the <names>
+session:`. The word `session` is required. Names: `walt_ui` (`walt ui`,
+`waltui`) is walt_ui; `harness` and `custom` are harness; `gen_saas`
+(`gen saas`, `gensaas`) and `laptop` are gen_saas; `desktop` names none.
+Names joined by `/` must name one label, or there is no mention; so is a
+name the table lacks. A message that talks ABOUT a session ("ask the harness
+session to …") is not one and is judged as before.
+
+- **Modes.** The step is part of the `slack_routing` topic step, so it runs
+  only in `shadow` or `on` and acts only in `on`, under the same rule for
+  setting `on` (`ai/contracts/athena-judgments.md` → *Modes*).
+- **No threshold and no tokens.** The mention is the owner's own words, not
+  a judgment, so no `judgment_calls` row is written and no context is read.
+  Its topic route is looked up exactly as an accepted judgment's, under the
+  same authorization: it selects only among the owner's own topic routes.
+- **The line.** In `on` with a live route, `route: session_mention` and a
+  `topic` of `{label, confidence: null, model: null, reason: null}`. In
+  `shadow`, the channel route with that same `topic`; the outcome record says
+  `by=session_mention` and names the would-be route. A missing route is
+  `label_disabled`, as for a judgment.
+- **One grammar.** The harness applies the same grammar when it labels the
+  eval corpus (`ai/lib/judgment_label.rb`, `rule_confirmed` with
+  `"rule": "session_mention"`), and `judgment-eval` leaves such roots out of
+  a run (`ai/contracts/athena-judgments.md` → *Threshold provenance, n/a and
+  the pinned model*). Both test suites carry one vector list; a change to
+  either is a new grammar version in both.
 
 **Topic routes.** A topic route maps `(slack_app, label)` to one AgentInstance,
 with an `enabled` flag. It is written by the owner of the app, holder of
@@ -4202,8 +4209,8 @@ Every judge call also records its own row, per
 behaviour, loudly*.
 
 **The line.** A line the topic route chose carries `route: topic_judgment`, or
-`route: session_mention` when step 2b′ chose it. A
-new-conversation line that reached step 2b, 2b′ or 2c — mode `shadow` or `on` —
+`route: session_mention` when step 2b' chose it. A
+new-conversation line that reached step 2b, 2b' or 2c — mode `shadow` or `on` —
 carries a `topic` object, whether it was routed by topic or fell back. A
 new-conversation line stopped at 2a (mode `off`) carries neither field: it is
 the unchanged channel-route line. Both fields are defined in

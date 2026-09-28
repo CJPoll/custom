@@ -51,8 +51,11 @@ module JudgmentLabel
   MENTION_TAIL = "\\s+session(?:\\s*\\([^)\\n]{0,60}\\))?[*_]*\\s*:"
   MENTION_FORMS = [
     Regexp.new("\\A\\s*[*_]*\\s*(?:the\\s+)?#{MENTION_NAMES}#{MENTION_TAIL}", Regexp::IGNORECASE),
-    Regexp.new("\\A[^\\n:]{0,80}?\\bfor\\s+the\\s+#{MENTION_NAMES}#{MENTION_TAIL}", Regexp::IGNORECASE)
+    Regexp.new("\\A[^\\n:]{0,80}?(?<![\\p{L}\\p{N}_])for\\s+the\\s+#{MENTION_NAMES}#{MENTION_TAIL}", Regexp::IGNORECASE)
   ].freeze
+  # Leading Slack user-mention tokens (<@U0BOT>, <@U0BOT|name>) are skipped:
+  # a channel mention carries the bot's token, usually first.
+  MENTION_LEADING_USERS = /\A\s*(?:<@[A-Za-z0-9]+(?:\|[^>\n]{0,80})?>\s*)+/
   MENTION_LABELS = { "waltui" => "walt_ui", "harness" => "harness", "custom" => "harness",
                      "gensaas" => "gen_saas", "laptop" => "gen_saas" }.freeze
   MENTION_SCAN_CHARS = 400
@@ -102,12 +105,17 @@ module JudgmentLabel
   def session_mention(text)
     return nil unless text.is_a?(String)
 
-    lead = text.scrub("?")[0, MENTION_SCAN_CHARS]
+    # Unicode space separators read as a space and Unicode line breaks as a
+    # newline, so \s means the same ASCII set here and in the Elixir copy.
+    lead = text.scrub("?")[0, MENTION_SCAN_CHARS].gsub(/\p{Zs}/, " ").gsub(/[\u0085  ]/, "\n")
+    lead = lead.sub(MENTION_LEADING_USERS, "")
     match = MENTION_FORMS.lazy.map { |re| re.match(lead) }.find(&:itself)
     return nil unless match
 
-    labels = match[1].split("/").map { |n| MENTION_LABELS.fetch(n.downcase.gsub(/[\s_]/, "")) }.uniq
-    labels.size == 1 ? labels.first : nil
+    # A name the pattern matched but the table lacks (a case fold) is no
+    # mention, never a crash: every inbox line from any sender passes here.
+    labels = match[1].split("/").map { |n| MENTION_LABELS[n.downcase.gsub(/[\s_]/, "")] }.uniq
+    labels.size == 1 && labels.first ? labels.first : nil
   end
 
   # parse_slack(text, path) -> {lines: [{event_id, kind, user, channel, ts, thread_ts, mention}], without_id: n}
@@ -339,7 +347,7 @@ module JudgmentLabel
     raise ArgumentError, "not a confirm mode: #{mode}" unless CONFIRM_MODES.include?(mode)
 
     case mode
-    when :proposed then rows.select { |r| %w[proposed rule_confirmed].include?(r["provenance"]) }
+    when :proposed then rows.select { |r| r["provenance"] == "proposed" || (r["provenance"] == "rule_confirmed" && r["rule"] != "session_mention") }
     when :forward then rows.select { |r| r["provenance"] == "forward_record" }
     else rows.select { |r| r["provenance"] == "owner_confirmed" && r["context"] != "shown" }
     end

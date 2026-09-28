@@ -963,7 +963,7 @@ claimant*). `thread_claim`: a live claim on the reply's thread chose it.
 (`ai/contracts/athena-events.md` → *New conversations may route by an advisory
 topic judgment*). `session_mention`: the owner's text addressed one of the
 owner's sessions and that session's topic route chose it, with no judgment
-(the same section, *The session mention (step 2b′)*). `channel_route`: the
+(the same section, *The session mention (step 2b')*). `channel_route`: the
 app's channel route chose it, including a stale-claim fallback and every
 topic-judgment fallback. The field is optional and additive:
 
@@ -973,7 +973,7 @@ topic-judgment fallback. The field is optional and additive:
 - A reader MAY display it and MUST NOT fail on it, on an unknown value, or on
   its absence. It is Slack-producer only; a platform line carries none.
 
-**`topic` says what the topic judgment decided** for a new-conversation line
+**`topic` says what the topic judgment or the session mention decided** for a new-conversation line
 (`ai/contracts/athena-events.md` → *New conversations may route by an advisory
 topic judgment*). It is an object with exactly four members:
 
@@ -981,7 +981,8 @@ topic judgment*). It is an object with exactly four members:
   mention named, or `null` when neither did;
 - `confidence`: the judgment's confidence in `[0,1]`, or `null`;
 - `model`: the versioned model id that answered, or `null`;
-- `reason`: `null` when the judgment was accepted, otherwise a reason from
+- `reason`: `null` when the judgment was accepted or the mention's label
+  had a live topic route, otherwise a reason from
   `ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
   behaviour, loudly* (for example `mode_off`, `sender_rule`, `key_missing`,
   `below_threshold`).

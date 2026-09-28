@@ -369,7 +369,7 @@ module Manager
     out.puts "labels: #{loaded[:labels].size} (#{JudgmentEval.provenance_counts(loaded[:labels]).map { |k, v| "#{k} #{v}" }.join(', ')}); " \
              "proposed excluded: #{joined[:proposed]}"
     if loaded[:rule_routed].positive?
-      out.puts "session-mention excluded: #{loaded[:rule_routed]} (the router routes these by rule, step 2b', and never judges them)"
+      out.puts "session-mention excluded: #{loaded[:rule_routed]} (the router routes these by rule, athena-events.md -> The session mention, and never judges them)"
     end
     out.puts "corpus: #{corpus[:rows].size} rows with #{corpus[:id_key]}" + (corpus[:without_id].positive? ? ", #{corpus[:without_id]} without #{corpus[:id_key]} (ignored)" : "")
     unless joined[:missing].empty?

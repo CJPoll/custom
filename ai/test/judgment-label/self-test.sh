@@ -684,11 +684,22 @@ VECTORS='[
   ["harness / walt_ui session: both of you", nil],
   [("x" * 81) + " for the harness session: late", nil],
   ["hello\nfor the harness session: second line", nil],
+  ["<@U0BOT> harness session: status?", "harness"],
+  ["<@U0BOT|athena>  <@U0OTHER> Gen_saas session (laptop): hi", "gen_saas"],
+  ["<@U0BOT> note for the harness session: x", "harness"],
+  ["<@U0BOT> ask the harness session: x", nil],
+  ["hi <@U0BOT> harness session: x", nil],
+  ["harness session: x", "harness"],
+  [" harness session: x", "harness"],
+  ["harness session : x", "harness"],
+  ["harness　session: x", "harness"],
+  ["harneſſ session: x", nil],
+  ["éfor the harness session: x", nil],
   ["desktop session: hi", nil],
   ["", nil]
 ]'
 ruby_eq "mention: the parity vectors all read as the router reads them [DND-717]" \
-  "19 ok" \
+  "30 ok" \
   "v = ${VECTORS}; bad = v.reject { |t, want| JudgmentLabel.session_mention(t) == want }; bad.empty? ? \"#{v.size} ok\" : bad.inspect"
 ruby_eq "mention: nil text is no mention" "nil" 'JudgmentLabel.session_mention(nil).inspect'
 ruby_eq "mention: only the lead of a long message is read" "harness" \
@@ -727,9 +738,9 @@ ruby_eq "labels: a rule_confirmed row without a known rule is refused, naming it
 ruby_eq "labels: a rule on a row the rule did not label is refused" \
   "InputError: L:1 has a rule on a owner_confirmed row" \
   'JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"owner_confirmed","rule":"session_mention"}\n), "L")'
-ruby_eq "pending: the confirm step presents rule_confirmed rows with the proposed ones; the owner's answer replaces them" \
+ruby_eq "pending: the confirm step presents default_walt_ui rows with the proposed ones (never session_mention rows: no run scores them); the owner's answer replaces them" \
   "p r|owner_confirmed -" \
-  "rows = [{'id' => 'p', 'provenance' => 'proposed'}, {'id' => 'r', 'provenance' => 'rule_confirmed', 'rule' => 'default_walt_ui'}, {'id' => 'f', 'provenance' => 'forward_record'}]; ids = JudgmentLabel.pending(rows, :proposed).map { |x| x['id'] }.join(' '); c = JudgmentLabel.confirm(rows, 'r', 'harness', 'U', 'now', 'shown').find { |x| x['id'] == 'r' }; ids + '|' + c['provenance'] + ' ' + (c['rule'] || '-')"
+  "rows = [{'id' => 'p', 'provenance' => 'proposed'}, {'id' => 'r', 'provenance' => 'rule_confirmed', 'rule' => 'default_walt_ui'}, {'id' => 'm', 'provenance' => 'rule_confirmed', 'rule' => 'session_mention'}, {'id' => 'f', 'provenance' => 'forward_record'}]; ids = JudgmentLabel.pending(rows, :proposed).map { |x| x['id'] }.join(' '); c = JudgmentLabel.confirm(rows, 'r', 'harness', 'U', 'now', 'shown').find { |x| x['id'] == 'r' }; ids + '|' + c['provenance'] + ' ' + (c['rule'] || '-')"
 
 echo "== end to end: the owner's rule on a fixture inbox (DND-717)"
 
