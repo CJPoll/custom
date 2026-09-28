@@ -92,7 +92,7 @@ gos_scan() {
       local marked=0
       gos_machine_marked || marked=$?
       if [ "$st" = 3 ] && [ "$marked" = 1 ]; then
-        printf 'gh-athena: WARNING: the %s of this %s went out UNSCANNED: the private overlay is ABSENT and this machine is not marked as one that holds it (no outbound pre-push hook installed). This is not a clean result. Fix: none needed on a machine without the overlay; on one that should hold it, the owner creates it and installs the hook once DND-703 ships an installer.\n' "$label" "$GOS_WHAT" >&2
+        printf 'gh-athena: WARNING: the %s of this %s went out UNSCANNED: the private overlay is ABSENT and this machine is not marked as one that holds it (no outbound pre-push hook installed). This is not a clean result. Fix: none needed on a machine without the overlay; on one that should hold it, the owner creates it with scripts/setup-private-overlay --init and installs the hook with scripts/setup-private-overlay --install.\n' "$label" "$GOS_WHAT" >&2
         return 0
       fi
       gos_refuse 3 "the outbound scan of the $label could not measure (above), and this machine must measure. Fix: the Fix: line above names the problem; correct it and retry." ;;

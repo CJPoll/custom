@@ -1,0 +1,10 @@
+# outbound/patterns.tsv -- the outbound scan's pattern list (DND-699).
+# One pattern per line: <label><TAB><regex>. Blank lines and # lines are skipped.
+# The label matches [a-z0-9][a-z0-9_.-]{0,63} and is NOT sensitive
+# (slack-person-3, work-ticket-id); the regex IS, so this file never leaves
+# this machine. The floor is the COMMITTED copy: commit every addition.
+# Contract: ~/dev/custom/ai/contracts/athena-private-overlay.md -> Outbound-scan interface.
+#
+# This skeleton ships with NO patterns. With none, the scanner reports
+# COULD NOT MEASURE, so scripts/setup-private-overlay does not install the
+# pre-push hook until at least one pattern is committed here.

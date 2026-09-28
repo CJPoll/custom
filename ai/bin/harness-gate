@@ -184,6 +184,7 @@ STATIC_CHECKS = [
 SELF_TEST_DELEGATES = {
   "scripts/setup-inbox-registry"       => "ai/inbox/test/self-test.sh",
   "scripts/setup-athena-inbox-client"  => "scripts/test/athena-inbox-client/self-test.sh",
+  "scripts/setup-private-overlay"      => "scripts/test/setup-private-overlay/self-test.sh",
 }.freeze
 
 # ---------------------------------------------------------------------------

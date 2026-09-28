@@ -284,3 +284,6 @@ ai/lib/outbound_scan.rb	guard
 ai/lib/outbound_scan_sources.rb	library	git/overlay/file adapter required by ai/bin/outbound-scan (DND-699); raises OutboundScan::Unmeasurable naming the reason, and the bin prints the exit-3 COULD NOT MEASURE line that carries Fix:
 ai/lib/gh-outbound-scan.sh	guard
 ai/git-hooks/outbound-pre-push.sh	guard
+scripts/setup-private-overlay	guard
+ai/lib/private_overlay_install.rb	library	pure verdict/plan rules required by scripts/setup-private-overlay (DND-703); returns Verdicts and the Fix: text (fix_for) that the installer prints
+ai/lib/private_overlay_install_host.rb	library	claude/git/filesystem adapter required by scripts/setup-private-overlay (DND-703); returns [nil, reason] or raises PrivateOverlayInstall::HostError, and the installer prints the Fix:

@@ -4,8 +4,9 @@
 # pushed refs on stdin; it runs the MAIN CHECKOUT's ai/bin/outbound-scan, which
 # refuses a push that carries a work-domain value.
 #
-# To be installed (by DND-703's installer, which does not exist yet; never by
-# hand from a worktree) at the main checkout's .git/hooks/pre-push. That one file serves every linked worktree and
+# Installed by `scripts/setup-private-overlay --install` (DND-703; never by
+# hand from a worktree) as a wrapper at the main checkout's .git/hooks/pre-push
+# that execs this script. That one file serves every linked worktree and
 # shipwright lane, because hooks live in the common git dir. It runs the
 # scanner that LANDED in the main checkout, never a worktree's copy, so a
 # branch cannot weaken the scan that judges its own push.
@@ -26,7 +27,7 @@ case "${1:-}" in
       "  The pre-push hook for the public ~/dev/custom repo (DND-699). It runs the MAIN" \
       "  checkout's ai/bin/outbound-scan --pre-push and refuses a push carrying a" \
       "  work-domain value, or one it could not measure. Not run by hand. Installed" \
-      "  at the main checkout's .git/hooks/pre-push by DND-703's installer." \
+      "  at the main checkout's .git/hooks/pre-push by scripts/setup-private-overlay --install." \
       "  Contract: ai/contracts/athena-private-overlay.md -> Outbound-scan interface."
     exit 0 ;;
 esac

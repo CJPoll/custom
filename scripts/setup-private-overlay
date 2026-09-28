@@ -1,0 +1,236 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# setup-private-overlay — wire the private work overlay into this machine (DND-703).
+#
+# The overlay is an on-machine directory (default ~/.config/athena/work,
+# ATHENA_PRIVATE_ROOT overrides) holding work-domain values, local-only git
+# history and no remote. Contract: ai/contracts/athena-private-overlay.md.
+#
+# --install makes three things true, each MERGE-ONLY and idempotent:
+#   marketplace  `claude plugin marketplace add <root>` registers the local
+#                marketplace custom-work (user scope);
+#   plugin       `claude plugin install work@custom-work` (user scope), or
+#                `enable` when it is installed but disabled;
+#   hook         the main checkout's git pre-push hook (resolved with
+#                `git rev-parse --git-path hooks/pre-push`, so it serves every
+#                worktree and lane), a small wrapper that execs the MAIN
+#                checkout's ai/git-hooks/outbound-pre-push.sh.
+# It never overwrites what it did not write: a pre-push hook without its marker
+# line, or a custom-work marketplace registered from another path, is reported
+# and left alone. The hook is written only when the main checkout's scanner can
+# measure (it reports CLEAN on an empty probe, so the overlay holds at least
+# one committed pattern); an installed hook that cannot measure refuses every
+# push.
+#
+# Usage:
+#   setup-private-overlay --init [--dry-run]      create the overlay root from the
+#                                                 public skeleton (ai/private-overlay/skeleton),
+#                                                 0700, `git init` + one local commit, no
+#                                                 remote. Refuses an existing path. Owner step.
+#   setup-private-overlay [--install] [--dry-run] register the marketplace, install the plugin,
+#                                                 install the hook (default action)
+#   setup-private-overlay --check                 read-only: one line per component
+#                                                 (overlay, marketplace, plugin, hook)
+#   setup-private-overlay --remove [--dry-run]    remove the hook, the plugin and the marketplace
+#                                                 this installer added; never the overlay itself
+#   setup-private-overlay --self-test             run scripts/test/setup-private-overlay/self-test.sh
+#   setup-private-overlay -h | --help
+#
+# Environment: ATHENA_PRIVATE_ROOT (the overlay root), HOME, CLAUDE_CONFIG_DIR
+# (read by `claude` itself).
+#
+# Exit codes: 0 ok · 1 usage error, a gap left open, or a failed self-test ·
+# 3 ABSENT overlay (--install) or COULD NOT MEASURE · 4 MALFORMED overlay ·
+# 5 --init target already exists, or a change failed
+
+require_relative "../ai/lib/private_overlay_install_host"
+
+PROG = "setup-private-overlay"
+INSTALLER = "scripts/#{PROG}"
+SUITE = File.join(PrivateOverlayInstall::Host.repo_dir, "scripts", "test", "setup-private-overlay", "self-test.sh")
+PO = PrivateOverlayInstall
+HOST = PrivateOverlayInstall::Host
+
+# The help text IS the leading comment block, so it cannot drift.
+def usage
+  File.readlines(__FILE__)
+      .drop_while { |l| !l.start_with?("# #{PROG}") }
+      .take_while { |l| l.start_with?("#") }
+      .map { |l| l.sub(/\A# ?/, "") }
+      .each { |l| puts l }
+end
+
+# Observe everything --check / --install / --remove judge. Read-only.
+def observe
+  overlay = PO.overlay_verdict(HOST.overlay)
+  root = overlay.ok? ? HOST.overlay.root : nil
+  mkts, mreason = HOST.marketplaces
+  plugs, preason = HOST.plugins
+  main, mwhy = HOST.main_checkout
+  hook_obs =
+    if main.nil?
+      { path: nil, why: mwhy }
+    else
+      path, hwhy = HOST.hook_path(main)
+      { path: path, why: hwhy, main: main, content: path ? HOST.read_hook(path) : :none }
+    end
+  scanner = main ? HOST.probe_scanner(main) : { ready: false, detail: mwhy }
+  hook_obs[:scanner] = scanner
+  {
+    overlay: overlay, root: root, main: main, hook_path: hook_obs[:path], scanner: scanner,
+    marketplace: PO.marketplace_verdict(mkts, mreason, root),
+    plugin: PO.plugin_verdict(plugs, preason),
+    hook: PO.hook_verdict(hook_obs),
+  }
+end
+
+def print_verdicts(verdicts)
+  verdicts.each do |v|
+    puts PO.check_line(v)
+    puts "  #{PO.fix_for(v, installer: INSTALLER)}" unless v.ok?
+  end
+end
+
+def cmd_check
+  o = observe
+  verdicts = [o[:overlay], o[:marketplace], o[:plugin], o[:hook]]
+  print_verdicts(verdicts)
+  code = PO.check_exit(verdicts)
+  puts "#{PROG}: #{code.zero? ? 'OK: all four components are in place' : code == 3 ? 'COULD NOT MEASURE: see the lines above' : 'GAPS: see the lines above'}"
+  code
+end
+
+def cmd_init(dry)
+  target, why = HOST.init_target
+  if target.nil?
+    warn "#{PROG}: --init: the overlay root cannot be computed: #{why}. Fix: set HOME to an absolute path, or ATHENA_PRIVATE_ROOT to an absolute path that does not exist yet."
+    return PO::EXIT[:malformed]
+  end
+  if File.exist?(target) || File.symlink?(target)
+    warn "#{PROG}: --init: #{target} already exists; refusing to overwrite it. Fix: run `#{INSTALLER} --check` to see its state; move it aside only if you mean to start over."
+    return PO::EXIT[:conflict]
+  end
+  if dry
+    puts "#{PROG}: (dry-run) would create #{target} (0700) from #{HOST.skeleton_dir}, git init it, and make one local commit. No remote."
+    return PO::EXIT[:ok]
+  end
+  HOST.init_overlay(target)
+  r = HOST.overlay
+  unless r.state == :found && PO.same_path?(r.root, File.realpath(target))
+    warn "#{PROG}: --init created #{target}, but the resolver reads #{r.state} (#{r.reason || r.root}). Fix: set ATHENA_PRIVATE_ROOT=#{target} or unset it so the resolver reads the directory just created, then `ai/bin/private-overlay status`."
+    return PO::EXIT[:malformed]
+  end
+  puts "#{PROG}: created #{target} (0700, local git history, no remote). It holds no work values yet."
+  puts "#{PROG}: WARNING: the overlay is now PRESENT with ZERO outbound patterns, so every outbound scan " \
+       "reports COULD NOT MEASURE and gh-athena refuses PR/issue writes to public repositories on this machine. " \
+       "Fix: add at least one `label<TAB>regex` line to #{File.join(target, 'outbound', 'patterns.tsv')} and " \
+       "commit it in the overlay, then run `#{INSTALLER} --install`."
+  PO::EXIT[:ok]
+rescue PrivateOverlayInstall::HostError => e
+  warn "#{PROG}: --init failed: #{e.message}. Fix: remove the partial directory only if you created nothing else in it, then run `#{INSTALLER} --init` again."
+  PO::EXIT[:conflict]
+end
+
+def overlay_refusal(o)
+  v = o[:overlay]
+  puts PO.check_line(v)
+  puts "  #{PO.fix_for(v, installer: INSTALLER)}"
+  v.state == :absent ? PO::EXIT[:absent] : PO::EXIT[:malformed]
+end
+
+def apply(step, o, dry)
+  action, arg = step
+  what =
+    case action
+    when :marketplace_add then "register marketplace #{PO::MARKETPLACE} from #{arg}"
+    when :plugin_install then "install plugin #{arg} (user scope)"
+    when :plugin_enable then "enable plugin #{arg}"
+    when :plugin_uninstall then "uninstall plugin #{arg}"
+    when :marketplace_remove then "remove marketplace #{arg}"
+    when :hook_write then "write the pre-push hook at #{o[:hook_path]}"
+    when :hook_delete then "remove the pre-push hook at #{o[:hook_path]}"
+    end
+  return puts("#{PROG}: (dry-run) would #{what}") if dry
+
+  case action
+  when :marketplace_add then HOST.claude!("plugin", "marketplace", "add", arg, "--scope", "user")
+  when :plugin_install then HOST.claude!("plugin", "install", arg, "--scope", "user")
+  when :plugin_enable then HOST.claude!("plugin", "enable", arg)
+  when :plugin_uninstall then HOST.claude!("plugin", "uninstall", arg)
+  when :marketplace_remove then HOST.claude!("plugin", "marketplace", "remove", arg)
+  when :hook_write then HOST.write_hook(o[:hook_path], PO.hook_body(o[:main]))
+  when :hook_delete then HOST.delete_hook(o[:hook_path])
+  end
+  puts "#{PROG}: did #{what}"
+end
+
+def run_plan(plan, o, dry, verb)
+  refusals = plan.select { |a, _| a == :refuse }.map(&:last)
+  changes = plan.reject { |a, _| a == :refuse }
+  changes.each { |step| apply(step, o, dry) }
+  refusals.each do |v|
+    puts PO.check_line(v)
+    puts "  #{PO.fix_for(v, installer: INSTALLER)}"
+  end
+  puts "#{PROG}: nothing to #{verb}; everything this installer manages is already in place." if plan.empty?
+  return PO::EXIT[:ok] if refusals.empty?
+
+  refusals.any?(&:unmeasured?) ? PO::EXIT[:unmeasured] : PO::EXIT[:gap]
+rescue PrivateOverlayInstall::HostError => e
+  warn "#{PROG}: #{verb} stopped: #{e.message}. Fix: correct the named failure, then re-run `#{INSTALLER} --#{verb}`; completed steps are kept and re-running is safe."
+  PO::EXIT[:conflict]
+end
+
+def cmd_install(dry)
+  o = observe
+  return overlay_refusal(o) unless o[:overlay].ok?
+
+  plan = PO.install_plan(marketplace: o[:marketplace], plugin: o[:plugin], hook: o[:hook],
+                         root: o[:root], hook_ready: o[:scanner])
+  code = run_plan(plan, o, dry, "install")
+  puts "#{PROG}: run `#{INSTALLER} --check` to confirm." unless dry || plan.empty?
+  code
+end
+
+def cmd_remove(dry)
+  o = observe
+  plan = PO.remove_plan(marketplace: o[:marketplace], plugin: o[:plugin], hook: o[:hook])
+  run_plan(plan, o, dry, "remove")
+end
+
+def main(argv)
+  action = "install"
+  dry = false
+  argv.each do |arg|
+    case arg
+    when "--install" then action = "install"
+    when "--init" then action = "init"
+    when "--check" then action = "check"
+    when "--remove" then action = "remove"
+    when "--self-test" then action = "self-test"
+    when "--dry-run" then dry = true
+    when "-h", "--help" then usage; return 0
+    else
+      warn "#{PROG}: unknown argument: #{arg}"
+      warn "Fix: use one of --init, --install (default), --check, --remove, --dry-run, --self-test, -h."
+      return PO::EXIT[:usage]
+    end
+  end
+
+  case action
+  when "self-test"
+    unless File.file?(SUITE)
+      warn "#{PROG}: self-test suite missing at #{SUITE}"
+      warn "Fix: restore it from git (`git restore scripts/test/setup-private-overlay/self-test.sh`)."
+      return PO::EXIT[:usage]
+    end
+    exec("bash", SUITE)
+  when "check" then cmd_check
+  when "init" then cmd_init(dry)
+  when "remove" then cmd_remove(dry)
+  else cmd_install(dry)
+  end
+end
+
+exit main(ARGV)

@@ -114,8 +114,12 @@ bodies. Tests use synthetic values (`UFAKE00001`).
   is never pushed.
 - Read a value with `ai/bin/private-overlay get <file> <.key.path>`. A non-zero
   exit is reported with its Fix. Never replace it with a guess.
+- `scripts/setup-private-overlay` creates the overlay from the public skeleton
+  (`--init`), wires its `work` plugin and the pre-push hook (`--install`), and
+  reports each piece (`--check`, read-only). The owner runs `--init` and
+  `--install`; agents run `--check`.
 - Contract: `ai/contracts/athena-private-overlay.md` → *Discovery*, *States and
-  exit codes*, *Consumer obligation*.
+  exit codes*, *Consumer obligation*, *Installer*.
 
 ## Development Guidelines
 

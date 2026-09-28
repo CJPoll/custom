@@ -53,9 +53,17 @@ A valid root is a directory (a symlink is resolved to its realpath) that:
 - holds the marker described in *Marker*.
 
 The overlay is **optional**. The public harness MUST work with it absent. It is
-created by the owner, never by an agent or an installer run by an agent. It is
-never pushed anywhere: it keeps local-only git history (no remote) and is synced
-between the owner's machines over ssh.
+created by the owner, or on the owner's explicit direction, from the public
+skeleton with `scripts/setup-private-overlay --init` (see *Installer*). No agent
+creates it on its own initiative, and no installer creates it as a side effect
+of another mode. It is never pushed anywhere: it keeps local-only git history
+(no remote) and is synced between the owner's machines over ssh.
+
+**Later (2026-09-28):** this paragraph said the overlay is "created by the
+owner, never by an agent or an installer run by an agent". Superseded by
+DND-703, which ships the skeleton and `--init`, and by the owner's direction of
+2026-09-28 07:15Z letting the harness session create the directory (DND-701's
+non-owner step). What stays forbidden is creation nobody asked for.
 
 ## States and exit codes
 
@@ -125,6 +133,65 @@ A consumer that needs a work value reads it with `ai/bin/private-overlay get`.
 - A tracked file MUST NOT carry the value, in prose, fixtures or tests. Tests
   use synthetic values (`UFAKE00001`, `SYNTH-TOKEN-1`) and fixture roots through
   `ATHENA_PRIVATE_ROOT`.
+
+## Installer
+
+`scripts/setup-private-overlay` wires the overlay into a machine. Rules:
+`ai/lib/private_overlay_install.rb`; reads and writes:
+`ai/lib/private_overlay_install_host.rb`; tests:
+`scripts/test/setup-private-overlay/self-test.sh`. Every mode answers
+`--help`; `--dry-run` previews `--init`, `--install` and `--remove`.
+
+**Skeleton.** `ai/private-overlay/skeleton/` is the public template: the
+marker, `overlay/slack.json` and `overlay/notion.json` as empty objects,
+`outbound/patterns.tsv` with comments only, `.claude-plugin/marketplace.json`
+(marketplace `custom-work`), `plugins/work/.claude-plugin/plugin.json`, a
+synthetic `work:overlay-probe` skill for the plugin-loading measurement, and a
+README carrying *No credentials*. It MUST NOT carry a work-domain value.
+
+**`--init`.** Resolves the root by the *Discovery* rule and refuses a path that
+already exists (exit 5), whatever is there. Otherwise it copies the skeleton
+(root and directories `0700`, files `0600`), runs `git init`, and makes one
+local commit. It never adds a remote. It ends by reading the root back through
+the resolver, and a root that does not read PRESENT is exit 4.
+
+A fresh overlay is PRESENT with zero patterns, so from that moment every
+outbound scan on the machine is COULD NOT MEASURE and gh-athena refuses public
+writes (*The forge path* below). `--init` prints that consequence and its Fix.
+Commit at least one pattern right after `--init`, before anything else on the
+machine needs gh-athena.
+
+**`--install`** is merge-only and idempotent. It requires a PRESENT overlay
+(ABSENT is exit 3 with a Fix naming `--init`; MALFORMED is exit 4), then:
+
+1. registers the marketplace: `claude plugin marketplace add <root> --scope user`;
+2. installs `work@custom-work` at user scope, or enables it when disabled;
+3. writes the pre-push hook at `git rev-parse --git-path hooks/pre-push` of the
+   **main** checkout: a wrapper that carries a fixed marker line and `exec`s
+   the main checkout's `ai/git-hooks/outbound-pre-push.sh`. A missing target
+   fails the `exec`, so the push is refused.
+
+It never overwrites what it did not write. A pre-push hook without the marker
+line, or a `custom-work` marketplace registered from another source, is
+reported and left alone, and the plugin is then not installed. The hook is
+written only when the main checkout's scanner reports CLEAN on an empty probe:
+with no committed pattern, an installed hook would refuse every push.
+
+**`--check`** is read-only and prints one line per component, `overlay`,
+`marketplace`, `plugin` and `hook`, each `OK` or its gap, with a Fix. The hook
+line is `hook: OK` only when this installer's hook is present, targets this
+main checkout, and the scanner can measure. Anything else is `hook: NOT
+ACTIVE (<why>)`, never OK. Exit 0 when all four are OK, 3 when any read
+failed (`COULD NOT MEASURE`: no `claude` on PATH, unparseable `claude` JSON,
+an unresolvable hook path), else 1.
+
+**`--remove`** removes this installer's hook, uninstalls the plugin and removes
+the marketplace. It never deletes the overlay directory or a foreign hook.
+
+**Who runs it.** `--init` and `--install` change the owner's machine: its
+Claude Code user settings and the main checkout's `.git/hooks`. The owner runs
+them, or an agent on the owner's explicit direction. Tests use a fixture repo,
+a temp `HOME`, a temp `CLAUDE_CONFIG_DIR` and a stub `claude`.
 
 ## Outbound-scan interface
 
@@ -203,9 +270,13 @@ the main checkout's `.git/hooks/pre-push`, it serves every linked worktree and
 lane, and it runs the **main checkout's** (landed) scanner, never a branch's
 copy. A missing scanner refuses the push (exit 3). An installed hook marks a
 machine that must measure, so an ABSENT overlay refuses the push there.
-**Nothing installs it yet:** the installer is DND-703. Until DND-703 lands and
-the owner runs it, no push is scanned on any machine, no machine is marked, and
-the forge path below runs in its unmarked mode everywhere.
+`scripts/setup-private-overlay --install` installs it (see *Installer*), and
+only once the scanner can measure. Until the owner runs the installer on a
+machine, no push is scanned there, the machine is not marked, and the forge
+path below runs in its unmarked mode there.
+
+**Later (2026-09-28):** this paragraph said "Nothing installs it yet: the
+installer is DND-703." Superseded by DND-703's installer.
 
 **The forge path.** `ai/bin/gh-athena` scans every `--title`/`--subject`,
 `--body`, `--body-file` and (on close/reopen) `--comment` (each gh spelling,

@@ -1,0 +1,16 @@
+{
+  "name": "custom-work",
+  "owner": {
+    "name": "Athena private overlay"
+  },
+  "metadata": {
+    "description": "Local-only marketplace for the private work overlay. Never published."
+  },
+  "plugins": [
+    {
+      "name": "work",
+      "source": "./plugins/work",
+      "description": "Work-domain procedures kept in the private overlay."
+    }
+  ]
+}
