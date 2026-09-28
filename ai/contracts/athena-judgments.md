@@ -285,7 +285,20 @@ must see it end.
 Each (owner, use case) has one mode:
 
 - **`off`** — the shipped default, and the reading of an absent settings row. No
-  call is made. The caller does today's behaviour and the record says `mode_off`.
+  call is made. The caller does today's behaviour. A caller that asks the judge
+  anyway gets `not_configured`, and the judge's record says `mode_off`. A
+  caller MAY instead read the mode first and, in `off`, not ask at all. Then
+  there is no judgment and so no outcome: no `judgment_calls` row, no caller
+  record, no fallback telemetry, and the caller's output is today's, byte for
+  byte. `mode_off` is a `state` reason, which never alerts or moves health, so
+  skipping its record hides no fault. The Slack router reads the mode first
+  (`ai/contracts/athena-events.md` → *New conversations may route by an
+  advisory topic judgment*).
+
+  **Later (2026-09-28):** this said only "the record says `mode_off`", which
+  read as a record on every `off` path. Superseded by DND-716 (gen_saas PR
+  #479), whose Slack router reads the mode before the sender rule and records
+  nothing in `off`, so the pre-epic line stays byte-identical.
 - **`shadow`** — judge and record, but act exactly as today. The record shows
   what would have happened.
 - **`on`** — act on accepted judgments.

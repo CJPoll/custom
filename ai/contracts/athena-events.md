@@ -3843,7 +3843,7 @@ event classified (not ignored), dedupe pre-check passed
                              stale or no claim: the channel route (unchanged)
 2. new conversation? (im, mpim or mention root)
    2a. mode off           -> the channel route, UNCHANGED: no call, no
-                             judgment_calls row, no topic, no outcome        [no call]
+                             judgment_calls row, no topic, no topic outcome  [no call]
    2b. sender != owner    -> the channel route (topic reason: sender_rule)   [no judgment]
    2c. judge slack_routing -> the caller's decision:
          accepted, label enabled, topic route live
@@ -3857,8 +3857,9 @@ event classified (not ignored), dedupe pre-check passed
 and mode off stamped `topic reason: mode_off` on the line. Superseded by DND-716
 (gen_saas PR #479), which reads the mode first and, when it is `off`, writes
 nothing at all — the line is byte-identical to the pre-epic line, with no
-`judgment_calls` row and no `topic` object, not even one carrying `mode_off`.
-`mode_off` still exists as a fallback reason (`ai/contracts/athena-judgments.md`
+`judgment_calls` row, no fallback telemetry, no `topic_routing` outcome and no
+`topic` object, not even one carrying `mode_off` (`ai/contracts/athena-judgments.md`
+→ *Modes*, a caller that reads the mode first). `mode_off` still exists as a fallback reason (`ai/contracts/athena-judgments.md`
 → *The closed reason list*), but it now only reaches a line in shadow/on, when a
 judge call's `:not_configured` is attributed to a re-read that found the mode
 turned off mid-flight (`ai/contracts/athena-judgments.md` → *Fallback: every
