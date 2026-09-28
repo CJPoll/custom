@@ -383,7 +383,7 @@ guardrails; you may **never relax, weaken, or delete** one.
    `ai/hooks/main-session-policy.sh`, their `--self-test`s, the
    `ops/never-end-turn-waiting` block, or any Hard Rule in `CLAUDE.md`
    (no `Process.sleep` timing, the safe-wait pattern, no `Application.put_env`,
-   no unattended system-level changes, credentials-are-owner-gated). Clarifying
+   sudo/password system steps are Cody's, credentials-are-owner-gated). Clarifying
    or tightening them is fine; loosening them is never fine.
 2. **Do not touch identity or credentials.** Leave `ai/bin/glab-athena`,
    `ai/bin/gh-athena`, `ai/bin/notion-athena-mcp`, the `athena:slack`
