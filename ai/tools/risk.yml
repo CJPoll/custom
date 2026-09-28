@@ -127,6 +127,9 @@ tools:
   # fleet-resume (DND-443) appends run-ownership marker lines to this machine's
   # own coordination state logs (untracked, gitignored). Local only.
   fleet-resume:            { class: idempotent, reason: markers }
+  # lane-lock (DND-261) takes and drops a machine-local flock(2) on a lane lock
+  # file under $XDG_STATE_HOME, through a holder process of this user. Local only.
+  lane-lock:               { class: idempotent, reason: lock }
 
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }

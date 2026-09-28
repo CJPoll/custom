@@ -431,7 +431,11 @@ is nothing in it to verify. The authority is the lane's re-query. Follow
 `~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *The harness lane* → *On a
 drain request*. If work is queued, spawn ONE `athena-admiral`; never do the
 work yourself. **Ledger:** `<utc> harness-alerts:<msg-name> harness-lane
-<spawned|quiet:<stage>|marker-fresh|cap-0|fault>`.
+<spawned|quiet:<stage>|lock-held|cap-0|fault>`.
+**Later (2026-09-28, DND-261):** the outcome `marker-fresh` (a
+`~/.claude/harness-coordinator.lock` existed) is now `lock-held`: `lane-lock`
+reported the lane HELD. When the lane admiral returns, run `lane-lock release
+--lane harness` (the brief's *Spinning the lane up*).
 
 **The clustering cron writer: its wedge and blocked reports (DND-983).**
 **Later (2026-09-27):** added by DND-983, a labelled addition to this dated

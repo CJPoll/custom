@@ -674,7 +674,7 @@ turn, 2026-09-28 04:18Z): "clicks from my user count as approval."
 This machine runs autonomous **ticket-driven lanes**: a lane watches a tracker
 queue and, when lane work is queued, spawns ONE draining `athena-admiral`; the
 **flaky-test lane** is one instance. The full spin-up procedure, the inner admiral
-brief, the coordinator-marker semantics, the channel-resolution assertion, the
+brief, the lane lock (`ai/bin/lane-lock`), the channel-resolution assertion, the
 read mechanics, and the add/drop handling all live in
 `~/dev/custom/ai/docs/ticket-lane-action-brief.md` (the *ticket-lane action brief*
 template; the flaky lane is its *worked instantiation*), which **cites** the
@@ -729,8 +729,8 @@ trigger-specific read mechanics — is the brief's, not this section's.
 **On a trigger**, if lane work is queued AND no admiral is already draining the
 lane, spin up ONE `athena-admiral` per
 `~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *Spinning the lane up*, which
-defines both the queued-work check and drain-detection (the coordinator marker and
-its freshness — not paraphrased here) — do not do the work yourself.
+defines both the queued-work check and drain-detection (the held lane lock, not
+paraphrased here) — do not do the work yourself.
 
 **A resolution failure is a fault, not an empty queue.** A lane channel that does
 not resolve is a FAULT to surface, never read as a quiet queue — *when* this

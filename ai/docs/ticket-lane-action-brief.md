@@ -69,15 +69,22 @@ config value substituted into the template body.
 **The conformance rule that makes the table load-bearing:** every obligation the
 template body states as a per-lane MUST is a **placeholder with a row here**, so
 that a table filling every row is a complete, conformant instantiation and no MUST
-can be silently omitted. The three MUSTs that would otherwise hide — the marker
-recovery, the channel-resolution assertion, and the merge terminal state — are
-therefore `{{STALE_MARKER_SWEEP}}`, `{{CHANNEL_RESOLUTION}}`, and the terminal-state
-half of `{{MERGE_POLICY}}` respectively. Leaving any of them unbound is NOT
-conformant.
+can be silently omitted. The two MUSTs that would otherwise hide — the
+channel-resolution assertion and the merge terminal state — are therefore
+`{{CHANNEL_RESOLUTION}}` and the terminal-state half of `{{MERGE_POLICY}}`
+respectively. Leaving either unbound is NOT conformant.
+
+**Later (2026-09-28, DND-261):** this rule named **three** hidden MUSTs, the
+first being "the marker recovery", bound as **`{{STALE_MARKER_SWEEP}}`**: each
+lane chose (a) an activity-independent age-out of its touch-marker or (b)
+`manual-only`. Superseded by the held lane lock (*The lane lock is a held
+`flock(2)`* below). A dead holder frees the lock by itself, so no lane binds a
+sweep, and `{{STALE_MARKER_SWEEP}}` is retired. `{{LOCK_PATH}}`, the marker
+file, is replaced by `{{LANE_LOCK}}`.
 
 | Placeholder | Meaning |
 |---|---|
-| `{{LANE_ID}}` | The lane's short identifier (e.g. `flaky`), used to name the coordinator marker. |
+| `{{LANE_ID}}` | The lane's short identifier (e.g. `flaky`), used to name the lane lock (`lane-lock --lane {{LANE_ID}}`). |
 | `{{LANE_LABEL}}` | The human name of the lane's work (e.g. "flaky-test"). |
 | `{{OWNER_NAME}}` / `{{OWNER_ID}}` | The owner account the scope filter's assignee clause includes (name for prose, source person-id for the query). The clause may OR further assignees; `{{SCOPE_FILTER}}` names them. |
 | `{{TRACKER_CONNECTOR}}` | The MCP connector the tracker is reached through (e.g. `notion-work`). |
@@ -86,11 +93,10 @@ conformant.
 | `{{STATUS_VOCAB}}` | The exact existing status options each lifecycle stage maps to (per `athena:ticket-management` / `athena:fleet-inputs`). |
 | `{{BLOCKED_SEMANTICS}}` | How "blocked" is represented (e.g. the `Blocked By` relation non-empty ⇒ blocked; the blocking status). |
 | `{{MAX_CAPTAINS}}` | The lane's concurrency cap (e.g. `1` for a strictly-sequential lane). |
-| `{{MERGE_POLICY}}` | The merge/deploy rule AND its **terminal state** — the two are one binding. The rule is e.g. auto-merge + the admiral's batch-and-watch defaults; the terminal state is the per-MR end condition the marker-removal step waits for (see *Spinning the lane up*). A lane MUST name the terminal state explicitly — for auto-merge it is "merged"; for a non-auto-merge policy (e.g. "keep the base PR ready-but-unmerged, stack dependents, merge none" under an owner-creds gate) it is that policy's own end state (e.g. "ready and handed off"). Binding the rule without a terminal state is NOT conformant: the removal step becomes unreachable and the marker never clears. |
+| `{{MERGE_POLICY}}` | The merge/deploy rule AND its **terminal state** — the two are one binding. The rule is e.g. auto-merge + the admiral's batch-and-watch defaults; the terminal state is the per-MR end condition the release step waits for (see *Spinning the lane up*). A lane MUST name the terminal state explicitly — for auto-merge it is "merged"; for a non-auto-merge policy (e.g. "keep the base PR ready-but-unmerged, stack dependents, merge none" under an owner-creds gate) it is that policy's own end state (e.g. "ready and handed off"). Binding the rule without a terminal state is NOT conformant: the admiral's release step becomes unreachable, and the lock is held until the spawning session releases it or exits. |
 | `{{LANE_CHANNEL}}` | The inbox `log` channel the lane's forwarded state-change events arrive on (`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of state-change events*). |
-| `{{CHANNEL_RESOLUTION}}` | How the instance **asserts `{{LANE_CHANNEL}}` resolves** at startup and makes a miss **observable** — naming the searched key — rather than reading a silent zero as "no action" (per *When NOT to spin up*). The assertion MUST check the **live installed** registry entry the consumer actually reads, an untracked machine-local file, not merely the committed `ai/inbox/registry.json`; a channel declared in the committed source but never installed (or clobbered) still resolves to zero channels at exit 0. **The entry to check is selected by its `repo` field, never by filename**: per `ai/contracts/athena-inbox.md` → *Finding the entry*, a reader enumerates `$ATHENA_INBOX_ROOT/projects/*.json` and takes the single entry whose realpath'd `repo` equals this session's git-common-dir realpath — the file conventionally named `projects/<project>.json` is only where a human finds that entry and "carries no authority". So the assertion keys on the matched `repo`, and the key it names on a miss is that repo identity, not a filename: an assertion keyed on the filename is green whenever `<project>.json` merely exists, yet the consumer still resolves to zero channels at exit 0 whenever that entry's `repo` fails to match (installed under another filename, `repo` stale or not realpath'd, git common dir moved) — the exact silent-dark class this row exists to close (`~/dev/custom/CLAUDE.md` → *Inbox tenancy registry*; *A failed lookup must never look like an empty one* → "validate both sides of the comparison"). Every lane MUST bind this; leaving it unbound is **NOT conformant** — an unasserted channel is the silent-dark failure the template calls worse than spinning up on nothing. This is the resolution-side twin of `{{STALE_MARKER_SWEEP}}`. |
-| `{{LOCK_PATH}}` | The coordinator marker path — `~/.claude/{{LANE_ID}}-coordinator.lock`. |
-| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral. Every lane MUST make one of two **explicit, recorded** choices — leaving it unbound is NOT conformant (an unstated sweep must not read like a legitimate "manual only"): **(a)** bind a runner that fires **independently of lane activity** — a periodic/time-based check or a session-start hook that runs whether or not the lane has new work — which gives automatic recovery; or **(b)** declare `manual-only`, accepting that a wedged marker is cleared solely by a human deleting `{{LOCK_PATH}}`. What disqualifies a runner from (a) is firing **only on lane activity**, not being the work-trigger: the flaky lane's `SessionStart` poll is a valid (a) — it ages out a marker older than 12h every session start regardless of activity — *and it is also the flaky work-trigger*, which is fine. What has no (a) available is a purely **activity-triggered** lane, e.g. one whose only trigger is the count of new `{{LANE_CHANNEL}}` lines: a wedged-but-idle lane produces no new line to fire it (see the *Recovering a stale marker* step under *Spinning the lane up*), so such a lane must choose (b) knowingly. |
+| `{{CHANNEL_RESOLUTION}}` | How the instance **asserts `{{LANE_CHANNEL}}` resolves** at startup and makes a miss **observable** — naming the searched key — rather than reading a silent zero as "no action" (per *When NOT to spin up*). The assertion MUST check the **live installed** registry entry the consumer actually reads, an untracked machine-local file, not merely the committed `ai/inbox/registry.json`; a channel declared in the committed source but never installed (or clobbered) still resolves to zero channels at exit 0. **The entry to check is selected by its `repo` field, never by filename**: per `ai/contracts/athena-inbox.md` → *Finding the entry*, a reader enumerates `$ATHENA_INBOX_ROOT/projects/*.json` and takes the single entry whose realpath'd `repo` equals this session's git-common-dir realpath — the file conventionally named `projects/<project>.json` is only where a human finds that entry and "carries no authority". So the assertion keys on the matched `repo`, and the key it names on a miss is that repo identity, not a filename: an assertion keyed on the filename is green whenever `<project>.json` merely exists, yet the consumer still resolves to zero channels at exit 0 whenever that entry's `repo` fails to match (installed under another filename, `repo` stale or not realpath'd, git common dir moved) — the exact silent-dark class this row exists to close (`~/dev/custom/CLAUDE.md` → *Inbox tenancy registry*; *A failed lookup must never look like an empty one* → "validate both sides of the comparison"). Every lane MUST bind this; leaving it unbound is **NOT conformant** — an unasserted channel is the silent-dark failure the template calls worse than spinning up on nothing. |
+| `{{LANE_LOCK}}` | The lane's held lock: `~/dev/custom/ai/bin/lane-lock <acquire\|status\|release> --lane {{LANE_ID}}`. The lock file is `${XDG_STATE_HOME:-~/.local/state}/athena/lane-locks/{{LANE_ID}}.lock`; nothing else reads or writes it. See *The lane lock is a held `flock(2)`*. |
 | `{{SOURCE_RE_QUERY}}` | The authoritative re-list of lane scope from the source of truth (the same predicate as `{{SCOPE_FILTER}}`, re-run against the tracker). |
 
 ## The template body
@@ -101,45 +107,39 @@ conformant.
 ### Spinning the lane up (one draining admiral)
 
 When the lane consumer observes that lane work is queued for `{{OWNER_NAME}}` AND
-no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
+no admiral is draining the lane (`lane-lock status --lane {{LANE_ID}}` exits 0,
+FREE):
 
-1. **Create the running-marker before spawning**, so the next session that fires
-   the lane's trigger stays quiet while this admiral drains:
+1. **Take the lane lock before spawning**, from the session that will spawn the
+   admiral (never from a script that outlives it):
 
-       touch {{LOCK_PATH}}
+       ~/dev/custom/ai/bin/lane-lock acquire --lane {{LANE_ID}} --note <run-id>
 
+   Exit 0 (`ACQUIRED`): go on. Exit 3 (`HELD`): another admiral won the race or
+   is draining; spawn nothing. Any other exit is a fault to surface, never a
+   spawn and never a quiet queue. The lock follows this session's lifetime, not
+   the Bash call's (*The lane lock is a held `flock(2)`*).
 2. **Spawn ONE `athena-admiral` subagent** (Agent tool) — do not do the work
    yourself — with the inner brief below, which fixes every foundational input so
    the admiral never has to ask a clarifying question.
-3. The admiral **removes the marker when the scope query returns empty** and every
+3. The admiral **releases the lock when the scope query returns empty** and every
    touched MR has reached `{{MERGE_POLICY}}`'s bound **terminal state** (that
    terminal state is part of the `{{MERGE_POLICY}}` binding, not a hardcoded
    "merged" — see the parameter table; an auto-merge lane's is "merged", a
-   non-auto-merge lane's is its own end state). If a lane leaves the terminal
-   state unbound this step is unreachable and the marker never clears — which is
-   why the parameter table makes it a required part of `{{MERGE_POLICY}}`:
+   non-auto-merge lane's is its own end state):
 
-       rm -f {{LOCK_PATH}}
+       ~/dev/custom/ai/bin/lane-lock release --lane {{LANE_ID}}
 
-4. **Recovering a stale marker.** If the admiral terminates, or the run aborts
-   without clearing the marker, the marker is stale and the lane is wedged until
-   something clears it. **An activity-only trigger will NOT clear it.** Under the
-   landed model the trigger is the count of *new lines* on `{{LANE_CHANNEL}}` (see
-   *Relationship to the existing flaky trigger*; `ai/contracts/athena-inbox.md` →
-   *A lane `log` channel is a change stream of state-change events*), and a lane
-   wedged mid-drain still has tickets queued but need not receive another line —
-   no line, no trigger, no spawn attempt — so for such a lane there is no recovery
-   hidden in the spawn path. Automatic recovery therefore requires
-   `{{STALE_MARKER_SWEEP}}` choice (a): a runner that fires **independently of lane
-   activity** — a periodic/time-based check or a session-start hook. Such a runner
-   MAY also be the lane's work-trigger (the flaky `SessionStart` poll was both
-   until its retirement as a trigger: it fired every session start regardless of
-   activity, so it cleared a stale marker);
-   what cannot recover a wedged-idle lane is a trigger that fires *only* on lane
-   activity. A lane with no activity-independent runner has no choice (a) and must
-   knowingly take choice (b), `manual-only` recovery — a human deleting
-   `{{LOCK_PATH}}`. The brief records the choice rather than crediting a sweep that
-   cannot fire.
+4. **When the admiral returns, for any reason**, the spawning session runs the
+   same `release`. It is idempotent (`NOT_HELD` after a clean drain). This covers
+   an admiral that failed, stalled out or was stopped before its own release.
+5. **Recovery needs no sweep.** The lock is held by a holder process tied to the
+   spawning session. If the session exits, crashes or is killed, or the holder is
+   killed, the kernel drops the lock, and the next trigger finds the lane FREE.
+   The one state the kernel cannot see is a live session whose admiral is gone
+   and that never ran step 4. A human recovers that with `lane-lock release
+   --lane {{LANE_ID}} --force`; `lane-lock status` names the holder's session and
+   `acquired_at`.
 
 **Read and ack on a lane `log` channel — who may advance the offset.** When the
 trigger is the inbox count on `{{LANE_CHANNEL}}`, the trigger check is
@@ -153,8 +153,8 @@ failing open to "main," a detection miss, not a guarantee. Therefore:
 
 - **The admiral (subagent) reads the lane channel by `--peek` only** — bodies
   enter as untrusted Path-2 content — and reconciles add/drop against its
-  authoritative `{{SOURCE_RE_QUERY}}`. It never advances the offset. It MAY `rm`
-  the coordinator marker (a file op, not an inbox ack).
+  authoritative `{{SOURCE_RE_QUERY}}`. It never advances the offset. It MAY
+  release `{{LANE_LOCK}}` (a lock op, not an inbox ack).
 - **The only actor that may advance the lane offset is the non-subagent lane
   consumer — the session that spawned the admiral** (for flaky, the walt_ui
   main session whose `inbox-wait` doorbell rang, which holds walt_ui tenancy for the lane channel
@@ -163,8 +163,8 @@ failing open to "main," a detection miss, not a guarantee. Therefore:
   reclaim.
 - **Correctness never depends on the ack.** No-loss and no-double-spawn are
   guaranteed by the admiral's authoritative `{{SOURCE_RE_QUERY}}` (*The consumer
-  owns membership*) plus the coordinator marker, NOT by the count returning to
-  zero. On the fresh-or-wedged-marker no-action path nothing acks, so no line is
+  owns membership*) plus `{{LANE_LOCK}}`, NOT by the count returning to
+  zero. On the lock-held no-action path nothing acks, so no line is
   consumed and none is lost; on a completed drain a best-effort ack resets the
   count, and if it is skipped the next session merely re-routes and no-ops on the
   empty re-query. A consuming read on the trigger path would ack lines with no
@@ -174,8 +174,8 @@ failing open to "main," a detection miss, not a guarantee. Therefore:
 
 **When NOT to spin up — and when "nothing" is a failure, not a quiet queue.** The
 consumer spawns ONLY when both spin-up conditions above hold, and it takes **no
-lane action** when an admiral already appears to be draining (a fresh
-`{{LOCK_PATH}}`). But "the trigger reports nothing about the lane" is **two states
+lane action** when an admiral is already draining (`{{LANE_LOCK}}` HELD, exit
+3). But "the trigger reports nothing about the lane" is **two states
 that must not be collapsed**:
 
 - The channel **resolved** and legitimately carries no new lines, or the scope
@@ -191,46 +191,64 @@ that must not be collapsed**:
 So **resolving `{{LANE_CHANNEL}}` is its own step with its own outcome**: the
 consumer asserts the channel resolves to a real registered channel and, on a miss,
 emits a readable signal naming the channel key it searched for — the same
-discipline this brief already puts on an unresolvable `{{LOCK_PATH}}`
+discipline this brief already puts on a `{{LANE_LOCK}}` that cannot be read
 (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*:
 resolving the key is its own step; every miss stays observable; a missing input is
 not a match). Only a *resolved* channel's genuine emptiness is "no action"; an
 *unresolved* channel is a surfaced fault. A lane instance that collapses the two
 can spin up on nothing, or — worse — sit dark forever on a misconfigured channel
 believing its queue is empty. **This assertion is not optional prose: every
-instance binds it as `{{CHANNEL_RESOLUTION}}`, a mandatory parameter symmetric to
-`{{STALE_MARKER_SWEEP}}`, so a table that fills every placeholder cannot silently
-omit the check** — leaving `{{CHANNEL_RESOLUTION}}` unbound is not conformant.
+instance binds it as `{{CHANNEL_RESOLUTION}}`, a mandatory parameter, so a table
+that fills every placeholder cannot silently omit the check** — leaving
+`{{CHANNEL_RESOLUTION}}` unbound is not conformant.
 
-**"Fresh" is defined by `{{STALE_MARKER_SWEEP}}`, not left to prose.** The spin-up
-gate ("no *fresh* `{{LOCK_PATH}}`") needs a staleness threshold, and that threshold
-is exactly the lane's `{{STALE_MARKER_SWEEP}}` choice: for a choice-**(a)** lane a
-marker is *fresh* until the runner's window elapses (the flaky sweeper's 12h), after
-which it is stale and the gate no longer treats it as a live admiral; for a
-choice-**(b)** `manual-only` lane there is **no auto-staleness**, so *every*
-existing marker is treated as fresh and the gate degrades to "marker exists" —
-which is not a defect but the accepted (b) consequence: a crashed admiral wedges
-the lane until a human deletes `{{LOCK_PATH}}`. So freshness is never generic
-prose; it is a function of the bound recovery choice.
+**The lane lock is a held `flock(2)`.** `ai/bin/lane-lock` (DND-261) gives one
+draining admiral per lane per machine, enforced by the kernel:
 
-**The marker is a best-effort quieting hint, NOT a lock** (these are the flaky
-lane's `~/.claude/flaky-coordinator.lock` semantics, preserved and generalized
-only in the path): touch-before-spawn, remove-when-scope-empty, and
-`{{STALE_MARKER_SWEEP}}` for a marker left behind. It does **not** provide mutual
-exclusion and does **not** guarantee a single admiral: check-freshness-then-`touch`
-is racy — two sessions can both observe no fresh marker, both `touch`, and both
-spawn — and a plain file cannot distinguish a live admiral from a corpse (a
-timeout-based `{{STALE_MARKER_SWEEP}}` such as the flaky sweeper's 12h age-out is a
-**timeout, not a liveness check**). `{{MAX_CAPTAINS}}` and any "one admiral at a
-time" intent are therefore **not enforced by this marker**; the marker only
-*quiets the trigger* so the common case does not double-spawn. This matches the class already measured in
-`~/dev/custom/CLAUDE.md` → *Agents work in worktrees, not the main checkout* ("the
-`run.lock` … was a zero-byte file that nothing could tell apart from a corpse"),
-whose durable fix is a held `flock(2)`, "never by a pid"; a lane that needs true
-mutual exclusion must adopt that primitive rather than rely on this marker. A
-`{{LOCK_PATH}}` that cannot be resolved is an error, not a silently-skipped spawn
-(`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
-one*).
+- **Who holds it.** An admiral is a subagent, and each of its Bash calls is a
+  separate process, so a lock taken inside one call would die with that call.
+  `acquire` starts a small detached **holder** process that takes an exclusive
+  `flock(2)` on the lane's lock file and keeps the fd open. The holder lives
+  exactly as long as its **anchor**: the Claude Code session process, found as
+  the nearest ancestor whose comm is `claude`. The spawning session and every
+  subagent it runs share that process. So the lock outlives each Bash call and
+  each subagent turn, and it ends with the session. The holder shows in `ps` as
+  `lane-lock-holder:<lane>`.
+- **Mutual exclusion.** Two concurrent `acquire`s race on the kernel lock, and
+  exactly one gets `ACQUIRED`; the other gets `HELD`, exit 3.
+- **Liveness is the lock, never a pid or a file's age.** `status` probes the
+  lock itself (a shared, non-blocking `flock`). A lock file or holder record
+  left by a dead holder reads FREE; a live holder reads HELD even if its record
+  was deleted or garbled. The holder record (`{{LANE_ID}}.holder`: holder pid,
+  anchor pid, session id, `acquired_at`, note) is informational only. The lock
+  file is never deleted: deleting a held lock file would let the next acquirer
+  lock a fresh inode.
+- **Release.** Only a caller under the holder's anchor may release it: the
+  spawning session or its admiral. A release from another session exits 4.
+  `--force` is the human's recovery.
+- **Scope: machine-local.** `flock(2)` does not cross machines. Two machines
+  can each hold their own lane lock, and nothing here prevents that. A lane that
+  runs on more than one machine needs a server-side claim; none exists today.
+- **Every failure is observable.** A lock file that cannot be read is exit 1,
+  never FREE. No anchor, a dead anchor, or a holder that never reported is
+  exit 1 with a `Fix:`, never a silent spawn (`~/dev/custom/ai/CLAUDE.md` → *A
+  failed lookup must never look like an empty one*).
+
+This is the fix `~/dev/custom/CLAUDE.md` → *Agents work in worktrees, not the
+main checkout* applies to the shipwright lanes ("judging liveness by a held
+`flock(2)` on the lane's lock and never by a pid").
+
+**Later (2026-09-28, DND-261):** this paragraph read "**The marker is a
+best-effort quieting hint, NOT a lock**": the lane's **`{{LOCK_PATH}}`**, a
+touch-marker at `~/.claude/{{LANE_ID}}-coordinator.lock`, was touched before
+spawning and removed when the scope emptied, and a preceding paragraph defined
+a "fresh" marker by the lane's `{{STALE_MARKER_SWEEP}}` window. It gave no
+mutual exclusion (two sessions could both see no marker, both `touch`, and both
+spawn), and a file could not tell a live admiral from a corpse; a 12h age-out
+was a timeout, not a liveness check. Superseded by the held lock above. The
+flaky lane's spawn text in walt_ui still runs the touch-marker until its
+follow-up moves it to `lane-lock` (see *The flaky lane — the worked
+instantiation*).
 
 ### The inner admiral brief (what the spawned admiral is told)
 
@@ -250,6 +268,10 @@ one*).
   none).
 - **Concurrency** — MAX `{{MAX_CAPTAINS}}` captains.
 - **Merge / deploy** — `{{MERGE_POLICY}}`; drain the ENTIRE scope.
+- **Lane lock** — the spawning session holds `{{LANE_LOCK}}` for you. When the
+  scope is drained, run `lane-lock release --lane {{LANE_ID}}` as your last act
+  before the final report. Never `acquire` it yourself, and never release it
+  while the scope is not drained.
 - **Fleet registry** — report the run, its scope and its end, per
   `athena:fleet-liveness` → *Fleet registry reports*.
 
@@ -297,17 +319,15 @@ So a lane needs **no seen-set** on the inbox path, by design. The retired flaky
 poll kept a per-ticket seen-set (`~/.claude/flaky-ticket-poll.seen`); nothing
 replaces it. The line is only a trigger. The re-query against the tracker is the
 authority, so a repeat line for a ticket already handled re-queries and no-ops.
-The coordinator marker quiets a repeat trigger while an admiral drains. It is a
-best-effort hint, not a lock (*Spinning the lane up* → "The marker is a
-best-effort quieting hint, NOT a lock"), so a
-lane needing true mutual exclusion still needs a held `flock(2)`, with or without
-a seen-set.
+`{{LANE_LOCK}}` turns a repeat trigger into a no-op while an admiral drains:
+the trigger's `acquire` gets `HELD` and spawns nothing (*Spinning the lane up*
+→ *The lane lock is a held `flock(2)`*).
 
 ## The flaky lane — the worked instantiation
 
 Binding every placeholder to the walt_ui flaky lane yields the flaky lane's
 action brief as one instance of this template — the spin-up trigger, the negative
-no-action branch, the marker semantics, and the add/drop handling. Fidelity is
+no-action branch, the lane lock, and the add/drop handling. Fidelity is
 over the *action brief*: the complete inventory of the current flaky lane's
 carriers — which files hold the policy today, and which DND-247 rewrites — is in
 the *Relationship to the existing flaky trigger* section below, not this table.
@@ -378,11 +398,10 @@ file; that stays in the spawn text, its only reader.
 | `{{STATUS_VOCAB}}` | per the flaky tracker policy above |
 | `{{BLOCKED_SEMANTICS}}` | per the flaky tracker policy above (the `Blocked By` relation) |
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
-| `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default); **terminal state = merged** (the condition the marker-removal step waits for) |
+| `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default); **terminal state = merged** (the condition the release step waits for) |
 | `{{LANE_CHANNEL}}` | the walt_ui `flaky` `log` channel, file `walt_ui-flaky.jsonl` (`kind:log`, `producer:"platform"`), declared in `ai/inbox/registry.json` (DND-260) and installed in the live entry. Its inbox count is the flaky lane's **operative trigger** (see `{{CHANNEL_RESOLUTION}}`) |
 | `{{CHANNEL_RESOLUTION}}` | resolve the flaky `log` channel in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json`. **Post-install invariant:** once the channel is declared AND installed, a live entry that does not resolve — logging the searched repo-identity key — is registry **drift**, a fault `check-inbox-registry` surfaces with `Fix: setup-inbox-registry --install`, never an empty queue. **Operative trigger:** the inbox count on this channel, reaching a live walt_ui session when the `inbox-wait` doorbell rings (`ai/skills/athena:inbox/SKILL.md` → *How to arm it*). The `SessionStart` poll (`flaky-ticket-poll.sh`) is **retired** as a trigger. A declared channel that is **not installed** is the same drift fault, never a quiet queue. **The line is a trigger, not the authority:** the consumer checks by count or `--peek`, then decides from `{{SOURCE_RE_QUERY}}` against Notion, never from the payload (*The consumer is idempotent by construction*). |
-| `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
-| `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. the runner is the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (DND-277), built so the sweep survives the poll's retirement. The retired poll's own 12h age-out went with the hook when walt_ui's own change removed it; nothing depended on it (see *Relationship to the existing flaky trigger*) |
+| `{{LANE_LOCK}}` | `lane-lock --lane flaky`. **Not yet adopted by the flaky carrier:** walt_ui's spawn text still runs the legacy touch-marker (see *The legacy flaky marker* below) |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
 
 **Later (2026-09-21):** the `{{LANE_CHANNEL}}` and `{{CHANNEL_RESOLUTION}}` rows
@@ -442,19 +461,22 @@ pointer at `flaky-coordinator-spawn.txt`, which holds the policy now. The
 living text that still said walt_ui "will" remove the poll hook now says it
 did.
 
-**The marker semantics preserved VERBATIM for the flaky instance:**
+**The legacy flaky marker.** The flaky instance binds `{{LANE_LOCK}}` like any
+lane. Its carrier has not moved yet: walt_ui's
+`.claude/hooks/flaky-coordinator-spawn.txt` still says
 
     touch ~/.claude/flaky-coordinator.lock          # before spawning
     rm -f ~/.claude/flaky-coordinator.lock          # when the scope query is empty and every touched MR is merged
 
-and: if the admiral terminates without clearing the marker, delete
-`~/.claude/flaky-coordinator.lock` yourself so the lane is not wedged shut. The
-flaky instance's `{{STALE_MARKER_SWEEP}}` is the activity-independent
-age-out in the dedicated `SessionStart` hook `flaky-marker-sweep.sh` (DND-277),
-which self-heals a marker older than 12h. The age-out is a property of that
-runner, not of the marker; because the hook is decoupled from the poll, retiring
-the poll does NOT remove the lane's age-out (see the placeholder table and *Relationship to the existing
-flaky trigger*).
+and this change does not edit walt_ui. Until walt_ui's follow-up replaces those
+two lines with `lane-lock acquire --lane flaky` and `lane-lock release --lane
+flaky`, the flaky lane keeps the old best-effort semantics: no mutual
+exclusion, and a marker left behind is aged out after 12h by the `SessionStart`
+hook `flaky-marker-sweep.sh` (DND-277). That hook stays registered until the
+carrier moves; it never touches a `lane-lock` file. The flaky lane has one
+spawner, the walt_ui session following that spawn text, so the two mechanisms
+never guard the same lane at once: the carrier switches from the marker to the
+lock in one change.
 
 The flaky instance's add/drop handling is the generic *Add / drop handling*
 section above with the flaky values substituted — the flaky `log` channel as
@@ -525,17 +547,20 @@ Progress`, and the other's next-mission then counts it as started.
 | `{{MERGE_POLICY}}` | the `~/dev/custom` PR flow: the captain opens a PR, and the lane admiral merges per athena:merge-boarding. **Terminal state = merged** |
 | `{{LANE_CHANNEL}}` | no `log` channel. The trigger is a drain request: one maildir message on custom's `harness-alerts` channel whose filename ends `-harness-lane-drain.md` (athena:inbox-attend → *A fourth writer*). It carries no state, so add/drop comes only from `{{SOURCE_RE_QUERY}}` |
 | `{{CHANNEL_RESOLUTION}}` | `harness-alerts` must resolve in the **live** custom entry, matched by its `repo`. `ai/bin/check-inbox-registry` asserts this read-only, in every `harness-gate` run. At request time a miss surfaces on the sender side: `send-mail` refuses an undeclared channel with a `Fix:`. A miss is registry drift (`Fix: scripts/setup-inbox-registry --install`), never a quiet queue. Verified 2026-09-27: the check passed, and in a temp root a detector-side send woke `inbox-wait` with `rang-channels: harness-alerts` |
-| `{{LOCK_PATH}}` | `~/.claude/harness-coordinator.lock` |
-| `{{STALE_MARKER_SWEEP}}` | **choice (b), `manual-only`.** Every existing marker is fresh; a human deletes `{{LOCK_PATH}}`. Requests are activity-triggered today, so no age-out is claimed. The 12h clustering cron (`scripts/athena-clustering-run.sh`) sends one every run once its crontab is installed; a later change may then move this row to (a) |
+| `{{LANE_LOCK}}` | `lane-lock --lane harness`, held by the attendant session that spawns the lane admiral. The retired marker `~/.claude/harness-coordinator.lock` is read by nothing |
 | `{{SOURCE_RE_QUERY}}` | `ai/bin/next-mission --harness-lane --started <state-log ids>`, re-run after each ticket |
 
 **On a drain request** the attendant does these steps, in order, and never the
 work itself:
 1. If the cap is `0`, take no action.
-2. If `{{LOCK_PATH}}` exists, take no action. Never remove it yourself. If it
-   is older than 12h, relay its age to the owner as a possibly wedged lane.
+2. Run `ai/bin/lane-lock status --lane harness`. Exit 3 (`HELD`): take no
+   action, and never release a lock your session does not hold. If its
+   `acquired_at` is older than 12h, relay the holder line to the owner as a
+   possibly wedged lane. Exit 1: a fault; relay it, never a quiet lane.
 3. Run `ai/bin/next-mission --harness-lane`:
-   - exit 0: work is queued. Spin the lane up (*Spinning the lane up*).
+   - exit 0: work is queued. Spin the lane up (*Spinning the lane up*); its
+     `acquire` is the real gate, since another session may have won the lane
+     since step 2.
    - exit 1: quiet. Record `emptied by: <stage>`; `lane_epics` means no lane
      epic exists yet. `functional_first` is not quiet: a Critical or Feature
      ticket sits in a lane epic. Relay the held ticket ids it names to the
@@ -584,15 +609,14 @@ inbox count delivered by the `inbox-wait` background waiter on
 poll is retired as a trigger by owner directive (see the `**Later
 (2026-09-23)**` note under the worked-instantiation table). The poll hook and its
 `settings.json` registration were removed by walt_ui's own change.
-The marker's **touch-before-spawn / remove-when-scope-empty** semantics carry over
-unchanged, but two things do
-change and are NOT "only the trigger":
+The legacy marker's **touch-before-spawn / remove-when-scope-empty** semantics
+carried over to the new trigger unchanged, but two things
+changed and are NOT "only the trigger":
 
-- The flaky `{{STALE_MARKER_SWEEP}}` **changes, and this is a real migration
+- The flaky stale-marker sweep **changed, and this was a real migration
   constraint, not a detail.** The poll's 12h age-out fires independently of lane
-  activity (choice (a)), and the new inbox-count trigger cannot replace it (it
-  fires only on new channel lines, which a wedged-but-idle lane need not receive
-  — see the *Recovering a stale marker* step above). So the flaky lane MUST keep
+  activity, and the new inbox-count trigger cannot replace it (it
+  fires only on new channel lines, which a wedged-but-idle lane need not receive). So the flaky lane MUST keep
   an activity-independent sweeper across the poll's retirement, or it drops to
   choice (b), `manual-only`, and loses automatic stale-marker recovery. This was
   surfaced here as a constraint DND-247/DND-248 must honor — and it is now MET
@@ -621,6 +645,12 @@ change and are NOT "only the trigger":
   `~/.claude/flaky-*` files — which includes `flaky-coordinator.lock` itself. So
   the marker preserved verbatim above is preserved only up to that final step,
   which removes it along with both the trigger and the age-out hook.
+
+  **Later (2026-09-28, DND-261):** the replacement now exists: `ai/bin/lane-lock`,
+  a held `flock(2)` whose holder dies with its session, so no age-out applies to
+  it. The gated final step is therefore walt_ui's spawn text switching to
+  `lane-lock --lane flaky`, then this repo retiring `flaky-marker-sweep.sh` with
+  its registry entry, `STATIC_CHECKS` entry and self-test. Both remain open.
 
 The migration therefore **spans three homes, not one**, and "lands in walt_ui" is
 too narrow: (a) the poll and its `walt_ui/.claude/settings.json` registration
