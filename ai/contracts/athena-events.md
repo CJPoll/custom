@@ -4105,6 +4105,22 @@ at every agent depth). The kinds and the other fields each may carry:
   `unclassified`. The fleet page shows `unclassified` as such; the control
   answer's closed `effective_domain` enum carries it as `personal`, the owner's
   default for an unknown project (OQ-4).
+
+  A **live run** (DND-877) has not ended (not `finished`) and either is
+  `running`, `draining` or not yet started (an admiral seen before
+  `admiral_started`) with its own liveness (*Fleet liveness*) not `lost`, or
+  is `drained`. A `drained` run waits for its resume: the page reads it
+  `drained`, never `lost` (*Fleet liveness*, step 1), so its silence does not
+  age it out, and it keeps its scope's domain. A `parked` run is not live.
+  (`Athena.Fleet.DomainClassifier.live_run?/1`.)
+
+  **Later (2026-09-28):** DND-877 and DND-578: a live run was any run not
+  ended in `running`, `draining` or not yet started, whatever its own
+  liveness, and a `drained` run did not count. A lost run then kept
+  classifying its session (DND-578), and a metering drain would have read "no
+  live run" the moment it completed, so the resume waiter would respawn the
+  fleet to drain again (*Session control: desired state* → *A session with
+  no live scoped admiral run is never metered*).
 - **`agent_id`** is the admiral's own agentId, the id SendMessage uses, which
   its dispatch briefs already carry. PreToolUse and PostToolUse hook stdin
   carries the same value as `agent_id` inside that admiral (measured, DND-428),
@@ -4637,7 +4653,7 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   `effective_domain` is in the policy's `metered_domains` and `now` is in work
   hours, with reason `metering:<domain>` and `until` the end of the work-hours
   span (*Reading control state and the control cache* → *Recomputing is
-  `desired/3` run locally*).
+  `desired/3` run locally*), unless one of the two exemptions below applies.
 - **A session whose project was never reported is never metered.** Such a
   session has neither `project` nor `repo_key`, because no `session_started`
   arrived. It runs unless the owner overrides it, whatever the policy says,
@@ -4645,6 +4661,25 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   from that snapshot runs it too. This is not `unclassified`, a reported
   project no policy maps, which is metered as `personal` (OQ-4). The harness's
   local rule does not mirror this exemption (*Unknown control state*).
+- **A session with no live scoped admiral run is never metered** (DND-877;
+  epic decision D-6, option (d)). Metering applies only once one of the
+  session's live runs (*Fleet report kinds and their closed schema* →
+  `notion_project_id`) has reported `admiral_scope`. Before that, the
+  session's domain is only its repo default: a gen_saas session with no
+  admiral yet reads `personal`, so metering it would make the drain guard
+  refuse the very admiral whose scope could reclassify it as `blend`, a
+  deadlock by construction. So a session with no run, or whose only runs are
+  unscoped, `lost`, `parked` or `finished`, runs unless the owner overrides
+  it, and its snapshot's `metering` is `{enabled: false}`, so a harness
+  recomputing from that snapshot runs it too. Its first admiral spawns. From
+  the moment that run reports its scope, metering applies: a personal run in
+  work hours drains, and parks at its first checkpoint before any captain
+  (OQ-2: a metering pause parks at once). The cost is one admiral start-up
+  turn. A `drained` run stays live, so the drained session stays drained
+  until the work-hours span ends rather than resuming into the same drain.
+  The harness's local rule does not mirror this exemption either: with no
+  answer and no cache it cannot know the session's runs (*Unknown control
+  state*).
 - **`reason` is one of a closed set of classes.** The drain protocol keys on the
   class (*Enforcement layers* → *Layer 3: the drain protocol*):
   - `override:force_drain` and `override:force_run`: the owner's override;
@@ -4727,8 +4762,10 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   and `now` in `timezone` falls on a work window's weekday, is not a holiday,
   and is at or after `start` and before `end`, it gives
   `{drain, "metering:<domain>", until}`. Otherwise `{run, default, null}`.
-  With metering off, and for a project-not-reported session, the snapshot says
-  `{enabled: false}` (*Session control: desired state*).
+  With metering off, for a project-not-reported session, and for a session
+  with no live scoped admiral run (DND-877), the snapshot says `{enabled:
+  false}` (*Session control: desired state*). The harness needs no run
+  knowledge of its own: the exemption reaches it as the snapshot.
 - **A metering `until` is the end of the work-hours span**, the first instant
   after `now` at which the work-hours test above changes (the server's
   `Athena.Fleet.WorkHours.next_boundary/2`). Windows of `now`'s local weekday
@@ -4799,6 +4836,14 @@ fail-mode decision (OQ-1, 2026-09-24) applies:
   agree wherever the server has answered, since a cached `{enabled: false}`
   snapshot recomputes to `run`. The window closes when the server answers
   again, and `session_started`'s self-heal (DND-497) makes it rarer.
+- **Nor the no-live-scoped-run exemption** (DND-877, *Session control:
+  desired state*). Whether a session holds a live scoped admiral run is a
+  fact of the server's registry (each run's scope and aged liveness), which
+  the harness does not keep. So on the local rule a personal or unmapped
+  session with no admiral yet still drains in work hours, and its first
+  admiral spawn is refused until the server answers or the owner overrides.
+  That is the same fail-mode rule; the no-run deadlock can then recur only
+  while the server is unreachable and no cache exists.
 - **Unknown is never read as `run` silently.** Each basis other than `server`
   prints a warning on stderr naming its cause, and the hook surfaces it to the
   transcript.
