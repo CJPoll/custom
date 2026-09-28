@@ -275,7 +275,9 @@ module PrivateOverlayInstall
       plan << (marketplace.state == :ok ? [:plugin_uninstall, PLUGIN_ID] : [:refuse, Verdict.new(component: "plugin", state: :conflict, detail: "#{PLUGIN_ID} is installed, but #{MARKETPLACE} is not this overlay's marketplace (#{CHECK_LABEL.fetch(marketplace.state)}), so it is left in place")])
     end
     plan << [:refuse, plugin] if plugin.unmeasured?
-    plan << [:marketplace_remove, MARKETPLACE] if marketplace.state == :ok
+    # Keep the marketplace while the plugin list is unreadable: removing it
+    # could strand an installed plugin whose source no longer exists.
+    plan << [:marketplace_remove, MARKETPLACE] if marketplace.state == :ok && !plugin.unmeasured?
     plan << [:refuse, marketplace] if %i[conflict unmeasured unverified].include?(marketplace.state)
     plan
   end

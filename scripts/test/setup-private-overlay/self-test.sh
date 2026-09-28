@@ -76,7 +76,9 @@ case args
 in ["plugin", "marketplace", "list"]
   puts(broken ? "not json" : JSON.generate(mkts.map { |n, p| { "name" => n, "source" => "directory", "path" => p, "installLocation" => p } }))
 in ["plugin", "list"]
-  puts(broken ? "not json" : JSON.generate(plugs.map { |id, en| { "id" => id, "version" => "0.1.0", "scope" => "user", "enabled" => en == "true" } }))
+  # A plugins line is id<TAB>enabled[<TAB>scope]; scope defaults to user.
+  broken ||= ENV["CLAUDE_STUB_BROKEN_PLUGINS"] == "1"
+  puts(broken ? "not json" : JSON.generate(plugs.map { |id, en| e, sc = en.split("\t", 2); { "id" => id, "version" => "0.1.0", "scope" => sc || "user", "enabled" => e == "true" } }))
 in ["plugin", "marketplace", "add", path]
   name = JSON.parse(File.read(File.join(path, ".claude-plugin", "marketplace.json")))["name"]
   mkts << [name, path] unless mkts.any? { |n, _| n == name }
@@ -326,6 +328,25 @@ if has "marketplace: UNVERIFIED" "$unv_check" && ! has "marketplace: OK" "$unv_c
    && [ -z "$(writes_in_log)" ]; then
   ok "22b overlay missing, custom-work registered: UNVERIFIED on --check; --remove keeps marketplace and plugin"
 else bad "22b unverified" "check=$unv_check remove=$OUT"; fi
+
+# 22c. work@custom-work installed only at PROJECT scope: not this installer's,
+#      so it reads MISSING (naming the scope) and --install adds the user copy.
+cp "${STATE}/plugins" "${TMP}/plugins.ok"
+printf 'work@custom-work\ttrue\tproject\n' > "${STATE}/plugins"
+run "$INST" --check; scope_check="$OUT"
+reset_calls; run "$INST" --install --dry-run
+if has "plugin: MISSING (work@custom-work is not installed at user scope (only at: project))" "$scope_check" \
+   && has "(dry-run) would install plugin work@custom-work (user scope)" "$OUT"; then
+  ok "22c a project-scope-only plugin reads MISSING (names the scope); --install would add the user-scope copy"
+else bad "22c scope" "check=$scope_check install=$OUT"; fi
+cp "${TMP}/plugins.ok" "${STATE}/plugins"
+
+# 22d. --remove while the plugin list is unreadable: the marketplace is kept
+#      (removing it could strand the plugin), and the gap is reported.
+reset_calls; run env CLAUDE_STUB_BROKEN_PLUGINS=1 "$INST" --remove --dry-run
+if [ "$RC" = 3 ] && has "plugin: COULD NOT MEASURE" "$OUT" && ! has "would remove marketplace" "$OUT"; then
+  ok "22d unreadable plugin list: --remove keeps the marketplace, exit 3"
+else bad "22d remove unmeasured" "rc=$RC out=$OUT"; fi
 
 # 23. --remove --dry-run changes nothing; --remove undoes all three, keeps the overlay.
 reset_calls; run "$INST" --remove --dry-run
