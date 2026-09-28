@@ -696,7 +696,18 @@ def judge_call(prompt, kind)
     end
   end
   stub = kind == :interaction ? (ENV["CRITIC_REVIEW_STUB_INTERACTION"] || ENV["CRITIC_REVIEW_STUB"]) : ENV["CRITIC_REVIEW_STUB"]
-  return [File.read(stub), true] if stub && File.file?(stub)
+  # A SET stub is always the answer, never the live model: a FIFO (not
+  # File.file?) or a mistyped path used to fall through to `claude -p` inside
+  # the blocking gate (run_stub_self_test says why that mattered).
+  if stub && !stub.empty?
+    begin
+      return [File.read(stub), true]
+    rescue SystemCallError, IOError => e
+      warn "critic-review: CRITIC_REVIEW_STUB=#{stub} is set but could not be read (#{e.message}); failing open instead of calling the live model."
+      warn "  Fix: point CRITIC_REVIEW_STUB (a self-test hook) at a readable file or FIFO, or unset it to run the real judge."
+      return ["", false]
+    end
+  end
 
   return ["", false] unless system("command -v claude >/dev/null 2>&1")
   out, _err, st = Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt)
@@ -2363,9 +2374,54 @@ ensure
   FileUtils.remove_entry(home) if home
 end
 
+# A SET stub never reaches the live model. The merge-boarding self-test's r8/r9
+# hand critic-review a FIFO so the judge stays "running" until the test answers.
+# A FIFO is not File.file?, so the stub was skipped and `claude -p` ran for real
+# inside the blocking harness gate. When the model hit its session limit the
+# judge failed open and the whole gate went red (DND-446 report, 2026-09-28
+# 17:44Z). A fake `claude` first on PATH records any live call.
+def run_stub_self_test
+  ok = true
+  check = lambda do |name, cond|
+    warn "critic-review: self-test FAILED — stub: #{name}" unless cond
+    ok &&= cond
+  end
+  prev = %w[PATH CRITIC_REVIEW_STUB CRITIC_REVIEW_STUB_INTERACTION].to_h { |k| [k, ENV[k]] }
+  Dir.mktmpdir("critic-review-stub-") do |d|
+    bin = File.join(d, "bin"); FileUtils.mkdir_p(bin)
+    marker = File.join(d, "live-claude-ran")
+    File.write(File.join(bin, "claude"), "#!/bin/sh\ntouch '#{marker}'\necho 'FINDINGS: none'\n")
+    File.chmod(0o755, File.join(bin, "claude"))
+    ENV["PATH"] = "#{bin}:#{prev['PATH']}"
+    ENV.delete("CRITIC_REVIEW_STUB_INTERACTION")
+
+    # S1: a FIFO stub is read, and answers the judge.
+    fifo = File.join(d, "stub.fifo")
+    system("mkfifo", fifo)
+    writer = Thread.new { File.write(fifo, "looks good\nFINDINGS: none\n") }
+    ENV["CRITIC_REVIEW_STUB"] = fifo
+    out, good = judge_call("P", :full)
+    writer.join(10)
+    check.call("S1 a FIFO stub answers the judge", good && out.include?("FINDINGS: none"))
+    check.call("S1 a FIFO stub never calls the live model", !File.exist?(marker))
+
+    # S2: a set stub that cannot be read fails open; it never falls through to
+    # the live model (a wrongly computed stub path must not look like "unset").
+    FileUtils.rm_f(marker)
+    ENV["CRITIC_REVIEW_STUB"] = File.join(d, "no-such-stub")
+    out, good = capture_err { judge_call("P", :full) }[0]
+    check.call("S2 a missing stub fails open", good == false)
+    check.call("S2 a missing stub never calls the live model", !File.exist?(marker))
+  end
+  ok
+ensure
+  prev&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+end
+
 def run_self_test
   require "tmpdir"
   ok = true
+  ok = run_stub_self_test && ok
   # Every sub-suite runs, so one failing suite never hides another's failures.
   ok = run_carry_domain_self_test && ok
   ok = run_carry_self_test && ok
