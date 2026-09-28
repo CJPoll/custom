@@ -4967,7 +4967,10 @@ indexed only once the owner binds it. `notion_work` binds only on a binding
 whose subscription is `metadata_only` (*The storage boundary* → *A
 `metadata_only` subscription*). Binding it on a `full` subscription is refused
 (`content_policy_required`, with a `Fix:`), and a subscription that feeds
-`notion_work` cannot be moved back to `full` until it is unbound. The Slack
+`notion_work` cannot be moved back to `full` until it is unbound.
+`notion_personal` is the mirror: it binds only on a `full` subscription,
+because its domain comes from the ticket's project, which a `metadata_only`
+payload never carries. The Slack
 team id comes the same way, from the Slack app the event arrived on, never
 from the payload.
 
@@ -5194,6 +5197,12 @@ closed list. The list has three parts:
 
   `assignee` and `labels` are the OQ-5 permissive fields above; removing one
   from the allow-list removes it from the persisted payload too.
+
+  The policy's scope is the ticket and comment families, the work tracker's
+  content. The `notion.agent_message.*` family (agent mail, whose payload is
+  already a closed list with no body) is unchanged under either policy,
+  because the one work subscription fronts both and the agent inbox routes on
+  that payload. Cutting agent mail too is the owner's call, not a default.
 
   **Later (2026-09-28):** the bullet before this one said the obligation
   "is DND-438's `metadata_only` subscription obligation" without stating it;
