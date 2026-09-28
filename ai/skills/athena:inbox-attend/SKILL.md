@@ -305,6 +305,9 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
   **Later (2026-09-27):** added by DND-987. A `-harness-lane-drain.md` message
   is a lane trigger: run the harness lane's drain steps (same section, *A
   fourth writer*).
+  **Later (2026-09-27):** added by DND-983. A `-clustering-wedged.md` or
+  `-clustering-blocked.md` message is handled like a `-shipwright-wedged.md` one (same section, *The
+  clustering cron writer*).
 - **Sender filter (courtesy):** if `$ATHENA_ATTEND_OWNER_SLACK_ID` is set, *reply*
   only to messages whose sender is that id; *relay* anyone else's to the owner
   without answering them. The `user` field is forgeable by a local writer, so
@@ -409,9 +412,9 @@ and the per-message wedge steps further down do not apply to it. Instead:
 
 **A fourth writer: the harness-lane drain request (DND-987).**
 **Later (2026-09-27):** added by DND-987. A message whose filename ends
-`-harness-lane-drain.md` is neither a wedge nor a report. Today it is sent by
-hand (the brief's *Senders*); the clustering cron, DND-983, is to send one
-each run once it lands. It is the one message a session may send on
+`-harness-lane-drain.md` is neither a wedge nor a report. It is sent by hand
+(the brief's *Senders*), and by the clustering cron
+(`scripts/athena-clustering-run.sh`, DND-983) at the end of each run. It is the one message a session may send on
 `harness-alerts-detector`, the exception to "never read or send" above. It
 arrives as `from: inbox-client-detector` by design; the `harness_alerts` note
 in `ai/inbox/registry.json` says why. Never pass it to
@@ -421,6 +424,31 @@ is nothing in it to verify. The authority is the lane's re-query. Follow
 drain request*. If work is queued, spawn ONE `athena-admiral`; never do the
 work yourself. **Ledger:** `<utc> harness-alerts:<msg-name> harness-lane
 <spawned|quiet:<stage>|marker-fresh|cap-0|fault>`.
+
+**The clustering cron writer: its wedge and blocked reports (DND-983).**
+**Later (2026-09-27):** added by DND-983, a labelled addition to this dated
+record. A message whose filename ends `-clustering-wedged.md` comes from the
+12h epic-clustering cron (`scripts/athena-clustering-run.sh`), once per wedge
+episode. Handle it exactly as the third writer above, with three differences:
+- the record is `<tick>.wedged` directly in
+  `~/dev/custom/ai-artifacts/clustering/runs/`;
+- the re-arm command you compose is `rm
+  ~/dev/custom/ai-artifacts/clustering/consecutive-failures`;
+- the ledger words are `clustering-wedged relayed`, `clustering-wedged-dm`
+  and `declined clustering-wedged-unverifiable`. The DM limit is one per 24
+  hours per writer, so check for a `clustering-wedged-dm` line.
+
+The same runner sends a message ending `-clustering-blocked.md` once per
+BLOCKED episode: several ticks in a row never reached the model (a usage limit,
+or an auth or account fault that does not clear). Nothing is wedged and there
+is no re-arm. Verify it the same way against `<tick>.blocked` in that `runs/`
+directory: its LAST line that starts `blocked: ` must carry
+`consecutive_blocked=N threshold=M` with N >= M, and an `episode=` equal to the
+message's `episode:` line. Relay to the owner: the record path, N and M,
+`first_blocked`, the record's `log=` path, and that the lane retries every tick
+but an auth or account fault needs the owner. Ledger words:
+`clustering-blocked relayed`, `clustering-blocked-dm` (one DM per 24 hours) and
+`declined clustering-blocked-unverifiable`.
 
 When the wake names `harness-alerts`, for each message `read-inbox
 harness-alerts` returned (it is now in

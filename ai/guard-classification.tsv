@@ -120,6 +120,7 @@ scripts/athena-mcp-headers	guard
 scripts/athena-inbox-client-run.sh	guard	
 scripts/athena-shipwright-commit.sh	guard	
 scripts/athena-shipwright-run.sh	guard	
+scripts/athena-clustering-run.sh	guard	
 scripts/check	guard	
 scripts/check-stack	guard	
 scripts/inbox-client-alert	guard	
@@ -130,6 +131,7 @@ scripts/reap-orphan-dbus	guard
 scripts/setup-athena-inbox-client	guard	
 scripts/setup-hooks	guard	
 scripts/setup-inbox-registry	guard	
+scripts/setup-clustering-cron	guard	
 scripts/setup-shipwright-cron	guard	
 scripts/wt	guard	
 scripts/wt-preflight	guard	

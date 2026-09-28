@@ -499,6 +499,35 @@ across sessions — it is not a one-shot queue drain.
   The shipwright applies harness changes to `~/dev/custom` and files product-repo
   changes as Notion tickets for the fleet (it never touches a product repo).
 
+## Epic-clustering cron (12h, DND-983)
+
+A second USER crontab entry runs `scripts/athena-clustering-run.sh` twice a day.
+It spawns one athena-architect that runs `athena:epic-clustering`. The
+shipwright cron never writes Notion, so this is its own runner.
+
+- **Schedule:** `0 7,19 * * *` in machine-local time (America/Denver here), so
+  07:00 and 19:00 Denver. That is 13:00/01:00 UTC under MDT and 14:00/02:00 UTC
+  under MST; cronie follows DST. The run before Denver noon also sends the daily
+  digest, once per Denver day.
+- **Fragility:** the same as the shipwright's. It is a per-user crontab line,
+  so a crontab reset stops it silently. The session is launched from a scratch
+  lane, and the Notion/Athena MCP servers are registered on the main checkout,
+  so the runner copies them into a `--mcp-config`. A missing server, or the
+  skill not landed in the main checkout, is exit 78 and counts as a failure.
+- **Install / restore / verify:** `scripts/setup-clustering-cron` (owner step;
+  `--dry-run`, `--check`, `--remove`, `--backup <file>`). State and per-run
+  records are in `ai-artifacts/clustering/`. The wedge follows the shipwright's
+  pattern (see the wedge bullet in *Cross-session reflection loop* above):
+  2 failures in a row exit 75 and write a `runs/<ts>.wedged` record. The first
+  wedged tick of an episode sends ONE `harness-alerts` message (slug
+  `clustering-wedged`). Re-arm: `rm ai-artifacts/clustering/consecutive-failures`.
+  A session that never reaches the model is BLOCKED (exit 69). It never
+  wedges, but 2 in a row send ONE `clustering-blocked` alert per episode,
+  because an auth or account fault does not clear by itself. Every run that
+  spawned a session ends with one `harness-lane-drain` request (DND-987), once
+  that request's reader is in the main checkout's `athena:inbox-attend`. Until
+  then the run's `.run` record says `drain: skipped (no reader ...)`.
+
 ## Cron D-Bus autolaunch leak (orphaned `dbus-daemon`, inotify exhaustion)
 
 A cron-launched process runs with no `DBUS_SESSION_BUS_ADDRESS` (the crontab
@@ -526,7 +555,7 @@ The durable fix, defense in depth:
   notifications; a client just fails fast). Never overrides a value the caller
   set.
 - **The cron wrappers** (`athena-shipwright-run.sh`,
-  `athena-inbox-client-run.sh`) source it after their early-exit arg parsing and
+  `athena-inbox-client-run.sh`, `athena-clustering-run.sh`) source it after their early-exit arg parsing and
   single-run lock, so `--help`/`--dry-run` and the `*/5` lock-held relaunch
   never trigger it. `notify-idle.sh` sources it too, so the Stop hook is guarded
   in every session regardless of how launched.
