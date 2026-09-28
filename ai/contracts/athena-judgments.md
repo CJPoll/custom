@@ -398,11 +398,15 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   `walt_ui-slack.jsonl` itself, so the text is never copied. A root that an R4
   forward record names is `forward_record`; the owner confirms the rest one
   message at a time at a terminal.
-- **The owner confirms with the conversation context** (DND-1047). Beside
-  each message, `judgment-label --confirm` shows the routing judge's context
-  window (DND-1048): the same channel's top-level messages from the hour
-  before, at most 6, each marked with what the judge sees of it. It reads
-  Slack as Athena's bot, for that terminal only; nothing egresses. A row
+- **The owner confirms with the conversation context** (DND-1047). Before
+  each message, `judgment-label --confirm` shows the context window that
+  DND-1048's routing-judge design (slack-routing-v2) specifies: the same
+  channel's top-level messages from the hour before, at most 6, each marked
+  with what that judge will see of it (the owner's text, Athena's post as a
+  session label, or nothing, D7). The builder is `ai/lib/judgment_context.rb`;
+  when DND-1048 builds its judge input it uses that builder, or a parity
+  check pins the two windows together. It reads Slack as Athena's bot, for
+  that terminal only; nothing egresses. A row
   records `"context": "shown"` or `"unavailable"`; an `owner_confirmed` row
   without `"shown"` is re-presented by `--confirm --recheck`, and its answer
   stays in force until then. judgment-eval reads only `id`, `label` and

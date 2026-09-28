@@ -1,16 +1,17 @@
 # frozen_string_literal: true
 
-# ai/lib/judgment_context_slack.rb -- SIDE EFFECT (adapter): read one
-# JudgmentContext request from Slack as ATHENA'S OWN BOT (DND-1047).
+# ai/lib/judgment_context_slack.rb -- SIDE EFFECT (adapter): read what one
+# JudgmentContext request names from Slack, as ATHENA'S OWN BOT (DND-1047).
 #
-# It runs the athena:slack skill's read bins (read-channel, read-thread,
-# whoami), which carry only the bot token (xoxb-, refused otherwise), never
-# the owner's account. Reads only: no post, no reaction, no claim.
+# It runs the athena:slack skill's read bins (whoami, read-channel,
+# read-thread), which carry only the bot token (xoxb-, refused otherwise),
+# never the owner's account. Reads only: no post, no reaction, no claim.
 #
-# Every failure is a context with status "unavailable" and a reason, never an
-# empty context: a caller must be able to tell "nobody wrote anything in the
-# hour before" from "could not look" (ai/CLAUDE.md, *A failed lookup must
-# never look like an empty one*).
+# It returns raw reader messages plus Athena's own ids; the caller (a
+# manager) hands them to JudgmentContext.build. Every failure is
+# [:error, reason], never an empty read: a caller must be able to tell
+# "nobody wrote anything in the hour before" from "could not look"
+# (ai/CLAUDE.md, *A failed lookup must never look like an empty one*).
 #
 # Deliberately gem-free (stdlib only).
 
@@ -22,30 +23,27 @@ class JudgmentContextSlack
   TIMEOUT_S = 30
   REASON_CAP = 200
 
-  # bin_dir: the athena:slack skill's bin/ (holds read-channel, read-thread,
-  # whoami). owner: the owner's Slack user id.
-  def initialize(bin_dir, owner, timeout_s: TIMEOUT_S)
+  # bin_dir: the athena:slack skill's bin/ (holds whoami, read-channel,
+  # read-thread). timeout_s bounds each reader run.
+  def initialize(bin_dir, timeout_s: TIMEOUT_S)
     @bin_dir = bin_dir
-    @owner = owner
     @timeout_s = timeout_s
-    @athena = nil
+    @athena_ids = nil
   end
 
-  # fetch(anchor) -> a JudgmentContext context for that message.
-  def fetch(anchor)
-    req = JudgmentContext.request(anchor)
-    return JudgmentContext.unavailable(req, req["error"]) if req["source"].nil?
+  # read(request) -> [:ok, messages, athena_ids] | [:error, reason].
+  # request: a JudgmentContext.request with a source ("channel" or "thread").
+  def read(req)
+    ids = athena_ids
+    return ids if ids.first == :error
 
-    athena = athena_id
-    return JudgmentContext.unavailable(req, athena.last) if athena.first == :error
+    out = run(argv(req))
+    return out if out.first == :error
 
-    read = run(argv(req))
-    return JudgmentContext.unavailable(req, read.last) if read.first == :error
+    messages = parse(out.last)
+    return messages if messages.first == :error
 
-    messages = parse(read.last)
-    return JudgmentContext.unavailable(req, messages.last) if messages.first == :error
-
-    JudgmentContext.build(req, messages.last, owner: @owner, athena: athena.last)
+    [:ok, messages.last, ids.last]
   end
 
   private
@@ -54,22 +52,25 @@ class JudgmentContextSlack
     if req["source"] == "thread"
       [bin("read-thread"), req["channel"], req["thread_ts"], "--json"]
     else
-      [bin("read-channel"), req["channel"], "--since", req["oldest"], "--before", req["latest"], "--limit", req["limit"].to_s, "--json"]
+      [bin("read-channel"), req["channel"], "--since", req["oldest"], "--before", req["latest"], "--json"]
     end
   end
 
-  # athena_id -> [:ok, "U..."] | [:error, reason]. Asked once per process:
-  # the bot's own user id is what marks a message as Athena's.
-  def athena_id
-    @athena ||= begin
-      out = run([bin("whoami")])
-      if out.first == :error
-        [:error, "could not resolve Athena's bot user id: #{out.last}"]
-      else
-        id = out.last[/^user_id:\s*(\S+)/, 1]
-        id ? [:ok, id] : [:error, "whoami printed no user_id"]
-      end
-    end
+  # athena_ids -> [:ok, [user_id, bot_id]] | [:error, reason]. Only a success
+  # is remembered: one transient whoami failure must not blank every later row.
+  def athena_ids
+    return @athena_ids if @athena_ids
+
+    out = run([bin("whoami")])
+    return [:error, "could not resolve Athena's bot user id: #{out.last}"] if out.first == :error
+
+    user = out.last[/^user_id:\s*(\S+)/, 1]
+    bot = out.last[/^bot_id:\s*(\S+)/, 1]
+    return [:error, "whoami printed no usable user_id (got #{user.inspect})"] unless user && JudgmentContext::USER_ID.match?(user)
+
+    ids = [user]
+    ids << bot if bot && JudgmentContext::AUTHOR_ID.match?(bot)
+    @athena_ids = [:ok, ids]
   end
 
   def bin(name)
@@ -92,7 +93,7 @@ class JudgmentContextSlack
 
   # reason(stderr, status) -> the reader's own last "athena-slack: ..." line
   # (a fixed reason plus Slack's error code; it never carries a token or a
-  # message body), else the exit status.
+  # message body), else the exit status. The caller sanitises it for display.
   def reason(err, status)
     line = err.to_s.scrub("?").lines.map(&:strip).reject(&:empty?).reverse.find { |l| l.start_with?("athena-slack: ") }
     text = line ? line.delete_prefix("athena-slack: ") : "the Slack reader exited #{status.exitstatus}"

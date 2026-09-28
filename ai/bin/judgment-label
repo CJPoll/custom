@@ -71,13 +71,13 @@ USAGE = <<~EOF
               Each message is shown with its conversation context, read from
               Slack as Athena's own bot (the athena:slack read bins; never
               the owner's account), for this terminal only: nothing is sent
-              to any model. The context is the routing judge's window
-              (DND-1048): the same channel's top-level messages from the
-              #{JudgmentContext::WINDOW_S / 60} minutes before, oldest first, at most #{JudgmentContext::MAX_MESSAGES}. Each line
-              says what the judge sees of it: the owner's text (first
-              #{JudgmentContext::JUDGE_TEXT_CAP} characters), Athena's post as a session label only, or
-              nothing (anyone else, D7). A message inside a thread shows its
-              parent and the replies before it, for you only. When Slack
+              to any model. The window is the one DND-1048's routing-judge
+              design (slack-routing-v2) specifies: the same channel's
+              top-level messages from the #{JudgmentContext::WINDOW_S / 60} minutes before, oldest
+              first, at most #{JudgmentContext::MAX_MESSAGES}. Each line says what that judge will see
+              of it: the owner's text (first #{JudgmentContext::JUDGE_TEXT_CAP} characters, cut marked),
+              Athena's post as a session label only, or nothing (anyone
+              else, D7). When Slack
               cannot be read the row says "context unavailable: <reason>"
               and you can still answer or skip. The answer records whether
               the context was shown ("context": "shown" or "unavailable").
@@ -204,7 +204,7 @@ module Effects
   # context_reader(bin_dir) -> the Slack adapter the confirm step reads
   # context through, as Athena's bot.
   def context_reader(bin_dir)
-    JudgmentContextSlack.new(bin_dir, JudgmentLabel::OWNER)
+    JudgmentContextSlack.new(bin_dir)
   end
 
   def now
@@ -320,7 +320,7 @@ module Manager
     skipped = 0
     pending.each_with_index do |row, i|
       msg = msgs[row["id"]]
-      context = msg ? reader.fetch(msg) : JudgmentContext.unavailable({ "source" => nil }, "this event_id is no longer in #{File.basename(path)}")
+      context = context_for(msg, reader, File.basename(path))
       show(row, msg, context, mode, i, pending.size, File.basename(path), out)
       verdict = ask(row["label"], mode, out, input)
       case verdict.first
@@ -331,11 +331,27 @@ module Manager
         done += 1
       end
     end
-    left = JudgmentLabel.pending(existing_rows(opts, must_exist: true), mode).size
-    out.puts "#{mode == :recheck ? 'rechecked' : 'confirmed'} #{done}, skipped #{skipped}; #{left} #{MODE_ROWS[mode]} remain"
+    left = JudgmentLabel.pending(existing_rows(opts, must_exist: true), mode)
+    gone = left.size - JudgmentLabel.messages(text, path, left.map { |r| r["id"] }).size
+    out.puts "#{mode == :recheck ? 'rechecked' : 'confirmed'} #{done}, skipped #{skipped}; #{left.size} #{MODE_ROWS[mode]} remain" +
+             (gone.positive? ? " (#{gone} no longer in #{File.basename(path)}, so no context can be shown for them)" : "")
     0
   rescue JudgmentLabel::InputError => e
     fail!(1, e.message, e.fix)
+  end
+
+  # context_for(msg, reader, inbox) -> a JudgmentContext context: what to
+  # read (domain), the read (adapter), the shaping (domain).
+  def context_for(msg, reader, inbox)
+    return JudgmentContext.unavailable({ "source" => nil }, "this event_id is no longer in #{inbox}") if msg.nil?
+
+    req = JudgmentContext.request(msg)
+    return JudgmentContext.unavailable(req, req["error"]) if req["source"].nil?
+
+    read = reader.read(req)
+    return JudgmentContext.unavailable(req, read.last) if read.first == :error
+
+    JudgmentContext.build(req, read[1], owner: JudgmentLabel::OWNER, athena: read[2])
   end
 
   MODE_ROWS = {
@@ -364,13 +380,17 @@ module Manager
   end
 
   # The per-line note: what the routing judge (DND-1048) sees of each line.
+  # The judge is DND-1048's design (slack-routing-v2), not yet built.
   JUDGE_NOTES = {
-    "text" => "judge sees this text (first #{JudgmentContext::JUDGE_TEXT_CAP} chars)",
-    "session_label" => "shown to you only; judge sees the session",
+    "text" => "the judge will see this text (first #{JudgmentContext::JUDGE_TEXT_CAP} chars)",
+    "session_label" => "shown to you only; the judge will see the session",
     "none" => "shown to you only; never sent to the judge"
   }.freeze
   # A context line longer than this is cut for the terminal, with a count.
   SHOW_TEXT_CAP = 1500
+  # Our own marker lines use "| " with no indent; message text is always
+  # "|   ", so a message cannot forge one.
+  JUDGE_CUT = "| ~~~ the judge will see only the text above ~~~"
 
   def show_context(context, out)
     if context["status"] != "ok"
@@ -384,10 +404,10 @@ module Manager
     end
     context["messages"].each do |m|
       out.puts "| #{slack_time(m['ts'])} #{JudgmentLabel.printable(m['name'] || m['user'])} (#{JudgmentLabel.printable(m['role'])}) -- #{JUDGE_NOTES.fetch(m['judge'])}"
-      out.puts JudgmentLabel.fenced(cut(m["text"].to_s)).gsub(/^\| /, "|   ")
+      show_text(m["text"].to_s, m["judge"] == "text", out)
     end
     notes = []
-    notes << "#{context['omitted']} earlier not shown (cap #{JudgmentContext::MAX_MESSAGES})" if context["omitted"].positive?
+    notes << "#{context['omitted']} earlier in the window not shown (cap #{JudgmentContext::MAX_MESSAGES})" if context["omitted"].positive?
     notes << "#{context['in_thread']} thread replies not context" if context["in_thread"].positive?
     notes << "#{context['malformed']} unreadable" if context["malformed"].positive?
     out.puts "| (#{notes.join('; ')})" unless notes.empty?
@@ -403,10 +423,27 @@ module Manager
     end
   end
 
-  def cut(text)
-    return text if text.length <= SHOW_TEXT_CAP
+  # show_text -- one context message's text, indented under its header; where
+  # the judge will see only a prefix, a marker line shows the cut.
+  def show_text(text, judged, out)
+    if text.empty?
+      out.puts "|   (no text)"
+      return
+    end
+    shown = text[0, SHOW_TEXT_CAP]
+    cap = JudgmentContext::JUDGE_TEXT_CAP
+    if judged && shown.length > cap
+      out.puts indented(shown[0, cap])
+      out.puts JUDGE_CUT
+      out.puts indented(shown[cap..])
+    else
+      out.puts indented(shown)
+    end
+    out.puts "|   [... #{text.length - SHOW_TEXT_CAP} more characters not shown]" if text.length > SHOW_TEXT_CAP
+  end
 
-    "#{text[0, SHOW_TEXT_CAP]}\n[... #{text.length - SHOW_TEXT_CAP} more characters not shown]"
+  def indented(text)
+    JudgmentLabel.fenced(text).gsub(/^\| /, "|   ")
   end
 
   def slack_time(ts)

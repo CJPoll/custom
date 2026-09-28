@@ -10,24 +10,28 @@
 # caller decides where the context goes. Today that is only the owner's
 # terminal, in judgment-label --confirm. Nothing here egresses.
 #
-# It is the same window as the routing judge's context (DND-1048,
-# "slack-routing-v2"), so the owner labels with what the judge will see:
+# The window is the one DND-1048's design ("slack-routing-v2", 2026-09-28)
+# specifies for the routing judge's context. That judge is not built yet; when
+# it is, it builds its input with this module (or a parity check pins the two
+# together), so the owner labels with what the judge will see:
 #   - same channel as the message; top-level messages only (thread_ts nil or
 #     equal to ts); ts within WINDOW_S before it; oldest first; at most
 #     MAX_MESSAGES;
-#   - each message carries its ROLE and what the JUDGE sees of it (D7):
+#   - each message carries its ROLE and what the JUDGE will see of it (D7):
 #       owner  -> "text"          the owner's own text, capped at JUDGE_TEXT_CAP
 #       athena -> "session_label" Athena's own post, as a session label only
 #       other  -> "none"          anyone else, never (even in an mpim)
 # A message inside a thread gets its thread instead: the parent plus the latest
 # replies before it. The judge never sees thread context, so every thread
-# message is judge "none": it is for the person at the terminal only.
+# message is judge "none". judgment-label never asks for a thread (its roots
+# are top-level); the thread path is kept for DND-1048, which judges replies.
 # Nothing after the message is context: the label is what the sender meant
 # then, not what happened next.
 #
 # The two steps:
 #   request(anchor) -> which conversation, which window.
-#   build(request, messages, owner:, athena:) -> a context;
+#   build(request, messages, owner:, athena:) -> a context (athena: the bot's
+#   ids, its user id and bot id, since a post can carry either);
 #   unavailable(request, reason) -> one that says why there is none.
 # A context is never silently empty: "no earlier message in the window"
 # (status ok, messages []) and "could not read" (status unavailable, reason)
@@ -57,6 +61,8 @@ module JudgmentContext
   JUDGE_TEXT_CAP = 500
   CHANNEL_ID = /\A[CDG][A-Z0-9]{2,30}\z/
   USER_ID = /\A[UW][A-Z0-9]{2,30}\z/
+  # A post names its author by user id, or by bot id when it has no user.
+  AUTHOR_ID = /\A[UWB][A-Z0-9]{2,30}\z/
   SLACK_TS = /\A\d{10}\.\d{6}\z/
   MESSAGE_KEYS = %w[ts user name text thread_ts].freeze
   JUDGE_VIEW = { "owner" => "text", "athena" => "session_label", "other" => "none" }.freeze
@@ -74,12 +80,17 @@ module JudgmentContext
     base = { "channel" => channel, "anchor_ts" => ts }
     return base.merge("source" => nil, "error" => "the root has no usable channel id (got #{channel.inspect})") unless channel.is_a?(String) && CHANNEL_ID.match?(channel)
     return base.merge("source" => nil, "error" => "the root has no usable Slack ts (got #{ts.inspect})") unless ts.is_a?(String) && SLACK_TS.match?(ts)
+    # A thread_ts that is present but malformed is an error, never "top-level":
+    # read as top-level, it would show the wrong conversation as "shown".
+    return base.merge("source" => nil, "error" => "the root has an unusable thread_ts (got #{thread_ts.inspect})") unless thread_ts.nil? || (thread_ts.is_a?(String) && SLACK_TS.match?(thread_ts))
 
-    if thread_ts.is_a?(String) && SLACK_TS.match?(thread_ts) && thread_ts != ts
+    if thread_ts && thread_ts != ts
       base.merge("source" => "thread", "thread_ts" => thread_ts)
     else
-      # One more than the cap, so the reader's answer shows whether any were cut.
-      base.merge("source" => "channel", "oldest" => shift(ts, -WINDOW_S), "latest" => ts, "limit" => MAX_MESSAGES + 1)
+      # The WHOLE window is read (no count limit): a window of one hour is
+      # bounded, and only a full read makes "omitted" exact, since thread
+      # broadcasts would otherwise take slots the cap is counted against.
+      base.merge("source" => "channel", "oldest" => shift(ts, -WINDOW_S), "latest" => ts)
     end
   end
 
@@ -90,7 +101,11 @@ module JudgmentContext
   def build(req, messages, owner:, athena:)
     return unavailable(req, req["error"]) if req["source"].nil?
     return unavailable(req, "the owner's Slack user id is unusable (got #{owner.inspect})") unless owner.is_a?(String) && USER_ID.match?(owner)
-    return unavailable(req, "Athena's Slack bot user id is unusable (got #{athena.inspect})") unless athena.is_a?(String) && USER_ID.match?(athena)
+
+    athena = Array(athena)
+    unless !athena.empty? && athena.all? { |id| id.is_a?(String) && AUTHOR_ID.match?(id) } && athena.any? { |id| USER_ID.match?(id) }
+      return unavailable(req, "Athena's Slack bot ids are unusable (got #{athena.inspect})")
+    end
 
     usable, malformed = messages.partition { |m| m.is_a?(Hash) && m["ts"].is_a?(String) && SLACK_TS.match?(m["ts"]) }
     before = usable.select { |m| key(m["ts"]) < key(req["anchor_ts"]) }.uniq { |m| m["ts"] }.sort_by { |m| key(m["ts"]) }
@@ -104,11 +119,10 @@ module JudgmentContext
     context(req, "unavailable", [], 0, 0, 0, reason.to_s.empty? ? "no reason given" : reason.to_s)
   end
 
-  # role(message, owner, athena) -> "owner" | "athena" | "other"
-  def role(message, owner, athena)
-    case message["user"]
-    when owner then "owner"
-    when athena then "athena"
+  # role(message, owner, athena_ids) -> "owner" | "athena" | "other"
+  def role(message, owner, athena_ids)
+    if message["user"] == owner then "owner"
+    elsif athena_ids.include?(message["user"]) then "athena"
     else "other"
     end
   end
@@ -152,8 +166,9 @@ module JudgmentContext
     (seconds.to_i * 1_000_000) + micros.to_i
   end
 
-  # shift(ts, seconds) -> a Slack ts that many seconds away, micros zeroed.
+  # shift(ts, seconds) -> the Slack ts exactly that many seconds away.
   def shift(ts, seconds)
-    format("%010d.000000", (key(ts) / 1_000_000) + seconds)
+    micros = key(ts) + (seconds * 1_000_000)
+    format("%010d.%06d", micros / 1_000_000, micros % 1_000_000)
   end
 end

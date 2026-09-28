@@ -140,6 +140,9 @@ ruby_eq "labels: the context mark survives a parse [DND-1047]" \
 ruby_eq "labels: an unknown context mark names its line [DND-1047]" \
   "InputError: L:1 has a context mark outside shown|unavailable" \
   'JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"owner_confirmed","context":"x"}\n), "L")'
+ruby_eq "labels: a context mark on a row the owner did not confirm is refused [DND-1047]" \
+  "InputError: L:1 has a context mark on a proposed row" \
+  'JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"proposed","context":"shown"}\n), "L")'
 ruby_eq "labels: a row without a context mark parses byte-identically [DND-1047]" \
   '{"id":"a","label":"harness","provenance":"owner_confirmed","labeler":"U","labeled_at":"t"}' \
   'JudgmentLabel.render(JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"owner_confirmed","labeler":"U","labeled_at":"t"}\n), "L")).strip'
@@ -165,18 +168,25 @@ ctx_eq() {
   eq "$1" "${got}" "$2"
 }
 ATHENA_ID="U0ATHENA01"
-IDS="owner: '${OWNER}', athena: '${ATHENA_ID}'"
+ATHENA_BOT="B0ATHENA01"
+IDS="owner: '${OWNER}', athena: ['${ATHENA_ID}', '${ATHENA_BOT}']"
 A_TOP="{channel: 'D0FIXTURE', ts: '1790050000.000500', thread_ts: nil}"
 A_THR="{channel: 'C0FIXTURE', ts: '1790050000.000500', thread_ts: '1790040000.000100'}"
 # msg TS TEXT [THREAD_TS [USER]] -- one reader message, as a ruby Hash literal.
 msg() { printf "{'ts' => '%s', 'user' => '%s', 'name' => 'n', 'text' => '%s', 'thread_ts' => '%s'}" "$1" "${4:-U0SOMEONE1}" "$2" "${3:-$1}"; }
 build() { printf 'JudgmentContext.build(JudgmentContext.request(%s), [%s], %s)' "$1" "$2" "${IDS}"; }
-ctx_eq "context: a top-level anchor reads the channel's hour before it, 6 at most (the DND-1048 judge window)" \
-  "channel D0FIXTURE 1790046400.000000 1790050000.000500 7" \
-  "r = JudgmentContext.request(${A_TOP}); [r['source'], r['channel'], r['oldest'], r['latest'], r['limit']].join(' ')"
-ctx_eq "context: the window constants match the judge's (60 min, 6 entries, 500-char owner text)" \
+ctx_eq "context: a top-level anchor reads the channel's WHOLE hour before it (no count limit, so omitted is exact)" \
+  "channel D0FIXTURE 1790046400.000500 1790050000.000500 nolimit" \
+  "r = JudgmentContext.request(${A_TOP}); [r['source'], r['channel'], r['oldest'], r['latest'], r.fetch('limit', 'nolimit')].join(' ')"
+ctx_eq "context: the constants pin the DND-1048 design window (slack-routing-v2: 60 min, 6 entries, 500-char owner text)" \
   "3600 6 500" \
   "[JudgmentContext::WINDOW_S, JudgmentContext::MAX_MESSAGES, JudgmentContext::JUDGE_TEXT_CAP].join(' ')"
+ctx_eq "context: a malformed thread_ts is unavailable, never read as top-level" \
+  "unavailable: the root has an unusable thread_ts (got \"17\")" \
+  "c = $(build "{channel: 'D0FIXTURE', ts: '1790050000.000500', thread_ts: '17'}" ""); c['status'] + ': ' + c['reason']"
+ctx_eq "context: a message exactly at the window's start is in it" \
+  "1" \
+  "$(build "${A_TOP}" "$(msg 1790046400.000500 edge)")['messages'].size"
 ctx_eq "context: a thread_ts equal to ts is still top-level" \
   "channel" \
   "JudgmentContext.request({channel: 'D0FIXTURE', ts: '1790050000.000500', thread_ts: '1790050000.000500'})['source']"
@@ -190,7 +200,7 @@ ctx_eq "context: a malformed ts is unavailable too" \
   "unavailable" \
   "$(build "{channel: 'D0FIXTURE', ts: '17'}" "")['status']"
 ctx_eq "context: an unusable Athena bot id is unavailable, never a context with every role guessed" \
-  "unavailable: Athena's Slack bot user id is unusable (got \"\")" \
+  "unavailable: Athena's Slack bot ids are unusable (got [\"\"])" \
   "c = JudgmentContext.build(JudgmentContext.request(${A_TOP}), [], owner: '${OWNER}', athena: ''); c['status'] + ': ' + c['reason']"
 ctx_eq "context: channel messages come back oldest first, strictly before the anchor" \
   "ok 1790049998.000000,1790049999.000000 omitted=0" \
@@ -213,6 +223,9 @@ ctx_eq "context: a reader message with a malformed ts is dropped and counted" \
 ctx_eq "context: roles by user id -- the judge sees owner text, Athena as a session label, nobody else (D7)" \
   "owner:text athena:session_label other:none" \
   "c = $(build "${A_TOP}" "$(msg 1790049997.000000 a 1790049997.000000 "${OWNER}"), $(msg 1790049998.000000 b 1790049998.000000 "${ATHENA_ID}"), $(msg 1790049999.000000 c)"); c['messages'].map { |m| m['role'] + ':' + m['judge'] }.join(' ')"
+ctx_eq "context: an Athena post carrying only its bot id is still Athena's" \
+  "athena:session_label" \
+  "c = $(build "${A_TOP}" "$(msg 1790049999.000000 a 1790049999.000000 "${ATHENA_BOT}")"); c['messages'].map { |m| m['role'] + ':' + m['judge'] }.join"
 ctx_eq "context: a display name never decides a role (only the user id does)" \
   "other" \
   "c = JudgmentContext.build(JudgmentContext.request(${A_TOP}), [{'ts' => '1790049999.000000', 'user' => 'U0SOMEONE1', 'name' => 'cody'}], ${IDS}); c['messages'].first['role']"
@@ -234,6 +247,42 @@ ctx_eq "context: the shape is plain JSON (reusable by the routing judge, DND-104
 ctx_eq "context: a message keeps only ts, user, name, text, thread_ts, plus role and judge" \
   '["judge","name","role","text","thread_ts","ts","user"]' \
   "require 'json'; JSON.generate($(build "${A_TOP}" "$(msg 1790049999.000000 x).merge('blocks' => [1], 'subtype' => nil)")['messages'].first.keys.sort)"
+echo "== adapter: the Slack reader (DND-1047)"
+
+ADRB="${AI}/lib/judgment_context_slack.rb"
+# stub_dir DIR WHOAMI-BODY READ-CHANNEL-BODY -- a fake athena:slack bin dir.
+stub_dir() {
+  mkdir -p "$1"
+  printf '#!/bin/sh\n%s\n' "$2" >"$1/whoami"
+  printf '#!/bin/sh\n%s\n' "$3" >"$1/read-channel"
+  chmod +x "$1/whoami" "$1/read-channel"
+}
+# ad_eq NAME EXPECTED DIR -- one read of A_TOP through the adapter in DIR.
+ad_eq() {
+  local got
+  got="$(ruby -r "${ADRB}" -e "r = JudgmentContextSlack.new('$3', timeout_s: 1).read(JudgmentContext.request(${A_TOP})); puts(r.first == :ok ? 'ok ' + r[2].join(',') + ' ' + r[1].size.to_s : 'error: ' + r.last)" 2>&1)"
+  eq "$1" "${got}" "$2"
+}
+WHO_OK='printf "user:    athena\nuser_id: U0ATHENA01\nbot_id:  B0ATHENA01\n"'
+stub_dir "${TMP}/ad-ok" "${WHO_OK}" "printf '%s\n' '{\"ts\":\"1790049999.000000\",\"user\":\"U1\",\"text\":\"x\"}'"
+ad_eq "adapter: a read returns the messages and both of Athena's ids" "ok U0ATHENA01,B0ATHENA01 1" "${TMP}/ad-ok"
+stub_dir "${TMP}/ad-empty" "${WHO_OK}" "exit 0"
+ad_eq "adapter: an empty read is ok with no messages, not an error" "ok U0ATHENA01,B0ATHENA01 0" "${TMP}/ad-empty"
+stub_dir "${TMP}/ad-notjson" "${WHO_OK}" "echo 'not json'"
+ad_eq "adapter: stdout that is not JSON is an error, never an empty read" "error: the Slack reader printed a line that is not JSON" "${TMP}/ad-notjson"
+stub_dir "${TMP}/ad-array" "${WHO_OK}" "echo '[1,2]'"
+ad_eq "adapter: a JSON line that is not an object is an error" "error: the Slack reader printed a line that is not a JSON object" "${TMP}/ad-array"
+stub_dir "${TMP}/ad-who" 'printf "user_id: ?\n"' "exit 0"
+ad_eq "adapter: whoami with no usable user_id is an error naming what it got" "error: whoami printed no usable user_id (got \"?\")" "${TMP}/ad-who"
+stub_dir "${TMP}/ad-hang" "${WHO_OK}" "exec tail -f /dev/null"
+ad_eq "adapter: a hung reader is cut off by the timeout and says so" "error: the Slack read timed out after 1s" "${TMP}/ad-hang"
+stub_dir "${TMP}/ad-die" "${WHO_OK}" "echo 'athena-slack: conversations.history failed: channel_not_found' >&2; exit 1"
+ad_eq "adapter: a reader failure carries the reader's own reason" "error: conversations.history failed: channel_not_found" "${TMP}/ad-die"
+# Transient whoami failure: fail once, then succeed. Only a success is kept.
+stub_dir "${TMP}/ad-flaky" "if [ -e '${TMP}/ad-flaky/seen' ]; then ${WHO_OK}; else touch '${TMP}/ad-flaky/seen'; echo 'athena-slack: auth.test failed: timeout' >&2; exit 1; fi" "exit 0"
+got="$(ruby -r "${ADRB}" -e "a = JudgmentContextSlack.new('${TMP}/ad-flaky', timeout_s: 5); q = JudgmentContext.request(${A_TOP}); puts [a.read(q).first, a.read(q).first].join(' ')" 2>&1)"
+eq "adapter: one transient whoami failure does not blank the later reads" "${got}" "error ok"
+
 ruby_eq "labels: only the four SlackRouting choices exist" \
   "walt_ui harness gen_saas unclear" \
   'JudgmentLabel::LABELS.join(" ")'
@@ -290,7 +339,7 @@ fake_reader() { # fake_reader NAME FIXTURE-FILE (whoami never fails: the read do
   cat >"${FAKESLACK}/$1" <<EOF
 #!/bin/sh
 printf '%s\n' "\$@" >"${FAKESLACK}/args.$1"
-if [ "$1" != whoami ] && [ -f "${FAKESLACK}/fail" ]; then echo "athena-slack: conversations.history failed: not_in_channel" >&2; exit 1; fi
+if [ "$1" != whoami ] && [ -f "${FAKESLACK}/fail" ]; then printf 'athena-slack: conversations.history failed: not_in_channel\033[2J\n' >&2; exit 1; fi
 cat "${FAKESLACK}/$2"
 EOF
   chmod +x "${FAKESLACK}/$1"
@@ -307,12 +356,14 @@ ctxline() { # ctxline TS USER NAME TEXT [THREAD_TS]
 # Context for T3 (1790000003.000300): Athena's post and the owner's line
 # before it, a stranger's line, a reply in a thread, and a line AFTER the root
 # (never context). The reader returns them in any order.
+LONG="$(printf 'y%.0s' $(seq 1 600))"
 {
   ctxline 1790000003.500000 "${OWNER}" cody "LATER-MARKER after the root"
   ctxline 1790000002.000000 U0ATHENA01 athena "ATHENA-POST-MARKER from a session"
-  ctxline 1790000001.000000 "${OWNER}" cody "OWNER-PRIOR-MARKER earlier owner line"
-  ctxline 1790000002.500000 U0SOMEONE1 mike "STRANGER-MARKER $(printf '\033')[31m"
+  ctxline 1790000001.000000 "${OWNER}" cody "OWNER-PRIOR-MARKER earlier owner line ${LONG}"
+  ctxline 1790000002.500000 U0SOMEONE1 "mike$(printf '\033')[2J" "STRANGER-MARKER $(printf '\033')[31m"
   ctxline 1790000002.700000 "${OWNER}" cody "THREAD-REPLY-MARKER" 1790000001.000000
+  ctxline 1790000002.800000 B0FAKE athena ""
 } >"${FAKESLACK}/history.jsonl"
 
 run() {
@@ -421,18 +472,22 @@ has "context: another person's line is shown to the owner [DND-1047]" "${FIRST}"
 lacks "context: nothing after the root is context [DND-1047]" "${FIRST}" "LATER-MARKER"
 lacks "context: a thread reply is not top-level context [DND-1047]" "${FIRST}" "THREAD-REPLY-MARKER"
 has "context: the dropped thread reply is counted, not silent" "${FIRST}" "1 thread replies not context"
-has "context: owner lines are marked as judge-visible text (DND-1048 alignment)" "${FIRST}" "judge sees this text (first 500 chars)"
-has "context: Athena lines are marked session-label only" "${FIRST}" "shown to you only; judge sees the session"
+has "context: owner lines are marked as text the judge will see (DND-1048 alignment)" "${FIRST}" "the judge will see this text (first 500 chars)"
+has "context: Athena lines are marked session-label only" "${FIRST}" "shown to you only; the judge will see the session"
 has "context: other people's lines are marked never sent to the judge (D7)" "${FIRST}" "shown to you only; never sent to the judge"
 has "context: the scope names the window (60 min, top-level, at most 6)" "${FIRST}" "top-level, the 60 minutes before, at most 6"
+has "context: the judge's 500-char cut is marked on a long owner line" "${FIRST}" "| ~~~ the judge will see only the text above ~~~"
+has "context: a post with only a bot id is Athena's" "${FIRST}" "(athena) -- shown to you only; the judge will see the session"
+has "context: an empty text is shown as such, fenced" "${FIRST}" "|   (no text)"
 lacks "context: a raw ESC in context text never reaches the terminal" "${FIRST}" "$(printf '\033')[31m"
+lacks "context: a raw ESC in a display name never reaches the terminal" "${FIRST}" "$(printf '\033')[2J"
 case "${FIRST}" in
   *"end of context"*"----- message"*) ok "context: the context is shown before the message" ;;
   *) bad "context: the context is shown before the message" "${FIRST}" ;;
 esac
 ARGS="$(tr '\n' ' ' <"${FAKESLACK}/args.read-channel" 2>/dev/null)"
-eq "context: read-channel is asked for the hour before the root, top of 7, as JSON (last row: Ev07)" \
-  "${ARGS}" "D0FIXTURE --since 1789996407.000000 --before ${T7} --limit 7 --json "
+eq "context: read-channel is asked for the whole hour before the root, as JSON (last row: Ev07)" \
+  "${ARGS}" "D0FIXTURE --since 1789996407.000700 --before ${T7} --json "
 eq "the confirmed row records that its context was shown [DND-1047]" "$(jq -r 'select(.id=="Ev03") | .context' "${LABELS}")" "shown"
 eq "the quit row is still proposed" "$(jq -r 'select(.id=="Ev07") | .provenance' "${LABELS}")" "proposed"
 eq "the forward rows are untouched" "$(jq -c 'select(.provenance=="forward_record")' "${LABELS}")" "$(jq -c 'select(.provenance=="forward_record")' <<<"${BEFORE}")"
@@ -507,7 +562,8 @@ OUT="$(printf 'u\n' | /usr/bin/script -qec "${CMD}" /dev/null 2>&1)"
 RC=$?
 rm -f "${FAKESLACK}/fail"
 eq "a confirm with Slack unreadable still exits 0" "${RC}" "0"
-has "the row says context unavailable with the reader's reason [DND-1047]" "${OUT}" "context unavailable: conversations.history failed: not_in_channel"
+has "the row says context unavailable with the reader's reason [DND-1047]" "${OUT}" "context unavailable: conversations.history failed: not_in_channel?[2J"
+lacks "a raw ESC in the reader's reason never reaches the terminal" "${OUT}" "$(printf '\033')[2J"
 has "the message itself is still shown" "${OUT}" "mixed topic"
 eq "the answer is recorded, marked context unavailable [DND-1047]" \
   "$(jq -r 'select(.id=="Ev07") | .label + " " + .provenance + " " + .context' "${LABELS}")" "unclear owner_confirmed unavailable"
@@ -547,6 +603,7 @@ RC=$?
 eq "a recheck with no Slack reader still exits 0" "${RC}" "0"
 has "a missing reader is context unavailable naming it, never an empty context" "${OUT}" "context unavailable: could not resolve Athena's bot user id: the Slack reader ${TMP}/no-such-slack-bin/whoami is missing or not executable"
 has "a row whose root left the inbox is context unavailable, saying so" "${OUT}" "context unavailable: this event_id is no longer in walt_ui-slack.jsonl"
+has "the tally names the rows that can never be shown context" "${OUT}" "(1 no longer in walt_ui-slack.jsonl, so no context can be shown for them)"
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"

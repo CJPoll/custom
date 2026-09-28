@@ -198,6 +198,7 @@ module JudgmentLabel
       raise InputError.new("#{where} has a label outside #{LABELS.join('|')}", fix) unless LABELS.include?(row["label"])
       raise InputError.new("#{where} has an unknown provenance", fix) unless PROVENANCES.include?(row["provenance"])
       raise InputError.new("#{where} has a context mark outside #{CONTEXT_MARKS.join('|')}", fix) if row.key?("context") && !CONTEXT_MARKS.include?(row["context"])
+      raise InputError.new("#{where} has a context mark on a #{row['provenance']} row", "a context mark belongs only on an owner_confirmed row; #{fix}") if row.key?("context") && row["provenance"] != "owner_confirmed"
       raise InputError.new("#{where} repeats the id of line #{seen[row['id']]}", "keep one row per id (judgment-eval refuses a repeat)") if seen.key?(row["id"])
 
       seen[row["id"]] = line_no
