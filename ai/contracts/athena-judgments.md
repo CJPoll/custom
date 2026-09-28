@@ -663,22 +663,25 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   be supplied by a caller. One case is one (item, dimension).
   - **`unmarked` is inferred, not confirmed.** The owner never said an
     unmarked item belongs below a pin; it is the list the pin was placed
-    against. It is the weakest side of any pair, and it enters only as a
-    pin's or a dismissal's partner.
+    against. It is still a record, read from what the index holds, not a
+    `proposed` label. It is the weakest side of any pair, and it enters only
+    as a pin's or a dismissal's partner.
   - **Pairs.** "The owner put A above B": `pin_top` above a score override,
     `pin_bottom` and `dismissed`; a score override above the overrides with
     the next lower value (not every lower one) and above `pin_bottom` and
     `dismissed`; each pin or dismissal against up to five `unmarked` items.
     Other combinations say nothing about order and are not pairs.
-  - **Pairs share items, so every item's pairs are capped.** A pair reuses
-    both sides' judgments, so the pairs are not independent trials. To bound
-    that, each acted item is the upper side of at most five acted pairs and
-    takes at most five unmarked partners, the other sides spread by a fixed
-    rotation. The Wilson bound below is computed over pairs anyway: the cap
-    limits how far one judgment can be counted, and it does not make the
-    pairs independent. A dimension clears the bar only with at least 35
-    decisive pairs; the gen_saas readiness check counts the pairs an index
-    implies before any call.
+  - **Pairs share items, so every item's pairs are capped, on both sides.**
+    A pair reuses both sides' judgments, so the pairs are not independent. To
+    bound that, among the acted items each item is the upper side of at most
+    five pairs and the lower side of at most five; each pin or dismissal
+    takes at most five unmarked partners, and each unmarked item serves at
+    most five. Counterparts are picked by a fixed rotation that skips one
+    already used five times. The Wilson bound below is computed over pairs
+    anyway: the cap limits how far one judgment can be counted, and it does
+    not make the pairs independent. A dimension clears the bar only with at
+    least 35 decisive pairs; the gen_saas readiness check counts the pairs an
+    index implies before any call.
   - **The curve is pairwise, per dimension.** At threshold t an item's delta
     is its judged level when accepted at t, else 0, as the product ranks it.
     A pair is correct when the deltas order it as the owner did, wrong when
@@ -1007,3 +1010,8 @@ with it.
       as a mismatch.
 - [ ] A question set with several questions defines its eval case unit; a
       finding triage case is one (finding, candidate) pair.
+- [ ] A request body carrying an `owner_action` label is refused; only the
+      server builds an owner-action run, from the owner's own index, with no
+      item in more than five pairs on either side of a pair group.
+- [ ] An owner-action run's threshold is one per dimension, written to each
+      of that dimension's level labels; a mixed run is never applied.
