@@ -59,7 +59,10 @@ case "$*" in
     # stdin body file is observable.
     prev=""; for a in "$@"; do
       if [ "$prev" = "--body-file" ] || [ "$prev" = "-F" ]; then printf 'stub-body:'; cat "$a"; fi
-      case "$a" in --body-file=*) printf 'stub-body:'; cat "${a#--body-file=}" ;; esac
+      case "$a" in
+        --body-file=*) printf 'stub-body:'; cat "${a#--body-file=}" ;;
+        -F?*) printf 'stub-body:'; cat "${a#-F}" ;;
+      esac
       prev="$a"
     done
     echo "stub: SENT $1 $2"; exit 0 ;;
@@ -114,6 +117,24 @@ for spelling in "--title x${TOKEN}" "-t x${TOKEN}" "--body x${TOKEN}" "-b x${TOK
   gha pr create ${spelling}
   if [ "${RC}" = 1 ] && not_sent "pr create" && no_literal; then ok "refused: ${spelling%%x*}"; else bad "refused: ${spelling%%x*}" "rc=${RC} ${OUT}"; fi
 done
+echo "--- attached short-flag values (critic round 1: -bVALUE went out unscanned) ---"
+gha pr create "-bx${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && no_literal; then ok "refused: -bVALUE"; else bad "refused: -bVALUE" "rc=${RC} ${OUT}"; fi
+gha pr create "-tx${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && no_literal; then ok "refused: -tVALUE"; else bad "refused: -tVALUE" "rc=${RC} ${OUT}"; fi
+gha pr create "-F${TMP}/body-hit.md"
+if [ "${RC}" = 1 ] && not_sent "pr create" && no_literal; then ok "refused: -F/path"; else bad "refused: -F/path" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && printf 'clean via -F-\n' | "${WRAPPER}" pr create -F- 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if [ "${RC}" = 0 ] && sent "pr create" && [[ "${OUT}" == *"stub-body:clean via -F-"* ]]; then ok "-F- is replaced by the scanned copy"; else bad "-F-" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gha pr create -db "x${TOKEN}"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"short-flag cluster"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "a cluster hiding -b is refused"; else bad "cluster" "rc=${RC} ${OUT}"; fi
+gha pr create -d --body "clean"
+if [ "${RC}" = 0 ] && sent "pr create"; then ok "a lone boolean short flag passes"; else bad "lone short flag" "rc=${RC} ${OUT}"; fi
+gha pr create --body "x${TOKEN}" --body "clean"
+if [ "${RC}" = 1 ] && not_sent "pr create"; then ok "every --body occurrence is scanned (first dirty)"; else bad "repeat first" "rc=${RC} ${OUT}"; fi
+gha pr create --body "clean" --body "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create"; then ok "every --body occurrence is scanned (last dirty)"; else bad "repeat last" "rc=${RC} ${OUT}"; fi
+
 for cmd in "pr comment 5" "pr edit 5" "pr review 5 --comment" "issue create" "issue comment 7" "issue edit 7"; do
   # shellcheck disable=SC2086
   gha ${cmd} --body "x${TOKEN}"

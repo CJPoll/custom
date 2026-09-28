@@ -74,6 +74,13 @@ gos_scan() {
 
 # gos_guard <gh argv...> : sets GOS_ARGV to the argv gh must run (a `-` body
 # file is replaced by the scanned private copy).
+#
+# Every spelling gh's flag parser accepts for the three fields is read, and
+# every occurrence is scanned (not only the last): `--title X`, `--title=X`,
+# `-t X`, `-tX`, and the same for --body/-b and --body-file/-F. A single-dash
+# cluster that carries t, b, F or R after its first letter (`-dbX`, `-Bmain`
+# with a t in it) could hide a field inside it, so it is REFUSED with a Fix
+# rather than guessed at. Everything after `--` is positional.
 gos_guard() {
   GOS_ARGV=("$@")
   local group="${1:-}" verb="${2:-}"
@@ -83,23 +90,33 @@ gos_guard() {
   esac
   GOS_WHAT="$group $verb"
 
-  local i=2 n=$# a repo="" title="" have_title="" body="" have_body="" bodyfile="" bf_index="" bf_eq=""
-  local -a argv=("$@")
+  local i=2 n=$# a repo=""
+  local -a argv=("$@") titles=() bodies=() bf_idx=() bf_pre=() bf_path=()
   while [ "$i" -lt "$n" ]; do
     a="${argv[$i]}"
     case "$a" in
-      --title=*) title="${a#--title=}"; have_title=1 ;;
-      --body=*) body="${a#--body=}"; have_body=1 ;;
-      --body-file=*) bodyfile="${a#--body-file=}"; bf_index="$i"; bf_eq=1 ;;
+      --) break ;;
+      --title=*) titles+=("${a#--title=}") ;;
+      --body=*) bodies+=("${a#--body=}") ;;
+      --body-file=*) bf_idx+=("$i"); bf_pre+=("--body-file="); bf_path+=("${a#--body-file=}") ;;
       --repo=*) repo="${a#--repo=}" ;;
-      -t | --title) i=$((i + 1)); title="${argv[$i]:-}"; have_title=1 ;;
-      -b | --body) i=$((i + 1)); body="${argv[$i]:-}"; have_body=1 ;;
-      -F | --body-file) i=$((i + 1)); bodyfile="${argv[$i]:-}"; bf_index="$i" ;;
+      -t | --title) i=$((i + 1)); titles+=("${argv[$i]:-}") ;;
+      -b | --body) i=$((i + 1)); bodies+=("${argv[$i]:-}") ;;
+      -F | --body-file) i=$((i + 1)); bf_idx+=("$i"); bf_pre+=(""); bf_path+=("${argv[$i]:-}") ;;
       -R | --repo) i=$((i + 1)); repo="${argv[$i]:-}" ;;
+      -t?*) titles+=("${a#-t}") ;;
+      -b?*) bodies+=("${a#-b}") ;;
+      -F?*) bf_idx+=("$i"); bf_pre+=("-F"); bf_path+=("${a#-F}") ;;
+      -R?*) repo="${a#-R}" ;;
+      --*) ;;
+      -?*)
+        if [ "${#a}" -gt 2 ] && [[ "${a:2}" == *[tbFR]* ]]; then
+          gos_refuse 3 "the short-flag cluster \`${a:0:2}…\` in this $GOS_WHAT may carry a title, body or repo the outbound scan cannot separate. Fix: write each short flag as its own word (\`-d -b <text>\`, \`-B <branch>\`), or use the long flags (--title, --body, --body-file, --repo)."
+        fi ;;
     esac
     i=$((i + 1))
   done
-  [ -n "$have_title$have_body$bodyfile" ] || return 0
+  [ "$((${#titles[@]} + ${#bodies[@]} + ${#bf_path[@]}))" -gt 0 ] || return 0
 
   local vis
   if [ -n "$repo" ]; then
@@ -115,21 +132,27 @@ gos_guard() {
 
   local dir="${FCI_CFG_DIR:?gh-athena: outbound scan needs the private config dir}/outbound-scan"
   mkdir -p "$dir" || gos_refuse 3 "could not create $dir for the outbound scan. Fix: make \$TMPDIR writable and retry."
-  if [ -n "$have_title" ]; then
-    printf '%s\n' "$title" > "$dir/title" && gos_scan title "$dir/title"
-  fi
-  if [ -n "$have_body" ]; then
-    printf '%s\n' "$body" > "$dir/body" && gos_scan body "$dir/body"
-  fi
-  if [ -n "$bodyfile" ]; then
-    if [ "$bodyfile" = "-" ]; then
-      cat > "$dir/body-stdin" || gos_refuse 3 "could not read the body from stdin. Fix: pass --body-file <path> instead."
-      if [ -n "$bf_eq" ]; then GOS_ARGV[$bf_index]="--body-file=$dir/body-stdin"; else GOS_ARGV[$bf_index]="$dir/body-stdin"; fi
-      gos_scan body-file "$dir/body-stdin"
+  local k f
+  for k in "${!titles[@]}"; do
+    f="$dir/title-$k"
+    printf '%s\n' "${titles[$k]}" > "$f" || gos_refuse 3 "could not write the title to $f for the outbound scan. Fix: make \$TMPDIR writable and retry."
+    gos_scan title "$f"
+  done
+  for k in "${!bodies[@]}"; do
+    f="$dir/body-$k"
+    printf '%s\n' "${bodies[$k]}" > "$f" || gos_refuse 3 "could not write the body to $f for the outbound scan. Fix: make \$TMPDIR writable and retry."
+    gos_scan body "$f"
+  done
+  for k in "${!bf_path[@]}"; do
+    f="${bf_path[$k]}"
+    if [ "$f" = "-" ]; then
+      f="$dir/body-stdin-$k"
+      cat > "$f" || gos_refuse 3 "could not read the body from stdin. Fix: pass --body-file <path> instead."
+      GOS_ARGV[${bf_idx[$k]}]="${bf_pre[$k]}$f"
     else
-      [ -r "$bodyfile" ] || gos_refuse 3 "the body file $bodyfile is not readable, so it cannot be scanned. Fix: pass a readable --body-file."
-      gos_scan body-file "$bodyfile"
+      [ -r "$f" ] || gos_refuse 3 "the body file $f is not readable, so it cannot be scanned. Fix: pass a readable --body-file."
     fi
-  fi
+    gos_scan body-file "$f"
+  done
   return 0
 }
