@@ -22,6 +22,10 @@
 #       the reaper, calls suite_reaper_begin, and calls suite_reap_tagged.
 #   S10 the real suites, SIGTERMed mid-run at the two measured windows, leave
 #       nothing behind (scripts/test/suite-reaper/repro-real-suites.sh).
+#   S11 when a repro case cannot run, the repro says why truthfully: a suite
+#       still running when the wait runs out is not called "exited", and one
+#       that did exit early is named with its status. Both quote the suite's
+#       own FAIL lines, and nothing the suite started is left alive.
 set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd -- "${HERE}/../../.." && pwd -P)"
@@ -209,6 +213,43 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# S11: the repro must say WHY a case could not run, truthfully. A suite that is
+# still running when the wait runs out, and one that exited before the trigger,
+# are different findings: the first is a slow (loaded) suite, not a leak; the
+# second is a suite that died early. On 2026-09-28 a loaded desktop gate read
+# the first as the second ("the trigger never fired (suite exited ...)") and the
+# still-running suite's own children as processes that "outlived" it. Run
+# against a fake repo so a slow suite costs seconds, not minutes.
+s11_repo() { # s11_repo <name> <fake-suite-body> -- a fake checkout holding the repro
+  local r="${TMP}/$1"
+  mkdir -p "${r}/scripts/test/suite-reaper" "${r}/scripts/test/athena-inbox-client"
+  cp "${HERE}/repro-real-suites.sh" "${r}/scripts/test/suite-reaper/"
+  printf '#!/usr/bin/env bash\n%s\n' "$2" >"${r}/scripts/test/athena-inbox-client/self-test.sh"
+  printf '%s\n' "${r}"
+}
+S11_FAKE_OUT='echo "  ok    fake case 1"; echo "  FAIL  fake case 43"; echo "        fake detail"'
+r="$(s11_repo s11slow "${S11_FAKE_OUT}; sleep 307 & wait")"
+MARK="DND818_ST_MARK=s11slow-$$"; MARKS+=("${MARK}")
+O="$(env "${MARK}" REPRO_CASES=r2 REPRO_WAIT_S=3 REPRO_STALL_S=3 bash "${r}/scripts/test/suite-reaper/repro-real-suites.sh" 2>&1)"; ORC=$?
+if [ "${ORC}" -eq 1 ] && grep -q '^VERDICT: FAIL' <<<"${O}" && grep -q 'still RUNNING' <<<"${O}" \
+   && ! grep -q 'suite exited' <<<"${O}" && grep -qF 'FAIL  fake case 43' <<<"${O}"; then
+  ok "S11 a suite still running when the wait runs out is reported as still RUNNING (with its own FAILs), never as exited"
+else
+  bad "S11 a suite still running when the wait runs out is reported as still RUNNING, never as exited" "rc=${ORC} $(printf '%s' "${O}" | tr '\n' '|')"
+fi
+if gone "${MARK}"; then
+  ok "S11 ...and the still-running suite and its children are killed"
+else
+  bad "S11 the still-running suite and its children are killed" "$(survivors "${MARK}")"; kill_marked "${MARK}"
+fi
+r="$(s11_repo s11early "${S11_FAKE_OUT}; exit 3")"
+O="$(REPRO_CASES=r2 REPRO_WAIT_S=30 REPRO_STALL_S=30 bash "${r}/scripts/test/suite-reaper/repro-real-suites.sh" 2>&1)"; ORC=$?
+if [ "${ORC}" -eq 1 ] && grep -q 'EXITED (status 3) before the trigger fired' <<<"${O}" && grep -qF 'FAIL  fake case 43' <<<"${O}"; then
+  ok "S11 a suite that exits before the trigger is reported as EXITED with its status and its own FAILs"
+else
+  bad "S11 a suite that exits before the trigger is reported as EXITED with its status and its own FAILs" "rc=${ORC} $(printf '%s' "${O}" | tr '\n' '|')"
+fi
+
 # S10: the real suites, at the two measured windows (the deterministic repro).
 R="$("${HERE}/repro-real-suites.sh" 2>&1)"; RRC=$?
 if [ "${RRC}" -eq 0 ] && grep -q '^VERDICT: PASS' <<<"${R}"; then

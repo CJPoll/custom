@@ -25,6 +25,17 @@
 #     supervisor's reaper sends it SIGTERM, which it ignores, and the suite
 #     never learned its pid.
 #
+# Environment (all optional):
+#   REPRO_CASES    which cases to run, space-separated (default "r1 r2").
+#   REPRO_WAIT_S   hard cap on the wait for each suite (default 1200).
+#   REPRO_STALL_S  a suite that prints nothing for this long is stuck (default 240).
+# A case that cannot run is a FAIL that says which of two things happened:
+# the suite was still RUNNING when the wait ran out (a slow or stuck suite,
+# killed here, no leak verdict), or it EXITED early (named with its status).
+# Either way the suite's own FAIL lines are quoted. Before this (2026-09-28) a
+# loaded gate's still-running suite was reported as "the trigger never fired
+# (suite exited ...)" and its live children as processes that "outlived" it.
+#
 # Survivors are found by a marker this script puts in each suite's
 # environment (every process the suite starts inherits it), never by the
 # suite's own bookkeeping. Each is printed, then killed BY PID.
@@ -35,6 +46,7 @@ REPO="$(cd -- "${HERE}/../../.." && pwd -P)"
 REAL_RUBY="$(command -v ruby)" || { echo "VERDICT: FAIL -- no ruby on PATH"; echo "  Fix: put ruby on PATH."; exit 1; }
 WORK="$(mktemp -d)"
 FAIL=0
+NORUN=0   # cases whose suite was still running when the wait ran out
 TRACK=()
 
 # pids_with_env <VAR=value> -- own-uid pids whose environ holds exactly it.
@@ -120,16 +132,75 @@ export REAL_RUBY
 mkdir -p "${WORK}/home/.local/bin"
 cp "${WORK}/bin/ruby" "${WORK}/home/.local/bin/ruby"
 
+# wait_suite <pid> <outfile> -- block until the suite exits (status 0), or
+# until it stalls or hits the cap (status 1, WAIT_WHY says which). The bound
+# follows progress, not a wall clock alone: a suite that keeps printing is
+# working, however loaded the machine, and a suite that prints nothing for
+# REPRO_STALL_S is stuck. REPRO_WAIT_S caps the whole wait either way.
+WAIT_WHY=""
+wait_suite() {
+  local pid="$1" out="$2" cap="${REPRO_WAIT_S:-1200}" stall="${REPRO_STALL_S:-240}" start now size last=-1 changed
+  start="$(date +%s)"; changed="${start}"
+  while kill -0 "${pid}" 2>/dev/null; do   # our own child: its pid is not reused before we wait
+    now="$(date +%s)"
+    size="$(stat -c %s "${out}" 2>/dev/null || echo 0)"
+    if [ "${size}" != "${last}" ]; then last="${size}"; changed="${now}"; fi
+    if [ $((now - start)) -ge "${cap}" ]; then WAIT_WHY="the ${cap}s cap ran out"; return 1; fi
+    if [ $((now - changed)) -ge "${stall}" ]; then WAIT_WHY="it printed nothing for ${stall}s, at $((now - start))s"; return 1; fi
+    timeout 5 tail --pid="${pid}" -f /dev/null
+  done
+  return 0
+}
+
+# suite_own_fails <outfile> -- the suite's own FAIL lines (each with its detail
+# line), else its last lines: why the case could not run starts there.
+suite_own_fails() {
+  local f
+  f="$(grep -A1 '^  FAIL' "$1" 2>/dev/null | grep -v '^--$' | head -n 12)"
+  if [ -n "${f}" ]; then
+    printf '        the suite'"'"'s own FAIL lines so far:\n'; printf '%s\n' "${f}" | sed 's/^/        | /'
+  else
+    printf '        the suite'"'"'s last lines:\n'; tail -n 3 "$1" 2>/dev/null | sed 's/^/        | /'
+  fi
+}
+
+# kill_mark <marker> -- kill every process carrying the marker, by pid, until
+# none is left (bounded; a process mid-fork is caught on the next pass).
+kill_mark() {
+  local pass p s
+  for pass in 1 2 3 4 5; do
+    s="$(pids_with_env "$1")"
+    [ -z "${s}" ] && return 0
+    for p in ${s}; do
+      [ "${pass}" = 1 ] && printf '        killed pid=%s cmd=%s\n' "${p}" "$(tr '\0' ' ' <"/proc/${p}/cmdline" 2>/dev/null)"
+      kill -9 "${p}" 2>/dev/null
+    done
+    timeout 1 tail --pid="${p}" -f /dev/null 2>/dev/null
+  done
+}
+
 run_case() { # run_case <id> <label> <suite-rel-path> <suite-pattern> [HOME]
-  local id="$1" label="$2" suite="$3" pat="$4" home="${5:-${HOME}}" mark="DND818_REPRO_MARK=${1}-$$" pid
+  local id="$1" label="$2" suite="$3" pat="$4" home="${5:-${HOME}}" mark="DND818_REPRO_MARK=${1}-$$" pid rc
   printf '%s  %s\n' "${id^^}" "${label}"
   env "${mark}" HOME="${home}" PATH="${WORK}/bin:${PATH}" REPRO_CASE="${id}" REPRO_SUITE_PAT="${pat}" \
       REPRO_SEEN="${WORK}/${id}.seen" REPRO_FIRED="${WORK}/${id}.fired" \
       bash "${REPO}/${suite}" >"${WORK}/${id}.out" 2>&1 &
   pid=$!; TRACK+=("${pid}")
-  timeout 400 tail --pid="${pid}" -f /dev/null
+  if ! wait_suite "${pid}" "${WORK}/${id}.out"; then
+    # Still running is NOT a leak and NOT an early exit: every process of the
+    # suite is still a live descendant of a live suite. Say so, and stop it.
+    printf '  FAIL  %s: the suite was still RUNNING when the wait ran out (%s); it never exited, so this run gives no leak verdict%s\n' \
+      "${id}" "${WAIT_WHY}" "$([ -s "${WORK}/${id}.fired" ] && echo ' (the trigger had fired)')"
+    suite_own_fails "${WORK}/${id}.out"
+    printf '        Fix: a loaded machine slows the suite; re-run this repro alone (REPRO_CASES=%s). A stall with the same last line each time is a hang in the suite.\n' "${id}"
+    FAIL=$((FAIL+1))
+    kill_mark "${mark}"; wait "${pid}" 2>/dev/null; NORUN=$((NORUN+1))
+    return
+  fi
+  wait "${pid}"; rc=$?
   if [ ! -s "${WORK}/${id}.fired" ]; then
-    printf '  FAIL  %s setup: the trigger never fired (suite exited %s)\n' "${id}" "$(tail -n 2 "${WORK}/${id}.out" | tr '\n' ' ')"
+    printf '  FAIL  %s setup: the suite EXITED (status %s) before the trigger fired\n' "${id}" "${rc}"
+    suite_own_fails "${WORK}/${id}.out"
     FAIL=$((FAIL+1))
     report_survivors "${id}" "${mark}"
     return
@@ -137,13 +208,19 @@ run_case() { # run_case <id> <label> <suite-rel-path> <suite-pattern> [HOME]
   report_survivors "${id} (target client pid $(cat "${WORK}/${id}.fired"))" "${mark}"
 }
 
-run_case r1 "inbox-client-capture: SIGTERM as C-10's fake suite starts its mock" \
-  scripts/test/inbox-client-capture/self-test.sh inbox-client-capture/self-test.sh
-run_case r2 "athena-inbox-client: SIGTERM as 45c relaunches a TERM-ignoring client" \
-  scripts/test/athena-inbox-client/self-test.sh athena-inbox-client/self-test.sh "${WORK}/home"
+for c in ${REPRO_CASES:-r1 r2}; do
+  case "${c}" in
+    r1) run_case r1 "inbox-client-capture: SIGTERM as C-10's fake suite starts its mock" \
+          scripts/test/inbox-client-capture/self-test.sh inbox-client-capture/self-test.sh ;;
+    r2) run_case r2 "athena-inbox-client: SIGTERM as 45c relaunches a TERM-ignoring client" \
+          scripts/test/athena-inbox-client/self-test.sh athena-inbox-client/self-test.sh "${WORK}/home" ;;
+    *) echo "VERDICT: FAIL -- unknown case '${c}' in REPRO_CASES"; echo "  Fix: REPRO_CASES takes r1 and/or r2."; exit 2 ;;
+  esac
+done
 
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS"; exit 0; fi
 echo "VERDICT: FAIL (${FAIL})"
-echo "  Fix: a suite must reap every process it started on every exit path, whether or not it learned the pid (scripts/test/lib/suite-reaper.bash)."
+[ "${NORUN}" -gt 0 ] && echo "  Fix: ${NORUN} case(s) never reached a verdict (the suite was still running); read each case's own FAIL lines above and re-run it alone before reading this as a leak."
+[ "${FAIL}" -gt "${NORUN}" ] && echo "  Fix: a suite must reap every process it started on every exit path, whether or not it learned the pid (scripts/test/lib/suite-reaper.bash)."
 exit 1
