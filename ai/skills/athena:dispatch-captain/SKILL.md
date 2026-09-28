@@ -193,7 +193,9 @@ see [[athena:brief-verification]].
 ## Batch Missions (tier 4)
 
 Tier 4 is defined in [[athena:ticket-management]] → *Priority: critical path
-first*, which also sets when those tickets run. Owner, 2026-09-27: "findings do
+first*, which also sets when those tickets run. **Pending DND-979:** that
+section gains the tier ladder when DND-979 lands. Until a `tier 4` definition
+is there, you have no tier 4 to batch, so batch nothing. Owner, 2026-09-27: "findings do
 get a captain, but only after the functional requirements are met." A batch is
 how such tier-4 tickets get that captain cheaply. Do not batch any other tier.
 
