@@ -121,6 +121,28 @@ eq "override expiring exactly now has expired" "$(dec "${OV_AT_NOW}" "${THU_10}"
 OV_RUN="$(jq -c '.override = {"desired":"run","expires_at":"2026-09-24T20:00:00Z"}' <<<"${METER_SNAP}")"
 eq "unexpired force_run beats metering" "$(dec "${OV_RUN}" "${THU_10}")" "run|override:force_run|2026-09-24T20:00:00Z"
 
+# DND-877 (epic D-6, option (d)): a session with no live scoped admiral run is
+# not metered. The server carries the exemption in the snapshot, so the
+# harness recomputes it with no run knowledge of its own. Each row is the
+# snapshot the server sends for that case (gen_saas
+# Athena.FleetMeteringTest, describe "DND-877") and the answer the server
+# gives at 10:00 MT Thursday with both metering switches on. Parity table:
+# a harness change that meters from effective_domain alone fails row 1.
+NO_RUN_SNAP='{"override":null,"effective_domain":"personal","metering":{"enabled":false}}'
+BLEND_RUN_SNAP="$(jq -c '.effective_domain = "blend"' <<<"${METER_SNAP}")"
+NO_RUN_PAUSED="$(jq -c '.override = {"desired":"drain","expires_at":null}' <<<"${NO_RUN_SNAP}")"
+while IFS='|' read -r name snap want; do
+  eq "[DND-877 parity] ${name}" "$(dec "${!snap}" "${THU_10}")" "${want}"
+done <<'ROWS'
+no run, personal, work hours: run, so its first admiral spawns|NO_RUN_SNAP|run|default|
+its run reported a personal scope: drain until 18:00 MT|METER_SNAP|drain|metering:personal|2026-09-25T00:00:00Z
+its only run is lost or finished (no live run): run|NO_RUN_SNAP|run|default|
+a drained personal run stays live: drain|METER_SNAP|drain|metering:personal|2026-09-25T00:00:00Z
+a blend-scoped run: never metered|BLEND_RUN_SNAP|run|default|
+metering switch off: unchanged|P1_SNAP|run|default|
+no run, owner pause: the override still drains|NO_RUN_PAUSED|drain|override:force_drain|
+ROWS
+
 # Work-hours math (epic invariant I16): start inclusive, end exclusive, DST, weekend, holiday.
 eq "07:59:59 MT is outside"   "$(dec "${METER_SNAP}" "$(den "2026-09-24 07:59:59")")" "run|default|"
 eq "08:00:00 MT is inside"    "$(dec "${METER_SNAP}" "$(den "2026-09-24 08:00:00")" | cut -d'|' -f1)" "drain"
