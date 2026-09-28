@@ -552,6 +552,28 @@ The 12h clustering cron, `scripts/athena-clustering-run.sh`, sends one after
 each run that spawned a session (`CLAUDE.md` → *Epic-clustering cron*). It
 sends nothing until its crontab is installed (`scripts/setup-clustering-cron`).
 
+## Pulling from the priority index
+
+A lane pulls from a tracker queue. A top-level session with no scope may
+instead pull its next item from the owner's priority index, under a lease.
+The rules live in `ai/contracts/athena-events.md` → *Priority index* →
+*Leases*; this brief restates none of them. The client is `ai/bin/priority-next`
+(DND-445), run from the session itself (it reads `$CLAUDE_CODE_SESSION_ID`):
+
+1. `priority-next next` leases the top item the session may serve. Exit 0
+   prints its `item_id`, pointer and url. Exit 3 is the server's own `none`,
+   with counts. Exit 4 is a refusal: on `session_draining`, run the drain
+   protocol (`athena:fleet-drain`) and do not retry. Exit 5 means the server
+   was not asked or answered unreadably; it is never an empty queue.
+2. The leased item is worked the usual way. For a tracker ticket, the admiral
+   still takes scope in the tracker (`athena:ticket-management`): a lease
+   never writes the source tracker.
+3. `priority-next complete <item_id>` closes the item in the index when the
+   work is done. `priority-next release <item_id>` gives it back unworked.
+
+Wiring a lane's spawn to this loop is not done yet; this section documents the
+loop so a lane can adopt it by citation.
+
 ## Relationship to the existing flaky trigger
 
 The flaky instance was spun by the `SessionStart` poll
