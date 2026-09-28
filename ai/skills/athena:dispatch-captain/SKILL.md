@@ -132,7 +132,8 @@ Give the captain, in the brief:
   `<cmd>` is your worktree's own `./ai/bin/harness-gate`. Quote its `gating
   <root>` line with the result. Exit 75 with `test-slot: TIMEOUT` means it
   never ran: run it again; never count it as a pass."*
-  `integration-gate` wraps its own declared gate in test-slot (DND-486); its
+  `integration-gate` wraps its whole run, fetch included, in test-slot
+  (DND-486, DND-1064); its
   own "never ran" is exit 6, `GATE NOT RUN`, and never a pass either. The
   captain definition's Verify step names test-slot. Nothing wraps a captain's
   other heavy runs mechanically, so this line is still what does.
@@ -157,7 +158,8 @@ Give the captain, in the brief:
   standing judge beside the gate, so it costs the slower of the two, not their
   sum. It refuses a dirty tree, and it records both receipts I land on. If
   main moved while it queued, it rebases your branch onto it inside the slot
-  and gates the rebased head; push that head (`--force-with-lease`). Quote its
+  and gates the rebased head; push that head as Athena with
+  `--force-with-lease` (`athena:github` → *Pushing as Athena*). Quote its
   INTEGRATION OK line. On a RED gate or a BLOCK, fix every finding from both
   in one round, commit, and run it again."* It replaces a separate
   `critic-review` then gate on the final commit (`athena:merge-boarding` →

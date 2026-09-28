@@ -19,7 +19,8 @@
 # This script is an ASSERTION: without --rebase it never rebases, commits,
 # pushes, or touches the working tree or any ref. A conflicting rebase is a
 # judgement call, so --rebase only ever replays a clean branch onto the target
-# and REFUSES on a conflict (DND-1064); it never resolves one. Safe to run
+# and REFUSES on a conflict (DND-1064); it never resolves one, and it refuses
+# a main checkout and a detached HEAD. Without --rebase it is safe to run
 # anywhere, any number of times. Its one other write is its RECEIPT
 # (DND-965): on INTEGRATION OK, and only then, it records the pass at
 # <git common dir>/integration-receipts/<head>.json, outside every working tree. locked-merge refuses a head with no such
@@ -125,6 +126,9 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    Without --since, the intersection is measured from the
                    pre-rebase branch point. The containment bar is unchanged:
                    the gated head contains the target read at gate start.
+                   Refused in a main checkout and on a detached HEAD. After a
+                   clean rebase the branch STAYS rebased whatever the gate or
+                   judge then say; the old head is ORIG_HEAD (or the reflog).
   --critic-override <reason>
                    merge WITHOUT a standing-judge verdict on this head -- and
                    ONLY that: the receipt is read first either way, and a
@@ -148,7 +152,8 @@ outcome removes a receipt for that head. There is no flag that skips it.
 
 Exit codes: 0 integration OK | 1 gate RED on the integrated head
             2 usage / unresolvable ref / branch behind target /
-              --rebase refused (dirty tree) or REBASE CONFLICT /
+              --rebase refused (dirty tree, main checkout, detached
+              HEAD), REBASE CONFLICT, or REBASE FAILED /
               gate refused (a no-op, or not the gate the target declares) /
               working tree is not HEAD (uncommitted or untracked paths,
               before the gate or left by it; ignored files do not count) /
@@ -310,25 +315,51 @@ join_critic() {
 # current head starts BEFORE the wait, as it always has (DND-1010), and the
 # run inside the slot adopts it when the head is unchanged; after a --rebase
 # it stops it and judges the new head. The inner run is recognised only while
-# a slot is held (ATHENA_TEST_SLOT_HELD), so the marker cannot skip the slot.
+# the slot ATHENA_TEST_SLOT_HELD names is really held (its flock is taken, the
+# same test test-slot makes before it re-enters), so neither the marker nor a
+# stale slot variable can move the containment check back before a wait.
 CRITIC_PGID=""; CRITIC_LOG=""; CRITIC_ADOPTED=0; CRITIC_ACTIVE=0; SLOT_TMP=""
+# slot_really_held -- 0 when ATHENA_TEST_SLOT_HELD=<pool>:<n> names a slot
+# lock some process holds: a shared non-blocking flock on a fresh open fails.
+slot_really_held() {
+  local held="${ATHENA_TEST_SLOT_HELD:-}" pool slot lock fd
+  [ -n "$held" ] || return 1
+  pool="${held%:*}"; slot="${held##*:}"
+  [[ "$slot" =~ ^[1-9][0-9]*$ ]] || return 1
+  lock="${pool}/slot-${slot}.lock"
+  [ -e "$lock" ] || return 1
+  { exec {fd}<"$lock"; } 2>/dev/null || return 1
+  if flock -n -s "$fd"; then exec {fd}<&-; return 1; fi
+  exec {fd}<&-
+  return 0
+}
 IN_SLOT=0
-if [ "${INTEGRATION_GATE_IN_SLOT:-}" = 1 ] && [ -n "${ATHENA_TEST_SLOT_HELD:-}" ]; then IN_SLOT=1; fi
+if [ "${INTEGRATION_GATE_IN_SLOT:-}" = 1 ] && slot_really_held; then IN_SLOT=1; fi
 PRESTARTED="${INTEGRATION_GATE_PRESTARTED_CRITIC:-}"
 unset INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC
 
 if [ "$IN_SLOT" -eq 0 ]; then
   HEAD0="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)"
+  # A run that does not end in INTEGRATION OK leaves no pass for its head, and
+  # that includes a run refused or killed before (or during) the queue wait.
+  # So the receipt for the head it queues with goes FIRST, before any refusal.
+  # The run inside the slot removes (and checks) again for the head it gates.
+  if [ -n "$HEAD0" ]; then
+    OUTER_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+    case "$OUTER_COMMON" in
+      /*) OUTER_RECEIPT="$(ir_receipt_path "$OUTER_COMMON" "$HEAD0")"
+          if ! rm -f "$OUTER_RECEIPT" 2>/dev/null; then
+            echo "${PROG}: could not remove the earlier receipt ${OUTER_RECEIPT}." >&2
+            echo "Fix: make $(dirname "$OUTER_RECEIPT") writable (ls -ld '$(dirname "$OUTER_RECEIPT")') and re-run. A stale pass this run cannot clear would outlive its result." >&2
+            exit 5
+          fi ;;
+    esac
+  fi
   # A tree `git status` cannot even read (a corrupt object) is left for the run
   # inside the slot, which names the exact failure; only a readable dirty tree
   # is refused here, before it costs a queue wait.
   if [ -n "$HEAD0" ] && git -C "$ROOT" status --porcelain >/dev/null 2>&1; then
     refuse_dirty_tree "$HEAD0"
-    # A run killed while queued must leave no earlier pass for its head: the
-    # receipt removal used to run before the gate's slot wait, so it still
-    # does. The run inside the slot removes (and checks) again for its head.
-    OUTER_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
-    case "$OUTER_COMMON" in /*) rm -f "$(ir_receipt_path "$OUTER_COMMON" "$HEAD0")" 2>/dev/null ;; esac
     if [ "$WITH_CRITIC" -eq 1 ]; then
       require_critic_tools
       fetch_target
@@ -360,7 +391,9 @@ if [ "$IN_SLOT" -eq 0 ]; then
   SLOT_RC=$?
   OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
   if [[ "$OUTCOME_LINE" =~ ^ran\ exit=([0-9]+)$ ]]; then
-    # The run inside the slot joined or stopped the judge itself.
+    # The run inside the slot joined or stopped the judge on every path that
+    # reaches the gate step; on an earlier exit (a containment refusal, say)
+    # outer_cleanup stops it here.
     exit "${BASH_REMATCH[1]}"
   fi
   join_critic
@@ -382,7 +415,8 @@ if [ -n "$PRESTARTED" ]; then
   read -r p_pgid p_sha p_log <<<"$PRESTARTED"
   if [[ "$p_pgid" =~ ^[1-9][0-9]*$ ]] && [[ "$p_sha" =~ ^[0-9a-f]{40}$ ]] \
      && [[ "$(basename "${p_log:-x}")" == integration-gate-critic.* ]] && [ -f "$p_log" ] \
-     && tr '\0' ' ' <"/proc/${p_pgid}/cmdline" 2>/dev/null | grep -q 'critic-review'; then
+     && tr '\0' ' ' <"/proc/${p_pgid}/cmdline" 2>/dev/null | grep -q 'critic-review' \
+     && [ "$(sed 's/.*) //' "/proc/${p_pgid}/stat" 2>/dev/null | cut -d' ' -f3)" = "$p_pgid" ]; then
     PRE_PGID="$p_pgid"; PRE_SHA="$p_sha"; PRE_LOG="$p_log"
   elif [ -f "${p_log:-}" ] && [[ "$(basename "$p_log")" == integration-gate-critic.* ]]; then
     # The judge already finished (its verdict is on disk): adopt only the log.
@@ -402,27 +436,53 @@ if [ "$REBASE" -eq 1 ] \
    && R_TARGET="$(git rev-parse --verify -q "${TARGET}^{commit}" 2>/dev/null)" \
    && R_HEAD="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)" \
    && ! git merge-base --is-ancestor "$R_TARGET" "$R_HEAD" 2>/dev/null; then
+  # A main checkout is a shared surface (~/dev/custom/CLAUDE.md -> "Agents
+  # work in worktrees, not the main checkout"), and a rewrite made in here is
+  # invisible to worktree-escape-guard. A detached HEAD would leave the branch
+  # at its old head while the receipt names the rebased one.
+  if [ "$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)" = "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]; then
+    echo "${PROG}: --rebase refused: ${ROOT} is a main checkout, and --rebase rewrites the checked-out branch." >&2
+    echo "Fix: run integration-gate --rebase from the Mission's worktree, or drop --rebase here and rebase by hand (git rebase ${TARGET}) after checking nobody else is using this checkout." >&2
+    exit 2
+  fi
+  if ! R_BRANCH="$(git symbolic-ref -q --short HEAD 2>/dev/null)"; then
+    echo "${PROG}: --rebase refused: HEAD is detached at $(short "$R_HEAD"), so a rebase would move no branch and the receipt would name a head nothing points at." >&2
+    echo "Fix: check out the Mission branch (git checkout <branch>) and re-run integration-gate --rebase." >&2
+    exit 2
+  fi
   refuse_dirty_tree "$R_HEAD"
   # The judge started before the wait reads this tree with git (index.lock),
   # and it judges a head the rebase replaces, so stop its whole process group
-  # and let it drain BEFORE the rebase touches the index. Bounded: 30 s at a
-  # 0.2 s cadence, then KILL.
+  # and let it drain BEFORE the rebase touches the index. Block on the leader
+  # (bounded at 30 s), then KILL whatever is left of the group.
   if [ -n "$PRE_PGID" ]; then
     kill -TERM -- "-${PRE_PGID}" 2>/dev/null
-    for _ in $(seq 1 150); do kill -0 -- "-${PRE_PGID}" 2>/dev/null || break; sleep 0.2; done
+    timeout 30 tail --pid="$PRE_PGID" -f /dev/null 2>/dev/null
     kill -KILL -- "-${PRE_PGID}" 2>/dev/null
     echo "${PROG}: --with-critic: stopped the judge started on ${PRE_SHA:0:12} before the slot wait; the rebased head is judged instead"
     PRE_PGID=""
   fi
   R_BASE="$(git merge-base "$R_HEAD" "$R_TARGET" 2>/dev/null)"
-  R_ERR="$(git -c rerere.enabled=false -c rebase.autoStash=false rebase --quiet "$R_TARGET" 2>&1)"
+  # Pinned against user config: no rerere replay, no autostash, no other
+  # branch's ref moved (updateRefs), no merge replay, no signing prompt that
+  # could hang while the slot is held. An interrupt mid-rebase aborts it, so
+  # the tree is never left with a rebase in progress.
+  rebase_in_progress() { git rev-parse -q --verify REBASE_HEAD >/dev/null 2>&1 || [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; }
+  trap 'rebase_in_progress && git rebase --abort >/dev/null 2>&1; exit 130' INT
+  trap 'rebase_in_progress && git rebase --abort >/dev/null 2>&1; exit 143' TERM
+  trap 'rebase_in_progress && git rebase --abort >/dev/null 2>&1; exit 129' HUP
+  R_ERR="$(git -c rerere.enabled=false -c rebase.autoStash=false -c rebase.updateRefs=false \
+             -c rebase.rebaseMerges=false -c commit.gpgSign=false \
+             rebase --quiet --no-update-refs --no-rebase-merges "$R_TARGET" 2>&1)"
   R_RC=$?
+  trap - INT TERM HUP
   if [ "$R_RC" -ne 0 ]; then
     R_CONFLICTS="$(git diff --name-only --diff-filter=U 2>/dev/null)"
-    if git rev-parse -q --verify REBASE_HEAD >/dev/null 2>&1 || [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
+    R_KIND="REBASE FAILED (not a conflict)"; [ -n "$R_CONFLICTS" ] && R_KIND="REBASE CONFLICT"
+    if rebase_in_progress; then
       git rebase --abort >/dev/null 2>&1 || {
-        echo "${PROG}: REBASE CONFLICT, and 'git rebase --abort' also failed; the rebase is still in progress in ${ROOT}." >&2
-        echo "Fix: run 'git rebase --abort' in ${ROOT} by hand (or 'git status' to see what is left), confirm HEAD is back at $(short "$R_HEAD"), then rebase onto ${TARGET} and resolve the conflict yourself." >&2
+        echo "${PROG}: ${R_KIND}, and 'git rebase --abort' also failed; the rebase is still in progress in ${ROOT}." >&2
+        echo "Fix: run 'git rebase --abort' in ${ROOT} by hand (or 'git status' to see what is left), confirm ${R_BRANCH} is back at $(short "$R_HEAD"), then rebase onto ${TARGET} yourself." >&2
         exit 2
       }
     fi

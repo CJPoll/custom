@@ -1055,18 +1055,20 @@ out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate"
 # the containment check, and an opt-in --rebase all happen inside it.
 #
 # remote_repo <dir> <gate body> -- a bare origin whose main declares
-# ai/bin/harness-gate with <gate body>, a clone at <dir>/wt on branch feature
-# with one commit, and a pusher clone at <dir>/up for moving origin/main.
+# ai/bin/harness-gate with <gate body>, a clone at <dir>/clone with a LINKED
+# WORKTREE at <dir>/wt on branch feature with one commit (--rebase refuses a
+# main checkout), and a pusher clone at <dir>/up for moving origin/main.
 remote_repo() {
   local d="$1"
   new_repo "$d/seed"; mkdir -p "$d/seed/ai/bin"
   printf '#!/bin/sh\n%s\n' "$2" > "$d/seed/ai/bin/harness-gate"; chmod +x "$d/seed/ai/bin/harness-gate"
   ( cd "$d/seed" && git add -A && git commit -qm gate && echo shared-v1 > shared.txt && git add shared.txt && git commit -qm shared )
   git clone -q --bare "$d/seed" "$d/origin.git"
-  git clone -q "$d/origin.git" "$d/wt"
+  git clone -q "$d/origin.git" "$d/clone"
+  git -C "$d/clone" worktree add -q -b feature "$d/wt" origin/main
   git clone -q "$d/origin.git" "$d/up"
-  printf '/g.sh\n/gp.sh\n/GATE_RAN\n/log\n' >> "$d/wt/.git/info/exclude"
-  ( cd "$d/wt" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+  printf '/g.sh\n/gp.sh\n/GATE_RAN\n/log\n' >> "$d/clone/.git/info/exclude"
+  ( cd "$d/wt" && echo f > f.txt && git add f.txt && git commit -qm f )
 }
 # move_main <dir> <file> <content> -- land one commit on origin/main.
 move_main() { ( cd "$1/up" && git pull -q --ff-only origin main && echo "$3" > "$2" && git add "$2" && git commit -qm "move $2" && git push -q origin HEAD:main ); }
@@ -1214,6 +1216,55 @@ reb_ln="$(grep -n 'inside the slot ->' <<<"$out" | head -1 | cut -d: -f1)"
   && ok "r9 the old head's judge is stopped before the rebase touches the tree" || bad "r9 judge not stopped before the rebase (stop=${stop_ln:-none} rebase=${reb_ln:-none})" "$out"
 [ "$(grep -c 'running the standing judge on' <<<"$out")" -eq 2 ] && ok "r9 the rebased head got its own judge" || bad "r9 expected two judge starts (old head, rebased head)" "$out"
 rm -f "${TMP}/r9-critic.fifo"
+
+# r10: --rebase refuses a main checkout (a shared surface) before it moves
+# anything, even when a rebase is needed.
+D="${TMP}/r10"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+( cd "$D/clone" && git checkout -q -b topic origin/main && echo t > t.txt && git add t.txt && git commit -qm t )
+move_main "$D" moved.txt "landed"
+before="$(git -C "$D/clone" rev-parse HEAD)"
+out="$( cd "$D/clone" && "$GATE" --rebase 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q 'main checkout' <<<"$out" && grep -q '^Fix:' <<<"$out" && [ "$(git -C "$D/clone" rev-parse HEAD)" = "$before" ] && [ ! -f "${D}.GATE_RAN" ] \
+  && ok "r10 --rebase refuses a main checkout with Fix:, nothing moved" || bad "r10 expected exit 2 'main checkout', got $rc" "$out"
+
+# r11: --rebase refuses a detached HEAD: no branch would move.
+D="${TMP}/r11"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+( cd "$D/wt" && git checkout -q --detach HEAD )
+move_main "$D" moved.txt "landed"
+before="$(git -C "$D/wt" rev-parse HEAD)"
+out="$( cd "$D/wt" && "$GATE" --rebase 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q 'detached' <<<"$out" && grep -q '^Fix:' <<<"$out" && [ "$(git -C "$D/wt" rev-parse HEAD)" = "$before" ] \
+  && ok "r11 --rebase refuses a detached HEAD with Fix:" || bad "r11 expected exit 2 'detached', got $rc" "$out"
+
+# r12: a rebase git refuses for a reason that is NOT a conflict (a held
+# index.lock) is REBASE FAILED, never REBASE CONFLICT, and moves nothing.
+D="${TMP}/r12"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+move_main "$D" moved.txt "landed"
+before="$(git -C "$D/wt" rev-parse HEAD)"
+lockf="$(git -C "$D/wt" rev-parse --path-format=absolute --git-path index.lock)"; : > "$lockf"
+out="$( cd "$D/wt" && "$GATE" --rebase 2>&1 )"; rc=$?
+rm -f "$lockf"
+[ "$rc" -eq 2 ] && grep -q 'REBASE FAILED (not a conflict)' <<<"$out" && grep -q '^Fix:' <<<"$out" && ! grep -q 'REBASE CONFLICT' <<<"$out" \
+  && ok "r12 a non-conflict rebase failure is REBASE FAILED with Fix:" || bad "r12 expected exit 2 REBASE FAILED, got $rc" "$out"
+[ "$(git -C "$D/wt" rev-parse HEAD)" = "$before" ] && [ ! -f "${D}.GATE_RAN" ] && ok "r12 nothing moved and the gate did not run" || bad "r12 the branch moved or the gate ran"
+
+# r13: a refusal BEFORE the slot wait (a dirty tree) still clears an earlier
+# pass for its head -- no outcome but INTEGRATION OK leaves a receipt.
+D="${TMP}/r13"; remote_repo "$D" "exit 0"
+head_sha="$(git -C "$D/wt" rev-parse HEAD)"
+rdir="$(git -C "$D/wt" rev-parse --path-format=absolute --git-common-dir)/integration-receipts"
+mkdir -p "$rdir"; echo '{"verdict":"pass"}' > "${rdir}/${head_sha}.json"
+echo wip > "$D/wt/wip.txt"
+out="$( cd "$D/wt" && "$GATE" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "${rdir}/${head_sha}.json" ] \
+  && ok "r13 a dirty-tree refusal before the wait removes the head's earlier receipt" || bad "r13 expected exit 2 and no receipt (rc=$rc, receipt $([ -e "${rdir}/${head_sha}.json" ] && echo present || echo gone))" "$out"
+
+# r14: the in-slot marker with a STALE slot variable (that slot is not held)
+# is not honoured: the run still takes its slot first.
+D="${TMP}/r14"; remote_repo "$D" "exit 0"; record_pass "$D/wt"
+out="$( cd "$D/wt" && INTEGRATION_GATE_IN_SLOT=1 ATHENA_TEST_SLOT_HELD="$(realpath -m "${TMP}/slots"):1" "$GATE" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q 'taking a machine test slot first' <<<"$out" \
+  && ok "r14 a forged marker with a stale slot variable still takes the slot first" || bad "r14 the stale marker skipped the slot-first step (rc=$rc)" "$out"
 
 # r7: --help documents --rebase and takes no slot.
 out="$( cd "$TMP" && "${TMP}/s5-layout/ai/skills/athena:merge-boarding/scripts/integration-gate" --help 2>&1 )"; rc=$?

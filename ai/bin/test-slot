@@ -7,7 +7,7 @@
 # runs at once on a 16-core box (load 54.58) and timing-sensitive suites flaked
 # (DND-473). Nothing bounded how many heavy runs share one machine. test-slot
 # wraps ONE heavy command (a full bin/prep-commit.sh, a full `mix test`, an
-# integration-gate gate) so that at most N wrapped commands run at once per
+# integration-gate run) so that at most N wrapped commands run at once per
 # machine, whatever repo, worktree, fleet, or session launched them.
 #
 # FASTER, NEVER WEAKER (ai/blocks/ops/safety-checks.md). test-slot changes only
@@ -66,7 +66,7 @@
 # old-version waiters order stays what it was until they drain.
 #
 # ---------------------------------------------------------------------------
-# STABLE INTERFACE (DND-486 wraps integration-gate's gate and the captain
+# STABLE INTERFACE (DND-486 wraps integration-gate's run and the captain
 # Verify step in this; DND-489's bench uses --exclusive and events.jsonl).
 # Changing anything in this block is a breaking change for those callers.
 #

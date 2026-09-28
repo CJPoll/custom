@@ -355,6 +355,10 @@ gate passed on this SHA" rested on the caller's word, and gen_saas #468 merged
 past a RED gate because a prep script printed READY without reading the exit
 code.
 
+**Later (2026-09-28, DND-1064):** this paragraph said "It never rebases or
+touches the working tree or a ref". Superseded: `--rebase` rebases a clean
+branch inside the test slot and refuses on a conflict (see *`--rebase`* below).
+
 **The gate runs in a machine test slot (DND-486), taken first (DND-1064).**
 `integration-gate` takes a slot of the main checkout's `ai/bin/test-slot`
 (`~/dev/custom`, found from the script's own git common dir, so a worktree copy
@@ -382,17 +386,21 @@ branch onto it and gates (and judges) the rebased head. It refuses a dirty tree
 before anything moves. On a conflict it aborts, names the conflicting paths as
 `REBASE CONFLICT`, and exits 2 with the branch at its original head; it never
 resolves one. With no `--since`, the intersection is measured from the
-pre-rebase branch point. Push a rebased captain branch before landing it. Without
-`--rebase`, a head that does not contain the target read inside the slot is
-refused exactly as before, and the `Fix:` offers `--rebase`.
+pre-rebase branch point. It refuses a main checkout and a detached HEAD. After
+a clean rebase the branch stays rebased whatever the gate or judge then say
+(the old head is `ORIG_HEAD`). Push a rebased captain branch as Athena
+(`athena:github` → *Pushing as Athena*) before landing it. Without `--rebase`,
+a head that does not contain the target read inside the slot is refused
+exactly as before, and the `Fix:` offers `--rebase`.
 
 **Later (2026-09-28, DND-1064):** the gate read `origin/main` and judged
-containment before its test-slot wait, and a caller that wrapped it in
-test-slot read it after a wait it rebased before. Queue waits of 5-26 min now
+containment before its test-slot wait. A captain that wrapped it in test-slot
+had rebased before that outer wait, so the main its head contained was stale
+by gate start. Queue waits of 5-26 min now
 exceed the gap between landings, so DND-907, DND-896+945 and DND-902 each
 refused twice, and the admiral lost three landing windows in a row. Unwrapped,
 the same order let a gate start on a head that no longer contained the main
-of gate start. The admiral's workaround was
+of gate start. The admiral's workaround was the machine-local
 `ai-artifacts/coordination/2026-09-28-harness-lane/helpers/gate-in-slot.sh`
 (take the slot, rebase inside it, re-enter it); the slot-first order and
 `--rebase` replace it.
@@ -417,7 +425,8 @@ point is unrecoverable, so the incoming delta is empty *by construction* and
 the tool reports the intersection `UNAVAILABLE` rather than empty — an empty
 intersection would read as "the incoming delta missed my reviewed files, board
 it". `--since` is the target SHA your branch was last gated against (your state
-log's "baseline main =="). The intersection it then prints is the input to the
+log's "baseline main =="). `--rebase` records the pre-rebase branch point
+itself, so pass `--since` only after a rebase you did by hand. The intersection it then prints is the input to the
 **No replay churn** coverage-intersection rule below: empty plus a green
 integration gate, board it; non-empty, treat the delta as outside the reviewed
 set and replay.
