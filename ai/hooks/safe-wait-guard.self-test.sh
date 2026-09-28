@@ -84,7 +84,7 @@ run "$(bash_json 'until cond; do :; done')"
 check "1c. until cond; do :; done (spin)" deny
 
 run "$(bash_json '(while :; do :; done) &')"
-check "1d. backgrounded busy-spin (the PT-919 shape)" deny
+check "1d. backgrounded busy-spin (the orphaned-spin-loop shape)" deny
 
 run "$(bash_json '(while cond; do check; sleep 5; done) &')"
 check "2a. backgrounded loop, sleeps, NO reaper" deny
@@ -146,7 +146,7 @@ echo "--- HEREDOC cases (only a one-line send-mail shape is exempt) ---"
 
 # ALLOW: the exact allow-listed shapes. H1 is the measured false positive.
 run "$(bash_json "$SM agent-mail note --to walt_ui <<'EOF'
-The PT-919 example was \`(while :; do :; done) &\` with no reaper.
+The orphaned-spin-loop example was \`(while :; do :; done) &\` with no reaper.
 EOF")"
 check "H1. spin text in a quoted heredoc fed to send-mail" allow
 

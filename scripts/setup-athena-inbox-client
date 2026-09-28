@@ -28,7 +28,7 @@
 # The second entry costs nothing while the client is healthy: the runner takes
 # an flock on its pidfile and a second invocation exits immediately without
 # starting anything. It is a paced, bounded external poll — not a spin loop,
-# and nothing it starts can be orphaned (PT-919).
+# and nothing it starts can be orphaned (the orphaned-spin-loop class).
 #
 # Idempotent. The crontab is edited read-modify-write: every line mentioning the
 # runner's absolute path is filtered out and the two canonical entries are

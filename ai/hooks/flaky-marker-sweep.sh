@@ -13,7 +13,7 @@
 # re-provisions the age-out half so it survives the poll's retirement: it
 # fires on EVERY session start, independent of flaky-lane activity, so the
 # wedged-idle state (stale marker + no new activity) is still swept. walt_ui's
-# own PT-1542 already removed the poll hook and its `settings.json`
+# own change already removed the poll hook and its `settings.json`
 # registration (`ai/docs/ticket-lane-action-brief.md` → *Relationship to the
 # existing flaky trigger*), so this hook is now the only age-out that runs.
 #

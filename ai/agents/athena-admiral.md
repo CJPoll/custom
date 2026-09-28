@@ -473,7 +473,7 @@ an uncommitted background gate you launched, and never park mid-gate expecting
 to be resumed. (A merge-train or pipeline the harness genuinely cannot observe
 is a legitimate external poll under rule 3 or an explicit hand-off to the
 session that can watch it — not this case.) Measured stalls: captains on
-2026-09-14/15 (ui-bg, aggregate-alignment ×3) and 2026-09-16 (PT-1289 ×3,
-PT-1297, PT-1312) ended the turn on a background gate before committing /
+2026-09-14/15 (ui-bg, aggregate-alignment ×3) and 2026-09-16 (five, on three work
+tickets) ended the turn on a background gate before committing /
 opening the MR / writing the report; Sonnet captains did it chronically
 (graphql-epics, workflows-phase1, processors-phase1, anchor-integration).

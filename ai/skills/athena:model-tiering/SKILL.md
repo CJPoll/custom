@@ -32,7 +32,7 @@ or anything schema-destructive; it needs root-cause work (a flake, a race, "why
 is this sync", a regression hunt); the acceptance criteria leave room to
 interpret (access control, cross-subdomain boundaries, what "done" means); it
 must reconcile with another open MR or a colleague's work; or its blast radius is
-> ~3 runtime files. Examples: PT-582's per-process Commanded instance, an async
+> ~3 runtime files. Examples: a work ticket's per-process Commanded instance, an async
 tranche that must *find* each file's real reason for being sync, a deploy-gating
 CI change, anything the athena-captain doctrine calls "stop early and report".
 

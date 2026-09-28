@@ -1,7 +1,7 @@
 #!/usr/bin/ruby
 # frozen_string_literal: true
 
-# check-inbox-mock-orphans — DND-404: PT-919-class backstop for
+# check-inbox-mock-orphans — DND-404: orphaned-spin-loop-class backstop for
 # scripts/test/inbox-client-capture/self-test.sh.
 #
 # That suite starts real `mock-athena-inbox-client.rb` processes and reaps
@@ -213,7 +213,7 @@ def run_check(min_age, ps_lines: nil, my_uid: Process.uid, only_pid: nil)
   kill_orphans(orphans)
   warn "check-inbox-mock-orphans: FAILED -- #{orphans.size} " \
        "mock-athena-inbox-client.rb process(es) have no live self-test/gate " \
-       "ancestor (the PT-919 class):"
+       "ancestor (the orphaned-spin-loop class):"
   orphans.each { |(pid, ppid, etimes, args)| warn "  pid=#{pid} ppid=#{ppid} age=#{etimes}s args=#{args}" }
   warn "  Each was just killed by PID (SIGKILL) as a backstop."
   warn "  Fix: the self-test (or harness-gate itself) that started this mock " \

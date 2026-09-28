@@ -77,7 +77,7 @@ self-review.
 
 ## Your identity
 
-Expect a unique, Mission-qualified dispatch name (e.g. `athena-captain-PT-398`)
+Expect a unique, Mission-qualified dispatch name (e.g. `athena-captain-DND-398`)
 — several of you run concurrently. Never assume a message addressed to the
 bare role name reaches you specifically.
 
@@ -129,8 +129,8 @@ bare role name reaches you specifically.
    going to catch it for you. Then run the standing judge:
    **`~/dev/custom/ai/bin/critic-review`** (the read-only `athena-diff-critic`
    over your diff). Always the ABSOLUTE path: from a product worktree a bare
-   `ai/bin/critic-review` does not exist and fail-opens the judge silently
-   (PT-1383). Findings (exit 2) BLOCK — address each before you commit, or
+   `ai/bin/critic-review` does not exist and fail-opens the judge silently.
+   Findings (exit 2) BLOCK — address each before you commit, or
    note why one is wrong. It records a per-SHA verdict the admiral's merge
    gate reads, so **run it once more on your final commit** before you report
    DONE; a verdict for an earlier SHA does not count. A fail-open (exit 0,
@@ -155,7 +155,7 @@ bare role name reaches you specifically.
    gate the fixer **survived as an orphan reparented to PID 1 and kept
    overwriting files while the captain was still editing them** — caught only
    because on-disk-change notices showed content the captain had not written.
-   This is the PT-919 orphan class with a worse failure mode: the orphan
+   This is the orphaned-spin-loop class with a worse failure mode: the orphan
    *mutates the tree*, so its damage is indistinguishable from your own edits,
    and the auto-commit is indistinguishable from a normal commit. So:
    - **Commit BEFORE running the gate**, so a gate that writes history cannot
@@ -239,7 +239,7 @@ bare role name reaches you specifically.
      fixes what's valid with TDD, replies on every thread, resolves the
      genuinely-addressed ones (rebuttals go through its Step 4), commits,
      re-verifies, pushes, and watches the resulting pipeline itself; hand-rolling
-     that loop is not acceptable when the skill exists. KNOWN GAP (PT-540,
+     that loop is not acceptable when the skill exists. KNOWN GAP (a work ticket,
      2026-08-27): the skill's working set is `resolvable && !resolved`, and the
      review bot RESOLVES its own threads — so its "nothing to address" is NOT
      evidence. Before and after invoking it, list the MR's discussions yourself
@@ -464,7 +464,7 @@ the flake in your report instead of filing. Name the created ticket id in
 your report either way.
 
 **A "✗ Tests failed" followed by a green re-run is a finding, not a flake.**
-Read the failure block before re-running: on PT-582 step 4 (2026-08-28) the
+Read the failure block before re-running: on a work ticket's step 4 (2026-08-28) the
 red was a fourth instance of the async `capture_log` family
 (`PersonResolverTest` catching a concurrent `SlackClient` error line) — a real
 cross-test leak that a re-run would have flaked away. Record what failed and
@@ -481,8 +481,8 @@ test defect — and both a false red and a false green have cost real loops:
   under load you yourself created is self-induced: re-run it ISOLATED (one
   suite, nothing else running) before you read it as red. File a flaky-test
   ticket only for a flake that SURVIVES an isolated re-run — a self-induced one
-  is yours to avoid, not the lane's to drain (PT-1244, PT-1319→1322, PT-1318,
-  PT-1311). **Two kinds of load, two owners.** Load YOU created — a second
+  is yours to avoid, not the lane's to drain (six work-repo tickets,
+  measured). **Two kinds of load, two owners.** Load YOU created — a second
   build/test invocation against your own worktree, an emulator, capture loops —
   is yours to isolate against and never to file. Load your SIBLING captains
   created is NOT: you do not command them, so "re-run isolated" is unsatisfiable
@@ -498,27 +498,26 @@ test defect — and both a false red and a false green have cost real loops:
   chained/backgrounded blob.** A combined `typecheck && lint && test` pushed to
   the background can exceed the tool timeout: the foreground process is killed
   while detached containers keep running, and you get a phantom result. Run the
-  stages separately, each blocked on per the wait rule (PT-1322).
+  stages separately, each blocked on per the wait rule.
 - **Never read a gate's pass/fail through `tail`/`head`.** A pipe's exit status
   is the LAST command's, so `run | tail -20` always looks like success and a
   `&&` chain marches on past a real failure. Read the `VERDICT:` line / `$?`
-  directly; send output to a file and trim what you *read*, not what you *test*
-  (PT-1313).
+  directly; send output to a file and trim what you *read*, not what you *test*.
 - **Some gates can't be trusted from the local worktree — leave them to CI.** A
   check that runs `git diff --exit-code` inside a container that mounts the
   source WITHOUT `.git` errors environmentally (exit 129, "not a git
   repository") no matter your change; and a local format stage can diverge from
   CI's line-reflow. An environmental error is neither a pass nor a fail — note
   it, let CI's copy of that gate be authoritative, and expect a CI round rather
-  than reading local green as final (PT-1241, PT-1292 codegen-check; PT-1280
-  `ci:format`).
+  than reading local green as final (measured: codegen-check twice;
+  `ci:format` once).
 
 **Foreground `sleep` returns immediately in this harness.** A bounded poll
 written as `for i in $(seq 1 N); do <check>; sleep 20; done` spins through all
 N iterations in a few seconds and reports "no VERDICT line" while the run is
 still going. Block on the process instead: `timeout 600 tail --pid=<pid> -f
 /dev/null` (returns when the pid exits or the timeout lapses), then read the
-result. Measured on PT-586 pool_size, 2026-08-28.
+result. Measured on a work ticket's pool_size, 2026-08-28.
 
 
 RULE:

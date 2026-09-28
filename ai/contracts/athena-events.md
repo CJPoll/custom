@@ -4051,7 +4051,7 @@ at every agent depth). The kinds and the other fields each may carry:
   outside that list to `other` before sending, so a Claude Code upgrade that
   adds a class never gets a report refused.
 - **`ticket_ref`** on `agent_spawn` matches
-  `^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,6}$` (e.g. `DND-541`, `PT-1289`), checked
+  `^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,6}$` (e.g. `DND-541`, `WEB-1289`), checked
   by the harness before sending and by the server on receipt.
 - **No lifecycle field can carry prompt text.** The Agent tool's prompt and
   description, a last assistant message and a transcript path never leave the
@@ -5068,7 +5068,7 @@ envelope's diagnostic `source` (*The event*).
 | Source | Identity key | `source_ref` format | Declared by |
 | --- | --- | --- | --- |
 | `notion_personal` | `payload.entity_id` (`notion:<page_id>`) | `notion_personal:<ticket_number>`, e.g. `notion_personal:DND-430` | this section |
-| `notion_work` | `payload.entity_id` | `notion_work:<ticket_number>`, e.g. `notion_work:PT-123` | this section |
+| `notion_work` | `payload.entity_id` | `notion_work:<ticket_number>`, e.g. `notion_work:WEB-123` | this section |
 | `slack_ask` | the `source_ref` | `slack:<team_id>:<channel_id>:<ts>` | this section |
 | `forge_review` | the `source_ref` | `forge:<host>:<project_path>:<mr_iid>` | this section; the event family is DND-439's |
 | `manual` | the item id | `manual:<item_id>` | this section |
@@ -5377,10 +5377,13 @@ or a digest can render them:
 - **Ties** break by the older `inserted_at`, then by item id, so the order is
   deterministic.
 - **VIPs are matched by id, never by name.** The VIP list holds (namespace,
-  id) pairs. It is seeded with Mike Peregrina's notion-work person id,
-  `c3fe57ad-9b1c-4d69-937b-9fc43afd234e` (owner decision OQ-9). DND-432
-  resolves his Slack user id by the same rule: an exact match on one user, then
-  stored as an id.
+  id) pairs. It is seeded with the owner-designated VIP's notion-work person
+  id (owner decision OQ-9). This repo is public, so the id is not written
+  here: it lives in the private overlay,
+  `~/dev/custom/ai/bin/private-overlay get notion .vip_person_ids`
+  (`ai/contracts/athena-private-overlay.md`), and in the server's config.
+  DND-432 resolves the VIP's Slack user id by the same rule: an exact match on
+  one user, then stored as an id.
 - **A new reason id is an amendment to this table.** A renderer that meets an
   id it does not know shows the id as it is. It never drops the reason.
 - **A reason fires only on a field its source fills.** Today only `manual`

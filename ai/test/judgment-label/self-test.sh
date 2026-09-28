@@ -50,7 +50,7 @@ ruby_eq() {
   eq "$1" "${got}" "$2"
 }
 
-OWNER="U0AHNV4RJGP"
+OWNER="UFAKE00001"   # synthetic: the real id lives only in the private overlay
 OTHER="U0OTHER0001"
 T1="1790000001.000100"   # owner im root, forwarded to custom by mail   -> harness forward_record
 T2="1790000002.000200"   # owner dm root, routed to gen_saas's session  -> gen_saas forward_record
@@ -283,11 +283,32 @@ stub_dir "${TMP}/ad-flaky" "if [ -e '${TMP}/ad-flaky/seen' ]; then ${WHO_OK}; el
 got="$(ruby -r "${ADRB}" -e "a = JudgmentContextSlack.new('${TMP}/ad-flaky', timeout_s: 5); q = JudgmentContext.request(${A_TOP}); puts [a.read(q).first, a.read(q).first].join(' ')" 2>&1)"
 eq "adapter: one transient whoami failure does not blank the later reads" "${got}" "error ok"
 
+ruby_eq "owner: a Slack user id passes" "nil" 'JudgmentLabel.owner_problem("UFAKE00001").inspect'
+ruby_eq "owner: a name is not a Slack user id, and the reason never quotes it" \
+  "true false" \
+  'r = JudgmentLabel.owner_problem("cody"); [r.include?("is not a Slack user id"), r.include?("cody")].join(" ")'
+ruby_eq "owner: a non-string (an object from the overlay) is refused" "true" \
+  'JudgmentLabel.owner_problem({"id" => "U1"}).is_a?(String)'
+
 ruby_eq "labels: only the four SlackRouting choices exist" \
   "walt_ui harness gen_saas unclear" \
   'JudgmentLabel::LABELS.join(" ")'
 
 echo "== end to end: fixtures"
+
+# The owner's Slack id comes from the private overlay
+# (ai/contracts/athena-private-overlay.md), never from this public repo. The
+# suite supplies a FIXTURE overlay through ATHENA_PRIVATE_ROOT; the cases
+# under "the owner id" run without one.
+overlay_root() { # overlay_root DIR SLACK_JSON
+  mkdir -p "$1/overlay"
+  printf '{"kind":"athena-private-overlay","schema":1}\n' >"$1/athena-overlay.json"
+  printf '%s\n' "$2" >"$1/overlay/slack.json"
+  chmod 700 "$1" "$1/overlay"
+}
+OVERLAY="${TMP}/overlay"
+overlay_root "${OVERLAY}" "{\"people\":{\"owner\":{\"user_id\":\"${OWNER}\"}}}"
+export ATHENA_PRIVATE_ROOT="${OVERLAY}"
 
 ROOT="${TMP}/athena"
 MAIL="${ROOT}/agent-mail/walt_ui/to-custom"
@@ -361,7 +382,7 @@ LONG="$(printf 'y%.0s' $(seq 1 600))"
   ctxline 1790000003.500000 "${OWNER}" cody "LATER-MARKER after the root"
   ctxline 1790000002.000000 U0ATHENA01 athena "ATHENA-POST-MARKER from a session"
   ctxline 1790000001.000000 "${OWNER}" cody "OWNER-PRIOR-MARKER earlier owner line ${LONG}"
-  ctxline 1790000002.500000 U0SOMEONE1 "mike$(printf '\033')[2J" "STRANGER-MARKER $(printf '\033')[31m"
+  ctxline 1790000002.500000 U0SOMEONE1 "stranger$(printf '\033')[2J" "STRANGER-MARKER $(printf '\033')[31m"
   ctxline 1790000002.700000 "${OWNER}" cody "THREAD-REPLY-MARKER" 1790000001.000000
   ctxline 1790000002.800000 B0FAKE athena ""
 } >"${FAKESLACK}/history.jsonl"
@@ -406,6 +427,41 @@ run "${BIN}" --propose --inbox-root "${EMPTYROOT}" --labels "${LABELS}"
 eq "a missing forward mail dir exits 1 (forward labels never vanish silently)" "${RC}" "1"
 has "the missing mail dir is named" "${ERR}" "to-custom does not exist"
 [ -e "${LABELS}" ] && bad "a refused run wrote no labels file" || ok "a refused run wrote no labels file"
+
+echo "== end to end: the owner id comes from the private overlay"
+
+NOHOME="${TMP}/no-overlay-home"
+mkdir -p "${NOHOME}"
+run env -u ATHENA_PRIVATE_ROOT HOME="${NOHOME}" "${BIN}" --help
+eq "--help needs no overlay (exit 0)" "${RC}" "0"
+has "--help names the overlay key the owner id is read from" "${OUT}" "slack .people.owner.user_id"
+lacks "--help prints no owner id" "${OUT}" "${OWNER}"
+run env -u ATHENA_PRIVATE_ROOT HOME="${NOHOME}" "${BIN}" --propose --inbox-root "${ROOT}" --labels "${LABELS}"
+eq "an ABSENT overlay refuses --propose (exit 3)" "${RC}" "3"
+has "the refusal carries the resolver's ABSENT line" "${ERR}" "private-overlay: ABSENT: key=slack.people.owner.user_id"
+has "the refusal names the probed path" "${ERR}" "${NOHOME}/.config/athena/work"
+has "the refusal carries Fix:" "${ERR}" "Fix:"
+eq "the refusal is one stderr line" "$(printf '%s\n' "${ERR}" | wc -l | tr -d ' ')" "1"
+[ -e "${LABELS}" ] && bad "an ABSENT overlay wrote no labels file" || ok "an ABSENT overlay wrote no labels file"
+NOKEY="${TMP}/overlay-nokey"
+overlay_root "${NOKEY}" '{"people":{}}'
+run env ATHENA_PRIVATE_ROOT="${NOKEY}" "${BIN}" --propose --dry-run --inbox-root "${ROOT}" --labels "${LABELS}"
+eq "an overlay without the owner key refuses (exit 3)" "${RC}" "3"
+has "the refusal says KEY_NOT_FOUND, distinct from ABSENT" "${ERR}" "private-overlay: KEY_NOT_FOUND"
+eq "the KEY_NOT_FOUND refusal is one stderr line" "$(printf '%s\n' "${ERR}" | wc -l | tr -d ' ')" "1"
+run env ATHENA_PRIVATE_ROOT="" "${BIN}" --propose --dry-run --inbox-root "${ROOT}" --labels "${LABELS}"
+eq "a MALFORMED overlay root refuses (exit 3)" "${RC}" "3"
+has "the refusal says MALFORMED, distinct from ABSENT and KEY_NOT_FOUND" "${ERR}" "private-overlay: MALFORMED"
+eq "the MALFORMED refusal is one stderr line" "$(printf '%s\n' "${ERR}" | wc -l | tr -d ' ')" "1"
+NOTID="${TMP}/overlay-notid"
+overlay_root "${NOTID}" '{"people":{"owner":{"user_id":"cody"}}}'
+run env ATHENA_PRIVATE_ROOT="${NOTID}" "${BIN}" --propose --dry-run --inbox-root "${ROOT}" --labels "${LABELS}"
+eq "an owner value that is not a Slack user id refuses (exit 3)" "${RC}" "3"
+has "the malformed-value refusal says what is wrong" "${ERR}" "is not a Slack user id"
+lacks "the malformed-value refusal never prints the value" "${ERR}" "cody"
+has "the malformed-value refusal carries Fix:" "${ERR}" "Fix:"
+run env -u ATHENA_PRIVATE_ROOT HOME="${NOHOME}" "${BIN}" --counts --labels "${TMP}/absent.jsonl"
+lacks "--counts does not need the overlay" "${ERR}" "private-overlay"
 
 echo "== end to end: propose"
 
@@ -514,7 +570,7 @@ eq "the owner's confirmation survives a re-propose" "$(jq -r 'select(.id=="Ev03"
 mailfile "${MAIL}/20260920T000007Z-007-fwd-disagree.md" "R4 forward for gen_saas (laptop). message ts: ${T3}"
 {
   cat "${LABELS}"
-  jq -cn '{id:"EvGone", label:"harness", provenance:"owner_confirmed", labeler:"U0AHNV4RJGP", labeled_at:"2000-01-01T00:00:00Z"}'
+  jq -cn '{id:"EvGone", label:"harness", provenance:"owner_confirmed", labeler:"UFAKE00001", labeled_at:"2000-01-01T00:00:00Z"}'
   jq -cn '{id:"EvStale", label:"walt_ui", provenance:"proposed", labeler:"judgment-label", labeled_at:"2000-01-01T00:00:00Z"}'
 } >"${TMP}/grown" && cat "${TMP}/grown" >"${LABELS}"
 run "${BIN}" --propose --inbox-root "${ROOT}" --labels "${LABELS}"

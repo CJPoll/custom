@@ -10,7 +10,7 @@ holds the ticket.** Athena holds it while it is actively being worked; Cody hold
 whenever it is waiting on him. Every status transition therefore also moves the
 `Assignee` — never change status without reconciling the assignee.
 
-Tickets are referenced by their `ID` (a `unique_id` property, e.g. `DND-29`, `PT-895`).
+Tickets are referenced by their `ID` (a `unique_id` property, e.g. `DND-29`).
 Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
 
 ## Status → Assignee map
@@ -474,10 +474,15 @@ person via `API-get-users`, or read a ticket's `created_by`.
 | Connection | Workspace | Athena (bot) id | Cody (person) id |
 |---|---|---|---|
 | `notion-personal` | "Cody" | `a22b6502-92b2-4b22-978d-9a49895afc1b` | `a6557c85-7931-480b-9e68-7f7fb2d889a7` |
-| `notion-work` | work | resolve via `API-get-self` | `358d872b-594c-8171-abad-0002238e7b12` (Cody Poll) |
+| `notion-work` | work | resolve via `API-get-self` | the roster below, else `private-overlay get notion .work.owner_person_id` |
 
-The `notion-work` Cody id also lives in `<repo-root>/.claude/agent-messages/roster.json`
-as `notion_person_id`; the flaky-lane tooling already resolves it that way.
+The `notion-work` Cody id lives in `<repo-root>/.claude/agent-messages/roster.json`
+as `notion_person_id`; the flaky-lane tooling already resolves it that way. This
+repo is public, so the fallback is the private overlay:
+`~/dev/custom/ai/bin/private-overlay get notion .work.owner_person_id`. A non-zero
+exit leaves the assignment undone: report the resolver's stderr line and its
+`Fix:`, and never pick a person by name (`ai/contracts/athena-private-overlay.md`
+→ *Consumer obligation*).
 
 ## Mechanics (raw Notion API via the connection's tools)
 
@@ -511,8 +516,8 @@ as `notion_person_id`; the flaky-lane tooling already resolves it that way.
   it to the ticket page body (`API-patch-block-children`), or record it in the MR/PR
   description and your report. Say in the report that the comment endpoint was
   unavailable, so the absence of a comment is never read as an absence of the note.
-  [measured 2026-09-20; recurring since at least 2026-09-12 — PT-789, dnd-140,
-  PT-1080, DND-219 each rediscovered it]
+  [measured 2026-09-20; recurring since at least 2026-09-12 — two work-repo tickets, dnd-140,
+  and DND-219 each rediscovered it]
   **It is already ticketed as DND-458. Do not file or propose another ticket for
   it.** DND-586, DND-641 and DND-755 are re-filings of the same defect. A report
   that hit it says "known, DND-458" and nothing more.
@@ -567,7 +572,9 @@ authoritative.
   dnd-708's sweep over a desktop-only `ai-artifacts/session-agreements/` covered zero files.
 - **Needs Attention DM to Cody (owner rule).** When a ticket moves to `Needs Attention`,
   DM Cody as Athena via the `athena:slack` skill (`~/.claude/skills/athena:slack/bin/dm`,
-  Cody = `U0AHNV4RJGP`) on that same transition — the one that already assigns Cody and
+  Cody = `~/dev/custom/ai/bin/private-overlay get slack .people.owner.user_id`;
+  a non-zero exit sends no DM, and the transition's report carries the
+  resolver's line and `Fix:`) on that same transition — the one that already assigns Cody and
   writes the context onto the ticket body, so the DM rides on it. Applies to ANY ticket,
   epic or not. Slack-mrkdwn format (`<url|label>`, NOT markdown; `:notion:` + the ticket
   PAGE url):

@@ -21,7 +21,7 @@ a Mission is unblocked and has a free slot (worktree already created via
 1. **Move the Mission's Notion status to `In Progress`** and set its `Assignee`
    to **Athena** (the active connection's bot — see [[athena:ticket-management]]).
 2. **Dispatch an athena-captain, named uniquely and Mission-qualified** (e.g.
-   `athena-captain-PT-398`) — never the bare role name. Several run
+   `athena-captain-DND-398`) — never the bare role name. Several run
    concurrently; `ListAgents` can't disambiguate identical bare names, and a
    report aimed at one can silently misroute.
 
@@ -118,7 +118,7 @@ Give the captain, in the brief:
   park WIP, commit it to your worktree branch."* A linked worktree shares ONE
   stash list with the owner's main checkout (`refs/stash` lives in the common
   git dir), so a captain's `git stash pop` can pop the owner's entry. Measured
-  2026-09-25 on walt_ui: the PT-1709 captain popped the owner's PT-822 entry
+  2026-09-25 on walt_ui: a captain popped the owner's own stash entry
   (DND-670). The `git-stash-guard` hook denies every stash write; the line saves
   the captain the denied call. Once the owner activates DND-775, git itself
   refuses stash writes in agent sessions (the `agentstash` reference-transaction

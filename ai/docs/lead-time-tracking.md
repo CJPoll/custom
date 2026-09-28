@@ -94,8 +94,8 @@ from another branch's commits over-reports, like the stacked case below.
 **Known limitation — stacked branches over-report.** For a **stacked** MR/PR
 whose branch still contains an unmerged parent's commits, the forge's commit list
 includes those ancestor commits, so `min(commit time)` reaches back to the
-stack's base and the lead time is inflated. Observed on walt_ui's `margie/`
-stacks (2026-09-19 backfill): MRs 1170/1175/1176 all resolve to the same start
+stack's base and the lead time is inflated. Observed on walt_ui's
+stacked MRs (2026-09-19 backfill): MRs 1170/1175/1176 all resolve to the same start
 `2026-09-17T22:52:20Z`, yielding 19–22h — an artefact of the stack, not the work.
 GitHub's `dnd-*` branches tonight were not stacked, so they were clean. Treat a
 lead time that shares a start with a sibling ticket as suspect. A robust fix
@@ -248,7 +248,7 @@ step ran); `via=merge` = no post-merge CI (ended at merge).
 **Reading it.** gen_saas deploy tails run ~5–20 min over merge (PR 245 merged
 `05:41:21`, deploy done `06:06:39` — a ~25 min tail); that tail is why
 deploy-completion, not merge, is the right end for a deploying repo. walt_ui's
-clean MRs behave the same; its stacked `margie/` MRs are the documented artefact.
+clean MRs behave the same; its stacked MRs are the documented artefact.
 
 **Backfill verdict: yes, recoverable across all three repos and both forges**, from
 git + CI alone with no reliance on any agent-set status. The start is the

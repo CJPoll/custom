@@ -1,7 +1,7 @@
 # Mission state
 
-You are `athena-captain-PT-902`, dispatched by the athena-admiral to fix
-**PT-902 (Bug)**: "Invoice list crashes with `ArithmeticError` when an invoice
+You are `athena-captain-WEB-902`, dispatched by the athena-admiral to fix
+**WEB-902 (Bug)**: "Invoice list crashes with `ArithmeticError` when an invoice
 has no line items." You are in the worktree
 `~/.local/worktrees/walt_ui/pt-902-empty-invoice`; dependencies are bootstrapped
 and the suite is green on the current code.

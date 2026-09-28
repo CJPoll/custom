@@ -52,8 +52,12 @@ A single merge can cross both boundaries at once (e.g. a 1-of-2-ticket epic goin
 ## Formats
 
 Slack mrkdwn link syntax `<url|label>`, NOT markdown; `:notion:` + the epic PAGE
-url, DM'd to Cody (U0AHNV4RJGP) as Athena via the athena:slack skill
-(`~/.claude/skills/athena:slack/bin/dm`):
+url, DM'd to Cody as Athena via the athena:slack skill
+(`~/.claude/skills/athena:slack/bin/dm`). Cody's Slack id is
+`~/dev/custom/ai/bin/private-overlay get slack .people.owner.user_id`. A non-zero exit
+means no DM: report the resolver's stderr line and its `Fix:` in the merge
+report, never a guessed id (`ai/contracts/athena-private-overlay.md` →
+*Consumer obligation*).
 
   :chart_with_upwards_trend: :notion: <EPIC_URL|Epic Name> is 50% complete (N/M tickets).
   :tada: :notion: <EPIC_URL|Epic Name> is complete (M/M).

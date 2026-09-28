@@ -17,7 +17,7 @@ jira, notion tickets db, etc.) or just a set of tasks (like if they were made
 using the `/ralph:plan` skill). The table of tickets should include the
 following:
 
-1. Ticket ID, if any (e.g. PT-153)
+1. Ticket ID, if any (e.g. DND-153)
 2. Ticket Name
 3. 1-3 sentence summary of ticket goal
 4. Status (In flight, Complete, Queued, Blocked)

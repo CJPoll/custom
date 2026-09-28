@@ -469,7 +469,7 @@ if wait_file "${TMP}/nested.ready" 100; then
   # its own pid, which is why the gate itself no longer trusts PPID alone --
   # see check-inbox-mock-orphans's ancestor-chain walk).
   if kill -0 "${NESTED_CHILD}" 2>/dev/null && [ "${ppid}" = "1" ]; then
-    ok "reproduces the incident: mock (pid ${NESTED_CHILD}) outlives its SIGKILLed launcher, ppid now 1 (PT-919 class)"
+    ok "reproduces the incident: mock (pid ${NESTED_CHILD}) outlives its SIGKILLed launcher, ppid now 1 (orphaned-spin-loop class)"
   else
     bad "reproduces the incident (mock outlives its SIGKILLed launcher, ppid == 1)" "pid ${NESTED_CHILD} alive=$(kill -0 "${NESTED_CHILD}" 2>/dev/null && echo yes || echo no) ppid=${ppid:-?}"
   fi

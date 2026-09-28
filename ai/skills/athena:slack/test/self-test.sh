@@ -24,14 +24,14 @@ HOOK="${AI_DIR}/hooks/athena-slack-poll.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 PASS=0; FAIL=0
 
-BOT_USER="U0BU75F8EUR"
-CODY="U0AHNV4RJGP"
-ENG_CHANNEL="C07A6E3CBFH"
+BOT_USER="UFAKEBOT01"
+CODY="UFAKE00001"
+ENG_CHANNEL="CFAKE00001"
 FAKE_TOKEN="xoxb-fake-000-111-abcdefghijklmnop"
 MCP_BEARER="fixture-machine-token-5e1d"
 MCP_URL="https://athena.example.test/mcp"
 BOT_ID="B0BOTFIX01"
-TEAM_ID="T06UD7W5HGX"
+TEAM_ID="TFAKE00001"
 
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
@@ -174,11 +174,11 @@ setup_case() {
 # Pre-seed the caches the inbox scan reads, so a case can script the API calls
 # it actually cares about instead of re-scripting identity every time.
 seed_caches() {
-  printf '{"ok":true,"user":"athena","user_id":"%s","team_id":"T06UD7W5HGX"}' "${BOT_USER}" \
+  printf '{"ok":true,"user":"athena","user_id":"%s","team_id":"TFAKE00001"}' "${BOT_USER}" \
     > "${CACHE}/identity.json"
-  printf '{"%s":"cody","%s":"athena","U0BETV05H40":"johnny"}' "${CODY}" "${BOT_USER}" \
+  printf '{"%s":"cody","%s":"athena","UFAKE00003":"colleague"}' "${CODY}" "${BOT_USER}" \
     > "${CACHE}/users.json"
-  printf '[{"id":"%s","name":"team-engineering","is_member":true},{"id":"C074G1DDUV8","name":"standup","is_member":false}]' \
+  printf '[{"id":"%s","name":"eng-fixture","is_member":true},{"id":"CFAKE00002","name":"standup","is_member":false}]' \
     "${ENG_CHANNEL}" > "${CACHE}/channels.json"
 }
 
@@ -355,7 +355,7 @@ else bad "post: an empty message is refused, not sent" "rc=${RC}"; fi
 setup_case
 seed_caches
 fixture chat.postMessage '{"ok":true,"ts":"3.3","channel":"C1"}'
-run_bin post '#team-engineering' "hi"
+run_bin post '#eng-fixture' "hi"
 if [[ "$(jq -r '.channel' <<<"$(body_of chat.postMessage)")" == "${ENG_CHANNEL}" ]] \
    && [[ "$(calls_of conversations.list)" == "0" ]]; then
   ok "post: #name resolves from the channel cache without a listing call"
@@ -485,10 +485,10 @@ else bad "users cache: known ids resolve to names with no users.list call" \
 #     the entire workspace per message.
 setup_case
 seed_caches
-fixture users.list '{"ok":true,"members":[{"id":"U0NEW","name":"erich","profile":{"display_name":"erich"}}],"response_metadata":{"next_cursor":""}}'
+fixture users.list '{"ok":true,"members":[{"id":"U0NEW","name":"newperson","profile":{"display_name":"newperson"}}],"response_metadata":{"next_cursor":""}}'
 fixture conversations.history '{"ok":true,"messages":[{"ts":"1.1","user":"U0NEW","text":"hi"},{"ts":"1.2","user":"U0NEW","text":"again"}],"response_metadata":{"next_cursor":""}}'
 run_bin read-channel "${ENG_CHANNEL}" --limit 5
-if [[ "${OUT}" == *"erich"* ]] && [[ "$(calls_of users.list)" == "1" ]]; then
+if [[ "${OUT}" == *"newperson"* ]] && [[ "$(calls_of users.list)" == "1" ]]; then
   ok "users cache: an unknown id triggers exactly one refresh"
 else bad "users cache: an unknown id triggers exactly one refresh" \
   "out='${OUT}' users.list=$(calls_of users.list)"; fi
@@ -790,7 +790,7 @@ echo "-- conversations that cannot be read -------------------------------------
 #     by name before any history call is spent on it.
 setup_case
 seed_caches; seed_state
-fixture conversations.list '{"ok":true,"channels":[{"id":"D0SLACKBOT","user":"USLACKBOT"},{"id":"D0CODY","user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0SLACKBOT","user":"USLACKBOT"},{"id":"D0CODY","user":"UFAKE00001"}],"response_metadata":{"next_cursor":""}}'
 fixture conversations.history '{"ok":true,"messages":[],"response_metadata":{"next_cursor":""}}'
 run_bin read-inbox
 FOUND_SLACKBOT=no
@@ -806,7 +806,7 @@ else bad "inbox scan: the Slackbot IM is excluded before a history call is spent
 #     are still scanned. A single bad channel must not blind the inbox.
 setup_case
 seed_caches; seed_state
-fixture conversations.list '{"ok":true,"channels":[{"id":"D0BAD","user":"U1"},{"id":"D0CODY","user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0BAD","user":"U1"},{"id":"D0CODY","user":"UFAKE00001"}],"response_metadata":{"next_cursor":""}}'
 fixture_seq conversations.history 1 '{"ok":false,"error":"channel_not_found"}'
 fixture_seq conversations.history 2 "{\"ok\":true,\"messages\":[{\"ts\":\"2000.7\",\"user\":\"${CODY}\",\"text\":\"still readable\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
 fixture_seq conversations.history 3 '{"ok":true,"messages":[],"response_metadata":{"next_cursor":""}}'
@@ -906,7 +906,7 @@ echo "-- DND-186: one dedupe set across file and API ---------------------------
 setup_case
 seed_caches
 printf '{"v":1,"channels":{"D0CODY":"1000.0"},"seen_event_ids":[],"seen_keys":["D0CODY:2000.5"]}' > "${STATE}"
-fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"UFAKE00001"}],"response_metadata":{"next_cursor":""}}'
 fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"already delivered by the file channel\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
 run_bin read-inbox
 if [[ "${OUT}" != *"already delivered by the file channel"* ]] \
@@ -983,7 +983,7 @@ setup_case
 seed_caches
 rm -f "${STATE}"
 printf '{"version":1,"channels":{"D0CODY":"1000.0"}}' > "${LEGACY}"
-fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"UFAKE00001"}],"response_metadata":{"next_cursor":""}}'
 fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"post-watermark message\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
 run_bin read-inbox
 if [[ "${OUT}" == *"post-watermark message"* ]] \
@@ -1079,7 +1079,7 @@ seed_caches
 # The shared file as the file reader would leave it: no channels key.
 printf '{"v":1,"offset":42,"seen_event_ids":["Ev9"],"seen_keys":[]}' > "${STATE}"
 printf '{"version":1,"channels":{"D0CODY":"1000.0"}}' > "${LEGACY}"
-fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"UFAKE00001"}],"response_metadata":{"next_cursor":""}}'
 fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"post-watermark, reader got there first\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
 run_bin read-inbox
 if [[ "${OUT}" == *"post-watermark, reader got there first"* ]] \
@@ -1144,7 +1144,7 @@ echo "-- DND-300/DND-318: the backstop's kind vocab is im | mpim ---------------
 #     as a DM. The conversation object has no is_mpim flag, so it is a 1:1.
 setup_case
 seed_caches; seed_state
-fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","is_im":true,"user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","is_im":true,"user":"UFAKE00001"}],"response_metadata":{"next_cursor":""}}'
 fixture_seq conversations.history 1 "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"one to one\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
 fixture_seq conversations.history 2 '{"ok":true,"messages":[],"response_metadata":{"next_cursor":""}}'
 run_bin read-inbox --json --peek
@@ -1171,7 +1171,7 @@ else bad "kind: a group DM (is_mpim) is labeled mpim" "out='${OUT}'"; fi
 setup_case
 seed_caches
 printf '{"v":1,"channels":{"D0CODY":"1000.0","D0GROUP":"1000.0"},"seen_event_ids":[],"seen_keys":[]}' > "${STATE}"
-fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","is_im":true,"user":"U0AHNV4RJGP"},{"id":"D0GROUP","is_mpim":true}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","is_im":true,"user":"UFAKE00001"},{"id":"D0GROUP","is_mpim":true}],"response_metadata":{"next_cursor":""}}'
 fixture_seq conversations.history 1 "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"im msg\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
 fixture_seq conversations.history 2 "{\"ok\":true,\"messages\":[{\"ts\":\"2000.6\",\"user\":\"${CODY}\",\"text\":\"mpim msg\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
 run_bin read-inbox --peek
@@ -1212,7 +1212,7 @@ done
 setup_case
 seed_caches
 fixture assistant.threads.setStatus '{"ok":true}'
-run_bin status "#team-engineering" 1.2 "is checking CI…"
+run_bin status "#eng-fixture" 1.2 "is checking CI…"
 B="$(body_of assistant.threads.setStatus)"
 if [[ "${RC}" == 0 ]] && [[ "$(jq -r '.channel_id' <<<"${B}")" == "${ENG_CHANNEL}" ]] \
    && [[ "$(jq -r '.status' <<<"${B}")" == "is checking CI…" ]]; then
@@ -1517,7 +1517,7 @@ if [[ "${RC}" == 3 && "${ERR}" == *"reason=refused "* && "${ERR}" == *"server: r
 else bad "claim-thread: refused -> exit 3 reason=refused, the server's words on a server: line" "rc=${RC} err='${ERR}'"; fi
 
 # c5. A malformed ts or channel: exit 2, Fix:, no call of any kind.
-for bad_args in "D0DMCHAN abc" "D0DMCHAN 1790" "U0AHNV4RJGP 1.2" "d0dm 1.2"; do
+for bad_args in "D0DMCHAN abc" "D0DMCHAN 1790" "UFAKE00001 1.2" "d0dm 1.2"; do
   setup_case; claim_setup
   # shellcheck disable=SC2086
   run_bin claim-thread ${bad_args}

@@ -466,7 +466,7 @@ the issues." This section is its one home; other documents cite it by name.
      `trap 'kill "$child" 2>/dev/null' EXIT INT TERM` so a crashed or
      rate-limited parent cannot orphan it. An orphaned `(while :; do :; done) &`
      reparented to PID 1 pinned load ~290 for an hour and flaked neighboring
-     ExUnit suites into Postgres `57014` timeouts (PT-919) — this is the class
+     ExUnit suites into Postgres `57014` timeouts (the orphaned-spin-loop incident, a work-repo flake) — this is the class
      we are eliminating.
   4. **A `pgrep -f "<pattern>"` wait self-matches the waiting shell**, so it
      never exits. The Bash tool runs `zsh -c '<command>'`, so any text in your

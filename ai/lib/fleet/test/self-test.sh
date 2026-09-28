@@ -175,7 +175,7 @@ for t in "" general-purpose athena-architect "athena-captain x" athena; do
   check "not a fleet worker: ${t@Q}" bash -c '. "$0"; ! fleet_is_fleet_worker "$1"' "${D}" "${t}"
 done
 
-for r in DND-541 PT-1289 AB-1 A1-9999999 ABCDEFGHIJ-5; do
+for r in DND-541 WEB-1289 AB-1 A1-9999999 ABCDEFGHIJ-5; do
   check "ticket ref valid: ${r}" fleet_valid_ticket_ref "${r}"
 done
 for r in "" dnd-5 DND-0 DND- DND-12345678 "DND-5:x" "DND-5 " " DND-5" A-5 ABCDEFGHIJK-5 "DND-05" $'DND-5\n'; do
@@ -187,7 +187,7 @@ eq "ref: description names one"      "$(fleet_parse_ticket_ref 'DND-541 captain'
 eq "ref: the same ref twice is one"  "$(fleet_parse_ticket_ref 'DND-541 captain for DND-541' '')" "mapped DND-541"
 eq "ref: two refs in the description are ambiguous" "$(fleet_parse_ticket_ref 'DND-541 and DND-542' 'Mission: DND-9')" "unmapped"
 eq "ref: prompt Mission line when the description has none" "$(fleet_parse_ticket_ref 'captain' "$(printf 'You are a captain.\nMission: DND-9\nMission: DND-10')")" "mapped DND-9"
-eq "ref: bold **Mission:**"          "$(fleet_parse_ticket_ref 'captain' "$(printf 'x\n**Mission:** PT-1289 (MEDIUM)')")" "mapped PT-1289"
+eq "ref: bold **Mission:**"          "$(fleet_parse_ticket_ref 'captain' "$(printf 'x\n**Mission:** WEB-1289 (MEDIUM)')")" "mapped WEB-1289"
 eq "ref: bold **Mission**:"          "$(fleet_parse_ticket_ref 'captain' "$(printf '  **Mission**: DND-7')")" "mapped DND-7"
 eq "ref: neither"                    "$(fleet_parse_ticket_ref 'captain' 'do the work')" "unmapped"
 eq "ref: lower case is not a ref"    "$(fleet_parse_ticket_ref 'dnd-5 captain' 'Mission: dnd-5')" "unmapped"
@@ -195,7 +195,7 @@ eq "ref: a ref inside a longer token does not count" "$(fleet_parse_ticket_ref '
 eq "ref: 8 digits is not a ref"      "$(fleet_parse_ticket_ref 'DND-12345678' '')" "unmapped"
 eq "ref: a Mission line mid-sentence does not count" "$(fleet_parse_ticket_ref 'captain' 'Your Mission: DND-9 is set')" "unmapped"
 eq "ref: a Mission line with a bad ref does not count" "$(fleet_parse_ticket_ref 'captain' 'Mission: DND-0')" "unmapped"
-eq "ref: refs in the prompt body alone do not count" "$(fleet_parse_ticket_ref 'captain' 'see DND-541 and PT-1')" "unmapped"
+eq "ref: refs in the prompt body alone do not count" "$(fleet_parse_ticket_ref 'captain' 'see DND-541 and WEB-1')" "unmapped"
 eq "ref: punctuation is a boundary"  "$(fleet_parse_ticket_ref '[DND-560]: hook' '')" "mapped DND-560"
 
 # fleet_parse_run_hint <prompt> -> the one distinct coordination dir, else nothing (status 1)

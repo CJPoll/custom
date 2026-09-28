@@ -1,4 +1,4 @@
-regression=unreaped backgrounded loop (done &) with no trap reaper — orphans to PID 1 (PT-919)
+regression=unreaped backgrounded loop (done &) with no trap reaper — orphans to PID 1 (the orphaned-spin-loop incident)
 guard=safe-wait-guard
 mode=hook-stdin
 input=input.json

@@ -65,7 +65,7 @@
 #
 # One blocking call. No `while`, no `until`, no poll, no sleep. The child is
 # backgrounded only so its pid can be trapped -- an orphaned waiter is the
-# PT-919 class (a spin loop reparented to PID 1 pinned this box's load at ~290
+# orphaned-spin-loop class (a spin loop reparented to PID 1 pinned this box's load at ~290
 # for an hour and flaked neighbouring suites into Postgres 57014 timeouts).
 # `wait` blocks on the pid; it does not re-check it.
 #--- end usage ---
@@ -236,7 +236,7 @@ OUTF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifyw
 # `&`, because both orderings were wrong and each has a failure:
 #
 #   * a trap installed after the `&` leaves a window in which a signal orphans
-#     the waiter -- the PT-919 class, through the gap in its own guard;
+#     the waiter -- the orphaned-spin-loop class, through the gap in its own guard;
 #   * a trap referencing an unset `child` under `set -u` ABORTS INSIDE THE
 #     TRAP. The `2>/dev/null` silences `kill`, not the unbound-variable error.
 #

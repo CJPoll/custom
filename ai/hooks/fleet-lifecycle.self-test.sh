@@ -169,10 +169,10 @@ spawn() { # spawn <description> <prompt> [subagent_type] -- a measured captain s
     '.tool_input.description = $d | .tool_input.prompt = $p | .tool_input.subagent_type = $t'
 }
 : > "${PIDS}"
-hook "$(spawn "captain ${MARK}" "$(printf 'You are a captain. %s\n**Mission:** PT-1289 (MEDIUM)\nReports: /home/u/dev/custom/ai-artifacts/coordination/2026-09-24-p1-fleet/reports/\n' "${MARK}")")"
+hook "$(spawn "captain ${MARK}" "$(printf 'You are a captain. %s\n**Mission:** WEB-1289 (MEDIUM)\nReports: /home/u/dev/custom/ai-artifacts/coordination/2026-09-24-p1-fleet/reports/\n' "${MARK}")")"
 fleet_wait_pids "${PIDS}" 1
 eq "a Mission: line maps when the description names no ref; the run hint rides along" \
-  "$(fleet_last_request | jq -c '.body | [.mapping, .ticket_ref, .run_hint]')" '["mapped","PT-1289","2026-09-24-p1-fleet"]'
+  "$(fleet_last_request | jq -c '.body | [.mapping, .ticket_ref, .run_hint]')" '["mapped","WEB-1289","2026-09-24-p1-fleet"]'
 eq "a mapped spawn prints nothing" "${OUT}" ""
 : > "${PIDS}"
 hook "$(spawn "admiral for ${MARK}" "run ai-artifacts/coordination/2026-09-26-x/state.md ${MARK}" athena-admiral)"

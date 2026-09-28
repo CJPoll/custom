@@ -20,8 +20,13 @@
 require "json"
 
 module JudgmentLabel
-  # D7: only the owner's own text is ever judged.
-  OWNER = "U0AHNV4RJGP"
+  # D7: only the owner's own text is ever judged. The owner's Slack user id is
+  # a work value, so it lives in the private overlay, never in this public
+  # repo (ai/contracts/athena-private-overlay.md); the bin resolves it at run
+  # time and passes it in.
+  OWNER_KEY = ["slack", ".people.owner.user_id"].freeze
+  # A Slack user id: U or W, then upper-case letters and digits.
+  SLACK_USER_ID = /\A[UW][A-Z0-9]{2,}\z/
   # The SlackRouting v1 Choice options (DND-716). Exactly these four.
   LABELS = %w[walt_ui harness gen_saas unclear].freeze
   PROVENANCES = %w[forward_record owner_confirmed proposed].freeze
@@ -57,6 +62,14 @@ module JudgmentLabel
   end
 
   module_function
+
+  # owner_problem(value) -> nil when VALUE is a Slack user id, else the reason
+  # it is not. The reason never quotes the value.
+  def owner_problem(value)
+    return nil if value.is_a?(String) && SLACK_USER_ID.match?(value)
+
+    "the overlay value at #{OWNER_KEY.join} is not a Slack user id (U or W, then upper-case letters and digits)"
+  end
 
   # parse_slack(text, path) -> {lines: [{event_id, kind, user, channel, ts, thread_ts}], without_id: n}
   # An empty file is its own error, distinct from a missing one (the bin says

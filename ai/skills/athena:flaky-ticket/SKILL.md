@@ -66,7 +66,11 @@ its `database_id` via its `connector`, with:
   2. Map identity → owner in `<repo-root>/.claude/agent-messages/roster.json`
      (repo root after MR !739): use that agent's `notion_person_id` as the
      Assignee. (On this machine identity resolves to `Athena` → owner
-     `Cody Poll` → `358d872b-594c-8171-abad-0002238e7b12`.)
+     `Cody Poll`; the same id is
+     `~/dev/custom/ai/bin/private-overlay get notion .work.owner_person_id`.
+     If neither resolves, leave the Assignee unset and report the resolver's
+     stderr line and its `Fix:`; never pick a person by name
+     (`ai/contracts/athena-private-overlay.md` → *Consumer obligation*).)
 
 Name the created ticket id in your report either way.
 

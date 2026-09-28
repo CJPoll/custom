@@ -805,7 +805,7 @@ if wait_for_nonempty "${CALLS}" 100; then
 
   # 34. And the child must not outlive it. An orphaned client reparented to
   #     init keeps writing to the inbox with nothing supervising it, and the
-  #     next supervisor takes the lock and becomes a second writer (PT-919 is
+  #     next supervisor takes the lock and becomes a second writer (the orphaned-spin-loop class is
   #     the same species of failure).
   #     The supervisor's reaper SIGTERMs the client and exits without waiting,
   #     so the client's death is AWAITED (bounded) before it is judged, never

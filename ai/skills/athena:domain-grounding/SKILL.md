@@ -79,7 +79,7 @@ them**. You integrate with that system — you do not design a parallel one.
   address that defect, not design on top of it. Measured 2026-09-22: a 4-way
   concurrent realtor master-load was designed on `bulk_upsert_brokerages`,
   discarding 21/22 shards to `40P01 deadlock_detected` — the exact failure of
-  PT-440, an open Backlog bug on that path (~397 daily occurrences) that no
+  an open Backlog bug on that path (~397 daily occurrences) that no
   planning step searched for.
 
 ## 5. Record what you found

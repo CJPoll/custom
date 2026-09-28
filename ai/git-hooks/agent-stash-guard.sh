@@ -1,6 +1,6 @@
 #!/bin/sh
 # agent-stash-guard — git reference-transaction hook that stops agent sessions
-# from writing the stash list (DND-775; the incident is DND-670, PT-1709).
+# from writing the stash list (DND-775; the incident is DND-670).
 #
 # WHY. Every linked worktree shares ONE stash list with the main checkout:
 # refs/stash and its reflog live in the common git dir. A captain's stash pop in

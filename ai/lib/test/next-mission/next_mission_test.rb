@@ -773,7 +773,7 @@ end
 
 check("cli: a --tickets id with a non-DND prefix is a usage error (exit 2), before any token read") do
   Dir.mktmpdir("DND-985") do |home|
-    _out, err, st = Open3.capture3({ "HOME" => home }, "/usr/bin/ruby", BIN, "--tickets", "PT-5")
+    _out, err, st = Open3.capture3({ "HOME" => home }, "/usr/bin/ruby", BIN, "--tickets", "WEB-5")
     st.exitstatus == 2 && err.include?("DND-NUMBER") && err.include?("Fix:")
   end
 end

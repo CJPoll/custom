@@ -643,7 +643,7 @@ is the turn-end abandonment this section forbids. A `state.md` left mid-poll is
 the signal for the orphan-MR sweep ([[athena:fleet-inputs]]) /
 [[athena:admiral-resume]] to adopt.
 
-*Measured 2026-09-22 (2 of 2 admiral runs, PT-1385 + PT-1479): both ended the
+*Measured 2026-09-22 (2 of 2 admiral runs, on two work tickets): both ended the
 turn on a running train; one never resumed, one resumed 90 min late, and the
 main session closed both by hand — duplicated teardown + status writes, and
 downstream tracker drift (tickets left off `Done`).*

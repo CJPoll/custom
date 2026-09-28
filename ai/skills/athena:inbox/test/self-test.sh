@@ -1800,7 +1800,7 @@ rfc_days_ago() { date -u -d "$1 days ago" +%Y-%m-%dT%H:%M:%SZ; }
 #
 # The rendezvous is two FIFOs, not a poll: the child blocks writing to
 # `ready`, the parent blocks reading it, and neither spins. A `while ! test -e
-# ready; do :; done` here would be the exact PT-919 shape the harness rule
+# ready; do :; done` here would be the exact orphaned-spin-loop shape the harness rule
 # forbids, and a `sleep`-based one would make a lock test's timing a property
 # of the machine.
 hold_lock() {
@@ -1824,7 +1824,7 @@ hold_lock() {
   # Any abnormal exit between hold_lock and release_lock (a `set -u` abort, a
   # ^C, harness-gate killing the run) would orphan a process blocked forever
   # on a FIFO that no longer exists, still holding the flock. It blocks rather
-  # than spins, so it is not the PT-919 load storm, but it is the orphan class
+  # than spins, so it is not the orphaned-spin-loop load storm, but it is the orphan class
   # the rule names -- and now that this suite runs under the gate, an
   # interrupted run is routine rather than exotic.
   #

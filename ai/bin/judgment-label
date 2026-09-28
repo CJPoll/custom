@@ -29,6 +29,7 @@ require_relative "../lib/judgment_label"
 require_relative "../lib/judgment_context"
 require_relative "../lib/judgment_context_slack"
 require_relative "../lib/strict_argv"
+require_relative "../lib/private_overlay_resolver"
 
 PROG = "judgment-label"
 
@@ -41,7 +42,10 @@ USAGE = <<~EOF
   Build the Slack routing label corpus for judgment-eval --use-case
   slack_routing (DND-715). One row per new conversation the owner started:
   a dm, im, mpim or mention root (not a thread reply) whose sender is the
-  owner (#{JudgmentLabel::OWNER}; D7: only the owner's text is ever judged).
+  owner (D7: only the owner's text is ever judged). The owner's Slack id is
+  read from the private overlay, `private-overlay get #{JudgmentLabel::OWNER_KEY.join(' ')}`
+  (ai/contracts/athena-private-overlay.md); --propose and --confirm refuse,
+  exit 3, when it does not resolve. --counts does not need it.
   Labels are exactly #{JudgmentLabel::LABELS.join(', ')}.
 
   --propose   Derive labels and write the labels file. A root named by an R4
@@ -109,8 +113,12 @@ USAGE = <<~EOF
     0  done
     1  an input is missing, empty or malformed, or no owner root was found
     2  usage (including --confirm off a terminal)
+    3  the owner's Slack id did not resolve from the private overlay (absent,
+       malformed, key missing, or not a Slack user id); nothing was read or
+       written
 
-  Every failure prints one stderr line carrying Fix:.
+  Every failure prints one stderr line carrying Fix:. For exit 3 it is the
+  resolver's own line; the owner id itself is never printed.
 EOF
 
 class Failure < StandardError
@@ -130,6 +138,21 @@ end
 
 module Effects
   module_function
+
+  # owner_id -> the owner's Slack user id from the private overlay. A resolve
+  # that fails, or a value that is not a Slack user id, is exit 3 carrying
+  # the resolver's one line (its Fix:). Never a fallback, never a guess.
+  def owner_id
+    file, path = JudgmentLabel::OWNER_KEY
+    r = PrivateOverlay::Resolver.get(file, path)
+    unless r.state == :found
+      raise Failure.new(3, "#{PROG}: the owner's Slack id did not resolve, so nothing was read or written: " \
+                           "#{PrivateOverlay.failure_line(r, "#{file}#{path}")}")
+    end
+    problem = JudgmentLabel.owner_problem(r.value)
+    fail!(3, problem, "set #{path} in overlay/#{file}.json of the private overlay (#{r.root}) to the owner's Slack user id") if problem
+    r.value
+  end
 
   def default_inbox_root
     root = ENV["ATHENA_INBOX_ROOT"].to_s
@@ -249,9 +272,10 @@ module Manager
   end
 
   def run_propose(opts, out, err)
+    opts = opts.merge(owner: Effects.owner_id)
     path, text = read_slack(opts)
     slack = JudgmentLabel.parse_slack(text, path)
-    sel = JudgmentLabel.select_roots(slack[:lines], JudgmentLabel::OWNER)
+    sel = JudgmentLabel.select_roots(slack[:lines], opts[:owner])
     records, by_source = forward_records(opts)
     matched = JudgmentLabel.match(records, slack[:lines], sel[:roots])
     report_inputs(path, slack, sel, records, by_source, matched, out, err)
@@ -282,7 +306,7 @@ module Manager
     out.puts "roots: #{sel[:roots].size} owner new-conversation roots " \
              "(excluded: #{sel[:duplicates]} duplicate, #{sel[:non_owner]} not from the owner, #{sel[:replies]} thread replies, #{sel[:other]} other kinds)"
     if sel[:roots].empty?
-      fail!(1, "no owner new-conversation root in #{path} (#{slack[:lines].size} lines considered)", "check the owner id (#{JudgmentLabel::OWNER}) and that this is the walt_ui slack inbox; nothing was written")
+      fail!(1, "no owner new-conversation root in #{path} (#{slack[:lines].size} lines considered)", "check the owner id (private overlay #{JudgmentLabel::OWNER_KEY.join(' ')}) and that this is the walt_ui slack inbox; nothing was written")
     end
     out.puts "forward records: #{records.size} (#{by_source.map { |k, v| "#{k} #{v}" }.join(', ')}): " \
              "matched #{matched[:matched]}, thread only #{matched[:thread_only]}, unmatched #{matched[:unmatched].size}, conflicts #{matched[:conflicts].size}"
@@ -307,6 +331,7 @@ module Manager
   def run_confirm(opts, out, input)
     fail!(2, "--confirm needs a terminal (stdin and stdout)", "the owner runs it at a terminal; a pipe or an agent never confirms a label") unless Effects.terminal?
 
+    opts = opts.merge(owner: Effects.owner_id)
     mode = confirm_mode(opts)
     pending = JudgmentLabel.pending(existing_rows(opts, must_exist: true), mode).first(opts[:batch])
     if pending.empty?
@@ -320,7 +345,7 @@ module Manager
     skipped = 0
     pending.each_with_index do |row, i|
       msg = msgs[row["id"]]
-      context = context_for(msg, reader, File.basename(path))
+      context = context_for(msg, reader, File.basename(path), opts[:owner])
       show(row, msg, context, mode, i, pending.size, File.basename(path), out)
       verdict = ask(row["label"], mode, out, input)
       case verdict.first
@@ -340,9 +365,9 @@ module Manager
     fail!(1, e.message, e.fix)
   end
 
-  # context_for(msg, reader, inbox) -> a JudgmentContext context: what to
+  # context_for(msg, reader, inbox, owner) -> a JudgmentContext context: what to
   # read (domain), the read (adapter), the shaping (domain).
-  def context_for(msg, reader, inbox)
+  def context_for(msg, reader, inbox, owner)
     return JudgmentContext.unavailable({ "source" => nil }, "this event_id is no longer in #{inbox}") if msg.nil?
 
     req = JudgmentContext.request(msg)
@@ -351,7 +376,7 @@ module Manager
     read = reader.read(req)
     return JudgmentContext.unavailable(req, read.last) if read.first == :error
 
-    JudgmentContext.build(req, read[1], owner: JudgmentLabel::OWNER, athena: read[2])
+    JudgmentContext.build(req, read[1], owner: owner, athena: read[2])
   end
 
   MODE_ROWS = {
@@ -455,7 +480,7 @@ module Manager
   def record(opts, id, label, context_mark)
     Effects.with_lock(opts[:labels]) do
       rows = existing_rows(opts, must_exist: true)
-      rows = JudgmentLabel.confirm(rows, id, label, JudgmentLabel::OWNER, Effects.now, context_mark)
+      rows = JudgmentLabel.confirm(rows, id, label, opts[:owner], Effects.now, context_mark)
       Effects.write_labels(opts[:labels], JudgmentLabel.render(rows))
     end
   end

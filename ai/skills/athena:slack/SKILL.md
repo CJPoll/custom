@@ -20,7 +20,7 @@ and layout; `athena:voice` sets the tone.
 
 | | Reads as | Use it for |
 |---|---|---|
-| **This skill** (`xoxb-`, user `athena`, `U0BU75F8EUR`, bot `B0BU39VLCLE`) | a bot named athena | anything Athena *says* or *does* |
+| **This skill** (`xoxb-`, user `athena`; its user and bot ids: `bin/whoami`) | a bot named athena | anything Athena *says* or *does* |
 | **The Slack plugin** (Cody's OAuth session) | Cody Poll | reading and searching as Cody |
 
 Writing through the plugin puts Cody's name on words Athena wrote. That is the
@@ -180,7 +180,7 @@ Concretely:
 ## When Athena may post (owner rule)
 
 Post in a channel ONLY when the triggering message is a DM/mpim, or pings the
-bot (`<@U0BU75F8EUR>`). An unpinged channel message: read it, act on it, but do
+bot (`<@…>` with the `user_id` that `bin/whoami` reports). An unpinged channel message: read it, act on it, but do
 NOT post a reply. A `react` receipt is always allowed. Cody, verbatim
 (2026-09-22): *"Only respond in slack in a few cases: when a person messages you
 in a DM or group message; when a person pings you."*
@@ -200,7 +200,8 @@ output, which it did not otherwise inherit.
 
 ## Every DM to the owner names its sending session (owner rule)
 
-Every Slack DM to Cody (`U0AHNV4RJGP`) leads with the sending session's name.
+Every Slack DM to Cody leads with the sending session's name. Cody's Slack id
+is the *Owner id* (*Reading the workspace*).
 Many sessions share the one Athena bot identity, so without it the owner cannot
 tell which session to answer — and an answer or authorization only counts in the
 session that asked.
@@ -403,8 +404,9 @@ fields of the message's `.payload` in `read-inbox --json`:
 1. The session read it with `read-inbox --json` from its own project's
    `session` channel (a platform-producer channel), and `.payload.kind` is
    `slack.interaction`.
-2. `.payload.actor.user_id` is `U0AHNV4RJGP` (Cody, the same id the server's
-   app config names as owner) and `.payload.actor.is_owner` is `true`.
+2. `.payload.actor.user_id` is the *Owner id* (*Reading the workspace*; Cody,
+   the same id the server's app config names as owner; a failed resolve fails
+   this check) and `.payload.actor.is_owner` is `true`.
 3. `.payload.channel` and `.payload.ts` equal a `{channel, ts}` that an
    Athena `slack_post` of that decision message returned: this session's own
    post, or one by an agent in this session's own agent tree (one it spawned,
@@ -536,7 +538,7 @@ Block Kit extends the rules above; it does not replace any of them.
   your draft against the newest replies. If what you were about to say has
   already happened, been answered, or been decided, change the reply, or react
   instead. Owner request (Cody, 2026-09-25): "check the thread for the message,
-  not just the singular shared message." Measured: a reply in C07A6E3CBFH built
+  not just the singular shared message." Measured: a reply in a team channel built
   on a ~20-minute-old read said "Cody's on it" after Cody had already set the
   icon and been thanked, and had to be corrected with `update`.
 - **Say who you are when it matters.** In a thread Athena already owns, the bot
@@ -544,7 +546,7 @@ Block Kit extends the rules above; it does not replace any of them.
   make that obvious, say so: *"Athena here, on Cody's behalf — …"*.
 - **Never DM anyone Cody has not cleared.** A bot DM is a phone notification
   with no channel context, and it reads as Cody pinging that person. Channel or
-  thread by default; DM by exception. Cody's own DM (`U0AHNV4RJGP`) is always
+  thread by default; DM by exception. Cody's own DM (the *Owner id*) is always
   fine.
 - **~1 message per second per channel.** Slack's posting limit. Don't loop over
   a list of channels without pacing; don't fire a burst of replies into one
@@ -557,10 +559,23 @@ Block Kit extends the rules above; it does not replace any of them.
 
 ## Reading the workspace
 
-Known ids: `#team-engineering` `C07A6E3CBFH`, `#standup` `C074G1DDUV8`. People:
-Cody `U0AHNV4RJGP`, Johnny `U0BETV05H40`, Tom `U0BTN832CG4`, Erich
-`U0BE9N6K50R`, David `U0BS4NW1A0L`. `channels` and the users cache are the
-source of truth; that list is a convenience.
+This repo is public, so the workspace's ids live in the private overlay
+(`ai/contracts/athena-private-overlay.md`), not here:
+
+- `~/dev/custom/ai/bin/private-overlay get slack .channels` — known channel
+  ids, by name.
+- `~/dev/custom/ai/bin/private-overlay get slack .people` — known people,
+  `{alias: {user_id, name}}`.
+
+`channels` and the users cache are the source of truth; the overlay list is a
+convenience.
+
+**Owner id.** Cody's Slack user id is
+`~/dev/custom/ai/bin/private-overlay get slack .people.owner.user_id`. Every
+step here that needs it (a DM to Cody, the click check) resolves it that way.
+A non-zero exit means the step is **not taken**: no DM is sent, no click
+counts. Report the resolver's one stderr line, with its `Fix:`. Never guess
+the id by name or from a users list (the contract's *Consumer obligation*).
 
 The bot can only read history in channels it has been **invited to**, and can
 only be mentioned in those. `channels --member` shows which those are.
@@ -672,7 +687,7 @@ nothing. Two patterns close that, both for later:
   between scans (never a spin loop), bound it with a max-iteration/`timeout`
   guard, and — because it is backgrounded — reap it with
   `trap 'kill "$child" 2>/dev/null' EXIT INT TERM` so a crashed or rate-limited
-  parent session cannot orphan it into a CPU hog (PT-919).
+  parent session cannot orphan it into a CPU hog (the orphaned-spin-loop incident).
 - **`inotifywait` on the state file.** Cheaper — no API calls — but it only
   fires when something *else* has already run a scan, so it needs the hook or a
   waiter underneath it. Useful for fanning one poll out to several sessions.

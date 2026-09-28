@@ -542,7 +542,7 @@ child=""
 
 # A reaper is mandatory: the client is backgrounded so this shell can own the
 # signal handling, and a crashed or killed supervisor must never orphan it
-# (the PT-919 class of failure).
+# (the orphaned-spin-loop class of failure).
 reap_child() { if [ -n "$child" ]; then kill "$child" 2>/dev/null; fi; }
 trap reap_child EXIT
 

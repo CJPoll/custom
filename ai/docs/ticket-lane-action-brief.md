@@ -382,7 +382,7 @@ file; that stays in the spawn text, its only reader.
 | `{{LANE_CHANNEL}}` | the walt_ui `flaky` `log` channel, file `walt_ui-flaky.jsonl` (`kind:log`, `producer:"platform"`), declared in `ai/inbox/registry.json` (DND-260) and installed in the live entry. Its inbox count is the flaky lane's **operative trigger** (see `{{CHANNEL_RESOLUTION}}`) |
 | `{{CHANNEL_RESOLUTION}}` | resolve the flaky `log` channel in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json`. **Post-install invariant:** once the channel is declared AND installed, a live entry that does not resolve — logging the searched repo-identity key — is registry **drift**, a fault `check-inbox-registry` surfaces with `Fix: setup-inbox-registry --install`, never an empty queue. **Operative trigger:** the inbox count on this channel, reaching a live walt_ui session when the `inbox-wait` doorbell rings (`ai/skills/athena:inbox/SKILL.md` → *How to arm it*). The `SessionStart` poll (`flaky-ticket-poll.sh`) is **retired** as a trigger. A declared channel that is **not installed** is the same drift fault, never a quiet queue. **The line is a trigger, not the authority:** the consumer checks by count or `--peek`, then decides from `{{SOURCE_RE_QUERY}}` against Notion, never from the payload (*The consumer is idempotent by construction*). |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
-| `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. the runner is the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (DND-277), built so the sweep survives the poll's retirement. The retired poll's own 12h age-out went with the hook when walt_ui's PT-1542 removed it; nothing depended on it (see *Relationship to the existing flaky trigger*) |
+| `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. the runner is the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (DND-277), built so the sweep survives the poll's retirement. The retired poll's own 12h age-out went with the hook when walt_ui's own change removed it; nothing depended on it (see *Relationship to the existing flaky trigger*) |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
 
 **Later (2026-09-21):** the `{{LANE_CHANNEL}}` and `{{CHANNEL_RESOLUTION}}` rows
@@ -437,7 +437,7 @@ the owner. *The inner admiral brief*
 requires per-assignee counts so a narrowed filter is observable. In the
 same change, the paragraph above the table stopped naming `walt_ui/CLAUDE.md` as
 the policy's canonical prose home and the poll as holding a hand-synced copy:
-walt_ui's PT-1542 retired the poll and reduced that `CLAUDE.md` section to a
+walt_ui's own change retired the poll and reduced that `CLAUDE.md` section to a
 pointer at `flaky-coordinator-spawn.txt`, which holds the policy now. The
 living text that still said walt_ui "will" remove the poll hook now says it
 did.
@@ -583,7 +583,7 @@ inbox count delivered by the `inbox-wait` background waiter on
 `{{LANE_CHANNEL}}` (`ai/skills/athena:inbox/SKILL.md` → *How to arm it*); the
 poll is retired as a trigger by owner directive (see the `**Later
 (2026-09-23)**` note under the worked-instantiation table). The poll hook and its
-`settings.json` registration were removed by walt_ui's own change, PT-1542.
+`settings.json` registration were removed by walt_ui's own change.
 The marker's **touch-before-spawn / remove-when-scope-empty** semantics carry over
 unchanged, but two things do
 change and are NOT "only the trigger":
@@ -615,7 +615,7 @@ change and are NOT "only the trigger":
   that can never meaningfully fire is worse. Job (2) remains open.
 - In the design's **gated final step** the whole flaky lock mechanism is retired
   (the poll and its `walt_ui/.claude/settings.json` registration already went in
-  walt_ui's PT-1542): the DND-277 age-out
+  walt_ui's own change): the DND-277 age-out
   hook `ai/hooks/flaky-marker-sweep.sh` together with its `ai/hooks/registry.json`
   entry, its `harness-gate` `STATIC_CHECKS` entry and its self-test, and the dead
   `~/.claude/flaky-*` files — which includes `flaky-coordinator.lock` itself. So
@@ -624,7 +624,7 @@ change and are NOT "only the trigger":
 
 The migration therefore **spans three homes, not one**, and "lands in walt_ui" is
 too narrow: (a) the poll and its `walt_ui/.claude/settings.json` registration
-retired in the **product repo (walt_ui)**, by PT-1542; (b) the new trigger's `{{LANE_CHANNEL}}`
+retired in the **product repo (walt_ui)**, by its own change; (b) the new trigger's `{{LANE_CHANNEL}}`
 `log` channel is provisioned by a **tenancy registry entry whose committed source
 of truth is THIS repo's `ai/inbox/registry.json`** (`~/dev/custom/CLAUDE.md` →
 *Inbox tenancy registry*) — the flaky `log` channel is now declared there
@@ -637,7 +637,7 @@ harness-side artifact the guidance is rewritten to point at.
 
 **The DND-247 sweep's carrier inventory is authoritative, not this section's
 examples.** The current flaky policy is carried in more than one file — the
-`SessionStart` poll (retired by walt_ui's PT-1542) and
+`SessionStart` poll (retired by walt_ui's own change) and
 `flaky-coordinator-spawn.txt` above (the canonical policy), **and
 `walt_ui/CLAUDE.md` → "Flaky-test lane automation"**, which points at it (the `~/.claude/CLAUDE.md` home is now the trigger-pointer into
 this brief, already rewritten by this change — not a policy carrier awaiting

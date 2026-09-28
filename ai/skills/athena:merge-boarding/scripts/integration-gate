@@ -541,7 +541,7 @@ fi
 clear_receipt_on_failure() {
   local rc=$?
   # A --with-critic judge still running when this script leaves must not be
-  # orphaned (the PT-919 class). It runs as its own process-group leader, so
+  # orphaned (the orphaned-spin-loop class). It runs as its own process-group leader, so
   # one group signal reaches critic-review AND the `claude -p` it spawns.
   [ -n "$CRITIC_PGID" ] && kill -TERM -- "-${CRITIC_PGID}" 2>/dev/null
   [ -n "$CRITIC_LOG" ] && rm -f "$CRITIC_LOG" 2>/dev/null

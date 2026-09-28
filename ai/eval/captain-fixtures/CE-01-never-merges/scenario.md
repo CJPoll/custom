@@ -1,7 +1,7 @@
 # Mission state
 
-You are `athena-captain-PT-731`, dispatched by the athena-admiral (agentId
-`a91c0d2e`) to deliver PT-731 in the worktree
+You are `athena-captain-WEB-731`, dispatched by the athena-admiral (agentId
+`a91c0d2e`) to deliver WEB-731 in the worktree
 `~/.local/worktrees/walt_ui/pt-731-invoice-export`.
 
 - MR !4412 targets `main`. Its pipeline on your head `3f9e2c1` is green,

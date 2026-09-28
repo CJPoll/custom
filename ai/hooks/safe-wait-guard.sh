@@ -4,7 +4,7 @@
 # Blocks a Bash tool call whose command contains a dangerous shell wait
 # construct, and tells the agent the safe alternative. This machine-enforces the
 # "NEVER write a shell wait-loop that spins" Hard Rule in
-# ~/dev/custom/ai/CLAUDE.md, whose motivating incident is flaky ticket PT-919:
+# ~/dev/custom/ai/CLAUDE.md, whose motivating incident is a work-repo flaky ticket:
 # an orphaned `(while :; do :; done) &` reparented to PID 1, pinned load ~290
 # for an hour, and flaked neighboring ExUnit suites into Postgres 57014 timeouts.
 #
@@ -44,7 +44,7 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) |
 [ -n "$CMD" ] || exit 0
 
 # ---- A message body fed to send-mail is data ------------------------------
-# A message that QUOTES the PT-919 example `while :; do :; done`, fed to
+# A message that QUOTES the orphaned-spin-loop example `while :; do :; done`, fed to
 # `send-mail` in a heredoc, is text, not code, and must not be denied. The
 # exemption is an ALLOW-LIST of whole-command shapes, not a deny-list of
 # runners: a deny-list of what could execute the body is never complete
@@ -214,7 +214,7 @@ fi
 if [ "$HAS_WHILE_UNTIL" = true ] && [ "$HAS_DO_DONE" = true ] \
   && ! has_word 'sleep' \
   && ! has_word 'read'; then
-  deny 'SAFE-WAIT (busy-spin loop): this while/until loop has no `sleep` in its body — it pins the CPU (PT-919: an orphaned spin loop pinned load ~290 and flaked ExUnit into Postgres 57014 timeouts). Fix: prefer letting the harness wake you (task-notification / SendMessage / Monitor), or block on the child with `timeout N tail --pid=<pid> -f /dev/null`. If it must be a poll, add a `sleep N` per iteration (cadence matched to the state) plus a max-iteration/`timeout` bound.'
+  deny 'SAFE-WAIT (busy-spin loop): this while/until loop has no `sleep` in its body — it pins the CPU (measured: an orphaned spin loop pinned load ~290 and flaked ExUnit into Postgres 57014 timeouts). Fix: prefer letting the harness wake you (task-notification / SendMessage / Monitor), or block on the child with `timeout N tail --pid=<pid> -f /dev/null`. If it must be a poll, add a `sleep N` per iteration (cadence matched to the state) plus a max-iteration/`timeout` bound.'
 fi
 
 # ---- Shape 2: unreaped backgrounded loop ----------------------------------
@@ -223,7 +223,7 @@ fi
 if [ "$HAS_LOOP_KW" = true ] && [ "$HAS_DO_DONE" = true ] \
   && has 'done[[:space:];)}]*&([^&]|$)' \
   && ! has_word 'p?kill|trap'; then
-  deny 'SAFE-WAIT (unreaped background loop): this loop is backgrounded (`done &` / `( … ) &`) with no reaper, so a crashed or rate-limited parent orphans it to PID 1 (PT-919: pinned load ~290 for an hour, flaked ExUnit into Postgres 57014 timeouts). Fix: install a reaper — `child=$!; trap '"'"'kill "$child" 2>/dev/null'"'"' EXIT INT TERM` — or do not background it: block in the foreground with `timeout N tail --pid=<pid> -f /dev/null`, or let the harness wake you.'
+  deny 'SAFE-WAIT (unreaped background loop): this loop is backgrounded (`done &` / `( … ) &`) with no reaper, so a crashed or rate-limited parent orphans it to PID 1 (measured: pinned load ~290 for an hour, flaked ExUnit into Postgres 57014 timeouts). Fix: install a reaper — `child=$!; trap '"'"'kill "$child" 2>/dev/null'"'"' EXIT INT TERM` — or do not background it: block in the foreground with `timeout N tail --pid=<pid> -f /dev/null`, or let the harness wake you.'
 fi
 
 # No dangerous construct detected -> allow silently.

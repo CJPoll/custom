@@ -94,7 +94,7 @@ run them. Jobs affected: `.build:gcr-image` (base) + `release:push-image:{test,p
     --output type=image,"name=<REF1>,<REF2>",push=true    # was --tag … --push (multi-tag = comma-separated)
   ```
 - **Stays UNTAGGED.** `buildctl` emits no provenance/sbom by default, so the
-  PT-619 index-PUT workaround is satisfied inherently (drop the
+  earlier index-PUT workaround is satisfied inherently (drop the
   `--provenance=false --sbom=false` flags).
 - **Re-validate** the old `--mtu=1400` / `--oci-worker-net=host` pin: it was
   SaaS-GCP-**dind**-specific. With no dind it drops; only re-add

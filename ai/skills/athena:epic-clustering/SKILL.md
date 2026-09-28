@@ -166,7 +166,11 @@ It's ok for there not to be any."
    - the pass summary: moved, merged (C3), closed as fixed (C4);
    - status hygiene and ticket hygiene.
 2. Read the draft. Prune a won't-fix candidate whose value is plain.
-3. Post it with `mcp__athena__slack_post` to Cody's DM `D0BU75FE0BB`, `text`
+3. Resolve Cody's DM channel id:
+   `~/dev/custom/ai/bin/private-overlay get slack .channels.owner_dm`. A non-zero
+   exit means the digest is not posted: report the resolver's stderr line and
+   its `Fix:` (`ai/contracts/athena-private-overlay.md` → *Consumer obligation*).
+   Post it with `mcp__athena__slack_post` to that DM, `text`
    plus the `blocks` array, per [[athena:slack]] → *Sending one: the athena
    MCP, never `bin/*`*. It carries no buttons. Then claim its thread with
    `mcp__athena__slack_thread_claim` (`channel`, `thread_ts` = the returned

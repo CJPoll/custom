@@ -1,4 +1,4 @@
-regression=busy-spin wait loop with no sleep — orphaned, pinned load ~290 (PT-919)
+regression=busy-spin wait loop with no sleep — orphaned, pinned load ~290 (the orphaned-spin-loop incident)
 guard=safe-wait-guard
 mode=hook-stdin
 input=input.json

@@ -113,6 +113,20 @@ The files and keys the harness uses are declared by the tickets that move each
 value (DND-704 and its siblings). Every such key is named in public prose; its
 value is not.
 
+Keys in use (DND-704), with where each is used:
+
+| File | Key | Shape | Used by |
+|---|---|---|---|
+| `slack` | `.people.owner.user_id` | Slack user id | `athena:slack` (owner DM, click check), `athena:ticket-management` (Needs Attention DM), `athena:epic-progress-dm`, `ai/bin/judgment-label` |
+| `slack` | `.people` | `{alias: {user_id, name}}` | `athena:slack` → *Reading the workspace* |
+| `slack` | `.channels` | `{name: channel id}` | `athena:slack` → *Reading the workspace* |
+| `slack` | `.channels.owner_dm` | DM channel id | `athena:epic-clustering` (the daily digest) |
+| `notion` | `.work.owner_person_id` | notion-work person id | `athena:ticket-management`, `athena:flaky-ticket` (after the roster) |
+| `notion` | `.vip_person_ids` | array of notion-work person ids | declared as the VIP seed in `athena-events.md`; the server keeps its own copy in its config |
+
+The Athena bot's own Slack user and bot ids are not overlay keys: `athena:slack`
+`bin/whoami` reports the live identity.
+
 ## No credentials
 
 The overlay holds identifiers and procedures, never credentials. Tokens and
