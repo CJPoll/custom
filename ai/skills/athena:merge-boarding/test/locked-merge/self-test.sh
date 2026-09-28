@@ -178,17 +178,17 @@ run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c9.lock"; expect c9 7; no
 fixture c10; echo 1 > "${ST}/confirm_rc"
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c10.lock"; expect c10 8; no_teardown c10
 
-# c15 (DND-864): landed, teardown failed -> exit 10 (9 is DND-965's NO RECEIPT,
+# c17 (DND-864): landed, teardown failed -> exit 10 (9 is DND-965's NO RECEIPT,
 # which lands nothing), the landing still reported.
-fixture c15; echo 4 > "${ST}/teardown_rc"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c15.lock"; expect c15 10
-grep -q '^MERGED 7 ' <<<"${out}" && ok "c15 still reports the landing" || bad "c15 MERGED line" "${out}"
-grep -q 'LANDED, but teardown-stack' <<<"${out}" && ok "c15 says it LANDED" || bad "c15 message" "${out}"
-# c16 (DND-864): the merge lock is released before the teardown runs.
-fixture c16
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c16.lock"; expect c16 0
-grep -qx "lock free" "${ST}/teardown.log" && ok "c16 lock released before teardown" \
-  || bad "c16 lock still held during teardown" "$(cat "${ST}/teardown.log")"
+fixture c17; echo 4 > "${ST}/teardown_rc"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c17.lock"; expect c17 10
+grep -q '^MERGED 7 ' <<<"${out}" && ok "c17 still reports the landing" || bad "c17 MERGED line" "${out}"
+grep -q 'LANDED, but teardown-stack' <<<"${out}" && ok "c17 says it LANDED" || bad "c17 message" "${out}"
+# c18 (DND-864): the merge lock is released before the teardown runs.
+fixture c18
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c18.lock"; expect c18 0
+grep -qx "lock free" "${ST}/teardown.log" && ok "c18 lock released before teardown" \
+  || bad "c18 lock still held during teardown" "$(cat "${ST}/teardown.log")"
 
 # c11 non-GitHub origin; c12 malformed keys; c13 unknown flag.
 fixture c11; git -C "${WT}" config remote.origin.url "git@gitlab.com:t/t.git"

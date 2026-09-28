@@ -91,22 +91,13 @@ module DockerStacks
     end
 
     # ---- filesystem -----------------------------------------------------------
-    # -> [compose file at <dir>'s root?, compose file one level down?]. An
-    # unreadable subdirectory counts as holding one: never read it as "none".
-    def compose_layout(dir)
-      root = Dir.children(dir).any? { |f| DockerStacks.compose_file?(f) }
-      subdirs = Dir.children(dir).map { |c| File.join(dir, c) }
-                   .select { |p| File.directory?(p) && !File.basename(p).start_with?(".") }
-      [root, subdirs.any? { |d| compose_in?(d) }]
-    end
-
     # Do this repo's worktrees run a per-worktree stack? A compose file at the
     # root (docker's default project), or a repo teardown script (a repo that
     # names its stacks its own way, like walt_ui's backend/). Compose files
     # only below the root with no script (~/dev/custom's templates/) are not
     # a stack.
     def stack_repo?(repo)
-      compose_layout(repo).first ||
+      Dir.children(repo).any? { |f| DockerStacks.compose_file?(f) } ||
         REPO_SCRIPTS.any? { |s| File.file?(File.join(repo, s)) && File.executable?(File.join(repo, s)) }
     end
 
@@ -158,12 +149,6 @@ module DockerStacks
     end
 
     private
-
-    def compose_in?(dir)
-      Dir.children(dir).any? { |f| DockerStacks.compose_file?(f) }
-    rescue SystemCallError
-      true
-    end
 
     def first_line(*texts)
       texts.map(&:to_s).map(&:strip).find { |t| !t.empty? }.to_s.lines.first.to_s.strip
