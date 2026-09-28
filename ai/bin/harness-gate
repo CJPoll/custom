@@ -950,6 +950,90 @@ rescue Landed::Unreadable => e
     "origin's main at gate start."
 end
 
+# ---------------------------------------------------------------------------
+# ORIGIN FRESHNESS, CHECKED BEFORE ANY CHECK RUNS (DND-945)
+#
+# The landed-ref checks (check-guard-messages, check-tool-risk, check-bin-help)
+# compare the local refs/remotes/origin/main against origin (ai/lib/landed.rb),
+# and each one independently discovers a stale local ref as a Landed::Mismatch
+# -- but only when THAT check happens to run, which can be 10+ minutes into a
+# ~15 min gate. DND-876 measured exactly this: a stale local origin/main
+# failed 7 checks at the END of a run; `git fetch` and a re-run of the SAME
+# head passed 96/96. The fetch was always the fix; the gate just made it
+# expensive to discover.
+#
+# So the gate checks freshness FIRST, reusing the SAME live read
+# landed_pin_env already performs (no second network round trip -- see
+# ai/lib/landed.rb -> "ONE READ PER GATE RUN"). Three outcomes, printed as
+# TEXTUALLY DISTINCT lines on purpose (CLAUDE.md -> "A failed lookup must
+# never look like an empty one" -- "found fresh" and "could not look" must
+# never read the same):
+#   - the pin could not be read at all (no network, no origin remote -- a
+#     fixture/CI/sandbox environment): NOT a failure. Each landed-ref check
+#     already degrades to its own could-not-measure report, so this says so
+#     and CONTINUES rather than blocking a network-less run.
+#   - the pin WAS read and the local ref already IS it: fresh, continue.
+#   - the pin WAS read and the local ref is anything else (behind it, or
+#     missing): `git fetch origin` was never run here, and every landed-ref
+#     check would hit the same Mismatch this preflight now catches in
+#     seconds. Fails fast, with a distinct exit code and a Fix:. Never
+#     auto-fetches: a fetch mutates refs another process may be reading.
+#
+# NOT exit 3: elsewhere in this repo (check-hooks-registered,
+# check-inbox-registry) exit 3 means "could not measure the landed bar" --
+# environment-safe, not necessarily actionable. This is the opposite: origin
+# WAS read, and it gave a definite, actionable answer (stale). Reusing 3 here
+# would read to a script or reader who knows that convention as "nothing to
+# do", exactly the confusion CLAUDE.md -> "A failed lookup must never look
+# like an empty one" warns about. So this is its own, unused code.
+ORIGIN_STALE_EXIT = 6
+
+# [:fresh, sha] | [:stale, local_sha_or_nil, remote_sha] | [:unknown, reason].
+# pin_env/pin_probes are exactly what landed_pin_env(root) returned -- passed
+# in rather than re-read, so this never performs its own network call.
+def origin_freshness(root, pin_env, pin_probes)
+  remote = pin_env[Landed::PIN_SHA_ENV]
+  unless remote
+    reason = pin_probes.to_a.map { |ref, outcome| "#{ref} -> #{outcome}" }.join("; ")
+    return [:unknown, reason]
+  end
+
+  local, ok = Landed.git_read(root, "rev-parse", "--verify", "--quiet", "#{Landed::REF}^{commit}")
+  local = local.strip
+  return [:fresh, remote] if ok && local == remote
+
+  [:stale, (ok && !local.empty? ? local : nil), remote]
+end
+
+# Prints the outcome of origin_freshness. Returns true (proceed) or false
+# (the gate must stop, with ORIGIN_STALE_EXIT).
+def report_origin_freshness(result)
+  status, a, b = result
+  case status
+  when :fresh
+    puts "harness-gate: origin freshness OK — local #{Landed::REF} matches origin's " \
+         "#{Landed::REMOTE_REF} (#{a[0, 12]})."
+    true
+  when :unknown
+    puts "harness-gate: NOTE — could not verify origin freshness: #{a}. Proceeding " \
+         "without a freshness preflight — any landed-ref check that needs origin will " \
+         "read it itself and report could-not-measure if it also can't."
+    true
+  when :stale
+    warn "harness-gate: FAILED — local #{Landed::REF} is stale " \
+         "(#{a ? a[0, 12] : 'no local ref'}); origin's #{Landed::REMOTE_REF} is #{b[0, 12]}."
+    warn "  Fix: run `git fetch origin`, then re-run ai/bin/harness-gate. Every " \
+         "landed-ref check (check-guard-messages, check-tool-risk, check-bin-help, and " \
+         "any suite that runs them live) compares the local #{Landed::REF} against " \
+         "origin, and a stale local ref fails each of them with this same root cause " \
+         "deep into the run — this preflight catches it in seconds instead. It never " \
+         "auto-fetches: a fetch mutates refs another process may be reading."
+    false
+  else
+    raise "origin_freshness returned an unrecognised status #{status.inspect}"
+  end
+end
+
 # Runs the block with ENV temporarily merged with env (nil unsets); restores
 # every key afterwards.
 def with_env(env)
@@ -1101,16 +1185,19 @@ end
 # measures an inherited pin. Checks run on a bounded pool (see PARALLEL
 # EXECUTION); results print in DECLARED order, each with its wall time, so the
 # output stays stable and diffable. root/chdir exist for --self-test case 12b:
-# a fixture repo drives this exact loop. Returns [pin_env, failures], failures
+# a fixture repo drives this exact loop. `pin`, when given, is a pre-computed
+# [pin_env, pin_probes]: run_gate's origin-freshness preflight (DND-945)
+# already read it, so this does not read origin a second time; nil (every
+# other caller) reads it here. Returns [pin_env, failures], failures
 # being [label, argv, output] per failed check, in declared order.
 # An entry's optional third element names an environment adjustment
 # (check_env); the only one is :stash_fixture_optout.
 def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: gate_jobs,
-               timings: timings_path)
+               timings: timings_path, pin: nil)
   dups = checks.map(&:first).tally.select { |_, n| n > 1 }.keys
   raise ArgumentError, "run_checks: duplicate check label(s) #{dups.inspect}" unless dups.empty?
 
-  pin_env, pin_probes = landed_pin_env(root)
+  pin_env, pin_probes = pin || landed_pin_env(root)
   io.puts landed_pin_line(pin_env, pin_probes)
 
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -1275,6 +1362,22 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
     return 1
   end
 
+  # ORIGIN FRESHNESS (DND-945). Before any check runs — see "ORIGIN FRESHNESS,
+  # CHECKED BEFORE ANY CHECK RUNS" above. Reads the pin ONCE here; the same
+  # pin is handed to run_checks below so it is never re-read.
+  #
+  # Ordered AFTER the tree snapshot (`pre`, DND-896) on purpose. The snapshot
+  # must come before the first read of the tree (discovery), or the report
+  # could name a tree the early steps never saw. This preflight reads only
+  # refs/remotes/origin/main and origin itself, never HEAD or the working
+  # tree, and the `git fetch` its Fix: asks for leaves the snapshot's
+  # fingerprint unchanged. So it can sit here, after the cheap local
+  # refusals and before the checks, without widening what `pre` covers. A
+  # tree that cannot be identified also fails at the snapshot, before this
+  # makes a network call.
+  pin_env, pin_probes = landed_pin_env(root)
+  return ORIGIN_STALE_EXIT unless report_origin_freshness(origin_freshness(root, pin_env, pin_probes))
+
   # INLINE --self-test COVERAGE (DND-507): the check LIST itself must include
   # every inline suite a first-party tool defines. A gap here means the run
   # below would report PASS over a suite it never ran, so it fails first, like
@@ -1311,13 +1414,15 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
          "the same change that renames a check)."
     return 1
   end
-  run_attributed_checks(CHECKS, pre, jobs: jobs)
+  run_attributed_checks(CHECKS, pre, jobs: jobs, pin: [pin_env, pin_probes])
 end
 
 # Runs `checks` through the gate's own loop and reports the result against
 # `pre`, the snapshot run_gate took before anything measured the tree.
 # Everything run_gate does from run_checks to its return, extracted so
 # --self-test case 7f can drive it against a fixture repo with stub checks.
+# run_opts go to run_checks unchanged: run_gate passes jobs: and pin: (its
+# origin-freshness read, DND-945, so origin is read once per run).
 def run_attributed_checks(checks, pre, root: CUSTOM_DIR, chdir: CUSTOM_DIR, **run_opts)
   pin_env, failures = run_checks(checks, root: root, chdir: chdir, **run_opts)
 
@@ -2351,10 +2456,15 @@ def run_self_test
   gate_source = File.read(__FILE__)
   run_gate_source = gate_source[/^def run_gate\b.*?^end$/m]
   attributed_source = gate_source[/^def run_attributed_checks\b.*?^end$/m]
-  unless run_gate_source&.include?("run_attributed_checks(CHECKS, pre, jobs: jobs)") &&
+  # DND-945 adds the freshness preflight's pin to the same hand-off: run_gate
+  # passes it, and run_attributed_checks gives it to run_checks, so origin is
+  # read once per run.
+  unless run_gate_source&.include?("run_attributed_checks(CHECKS, pre, jobs: jobs, pin: [pin_env, pin_probes])") &&
+         attributed_source&.include?("run_checks(checks, root: root, chdir: chdir, **run_opts)") &&
          attributed_source&.include?("report_check_results(failures, checks.size, pre: pre")
     warn "self-test: FAIL — run_gate no longer delegates its check loop and report " \
-         "to run_attributed_checks(CHECKS, pre) -> report_check_results(..., pre: pre); " \
+         "to run_attributed_checks(CHECKS, pre, pin: ...) -> run_checks(..., pin: pin) " \
+         "and report_check_results(..., pre: pre); " \
          "the safe, attributed OK/FAILED reporting (cases 7d/7f) could be bypassed " \
          "with no test noticing"
     ok = false
@@ -2747,6 +2857,168 @@ def run_self_test
                 "the inherited pin must be cleared, not passed through")
   end
 
+  # 13 (DND-945). Origin freshness is checked BEFORE any check runs, not
+  #    discovered as a Landed::Mismatch by whichever landed-ref check happens
+  #    to run 10+ minutes into the gate (DND-876: a stale local origin/main
+  #    failed 7 checks at the END of a run; a fetch and re-run of the SAME
+  #    head passed 96/96). Driven against fixture repos with a bare origin, no
+  #    real network. Three outcomes, and they must print TEXTUALLY DISTINCT
+  #    lines (CLAUDE.md -> "A failed lookup must never look like an empty
+  #    one"): fresh, stale (fails fast with a Fix:), and unreadable (proceeds,
+  #    never a silent pass-alike).
+  Dir.mktmpdir("harness-gate-selftest-freshness") do |dir|
+    expect = lambda do |cond, msg|
+      unless cond
+        warn "self-test: FAIL — origin freshness (DND-945): #{msg}"
+        ok = false
+      end
+    end
+    git = lambda do |*args, chdir: dir|
+      out, _e, st = Open3.capture3({ "GIT_AUTHOR_NAME" => "t", "GIT_AUTHOR_EMAIL" => "t@t",
+                                     "GIT_COMMITTER_NAME" => "t", "GIT_COMMITTER_EMAIL" => "t@t" },
+                                   "git", *args, chdir: chdir)
+      [out.strip, st.success?]
+    end
+    origin = File.join(dir, "origin.git")
+    root = File.join(dir, "repo")
+    other = File.join(dir, "other")
+    git.call("-c", "init.defaultBranch=main", "init", "-q", "--bare", origin)
+    git.call("-c", "init.defaultBranch=main", "init", "-q", root)
+    git.call("-C", root, "commit", "-q", "--allow-empty", "-m", "landed")
+    git.call("-C", root, "remote", "add", "origin", origin)
+    git.call("-C", root, "push", "-q", "origin", "HEAD:refs/heads/main")
+    git.call("-C", root, "fetch", "-q", "origin")
+    a_sha, = git.call("-C", root, "rev-parse", "HEAD")
+
+    # FRESH: local refs/remotes/origin/main already is what origin reports.
+    env, probes = landed_pin_env(root)
+    result = origin_freshness(root, env, probes)
+    expect.call(result == [:fresh, a_sha], "expected [:fresh, #{a_sha.inspect}], got #{result.inspect}")
+    code, out, err = capture.call { report_origin_freshness(result) }
+    expect.call(code == true && out.include?("OK") && err.empty?,
+                "fresh must print an OK line on stdout and proceed (code #{code.inspect}, " \
+                "out #{out.inspect}, err #{err.inspect})")
+    fresh_out = out
+
+    # STALE: origin moves (another clone pushes) but root never fetches, so
+    # its local refs/remotes/origin/main is now behind what ls-remote reports.
+    git.call("clone", "-q", "-b", "main", origin, other)
+    git.call("-C", other, "commit", "-q", "--allow-empty", "-m", "elsewhere")
+    git.call("-C", other, "push", "-q", "origin", "HEAD:refs/heads/main")
+    b_sha, = git.call("-C", other, "rev-parse", "HEAD")
+    env2, probes2 = landed_pin_env(root)
+    result2 = origin_freshness(root, env2, probes2)
+    expect.call(result2 == [:stale, a_sha, b_sha], "expected [:stale, #{a_sha.inspect}, #{b_sha.inspect}], got #{result2.inspect}")
+    code2, out2, err2 = capture.call { report_origin_freshness(result2) }
+    expect.call(code2 == false, "a stale local ref must return false (do not proceed), got #{code2.inspect}")
+    expect.call(out2.empty?, "a stale result must print nothing on stdout, got #{out2.inspect}")
+    expect.call(err2.include?("stale") && err2.include?("Fix:") && err2.include?("git fetch origin"),
+                "a stale result must FAIL with a Fix: naming `git fetch origin` (stderr #{err2.inspect})")
+    expect.call(err2 != fresh_out && !err2.include?("OK"),
+                "the stale FAIL line must be textually distinct from the fresh OK line")
+
+    # UNREADABLE: origin cannot be reached at all (bad remote URL, never real
+    # network) -> "could not verify", and it PROCEEDS rather than failing.
+    git.call("-C", root, "remote", "set-url", "origin", File.join(dir, "no-such.git"))
+    env3, probes3 = landed_pin_env(root)
+    result3 = origin_freshness(root, env3, probes3)
+    expect.call(result3[0] == :unknown && result3[1].to_s.length.positive?,
+                "expected [:unknown, <non-empty reason>], got #{result3.inspect}")
+    code3, out3, err3 = capture.call { report_origin_freshness(result3) }
+    expect.call(code3 == true, "an unreadable origin must proceed (never fail CI/sandbox), got #{code3.inspect}")
+    expect.call(err3.empty?, "an unreadable-origin result must never print to stderr (it is not a failure), got #{err3.inspect}")
+    expect.call(out3.include?("could not verify origin freshness"),
+                "an unreadable origin must say so on stdout (out #{out3.inspect})")
+    expect.call(out3 != fresh_out && !out3.include?(" OK "),
+                "the could-not-verify NOTE must be textually distinct from the fresh OK line " \
+                "(out #{out3.inspect} vs fresh #{fresh_out.inspect})")
+
+    # 13b (DND-945). THE REAL ENTRY PATH, not these helpers directly: a
+    #     critic-review round on this Mission's earlier commit correctly
+    #     rejected "call origin_freshness/report_origin_freshness by hand" as
+    #     proof, because it never proves run_gate's OWN CLI dispatch actually
+    #     wires the preflight in ahead of everything else. So this drives the
+    #     REAL, unmodified `ai/bin/harness-gate` binary as a subprocess
+    #     (`ruby <fixture>/ai/bin/harness-gate`, no flags -- the exact
+    #     invocation a captain types) against a minimal fixture: just the
+    #     currently-running script itself (copied via __FILE__, so this
+    #     always tests whatever code is actually present) plus its three
+    #     require_relative dependencies, and one dummy self-test.sh to clear
+    #     the zero-discovery guard. That is enough, because the freshness
+    #     preflight runs BEFORE inline-self-test-coverage/missing_executables/
+    #     run_checks -- a stale (or fresh, or unreadable) verdict is reached
+    #     without any of CHECKS' real files needing to exist.
+    fixture = File.join(dir, "fixture")
+    FileUtils.mkdir_p(File.join(fixture, "ai/bin"))
+    FileUtils.mkdir_p(File.join(fixture, "ai/lib"))
+    FileUtils.mkdir_p(File.join(fixture, "some/test"))
+    FileUtils.cp(File.expand_path(__FILE__), File.join(fixture, "ai/bin/harness-gate"))
+    FileUtils.chmod(0o755, File.join(fixture, "ai/bin/harness-gate"))
+    FileUtils.cp(File.join(CUSTOM_DIR, "ai/lib/first_party.rb"), File.join(fixture, "ai/lib/first_party.rb"))
+    FileUtils.cp(File.join(CUSTOM_DIR, "ai/lib/landed.rb"), File.join(fixture, "ai/lib/landed.rb"))
+    FileUtils.cp(File.join(CUSTOM_DIR, "ai/lib/strict_argv.rb"), File.join(fixture, "ai/lib/strict_argv.rb"))
+    File.write(File.join(fixture, "some/test/self-test.sh"), "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, File.join(fixture, "some/test/self-test.sh"))
+    git.call("-c", "init.defaultBranch=main", "init", "-q", fixture)
+    git.call("-C", fixture, "add", "-A")
+    git.call("-C", fixture, "commit", "-q", "-m", "fixture")
+
+    f_origin = File.join(dir, "f-origin.git")
+    f_other = File.join(dir, "f-other")
+    git.call("-c", "init.defaultBranch=main", "init", "-q", "--bare", f_origin)
+    git.call("-C", fixture, "remote", "add", "origin", f_origin)
+    git.call("-C", fixture, "push", "-q", "origin", "HEAD:refs/heads/main")
+    git.call("-C", fixture, "fetch", "-q", "origin")
+
+    run_fixture = lambda { Open3.capture3("ruby", File.join(fixture, "ai/bin/harness-gate"), chdir: fixture) }
+
+    # FRESH, through the real subprocess: must print the OK line and proceed
+    # PAST the gate. It will fail LATER, for an unrelated and EXPECTED reason
+    # in this minimal fixture (inline --self-test coverage has nothing real to
+    # measure) -- the claim under test is only "did not stop at the gate".
+    fout, = run_fixture.call
+    expect.call(fout.include?("origin freshness OK"),
+                "the real `ai/bin/harness-gate` subprocess (fresh) must print the OK line " \
+                "(stdout #{fout.inspect})")
+    # 13c (DND-945 x DND-896). The two pre-run steps compose in a fixed
+    # order: the tree snapshot (`pre`) first, then this preflight. The
+    # snapshot must precede every read of the tree; the preflight reads only
+    # origin and refs/remotes/origin/main (see run_gate). Asserted on the
+    # real binary's output, not its source.
+    snap_line = fout.index("harness-gate: checks run against [tree ")
+    fresh_line = fout.index("origin freshness OK")
+    expect.call(snap_line && fresh_line && snap_line < fresh_line,
+                "the real subprocess must print its tree snapshot (\"checks run against\") " \
+                "BEFORE the origin-freshness line (stdout #{fout.inspect})")
+
+    # STALE, through the real subprocess: advance f-origin from a second
+    # clone, without ever fetching in `fixture` -- same shape as the unit
+    # tests above, but this time run_gate's own CLI dispatch is what runs,
+    # never origin_freshness/report_origin_freshness directly.
+    git.call("clone", "-q", "-b", "main", f_origin, f_other)
+    git.call("-C", f_other, "commit", "-q", "--allow-empty", "-m", "elsewhere")
+    git.call("-C", f_other, "push", "-q", "origin", "HEAD:refs/heads/main")
+    started = Time.now
+    sout, serr, sstatus = run_fixture.call
+    elapsed = Time.now - started
+    expect.call(sstatus.exitstatus == ORIGIN_STALE_EXIT,
+                "the real subprocess must exit ORIGIN_STALE_EXIT=#{ORIGIN_STALE_EXIT} on a stale " \
+                "local origin/main, got #{sstatus.exitstatus} (stdout #{sout.inspect}, stderr #{serr.inspect})")
+    expect.call(elapsed < 10,
+                "the real subprocess must fail FAST (seconds, not minutes) on a stale local " \
+                "origin/main -- took #{elapsed.round(2)}s")
+    expect.call(serr.include?("FAILED") && serr.include?("stale") && serr.include?("Fix:") &&
+                serr.include?("git fetch origin"),
+                "the real subprocess's stderr must FAIL with a Fix: naming `git fetch origin` " \
+                "(stderr #{serr.inspect})")
+    expect.call(sout.include?("harness-gate: checks run against [tree "),
+                "a stale result must still come AFTER the tree snapshot (13c's order); the " \
+                "snapshot line is missing (stdout #{sout.inspect})")
+    expect.call(!sout.include?("landed ref pinned"),
+                "a stale result must return BEFORE run_checks's own pin-announcement line -- " \
+                "it must never reach the check loop at all (stdout #{sout.inspect})")
+  end
+
   # 10 (DND-404). check-inbox-mock-orphans's REAP invocation (FINAL_CHECKS)
   #    must stay the LAST entry in CHECKS — it backstops
   #    scripts/test/inbox-client-capture's self-test, so it must run after
@@ -2961,7 +3233,14 @@ if ARGV.include?("--help") || ARGV.include?("-h")
     Usage:
       ai/bin/harness-gate              run every gate check in its verified-correct
                                        invocation form; prints PASS/FAIL per check
-                                       and exits non-zero if any fails
+                                       and exits non-zero if any fails. First
+                                       checks origin freshness (exit 6, before
+                                       any check runs, if the local
+                                       refs/remotes/origin/main is stale —
+                                       `git fetch origin` and re-run; distinct
+                                       from exit 3 elsewhere in this repo,
+                                       which means "could not measure" —
+                                       origin WAS read here)
       ai/bin/harness-gate --list       list the checks without running them
       ai/bin/harness-gate --self-test  assert the declared check list stays correct
                                        and complete (no model)
