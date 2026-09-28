@@ -51,15 +51,21 @@ USAGE = <<~EOF
              feature (Kind and Severity; Feature is authored), property_unset,
              unknown_value, unknown_project (never guessed), body_unread,
              blank_title, jev_decided (a property Jev set: never its own
-             label), provenance_unparseable. The title sent drops its
-             severity prefix; the body sent drops classification statements
-             ("Kind Bug", "Severity: HIGH", "Bug MEDIUM") and the
-             Jev classification line; at most #{TicketCorpus::MAX_BODY} characters.
+             label, title prefix included), provenance_unparseable, and
+             provenance_unread (a truncated body with no line: the line may
+             be past the page read). The title sent drops its severity
+             prefix; title and body drop classification statements ("Kind
+             Bug", "Severity: HIGH", "a HIGH severity", "Bug MEDIUM") and the
+             Jev classification line; at most #{TicketCorpus::MAX_BODY} characters of body.
+             A snapshot whose rows lack a Kind, Severity or Security select
+             (a renamed property) is refused, never read as unset.
   --dry-run  with --build: print the counts, write nothing
   --shadow-report --since UTC
              Over tickets created at or after UTC (e.g. 2026-09-29T00:00:00Z),
              read each body's LAST "Jev classification:" line and compare
-             every ACCEPTED judgment with the ticket's CURRENT value. Prints
+             every ACCEPTED judgment made in mode shadow with the ticket's
+             CURRENT value (mode on is excluded, as mode_on: that value may be
+             Jev's own; Feature and an unset value are excluded too). Prints
              filings, lines, no_provenance / unparseable / unread by ref,
              per use case accepted, agreed and the Wilson 95% lower bound (n/a
              when nothing was accepted, never 0), per judged label, and the
@@ -141,6 +147,9 @@ module Manager
       out.puts "#{uc}: #{rows.size} labels (#{fmt(TicketCorpus.counts(rows))}); excluded: #{fmt(result[:exclusions][uc])}"
     end
     out.puts "every label is weak (an agent filer set it): provenance tracker_record or title_prefix, never owner_confirmed"
+    if result[:labels].values.all?(&:empty?)
+      out.puts "0 labels: every ticket was excluded (reasons above); no use case can be evaluated from this snapshot"
+    end
     return 0 if opts[:dry_run]
 
     TicketCorpus::USE_CASES.each do |uc|

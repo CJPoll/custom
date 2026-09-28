@@ -450,8 +450,9 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   tracker reader), one case per ticket per use case, in the machine-local
   `ticket-{kind,severity,security}-{labels,corpus}.jsonl`. Labels use the
   tracker's spelling (`Bug`, `MEDIUM`; Security reads `security` for
-  `introduced` or `pre-existing`, else `none`). Every row is weak (an agent
-  filer set it, `"weak": true`) and never `owner_confirmed`:
+  `introduced` or `pre-existing` and `none` for `none`; an unset or other
+  value is excluded, never read as `none`). Every row is weak (an agent filer
+  set it, `"weak": true`) and never `owner_confirmed`:
   - `tracker_record`: the property, on a ticket created at or after
     2026-09-27T22:00Z (filed under the W2 rules). Earlier values are the W4
     backfill and are excluded as `before_cutoff`.
@@ -459,18 +460,26 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
     `MEDIUM` or `LOW`, at any date; a post-cutoff property wins.
   - Excluded and counted by reason: `feature` (Kind and Severity; Feature is
     authored), `property_unset`, `unknown_value`, `unknown_project` (never
-    guessed), `body_unread`, `blank_title`, `jev_decided` (a property whose
-    provenance line says Jev set it is never its own label), and
-    `provenance_unparseable`.
-  - The input sent is the title without its severity prefix, and the body
-    without the `Jev classification:` line or any classification statement
-    ("Kind Bug", "Severity: HIGH", "Bug MEDIUM"), so a case is judged on
-    content, not on a label leak.
+    guessed), `body_unread`, `blank_title`, `jev_decided` (a ticket whose
+    provenance line says Jev set that property is excluded for that use
+    case, a title prefix included), `provenance_unparseable`, and
+    `provenance_unread` (a truncated body with no line, which may lie past
+    the page read). A snapshot whose rows lack a Kind, Severity or Security
+    select (a renamed property) is refused, never read as unset.
+  - The input sent is the title without its severity prefix, and the title
+    and body without the `Jev classification:` line or any classification
+    statement ("Kind Bug", "Severity: HIGH", "a HIGH severity", "Bug
+    MEDIUM"), so a case is judged on content, not on a label leak.
 
-  `ticket-corpus --shadow-report --since` measures the shadow bar from ticket
+  `ticket-corpus --shadow-report --since` measures DND-1055's shadow bar
+  (Product Requirements R1055-3: at least 3 days, at least 35 accepted
+  judgments, and a Wilson 95% lower bound of at least 0.90 on their
+  agreement; a use case short of it at 14 days stays shadow) from ticket
   bodies alone: each ticket's LAST provenance line, every ACCEPTED judgment
-  compared with the value the ticket ended up with, and the Wilson 95% lower
-  bound (n/a with nothing accepted, never 0).
+  made in mode `shadow` compared with the value the ticket ended up with.
+  A judgment in mode `on` is excluded (`mode_on`: the value may be Jev's
+  own), as are a Feature's Kind and Severity (`feature`) and an unset value
+  (`current_unset`). Nothing accepted reads n/a, never 0.
 - **n/a reads "insufficient evidence"** in `judgment-eval`'s run and apply
   lines: the label stays disabled.
 - **One case, one label.** A question set's eval reading names exactly one

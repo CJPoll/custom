@@ -44,7 +44,7 @@ trap 'rm -rf "${TMP}"' EXIT INT TERM
 # PRE builds tickets: t.(n, created, props = {}) -> a snapshot ticket in the
 # harness epic EH, post-cutoff unless `created` says otherwise.
 PRE='POST = "2026-09-28T01:00:00.000Z"; PRE_CUT = "2026-09-26T12:00:00.000Z";
-t = ->(n, created = POST, extra = {}) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>"Ticket #{n} widget","area"=>"Harness","epic_ids"=>["EH"],"created_time"=>created,"kind"=>"Bug","severity"=>"MEDIUM","security"=>"none","blocks_text"=>["Body #{n}."],"body_read"=>true,"body_truncated"=>false}.merge(extra) };
+t = ->(n, created = POST, extra = {}) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>"Ticket #{n} widget","area"=>"Harness","epic_ids"=>["EH"],"created_time"=>created,"kind"=>"Bug","severity"=>"MEDIUM","security"=>"none","schema_missing"=>[],"blocks_text"=>["Body #{n}."],"body_read"=>true,"body_truncated"=>false}.merge(extra) };
 snap = ->(ts, at = "2026-10-02T00:00:00Z") { {"fetched_at"=>at,"epic_projects"=>{"EH"=>"harness","EW"=>"walt_ui"},"tickets"=>ts} };
 rows = ->(r, uc) { r[:labels][uc].map { |l| [l["id"], l["label"], l["provenance"]].join(" ") }.join("|") };
 ex = ->(r, uc) { r[:exclusions][uc].map { |k, v| "#{k} #{v}" }.join(", ") };
@@ -125,6 +125,27 @@ eq "15b an empty snapshot is an error, not an empty corpus" \
 eq "16 labels and corpus rows are ordered by ticket number (deterministic)" \
   "DND-2,DND-10" \
   "$(rb 'puts TicketCorpus.labels(snap.([t.(10), t.(2)]))[:labels]["ticket_kind"].map { |l| l["id"] }.join(",")')"
+eq "17 a truncated body with no provenance line is provenance_unread: Jev's line may be past the page [review 2]" \
+  "provenance_unread 1" \
+  "$(rb 'puts ex.(TicketCorpus.labels(snap.([t.(19, POST, "body_truncated"=>true)])), "ticket_kind")')"
+eq "18 severity words in either order and with a dash are redacted [review 4]" \
+  "This is a [classification] bug.|[classification]|Filed as a [classification], [classification]." \
+  "$(rb 'puts ["This is a HIGH severity bug.", "Severity — HIGH", "Filed as a Bug, severity HIGH."].map { |s| TicketCorpus.redact_body(s) }.join("|")')"
+eq "19 the title sent is redacted like the body [review 5]" \
+  "[classification]: [classification] auth bypass" \
+  "$(rb 'puts TicketCorpus.labels(snap.([t.(20, POST, "title"=>"Kind Bug: Severity HIGH auth bypass")]))[:corpus]["ticket_kind"].first["input"]["title"]')"
+eq "20 a title that is only a classification is blank_title [review 5]" \
+  "blank_title 1" \
+  "$(rb 'puts ex.(TicketCorpus.labels(snap.([t.(21, POST, "title"=>"Severity: HIGH")])), "ticket_kind")')"
+eq "21 a Kind/Severity/Security property missing from the tracker schema is an error, never property_unset [review 6]" \
+  "InputError Kind" \
+  "$(rb 'begin; TicketCorpus.labels(snap.([t.(22, POST, "schema_missing"=>["Kind"])])); puts "no error"; rescue TicketCorpus::InputError => e; puts "InputError #{e.message[/Kind/]}"; end')"
+eq "22 a title word that merely starts with a level is not a prefix ('LOW-hanging') [review 8]" \
+  "property_unset 1|LOW-hanging fruit in the widget" \
+  "$(rb 'r = TicketCorpus.labels(snap.([t.(23, PRE_CUT), t.(24, POST, "severity"=>nil, "title"=>"LOW-hanging fruit in the widget")])); puts [ex.(r, "ticket_severity").sub("before_cutoff 1, ", ""), r[:corpus]["ticket_kind"].first["input"]["title"]].join("|")')"
+eq "23 equal ticket numbers order by ref (stable) [review 7]" \
+  "DND-a,DND-b" \
+  "$(rb 'a = t.(5).merge("ref"=>"DND-a"); b = t.(5).merge("ref"=>"DND-b"); puts TicketCorpus.labels(snap.([b, a]))[:labels]["ticket_kind"].map { |l| l["id"] }.join(",")')"
 
 echo "== domain: shadow_report/2"
 
@@ -182,6 +203,16 @@ eq "s13 an unread body is counted body_unread, never no_provenance" \
 eq "s14 a truncated body with no line is provenance_unread (the line may be past the page), never no_provenance" \
   "provenance_unread 1 no_provenance 0" \
   "$(sh 'r = TicketCorpus.shadow_report(snap.([t.(1, POST, "body_truncated"=>true)]), SINCE); puts "provenance_unread #{r[:provenance_unread].size} no_provenance #{r[:no_provenance].size}"')"
+
+eq "s15 an accepted judgment in mode on is not a shadow case (Jev agreeing with itself) [review 1]" \
+  "accepted 0 mode_on 1" \
+  "$(sh 'l = line.("Bug", true).sub("\"mode\":\"shadow\"", "\"mode\":\"on\"").sub("\"source\":\"filer\"", "\"source\":\"jev\""); r = TicketCorpus.shadow_report(snap.([t.(1, POST, "blocks_text"=>[l])]), SINCE); k = r[:use_cases]["ticket_kind"]; puts "accepted #{k[:accepted]} mode_on #{k[:excluded]["mode_on"]}"')"
+eq "s16 an accepted judgment with no judged label is unparseable, never a crash [review 3]" \
+  "unparseable DND-2" \
+  "$(sh 'r = TicketCorpus.shadow_report(snap.([t.(2, POST, "blocks_text"=>[line.(nil, true)])]), SINCE); puts "unparseable #{r[:unparseable].join(",")}"')"
+eq "s17 an accepted judgment outside the label set is unparseable [review 3]" \
+  "unparseable DND-3" \
+  "$(sh 'r = TicketCorpus.shadow_report(snap.([t.(3, POST, "blocks_text"=>[line.("Feature", true)])]), SINCE); puts "unparseable #{r[:unparseable].join(",")}"')"
 
 echo "== bin"
 
@@ -243,6 +274,10 @@ OUT="$("${BIN}" --build --dir "${TMP}/old" 2>&1)"; RC=$?
 eq "--build over a pre-DND-1055 snapshot exits 1 [ticket]" "${RC}" "1"
 has "--build over a pre-DND-1055 snapshot names the missing field, with Fix:" "${OUT}" "created_time"
 lacks "--build prints no backtrace" "${OUT}" "ticket_corpus.rb:"
+mkdir -p "${TMP}/allold"
+ruby -rjson -r "${LIBRB}" -e "${PRE}; File.write(ARGV[0], JSON.generate(snap.([t.(1, PRE_CUT), t.(2, PRE_CUT)])))" "${TMP}/allold/finding-triage-snapshot.json"
+OUT="$("${BIN}" --build --dry-run --dir "${TMP}/allold" 2>&1)"
+has "--build says so when every ticket is excluded (0 labels is never silent) [review 9]" "${OUT}" "0 labels: every ticket was excluded"
 OUT="$("${BIN}" --bogus 2>&1)"; RC=$?
 eq "an unknown flag is usage (exit 2)" "${RC}" "2"
 

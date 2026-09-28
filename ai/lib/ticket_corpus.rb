@@ -66,15 +66,22 @@ module TicketCorpus
 
   # A title's severity prefix ("HIGH: ...", "MEDIUM [harness] ..."): the
   # title_prefix label source, stripped from every title sent.
-  TITLE_PREFIX = /\A\s*(CRITICAL|HIGH|MEDIUM|LOW)\b\s*[:\-–—]?\s*/
+  # The level must end the word: "LOW-hanging fruit" is no prefix.
+  TITLE_PREFIX = /\A\s*(CRITICAL|HIGH|MEDIUM|LOW)(?:\s*[:–—]\s*|\s+|\z)/
   VALUE = Regexp.union(ALL_KINDS + SEVERITIES + %w[pre-existing introduced none]).source
   # "Kind Bug", "Severity: MEDIUM", "Security `none`": a body stating a
   # classification is a label leak, redacted by its span.
-  STATEMENT = /\b(?:Kind|Severity|Security)\b\s*(?:[:=]|is|->|→)?\s*[`*"']?(?:#{VALUE})\b[`*"']?/i
+  STATEMENT = /\b(?:Kind|Severity|Security)\b\s*(?:[:=\-–—]|is|->|→)?\s*[`*"']?(?:#{VALUE})\b[`*"']?/i
+  # "a HIGH severity bug": the level before the word.
+  REVERSE = /\b(?:CRITICAL|HIGH|MEDIUM|LOW)\s+severity\b/i
   # "Bug MEDIUM", "Vulnerability HIGH": a Kind then a level (case-sensitive:
   # "the bug is high" is prose).
   PAIR = /\b(?:#{Regexp.union(ALL_KINDS).source})\s+(?:#{Regexp.union(SEVERITIES).source})\b/
   REDACTED = "[classification]"
+  # "a Bug, severity HIGH": a Kind listed beside a redacted statement.
+  KIND_BESIDE = /\b(?:#{Regexp.union(ALL_KINDS).source})\b(?=\s*[,·;]\s*\[classification\])/
+  # What an accepted judgment may name, per property (DND-991 labels).
+  JUDGED = { "kind" => KINDS, "severity" => SEVERITIES, "security" => %w[security none] }.freeze
 
   class InputError < StandardError
     attr_reader :fix
@@ -96,10 +103,17 @@ module TicketCorpus
     tickets = Array(snapshot["tickets"])
     raise InputError.new("the snapshot holds no tickets", "re-run triage-corpus --fetch; zero tickets is a failed read, not an empty tracker") if tickets.empty?
 
-    stale = tickets.reject { |t| t["created_time"].is_a?(String) && %w[kind severity security].all? { |k| t.key?(k) } }
+    stale = tickets.reject { |t| t["created_time"].is_a?(String) && %w[kind severity security schema_missing].all? { |k| t.key?(k) } }
     unless stale.empty?
-      raise InputError.new("#{stale.size} of #{tickets.size} snapshot tickets lack created_time, kind, severity or security (first: #{stale.first['ref']})",
+      raise InputError.new("#{stale.size} of #{tickets.size} snapshot tickets lack created_time, kind, severity, security or schema_missing (first: #{stale.first['ref']})",
                            "re-run triage-corpus --fetch (DND-1055 added those fields); the snapshot predates it")
+    end
+    # A property missing from the tracker (renamed or retyped) would read as
+    # "unset" on every ticket: 0 labels, exit 0. It is an error instead.
+    missing = tickets.flat_map { |t| Array(t["schema_missing"]) }.uniq.sort
+    unless missing.empty?
+      raise InputError.new("the tracker rows carry no select property #{missing.join(', ')}",
+                           "the DND Tickets schema changed: update TriageCorpus.ticket_from_row and ticket-corpus to the new property, then re-run triage-corpus --fetch")
     end
     tickets
   end
@@ -130,10 +144,15 @@ module TicketCorpus
     valid_provenance?(doc) ? [:ok, doc] : [:unparseable]
   end
 
+  # An accepted judgment must name a label of its property: an accepted
+  # judgment with no answer, or an answer outside the set, is a garbled line.
   def valid_provenance?(doc)
     doc.is_a?(Hash) && PROPERTY.values.all? do |key|
       p = doc[key]
-      p.is_a?(Hash) && [true, false].include?(p["accepted"]) && (p["judged"].nil? || p["judged"].is_a?(String)) && SOURCES.include?(p["source"])
+      next false unless p.is_a?(Hash) && [true, false].include?(p["accepted"]) && SOURCES.include?(p["source"])
+      next false unless p["judged"].nil? || p["judged"].is_a?(String)
+
+      p["accepted"] == false || JUDGED.fetch(key).include?(p["judged"])
     end
   end
 
@@ -147,7 +166,13 @@ module TicketCorpus
   # classification statement replaced, so a case is judged on content.
   def redact_body(text)
     kept = text.to_s.each_line.reject { |l| l.lstrip.start_with?(PROVENANCE_PREFIX) }.join
-    kept.gsub(STATEMENT, REDACTED).gsub(PAIR, REDACTED).strip
+    kept.gsub(REVERSE, REDACTED).gsub(STATEMENT, REDACTED).gsub(PAIR, REDACTED).gsub(KIND_BESIDE, REDACTED).strip
+  end
+
+  # sent_title(title) -> the title as the eval sends it: no severity prefix,
+  # and redacted like the body.
+  def sent_title(title)
+    truncate(redact_body(strip_title(title)), MAX_TITLE)
   end
 
   def truncate(text, max) = text.length > max ? text[0, max] : text
@@ -156,8 +181,11 @@ module TicketCorpus
   def common_exclusion(ticket, project, prov)
     return "unknown_project" if project.nil?
     return "body_unread" unless ticket["body_read"] == true
-    return "blank_title" if strip_title(ticket["title"]).gsub(/[[:space:]​﻿]/, "").empty?
+    return "blank_title" unless sent_title(ticket["title"]).gsub(REDACTED, "").match?(/[[:alnum:]]/)
     return "provenance_unparseable" if prov.first == :unparseable
+    # The line is appended last; past the fetched page it may say Jev set a
+    # value, which must never become its own label.
+    return "provenance_unread" if prov.first == :none && ticket["body_truncated"] == true
 
     nil
   end
@@ -197,7 +225,7 @@ module TicketCorpus
   # rows}, exclusions: {uc => {reason => n}}}. Deterministic: rows are in
   # ticket-number order.
   def labels(snapshot, cutoff = CUTOFF)
-    tickets = tickets!(snapshot).sort_by { |t| number(t["ref"]) }
+    tickets = tickets!(snapshot).sort_by { |t| [number(t["ref"]), t["ref"].to_s] }
     epic_projects = snapshot.fetch("epic_projects")
     labeled_at = snapshot.fetch("fetched_at")
     cut = time(cutoff, "cutoff")
@@ -227,7 +255,7 @@ module TicketCorpus
 
   def input(ticket, project)
     {
-      "title" => truncate(strip_title(ticket["title"]), MAX_TITLE),
+      "title" => sent_title(ticket["title"]),
       "body" => truncate(redact_body(lines(ticket).join("\n")), MAX_BODY),
       "project" => project
     }
@@ -265,7 +293,7 @@ module TicketCorpus
   def shadow_report(snapshot, since)
     from = time(since, "--since")
     fetched = time(snapshot.fetch("fetched_at"), "fetched_at")
-    tickets = tickets!(snapshot).select { |t| time(t["created_time"], "#{t['ref']} created_time") >= from }.sort_by { |t| number(t["ref"]) }
+    tickets = tickets!(snapshot).select { |t| time(t["created_time"], "#{t['ref']} created_time") >= from }.sort_by { |t| [number(t["ref"]), t["ref"].to_s] }
     report = { since: since, fetched_at: snapshot["fetched_at"], window_days: ((fetched - from) / 86_400.0).round(1),
                filings: tickets.size, lines: 0, no_provenance: [], unparseable: [], body_unread: [], provenance_unread: [],
                use_cases: USE_CASES.to_h { |uc| [uc, { accepted: 0, agreed: 0, excluded: Hash.new(0), by_label: Hash.new { |h, k| h[k] = { accepted: 0, agreed: 0 } } }] } }
@@ -291,6 +319,9 @@ module TicketCorpus
 
   def tally(u, use_case, ticket, prop)
     return unless prop["accepted"] == true
+    # Only a shadow judgment is evidence: in mode on the value may be Jev's
+    # own, so it would agree with itself.
+    return u[:excluded]["mode_#{prop['mode']}"] += 1 unless prop["mode"] == "shadow"
     return u[:excluded]["feature"] += 1 if use_case != "ticket_security" && ticket["kind"] == "Feature"
 
     now = current(use_case, ticket)
