@@ -210,6 +210,10 @@ tools:
   # a judgment_calls row (and, with a key, spends TypeSafe budget). External
   # state, so destructive, like judgment-eval.
   skills/athena:ticket-management/scripts/finding-triage: { class: destructive, reason: judgments }
+  # ticket-classify (DND-1054) has no tracker client at all, but like
+  # finding-triage it posts to the Athena server, which records judgment_calls
+  # rows and spends the owner's judgments budget: server state, so destructive.
+  skills/athena:ticket-management/scripts/ticket-classify: { class: destructive, reason: judgments }
   # DND-775: the agent PATH git wrapper. It refuses stash-list writes, then
   # execs the real git with argv unchanged, so it can do anything git can.
   agent-bin/git: { class: destructive, reason: git }

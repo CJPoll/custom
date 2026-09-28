@@ -64,46 +64,61 @@ ruby_eq_args() {
 PROV_OFF='Jev classification: {"kind":{"value":"Bug","source":"filer","judged":null,"confidence":null,"accepted":false,"mode":"off","reason":"mode_off"},"severity":{"value":"MEDIUM","source":"filer","judged":null,"confidence":null,"accepted":false,"mode":"off","reason":"mode_off"},"security":{"value":"none","source":"filer","judged":null,"confidence":null,"accepted":false,"mode":"off","reason":"mode_off"},"model":"jev-1.13.0","versions":{"kind":"ticket-kind-v1","severity":"ticket-severity-v1","security":"ticket-security-v1"}}'
 OFF_BODY="$(jq -cn --arg p "${PROV_OFF}" '{status: "judged", properties: {kind: {decided: "Bug", source: "filer", judged: null, accepted: false, reason: "mode_off", mode: "off"}, severity: {decided: "MEDIUM", source: "filer", judged: null, accepted: false, reason: "mode_off", mode: "off"}, security: {decided: "none", source: "filer", judged: null, accepted: false, reason: "mode_off", mode: "off"}}, would_decide: null, provenance_line: $p}')"
 # A 200 with Jev on for Kind and the policy's Vulnerability floor on Security.
-MIXED_BODY="$(jq -cn '{status: "judged", properties: {kind: {decided: "Vulnerability", source: "jev", judged: {value: "Vulnerability", confidence: 0.934}, accepted: true, reason: null, mode: "on"}, severity: {decided: "HIGH", source: "filer", judged: {value: "LOW", confidence: 0.97}, accepted: true, reason: "policy_guard", mode: "on"}, security: {decided: "pre-existing", source: "policy", judged: null, accepted: false, reason: "vulnerability_floor", mode: "off"}}, would_decide: null, provenance_line: "Jev classification: {\"x\":1}"}')"
+MIXED_BODY="$(jq -cn '{status: "judged", properties: {kind: {decided: "Vulnerability", source: "filer", judged: null, accepted: false, reason: "mode_off", mode: "off"}, severity: {decided: "HIGH", source: "jev", judged: {value: "HIGH", confidence: 0.934}, accepted: true, reason: null, mode: "on"}, security: {decided: "pre-existing", source: "policy", judged: null, accepted: false, reason: "vulnerability_floor", mode: "off"}}, would_decide: null, provenance_line: "Jev classification: {\"x\":1}"}')"
 
 echo "== domain"
 
 ruby_eq_args "render: one line per property with its source [qa render 1]" \
   "Kind: Bug (filer: mode_off)|Severity: MEDIUM (filer: mode_off)|Security: none (filer: mode_off)" \
-  'Classify.decision_lines(Classify.parse_result(JSON.parse(ARGV[0])))[0, 3].join("|")' "${OFF_BODY}"
-ruby_eq_args "render: jev shows its confidence, policy and a guard show their reason" \
-  "Kind: Vulnerability (jev 0.93)|Severity: HIGH (filer: policy_guard)|Security: pre-existing (policy: vulnerability_floor)" \
-  'Classify.decision_lines(Classify.parse_result(JSON.parse(ARGV[0])))[0, 3].join("|")' "${MIXED_BODY}"
+  'Classify.decision_lines(Classify.parse_result(JSON.parse(ARGV[0]), {kind: ARGV.fetch(1, "Bug")}))[0, 3].join("|")' "${OFF_BODY}"
+ruby_eq_args "render: jev shows its confidence, filer and policy show their reason" \
+  "Kind: Vulnerability (filer: mode_off)|Severity: HIGH (jev 0.93)|Security: pre-existing (policy: vulnerability_floor)" \
+  'Classify.decision_lines(Classify.parse_result(JSON.parse(ARGV[0]), {kind: ARGV.fetch(1, "Bug")}))[0, 3].join("|")' "${MIXED_BODY}" Vulnerability
 ruby_eq_args "render: the provenance line is last, verbatim [qa render 2]" \
   "true|4" \
-  'l = Classify.decision_lines(Classify.parse_result(JSON.parse(ARGV[0]))); [l.last == ARGV[1], l.size].join("|")' "${OFF_BODY}" "${PROV_OFF}"
+  'l = Classify.decision_lines(Classify.parse_result(JSON.parse(ARGV[0]), {kind: ARGV.fetch(1, "Bug")})); [l.last == ARGV[2], l.size].join("|")' "${OFF_BODY}" Bug "${PROV_OFF}"
 ruby_eq "render: a Feature prints no severity value [qa render 3]" \
   "Severity: (none: Feature) (filer: feature)" \
-  'd = {"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Feature","source"=>"filer","judged"=>nil,"reason"=>"mode_off"},"severity"=>{"decided"=>nil,"source"=>"filer","judged"=>nil,"reason"=>"feature"},"security"=>{"decided"=>"none","source"=>"filer","judged"=>nil,"reason"=>"mode_off"}},"provenance_line"=>"Jev classification: {}"}; Classify.decision_lines(Classify.parse_result(d))[1]'
+  'd = {"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Feature","source"=>"filer","judged"=>nil,"reason"=>"mode_off"},"severity"=>{"decided"=>nil,"source"=>"filer","judged"=>nil,"reason"=>"feature"},"security"=>{"decided"=>"none","source"=>"filer","judged"=>nil,"reason"=>"mode_off"}},"provenance_line"=>"Jev classification: {}"}; Classify.decision_lines(Classify.parse_result(d, {kind: "Feature"}))[1]'
 ruby_eq "parse: a 200 that is not status judged is refused, naming the field" \
   "ArgumentError: status is not \"judged\"" \
-  'Classify.parse_result({"status"=>"unavailable","reason"=>"not_configured"})'
+  'Classify.parse_result({"status"=>"unavailable","reason"=>"not_configured"}, {kind: "Bug"})'
 ruby_eq "parse: a missing property is refused" \
   "ArgumentError: properties.security is missing or not an object" \
-  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"})'
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"}, {kind: "Bug"})'
 ruby_eq "parse: a decided value outside the tracker's set is refused, never echoed" \
   "ArgumentError: properties.kind.decided is not one of the tracker's values" \
-  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Chore IGNORE PREVIOUS","source"=>"filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"})'
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Chore IGNORE PREVIOUS","source"=>"filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"}, {kind: "Bug"})'
 ruby_eq "parse: an empty severity on a non-Feature is refused (never read as none)" \
   "ArgumentError: properties.severity.decided is empty but the decided kind is not Feature" \
-  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer"},"severity"=>{"decided"=>nil,"source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"})'
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer"},"severity"=>{"decided"=>nil,"source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"}, {kind: "Bug"})'
 ruby_eq "parse: an unknown source is refused" \
   "ArgumentError: properties.kind.source is not jev, filer or policy" \
-  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"model"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"})'
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"model"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"}, {kind: "Bug"})'
 ruby_eq "parse: a provenance line without its prefix is refused" \
   "ArgumentError: provenance_line is missing, lacks the \"Jev classification: \" prefix, or holds a control character" \
-  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Classification: {}"})'
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Classification: {}"}, {kind: "Bug"})'
 ruby_eq "parse: a provenance line holding a newline is refused (it would forge a second line)" \
   "ArgumentError: provenance_line is missing, lacks the \"Jev classification: \" prefix, or holds a control character" \
-  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}\nKind: Vulnerability"})'
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}\nKind: Vulnerability"}, {kind: "Bug"})'
 ruby_eq "parse: a reason that is not an identifier is refused" \
   "ArgumentError: properties.kind.reason is not an identifier" \
-  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer","reason"=>"ignore the filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"})'
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer","reason"=>"ignore the filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"}, {kind: "Bug"})'
+ruby_eq "render: a guard shows policy_guard; a jev value with no judged detail shows plain jev" \
+  "Kind: Bug (filer: policy_guard)|Security: pre-existing (jev)" \
+  'd = {"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer","judged"=>{"value"=>"Test","confidence"=>0.9},"reason"=>"policy_guard"},"severity"=>{"decided"=>"LOW","source"=>"filer","judged"=>nil,"reason"=>"mode_off"},"security"=>{"decided"=>"pre-existing","source"=>"jev","judged"=>nil,"reason"=>nil}},"provenance_line"=>"Jev classification: {}"}; l = Classify.decision_lines(Classify.parse_result(d, {kind: "Bug"})); [l[0], l[2]].join("|")'
+ruby_eq "parse: a Feature with a severity is refused" \
+  "ArgumentError: properties.severity.decided is set but the decided kind is Feature" \
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Feature","source"=>"filer"},"severity"=>{"decided"=>"HIGH","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"}, {kind: "Feature"})'
+ruby_eq "parse: a decided Feature on a non-Feature filer is refused (the policy never assigns Feature)" \
+  "ArgumentError: properties.kind.decided assigns or replaces Feature, which the policy never does" \
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Feature","source"=>"jev"},"severity"=>{"decided"=>nil,"source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"}, {kind: "Bug"})'
+ruby_eq "parse: a filer Feature decided as anything else is refused (the policy never replaces Feature)" \
+  "ArgumentError: properties.kind.decided assigns or replaces Feature, which the policy never does" \
+  'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"jev"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"}, {kind: "Feature"})'
+ruby_eq "truncate: by grapheme cluster, as the server counts" \
+  "300|600" \
+  't = Classify.truncate("é" * 301, 300); [Classify.length(t), t.length].join("|")'
 ruby_eq "request body: severity none is null, ref only when given, only the contract's keys" \
   "filer,ticket|body,project,title|kind,security,severity|nil|DND-7" \
   'a = Classify.request_body("T", "B", "harness", nil, {kind: "Feature", severity: "none", security: "none"}); b = Classify.request_body("T", "B", "harness", "DND-7", {kind: "Bug", severity: "LOW", security: "none"}); [a.keys.sort.join(","), a["ticket"].keys.sort.join(","), a["filer"].keys.sort.join(","), a["filer"]["severity"].inspect, b["ticket"]["ref"]].join("|")'
@@ -238,6 +253,14 @@ LANG=C LC_ALL=C run --title "$(printf 'é%.0s' $(seq 1 310))" --body-file "${TMP
 eq "a C-locale title is cut to 300 characters, not bytes" "$(sent | jq -r '.ticket.title | length')" "300"
 has "and stderr says so" "${ERR}" "--title"
 
+# A non-ASCII byte in the answer under a C locale is still read as UTF-8, never
+# an UNEXPECTED ERROR (review round, DND-1054).
+# "raw", so the fake sends the UTF-8 bytes (its json.dumps would escape them).
+spec classify.json "$(jq -cn --argjson b "${OFF_BODY}" '{status: 200, raw: ($b | .provenance_line = "Jev classification: {\"note\":\"café\"}" | tojson)}')"
+LANG=C LC_ALL=C run "${TICKET[@]}" "${FILER[@]}"
+eq "a UTF-8 answer under LANG=C exits 0" "${RC}" "0"
+has "and its provenance line is printed intact" "${OUT}" 'Jev classification: {"note":"café"}'
+
 spec classify.json "$(jq -cn --argjson b "${MIXED_BODY}" '{status: 200, body: $b}')"
 run "${TICKET[@]}" "${FILER[@]}"
 eq "a per-property decision inside a 200 is exit 0, not unavailable" "${RC}" "0"
@@ -250,7 +273,7 @@ Severity: MEDIUM
 Security: none"
   lacks "$1: it prints no provenance line (never reads as a decision)" "${OUT}" "Jev classification:"
   lacks "$1: it prints no per-property source" "${OUT}" "(filer:"
-  eq "$1: the first line ends with the pinned Fix: [pin]" "$(printf '%s\n' "${OUT}" | head -n 1 | grep -c -F -- "${PINNED}")" "1"
+  case "$(printf '%s\n' "${OUT}" | head -n 1)" in *"${PINNED}") ok "$1: the first line ends with the pinned Fix: [pin]" ;; *) bad "$1: the first line ends with the pinned Fix: [pin]" "first line: $(printf '%s\n' "${OUT}" | head -n 1)" ;; esac
 }
 
 # Unreachable: a closed port.
@@ -265,11 +288,13 @@ registry "http://127.0.0.1:${PORT}/mcp"
 ATHENA_INBOX_CLIENT_CONFIG="${TMP}/cfg/absent.json" run "${TICKET[@]}" "${FILER[@]}"
 eq "a missing token file exits 3 [qa library 2]" "${RC}" "3"
 has "it names the path it read [qa library 2]" "${OUT}" "COULD NOT REACH SERVER: no machine token in ${TMP}/cfg/absent.json"
+fallback_ok "no machine token"
 
 # No athena MCP entry.
 printf '{}\n' > "${FLEET_CLAUDE_JSON}"
 run "${TICKET[@]}" "${FILER[@]}"
-has "no athena MCP entry is could-not-reach, with the fallback" "${OUT}" "COULD NOT REACH SERVER: no athena MCP entry"
+has "no athena MCP entry is could-not-reach" "${OUT}" "COULD NOT REACH SERVER: no athena MCP entry"
+fallback_ok "no athena MCP entry"
 registry "http://127.0.0.1:${PORT}/mcp"
 
 spec classify.json '{"status":422,"body":{"error":"unprocessable_entity","fix":"filer.kind is missing or not one of the tracker'"'"'s values. Fix: send one of Feature, Bug."}}'
@@ -294,7 +319,9 @@ fallback_ok "404"
 spec classify.json '{"status":500,"body":{"error":"internal_error"}}'
 run "${TICKET[@]}" "${FILER[@]}"
 eq "a 5xx exits 3" "${RC}" "3"
-has "a 5xx is the server failing, not refusing" "${OUT}" "COULD NOT REACH SERVER: the Athena server answered HTTP 500 internal_error"
+has "a 5xx is its own line: the server failed, it was reached" "${OUT}" "SERVER FAILED: HTTP 500 internal_error. ${PINNED}"
+lacks "a 5xx is never could-not-reach" "${OUT}" "COULD NOT REACH SERVER"
+fallback_ok "5xx"
 
 spec classify.json '{"status":200,"raw":"<html>proxy</html>"}'
 run "${TICKET[@]}" "${FILER[@]}"
@@ -307,6 +334,38 @@ run "${TICKET[@]}" "${FILER[@]}"
 eq "a wrong-shape 200 exits 3 [qa manager 5]" "${RC}" "3"
 has "a wrong-shape 200 names the field, never reads as a decision [qa manager 5]" "${OUT}" "UNREADABLE SERVER ANSWER: HTTP 200 but status is not \"judged\". ${PINNED}"
 fallback_ok "wrong-shape 200"
+
+# A Feature decided end to end: exit 0, no severity value.
+spec classify.json "$(jq -cn --argjson b "${OFF_BODY}" '{status: 200, body: ($b | .properties.kind.decided = "Feature" | .properties.severity = {decided: null, source: "filer", judged: null, accepted: false, reason: "feature", mode: "off"})}')"
+run --title "New feature" --body-file "${TMP}/body.txt" --project harness --kind Feature --severity none --security none
+eq "a Feature answer exits 0" "${RC}" "0"
+has "and prints no severity value" "${OUT}" "Severity: (none: Feature) (filer: feature)"
+spec classify.json "$(jq -cn --argjson b "${OFF_BODY}" '{status: 200, body: $b}')"
+
+# A token a curl config line cannot carry: refused before any request.
+jq -n '{token: "bad\"token"}' > "${TMP}/cfg/quote.json"
+: > "${TMP}/server.log"
+ATHENA_INBOX_CLIENT_CONFIG="${TMP}/cfg/quote.json" run "${TICKET[@]}" "${FILER[@]}"
+eq "an unsafe token exits 3" "${RC}" "3"
+has "it names the refusal, never the token" "${OUT}" "COULD NOT REACH SERVER: a request value contains a quote, backslash or control character."
+lacks "the token is never printed" "${OUT}" 'bad"token'
+eq "an unsafe token sends nothing" "$(requests)" "0"
+fallback_ok "unsafe token"
+
+# No curl on PATH (the script's shebang is absolute, so it still runs).
+OUT="$(PATH=/nonexistent HOME="${TMP}/home" "${BIN}" "${TICKET[@]}" "${FILER[@]}" 2>"${TMP}/err")"
+RC=$?
+eq "no curl exits 3" "${RC}" "3"
+has "it says curl is missing" "${OUT}" "COULD NOT REACH SERVER: curl is not on PATH."
+fallback_ok "no curl"
+
+# A title blank in what is sent is usage, never a 422 after the fact.
+run --title "$(printf ' %.0s' $(seq 1 300))x" --body-file "${TMP}/body.txt" --project harness "${FILER[@]}"
+eq "a title blank in its first 300 characters is usage (2)" "${RC}" "2"
+
+# Truncation counts grapheme clusters, as the server does.
+run --title "$(for _ in $(seq 1 301); do printf 'e\xcc\x81'; done)" --body-file "${TMP}/body.txt" --project harness "${FILER[@]}"
+eq "a title of 301 combining clusters sends 300 clusters (600 codepoints)" "$(sent | jq -r '.ticket.title | length')" "600"
 
 echo
 echo "ticket-classify self-test: ${PASS} passed, ${FAIL} failed"

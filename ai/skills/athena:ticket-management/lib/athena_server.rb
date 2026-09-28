@@ -124,7 +124,11 @@ module AthenaServer
       config << "connect-timeout = 10\nmax-time = #{max_time}\nsilent\n"
       out, _err, status = Open3.capture3("curl", "--config", "-", stdin_data: config)
       config.clear
-      { curl_rc: status.exitstatus, status: out.strip.to_i, body: File.exist?(resp) ? File.read(resp) : "" }
+      # The answer is read as UTF-8 whatever the locale: under LANG=C the
+      # default external encoding is US-ASCII, and JSON.parse then raises on
+      # the first non-ASCII byte (DND-1054 review round).
+      body = File.exist?(resp) ? File.binread(resp).force_encoding(Encoding::UTF_8) : +""
+      { curl_rc: status.exitstatus, status: out.strip.to_i, body: body }
     end
   rescue Errno::ENOENT
     raise Unreachable, "curl is not on PATH"

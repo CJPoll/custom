@@ -57,7 +57,8 @@ USAGE = <<~EOF
     --security X     your Security: none, introduced or pre-existing
     --ref DND-N      an existing ticket's id (a reclassification); omit it
                      for a new filing
-    --json           print the server's result as JSON instead of lines
+    --json           on exit 0, print the server's result as JSON instead of
+                     lines (exit 2 and 3 print as without it)
 
   Output (stdout), exit 0 -- the server's decision, one line per property,
   then its provenance line verbatim (paste that into the ticket body):
@@ -66,14 +67,19 @@ USAGE = <<~EOF
     Security: none (filer: mode_off)
     Jev classification: {...}
   The parenthesis is the value's source: `jev <confidence>`, `filer: <reason>`
-  or `policy: <reason>`. With every mode off (the shipped state) each is
-  `filer: mode_off`: your own values, unchanged.
+  or `policy: <reason>`. With every mode off (the shipped state) each is your
+  own value with `filer: mode_off`, except: a Feature's severity is
+  `(none: Feature) (filer: feature)`; a Vulnerability filed with Security
+  none is decided `pre-existing (policy: vulnerability_floor)`; and an
+  unknown project reads `filer: domain_not_permitted`.
 
   Output, exit 3 -- the classification is unavailable. One line ending
   "#{UNAVAILABLE_FIX}", then your own values:
       "COULD NOT REACH SERVER: <why>. #{UNAVAILABLE_FIX}"
       "SERVER REFUSED THE REQUEST: HTTP <status> <error>: <server fix>. #{UNAVAILABLE_FIX}"
+      "SERVER FAILED: HTTP <status> <error>. #{UNAVAILABLE_FIX}"   (a 5xx)
       "UNREADABLE SERVER ANSWER: HTTP 200 <what>. #{UNAVAILABLE_FIX}"
+      "#{PROG}: UNEXPECTED ERROR: <class>. #{UNAVAILABLE_FIX}"   (a bug here)
     Decided (filer; classification unavailable):
     Kind: Bug
     Severity: MEDIUM
@@ -154,15 +160,22 @@ module Classify
     nil
   end
 
-  # blank?(text) -> true for "" and Unicode whitespace only (the server
-  # trims Unicode whitespace, so an ASCII-only strip would send a title it
-  # refuses).
+  # blank?(text) -> true for "" and Unicode whitespace only. The server trims
+  # Unicode whitespace (String.trim), so an ASCII-only strip would send a
+  # title it refuses. Zero-width characters are not whitespace to either side.
   def blank?(text)
-    text.to_s.gsub(/[[:space:]​﻿]/, "").empty?
+    text.to_s.gsub(/[[:space:]]/, "").empty?
   end
 
+  # length(text) -> the length the server measures: grapheme clusters, as
+  # Elixir's String.length counts them.
+  def length(text)
+    text.grapheme_clusters.size
+  end
+
+  # truncate(text, max) -> at most max grapheme clusters, never a split one.
   def truncate(text, max)
-    text.length > max ? text[0, max] : text
+    length(text) > max ? text.grapheme_clusters.first(max).join : text
   end
 
   # request_body(...) -> the closed body the server's schema accepts: the
@@ -175,9 +188,10 @@ module Classify
     { "ticket" => ticket, "filer" => { "kind" => filer[:kind], "severity" => severity, "security" => filer[:security] } }
   end
 
-  # parse_result(doc) -> doc, when it is the contract's judged shape; raises
-  # ArgumentError naming the first field at fault (never its value).
-  def parse_result(doc)
+  # parse_result(doc, filer) -> doc, when it is the contract's judged shape
+  # for this filer; raises ArgumentError naming the first field at fault
+  # (never its value).
+  def parse_result(doc, filer)
     raise ArgumentError, "is not a JSON object" unless doc.is_a?(Hash)
     raise ArgumentError, "status is not \"judged\"" unless doc["status"] == "judged"
 
@@ -185,7 +199,7 @@ module Classify
     raise ArgumentError, "properties is missing or not an object" unless props.is_a?(Hash)
 
     PROPERTIES.each_key { |name| check_property(name, props[name]) }
-    check_decided(props)
+    check_decided(props, filer)
     line = doc["provenance_line"]
     unless line.is_a?(String) && line.start_with?(PREFIX) && !/[[:cntrl:]]/.match?(line)
       raise ArgumentError, "provenance_line is missing, lacks the \"#{PREFIX}\" prefix, or holds a control character"
@@ -206,16 +220,22 @@ module Classify
     raise ArgumentError, "#{where}.judged has no numeric confidence"
   end
 
-  # The decided values must be the tracker's, and an empty severity is only a
-  # Feature's: an empty value is never read as a decision.
-  def check_decided(props)
+  # The decided values must be the tracker's. Feature is authored: it is
+  # decided exactly when the filer sent it, and only a Feature has an empty
+  # severity. An empty value is never read as a decision.
+  def check_decided(props, filer)
     kind = props["kind"]["decided"]
     raise ArgumentError, "properties.kind.decided is not one of the tracker's values" unless KINDS.include?(kind)
     raise ArgumentError, "properties.security.decided is not one of the tracker's values" unless SECURITIES.include?(props["security"]["decided"])
+    if (kind == "Feature") != (filer[:kind] == "Feature")
+      raise ArgumentError, "properties.kind.decided assigns or replaces Feature, which the policy never does"
+    end
 
     severity = props["severity"]["decided"]
-    if severity.nil?
-      raise ArgumentError, "properties.severity.decided is empty but the decided kind is not Feature" unless kind == "Feature"
+    if kind == "Feature"
+      raise ArgumentError, "properties.severity.decided is set but the decided kind is Feature" unless severity.nil?
+    elsif severity.nil?
+      raise ArgumentError, "properties.severity.decided is empty but the decided kind is not Feature"
     elsif !SEVERITIES.include?(severity)
       raise ArgumentError, "properties.severity.decided is not one of the tracker's values"
     end
@@ -268,7 +288,8 @@ module Effects
   rescue AthenaServer::Unreachable => e
     server_unreachable!(e.message)
   rescue AthenaServer::UnsafeValue => e
-    raise Failure.new(3, "#{PROG}: #{e.message}. #{UNAVAILABLE_FIX}")
+    # Nothing was sent: the server cannot be used with this configuration.
+    server_unreachable!(e.message)
   end
 end
 
@@ -282,7 +303,7 @@ module Manager
     note_truncation(err, "--title", opts[:title], Classify::MAX_TITLE)
     note_truncation(err, "--body-file", body, Classify::MAX_BODY)
     request = Classify.request_body(opts[:title], body, opts[:project], opts[:ref], opts[:filer])
-    result = classify(Effects.post(request))
+    result = classify(Effects.post(request), opts[:filer])
     if opts[:json]
       out.puts JSON.generate(result)
     else
@@ -292,25 +313,27 @@ module Manager
   end
 
   def note_truncation(err, flag, text, max)
-    return unless text.length > max
+    size = Classify.length(text)
+    return unless size > max
 
-    err.puts "#{PROG}: note: #{flag} is #{text.length} characters; the first #{max} were sent [truncated]"
+    err.puts "#{PROG}: note: #{flag} is #{size} characters; the first #{max} were sent [truncated]"
   end
 
-  # classify(reply) -> the judged result, or raises the unavailable Failure.
-  def classify(reply)
+  # classify(reply, filer) -> the judged result, or raises the unavailable
+  # Failure.
+  def classify(reply, filer)
     server_unreachable!("curl exit #{reply[:curl_rc]} reaching the Athena server") if reply[:curl_rc] != 0
 
     doc = begin
       JSON.parse(reply[:body])
-    rescue JSON::ParserError
+    rescue JSON::ParserError, EncodingError
       :not_json
     end
     status = reply[:status]
     if status == 200
       unreadable!("with a body that is not JSON") if doc == :not_json
       begin
-        return Classify.parse_result(doc)
+        return Classify.parse_result(doc, filer)
       rescue ArgumentError => e
         unreadable!("but #{e.message}")
       end
@@ -320,6 +343,10 @@ module Manager
     server_refused!(status, error, "the machine token was rejected; it is owner-issued, never mint one") if status == 401
     server_refused!(status, error, "this server does not serve ticket_classification (DND-991 not deployed?)") if status == 404
     server_refused!(status, error, safe_fix(doc)) if (400..499).cover?(status)
+    # A 5xx: the server was reached and failed. Anything else (no status, a
+    # redirect) is a server we could not use.
+    raise Failure.new(3, "SERVER FAILED: HTTP #{status}#{error ? " #{error}" : ''}. #{UNAVAILABLE_FIX}") if (500..599).cover?(status)
+
     server_unreachable!("the Athena server answered HTTP #{status}#{error ? " #{error}" : ''}")
   end
 
@@ -355,7 +382,9 @@ def parse_options(argv)
   raw = StrictArgv.parse(argv, SPEC)
   REQUIRED.each { |flag, fix| usage!("#{flag} is required", fix) if raw[flag].nil? }
   title = raw["--title"].dup.force_encoding(Encoding::UTF_8).scrub
-  usage!("--title is blank", "pass the ticket's title") if Classify.blank?(title)
+  # Blank is judged on what is sent: a title blank in its first 300
+  # characters would be refused by the server.
+  usage!("--title is blank (in the first #{Classify::MAX_TITLE} characters, which are what is sent)", "pass the ticket's title") if Classify.blank?(Classify.truncate(title, Classify::MAX_TITLE))
   usage!("--project is not a project identifier", "pass one of athena, harness, walt_ui, dnd, lms, admiral") unless Classify::PROJECT.match?(raw["--project"])
   usage!("--ref #{raw['--ref']} is not a ticket id", "pass an id such as DND-991, or omit --ref for a new filing") if raw["--ref"] && !Classify::REF.match?(raw["--ref"])
   filer = { kind: raw["--kind"], severity: raw["--severity"], security: raw["--security"] }
@@ -364,6 +393,12 @@ def parse_options(argv)
   { title: title, body_file: raw["--body-file"], project: raw["--project"], ref: raw["--ref"], json: raw["--json"] == true, filer: filer }
 rescue StrictArgv::UsageError => e
   usage!(e.message, "run #{PROG} --help for the flags")
+rescue Failure
+  raise
+rescue StandardError => e
+  # Before the filer's values are known there is no fallback to print, so
+  # this is a usage failure (exit 2), never an exit 3 without them.
+  usage!("could not read the arguments (#{e.class})", "run #{PROG} --help for the flags")
 end
 
 def main(argv)

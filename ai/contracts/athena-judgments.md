@@ -105,7 +105,9 @@ Concretely:
 - **Ticket classification sets only Kind, Severity and Security**, through
   deterministic policy. It never lowers a security classification, never
   assigns or replaces `Feature`, and never touches `Status` or `Path`. Every
-  fallback is the filer's own value.
+  fallback starts from the filer's own value; the one change with no judgment
+  is a raise (the Vulnerability floor, *Ticket classification: the harness
+  script*).
 - **Arithmetic, dates, sender identity and all policy stay in code.** jev-1.13
   is unreliable at counting, math, dates and indirection, so none of them is
   asked of it.
@@ -521,8 +523,8 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   its own and prints what the server decided.
 - **The filer's values are required.** The caller sends its own `Kind`,
   `Severity` and `Security` (tracker spelling; a `Feature` sends no Severity).
-  Every fallback answers with them, so a fallback is always defined and is
-  today's behaviour.
+  Every fallback starts from them, so a fallback is always defined and is
+  today's behaviour, except the Vulnerability floor below.
 - **The owner is the machine token's**, never the body's: the closed body
   schema refuses any unlisted key, identity fields included.
 - **The content domain is derived server-side from the project**, as for
@@ -532,8 +534,10 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   An accepted judgment may set Kind (never over a filer's `Feature` or
   `Vulnerability`), raise Security from `none`, and set Severity, but for a
   security-relevant ticket never below the filer's. A decided `Vulnerability`
-  with Security `none` is lifted to `pre-existing`; when no judgment made the
-  ticket a Vulnerability, that lift's source is `policy`.
+  with Security `none` is lifted to `pre-existing` (the Vulnerability floor).
+  The lift's source is `jev` when an accepted Kind judgment made the ticket a
+  Vulnerability, `filer` with reason `policy_guard` when it overrides an
+  accepted Security `none`, and otherwise `policy`.
 - **The output is the server's decision**: one line per property with its
   source, then the server's provenance line verbatim, which the filer pastes
   into the ticket body. A source is `jev` (an accepted judgment set, raised or
@@ -541,18 +545,23 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   with no judgment). A `filer` or `policy` value carries a reason: a reason
   from *The closed reason list*, or one of four that are not fallbacks
   (`shadow`, `policy_guard`, `vulnerability_floor`, `feature`). While the
-  feature is inert (every mode `off`) each property is the filer's with reason
-  `mode_off`, and the script exits 0.
-- **Unavailable is exit 3 with the filer's values.** An unreachable server, a
-  server that answered and refused (any 4xx; a 404 while the endpoint is not
-  deployed), and a 200 outside the judged shape each print their own first
-  line (`COULD NOT REACH SERVER`, `SERVER REFUSED THE REQUEST`,
-  `UNREADABLE SERVER ANSWER`), ending with
+  feature is inert (every mode `off`) the script exits 0 and each property is
+  the filer's with reason `mode_off`, with three exceptions: a Feature's
+  Severity is empty with reason `feature` (it is never asked); a
+  Vulnerability filed with Security `none` is decided `pre-existing`, source
+  `policy`, reason `vulnerability_floor`; and an unknown project reads
+  `domain_not_permitted`, because the domain is checked before the mode.
+- **Unavailable is exit 3 with the filer's values.** Each cause prints its
+  own first line: an unreachable server (`COULD NOT REACH SERVER`), a server
+  that answered and refused (any 4xx, a 404 while the endpoint is not
+  deployed; `SERVER REFUSED THE REQUEST`), a server that failed (a 5xx;
+  `SERVER FAILED`), a 200 outside the judged shape
+  (`UNREADABLE SERVER ANSWER`), and a fault in the script itself
+  (`UNEXPECTED ERROR`). Every one ends with
   `Fix: file the ticket as today; this is advisory.` The filer's own values
-  follow under `Decided (filer; classification unavailable):`. None of the
-  three prints a provenance line, so none reads as a decision. A per-property
-  fallback inside a 200 is not unavailable: it is a decision with source
-  `filer`.
+  follow under `Decided (filer; classification unavailable):`. None prints a
+  provenance line, so none reads as a decision. A per-property fallback
+  inside a 200 is not unavailable: it is a decision with source `filer`.
 - **The machine token never reaches argv or the environment**; it goes to curl
   on stdin, as for finding triage.
 
@@ -649,7 +658,7 @@ with it.
 - [ ] Ticket classification writes nothing to any tracker, requires the
       filer's values, prints the server's decision and provenance line, never
       lowers a security classification or replaces `Feature`, and on an
-      unreachable server, a refusal or an unreadable answer exits 3 with a
-      distinct line and the filer's values.
+      unreachable server, a refusal, a server failure or an unreadable answer
+      exits 3 with a distinct line and the filer's values.
 - [ ] A question set with several questions defines its eval case unit; a
       finding triage case is one (finding, candidate) pair.
