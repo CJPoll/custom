@@ -456,15 +456,37 @@ def heading_line?(line, heading)
   line.match?(/\A#+[ \t]+#{Regexp.escape(heading)}[ \t]*\r?\n?\z/)
 end
 
+# Indices of the lines OUTSIDE fenced code blocks (``` or ~~~). A `# comment`
+# inside a shell block is not a heading: read as one, it would end the
+# section early, and every later edit to the section would read COLD.
+def prose_line_indices(lines)
+  fence = nil
+  lines.each_index.select do |i|
+    marker = lines[i][/\A[ \t]*(```|~~~)/, 1]
+    if marker && (fence.nil? || marker == fence)
+      fence = fence ? nil : marker
+      next false
+    end
+    fence.nil?
+  end
+end
+
+# How many prose (unfenced) heading lines name `heading`.
+def heading_count(text, heading)
+  lines = text.lines
+  prose_line_indices(lines).count { |i| heading_line?(lines[i], heading) }
+end
+
 # The section under `heading`: its heading line through the line before the
-# next heading of the same or a higher level.
+# next prose heading of the same or a higher level.
 def markdown_section(text, heading)
   lines = text.lines
-  idx = lines.index { |l| heading_line?(l, heading) }
+  prose = prose_line_indices(lines)
+  idx = prose.find { |i| heading_line?(lines[i], heading) }
   return nil unless idx
 
   level = lines[idx][/\A#+/].size
-  stop = ((idx + 1)...lines.size).find { |i| (m = lines[i][/\A#+(?=[ \t])/]) && m.size <= level }
+  stop = prose.find { |i| i > idx && (m = lines[i][/\A#+(?=[ \t])/]) && m.size <= level }
   lines[idx...(stop || lines.size)].join
 end
 
@@ -486,7 +508,7 @@ def section_hit?(repo, base, head, path, rule)
     texts[side] = t
   end
   heads.each do |hd|
-    counts = texts.transform_values { |t| t.lines.count { |l| heading_line?(l, hd) } }
+    counts = texts.transform_values { |t| heading_count(t, hd) }
     unless counts.values.all? { |c| c == 1 }
       return [:hit, "section '#{hd}' appears #{counts['base']}x at base and #{counts['head']}x at head " \
                     "(must be exactly once on both sides) -- fails closed"]
@@ -1417,7 +1439,7 @@ HOLD_LABELS = {
   "never" => "no -- report-only (owner approval policy, 2026-09-28)"
 }.freeze
 
-def print_report(verdict,  head, manifest, surfaces, pattern_count, files, hits, automation, examined = [], notes = {}, refs = nil)
+def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, automation, examined = [], notes = {}, refs = nil)
   puts "BLAST-RADIUS #{verdict} #{short(head)}"
   puts "  manifest: #{manifest} (#{surfaces.size} class(es), #{pattern_count} pattern(s))"
   # This line is the failed-lookup doctrine discharged: a zero can always name
@@ -2250,34 +2272,34 @@ def self_test
     # resolve to tmp/lib: a mutant that cannot load would exit non-zero, which
     # every sabotage case reads as a FAIL rather than as the mutation it names.
     FileUtils.mkdir_p([File.join(tmp, "bin"), File.join(tmp, "lib")])
-FileUtils.cp(File.expand_path("../lib/strict_argv.rb", __dir__), File.join(tmp, "lib", "strict_argv.rb"))
-FileUtils.cp(File.expand_path("../lib/owner_turn.rb", __dir__), File.join(tmp, "lib", "owner_turn.rb"))
-classifier_manifest = File.join(tmp, "classifier-surfaces.json")
-cm = JSON.parse(File.read(DEFAULT_MANIFEST))
-cm["surfaces"].each { |sf| sf["hold"] = DEFAULT_HOLD if sf["hold"] == "never" }
-File.write(classifier_manifest, JSON.dump(cm))
+    FileUtils.cp(File.expand_path("../lib/strict_argv.rb", __dir__), File.join(tmp, "lib", "strict_argv.rb"))
+    FileUtils.cp(File.expand_path("../lib/owner_turn.rb", __dir__), File.join(tmp, "lib", "owner_turn.rb"))
+    classifier_manifest = File.join(tmp, "classifier-surfaces.json")
+    cm = JSON.parse(File.read(DEFAULT_MANIFEST))
+    cm["surfaces"].each { |sf| sf["hold"] = DEFAULT_HOLD if sf["hold"] == "never" }
+    File.write(classifier_manifest, JSON.dump(cm))
 
-# A fixture HOME holding one Claude Code transcript, for the --owner-approval
-# record cases: an owner turn typed by a human, an assistant turn, and a
-# headless (sdk-cli) prompt. OwnerTurn reads ~/.claude/projects via Dir.home.
-fake_home = File.join(tmp, "home")
-sid = "11111111-2222-3333-4444-555555555555"
-owner_mid = "aaaaaaaa-0000-0000-0000-000000000001"
-asst_mid = "aaaaaaaa-0000-0000-0000-000000000002"
-sdk_mid = "aaaaaaaa-0000-0000-0000-000000000003"
-FileUtils.mkdir_p(File.join(fake_home, ".claude", "projects", "proj"))
-File.write(File.join(fake_home, ".claude", "projects", "proj", "#{sid}.jsonl"), [
-  { "type" => "user", "uuid" => owner_mid, "isSidechain" => false, "entrypoint" => "cli",
-    "promptSource" => "typed", "origin" => { "kind" => "human" },
-    "message" => { "role" => "user", "content" => "yes, drop the widgets table. approve" } },
-  { "type" => "assistant", "uuid" => asst_mid, "isSidechain" => false,
-    "message" => { "role" => "assistant", "content" => [{ "type" => "text", "text" => "approve" }] } },
-  { "type" => "user", "uuid" => sdk_mid, "isSidechain" => false, "entrypoint" => "sdk-cli",
-    "promptSource" => "sdk", "origin" => { "kind" => "human" },
-    "message" => { "role" => "user", "content" => "approve" } }
-].map { |j| JSON.dump(j) }.join("\n") + "\n")
-fx_env = { "HOME" => fake_home }
-good_approval = "session:#{sid}/#{owner_mid} quote:yes, drop the widgets table"
+    # A fixture HOME holding one Claude Code transcript, for the --owner-approval
+    # record cases: an owner turn typed by a human, an assistant turn, and a
+    # headless (sdk-cli) prompt. OwnerTurn reads ~/.claude/projects via Dir.home.
+    fake_home = File.join(tmp, "home")
+    sid = "11111111-2222-3333-4444-555555555555"
+    owner_mid = "aaaaaaaa-0000-0000-0000-000000000001"
+    asst_mid = "aaaaaaaa-0000-0000-0000-000000000002"
+    sdk_mid = "aaaaaaaa-0000-0000-0000-000000000003"
+    FileUtils.mkdir_p(File.join(fake_home, ".claude", "projects", "proj"))
+    File.write(File.join(fake_home, ".claude", "projects", "proj", "#{sid}.jsonl"), [
+      { "type" => "user", "uuid" => owner_mid, "isSidechain" => false, "entrypoint" => "cli",
+        "promptSource" => "typed", "origin" => { "kind" => "human" },
+        "message" => { "role" => "user", "content" => "yes, drop the widgets table. approve" } },
+      { "type" => "assistant", "uuid" => asst_mid, "isSidechain" => false,
+        "message" => { "role" => "assistant", "content" => [{ "type" => "text", "text" => "approve" }] } },
+      { "type" => "user", "uuid" => sdk_mid, "isSidechain" => false, "entrypoint" => "sdk-cli",
+        "promptSource" => "sdk", "origin" => { "kind" => "human" },
+        "message" => { "role" => "user", "content" => "approve" } }
+    ].map { |j| JSON.dump(j) }.join("\n") + "\n")
+    fx_env = { "HOME" => fake_home }
+    good_approval = "session:#{sid}/#{owner_mid} quote:yes, drop the widgets table"
 
     # 1. the REAL manifest loads and is non-trivial
     surfaces, pc = nil
@@ -3350,6 +3372,14 @@ good_approval = "session:#{sid}/#{owner_mid} quote:yes, drop the widgets table"
     sec_case.call("sibling-section edit is COLD", claude.call("", " now"), 0, "BLAST-RADIUS COLD")
     sec_case.call("deleted heading holds", claude.call("", "").sub("## Owner approval policy\n", ""), 4, "fails closed")
     sec_case.call("duplicate heading holds", claude.call("", "", dup: true), 4, "must be exactly once")
+    fenced = claude.call("", "").sub("rows", "rows\n\n```sh\n# a shell comment, not a heading\n```\n\nafter the fence")
+    dd = File.join(tmp, "policy-sec-fence")
+    bb, hh = mkrepo.call(dd, seed: ->(r) { FileUtils.mkdir_p(File.join(r, "ai")); File.write(File.join(r, "ai", "CLAUDE.md"), fenced) }) do |r|
+      File.write(File.join(r, "ai", "CLAUDE.md"), fenced.sub("after the fence", "after the fence, edited"))
+    end
+    out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
+    check.call("policy: an edit below a fenced `# comment` in the approval section still holds (the fence is not a heading)",
+               code == 4 && out.include?("section 'Owner approval policy' changed"), "exit=#{code} out=#{out}")
     # manifest validation for `hold`
     [["an unknown hold", [{ "class" => "x", "why" => "y", "hold" => "sometimes", "patterns" => ["**/*"] }], "hold"],
      ["a report-only surface ahead of a holding one",

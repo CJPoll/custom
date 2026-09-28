@@ -264,9 +264,9 @@ These needed Cody before 2026-09-28 and no longer do. Named so no one
 re-derives the hold: a non-security `integration-gate` exit 4, deploy-workflow
 edits included; library upgrades and new libraries; docs- and comment-only
 changes; terraform that neither destroys nor adds cost, auto-applied roots
-included; a captain's `IRREVERSIBLE` outside item 1; promoting a security
-issue; harness governance edits outside items 5 and 6; secret rotation with no
-console step.
+included; a captain's `IRREVERSIBLE` for a one-way action outside items 1–3;
+promoting a security issue; harness governance edits outside items 5 and 6;
+secret rotation with no console step.
 
 ### Security fixes
 
