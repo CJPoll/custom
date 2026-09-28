@@ -797,3 +797,21 @@ After the fix: `RESULT: 258 passed, 0 failed`.
 | S-DND1095-8 | a shell alias re-expanded inside its own expansion | `L2.3 ... grep -i stash (DND-853)` |
 | S-DND1095-9 | the expanded-head unknown-subcommand relaxation removed | `L2.13 ... $H/ticket.rb`, `L2.14 ... [ -n "$s" ]` |
 | S-DND1095-10 | the install-stamp shape check removed (`date -d ""` reads today) | both `L4. install stamp unset` cases |
+
+Review round 1 (critic BLOCK on 30197e59, code-reviewer, adr-reviewer). The
+suite at this round, run against 30197e59's guard: `RESULT: 435 passed, 49
+failed` (L4 said nothing about why; L5, L7, L8, L9 were allowed). After:
+`RESULT: 484 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND1095-11 | a nested text no longer inherits its enclosing text's stash mention | `L3 ... sh -c 'g?t "$@"' sh stash drop` |
+| S-DND1095-12 | the expanded-head relaxation ignores TSTASH | `L3 ... sh -c '$*' sh /usr/bin/g?t stash drop` |
+| S-DND1095-13 | the launcher list dropped from `exposed` | the 5 L5 tmux / ssh / sudo / at cases |
+| S-DND1095-14 | a glob word holding `$` relaxed like any other | both L7 cases (`${D}?sh drop`, `${G}? ... drop`) |
+| S-DND1095-15 | `exposed` reads only the raw text, not FLAT | `L5 ... /usr/bin/"git" $X drop`, `... gi\t ...`, `... P""ATH=...` |
+| S-DND1095-16 | `git <expanded>` relaxed under cfgov | `L8. autocorrect on ... X=stsh; git $X drop` |
+| S-DND1095-17 | `can_become_stash` always false | `L8 ... $G stsh drop`, `L8 ... $G stas drop` |
+| S-DND1095-18 | STASH_ALIAS never set | `L8. a ! alias whose body hides stash from the wrapper ...` |
+| S-DND1095-19 | a failed second pass returns an empty verdict | `L9. a failed second pass keeps the deny and names the fault` |
+| S-DND1095-20 | the glob-head relaxation ignores its words' verdict (gv) | `L8. autocorrect on ... g?t stsh drop` |

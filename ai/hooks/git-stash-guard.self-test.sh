@@ -847,11 +847,16 @@ lreset() {
   L_COUNT=4; L_ENABLED=true; L_HOOK="$REPO_ROOT/ai/git-hooks/agent-stash-guard.sh"; L_TRACE=/dev/null
   L_BIN="$REPO_ROOT/ai/agent-bin"; L_ENVF="$REPO_ROOT/ai/agent-env/session-env.sh"
   L_INST=2000-01-01T00:00:00Z; L_PARENT="$TMP/lbin/claude"; L_PATH=$PATH
+  L_GCG="$TMP/l.gitconfig"
 }
+# The L global config: one plain stash alias (the wrapper resolves it through
+# git). The suite's own fixture config also holds `!` aliases that spell stash
+# with quotes, which keep `git $X` denied by design (L8).
+printf '[alias]\n\tsp = stash pop\n' > "$TMP/l.gitconfig"
 lreset
 # lenv <cmd...> : run cmd in the live env the L_* variables describe.
 lenv() {
-  env CLAUDE_CONFIG_DIR="$TMP/claude-l" PATH="$L_PATH" GIT_CONFIG_COUNT="$L_COUNT" \
+  env CLAUDE_CONFIG_DIR="$TMP/claude-l" PATH="$L_PATH" GIT_CONFIG_GLOBAL="$L_GCG" GIT_CONFIG_COUNT="$L_COUNT" \
     GIT_CONFIG_KEY_0=hook.agentstash.event GIT_CONFIG_VALUE_0=reference-transaction \
     GIT_CONFIG_KEY_1=hook.agentstash.command GIT_CONFIG_VALUE_1="h='$L_HOOK'; exec \"\$h\" \"\$@\"" \
     GIT_CONFIG_KEY_2=hook.agentstash.enabled GIT_CONFIG_VALUE_2="$L_ENABLED" \
@@ -874,7 +879,7 @@ run_live() {
 }
 # run_nolayer <command> : the same aliases, no git layer (today's env).
 run_nolayer() {
-  OUT=$(json "$WT" "$1" | CLAUDE_CONFIG_DIR="$TMP/claude-l" sh "$HOOK" 2>/dev/null); STATUS=$?
+  OUT=$(json "$WT" "$1" | CLAUDE_CONFIG_DIR="$TMP/claude-l" GIT_CONFIG_GLOBAL="$L_GCG" sh "$HOOK" 2>/dev/null); STATUS=$?
 }
 # is_left : allowed, with the note that the git layer was left to decide.
 is_left() {
@@ -956,49 +961,88 @@ for _c in 'git stash pop' 'git stash' 'git -C /tmp/x stash drop' 'gstp' 'gstp --
   "git reflog delete 'stash@{1}'" 'rm .git/refs/stash' ': > .git/logs/refs/stash' \
   'X=stash; git $X' 'git -c gc.reflogExpire=now gc' 'git -c help.autocorrect=1 stsh drop' \
   'git stash import abc123' 'git stash export --to-ref refs/x' 'git commit -m "then git stash pop"' \
-  "ssh h 'X=stash; git \$X'" "sh -c '\$*' sh /usr/bin/g?t stash drop"; do
+  "ssh h 'X=stash; git \$X'" "sh -c '\$*' sh /usr/bin/g?t stash drop" \
+  "sh -c 'g?t \"\$@\"' sh stash drop"; do
   run_live "$_c"; lcheck "L3. git layer live, still denied: $_c" deny
 done
 
 # L4: any condition of the live check failing keeps the full guard. Two
 # false-positive inputs; each must deny.
+# lneg <label> <why> : each input denies, and the deny names why the git
+# layer read as not live (the failed condition, not a silent fallback).
 lneg() {
   for _c in "ps aux | awk '{print \$4}'" "grep -E 'a(1|2)[0-9]' /tmp/nothing"; do
-    run_live "$_c"; lcheck "L4. $1: $_c" deny
+    run_live "$_c"
+    if is_deny && printf '%s' "$OUT" | grep -qF "not live for this session ($2"; then
+      record "L4. $1 denies and says why: $_c" PASS
+    else
+      record "L4. $1 denies and says why: $_c" FAIL
+    fi
   done
   lreset
 }
-L_COUNT=0; lneg "no GIT_CONFIG hook keys"
-L_ENABLED=false; lneg "hook.agentstash.enabled=false"
-L_HOOK="$TMP/missing/agent-stash-guard.sh"; lneg "hook script missing"
-L_TRACE=; lneg "GIT_TRACE2 unset"
-L_BIN="$TMP/nomark"; lneg "ATHENA_AGENT_BIN git without the wrapper mark"
-L_ENVF="$TMP/no-line-env.sh"; lneg "CLAUDE_ENV_FILE without the agent PATH line"
-L_INST=2099-01-01T00:00:00Z; lneg "session predates the install (pending restart)"
-L_INST=; lneg "install stamp unset"
-L_PARENT=; lneg "no claude ancestor"
-L_PATH="$TMP/oldgit:$PATH"; lneg "git 2.53"
-# L5: a command that shows a way around the git layer keeps the full guard.
+L_COUNT=0; lneg "no GIT_CONFIG hook keys" "no hook config"
+L_ENABLED=false; lneg "hook.agentstash.enabled=false" "hook.agentstash.enabled is not true"
+L_HOOK="$TMP/missing/ai/git-hooks/agent-stash-guard.sh"; lneg "hook script missing" "the hook command names no executable"
+L_TRACE=; lneg "GIT_TRACE2 unset" "GIT_TRACE2 is unset"
+L_BIN="$TMP/nomark"; lneg "ATHENA_AGENT_BIN git without the wrapper mark" "no PATH git wrapper"
+L_ENVF="$TMP/no-line-env.sh"; lneg "CLAUDE_ENV_FILE without the agent PATH line" "CLAUDE_ENV_FILE does not carry"
+L_INST=2099-01-01T00:00:00Z; lneg "session predates the install (pending restart)" "this session predates the install"
+L_INST=; lneg "install stamp unset" "ATHENA_AGENT_ENV_INSTALLED_AT is not an ISO"
+L_PARENT=; lneg "no claude ancestor" "no claude ancestor"
+L_PATH="$TMP/oldgit:$PATH"; lneg "git 2.53" "git 2.53.0 predates"
+# L5: a command that shows a way around the git layer keeps the full guard,
+# and the deny says so. The launchers run their payload outside the agent
+# env, where neither layer exists (ADR-review round 1: a computed stash
+# spelling in a tmux or ssh payload).
 for _c in "/usr/bin/git log; ps aux | awk '{print \$4}'" "PATH=/usr/bin; ps aux | awk '{print \$4}'" \
   "env -u X ps aux | awk '{print \$4}'" "GIT_CONFIG_COUNT=0 ps aux | awk '{print \$4}'" \
-  "which git; ps aux | awk '{print \$4}'" "command -p ls | awk '{print \$4}'"; do
-  run_live "$_c"; lcheck "L5. exposure keeps the full guard: $_c" deny
+  "which git; ps aux | awk '{print \$4}'" "command -p ls | awk '{print \$4}'" \
+  "type -pa git; ps aux | awk '{print \$4}'" \
+  "git -c HOOK.reference-transaction.ENABLED=false \$S pop" \
+  "git --config-env=Hook.Reference-Transaction.Enabled=V \$S pop" \
+  "tmux new -d 'X=\$(printf st%s ash); git \$X pop'" \
+  "ssh h 'X=\$(printf st%s ash); git \$X drop'" \
+  "ssh h 'g?t \$(printf st%s ash) drop'" \
+  "sudo sh -c 'X=\$(printf st%s ash); git \$X drop'" \
+  "echo 'X=\$(printf st%s ash); git \$X pop' | at now" \
+  '/usr/bin/"git" $X drop' '/usr/bin/gi\t $X drop' 'export P""ATH=/usr/bin; git $X drop' \
+  "bash -lc 'git \$X drop'" "zsh --login -c 'git \$X drop'" '. /etc/profile.env; git $X drop' \
+  'read -r P <<< /usr/bin; git $X drop'; do
+  run_live "$_c"
+  if is_deny && printf '%s' "$OUT" | grep -qF 'shows a way around it'; then
+    record "L5. exposure keeps the full guard: $_c" PASS
+  else
+    record "L5. exposure keeps the full guard: $_c" FAIL
+  fi
+done
+# L7: a glob command word holding an expansion can expand to a path, where
+# git bypasses the wrapper; it keeps the deny with the layer live. An
+# assignment word with ${...} is not a command word (L2.18 allows it).
+for _c in 'D=$(printf /usr/libexec/g%st-core/g%st-st i i); ${D}?sh drop' \
+  'G=$(printf /usr/bin/g%s i); ${G}? $(printf st%s ash) drop'; do
+  run_nolayer "$_c"; lcheck "L7. no git layer: $_c" deny
+  run_live "$_c"; lcheck "L7. git layer live, still denied: $_c" deny
 done
 
 # L6: the shapes L2 leaves to the git layer are refused there. In the fixture
 # worktree, with the live PATH and env, run what the text guard allows: the
 # wrapper refuses it, and the owner's stash list is byte-identical.
 _before=$(git -C "$OWNER" stash list; git -C "$OWNER" rev-parse refs/stash)
+: > "$TMP/noalias.gitconfig"
 for _c in 'X=$(printf "st%s" ash); git $X' 'S=$(printf "st%s" ash); git $S pop' 'V=$(printf "dr%s" op); git stash $V'; do
+  L_GCG="$TMP/noalias.gitconfig"
   run_live "$_c"
+  lreset
   if is_deny; then _v=deny; else _v=allow; fi
+  case "$_c" in *'git stash $V') _want=deny ;; *) _want=allow ;; esac
   (L_PATH="$L_BIN:$PATH"; cd "$WT" && lenv sh -c "$_c") > "$TMP/l6.out" 2>&1
   _rc=$?
   if grep -q 'REFUSED' "$TMP/l6.out" && [ "$_rc" -ne 0 ]; then _g=refused; else _g="not refused (rc=$_rc)"; fi
-  if [ "$_g" = refused ]; then
+  if [ "$_g" = refused ] && [ "$_v" = "$_want" ]; then
     record "L6. text guard $_v, git layer refused: $_c" PASS
   else
-    STATUS=0; OUT="guard=$_v git=$_g: $(head -c 300 "$TMP/l6.out")"; record "L6. text guard $_v, git layer refused: $_c" FAIL
+    STATUS=0; OUT="guard=$_v (want $_want) git=$_g: $(head -c 300 "$TMP/l6.out")"; record "L6. text guard $_v, git layer refused: $_c" FAIL
   fi
 done
 _after=$(git -C "$OWNER" stash list; git -C "$OWNER" rev-parse refs/stash)
@@ -1006,6 +1050,50 @@ if [ "$_before" = "$_after" ] && printf '%s' "$_after" | grep -q OWNER-ENTRY; th
   record "L6. owner stash list byte-identical after the git-layer attempts" PASS
 else
   STATUS=0; OUT="before=[$_before] after=[$_after]"; record "L6. owner stash list byte-identical after the git-layer attempts" FAIL
+fi
+
+# L8: what the wrapper cannot see keeps the deny with the layer live (code
+# review round 1). help.autocorrect turns a typo into stash, and the wrapper
+# passes a typo through; a stash alias in a config this guard read may be
+# named by an expanded subcommand.
+printf '[help]\n\tautocorrect = immediate\n' > "$TMP/autocorrect.gitconfig"
+for _c in 'X=stsh; git $X drop' 'G=git; $G stsh drop' 'g?t stsh drop'; do
+  L_GCG="$TMP/autocorrect.gitconfig"
+  run_live "$_c"
+  lreset
+  lcheck "L8. autocorrect on, git layer live: $_c" deny
+done
+# git config keeps the backslash (`st\ash`), sh drops it: the body the
+# wrapper matches holds no `stash`, the command sh runs does.
+printf '[alias]\n\tsq = !git st\\\\ash drop\n' > "$TMP/bang.gitconfig"
+[ "$(GIT_CONFIG_GLOBAL="$TMP/bang.gitconfig" git config --get alias.sq)" = '!git st\ash drop' ] \
+  || { STATUS=0; OUT=$(GIT_CONFIG_GLOBAL="$TMP/bang.gitconfig" git config --get alias.sq); record "L8. the ! alias fixture reads back as written" FAIL; }
+L_GCG="$TMP/bang.gitconfig"
+run_live 'X=$(printf s%s q); git $X'
+lcheck "L8. a ! alias whose body hides stash from the wrapper, git layer live: git \$X" deny
+lreset
+run_live 'X=$(printf s%s p); git $X'
+lcheck "L8. a plain stash alias (the wrapper resolves it), git layer live: git \$X" allow
+# can_become_stash is git's own reach: with autocorrect on, `]` after an
+# expanded command word is no typo of stash (L2.14's shape), `stas` is.
+L_GCG="$TMP/autocorrect.gitconfig"
+run_live 'for d in a b; do s=$(git -C "$d" log -1); [ -n "$s" ] && echo "$d"; done'
+lcheck "L8. autocorrect on: [ -n \"\$s\" ] after git -C" allow
+run_live 'G=git; cd "$D"; $G stas drop'
+lcheck "L8. autocorrect on: \$G stas drop (a prefix of stash)" deny
+lreset
+
+# L9: a second pass that fails keeps the first pass's deny, and says so.
+mkdir -p "$TMP/pass2bad"
+printf '#!/bin/sh\ncase " $* " in *" active=1 "*) exit 2 ;; esac\nexec "%s" "$@"\n' "$(command -v awk)" > "$TMP/pass2bad/awk"
+chmod +x "$TMP/pass2bad/awk"
+L_PATH="$TMP/pass2bad:$PATH"
+run_live "ps aux | awk '{print \$4}'"
+lreset
+if is_deny && printf '%s' "$OUT" | grep -qF 'could not re-judge this command'; then
+  record "L9. a failed second pass keeps the deny and names the fault" PASS
+else
+  record "L9. a failed second pass keeps the deny and names the fault" FAIL
 fi
 
 echo
