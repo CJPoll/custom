@@ -873,10 +873,12 @@ def run_one(argv, chdir: CUSTOM_DIR, env: {})
       leaked = ReapTags.reap(tag)
     rescue ReapTags::ScanError => e
       # DND-1016: the sweep could not look, so "nothing leaked" is unknown.
+      # What it did find was still killed (e.killed), and is reported too.
       scan_failure = "\nharness-gate: FAIL — the leak sweep after `#{argv.join(' ')}` could not look: #{e.message}\n"
+      leaked = e.killed
     end
   end
-  return [false, "#{out}#{scan_failure}"] if scan_failure
+  return [false, "#{out}#{scan_failure}#{leaked.empty? ? '' : leak_report(argv, leaked)}"] if scan_failure
   return [ok, out] if leaked.empty?
 
   [false, "#{out}#{leak_report(argv, leaked)}"]
@@ -2661,6 +2663,43 @@ def run_self_test
     end
     expect.call(!blind_ok && blind_out.to_s.include?("could not look") && blind_out.to_s.include?("pid=4202"),
                 "a leak sweep that could not look was reported as a PASS (#{blind_ok.inspect}, #{blind_out.inspect})")
+
+    # A PARTIAL scan (one pid never settles) still kills the matches it
+    # confirmed, then raises with them in `killed`; dropping them would leave
+    # the very orphan DND-1016 is about. tagged_pids is stubbed to report a
+    # real tagged sleep plus an unknown.
+    part_tag = ReapTags.new_tag("selftest-partial")
+    part = Process.spawn(ReapTags.env_with(part_tag), "sleep", "311", out: File::NULL, err: File::NULL)
+    real_tp = ReapTags.method(:tagged_pids)
+    ReapTags.define_singleton_method(:tagged_pids) do |*_a, **_k|
+      found = begin
+        Process.kill(0, part)
+        Process.waitpid(part, Process::WNOHANG) ? [] : [part]
+      rescue Errno::ESRCH, Errno::ECHILD
+        []
+      end
+      raise ReapTags::ScanError.new("pid=4203 UNKNOWN. Fix: none", found: found)
+    end
+    part_err = begin
+      ReapTags.reap(part_tag, grace: 0)
+      nil
+    rescue ReapTags::ScanError => e
+      e
+    ensure
+      ReapTags.define_singleton_method(:tagged_pids, real_tp)
+    end
+    part_dead = begin
+      Process.waitpid(part, Process::WNOHANG) || !Process.kill(0, part)
+    rescue Errno::ESRCH, Errno::ECHILD
+      true
+    end
+    expect.call(part_err && part_err.killed.any? { |(p, _)| p == part } && part_dead,
+                "a partial scan did not kill the tagged process it confirmed before failing " \
+                "(error: #{part_err.inspect}, killed: #{part_err&.killed.inspect}, dead: #{part_dead.inspect})")
+    unless part_dead
+      Process.kill("KILL", part) rescue nil
+      Process.wait(part) rescue nil
+    end
   end
 
   # 9. The failure report NAMES the failing case even when a chatty suite has
