@@ -28,7 +28,8 @@ ANCHORS=()
 cleanup() {
   local p
   for p in "${ANCHORS[@]}"; do kill "${p}" 2>/dev/null; done
-  for l in a b c d e f g h i j; do "${TOOL}" release --lane "${l}" --force --lock-dir "${LD}" >/dev/null 2>&1; done
+  for l in a b c d e f g h i j k; do "${TOOL}" release --lane "${l}" --force --lock-dir "${LD}" >/dev/null 2>&1; done
+  chmod -R u+rwx "${TMP}" 2>/dev/null
   rm -rf "${TMP}"
 }
 trap cleanup EXIT
@@ -179,6 +180,42 @@ else
   else bad "unreadable lock file: exit 1, never FREE" "rc=${rc} ${out}"; fi
 fi
 chmod 600 "${LD}/i.lock"
+if [ "$(LL status --lane g)" = "FREE lane=g lock=${LD}/g.lock" ] && [ -z "$(pgrep -f '^lane-lock-holder:g ')" ]; then
+  ok "after the failed acquires, lane g is FREE and no holder lingers"
+else bad "after the failed acquires, lane g is FREE and no holder lingers" "$(LL status --lane g) $(pgrep -af '^lane-lock-holder:g ')"; fi
+
+# A directory that cannot be searched, or a file where the dir should be,
+# hides the lock file from [ -e ]; that is "cannot look", never FREE.
+new_anchor; K="${ANCHOR}"
+KD="${TMP}/kdir"
+"${TOOL}" acquire --lane k --anchor-pid "${K}" --lock-dir "${KD}" >/dev/null 2>&1
+chmod 000 "${KD}"
+if [ -x "${KD}" ]; then ok "unsearchable lock dir: skipped (running as root)"
+else
+  out="$("${TOOL}" status --lane k --lock-dir "${KD}" 2>&1)"; rc=$?
+  if [ "${rc}" = 1 ] && [[ "${out}" != FREE* ]] && [[ "${out}" == *"Fix:"* ]]; then ok "held lane in an unsearchable lock dir: exit 1, never FREE"
+  else bad "held lane in an unsearchable lock dir: exit 1, never FREE" "rc=${rc} ${out}"; fi
+fi
+chmod 700 "${KD}"
+"${TOOL}" release --lane k --force --lock-dir "${KD}" >/dev/null 2>&1
+: > "${TMP}/afile"
+out="$("${TOOL}" status --lane k --lock-dir "${TMP}/afile/locks" 2>&1)"; rc=$?
+if [ "${rc}" = 1 ] && [[ "${out}" != FREE* ]]; then ok "a file where the lock dir should be: exit 1, never FREE"
+else bad "a file where the lock dir should be: exit 1, never FREE" "rc=${rc} ${out}"; fi
+
+# --wait: decimal only in meaning (08 is eight, not an octal error), acquire only.
+new_anchor; W="${ANCHOR}"
+out="$(LL acquire --lane h --anchor-pid "${W}" --wait 08 2>&1)"; rc=$?
+if [ "${rc}" = 0 ] && [[ "${out}" == ACQUIRED* ]]; then ok "--wait 08 is eight seconds"
+else bad "--wait 08 is eight seconds" "rc=${rc} ${out}"; fi
+out="$(LL status --lane h --wait 3 2>&1)"; rc=$?
+if [ "${rc}" = 2 ]; then ok "--wait on status: exit 2, even at the default value"
+else bad "--wait on status: exit 2, even at the default value" "rc=${rc} ${out}"; fi
+if [ -z "$(find "${LD}" -maxdepth 1 -name '.acquire.*')" ]; then ok "no hand-off fifo or stray file left in the lock dir"
+else bad "no hand-off fifo or stray file left in the lock dir" "$(find "${LD}" -maxdepth 1 -name '.acquire.*')"; fi
+m="$(stat -c %a "${LD}/h.holder" 2>/dev/null)"
+if [ "${m}" = 600 ]; then ok "holder record is mode 600 (it names the session)"
+else bad "holder record is mode 600 (it names the session)" "mode=${m}"; fi
 
 # ---- 9. the holder does not tie up the caller's stdout ---------------------
 new_anchor; J="${ANCHOR}"

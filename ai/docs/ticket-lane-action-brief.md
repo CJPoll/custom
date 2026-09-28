@@ -212,15 +212,19 @@ draining admiral per lane per machine, enforced by the kernel:
   exactly as long as its **anchor**: the Claude Code session process, found as
   the nearest ancestor whose comm is `claude`. The spawning session and every
   subagent it runs share that process. So the lock outlives each Bash call and
-  each subagent turn, and it ends with the session. The holder shows in `ps` as
-  `lane-lock-holder:<lane>`.
+  each subagent turn, and it ends with the session. The holder shows in
+  `ps -f` / `pgrep -af` as `lane-lock-holder:<lane>` (its comm stays `tail`).
+  It follows the anchor with `tail --pid`, which checks about once a second,
+  so an anchor pid reused inside that second would keep the lock; that is
+  theoretical, and `release --force` recovers it.
 - **Mutual exclusion.** Two concurrent `acquire`s race on the kernel lock, and
   exactly one gets `ACQUIRED`; the other gets `HELD`, exit 3.
 - **Liveness is the lock, never a pid or a file's age.** `status` probes the
   lock itself (a shared, non-blocking `flock`). A lock file or holder record
   left by a dead holder reads FREE; a live holder reads HELD even if its record
   was deleted or garbled. The holder record (`{{LANE_ID}}.holder`: holder pid,
-  anchor pid, session id, `acquired_at`, note) is informational only. The lock
+  anchor pid, session id, `acquired_at`, note) is informational only; release
+  authorizes against the holder process's own argv, not the record. The lock
   file is never deleted: deleting a held lock file would let the next acquirer
   lock a fresh inode.
 - **Release.** Only a caller under the holder's anchor may release it: the
@@ -468,7 +472,8 @@ lane. Its carrier has not moved yet: walt_ui's
     touch ~/.claude/flaky-coordinator.lock          # before spawning
     rm -f ~/.claude/flaky-coordinator.lock          # when the scope query is empty and every touched MR is merged
 
-and this change does not edit walt_ui. Until walt_ui's follow-up replaces those
+and that carrier is walt_ui's, moved in walt_ui's own change (the follow-up is
+tracked from DND-261). Until it replaces those
 two lines with `lane-lock acquire --lane flaky` and `lane-lock release --lane
 flaky`, the flaky lane keeps the old best-effort semantics: no mutual
 exclusion, and a marker left behind is aged out after 12h by the `SessionStart`
@@ -617,8 +622,8 @@ changed and are NOT "only the trigger":
   constraint, not a detail.** The poll's 12h age-out fires independently of lane
   activity, and the new inbox-count trigger cannot replace it (it
   fires only on new channel lines, which a wedged-but-idle lane need not receive). So the flaky lane MUST keep
-  an activity-independent sweeper across the poll's retirement, or it drops to
-  choice (b), `manual-only`, and loses automatic stale-marker recovery. This was
+  an activity-independent sweeper across the poll's retirement, or it loses
+  automatic stale-marker recovery. This was
   surfaced here as a constraint DND-247/DND-248 must honor — and it is now MET
   by a poll-independent replacement; see the `**Later (2026-09-21)**` note below.
 
@@ -650,7 +655,8 @@ changed and are NOT "only the trigger":
   a held `flock(2)` whose holder dies with its session, so no age-out applies to
   it. The gated final step is therefore walt_ui's spawn text switching to
   `lane-lock --lane flaky`, then this repo retiring `flaky-marker-sweep.sh` with
-  its registry entry, `STATIC_CHECKS` entry and self-test. Both remain open.
+  its registry entry, `STATIC_CHECKS` entry and self-test. Both remain open,
+  as follow-ups tracked from DND-261.
 
 The migration therefore **spans three homes, not one**, and "lands in walt_ui" is
 too narrow: (a) the poll and its `walt_ui/.claude/settings.json` registration

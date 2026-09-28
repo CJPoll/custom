@@ -14,14 +14,21 @@
 # process, so the lock outlives each Bash call and each subagent turn, and it
 # dies with the session. When the holder dies for any reason (released,
 # killed, the anchor exited, the machine rebooted) the kernel drops the lock.
-# Liveness is the held lock, never a pid and never a file's age.
+# Liveness is the held lock, never a pid and never a file's age. (The
+# holder's own lifetime does follow the anchor's pid: `tail --pid` checks it
+# about once a second, so a pid reused inside that second would keep the lock.
+# Theoretical with a large pid_max; release --force recovers it.)
 #
 # Scope: machine-local. flock(2) does not cross machines, so two machines can
 # each hold their own lane lock. Cross-machine exclusion is not provided here.
 #
 # The lock file is never deleted: deleting a held lock file lets the next
 # acquirer lock a new inode while the old holder still holds the old one.
-# The holder record (<lane>.holder) is informational only; the lock decides.
+# The holder record (<lane>.holder) is informational only; the lock decides,
+# and release authorizes against the holder process's own argv.
+#
+# The holder shows in `ps -f` / `pgrep -af` as lane-lock-holder:<lane> (its
+# comm stays `tail`).
 #
 # Usage:
 #   lane-lock acquire --lane ID [--anchor-pid PID] [--anchor-comm NAME]
@@ -50,16 +57,18 @@
 #
 # Exit:
 #   0 acquire: ACQUIRED; status: FREE; release: RELEASED or NOT_HELD
-#   1 local failure (no anchor, anchor dead, holder did not start, lock
-#     unreadable, release could not stop the holder). Never read as FREE.
+#   1 local failure (no anchor, anchor dead, holder did not start, lock or
+#     lock dir unreadable, release could not stop the holder). Never FREE.
 #   2 usage
 #   3 HELD: another holder has the lane (acquire refused; status reports it)
 #   4 release refused: the holder's anchor is not the caller's
 #
-# Every non-zero exit prints a Fix: line.
+# Every failure (exit 1, 2, 4) prints a Fix: line. Exit 3 is an answer, not a
+# failure; acquire's exit 3 also prints a Fix: (spawn nothing).
 # Suite: ai/test/lane-lock/self-test.sh.
 
 set -u
+umask 077   # the lock, the holder record (it names the session), the fifo
 
 usage() {
   sed -n '2,/^# Suite:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -96,27 +105,50 @@ proc_ppid() {
   local stat rest
   stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
   rest="${stat##*) }"
+  # shellcheck disable=SC2086
   set -- ${rest}
   printf '%s\n' "$2"
 }
 
 # find_anchor <comm> -- nearest ancestor of this process whose comm is <comm>.
+# Status 1: walked to pid 1 and found none. Status 2: could not read an
+# ancestor (hidepid, an ancestor exiting), so "none" is unknown.
 find_anchor() {
   local p="${PPID}" comm guard=0
   while valid_pid "${p}" && [ "${p}" -gt 1 ] && [ "${guard}" -lt 64 ]; do
-    comm="$(cat "/proc/${p}/comm" 2>/dev/null)" || return 1
+    comm="$(cat "/proc/${p}/comm" 2>/dev/null)" || return 2
     if [ "${comm}" = "$1" ]; then printf '%s\n' "${p}"; return 0; fi
-    p="$(proc_ppid "${p}")" || return 1
+    p="$(proc_ppid "${p}")" || return 2
     guard=$((guard + 1))
   done
   return 1
+}
+
+# absent_for_sure <path> -- true only when <path> provably does not exist:
+# its nearest existing ancestor is a directory this user can search and read.
+# An unsearchable directory or a file in the way makes `[ -e ]` false too, and
+# that is "cannot look", never "absent".
+absent_for_sure() {
+  local d="$1"
+  [ -e "${d}" ] && return 1
+  while d="$(dirname -- "${d}")"; do
+    if [ -e "${d}" ]; then
+      [ -d "${d}" ] && [ -x "${d}" ] && [ -r "${d}" ]
+      return
+    fi
+    [ "${d}" != / ] || return 1
+  done
 }
 
 # lock_state <lock> -- prints FREE or HELD; status 1 when it cannot look.
 # A SHARED probe: it conflicts only with the holder's exclusive lock, so two
 # probes never block each other.
 lock_state() {
-  [ -e "$1" ] || { echo FREE; return 0; }
+  if [ ! -e "$1" ]; then
+    absent_for_sure "$1" || return 1
+    echo FREE
+    return 0
+  fi
   [ -r "$1" ] || return 1
   (
     exec 8<"$1" || exit 1
@@ -127,15 +159,31 @@ lock_state() {
 # inode_of <path> -- dev:inode, following links.
 inode_of() { stat -L -c '%d:%i' -- "$1" 2>/dev/null; }
 
-# holder_pids <lock> <lane> -- the holder process(es) of the lane: a process
-# of this uid that has the lock file's inode open AND whose argv[0] is
-# `lane-lock-holder:<lane>` (the holder sets it with exec -a). The holder
-# record is never trusted, and a process that merely has the file open (a
-# status probe, an acquirer still waiting) is never matched, so release cannot
-# kill a bystander. (/proc/locks cannot name the holder: it records the pid of
-# the short-lived flock(1) that took the lock.)
+# holder_anchor <pid> <lane> -- the anchor pid a lane holder process follows,
+# read from its own argv; status 1 when <pid> is not a holder of <lane>.
+# Two phases: until it execs, it is `bash -c HOLDER lane-lock-holder:<lane>
+# <lock> <fifo> <anchor> ...`; after, `lane-lock-holder:<lane> --pid=<anchor>
+# -f /dev/null`.
+holder_anchor() {
+  local -a a
+  mapfile -d '' -t a < "/proc/$1/cmdline" 2>/dev/null || return 1
+  if [ "${a[0]:-}" = "lane-lock-holder:$2" ] && [[ "${a[1]:-}" == --pid=* ]]; then
+    printf '%s\n' "${a[1]#--pid=}"
+  elif [ "${a[1]:-}" = "-c" ] && [ "${a[3]:-}" = "lane-lock-holder:$2" ] && valid_pid "${a[6]:-}"; then
+    printf '%s\n' "${a[6]}"
+  else
+    return 1
+  fi
+}
+
+# holder_pids <lock> <lane> -- "<pid> <anchor>" per holder process of the
+# lane: a process of this uid with the lock file's inode open that is a lane
+# holder by its own argv (holder_anchor). The holder record is never trusted,
+# and a process that merely has the file open (a status probe, a bystander)
+# is never matched, so release cannot kill one. (/proc/locks cannot name the
+# holder: it records the pid of the short-lived flock(1) that took the lock.)
 holder_pids() {
-  local want real pattern fd pid argv0
+  local want real pattern fd pid anchor
   want="$(inode_of "$1")" || return 1
   real="$(realpath -- "$1")" || return 1
   pattern="$(printf '%s' "${real}" | sed 's/[][*?\\]/\\&/g')"
@@ -143,19 +191,20 @@ holder_pids() {
     | while IFS= read -r fd; do
         [ "$(inode_of "${fd}")" = "${want}" ] || continue
         pid="${fd#/proc/}"; pid="${pid%%/*}"
-        argv0="$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | head -n 1)"
-        [ "${argv0}" = "lane-lock-holder:$2" ] && printf '%s\n' "${pid}"
+        anchor="$(holder_anchor "${pid}" "$2")" && printf '%s %s\n' "${pid}" "${anchor}"
       done | sort -u
 }
 
 # The holder: runs detached (setsid, fds on /dev/null). It takes the lock on
 # fd 9, checks the path still names the locked inode, writes the holder
 # record, reports on the fifo, then execs `tail --pid=<anchor>` so fd 9 stays
-# open exactly as long as the anchor lives.
+# open exactly as long as the anchor lives. `say` opens the fifo O_RDWR, which
+# never blocks, so a gone acquirer cannot wedge the holder in open(2) while it
+# holds fd 9; `[ -p ]` keeps it from creating a regular file in its place.
 # shellcheck disable=SC2016
 HOLDER='
 lock="$1" fifo="$2" anchor="$3" lane="$4" session="$5" note="$6" wait="$7" record="$8"
-say() { printf "%s\n" "$1" > "${fifo}"; }
+say() { [ -p "${fifo}" ] || return 1; exec 3<>"${fifo}" || return 1; printf "%s\n" "$1" >&3; exec 3>&-; }
 exec 9>>"${lock}" || { say "error cannot open the lock file"; exit 1; }
 flock -w "${wait}" 9 || { say "busy"; exit 3; }
 [ "$(stat -L -c %d:%i -- "${lock}")" = "$(stat -L -c %d:%i -- /proc/$$/fd/9)" ] \
@@ -165,13 +214,13 @@ tmp="${record}.$$"
 printf "holder_pid=%s\nanchor_pid=%s\nlane=%s\nsession=%s\nacquired_at=%s\nnote=%s\n" \
   "$$" "${anchor}" "${lane}" "${session}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${note}" > "${tmp}" \
   && mv -f -- "${tmp}" "${record}" || { rm -f -- "${tmp}"; say "error cannot write the holder record"; exit 1; }
-say "held $$"
+say "held $$" || exit 1
 exec -a "lane-lock-holder:${lane}" tail --pid="${anchor}" -f /dev/null
 '
 
 # ---------------------------------------------------------------- argv ------
 
-sub="" lane="" anchor_pid="" anchor_comm="claude" note="" wait_s=3 lock_dir="" force=0
+sub="" lane="" anchor_pid="" anchor_comm="claude" note="" wait_s=3 wait_given=0 lock_dir="" force=0
 seen=" "
 once() {
   case "${seen}" in *" $1 "*) die 2 "$1 given more than once" "pass $1 once." ;; esac
@@ -187,7 +236,7 @@ while [ "$#" -gt 0 ]; do
     --anchor-pid)  need_value "$@"; anchor_pid="$2"; shift 2 ;;
     --anchor-comm) need_value "$@"; anchor_comm="$2"; shift 2 ;;
     --note)        need_value "$@"; note="$2"; shift 2 ;;
-    --wait)        need_value "$@"; wait_s="$2"; shift 2 ;;
+    --wait)        need_value "$@"; wait_s="$2"; wait_given=1; shift 2 ;;
     --lock-dir)    need_value "$@"; lock_dir="$2"; shift 2 ;;
     --force)       once "$1"; force=1; shift ;;
     -*) die 2 "unknown flag $1" "run lane-lock --help." ;;
@@ -204,7 +253,8 @@ esac
 valid_lane "${lane}" || die 2 "lane id '${lane}' is malformed" "use [a-z0-9][a-z0-9_-]*, e.g. flaky or harness."
 [ -z "${anchor_pid}" ] || valid_pid "${anchor_pid}" || die 2 "--anchor-pid '${anchor_pid}' is not a pid" "pass a numeric pid."
 [[ "${wait_s}" =~ ^[0-9]{1,4}$ ]] || die 2 "--wait '${wait_s}' is not a whole number of seconds" "pass e.g. --wait 3."
-[ "${sub}" = "acquire" ] || [ "${wait_s}" = 3 ] || die 2 "--wait applies to acquire only" "drop --wait."
+wait_s=$((10#${wait_s}))   # 08 is eight seconds, never an octal error
+[ "${sub}" = "acquire" ] || [ "${wait_given}" = 0 ] || die 2 "--wait applies to acquire only" "drop --wait."
 [ "${sub}" = "release" ] || [ "${force}" = 0 ] || die 2 "--force applies to release only" "drop --force."
 if [ -z "${lock_dir}" ]; then
   [ -n "${HOME:-}" ] || die 1 "HOME is unset, so the default lock dir is unknown" "set HOME or pass --lock-dir <absolute dir>."
@@ -217,11 +267,16 @@ record="${lock_dir}/${lane}.holder"
 
 # resolve_anchor -- sets anchor_pid, or dies naming what it searched for.
 resolve_anchor() {
-  if [ -z "${anchor_pid}" ]; then
-    anchor_pid="$(find_anchor "${anchor_comm}")" || die 1 \
-      "no ancestor process has comm '${anchor_comm}', so there is no session for the lock to follow" \
-      "run lane-lock from inside the Claude Code session that spawns the admiral, or pass --anchor-pid <pid of the process whose lifetime the lock must follow>."
-  fi
+  local rc=0
+  [ -z "${anchor_pid}" ] || return 0
+  anchor_pid="$(find_anchor "${anchor_comm}")" || rc=$?
+  case "${rc}" in
+    0) ;;
+    2) die 1 "could not read an ancestor process in /proc while looking for comm '${anchor_comm}', so the anchor is unknown" \
+         "check that /proc is readable (no hidepid), or pass --anchor-pid <pid of the Claude Code session>." ;;
+    *) die 1 "no ancestor process has comm '${anchor_comm}', so there is no session for the lock to follow" \
+         "run lane-lock from inside the Claude Code session that spawns the admiral, or pass --anchor-pid <pid of the process whose lifetime the lock must follow>." ;;
+  esac
 }
 
 read_record() { cat -- "${record}" 2>/dev/null || true; }
@@ -242,8 +297,8 @@ describe_holder() {
 
 do_status() {
   local st
-  st="$(lock_state "${lock}")" || die 1 "cannot read ${lock}, so the lane's state is unknown (not FREE)" \
-    "check the file's permissions (it is this user's, mode 600)."
+  st="$(lock_state "${lock}")" || die 1 "cannot read ${lock} or its directory, so the lane's state is unknown (not FREE)" \
+    "check the permissions of ${lock_dir} and ${lock} (this user's, modes 700 and 600)."
   if [ "${st}" = FREE ]; then
     printf 'FREE lane=%s lock=%s\n' "${lane}" "${lock}"
     exit 0
@@ -256,14 +311,24 @@ do_acquire() {
   resolve_anchor
   kill -0 "${anchor_pid}" 2>/dev/null || die 1 "anchor ${anchor_pid} is not a live process" \
     "pass the pid of a live process (the Claude Code session) as --anchor-pid, or omit it."
-  ( umask 077; mkdir -p -- "${lock_dir}" ) || die 1 "cannot create ${lock_dir}" "check that its parent is writable by this user."
-  ( umask 077; : >> "${lock}" ) || die 1 "cannot create ${lock}" "check that ${lock_dir} is writable by this user."
-  local fifo msg rc=0
+  mkdir -p -- "${lock_dir}" || die 1 "cannot create ${lock_dir}" "check that its parent is writable by this user."
+  : >> "${lock}" || die 1 "cannot create ${lock}" "check that ${lock_dir} is writable by this user."
+  local fifo msg rc=0 holder
   fifo="$(mktemp -u "${lock_dir}/.acquire.XXXXXX")" && mkfifo -m 600 -- "${fifo}" \
     || die 1 "cannot create the hand-off fifo in ${lock_dir}" "check that ${lock_dir} is writable by this user."
-  setsid bash -c "${HOLDER}" lane-lock-holder "${lock}" "${fifo}" "${anchor_pid}" "${lane}" \
+  # A background child of a non-interactive shell is not a process-group
+  # leader, so setsid(1) calls setsid(2) without forking: $! is the holder.
+  setsid bash -c "${HOLDER}" "lane-lock-holder:${lane}" "${lock}" "${fifo}" "${anchor_pid}" "${lane}" \
     "${CLAUDE_CODE_SESSION_ID:-}" "${note}" "${wait_s}" "${record}" </dev/null >/dev/null 2>&1 &
+  holder=$!
   msg="$(timeout $((wait_s + 15)) cat -- "${fifo}")" || rc=$?
+  case "${msg}" in
+    "held "*|busy) ;;
+    *) # No clean answer: stop the holder, so a late one never holds the lane
+       # behind an exit 1.
+       kill -KILL "${holder}" 2>/dev/null
+       wait "${holder}" 2>/dev/null ;;
+  esac
   rm -f -- "${fifo}"
   case "${msg}" in
     "held "*)
@@ -276,39 +341,42 @@ do_acquire() {
     "error "*)
       die 1 "the holder could not take the lock: ${msg#error }" "fix the named cause and run acquire again." ;;
     *)
-      die 1 "the holder never reported (cat rc=${rc}), so the lock is NOT known to be held" \
-        "run lane-lock status --lane ${lane}; if HELD with no record, release it with --force and acquire again." ;;
+      die 1 "the holder never reported (cat rc=${rc}); it was stopped, so this call holds nothing" \
+        "run lane-lock status --lane ${lane}, then acquire again; if it stays HELD with no live session behind it, release it with --force." ;;
   esac
 }
 
 do_release() {
-  local st r holder_anchor pids pid
-  st="$(lock_state "${lock}")" || die 1 "cannot read ${lock}, so the lane's state is unknown" \
-    "check the file's permissions (it is this user's, mode 600)."
+  local st pairs pids="" others="" pid anchor
+  st="$(lock_state "${lock}")" || die 1 "cannot read ${lock} or its directory, so the lane's state is unknown" \
+    "check the permissions of ${lock_dir} and ${lock} (this user's, modes 700 and 600)."
   if [ "${st}" = FREE ]; then
     printf 'NOT_HELD lane=%s lock=%s\n' "${lane}" "${lock}"
     exit 0
   fi
-  if [ "${force}" = 0 ]; then
-    resolve_anchor
-    r="$(read_record)"
-    holder_anchor="$(record_field "${r}" anchor_pid)"
-    [ -n "${holder_anchor}" ] || die 4 "the lane is held but has no holder record, so its owner cannot be checked" \
-      "if no admiral of yours is draining lane ${lane}, run lane-lock release --lane ${lane} --force."
-    [ "${holder_anchor}" = "${anchor_pid}" ] || die 4 \
-      "lane ${lane} is held under anchor ${holder_anchor}, not this caller's anchor ${anchor_pid}" \
-      "only the session that acquired it (or its admiral) releases it; a human recovering a wedged lane passes --force."
-  fi
-  pids="$(holder_pids "${lock}" "${lane}")"
-  [ -n "${pids}" ] || die 1 "the lane is HELD but no lane-lock-holder:${lane} process of this user has ${lock} open" \
+  [ "${force}" = 1 ] || resolve_anchor
+  pairs="$(holder_pids "${lock}" "${lane}")"
+  [ -n "${pairs}" ] || die 1 "the lane is HELD but no lane-lock-holder:${lane} process of this user has ${lock} open" \
     "something other than lane-lock holds it; find it with: lsof ${lock}."
+  # Authorize against each holder's OWN argv (the anchor it follows), never
+  # the informational record.
+  while read -r pid anchor; do
+    if [ "${force}" = 1 ] || [ "${anchor}" = "${anchor_pid}" ]; then
+      pids="${pids} ${pid}"
+    else
+      others="${others} ${anchor}"
+    fi
+  done <<< "${pairs}"
+  [ -n "${pids}" ] || die 4 "lane ${lane} is held under anchor${others}, not this caller's anchor ${anchor_pid}" \
+    "only the session that acquired it (or its admiral) releases it; a human recovering a wedged lane passes --force."
+  pids="${pids# }"
   for pid in ${pids}; do kill -TERM "${pid}" 2>/dev/null; done
   if ! flock -w 5 -s "${lock}" true 2>/dev/null; then
     for pid in ${pids}; do kill -KILL "${pid}" 2>/dev/null; done
-    flock -w 5 -s "${lock}" true 2>/dev/null || die 1 "lane ${lane} is still held after signalling ${pids//$'\n'/ }" \
+    flock -w 5 -s "${lock}" true 2>/dev/null || die 1 "lane ${lane} is still held after signalling ${pids}" \
       "run lane-lock status --lane ${lane}, then kill the named holder_pid by hand."
   fi
-  printf 'RELEASED lane=%s lock=%s pids=%s\n' "${lane}" "${lock}" "${pids//$'\n'/,}"
+  printf 'RELEASED lane=%s lock=%s pids=%s\n' "${lane}" "${lock}" "${pids// /,}"
   exit 0
 }
 

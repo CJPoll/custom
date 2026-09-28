@@ -685,7 +685,7 @@ ticket is filed at, and the statuses the lane drains — has one home,
 instantiation* names who reads it. This
 section is ONLY the machine-level **trigger** summary that routes a session into
 that brief — beyond naming the triggers and the spin-up/resolution routing it
-points at, it states no lane mechanics (the marker semantics, channel resolution,
+points at, it states no lane mechanics (the lane lock, channel resolution,
 read mechanics, and add/drop handling are the brief's); on any detail the brief
 wins.
 
