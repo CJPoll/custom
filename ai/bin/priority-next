@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# priority-next -- pull work from the priority index under a lease (DND-445).
+#
+# Usage:
+#   priority-next next [--domains work,blend,personal] [--json]
+#   priority-next release <item_id> [--json]
+#   priority-next complete <item_id> [--json]
+#   priority-next --help
+#
+# A thin client over the athena MCP lease tools (priority_next,
+# priority_release, priority_complete). The normative home is
+# ai/contracts/athena-events.md -> *Priority index* -> *Leases*; this tool
+# restates none of it. In short: `next` leases the top item this session may
+# serve; the lease lives while the session is seen and ends when the session
+# ends; `release` gives an item back; `complete` closes it in the index
+# (closed_by lease_complete). Leasing never writes the source tracker: an
+# admiral still takes scope in Notion (athena:ticket-management).
+#
+# The session is $CLAUDE_CODE_SESSION_ID (the top-level session; the server
+# refuses a session not bound to this machine). The MCP url is the athena
+# server Claude Code has registered for this checkout. The machine token is
+# read from the inbox client config and reaches curl on stdin only, never
+# argv, the environment or a file (athena:inbox lib/mcp.sh).
+#
+# Output (stdout unless noted):
+#   next     result=leased item_id=<id> source=<source> ref=<source_ref>
+#            domain=<domain> lease_window_s=<s>, then url=<url> and title=<title>
+#            on their own lines                                    exit 0
+#            result=none considered=<n> owner_only=<n> leased=<n> domain=<n>
+#            ingest_failures_unread=<n>                            exit 3
+#   release, complete: result=ok item_id=<id>                      exit 0
+#   A server refusal (stderr): result=refused code=<code>, then
+#     server: <the server's sentence, with its Fix:>               exit 4
+#     codes: not_found, session_ended, session_draining,
+#     not_lease_holder, not_leased, refused, store_failed
+#   Misuse (a bad subcommand, item id or domain; no session id):
+#     result=misuse, Fix: ... (stderr), and NO request is made      exit 2
+#   The server could not be asked or answered unreadably (no token, MCP not
+#   registered, transport, HTTP, a garbled answer): result=unreachable
+#     reason=<...>, Fix: ... (stderr)                               exit 5
+#     Never read as none: exit 3 is only the server's own `none`.
+#   --json prints the server's answer object instead of the key=value lines.
+#
+# session_draining means the session's desired state is drain: run the drain
+# protocol (athena:fleet-drain), do not retry.
+set -uo pipefail
+
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+SELF_DIR="$(dirname "${SELF}")"
+
+usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${SELF}"; }
+
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+
+misuse() {
+  printf 'result=misuse %s\n' "$1" >&2
+  printf 'Fix: %s\n' "$2" >&2
+  exit 2
+}
+
+unreachable() {
+  printf 'result=unreachable reason=%s\n' "$1" >&2
+  printf 'Fix: %s\n' "$2" >&2
+  exit 5
+}
+
+# ---- arguments (all checked before any request) -----------------------------
+SUB="${1:-}"; shift || true
+ITEM=""; DOMAINS=""; JSON_OUT=0
+case "${SUB}" in
+  next) ;;
+  release|complete)
+    ITEM="${1:-}"; shift || true
+    [[ "${ITEM}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] \
+      || misuse "item_id=invalid" "pass the item_id \`priority-next next\` printed (a UUID)." ;;
+  "") misuse "subcommand=missing" "run: priority-next next | release <item_id> | complete <item_id> (see --help)." ;;
+  *) misuse "subcommand=unknown" "run: priority-next next | release <item_id> | complete <item_id> (see --help)." ;;
+esac
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json) JSON_OUT=1; shift ;;
+    --domains)
+      [ "${SUB}" = "next" ] || misuse "flag=--domains" "--domains belongs to \`next\` only."
+      [ "$#" -ge 2 ] || misuse "domains=missing" "pass --domains with a comma-separated list of work, blend, personal."
+      DOMAINS="$2"; shift 2 ;;
+    *) misuse "argument=unknown" "run priority-next --help for the arguments each subcommand takes." ;;
+  esac
+done
+
+DOMAINS_JSON="null"
+if [ -n "${DOMAINS}" ]; then
+  IFS=',' read -r -a parts <<<"${DOMAINS}"
+  [ "${#parts[@]}" -gt 0 ] || misuse "domains=empty" "pass at least one of work, blend, personal."
+  for d in "${parts[@]}"; do
+    case "${d}" in work|blend|personal) ;; *)
+      misuse "domains=invalid" "each --domains value is one of work, blend, personal." ;;
+    esac
+  done
+  DOMAINS_JSON="$(printf '%s\n' "${parts[@]}" | jq -R . | jq -s -c .)"
+fi
+
+SID="${CLAUDE_CODE_SESSION_ID:-}"
+[[ "${SID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+  || misuse "session=missing" "run from a Claude Code session: CLAUDE_CODE_SESSION_ID must be its session id (it is unset, empty, or not a plain id)."
+
+# ---- the call ---------------------------------------------------------------
+INBOX_LIB="${SELF_DIR}/../skills/athena:inbox/lib"
+for f in err.sh names.sh descriptor.sh logchan.sh maildir.sh fence.sh session.sh fs.sh lock.sh inbox.sh mcp.sh; do
+  [ -f "${INBOX_LIB}/${f}" ] || unreachable "missing-library" \
+    "athena:inbox is not beside ai/bin (${INBOX_LIB}/${f} is missing); run the tool from ~/dev/custom/ai/bin."
+  # shellcheck source=/dev/null
+  . "${INBOX_LIB}/${f}"
+done
+
+command -v jq >/dev/null 2>&1 || unreachable "no-jq" "install jq; the answer is JSON."
+
+case "$(mcp_token_state)" in
+  present) ;;
+  *) unreachable "no-token" "$(mcp_token_unusable_reason "$(mcp_token_state)" | tr -d '\n'); set up the inbox client (athena:inbox) on this machine." ;;
+esac
+
+URL="$(inbox_mcp_registration "$(pwd -P)" 2>/dev/null)"; RC=$?
+case "${RC}" in
+  0) ;;
+  1) unreachable "mcp-unregistered" "register the athena MCP for this checkout (add-athena-mcp), then run again from inside it." ;;
+  2) unreachable "mcp-registration-key" "run from inside a git checkout whose athena MCP is registered." ;;
+  *) unreachable "mcp-registration-unreadable" "repair the athena entry in ~/.claude.json (it exists but has no usable url)." ;;
+esac
+
+case "${SUB}" in
+  next)
+    TOOL=priority_next
+    ARGS="$(jq -n -c --arg s "${SID}" --argjson d "${DOMAINS_JSON}" \
+      '{claude_session_id: $s} + (if $d == null then {} else {domains: $d} end)')" ;;
+  release|complete)
+    TOOL="priority_${SUB}"
+    ARGS="$(jq -n -c --arg s "${SID}" --arg i "${ITEM}" '{claude_session_id: $s, item_id: $i}')" ;;
+esac
+
+MSG="$(mcp_call_tool "${URL}" "${TOOL}" "${ARGS}")"; RC=$?
+case "${RC}" in
+  0) ;;
+  3) unreachable "not-sent:$(printf '%s' "${MSG}" | tr -s '\n\t ' ' ' | cut -c1-200)" \
+       "nothing was sent; fix the cause named above and run again." ;;
+  *) unreachable "outcome-unknown:$(printf '%s' "${MSG}" | tr -s '\n\t ' ' ' | cut -c1-200)" \
+       "the ${TOOL} call may or may not have taken effect. A lease taken stays with this session until released, completed, or the session ends; run the same command again once the server answers." ;;
+esac
+
+# ---- the answer -------------------------------------------------------------
+# One line, control characters stripped: a title or url is tracker text.
+oneline() { printf '%s' "$1" | tr -d '\000-\010\013-\037\177' | tr '\n\t' '  ' | cut -c1-500; }
+
+ERRTEXT="$(printf '%s' "${MSG}" | jq -r 'if (.result.isError // false) then ([.result.content[]? | .text? // empty] | join(" ")) else empty end' 2>/dev/null)"
+if [ -n "${ERRTEXT}" ]; then
+  CODE="${ERRTEXT%%:*}"
+  case "${CODE}" in
+    not_found|session_ended|session_draining|not_lease_holder|not_leased|refused|store_failed)
+      printf 'result=refused code=%s\n' "${CODE}" >&2
+      printf 'server: %s\n' "$(oneline "${ERRTEXT}")" >&2
+      exit 4 ;;
+    *) unreachable "unrecognised-refusal" "the server answered a tool error this client does not know: $(oneline "${ERRTEXT}")" ;;
+  esac
+fi
+
+RPCERR="$(printf '%s' "${MSG}" | jq -r 'if .error then (.error.message // "an MCP error" | tostring) else empty end' 2>/dev/null)"
+[ -z "${RPCERR}" ] || unreachable "mcp-error" "the MCP server answered a protocol error: $(oneline "${RPCERR}")."
+
+ANSWER="$(printf '%s' "${MSG}" | jq -c '(.result.structuredContent // (.result.content[0].text | fromjson? // null)) | select(type == "object")' 2>/dev/null)"
+RESULT="$(printf '%s' "${ANSWER}" | jq -r '.result // empty | select(type == "string")' 2>/dev/null)"
+
+expect_result() { # the results a subcommand may answer; anything else is unreadable
+  case "${SUB}:${RESULT}" in
+    next:leased|next:none|release:ok|complete:ok) return 0 ;;
+    *) unreachable "unreadable-answer" "the server's ${TOOL} answer carried no result this client knows (got '$(oneline "${RESULT}")'); check the athena server version." ;;
+  esac
+}
+expect_result
+
+if [ "${JSON_OUT}" -eq 1 ]; then
+  printf '%s\n' "${ANSWER}"
+  [ "${RESULT}" = "none" ] && exit 3
+  exit 0
+fi
+
+case "${RESULT}" in
+  leased)
+    printf 'result=leased item_id=%s source=%s ref=%s domain=%s lease_window_s=%s\n' \
+      "$(oneline "$(jq -r '.item.item_id // ""' <<<"${ANSWER}")")" \
+      "$(oneline "$(jq -r '.item.source // ""' <<<"${ANSWER}")")" \
+      "$(oneline "$(jq -r '.item.source_ref // ""' <<<"${ANSWER}")")" \
+      "$(oneline "$(jq -r '.item.domain // ""' <<<"${ANSWER}")")" \
+      "$(oneline "$(jq -r '.lease_window_s // ""' <<<"${ANSWER}")")"
+    printf 'url=%s\n' "$(oneline "$(jq -r '.item.url // ""' <<<"${ANSWER}")")"
+    printf 'title=%s\n' "$(oneline "$(jq -r '.item.title // ""' <<<"${ANSWER}")")"
+    exit 0 ;;
+  none)
+    printf 'result=none %s\n' "$(jq -r '"considered=\(.considered) owner_only=\(.excluded.owner_only) leased=\(.excluded.leased) domain=\(.excluded.domain) ingest_failures_unread=\(.ingest_failures_unread)"' <<<"${ANSWER}")"
+    exit 3 ;;
+  ok)
+    printf 'result=ok item_id=%s\n' "${ITEM}"
+    exit 0 ;;
+esac
