@@ -120,6 +120,8 @@ fixture t1 dnd-1-x; run --pr 5
 expect t1 0
 has "t1 reports what it removed" "TORN DOWN project dnd-1-x in ${WT}/dnd-1-x (removed 2 container(s), 3 volume(s), 1 network(s))"
 has "t1 names the worktree to remove next" "next: remove the worktree ${WT}/dnd-1-x"
+has "t1 names the no-sudo husk reclaim" "Permission denied on container-owned deps/_build is a husk: reclaim it without sudo"
+has "t1 cites the husk section by name" "athena:teardown-worktree-stack -> A root-owned husk"
 [ -d "${WT}/dnd-1-x" ] && ok "t1 the tool itself left the worktree" || bad "t1 the tool removed the worktree"
 grep -qxF "CWD ${WT}/dnd-1-x PROJECT dnd-1-x" "${ST}/compose.log" && ok "t1 down ran in the worktree for its project" \
   || bad "t1 compose call" "$(cat "${ST}/compose.log" 2>/dev/null)"
