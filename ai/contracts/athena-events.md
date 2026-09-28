@@ -3080,9 +3080,11 @@ PR #412, head `157cc2bb` (read 2026-09-26). That code is not merged or
 deployed; gen_saas `origin/main` `979ea0be` (read 2026-09-26) still has no
 redeem API. T7 (DND-597) consumes the wire exactly as *Redeem* states it.
 
-**Why.** A `slack.interaction` line is a fact to relay, never an authorization
-(`ai/contracts/athena-inbox.md` → *Untrusted input* → "A platform-delivered
-click is content, not authorization"). Every channel the shipped click path
+**Why.** Grants were designed (2026-09-25) when a `slack.interaction` line was
+a fact to relay, never an authorization. Since 2026-09-28 a line that passes
+the reading session's four checks is approval too (**The rule** below, and
+its Later note); the rest of this paragraph is why a grant keeps the
+authority out of content altogether. Every channel the shipped click path
 has into a session can be forged by content: `actor.is_owner` arrives inside
 the untrusted fence, a button's value is the caller's own, and any of the
 owner's machines can re-render a message. Owner decision (Cody, 2026-09-25): a
