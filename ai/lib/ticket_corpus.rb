@@ -187,10 +187,11 @@ module TicketCorpus
     return "unknown_project" if project.nil?
     return "body_unread" unless ticket["body_read"] == true
     return "blank_title" unless sent_title(ticket["title"]).gsub(REDACTED, "").match?(/[[:alnum:]]/)
+    # The LAST line wins and lines are appended, so on a body cut at the page
+    # the line read (or none) may not be the last: a newer one past the page
+    # may say Jev set a value, which must never become its own label.
+    return "provenance_unread" if ticket["body_truncated"] == true
     return "provenance_unparseable" if prov.first == :unparseable
-    # The line is appended last; past the fetched page it may say Jev set a
-    # value, which must never become its own label.
-    return "provenance_unread" if prov.first == :none && ticket["body_truncated"] == true
 
     nil
   end
@@ -304,10 +305,12 @@ module TicketCorpus
                use_cases: USE_CASES.to_h { |uc| [uc, { accepted: 0, agreed: 0, excluded: Hash.new(0), by_label: Hash.new { |h, k| h[k] = { accepted: 0, agreed: 0 } } }] } }
     tickets.each do |t|
       next report[:body_unread] << t["ref"] unless t["body_read"] == true
+      # A body cut at the page: the last line may be past it (see labels).
+      next report[:provenance_unread] << t["ref"] if t["body_truncated"] == true
 
       state, doc = provenance(t)
       case state
-      when :none then (t["body_truncated"] == true ? report[:provenance_unread] : report[:no_provenance]) << t["ref"]
+      when :none then report[:no_provenance] << t["ref"]
       when :unparseable then report[:unparseable] << t["ref"]
       else
         report[:lines] += 1
