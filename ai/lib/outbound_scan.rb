@@ -92,10 +92,12 @@ module OutboundScan
     labels_matching(patterns, text).map { |l| Hit.new(location: location, label: l) }
   end
 
-  # Render one location. `redacted` is a Set-like of paths that matched a
-  # pattern themselves; such a path is never printed.
-  def render_location(loc, redacted)
-    path = loc.path && redacted.include?(loc.path) ? "<path redacted: it matches a pattern>" : loc.path
+  # Render one location. A path that itself matches any pattern is never
+  # printed. The decision is made HERE, against the patterns, for every path at
+  # render time -- not looked up in a set built elsewhere, whose keys could
+  # differ in encoding or miss a path (a modified file) that never went in.
+  def render_location(loc, patterns)
+    path = loc.path && !labels_matching(patterns, loc.path).empty? ? "<path redacted: it matches a pattern>" : loc.path
     sha = loc.commit && loc.commit[0, 12]
     case loc.kind
     when :content
@@ -114,9 +116,8 @@ module OutboundScan
 
   # The SCANNED counts line every measured run prints.
   def counts_line(counts)
-    extra = counts[:binary].to_i.positive? ? " binary_skipped=#{counts[:binary]}" : ""
     "SCANNED commits=#{counts[:commits].to_i} lines=#{counts[:lines].to_i} " \
-      "patterns=#{counts[:patterns].to_i} hits=#{counts[:hits].to_i}#{extra}"
+      "patterns=#{counts[:patterns].to_i} hits=#{counts[:hits].to_i}"
   end
 
   HIT_FIX = "Fix: move each value to the private overlay and read it with `ai/bin/private-overlay get <file> <.key.path>` " \

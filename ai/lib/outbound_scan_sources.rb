@@ -34,9 +34,8 @@ module OutboundScan
       GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
       GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_QUARANTINE_PATH
     ].freeze
-    BINARY_PROBE = 8000
 
-    Surface = Struct.new(:hits, :counts, :redacted, keyword_init: true)
+    Surface = Struct.new(:hits, :counts, keyword_init: true)
 
     module_function
 
@@ -146,19 +145,18 @@ module OutboundScan
 
     # -> Surface for a list of commits.
     def scan_commits(patterns, shas)
-      counts = { commits: 0, lines: 0, patterns: patterns.length, hits: 0, binary: 0 }
+      counts = { commits: 0, lines: 0, patterns: patterns.length, hits: 0 }
       hits = []
-      redacted = {}
       matcher = quick_matcher(patterns)
       shas.each do |sha|
         counts[:commits] += 1
         scan_message(patterns, matcher, sha, hits, counts)
         ps = parents(sha)
-        scan_paths(patterns, sha, ps, hits, redacted)
+        scan_paths(patterns, sha, ps, hits)
         scan_diff(patterns, matcher, sha, ps, hits, counts)
       end
       counts[:hits] = hits.length
-      Surface.new(hits: hits, counts: counts, redacted: redacted)
+      Surface.new(hits: hits, counts: counts)
     end
 
     def scan_message(patterns, matcher, sha, hits, counts)
@@ -176,7 +174,12 @@ module OutboundScan
       git!("rev-list", "--parents", "-n", "1", sha, what: "read the parents of #{sha[0, 12]}").split[1..] || []
     end
 
-    COMMON_DIFF = %w[--no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/].freeze
+    # --text: every file's content is diffed as text, so a `-diff` or `binary`
+    # attribute the pushed commit itself adds (.gitattributes) cannot turn its
+    # own hunks into "Binary files differ" and skip the scan. The bar is not
+    # read from the diff under test. --no-textconv/--no-ext-diff keep a
+    # `diff=<driver>` attribute from rewriting the text either.
+    COMMON_DIFF = %w[--text --no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/].freeze
 
     # The full git argv for what this commit INTRODUCES, with `extra` flags:
     #   root commit   its whole tree (diff-tree --root);
@@ -196,12 +199,11 @@ module OutboundScan
       end
     end
 
-    def scan_paths(patterns, sha, ps, hits, redacted)
+    def scan_paths(patterns, sha, ps, hits)
       new_paths(sha, ps).each do |path|
         labels = OutboundScan.labels_matching(patterns, path)
         next if labels.empty?
 
-        redacted[path] = true
         loc = Location.new(kind: :path, path: path, commit: sha)
         labels.each { |l| hits << Hit.new(location: loc, label: l) }
       end
@@ -230,11 +232,7 @@ module OutboundScan
 
     def scan_diff(patterns, matcher, sha, ps, hits, counts)
       out = git!(*diff_argv(sha, ps, %w[-p --unified=0]), what: "read the diff of #{sha[0, 12]}")
-      each_added_line(out, [ps.length, 1].max) do |kind, path, n, text|
-        if kind == :binary
-          counts[:binary] += 1
-          next
-        end
+      each_added_line(out, [ps.length, 1].max) do |path, n, text|
         counts[:lines] += 1
         next unless quick?(matcher, text)
 
@@ -243,11 +241,11 @@ module OutboundScan
       end
     end
 
-    # Walk a unified (cols=1) or combined (cols=parents) diff. Yields
-    # (:add, path, line_no, text) for each line the commit introduces -- every
-    # prefix column '+' -- and (:binary, path) for a binary file. A state
-    # machine, so an added line whose text starts with "++ " is content, never
-    # a header.
+    # Walk a unified (cols=1) or combined (cols=parents) diff made with --text.
+    # Yields (path, line_no, text) for each line the commit introduces -- every
+    # prefix column '+'. A state machine, so an added line whose text starts
+    # with "++ " is content, never a header. A "Binary files" line cannot occur
+    # under --text; if git ever prints one, the scan refuses to call it clean.
     def each_added_line(diff, cols = 1)
       state = :none
       path = nil
@@ -264,7 +262,7 @@ module OutboundScan
           if line.start_with?("+++ ")
             path = diff_path(line[4..])
           elsif line.start_with?("Binary files ")
-            yield :binary, path, 0, nil
+            raise Unmeasurable, "git reported a binary diff despite --text, so a file's content was not shown"
           elsif line.start_with?("@@")
             state = :hunk
             n = hunk_start(line)
@@ -278,7 +276,7 @@ module OutboundScan
           next if prefix.length < cols || prefix.start_with?("\\")
           next if prefix.include?("-") # a removed line: not in the result
 
-          yield :add, path, n, line[cols..].to_s if prefix.delete("+").empty?
+          yield path, n, line[cols..].to_s if prefix.delete("+").empty?
           n += 1
         end
       end
@@ -295,7 +293,7 @@ module OutboundScan
       return nil if spec == "/dev/null"
 
       s = spec.start_with?('"') ? unquote(spec) : spec
-      s.sub(%r{\Ab/}, "")
+      s.sub(%r{\Ab/}, "").dup.force_encoding(Encoding::UTF_8)
     end
 
     # git's C-style path quoting.
@@ -327,9 +325,8 @@ module OutboundScan
     def scan_tree(patterns)
       top = git!("rev-parse", "--show-toplevel", what: "find the repository top level").strip
       listing = git!("-C", top, "ls-files", "-z", "-s", what: "list the tracked files")
-      counts = { commits: 0, lines: 0, patterns: patterns.length, hits: 0, binary: 0, files: 0 }
+      counts = { commits: 0, lines: 0, patterns: patterns.length, hits: 0, files: 0 }
       hits = []
-      redacted = {}
       matcher = quick_matcher(patterns)
       entries = listing.split("\0").reject(&:empty?)
       raise Unmeasurable, "git ls-files listed zero tracked files" if entries.empty?
@@ -341,17 +338,14 @@ module OutboundScan
         counts[:files] += 1
         labels = OutboundScan.labels_matching(patterns, path)
         unless labels.empty?
-          redacted[path] = true
           loc = Location.new(kind: :path, path: path)
           labels.each { |l| hits << Hit.new(location: loc, label: l) }
         end
         next if mode == "160000"
 
+        # Binary content is scanned as bytes split on newlines, like text: a
+        # file cannot opt out of the scan by holding a NUL.
         content = tree_content(top, path, mode, blob)
-        if content.byteslice(0, BINARY_PROBE).include?("\0")
-          counts[:binary] += 1
-          next
-        end
         content.each_line.with_index(1) do |line, n|
           counts[:lines] += 1
           next unless quick?(matcher, line)
@@ -360,7 +354,7 @@ module OutboundScan
         end
       end
       counts[:hits] = hits.length
-      Surface.new(hits: hits, counts: counts, redacted: redacted)
+      Surface.new(hits: hits, counts: counts)
     end
 
     def tree_content(top, path, mode, blob)
@@ -381,14 +375,14 @@ module OutboundScan
       rescue SystemCallError
         raise Unmeasurable, "the text file to scan (#{field}) is unreadable"
       end
-      counts = { commits: 0, lines: 0, patterns: patterns.length, hits: 0, binary: 0 }
+      counts = { commits: 0, lines: 0, patterns: patterns.length, hits: 0 }
       hits = []
       text.each_line.with_index(1) do |line, n|
         counts[:lines] += 1
         hits.concat(OutboundScan.scan_line(patterns, Location.new(kind: :field, field: field, line: n), line))
       end
       counts[:hits] = hits.length
-      Surface.new(hits: hits, counts: counts, redacted: {})
+      Surface.new(hits: hits, counts: counts)
     end
 
     # ---- a cheap pre-filter -------------------------------------------------------

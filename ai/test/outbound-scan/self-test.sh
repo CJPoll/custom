@@ -280,6 +280,46 @@ R="${TMP}/rootrepo"; git init -q "${R}"; printf 'root %s\n' "${TOKEN}" > "${R}/f
 OUT="$(cd "${R}" && printf 'refs/heads/main %s refs/heads/main 0000000000000000000000000000000000000000\n' "$(git rev-parse HEAD)" | "${SCAN}" --pre-push --remote /some/url 2>&1)"; RC=$?
 if [ "${RC}" = 1 ] && [[ "${OUT}" == *"f:1 (commit "* ]]; then ok "a root commit's diff is scanned"; else bad "root commit" "rc=${RC} ${OUT}"; fi
 
+echo "--- the pushed commit cannot opt its own content out (critic round 5) ---"
+GA="$(mk_public gattr)"
+mkdir -p "${GA}/d"
+printf '*.md -diff\n' > "${GA}/.gitattributes"
+printf 'carry %s\n' "${TOKEN}" > "${GA}/d/n.md"
+git -C "${GA}" add .gitattributes d/n.md && git -C "${GA}" commit -q -m "attrs and content"
+prepush_head() {
+  OUT="$(cd "$1" && printf 'refs/heads/main %s refs/heads/main %s\n' "$(git rev-parse HEAD)" "$(git rev-parse origin/main)" | "${SCAN}" --pre-push --remote origin 2>&1)"; RC=$?
+}
+prepush_head "${GA}"
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"d/n.md:1 (commit "*"label=synth-token"* ]] && no_literal; then
+  ok "a '-diff' .gitattributes in the pushed commit does not hide its content"
+else
+  bad "gitattributes opt-out" "rc=${RC} ${OUT}"
+fi
+printf 'bin\0ary %s\n' "${TOKEN}" > "${GA}/blob.dat"
+git -C "${GA}" add blob.dat && git -C "${GA}" commit -q -m blob
+prepush_head "${GA}"
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"blob.dat:1 (commit "* ]] && no_literal; then ok "content with a NUL is scanned in a push"; else bad "NUL push" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${GA}" && "${SCAN}" --tree 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"blob.dat:1 label=synth-token"* ]] && no_literal; then ok "content with a NUL is scanned in --tree"; else bad "NUL tree" "rc=${RC} ${OUT}"; fi
+
+echo "--- a matching path is never printed, whatever its encoding or status (critic round 5) ---"
+NA="$(mk_public nonascii)"
+commit_file "${NA}" "docs/café-${PERSON}/x.md" "and ${TOKEN}\n" "non-ascii matching dir"
+prepush_head "${NA}"
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"<path redacted: it matches a pattern>:1 (commit "* ]] && no_literal; then
+  ok "a non-ASCII matching path is redacted in a content hit"
+else
+  bad "non-ASCII redaction" "rc=${RC} ${OUT}"
+fi
+git -C "${NA}" push -q origin main 2>/dev/null   # now public; the next commit only MODIFIES it
+commit_file "${NA}" "docs/café-${PERSON}/x.md" "and ${TOKEN}\nagain ${TOKEN}\n" "modify"
+prepush_head "${NA}"
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"<path redacted: it matches a pattern>:2 (commit "* ]] && no_literal; then
+  ok "a matching path on a MODIFIED file is redacted too"
+else
+  bad "modified-path redaction" "rc=${RC} ${OUT}"
+fi
+
 echo "--- merges: only what differs from every parent is new ---"
 MG="$(mk_public merges)"
 git -C "${MG}" checkout -q -b feature

@@ -165,7 +165,8 @@ A run that measured prints `SCANNED commits=N lines=M patterns=P hits=H`.
 
 A hit is printed as a location and the pattern label: `path:line (commit <sha>)`,
 `commit <sha> message:<n>`, `commit <sha> path <redacted>`, or `<field>:<n>`. A
-path that itself matches a pattern is never printed.
+path that itself matches a pattern is never printed: every rendered path is
+checked against the patterns at render time.
 
 **Surfaces.** Three modes of `ai/bin/outbound-scan`, exactly one per run:
 
@@ -180,9 +181,11 @@ path that itself matches a pattern is never printed.
   from a parent is that parent's. It is scanned where that parent's commits are
   in the pushed range, and it is already on the remote where they are not, so
   skipping it at the merge publishes nothing new. A deleted ref publishes
-  nothing. Binary files are skipped and counted (`binary_skipped=N`). Tag
-  messages are not scanned.
+  nothing. Every file is diffed as text (`--text`, no textconv, no external
+  diff), so a `.gitattributes` in the pushed commit cannot mark its own content
+  binary and skip the scan. Tag messages are not scanned.
 - `--tree` — every tracked file of the current repository: content and path.
+  Binary content is scanned too, as bytes split on newlines: no file opts out.
   It is not in `harness-gate` yet: the tree still carries work values until
   DND-704, DND-705 and DND-706 land, and wiring it earlier would turn every
   gate red.
