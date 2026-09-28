@@ -38,7 +38,10 @@
 # Its GIT_CONFIG pairs are APPENDED after any the settings env already holds,
 # never written over an index in use; a key already present with another value
 # is refused, never overwritten. --remove-env deletes exactly those keys and
-# renumbers the rest.
+# renumbers the rest. An --install-env that changes the env also writes
+# ATHENA_AGENT_ENV_INSTALLED_AT (UTC, to the second) in the same write, so
+# check-hooks-registered can tell a session started before the install
+# (PENDING RESTART) from drift (DND-1036); --remove-env removes it too.
 #
 # Exit codes: 0 ok · 1 usage/arg error · 2 missing prerequisite (no python3/registry)
 # · 3 an unreadable settings file or env · 4 an unquotable main-checkout path
@@ -191,6 +194,9 @@ if mode in ("install-env", "remove-env"):
     ex = lambda v: v.replace("{{MAIN}}", repo)
     pairs = [(e["key"], ex(e["value"])) for e in spec["git_config"]]
     ours = {k for k, _ in pairs}
+    # Must equal AgentStashEnv::INSTALLED_AT (ai/lib/agent_stash_env.rb); the
+    # self-test's install-env case asserts the checker reads what this writes.
+    STAMP_KEY = "ATHENA_AGENT_ENV_INSTALLED_AT"
     vars_ = {k: ex(v) for k, v in spec["vars"].items()}
     env = settings.get("env", {})
     if not isinstance(env, dict):
@@ -245,6 +251,16 @@ if mode in ("install-env", "remove-env"):
             if k not in env:
                 env[k] = v
                 changes.append(f"+ env {k}={v}")
+        # The install time (DND-1036), written in the same file write that
+        # completes the env, and only when this run changed it: a session whose
+        # shell snapshot predates it is a pending restart, not drift. A no-op
+        # run never backfills it: stamping "now" onto an older install would
+        # read sessions started between the two as pending.
+        if changes:
+            import datetime
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            env[STAMP_KEY] = stamp
+            changes.append(f"+ env {STAMP_KEY}={stamp}")
     else:  # remove-env
         keep = [(k, v) for k, v in entries if k not in ours]
         if len(keep) != len(entries):
@@ -267,6 +283,9 @@ if mode in ("install-env", "remove-env"):
             if k in env and (k != "GIT_TRACE2" or env[k] == v):
                 del env[k]
                 changes.append(f"- env {k}")
+        if STAMP_KEY in env:
+            del env[STAMP_KEY]
+            changes.append(f"- env {STAMP_KEY}")
     if env:
         settings["env"] = env
     else:
@@ -731,7 +750,7 @@ PY2
     printf '{\n    "model": "x"\n}\n' > "$envs"
     re1="$(apply install-env "$envs" 0)"
     SETTINGS="$envs" HOOKS_REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" python3 - <<'PY3' \
-      && echo "  ok   install-env writes the registry env, expanded against the MAIN checkout" \
+      && echo "  ok   install-env writes the registry env, expanded against the MAIN checkout, and its install time" \
       || { echo "  FAIL install-env did not write the expected env"; ok=0; }
 import json, os, sys
 main = os.environ["HOOKS_REPO_DIR"]
@@ -744,6 +763,14 @@ for i, e in enumerate(spec["git_config"]):
 for k, v in spec["vars"].items():
     want[k] = v.replace("{{MAIN}}", main)
 cmd = next(v for k, v in env.items() if k.startswith("GIT_CONFIG_VALUE_") and "agent-stash-guard.sh" in v)
+# The install stamp (DND-1036): a real UTC second, within a minute of now.
+import datetime, re
+stamp = env.pop("ATHENA_AGENT_ENV_INSTALLED_AT", "")
+if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stamp):
+    sys.exit(1)
+age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+if not datetime.timedelta(seconds=-5) <= age <= datetime.timedelta(seconds=60):
+    sys.exit(1)
 sys.exit(0 if env == want and f"{main}/ai/git-hooks/agent-stash-guard.sh" in cmd
          and "/.local/worktrees/" not in cmd and env["ATHENA_AGENT_BIN"] == f"{main}/ai/agent-bin" else 1)
 PY3
@@ -751,6 +778,14 @@ PY3
     re2="$(apply install-env "$envs" 0)"
     grep -q "MARKER:nochange" <<<"$re2" && echo "  ok   install-env is idempotent" \
       || { echo "  FAIL second install-env should be a no-op"; ok=0; }
+    # The stamp this installer writes is the one the checker reads (DND-1036):
+    # the shipped AgentStashEnv.installed_at, not a copy of its rule.
+    SETTINGS="$envs" LIB="${REPO_DIR}/ai/lib/agent_stash_env.rb" /usr/bin/ruby -rjson -e '
+      require ENV["LIB"]
+      t = AgentStashEnv.installed_at(JSON.parse(File.read(ENV["SETTINGS"]))["env"])
+      exit((Time.now - t).between?(-5, 60) ? 0 : 1)' 2>/dev/null \
+      && echo "  ok   check-hooks-registered reads the install time install-env wrote" \
+      || { echo "  FAIL the checker cannot read the install time install-env wrote"; ok=0; }
     # The fixture repo's origin/main is this tree, so the checker's landed env
     # bar is the one install-env just wrote. Its values must match: ACTIVE, or
     # (the fixture carries no hook script, wrapper or shell line) the

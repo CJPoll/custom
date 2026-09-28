@@ -580,8 +580,9 @@ end
 # the states). This reports it on its own line and never folds it into the hook
 # verdict above: INACTIVE (exit 0, the owner has not run
 # `scripts/setup-hooks --install-env`), ACTIVE (exit 0, runtime asserted too),
-# DRIFT/FAIL (exit 1), or COULD NOT MEASURE (exit 3). The overall exit is the
-# worse of the two checks.
+# PENDING RESTART (exit 0: ACTIVE, except this session's shell snapshot
+# predates the install, DND-1036), DRIFT/FAIL (exit 1), or COULD NOT MEASURE
+# (exit 3). The overall exit is the worse of the two checks.
 #
 # THE BAR IS THE ENV AS LANDED, like the hooks' (DND-743). The expected values
 # come from ai/hooks/registry.json at origin/main's tip (ai/lib/landed.rb,
@@ -612,7 +613,9 @@ end
 # landed env) comes from the diff under check (critic round 4).
 def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO_DIR,
                         landed_env: ->(r) { landed_env_section(r) },
-                        zshrc: File.join(Dir.home, ".zshrc"), proc_env: ENV, out: $stdout, err: $stderr)
+                        zshrc: File.join(Dir.home, ".zshrc"), proc_env: ENV,
+                        session_snapshot: ->(now) { AgentStashEnv.session_snapshot(now: now) },
+                        now: -> { Time.now }, out: $stdout, err: $stderr)
   tag = "check-hooks-registered: agent-stash env"
   unless File.exist?(path)
     out.puts "#{tag}: no settings file at #{path} — nothing to assert (not this environment). OK."
@@ -650,7 +653,8 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
     # A guard trace exists (any_guard_key? above) but none of the landed keys
     # does: a renamed or case-variant key. That is drift, never INACTIVE.
     res = AgentStashEnv::Result.new(:drift, ["#{path} carries agent-stash keys (a hook.agentstash.* / " \
-                                             "hook.reference-transaction.* GIT_CONFIG key or ATHENA_AGENT_BIN), " \
+                                             "hook.reference-transaction.* GIT_CONFIG key, ATHENA_AGENT_BIN or " \
+                                             "#{AgentStashEnv::INSTALLED_AT}), " \
                                              "but none of the landed env's keys"], 1)
   end
   if res.state == :drift
@@ -664,20 +668,60 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
   end
 
   problems = AgentStashEnv.runtime_problems(env, exp, main: main, zshrc: zshrc)
-  notes, session = AgentStashEnv.session_state(exp, proc_env: proc_env)
+  notes, session, path_problem = AgentStashEnv.session_state(exp, proc_env: proc_env)
   problems += session
-  if problems.empty?
+  if problems.empty? && path_problem.nil?
     out.puts "#{tag}: ACTIVE — settings values match #{bar}; hook script, `git hook list` (agentstash), " \
              "wrapper and shell line verified. OK."
     notes.each { |n| out.puts "  note: #{n}" }
     return EXIT_OK
   end
-  err.puts "#{tag}: FAIL — the settings values match (active), but:"
-  problems.each { |l| err.puts "  - #{l}" }
-  EXIT_FAIL
+  unless problems.empty?
+    err.puts "#{tag}: FAIL — the settings values match (active), but:"
+    (problems + [path_problem].compact).each { |l| err.puts "  - #{l}" }
+    return EXIT_FAIL
+  end
+  report_session_path(path_problem, env, tag: tag, main: main, snapshot: session_snapshot, now: now.call,
+                                                      out: out, err: err)
 rescue JSON::ParserError, SystemCallError => e
   err.puts "#{tag}: COULD NOT MEASURE — #{e.message.lines.first.to_s.strip}. " \
            "Fix: repair the file named above (registry or settings JSON) and re-run; this is not a pass."
+  EXIT_UNMEASURED
+end
+
+# PENDING RESTART (DND-1036). The settings env is ACTIVE and every runtime
+# check passed; the one problem is that this session's first git on PATH is not
+# the wrapper. That is a pending restart only if this session's shell snapshot
+# was built before the env was installed (ai/lib/agent_stash_env.rb explains
+# both times and why the snapshot is "session start"). Either time unreadable
+# is COULD NOT MEASURE (exit 3), never pending; a snapshot at or after the
+# install is FAIL. Neither time comes from the branch: the stamp is in the live
+# settings, the snapshot in this process's ancestry.
+def report_session_path(path_problem, env, tag:, main:, snapshot:, now:, out:, err:)
+  installed = AgentStashEnv.installed_at(env, now: now)
+  snap_time, snap_path = snapshot.call(now)
+  if AgentStashEnv.pending_verdict(snap_time, installed) == :pending
+    out.puts "#{tag}: PENDING RESTART — settings values match the landed env and the runtime checks pass, but " \
+             "this session's shell snapshot #{snap_path} was built #{AgentStashEnv.iso(snap_time)}, before the " \
+             "env was installed at #{AgentStashEnv.iso(installed)} (#{AgentStashEnv::INSTALLED_AT}), so its PATH " \
+             "predates the wrapper. OK (exit 0): restart this session to load it; a session started after the " \
+             "install that still lacks the wrapper is a failure."
+    return EXIT_OK
+  end
+  err.puts "#{tag}: FAIL — the settings values match (active), but:"
+  err.puts "  - #{path_problem}"
+  err.puts "  - this session's shell snapshot #{snap_path} was built #{AgentStashEnv.iso(snap_time)}, at or after " \
+           "the env install at #{AgentStashEnv.iso(installed)}: this is not a pending restart, the shell line did " \
+           "not take effect."
+  EXIT_FAIL
+rescue AgentStashEnv::Unmeasured => e
+  err.puts "#{tag}: COULD NOT MEASURE — this is not a pass."
+  err.puts "  - #{path_problem}"
+  err.puts "  - whether that is a pending restart could not be decided: #{e.message}."
+  err.puts "  Fix: restart this session (a fresh session's snapshot carries the wrapper). If the install time is " \
+           "missing or wrong, the owner re-applies the env from the MAIN checkout so it records one: " \
+           "`#{File.join(main, 'scripts/setup-hooks')} --remove-env && " \
+           "#{File.join(main, 'scripts/setup-hooks')} --install-env`, then restarts sessions."
   EXIT_UNMEASURED
 end
 
@@ -715,12 +759,17 @@ def agent_stash_env_self_test(check)
     full.merge!(exp[:vars])
     settings = File.join(dir, "settings.json")
     landed = ->(_root) { ["fixture landed", registry["env"]] }
-    run = lambda do |env, proc_env: {}, landed_env: landed|
+    # The live /proc walk is never reached from here: every case injects the
+    # session's snapshot time (DND-1036), so the session running the suite is
+    # never read.
+    now = Time.utc(2026, 9, 28, 8, 0, 0)
+    snap_old = ->(_now) { [Time.utc(2026, 9, 26, 19, 31, 9), "/h/.claude/shell-snapshots/snapshot-zsh-1-a.sh"] }
+    run = lambda do |env, proc_env: {}, landed_env: landed, snapshot: snap_old|
       File.write(settings, JSON.generate(env.nil? ? {} : { "env" => env }))
       o = StringIO.new
       e = StringIO.new
-      code = run_agent_stash_env(path: settings, main: main, zshrc: zshrc,
-                                 landed_env: landed_env, proc_env: proc_env, out: o, err: e)
+      code = run_agent_stash_env(path: settings, main: main, zshrc: zshrc, landed_env: landed_env,
+                                 proc_env: proc_env, session_snapshot: snapshot, now: -> { now }, out: o, err: e)
       [code, o.string + e.string]
     end
 
@@ -773,9 +822,91 @@ def agent_stash_env_self_test(check)
     good = { "ATHENA_AGENT_BIN" => bin, "PATH" => "#{bin}:/usr/bin:/bin" }
     code, = run.call(full, proc_env: good)
     check.call("env: an activated session with the wrapper first on PATH -> ACTIVE", code.zero?)
-    code, text = run.call(full, proc_env: good.merge("PATH" => "/usr/bin:#{bin}:/bin"))
-    check.call("env: an activated session whose PATH puts real git first -> FAIL",
-               code == 1 && text.include?("first git on PATH"))
+    stale = good.merge("PATH" => "/usr/bin:#{bin}:/bin")
+    installed = full.merge(AgentStashEnv::INSTALLED_AT => "2026-09-28T07:19:25Z")
+    code, text = run.call(full.merge(AgentStashEnv::INSTALLED_AT => "2026-09-25T00:00:00Z"), proc_env: stale)
+    check.call("env: a session started after the install whose PATH puts real git first -> FAIL",
+               code == 1 && text.include?("first git on PATH") && !text.include?("PENDING"))
+
+    # PENDING RESTART (DND-1036): the snapshot predates the install.
+    code, text = run.call(installed, proc_env: stale)
+    check.call("pending: snapshot before the install, only the PATH is stale -> PENDING RESTART, exit 0",
+               code.zero? && text.include?("PENDING RESTART") && text.include?("2026-09-28T07:19:25Z"))
+    code, text = run.call(installed.merge("ATHENA_AGENT_BIN" => "/elsewhere"), proc_env: stale)
+    check.call("pending: a partial/differing env is DRIFT even for an old session", code == 1 && text.include?("DRIFT"))
+    code, text = run.call(installed, proc_env: stale.merge("ATHENA_AGENT_BIN" => "/elsewhere"))
+    check.call("pending: an old session with the wrong ATHENA_AGENT_BIN -> FAIL, never pending",
+               code == 1 && !text.include?("PENDING"))
+    File.write(zshrc, "export FOO=1\n")
+    code, text = run.call(installed, proc_env: stale)
+    File.write(zshrc, "export FOO=1\n#{AgentStashEnv::ZSHRC_LINE}\n")
+    check.call("pending: a runtime problem beside the stale PATH -> FAIL naming both, never pending",
+               code == 1 && text.include?("agent PATH line") && text.include?("first git on PATH") &&
+               !text.include?("PENDING"))
+    same = ->(_now) { [Time.utc(2026, 9, 28, 7, 19, 25, 500_000), "/s/shell-snapshots/snapshot-zsh-2-b.sh"] }
+    code, text = run.call(installed, proc_env: stale, snapshot: same)
+    check.call("pending: a snapshot inside the install's own second -> FAIL (the conservative side)",
+               code == 1 && !text.include?("PENDING"))
+    { "no stamp" => full, "malformed stamp" => full.merge(AgentStashEnv::INSTALLED_AT => "yesterday"),
+      "impossible date" => full.merge(AgentStashEnv::INSTALLED_AT => "2026-02-30T00:00:00Z"),
+      "stamp not a string" => full.merge(AgentStashEnv::INSTALLED_AT => 1_790_551_165),
+      "future stamp" => full.merge(AgentStashEnv::INSTALLED_AT => "2026-09-28T09:00:00Z") }.each do |label, env|
+      code, text = run.call(env, proc_env: stale)
+      check.call("pending: #{label} -> COULD NOT MEASURE, exit 3, never pending",
+                 code == EXIT_UNMEASURED && text.include?("COULD NOT MEASURE") && !text.include?("PENDING RESTART"))
+    end
+    lost = ->(_now) { raise AgentStashEnv::Unmeasured, "no ancestor of this process sourced a Claude Code shell snapshot" }
+    code, text = run.call(installed, proc_env: stale, snapshot: lost)
+    check.call("pending: session start unreadable -> COULD NOT MEASURE, exit 3, never pending",
+               code == EXIT_UNMEASURED && text.include?("no ancestor") && !text.include?("PENDING RESTART"))
+    code, = run.call(installed, proc_env: good, snapshot: lost)
+    check.call("pending: wrapper first -> ACTIVE without reading the session start", code.zero?)
+    code, text = run.call({ AgentStashEnv::INSTALLED_AT => "2026-09-28T07:19:25Z" })
+    check.call("pending: the install stamp alone is a guard trace -> DRIFT, never INACTIVE",
+               code == EXIT_FAIL && text.include?("DRIFT"))
+
+    # The ancestor walk, against a fixture /proc (DND-1036).
+    proc_root = File.join(dir, "proc")
+    mkproc = lambda do |pid, ppid, argv, comm: "zsh"|
+      FileUtils.mkdir_p(File.join(proc_root, pid.to_s))
+      File.write(File.join(proc_root, pid.to_s, "cmdline"), argv.join("\0") + "\0")
+      File.write(File.join(proc_root, pid.to_s, "stat"), "#{pid} (#{comm}) S #{ppid} 1 1 0 -1\n")
+    end
+    outer = "/home/u/.claude/shell-snapshots/snapshot-zsh-1790451069047-si085w.sh"
+    inner = "/home/u/.claude/shell-snapshots/snapshot-bash-1790552000123-q1.sh"
+    mkproc.call(1, 0, ["init"])
+    mkproc.call(10, 1, ["claude"])
+    mkproc.call(20, 10, ["/usr/bin/zsh", "-c", "source #{outer} 2>/dev/null || true && eval 'x'"])
+    mkproc.call(30, 20, ["ruby", "harness-gate"], comm: "ruby) S 9 (odd")
+    mkproc.call(40, 30, ["ruby", "check-hooks-registered"])
+    t, path = AgentStashEnv.session_snapshot(pid: 40, proc_root: proc_root, now: now)
+    check.call("walk: the nearest snapshot ancestor, time from its file name (ms), odd comm parsed",
+               path == outer && t == Time.at(1_790_451_069, 47, :millisecond).utc)
+    mkproc.call(50, 40, ["/bin/bash", "-c", "source #{inner}; claude -p"])
+    mkproc.call(60, 50, ["ruby", "check-hooks-registered"])
+    _t, path = AgentStashEnv.session_snapshot(pid: 60, proc_root: proc_root, now: now)
+    check.call("walk: a nested session reads its own shell's snapshot, not its parent's", path == inner)
+    mkproc.call(70, 1, ["tmux"])
+    mkproc.call(80, 70, ["ruby", "check-hooks-registered"])
+    begin
+      AgentStashEnv.session_snapshot(pid: 80, proc_root: proc_root, now: now)
+      check.call("walk: no snapshot ancestor -> Unmeasured naming the pids walked", false)
+    rescue AgentStashEnv::Unmeasured => e
+      check.call("walk: no snapshot ancestor -> Unmeasured naming the pids walked", e.message.include?("80 70"))
+    end
+    begin
+      AgentStashEnv.session_snapshot(pid: 99, proc_root: proc_root, now: now)
+      check.call("walk: an unreadable /proc entry -> Unmeasured", false)
+    rescue AgentStashEnv::Unmeasured => e
+      check.call("walk: an unreadable /proc entry -> Unmeasured", e.message.include?("cannot read"))
+    end
+    mkproc.call(90, 1, ["zsh", "-c", "source /x/shell-snapshots/snapshot-zsh-4102444800000-f.sh"])
+    begin
+      AgentStashEnv.session_snapshot(pid: 90, proc_root: proc_root, now: now)
+      check.call("walk: a snapshot time in the future -> Unmeasured", false)
+    rescue AgentStashEnv::Unmeasured => e
+      check.call("walk: a snapshot time in the future -> Unmeasured", e.message.include?("future"))
+    end
 
     # The bar is the env AS LANDED (DND-743's rule, applied to the env).
     never = ->(_root) { raise "the landed bar must not be read here" }

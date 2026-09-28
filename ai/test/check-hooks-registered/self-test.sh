@@ -254,6 +254,118 @@ OUT="$(env -u ATHENA_LANDED_PIN_SHA -u ATHENA_LANDED_PIN_REPO HOOKS_SETTINGS_FIL
   "${D}/wt/ai/bin/check-hooks-registered" 2>&1)"; RC=$?
 expect "...and unpinned, the stale local origin/main -> could not measure, exit 3" 3 "disagrees with origin"
 
+# 15. THE AGENT-STASH ENV AND A SESSION STARTED BEFORE ITS INSTALL (DND-1036).
+#     Claude Code hot-reloads the settings env into a running session, so after
+#     `setup-hooks --install-env` an old session carries ATHENA_AGENT_BIN while
+#     its Bash tool still sources the shell snapshot built at session start,
+#     whose PATH has no wrapper. The pre-fix checker FAILED every such session,
+#     so installing the env redded every harness-gate on the machine until a
+#     fleet-wide restart (measured 2026-09-28 07:19Z-07:25Z). The fix reads the
+#     install time the installer records in the settings env and the build
+#     time of the snapshot this process's shell sourced (named in an ancestor's
+#     argv), and reports PENDING RESTART only when the snapshot predates the
+#     install. The fixture parent below carries a snapshot path in its argv the
+#     way the Bash tool's `zsh -c "source <snapshot> ..."` does; the nearest
+#     such ancestor wins, so the live session running this suite is never read.
+env_fixture() { # env_fixture <name>: new_fixture plus the env landed on origin
+  local d; d="$(new_fixture "$1")"
+  mkdir -p "${d}/main/ai/git-hooks" "${d}/main/ai/agent-bin" "${d}/home"
+  cp "${SRC_ROOT}/ai/git-hooks/agent-stash-guard.sh" "${d}/main/ai/git-hooks/agent-stash-guard.sh"
+  cp "${SRC_ROOT}/ai/agent-bin/git" "${d}/main/ai/agent-bin/git"
+  chmod +x "${d}/main/ai/git-hooks/agent-stash-guard.sh" "${d}/main/ai/agent-bin/git"
+  REG_SRC="${SRC_ROOT}/ai/hooks/registry.json" REG_DST="${d}/main/ai/hooks/registry.json" ruby -rjson -e '
+    src = JSON.parse(File.read(ENV["REG_SRC"]))
+    dst = JSON.parse(File.read(ENV["REG_DST"]))
+    File.write(ENV["REG_DST"], JSON.pretty_generate(dst.merge("env" => src.fetch("env"))) + "\n")'
+  commit "${d}/main" land-env
+  git -C "${d}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+  git -C "${d}/main" fetch -q origin >/dev/null 2>&1
+  git -C "${d}/wt" "${GITC[@]}" rebase -q origin/main >/dev/null 2>&1
+  # The last line of the owner's ~/.zshrc: the agent PATH line, verbatim.
+  tail -n 1 "${SRC_ROOT}/dotfiles/.zshrc" > "${d}/home/.zshrc"
+  printf '%s\n' "${d}"
+}
+
+# env_settings <dir> <installed-at|-> [drop-key]: the settings file the
+# installer writes -- the landed hook wired, the env expanded against the MAIN
+# checkout, and the install stamp (omitted for "-"; drop-key removes one key).
+env_settings() {
+  D_MAIN="$1/main" STAMP="$2" DROP="${3:-}" OUTF="$1/settings.json" ruby -rjson -e '
+    main = ENV["D_MAIN"]
+    spec = JSON.parse(File.read(File.join(main, "ai/hooks/registry.json"))).fetch("env")
+    ex = ->(v) { v.gsub("{{MAIN}}", main) }
+    env = { "GIT_CONFIG_COUNT" => spec["git_config"].size.to_s }
+    spec["git_config"].each_with_index do |e, i|
+      env["GIT_CONFIG_KEY_#{i}"] = e["key"]; env["GIT_CONFIG_VALUE_#{i}"] = ex.call(e["value"])
+    end
+    spec["vars"].each { |k, v| env[k] = ex.call(v) }
+    env["ATHENA_AGENT_ENV_INSTALLED_AT"] = ENV["STAMP"] unless ENV["STAMP"] == "-"
+    env.delete(ENV["DROP"]) unless ENV["DROP"].to_s.empty?
+    hooks = { "SessionStart" => [{ "matcher" => "", "hooks" => [{ "type" => "command",
+              "command" => File.join(main, "ai/hooks/a.sh") }] }] }
+    File.write(ENV["OUTF"], JSON.generate({ "hooks" => hooks, "env" => env }))'
+}
+
+# session_check <dir> <snapshot-epoch-ms> <path-mode>: run the worktree's
+# checker as an activated agent session would -- ATHENA_AGENT_BIN set by the
+# settings env, under a parent shell whose argv names the snapshot it sourced.
+# path-mode "stale" is a PATH with no wrapper (the snapshot predates the env);
+# "wrapper" puts the wrapper first (the session's shell line ran).
+session_check() {
+  local d="$1" ms="$2" mode="$3" path="/usr/bin:/bin"
+  [ "${mode}" = "wrapper" ] && path="${d}/main/ai/agent-bin:${path}"
+  local snap="${d}/home/.claude/shell-snapshots/snapshot-zsh-${ms}-fx0001.sh"
+  OUT="$(env HOME="${d}/home" HOOKS_SETTINGS_FILE="${d}/settings.json" \
+      ATHENA_AGENT_BIN="${d}/main/ai/agent-bin" PATH="${path}" \
+      bash -c "source ${snap} 2>/dev/null || true; \"\$0\"; exit \$?" \
+      "${d}/wt/ai/bin/check-hooks-registered" 2>&1)"; RC=$?
+}
+
+# Times: the snapshot 2026-09-26T19:31:09Z (ms), the install 2026-09-28T07:19:25Z.
+SNAP_OLD=1790451069047
+INSTALL_AFTER="2026-09-28T07:19:25Z"
+INSTALL_BEFORE="2026-09-25T00:00:00Z"
+
+D="$(env_fixture env-pending)"
+env_settings "${D}" "${INSTALL_AFTER}"
+session_check "${D}" "${SNAP_OLD}" stale
+expect "env installed after this session's snapshot, PATH lacks the wrapper -> PENDING RESTART, exit 0" 0 \
+  "agent-stash env: PENDING RESTART" "agent-stash env: (FAIL|DRIFT|ACTIVE)"
+expect "...and it names the snapshot and the install time" 0 "snapshot-zsh-${SNAP_OLD}-fx0001\.sh.*2026-09-28T07:19:25Z|2026-09-28T07:19:25Z.*snapshot-zsh-${SNAP_OLD}"
+session_check "${D}" "${SNAP_OLD}" wrapper
+expect "same install, wrapper first on PATH -> ACTIVE" 0 "agent-stash env: ACTIVE" "PENDING"
+
+D="$(env_fixture env-newer-session)"
+env_settings "${D}" "${INSTALL_BEFORE}"
+session_check "${D}" "${SNAP_OLD}" stale
+expect "session snapshot built AFTER the install, still no wrapper -> FAIL, exit 1" 1 \
+  "agent-stash env: FAIL.*" "PENDING RESTART"
+expect "...naming the first git on PATH" 1 "first git on PATH"
+
+D="$(env_fixture env-partial)"
+env_settings "${D}" "${INSTALL_AFTER}" ATHENA_AGENT_BIN
+session_check "${D}" "${SNAP_OLD}" stale
+expect "partial env (ATHENA_AGENT_BIN missing from settings), old session -> DRIFT, exit 1" 1 \
+  "agent-stash env: DRIFT" "PENDING RESTART"
+env_settings "${D}" "${INSTALL_AFTER}" GIT_CONFIG_KEY_3
+session_check "${D}" "${SNAP_OLD}" stale
+expect "partial env (a GIT_CONFIG key missing), old session -> DRIFT, exit 1" 1 \
+  "agent-stash env: DRIFT" "PENDING RESTART"
+
+D="$(env_fixture env-no-stamp)"
+env_settings "${D}" -
+session_check "${D}" "${SNAP_OLD}" stale
+expect "install time absent from the settings env -> COULD NOT MEASURE, exit 3, never pending" 3 \
+  "agent-stash env: COULD NOT MEASURE" "PENDING RESTART"
+env_settings "${D}" "yesterday"
+session_check "${D}" "${SNAP_OLD}" stale
+expect "install time unreadable -> COULD NOT MEASURE, exit 3, never pending" 3 \
+  "agent-stash env: COULD NOT MEASURE.*|could not be read" "PENDING RESTART"
+env_settings "${D}" "2999-01-01T00:00:00Z"
+session_check "${D}" "${SNAP_OLD}" stale
+expect "install time in the future -> COULD NOT MEASURE, exit 3 (it would make every session pending)" 3 \
+  "agent-stash env: COULD NOT MEASURE" "PENDING RESTART"
+
 echo "check-hooks-registered landed-bar suite: ${PASS} passed, ${FAIL} failed"
 if [ "${FAIL}" -eq 0 ]; then echo "ALL CASES PASS"; exit 0; fi
 echo "SELF-TEST FAILED"; exit 1

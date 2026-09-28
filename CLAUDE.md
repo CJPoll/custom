@@ -651,11 +651,28 @@ and pronoun-guard; nothing detected it. The durable fix:
   it is installed only after it lands. The expected values are read from the
   registry AS LANDED, like the hooks' bar.
   `check-hooks-registered` prints its own agent-stash line: INACTIVE (exit 0),
-  ACTIVE (exit 0, runtime asserted), DRIFT/FAIL (exit 1), or COULD NOT
-  MEASURE (exit 3: guard keys present but the landed env cannot be read).
+  ACTIVE (exit 0, runtime asserted), PENDING RESTART (exit 0), DRIFT/FAIL
+  (exit 1), or COULD NOT MEASURE (exit 3: guard keys present but the landed
+  env cannot be read, or a time the pending decision needs cannot be read).
   INACTIVE is a fixed rule on the settings (no `hook.agentstash.*` /
-  `hook.reference-transaction.*` GIT_CONFIG key and no `ATHENA_AGENT_BIN`),
-  never read from a branch's registry.
+  `hook.reference-transaction.*` GIT_CONFIG key, no `ATHENA_AGENT_BIN` and no
+  `ATHENA_AGENT_ENV_INSTALLED_AT`), never read from a branch's registry.
+  PENDING RESTART is a session started before the install: Claude Code
+  hot-reloads the settings env, but the session's Bash tool keeps the shell
+  snapshot built at its start, so git is not yet the wrapper. It requires
+  everything ACTIVE requires except the PATH, and a snapshot built before the
+  install. The install time is `ATHENA_AGENT_ENV_INSTALLED_AT`, which
+  `--install-env` writes into the settings env; the snapshot time is in the
+  name of the snapshot an ancestor shell sourced. Both are machine state, and
+  either one unreadable is COULD NOT MEASURE. The rule and its reasons live in
+  `ai/lib/agent_stash_env.rb`.
+
+  **Later (2026-09-28, DND-1036):** a session started before
+  `--install-env` read FAIL (exit 1), because its first git on PATH is not the
+  wrapper. Superseded by PENDING RESTART. Measured 07:19Z-07:25Z that day:
+  installing the env redded the check in every running session, so every
+  harness-gate on the machine failed until a fleet-wide restart. A session
+  whose snapshot was built after the install still FAILs.
 
 ## Inbox tenancy registry (`$ATHENA_INBOX_ROOT/projects/` is not in git)
 

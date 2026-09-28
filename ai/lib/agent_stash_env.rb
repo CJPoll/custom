@@ -27,6 +27,32 @@
 # that is not a string) is DRIFT as well, never INACTIVE: a failed read must not
 # look like an empty one.
 #
+# PENDING RESTART (DND-1036) is ACTIVE for a session that predates the install.
+# Claude Code hot-reloads the settings env into a running session, so after
+# --install-env an old session carries ATHENA_AGENT_BIN, but its Bash tool
+# still sources the shell snapshot built at session start, whose PATH has no
+# wrapper. That session is not drift: a restart fixes it. It is PENDING RESTART
+# (exit 0) only when ALL of these hold: the settings values match the landed
+# env, every runtime check passes, the session's ATHENA_AGENT_BIN is the right
+# one, the only problem is the first git on PATH, and the snapshot this
+# process's shell sourced was built BEFORE the install. Both times are read:
+#   - install time: ATHENA_AGENT_ENV_INSTALLED_AT in the settings env, an ISO
+#     UTC second the installer writes in the same file write that completes the
+#     env. It is machine state, never the branch's. settings.json's mtime is not
+#     used: any later edit moves it, which would read a session started after
+#     the install as pending.
+#   - session time: "session start" means the SNAPSHOT. The PATH this check
+#     sees is the one the Bash tool's `zsh -c "source <snapshot> ..."` restored,
+#     and the snapshot is built once, at session start, from ~/.zshrc and the
+#     env of that moment. Its build time (the epoch ms in its file name) is when
+#     this PATH was fixed. The nearest ancestor naming a snapshot in its argv
+#     wins, so a gate run under test-slot/harness-gate, or a nested session,
+#     reads its own shell's snapshot.
+# Either time that cannot be read (no stamp, a malformed stamp, a stamp in the
+# future, no snapshot ancestor, an unreadable /proc) is COULD NOT MEASURE (exit
+# 3), never PENDING. A snapshot built at or after the install is FAIL: the
+# restart already happened and the wrapper is still not first.
+#
 # The disable is `scripts/setup-hooks --remove-env`, then restart sessions.
 
 require "open3"
@@ -37,8 +63,19 @@ module AgentStashEnv
   HOOK_REL    = "ai/git-hooks/agent-stash-guard.sh"
   ZSHRC_LINE  = 'if [ -n "${ATHENA_AGENT_BIN:-}" ] && [ -x "$ATHENA_AGENT_BIN/git" ]; then PATH="$ATHENA_AGENT_BIN:$PATH"; fi'
   DISABLE     = "scripts/setup-hooks --remove-env"
+  # The install stamp scripts/setup-hooks --install-env writes (DND-1036).
+  INSTALLED_AT = "ATHENA_AGENT_ENV_INSTALLED_AT"
+  STAMP_RE     = /\A(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z\z/.freeze
+  # Claude Code's Bash tool runs `zsh -c "source <home>/.claude/shell-snapshots/
+  # snapshot-<shell>-<epoch ms>-<id>.sh ..."`.
+  SNAPSHOT_RE  = %r{(/\S*/shell-snapshots/snapshot-[A-Za-z0-9]+-(\d{12,})-[A-Za-z0-9]+\.sh)}.freeze
+  # Clock skew tolerated before a time "in the future" is refused.
+  SKEW_S       = 300
 
   Result = Struct.new(:state, :lines, :code)
+
+  # A time the pending decision needs could not be read. Never PENDING.
+  class Unmeasured < StandardError; end
 
   module_function
 
@@ -73,7 +110,7 @@ module AgentStashEnv
     return true unless env.nil? || env.is_a?(Hash) # an unreadable env is not "none"
     return false if env.nil?
 
-    env.key?("ATHENA_AGENT_BIN") ||
+    env.key?("ATHENA_AGENT_BIN") || env.key?(INSTALLED_AT) ||
       env.any? { |k, v| k.to_s.match?(/\AGIT_CONFIG_KEY_\d+\z/) && v.to_s.match?(GUARD_KEY) }
   end
 
@@ -184,23 +221,102 @@ module AgentStashEnv
 
   # The process this check runs in. When it carries ATHENA_AGENT_BIN, it is an
   # activated agent session, and its PATH must put the wrapper first.
-  # Returns [note_lines, problem_lines].
+  # Returns [note_lines, problem_lines, path_problem]. path_problem is the
+  # first-git-on-PATH line (nil when the wrapper is first), kept apart because
+  # it alone can be a pending restart rather than a failure (DND-1036).
   def session_state(exp, proc_env: ENV)
     want_bin = exp[:vars]["ATHENA_AGENT_BIN"].to_s
     have_bin = proc_env["ATHENA_AGENT_BIN"].to_s
     if have_bin.empty?
       return [["this process does not carry the agent-stash env (not an agent session, or one started " \
-               "before activation: restart it to load the settings env)."], []]
+               "before activation: restart it to load the settings env)."], [], nil]
     end
     probs = []
     probs << "this session's ATHENA_AGENT_BIN is #{have_bin.inspect}, want #{want_bin.inspect}. Fix: restart it." if have_bin != want_bin
     first = proc_env.fetch("PATH", "").split(":").map { |d| File.join(d.empty? ? "." : d, "git") }
                     .find { |g| File.file?(g) && File.executable?(g) }
+    path_problem = nil
     unless first && File.expand_path(first) == File.join(File.expand_path(have_bin), "git")
-      probs << "this session's first git on PATH is #{first.inspect}, not #{File.join(have_bin, 'git')}: the " \
-               "last line of ~/.zshrc did not prepend the wrapper when the shell snapshot was built. Fix: " \
-               "check ~/.zshrc ends with the agent PATH line, then restart the session."
+      path_problem = "this session's first git on PATH is #{first.inspect}, not #{File.join(have_bin, 'git')}: the " \
+                     "last line of ~/.zshrc did not prepend the wrapper when the shell snapshot was built. Fix: " \
+                     "check ~/.zshrc ends with the agent PATH line, then restart the session."
     end
-    [[], probs]
+    [[], probs, path_problem]
+  end
+
+  # The install time recorded in the settings env, as a UTC Time. Raises
+  # Unmeasured when it is absent, malformed, or later than now + SKEW_S (a
+  # future stamp would read every running session as pending).
+  def installed_at(env, now: Time.now)
+    raw = env.is_a?(Hash) ? env[INSTALLED_AT] : nil
+    if raw.nil?
+      raise Unmeasured, "the settings env has no #{INSTALLED_AT}, so the install time is unknown (an install " \
+                        "made before DND-1036 recorded none)"
+    end
+    m = raw.is_a?(String) ? raw.match(STAMP_RE) : nil
+    raise Unmeasured, "#{INSTALLED_AT} is #{raw.inspect}, not a UTC time like 2026-09-28T07:19:25Z" unless m
+
+    t = begin
+      Time.utc(*m.captures.map(&:to_i))
+    rescue ArgumentError
+      nil
+    end
+    raise Unmeasured, "#{INSTALLED_AT} is #{raw.inspect}, which is not a real UTC time" unless t && iso(t) == raw
+    raise Unmeasured, "#{INSTALLED_AT} is #{raw}, in the future (now #{iso(now)})" if t > now + SKEW_S
+
+    t
+  end
+
+  # The shell snapshot this process's shell sourced: [build Time (UTC), path].
+  # Walks the ancestors from `pid` through `proc_root`; the nearest whose argv
+  # names a snapshot wins. Raises Unmeasured when no ancestor names one, when
+  # /proc cannot be read, or when the build time is in the future.
+  def session_snapshot(pid: Process.pid, proc_root: "/proc", now: Time.now)
+    walked = []
+    seen = {}
+    while pid.positive? && !seen[pid]
+      seen[pid] = true
+      argv = begin
+        File.binread(File.join(proc_root, pid.to_s, "cmdline")).tr("\0", " ")
+      rescue SystemCallError => e
+        raise Unmeasured, "cannot read #{File.join(proc_root, pid.to_s, 'cmdline')} (#{e.class}) while looking " \
+                          "for this session's shell snapshot"
+      end
+      if (m = argv.match(SNAPSHOT_RE))
+        ms = m[2].to_i
+        t = Time.at(ms / 1000, ms % 1000, :millisecond).utc
+        raise Unmeasured, "the shell snapshot #{m[1]} claims a build time #{iso(t)}, in the future" if t > now + SKEW_S
+
+        return [t, m[1]]
+      end
+      walked << pid
+      pid = parent_pid(pid, proc_root)
+    end
+    raise Unmeasured, "no ancestor of this process sourced a Claude Code shell snapshot (walked pids " \
+                      "#{walked.join(' ')}), so when this session's PATH was fixed is unknown"
+  end
+
+  # The PPid field of /proc/<pid>/stat (the field after the state, which
+  # follows the last ")" -- the comm may itself hold parentheses or spaces).
+  def parent_pid(pid, proc_root)
+    stat = File.read(File.join(proc_root, pid.to_s, "stat"))
+    close = stat.rindex(")")
+    raise Unmeasured, "#{File.join(proc_root, pid.to_s, 'stat')} is malformed" unless close
+
+    Integer(stat[(close + 1)..].split[1], 10)
+  rescue SystemCallError, ArgumentError, TypeError => e
+    raise Unmeasured, "cannot read the parent of pid #{pid} from #{File.join(proc_root, pid.to_s, 'stat')} (#{e.class})"
+  end
+
+  # Pure: the verdict on a session whose only problem is the first git on PATH.
+  # :pending when the snapshot was built strictly before the install, else
+  # :fail. The stamp is truncated to the second, so a snapshot inside the
+  # install's own second reads :fail (the conservative side).
+  def pending_verdict(snapshot_time, install_time)
+    snapshot_time < install_time ? :pending : :fail
+  end
+
+  def iso(time)
+    time.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
   end
 end
