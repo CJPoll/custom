@@ -65,6 +65,7 @@ ai/lib/judgment_eval.rb	library	pure domain required by ai/bin/judgment-eval (DN
 ai/lib/judgment_context.rb	library	pure domain required by ai/bin/judgment-label (DND-1047): the conversation-context builder; a failure is an unavailable context carrying a reason, which the caller shows, never a process exit
 ai/lib/judgment_context_slack.rb	library	adapter required by ai/bin/judgment-label (DND-1047): reads Slack through the athena:slack bins; every failure is returned as an unavailable context with a reason, never raised or exited
 ai/lib/judgment_label.rb	library	pure domain required by ai/bin/judgment-label (DND-715); raises JudgmentLabel::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
+ai/lib/ticket_corpus.rb	library	pure domain required by ai/bin/ticket-corpus (DND-1055); raises TicketCorpus::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/triage_corpus.rb	library	pure domain required by ai/bin/triage-corpus (DND-714); raises TriageCorpus::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/first_party.rb	library	first-party discovery required by ai/bin/harness-gate; raises FirstParty::MeasureError and the caller prints the Fix:
 ai/lib/harness_tools.rb	library	harness-tool scope required by ai/bin/check-bin-help / check-tool-risk; raises FirstParty::MeasureError and the caller prints the Fix:

@@ -46,13 +46,15 @@ USAGE = <<~EOF
   metrics; this prints them and writes a run file.
 
   Eval run:
-    --use-case U        finding_triage | slack_routing | priority_scoring
+    --use-case U        finding_triage | slack_routing | priority_scoring |
+                        ticket_kind | ticket_severity | ticket_security
     --labels FILE       JSONL, one per line: {"id", "label", "provenance",
                         "labeler", "labeled_at"}; provenance is forward_record,
-                        owner_confirmed, tracker_record, rule_confirmed or
-                        proposed (see ai/bin/triage-corpus and judgment-label
-                        for how each is made). proposed rows are excluded
-                        from the run (they never select a threshold) and counted.
+                        owner_confirmed, tracker_record, rule_confirmed,
+                        title_prefix or proposed (see ai/bin/triage-corpus,
+                        ai/bin/ticket-corpus and judgment-label for how each
+                        is made). proposed rows are excluded from the run
+                        (they never select a threshold) and counted.
     --corpus FILE       JSONL the labels were made from. A row joins on "id"
                         ("event_id" for slack_routing); its "input" member is
                         sent, or the whole row if it has none. A row's

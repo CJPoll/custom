@@ -121,6 +121,12 @@ ruby_eq "epic_projects: a mapped Repo / App no row carries is an error, not an e
   'rows = (TriageCorpus::REPO_APPS.values.flatten - ["walt_ui"]).map { |a| {"repo_app"=>a,"epic_ids"=>[]} }; TriageCorpus.epic_projects(rows)'
 ruby_eq "ticket_from_row: a row with no DND id is skipped" \
   "nil" 'TriageCorpus.ticket_from_row({"id"=>"x","properties"=>{"ID"=>{"unique_id"=>{"prefix"=>"PT","number"=>3}}}}).inspect'
+ruby_eq "ticket_from_row: records created_time, Kind and Security for ticket-corpus [DND-1055]" \
+  "2026-09-28T01:00:00.000Z Bug pre-existing true" \
+  'r = TriageCorpus.ticket_from_row({"id"=>"x","created_time"=>"2026-09-28T01:00:00.000Z","properties"=>{"ID"=>{"unique_id"=>{"prefix"=>"DND","number"=>3}},"Kind"=>{"select"=>{"name"=>"Bug"}},"Security"=>{"select"=>{"name"=>"pre-existing"}}}}); [r["created_time"], r["kind"], r["security"], r.key?("severity")].join(" ")'
+ruby_eq "ticket_from_row: an unset Kind or Security is recorded as nil, never absent [DND-1055]" \
+  "true true nil" \
+  'r = TriageCorpus.ticket_from_row({"id"=>"x","created_time"=>"t","properties"=>{"ID"=>{"unique_id"=>{"prefix"=>"DND","number"=>3}},"Kind"=>{"select"=>nil}}}); [r.key?("kind"), r.key?("security"), r["kind"].inspect].join(" ")'
 
 # ── the fixture snapshot ────────────────────────────────────────────────────
 # harness epic EH, walt_ui epic EW. Tickets (ref, area, text / links):
@@ -272,6 +278,10 @@ eq "only reads were made (POST query, GET children)" \
 eq "a 429 body read was tried 3 times" "$(grep -c '0429/children' "${TMP}/notion.log")" "3"
 OUT="$("${BIN}" --build --unrelated 1 --dir "${TMP}/fetched" 2>&1)"
 has "a fetched snapshot builds: the duplicate from the fake bodies" "${OUT}" "duplicate/tracker_record 1"
+eq "the snapshot records created_time, Kind and Security [DND-1055]" \
+  "$(jq -r '.tickets[] | select(.ref=="DND-1") | [.created_time, .kind, .security] | join(" ")' "${SNAP}" 2>/dev/null)" "2026-09-28T01:00:00.000Z Bug none"
+OUT="$("${AI}/bin/ticket-corpus" --build --dry-run --dir "${TMP}/fetched" 2>&1)"
+has "ticket-corpus builds from a fetched snapshot (the one tracker reader) [DND-1055]" "${OUT}" "ticket_kind: 3 labels (Bug/tracker_record 3)"
 eq "the snapshot records a body with more than one page of blocks as body_truncated [review h]" \
   "$(jq -r '[(.tickets[] | select(.ref=="DND-3") | .body_truncated), (.tickets[] | select(.ref=="DND-1") | .body_truncated)] | map(tostring) | join(" ")' "${SNAP}" 2>/dev/null)" "true false"
 has "--fetch counts truncated bodies" "$(cd "${TMP}" && FLEET_CLAUDE_JSON="${TMP}/claude.json" TRIAGE_CORPUS_NOTION_API="http://127.0.0.1:${PORT}" TRIAGE_CORPUS_PACE_S=0 "${BIN}" --fetch --dir "${TMP}/fetched2" 2>&1)" "1 with a truncated body"
