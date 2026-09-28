@@ -828,9 +828,20 @@ def last_durations(path)
   end
 end
 
+# ~100 rows per run; keep about a week of runs, so the file (read in full on
+# every run) stays near 2 MB instead of growing without bound.
+TIMINGS_MAX_ROWS = 60_000
+TIMINGS_KEEP_ROWS = 40_000
+
 def record_timings(path, rows)
   FileUtils.mkdir_p(File.dirname(path))
   File.open(path, "a") { |f| rows.each { |r| f.puts(JSON.generate(r)) } }
+  lines = File.readlines(path)
+  if lines.size > TIMINGS_MAX_ROWS
+    tmp = "#{path}.#{Process.pid}.tmp"
+    File.write(tmp, lines.last(TIMINGS_KEEP_ROWS).join)
+    File.rename(tmp, path)
+  end
   nil
 rescue SystemCallError => e
   warn "harness-gate: NOTE — could not record per-check timings to #{path} (#{e.class}: #{e.message}); " \
@@ -2084,16 +2095,17 @@ def run_self_test
   #    - each check's wall time is printed and recorded.
   Dir.mktmpdir("harness-gate-par") do |dir|
     done = File.join(dir, "done")
-    FileUtils.mkdir_p(done)
+    started = File.join(dir, "started")
+    FileUtils.mkdir_p([done, started])
     mk = lambda do |name, body|
       path = File.join(dir, "#{name}.sh")
-      File.write(path, "#!/bin/sh\n#{body}\n")
+      File.write(path, "#!/bin/sh\ntouch #{started.shellescape}/#{name}\n#{body}\n")
       FileUtils.chmod(0o755, path)
       [path]
     end
     count = "ls #{done.shellescape} | wc -l | tr -d ' '"
     fixture = [
-      ["check-inotify-headroom", mk.call("pre", "echo $(#{count}) > #{dir}/pre-saw")],
+      ["check-inotify-headroom", mk.call("pre", "sleep 0.3; ls #{started.shellescape} | grep -vx pre | wc -l | tr -d ' ' > #{dir}/pre-saw")],
       ["build-agents --check", mk.call("build", "sleep 0.3; touch #{dir}/built; touch #{done}/build")],
       ["check-agent-size", mk.call("size", "[ -f #{dir}/built ] || exit 1; touch #{done}/size")],
       ["slow-1", mk.call("s1", "sleep 1; touch #{done}/s1")],
@@ -2116,7 +2128,7 @@ def run_self_test
       "every pooled check ran once (#{ran.inspect})" => ran == want_ran,
       "exactly the red check failed (#{failures.map(&:first).inspect})" => failures.map(&:first) == ["red-one"],
       "check-agent-size ran after build-agents --check" => failures.none? { |f| f.first == "check-agent-size" },
-      "the pre-pool check saw no finished sibling" => File.read(File.join(dir, "pre-saw")).strip == "0",
+      "the pre-pool check saw no other check started" => File.read(File.join(dir, "pre-saw")).strip == "0",
       "the final check saw all #{want_ran.size} done" =>
         File.read(File.join(dir, "final-saw")).strip == want_ran.size.to_s,
       "four 1 s checks overlapped (took #{elapsed.round(2)}s)" => elapsed < 3.0,
