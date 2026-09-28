@@ -146,22 +146,26 @@
 #   exec. This is the same class NOT CATCHABLE names (a script defined in
 #   one call and run in another; another interpreter building argv).
 #   OWNER DECISION (the record this reduction needs; critic rounds 12-13,
-#   22). This reduction is Owner approval policy item 5. Two records:
-#     1. Named, not tool-verifiable. Cody, 2026-09-27 ~07:20Z, the laptop
-#        coordinator session (terminal), relayed by the main session.
-#        Question: "Accept the DND-799 text-guard residual (a string or
-#        file written in the same command and then executed -- e.g.
-#        python3 -c, a repo hook git fires, a script written then run)
-#        until DND-775 is activated, with DND-905 as the fallback if
-#        activation slips past 2026-10-04?" Answer: "approved".
-#     2. Tool-verifiable, blanket. Cody, 2026-09-28T03:36:36Z, own
-#        terminal turn, session 062722c9-9552-47d4-9c0b-717f3291dc3e,
-#        message 1170f3ef-b277-46a9-9319-e6cb654f82fd. Verbatim: "Please
-#        just ship - get the things done without bugging me for things.
-#        If something is truly blocked on me doing a thing, but otherwise
-#        just ship". It names no item. The admiral reads it as covering
-#        this one; the lander passes it with integration-gate
-#        --owner-approval, where the gate checks it.
+#   22). This reduction is Owner approval policy item 5. Session
+#   062722c9-9552-47d4-9c0b-717f3291dc3e (the laptop gen_saas coordinator,
+#   Cody's terminal):
+#     Question: assistant message a5d43f29-28dd-4264-9099-31bc18a9d751,
+#     2026-09-28T03:33:41Z, an AskUserQuestion that names this residual:
+#     "The change stops the stash guard from falsely blocking quoted text
+#     (grep patterns, heredocs). The cost: a stash command hidden in a
+#     string or file that the same call then runs (e.g. python3 -c, awk
+#     system) is no longer caught by the text guard. Compensating
+#     controls: DND-775's git-level hook catches it once you activate 775,
+#     and DND-905 is the fallback if activation slips (due 2026-10-04)."
+#     Options: Accept the residual / Reject / Land 775 first.
+#     Answer: user message 1170f3ef-b277-46a9-9319-e6cb654f82fd,
+#     2026-09-28T03:36:36Z, Cody, verbatim: "Please just ship - get the
+#     things done without bugging me for things. If something is truly
+#     blocked on me doing a thing, but otherwise just ship".
+#     Caveat: the answer is free text, not the "Accept the residual"
+#     option. Reading it as acceptance is the coordinator's
+#     interpretation. The lander passes it with integration-gate
+#     --owner-approval, where the gate checks the ids.
 #   DND-775 (the git-level guard on refs/stash, injected into agent
 #   sessions) is the enforcement that closes the whole class below the
 #   text; DND-905 is the text-layer fallback if its activation slips past

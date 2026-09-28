@@ -983,15 +983,16 @@ retired with that code.
   predates DND-799; option A only narrowed it).
 - **Round 13, owner decision recorded.** The critic's last finding (a
   guardrail finding: the data-mode residual reduces what the guard catches
-  and needs a recorded owner decision, not a session ruling) is answered
-  by Cody's recorded acceptance (2026-09-27 ~07:20Z, "approved", relayed
-  from the laptop coordinator session), quoted verbatim in the header
-  RESIDUAL. DND-775 closes the class below the text; DND-905 is the
-  fallback if its activation slips past 2026-10-04. No code or test change.
-  **Later (round 22):** the relayed 07:20Z "approved" could not be
-  verified by a tool. The header now records it alongside Cody's
-  verifiable 2026-09-28T03:36:36Z terminal turn; see the header OWNER
-  DECISION for what each one covers.
+  and needs a recorded owner decision, not a session ruling) was answered
+  at the time by a relayed owner acceptance. DND-775 closes the class
+  below the text; DND-905 is the fallback if its activation slips past
+  2026-10-04. No code or test change.
+  **Later (round 22):** that relayed acceptance was never found in any
+  laptop transcript and is no longer cited. The header OWNER DECISION now
+  records the coordinator's question (message a5d43f29-...,
+  2026-09-28T03:33:41Z) and Cody's free-text answer (message 1170f3ef-...,
+  03:36:36Z), with the caveat that reading it as acceptance is the
+  coordinator's interpretation.
 - **Round 14, `<<` inside `${...}`.** The critic found the tokenizer took
   `<<` inside an unclosed `${...}` parameter expansion as a heredoc, so the
   next line was read as data and a verb-hiding stash write in it was
