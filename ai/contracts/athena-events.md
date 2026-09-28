@@ -4994,7 +4994,8 @@ build by name:
 - DND-439: forge review requests;
 - DND-440: the surface that requests `priority.transition` grants (*Owner
   approval grants*);
-- DND-446, DND-447 and DND-449: the digest, meetings and meeting catch-up.
+- DND-446: the morning digest (*Morning digest*);
+- DND-447 and DND-449: meetings and meeting catch-up.
 
 None of the server homes named below exists yet (gen_saas `origin/main`
 `b5f85909`, read 2026-09-24). Every sentence about them is an obligation on its
@@ -5567,12 +5568,98 @@ would keep a dead session's lease alive.
 **Leasing never writes to the source tracker.** An admiral still takes scope
 in Notion per `athena:ticket-management`.
 
+### Morning digest
+
+Once per local day the server sends each owner one Slack DM summarising what
+needs them (DND-446; owner decision OQ-11: 07:00 America/Denver). It is v1 of
+the digest: links only. One-click buttons come with DND-440.
+
+**What it reads.** Only the owner's own items, through the owner read path
+(`Athena.Priorities.list_ranked/2` with the owner's user): the query filters
+`owner_id` and checks RBAC `read`. It reads `proposed` and `active` items and
+nothing else. It shows:
+
+- the **owner queue**: `proposed` items and `active` `owner_only` items, in
+  rank order, at most 10, then "and N more";
+- the top N (the owner's setting, default 5) **leasable** `active` items per
+  domain (`work`, `blend`, `personal`, each present even when empty), each with
+  its reason ids;
+- a meetings slot, left out until DND-447 fills it;
+- a footer link to `/priorities`.
+
+An empty index sends one line, "Nothing needs you today.", never silence.
+
+**Stored metadata only** (*The storage boundary*). A row is the source label,
+the item's ref linked to its `url`, the title and the reason ids. A
+`slack_ask` row reads `Slack ask from <@asker_ref>` with its link. Its
+`message_text` is never in the DM. The DM goes to the work Slack (OQ-6).
+
+**The recipient is the owner, and only the owner.** The server sends through
+`Athena.Slack.owner_dm/3`. It takes the owner id and a `{text, blocks}`
+message. It has no recipient, channel or app argument: any other key is
+refused by name. The app is the owner's one live Slack app
+(`slack_apps.owner_id`). The recipient is that app's `owner_slack_user_id`,
+read from the app row before any Slack call. Each of these is refused before
+anything is sent, recorded, and shown on `/priorities` as "Last digest:
+failed (<cause>)" with a `Fix:`:
+
+- no live app: `slack_not_configured`;
+- more than one live app: `ambiguous_slack_app` (never guessed);
+- no `owner_slack_user_id`: `owner_slack_user_id_unset`;
+- no stored bot token: `token_missing`.
+
+A missing recipient is never a silent skip, and there is never a fallback
+recipient. There is no inbox fallback either: the server holds the bot token
+(OQ-12), so a failure is made visible instead of routed a second way.
+`owner_dm/3` is server-internal. No MCP tool, API route or page exposes it.
+
+**No interactive blocks.** `owner_dm/3` refuses any interactive element
+(`interactive_blocks_refused`), as the click path does. It stamps no return
+address, so no click from a digest can be routed until DND-440 adds that path.
+
+**Schedule.** The owner's settings live on their priority rules, edited in the
+rules editor:
+
+- `digest_enabled` (default `true`);
+- `digest_time`, `HH:MM` (default `07:00`);
+- `digest_weekdays`, ISO weekdays with 1 = Monday (default Monday to Friday,
+  never empty);
+- `digest_top_n`, 1 to 20 (default 5).
+
+The time zone is the owner's fleet policy (`Athena.Fleet.Policy.timezone`),
+never a second copy. The day is the owner's **local date**. A send time that
+occurs twice (the fall-back hour) is due at its first occurrence. A send time
+that does not exist (the spring-forward hour) is due at the first instant
+after the gap.
+
+**At most once per local day.** The send log, `digest_sends`, has one row per
+(owner, local date), unique. A pass claims the day before it reads or sends:
+it inserts `sending`, or takes over a `failed` row or a `sending` row whose
+claim is older than 10 minutes. A `sent` or `missed` day is never claimed
+again. A failed send is retried each pass (every 60 s) until 3 h after the
+send time. Then the day is recorded `missed`, keeping its last cause (or
+`no_attempt`). A crash between Slack's reply and the `sent` write can send a
+second message once the claim goes stale. That at-least-once edge is
+accepted.
+
+**The send log holds no content.** Each row has the owner, local date, status
+(`sending`, `sent`, `failed`, `missed`), attempts, the last cause (a closed
+code), the Slack channel and ts, and the block count. It never holds the
+rendered text. Each send also writes the outbound audit row every Slack action
+writes: action `owner_dm`, no machine, a body hash, never a body.
+
+**Each owner is its own boundary.** The scheduler runs each owner in
+`Athena.PerRow.run/2`. One owner's failure never stops
+another's digest.
+
 ### Access control
 
 | Operation | Who | Resource | Where checked | On denial |
 | --- | --- | --- | --- | --- |
 | View the priorities page | the logged-in owner | only the owner's items, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
 | Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or, for promote, restore and dismiss only, an owner approval grant of class `priority.transition`, executed by the server at click time | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the grant path logs the refusal, the grant stays `approved`, and the approval message says so |
+| Build and send the morning digest | the server, for owner O; no caller | O's `proposed` and `active` items; O's own Slack app; recipient O's `owner_slack_user_id` | `Athena.Digest`: items through `list_ranked/2` with O's user (the `owner_id` filter plus RBAC `read`); `Athena.Slack.owner_dm/3` selects the app by `owner_id` and reads the recipient from it, with no recipient argument | nothing is sent; the cause is recorded on O's send log and shown on O's `/priorities` |
+| Read the last digest day | the logged-in owner | the owner's own `digest_sends` rows | `Athena.Digest.latest_send/1`: an `owner_id` = viewer filter in the query | none shown ("none yet") |
 | `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
 
 - **Deny by default.** A machine token reaches the index only through the three
