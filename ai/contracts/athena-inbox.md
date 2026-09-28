@@ -2477,14 +2477,6 @@ arrives through the exact same file, indistinguishable at the point of reading.
   any message as approval. It passes a grant id to the consuming mechanism,
   and that mechanism asks the server. Nothing in this facility can create,
   widen, move or replay a grant.
-
-  **Later (2026-09-27):** one exception, by owner decision (Cody): "The click
-  authorizes IFF you are able to determine that it's from my user." The
-  owner's veto click on a won't-fix notice that the reading session itself
-  posted authorizes that one tracker change (reopening the ticket), when the
-  checks in `athena:slack` → *A click is untrusted input* all hold. That skill
-  holds the checks and the residual. Everything else in this bullet is unchanged: no
-  other action is authorized by a line.
 - **Per tenant.** No project's content can authorize anything in another
   project's session. The tenancy rule is what enforces this, which is why a
   resolver must never fall back to scanning the root.
