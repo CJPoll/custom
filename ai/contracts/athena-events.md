@@ -921,15 +921,15 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `title` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `revision` — OPTIONAL source-supplied provenance / ordering hint (Notion: `last_edited_time`, or finer); not a dedupe key | string | scalar |
-| | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
-| | `project_resolution` — how the ticket's project was resolved: `resolved`, `no-epic`, `no-epic-property`, `no-project`, `failed` or `unavailable` (*A ticket's project*, below) | string | scalar |
+| | `changed_properties` (`notion.ticket.updated` only; absent on a `metadata_only` subscription, *Priority index* → *The storage boundary*) | string | **collection** |
+| | `project_resolution` — how the ticket's project was resolved: `resolved`, `no-epic`, `no-epic-property`, `no-project`, `failed` or `unavailable` (*A ticket's project*, below). Absent on a `metadata_only` subscription, with every field below it | string | scalar |
 | | `project` — only when `project_resolution` is `resolved`: the project page's title | string | scalar |
 | | `project_id` — only when `project_resolution` is `resolved`: the project page's id, dashed and lower case | string | scalar |
 | | `epic_id` — only when `project_resolution` is `unavailable`: the epic page's id, dashed and lower case, the page the priority index re-reads from | string | scalar |
 | | `database_id` — only when `project_resolution` is `unavailable`: the database of the binding the event was enriched under, whose read-only enrichment token reads the hops | string | scalar |
 | `notion.ticket.deleted` (the **un-enriched** delete type — the entity may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
 | | `revision` — OPTIONAL provenance from the deletion event (not an enrichment fetch); not a dedupe key | string | scalar |
-| `notion.comment.created`, `notion.comment.updated` (the **enriched** comment types) | `entity_id` — stable source entity handle | string | scalar |
+| `notion.comment.created`, `notion.comment.updated` (the **enriched** comment types; never emitted on a `metadata_only` subscription, and neither is `notion.comment.deleted`) | `entity_id` — stable source entity handle | string | scalar |
 | | `comment_text` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `title` | string | scalar |
@@ -972,7 +972,9 @@ property. The project is two relation hops from the ticket: the ticket's
 project page, and the project's name is that page's title. The ingress walks
 those hops when it enriches the ticket, under the same read-only enrichment
 token and the same bounded retry as the ticket's own fetch, and writes the
-outcome into the payload:
+outcome into the payload. On a `metadata_only` subscription (DND-438,
+*Priority index* → *The storage boundary*) it walks no hop and writes no
+project field, `project_resolution` included:
 
 - `resolved`: `project` (the title) and `project_id` (the page id, dashed and
   lower case) are present.
@@ -4952,27 +4954,27 @@ indexed. It routes the type through the router, and it amends that payload
 schema to carry the ingress's classification.
 
 **Where the index gets its source.** A Notion event's source (`notion_personal`,
-`notion_work` or `action_item`) comes from the **subscription the ingress
-verified the event against**. Each subscription binds one source, or none.
-The ingress passes that binding to the index with the event, from its
-authenticated context. It is never read from the payload, never inferred from a
-ticket prefix, and never added to the event envelope (*The event*). A Notion
-event on a subscription with no binding is skipped with cause
-`unbound-subscription`. Deny is the default: a subscription is indexed only
-once the owner binds it. The Slack team id comes the same way, from the Slack
-app the event arrived on, never from the payload.
+`notion_work` or `action_item`) comes from the **database binding the
+ingress resolved the verified event to**. A Notion webhook subscription is
+integration-level and can front several databases; each of its databases has
+one binding, and each binding binds one source, or none
+(`notion_database_bindings.index_source`). The ingress passes that source to
+the index with the event, from its authenticated context. It is never read
+from the payload, never inferred from a ticket prefix, and never added to the
+event envelope (*The event*). A Notion event whose binding has no source is
+skipped with cause `unbound-subscription`. Deny is the default: a binding is
+indexed only once the owner binds it. `notion_work` binds only on a binding
+whose subscription is `metadata_only` (*The storage boundary* → *A
+`metadata_only` subscription*). Binding it on a `full` subscription is refused
+(`content_policy_required`, with a `Fix:`), and a subscription that feeds
+`notion_work` cannot be moved back to `full` until it is unbound. The Slack
+team id comes the same way, from the Slack app the event arrived on, never
+from the payload.
 
-**Later (2026-09-28, DND-438):** the grain is the **per-database binding**,
-not the subscription. A Notion webhook subscription is integration-level and
-can front several databases, so gen_saas records the source on the database
-binding the event resolves to (`notion_database_bindings.index_source`), and
-an event on an unbound binding is skipped `unbound-subscription` as above.
-DND-763 carries the general amendment of this paragraph; this note fixes the
-grain for `notion_work`. `notion_work` binds only on a binding whose
-subscription is `metadata_only` (*The storage boundary* →
-*A `metadata_only` subscription*). Binding it on a `full` subscription is
-refused (`content_policy_required`, with a `Fix:`), and a subscription that
-feeds `notion_work` cannot be moved back to `full` until it is unbound.
+**Later (2026-09-28, DND-438):** this paragraph said the source comes from
+"the **subscription** the ingress verified the event against", and that "each
+subscription binds one source". The grain was already the per-database
+binding in gen_saas (DND-436); DND-763 tracks the rest of that drift.
 
 **At-least-once, row by row.**
 
@@ -5193,8 +5195,11 @@ closed list. The list has three parts:
   `assignee` and `labels` are the OQ-5 permissive fields above; removing one
   from the allow-list removes it from the persisted payload too.
 
-  **Later (2026-09-28):** this bullet replaces the forward reference that
-  named the obligation without stating it.
+  **Later (2026-09-28):** the bullet before this one said the obligation
+  "is DND-438's `metadata_only` subscription obligation" without stating it;
+  this bullet states it. The skip cause is snake_case like the other Notion
+  ingress causes (`unbound_database`, `no_parent`); the kebab-case causes are
+  the index's own.
 - **Mission pointers are a separate schema.** *Mission pointers are metadata
   only* keeps its own closed list, which refuses labels and assignees. This
   section does not change it.
