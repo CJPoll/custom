@@ -27,6 +27,25 @@ FAIL=0
 TMP=$(mktemp -d) || { echo "FAIL: mktemp"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
+# STASH FIXTURE OPT-OUT (DND-1103). The fixtures seed real stash entries, and
+# M1b runs an UNGUARDED pop to show the mechanism, in mktemp repos only. In an
+# agent session both DND-775 layers refuse those writes: the PATH git wrapper
+# (ai/agent-bin/git) and the reference-transaction hook injected through
+# GIT_CONFIG_COUNT/KEY_n/VALUE_n. So this suite drops both itself, as
+# ai/test/agent-stash-guard/self-test.sh does, instead of relying on the
+# harness-gate opt-out alone (a direct run failed "fixture a"). This suite
+# tests the PreToolUse text guard, which never runs git writes.
+for _v in $(env | sed -n 's/^\(GIT_CONFIG_\(KEY\|VALUE\)_[0-9]*\)=.*/\1/p'); do unset "$_v"; done
+unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_TRACE2 ATHENA_AGENT_GIT_SEEN ATHENA_AGENT_BIN
+_newpath=
+_ifs=$IFS; IFS=:
+for _d in $PATH; do
+  if [ -f "$_d/git" ] && grep -q 'git (agent wrapper)' "$_d/git" 2>/dev/null; then continue; fi
+  _newpath="${_newpath:+$_newpath:}$_d"
+done
+IFS=$_ifs
+PATH=$_newpath; export PATH
+
 # Hermetic git identity + config for the fixtures AND for the hook's alias read.
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL="$TMP/gitconfig"
