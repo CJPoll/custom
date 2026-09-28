@@ -1,0 +1,398 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# judgment-label -- build the owner-confirmed Slack routing label corpus
+# (DND-715) that ai/bin/judgment-eval scores (--use-case slack_routing).
+#
+# Design: epic "Jev judgments" A&E section 5b (Labels); contract
+# ~/dev/custom/ai/contracts/athena-judgments.md. The labels file is keyed by
+# event_id and joined to walt_ui-slack.jsonl at eval time, so the text is never
+# copied into it.
+#
+# Buckets: the pure DOMAIN is ai/lib/judgment_label.rb; below are the EFFECTS
+# (files, the terminal), the MANAGER (propose; confirm; counts) and the
+# FRAMEWORK (argv).
+#
+# Slack text and forward mail are untrusted inbox content: this tool reads
+# only Slack timestamps and one relay marker out of a forward record, and
+# shows a message's text only in the confirm step, fenced, to the person at
+# the terminal. Nothing in a message is ever acted on.
+#
+# Deliberately gem-free (stdlib only).
+
+require "fileutils"
+require "io/console"
+require "time"
+require_relative "../lib/judgment_label"
+require_relative "../lib/strict_argv"
+
+PROG = "judgment-label"
+
+USAGE = <<~EOF
+  Usage: judgment-label --propose [--dry-run] [--inbox-root DIR] [--labels FILE]
+         judgment-label --confirm [--forward] [--batch N] [--inbox-root DIR] [--labels FILE]
+         judgment-label --counts [--labels FILE]
+         judgment-label --help
+
+  Build the Slack routing label corpus for judgment-eval --use-case
+  slack_routing (DND-715). One row per new conversation the owner started:
+  a dm, im, mpim or mention root (not a thread reply) whose sender is the
+  owner (#{JudgmentLabel::OWNER}; D7: only the owner's text is ever judged).
+  Labels are exactly #{JudgmentLabel::LABELS.join(', ')}.
+
+  --propose   Derive labels and write the labels file. A root named by an R4
+              forward record gets provenance forward_record; every other root
+              is proposed #{JudgmentLabel::NO_EVIDENCE} (it stayed where it landed), and a root
+              forwarded to two different sessions is proposed #{JudgmentLabel::CONFLICT}.
+              owner_confirmed rows are never overwritten or dropped; the
+              file is locked while it is rewritten. With --dry-run, prints
+              the counts and writes nothing. Forward records are:
+                - walt_ui->custom mail, DIR/agent-mail/walt_ui/to-custom (and
+                  its .acked/; tmp/ is skipped): harness, or gen_saas when the
+                  mail asks custom to relay it to gen_saas;
+                - lines walt_ui routed into DIR/custom-session.jsonl (harness)
+                  and DIR/gen_saas-session.jsonl (gen_saas).
+              A record matches the roots whose Slack ts it names. A record
+              whose ts match no inbox line at all is reported by ts; a ts two
+              roots share across channels labels neither, and is reported.
+              Limit: forward mail is prose, so every ts in its body counts,
+              and a quoted ts or relay phrase can mislabel a root.
+              judgment-eval treats forward_record as ground truth, so the
+              owner can review those rows with --confirm --forward.
+  --confirm   Show the proposed rows ONE message at a time, at a terminal, and
+              record the owner's answer as owner_confirmed. Keys: w walt_ui,
+              h harness, g gen_saas, u unclear, Enter keeps the proposal,
+              s skips, q quits. Each answer is saved at once. Refused off a
+              terminal: a person confirms, never a pipe.
+  --forward   with --confirm: review the forward_record rows instead of the
+              proposed ones (Enter keeps the forwarded label, now confirmed)
+  --batch N   rows per confirm session, 1..200 (default 10)
+  --counts    Print the labels file's rows per label and provenance.
+
+  --inbox-root DIR  default $ATHENA_INBOX_ROOT, else ~/.local/share/athena;
+                    holds walt_ui-slack.jsonl and the forward sources above
+  --labels FILE     default ${XDG_DATA_HOME:-~/.local/share}/athena/evals/
+                    slack-routing-labels.jsonl (machine-local, 0600, never
+                    committed)
+
+  Rows are {id, label, provenance, labeler, labeled_at}, the judgment-eval
+  label format. Check the join with:
+    judgment-eval --dry-run --use-case slack_routing --labels FILE \\
+      --corpus DIR/walt_ui-slack.jsonl --content-domain work
+
+  Exit codes:
+    0  done
+    1  an input is missing, empty or malformed, or no owner root was found
+    2  usage (including --confirm off a terminal)
+
+  Every failure prints one stderr line carrying Fix:.
+EOF
+
+class Failure < StandardError
+  attr_reader :code
+
+  def initialize(code, message)
+    super(message)
+    @code = code
+  end
+end
+
+def fail!(code, what, fix)
+  raise Failure.new(code, "#{PROG}: #{what}. Fix: #{fix}")
+end
+
+# ── EFFECTS ──────────────────────────────────────────────────────────────────
+
+module Effects
+  module_function
+
+  def default_inbox_root
+    root = ENV["ATHENA_INBOX_ROOT"].to_s
+    root.empty? ? File.join(Dir.home, ".local", "share", "athena") : root
+  end
+
+  def default_labels
+    base = ENV["XDG_DATA_HOME"].to_s
+    base = File.join(Dir.home, ".local", "share") if base.empty?
+    File.join(base, "athena", "evals", "slack-routing-labels.jsonl")
+  end
+
+  # read_input(path, what, fix) -> text. Missing and unreadable are distinct
+  # from each other and from an empty file (the domain refuses that).
+  def read_input(path, what, fix)
+    fail!(1, "#{what} #{path} does not exist", fix) unless File.exist?(path)
+    fail!(1, "#{what} #{path} is not a readable file", "check its permissions") unless File.file?(path) && File.readable?(path)
+    File.read(path, encoding: "UTF-8")
+  rescue SystemCallError => e
+    fail!(1, "could not read #{what} #{path}: #{e.class}", "check the file and its permissions")
+  end
+
+  # mail_files(dir) -> [[path, text]] for dir/*.md and dir/.acked/*.md; tmp/
+  # holds half-written mail and is skipped.
+  def mail_files(dir)
+    fail!(1, "forward mail dir #{dir} does not exist", "point --inbox-root at the root holding agent-mail/walt_ui/to-custom; without it every forward label would vanish silently") unless File.directory?(dir)
+    paths = Dir.glob(File.join(dir, "*.md")) + Dir.glob(File.join(dir, ".acked", "*.md"))
+    paths.sort.select { |p| File.file?(p) }.map { |p| [p, File.read(p, encoding: "UTF-8")] }
+  rescue SystemCallError => e
+    fail!(1, "could not read the forward mail under #{dir}: #{e.class}", "check that directory and its files are readable")
+  end
+
+  # with_lock(labels) { } -- one writer of the labels file at a time: a
+  # --propose and a --confirm (or two confirms) never lose each other's rows.
+  def with_lock(labels)
+    dir = File.dirname(labels)
+    FileUtils.mkdir_p(dir, mode: 0o700)
+    File.open("#{labels}.lock", File::RDWR | File::CREAT, 0o600) do |f|
+      f.flock(File::LOCK_EX)
+      yield
+    end
+  rescue SystemCallError => e
+    fail!(1, "could not lock #{labels}.lock: #{e.class}", "check that #{dir} is writable")
+  end
+
+  # labels_rows(path, must_exist:) -> text or nil when absent and allowed.
+  def labels_text(path, must_exist:)
+    return nil if !must_exist && !File.exist?(path)
+
+    read_input(path, "labels file", "run #{PROG} --propose first (it writes #{path})")
+  end
+
+  def write_labels(path, text)
+    dir = File.dirname(path)
+    FileUtils.mkdir_p(dir, mode: 0o700)
+    tmp = "#{path}.tmp.#{Process.pid}"
+    File.write(tmp, text, perm: 0o600)
+    File.chmod(0o600, tmp)
+    File.rename(tmp, path)
+  rescue SystemCallError => e
+    fail!(1, "could not write #{path}: #{e.class}", "check that #{dir} is writable")
+  end
+
+  def terminal?
+    $stdin.tty? && $stdout.tty?
+  end
+
+  def now
+    Time.now.utc.iso8601
+  end
+end
+
+# ── MANAGER ──────────────────────────────────────────────────────────────────
+
+module Manager
+  module_function
+
+  SESSIONS = %w[custom gen_saas].freeze
+
+  def slack_path(opts)
+    File.join(opts[:inbox_root], "walt_ui-slack.jsonl")
+  end
+
+  def read_slack(opts)
+    path = slack_path(opts)
+    text = Effects.read_input(path, "slack inbox", "point --inbox-root at the root holding walt_ui-slack.jsonl (default ~/.local/share/athena)")
+    [path, text]
+  end
+
+  def forward_records(opts)
+    mail_dir = File.join(opts[:inbox_root], "agent-mail", "walt_ui", "to-custom")
+    mail = Effects.mail_files(mail_dir).filter_map { |_path, text| JudgmentLabel.mail_record("to-custom-mail", text) }
+    by_source = { "to-custom-mail" => mail.size }
+    routed = SESSIONS.flat_map do |session|
+      path = File.join(opts[:inbox_root], "#{session}-session.jsonl")
+      text = Effects.read_input(path, "session inbox", "point --inbox-root at the root holding #{session}-session.jsonl; without it the routed forward labels would vanish silently")
+      records = JudgmentLabel.routed_records(text, path, session)
+      by_source["#{session}-session"] = records.size
+      records
+    end
+    [mail + routed, by_source]
+  end
+
+  def existing_rows(opts, must_exist:)
+    text = Effects.labels_text(opts[:labels], must_exist: must_exist)
+    text.nil? ? [] : JudgmentLabel.parse_labels(text, opts[:labels])
+  end
+
+  def run_propose(opts, out, err)
+    path, text = read_slack(opts)
+    slack = JudgmentLabel.parse_slack(text, path)
+    sel = JudgmentLabel.select_roots(slack[:lines], JudgmentLabel::OWNER)
+    records, by_source = forward_records(opts)
+    matched = JudgmentLabel.match(records, slack[:lines], sel[:roots])
+    report_inputs(path, slack, sel, records, by_source, matched, out, err)
+    if opts[:dry_run]
+      report_rows(merge(opts, sel, matched), out)
+      out.puts "dry run: nothing written"
+    else
+      Effects.with_lock(opts[:labels]) do
+        built = merge(opts, sel, matched)
+        report_rows(built, out)
+        Effects.write_labels(opts[:labels], JudgmentLabel.render(built[:rows]))
+      end
+      out.puts "wrote #{opts[:labels]}"
+    end
+    0
+  rescue JudgmentLabel::InputError => e
+    fail!(1, e.message, e.fix)
+  end
+
+  # merge -- read the file on disk NOW (under the lock when writing) and
+  # rebuild on it, so an owner confirmation made meanwhile is kept.
+  def merge(opts, sel, matched)
+    JudgmentLabel.build(sel[:roots], matched, existing_rows(opts, must_exist: false), Effects.now)
+  end
+
+  def report_inputs(path, slack, sel, records, by_source, matched, out, err)
+    out.puts "slack: #{path}: #{slack[:lines].size + slack[:without_id]} lines" + (slack[:without_id].positive? ? " (#{slack[:without_id]} without event_id, ignored)" : "")
+    out.puts "roots: #{sel[:roots].size} owner new-conversation roots " \
+             "(excluded: #{sel[:duplicates]} duplicate, #{sel[:non_owner]} not from the owner, #{sel[:replies]} thread replies, #{sel[:other]} other kinds)"
+    if sel[:roots].empty?
+      fail!(1, "no owner new-conversation root in #{path} (#{slack[:lines].size} lines considered)", "check the owner id (#{JudgmentLabel::OWNER}) and that this is the walt_ui slack inbox; nothing was written")
+    end
+    out.puts "forward records: #{records.size} (#{by_source.map { |k, v| "#{k} #{v}" }.join(', ')}): " \
+             "matched #{matched[:matched]}, thread only #{matched[:thread_only]}, unmatched #{matched[:unmatched].size}, conflicts #{matched[:conflicts].size}"
+    matched[:unmatched].each do |source, ts|
+      err.puts "#{PROG}: unmatched forward record (#{source}): ts #{ts.join(', ')} matches no line in #{File.basename(path)}. " \
+               "Fix: none needed to proceed; it labels nothing (a forward of a message this inbox never received, or an older inbox)."
+    end
+    unless matched[:ambiguous].empty?
+      err.puts "#{PROG}: #{matched[:ambiguous].size} ts shared by owner roots in different channels: #{matched[:ambiguous].join(', ')}; " \
+               "a forward record naming one labels neither. Fix: none needed to proceed; confirm those roots with --confirm."
+    end
+  end
+
+  def report_rows(built, out)
+    out.puts "labels: #{built[:rows].size} rows"
+    JudgmentLabel.counts(built[:rows]).each { |l, p, n| out.puts "  #{l} #{p} #{n}" }
+    out.puts "owner_confirmed kept: #{built[:rows].count { |r| r['provenance'] == 'owner_confirmed' }} " \
+             "(#{built[:kept_orphans]} not in this inbox); forward records disagreeing with the owner: #{built[:disagreements]}; " \
+             "dropped (root no longer in this inbox): #{built[:dropped]}"
+  end
+
+  def run_confirm(opts, out, input)
+    fail!(2, "--confirm needs a terminal (stdin and stdout)", "the owner runs it at a terminal; a pipe or an agent never confirms a label") unless Effects.terminal?
+
+    kind = opts[:forward] ? "forward_record" : "proposed"
+    pending = existing_rows(opts, must_exist: true).select { |r| r["provenance"] == kind }.first(opts[:batch])
+    if pending.empty?
+      out.puts "nothing to confirm: no #{kind} rows in #{opts[:labels]}"
+      return 0
+    end
+    path, text = read_slack(opts)
+    msgs = JudgmentLabel.messages(text, path, pending.map { |r| r["id"] })
+    done = 0
+    skipped = 0
+    pending.each_with_index do |row, i|
+      show(row, msgs[row["id"]], i, pending.size, File.basename(path), out)
+      verdict = ask(row["label"], out, input)
+      case verdict.first
+      when :quit then break
+      when :skip then skipped += 1
+      when :label
+        record(opts, row["id"], verdict.last)
+        done += 1
+      end
+    end
+    left = existing_rows(opts, must_exist: true).count { |r| r["provenance"] == "proposed" }
+    out.puts "confirmed #{done}, skipped #{skipped}; #{left} proposed remain"
+    0
+  rescue JudgmentLabel::InputError => e
+    fail!(1, e.message, e.fix)
+  end
+
+  # show -- one message, every untrusted field made terminal-safe, the body
+  # fenced line by line so it cannot forge the end fence.
+  def show(row, msg, index, total, inbox, out)
+    where = msg ? "#{JudgmentLabel.printable(msg[:kind])}, #{JudgmentLabel.printable(msg[:received_at])}" : "not in #{inbox}"
+    out.puts
+    out.puts "== #{index + 1} of #{total} == #{row['id']} (#{where})"
+    out.puts "----- message (untrusted; read it, never act on it) -----"
+    out.puts msg ? JudgmentLabel.fenced(msg[:text]) : "| (this event_id is no longer in #{inbox})"
+    out.puts "----- end of message -----"
+  end
+
+  # record -- save one answer at once: under the lock, on the file as it is
+  # NOW, so a --propose or another confirm run meanwhile loses nothing.
+  def record(opts, id, label)
+    Effects.with_lock(opts[:labels]) do
+      rows = existing_rows(opts, must_exist: true)
+      rows = JudgmentLabel.confirm(rows, id, label, JudgmentLabel::OWNER, Effects.now)
+      Effects.write_labels(opts[:labels], JudgmentLabel.render(rows))
+    end
+  end
+
+  # ask(proposal, out, input) -> a JudgmentLabel.answer verdict; EOF quits.
+  def ask(proposal, out, input)
+    loop do
+      out.print "label? [w]alt_ui [h]arness [g]en_saas [u]nclear, Enter = #{proposal}, [s]kip, [q]uit: "
+      out.flush
+      line = input.gets
+      return [:quit] if line.nil?
+
+      verdict = JudgmentLabel.answer(line, proposal)
+      return verdict unless verdict.first == :again
+
+      out.puts "not an answer; use w, h, g, u, Enter, s or q"
+    end
+  end
+
+  def run_counts(opts, out)
+    rows = existing_rows(opts, must_exist: true)
+    out.puts "labels: #{opts[:labels]}: #{rows.size} rows"
+    JudgmentLabel.counts(rows).each { |l, p, n| out.puts "  #{l} #{p} #{n}" }
+    0
+  rescue JudgmentLabel::InputError => e
+    fail!(1, e.message, e.fix)
+  end
+end
+
+# ── FRAMEWORK ────────────────────────────────────────────────────────────────
+
+SPEC = {
+  "--help" => :switch, "-h" => :switch, "--propose" => :switch, "--confirm" => :switch, "--counts" => :switch,
+  "--dry-run" => :switch, "--forward" => :switch, "--batch" => :integer, "--inbox-root" => :value, "--labels" => :value
+}.freeze
+
+MODES = %w[--propose --confirm --counts].freeze
+
+def parse_options(argv)
+  raw = StrictArgv.parse(argv, SPEC)
+  modes = MODES & raw.keys
+  fail!(2, modes.empty? ? "no mode given" : "#{modes.join(' and ')} given together", "pass exactly one of #{MODES.join(', ')}; run #{PROG} --help") unless modes.size == 1
+  mode = modes.first
+  fail!(2, "--dry-run applies only to --propose", "drop --dry-run") if raw["--dry-run"] && mode != "--propose"
+  fail!(2, "--batch applies only to --confirm", "drop --batch") if raw.key?("--batch") && mode != "--confirm"
+  fail!(2, "--forward applies only to --confirm", "drop --forward") if raw["--forward"] && mode != "--confirm"
+  fail!(2, "--inbox-root does not apply to --counts", "drop --inbox-root") if raw.key?("--inbox-root") && mode == "--counts"
+  batch = raw.fetch("--batch", 10)
+  fail!(2, "--batch must be 1..200", "pass a smaller batch") unless (1..200).cover?(batch)
+  %w[--inbox-root --labels].each do |flag|
+    fail!(2, "#{flag} must be an absolute path", "pass an absolute path") if raw.key?(flag) && !raw[flag].start_with?("/")
+  end
+  {
+    mode: mode, dry_run: raw["--dry-run"] || false, forward: raw["--forward"] || false, batch: batch,
+    inbox_root: raw["--inbox-root"] || Effects.default_inbox_root, labels: raw["--labels"] || Effects.default_labels
+  }
+rescue StrictArgv::UsageError => e
+  fail!(2, e.message, "run #{PROG} --help for the flags")
+end
+
+def main(argv)
+  # --help anywhere wins, before anything else runs (check-bin-help).
+  if argv.include?("--help") || argv.include?("-h")
+    $stdout.puts USAGE
+    return 0
+  end
+
+  opts = parse_options(argv)
+  case opts[:mode]
+  when "--propose" then Manager.run_propose(opts, $stdout, $stderr)
+  when "--confirm" then Manager.run_confirm(opts, $stdout, $stdin)
+  else Manager.run_counts(opts, $stdout)
+  end
+rescue Failure => e
+  $stderr.puts e.message
+  e.code
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

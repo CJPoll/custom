@@ -27,6 +27,15 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(dirname "${HERE}")"
 
+# The receipt reader is shared with gh-athena's merge guard and the writer
+# (integration-gate), so the three cannot drift (DND-969).
+IR_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/integration-receipt.sh"
+# shellcheck source=../../../lib/integration-receipt.sh
+if ! . "${IR_LIB}" 2>/dev/null; then
+  printf 'locked-merge: cannot load %s\nFix: run locked-merge from its committed path in a full ~/dev/custom checkout (ai/skills and ai/lib side by side).\n' "${IR_LIB}" >&2
+  exit 2
+fi
+
 usage() {
   cat <<'EOF'
 locked-merge -- merge one GitHub PR under the repo's merge lock.
@@ -171,29 +180,11 @@ echo "BASE origin/${base} ${B} contained in ${HEAD_SHA}"
 # "I could not read whether it did" call for different next steps and must
 # never read the same (~/dev/custom/ai/CLAUDE.md -> "A failed lookup must never
 # look like an empty one"). All four refuse before the merge call.
-R_STORE="${COMMON}/integration-receipts"
-RECEIPT="${R_STORE}/${HEAD_SHA}.json"
-REGATE="run integration-gate on this head (from any checkout of this repo, with origin/${base} at ${B}); merge the SHA its INTEGRATION OK line names."
-if [ -e "${R_STORE}" ] && { [ ! -d "${R_STORE}" ] || [ ! -r "${R_STORE}" ] || [ ! -x "${R_STORE}" ]; }; then
-  die 9 "RECEIPT UNREADABLE (COULD NOT LOOK): the receipt store ${R_STORE} exists but cannot be searched, so whether integration-gate passed ${HEAD_SHA} is unknown -- not the same as no receipt" \
-    "repair the permissions on ${R_STORE} (ls -ld '${R_STORE}'), then re-run; if the receipt is still missing, ${REGATE}"
+REGATE="run integration-gate on this head (from any checkout of this repo, with origin/${base} at ${B}), then re-run locked-merge with the SHA its INTEGRATION OK line names."
+if ! ir_read_receipt "${COMMON}" "${HEAD_SHA}" "${B}"; then
+  die 9 "${IR_KIND}: ${IR_WHY}" "${IR_HOW:+${IR_HOW} }${REGATE}"
 fi
-if [ ! -e "${RECEIPT}" ]; then
-  if [ -d "${R_STORE}" ]; then where="the store exists; it holds no receipt for this head"; else where="the store does not exist yet"; fi
-  die 9 "NO RECEIPT: integration-gate has recorded no pass for ${HEAD_SHA} (looked for ${RECEIPT}; ${where}). A RED, refused, or never-run gate leaves none" \
-    "${REGATE}"
-fi
-r_fields="$(jq -er '[.schema, .verdict, .head, .base, (.target_ref // ""), (.recorded_at // "")] | map(tostring) | @tsv' "${RECEIPT}" 2>/dev/null)" \
-  || die 9 "RECEIPT UNREADABLE (COULD NOT LOOK): ${RECEIPT} exists but is not a readable receipt (unreadable file or malformed JSON)" \
-       "inspect it (cat '${RECEIPT}'); then ${REGATE}"
-IFS=$'\t' read -r r_schema r_verdict r_head r_base r_target r_at <<<"${r_fields}"
-[ "${r_schema}" = "integration-receipt/1" ] && [ "${r_verdict}" = "pass" ] && [ "${r_head}" = "${HEAD_SHA}" ] \
-  || die 9 "RECEIPT INVALID: ${RECEIPT} is not a pass for ${HEAD_SHA} (schema '${r_schema}', verdict '${r_verdict}', head '${r_head}')" \
-       "${REGATE}"
-[ "${r_base}" = "${B}" ] \
-  || die 9 "RECEIPT FOR ANOTHER BASE: integration-gate passed ${HEAD_SHA} against ${r_base} (${r_target}, ${r_at}), but origin/${base} is ${B} under the lock" \
-       "${REGATE}"
-echo "RECEIPT ${RECEIPT} base ${B} recorded ${r_at}"
+echo "RECEIPT ${IR_RECEIPT} base ${B} recorded ${IR_RECORDED_AT}"
 
 if [ -n "${IDLE_WF}" ]; then
   busy="$(cd "${REPO}" && gh run list --workflow "${IDLE_WF}" --branch "${base}" --json status \

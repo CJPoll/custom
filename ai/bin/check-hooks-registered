@@ -62,6 +62,8 @@
 
 require "json"
 require "shellwords"
+require "stringio"
+require_relative "../lib/agent_stash_env"
 require_relative "../lib/landed"
 
 AI_DIR       = File.expand_path("..", __dir__)          # .../ai
@@ -555,6 +557,264 @@ def matcher_key_cases(check)
   end
 end
 
+# ---------------------------------------------------------------------------
+# THE AGENT-STASH ENV (DND-775). The registry's `env` section is the settings
+# env that activates the agent-stash guard (ai/lib/agent_stash_env.rb explains
+# the states). This reports it on its own line and never folds it into the hook
+# verdict above: INACTIVE (exit 0, the owner has not run
+# `scripts/setup-hooks --install-env`), ACTIVE (exit 0, runtime asserted too),
+# DRIFT/FAIL (exit 1), or COULD NOT MEASURE (exit 3). The overall exit is the
+# worse of the two checks.
+#
+# THE BAR IS THE ENV AS LANDED, like the hooks' (DND-743). The expected values
+# come from ai/hooks/registry.json at origin/main's tip (ai/lib/landed.rb,
+# honouring the harness-gate pin), expanded against the MAIN checkout. The tip,
+# not the union: the owner installs from the main checkout after it
+# fast-forwards to that tip, and env values must match exactly. A branch can
+# therefore neither lower nor rewrite the bar. Deciding INACTIVE needs no bar:
+# none of the guard's keys in the settings is a fact about the settings alone,
+# so an offline machine that never activated still reads INACTIVE. Keys present
+# while the tip has no env section is a FAIL: the guard is live on this machine
+# ahead of its landing, the fail-closed outage state.
+def landed_env_section(root = REPO_DIR)
+  pts, bars = Landed.read_bar(root, REGISTRY_REL) do |text, label, sha|
+    data = begin
+      JSON.parse(text)
+    rescue JSON::ParserError => e
+      raise Landed::Unreadable.new([["#{REGISTRY_REL} @ #{label} #{sha[0, 12]}", "not valid JSON (#{e.message.lines.first.to_s.strip})"]])
+    end
+    [label, data.is_a?(Hash) ? data["env"] : nil]
+  end
+  tip_label = pts.first&.first
+  tip = bars.find { |(label, _)| label == tip_label }
+  [Landed.describe([pts.first]), tip ? tip[1] : nil]
+end
+
+# The branch's own registry is never read here: neither the INACTIVE decision
+# (a fixed key rule, AgentStashEnv.any_guard_key?) nor the expected values (the
+# landed env) comes from the diff under check (critic round 4).
+def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO_DIR,
+                        landed_env: ->(r) { landed_env_section(r) },
+                        zshrc: File.join(Dir.home, ".zshrc"), proc_env: ENV, out: $stdout, err: $stderr)
+  tag = "check-hooks-registered: agent-stash env"
+  unless File.exist?(path)
+    out.puts "#{tag}: no settings file at #{path} — nothing to assert (not this environment). OK."
+    return EXIT_OK
+  end
+  settings = JSON.parse(File.read(path))
+  env = settings.is_a?(Hash) ? settings["env"] : nil
+  unless AgentStashEnv.any_guard_key?(env)
+    out.puts "#{tag}: INACTIVE — none of its keys are in #{path} (not activated; the owner activates it after " \
+             "it lands with `#{File.join(main, 'scripts/setup-hooks')} --install-env` and a session restart). OK."
+    return EXIT_OK
+  end
+
+  begin
+    bar, section = landed_env.call(root)
+  rescue Landed::Unreadable => e
+    err.puts "#{tag}: COULD NOT MEASURE — this is not a pass."
+    Landed.unreadable_lines("hook registry env", e.probes).each { |l| err.puts l }
+    return EXIT_UNMEASURED
+  rescue Landed::Mismatch => e
+    err.puts "#{tag}: COULD NOT MEASURE — this is not a pass."
+    Landed.mismatch_lines(e.local, e.remote, e.source).each { |l| err.puts l }
+    return EXIT_UNMEASURED
+  end
+  if section.nil?
+    err.puts "#{tag}: FAIL — #{path} carries agent-stash keys, but the env has not landed (#{bar}). " \
+             "The guard is live ahead of its script: every agent ref update may fail closed."
+    err.puts "  Fix: the owner runs `#{File.join(main, 'scripts/setup-hooks')} --remove-env` and restarts " \
+             "sessions, then re-installs after the branch lands."
+    return EXIT_FAIL
+  end
+  exp = AgentStashEnv.expected({ "env" => section }, main)
+  res = AgentStashEnv.settings_state(env, exp)
+  if res.state == :inactive
+    # A guard trace exists (any_guard_key? above) but none of the landed keys
+    # does: a renamed or case-variant key. That is drift, never INACTIVE.
+    res = AgentStashEnv::Result.new(:drift, ["#{path} carries agent-stash keys (a hook.agentstash.* / " \
+                                             "hook.reference-transaction.* GIT_CONFIG key or ATHENA_AGENT_BIN), " \
+                                             "but none of the landed env's keys"], 1)
+  end
+  if res.state == :drift
+    err.puts "#{tag}: DRIFT — #{path} holds part of the agent-stash env, or values that differ from #{bar}:"
+    res.lines.each { |l| err.puts "  - #{l}" }
+    err.puts "  Fix: the owner re-applies it from the MAIN checkout (fast-forwarded to origin/main): " \
+             "`#{File.join(main, 'scripts/setup-hooks')} --remove-env && " \
+             "#{File.join(main, 'scripts/setup-hooks')} --install-env`, then restarts sessions. " \
+             "An agent reports this; live settings are the owner's machine state."
+    return EXIT_FAIL
+  end
+
+  problems = AgentStashEnv.runtime_problems(env, exp, main: main, zshrc: zshrc)
+  notes, session = AgentStashEnv.session_state(exp, proc_env: proc_env)
+  problems += session
+  if problems.empty?
+    out.puts "#{tag}: ACTIVE — settings values match #{bar}; hook script, `git hook list` (agentstash), " \
+             "wrapper and shell line verified. OK."
+    notes.each { |n| out.puts "  note: #{n}" }
+    return EXIT_OK
+  end
+  err.puts "#{tag}: FAIL — the settings values match (active), but:"
+  problems.each { |l| err.puts "  - #{l}" }
+  EXIT_FAIL
+rescue JSON::ParserError, SystemCallError => e
+  err.puts "#{tag}: COULD NOT MEASURE — #{e.message.lines.first.to_s.strip}. " \
+           "Fix: repair the file named above (registry or settings JSON) and re-run; this is not a pass."
+  EXIT_UNMEASURED
+end
+
+# The live check's exit from the hook verdict and the agent-stash env verdict
+# (DND-775). The header's precedence rule holds across the two: a failure (1)
+# either side can see stands whatever the other could not measure (3), so a
+# visible failure is never reported as COULD NOT MEASURE. Otherwise the worse.
+def combined_exit(hook, env)
+  return EXIT_FAIL if [hook, env].include?(EXIT_FAIL)
+
+  [hook, env].max
+end
+
+# The agent-stash env cases (DND-775), in-process against a fixture main
+# checkout, settings file and shell profile. Returns true when all pass.
+def agent_stash_env_self_test(check)
+  require "fileutils"
+  registry = JSON.parse(File.read(REGISTRY))
+  tracked = File.join(REPO_DIR, "dotfiles", ".zshrc")
+  last = File.exist?(tracked) ? File.readlines(tracked).map(&:strip).reject(&:empty?).last : nil
+  check.call("env: the tracked dotfiles/.zshrc ENDS with the agent PATH line (earlier lines reset PATH)",
+             last == AgentStashEnv::ZSHRC_LINE)
+  Dir.mktmpdir("agent-stash-env-selftest") do |dir|
+    main = File.join(dir, "main")
+    FileUtils.mkdir_p([File.join(main, "ai", "git-hooks"), File.join(main, "ai", "agent-bin")])
+    FileUtils.cp(File.join(REPO_DIR, AgentStashEnv::HOOK_REL), File.join(main, AgentStashEnv::HOOK_REL))
+    FileUtils.cp(File.join(REPO_DIR, "ai", "agent-bin", "git"), File.join(main, "ai", "agent-bin", "git"))
+    zshrc = File.join(dir, "zshrc")
+    File.write(zshrc, "export FOO=1\n#{AgentStashEnv::ZSHRC_LINE}\n")
+    reg = File.join(dir, "registry.json")
+    File.write(reg, JSON.generate(registry))
+    exp = AgentStashEnv.expected(registry, main)
+    full = { "GIT_CONFIG_COUNT" => exp[:pairs].size.to_s }
+    exp[:pairs].each_with_index { |(k, v), i| full["GIT_CONFIG_KEY_#{i}"] = k; full["GIT_CONFIG_VALUE_#{i}"] = v }
+    full.merge!(exp[:vars])
+    settings = File.join(dir, "settings.json")
+    landed = ->(_root) { ["fixture landed", registry["env"]] }
+    run = lambda do |env, proc_env: {}, landed_env: landed|
+      File.write(settings, JSON.generate(env.nil? ? {} : { "env" => env }))
+      o = StringIO.new
+      e = StringIO.new
+      code = run_agent_stash_env(path: settings, main: main, zshrc: zshrc,
+                                 landed_env: landed_env, proc_env: proc_env, out: o, err: e)
+      [code, o.string + e.string]
+    end
+
+    code, text = run.call(nil)
+    check.call("env: no env keys -> INACTIVE, exit 0", code.zero? && text.include?("INACTIVE"))
+    code, text = run.call({ "GIT_TRACE2" => "/dev/null", "OTHER" => "x" })
+    check.call("env: GIT_TRACE2 alone is not the guard -> INACTIVE", code.zero? && text.include?("INACTIVE"))
+    code, text = run.call(full)
+    check.call("env: complete -> ACTIVE, exit 0 (git hook list prints agentstash)",
+               code.zero? && text.include?("ACTIVE") && !text.include?("INACTIVE"))
+
+    appended = { "GIT_CONFIG_COUNT" => (exp[:pairs].size + 1).to_s,
+                 "GIT_CONFIG_KEY_0" => "user.name", "GIT_CONFIG_VALUE_0" => "owner-kept" }
+    exp[:pairs].each_with_index { |(k, v), i| appended["GIT_CONFIG_KEY_#{i + 1}"] = k; appended["GIT_CONFIG_VALUE_#{i + 1}"] = v }
+    appended.merge!(exp[:vars])
+    code, = run.call(appended)
+    check.call("env: appended after an owner's own GIT_CONFIG entry -> ACTIVE", code.zero?)
+
+    partial = full.reject { |k, _| k == "ATHENA_AGENT_BIN" }
+    code, text = run.call(partial)
+    check.call("env: one key removed -> DRIFT, exit 1, names it",
+               code == 1 && text.include?("DRIFT") && text.include?("ATHENA_AGENT_BIN is missing"))
+    short = full.merge("GIT_CONFIG_COUNT" => (exp[:pairs].size - 1).to_s)
+    code, text = run.call(short)
+    check.call("env: a pair past GIT_CONFIG_COUNT -> DRIFT (git never reads it)",
+               code == 1 && text.include?("past GIT_CONFIG_COUNT"))
+    wt = full.map { |k, v| [k, v.gsub(main, "/home/x/.local/worktrees/custom/branch")] }.to_h
+    code, text = run.call(wt)
+    check.call("env: hook command pointing at a worktree path -> DRIFT, exit 1",
+               code == 1 && text.include?("hook.agentstash.command") && text.include?("differs"))
+    code, text = run.call(full.merge("GIT_CONFIG_COUNT" => "four"))
+    check.call("env: unreadable GIT_CONFIG_COUNT -> DRIFT, never INACTIVE",
+               code == 1 && text.include?("cannot be read"))
+
+    FileUtils.mv(File.join(main, AgentStashEnv::HOOK_REL), File.join(dir, "hook.aside"))
+    code, text = run.call(full)
+    FileUtils.mv(File.join(dir, "hook.aside"), File.join(main, AgentStashEnv::HOOK_REL))
+    check.call("env: hook script missing in the main checkout -> FAIL with the disable in the Fix:",
+               code == 1 && text.include?("missing") && text.include?("--remove-env"))
+    File.write(File.join(main, "ai", "agent-bin", "ls"), "#!/bin/sh\n")
+    code, text = run.call(full)
+    File.delete(File.join(main, "ai", "agent-bin", "ls"))
+    check.call("env: a second file in the wrapper dir -> FAIL", code == 1 && text.include?("besides git"))
+    File.write(zshrc, "export FOO=1\n")
+    code, text = run.call(full)
+    File.write(zshrc, "export FOO=1\n#{AgentStashEnv::ZSHRC_LINE}\n")
+    check.call("env: shell profile without the PATH line -> FAIL", code == 1 && text.include?("agent PATH line"))
+
+    bin = File.join(main, "ai", "agent-bin")
+    good = { "ATHENA_AGENT_BIN" => bin, "PATH" => "#{bin}:/usr/bin:/bin" }
+    code, = run.call(full, proc_env: good)
+    check.call("env: an activated session with the wrapper first on PATH -> ACTIVE", code.zero?)
+    code, text = run.call(full, proc_env: good.merge("PATH" => "/usr/bin:#{bin}:/bin"))
+    check.call("env: an activated session whose PATH puts real git first -> FAIL",
+               code == 1 && text.include?("first git on PATH"))
+
+    # The bar is the env AS LANDED (DND-743's rule, applied to the env).
+    never = ->(_root) { raise "the landed bar must not be read here" }
+    code, text = run.call(nil, landed_env: never)
+    check.call("env: INACTIVE is decided without reading the landed bar (offline-safe)",
+               code.zero? && text.include?("INACTIVE"))
+    unreadable = ->(_root) { raise Landed::Unreadable.new([["fixture probe", "unreachable"]]) }
+    code, text = run.call(full, landed_env: unreadable)
+    check.call("env: keys present, landed bar unreadable -> COULD NOT MEASURE, exit 3",
+               code == EXIT_UNMEASURED && text.include?("COULD NOT MEASURE"))
+    code, text = run.call(full, landed_env: ->(_root) { ["fixture landed", nil] })
+    check.call("env: keys present but the env has not landed -> FAIL (live ahead of its script)",
+               code == EXIT_FAIL && text.include?("has not landed"))
+    lowered = JSON.parse(JSON.generate(registry["env"]))
+    lowered["git_config"].find { |e| e["key"] == "hook.agentstash.enabled" }["value"] = "false"
+    reg_low = JSON.parse(JSON.generate(registry)).merge("env" => lowered)
+    exp_low = AgentStashEnv.expected(reg_low, main)
+    low = { "GIT_CONFIG_COUNT" => exp_low[:pairs].size.to_s }
+    exp_low[:pairs].each_with_index { |(k, v), i| low["GIT_CONFIG_KEY_#{i}"] = k; low["GIT_CONFIG_VALUE_#{i}"] = v }
+    low.merge!(exp_low[:vars])
+    code, text = run.call(low)
+    check.call("env: settings carrying a rewritten env (enabled=false) fail against the landed bar -> DRIFT",
+               code == EXIT_FAIL && text.include?("DRIFT"))
+
+    # INACTIVE comes from a fixed key rule, never from the branch registry
+    # (critic round 4): deleting or renaming the env section on a branch must
+    # not make a live guard read INACTIVE. The branch registry is not an input
+    # at all; these pin the rule on the settings side.
+    code, text = run.call({ "GIT_CONFIG_COUNT" => "1", "GIT_CONFIG_KEY_0" => "HOOK.agentstash.command",
+                            "GIT_CONFIG_VALUE_0" => "true" })
+    check.call("env: a case-variant hook key alone is a guard trace, never INACTIVE -> DRIFT",
+               code == EXIT_FAIL && text.include?("DRIFT"))
+    code, text = run.call({ "GIT_CONFIG_KEY_7" => "hook.reference-transaction.enabled", "GIT_CONFIG_VALUE_7" => "true" })
+    check.call("env: a hook key past GIT_CONFIG_COUNT is a guard trace, never INACTIVE", code == EXIT_FAIL && !text.include?("INACTIVE"))
+    code, text = run.call({ "ATHENA_AGENT_BIN" => "/x" })
+    check.call("env: ATHENA_AGENT_BIN alone is a guard trace, never INACTIVE", code == EXIT_FAIL && !text.include?("INACTIVE"))
+    File.write(settings, JSON.generate({ "env" => "not-an-object" }))
+    o = StringIO.new
+    code = run_agent_stash_env(path: settings, main: main, zshrc: zshrc, landed_env: landed, proc_env: {}, out: o, err: o)
+    check.call("env: an env that is not an object is never INACTIVE", code != EXIT_OK && !o.string.include?("INACTIVE"))
+    src = File.read(__FILE__)
+    body = src[/^def run_agent_stash_env.*?^end$/m].to_s
+    check.call("env: run_agent_stash_env never reads the branch registry (REGISTRY / registry_file)",
+               !body.empty? && !body.include?("REGISTRY") && !body.include?("registry_file"))
+
+    # The two verdicts combine under the header's precedence rule (critic,
+    # rebase round 2): a visible failure beats could-not-measure either way.
+    { [EXIT_FAIL, EXIT_UNMEASURED] => EXIT_FAIL, [EXIT_UNMEASURED, EXIT_FAIL] => EXIT_FAIL,
+      [EXIT_OK, EXIT_UNMEASURED] => EXIT_UNMEASURED, [EXIT_UNMEASURED, EXIT_OK] => EXIT_UNMEASURED,
+      [EXIT_FAIL, EXIT_OK] => EXIT_FAIL, [EXIT_OK, EXIT_FAIL] => EXIT_FAIL,
+      [EXIT_UNMEASURED, EXIT_UNMEASURED] => EXIT_UNMEASURED, [EXIT_OK, EXIT_OK] => EXIT_OK }.each do |(h, e), want|
+      check.call("exit: hook #{h} + env #{e} -> #{want}", combined_exit(h, e) == want)
+    end
+  end
+end
+
 def self_test
   require "tmpdir"
   registry = load_registry
@@ -724,6 +984,8 @@ def self_test
   # `check` closes over `ok`, so a failing case here reddens the suite.
   matcher_key_cases(check)
 
+  agent_stash_env_self_test(check)
+
   puts(ok ? "ALL CASES PASS" : "SELF-TEST FAILED")
   ok ? 0 : 1
 end
@@ -791,5 +1053,7 @@ if cli.key?("--norm")
 elsif cli["--self-test"]
   exit self_test
 else
-  exit run
+  # The hook verdict and the agent-stash env verdict are separate lines;
+  # combined_exit joins them (DND-775).
+  exit combined_exit(run, run_agent_stash_env)
 end

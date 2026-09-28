@@ -936,10 +936,13 @@ grep -q 'GATE NOT RUN' <<<"$out" && bad "s4 read the gate's own 75 as a slot tim
 
 # layout_copy <dir> -- a copy of the checkout layout integration-gate resolves
 # its siblings from: the script copied (so realpath lands here), critic-review
-# and blast-radius linked to the real ones. It is a git repo, so its own main
-# checkout (where test-slot is resolved) is the layout itself.
+# and blast-radius linked to the real ones, and the shared receipt library
+# (ai/lib/integration-receipt.sh, DND-969) linked beside them. It is a git
+# repo, so its own main checkout (where test-slot is resolved) is the layout
+# itself.
 layout_copy() {
-  mkdir -p "$1/ai/skills/athena:merge-boarding/scripts" "$1/ai/bin"
+  mkdir -p "$1/ai/skills/athena:merge-boarding/scripts" "$1/ai/bin" "$1/ai/lib"
+  ln -s "$(cd "${ROOT}/../../lib" && pwd)/integration-receipt.sh" "$1/ai/lib/integration-receipt.sh"
   git init -q "$1"
   cp "$GATE" "$1/ai/skills/athena:merge-boarding/scripts/integration-gate"
   ln -s "$(cd "${ROOT}/../../bin" && pwd)/critic-review" "$1/ai/bin/critic-review"
@@ -1032,8 +1035,16 @@ L="${TMP}/s12-nogit"; layout_copy "$L"; rm -rf "$L/.git"
 printf '#!/bin/sh\nexit 0\n' > "$L/ai/bin/test-slot"; chmod +x "$L/ai/bin/test-slot"
 R="${TMP}/s12b"; slot_repo "$R" "touch '${R}/GATE_RAN'"
 out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
-[ "$rc" -eq 2 ] && grep -q '^Fix:' <<<"$out" && [ ! -f "${R}/GATE_RAN" ] \
-  && ok "s12 an unresolvable script checkout is exit 2 with Fix:, gate not run" || bad "s12 no-git layout expected exit 2, got $rc" "$out"
+[ "$rc" -eq 2 ] && grep -q '^Fix:' <<<"$out" && grep -q 'cannot locate the main checkout' <<<"$out" && [ ! -f "${R}/GATE_RAN" ] \
+  && ok "s12 an unresolvable script checkout is exit 2 with Fix:, gate not run" || bad "s12 no-git layout expected exit 2 naming the main checkout, got $rc" "$out"
+# ...and a layout without the shared receipt library (DND-969) is exit 2 with a
+# Fix: naming it, before any gate runs. Its exit 2 must not be mistaken for the
+# unresolvable-checkout refusal above, so each case greps its own cause.
+L="${TMP}/s12-nolib"; layout_copy "$L"; rm -f "$L/ai/lib/integration-receipt.sh"
+R="${TMP}/s12c"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q 'cannot load .*integration-receipt.sh' <<<"$out" && grep -q '^Fix:' <<<"$out" && [ ! -f "${R}/GATE_RAN" ] \
+  && ok "s12 a missing receipt library is exit 2 with Fix:, gate not run" || bad "s12 missing library expected exit 2 naming it, got $rc" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

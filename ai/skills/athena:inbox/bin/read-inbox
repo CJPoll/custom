@@ -336,7 +336,7 @@ else
     elif [ "${KIND}" = "log" ]; then
       BODY="$(printf '%s' "${READ}" | jq -r '
         .messages[]
-        | "[\(if (.kind // "") == "" then "message" else .kind end)] \(.channel) \(.ts) \(.user)\n\(.text)\n"')" || RENDER_RC=1
+        | "[\(if (.kind // "") == "" then "message" else .kind end)] \(.channel) \(.ts) \(.user) thread_ts=\(if (.thread_ts // "") == "" then "(none)" else .thread_ts end) route=\(.route // "(none, pre-DND-450)")\n\(.text)\n"')" || RENDER_RC=1
     else
       BODY="$(printf '%s' "${READ}" | jq -r '
         .messages[]

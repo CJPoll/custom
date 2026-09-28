@@ -74,6 +74,7 @@ case "$*" in
   "pr view"*"--json"*) answer prview ;;
   "api repos/"*"/protection/required_status_checks"*) answer protection ;;
   "api repos/"*"/rules/branches/"*) answer rules ;;
+  "api repos/"*"/git/ref/heads/"*) answer baseref ;;
   "alias list"*) answer aliases ;;
   "pr merge"*|"-R "*"pr merge"*|"--repo"*"pr merge"*) echo "stub: MERGED" ; exit 0 ;;
   *) echo "stub: passthrough $*"; exit 0 ;;
@@ -85,7 +86,44 @@ export PATH="${TMP}/bin:${PATH}"
 HEAD_SHA="b712de1d0000000000000000000000000000beef"
 OTHER_SHA="0e134e88662690fe8edde401fa79bf44aa688eec"
 
-reset_fx() { rm -f "${FX}"/* "${STUB_LOG}"; : > "${STUB_LOG}"; printf '' > "${FX}/aliases.out"; }
+# ---- the local checkout the guard reads (DND-969) ---------------------------
+# The guard now reads the PR's base tip from the forge (stub: the baseref
+# fixture), asks the LOCAL checkout of the PR's repo whether that commit
+# declares an integration gate, and if so requires integration-gate's receipt.
+# One fixture repo, origin = the PR's repo URL (never contacted), three base
+# commits:
+#   NOGATE_BASE  declares no gate (bin/prep-commit.sh, ai/bin/harness-gate absent)
+#   GATED_BASE   declares bin/prep-commit.sh
+#   HGATE_BASE   declares ai/bin/harness-gate only
+# Every case runs with the fixture as cwd. The default base is NOGATE_BASE, so
+# every pre-DND-969 case below is ALSO the "a repo that declares no gate behaves
+# as before" evidence: none of them changed its expectation.
+REPO_FX="${TMP}/gen_saas"
+git init -q -b main "${REPO_FX}"
+gfx() { git -C "${REPO_FX}" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+gfx remote add origin git@github.com:CJPoll/gen_saas.git
+echo readme > "${REPO_FX}/README"; gfx add README; gfx commit -q -m nogate
+NOGATE_BASE="$(gfx rev-parse HEAD)"
+mkdir -p "${REPO_FX}/bin"; printf '#!/bin/sh\nexit 0\n' > "${REPO_FX}/bin/prep-commit.sh"
+gfx add bin; gfx commit -q -m gated
+GATED_BASE="$(gfx rev-parse HEAD)"
+gfx checkout -q -b hgate "${NOGATE_BASE}"
+mkdir -p "${REPO_FX}/ai/bin"; printf '#!/bin/sh\nexit 0\n' > "${REPO_FX}/ai/bin/harness-gate"
+gfx add ai; gfx commit -q -m hgate
+HGATE_BASE="$(gfx rev-parse HEAD)"
+gfx checkout -q main
+COMMON_FX="$(git -C "${REPO_FX}" rev-parse --path-format=absolute --git-common-dir)"
+STORE_FX="${COMMON_FX}/integration-receipts"
+cd "${REPO_FX}" || exit 2
+
+# base_is <sha> : the forge reports <sha> as the tip of the PR's base branch.
+base_is() { printf '{"ref":"refs/heads/main","object":{"sha":"%s","type":"commit"}}\n' "$1" > "${FX}/baseref.out"; }
+
+reset_fx() {
+  rm -f "${FX}"/* "${STUB_LOG}"; : > "${STUB_LOG}"; printf '' > "${FX}/aliases.out"
+  base_is "${NOGATE_BASE}"
+  chmod -R u+rwx "${STORE_FX}" 2>/dev/null; rm -rf "${STORE_FX}"
+}
 
 # pr_view <rollup-json-array> [head]
 pr_view() {
@@ -107,6 +145,9 @@ run() { OUT="$("${WRAPPER}" "$@" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err
 merged()  { grep -q 'pr merge' "${STUB_LOG}"; }
 refused() { [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"Fix:"* ]] && ! merged; }
 detail()  { printf 'rc=%s out=%q err=%q calls=%q' "${RC}" "${OUT}" "${ERR}" "$(cat "${STUB_LOG}")"; }
+# lands_safely : the Fix: names the one recommended merge path, integration-gate
+# THEN locked-merge (DND-969), never a bare `gh-athena pr merge`.
+lands_safely() { [[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"integration-gate"*"locked-merge --pr <n> --head"* ]]; }
 
 echo "gh-athena merge-guard self-test"
 echo "wrapper: ${WRAPPER}"
@@ -115,9 +156,9 @@ echo
 echo "--- --auto with NO readable required-checks gate is REFUSED before any write ---"
 reset_fx; pr_view "${QUEUED}"; gate_unreadable
 run pr merge 362 --squash --auto
-if refused && [[ "${ERR}" == *"--match-head-commit"* ]] && [[ "${ERR}" == *"403"* ]] \
+if refused && lands_safely && [[ "${ERR}" == *"403"* ]] \
   && [[ "${ERR}" == *"could not establish"* ]]; then
-  ok "1. the incident: --auto on gen_saas (protection 403, rules 403) -> refused, Fix names --match-head-commit, no merge call"
+  ok "1. the incident: --auto on gen_saas (protection 403, rules 403) -> refused, Fix names integration-gate then locked-merge, no merge call"
 else bad "1. --auto refused when both lookups 403" "$(detail)"; fi
 
 reset_fx; pr_view "${QUEUED}"
@@ -355,7 +396,7 @@ api_refused() {
   local label="$1" needle="$2"; shift 2
   reset_fx; run "$@"
   if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
-    && [[ "${ERR}" == *"pr merge <n> --squash --match-head-commit <sha>"* ]] \
+    && lands_safely \
     && [[ "${ERR}" == *"${needle}"* ]] && [ ! -s "${STUB_LOG}" ]; then
     ok "${label}"
   else bad "${label}" "$(detail)"; fi
@@ -442,7 +483,7 @@ rm -rf "${TMP}/brokenbin"
 
 reset_fx; printf 'am: api -X PUT %s\n' "${PR_PATH}" > "${FX}/aliases.out"
 run am
-if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"--match-head-commit"* ]] \
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && lands_safely \
   && [ "$(cat "${STUB_LOG}")" = "alias list" ]; then
   ok "L1. a gh alias expanding to an api merge -> expanded, refused; only \`alias list\` ran"
 else bad "L1. alias to api merge refused" "$(detail)"; fi
@@ -491,7 +532,7 @@ ref_refused() {
   reset_fx; run "$@"
   if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
     && [[ "${ERR}" == *"gh-athena git push"* ]] \
-    && [[ "${ERR}" == *"pr merge <n> --squash --match-head-commit <sha>"* ]] \
+    && lands_safely \
     && [[ "${ERR}" == *"${needle}"* ]] && [ ! -s "${STUB_LOG}" ]; then
     ok "${label}"
   else bad "${label}" "$(detail)"; fi
@@ -558,6 +599,136 @@ api_passes "NR8. GraphQL read of a ref's target" api graphql -f query='{ reposit
 api_passes "NR9. a REST write whose field VALUE names a ref mutation is not scanned" api -X POST repos/CJPoll/gen_saas/issues/5/comments -f body='why not updateRef or createCommitOnBranch?'
 api_passes "NR10. a REST read of a file under a contents/ path" api repos/CJPoll/gen_saas/contents/git/refs/heads/main
 api_passes "NR11. a word that only CONTAINS a mutation name (createRefund)" api graphql -f query='mutation { createRefund(input: {}) { id } }'
+
+echo
+echo "--- DND-969: a gated repo's merge needs integration-gate's receipt for the pinned head ---"
+# The defect: locked-merge requires the receipt (DND-965), but a direct
+# `gh-athena pr merge <n> --squash --match-head-commit <sha>` only asked whether
+# CI was green, so it merged a head integration-gate never passed. The guard
+# now resolves the base tip from the forge, asks the local checkout whether that
+# commit declares a gate (ai/lib/integration-receipt.sh, the rule
+# integration-gate uses), and if so requires the receipt for exactly the pinned
+# head and exactly that base. Each refusal is asserted to happen BEFORE the
+# stubbed merge call.
+
+# plant <head> <base> [verdict] [recorded-head] : a receipt as integration-gate
+# writes it.
+plant() {
+  mkdir -p "${STORE_FX}"
+  jq -n --arg h "${4:-$1}" --arg b "$2" --arg v "${3:-pass}" \
+    '{schema:"integration-receipt/1", verdict:$v, head:$h, target_ref:"origin/main", base:$b,
+      gate:"bin/prep-commit.sh", recorded_at:"2026-09-27T00:00:00Z"}' > "${STORE_FX}/$1.json"
+}
+
+# receipt_refused <label> <kind> : refused with that kind, a Fix: that names
+# integration-gate BEFORE locked-merge, and no merge call.
+receipt_refused() {
+  local fixline
+  fixline="$(grep -m1 'Fix:' <<<"${ERR}")"
+  if refused && [[ "${ERR}" == *"$2"* ]] && [[ "${fixline}" == *"integration-gate"*"locked-merge"* ]]; then
+    ok "$1"
+  else bad "$1" "$(detail)"; fi
+}
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D1. THE MISS: gated repo, green pinned head, NO receipt -> refused before the merge call" "NO RECEIPT"
+[[ "${ERR}" == *"${STORE_FX}/${HEAD_SHA}.json"* ]] && ok "D1b. the refusal names the receipt path it searched" \
+  || bad "D1b. searched path named" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${GATED_BASE}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+if [ "${RC}" = 0 ] && grep -qx "pr merge 362 --squash --match-head-commit ${HEAD_SHA}" "${STUB_LOG}"; then
+  ok "D2. a valid receipt for this head and this base -> the merge runs, argv unchanged"
+else bad "D2. valid receipt merges" "$(detail)"; fi
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${NOGATE_BASE}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D3. a receipt recorded against another base (main moved since the gate) -> refused" "RECEIPT FOR ANOTHER BASE"
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; mkdir -p "${STORE_FX}"; echo '{not json' > "${STORE_FX}/${HEAD_SHA}.json"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D4. a malformed receipt -> RECEIPT UNREADABLE (COULD NOT LOOK)" "RECEIPT UNREADABLE"
+[[ "${ERR}" != *"NO RECEIPT"* ]] && ok "D4b. an unreadable receipt is not reported as NO RECEIPT" || bad "D4b. unreadable vs absent" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${GATED_BASE}" red
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D5. a receipt whose verdict is not pass -> RECEIPT INVALID" "RECEIPT INVALID"
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${GATED_BASE}" pass "${OTHER_SHA}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D5b. a receipt whose recorded head is another SHA -> RECEIPT INVALID" "RECEIPT INVALID"
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${GATED_BASE}"; chmod 000 "${STORE_FX}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+chmod 700 "${STORE_FX}"
+receipt_refused "D6. a receipt store that cannot be searched -> COULD NOT LOOK" "COULD NOT LOOK"
+[[ "${ERR}" != *"NO RECEIPT"* ]] && ok "D6b. an unsearchable store is not reported as NO RECEIPT" || bad "D6b. unsearchable vs absent" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${HGATE_BASE}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D7. a repo declaring ai/bin/harness-gate (not bin/prep-commit.sh) is gated too" "NO RECEIPT"
+
+reset_fx; pr_view "${GREEN}"; base_is "${NOGATE_BASE}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+if [ "${RC}" = 0 ] && grep -qx "pr merge 362 --squash --match-head-commit ${HEAD_SHA}" "${STUB_LOG}"; then
+  ok "D8. a repo that declares NO gate, no receipt -> the merge runs as before"
+else bad "D8. no-gate repo unchanged" "$(detail)"; fi
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"
+mkdir -p "${TMP}/not-a-repo"; cd "${TMP}/not-a-repo" || exit 2
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+cd "${REPO_FX}" || exit 2
+receipt_refused "D9. run outside any checkout of the PR's repo -> refused (COULD NOT LOOK), never read as no gate" "COULD NOT LOOK"
+
+OTHER_FX="${TMP}/other"
+git init -q -b main "${OTHER_FX}"; git -C "${OTHER_FX}" remote add origin git@github.com:CJPoll/custom.git
+reset_fx; pr_view "${GREEN}"; base_is "${NOGATE_BASE}"
+cd "${OTHER_FX}" || exit 2
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+cd "${REPO_FX}" || exit 2
+receipt_refused "D9b. run from a checkout of ANOTHER repo -> refused (COULD NOT LOOK)" "COULD NOT LOOK"
+
+reset_fx; pr_view "${GREEN}"; base_is "0123456789abcdef0123456789abcdef01234567"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D10. the base tip is not in the local object store -> refused (COULD NOT LOOK), not 'no gate'" "COULD NOT LOOK"
+[[ "${ERR}" == *"git fetch"* ]] && ok "D10b. the Fix says to fetch" || bad "D10b. fetch named" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; fx baseref '' 1 'gh: Not Found (HTTP 404)'
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D11. the base tip cannot be read from the forge -> refused, the failure is named" "COULD NOT LOOK"
+[[ "${ERR}" == *"HTTP 404"* ]] && ok "D11b. the forge's error is in the refusal" || bad "D11b. forge error named" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; fx baseref '{"object":{"sha":"not-a-sha"}}'
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D11c. a base-tip body that is not a SHA -> refused" "COULD NOT LOOK"
+
+reset_fx; pr_view "${QUEUED}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${GATED_BASE}"
+fx protection '{"strict":true,"contexts":["Test"],"checks":[{"context":"Test","app_id":1}]}'
+fx rules '[]'
+run pr merge 362 --squash --auto
+if refused && [[ "${ERR}" == *"--auto"* ]] && [[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"integration-gate"*"locked-merge"* ]]; then
+  ok "D12. --auto in a gated repo -> refused even with required checks and a receipt (it lands later, on a base no receipt covers)"
+else bad "D12. --auto in gated repo refused" "$(detail)"; fi
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"
+run pr merge 362 --squash
+refused && [[ "${ERR}" == *"--match-head-commit"* ]] \
+  && ok "D13. gated repo, no --match-head-commit -> still refused (item 2)" || bad "D13. no pin refused" "$(detail)"
+
+WT_FX="${TMP}/gen_saas-wt"
+git -C "${REPO_FX}" worktree add -q --detach "${WT_FX}" "${NOGATE_BASE}" 2>/dev/null
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${GATED_BASE}"
+cd "${WT_FX}" || exit 2
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+cd "${REPO_FX}" || exit 2
+if [ "${RC}" = 0 ] && merged; then
+  ok "D14. run from a LINKED worktree -> finds the receipt in the shared git common dir, merges"
+else bad "D14. linked worktree reads the common store" "$(detail)"; fi
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"
+OUT="$(GH_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" pr merge 362 --squash --match-head-commit "${HEAD_SHA}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+receipt_refused "D15. the dry-run seam on a gated merge with no receipt -> the same refusal" "NO RECEIPT"
 
 echo
 echo "==================================================="

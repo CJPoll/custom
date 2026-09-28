@@ -33,6 +33,12 @@ printf '[user]\n\tname = t\n\temail = t@t\n[init]\n\tdefaultBranch = main\n' > "
 export GIT_ALLOW_PROTOCOL=file
 export GIT_SSH_COMMAND=false
 export GIT_TERMINAL_PROMPT=0
+# The calling session may inject its own config entries (DND-775: agent sessions
+# carry the agent-stash hook as GIT_CONFIG_COUNT/KEY_n/VALUE_n). Case 1 pins the
+# header at index 0, so start from none, as glab-athena's suite does. Case 18
+# covers a pre-set count explicitly. This drops the agent-stash hook inside this
+# sandbox (DND-775 condition b), which only ever creates fixture repos.
+unset GIT_CONFIG_COUNT
 FAKE_TOKEN="ghs_SELFTESTFAKETOKEN0000"
 printf '12345\n' > "${TMP}/app-id"
 printf 'not-a-key\n' > "${TMP}/key.pem"
@@ -218,6 +224,36 @@ R="$(new_repo hdr 'git@github.com:o/r.git')"
 if [ "${RC}" = 0 ] && [ "$(cat "${TMP}/out")" = "AUTHORIZATION: basic ${B64}" ]; then
   ok "17. real exec: git sees the x-access-token basic header for https://github.com/"
 else bad "17. git sees the bot header" "rc=${RC} out='$(cat "${TMP}/out")' err='$(cat "${TMP}/err")'"; fi
+
+# DND-775 condition (a): agent sessions carry the agent-stash hook as injected
+# config entries. The header must be APPENDED after them (index COUNT), never
+# written over index 0, and the hook must still be registered in the git the
+# passthrough execs. The injected entries come from ai/hooks/registry.json.
+REGISTRY="${AI_DIR}/hooks/registry.json"
+R="$(new_repo inject 'git@github.com:o/r.git')"
+inject_env() {
+  python3 - "${REGISTRY}" <<'PY'
+import json, shlex, sys
+env = json.load(open(sys.argv[1]))["env"]
+pairs = [("user.name", "caller-kept")] + [(e["key"], e["value"]) for e in env["git_config"]]
+out = ["GIT_CONFIG_COUNT=%d" % len(pairs)]
+for i, (k, v) in enumerate(pairs):
+    out.append("GIT_CONFIG_KEY_%d=%s" % (i, shlex.quote(k)))
+    out.append("GIT_CONFIG_VALUE_%d=%s" % (i, shlex.quote(v)))
+print(" ".join(out))
+PY
+}
+INJ="$(inject_env)"
+N="$(eval "${INJ}"; printf '%s' "${GIT_CONFIG_COUNT}")"
+OUT="$(cd "${R}" && eval "export ${INJ}" && GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD 2>"${TMP}/err")"; RC=$?
+( cd "${R}" && eval "export ${INJ}" && "${WRAPPER}" git config --get user.name \
+    && "${WRAPPER}" git config --get-all http.https://github.com/.extraheader \
+    && "${WRAPPER}" git hook list reference-transaction ) >"${TMP}/out" 2>>"${TMP}/err"; RC2=$?
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"GIT_CONFIG_KEY_${N}=[http.https://github.com/.extraheader]"* ]] \
+  && [ "${RC2}" = 0 ] \
+  && [ "$(cat "${TMP}/out")" = "caller-kept"$'\n'"AUTHORIZATION: basic ${B64}"$'\n'"agentstash" ]; then
+  ok "18. injected entries (count ${N}) are kept: the header lands at index ${N} and the agent-stash hook stays registered"
+else bad "18. append after injected entries" "rc=${RC} rc2=${RC2} n=${N} out='${OUT}' real='$(cat "${TMP}/out")' err='$(cat "${TMP}/err")'"; fi
 
 echo
 echo "==================================================="

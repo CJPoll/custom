@@ -145,7 +145,10 @@ fi
 # `pr merge --auto` is REFUSED unless the PR's base branch has a READABLE,
 # non-empty required-checks set (on a free private repo it has none, and --auto
 # merges immediately). A non-auto `pr merge` is REFUSED unless it pins the head
-# with --match-head-commit <sha> and every check on that head is green. A
+# with --match-head-commit <sha> and every check on that head is green, and,
+# in a repo that declares an integration gate, integration-gate's receipt exists
+# for that head and the base tip (DND-969; merge via integration-gate, then
+# locked-merge, which makes this call). A
 # `gh api` call that merges (REST …/pulls/<n>/merge, …/merges, …/merge-upstream;
 # GraphQL mergePullRequest / enablePullRequestAutoMerge / enqueuePullRequest /
 # mergeBranch) is REFUSED outright, with no reads (DND-728). So is a `gh api`

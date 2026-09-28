@@ -2534,6 +2534,29 @@ assert_eq "I-4 --peek does not write a state file at all" "0" \
 assert_eq "I-4 --peek leaves the count where it was" "2" \
   "$(cd "${LPROJ}" && "${BIN}/inbox-status" --json 2>/dev/null | jq -r '.channels[0].new')"
 
+# DND-491 r1-r3: a Slack line says how the server routed it. `thread_ts` and
+# `route` are rendered inside the fence as data. A line with no `route`
+# predates DND-450 and says so; a hostile non-string `route` is coerced to a
+# string, never fatal.
+setup_log_case
+printf '%s\n' \
+  '{"v":1,"ts":"1790.2","channel":"D1","user":"U1","kind":"thread_reply","event_id":"EvR1","thread_ts":"1790.1","route":"thread_claim","text":"ok"}' \
+  '{"v":1,"ts":"1790.3","channel":"D1","user":"U1","kind":"dm","event_id":"EvR2","text":"old line"}' \
+  '{"v":1,"ts":"1790.4","channel":"D1","user":"U1","kind":"dm","event_id":"EvR3","route":{"evil":["x"]},"text":"hostile"}' \
+  > "${LINBOX}"
+OUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --peek 2>/dev/null)"; RC=$?
+assert_eq "DND-491 r1 read-inbox renders routed lines, exit 0" "0" "${RC}"
+assert_contains "DND-491 r1 a claimed reply shows thread_ts and route=thread_claim" \
+  "[thread_reply] D1 1790.2 U1 thread_ts=1790.1 route=thread_claim" "${OUT}"
+assert_contains "DND-491 r2 a line with no route says it predates DND-450" \
+  "[dm] D1 1790.3 U1 thread_ts=(none) route=(none, pre-DND-450)" "${OUT}"
+assert_contains "DND-491 r3 a non-string route is rendered as a string" \
+  'route={"evil":["x"]}' "${OUT}"
+assert_eq "DND-491 r1-r3 every line counted, none unreadable" "3 0" \
+  "$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --json --peek 2>/dev/null | jq -r '"\(.messages | length) \(.unreadable // 0)"')"
+assert_eq "DND-491 r3 the hostile route line stays inside the fence" "1" \
+  "$(printf '%s\n' "${OUT}" | awk '/untrusted content [0-9a-f]+:/{f=1} /--- end untrusted content/{f=0} f && /route=\{"evil"/{n++} END{print n+0}')"
+
 # A re-appended duplicate event_id is reported ONCE. At-least-once delivery
 # makes a re-append normal, not an anomaly.
 setup_log_case

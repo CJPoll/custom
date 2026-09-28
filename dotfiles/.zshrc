@@ -252,3 +252,11 @@ if [ -f '/home/cjpoll/google-cloud-sdk/path.zsh.inc' ]; then . '/home/cjpoll/goo
 
 # The next line enables shell command completion for gcloud.
 if [ -f '/home/cjpoll/google-cloud-sdk/completion.zsh.inc' ]; then . '/home/cjpoll/google-cloud-sdk/completion.zsh.inc'; fi
+
+# DND-775 (owner-approved, Q1, 2026-09-27): agent sessions only. Settings env
+# sets ATHENA_AGENT_BIN (scripts/setup-hooks --install-env); this puts the agent git
+# wrapper first on PATH when the Bash tool builds its shell snapshot. Inert in a
+# terminal, where ATHENA_AGENT_BIN is never set. Keep it the LAST line: earlier
+# lines reset PATH. An if, not an && chain, so the file still ends with status 0
+# when inert. Disable: scripts/setup-hooks --remove-env, restart sessions.
+if [ -n "${ATHENA_AGENT_BIN:-}" ] && [ -x "$ATHENA_AGENT_BIN/git" ]; then PATH="$ATHENA_AGENT_BIN:$PATH"; fi
