@@ -303,11 +303,28 @@ Each (owner, use case) has one mode:
   what would have happened.
 - **`on`** — act on accepted judgments.
 
-**`on` is refused** unless a threshold row exists for (owner, use case,
-question-set version, pinned model) that an eval run produced. A use case MAY
+**`on` is refused** unless the owner's thresholds for (use case, question-set
+version, pinned model) hold at least one ENABLED row, produced by an eval run,
+for an **advisory label**: a label the use case may act on. A run where every
+label is n/a, or where only a non-advisory label is enabled, cannot turn a use
+case on. Finding triage's advisory labels are `duplicate` and `related`;
+`unrelated` is never advice, so an enabled `unrelated` alone does not count. A
+use case whose question set declares no advisory label cannot be turned on.
+**`shadow` is refused** unless the use case has a registered question set,
+because shadow makes real calls. **`off` is never refused.** A use case MAY
 add a refusal of its own; Slack routing refuses `on` while the p95 of
-`latency_ms` over its shadow-mode `judgment_calls` rows exceeds 1,000 ms.
-`eval:*` ignores the mode, but not the key, the domain or the budget.
+`latency_ms` over its shadow-mode `judgment_calls` rows exceeds 1,000 ms. That
+measurement is not built yet (DND-717), so until it is, Slack routing's `on`
+is refused outright. `eval:*` ignores the mode, but not the key, the domain or
+the budget. The writer is gen_saas `Athena.Judgments.Settings.set_mode/3`
+(DND-714), the owner's only one; every refusal carries `Fix:`.
+
+**Later (2026-09-28):** this read "`on` is refused unless a threshold row
+exists for (owner, use case, question-set version, pinned model) that an eval
+run produced", and named no refusal for `shadow`. Replaced by the text above
+(DND-714). Why: a row existing is not calibration. An all-n/a run writes rows,
+and an enabled `unrelated` row enables nothing a caller acts on, so either
+would have turned a use case on with no advice it could give.
 
 ## Threshold provenance, n/a and the pinned model
 
@@ -441,10 +458,8 @@ athena:ticket-management → *Before filing a finding*.
   "insufficient evidence" and is never advised, so its silence never reads as
   "no duplicate". A state the server did not report is said as such and is
   never read as `enabled`.
-- **Setting the mode** is gen_saas `Athena.Judgments.Settings.set_mode/3`
-  (DND-714), the owner's only writer. It applies *Modes*' refusal strictly:
-  `on` needs at least one ENABLED eval-produced label, so a run where every
-  label is n/a cannot turn a use case on.
+- **Setting the mode** follows *Modes*: `on` needs an enabled advisory label
+  (`duplicate` or `related`).
 - **A server that answered and refused** (any 4xx, a rejected machine token
   included) prints its own line with the server's `Fix:`, distinct from a
   server that could not be reached. A 200 outside this shape is its own
