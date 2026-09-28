@@ -123,8 +123,11 @@
 # docker, sed, rg, sort and wget whatever their subcommand (admiral
 # decision after critic round 10: per-tool read lists were deleted; the
 # relief they gave for git/gh/docker/sed pipelines returns with DND-775).
-# So is a payload holding a command substitution, and an unquoted or
-# unterminated heredoc. The arguments of a test (`[`, `[[`, `test`) are
+# So is a payload holding a command substitution, an unquoted or
+# unterminated heredoc, and any heredoc whose body comes after an
+# expansion or substitution in the command (`${`, `$(`, `$[`, a backtick,
+# `<(`; critic round 22, fail closed: `echo ${x} && jq <<'E'` reads its
+# body as commands). The arguments of a test (`[`, `[[`, `test`) are
 # data too.
 #   RESIDUAL (data mode), a deliberate reduction from cbac851/d8cf63e,
 #   which read every payload in full: a stash write that names NO stash
@@ -143,14 +146,14 @@
 #   exec. This is the same class NOT CATCHABLE names (a script defined in
 #   one call and run in another; another interpreter building argv).
 #   OWNER DECISION (the record this reduction needs; critic rounds 12-13):
-#     Owner: Cody. Time: 2026-09-27 ~07:20Z. Source: the laptop
-#     coordinator session (terminal), relayed by the main session.
-#     Question: "Accept the DND-799 text-guard residual (a string or file
-#     written in the same command and then executed — e.g. python3 -c, a
-#     repo hook git fires, a script written then run) until DND-775 is
-#     activated, with DND-905 as the fallback if activation slips past
-#     2026-10-04?"
-#     Answer: "approved".
+#     Owner: Cody. Time: 2026-09-28T03:36:36Z. Source: Cody's own
+#     terminal turn in session 062722c9-9552-47d4-9c0b-717f3291dc3e,
+#     message 1170f3ef-b277-46a9-9319-e6cb654f82fd (verifiable with
+#     integration-gate --owner-approval). Verbatim: "Please just ship -
+#     get the things done without bugging me for things. If something is
+#     truly blocked on me doing a thing, but otherwise just ship".
+#     It supersedes the 2026-09-27 ~07:20Z "approved", which was relayed
+#     by the main session and could not be verified.
 #   DND-775 (the git-level guard on refs/stash, injected into agent
 #   sessions) is the enforcement that closes the whole class below the
 #   text; DND-905 is the text-layer fallback if its activation slips past
@@ -533,9 +536,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # its line (a comment, or a literal `#` word) or inside `((`/`$[`
   # arithmetic (a shift) is not taken as a heredoc: the lines after it are
   # tokenized with the command, as before.
-  function tokenize(text, W, QF, SB, UX, PQ, HB, HQ,    n, i, L, c, st, cur, has, q, ns, skip, ux, wq, hdp, hds, nohd, cm, ar, np, pd, pq, ps, nh, h, pos, nx, line, t, body, bl, term, op, bo, bc, ao, ac, pxs, hcx) {
+  function tokenize(text, W, QF, SB, UX, PQ, HB, HQ,    n, i, L, c, st, cur, has, q, ns, skip, ux, wq, hdp, hds, nohd, cm, ar, np, pd, pq, ps, nh, h, pos, nx, line, t, body, bl, term, op, bo, bc, ao, ac, pxs, hcx, sx, k) {
     n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; L = length(text)
-    wq = 0; hdp = 0; cm = 0; ar = 0; np = 0; nh = 0; HB[0] = 0; bo = 0; bc = 0; ao = 0; ac = 0; pxs = 0; hcx = 0
+    wq = 0; hdp = 0; cm = 0; ar = 0; np = 0; nh = 0; HB[0] = 0; bo = 0; bc = 0; ao = 0; ac = 0; pxs = 0; hcx = 0; sx = 0
     for (i = 1; i <= L; i++) {
       c = substr(text, i, 1)
       if (st == 1) {
@@ -543,6 +546,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         continue
       }
       if (st == 2) {
+        if (c == "`" || (c == "$" && substr(text, i + 1, 1) ~ /[{([]/)) sx = 1
         if (c == "\"") st = 0
         else if (c == "\\" && i < L && substr(text, i + 1, 1) ~ /["\\$`]/) { i++; cur = cur substr(text, i, 1) }
         else { cur = cur c; if (is_sep(c)) q = 1 }
@@ -577,13 +581,24 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         # from there on, so it is never cleared (not at a newline, not at a
         # close) and heredoc detection stays off for the rest of the text
         # (critic rounds 18, 20). Over-setting only reads lines as commands.
+        # sx is the coarse fail-closed rule behind all of the above (critic
+        # round 22; rounds 14-22 were one class, a heredoc inside an
+        # expansion or substitution, which counting brackets by type kept
+        # missing: a nested `{` in `${x:-{a} <<E }`, a `"${x:-" <<E "}"`, a
+        # backtick left open across a newline). It is set, and never
+        # cleared, by any `${`, `$[`, `$(`, `$name[`, backtick, `<(` or `>(`,
+        # quoted or not, before or after the `<<` on its line. Once set, the
+        # heredocs pending at each newline are dropped, so every body from
+        # there on is read as commands (the base behaviour). A
+        # data heredoc keeps data mode only when no expansion or
+        # substitution appears before its body.
         nohd = (bo > bc) || (ao > ac) || pxs
         if (has && cur !~ /^[0-9]+$/) {
           if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; hdp = 0 } }
           else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; ns = 0 }
         }
         cur = ""; has = 0; q = 0; ux = 0; wq = 0; hdp = 0
-        if (substr(text, i + 1, 1) == "(") continue
+        if (substr(text, i + 1, 1) == "(") { sx = 1; continue }
         op = c
         while (i < L && substr(text, i + 1, 1) ~ /[<>&|-]/) { i++; op = op substr(text, i, 1) }
         if ((op == "<<" || op == "<<-") && !cm && !ar && !nohd) { hdp = 1; hds = (op == "<<-") }
@@ -597,6 +612,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         }
         cur = ""; has = 0; q = 0; ux = 0; wq = 0
         if (c == "`" && (bo > bc || ao > ac)) pxs = 1
+        if (c == "`") sx = 1
         # A `)` or backtick after a heredoc delimiter on the same line
         # closes a substitution the `<<` sat inside (`echo $(cat <<E)`, or
         # the same in backticks). zsh, which the Bash tool runs, then runs
@@ -613,7 +629,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         if (c !~ /[ \t]/) { ns = 1; skip = 0; hdp = 0 }
         if (c == "\n") {
           cm = 0
-          if (hcx) { np = 0; hcx = 0 }
+          if (hcx || sx) { np = 0; hcx = 0 }
           # The bodies of the heredocs opened on the line just ended, in
           # order, each up to its delimiter line (tabs stripped for `<<-`).
           pos = i + 1
@@ -638,6 +654,11 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (c == "$") {
         ux = 1; has = 1
         if (substr(text, i + 1, 1) == "?") { cur = cur "$?"; i++; continue }
+        if (substr(text, i + 1, 1) ~ /[{([]/) sx = 1
+        # zsh subscript on a bare name (`$x[...]`): the shell parses the
+        # bracketed text, so it counts as an expansion for sx too.
+        for (k = i + 1; k <= L && substr(text, k, 1) ~ /[A-Za-z0-9_]/; k++) ;
+        if (k > i + 1 && substr(text, k, 1) == "[") sx = 1
         if (substr(text, i + 1, 1) == "{") bo++
         else if (substr(text, i + 1, 1) == "[") ao++
         else if (substr(text, i + 1, 1) == "(" && (bo > bc || ao > ac)) pxs = 1

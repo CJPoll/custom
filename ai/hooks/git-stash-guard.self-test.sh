@@ -968,9 +968,10 @@ E"
 case_cmd "QX100. << inside \$[ ... ] arithmetic with spaces" deny "echo \$[ 1 <<'E' 2 ]
 /usr/libexec/git-core/git-st*sh -u
 E"
-# A REAL heredoc after a CLOSED ${x} on the same line still parses as a
-# heredoc: its body fed to a data tool (cat/jq) is data (QA72).
-case_cmd "QA72. a real heredoc after a closed \${x} keeps a data body allowed" allow "echo \${x} && jq -c '.[]' <<'E'
+# A real heredoc after a CLOSED ${x} on the same line. Allowed until critic
+# round 22; the coarse sx rule reads its body as commands, and the `{}`
+# body line is a brace word, so it denies (accepted false positive).
+case_cmd "QA72. a heredoc after a closed \${x} (round-22 accepted false positive)" deny "echo \${x} && jq -c '.[]' <<'E'
 {}
 E"
 
@@ -1009,8 +1010,9 @@ E"
 case_cmd "QX104. a } inside \$[ ... ] does not close it" deny "echo \$[ 1} <<'E' 2 ]
 /usr/libexec/git-core/git-st*sh -u
 E"
-# A real heredoc after a genuinely closed ${x} on a PRIOR line still parses.
-case_cmd "QA80. a closed \${x} then a real data heredoc on the next line" allow "echo \${x}
+# A real heredoc after a closed ${x} on a PRIOR line. Allowed until critic
+# round 22; sx is sticky across lines, so it denies (accepted false positive).
+case_cmd "QA80. a closed \${x} then a heredoc on the next line (round-22 accepted false positive)" deny "echo \${x}
 jq -c '.[]' <<'E'
 {}
 E"
@@ -1024,9 +1026,9 @@ E"
 case_cmd "QX106. a } inside backticks nested in \${x:- ...}" deny "echo \${x:-\`echo }\`<<'E' }
 /usr/libexec/git-core/git-st*sh -u
 E"
-# A substitution OUTSIDE any expansion does not trip the fail-safe: a real
-# data heredoc after it still parses.
-case_cmd "QA81. \$(date) then a real data heredoc stays allowed" allow "d=\$(date) && jq -c '.[]' <<'E'
+# A substitution outside any expansion, then a real heredoc. Allowed until
+# critic round 22; sx denies it (accepted false positive).
+case_cmd "QA81. \$(date) then a heredoc (round-22 accepted false positive)" deny "d=\$(date) && jq -c '.[]' <<'E'
 {}
 E"
 
@@ -1055,12 +1057,52 @@ case_cmd "QX110. <<'E' inside \$(...) closed on the same line" deny "echo \$(cat
 /usr/libexec/git-core/git-st*sh -u
 E"
 # The substitution still open at the newline is a real heredoc in every
-# shell: its body stays data. The body line is QX109's, which denies as a
-# command, so this allows only if the body is read as data.
-case_cmd "QA83. multi-line \$(cat <<'E' ...) keeps its body as data" allow "msg=\$(cat <<'E'
+# shell, so its body is data to the shell. Allowed until critic round 22;
+# sx reads the body as commands, so it denies (accepted false positive).
+case_cmd "QA83. multi-line \$(cat <<'E' ...) (round-22 accepted false positive)" deny "msg=\$(cat <<'E'
 /usr/libexec/git-core/git-st*sh -u
 E
 )"
+
+# QX111-113: critic round 22. A nested `{` inside `${...}` (zsh counts it;
+# probed 2026-09-28: `echo ${x:-{a}b}` prints `{a}b`), and a `${`/`$(`
+# opened inside double quotes, each hide `<<` from the heredoc detector. zsh
+# runs the next line as a command (probed 2026-09-28). The coarse rule (sx):
+# any expansion or substitution on or before the `<<` line reads the body
+# as commands.
+case_cmd "QX111. a nested { inside \${x:- ...} before <<" deny "echo \${x:-{a} <<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX112. <<'E' inside a double-quoted \${x:- ...}" deny "echo \"\${x:-\" <<'E' \"}\"
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX113. <<'E' inside a double-quoted \$(...) closed on the line" deny "echo \"\$(cat <<'E')\"
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX114. a backtick open across a newline, closed in the body" deny "x=\`
+cat <<'E'
+\` ; /usr/libexec/git-core/git-st*sh -u
+E"
+# Defensive: a zsh subscript on a bare name holds text the shell parses.
+# (zsh rejects this exact subscript; the case pins that `$x[` sets sx.)
+case_cmd "QX115. << inside a zsh \$x[ ... ] subscript" deny "echo \$x[ <<'E' ]
+/usr/libexec/git-core/git-st*sh -u
+E"
+# Fail closed: a substitution AFTER the `<<` on its line, or a process
+# substitution, also reads the body as commands (accepted false positives).
+case_cmd "QX116. a substitution after << on its line" deny "cat <<'E' \$(true)
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX117. a process substitution before <<" deny "diff <(true) - <<'E'
+/usr/libexec/git-core/git-st*sh -u
+E"
+# sx only looks forward: an expansion AFTER a data heredoc's body does not
+# reach back into it. The body line is QX109's, which denies as a command,
+# so this allows only if the body is still read as data.
+case_cmd "QA84. an expansion after a data heredoc's body keeps it data" allow "cat <<'E'
+/usr/libexec/git-core/git-st*sh -u
+E
+echo \${x}"
 
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).

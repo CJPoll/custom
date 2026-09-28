@@ -924,12 +924,12 @@ reached every case they did (their mutants stayed green).
   via DND-775" block. Every deny stays green. Rows 10, 13, 14, 17-22, 24
   and 25 above sabotaged deleted code and are retired.
 
-### Sabotage rows on the option-A hook (final, measured on the round-21
+### Sabotage rows on the option-A hook (final, measured on the round-22
 hook; supersede every table above)
 
-Self-test `RESULT: 580 passed, 0 failed`. One mutant copy each. A-1..A-31
+Self-test `RESULT: 588 passed, 0 failed`. One mutant copy each. A-1..A-31
 were measured on 9e114a6 + the round-12 edits; A-32 on 110ea27; A-33 on the
-round-16 hook; A-34/A-35 on the round-17 hook; A-36 on the round-18 hook; A-37 on the round-20 hook; A-38/A-39 on the round-21 hook.
+round-16 hook; A-34/A-35 on the round-17 hook; A-36 on the round-18 hook; A-37 on the round-20 hook; A-38 on the round-21 hook; A-39..A-45 on the round-22 hook.
 Rows whose mechanisms option A deleted (the old A-3/10/12-14/17-25) are
 retired with that code.
 
@@ -959,7 +959,13 @@ retired with that code.
 | A-36 | The fail-safe on a substitution inside an open expansion is dropped, so a `}` inside `$(...)`/backticks closes the `${` (critic round 18) | QX105, QX106 — `572 passed, 2 failed` |
 | A-37 | The substitution fail-safe is cleared at each newline again, so a newline inside the nested `$(...)`/backticks reopens it (critic round 20) | QX107, QX108 — `575 passed, 2 failed` |
 | A-38 | The same-line-close drop (hcx) removed, so a `<<` inside a `$(...)`/backticks closed on its own line is a heredoc again (critic round 21) | QX109, QX110 — `578 passed, 2 failed` |
-| A-39 | Over-drop: every pending heredoc is discarded at the newline, so no real heredoc body is data (guards against a fail-safe that over-reaches) | QA5, QA18, QA20, QA29, QA33, QA62, QA72, QA80, QA81, QA83 — `570 passed, 10 failed` |
+| A-39 | Over-drop: every pending heredoc is discarded at the newline, so no real heredoc body is data (guards against a fail-safe that over-reaches; re-measured on the round-22 hook, where QA72/QA80/QA81/QA83 deny by design) | QA5, QA18, QA20, QA29, QA33, QA62, QA84 — `581 passed, 7 failed` |
+| A-40 | The newline drop ignores sx, so a heredoc after an expansion or substitution keeps a data body (critic round 22) | QA72, QA80, QA81, QA83, QX111, QX112, QX114, QX115, QX117 — `579 passed, 9 failed` |
+| A-41 | A `${`/`$(`/`$[`/backtick inside double quotes does not set sx (critic round 22) | QX112 — `587 passed, 1 failed` |
+| A-42 | An unquoted backtick does not set sx, so a backtick open across a newline hides `<<` (critic round 22) | QX114 — `587 passed, 1 failed` |
+| A-43 | An unquoted `${`/`$(`/`$[` does not set sx, so a nested `{` inside `${...}` hides `<<` (critic round 22) | QA72, QA80, QA81, QA83, QX111 — `583 passed, 5 failed` |
+| A-44 | A zsh `$name[` subscript does not set sx (critic round 22, defensive) | QX115 — `587 passed, 1 failed` |
+| A-45 | A process substitution `<(`/`>(` does not set sx (critic round 22, defensive) | QX117 — `587 passed, 1 failed` |
 
 - **Round 11, path-qualified word + stale text.** The critic found that
   `exec_text()` stripped a command word to its basename before the
@@ -1043,3 +1049,33 @@ retired with that code.
   as data; its body is QX109's line, which denies as a command, so it
   allows only if the body is read as data (base 81ba7c2 denies it).
   Mutations A-38/A-39. Final counts: 580 cases, base 541/39.
+- **Round 22, a nested `{` inside `${...}` (the class, closed coarsely).**
+  The critic traced `echo ${x:-{a} <<'E' }`: a plain `{` inside `${` was
+  not counted, its `}` was, so the `${` closed early and the `<<` read as a
+  heredoc. Probed 2026-09-28: zsh prints `{a}b` for `echo ${x:-{a}b}` and
+  runs the next line as a command. Two more shapes of the same class
+  surfaced while probing, both run by zsh and both allowed by the round-21
+  hook: `echo "${x:-" <<'E' "}"` (the `${` inside double quotes, so no
+  counter saw it) and a backtick left open across a newline and closed on
+  the body line (``x=` ``, `cat <<'E'`, `` ` ; <cmd>``, `E`).
+  Rounds 14-22 are one class, a heredoc inside an expansion or
+  substitution. Admiral decision (athena:critic-convergence): no further
+  bracket counter. Fix: a coarse fail-closed flag, sx, set and never
+  cleared by any `${`, `$[`, `$(`, `$name[`, backtick, `<(` or `>(`,
+  quoted or not. At each newline, sx drops the pending heredocs, so every
+  heredoc body from the first expansion on is read as commands (the base
+  behaviour). A data heredoc keeps data mode only when no expansion or
+  substitution appears before its body (QA84: one after the body does not
+  reach back).
+  Accepted false positives (allowed at round 21, denied now, as on base
+  81ba7c2): QA72 (`echo ${x} && jq <<'E'`), QA80 (`${x}` on a prior line),
+  QA81 (`d=$(date) && jq <<'E'`), QA83 (multi-line `msg=$(cat <<'E'`).
+  QX115 (`$x[`) and QX117 (`<(`) are defensive: zsh rejects the QX115
+  subscript and a process substitution is parsed recursively, so neither is
+  a demonstrated bypass on the round-21 hook.
+  Fail-first: the round-21 hook (de187e4) on the final suite gives
+  `579 passed, 9 failed` (QA72, QA80, QA81, QA83, QX111, QX112, QX114,
+  QX115, QX117, each status=0, allowed); the real bypasses among them are
+  QX111, QX112 and QX114. The fix gives `588 passed, 0 failed`. Mutations
+  A-39 (re-measured) to A-45. Final counts: 588 cases, base 81ba7c2
+  552/36.
