@@ -38,10 +38,11 @@ implementation that violates a MUST is non-conformant.
 a greppable `Fix:` clause** in its log line or structured field, naming the
 corrective action (*Fallback: every error equals today's behaviour, loudly*
 says which fallbacks are faults), per `~/dev/custom/CLAUDE.md` →
-*Guard/error messages are written for the LLM*. This contract quotes no exact
-`Fix:` text. When an implementation pins exact text, the ticket that ships it
-adds the quote and its pin together (`ai/contracts/test/check-quoted-fix.rb`,
-DND-411).
+*Guard/error messages are written for the LLM*. This contract quotes exact
+`Fix:` text only where a fixture pins it: *Finding triage: the harness script*
+(`ai/contracts/fixtures/athena-judgments-quoted-fix.txt`, DND-713). When an
+implementation pins more exact text, the ticket that ships it adds the quote
+and its pin together (`ai/contracts/test/check-quoted-fix.rb`, DND-411).
 
 ---
 
@@ -357,6 +358,57 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   `walt_ui-slack.jsonl` itself, so the text is never copied. A root that an R4
   forward record names is `forward_record`; the owner confirms the rest one
   message at a time at a terminal.
+- **One case, one label.** A question set's eval reading names exactly one
+  answer as the label, so a set that asks several questions defines its eval
+  case unit. `finding_triage` (DND-713): one case is ONE (finding, candidate)
+  pair, an input with exactly one candidate, labelled with that candidate's
+  relation (`duplicate`, `related` or `unrelated`). A case with no candidate
+  or several is unscored `malformed_answer`, never scored. Its severity Score
+  is not evaluated, so severity has no threshold and is only ever shown as an
+  uncalibrated suggestion.
+
+## Finding triage: the harness script
+
+The first product consumer (DND-713). The server is gen_saas
+`Athena.Judgments.Triage` behind `POST /api/v1/judgments/finding_triage`; the
+harness caller is
+`ai/skills/athena:ticket-management/scripts/finding-triage`; the procedure is
+athena:ticket-management → *Before filing a finding*.
+
+- **Advisory only.** The script MUST NOT write to Notion or any tracker. Its
+  Notion effect admits only reads (a data source query and a block-children
+  list) and refuses any other request before sending it. It never closes,
+  merges or cancels a ticket. The filer decides.
+- **The owner is the machine token's**; another owner's token judges with that
+  owner's key, or answers `not_configured`. Only `finding_triage` is served
+  over REST; any other use case is `not_found`.
+- **The content domain is derived server-side from the project**, never taken
+  from the caller: `athena` and `harness` are `blend`, `walt_ui` is `work`,
+  `dnd`, `lms` and `admiral` are `personal`. An unknown project is judged with
+  no domain, so it is refused and recorded as `domain_not_permitted`.
+- **Candidates are retrieved in code**, not by the model: tickets in the same
+  project, open or edited in the last 90 days, whose title contains a keyword
+  of the finding's title, at most 20. The script prints how many it
+  considered, including `0 candidates considered`, before any advice. A
+  search that could not run is its own unavailable line, never 0 candidates.
+- **An advisory line is printed only above threshold**: for a candidate judged
+  `duplicate` or `related`, in mode `on`, whose confidence the owner's
+  eval-produced threshold for that label accepts. In mode `on` the severity is
+  printed as an uncalibrated suggestion. Shadow mode prints no advice at all,
+  severity included.
+- **A server that answered and refused** (any 4xx, a rejected machine token
+  included) prints its own line with the server's `Fix:`, distinct from a
+  server that could not be reached. A 200 outside this shape is its own
+  unreadable-answer line.
+- **Unavailable is an answer, not an error.** The server answers 200 with
+  `status` `unavailable` and a reason from *The closed reason list*
+  (`not_configured` for `mode_off` and `key_missing`). The script then exits 3
+  and prints one line naming why, ending with the same `Fix:` clause. While the
+  feature is inert (every mode `off`, no key), every call prints exactly
+  `JUDGMENTS UNAVAILABLE: not_configured. Fix: file the ticket as today; this is advisory.`
+  An unreachable server and a failed candidate search print their own distinct
+  lines (`COULD NOT REACH SERVER`, `CANDIDATES UNAVAILABLE`), so neither reads
+  as not configured or as no duplicates.
 
 ## Budget
 
@@ -435,3 +487,9 @@ with it.
       to `ok` recovers the last alerted fault, even across
       `budget_exhausted`.
 - [ ] Deleting the secret returns every consumer to today's behaviour.
+- [ ] Finding triage writes nothing to Notion, prints its candidate count even
+      when 0, derives the content domain from the project server-side, and
+      distinguishes not configured, an unreachable server and a failed
+      candidate search.
+- [ ] A question set with several questions defines its eval case unit; a
+      finding triage case is one (finding, candidate) pair.

@@ -290,7 +290,15 @@ logchan_scan() {
                                 {text: (($o.text // "") | tostring),
                                  user: (($o.user // "") | tostring),
                                  kind: (($o.kind // "") | tostring),
-                                 permalink: (($o.permalink // "") | tostring)}
+                                 permalink: (($o.permalink // "") | tostring),
+                                 # DND-491: how the server routed this line.
+                                 # Server-set, but still rendered as data
+                                 # inside the fence, and coerced like the
+                                 # rest. An absent `route` stays null so the
+                                 # renderer can say the line predates DND-450.
+                                 thread_ts: (($o.thread_ts // "") | tostring),
+                                 route: (if $o.route == null then null
+                                         else ($o.route | tostring) end)}
                               else {} end)) ]
                 | (if $eid != null then .ev[$eid] = true else . end)
                 | (if $key != null then .ky[$key] = true else . end)

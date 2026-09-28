@@ -1,6 +1,6 @@
 ---
 name: athena:ticket-management
-description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket.
+description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only).
 ---
 
 # athena:ticket-management
@@ -343,7 +343,9 @@ The DND Tickets data source carries these. The values are stated here once.
 - **Dedupe first (one root cause, one ticket).** Search open tickets in the
   same `Area` for the same root cause, by subsystem keyword and `Found while`.
   On a match, append the new site and its evidence to that ticket instead. A
-  different defect in the same subsystem still gets its own ticket.
+  different defect in the same subsystem still gets its own ticket. For a
+  finding, also run *Before filing a finding* (the Jev advisory); it informs
+  this search and never replaces it.
 
 ### Promote and won't-fix
 
@@ -405,6 +407,36 @@ When the status you would set does not exist:
    no status" and "this tracker has no such status" must never read the same —
    per `~/.claude/CLAUDE.md` → *A failed lookup must never look like an empty
    one*.
+
+## Before filing a finding
+
+A **finding** is an anomaly you observed and are about to ticket (`~/.claude/CLAUDE.md`
+→ *Find it, ticket it, fix it, verify it live*; that rule is unchanged). Before you
+create its ticket, ask Jev whether it duplicates or relates to an existing one
+(DND-713; contract `ai/contracts/athena-judgments.md` → *Finding triage: the
+harness script*):
+
+1. **Run the script.** Write the draft body to a file, then:
+   `~/dev/custom/ai/skills/athena:ticket-management/scripts/finding-triage --title "<TITLE>" --body-file <FILE> --project <athena|harness|walt_ui|dnd|lms|admiral>`.
+   It searches the DND tracker for candidates itself (same project, open or edited
+   in the last 90 days, at most 20) and prints how many it considered, even 0.
+2. **Paste its output verbatim** into the new ticket body under a heading
+   **"Jev advisory (not a decision)"**. That includes an unavailable line.
+3. **The filer decides.** A `duplicate` or `related` line is advice to check the
+   named ticket, never a verdict. The advisory never blocks filing.
+4. **Never auto-close, auto-merge or auto-cancel** anything on the strength of it,
+   the new ticket or the candidate. The script writes nothing to Notion.
+5. **When it is unavailable, file as today.** Exit 3 prints one line ending
+   `Fix: file the ticket as today; this is advisory.` While `finding_triage`'s
+   mode is `off` every call prints `JUDGMENTS UNAVAILABLE: not_configured`. The
+   owner's key exists (DND-711), but the contract refuses mode `on` without an
+   eval-produced threshold (post-key verification is DND-714). An unknown `--project` prints `domain_not_permitted`.
+   `COULD NOT REACH SERVER` and
+   `CANDIDATES UNAVAILABLE` mean the same for filing: file it.
+
+Exit 2 is a usage error: fix the command and rerun. If the Notion search cannot
+run on your machine, `--candidates-file` takes a JSON array of
+`{"ref","title","summary"}` instead.
 
 ## Resolving the two accounts (per active connection)
 

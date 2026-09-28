@@ -248,6 +248,28 @@ slack_load_identity() {
   return 0
 }
 
+# Sets $SLACK_BOT_BOT_ID (B...) and $SLACK_BOT_TEAM_ID (T...), the bot identity
+# a thread claim names (DND-491). Both come from the same cached auth.test
+# answer. A cache written before either field was read may lack one, so a
+# missing field refreshes the cache ONCE rather than failing on stale data; a
+# fresh answer still missing one is a failure, never an empty id.
+slack_load_bot_identity() {
+  slack_cache_dir
+  _bi_file="$SLACK_CACHE_DIR/identity.json"
+  _bi_try=0
+  while :; do
+    _bi_try=$((_bi_try + 1))
+    if [ "$_bi_try" -gt 1 ] || ! _slack_cache_fresh "$_bi_file" "$SLACK_IDENTITY_TTL_MIN"; then
+      slack_post_empty auth.test > "$_bi_file.tmp" || slack_die "auth.test failed"
+      mv "$_bi_file.tmp" "$_bi_file"
+    fi
+    SLACK_BOT_BOT_ID="$(jq -r '.bot_id // ""' "$_bi_file" 2>/dev/null)"
+    SLACK_BOT_TEAM_ID="$(jq -r '.team_id // ""' "$_bi_file" 2>/dev/null)"
+    if [ -n "$SLACK_BOT_BOT_ID" ] && [ -n "$SLACK_BOT_TEAM_ID" ]; then return 0; fi
+    if [ "$_bi_try" -ge 2 ]; then slack_die "auth.test answered without a bot_id and team_id"; fi
+  done
+}
+
 _slack_users_file() { printf '%s/users.json' "$SLACK_CACHE_DIR"; }
 
 slack_refresh_users() {
@@ -345,6 +367,28 @@ slack_resolve_channel() {
 slack_permalink() {
   slack_get chat.getPermalink "channel=$(slack_urlencode "$1")&message_ts=$(slack_urlencode "$2")" 2>/dev/null \
     | jq -r '.permalink // ""' 2>/dev/null || printf ''
+}
+
+# slack_claim_started_thread <bin-dir> <channel> <ts> -- EXITS, never returns.
+#
+# Runs bin/claim-thread for a thread `post` or `dm` just started (DND-491), and
+# ends the script with the claim's outcome: 0 when claimed, 3 when the post
+# happened but the claim did not. claim-thread's own lines (claim=... on
+# stdout, claim=FAILED + Fix: on stderr) pass straight through. A claim-thread
+# that could not run at all, or exited with a status it never documents, is
+# still posted-not-claimed: it gets its own FAILED line so the caller is never
+# left with a silent exit 3.
+slack_claim_started_thread() {
+  _cl_rc=0
+  "$1/claim-thread" "$2" "$3" || _cl_rc=$?
+  case "$_cl_rc" in
+    0) exit 0 ;;
+    2|3) exit 3 ;;
+    *)
+      printf 'claim=FAILED reason=mcp-error:claim-thread-exit-%s key=?/%s/%s inbox=none\n' "$_cl_rc" "$2" "$3" >&2
+      printf 'Fix: the message WAS posted; do not re-post. Run %s/claim-thread %s %s by hand and read its error.\n' "$1" "$2" "$3" >&2
+      exit 3 ;;
+  esac
 }
 
 # slack_read_text <arg...> -- the trailing text argument, or stdin when absent.

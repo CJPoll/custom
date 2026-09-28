@@ -386,3 +386,69 @@ returned to `VERDICT: PASS (117 cases)`.
 | S68 | the `**Background**` step deleted from the structure list | 1 | `FAIL doctrine: athena:slack carries decision rule '**Background**'` |
 
 After each row the suite returned to `VERDICT: PASS (124 cases)`.
+
+## Thread claim on post/dm (DND-491, 2026-09-27)
+
+- **Code under test:** `bin/claim-thread`, `lib/claim.sh`,
+  `lib/slack.sh` (`slack_load_bot_identity`, `slack_claim_started_thread`),
+  `bin/post`, `bin/dm`; and athena:inbox `lib/logchan.sh` + `bin/read-inbox`
+  (the `thread_ts` / `route` render).
+- **Suite run:** `bash test/self-test.sh` (athena:slack) and
+  `bash ../athena:inbox/test/self-test.sh` (reader row S77).
+- **Baseline:** `VERDICT: PASS (173 cases)` (athena:slack),
+  `VERDICT: PASS (883 cases)` (athena:inbox).
+- **Runner:** one mutation at a time by an exact-anchor replace asserted to
+  occur once, full suite, restored byte-for-byte from a backup.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S69 | `post` no longer calls the claim | 3 | `FAIL post: prints the ts line, then claims that (channel, ts): claim=claimed, exit 0` / `FAIL post: cwd with no registry entry -> posted once, exit 3 reason=no-registry-entry inbox=none` |
+| S70 | an empty MCP answer parsed as `claimed` | 2 | `FAIL claim_parse_result: an empty answer -> mcp-error:no-answer` |
+| S71 | the producer filter dropped (a platform log channel is a candidate) | 18 | `FAIL claim_resolve_inbox: only a platform log channel -> no-slack-channel` / `FAIL claim_resolve_inbox: one slack log channel -> cproj-slack.jsonl` |
+| S72 | `machine_id` added to the claim arguments | 1 | `FAIL claim-thread: claimed -> claim=claimed, exit 0, exactly bot_id/team_id/channel/thread_ts/inbox_name` |
+| S73 | a failed claim exits 0 from post/dm | 2 | `FAIL post: a failed claim -> ts line printed, claim=FAILED on stderr, exit 3, posted exactly once` |
+| S74 | `dm --thread_ts` claims | 1 | `FAIL dm --thread_ts: no MCP call, no claim line, exit 0` |
+| S75 | the server's `not found` folded into `mcp-error` | 4 | `FAIL claim_parse_result: a tool error 'not found' -> not-found` / `FAIL claim-thread: not found -> exit 3 reason=not-found key=<team>/<chan>/<ts> inbox=<inbox>` |
+| S76 | a cached identity without `bot_id` is never refreshed | 1 | `FAIL claim-thread: a cached identity without bot_id is refreshed once from auth.test` |
+| S77 | the reader projects `route` as always null | 3 | `FAIL DND-491 r1 a claimed reply shows thread_ts and route=thread_claim` / `FAIL DND-491 r3 a non-string route is rendered as a string` |
+
+S71 first ran the suite to an early stop with no `VERDICT` line: two test
+helpers (`claim_args`, `mcp_calls`) returned `cat`'s non-zero status under the
+suite's `set -e`, so a missing MCP record aborted the run instead of failing
+one case. Both now end `|| true`, and S71 was re-applied: `VERDICT: FAIL (18 of
+173 cases)`. After each row the suites returned to their baselines.
+
+## Thread claim on post/dm: the critic's four gaps (DND-491 fix round, 2026-09-27)
+
+athena-diff-critic ran against the DND-491 commit rebuilt on `origin/main`
+(head `3e6bc0a`) and blocked on one missing test plus three smaller gaps of the
+same kind, all in the claim path's failure branches. This round adds the four
+negative tests it named; no runtime behaviour changed.
+
+- **Code under test:** `lib/slack.sh` (`slack_claim_started_thread`'s `*)`
+  branch, `slack_load_bot_identity`'s team_id half), `lib/claim.sh`
+  (`claim_resolve_inbox`'s `registry-error` path), athena:inbox `lib/mcp.sh`
+  (`mcp_registered_url`'s internal-error status).
+- **Suite run:** `bash test/self-test.sh` (athena:slack).
+- **Baseline:** `VERDICT: PASS (180 cases)` (up from 173; all 7 new cases
+  passed on first run against the unmutated code).
+- **Runner:** one mutation at a time, by an exact-anchor Python replace
+  asserted to occur exactly once, full suite, restored with `git checkout --`
+  (each mutated file was otherwise untouched by this round).
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S78 | `claim_resolve_inbox`'s registry-error branch (`*)`) prints `no-registry-entry` instead | 2 | `FAIL claim_resolve_inbox: an unparseable OTHER registry entry, no match for this repo -> registry-error` / `FAIL claim-thread: an unparseable OTHER registry entry -> exit 3 reason=registry-error, Fix:` |
+| S79 | `mcp_registered_url`'s two absolute-path guards (main and top) removed | 2 | `FAIL mcp_registered_url: a non-absolute main-checkout key -> status 2 (internal, never 'not registered')` / `FAIL mcp_registered_url: a non-absolute toplevel key -> status 2` |
+| S80 | `slack_load_bot_identity`'s success check drops the `team_id` half (`bot_id` alone is enough) | 1 | `FAIL claim-thread: a cached identity without team_id is refreshed once from auth.test` |
+| S81 | `slack_claim_started_thread`'s `*)` branch exits 0 instead of 3 | 1 | `FAIL post: claim-thread exiting an undocumented code (1) -> claim=FAILED reason=mcp-error:claim-thread-exit-1, Fix:, exit 3` |
+
+S80 reddened only the refresh case, not the paired "auth.test without a
+team_id -> exit 3 reason=no-identity" case: `claim-thread` re-validates both
+`BOT_ID` and `TEAM` itself after calling `slack_load_bot_identity`
+(`bin/claim-thread`'s `[ -n "${BOT_ID}" ] && [ -n "${TEAM}" ] || fail
+no-identity`), so that second case is a genuine regression test of
+`claim-thread`'s own redundant guard, not of the library function's internal
+check -- the same relationship the original bot_id-missing pair (S76's sibling
+case) already has. After each row the suite returned to
+`VERDICT: PASS (180 cases)`.

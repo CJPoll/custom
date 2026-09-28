@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# claim-thread <channel_id> <thread_ts>
+#
+# Claims a Slack thread for THIS session's project inbox, so the thread's
+# replies are routed back here (ai/contracts/athena-events.md -> *Thread
+# replies route to the thread's claimant*). `post` and `dm` run it on every
+# thread they start; run it by hand to retry a claim that failed, without
+# re-posting.
+#
+# The inbox is found from the cwd: realpath of the git common dir -> this
+# project's entry in the inbox registry -> its one Slack `log` channel (no
+# producer, or producer "slack") -> that channel's path, e.g.
+# custom-slack.jsonl. The bot_id and team_id come from auth.test (cached). The
+# call is the athena MCP tool `slack_thread_claim`; the machine token is read
+# from the inbox client config and reaches curl only on stdin.
+#
+# thread_ts is the PARENT message's ts, as post/dm print it.
+#
+# Output:
+#   claim=claimed inbox=<inbox>          (stdout) exit 0
+#   claim=already_yours inbox=<inbox>    (stdout) exit 0
+#   claim=FAILED reason=<token> key=<team>/<channel>/<ts> inbox=<inbox|none>
+#     Fix: <what to do>                  (stderr) exit 3
+# A usage error (a malformed channel or ts) is claim=FAILED reason=invalid,
+# exit 2, and makes no call. Reasons, each distinct: no-registry-entry,
+# registry-error, no-slack-channel, ambiguous-slack-channel, no-identity,
+# no-token, mcp-unregistered, mcp-error:<words>, not-found, refused,
+# already-claimed, invalid.
+set -uo pipefail
+
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+SELF_DIR="$(dirname "${SELF}")"
+case "${1:-}" in -h|--help)
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${SELF}"; exit 0 ;;
+esac
+
+SLACK_LIB="${SELF_DIR}/../lib"
+INBOX_LIB="${SELF_DIR}/../../athena:inbox/lib"
+for f in err.sh names.sh descriptor.sh logchan.sh maildir.sh fence.sh session.sh fs.sh lock.sh inbox.sh; do
+  if [ ! -f "${INBOX_LIB}/${f}" ]; then
+    printf 'claim=FAILED reason=mcp-error:missing-library key=?/%s/%s inbox=none\n' "${1:-?}" "${2:-?}" >&2
+    printf 'Fix: athena:inbox is not beside athena:slack (%s/%s is missing); both skills ship together from ~/dev/custom/ai/skills.\n' "${INBOX_LIB}" "${f}" >&2
+    exit 3
+  fi
+  # shellcheck source=/dev/null
+  . "${INBOX_LIB}/${f}"
+done
+# shellcheck source=/dev/null
+. "${SLACK_LIB}/claim.sh"
+
+CHANNEL="${1:-}"
+TS="${2:-}"
+TEAM="?"
+INBOX="none"
+
+# fail <reason> [server-words] -- the one failure shape; exits 3 (2 for invalid).
+fail() {
+  local reason="$1" words="${2:-}" code=3
+  printf 'claim=FAILED reason=%s key=%s/%s/%s inbox=%s\n' "${reason}" "${TEAM}" \
+    "$(claim_oneline "${CHANNEL}")" "$(claim_oneline "${TS}")" "${INBOX}" >&2
+  [ -z "${words}" ] || printf 'server: %s\n' "${words}" >&2
+  printf 'Fix: %s\n' "$(claim_reason_fix "${reason}")" >&2
+  [ "${reason}" != "invalid" ] || code=2
+  exit "${code}"
+}
+
+[ "$#" -eq 2 ] || fail invalid
+[[ "${CHANNEL}" =~ ^[CDG][A-Z0-9]+$ ]] || fail invalid
+[[ "${TS}" =~ ^[0-9]+\.[0-9]+$ ]] || fail invalid
+
+# The cwd is captured ABSOLUTE here, at the point of capture: a relative git
+# common dir resolved later, from another directory, matches no entry
+# (athena-inbox.md -> *Repo identity: the git common dir*).
+CWD="$(pwd -P)"
+INBOX_OR_REASON="$(claim_resolve_inbox "${CWD}")" || fail "${INBOX_OR_REASON}"
+INBOX="${INBOX_OR_REASON}"
+
+# The bot identity, in a subshell: slack_die exits, and here it must become
+# the no-identity reason, never a bare exit 1.
+IDENT="$( . "${SLACK_LIB}/slack.sh" && slack_load_bot_identity >/dev/null \
+  && printf '%s\t%s\n' "${SLACK_BOT_BOT_ID}" "${SLACK_BOT_TEAM_ID}" )" || fail no-identity
+BOT_ID="${IDENT%%$'\t'*}"
+TEAM="${IDENT#*$'\t'}"
+[ -n "${BOT_ID}" ] && [ -n "${TEAM}" ] || { TEAM="?"; fail no-identity; }
+
+[ "$(mcp_token_state)" = "present" ] || fail no-token
+
+URL="$(inbox_mcp_registration "${CWD}" 2>/dev/null)"; RC=$?
+case "${RC}" in
+  0) ;;
+  1) fail mcp-unregistered ;;
+  2) fail "mcp-error:registration-key" ;;
+  *) fail "mcp-error:registration-unreadable" ;;
+esac
+
+ARGS="$(jq -n -c --arg b "${BOT_ID}" --arg t "${TEAM}" --arg c "${CHANNEL}" \
+  --arg ts "${TS}" --arg i "${INBOX}" \
+  '{bot_id: $b, team_id: $t, channel: $c, thread_ts: $ts, inbox_name: $i}')" \
+  || fail "mcp-error:could-not-build-arguments"
+
+MSG="$(mcp_call_tool "${URL}" slack_thread_claim "${ARGS}")"; RC=$?
+[ "${RC}" -eq 0 ] || fail "mcp-error:$(claim_oneline "${MSG}")"
+
+STATUS="$(claim_parse_result "${MSG}")" || fail "${STATUS}" "$(claim_server_words "${MSG}")"
+printf 'claim=%s inbox=%s\n' "${STATUS}" "${INBOX}"
+exit 0

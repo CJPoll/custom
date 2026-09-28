@@ -1,5 +1,5 @@
 #!/bin/sh
-# dm <user_id> [text] [--thread_ts <ts>]
+# dm <user_id> [text] [--thread_ts <ts>] [--no-claim]
 #
 # Opens (or reuses) the bot's IM with one user and posts to it. Slack has no
 # "post to a user"; conversations.open is what turns a U... into a D... .
@@ -8,6 +8,13 @@
 # is a notification on someone's phone with no channel context around it, and
 # Athena is acting on Cody's behalf -- an unexpected one reads as Cody pinging
 # them. Post in a channel or thread by default; DM by exception.
+#
+# A NEW DM (no --thread_ts) starts a thread, so dm then CLAIMS it for this
+# session's project inbox, exactly as `post` does (see post's header for the
+# claim=... line; a failed claim prints claim=FAILED and a Fix: line on stderr
+# and exits 3 = posted, not claimed). A reply into an existing
+# thread (--thread_ts) never claims: the thread belongs to whoever started it.
+# --no-claim skips the claim and prints claim=skipped.
 set -eu
 SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 . "$SELF_DIR/../lib/slack.sh"
@@ -15,7 +22,7 @@ case "${1:-}" in -h|--help) slack_help "$0"; exit 0 ;; esac
 slack_need_tools
 
 usage() {
-  printf 'usage: dm <user_id> [text] [--thread_ts <ts>]\n' >&2
+  printf 'usage: dm <user_id> [text] [--thread_ts <ts>] [--no-claim]\n' >&2
   exit 2
 }
 
@@ -23,9 +30,11 @@ usage() {
 USER_ID="$1"; shift
 TEXT=""
 THREAD_TS=""
+CLAIM=true
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --thread_ts) [ "$#" -ge 2 ] || usage; THREAD_TS="$2"; shift 2 ;;
+    --no-claim) CLAIM=false; shift ;;
     --) shift; TEXT="${1:-}"; break ;;
     -*) usage ;;
     *) TEXT="$1"; shift ;;
@@ -52,3 +61,7 @@ TS="$(printf '%s' "$RESP" | jq -r '.ts')"
 printf 'ts=%s channel=%s user=%s\n' "$TS" "$CHANNEL" "$USER_ID"
 PERMALINK="$(slack_permalink "$CHANNEL" "$TS" || printf '')"
 if [ -n "$PERMALINK" ]; then printf 'permalink=%s\n' "$PERMALINK"; fi
+# A reply into an existing thread prints no claim line at all.
+if [ -n "$THREAD_TS" ]; then exit 0; fi
+if [ "$CLAIM" = true ]; then slack_claim_started_thread "$SELF_DIR" "$CHANNEL" "$TS"; fi
+printf 'claim=skipped\n'
