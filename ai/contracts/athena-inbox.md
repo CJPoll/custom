@@ -942,11 +942,18 @@ topic judgment*). It is an object with exactly four members:
 `route: channel_route` with `reason: null` is a shadow-mode judgment that would
 have been accepted and was not acted on. The object carries no probabilities and
 no text. It is optional and additive on the same terms as `route`: absent on
-lines written before the producer stamped it and on every line that is not a
-new conversation, not a dedupe key, Slack-producer only. A reader MAY display it
-and MUST NOT fail on it, on an unknown `reason`, or on its absence. It is
-advisory: a reader MUST NOT treat it as authorization (`ai/contracts/athena-judgments.md`
-→ *Trust posture*).
+lines written before the producer stamped it, absent when the routing mode is
+`off`, and absent on every line that is not a new conversation; not a dedupe
+key, Slack-producer only. A reader MAY display it and MUST NOT fail on it, on an
+unknown `reason`, or on its absence. It is advisory: a reader MUST NOT treat it
+as authorization (`ai/contracts/athena-judgments.md` → *Trust posture*).
+
+**Later (2026-09-28):** this said `topic` is present on every new-conversation
+line (absent only pre-stamp or on a non-new-conversation line). Superseded by
+DND-716 (gen_saas PR #479): a new conversation while the routing mode is `off`
+writes no `topic` object at all — the line is byte-identical to the pre-epic
+line, matching `ai/contracts/athena-events.md` → *New conversations may route
+by an advisory topic judgment*.
 
 ### `received_at` — what it is and is not
 

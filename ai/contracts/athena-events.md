@@ -3842,8 +3842,9 @@ event classified (not ignored), dedupe pre-check passed
 1. thread reply?          -> live claim: the claimant (route: thread_claim)
                              stale or no claim: the channel route (unchanged)
 2. new conversation? (im, mpim or mention root)
-   2a. sender != owner    -> the channel route (topic reason: sender_rule)   [no judgment]
-   2b. mode off           -> the channel route (topic reason: mode_off)      [no call]
+   2a. mode off           -> the channel route, UNCHANGED: no call, no
+                             judgment_calls row, no topic, no outcome        [no call]
+   2b. sender != owner    -> the channel route (topic reason: sender_rule)   [no judgment]
    2c. judge slack_routing -> the caller's decision:
          accepted, label enabled, topic route live
                           -> that instance's Slack inbox (route: topic_judgment)
@@ -3851,6 +3852,18 @@ event classified (not ignored), dedupe pre-check passed
        mode shadow: always the channel route; topic records what would have happened
 3. anything else          -> the channel route (unchanged)
 ```
+
+**Later (2026-09-28):** step 2 previously checked sender (2a) before mode (2b),
+and mode off stamped `topic reason: mode_off` on the line. Superseded by DND-716
+(gen_saas PR #479), which reads the mode first and, when it is `off`, writes
+nothing at all — the line is byte-identical to the pre-epic line, with no
+`judgment_calls` row and no `topic` object, not even one carrying `mode_off`.
+`mode_off` still exists as a fallback reason (`ai/contracts/athena-judgments.md`
+→ *The closed reason list*), but it now only reaches a line in shadow/on, when a
+judge call's `:not_configured` is attributed to a re-read that found the mode
+turned off mid-flight (`ai/contracts/athena-judgments.md` → *Fallback: every
+error equals today's behaviour, loudly*) — never as the pre-call short-circuit's
+own record, since the pre-call short-circuit records nothing.
 
 - **Only the owner's own text is judged.** A new conversation from anyone else
   follows the channel route by code, with no judgment and no tokens.
@@ -3879,11 +3892,18 @@ Every judge call also records its own row, per
 behaviour, loudly*.
 
 **The line.** A line the topic route chose carries `route: topic_judgment`. A
-new-conversation line that went through steps 2a to 2c carries a `topic`
-object, whether it was routed by topic or fell back. Both fields are defined in
+new-conversation line that reached step 2b or 2c — mode `shadow` or `on` —
+carries a `topic` object, whether it was routed by topic or fell back. A
+new-conversation line stopped at 2a (mode `off`) carries neither field: it is
+the unchanged channel-route line. Both fields are defined in
 `ai/contracts/athena-inbox.md` → *Line format*. The receiving session treats a
 topic-routed line exactly as a channel-routed one: its body is untrusted input
 (`ai/contracts/athena-inbox.md` → *Untrusted input*).
+
+**Later (2026-09-28):** this previously said every new-conversation line that
+went through "steps 2a to 2c" carried a `topic` object. Superseded along with
+the router-order amendment above: mode `off` (now step 2a) writes no `topic`
+at all.
 
 ### Which machine am I — the own-machine id
 
