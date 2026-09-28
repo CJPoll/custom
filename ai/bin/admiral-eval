@@ -103,6 +103,7 @@ require "fileutils"
 require "tmpdir"
 require "time"
 require "rbconfig"
+require "shellwords"
 require_relative "../lib/strict_argv"
 
 AI_DIR       = File.expand_path("..", __dir__)
@@ -541,10 +542,7 @@ def build_sandbox(dir)
   # git: forward reads to the real git, but BLOCK `push` (the one git mutation
   # that could escape the sandbox). Scans only the first positional token so a
   # commit message containing "push" is not blocked.
-  # The REAL git, never the agent PATH wrapper (DND-1103): this shim sits ahead
-  # of the wrapper on PATH, so exec'ing the wrapper hands it a PATH whose first
-  # "other" git is this shim again.
-  real_git = which("git", skip_marked: AGENT_GIT_WRAPPER_MARK) || "/usr/bin/git"
+  real_git = which("git") || "/usr/bin/git"
   gitpath = File.join(bin, "git")
   # NOTE: do NOT `shift` here — `for a in "$@"` iterates a snapshot, but `shift`
   # mutates "$@", so the trailing `exec real_git "$@"` would forward corrupted
@@ -565,6 +563,13 @@ def build_sandbox(dir)
       echo "admiral-eval: INERT STUB 'git push' blocked in the eval sandbox. No real action taken." >&2
       exit #{INERT_EXIT}
     fi
+    # Drop this shim's own dir from PATH before handing off (DND-1103). In an
+    # agent session real_git is the agent PATH wrapper; a wrapper that predates
+    # DND-1103 execs the first OTHER git on PATH, which is this shim again: an
+    # exec loop that ends at ARG_MAX. The wrapper stays in the chain.
+    _p=; _ifs=$IFS; IFS=:
+    for _d in $PATH; do [ "$_d" = #{Shellwords.escape(bin)} ] || _p="${_p:+$_p:}$_d"; done
+    IFS=$_ifs; PATH=$_p; export PATH
     exec #{real_git} "$@"
   SH
   FileUtils.chmod(0o755, gitpath)
@@ -572,26 +577,12 @@ def build_sandbox(dir)
   bin
 end
 
-# The text that marks the agent PATH git wrapper (ai/agent-bin/git, DND-775).
-AGENT_GIT_WRAPPER_MARK = "git (agent wrapper)"
-
-# The first executable `cmd` on PATH. With skip_marked, a file whose first 4 KiB
-# carry that text is passed over (used to skip the agent git wrapper).
-def which(cmd, skip_marked: nil)
+def which(cmd)
   ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |d|
     p = File.join(d, cmd)
-    next unless File.executable?(p) && !File.directory?(p)
-    next if skip_marked && marked?(p, skip_marked)
-
-    return p
+    return p if File.executable?(p) && !File.directory?(p)
   end
   nil
-end
-
-def marked?(path, mark)
-  File.read(path, 4096).to_s.include?(mark)
-rescue SystemCallError
-  false
 end
 
 # The env the model child runs under: the stub bin prepended to PATH. HOME is

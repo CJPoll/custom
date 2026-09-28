@@ -31,14 +31,18 @@ agent_free_git() {
   _afg_ifs=$IFS
   IFS=:
   for _afg_d in ${PATH}; do
-    [ -n "${_afg_d}" ] || _afg_d=.
-    if [ -f "${_afg_d}/git" ] && [ -x "${_afg_d}/git" ] && ! _afg_is_wrapper "${_afg_d}/git"; then
+    # Absolute entries only: a fixture links the result into another dir, where
+    # a relative path dangles. An unreadable file cannot be shown not to be the
+    # wrapper, so it is passed over too.
+    case "${_afg_d}" in /*) ;; *) continue ;; esac
+    if [ -f "${_afg_d}/git" ] && [ -x "${_afg_d}/git" ] && [ -r "${_afg_d}/git" ] \
+      && ! _afg_is_wrapper "${_afg_d}/git"; then
       IFS=$_afg_ifs
       printf '%s\n' "${_afg_d}/git"
       return 0
     fi
   done
   IFS=$_afg_ifs
-  printf 'agent_free_git: no git on PATH besides the agent wrapper (PATH=%s). Fix: put the directory holding the real git (usually /usr/bin) on PATH.\n' "${PATH}" >&2
+  printf 'agent_free_git: no readable git in an absolute PATH entry besides the agent wrapper (PATH=%s). Fix: put the directory holding the real git (usually /usr/bin) on PATH.\n' "${PATH}" >&2
   return 1
 }

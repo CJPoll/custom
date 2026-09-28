@@ -260,13 +260,33 @@ else
       ok "FT7. ${s} ahead of the wrapper: a refused form is still refused"
     else bad "FT7. ${s} ahead of the wrapper still refuses" "rc=${rc} out=$(printf '%s' "${out}" | head -c 200)"; fi
   done
+  # The fallback layouts: nothing after the wrapper's entry (or no entry), so
+  # the first git anywhere stands in, and that is the shim. The shim is then
+  # remembered as passed through, and the second pass reaches the real git.
+  for layout in "A|${TMP}/shim:${GDIR}" "B|${TMP}/shim:${GDIR}:${WBIN}"; do
+    name="${layout%%|*}"; lp="${layout#*|}"
+    out="$(PATH="${lp}" timeout 10 "${WBIN}/git" --version 2>&1)"; rc=$?
+    if [ "${rc}" -eq 0 ] && [[ "${out}" == "git version"* ]]; then
+      ok "FT10${name}. shim ahead, no git after the wrapper: the shim is passed through once, git is reached"
+    else bad "FT10${name}. fallback layout ${lp}" "rc=${rc} (124 = looped) out=$(printf '%s' "${out}" | head -c 200)"; fi
+    fresh
+    out="$(PATH="${lp}" timeout 10 "${WBIN}/git" stash pop 2>&1)"; rc=$?
+    if [ "${rc}" -eq 1 ] && [[ "${out}" == *REFUSED*"Fix:"* ]] && list_intact; then
+      ok "FT11${name}. fallback layout: a refused form is still refused"
+    else bad "FT11${name}. fallback layout still refuses" "rc=${rc} out=$(printf '%s' "${out}" | head -c 200)"; fi
+  done
+  TO="$(command -v timeout)"
+  out="$(PATH="${TMP}/shim" "${TO}" 10 "${WBIN}/git" --version 2>&1)"; rc=$?
+  if [ "${rc}" -eq 127 ] && [[ "${out}" == *"no real git on PATH"*"Fix:"* ]]; then
+    ok "FT12. a shim that execs the wrapper and no real git: exit 127 with a Fix:, never a loop"
+  else bad "FT12. shim and no real git" "rc=${rc} (124 = looped) out=$(printf '%s' "${out}" | head -c 200)"; fi
   # ai/lib/agent-free-git.sh, the fixtures' way to the real git (DND-1103):
   # it skips the wrapper, and a PATH holding only the wrapper is a named miss.
   out="$(PATH="${WBIN}:${GDIR}" bash -c '. "$1"; agent_free_git' _ "${ROOT}/ai/lib/agent-free-git.sh" 2>&1)"; rc=$?
   if [ "${rc}" -eq 0 ] && [ "${out}" = "${GDIR}/git" ]; then ok "FT8. agent_free_git skips the wrapper and names the git after it"
   else bad "FT8. agent_free_git skips the wrapper" "rc=${rc} out=${out}"; fi
   out="$(PATH="${WBIN}" "${BASH}" -c '. "$1"; agent_free_git' _ "${ROOT}/ai/lib/agent-free-git.sh" 2>&1)"; rc=$?
-  if [ "${rc}" -eq 1 ] && [[ "${out}" == *"no git on PATH besides the agent wrapper"*"Fix:"* ]]; then
+  if [ "${rc}" -eq 1 ] && [[ "${out}" == *"besides the agent wrapper"*"Fix:"* ]]; then
     ok "FT9. agent_free_git with only the wrapper on PATH: exit 1 with a Fix:, never the wrapper's path"
   else bad "FT9. agent_free_git names the miss" "rc=${rc} out=${out}"; fi
 fi
