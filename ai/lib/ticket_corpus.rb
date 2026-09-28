@@ -77,6 +77,11 @@ module TicketCorpus
   # "Bug MEDIUM", "Vulnerability HIGH": a Kind then a level (case-sensitive:
   # "the bug is high" is prose).
   PAIR = /\b(?:#{Regexp.union(ALL_KINDS).source})\s+(?:#{Regexp.union(SEVERITIES).source})\b/
+  # A bare upper-case level ("Priority: LOW", "filed it as HIGH", "Why
+  # HIGH:") is a rating, most often the ticket's own: measured on the
+  # 2026-09-28 corpus, 24 of 330 severity cases stated their label so.
+  # Case-sensitive, so "the high road" is prose and stays.
+  LEVEL_WORD = /(?<![\w-])(?:#{Regexp.union(SEVERITIES).source})\b(?!-\w)/
   REDACTED = "[classification]"
   # "a Bug, severity HIGH": a Kind listed beside a redacted statement.
   KIND_BESIDE = /\b(?:#{Regexp.union(ALL_KINDS).source})\b(?=\s*[,·;]\s*\[classification\])/
@@ -166,7 +171,7 @@ module TicketCorpus
   # classification statement replaced, so a case is judged on content.
   def redact_body(text)
     kept = text.to_s.each_line.reject { |l| l.lstrip.start_with?(PROVENANCE_PREFIX) }.join
-    kept.gsub(REVERSE, REDACTED).gsub(STATEMENT, REDACTED).gsub(PAIR, REDACTED).gsub(KIND_BESIDE, REDACTED).strip
+    kept.gsub(REVERSE, REDACTED).gsub(STATEMENT, REDACTED).gsub(PAIR, REDACTED).gsub(LEVEL_WORD, REDACTED).gsub(KIND_BESIDE, REDACTED).strip
   end
 
   # sent_title(title) -> the title as the eval sends it: no severity prefix,

@@ -131,6 +131,9 @@ eq "17 a truncated body with no provenance line is provenance_unread: Jev's line
 eq "18 severity words in either order and with a dash are redacted [review 4]" \
   "This is a [classification] bug.|[classification]|Filed as a [classification], [classification]." \
   "$(rb 'puts ["This is a HIGH severity bug.", "Severity — HIGH", "Filed as a Bug, severity HIGH."].map { |s| TicketCorpus.redact_body(s) }.join("|")')"
+eq "18b a bare upper-case level in prose is the ticket's own rating: redacted; lower-case prose stays [corpus probe]" \
+  "Priority: [classification].|the coordinator filed it as [classification] today|the high road is low risk" \
+  "$(rb 'puts ["Priority: LOW.", "the coordinator filed it as HIGH today", "the high road is low risk"].map { |s| TicketCorpus.redact_body(s) }.join("|")')"
 eq "19 the title sent is redacted like the body [review 5]" \
   "[classification]: [classification] auth bypass" \
   "$(rb 'puts TicketCorpus.labels(snap.([t.(20, POST, "title"=>"Kind Bug: Severity HIGH auth bypass")]))[:corpus]["ticket_kind"].first["input"]["title"]')"
