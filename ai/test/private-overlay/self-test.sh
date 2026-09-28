@@ -205,7 +205,11 @@ fi
 echo "--- root permissions and ownership ---"
 RP="${TMP}/perm"; mk_root "${RP}"; chmod 755 "${RP}"
 run_po "${RP}" get slack .people.owner.user_id
-expect_fail "perm 0755 root refused" 4 MALFORMED "group/other access (mode 0755)"
+expect_fail "perm 0755 root refused" 4 MALFORMED "group/other permission bits (mode 0755)"
+RO="${TMP}/owner-only"; mk_root "${RO}"; chmod 500 "${RO}"
+run_po "${RO}" get slack .people.owner.user_id
+if [ "${RC}" = 0 ] && [ "${OUT}" = "${VALUE}" ]; then ok "perm 0500 root accepted (the rule is: no group/other bits)"; else bad "perm 0500" "rc=${RC} err=[${ERR}]"; fi
+chmod 700 "${RO}"
 RF="${TMP}/afile"; : > "${RF}"
 run_po "${RF}" status
 expect_fail "root is a file" 4 MALFORMED "not a directory"

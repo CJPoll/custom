@@ -48,7 +48,8 @@ file.
 
 A valid root is a directory (a symlink is resolved to its realpath) that:
 
-- is owned by the invoking user, with no group or other access (mode `0700`);
+- is owned by the invoking user, with no group or other permission bits (the
+  resolver refuses any; the owner creates it `0700`);
 - holds the marker described in *Marker*.
 
 The overlay is **optional**. The public harness MUST work with it absent. It is

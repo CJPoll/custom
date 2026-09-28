@@ -15,9 +15,10 @@
 # a missing overlay never reads as an empty value
 # (~/dev/custom/CLAUDE.md -> "A failed lookup must never look like an empty one").
 #
-# Bucket placement: this file is Framework (argv -> exit code). The rules are
-# Domain (ai/lib/private_overlay.rb); the env/fs reads are the Side Effect
-# (ai/lib/private_overlay_resolver.rb). Tests: ai/test/private-overlay/self-test.sh.
+# Bucket placement: this file is the Manager + Framework (argv -> resolve ->
+# exit code); it is the one caller of the Side Effect
+# (ai/lib/private_overlay_resolver.rb, env/fs reads), which hands every
+# decision to the Domain rules (ai/lib/private_overlay.rb). Tests: ai/test/private-overlay/self-test.sh.
 
 require_relative "../lib/private_overlay_resolver"
 
@@ -33,7 +34,8 @@ HELP = <<~HELP
 
   Discovery: ATHENA_PRIVATE_ROOT when set (authoritative: set-but-invalid is
   MALFORMED, never a fallthrough), else $HOME/.config/athena/work. The root must
-  be a 0700 directory owned by you, holding athena-overlay.json with
+  be a directory owned by you with no group or other permission bits (create
+  it 0700), holding athena-overlay.json with
   {"kind":"athena-private-overlay","schema":1}.
 
   Exit codes:

@@ -110,7 +110,7 @@ module PrivateOverlay
     return "the root is owned by uid #{owner_uid}, not by this user (uid #{my_uid})" unless owner_uid == my_uid
     return nil if (mode & 0o077).zero?
 
-    format("the root has group/other access (mode %04o); the overlay must be 0700", mode & 0o7777)
+    format("the root has group/other permission bits (mode %04o); the overlay must have none (create it 0700)", mode & 0o7777)
   end
 
   # Walk parsed JSON. -> [:found, value] | [:key_not_found, reason] |
