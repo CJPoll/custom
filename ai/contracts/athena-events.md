@@ -850,7 +850,9 @@ source):
 - `notion.ticket.created`
 - `notion.ticket.updated` — the coarse "a property changed" signal; its payload
   carries the changed property identifiers (`changed_properties`) plus the
-  enriched **current** values.
+  enriched **current** values. On a `metadata_only` subscription it carries
+  the current values only, with no `changed_properties` (*Priority index* →
+  *The storage boundary*).
 - `notion.ticket.deleted`
 - `notion.ticket.undeleted`
 - `notion.comment.created`
@@ -865,7 +867,11 @@ cares which property changed filters the coarse `notion.ticket.updated` on its
 declared `changed_properties` collection, e.g.
 `{"field":"payload.changed_properties","op":"contains","value":"<status-prop-id>"}`
 — that carries the full "which property" signal, so a finer separate type would
-buy no routing power and is not minted. (Finer separate types are roadmap; they
+buy no routing power and is not minted. The exception is a `metadata_only`
+subscription (a work workspace): its events carry no `changed_properties`, so
+there "which property changed" cannot be expressed, and such a leaf reads
+`absent` on every one of its events. A rule for a work source matches on the
+current values (`status`, `labels`, `assignee`) instead. (Finer separate types are roadmap; they
 would land with their own payload-schema rows only if a real need appears.) A
 routing rule authored against one of those non-existent finer types fails loud at
 **save** time on **two** independent grounds, so it is caught **whatever its
@@ -1014,9 +1020,10 @@ not its epic. Only relation ids and the project's title are read, never page
 content. The reconciliation re-emit (*Poller (fallback only)*) and the
 priority index's one-shot backfill (DND-436) resolve a page exactly this way,
 so every
-`notion.ticket.created`, `.updated` and `.undeleted` event carries
-`project_resolution`. `notion.ticket.deleted` and the comment types carry none
-of these fields. The Epics and Projects databases must be readable by the
+`notion.ticket.created`, `.updated` and `.undeleted` event on a `full`
+subscription carries `project_resolution`. `notion.ticket.deleted`, the
+comment types, and every event on a `metadata_only` subscription carry none of
+these fields. The Epics and Projects databases must be readable by the
 enrichment integration; if they are not, every ticket with an epic reads
 `failed`, which the priority index reports (*Domain and owner-only items*).
 
@@ -2018,7 +2025,10 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
   `notion.ticket.updated`, so a rule spanning `notion.ticket.created` and
   `notion.ticket.updated` binds it at save time and it reads `absent` on a
   `created` event. This is the intended interaction of union-binding with the
-  known-field-missing `absent` rule, not a gap.
+  known-field-missing `absent` rule, not a gap. The same holds for a field a
+  `metadata_only` subscription's events never carry (`changed_properties`,
+  the project fields): it binds at save time and reads `absent` on those
+  events.
 - **comparators:**
   - `eq`, `ne`, `lt`, `lte`, `gt`, `gte` — scalar comparison.
   - `in` — scalar is a member of the literal set.
@@ -5273,7 +5283,9 @@ closed list. The list has three parts:
     updated, deleted) is dropped after the signature check and before any
     fetch, as a counted skip with cause `metadata_only_comment`. It is never
     an error and never a dead letter. The skip count holds owner,
-    subscription, cause, count and times, and no content.
+    subscription, cause, count and times, and no content. The cause is
+    snake_case like the other Notion ingress causes (`unbound_database`,
+    `no_parent`); the kebab-case causes are the index's own.
   - **The ticket payload is closed.** A `notion.ticket.*` payload holds only
     `entity_id`, `title`, `status`, `labels`, `assignee` (person ids),
     `ticket_number` and `revision`. There is no `changed_properties`, no
@@ -5299,9 +5311,7 @@ closed list. The list has three parts:
 
   **Later (2026-09-28):** the bullet before this one said the obligation
   "is DND-438's `metadata_only` subscription obligation" without stating it;
-  this bullet states it. The skip cause is snake_case like the other Notion
-  ingress causes (`unbound_database`, `no_parent`); the kebab-case causes are
-  the index's own.
+  this bullet states it.
 - **Mission pointers are a separate schema.** *Mission pointers are metadata
   only* keeps its own closed list, which refuses labels and assignees. This
   section does not change it.
