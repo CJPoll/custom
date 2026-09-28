@@ -155,6 +155,10 @@ agent.** Some GitHub or GitLab operation cannot be done under the Athena
 identity. The cause does not matter: a wrapper error, a 401/403, the token not
 resolving to the bot, a guard denial or refusal, anything. Then:
 
+(A refusal listed in *Expected refusals* below is not this case. It is a
+known, permanent limit of the App or the plan, not a broken identity. Its row
+names the next step, and that step never uses the owner's login.)
+
 1. **Stop that operation.** Do not fall back to the owner's `gh`/`glab` login,
    a plain `git push`, the owner's credential helper, or any
    auth/setup/login subcommand.
@@ -216,6 +220,11 @@ shell loop. "CI is done" = every **required** check-run has concluded.
 When a check **fails in ~1-2s with an empty log** (BlobNotFound), it did not
 flake — read **athena:diagnose-github-actions-failure** before re-running; the
 usual cause is billing exhaustion, which no re-run can clear.
+
+**`gh-athena run rerun` always fails** (`Resource not accessible by
+integration`). To re-trigger a run that failed on infra, use the `run rerun`
+row in *Expected refusals*: close and reopen the PR, same SHA. An empty commit
+is a new SHA and a re-gate.
 
 `--watch` only blocks *usefully* if a runner ever picks the job up. When checks
 stay **`queued` with nothing reaching `in_progress`** for more than a few
