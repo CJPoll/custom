@@ -5649,8 +5649,7 @@ rendered text. Each send also writes the outbound audit row every Slack action
 writes: action `owner_dm`, no machine, a body hash, never a body.
 
 **Each owner is its own boundary.** The scheduler runs each owner in
-`Athena.PerRow.run/2`. One owner's failure never stops
-another's digest.
+`Athena.PerRow.run/2`. One owner's failure never stops another's digest.
 
 ### Access control
 
