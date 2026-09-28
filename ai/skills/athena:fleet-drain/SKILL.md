@@ -1,6 +1,6 @@
 ---
 name: athena:fleet-drain
-description: The fleet's pause/resume procedure — the admiral's control checkpoint before every dispatch, reading a spawn refused by the drain guard as PAUSE (never retry, never do the work in-line), the drain protocol (park QUEUED missions, let running captains finish or park by reason class, never end the turn while a captain runs, then report drained), a captain parking on request, and the top-level session arming its resume waiter and resuming a drained run. Use at every dispatch point, on a `CONTROL:` line from admiral-report-watch, on any refused athena-admiral/athena-captain spawn, on a park message, when an admiral you launched ends with reason `drained`, when a `fleet-control wait` you armed exits, and on a fleet.session.control_changed inbox line.
+description: The fleet's pause/resume procedure — the admiral's control checkpoint before every dispatch, reading a spawn refused by the drain guard as PAUSE (never retry, never do the work in-line), the drain protocol (park QUEUED missions, let running captains finish or park by reason class, never end the turn while a captain runs, then report drained), a captain parking on request, and the top-level session arming its resume waiter and resuming a drained run. Use at every dispatch point, on a `CONTROL:` line from admiral-report-watch, on any refused athena-admiral/athena-captain spawn, on a park message, on a pause the owner asks for in words, when an admiral you launched ends with reason `drained`, when a `fleet-control wait` you armed exits, and on a fleet.session.control_changed inbox line.
 ---
 
 # athena:fleet-drain
@@ -50,6 +50,17 @@ not classify, or a `fleet-control` error. Read every such refusal as **PAUSE**:
 - Run the drain protocol.
 
 ## The drain protocol (admiral)
+
+**A pause the owner asks for in words is the same drain.** The owner may pause
+admirals in a message, relayed by the coordinator, while `fleet-control check`
+still reads `run`. Run this whole protocol for it, with the grace of
+`override:force_drain`, and end with step 5's `fleet-resume drained`. Record the
+owner's words in the state log. Without the `DRAINED` marker the resume has no
+claim: `fleet-resume status` prints `none`, which reads as "you do not own this
+run". Measured 2026-09-27/28: both laptop admirals drained on "Let's pause
+admirals while we're figuring this out" by hand, wrote no marker, and each
+successor resumed on a recorded assumption instead of a claim
+(`2026-09-25-dnd-671-650-644`, `2026-09-25-laptop-harness` state logs).
 
 Do these in order.
 
