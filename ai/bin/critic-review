@@ -223,10 +223,16 @@ end
 # Returns the path written, or nil. nil is reported by the caller, never
 # silently swallowed -- a report that was not recorded must not read like one
 # that was.
+# The ONE place the report's name is built, so the writer (write_report) and
+# the remover (retire_report) can never key on different paths.
+def report_path(dir, sha)
+  File.join(dir, "#{sha}.report.txt")
+end
+
 def write_report(sha, text)
   dir = verdict_dir
   return nil unless dir && sha
-  path = File.join(dir, "#{sha}.report.txt")
+  path = report_path(dir, sha)
   FileUtils.mkdir_p(dir)
   File.write(path, text.to_s)
   path
@@ -303,11 +309,46 @@ def write_verdict(sha, base, action, findings, dirty, keys: nil, carried: nil, e
     ensure
       FileUtils.rm_f(tmp)
     end
+    retire_report(dir, sha)
     return path
   end
   File.write(path, body)
   FileUtils.rm_f(File.join(dir, "#{sha}.running"))
+  retire_report(dir, sha)
   path
+end
+
+# A new receipt retires the previous run's report for the same SHA (DND-907).
+#
+# The report body is written only on BLOCK and on a FAIL-OPEN with output. A
+# PASS -- judged, carried, or interaction -- and an empty-raw FAIL-OPEN write
+# none. So without this, a re-run on the same SHA left the LAST run's body in
+# place: measured on a75a777 (DND-880, 2026-09-27), a session-limit fail-open's
+# report sat beside a `verdict: pass` receipt, and the "FULL REPORT" pointer a
+# reader had followed now contradicted the recorded verdict.
+#
+# Every completion path writes its receipt through write_verdict BEFORE it
+# writes a report, so retiring here -- the one funnel -- makes "a report exists"
+# mean "this receipt's run wrote it". A refused exclusive write never reaches
+# this, so at that step the receipt that won keeps its report; the full review
+# the same invocation then falls back to writes a new receipt and retires it.
+#
+# Two runs on ONE sha at once can still interleave: A's retire can land after
+# B wrote its receipt and report, deleting B's fresh body; and, as before this
+# retire existed, A's report can land after B's receipt. Each window is the gap
+# between two statements, no lock covers them, and the receipt stays the
+# verdict in every order.
+#
+# FileUtils.rm_f is silent on every failure, "already gone" and "permission
+# denied" alike, so the outcome is read back from the filesystem, and a report
+# that survived is said out loud rather than left to contradict the receipt.
+def retire_report(dir, sha)
+  report = report_path(dir, sha)
+  FileUtils.rm_f(report)
+  return unless File.exist?(report)
+
+  warn "critic-review: NOTE a previous run's report could not be removed: #{report}."
+  warn "  Fix: delete it by hand (`rm -rf #{report}`); until then it describes an EARLIER run than the receipt #{sha}.json beside it, and the receipt is the verdict."
 end
 
 # --- The READ side: every checkout of the repo (DND-457) ---------------------
@@ -1220,6 +1261,49 @@ def run_receipt_self_test
       ok &&= err.match?(/NO output at all/)
       ok &&= !err.include?("FULL REPORT RECORDED AT")
 
+      # (20-21) A NEW RECEIPT RETIRES THE OLD REPORT (DND-907).
+      #
+      # The defect: a FAIL-OPEN wrote <sha>.report.txt; a re-run on the same
+      # sha recorded `verdict: pass` and never touched the report, so the file
+      # the "FULL REPORT" pointer names contradicted the receipt beside it.
+      # Measured on a75a777 (DND-880 captain report, 2026-09-27).
+      #
+      # (20) FAIL-OPEN with a body, then PASS on the same sha: no report
+      # survives, matching every other PASS (M21).
+      named = lambda do |label, cond|
+        warn "critic-review --self-test: FAILED receipt case: #{label}" unless cond
+        cond
+      end
+      ENV["CRITIC_REVIEW_STUB"] = broken_out
+      capture_err { run(["--base", "main"]) }
+      ok = named.call("(20) a fail-open with a body records a report", File.file?(report)) && ok
+      ENV["CRITIC_REVIEW_STUB"] = clean_out
+      rc, _e = capture_err { run(["--base", "main"]) }
+      ok = named.call("(20) the re-run PASSES", rc == 0) && ok
+      ok = named.call("(20) a PASS after a fail-open leaves no stale report", !File.exist?(report)) && ok
+      # (21) BLOCK, then an EMPTY-raw FAIL-OPEN on the same sha: the fail-open
+      # records no report of its own, so the BLOCK's body must not stand in
+      # for it beside a fail-open receipt.
+      ENV["CRITIC_REVIEW_STUB"] = findings_out
+      capture_err { run(["--base", "main"]) }
+      ok = named.call("(21) a BLOCK records a report", File.file?(report)) && ok
+      ENV["CRITIC_REVIEW_STUB"] = empty_out
+      capture_err { run(["--base", "main"]) }
+      ok = named.call("(21) an empty-raw fail-open after a BLOCK leaves no stale report", !File.exist?(report)) && ok
+      # (22) a report that CANNOT be removed is named, never silently kept. A
+      # non-empty directory at the report's path defeats rm_f for any user,
+      # root included, so this reproduces the failure without permissions.
+      # rm_rf first: if (21) regressed, its report is still a FILE here, and
+      # mkdir_p would raise and end the suite instead of naming the failure.
+      FileUtils.rm_rf(report)
+      FileUtils.mkdir_p(File.join(report, "x"))
+      ENV["CRITIC_REVIEW_STUB"] = clean_out
+      rc, err = capture_err { run(["--base", "main"]) }
+      ok = named.call("(22) an unremovable report is named with a Fix:",
+                      err.include?("could not be removed: #{report}") && err.include?("Fix:")) && ok
+      ok = named.call("(22) and the verdict is unchanged: still a PASS, exit 0", rc == 0) && ok
+      FileUtils.rm_rf(report)
+
       ENV["CRITIC_REVIEW_STUB"] = findings_out
 
       # (7) malformed receipt is an ERROR, not a pass.
@@ -1827,6 +1911,9 @@ def run_carry_self_test
     # diff, and ONLY an interaction review of the upstream delta runs.
     mb1 = r1["merge_base"]
     mb2 = sha_of.call("main")
+    # A leftover report for F2 (DND-907) must not survive the receipt below.
+    FileUtils.mkdir_p(verdict_dir)
+    File.write(File.join(verdict_dir, "#{f2}.report.txt"), "stale fail-open body\n")
     rc, out, err = go.call(["--base", "main"], block_out)
     check.call("M2 hit + interaction PASS exits 0 although a full review would BLOCK (exit #{rc}; #{err.lines.first})", rc == 0)
     check.call("M2 stdout starts PASS (CARRIED + INTERACTION)", out.start_with?("critic-review: PASS (CARRIED + INTERACTION)"))
@@ -1843,7 +1930,7 @@ def run_carry_self_test
     check.call("M2 receipt names the matched receipt", r2["carried_receipt"] == File.join(own_store, "#{f1}.json"))
     check.call("M2 no .running marker left", !File.exist?(File.join(verdict_dir, "#{f2}.running")))
     # M21 an interaction PASS, like a full PASS, writes no report file.
-    check.call("M21 an interaction PASS writes no report file", !File.exist?(File.join(verdict_dir, "#{f2}.report.txt")))
+    check.call("M21 an interaction PASS writes no report file, and retires a stale one", !File.exist?(File.join(verdict_dir, "#{f2}.report.txt")))
     # M20 an interaction review IS a judge round (a model looked); only a pure
     # carry is excluded.
     check.call("M20 rounds count the interaction review (#{rounds_recorded.inspect})", rounds_recorded&.first == 2)
@@ -1950,8 +2037,14 @@ def run_carry_self_test
   fixture.call do |f1, _f2, _root|
     git.call("reset", "-q", "--hard", f1)
     git.call("commit", "-q", "--amend", "--no-edit", "--date=2001-01-01T00:00:00")
+    # A leftover report for this head (DND-907) must not survive the carried
+    # receipt: this is the exclusive write's retire, which M21 does not reach.
+    stale = File.join(verdict_dir, "#{head_sha}.report.txt")
+    FileUtils.mkdir_p(verdict_dir)
+    File.write(stale, "stale fail-open body\n")
     rc, out, _err = go.call(["--base", "main"], block_out, block_out)
     check.call("M2d same base: PASS (CARRIED), exit 0", rc == 0 && out.start_with?("critic-review: PASS (CARRIED) —"))
+    check.call("M2d the carried PASS retires a stale report", !File.exist?(stale))
     check.call("M2d no judge call at all (#{kinds.call.inspect})", kinds.call.empty?)
     check.call("M2d receipt has no upstream range", receipt.call(head_sha)["upstream_range"].nil?)
   end
@@ -2166,8 +2259,11 @@ def run_carry_self_test
   fixture.call do |_f1, f2, _root|
     path = File.join(verdict_dir, "#{f2}.json")
     File.write(path, "{\"verdict\":\"block\"}")
+    kept = File.join(verdict_dir, "#{f2}.report.txt")
+    File.write(kept, "the block's body\n")
     wrote, = capture_err { write_verdict(f2, "main", "pass", [], false, exclusive: true) }
     check.call("M27 an exclusive write refuses an existing receipt", wrote == false && File.read(path) == "{\"verdict\":\"block\"}")
+    check.call("M27 and keeps that receipt's report (DND-907)", File.read(kept) == "the block's body\n")
     check.call("M27 and leaves no temp file behind", Dir.glob(File.join(verdict_dir, ".*tmp*")).empty?)
   end
 
