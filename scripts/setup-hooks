@@ -245,7 +245,16 @@ if mode in ("install-env", "remove-env"):
             print(f"error: {path} already holds part of the agent-stash env with other values:", file=sys.stderr)
             for c in conflicts:
                 print(f"  - {c}", file=sys.stderr)
-            print("Fix: run `setup-hooks --remove-env`, then `setup-hooks --install-env` (never overwritten in place).", file=sys.stderr)
+            shared = sorted(k for k in SHARED_KEYS if k in vars_ and k in env and env[k] != vars_[k])
+            if shared:
+                # --remove-env keeps a shared key that is not ours, so the
+                # usual remove-then-install advice would loop (review, DND-1080).
+                print(f"Fix: {', '.join(shared)} holds the owner's own value, which --remove-env deliberately keeps. "
+                      "Remove it from the settings env by hand, then re-run `setup-hooks --install-env`. "
+                      "Claude Code reads one CLAUDE_ENV_FILE, so the guard cannot be activated beside another; "
+                      "keeping yours leaves the guard inactive.", file=sys.stderr)
+            else:
+                print("Fix: run `setup-hooks --remove-env`, then `setup-hooks --install-env` (never overwritten in place).", file=sys.stderr)
             sys.exit(5)
         idx = n
         for k, v in pairs:
@@ -813,14 +822,27 @@ PYF
     fdir="${tmp}/fresh-session"; mkdir -p "$fdir"
     printf 'export PATH=%s\n' "/usr/bin:/bin" > "${fdir}/snapshot.sh"
     fscript=""; [ -n "$ffile" ] && fscript="$(cat "$ffile" 2>/dev/null || true)"
-    fgit="$(env -i HOME="$fdir" ATHENA_AGENT_BIN="$fbin" PATH=/usr/bin:/bin sh -c ". '${fdir}/snapshot.sh' || true
-${fscript}
-:
-command -v git" 2>&1 || true)"
+    # Joined with && as Claude Code joins them: a script ending non-zero
+    # would stop every command. $1 is the session's ATHENA_AGENT_BIN.
+    fresh_git() {
+      env -i HOME="$fdir" ATHENA_AGENT_BIN="$1" PATH=/usr/bin:/bin sh -c ". '${fdir}/snapshot.sh' && {
+${fscript:-:}
+} && command -v git" 2>&1
+    }
+    fgit="$(fresh_git "$fbin" || echo "(chain broke: rc=$?)")"
     if [ -n "$fbin" ] && [ "$fgit" = "${fbin}/git" ]; then
       echo "  ok   a fresh session built from the installed env has the agent git wrapper first on PATH (DND-1080)"
     else
       echo "  FAIL a fresh session built from the installed env must have ${fbin:-<no ATHENA_AGENT_BIN>}/git first on PATH, got [${fgit}] (CLAUDE_ENV_FILE=[${ffile}]) (DND-1080)"; ok=0
+    fi
+    # Inert: no ATHENA_AGENT_BIN (a terminal), or one with no executable git.
+    # The chain must still run the command, with PATH untouched.
+    fi1="$(fresh_git "" || echo "(chain broke: rc=$?)")"
+    fi2="$(fresh_git "${fdir}" || echo "(chain broke: rc=$?)")"
+    if [ -n "$fscript" ] && [ "$fi1" = "$(PATH=/usr/bin:/bin command -v git)" ] && [ "$fi1" = "$fi2" ]; then
+      echo "  ok   inert (no ATHENA_AGENT_BIN, or no wrapper in it): the CLAUDE_ENV_FILE script ends 0 and leaves PATH alone"
+    else
+      echo "  FAIL inert CLAUDE_ENV_FILE script must end 0 and leave PATH alone: got [${fi1}] and [${fi2}]"; ok=0
     fi
     # The stamp this installer writes is the one the checker reads (DND-1036):
     # the shipped AgentStashEnv.installed_at, not a copy of its rule.
@@ -880,12 +902,14 @@ PY4
       && echo "  ok   remove-env keeps a CLAUDE_ENV_FILE that is not ours" \
       || { echo "  FAIL remove-env removed the owner's own CLAUDE_ENV_FILE: $(cat "$envs")"; ok=0; }
     cp "$envs" "${envs}.before"
-    if apply install-env "$envs" 0 >/dev/null 2>&1; then
+    if ferr="$(apply install-env "$envs" 0 2>&1 >/dev/null)"; then
       echo "  FAIL install-env overwrote the owner's own CLAUDE_ENV_FILE"; ok=0
-    elif cmp -s "$envs" "${envs}.before"; then
-      echo "  ok   install-env refuses (never overwrites) the owner's own CLAUDE_ENV_FILE"
-    else
+    elif ! cmp -s "$envs" "${envs}.before"; then
       echo "  FAIL a refused install-env still changed the file"; ok=0
+    elif grep -q "by hand" <<<"$ferr" && ! grep -q "run \`setup-hooks --remove-env\`, then" <<<"$ferr"; then
+      echo "  ok   install-env refuses the owner's own CLAUDE_ENV_FILE, and its Fix: does not loop through --remove-env"
+    else
+      echo "  FAIL the refusal's Fix: must send the owner to remove their CLAUDE_ENV_FILE by hand (--remove-env keeps it): $ferr"; ok=0
     fi
     # An install made before DND-1080 (ATHENA_AGENT_BIN and a stamp, no
     # CLAUDE_ENV_FILE) never put the wrapper on PATH. Adding CLAUDE_ENV_FILE is

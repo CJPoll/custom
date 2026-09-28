@@ -664,6 +664,16 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
              "`#{File.join(main, 'scripts/setup-hooks')} --remove-env && " \
              "#{File.join(main, 'scripts/setup-hooks')} --install-env`, then restarts sessions. " \
              "An agent reports this; live settings are the owner's machine state."
+    shared = AgentStashEnv::SHARED_VARS.select do |k|
+      exp[:vars].key?(k) && env.is_a?(Hash) && env.key?(k) && env[k] != exp[:vars][k]
+    end
+    unless shared.empty?
+      # --remove-env keeps a shared key that is not ours, so the line above
+      # alone would loop (review, DND-1080).
+      err.puts "  Fix: #{shared.join(', ')} holds another value, which --remove-env keeps: the owner removes it " \
+               "from the settings env by hand first. Claude Code reads one CLAUDE_ENV_FILE, so the guard cannot " \
+               "be active beside another."
+    end
     return EXIT_FAIL
   end
 
@@ -837,6 +847,14 @@ def agent_stash_env_self_test(check)
                code == 1 && text.include?("cannot be read") && !text.include?("ACTIVE —"))
     code, text = run.call({ AgentStashEnv::ENV_FILE => "/owner/own-env.sh", "OTHER" => "x" })
     check.call("env: CLAUDE_ENV_FILE alone is not the guard -> INACTIVE", code.zero? && text.include?("INACTIVE"))
+    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\nexport FOO=appended\n")
+    code, text = run.call(full)
+    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
+    check.call("env: CLAUDE_ENV_FILE script running a line besides the PATH line -> FAIL naming it",
+               code == 1 && text.include?("besides the agent PATH line") && text.include?("export FOO=appended"))
+    code, text = run.call(full.merge(AgentStashEnv::ENV_FILE => "/owner/own-env.sh"))
+    check.call("env: the owner's own CLAUDE_ENV_FILE beside the guard -> DRIFT whose Fix: says remove it by hand",
+               code == 1 && text.include?("DRIFT") && text.include?("by hand"))
     code, text = run.call(full.reject { |k, _| k == AgentStashEnv::ENV_FILE })
     check.call("env: an install without CLAUDE_ENV_FILE (the pre-DND-1080 shape) -> DRIFT naming it",
                code == 1 && text.include?("DRIFT") && text.include?("CLAUDE_ENV_FILE is missing"))

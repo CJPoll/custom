@@ -674,15 +674,16 @@ and pronoun-guard; nothing detected it. The durable fix:
   env cannot be read, or a time the pending decision needs cannot be read).
   INACTIVE is a fixed rule on the settings (no `hook.agentstash.*` /
   `hook.reference-transaction.*` GIT_CONFIG key, no `ATHENA_AGENT_BIN` and no
-  `ATHENA_AGENT_ENV_INSTALLED_AT`), never read from a branch's registry.
+  `ATHENA_AGENT_ENV_INSTALLED_AT`), never read from a branch's registry;
+  `CLAUDE_ENV_FILE` alone, like `GIT_TRACE2`, is no trace.
   PENDING RESTART is a session started before the install: Claude Code
-  hot-reloads the settings env, but the session's Bash tool read
-  `CLAUDE_ENV_FILE` once, at its start, so git is not yet the wrapper. It
-  requires everything ACTIVE requires except the PATH, and a snapshot built
-  before the install. The install time is `ATHENA_AGENT_ENV_INSTALLED_AT`,
-  which `--install-env` writes into the settings env when it adds
-  `ATHENA_AGENT_BIN` or `CLAUDE_ENV_FILE`; the snapshot time is in the name of the snapshot an
-  ancestor shell sourced. Both are machine state, and either one unreadable is
+  hot-reloads the settings env, but the session's Bash tool need not pick up
+  `CLAUDE_ENV_FILE` (`ai/lib/agent_stash_env.rb` says why), so git may not
+  yet be the wrapper. It requires everything ACTIVE requires except the
+  PATH, and a snapshot built before the install. The install time is
+  `ATHENA_AGENT_ENV_INSTALLED_AT`, which `--install-env` writes into the
+  settings env when it adds `ATHENA_AGENT_BIN` or `CLAUDE_ENV_FILE`; the
+  snapshot time is in the name of the snapshot an ancestor shell sourced. Both are machine state, and either one unreadable is
   COULD NOT MEASURE. An install made before DND-1036 has no stamp, so its old
   sessions read COULD NOT MEASURE: restart them. Re-stamping such an install
   dates it now and reads every session since as pending, so do it only
@@ -707,7 +708,9 @@ and pronoun-guard; nothing detected it. The durable fix:
   settings env carrying `CLAUDE_ENV_FILE`, a fresh session's first git is the
   wrapper. An install made before this change lacks `CLAUDE_ENV_FILE` and
   reads DRIFT; re-run `--install-env` (it adds the key and re-stamps the
-  install time), then restart sessions.
+  install time), then restart sessions. PENDING RESTART's reason changed with
+  it: it said the old session keeps the shell snapshot built at its start,
+  but the snapshot never carried the wrapper for any session.
 
 ## Inbox tenancy registry (`$ATHENA_INBOX_ROOT/projects/` is not in git)
 
