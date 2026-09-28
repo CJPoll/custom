@@ -47,7 +47,10 @@ def ticket(n, epic, area, rel=None):
         "Blocks": {"relation": [], "has_more": False},
         "Found while": {"relation": [], "has_more": False},
     }
-    return {"id": page(n), "properties": props}
+    # DND-1055: Kind, Security and the page's created_time (ticket-corpus).
+    props["Kind"] = {"select": {"name": "Bug"}}
+    props["Security"] = {"select": {"name": "none"}}
+    return {"id": page(n), "created_time": "2026-09-28T01:00:00.000Z", "properties": props}
 
 
 REPO_APPS = ["gen_saas / Athena", "gen_saas/apps/athena", "~/dev/custom", "walt_ui",

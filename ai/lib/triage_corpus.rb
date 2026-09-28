@@ -109,6 +109,11 @@ module TriageCorpus
       "status" => row.dig("properties", "Status", "status", "name"),
       "area" => row.dig("properties", "Area", "select", "name"),
       "severity" => row.dig("properties", "Severity", "select", "name"),
+      # ai/bin/ticket-corpus (DND-1055): the creation instant decides whether
+      # a property was set by its filer (W2 rules) or by the W4 backfill.
+      "created_time" => row["created_time"],
+      "kind" => row.dig("properties", "Kind", "select", "name"),
+      "security" => row.dig("properties", "Security", "select", "name"),
       "epic_ids" => relation_ids(row, "Epic"),
       "depends_on" => relation_ids(row, "Depends On"),
       "blocks" => relation_ids(row, "Blocks"),

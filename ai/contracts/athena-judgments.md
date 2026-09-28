@@ -398,8 +398,13 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
 - **Proposed labels** (confirmed by no owner, record or rule) never enter a
   run, so they never select a threshold. A label whose id the corpus lacks is
   reported by count and id. A run's provenances are `forward_record`,
-  `owner_confirmed`, `tracker_record` and `rule_confirmed`; each names what
-  confirmed it, and only `owner_confirmed` means the owner did.
+  `owner_confirmed`, `tracker_record`, `rule_confirmed` and `title_prefix`;
+  each names what confirmed it, and only `owner_confirmed` means the owner
+  did.
+
+  **Later (2026-09-28, DND-1055):** the list above ended at `rule_confirmed`.
+  Ticket classification adds `title_prefix` (*Ticket classification labels*
+  below); the rule that `proposed` never enters is unchanged.
 
   **Later (2026-09-28):** this read "Proposed labels (not yet confirmed by the
   owner)", which read as if only the owner's confirmation lets a label into a
@@ -440,6 +445,32 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   confirms (different Areas, no link, no citation). `rule_confirmed` is never
   `owner_confirmed`. Every other sampled pair stays `proposed`. Severity labels
   are weak (an agent assigned them) and are not evaluated.
+- **Ticket classification labels** (DND-1055, `ai/bin/ticket-corpus`) come
+  from the same tracker snapshot (`triage-corpus --fetch`, the one read-only
+  tracker reader), one case per ticket per use case, in the machine-local
+  `ticket-{kind,severity,security}-{labels,corpus}.jsonl`. Labels use the
+  tracker's spelling (`Bug`, `MEDIUM`; Security reads `security` for
+  `introduced` or `pre-existing`, else `none`). Every row is weak (an agent
+  filer set it, `"weak": true`) and never `owner_confirmed`:
+  - `tracker_record`: the property, on a ticket created at or after
+    2026-09-27T22:00Z (filed under the W2 rules). Earlier values are the W4
+    backfill and are excluded as `before_cutoff`.
+  - `title_prefix`: Severity from a title that starts `CRITICAL`, `HIGH`,
+    `MEDIUM` or `LOW`, at any date; a post-cutoff property wins.
+  - Excluded and counted by reason: `feature` (Kind and Severity; Feature is
+    authored), `property_unset`, `unknown_value`, `unknown_project` (never
+    guessed), `body_unread`, `blank_title`, `jev_decided` (a property whose
+    provenance line says Jev set it is never its own label), and
+    `provenance_unparseable`.
+  - The input sent is the title without its severity prefix, and the body
+    without the `Jev classification:` line or any classification statement
+    ("Kind Bug", "Severity: HIGH", "Bug MEDIUM"), so a case is judged on
+    content, not on a label leak.
+
+  `ticket-corpus --shadow-report --since` measures the shadow bar from ticket
+  bodies alone: each ticket's LAST provenance line, every ACCEPTED judgment
+  compared with the value the ticket ended up with, and the Wilson 95% lower
+  bound (n/a with nothing accepted, never 0).
 - **n/a reads "insufficient evidence"** in `judgment-eval`'s run and apply
   lines: the label stays disabled.
 - **One case, one label.** A question set's eval reading names exactly one

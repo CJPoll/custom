@@ -81,6 +81,12 @@ ruby_eq "labels: an unknown provenance is refused" \
 ruby_eq "labels: tracker_record and rule_confirmed are provenances [DND-714]" \
   "tracker_record rule_confirmed" \
   'JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"tracker_record"}\n{"id":"b","label":"y","provenance":"rule_confirmed"}\n), "L").map { |l| l[:provenance] }.join(" ")'
+ruby_eq "labels: title_prefix is a provenance and enters the run [DND-1055]" \
+  "title_prefix 1 0" \
+  'l = JudgmentEval.parse_labels(%({"id":"DND-1","label":"HIGH","provenance":"title_prefix"}\n), "L"); c = JudgmentEval.parse_corpus(%({"id":"DND-1"}\n), "C", "ticket_severity"); j = JudgmentEval.join(l, c); [l.first[:provenance], j[:cases].size, j[:proposed]].join(" ")'
+ruby_eq "use cases: ticket_kind, ticket_severity and ticket_security are evaluable, joined on id [DND-1055]" \
+  "true id id id" \
+  '[%w[ticket_kind ticket_severity ticket_security].all? { |u| JudgmentEval::USE_CASES.include?(u) }, *%w[ticket_kind ticket_severity ticket_security].map { |u| JudgmentEval::ID_KEYS[u] }].join(" ")'
 ruby_eq "join: only proposed is excluded; tracker_record and rule_confirmed enter the run [DND-714]" \
   "2 1" \
   'l = JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"tracker_record"}\n{"id":"b","label":"x","provenance":"rule_confirmed"}\n{"id":"c","label":"x","provenance":"proposed"}\n), "L"); c = JudgmentEval.parse_corpus(%({"id":"a"}\n{"id":"b"}\n{"id":"c"}\n), "C", "finding_triage"); j = JudgmentEval.join(l, c); [j[:cases].size, j[:proposed]].join(" ")'
@@ -157,6 +163,7 @@ run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/co
 eq "an unknown flag is usage (2)" "${RC}" "2"
 run --use-case general --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend
 eq "an unknown use case is usage (2)" "${RC}" "2"
+has "the unknown-use-case Fix: names the ticket use cases [DND-1055]" "${ERR}" "ticket_kind, ticket_severity, ticket_security"
 
 n="$(requests)"
 run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/absent.jsonl" --content-domain blend

@@ -1,0 +1,215 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# ticket-corpus -- build the ticket classification eval corpus from the DND
+# tracker, and report the shadow agreement (DND-1055).
+#
+# Design: DND-1055 A&E sections 1-2; contract
+# ~/dev/custom/ai/contracts/athena-judgments.md -> *Threshold provenance, n/a
+# and the pinned model* (*Ticket classification labels*).
+#
+# Buckets: the pure DOMAIN is ai/lib/ticket_corpus.rb; below are the EFFECTS
+# (files only), the MANAGER (build; shadow report) and the FRAMEWORK (argv).
+#
+# This tool makes NO network call. It reads the snapshot that
+# `ai/bin/triage-corpus --fetch` writes (that tool's read-only Notion effect is
+# the one tracker reader; DND-1055 added created_time, Kind and Security to
+# it). Ticket text is untrusted data, written only to machine-local 0600
+# files, never committed; the labels files hold ids.
+#
+# Deliberately gem-free (stdlib only).
+
+require "fileutils"
+require "json"
+require "time"
+require_relative "../lib/ticket_corpus"
+require_relative "../lib/strict_argv"
+
+PROG = "ticket-corpus"
+
+USAGE = <<~EOF
+  Usage: ticket-corpus --build [--dry-run] [--dir DIR]
+         ticket-corpus --shadow-report --since UTC [--dir DIR]
+         ticket-corpus --help
+
+  First refresh the tracker snapshot (read-only Notion, paced):
+    triage-corpus --fetch [--dir DIR]
+  It writes DIR/finding-triage-snapshot.json; this tool only reads it.
+
+  --build    Write, per use case U in kind, severity, security:
+               DIR/ticket-U-labels.jsonl   ids and labels only
+               DIR/ticket-U-corpus.jsonl   the inputs the eval sends
+             and print the counts by label/provenance and the exclusions by
+             reason. One case is one ticket. Labels are in the tracker's
+             spelling (Bug, MEDIUM; Security reads security | none) and are
+             WEAK: an agent filer set them. Provenance:
+               tracker_record  the property, on a ticket created at or after
+                               #{TicketCorpus::CUTOFF} (filed under the W2 rules)
+               title_prefix    Severity from a title starting CRITICAL, HIGH,
+                               MEDIUM or LOW (any date; a post-cutoff property wins)
+             Excluded, counted by reason: before_cutoff (the W4 backfill),
+             feature (Kind and Severity; Feature is authored), property_unset,
+             unknown_value, unknown_project (never guessed), body_unread,
+             blank_title, jev_decided (a property Jev set: never its own
+             label), provenance_unparseable. The title sent drops its
+             severity prefix; the body sent drops classification statements
+             ("Kind Bug", "Severity: HIGH", "Bug MEDIUM") and the
+             Jev classification line; at most #{TicketCorpus::MAX_BODY} characters.
+  --dry-run  with --build: print the counts, write nothing
+  --shadow-report --since UTC
+             Over tickets created at or after UTC (e.g. 2026-09-29T00:00:00Z),
+             read each body's LAST "Jev classification:" line and compare
+             every ACCEPTED judgment with the ticket's CURRENT value. Prints
+             filings, lines, no_provenance / unparseable / unread by ref,
+             per use case accepted, agreed and the Wilson 95% lower bound (n/a
+             when nothing was accepted, never 0), per judged label, and the
+             bar: at least #{TicketCorpus::MIN_WINDOW_DAYS} days, #{TicketCorpus::MIN_ACCEPTED} accepted and lb >= #{TicketCorpus::MIN_LB}
+             (a use case short of it at #{TicketCorpus::MAX_WINDOW_DAYS} days stays shadow).
+  --dir DIR  default ${XDG_DATA_HOME:-~/.local/share}/athena/evals
+             (machine-local, 0600 files, never committed)
+
+  Then: judgment-eval --use-case ticket_kind --labels DIR/ticket-kind-labels.jsonl
+          --corpus DIR/ticket-kind-corpus.jsonl   (and severity, security)
+
+  Exit codes:
+    0  done
+    1  the snapshot is missing, empty, malformed or predates DND-1055
+    2  usage
+
+  Every failure prints one stderr line carrying Fix:.
+EOF
+
+class Failure < StandardError
+  attr_reader :code
+
+  def initialize(code, message)
+    super(message)
+    @code = code
+  end
+end
+
+def fail!(code, what, fix)
+  raise Failure.new(code, "#{PROG}: #{what}. Fix: #{fix}")
+end
+
+# ── EFFECTS ──────────────────────────────────────────────────────────────────
+
+module Effects
+  module_function
+
+  def default_dir
+    base = ENV["XDG_DATA_HOME"].to_s
+    base = File.join(Dir.home, ".local", "share") if base.empty?
+    fail!(1, "XDG_DATA_HOME is not absolute", "set it to an absolute path or unset it") unless base.start_with?("/")
+    File.join(base, "athena", "evals")
+  end
+
+  def read_snapshot(dir)
+    path = File.join(dir, "finding-triage-snapshot.json")
+    fail!(1, "snapshot #{path} does not exist", "run triage-corpus --fetch --dir #{dir} first") unless File.exist?(path)
+    fail!(1, "snapshot #{path} is not a readable file", "check its permissions") unless File.file?(path) && File.readable?(path)
+    doc = begin
+      JSON.parse(File.read(path, encoding: "UTF-8"))
+    rescue JSON::ParserError
+      fail!(1, "snapshot #{path} is not JSON", "run triage-corpus --fetch again")
+    end
+    fail!(1, "snapshot #{path} is not a JSON object", "run triage-corpus --fetch again") unless doc.is_a?(Hash)
+    doc
+  end
+
+  def write_private(path, text)
+    FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+    File.write("#{path}.tmp", text, perm: 0o600)
+    File.chmod(0o600, "#{path}.tmp")
+    File.rename("#{path}.tmp", path)
+  rescue SystemCallError => e
+    fail!(1, "could not write #{path}: #{e.class}", "check that directory is writable")
+  end
+end
+
+# ── MANAGER ──────────────────────────────────────────────────────────────────
+
+module Manager
+  module_function
+
+  def build(opts, out)
+    snapshot = Effects.read_snapshot(opts[:dir])
+    result = TicketCorpus.labels(snapshot)
+    out.puts "#{PROG}: snapshot #{snapshot['fetched_at']}, #{Array(snapshot['tickets']).size} tickets, cutoff #{TicketCorpus::CUTOFF}"
+    TicketCorpus::USE_CASES.each do |uc|
+      rows = result[:labels][uc]
+      out.puts "#{uc}: #{rows.size} labels (#{fmt(TicketCorpus.counts(rows))}); excluded: #{fmt(result[:exclusions][uc])}"
+    end
+    out.puts "every label is weak (an agent filer set it): provenance tracker_record or title_prefix, never owner_confirmed"
+    return 0 if opts[:dry_run]
+
+    TicketCorpus::USE_CASES.each do |uc|
+      stem = TicketCorpus::STEMS.fetch(uc)
+      { "labels" => result[:labels][uc], "corpus" => result[:corpus][uc] }.each do |kind, rows|
+        path = File.join(opts[:dir], "#{stem}-#{kind}.jsonl")
+        Effects.write_private(path, rows.map { |r| JSON.generate(r) }.join("\n") + (rows.empty? ? "" : "\n"))
+        out.puts "wrote #{path} (#{rows.size} rows)"
+      end
+    end
+    0
+  rescue TicketCorpus::InputError => e
+    fail!(1, e.message, e.fix)
+  rescue KeyError => e
+    fail!(1, "the snapshot lacks #{e.key}", "run triage-corpus --fetch again")
+  end
+
+  def shadow(opts, out)
+    snapshot = Effects.read_snapshot(opts[:dir])
+    TicketCorpus.shadow_lines(TicketCorpus.shadow_report(snapshot, opts[:since])).each { |l| out.puts l }
+    0
+  rescue TicketCorpus::InputError => e
+    fail!(1, e.message, e.fix)
+  rescue KeyError => e
+    fail!(1, "the snapshot lacks #{e.key}", "run triage-corpus --fetch again")
+  end
+
+  def fmt(hash) = hash.empty? ? "none" : hash.map { |k, v| "#{k} #{v}" }.join(", ")
+end
+
+# ── FRAMEWORK ────────────────────────────────────────────────────────────────
+
+SPEC = {
+  "--help" => :switch, "-h" => :switch, "--build" => :switch, "--shadow-report" => :switch,
+  "--dry-run" => :switch, "--since" => :value, "--dir" => :value
+}.freeze
+UTC = /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z\z/
+
+def parse_options(argv)
+  raw = StrictArgv.parse(argv, SPEC)
+  modes = %w[--build --shadow-report].select { |m| raw[m] }
+  fail!(2, "pass exactly one of --build or --shadow-report", "run #{PROG} --help") unless modes.size == 1
+  mode = modes.first
+  if mode == "--build"
+    fail!(2, "--since belongs to --shadow-report", "run #{PROG} --help") if raw.key?("--since")
+  else
+    fail!(2, "--dry-run belongs to --build", "run #{PROG} --help") if raw.key?("--dry-run")
+    fail!(2, "--shadow-report needs --since UTC", "pass the shadow start, e.g. --since 2026-09-29T00:00:00Z") unless raw["--since"]
+    fail!(2, "--since must be a UTC timestamp like 2026-09-29T00:00:00Z", "pass the shadow start recorded on the epic") unless UTC.match?(raw["--since"])
+  end
+  dir = raw["--dir"] || Effects.default_dir
+  fail!(2, "--dir must be an absolute path", "pass an absolute directory") unless dir.start_with?("/")
+  { mode: mode, dir: dir, since: raw["--since"], dry_run: raw["--dry-run"] || false }
+rescue StrictArgv::UsageError => e
+  fail!(2, e.message, "run #{PROG} --help for the flags")
+end
+
+def main(argv)
+  # --help anywhere wins, before anything else runs (check-bin-help).
+  if argv.include?("--help") || argv.include?("-h")
+    $stdout.puts USAGE
+    return 0
+  end
+
+  opts = parse_options(argv)
+  opts[:mode] == "--build" ? Manager.build(opts, $stdout) : Manager.shadow(opts, $stdout)
+rescue Failure => e
+  $stderr.puts e.message
+  e.code
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

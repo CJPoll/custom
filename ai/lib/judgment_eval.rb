@@ -17,8 +17,8 @@
 require "json"
 
 module JudgmentEval
-  USE_CASES = %w[finding_triage slack_routing priority_scoring].freeze
-  PROVENANCES = %w[forward_record owner_confirmed tracker_record rule_confirmed proposed].freeze
+  USE_CASES = %w[finding_triage slack_routing priority_scoring ticket_kind ticket_severity ticket_security].freeze
+  PROVENANCES = %w[forward_record owner_confirmed tracker_record rule_confirmed title_prefix proposed].freeze
   DOMAINS = %w[work blend personal].freeze
   MAX_BATCH = 50
   # The corpus key a label's id joins on. Slack routing joins the inbox's own
