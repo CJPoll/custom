@@ -293,16 +293,18 @@ wired the check described in *The gate check*.
 runs tree mode over the checkout under test. Verdict rules:
 `ai/lib/outbound_tree_check.rb`; the mark probe: `ai/lib/outbound_mark.rb`;
 tests: `ai/test/check-outbound-tree/self-test.sh`. It reads the same mark as
-the forge path below: the outbound pre-push hook in the checkout's common git
-dir, as `git rev-parse --git-path hooks/pre-push` resolves it. A mark that
-cannot be determined counts as marked.
+the forge path below: the outbound pre-push hook at the path
+`git rev-parse --git-path hooks/pre-push` resolves (the common git dir's
+`hooks/`, or `core.hooksPath` when set). A mark that cannot be determined
+counts as marked, and so does a directory at that path (the forge path reads
+it as unmarked). Every ABSENT verdict prints the hook path it probed.
 
 | Overlay | Marked (or undeterminable) | Unmarked |
 |---|---|---|
-| ABSENT | FAIL, `COULD NOT MEASURE` | pass, `NOT MEASURED (no overlay on this unmarked machine; …)` |
-| MALFORMED, zero patterns, no committed floor, unreadable tree | FAIL, `COULD NOT MEASURE` | FAIL, `COULD NOT MEASURE` |
-| HITS | FAIL: `file:line label=<label>`, never the text, with `Fix:` | the same |
-| CLEAN | pass, `CLEAN` + the `SCANNED` line | the same |
+| ABSENT | FAIL (exit 3), `COULD NOT MEASURE` | pass (exit 0), `NOT MEASURED (no overlay on this unmarked machine; …)` |
+| MALFORMED, zero patterns, no committed floor, unreadable tree | FAIL (exit 3), `COULD NOT MEASURE` | the same |
+| HITS | FAIL (exit 1): a location and `label=<label>` per hit (a matching path is redacted), never the text, with `Fix:` | the same |
+| CLEAN | pass (exit 0), `CLEAN` + the `SCANNED` line | the same |
 
 `NOT MEASURED` is textually distinct from `CLEAN`: it prints no `CLEAN`, no
 `OK` and no `SCANNED` line. The check calls the scan's libraries, not the CLI,
@@ -313,8 +315,8 @@ bar is the overlay's pattern list, outside the diff (`~/dev/custom/CLAUDE.md`
 Residual, stated: removing the hook mark from a machine with no overlay turns
 the check into `NOT MEASURED`, a pass. The mark is outside the diff too (it is
 in the common git dir, not a tracked file), so a branch cannot remove it; an
-agent or human acting on the machine can. A gate on a machine that never held
-the overlay (the laptop today, a fresh clone) measures nothing.
+agent or human acting on the machine can. A gate on a machine without the
+overlay and without the mark (the laptop today) measures nothing.
 
 **The pre-push hook.** `ai/git-hooks/outbound-pre-push.sh`. Once installed at
 the main checkout's `.git/hooks/pre-push`, it serves every linked worktree and

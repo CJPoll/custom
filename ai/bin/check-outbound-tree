@@ -27,6 +27,7 @@
 
 require_relative "../lib/outbound_tree_check"
 require_relative "../lib/outbound_mark"
+require_relative "../lib/private_overlay_resolver"
 require_relative "../lib/outbound_scan_sources"
 
 HELP = <<~HELP
@@ -42,15 +43,18 @@ HELP = <<~HELP
     0 "check-outbound-tree: CLEAN: ..."         scanned; zero hits (a SCANNED counts line follows)
     0 "check-outbound-tree: NOT MEASURED (...)" the overlay is ABSENT and this machine is not marked
                                                 (no outbound pre-push hook); nothing was scanned
-    1 "check-outbound-tree: FAIL: HITS: ..."    each hit as file:line + label, never the matched text
-    1 "check-outbound-tree: FAIL: COULD NOT MEASURE: ..."
+    1 "check-outbound-tree: FAIL: HITS: ..."    each hit as a location + label, never the matched text
+                                                (a path that itself matches is redacted)
+    3 "check-outbound-tree: FAIL: COULD NOT MEASURE: ..."
                                                 a marked (or undeterminable) machine with no overlay,
                                                 a malformed overlay, zero patterns, no committed floor,
                                                 or a tree that could not be read
     2 usage error
 
+  The mark: the outbound pre-push hook at `git rev-parse --git-path hooks/pre-push`
+  (core.hooksPath honoured). Every absent-overlay verdict prints the path probed.
   ATHENA_OUTBOUND_WAIVE is not honoured: the waiver is for a push, not the gate.
-  Contract: ai/contracts/athena-private-overlay.md -> Outbound-scan interface
+  Contract: ai/contracts/athena-private-overlay.md -> The gate check
 HELP
 
 def scan_result
@@ -70,13 +74,13 @@ rescue StandardError => e
 end
 
 def run
-  mark, = OutboundMark.probe(Dir.pwd)
+  mark, hook = OutboundMark.probe(Dir.pwd)
   overlay = PrivateOverlay::Resolver.root
   detail = overlay.state == :absent ? overlay.root : overlay.reason
   scan = overlay.state == :found ? scan_result : nil
-  verdict = OutboundTreeCheck.decide(mark: mark, overlay: overlay.state, detail: detail, scan: scan)
+  verdict = OutboundTreeCheck.decide(mark: mark, hook: hook, overlay: overlay.state, detail: detail, scan: scan)
   puts verdict.lines
-  exit(verdict.ok ? 0 : 1)
+  exit OutboundTreeCheck::EXIT.fetch(verdict.state)
 end
 
 if ARGV.include?("--help") || ARGV.include?("-h")

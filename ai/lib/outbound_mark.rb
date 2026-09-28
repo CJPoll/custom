@@ -7,7 +7,13 @@
 # The mark is the outbound pre-push hook in the repository's common git dir,
 # as `git rev-parse --git-path hooks/pre-push` resolves it (so core.hooksPath
 # is honoured, and a linked worktree or lane resolves to its main checkout's
-# hooks). The same rule as gos_machine_marked in ai/lib/gh-outbound-scan.sh.
+# hooks). The same rule as gos_machine_marked in ai/lib/gh-outbound-scan.sh,
+# stricter in one state: a directory (or other non-file) at the hook path is
+# :unknown here (so it counts as marked), where the shell reads it as
+# unmarked. A symlinked hook is resolved by git itself: the path returned is
+# the target, so a dangling one reads :unmarked, as git never runs it. This probes the repository it is given (the gate's checkout under
+# test); the shell probes the checkout holding gh-athena. Inside the gate they
+# are the same repository.
 #
 # Three outcomes, never two:
 #   :marked    the hook file exists and names the outbound scanner

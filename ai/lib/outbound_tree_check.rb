@@ -2,7 +2,7 @@
 
 # ai/lib/outbound_tree_check.rb -- the PURE verdict of the harness-gate tree
 # scan (DND-699 part 2). Contract: ai/contracts/athena-private-overlay.md ->
-# Outbound-scan interface -> the `--tree` surface.
+# Outbound-scan interface -> The gate check.
 #
 # Domain only: given what the side effects found (the machine mark, the
 # overlay state, and the tree scan's outcome), decide pass or fail and the
@@ -18,6 +18,9 @@
 #
 # Inputs:
 #   mark     :marked | :unmarked | :unknown   (the outbound pre-push hook)
+#   hook     the hook path the mark probe read, or the reason it could not.
+#            Printed in every absent-overlay verdict, so a wrongly resolved
+#            hook path is visible instead of reading as "unmarked".
 #   overlay  :found | :absent | :malformed    (PrivateOverlay::Resolver.root)
 #   detail   the probed path (absent) or the reason (malformed)
 #   scan     nil when the overlay was not found; else a Hash:
@@ -36,6 +39,11 @@ module OutboundTreeCheck
 
   Verdict = Struct.new(:ok, :state, :lines, keyword_init: true)
 
+  # 0 CLEAN or NOT MEASURED, 1 HITS, 3 COULD NOT MEASURE (the outbound-scan
+  # convention), so a caller tells a hit from a failure to look without
+  # parsing text.
+  EXIT = { clean: 0, not_measured: 0, hits: 1, unmeasured: 3 }.freeze
+
   MARK_WHY = {
     marked: "this machine is marked as one that holds the overlay (the outbound pre-push hook is installed)",
     unknown: "whether this machine is marked could not be determined, so it counts as marked",
@@ -43,38 +51,47 @@ module OutboundTreeCheck
 
   MARKED_ABSENT_FIX =
     "Fix: this machine must measure. Create the overlay (the owner runs `scripts/setup-private-overlay --init`, " \
-    "then fills outbound/patterns.tsv and commits it), or, if this machine should not hold it, the owner removes " \
-    "the outbound pre-push hook (`scripts/setup-private-overlay --remove`). Contract: " \
-    "ai/contracts/athena-private-overlay.md -> Outbound-scan interface."
+    "then fills outbound/patterns.tsv and commits it). If this machine should not hold it, the owner removes the " \
+    "outbound pre-push hook named above by hand; `scripts/setup-private-overlay --remove` also removes it, but it " \
+    "uninstalls the work plugin and its marketplace too. Contract: ai/contracts/athena-private-overlay.md -> " \
+    "The gate check."
 
   MALFORMED_FIX =
     "Fix: correct the overlay problem named above (`ai/bin/private-overlay status` shows it). A malformed " \
     "overlay fails on every machine, marked or not: an overlay that is there but broken is never read as absent."
 
+  DEFECT_FIX = "Fix: report this as a defect in ai/bin/check-outbound-tree."
+
   module_function
 
-  def decide(mark:, overlay:, detail:, scan:)
+  def decide(mark:, hook:, overlay:, detail:, scan:)
     case overlay
-    when :absent then absent(mark, detail)
+    when :absent then absent(mark, hook, detail)
     when :malformed then malformed(detail)
     when :found then scanned(scan)
-    else fail_verdict(:unmeasured, ["#{PROG}: FAIL: COULD NOT MEASURE: unknown overlay state #{overlay.inspect}.",
-                                    "Fix: report this as a defect in ai/bin/check-outbound-tree."])
+    else fail_verdict(:unmeasured, [headline("FAIL: COULD NOT MEASURE: unknown overlay state #{overlay.inspect}."),
+                                    DEFECT_FIX])
     end
   end
 
-  def absent(mark, probed)
+  def headline(text)
+    "#{PROG}: #{text}"
+  end
+
+  def absent(mark, hook, probed)
     if mark == :unmarked
       return Verdict.new(ok: true, state: :not_measured, lines: [
-        "#{PROG}: NOT MEASURED (no overlay on this unmarked machine; probed #{probed})",
+        headline("NOT MEASURED (no overlay on this unmarked machine; probed #{probed})"),
         "Nothing was scanned. This is not a clean result: this machine holds no pattern list and has no " \
         "outbound pre-push hook, so there is no bar to measure against here.",
+        "hook probed: #{hook} (no outbound pre-push hook there)",
       ])
     end
 
     why = MARK_WHY.fetch(mark, MARK_WHY[:unknown])
     fail_verdict(:unmeasured, [
-      "#{PROG}: FAIL: COULD NOT MEASURE: the private overlay is ABSENT (probed #{probed}), and #{why}.",
+      headline("FAIL: COULD NOT MEASURE: the private overlay is ABSENT (probed #{probed}), and #{why}."),
+      "hook probed: #{hook}",
       "NOT SCANNED: no result, clean or otherwise.",
       MARKED_ABSENT_FIX,
     ])
@@ -82,7 +99,7 @@ module OutboundTreeCheck
 
   def malformed(reason)
     fail_verdict(:unmeasured, [
-      "#{PROG}: FAIL: COULD NOT MEASURE: the private overlay is MALFORMED: #{reason}.",
+      headline("FAIL: COULD NOT MEASURE: the private overlay is MALFORMED: #{reason}."),
       "NOT SCANNED: no result, clean or otherwise.",
       MALFORMED_FIX,
     ])
@@ -92,27 +109,27 @@ module OutboundTreeCheck
     case scan && scan[:state]
     when :clean
       Verdict.new(ok: true, state: :clean, lines: [
-        "#{PROG}: CLEAN: no tracked file carries a work-domain pattern",
+        headline("CLEAN: no tracked file carries a work-domain pattern"),
         OutboundScan.counts_line(scan[:counts]),
       ])
     when :hits then hits(scan)
     when :unmeasured
       fail_verdict(:unmeasured, [
-        "#{PROG}: FAIL: COULD NOT MEASURE: #{scan[:reason]}.",
+        headline("FAIL: COULD NOT MEASURE: #{scan[:reason]}."),
         "NOT SCANNED: no result, clean or otherwise.",
         OutboundScan.unmeasured_fix(scan[:reason].to_s),
       ])
     else
-      fail_verdict(:unmeasured, ["#{PROG}: FAIL: COULD NOT MEASURE: the overlay was found but no scan result was recorded.",
-                                 "Fix: report this as a defect in ai/bin/check-outbound-tree."])
+      fail_verdict(:unmeasured, [headline("FAIL: COULD NOT MEASURE: the overlay was found but no scan result was recorded."),
+                                 DEFECT_FIX])
     end
   end
 
   def hits(scan)
     list = scan[:hits] || []
     fail_verdict(:hits, [
-      "#{PROG}: FAIL: HITS: #{list.length} match(es) of work-domain patterns in tracked files. " \
-      "The matched text is never printed.",
+      headline("FAIL: HITS: #{list.length} match(es) of work-domain patterns in tracked files. " \
+               "The matched text is never printed."),
       *list.map { |h| "  #{h}" },
       OutboundScan.counts_line(scan[:counts]),
       OutboundScan::HIT_FIX,
