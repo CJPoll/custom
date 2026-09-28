@@ -128,6 +128,9 @@ eq "unexpired force_run beats metering" "$(dec "${OV_RUN}" "${THU_10}")" "run|ov
 # Athena.FleetMeteringTest, describe "DND-877") and the answer the server
 # gives at 10:00 MT Thursday with both metering switches on. Parity table:
 # a harness change that meters from effective_domain alone fails row 1.
+# Distinct server cases share a snapshot on purpose (no run and lost-only;
+# scoped and drained): the server folds the run facts into the snapshot, and
+# these rows pin that the harness needs nothing more.
 NO_RUN_SNAP='{"override":null,"effective_domain":"personal","metering":{"enabled":false}}'
 BLEND_RUN_SNAP="$(jq -c '.effective_domain = "blend"' <<<"${METER_SNAP}")"
 NO_RUN_PAUSED="$(jq -c '.override = {"desired":"drain","expires_at":null}' <<<"${NO_RUN_SNAP}")"
@@ -137,7 +140,7 @@ done <<'ROWS'
 no run, personal, work hours: run, so its first admiral spawns|NO_RUN_SNAP|run|default|
 its run reported a personal scope: drain until 18:00 MT|METER_SNAP|drain|metering:personal|2026-09-25T00:00:00Z
 its only run is lost or finished (no live run): run|NO_RUN_SNAP|run|default|
-a drained personal run stays live: drain|METER_SNAP|drain|metering:personal|2026-09-25T00:00:00Z
+a drained personal run, the session's newest, stays live: drain|METER_SNAP|drain|metering:personal|2026-09-25T00:00:00Z
 a blend-scoped run: never metered|BLEND_RUN_SNAP|run|default|
 metering switch off: unchanged|P1_SNAP|run|default|
 no run, owner pause: the override still drains|NO_RUN_PAUSED|drain|override:force_drain|

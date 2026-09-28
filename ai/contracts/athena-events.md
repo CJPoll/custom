@@ -4121,10 +4121,12 @@ at every agent depth). The kinds and the other fields each may carry:
   A **live run** (DND-877) has not ended (not `finished`) and either is
   `running`, `draining` or not yet started (an admiral seen before
   `admiral_started`) with its own liveness (*Fleet liveness*) not `lost`, or
-  is `drained`. A `drained` run waits for its resume: the page reads it
-  `drained`, never `lost` (*Fleet liveness*, step 1), so its silence does not
-  age it out, and it keeps its scope's domain. A `parked` run is not live.
-  (`Athena.Fleet.DomainClassifier.live_run?/1`.)
+  is `drained` and no run of the session started after it. A `drained` run
+  waits for its resume: the page reads it `drained`, never `lost` (*Fleet
+  liveness*, step 1), so its silence does not age it out, and it keeps its
+  scope's domain. A resumed run keeps its `started_at`, so only a fresh
+  admiral (a new run) retires a drain nobody resumed. A `parked` run is not
+  live. (`Athena.Fleet.DomainClassifier.live_runs/1`.)
 
   **Later (2026-09-28):** DND-877 and DND-578: a live run was any run not
   ended in `running`, `draining` or not yet started, whatever its own
@@ -4687,8 +4689,9 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   the moment that run reports its scope, metering applies: a personal run in
   work hours drains, and parks at its first checkpoint before any captain
   (OQ-2: a metering pause parks at once). The cost is one admiral start-up
-  turn. A `drained` run stays live, so the drained session stays drained
-  until the work-hours span ends rather than resuming into the same drain.
+  turn. A `drained` run stays live while it is the session's newest run, so
+  the drained session stays drained until the work-hours span ends rather
+  than resuming into the same drain.
   The harness's local rule does not mirror this exemption either: with no
   answer and no cache it cannot know the session's runs (*Unknown control
   state*).
