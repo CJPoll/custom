@@ -961,7 +961,7 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `state` — `opened`, `merged` or `closed` | string | scalar |
 | | `revision` — the merge request's `updated_at`, ISO 8601 UTC: the family's ordering revision | string | scalar |
 
-The event also carries `actor.is_owner`: whether the clicking user is the
+`slack.interaction.received` also carries `actor.is_owner`: whether the clicking user is the
 app's configured owner Slack user. It is a boolean, which the declared field
 types cannot type, so it is **not addressable**: a predicate or template slot
 on it is the ordinary unknown-path save-time error. It is still delivered on
@@ -1450,8 +1450,10 @@ source.
 3. **Change/revision token** — `payload.revision`, the merge request's
    `updated_at`, normalized to ISO 8601 UTC. It orders the family's events
    against an item (*Priority index* → *States*). The `idempotency_key` is
-   `gitlab:<hook_id>:<X-Gitlab-Event-UUID>:<kind>` when GitLab sends a UUID,
-   else `<entity_id>:<kind>:<revision>`. The ingress routes each key once, so a
+   `gitlab:<hook_id>:<delivery id>:<kind>`, where the delivery id is GitLab's
+   `Idempotency-Key` (stable across GitLab's own retries of one trigger), else
+   its `X-Gitlab-Event-UUID`, each only when it is a UUID; with neither it is
+   `<entity_id>:<kind>:<revision>`. The ingress routes each key once, so a
    redelivery converges on the first event.
 4. **Origination membership** — **verified-ingress-only**: the GitLab webhook
    ingress, and only after the request's `X-Gitlab-Token` matched the hook's
@@ -1477,9 +1479,11 @@ reads as a new review:
   `malformed`, `unhandled-state`), and no event.
 
 `owner` is the hook's owner and `source` is `webhook:gitlab`. Every refusal and
-skip is counted per (hook, cause), with no body, header or token. A cause
-recorded before verification is written at most once per window, because
-anyone can send one.
+skip that has a hook is counted per (hook, cause), with no body, header or
+token. A cause recorded before verification is written at most once per
+window, because anyone can send one. A request with no hook to count against
+(an unknown hook id, 404, or a body over the bound, 413, refused before the
+lookup) is logged, throttled, and recorded against no owner.
 
 ### Idempotency is per (event, rule)
 
@@ -1648,11 +1652,27 @@ credential can serve many accounts. Owner is resolved per ingress kind:
   custody there. A `team_id`/`enterprise_id` that resolves to **no** install
   record is an **owner-unresolvable reject** (per *The event*), never defaulted.
 - **GitLab webhook** — the URL's hook id is a key into an owner-stamped hook
-  record, registered by an operator for one owner and one project. The token
-  that verified the request is custodied per hook, so verifying against it
-  both authenticates the sender and identifies the owner. An unknown or
-  disabled hook id is an owner-unresolvable reject, and records nothing
-  against any owner.
+  record for one owner and one project. The token that verified the request
+  is custodied per hook, so verifying against it both authenticates the
+  sender and identifies the owner. An unknown or disabled hook id is an
+  owner-unresolvable reject, and records nothing against any owner.
+
+  **Who registers a hook, and whose it is.** In the first pass a hook has no
+  owner-facing route. It is registered, rotated and disabled only by an
+  operator `rpc` on the gen_saas prod host (DND-439). That operator already
+  holds the host and its database, so the path grants no authority the
+  operator did not have. The hook's owner is the account the call names; the
+  owner, or an agent acting on the owner's direction for the owner's own
+  account, makes the call. The owner confirms `owner_forge_user_id` (their own
+  numeric GitLab user id) before registering. This is a named residual of the
+  owner-from-auth invariant: the operator path is the one place a hook's owner
+  is not stamped from an authenticated session, so it has no route, it is
+  never exposed to a machine token or a request, and it never registers a
+  hook for an account the operator does not act for. An owner-facing path,
+  should one be built, stamps the owner from the authenticated session like
+  every other seam (*Rule ownership is stamped from the authenticated
+  author*). Rotation and disabling are owner-scoped: another owner's hook
+  reads as absent.
 - **Reconciliation poller** — the owner is the account its per-account source-read
   token belongs to, resolved server-side from that token (as harness-emit resolves
   owner from the machine token), never from fetched content.
@@ -2764,8 +2784,12 @@ under-encrypted**:
   first use and never replaces it. The set also holds each **forge hook's
   webhook secret** (`:forge_webhook_secret`, `scope_ref` = the hook id,
   DND-439): the GitLab `X-Gitlab-Token` a hook verifies against. The server
-  mints it when an operator registers the hook and returns it once, for the
-  owner to paste into GitLab; no read returns it again. Any future adapter
+  mints it and returns it at most once per mint, only to a call that asks
+  for it, for the owner to paste into GitLab; no read returns it again. A
+  rotation mints a new one and the old stops verifying at once. Output a
+  host keeps (an `rpc` over `aws ssm send-command`, whose stdout SSM
+  retains) never carries it: a call that returns the secret runs only in an
+  interactive session. Any future adapter
   credential (SMTP, SMS, Discord bot) joins this set under the same story.
 
   **Later (2026-09-22):** this named the Notion read token a **"read-only,
@@ -5406,7 +5430,11 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   `skipped:unknown-item`. They leave every other state as it is. A
   `forge.review.requested` whose `revision` is strictly newer than the row's
   reopens a `source_status` close, like any other; it never reopens an
-  `owner` or `lease_complete` close.
+  `owner` or `lease_complete` close. GitLab's `updated_at` has one-second
+  precision, so a removal and a re-request in the same second tie: the
+  re-request does not reopen, and the item shows again on the merge
+  request's next change. That is the safe direction of *A close needs an
+  event no older than the row*, accepted.
 
   **Later (2026-09-28):** the bullet before this one named "the forge family,
   DND-439" as a family with no revision token. Superseded: the family
