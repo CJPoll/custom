@@ -294,6 +294,21 @@ grep -q 'refs were not refreshed this run' <<<"${EMPTY_OUT}" \
   && ok "a CLEAN SCAN off un-refreshed refs still SAYS the refs were not refreshed" \
   || bad "a CLEAN SCAN states the un-refreshed refs" "out=${EMPTY_OUT}"
 
+# 9a'. No CI result on the head (a no-CI repo, like custom) is NOT JUDGED, and
+# never a CLEAN SCAN. Measured 2026-09-28: custom's scan said CLEAN SCAN
+# (excluded: not_green=6) while three finished PRs sat unmerged.
+mk_gitlab 4002 "${SHA_OLD}" false true "$(ago '10 hours')" none 0
+run --repo "${WORK}" --no-fetch
+[ "${CODE}" -eq 0 ] && grep -q 'NOT JUDGED' <<<"${OUT}" \
+  && grep -q 'no_ci_result=1' <<<"${OUT}" && grep -q 'Fix:' <<<"${OUT}" \
+  && ! grep -q 'CLEAN SCAN' <<<"${OUT}${ERR}" \
+  && ok "a request with no CI result is NOT JUDGED, never a CLEAN SCAN" \
+  || bad "a request with no CI result is NOT JUDGED" "code=${CODE} out=${OUT} err=${ERR}"
+run --repo "${WORK}" --no-fetch --json
+grep -q '"unjudged": 1' <<<"${OUT}" \
+  && ok "the JSON payload counts it as unjudged" \
+  || bad "the JSON payload counts it as unjudged" "out=${OUT}"
+
 # 9b. A FAILED forge probe: non-zero exit, and NOT the zero-orphans text.
 : > "${STUB}/fail"
 run --repo "${WORK}" --no-fetch

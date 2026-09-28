@@ -107,6 +107,32 @@ module ReadyAndIdle
     %w[success].include?(status.to_s.strip.downcase)
   end
 
+  # The head carries no CI result at all (nil, "", or an empty rollup "none").
+  def ci_absent?(status)
+    s = status.to_s.strip.downcase
+    s.empty? || s == "none"
+  end
+
+  # The line for a scan that emitted no rows. It says CLEAN SCAN only when
+  # every candidate was JUDGED. A candidate with no CI result was not, so the
+  # line says NOT JUDGED instead. Measured 2026-09-28: custom has no CI, and
+  # this line read "CLEAN SCAN ... excluded: not_green=6" every hourly run
+  # while three finished shipwright PRs (#88, #98, #101) sat unmerged, #88 for
+  # 18h. That is "could not look" printed as "looked, found nothing".
+  def empty_scan_line(scanned:, repo:, excluded:)
+    tail = excluded.empty? ? "" : " (excluded: #{excluded.map { |k, v| "#{k}=#{v}" }.join(', ')})"
+    unjudged = excluded[:no_ci_result].to_i
+    return "ready-and-idle: CLEAN SCAN — looked at #{scanned} open change request(s) in #{repo}; " \
+           "0 are ready-and-idle.#{tail}" unless unjudged.positive?
+
+    "ready-and-idle: NOT JUDGED — #{unjudged} of #{scanned} open change request(s) in #{repo} " \
+      "have no CI result on their head, so whether they are finished was not measured; " \
+      "0 of the rest are ready-and-idle.#{tail} " \
+      "Fix: check each un-judged change request by hand (in a repo that declares a gate, a " \
+      "critic PASS and an integration-gate receipt for its head mean finished); never report " \
+      "this scan as clean."
+  end
+
   # THE predicate. Returns nil when the change request IS ready-and-idle, and
   # otherwise a symbol naming the FIRST reason it is not. A reason is returned
   # rather than a bare false so a caller can say what it looked at and why each
@@ -116,8 +142,12 @@ module ReadyAndIdle
   #
   # :unknown_activity is a MISSING measurement, not a disqualification on the
   # merits; the caller surfaces it as a probe failure rather than swallowing it.
+  #
+  # :no_ci_result is NOT JUDGED, not "not green": nothing measured readiness.
+  # In a repo with no CI at all (custom) every candidate lands here.
   def disqualifier(mr, now:, idle_hours:)
     return :draft if mr[:draft]
+    return :no_ci_result if ci_absent?(mr[:pipeline_status])
     return :not_green unless green?(mr[:pipeline_status])
     return :blocking_discussions if mr[:blocking_unresolved]
 
@@ -568,8 +598,27 @@ def self_test
              ReadyAndIdle.disqualifier(ready.merge(pipeline_status: "failed"), now: now, idle_hours: 2), :not_green)
   check.call("running pipeline excluded",
              ReadyAndIdle.disqualifier(ready.merge(pipeline_status: "running"), now: now, idle_hours: 2), :not_green)
-  check.call("absent pipeline excluded",
-             ReadyAndIdle.disqualifier(ready.merge(pipeline_status: nil), now: now, idle_hours: 2), :not_green)
+  # No CI result is NOT JUDGED, never "not green": readiness was not measured.
+  check.call("absent pipeline is not judged",
+             ReadyAndIdle.disqualifier(ready.merge(pipeline_status: nil), now: now, idle_hours: 2), :no_ci_result)
+  check.call("empty rollup ('none') is not judged",
+             ReadyAndIdle.disqualifier(ready.merge(pipeline_status: "none"), now: now, idle_hours: 2), :no_ci_result)
+  check.call("draft still wins over no CI",
+             ReadyAndIdle.disqualifier(ready.merge(draft: true, pipeline_status: nil), now: now, idle_hours: 2), :draft)
+
+  # The empty-scan line. A no-CI repo (custom, measured 2026-09-28: 6 open PRs,
+  # 3 of them finished shipwright fixes orphaned up to 18h) must never read
+  # CLEAN SCAN: "could not look" and "looked, found nothing" stay distinct.
+  unjudged_line = ReadyAndIdle.empty_scan_line(scanned: 6, repo: "/r", excluded: { no_ci_result: 6 })
+  check.call("no-CI candidates are never a CLEAN SCAN", unjudged_line.include?("CLEAN SCAN"), false)
+  check.call("no-CI candidates say NOT JUDGED", unjudged_line.include?("NOT JUDGED"), true)
+  check.call("no-CI candidates are counted", unjudged_line.include?("6 of 6"), true)
+  check.call("NOT JUDGED carries a Fix:", unjudged_line.include?("Fix:"), true)
+  mixed_line = ReadyAndIdle.empty_scan_line(scanned: 3, repo: "/r", excluded: { not_green: 2, no_ci_result: 1 })
+  check.call("one un-judged candidate still blocks CLEAN", mixed_line.include?("CLEAN SCAN"), false)
+  clean_line = ReadyAndIdle.empty_scan_line(scanned: 2, repo: "/r", excluded: { not_green: 2 })
+  check.call("all judged and none ready is CLEAN", clean_line.include?("CLEAN SCAN"), true)
+  check.call("CLEAN keeps its exclusion counts", clean_line.include?("not_green=2"), true)
   check.call("unresolved discussion excluded",
              ReadyAndIdle.disqualifier(ready.merge(blocking_unresolved: true), now: now, idle_hours: 2), :blocking_discussions)
   check.call("unmet approval excluded",
@@ -895,6 +944,8 @@ def main(argv)
       repo: repo, forge: forge.name, idle_hours: idle_hours,
       scanned: candidates.size, orphans: rows.size,
       excluded: excluded.transform_keys(&:to_s),
+      # Candidates with no CI result: readiness NOT measured, never "0 orphans".
+      unjudged: excluded[:no_ci_result].to_i,
       refs_refreshed: refs_refreshed,
       refs_note: refs_note,
       refs_last_moved: (refs_refreshed ? {} : { banner_target => refs_last_moved(repo, banner_target) }),
@@ -912,9 +963,7 @@ def main(argv)
       # Textually distinct from SCAN INCOMPLETE above, on purpose and by
       # construction: this line can only be printed after every MEMBERSHIP
       # probe landed, and only when no emitted value was priced.
-      puts "ready-and-idle: CLEAN SCAN — looked at #{candidates.size} open change " \
-           "request(s) in #{repo}; 0 are ready-and-idle." \
-           "#{excluded.empty? ? '' : " (excluded: #{excluded.map { |k, v| "#{k}=#{v}" }.join(', ')})"}" \
+      puts ReadyAndIdle.empty_scan_line(scanned: candidates.size, repo: repo, excluded: excluded) +
            "#{refs_refreshed ? '' : " Note: refs were not refreshed this run (#{refs_reason}); " \
                                     "that did not affect this result, because no row needed drift priced."}"
     else
@@ -923,6 +972,10 @@ def main(argv)
       warn "ready-and-idle: #{rows.size} of #{candidates.size} open change request(s) are " \
            "ready-and-idle (finished work nobody is carrying)."
       rows.each { |r| print_row(r, forge.marker) }
+      if excluded[:no_ci_result].to_i.positive?
+        warn "ready-and-idle: NOT JUDGED — #{excluded[:no_ci_result]} more open change request(s) " \
+             "have no CI result on their head; they are not in this list because nothing measured them."
+      end
     end
   end
   degraded ? 4 : 0
@@ -959,8 +1012,11 @@ if $PROGRAM_NAME == __FILE__
         sha     the green head sha the pipeline/check suite passed on
 
       Notes:
-        * A change request with NO CI result at all counts as not green, so it
-          is never reported as finished-and-abandoned.
+        * A change request with NO CI result at all is never reported as
+          finished-and-abandoned. It is counted as NOT JUDGED
+          (excluded: no_ci_result; JSON `unjudged`), and a scan with any such
+          request never says CLEAN SCAN. In a repo with no CI (custom) that is
+          every request: check them by hand.
         * `approvals_required: 0` satisfies the approval test trivially, which
           is correct — the question is whether anything is WAITING on a human.
         * Read-only: it merges, approves, comments, relabels and resolves
