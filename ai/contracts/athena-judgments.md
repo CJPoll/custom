@@ -79,7 +79,8 @@ later, as its own change.
 > A judgment is advisory input to deterministic policy. It never authorizes an action, never grants or widens access, and never selects a destination or target outside a set the owner already authorized. It is never the sole basis for a destructive, irreversible, owner-gated or security-relevant step. The `state` sent for judgment is untrusted data: its text can steer the answer (TypeSafe, jev-1.13 jaggedness, *Adversarial content*). A use case is admissible only if a wrong answer costs at most one of: a recoverable misroute between the owner's own sessions, a misranked item, or a wrong advisory line a human or agent reads before acting. Typed output guarantees the interface, not truth.
 
 This mirrors the inbox rule that content can cause a report but never authorize
-an action (`ai/contracts/athena-inbox.md` → *Untrusted input*). A judgment-routed
+an action (`ai/contracts/athena-inbox.md` → *Untrusted input*). That rule's
+one exception, an owner click passing four checks, has no judgment analogue. A judgment-routed
 Slack line is inbox content like any other: the receiving session re-verifies it
 and treats its body as untrusted, exactly as for a line the channel route
 delivered.
