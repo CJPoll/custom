@@ -5055,6 +5055,18 @@ event on a subscription with no binding is skipped with cause
 once the owner binds it. The Slack team id comes the same way, from the Slack
 app the event arrived on, never from the payload.
 
+**Later (2026-09-28, DND-438):** the grain is the **per-database binding**,
+not the subscription. A Notion webhook subscription is integration-level and
+can front several databases, so gen_saas records the source on the database
+binding the event resolves to (`notion_database_bindings.index_source`), and
+an event on an unbound binding is skipped `unbound-subscription` as above.
+DND-763 carries the general amendment of this paragraph; this note fixes the
+grain for `notion_work`. `notion_work` binds only on a binding whose
+subscription is `metadata_only` (*The storage boundary* →
+*A `metadata_only` subscription*). Binding it on a `full` subscription is
+refused (`content_policy_required`, with a `Fix:`), and a subscription that
+feeds `notion_work` cannot be moved back to `full` until it is unbound.
+
 **At-least-once, row by row.**
 
 - **The obligation to index is recorded in the transaction that persists the
@@ -5244,8 +5256,38 @@ closed list. The list has three parts:
   obligations, the skip counts and the index-failure record. It does not make
   upstream stores content-free. The event store and the Slack ingress's own
   store hold what their ingress persists. Keeping work-Notion content out of
-  the event store is DND-438's `metadata_only` subscription obligation. It is
-  not a property of this boundary.
+  the event store is the `metadata_only` subscription obligation (next
+  bullet). It is not a property of this boundary.
+- **A `metadata_only` subscription (DND-438).** A Notion subscription carries a
+  content policy, `full` (the default, today's behaviour) or `metadata_only`.
+  The policy is owner config on the subscription row, never read from a
+  payload, and any value other than `full` is read as `metadata_only`. A work
+  workspace's subscription is `metadata_only`. On it, before anything is
+  persisted, logged or written to an inbox line:
+  - **Comments never land.** Every `notion.comment.*` webhook (created,
+    updated, deleted) is dropped after the signature check and before any
+    fetch, as a counted skip with cause `metadata_only_comment`. It is never
+    an error and never a dead letter. The skip count holds owner,
+    subscription, cause, count and times, and no content.
+  - **The ticket payload is closed.** A `notion.ticket.*` payload holds only
+    `entity_id`, `title`, `status`, `labels`, `assignee` (person ids),
+    `ticket_number` and `revision`. There is no `changed_properties`, no
+    project field and no rich text. This holds on every path that builds a
+    ticket event: the webhook, the reconciliation re-emit and its retry set
+    (a held page keeps only what those fields are read from), and the index
+    snapshot the backfill and re-sync read.
+  - **No Epic or Project page is read.** The project hops of *A ticket's
+    project* are skipped; `notion_work` is `work` by source.
+  - **Side stores carry no values.** An ingress dead-letter exemplar keeps only
+    the event's `type`, `entity_id`, `reason` and field names. An
+    ingress-failure exemplar is identity plus cause, as it is for every
+    subscription.
+
+  `assignee` and `labels` are the OQ-5 permissive fields above; removing one
+  from the allow-list removes it from the persisted payload too.
+
+  **Later (2026-09-28):** this bullet replaces the forward reference that
+  named the obligation without stating it.
 - **Mission pointers are a separate schema.** *Mission pointers are metadata
   only* keeps its own closed list, which refuses labels and assignees. This
   section does not change it.
@@ -5302,10 +5344,17 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   close drops an item from the queue until its next change. A wrong reopen
   hands finished work to a second session.
 - **Terminal statuses are owner config, per source.** For `notion_personal`
-  the default is `Done`, `Cancelled` and `Won't Fix`. `notion_work` gets its
-  default from DND-438. A status outside the source's declared set is stored
-  and treated as non-terminal. The priorities page flags it as undeclared. It
-  is never silently read as open.
+  the default is `Done`, `Cancelled` and `Won't Fix`. For `notion_work` the
+  default is also `Done`, `Cancelled` and `Won't Fix`; `Ready for Release` is
+  not terminal, because it waits on the owner. The owner's stored list for a
+  source wins over its default, an empty list included; a source the stored
+  rules do not name takes its default. A status outside the source's declared
+  set is stored and treated as non-terminal. The priorities page flags it as
+  undeclared. It is never silently read as open.
+
+  **Later (2026-09-28, DND-438):** this bullet said "`notion_work` gets its
+  default from DND-438". DND-438 set it, and made the default apply per source
+  to a rules row seeded before that source's default existed.
 
   **Later (2026-09-27):** the `notion_personal` default was `Done` and
   `Cancelled`. The owner made `Won't Fix` a closing status
