@@ -580,7 +580,9 @@ GateAttributionError = Class.new(StandardError)
 
 # One reading of a gated tree. `fingerprint` covers HEAD, the index and
 # working-tree state (`git status`), the content of every tracked change
-# (`git diff HEAD --binary`), and the content of every untracked,
+# (`git diff HEAD --binary`), the index's content (`git diff --cached
+# --binary`, so an index-only change to an already-`MM` file counts), and
+# the content of every untracked,
 # not-ignored file, so any edit between two readings changes it -- not just
 # a HEAD move or a newly dirty tree. Ignored files are outside it on purpose:
 # they are build and runtime output, not the tree under review.
@@ -597,21 +599,30 @@ def gate_git!(worktree_root, *args)
   raise GateAttributionError, "git -C #{worktree_root} #{args.join(' ')} failed" unless st.success?
 
   out
+rescue Errno::ENOENT
+  raise GateAttributionError, "git executable not found on PATH"
 end
 
 # Digest of every untracked file's content, in the order `git status -z`
-# listed them. A symlink contributes its target, a file that vanished between
-# the listing and the read contributes a marker, so neither raises.
+# listed them. A symlink contributes its target; a file that vanished
+# between the listing and the read, or that the gate cannot read (a
+# root-owned 0600 file a container left), contributes a marker naming why.
+# None of them raises: a bare Errno here would end the run with a backtrace
+# and, at report time, discard every per-check result (case 7g).
 def untracked_content_digest(worktree_root, status_z)
   paths = status_z.split("\0").select { |e| e.start_with?("?? ") }.map { |e| e[3..] }
   digest = Digest::SHA256.new
   paths.each do |rel|
     path = File.join(worktree_root, rel)
     digest << rel << "\0"
-    digest << if File.symlink?(path) then "link:#{File.readlink(path)}"
-              elsif File.file?(path) then Digest::SHA256.file(path).hexdigest
-              else "missing"
-              end
+    digest << begin
+      if File.symlink?(path) then "link:#{File.readlink(path)}"
+      elsif File.file?(path) then Digest::SHA256.file(path).hexdigest
+      else "missing"
+      end
+    rescue SystemCallError => e
+      "unreadable:#{e.class}"
+    end
     digest << "\0"
   end
   digest.hexdigest
@@ -633,14 +644,13 @@ def gate_snapshot(root = CUSTOM_DIR)
 
   status = gate_git!(worktree_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
   diff = gate_git!(worktree_root, "diff", "HEAD", "--binary")
+  index = gate_git!(worktree_root, "diff", "--cached", "--binary")
   fingerprint = Digest::SHA256.hexdigest(
-    [sha, status, Digest::SHA256.hexdigest(diff), untracked_content_digest(worktree_root, status)]
-      .join("\0\0")
+    [sha, status, Digest::SHA256.hexdigest(diff), Digest::SHA256.hexdigest(index),
+     untracked_content_digest(worktree_root, status)].join("\0\0")
   )
   GateSnapshot.new(worktree_root: worktree_root, sha: sha, dirty: !status.empty?,
                    fingerprint: fingerprint)
-rescue Errno::ENOENT
-  raise GateAttributionError, "git executable not found on PATH"
 end
 
 def gate_attribution(root = CUSTOM_DIR)
@@ -1539,7 +1549,7 @@ def run_self_test
       !probe_status.success?
     end
   unless fixtures_isolated
-    warn "self-test: NOTE — skipping cases 5/6/6b/6c/7c/7d: Dir.mktmpdir resolves " \
+    warn "self-test: NOTE — skipping cases 5/6/6b/6c/7c/7d/7f/7g: Dir.mktmpdir resolves " \
          "inside a git worktree in this environment (check $TMPDIR), so the " \
          "tracked-file filter would treat every fixture there as a real repo " \
          "and produce false reds unrelated to this code. Not counted as a " \
@@ -2263,7 +2273,70 @@ def run_self_test
       end
     end
   end
-  end # fixtures_isolated (7c/7d/7f)
+
+  # 7g (DND-896 review floor). gate_snapshot reads every untracked file's
+  #    content and the index. Two edges of that read:
+  #    - an untracked file the gate cannot read (a root-owned 0600 file a
+  #      container left behind) must not escape as a bare Errno backtrace --
+  #      at report time that would discard ~15 minutes of per-check detail;
+  #    - an index-only change (the file stays `MM`, the working tree is
+  #      unchanged) must still change the fingerprint, as its comment says.
+  Dir.mktmpdir("harness-gate-attribution-edges") do |dir|
+    edge_fail = lambda do |msg|
+      warn "self-test: FAIL — snapshot edges (7g): #{msg}"
+      ok = false
+    end
+    eg_git = ["git", "-c", "commit.gpgsign=false", "-c", "user.name=t",
+              "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]
+    fx = File.join(dir, "repo")
+    FileUtils.mkdir_p(fx)
+    File.write(File.join(fx, "f"), "a")
+    step_failed = [%W[init -q #{fx}], %W[-C #{fx} add f], %W[-C #{fx} commit -qm base]].find do |args|
+      _o, _e, st = Open3.capture3(*eg_git, *args)
+      !st.success?
+    end
+    if step_failed
+      edge_fail.call("could not build the fixture repo (`git #{step_failed.join(' ')}` failed)")
+    else
+      secret = File.join(fx, "unreadable")
+      File.write(secret, "s")
+      FileUtils.chmod(0o000, secret)
+      begin
+        snap = gate_snapshot(fx)
+        edge_fail.call("an unreadable untracked file must still be snapshotted as dirty " \
+                       "(got #{snap.inspect})") unless snap.is_a?(GateSnapshot) && snap.dirty
+      rescue StandardError => e
+        edge_fail.call("an unreadable untracked file made gate_snapshot raise " \
+                       "#{e.class}: #{e.message}")
+      ensure
+        FileUtils.chmod(0o600, secret)
+        File.delete(secret)
+      end
+
+      stage = lambda do |content|
+        File.write(File.join(fx, "f"), content)
+        _o, _e, st = Open3.capture3(*eg_git, "-C", fx, "add", "f")
+        st.success?
+      end
+      begin
+        staged = stage.call("b")
+        File.write(File.join(fx, "f"), "c")
+        before = gate_snapshot(fx)
+        staged &&= stage.call("d")
+        File.write(File.join(fx, "f"), "c")
+        after = gate_snapshot(fx)
+        if !staged
+          edge_fail.call("could not stage the index-only fixture change")
+        elsif before.fingerprint == after.fingerprint
+          edge_fail.call("an index-only change (staged b -> d, working tree 'c' both " \
+                         "times) left the fingerprint unchanged")
+        end
+      rescue GateAttributionError => e
+        edge_fail.call("gate_snapshot raised on the index-only fixture: #{e.message}")
+      end
+    end
+  end
+  end # fixtures_isolated (7c/7d/7f/7g)
 
   # 7e (coordinator-train critic t32, DND-896). Static composition check:
   # run_gate's OWN source must delegate its check loop and report to
