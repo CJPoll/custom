@@ -344,10 +344,15 @@ advisory label, since the policy may act on each. A
 use case whose question set declares no advisory label cannot be turned on.
 **`shadow` is refused** unless the use case has a registered question set,
 because shadow makes real calls. **`off` is never refused.** A use case MAY
-add a refusal of its own; Slack routing refuses `on` while the p95 of
-`latency_ms` over its shadow-mode `judgment_calls` rows exceeds 1,000 ms. That
-measurement is not built yet (DND-717), so until it is, Slack routing's `on`
-is refused outright. `eval:*` ignores the mode, but not the key, the domain or
+add a refusal of its own. Slack routing's advisory labels are its routable
+ones (`walt_ui`, `harness`, `gen_saas`; never `unclear`), and it refuses `on`
+unless its live latency is measured and fast enough (DND-717): over the
+owner's own `slack_routing` rows of the last 30 days that reached the port,
+at least 20 calls, the first at least 3 days old (else `latency_unmeasured`),
+with a discrete p95 `latency_ms` of at most 1,000 ms (else
+`latency_too_high`). `judgment_calls` rows carry no mode, so shadow and `on`
+calls both count; before `on` is first set, every such call is a shadow
+call. `eval:*` ignores the mode, but not the key, the domain or
 the budget. The writer is gen_saas `Athena.Judgments.Settings.set_mode/3`
 (DND-714), the owner's only one; every refusal carries `Fix:`.
 
@@ -357,6 +362,16 @@ run produced", and named no refusal for `shadow`. Replaced by the text above
 (DND-714). Why: a row existing is not calibration. An all-n/a run writes rows,
 and an enabled `unrelated` row enables nothing a caller acts on, so either
 would have turned a use case on with no advice it could give.
+
+**Later (2026-09-28):** this said Slack routing refuses `on` while the p95
+over its "shadow-mode" rows exceeds 1,000 ms, and that until the measurement
+was built its `on` was refused outright. Replaced by the text above (DND-717,
+gen_saas `ModePolicy.permit/5` and `CallStore.latency/3`, stacked on the
+DND-714 mode writer). Why: the rows record no mode, so the bar reads every
+call that reached the port; and a p95 over too few calls or too short a
+window is not a measurement, so it is refused as `latency_unmeasured`, never
+passed. The 20 calls and 3 days are DND-717's shadow bar ("at least 3 days,
+or at least 20 new owner conversations, whichever is later").
 
 ## Threshold provenance, n/a and the pinned model
 
