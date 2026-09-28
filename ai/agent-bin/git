@@ -27,10 +27,13 @@
 #      not a wrapper (`test -ef`, so a symlinked or re-spelled directory still
 #      matches); a git ahead of the wrapper is a shim that may exec it back
 #      (DND-1103). With no entry of its own on PATH, or none after it, the
-#      first non-wrapper git anywhere on PATH. Wrappers already
-#      passed through are carried in ATHENA_AGENT_GIT_SEEN, so two copies of
-#      the wrapper on PATH never exec each other in a loop. None left: exit 127
-#      with a Fix:.
+#      first non-wrapper git anywhere on PATH. Wrappers already passed
+#      through, and any such fallback git, are carried in
+#      ATHENA_AGENT_GIT_SEEN and skipped, so two copies of the wrapper, or a
+#      shim that execs it back, never loop. None left: exit 127 with a Fix:.
+#      Line 2's text "git (agent wrapper)" is the mark fixtures and gates use
+#      to recognise this file (ai/lib/agent-free-git.sh, harness-gate's
+#      stash_fixture_optout_env, the agent-stash-guard suite): keep it there.
 #   2. git's global options are parsed by git's own grammar (-C, -c,
 #      --config-env, --git-dir, --work-tree, --namespace, -p/-P/--no-pager, ...).
 #      An option it does not know passes through for git to judge.
@@ -96,13 +99,14 @@ is_wrapper() {
   return 1
 }
 
-# The real git is the first non-wrapper git AFTER this wrapper's own PATH entry:
-# the one PATH would reach if the wrapper were not there. A git BEFORE that
-# entry is a shim someone put in front of the wrapper (an eval sandbox, a test
-# fixture); when it delegates back to the wrapper by path, exec'ing it again is
-# an exec loop that ends only at ARG_MAX (DND-1103). Only when the wrapper is
-# not on PATH at all (invoked by path), or nothing follows its entry, does the
-# first non-wrapper git anywhere on PATH stand in.
+# The real git is the first non-wrapper git AFTER this wrapper's own PATH
+# entry. A git BEFORE that entry is a shim someone put in front of the wrapper
+# (an eval sandbox, a test fixture); when it delegates back to the wrapper by
+# path, exec'ing it again is an exec loop that ends only at ARG_MAX (DND-1103).
+# Only when the wrapper is not on PATH at all (invoked by path), or nothing
+# follows its entry, does the first non-wrapper git anywhere on PATH stand in,
+# and that fallback is added to ATHENA_AGENT_GIT_SEEN: if it is a shim that
+# execs the wrapper again, the next pass skips it and takes the git after it.
 real=
 before=
 past_self=
@@ -117,13 +121,14 @@ for d in $PATH; do
   [ -n "$before" ] || before="$d/git"
 done
 IFS=$old_ifs
-[ -n "$real" ] || real=$before
+fallback=
+if [ -z "$real" ] && [ -n "$before" ]; then real=$before; fallback=$before; fi
 if [ -z "$real" ]; then
-  printf 'git (agent wrapper): no real git on PATH after skipping the wrapper %s (PATH=%s). Fix: put the directory holding the real git (usually /usr/bin) on PATH after the wrapper directory.\n' \
-    "$self" "$PATH" >&2
+  printf 'git (agent wrapper): no real git on PATH after skipping the wrapper %s and the gits already passed through (ATHENA_AGENT_GIT_SEEN=%s; PATH=%s). Fix: put the directory holding the real git (usually /usr/bin) on PATH after the wrapper directory; a shim that execs the wrapper must have a real git after the wrapper on PATH.\n' \
+    "$self" "${ATHENA_AGENT_GIT_SEEN:-}" "$PATH" >&2
   exit 127
 fi
-ATHENA_AGENT_GIT_SEEN="${ATHENA_AGENT_GIT_SEEN:+$ATHENA_AGENT_GIT_SEEN:}$self"
+ATHENA_AGENT_GIT_SEEN="${ATHENA_AGENT_GIT_SEEN:+$ATHENA_AGENT_GIT_SEEN:}$self${fallback:+:$fallback}"
 export ATHENA_AGENT_GIT_SEEN
 
 # ---- helpers ----------------------------------------------------------------
