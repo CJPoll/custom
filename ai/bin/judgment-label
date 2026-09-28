@@ -34,7 +34,7 @@ require_relative "../lib/private_overlay_resolver"
 PROG = "judgment-label"
 
 USAGE = <<~EOF
-  Usage: judgment-label --propose [--dry-run] [--inbox-root DIR] [--labels FILE]
+  Usage: judgment-label --propose [--dry-run] [--rule-default] [--inbox-root DIR] [--labels FILE]
          judgment-label --confirm [--forward | --recheck] [--batch N] [--inbox-root DIR] [--labels FILE] [--slack-bin DIR]
          judgment-label --counts [--labels FILE]
          judgment-label --help
@@ -67,6 +67,18 @@ USAGE = <<~EOF
               and a quoted ts or relay phrase can mislabel a root.
               judgment-eval treats forward_record as ground truth, so the
               owner can review those rows with --confirm --forward.
+              The owner's routing rule (2026-09-28 ~04:25Z) is applied
+              mechanically, as provenance rule_confirmed with a "rule"
+              field (epic decision D-R2, DND-717); never owner_confirmed:
+                - rule 2, session_mention: a root whose text ADDRESSES a
+                  session ("harness session: ...", or a short lead-in
+                  ending "for the harness session:"; grammar
+                  #{JudgmentLabel::MENTION_GRAMMAR}, the server router's own) is labelled that
+                  session, over a forward record that disagrees (counted);
+                - rule 3, default_walt_ui, only with --rule-default: a root
+                  no other evidence labels is walt_ui.
+              A rule_confirmed row enters the eval; --confirm presents it
+              with the proposed rows, and the owner's answer replaces it.
   --confirm   Show the proposed rows ONE message at a time, at a terminal, and
               record the owner's answer as owner_confirmed. Keys: w walt_ui,
               h harness, g gen_saas, u unclear, Enter keeps the proposal,
@@ -105,7 +117,8 @@ USAGE = <<~EOF
                     committed)
 
   Rows are {id, label, provenance, labeler, labeled_at}, the judgment-eval
-  label format. Check the join with:
+  label format, plus "context" on an owner_confirmed row and "rule" on a
+  rule_confirmed row. Check the join with:
     judgment-eval --dry-run --use-case slack_routing --labels FILE \\
       --corpus DIR/walt_ui-slack.jsonl --content-domain work
 
@@ -298,7 +311,8 @@ module Manager
   # merge -- read the file on disk NOW (under the lock when writing) and
   # rebuild on it, so an owner confirmation made meanwhile is kept.
   def merge(opts, sel, matched)
-    JudgmentLabel.build(sel[:roots], matched, existing_rows(opts, must_exist: false), Effects.now)
+    JudgmentLabel.build(sel[:roots], matched, existing_rows(opts, must_exist: false), Effects.now,
+                        rule_default: opts[:rule_default])
   end
 
   def report_inputs(path, slack, sel, records, by_source, matched, out, err)
@@ -326,6 +340,9 @@ module Manager
     out.puts "owner_confirmed kept: #{built[:rows].count { |r| r['provenance'] == 'owner_confirmed' }} " \
              "(#{built[:kept_orphans]} not in this inbox); forward records disagreeing with the owner: #{built[:disagreements]}; " \
              "dropped (root no longer in this inbox): #{built[:dropped]}"
+    out.puts "session mentions (rule 2, #{JudgmentLabel::MENTION_GRAMMAR}): " \
+             "#{built[:rows].count { |r| r['rule'] == 'session_mention' }} rule_confirmed; " \
+             "forward records a mention overrode: #{built[:mention_overrides]}"
   end
 
   def run_confirm(opts, out, input)
@@ -516,7 +533,7 @@ end
 
 SPEC = {
   "--help" => :switch, "-h" => :switch, "--propose" => :switch, "--confirm" => :switch, "--counts" => :switch,
-  "--dry-run" => :switch, "--forward" => :switch, "--recheck" => :switch, "--batch" => :integer,
+  "--dry-run" => :switch, "--rule-default" => :switch, "--forward" => :switch, "--recheck" => :switch, "--batch" => :integer,
   "--inbox-root" => :value, "--labels" => :value, "--slack-bin" => :value
 }.freeze
 
@@ -528,6 +545,7 @@ def parse_options(argv)
   fail!(2, modes.empty? ? "no mode given" : "#{modes.join(' and ')} given together", "pass exactly one of #{MODES.join(', ')}; run #{PROG} --help") unless modes.size == 1
   mode = modes.first
   fail!(2, "--dry-run applies only to --propose", "drop --dry-run") if raw["--dry-run"] && mode != "--propose"
+  fail!(2, "--rule-default applies only to --propose", "drop --rule-default") if raw["--rule-default"] && mode != "--propose"
   fail!(2, "--batch applies only to --confirm", "drop --batch") if raw.key?("--batch") && mode != "--confirm"
   fail!(2, "--forward applies only to --confirm", "drop --forward") if raw["--forward"] && mode != "--confirm"
   fail!(2, "--recheck applies only to --confirm", "drop --recheck") if raw["--recheck"] && mode != "--confirm"
@@ -540,7 +558,7 @@ def parse_options(argv)
     fail!(2, "#{flag} must be an absolute path", "pass an absolute path") if raw.key?(flag) && !raw[flag].start_with?("/")
   end
   {
-    mode: mode, dry_run: raw["--dry-run"] || false, forward: raw["--forward"] || false, recheck: raw["--recheck"] || false,
+    mode: mode, dry_run: raw["--dry-run"] || false, rule_default: raw["--rule-default"] || false, forward: raw["--forward"] || false, recheck: raw["--recheck"] || false,
     batch: batch, inbox_root: raw["--inbox-root"] || Effects.default_inbox_root, labels: raw["--labels"] || Effects.default_labels,
     slack_bin: raw["--slack-bin"] || Effects.default_slack_bin
   }

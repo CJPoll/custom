@@ -265,7 +265,7 @@ one is an amendment to this table.
 | `model_mismatch` | fault | judge | the answering model is not the pinned model |
 | `below_threshold` | state | caller | the confidence is under the accepted threshold, or the answer is `unclear` |
 | `threshold_unset` | state | caller | no threshold exists for the key; never accepts, whatever the confidence |
-| `label_disabled` | state | caller | the answer's label is disabled, or has no live destination |
+| `label_disabled` | state | caller | the answer's label is disabled, or has no live destination (also the Slack router's session mention, DND-717, whose label has no live topic route) |
 | `sender_rule` | state | Slack router | the conversation is not the owner's own, so no judgment is asked |
 | `context_unavailable` | fault | Slack router | reading the conversation context failed (or the root's `ts` is malformed), so no judgment was asked; the caller-side record is the router's outcome log, with no `judgment_calls` row |
 
@@ -432,9 +432,19 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
 - **Slack routing labels** (DND-715, `ai/bin/judgment-label`) cover the
   owner's new-conversation roots only (D7), one row per `event_id`, in the
   machine-local `slack-routing-labels.jsonl`. The corpus is
-  `walt_ui-slack.jsonl` itself, so the text is never copied. A root that an R4
-  forward record names is `forward_record`; the owner confirms the rest one
-  message at a time at a terminal. An eval case carries the context the
+  `walt_ui-slack.jsonl` itself, so the text is never copied. The owner's
+  answer at a terminal (`--confirm`, one message at a time) is
+  `owner_confirmed` and always wins. Otherwise a root whose text addresses a
+  session is `rule_confirmed` with `"rule": "session_mention"`, by the
+  router's own grammar (`ai/contracts/athena-events.md` → *New conversations
+  may route by an advisory topic judgment*, rule 2; a forward record that
+  agrees stays `forward_record`, one that disagrees is overridden and
+  counted). A root that an R4 forward record names is `forward_record`. With
+  `--propose --rule-default`, a root nothing else labels is `walt_ui`,
+  `rule_confirmed` with `"rule": "default_walt_ui"` (the owner's rule 3);
+  without it that root stays `proposed`. `--confirm` presents
+  `rule_confirmed` rows with the `proposed` ones, and the owner's answer
+  replaces them. An agent never writes `owner_confirmed`. An eval case carries the context the
   server's `POST /api/v1/judgments/slack_routing/context` builds (DND-1048),
   which runs the router's own selection over the local inbox lines (anyone
   but the owner with the text emptied) and the app's claims. The rule is the
@@ -447,6 +457,16 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   before anything is sent, never reading as "no root is the owner's". A case
   whose context cannot be built is
   unscored `context_unavailable` and is never sent with an empty context.
+
+  **Later (2026-09-28):** this said "the owner confirms the rest one message
+  at a time at a terminal": every root without a forward record waited for
+  the owner. Replaced by the text above (DND-717, epic decision D-R2): the
+  owner's routing rule of 2026-09-28 ~04:25Z ("if I'm replying to a message,
+  the session that sent it is the intended recipient. If I specify a session,
+  then great. Most messages from slack will be for walt_ui") is applied
+  mechanically under `rule_confirmed`, so the eval does not wait on a confirm
+  batch. The Wilson bar is unchanged. Rule 1 labels no root: a root is not a
+  reply.
 - **The owner confirms with the conversation context** (DND-1047). Before
   each message, `judgment-label --confirm` shows the context window that
   the routing judge uses (slack-routing-v2): the same channel's top-level

@@ -661,6 +661,108 @@ has "a missing reader is context unavailable naming it, never an empty context" 
 has "a row whose root left the inbox is context unavailable, saying so" "${OUT}" "context unavailable: this event_id is no longer in walt_ui-slack.jsonl"
 has "the tally names the rows that can never be shown context" "${OUT}" "(1 no longer in walt_ui-slack.jsonl, so no context can be shown for them)"
 
+echo "== domain: the owner's routing rule as rule_confirmed labels (DND-717, D-R2)"
+
+# The parity vectors: gen_saas apps/athena/test/athena/slack_events/
+# session_mention_test.exs runs this same list against the router's
+# SessionMention.address/1 (grammar session-mention-v1). Keep them in step.
+VECTORS='[
+  ["Gen_saas session (laptop): turn the wifi back on", "gen_saas"],
+  ["harness session: status?", "harness"],
+  ["*harness session (~/dev/custom):* the inbox is dark", "harness"],
+  ["walt_ui session: ship the release", "walt_ui"],
+  ["Walt UI session - no colon", nil],
+  ["  the laptop session: hello", "gen_saas"],
+  ["custom session: hi", "harness"],
+  ["This is a message intended for the harness / custom session: I have HG-18", "harness"],
+  ["Note for the gen saas session: dnd deploy", "gen_saas"],
+  ["Get a status update from the harness session and give yours too.", nil],
+  ["The harness session asked me for 7 things: see above", nil],
+  ["this is why we need the harness session to build routing", nil],
+  ["ask the walt_ui session: it knows", nil],
+  ["harness: judgment routing smoke", nil],
+  ["harness / walt_ui session: both of you", nil],
+  [("x" * 81) + " for the harness session: late", nil],
+  ["hello\nfor the harness session: second line", nil],
+  ["desktop session: hi", nil],
+  ["", nil]
+]'
+ruby_eq "mention: the parity vectors all read as the router reads them [DND-717]" \
+  "19 ok" \
+  "v = ${VECTORS}; bad = v.reject { |t, want| JudgmentLabel.session_mention(t) == want }; bad.empty? ? \"#{v.size} ok\" : bad.inspect"
+ruby_eq "mention: nil text is no mention" "nil" 'JudgmentLabel.session_mention(nil).inspect'
+ruby_eq "mention: only the lead of a long message is read" "harness" \
+  'JudgmentLabel.session_mention("harness session: " + "y" * 10_000)'
+ruby_eq "mention: invalid UTF-8 in untrusted text is scrubbed, never a crash" "harness" \
+  'JudgmentLabel.session_mention("harness session: \xFF".dup.force_encoding("UTF-8"))'
+ruby_eq "mention: every label it answers is a SlackRouting label" "true" \
+  "(${VECTORS}.filter_map(&:last).uniq - JudgmentLabel::LABELS).empty?"
+ruby_eq "slack: a parsed line keeps the mention it addresses, not its text" \
+  "harness false" \
+  'l = JudgmentLabel.parse_slack(%({"event_id":"Ev1","kind":"im","user":"U","ts":"1.1","text":"harness session: hi"}\n), "S")[:lines].first; "#{l[:mention]} #{l.key?(:text)}"'
+
+# rb ROOTS FORWARD CONFLICTS EXISTING [RULE_DEFAULT] -> "id label provenance rule" per row
+rule_rows() {
+  printf 'b = JudgmentLabel.build(%s, {forward: %s, conflicts: %s}, %s, "NOW", rule_default: %s); b[:rows].map { |r| [r["id"], r["label"], r["provenance"], r["rule"] || "-"].join(" ") }.join(", ") + " overrides=#{b[:mention_overrides]}"' \
+    "$1" "$2" "$3" "$4" "${5:-false}"
+}
+ROOTS='[{event_id: "M", mention: "harness"}, {event_id: "F", mention: nil}, {event_id: "A", mention: "gen_saas"}, {event_id: "O", mention: "harness"}, {event_id: "N", mention: nil}, {event_id: "C", mention: nil}]'
+FWD='{"F" => "gen_saas", "A" => "gen_saas", "O" => "walt_ui", "M" => "walt_ui"}'
+OWNERROW='[{"id" => "O", "label" => "unclear", "provenance" => "owner_confirmed", "labeler" => "U", "labeled_at" => "t"}]'
+ruby_eq "build: mention wins over a disagreeing forward; an agreeing one stays forward_record; the owner's row is never touched [DND-717]" \
+  "M harness rule_confirmed session_mention, F gen_saas forward_record -, A gen_saas forward_record -, O unclear owner_confirmed -, N walt_ui proposed -, C unclear proposed - overrides=1" \
+  "$(rule_rows "${ROOTS}" "${FWD}" '["C"]' "${OWNERROW}")"
+ruby_eq "build: --rule-default labels only the no-evidence root walt_ui, rule_confirmed default_walt_ui; a conflict stays proposed [DND-717]" \
+  "M harness rule_confirmed session_mention, F gen_saas forward_record -, A gen_saas forward_record -, O unclear owner_confirmed -, N walt_ui rule_confirmed default_walt_ui, C unclear proposed - overrides=1" \
+  "$(rule_rows "${ROOTS}" "${FWD}" '["C"]' "${OWNERROW}" true)"
+ruby_eq "build: an unchanged rule row keeps its stamp; a changed rule re-stamps" \
+  "t NOW" \
+  "old = [{'id' => 'N', 'label' => 'walt_ui', 'provenance' => 'rule_confirmed', 'rule' => 'default_walt_ui', 'labeled_at' => 't'}]; r = ->(d) { JudgmentLabel.build([{event_id: 'N', mention: nil}], {forward: {}, conflicts: []}, old, 'NOW', rule_default: d)[:rows].first['labeled_at'] }; [r.(true), r.(false)].join(' ')"
+ruby_eq "labels: a rule_confirmed row round-trips with its rule [DND-717]" \
+  '{"id":"a","label":"harness","provenance":"rule_confirmed","labeler":"judgment-label","labeled_at":"t","rule":"session_mention"}' \
+  'JudgmentLabel.render(JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"rule_confirmed","labeler":"judgment-label","labeled_at":"t","rule":"session_mention"}\n), "L")).strip'
+ruby_eq "labels: a rule_confirmed row without a known rule is refused, naming its line" \
+  "InputError: L:1 is rule_confirmed with a rule outside session_mention|default_walt_ui" \
+  'JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"rule_confirmed","rule":"vibes"}\n), "L")'
+ruby_eq "labels: a rule on a row the rule did not label is refused" \
+  "InputError: L:1 has a rule on a owner_confirmed row" \
+  'JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"owner_confirmed","rule":"session_mention"}\n), "L")'
+ruby_eq "pending: the confirm step presents rule_confirmed rows with the proposed ones; the owner's answer replaces them" \
+  "p r|owner_confirmed -" \
+  "rows = [{'id' => 'p', 'provenance' => 'proposed'}, {'id' => 'r', 'provenance' => 'rule_confirmed', 'rule' => 'default_walt_ui'}, {'id' => 'f', 'provenance' => 'forward_record'}]; ids = JudgmentLabel.pending(rows, :proposed).map { |x| x['id'] }.join(' '); c = JudgmentLabel.confirm(rows, 'r', 'harness', 'U', 'now', 'shown').find { |x| x['id'] == 'r' }; ids + '|' + c['provenance'] + ' ' + (c['rule'] || '-')"
+
+echo "== end to end: the owner's rule on a fixture inbox (DND-717)"
+
+RROOT="${TMP}/rule-root"
+RLABELS="${TMP}/evals/rule-labels.jsonl"
+mkdir -p "${RROOT}/agent-mail/walt_ui/to-custom"
+: >"${RROOT}/custom-session.jsonl"
+: >"${RROOT}/gen_saas-session.jsonl"
+{
+  line EvM1 im "${OWNER}" "1790100001.000100" "" "Gen_saas session (laptop): SECRET-MENTION-TEXT"
+  line EvN1 im "${OWNER}" "1790100002.000200" "" "a plain question with no address"
+  line EvA1 im "${OWNER}" "1790100003.000300" "" "ask the harness session: about it"
+} >"${RROOT}/walt_ui-slack.jsonl"
+run "${BIN}" --propose --inbox-root "${RROOT}" --labels "${RLABELS}"
+eq "propose on the rule fixture exits 0" "${RC}" "0"
+eq "a session-addressed root is rule_confirmed session_mention [DND-717]" \
+  "$(jq -r 'select(.id=="EvM1") | .label + " " + .provenance + " " + .rule' "${RLABELS}")" "gen_saas rule_confirmed session_mention"
+eq "without --rule-default a no-evidence root stays proposed" "$(jq -r 'select(.id=="EvN1") | .provenance' "${RLABELS}")" "proposed"
+eq "talking about a session is not addressing it" "$(jq -r 'select(.id=="EvA1") | .label + " " + .provenance' "${RLABELS}")" "walt_ui proposed"
+lacks "the labels file never carries the text" "$(cat "${RLABELS}")" "SECRET-MENTION"
+has "the report counts the mentions" "${OUT}" "session mentions (rule 2, session-mention-v1): 1 rule_confirmed"
+run "${BIN}" --propose --rule-default --inbox-root "${RROOT}" --labels "${RLABELS}"
+eq "--propose --rule-default exits 0" "${RC}" "0"
+eq "--rule-default labels the no-evidence roots walt_ui default_walt_ui [DND-717]" \
+  "$(jq -r 'select(.provenance=="rule_confirmed" and .rule=="default_walt_ui") | .id' "${RLABELS}" | sort | tr '\n' ' ')" "EvA1 EvN1 "
+has "the report prints the rule_confirmed count" "${OUT}" "walt_ui rule_confirmed 2"
+run "${EVAL}" --dry-run --use-case slack_routing --labels "${RLABELS}" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
+eq "judgment-eval joins rule_confirmed rows (exit 0)" "${RC}" "0"
+has "rule_confirmed rows are usable eval cases, not excluded [DND-717]" "${OUT}" "cases: 3 (gen_saas 1, walt_ui 2)"
+run "${BIN}" --confirm --rule-default --labels "${RLABELS}"
+eq "--rule-default outside --propose is a usage error" "${RC}" "2"
+has "that usage error carries Fix:" "${ERR}" "Fix:"
+
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then

@@ -4101,6 +4101,10 @@ event classified (not ignored), dedupe pre-check passed
    2a. mode off           -> the channel route, UNCHANGED: no call, no
                              judgment_calls row, no topic, no topic outcome  [no call]
    2b. sender != owner    -> the channel route (topic reason: sender_rule)   [no judgment]
+   2b'. the owner's text addresses a session (owner rule 2, session-mention-v1)
+                          -> that label's topic route, live: its Slack inbox (route: session_mention)
+                             no enabled live route: the channel route (topic reason: label_disabled)
+                             no context read                              [no judgment]
    2c. read the conversation context (ai/contracts/athena-judgments.md ->
        Egress and data flow, the slack_routing row)
          read failed      -> the channel route (topic reason: context_unavailable)  [no judgment]
@@ -4133,6 +4137,42 @@ holds is `ai/contracts/athena-judgments.md` → *Egress and data flow*, not
 restated here. Why: the owner found roots that cannot be routed without the
 conversation before them.
 
+**Later (2026-09-28):** step 2b went straight to 2c: every owner-written new
+conversation was judged. Superseded by DND-717 (gen_saas
+`Athena.SlackEvents.SessionMention`), which adds step 2b′. Why: the owner's
+routing rule (Cody, 2026-09-28 ~04:25Z): "if I'm replying to a message, the
+session that sent it is the intended recipient. If I specify a session, then
+great. Most messages from slack will be for walt_ui." Rule 1 is step 1 (the
+thread claim) and rule 3 is the channel route; step 2b′ is rule 2, so the
+judgment is left as the tiebreak for a new conversation that names no
+session.
+
+**The session mention (step 2b′).** Grammar `session-mention-v1`, in code and
+versioned. Only the start of the owner's text is read, and only an ADDRESS
+counts, ending in a colon: the tag form (`harness session:`,
+`*gen_saas session (laptop):*`, as routing agreement R1 tags posts), or a
+single-line lead-in of at most 80 characters ending `for the <names>
+session:`. The word `session` is required. Names: `walt_ui` (`walt ui`) is
+walt_ui; `harness` and `custom` are harness; `gen_saas` (`gen saas`) and
+`laptop` are gen_saas; `desktop` names none. Names joined by `/` must name
+one label, or there is no mention. A message that talks ABOUT a session
+("ask the harness session to …") is not one and is judged as before.
+
+- **No threshold and no tokens.** The mention is the owner's own words, not
+  a judgment, so no `judgment_calls` row is written and no context is read.
+  Its topic route is looked up exactly as an accepted judgment's, under the
+  same authorization: it selects only among the owner's own topic routes.
+- **The line.** In `on` with a live route, `route: session_mention` and a
+  `topic` of `{label, confidence: null, model: null, reason: null}`. In
+  `shadow`, the channel route with that same `topic`; the outcome record says
+  `by=session_mention` and names the would-be route. A missing route is
+  `label_disabled`, as for a judgment.
+- **One grammar.** The harness applies the same grammar when it labels the
+  eval corpus (`ai/lib/judgment_label.rb`, `rule_confirmed` with
+  `"rule": "session_mention"`; `ai/contracts/athena-judgments.md` →
+  *Threshold provenance, n/a and the pinned model*). Both test suites carry one vector list; a change
+  to either is a new grammar version in both.
+
 - **Only the owner's own text is judged.** A new conversation from anyone else
   follows the channel route by code, with no judgment and no tokens. The
   context a root carries is also only the owner's own text, plus session
@@ -4161,8 +4201,9 @@ Every judge call also records its own row, per
 `ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
 behaviour, loudly*.
 
-**The line.** A line the topic route chose carries `route: topic_judgment`. A
-new-conversation line that reached step 2b or 2c — mode `shadow` or `on` —
+**The line.** A line the topic route chose carries `route: topic_judgment`, or
+`route: session_mention` when step 2b′ chose it. A
+new-conversation line that reached step 2b, 2b′ or 2c — mode `shadow` or `on` —
 carries a `topic` object, whether it was routed by topic or fell back. A
 new-conversation line stopped at 2a (mode `off`) carries neither field: it is
 the unchanged channel-route line. Both fields are defined in

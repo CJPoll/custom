@@ -29,7 +29,33 @@ module JudgmentLabel
   SLACK_USER_ID = /\A[UW][A-Z0-9]{2,}\z/
   # The SlackRouting v1 Choice options (DND-716). Exactly these four.
   LABELS = %w[walt_ui harness gen_saas unclear].freeze
-  PROVENANCES = %w[forward_record owner_confirmed proposed].freeze
+  PROVENANCES = %w[forward_record owner_confirmed rule_confirmed proposed].freeze
+  # The owner's routing rule (Cody, 2026-09-28 ~04:25Z), applied mechanically
+  # under provenance rule_confirmed (epic decision D-R2, DND-717). Rule 1 (a
+  # reply goes to the posting session) never labels a root: roots are not
+  # replies. The rule a rule_confirmed row came from is on the row.
+  #   session_mention  rule 2: the owner's text addresses a session
+  #   default_walt_ui  rule 3: "Most messages from slack will be for walt_ui";
+  #                    applied only with --rule-default, to a root no other
+  #                    evidence labels
+  RULES = %w[session_mention default_walt_ui].freeze
+  # Grammar session-mention-v1, the SAME grammar the server's router applies
+  # (gen_saas Athena.SlackEvents.SessionMention; both suites carry one vector
+  # list). Only a LEADING address counts: "harness session:" (the tag form,
+  # as R1 tags posts) or a single-line lead-in of at most 80 characters
+  # ending "for the harness session:". "session" is required. Names that
+  # disagree are no mention.
+  MENTION_GRAMMAR = "session-mention-v1"
+  MENTION_NAME = "(?:walt[_ ]?ui|harness|custom|gen[_ ]?saas|laptop)"
+  MENTION_NAMES = "(#{MENTION_NAME}(?:\\s*/\\s*#{MENTION_NAME})*)".freeze
+  MENTION_TAIL = "\\s+session(?:\\s*\\([^)\\n]{0,60}\\))?[*_]*\\s*:"
+  MENTION_FORMS = [
+    Regexp.new("\\A\\s*[*_]*\\s*(?:the\\s+)?#{MENTION_NAMES}#{MENTION_TAIL}", Regexp::IGNORECASE),
+    Regexp.new("\\A[^\\n:]{0,80}?\\bfor\\s+the\\s+#{MENTION_NAMES}#{MENTION_TAIL}", Regexp::IGNORECASE)
+  ].freeze
+  MENTION_LABELS = { "waltui" => "walt_ui", "harness" => "harness", "custom" => "harness",
+                     "gensaas" => "gen_saas", "laptop" => "gen_saas" }.freeze
+  MENTION_SCAN_CHARS = 400
   # Whether the owner saw the conversation context when confirming (DND-1047).
   # An owner_confirmed row without the mark was confirmed before context was
   # shown (batch 1, 2026-09-28 ~07:20Z); --confirm --recheck re-presents it.
@@ -71,9 +97,23 @@ module JudgmentLabel
     "the overlay value at #{OWNER_KEY.join} is not a Slack user id (U or W, then upper-case letters and digits)"
   end
 
-  # parse_slack(text, path) -> {lines: [{event_id, kind, user, channel, ts, thread_ts}], without_id: n}
+  # session_mention(text) -> the label the text addresses, or nil (grammar
+  # session-mention-v1, above). Untrusted text: invalid UTF-8 is scrubbed.
+  def session_mention(text)
+    return nil unless text.is_a?(String)
+
+    lead = text.scrub("?")[0, MENTION_SCAN_CHARS]
+    match = MENTION_FORMS.lazy.map { |re| re.match(lead) }.find(&:itself)
+    return nil unless match
+
+    labels = match[1].split("/").map { |n| MENTION_LABELS.fetch(n.downcase.gsub(/[\s_]/, "")) }.uniq
+    labels.size == 1 ? labels.first : nil
+  end
+
+  # parse_slack(text, path) -> {lines: [{event_id, kind, user, channel, ts, thread_ts, mention}], without_id: n}
   # An empty file is its own error, distinct from a missing one (the bin says
-  # which). A parsed line keeps no text.
+  # which). A parsed line keeps no text: only the label its text addresses
+  # (session_mention), or nil.
   def parse_slack(text, path)
     rows = jsonl(text, path, "slack")
     raise InputError.new("slack file #{path} is empty (0 lines)", "point --inbox-root at the root holding walt_ui-slack.jsonl; an empty inbox has nothing to label") if rows.empty?
@@ -86,7 +126,8 @@ module JudgmentLabel
         without_id += 1
         next
       end
-      lines << { event_id: id, kind: row["kind"], user: row["user"], channel: row["channel"], ts: row["ts"], thread_ts: row["thread_ts"] }
+      lines << { event_id: id, kind: row["kind"], user: row["user"], channel: row["channel"], ts: row["ts"], thread_ts: row["thread_ts"],
+                 mention: session_mention(row["text"]) }
     end
     { lines: lines, without_id: without_id }
   end
@@ -212,21 +253,34 @@ module JudgmentLabel
       raise InputError.new("#{where} has an unknown provenance", fix) unless PROVENANCES.include?(row["provenance"])
       raise InputError.new("#{where} has a context mark outside #{CONTEXT_MARKS.join('|')}", fix) if row.key?("context") && !CONTEXT_MARKS.include?(row["context"])
       raise InputError.new("#{where} has a context mark on a #{row['provenance']} row", "a context mark belongs only on an owner_confirmed row; #{fix}") if row.key?("context") && row["provenance"] != "owner_confirmed"
+      raise InputError.new("#{where} is rule_confirmed with a rule outside #{RULES.join('|')}", "a rule_confirmed row names the rule that labelled it; #{fix}") if row["provenance"] == "rule_confirmed" && !RULES.include?(row["rule"])
+      raise InputError.new("#{where} has a rule on a #{row['provenance']} row", "a rule belongs only on a rule_confirmed row; #{fix}") if row.key?("rule") && row["provenance"] != "rule_confirmed"
       raise InputError.new("#{where} repeats the id of line #{seen[row['id']]}", "keep one row per id (judgment-eval refuses a repeat)") if seen.key?(row["id"])
 
       seen[row["id"]] = line_no
-      row.slice("id", "label", "provenance", "labeler", "labeled_at", "context")
+      row.slice("id", "label", "provenance", "labeler", "labeled_at", "context", "rule")
     end
   end
 
-  # build(roots, matched, existing, now) -> {rows:, kept_orphans:, dropped:, disagreements:}
+  # build(roots, matched, existing, now, rule_default: false)
+  #   -> {rows:, kept_orphans:, dropped:, disagreements:, mention_overrides:}
   # owner_confirmed rows are the owner's work: never overwritten or dropped.
-  # A recomputed row keeps its labeled_at when its label and provenance are
-  # unchanged, so an unchanged input writes a byte-identical file.
-  def build(roots, matched, existing, now)
+  # Otherwise, in order (the owner's rule, D-R2):
+  #   1. the root's text addresses a session (rule 2): that label. A forward
+  #      record that agrees keeps forward_record; any other root is
+  #      rule_confirmed/session_mention, and a forward record it overrides is
+  #      counted in mention_overrides;
+  #   2. a forward record: forward_record;
+  #   3. forwarded to two sessions: proposed unclear;
+  #   4. no evidence: walt_ui, rule_confirmed/default_walt_ui with
+  #      rule_default (rule 3), proposed without it.
+  # A recomputed row keeps its labeled_at when its label, provenance and rule
+  # are unchanged, so an unchanged input writes a byte-identical file.
+  def build(roots, matched, existing, now, rule_default: false)
     prior = existing.to_h { |r| [r["id"], r] }
     root_ids = {}
     disagreements = 0
+    mention_overrides = 0
     rows = roots.map do |root|
       id = root[:event_id]
       root_ids[id] = true
@@ -236,17 +290,27 @@ module JudgmentLabel
         disagreements += 1 if forward && forward != old["label"]
         next old
       end
-      label, provenance =
-        if forward then [forward, "forward_record"]
-        elsif matched[:conflicts].include?(id) then [CONFLICT, "proposed"]
-        else [NO_EVIDENCE, "proposed"]
-        end
-      stamp = old && old["label"] == label && old["provenance"] == provenance ? old["labeled_at"] : now
-      { "id" => id, "label" => label, "provenance" => provenance, "labeler" => TOOL, "labeled_at" => stamp }
+      mention_overrides += 1 if root[:mention] && forward && forward != root[:mention]
+      label, provenance, rule = derive(root[:mention], forward, matched[:conflicts].include?(id), rule_default)
+      stamp = old && old["label"] == label && old["provenance"] == provenance && old["rule"] == rule ? old["labeled_at"] : now
+      row = { "id" => id, "label" => label, "provenance" => provenance, "labeler" => TOOL, "labeled_at" => stamp }
+      rule ? row.merge("rule" => rule) : row
     end
     gone = existing.reject { |r| root_ids.key?(r["id"]) }
     orphans = gone.select { |r| r["provenance"] == "owner_confirmed" }
-    { rows: rows + orphans, kept_orphans: orphans.size, dropped: gone.size - orphans.size, disagreements: disagreements }
+    { rows: rows + orphans, kept_orphans: orphans.size, dropped: gone.size - orphans.size, disagreements: disagreements,
+      mention_overrides: mention_overrides }
+  end
+
+  # derive(mention, forward, conflict, rule_default) -> [label, provenance, rule-or-nil]; see build.
+  def derive(mention, forward, conflict, rule_default)
+    if mention && mention == forward then [forward, "forward_record", nil]
+    elsif mention then [mention, "rule_confirmed", "session_mention"]
+    elsif forward then [forward, "forward_record", nil]
+    elsif conflict then [CONFLICT, "proposed", nil]
+    elsif rule_default then [NO_EVIDENCE, "rule_confirmed", "default_walt_ui"]
+    else [NO_EVIDENCE, "proposed", nil]
+    end
   end
 
   # confirm(rows, id, label, owner, now, context) -> rows with that row
@@ -264,7 +328,9 @@ module JudgmentLabel
   end
 
   # pending(rows, mode) -> the rows a confirm mode presents, in file order.
-  #   :proposed  rows with no confirmed label yet
+  #   :proposed  rows the owner has not answered: proposed, and rule_confirmed
+  #              (the owner's rule applied mechanically; the owner's own
+  #              answer replaces it)
   #   :forward   forward_record rows, for the owner to review
   #   :recheck   owner_confirmed rows whose context was not shown (confirmed
   #              before DND-1047, or while Slack was unreachable); their
@@ -273,7 +339,7 @@ module JudgmentLabel
     raise ArgumentError, "not a confirm mode: #{mode}" unless CONFIRM_MODES.include?(mode)
 
     case mode
-    when :proposed then rows.select { |r| r["provenance"] == "proposed" }
+    when :proposed then rows.select { |r| %w[proposed rule_confirmed].include?(r["provenance"]) }
     when :forward then rows.select { |r| r["provenance"] == "forward_record" }
     else rows.select { |r| r["provenance"] == "owner_confirmed" && r["context"] != "shown" }
     end

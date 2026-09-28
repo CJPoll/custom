@@ -851,7 +851,7 @@ One JSON object per line, UTF-8, no pretty-printing, newline-terminated:
 {"v":1,"received_at":"2026-09-01T22:10:03Z","kind":"im|mpim|channel|mention|thread_reply",
  "channel":"C…|D…","user":"U…","ts":"1788….…","thread_ts":"1788….… or null",
  "text":"…raw text…","permalink":"https://… (optional)","event_id":"Ev…",
- "route":"thread_claim|topic_judgment|channel_route (optional)",
+ "route":"thread_claim|topic_judgment|session_mention|channel_route (optional)",
  "topic":{"label":"… or null","confidence":0.0,"model":"jev-1.13.0 or null","reason":"… or null"} (optional)}
 ```
 
@@ -961,9 +961,11 @@ none and read as legacy.
 claimant*). `thread_claim`: a live claim on the reply's thread chose it.
 `topic_judgment`: an accepted topic judgment chose it
 (`ai/contracts/athena-events.md` → *New conversations may route by an advisory
-topic judgment*). `channel_route`: the app's channel route chose it, including a
-stale-claim fallback and every topic-judgment fallback. The field is optional
-and additive:
+topic judgment*). `session_mention`: the owner's text addressed one of the
+owner's sessions and that session's topic route chose it, with no judgment
+(the same section, *The session mention (step 2b′)*). `channel_route`: the
+app's channel route chose it, including a stale-claim fallback and every
+topic-judgment fallback. The field is optional and additive:
 
 - **Absent** means a line written before the producer stamped the field. It is
   read and counted normally.
@@ -975,8 +977,8 @@ and additive:
 (`ai/contracts/athena-events.md` → *New conversations may route by an advisory
 topic judgment*). It is an object with exactly four members:
 
-- `label`: the session label the judgment chose, or `null` when no judgment
-  answered;
+- `label`: the session label the judgment chose or the owner's session
+  mention named, or `null` when neither did;
 - `confidence`: the judgment's confidence in `[0,1]`, or `null`;
 - `model`: the versioned model id that answered, or `null`;
 - `reason`: `null` when the judgment was accepted, otherwise a reason from
@@ -985,8 +987,11 @@ topic judgment*). It is an object with exactly four members:
   `below_threshold`).
 
 `route: topic_judgment` with `reason: null` is a routed judgment.
-`route: channel_route` with `reason: null` is a shadow-mode judgment that would
-have been accepted and was not acted on. The object carries no probabilities and
+`route: session_mention` is a routed session mention: `label` is the session
+the owner addressed, and `confidence` and `model` are `null` because no model
+answered. `route: channel_route` with `reason: null` is a shadow-mode judgment
+or session mention that would have been routed and was not; `model: null`
+there means the mention. The object carries no probabilities and
 no text. It is optional and additive on the same terms as `route`: absent on
 lines written before the producer stamped it, absent when the routing mode is
 `off`, and absent on every line that is not a new conversation; not a dedupe
@@ -1000,6 +1005,13 @@ DND-716 (gen_saas PR #479): a new conversation while the routing mode is `off`
 writes no `topic` object at all — the line is byte-identical to the pre-epic
 line, matching `ai/contracts/athena-events.md` → *New conversations may route
 by an advisory topic judgment*.
+
+**Later (2026-09-28):** `route` had three values and `topic.label` was only
+ever a judgment's answer, so `route: channel_route` with `reason: null` was
+always a shadow judgment. Superseded by DND-717: the router's session-mention
+step adds `route: session_mention`, and its `topic` names the addressed session
+with `confidence` and `model` null. A reader already tolerates the new value
+(*unknown value* above).
 
 ### `received_at` — what it is and is not
 
