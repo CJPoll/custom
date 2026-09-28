@@ -433,6 +433,16 @@ athena:ticket-management → *Before filing a finding*.
   eval-produced threshold for that label accepts. In mode `on` the severity is
   printed as an uncalibrated suggestion. Shadow mode prints no advice at all,
   severity included.
+- **An uncalibrated relation says so.** The judged response names each
+  advisory relation's threshold state (`thresholds`: `enabled`, `n_a` or
+  `unset`, DND-714). In mode `on`, a relation that is not `enabled` prints
+  "insufficient evidence" and is never advised, so its silence never reads as
+  "no duplicate". A state the server did not report is said as such and is
+  never read as `enabled`.
+- **Setting the mode** is gen_saas `Athena.Judgments.Settings.set_mode/3`
+  (DND-714), the owner's only writer. It applies *Modes*' refusal strictly:
+  `on` needs at least one ENABLED eval-produced label, so a run where every
+  label is n/a cannot turn a use case on.
 - **A server that answered and refused** (any 4xx, a rejected machine token
   included) prints its own line with the server's `Fix:`, distinct from a
   server that could not be reached. A 200 outside this shape is its own

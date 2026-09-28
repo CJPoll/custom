@@ -62,9 +62,12 @@ USAGE = <<~EOF
   Output (stdout), always in this order:
     "<N> candidates considered (...)" -- printed even when N is 0
     then either the advisory:
-      "Jev advisory (not a decision) ..." and one line per candidate the
-      server judged duplicate or related AT OR ABOVE its threshold (or a line
-      saying none is), then "severity suggestion: <LEVEL> ..."
+      "Jev advisory (not a decision) ..."; in mode on, a line saying
+      "insufficient evidence" for each relation whose threshold is n/a or
+      unset (it is never advised, and its silence is not "no duplicate");
+      one line per candidate the server judged duplicate or related AT OR
+      ABOVE its threshold (or a line saying none is, naming the enabled
+      relations); then "severity suggestion: <LEVEL> ..."
     or one unavailable line, ending "#{UNAVAILABLE_FIX}"
       "JUDGMENTS UNAVAILABLE: <reason>. #{UNAVAILABLE_FIX}"
       "CANDIDATES UNAVAILABLE: <why>. #{UNAVAILABLE_FIX}"
@@ -276,9 +279,12 @@ module Triage
       return lines
     end
 
-    hits = Array(result["candidates"]).select { |c| c["above_threshold"] == true && %w[duplicate related].include?(c["relation"]) }
+    states = ADVISORY.to_h { |rel| [rel, threshold_state(result, rel)] }
+    states.each { |rel, state| lines << evidence_line(rel, state) unless state == "enabled" }
+    hits = Array(result["candidates"]).select { |c| c["above_threshold"] == true && ADVISORY.include?(c["relation"]) }
     if hits.empty?
-      lines << "  no candidate is a duplicate or related at or above its threshold."
+      enabled = ADVISORY.select { |rel| states[rel] == "enabled" }
+      lines << "  no candidate is #{enabled.map { |rel| RELATION_NOUN[rel] }.join(' or ')} at or above its threshold." unless enabled.empty?
     else
       hits.each do |c|
         lines << format("  %s: %s (confidence %.2f) -- %s", c["ref"], c["relation"], c["confidence"].to_f, titles.fetch(c["ref"], "(title not retrieved)"))
@@ -287,6 +293,28 @@ module Triage
     sev = result["severity"] || {}
     lines << format("  severity suggestion: %s (confidence %.2f; a suggestion, not calibrated)", sev["level"], sev["confidence"].to_f)
     lines
+  end
+
+  # The relations the advisory may name, and how a "none" line names them.
+  ADVISORY = %w[duplicate related].freeze
+  RELATION_NOUN = { "duplicate" => "a duplicate", "related" => "related" }.freeze
+
+  # threshold_state(result, rel) -> "enabled", "n_a", "unset", or nil when
+  # the server did not report it (DND-714). nil is never read as enabled.
+  def threshold_state(result, rel)
+    states = result["thresholds"]
+    state = states.is_a?(Hash) ? states[rel] : nil
+    %w[enabled n_a unset].include?(state) ? state : nil
+  end
+
+  # evidence_line(rel, state) -> the line for a relation that cannot be
+  # advised: its silence must never read as "no duplicate".
+  def evidence_line(rel, state)
+    case state
+    when "n_a" then "  #{rel}: insufficient evidence (n/a: the eval could not calibrate it); not advised."
+    when "unset" then "  #{rel}: insufficient evidence (no threshold); not advised."
+    else "  #{rel}: threshold state not reported by the server; treat as insufficient evidence."
+    end
   end
 
   def security_hint?(title, body)

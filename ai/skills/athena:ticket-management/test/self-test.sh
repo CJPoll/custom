@@ -96,10 +96,22 @@ ruby_eq "candidates file: a ref that is text is refused, never echoed" \
   'Triage.parse_candidates_file(%([{"ref":"SECRET words here","title":"a"}]))'
 ruby_eq "advisory: only duplicate/related AT OR ABOVE threshold, then the severity" \
   "3|  DND-5: duplicate (confidence 0.93) -- Five|  severity suggestion: HIGH (confidence 0.55; a suggestion, not calibrated)" \
-  'l = Triage.advisory_lines({"mode"=>"on","question_set_version"=>"v1","model"=>"m","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.93,"above_threshold"=>true},{"ref"=>"DND-6","relation"=>"related","confidence"=>0.4,"above_threshold"=>false},{"ref"=>"DND-7","relation"=>"unrelated","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"HIGH","confidence"=>0.55}}, {"DND-5"=>"Five"}); [l.size, l[1], l[2]].join("|")'
+  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"question_set_version"=>"v1","model"=>"m","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.93,"above_threshold"=>true},{"ref"=>"DND-6","relation"=>"related","confidence"=>0.4,"above_threshold"=>false},{"ref"=>"DND-7","relation"=>"unrelated","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"HIGH","confidence"=>0.55}}, {"DND-5"=>"Five"}); [l.size, l[1], l[2]].join("|")'
 ruby_eq "advisory: none above threshold is said" \
   "  no candidate is a duplicate or related at or above its threshold." \
-  'Triage.advisory_lines({"mode"=>"on","candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[1]'
+  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[1]'
+ruby_eq "advisory: an n/a relation says insufficient evidence, and only enabled ones are advised [DND-714]" \
+  "4|  duplicate: insufficient evidence (n/a: the eval could not calibrate it); not advised.|  DND-6: related (confidence 0.97) -- Six" \
+  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>false},{"ref"=>"DND-6","relation"=>"related","confidence"=>0.97,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-6"=>"Six"}); [l.size, l[1], l[2]].join("|")'
+ruby_eq "advisory: no hit names only the enabled relations [DND-714]" \
+  "  no candidate is related at or above its threshold." \
+  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[2]'
+ruby_eq "advisory: an unset relation says insufficient evidence (no threshold) [DND-714]" \
+  "  related: insufficient evidence (no threshold); not advised." \
+  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"unset"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[1]'
+ruby_eq "advisory: no threshold state from the server is said, never read as enabled [DND-714]" \
+  "  duplicate: threshold state not reported by the server; treat as insufficient evidence.|  related: threshold state not reported by the server; treat as insufficient evidence.|4" \
+  'l = Triage.advisory_lines({"mode"=>"on","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l[1], l[2], l.size - 1].join("|")'
 ruby_eq "advisory: shadow mode advises nothing" \
   "2|  mode shadow: judged and recorded; nothing is advised until the mode is on." \
   'l = Triage.advisory_lines({"mode"=>"shadow","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>1,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l.size, l[1]].join("|")'
@@ -227,7 +239,7 @@ registry "http://127.0.0.1:${PORT}/mcp"
 
 # 0 candidates considered, judged.
 spec "query-${TICKETS_DS}.json" '{"status":200,"body":{"results":[]}}'
-spec triage.json '{"status":200,"body":{"status":"judged","mode":"on","question_set_version":"finding-triage-v1","model":"jev-1.13.0","candidates":[],"severity":{"level":"MEDIUM","score":1.1,"confidence":0.6}}}'
+spec triage.json '{"status":200,"body":{"status":"judged","mode":"on","question_set_version":"finding-triage-v1","model":"jev-1.13.0","thresholds":{"duplicate":"enabled","related":"enabled"},"candidates":[],"severity":{"level":"MEDIUM","score":1.1,"confidence":0.6}}}'
 : > "${TMP}/server.log"
 run "${FINDING[@]}" --project harness
 eq "0 candidates judged exits 0 [qa]" "${RC}" "0"
@@ -238,7 +250,7 @@ eq "the server got an empty candidate list" "$(jq -c 'select(.service == "athena
 
 # Judged with a duplicate above threshold.
 spec "query-${TICKETS_DS}.json" "${TICKETS_TWO}"
-spec triage.json '{"status":200,"body":{"status":"judged","mode":"on","question_set_version":"finding-triage-v1","model":"jev-1.13.0","candidates":[{"ref":"DND-5","relation":"duplicate","confidence":0.91,"above_threshold":true},{"ref":"DND-6","relation":"related","confidence":0.4,"above_threshold":false}],"severity":{"level":"HIGH","score":2.0,"confidence":0.7}}}'
+spec triage.json '{"status":200,"body":{"status":"judged","mode":"on","question_set_version":"finding-triage-v1","model":"jev-1.13.0","thresholds":{"duplicate":"enabled","related":"enabled"},"candidates":[{"ref":"DND-5","relation":"duplicate","confidence":0.91,"above_threshold":true},{"ref":"DND-6","relation":"related","confidence":0.4,"above_threshold":false}],"severity":{"level":"HIGH","score":2.0,"confidence":0.7}}}'
 run "${FINDING[@]}" --project harness
 eq "judged exits 0" "${RC}" "0"
 has "the duplicate above threshold is printed with its title" "${OUT}" "DND-5: duplicate (confidence 0.91) -- Gate passes when its check cannot run"
@@ -357,7 +369,7 @@ LANG=C LC_ALL=C run --title "HIGH: $(printf 'é%.0s' $(seq 1 310))" --body-file 
 eq "a C-locale title is cut to 300 characters, not bytes" "$(jq -r 'select(.service == "athena") | .body.finding.title | length' "${TMP}/server.log")" "300"
 
 # A security word prints the hint.
-spec triage.json '{"status":200,"body":{"status":"judged","mode":"on","question_set_version":"finding-triage-v1","model":"jev-1.13.0","candidates":[],"severity":{"level":"CRITICAL","score":3,"confidence":0.9}}}'
+spec triage.json '{"status":200,"body":{"status":"judged","mode":"on","question_set_version":"finding-triage-v1","model":"jev-1.13.0","thresholds":{"duplicate":"enabled","related":"enabled"},"candidates":[],"severity":{"level":"CRITICAL","score":3,"confidence":0.9}}}'
 printf '[]\n' > "${TMP}/none.json"
 run --title "CRITICAL: token printed in argv" --body-file "${TMP}/body.txt" --project harness --candidates-file "${TMP}/none.json"
 has "a security finding prints the hint" "${OUT}" "Owner approval policy -> Security fixes"
