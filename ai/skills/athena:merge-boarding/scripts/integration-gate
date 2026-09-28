@@ -415,7 +415,7 @@ if [ -n "$PRESTARTED" ]; then
   read -r p_pgid p_sha p_log <<<"$PRESTARTED"
   if [[ "$p_pgid" =~ ^[1-9][0-9]*$ ]] && [[ "$p_sha" =~ ^[0-9a-f]{40}$ ]] \
      && [[ "$(basename "${p_log:-x}")" == integration-gate-critic.* ]] && [ -f "$p_log" ] \
-     && tr '\0' ' ' <"/proc/${p_pgid}/cmdline" 2>/dev/null | grep -q 'critic-review' \
+     && grep -q 'critic-review' <<<"$(tr '\0' ' ' <"/proc/${p_pgid}/cmdline" 2>/dev/null)" \
      && [ "$(sed 's/.*) //' "/proc/${p_pgid}/stat" 2>/dev/null | cut -d' ' -f3)" = "$p_pgid" ]; then
     PRE_PGID="$p_pgid"; PRE_SHA="$p_sha"; PRE_LOG="$p_log"
   elif [ -f "${p_log:-}" ] && [[ "$(basename "$p_log")" == integration-gate-critic.* ]]; then
