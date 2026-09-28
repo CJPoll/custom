@@ -300,6 +300,15 @@ out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-a
 out="$( cd "$R" && HOME="$FIXTURE_HOME" "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval 'owner said go' 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && ok "c14 a free-text --owner-approval is REFUSED (exit 2)" || bad "c14 free text: expected exit 2, got $rc" "$out"
 grep -q 'INTEGRATION OK' <<<"$out" && bad "c14 free text printed INTEGRATION OK" "$out" || ok "c14 free text prints no INTEGRATION OK"
+# ...and a VERIFIED record on a head nothing holds is refused too, so no OK
+# line or receipt ever records an approval that gated nothing.
+R="${TMP}/c14b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo x > app.txt && git add app.txt && git commit -qm app )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+out="$( cd "$R" && HOME="$FIXTURE_HOME" "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval "$APPROVAL" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c14b a verified approval on a COLD head is REFUSED (exit 2)" || bad "c14b expected exit 2, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "c14b printed INTEGRATION OK with an unneeded approval" "$out" || ok "c14b no INTEGRATION OK records an approval that gated nothing"
 
 # ---------------------------------------------------------------- case 15
 # THE OVERRIDE'S SCOPE. --critic-override covers the ABSENCE of a verdict, not

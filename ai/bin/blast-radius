@@ -2038,6 +2038,15 @@ OWNER_APPROVAL_FIX =
 # so a delimiter inside the owner's words can never end the field early.
 OWNER_APPROVAL_RE = /\A(session:\S+)[ \t]+quote:(.+)\z/m.freeze
 
+# An approval on a head nothing holds is refused (exit 2): integration-gate
+# records --owner-approval on its INTEGRATION OK line and in the receipt, so
+# accepting it here would record an approval that gated nothing.
+def refuse_unneeded_approval!
+  die("--owner-approval was passed, but nothing in this diff holds for the owner.",
+      "drop --owner-approval and re-run: an approval is recorded only on a head it actually " \
+      "gates. What holds: ~/.claude/CLAUDE.md -> Owner approval policy.")
+end
+
 # -> [ref, words, owner_turn_text]; dies (exit 2) on anything unverified.
 def verify_owner_approval!(value)
   m = OWNER_APPROVAL_RE.match(value.to_s.strip)
@@ -2149,6 +2158,7 @@ def run(argv)
 
   if hits.empty?
     print_report("COLD", head, manifest, surfaces, pattern_count, files, hits, nil, examined, {}, refs)
+    refuse_unneeded_approval! if approval
     return 0
   end
 
@@ -2173,7 +2183,7 @@ def run(argv)
       puts "  -> report-only surface(s) touched (#{report_only.map { |hh| hh[:class] }.uniq.join(', ')}): " \
            "reported, not held (~/.claude/CLAUDE.md -> Owner approval policy)."
     end
-    puts "  owner-approval: not needed -- nothing here holds; not recorded as used" if approval
+    refuse_unneeded_approval! if approval
     return 0
   end
 
@@ -3331,9 +3341,16 @@ def self_test
                code.zero? && out.include?("BLAST-RADIUS WARM") && out.include?(".github/workflows/post-merge.yml") &&
                  out.include?("[deploy-automation]") && out.include?("hold: no") && out.include?("report-only"),
                "exit=#{code} out=#{out}")
-    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", good_approval] + real, env: fx_env)
-    check.call("policy: a verified approval on a head nothing holds is noted as not needed (exit 0, no HOT-OWNER-APPROVED)",
-               code.zero? && out.include?("not needed") && !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out}")
+    out, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", good_approval] + real, env: fx_env)
+    check.call("policy: a verified approval on a WARM head (nothing holds) is REFUSED, exit 2 -- never recorded as used",
+               code == 2 && err.include?("nothing in this diff holds") && err.include?("Fix:") &&
+                 !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    dc = File.join(tmp, "policy-cold-approved")
+    bc, hc = mkrepo.call(dc) { |r| File.write(File.join(r, "app.rb"), "x\n") }
+    out, err, code = run_br.call(["--base", bc, "--head", hc, "--repo", dc, "--owner-approval", good_approval] + real, env: fx_env)
+    check.call("policy: a verified approval on a COLD head is REFUSED, exit 2",
+               code == 2 && out.include?("BLAST-RADIUS COLD") && err.include?("nothing in this diff holds"),
+               "exit=#{code} out=#{out} err=#{err}")
     d = File.join(tmp, "policy-tf")
     b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
     out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d] + real)

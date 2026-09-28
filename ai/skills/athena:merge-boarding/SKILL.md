@@ -230,7 +230,8 @@ The reference names the turn the owner typed, in the Claude Code session where
 they typed it. `blast-radius` checks the transcript and refuses anything else:
 free text, a rule citation, an architect's sign-off, a captain's report,
 another agent's message, a Slack reply. A coordinator that heard the owner
-relays the reference, never a paraphrase. The record prints into the
+relays the reference, never a paraphrase. A record passed on a head nothing
+holds is refused (exit 2), so drop it there. The record prints into the
 `INTEGRATION OK` line and the receipt; copy the line into your state log and
 name it in the final report.
 
