@@ -1239,7 +1239,8 @@ end
 
 # STASH FIXTURE OPT-OUT (DND-775). Agent sessions carry the agent-stash
 # reference-transaction hook (GIT_CONFIG_COUNT/KEY_n/VALUE_n + GIT_TRACE2) and
-# the PATH git wrapper (ATHENA_AGENT_BIN, prepended by dotfiles/.zshrc). Both
+# the PATH git wrapper (ATHENA_AGENT_BIN, prepended by the CLAUDE_ENV_FILE
+# script ai/agent-env/session-env.sh, DND-1080). Both
 # refuse every stash-list write. The legacy git-stash-guard suite seeds its
 # fixture repos (under mktemp -d, never a real repo) with real stash entries,
 # so in an activated session it would be refused before it tests anything.

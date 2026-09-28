@@ -34,11 +34,14 @@
 #
 # The agent-stash env (DND-775) is ai/hooks/registry.json's `env` section: the
 # GIT_CONFIG_* pairs that register the reference-transaction hook
-# ai/git-hooks/agent-stash-guard.sh, GIT_TRACE2=/dev/null, and ATHENA_AGENT_BIN.
+# ai/git-hooks/agent-stash-guard.sh, GIT_TRACE2=/dev/null, ATHENA_AGENT_BIN, and
+# CLAUDE_ENV_FILE (ai/agent-env/session-env.sh, which puts the wrapper first on
+# the Bash tool's PATH, DND-1080).
 # Its GIT_CONFIG pairs are APPENDED after any the settings env already holds,
 # never written over an index in use; a key already present with another value
 # is refused, never overwritten. --remove-env deletes exactly those keys and
-# renumbers the rest. An --install-env that adds ATHENA_AGENT_BIN also writes
+# renumbers the rest; GIT_TRACE2 and CLAUDE_ENV_FILE only while they hold our
+# value. An --install-env that adds ATHENA_AGENT_BIN or CLAUDE_ENV_FILE writes
 # ATHENA_AGENT_ENV_INSTALLED_AT (UTC, to the second) in the same write, so
 # check-hooks-registered can tell a session started before the install
 # (PENDING RESTART) from drift (DND-1036); --remove-env removes it too.
@@ -197,6 +200,13 @@ if mode in ("install-env", "remove-env"):
     # Must equal AgentStashEnv::INSTALLED_AT (ai/lib/agent_stash_env.rb); the
     # self-test's install-env case asserts the checker reads what this writes.
     STAMP_KEY = "ATHENA_AGENT_ENV_INSTALLED_AT"
+    # The vars whose arrival puts the wrapper first on a new session's PATH
+    # (DND-1080): the wrapper's directory, and the CLAUDE_ENV_FILE script that
+    # prepends it after the shell snapshot.
+    DELIVERY_KEYS = {"ATHENA_AGENT_BIN", "CLAUDE_ENV_FILE"}
+    # Names other tools use too: --remove-env removes them only while they hold
+    # our value (AgentStashEnv::SHARED_VARS keeps them out of the marker keys).
+    SHARED_KEYS = {"GIT_TRACE2", "CLAUDE_ENV_FILE"}
     vars_ = {k: ex(v) for k, v in spec["vars"].items()}
     env = settings.get("env", {})
     if not isinstance(env, dict):
@@ -252,11 +262,12 @@ if mode in ("install-env", "remove-env"):
             if k not in env:
                 env[k] = v
                 changes.append(f"+ env {k}={v}")
-                bin_added = bin_added or k == "ATHENA_AGENT_BIN"
+                bin_added = bin_added or k in DELIVERY_KEYS
         # The install time (DND-1036), written in the same file write that
-        # adds ATHENA_AGENT_BIN, and at no other time: a session whose shell
+        # adds a DELIVERY key, and at no other time: a session whose shell
         # snapshot predates it is a pending restart, not drift. ATHENA_AGENT_BIN
-        # is the key whose arrival puts the wrapper on a new session's PATH. A
+        # and CLAUDE_ENV_FILE together put the wrapper on a new session's PATH
+        # (DND-1080), so the arrival of the second is when that became true. A
         # run that only adds GIT_CONFIG pairs (a grown landed env, a partial
         # env) never moves it, and a no-op run never backfills it: stamping
         # "now" onto an older install would read sessions started between the
@@ -283,9 +294,9 @@ if mode in ("install-env", "remove-env"):
             else:
                 env.pop("GIT_CONFIG_COUNT", None)
         for k, v in vars_.items():
-            # GIT_TRACE2 is removed only when it is ours (/dev/null): the owner
-            # may set it for other reasons.
-            if k in env and (k != "GIT_TRACE2" or env[k] == v):
+            # A SHARED name is removed only while it holds our value: the owner
+            # may set GIT_TRACE2 or CLAUDE_ENV_FILE for other reasons.
+            if k in env and (k not in SHARED_KEYS or env[k] == v):
                 del env[k]
                 changes.append(f"- env {k}")
         if STAMP_KEY in env:
@@ -783,6 +794,34 @@ PY3
     re2="$(apply install-env "$envs" 0)"
     grep -q "MARKER:nochange" <<<"$re2" && echo "  ok   install-env is idempotent" \
       || { echo "  FAIL second install-env should be a no-op"; ok=0; }
+    # A FRESH session gets the wrapper first on PATH (DND-1080). The fixture
+    # models Claude Code's Bash tool (2.1.283, read from its bundle): the shell
+    # snapshot ENDS with `export PATH=<Claude Code's own process PATH>`, so
+    # whatever ~/.zshrc did to PATH while the snapshot was built is discarded;
+    # then each command runs the CLAUDE_ENV_FILE script, then the command. The
+    # settings env install-env wrote is the only input; a {{MAIN}} path is read
+    # from the tree under test, which is what lands at that path.
+    fresh="$(SETTINGS="$envs" MAIN="$HOOKS_REPO_DIR" TREE="$REPO_DIR" python3 - <<'PYF'
+import json, os
+env = json.load(open(os.environ["SETTINGS"])).get("env", {})
+m = lambda v: os.environ["TREE"] + v[len(os.environ["MAIN"]):] if v.startswith(os.environ["MAIN"] + "/") else v
+print(m(env.get("ATHENA_AGENT_BIN", "")))
+print(m(env.get("CLAUDE_ENV_FILE", "")))
+PYF
+)"
+    fbin="$(sed -n 1p <<<"$fresh")"; ffile="$(sed -n 2p <<<"$fresh")"
+    fdir="${tmp}/fresh-session"; mkdir -p "$fdir"
+    printf 'export PATH=%s\n' "/usr/bin:/bin" > "${fdir}/snapshot.sh"
+    fscript=""; [ -n "$ffile" ] && fscript="$(cat "$ffile" 2>/dev/null || true)"
+    fgit="$(env -i HOME="$fdir" ATHENA_AGENT_BIN="$fbin" PATH=/usr/bin:/bin sh -c ". '${fdir}/snapshot.sh' || true
+${fscript}
+:
+command -v git" 2>&1 || true)"
+    if [ -n "$fbin" ] && [ "$fgit" = "${fbin}/git" ]; then
+      echo "  ok   a fresh session built from the installed env has the agent git wrapper first on PATH (DND-1080)"
+    else
+      echo "  FAIL a fresh session built from the installed env must have ${fbin:-<no ATHENA_AGENT_BIN>}/git first on PATH, got [${fgit}] (CLAUDE_ENV_FILE=[${ffile}]) (DND-1080)"; ok=0
+    fi
     # The stamp this installer writes is the one the checker reads (DND-1036):
     # the shipped AgentStashEnv.installed_at, not a copy of its rule.
     SETTINGS="$envs" LIB="${REPO_DIR}/ai/lib/agent_stash_env.rb" /usr/bin/ruby -rjson -e '
@@ -810,7 +849,7 @@ PY4
       || { echo "  FAIL install-env moved the install time without adding ATHENA_AGENT_BIN: $(cat "$envs")"; ok=0; }
     # The fixture repo's origin/main is this tree, so the checker's landed env
     # bar is the one install-env just wrote. Its values must match: ACTIVE, or
-    # (the fixture carries no hook script, wrapper or shell line) the
+    # (the fixture carries no hook script, wrapper or CLAUDE_ENV_FILE script) the
     # values-match FAIL that names only runtime problems. Never DRIFT, INACTIVE,
     # not-landed or could-not-measure.
     chk="$(HOOKS_SETTINGS_FILE="$envs" "$CHECKER" 2>&1 || true)"
@@ -833,6 +872,39 @@ PY4
     python3 -c "import json,sys; e=json.load(open('$envs'))['env']; sys.exit(0 if e=={'GIT_CONFIG_COUNT':'1','GIT_CONFIG_KEY_0':'user.name','GIT_CONFIG_VALUE_0':'owner-kept','FOO':'bar'} else 1)" \
       && echo "  ok   remove-env restores exactly the owner's env" \
       || { echo "  FAIL remove-env must leave exactly the owner's entries: $(cat "$envs")"; ok=0; }
+    # CLAUDE_ENV_FILE is a Claude Code name the owner may use too (DND-1080):
+    # remove-env leaves one that is not ours.
+    printf '{"env": {"CLAUDE_ENV_FILE": "/owner/own-env.sh"}}\n' > "$envs"
+    apply remove-env "$envs" 0 >/dev/null
+    python3 -c "import json,sys; e=json.load(open('$envs'))['env']; sys.exit(0 if e=={'CLAUDE_ENV_FILE':'/owner/own-env.sh'} else 1)" \
+      && echo "  ok   remove-env keeps a CLAUDE_ENV_FILE that is not ours" \
+      || { echo "  FAIL remove-env removed the owner's own CLAUDE_ENV_FILE: $(cat "$envs")"; ok=0; }
+    cp "$envs" "${envs}.before"
+    if apply install-env "$envs" 0 >/dev/null 2>&1; then
+      echo "  FAIL install-env overwrote the owner's own CLAUDE_ENV_FILE"; ok=0
+    elif cmp -s "$envs" "${envs}.before"; then
+      echo "  ok   install-env refuses (never overwrites) the owner's own CLAUDE_ENV_FILE"
+    else
+      echo "  FAIL a refused install-env still changed the file"; ok=0
+    fi
+    # An install made before DND-1080 (ATHENA_AGENT_BIN and a stamp, no
+    # CLAUDE_ENV_FILE) never put the wrapper on PATH. Adding CLAUDE_ENV_FILE is
+    # when it arrives, so the stamp moves to now: sessions started before it
+    # are pending a restart, not failing.
+    printf '{}\n' > "$envs"
+    apply install-env "$envs" 0 >/dev/null
+    SETTINGS="$envs" python3 - <<'PY5'
+import json, os
+p = os.environ["SETTINGS"]; s = json.load(open(p)); e = s["env"]
+e.pop("CLAUDE_ENV_FILE")
+e["ATHENA_AGENT_ENV_INSTALLED_AT"] = "2026-01-02T03:04:05Z"
+json.dump(s, open(p, "w"))
+PY5
+    re5="$(apply install-env "$envs" 0)"
+    python3 -c "import json,sys; e=json.load(open('$envs'))['env']; sys.exit(0 if e.get('CLAUDE_ENV_FILE') and e['ATHENA_AGENT_ENV_INSTALLED_AT']!='2026-01-02T03:04:05Z' else 1)" \
+      && grep -q "+ env CLAUDE_ENV_FILE=" <<<"$re5" \
+      && echo "  ok   install-env adding CLAUDE_ENV_FILE to a pre-DND-1080 install moves the install time" \
+      || { echo "  FAIL install-env adding CLAUDE_ENV_FILE must re-stamp the install time: $(cat "$envs")"; ok=0; }
     printf '{"env": {"ATHENA_AGENT_BIN": "/elsewhere"}}\n' > "$envs"
     cp "$envs" "${envs}.before"
     if apply install-env "$envs" 0 >/dev/null 2>&1; then

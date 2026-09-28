@@ -269,7 +269,7 @@ expect "...and unpinned, the stale local origin/main -> could not measure, exit 
 #     such ancestor wins, so the live session running this suite is never read.
 env_fixture() { # env_fixture <name>: new_fixture plus the env landed on origin
   local d; d="$(new_fixture "$1")"
-  mkdir -p "${d}/main/ai/git-hooks" "${d}/main/ai/agent-bin" "${d}/home"
+  mkdir -p "${d}/main/ai/git-hooks" "${d}/main/ai/agent-bin" "${d}/main/ai/agent-env" "${d}/home"
   cp "${SRC_ROOT}/ai/git-hooks/agent-stash-guard.sh" "${d}/main/ai/git-hooks/agent-stash-guard.sh"
   cp "${SRC_ROOT}/ai/agent-bin/git" "${d}/main/ai/agent-bin/git"
   chmod +x "${d}/main/ai/git-hooks/agent-stash-guard.sh" "${d}/main/ai/agent-bin/git"
@@ -281,8 +281,8 @@ env_fixture() { # env_fixture <name>: new_fixture plus the env landed on origin
   git -C "${d}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
   git -C "${d}/main" fetch -q origin >/dev/null 2>&1
   git -C "${d}/wt" "${GITC[@]}" rebase -q origin/main >/dev/null 2>&1
-  # The last line of the owner's ~/.zshrc: the agent PATH line, verbatim.
-  tail -n 1 "${SRC_ROOT}/dotfiles/.zshrc" > "${d}/home/.zshrc"
+  # The CLAUDE_ENV_FILE script the settings env names (DND-1080), verbatim.
+  cp "${SRC_ROOT}/ai/agent-env/session-env.sh" "${d}/main/ai/agent-env/session-env.sh"
   printf '%s\n' "${d}"
 }
 
@@ -310,18 +310,23 @@ env_settings() {
 # checker as an activated agent session would -- ATHENA_AGENT_BIN set by the
 # settings env, under a parent shell whose argv names the snapshot it sourced.
 # path-mode "stale" is a PATH with no wrapper (the snapshot predates the env);
-# "wrapper" puts the wrapper first (the session's shell line ran).
+# "wrapper" puts the wrapper first by hand; "fresh" builds the PATH the way a
+# session started after the install does (DND-1080): the stale PATH the
+# snapshot restores, then the script the settings env's CLAUDE_ENV_FILE names,
+# which Claude Code runs after the snapshot and before the command.
 session_check() {
-  local d="$1" ms="$2" mode="$3" path="/usr/bin:/bin"
+  local d="$1" ms="$2" mode="$3" path="/usr/bin:/bin" envfile=""
   [ "${mode}" = "wrapper" ] && path="${d}/main/ai/agent-bin:${path}"
+  [ "${mode}" = "fresh" ] && envfile="$(ruby -rjson -e \
+    'print JSON.parse(File.read(ARGV[0])).fetch("env", {}).fetch("CLAUDE_ENV_FILE", "")' "${d}/settings.json")"
   local snap="${d}/home/.claude/shell-snapshots/snapshot-zsh-${ms}-fx0001.sh"
   # Keep the trailing `exit $?`: without it bash execs the checker in place of
   # itself, the fixture parent vanishes from the ancestry, and the walk reads
   # the LIVE session's snapshot instead of this one.
   OUT="$(env HOME="${d}/home" HOOKS_SETTINGS_FILE="${d}/settings.json" \
       ATHENA_AGENT_BIN="${d}/main/ai/agent-bin" PATH="${path}" \
-      bash -c "source ${snap} 2>/dev/null || true; \"\$0\"; exit \$?" \
-      "${d}/wt/ai/bin/check-hooks-registered" 2>&1)"; RC=$?
+      bash -c "source ${snap} 2>/dev/null || true; if [ -n \"\$1\" ]; then . \"\$1\"; fi; \"\$0\"; exit \$?" \
+      "${d}/wt/ai/bin/check-hooks-registered" "${envfile}" 2>&1)"; RC=$?
 }
 
 # Times: the snapshot 2026-09-26T19:31:09Z (ms), the install 2026-09-28T07:19:25Z.
@@ -337,6 +342,21 @@ expect "env installed after this session's snapshot, PATH lacks the wrapper -> P
 expect "...and it names the snapshot and the install time" 0 "snapshot-zsh-${SNAP_OLD}-fx0001\.sh.*2026-09-28T07:19:25Z|2026-09-28T07:19:25Z.*snapshot-zsh-${SNAP_OLD}"
 session_check "${D}" "${SNAP_OLD}" wrapper
 expect "same install, wrapper first on PATH -> ACTIVE" 0 "agent-stash env: ACTIVE" "PENDING"
+
+# A FRESH session, started after the install, gets the wrapper first on PATH
+# from the installed env alone (DND-1080). Before the fix nothing in the
+# settings env put it there: the ~/.zshrc line ran while the snapshot was
+# built, and the snapshot's closing `export PATH=` discarded it.
+SNAP_NEW=1790582400000 # 2026-09-28T08:00:00Z, after INSTALL_AFTER
+D="$(env_fixture env-fresh-session)"
+env_settings "${D}" "${INSTALL_AFTER}"
+session_check "${D}" "${SNAP_NEW}" fresh
+expect "fresh session after the install: CLAUDE_ENV_FILE puts the wrapper first -> ACTIVE, exit 0" 0 \
+  "agent-stash env: ACTIVE" "agent-stash env: (FAIL|DRIFT|PENDING)"
+env_settings "${D}" "${INSTALL_AFTER}" CLAUDE_ENV_FILE
+session_check "${D}" "${SNAP_NEW}" fresh
+expect "fresh session, settings env without CLAUDE_ENV_FILE -> DRIFT naming it, exit 1" 1 \
+  "CLAUDE_ENV_FILE is missing" "agent-stash env: (ACTIVE|PENDING)"
 
 D="$(env_fixture env-newer-session)"
 env_settings "${D}" "${INSTALL_BEFORE}"

@@ -21,8 +21,8 @@
 #             inside GIT_CONFIG_COUNT. Then the runtime is asserted too (the
 #             hook script exists and is executable in the main checkout; git
 #             lists the hook; the wrapper is executable and alone in its
-#             directory; the shell profile line is present) and each failure
-#             is exit 1 with a Fix:.
+#             directory; the CLAUDE_ENV_FILE script carries the PATH line)
+#             and each failure is exit 1 with a Fix:.
 #   DRIFT     some keys present, or a value that differs (a hook path in a
 #             worktree, say). Exit 1, each difference named.
 # A settings env that cannot be read (GIT_CONFIG_COUNT not a number, a value
@@ -32,25 +32,36 @@
 # PENDING RESTART (DND-1036) is ACTIVE for a session that predates the install.
 # Claude Code hot-reloads the settings env into a running session, so after
 # --install-env an old session carries ATHENA_AGENT_BIN, but its Bash tool
-# still sources the shell snapshot built at session start, whose PATH has no
-# wrapper. That session is not drift: a restart fixes it. It is PENDING RESTART
+# read CLAUDE_ENV_FILE once, when the session began, and caches what it read
+# (Claude Code 2.1.283), so its PATH still has no wrapper. That session is not
+# drift: a restart fixes it.
+#
+# HOW THE WRAPPER REACHES THE BASH TOOL'S PATH (DND-1080). The Bash tool runs
+# each command as `zsh -c "source <snapshot> && <CLAUDE_ENV_FILE text> ... &&
+# eval <command>"`. The snapshot is built at session start by sourcing
+# ~/.zshrc, but it ENDS with `export PATH=<Claude Code's own process PATH>`, so
+# a PATH change made in ~/.zshrc never reaches the tool shell. The
+# CLAUDE_ENV_FILE text runs after the snapshot: ai/agent-env/session-env.sh
+# carries ENV_LINE, which prepends ATHENA_AGENT_BIN. The settings env sets
+# CLAUDE_ENV_FILE to that file. It is PENDING RESTART
 # (exit 0) only when ALL of these hold: the settings values match the landed
 # env, every runtime check passes, the session's ATHENA_AGENT_BIN is the right
 # one, the only problem is the first git on PATH, and the snapshot this
 # process's shell sourced was built BEFORE the install. Both times are read:
 #   - install time: ATHENA_AGENT_ENV_INSTALLED_AT in the settings env, an ISO
 #     UTC second the installer writes in the same file write that adds
-#     ATHENA_AGENT_BIN (the key whose arrival puts the wrapper on a new
-#     session's PATH), and at no other time: a later --install-env that only
+#     ATHENA_AGENT_BIN or CLAUDE_ENV_FILE (the keys whose arrival puts the
+#     wrapper on a new session's PATH), and at no other time: a later
+#     --install-env that only
 #     adds GIT_CONFIG pairs leaves it alone, so a session started after the
 #     wrapper arrived cannot be re-dated as pending. It is machine state, never
 #     the branch's. settings.json's mtime is not used: any later edit moves it,
 #     which would read a session started after the install as pending.
-#   - session time: "session start" means the SNAPSHOT. The PATH this check
-#     sees is the one the Bash tool's `zsh -c "source <snapshot> ..."` restored,
-#     and the snapshot is built once, at session start, from ~/.zshrc and the
-#     env of that moment. Its build time (the epoch ms in its file name) is when
-#     this PATH was fixed. The nearest ancestor naming a snapshot in its argv
+#   - session time: "session start" means the SNAPSHOT. The snapshot is built
+#     once, at session start, and CLAUDE_ENV_FILE is read at the session's
+#     first Bash command, so the snapshot's build time (the epoch ms in its
+#     file name) is the earliest moment this session's PATH could have been
+#     fixed. The nearest ancestor naming a snapshot in its argv
 #     wins, so a gate run under test-slot/harness-gate, or a nested session,
 #     reads its own shell's snapshot.
 # Either time that cannot be read (no stamp, a malformed stamp, a stamp in the
@@ -66,7 +77,13 @@ require "tmpdir"
 module AgentStashEnv
   PLACEHOLDER = "{{MAIN}}"
   HOOK_REL    = "ai/git-hooks/agent-stash-guard.sh"
-  ZSHRC_LINE  = 'if [ -n "${ATHENA_AGENT_BIN:-}" ] && [ -x "$ATHENA_AGENT_BIN/git" ]; then PATH="$ATHENA_AGENT_BIN:$PATH"; fi'
+  # The PATH line ai/agent-env/session-env.sh carries (DND-1080). Claude Code
+  # runs that file's text after the shell snapshot, so this is the one place a
+  # PATH change reaches the Bash tool's shell.
+  ENV_LINE    = 'if [ -n "${ATHENA_AGENT_BIN:-}" ] && [ -x "$ATHENA_AGENT_BIN/git" ]; then PATH="$ATHENA_AGENT_BIN:$PATH"; export PATH; fi'
+  ENV_FILE    = "CLAUDE_ENV_FILE"
+  # Vars other tools set too. Their presence alone is no trace of the guard.
+  SHARED_VARS = ["GIT_TRACE2", ENV_FILE].freeze
   DISABLE     = "scripts/setup-hooks --remove-env"
   # The install stamp scripts/setup-hooks --install-env writes (DND-1036).
   INSTALLED_AT = "ATHENA_AGENT_ENV_INSTALLED_AT"
@@ -100,10 +117,10 @@ module AgentStashEnv
       vars: (env["vars"] || {}).to_h { |k, v| [k.to_s, ex.call(v)] } }
   end
 
-  # The keys whose presence means the guard was installed (GIT_TRACE2 alone is
-  # not: the owner may set it for other reasons).
+  # The keys whose presence means the guard was installed (GIT_TRACE2 or
+  # CLAUDE_ENV_FILE alone is not: the owner may set either for other reasons).
   def marker_keys(exp)
-    exp[:pairs].map(&:first) + (exp[:vars].keys - ["GIT_TRACE2"])
+    exp[:pairs].map(&:first) + (exp[:vars].keys - SHARED_VARS)
   end
 
   # Whether a settings env carries ANY trace of the guard, judged by a fixed
@@ -177,7 +194,7 @@ module AgentStashEnv
   end
 
   # Runtime problems of an ACTIVE install: [] when all hold.
-  def runtime_problems(env, exp, main:, zshrc:)
+  def runtime_problems(env, exp, main:)
     out = []
     hook = File.join(main, HOOK_REL)
     unless File.file?(hook) && File.executable?(hook)
@@ -195,19 +212,37 @@ module AgentStashEnv
     bin = exp[:vars]["ATHENA_AGENT_BIN"].to_s
     wrapper = File.join(bin, "git")
     if !(File.file?(wrapper) && File.executable?(wrapper))
-      out << "the PATH git wrapper #{wrapper} is missing or not executable; the shell line then leaves PATH " \
+      out << "the PATH git wrapper #{wrapper} is missing or not executable; the CLAUDE_ENV_FILE line then leaves PATH " \
              "alone and drop/reflog go unguarded. Fix: restore ai/agent-bin/git in #{main}."
     elsif (extra = Dir.children(bin) - ["git"]).any?
       out << "#{bin} holds #{extra.sort.join(', ')} besides git; anything there shadows a real command on " \
              "agent PATH. Fix: move it out of #{bin}."
     end
-    text = File.exist?(zshrc) ? File.read(zshrc) : nil
-    unless text&.lines&.any? { |l| l.strip == ZSHRC_LINE }
-      out << "#{zshrc} does not carry the agent PATH line, so the wrapper never reaches agent PATH. " \
-             "Fix: the line lives last in dotfiles/.zshrc on main; make #{zshrc} that file (it is a symlink " \
-             "to it on the owner's machines) and restart sessions."
-    end
+    out.concat(env_file_problems(exp, main))
     out
+  end
+
+  # The CLAUDE_ENV_FILE script the landed env names must carry ENV_LINE: it is
+  # the only thing that puts the wrapper on the Bash tool's PATH (DND-1080).
+  def env_file_problems(exp, main)
+    file = exp[:vars][ENV_FILE].to_s
+    if file.empty?
+      return ["the landed env sets no #{ENV_FILE}, so nothing puts the wrapper on the Bash tool's PATH (the " \
+              "shell snapshot ends with Claude Code's own PATH, whatever ~/.zshrc did). Fix: land the " \
+              "#{ENV_FILE} var in ai/hooks/registry.json's env, then the owner runs " \
+              "`#{File.join(main, 'scripts/setup-hooks')} --install-env` and restarts sessions."]
+    end
+    restore = "Fix: restore ai/agent-env/session-env.sh in #{main} (git -C #{main} checkout -- " \
+              "ai/agent-env/session-env.sh), then restart sessions."
+    begin
+      return [] if File.read(file).lines.any? { |l| l.strip == ENV_LINE }
+
+      ["#{ENV_FILE} #{file} does not carry the agent PATH line, so the wrapper never reaches the Bash " \
+       "tool's PATH. #{restore}"]
+    rescue SystemCallError => e
+      ["#{ENV_FILE} #{file} cannot be read (#{e.class}), so the wrapper never reaches the Bash tool's PATH. " \
+       "#{restore}"]
+    end
   end
 
   # `git hook list reference-transaction` in a throwaway repo with ONLY the
@@ -247,8 +282,9 @@ module AgentStashEnv
     path_problem = nil
     unless first && File.expand_path(first) == File.join(File.expand_path(have_bin), "git")
       path_problem = "this session's first git on PATH is #{first.inspect}, not #{File.join(have_bin, 'git')}: the " \
-                     "last line of ~/.zshrc did not prepend the wrapper when the shell snapshot was built. Fix: " \
-                     "check ~/.zshrc ends with the agent PATH line, then restart the session."
+                     "#{ENV_FILE} script did not prepend the wrapper after the shell snapshot. Fix: check this " \
+                     "session's #{ENV_FILE} is #{exp[:vars][ENV_FILE].inspect} and carries the agent PATH " \
+                     "line, then restart the session."
     end
     [[], probs, path_problem]
   end
