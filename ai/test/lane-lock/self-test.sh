@@ -55,7 +55,7 @@ echo "lane-lock self-test"
 
 # ---- --help ---------------------------------------------------------------
 out="$("${TOOL}" --help 2>/dev/null)"; rc=$?
-if [ "${rc}" = 0 ] && printf '%s' "${out}" | grep -q 'lane-lock acquire'; then ok "--help on stdout, exit 0"
+if [ "${rc}" = 0 ] && grep -q 'lane-lock acquire' <<<"${out}"; then ok "--help on stdout, exit 0"
 else bad "--help on stdout, exit 0" "rc=${rc}"; fi
 
 # ---- 1. two concurrent claims: exactly one wins ---------------------------
