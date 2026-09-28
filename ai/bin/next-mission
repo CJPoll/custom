@@ -11,8 +11,7 @@
 #
 # The rule (tiers 0-4 and the functional-first hold) lives in
 # ai/lib/next_mission.rb; its prose home is athena:ticket-management ->
-# "Priority: critical path first" (pending DND-979; not on main until it
-# lands). The Notion reads
+# "Priority: critical path first" (as amended by DND-979). The Notion reads
 # live in ai/lib/next_mission_notion.rb.
 #
 # Exit codes -- a failed lookup must never look like an empty one:

@@ -252,6 +252,14 @@ other documents cite it by name.
   - **An owner-directed priority** is tier 0.
 - **A lane whose scope is raised issues** (the flaky lane) has no planned path
   to defer to. Its queue is its path, and it drains per its brief.
+- **The harness lane (P7).** A ticket with `Area` = `Harness`, `Path` = `Off`
+  or unset, that is not a `Feature`, belongs to the harness lane. A feature
+  admiral files it and does not start it. It keeps a harness ticket with
+  `Path` = `Promoted`, `Blocking` or `Critical`, a planned `Feature`, and a
+  tier-1 vulnerability. `ai/bin/next-mission` enforces this split. The lane
+  works its own queue in the same tier order. Its scope (`Harness lane: `
+  epics) and its cap are in `~/dev/custom/ai/docs/ticket-lane-action-brief.md`
+  → *The harness lane — the second instantiation*.
 - **Epic status is unchanged.** The epic still goes `Done` only per *Keep
   tickets, epics and projects current* above: every linked ticket, follow-ups
   included, `Done`, `Cancelled` or `Won't Fix`. A finished critical path does
