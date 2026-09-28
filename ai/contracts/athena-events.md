@@ -4740,7 +4740,14 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   crosses local midnight (`start` before `end`, both `HH:MM`, `end`
   exclusive), so a span ends on `now`'s local date, and a holiday never moves
   it. A span end the clock skips (spring forward) is the instant the clock
-  jumps past it; a span end in a repeated hour (fall back) is its first pass.
+  jumps past it. A span end in a repeated hour (fall back) happens twice; it
+  is **the pass after `now`** — the first pass, unless `now` is already at or
+  past it (i.e. `now` is itself in the second pass), in which case the
+  second pass (the first pass's wall time, one hour later). This is what
+  "the first instant after `now`" already requires: the server's
+  `next_boundary/2` generates both passes as candidates and keeps only the
+  ones strictly after `now`, so it never answers an instant that has already
+  passed.
   `ai/bin/fleet-control` computes the same span (`fleet_desired` in
   `ai/lib/fleet/control-domain.sh`, pinned by its self-test).
 
