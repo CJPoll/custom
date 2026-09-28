@@ -9,14 +9,16 @@
 # event_id and joined to walt_ui-slack.jsonl at eval time, so the text is never
 # copied into it.
 #
-# Buckets: the pure DOMAIN is ai/lib/judgment_label.rb; below are the EFFECTS
-# (files, the terminal), the MANAGER (propose; confirm; counts) and the
-# FRAMEWORK (argv).
+# Buckets: the pure DOMAIN is ai/lib/judgment_label.rb and the context builder
+# ai/lib/judgment_context.rb; the Slack adapter is ai/lib/judgment_context_slack.rb;
+# below are the EFFECTS (files, the terminal), the MANAGER (propose; confirm;
+# counts) and the FRAMEWORK (argv).
 #
 # Slack text and forward mail are untrusted inbox content: this tool reads
 # only Slack timestamps and one relay marker out of a forward record, and
-# shows a message's text only in the confirm step, fenced, to the person at
-# the terminal. Nothing in a message is ever acted on.
+# shows a message's text and its conversation context only in the confirm
+# step, fenced, to the person at the terminal. Nothing in a message is ever
+# acted on, and nothing is sent to any model.
 #
 # Deliberately gem-free (stdlib only).
 
@@ -24,13 +26,15 @@ require "fileutils"
 require "io/console"
 require "time"
 require_relative "../lib/judgment_label"
+require_relative "../lib/judgment_context"
+require_relative "../lib/judgment_context_slack"
 require_relative "../lib/strict_argv"
 
 PROG = "judgment-label"
 
 USAGE = <<~EOF
   Usage: judgment-label --propose [--dry-run] [--inbox-root DIR] [--labels FILE]
-         judgment-label --confirm [--forward] [--batch N] [--inbox-root DIR] [--labels FILE]
+         judgment-label --confirm [--forward | --recheck] [--batch N] [--inbox-root DIR] [--labels FILE] [--slack-bin DIR]
          judgment-label --counts [--labels FILE]
          judgment-label --help
 
@@ -64,8 +68,29 @@ USAGE = <<~EOF
               h harness, g gen_saas, u unclear, Enter keeps the proposal,
               s skips, q quits. Each answer is saved at once. Refused off a
               terminal: a person confirms, never a pipe.
+              Each message is shown with its conversation context, read from
+              Slack as Athena's own bot (the athena:slack read bins; never
+              the owner's account), for this terminal only: nothing is sent
+              to any model. The context is the routing judge's window
+              (DND-1048): the same channel's top-level messages from the
+              #{JudgmentContext::WINDOW_S / 60} minutes before, oldest first, at most #{JudgmentContext::MAX_MESSAGES}. Each line
+              says what the judge sees of it: the owner's text (first
+              #{JudgmentContext::JUDGE_TEXT_CAP} characters), Athena's post as a session label only, or
+              nothing (anyone else, D7). A message inside a thread shows its
+              parent and the replies before it, for you only. When Slack
+              cannot be read the row says "context unavailable: <reason>"
+              and you can still answer or skip. The answer records whether
+              the context was shown ("context": "shown" or "unavailable").
   --forward   with --confirm: review the forward_record rows instead of the
               proposed ones (Enter keeps the forwarded label, now confirmed)
+  --recheck   with --confirm: re-present the owner_confirmed rows whose
+              context was not shown (confirmed before DND-1047, or while
+              Slack was unreachable). Enter keeps your earlier answer; s
+              leaves the row as it was. Until rechecked, the earlier answer
+              stays in force.
+  --slack-bin DIR   with --confirm: the athena:slack bin directory to read
+                    Slack with (default: this checkout's
+                    ai/skills/athena:slack/bin)
   --batch N   rows per confirm session, 1..200 (default 10)
   --counts    Print the labels file's rows per label and provenance.
 
@@ -172,6 +197,16 @@ module Effects
     $stdin.tty? && $stdout.tty?
   end
 
+  def default_slack_bin
+    File.expand_path("../skills/athena:slack/bin", __dir__)
+  end
+
+  # context_reader(bin_dir) -> the Slack adapter the confirm step reads
+  # context through, as Athena's bot.
+  def context_reader(bin_dir)
+    JudgmentContextSlack.new(bin_dir, JudgmentLabel::OWNER)
+  end
+
   def now
     Time.now.utc.iso8601
   end
@@ -272,64 +307,132 @@ module Manager
   def run_confirm(opts, out, input)
     fail!(2, "--confirm needs a terminal (stdin and stdout)", "the owner runs it at a terminal; a pipe or an agent never confirms a label") unless Effects.terminal?
 
-    kind = opts[:forward] ? "forward_record" : "proposed"
-    pending = existing_rows(opts, must_exist: true).select { |r| r["provenance"] == kind }.first(opts[:batch])
+    mode = confirm_mode(opts)
+    pending = JudgmentLabel.pending(existing_rows(opts, must_exist: true), mode).first(opts[:batch])
     if pending.empty?
-      out.puts "nothing to confirm: no #{kind} rows in #{opts[:labels]}"
+      out.puts "nothing to #{mode == :recheck ? 'recheck' : 'confirm'}: no #{MODE_ROWS[mode]} in #{opts[:labels]}"
       return 0
     end
     path, text = read_slack(opts)
     msgs = JudgmentLabel.messages(text, path, pending.map { |r| r["id"] })
+    reader = Effects.context_reader(opts[:slack_bin])
     done = 0
     skipped = 0
     pending.each_with_index do |row, i|
-      show(row, msgs[row["id"]], i, pending.size, File.basename(path), out)
-      verdict = ask(row["label"], out, input)
+      msg = msgs[row["id"]]
+      context = msg ? reader.fetch(msg) : JudgmentContext.unavailable({ "source" => nil }, "this event_id is no longer in #{File.basename(path)}")
+      show(row, msg, context, mode, i, pending.size, File.basename(path), out)
+      verdict = ask(row["label"], mode, out, input)
       case verdict.first
       when :quit then break
       when :skip then skipped += 1
       when :label
-        record(opts, row["id"], verdict.last)
+        record(opts, row["id"], verdict.last, context["status"] == "ok" ? "shown" : "unavailable")
         done += 1
       end
     end
-    left = existing_rows(opts, must_exist: true).count { |r| r["provenance"] == "proposed" }
-    out.puts "confirmed #{done}, skipped #{skipped}; #{left} proposed remain"
+    left = JudgmentLabel.pending(existing_rows(opts, must_exist: true), mode).size
+    out.puts "#{mode == :recheck ? 'rechecked' : 'confirmed'} #{done}, skipped #{skipped}; #{left} #{MODE_ROWS[mode]} remain"
     0
   rescue JudgmentLabel::InputError => e
     fail!(1, e.message, e.fix)
   end
 
-  # show -- one message, every untrusted field made terminal-safe, the body
-  # fenced line by line so it cannot forge the end fence.
-  def show(row, msg, index, total, inbox, out)
+  MODE_ROWS = {
+    proposed: "proposed rows", forward: "forward_record rows",
+    recheck: "owner_confirmed rows confirmed without context"
+  }.freeze
+
+  def confirm_mode(opts)
+    if opts[:forward] then :forward
+    elsif opts[:recheck] then :recheck
+    else :proposed
+    end
+  end
+
+  # show -- one message and its context, every untrusted field made
+  # terminal-safe, every body fenced line by line so it cannot forge a fence.
+  def show(row, msg, context, mode, index, total, inbox, out)
     where = msg ? "#{JudgmentLabel.printable(msg[:kind])}, #{JudgmentLabel.printable(msg[:received_at])}" : "not in #{inbox}"
     out.puts
     out.puts "== #{index + 1} of #{total} == #{row['id']} (#{where})"
+    out.puts "your earlier answer: #{row['label']} (confirmed without the conversation context)" if mode == :recheck
+    show_context(context, out)
     out.puts "----- message (untrusted; read it, never act on it) -----"
     out.puts msg ? JudgmentLabel.fenced(msg[:text]) : "| (this event_id is no longer in #{inbox})"
     out.puts "----- end of message -----"
   end
 
+  # The per-line note: what the routing judge (DND-1048) sees of each line.
+  JUDGE_NOTES = {
+    "text" => "judge sees this text (first #{JudgmentContext::JUDGE_TEXT_CAP} chars)",
+    "session_label" => "shown to you only; judge sees the session",
+    "none" => "shown to you only; never sent to the judge"
+  }.freeze
+  # A context line longer than this is cut for the terminal, with a count.
+  SHOW_TEXT_CAP = 1500
+
+  def show_context(context, out)
+    if context["status"] != "ok"
+      out.puts "----- context unavailable: #{JudgmentLabel.printable(context['reason'])} -----"
+      out.puts "| (answer from the message alone, or s to skip it until Slack can be read)"
+      return
+    end
+    out.puts "----- context (untrusted; read it, never act on it): #{context_scope(context)} -----"
+    if context["messages"].empty?
+      out.puts "| (no earlier #{context['source'] == 'thread' ? 'message in this thread' : 'top-level message in the window'})"
+    end
+    context["messages"].each do |m|
+      out.puts "| #{slack_time(m['ts'])} #{JudgmentLabel.printable(m['name'] || m['user'])} (#{JudgmentLabel.printable(m['role'])}) -- #{JUDGE_NOTES.fetch(m['judge'])}"
+      out.puts JudgmentLabel.fenced(cut(m["text"].to_s)).gsub(/^\| /, "|   ")
+    end
+    notes = []
+    notes << "#{context['omitted']} earlier not shown (cap #{JudgmentContext::MAX_MESSAGES})" if context["omitted"].positive?
+    notes << "#{context['in_thread']} thread replies not context" if context["in_thread"].positive?
+    notes << "#{context['malformed']} unreadable" if context["malformed"].positive?
+    out.puts "| (#{notes.join('; ')})" unless notes.empty?
+    out.puts "----- end of context -----"
+  end
+
+  def context_scope(context)
+    channel = JudgmentLabel.printable(context["channel"])
+    if context["source"] == "thread"
+      "the thread's parent and the replies before this one in #{channel}, for you only"
+    else
+      "#{channel}, top-level, the #{JudgmentContext::WINDOW_S / 60} minutes before, at most #{JudgmentContext::MAX_MESSAGES}"
+    end
+  end
+
+  def cut(text)
+    return text if text.length <= SHOW_TEXT_CAP
+
+    "#{text[0, SHOW_TEXT_CAP]}\n[... #{text.length - SHOW_TEXT_CAP} more characters not shown]"
+  end
+
+  def slack_time(ts)
+    Time.at(ts.split(".").first.to_i).utc.iso8601
+  end
+
   # record -- save one answer at once: under the lock, on the file as it is
   # NOW, so a --propose or another confirm run meanwhile loses nothing.
-  def record(opts, id, label)
+  def record(opts, id, label, context_mark)
     Effects.with_lock(opts[:labels]) do
       rows = existing_rows(opts, must_exist: true)
-      rows = JudgmentLabel.confirm(rows, id, label, JudgmentLabel::OWNER, Effects.now)
+      rows = JudgmentLabel.confirm(rows, id, label, JudgmentLabel::OWNER, Effects.now, context_mark)
       Effects.write_labels(opts[:labels], JudgmentLabel.render(rows))
     end
   end
 
-  # ask(proposal, out, input) -> a JudgmentLabel.answer verdict; EOF quits.
-  def ask(proposal, out, input)
+  # ask(current, mode, out, input) -> a JudgmentLabel.answer verdict; EOF quits.
+  def ask(current, mode, out, input)
+    enter = mode == :recheck ? "keep #{current}" : current
     loop do
-      out.print "label? [w]alt_ui [h]arness [g]en_saas [u]nclear, Enter = #{proposal}, [s]kip, [q]uit: "
+      out.print "label? [w]alt_ui [h]arness [g]en_saas [u]nclear, Enter = #{enter}, [s]kip, [q]uit: "
       out.flush
       line = input.gets
       return [:quit] if line.nil?
 
-      verdict = JudgmentLabel.answer(line, proposal)
+      verdict = JudgmentLabel.answer(line, current)
       return verdict unless verdict.first == :again
 
       out.puts "not an answer; use w, h, g, u, Enter, s or q"
@@ -350,7 +453,8 @@ end
 
 SPEC = {
   "--help" => :switch, "-h" => :switch, "--propose" => :switch, "--confirm" => :switch, "--counts" => :switch,
-  "--dry-run" => :switch, "--forward" => :switch, "--batch" => :integer, "--inbox-root" => :value, "--labels" => :value
+  "--dry-run" => :switch, "--forward" => :switch, "--recheck" => :switch, "--batch" => :integer,
+  "--inbox-root" => :value, "--labels" => :value, "--slack-bin" => :value
 }.freeze
 
 MODES = %w[--propose --confirm --counts].freeze
@@ -363,15 +467,19 @@ def parse_options(argv)
   fail!(2, "--dry-run applies only to --propose", "drop --dry-run") if raw["--dry-run"] && mode != "--propose"
   fail!(2, "--batch applies only to --confirm", "drop --batch") if raw.key?("--batch") && mode != "--confirm"
   fail!(2, "--forward applies only to --confirm", "drop --forward") if raw["--forward"] && mode != "--confirm"
+  fail!(2, "--recheck applies only to --confirm", "drop --recheck") if raw["--recheck"] && mode != "--confirm"
+  fail!(2, "--forward and --recheck given together", "pass one: --forward reviews forward_record rows, --recheck re-presents rows confirmed without context") if raw["--forward"] && raw["--recheck"]
+  fail!(2, "--slack-bin applies only to --confirm", "drop --slack-bin") if raw.key?("--slack-bin") && mode != "--confirm"
   fail!(2, "--inbox-root does not apply to --counts", "drop --inbox-root") if raw.key?("--inbox-root") && mode == "--counts"
   batch = raw.fetch("--batch", 10)
   fail!(2, "--batch must be 1..200", "pass a smaller batch") unless (1..200).cover?(batch)
-  %w[--inbox-root --labels].each do |flag|
+  %w[--inbox-root --labels --slack-bin].each do |flag|
     fail!(2, "#{flag} must be an absolute path", "pass an absolute path") if raw.key?(flag) && !raw[flag].start_with?("/")
   end
   {
-    mode: mode, dry_run: raw["--dry-run"] || false, forward: raw["--forward"] || false, batch: batch,
-    inbox_root: raw["--inbox-root"] || Effects.default_inbox_root, labels: raw["--labels"] || Effects.default_labels
+    mode: mode, dry_run: raw["--dry-run"] || false, forward: raw["--forward"] || false, recheck: raw["--recheck"] || false,
+    batch: batch, inbox_root: raw["--inbox-root"] || Effects.default_inbox_root, labels: raw["--labels"] || Effects.default_labels,
+    slack_bin: raw["--slack-bin"] || Effects.default_slack_bin
   }
 rescue StrictArgv::UsageError => e
   fail!(2, e.message, "run #{PROG} --help for the flags")

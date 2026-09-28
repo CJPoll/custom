@@ -83,7 +83,7 @@ can thread onto it.
 | `delete <channel> <ts>` | Delete — bot's own messages only. No undo. |
 | `react <channel> <ts> <emoji> [--remove]` | Add/remove a reaction. Bare name (`eyes`, not `:eyes:`). |
 | `status <channel> <thread_ts> [text] [--clear]` | Shows "Athena is thinking…" (or `text`) in a DM or thread while a session works on it. `--clear` removes it. See *The thinking status* below. |
-| `read-channel <channel> [--since TS] [--limit N] [--json]` | Channel history, oldest-first, ids resolved to names. |
+| `read-channel <channel> [--since TS] [--before TS] [--limit N] [--json]` | Channel history, oldest-first, ids resolved to names. `--before` reads only older messages (Slack's `latest`). |
 | `read-thread <channel> <thread_ts> [--json]` | One thread, oldest-first. |
 | `read-inbox [--json] [--peek]` | New DMs + mentions **with bodies**; advances the seen-state unless `--peek`. `--json` emits a JSON **array** (`[]` when empty, never zero bytes); a failure exits non-zero with a `Fix:` line, never an empty inbox. |
 | `channels [--types CSV] [--member] [--json]` | Conversation list with ids. `--types im,mpim` for DMs. |

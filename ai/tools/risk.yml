@@ -132,7 +132,8 @@ tools:
   judgment-eval:           { class: destructive, reason: judgments }
   # judgment-label (DND-715) writes only the machine-local slack routing labels
   # file; --propose re-derives it deterministically and keeps every owner
-  # confirmation. No forge, tracker, server or remote write.
+  # confirmation. No forge, tracker, server or remote write. --confirm READS
+  # Slack as Athena's bot for conversation context (DND-1047); it never posts.
   judgment-label:          { class: idempotent, reason: labels }
   # triage-corpus (DND-714) only READS Notion (its Notion effect refuses any
   # other request) and writes machine-local snapshot/label/corpus files; a

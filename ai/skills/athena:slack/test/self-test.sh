@@ -513,6 +513,25 @@ if [[ "$(url_of conversations.history)" == *"oldest=1699999999.000000"* ]]; then
   ok "read-channel: --since is sent as oldest"
 else bad "read-channel: --since is sent as oldest" "url=$(url_of conversations.history)"; fi
 
+# 26b. --before becomes `latest` (DND-1047): the messages BEFORE a given one,
+#      which judgment-label reads as that message's conversation context.
+#      Without it, --since plus --limit returns the newest N in the window,
+#      not the N just before the message.
+setup_case
+seed_caches
+fixture conversations.history '{"ok":true,"messages":[],"response_metadata":{"next_cursor":""}}'
+run_bin read-channel "${ENG_CHANNEL}" --since "1699999999.000000" --before "1700000500.000100" --limit 5
+if [[ "${RC}" == 0 ]] && [[ "$(url_of conversations.history)" == *"latest=1700000500.000100"* ]] \
+   && [[ "$(url_of conversations.history)" == *"oldest=1699999999.000000"* ]]; then
+  ok "read-channel: --before is sent as latest"
+else bad "read-channel: --before is sent as latest" "rc=${RC} url=$(url_of conversations.history)"; fi
+setup_case
+seed_caches
+run_bin read-channel "${ENG_CHANNEL}" --before
+if [[ "${RC}" == 2 ]] && ! any_curl; then
+  ok "read-channel: --before with no value is a usage error, no request"
+else bad "read-channel: --before with no value is a usage error, no request" "rc=${RC}"; fi
+
 echo
 echo "-- the hook: when it runs --------------------------------------------------"
 

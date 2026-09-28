@@ -25,6 +25,12 @@ module JudgmentLabel
   # The SlackRouting v1 Choice options (DND-716). Exactly these four.
   LABELS = %w[walt_ui harness gen_saas unclear].freeze
   PROVENANCES = %w[forward_record owner_confirmed proposed].freeze
+  # Whether the owner saw the conversation context when confirming (DND-1047).
+  # An owner_confirmed row without the mark was confirmed before context was
+  # shown (batch 1, 2026-09-28 ~07:20Z); --confirm --recheck re-presents it.
+  CONTEXT_MARKS = %w[shown unavailable].freeze
+  # Which rows each confirm mode presents.
+  CONFIRM_MODES = %i[proposed forward recheck].freeze
   ROOT_KINDS = %w[dm im mpim mention].freeze
   # The proposal for a root no forward record names: it stayed in walt_ui, the
   # session whose inbox it landed in (today's channel route, A&E D6).
@@ -191,10 +197,11 @@ module JudgmentLabel
       raise InputError.new("#{where} has no event id", fix) unless row["id"].is_a?(String) && EVENT_ID.match?(row["id"])
       raise InputError.new("#{where} has a label outside #{LABELS.join('|')}", fix) unless LABELS.include?(row["label"])
       raise InputError.new("#{where} has an unknown provenance", fix) unless PROVENANCES.include?(row["provenance"])
+      raise InputError.new("#{where} has a context mark outside #{CONTEXT_MARKS.join('|')}", fix) if row.key?("context") && !CONTEXT_MARKS.include?(row["context"])
       raise InputError.new("#{where} repeats the id of line #{seen[row['id']]}", "keep one row per id (judgment-eval refuses a repeat)") if seen.key?(row["id"])
 
       seen[row["id"]] = line_no
-      row.slice("id", "label", "provenance", "labeler", "labeled_at")
+      row.slice("id", "label", "provenance", "labeler", "labeled_at", "context")
     end
   end
 
@@ -228,16 +235,34 @@ module JudgmentLabel
     { rows: rows + orphans, kept_orphans: orphans.size, dropped: gone.size - orphans.size, disagreements: disagreements }
   end
 
-  # confirm(rows, id, label, owner, now) -> rows with that row owner_confirmed.
+  # confirm(rows, id, label, owner, now, context) -> rows with that row
+  # owner_confirmed, marked with whether the conversation context was shown.
   # A row no longer in rows (a re-propose dropped it meanwhile) is appended:
   # an owner answer is never lost.
-  def confirm(rows, id, label, owner, now)
+  def confirm(rows, id, label, owner, now, context)
     raise ArgumentError, "not a label: #{label}" unless LABELS.include?(label)
+    raise ArgumentError, "not a context mark: #{context}" unless CONTEXT_MARKS.include?(context)
 
-    row = { "id" => id, "label" => label, "provenance" => "owner_confirmed", "labeler" => owner, "labeled_at" => now }
+    row = { "id" => id, "label" => label, "provenance" => "owner_confirmed", "labeler" => owner, "labeled_at" => now, "context" => context }
     return rows + [row] unless rows.any? { |r| r["id"] == id }
 
     rows.map { |r| r["id"] == id ? row : r }
+  end
+
+  # pending(rows, mode) -> the rows a confirm mode presents, in file order.
+  #   :proposed  rows with no confirmed label yet
+  #   :forward   forward_record rows, for the owner to review
+  #   :recheck   owner_confirmed rows whose context was not shown (confirmed
+  #              before DND-1047, or while Slack was unreachable); their
+  #              answers stay in force until rechecked
+  def pending(rows, mode)
+    raise ArgumentError, "not a confirm mode: #{mode}" unless CONFIRM_MODES.include?(mode)
+
+    case mode
+    when :proposed then rows.select { |r| r["provenance"] == "proposed" }
+    when :forward then rows.select { |r| r["provenance"] == "forward_record" }
+    else rows.select { |r| r["provenance"] == "owner_confirmed" && r["context"] != "shown" }
+    end
   end
 
   # counts(rows) -> [[label, provenance, n]] in LABELS x PROVENANCES order, nonzero only.
@@ -246,8 +271,9 @@ module JudgmentLabel
     LABELS.product(PROVENANCES).filter_map { |l, p| [l, p, tally[[l, p]]] if tally[[l, p]] }
   end
 
-  # messages(text, path, ids) -> {event_id => {kind, received_at, text}} for
-  # the confirm step only: the one place the text is read, shown, never stored.
+  # messages(text, path, ids) -> {event_id => {kind, received_at, text,
+  # channel, ts, thread_ts}} for the confirm step only: the one place the text
+  # is read, shown, never stored. channel/ts/thread_ts anchor its context.
   def messages(text, path, ids)
     wanted = ids.to_h { |id| [id, true] }
     out = {}
@@ -255,7 +281,8 @@ module JudgmentLabel
       id = row["event_id"]
       next unless wanted.key?(id) && !out.key?(id)
 
-      out[id] = { kind: row["kind"], received_at: row["received_at"], text: row["text"].to_s }
+      out[id] = { kind: row["kind"], received_at: row["received_at"], text: row["text"].to_s,
+                  channel: row["channel"], ts: row["ts"], thread_ts: row["thread_ts"] }
     end
     out
   end
