@@ -820,6 +820,194 @@ else
   record "F13. the work dir is removed on deny, allow and fault exits" FAIL
 fi
 
+echo "== L: WHEN THE GIT LAYER IS LIVE (DND-1095) =="
+# The hook reads the git layer's state from its own environment (Claude Code's,
+# carrying the settings env). run_live builds that env as scripts/setup-hooks
+# --install-env does, pointing at THIS checkout's wrapper, hook script and
+# CLAUDE_ENV_FILE, and runs the hook under a stand-in `claude` process started
+# now (after the install stamp), as Claude Code runs it. L_* variables change
+# one condition at a time; lreset restores the live defaults.
+REPO_ROOT=$(CDPATH= cd "$(dirname "$HOOK")/../.." && pwd)
+mkdir -p "$TMP/lbin" "$TMP/claude-l/shell-snapshots" "$TMP/nomark" "$TMP/oldgit"
+# The stand-in parent: it runs its arguments as a child (no exec), so the
+# hook's nearest `claude` ancestor is this process.
+printf '#!/bin/sh\n"$@"\nexit $?\n' > "$TMP/lbin/claude"; chmod +x "$TMP/lbin/claude"
+# The owner's real grep alias (oh-my-zsh), whose self-reference the legacy
+# reader expanded eight levels deep (DND-853), plus the suite's aliases.
+cp "$CLAUDE_CONFIG_DIR/shell-snapshots/snapshot-zsh-1-fixture.sh" "$TMP/claude-l/shell-snapshots/"
+printf '%s\n' "alias -- grep='grep --color=auto --exclude-dir={.bzr,CVS,.git,.hg,.svn,.idea,.tox,.venv,venv}'" \
+  >> "$TMP/claude-l/shell-snapshots/snapshot-zsh-1-fixture.sh"
+# A git with no wrapper mark, and a git that reports 2.53.
+printf '#!/bin/sh\nexec git "$@"\n' > "$TMP/nomark/git"; chmod +x "$TMP/nomark/git"
+_realgit=$(command -v git)
+printf '#!/bin/sh\n[ "$1" = --version ] && { echo "git version 2.53.0"; exit 0; }\nexec "%s" "$@"\n' "$_realgit" > "$TMP/oldgit/git"
+chmod +x "$TMP/oldgit/git"
+printf '# no agent PATH line here\n' > "$TMP/no-line-env.sh"
+lreset() {
+  L_COUNT=4; L_ENABLED=true; L_HOOK="$REPO_ROOT/ai/git-hooks/agent-stash-guard.sh"; L_TRACE=/dev/null
+  L_BIN="$REPO_ROOT/ai/agent-bin"; L_ENVF="$REPO_ROOT/ai/agent-env/session-env.sh"
+  L_INST=2000-01-01T00:00:00Z; L_PARENT="$TMP/lbin/claude"; L_PATH=$PATH
+}
+lreset
+# lenv <cmd...> : run cmd in the live env the L_* variables describe.
+lenv() {
+  env CLAUDE_CONFIG_DIR="$TMP/claude-l" PATH="$L_PATH" GIT_CONFIG_COUNT="$L_COUNT" \
+    GIT_CONFIG_KEY_0=hook.agentstash.event GIT_CONFIG_VALUE_0=reference-transaction \
+    GIT_CONFIG_KEY_1=hook.agentstash.command GIT_CONFIG_VALUE_1="h='$L_HOOK'; exec \"\$h\" \"\$@\"" \
+    GIT_CONFIG_KEY_2=hook.agentstash.enabled GIT_CONFIG_VALUE_2="$L_ENABLED" \
+    GIT_CONFIG_KEY_3=hook.reference-transaction.enabled GIT_CONFIG_VALUE_3=true \
+    GIT_TRACE2="$L_TRACE" ATHENA_AGENT_BIN="$L_BIN" CLAUDE_ENV_FILE="$L_ENVF" \
+    ATHENA_AGENT_ENV_INSTALLED_AT="$L_INST" "$@"
+}
+# run_live <command> : the hook's verdict in that env. With L_PARENT empty the
+# hook is orphaned: its parent exits at once, so no ancestor can be read (the
+# suite itself may run under a real claude process, which must not count).
+run_live() {
+  if [ -n "$L_PARENT" ]; then
+    OUT=$(json "$WT" "$1" | lenv "$L_PARENT" sh "$HOOK" 2>/dev/null); STATUS=$?
+  else
+    json "$WT" "$1" > "$TMP/l-in.json"
+    rm -f "$TMP/l-fifo"; mkfifo "$TMP/l-fifo"
+    lenv sh -c '(sh "$1" < "$2" > "$3" 2>/dev/null &)' sh "$HOOK" "$TMP/l-in.json" "$TMP/l-fifo"
+    OUT=$(cat "$TMP/l-fifo"); STATUS=0
+  fi
+}
+# run_nolayer <command> : the same aliases, no git layer (today's env).
+run_nolayer() {
+  OUT=$(json "$WT" "$1" | CLAUDE_CONFIG_DIR="$TMP/claude-l" sh "$HOOK" 2>/dev/null); STATUS=$?
+}
+# is_left : allowed, with the note that the git layer was left to decide.
+is_left() {
+  [ "$STATUS" -eq 0 ] && ! printf '%s' "$OUT" | grep -q '"deny"' \
+    && printf '%s' "$OUT" | grep -q 'left .* to the DND-775 git layer'
+}
+lcheck() {
+  if [ "$2" = deny ]; then
+    if is_deny; then record "$1 (expected deny)" PASS; else record "$1 (expected deny)" FAIL; fi
+  else
+    if is_left; then record "$1 (expected allow, left to the git layer)" PASS; else record "$1 (expected allow, left to the git layer)" FAIL; fi
+  fi
+}
+# The false positives (DND-853, DND-799, DND-1095): read-only commands the text
+# guard denies. Each is DENIED with no git layer and ALLOWED with it. One case
+# per `### name` block; the command is the block's text.
+cat > "$TMP/fp-cases" <<'EOF'
+### grep alternation read as the gstp alias
+grep -n -E 'dnd-(513|514|52[1-9]|537)' /tmp/nothing.txt
+### grep BRE alternation
+grep -rln 'walt_ui-slack\|producer.*slack' /tmp/nothing
+### grep -i stash (DND-853)
+ls /tmp | grep -i stash
+### grep class with braces
+grep -rhoE 'data_source[_ ]id[^0-9a-f]{0,8}[0-9a-f-]{32,36}' /tmp/nothing
+### grep d{4} pattern
+grep -E 'd{4} $' "$F"
+### jq filter with brackets
+gh pr view 1 --json statusCheckRollup -q '[.statusCheckRollup[] | {n: .name, c: .conclusion}]'
+### jq slice interpolation
+for p in 407; do gh pr view $p --json number,headRefOid -q '"\(.number) \(.headRefOid[0:8])"'; done
+### awk {print $4} after git in the same command
+cd /tmp; git fetch -q origin; gh pr checks 459 | awk '{print $4}'
+### awk {print $4}
+ps aux | awk '{print $4}'
+### JSON heredoc with [harness]
+gh api repos/x/y/issues --input - <<EOT
+["[harness] a", "$T"]
+EOT
+### JSON object heredoc with [harness]
+gh api repos/x/y/issues --input - <<EOT
+{"title": "[harness] $T", "labels": ["harness"]}
+EOT
+### athena-harness[bot] in echo text
+echo "athena-harness[bot] -- $X"
+### $H/ticket.rb --set-status after git -C
+git -C "$W" log -1 --format=%h; $H/ticket.rb DND-1095 --set-status Done
+### test [ -n "$s" ] after git -C (DND-853)
+for d in a b; do s=$(git -C "$d" status --porcelain); [ -n "$s" ] && echo "$d"; done
+### ARGV[0] in ruby -e
+ruby -e 'ARGV[0].split(",").each { |x| puts x }' "$X"
+### ruby #{...} interpolation
+ruby -e 'puts "#{1} #{2}"; exit 0' "$X"
+### ruby #{...} in a heredoc
+cat <<EOT | ruby
+puts "#{ENV["HOME"]} $X"
+EOT
+### assignment with ${...}
+X=${A:-b}; ls
+### "stash guard" as a search term
+./search.rb "stash guard"
+EOF
+awk -v d="$TMP/fpc" 'BEGIN { system("mkdir -p " d) } /^### / { n++; f = d "/" n; print substr($0, 5) > (d "/" n ".name"); next } { print > f }' "$TMP/fp-cases"
+_i=1
+while [ -f "$TMP/fpc/$_i" ]; do
+  _name=$(cat "$TMP/fpc/$_i.name"); _cmd=$(cat "$TMP/fpc/$_i")
+  run_nolayer "$_cmd"; lcheck "L1.$_i. no git layer: $_name" deny
+  run_live "$_cmd"; lcheck "L2.$_i. git layer live: $_name" allow
+  _i=$((_i + 1))
+done
+[ "$_i" -gt 19 ] || { STATUS=0; OUT="only $((_i - 1)) cases read"; record "L0. every false-positive case was read" FAIL; }
+
+# L3: real stash writes still deny with the git layer live. The literal
+# spellings stay: a payload may run outside the agent env (ssh, tmux, sudo),
+# where neither git layer exists.
+for _c in 'git stash pop' 'git stash' 'git -C /tmp/x stash drop' 'gstp' 'gstp --index' 'git sp' \
+  "sh -c 'git stash pop'" "tmux new -d 'git stash pop'" 'ssh localhost git stash drop' \
+  '/usr/bin/git stash drop' '$G stash drop' '/usr/bin/g?t stash drop' 'g?t stash drop' '/usr/bin/g?t $V' \
+  "git reflog delete 'stash@{1}'" 'rm .git/refs/stash' ': > .git/logs/refs/stash' \
+  'X=stash; git $X' 'git -c gc.reflogExpire=now gc' 'git -c help.autocorrect=1 stsh drop' \
+  'git stash import abc123' 'git stash export --to-ref refs/x' 'git commit -m "then git stash pop"' \
+  "ssh h 'X=stash; git \$X'" "sh -c '\$*' sh /usr/bin/g?t stash drop"; do
+  run_live "$_c"; lcheck "L3. git layer live, still denied: $_c" deny
+done
+
+# L4: any condition of the live check failing keeps the full guard. Two
+# false-positive inputs; each must deny.
+lneg() {
+  for _c in "ps aux | awk '{print \$4}'" "grep -E 'a(1|2)[0-9]' /tmp/nothing"; do
+    run_live "$_c"; lcheck "L4. $1: $_c" deny
+  done
+  lreset
+}
+L_COUNT=0; lneg "no GIT_CONFIG hook keys"
+L_ENABLED=false; lneg "hook.agentstash.enabled=false"
+L_HOOK="$TMP/missing/agent-stash-guard.sh"; lneg "hook script missing"
+L_TRACE=; lneg "GIT_TRACE2 unset"
+L_BIN="$TMP/nomark"; lneg "ATHENA_AGENT_BIN git without the wrapper mark"
+L_ENVF="$TMP/no-line-env.sh"; lneg "CLAUDE_ENV_FILE without the agent PATH line"
+L_INST=2099-01-01T00:00:00Z; lneg "session predates the install (pending restart)"
+L_INST=; lneg "install stamp unset"
+L_PARENT=; lneg "no claude ancestor"
+L_PATH="$TMP/oldgit:$PATH"; lneg "git 2.53"
+# L5: a command that shows a way around the git layer keeps the full guard.
+for _c in "/usr/bin/git log; ps aux | awk '{print \$4}'" "PATH=/usr/bin; ps aux | awk '{print \$4}'" \
+  "env -u X ps aux | awk '{print \$4}'" "GIT_CONFIG_COUNT=0 ps aux | awk '{print \$4}'" \
+  "which git; ps aux | awk '{print \$4}'" "command -p ls | awk '{print \$4}'"; do
+  run_live "$_c"; lcheck "L5. exposure keeps the full guard: $_c" deny
+done
+
+# L6: the shapes L2 leaves to the git layer are refused there. In the fixture
+# worktree, with the live PATH and env, run what the text guard allows: the
+# wrapper refuses it, and the owner's stash list is byte-identical.
+_before=$(git -C "$OWNER" stash list; git -C "$OWNER" rev-parse refs/stash)
+for _c in 'X=$(printf "st%s" ash); git $X' 'S=$(printf "st%s" ash); git $S pop' 'V=$(printf "dr%s" op); git stash $V'; do
+  run_live "$_c"
+  if is_deny; then _v=deny; else _v=allow; fi
+  (L_PATH="$L_BIN:$PATH"; cd "$WT" && lenv sh -c "$_c") > "$TMP/l6.out" 2>&1
+  _rc=$?
+  if grep -q 'REFUSED' "$TMP/l6.out" && [ "$_rc" -ne 0 ]; then _g=refused; else _g="not refused (rc=$_rc)"; fi
+  if [ "$_g" = refused ]; then
+    record "L6. text guard $_v, git layer refused: $_c" PASS
+  else
+    STATUS=0; OUT="guard=$_v git=$_g: $(head -c 300 "$TMP/l6.out")"; record "L6. text guard $_v, git layer refused: $_c" FAIL
+  fi
+done
+_after=$(git -C "$OWNER" stash list; git -C "$OWNER" rev-parse refs/stash)
+if [ "$_before" = "$_after" ] && printf '%s' "$_after" | grep -q OWNER-ENTRY; then
+  record "L6. owner stash list byte-identical after the git-layer attempts" PASS
+else
+  STATUS=0; OUT="before=[$_before] after=[$_after]"; record "L6. owner stash list byte-identical after the git-layer attempts" FAIL
+fi
+
 echo
 echo "==================================================="
 printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
