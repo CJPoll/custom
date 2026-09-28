@@ -114,6 +114,9 @@ module TriageCorpus
       "created_time" => row["created_time"],
       "kind" => row.dig("properties", "Kind", "select", "name"),
       "security" => row.dig("properties", "Security", "select", "name"),
+      # A property renamed or retyped reads nil like an unset one; naming it
+      # here lets ticket-corpus refuse the snapshot instead of 0 labels.
+      "schema_missing" => %w[Kind Severity Security].reject { |n| row.dig("properties", n).is_a?(Hash) && row.dig("properties", n).key?("select") },
       "epic_ids" => relation_ids(row, "Epic"),
       "depends_on" => relation_ids(row, "Depends On"),
       "blocks" => relation_ids(row, "Blocks"),
