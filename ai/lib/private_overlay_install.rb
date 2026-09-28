@@ -201,6 +201,8 @@ module PrivateOverlayInstall
       "Fix: run `#{installer} --install`."
     in ["marketplace", :conflict]
       "Fix: another marketplace named #{MARKETPLACE} is registered. Remove it with `claude plugin marketplace remove #{MARKETPLACE}`, then run `#{installer} --install`."
+    in ["plugin", :conflict]
+      "Fix: this installer did not install it from this overlay; if it should go, run `claude plugin uninstall #{PLUGIN_ID}` yourself."
     in ["hook", :missing] | ["hook", :stale]
       "Fix: run `#{installer} --install` once the scanner can measure (at least one pattern committed in the overlay's outbound/patterns.tsv)."
     in ["hook", :inert]
@@ -250,7 +252,12 @@ module PrivateOverlayInstall
     plan = []
     plan << [:hook_delete] if %i[ok inert stale].include?(hook.state)
     plan << [:refuse, hook] if %i[conflict unmeasured].include?(hook.state)
-    plan << [:plugin_uninstall, PLUGIN_ID] if %i[ok disabled].include?(plugin.state)
+    # Uninstall the plugin only when it came from OUR marketplace. From a
+    # custom-work registered elsewhere (or one that could not be read), it is
+    # not this installer's to remove.
+    if %i[ok disabled].include?(plugin.state)
+      plan << (marketplace.state == :ok ? [:plugin_uninstall, PLUGIN_ID] : [:refuse, Verdict.new(component: "plugin", state: :conflict, detail: "#{PLUGIN_ID} is installed, but #{MARKETPLACE} is not this overlay's marketplace (#{CHECK_LABEL.fetch(marketplace.state)}), so it is left in place")])
+    end
     plan << [:refuse, plugin] if plugin.unmeasured?
     plan << [:marketplace_remove, MARKETPLACE] if marketplace.state == :ok
     plan << [:refuse, marketplace] if %i[conflict unmeasured].include?(marketplace.state)

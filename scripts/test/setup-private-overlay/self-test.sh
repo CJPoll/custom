@@ -283,7 +283,27 @@ reset_calls; run "$INST" --install
 if [ "$RC" = 1 ] && has "marketplace: CONFLICT" "$OUT" && has "not the overlay root" "$OUT" && [ -z "$(writes_in_log)" ]; then
   ok "21 a custom-work marketplace from another path: CONFLICT, no add, no plugin install"
 else bad "21 conflict" "rc=$RC out=$OUT calls=$(calls)"; fi
+# 21b. --remove with that foreign custom-work: neither the marketplace nor a
+#      plugin installed from it is removed.
+printf 'work@custom-work\ttrue\n' > "${STATE}/plugins"
+reset_calls; run "$INST" --remove --dry-run; dry_out="$OUT"
+reset_calls; run "$INST" --remove
+if [ "$RC" = 1 ] && has "plugin: CONFLICT" "$OUT" && has "left in place" "$OUT" && [ -z "$(writes_in_log)" ] \
+   && ! has "would uninstall" "$dry_out"; then
+  ok "21b --remove leaves a plugin and marketplace this installer did not add"
+else bad "21b remove conflict" "rc=$RC out=$OUT dry=$dry_out calls=$(calls)"; fi
 cp "${TMP}/mkts.ok" "${STATE}/mkts"; cp "${TMP}/plugins.ok" "${STATE}/plugins"
+# 21b removed our hook (it is ours, whatever the marketplace); put it back.
+[ -e "$HOOK" ] || { cp "${TMP}/ours.hook" "$HOOK"; chmod +x "$HOOK"; }
+
+# 21c. A hook that exists but cannot be read: COULD NOT MEASURE, never OK.
+chmod 000 "$HOOK"
+run "$INST" --check
+chmod 755 "$HOOK"
+if [ "$(id -u)" = 0 ]; then ok "21c skipped: root reads any file"
+elif [ "$RC" = 3 ] && has "hook: COULD NOT MEASURE" "$OUT" && has "cannot be read" "$OUT"; then
+  ok "21c an unreadable hook: COULD NOT MEASURE, exit 3"
+else bad "21c unreadable hook" "rc=$RC out=$OUT"; fi
 
 # 22. The hook installed but the overlay's pattern floor gone (another root
 #     with no patterns): --check says NOT ACTIVE, not OK.

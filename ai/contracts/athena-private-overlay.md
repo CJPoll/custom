@@ -186,7 +186,9 @@ failed (`COULD NOT MEASURE`: no `claude` on PATH, unparseable `claude` JSON,
 an unresolvable hook path), else 1.
 
 **`--remove`** removes this installer's hook, uninstalls the plugin and removes
-the marketplace. It never deletes the overlay directory or a foreign hook.
+the marketplace. It never deletes the overlay directory, a foreign hook, or a
+`custom-work` marketplace registered from another source, nor the plugin while
+such a marketplace holds the name.
 
 **Who runs it.** `--init` and `--install` change the owner's machine: its
 Claude Code user settings and the main checkout's `.git/hooks`. The owner runs

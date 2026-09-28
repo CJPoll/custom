@@ -40,8 +40,9 @@ Say which piece is missing, quote its line, and give its Fix:
 | plugin missing or disabled | The owner runs `~/dev/custom/scripts/setup-private-overlay --install`. |
 | everything present, but the `work:` skill you need is not listed | The skill has not moved into the overlay yet; say so. |
 
-An agent does not run `--init` or `--install` itself: both change the
-owner's machine configuration. Report the command for the owner instead.
+Who may run `--init` and `--install` is the contract's *Installer* → *Who
+runs it*. Without the owner's explicit direction, report the command for the
+owner instead of running it.
 
 If the task cannot proceed without the work value or procedure, stop and say
 so. That report is the result.
