@@ -127,6 +127,17 @@ rebase A's branch into B's worktree** before B's captain continues (or starts).
 This is your job, not theirs — they don't reach across worktrees. Do it every
 time a dependency resolves, not just at the end.
 
+**Starting B before A has merged (a stacked Mission):** create B's worktree
+with `wt-preflight` as for any Mission, then merge A's branch into it
+(`git -C <B-wt> merge --ff-only <A-branch>`; a plain merge if that refuses).
+B's PR targets A's branch until A lands. Never bypass the preflight
+with a bare `git worktree add -b B <A-branch>`: that skips its staleness and
+pool-headroom checks, and `PREFLIGHT OK` is the dispatch precondition.
+Measured 2026-09-28: two fleets in one hour stacked a Mission on an unmerged
+dependency (DND-100 on DND-99; DND-302 on DND-238). One preflighted then
+fast-forwarded; the other hand-rolled `git worktree add`, logging
+"wt-preflight only branches from main".
+
 If B's captain has already opened its MR against a placeholder target by the time
 A merges, **retarget B's MR yourself** — `glab mr update --target-branch`;
 GitHub: `gh-athena pr edit <n> --base` (an attributed write, so through the
