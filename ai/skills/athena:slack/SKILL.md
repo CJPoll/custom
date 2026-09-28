@@ -249,10 +249,16 @@ Cody, verbatim (2026-09-25): *"slack me if you actually need me to make a
 decision; use slack's block kit to make it easier for me to give a response
 when you do that."*
 
-- **Ask only for a real decision.** If you can decide it, decide it. If you can
-  already run a step, run it. Nothing needs Cody's approval unless
-  `~/.claude/CLAUDE.md` → *Owner approval policy* names it; anything else is not
-  a decision, and it ships.
+- **Ask only for a step only Cody can run.** That is `~/.claude/CLAUDE.md` →
+  *Owner approval policy* → *Only Cody can run*, or clearing an
+  `integration-gate` exit 4. Everything else, the policy's judgement calls
+  included, you decide on best judgement and list in the digest. If you can
+  already run a step, run it.
+
+  **Later (2026-09-28, ~07:15Z):** this read "Nothing needs Cody's approval
+  unless *Owner approval policy* names it", so each table item was a DM.
+  Superseded by owner decision: "I would prefer you not even dm me unless it's
+  something that only I can run."
 - **Send it as a Block Kit DM to Cody.** Do not end a terminal reply with a
   list of open questions instead.
 
@@ -388,8 +394,9 @@ terminal turn, 2026-09-28 04:18Z (session
 `8a6404f7-1942-416e-bb2b-4394ed83d7d8`): "I confirm what I said in slack -
 clicks from my user count as approval. Please have a shipwright update
 conflicts accordingly." So a click that passes all four checks is the owner's
-decision on the one question that message asked. That covers a table item
-in `~/.claude/CLAUDE.md` → *Owner approval policy*, and the won't-fix veto
+decision on the one question that message asked. That covers any ask
+`~/.claude/CLAUDE.md` → *Owner approval policy* → *Asking, and what counts as
+approval* allows, and the won't-fix veto
 ([[athena:ticket-management]] → *Promote and won't-fix*). The checks use the
 fields of the message's `.payload` in `read-inbox --json`:
 

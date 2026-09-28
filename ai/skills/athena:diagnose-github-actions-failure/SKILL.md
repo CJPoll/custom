@@ -153,10 +153,11 @@ runners API is the only authority.
 
 ### What to do about it
 
-- **Restarting it is owner-gated** and usually a system service on a machine
-  this session is not even on — never touch it (`ai/CLAUDE.md` → *Hard Rule*:
-  no unattended system-level changes). Surface it with the identity that makes
-  the instruction actionable: runner **name, id, labels, status**, which **host**
+- **Restarting it is a judgement call** (`ai/CLAUDE.md` → *Owner approval
+  policy*). A runner you can reach and restart without sudo, restart it and
+  list it in the digest. One that needs sudo, or sits on a machine this
+  session is not on and cannot reach, is Cody's step: surface it with the
+  identity that makes the instruction actionable: runner **name, id, labels, status**, which **host**
   it runs on, the repo, and the time of the last successful dispatch.
 - **Stop watching and re-plan around it.** An indefinite `gh pr checks --watch`
   is a stall, not a wait. Split the scope by what the runner gates: drive every

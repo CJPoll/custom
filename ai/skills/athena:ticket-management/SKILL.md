@@ -20,7 +20,7 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
 | `Backlog` | leave as-is until scoped | not yet in an athena-admiral's scope; on scope-in, normalize to `Todo` |
 | `Todo` | **Athena** once in scope | in an athena-admiral's scope, queued; no engineer on it yet |
 | `In Progress` | **Athena** | an athena-captain has been dispatched and is actively working it |
-| `Needs Attention` | **Cody** | blocked on Cody's input/decision — put the context he needs in the ticket body |
+| `Needs Attention` | **Cody** | blocked on a step only Cody can run (`~/.claude/CLAUDE.md` → *Owner approval policy* → *Only Cody can run*), or on clearing an `integration-gate` exit 4 — put the exact step in the ticket body |
 | `Attention Given` | **Cody** | Cody has answered; awaiting the owning athena-admiral to pick it back up (stays Cody until reopened) |
 | `Done` | **Cody** | Cody's to review / verify / close |
 | `Ready for Release` | **Cody** | work workspace only — a mobile ticket that has cleared dev but not yet the app-store process |
@@ -40,14 +40,15 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    follows its captain*).
 2. **Assigning an engineer** — when an athena-captain is dispatched to the ticket, move
    the status to `In Progress`; the assignee stays **Athena**.
-3. **→ `Needs Attention`** — set `Assignee` = **Cody**, write the decision/context
+3. **→ `Needs Attention`** (only for a step only Cody can run; see the Notes
+   rule) — set `Assignee` = **Cody**, write the exact step
    Cody needs onto the ticket body (that is the whole point of the status), and
    **DM Cody** as Athena that the ticket needs him (see the Notes "Needs Attention
    DM" rule). This is one of the three owner-notification events; it fires on the
    transition itself and applies to ANY ticket, epic or not.
 4. **→ `Done`** — set `Assignee` = **Cody**. Only after the merge is CONFIRMED
    (`ai/bin/confirm-merged`) **and** the change is verified live where it runs.
-   If only Cody can do the live check (his login, his machine), move the ticket
+   If only Cody can do the live check (Cody's login or password), move the ticket
    to `Needs Attention` instead, with the exact check on the body.
 5. **→ `Ready for Release`** (work workspace only) — set `Assignee` = **Cody**.
 6. **`Attention Given` → `In Progress`** — a ticket in `Attention Given` is still
@@ -557,3 +558,11 @@ authoritative.
   the three owner-notification events; the other two — an epic crossing 50% and an epic
   reaching 100% — are the **athena-admiral**'s, computed at merge time (see that agent
   def's "Epic-progress DM to the owner"). Athena no longer DMs on every merge.
+
+  **Later (2026-09-28, ~07:15Z):** a ticket moved to `Needs Attention` for any
+  decision Cody's input could settle, so this DM fired for approval asks too.
+  Superseded by owner decision (`~/.claude/CLAUDE.md` → *Owner approval
+  policy*): "I would prefer you not even dm me unless it's something that only
+  I can run." `Needs Attention`, and so this DM, is now only for a step only
+  Cody can run, or clearing an exit 4. Any other decision is made on best
+  judgement, recorded on the ticket, and listed in the digest.

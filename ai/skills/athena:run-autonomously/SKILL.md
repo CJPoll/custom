@@ -51,10 +51,11 @@ through to completion without them.
    independent piece of work to done and merged as normal. In *When the user
    returns*, give the owner the precise credential/console step **and** the
    ordered list of the stacked, ready-to-merge PRs, so one manual step lands
-   the whole stack. Besides this owner-only class, only what
-   `~/.claude/CLAUDE.md` → *Owner approval policy* keeps waits on the owner.
-   Request each by Block Kit as that section says. Everything else, security
-   fixes included, ships. What it lists under *Notify after* goes in your
+   the whole stack. Besides this owner-only class, only an `integration-gate`
+   exit 4 waits on the owner (`~/.claude/CLAUDE.md` → *Owner approval policy*
+   → *What still holds mechanically*); request it by Block Kit as that
+   section says. The policy's judgement calls you decide yourself and report.
+   Everything else, security fixes included, ships. What it lists under *Notify after* goes in your
    report to the returning user (*When the user returns*).
 
 ## When the user returns

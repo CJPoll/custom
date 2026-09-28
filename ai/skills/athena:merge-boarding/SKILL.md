@@ -187,8 +187,9 @@ admiral following this bar **exactly and correctly** would have merged it; only
 a captain choosing to read a workflow file nobody told it to read prevented
 that. `integration-gate` now asks the question for you.
 
-**Exit 4 means merging does something on the owner's approval list**
-(`~/.claude/CLAUDE.md` → *Owner approval policy*). The output names each
+**Exit 4 means merging does something only Cody's verified words clear**
+(`~/.claude/CLAUDE.md` → *Owner approval policy* → *What still holds
+mechanically*). The output names each
 declared surface the diff touches, whether it holds (`hold:`), and whether
 merging triggers automation. A diff that touches no surface exits 0 without the
 automation check ever running, so an ordinary app-code deploy costs one `git
@@ -246,13 +247,18 @@ holds is refused (exit 2), so drop it there. The record prints into the
 `INTEGRATION OK` line and the receipt; copy the line into your state log and
 name it in the final report.
 
-**A captain's `Blast radius: IRREVERSIBLE` is a hold in its own right**, even
-when `integration-gate` exits 0. It flags what the classifier cannot see
+**A captain's `Blast radius: IRREVERSIBLE` is yours to judge**, even when
+`integration-gate` exits 0. It flags what the classifier cannot see
 (*Owner approval policy* items 1–3): a pure-code change that deletes prod data,
-starts a recurring charge, or emails real users hits no path pattern. The two
-channels **union**; neither cancels the other. A captain's `ROUTINE` never
-overrides an exit 4, and an exit 0 never overrides a captain's `IRREVERSIBLE`.
-Hold it and request the go as for exit 4.
+starts a recurring charge, or emails real users hits no path pattern. Decide it
+on the policy's best judgement (prefer reversible; never casually destroy prod
+data), record the call on the Mission, and list it in your final report. A
+captain's `ROUTINE` never overrides an exit 4.
+
+**Later (2026-09-28, ~07:15Z):** this was "a hold in its own right … Hold it
+and request the go as for exit 4." Superseded by owner decision (*Owner
+approval policy*): "I would prefer you not even dm me unless it's something
+that only I can run." Items 1–3 are judgement calls; only exit 4 still holds.
 
 **A destructive migration is PLANNED, so its authorization is too.** The
 `destructive-migration` surface gates a merge whose deploy drops a table or a

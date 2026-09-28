@@ -119,11 +119,11 @@ goes nowhere unless the owner acts. Per Mission:
   `integration-gate --owner-approval 'session:<sid>/<mid> quote:<their
   words>'` (the reference to the turn they type), run from the named worktree.
 
-Only what `~/.claude/CLAUDE.md` → *Owner approval policy* keeps is held here,
-with the Block Kit request you sent. What that policy lists under *Notify
-after* (a Won't Fix, a Notion schema change, a bulk ticket change, an installer
-run, a tool-version or dotfile change) gets one line each in a **Notify-after**
-list: what changed and where.
+Only what `~/.claude/CLAUDE.md` → *Owner approval policy* still holds (an
+exit 4, a Cody-only step) is held here, with the Block Kit request you sent.
+Everything that policy lists under *Notify after*, each judgement call
+included, gets one line in a **Notify-after** list: what changed, where, and
+how to reverse it.
 
 A held Mission reported only as a status string leaves the owner to reconstruct
 the merge, which is how a held MR becomes a forgotten one.

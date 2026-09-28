@@ -63,8 +63,9 @@ match):
   with it)
 - Green, reviewed, and deliberately **not mergeable by the fleet** — merging
   hits an `integration-gate` exit 4 (see [[athena:merge-boarding]] → *Merging is
-  not always landing code*), or a captain reported `IRREVERSIBLE`
-  (`~/.claude/CLAUDE.md` → *Owner approval policy*) →
+  not always landing code*; a captain's `IRREVERSIBLE` is the admiral's
+  judgement call, not a hold: `~/.claude/CLAUDE.md` → *Owner approval
+  policy*) →
   **`HELD_FOR_OWNER`** in your state log, and in
   Notion `Needs Attention` assigned to **Cody**, with the context on the Mission
   body. This is a distinct terminal state, not a flavour of the others: `Stuck`
