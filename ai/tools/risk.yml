@@ -128,6 +128,9 @@ tools:
   # Athena server. Each report is an idempotent upsert, but it mutates EXTERNAL
   # state, which is this file's definition of destructive.
   fleet-report:            { class: destructive, reason: registry }
+  # priority-next (DND-445) takes, releases and completes leases on the Athena
+  # server's priority index: external state.
+  priority-next:           { class: destructive, reason: lease }
   # judgment-eval (DND-710) sends labelled cases to the Athena server, which
   # records judgment_calls and eval-run rows (and, with a key, spends TypeSafe
   # budget); --apply writes the owner's judgment_thresholds. External state.

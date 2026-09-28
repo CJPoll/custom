@@ -212,6 +212,34 @@ else bad "--domains work,blend -> domains [work, blend]" "rc=${RC} args='$(tool_
 setup_case; run next --domains everything
 if [ "${RC}" -eq 2 ] && [ "$(requests)" -eq 0 ]; then ok "--domains everything -> exit 2, no request"
 else bad "--domains everything -> exit 2, no request" "rc=${RC} requests=$(requests)"; fi
+# The miss: `--domains "$UNSET"` must never read as "no filter".
+setup_case; answer_ok "${LEASED}"; run next --domains ""
+if [ "${RC}" -eq 2 ] && [[ "${ERR}" == *"domains=empty"* ]] && [ "$(requests)" -eq 0 ]; then
+  ok "--domains '' -> exit 2 domains=empty, no request (never an unfiltered lease)"
+else bad "--domains '' -> exit 2 domains=empty, no request (never an unfiltered lease)" "rc=${RC} err='${ERR}' requests=$(requests)"; fi
+setup_case; run next --domains ,work
+if [ "${RC}" -eq 2 ] && [ "$(requests)" -eq 0 ]; then ok "--domains ,work -> exit 2, no request"
+else bad "--domains ,work -> exit 2, no request" "rc=${RC} requests=$(requests)"; fi
+
+# 10b. flags and the item id in any order; a second item id is misuse.
+setup_case; answer_ok '{"result":"ok"}'; run release --json "${ITEM}"
+if [ "${RC}" -eq 0 ] && [ "$(jq -r .result <<<"${OUT}")" = "ok" ]; then ok "release --json <id> (flag first) -> ok"
+else bad "release --json <id> (flag first) -> ok" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+setup_case; run release "${ITEM}" "${ITEM}"
+if [ "${RC}" -eq 2 ] && [ "$(requests)" -eq 0 ]; then ok "release <id> <id> -> exit 2, no request"
+else bad "release <id> <id> -> exit 2, no request" "rc=${RC} requests=$(requests)"; fi
+setup_case; run next "${ITEM}"
+if [ "${RC}" -eq 2 ] && [ "$(requests)" -eq 0 ]; then ok "next <id> -> exit 2, no request"
+else bad "next <id> -> exit 2, no request" "rc=${RC} requests=$(requests)"; fi
+
+# 10c. a leased answer with no item id, or a none with a missing count, is
+#      unreadable (exit 5), never a lease or a none.
+setup_case; answer_ok "$(jq -c 'del(.item.item_id)' <<<"${LEASED}")"; run next
+if [ "${RC}" -eq 5 ] && [[ "${ERR}" == *"unreadable-answer"* ]]; then ok "leased with no item_id -> exit 5"
+else bad "leased with no item_id -> exit 5" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+setup_case; answer_ok "$(jq -c 'del(.excluded.leased)' <<<"${NONE}")"; run next
+if [ "${RC}" -eq 5 ] && [[ "${ERR}" == *"unreadable-answer"* ]]; then ok "none with a missing count -> exit 5, never 3"
+else bad "none with a missing count -> exit 5, never 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 # 11. release and complete: result=ok, exit 0, exactly session + item.
 for sub in release complete; do
