@@ -221,8 +221,8 @@ everything.
 **Later (2026-09-28, ~07:15Z):** the default read "no approval", with the
 table below titled *Needs Cody's approval*: each item held for Cody's go via a
 Block Kit decision DM. Superseded by the owner decision above. Items 1–4 and
-7 are judgement calls, listed in the digest, except a force-push to `main`.
-Items 5 and 6 stay with Cody.
+7 are judgement calls, listed in the digest. Items 5 and 6, and a
+force-push to `main`, stay with Cody (*What stays with Cody*).
 Item 8 is narrowed to what only Cody can run.
 
 **Later (2026-09-28):** this section replaces *Standing owner approvals* and its
@@ -240,9 +240,9 @@ a named standing approval covered it. Superseded by the owner decision of
 | 1 | Destroying or replacing stateful prod infra or data | Terraform destroy/replace of a database, secret store or bucket; a destructive migration; deleting prod data. |
 | 2 | Adding recurring cost | Paid infra, a paid API or SaaS, a new vendor account. |
 | 3 | Reaching another person | A DM to anyone but Cody, an email, a Drive share, an unprompted channel post (`athena:slack` → *When Athena may post*). |
-| 4 | Deleting a repo, force-pushing main, changing forge settings or branch protection | A force-push to `main` skips the merge bar, so it is never a judgement call. A settings or protection change that loosens a check or review is item 5. |
-| 5 | Loosening a quality bar | Not a judgement call: see *Items 5 and 6* below. |
-| 6 | Changing the approval rules, or reversing a Cody decision | Not a judgement call: see *Items 5 and 6* below. |
+| 4 | Deleting a repo, force-pushing main, changing forge settings or branch protection | A force-push to `main` stays with Cody (*What stays with Cody*). A settings or protection change that loosens a check or review is item 5. |
+| 5 | Loosening a quality bar | Stays with Cody: see *What stays with Cody* below. |
+| 6 | Changing the approval rules, or reversing a Cody decision | Stays with Cody: see *What stays with Cody* below. |
 | 7 | A walt_ui change that would cause downtime | A walt_ui security fix ships zero-downtime. |
 
 **Best judgement means:**
@@ -255,8 +255,10 @@ a named standing approval covered it. Superseded by the owner decision of
 These hold for security fixes too. A change covered by none of them ships
 with no digest line of its own.
 
-**Items 5 and 6 are never judgement calls.** The owner's decision above
-covers system and runner changes, not the fleet's own bars and rules.
+**What stays with Cody.** These are never judgement calls. Each is an ask
+(*Asking, and what counts as approval*); until Cody answers, it does not
+happen. The owner's decision above covers system and runner changes, not the
+fleet's own bars and rules.
 
 - **Item 5, loosening a quality bar**: raising a budget or threshold, or
   dropping, skipping or downgrading a check. Fixing a check's false positive
@@ -268,6 +270,8 @@ covers system and runner changes, not the fleet's own bars and rules.
   section, the `blast-radius` holds, the owner approval grant allowlist. Only
   Cody's own words change them, as this amendment's were. An edit to this
   section exits 4 (*What still holds mechanically*).
+- **A force-push to `main`** (item 4). It skips the merge bar, and no
+  mechanical hold can see it.
 
 ### Only Cody can run
 
@@ -346,8 +350,8 @@ earlier *Security fixes ship without owner approval* still stand:
 ### Asking, and what counts as approval
 
 - **Ask only for what needs Cody; hold only that.** That is a step under
-  *Only Cody can run*, clearing an exit 4, or an item 5 or 6 change. Nothing
-  else is an ask. Send Cody a Block Kit DM
+  *Only Cody can run*, clearing an exit 4, or what *What stays with Cody*
+  names. Nothing else is an ask. Send Cody a Block Kit DM
   (`athena:slack` → *Asking the owner for a decision*) with the exact command,
   or what merging causes: the `BLAST-RADIUS HOT` block or the plan summary.
   Keep working everything else (`athena:run-autonomously` → *Owner-credential
@@ -480,17 +484,15 @@ the issues." This section is its one home; other documents cite it by name.
 - NEVER EVER UNDER ANY CIRCUMSTANCE use `Application.put_env`
 - NEVER make system-level changes (especially daemons, system services, /etc files, sudo commands) without the user's express direction
 - It's OK to make changes to files under ~/dev or ~/.local/worktrees without asking
-- For system changes: provide instructions for the user to execute, do NOT execute them yourself
+- For a system change that needs sudo or Cody's password: provide instructions for the user to execute, do NOT execute them yourself. A reasonable system change the fleet can run without sudo has the owner's express direction: make it on best judgement and list it in the digest (*Owner approval policy*).
 
-  **Later (2026-09-28, ~07:15Z):** the owner has given that express direction
-  for reasonable system changes. Cody, terminal turn (session
-  `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`, message
+  **Later (2026-09-28, ~07:15Z):** this bullet read "For system changes:
+  provide instructions for the user to execute, do NOT execute them
+  yourself." Superseded by the owner's express direction, Cody, terminal turn
+  (session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`, message
   `6d7a8c6a-32e3-46c4-bfa3-2f2d9f704774`): "I'm asking you to use your best
   judgement, even if it's a CI runner change, or makes reasonable changes to
-  the system." So a reasonable system change the fleet can run without sudo
-  is made on best judgement and listed in the digest (*Owner approval policy*).
-  Anything needing sudo or Cody's password stays Cody's: give the
-  instructions, do not run them.
+  the system."
 
 ## Structure
 
