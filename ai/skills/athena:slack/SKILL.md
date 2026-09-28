@@ -488,7 +488,7 @@ What the session can and cannot verify:
   schemas are closed, so a peer's `session.message` cannot carry a
   `slack.interaction` kind.
 - **The residual:** a process running as the owner's user can append a line
-  to the local inbox file, and so forge an approval, table items included.
+  to the local inbox file, and so forge an approval.
   The owner accepted this residual when he made clicks approval. It is not
   new: the same user can write the Claude Code transcript that
   `--owner-approval` reads, and can already write the tracker.

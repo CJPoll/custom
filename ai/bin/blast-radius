@@ -1580,11 +1580,11 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
 end
 
 HOT_FIX = <<~FIX.freeze
-  do NOT merge. What merging this does is on the owner's approval list
-  (~/.claude/CLAUDE.md -> "Owner approval policy": destroying or replacing prod state, adding
-  recurring cost, forge settings, loosening a quality bar, or changing the approval rules).
-  There is no admiral override and no standing approval that covers it, security fixes
-  included. HOLD this ONE MR and move to the next Mission (athena:merge-boarding -> "Merging
+  do NOT merge. What merging this does still holds for the owner
+  (~/.claude/CLAUDE.md -> "Owner approval policy" -> "What still holds mechanically": a
+  destructive migration, terraform that merging applies, forge settings, a check's
+  suppression list, or the approval rules and what enforces them). Only the owner's verified
+  words clear it: no admiral override, no judgement call, security fixes included. HOLD this ONE MR and move to the next Mission (athena:merge-boarding -> "Merging
   is not always landing code"): HELD_FOR_OWNER in your state log, Needs Attention/Cody in
   Notion with the PR URL, head SHA and what merging would cause, and a Block Kit decision DM
   to the owner (athena:slack -> "Asking the owner for a decision"). Merge only on the
