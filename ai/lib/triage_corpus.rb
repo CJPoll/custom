@@ -188,12 +188,31 @@ module TriageCorpus
     refs.uniq
   end
 
-  # redact(text) -> the text as the eval sends it: every ticket ref replaced by
-  # "[ref]" and every line naming a duplicate dropped. A live finding does not
-  # yet cite the ticket it duplicates, so a case that did would be judged on a
-  # label leak, not on content.
+  # redact(text) -> body text as the eval sends it: every line that names a
+  # duplicate AND cites a ticket is dropped, and every other ref becomes
+  # "[ref]". A live finding does not yet cite the ticket it duplicates, so a
+  # case that did would be judged on a label leak, not on content. A line
+  # that only uses the word ("a near-duplicate merge") is content and stays.
   def redact(text)
-    text.to_s.each_line.reject { |l| DUP_WORD.match?(l) }.join.gsub(REF, "[ref]").strip
+    text.to_s.each_line.reject { |l| DUP_WORD.match?(l) && REF.match?(l) }.join.gsub(REF, "[ref]").strip
+  end
+
+  # redact_title(text) -> a title as sent: refs replaced, never dropped.
+  def redact_title(text)
+    text.to_s.gsub(REF, "[ref]").strip
+  end
+
+  # blank_title?(ticket) -> true when the title as sent would be blank (the
+  # server trims Unicode whitespace and refuses a blank title, so the case
+  # would be unscored invalid_request, never judged).
+  def blank_title?(ticket)
+    redact_title(ticket["title"]).gsub(/[[:space:]​﻿]/, "").empty?
+  end
+
+  # summary(candidate) -> its first blocks, each redacted, on one line.
+  def summary(candidate)
+    blocks = Array(candidate["blocks_text"]).first(SUMMARY_BLOCKS).map { |b| redact(b) }
+    blocks.reject(&:empty?).join(" ").gsub(/\s+/, " ")
   end
 
   def truncate(text, max)
@@ -294,6 +313,7 @@ module TriageCorpus
       if by_ref[finding]["body_read"] != true || by_ref[candidate]["body_read"] != true then :body_unread
       elsif projects[finding].nil? || projects[candidate].nil? then :no_project
       elsif projects[finding] != projects[candidate] then :cross_project
+      elsif blank_title?(by_ref[finding]) || blank_title?(by_ref[candidate]) then :blank_title
       end
     end
 
@@ -335,7 +355,7 @@ module TriageCorpus
   # Pairs whose titles share a keyword are sampled first: a live candidate is
   # found by a title keyword, so these are the negatives triage actually sees.
   def unrelated_pairs(tickets, projects, linked, n, seed)
-    readable = tickets.select { |t| t["body_read"] == true && projects[t["ref"]] }
+    readable = tickets.select { |t| t["body_read"] == true && projects[t["ref"]] && !blank_title?(t) }
     by_project = readable.group_by { |t| projects[t["ref"]] }
     words = readable.to_h { |t| [t["ref"], title_words(t["title"])] }
     confirmable = []
@@ -374,14 +394,14 @@ module TriageCorpus
   def input(finding, candidate, project)
     {
       "finding" => {
-        "title" => truncate(redact(finding["title"]), MAX_TITLE),
+        "title" => truncate(redact_title(finding["title"]), MAX_TITLE),
         "body" => truncate(redact(body_text(finding)), MAX_BODY),
         "project" => project
       },
       "candidates" => [{
         "ref" => candidate["ref"],
-        "title" => truncate(redact(candidate["title"]), MAX_TITLE),
-        "summary" => truncate(redact(Array(candidate["blocks_text"]).first(SUMMARY_BLOCKS).join(" ")).gsub(/\s+/, " "), MAX_SUMMARY)
+        "title" => truncate(redact_title(candidate["title"]), MAX_TITLE),
+        "summary" => truncate(summary(candidate), MAX_SUMMARY)
       }]
     }
   end

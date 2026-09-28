@@ -82,6 +82,15 @@ ruby_eq "refs: distinct, first-mention order, leading zeros dropped" \
 ruby_eq "redact: refs become [ref] and duplicate lines are dropped [ticket]" \
   "Widget breaks on save.|See [ref] for context." \
   'TriageCorpus.redact("Duplicate of DND-2.\nWidget breaks on save.\nSee DND-9 for context.").split("\n").join("|")'
+ruby_eq "redact: a duplicate word with no ref is content and stays (regression: DND-1012's title went blank)" \
+  "C3 (near-duplicate merge) may cancel [ref]|a near-duplicate merge" \
+  'i = TriageCorpus.input({"title"=>"C3 (near-duplicate merge) may cancel DND-5","blocks_text"=>["a near-duplicate merge"]}, {"ref"=>"DND-5","title"=>"t","blocks_text"=>["s"]}, "harness"); [i["finding"]["title"], i["finding"]["body"]].join("|")'
+ruby_eq "input: a title is never dropped, only its refs replaced" \
+  "Duplicate of [ref]" \
+  'TriageCorpus.input({"title"=>"Duplicate of DND-9","blocks_text"=>[]}, {"ref"=>"DND-5","title"=>"t","blocks_text"=>[]}, "harness")["finding"]["title"]'
+eq "build: a case whose sent title would be blank is excluded as blank_title, never sent" \
+  "blank_title 1" \
+  "$(ruby -rjson -r "${LIBRB}" -e 't = ->(n, title, text) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>title,"area"=>"Harness","epic_ids"=>[],"depends_on"=>[],"blocks"=>[],"found_while"=>[],"blocks_text"=>text,"body_read"=>true} }; s = {"fetched_at"=>"x","epic_projects"=>{},"tickets"=>[t.(1,"  ",["b"]), t.(2,"Real",["Follows DND-1."])]}; r = TriageCorpus.build(s, unrelated: 0, related: 10, seed: "s"); puts r[:excluded].select { |k, _| k == :blank_title }.map { |k, v| "#{k} #{v}" }.join(",")')"
 ruby_eq "epic_projects: an epic claimed by two projects is ambiguous (nil)" \
   "harness nil" \
   'rows = TriageCorpus::REPO_APPS.values.flatten.map { |a| {"repo_app"=>a,"epic_ids"=>[]} }; rows << {"repo_app"=>"~/dev/custom","epic_ids"=>["E1","E2"]}; rows << {"repo_app"=>"walt_ui","epic_ids"=>["E2"]}; m = TriageCorpus.epic_projects(rows); [m["E1"], m["E2"].inspect].join(" ")'
