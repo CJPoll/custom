@@ -130,9 +130,9 @@ A consumer that needs a work value reads it with `ai/bin/private-overlay get`.
 
 DND-699's scanner (`ai/bin/outbound-scan`) refuses a push or a public forge
 write that carries a work-domain value. It reads its bar from the overlay, so
-the bar never lives in the public diff it checks. The scanner is DND-699's
-deliverable: until it lands, nothing implements this section, and no push is
-scanned.
+the bar never lives in the public diff it checks. Rules:
+`ai/lib/outbound_scan.rb`; reads: `ai/lib/outbound_scan_sources.rb`; tests:
+`ai/test/outbound-scan/self-test.sh` and `ai/test/gh-athena-outbound/self-test.sh`.
 
 **Patterns file.** `<root>/outbound/patterns.tsv`. One pattern per line:
 `<label><TAB><regex>`. Blank lines and lines starting with `#` are skipped. The
@@ -162,3 +162,48 @@ overlay that is not a git repository, has no commits, or has no committed
 | 0 | WAIVED - NOT SCANNED | `ATHENA_OUTBOUND_WAIVE=<reason>` was set; the reason is printed and logged; this is never printed as CLEAN |
 
 A run that measured prints `SCANNED commits=N lines=M patterns=P hits=H`.
+
+A hit is printed as a location and the pattern label: `path:line (commit <sha>)`,
+`commit <sha> message:<n>`, `commit <sha> path <redacted>`, or `<field>:<n>`. A
+path that itself matches a pattern is never printed.
+
+**Surfaces.** Three modes of `ai/bin/outbound-scan`, exactly one per run:
+
+- `--pre-push --remote NAME [--url URL]` — git's pre-push stdin. For each pushed
+  ref, the commits in `<remote sha>..<local sha>` (a new ref, or a remote tip
+  not present locally: every commit not on a `refs/remotes/<NAME>/*` ref). For
+  each commit: the added lines of its diff against its first parent, its new or
+  renamed paths, and its message. A deleted ref publishes nothing. Binary files
+  are skipped and counted (`binary_skipped=N`). Tag messages are not scanned.
+- `--tree` — every tracked file of the current repository: content and path.
+  It is not in `harness-gate` yet: the tree still carries work values until
+  DND-704, DND-705 and DND-706 land, and wiring it earlier would turn every
+  gate red.
+- `--text FILE [--label NAME]` — one file's lines (gh-athena's title and body).
+
+**The pre-push hook.** `ai/git-hooks/outbound-pre-push.sh`, installed by
+DND-703's installer at the main checkout's `.git/hooks/pre-push`. It serves
+every linked worktree and lane, and it runs the **main checkout's** (landed)
+scanner, never a branch's copy. A missing scanner refuses the push (exit 3). An
+installed hook marks a machine that must measure, so an ABSENT overlay refuses
+the push there.
+
+**The forge path.** `ai/bin/gh-athena` scans the `--title`, `--body` and
+`--body-file` of `pr create|edit|comment|review` and `issue create|edit|comment`
+before gh runs, when the target repository is PUBLIC or its visibility cannot be
+read. HITS refuse (exit 1). COULD NOT MEASURE refuses (exit 3), except where the
+overlay is ABSENT and the machine is not marked (no outbound pre-push hook in
+the harness checkout's common git dir): there the write proceeds with a
+WARNING that the text went out unscanned, never a CLEAN line.
+
+**Residuals, stated.** An agent or a human can push with `--no-verify`, set the
+waiver, edit the main checkout's scanner, or commit a pattern removal in the
+overlay. `gh pr create --fill`, an editor or `--web` body, `gh api` writes, and
+other commands (release notes, gists) are not scanned by the forge path. No
+scan catches a value it has no pattern for. Each bypass raises the cost or
+leaves a trace; none is impossible.
+
+**Consequence for this repo.** The owner's scope (2026-09-25) puts work ticket
+ids in the pattern list. Once the overlay holds that pattern and the hook is
+installed, harness commit messages and PR bodies can no longer cite work ticket
+ids.

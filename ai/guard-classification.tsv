@@ -279,3 +279,7 @@ ai/lib/docker_stacks_host.rb	library	docker/git/gh/glab adapter required by ai/b
 ai/lib/bounded_command.rb	library	bounded external-command runner (DND-1088) required by ai/lib/docker_stacks_host.rb; returns a Result with timed_out and never prints, so each caller prints the Fix:
 ai/lib/private_overlay.rb	guard
 ai/lib/private_overlay_resolver.rb	library	env/filesystem adapter required by ai/bin/private-overlay (DND-702); returns a PrivateOverlay::Result and the caller prints the one stderr line that carries Fix:
+ai/lib/outbound_scan.rb	guard
+ai/lib/outbound_scan_sources.rb	library	git/overlay/file adapter required by ai/bin/outbound-scan (DND-699); raises OutboundScan::Unmeasurable naming the reason, and the bin prints the exit-3 COULD NOT MEASURE line that carries Fix:
+ai/lib/gh-outbound-scan.sh	guard
+ai/git-hooks/outbound-pre-push.sh	guard

@@ -1,0 +1,171 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# outbound-scan -- refuse a publish of a work-domain value to this PUBLIC repo
+# (DND-699). Contract: ai/contracts/athena-private-overlay.md ->
+# Outbound-scan interface.
+#
+# The pattern list is the bar, and it lives OUTSIDE the public diff: the private
+# overlay's outbound/patterns.tsv, as the UNION of the overlay's working tree and
+# its latest committed copy. A local uncommitted edit can only add a pattern.
+#
+# Modes (exactly one):
+#   --pre-push --remote NAME [--url URL]   git's pre-push hook: reads git's
+#       ref lines on stdin and scans each pushed commit's added lines, new or
+#       renamed paths, and message. Installed as ai/git-hooks/outbound-pre-push.sh.
+#   --tree                                 every tracked file of the current repo.
+#   --text FILE [--label NAME]             one file's lines (gh-athena scans PR and
+#       issue titles and bodies this way before a PUBLIC write).
+#
+# States (each textually distinct; never a bare exit code):
+#   CLEAN (0) · HITS (1) · USAGE (2) · COULD NOT MEASURE (3) ·
+#   WAIVED - NOT SCANNED (0, only with ATHENA_OUTBOUND_WAIVE=<reason>).
+# A matched literal is never printed: a hit is a location plus the pattern
+# LABEL, and a path that itself matches is redacted.
+#
+# Bucket placement: this file is the Manager + Framework (argv -> sources ->
+# rules -> report). Rules: ai/lib/outbound_scan.rb (Domain). Reads:
+# ai/lib/outbound_scan_sources.rb (Side Effects).
+# Tests: ai/test/outbound-scan/self-test.sh.
+
+require "time"
+require "fileutils"
+require_relative "../lib/strict_argv"
+require_relative "../lib/outbound_scan_sources"
+
+PROG = "outbound-scan"
+
+HELP = <<~HELP
+  outbound-scan -- refuse publishing a work-domain value to a public repo (DND-699)
+
+  Usage:
+    outbound-scan --pre-push --remote NAME [--url URL]   (git pre-push hook; ref lines on stdin)
+    outbound-scan --tree                                  (every tracked file in the current repo)
+    outbound-scan --text FILE [--label NAME]              (one file, e.g. a PR body)
+    outbound-scan --help                                  (this text: stdout, exit 0, no side effects)
+
+  Patterns: the private overlay's outbound/patterns.tsv (label<TAB>regex), read as
+  the UNION of its working tree and `git show HEAD:outbound/patterns.tsv` in the
+  overlay's local history. Overlay: ai/bin/private-overlay (ATHENA_PRIVATE_ROOT,
+  else ~/.config/athena/work).
+
+  Exit / state:
+    0 CLEAN                 scanned, no hits; prints SCANNED commits=.. lines=.. patterns=.. hits=0
+    1 HITS                  each hit as file:line (or commit <sha> message:<n>) + label; never the text
+    2 USAGE                 bad arguments
+    3 COULD NOT MEASURE     overlay absent/malformed, no committed floor, zero patterns, or an unreadable surface
+    0 WAIVED - NOT SCANNED  ATHENA_OUTBOUND_WAIVE=<reason> is set; the reason is printed and appended to
+                            $XDG_STATE_HOME/athena/outbound-scan-waivers.log (default ~/.local/state/...)
+
+  Contract: ai/contracts/athena-private-overlay.md -> Outbound-scan interface
+HELP
+
+SPEC = {
+  "--pre-push" => :switch,
+  "--remote" => :value,
+  "--url" => :value,
+  "--tree" => :switch,
+  "--text" => :value,
+  "--label" => :value,
+}.freeze
+
+def usage!(reason)
+  puts "#{PROG}: USAGE: #{reason}. Fix: see `#{PROG} --help`; pass exactly one of --pre-push (with --remote), --tree, or --text FILE."
+  exit OutboundScan::EXIT[:usage]
+end
+
+def mode_of(opts)
+  modes = %w[--pre-push --tree --text].select { |m| opts.key?(m) }
+  usage!("exactly one mode is required (got #{modes.empty? ? 'none' : modes.join(' ')})") unless modes.length == 1
+  mode = modes.first
+  usage!("--pre-push needs --remote NAME") if mode == "--pre-push" && !opts.key?("--remote")
+  usage!("--remote/--url apply to --pre-push only") if mode != "--pre-push" && (opts.key?("--remote") || opts.key?("--url"))
+  usage!("--label applies to --text only") if mode != "--text" && opts.key?("--label")
+  if mode == "--text" && opts.key?("--label") && !OutboundScan::LABEL_RE.match?(opts["--label"])
+    usage!("--label must match [a-z0-9][a-z0-9_.-]*")
+  end
+  mode.delete_prefix("--")
+end
+
+def waiver_log_path
+  base = ENV["XDG_STATE_HOME"]
+  base = File.join(Dir.home, ".local/state") if base.nil? || base.empty? || !base.start_with?("/")
+  File.join(base, "athena", "outbound-scan-waivers.log")
+end
+
+def waive!(mode, reason)
+  clean_reason = reason.gsub(/[[:cntrl:]]/, " ").strip
+  usage!("ATHENA_OUTBOUND_WAIVE is set but empty; a waiver needs a reason") if clean_reason.empty?
+  $stdin.read if mode == "pre-push" # drain git's ref lines
+  path = waiver_log_path
+  begin
+    FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+    File.open(path, "a", 0o600) do |f|
+      f.puts [Time.now.utc.iso8601, mode, Dir.pwd, clean_reason].join("\t")
+    end
+  rescue SystemCallError, IOError => e
+    puts "#{PROG}: COULD NOT MEASURE mode=#{mode}: a waiver was requested but could not be recorded at #{path} " \
+         "(#{e.class.name.split('::').last}), so it is refused. Fix: make #{File.dirname(path)} writable, or unset " \
+         "ATHENA_OUTBOUND_WAIVE and let the scan run."
+    exit OutboundScan::EXIT[:unmeasured]
+  end
+  puts "#{PROG}: WAIVED - NOT SCANNED mode=#{mode} reason=#{clean_reason}"
+  puts "Nothing was scanned. This is not a clean result. Logged to #{path}."
+  exit OutboundScan::EXIT[:waived]
+end
+
+def unmeasured!(mode, reason)
+  puts "#{PROG}: COULD NOT MEASURE mode=#{mode}: #{reason}."
+  puts "NOT SCANNED: no result, clean or otherwise."
+  puts OutboundScan.unmeasured_fix(reason)
+  exit OutboundScan::EXIT[:unmeasured]
+end
+
+def report!(mode, surface)
+  if surface.hits.empty?
+    puts "#{PROG}: CLEAN mode=#{mode}"
+    puts OutboundScan.counts_line(surface.counts)
+    exit OutboundScan::EXIT[:clean]
+  end
+  puts "#{PROG}: HITS mode=#{mode}: #{surface.hits.length} match(es) of work-domain patterns. The matched text is never printed."
+  surface.hits.each do |h|
+    puts "  #{OutboundScan.render_location(h.location, surface.redacted)} label=#{h.label}"
+  end
+  puts OutboundScan.counts_line(surface.counts)
+  puts OutboundScan::HIT_FIX
+  exit OutboundScan::EXIT[:hits]
+end
+
+def run(opts)
+  mode = mode_of(opts)
+  waive!(mode, ENV["ATHENA_OUTBOUND_WAIVE"].to_s) if ENV.key?("ATHENA_OUTBOUND_WAIVE")
+
+  # Read stdin before anything can fail, so git never sees a broken pipe.
+  stdin_text = mode == "pre-push" ? $stdin.read.to_s : nil
+  patterns = OutboundScan::Sources.patterns
+  surface =
+    case mode
+    when "pre-push"
+      shas, _deletes = OutboundScan::Sources.pre_push_commits(stdin_text, opts["--remote"])
+      OutboundScan::Sources.scan_commits(patterns, shas)
+    when "tree"
+      OutboundScan::Sources.scan_tree(patterns)
+    else
+      OutboundScan::Sources.scan_text(patterns, opts["--text"], opts["--label"] || "text")
+    end
+  report!(mode, surface)
+rescue OutboundScan::Unmeasurable => e
+  unmeasured!(mode || "unknown", e.message)
+end
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts HELP
+  exit 0
+end
+
+begin
+  opts = StrictArgv.parse(ARGV, SPEC)
+rescue StrictArgv::UsageError => e
+  usage!(e.message)
+end
+run(opts)
