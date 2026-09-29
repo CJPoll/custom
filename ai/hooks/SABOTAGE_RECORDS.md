@@ -811,3 +811,28 @@ external`: `expected [external .../settings.json.bak-20261001-142204], got [suit
 | S-DND726-2 | `decide` returns nil where it returns the deny | 198 FAILs, from `DND-321: gh-athena pr merge 275 --squash --auto [captain] -- expected deny, got allow` on |
 | S-DND726-3 | the shipwright carve-out's `lane_of.call(f[:dir])` dropped | `hand-spawned worktree push HEAD:main [shipwright]` and `product repo's lead-time lane push HEAD:main [shipwright]`: `expected deny, got allow` |
 | S-DND726-4 | an unresolved current branch read as "not main" (`return nil unless facts.resolved`, both sites) | 14 FAILs, among them `no refspec, unresolvable branch, names it [captain]`, `GIT_DIR= prefix [captain]`, `cd after \|\| [captain]`, `top-level --agent captain, bare push: cwd is not trusted [agent-captain]`: `expected deny, got allow` |
+
+## 2026-09-29 — DND-1095 D1, git-stash-guard false positives that drop no coverage
+
+- **Domain:** the PreToolUse git-stash text guard (`ai/hooks/git-stash-guard.sh`):
+  alias self-expansion, the stash verb table, assignment words.
+- **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic fixture
+  repos and snapshot; the mutations ran on a `mktemp -d` copy of the hook and
+  suite, so the committed files were never edited).
+- **Fail-first:** against the unfixed hook, `RESULT: 388 passed, 12 failed`:
+  D1-1..3 (grep alias), D1-9..11 (non-verb), D1-23..26b (assignments), and the
+  D1-36 table canary ("could not measure": the hook had no table). After:
+  `RESULT: 400 passed, 0 failed`; with D1-37 (added in self-review, passes on
+  the unfixed hook too) `401 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-D1-1 | `!(x in EXPANDING)` removed (alias re-expanded inside itself) | D1-1, D1-2, D1-3, D1-9, D1-10 (expected allow) |
+| S-D1-2 | `GSG_STASH_VERBS_GIT` set to 2.53 (not the installed git) | D1-36: `installed git 2.54, table for 2.53 ... Fix: ...`; D1-9..11 flip to expect deny and pass |
+| S-D1-3 | `!asgw` removed from the glob-head rule | D1-23, D1-24, D1-25, D1-26 |
+| S-D1-4 | `!asgw` removed from the expanded-head rule | D1-26b |
+| S-D1-5 | every zsh global alias no longer kept regardless of value | D1-20 (`git stash GRD` with `alias -g GRD=pop`: expected deny, got allow) |
+| S-D1-6 | the letters-only verb compare removed | O48 (`Mentions git stash pop.` in a heredoc: expected deny) |
+| S-D1-7 | `env` and `eval` added to the assignment-position keywords | D1-30 (`eval X=$G stash pop`), D1-34 (`env X=${G} stash`) |
+| S-D1-8 | a quote before `=` no longer stops an assignment (`!rq` removed) | O125, D1-31 (`"X"=${G} stash pop`) |
+| S-D1-9 | a keyword opens assignment position without itself being in command position (`pcp` dropped) | D1-37 (`echo then X=$G stash pop`) |

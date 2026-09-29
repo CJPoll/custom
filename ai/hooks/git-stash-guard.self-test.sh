@@ -755,6 +755,97 @@ run "$(json "$OWNER" 'git stsh pop')"
 check "AC8. autocorrect on in the repo config, a typo of stash" deny
 git -C "$OWNER" config --unset help.autocorrect
 
+echo "== D1: false positives that drop no coverage (DND-1095 D1) =="
+# Three read-only shapes the guard denied, each fixed without relying on the
+# DND-775 git layer. Each fix has paired cases proving the real stash writes
+# near it still deny. The snapshot adds the owner's real self-referential
+# `grep` alias, a `git` alias naming itself, and a global alias `GRD=pop`.
+D1CFG="$TMP/d1claude"
+mkdir -p "$D1CFG/shell-snapshots"
+cp "$CLAUDE_CONFIG_DIR/shell-snapshots/snapshot-zsh-1-fixture.sh" "$D1CFG/shell-snapshots/"
+cat >> "$D1CFG/shell-snapshots/snapshot-zsh-1-fixture.sh" <<'EOF'
+alias -- grep='grep --color=auto --exclude-dir={.bzr,CVS,.git,.hg,.svn,.idea,.tox,.venv,venv}'
+alias -- git='git --no-pager'
+alias -g GRD=pop
+EOF
+# case_d1 <label> <deny|allow> <command> : decided from the fixture worktree
+# with the D1 snapshot.
+case_d1() {
+  runin "$D1CFG" "$GIT_CONFIG_GLOBAL" "$(json "$WT" "$3")"
+  check "$1" "$2"
+}
+# Fix 1: a shell alias is not expanded inside its own expansion (zsh and
+# POSIX sh both mark it in use). The owner's `grep` alias recursed until the
+# nesting bound, where any `stash` text denied.
+case_d1 "D1-1. grep alias with a stash search term" allow 'grep -i stash ai/hooks'
+case_d1 "D1-2. command grep with stash text in the pattern" allow "command grep -n -i 'GH_ATHENA\\|stash guard' r.md"
+case_d1 "D1-3. grep alias in a pipeline" allow 'git log --oneline | grep -i stash'
+case_d1 "D1-4. paired: gstp still expands to git stash pop" deny 'gstp'
+case_d1 "D1-5. paired: alias git='git --no-pager', then git stash pop" deny 'git stash pop'
+case_d1 "D1-6. paired: alias git, then a git stash alias" deny 'git sp'
+case_d1 "D1-7. paired: alias chain gsp2 -> gstp" deny 'gsp2'
+case_d1 "D1-8. paired: grep alias, then a stash write after a separator" deny 'grep -i stash f; git stash drop'
+# Fix 2: git refuses `git stash <word>` for a word outside its subcommand
+# table ("subcommand wasn't specified; 'push' can't be assumed due to
+# unexpected token", exit 128), so it writes nothing. Only while the installed
+# git is the version whose table the hook carries; otherwise the old verdict.
+_d1v=$(git --version 2>/dev/null | sed -nE 's/^git version ([0-9]+\.[0-9]+).*/\1/p')
+_d1t=$(sed -nE "s/^GSG_STASH_VERBS_GIT='([0-9.]+)'.*/\\1/p" "$HOOK")
+# Expected allow unless the hook names a table version other than the
+# installed git's (a hook with no table at all is expected to allow, so the
+# unfixed hook fails these cases).
+if [ -n "$_d1t" ] && [ "$_d1v" != "$_d1t" ]; then D1NV=deny; else D1NV=allow; fi
+case_d1 "D1-9. git stash <non-verb> (prose 'stash guard')" "$D1NV" 'git stash guard'
+case_d1 "D1-10. a commit message naming git stash guard" "$D1NV" 'git commit -m "fix the git stash guard false positives"'
+case_d1 "D1-11. a git alias to stash, then a non-verb" "$D1NV" 'git s guard'
+case_d1 "D1-12. paired: a verb in another case still denies" deny 'git stash Pop'
+case_d1 "D1-13. paired: git stash import" deny 'git stash import deadbeef'
+case_d1 "D1-14. paired: git stash export --to-ref" deny 'git stash export --to-ref refs/stash'
+case_d1 "D1-15. paired: git stash \$X" deny 'git stash $X'
+case_d1 "D1-16. paired: X=pop; git stash \$X" deny 'X=pop; git stash $X'
+case_d1 "D1-17. paired: a glob verb" deny 'git stash p?p'
+case_d1 "D1-18. paired: a brace verb" deny 'git stash {pop,x}'
+case_d1 "D1-19. paired: an option before a non-verb" deny 'git stash -q guard'
+case_d1 "D1-20. paired: a zsh global alias as the verb" deny 'git stash GRD'
+case_d1 "D1-21. paired: a bare git stash at the end of a payload" deny 'finding-triage --title "false positives on commands that never run git stash"'
+case_d1 "D1-22. paired: git-stash with a writing verb" deny '/usr/libexec/git-core/git-stash pop'
+# Fix 3: an assignment word is not a command. Its value is not a command word,
+# so no glob or expansion rule judges it; the next word keeps command position.
+case_d1 "D1-23. an assignment with a default expansion" allow 'X=${A:-b}'
+case_d1 "D1-24. two assignments, then a command" allow 'T=${TMPDIR:-/tmp} S=${T}/s ls "$S"'
+case_d1 "D1-25. an assignment after then" allow 'if true; then X=${A:-b}; fi'
+case_d1 "D1-26. an assignment whose value is a path, then bash" allow 'GH_ATHENA_UNDER_TEST=${S}/gh-fake; export GH_ATHENA_UNDER_TEST; bash -x t.sh'
+case_d1 "D1-26b. an expanded assignment, then a command named stash (not git)" allow 'GH_ATHENA_UNDER_TEST=$S/gh-fake stash pop'
+case_d1 "D1-27. paired: X=\$G; \$X stash pop" deny 'X=$G; $X stash pop'
+case_d1 "D1-28. paired: an assignment, then git stash pop" deny 'X=${A:-b} git stash pop'
+case_d1 "D1-29. paired: an assignment, then \$G stash pop" deny 'X=${A:-b} $G stash pop'
+case_d1 "D1-30. paired: eval reads the word as a command" deny 'eval X=$G stash pop'
+case_d1 "D1-31. paired: a quoted name is a command word, not an assignment" deny '"X"=${G} stash pop'
+case_d1 "D1-32. paired: an escaped = is a command word" deny 'X\=${G} stash pop'
+case_d1 "D1-33. paired: a git-stash path assigned, then run bare" deny 'X=/usr/libexec/git-core/git-stash; $X'
+case_d1 "D1-34. paired: env reads NAME=value itself" deny 'env X=${G} stash'
+case_d1 "D1-35. paired: a glob command word after an assignment" deny 'X=1 /usr/bin/g?t stash pop'
+case_d1 "D1-37. paired: a keyword spelled as an argument opens no assignment" deny 'echo then X=$G stash pop'
+# Canary for fix 2: the hook's verb table must hold every verb the installed
+# git lists, and name its version. A git upgrade turns this red until someone
+# re-reads the table and bumps GSG_STASH_VERBS_GIT (until then fix 2 is off).
+_d1h=$(git stash -h 2>&1 | sed -nE 's/^ *(usage|or): git stash ([a-z-]+).*/\2/p' | sort -u)
+_d1tab=$(sed -nE "s/^GSG_STASH_VERBS='([a-z -]+)'.*/\\1/p" "$HOOK")
+_d1miss=""
+for _vb in $_d1h; do
+  case " $_d1tab " in *" $_vb "*) ;; *) _d1miss="$_d1miss $_vb" ;; esac
+done
+STATUS=0
+if [ -z "$_d1h" ] || [ -z "$_d1tab" ]; then
+  OUT="could not measure: git stash -h verbs [$_d1h], hook table [$_d1tab]"
+  record "D1-36. the hook's stash verb table covers the installed git" FAIL
+elif [ -n "$_d1miss" ] || [ "$_d1v" != "$_d1t" ]; then
+  OUT="installed git $_d1v, table for $_d1t, verbs missing from the table:$_d1miss. Fix: add them to GSG_STASH_VERBS and set GSG_STASH_VERBS_GIT to $_d1v in git-stash-guard.sh"
+  record "D1-36. the hook's stash verb table covers the installed git" FAIL
+else
+  record "D1-36. the hook's stash verb table covers the installed git" PASS
+fi
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow
