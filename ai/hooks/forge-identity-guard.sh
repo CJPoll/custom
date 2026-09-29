@@ -260,13 +260,36 @@ bless_wrapper_var() {
     }'
 }
 
+
+# mask_quoted_seps: inside single or double quotes, `;`, `&` and `|` are data,
+# so they become `_` before the text is dequoted and split (DND-1179). Without
+# this, `git -c 'core.x=a;b' push` split inside the quote and no push was
+# seen. `(`, `)` and newlines are left alone: a quoted `"$(git push …)"` still
+# runs, and the push pattern needs the `(` before `git`.
+mask_quoted_seps() {
+  awk -v Q="'" '
+    { buf = buf (NR > 1 ? "\n" : "") $0 }
+    END {
+      out = ""; st = ""
+      for (p = 1; p <= length(buf); p++) {
+        c = substr(buf, p, 1)
+        if (st == "" && c == "\\") { out = out c substr(buf, p + 1, 1); p++; continue }
+        if (st == "\"" && c == "\\") { out = out c substr(buf, p + 1, 1); p++; continue }
+        if (st == "" && (c == Q || c == "\"")) st = c
+        else if (st != "" && c == st) st = ""
+        else if (st != "" && (c == ";" || c == "&" || c == "|")) c = "_"
+        out = out c
+      }
+      printf "%s", out
+    }'
+}
 # Dequote (as forge-auth-guard does) so quoting cannot split the pattern, and
 # mask the wrapper forms `gh-athena git` / `glab-athena git` first so they are
 # never matched. DND-397: bless_wrapper_var first rewrites the one provable
 # `W=<wrapper>; "$W" git …` shape to the wrapper form.
 # Newlines become `;` here (not spaces, as in FLAT): a push's arguments end at
 # the end of its line, so `git push<NL>echo done` never reads `echo` as a remote.
-GFLAT=$(printf '%s' "$CMD" | bless_wrapper_var | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
+GFLAT=$(printf "%s" "$CMD" | bless_wrapper_var | mask_quoted_seps | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
 # `git`, bare or path-qualified, then only GLOBAL options (-C/-c take a value),
 # then `push`. `git commit -m "push"` does not match: `commit` is not an option.
 GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|]+|--?[^[:space:];&|]+))*[[:space:]]+push([[:space:]]|$|[;&|)])'
@@ -432,10 +455,15 @@ done
 #   * Known false denies (reads, one retry through the wrapper): `gh issue
 #     develop --list`, `gh codespace ssh|code|cp`, a read flag placed between
 #     the group and the verb that takes a value this guard does not know.
+#   * Two passes, and a write found by either denies. Pass A drops every quote
+#     and splits on every separator, so a command inside any string (a
+#     `sh -c` payload, a quoted `$(…)`) is judged. Pass B splits the way the
+#     shell does, so a separator inside quotes (`--jq '.a | b' -f x=y`) cannot
+#     cut a command in two; it re-splits any word that holds a command.
 # Lexical, like every rule here: a command that only MENTIONS a write is denied
 # (the accepted false positive above), and a command word built by expansion
 # (`$G pr close`) is not seen.
-FORGE_WRITE=$(printf '%s' "$CMD" | tr '\n\t' ';  ' | tr -d "'\"\\\\" | awk '
+FORGE_WRITE=$(printf '%s\n' "$CMD" | awk '
   BEGIN {
     # Groups (and group aliases) with no forge write: allowed whole.
     AGS["gh"] = "auth config completion help version extension extensions ext search status browse attestation at ruleset rs preview org accessibility a11y licenses"
@@ -555,9 +583,63 @@ FORGE_WRITE=$(printf '%s' "$CMD" | tr '\n\t' ';  ' | tr -d "'\"\\\\" | awk '
     printf "%s\t%s\t%s\t%s\n", cli, g, v1, RD[key]
     exit
   }
-  {
-    MUT = (tolower($0) ~ /(^|[^a-z0-9_])mutation([^a-z0-9_]|$)/)
-    s = $0
+  # judge_words(w, nw): judge every gh/glab word of one command segment.
+  function judge_words(w, nw,    i, b) {
+    n = nw
+    for (i = 1; i <= nw; i++) t[i] = w[i]
+    for (i = nw + 1; i in t; i++) delete t[i]
+    for (i = 1; i <= n; i++) { b = t[i]; sub(/.*\//, "", b); if (b == "gh" || b == "glab") judge(i) }
+  }
+  # PASS B: split `s` the way the shell does. Quotes and backslashes group a
+  # word, so a separator INSIDE quotes is data (`--jq ".a | b" -f x=y` stays
+  # one command); outside them, newline ; & | ( ) and a backtick end the
+  # command. A word that itself holds a command (the payload of a `sh -c` string,
+  # a quoted `$(…)`) is split again, to depth 4.
+  function shell_split(s, depth,    L, p, c, cur, has, w, nw, sub_w, nsub, k, q, lit) {
+    L = length(s); p = 1; cur = ""; has = 0; nw = 0; nsub = 0
+    while (p <= L + 1) {
+      c = (p <= L) ? substr(s, p, 1) : "\n"
+      if (c == "\\" && p < L) { cur = cur substr(s, p + 1, 1); has = 1; p += 2; continue }
+      if (c == Q) {
+        # Single-quoted text is literal: its `$` expands nothing, so it is
+        # masked (\034) and a GraphQL `query($o: …)` literal stays readable.
+        q = index(substr(s, p + 1), Q)
+        lit = (q == 0) ? substr(s, p + 1) : substr(s, p + 1, q - 1)
+        gsub(/[$]/, "\034", lit)
+        cur = cur lit; has = 1; p = (q == 0) ? L + 1 : p + q + 1; continue
+      }
+      if (c == "\"") {
+        p++
+        while (p <= L && substr(s, p, 1) != "\"") {
+          if (substr(s, p, 1) == "\\" && p < L) { cur = cur substr(s, p + 1, 1); p += 2; continue }
+          cur = cur substr(s, p, 1); p++
+        }
+        p++; has = 1; continue
+      }
+      if (c == " " || c == "\t" || c == "\n" || c == ";" || c == "&" || c == "|" || c == "(" || c == ")" || c == "`") {
+        if (has) { w[++nw] = cur; if (cur ~ /[ \t\n;&|()`$]/) sub_w[++nsub] = cur }
+        cur = ""; has = 0
+        if (c != " " && c != "\t") { judge_words(w, nw); nw = 0 }
+        p++; continue
+      }
+      cur = cur c; has = 1; p++
+    }
+    if (depth < 4) for (k = 1; k <= nsub; k++) shell_split(sub_w[k], depth + 1)
+  }
+  { buf = buf (NR > 1 ? "\n" : "") $0 }
+  END {
+    Q = sprintf("%c", 39)
+    # PASS A: every quote and backslash dropped, then split on every
+    # separator. It over-reads (a command inside any quoted string is judged),
+    # which catches a payload that pass B leaves in one word.
+    s = ""
+    for (p = 1; p <= length(buf); p++) {
+      c = substr(buf, p, 1)
+      if (c == Q || c == "\"" || c == "\\") continue
+      if (c == "\n") c = ";"; else if (c == "\t") c = " "
+      s = s c
+    }
+    MUT = (tolower(s) ~ /(^|[^a-z0-9_])mutation([^a-z0-9_]|$)/)
     # A backtick opens or closes a substitution: it becomes a `$` word, so a
     # verb built by one (gh pr `printf close`) reads as `$` (an unknown verb:
     # denied) and a command inside one is still split into its own words.
@@ -569,6 +651,7 @@ FORGE_WRITE=$(printf '%s' "$CMD" | tr '\n\t' ';  ' | tr -d "'\"\\\\" | awk '
       n = split(seg[q], t, " ")
       for (i = 1; i <= n; i++) { b = t[i]; sub(/.*\//, "", b); if (b == "gh" || b == "glab") judge(i) }
     }
+    shell_split(buf, 0)
   }' 2>/dev/null)
 if [ -n "$FORGE_WRITE" ]; then
   _cli=$(printf '%s' "$FORGE_WRITE" | cut -f1)
