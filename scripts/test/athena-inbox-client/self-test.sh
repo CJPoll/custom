@@ -35,6 +35,10 @@
 # that is the entry point that runs THIS file, and the pair would recurse.
 
 set -uo pipefail
+# DND-1163: the athena:inbox bins resolve the session's project from
+# CLAUDE_PROJECT_DIR, then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so
+# the fixtures, not the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 # Match captured output with a here-string (`grep -q PAT <<<"$out"`), never
 # `printf '%s' "$out" | grep -q PAT`. Under pipefail that pipe is a race:

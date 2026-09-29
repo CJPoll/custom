@@ -188,7 +188,14 @@ fi
 
 # Tenancy, provisioning, and the refusals -- all in the manager. A zero-channel
 # session is refused there rather than armed on nothing.
-DOORBELLS="$(inbox_doorbells ".")" || exit "${EX_REFUSED}"
+# THE SESSION'S PROJECT, NOT THE SHELL CWD (DND-1163). The Bash tool keeps a
+# `cd` across calls, so "." can be another project's repo; keyed on it, this
+# would act on that project's channels with exit 0. inbox_session_dir
+# (lib/inbox.sh) names the session's project and refuses a cwd that sits in a
+# different registered project. PROJECT_DIR replaces "." everywhere below.
+PROJECT_LINE="$(inbox_session_dir)" || exit "${EX_REFUSED}"
+PROJECT_DIR="${PROJECT_LINE#*$'\t'}"
+DOORBELLS="$(inbox_doorbells "${PROJECT_DIR}")" || exit "${EX_REFUSED}"
 mapfile -t EVENT_FILES <<< "${DOORBELLS}"
 
 # --DRY-RUN EXITS HERE, BEFORE THE SUBAGENT GATE, ON PURPOSE. Dry-run does not
@@ -301,7 +308,7 @@ case "${RC}" in
     RANG_PATH=""
     while IFS= read -r RANG_PATH; do
       [ -n "${RANG_PATH}" ] || continue
-      RANG_CH="$(inbox_doorbell_channel "${RANG_PATH}" ".")" || continue
+      RANG_CH="$(inbox_doorbell_channel "${RANG_PATH}" "${PROJECT_DIR}")" || continue
       case " ${RANG_CHANNELS} " in
         *" ${RANG_CH} "*) : ;;                       # already listed
         *) RANG_CHANNELS="${RANG_CHANNELS:+${RANG_CHANNELS} }${RANG_CH}" ;;

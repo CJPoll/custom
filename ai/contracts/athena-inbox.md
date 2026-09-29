@@ -321,7 +321,8 @@ migration. That is a one-time judgement recorded here so it is not read as
 permission to redefine `v: 1` again. Everything the
 superseded text said about resolving ownership from the **session's cwd**, and
 about a session never seeing another project's channels, is unchanged — restated
-under *Repo identity: the git common dir* below, not weakened.
+under *Repo identity: the git common dir* below, not weakened. (The cwd itself
+was later replaced there by the session's project directory, DND-1163.)
 
 **The opt-in claim is about the reader side only.** A `maildir` channel really is
 self-service: declare it, and provisioning creates the directories. A `log`
@@ -395,20 +396,65 @@ channel is normal — so the misconfiguration is invisible. Therefore:
 
 ### Repo identity: the git common dir
 
-**Ownership resolves from the session's cwd.** That invariant is unchanged and
-is the whole resolution rule; it is load-bearing rather than a convenience,
+**Ownership resolves from the session's project directory.** That invariant is
+the whole resolution rule; it is load-bearing rather than a convenience,
 because it is the only thing that decides which session a channel's traffic
-reaches. What changed is the key it resolves through:
+reaches. The key it resolves through:
 
 ```
-cwd → realpath of `git rev-parse --git-common-dir` → the registry entry
-      whose `repo` is that path → that entry's declared channels
+session project dir → realpath of `git rev-parse --git-common-dir` → the
+      registry entry whose `repo` is that path → that entry's declared channels
 ```
+
+**The session's project directory** is, in precedence order:
+
+1. `$CLAUDE_PROJECT_DIR` (Claude Code sets it for hooks);
+2. the Claude Code process's own cwd, `/proc/$CLAUDE_PID/cwd` (the Bash tool
+   exports `CLAUDE_PID` but not `CLAUDE_PROJECT_DIR`; that process's cwd is
+   where the session started, and a `cd` in the tool shell never moves it);
+3. the shell's cwd, only when neither signal is set (a terminal, cron, a test).
+
+A reader MUST say which source it used wherever it reports the project, MUST
+refuse (with a `Fix:`) a signal that is set but unusable rather than fall
+through to the next source, and MUST refuse when the shell's cwd lies inside a
+**different** registered project from the session's own, rather than act on
+either project's channels. A cwd in no registered project, or in the session's
+own (a worktree, a subdirectory), is not a mismatch. The one implementation is
+athena:inbox `lib/session.sh` → `session_project_dir` and `lib/inbox.sh` →
+`inbox_session_dir`.
+
+Two refusals follow from this and are **intended**:
+
+- **A subagent dispatched into another repo.** A subagent inherits its
+  parent's `CLAUDE_PID`, so a captain that a `~/dev/custom` session dispatched
+  into a walt_ui worktree resolves custom, and is refused while its cwd is in
+  walt_ui.
+- **A session started outside every registered project** (`~`, `~/dev`), once
+  its shell is inside one.
+
+Each is the same ambiguity as a drifted cwd, and each has the same way out:
+name the project explicitly, `CLAUDE_PROJECT_DIR=<dir> <command>`, which
+outranks both other sources. The refusal's `Fix:` says so.
+
+**Residuals, named.** A `CLAUDE_PID` that outlived its session and was
+recycled to another of the user's processes resolves that process's cwd; the
+pid is not checked to be Claude Code, whose process name varies by install. A
+Claude Code action that moves the process itself (`EnterWorktree`,
+`/add-dir`) was not measured.
+
+**Later (2026-09-28, DND-1163):** this section read "**Ownership resolves from
+the session's cwd.**", with `cwd →` heading the chain above, and the realpath
+rule below was taken "against the session's cwd". Superseded: the Claude Code
+Bash tool keeps a `cd` across calls, so a walt_ui session whose shell had
+drifted into `~/dev/custom` (or through `~/.claude/skills`, which realpaths
+there) claimed a Slack thread for `custom-slack.jsonl` with exit 0. The cwd was
+the right *kind* of key computed from the wrong directory.
 
 **Repo identity is the realpath of `git rev-parse --git-common-dir`.**
 
 **That command returns a *cwd-relative* path in a main checkout, and the
-realpath MUST be taken against the session's cwd.** Verified on this machine
+realpath MUST be taken against the directory it was run in: the session's
+project directory, captured when it is chosen.** Verified on this machine
 (2026-09-19 UTC):
 
 | cwd | raw `git rev-parse --git-common-dir` |
@@ -423,7 +469,7 @@ somewhere else — produces a path that exists nowhere, matches no entry, and
 therefore reports **zero channels and exit 0**, because that is what this
 contract says an unmatched identity means. The channel goes dark with no error
 and no skip count, since nothing was skipped. Resolve it at the point of
-capture, in the session's cwd, or do not capture it.
+capture, in the session's project directory, or do not capture it.
 
 The identity so resolved is
 identical across a repo's main checkout and every one of its worktrees, and
@@ -2811,7 +2857,9 @@ prohibition is narrowed to a `*.consumer.lock`, matching *Derived paths*: the
 `.sender.lock` is exactly the writer's and is now named as such.
 
 **A reader is conformant when it:** resolves channels only from the registry
-entry matching its own repo identity — resolved against the session's cwd, and
+entry matching its own repo identity — resolved against the session's project
+directory (*Repo identity: the git common dir*), refusing a shell cwd inside a
+different registered project, and
 treating two entries claiming that identity as a hard error — and never from a
 scan of the root for surfaces; refuses a `path` or `namespace` resolving inside
 `projects/`;

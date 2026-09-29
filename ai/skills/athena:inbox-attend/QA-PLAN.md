@@ -118,9 +118,16 @@ runner.
     sessions contend, only one holds the designated-consumer lock at `read-inbox`;
     the loser's read is refused and the attend procedure ends its turn. **[runner]
     [judgment]**
-17. **Tenancy is resolved from the session cwd, refused at the key.** The waiter
-    resolves the registry entry from its own cwd; zero channels is a loud failure
-    (`exit 2` + `Fix:`), never a session sitting silently on nothing. **[waiter]**
+17. **Tenancy is resolved from the session's project directory, refused at the
+    key.** The waiter resolves the registry entry from the session's project
+    directory (athena-inbox.md → *Repo identity: the git common dir*), and
+    refuses a shell cwd inside a different registered project; zero channels is
+    a loud failure (`exit 2` + `Fix:`), never a session sitting silently on
+    nothing. **[waiter]**
+
+    **Later (2026-09-28, DND-1163):** this read "resolved from the session
+    cwd … from its own cwd". Superseded: a drifted Bash cwd armed the waiter on
+    another project's doorbells.
 
 ## Reply scope and tiering (judgment)
 

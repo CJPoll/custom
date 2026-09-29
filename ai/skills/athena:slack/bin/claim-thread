@@ -7,25 +7,34 @@
 # thread they start; run it by hand to retry a claim that failed, without
 # re-posting.
 #
-# The inbox is found from the cwd: realpath of the git common dir -> this
-# project's entry in the inbox registry -> its one Slack `log` channel (no
-# producer, or producer "slack") -> that channel's path, e.g.
-# custom-slack.jsonl. The bot_id and team_id come from auth.test (cached). The
-# call is the athena MCP tool `slack_thread_claim`; the machine token is read
-# from the inbox client config and reaches curl only on stdin.
+# The inbox is found from the SESSION's project, not the shell's cwd
+# (DND-1163): $CLAUDE_PROJECT_DIR, else the Claude Code process's own cwd
+# (/proc/$CLAUDE_PID/cwd, which the Bash tool's `cd` never moves), else the cwd
+# -> realpath of its git common dir -> this project's entry in the inbox
+# registry -> its one Slack `log` channel (no producer, or producer "slack") ->
+# that channel's path, e.g. custom-slack.jsonl. A shell cwd inside a DIFFERENT
+# registered project is refused (cwd-project-mismatch) rather than claimed for
+# either one: a claim cannot be taken back (see SKILL.md -> Thread replies come back to the session that started the thread).
+# The bot_id and team_id come from auth.test (cached). The call is the athena
+# MCP tool `slack_thread_claim`; the machine token is read from the inbox
+# client config and reaches curl only on stdin.
 #
 # thread_ts is the PARENT message's ts, as post/dm print it.
 #
-# Output:
-#   claim=claimed inbox=<inbox>          (stdout) exit 0
-#   claim=already_yours inbox=<inbox>    (stdout) exit 0
+# Output (source = project-dir | session-process | cwd: where the project came
+# from; project = the directory it names, on a failure once known):
+#   claim=claimed inbox=<inbox> source=<source>        (stdout) exit 0
+#   claim=already_yours inbox=<inbox> source=<source>  (stdout) exit 0
 #   claim=FAILED reason=<token> key=<team>/<channel>/<ts> inbox=<inbox|none>
+#     [source=<source> project=<dir>]
 #     Fix: <what to do>                  (stderr) exit 3
 # A usage error (a malformed channel or ts) is claim=FAILED reason=invalid,
 # exit 2, and makes no call. Reasons, each distinct: no-registry-entry,
 # registry-error, no-slack-channel, ambiguous-slack-channel, no-identity,
 # no-token, mcp-unregistered, mcp-error:<words>, not-found, refused,
-# already-claimed, invalid.
+# already-claimed, invalid, cwd-project-mismatch, project-unresolved.
+# no-registry-entry adds a `lookup:` line naming the repo key that matched
+# nothing.
 set -uo pipefail
 
 SELF="$(realpath "${BASH_SOURCE[0]}")"
@@ -52,13 +61,20 @@ CHANNEL="${1:-}"
 TS="${2:-}"
 TEAM="?"
 INBOX="none"
+SOURCE=""
+PROJECT_DIR=""
 
 # fail <reason> [server-words] -- the one failure shape; exits 3 (2 for invalid).
 fail() {
-  local reason="$1" words="${2:-}" code=3
-  printf 'claim=FAILED reason=%s key=%s/%s/%s inbox=%s\n' "${reason}" "${TEAM}" \
-    "$(claim_oneline "${CHANNEL}")" "$(claim_oneline "${TS}")" "${INBOX}" >&2
+  local reason="$1" words="${2:-}" code=3 where=""
+  [ -z "${SOURCE}" ] || where=" source=${SOURCE} project=${PROJECT_DIR}"
+  printf 'claim=FAILED reason=%s key=%s/%s/%s inbox=%s%s\n' "${reason}" "${TEAM}" \
+    "$(claim_oneline "${CHANNEL}")" "$(claim_oneline "${TS}")" "${INBOX}" "${where}" >&2
   [ -z "${words}" ] || printf 'server: %s\n' "${words}" >&2
+  if [ "${reason}" = "no-registry-entry" ] && [ -n "${PROJECT_DIR}" ]; then
+    printf 'lookup: repo key %s matched no inbox registry entry\n' \
+      "$(fs_git_common_dir "${PROJECT_DIR}" 2>/dev/null || printf '(none: %s is in no git repository)' "${PROJECT_DIR}")" >&2
+  fi
   printf 'Fix: %s\n' "$(claim_reason_fix "${reason}")" >&2
   [ "${reason}" != "invalid" ] || code=2
   exit "${code}"
@@ -68,11 +84,23 @@ fail() {
 [[ "${CHANNEL}" =~ ^[CDG][A-Z0-9]+$ ]] || fail invalid
 [[ "${TS}" =~ ^[0-9]+\.[0-9]+$ ]] || fail invalid
 
-# The cwd is captured ABSOLUTE here, at the point of capture: a relative git
-# common dir resolved later, from another directory, matches no entry
-# (athena-inbox.md -> *Repo identity: the git common dir*).
-CWD="$(pwd -P)"
-INBOX_OR_REASON="$(claim_resolve_inbox "${CWD}")" || fail "${INBOX_OR_REASON}"
+# The SESSION's project (DND-1163), captured ABSOLUTE here, at the point of
+# capture: a relative git common dir resolved later, from another directory,
+# matches no entry (athena-inbox.md -> *Repo identity: the git common dir*).
+# inbox_session_dir refuses a shell cwd inside a different registered project;
+# its own refusal (with its Fix:) is on stderr above the claim=FAILED line.
+PROJECT_LINE="$(inbox_session_dir)"
+case "$?" in
+  0) ;;
+  2) fail registry-error ;;
+  3) PROJECT_LINE="$(session_project_dir 2>/dev/null)"
+     SOURCE="${PROJECT_LINE%%$'\t'*}"; PROJECT_DIR="${PROJECT_LINE#*$'\t'}"
+     fail cwd-project-mismatch ;;
+  *) fail project-unresolved ;;
+esac
+SOURCE="${PROJECT_LINE%%$'\t'*}"
+PROJECT_DIR="${PROJECT_LINE#*$'\t'}"
+INBOX_OR_REASON="$(claim_resolve_inbox "${PROJECT_DIR}")" || fail "${INBOX_OR_REASON}"
 INBOX="${INBOX_OR_REASON}"
 
 # The bot identity, in a subshell: slack_die exits, and here it must become
@@ -85,7 +113,7 @@ TEAM="${IDENT#*$'\t'}"
 
 [ "$(mcp_token_state)" = "present" ] || fail no-token
 
-URL="$(inbox_mcp_registration "${CWD}" 2>/dev/null)"; RC=$?
+URL="$(inbox_mcp_registration "${PROJECT_DIR}" 2>/dev/null)"; RC=$?
 case "${RC}" in
   0) ;;
   1) fail mcp-unregistered ;;
@@ -102,5 +130,5 @@ MSG="$(mcp_call_tool "${URL}" slack_thread_claim "${ARGS}")"; RC=$?
 [ "${RC}" -eq 0 ] || fail "mcp-error:$(claim_oneline "${MSG}")"
 
 STATUS="$(claim_parse_result "${MSG}")" || fail "${STATUS}" "$(claim_server_words "${MSG}")"
-printf 'claim=%s inbox=%s\n' "${STATUS}" "${INBOX}"
+printf 'claim=%s inbox=%s source=%s\n' "${STATUS}" "${INBOX}" "${SOURCE}"
 exit 0

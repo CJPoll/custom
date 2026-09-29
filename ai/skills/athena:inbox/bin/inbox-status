@@ -4,6 +4,12 @@
 #   inbox-status             one line per channel with anything waiting
 #   inbox-status --json      the same counts as one JSON object
 #   inbox-status --repo-key  this session's repo identity, and nothing else
+#
+# "This project" is the SESSION's project, not the shell's cwd (DND-1163):
+# CLAUDE_PROJECT_DIR, else the Claude Code process's cwd (/proc/$CLAUDE_PID),
+# else the cwd. A cwd inside a DIFFERENT registered project is refused with a
+# Fix:, never counted (lib/session.sh -> session_project_dir, lib/inbox.sh ->
+# inbox_session_dir).
 #   inbox-status -h          this header
 #
 # COUNTS ONLY. No body, no subject, no sender's text, no filename, no token.
@@ -116,7 +122,12 @@ if [ "${REPO_KEY_ONLY}" -eq 1 ]; then
   # and MUST propagate -- swallowing it with `|| printf ''` was exactly the
   # collapse that let a git-less environment read as "no repo, nothing to
   # report" (DND-188 merge-round critic).
-  if key="$(inbox_repo_key ".")"; then
+  # The SESSION's project (DND-1163), from session_project_dir alone: the
+  # cwd-mismatch check needs the registry, and this answer must not. It still
+  # never names the drifted cwd's repo, because the session's own directory
+  # outranks the cwd whenever a session signal is set.
+  KEY_LINE="$(session_project_dir)" || exit 1
+  if key="$(inbox_repo_key "${KEY_LINE#*$'\t'}")"; then
     printf '%s\n' "${key}"
     exit 0
   fi
@@ -134,7 +145,12 @@ fi
 # mail on the others. An empty result is the only thing treated as fatal,
 # because emitting nothing while claiming success is the conflation this whole
 # command refuses.
-STATUS="$(inbox_status_json ".")"; STATUS_RC=$?
+# THE SESSION'S PROJECT, NOT THE SHELL CWD (DND-1163): inbox_session_dir
+# (lib/inbox.sh) names it, and refuses a cwd in a different registered project,
+# rather than count that project's channels for this session.
+PROJECT_LINE="$(inbox_session_dir)" || exit 1
+PROJECT_DIR="${PROJECT_LINE#*$'\t'}"
+STATUS="$(inbox_status_json "${PROJECT_DIR}")"; STATUS_RC=$?
 [ -n "${STATUS}" ] || exit 1
 
 if [ "${JSON}" -eq 1 ]; then

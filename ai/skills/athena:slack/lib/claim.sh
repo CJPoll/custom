@@ -27,7 +27,7 @@
 
 # The reason tokens, one per distinct cause. `mcp-error:<text>` is the one
 # open-ended token: its suffix is the transport's or the server's own words.
-CLAIM_REASONS="no-registry-entry registry-error no-slack-channel ambiguous-slack-channel no-identity no-token mcp-unregistered mcp-error not-found refused already-claimed invalid"
+CLAIM_REASONS="no-registry-entry registry-error no-slack-channel ambiguous-slack-channel no-identity no-token mcp-unregistered mcp-error not-found refused already-claimed invalid cwd-project-mismatch project-unresolved"
 
 # claim_oneline <text> -- one bounded line: control characters (newlines
 # included) become spaces, then at most 80 characters. Server words are printed
@@ -100,7 +100,7 @@ claim_server_words() {
 claim_reason_fix() {
   case "$1" in
     no-registry-entry)
-      printf 'run from inside the project whose session should hear the replies: the inbox is found from the cwd (realpath of git rev-parse --git-common-dir) and its entry in $ATHENA_INBOX_ROOT/projects/. Check it with athena:inbox bin/inbox-status. The post is not undone; re-run bin/claim-thread <channel> <ts> once fixed.' ;;
+      printf 'the session'"'"'s project (the source= and project= fields above; the lookup: line names the repo key) has no entry in $ATHENA_INBOX_ROOT/projects/, so there is no inbox for the replies. Check it with athena:inbox bin/inbox-status from that project. The post is not undone; re-run bin/claim-thread <channel> <ts> once fixed.' ;;
     registry-error)
       printf 'the inbox registry could not be read (unparseable or ambiguous entries; the athena:inbox refusal above names the cause). Run athena:inbox bin/inbox-doctor, fix the entry, then re-run bin/claim-thread <channel> <ts>.' ;;
     no-slack-channel)
@@ -120,9 +120,13 @@ claim_reason_fix() {
     refused)
       printf 'the server refused the claim; its own words are on the server: line above. The usual cause is an inbox that is not one of this machine'"'"'s live Slack inboxes (check it with the athena MCP lookup_inbox).' ;;
     already-claimed)
-      printf 'another inbox already holds this thread, so its replies go there. A thread belongs to whoever claimed it first; start a new thread with bin/post or bin/dm if this session needs the replies.' ;;
+      printf 'another inbox already holds this thread, so its replies go there. A thread belongs to whoever claimed it first, and the server has no release or transfer yet (athena:slack SKILL.md -> Thread replies come back to the session that started the thread); start a new thread with bin/post or bin/dm if this session needs the replies, and ask the holding session to forward any reply meanwhile.' ;;
     invalid)
       printf 'the channel must be a Slack conversation id ([CDG] followed by capitals and digits) and the ts a Slack ts (digits.digits) -- the ts of the thread'"'"'s PARENT message, as bin/post and bin/dm print it.' ;;
+    cwd-project-mismatch)
+      printf 'the shell cwd is inside a different inbox project from this session'"'"'s own (the athena:inbox refusal above names both), so nothing was claimed: a claim cannot be taken back. cd into the session'"'"'s project (project= above) or a worktree of it and re-run bin/claim-thread <channel> <ts>; or, to claim for the cwd'"'"'s project on purpose (a subagent dispatched into another repo), re-run as CLAUDE_PROJECT_DIR=<that project'"'"'s dir> bin/claim-thread <channel> <ts>. The post is not undone.' ;;
+    project-unresolved)
+      printf 'this session'"'"'s project could not be named: CLAUDE_PROJECT_DIR or CLAUDE_PID is set but unusable (the athena:inbox refusal above names the value). Fix or unset it, then re-run bin/claim-thread <channel> <ts>; with neither set the shell cwd is used and the output says source=cwd.' ;;
     *)
       printf 'unrecognised claim failure reason "%s"; report it (claim.sh has no Fix for it).' "$(claim_oneline "$1")" ;;
   esac
@@ -151,11 +155,13 @@ claim_pick_slack_channel() {
   esac
 }
 
-# claim_resolve_inbox <cwd>
+# claim_resolve_inbox <project-dir>
 #
 # SIDE EFFECT. This session's project Slack inbox name (e.g.
 # custom-slack.jsonl) on stdout, status 0; otherwise the reason token on
-# stdout, status 1. The identity rule is athena:inbox's `inbox_entry`: cwd ->
+# stdout, status 1. <project-dir> is the SESSION's project (claim-thread gets it
+# from athena:inbox's inbox_session_dir, DND-1163), never a bare shell cwd.
+# The identity rule is athena:inbox's `inbox_entry`: dir ->
 # realpath of the git common dir -> the registry entry naming it. A worktree
 # resolves its main checkout's entry. Not in a repo, or no entry:
 # `no-registry-entry`. An unreadable or ambiguous registry: `registry-error`

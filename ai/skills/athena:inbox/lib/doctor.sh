@@ -661,6 +661,40 @@ doctor_check_collisions() {
   fi
 }
 
+# --- which project this session is (DND-1163) ------------------------------
+
+# doctor_check_session_project
+# Which project the doctor is diagnosing, and where that came from: ok naming
+# the source (project-dir | session-process | cwd) and the directory; fail when
+# a session signal is set but unusable, or when the shell's cwd sits in a
+# different registered project from the session's own. It hands the directory
+# every later check should use back through DOCTOR_PROJECT_DIR (a global, for
+# the same reason as DOCTOR_MATCHED_ENTRY below): the session's own directory
+# whenever it could be named, even on a mismatch, so the rest of the report is
+# about THIS session's project and never the drifted cwd's. When no directory
+# could be named at all it is ".", and the fail finding says so.
+DOCTOR_PROJECT_DIR="."
+doctor_check_session_project() {
+  local line src dir err rc
+  DOCTOR_PROJECT_DIR="."
+  if ! line="$(session_project_dir 2>&1)"; then
+    doctor_finding fail "session-project" "this session's project cannot be named: $(printf '%s' "${line}" | head -n 1 | sed 's/^athena:inbox: //'); the checks below use the shell cwd instead" \
+      "$(printf '%s' "${line}" | sed -n 's/^ *Fix: //p' | head -n 1)"
+    return 0
+  fi
+  src="${line%%$'\t'*}"; dir="${line#*$'\t'}"
+  DOCTOR_PROJECT_DIR="${dir}"
+  err="$(inbox_session_check "${src}" "${dir}" 2>&1 >/dev/null)"; rc=$?
+  case "${rc}" in
+    0) doctor_finding ok "session-project" "diagnosing ${dir} (source ${src})" "" ;;
+    3) doctor_finding fail "session-project" "$(printf '%s' "${err}" | head -n 1 | sed 's/^athena:inbox: //'); the checks below diagnose ${dir}" \
+         "$(printf '%s' "${err}" | sed -n 's/^ *Fix: //p' | head -n 1)" ;;
+    *) doctor_finding fail "session-project" "the registry could not say whether the shell cwd is in this session's project (${dir}, source ${src}); the checks below diagnose ${dir}" \
+         "run inbox-status --json from ${dir} to see the registry refusal, and fix the entry it names." ;;
+  esac
+  return 0
+}
+
 # --- per matched-entry checks ----------------------------------------------
 
 # doctor_check_entry [cwd]

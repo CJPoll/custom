@@ -15,6 +15,10 @@
 # resolved (the DND-183 class); the token is never in argv (read from /proc).
 
 set -u
+# DND-1163: the athena:inbox bins resolve the session's project from
+# CLAUDE_PROJECT_DIR, then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so
+# the fixtures, not the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 LIB="$(cd -- "${HERE}/.." && pwd -P)"

@@ -31,6 +31,10 @@
 # match can SIGPIPE the printf and turn a match into a failure (DND-365; seen
 # here as a one-off C5 red in a loaded gate run).
 set -uo pipefail
+# DND-1163: the athena:inbox bins resolve the session's project from
+# CLAUDE_PROJECT_DIR, then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so
+# the fixtures, not the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../../.." && pwd)"
