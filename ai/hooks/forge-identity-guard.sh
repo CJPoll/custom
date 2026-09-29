@@ -88,6 +88,13 @@ TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null) || exit 0
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 [ -n "$CMD" ] || exit 0
 
+# Join backslash-newline continuations FIRST, as the shell does before it runs
+# anything (DND-1179): every rule below reads CMD, and one that turned the
+# newline into a separator judged `gh api … \⏎ -f x` or `git -C r \⏎ push` as
+# two commands, neither of them a write. Inside single quotes the pair is
+# literal, so joining there over-reads: the safe direction for a deny rule.
+CMD=$(printf '%s\n' "$CMD" | awk '{ if (sub(/\\$/, "")) printf "%s", $0; else print }')
+
 # Flatten to one logical line so a command split across newlines still matches.
 FLAT=$(printf '%s' "$CMD" | tr '\n\t' '  ')
 

@@ -494,6 +494,22 @@ allow_each "Y2 api reads with valued flags and placeholders" \
   'glab api --output json projects/:id' 'gh api repos/{owner}/{repo}/pulls' \
   'echo `gh pr view 5`'
 
+echo "--- DND-1179 critic round 2: a backslash-newline continuation is ONE command ---"
+# The shell joins `\`+newline before it runs anything; the guard turned the
+# newline into a separator first, so each half was judged alone.
+run "$(bash_json "$(printf 'gh api repos/o/r/issues/5/comments \\\n  -f body=x')")"
+check_text "L1. gh api … \\⏎ -f body=x (a POST split across lines)" 'DND-1179'
+run "$(bash_json "$(printf 'gh pr \\\nclose 5')")"
+check_text "L2. gh pr \\⏎close 5" 'DND-1179'
+run "$(bash_json "$(printf 'glab mr \\\n  note 4 -m x')")"
+check_text "L3. glab mr \\⏎note 4" 'DND-1179'
+run "$(bash_json_cwd "$TMP/norepo" "$(printf "git -C $TMP/gh_scp \\\\\npush origin HEAD")")"
+check_text "L4. git -C <github repo> \\⏎push (the push rule had the same split)" 'to a github.com remote'
+run "$(bash_json "$(printf 'gh pr view 5 \\\n  --json state')")"
+check "L5. a READ split across lines still passes" allow
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'git status\ngit log -1')")"
+check "L6. a plain newline (no backslash) still separates two reads" allow
+
 echo "--- DND-1179: every installed gh/glab command group is classified ---"
 # A group the hook does not know is ALLOWED (it reads as prose), so a CLI
 # upgrade that adds a group with a write verb would fail open. This turns it red.
