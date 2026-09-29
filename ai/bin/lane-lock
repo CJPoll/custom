@@ -307,6 +307,22 @@ do_status() {
   exit 3
 }
 
+# late_read_seam <holder-pid> -- test seam (LANE_LOCK_TEST_LATE_READ=1). Waits,
+# bounded to 10 s, until the holder has reported and exec'd tail (its argv0 is
+# lane-lock-holder:<lane>) or has exited (empty cmdline), so the read below runs
+# only after the holder's reply was written and its end closed: the order in
+# which a reader that opens the fifo late loses the reply. It only delays the
+# read; it never changes what is read or decided.
+late_read_seam() {
+  local cmd
+  for _ in $(seq 1 200); do
+    cmd="$( { tr '\0' ' ' < "/proc/$1/cmdline"; } 2>/dev/null)"
+    [ -z "${cmd}" ] && return 0
+    [[ "${cmd}" == "lane-lock-holder:${lane} "* ]] && return 0
+    sleep 0.05
+  done
+}
+
 do_acquire() {
   resolve_anchor
   kill -0 "${anchor_pid}" 2>/dev/null || die 1 "anchor ${anchor_pid} is not a live process" \
@@ -327,6 +343,7 @@ do_acquire() {
   setsid bash -c "${HOLDER}" "lane-lock-holder:${lane}" "${lock}" "${fifo}" "${anchor_pid}" "${lane}" \
     "${CLAUDE_CODE_SESSION_ID:-}" "${note}" "${wait_s}" "${record}" </dev/null >/dev/null 2>&1 7<&- &
   holder=$!
+  [ "${LANE_LOCK_TEST_LATE_READ:-}" = 1 ] && late_read_seam "${holder}"
   IFS= read -r -t $((wait_s + 15)) -u 7 msg || { rc=$?; msg=""; }
   exec 7<&-
   case "${msg}" in

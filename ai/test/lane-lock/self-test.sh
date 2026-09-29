@@ -11,8 +11,9 @@
 # a caller under another anchor.
 #
 # Hermetic: a temp lock dir and temp HOME; anchors are `sleep` processes this
-# suite starts and kills. Every wait blocks on a lock or a pid with a bound;
-# nothing polls.
+# suite starts and kills. Every wait blocks on a lock or a pid with a bound.
+# The one poll is lane-lock's own LANE_LOCK_TEST_LATE_READ seam (case 10),
+# bounded to 10 s.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -226,28 +227,19 @@ else bad "acquire returns while the holder keeps running (no inherited stdout)" 
 # ---- 10. the holder reports before the acquirer is listening ---------------
 # A fifo drops its buffer when the last descriptor on it closes. If the holder
 # opens, writes and closes before the acquirer opens it, a reader that opens
-# only afterwards gets nothing. A `cat` shim on PATH forces that order: it opens
-# the fifo only once the holder has reported and exec'd `tail`. The acquirer
-# must still see ACQUIRED.
-SC="${TMP}/slowcat"; mkdir -p "${SC}"
-REAL_CAT="$(command -v cat)"
-cat > "${SC}/cat" <<SHIM
-#!/usr/bin/env bash
-# Bounded poll (10s): wait for the lane-l holder to reach tail, then be cat.
-for _ in \$(seq 1 200); do
-  pgrep -f '^lane-lock-holder:l ' >/dev/null && break
-  sleep 0.05
-done
-exec "${REAL_CAT}" "\$@"
-SHIM
-chmod +x "${SC}/cat"
+# only afterwards gets nothing. LANE_LOCK_TEST_LATE_READ=1 makes acquire wait
+# until the holder has reported (and exec'd tail, or exited) before it reads,
+# whatever reader it uses. The reply must survive that order, both ways.
 new_anchor; L="${ANCHOR}"
-out="$(PATH="${SC}:${PATH}" timeout 40 "${TOOL}" acquire --lane l --anchor-pid "${L}" --lock-dir "${LD}" 2>&1)"; rc=$?
+out="$(LANE_LOCK_TEST_LATE_READ=1 timeout 40 "${TOOL}" acquire --lane l --anchor-pid "${L}" --lock-dir "${LD}" 2>&1)"; rc=$?
 if [ "${rc}" = 0 ] && [[ "${out}" == ACQUIRED* ]]; then ok "holder reports before the acquirer reads: still ACQUIRED"
 else bad "holder reports before the acquirer reads: still ACQUIRED" "rc=${rc} ${out}"; fi
 out="$(LL status --lane l)"; rc=$?
 if [ "${rc}" = 3 ]; then ok "... and the lane is HELD afterwards"
 else bad "... and the lane is HELD afterwards" "rc=${rc} ${out}"; fi
+out="$(LANE_LOCK_TEST_LATE_READ=1 timeout 40 "${TOOL}" acquire --lane l --anchor-pid "${L}" --wait 0 --lock-dir "${LD}" 2>&1)"; rc=$?
+if [ "${rc}" = 3 ] && [[ "${out}" == HELD* ]]; then ok "busy holder exits before the acquirer reads: still HELD (3)"
+else bad "busy holder exits before the acquirer reads: still HELD (3)" "rc=${rc} ${out}"; fi
 
 echo "lane-lock self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" = 0 ]

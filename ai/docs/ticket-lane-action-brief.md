@@ -107,7 +107,7 @@ file, is replaced by `{{LANE_LOCK}}`.
 ### Spinning the lane up (one draining admiral)
 
 When the lane consumer observes that lane work is queued for `{{OWNER_NAME}}` AND
-no admiral is draining the lane (`lane-lock status --lane {{LANE_ID}}` exits 0,
+no admiral is draining the lane (`~/dev/custom/ai/bin/lane-lock status --lane {{LANE_ID}}` exits 0,
 FREE):
 
 1. **Take the lane lock before spawning**, from the session that will spawn the
@@ -137,8 +137,9 @@ FREE):
    spawning session. If the session exits, crashes or is killed, or the holder is
    killed, the kernel drops the lock, and the next trigger finds the lane FREE.
    The one state the kernel cannot see is a live session whose admiral is gone
-   and that never ran step 4. A human recovers that with `lane-lock release
-   --lane {{LANE_ID}} --force`; `lane-lock status` names the holder's session and
+   and that never ran step 4. A human recovers that with
+   `~/dev/custom/ai/bin/lane-lock release --lane {{LANE_ID}} --force`;
+   `lane-lock status` names the holder's session and
    `acquired_at`.
 
 **Read and ack on a lane `log` channel — who may advance the offset.** When the
@@ -273,7 +274,7 @@ instantiation*).
 - **Concurrency** — MAX `{{MAX_CAPTAINS}}` captains.
 - **Merge / deploy** — `{{MERGE_POLICY}}`; drain the ENTIRE scope.
 - **Lane lock** — the spawning session holds `{{LANE_LOCK}}` for you. When the
-  scope is drained, run `lane-lock release --lane {{LANE_ID}}` as your last act
+  scope is drained, run `~/dev/custom/ai/bin/lane-lock release --lane {{LANE_ID}}` as your last act
   before the final report. Never `acquire` it yourself, and never release it
   while the scope is not drained.
 - **Fleet registry** — report the run, its scope and its end, per
@@ -558,7 +559,7 @@ Progress`, and the other's next-mission then counts it as started.
 **On a drain request** the attendant does these steps, in order, and never the
 work itself:
 1. If the cap is `0`, take no action.
-2. Run `ai/bin/lane-lock status --lane harness`. Exit 3 (`HELD`): take no
+2. Run `~/dev/custom/ai/bin/lane-lock status --lane harness`. Exit 3 (`HELD`): take no
    action, and never release a lock your session does not hold. If its
    `acquired_at` is older than 12h, relay the holder line to the owner as a
    possibly wedged lane. Exit 1: a fault; relay it, never a quiet lane.
