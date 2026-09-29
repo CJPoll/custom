@@ -11,8 +11,9 @@
 #     set for the PR's base branch. An empty set, a 403/404, or any failed
 #     lookup is "could not establish a gate", never "fine".
 #   * REFUSES a non-auto `pr merge` unless it names the exact head with
-#     --match-head-commit <sha> and every check reported on that head concluded
-#     green. Zero reported checks is not green.
+#     --match-head-commit <sha> and the latest run of every check reported on
+#     that head concluded green (DND-1140: a superseded run is not judged; an
+#     order that cannot be read refuses). Zero reported checks is not green.
 #   * REFUSES every `gh api` call that merges (DND-728): REST …/pulls/<n>/merge,
 #     …/merges, …/merge-upstream, and the GraphQL merge mutations, however the
 #     method, endpoint or query is spelled or supplied.
@@ -72,6 +73,7 @@ answer() {
 }
 case "$*" in
   "pr view"*"--json"*) answer prview ;;
+  "api graphql"*"statusCheckRollup"*) answer rollup ;;
   "api repos/"*"/protection/required_status_checks"*) answer protection ;;
   "api repos/"*"/rules/branches/"*) answer rules ;;
   "api repos/"*"/git/ref/heads/"*) answer baseref ;;
@@ -125,10 +127,24 @@ reset_fx() {
   chmod -R u+rwx "${STORE_FX}" 2>/dev/null; rm -rf "${STORE_FX}"
 }
 
-# pr_view <rollup-json-array> [head]
+# pr_view <rollup-json-array> [head] : the PR, and the same contexts as the
+# head commit's rollup. Since DND-1140 the guard reads the contexts by GraphQL
+# on the pinned head (the rollup fixture); prview keeps them too, so an older
+# copy of the wrapper that read `pr view` sees the same runs (old-vs-new
+# evidence).
 pr_view() {
   printf '{"number":362,"url":"https://github.com/CJPoll/gen_saas/pull/362","baseRefName":"main","headRefOid":"%s","statusCheckRollup":%s}\n' \
     "${2:-${HEAD_SHA}}" "$1" > "${FX}/prview.out"
+  rollup_fx "$1"
+}
+# rollup_fx <nodes-json|null> [hasNextPage] [totalCount] : the GraphQL answer
+# for the head commit's statusCheckRollup.contexts.
+rollup_fx() {
+  jq -cn --argjson n "$1" --argjson more "${2:-false}" --argjson tc "${3:-null}" '
+    {data: {repository: {object: {__typename: "Commit", statusCheckRollup:
+      (if $n == null then null
+       else {contexts: {totalCount: ($tc // ($n | length)), pageInfo: {hasNextPage: $more}, nodes: $n}} end)}}}}' \
+    > "${FX}/rollup.out"
 }
 fx() { printf '%s' "$2" > "${FX}/$1.out"; printf '%s' "${3:-0}" > "${FX}/$1.rc"; [ -z "${4:-}" ] || printf '%s\n' "$4" > "${FX}/$1.err"; }
 
@@ -344,6 +360,137 @@ else bad "23. green head merges" "$(detail)"; fi
 reset_fx; pr_view "${GREEN}"
 run pr merge 362 --squash "--match-head-commit=${HEAD_SHA}"
 [ "${RC}" = 0 ] && merged && ok "24. --match-head-commit=<sha> form accepted" || bad "24. = form" "$(detail)"
+
+echo
+echo "--- DND-1140: only the LATEST run of each check is judged; a newer red still refuses ---"
+# The defect: gen_saas PR #488, head d0889159, 2026-09-28. CI run 36464818403
+# failed Test (a ticketed flake); a close/reopen re-ran CI as run 36467382644
+# on the SAME head, all green, and `gh pr checks` showed all green. The guard
+# judged every check-run on the head, so the superseded failure kept refusing:
+# "Test: COMPLETED/FAILURE". A check is identified by (app, workflow, event,
+# name) and a status by its context; within one identity only the run that
+# started last is judged. A run whose identity cannot be read is judged on its
+# own. An order that cannot be read, or a tie for newest, refuses.
+PR488_NODES="$(cat "${HERE}/fixtures/gen_saas-pr488-d0889159-rollup-nodes.json")"
+ACT_APP=15368; CI_WF=256531677; OTHER_WF=256539999; OTHER_APP=90001; THIRD_APP=90002
+# cr <name> <status> <conclusion|""> <startedAt|null> [app-id] [app-slug] [workflow-id|null] [event|null]
+cr() {
+  jq -cn --arg n "$1" --arg s "$2" --arg c "$3" --argjson t "$( [ "$4" = null ] && echo null || printf '"%s"' "$4")" \
+    --argjson app "${5:-${ACT_APP}}" --arg slug "${6:-github-actions}" --argjson wf "${7:-${CI_WF}}" \
+    --argjson ev "$( [ "${8:-pull_request}" = null ] && echo null || printf '"%s"' "${8:-pull_request}")" '
+    {__typename: "CheckRun", name: $n, status: $s, conclusion: (if $c == "" then null else $c end), startedAt: $t,
+     checkSuite: {app: {databaseId: $app, slug: $slug},
+                  workflowRun: (if $wf == null and $ev == null then null
+                                else {event: $ev, workflow: (if $wf == null then null else {databaseId: $wf, name: "CI"} end)} end)}}'
+}
+sc() { jq -cn --arg c "$1" --arg s "$2" --arg t "$3" '{__typename: "StatusContext", context: $c, state: $s, createdAt: $t}'; }
+arr() { local IFS=,; printf '[%s]' "$*"; }
+merge_pinned() { run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"; }
+
+reset_fx; pr_view "${PR488_NODES}"
+merge_pinned
+if [ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"superseded"* ]] && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]]; then
+  ok "L1. the incident (#488's 16 live runs: older Test FAILURE, newer re-run all green) -> merges; the ignored run is named"
+else bad "L1. superseded failure no longer refuses" "$(detail)"; fi
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED SUCCESS 2026-09-28T18:40:00Z)" "$(cr Test COMPLETED FAILURE 2026-09-28T18:48:55Z)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+  && ok "L2. older SUCCESS + newer FAILURE, same check -> refused, names the newer failure" \
+  || bad "L2. newer failure refuses" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z)" "$(cr Test IN_PROGRESS "" 2026-09-28T18:48:55Z)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: IN_PROGRESS/-"* ]] \
+  && ok "L3. older FAILURE + newer IN_PROGRESS -> refused, names the in-progress run" \
+  || bad "L3. newer in-progress refuses" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED SUCCESS 2026-09-28T18:40:00Z)" "$(cr Test QUEUED "" null)")"
+merge_pinned
+refused && [[ "${ERR}" == *"order cannot be read"* ]] \
+  && ok "L3b. older SUCCESS + a QUEUED run with no start time -> refused (the order cannot be read)" \
+  || bad "L3b. unreadable order refuses" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z "${OTHER_APP}" other-ci null null)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z "${THIRD_APP}" third-ci null null)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+  && ok "L4. two APPS (no workflow either) report a check named Test (older one red) -> both judged, refused" \
+  || bad "L4. same name across apps is not deduped" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z "${OTHER_APP}" other-ci null null)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z "${OTHER_APP}" other-ci null null)")"
+merge_pinned
+[ "${RC}" = 0 ] && merged \
+  && ok "L4e. one non-Actions app re-reports Test (older red, newer green) -> merges" \
+  || bad "L4e. same app re-run is deduped" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z "${ACT_APP}" github-actions "${OTHER_WF}")" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+  && ok "L4b. two WORKFLOWS with a job named Test (older one red) -> both judged, refused" \
+  || bad "L4b. same name across workflows is not deduped" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z "${ACT_APP}" github-actions "${CI_WF}" push)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+  && ok "L4c. one workflow run by push AND pull_request (push run red, older) -> both judged, refused" \
+  || bad "L4c. push and pull_request runs are not deduped" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z "${ACT_APP}" github-actions null)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z "${ACT_APP}" github-actions null)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+  && ok "L4d. Actions runs whose workflow cannot be read -> never deduped, the red one refuses" \
+  || bad "L4d. unreadable workflow identity is judged alone" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:48:55Z)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z)")"
+merge_pinned
+refused && [[ "${ERR}" == *"share the newest start time"* ]] \
+  && ok "L5. two runs tie for the newest start time -> refused" || bad "L5. tie refuses" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z)" "$(cr Test COMPLETED SUCCESS 'yesterday')")"
+merge_pinned
+refused && [[ "${ERR}" == *"order cannot be read"* ]] \
+  && ok "L6. a malformed start time -> refused (the order cannot be read)" || bad "L6. malformed time refuses" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(sc ext/ci FAILURE 2026-09-28T18:40:00Z)" "$(sc ext/ci SUCCESS 2026-09-28T18:48:55Z)")"
+merge_pinned
+[ "${RC}" = 0 ] && merged && ok "L7. a commit status: older FAILURE + newer SUCCESS, same context -> merges" \
+  || bad "L7. superseded status no longer refuses" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(sc ext/ci SUCCESS 2026-09-28T18:40:00Z)" "$(sc ext/ci FAILURE 2026-09-28T18:48:55Z)")"
+merge_pinned
+refused && [[ "${ERR}" == *"ext/ci: FAILURE"* ]] \
+  && ok "L7b. a commit status: older SUCCESS + newer FAILURE -> refused" || bad "L7b. newer status failure refuses" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; rollup_fx "${GREEN}" true
+merge_pinned
+refused && [[ "${ERR}" == *"more than"* ]] \
+  && ok "L8. the rollup has another page -> refused (unread runs are not green)" || bad "L8. hasNextPage refuses" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; rollup_fx "${GREEN}" false 9
+merge_pinned
+refused && [[ "${ERR}" == *"9"* ]] \
+  && ok "L8b. totalCount says 9 but 4 were returned -> refused" || bad "L8b. count mismatch refuses" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; fx rollup '' 1 'gh: HTTP 502'
+merge_pinned
+refused && [[ "${ERR}" == *"502"* ]] \
+  && ok "L9. the rollup read fails -> refused, the failure is named" || bad "L9. failed rollup read refuses" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; fx rollup '{"data":{"repository":{"object":null}},"errors":[{"message":"Could not resolve to a Commit"}]}'
+merge_pinned
+refused && [[ "${ERR}" == *"Could not resolve"* ]] \
+  && ok "L9b. a GraphQL error / no such commit -> refused" || bad "L9b. GraphQL error refuses" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; fx rollup '{"data":{"repository":{"object":{"__typename":"Commit","statusCheckRollup":{"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"__typename":"Mystery"}]}}}}}}'
+merge_pinned
+refused && [[ "${ERR}" == *"Mystery"* ]] \
+  && ok "L9c. a context of an unknown type -> refused" || bad "L9c. unknown context type refuses" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"
+merge_pinned
+if [ "${RC}" = 0 ] && grep -q "^api graphql .*statusCheckRollup.* -f owner=CJPoll -f repo=gen_saas -f oid=${HEAD_SHA}\$" "${STUB_LOG}"; then
+  ok "L10. the contexts are read for the PINNED head commit (oid=<sha>)"
+else bad "L10. rollup read pins the head" "$(detail)"; fi
 
 echo
 echo "--- dry-run seam: decides, never writes ---"

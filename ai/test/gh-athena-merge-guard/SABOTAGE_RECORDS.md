@@ -169,3 +169,46 @@ Fix texts were swept to the one recommended path.
 | M19 `gmg_receipt_gate` never called (the unfixed guard) | the 17 above |
 | M20 `ir_declared_gate_on` returns "no gate" when the base commit is missing | D10, D10b |
 | M21 `ir_read_receipt` skips the base comparison | D3 |
+
+---
+
+## 2026-09-28 — DND-1140: a superseded failed run kept refusing a green head
+
+- **Code under test:** `ai/lib/gh-merge-guard.sh` (`gmg_checks_green`,
+  `GMG_ROLLUP_SHAPE`, `GMG_ROLLUP_JUDGE`)
+- **Suite:** `bash ai/test/gh-athena-merge-guard/self-test.sh`, cases L1–L10.
+  L1 replays the live rollup of gen_saas PR #488 head d0889159, saved in
+  `fixtures/gen_saas-pr488-d0889159-rollup-nodes.json`.
+- **Baseline (fixed code):** `RESULT: 178 passed, 0 failed`
+
+### Fail-first: the final suite against the unfixed sources (194a5fe2)
+
+`RESULT: 166 passed, 12 failed`. L1 (the incident), L7 and L4e (a superseded
+failure: check run, commit status, non-Actions app) fail with the incident's
+own refusal:
+
+```
+FAIL  L1. superseded failure no longer refuses
+      rc=3 out='' err=$'gh-athena: REFUSING `gh pr merge 362 --squash --match-head-commit b712de1d…`: not every check on head b712de1d… is green:\n    Test: COMPLETED/FAILURE\n  Fix: …
+```
+
+L3b, L5 and L6 fail on the message only: the old guard refused them, as it
+refused any red run. L8, L8b, L9, L9b, L9c and L10 exercise the new GraphQL
+read, which the old guard never made. Every pre-DND-1140 case, and L2, L3, L4,
+L4b, L4c, L4d and L7b, passed against the old code and still pass: nothing that
+refused before passes now unless a newer run of the same check superseded it.
+
+### Mutations on the fixed code (applied to a copy of `ai/bin` + `ai/lib`)
+
+| Mutation | Cases that fail |
+| --- | --- |
+| M22 the workflow-run event dropped from the check key | L4c |
+| M23 the app id dropped from the check key | L4 |
+| M24 no tie check for the newest start time | L5 |
+| M25 no check that every start time is readable | L3b, L6 |
+| M26 the OLDEST run judged instead of the newest | L1, L2, L3, L4e, L7, L7b |
+| M27 totalCount vs returned nodes not compared | L8b |
+| M28 hasNextPage ignored | L8 |
+| M29 the rollup read for another oid than the pinned head | L10 |
+| M30 an Actions run with no readable workflow folded by (app, name) | L4d |
+| M31 an empty rollup passes | 20 |
