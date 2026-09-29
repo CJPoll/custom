@@ -172,6 +172,12 @@ refused "check-inotify-headroom: --threshold twice is refused" "--threshold give
 # --- admiral-report-watch ---------------------------------------------------------
 refused "admiral-report-watch: --session-id does not swallow --max-loops" "--session-id needs a value" admiral-report-watch run-x --session-id --max-loops 1
 refused "admiral-report-watch: --poll-s twice is refused" "--poll-s given more than once" admiral-report-watch run-x --poll-s 0 --poll-s 0 --max-loops 1
+# The run-id is a key: it names /tmp/admiral-<run-id>-seen and the reports dir.
+# A `/` in it made the seen-file path unwritable and the watcher looped on
+# find/touch errors every poll instead of refusing (measured 2026-09-29, a live
+# admiral passing a path). --reports-dir keeps a fall-through out of the repo.
+refused "admiral-report-watch: a run-id with / is refused, not looped on" "is not a valid run-id" admiral-report-watch "${TMP}/runs/x" --reports-dir "${TMP}/arw-r" --poll-s 0 --max-loops 1
+refused "admiral-report-watch: a run-id of .. is refused (it escapes the coordination dir)" "is not a valid run-id" admiral-report-watch .. --reports-dir "${TMP}/arw-r" --poll-s 0 --max-loops 1
 
 # --- confirm-merged ------------------------------------------------------------
 refused "confirm-merged: --pr does not swallow --json" "--pr needs a value" confirm-merged --pr --json

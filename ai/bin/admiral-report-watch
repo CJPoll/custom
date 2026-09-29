@@ -83,6 +83,13 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "${run_id}" ] || die "pass the run-id, e.g. \`admiral-report-watch 2026-09-20-notif-platform\`."
+# The run-id is a key: it names /tmp/admiral-<run-id>-seen and the reports dir.
+# A `/` in it (a path passed as the id) made the seen file unwritable, and the
+# watcher looped on find/touch errors every poll instead of refusing. Held to
+# the fleet id grammar (ai/lib/fleet/domain.sh, fleet_valid_id).
+# shellcheck source=../lib/fleet/domain.sh
+. "$(dirname "$0")/../lib/fleet/domain.sh"
+fleet_valid_id "${run_id}" || die "${run_id@Q} is not a valid run-id; pass the run's coordination directory NAME (letters, digits, . _ -, no /), e.g. \`admiral-report-watch 2026-09-20-notif-platform\`, not its path."
 for n in "${poll_s}" "${control_s}" "${max_loops}"; do
   [[ "${n}" =~ ^[0-9]{1,6}$ ]] || die "--poll-s, --control-s and --max-loops take whole seconds / counts (got ${n@Q})."
 done
