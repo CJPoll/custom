@@ -481,6 +481,18 @@ the issues." This section is its one home; other documents cite it by name.
      Measured: that exact loop never exits with no target alive, and an
      admiral's path-based load-wait recipe hung a captain (DND-589); an
      architect's `pkill -f` killed its own tool shell (DND-541).
+- NEVER generate CPU, memory or IO load on this machine to test or reproduce
+  anything. This desktop is Cody's workstation, not a CI box. No stress or load
+  runs, no burner fan-outs (`yes`, spin or re-exec loops), no repeated N-run
+  flake hunts. Tests we write and run are **functional**: no performance, load,
+  stress or wall-clock-threshold tests. A timeout that only caps a hang is
+  fine; a verdict that flips when the machine is slow is not. A flake that
+  shows only under load gets a deterministic test (a fixture, an injected
+  clock, a fake, or a block on the event), never a stress repro. How:
+  `athena:test-specification` → *Scope: functional tests only*. Owner, Cody,
+  2026-09-29: "I want us only doing functional testing in the agent
+  definitions, skill definitions, etc." Measured that day: a captain's `yes`
+  and spin-loop repro of DND-1202 drove load to 46 while Cody was gaming.
 - NEVER EVER UNDER ANY CIRCUMSTANCE use `Application.put_env`
 - NEVER make system-level changes (especially daemons, system services, /etc files, sudo commands) without the user's express direction
 - It's OK to make changes to files under ~/dev or ~/.local/worktrees without asking
