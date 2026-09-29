@@ -510,6 +510,26 @@ check "L5. a READ split across lines still passes" allow
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'git status\ngit log -1')")"
 check "L6. a plain newline (no backslash) still separates two reads" allow
 
+echo "--- DND-1179 critic round 3: a separator INSIDE quotes is data, not a command break ---"
+deny_each "Q1 a field after a quoted separator" \
+  "gh api repos/o/r/issues --jq '.number | tostring' -f title=x" \
+  "gh api 'repos/o/r/issues?q=(x)' -f body=y" \
+  'gh api repos/o/r/issues --jq ".a; .b" -f title=x' \
+  "glab api projects/:id/issues --jq '.[] | .iid' -f title=x" \
+  "gh api repos/o/r/issues -H 'Accept: a&b' --method POST" \
+  "sh -c 'gh api repos/o/r/issues --jq \".a | .b\" -f title=x'"
+allow_each "Q2 reads with quoted separators still pass" \
+  "gh api repos/o/r/issues --jq '.[] | .number'" \
+  'gh pr list --search "is:open (label:a) | x"' \
+  "glab api projects/:id/issues --jq '.[] | .iid'"
+
+run "$(bash_json_cwd "$TMP/gh_scp" "git -c 'core.x=a;b' push origin HEAD")"
+check_text "Q3. git -c 'core.x=a;b' push (the push rule split inside the quote too)" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" "git -c 'core.x=a|b' push origin HEAD")"
+check_text "Q4. git -c 'core.x=a|b' push" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" "git commit -m 'a; b' && git log -1")"
+check "Q5. a quoted separator in a non-push git command still passes" allow
+
 echo "--- DND-1179: every installed gh/glab command group is classified ---"
 # A group the hook does not know is ALLOWED (it reads as prose), so a CLI
 # upgrade that adds a group with a write verb would fail open. This turns it red.
