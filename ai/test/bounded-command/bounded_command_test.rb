@@ -90,8 +90,17 @@ Dir.mktmpdir do |tmp|
   # hangs: the child is in its own group, so the caller must kill it on the way
   # out, and must not wait for it.
   lib = File.expand_path("../../lib/bounded_command", __dir__)
+  # b8 and b9 deliver INT to a caller they spawn. An ignored signal survives
+  # fork+exec, and Ruby leaves an INT it inherited ignored alone, so a gate
+  # launched with `&` from a non-interactive shell (SIGINT ignored) ran these
+  # callers deaf to INT: 4 deterministic FAILs that read as a load flake
+  # (measured 2026-09-29, 2 of 2 backgrounded gates; the DND-815b class). Each
+  # caller is launched with INT reset to default, and this process ignores INT
+  # around b8/b9 so every run exercises the hostile environment.
+  default_int = ["env", "--default-signal=INT"]
+  prior_int = Signal.trap("INT", "IGNORE")
   cpid = File.join(tmp, "caller-child")
-  caller = Process.spawn(RbConfig.ruby, "-r", lib, "-e",
+  caller = Process.spawn(*default_int, RbConfig.ruby, "-r", lib, "-e",
                          "BoundedCommand.run(['bash', '-c', 'echo $$ > #{cpid}; exec sleep 300'], timeout: 120)",
                          %i[out err] => File::NULL)
   deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 10
@@ -124,7 +133,7 @@ Dir.mktmpdir do |tmp|
   cpid9 = File.join(tmp, "caller-child-9")
   slow_detach = "module Process; class << self; alias_method :bc_detach, :detach; " \
                 "def detach(pid); t = bc_detach(pid); sleep 1; t; end; end; end"
-  caller9 = Process.spawn(RbConfig.ruby, "-r", lib, "-e",
+  caller9 = Process.spawn(*default_int, RbConfig.ruby, "-r", lib, "-e",
                           "#{slow_detach}; BoundedCommand.run(['bash', '-c', 'echo $$ > #{cpid9}; exec sleep 300'], timeout: 120)",
                           %i[out err] => File::NULL)
   deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 10
@@ -148,6 +157,7 @@ Dir.mktmpdir do |tmp|
     Process.wait(caller9)
   end
   Process.kill("KILL", child9) if child9.positive? && alive?(child9)
+  Signal.trap("INT", prior_int)
 
   [0, -1, nil, "5"].each do |bad|
     raised = begin
