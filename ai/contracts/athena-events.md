@@ -1609,13 +1609,24 @@ A verified `POST` from an external source, normalized to an event.
 
 **Sender verification is mandatory and is the ingress's authorization of the
 SOURCE — never of the CONTENT.** Every inbound webhook MUST verify a
-signature/HMAC before doing anything else:
+signature/HMAC, or — for a source that signs nothing — a custodied
+shared-secret token (below), before doing anything else:
 
-- The signature MUST be computed over the **raw request bytes as received**, not
-  over a re-parsed or re-serialized copy — re-serialized JSON produces different
-  bytes and will fail to match a legitimate signature (and, worse, could be made
-  to match a tampered body). Verify the bytes as received.
-- The comparison MUST be **constant-time**.
+**Later (2026-09-29):** this MUST read "verify a signature/HMAC" with no
+exception, and its first sub-bullet required the signature to be computed over
+the raw request bytes with no alternative. Superseded: GitLab signs nothing —
+it has no signature to compute over any bytes — so its verification is a
+shared-secret token comparison instead (*GitLab signs nothing, so its token is
+the verification*, below), not a weaker case of the signature rule.
+
+- Where the source signs its payload, that signature MUST be computed over the
+  **raw request bytes as received**, not over a re-parsed or re-serialized
+  copy — re-serialized JSON produces different bytes and will fail to match a
+  legitimate signature (and, worse, could be made to match a tampered body).
+  Verify the bytes as received. A source that signs nothing instead compares
+  its shared-secret token against the raw request header (below); there is no
+  body to re-serialize into that comparison.
+- The comparison MUST be **constant-time**, signature or token alike.
 - An unverified or failed-verification body is a **hard reject** carrying a
   `Fix:` (name the header checked and that verification failed); it MUST NEVER be
   normalized into an event.
