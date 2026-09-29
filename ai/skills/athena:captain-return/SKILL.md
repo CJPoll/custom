@@ -145,6 +145,15 @@ wrapper). B's captain has likely already finished and terminated by then, so
 this is yours to do, not a redispatch. **Never rewrite the captain's work** —
 propagation is a git operation on that worktree, not a rewrite.
 
+**On GitHub, retargeting is half the step.** `locked-merge` squash-merges A,
+so B still carries A's pre-squash commits, and merging `origin/main` into B
+can conflict with A's own squash. Rebase B onto it with `git rebase --onto`
+from A's old head, then push as Athena: [[athena:dispatch-captain]] → *Batch
+Missions (tier 4)*, the forge-repo landing bullet, which also covers the
+orphaned critic receipt. Measured 2026-09-29 (event-platform, 11:09Z): #525
+retargeted after #524's squash hit a plain-merge conflict until rebased
+`--onto`.
+
 When you need to confirm an MR/PR **actually merged** (before a dependent's
 terminal move, a DM, or a teardown), use `ai/bin/confirm-merged` with the forge
 probe — **`--pr <n>` (GitHub) / `--mr <n>` (GitLab)**. A git-ancestry probe
