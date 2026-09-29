@@ -12,8 +12,8 @@
 #
 # Hermetic: a temp lock dir and temp HOME; anchors are `sleep` processes this
 # suite starts and kills. Every wait blocks on a lock or a pid with a bound.
-# The one poll is lane-lock's own LANE_LOCK_TEST_LATE_READ seam (case 10),
-# bounded to 10 s.
+# The polls are bounded: lane-lock's own LANE_LOCK_TEST_LATE_READ seam
+# (case 10, 10 s) and case 12's gate hand-off and late-holder window.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +29,7 @@ ANCHORS=()
 cleanup() {
   local p
   for p in "${ANCHORS[@]}"; do kill "${p}" 2>/dev/null; done
-  for l in a b c d e f g h i j k l; do "${TOOL}" release --lane "${l}" --force --lock-dir "${LD}" >/dev/null 2>&1; done
+  for l in a b c d e f g h i j k l m n; do "${TOOL}" release --lane "${l}" --force --lock-dir "${LD}" >/dev/null 2>&1; done
   chmod -R u+rwx "${TMP}" 2>/dev/null
   rm -rf "${TMP}"
 }
@@ -240,6 +240,46 @@ else bad "... and the lane is HELD afterwards" "rc=${rc} ${out}"; fi
 out="$(LANE_LOCK_TEST_LATE_READ=1 timeout 40 "${TOOL}" acquire --lane l --anchor-pid "${L}" --wait 0 --lock-dir "${LD}" 2>&1)"; rc=$?
 if [ "${rc}" = 3 ] && [[ "${out}" == HELD* ]]; then ok "busy holder exits before the acquirer reads: still HELD (3)"
 else bad "busy holder exits before the acquirer reads: still HELD (3)" "rc=${rc} ${out}"; fi
+
+# ---- 11. release trusts the holder's argv, never the record ---------------
+# The record is informational. A record naming the caller's anchor must not
+# authorize killing a live holder that follows a different anchor.
+new_anchor; M1="${ANCHOR}"; new_anchor; M2="${ANCHOR}"
+LL acquire --lane m --anchor-pid "${M1}" >/dev/null 2>&1
+sed -i "s/^anchor_pid=.*/anchor_pid=${M2}/" "${LD}/m.holder"
+out="$(LL release --lane m --anchor-pid "${M2}" 2>&1)"; rc=$?
+if [ "${rc}" = 4 ] && ! freed_within m 0; then ok "a record naming the caller's anchor does not authorize release (4), still held"
+else bad "a record naming the caller's anchor does not authorize release (4), still held" "rc=${rc} ${out}"; fi
+
+# ---- 12. a holder that reports after acquire gave up never holds the lane --
+# A `date` shim on PATH (the holder runs `date` after it has the lock and
+# before it reports) blocks on a gate fifo, so the holder cannot report within
+# acquire's read window. Acquire must exit 1 AND leave no holder behind: once
+# the gate opens, a late holder that survived would report and hold the lane.
+DS="${TMP}/gatedate"; mkdir -p "${DS}"
+GATE="${TMP}/date-gate"; mkfifo "${GATE}"
+REAL_DATE="$(command -v date)"
+cat > "${DS}/date" <<SHIM
+#!/usr/bin/env bash
+IFS= read -r _ < "${GATE}"
+: > "${TMP}/date-passed"
+exec "${REAL_DATE}" "\$@"
+SHIM
+chmod +x "${DS}/date"
+new_anchor; N="${ANCHOR}"
+out="$(PATH="${DS}:${PATH}" timeout 60 "${TOOL}" acquire --lane n --anchor-pid "${N}" --wait 0 --lock-dir "${LD}" 2>&1)"; rc=$?
+exec 8<>"${GATE}"; printf 'go\n' >&8          # let the held-up holder go on
+for _ in $(seq 1 200); do [ -e "${TMP}/date-passed" ] && break; sleep 0.05; done
+exec 8>&-
+late=""
+for _ in $(seq 1 40); do                          # bounded: 2 s for a late holder to show up
+  LL status --lane n >/dev/null 2>&1; [ "$?" = 3 ] && { late=held; break; }
+  sleep 0.05
+done
+if [ "${rc}" = 1 ] && [[ "${out}" == *"Fix:"* ]]; then ok "holder held up past the read window: acquire exits 1"
+else bad "holder held up past the read window: acquire exits 1" "rc=${rc} ${out}"; fi
+if [ -z "${late}" ]; then ok "... and no late holder takes the lane afterwards"
+else bad "... and no late holder takes the lane afterwards" "$(LL status --lane n)"; fi
 
 echo "lane-lock self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" = 0 ]
