@@ -1,8 +1,9 @@
 #!/bin/sh
 # PreToolUse forge-identity guard.
 #
-# Surfaces a bare `gh pr create` / `glab mr create` — a forge WRITE that stamps
-# authorship — that bypasses the Athena wrapper (`gh-athena` / `glab-athena`).
+# Denies every forge WRITE run on plain `gh` / `glab` (see SCOPE) — a write
+# that stamps authorship yet bypasses the Athena wrapper (`gh-athena` /
+# `glab-athena`).
 # The DND-203 outage had two halves; this closes the second: a HEALTHY wrapper
 # that a captain simply never called, so the MR was authored by the machine
 # owner (`cjpoll`) with nothing in the output saying so. The failure mode is
@@ -67,8 +68,12 @@
 #     match) exits 0 and ALLOWS silently. A bug here can never wedge Bash.
 #     A deny is only ever emitted for a positive match.
 #   * WRAPPER   — only plain gh/glab and plain git push match. The wrapper
-#     path (`gh-athena pr close`, `glab-athena mr note`) is explicitly NOT
-#     matched: `gh`/`glab` there is followed by `-`, not whitespace.
+#     path (`gh-athena pr close`, `glab-athena mr note`) is never matched: the
+#     create/merge/api patterns need whitespace after `gh`/`glab` (the wrapper
+#     has `-`), and the DND-1179 rule needs the command word, path stripped, to
+#     be exactly `gh` or `glab`.
+#     Later (2026-09-29, DND-1179): this bullet was NARROW, "only the
+#     wrapper-bypassing create commands match". Every plain write matches now.
 #
 # Wired in ~/.claude/settings.json as a PreToolUse hook scoped to Bash
 # (ai/hooks/registry.json is the source of truth; `scripts/setup-hooks --install`
@@ -387,79 +392,111 @@ done
 
 # ---- Every other plain gh/glab WRITE (DND-1179) ------------------------------
 # 2026-09-29 00:11Z an admiral ran a plain `gh pr close 119 -R CJPoll/custom`
-# (output redirected). The rules above cover only create/merge and the api
-# merge/ref routes, so it ran, and GitHub recorded the close as CJPoll. This
-# rule closes the class with a POSITIVE model, chosen over a longer deny-list
-# because a deny-list misses the next verb the CLI ships: for each known command
-# group, a READ allowlist (RD below); any other verb of that group is a write and
-# is denied. `api` is judged by its method (below). The specific rules above run
+# (output redirected). Before this rule the guard covered only create/merge,
+# the api merge/ref routes and plain push, so it ran, and GitHub recorded the
+# close as CJPoll. This rule closes the class with a POSITIVE model, chosen
+# over a longer deny-list because a deny-list misses the next verb the CLI
+# ships: for each known command group, a READ allowlist (RD below); any other
+# verb of that group is a write and is denied. `api` is judged by its method (below). The specific rules above run
 # first, so a create, a merge or a ref write keeps its own Fix.
-#   * Known groups are every gh 2.96 / glab 1.92 group with a write verb (the RD
-#     keys). Groups that cannot write to the forge (help, config, search, …; and
-#     `auth`, which is forge-auth-guard's domain) are ALLOWED whole (AG).
+#   * Known groups: every group and group alias of gh 2.96 / glab 1.92. A group
+#     with a write verb has a READ allowlist (RD); one that cannot write to the
+#     forge (help, config, search, …; and `auth`, forge-auth-guard's domain) is
+#     ALLOWED whole (AGS). Verb aliases (`ls`, `co`, `show`) are in RD too.
+#     `gh copilot`, `glab duo cli` and `glab mcp serve` start an agent or a
+#     server that can write as the owner, so they are denied. The self-test
+#     (K1, K2) reads the installed CLIs and fails on any group, or gh group
+#     alias, that is in neither list, so a CLI upgrade turns it red instead of
+#     failing open. glab does not list its group aliases; those (var, project,
+#     pipe, pipeline, stacks, sched, skd) are kept by hand.
 #   * A word after `gh`/`glab` that is no known group is ALLOWED: it is prose
 #     (`the gh CLI`), an alias or an extension. The named residual: an alias or
 #     an extension that performs a write. `gh alias set` / `import` and `glab
 #     alias set` are denied for that reason.
 #   * `api`: a write when it names -X/--method other than GET/HEAD, carries a
-#     method-override header, or has no method but a field or --input (gh and
-#     glab then POST). A `graphql` call is a write when the command has the word
-#     `mutation` anywhere, or reads its query from a file (`=@f`, --input),
-#     which this guard cannot read.
+#     method-override header, or has no method but a field, --form or --input
+#     (gh and glab then POST). A `graphql` call is a write when the command has
+#     the word `mutation` anywhere, or its query is one this guard cannot read:
+#     from a file (`=@f`, --input) or built by expansion (`query=$Q`, `$(…)`,
+#     backticks).
 #   * Help (`gh pr close --help`) is allowed: --help/-h right after the group or
 #     the verb. The words are matched after dequoting, so `"gh" pr close` counts.
+#     A backtick becomes a `$` word, so a verb built by one is an unknown verb.
+#   * Known false denies (reads, one retry through the wrapper): `gh issue
+#     develop --list`, `gh codespace ssh|code|cp`, a read flag placed between
+#     the group and the verb that takes a value this guard does not know.
 # Lexical, like every rule here: a command that only MENTIONS a write is denied
 # (the accepted false positive above), and a command word built by expansion
 # (`$G pr close`) is not seen.
 FORGE_WRITE=$(printf '%s' "$CMD" | tr '\n\t' ';  ' | tr -d "'\"\\\\" | awk '
   BEGIN {
-    # Groups with no forge write: allowed whole.
-    split("auth config completion help version extension extensions ext search status browse attestation copilot ruleset preview org accessibility a11y licenses", a, " ")
-    for (x in a) AG["gh " a[x]] = 1
-    split("auth config completion help version check-update changelog user duo iteration mcp", a, " ")
-    for (x in a) AG["glab " a[x]] = 1
-    # READ allowlists: "|verb|" or "|verb subverb|". Every other verb writes.
-    RD["gh pr"] = "|list|view|status|checks|diff|checkout|"
-    RD["gh issue"] = "|list|view|status|"
-    RD["gh repo"] = "|list|view|clone|set-default|deploy-key list|autolink list|autolink view|gitignore list|gitignore view|license list|license view|"
-    RD["gh release"] = "|list|view|download|verify|verify-asset|"
-    RD["gh run"] = "|list|view|watch|download|"
-    RD["gh workflow"] = "|list|view|"
-    RD["gh label"] = "|list|"
-    RD["gh secret"] = "|list|"
-    RD["gh variable"] = "|list|get|"
-    RD["gh gist"] = "|list|view|clone|"
-    RD["gh cache"] = "|list|"
-    RD["gh project"] = "|list|view|field-list|item-list|"
-    RD["gh codespace"] = "|list|view|logs|"
+    # Groups (and group aliases) with no forge write: allowed whole.
+    AGS["gh"] = "auth config completion help version extension extensions ext search status browse attestation at ruleset rs preview org accessibility a11y licenses"
+    AGS["glab"] = "auth config completion help version check-update changelog user iteration work-items attestation"
+    for (c in AGS) { na = split(AGS[c], a, " "); for (x = 1; x <= na; x++) AG[c " " a[x]] = 1 }
+    # READ allowlists: "|verb|" or "|verb subverb|", verb aliases included.
+    # Every other verb of the group writes.
+    RD["gh pr"] = "|list|ls|view|status|checks|diff|checkout|co|"
+    RD["gh issue"] = "|list|ls|view|status|"
+    RD["gh repo"] = "|list|ls|view|clone|set-default|read-dir|read-file|deploy-key list|deploy-key ls|autolink list|autolink ls|autolink view|gitignore list|gitignore view|license list|license view|"
+    RD["gh release"] = "|list|ls|view|download|verify|verify-asset|"
+    RD["gh run"] = "|list|ls|view|watch|download|"
+    RD["gh workflow"] = "|list|ls|view|"
+    RD["gh label"] = "|list|ls|"
+    RD["gh secret"] = "|list|ls|"
+    RD["gh variable"] = "|list|ls|get|"
+    RD["gh gist"] = "|list|ls|view|clone|"
+    RD["gh cache"] = "|list|ls|"
+    RD["gh project"] = "|list|ls|view|field-list|item-list|"
+    RD["gh codespace"] = "|list|ls|view|logs|ports|"
     RD["gh cs"] = RD["gh codespace"]
-    RD["gh ssh-key"] = "|list|"
-    RD["gh gpg-key"] = "|list|"
-    RD["gh agent-task"] = "|list|view|"
-    RD["gh alias"] = "|list|delete|"
-    RD["glab mr"] = "|list|view|diff|checkout|issues|approvers|"
-    RD["glab issue"] = "|list|view|board view|"
-    RD["glab ci"] = "|list|view|status|trace|get|lint|config|artifact|"
-    RD["glab pipeline"] = RD["glab ci"]
+    RD["gh ssh-key"] = "|list|ls|"
+    RD["gh gpg-key"] = "|list|ls|"
+    RD["gh agent-task"] = "|list|ls|view|"
+    RD["gh agent-tasks"] = RD["gh agent-task"]; RD["gh agent"] = RD["gh agent-task"]; RD["gh agents"] = RD["gh agent-task"]
+    RD["gh discussion"] = "|list|ls|view|"
+    RD["gh skill"] = "|list|ls|preview|search|install|update|"
+    RD["gh skills"] = RD["gh skill"]
+    RD["gh alias"] = "|list|ls|delete|"
+    # Runs an agent that can write as the owner: no verb is a read.
+    RD["gh copilot"] = "|"
+    RD["glab mr"] = "|list|ls|view|show|diff|checkout|issues|approvers|note list|"
+    RD["glab issue"] = "|list|ls|view|show|board view|"
+    RD["glab ci"] = "|list|ls|view|status|trace|get|lint|config|artifact|"
+    RD["glab pipeline"] = RD["glab ci"]; RD["glab pipe"] = RD["glab ci"]
     RD["glab job"] = "|artifact|"
-    RD["glab release"] = "|list|view|download|"
-    RD["glab repo"] = "|list|view|clone|search|contributors|archive|"
-    RD["glab label"] = "|list|get|"
-    RD["glab variable"] = "|list|get|export|"
-    RD["glab snippet"] = "|list|view|"
-    RD["glab schedule"] = "|list|"
-    RD["glab milestone"] = "|list|get|"
-    RD["glab incident"] = "|list|view|"
-    RD["glab token"] = "|list|"
-    RD["glab deploy-key"] = "|list|get|"
-    RD["glab ssh-key"] = "|list|get|"
-    RD["glab gpg-key"] = "|list|get|"
-    RD["glab cluster"] = "|agent list|"
-    RD["glab stack"] = "|list|prev|next|first|last|move|create|save|amend|switch|"
-    RD["glab securefile"] = "|list|get|download|"
-    RD["glab alias"] = "|list|delete|"
+    RD["glab release"] = "|list|ls|view|download|"
+    RD["glab repo"] = "|list|ls|view|clone|search|contributors|archive|"
+    RD["glab project"] = RD["glab repo"]
+    RD["glab label"] = "|list|ls|get|"
+    RD["glab variable"] = "|list|ls|get|export|"
+    RD["glab var"] = RD["glab variable"]
+    RD["glab snippet"] = "|list|ls|view|"
+    RD["glab schedule"] = "|list|ls|"
+    RD["glab sched"] = RD["glab schedule"]; RD["glab skd"] = RD["glab schedule"]
+    RD["glab milestone"] = "|list|ls|get|"
+    RD["glab incident"] = "|list|ls|view|show|"
+    RD["glab token"] = "|list|ls|"
+    RD["glab deploy-key"] = "|list|ls|get|"
+    RD["glab ssh-key"] = "|list|ls|get|"
+    RD["glab gpg-key"] = "|list|ls|get|"
+    RD["glab cluster"] = "|agent list|graph|"
+    RD["glab stack"] = "|list|ls|prev|next|first|last|move|create|save|amend|switch|"
+    RD["glab stacks"] = RD["glab stack"]
+    RD["glab securefile"] = "|list|ls|show|get|download|"
+    RD["glab runner"] = "|list|ls|jobs|managers|"
+    RD["glab runner-controller"] = "|list|ls|get|scope list|token list|"
+    RD["glab opentofu"] = "|init|state list|state download|"
+    RD["glab todo"] = "|list|ls|"
+    RD["glab alias"] = "|list|ls|delete|"
+    # duo cli and mcp serve run an agent or a server that can write as the owner.
+    RD["glab duo"] = "|ask|"
+    RD["glab mcp"] = "|"
   }
   function valued(x) { return x == "-R" || x == "--repo" || x == "--hostname" }
+  # unread(v): a field value this guard cannot read: from a file (=@f), or a
+  # GraphQL query built by expansion (`query=$Q`, `query=$(cat f)`, backticks).
+  function unread(v) { return v ~ /=@/ || v ~ /(^|[^A-Za-z0-9_])query=.*[$]/ }
   function api_write(s,    k, x, m, method, field, ovr, ep, fromfile) {
     method = ""; field = 0; ovr = 0; ep = ""; fromfile = 0
     for (k = s; k <= n; k++) {
@@ -473,11 +510,11 @@ FORGE_WRITE=$(printf '%s' "$CMD" | tr '\n\t' ';  ' | tr -d "'\"\\\\" | awk '
       }
       if (x == "-H" || x == "--header") { if (tolower(t[k + 1]) ~ /x-(http-)?method/) ovr = 1; k++; continue }
       if ((x ~ /^--header=/ || x ~ /^-H/) && tolower(x) ~ /x-(http-)?method/) { ovr = 1; continue }
-      if (x == "-q" || x == "--jq" || x == "-t" || x == "--template" || x == "-p" || x == "--preview" || valued(x)) { k++; continue }
+      if (x == "-q" || x == "--jq" || x == "-t" || x == "--template" || x == "-p" || x == "--preview" || x == "--cache" || x == "--output" || valued(x)) { k++; continue }
       if (x == "--input") { field = 1; fromfile = 1; k++; continue }
       if (x ~ /^--input=/) { field = 1; fromfile = 1; continue }
-      if (x == "-f" || x == "-F" || x == "--field" || x == "--raw-field") { field = 1; if (t[k + 1] ~ /=@/) fromfile = 1; k++; continue }
-      if (x ~ /^--(raw-)?field=/ || (x ~ /^-[A-Za-z]*[fF]/ && x !~ /^--/)) { field = 1; if (x ~ /=@/) fromfile = 1; continue }
+      if (x == "-f" || x == "-F" || x == "--field" || x == "--raw-field" || x == "--form") { field = 1; if (unread(t[k + 1])) fromfile = 1; k++; continue }
+      if (x ~ /^--(raw-field|field|form)=/ || (x ~ /^-[A-Za-z]*[fF]/ && x !~ /^--/)) { field = 1; if (unread(x)) fromfile = 1; continue }
       if (x ~ /^-/) continue
       if (ep == "") ep = x
     }
@@ -514,7 +551,12 @@ FORGE_WRITE=$(printf '%s' "$CMD" | tr '\n\t' ';  ' | tr -d "'\"\\\\" | awk '
   {
     MUT = (tolower($0) ~ /(^|[^a-z0-9_])mutation([^a-z0-9_]|$)/)
     s = $0
-    gsub(/[;&|()`{}]/, "\n", s)
+    # A backtick opens or closes a substitution: it becomes a `$` word, so a
+    # verb built by one (gh pr `printf close`) reads as `$` (an unknown verb:
+    # denied) and a command inside one is still split into its own words.
+    # Braces are NOT separators: `repos/{owner}/{repo}` is one word.
+    gsub(/`/, "$ ", s)
+    gsub(/[;&|()]/, "\n", s)
     nseg = split(s, seg, "\n")
     for (q = 1; q <= nseg; q++) {
       n = split(seg[q], t, " ")
@@ -526,6 +568,7 @@ if [ -n "$FORGE_WRITE" ]; then
   _grp=$(printf '%s' "$FORGE_WRITE" | cut -f2)
   _verb=$(printf '%s' "$FORGE_WRITE" | cut -f3)
   _reads=$(printf '%s' "$FORGE_WRITE" | cut -f4 | sed -E 's/^\|//; s/\|$//; s/\|/, /g')
+  [ -n "$_reads" ] || _reads='none; it runs an agent or a server that can write as the owner'
   if [ "$_cli" = gh ]; then _who='GitHub records it as the machine owner (CJPoll), not athena-harness[bot]'
   else _who='GitLab records it as the machine owner, not athena-amby'; fi
   _esc='If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'"'"'t be done as Athena").'

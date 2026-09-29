@@ -453,6 +453,89 @@ allow_each "R4 wrappers and prose" \
   '~/dev/custom/ai/bin/glab-athena api -X POST projects/:id/issues -f title=x' \
   'echo the gh CLI is fine' 'ls ~/dev/gh-pages' 'git log --oneline -3'
 
+echo "--- DND-1179 review round: writes that passed, reads that were denied ---"
+deny_each "X1 placeholder braces stay inside the word" \
+  'gh api repos/{owner}/{repo}/issues -f title=x -f body=y' \
+  'gh api repos/{owner}/{repo}/pulls/3/reviews -f event=APPROVE' \
+  'gh pr {close,} 1'
+deny_each "X2 group aliases" \
+  'glab var set FOO bar' 'glab project delete o/r' 'glab project update --description x' \
+  'glab pipe run' 'glab pipeline cancel 5' 'glab stacks sync' 'glab sched create' \
+  'glab skd run 1' 'gh agent create x' 'gh agents create x' 'gh agent-tasks create x' \
+  'gh cs delete x'
+deny_each "X3 groups the first pass missed" \
+  'gh discussion create' 'gh discussion comment 1' 'gh discussion edit 1' 'gh skill publish' \
+  'gh skills publish' 'glab runner delete 1' 'glab runner pause 1' 'glab runner update 1' \
+  'glab opentofu state delete x' 'glab opentofu state lock x' 'glab todo done 3' \
+  'glab runner-controller create' 'glab runner-controller token rotate 1' \
+  'gh copilot -p fix-it' 'glab mcp serve' 'glab duo cli'
+deny_each "X4 glab api --form POSTs" \
+  'glab api projects/:id/uploads --form file=@x.png' \
+  'glab api projects/:id/issues --form title=x' \
+  'glab api projects/:id/issues --form=title=x'
+deny_each "X5 a graphql query this guard cannot read" \
+  "gh api graphql -f query=\"\$(cat m.graphql)\"" \
+  "gh api graphql -f query=\"\$Q\"" \
+  "glab api graphql -f query=\"\`cat m.graphql\`\""
+deny_each "X6 backticks" \
+  'gh pr `printf close` 1' \
+  'echo `gh pr close 5`'
+allow_each "Y1 verb aliases and reads the first pass denied" \
+  'gh pr ls' 'gh pr co 5' 'gh issue ls' 'gh repo ls' 'gh run ls' 'gh workflow ls' \
+  'gh release ls' 'gh label ls' 'gh secret ls' 'gh variable ls' 'gh gist ls' 'gh cache ls' \
+  'gh project ls' 'gh repo read-file README.md' 'gh discussion list' 'gh discussion view 1' \
+  'gh rs ls' 'gh cs ls' 'gh codespace ports' 'gh skill search x' \
+  'glab mr ls' 'glab mr show 3' 'glab issue ls' 'glab issue show 3' 'glab incident show 1' \
+  'glab var ls' 'glab var get X' 'glab project view' 'glab pipe list' 'glab mr note list 3' \
+  'glab cluster graph' 'glab runner list' 'glab todo list' 'glab duo ask what' \
+  'glab opentofu state list' 'glab stacks list' 'glab work-items list'
+allow_each "Y2 api reads with valued flags and placeholders" \
+  'gh api --cache 1h graphql -f query=x' 'gh api --cache=1h graphql -f query=x' \
+  'glab api --output json projects/:id' 'gh api repos/{owner}/{repo}/pulls' \
+  'echo `gh pr view 5`'
+
+echo "--- DND-1179: every installed gh/glab command group is classified ---"
+# A group the hook does not know is ALLOWED (it reads as prose), so a CLI
+# upgrade that adds a group with a write verb would fail open. This turns it red.
+KNOWN=$( { grep -oE 'RD\["(gh|glab) [a-z0-9-]+"\]' "$HOOK" | sed -E 's/^RD\["//; s/"\]$//'
+  sed -nE 's/^[[:space:]]*AGS\["(gh|glab)"\] = "([^"]*)".*/\1 \2/p' "$HOOK" |
+    while read -r _c _rest; do for _w in $_rest; do echo "$_c $_w"; done; done
+  echo 'gh api'; echo 'glab api'; } | sort -u)
+unclassified() {
+  while read -r _n; do
+    [ -n "$_n" ] || continue
+    printf '%s\n' "$KNOWN" | grep -qxF -- "$1 $_n" || printf '%s ' "$_n"
+  done
+}
+if command -v gh >/dev/null 2>&1; then
+  GH_GROUPS=$(gh --help 2>/dev/null | awk '
+    /^[A-Z][A-Z ]*COMMANDS$/ { on = ($0 !~ /ALIAS|EXTENSION/); next }
+    /^$/ { on = 0 }
+    on && /^  [a-z0-9-]+:/ { sub(/^  /, ""); sub(/:.*/, ""); print }')
+  GH_ALL=$(for _g in $GH_GROUPS; do echo "$_g"; gh "$_g" --help 2>/dev/null | awk '
+    /^ALIASES$/ { on = 1; next } /^$/ { on = 0 }
+    on { gsub(/,/, " "); for (i = 1; i <= NF; i++) if ($i != "gh") print $i }'; done)
+  _miss=$(printf '%s\n' "$GH_ALL" | unclassified gh)
+  if [ -n "$GH_GROUPS" ] && [ -z "$_miss" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  K1. every gh %s group and group alias is classified (%s names)\n' "$(gh --version | awk 'NR==1{print $3}')" "$(printf '%s\n' "$GH_ALL" | grep -c .)"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  K1. gh groups not classified in the hook: [%s] (parsed %s names from gh --help). Fix: in forge-identity-guard.sh add RD["gh <group>"] with its read verbs (every other verb is denied), or add it to AGS["gh"] if it has no forge write.\n' "$_miss" "$(printf '%s\n' "$GH_ALL" | grep -c .)"
+  fi
+else
+  echo "  NOTE  K1. gh is not on PATH: gh group coverage NOT measured here"
+fi
+if command -v glab >/dev/null 2>&1; then
+  GL_ALL=$(glab __complete '' 2>/dev/null | awk -F '\t' '/^[a-z0-9-]+\t/ { print $1 }')
+  _miss=$(printf '%s\n' "$GL_ALL" | unclassified glab)
+  if [ -n "$GL_ALL" ] && [ -z "$_miss" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  K2. every glab %s group is classified (%s names; group aliases are not listed by glab and are kept by hand)\n' "$(glab --version | awk 'NR==1{print $2}')" "$(printf '%s\n' "$GL_ALL" | grep -c .)"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  K2. glab groups not classified in the hook: [%s] (parsed %s names from glab __complete). Fix: in forge-identity-guard.sh add RD["glab <group>"] with its read verbs, or add it to AGS["glab"] if it has no forge write.\n' "$_miss" "$(printf '%s\n' "$GL_ALL" | grep -c .)"
+  fi
+else
+  echo "  NOTE  K2. glab is not on PATH: glab group coverage NOT measured here"
+fi
+
 echo
 echo "--- DND-577: the 2026-09-24 incident — a plain push is STOPPED, not warned about ---"
 
