@@ -771,13 +771,17 @@ rm -f "${TMP}/critic-fifo"
 # DND-986: a CARRIED critic PASS (critic-review found an identical change that
 # already passed, and recorded a schema-2 receipt naming it) is a present
 # verdict. The OK line and the receipt must NAME it, so a post-merge defect can
-# be traced to a carry. record_carried forges the on-disk schema-2 shape.
-record_carried() { # <repo dir> <carried_from sha> [sha] [schema]
+# be traced to a carry. record_carried forges the on-disk schema-2 shape. Its
+# merge_base is the REAL merge base of main and the head unless a fifth argument
+# names another commit: the gate checks that the judged diff covers the target
+# (case c32g), so a fake SHA there is no longer filler.
+record_carried() { # <repo dir> <carried_from sha> [sha] [schema] [merge_base]
   ( cd "$1" && sha="${3:-$(git rev-parse HEAD)}" \
+    && mb="${5:-$(git merge-base main "$sha")}" \
     && d="$(git rev-parse --git-path critic-verdicts)" && mkdir -p "$d" \
-    && jq -n --arg sha "$sha" --arg src "$2" --argjson schema "${4:-2}" \
+    && jq -n --arg sha "$sha" --arg src "$2" --argjson schema "${4:-2}" --arg mb "$mb" \
          '{schema:$schema, tool:"critic-review", sha:$sha, base:"main", verdict:"pass", findings:[],
-           dirty:false, at:"2026-09-27T00:00:00Z", merge_base:("a"*40), patch_id:("b"*40),
+           dirty:false, at:"2026-09-27T00:00:00Z", merge_base:$mb, patch_id:("b"*40),
            diff_digest:("c"*64), msgs_digest:("d"*64), judge_digest:("e"*64),
            carried_from:(if $src == "" then null else $src end),
            carried_receipt:(if $src == "" then null else "/x/\($src).json" end)}' > "${d}/${sha}.json" )
@@ -864,6 +868,50 @@ stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
 record_carried "$R" "not-a-sha"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 3 ] && ok "c32 F4b malformed carried_from: exit 3" || bad "c32 F4b expected exit 3, got $rc" "$out"
+
+# c32g A PASS JUDGED AGAINST A NARROWER BASE does not cover the target. The
+# receipt's merge_base is a stacked parent branch that is not on main, so the
+# judged diff (parent..head) omits the parent's own commits, which the
+# integrated diff (main..head) contains. Measured 2026-09-29 (gen_saas
+# DND-1185): a captain's `critic-review --base <parent>` PASS was reused by
+# `integration-gate --with-critic` (target origin/main), which printed
+# INTEGRATION OK, while a whole-stack run of the same judge had found real gaps
+# in the parent commits. The same receipt still gates against the parent it
+# was judged on, and a PASS judged against an OLDER main (an ancestor of the
+# target) is a superset review, so it covers the newer target.
+R="${TMP}/c32g"; new_repo "$R"
+( cd "$R" && git checkout -qb parent && echo p > p.txt && git add p.txt && git commit -qm parent \
+  && git checkout -qb child && echo c > c.txt && git add c.txt && git commit -qm child )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+parent_sha="$( cd "$R" && git rev-parse parent )"
+record_carried "$R" "" "" 2 "$parent_sha"
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && grep -q 'does not cover' <<<"$out" && grep -q 'Fix:' <<<"$out" \
+  && ok "c32g PASS judged against a stacked parent: exit 3, names the coverage gap" \
+  || bad "c32g expected exit 3 naming 'does not cover', got $rc" "$out"
+[ -e "$rf" ] && bad "c32g an integration receipt was written" "$(cat "$rf")" || ok "c32g no integration receipt written"
+out="$( cd "$R" && "$GATE" --target parent --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c32g the same PASS gates green against the parent it was judged on" \
+  || bad "c32g expected exit 0 with --target parent, got $rc" "$out"
+( cd "$R" && git checkout -q main && echo u > u.txt && git add u.txt && git commit -qm upstream \
+  && git checkout -q child && git merge -q --no-edit main )
+old_main="$( cd "$R" && git rev-parse main~1 )"
+record_carried "$R" "" "" 2 "$old_main"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c32g a PASS judged against an OLDER main covers the newer target" \
+  || bad "c32g expected exit 0 for an ancestor merge_base, got $rc" "$out"
+# c32h the DND-1185 path itself: --with-critic must RE-RUN the judge against
+# the target rather than reuse the narrow PASS, and its verdict decides.
+R="${TMP}/c32h"; new_repo "$R"
+( cd "$R" && git checkout -qb parent && echo p > p.txt && git add p.txt && git commit -qm parent \
+  && git checkout -qb child && echo c > c.txt && git add c.txt && git commit -qm child )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_carried "$R" "" "" 2 "$( cd "$R" && git rev-parse parent )"
+out="$(wc_gate "$R" "${TMP}/critic-block" "${R}/g.sh")"; rc=$?
+[ "$rc" -eq 3 ] && ! grep -q 'a PASS is already recorded' <<<"$out" && grep -q 'critic-review: BLOCKED' <<<"$out" \
+  && ok "c32h --with-critic re-judges against the target instead of reusing a narrow PASS" \
+  || bad "c32h expected a fresh judge run and exit 3, got $rc" "$out"
 
 # F5 --with-critic (DND-1010) on a rebased, unchanged branch: the judge the
 # gate runs beside itself is critic-review's own writer, so it carries the

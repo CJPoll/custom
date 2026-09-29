@@ -98,6 +98,15 @@ USAGE = <<~TXT.freeze
                                            / could-not-look -- each named).
                                            Searches every checkout (main and
                                            worktrees) of the current repo.
+    ai/bin/critic-review --verdict-for SHA --covering REF
+                                           as above, and a PASS counts only if
+                                           the diff it judged covers REF..SHA:
+                                           its recorded merge base must be REF
+                                           or an ancestor of it. A PASS judged
+                                           against a narrower base (a stacked
+                                           parent not on REF) is exit 3. A
+                                           legacy schema-1 receipt records no
+                                           merge base and is not checked.
     ai/bin/critic-review --self-test       verify the decision, parser, and the
                                            receipt writer+reader (no model)
     ai/bin/critic-review --help            this text (never invokes the model)
@@ -124,7 +133,7 @@ TXT
 # This is the CLI-argument instance of ~/dev/custom/CLAUDE.md -> "A failed
 # lookup must never look like an empty one": an unrecognised key must not
 # resolve to the most expensive default action and report nothing about it.
-VALUE_FLAGS = %w[--base --verdict-for].freeze
+VALUE_FLAGS = %w[--base --verdict-for --covering].freeze
 BOOL_FLAGS  = %w[--self-test --help -h --no-carry].freeze
 
 # -> nil when argv is well-formed, else a one-line reason.
@@ -151,6 +160,9 @@ def usage_error(argv)
   # honoured, so the combination is refused.
   if argv.include?("--no-carry") && (argv.include?("--verdict-for") || argv.include?("--self-test"))
     return "--no-carry applies only to a review run, not to --verdict-for or --self-test."
+  end
+  if argv.include?("--covering") && !argv.include?("--verdict-for")
+    return "--covering applies only to --verdict-for."
   end
   nil
 end
@@ -411,9 +423,34 @@ def own_store
   File.join(File.realpath(File.dirname(dir)), File.basename(dir))
 end
 
+# Does a PASS receipt's judged diff cover <target>..<sha>? The judged diff is
+# merge_base..sha, so it covers the target when merge_base IS the target or an
+# ancestor of it (an older main is a superset review). A merge_base off the
+# target -- a stacked parent branch -- leaves that parent's own commits
+# unjudged, though the integrated diff contains them. Measured 2026-09-29
+# (gen_saas DND-1185): a `--base <parent>` PASS was reused by integration-gate
+# against origin/main and printed INTEGRATION OK, while a whole-stack run of the
+# same judge had found real gaps in the parent commits.
+#
+# -> nil when covered (or the receipt is legacy schema 1, which records no
+# merge base and was never checked), else [3, :err, lines].
+def coverage_refusal(sha, data, full, covering)
+  mb = data["merge_base"]
+  return nil if mb.nil? && data["schema"].to_i < 2
+  unless mb.to_s.match?(CriticCarry::SHA40)
+    return [3, :err, ["critic-review: the PASS for #{sha} records no usable merge_base (#{mb.inspect}), so it cannot show it judged everything since #{covering}.",
+                      "  Fix: re-run ~/dev/custom/ai/bin/critic-review --base <target> at #{sha} in the Mission's worktree. A PASS that cannot name what it judged does not cover the target."]]
+  end
+  _o, _e, st = Open3.capture3("git", "merge-base", "--is-ancestor", mb, covering)
+  return nil if st.success?
+  [3, :err, ["critic-review: the PASS for #{sha} does not cover #{covering}: it judged #{mb[0, 12]}..#{sha[0, 12]} (base #{data['base']}; receipt #{full}), and #{mb[0, 12]} is not #{covering[0, 12]} or an ancestor of it, so commits in the integrated diff were never judged.",
+             "  Fix: run ~/dev/custom/ai/bin/critic-review --base <target> at #{sha} in the Mission's worktree (integration-gate --with-critic does this for you). A PASS judged against a stacked parent covers only that branch's own commits."]]
+end
+
 # Judge ONE receipt. Pure: returns [code, stream, lines] and prints nothing,
 # so several stores' receipts can be compared before anything is said.
-def judge_receipt(sha, full)
+# covering: nil, or a resolved 40-hex SHA a PASS must cover (coverage_refusal).
+def judge_receipt(sha, full, covering = nil)
   data = begin
     JSON.parse(File.read(full))
   rescue StandardError => e
@@ -444,6 +481,9 @@ def judge_receipt(sha, full)
   end
   case data["verdict"]
   when "pass"
+    if covering && (refusal = coverage_refusal(sha, data, full, covering))
+      return refusal
+    end
     # The bracketed tokens are the machine-readable contract integration-gate
     # reads (DND-986); the prose around them may change, the tokens may not.
     token = carried ? " [critic-carried-from=#{carried}]" : ""
@@ -476,11 +516,24 @@ end
 # Precedence: this checkout's own receipt wins (it is the one this checkout's
 # own runs overwrite). Otherwise every other store is read; receipts that
 # DISAGREE are an error naming each one, never a pick.
-def verdict_for(sha)
+def verdict_for(sha, covering_ref = nil)
   unless sha.to_s =~ /\A[0-9a-f]{7,40}\z/
     warn "critic-review: --verdict-for needs a commit SHA (got #{sha.inspect})."
     warn "  Fix: pass the 40-char SHA of the head you intend to merge, e.g. --verdict-for $(git rev-parse HEAD)."
     return 3
+  end
+  # Resolving the coverage key is its own step: a ref that does not resolve is
+  # an ERROR, never "nothing to check" (ai/CLAUDE.md -> "A failed lookup must
+  # never look like an empty one").
+  covering = nil
+  if covering_ref
+    out, _e, st = Open3.capture3("git", "rev-parse", "--verify", "-q", "#{covering_ref}^{commit}")
+    covering = out.strip
+    unless st.success? && covering.match?(CriticCarry::SHA40)
+      warn "critic-review: COULD NOT LOOK — --covering #{covering_ref.inspect} does not resolve to a commit here."
+      warn "  Fix: pass a ref or SHA this checkout has (fetch it first), e.g. --covering origin/main. An unresolvable target is an ERROR, never a pass."
+      return 3
+    end
   end
   common, why = git_common_dir
   stores, why = verdict_stores(common) unless why
@@ -529,12 +582,12 @@ def verdict_for(sha)
 
   own_hit = own && hits.find { |p| File.dirname(p) == own }
   if own_hit
-    code, stream, lines = judge_receipt(sha, own_hit)
+    code, stream, lines = judge_receipt(sha, own_hit, covering)
     say(stream, lines)
     return code
   end
 
-  judged = hits.map { |p| [p, *judge_receipt(sha, p)] }
+  judged = hits.map { |p| [p, *judge_receipt(sha, p, covering)] }
   codes = judged.map { |j| j[1] }
   if codes.uniq.size > 1
     # A recorded BLOCK anywhere keeps its exit 2, so integration-gate's
@@ -1156,6 +1209,59 @@ def run_receipt_self_test
       ok &&= err.include?("Fix:")
     end
   end
+
+  # (cov) --covering: a PASS counts only if its judged diff (merge_base..sha)
+  # covers the target. The DND-1185 miss: a PASS judged against a stacked parent
+  # that is not on the target read as a PASS for the whole integrated diff.
+  Dir.mktmpdir("critic-review-cov-") do |repo|
+    Dir.chdir(repo) do
+      sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
+      commit = lambda do |f|
+        File.write(f, "#{f}\n")
+        sh.call("git", "add", "-A")
+        sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qm", f)
+        head_sha
+      end
+      sh.call("git", "init", "-q", "-b", "trunk", ".")
+      sh.call("git", "config", "user.email", "t@example.invalid")
+      sh.call("git", "config", "user.name", "t")
+      root = commit.call("root")
+      sh.call("git", "checkout", "-qb", "parent")
+      parent = commit.call("parent")
+      sh.call("git", "checkout", "-qb", "child")
+      sha = commit.call("child")
+      dir = verdict_dir
+      FileUtils.mkdir_p(dir)
+      receipt = lambda do |mb, schema = 2|
+        r = { "schema" => schema, "tool" => "critic-review", "sha" => sha, "base" => "x", "verdict" => "pass",
+              "findings" => [], "dirty" => false, "at" => "2026-09-29T00:00:00Z" }
+        r["merge_base"] = mb if schema >= 2
+        File.write(File.join(dir, "#{sha}.json"), JSON.generate(r))
+      end
+      read = ->(cov) { capture_err { capture_out { verdict_for(sha, cov) }[0] } }
+      receipt.call(parent)
+      code, err = read.call("trunk")
+      check_cov = lambda { |name, cond| ok &&= cond; warn "  FAIL #{name}" unless cond }
+      check_cov.call("cov1 narrow-base PASS does not cover trunk", code == 3 && err.include?("does not cover") && err.include?("Fix:"))
+      code, = read.call("parent")
+      check_cov.call("cov2 the same PASS covers the parent it was judged on", code == 0)
+      code, = read.call(nil)
+      check_cov.call("cov3 no --covering keeps the old reading", code == 0)
+      receipt.call(root)
+      code, = read.call("trunk")
+      check_cov.call("cov4 an ancestor merge_base covers the target", code == 0)
+      receipt.call(nil, 1)
+      code, = read.call("trunk")
+      check_cov.call("cov5 a legacy schema-1 PASS is not checked", code == 0)
+      receipt.call("zz")
+      code, err = read.call("trunk")
+      check_cov.call("cov6 a schema-2 PASS with no usable merge_base is refused", code == 3 && err.include?("Fix:"))
+      receipt.call(parent)
+      code, err = read.call("no-such-ref")
+      check_cov.call("cov7 an unresolvable --covering is COULD NOT LOOK", code == 3 && err.include?("COULD NOT LOOK"))
+    end
+  end
+  ok &&= (usage_error(["--covering", "main"]) == "--covering applies only to --verdict-for.")
 
   Dir.mktmpdir("critic-review-repo-") do |repo|
     Dir.chdir(repo) do
@@ -2676,7 +2782,8 @@ def main(argv)
   return run_self_test if argv.include?("--self-test")
 
   if (idx = argv.index("--verdict-for"))
-    return verdict_for(argv[idx + 1].to_s)
+    cov = (c = argv.index("--covering")) ? argv[c + 1].to_s : nil
+    return verdict_for(argv[idx + 1].to_s, cov)
   end
 
   run(argv)

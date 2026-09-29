@@ -340,7 +340,10 @@ run warns and the OK line says `EDITED BY THIS BRANCH` — review that diff.
 
 **Run the judge beside the gate: `integration-gate --with-critic`.** It starts
 `critic-review --base <target>` on this head concurrently with the gate, unless
-a PASS is already recorded for it. It joins the judge even on a RED gate, so
+a PASS that covers the target is already recorded for it. A PASS covers the
+target when the base it was judged against is the target or an ancestor of it;
+one judged against a stacked parent covers only that branch's commits, so the
+gate re-judges (and without the flag, refuses it, exit 3). It joins the judge even on a RED gate, so
 one round returns both sets of findings, then reads the verdict exactly as
 without the flag. Use it for a captain's final check and after every rebase:
 a new SHA needs both a new gate and a new verdict. It changes the wall time,

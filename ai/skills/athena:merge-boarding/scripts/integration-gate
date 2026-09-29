@@ -105,8 +105,10 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    changes the gate script itself.
   --no-fetch       skip the fetch; compare against the target ref as-is
   --with-critic    also run the standing judge (critic-review --base <target>)
-                   on this head, CONCURRENTLY with the gate, unless a PASS is
-                   already recorded for it. It is joined before the verdict
+                   on this head, CONCURRENTLY with the gate, unless a PASS
+                   covering the target is already recorded for it (critic-review
+                   --verdict-for --covering: a PASS judged against a stacked
+                   parent does not cover the target and is re-judged). It is joined before the verdict
                    step, which then reads the judge's receipt exactly as
                    without the flag, so wall time is max(gate, critic), not
                    the sum. On a RED gate the judge is still joined, so one
@@ -363,7 +365,7 @@ if [ "$IN_SLOT" -eq 0 ]; then
     if [ "$WITH_CRITIC" -eq 1 ]; then
       require_critic_tools
       fetch_target
-      if ! "$CRITIC" --verdict-for "$HEAD0" >/dev/null 2>&1; then
+      if ! "$CRITIC" --verdict-for "$HEAD0" --covering "$TARGET" >/dev/null 2>&1; then
         start_critic "$HEAD0"
         export INTEGRATION_GATE_PRESTARTED_CRITIC="${CRITIC_PGID} ${HEAD0} ${CRITIC_LOG}"
       fi
@@ -835,7 +837,7 @@ if [ "$WITH_CRITIC" -eq 1 ]; then
       echo "${PROG}: --with-critic: stopped the judge started on ${PRE_SHA:0:12} before the slot wait; the head is now $(short "$HEAD_SHA")"
     fi
     [ -n "$PRE_LOG" ] && rm -f "$PRE_LOG" 2>/dev/null
-    if "$CRITIC" --verdict-for "$HEAD_SHA" >/dev/null 2>&1; then
+    if "$CRITIC" --verdict-for "$HEAD_SHA" --covering "$TARGET_SHA" >/dev/null 2>&1; then
       echo "${PROG}: --with-critic: a PASS is already recorded for $(short "$HEAD_SHA"); the judge is not re-run."
     else
       start_critic "$HEAD_SHA"
@@ -912,7 +914,7 @@ if [ ! -x "$CRITIC" ]; then
   echo "Fix: run this script from its committed path under ~/dev/custom so the judge's verdict reader resolves. A judge that cannot be found is an ERROR, never a pass -- and --critic-override does NOT apply here, because with no reader 'no BLOCK recorded' cannot be told apart from 'nothing was read'." >&2
   exit 3
 fi
-VERDICT_OUT="$("$CRITIC" --verdict-for "$HEAD_SHA" 2>&1)"
+VERDICT_OUT="$("$CRITIC" --verdict-for "$HEAD_SHA" --covering "$TARGET_SHA" 2>&1)"
 VERDICT_RC=$?
 # Same streams as before: the reader's PASS line on stdout, everything else on
 # stderr. It is captured only so the override can NAME the state it overrode.
