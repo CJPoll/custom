@@ -406,7 +406,7 @@ done
 # ships: for each known command group, a READ allowlist (RD below); any other
 # verb of that group is a write and is denied. `api` is judged by its method (below). The specific rules above run
 # first, so a create, a merge or a ref write keeps its own Fix.
-#   * Known groups: every group and group alias of gh 2.96 / glab 1.92. A group
+#   * Known groups: every group and group alias of gh 2.96 / glab 1.112. A group
 #     with a write verb has a READ allowlist (RD); one that cannot write to the
 #     forge (help, config, search, …; and `auth`, forge-auth-guard's domain) is
 #     ALLOWED whole (AGS). Verb aliases (`ls`, `co`, `show`) are in RD too.
@@ -444,7 +444,7 @@ FORGE_WRITE=$(printf '%s\n' "$CMD" | awk '
   BEGIN {
     # Groups (and group aliases) with no forge write: allowed whole.
     AGS["gh"] = "auth config completion help version extension extensions ext search status browse attestation at ruleset rs preview org accessibility a11y licenses"
-    AGS["glab"] = "auth config completion help version check-update changelog user iteration work-items attestation"
+    AGS["glab"] = "auth config completion help version check-update changelog user iteration work-items attestation whatsnew"
     for (c in AGS) { na = split(AGS[c], a, " "); for (x = 1; x <= na; x++) AG[c " " a[x]] = 1 }
     # READ allowlists: "|verb|" or "|verb subverb|", verb aliases included.
     # Every other verb of the group writes.
@@ -504,6 +504,16 @@ FORGE_WRITE=$(printf '%s\n' "$CMD" | awk '
     # duo cli and mcp serve run an agent or a server that can write as the owner.
     RD["glab duo"] = "|ask|"
     RD["glab mcp"] = "|"
+    # glab 1.112 groups. dependency-firewall configure writes a local package
+    # manager config, not the forge. orbit setup/local and skills install/update
+    # install a binary or agent skills on this machine: denied, like duo cli.
+    RD["glab container-registry"] = "|repository list|repository ls|repository view|tag list|tag ls|tag view|"
+    RD["glab dependency-firewall"] = "|ci-summary|configure|"
+    RD["glab orbit"] = "|remote dsl|remote graph-status|remote query|remote schema|remote status|remote tools|"
+    RD["glab packages"] = "|list|ls|download|"
+    RD["glab search"] = "|semantic|"
+    RD["glab security"] = "|config status|"
+    RD["glab skills"] = "|list|"
   }
   function valued(x) { return x == "-R" || x == "--repo" || x == "--hostname" }
   # unread(v): a field value this guard cannot read: from a file (=@f), or a

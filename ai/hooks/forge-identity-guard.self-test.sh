@@ -469,6 +469,16 @@ deny_each "X3 groups the first pass missed" \
   'glab opentofu state delete x' 'glab opentofu state lock x' 'glab todo done 3' \
   'glab runner-controller create' 'glab runner-controller token rotate 1' \
   'gh copilot -p fix-it' 'glab mcp serve' 'glab duo cli'
+deny_each "X3b glab 1.112 groups (K2 found them unclassified)" \
+  'glab container-registry tag delete 1 latest' 'glab container-registry repository delete 1' \
+  'glab packages delete 5' 'glab packages upload f --name n --version 1' \
+  'glab security config enable sast' 'glab security config disable sast' \
+  'glab orbit setup' 'glab orbit local' 'glab skills install' 'glab skills update'
+allow_each "Y1b glab 1.112 reads" \
+  'glab container-registry repository list' 'glab container-registry tag list 1' \
+  'glab packages list' 'glab packages download --name n --version 1 --filename f' \
+  'glab security config status sast' 'glab orbit remote status' 'glab search semantic x' \
+  'glab skills list' 'glab dependency-firewall ci-summary' 'glab whatsnew'
 deny_each "X4 glab api --form POSTs" \
   'glab api projects/:id/uploads --form file=@x.png' \
   'glab api projects/:id/issues --form title=x' \
