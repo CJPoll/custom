@@ -1462,7 +1462,8 @@ source.
    `gitlab:<hook_id>:<delivery id>:<kind>`, where the delivery id is GitLab's
    `Idempotency-Key` (stable across GitLab's own retries of one trigger), else
    its `X-Gitlab-Event-UUID`, each only when it is a UUID; with neither it is
-   `<entity_id>:<kind>:<revision>`. The ingress routes each key once, so a
+   `<entity_id>:<kind>:<revision>`. The ingress routes each key once, through
+   the event store's seen-check (*Idempotency is per (event, rule)*), so a
    redelivery converges on the first event. A key is compared whole and
    never split, and both shapes are unambiguous although `:` is their
    separator: every component except the last is checked free of `:` where
@@ -1509,9 +1510,44 @@ lookup) is logged, throttled, and recorded against no owner.
 
 Delivery is **at-least-once**: the platform delivers every matched `(event, rule)`
 at least once, carrying **current enriched state**, and **never silently drops** a
-matched delivery. The platform holds **no** durable idempotency-key store and
-performs **no** content dedupe; it retains only transient in-flight retry state
-(deliver → await ack → retry until acked or terminally FAILED).
+matched delivery. The platform performs **no** content dedupe, and its retry
+state is transient in-flight state (deliver → await ack → retry until acked or
+terminally FAILED).
+
+The one durable key is the event row's `idempotency_key`. The event store
+persists it with every routed event, under no uniqueness constraint. An
+ingress MAY opt into the store's **seen-check** on it. Inside one transaction
+the ingress takes an advisory lock on (owner, `idempotency_key`), asks whether
+an event with the same (owner, `type`, `idempotency_key`) is already stored,
+and routes only if none is. A stored one answers duplicate and routes nothing,
+so two concurrent or repeated arrivals of one source event cannot both route.
+A route that fails rolls back, leaves no row, and a later arrival routes
+again. Three ingresses opt in:
+
+- `slack.interaction.received`, for a click that claims nothing (anyone
+  else's, or the owner's on a non-terminal button), so a repeated delivery of
+  one click routes once (DND-290, DND-549). The owner's terminal click takes
+  the message's claim instead, and does not use the seen-check;
+- `slack.message.received`, so a Slack retry of one message routes once
+  (DND-437);
+- the `forge.review.*` family, so a GitLab redelivery routes once (DND-439;
+  its key is in *Declared families beyond the first pass*).
+
+Every other family, and every other path, routes each arrival. The seen-check runs before routing, so
+it never dedupes a retry of a delivery. Delivery stays at-least-once for every
+family, the opted-in ones included, and the consumer rule below binds them all.
+
+**Later (2026-09-29):** this section said "The platform holds **no** durable
+idempotency-key store and performs **no** content dedupe". Superseded: gen_saas
+has had the opt-in seen-check since DND-290 (`a1024992`, 2026-09-24):
+`Athena.Events.EventStore.idempotency_key_seen?/3` behind
+`lock_idempotency_key/2`, called by
+`Athena.SlackInteractions.Events.route_direct_once/3` and
+`Athena.SlackEvents.EventRouterAdapter.route_message/2` on `origin/main`, and by
+`Athena.Forge.EventsAdapter.route_once/1` on the DND-439 branch (gen_saas PR
+#515). The old sentence also contradicted the `forge.review.*` rule that the
+ingress routes each key once. No content dedupe, transient retry state and
+consumer idempotency are unchanged.
 
 Because of fan-out (see *Fan-out: every match fires*), one event fires every
 matching rule independently, so at-least-once delivery and its retry are tracked
@@ -1519,9 +1555,10 @@ per `(event, rule)`, never only at the event grain. The `idempotency_key` in the
 envelope is the **event-level** identity; the platform combines it with the
 matched `rule_id` as the **transient** in-flight retry handle for a delivery
 attempt. This handle is **ack-based in-flight tracking, not a durable content
-key** — a redelivery of the same source change reaches the consumer as another
-at-least-once delivery, and it is the **consumer** (below), not the platform, that
-makes a duplicate harmless.
+key** — a retry of the delivery, or a redelivery of the same source change
+that its ingress routes again, reaches the consumer as another at-least-once
+delivery, and it is the **consumer** (below), not the platform, that makes a
+duplicate harmless.
 
 **Later (2026-09-23):** the retry handle above was, until D40 (HG-16/DND-311),
 always `idempotency_key` + a **matched** `rule_id` — every delivery had a rule.
@@ -5313,7 +5350,9 @@ binding in gen_saas (DND-436); DND-763 tracks the rest of that drift.
 (its `idempotency_key`) and the item it resolves to. Ingest is an upsert on the
 item's identity (next subsection), so a redelivered or duplicated event
 converges on the same row. The index does not rely on unique event keys: the
-event store does not enforce one. Each row keeps `source_revision`, the
+event store holds no uniqueness constraint on them, and only the ingresses
+that opt into its seen-check route a key once (*Idempotency is per (event,
+rule)*). Each row keeps `source_revision`, the
 event's `payload.revision`. An event whose revision is older than the row's
 does not overwrite the row; it writes nothing, and its obligation still
 settles `indexed`, since the item it names exists and is newer. An event with
@@ -6094,7 +6133,8 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
 - delivers **at-least-once** and retries at the **`(event, rule)`** grain using the event-level key combined with the
   stable `rule_id` — or, for a direct (rule-less) delivery, its own key (*Declared families beyond
   the first pass* → `fleet.session.message`, stated once there) — holding no durable dedupe store
-  and requiring consumer idempotency (*Idempotency is per (event, rule)*; *Rule identity —
+  for retries, running an ingress's opt-in seen-check before routing only, and requiring
+  consumer idempotency (*Idempotency is per (event, rule)*; *Rule identity —
   `rule_id`*);
 - applies the dedupe window at its declared **`(rule_id, subject)`** grain (*Enabled flag and
   dedupe window*);
