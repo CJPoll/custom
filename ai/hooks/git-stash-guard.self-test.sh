@@ -790,13 +790,16 @@ case_d1 "D1-8. paired: grep alias, then a stash write after a separator" deny 'g
 # Fix 2: git refuses `git stash <word>` for a word outside its subcommand
 # table ("subcommand wasn't specified; 'push' can't be assumed due to
 # unexpected token", exit 128), so it writes nothing. Only while the installed
-# git is the version whose table the hook carries; otherwise the old verdict.
+# git is a version the hook has measured; otherwise the old verdict.
 _d1v=$(git --version 2>/dev/null | sed -nE 's/^git version ([0-9]+\.[0-9]+).*/\1/p')
-_d1t=$(sed -nE "s/^GSG_STASH_VERBS_GIT='([0-9.]+)'.*/\\1/p" "$HOOK")
-# Expected allow unless the hook names a table version other than the
-# installed git's (a hook with no table at all is expected to allow, so the
-# unfixed hook fails these cases).
-if [ -n "$_d1t" ] && [ "$_d1v" != "$_d1t" ]; then D1NV=deny; else D1NV=allow; fi
+_d1t=$(sed -nE "s/^GSG_STASH_VERBS_GIT='([0-9. ]+)'.*/\\1/p" "$HOOK")
+# Expected allow unless the hook names measured versions and the installed
+# git is not one of them (a hook with no table at all is expected to allow,
+# so the unfixed hook fails these cases).
+D1NV=allow
+if [ -n "$_d1t" ]; then
+  case " $_d1t " in *" $_d1v "*) [ -n "$_d1v" ] || D1NV=deny ;; *) D1NV=deny ;; esac
+fi
 case_d1 "D1-9. git stash <non-verb> (prose 'stash guard')" "$D1NV" 'git stash guard'
 case_d1 "D1-10. a commit message naming git stash guard" "$D1NV" 'git commit -m "fix the git stash guard false positives"'
 case_d1 "D1-11. a git alias to stash, then a non-verb" "$D1NV" 'git s guard'
@@ -858,25 +861,99 @@ case_d1 "D1-49. paired: the same after a backtick substitution" deny '`echo eval
 case_d1 "D1-50. paired: a keyword after \$(...) opens no assignment" deny '$(echo eval) then X=$G stash pop'
 case_d1 "D1-51. an assignment after a substitution and a separator" allow 'Y=$(date); X=${A:-b}'
 case_d1 "D1-52. an assignment opening a backtick substitution" allow 'echo `X=${A:-b} true`'
-# Canary for fix 2: the hook's verb table must hold every verb the installed
-# git lists, and name its version. A git upgrade turns this red until someone
-# re-reads the table and bumps GSG_STASH_VERBS_GIT (until then fix 2 is off).
-_d1h=$(git stash -h 2>&1 | sed -nE 's/^ *(usage|or): git stash ([a-z-]+).*/\2/p' | sort -u)
-_d1tab=$(sed -nE "s/^GSG_STASH_VERBS='([a-z -]+)'.*/\\1/p" "$HOOK")
-_d1miss=""
-for _vb in $_d1h; do
-  case " $_d1tab " in *" $_vb "*) ;; *) _d1miss="$_d1miss $_vb" ;; esac
-done
+# Canary for fix 2 (d1_canary): on a MEASURED git version the hook's verb
+# table must hold every verb that git lists; a verb missing is real drift and
+# FAILS. An UNMEASURED version is an environment fact, not a defect: the hook
+# keeps fix 2 off there, so the canary PASSES with a visible note (D1C_NOTE)
+# instead of turning every gate on that machine red. The usage is read under
+# LC_ALL=C, so a non-English locale cannot read as "could not measure".
+# Sets D1C (PASS or FAIL), OUT, and D1C_NOTE. The git is whichever is first
+# on PATH, so the regression cases below run it against a fake git.
+d1_canary() {
+  D1C_NOTE=""
+  _cv=$(git --version 2>/dev/null | sed -nE 's/^git version ([0-9]+\.[0-9]+).*/\1/p')
+  _ct=$(sed -nE "s/^GSG_STASH_VERBS_GIT='([0-9. ]+)'.*/\\1/p" "$HOOK")
+  _ctab=$(sed -nE "s/^GSG_STASH_VERBS='([a-z -]+)'.*/\\1/p" "$HOOK")
+  if [ -z "$_cv" ] || [ -z "$_ct" ] || [ -z "$_ctab" ]; then
+    D1C=FAIL; OUT="could not measure: git version [$_cv], measured versions [$_ct], hook table [$_ctab]. Fix: check that \`git --version\` runs here, and that git-stash-guard.sh still defines GSG_STASH_VERBS_GIT='...' and GSG_STASH_VERBS='...' each on one line in that single-quoted form"
+    return
+  fi
+  case " $_ct " in
+    *" $_cv "*) ;;
+    *) D1C=PASS; OUT=""; D1C_NOTE="fix 2 inactive: git $_cv not measured (measured: $_ct); every non-read word after git stash stays a write. To activate, measure $_cv (LC_ALL=C git stash -h verbs, and exit 128 on a non-verb in a temp repo) and add it to GSG_STASH_VERBS_GIT"
+       return ;;
+  esac
+  _ch=$(LC_ALL=C git stash -h 2>&1 | sed -nE 's/^ *(usage|or): git stash ([a-z-]+).*/\2/p' | sort -u)
+  if [ -z "$_ch" ]; then
+    D1C=FAIL; OUT="could not measure: LC_ALL=C git stash -h listed no verbs for measured git $_cv. Fix: check that \`LC_ALL=C git stash -h\` prints its usage: and or: lines here"
+    return
+  fi
+  _cmiss=""
+  for _vb in $_ch; do
+    case " $_ctab " in *" $_vb "*) ;; *) _cmiss="$_cmiss $_vb" ;; esac
+  done
+  if [ -n "$_cmiss" ]; then
+    D1C=FAIL; OUT="measured git $_cv lists verbs missing from the table:$_cmiss. Fix: add them to GSG_STASH_VERBS in git-stash-guard.sh after checking each one"
+  else
+    D1C=PASS; OUT=""
+  fi
+}
 STATUS=0
-if [ -z "$_d1h" ] || [ -z "$_d1tab" ]; then
-  OUT="could not measure: git stash -h verbs [$_d1h], hook table [$_d1tab]. Fix: check that \`git stash -h\` prints its usage lines here, and that git-stash-guard.sh still defines GSG_STASH_VERBS='...' on one line in that single-quoted form"
-  record "D1-36. the hook's stash verb table covers the installed git" FAIL
-elif [ -n "$_d1miss" ] || [ "$_d1v" != "$_d1t" ]; then
-  OUT="installed git $_d1v, table for $_d1t, verbs missing from the table:$_d1miss. Fix: add them to GSG_STASH_VERBS and set GSG_STASH_VERBS_GIT to $_d1v in git-stash-guard.sh"
-  record "D1-36. the hook's stash verb table covers the installed git" FAIL
-else
-  record "D1-36. the hook's stash verb table covers the installed git" PASS
+d1_canary
+[ -z "$D1C_NOTE" ] || printf '  NOTE  %s\n' "$D1C_NOTE"
+record "D1-36. the hook's stash verb table covers the installed git" "$D1C"
+# Regression cases for the canary and the version gate, against a fake git
+# that reports a chosen version and verb list and runs the real git for
+# everything else. Its usage is German unless LC_ALL=C.
+_realgit=$(command -v git)
+mkdir -p "$TMP/fakegit"
+cat > "$TMP/fakegit/git" <<EOF
+#!/bin/sh
+case "\$1" in --version) echo "git version \$FAKE_GIT_VER"; exit 0 ;; esac
+if [ "\$1" = stash ] && [ "\${2:-}" = -h ]; then
+  if [ "\${LC_ALL:-}" != C ]; then echo "Verwendung: git stash liste"; exit 129; fi
+  _first=usage
+  for _v in \$FAKE_GIT_VERBS; do printf '%s: git stash %s\n' "\$_first" "\$_v"; _first='   or'; done
+  exit 129
 fi
+exec "$_realgit" "\$@"
+EOF
+chmod +x "$TMP/fakegit/git"
+_fullverbs='list show drop pop apply branch save clear create store export import'
+# fake_env_on <version> <verbs> / fake_env_off : put the fake git first on
+# PATH under a German locale, and restore the caller's PATH and locale.
+fake_env_on() {
+  _sp=$PATH; _slang=${LANG-__unset__}; _slcall=${LC_ALL-__unset__}
+  PATH="$TMP/fakegit:$PATH"; FAKE_GIT_VER=$1; FAKE_GIT_VERBS=$2; LANG=de_DE.UTF-8
+  export PATH FAKE_GIT_VER FAKE_GIT_VERBS LANG
+  unset LC_ALL
+}
+fake_env_off() {
+  PATH=$_sp; export PATH; unset FAKE_GIT_VER FAKE_GIT_VERBS
+  if [ "$_slang" = __unset__ ]; then unset LANG; else LANG=$_slang; export LANG; fi
+  if [ "$_slcall" = __unset__ ]; then unset LC_ALL; else LC_ALL=$_slcall; export LC_ALL; fi
+}
+# fake_canary <version> <verbs> : run d1_canary against the fake git.
+fake_canary() { fake_env_on "$1" "$2"; d1_canary; fake_env_off; }
+STATUS=0
+fake_canary 2.99.1 "$_fullverbs"
+if [ "$D1C" = PASS ] && printf '%s' "$D1C_NOTE" | grep -q 'fix 2 inactive: git 2.99 not measured'; then
+  record "D1-61. an unmeasured git version passes the canary with the inactive note" PASS
+else OUT="D1C=$D1C note=[$D1C_NOTE] out=[$OUT]"; record "D1-61. an unmeasured git version passes the canary with the inactive note" FAIL; fi
+fake_canary 2.54.0 "$_fullverbs frobnicate"
+if [ "$D1C" = FAIL ] && printf '%s' "$OUT" | grep -q 'frobnicate'; then
+  record "D1-62. a measured git version whose verbs drifted fails the canary" PASS
+else OUT="D1C=$D1C out=[$OUT]"; record "D1-62. a measured git version whose verbs drifted fails the canary" FAIL; fi
+fake_canary 2.55.0 "$_fullverbs"
+if [ "$D1C" = PASS ] && [ -z "$D1C_NOTE" ]; then
+  record "D1-63. a measured version read under a German locale passes (LC_ALL=C)" PASS
+else OUT="D1C=$D1C note=[$D1C_NOTE] out=[$OUT]"; record "D1-63. a measured version read under a German locale passes (LC_ALL=C)" FAIL; fi
+# The hook itself on an unmeasured git: fix 2 is off, so a non-verb denies.
+_d1j=$(json "$WT" 'git stash guard')
+fake_env_on 2.99.1 "$_fullverbs"; runin "$D1CFG" "$GIT_CONFIG_GLOBAL" "$_d1j"; fake_env_off
+check "D1-64. the hook on an unmeasured git keeps git stash <non-verb> a write" deny
+fake_env_on 2.55.0 "$_fullverbs"; runin "$D1CFG" "$GIT_CONFIG_GLOBAL" "$_d1j"; fake_env_off
+check "D1-65. the hook on measured git 2.55 applies fix 2" allow
 
 echo "== F: fail-open =="
 run ''

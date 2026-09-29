@@ -126,7 +126,7 @@
 #   * `git stash <word>` for a literal word outside git's stash verb table
 #     (GSG_STASH_VERBS, compared on its letters in any case) is refused by
 #     git with exit 128 and writes nothing (`git stash guard` in prose). Only
-#     while the installed git is the table's version (GSG_STASH_VERBS_GIT),
+#     while the installed git is a measured version (GSG_STASH_VERBS_GIT),
 #     and only for a plain word ([A-Za-z0-9._,:%+@/-]) that names no snapshot
 #     alias, in a command that shows no way to redefine a word or run text
 #     (no expansion, substitution or glob character, and no definition,
@@ -487,14 +487,18 @@ esac
 # ---- git's stash verb table (DND-1095 D1) ------------------------------------
 # `git stash <word>` for a word outside this table is refused by git before it
 # touches the list (see stash_write in the evaluator). The table is every verb
-# `git stash -h` lists in GSG_STASH_VERBS_GIT, the version it was read from.
-# Only when the installed git is that version (major.minor) is a word outside
-# the table let through: a newer git may add a writing verb (2.51 added import
-# and export). An unreadable or different version keeps every non-read word a
-# write. The self-test's D1-36 fails when the installed git lists a verb this
-# table lacks or names another version; its Fix says what to update.
+# `LC_ALL=C git stash -h` lists in each version named in GSG_STASH_VERBS_GIT
+# (major.minor, space-separated). A version is added only once measured: its
+# usage lists exactly these verbs and it refuses an unknown word with exit 128
+# and the list untouched. 2.54 (desktop) and 2.55 (laptop) measured
+# 2026-09-29. Only on a measured version is a word outside the table let
+# through: a newer git may add a writing verb (2.51 added import and export).
+# An unreadable or unmeasured version keeps every non-read word a write, as
+# before D1. The self-test's D1-36 then passes with a note that fix 2 is
+# inactive, and fails only when a MEASURED version lists a verb the table
+# lacks (real drift); its Fix says what to update.
 GSG_STASH_VERBS='apply branch clear create drop export import list pop push save show store'
-GSG_STASH_VERBS_GIT='2.54'
+GSG_STASH_VERBS_GIT='2.54 2.55'
 # Probed for every command that reaches the evaluator, not only one naming
 # stash: a git alias (`git s guard`, s = stash) reaches the stash verdict
 # with no stash text in the command.
@@ -519,7 +523,9 @@ GSG_STASH_VERBS_GIT='2.54'
 # residual only if that git adds a writing verb.
 STASH_TABLE_OK=0
 _gv=$(cd / && git --version 2>/dev/null | sed -nE 's/^git version ([0-9]+\.[0-9]+).*/\1/p')
-[ -n "$_gv" ] && [ "$_gv" = "$GSG_STASH_VERBS_GIT" ] && STASH_TABLE_OK=1
+case " $GSG_STASH_VERBS_GIT " in
+  *" $_gv "*) [ -n "$_gv" ] && STASH_TABLE_OK=1 ;;
+esac
 case $CMD in
   *'$'* | *'`'* | *'*'* | *'?'* | *'['* | *'{'* | *'~'*) STASH_TABLE_OK=0 ;;
 esac

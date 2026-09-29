@@ -868,3 +868,20 @@ first; against head e792063d `RESULT: 418 passed, 6 failed` (D1-53, 54, 55,
 |---|---|---|
 | S-D1-14 | the `$`/backtick/glob/tilde character rule removed | D1-54 (`${a}as ... ${e}al`), D1-59 (a backtick substitution) |
 | S-D1-15 | the shell/interpreter word list disabled | D1-55 (`printf '\141lias ...' \| zsh`), D1-57 (`python3 -c ... os.system(...)`) |
+
+Admiral hold before landing: the laptop runs git 2.55.0, the desktop 2.54.0, and
+the D1-36 canary failed on any version but the table's. That would have turned
+every harness gate on the laptop red on an environment fact. Measured on the
+laptop (read-only, and a non-verb in a mktemp repo): `LC_ALL=C git stash -h`
+lists the same 13 verbs as 2.54, and `git stash guard` / `git stash Guard`
+exit 128 with "subcommand wasn't specified; 'push' can't be assumed due to
+unexpected token" and 0 stash entries. So `GSG_STASH_VERBS_GIT='2.54 2.55'`.
+An unmeasured version now passes the canary with a "fix 2 inactive" note (the
+hook keeps fix 2 off there); only a measured version whose verbs drift fails.
+The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-D1-16 | an unmeasured version FAILS the canary (the rule at 73a7b23b) | D1-61 (fake git 2.99: expected PASS with the inactive note) |
+| S-D1-17 | the canary reads `git stash -h` in the caller's locale | D1-62, D1-63 (German usage: "could not measure") |
+| S-D1-18 | the hook measured only 2.54 | D1-63 (2.55 read as unmeasured), D1-65 (the hook on fake git 2.55 denies `git stash guard`) |
