@@ -79,6 +79,10 @@ module ReapTags
   # exactly the bytes read (#classify). Anything else is re-read every
   # SETTLE_POLL_S for up to `settle` seconds, and a pid still unreadable after
   # that raises ScanError naming it -- never silently counted as untagged.
+  # DND-1202: a settled read can still be torn, because the new program may
+  # rewrite its environment in place (bash's startup NULs each '=' while it
+  # imports the entry). Our entry read as a bare "ATHENA_REAP_TAGS" is re-read
+  # the same way.
   # scripts/lib/proc-env-scan.awk applies the same rule for shell readers, and
   # its header states the limits (a non-dumpable process cannot be read and
   # is skipped; the equal-bounds rule assumes ASLR).
@@ -112,8 +116,9 @@ module ReapTags
 
     named = unknown.map { |pid| "pid=#{pid} #{cmdline(pid, proc_root: proc_root)}" }.join("; ")
     raise ScanError.new("#{unknown.size} process(es) stayed unreadable for #{settle}s (environment bounds " \
-                        "never settled), so whether they carry #{tag} is UNKNOWN: #{named}. Fix: find what " \
-                        "those processes are doing (stuck in execve, or an unreadable environ) and re-run; the " \
+                        "never settled, or the #{VAR} entry stayed mid-rewrite), so whether they carry #{tag} is " \
+                        "UNKNOWN: #{named}. Fix: find what those processes are doing (stuck in execve, an " \
+                        "unreadable environ, or a program holding its environment half-rewritten) and re-run; the " \
                         "scan could not look, so it did not report 'none left'.", found: found)
   end
 
@@ -188,8 +193,18 @@ module ReapTags
     return :unknown if env.nil? # unreadable with settled bounds: transient
     return :unknown unless env.bytesize == b1 - b0 # a short read
 
-    entry = env.split("\0").find { |e| e.start_with?("#{VAR}=") }
-    entry && entry.byteslice(VAR.bytesize + 1..-1).split(",").include?(tag) ? :match : :no
+    entries = env.split("\0")
+    entry = entries.find { |e| e.start_with?("#{VAR}=") }
+    return :match if entry && entry.byteslice(VAR.bytesize + 1..-1).split(",").include?(tag)
+
+    # DND-1202: the exec is over, but the new program may be rewriting its
+    # environment in place. bash's startup writes a NUL over each entry's '='
+    # while it imports it, then puts the '=' back, so a read in between shows
+    # our entry split in two ("ATHENA_REAP_TAGS\0<tags>"). That is a torn
+    # read, not an untagged process: re-read it.
+    return :unknown if entries.include?(VAR)
+
+    :no
   end
 
   def own_starttime

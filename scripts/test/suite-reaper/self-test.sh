@@ -33,7 +33,9 @@
 #       "none left".
 #   S15 scripts/lib/proc-env-scan.awk on a fixture /proc: settled bounds find
 #       the tag; 0 0 that never settles and a short read are UNKNOWN (exit 4);
-#       equal bounds still equal on a re-read are an empty environment.
+#       equal bounds still equal on a re-read are an empty environment; the
+#       needle's own entry read torn ('=' a NUL, bash mid-import) is UNKNOWN,
+#       another variable torn is not (DND-1202).
 #   S16 a non-dumpable process (0 0 forever) is skipped at once, not waited out.
 set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -405,6 +407,31 @@ if [ "${SRC}" -eq 0 ] && [ -z "${SO}" ] && [ -z "${SE}" ]; then
   ok "S15 equal bounds still equal on a re-read: an empty environment, 'no' with no warning"
 else
   bad "S15 equal bounds still equal on a re-read: an empty environment" "rc=${SRC} out=${SO} err=${SE}"
+fi
+# DND-1202: settled bounds, but the program is rewriting its environment in
+# place (bash writes a NUL over each entry's '=' while it imports it), so our
+# entry reads split in two. That is "cannot tell yet", never "no".
+fake_proc 4205 1000 1031 'HOME=/x\0ATHENA_REAP_TAGS\0t0,t1\0'   # 31 bytes
+scan_fake 4205
+if [ "${SRC}" -eq 4 ] && [ -z "${SO}" ] && grep -q 'pid 4205 .*UNKNOWN' <<<"${SE}"; then
+  ok "S15 our entry read mid-rewrite ('=' read as NUL): UNKNOWN, exit 4, never 'no'"
+else
+  bad "S15 our entry read mid-rewrite ('=' read as NUL): UNKNOWN, exit 4" "rc=${SRC} out=${SO} err=${SE}"
+fi
+fake_proc 4206 1000 1028 'HOME\0/x\0ATHENA_REAP_TAGS=t0\0'       # 28 bytes
+scan_fake 4206
+if [ "${SRC}" -eq 0 ] && [ -z "${SO}" ] && [ -z "${SE}" ]; then
+  ok "S15 another variable read mid-rewrite, ours whole and untagged: a plain 'no'"
+else
+  bad "S15 another variable read mid-rewrite, ours whole and untagged: a plain 'no'" "rc=${SRC} out=${SO} err=${SE}"
+fi
+fake_proc 4207 1000 1016 'HOME=/x\0DND_X\0v\0'                    # 16 bytes
+SO="$(gawk -b -f "${SCAN}" -v mode=exact -v needle=DND_X=v -v uid="${UID}" -v since=0 -v settle_s=0.2 \
+      -v root="${TMP}/fakeproc" "${TMP}/fakeproc/4207" 2>"${TMP}/scan.err")"; SRC=$?; SE="$(cat "${TMP}/scan.err")"
+if [ "${SRC}" -eq 4 ] && [ -z "${SO}" ] && grep -q 'pid 4207 .*UNKNOWN' <<<"${SE}"; then
+  ok "S15 mode exact: the needle's entry read mid-rewrite is UNKNOWN, exit 4, never 'no'"
+else
+  bad "S15 mode exact: the needle's entry read mid-rewrite is UNKNOWN, exit 4" "rc=${SRC} out=${SO} err=${SE}"
 fi
 
 # S16: a NON-DUMPABLE process of ours (ssh-agent disables tracing) shows 0 0
