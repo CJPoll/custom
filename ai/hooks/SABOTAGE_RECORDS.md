@@ -815,3 +815,23 @@ failed` (L4 said nothing about why; L5, L7, L8, L9 were allowed). After:
 | S-DND1095-18 | STASH_ALIAS never set | `L8. a ! alias whose body hides stash from the wrapper ...` |
 | S-DND1095-19 | a failed second pass returns an empty verdict | `L9. a failed second pass keeps the deny and names the fault` |
 | S-DND1095-20 | the glob-head relaxation ignores its words' verdict (gv) | `L8. autocorrect on ... g?t stsh drop` |
+
+Option B (admiral decision after critic round 2 BLOCKed 713a5c03 [guardrail]:
+a computed stash spelling in a quoted payload handed to a launcher the
+exposure list does not name, such as `pueue add -- 'X=$(printf st%s ash); git
+$X pop'`). Inside a quoted payload (INPAY), a computed first verb keeps the
+deny, both after a glob or brace command word (xw) and after a literal git
+(decide). A literal git's glob or brace verb (LITGIT) keeps it too. The suite
+at this round, run against 713a5c03's guard: `RESULT: 485 passed, 12 failed`
+(L2.8/9/11/12/17 now expected denied; every L10 payload case allowed, e.g.
+`FAIL L10. git layer live, payload verb computed, still denied: pueue add --
+'X=$(printf st%s ash); git $X pop'`). After: `RESULT: 497 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND1095-21 | xw forced 0 in the glob-head rule | `L2.12 ... B: athena-harness[bot] in echo text` (the other B cases also deny through gv) |
+| S-DND1095-22 | decide ignores INPAY | 4 L10 cases: `pueue ... git $X pop`, `emacsclient ... git $S drop`, `git st{a,}sh drop`, `git -C /tmp/x $(printf ...) drop` |
+| S-DND1095-23 | INPAY never set | 11: L2.8/9/11/12/17 and all 6 L10 payload cases |
+| S-DND1095-24 | LITGIT never set | `L10 ... pueue add -- 'git st{a,}sh drop'` |
+| S-DND1095-25 | the `$(` mark dropped from tokenize | `L10 ... {git,} $(printf st%s ash) drop`, `L10 ... git -C /tmp/x $(printf ...) drop` |
+| S-DND1095-26 | computed() takes a lone `$` | `L2.5 ... grep d{4} pattern`, `L10 ... a lone $ and $? after a glob word` |

@@ -895,7 +895,11 @@ lcheck() {
 }
 # The false positives (DND-853, DND-799, DND-1095): read-only commands the text
 # guard denies. Each is DENIED with no git layer and ALLOWED with it. One case
-# per `### name` block; the command is the block's text.
+# per `### name` block; the command is the block's text. A `B: ` name is an
+# accepted false positive that stays DENIED with the layer live (DND-1095
+# option B): a glob or brace command word in a quoted payload followed by a
+# computed word, the shape of a stash spelled at run time and run outside
+# the agent env. Lifting those is option A, the owner's call.
 cat > "$TMP/fp-cases" <<'EOF'
 ### grep alternation read as the gstp alias
 grep -n -E 'dnd-(513|514|52[1-9]|537)' /tmp/nothing.txt
@@ -911,19 +915,19 @@ grep -E 'd{4} $' "$F"
 gh pr view 1 --json statusCheckRollup -q '[.statusCheckRollup[] | {n: .name, c: .conclusion}]'
 ### jq slice interpolation
 for p in 407; do gh pr view $p --json number,headRefOid -q '"\(.number) \(.headRefOid[0:8])"'; done
-### awk {print $4} after git in the same command
+### B: awk {print $4} after git in the same command
 cd /tmp; git fetch -q origin; gh pr checks 459 | awk '{print $4}'
-### awk {print $4}
+### B: awk {print $4}
 ps aux | awk '{print $4}'
 ### JSON heredoc with [harness]
 gh api repos/x/y/issues --input - <<EOT
 ["[harness] a", "$T"]
 EOT
-### JSON object heredoc with [harness]
+### B: JSON object heredoc with [harness]
 gh api repos/x/y/issues --input - <<EOT
 {"title": "[harness] $T", "labels": ["harness"]}
 EOT
-### athena-harness[bot] in echo text
+### B: athena-harness[bot] in echo text
 echo "athena-harness[bot] -- $X"
 ### $H/ticket.rb --set-status after git -C
 git -C "$W" log -1 --format=%h; $H/ticket.rb DND-1095 --set-status Done
@@ -933,7 +937,7 @@ for d in a b; do s=$(git -C "$d" status --porcelain); [ -n "$s" ] && echo "$d"; 
 ruby -e 'ARGV[0].split(",").each { |x| puts x }' "$X"
 ### ruby #{...} interpolation
 ruby -e 'puts "#{1} #{2}"; exit 0' "$X"
-### ruby #{...} in a heredoc
+### B: ruby #{...} in a heredoc
 cat <<EOT | ruby
 puts "#{ENV["HOME"]} $X"
 EOT
@@ -947,7 +951,8 @@ _i=1
 while [ -f "$TMP/fpc/$_i" ]; do
   _name=$(cat "$TMP/fpc/$_i.name"); _cmd=$(cat "$TMP/fpc/$_i")
   run_nolayer "$_cmd"; lcheck "L1.$_i. no git layer: $_name" deny
-  run_live "$_cmd"; lcheck "L2.$_i. git layer live: $_name" allow
+  case "$_name" in B:*) _want=deny ;; *) _want=allow ;; esac
+  run_live "$_cmd"; lcheck "L2.$_i. git layer live: $_name" "$_want"
   _i=$((_i + 1))
 done
 [ "$_i" -gt 19 ] || { STATUS=0; OUT="only $((_i - 1)) cases read"; record "L0. every false-positive case was read" FAIL; }
@@ -1095,6 +1100,25 @@ if is_deny && printf '%s' "$OUT" | grep -qF 'could not re-judge this command'; t
 else
   record "L9. a failed second pass keeps the deny and names the fault" FAIL
 fi
+
+# L10: option B (DND-1095 critic round 2). A quoted payload may run through a
+# launcher the exposure list does not name (pueue, emacsclient), outside the
+# agent env, where neither git layer exists. A verb computed at run time
+# there keeps the deny with the layer live, under a literal git or a glob or
+# brace command word. The same shape typed at the top level runs in the
+# agent env, where the wrapper judges it (L6), so it stays allowed.
+for _c in "pueue add -- 'X=\$(printf st%s ash); git \$X pop'" \
+  "emacsclient -e '(shell-command \"S=\$(printf st%s ash); git \$S drop\")'" \
+  "pueue add -- '{git,} \$(printf st%s ash) drop'" \
+  "pueue add -- 'g?t \${S} drop'" "pueue add -- 'git st{a,}sh drop'" \
+  "pueue add -- 'git -C /tmp/x \$(printf st%s ash) drop'"; do
+  run_nolayer "$_c"; lcheck "L10. no git layer: $_c" deny
+  run_live "$_c"; lcheck "L10. git layer live, payload verb computed, still denied: $_c" deny
+done
+# The lone `$` and `$?` are no expansion to a stash spelling: the grep
+# pattern `d{4} $` (L2.5) and a status test stay allowed.
+run_live "grep -E 'd{4} \$' \"\$F\"; echo 'a[1] \$?'"
+lcheck "L10. git layer live: a lone \$ and \$? after a glob word in a payload" allow
 
 echo
 echo "==================================================="

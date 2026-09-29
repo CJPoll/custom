@@ -145,8 +145,11 @@
 #     exists (the DND-775 verify: rc 127). A `$` or backtick in the word
 #     keeps the deny (`${D}?sh` can expand to a path), and so do words after
 #     it that read as a stash write, a stash alias or an autocorrect risk.
+#     In a quoted payload a computed first verb word (`$X`, `$(...)`, a
+#     backtick; not a lone `$` or `$?`) keeps it too (option B, below).
 #   * `git <expanded subcommand>` no longer denies unless its text names
-#     stash: the wrapper reads argv after expansion. It still denies when git
+#     stash: the wrapper reads argv after expansion. It still denies in a
+#     quoted payload when the subcommand is computed (option B), when git
 #     may read a config this guard did not, or help.autocorrect is on (the
 #     unread-config condition: the wrapper passes a typo through), or when a
 #     git `!` alias this guard read resolves to a stash write while its body
@@ -174,10 +177,27 @@
 #     a file write or a gc expiry, and the wrapper passes a typo through.
 #   * unread-config under a literal git: help.autocorrect in an unread config
 #     turns a typo into `stash drop`, which the hook cannot see.
+# OPTION B (DND-1095, admiral decision after critic round 2). A quoted
+# payload may be handed to a launcher the exposure list does not name
+# (`pueue add -- '...'`, `emacsclient -e '...'`), which runs it outside the
+# agent env, where neither git layer exists. A launcher blocklist is
+# open-ended, so inside a quoted payload a verb computed by parameter or
+# command expansion keeps the deny, after a literal git or a glob or brace
+# command word; after a literal git, so does a glob or brace verb. That keeps these false positives DENIED with the layer live,
+# accepted for now (lifting them is option A, the owner's call): awk
+# `'{print $4}'`, JSON or jq text with `[x] $VAR`, ruby `"#{x} $X"`, and
+# `"athena-harness[bot] -- $X"`. The same shapes typed at the top level run
+# in the agent env, where the wrapper judges them, so they stay allowed.
 # RESIDUAL of the active rules, beyond the two layers' own (DND-775 Q2), each
 # needing a stash spelling computed at run time (no `stash` in its text):
-#   * a payload handed to a process outside the agent env by a launcher the
-#     list above does not name (or names only through an alias or a script);
+#   * a quoted payload handed to a launcher the list above does not name,
+#     whose command word AND verb are both built by glob or brace with no
+#     `$` (`{git,} st{a,}sh drop`; under a literal git the brace verb is
+#     denied): telling that verb from a grep pattern
+#     (`[_ ]id{0,8}`) needs a glob model (option C), so it is left;
+#   * an unquoted command handed to such a launcher as argv (`pueue add --
+#     git $X pop`): the old guard never read it either, since git is not in
+#     command position there;
 #   * a PATH changed by something the text does not show (a script it runs,
 #     direnv, nix-shell), so a bare `git` in that script may not be the
 #     wrapper;
@@ -767,6 +787,9 @@ GSG_PROG='
       if (c == "$") {
         ux = 1; has = 1
         if (substr(text, i + 1, 1) == "?") { cur = cur "$?"; i++; continue }
+        # `$(` ends this word at the `(`, which leaves a lone `$`: mark it
+        # \003 so computed() tells a command substitution from a literal `$`.
+        if (substr(text, i + 1, 1) == "(") { cur = cur "$\003"; continue }
         cur = cur c; continue
       }
       if (c ~ /[*?[{]/) { cur = cur c "\001"; has = 1; continue }
@@ -777,7 +800,7 @@ GSG_PROG='
   }
   # refpart(t): the ref a revision/refspec word names: glob marks, a leading
   # `+` and any `@{...}` reflog selector removed (`stash@{0}` -> stash).
-  function refpart(t) { gsub(/\001/, "", t); sub(/^\+/, "", t); sub(/@\{.*$/, "", t); return t }
+  function refpart(t) { gsub(/[\001\003]/, "", t); sub(/^\+/, "", t); sub(/@\{.*$/, "", t); return t }
   # is_assign(t): t has the shape of an assignment word (NAME=...,
   # NAME[i]=..., NAME+=...). Used ONLY to give the next word command
   # position (cmd_prefix), which can only add checks. The glob and
@@ -785,6 +808,17 @@ GSG_PROG='
   # quotes, so `"A"=/usr/bin/g?t` (a command word, not an assignment) has
   # the same shape (DND-780 narrow cut, critic round 1).
   function is_assign(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=/ }
+  # computed(t): t holds a parameter or command expansion, so its value is
+  # made at run time (`$X`, `${X}`, `$(...)`, `$4`, a backtick). A lone `$`
+  # is a literal, and `$?` is an exit status (a number, never stash). A `$(`
+  # reaches here as `$` and the \003 mark (see tokenize).
+  function computed(t) { return t ~ /`/ || t ~ /\$[\003A-Za-z0-9_{(@*#!$-]/ }
+  # INPAY is 1 while analyze reads a quoted payload (QF): text another
+  # program may run, possibly through a launcher outside the agent env that
+  # the exposure list does not name (pueue, emacsclient, ...), where neither
+  # git layer exists. There a verb computed at run time keeps its deny
+  # (DND-1095 option B): the critic'"'"'s `pueue add -- '"'"'X=$(printf st%s
+  # ash); git $X pop'"'"'`.
   # literal_non_git(t, ux): word t holds an expansion only inside double
   # quotes (ux == 0, so it is never split into several words or globbed) and
   # ends in a literal path component that is not git or git-stash
@@ -873,8 +907,13 @@ GSG_PROG='
     # (TSTASH), when git may autocorrect a typo or read an alias this guard
     # could not (cfgov: the wrapper passes a typo through), or when an alias
     # this guard read resolves to a stash write through a `!` body that does
-    # not spell stash (STASH_ALIAS), which the wrapper cannot see.
-    if (sc ~ /[$`\001]/) return (active && !TSTASH && !cfgov && !STASH_ALIAS) ? "" : "expanded"
+    # not spell stash (STASH_ALIAS), which the wrapper cannot see, or when a
+    # quoted payload computes it (INPAY): the payload may run outside the
+    # agent env, where no wrapper judges it. Under a literal git (LITGIT) a
+    # glob or brace subcommand counts as computed there too (`git
+    # st{a,}sh drop`); under a glob command word it does not, since that is
+    # the shape of a grep pattern (`[_ ]id{0,8}`).
+    if (sc ~ /[$`\001]/) return (active && !TSTASH && !cfgov && !STASH_ALIAS && !(INPAY && (computed(sc) || (LITGIT && sc ~ /\001/)))) ? "" : "expanded"
     r = plumb(sc, w, n, j)
     if (r != "") return r
     # Alias names are config keys, so git matches them case-insensitively
@@ -967,7 +1006,7 @@ GSG_PROG='
     NT[c] = clip(t); NP[c] = k; ND[c] = depth
   }
   function clip(t) {
-    gsub(/\001/, "", t); gsub(/\002/, "$", t); gsub(/[\n\r\t]+/, " ", t)
+    gsub(/[\001\003]/, "", t); gsub(/\002/, "$", t); gsub(/[\n\r\t]+/, " ", t)
     return length(t) > 120 ? substr(t, 1, 117) "..." : t
   }
   # analyze(text, depth): the most specific finding in text (see rank), or
@@ -976,13 +1015,16 @@ GSG_PROG='
   # on return. A nested text inherits its enclosing text'"'"'s TSTASH: a payload
   # can run words of the command around it (`sh -c '"'"'$*'"'"' sh ... stash
   # drop`, `read`, xargs), so those words count as its own.
-  function analyze(text, depth,    saved, r) {
-    saved = TSTASH; TSTASH = saved || (tolower(text) ~ /stash/)
+  # It also restores LITGIT (is the git_verdict in progress under a literal
+  # git), which analyze_text sets at each git_verdict it starts, so a `!`
+  # alias body read mid-verdict cannot clear its caller'"'"'s.
+  function analyze(text, depth,    saved, lg, r) {
+    saved = TSTASH; TSTASH = saved || (tolower(text) ~ /stash/); lg = LITGIT
     r = analyze_text(text, depth)
-    TSTASH = saved
+    TSTASH = saved; LITGIT = lg
     return r
   }
-  function analyze_text(text, depth,    W, QF, SB, UX, PQ, n, k, e, r, sw, m, i, cp, t, j, x, best, gv) {
+  function analyze_text(text, depth,    W, QF, SB, UX, PQ, n, k, e, r, sw, m, i, cp, t, j, x, best, gv, xw, sp) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) {
       if (!mentions_stash(text)) return ""
@@ -990,7 +1032,10 @@ GSG_PROG='
       return "stash"
     }
     n = tokenize(text, W, QF, SB, UX, PQ); best = ""
-    for (k = 1; k <= n; k++) if (QF[k]) { best = better(best, analyze(W[k], depth + 1)); if (best == "stash") return best }
+    for (k = 1; k <= n; k++) if (QF[k]) {
+      sp = INPAY; INPAY = 1; r = analyze(W[k], depth + 1); INPAY = sp
+      best = better(best, r); if (best == "stash") return best
+    }
     cp = 0
     for (k = 1; k <= n; k++) {
       # cp: word k is in command position (starts a simple command, or
@@ -1046,18 +1091,23 @@ GSG_PROG='
         # shell looks up on PATH, where git is the wrapper, and no git-stash
         # is on PATH (DND-775 verify: rc 127). So it denies only when it holds
         # a `/`, holds an expansion (`${D}?sh` can expand to a path) and is
-        # not an assignment word, the text names stash (TSTASH), or its
+        # not an assignment word, it sits in a quoted payload and its first
+        # verb word is computed (xw), the text names stash (TSTASH), or its
         # words read, by the active rules, as a stash write, a stash alias or
-        # a possible autocorrect (gv).
-        gv = git_verdict(sw, m, 1, 0, 0)
+        # a possible autocorrect (gv). xw is DND-1095 option B: a launcher the
+        # exposure list does not name runs the payload outside the agent env,
+        # where the glob head can be git and the verb a computed stash, which
+        # neither git layer can refuse. So `{print $4}` in awk stays denied.
+        LITGIT = 0; gv = git_verdict(sw, m, 1, 0, 0)
+        xw = INPAY && i <= m && computed(sw[i])
         if ((i > m || sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/ || sw[i] ~ /[$`\001]/ || gv != "") \
-          && (!active || W[k] ~ /\// || (W[k] ~ /[$`]/ && !is_assign(W[k])) || TSTASH || gv != "")) {
+          && (!active || W[k] ~ /\// || (W[k] ~ /[$`]/ && !is_assign(W[k])) || xw || TSTASH || gv != "")) {
           best = better(best, "glob-head"); note("glob-head", W, k, e, depth, 0)
         }
         continue
       }
-      if (W[k] ~ /(^|\/)git$/) r = git_verdict(sw, m, 1, 0, 0)
-      else if (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k])) r = git_verdict(sw, m, 1, 1, 0)
+      if (W[k] ~ /(^|\/)git$/) { LITGIT = 1; r = git_verdict(sw, m, 1, 0, 0) }
+      else if (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k])) { LITGIT = 0; r = git_verdict(sw, m, 1, 1, 0) }
       else r = ""
       note(r, W, k, e, depth, 0)
       if (r == "stash") return r
