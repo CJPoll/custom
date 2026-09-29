@@ -83,7 +83,7 @@ for a in "$@"; do
   case "${a}" in -h|--help) usage; exit 0 ;; esac
 done
 
-for dep in flock setsid mkfifo tail timeout stat; do
+for dep in flock setsid mkfifo tail stat; do
   command -v "${dep}" >/dev/null 2>&1 || die 1 "${dep} is not on PATH" "install ${dep} (util-linux / coreutils)."
 done
 
@@ -316,12 +316,19 @@ do_acquire() {
   local fifo msg rc=0 holder
   fifo="$(mktemp -u "${lock_dir}/.acquire.XXXXXX")" && mkfifo -m 600 -- "${fifo}" \
     || die 1 "cannot create the hand-off fifo in ${lock_dir}" "check that ${lock_dir} is writable by this user."
+  # Open the fifo O_RDWR BEFORE the holder starts. A fifo drops its buffer
+  # when its last descriptor closes, so a reader that opened only after the
+  # holder's `say` had written and closed would get nothing. Holding fd 7
+  # keeps the pipe alive from the first write; O_RDWR never blocks.
+  exec 7<>"${fifo}" || { rm -f -- "${fifo}"; die 1 "cannot open the hand-off fifo ${fifo}" "check that ${lock_dir} is writable by this user."; }
   # A background child of a non-interactive shell is not a process-group
   # leader, so setsid(1) calls setsid(2) without forking: $! is the holder.
+  # 7<&- keeps the holder from inheriting the acquirer's end.
   setsid bash -c "${HOLDER}" "lane-lock-holder:${lane}" "${lock}" "${fifo}" "${anchor_pid}" "${lane}" \
-    "${CLAUDE_CODE_SESSION_ID:-}" "${note}" "${wait_s}" "${record}" </dev/null >/dev/null 2>&1 &
+    "${CLAUDE_CODE_SESSION_ID:-}" "${note}" "${wait_s}" "${record}" </dev/null >/dev/null 2>&1 7<&- &
   holder=$!
-  msg="$(timeout $((wait_s + 15)) cat -- "${fifo}")" || rc=$?
+  IFS= read -r -t $((wait_s + 15)) -u 7 msg || { rc=$?; msg=""; }
+  exec 7<&-
   case "${msg}" in
     "held "*|busy) ;;
     *) # No clean answer: stop the holder, so a late one never holds the lane
@@ -341,7 +348,7 @@ do_acquire() {
     "error "*)
       die 1 "the holder could not take the lock: ${msg#error }" "fix the named cause and run acquire again." ;;
     *)
-      die 1 "the holder never reported (cat rc=${rc}); it was stopped, so this call holds nothing" \
+      die 1 "the holder never reported (read rc=${rc}); it was stopped, so this call holds nothing" \
         "run lane-lock status --lane ${lane}, then acquire again; if it stays HELD with no live session behind it, release it with --force." ;;
   esac
 }

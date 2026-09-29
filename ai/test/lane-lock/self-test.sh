@@ -28,7 +28,7 @@ ANCHORS=()
 cleanup() {
   local p
   for p in "${ANCHORS[@]}"; do kill "${p}" 2>/dev/null; done
-  for l in a b c d e f g h i j k; do "${TOOL}" release --lane "${l}" --force --lock-dir "${LD}" >/dev/null 2>&1; done
+  for l in a b c d e f g h i j k l; do "${TOOL}" release --lane "${l}" --force --lock-dir "${LD}" >/dev/null 2>&1; done
   chmod -R u+rwx "${TMP}" 2>/dev/null
   rm -rf "${TMP}"
 }
@@ -222,6 +222,32 @@ new_anchor; J="${ANCHOR}"
 out="$(timeout 20 "${TOOL}" acquire --lane j --anchor-pid "${J}" --lock-dir "${LD}")"; rc=$?
 if [ "${rc}" = 0 ]; then ok "acquire returns while the holder keeps running (no inherited stdout)"
 else bad "acquire returns while the holder keeps running (no inherited stdout)" "rc=${rc} ${out}"; fi
+
+# ---- 10. the holder reports before the acquirer is listening ---------------
+# A fifo drops its buffer when the last descriptor on it closes. If the holder
+# opens, writes and closes before the acquirer opens it, a reader that opens
+# only afterwards gets nothing. A `cat` shim on PATH forces that order: it opens
+# the fifo only once the holder has reported and exec'd `tail`. The acquirer
+# must still see ACQUIRED.
+SC="${TMP}/slowcat"; mkdir -p "${SC}"
+REAL_CAT="$(command -v cat)"
+cat > "${SC}/cat" <<SHIM
+#!/usr/bin/env bash
+# Bounded poll (10s): wait for the lane-l holder to reach tail, then be cat.
+for _ in \$(seq 1 200); do
+  pgrep -f '^lane-lock-holder:l ' >/dev/null && break
+  sleep 0.05
+done
+exec "${REAL_CAT}" "\$@"
+SHIM
+chmod +x "${SC}/cat"
+new_anchor; L="${ANCHOR}"
+out="$(PATH="${SC}:${PATH}" timeout 40 "${TOOL}" acquire --lane l --anchor-pid "${L}" --lock-dir "${LD}" 2>&1)"; rc=$?
+if [ "${rc}" = 0 ] && [[ "${out}" == ACQUIRED* ]]; then ok "holder reports before the acquirer reads: still ACQUIRED"
+else bad "holder reports before the acquirer reads: still ACQUIRED" "rc=${rc} ${out}"; fi
+out="$(LL status --lane l)"; rc=$?
+if [ "${rc}" = 3 ]; then ok "... and the lane is HELD afterwards"
+else bad "... and the lane is HELD afterwards" "rc=${rc} ${out}"; fi
 
 echo "lane-lock self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" = 0 ]
