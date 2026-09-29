@@ -523,10 +523,13 @@ allow_each "Q2 reads with quoted separators still pass" \
   'gh pr list --search "is:open (label:a) | x"' \
   "glab api projects/:id/issues --jq '.[] | .iid'"
 
-run "$(bash_json_cwd "$TMP/gh_scp" "git -c 'core.x=a;b' push origin HEAD")"
-check_text "Q3. git -c 'core.x=a;b' push (the push rule split inside the quote too)" 'to a github.com remote'
-run "$(bash_json_cwd "$TMP/gh_scp" "git -c 'core.x=a|b' push origin HEAD")"
-check_text "Q4. git -c 'core.x=a|b' push" 'to a github.com remote'
+# DND-1179 critic round 4: masking quoted separators in the push rule lost
+# these unspaced payload pushes. The mask was reverted; the quoted-option gap
+# it aimed at (`git -c 'core.x=a;b' push`) is DND-1206, out of scope here.
+run "$(bash_json_cwd "$TMP/gh_scp" "sh -c 'true;git push origin HEAD'")"
+check_text "Q3. sh -c 'true;git push origin HEAD' (unspaced, before git)" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" "bash -c 'git push;echo ok'")"
+check_text "Q4. bash -c 'git push;echo ok' (unspaced, after push)" 'to a github.com remote'
 run "$(bash_json_cwd "$TMP/gh_scp" "git commit -m 'a; b' && git log -1")"
 check "Q5. a quoted separator in a non-push git command still passes" allow
 

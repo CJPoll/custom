@@ -260,36 +260,13 @@ bless_wrapper_var() {
     }'
 }
 
-
-# mask_quoted_seps: inside single or double quotes, `;`, `&` and `|` are data,
-# so they become `_` before the text is dequoted and split (DND-1179). Without
-# this, `git -c 'core.x=a;b' push` split inside the quote and no push was
-# seen. `(`, `)` and newlines are left alone: a quoted `"$(git push …)"` still
-# runs, and the push pattern needs the `(` before `git`.
-mask_quoted_seps() {
-  awk -v Q="'" '
-    { buf = buf (NR > 1 ? "\n" : "") $0 }
-    END {
-      out = ""; st = ""
-      for (p = 1; p <= length(buf); p++) {
-        c = substr(buf, p, 1)
-        if (st == "" && c == "\\") { out = out c substr(buf, p + 1, 1); p++; continue }
-        if (st == "\"" && c == "\\") { out = out c substr(buf, p + 1, 1); p++; continue }
-        if (st == "" && (c == Q || c == "\"")) st = c
-        else if (st != "" && c == st) st = ""
-        else if (st != "" && (c == ";" || c == "&" || c == "|")) c = "_"
-        out = out c
-      }
-      printf "%s", out
-    }'
-}
 # Dequote (as forge-auth-guard does) so quoting cannot split the pattern, and
 # mask the wrapper forms `gh-athena git` / `glab-athena git` first so they are
 # never matched. DND-397: bless_wrapper_var first rewrites the one provable
 # `W=<wrapper>; "$W" git …` shape to the wrapper form.
 # Newlines become `;` here (not spaces, as in FLAT): a push's arguments end at
 # the end of its line, so `git push<NL>echo done` never reads `echo` as a remote.
-GFLAT=$(printf "%s" "$CMD" | bless_wrapper_var | mask_quoted_seps | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
+GFLAT=$(printf '%s' "$CMD" | bless_wrapper_var | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
 # `git`, bare or path-qualified, then only GLOBAL options (-C/-c take a value),
 # then `push`. `git commit -m "push"` does not match: `commit` is not an option.
 GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|]+|--?[^[:space:];&|]+))*[[:space:]]+push([[:space:]]|$|[;&|)])'
