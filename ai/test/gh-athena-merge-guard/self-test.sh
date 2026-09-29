@@ -11,9 +11,10 @@
 #     set for the PR's base branch. An empty set, a 403/404, or any failed
 #     lookup is "could not establish a gate", never "fine".
 #   * REFUSES a non-auto `pr merge` unless it names the exact head with
-#     --match-head-commit <sha> and the latest run of every check reported on
-#     that head concluded green (DND-1140: a superseded run is not judged; an
-#     order that cannot be read refuses). Zero reported checks is not green.
+#     --match-head-commit <sha> and every judged run on that head concluded
+#     green (DND-1140: a run superseded by a newer check suite's all-SUCCESS
+#     runs of the same check is not judged; an order that cannot be read
+#     refuses). Zero reported checks is not green.
 #   * REFUSES every `gh api` call that merges (DND-728): REST …/pulls/<n>/merge,
 #     …/merges, …/merge-upstream, and the GraphQL merge mutations, however the
 #     method, endpoint or query is spelled or supplied.
@@ -311,7 +312,7 @@ run pr merge 362 --squash --auto
   || bad "14. classic protection gate passes" "$(detail)"
 
 echo
-echo "--- a non-auto merge needs the exact head, and every check on it green ---"
+echo "--- a non-auto merge needs the exact head, and every judged check on it green ---"
 reset_fx; pr_view "${GREEN}"
 run pr merge 362 --squash
 refused && [[ "${ERR}" == *"--match-head-commit"* ]] \
@@ -368,18 +369,25 @@ echo "--- DND-1140: only the LATEST run of each check is judged; a newer red sti
 # on the SAME head, all green, and `gh pr checks` showed all green. The guard
 # judged every check-run on the head, so the superseded failure kept refusing:
 # "Test: COMPLETED/FAILURE". A check is identified by (app, workflow, event,
-# name) and a status by its context; within one identity only the run that
-# started last is judged. A run whose identity cannot be read is judged on its
-# own. An order that cannot be read, or a tie for newest, refuses.
+# name) and a status by its context. Within one identity, runs in an older
+# check suite are superseded only when the newest suite's runs are all SUCCESS;
+# every run inside the newest suite is judged. A run whose identity cannot be
+# read is judged on its own. An order that cannot be read, or a tie for
+# newest, refuses.
 PR488_NODES="$(cat "${HERE}/fixtures/gen_saas-pr488-d0889159-rollup-nodes.json")"
 ACT_APP=15368; CI_WF=256531677; OTHER_WF=256539999; OTHER_APP=90001; THIRD_APP=90002
 # cr <name> <status> <conclusion|""> <startedAt|null> [app-id] [app-slug] [workflow-id|null] [event|null]
+#   [suite-id|null] : default = the start time's digits, so runs started at
+#   different times are in different check suites (a close/reopen or a new
+#   workflow run); pass the same id to put runs in ONE suite.
+jstr() { [ "$1" = null ] && echo null || printf '"%s"' "$1"; }
 cr() {
-  jq -cn --arg n "$1" --arg s "$2" --arg c "$3" --argjson t "$( [ "$4" = null ] && echo null || printf '"%s"' "$4")" \
-    --argjson app "${5:-${ACT_APP}}" --arg slug "${6:-github-actions}" --argjson wf "${7:-${CI_WF}}" \
-    --argjson ev "$( [ "${8:-pull_request}" = null ] && echo null || printf '"%s"' "${8:-pull_request}")" '
+  local suite="${9:-$(tr -dc 0-9 <<<"$4")}"
+  jq -cn --arg n "$1" --arg s "$2" --arg c "$3" --argjson t "$(jstr "$4")" \
+    --argjson app "${5:-${ACT_APP}}" --argjson slug "$(jstr "${6:-github-actions}")" --argjson wf "${7:-${CI_WF}}" \
+    --argjson ev "$(jstr "${8:-pull_request}")" --argjson suite "${suite:-null}" '
     {__typename: "CheckRun", name: $n, status: $s, conclusion: (if $c == "" then null else $c end), startedAt: $t,
-     checkSuite: {app: {databaseId: $app, slug: $slug},
+     checkSuite: {databaseId: $suite, app: {databaseId: $app, slug: $slug},
                   workflowRun: (if $wf == null and $ev == null then null
                                 else {event: $ev, workflow: (if $wf == null then null else {databaseId: $wf, name: "CI"} end)} end)}}'
 }
@@ -405,7 +413,7 @@ refused && [[ "${ERR}" == *"Test: IN_PROGRESS/-"* ]] \
   && ok "L3. older FAILURE + newer IN_PROGRESS -> refused, names the in-progress run" \
   || bad "L3. newer in-progress refuses" "$(detail)"
 
-reset_fx; pr_view "$(arr "$(cr Test COMPLETED SUCCESS 2026-09-28T18:40:00Z)" "$(cr Test QUEUED "" null)")"
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED SUCCESS 2026-09-28T18:40:00Z)" "$(cr Test QUEUED "" null "" "" "" "" 4242)")"
 merge_pinned
 refused && [[ "${ERR}" == *"order cannot be read"* ]] \
   && ok "L3b. older SUCCESS + a QUEUED run with no start time -> refused (the order cannot be read)" \
@@ -441,12 +449,12 @@ refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
   && ok "L4d. Actions runs whose workflow cannot be read -> never deduped, the red one refuses" \
   || bad "L4d. unreadable workflow identity is judged alone" "$(detail)"
 
-reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:48:55Z)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z)")"
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:48:55Z "" "" "" "" 4201)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z "" "" "" "" 4202)")"
 merge_pinned
 refused && [[ "${ERR}" == *"share the newest start time"* ]] \
   && ok "L5. two runs tie for the newest start time -> refused" || bad "L5. tie refuses" "$(detail)"
 
-reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z)" "$(cr Test COMPLETED SUCCESS 'yesterday')")"
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z)" "$(cr Test COMPLETED SUCCESS 'yesterday' "" "" "" "" 4400)")"
 merge_pinned
 refused && [[ "${ERR}" == *"order cannot be read"* ]] \
   && ok "L6. a malformed start time -> refused (the order cannot be read)" || bad "L6. malformed time refuses" "$(detail)"
@@ -491,6 +499,42 @@ merge_pinned
 if [ "${RC}" = 0 ] && grep -q "^api graphql .*statusCheckRollup.* -f owner=CJPoll -f repo=gen_saas -f oid=${HEAD_SHA}\$" "${STUB_LOG}"; then
   ok "L10. the contexts are read for the PINNED head commit (oid=<sha>)"
 else bad "L10. rollup read pins the head" "$(detail)"; fi
+
+# Review round 1 (code-reviewer): three inputs where the first cut hid a red run.
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z "" "" "" "" 4300)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:40:05Z "" "" "" "" 4300)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+  && ok "L11. two current jobs share the name Test in ONE check suite (the earlier one red) -> both judged, refused" \
+  || bad "L11. same-suite runs are never superseded" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z)" "$(cr Test COMPLETED SKIPPED 2026-09-28T18:48:55Z)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] && [[ "${ERR}" == *"does not supersede"* ]] \
+  && ok "L12. an older FAILURE, then a newer SKIPPED run (a job gated off on reopen) -> refused, a skip supersedes nothing" \
+  || bad "L12. SKIPPED does not supersede" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z)" "$(cr Test COMPLETED NEUTRAL 2026-09-28T18:48:55Z)")"
+merge_pinned
+refused && [[ "${ERR}" == *"does not supersede"* ]] \
+  && ok "L12b. an older FAILURE, then a newer NEUTRAL run -> refused" || bad "L12b. NEUTRAL does not supersede" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED SUCCESS 2026-09-28T18:40:00Z)" "$(cr Test COMPLETED SKIPPED 2026-09-28T18:48:55Z)")"
+merge_pinned
+[ "${RC}" = 0 ] && merged \
+  && ok "L12c. an older SUCCESS, then a newer SKIPPED run -> merges (every judged run is green)" \
+  || bad "L12c. green older run + skipped newer run merges" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z "${ACT_APP}" null null null)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z "${ACT_APP}" null null null)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+  && ok "L13. an app slug that cannot be read (no workflow either) -> never folded, the red run refuses" \
+  || bad "L13. unreadable slug is judged alone" "$(detail)"
+
+reset_fx; pr_view "$(arr "$(cr Test COMPLETED FAILURE 2026-09-28T18:40:00Z "" "" "" "" null)" "$(cr Test COMPLETED SUCCESS 2026-09-28T18:48:55Z)")"
+merge_pinned
+refused && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+  && ok "L13b. a check suite id that cannot be read -> never folded, the red run refuses" \
+  || bad "L13b. unreadable suite is judged alone" "$(detail)"
 
 echo
 echo "--- dry-run seam: decides, never writes ---"

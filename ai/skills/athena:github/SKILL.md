@@ -287,14 +287,18 @@ declares a gate, and the only documented path is `integration-gate` then
   default to `--squash` otherwise.
 - **`gh-athena` enforces a merge floor itself (DND-609).** Before gh runs, the
   wrapper reads the PR and REFUSES (exit 3, `Fix:`) a merge unless it pins the
-  head with `--match-head-commit <sha>`, that sha IS the PR's head, and the
-  LATEST run of every check reported on it concluded green (CheckRun
-  `SUCCESS`/`NEUTRAL`/`SKIPPED`, commit status `SUCCESS`). A check is one
-  (app, workflow, event, name), or one status context; a run superseded by a
-  newer run of the same check (a re-run, a close/reopen) is printed and not
-  judged, and an order it cannot read (a missing start time, a tie for newest)
-  refuses (DND-1140). Zero reported checks is refused: no evidence is not
-  green. The pin also makes GitHub refuse the merge if the head moves after the
+  head with `--match-head-commit <sha>`, that sha IS the PR's head, and every
+  judged run on it concluded green (CheckRun `SUCCESS`/`NEUTRAL`/`SKIPPED`,
+  commit status `SUCCESS`). A run is NOT judged only when a newer check suite
+  (a close/reopen, a new workflow run) holds runs of the same check, all
+  `SUCCESS`; it is printed instead. A check is one (app, workflow, event,
+  name), or one status context. Runs inside one suite are all judged, a newer
+  `SKIPPED`/`NEUTRAL` run supersedes nothing, and an order the wrapper cannot
+  read (a missing start time, a tie for newest) refuses (DND-1140; the rules
+  are in `ai/lib/gh-merge-guard.sh` → `gmg_checks_green`). So after a flaky
+  red run, a close/reopen that re-runs CI green unblocks the merge; a
+  "re-run failed jobs" inside the same run does not. Zero reported checks is
+  refused: no evidence is not green. The pin also makes GitHub refuse the merge if the head moves after the
   read. A `gh api` merge (REST `PUT …/pulls/<n>/merge`, `…/merges`,
   `…/merge-upstream`, or a GraphQL merge / auto-merge / merge-queue mutation) is
   refused outright by `gh-athena` (DND-728); a bare `gh api` merge is denied by
