@@ -644,7 +644,7 @@ $old}" >&2
 
 # gmg_guard <gh args...> : the entry point. Returns 0 or exits 3.
 gmg_guard() {
-  local shown="gh $*" pr_json err rc url owner repo base head n_prot n_rules bad total w
+  local shown="gh $*" pr_json err rc url owner repo base head n_prot n_rules w
   gmg_expand_alias "$@"
   # The first non-flag word of the EXPANDED argv picks the command; `api` is
   # judged by gmg_api_guard (DND-728), everything else by the pr merge rules.
