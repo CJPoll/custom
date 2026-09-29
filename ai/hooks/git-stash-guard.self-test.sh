@@ -767,6 +767,8 @@ cat >> "$D1CFG/shell-snapshots/snapshot-zsh-1-fixture.sh" <<'EOF'
 alias -- grep='grep --color=auto --exclude-dir={.bzr,CVS,.git,.hg,.svn,.idea,.tox,.venv,venv}'
 alias -- git='git --no-pager'
 alias -g GRD=pop
+alias -- gsx='git stash '
+alias -- V=pop
 EOF
 # case_d1 <label> <deny|allow> <command> : decided from the fixture worktree
 # with the D1 snapshot.
@@ -809,6 +811,18 @@ case_d1 "D1-19. paired: an option before a non-verb" deny 'git stash -q guard'
 case_d1 "D1-20. paired: a zsh global alias as the verb" deny 'git stash GRD'
 case_d1 "D1-21. paired: a bare git stash at the end of a payload" deny 'finding-triage --title "false positives on commands that never run git stash"'
 case_d1 "D1-22. paired: git-stash with a writing verb" deny '/usr/libexec/git-core/git-stash pop'
+# Review round 1: shapes where zsh turns a word the table does not know into a
+# verb at run time. Each denied on origin/main and must stay denied.
+case_d1 "D1-38. paired: a global alias defined in the command, then eval" deny "alias -g W=pop; eval 'git stash W'"
+case_d1 "D1-39. paired: a global alias defined on an earlier line, then eval" deny "$(printf 'alias -g W=pop\neval "git stash W"')"
+case_d1 "D1-40. paired: a global alias set through galiases, then eval" deny "galiases[W]=pop; eval 'git stash W'"
+case_d1 "D1-41. paired: a zsh named directory as the verb" deny 'hash -d P=pop; git stash ~P'
+case_d1 "D1-42. paired: a named directory set through nameddirs" deny 'nameddirs[P]=pop; git stash ~P'
+case_d1 "D1-43. paired: an extendedglob negation as the verb" deny 'setopt extendedglob && git stash ^guard'
+case_d1 "D1-44. paired: an extendedglob exclusion as the verb" deny 'git stash po~x'
+case_d1 "D1-45. paired: an extendedglob # as the verb" deny 'git stash po#p'
+case_d1 "D1-46. paired: a snapshot alias ending in a space, then an alias verb" deny 'gsx V'
+case_d1 "D1-47. paired: a snapshot alias name as the verb" deny 'git stash V'
 # Fix 3: an assignment word is not a command. Its value is not a command word,
 # so no glob or expansion rule judges it; the next word keeps command position.
 case_d1 "D1-23. an assignment with a default expansion" allow 'X=${A:-b}'
@@ -837,7 +851,7 @@ for _vb in $_d1h; do
 done
 STATUS=0
 if [ -z "$_d1h" ] || [ -z "$_d1tab" ]; then
-  OUT="could not measure: git stash -h verbs [$_d1h], hook table [$_d1tab]"
+  OUT="could not measure: git stash -h verbs [$_d1h], hook table [$_d1tab]. Fix: check that \`git stash -h\` prints its usage lines here, and that git-stash-guard.sh still defines GSG_STASH_VERBS='...' on one line in that single-quoted form"
   record "D1-36. the hook's stash verb table covers the installed git" FAIL
 elif [ -n "$_d1miss" ] || [ "$_d1v" != "$_d1t" ]; then
   OUT="installed git $_d1v, table for $_d1t, verbs missing from the table:$_d1miss. Fix: add them to GSG_STASH_VERBS and set GSG_STASH_VERBS_GIT to $_d1v in git-stash-guard.sh"

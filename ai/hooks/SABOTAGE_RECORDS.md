@@ -836,3 +836,14 @@ external`: `expected [external .../settings.json.bak-20261001-142204], got [suit
 | S-D1-7 | `env` and `eval` added to the assignment-position keywords | D1-30 (`eval X=$G stash pop`), D1-34 (`env X=${G} stash`) |
 | S-D1-8 | a quote before `=` no longer stops an assignment (`!rq` removed) | O125, D1-31 (`"X"=${G} stash pop`) |
 | S-D1-9 | a keyword opens assignment position without itself being in command position (`pcp` dropped) | D1-37 (`echo then X=$G stash pop`) |
+
+Review round 1 (code-reviewer): the table relaxation let through words zsh
+turns into a verb at run time. Cases D1-38..47 added first; against head
+8cc390ff `RESULT: 402 passed, 9 failed` (D1-38..44, 46, 47); after the fix
+`RESULT: 411 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-D1-10 | the plain-word whitelist in `stash_write` removed | D1-44 (`git stash po~x`); D1-41..43 are also held by S-D1-11's rule |
+| S-D1-11 | an in-command alias/named-dir/option definition or eval no longer turns the table off | D1-38, D1-39, D1-40 (`alias -g W=pop; eval 'git stash W'` and variants) |
+| S-D1-12 | snapshot alias names no longer consulted (`ANYAL`) | D1-46 (`gsx V`), D1-47 (`git stash V`) |

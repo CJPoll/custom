@@ -25,8 +25,8 @@
 # `git stash -- f`), which are an implicit push. A literal word git refuses
 # as a stash verb is not a verb (see PRECISION (DND-1095 D1)). Also the
 # plumbing that rewrites the same list without the stash subcommand (see
-# plumb() in the awk
-# block): `reflog delete|expire|drop` naming the stash ref in ANY spelling
+# plumb() in the awk block): `reflog delete|expire|drop` naming the stash
+# ref in ANY spelling
 # (`stash`, `stash@{N}`, `refs/stash`, `refs/stash@{N}`) or given `--all`;
 # `update-ref` / `symbolic-ref` on the stash ref, with `--stdin`, or with no
 # literal ref (xargs-fed); a fetch/push refspec into the stash ref (either
@@ -126,9 +126,16 @@
 #   * `git stash <word>` for a literal word outside git's stash verb table
 #     (GSG_STASH_VERBS, compared on its letters in any case) is refused by
 #     git with exit 128 and writes nothing (`git stash guard` in prose). Only
-#     while the installed git is the table's version (GSG_STASH_VERBS_GIT);
-#     a bare or option-first stash, a verb built by expansion, glob or brace,
-#     and every zsh global alias (substituted, see ZSH) are still judged.
+#     while the installed git is the table's version (GSG_STASH_VERBS_GIT),
+#     and only for a plain word ([A-Za-z0-9._,:%+@/-]) that names no snapshot
+#     alias, in a command that defines no alias, named directory or option
+#     and runs no eval/source/`.`. Otherwise zsh can turn the word into a
+#     verb at run time (`~P`, `^x`, an alias after `alias x='git stash '`, a
+#     global alias defined then eval'd), so it stays a write. A bare or
+#     option-first stash, a verb built by expansion, glob or brace, and every
+#     snapshot global alias (substituted, see ZSH) are still judged.
+#     Residual: the version probed is the git first on the hook's PATH, so a
+#     command running another git binary is judged by this table too.
 #   * a word the shell reads as an assignment (an unquoted, unescaped
 #     NAME=..., at the start of a simple command, after a keyword, or after
 #     another such assignment) is not a command word: the glob-head and
@@ -215,7 +222,7 @@ if [ -n "$GSG_TMP" ] && [ -d "$GSG_TMP" ]; then
   trap 'exit 130' INT
   trap 'exit 143' TERM
   : > "$GSG_TMP/shaliases"; : > "$GSG_TMP/shalias.re"; : > "$GSG_TMP/aliases"
-  : > "$GSG_TMP/autocorrect"
+  : > "$GSG_TMP/autocorrect"; : > "$GSG_TMP/shnames"
   printf '%s' "$CMD" > "$GSG_TMP/cmd" || FAULT="the command could not be written to a work file"
 else
   GSG_TMP=""; FAULT="mktemp could not create a work dir"
@@ -251,6 +258,11 @@ if [ -z "$FAULT" ] && [ -d "$SNAPDIR" ]; then
     > "$GSG_TMP/shaliases.raw" 2>/dev/null
   sort -u "$GSG_TMP/shaliases.raw" > "$GSG_TMP/shaliases.uniq" 2>/dev/null \
     || FAULT="the shell snapshot aliases could not be sorted"
+  # Every alias NAME, whatever its value (DND-1095 D1): a word after `git
+  # stash` that names one is never read as a word git refuses, since zsh may
+  # expand it (after an alias ending in a space, or as a global alias).
+  [ -n "$FAULT" ] || sed -E 's/^alias (-[gs] )?(-- )?([^=]+)=.*/\3/' "$GSG_TMP/shaliases.uniq" \
+    > "$GSG_TMP/shnames" 2>/dev/null || FAULT="${FAULT:-the shell alias names could not be written}"
   # Relevant: a value naming git, stash, an expansion or a glob, or one whose
   # first word is itself a relevant alias (a chain), to a fixpoint.
   [ -n "$FAULT" ] || awk '
@@ -482,15 +494,28 @@ GSG_STASH_VERBS_GIT='2.54'
 # Probed for every command that reaches the evaluator, not only one naming
 # stash: a git alias (`git s guard`, s = stash) reaches the stash verdict
 # with no stash text in the command.
+# Off too when the command itself defines what zsh could expand a later word
+# into: an alias (`alias -g V=pop; eval 'git stash V'`), a named directory
+# (`hash -d P=pop`, nameddirs), an option (`setopt`), or re-reads text (eval,
+# source, `.`). The hook reads only the snapshot's aliases, so a word
+# defined in the command cannot be judged; the table is not trusted there.
+# The probe is the git first on the hook's PATH. A command that runs another
+# git binary (`/opt/x/bin/git stash <verb>`) is judged by this table too: a
+# residual only if that git adds a writing verb.
 STASH_TABLE_OK=0
 _gv=$(cd / && git --version 2>/dev/null | sed -nE 's/^git version ([0-9]+\.[0-9]+).*/\1/p')
 [ -n "$_gv" ] && [ "$_gv" = "$GSG_STASH_VERBS_GIT" ] && STASH_TABLE_OK=1
+if [ "$STASH_TABLE_OK" = 1 ] && printf '%s' "$FLAT" | grep -Eq \
+  -e '(^|[^[:alnum:]_.-])(alias|unalias|aliases|galiases|saliases|dis_aliases|dis_galiases|hash|nameddirs|setopt|unsetopt|set|options|emulate|eval|source|enable|disable)([^[:alnum:]_-]|$)' \
+  -e '(^|[;&|(]|[[:space:]])\.[[:space:]]'; then
+  STASH_TABLE_OK=0
+fi
 
 # ---- git stash, through every head the header lists -------------------------
 # Its inputs are files (BOUNDED HAND-OFF): argv carries only their paths.
 VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/shaliases" \
   -v cfgov="$UNREAD_CONFIG" -v bif="$GSG_TMP/builtins" \
-  -v stv="$GSG_STASH_VERBS" -v stok="$STASH_TABLE_OK" '
+  -v stv="$GSG_STASH_VERBS" -v stok="$STASH_TABLE_OK" -v anf="$GSG_TMP/shnames" '
   # slurp(f): the whole file, lines joined by newlines. An unreadable file
   # exits 3, which the caller reads as a fault.
   function slurp(f,   s, l, n, rc) {
@@ -514,6 +539,11 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     if (is_read(v)) return 0
     sub(/[<>].*/, "", v)
     if (!stok || v == "" || v ~ /^-/ || v ~ /[$`\001\002]/) return 1
+    # Only a plain word: zsh can still rewrite anything else at run time
+    # into a verb (`~P` a named directory, `^x` / `a~b` / `a#` extendedglob).
+    # The name of ANY snapshot alias stays a write too: an alias whose value
+    # ends in a space makes zsh expand the next word (`gsx V`).
+    if (v !~ /^[A-Za-z0-9._,:%+@\/-]+$/ || (v in ANYAL)) return 1
     # Compared on its letters alone, so prose punctuation around a verb
     # (`pop.`, `(drop)`) still reads as that verb; a word with no letters
     # stays a write.
@@ -884,6 +914,8 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   BEGIN {
     nv = split(stv, vl, " ")
     for (k = 1; k <= nv; k++) STV[vl[k]] = 1
+    nv = split(slurp(anf), vl, "\n")
+    for (k = 1; k <= nv; k++) if (vl[k] != "") ANYAL[vl[k]] = 1
     na = split(slurp(alf), lines, "\n")
     for (k = 1; k <= na; k++) {
       l = lines[k]
