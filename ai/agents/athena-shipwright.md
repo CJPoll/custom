@@ -139,8 +139,11 @@ Everything you learn from is local, under `~/dev/custom/`:
   (`~/.claude/projects/-home-cjpoll-dev-custom/memory/MEMORY.md`). A lesson
   captured more than once, or a gotcha that keeps recurring, is a signal a
   *systemic* fix (not just a memory note) is due. Every run, also run
-  `ai/skills/athena:memory-maintenance/scripts/index-budget`: exit 1 means
-  compact the index this run (that skill → *Index budget*); exit 2 is a fault.
+  `ai/skills/athena:memory-maintenance/scripts/index-budget --repo <R>` for
+  each repo the fleet ships from (the lead-time list below): exit 1 means
+  compact that index this run (that skill → *Index budget*); exit 2 is a
+  fault. (Measured 2026-09-29: gen_saas's index hit 26455 bytes, past the
+  loader cut, while this repo's read "within"; a captain found it.)
 - **Your own journal** — `journal.md` and the cursor `cursor.txt` in your state
   directory (this directory is gitignored; it is local runtime state, created on
   your first run). The journal records what you changed, the evidence, and —

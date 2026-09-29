@@ -78,6 +78,30 @@ fi
 has "unknown argument carries a Fix:" "Fix:" "$TMP/o"
 "$TOOL" --file > "$TMP/o" 2>&1; check "--file without a path exits 2" 2 $?
 
+# 9. --repo <path>: another repo's index, keyed the way Claude Code keys it.
+#    The project slug replaces EVERY non-alphanumeric character with '-', so
+#    ~/dev/gen_saas is -...-dev-gen-saas. A '/'-only rewrite computes
+#    -...-dev-gen_saas, a directory that never exists.
+mkdir -p "$TMP/home2" "$TMP/dev/gen_saas"
+git -C "$TMP/dev/gen_saas" init -q
+realrepo="$(cd "$TMP/dev/gen_saas" && pwd -P)"
+slug="$(printf '%s' "$realrepo" | sed 's/[^A-Za-z0-9]/-/g')"
+mkdir -p "$TMP/home2/.claude/projects/$slug/memory"
+gen "$TMP/home2/.claude/projects/$slug/memory/MEMORY.md" 3 5
+HOME="$TMP/home2" "$TOOL" --repo "$TMP/dev/gen_saas" > "$TMP/o" 2>&1; check "--repo with '_' in its path finds its index" 0 $?
+has "--repo names the slugged index" "$slug/memory/MEMORY.md" "$TMP/o"
+# ...from a linked worktree too: the key is the MAIN checkout, not the tree.
+git -C "$TMP/dev/gen_saas" commit -q --allow-empty -m init
+git -C "$TMP/dev/gen_saas" worktree add -q "$TMP/wt/gen_saas-x" -b x
+HOME="$TMP/home2" "$TOOL" --repo "$TMP/wt/gen_saas-x" > "$TMP/o" 2>&1; check "--repo from a worktree keys on the main checkout" 0 $?
+has "--repo worktree names the main checkout's index" "$slug/memory/MEMORY.md" "$TMP/o"
+# THE MISS: a path that is not a repo is exit 2 with a Fix:, never "within".
+mkdir -p "$TMP/notarepo"
+HOME="$TMP/home2" "$TOOL" --repo "$TMP/notarepo" > "$TMP/o" 2>&1; check "--repo on a non-repo exits 2" 2 $?
+has "--repo non-repo carries a Fix:" "Fix:" "$TMP/o"
+"$TOOL" --repo > "$TMP/o" 2>&1; check "--repo without a path exits 2" 2 $?
+"$TOOL" --repo "$TMP/dev/gen_saas" --file "$TMP/small.md" > "$TMP/o" 2>&1; check "--repo with --file exits 2" 2 $?
+
 echo "index-budget self-test: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ] || { echo "SELF-TEST FAILED"; exit 1; }
 echo "ALL CASES PASS"

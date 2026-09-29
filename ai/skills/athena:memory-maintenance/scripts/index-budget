@@ -14,7 +14,14 @@
 #
 # Usage:
 #   index-budget                 # this repo's project memory index
+#   index-budget --repo <path>   # the index of the repo at <path> (its main
+#                                # checkout's, from a worktree too)
 #   index-budget --file <path>   # any MEMORY.md
+#
+# The project key is Claude Code's slug of the MAIN checkout's absolute path:
+# every non-alphanumeric character becomes '-', so ~/dev/gen_saas is
+# -home-<user>-dev-gen-saas. (A '/'-only rewrite computes ...-gen_saas, a
+# directory that never exists; that is exit 2, not "within budget".)
 #   index-budget --help
 #
 # Budget (the skill's compaction trigger, below the loader's cut):
@@ -35,6 +42,7 @@ LOADER_BYTES=24986
 usage() { sed -n '2,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
 file=""
+repo=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -44,26 +52,37 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       file="$2"; shift 2 ;;
+    --repo)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "index-budget: --repo needs a path. Fix: pass --repo <path/to/a/checkout/of/the/repo>." >&2
+        exit 2
+      fi
+      repo="$2"; shift 2 ;;
     *)
       echo "index-budget: unknown argument: $1. Fix: run index-budget --help for usage." >&2
       exit 2 ;;
   esac
 done
 
+if [ -n "$file" ] && [ -n "$repo" ]; then
+  echo "index-budget: --file and --repo both given. Fix: pass one of them." >&2
+  exit 2
+fi
+
 if [ -z "$file" ]; then
-  here="$(cd "$(dirname "$0")" && pwd)"
-  common="$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  from="${repo:-$(cd "$(dirname "$0")" && pwd)}"
+  common="$(git -C "$from" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
   if [ -z "$common" ]; then
-    echo "index-budget: cannot resolve this repo's main checkout from $here. Fix: pass --file <path/to/MEMORY.md>." >&2
+    echo "index-budget: cannot resolve a main checkout from $from (not a git repo?). Fix: pass --repo <a checkout of the repo> or --file <path/to/MEMORY.md>." >&2
     exit 2
   fi
-  main="$(dirname "$common")"
-  slug="$(printf '%s' "$main" | tr '/' '-')"
+  main="$(cd "$(dirname "$common")" && pwd -P)"
+  slug="$(printf '%s' "$main" | sed 's/[^A-Za-z0-9]/-/g')"
   file="$HOME/.claude/projects/$slug/memory/MEMORY.md"
 fi
 
 if [ ! -f "$file" ] || [ ! -r "$file" ]; then
-  echo "index-budget: no readable index at $file. Fix: check the project slug (main checkout path with / as -) or pass --file; a missing index is not a small one." >&2
+  echo "index-budget: no readable index at $file. Fix: check the project slug (main checkout path, every non-alphanumeric as -) or pass --file; a missing index is not a small one." >&2
   exit 2
 fi
 
