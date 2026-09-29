@@ -28,6 +28,19 @@ items fixed, nits replied/resolved) with threads replied.
   unfixed code and then passing, per `~/dev/custom/ai/CLAUDE.md` → *TDD
   Workflow*. The standing judge's PASS covers the fix commit's message; the
   report and PR body are yours to check.
+- **The review floor ran on this change.** The captain's local `code-reviewer`
+  + `adr-reviewer` pair is mandatory on every PR/MR (`athena-captain` →
+  *Drive CI and review to green*), and the captain names it in its report "so
+  the athena-admiral can board on it". Check that the report names it. A
+  review bot is not the floor, and on a repo with no bot (gen_saas) the bot
+  clause above is empty. A captain that reported DONE-LOCAL (committed, no PR:
+  CI paused) never reached that step and says "Review floor: not run". Before
+  you merge that head, run the floor yourself against the diff over its
+  merge-base, or resume the captain to run it; fix must-fix items like any
+  other round. Measured 2026-09-29 (`2026-09-28-unified-priorities`): DND-1183
+  and DND-1184 both reported DONE-LOCAL with "Review floor: not run … whoever
+  opens the PR should run" it, and the admiral's queue had it push and open
+  those PRs itself.
 
 **A merge criterion is scoped to its evidence model — in a repo with NO CI,
 "green" proves nothing and the report IS the gate.** The readiness rules assume
