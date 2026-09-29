@@ -17,6 +17,10 @@
 #
 # Run: bash test/doctor/self-test.sh
 set -uo pipefail
+# DND-1163: the bins resolve the session's project from CLAUDE_PROJECT_DIR,
+# then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so the fixtures, not
+# the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL="$(cd "${HERE}/../.." && pwd)"
@@ -1112,6 +1116,23 @@ if command -v ruby >/dev/null 2>&1 && [ -f "${REPO}/ai/inbox/lib/registry.rb" ];
 else
   ok "symlinked-skills root test skipped (no ruby or no registry.rb in this checkout)"
 fi
+
+echo "== session-project (DND-1163): the doctor diagnoses the SESSION's project =="
+export ATHENA_INBOX_ROOT="${TMP}/sp-root"; mkdir -p "${ATHENA_INBOX_ROOT}/projects"; chmod 700 "${ATHENA_INBOX_ROOT}" "${ATHENA_INBOX_ROOT}/projects"
+sp_repo() { mkdir -p "${TMP}/sp/$1"; ( cd "${TMP}/sp/$1" && git init -q . ); printf '%s\n' "$(cd "${TMP}/sp/$1" && pwd -P)"; }
+SP_L="$(sp_repo lproj)"; SP_W="$(sp_repo wproj)"; SP_NOREPO="${TMP}/sp/norepo"; mkdir -p "${SP_NOREPO}"
+for sp in lproj wproj; do
+  jq -n --arg r "$(cd "${TMP}/sp/${sp}" && realpath "$(git rev-parse --git-common-dir)")" --arg p "${sp}-slack.jsonl" \
+    '{v:1, repo:$r, channels:{slack:{kind:"log", path:$p, schema_v:[1]}}}' > "${ATHENA_INBOX_ROOT}/projects/${sp}.json"
+done
+SPOUT="$(cd "${SP_L}" && CLAUDE_PROJECT_DIR="${SP_W}" doctor_check_session_project 2>/dev/null)"
+assert_finding "session project and cwd in different entries -> fail naming the session project" "${SPOUT}" fail session-project "${SP_W}"
+SPOUT="$(cd "${SP_NOREPO}" && CLAUDE_PROJECT_DIR="${SP_W}" doctor_check_session_project 2>/dev/null)"
+assert_finding "session project resolved -> ok naming its source" "${SPOUT}" ok session-project "project-dir"
+SPOUT="$(cd "${SP_L}" && doctor_check_session_project 2>/dev/null)"
+assert_finding "no session signal -> ok, source cwd" "${SPOUT}" ok session-project "cwd"
+SPOUT="$(cd "${SP_L}" && CLAUDE_PROJECT_DIR=relative doctor_check_session_project 2>/dev/null)"
+assert_finding "an unusable CLAUDE_PROJECT_DIR -> fail" "${SPOUT}" fail session-project "relative"
 
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0

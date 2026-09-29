@@ -140,11 +140,14 @@ collect_findings() {
   doctor_check_captures
   doctor_check_watchdog
   doctor_check_cron
-  doctor_check_entry "."
-  doctor_check_channels "${DOCTOR_MATCHED_ENTRY}" "."
-  doctor_check_server "."
+  # The SESSION's project, not the shell cwd (DND-1163): named and checked
+  # first, then handed to every per-project check below.
+  doctor_check_session_project
+  doctor_check_entry "${DOCTOR_PROJECT_DIR}"
+  doctor_check_channels "${DOCTOR_MATCHED_ENTRY}" "${DOCTOR_PROJECT_DIR}"
+  doctor_check_server "${DOCTOR_PROJECT_DIR}"
   doctor_check_server_reachability
-  doctor_check_send_paths "${DOCTOR_MATCHED_ENTRY}" "."
+  doctor_check_send_paths "${DOCTOR_MATCHED_ENTRY}" "${DOCTOR_PROJECT_DIR}"
   doctor_check_server_failed_deliveries
   doctor_check_server_refused_deliveries
 }

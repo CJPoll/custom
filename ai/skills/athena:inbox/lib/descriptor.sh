@@ -359,6 +359,31 @@ descriptor_has_channel() {
   printf '%s' "$1" | jq -e --arg c "$2" '.channels | has($c)' >/dev/null 2>&1
 }
 
+# descriptor_owner_differs <session-entry-json> <cwd-entry-json>   (DND-1163)
+#
+# Status 0 when the shell's cwd sits in a DIFFERENT registered project from the
+# session's own, so resolving by the cwd would hand this session another
+# project's channels. Either argument may be "" (no entry owns that directory).
+#   * cwd entry ""              -> 1: the cwd is in no registered project, so
+#                                  it cannot steal anything; the session's own
+#                                  project decides, entry or not.
+#   * both non-empty, same repo -> 1: a worktree or subdirectory of the same
+#                                  project.
+#   * otherwise                 -> 0, INCLUDING a session with no entry of its
+#                                  own: that is the drift, not a licence to use
+#                                  the cwd's project instead.
+# Entries are compared by their `repo` key, the one field that says who owns
+# them.
+descriptor_owner_differs() {
+  local mine="$1" here="$2" a b
+  [ -n "${here}" ] || return 1
+  [ -n "${mine}" ] || return 0
+  a="$(printf '%s' "${mine}" | jq -r '.repo // empty' 2>/dev/null)"
+  b="$(printf '%s' "${here}" | jq -r '.repo // empty' 2>/dev/null)"
+  if [ -n "${a}" ] && [ "${a}" = "${b}" ]; then return 1; fi
+  return 0
+}
+
 # --- selection: which entry owns this session -------------------------------
 
 # descriptor_select <repo-id>   (records on stdin: "<source>\t<one-line json>")

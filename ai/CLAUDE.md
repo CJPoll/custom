@@ -640,13 +640,21 @@ contract, which is why they live here.
 
 A project opts in through a **machine-local registry entry**,
 `$ATHENA_INBOX_ROOT/projects/<project>.json`, which is untracked and never lives
-in the project. Ownership still resolves from the session's cwd: cwd → realpath
-of `git rev-parse --git-common-dir` → the entry whose `repo` is that path → its
-channels. That key is identical for a repo's main checkout and all its
-worktrees, so a worktree session gets its parent repo's channels. A session only
-ever sees its own project's channels; never fall back to scanning the inbox root
-for surfaces the matched entry does not declare. No entry is not a fault — zero
-channels, exit 0.
+in the project. Ownership resolves from the session's project directory
+(`$CLAUDE_PROJECT_DIR`, else the Claude Code process's own cwd, else the shell
+cwd): that directory → realpath of `git rev-parse --git-common-dir` → the entry
+whose `repo` is that path → its channels. A shell cwd inside a different
+registered project is refused, not used. That key is identical for a repo's
+main checkout and all its worktrees, so a worktree session gets its parent
+repo's channels. A session only ever sees its own project's channels; never
+fall back to scanning the inbox root for surfaces the matched entry does not
+declare. No entry is not a fault — zero channels, exit 0.
+
+**Later (2026-09-28, DND-1163):** this read "Ownership still resolves from the
+session's cwd: cwd → realpath …". Superseded: the Bash tool keeps a `cd` across
+calls, so a walt_ui session standing in `~/dev/custom` claimed a Slack thread
+for custom's inbox with exit 0. The rule's home is the contract → *Repo
+identity: the git common dir*.
 
 **Later (2026-09-19):** this paragraph previously said a project opts in by
 committing **`.athena-inbox.json`** at its **repo root**, resolved from the git
