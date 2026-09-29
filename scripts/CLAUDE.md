@@ -389,7 +389,10 @@ leaked a live client for hours in 2026-09.
   name. The tag is read by `lib/proc-env-scan.awk`, never by a plain
   `grep -z` over `/proc/<pid>/environ`: that read comes back empty or cut
   short while a process is inside execve, which is how a mock mid-way through
-  the asdf shim chain outlived its suite (DND-1016). Reuse the scan for any
+  the asdf shim chain outlived its suite (DND-1016). Just after an exec, bash
+  also splits each entry in place while it imports it ('=' briefly a NUL), so
+  the scan re-reads a torn entry instead of calling it untagged (DND-1202).
+  Reuse the scan for any
   other environ lookup. Self-test: `test/suite-reaper/` (it also runs
   `repro-real-suites.sh`, which SIGTERMs the two mock-bearing suites at the
   measured windows).

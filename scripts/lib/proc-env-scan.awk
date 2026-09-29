@@ -41,6 +41,13 @@
 # 0.05s (bounded by settle_s), never counted as "no". Equal bounds that are
 # still the same on a re-read are a genuinely empty environment.
 #
+# A settled read can still be torn (DND-1202). After the exec, the new program
+# owns that memory and may rewrite it in place: bash's startup writes a NUL
+# over each entry's '=' while it imports the entry, then puts the '=' back.
+# A read in between shows the entry split in two ("ATHENA_REAP_TAGS\0<tags>"),
+# and was read as "no": 5 of 9929 scans of a bash spinner, and 1 of 200 S12
+# scans. The needle's own entry read as a bare name is "cannot tell yet" too.
+#
 # 0 0 is also what the kernel shows for ANY process the reader may not trace
 # (a NON-DUMPABLE one: setuid/file-caps execs such as sudo or fusermount3, or
 # a prctl(PR_SET_DUMPABLE, 0) caller such as ssh-agent). Those are told apart
@@ -59,7 +66,12 @@
 #   * the "equal bounds, still equal on a re-read" rule assumes a re-exec
 #     lands at a new, randomized stack address. With ASLR off
 #     (randomize_va_space=0, or setarch -R) a process re-exec'ing itself
-#     between the two reads could read as "empty".
+#     between the two reads could read as "empty". It also assumes the
+#     kernel's walk of a new environment (microseconds) is not descheduled
+#     for the whole 0.05s between the two reads; under PREEMPT a preempted
+#     walk could read as "empty". Not observed in 26k scans (DND-1202);
+#   * a process that keeps the needle's entry torn (its '=' a NUL) for longer
+#     than settle_s is named UNKNOWN (exit 4): loud, never "no".
 #
 # Shared by scripts/test/lib/suite-reaper.bash (suite_env_pids) and meant for
 # any other shell reader of /proc/<pid>/environ (DND-1105:
@@ -100,7 +112,7 @@ function real_uid(pid,    f, line, a, u) {
 }
 
 # classify(pid) -- 0 matches, 1 does not (or cannot be ours), 2 cannot tell yet.
-function classify(pid,    b0, b1, f, e, r, n, hit, got, list, st, saved_rs) {
+function classify(pid,    b0, b1, f, e, r, n, hit, torn, got, list, st, saved_rs) {
   if (!stat_of(pid)) return 1
   if (ST_STATE == "Z" || ST_STATE == "X" || ST_STATE == "x") return 1
   if (ST_START < since) return 1
@@ -123,10 +135,11 @@ function classify(pid,    b0, b1, f, e, r, n, hit, got, list, st, saved_rs) {
   }
   f = root "/" pid "/environ"
   saved_rs = RS; RS = "\0"
-  n = 0; hit = 0; got = 0
+  n = 0; hit = 0; torn = 0; got = 0
   while ((r = (getline e < f)) > 0) {
     got = 1
     n += length(e) + length(RT)            # the last entry may lack its NUL
+    if (e == var_name) torn = 1             # our entry, its '=' read as NUL
     if (mode == "exact") {
       if (e == needle) hit = 1
     } else if (substr(e, 1, 17) == "ATHENA_REAP_TAGS=") {
@@ -139,13 +152,24 @@ function classify(pid,    b0, b1, f, e, r, n, hit, got, list, st, saved_rs) {
   if (ST_E0 != b0 || ST_E1 != b1) return 2  # an exec happened during the read
   if (r < 0 && !got) return 2               # unreadable with settled bounds: transient
   if (n != b1 - b0) return 2                # a short read: not the whole environment
-  return hit ? 0 : 1
+  if (hit) return 0
+  # DND-1202: the exec is over and the bounds are settled, but the new
+  # program may be rewriting its environment in place: bash's startup writes
+  # a NUL over each entry's '=' while it imports it, then puts it back. A read
+  # in between shows our entry split in two, and without this it read as "no"
+  # (1 of 200 S12 scans). Only OUR entry torn counts: a process caught
+  # importing another variable can still be told.
+  if (torn) return 2
+  return 1
 }
 
 BEGIN {
   if (length("\303\251") != 2) die(2, "gawk is counting characters, not bytes, so the byte count cannot be checked against the kernel's bounds.", "invoke it as gawk -b -f proc-env-scan.awk ...")
   if (mode != "tag" && mode != "exact") die(2, "mode must be tag or exact, got '" mode "'.", "pass -v mode=tag or -v mode=exact.")
   if (needle == "") die(2, "empty needle; an empty key would match nothing and read as 'none left'.", "pass -v needle=<tag or VAR=value>.")
+  if (mode == "exact" && index(needle, "=") < 2) die(2, "mode exact needs a VAR=value needle, got '" needle "'; without a name, a torn read of it cannot be recognized.", "pass -v needle=<VAR>=<value>.")
+  # The bare name our entry shows while it is mid-rewrite (its '=' a NUL).
+  var_name = (mode == "exact") ? substr(needle, 1, index(needle, "=") - 1) : "ATHENA_REAP_TAGS"
   if (uid !~ /^[0-9]+$/) die(2, "uid must be a number, got '" uid "'.", "pass -v uid=\"$(id -u)\".")
   if (since !~ /^[0-9]+$/) die(2, "since must be a starttime in clock ticks, got '" since "'.", "pass the caller's own starttime (field 22 of /proc/<pid>/stat).")
   if (root == "") root = "/proc"
@@ -183,8 +207,8 @@ BEGIN {
     f = root "/" unknown[j] "/cmdline"; saved = RS; RS = "\0"; cmd = ""
     while ((getline part < f) > 0) cmd = cmd (cmd == "" ? "" : " ") part
     close(f); RS = saved
-    printf "proc-env-scan: pid %s stayed unreadable for %ss (its environment bounds never settled), so whether it carries %s is UNKNOWN: %s\n  Fix: find what that process is doing (it is stuck in execve or its environ is unreadable) and re-run; this scan could not look, so it exits 4.\n", \
-      unknown[j], settle_s, needle, cmd > "/dev/stderr"
+    printf "proc-env-scan: pid %s stayed unreadable for %ss (its environment bounds never settled, or its %s entry stayed mid-rewrite), so whether it carries %s is UNKNOWN: %s\n  Fix: find what that process is doing (it is stuck in execve, its environ is unreadable, or it holds its environment half-rewritten) and re-run; this scan could not look, so it exits 4.\n", \
+      unknown[j], settle_s, var_name, needle, cmd > "/dev/stderr"
   }
   fflush()
   exit (nu > 0 ? 4 : 0)
