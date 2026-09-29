@@ -28,7 +28,7 @@ ANCHORS=()
 
 cleanup() {
   local p
-  for p in "${ANCHORS[@]}"; do kill "${p}" 2>/dev/null; done
+  for p in "${ANCHORS[@]}"; do kill -KILL "${p}" 2>/dev/null; done
   for l in a b c d e f g h i j k l m n; do "${TOOL}" release --lane "${l}" --force --lock-dir "${LD}" >/dev/null 2>&1; done
   chmod -R u+rwx "${TMP}" 2>/dev/null
   rm -rf "${TMP}"
@@ -40,6 +40,9 @@ bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [ -n "${2-}" ] && printf '%
 
 # new_anchor -- start a long sleep standing in for the Claude session; its pid
 # is in ANCHOR. Called in THIS shell (never in $(...)), so cleanup sees it.
+# Anchors are killed with SIGKILL: the EXIT trap makes bash catch SIGTERM, and
+# a TERM that lands in the forked child before it execs `sleep` is lost, so
+# the sleep lives on and a `wait` on it hangs (seen 2 runs in 10).
 ANCHOR=""
 new_anchor() {
   sleep 3600 </dev/null >/dev/null 2>&1 &
@@ -91,7 +94,7 @@ if [ "${rc}" = 0 ]; then ok "acquire after the crash succeeds"; else bad "acquir
 # ---- 3. the anchor (session) exiting frees the lock -----------------------
 new_anchor; B="${ANCHOR}"
 LL acquire --lane b --anchor-pid "${B}" >/dev/null 2>&1
-kill "${B}"
+kill -KILL "${B}"
 if freed_within b 10; then ok "the anchor exiting frees the lock"
 else bad "the anchor exiting frees the lock" "$(LL status --lane b)"; fi
 
@@ -159,7 +162,7 @@ else bad "... and the lock ended with that ancestor" "$(LL status --lane f)"; fi
 out="$(LL acquire --lane g --anchor-comm no-such-comm-dnd261 2>&1)"; rc=$?
 if [ "${rc}" = 1 ] && [[ "${out}" == *"no-such-comm-dnd261"*"Fix:"* ]] && [ ! -e "${LD}/g.lock" ]; then ok "no anchor ancestor: exit 1 naming the comm searched, no lock"
 else bad "no anchor ancestor: exit 1 naming the comm searched, no lock" "rc=${rc} ${out}"; fi
-new_anchor; dead="${ANCHOR}"; kill "${dead}"; wait "${dead}" 2>/dev/null
+new_anchor; dead="${ANCHOR}"; kill -KILL "${dead}"; wait "${dead}" 2>/dev/null
 out="$(LL acquire --lane g --anchor-pid "${dead}" 2>&1)"; rc=$?
 if [ "${rc}" = 1 ] && [[ "${out}" == *"Fix:"* ]]; then ok "dead anchor: exit 1, never ACQUIRED"
 else bad "dead anchor: exit 1, never ACQUIRED" "rc=${rc} ${out}"; fi
@@ -254,8 +257,9 @@ else bad "a record naming the caller's anchor does not authorize release (4), st
 # ---- 12. a holder that reports after acquire gave up never holds the lane --
 # A `date` shim on PATH (the holder runs `date` after it has the lock and
 # before it reports) blocks on a gate fifo, so the holder cannot report within
-# acquire's read window. Acquire must exit 1 AND leave no holder behind: once
-# the gate opens, a late holder that survived would report and hold the lane.
+# acquire's read window. Acquire must exit 1 AND leave no holder behind: the
+# lane must be FREE while the shim is still stuck (it holds an inherited fd 9),
+# and once the gate opens a late holder that survived would report and hold it.
 DS="${TMP}/gatedate"; mkdir -p "${DS}"
 GATE="${TMP}/date-gate"; mkfifo "${GATE}"
 REAL_DATE="$(command -v date)"
@@ -268,6 +272,9 @@ SHIM
 chmod +x "${DS}/date"
 new_anchor; N="${ANCHOR}"
 out="$(PATH="${DS}:${PATH}" timeout 60 "${TOOL}" acquire --lane n --anchor-pid "${N}" --wait 0 --lock-dir "${LD}" 2>&1)"; rc=$?
+# Probe BEFORE the gate opens: the held-up child (the shim) inherited the
+# holder's fd 9, so killing the holder's pid alone would leave the lane held.
+now_out="$(LL status --lane n 2>&1)"; now_rc=$?
 exec 8<>"${GATE}"; printf 'go\n' >&8          # let the held-up holder go on
 for _ in $(seq 1 200); do [ -e "${TMP}/date-passed" ] && break; sleep 0.05; done
 exec 8>&-
@@ -278,6 +285,8 @@ for _ in $(seq 1 40); do                          # bounded: 2 s for a late hold
 done
 if [ "${rc}" = 1 ] && [[ "${out}" == *"Fix:"* ]]; then ok "holder held up past the read window: acquire exits 1"
 else bad "holder held up past the read window: acquire exits 1" "rc=${rc} ${out}"; fi
+if [ "${now_rc}" = 0 ] && [[ "${now_out}" == FREE* ]]; then ok "... and the lane is FREE right after that exit 1, before the stuck child moves"
+else bad "... and the lane is FREE right after that exit 1, before the stuck child moves" "rc=${now_rc} ${now_out}"; fi
 if [ -z "${late}" ]; then ok "... and no late holder takes the lane afterwards"
 else bad "... and no late holder takes the lane afterwards" "$(LL status --lane n)"; fi
 

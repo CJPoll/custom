@@ -110,6 +110,31 @@ proc_ppid() {
   printf '%s\n' "$2"
 }
 
+# signal_holder <sig> <pid> -- signal a holder AND every process in its
+# session. The holder's fd 9 (the lock) is inherited by every child it forks
+# (`$(date ...)`, `date`, `stat`, `mv`, `flock`), so killing the holder's pid
+# alone can leave a stuck child holding the lock. The holder is started under
+# setsid(1), so its pid is its session and process-group id; the group is
+# signalled only when <pid> sits in such a group (pgid = sid) that is not the
+# caller's own, so a stray match can never take down this shell's group.
+signal_holder() {
+  local stat rest pgid sid mine
+  stat="$( { cat "/proc/$2/stat"; } 2>/dev/null)" || { kill "-$1" "$2" 2>/dev/null; return 0; }
+  rest="${stat##*) }"
+  # shellcheck disable=SC2086
+  set -- "$1" "$2" ${rest}
+  pgid="$5" sid="$6"
+  mine="$( { cat "/proc/$$/stat"; } 2>/dev/null)"; mine="${mine##*) }"
+  # shellcheck disable=SC2086
+  mine="$(set -- ${mine}; printf '%s' "$3")"
+  if valid_pid "${pgid}" && [ "${pgid}" = "${sid}" ] && [ "${pgid}" != "${mine}" ]; then
+    kill "-$1" -- "-${pgid}" 2>/dev/null
+  else
+    kill "-$1" "$2" 2>/dev/null
+  fi
+  return 0
+}
+
 # find_anchor <comm> -- nearest ancestor of this process whose comm is <comm>.
 # Status 1: walked to pid 1 and found none. Status 2: could not read an
 # ancestor (hidepid, an ancestor exiting), so "none" is unknown.
@@ -350,7 +375,7 @@ do_acquire() {
     "held "*|busy) ;;
     *) # No clean answer: stop the holder, so a late one never holds the lane
        # behind an exit 1.
-       kill -KILL "${holder}" 2>/dev/null
+       signal_holder KILL "${holder}"
        wait "${holder}" 2>/dev/null ;;
   esac
   rm -f -- "${fifo}"
@@ -394,9 +419,9 @@ do_release() {
   [ -n "${pids}" ] || die 4 "lane ${lane} is held under anchor${others}, not this caller's anchor ${anchor_pid}" \
     "only the session that acquired it (or its admiral) releases it; a human recovering a wedged lane passes --force."
   pids="${pids# }"
-  for pid in ${pids}; do kill -TERM "${pid}" 2>/dev/null; done
+  for pid in ${pids}; do signal_holder TERM "${pid}"; done
   if ! flock -w 5 -s "${lock}" true 2>/dev/null; then
-    for pid in ${pids}; do kill -KILL "${pid}" 2>/dev/null; done
+    for pid in ${pids}; do signal_holder KILL "${pid}"; done
     flock -w 5 -s "${lock}" true 2>/dev/null || die 1 "lane ${lane} is still held after signalling ${pids}" \
       "run lane-lock status --lane ${lane}, then kill the named holder_pid by hand."
   fi
