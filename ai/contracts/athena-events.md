@@ -5199,7 +5199,9 @@ app the event arrived on, never from the payload.
   A personal ticket whose project stays `unavailable` is one (*Domain and
   owner-only items*).
 - **Each obligation ends in exactly one outcome:**
-  - `indexed`: an item was created, updated or closed;
+  - `indexed`: an item was created, updated or closed, or the event
+    converged on an existing row without writing because the row already
+    holds newer evidence (*Idempotency is per (event, item)*);
   - `skipped:<cause>`: the event is legitimately not an item. The causes are
     `not-an-ask`, `unbound-subscription` and `unknown-item` (a delete, or a
     forge close, for an item never indexed);
@@ -5226,7 +5228,9 @@ item's identity (next subsection), so a redelivered or duplicated event
 converges on the same row. The index does not rely on unique event keys: the
 event store does not enforce one. Each row keeps `source_revision`, the
 event's `payload.revision`. An event whose revision is older than the row's
-does not overwrite the row. An event with an equal revision, or with none, is
+does not overwrite the row; it writes nothing, and its obligation still
+settles `indexed`, since the item it names exists and is newer. An event with
+an equal revision, or with none, is
 applied in processing order. Notion's revision is minute-granular, so two
 same-minute events processed out of order can leave the older state until the
 item's next change. The index claims no finer ordering than that.
@@ -5448,8 +5452,8 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   fields and `source_revision` refresh. It is neither a second close nor a
   skip, and its obligation settles `indexed` (*At-least-once, row by row*).
   A close whose `revision` is older than the row's, on any item, writes
-  nothing and also settles `indexed`: the item already holds newer evidence,
-  as for any older update. A new `forge_review` item is created `active` and `owner_only`,
+  nothing and also settles `indexed`: the item already holds newer evidence
+  (*Idempotency is per (event, item)*). A new `forge_review` item is created `active` and `owner_only`,
   never `proposed`: the ingress routes only a merge request that names the
   owner as a reviewer, so the request is already addressed to the owner and
   has nothing to promote (*created `active`*, above). A
