@@ -104,6 +104,12 @@ notification. Its envelope is:
   family carries `source` `platform`, which no ingress form described. Why:
   its producer is the server itself, not an ingress, so none of the four
   forms is true of it.
+
+  **Later (2026-09-29):** the set of forms was exactly five, without
+  `webhook:gitlab`. Superseded (DND-439): the `forge.review.*` family arrives
+  on a GitLab webhook, which no existing form described. GitLab signs nothing,
+  so that ingress verifies a per-hook secret token instead of a signature
+  (*Sender verification and payload completeness*).
 - **`idempotency_key`** — see *Idempotency is per (event, rule)*.
 
 ### The event taxonomy is open
@@ -1522,7 +1528,9 @@ an event with the same (owner, `type`, `idempotency_key`) is already stored,
 and routes only if none is. A stored one answers duplicate and routes nothing,
 so two concurrent or repeated arrivals of one source event cannot both route.
 A route that fails rolls back, leaves no row, and a later arrival routes
-again. Three ingresses opt in:
+again. Both hold because the caller opens that one transaction and the
+router's own transaction nests inside it, so the lock, the check and the
+route's rows commit or roll back together. Three ingresses opt in:
 
 - `slack.interaction.received`, for a click that claims nothing (anyone
   else's, or the owner's on a non-terminal button), so a repeated delivery of
@@ -2859,8 +2867,12 @@ under-encrypted**:
   for it, for the owner to paste into GitLab; no read returns it again. A
   rotation mints a new one and the old stops verifying at once. Output a
   host keeps (an `rpc` over `aws ssm send-command`, whose stdout SSM
-  retains) never carries it: a call that returns the secret runs only in an
-  interactive session. Any future adapter
+  retains) MUST NOT carry it. What the code enforces is the opt-in: a
+  default register call returns no secret, so it is safe over
+  send-command. Running a call that does return the secret (a register that
+  asks for it, or any rotation) only in an interactive session is an
+  **operator procedure**, not a guarantee: nothing refuses such a call over
+  send-command. Any future adapter
   credential (SMTP, SMS, Discord bot) joins this set under the same story.
 
   **Later (2026-09-22):** this named the Notion read token a **"read-only,
