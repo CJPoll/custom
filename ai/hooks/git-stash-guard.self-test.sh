@@ -840,6 +840,14 @@ case_d1 "D1-33. paired: a git-stash path assigned, then run bare" deny 'X=/usr/l
 case_d1 "D1-34. paired: env reads NAME=value itself" deny 'env X=${G} stash'
 case_d1 "D1-35. paired: a glob command word after an assignment" deny 'X=1 /usr/bin/g?t stash pop'
 case_d1 "D1-37. paired: a keyword spelled as an argument opens no assignment" deny 'echo then X=$G stash pop'
+# Critic round 2: a word after a CLOSING `)` or backtick is an argument to
+# what the substitution produced (which can be eval), not a simple-command
+# start, so it is never an assignment.
+case_d1 "D1-48. paired: an assignment-shaped word after \$(echo eval)" deny '$(echo eval) X=/usr/bin/git\;\$X stash pop'
+case_d1 "D1-49. paired: the same after a backtick substitution" deny '`echo eval` X=/usr/bin/git\;\$X stash pop'
+case_d1 "D1-50. paired: a keyword after \$(...) opens no assignment" deny '$(echo eval) then X=$G stash pop'
+case_d1 "D1-51. an assignment after a substitution and a separator" allow 'Y=$(date); X=${A:-b}'
+case_d1 "D1-52. an assignment opening a backtick substitution" allow 'echo `X=${A:-b} true`'
 # Canary for fix 2: the hook's verb table must hold every verb the installed
 # git lists, and name its version. A git upgrade turns this red until someone
 # re-reads the table and bumps GSG_STASH_VERBS_GIT (until then fix 2 is off).

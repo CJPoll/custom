@@ -138,7 +138,9 @@
 #     command running another git binary is judged by this table too.
 #   * a word the shell reads as an assignment (an unquoted, unescaped
 #     NAME=..., at the start of a simple command, after a keyword, or after
-#     another such assignment) is not a command word: the glob-head and
+#     another such assignment; never after a CLOSING `)` or backtick, where
+#     it is an argument to the substitution's output, which may be eval)
+#     is not a command word: the glob-head and
 #     expanded-head rules skip it (`X=${A:-b}`). The next word keeps command
 #     position; a command substitution in the value is still read; after
 #     env/sudo/eval/nohup/xargs the word keeps every rule; a literal
@@ -570,8 +572,12 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # IT (DND-1095 D1): an unquoted NAME, NAME[...] or NAME+ directly followed
   # by an unquoted `=`, with no quote or backslash anywhere before that `=`.
   # A quoted or escaped name (`"X"=...`, `X\=...`) makes a command word.
-  function tokenize(text, W, QF, SB, UX, PQ, AS,    n, i, L, c, st, cur, has, q, ns, skip, ux, rq, asg) {
-    n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; rq = 0; asg = 0; L = length(text)
+  # SC[k] is 1 when word k has SB only because a CLOSING `)` or backtick
+  # came before it (`$(echo eval) X=...`): there it is an argument to what
+  # the substitution produced, not a simple-command start. An opening
+  # backtick (odd count, unquoted) or `(` is a real start.
+  function tokenize(text, W, QF, SB, UX, PQ, AS, SC,    n, i, L, c, st, cur, has, q, ns, skip, ux, rq, asg, fk, bt) {
+    n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; rq = 0; asg = 0; fk = 0; bt = 0; L = length(text)
     for (i = 1; i <= L; i++) {
       c = substr(text, i, 1)
       if (st == 1) {
@@ -601,7 +607,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (c ~ /[<>]/ || (c == "&" && substr(text, i + 1, 1) == ">")) {
         if (c == "&") i++
         if (has && cur !~ /^[0-9]+$/) {
-          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; ns = 0 }
+          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; SC[n] = ns && fk; ns = 0 }
         }
         cur = ""; has = 0; q = 0; ux = 0; rq = 0; asg = 0
         if (substr(text, i + 1, 1) == "(") continue
@@ -611,10 +617,13 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       }
       if (is_sep(c)) {
         if (has) {
-          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; ns = 0 }
+          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; SC[n] = ns && fk; ns = 0 }
         }
         cur = ""; has = 0; q = 0; ux = 0; rq = 0; asg = 0
-        if (c !~ /[ \t]/) { ns = 1; skip = 0 }
+        if (c !~ /[ \t]/) {
+          ns = 1; skip = 0
+          if (c == "`") { bt = !bt; fk = !bt } else fk = (c == ")")
+        }
         continue
       }
       # An unquoted glob or brace character means the shell rewrites the word
@@ -631,7 +640,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (c == "=" && !asg && !rq && cur ~ /^[A-Za-z_][A-Za-z0-9_]*(\[\001[^]]*\])?\+?$/) asg = 1
       cur = cur c; has = 1
     }
-    if (has && !skip) { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg }
+    if (has && !skip) { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; SC[n] = ns && fk }
     return n
   }
   # refpart(t): the ref a revision/refspec word names: glob marks, a leading
@@ -818,28 +827,31 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   }
   # analyze(text, depth): the most specific finding in text (see rank), or
   # "" when it runs no stash write. It stops early only on a literal stash.
-  function analyze(text, depth,    W, QF, SB, UX, PQ, AS, n, k, e, r, sw, m, i, cp, pcp, ap, pap, asgw, t, j, x, best) {
+  function analyze(text, depth,    W, QF, SB, UX, PQ, AS, SC, n, k, e, r, sw, m, i, cp, rs, prs, ap, pap, asgw, t, j, x, best) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) {
       if (!mentions_stash(text)) return ""
       if (!("stash" in NT)) { NT["stash"] = clip(text); NP["stash"] = 0; ND["stash"] = depth }
       return "stash"
     }
-    n = tokenize(text, W, QF, SB, UX, PQ, AS); best = ""
+    n = tokenize(text, W, QF, SB, UX, PQ, AS, SC); best = ""
     for (k = 1; k <= n; k++) if (QF[k]) { best = better(best, analyze(W[k], depth + 1)); if (best == "stash") return best }
-    cp = 0; pap = 0
+    cp = 0; pap = 0; rs = 0
     for (k = 1; k <= n; k++) {
-      pcp = cp
+      prs = rs
+      # rs: word k REALLY starts a simple command: SB, and not only because a
+      # substitution closed before it (SC; `$(echo eval) X=...`).
+      rs = SB[k] && !SC[k]
       # cp: word k is in command position (starts a simple command, or
       # follows a prefix such as env/sudo/xargs or a VAR=value assignment).
       cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
       # ap: word k is where the SHELL itself reads NAME=value as an
-      # assignment: it starts a simple command, follows a shell keyword that
-      # was itself in command position, or follows an assignment that was in
-      # this position. Not after env/sudo/eval/nohup/xargs/...: those hand
-      # the word to a program, and eval re-reads it, so there it keeps every
-      # rule (DND-1095 D1).
-      ap = SB[k] || (k > 1 && ((pap && AS[k - 1]) || (pcp && W[k - 1] ~ /^(then|do|else|if|while|until|!|\{\001)$/)))
+      # assignment: it really starts a simple command (rs), follows a shell
+      # keyword that itself really started one, or follows an assignment
+      # that was in this position. Not after env/sudo/eval/nohup/xargs/...:
+      # those hand the word to a program, and eval re-reads it, so there it
+      # keeps every rule (DND-1095 D1).
+      ap = rs || (k > 1 && ((pap && AS[k - 1]) || (prs && W[k - 1] ~ /^(then|do|else|if|while|until|!|\{\001)$/)))
       pap = ap
       # asgw: word k is an assignment, not a command word. Its value is
       # never run as a command, so the glob-head and expanded-head rules below

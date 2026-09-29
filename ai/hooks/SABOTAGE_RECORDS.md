@@ -847,3 +847,12 @@ turns into a verb at run time. Cases D1-38..47 added first; against head
 | S-D1-10 | the plain-word whitelist in `stash_write` removed | D1-44 (`git stash po~x`); D1-41..43 are also held by S-D1-11's rule |
 | S-D1-11 | an in-command alias/named-dir/option definition or eval no longer turns the table off | D1-38, D1-39, D1-40 (`alias -g W=pop; eval 'git stash W'` and variants) |
 | S-D1-12 | snapshot alias names no longer consulted (`ANYAL`) | D1-46 (`gsx V`), D1-47 (`git stash V`) |
+
+Critic round 2: a word after a CLOSING `)` or backtick carries `SB` but is an
+argument (`$(echo eval) X=/usr/bin/git\;\$X stash pop`). Cases D1-48..52
+added first; against head 926c862b `RESULT: 413 passed, 3 failed` (D1-48,
+49, 50); after the `SC` flag `RESULT: 416 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-D1-13 | `SC` ignored (`rs = SB[k]`) | D1-48, D1-49, D1-50 |
