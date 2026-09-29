@@ -856,3 +856,15 @@ added first; against head 926c862b `RESULT: 413 passed, 3 failed` (D1-48,
 | id | Mutation | Observed failure |
 |---|---|---|
 | S-D1-13 | `SC` ignored (`rs = SB[k]`) | D1-48, D1-49, D1-50 |
+
+Critic round 3: the table's off-switch matched literal spellings only
+(`${:-alias} -g W=pop; ${:-eval} 'git stash W'`). Now the table applies only
+to a command with no expansion/substitution/glob character and no
+definition, re-parse, shell or interpreter word. Cases D1-53..60 added
+first; against head e792063d `RESULT: 418 passed, 6 failed` (D1-53, 54, 55,
+57, 58, 59); after `RESULT: 424 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-D1-14 | the `$`/backtick/glob/tilde character rule removed | D1-54 (`${a}as ... ${e}al`), D1-59 (a backtick substitution) |
+| S-D1-15 | the shell/interpreter word list disabled | D1-55 (`printf '\141lias ...' \| zsh`), D1-57 (`python3 -c ... os.system(...)`) |

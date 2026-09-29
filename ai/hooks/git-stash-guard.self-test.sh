@@ -821,6 +821,16 @@ case_d1 "D1-42. paired: a named directory set through nameddirs" deny 'nameddirs
 case_d1 "D1-43. paired: an extendedglob negation as the verb" deny 'setopt extendedglob && git stash ^guard'
 case_d1 "D1-44. paired: an extendedglob exclusion as the verb" deny 'git stash po~x'
 case_d1 "D1-45. paired: an extendedglob # as the verb" deny 'git stash po#p'
+# Critic round 3: the table must be off for EVERY way the same shell can
+# define an alias or run text, not only literal spellings.
+case_d1 "D1-53. paired: alias and eval spelled by expansion" deny "\${:-alias} -g W=pop; \${:-eval} 'git stash W'"
+case_d1 "D1-54. paired: alias and eval built from pieces" deny "a=ali; e=ev; \${a}as -g W=pop; \${e}al 'git stash W'"
+case_d1 "D1-55. paired: octal-escaped definitions piped into zsh" deny "printf '\\141lias -g W=pop\\n\\145val \"git stash W\"' | zsh"
+case_d1 "D1-56. paired: a glob-named shell running the text" deny "printf 'x\\n git stash W' | /bin/zs?"
+case_d1 "D1-57. paired: an interpreter running shell text" deny "python3 -c 'import os; os.system(\"git stash W\")'"
+case_d1 "D1-58. paired: awk system() running shell text" deny "awk 'BEGIN { system(\"git stash W\") }'"
+case_d1 "D1-59. paired: a backtick substitution in the command" deny "\`echo true\`; git stash W"
+case_d1 "D1-60. prose naming git stash guard with a hyphenated word" "$D1NV" 'git commit -m "the git stash guard, re-checked"'
 case_d1 "D1-46. paired: a snapshot alias ending in a space, then an alias verb" deny 'gsx V'
 case_d1 "D1-47. paired: a snapshot alias name as the verb" deny 'git stash V'
 # Fix 3: an assignment word is not a command. Its value is not a command word,

@@ -496,19 +496,34 @@ GSG_STASH_VERBS_GIT='2.54'
 # Probed for every command that reaches the evaluator, not only one naming
 # stash: a git alias (`git s guard`, s = stash) reaches the stash verdict
 # with no stash text in the command.
-# Off too when the command itself defines what zsh could expand a later word
-# into: an alias (`alias -g V=pop; eval 'git stash V'`), a named directory
-# (`hash -d P=pop`, nameddirs), an option (`setopt`), or re-reads text (eval,
-# source, `.`). The hook reads only the snapshot's aliases, so a word
-# defined in the command cannot be judged; the table is not trusted there.
+# The table is sound only when the word reaches git as typed: no zsh that
+# parses it can have defined an alias, named directory or option first, or
+# be running text built at run time (DND-1095 D1, critic round 3). The hook
+# reads only the snapshot's aliases, so it applies the table ONLY to a
+# command that shows no way to do either. It is off when the command holds:
+#   * any expansion, substitution or glob/brace/tilde character (`$`, a
+#     backtick, `* ? [ { ~`): a command word, or text a shell runs, may be
+#     built from it (`${:-alias} -g W=pop; ${:-eval} 'git stash W'`);
+#   * a word (quotes removed, `-` counts as a boundary) that defines what
+#     zsh expands (alias, galiases, hash, nameddirs, setopt, ...), re-reads
+#     text (eval, source, `.`, trap, fc, autoload, sched, ...), or runs text
+#     in a shell or another interpreter (sh, zsh, python, perl, awk, sed,
+#     xargs, find, env, sudo, ssh, ...; escaped text such as
+#     `printf '\141lias ...' | zsh` needs one of them to run).
+# What it does not see is the NOT CATCHABLE class: a script file, or text
+# computed and run by a program not named here.
 # The probe is the git first on the hook's PATH. A command that runs another
 # git binary (`/opt/x/bin/git stash <verb>`) is judged by this table too: a
 # residual only if that git adds a writing verb.
 STASH_TABLE_OK=0
 _gv=$(cd / && git --version 2>/dev/null | sed -nE 's/^git version ([0-9]+\.[0-9]+).*/\1/p')
 [ -n "$_gv" ] && [ "$_gv" = "$GSG_STASH_VERBS_GIT" ] && STASH_TABLE_OK=1
-if [ "$STASH_TABLE_OK" = 1 ] && printf '%s' "$FLAT" | grep -Eq \
-  -e '(^|[^[:alnum:]_.-])(alias|unalias|aliases|galiases|saliases|dis_aliases|dis_galiases|hash|nameddirs|setopt|unsetopt|set|options|emulate|eval|source|enable|disable)([^[:alnum:]_-]|$)' \
+case $CMD in
+  *'$'* | *'`'* | *'*'* | *'?'* | *'['* | *'{'* | *'~'*) STASH_TABLE_OK=0 ;;
+esac
+if [ "$STASH_TABLE_OK" = 1 ] && printf '%s' "$FLAT" | grep -Eiq \
+  -e '(^|[^[:alnum:]_])(alias|unalias|aliases|galiases|saliases|dis_[a-z]*aliases|hash|nameddirs|setopt|unsetopt|set|options|emulate|enable|disable|eval|source|trap|fc|autoload|zmodload|functions|sched|builtin|command|exec|noglob|nocorrect)([^[:alnum:]_]|$)' \
+  -e '(^|[^[:alnum:]_])(sh|bash|zsh|dash|ksh|mksh|yash|fish|csh|tcsh|busybox|python[0-9.]*|pypy[0-9.]*|perl|ruby|node|nodejs|deno|bun|php|lua|luajit|tclsh|wish|expect|osascript|awk|gawk|mawk|nawk|sed|gsed|xargs|find|parallel|env|nohup|setsid|timeout|nice|sudo|doas|su|runuser|ssh|script|tmux|screen|watch)([^[:alnum:]_]|$)' \
   -e '(^|[;&|(]|[[:space:]])\.[[:space:]]'; then
   STASH_TABLE_OK=0
 fi
