@@ -886,7 +886,7 @@ esac
 if [ "$GATE_RC" -ne 0 ]; then
   join_critic
   echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA") (gate exit ${GATE_RC})." >&2
-  echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA") although your branch passed alone. A disjoint file set does not imply a disjoint gate (shared budgets/registries). Fix it on this branch and re-run; do not merge." >&2
+  echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA"); read the failing stage above. This tool ran only the integrated head, so it cannot tell a break from a flake. A test failing for a reason unrelated to this change (a timeout under load, a known Flaky ticket's test) is a flake: ticket it per athena:flaky-ticket, then re-run. Otherwise the integration broke it: a disjoint file set does not imply a disjoint gate (shared budgets/registries), so fix it on this branch and re-run. Do not merge on a RED." >&2
   exit 1
 fi
 AFTER_SHA="$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null)"

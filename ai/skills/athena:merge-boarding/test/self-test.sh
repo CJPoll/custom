@@ -143,6 +143,12 @@ stub_gate_pair "${R}/g.sh"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 1 ] && ok "c4 exit 1: gate RED on the integrated head (the defect class)" || bad "c4 expected exit 1, got $rc" "$out"
 grep -q 'disjoint file set does not imply a disjoint gate' <<<"$out" && ok "c4 Fix: explains green-alone != green-merged" || bad "c4 Fix: missing the explanation" "$out"
+# The tool runs only the integrated head, so a RED can be a flake as easily as a
+# break. Its Fix must not assert an unmeasured "passed alone", and must route a
+# flake to athena:flaky-ticket rather than "fix it on this branch" (2026-09-29:
+# two gen_saas integrated-head REDs were known flakes, DND-1255 class).
+grep -q 'passed alone' <<<"$out" && bad "c4 Fix: claims the branch passed alone, which the tool never ran" "$out" || ok "c4 Fix: claims nothing it did not measure"
+grep -q 'athena:flaky-ticket' <<<"$out" && ok "c4 Fix: routes a flake to athena:flaky-ticket" || bad "c4 Fix: gives a flake no route" "$out"
 grep -q 'INTEGRATION OK' <<<"$out" && bad "c4 printed INTEGRATION OK on a red gate" || ok "c4 does not print INTEGRATION OK when red"
 
 # ---------------------------------------------------------------- case 5
