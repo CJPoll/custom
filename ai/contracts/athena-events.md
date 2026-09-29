@@ -1466,9 +1466,11 @@ source.
    redelivery converges on the first event. A key is compared whole and
    never split, and both shapes are unambiguous although `:` is their
    separator: every component except the last is checked free of `:` where
-   it is produced (the hook's `host` and `project_path` by the hook's own
-   validation, the `mr_iid` as an integer, `<kind>` from the closed set
-   `requested`, `removed`, `merged`, `closed`, the delivery id as a UUID),
+   it is produced (`<hook_id>` as the server-generated UUID of the hook row;
+   the hook's `host` as a bare hostname and its `project_path` as
+   `/`-separated segments, both checked when the hook is registered; the
+   `mr_iid` as a positive integer; `<kind>` from the closed set `requested`,
+   `removed`, `merged`, `closed`; the delivery id as a UUID),
    and the one component that can carry `:`, the ISO 8601 `revision`, is
    always last. A payload with no `entity_id` or no `revision` is never
    built (the delivery is skipped malformed), so the fallback key can never
@@ -5557,10 +5559,12 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   create an item: one for a merge request never indexed is
   `skipped:unknown-item`. They leave every other state as it is: on an item
   already `done` (any `closed_by`) or `dismissed`, a close is applied as a
-  pointer update, outcome `updated`. The state and `closed_by` stay as they
-  are; the pointer fields and `source_revision` refresh, and an older
-  `revision` is `stale`, not applied. It is neither a second close nor a
-  skip. A new `forge_review` item is created `active` and `owner_only`,
+  pointer update: the state and `closed_by` stay as they are, and the pointer
+  fields and `source_revision` refresh. It is neither a second close nor a
+  skip, and its obligation settles `indexed` (*At-least-once, row by row*).
+  A close whose `revision` is older than the row's, on any item, writes
+  nothing and also settles `indexed`: the item already holds newer evidence,
+  as for any older update. A new `forge_review` item is created `active` and `owner_only`,
   never `proposed`: the ingress routes only a merge request that names the
   owner as a reviewer, so the request is already addressed to the owner and
   has nothing to promote (*created `active`*, above). A
