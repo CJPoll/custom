@@ -338,6 +338,14 @@ head" is not a reason to skip it: the integrated head is the one being judged.
 a real run.) A branch that edits its own gate still runs its own copy, but the
 run warns and the OK line says `EDITED BY THIS BRANCH` — review that diff.
 
+**`--target` does not retarget the gate's own stages.** A stacked branch whose
+base conflicts with main gates RED under any `--target` (`integration-gate
+--help` → `--target`). So a brief for a local stack behind main cannot ask for
+`INTEGRATION OK`; name what the captain reports instead, and re-integrate the
+stack base onto main once. (DND-302, 2026-09-28: the captain merged main into
+its stacked branch; DND-1187, 2026-09-29: the brief's `INTEGRATION OK` was
+unreachable.)
+
 **Run the judge beside the gate: `integration-gate --with-critic`.** It starts
 `critic-review --base <target>` on this head concurrently with the gate, unless
 a PASS that covers the target is already recorded for it. A PASS covers the

@@ -84,7 +84,15 @@ blast-radius verdict, the INTEGRATION OK line, and a UTC timestamp.
 locked-merge requires it. Any other
 outcome removes a receipt for that head. There is no flag that skips it.
 
-  --target <ref>   integration target (default: origin/main)
+  --target <ref>   integration target (default: origin/main). It sets the
+                   containment check and the critic base ONLY. The declared
+                   gate runs unchanged and is not told the target, so a
+                   stage of its own may still compare against main
+                   (gen_saas bin/checks/merge-conflicts.sh always merges
+                   against origin/main). A stacked branch whose base
+                   conflicts with main is therefore RED there under any
+                   --target. That red is real: the stack is stale vs main,
+                   and is fixed once at the stack base, not per ticket.
   --since <ref>    the target SHA your branch was last reviewed/gated against
                    (the "baseline main" in your state log). REQUIRED for a
                    meaningful file-set intersection once you have rebased:
