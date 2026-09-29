@@ -1454,7 +1454,16 @@ source.
    `Idempotency-Key` (stable across GitLab's own retries of one trigger), else
    its `X-Gitlab-Event-UUID`, each only when it is a UUID; with neither it is
    `<entity_id>:<kind>:<revision>`. The ingress routes each key once, so a
-   redelivery converges on the first event.
+   redelivery converges on the first event. A key is compared whole and
+   never split, and both shapes are unambiguous although `:` is their
+   separator: every component except the last is checked free of `:` where
+   it is produced (the hook's `host` and `project_path` by the hook's own
+   validation, the `mr_iid` as an integer, `<kind>` from the closed set
+   `requested`, `removed`, `merged`, `closed`, the delivery id as a UUID),
+   and the one component that can carry `:`, the ISO 8601 `revision`, is
+   always last. A payload with no `entity_id` or no `revision` is never
+   built (the delivery is skipped malformed), so the fallback key can never
+   be computed from an absent part.
 4. **Origination membership** — **verified-ingress-only**: the GitLab webhook
    ingress, and only after the request's `X-Gitlab-Token` matched the hook's
    custodied secret (*Inbound webhook*). Harness-emit refuses the whole
@@ -5431,7 +5440,15 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   `source_status` whatever its `status`, at an equal or newer `revision`
   (the merge request's `updated_at`); an older one is not applied. They never
   create an item: one for a merge request never indexed is
-  `skipped:unknown-item`. They leave every other state as it is. A
+  `skipped:unknown-item`. They leave every other state as it is: on an item
+  already `done` (any `closed_by`) or `dismissed`, a close is applied as a
+  pointer update, outcome `updated`. The state and `closed_by` stay as they
+  are; the pointer fields and `source_revision` refresh, and an older
+  `revision` is `stale`, not applied. It is neither a second close nor a
+  skip. A new `forge_review` item is created `active` and `owner_only`,
+  never `proposed`: the ingress routes only a merge request that names the
+  owner as a reviewer, so the request is already addressed to the owner and
+  has nothing to promote (*created `active`*, above). A
   `forge.review.requested` whose `revision` is strictly newer than the row's
   reopens a `source_status` close, like any other; it never reopens an
   `owner` or `lease_complete` close. GitLab's `updated_at` has one-second
