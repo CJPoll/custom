@@ -295,17 +295,17 @@ declares a gate, and the only documented path is `integration-gate` then
   judged, and an order it cannot read (a missing start time, a tie for newest)
   refuses (DND-1140). Zero reported checks is refused: no evidence is not
   green. The pin also makes GitHub refuse the merge if the head moves after the
-  read.
+  read. A `gh api` merge (REST `PUT …/pulls/<n>/merge`, `…/merges`,
+  `…/merge-upstream`, or a GraphQL merge / auto-merge / merge-queue mutation) is
+  refused outright by `gh-athena` (DND-728); a bare `gh api` merge is denied by
+  the forge-identity hook. `pr merge`, made by `locked-merge`, is the one merge
+  path.
 
   **Later (2026-09-28, DND-1140):** this said "every check reported on it
   concluded green", and the wrapper judged every check-run on the head. A
   superseded failure then refused forever: gen_saas PR #488's close/reopen
   re-ran CI green on the same head, `gh pr checks` was green, and the merge
-  was still refused on the old run's `Test: COMPLETED/FAILURE`. A `gh api` merge (REST `PUT …/pulls/<n>/merge`, `…/merges`,
-  `…/merge-upstream`, or a GraphQL merge / auto-merge / merge-queue mutation) is
-  refused outright by `gh-athena` (DND-728); a bare `gh api` merge is denied by
-  the forge-identity hook. `pr merge`, made by `locked-merge`, is the one merge
-  path.
+  was still refused on the old run's `Test: COMPLETED/FAILURE`.
 - **In a gated repo the wrapper also requires `integration-gate`'s receipt
   (DND-969).** A repo declares a gate when the base branch's tip carries
   `bin/prep-commit.sh` or `ai/bin/harness-gate` (the rule `integration-gate`
