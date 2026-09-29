@@ -57,6 +57,18 @@ of repo** — before merging, confirm the head SHA you are landing is the one th
 report names, and never infer readiness from forge state alone while the
 captain's worktree is still moving.
 
+**In a no-CI GitHub repo the pinned merge cannot run.** `gh-athena` refuses a
+merge when no check has reported on the head (`ai/lib/gh-merge-guard.sh`, the
+`EMPTY` case), so `locked-merge` exits 4 there however good the report is. Do
+not retry it, and do not reach for `gh api`: the guard refuses API merges and
+ref writes too. `~/dev/custom` lands by a fast-forward `gh-athena git push` of
+the gated head (the guard's header names that path). For any other no-CI repo,
+land CI first, or escalate the merge to Cody as a step only Cody can run.
+Measured 2026-09-29 (`2026-09-25-dnd-671-650-644`, 22:02Z): anchor#28 was
+DONE, gated and critic-PASSed, and the merge was refused. It waited on Cody,
+whose click chose "CI first"; DND-1279's workflow took one captain and a 24 s
+run.
+
 - **A standing-judge verdict on the SHA you are landing — "no verdict" is not a
   pass.** `athena-diff-critic` was blocking for the *captain*, but this bar never
   required its result, so a judge that **never ran**, **fail-opened** on an infra
