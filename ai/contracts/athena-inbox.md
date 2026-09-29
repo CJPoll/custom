@@ -1273,10 +1273,10 @@ producer. Made explicit:
   `*.consumer.lock`, `*.jsonl.1`, or anything under `projects/`, and put no
   credential in a line.
 - Delivery is **at-least-once**, exactly as for Slack. A re-dispatched Event —
-  `athena-events.md` **retries** per `(event, rule)`, holding **no** durable
-  idempotency-key store and doing **no** content dedup itself, only transient
-  in-flight retry state (`athena-events.md` → *Idempotency is per (event, rule)*)
-  — may append a duplicate line. Absorbing that duplicate is the **reader's and
+  `athena-events.md` **retries** per `(event, rule)` on transient in-flight
+  retry state, and its ingress seen-check never dedupes a retry
+  (`athena-events.md` → *Idempotency is per (event, rule)*) — may append a
+  duplicate line. Absorbing that duplicate is the **reader's and
   consumer's** job, not the platform's. A retry of one `(event, rule)` delivery
   is a repeated frame, which the reader collapses on `delivery_id` (*Line
   format*). The consumer absorbs anything else: for a regular (non-lane)
