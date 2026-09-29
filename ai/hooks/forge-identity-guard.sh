@@ -22,19 +22,19 @@
 # `glab-athena git` is now the Athena path to point it at. A remote resolving
 # elsewhere (a local path, another host) is allowed silently.
 #
-# SCOPE: this surfaces the authorship-ESTABLISHING write — `pr create` /
-# `mr create` — AND the MERGE write the athena-admiral performs (`pr merge` /
-# `mr merge`), which stamps the merge commit / merge event with an author. The
-# admiral-500 design (ai/docs/admiral-500-design.md §2) strengthens the
-# "attributed writes go through the wrapper" invariant by extending this guard
-# from create to also cover merge. Other attributed writes (`pr comment`, `mr
-# approve`, `api --method POST`) are still NOT matched here; they rely on the
-# captain's wrapper discipline and the forge-preflight assertion. This is
-# deliberate, not full write coverage — broadening the subcommand alternation
-# further is a follow-up if a bare non-create/merge write is ever observed
-# mis-attributing. Two `gh api` shapes ARE matched, because they also skip a
-# safety check, not only attribution: a merge (DND-728) and a ref write
-# (DND-741). Each has its own block below.
+# SCOPE: EVERY forge write run on plain `gh` / `glab` (DND-1179). Create and
+# merge, and the `gh api` / `glab api` merge and ref-write shapes (DND-728,
+# DND-741, DND-742), keep their own blocks and Fix text, because a merge or a
+# ref write also skips a safety check, not only attribution. Every other write
+# (close, edit, comment, review, label, release, secret, variable, repo, api
+# POST, …) is denied by the positive model in the last gh/glab block: a READ
+# allowlist per command group, any other verb denied. Plain `git push` to a
+# forge remote has its own block (DND-389/393).
+# Later (2026-09-29, DND-1179): this paragraph said only create and merge were
+# matched, and that `pr comment`, `mr approve` and `api --method POST` relied on
+# wrapper discipline, "a follow-up if a bare non-create/merge write is ever
+# observed mis-attributing". It was observed: a plain `gh pr close 119 -R
+# CJPoll/custom` ran and GitHub recorded the close as CJPoll.
 #
 # DENY, WITH A Fix: — DND-577 (2026-09-24). This guard used to WARN and always
 # allow (DND-206 scope 2). A PreToolUse `additionalContext` reaches the model
@@ -66,8 +66,8 @@
 #   * FAIL-OPEN — any error (missing jq, unparseable input, non-Bash tool, no
 #     match) exits 0 and ALLOWS silently. A bug here can never wedge Bash.
 #     A deny is only ever emitted for a positive match.
-#   * NARROW    — only the wrapper-bypassing create commands match. The wrapper
-#     path (`gh-athena pr create`, `glab-athena mr create`) is explicitly NOT
+#   * WRAPPER   — only plain gh/glab and plain git push match. The wrapper
+#     path (`gh-athena pr close`, `glab-athena mr note`) is explicitly NOT
 #     matched: `gh`/`glab` there is followed by `-`, not whitespace.
 #
 # Wired in ~/.claude/settings.json as a PreToolUse hook scoped to Bash
@@ -384,6 +384,159 @@ while [ "$N" -lt 10 ] && printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; do
 done
 
 [ -z "$WARNINGS" ] || deny "$WARNINGS"
+
+# ---- Every other plain gh/glab WRITE (DND-1179) ------------------------------
+# 2026-09-29 00:11Z an admiral ran a plain `gh pr close 119 -R CJPoll/custom`
+# (output redirected). The rules above cover only create/merge and the api
+# merge/ref routes, so it ran, and GitHub recorded the close as CJPoll. This
+# rule closes the class with a POSITIVE model, chosen over a longer deny-list
+# because a deny-list misses the next verb the CLI ships: for each known command
+# group, a READ allowlist (RD below); any other verb of that group is a write and
+# is denied. `api` is judged by its method (below). The specific rules above run
+# first, so a create, a merge or a ref write keeps its own Fix.
+#   * Known groups are every gh 2.96 / glab 1.92 group with a write verb (the RD
+#     keys). Groups that cannot write to the forge (help, config, search, …; and
+#     `auth`, which is forge-auth-guard's domain) are ALLOWED whole (AG).
+#   * A word after `gh`/`glab` that is no known group is ALLOWED: it is prose
+#     (`the gh CLI`), an alias or an extension. The named residual: an alias or
+#     an extension that performs a write. `gh alias set` / `import` and `glab
+#     alias set` are denied for that reason.
+#   * `api`: a write when it names -X/--method other than GET/HEAD, carries a
+#     method-override header, or has no method but a field or --input (gh and
+#     glab then POST). A `graphql` call is a write when the command has the word
+#     `mutation` anywhere, or reads its query from a file (`=@f`, --input),
+#     which this guard cannot read.
+#   * Help (`gh pr close --help`) is allowed: --help/-h right after the group or
+#     the verb. The words are matched after dequoting, so `"gh" pr close` counts.
+# Lexical, like every rule here: a command that only MENTIONS a write is denied
+# (the accepted false positive above), and a command word built by expansion
+# (`$G pr close`) is not seen.
+FORGE_WRITE=$(printf '%s' "$CMD" | tr '\n\t' ';  ' | tr -d "'\"\\\\" | awk '
+  BEGIN {
+    # Groups with no forge write: allowed whole.
+    split("auth config completion help version extension extensions ext search status browse attestation copilot ruleset preview org accessibility a11y licenses", a, " ")
+    for (x in a) AG["gh " a[x]] = 1
+    split("auth config completion help version check-update changelog user duo iteration mcp", a, " ")
+    for (x in a) AG["glab " a[x]] = 1
+    # READ allowlists: "|verb|" or "|verb subverb|". Every other verb writes.
+    RD["gh pr"] = "|list|view|status|checks|diff|checkout|"
+    RD["gh issue"] = "|list|view|status|"
+    RD["gh repo"] = "|list|view|clone|set-default|deploy-key list|autolink list|autolink view|gitignore list|gitignore view|license list|license view|"
+    RD["gh release"] = "|list|view|download|verify|verify-asset|"
+    RD["gh run"] = "|list|view|watch|download|"
+    RD["gh workflow"] = "|list|view|"
+    RD["gh label"] = "|list|"
+    RD["gh secret"] = "|list|"
+    RD["gh variable"] = "|list|get|"
+    RD["gh gist"] = "|list|view|clone|"
+    RD["gh cache"] = "|list|"
+    RD["gh project"] = "|list|view|field-list|item-list|"
+    RD["gh codespace"] = "|list|view|logs|"
+    RD["gh cs"] = RD["gh codespace"]
+    RD["gh ssh-key"] = "|list|"
+    RD["gh gpg-key"] = "|list|"
+    RD["gh agent-task"] = "|list|view|"
+    RD["gh alias"] = "|list|delete|"
+    RD["glab mr"] = "|list|view|diff|checkout|issues|approvers|"
+    RD["glab issue"] = "|list|view|board view|"
+    RD["glab ci"] = "|list|view|status|trace|get|lint|config|artifact|"
+    RD["glab pipeline"] = RD["glab ci"]
+    RD["glab job"] = "|artifact|"
+    RD["glab release"] = "|list|view|download|"
+    RD["glab repo"] = "|list|view|clone|search|contributors|archive|"
+    RD["glab label"] = "|list|get|"
+    RD["glab variable"] = "|list|get|export|"
+    RD["glab snippet"] = "|list|view|"
+    RD["glab schedule"] = "|list|"
+    RD["glab milestone"] = "|list|get|"
+    RD["glab incident"] = "|list|view|"
+    RD["glab token"] = "|list|"
+    RD["glab deploy-key"] = "|list|get|"
+    RD["glab ssh-key"] = "|list|get|"
+    RD["glab gpg-key"] = "|list|get|"
+    RD["glab cluster"] = "|agent list|"
+    RD["glab stack"] = "|list|prev|next|first|last|move|create|save|amend|switch|"
+    RD["glab securefile"] = "|list|get|download|"
+    RD["glab alias"] = "|list|delete|"
+  }
+  function valued(x) { return x == "-R" || x == "--repo" || x == "--hostname" }
+  function api_write(s,    k, x, m, method, field, ovr, ep, fromfile) {
+    method = ""; field = 0; ovr = 0; ep = ""; fromfile = 0
+    for (k = s; k <= n; k++) {
+      x = t[k]
+      if (x == "-X" || x == "--method") { method = t[k + 1]; k++; continue }
+      if (x ~ /^--method=/) { method = substr(x, 10); continue }
+      if (x ~ /^-[A-Za-z]*X/ && x !~ /^--/) {
+        m = x; sub(/^-[A-Za-z]*X=?/, "", m)
+        if (m == "") { method = t[k + 1]; k++ } else method = m
+        continue
+      }
+      if (x == "-H" || x == "--header") { if (tolower(t[k + 1]) ~ /x-(http-)?method/) ovr = 1; k++; continue }
+      if ((x ~ /^--header=/ || x ~ /^-H/) && tolower(x) ~ /x-(http-)?method/) { ovr = 1; continue }
+      if (x == "-q" || x == "--jq" || x == "-t" || x == "--template" || x == "-p" || x == "--preview" || valued(x)) { k++; continue }
+      if (x == "--input") { field = 1; fromfile = 1; k++; continue }
+      if (x ~ /^--input=/) { field = 1; fromfile = 1; continue }
+      if (x == "-f" || x == "-F" || x == "--field" || x == "--raw-field") { field = 1; if (t[k + 1] ~ /=@/) fromfile = 1; k++; continue }
+      if (x ~ /^--(raw-)?field=/ || (x ~ /^-[A-Za-z]*[fF]/ && x !~ /^--/)) { field = 1; if (x ~ /=@/) fromfile = 1; continue }
+      if (x ~ /^-/) continue
+      if (ep == "") ep = x
+    }
+    sub(/^\//, "", ep)
+    if (tolower(ep) == "graphql") return MUT || fromfile
+    if (ovr) return 1
+    method = toupper(method)
+    if (method != "") return !(method == "GET" || method == "HEAD")
+    return field
+  }
+  # judge(i): t[i] is the command word gh/glab; prints the verdict and exits on a write.
+  function judge(i,    cli, j, g, key, k, v1, v2) {
+    cli = t[i]; sub(/.*\//, "", cli)
+    j = i + 1
+    while (j <= n && t[j] ~ /^-/) { if (valued(t[j])) j++; j++ }
+    g = t[j]
+    if (g == "") return
+    key = cli " " g
+    if (key in AG) return
+    if (g == "api") { if (api_write(j + 1)) { printf "%s\tapi\t\t\n", cli; exit } ; return }
+    if (!(key in RD)) return
+    v1 = ""; v2 = ""
+    for (k = j + 1; k <= n; k++) {
+      if (t[k] == "--help" || t[k] == "-h") { if (v2 == "") return; break }
+      if (t[k] ~ /^-/) { if (valued(t[k])) k++; continue }
+      if (v1 == "") v1 = t[k]; else if (v2 == "") v2 = t[k]; else break
+      if (v2 != "") break
+    }
+    if (v1 == "") return
+    if (index(RD[key], "|" v1 "|") || index(RD[key], "|" v1 " " v2 "|")) return
+    printf "%s\t%s\t%s\t%s\n", cli, g, v1, RD[key]
+    exit
+  }
+  {
+    MUT = (tolower($0) ~ /(^|[^a-z0-9_])mutation([^a-z0-9_]|$)/)
+    s = $0
+    gsub(/[;&|()`{}]/, "\n", s)
+    nseg = split(s, seg, "\n")
+    for (q = 1; q <= nseg; q++) {
+      n = split(seg[q], t, " ")
+      for (i = 1; i <= n; i++) { b = t[i]; sub(/.*\//, "", b); if (b == "gh" || b == "glab") judge(i) }
+    }
+  }' 2>/dev/null)
+if [ -n "$FORGE_WRITE" ]; then
+  _cli=$(printf '%s' "$FORGE_WRITE" | cut -f1)
+  _grp=$(printf '%s' "$FORGE_WRITE" | cut -f2)
+  _verb=$(printf '%s' "$FORGE_WRITE" | cut -f3)
+  _reads=$(printf '%s' "$FORGE_WRITE" | cut -f4 | sed -E 's/^\|//; s/\|$//; s/\|/, /g')
+  if [ "$_cli" = gh ]; then _who='GitHub records it as the machine owner (CJPoll), not athena-harness[bot]'
+  else _who='GitLab records it as the machine owner, not athena-amby'; fi
+  _esc='If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'"'"'t be done as Athena").'
+  if [ "$_grp" = api ]; then
+    deny "forge-identity: this is a plain \`$_cli api\` call that WRITES: a method other than GET/HEAD, a field or --input with no \`-X GET\` (the CLI then POSTs), a method-override header, or a GraphQL mutation or query read from a file. $_who: the silent mis-attribution DND-203 exists to prevent (DND-1179). Fix: run the same call through the wrapper, \`~/dev/custom/ai/bin/$_cli-athena api …\` (check it with \`~/dev/custom/ai/bin/forge-preflight\` if it fails). To only READ, pass \`-X GET\` with the fields, or drop them. $_esc"
+  elif [ "$_grp" = alias ]; then
+    deny "forge-identity: this is \`$_cli alias $_verb\`. An alias can run a forge write under a name this guard does not recognise, as the machine owner (DND-1179). Fix: do not define aliases; run the command itself, and run a write through \`~/dev/custom/ai/bin/$_cli-athena\`. $_esc"
+  else
+    deny "forge-identity: this is a plain \`$_cli $_grp $_verb\`, a forge WRITE ($_cli $_grp reads are only: $_reads). $_who: the silent mis-attribution DND-203 exists to prevent (DND-1179). Fix: run the same command through the wrapper, \`~/dev/custom/ai/bin/$_cli-athena $_grp $_verb …\` (check it with \`~/dev/custom/ai/bin/forge-preflight\` if it fails). Reads may stay on plain \`$_cli\`. $_esc"
+  fi
+fi
 
 # No bypass detected → allow silently.
 exit 0

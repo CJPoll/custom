@@ -158,10 +158,10 @@ run "$(bash_json 'glab api projects/:id/merge_requests/42/merge_ref')"
 check "2z2. bare glab api read of merge_ref" allow
 
 run "$(bash_json 'glab api -X POST projects/:id/merge_requests/42/notes -f body=merge')"
-check "2z3. bare glab api note (not a merge route)" allow
+check "2z3. bare glab api note (not a merge route; a write since DND-1179)" deny
 
 run "$(bash_json "glab api graphql -f query='mutation { mergeRequestSetLabels(input: {}) { errors } }'")"
-check "2z4. bare glab api graphql mergeRequestSetLabels" allow
+check "2z4. bare glab api graphql mergeRequestSetLabels (a mutation, DND-1179)" deny
 
 # DND-728: a bare `gh api` merge runs as the owner and skips gh-athena's guard.
 run "$(bash_json 'gh api -X PUT repos/o/r/pulls/5/merge -f merge_method=squash')"
@@ -196,10 +196,10 @@ run "$(bash_json '~/dev/custom/ai/bin/gh-athena api -X PUT repos/o/r/pulls/5/mer
 check "2m. gh-athena api merge (the wrapper judges it)" allow
 
 run "$(bash_json 'gh api -X PUT repos/o/r/issues/5/labels -f labels[]=bug')"
-check "2n. bare gh api PUT to a non-merge route" allow
+check "2n. bare gh api PUT to a non-merge route (a write since DND-1179)" deny
 
 run "$(bash_json "gh api graphql -f query='mutation { disablePullRequestAutoMerge(input: {pullRequestId: \"x\"}) { clientMutationId } }'")"
-check "2o. bare gh api graphql disablePullRequestAutoMerge" allow
+check "2o. bare gh api graphql disablePullRequestAutoMerge (a mutation, DND-1179)" deny
 
 run "$(bash_json 'gh api repos/o/r/git/refs/heads/merge-x')"
 check "2p. bare gh api read of a branch named merge-x" allow
@@ -254,19 +254,19 @@ run "$(bash_json 'gh api repos/o/r/git/refs/heads/main --jq .object.sha')"
 check "4o. bare gh api READ of git/refs/heads/main" allow
 
 run "$(bash_json 'gh api -X DELETE repos/o/r/git/refs/heads/dnd-1-done')"
-check "4p. bare gh api DELETE of a branch ref (moves nothing onto it)" allow
+check "4p. bare gh api DELETE of a branch ref (not a ref MOVE, but an owner-attributed write, DND-1179)" deny
 
 run "$(bash_json 'gh api -X GET repos/o/r/contents/README.md -f ref=main')"
 check "4q. -X GET contents with a ref field (a read)" allow
 
 run "$(bash_json "gh api graphql -f query='mutation { deleteRef(input: {refId: \"x\"}) { clientMutationId } }'")"
-check "4r. bare gh api graphql deleteRef" allow
+check "4r. bare gh api graphql deleteRef (a mutation, DND-1179)" deny
 
 run "$(bash_json '~/dev/custom/ai/bin/gh-athena api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc')"
 check "4s. gh-athena api ref write (the wrapper judges it)" allow
 
 run "$(bash_json 'gh api -X POST repos/o/r/git/commits -f message=x -f tree=abc')"
-check "4t. bare gh api POST git/commits (an object only)" allow
+check "4t. bare gh api POST git/commits (an object only; a write since DND-1179)" deny
 
 run "$(bash_json 'gh api repos/o/r/git/refs/heads/main; echo -f x')"
 check "4u. a field flag in a LATER command does not make a read a write" allow
@@ -321,6 +321,137 @@ check_text "3k. push deny says escalate to your admiral" 'escalate to your admir
 
 run "$(bash_json 'gh pr create --fill')"
 check_text "3l. create deny carries the escalate clause" 'escalate to your admiral with the command + error and wait'
+
+echo
+echo "--- DND-1179: EVERY plain gh/glab write denies; reads still pass ---"
+# 2026-09-29 00:11Z: an admiral's plain `gh pr close 119 -R CJPoll/custom`
+# (output redirected) ran, and GitHub recorded the close as CJPoll. The guard
+# covered create/merge only. The rule is now a positive model: per command
+# group, a READ allowlist; any other verb of a known group is a write.
+
+# deny_each <label-prefix> <cmd>... : each command must deny with the
+# DND-1179 write text (not only some older rule's).
+deny_each() {
+  _p=$1; shift
+  for _c in "$@"; do
+    run "$(bash_json "$_c")"
+    check_text "$_p: $_c" 'DND-1179'
+  done
+}
+
+# allow_each <label-prefix> <cmd>... : each command must pass silently.
+allow_each() {
+  _p=$1; shift
+  for _c in "$@"; do
+    run "$(bash_json "$_c")"
+    check "$_p: $_c" allow
+  done
+}
+
+run "$(bash_json 'gh pr close 119 -R CJPoll/custom >/dev/null 2>&1')"
+check "W1. the incident: gh pr close 119 -R CJPoll/custom, output redirected" deny
+check_text "W1b. its Fix names the wrapper form of the same command" 'gh-athena pr close'
+
+deny_each "W2 gh pr write" \
+  'gh pr close 5' 'gh pr reopen 5' 'gh pr edit 5 --title x' 'gh pr ready 5' \
+  'gh pr comment 5 --body x' 'gh pr review 5 --approve' 'gh pr lock 5' \
+  'gh pr unlock 5' 'gh pr update-branch 5' 'gh pr revert 5' 'gh pr edit 5 --add-label bug' \
+  'gh -R o/r pr close 5' 'gh pr --repo o/r close 5' '/usr/bin/gh pr close 5' \
+  'cd /tmp && gh pr close 5' 'timeout 30 gh pr comment 5 -b x' '"gh" pr close 5' \
+  'echo x | xargs gh pr close'
+deny_each "W3 gh issue write" \
+  'gh issue create -t x -b y' 'gh issue close 7' 'gh issue reopen 7' 'gh issue edit 7 --add-label x' \
+  'gh issue comment 7 -b x' 'gh issue delete 7 --yes' 'gh issue lock 7' 'gh issue unlock 7' \
+  'gh issue pin 7' 'gh issue unpin 7' 'gh issue transfer 7 o/r2' 'gh issue develop 7'
+deny_each "W4 gh other groups" \
+  'gh release create v1' 'gh release edit v1 --draft=false' 'gh release delete v1 --yes' \
+  'gh release upload v1 a.tgz' 'gh repo create o/new --private' 'gh repo edit --visibility public' \
+  'gh repo delete o/r --yes' 'gh repo fork o/r' 'gh repo rename x' 'gh repo archive o/r' \
+  'gh repo sync o/fork' 'gh repo deploy-key add k.pub' 'gh secret set X --body y' \
+  'gh secret delete X' 'gh variable set X --body y' 'gh variable delete X' \
+  'gh label create bug' 'gh label edit bug --color fff' 'gh label delete bug --yes' \
+  'gh label clone o/r2' 'gh gist create a.txt' 'gh gist edit abc' 'gh gist delete abc' \
+  'gh run rerun 9' 'gh run cancel 9' 'gh run delete 9' 'gh workflow run ci.yml' \
+  'gh workflow enable ci.yml' 'gh workflow disable ci.yml' 'gh cache delete k' \
+  'gh project create --title x' 'gh project item-add 1 --url u' 'gh alias set pc "pr close"'
+deny_each "W5 gh api write" \
+  'gh api -X POST repos/o/r/issues/5/comments -f body=x' \
+  'gh api --method PATCH repos/o/r/issues/5 -f state=closed' \
+  'gh api -XDELETE repos/o/r/issues/comments/1' \
+  'gh api --method=PUT repos/o/r/issues/5/lock' \
+  'gh api repos/o/r/issues/5/comments -f body=x' \
+  'gh api repos/o/r/issues -F title=x' \
+  'gh api repos/o/r/issues/5/labels --raw-field labels=bug' \
+  'gh api repos/o/r/issues/5/labels --field labels=bug' \
+  'gh api repos/o/r/issues --input body.json' \
+  "gh api -H 'X-HTTP-Method-Override: DELETE' repos/o/r/issues/comments/1" \
+  "gh api graphql -f query='mutation { closePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'" \
+  'gh api graphql -F query=@q.graphql'
+run "$(bash_json 'gh api -X PUT repos/o/r/issues/5/labels -f labels[]=bug')"
+check_text "W5b. 2n now denies by the DND-1179 write rule" 'DND-1179'
+run "$(bash_json 'gh api -X DELETE repos/o/r/git/refs/heads/dnd-1-done')"
+check_text "W5c. 4p now denies by the DND-1179 write rule" 'DND-1179'
+run "$(bash_json 'gh api -X POST repos/o/r/git/commits -f message=x -f tree=abc')"
+check_text "W5d. 4t now denies by the DND-1179 write rule" 'DND-1179'
+run "$(bash_json 'gh api -X POST repos/o/r/issues/5/comments -f body=x')"
+check_text "W5e. an api write's Fix names gh-athena api" 'gh-athena api'
+run "$(bash_json 'gh api -X PUT repos/o/r/pulls/5/merge')"
+check_text "W5f. a merge route keeps its own (merge) Fix, not the generic one" 'locked-merge --pr <n>'
+
+deny_each "W6 glab write" \
+  'glab mr close 4' 'glab mr reopen 4' 'glab mr update 4 --title x' 'glab mr note 4 -m x' \
+  'glab mr approve 4' 'glab mr revoke 4' 'glab mr rebase 4' 'glab mr delete 4' \
+  'glab mr subscribe 4' 'glab mr todo 4' 'glab -R g/r mr close 4' \
+  'glab issue create -t x' 'glab issue close 3' 'glab issue update 3 --label x' \
+  'glab issue note 3 -m x' 'glab issue delete 3' 'glab issue board create' \
+  'glab release create v1' 'glab release upload v1 a.tgz' 'glab release delete v1' \
+  'glab repo create g/new' 'glab repo fork g/r' 'glab repo delete g/r' 'glab repo transfer g/r' \
+  'glab repo update --description x' 'glab repo mirror g/r' \
+  'glab label create -n bug' 'glab label delete bug' 'glab variable set X y' \
+  'glab variable update X y' 'glab variable delete X' 'glab ci run' 'glab ci retry 9' \
+  'glab ci cancel 9' 'glab ci delete 9' 'glab ci trigger 9' 'glab pipeline run' \
+  'glab schedule create' 'glab schedule run 1' 'glab milestone create' \
+  'glab token create x' 'glab deploy-key add k.pub' 'glab snippet create a.txt' \
+  'glab stack sync'
+deny_each "W7 glab api write" \
+  'glab api -X POST projects/:id/issues -f title=x' \
+  'glab api --method PUT projects/:id/merge_requests/4 -f state_event=close' \
+  'glab api projects/:id/merge_requests/4/notes -f body=x' \
+  'glab api projects/:id/labels --field name=x' \
+  "glab api graphql -f query='mutation { mergeRequestSetDraft(input: {}) { errors } }'"
+
+echo "--- DND-1179: reads, help, wrappers and auth (forge-auth-guard's) must pass ---"
+allow_each "R1 gh read" \
+  'gh pr view 5' 'gh pr list --state open' 'gh pr status' 'gh pr checks 5 --watch' \
+  'gh pr diff 5' 'gh pr checkout 5' 'gh -R o/r pr view 5 --json state' \
+  'gh pr view 5 --json mergedAt,state >/dev/null 2>&1' \
+  'gh issue view 7' 'gh issue list' 'gh issue status' 'gh release list' 'gh release view v1' \
+  'gh release download v1' 'gh repo view' 'gh repo clone o/r' 'gh repo list' \
+  'gh repo set-default o/r' 'gh repo deploy-key list' 'gh run view 9 --log' 'gh run list' \
+  'gh run watch 9' 'gh run download 9' 'gh workflow list' 'gh workflow view ci.yml' \
+  'gh label list' 'gh secret list' 'gh variable list' 'gh variable get X' 'gh gist list' \
+  'gh gist view abc' 'gh cache list' 'gh search prs is:open' 'gh status' 'gh browse --no-browser' \
+  'gh auth status' 'gh --version' 'gh version' 'gh help pr' 'gh pr close --help' 'gh pr' \
+  'gh project list' 'gh project view 1' 'gh ruleset list' 'gh alias list' 'gh config get editor'
+allow_each "R2 gh api read" \
+  'gh api repos/o/r/pulls/5' 'gh api user --jq .login' 'gh api -X GET repos/o/r/issues -f state=open' \
+  'gh api --method GET search/issues -F q=x' 'gh api --paginate repos/o/r/issues' \
+  "gh api graphql -f query='{ viewer { login } }'" \
+  "gh api graphql -f query='query(\$o: String!) { repository(owner: \$o, name: \"r\") { id } }' -f o=x"
+allow_each "R3 glab read" \
+  'glab mr view 4' 'glab mr list' 'glab mr diff 4' 'glab mr checkout 4' 'glab issue view 3' \
+  'glab issue list' 'glab issue board view' 'glab ci status' 'glab ci view' 'glab ci trace 9' \
+  'glab ci list' 'glab ci lint' 'glab pipeline list' 'glab release list' 'glab release view v1' \
+  'glab repo view' 'glab repo clone g/r' 'glab label list' 'glab variable list' \
+  'glab variable get X' 'glab schedule list' 'glab auth status' 'glab version' 'glab mr' \
+  'glab api projects/:id/merge_requests/4' 'glab api -X GET projects/:id/issues -f state=opened' \
+  "glab api graphql -f query='{ currentUser { username } }'"
+allow_each "R4 wrappers and prose" \
+  '~/dev/custom/ai/bin/gh-athena pr close 119 -R CJPoll/custom' \
+  '~/dev/custom/ai/bin/gh-athena api -X POST repos/o/r/issues/5/comments -f body=x' \
+  '~/dev/custom/ai/bin/glab-athena mr note 4 -m x' \
+  '~/dev/custom/ai/bin/glab-athena api -X POST projects/:id/issues -f title=x' \
+  'echo the gh CLI is fine' 'ls ~/dev/gh-pages' 'git log --oneline -3'
 
 echo
 echo "--- DND-577: the 2026-09-24 incident — a plain push is STOPPED, not warned about ---"

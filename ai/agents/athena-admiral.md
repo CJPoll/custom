@@ -383,7 +383,7 @@ same commands as `gh`/`glab` — so writes are attributed to Athena, not the
 machine owner. The App config is present, so the wrapper works. READS
 may use plain `gh`/`glab`. Verify wrapper health with
 `~/dev/custom/ai/bin/forge-preflight` if a write fails. (The `forge-identity-guard.sh`
-hook enforces this: it denies a bare create/merge or plain push to a forge
+hook enforces this: it denies every plain `gh`/`glab` write or plain push to a forge
 before it runs, with a `Fix:` — the guard stops, the block instructs.)
 
 This covers every write the admiral performs — MRs/PRs, comments, approvals,
