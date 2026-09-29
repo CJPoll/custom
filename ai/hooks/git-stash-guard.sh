@@ -128,10 +128,12 @@
 #     git with exit 128 and writes nothing (`git stash guard` in prose). Only
 #     while the installed git is the table's version (GSG_STASH_VERBS_GIT),
 #     and only for a plain word ([A-Za-z0-9._,:%+@/-]) that names no snapshot
-#     alias, in a command that defines no alias, named directory or option
-#     and runs no eval/source/`.`. Otherwise zsh can turn the word into a
-#     verb at run time (`~P`, `^x`, an alias after `alias x='git stash '`, a
-#     global alias defined then eval'd), so it stays a write. A bare or
+#     alias, in a command that shows no way to redefine a word or run text
+#     (no expansion, substitution or glob character, and no definition,
+#     re-parse, shell or interpreter word; see STASH_TABLE_OK). Otherwise
+#     zsh can turn the word into a verb at run time (`~P`, `^x`, an alias
+#     after `alias x='git stash '`, a global alias defined then eval'd, by
+#     any spelling), so it stays a write. A bare or
 #     option-first stash, a verb built by expansion, glob or brace, and every
 #     snapshot global alias (substituted, see ZSH) are still judged.
 #     Residual: the version probed is the git first on the hook's PATH, so a
