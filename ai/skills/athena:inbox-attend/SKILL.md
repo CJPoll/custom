@@ -126,6 +126,17 @@ is the brief, not the message.
    block on or poll. Launch nothing else in the background and do not park on the
    waiter.
 
+   **Any turn can end, not only a wake turn — check the waiter before each
+   end.** An owner turn that arrives mid-wake, before step 3, takes the turn
+   over, and nothing after it re-arms. So before ending ANY turn in the
+   attendant session, confirm this session has a waiter live: one you launched
+   whose completion notification has not yet arrived. If none is, arm one now.
+   A duplicate waiter costs one extra wake; a missing one costs every message
+   until someone happens to look. Measured 2026-09-29: the coordinator read one
+   message at 05:15Z, handled Cody's "pause harness work" turn, and never
+   re-armed. It was deaf for 19h: 60 unread, a merge-token grant and two green
+   security PRs stalled until Cody asked for a progress report.
+
 ## Show that Athena is thinking
 
 **Later (2026-09-25):** added by DND-682. This file has no *Kind* header, so it
