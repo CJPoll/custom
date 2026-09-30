@@ -317,7 +317,7 @@ grep -rn 'a\|b' dir
 grep -i stash f
 grep -n -i stash f g
 python3 -c 'd=[{"text": 1}]; print(d[0]["text"])'
-ruby -e 'fix = 1; puts "#{fix}"'
+/usr/bin/ruby -e 'fix = 1; puts "#{fix}"'
 python3 -c 'import sys; p=sys.argv[1]' x
 gh pr view --jq '{reviews: .reviews}'
 docker ps --format '{{.Names}}'
@@ -332,7 +332,7 @@ CORPUS
 # The heredoc forms, as files (a heredoc cannot sit on one corpus line).
 printf 'python3 - <<'"'"'EOF'"'"'\nprint("abcdef"[0:2])\nEOF\n' > "${TMP}/hd1.sh"
 printf 'cat > s.sh <<'"'"'EOF'"'"'\ngit stash pop\nEOF\n' > "${TMP}/hd2.sh"
-printf 'ruby - <<'"'"'EOF'"'"'\nfix = 1\nputs "#{fix}"\nEOF\n' > "${TMP}/hd3.sh"
+printf '/usr/bin/ruby - <<'"'"'EOF'"'"'\nfix = 1\nputs "#{fix}"\nEOF\n' > "${TMP}/hd3.sh"
 for h in hd1 hd2 hd3; do
   : > "${TMP}/git.log"
   ( cd "${FP}" && PATH="${TB}:${BASEPATH}" bash "${TMP}/${h}.sh" ) >/dev/null 2>&1

@@ -79,9 +79,9 @@ trap 'exit 143' TERM
 # `ruby` found through PATH. REPRO_RUBY is the one seam: the suite-reaper repro
 # (scripts/test/suite-reaper/repro-real-suites.sh) sets it to its trigger shim.
 MOCK_RUBY="${REPRO_RUBY:-/usr/bin/ruby}"
-[ -x /usr/bin/ruby ] || {
-  echo "VERDICT: FAIL — /usr/bin/ruby is missing; the mock client is ruby so the identity check is the real one."
-  echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958; the harness gate itself needs it)."
+[ -x "${MOCK_RUBY}" ] || {
+  echo "VERDICT: FAIL — ${MOCK_RUBY} is not executable; the mock client is ruby so the identity check is the real one."
+  echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958; the harness gate itself needs it), or unset REPRO_RUBY."
   exit 1
 }
 

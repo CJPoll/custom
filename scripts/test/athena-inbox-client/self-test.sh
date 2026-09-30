@@ -1054,8 +1054,8 @@ WD_PIDS=()
 # `ruby` found through PATH. REPRO_RUBY is the one seam: the suite-reaper repro
 # (scripts/test/suite-reaper/repro-real-suites.sh) sets it to its trigger shim.
 MOCK_RUBY="${REPRO_RUBY:-/usr/bin/ruby}"
-if [ ! -x /usr/bin/ruby ]; then
-  bad "the watchdog cases need ruby for the mock client" "no /usr/bin/ruby (the harness Ruby, DND-931/958)"
+if [ ! -x "${MOCK_RUBY}" ]; then
+  bad "the watchdog cases need ruby for the mock client" "${MOCK_RUBY} is not executable (default /usr/bin/ruby, the harness Ruby, DND-931/958)"
 else
 
 # start_wd_supervisor <mode> — a supervised mock client. Sets SUPERVISOR_PID

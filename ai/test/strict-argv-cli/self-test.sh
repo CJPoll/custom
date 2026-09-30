@@ -45,7 +45,7 @@ bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 # tool below would "fail" for a reason that has nothing to do with argv.
 REAL_RUBY_DIR="$(dirname "$(/usr/bin/ruby -e 'print RbConfig.ruby')")" || {
   echo "strict-argv CLI suite: FAIL -- /usr/bin/ruby did not run"
-  echo "  Fix: install ruby; this suite does not skip."; exit 1; }
+  echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
 mkdir -p "${TMP}/home" "${TMP}/state" "${TMP}/inbox" "${TMP}/stubs" "${TMP}/pool"
 chmod 700 "${TMP}/pool"
 export HOME="${TMP}/home"

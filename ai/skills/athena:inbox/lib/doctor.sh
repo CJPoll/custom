@@ -596,7 +596,7 @@ doctor_check_undeclared_live() {
   [ -d "${dir}" ] || return 0
   if ! declared="$(doctor_declared_files)"; then
     doctor_finding na "undeclared-entry" "cannot consult the committed registry list, so live entries cannot be reconciled against it" \
-      "run ai/bin/check-inbox-registry from the main checkout (it owns the committed source of truth); this cross-check needs ruby and ai/inbox/lib/registry.rb."
+      "run ai/bin/check-inbox-registry from the main checkout (it owns the committed source of truth); this cross-check needs /usr/bin/ruby and ai/inbox/lib/registry.rb."
     return 0
   fi
   local f

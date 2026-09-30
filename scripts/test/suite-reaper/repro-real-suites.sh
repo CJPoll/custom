@@ -152,7 +152,7 @@ chmod +x "${WORK}/bin/ruby"
 # did. scripts/athena-inbox-client-run.sh resets PATH to a fixed list headed by
 # ${HOME}/.local/bin, so the shim cannot come from PATH there: the suite's stub
 # execs the absolute REPRO_RUBY path it was written with (DND-1340).
-mkdir -p "${WORK}/home/.local/bin"
+mkdir -p "${WORK}/home"
 
 # REAL_RUBY is the interpreter itself, never the first `ruby` on PATH
 # (DND-1203). In an agent session that is the asdf shim, and an asdf shim
