@@ -6154,10 +6154,19 @@ this subsection is its boundary.
   the call: only the summary is stored. A channel mention is never read
   live, so with no stored text it has no text to summarize. A read that
   finds nothing (a blank text, or a thread with no message from the asker)
-  is no text to summarize too. A failed read is never read as no text: a
+  is no text to summarize too. A failed read is never read as no text. A
+  failure about the whole workspace pauses the item and fails nothing
+  (*A Slack workspace failure pauses*). Of the failures about the one ask, a
   malformed Slack reference or asker fails `slack_ref_invalid`, a permanent
-  cause, and any other failure fails `slack_unreadable`, a transient one
+  cause, and any other fails `slack_unreadable`, a transient one
   (*Refresh*).
+
+  **Later (2026-09-30, DND-1335):** this bullet said any failed read other
+  than a malformed reference fails `slack_unreadable`. Superseded by
+  DND-1335 (gen_saas #582, `c9690bbc`): a workspace-level failure (no app, a
+  revoked token, Slack down, a rate limit) failed every Slack ask, spent
+  each item's attempts, and pushed its retry out to 6 h, long after Slack
+  had recovered.
 
   **Later (2026-09-30):** this bullet said `slack_ask` sends "the stored
   `message_text`" only. Superseded by DND-1285 (gen_saas #575, `0594cf75`):
@@ -6195,6 +6204,40 @@ this subsection is its boundary.
   `retries_exhausted`. Superseded for `slack_unreadable` by DND-1285
   (gen_saas #575, `Summaries.Cause.exhausts?/1`,
   `Summaries.Refresh.retry_delay/4`).
+- **A Slack workspace failure pauses, never fails** (DND-1335). A Slack
+  ask's live read can fail for a reason about the whole workspace rather
+  than the one ask. `Athena.Priorities.SlackNames.workspace_failure/1` is
+  the one table of those reasons. The Slack name lookup's own workspace
+  pause (`failure_scope/1`) reads the same table. There are five causes:
+  - `slack_not_configured`: no Slack app with a stored bot token;
+  - `slack_token_unreadable`: the bot token could not be read;
+  - `slack_auth_rejected`: Slack answered `invalid_auth`, `not_authed`,
+    `account_inactive`, `token_revoked`, `token_expired`,
+    `org_login_required`, `team_access_not_granted` or `ekm_access_denied`;
+  - `slack_rate_limited`: HTTP 429, or Slack's `ratelimited`;
+  - `slack_unavailable`: a transport failure, any other non-2xx status, or
+    Slack's `accesslimited`, `fatal_error`, `internal_error`,
+    `service_unavailable` or `request_timeout`.
+
+  Any other reason, `missing_scope` included, is about the one lookup and
+  stays `slack_unreadable`. Treating `missing_scope` as workspace-level is
+  DND-1368.
+
+  A paused item is deferred under its cause until the lookup's pause ends.
+  That is 5 minutes. After an HTTP 429 carrying Slack's retry-after, it is
+  that delay held between 1 and 15 minutes. An item that met a pause already
+  cached may wait up to one more window. The pause spends no attempt,
+  fails no item, and makes no model call and no ledger row. A row with no
+  summary, one already paused, or one retrying a transient failure shows
+  the pause. A row with its own state (a current summary, a permanent
+  failure, no text) keeps it and only waits. When the pause ends, the item
+  is due again with no revision change, so it recovers by itself. The
+  lookup's pause keeps this to one Slack call per workspace per window.
+
+  Each sweep pass counts `slack_paused` per cause in its tally and its pass
+  line. It logs one warning per owner and cause, never one per item, naming
+  the count and the cause's `Fix:` line. The row reads "Summary paused:
+  <cause>, re-checked <time>".
 - **Budget, per owner.** 200 model calls and 400,000 tokens per UTC day, and
   $5 per UTC month from metered tokens at configured prices, checked before
   each call against the ledger plus the call's estimate. A missing price, or
@@ -6206,9 +6249,9 @@ this subsection is its boundary.
   It is not a judgment (`ai/contracts/athena-judgments.md` → *Purpose and
   non-goals*).
 - **Never a silent blank.** Each row shows its summary or exactly one of:
-  pending, paused by a named budget, failed with a named cause, no text to
-  summarize, unavailable with an owner-level cause, off for this source, or
-  no summary for this source. A stored status or cause the page does not know
+  pending, paused by a named budget or a named Slack workspace cause,
+  failed with a named cause, no text to summarize, unavailable with an
+  owner-level cause, off for this source, or no summary for this source. A stored status or cause the page does not know
   shows as failed, never as a summary.
 - **Access control.** Only the owner's page reads summaries, through the
   owner-scoped item listing (`owner_id` in the query). The sweeper writes
