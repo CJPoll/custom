@@ -1905,11 +1905,21 @@ def spawn_from_blocked_thread
     old = Fiddle::Pointer.malloc(128, Fiddle::RUBY_FREE)
     fill.call(all)
     rc = sigmask.call(sig_block, all, old)
-    next { out: nil, thread_blk: nil, error: "pthread_sigmask returned #{rc}" } unless rc.zero?
+    next({ out: nil, thread_blk: nil, error: "pthread_sigmask returned #{rc}" }) unless rc.zero?
 
+    # The block runs with SIGVTALRM blocked too, so Ruby cannot interrupt it
+    # mid-call; the probe it runs is short.
     begin
+      native = File.readlink("/proc/thread-self")
       thread_blk = File.read("/proc/thread-self/status")[/^SigBlk:\s*(\h+)$/, 1]
-      { out: yield, thread_blk: thread_blk, error: nil }
+      out = yield
+      # Under M:N threads the Ruby thread could move to another native
+      # thread, and then the spawn did not come from the blocked one. (The
+      # mask itself cannot be re-read to tell: Ruby's vfork spawn leaves the
+      # spawning thread's mask empty afterwards.)
+      now = File.readlink("/proc/thread-self")
+      moved = now == native ? nil : "the Ruby thread moved from native thread #{native} to #{now}"
+      { out: out, thread_blk: thread_blk, error: moved }
     ensure
       sigmask.call(sig_setmask, old, nil)
     end
@@ -1981,7 +1991,9 @@ def self_test_cpu_attribution
     #     (0x10000), or every signal blocked while it is inside glibc's
     #     _Fork, which holds them all blocked around clone(). Seen once as
     #     SigBlk fffffffffffbfeff: bits 32 and 33 are glibc's own signals,
-    #     which no public sigprocmask call can block.
+    #     which no public sigprocmask call can block. A redirected loop runs
+    #     in the shell itself (bash and dash); a pipe or $(...) in this probe
+    #     would bring the fork back.
     probe = ["sh", "-c", 'while IFS= read -r l; do case $l in SigBlk:*|SigIgn:*) echo "$l" ;; esac; ' \
                          'done < /proc/$$/status; for f in /proc/$$/fd/*; do echo "${f##*/}"; done']
     direct, = Open3.capture2e(*probe, chdir: dir, stdin_data: "")
@@ -1999,8 +2011,16 @@ def self_test_cpu_attribution
       checks["a check spawned #{how} starts with no signal blocked (SigBlk #{blk.inspect})"] =
         !blk.nil? && blk.to_i(16).zero?
     end
-    checks["the blocked-thread fixture blocked its signals (#{from_blocked[:error] || 'ok'})"] =
-      from_blocked[:error].nil? && from_blocked[:thread_blk].to_s.to_i(16).positive?
+    # The fixture must really have blocked SIGINT, SIGTERM and SIGCHLD (bit
+    # n-1 is signal n), or 15c tested nothing; that failure has its own Fix.
+    want_bits = (1 << 1) | (1 << 14) | (1 << 16)
+    unless from_blocked[:error].nil? && (from_blocked[:thread_blk].to_s.to_i(16) & want_bits) == want_bits
+      warn "self-test: FAIL — case 15c fixture: the spawning thread did not have SIGINT, SIGTERM and " \
+           "SIGCHLD blocked (SigBlk #{from_blocked[:thread_blk].inspect}; #{from_blocked[:error] || 'no error'}). " \
+           "Fix: repair spawn_from_blocked_thread (Fiddle must load, and pthread_sigmask must block every " \
+           "signal on the thread that runs the spawn); never delete or skip case 15c."
+      good = false
+    end
     checks.each do |what, ok|
       next if ok
 
