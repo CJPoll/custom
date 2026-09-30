@@ -837,33 +837,36 @@ fi
 #     for up to MAX_BACKOFF — 300s in production. The operator's documented
 #     recovery would appear to do nothing for five minutes, which reads as a
 #     wedged supervisor and invites a kill -9 that skips the reaper entirely.
+#     DND-1356: the backoff is an hour, so TERM is the only thing that can end
+#     the supervisor inside the 120 s wait below, which only caps a hang. It
+#     was a 30 s backoff against a 10 s wait: a race a slow host could lose.
 setup_case term_during_backoff
 make_stub 1 0
 env ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
     ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
-    ATHENA_INBOX_CLIENT_MIN_BACKOFF=30 \
-    ATHENA_INBOX_CLIENT_MAX_BACKOFF=30 \
+    ATHENA_INBOX_CLIENT_MIN_BACKOFF=3600 \
+    ATHENA_INBOX_CLIENT_MAX_BACKOFF=3600 \
     ATHENA_INBOX_CLIENT_BACKOFF_RESET=120 \
     ATHENA_INBOX_CLIENT_MAX_RESTARTS=9 \
     bash "${RUNNER}" >/dev/null 2>&1 &
 SUPERVISOR_PID=$!
 
 # The stub exits 1 immediately, so once it has run once the supervisor is in
-# its 30s backoff — the window under test.
-# Synchronised on the supervisor's own "restart 1 in 30s" line, not on
+# its 3600s backoff — the window under test.
+# Synchronised on the supervisor's own "restart 1 in 3600s" line, not on
 # `sleep 1`: under load a fixed second is no promise the supervisor has reached
 # the backoff, and a TERM that lands earlier would pass without testing the
 # window this case exists for (DND-365).
-if wait_for_nonempty "${CALLS}" 100 && wait_for_log 'restart 1 in 30s' 300; then
-  started="$(date +%s)"
+if wait_for_nonempty "${CALLS}" 100 && wait_for_log 'restart 1 in 3600s' 300; then
   kill "$SUPERVISOR_PID" 2>/dev/null
-  # Bounded: if TERM is being swallowed this returns when the timeout lapses
-  # rather than hanging the suite.
-  timeout 10 tail --pid="$SUPERVISOR_PID" -f /dev/null >/dev/null 2>&1
-  elapsed=$(( $(date +%s) - started ))
+  # Bounded: if TERM is being swallowed this returns when the hang cap lapses
+  # (120 s, far inside the 3600 s backoff) rather than hanging the suite.
+  timeout 120 tail --pid="$SUPERVISOR_PID" -f /dev/null >/dev/null 2>&1
   if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
     bad "SIGTERM is honoured during the backoff sleep, not deferred until it ends" \
-        "still alive ${elapsed}s after TERM (MIN_BACKOFF was 30s)"
+        "still alive 120s after TERM, inside a 3600s backoff"
+    # Its backoff `sleep 3600` would outlive a SIGKILLed supervisor.
+    pkill -KILL -P "$SUPERVISOR_PID" 2>/dev/null
     kill -9 "$SUPERVISOR_PID" 2>/dev/null
   else
     ok "SIGTERM is honoured during the backoff sleep, not deferred until it ends"

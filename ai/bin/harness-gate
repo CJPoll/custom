@@ -2270,9 +2270,56 @@ def self_test_reap
     pidfile = File.join(dir, "leak.pid")
     leaky = File.join(dir, "leaky.sh")
     File.write(leaky, "#!/bin/sh\nsh -c 'sleep 307 >/dev/null 2>&1 & echo $! >\"$0\"' \"$1\"\nexit 0\n")
+    # brief.sh FIFO: leaves a child that is still alive when the check exits
+    # and ends on its own once FIFO is written (DND-1356: an event, where it
+    # used to be `sleep 1` against the 5 s grace, a race a slow host loses).
     brief = File.join(dir, "brief.sh")
-    File.write(brief, "#!/bin/sh\nsleep 1 >/dev/null 2>&1 &\nexit 0\n")
+    File.write(brief, "#!/bin/sh\n(read _x < \"$1\") >/dev/null 2>&1 &\nexit 0\n")
     [leaky, brief].each { |p| FileUtils.chmod(0o755, p) }
+    # run_brief -> [ok, out, alive_at_sweep, grace_seen]. For this one call
+    # the sweep records the grace run_one asked for and runs it as a hang cap
+    # (600 s), and its FIRST scan that finds the child releases it, returning
+    # the child as still alive. So the sweep's grace wait is what must see the
+    # child go: a sweep that killed at once would find it and fail the check,
+    # and a slow host only makes the wait longer, never the verdict different.
+    brief_n = 0
+    run_brief = lambda do
+      brief_n += 1
+      fifo = File.join(dir, "brief-#{brief_n}.fifo")
+      File.mkfifo(fifo)
+      seen = { alive: false, grace: nil }
+      writer = nil
+      real_reap = ReapTags.method(:reap)
+      real_tp = ReapTags.method(:tagged_pids)
+      ReapTags.define_singleton_method(:tagged_pids) do |*a, **k|
+        found = real_tp.call(*a, **k)
+        if !found.empty? && writer.nil?
+          seen[:alive] = true
+          writer = Thread.new { File.open(fifo, "w") { |f| f.write("go\n") } }
+        end
+        found
+      end
+      ReapTags.define_singleton_method(:reap) do |tag, grace: ReapTags::DEFAULT_GRACE_S, **kw|
+        seen[:grace] = grace
+        real_reap.call(tag, grace: grace.positive? ? 600 : grace, **kw)
+      end
+      begin
+        r_ok, r_out = run_one([brief, fifo], chdir: dir)
+      ensure
+        ReapTags.define_singleton_method(:reap, real_reap)
+        ReapTags.define_singleton_method(:tagged_pids, real_tp)
+        if writer.nil?
+          # The sweep never saw the child (a failing run). Release it anyway,
+          # without blocking: with no reader the open is ENXIO, which is fine.
+          File.open(fifo, File::WRONLY | File::NONBLOCK) { |f| f.write("go\n") } rescue nil
+        elsif !writer.join(10)
+          # The child never opened the FIFO: unblock the writer, never hang.
+          File.open(fifo, File::RDONLY | File::NONBLOCK) { writer.join(10) } rescue nil
+          writer.kill
+        end
+      end
+      [r_ok, r_out, seen[:alive], seen[:grace]]
+    end
 
     leak_ok, leak_out = run_one([leaky, pidfile], chdir: dir)
     leak_pid = File.exist?(pidfile) ? File.read(pidfile).strip.to_i : 0
@@ -2290,14 +2337,17 @@ def self_test_reap
     Process.kill("KILL", leak_pid) if alive
 
     # A child that finishes inside the grace period is not a leak.
-    brief_ok, brief_out = run_one([brief], chdir: dir)
-    expect.call(brief_ok, "a child that exits 1s after its check was called a leak (#{brief_out.inspect})")
+    brief_ok, brief_out, brief_alive, brief_grace = run_brief.call
+    expect.call(brief_grace == ReapTags::DEFAULT_GRACE_S,
+                "a check that returned was swept with grace #{brief_grace.inspect}, not DEFAULT_GRACE_S")
+    expect.call(brief_alive, "the brief child was already gone when the sweep began, so the grace was never exercised")
+    expect.call(brief_ok, "a child that exits during the grace period was called a leak (#{brief_out.inspect})")
 
     # Another run's tagged process (a sibling gate) is never touched.
     other_tag = ReapTags.new_tag("selftest-sibling")
     sib = Process.spawn(ReapTags.env_with(other_tag), "sleep", "308", out: File::NULL, err: File::NULL)
     begin
-      sib_ok, = run_one([brief], chdir: dir)
+      sib_ok, = run_brief.call
       sib_alive = begin
         Process.kill(0, sib)
         true

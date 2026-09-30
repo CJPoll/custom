@@ -48,7 +48,7 @@ APPROVAL="session:${FX_SID}/${FX_MID} quote:yes, provision the KMS key"
 # real pool, whatever fleet is running.
 # A suite launched from inside a real slot (a captain's wrapped harness-gate)
 # must not carry that slot into its fixtures.
-unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC
+unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC
 export ATHENA_TEST_SLOT_DIR="${TMP}/slots" ATHENA_TEST_SLOTS=1
 TEST_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
 
