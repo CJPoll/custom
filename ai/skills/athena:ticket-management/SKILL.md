@@ -220,6 +220,17 @@ other documents cite it by name.
     finished security fix merges first*). Owner, ~10:45Z: "I'm not talking
     about the merge queue; I'm talking about the order in which an admiral
     assigns tickets to captains."
+  - **A free captain slot picks up `Parked` tickets too.** Owner, Cody,
+    2026-09-30 (UTC), terminal: "Let's make sure that when we have free
+    captains we pick up the parked tickets too." When a slot frees, the
+    admiral's candidates are its own `Parked` tickets alongside its `Todo`
+    ones, in the same tier order. `ai/bin/next-mission` already does this: a
+    `Parked` ticket is a candidate unless `--started` names it, and within a
+    tier it is resumed before a fresh one starts.
+    - A resumed `Parked` ticket starts from the branch, head SHA and PR its
+      body names (*A ticket's status follows its captain*). The captain's
+      brief carries all three; never a fresh branch.
+    - `Needs Attention` stays Cody's. It is never a candidate.
 - **A finding blocks only if it truly prevents the work.** The test: does the
   planned ticket fail its acceptance criteria or intended requirements without
   this fix? If yes, set `Path` = `Blocking` and wire `Depends On`↔`Blocks` onto

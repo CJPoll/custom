@@ -127,12 +127,21 @@ Keys in use (DND-704), with where each is used:
 The Athena bot's own Slack user and bot ids are not overlay keys: `athena:slack`
 `bin/whoami` reports the live identity.
 
+**`secrets.json` (optional).** `overlay/secrets.json` declares the work-domain
+per-machine secrets: their names, paths, copies, consumers and restart
+commands. It uses the registry schema in `ai/contracts/athena-machine-secrets.md`
+→ *The registry*. Like every overlay file it holds names and paths only, never
+a value (*No credentials*). `ai/bin/check-machine-secrets` and
+`ai/bin/with-secret` read it when the overlay is present. An absent overlay
+means no work-domain secrets are declared on that machine.
+
 ## No credentials
 
 The overlay holds identifiers and procedures, never credentials. Tokens and
 keys stay where they are today (`~/.claude/*token*`,
 `~/.config/athena-inbox-client/`, the GitHub App key). A credential found in the
-overlay is a defect to report.
+overlay is a defect to report. Where a secret lives, how it is declared and
+how it is loaded: `ai/contracts/athena-machine-secrets.md`.
 
 ## Consumer obligation
 

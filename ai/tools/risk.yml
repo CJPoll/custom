@@ -96,6 +96,10 @@ tools:
   # repo/forge/tracker/remote, so idempotent (re-running once clean is a
   # no-op).
   check-inbox-mock-orphans: { class: idempotent, reason: reap }
+  # check-machine-secrets (DND-845) reads env, files and git; its one write is
+  # the machine-local exports record under $XDG_STATE_HOME (never the repo, a
+  # forge or a remote), so idempotent by the class order.
+  check-machine-secrets:   { class: idempotent, reason: check }
   # admiral-eval / harness-eval can rewrite a TRACKED baseline JSON via
   # --update-baseline (and harness-eval writes ai/eval/scorecard.json on the
   # default gate path), so by worst-case capability they mutate the repo.
@@ -168,6 +172,10 @@ tools:
   # worst-case capability it grants policy authority to something else. Local
   # --list/--path reads are harmless; the class follows --add.
   owner-notes:             { class: destructive, reason: authority }
+  # with-secret (DND-845) execs an arbitrary caller-supplied command with one
+  # declared secret in its env, so its worst case is whatever that command
+  # does, holding a credential.
+  with-secret:             { class: destructive, reason: exec }
   # test-slot (DND-485) runs an arbitrary caller-supplied CMD once a machine
   # slot is free. Its own writes are local pool state, but by worst-case
   # capability it executes whatever CMD is: classifying it lower would let a
