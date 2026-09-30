@@ -124,7 +124,8 @@ USAGE = <<~EOF
        join, no token config, no athena MCP entry), or (slack_routing) the
        owner's Slack id did not resolve from the private overlay (absent,
        malformed, key missing, or not a Slack user id) or matches none of
-       the labelled roots: nothing was sent
+       the labelled roots, or every joined label is a session-mention root
+       (the router never judges those): nothing was sent
     2  usage
     3  nothing scored: no key ("no key; see DND-711"), every case unscored, the
        use case's question set is not on the server yet, or (slack_routing)

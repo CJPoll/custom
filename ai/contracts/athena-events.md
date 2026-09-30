@@ -4065,9 +4065,17 @@ durable trace of an unrouted event, names the stale claim's key too.
 **The line says how it was routed.** Every Slack line the router writes carries
 `route`: `thread_claim` when a live claim chose the channel, `topic_judgment`
 when an accepted topic judgment chose it (*New conversations may route by an
-advisory topic judgment*), `channel_route` otherwise (including a stale-claim
-fallback). The field is defined in `ai/contracts/athena-inbox.md` → *Line
-format*.
+advisory topic judgment*), `session_mention` when the owner's text addressed a
+session (step 2b', *The session mention*), `channel_route` otherwise
+(including a stale-claim fallback). The field is defined in
+`ai/contracts/athena-inbox.md` → *Line format*.
+
+**Later (2026-09-30):** this paragraph listed three `route` values, with
+`channel_route` for everything but a claim or a judgment. Superseded by
+DND-717's step 2b', which adds `session_mention`; *The line* under *New
+conversations may route by an advisory topic judgment* gained the same value
+in the same change. Why: a session-addressed line is routed by the owner's
+own rule, and calling it `channel_route` would misreport it.
 
 **What it does not guarantee.** A claim is owner-scoped isolation, not a security
 boundary between the owner's own projects. Any of the owner's machines can claim
@@ -4191,8 +4199,9 @@ session to …") is not one and is judged as before.
   eval corpus (`ai/lib/judgment_label.rb`, `rule_confirmed` with
   `"rule": "session_mention"`), and `judgment-eval` leaves such roots out of
   a run (`ai/contracts/athena-judgments.md` → *Threshold provenance, n/a and
-  the pinned model*). Both test suites carry one vector list; a change to
-  either is a new grammar version in both.
+  the pinned model*). Both test suites carry the same vector list, as two
+  copies kept in step by hand (nothing compares them); a change to either is
+  a new grammar version in both.
 
 **Topic routes.** A topic route maps `(slack_app, label)` to one AgentInstance,
 with an `enabled` flag. It is written by the owner of the app, holder of

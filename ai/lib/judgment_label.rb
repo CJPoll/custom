@@ -40,8 +40,8 @@ module JudgmentLabel
   #                    evidence labels
   RULES = %w[session_mention default_walt_ui].freeze
   # Grammar session-mention-v1, the SAME grammar the server's router applies
-  # (gen_saas Athena.SlackEvents.SessionMention; both suites carry one vector
-  # list). Only a LEADING address counts: "harness session:" (the tag form,
+  # (gen_saas Athena.SlackEvents.SessionMention; both suites carry the same
+  # vector list, two copies kept in step by hand). Only a LEADING address counts: "harness session:" (the tag form,
   # as R1 tags posts) or a single-line lead-in of at most 80 characters
   # ending "for the harness session:". "session" is required. Names that
   # disagree are no mention.
