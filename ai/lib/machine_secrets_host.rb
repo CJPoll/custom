@@ -19,6 +19,7 @@ require "etc"
 require "find"
 require "fileutils"
 require "open3"
+require "tmpdir"
 require_relative "machine_secrets"
 require_relative "landed"
 require_relative "private_overlay_resolver"
@@ -264,6 +265,9 @@ module MachineSecretsHost
   # -> [epoch Float or nil, note]. The start time of the nearest ancestor
   # process whose comm is "claude".
   def session_start(env = ENV)
+    if env.key?(SESSION_START_SEAM) && !fixture_home?(env)
+      return [nil, "#{SESSION_START_SEAM} is set but ignored: it is honoured only with a fixture HOME under #{tmp_root}, and no ancestor claude process was used"]
+    end
     if env.key?(SESSION_START_SEAM)
       raw = env[SESSION_START_SEAM]
       return [nil, "no ancestor claude process (#{SESSION_START_SEAM}=none)"] if raw == "none"
@@ -289,6 +293,25 @@ module MachineSecretsHost
     [nil, "no ancestor claude process"]
   rescue SystemCallError => e
     [nil, "/proc could not be read (#{e.class.name.split('::').last})"]
+  end
+
+  def tmp_root
+    File.realpath(Dir.tmpdir)
+  rescue SystemCallError
+    "/tmp"
+  end
+
+  # The seam is honoured only in a self-test's fixture: HOME under the temp
+  # root. A real session's HOME never is, so a caller cannot use the seam to
+  # relabel a live FAIL as PENDING RESTART.
+  def fixture_home?(env)
+    h = home(env).to_s
+    return false unless h.start_with?("/")
+
+    real = File.realpath(h)
+    real.start_with?("#{tmp_root}/") || real.start_with?("/tmp/")
+  rescue SystemCallError
+    false
   end
 
   def mtime_l(path)

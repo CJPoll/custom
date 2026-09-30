@@ -70,6 +70,7 @@ BASE_ENTRIES=(
   "$(entry fx-dotenv '~/.fx/app/.env' dotenv '~/wt/*/app/.env')"
   "$(entry SYN_KEY '~/.fx/syn-key' api-key)"
   "$(entry SYN_DOTENV '~/.fx/app/.env' dotenv)"
+  "$(entry SYN_ABSENT '~/.fx/never-provisioned' api-key)"
 )
 write_allowlist
 write_registry "${BASE_ENTRIES[@]}"
@@ -231,6 +232,11 @@ expect "(a) recorded export still present -> FAIL" 1 "still present at ~/.zshrc.
 printf 'export OTHER=1\n' > "${FHOME}/.zshrc.local"
 check "SYN_API_KEY=${SYN_C}" "CHECK_MS_TEST_CLAUDE_START=$((NOW - 100))" -- --probe a
 expect "(a) recorded, gone, file changed after session start -> PENDING RESTART, exit 0" 0 "PENDING RESTART  SYN_API_KEY"
+# The same state with a HOME that is not a fixture: the seam is ignored, so it
+# cannot relabel a live FAIL (the record's paths are absolute, so HOME=/ still
+# finds them).
+check "HOME=/" "SYN_API_KEY=${SYN_C}" "CHECK_MS_TEST_CLAUDE_START=$((NOW - 100))" -- --probe a
+expect "(a) the session-start seam is ignored outside a fixture HOME -> FAIL" 1 "FAIL  SYN_API_KEY" "PENDING"
 touch -d "@$((NOW - 200))" "${FHOME}/.zshrc.local"
 # Another probed file (the symlinked ~/.zshrc, whose target a git pull would
 # bump) changed after the start: only the RECORDED file's own mtime counts.
@@ -265,6 +271,20 @@ printf 'A=%s\n' "${SYN_C}" > "${FHOME}/wt/two/app/.env"; chmod 644 "${FHOME}/wt/
 check -- --probe c
 expect "(c) copies: counts matches and violators" 1 "copies fx-dotenv ~/wt/\*/app/.env: 2 matched, 1 violator"
 expect "(c) copies: names the 0644 copy" 1 "FAIL  fx-dotenv copy ~/wt/two/app/.env: mode 0644"
+# Every probe (c) refusal branch, one at a time.
+chmod 770 "${FHOME}/.fx"
+check -- --probe c
+expect "(c) a group-writable parent directory is a finding" 1 "FAIL  fx-token ~/.fx/token: parent directory mode 0770 is group- or world-writable"
+expect "(c) its Fix is chmod 700 on the directory" 1 "Fix: chmod 700 ~/.fx"
+chmod 700 "${FHOME}/.fx"
+mv "${FHOME}/.fx/target" "${FHOME}/.fx/target.moved"
+check -- --probe c
+expect "(c) a dangling symlink is a finding, not 'not provisioned'" 1 "FAIL  fx-link ~/.fx/link -> \(dangling\): a dangling symlink"
+mv "${FHOME}/.fx/target.moved" "${FHOME}/.fx/target"
+mkdir -p "${FHOME}/.fx/absent"
+check -- --probe c
+expect "(c) a declared path that is a directory is a finding" 1 "FAIL  fx-absent ~/.fx/absent: not a regular file"
+rmdir "${FHOME}/.fx/absent"
 rm -rf "${FHOME}/wt"
 write_registry "${BASE_ENTRIES[@]}" "$(entry rel-path 'secrets/relative')"
 check -- --probe c
@@ -277,7 +297,7 @@ expect "(c) a registry field holding a credential value is malformed (and not ec
 # is the field most likely to echo. Refused by position, never by name.
 write_registry "${BASE_ENTRIES[@]}" "$(entry "${SYN_D}" '~/.fx/x' token)"
 check -- --probe c
-expect "(c) a credential-valued NAME is malformed and not echoed" 3 "secrets\[6\]: name looks like a credential value" "SYNTHd"
+expect "(c) a credential-valued NAME is malformed and not echoed" 3 "secrets\[7\]: name looks like a credential value" "SYNTHd"
 run with-secret -- SYN_KEY -- /bin/true
 expect "with-secret: a credential-valued NAME in the registry is refused and not echoed" 1 "looks like a credential" "SYNTHd"
 run with-secret -- "${SYN_A}" -- /bin/true
@@ -324,6 +344,9 @@ run with-secret -- SYN_KEY -- /bin/sh -c 'printf "len=%s args=%s" "${#SYN_KEY}" 
 expect "with-secret: the value reaches the child's env" 0 "len=${#SYN_A} args=one"
 run with-secret -- SYN_KEY -- /bin/sh -c 'cat /proc/$$/cmdline | tr "\0" " "'
 expect "with-secret: the value is not in the child's argv" 0 "/bin/sh -c"
+run with-secret -- SYN_ABSENT -- /bin/true
+expect "with-secret: a declared file that does not exist is refused" 1 "never-provisioned does not exist on this machine"
+has_fix "with-secret: a declared file that does not exist is refused"
 run with-secret -- NO_SUCH -- /bin/true
 expect "with-secret: an unknown name is refused with a Fix" 1 "Fix:"
 has_fix "with-secret: an unknown name is refused with a Fix"
@@ -367,6 +390,9 @@ expect "with-secret: a credential-valued overlay NAME is refused and not echoed"
 printf 'not json' > "${FHOME}/.config/athena/work/overlay/secrets.json"
 check -- --probe c
 expect "(c) a malformed overlay registry is could-not-measure" 3 "overlay's secrets are not checked"
+run with-secret -- SYN_KEY -- /bin/true
+expect "with-secret: a malformed overlay refuses even a public name (uniqueness unknown)" 1 "overlay's registry could not be read"
+has_fix "with-secret: a malformed overlay refuses even a public name (uniqueness unknown)"
 rm -rf "${FHOME}/.config/athena"
 
 # ---------------------------------------------------------------- no value, ever

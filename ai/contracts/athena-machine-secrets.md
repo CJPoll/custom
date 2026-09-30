@@ -51,6 +51,12 @@ The rules below exist to keep every secret per-process.
 One secret per regular file, mode `0600` (`0400` allowed), owned by the user, in
 a directory that is not group- or world-accessible.
 
+What probe (c) enforces is narrower on the directory: not group- or
+world-**writable**. A writable directory lets another user swap the file; a
+`0755` one only lists its names. The narrower bar keeps existing tool
+directories (`~/.config/gh`, `~/.config/gcloud`) from failing, while the rule
+above still governs every directory you create (`0700`).
+
 - New secrets go under
   `${ATHENA_SECRETS_ROOT:-~/.config/athena-secrets}/<scope>/<name>`, with each
   directory `0700`.
@@ -315,7 +321,9 @@ RESTART), so a fixed dotfile does not red every running session.
 So run the check once, standalone, **before** deleting an export: that run
 records it. The self-test injects the session start through
 `CHECK_MS_TEST_CLAUDE_START` (epoch seconds, or `none`); the output names the
-injection.
+injection. The seam is honoured only when `HOME` is under the temp directory,
+as a fixture's is; anywhere else it is ignored, said so, and the real ancestor
+is not consulted, so a caller cannot relabel a live FAIL as PENDING RESTART.
 
 ### Probe (b): static config
 
@@ -401,7 +409,10 @@ command.
 and prints one context line per reported name, with the Fix. It never blocks.
 It covers sessions that never run the harness gate (a tenant repo's). Hooks
 inherit Claude Code's env, so it fires in exactly the state a global export
-creates.
+creates. Reading the landed allowlist costs one `git ls-remote origin` per
+session start (about 1.4 s over SSH). Offline, allowlisted names print as
+could-not-measure and real findings still print. The hook caps the check at
+30 s and says so if it times out.
 
 ## Rollout
 
