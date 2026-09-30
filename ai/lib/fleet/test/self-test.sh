@@ -15,6 +15,10 @@
 # resolved (the DND-183 class); the token is never in argv (read from /proc).
 
 set -u
+# DND-1163: the athena:inbox bins resolve the session's project from
+# CLAUDE_PROJECT_DIR, then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so
+# the fixtures, not the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 LIB="$(cd -- "${HERE}/.." && pwd -P)"
@@ -547,8 +551,11 @@ eq "[ticket] an unreachable server exits 4, distinct from a refusal (3)" "${RC}"
 check "unreachable is one stderr line with Fix:" one_fix_line
 case "${ERR}" in *"could not reach"*) ok "unreachable says it could not reach the server" ;; *) bad "unreachable says it could not reach the server" "${ERR}" ;; esac
 fleet_point_at "http://127.0.0.1:${SERVER_PORT}/mcp"
-fleet_respond '{"status":202,"body":{"ok":true},"delay_s":3}'
+# The answer is held until after the client gave up (DND-1007), so only curl's
+# max-time can end the request: the verdict never depends on machine speed.
+fleet_respond "{\"status\":202,\"body\":{\"ok\":true},\"hold_file\":\"${TMP}/hold-maxtime\"}"
 OUT="$(FLEET_MAX_TIME_S=1 "${BIN}" session-seen 2>"${TMP}/err")"; eq "a server slower than max-time is unreachable (4)" "$?" "4"
+touch "${TMP}/hold-maxtime"
 fleet_respond '{"status":202,"body":{"ok":true}}'
 
 n="$(fleet_log_count)"

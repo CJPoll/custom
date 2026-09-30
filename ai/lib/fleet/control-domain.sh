@@ -159,11 +159,13 @@ fleet_epoch_iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
 # state*): an unexpired override (a null expires_at never expires); then
 # metering, only when enabled -- a session whose effective domain is metered
 # drains while `now`, in the policy's zone, falls in a work window on a
-# non-holiday (start inclusive, end exclusive), until that window's end; then
+# non-holiday (start inclusive, end exclusive), until the end of its span (the
+# server's WorkHours.next_boundary/2: the first instant the answer changes, so
+# that weekday's windows that abut or overlap read as one span; DND-876); then
 # run with reason `default`. The snapshot must already have passed
 # snapshot_problem and its zone must exist.
 fleet_desired() {
-  local snap="$1" now="$2" ov_d ov_exp enabled dom tz day dow hm win until
+  local snap="$1" now="$2" ov_d ov_exp enabled dom tz day dow hm win until until_epoch
   # US (0x1f), never a tab: tab is IFS whitespace, so an empty field would
   # collapse and shift every later one.
   IFS=$'\x1f' read -r ov_d ov_exp enabled dom tz < <(printf '%s' "${snap}" | jq -r '
@@ -181,16 +183,49 @@ fleet_desired() {
     read -r day dow hm < <(TZ="${tz}" date -d "@${now}" '+%F %u %H:%M')
     if ! printf '%s' "${snap}" | jq -e --arg d "${day}" '.metering.holidays | index($d) != null' >/dev/null; then
       win="$(printf '%s' "${snap}" | jq -r --argjson dow "${dow}" --arg hm "${hm}" '
-        [ .metering.work_windows[] | select((.days | index($dow)) != null and .start <= $hm and $hm < .end) ]
-        | sort_by(.end) | last | if . == null then "" else .end end')"
+        [ .metering.work_windows[] | select((.days | index($dow)) != null) ] as $w
+        | def reach($e): [ $w[] | select(.start <= $e and $e < .end) | .end ] | max;
+          reach($hm) | if . == null then "" else until(reach(.) == null; reach(.)) end')"
       if [ -n "${win}" ]; then
-        until="$(fleet_epoch_iso "$(TZ="${tz}" date -d "${day} ${win}" +%s)")"
+        until_epoch="$(fleet_wall_epoch "${tz}" "${day}" "${win}")"
+        # A repeated-hour (fall-back) wall time happens twice; fleet_wall_epoch
+        # gives the first pass. `until` must be strictly after `now` (the
+        # contract), so when the first pass is not -- because `now` is itself
+        # in the second pass -- advance to the second pass, one hour later.
+        if [ -n "${until_epoch}" ] && [ "${until_epoch}" -le "${now}" ]; then
+          until_epoch=$((until_epoch + 3600))
+        fi
+        until="$(fleet_epoch_iso "${until_epoch}")"
         printf 'drain\tmetering:%s\t%s\n' "${dom}" "${until}"
         return 0
       fi
     fi
   fi
   printf 'run\tdefault\t\n'
+}
+
+# fleet_wall_epoch <zone> <YYYY-MM-DD> <HH:MM>
+# The epoch of local wall time HH:MM on that date in <zone>. A wall time the
+# clock skips (spring forward) never happens, so the answer is the instant the
+# clock jumps past it: the first wall minute after it that exists, as the
+# server's WorkHours resolves a gap. In a repeated hour GNU date takes the
+# first pass; the caller (fleet_desired) is the one that advances to the
+# second pass when `now` requires it (the contract, *A metering `until` is the
+# end of the work-hours span*) -- the server's next_boundary/2 does not take
+# "the first pass": it generates both passes as candidates and keeps only the
+# one strictly after `now`, which is what fleet_desired's adjustment
+# reproduces. Status 1 when no wall minute through 23:59 exists (it cannot,
+# for a real zone).
+fleet_wall_epoch() {
+  local tz="$1" day="$2" hm="$3" m
+  m=$(( 10#${hm%%:*} * 60 + 10#${hm##*:} ))
+  while [ "${m}" -lt 1440 ]; do
+    if TZ="${tz}" date -d "${day} $(printf '%02d:%02d' $((m / 60)) $((m % 60)))" +%s 2>/dev/null; then
+      return 0
+    fi
+    m=$((m + 1))
+  done
+  return 1
 }
 
 # fleet_local_rule_blind <project>

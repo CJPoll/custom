@@ -257,7 +257,9 @@ def main(argv)
     # The worktree itself is the admiral's to remove (salvage, husks, a live
     # cwd): name it so the second half of the step is never implicit.
     puts "teardown-stack: next: remove the worktree #{wt} once `git status --porcelain` is empty " \
-         "(athena:teardown-worktree-stack -> Removing the WORKTREE)" unless dry
+         "(athena:teardown-worktree-stack -> Removing the WORKTREE). " \
+         "Permission denied on container-owned deps/_build is a husk: reclaim it without sudo, " \
+         "by a throwaway container on that one dir (athena:teardown-worktree-stack -> A root-owned husk)" unless dry
   elsif merged.empty? && opts.key?("--parked") && opts.key?("--worktree") && !opts.key?("--repo")
     wt = linked_worktree!(host, realdir(opts["--worktree"], "--worktree"))
     puts "teardown-stack: parked (#{opts['--parked']}): #{wt}"

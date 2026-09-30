@@ -21,6 +21,7 @@ ai/hooks/notify-idle.sh	no-fail-path	idle notifier; emits a desktop notification
 ai/hooks/harness-event.sh	no-fail-path	PostToolUse telemetry emitter; fail-open, never denies or fails a turn
 ai/hooks/athena-inbox-poll.sh	no-fail-path	SessionStart inbox count; emits a notice or stays quiet, never denies or fails a turn (its Fix: text is diagnostic guidance, not a denial)
 ai/hooks/athena-slack-poll.sh	no-fail-path	SessionStart Slack backstop poll; emits a notice, never denies or fails a turn (its Fix: text is diagnostic guidance, not a denial)
+ai/hooks/secret-env-warn.sh	no-fail-path	SessionStart warning (DND-845); prints one context line per secret in the session env, never denies or fails a turn (its Fix: text is guidance, not a denial)
 ai/bin/contention-census	tool	reads and prints host load/contention numbers for a report; never denies, gates, or retries anything
 
 # --- DND-775 agent-stash guard: a git reference-transaction hook and the agent PATH git wrapper. Both refuse with a Fix:.
@@ -58,14 +59,19 @@ ai/lib/forge-api-scan.sh	library	sourced by ai/lib/gh-merge-guard.sh and ai/lib/
 ai/lib/integration-receipt.sh	library	sourced by ai/lib/gh-merge-guard.sh and athena:merge-boarding's integration-gate and locked-merge (DND-969); returns a status with IR_KIND/IR_WHY/IR_HOW, and each caller composes the refusal that carries Fix:
 ai/lib/critic_prompt.rb	library	prompt-text constants required by ai/bin/critic-review; emits nothing and has no failure path of its own
 ai/lib/critic_carry.rb	library	pure carry-key and decision functions required by ai/bin/critic-review; no I/O, no failure path
-ai/lib/reap_tags.rb	library	reap-tag scan and kill required by ai/bin/harness-gate run_one (DND-818); returns what it killed, and the caller prints the leak report that carries Fix:
+ai/lib/reap_tags.rb	guard	
+ai/lib/scratch_home_sentinel.rb	guard	
 ai/lib/strict_argv.rb	library	required by the Ruby ai/bin tools that refuse unknown arguments (DND-505/526/813); raises StrictArgv::UsageError with a one-line reason, and each caller composes the exit-2 refusal that carries Fix:
+ai/lib/eval_pool.rb	library	required by ai/bin/admiral-eval, critic-eval and variant-eval for bounded concurrent sampling (DND-1007); raises EvalPool::UsageError with a one-line reason, and each caller composes the exit-2 refusal that carries Fix:
 ai/lib/owner_turn.rb	library	owner-turn verifier required by ai/bin/owner-notes (relay check) and ai/bin/blast-radius (--owner-approval record); returns a verdict tuple and each caller prints the refusal that carries Fix:
 ai/lib/judgment_eval.rb	library	pure domain required by ai/bin/judgment-eval (DND-710); raises JudgmentEval::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/judgment_context.rb	library	pure domain required by ai/bin/judgment-label (DND-1047): the conversation-context builder; a failure is an unavailable context carrying a reason, which the caller shows, never a process exit
 ai/lib/judgment_context_slack.rb	library	adapter required by ai/bin/judgment-label (DND-1047): reads Slack through the athena:slack bins; every failure is returned as an unavailable context with a reason, never raised or exited
 ai/lib/judgment_label.rb	library	pure domain required by ai/bin/judgment-label (DND-715); raises JudgmentLabel::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
+ai/lib/blocking_corpus.rb	library	pure domain required by ai/bin/ticket-corpus for ticket_blocking (DND-1057); raises TicketCorpus::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
+ai/lib/ticket_corpus.rb	library	pure domain required by ai/bin/ticket-corpus (DND-1055); raises TicketCorpus::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/triage_corpus.rb	library	pure domain required by ai/bin/triage-corpus (DND-714); raises TriageCorpus::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
+ai/lib/notion_read.rb	library	read-only Notion client required by ai/bin/triage-corpus, scripts/ticket-reclassify and scripts/ticket-classify --epic (DND-714, extracted by DND-1056; DND-1057); raises NotionRead::Error carrying the fix, and each caller prints the failure line with Fix:
 ai/lib/first_party.rb	library	first-party discovery required by ai/bin/harness-gate; raises FirstParty::MeasureError and the caller prints the Fix:
 ai/lib/harness_tools.rb	library	harness-tool scope required by ai/bin/check-bin-help / check-tool-risk; raises FirstParty::MeasureError and the caller prints the Fix:
 ai/lib/fleet/control-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
@@ -73,9 +79,14 @@ ai/lib/fleet/resume-domain.sh	library	sourced by ai/bin/fleet-control / fleet-re
 ai/lib/fleet/resume-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
 ai/lib/next_mission.rb	library	pure selection rule required by ai/bin/next-mission (DND-985); raises NextMission::DataError naming the bad value, and the bin prints the exit-3 refusal that carries Fix:
 ai/lib/next_mission_notion.rb	library	Notion read adapter required by ai/bin/next-mission (DND-985); raises NextMissionNotion::ReadError naming the miss, and the bin prints the exit-3 refusal that carries Fix:
+ai/lib/dispatch_trackers.rb	library	pure tracker rules required by mark-in-progress and ai/bin/lead-time (DND-1341); returns a Resolution or [nil, reason, exit] whose reason carries Fix:, and the caller prints it
+ai/lib/dispatch_trackers_overlay.rb	library	private-overlay adapter required by mark-in-progress and ai/bin/lead-time (DND-1341); returns a Resolution carrying the resolver's line with Fix:, and the caller prints it
 ai/skills/athena:epic-clustering/lib/epic_clustering.rb	library	pure clustering rules required by scripts/epic-clustering (DND-982); raises EpicClustering::DataError naming the bad value, and the script prints the exit-3 refusal that carries Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering_notion.rb	library	Notion read adapter required by scripts/epic-clustering (DND-982); raises NextMissionNotion::ReadError naming the miss, and the script prints the exit-3 refusal that carries Fix:
-ai/skills/athena:ticket-management/lib/athena_server.rb	library	Athena server effects required by scripts/finding-triage and scripts/ticket-classify (DND-1054); raises AthenaServer::Unreachable or UnsafeValue naming the reason, and each script prints the exit-3 unavailable line that carries Fix:
+ai/skills/athena:ticket-management/lib/athena_server.rb	library	Athena server effects required by scripts/finding-triage, scripts/ticket-classify (DND-1054) and scripts/ticket-reclassify (DND-1056); raises AthenaServer::Unreachable or UnsafeValue naming the reason, and each script prints the exit-3 unavailable line that carries Fix:
+ai/skills/athena:ticket-management/lib/blocking.rb	library	pure Path rules required by scripts/ticket-classify --epic (DND-1057); raises ArgumentError naming the row or field at fault, and the script prints the unavailable line that carries Fix:
+ai/skills/athena:ticket-management/lib/classify.rb	library	pure answer rules required by scripts/ticket-classify and scripts/ticket-reclassify (DND-1054/1056); raises ArgumentError naming the field at fault, and each script prints the refusal that carries Fix:
+ai/skills/athena:ticket-management/lib/reclassify.rb	library	pure domain required by scripts/ticket-reclassify (DND-1056); returns skip reasons and reply verdicts, never exits, and the script prints every failure with Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering_fixture.rb	library	offline fixture source required by scripts/epic-clustering --from-json (DND-982); raises FixtureError or NextMissionNotion::ReadError naming the miss, and the script prints the exit-3 refusal that carries Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering_view.rb	library	rendering required by scripts/epic-clustering (DND-982); raises EpicClustering::DataError naming the bad input, and the script prints the refusal that carries Fix:
 ai/skills/athena:inbox/lib/fence.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
@@ -90,6 +101,7 @@ ai/skills/athena:slack/lib/claim.sh	library	sourced by athena:slack bin/claim-th
 ai/skills/athena:slack/lib/inbox.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
 ai/skills/athena:slack/lib/slack.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
 scripts/lib/dbus-env.sh	library	sourced by the cron wrappers; always exports a bus address (real or sentinel) and never fails
+scripts/lib/proc-env-scan.awk	guard	
 scripts/lib/shipwright-stale-dirt.sh	library	sourced by athena-shipwright-run.sh; each function that reads git (sd_dirty_paths, sd_measure, sd_display_paths) returns non-zero when git fails, and the runner prints the Fix: for it
 scripts/wt-lib/close.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
 scripts/wt-lib/common.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
@@ -128,7 +140,9 @@ ai/skills/athena:slack/bin/update	tool	Slack Web API action wrapper; fails only 
 ai/skills/athena:slack/bin/upload	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/whoami	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:ticket-management/scripts/finding-triage	guard	
+ai/skills/athena:ticket-management/scripts/mark-in-progress	guard	
 ai/skills/athena:ticket-management/scripts/ticket-classify	guard	
+ai/skills/athena:ticket-management/scripts/ticket-reclassify	guard	
 
 # --- scripts/: guards (deny, check, gate, or preflight).
 scripts/athena	guard
@@ -279,6 +293,8 @@ ai/lib/docker_stacks_host.rb	library	docker/git/gh/glab adapter required by ai/b
 ai/lib/bounded_command.rb	library	bounded external-command runner (DND-1088) required by ai/lib/docker_stacks_host.rb; returns a Result with timed_out and never prints, so each caller prints the Fix:
 ai/lib/private_overlay.rb	guard
 ai/lib/private_overlay_resolver.rb	library	env/filesystem adapter required by ai/bin/private-overlay (DND-702); returns a PrivateOverlay::Result and the caller prints the one stderr line that carries Fix:
+ai/lib/machine_secrets.rb	library	pure rules required by ai/bin/check-machine-secrets and ai/bin/with-secret (DND-845); raises MachineSecrets::Malformed and the callers print it with a Fix:
+ai/lib/machine_secrets_host.rb	library	env, filesystem, /proc and git adapter required by ai/bin/check-machine-secrets and ai/bin/with-secret (DND-845); returns states and reasons, and the callers print the Fix:
 ai/lib/outbound_scan.rb	guard
 ai/lib/outbound_scan_sources.rb	library	git/overlay/file adapter required by ai/bin/outbound-scan (DND-699); raises OutboundScan::Unmeasurable naming the reason, and the bin prints the exit-3 COULD NOT MEASURE line that carries Fix:
 ai/lib/gh-outbound-scan.sh	guard

@@ -17,6 +17,10 @@
 #     the live harness-alerts channel.
 
 set -uo pipefail
+# DND-1163: the athena:inbox bins resolve the session's project from
+# CLAUDE_PROJECT_DIR, then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so
+# the fixtures, not the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$(cd -- "${HERE}/../.." && pwd -P)"
@@ -98,6 +102,7 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   nosummary) : >"$CLUSTERING_RECEIPT"; exit 0 ;;
   blocked0)  exit 0 ;;
   limit)     echo "You've hit your weekly limit"; exit 1 ;;
+  slimit)    echo "You've hit your session limit · resets 6:30am (America/Denver)"; exit 1 ;;
   crash)     echo "segmentation fault"; exit 3 ;;
 esac
 EOF
@@ -415,6 +420,13 @@ if [ "$rc" = 69 ] && [ ! -e "$(sd "$c")/consecutive-failures" ] && grep -q 'week
   ok "no receipt, non-zero exit with a usage-limit signature: BLOCKED, never a wedge failure"
 else
   bad "blocked limit" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo slimit >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 69 ] && [ ! -e "$(sd "$c")/consecutive-failures" ] && grep -q 'session limit' "$(newest "$c" blocked)"; then
+  ok "no receipt, non-zero exit with the session-limit wording: BLOCKED, never a wedge failure"
+else
+  bad "blocked session limit" "rc=$rc failures='$(cat "$(sd "$c")/consecutive-failures" 2>/dev/null)' err=$(cat "$c/runner.err")"
 fi
 echo crash >"$c/mode"
 rc="$(run_runner "$c")"

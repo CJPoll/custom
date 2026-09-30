@@ -30,6 +30,14 @@ things:
    rather than letting it sit — a Backlog Flaky ticket nobody is assigned is an
    unworked flake, which is exactly what this rule exists to prevent.
 
+**A load-dependent flake is diagnosed by reading, not by load.** Never
+reproduce one with burners, spin loops, parallel re-runs or N-run hunts on this
+machine (`~/.claude/CLAUDE.md` → *Hard Rule*). Find the race in the code, name
+the state it lands in, and write the deterministic test that forces that state
+(`athena:test-specification` → *Scope: functional tests only*). If the state
+cannot be forced, report that with the analysis; do not generate load to
+sample it.
+
 **Never merge past a flake by re-running until green and moving on:** an
 unticketed flake is a lost finding, and a masked one is worse than a visible one.
 The one non-fix disposition is "genuinely unfixable in code we control" (a true

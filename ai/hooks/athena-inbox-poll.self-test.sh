@@ -30,6 +30,10 @@
 #
 # Run: bash ai/hooks/athena-inbox-poll.self-test.sh
 set -uo pipefail
+# DND-1163: the athena:inbox bins resolve the session's project from
+# CLAUDE_PROJECT_DIR, then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so
+# the fixtures, not the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd -- "${HERE}/../.." && pwd -P)"
@@ -1334,22 +1338,37 @@ echo "== R14: the wrapped command is bounded too =="
 # inbox root on a stale mount blocks SessionStart for as long as it takes. An
 # expiry is just another failed poll -- the success marker stays unstamped, so
 # the staleness warning can still eventually fire.
+#
+# DND-1356: asserted on an event, not a clock. The stub marks itself started
+# and then blocks on a FIFO nothing ever writes, so its only way out is the
+# hook's own bound. The hook returning at all (under a 120 s cap that only
+# stops a hang: exit 124 is the FAIL) while the stub never finished proves
+# the bound. It used to require the hook back within 10 s of a 30 s sleep,
+# a verdict a slow host could flip.
 setup_case
 register "${LOG_CHANNEL}"
 export ATHENA_INBOX_STATUS_TIMEOUT_SECONDS=1
+mkfifo "${CASE_DIR}/r14.fifo"
 stub_repo '#!/usr/bin/env bash
 case "$1" in --repo-key) realpath "$(git rev-parse --git-common-dir)"; exit 0 ;; esac
-sleep 30
+echo $$ > "'"${CASE_DIR}"'/r14.started"
+exec 3<>"'"${CASE_DIR}"'/r14.fifo"
+read -t 600 -u 3 _ && : > "'"${CASE_DIR}"'/r14.finished"
 printf '"'"'{"channels":[]}'"'"''
-START="$(date +%s)"
-run_stub_hook
-ELAPSED=$(( $(date +%s) - START ))
+assert_fake_home
+OUT="$(cd "${REPO}" && printf '%s' "${HOOK_STDIN}" | timeout 120 "${STUB_HOOK}" 2>"${CASE_DIR}/stderr")"
+RC=$?
+ERR="$(cat "${CASE_DIR}/stderr" 2>/dev/null)"
 unset ATHENA_INBOX_STATUS_TIMEOUT_SECONDS
-if [ "${ELAPSED}" -lt 10 ]; then
-  ok "R14 a hanging inbox-status does not hang session start (${ELAPSED}s)"
+if [ "${RC}" -ne 124 ] && [ -e "${CASE_DIR}/r14.started" ] && [ ! -e "${CASE_DIR}/r14.finished" ]; then
+  ok "R14 a hanging inbox-status does not hang session start (it returned while the status call was still blocked)"
 else
-  bad "R14 a hanging inbox-status does not hang session start" "took ${ELAPSED}s"
+  bad "R14 a hanging inbox-status does not hang session start" \
+      "rc=${RC}$([ "${RC}" -eq 124 ] && printf ' (hung: killed by the 120 s hang cap)') started=$([ -e "${CASE_DIR}/r14.started" ] && echo yes || echo no) finished=$([ -e "${CASE_DIR}/r14.finished" ] && echo yes || echo no)"
 fi
+# A regressed bound leaves the stub blocked for its 600 s cap: end it.
+R14_PID="$(cat "${CASE_DIR}/r14.started" 2>/dev/null)"
+[ -n "${R14_PID}" ] && grep -qa inbox-status "/proc/${R14_PID}/cmdline" 2>/dev/null && kill "${R14_PID}" 2>/dev/null
 assert_eq "R14 the expiry still exits 0" "0" "${RC}"
 assert_no_file "R14 an expired poll does NOT stamp success" \
   "$(pm success)"
@@ -1567,18 +1586,21 @@ plant_log_lines
 assert_fake_home
 # A FIFO held open by a background writer, not `sleep | hook`: a pipeline waits
 # for every member, so the sleep's own duration would be what this measured.
-FIFO="${CASE_DIR}/fifo"; mkfifo "${FIFO}"
-( exec 9>"${FIFO}"; sleep 20 ) & WRITER_PID=$!
-START="$(date +%s)"
-OUT="$( cd "${REPO}" && timeout 10 "${HOOK}" < "${FIFO}" 2>/dev/null )"
+# DND-1356: the writer holds the pipe open until the case releases it (it
+# never does before the verdict), so the pipe cannot reach EOF on its own.
+# The verdict is the hook returning (under a 120 s cap that only stops a
+# hang) while the writer is still alive, never an elapsed-time threshold.
+FIFO="${CASE_DIR}/fifo"; mkfifo "${FIFO}" "${CASE_DIR}/writer.release"
+( exec 9>"${FIFO}"; exec 3<>"${CASE_DIR}/writer.release"; read -t 600 -u 3 _ ) & WRITER_PID=$!
+OUT="$( cd "${REPO}" && timeout 120 "${HOOK}" < "${FIFO}" 2>/dev/null )"
 RC=$?
-ELAPSED=$(( $(date +%s) - START ))
+WRITER_ALIVE=no; kill -0 "${WRITER_PID}" 2>/dev/null && WRITER_ALIVE=yes
 kill "${WRITER_PID}" 2>/dev/null; wait "${WRITER_PID}" 2>/dev/null; WRITER_PID=""
-if [ "${RC}" -ne 124 ] && [ "${ELAPSED}" -lt 8 ]; then
-  ok "the stdin read is bounded — an open pipe does not hang session start (${ELAPSED}s)"
+if [ "${RC}" -ne 124 ] && [ "${WRITER_ALIVE}" = yes ]; then
+  ok "the stdin read is bounded — an open pipe does not hang session start (it returned with the pipe still open)"
 else
   bad "the stdin read is bounded — an open pipe does not hang session start" \
-      "rc=${RC} elapsed=${ELAPSED}s"
+      "rc=${RC}$([ "${RC}" -eq 124 ] && printf ' (hung: killed by the 120 s hang cap)') writer_alive=${WRITER_ALIVE}"
 fi
 
 # An unknown argument is not a reason to interrupt a session, and not a reason

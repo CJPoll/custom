@@ -20,11 +20,15 @@
 #     failed lookup is "could not establish a gate" — never "fine". Every
 #     source's outcome is printed with the refusal.
 #   * A non-auto `pr merge` is REFUSED unless it pins the exact head with
-#     `--match-head-commit <sha>`, that sha IS the PR's head, and every check
-#     reported on that head concluded green: a CheckRun COMPLETED with
-#     SUCCESS/NEUTRAL/SKIPPED, a commit StatusContext SUCCESS. Zero reported
-#     checks is not green. The pin makes GitHub itself refuse the merge if the
-#     head moves between this read and the merge.
+#     `--match-head-commit <sha>`, that sha IS the PR's head, and every judged
+#     run on that head concluded green: a CheckRun COMPLETED with
+#     SUCCESS/NEUTRAL/SKIPPED, a commit StatusContext SUCCESS. A run is not
+#     judged only when a newer check suite holds runs of the same check, all
+#     SUCCESS (a close/reopen re-run); it is printed instead. An order that
+#     cannot be read refuses (DND-1140; see gmg_checks_green). Zero reported
+#     checks is not green. The pin makes
+#     GitHub itself refuse the merge if the head moves between this read and
+#     the merge.
 #   * In a repo whose base-branch tip DECLARES an integration gate
 #     (bin/prep-commit.sh or ai/bin/harness-gate, the rule integration-gate
 #     uses), a merge is also REFUSED unless integration-gate's receipt exists
@@ -516,9 +520,170 @@ gmg_receipt_gate() {
   return 0
 }
 
+# ---- the checks on the pinned head: the LATEST run of each check (DND-1140) --
+# The defect: gen_saas PR #488, head d0889159, 2026-09-28. CI run 36464818403
+# failed its Test job (a ticketed flake). The App cannot re-run jobs, so the PR
+# was closed and reopened, and run 36467382644 re-ran CI on the SAME head, all
+# green; `gh pr checks` showed all green. The head's rollup still held both
+# runs, the guard judged every check-run, and the superseded Test failure kept
+# refusing the merge.
+#
+# So a run may be SUPERSEDED by a newer run of the same check, the way
+# `gh pr checks` and GitHub's required-check view already ignore it. The rules,
+# each chosen to fail closed:
+#   * One check run identity is (app id, workflow id, workflow-run event,
+#     check name). The app separates two apps reporting the same name; the
+#     workflow separates two workflow files with a same-named job; the event
+#     keeps a push run and a pull_request run of one workflow apart (both are
+#     current). This is stricter than GitHub's own (app, name) key. A commit
+#     status's identity is its context.
+#   * Superseding happens only ACROSS check suites. Within one identity the
+#     runs are grouped by check suite; the suite whose newest run started last
+#     is current, and EVERY run of that identity in it is judged. So two
+#     current jobs that share a display name in one workflow run are both
+#     judged, and a re-run attempt inside the same suite does not hide the
+#     failed attempt (residual: such a re-run still refuses; a close/reopen or
+#     a new commit makes a new suite). Each commit status is its own "suite".
+#   * Runs in older suites are superseded only when every current run of that
+#     identity concluded SUCCESS. A newer SKIPPED or NEUTRAL run (a job gated
+#     off on reopen, say) proves nothing, so an older red run stays judged.
+#   * A run whose identity cannot be read (no name, no app id, no suite id,
+#     no app slug, or an Actions run with no workflow or event) is judged on
+#     its own, never folded.
+#   * Across suites, a missing or malformed start time refuses, and so does a
+#     tie for the newest start time: the order cannot be read, so no suite may
+#     be called current. Times must be whole-second UTC (GitHub's format), so
+#     string order is time order; a fractional time is refused, not guessed.
+#   * Every superseded run is printed, on a pass and on a refusal.
+#
+# The contexts are read by GraphQL for the PINNED head commit itself, not from
+# `pr view`'s rollup, because only the check suite carries the app, suite,
+# workflow and event. One page of 100: a rollup with more (another page, or a
+# totalCount the page does not match) is refused, since unread runs are not
+# green. Zero contexts is refused, as before: no evidence is not green.
+GMG_ROLLUP_QUERY='query($owner: String!, $repo: String!, $oid: GitObjectID!) { repository(owner: $owner, name: $repo) { object(oid: $oid) { __typename ... on Commit { statusCheckRollup { contexts(first: 100) { totalCount pageInfo { hasNextPage } nodes { __typename ... on CheckRun { name status conclusion startedAt checkSuite { databaseId app { databaseId slug } workflowRun { event workflow { databaseId } } } } ... on StatusContext { context state createdAt } } } } } } } }'
+
+# The answer's shape: OK, EMPTY (no context), or ERR<TAB><why>.
+GMG_ROLLUP_SHAPE='
+  if (.errors // null) != null then "ERR\tthe GraphQL answer carries errors: \([.errors[]? | (.message // tostring)] | join("; "))"
+  elif (.data.repository.object.__typename // null) != "Commit" then "ERR\tthe forge returned no commit for it (object: \(.data.repository.object // null | tojson))"
+  elif .data.repository.object.statusCheckRollup == null then "EMPTY"
+  else .data.repository.object.statusCheckRollup.contexts as $c
+    | if ($c.nodes | type) != "array" then "ERR\tthe rollup carries no contexts list"
+      elif $c.pageInfo.hasNextPage != false then "ERR\tthe head has more than \($c.nodes | length) check contexts (another page exists), and unread runs are not green"
+      elif $c.totalCount != ($c.nodes | length) then "ERR\tthe rollup counts \($c.totalCount) contexts but returned \($c.nodes | length)"
+      elif ($c.nodes | length) == 0 then "EMPTY"
+      else "OK" end
+  end'
+
+# The judgment. One line per run or finding: BAD<TAB><text> for a run that is
+# judged and not green, or a check whose order cannot be read; OLD<TAB><text>
+# for a superseded run. The caller refuses on any other line.
+GMG_ROLLUP_JUDGE='
+  def ts: if .__typename == "StatusContext" then .createdAt else .startedAt end;
+  def ts_ok: type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+  def nonempty: type == "string" and length > 0;
+  def green:
+    if .__typename == "StatusContext" then .state == "SUCCESS"
+    elif .__typename == "CheckRun" then .status == "COMPLETED" and ((.conclusion // "") | IN("SUCCESS", "NEUTRAL", "SKIPPED"))
+    else false end;
+  def success:
+    if .__typename == "StatusContext" then .state == "SUCCESS"
+    elif .__typename == "CheckRun" then .status == "COMPLETED" and .conclusion == "SUCCESS"
+    else false end;
+  def cname: (if .__typename == "StatusContext" then .context else .name end) // "?" | tostring;
+  def lbl:
+    if .__typename == "StatusContext" then "\(cname): \(.state // "?")"
+    elif .__typename == "CheckRun" then "\(cname): \(.status // "?")/\(if (.conclusion // "") == "" then "-" else .conclusion end)"
+    else "a context of unknown type \(.__typename // "?" | tostring)" end;
+  def when: " (started \(ts // "?" | tostring))";
+  def key($i):
+    if .__typename == "StatusContext" and (.context | nonempty) then ["status", .context]
+    elif .__typename == "CheckRun" and (.name | nonempty)
+         and (.checkSuite.databaseId | type == "number")
+         and (.checkSuite.app.databaseId | type == "number")
+         and (.checkSuite.app.slug | nonempty)
+         and (.checkSuite.app.slug != "github-actions"
+              or ((.checkSuite.workflowRun.workflow.databaseId | type == "number")
+                  and (.checkSuite.workflowRun.event | nonempty)))
+      then ["check", .checkSuite.app.databaseId, (.checkSuite.workflowRun.workflow.databaseId // null),
+            (.checkSuite.workflowRun.event // null), .name]
+    else ["alone", $i] end;
+  def suite($i): if .__typename == "CheckRun" then .checkSuite.databaseId else $i end;
+  [.data.repository.object.statusCheckRollup.contexts.nodes | to_entries[] | .key as $i | .value
+    | {k: key($i), s: suite($i), v: .}]
+  | group_by(.k)[]
+  | [group_by(.s)[] | map(.v)] as $suites
+  | if ($suites | length) == 1 then ($suites[0][] | if green then empty else "BAD\t\(lbl)" end)
+    elif ([$suites[][] | ts | ts_ok] | all | not) then
+      "BAD\t\($suites[0][0] | cname): runs from \($suites | length) check suites on the head, and their order cannot be read (start times: \([$suites[][] | ts | tostring] | join(", "))), so which run is current is unknown; a run with no start time has not started yet"
+    else ($suites | map({t: (map(ts) | max), runs: .}) | sort_by(.t)) as $o
+      | ($o[-1].t) as $top | [$o[] | select(.t == $top)] as $tied
+      | if ($tied | length) > 1 then
+          "BAD\t\($o[-1].runs[0] | cname): runs from \($tied | length) check suites share the newest start time \($top) (\([$tied[].runs[] | lbl] | join("; "))), so which run is current is unknown"
+        else $o[-1].runs as $cur | [$o[:-1][].runs[]] as $old | ($cur | all(success)) as $supersedes
+          | ($cur[] | if green then empty else "BAD\t\(lbl)\(when), the current run" end),
+            ($old[] | if $supersedes or green then "OLD\t\(lbl)\(when)"
+                      else "BAD\t\(lbl)\(when): the newer run is not SUCCESS (\([$cur[] | lbl] | join("; "))), so it does not supersede this one" end)
+        end
+    end'
+
+# gmg_checks_green <shown> <owner> <repo> <head> : returns 0 when every judged
+# run on <head> is green; exits 3 otherwise.
+gmg_checks_green() {
+  local shown="$1" owner="$2" repo="$3" head="$4" rollup err rc why shape judged kind text bad="" old="" n_old=0 odd=""
+  local rfix="make the head's checks readable (network up, the right -R <owner>/<repo>), then $GMG_SAFE_PATH"
+  err="$(mktemp)"
+  if rollup="$(gh api graphql -f query="$GMG_ROLLUP_QUERY" -f owner="$owner" -f repo="$repo" -f oid="$head" 2>"$err")"; then rc=0; else rc=$?; fi
+  why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
+  if [ "$rc" != 0 ]; then
+    gmg_refuse "$shown" "could not read the checks on head $head (\`gh api graphql\` statusCheckRollup exit $rc: ${why:-no stderr}${rollup:+; body $(head -c 300 <<<"$rollup" | tr '\n' ' ')}), so nothing shows it green" \
+      "$rfix"
+  fi
+  if ! shape="$(jq -r "$GMG_ROLLUP_SHAPE" <<<"$rollup" 2>/dev/null)"; then
+    shape="ERR"$'\t'"the answer is not the expected JSON: $(head -c 200 <<<"$rollup" | tr '\n' ' ')"
+  fi
+  case "$shape" in
+    OK) ;;
+    EMPTY) gmg_refuse "$shown" "no check has reported on head $head, so nothing shows it green" \
+             "wait for CI to report on $head (\`gh pr checks <n> --watch\`), then $GMG_SAFE_PATH" ;;
+    *) gmg_refuse "$shown" "could not read the checks on head $head: ${shape#ERR$'\t'}, so nothing shows it green" "$rfix" ;;
+  esac
+  if ! judged="$(jq -r "$GMG_ROLLUP_JUDGE" <<<"$rollup" 2>&1)"; then
+    gmg_refuse "$shown" "the checks on head $head could not be judged: $GMG_TOOL's own rollup judge failed (jq: $(tr '\n' ' ' <<<"$judged"))" \
+      "this is a defect in ai/lib/gh-merge-guard.sh, not in the PR; do not merge, and report this output to your admiral so it is ticketed"
+  fi
+  # Every line must be BAD or OLD; anything else is refused, never skipped.
+  while IFS= read -r kind; do
+    [ -n "$kind" ] || continue
+    text="${kind#*$'\t'}"
+    case "$kind" in
+      BAD$'\t'*) bad+="    $text"$'\n' ;;
+      OLD$'\t'*) old+="    $text"$'\n'; n_old=$((n_old + 1)) ;;
+      *) odd+="    $kind"$'\n' ;;
+    esac
+  done <<<"$judged"
+  if [ -n "$odd" ]; then
+    gmg_refuse "$shown" "the rollup judge for head $head printed lines it has no meaning for:
+${odd%$'\n'}" \
+      "this is a defect in ai/lib/gh-merge-guard.sh, not in the PR; do not merge, and report this output to your admiral so it is ticketed"
+  fi
+  if [ -n "$bad" ]; then
+    gmg_refuse "$shown" "not every check on head $head is green (a run superseded by a newer SUCCESS run of the same check is not judged):
+${bad%$'\n'}${old:+
+  superseded runs, not judged:
+${old%$'\n'}}" \
+      "wait for these to conclude (\`gh pr checks <n> --watch\`) and fix any red one. A run with no start time is queued: wait for it to start. A tie for the newest start time needs a fresh run on a new commit. Then $GMG_SAFE_PATH"
+  fi
+  printf '%s: CHECKS head %s: every judged run is green; %s superseded run(s) not judged%s\n' \
+    "$GMG_TOOL" "$head" "$n_old" "${old:+:
+${old%$'\n'}}" >&2
+  return 0
+}
+
 # gmg_guard <gh args...> : the entry point. Returns 0 or exits 3.
 gmg_guard() {
-  local shown="gh $*" pr_json err rc url owner repo base head n_prot n_rules bad total w
+  local shown="gh $*" pr_json err rc url owner repo base head n_prot n_rules w
   gmg_expand_alias "$@"
   # The first non-flag word of the EXPANDED argv picks the command; `api` is
   # judged by gmg_api_guard (DND-728), everything else by the pr merge rules.
@@ -538,7 +703,7 @@ gmg_guard() {
   [ -n "$GMG_SELECTOR" ] && view+=("$GMG_SELECTOR")
   [ -n "$GMG_REPO" ] && view+=(-R "$GMG_REPO")
   err="$(mktemp)"
-  if pr_json="$(gh "${view[@]}" --json number,url,baseRefName,headRefOid,statusCheckRollup 2>"$err")"; then rc=0; else rc=$?; fi
+  if pr_json="$(gh "${view[@]}" --json number,url,baseRefName,headRefOid 2>"$err")"; then rc=0; else rc=$?; fi
   if [ "$rc" != 0 ] || ! jq -e '.url and .baseRefName and .headRefOid' >/dev/null 2>&1 <<<"$pr_json"; then
     local why; why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
     gmg_refuse "$shown" "could not read the PR (\`gh ${view[*]}\` exit $rc: ${why:-no usable JSON}), so no merge gate can be established" \
@@ -578,23 +743,7 @@ $probes
     gmg_refuse "$shown" "--match-head-commit $GMG_MATCH_SHA is not the PR's head; the head is $head (pass the full 40-char SHA)" \
       "re-check CI on $head, then $GMG_SAFE_PATH"
   fi
-  total="$(jq -r '(.statusCheckRollup // []) | length' <<<"$pr_json")"
-  if [ "$total" = 0 ]; then
-    gmg_refuse "$shown" "no check has reported on head $head, so nothing shows it green" \
-      "wait for CI to report on $head (\`gh pr checks <n> --watch\`), then $GMG_SAFE_PATH"
-  fi
-  bad="$(jq -r '(.statusCheckRollup // [])[]
-      | if .__typename == "StatusContext" then
-          select(.state != "SUCCESS") | "    \(.context): \(.state)"
-        else
-          select(.status != "COMPLETED" or ((.conclusion // "") | IN("SUCCESS", "NEUTRAL", "SKIPPED") | not))
-          | "    \(.name // "?"): \(.status // "?")/\(if (.conclusion // "") == "" then "-" else .conclusion end)"
-        end' <<<"$pr_json" 2>&1)" || bad="    (rollup unreadable: $bad)"
-  if [ -n "$bad" ]; then
-    gmg_refuse "$shown" "not every check on head $head is green:
-$bad" \
-      "wait for these to conclude (\`gh pr checks <n> --watch\`) and fix any red one, then $GMG_SAFE_PATH"
-  fi
+  gmg_checks_green "$shown" "$owner" "$repo" "$head"
   gmg_receipt_gate "$shown" "$owner" "$repo" "$base" "$head"
   return 0
 }

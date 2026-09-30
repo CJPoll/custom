@@ -61,6 +61,10 @@
 #   * `ruby` invoked BY NAME from a shell script, or `ruby -e '...'`, still goes
 #     through PATH and is not read. The repo's .tool-versions (`ruby system`)
 #     covers such calls made with cwd inside this repo or a worktree of it.
+#     Harness test suites call /usr/bin/ruby (DND-1340), and harness-gate's
+#     scratch-HOME sentinel fails a harness-gate check that runs a PATH `ruby`
+#     under a scratch HOME (DND-1316). A suite run by hand outside the gate
+#     gets no sentinel, and a PATH `ruby` under the real HOME stays unread.
 #   * SYNTAX and interpreter only: a stdlib method a newer Ruby adds is not seen.
 #   * The shebang, the pin and this file's enforcement are in the diff. Only
 #     FLOOR is ratcheted against what landed; a diff that edits the ratchet

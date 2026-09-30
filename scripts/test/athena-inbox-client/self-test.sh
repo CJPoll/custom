@@ -35,6 +35,10 @@
 # that is the entry point that runs THIS file, and the pair would recurse.
 
 set -uo pipefail
+# DND-1163: the athena:inbox bins resolve the session's project from
+# CLAUDE_PROJECT_DIR, then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so
+# the fixtures, not the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 # Match captured output with a here-string (`grep -q PAT <<<"$out"`), never
 # `printf '%s' "$out" | grep -q PAT`. Under pipefail that pipe is a race:
@@ -833,33 +837,36 @@ fi
 #     for up to MAX_BACKOFF — 300s in production. The operator's documented
 #     recovery would appear to do nothing for five minutes, which reads as a
 #     wedged supervisor and invites a kill -9 that skips the reaper entirely.
+#     DND-1356: the backoff is an hour, so TERM is the only thing that can end
+#     the supervisor inside the 120 s wait below, which only caps a hang. It
+#     was a 30 s backoff against a 10 s wait: a race a slow host could lose.
 setup_case term_during_backoff
 make_stub 1 0
 env ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
     ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
-    ATHENA_INBOX_CLIENT_MIN_BACKOFF=30 \
-    ATHENA_INBOX_CLIENT_MAX_BACKOFF=30 \
+    ATHENA_INBOX_CLIENT_MIN_BACKOFF=3600 \
+    ATHENA_INBOX_CLIENT_MAX_BACKOFF=3600 \
     ATHENA_INBOX_CLIENT_BACKOFF_RESET=120 \
     ATHENA_INBOX_CLIENT_MAX_RESTARTS=9 \
     bash "${RUNNER}" >/dev/null 2>&1 &
 SUPERVISOR_PID=$!
 
 # The stub exits 1 immediately, so once it has run once the supervisor is in
-# its 30s backoff — the window under test.
-# Synchronised on the supervisor's own "restart 1 in 30s" line, not on
+# its 3600s backoff — the window under test.
+# Synchronised on the supervisor's own "restart 1 in 3600s" line, not on
 # `sleep 1`: under load a fixed second is no promise the supervisor has reached
 # the backoff, and a TERM that lands earlier would pass without testing the
 # window this case exists for (DND-365).
-if wait_for_nonempty "${CALLS}" 100 && wait_for_log 'restart 1 in 30s' 300; then
-  started="$(date +%s)"
+if wait_for_nonempty "${CALLS}" 100 && wait_for_log 'restart 1 in 3600s' 300; then
   kill "$SUPERVISOR_PID" 2>/dev/null
-  # Bounded: if TERM is being swallowed this returns when the timeout lapses
-  # rather than hanging the suite.
-  timeout 10 tail --pid="$SUPERVISOR_PID" -f /dev/null >/dev/null 2>&1
-  elapsed=$(( $(date +%s) - started ))
+  # Bounded: if TERM is being swallowed this returns when the hang cap lapses
+  # (120 s, far inside the 3600 s backoff) rather than hanging the suite.
+  timeout 120 tail --pid="$SUPERVISOR_PID" -f /dev/null >/dev/null 2>&1
   if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
     bad "SIGTERM is honoured during the backoff sleep, not deferred until it ends" \
-        "still alive ${elapsed}s after TERM (MIN_BACKOFF was 30s)"
+        "still alive 120s after TERM, inside a 3600s backoff"
+    # Its backoff `sleep 3600` would outlive a SIGKILLed supervisor.
+    pkill -KILL -P "$SUPERVISOR_PID" 2>/dev/null
     kill -9 "$SUPERVISOR_PID" 2>/dev/null
   else
     ok "SIGTERM is honoured during the backoff sleep, not deferred until it ends"
@@ -1043,8 +1050,12 @@ printf '\nI-13 watchdog: a wedge is CAPTURED, then restarted; a progressing clie
 # watchdog reads — backdated past its allowance.
 MOCK="${SCRIPTS}/test/inbox-client-capture/mock-athena-inbox-client.rb"
 WD_PIDS=()
-if ! command -v ruby >/dev/null 2>&1; then
-  bad "the watchdog cases need ruby for the mock client" "no ruby on PATH"
+# The mock client's interpreter: /usr/bin/ruby (DND-931/958, DND-1340), never a
+# `ruby` found through PATH. REPRO_RUBY is the one seam: the suite-reaper repro
+# (scripts/test/suite-reaper/repro-real-suites.sh) sets it to its trigger shim.
+MOCK_RUBY="${REPRO_RUBY:-/usr/bin/ruby}"
+if [ ! -x "${MOCK_RUBY}" ]; then
+  bad "the watchdog cases need ruby for the mock client" "${MOCK_RUBY} is not executable (default /usr/bin/ruby, the harness Ruby, DND-931/958)"
 else
 
 # start_wd_supervisor <mode> — a supervised mock client. Sets SUPERVISOR_PID
@@ -1052,7 +1063,7 @@ else
 start_wd_supervisor() {
   cat > "${STUB}" <<STUBEOF
 #!/bin/sh
-exec ruby '${MOCK}'
+exec '${MOCK_RUBY}' '${MOCK}'
 STUBEOF
   chmod +x "${STUB}"
   rm -f "${CASE_DIR}/ready"
@@ -1096,9 +1107,17 @@ stop_wd_supervisor() {
   # Children first (a stub's `sleep` would be orphaned to PID 1), then the pids.
   for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && pkill -9 -P "${p}" 2>/dev/null; done
   # A read-before-stop child may have exited since, and its pid been reused:
-  # kill it only while it still carries this run's reap tag.
+  # kill it only while it still carries this run's reap tag. The tag is read
+  # through the reaper's scan (DND-1016): a plain environ read of a child
+  # caught mid-exec reads empty, and the child would be left alive.
+  # A scan that cannot look kills nothing here and says so; the suite's final
+  # suite_reap_tagged then fails loudly for the same reason.
+  local tagged
+  tagged="$(suite_tagged_pids)" \
+    || echo "stop_wd_supervisor: the tag scan could not look; the final suite_reap_tagged will fail for it." >&2
+  tagged=" $(printf '%s' "${tagged}" | tr '\n' ' ') "
   for p in ${kids}; do
-    grep -qsFz -- "${ATHENA_SUITE_REAPER_TAG}" "/proc/${p}/environ" && kill -9 "${p}" 2>/dev/null
+    case "${tagged}" in *" ${p} "*) kill -9 "${p}" 2>/dev/null ;; esac
   done
   for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && kill -9 "${p}" 2>/dev/null; done
   SUPERVISOR_PID=""

@@ -4,4 +4,4 @@
 # by ai/bin/harness-gate (any committed self-test.sh).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec ruby "${here}/eval_subject_test.rb"
+exec /usr/bin/ruby "${here}/eval_subject_test.rb"

@@ -33,6 +33,11 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/routed.sh"
 # shellcheck source=/dev/null
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mcp.sh"
+# session.sh backs `inbox_session_dir` (DND-1163), sourced here for the same
+# reason: a caller that forgot it would get "command not found", which a bin
+# would report as a failed lookup rather than the missing library it is.
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/session.sh"
 
 # inbox_entry [cwd]
 # The registry entry owning this session, as one-line JSON. Empty output with
@@ -94,6 +99,72 @@ inbox_channels() {
   descriptor_channel_names "${entry}"
 }
 
+# inbox_session_check <source> <session-dir>   (DND-1163)
+#
+# Status 0 when the shell's cwd cannot hand this session another project's
+# channels: the source IS the cwd, or the cwd is in the session's own project,
+# or in no registered project at all. Status 3 when the cwd is in a DIFFERENT
+# registered project (descriptor_owner_differs), refused with a Fix: that names
+# the session's project, the cwd, and the deliberate override
+# (CLAUDE_PROJECT_DIR=<dir>). Status 2 when the registry cannot say which
+# entry is the session's own (inbox_entry's refusal is already on stderr).
+#
+# Two refusals here are INTENDED, not collateral (athena-inbox.md -> *Repo
+# identity*): a subagent inherits its parent's CLAUDE_PID, so a captain a
+# custom-rooted admiral dispatched into a walt_ui worktree resolves custom and
+# is refused in walt_ui; and a session started outside every registered
+# project is refused once it `cd`s into one. Both are the same ambiguity the
+# walt_ui incident was, and both have the same explicit way out.
+#
+# The refusal names this session's own directory and the cwd it is standing in,
+# with their repo keys -- both are the caller's own facts. It never names the
+# cwd project's channels or entry file.
+inbox_session_check() {
+  local src="$1" dir="$2" cwd mine here rc
+  [ "${src}" != "cwd" ] || return 0
+  cwd="$(pwd -P 2>/dev/null)" || cwd=""
+  [ -n "${cwd}" ] || return 0            # nothing to compare: the session's dir decides
+  [ "${cwd}" != "${dir}" ] || return 0
+  mine="$(inbox_entry "${dir}")"; rc=$?
+  [ "${rc}" -ne 2 ] || return 2
+  # The cwd's lookup is only a safety net. Once the session's own entry has
+  # resolved, a registry error on the cwd side (inbox_entry answers 2 when no
+  # entry matches and ANY tenant's file is unparseable) is another tenant's
+  # problem, not a reason to refuse this session (fs.sh -> fs_registry_records).
+  here="$(inbox_entry "${cwd}" 2>/dev/null)"; rc=$?
+  if [ "${rc}" -eq 2 ]; then
+    [ -n "${mine}" ] && return 0
+    inbox_entry "${cwd}" >/dev/null   # re-run for its refusal on stderr
+    return 2
+  fi
+  descriptor_owner_differs "${mine}" "${here}" || return 0
+  local mkey hkey
+  mkey="$(fs_git_common_dir "${dir}" 2>/dev/null)" || mkey="(no git repository)"
+  hkey="$(fs_git_common_dir "${cwd}" 2>/dev/null)" || hkey="(no git repository)"
+  [ -n "${mine}" ] || mkey="${mkey}, which has no registry entry"
+  inbox_fail "this session's project is ${dir} (from ${src}; repo key ${mkey}), but the shell's cwd ${cwd} is in a different inbox project (repo key ${hkey}) -- refusing rather than use either one's inbox" \
+    "to act for the session's project, cd back into ${dir} (or a worktree of it) and re-run; the shell usually drifts after a \`cd\` into another repo, or through a ~/.claude/skills path, which realpaths into ~/dev/custom. To act for the cwd's project on purpose (a subagent dispatched into another repo, or a session started outside any project), name it: CLAUDE_PROJECT_DIR=<that project's dir> <command>. Nothing was read, sent or claimed." 3
+}
+
+# inbox_session_dir
+#
+# THE ONE PLACE a bin learns which project it is acting for (DND-1163): the
+# session's own directory (session_project_dir, lib/session.sh) and its source,
+# checked against the cwd (inbox_session_check). One "<source>\t<dir>" line,
+# status 0. Otherwise the refusal is on stderr and the status says which:
+#   1 -- a session signal is set but unusable (session_project_dir);
+#   2 -- the registry cannot be read or is ambiguous;
+#   3 -- the cwd is in a different registered project (cwd-project-mismatch).
+# A bin passes <dir> to every inbox_* call where it used to pass ".".
+inbox_session_dir() {
+  local line src dir rc
+  line="$(session_project_dir)" || return 1
+  src="${line%%$'\t'*}"; dir="${line#*$'\t'}"
+  inbox_session_check "${src}" "${dir}"; rc=$?
+  [ "${rc}" -eq 0 ] || return "${rc}"
+  printf '%s\t%s\n' "${src}" "${dir}"
+}
+
 # _inbox_no_entry_refusal <cwd>
 #
 # "Nothing resolved" has THREE causes, and collapsing them into one message is
@@ -135,7 +206,7 @@ _inbox_no_entry_refusal() {
       "this is a MACHINE-level condition, not a project one -- no project on this machine has channels while that directory is missing. Check \$ATHENA_INBOX_ROOT points where you think (default: \$HOME/.local/share/athena) and that the root is present, before concluding this project is not opted in."
     return 1
   fi
-  inbox_fail "this project declares no inbox channels" \
+  inbox_fail "this project declares no inbox channels (no registry entry names repo key $(fs_git_common_dir "${cwd}" 2>/dev/null))" \
     "add ${regdir}/<project>.json with a \"repo\" naming this repo's git common dir (realpath \"\$(git rev-parse --git-common-dir)\"), or run from a project that has one."
   return 1
 }

@@ -109,6 +109,19 @@ module TriageCorpus
       "status" => row.dig("properties", "Status", "status", "name"),
       "area" => row.dig("properties", "Area", "select", "name"),
       "severity" => row.dig("properties", "Severity", "select", "name"),
+      # ai/bin/ticket-corpus (DND-1055): the creation instant decides whether
+      # a property was set by its filer (W2 rules) or by the W4 backfill.
+      "created_time" => row["created_time"],
+      "kind" => row.dig("properties", "Kind", "select", "name"),
+      "security" => row.dig("properties", "Security", "select", "name"),
+      # A property renamed or retyped reads nil like an unset one; naming it
+      # here lets ticket-corpus refuse the snapshot instead of 0 labels.
+      "schema_missing" => %w[Kind Severity Security].reject { |n| row.dig("properties", n).is_a?(Hash) && row.dig("properties", n).key?("select") },
+      # ai/bin/ticket-corpus's ticket_blocking pairs (DND-1057). path_select
+      # says the row carries a Path select at all, so a renamed property is
+      # refused there, never read as "Path unset".
+      "path" => row.dig("properties", "Path", "select", "name"),
+      "path_select" => row.dig("properties", "Path").is_a?(Hash) && row.dig("properties", "Path").key?("select"),
       "epic_ids" => relation_ids(row, "Epic"),
       "depends_on" => relation_ids(row, "Depends On"),
       "blocks" => relation_ids(row, "Blocks"),

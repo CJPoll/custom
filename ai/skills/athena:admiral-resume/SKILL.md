@@ -67,7 +67,9 @@ is the reading that loses nothing if you are wrong.
     `git status --porcelain` (which lists `??` entries) and copies them too, and
     the resume brief tells the incoming captain **by name** which files are its
     own in-flight work plus an explicit instruction not to `git clean`.
-- **Adopt worktrees and branches, never recreate them.**
+- **Adopt worktrees and branches, never recreate them.** A Mission logged
+  `stack: down` re-ups its stack before the first gate
+  ([[athena:teardown-worktree-stack]] → *Whoever adopts that PR re-ups first*).
 - For what's left, check `ListAgents` for the Mission-qualified name. **Alive** →
   don't duplicate, just check status. **Gone** → re-dispatch under the same
   name, into the same worktree, told explicitly this is a resume (it should

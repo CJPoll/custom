@@ -43,9 +43,9 @@ bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 # Resolve the real ruby BEFORE HOME moves: a version-manager shim (asdf) reads
 # its config from HOME, so under the sandboxed HOME it exits 126 and every Ruby
 # tool below would "fail" for a reason that has nothing to do with argv.
-REAL_RUBY_DIR="$(dirname "$(ruby -e 'print RbConfig.ruby')")" || {
-  echo "strict-argv CLI suite: FAIL -- no working ruby on PATH"
-  echo "  Fix: install ruby; this suite does not skip."; exit 1; }
+REAL_RUBY_DIR="$(dirname "$(/usr/bin/ruby -e 'print RbConfig.ruby')")" || {
+  echo "strict-argv CLI suite: FAIL -- /usr/bin/ruby did not run"
+  echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
 mkdir -p "${TMP}/home" "${TMP}/state" "${TMP}/inbox" "${TMP}/stubs" "${TMP}/pool"
 chmod 700 "${TMP}/pool"
 export HOME="${TMP}/home"
@@ -172,6 +172,12 @@ refused "check-inotify-headroom: --threshold twice is refused" "--threshold give
 # --- admiral-report-watch ---------------------------------------------------------
 refused "admiral-report-watch: --session-id does not swallow --max-loops" "--session-id needs a value" admiral-report-watch run-x --session-id --max-loops 1
 refused "admiral-report-watch: --poll-s twice is refused" "--poll-s given more than once" admiral-report-watch run-x --poll-s 0 --poll-s 0 --max-loops 1
+# The run-id is a key: it names /tmp/admiral-<run-id>-seen and the reports dir.
+# A `/` in it made the seen-file path unwritable and the watcher looped on
+# find/touch errors every poll instead of refusing (measured 2026-09-29, a live
+# admiral passing a path). --reports-dir keeps a fall-through out of the repo.
+refused "admiral-report-watch: a run-id with / is refused, not looped on" "is not a valid run-id" admiral-report-watch "${TMP}/runs/x" --reports-dir "${TMP}/arw-r" --poll-s 0 --max-loops 1
+refused "admiral-report-watch: a run-id of .. is refused (it escapes the coordination dir)" "is not a valid run-id" admiral-report-watch .. --reports-dir "${TMP}/arw-r" --poll-s 0 --max-loops 1
 
 # --- confirm-merged ------------------------------------------------------------
 refused "confirm-merged: --pr does not swallow --json" "--pr needs a value" confirm-merged --pr --json

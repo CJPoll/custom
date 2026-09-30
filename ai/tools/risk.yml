@@ -96,6 +96,10 @@ tools:
   # repo/forge/tracker/remote, so idempotent (re-running once clean is a
   # no-op).
   check-inbox-mock-orphans: { class: idempotent, reason: reap }
+  # check-machine-secrets (DND-845) reads env, files and git; its one write is
+  # the machine-local exports record under $XDG_STATE_HOME (never the repo, a
+  # forge or a remote), so idempotent by the class order.
+  check-machine-secrets:   { class: idempotent, reason: check }
   # admiral-eval / harness-eval can rewrite a TRACKED baseline JSON via
   # --update-baseline (and harness-eval writes ai/eval/scorecard.json on the
   # default gate path), so by worst-case capability they mutate the repo.
@@ -127,6 +131,9 @@ tools:
   # fleet-resume (DND-443) appends run-ownership marker lines to this machine's
   # own coordination state logs (untracked, gitignored). Local only.
   fleet-resume:            { class: idempotent, reason: markers }
+  # lane-lock (DND-261) takes and drops a machine-local flock(2) on a lane lock
+  # file under $XDG_STATE_HOME, through a holder process of this user. Local only.
+  lane-lock:               { class: idempotent, reason: lock }
 
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }
@@ -138,6 +145,9 @@ tools:
   # priority-next (DND-445) takes, releases and completes leases on the Athena
   # server's priority index: external state.
   priority-next:           { class: destructive, reason: lease }
+  # mark-in-progress (DND-1318, DND-1341) writes a DND or work-tracker
+  # ticket's Status and its dispatch stamp in Notion: tracker state.
+  skills/athena:ticket-management/scripts/mark-in-progress: { class: destructive, reason: tracker }
   # judgment-eval (DND-710) sends labelled cases to the Athena server, which
   # records judgment_calls and eval-run rows (and, with a key, spends TypeSafe
   # budget); --apply writes the owner's judgment_thresholds. External state.
@@ -147,10 +157,14 @@ tools:
   # confirmation. No forge, tracker, server or remote write. --confirm READS
   # Slack as Athena's bot for conversation context (DND-1047); it never posts.
   judgment-label:          { class: idempotent, reason: labels }
-  # triage-corpus (DND-714) only READS Notion (its Notion effect refuses any
-  # other request) and writes machine-local snapshot/label/corpus files; a
+  # triage-corpus (DND-714) only READS Notion (ai/lib/notion_read.rb refuses
+  # any other request) and writes machine-local snapshot/label/corpus files; a
   # rebuild from one snapshot is byte-identical. No forge, tracker or server write.
   triage-corpus:           { class: idempotent, reason: labels }
+  # ticket-corpus (DND-1055) makes no network call: it reads triage-corpus's
+  # snapshot and writes machine-local label/corpus files; a rebuild from one
+  # snapshot is byte-identical. --shadow-report only prints.
+  ticket-corpus:           { class: idempotent, reason: labels }
   # notion-athena-mcp launches an MCP server that EXPOSES Notion writes. It does
   # not itself write, but its worst-case capability is a tracker mutation, so it
   # is classified destructive. FLAGGED for owner ratification (DND-172); shipped
@@ -161,6 +175,10 @@ tools:
   # worst-case capability it grants policy authority to something else. Local
   # --list/--path reads are harmless; the class follows --add.
   owner-notes:             { class: destructive, reason: authority }
+  # with-secret (DND-845) execs an arbitrary caller-supplied command with one
+  # declared secret in its env, so its worst case is whatever that command
+  # does, holding a credential.
+  with-secret:             { class: destructive, reason: exec }
   # test-slot (DND-485) runs an arbitrary caller-supplied CMD once a machine
   # slot is free. Its own writes are local pool state, but by worst-case
   # capability it executes whatever CMD is: classifying it lower would let a
@@ -216,10 +234,16 @@ tools:
   # a judgment_calls row (and, with a key, spends TypeSafe budget). External
   # state, so destructive, like judgment-eval.
   skills/athena:ticket-management/scripts/finding-triage: { class: destructive, reason: judgments }
-  # ticket-classify (DND-1054) has no tracker client at all, but like
+  # ticket-classify (DND-1054) writes no tracker; with --epic (DND-1057) it
+  # only READS Notion (ai/lib/notion_read.rb refuses any other request). Like
   # finding-triage it posts to the Athena server, which records judgment_calls
   # rows and spends the owner's judgments budget: server state, so destructive.
   skills/athena:ticket-management/scripts/ticket-classify: { class: destructive, reason: judgments }
+  # ticket-reclassify (DND-1056) only READS Notion (ai/lib/notion_read.rb
+  # refuses any other request) and writes a local plan file, but `plan` posts
+  # each open ticket to the classification endpoint, which records
+  # judgment_calls rows and spends the owner's judgments budget: destructive.
+  skills/athena:ticket-management/scripts/ticket-reclassify: { class: destructive, reason: judgments }
   # DND-775: the agent PATH git wrapper. It refuses stash-list writes, then
   # execs the real git with argv unchanged, so it can do anything git can.
   agent-bin/git: { class: destructive, reason: git }

@@ -24,6 +24,14 @@ HOOK="${AI_DIR}/hooks/athena-slack-poll.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 PASS=0; FAIL=0
 
+# THE SESSION'S PROJECT SIGNALS ARE SCRUBBED (DND-1163), so the suite is
+# hermetic. claim-thread and the athena:inbox bins resolve the session's
+# project from CLAUDE_PROJECT_DIR, then the Claude Code process's own cwd
+# (/proc/$CLAUDE_PID/cwd), before the shell cwd. This suite runs inside Claude
+# sessions, so without this every fixture repo would be judged against the
+# real session's project. The DND-1163 cases set them per case.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
+
 BOT_USER="UFAKEBOT01"
 CODY="UFAKE00001"
 ENG_CHANNEL="CFAKE00001"
@@ -289,6 +297,24 @@ if [[ "${RC}" != 0 && "${ERR}" == *"slack-bot-token"* ]] && ! any_curl; then
   ok "no token: named error, non-zero, and no request is made"
 else bad "no token: named error, non-zero, and no request is made" "rc=${RC} err='${ERR}'"; fi
 
+# 4b. DND-845: there is no env-var fallback for the token. A token in the
+#     caller's env is ignored, because a fallback invites a global export
+#     (ai/contracts/athena-machine-secrets.md -> Never). Both the retired
+#     $SLACK_BOT_TOKEN and an inherited $SLACK_TOKEN_VALUE (the lib's
+#     same-shell cache) are covered.
+setup_case
+rm -f "${CHOME}/.claude/slack-bot-token"
+SLACK_BOT_TOKEN="${FAKE_TOKEN}" run_bin whoami
+if [[ "${RC}" != 0 && "${ERR}" == *"slack-bot-token"* ]] && ! any_curl; then
+  ok "a \$SLACK_BOT_TOKEN in the env is not a token source (no request)"
+else bad "a \$SLACK_BOT_TOKEN in the env is not a token source (no request)" "rc=${RC} err='${ERR}'"; fi
+setup_case
+rm -f "${CHOME}/.claude/slack-bot-token"
+SLACK_TOKEN_VALUE="${FAKE_TOKEN}" run_bin whoami
+if [[ "${RC}" != 0 && "${ERR}" == *"slack-bot-token"* ]] && ! any_curl; then
+  ok "an inherited \$SLACK_TOKEN_VALUE is not a token source (no request)"
+else bad "an inherited \$SLACK_TOKEN_VALUE is not a token source (no request)" "rc=${RC} err='${ERR}'"; fi
+
 # 5. A user token where a bot token belongs. This is the failure that would
 #    silently make Athena post AS CODY -- the one thing the skill exists to
 #    prevent -- so it is refused by shape before it is ever sent.
@@ -543,6 +569,15 @@ run_hook
 if [[ -z "${OUT}" && "${RC}" == 0 ]] && ! any_curl && [[ -z "${HOOKLOG}" ]]; then
   ok "hook: no token configured is silent, unlogged, and makes no request"
 else bad "hook: no token configured is silent, unlogged, and makes no request" \
+  "rc=${RC} out='${OUT}' log='${HOOKLOG}'"; fi
+
+# 27b. DND-845: a $SLACK_BOT_TOKEN in the env does not configure the hook.
+setup_case
+rm -f "${CHOME}/.claude/slack-bot-token"
+run_hook SLACK_BOT_TOKEN="${FAKE_TOKEN}"
+if [[ -z "${OUT}" && "${RC}" == 0 ]] && ! any_curl && [[ -z "${HOOKLOG}" ]]; then
+  ok "hook: a \$SLACK_BOT_TOKEN in the env is not configuration (silent, no request)"
+else bad "hook: a \$SLACK_BOT_TOKEN in the env is not configuration (silent, no request)" \
   "rc=${RC} out='${OUT}' log='${HOOKLOG}'"; fi
 
 # 28. Inside the 5-minute window: no output and, crucially, no network call.
@@ -1376,15 +1411,16 @@ parse_case "an unrecognised tool error, multi-line" "$(err_msg $'boom\nsecond li
 setup_case
 FIXES=""
 for r in no-registry-entry registry-error no-slack-channel ambiguous-slack-channel no-identity no-token \
-         mcp-unregistered mcp-error:x not-found refused already-claimed invalid; do
+         mcp-unregistered mcp-error:x not-found refused already-claimed invalid \
+         cwd-project-mismatch project-unresolved; do
   claim_fn claim_reason_fix "${r}"
   if [[ -z "${OUT}" ]]; then bad "claim_reason_fix: ${r} has a Fix text" "empty"; continue; fi
   FIXES="${FIXES}${OUT}"$'\n'
 done
 if [[ "$(printf '%s' "${FIXES}" | sort | uniq -d | wc -l)" -eq 0 ]] \
-   && [[ "$(printf '%s' "${FIXES}" | grep -c .)" -eq 12 ]]; then
-  ok "claim_reason_fix: all 12 reasons have a non-empty, distinct Fix text"
-else bad "claim_reason_fix: all 12 reasons have a non-empty, distinct Fix text" "$(printf '%s' "${FIXES}" | sort | uniq -c | sort -rn | head -3)"; fi
+   && [[ "$(printf '%s' "${FIXES}" | grep -c .)" -eq 14 ]]; then
+  ok "claim_reason_fix: all 14 reasons have a non-empty, distinct Fix text"
+else bad "claim_reason_fix: all 14 reasons have a non-empty, distinct Fix text" "$(printf '%s' "${FIXES}" | sort | uniq -c | sort -rn | head -3)"; fi
 
 # u6-u11. claim_resolve_inbox: the project's ONE Slack log channel, from the
 #         registry entry the cwd resolves -- never a platform channel, never a
@@ -1469,7 +1505,7 @@ else bad "claim_resolve_inbox: a relative cwd key is refused, never looked up" "
 setup_case; claim_setup
 run_bin claim-thread D0DMCHAN 1790360915.000100
 ARGS="$(claim_args)"
-if [[ "${RC}" == 0 && "${OUT}" == "claim=claimed inbox=cproj-slack.jsonl" ]] \
+if [[ "${RC}" == 0 && "${OUT}" == "claim=claimed inbox=cproj-slack.jsonl source=cwd" ]] \
    && [[ "$(jq -r '[.bot_id,.team_id,.channel,.thread_ts,.inbox_name]|join(" ")' <<<"${ARGS}")" == "${BOT_ID} ${TEAM_ID} D0DMCHAN 1790360915.000100 cproj-slack.jsonl" ]] \
    && [[ "$(jq -r 'keys|sort|join(",")' <<<"${ARGS}")" == "bot_id,channel,inbox_name,team_id,thread_ts" ]] \
    && [[ "$(mcp_calls | tr '\n' '|')" == "initialize|initialized|tools/call slack_thread_claim|" ]]; then
@@ -1480,7 +1516,7 @@ else bad "claim-thread: claimed -> claim=claimed, exit 0, exactly bot_id/team_id
 # c1b. already_yours is success too: re-claiming your own thread is a no-op.
 setup_case; claim_setup; claim_ok_answer already_yours
 run_bin claim-thread D0DMCHAN 1.2
-if [[ "${RC}" == 0 && "${OUT}" == "claim=already_yours inbox=cproj-slack.jsonl" ]]; then
+if [[ "${RC}" == 0 && "${OUT}" == "claim=already_yours inbox=cproj-slack.jsonl source=cwd" ]]; then
   ok "claim-thread: already_yours -> exit 0"
 else bad "claim-thread: already_yours -> exit 0" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
@@ -1579,11 +1615,153 @@ if [[ "${RC}" == 3 && "${ERR}" == *"reason=no-identity "* ]] && [[ -z "$(mcp_cal
   ok "claim-thread: auth.test without a team_id -> exit 3 reason=no-identity, no call"
 else bad "claim-thread: auth.test without a team_id -> exit 3 reason=no-identity, no call" "rc=${RC} err='${ERR}'"; fi
 
+echo
+echo "-- DND-1163: the claim is keyed on the SESSION's project, not the shell cwd --"
+# A walt_ui session whose Bash cwd had drifted into ~/dev/custom claimed its
+# DM thread for custom-slack.jsonl: exit 0, claim=claimed, the wrong inbox.
+# Here cproj plays custom (where the cwd drifted to) and wproj plays walt_ui
+# (the session's own project).
+
+# claim_other_project <name> <registered:yes|no> -- a second repo under
+# ${CHOME}/dev/<name>; with "yes" it gets a registry entry whose one Slack log
+# channel is <name>-slack.jsonl. The athena MCP is registered for it either
+# way, so a claim can only fail on the project key. Sets OPROJ, OCOMMON.
+claim_other_project() {
+  OPROJ="${CHOME}/dev/$1"; mkdir -p "${OPROJ}/sub"
+  ( cd "${OPROJ}" && git init -q . && git config user.email t@t && git config user.name t \
+    && git commit -q --allow-empty -m init )
+  OCOMMON="$(cd "${OPROJ}" && realpath "$(git rev-parse --git-common-dir)")"
+  if [[ "$2" == yes ]]; then
+    jq -n --arg r "${OCOMMON}" --arg p "$1-slack.jsonl" \
+      '{v:1, repo:$r, channels:{slack:{kind:"log", path:$p, dedupe:["event_id","channel+ts"], schema_v:[1], stale_after_s:0}}}' \
+      > "${CHOME}/inbox-root/projects/$1.json"
+    chmod 600 "${CHOME}/inbox-root/projects/$1.json"
+  fi
+  local cfg; cfg="$(jq --arg p "$(dirname "${OCOMMON}")" --arg u "${MCP_URL}" \
+    '.projects[$p] = {mcpServers: {athena: {type: "http", url: $u}}}' "${CHOME}/.claude.json")"
+  printf '%s\n' "${cfg}" > "${CHOME}/.claude.json"
+}
+# claim_with_env <NAME=value...> -- run_bin claim-thread with extra session env.
+claim_with_env() {
+  local saved_cpd="${CLAUDE_PROJECT_DIR-__unset__}" saved_pid="${CLAUDE_PID-__unset__}"
+  unset CLAUDE_PROJECT_DIR CLAUDE_PID
+  local kv; for kv in "$@"; do export "${kv?}"; done
+  run_bin claim-thread D0DMCHAN 1790632113.515229
+  unset CLAUDE_PROJECT_DIR CLAUDE_PID
+  [[ "${saved_cpd}" == __unset__ ]] || export CLAUDE_PROJECT_DIR="${saved_cpd}"
+  [[ "${saved_pid}" == __unset__ ]] || export CLAUDE_PID="${saved_pid}"
+}
+
+# k1. THE REPORTED DEFECT. Session project = wproj, cwd = cproj: never
+#     cproj's inbox; refused as a mismatch, with a Fix:, before any MCP call.
+setup_case; claim_setup; claim_other_project wproj yes
+RUN_CWD="${PROJ}/sub/dir"; claim_with_env "CLAUDE_PROJECT_DIR=${OPROJ}"
+if [[ "${RC}" == 3 && "${OUT}" != *"cproj-slack.jsonl"* && "${ERR}" == *"reason=cwd-project-mismatch "* ]] \
+   && [[ "${ERR}" == *"Fix:"* && "${ERR}" == *"${OPROJ}"* && "${ERR}" == *"CLAUDE_PROJECT_DIR=<"* ]] && [[ -z "$(mcp_calls)" ]]; then
+  ok "claim-thread: CLAUDE_PROJECT_DIR=wproj, cwd in cproj -> claim=FAILED reason=cwd-project-mismatch, Fix:, no call, never cproj's inbox"
+else bad "claim-thread: CLAUDE_PROJECT_DIR=wproj, cwd in cproj -> claim=FAILED reason=cwd-project-mismatch, Fix:, no call, never cproj's inbox" \
+  "rc=${RC} out='${OUT}' err='${ERR}' calls=$(mcp_calls | tr '\n' '|')"; fi
+
+# k2. The session's project wins over a cwd that is in no registered project,
+#     and the output says where the project came from.
+setup_case; claim_setup; claim_other_project wproj yes
+RUN_CWD="${TMP}"; claim_with_env "CLAUDE_PROJECT_DIR=${OPROJ}"
+if [[ "${RC}" == 0 && "${OUT}" == "claim=claimed inbox=wproj-slack.jsonl source=project-dir" ]] \
+   && [[ "$(jq -r .inbox_name <<<"$(claim_args)")" == "wproj-slack.jsonl" ]]; then
+  ok "claim-thread: CLAUDE_PROJECT_DIR=wproj, cwd outside any project -> wproj's inbox, source=project-dir"
+else bad "claim-thread: CLAUDE_PROJECT_DIR=wproj, cwd outside any project -> wproj's inbox, source=project-dir" \
+  "rc=${RC} out='${OUT}' err='${ERR}' args=$(claim_args)"; fi
+
+# k3. No session signal at all: the cwd, and the output says so.
+setup_case; claim_setup; claim_other_project wproj yes
+RUN_CWD="${PROJ}"; claim_with_env
+if [[ "${RC}" == 0 && "${OUT}" == "claim=claimed inbox=cproj-slack.jsonl source=cwd" ]]; then
+  ok "claim-thread: no CLAUDE_PROJECT_DIR and no CLAUDE_PID -> falls back to the cwd and says source=cwd"
+else bad "claim-thread: no CLAUDE_PROJECT_DIR and no CLAUDE_PID -> falls back to the cwd and says source=cwd" \
+  "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# k4. The Bash tool does not export CLAUDE_PROJECT_DIR (measured 2026-09-28);
+#     it exports CLAUDE_PID, the Claude Code process, whose own cwd is the
+#     session's project and never follows the tool shell's `cd`. A stand-in
+#     process parked in wproj plays it.
+setup_case; claim_setup; claim_other_project wproj yes
+( cd "${OPROJ}" && exec tail -f /dev/null ) & STANDIN=$!
+RUN_CWD="${PROJ}"; claim_with_env "CLAUDE_PID=${STANDIN}"
+K4A_RC="${RC}" K4A_OUT="${OUT}" K4A_ERR="${ERR}" K4A_CALLS="$(mcp_calls)"
+RUN_CWD="${OPROJ}/sub"; claim_with_env "CLAUDE_PID=${STANDIN}"
+kill "${STANDIN}" 2>/dev/null; wait "${STANDIN}" 2>/dev/null || true  # 143: killed, as intended (run_bin leaves set -e on)
+if [[ "${K4A_RC}" == 3 && "${K4A_ERR}" == *"reason=cwd-project-mismatch "* && "${K4A_OUT}" != *"cproj-slack"* && -z "${K4A_CALLS}" ]] \
+   && [[ "${RC}" == 0 && "${OUT}" == "claim=claimed inbox=wproj-slack.jsonl source=session-process" ]]; then
+  ok "claim-thread: CLAUDE_PID's cwd is the session project -> cwd in cproj refused; cwd in wproj claims wproj, source=session-process"
+else bad "claim-thread: CLAUDE_PID's cwd is the session project -> cwd in cproj refused; cwd in wproj claims wproj, source=session-process" \
+  "first: rc=${K4A_RC} out='${K4A_OUT}' err='${K4A_ERR}'; second: rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# k5. A worktree of the session's own project is the same project.
+setup_case; claim_setup
+WT="${CHOME}/wt/cproj-k5"; ( cd "${PROJ}" && git worktree add -q -b k5 "${WT}" ) >/dev/null 2>&1
+RUN_CWD="${WT}"; claim_with_env "CLAUDE_PROJECT_DIR=${PROJ}"
+if [[ "${RC}" == 0 && "${OUT}" == "claim=claimed inbox=cproj-slack.jsonl source=project-dir" ]]; then
+  ok "claim-thread: cwd in a worktree of the session's project -> that project's inbox, no mismatch"
+else bad "claim-thread: cwd in a worktree of the session's project -> that project's inbox, no mismatch" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# k6. The session's project has NO registry entry and the cwd's does: that is
+#     the drift, not a licence to borrow the cwd's inbox.
+setup_case; claim_setup; claim_other_project uproj no
+RUN_CWD="${PROJ}"; claim_with_env "CLAUDE_PROJECT_DIR=${OPROJ}"
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=cwd-project-mismatch "* && "${OUT}" != *"cproj-slack"* && -z "$(mcp_calls)" ]]; then
+  ok "claim-thread: an unregistered session project with the cwd in cproj -> cwd-project-mismatch, never cproj's inbox"
+else bad "claim-thread: an unregistered session project with the cwd in cproj -> cwd-project-mismatch, never cproj's inbox" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# k7. A key that resolves to nothing is an error NAMING THE KEY.
+setup_case; claim_setup; claim_other_project uproj no
+RUN_CWD="${TMP}"; claim_with_env "CLAUDE_PROJECT_DIR=${OPROJ}"
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=no-registry-entry "* && "${ERR}" == *"${OCOMMON}"* && "${ERR}" == *"Fix:"* ]] \
+   && [[ -z "${OUT}" && -z "$(mcp_calls)" ]]; then
+  ok "claim-thread: the session project's repo key matches no entry -> no-registry-entry naming that key"
+else bad "claim-thread: the session project's repo key matches no entry -> no-registry-entry naming that key" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# k8. A session signal that is SET but unusable is refused by name, never
+#     skipped in favour of the next source.
+for bogus in "relative/dir" "${CHOME}/dev/no-such-dir"; do
+  setup_case; claim_setup
+  RUN_CWD="${PROJ}"; claim_with_env "CLAUDE_PROJECT_DIR=${bogus}"
+  if [[ "${RC}" == 3 && "${ERR}" == *"reason=project-unresolved "* && "${ERR}" == *"${bogus}"* && "${ERR}" == *"Fix:"* && -z "${OUT}" ]]; then
+    ok "claim-thread: CLAUDE_PROJECT_DIR='${bogus##*/}' unusable -> reason=project-unresolved naming it, no fallback to the cwd"
+  else bad "claim-thread: CLAUDE_PROJECT_DIR='${bogus##*/}' unusable -> reason=project-unresolved naming it, no fallback to the cwd" \
+    "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+done
+# k9. A subagent inherits its parent's CLAUDE_PID. With the parent parked in
+#     wproj and the subagent dispatched into cproj, it is refused there (k4)
+#     and claims for cproj only when it names cproj explicitly: the override
+#     the refusal's Fix: prescribes.
+setup_case; claim_setup; claim_other_project wproj yes
+( cd "${OPROJ}" && exec tail -f /dev/null ) & STANDIN=$!
+RUN_CWD="${PROJ}"; claim_with_env "CLAUDE_PID=${STANDIN}" "CLAUDE_PROJECT_DIR=${PROJ}"
+kill "${STANDIN}" 2>/dev/null; wait "${STANDIN}" 2>/dev/null || true  # 143: killed, as intended (run_bin leaves set -e on)
+if [[ "${RC}" == 0 && "${OUT}" == "claim=claimed inbox=cproj-slack.jsonl source=project-dir" ]]; then
+  ok "claim-thread: an explicit CLAUDE_PROJECT_DIR outranks an inherited CLAUDE_PID (the subagent override)"
+else bad "claim-thread: an explicit CLAUDE_PROJECT_DIR outranks an inherited CLAUDE_PID (the subagent override)" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# k10. The registry cannot say which entry is the session's (two entries claim
+#      it): registry-error, never a guess and never the cwd's.
+setup_case; claim_setup; claim_other_project wproj yes
+cp "${CHOME}/inbox-root/projects/wproj.json" "${CHOME}/inbox-root/projects/wproj-dup.json"
+RUN_CWD="${PROJ}"; claim_with_env "CLAUDE_PROJECT_DIR=${OPROJ}"
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=registry-error "* && -z "${OUT}" && -z "$(mcp_calls)" ]]; then
+  ok "claim-thread: an ambiguous registry for the session's project -> reason=registry-error, no call"
+else bad "claim-thread: an ambiguous registry for the session's project -> reason=registry-error, no call" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+setup_case; claim_setup
+RUN_CWD="${PROJ}"; claim_with_env "CLAUDE_PID=not-a-pid"
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=project-unresolved "* && "${ERR}" == *"not-a-pid"* && -z "${OUT}" ]]; then
+  ok "claim-thread: CLAUDE_PID not a pid -> reason=project-unresolved, no fallback to the cwd"
+else bad "claim-thread: CLAUDE_PID not a pid -> reason=project-unresolved, no fallback to the cwd" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
 # p1. post: the ts line, then the claim; exit 0.
 setup_case; claim_setup
 fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790000000.000100\",\"channel\":\"${ENG_CHANNEL}\"}"
 run_bin post "${ENG_CHANNEL}" "hi"
-if [[ "${RC}" == 0 && "$(head -n1 <<<"${OUT}")" == "ts=1790000000.000100 channel=${ENG_CHANNEL}" && "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-slack.jsonl" ]] \
+if [[ "${RC}" == 0 && "$(head -n1 <<<"${OUT}")" == "ts=1790000000.000100 channel=${ENG_CHANNEL}" && "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-slack.jsonl source=cwd" ]] \
    && [[ "$(jq -r '.channel + " " + .thread_ts' <<<"$(claim_args)")" == "${ENG_CHANNEL} 1790000000.000100" ]]; then
   ok "post: prints the ts line, then claims that (channel, ts): claim=claimed, exit 0"
 else bad "post: prints the ts line, then claims that (channel, ts): claim=claimed, exit 0" "rc=${RC} out='${OUT}' err='${ERR}' args=$(claim_args)"; fi
@@ -1604,7 +1782,7 @@ setup_case; claim_setup
 fixture conversations.open '{"ok":true,"channel":{"id":"D0PENED"}}'
 fixture chat.postMessage '{"ok":true,"ts":"1790.5","channel":"D0PENED"}'
 run_bin dm "${CODY}" "hi"
-if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-slack.jsonl" ]] \
+if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-slack.jsonl source=cwd" ]] \
    && [[ "$(jq -r '.channel + " " + .thread_ts' <<<"$(claim_args)")" == "D0PENED 1790.5" ]]; then
   ok "dm: a new DM claims (D... from conversations.open, ts from the post)"
 else bad "dm: a new DM claims (D... from conversations.open, ts from the post)" "rc=${RC} out='${OUT}' err='${ERR}' args=$(claim_args)"; fi

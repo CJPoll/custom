@@ -48,7 +48,7 @@ APPROVAL="session:${FX_SID}/${FX_MID} quote:yes, provision the KMS key"
 # real pool, whatever fleet is running.
 # A suite launched from inside a real slot (a captain's wrapped harness-gate)
 # must not carry that slot into its fixtures.
-unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC
+unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC
 export ATHENA_TEST_SLOT_DIR="${TMP}/slots" ATHENA_TEST_SLOTS=1
 TEST_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
 
@@ -143,6 +143,12 @@ stub_gate_pair "${R}/g.sh"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 1 ] && ok "c4 exit 1: gate RED on the integrated head (the defect class)" || bad "c4 expected exit 1, got $rc" "$out"
 grep -q 'disjoint file set does not imply a disjoint gate' <<<"$out" && ok "c4 Fix: explains green-alone != green-merged" || bad "c4 Fix: missing the explanation" "$out"
+# The tool runs only the integrated head, so a RED can be a flake as easily as a
+# break. Its Fix must not assert an unmeasured "passed alone", and must route a
+# flake to athena:flaky-ticket rather than "fix it on this branch" (2026-09-29:
+# two gen_saas integrated-head REDs were known flakes, DND-1255 class).
+grep -q 'passed alone' <<<"$out" && bad "c4 Fix: claims the branch passed alone, which the tool never ran" "$out" || ok "c4 Fix: claims nothing it did not measure"
+grep -q 'athena:flaky-ticket' <<<"$out" && ok "c4 Fix: routes a flake to athena:flaky-ticket" || bad "c4 Fix: gives a flake no route" "$out"
 grep -q 'INTEGRATION OK' <<<"$out" && bad "c4 printed INTEGRATION OK on a red gate" || ok "c4 does not print INTEGRATION OK when red"
 
 # ---------------------------------------------------------------- case 5
@@ -771,13 +777,17 @@ rm -f "${TMP}/critic-fifo"
 # DND-986: a CARRIED critic PASS (critic-review found an identical change that
 # already passed, and recorded a schema-2 receipt naming it) is a present
 # verdict. The OK line and the receipt must NAME it, so a post-merge defect can
-# be traced to a carry. record_carried forges the on-disk schema-2 shape.
-record_carried() { # <repo dir> <carried_from sha> [sha] [schema]
+# be traced to a carry. record_carried forges the on-disk schema-2 shape. Its
+# merge_base is the REAL merge base of main and the head unless a fifth argument
+# names another commit: the gate checks that the judged diff covers the target
+# (case c32g), so a fake SHA there is no longer filler.
+record_carried() { # <repo dir> <carried_from sha> [sha] [schema] [merge_base]
   ( cd "$1" && sha="${3:-$(git rev-parse HEAD)}" \
+    && mb="${5:-$(git merge-base main "$sha")}" \
     && d="$(git rev-parse --git-path critic-verdicts)" && mkdir -p "$d" \
-    && jq -n --arg sha "$sha" --arg src "$2" --argjson schema "${4:-2}" \
+    && jq -n --arg sha "$sha" --arg src "$2" --argjson schema "${4:-2}" --arg mb "$mb" \
          '{schema:$schema, tool:"critic-review", sha:$sha, base:"main", verdict:"pass", findings:[],
-           dirty:false, at:"2026-09-27T00:00:00Z", merge_base:("a"*40), patch_id:("b"*40),
+           dirty:false, at:"2026-09-27T00:00:00Z", merge_base:$mb, patch_id:("b"*40),
            diff_digest:("c"*64), msgs_digest:("d"*64), judge_digest:("e"*64),
            carried_from:(if $src == "" then null else $src end),
            carried_receipt:(if $src == "" then null else "/x/\($src).json" end)}' > "${d}/${sha}.json" )
@@ -864,6 +874,50 @@ stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
 record_carried "$R" "not-a-sha"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 3 ] && ok "c32 F4b malformed carried_from: exit 3" || bad "c32 F4b expected exit 3, got $rc" "$out"
+
+# c32g A PASS JUDGED AGAINST A NARROWER BASE does not cover the target. The
+# receipt's merge_base is a stacked parent branch that is not on main, so the
+# judged diff (parent..head) omits the parent's own commits, which the
+# integrated diff (main..head) contains. Measured 2026-09-29 (gen_saas
+# DND-1185): a captain's `critic-review --base <parent>` PASS was reused by
+# `integration-gate --with-critic` (target origin/main), which printed
+# INTEGRATION OK, while a whole-stack run of the same judge had found real gaps
+# in the parent commits. The same receipt still gates against the parent it
+# was judged on, and a PASS judged against an OLDER main (an ancestor of the
+# target) is a superset review, so it covers the newer target.
+R="${TMP}/c32g"; new_repo "$R"
+( cd "$R" && git checkout -qb parent && echo p > p.txt && git add p.txt && git commit -qm parent \
+  && git checkout -qb child && echo c > c.txt && git add c.txt && git commit -qm child )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+parent_sha="$( cd "$R" && git rev-parse parent )"
+record_carried "$R" "" "" 2 "$parent_sha"
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && grep -q 'does not cover' <<<"$out" && grep -q 'Fix:' <<<"$out" \
+  && ok "c32g PASS judged against a stacked parent: exit 3, names the coverage gap" \
+  || bad "c32g expected exit 3 naming 'does not cover', got $rc" "$out"
+[ -e "$rf" ] && bad "c32g an integration receipt was written" "$(cat "$rf")" || ok "c32g no integration receipt written"
+out="$( cd "$R" && "$GATE" --target parent --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c32g the same PASS gates green against the parent it was judged on" \
+  || bad "c32g expected exit 0 with --target parent, got $rc" "$out"
+( cd "$R" && git checkout -q main && echo u > u.txt && git add u.txt && git commit -qm upstream \
+  && git checkout -q child && git merge -q --no-edit main )
+old_main="$( cd "$R" && git rev-parse main~1 )"
+record_carried "$R" "" "" 2 "$old_main"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c32g a PASS judged against an OLDER main covers the newer target" \
+  || bad "c32g expected exit 0 for an ancestor merge_base, got $rc" "$out"
+# c32h the DND-1185 path itself: --with-critic must RE-RUN the judge against
+# the target rather than reuse the narrow PASS, and its verdict decides.
+R="${TMP}/c32h"; new_repo "$R"
+( cd "$R" && git checkout -qb parent && echo p > p.txt && git add p.txt && git commit -qm parent \
+  && git checkout -qb child && echo c > c.txt && git add c.txt && git commit -qm child )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_carried "$R" "" "" 2 "$( cd "$R" && git rev-parse parent )"
+out="$(wc_gate "$R" "${TMP}/critic-block" "${R}/g.sh")"; rc=$?
+[ "$rc" -eq 3 ] && ! grep -q 'a PASS is already recorded' <<<"$out" && grep -q 'critic-review: BLOCKED' <<<"$out" \
+  && ok "c32h --with-critic re-judges against the target instead of reusing a narrow PASS" \
+  || bad "c32h expected a fresh judge run and exit 3, got $rc" "$out"
 
 # F5 --with-critic (DND-1010) on a rebased, unchanged branch: the judge the
 # gate runs beside itself is critic-review's own writer, so it carries the
@@ -1016,7 +1070,7 @@ grep -q '^critic-review: PASS' <<<"$out" && ok "s11 the judge was joined and its
 
 # s12: run from a LINKED WORKTREE of the custom repo, the gate uses the MAIN
 # checkout's test-slot, never the worktree's copy (test-slot's stable
-# interface: every caller agrees on N). Each copy marks which one ran, then
+# interface: every caller agrees on the budget). Each copy marks which one ran, then
 # execs the real test-slot.
 L="${TMP}/s12-layout"; layout_copy "$L"
 REAL_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
@@ -1269,6 +1323,95 @@ out="$( cd "$D/wt" && INTEGRATION_GATE_IN_SLOT=1 ATHENA_TEST_SLOT_HELD="$(realpa
 # r7: --help documents --rebase and takes no slot.
 out="$( cd "$TMP" && "${TMP}/s5-layout/ai/skills/athena:merge-boarding/scripts/integration-gate" --help 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && grep -q -- '--rebase' <<<"$out" && ok "r7 --help documents --rebase" || bad "r7 --help missing --rebase (rc=$rc)" "$out"
+
+# ---------------------------------------------------------------- DND-1326
+# The outer slot is weighed as test-slot weighs the declared gate itself
+# (test-slot --weight-of), and the --with-critic judge queues in test-slot's
+# model pool. The layout carries THIS checkout's test-slot, which has
+# --weight-of; each case reads the weight from the pool's own events.
+L="${TMP}/w-layout"; layout_copy "$L"
+cp "$(cd "${ROOT}/../../bin" && pwd)/test-slot" "$L/ai/bin/test-slot"
+( cd "$L" && git add -A && git commit -qm layout )
+WGATE="$L/ai/skills/athena:merge-boarding/scripts/integration-gate"
+# w_weight <pool dir> <label prefix> [model] -- the weight of the first run
+# acquired in that pool whose label starts with the prefix.
+w_weight() {
+  jq -s --arg p "$2" '[.[] | select(.event == "acquired" and (.label | startswith($p))) | .weight] | first' \
+    "$1/${3:+model/}events.jsonl" 2>/dev/null
+}
+# w1: a harness-gate run at HARNESS_GATE_JOBS=16 holds 16 units, not the default.
+WS="${TMP}/w1-slots"; R="${TMP}/w1"; slot_repo "$R" "exit 0"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 HARNESS_GATE_JOBS=16 "$WGATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$out" && ok "w1 exit 0 with a weighed outer slot" || bad "w1 expected exit 0, got $rc" "$out"
+[ "$(w_weight "$WS" "integration-gate ")" = 16 ] \
+  && ok "w1 a HARNESS_GATE_JOBS=16 gate's outer slot holds 16 units" || bad "w1 outer slot weight $(w_weight "$WS" "integration-gate ") (want 16)" "$out"
+grep -q 'weight 16' <<<"$out" && ok "w1 the run names the weight it takes" || bad "w1 weight not named" "$out"
+# w2: a gate test-slot cannot weigh by its workers (prep-commit.sh) keeps
+# test-slot's default (budget/3), as before DND-1326.
+WS="${TMP}/w2-slots"; R="${TMP}/w2"; new_repo "$R"; mkdir -p "$R/bin"
+printf '#!/bin/sh\nexit 0\n' > "$R/bin/prep-commit.sh"; chmod +x "$R/bin/prep-commit.sh"
+( cd "$R" && git add -A && git commit -qm gate && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+record_pass "$R"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 HARNESS_GATE_JOBS=16 "$WGATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ "$(w_weight "$WS" "integration-gate ")" = 8 ] \
+  && ok "w2 a prep-commit.sh gate keeps test-slot's default weight" || bad "w2 expected exit 0 at weight 8 (rc=$rc, weight $(w_weight "$WS" "integration-gate "))" "$out"
+# w3: --with-critic's judge queues in the MODEL pool (one unit), beside the gate.
+WS="${TMP}/w3-slots"; R="${TMP}/w3"; slot_repo "$R" "exit 0"
+rm -rf "${R}/$(cd "$R" && git rev-parse --git-path critic-verdicts)"   # no verdict yet
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/critic-pass" "$WGATE" --target main --no-fetch --with-critic 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q '^critic-review: PASS' <<<"$out" && grep -q '^INTEGRATION OK' <<<"$out" \
+  && ok "w3 --with-critic in the model pool: judged PASS, INTEGRATION OK" || bad "w3 expected exit 0 with a PASS (rc=$rc)" "$out"
+[ "$(w_weight "$WS" "critic-review " model)" = 1 ] \
+  && ok "w3 the judge held one model-pool unit" || bad "w3 the judge was not in the model pool (weight '$(w_weight "$WS" "critic-review " model)')" "$out"
+[ -s "$WS/events.jsonl" ] && [ "$(w_weight "$WS" "critic-review ")" = null ] \
+  && ok "w3 the judge held no cpu unit (the cpu pool's events exist)" || bad "w3 the judge took cpu units, or the cpu events are missing" "$out"
+# w4: a main-checkout test-slot that predates --weight-of (it refuses the
+# flag) is not a failure: the slot takes test-slot's default, and says so.
+L4="${TMP}/w4-layout"; layout_copy "$L4"
+printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = --weight-of ] && { echo "test-slot: unknown argument --weight-of" >&2; exit 2; }; done\nexec "%s" "$@"\n' \
+  "$L/ai/bin/test-slot" > "$L4/ai/bin/test-slot"; chmod +x "$L4/ai/bin/test-slot"
+( cd "$L4" && git add -A && git commit -qm layout )
+WS="${TMP}/w4-slots"; R="${TMP}/w4"; slot_repo "$R" "exit 0"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 HARNESS_GATE_JOBS=16 "$L4/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ "$(w_weight "$WS" "integration-gate ")" = 8 ] \
+  && ok "w4 an older test-slot: exit 0 at its default weight" || bad "w4 expected exit 0 at weight 8 (rc=$rc, weight $(w_weight "$WS" "integration-gate "))" "$out"
+grep -q "default weight" <<<"$out" && ok "w4 the fallback to the default weight is named" || bad "w4 fallback not named" "$out"
+# w5: a target that cannot be read and a target that declares no gate take
+# the default weight with DIFFERENT notes: "could not look" never reads as
+# "none". (Each run is then refused inside the slot, as before.)
+WS="${TMP}/w5-slots"; R="${TMP}/w5"; slot_repo "$R" "exit 0"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 "$WGATE" --target nosuch/main --no-fetch 2>&1 )"
+grep -q "nosuch/main is not fetched yet, so its declared gate could not be read" <<<"$out" \
+  && ok "w5 an unreadable target is named as could-not-read" || bad "w5 unreadable target note" "$out"
+R="${TMP}/w5b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 "$WGATE" --target main --no-fetch 2>&1 )"
+grep -q "main declares no gate and no --gate was passed" <<<"$out" \
+  && ok "w5 a target with no declared gate is named as none" || bad "w5 no-gate note" "$out"
+# w6: the outer slot is a cpu slot, so a caller --gate naming a model-pool
+# command is still weighed in cpu units (the cpu default), never as model calls.
+WS="${TMP}/w6-slots"; R="${TMP}/w6"; new_repo "$R"; mkdir -p "$R/ai/bin"
+printf '#!/bin/sh\nexit 0\n' > "$R/ai/bin/critic-eval"; chmod +x "$R/ai/bin/critic-eval"
+( cd "$R" && git add -A && git commit -qm tool && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+record_pass "$R"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 "$WGATE" --target main --no-fetch --gate 'ai/bin/critic-eval --run --concurrency 2' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ "$(w_weight "$WS" "integration-gate ")" = 8 ] \
+  && ok "w6 a model-pool --gate command is weighed in cpu units" || bad "w6 expected exit 0 at cpu weight 8 (rc=$rc, weight $(w_weight "$WS" "integration-gate "))" "$out"
+# w7: a judge the model pool never admits records no verdict. The gate still
+# runs; the verdict step reads the absence (exit 3) and the judge's log shows
+# test-slot's TIMEOUT, so it never reads as a PASS or a BLOCK.
+WS="${TMP}/w7-slots"; R="${TMP}/w7"; slot_repo "$R" "exit 0"
+rm -rf "${R}/$(cd "$R" && git rev-parse --git-path critic-verdicts)"
+mkfifo "${TMP}/w7.fifo"
+ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 ATHENA_TEST_MODEL_SLOTS=1 "$L/ai/bin/test-slot" --pool model --label 'w7 foreign holder' -- \
+  bash -c ': > "$1"; exec 3<>"$2"; read -t 60 -u 3 _x' _ "${TMP}/w7.started" "${TMP}/w7.fifo" 2>/dev/null &
+holder=$!
+await_file "${TMP}/w7.started" || bad "w7 fixture: the model-pool holder never started"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 ATHENA_TEST_MODEL_SLOTS=1 TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/critic-pass" "$WGATE" --target main --no-fetch --with-critic --slot-wait-timeout 1 2>&1 )"; rc=$?
+timeout 5 bash -c 'printf "go\n" > "$1"' _ "${TMP}/w7.fifo"; wait "$holder" 2>/dev/null
+[ "$rc" -eq 3 ] && grep -q 'test-slot: TIMEOUT' <<<"$out" && ! grep -q '^INTEGRATION OK' <<<"$out" \
+  && ok "w7 a judge the model pool never admits is an absent verdict (exit 3), with test-slot's TIMEOUT shown" \
+  || bad "w7 expected exit 3 with a TIMEOUT line (rc=$rc)" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

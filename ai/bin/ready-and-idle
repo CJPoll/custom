@@ -20,8 +20,9 @@
 # and 3 extra re-reviews, because main had moved under them (!1187 alone: 19
 # commits, 4 full pipelines).
 #
-# The structural hole this fills: `ai/bin/lead-time` only ever queries MERGED
-# change requests, so an orphaned OPEN one is invisible to it until it merges.
+# The structural hole this fills: `ai/bin/lead-time` only ever sees LANDED
+# change requests (merged, or on GitHub closed and landed by a push), so an
+# orphaned OPEN one is invisible to it until it lands.
 # lead-time is a postmortem instrument and it reported this 2.5 days after the
 # damage was unrecoverable. This is the same measurement taken while the work
 # is still recoverable, so `drift` is a bill you can still refuse to pay.
@@ -996,7 +997,7 @@ if $PROGRAM_NAME == __FILE__
       Nothing is waiting on CI and nothing is waiting on a human, so every
       second in this state is pure lead time.
 
-      The sibling tool ai/bin/lead-time only sees MERGED change requests, so it
+      The sibling tool ai/bin/lead-time only sees LANDED change requests, so it
       cannot report this until the damage is already unrecoverable. This one
       fires while the work is still cheap to land.
 

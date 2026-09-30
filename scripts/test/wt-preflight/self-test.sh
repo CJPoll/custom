@@ -18,7 +18,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 # The fixture Ruby resolves BEFORE HOME moves: asdf's `ruby` shim needs the real
 # HOME. pool-headroom runs on #!/usr/bin/ruby (DND-931), so the fake HOME no
 # longer breaks the tool, and no case can write under the real HOME.
-RUBY="$(ruby -e 'print RbConfig.ruby')" || { echo "wt-preflight self-test: no ruby on PATH"; echo "Fix: install the harness Ruby (/usr/bin/ruby, 3.4+)"; exit 2; }
+RUBY="$(/usr/bin/ruby -e 'print RbConfig.ruby')" || { echo "wt-preflight self-test: /usr/bin/ruby did not run"; echo "Fix: install the harness Ruby (/usr/bin/ruby, 3.4+)"; exit 2; }
 export HOME="${TMP}/home"; mkdir -p "${HOME}"
 
 ok()  { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }

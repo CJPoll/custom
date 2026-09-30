@@ -68,7 +68,7 @@ add_exec() { mkdir -p "$(dirname "$1/$2")"; printf '%s\n' "$3" > "$1/$2"; chmod 
 # these keys, each with a reason, in the literal form the checker ships.
 exempt() {
   local root="$1"; shift
-  ruby -e 'f = ARGV.shift
+  /usr/bin/ruby -e 'f = ARGV.shift
     t = File.read(f)
     body = ARGV.map { |k| "  \"#{k}\" => \"passthrough wrapper: forwarding argv IS its contract\",\n" }.join
     t.sub!(/^EXEMPT = \{\n.*?^\}\.freeze\n/m) { "EXEMPT = {\n#{body}}.freeze\n" } or abort "no EXEMPT"
@@ -92,7 +92,7 @@ new_fixture() {
   printf '%s\n' "${root}"
 }
 
-run() { OUT="$(cd "$1" && ruby ai/bin/check-bin-help 2>&1)"; RC=$?; }
+run() { OUT="$(cd "$1" && /usr/bin/ruby ai/bin/check-bin-help 2>&1)"; RC=$?; }
 has() { printf '%s' "${OUT}" | grep -F -- "$1" >/dev/null; }
 # said_ok: the checker printed its OK status line. Anchored to the line start
 # and the program name, so a fixture path in the output never satisfies it
@@ -146,7 +146,7 @@ else bad "5 a landed bare-name key matches its ai/bin/<name> path" "rc=${RC} out
 #    could-not-measure: writing the table differently must not hide an entry.
 R="$(new_fixture unparseable)"
 add_exec "${R}" ai/bin/nohelp "${HELPLESS}"
-ruby -e 'f = ARGV[0]; t = File.read(f)
+/usr/bin/ruby -e 'f = ARGV[0]; t = File.read(f)
   t.sub!(/^EXEMPT = \{\n/) { "EXEMPT = {\n  %w[ai/bin/nohelp].first => \"hidden\",\n" } or abort "no EXEMPT"
   File.write(f, t)' "${R}/ai/bin/check-bin-help"; run "${R}"
 if [ "${RC}" -ne 0 ] && has "could not measure" && has "Fix:"; then
@@ -192,7 +192,7 @@ move_origin() {
 }
 run_pinned() { # <root> <pinned sha>
   OUT="$(cd "$1" && ATHENA_LANDED_PIN_SHA="$2" ATHENA_LANDED_PIN_REPO="$(realpath "$1/.git")" \
-    ruby ai/bin/check-bin-help 2>&1)"; RC=$?
+    /usr/bin/ruby ai/bin/check-bin-help 2>&1)"; RC=$?
 }
 
 # 9b. Origin moves mid-gate: the pinned check still measures the pin -> PASS.

@@ -196,7 +196,11 @@ PATH_REASON=""
 
 if [ "${ADDRESS}" = "server" ]; then
   if [ -n "${CHANNEL}" ]; then
-    inbox_routed_channel_refusal "${CHANNEL}" "."
+    # A refusal either way; the session's project only tailors its message.
+    # When it cannot be named, "/" (in no repository) gives the generic one,
+    # never a fall back to the shell cwd (DND-1163).
+    RSESSION="$(session_project_dir 2>/dev/null)" && RSESSION="${RSESSION#*$'\t'}" || RSESSION="/"
+    inbox_routed_channel_refusal "${CHANNEL}" "${RSESSION}"
     exit 2
   fi
   if [ -n "${TO}" ] && [ -n "${TO_PROJECT}" ]; then
@@ -264,6 +268,14 @@ if ! command -v jq >/dev/null 2>&1; then
     "install jq (it is already a dependency of the athena:slack skill), then re-run."
   exit 2
 fi
+
+# THE SESSION'S PROJECT, NOT THE SHELL CWD (DND-1163). The Bash tool keeps a
+# `cd` across calls, so "." can be another project's repo; keyed on it, this
+# would act on that project's channels with exit 0. inbox_session_dir
+# (lib/inbox.sh) names the session's project and refuses a cwd that sits in a
+# different registered project. PROJECT_DIR replaces "." everywhere below.
+PROJECT_LINE="$(inbox_session_dir)" || exit 2
+PROJECT_DIR="${PROJECT_LINE#*$'\t'}"
 if [ "${ADDRESS}" = "maildir" ] && ! command -v flock >/dev/null 2>&1; then
   # REFUSED, NOT DEGRADED. Without the lock two senders scanning at once derive
   # the same <seq>; the delivery is non-clobbering so nothing is destroyed, but
@@ -281,7 +293,7 @@ fi
 # only when its answer decides it).
 if [ -z "${PATH_REASON}" ]; then
   if [ "${ADDRESS}" = "server" ]; then DEFAULT_TO="${TO}"; else DEFAULT_TO=""; fi
-  DECISION="$(inbox_default_path "${ADDRESS}" "." "${DEFAULT_TO}")" || exit 2
+  DECISION="$(inbox_default_path "${ADDRESS}" "${PROJECT_DIR}" "${DEFAULT_TO}")" || exit 2
   CHOSEN="${DECISION%%$'\t'*}"; PATH_REASON="${DECISION#*$'\t'}"
   case "${CHOSEN}" in
     local)  ;;
@@ -384,12 +396,12 @@ if [ "${ROUTED}" -eq 1 ]; then
   # body is never echoed back. `event_id` is what a reply's --thread names;
   # `delivery_id` is the handle for the server's delivery status. "pending"
   # is literal: a platform delivery is delivered only on the recipient's ack.
-  printf '%s' "${BODY}" | inbox_send_routed "${TO}" "${TO_PROJECT}" "${SUBJECT}" "${RE}" "${THREAD}" "." || exit 1
+  printf '%s' "${BODY}" | inbox_send_routed "${TO}" "${TO_PROJECT}" "${SUBJECT}" "${RE}" "${THREAD}" "${PROJECT_DIR}" || exit 1
   exit 0
 fi
 
 routed_path_line local "${PATH_REASON}"
-NAME="$(printf '%s' "${BODY}" | inbox_send_mail "${CHANNEL}" "${SLUG}" "${TO}" "." "${RE}" "${THREAD}")" || exit 1
+NAME="$(printf '%s' "${BODY}" | inbox_send_mail "${CHANNEL}" "${SLUG}" "${TO}" "${PROJECT_DIR}" "${RE}" "${THREAD}")" || exit 1
 
 # THE PATH LINE, THEN THE FILENAME, AND NOTHING ELSE. Not the body -- echoing it back would put the
 # text a second time in the context that composed it, for no information. The

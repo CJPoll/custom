@@ -481,6 +481,19 @@ the issues." This section is its one home; other documents cite it by name.
      Measured: that exact loop never exits with no target alive, and an
      admiral's path-based load-wait recipe hung a captain (DND-589); an
      architect's `pkill -f` killed its own tool shell (DND-541).
+- NEVER generate CPU, memory or IO load on this machine to test or reproduce
+  anything. This desktop is Cody's workstation, not a CI box. No stress or load
+  runs, no burner fan-outs (`yes`, spin or re-exec loops), no repeated N-run
+  flake hunts. Tests we write and run are **functional**: no performance, load,
+  stress or wall-clock-threshold tests. A timeout that only caps a hang is
+  fine; a verdict that flips when the machine is slow is not. A flake that
+  shows only under load gets a deterministic test (a fixture, an injected
+  clock, a fake, or a block on the event), never a stress repro. How:
+  `athena:test-specification` → *Scope: functional tests only*. Briefs cite
+  this rule as DND-1222. Owner, Cody,
+  2026-09-29: "I want us only doing functional testing in the agent
+  definitions, skill definitions, etc." Measured that day: a captain's `yes`
+  and spin-loop repro of DND-1202 drove load to 46 while Cody was gaming.
 - NEVER EVER UNDER ANY CIRCUMSTANCE use `Application.put_env`
 - NEVER make system-level changes (especially daemons, system services, /etc files, sudo commands) without the user's express direction
 - It's OK to make changes to files under ~/dev or ~/.local/worktrees without asking
@@ -493,6 +506,12 @@ the issues." This section is its one home; other documents cite it by name.
   `6d7a8c6a-32e3-46c4-bfa3-2f2d9f704774`): "I'm asking you to use your best
   judgement, even if it's a CI runner change, or makes reasonable changes to
   the system."
+
+## Per-machine secrets
+
+- Never export a secret into a shell or session env. Load it at point of use: a `_FILE` path, `ai/bin/with-secret`, or a headersHelper.
+- Inspect a secret by metadata only: name, path, mode. Over any file that might hold a value, `grep -l`/`-c` only; never `cat`, `printenv NAME`, an unfiltered `env`, or a parse of `env` output.
+- The rules, the registry and the check: `~/dev/custom/ai/contracts/athena-machine-secrets.md`.
 
 ## Structure
 
@@ -640,13 +659,21 @@ contract, which is why they live here.
 
 A project opts in through a **machine-local registry entry**,
 `$ATHENA_INBOX_ROOT/projects/<project>.json`, which is untracked and never lives
-in the project. Ownership still resolves from the session's cwd: cwd → realpath
-of `git rev-parse --git-common-dir` → the entry whose `repo` is that path → its
-channels. That key is identical for a repo's main checkout and all its
-worktrees, so a worktree session gets its parent repo's channels. A session only
-ever sees its own project's channels; never fall back to scanning the inbox root
-for surfaces the matched entry does not declare. No entry is not a fault — zero
-channels, exit 0.
+in the project. Ownership resolves from the session's project directory
+(`$CLAUDE_PROJECT_DIR`, else the Claude Code process's own cwd, else the shell
+cwd): that directory → realpath of `git rev-parse --git-common-dir` → the entry
+whose `repo` is that path → its channels. A shell cwd inside a different
+registered project is refused, not used. That key is identical for a repo's
+main checkout and all its worktrees, so a worktree session gets its parent
+repo's channels. A session only ever sees its own project's channels; never
+fall back to scanning the inbox root for surfaces the matched entry does not
+declare. No entry is not a fault — zero channels, exit 0.
+
+**Later (2026-09-28, DND-1163):** this read "Ownership still resolves from the
+session's cwd: cwd → realpath …". Superseded: the Bash tool keeps a `cd` across
+calls, so a walt_ui session standing in `~/dev/custom` claimed a Slack thread
+for custom's inbox with exit 0. The rule's home is the contract → *Repo
+identity: the git common dir*.
 
 **Later (2026-09-19):** this paragraph previously said a project opts in by
 committing **`.athena-inbox.json`** at its **repo root**, resolved from the git
@@ -674,7 +701,7 @@ turn, 2026-09-28 04:18Z): "clicks from my user count as approval."
 This machine runs autonomous **ticket-driven lanes**: a lane watches a tracker
 queue and, when lane work is queued, spawns ONE draining `athena-admiral`; the
 **flaky-test lane** is one instance. The full spin-up procedure, the inner admiral
-brief, the coordinator-marker semantics, the channel-resolution assertion, the
+brief, the lane lock (`ai/bin/lane-lock`), the channel-resolution assertion, the
 read mechanics, and the add/drop handling all live in
 `~/dev/custom/ai/docs/ticket-lane-action-brief.md` (the *ticket-lane action brief*
 template; the flaky lane is its *worked instantiation*), which **cites** the
@@ -685,7 +712,7 @@ ticket is filed at, and the statuses the lane drains — has one home,
 instantiation* names who reads it. This
 section is ONLY the machine-level **trigger** summary that routes a session into
 that brief — beyond naming the triggers and the spin-up/resolution routing it
-points at, it states no lane mechanics (the marker semantics, channel resolution,
+points at, it states no lane mechanics (the lane lock, channel resolution,
 read mechanics, and add/drop handling are the brief's); on any detail the brief
 wins.
 
@@ -729,8 +756,8 @@ trigger-specific read mechanics — is the brief's, not this section's.
 **On a trigger**, if lane work is queued AND no admiral is already draining the
 lane, spin up ONE `athena-admiral` per
 `~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *Spinning the lane up*, which
-defines both the queued-work check and drain-detection (the coordinator marker and
-its freshness — not paraphrased here) — do not do the work yourself.
+defines both the queued-work check and drain-detection (the held lane lock, not
+paraphrased here) — do not do the work yourself.
 
 **A resolution failure is a fault, not an empty queue.** A lane channel that does
 not resolve is a FAULT to surface, never read as a quiet queue — *when* this

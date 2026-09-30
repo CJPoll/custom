@@ -7,13 +7,63 @@
 # runs at once on a 16-core box (load 54.58) and timing-sensitive suites flaked
 # (DND-473). Nothing bounded how many heavy runs share one machine. test-slot
 # wraps ONE heavy command (a full bin/prep-commit.sh, a full `mix test`, an
-# integration-gate run) so that at most N wrapped commands run at once per
-# machine, whatever repo, worktree, fleet, or session launched them.
+# integration-gate run) so that the wrapped commands running at once per
+# machine stay inside a budget, whatever repo, worktree, fleet, or session
+# launched them.
+#
+# A WEIGHTED BUDGET, TWO POOLS (DND-1006). Until DND-1006 the cap was N=3
+# slots, "provisional, unmeasured", one per run. Now each pool has a BUDGET of
+# units and each run declares a WEIGHT (the units it holds while it runs):
+#   cpu pool   budget = nproc * 3/2 units (24 on this 16-core box). One unit is
+#              one gate worker, measured at 0.5 core; the budget lets slotted
+#              runs use 3/4 of the cores (12 of 16, the fleet's load-1
+#              dispatch threshold in athena:dispatch-captain), leaving the
+#              rest for the owner and for unslotted work. A W-worker
+#              harness-gate (DND-1005) weighs W; an undeclared run weighs
+#              budget/3 (8), which is exactly its pre-DND-1006 share of N=3,
+#              so a caller that never says --weight sees the old concurrency.
+#   model pool budget = 8 model calls in flight. Model-in-loop evals
+#              (admiral-eval, critic-eval, variant-eval, block-optimize) and
+#              critic-review are network- and model-bound, so they queue here
+#              and never hold CPU units. They are routed here by name; any
+#              other run by --pool model. An eval weighs the model calls it
+#              keeps in flight (DND-1358, eval_calls): a K-concurrency
+#              admiral-eval or critic-eval K, variant-eval 2K (both sides
+#              at once), block-optimize 4; any other model run weighs 1.
+# BASIS (recorded passively from real traffic; DND-1222 forbids generating
+# load to measure it, so the DND-489 bench was NOT re-run):
+#   * 0.5 core per unit: harness-gate at W=8 on heads 423674a7 and 0d08cb1d
+#     (after DND-1203, 2026-09-30T03:11Z and 03:19Z) spent 1094 s and 1049 s
+#     CPU (sum of timings.jsonl cpu_s) in 273 s and 257 s of slot time
+#     (events.jsonl ran_s): 4.00 and 4.08 cores, 0.50 per worker. The one
+#     earlier W=8 run (ef3f2a90, before DND-1203) was 1.31 cores, held down
+#     by the 946 s suite-reaper self-test; it is not used.
+#   * 3/4 of nproc: 2026-09-27 timing study (a local, gitignored note:
+#     ai-artifacts/coordination/2026-09-27-gate-timing-parallelism.md A1, B2
+#     row 7; its figures are quoted here): three serial gates
+#     holding N=3 ran at load1 2.2-2.8 on 16 cores. 2026-09-30T03:35Z: two
+#     undeclared walt_ui gates held 2 of 3 slots at load1 21-26, ~12 cores of
+#     containerised beam.smp between them. Undeclared runs are therefore not
+#     uniform: that reading is why the default keeps the old share rather
+#     than a smaller one, and why a heavy caller should declare --weight.
+#   * model 8: transcripts touched 2026-09-27..30 show the account sustained
+#     23 concurrent claude sessions at peak (p90 8 at 5-minute samples) with
+#     no rate-limit failure recorded, so 8 eval/critic runs in flight on top
+#     of the fleet's own p90 stays inside what was already sustained. Since
+#     DND-1358 a unit is one model CALL in flight, not one run (an eval
+#     weighs its K), so the same 8 now bounds calls, not K-call runs.
+#   * queue wait BEFORE (events.jsonl, every caller, N=3): 2026-09-26..28:
+#     n=1087 at 15.1 runs/h, median 121 s, p90 836 s, 599 over 60 s.
+#     2026-09-29: n=327 at 13.6/h, median 0 s, p90 34 s. AFTER: n/a until
+#     traffic accrues under the budget. Method: acquired events in a window,
+#     grouped by .pool (absent = cpu), median and p90 of waited_s, with the
+#     runs per hour beside them so windows compare at like volume.
 #
 # FASTER, NEVER WEAKER (ai/blocks/ops/safety-checks.md). test-slot changes only
 # WHEN the command runs. It never edits the command's argv, stdin, stdout,
 # stderr, or exit status, and adds exactly one environment variable
-# (ATHENA_TEST_SLOT_HELD). Nothing is skipped, filtered, or loosened. Its own
+# (ATHENA_TEST_SLOT_HELD, or ATHENA_TEST_SLOT_HELD_MODEL in the model pool).
+# Nothing is skipped, filtered, or loosened. Its own
 # messages go to stderr, prefixed `test-slot:`.
 #
 # LIVENESS IS THE FLOCK, NEVER A PID. A slot is held exactly while some process
@@ -71,12 +121,37 @@
 # Changing anything in this block is a breaking change for those callers.
 #
 #   test-slot [--label TEXT] [--wait-timeout SECONDS] [--outcome-file PATH]
-#             [--exclusive] -- CMD [ARGS...]
-#   test-slot --status [--json]
+#             [--weight UNITS] [--pool cpu|model] [--exclusive] -- CMD [ARGS...]
+#   test-slot --status [--pool cpu|model] [--json]
+#   test-slot --weight-of [--pool cpu|model] -- CMD [ARGS...]
 #   test-slot --help | --self-test
 #
+#   --weight-of (DND-1326) prints, on one stdout line, the units
+#   `test-slot [--pool P] -- CMD` would hold (the weight rules below, clamped
+#   to the budget), and exits 0. It creates no pool, takes no unit and never
+#   runs CMD. integration-gate asks it for its declared gate's weight, so
+#   the gate's outer slot is weighed as the gate itself would be.
+#
 #   Always invoke the MAIN checkout's copy by absolute path
-#   (~/dev/custom/ai/bin/test-slot), so every caller agrees on N.
+#   (~/dev/custom/ai/bin/test-slot), so every caller agrees on the budget.
+#
+#   The COMMAND is CMD with its wrappers skipped: timeout, env, nice, ionice,
+#   nohup, setsid, stdbuf and time, with their own options and arguments
+#   (DND-1006), then through an interpreter running a script: ruby, bash, sh,
+#   dash or zsh SCRIPT (DND-1365), so `ruby ai/bin/admiral-eval` is the
+#   COMMAND admiral-eval. It names the default label, picks the pool and the
+#   weight. An option a wrapper or interpreter table does not know (ruby -e,
+#   bash -c among them) stops the skip there, so the wrapper itself is the
+#   command (the default weight and the cpu pool: never lighter).
+#   --weight UNITS: units this run holds, 1..budget (DND-1006). Default: a
+#     harness-gate COMMAND weighs its worker count (its --jobs, else
+#     HARNESS_GATE_JOBS, else min(8, nproc/2), as harness-gate resolves it);
+#     any other cpu run weighs the cpu default (budget/3). In the model pool
+#     an eval weighs its model calls in flight (eval_calls, DND-1358: its
+#     --concurrency K or ATHENA_EVAL_CONCURRENCY, variant-eval 2K); any
+#     other model run weighs 1.
+#   --pool cpu|model: default model for a critic-review, admiral-eval,
+#     critic-eval, variant-eval or block-optimize COMMAND, else cpu.
 #
 #   Exit codes:
 #     <CMD's own code>  CMD ran (including 128+n when a signal killed it)
@@ -102,13 +177,21 @@
 #                       SIGKILLed (see RESIDUALS)
 #   This is how a caller tells "CMD exited 75" from "the wait timed out".
 #
-#   Environment set for CMD: ATHENA_TEST_SLOT_HELD=<pool dir>:<slot>. A nested
-#   test-slot that sees it (and finds that slot's lock still held) runs its CMD
-#   directly without taking a second slot, so nesting cannot self-deadlock.
+#   Environment set for CMD: ATHENA_TEST_SLOT_HELD=<pool dir>:<slot> (cpu
+#   pool; <slot> is the run's lowest unit), or ATHENA_TEST_SLOT_HELD_MODEL
+#   for a model run (DND-1006: one marker per pool, so nesting across pools
+#   never hides the outer marker). A nested test-slot in the same pool that
+#   sees it (and finds that unit's lock still held) runs its CMD directly
+#   without taking more units, so nesting cannot self-deadlock.
 #
-#   Pool: ${XDG_STATE_HOME:-$HOME/.local/state}/athena/test-slots/ (0700):
-#     slot-<i>.lock      flock = liveness; never deleted
-#     slot-<i>.holder    JSON {label,cwd,pid,started_at,exclusive}; diagnostic
+#   Pools: cpu = ${XDG_STATE_HOME:-$HOME/.local/state}/athena/test-slots/
+#   (0700), model = its model/ subdirectory (0700). Each holds the files below.
+#     slot-<i>.lock      one budget UNIT; flock = liveness; never deleted. A run
+#                        of weight w holds w of them. Units are taken highest
+#                        first, so a pre-DND-1006 run (it knows slots 1..3
+#                        only) finds its slots free while new runs hold others.
+#     slot-<i>.holder    JSON {label,cwd,pid,started_at,exclusive,pool,weight,
+#                        sha,tree}; diagnostic
 #     seq.lock           guards ticket issue and the reaping of dead waiters
 #     queue.lock         the queue head (and any pre-DND-823 waiter) blocks here
 #     waiters/q-<ticket>.w  one per live waiter, flock-held by it; ticket
@@ -116,24 +199,40 @@
 #                        since,ticket}. waiters/<pid>-<epoch>.w is a
 #                        pre-DND-823 waiter (unordered)
 #     events.jsonl       one JSON line per event {ts,event,slot,label,cwd,pid,
-#                        exclusive,waited_s,ran_s,exit}; event is one of
+#                        exclusive,waited_s,ran_s,exit,pool,weight,sha,tree};
+#                        slot is the lowest unit held; sha/tree are the git
+#                        HEAD and top level of the caller's cwd (null outside
+#                        a work tree), read again for `released` so a rebase
+#                        inside the slot shows (DND-1006); a `reentrant`
+#                        event has weight 0 (it takes no units); event is one of
 #                        waiting|acquired|released|timeout|reentrant|orphaned
 #                        (orphaned: DND-925, the caller died; it can follow
 #                        an `acquired` whose CMD then never started, and no
 #                        `released` follows it); rotated to
 #                        events.jsonl.1 past 1 MiB (one generation kept)
-#   --exclusive: holds ALL N slots before CMD runs (DND-489's bench quiesces
-#     the fleet with it). Holder lines say EXCLUSIVE.
-#   --status [--json]: N and its basis, held/waiting/unslotted counts, load1,
-#     nproc, then each holder, waiter, and heavy run WITHOUT a slot (UNSLOTTED).
-#     Each waiter has its queue position (text `WAITING #<k>:`, JSON
-#     "position": k; 1 = served next; null for a pre-DND-823 waiter).
-#     Read-only: never creates the pool.
+#   --exclusive: BENCH ONLY. Holds the whole cpu budget before CMD runs
+#     (DND-489's bench quiesces the fleet with it). No gate, eval or critic
+#     path takes it: it is the one machine-wide mutex, and the self-test
+#     fails if a repo caller passes it. Refused with --weight or --pool model.
+#     Holder lines say EXCLUSIVE.
+#   --status [--pool P] [--json]: the pool's budget and basis, the default
+#     weight, units held, waiting/unslotted counts, load1, nproc, then each
+#     holder (one line per run, with its units and weight), waiter, and heavy
+#     run WITHOUT a slot (UNSLOTTED; cpu pool only). Each waiter has its queue
+#     position (text `WAITING #<k>:`, JSON "position": k; 1 = served next;
+#     null for a pre-DND-823 waiter). With no --pool it shows both pools; its
+#     JSON is the cpu pool's document with the model pool's under "model".
+#     JSON keeps "n" (= the budget) and "n_basis"; "held" counts units; each
+#     holder is one RUN with "units", "weight" and "slot" (its lowest unit,
+#     the pre-DND-1006 key). Read-only: never creates the pool.
 #
-#   Test seams (self-test only): ATHENA_TEST_SLOT_DIR (pool dir);
-#   ATHENA_TEST_SLOTS (N) and ATHENA_TEST_SLOT_HEARTBEAT (seconds) are honored
-#   ONLY when ATHENA_TEST_SLOT_DIR is set to a non-default path, so no override
-#   can change the real pool. An honored-but-invalid value is exit 2, never a
+#   Test seams (self-test only): ATHENA_TEST_SLOT_DIR (cpu pool dir; the
+#   model pool is its model/); ATHENA_TEST_SLOTS (cpu budget),
+#   ATHENA_TEST_SLOT_DEFAULT_WEIGHT (cpu default weight), ATHENA_TEST_MODEL_SLOTS
+#   (model budget), ATHENA_TEST_SLOT_HEARTBEAT and ATHENA_TEST_SLOT_PARENT_CHECK
+#   (seconds) are honored ONLY
+#   when ATHENA_TEST_SLOT_DIR is set to a non-default path, so no override can
+#   change the real pool. An honored-but-invalid value is exit 2, never a
 #   fallback.
 # ---------------------------------------------------------------------------
 #
@@ -163,7 +262,20 @@
 #     acquirer racing that probe sees the slot busy for microseconds and simply
 #     tries the next slot or the next 2 s poll.
 #   * FIFO is strict, so the queue is head-of-line: every waiter waits behind
-#     the head, including a head that is --exclusive and needs all N slots.
+#     the head, including a heavy head (or an --exclusive one) that needs more
+#     units than are free. The head keeps the units it has taken while it
+#     waits for the rest, as --exclusive always did; nobody behind it could
+#     use them anyway. The pools queue independently.
+#   * A weight is declared, not measured. An undeclared heavy run holds the
+#     default whatever it really burns (see BASIS: a walt_ui gate ran near 6
+#     cores). Declare --weight for a run you know is heavier or lighter.
+#   * THE UPGRADE (DND-1006). A run already holding a slot keeps it: slot-1..3
+#     are units 1..3 of the budget, so each counts as ONE unit until it ends
+#     (under-weighted while it lasts). A waiter started by the old script
+#     keeps its queue place (same q-files, same queue.lock) and, as head,
+#     polls slots 1..3 only; new runs take units highest first, so those stay
+#     free longest. Each such old run is bounded by its own CMD or
+#     --wait-timeout; after that every holder is weighted.
 #     A waiter that is stopped (SIGSTOP) but alive keeps its place, because
 #     it still holds its flock; --status shows it at its position.
 #   * Parent death is watched only while WAITING (DND-925). Once CMD runs,
@@ -188,9 +300,34 @@
 set -u -o pipefail
 
 PROG=test-slot
-# N: provisional, unmeasured -- DND-489 sets it from data.
-TEST_SLOT_N=3
-TEST_SLOT_N_BASIS="provisional, unmeasured"
+# The budgets (DND-1006). BASIS in the header holds the measurements.
+# cpu budget = nproc * CPU_SLOTTED_NUM/CPU_SLOTTED_DEN cores * CPU_UNITS_PER_CORE.
+CPU_SLOTTED_NUM=3
+CPU_SLOTTED_DEN=4
+CPU_UNITS_PER_CORE=2
+# An undeclared cpu run weighs budget/CPU_DEFAULT_SHARES: its old share of N=3.
+CPU_DEFAULT_SHARES=3
+CPU_BUDGET_BASIS="measured 2026-09-30: 0.5 core/unit (W=8 harness-gate = 4.0 cores); 3/4 of nproc for slotted runs"
+MODEL_BUDGET=8
+MODEL_DEFAULT_WEIGHT=1
+MODEL_BUDGET_BASIS="8 model calls in flight; the account sustained 23 concurrent sessions 2026-09-27..30"
+# COMMANDs that queue in the model pool unless --pool says otherwise.
+MODEL_COMMANDS=" critic-review admiral-eval critic-eval variant-eval block-optimize "
+# The evals' model calls in flight (eval_calls, DND-1358), restated from
+# ai/lib/eval_pool.rb (RANGE, DEFAULT, ENV_VAR) and ai/bin/variant-eval
+# (DEFAULT_SIDE_CONCURRENCY); the self-test pins them to those sources.
+EVAL_MAX_CONCURRENCY=16
+EVAL_DEFAULT_CONCURRENCY=4
+EVAL_ENV=ATHENA_EVAL_CONCURRENCY
+VARIANT_SIDE_CONCURRENCY=2
+# harness-gate's own worker default (ai/bin/harness-gate gate_jobs):
+# min(max(nproc/2, 1), HARNESS_GATE_MAX_JOBS).
+HARNESS_GATE_MAX_JOBS=8
+# Run state main sets; these defaults keep a sourced copy (the self-test) whole.
+POOL_KIND=cpu
+WEIGHT=1
+GATE_SHA=""
+GATE_TREE=""
 EXIT_USAGE=2
 EXIT_TIMEOUT=75
 POLL_S=2
@@ -199,7 +336,8 @@ DEFAULT_HEARTBEAT_S=60
 QUEUE_GRACE_S=1
 WAITER_REAP_AGE_S=10
 # DND-925: a blocked waiter re-checks its caller at least this often.
-PARENT_CHECK_S=5
+# resolve_pool sets PARENT_CHECK_S from this and the seam.
+DEFAULT_PARENT_CHECK_S=5
 # PROC_PID_INIT_INO: the kernel's fixed inode for the initial (host) pid
 # namespace, so "parent is PID 1" means init only when this matches.
 HOST_PID_NS='pid:[4026531836]'
@@ -209,19 +347,31 @@ usage() {
   cat <<'TXT'
 Usage:
   test-slot [--label TEXT] [--wait-timeout SECONDS] [--outcome-file PATH]
-            [--exclusive] -- CMD [ARGS...]
-  test-slot --status [--json]
+            [--weight UNITS] [--pool cpu|model] [--exclusive] -- CMD [ARGS...]
+  test-slot --status [--pool cpu|model] [--json]
+  test-slot --weight-of [--pool cpu|model] -- CMD [ARGS...]
   test-slot --help | --self-test
 
-Run CMD once a machine-wide test slot is free (at most N heavy runs at once).
-CMD's argv, stdin, stdout, stderr, and exit code pass through unchanged.
+Run CMD once its weight fits the machine-wide budget of its pool. The cpu pool
+holds nproc*3/2 units (one unit = one gate worker, ~0.5 core); the model pool
+holds 8 model calls in flight. CMD's argv, stdin, stdout, stderr, and exit code pass
+through unchanged. The COMMAND is CMD after timeout/env/nice/ionice/nohup/
+setsid/stdbuf/time wrappers, and the SCRIPT an interpreter (ruby, bash, sh,
+dash, zsh) runs.
 
   --label TEXT          shown to waiters and in --status
-                        (default: "<repo or cwd basename> <CMD basename>")
+                        (default: "<repo or cwd basename> <COMMAND basename>")
   --wait-timeout SECS   give up waiting after SECS (default 7200); exit 75
   --outcome-file PATH   write `timeout` or `ran exit=<n>` (removed at start)
-  --exclusive           hold ALL N slots while CMD runs
-  --status [--json]     show N, holders, waiters, and UNSLOTTED heavy runs
+  --weight UNITS        units to hold (default: a harness-gate's worker count,
+                        else budget/3 in the cpu pool; in the model pool an
+                        eval's model calls in flight (its --concurrency K,
+                        variant-eval 2K), else 1)
+  --pool cpu|model      default model for critic-review, admiral-eval,
+                        critic-eval, variant-eval, block-optimize; else cpu
+  --exclusive           BENCH ONLY: hold the whole cpu budget while CMD runs
+  --status              show the budget, holders, waiters, UNSLOTTED runs
+  --weight-of           print the units `test-slot -- CMD` would hold; run nothing
   --self-test           run the hermetic self-test suite
 
 Exit: CMD's code if it ran | 75 wait timed out, CMD never ran | 2 usage |
@@ -251,8 +401,343 @@ outcome_line() {
   esac
 }
 
-# pick_label DIR CMD0 — default label: "<basename DIR> <basename CMD0>".
-pick_label() { printf '%s %s\n' "${1##*/}" "${2##*/}"; }
+# unwrap_index ARGV... — the index in ARGV of the COMMAND: the first word that
+# is not a timeout/env/nice/ionice/nohup/setsid/stdbuf/time wrapper, its
+# options, or their arguments (timeout's DURATION, env's NAME=VALUE). A wrapper
+# option not in these tables stops the skip at that wrapper, so the wrapper is
+# the COMMAND. An interpreter (ruby, bash, sh, dash, zsh) with only
+# script-running options before a SCRIPT resolves to the SCRIPT, which is the
+# COMMAND whatever it is named (DND-1365). Prints n (one past the end) when
+# wrappers wrap nothing.
+unwrap_index() {
+  local -a v=("$@")
+  local n=${#v[@]} i=0 w b a dd
+  while ((i < n)); do
+    w=$i
+    b=${v[i]##*/}
+    i=$((i + 1))
+    dd=0
+    case $b in
+      timeout)
+        while ((i < n)); do
+          a=${v[i]}
+          case $a in
+            --) i=$((i + 1)); break ;;
+            -s | -k | --signal | --kill-after) i=$((i + 2)) ;;
+            --signal=* | --kill-after=* | --preserve-status | --foreground | -v | --verbose | -s?* | -k?*) i=$((i + 1)) ;;
+            -*) printf '%s\n' "$w"; return ;;
+            *) break ;;
+          esac
+        done
+        ((i < n)) || { printf '%s\n' "$n"; return; }
+        i=$((i + 1)) # DURATION
+        ;;
+      env)
+        # Options, then NAME=VALUE assignments (after `--` or the first
+        # assignment, a word starting with `-` is the COMMAND).
+        while ((i < n)); do
+          a=${v[i]}
+          if ((dd)) || [[ $a != -* ]]; then
+            [[ $a == *=* ]] || break
+            dd=1
+            i=$((i + 1))
+            continue
+          fi
+          case $a in
+            --) dd=1; i=$((i + 1)) ;;
+            -i | -0 | - | -v | --ignore-environment | --null | --debug | --list-signal-handling) i=$((i + 1)) ;;
+            -u | -C | --unset | --chdir) i=$((i + 2)) ;;
+            -u?* | -C?* | --unset=* | --chdir=* | --default-signal | --default-signal=* | --ignore-signal | --ignore-signal=* | --block-signal | --block-signal=*) i=$((i + 1)) ;;
+            -*) printf '%s\n' "$w"; return ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      nice)
+        while ((i < n)); do
+          a=${v[i]}
+          case $a in
+            --) i=$((i + 1)); break ;;
+            -n | --adjustment) i=$((i + 2)) ;;
+            -n?* | --adjustment=* | -[0-9]*) i=$((i + 1)) ;;
+            -*) printf '%s\n' "$w"; return ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      ionice)
+        while ((i < n)); do
+          a=${v[i]}
+          case $a in
+            --) i=$((i + 1)); break ;;
+            -c | -n | --class | --classdata) i=$((i + 2)) ;;
+            -c?* | -n?* | --class=* | --classdata=* | -t | --ignore) i=$((i + 1)) ;;
+            -*) printf '%s\n' "$w"; return ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      nohup)
+        [[ ${v[i]:-} == -- ]] && i=$((i + 1))
+        ;;
+      setsid)
+        while ((i < n)); do
+          a=${v[i]}
+          case $a in
+            --) i=$((i + 1)); break ;;
+            -c | -f | -w | --ctty | --fork | --wait) i=$((i + 1)) ;;
+            -*) printf '%s\n' "$w"; return ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      stdbuf)
+        while ((i < n)); do
+          a=${v[i]}
+          case $a in
+            --) i=$((i + 1)); break ;;
+            -i | -o | -e) i=$((i + 2)) ;;
+            -i?* | -o?* | -e?* | --input=* | --output=* | --error=*) i=$((i + 1)) ;;
+            -*) printf '%s\n' "$w"; return ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      time)
+        while ((i < n)); do
+          a=${v[i]}
+          case $a in
+            --) i=$((i + 1)); break ;;
+            -o | -f | --output | --format) i=$((i + 2)) ;;
+            -p | -a | -v | -q | --portability | --append | --verbose | --quiet | --output=* | --format=*) i=$((i + 1)) ;;
+            -*) printf '%s\n' "$w"; return ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      ruby | ruby[0-9]*)
+        # DND-1365: `ruby [OPTS] SCRIPT` runs SCRIPT, so SCRIPT is the
+        # COMMAND. Only options that still run SCRIPT are skipped; one that
+        # runs other code or none (-e, -n, -p, -c, -S, -x, ...) is unknown
+        # here, so ruby stays the COMMAND.
+        while ((i < n)); do
+          a=${v[i]}
+          case $a in
+            --) i=$((i + 1)); break ;;
+            -I | -r | -E | -C) i=$((i + 2)) ;;
+            -I?* | -r?* | -E?* | -C?* | -w | -W | -W[012] | -W:* | -d | -v | -U | --debug | --verbose | --jit | --yjit | --jit-* | --yjit-* | --disable-* | --disable=* | --enable-* | --enable=* | --encoding=* | --external-encoding=* | --internal-encoding=*) i=$((i + 1)) ;;
+            -*) printf '%s\n' "$w"; return ;;
+            *) break ;;
+          esac
+        done
+        ((i < n)) || { printf '%s\n' "$n"; return; }
+        printf '%s\n' "$i"
+        return
+        ;;
+      bash | sh | dash | zsh)
+        # DND-1365: `bash [OPTS] SCRIPT` runs SCRIPT. Skipped: shell flag
+        # clusters that still run SCRIPT and set -o/+o NAME; for bash only,
+        # shopt -O/+O NAME and its startup-file switches (dash refuses them,
+        # zsh reads -O as a flag). -c, -s, -i, -n, -l, -r (and anything
+        # else) are unknown here, so the shell stays the COMMAND.
+        while ((i < n)); do
+          a=${v[i]}
+          case $b:$a in
+            *:--) i=$((i + 1)); break ;;
+            *:-o | *:+o | bash:-O | bash:+O) i=$((i + 2)) ;;
+            bash:--noprofile | bash:--norc | bash:--posix) i=$((i + 1)) ;;
+            *:[-+]*)
+              [[ $a =~ ^[-+][aefhuvxBCEHPT]+$ ]] || { printf '%s\n' "$w"; return; }
+              i=$((i + 1))
+              ;;
+            *) break ;;
+          esac
+        done
+        ((i < n)) || { printf '%s\n' "$n"; return; }
+        printf '%s\n' "$i"
+        return
+        ;;
+      *)
+        printf '%s\n' "$w"
+        return
+        ;;
+    esac
+  done
+  ((i > n)) && i=$n
+  printf '%s\n' "$i"
+}
+
+# command_word ARGV... — the COMMAND (see unwrap_index), or ARGV[0] when the
+# wrappers wrap nothing.
+command_word() {
+  local i
+  i=$(unwrap_index "$@")
+  if ((i < $#)); then
+    local -a v=("$@")
+    printf '%s\n' "${v[i]}"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+# pick_label DIR ARGV... — default label: "<basename DIR> <basename COMMAND>".
+pick_label() {
+  local dir=$1 cmd
+  shift
+  cmd=$(command_word "$@")
+  printf '%s %s\n' "${dir##*/}" "${cmd##*/}"
+}
+
+# infer_pool ARGV... — model when the COMMAND is a model-in-loop tool, else cpu.
+infer_pool() {
+  local cmd
+  cmd=$(command_word "$@")
+  if [[ $MODEL_COMMANDS == *" ${cmd##*/} "* ]]; then printf 'model\n'; else printf 'cpu\n'; fi
+}
+
+# cpu_budget NPROC — the cpu pool's budget in units (never below 1).
+cpu_budget() {
+  local b=$(($1 * CPU_SLOTTED_NUM * CPU_UNITS_PER_CORE / CPU_SLOTTED_DEN))
+  ((b < 1)) && b=1
+  printf '%s\n' "$b"
+}
+
+# cpu_default_weight BUDGET — an undeclared cpu run's weight (never below 1).
+cpu_default_weight() {
+  local w=$(($1 / CPU_DEFAULT_SHARES))
+  ((w < 1)) && w=1
+  printf '%s\n' "$w"
+}
+
+# gate_jobs NPROC ENV_JOBS ARGV... — the worker count a harness-gate COMMAND in
+# ARGV will use, resolved as harness-gate resolves it: its --jobs, else the
+# HARNESS_GATE_JOBS it will see, else min(max(NPROC/2, 1), 8). What it will
+# see starts as ENV_JOBS (this environment's value) and follows the env
+# wrappers in front of it: NAME=V sets it; -i, -u/--unset HARNESS_GATE_JOBS
+# clear it; empty means unset, as in harness-gate. A value over 6 digits
+# prints 999999 (the caller clamps it to the budget). Prints nothing,
+# returning 1, when the COMMAND is not harness-gate or the value is not a
+# positive integer (harness-gate refuses that itself; the caller falls back).
+# NPROC is the machine's online CPU count; harness-gate counts cores with
+# Etc.nprocessors, which honours CPU affinity, so under taskset this weighs a
+# gate heavier than its workers, never lighter.
+gate_jobs() {
+  local nproc=$1 cur=$2 i j a val="" found=0
+  shift 2
+  local -a v=("$@")
+  i=$(unwrap_index "$@")
+  ((i < ${#v[@]})) && [[ ${v[i]##*/} == harness-gate ]] || return 1
+  for ((j = i + 1; j < ${#v[@]}; j++)); do
+    a=${v[j]}
+    case $a in
+      --jobs) val=${v[j + 1]:-}; found=1; break ;;
+      --jobs=*) val=${a#--jobs=}; found=1; break ;;
+    esac
+  done
+  if ((!found)); then
+    cur=$(wrapped_env HARNESS_GATE_JOBS "$cur" "$@")
+    if [ -n "$cur" ]; then val=$cur; found=1; fi
+  fi
+  if ((!found)); then
+    val=$((nproc / 2))
+    ((val < 1)) && val=1
+    ((val > HARNESS_GATE_MAX_JOBS)) && val=$HARNESS_GATE_MAX_JOBS
+  fi
+  [[ $val =~ ^[1-9][0-9]*$ ]] || return 1
+  ((${#val} > 6)) && val=999999
+  printf '%s\n' "$val"
+}
+
+# wrapped_env NAME CUR ARGV... — the value of environment variable NAME that
+# the COMMAND in ARGV will see. It starts as CUR (this environment's value)
+# and follows the env wrappers in front of the COMMAND: NAME=V sets it; -i,
+# -u/--unset NAME clear it. Prints it; empty means unset.
+wrapped_env() {
+  local name=$1 cur=$2 i j a b wrap=""
+  shift 2
+  local -a v=("$@")
+  i=$(unwrap_index "$@")
+  for ((j = 0; j < i; j++)); do
+    a=${v[j]}
+    b=${a##*/}
+    case $b in
+      # An interpreter's options (bash -u is nounset) are never env's.
+      timeout | env | nice | ionice | nohup | setsid | stdbuf | time | ruby | ruby[0-9]* | bash | sh | dash | zsh) wrap=$b; continue ;;
+    esac
+    [ "$wrap" = env ] || continue
+    case $a in
+      -i | - | --ignore-environment | "-u$name" | "--unset=$name") cur="" ;;
+      -u | --unset) [ "${v[j + 1]:-}" = "$name" ] && cur=""; j=$((j + 1)) ;;
+      "$name"=*) cur=${a#"$name"=} ;;
+    esac
+  done
+  printf '%s\n' "$cur"
+}
+
+# eval_calls ENV_K ARGV... — the model calls an eval COMMAND in ARGV keeps in
+# flight, which is its weight in the model pool (DND-1358). DND-1007 made the
+# evals sample K calls at once; weighing each run 1 let the 8-unit pool admit
+# 8 runs of K calls. Resolved as each eval resolves K (ai/lib/eval_pool.rb):
+#   admiral-eval, critic-eval: with --run, K is --concurrency K, else the
+#     ATHENA_EVAL_CONCURRENCY it will see (ENV_K through the env wrappers,
+#     see wrapped_env; empty is unset), else EvalPool's default. Weight K.
+#   variant-eval: with --corpus full, both sides run at once with K per side:
+#     --concurrency K, else its per-side default (it ignores the env var).
+#     Weight 2K.
+#   block-optimize: runs variant-eval --corpus full at that default. 2K.
+# A K that is not plain digits in EvalPool's range weighs the most an eval can
+# run, EVAL_MAX_CONCURRENCY (per side for variant-eval). The eval parses K
+# with Ruby's Integer(raw, 10), which also takes " 12", "+12" or "1_2", so it
+# may run such a K; or it refuses it and exits 2 before any call. Either way
+# the weight is never below the calls. The scan does not skip a value flag's
+# value: every eval's StrictArgv refuses a value starting with `-`, so a
+# `--run` or `--corpus` word is always the flag itself. Prints nothing, returning 1, when the
+# COMMAND is not one of these or will make no model call (no --run, a
+# deterministic corpus, --self-test, --help); the caller falls back to the
+# pool's default weight. The caller clamps a weight over the budget.
+eval_calls() {
+  local cur=$1 i j a cmd k="" dflt mult=1 model=0
+  shift
+  local -a v=("$@")
+  i=$(unwrap_index "$@")
+  ((i < ${#v[@]})) || return 1
+  cmd=${v[i]##*/}
+  for ((j = i + 1; j < ${#v[@]}; j++)); do
+    a=${v[j]}
+    case $a in
+      --help | -h | --self-test) return 1 ;;
+      --run) model=1 ;;
+      --concurrency) k=${v[j + 1]:-} ;;
+      --corpus) [ "${v[j + 1]:-}" = full ] && model=1 ;;
+    esac
+  done
+  case $cmd in
+    admiral-eval | critic-eval)
+      ((model)) || return 1
+      dflt=$EVAL_DEFAULT_CONCURRENCY
+      [ -n "$k" ] || k=$(wrapped_env "$EVAL_ENV" "$cur" "$@")
+      ;;
+    variant-eval)
+      ((model)) || return 1
+      dflt=$VARIANT_SIDE_CONCURRENCY
+      mult=2
+      ;;
+    block-optimize)
+      dflt=$VARIANT_SIDE_CONCURRENCY
+      k=""
+      mult=2
+      ;;
+    *) return 1 ;;
+  esac
+  if [ -z "$k" ]; then
+    k=$dflt
+  elif [[ $k =~ ^[0-9]{1,6}$ ]] && ((10#$k >= 1 && 10#$k <= EVAL_MAX_CONCURRENCY)); then
+    k=$((10#$k))
+  else
+    k=$EVAL_MAX_CONCURRENCY
+  fi
+  printf '%s\n' "$((k * mult))"
+}
 
 # json_str S — S as a JSON string literal (quotes included).
 json_str() {
@@ -271,12 +756,27 @@ json_str() {
 # one_line S — S with newlines/tabs flattened, for a human-readable line.
 one_line() { local s=${1//$'\n'/ }; printf '%s' "${s//$'\t'/ }"; }
 
-# format_holder_line SLOT LABEL CWD SINCE PID EXCLUSIVE
+# compact_units "3 4 5 9" — "3-5,9" (the units one run holds, ascending).
+compact_units() {
+  local out="" start="" prev="" u
+  for u in $1; do
+    if [ -n "$prev" ] && ((u == prev + 1)); then prev=$u; continue; fi
+    [ -n "$start" ] && out+="${out:+,}$start$([ "$prev" != "$start" ] && printf -- '-%s' "$prev")"
+    start=$u
+    prev=$u
+  done
+  [ -n "$start" ] && out+="${out:+,}$start$([ "$prev" != "$start" ] && printf -- '-%s' "$prev")"
+  printf '%s\n' "$out"
+}
+
+# format_holder_line UNITS LABEL CWD SINCE PID EXCLUSIVE WEIGHT — one line per
+# run; UNITS is the space-separated list of units it holds.
 format_holder_line() {
-  local excl=""
+  local excl="" n
   [ "$6" = true ] && excl=" EXCLUSIVE"
-  printf 'slot %s: %s in %s since %s (pid %s, diagnostic)%s\n' \
-    "$1" "$(one_line "$2")" "$(one_line "$3")" "$4" "$5" "$excl"
+  n=$(wc -w <<<"$1")
+  printf 'units %s (%s of weight %s): %s in %s since %s (pid %s, diagnostic)%s\n' \
+    "$(compact_units "$1")" "$n" "$7" "$(one_line "$2")" "$(one_line "$3")" "$4" "$5" "$excl"
 }
 
 # fmt_ms MS — milliseconds as seconds with 3 decimals.
@@ -386,24 +886,50 @@ default_pool_dir() {
   printf '%s/athena/test-slots\n' "$base"
 }
 
-# resolve_pool — sets POOL, N, HEARTBEAT_S from defaults and the seams.
+# read_nproc — sets NPROC to the online CPU count, or refuses (exit 2): the
+# cpu budget is derived from it, and a count it cannot read is never a guess.
+read_nproc() {
+  NPROC=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || NPROC=""
+  [[ $NPROC =~ ^[1-9][0-9]*$ ]] || NPROC=$(nproc 2>/dev/null) || NPROC=""
+  [[ $NPROC =~ ^[1-9][0-9]*$ ]] || die_usage \
+    "cannot read the online CPU count (getconf _NPROCESSORS_ONLN and nproc both failed); the cpu budget is derived from it." \
+    "run test-slot where getconf or nproc (coreutils) works; it never guesses the budget."
+}
+
+# seam_count VAR — the value of self-test seam VAR as a count 1..64, or exit 2.
+seam_count() {
+  parse_n "${!1}" || die_usage "$1='${!1}' is not a unit count." \
+    "set $1 to an integer 1..64, or unset it (it is a self-test seam; an invalid value never falls back)."
+}
+
+# resolve_pool — sets POOL_ROOT (the cpu pool dir), POOL (the dir of pool
+# POOL_KIND), N (its budget in units), N_BASIS, DEFAULT_WEIGHT, NPROC and
+# HEARTBEAT_S and PARENT_CHECK_S from the defaults and the seams.
 resolve_pool() {
-  local def seam
+  local def seam v
   def=$(canon "$(default_pool_dir)")
-  POOL=$def
-  N=$TEST_SLOT_N
-  N_BASIS=$TEST_SLOT_N_BASIS
+  POOL_ROOT=$def
+  read_nproc
   HEARTBEAT_S=$DEFAULT_HEARTBEAT_S
+  PARENT_CHECK_S=$DEFAULT_PARENT_CHECK_S
   seam=${ATHENA_TEST_SLOT_DIR:-}
   if [ -n "$seam" ]; then
-    POOL=$(canon "$seam")
+    POOL_ROOT=$(canon "$seam")
   fi
-  if [ -n "$seam" ] && [ "$POOL" != "$def" ]; then
+  local cpu_n cpu_basis=$CPU_BUDGET_BASIS cpu_w model_n=$MODEL_BUDGET model_basis=$MODEL_BUDGET_BASIS
+  cpu_n=$(cpu_budget "$NPROC")
+  cpu_w=""
+  if [ -n "$seam" ] && [ "$POOL_ROOT" != "$def" ]; then
     if [ -n "${ATHENA_TEST_SLOTS+x}" ]; then
-      N=$(parse_n "$ATHENA_TEST_SLOTS") || die_usage \
-        "ATHENA_TEST_SLOTS='$ATHENA_TEST_SLOTS' is not a slot count." \
-        "set ATHENA_TEST_SLOTS to an integer 1..64, or unset it (it is a self-test seam; an invalid value never falls back)."
-      N_BASIS="test seam"
+      cpu_n=$(seam_count ATHENA_TEST_SLOTS) || exit "$EXIT_USAGE"
+      cpu_basis="test seam"
+    fi
+    if [ -n "${ATHENA_TEST_SLOT_DEFAULT_WEIGHT+x}" ]; then
+      cpu_w=$(seam_count ATHENA_TEST_SLOT_DEFAULT_WEIGHT) || exit "$EXIT_USAGE"
+    fi
+    if [ -n "${ATHENA_TEST_MODEL_SLOTS+x}" ]; then
+      model_n=$(seam_count ATHENA_TEST_MODEL_SLOTS) || exit "$EXIT_USAGE"
+      model_basis="test seam"
     fi
     if [ -n "${ATHENA_TEST_SLOT_HEARTBEAT+x}" ]; then
       is_pos_int "$ATHENA_TEST_SLOT_HEARTBEAT" || die_usage \
@@ -411,8 +937,31 @@ resolve_pool() {
         "set it to whole seconds, or unset it (it is a self-test seam)."
       HEARTBEAT_S=$ATHENA_TEST_SLOT_HEARTBEAT
     fi
-  elif [ -n "${ATHENA_TEST_SLOTS+x}" ] || [ -n "${ATHENA_TEST_SLOT_HEARTBEAT+x}" ]; then
-    say "WARN ignoring ATHENA_TEST_SLOTS/ATHENA_TEST_SLOT_HEARTBEAT: they apply only with ATHENA_TEST_SLOT_DIR set to a non-default pool; the real pool uses N=$N."
+    # DND-1356: a self-test raises it (with the heartbeat) so that only a
+    # signal can end a blocked wait, and asserts on that event, not a clock.
+    if [ -n "${ATHENA_TEST_SLOT_PARENT_CHECK+x}" ]; then
+      is_pos_int "$ATHENA_TEST_SLOT_PARENT_CHECK" || die_usage \
+        "ATHENA_TEST_SLOT_PARENT_CHECK='$ATHENA_TEST_SLOT_PARENT_CHECK' is not a positive integer." \
+        "set it to whole seconds, or unset it (it is a self-test seam)."
+      PARENT_CHECK_S=$ATHENA_TEST_SLOT_PARENT_CHECK
+    fi
+  else
+    for v in ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK; do
+      [ -n "${!v+x}" ] || continue
+      say "WARN ignoring $v: the test seams apply only with ATHENA_TEST_SLOT_DIR set to a non-default pool; the real pools use their measured budgets."
+    done
+  fi
+  [ -n "$cpu_w" ] || cpu_w=$(cpu_default_weight "$cpu_n")
+  if [ "$POOL_KIND" = model ]; then
+    POOL="$POOL_ROOT/model"
+    N=$model_n
+    N_BASIS=$model_basis
+    DEFAULT_WEIGHT=$MODEL_DEFAULT_WEIGHT
+  else
+    POOL=$POOL_ROOT
+    N=$cpu_n
+    N_BASIS=$cpu_basis
+    DEFAULT_WEIGHT=$cpu_w
   fi
 }
 
@@ -432,16 +981,26 @@ refuse_pool() { # refuse_pool DIR PROBLEM
     "make it a real directory owned by you with mode 0700: \`chmod 700 '$1'\` (or remove it if it is not yours to use), then re-run."
 }
 
-ensure_pool() {
-  local problem sub
-  if [ ! -e "$POOL" ] && [ ! -L "$POOL" ]; then
-    mkdir -p -- "$(dirname -- "$POOL")" 2>/dev/null
-    mkdir -m 0700 -- "$POOL" 2>/dev/null || [ -d "$POOL" ] || die_usage \
-      "cannot create slot pool $POOL." \
+# ensure_pool_dir DIR — create DIR 0700 if absent, then refuse it unless it
+# is a real directory of ours with mode 0700.
+ensure_pool_dir() {
+  local problem
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+    mkdir -p -- "$(dirname -- "$1")" 2>/dev/null
+    mkdir -m 0700 -- "$1" 2>/dev/null || [ -d "$1" ] || die_usage \
+      "cannot create slot pool $1." \
       "make its parent directory writable by you, or point XDG_STATE_HOME at a writable state dir."
   fi
-  problem=$(pool_problem "$POOL")
-  [ -z "$problem" ] || refuse_pool "$POOL" "$problem"
+  problem=$(pool_problem "$1")
+  [ -z "$problem" ] || refuse_pool "$1" "$problem"
+}
+
+ensure_pool() {
+  local sub
+  # The model pool lives inside the cpu pool dir, so the cpu dir is made
+  # (0700) first: `mkdir -p` would leave it at the umask's mode.
+  ensure_pool_dir "$POOL_ROOT"
+  [ "$POOL" = "$POOL_ROOT" ] || ensure_pool_dir "$POOL"
   sub="$POOL/waiters"
   if [ ! -d "$sub" ]; then
     mkdir -m 0700 -- "$sub" 2>/dev/null || [ -d "$sub" ] || die_usage \
@@ -478,41 +1037,60 @@ try_slot() {
   return 1
 }
 
-# try_acquire — normal: take any one free slot (sets SLOT). Exclusive: take
-# every free slot not yet ours; succeed once all N are ours.
+# try_acquire — take free units, highest first, until this run holds WEIGHT
+# of them (all N for --exclusive); units taken on an earlier poll are kept.
+# Succeeds (setting SLOT to the lowest unit held) once it holds WEIGHT.
 try_acquire() {
-  local i
-  if ((EXCLUSIVE)); then
-    for ((i = 1; i <= N; i++)); do
-      [ -n "${SLOT_FD[$i]:-}" ] || try_slot "$i" || true
-    done
-    ((${#SLOT_FD[@]} == N)) && SLOT=1 && return 0
-    return 1
-  fi
-  for ((i = 1; i <= N; i++)); do
-    if try_slot "$i"; then SLOT=$i; return 0; fi
+  local i u
+  for ((i = N; i >= 1 && ${#SLOT_FD[@]} < WEIGHT; i--)); do
+    [ -n "${SLOT_FD[$i]:-}" ] || try_slot "$i" || true
   done
-  return 1
+  ((${#SLOT_FD[@]} >= WEIGHT)) || return 1
+  SLOT=""
+  for u in "${!SLOT_FD[@]}"; do
+    if [ -z "$SLOT" ] || ((u < SLOT)); then SLOT=$u; fi
+  done
+  return 0
 }
 
+HOLD_SINCE=""
 write_holder() {
   local i=$1 f="$POOL/slot-$1.holder" excl=false
   ((EXCLUSIVE)) && excl=true
-  if printf '{"label":%s,"cwd":%s,"pid":%s,"started_at":"%s","exclusive":%s}\n' \
-    "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$(iso_now)" "$excl" >"$f.$$.tmp" 2>/dev/null; then
+  [ -n "$HOLD_SINCE" ] || HOLD_SINCE=$(iso_now)
+  if printf '{"label":%s,"cwd":%s,"pid":%s,"started_at":"%s","exclusive":%s,"pool":"%s","weight":%s,"sha":%s,"tree":%s}\n' \
+    "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$HOLD_SINCE" "$excl" "$POOL_KIND" "$WEIGHT" \
+    "$(json_or_null "$GATE_SHA")" "$(json_or_null "$GATE_TREE")" >"$f.$$.tmp" 2>/dev/null; then
     mv -f -- "$f.$$.tmp" "$f" 2>/dev/null || rm -f -- "$f.$$.tmp"
   fi
+}
+
+# json_or_null S — S as a JSON string, or null when S is empty.
+json_or_null() { if [ -n "$1" ]; then json_str "$1"; else printf 'null'; fi; }
+
+# read_gate_ref — sets GATE_SHA and GATE_TREE to the git HEAD and top level of
+# the cwd (empty outside a work tree, recorded as null), so an event names what
+# was gated (DND-1006).
+read_gate_ref() {
+  GATE_TREE=$(git rev-parse --show-toplevel 2>/dev/null) || GATE_TREE=""
+  GATE_SHA=""
+  [ -n "$GATE_TREE" ] && { GATE_SHA=$(git rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null) || GATE_SHA=""; }
+  return 0
 }
 
 # append_event EVENT SLOT WAITED_MS RAN_MS EXIT — one line to events.jsonl,
 # rotating past EVENTS_MAX_BYTES. A logging failure warns; it never changes
 # whether or how CMD runs.
 append_event() {
-  local fd size line excl=false
+  local fd size line excl=false weight=$WEIGHT
   ((EXCLUSIVE)) && excl=true
-  line=$(printf '{"ts":"%s","event":"%s","slot":%s,"label":%s,"cwd":%s,"pid":%s,"exclusive":%s,"waited_s":%s,"ran_s":%s,"exit":%s}' \
+  # A re-entrant run takes no units: weight 0, so summing weights over events
+  # never counts the outer run twice.
+  [ "$1" = reentrant ] && weight=0
+  line=$(printf '{"ts":"%s","event":"%s","slot":%s,"label":%s,"cwd":%s,"pid":%s,"exclusive":%s,"waited_s":%s,"ran_s":%s,"exit":%s,"pool":"%s","weight":%s,"sha":%s,"tree":%s}' \
     "$(iso_now)" "$1" "${2:-null}" "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$excl" \
-    "${3:+$(fmt_ms "$3")}" "${4:+$(fmt_ms "$4")}" "${5:-null}")
+    "${3:+$(fmt_ms "$3")}" "${4:+$(fmt_ms "$4")}" "${5:-null}" \
+    "$POOL_KIND" "$weight" "$(json_or_null "$GATE_SHA")" "$(json_or_null "$GATE_TREE")")
   line=${line//\"waited_s\":,/\"waited_s\":null,}
   line=${line//\"ran_s\":,/\"ran_s\":null,}
   if ! { exec {fd}>>"$POOL/events.lock"; } 2>/dev/null; then
@@ -533,21 +1111,30 @@ append_event() {
   exec {fd}>&-
 }
 
-# holder_lines — one human line per HELD slot (lock actually held).
+# holder_lines — one human line per RUN holding units (a unit counts only
+# while its lock is actually held), grouped by the holder's pid. A pre-DND-1006
+# holder (no weight) shows weight 1; an unreadable holder file is named.
 holder_lines() {
-  local i f fields
+  local i f fields key label cwd since pid excl weight
+  local -A units=() row=()
+  local -a order=()
   for ((i = 1; i <= N; i++)); do
     lock_held "$POOL/slot-$i.lock" || continue
     f="$POOL/slot-$i.holder"
     if command -v jq >/dev/null 2>&1 &&
-      fields=$(jq -r '[.label, .cwd, .started_at, (.pid|tostring), (.exclusive|tostring)] | @tsv' "$f" 2>/dev/null) &&
+      fields=$(jq -r '[.label, .cwd, .started_at, (.pid|tostring), (.exclusive|tostring), ((.weight // 1)|tostring)] | @tsv' "$f" 2>/dev/null) &&
       [ -n "$fields" ]; then
-      local label cwd since pid excl
-      IFS=$'\t' read -r label cwd since pid excl <<<"$fields"
-      format_holder_line "$i" "$label" "$cwd" "$since" "$pid" "$excl"
+      IFS=$'\t' read -r label cwd since pid excl weight <<<"$fields"
+      key="pid:$pid"
+      [ -n "${row[$key]+x}" ] || { order+=("$key"); row[$key]="$label"$'\t'"$cwd"$'\t'"$since"$'\t'"$pid"$'\t'"$excl"$'\t'"$weight"; }
+      units[$key]="${units[$key]:+${units[$key]} }$i"
     else
-      printf 'slot %s: held (holder diagnostics unreadable at %s)\n' "$i" "$f"
+      printf 'unit %s: held (holder diagnostics unreadable at %s)\n' "$i" "$f"
     fi
+  done
+  for key in "${order[@]}"; do
+    IFS=$'\t' read -r label cwd since pid excl weight <<<"${row[$key]}"
+    format_holder_line "${units[$key]}" "$label" "$cwd" "$since" "$pid" "$excl" "$weight"
   done
 }
 
@@ -679,8 +1266,8 @@ enqueue() {
     die_usage "cannot register in the queue at $POOL/waiters." \
       "check disk space and that $POOL/waiters is yours with mode 0700; test-slot never runs a command out of queue order."
   fi
-  printf '{"label":%s,"cwd":%s,"pid":%s,"since":"%s","ticket":%s}\n' \
-    "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$(iso_now)" "$TICKET" >&"$WAITER_FD"
+  printf '{"label":%s,"cwd":%s,"pid":%s,"since":"%s","ticket":%s,"weight":%s}\n' \
+    "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$(iso_now)" "$TICKET" "$WEIGHT" >&"$WAITER_FD"
   mv -f -- "$tmp" "$final" || {
     rm -f -- "$tmp"
     die_usage "cannot publish $final." "check that $POOL/waiters is writable."
@@ -714,10 +1301,11 @@ announce_waiting() {
   waiting=$(live_waiters | wc -l)
   pos=$(position_text)
   {
-    printf '%s: WAITING for a slot -- pool %s, N=%s, %s held:\n' "$PROG" "$POOL" "$N" "$held"
+    printf '%s: WAITING for %s unit(s) -- %s pool %s, budget=%s, %s held:\n' \
+      "$PROG" "$WEIGHT" "$POOL_KIND" "$POOL" "$N" "$held"
     [ -n "$lines" ] && printf '%s\n' "$lines" | sed 's/^/  /'
-    printf '  %s waiting (this run: %s%s)\n' "$waiting" "$(one_line "$LABEL")" "${pos:+, $pos}"
-    ((EXCLUSIVE)) && printf '  this run is --exclusive: it needs all %s slots\n' "$N"
+    printf '  %s waiting (this run: %s, weight %s%s)\n' "$waiting" "$(one_line "$LABEL")" "$WEIGHT" "${pos:+, $pos}"
+    ((EXCLUSIVE)) && printf '  this run is --exclusive (bench only): it needs all %s units\n' "$N"
   } >&2
   append_event waiting "" "$(($(now_ms) - START_MS))" "" ""
 }
@@ -727,7 +1315,7 @@ maybe_heartbeat() {
   (($(now_ms) - LAST_HB >= HEARTBEAT_S * 1000)) || return 0
   local waited_s=$((($(now_ms) - START_MS) / 1000)) pos
   pos=$(position_text)
-  say "still waiting ${waited_s}s for a slot; ${pos:+$pos; }$(held_count) of $N held (pool $POOL)"
+  say "still waiting ${waited_s}s for ${WEIGHT} unit(s); ${pos:+$pos; }$(held_count) of $N held (pool $POOL)"
   LAST_HB=$(now_ms)
 }
 
@@ -795,8 +1383,8 @@ timeout_exit() {
   local waited_ms=$(($(now_ms) - START_MS)) lines
   lines=$(holder_lines)
   {
-    printf '%s: TIMEOUT after %ss waiting for a slot (pool %s, N=%s); the command did NOT run.\n' \
-      "$PROG" "$((waited_ms / 1000))" "$POOL" "$N"
+    printf '%s: TIMEOUT after %ss waiting for %s unit(s) (pool %s, budget=%s); the command did NOT run.\n' \
+      "$PROG" "$((waited_ms / 1000))" "$WEIGHT" "$POOL" "$N"
     printf 'Fix: the pool stayed full for %ss. Holders:\n' "$((waited_ms / 1000))"
     [ -n "$lines" ] && printf '%s\n' "$lines" | sed 's/^/  /'
     printf '  If a holder above is wedged, stop that process; otherwise re-run later or pass a longer --wait-timeout. Never bypass the pool.\n'
@@ -880,7 +1468,7 @@ wait_turn() {
   done
 }
 
-# acquire — take a slot (or all N with --exclusive), in arrival order.
+# acquire — take WEIGHT units (all N with --exclusive), in arrival order.
 acquire() {
   local qfd rem nap next_hb
   check_parent startup
@@ -914,9 +1502,18 @@ acquire() {
   unregister_waiter
 }
 
-# reentrant_slot — 0 when ATHENA_TEST_SLOT_HELD names a held slot of THIS pool.
+# held_var — the environment variable that marks a held unit of this pool
+# kind: one per pool (DND-1006), so a model run nested in a cpu run (or the
+# reverse) never hides the outer run's marker from a run nested deeper.
+held_var() {
+  if [ "$POOL_KIND" = model ]; then printf 'ATHENA_TEST_SLOT_HELD_MODEL\n'; else printf 'ATHENA_TEST_SLOT_HELD\n'; fi
+}
+
+# reentrant_slot — 0 when this pool's held_var names a held unit of THIS pool.
 reentrant_slot() {
-  local held=${ATHENA_TEST_SLOT_HELD:-} hpool hslot
+  local var held hpool hslot
+  var=$(held_var)
+  held=${!var:-}
   [ -n "$held" ] || return 1
   hpool=${held%:*}
   hslot=${held##*:}
@@ -925,7 +1522,7 @@ reentrant_slot() {
     SLOT=$hslot
     return 0
   fi
-  say "WARN stale ATHENA_TEST_SLOT_HELD=$held (that slot is not held); taking a slot normally."
+  say "WARN stale $var=$held (that slot is not held); taking a slot normally."
   return 1
 }
 
@@ -1032,7 +1629,7 @@ scan_unslotted() { # prints "pid<TAB>state<TAB>cwd<TAB>cmd", state unslotted|unk
 }
 
 status() {
-  local initialised=true problem held=0 waiting=0 load1 nproc lines unslotted wfiles
+  local initialised=true problem held=0 waiting=0 load1 lines unslotted="" wfiles
   local -a holders_json=() waiters_json=() uns_json=()
   if [ ! -e "$POOL" ] && [ ! -L "$POOL" ]; then
     initialised=false
@@ -1041,10 +1638,8 @@ status() {
     [ -z "$problem" ] || refuse_pool "$POOL" "$problem"
   fi
   load1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo unknown)
-  nproc=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)
-  unslotted=$(scan_unslotted)
-  local provisional=false
-  [[ $TEST_SLOT_N_BASIS == provisional* ]] && provisional=true
+  # Heavy runs that bypass the pool are CPU runs: the scan is the cpu pool's.
+  [ "$POOL_KIND" = cpu ] && unslotted=$(scan_unslotted)
 
   if [ "$initialised" = true ]; then
     held=$(held_count)
@@ -1057,16 +1652,32 @@ status() {
     [ -n "$_p" ] || continue
     if [ "$_st" = container ]; then ccount=$((ccount + 1)); else ucount=$((ucount + 1)); fi
   done <<<"$unslotted"
+  if [ "$POOL_KIND" != cpu ]; then ucount=null; ccount=null; fi
 
   if ((JSON)); then
-    local i f w pid st cwd cmd
+    local i f w pid st cwd cmd per_unit=""
     if [ "$initialised" = true ]; then
+      # One entry per RUN: its holder file plus the units it holds.
       for ((i = 1; i <= N; i++)); do
         lock_held "$POOL/slot-$i.lock" || continue
         f="$POOL/slot-$i.holder"
-        holders_json+=("$(jq -c --argjson s "$i" '. + {slot: $s}' "$f" 2>/dev/null ||
-          printf '{"slot":%s,"label":null,"diagnostics":"unreadable"}' "$i")")
+        per_unit+="$(jq -c --argjson s "$i" '. + {slot: $s}' "$f" 2>/dev/null ||
+          printf '{"slot":%s,"label":null,"pid":null,"diagnostics":"unreadable"}' "$i")"$'\n'
       done
+      if [ -n "$per_unit" ]; then
+        # "slot" stays (the run's lowest unit) for pre-DND-1006 readers.
+        local grouped
+        if grouped=$(jq -c -s \
+          'group_by(if .pid == null then "unit:\(.slot)" else "pid:\(.pid)" end)
+           | map(.[0] + {units: map(.slot), weight: (.[0].weight // 1)} | .slot = .units[0])
+           | sort_by(.units[0]) | .[]' <<<"$per_unit") && [ -n "$grouped" ]; then
+          mapfile -t holders_json <<<"$grouped"
+        else
+          # Grouping failed: list every held unit ungrouped rather than none,
+          # so a held pool never reads as an empty one.
+          mapfile -t holders_json <<<"${per_unit%$'\n'}"
+        fi
+      fi
       local wpos jpos
       while IFS=$'\t' read -r wpos w; do
         [ -n "$w" ] || continue
@@ -1081,27 +1692,30 @@ status() {
       uns_json+=("$(printf '{"pid":%s,"environ":"%s","cwd":%s,"cmd":%s}' "$pid" "$st" "$(json_str "$cwd")" "$(json_str "$cmd")")")
     done <<<"$unslotted"
     local IFS=,
-    printf '{"initialised":%s,"pool":%s,"n":%s,"n_basis":%s,"provisional":%s,"held":%s,"waiting":%s,"unslotted":%s,"in_container":%s,"load1":%s,"nproc":%s,"holders":[%s],"waiters":[%s],"unslotted_runs":[%s]}\n' \
-      "$initialised" "$(json_str "$POOL")" "$N" "$(json_str "$N_BASIS")" "$provisional" \
-      "$held" "$waiting" "$ucount" "$ccount" "$(json_str "$load1")" "$(json_str "$nproc")" \
+    printf '{"initialised":%s,"kind":"%s","pool":%s,"n":%s,"budget":%s,"n_basis":%s,"provisional":false,"default_weight":%s,"held":%s,"waiting":%s,"unslotted":%s,"in_container":%s,"load1":%s,"nproc":%s,"holders":[%s],"waiters":[%s],"unslotted_runs":[%s]}\n' \
+      "$initialised" "$POOL_KIND" "$(json_str "$POOL")" "$N" "$N" "$(json_str "$N_BASIS")" "$DEFAULT_WEIGHT" \
+      "$held" "$waiting" "$ucount" "$ccount" "$(json_str "$load1")" "$(json_str "$NPROC")" \
       "${holders_json[*]}" "${waiters_json[*]}" "${uns_json[*]}"
     return 0
   fi
 
+  local head ucol=""
+  head=$(printf '%s pool: budget=%s units (%s) default_weight=%s' "$POOL_KIND" "$N" "$N_BASIS" "$DEFAULT_WEIGHT")
+  [ "$POOL_KIND" = cpu ] && ucol=" unslotted=$ucount in_container=$ccount"
   if [ "$initialised" = false ]; then
-    printf 'N=%s (%s) pool not initialised at %s unslotted=%s in_container=%s load1=%s nproc=%s\n' \
-      "$N" "$N_BASIS" "$POOL" "$ucount" "$ccount" "$load1" "$nproc"
+    printf '%s pool not initialised at %s%s load1=%s nproc=%s\n' \
+      "$head" "$POOL" "$ucol" "$load1" "$NPROC"
   else
-    printf 'N=%s (%s) held=%s waiting=%s unslotted=%s in_container=%s load1=%s nproc=%s pool=%s\n' \
-      "$N" "$N_BASIS" "$held" "$waiting" "$ucount" "$ccount" "$load1" "$nproc" "$POOL"
+    printf '%s held=%s waiting=%s%s load1=%s nproc=%s pool=%s\n' \
+      "$head" "$held" "$waiting" "$ucol" "$load1" "$NPROC" "$POOL"
     [ -n "$lines" ] && printf '%s\n' "$lines"
-    local w wpos tag label wcwd since wpid
+    local w wpos tag label wcwd since wpid wweight
     while IFS=$'\t' read -r wpos w; do
       [ -n "$w" ] || continue
       if [ "$wpos" = - ]; then tag="WAITING (pre-DND-823 waiter, unordered)"; else tag="WAITING #$wpos"; fi
-      if IFS=$'\t' read -r label wcwd since wpid < <(jq -r '[.label, .cwd, .since, (.pid|tostring)] | @tsv' "$w" 2>/dev/null) &&
+      if IFS=$'\t' read -r label wcwd since wpid wweight < <(jq -r '[.label, .cwd, .since, (.pid|tostring), ((.weight // "?")|tostring)] | @tsv' "$w" 2>/dev/null) &&
         [ -n "$label" ]; then
-        printf '%s: %s in %s since %s (pid %s, diagnostic)\n' "$tag" "$(one_line "$label")" "$wcwd" "$since" "$wpid"
+        printf '%s: %s (weight %s) in %s since %s (pid %s, diagnostic)\n' "$tag" "$(one_line "$label")" "$wweight" "$wcwd" "$since" "$wpid"
       else
         printf '%s: (waiter diagnostics unreadable at %s)\n' "$tag" "$w"
       fi
@@ -1131,7 +1745,9 @@ main() {
   EXCLUSIVE=0
   JSON=0
   CMD=()
-  local wait_raw=""
+  GATE_SHA=""
+  GATE_TREE=""
+  local wait_raw="" weight_raw="" pool_raw=""
   # DND-813: a flag given twice (in either spelling) is refused rather than
   # silently keeping the second, and a value flag's value may not be the next
   # flag (`--label --exclusive -- CMD` used to label the run "--exclusive" and
@@ -1147,27 +1763,35 @@ main() {
     esac
     case $1 in
       -h | --help) usage; exit 0 ;;
-      --self-test | --status)
-        [ "$mode" = run ] || die_usage "--self-test and --status are two modes." "pass one of them."
-        [ "$1" = --self-test ] && mode=selftest || mode=status
+      --self-test | --status | --weight-of)
+        [ "$mode" = run ] || die_usage "two modes given: --self-test, --status and --weight-of are separate modes." "pass one of them."
+        case $1 in
+          --self-test) mode=selftest ;;
+          --status) mode=status ;;
+          --weight-of) mode=weightof ;;
+        esac
         ;;
       --json) JSON=1 ;;
       --exclusive) EXCLUSIVE=1 ;;
-      --label | --wait-timeout | --outcome-file)
+      --label | --wait-timeout | --outcome-file | --weight | --pool)
         { (($# >= 2)) && [ -n "$2" ] && [ "${2#-}" = "$2" ]; } || die_usage "$1 needs a value." "pass $1 VALUE before \`--\`."
         case $1 in
           --label) LABEL=$2 ;;
           --wait-timeout) wait_raw=$2 ;;
           --outcome-file) OUTCOME_FILE=$2 ;;
+          --weight) weight_raw=$2 ;;
+          --pool) pool_raw=$2 ;;
         esac
         shift
         ;;
-      --label=* | --wait-timeout=* | --outcome-file=*)
+      --label=* | --wait-timeout=* | --outcome-file=* | --weight=* | --pool=*)
         [ -n "${1#*=}" ] || die_usage "$flag needs a value." "pass $flag=VALUE (non-empty) before \`--\`."
         case $1 in
           --label=*) LABEL=${1#*=} ;;
           --wait-timeout=*) wait_raw=${1#*=} ;;
           --outcome-file=*) OUTCOME_FILE=${1#*=} ;;
+          --weight=*) weight_raw=${1#*=} ;;
+          --pool=*) pool_raw=${1#*=} ;;
         esac
         ;;
       --) shift; have_dd=1; CMD=("$@"); break ;;
@@ -1177,6 +1801,12 @@ main() {
     shift
   done
 
+  # --weight-of runs nothing, so it has no outcome to record, and it must not
+  # remove a file some real run owns.
+  if [ "$mode" = weightof ] && [ -n "$OUTCOME_FILE" ]; then
+    die_usage "--weight-of runs nothing, so --outcome-file does not apply to it." \
+      "drop --outcome-file: --weight-of only prints the weight \`test-slot -- CMD\` would take."
+  fi
   # A stale outcome file must never survive to be read as this run's result.
   if [ -n "$OUTCOME_FILE" ]; then
     rm -f -- "$OUTCOME_FILE" 2>/dev/null
@@ -1184,6 +1814,12 @@ main() {
       "--outcome-file $OUTCOME_FILE: its directory is missing or not writable." \
       "pass a path in an existing directory you own (namespace it per unit of work)."
   fi
+
+  case $pool_raw in
+    "" | cpu | model) ;;
+    *) die_usage "--pool '$pool_raw' is not a pool." \
+      "pass --pool cpu (heavy CPU runs: gates, suites) or --pool model (model-in-loop evals, critic-review)." ;;
+  esac
 
   case $mode in
     selftest)
@@ -1193,8 +1829,24 @@ main() {
       exec "$suite"
       ;;
     status)
-      resolve_pool
-      status
+      # With no --pool, both pools: a run queued for the model pool (a
+      # critic-review, an eval) must show wherever the cpu pool's runs do.
+      # JSON keeps the cpu pool at the top level and nests the model pool.
+      if [ -n "$pool_raw" ]; then
+        POOL_KIND=$pool_raw
+        resolve_pool
+        status
+      elif ((JSON)); then
+        local cpu_json model_json
+        POOL_KIND=cpu; resolve_pool; cpu_json=$(status) || exit $?
+        POOL_KIND=model; resolve_pool; model_json=$(status) || exit $?
+        jq -c --argjson m "$model_json" '. + {model: $m}' <<<"$cpu_json" || die_usage \
+          "could not merge the two pools' --status --json documents." \
+          "check jq works, or read each pool with --status --pool cpu --json and --status --pool model --json."
+      else
+        POOL_KIND=cpu; resolve_pool; status
+        POOL_KIND=model; resolve_pool; status
+      fi
       exit 0
       ;;
   esac
@@ -1207,13 +1859,52 @@ main() {
   ((have_dd)) || die_usage "no \`--\` before the command." \
     "write: test-slot [flags] -- CMD ARGS (the \`--\` is required)."
   ((${#CMD[@]})) || die_usage "no command after \`--\`." "write: test-slot [flags] -- CMD ARGS."
-  if [ -z "$LABEL" ]; then
-    local top
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=$PWD
-    LABEL=$(pick_label "$top" "${CMD[0]}")
+  read_gate_ref
+  [ -n "$LABEL" ] || LABEL=$(pick_label "${GATE_TREE:-$PWD}" "${CMD[@]}")
+
+  # The pool: --pool, else by the COMMAND. --exclusive is the bench's
+  # machine-wide mutex over the CPU budget only (DND-1006).
+  POOL_KIND=${pool_raw:-$(infer_pool "${CMD[@]}")}
+  if ((EXCLUSIVE)); then
+    [ -z "$weight_raw" ] || die_usage "--exclusive holds the whole budget; --weight does not apply to it." \
+      "drop --weight (or drop --exclusive, which is for the DND-489 bench only)."
+    [ "$POOL_KIND" = cpu ] || die_usage "--exclusive applies only to the cpu pool (it quiesces CPU load for the DND-489 bench); this run is in the $POOL_KIND pool." \
+      "drop --exclusive: no gate, eval or critic run takes it. For a bench run, pass --pool cpu."
   fi
 
   resolve_pool
+
+  # The weight: --weight, else a harness-gate's worker count (cpu) or an
+  # eval's model calls in flight (model, DND-1358), else the pool's
+  # default. --exclusive holds the whole budget.
+  if ((EXCLUSIVE)); then
+    WEIGHT=$N
+  elif [ -n "$weight_raw" ]; then
+    [[ $weight_raw =~ ^[1-9][0-9]*$ ]] && ((${#weight_raw} <= 6)) && ((weight_raw <= N)) || die_usage \
+      "--weight '$weight_raw' is not a unit count 1..$N (the $POOL_KIND pool's budget); a larger run could never start." \
+      "pass --weight 1..$N: the workers (cpu) or model calls in flight (model) this run keeps busy."
+    WEIGHT=$weight_raw
+  else
+    WEIGHT=""
+    if [ "$POOL_KIND" = cpu ]; then
+      WEIGHT=$(gate_jobs "$NPROC" "${HARNESS_GATE_JOBS:-}" "${CMD[@]}") || WEIGHT=""
+    else
+      WEIGHT=$(eval_calls "${ATHENA_EVAL_CONCURRENCY:-}" "${CMD[@]}") || WEIGHT=""
+    fi
+    [ -n "$WEIGHT" ] || WEIGHT=$DEFAULT_WEIGHT
+    if ((WEIGHT > N)); then
+      say "note: this run's weight $WEIGHT exceeds the $POOL_KIND budget $N; it holds the whole budget."
+      WEIGHT=$N
+    fi
+  fi
+
+  # --weight-of (DND-1326): the weight this run would hold, and nothing else:
+  # no pool is created, no unit taken, CMD never runs.
+  if [ "$mode" = weightof ]; then
+    printf '%s\n' "$WEIGHT"
+    exit 0
+  fi
+
   ensure_pool
   START_MS=$(now_ms)
   DEADLINE_MS=$((START_MS + WAIT_TIMEOUT_S * 1000))
@@ -1224,7 +1915,7 @@ main() {
 
   local rc
   if reentrant_slot; then
-    ((EXCLUSIVE)) && say "note: already inside slot $SLOT; --exclusive not re-applied (nested run)."
+    ((EXCLUSIVE)) && say "note: already inside unit $SLOT; --exclusive not re-applied (nested run)."
     append_event reentrant "$SLOT" 0 "" ""
     run_cmd
     rc=$?
@@ -1242,19 +1933,21 @@ main() {
   append_event acquired "$SLOT" "$waited_ms" "" ""
   if ((ANNOUNCED)); then
     if ((EXCLUSIVE)); then
-      say "all $N slots acquired (exclusive) after $(fmt_ms "$waited_ms")s"
+      say "all $N units acquired (exclusive) after $(fmt_ms "$waited_ms")s"
     else
-      say "slot $SLOT/$N acquired after $(fmt_ms "$waited_ms")s"
+      say "$WEIGHT unit(s) of $N acquired in the $POOL_KIND pool after $(fmt_ms "$waited_ms")s"
     fi
   fi
 
-  export ATHENA_TEST_SLOT_HELD="$POOL:$SLOT"
+  export "$(held_var)=$POOL:$SLOT"
   # The caller may have died during the last wait or the logging above: never
   # start CMD for it (DND-925). Its slot fds close with this process.
   check_parent
   ran_start=$(now_ms)
   run_cmd
   rc=$?
+  # Read again: a rebase inside the slot (integration-gate --rebase) moved HEAD.
+  read_gate_ref
   append_event released "$SLOT" "" "$(($(now_ms) - ran_start))" "$rc"
   write_outcome ran "$rc"
   exit "$rc"

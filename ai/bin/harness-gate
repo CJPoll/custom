@@ -22,13 +22,54 @@
 #
 # Usage:
 #   ai/bin/harness-gate              run every check; exit 1 if any fails
+#   ai/bin/harness-gate --jobs N     the same, on N workers
 #   ai/bin/harness-gate --list       print the declared checks, run nothing
-#   ai/bin/harness-gate --self-test  verify the runner's own logic
+#   ai/bin/harness-gate --self-test  verify the runner's own logic (every group)
+#   ai/bin/harness-gate --self-test --group NAME   one group (DND-1007)
+#
+# Workers (DND-1005): `--jobs N` wins over the HARNESS_GATE_JOBS environment
+# variable; with neither, half the cores, at least 1 and at most 8. Both must
+# be a positive integer: anything else is exit 2 with a Fix:, before any check
+# runs. `--jobs 1` is the old serial run. --jobs applies only to a gate run.
+#
+# Per-check timings (DND-1005). Every output line carries the check's wall
+# and CPU seconds. Every run also appends one JSON object per check to
+#   $XDG_STATE_HOME/athena/harness-gate/timings.jsonl
+#   (~/.local/state/athena/harness-gate/timings.jsonl when XDG_STATE_HOME is
+#   unset or empty)
+# with these keys:
+#   at      UTC time the run's results were recorded, ISO 8601
+#   tree    the directory the checks ran in (the gated worktree)
+#   head    that tree's HEAD SHA ("" when it cannot be read)
+#   label   the check's label, as in --list
+#   wall_s  wall seconds, from spawn to reap (2 decimals)
+#   cpu_s   user+system CPU seconds of the check's process tree (3
+#           decimals), or null when it could not be measured; see
+#           CPU SECONDS PER CHECK below for what the tree includes
+#   ok      true when the check passed
+#   jobs    the worker count of that run
+# The file is capped (TIMINGS_MAX_ROWS, trimmed to the newest
+# TIMINGS_KEEP_ROWS). The next run reads it back: the last wall_s per label
+# orders the pool longest-first. A failed write is a NOTE, never a verdict.
+# An interrupted run (see INTERRUPTED RUNS below) records nothing.
+#
+# SCRATCH-HOME SENTINEL (DND-1316). Every check runs with a fresh sentinel
+# directory first on PATH (ai/lib/scratch_home_sentinel.rb). The watched tools
+# are what asdf shims here (ruby, node, mix, ...) plus every name in a PATH
+# `shims` directory. A check that runs one through PATH while HOME is not the
+# gate's own HOME FAILS. The report names the tool and the HOME. The check's
+# own exit status does not matter. In an agent session that tool is an asdf
+# shim, which exits 126 under a scratch HOME (DND-1203). The sentinel execs
+# the next tool on PATH, so a check that keeps its PATH behaves as it would
+# without it. It fires on any machine, lane or agent session. A check that
+# deletes its sentinel, or a gate HOME that is not absolute, fails the check as
+# "could not measure", never as clean.
 #
 # Not in the list: the gate RUN itself (it would recurse). Its --self-test IS
 # declared (DND-507): it never runs the gate, only `--list` and fixtures.
 
 require "open3"
+require "rbconfig"
 require "fileutils"
 require "tmpdir"
 require "stringio"
@@ -39,8 +80,38 @@ require "digest"
 require_relative "../lib/first_party"
 require_relative "../lib/landed"
 require_relative "../lib/reap_tags"
+require_relative "../lib/scratch_home_sentinel"
 
 CUSTOM_DIR = File.expand_path("../..", __dir__)
+
+# A `scripts/setup-*` installer whose own --self-test is ALREADY covered below
+# under a different name — either a STATIC_CHECKS entry or a discovered
+# **/self-test.sh (see below). Maps script -> the check that covers
+# it, so run_self_test's "no committed self-test goes unrun" assertion stays
+# true without running the same suite twice under two labels.
+SELF_TEST_DELEGATES = {
+  "scripts/setup-inbox-registry"       => "ai/inbox/test/self-test.sh",
+  "scripts/setup-athena-inbox-client"  => "scripts/test/athena-inbox-client/self-test.sh",
+  "scripts/setup-private-overlay"      => "scripts/test/setup-private-overlay/self-test.sh",
+}.freeze
+
+# The --self-test group that runs case 4b for one SELF_TEST_DELEGATES entry.
+def self_test_delegate_group(script)
+  "delegate-#{File.basename(script)}"
+end
+
+# SELF-TEST GROUPS (DND-1007). The gate's own suite was ONE check of about
+# 185 s alone (measured 2026-09-30: case 4b 162 s, case 13/DND-818 15 s, every
+# other case together about 8 s), so no worker count got a parallel gate
+# under it. It now runs as independent groups, each its own gate check
+# (`--self-test --group NAME`), and every case runs in exactly one of them:
+#   core                   every case but 4b and 13 (DND-818)
+#   reap                   case 13 (DND-818): the per-check leak reap
+#   delegate-<installer>   case 4b for ONE SELF_TEST_DELEGATES entry
+# A new delegate gets its own group automatically. `--self-test` with no
+# --group still runs every group, in this order. Case 13d asserts the split.
+HARNESS_GATE_SELF_TEST_GROUPS =
+  (%w[core reap] + SELF_TEST_DELEGATES.keys.map { |s| self_test_delegate_group(s) }).freeze
 
 # Each entry: [label, argv]. argv[0] is repo-relative.
 STATIC_CHECKS = [
@@ -75,7 +146,7 @@ STATIC_CHECKS = [
   ["fleet-report hook self-test", %w[ai/hooks/fleet-report.self-test.sh]],
   # fleet-drain-guard (DND-443): the PreToolUse(Agent|Task) drain guard. Its
   # matrix is a dedicated .self-test.sh; the fleet-control suite
-  # (ai/lib/fleet/test/control/self-test.sh) is discovered, not declared.
+  # (ai/lib/fleet/test/control/*/self-test.sh, six parts) is discovered.
   ["fleet-drain-guard self-test", %w[ai/hooks/fleet-drain-guard.self-test.sh]],
   # fleet-lifecycle (DND-560): the PreToolUse/PostToolUse/PostToolUseFailure
   # (Agent|Task), SubagentStart/Stop and StopFailure lifecycle reporter. Replays
@@ -92,6 +163,10 @@ STATIC_CHECKS = [
   # dispatched into a worktree out of the MAIN checkout. Dedicated .self-test.sh
   # against throwaway repos under a fake HOME (never the live checkout).
   ["worktree-escape-guard self-test", %w[ai/hooks/worktree-escape-guard.self-test.sh]],
+  # secret-env-warn (DND-845): the SessionStart per-machine-secrets warning. Only
+  # its SELF-TEST is gated here; the check it runs (check-machine-secrets) and
+  # its registry row join at the migration's final step (contract -> Rollout).
+  ["secret-env-warn self-test", %w[ai/hooks/secret-env-warn.self-test.sh]],
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
   ["check-generic-skills self-test", %w[ai/bin/check-generic-skills --self-test]],
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
@@ -151,9 +226,13 @@ STATIC_CHECKS = [
   # and drives fixtures, so declaring it cannot recurse. It carries the
   # regression cases for the inline --self-test coverage check (case 11), which
   # a hand-run-only suite would leave unrun -- the class this ticket closes.
-  # Named cost: ~110 s, almost all of it case 4b proving the two installer
-  # delegations behaviourally (it re-runs those suites).
-  ["harness-gate self-test",    %w[ai/bin/harness-gate --self-test]],
+  # Declared once per group (DND-1007, see SELF-TEST GROUPS above), so the
+  # pool runs the groups side by side. Named cost: the delegate-* groups, each
+  # proving one installer delegation behaviourally by re-running that suite
+  # (case 4b; its duplicated work is an owner decision, DND-1007).
+  *HARNESS_GATE_SELF_TEST_GROUPS.map do |g|
+    ["harness-gate self-test: #{g}", %W[ai/bin/harness-gate --self-test --group #{g}]]
+  end,
   # Answers the one merge question the rest of the bar never asked -- what
   # merging CAUSES (gen_saas PR #256 / DND-234: merging would have run
   # `terraform apply -auto-approve` on prod AWS). Deterministic and hermetic
@@ -181,17 +260,6 @@ STATIC_CHECKS = [
   # **/test/self-test.sh file backs it), so it stays hand-declared here.
   ["setup-hooks self-test",     %w[scripts/setup-hooks --self-test]],
 ].freeze
-
-# A `scripts/setup-*` installer whose own --self-test is ALREADY covered above
-# under a different name — either a STATIC_CHECKS entry or a discovered
-# **/self-test.sh (see below). Maps script -> the check that covers
-# it, so run_self_test's "no committed self-test goes unrun" assertion stays
-# true without running the same suite twice under two labels.
-SELF_TEST_DELEGATES = {
-  "scripts/setup-inbox-registry"       => "ai/inbox/test/self-test.sh",
-  "scripts/setup-athena-inbox-client"  => "scripts/test/athena-inbox-client/self-test.sh",
-  "scripts/setup-private-overlay"      => "scripts/test/setup-private-overlay/self-test.sh",
-}.freeze
 
 # ---------------------------------------------------------------------------
 # INLINE --self-test COVERAGE (DND-507)
@@ -245,7 +313,9 @@ INLINE_SELF_TEST_RE = /(?<![\w-])--self-test(?![\w-])/.freeze
 # self-test.sh), or the suite's code names the tool together with --self-test.
 INLINE_SELF_TEST_COVERED_BY = {
   # The tool's --self-test execs a discovered/declared suite.
-  "ai/bin/fleet-control"         => "ai/lib/fleet/test/control/self-test.sh",
+  # fleet-control --self-test runs all six parts of its suite (DND-1007/DND-1361);
+  # each part is discovered on its own. The map names one of them.
+  "ai/bin/fleet-control"         => "ai/lib/fleet/test/control/domain/self-test.sh",
   "ai/bin/fleet-report"          => "ai/lib/fleet/test/self-test.sh",
   "ai/bin/fleet-resume"          => "ai/lib/fleet/test/resume/self-test.sh",
   "ai/bin/next-mission"          => "ai/lib/test/next-mission/self-test.sh",
@@ -337,8 +407,19 @@ def inline_self_test_coverage(root:, checks: STATIC_CHECKS + self_test_checks(ro
   end
 
   run_paths = checks.map { |(_, argv)| argv.first }
-  declared = checks.select { |(_, argv)| argv.drop(1).include?("--self-test") }.map { |(_, argv)| argv.first }
+  # One tool may declare its suite as several DISTINCT argvs (harness-gate's
+  # own --self-test --group NAME, DND-1007): each runs a different part, so
+  # that tool is accounted once. The same argv declared twice still runs the
+  # same suite twice, and is an error below.
+  declared_argvs = checks.map { |(_, argv)| argv }.select { |argv| argv.drop(1).include?("--self-test") }
+  declared = declared_argvs.map(&:first).uniq
   errors = []
+  declared_argvs.tally.each do |argv, n|
+    next if n < 2
+
+    errors << "#{argv.join(' ')} is declared #{n} times in STATIC_CHECKS; " \
+              "its suite would run #{n} times"
+  end
 
   accounted = Hash.new { |h, k| h[k] = [] }
   declared.each { |t| accounted[t] << "STATIC_CHECKS" }
@@ -854,31 +935,231 @@ def failure_lines(out)
   out.to_s.lines.grep(FAIL_LINE_RE)
 end
 
+# ---------------------------------------------------------------------------
+# CPU SECONDS PER CHECK (DND-1005)
+#
+# What is measured: the user+system CPU of the check's process tree, taken
+# from the kernel's child rusage (getrusage RUSAGE_CHILDREN) of a process
+# whose ONLY child is the check. That figure includes the check and every
+# descendant whose parent waited for it, recursively. It does not include a
+# descendant that was orphaned (reparented, then reaped by someone else) or
+# one the leak sweep had to kill: their CPU is charged to whoever reaped them.
+#
+# Why a shim: the gate's own child rusage (Process.times.cutime) is one
+# process-wide counter. The pool runs several checks on threads at once, so
+# a before/after delta around one check would also count every sibling check
+# reaped in that window. Ruby exposes no wait4 rusage per child. So each
+# check runs under CPU_SHIM, a few lines of Ruby exec'd with the gate's own
+# interpreter (--disable=all: no gems, no RUBYOPT). The shim spawns the
+# check's argv unchanged, waits for it, writes its child CPU to fd 3, and
+# exits with the check's status (128+signal when the check was killed by
+# one). The check keeps its argv, environment, working directory, stdin (an
+# empty pipe), and stdout/stderr (the one captured pipe); fd 3 is
+# close-on-exec in the shim, so the check never sees it. The shim adds one
+# process between the gate and the check (the check's parent is the shim)
+# and about 15 ms of startup per check (`time ruby --disable=all -e ...`:
+# 0.015 s wall, 0.01 s user; measured once, 2026-09-29). The shim changes no signal
+# disposition, so the check inherits what it did before. Its signal mask is
+# empty either way: Ruby's spawn empties the mask in the child before exec,
+# whichever thread spawns it and whatever that thread blocks (process.c,
+# disable_child_handler_fork_child; self-test cases 15b and 15c). The shim's command
+# line carries the check's argv, so a tool matching processes by argument
+# sees one extra match per running check; the shim never outlives its
+# check, so it is never an orphan of its own. A cpu figure the
+# shim did not report (the shim was killed, or failed to start) is nil,
+# printed as n/a and recorded as null: never a 0.
+CPU_SHIM = <<~'SHIM'
+  report = IO.for_fd(3)
+  report.close_on_exec = true
+  begin
+    pid = Process.spawn([ARGV[0], ARGV[0]], *ARGV.drop(1))
+  rescue SystemCallError => e
+    $stdout.write("harness-gate: cannot execute #{ARGV[0]}: #{e.class}: #{e.message}\n")
+    exit 127
+  end
+  _pid, status = Process.wait2(pid)
+  t = Process.times
+  report.write(format("%.6f\n", t.cutime + t.cstime))
+  report.close
+  exit(status.exitstatus || (128 + status.termsig.to_i))
+SHIM
+
+# The checks running right now, by label, with the reap tag each runs under.
+# run_one registers a check when it starts and removes it when it returns
+# normally; a check whose run_one was cut short by an interrupt stays, so the
+# interrupt report can still name it (see INTERRUPTED RUNS). `abort!` stops
+# the pool from starting another check.
+class RunningChecks
+  Entry = Struct.new(:label, :argv, :started, :tag)
+
+  def initialize
+    @lock = Mutex.new
+    @entries = {}
+    @aborted = false
+  end
+
+  # false (and nothing registered) once aborted: no check starts after the
+  # interrupt report has taken its snapshot.
+  def start(label, argv, tag)
+    @lock.synchronize do
+      next false if @aborted
+
+      @entries[label] = Entry.new(label, argv, ReapTags.monotonic, tag)
+      true
+    end
+  end
+
+  def finish(label)
+    @lock.synchronize { @entries.delete(label) }
+  end
+
+  # Stops every later start and returns what is running, in one step.
+  def abort!
+    @lock.synchronize do
+      @aborted = true
+      @entries.values.sort_by(&:started)
+    end
+  end
+
+  def aborted?
+    @lock.synchronize { @aborted }
+  end
+end
+
+# Spawns the check under CPU_SHIM and captures its combined output.
+# Returns [ok?, output, cpu_s or nil]. Reads the output to EOF, then reaps,
+# as Open3.capture2e does. When anything cuts this short (an interrupt, or
+# the thread being killed at exit), the shim is KILLed and reaped here, so
+# nothing waits on a check that will never finish; the caller's leak sweep
+# then kills the rest of the check's tree.
+def spawn_under_cpu_shim(argv, chdir:, env:, aborted: -> { false })
+  pipes = []
+  pid = nil
+  reaped = false
+  begin
+    out_r, out_w = IO.pipe.tap { |p| pipes.concat(p) }
+    in_r, in_w = IO.pipe.tap { |p| pipes.concat(p) }
+    cpu_r, cpu_w = IO.pipe.tap { |p| pipes.concat(p) }
+    # A spawned shim is never untracked: no interrupt lands between the
+    # spawn and the assignment.
+    Thread.handle_interrupt(Object => :never) do
+      pid = Process.spawn(env, RbConfig.ruby, "--disable=all", "-e", CPU_SHIM, "--", *argv,
+                          chdir: chdir, in: in_r, out: out_w, err: out_w, 3 => cpu_w)
+    end
+    # An interrupt report that ran between this check's registration and its
+    # spawn could not kill it, so it is killed here.
+    Process.kill("KILL", pid) if aborted.call
+    [in_r, in_w, out_w, cpu_w].each(&:close)
+    out = out_r.read
+    status = nil
+    # An interrupt may cut the wait short (then the ensure kills and reaps the
+    # shim), but never land after the reap and before `reaped` is set: that
+    # would KILL and wait on a pid that may already belong to someone else.
+    Thread.handle_interrupt(Object => :on_blocking) do
+      _pid, status = Process.wait2(pid)
+      reaped = true
+    end
+    raw = cpu_r.read_nonblock(64, exception: false)
+    cpu = raw.is_a?(String) && raw.match?(/\A\d+\.\d+\n\z/) ? raw.to_f : nil
+    [status.success?, out, cpu]
+  ensure
+    unless reaped || pid.nil?
+      begin
+        Process.kill("KILL", pid)
+      rescue Errno::ESRCH
+        nil
+      end
+      begin
+        Process.wait(pid)
+      rescue Errno::ECHILD
+        nil
+      end
+    end
+    pipes.each { |io| io.close unless io.closed? }
+  end
+end
+
 # Run one check with stdin CLOSED (a check that reads stdin must never inherit
 # the caller's terminal or a pipe — that is the false-green path). env is
 # merged into the check's environment (a nil value unsets the variable).
-# Returns [ok?, combined_output].
+# Returns [ok?, combined_output, cpu_s]; cpu_s is nil when it could not be
+# measured (see CPU SECONDS PER CHECK). `running`, when given, registers the
+# check under `label` while it runs (RunningChecks).
 #
 # DND-818: every check also runs under its own reap tag (ai/lib/reap_tags.rb).
 # Once it has exited, anything still carrying the tag after the grace period
 # is killed and the check FAILS, naming each process. The sweep is in an
-# `ensure`, so it also runs when this gate is interrupted mid-check.
-def run_one(argv, chdir: CUSTOM_DIR, env: {})
+# `ensure`, so it also runs when this gate is interrupted mid-check; then it
+# kills at once (no grace), because the check did not exit on its own.
+#
+# DND-1316: every check also runs with a scratch-HOME sentinel first on PATH
+# (SCRATCH-HOME SENTINEL above). A logged violation FAILS the check, with the
+# sentinel's report appended; a gate HOME the sentinel cannot anchor fails it
+# unrun.
+def run_one(argv, chdir: CUSTOM_DIR, env: {}, label: nil, running: nil)
   tag = ReapTags.new_tag("gate-check")
+  name = label || argv.join(" ")
+  return [false, "harness-gate: not started — the gate was interrupted", nil] if running && !running.start(name, argv, tag)
+
   ok = false
   out = nil
+  cpu = nil
+  scan_failure = nil
+  returned = false
+  sentinel = nil
+  unmeasured = nil
   begin
-    out, status = Open3.capture2e(env.merge(ReapTags.env_with(tag, env.fetch(ReapTags::VAR, ENV[ReapTags::VAR]))),
-                                  *argv, chdir: chdir, stdin_data: "")
-    ok = status.success?
+    # DND-1316: see SCRATCH-HOME SENTINEL. A HOME that cannot anchor the
+    # comparison is a failed check (could not measure), never a clean one.
+    path = env.key?("PATH") ? env["PATH"].to_s : ENV.fetch("PATH", "")
+    sentinel = ScratchHomeSentinel.create(path: path, real_home: ENV.fetch("HOME", ""))
+    spawn_env = env.merge("PATH" => ScratchHomeSentinel.path_with(sentinel, path))
+                   .merge(ReapTags.env_with(tag, env.fetch(ReapTags::VAR, ENV[ReapTags::VAR])))
+    ok, out, cpu = spawn_under_cpu_shim(argv, chdir: chdir, env: spawn_env,
+                                        aborted: -> { running&.aborted? })
+    returned = true
+  rescue ScratchHomeSentinel::SetupError => e
+    out = "harness-gate: FAIL — `#{argv.join(' ')}` was not run: the scratch-HOME sentinel could not be set " \
+          "up: #{e.message}.\n  Fix: run the gate with HOME set to your real, absolute home directory."
+    returned = true
   rescue Errno::ENOENT, Errno::EACCES => e
     out = "harness-gate: cannot execute #{argv.first}: #{e.class}: #{e.message}"
+    returned = true
   ensure
-    leaked = ReapTags.reap(tag)
+    begin
+      leaked = ReapTags.reap(tag, grace: returned ? ReapTags::DEFAULT_GRACE_S : 0)
+    rescue ReapTags::ScanError => e
+      # DND-1016: the sweep could not look, so "nothing leaked" is unknown.
+      # What it did find was still killed (e.killed), and is reported too.
+      scan_failure = "\nharness-gate: FAIL — the leak sweep after `#{argv.join(' ')}` could not look: #{e.message}\n"
+      leaked = e.killed
+    end
+    # Read after the reap, so nothing the check left running can still log.
+    # A sentinel the check deleted is "could not measure", never clean.
+    hits = []
+    begin
+      hits = ScratchHomeSentinel.violations(sentinel) if sentinel
+    rescue ScratchHomeSentinel::MeasureError => e
+      unmeasured = "harness-gate: FAIL — `#{argv.join(' ')}` could not be judged for scratch-HOME " \
+                   "shims (DND-1316): #{e.message}.\n  Fix: the check must leave the first PATH " \
+                   "directory it was given (the gate's sentinel) in place; do not delete it."
+    ensure
+      ScratchHomeSentinel.remove(sentinel)
+    end
   end
-  return [ok, out] if leaked.empty?
+  running&.finish(name)
+  unless hits.empty?
+    ok = false
+    out = "#{out}\n#{ScratchHomeSentinel.report(hits, ENV.fetch('HOME', ''))}"
+  end
+  if unmeasured
+    ok = false
+    out = "#{out}\n#{unmeasured}"
+  end
+  return [false, "#{out}#{scan_failure}#{leaked.empty? ? '' : leak_report(argv, leaked)}", cpu] if scan_failure
+  return [ok, out, cpu] if leaked.empty?
 
-  [false, "#{out}#{leak_report(argv, leaked)}"]
+  [false, "#{out}#{leak_report(argv, leaked)}", cpu]
 end
 
 def leak_report(argv, leaked)
@@ -1086,15 +1367,38 @@ def schedule_errors(checks)
   errors + (edge_labels - labels).map { |l| "ordering edge names #{l.inspect}, which no declared check has" }
 end
 
-# Workers: HARNESS_GATE_JOBS, else half the cores, capped at 8. At 8 workers the
-# measured makespan equals the longest suite (~124 s), so more buys nothing.
-# test-slot still caps how many gates run at once; this is per gate.
-def gate_jobs(env = ENV, cores: Etc.nprocessors)
+# Workers: `--jobs N` (flag), else HARNESS_GATE_JOBS, else half the cores,
+# capped at 8. At 8 workers the measured makespan equals the longest suite
+# (~124 s), so more buys nothing. test-slot still caps how many gates run at
+# once; this is per gate. test-slot weighs a gate by this count (DND-1006)
+# and restates this default to do so: change both together. The flag and the variable share one validation: a
+# positive integer, anything else raises. When the flag is given the
+# variable is not read, so it cannot override or fail the flag.
+JOBS_FORMAT = /\A[1-9]\d*\z/.freeze
+
+def gate_jobs(env = ENV, cores: Etc.nprocessors, flag: nil)
+  unless flag.nil?
+    raise ArgumentError, "--jobs #{flag.inspect} is not a positive integer" unless flag.to_s.match?(JOBS_FORMAT)
+
+    return flag.to_i
+  end
   raw = env["HARNESS_GATE_JOBS"]
   return [[cores / 2, 1].max, 8].min if raw.nil? || raw.empty?
-  raise ArgumentError, "HARNESS_GATE_JOBS=#{raw.inspect} is not a positive integer" unless raw.match?(/\A[1-9]\d*\z/)
+  raise ArgumentError, "HARNESS_GATE_JOBS=#{raw.inspect} is not a positive integer" unless raw.match?(JOBS_FORMAT)
 
   raw.to_i
+end
+
+# gate_jobs for the command line: the worker count, or nil after printing a
+# usage error with a Fix: (the caller exits 2).
+def resolve_gate_jobs(flag, env = ENV)
+  gate_jobs(env, flag: flag)
+rescue ArgumentError => e
+  warn "harness-gate: usage error — #{e.message}."
+  warn "  Fix: pass `--jobs N` or set HARNESS_GATE_JOBS to a positive integer (the worker " \
+       "count; --jobs wins over the variable), or give neither for the default (half the " \
+       "cores, at most 8). `--jobs 1` runs the checks one at a time."
+  nil
 end
 
 # Per-check timings, one JSON line per check per run, so a slow gate can be
@@ -1164,8 +1468,10 @@ def check_env(pin_env, opt)
 end
 
 # Runs units on `jobs` threads, longest-first by `durations` (unknown first).
-# Yields each finished check as [label, argv, ok, out, wall_s].
-def run_pool(units, jobs:, durations:, chdir:, env:)
+# Yields each finished check as [label, argv, ok, out, wall_s, cpu_s].
+# `running` (RunningChecks) sees every check while it runs; once it is
+# aborted, no worker starts another check.
+def run_pool(units, jobs:, durations:, chdir:, env:, running: RunningChecks.new)
   cost = ->(u) { u.sum { |(l, _)| durations.fetch(l, Float::INFINITY) } }
   queue = Queue.new
   units.sort_by { |u| -cost.call(u) }.each { |u| queue << u }
@@ -1175,14 +1481,62 @@ def run_pool(units, jobs:, durations:, chdir:, env:)
     Thread.new do
       while (unit = queue.pop) != :done
         unit.each do |(label, argv, opt)|
+          break if running.aborted?
+
           t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          ok, out = run_one(argv, chdir: chdir, env: check_env(env, opt))
+          ok, out, cpu = run_one(argv, chdir: chdir, env: check_env(env, opt), label: label, running: running)
           wall = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
-          lock.synchronize { yield [label, argv, ok, out, wall] }
+          lock.synchronize { yield [label, argv, ok, out, wall, cpu] }
         end
+        break if running.aborted?
       end
     end
   end.each(&:join)
+end
+
+# ---------------------------------------------------------------------------
+# INTERRUPTED RUNS (DND-1005)
+#
+# The gate sets no per-check timeout: a limit that fails a slow check would
+# flip a verdict with machine speed. So a check that hangs holds the gate
+# until something outside stops it: a Ctrl-C, or test-slot's `timeout`
+# sending SIGTERM. Then the gate must say WHICH check it was waiting on, or
+# a hang reads as "the gate is slow". On any signal (SIGINT, SIGTERM,
+# SIGHUP) during the checks, run_checks prints INTERRUPTED with every check
+# still running, by label, with how long it ran and its argv; stops the pool
+# from starting another; kills each still-running check's process tree by
+# its reap tag; and re-raises, so the gate dies by that signal (exit 130 for
+# SIGINT, 143 for SIGTERM). Nothing is recorded to timings.jsonl for an
+# interrupted run.
+def report_interrupted(signal, running, finished, total, elapsed, err)
+  still = running.abort!
+  begin
+    now = ReapTags.monotonic
+    failed = finished.reject { |_, r| r[1] }.keys
+    err.puts "harness-gate: INTERRUPTED by #{signal} after #{elapsed.round(1)}s — " \
+             "#{still.size} check(s) still running:"
+    still.each do |e|
+      err.puts "  - #{e.label} (running #{(now - e.started).round(1)}s): #{e.argv.join(' ')}"
+    end
+    err.puts "  #{finished.size}/#{total} check(s) finished before the signal" \
+             "#{failed.empty? ? '' : " (FAIL: #{failed.join(', ')})"}; " \
+             "#{total - finished.size - still.size} not started or not yet recorded."
+    err.puts "  Fix: a check named above as still running is what the gate was waiting on. " \
+             "Run it alone from the gated tree (`cd <tree> && <argv above>`) and find what it " \
+             "blocks on; the gate has no per-check timeout, so a hang shows up only here."
+  rescue IOError, SystemCallError
+    nil # stderr is gone (SIGHUP closed the tty, or its reader exited); still kill below
+  ensure
+    still.each do |e|
+      ReapTags.reap(e.tag, grace: 0)
+    rescue ReapTags::ScanError => x
+      begin
+        err.puts "  NOTE — could not confirm #{e.label}'s processes are gone: #{x.message}"
+      rescue IOError, SystemCallError
+        nil
+      end
+    end
+  end
 end
 
 # The gate's check loop (DND-735). Reads the landed-ref pin ONCE from root's
@@ -1190,17 +1544,18 @@ end
 # environment. The pin always replaces whatever the caller exported
 # (landed_pin_env sets both variables, or clears both), so a check never
 # measures an inherited pin. Checks run on a bounded pool (see PARALLEL
-# EXECUTION); results print in DECLARED order, each with its wall time, so the
-# output stays stable and diffable. root/chdir exist for --self-test case 12b:
-# a fixture repo drives this exact loop. `pin`, when given, is a pre-computed
-# [pin_env, pin_probes]: run_gate's origin-freshness preflight (DND-945)
-# already read it, so this does not read origin a second time; nil (every
-# other caller) reads it here. Returns [pin_env, failures], failures
-# being [label, argv, output] per failed check, in declared order.
+# EXECUTION); results print in DECLARED order, each with its wall and CPU
+# seconds, so the output stays stable and diffable. root/chdir exist for
+# --self-test case 12b: a fixture repo drives this exact loop. `pin`, when
+# given, is a pre-computed [pin_env, pin_probes]: run_gate's origin-freshness
+# preflight (DND-945) already read it, so this does not read origin a second
+# time; nil (every other caller) reads it here. Returns [pin_env, failures],
+# failures being [label, argv, output] per failed check, in declared order.
 # An entry's optional third element names an environment adjustment
-# (check_env); the only one is :stash_fixture_optout.
+# (check_env); the only one is :stash_fixture_optout. A signal during the
+# checks is reported on `err` and re-raised (INTERRUPTED RUNS).
 def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: gate_jobs,
-               timings: timings_path, pin: nil)
+               timings: timings_path, pin: nil, err: $stderr)
   dups = checks.map(&:first).tally.select { |_, n| n > 1 }.keys
   raise ArgumentError, "run_checks: duplicate check label(s) #{dups.inspect}" unless dups.empty?
 
@@ -1209,37 +1564,61 @@ def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: g
 
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   results = {}
+  running = RunningChecks.new
   run_serial = lambda do |list|
     list.each do |(label, argv, opt)|
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      ok, out = run_one(argv, chdir: chdir, env: check_env(pin_env, opt))
-      results[label] = [argv, ok, out, Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0]
+      ok, out, cpu = run_one(argv, chdir: chdir, env: check_env(pin_env, opt), label: label, running: running)
+      results[label] = [argv, ok, out, Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0, cpu]
     end
   end
   pre, units, final = gate_units(checks)
-  run_serial.call(pre)
-  run_pool(units, jobs: jobs, durations: last_durations(timings), chdir: chdir, env: pin_env) do |label, argv, ok, out, wall|
-    results[label] = [argv, ok, out, wall]
+  begin
+    run_serial.call(pre)
+    run_pool(units, jobs: jobs, durations: last_durations(timings), chdir: chdir, env: pin_env,
+                    running: running) do |label, argv, ok, out, wall, cpu|
+      results[label] = [argv, ok, out, wall, cpu]
+    end
+    run_serial.call(final)
+  rescue SignalException => e
+    # results.dup is taken without the pool's lock. A worker may add one
+    # more result just after; the report is then one count behind, which is
+    # why it says "not started or not yet recorded" and never "never ran".
+    # The signal is re-raised whatever the report does: a report that fails
+    # must never turn "died by SIGTERM" into exit 1.
+    begin
+      report_interrupted("SIG#{Signal.signame(e.signo) || e.signo}", running,
+                         results.dup, checks.size, Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, err)
+    rescue StandardError
+      nil
+    end
+    raise e
   end
-  run_serial.call(final)
   elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 
   failures = []
   checks.each do |(label, argv)|
-    _argv, ok, out, wall = results.fetch(label) { [argv, false, "harness-gate: check never ran (scheduler fault)", 0.0] }
-    io.printf("%-28s %s %7.1fs\n", label, ok ? "PASS" : "FAIL", wall)
+    _argv, ok, out, wall, cpu = results.fetch(label) do
+      [argv, false, "harness-gate: check never ran (scheduler fault)", 0.0, nil]
+    end
+    io.printf("%-28s %s %7.1fs wall %s cpu\n", label, ok ? "PASS" : "FAIL", wall,
+              cpu ? format("%6.1fs", cpu) : "    n/a")
     failures << [label, argv, out] unless ok
   end
 
   serial = results.values.sum { |r| r[3] }
+  cpus = results.values.map { |r| r[4] }
+  cpu_total = cpus.compact.empty? ? "n/a" : "#{cpus.compact.sum.round(1)}s"
+  cpu_note = cpus.include?(nil) ? " (#{cpus.count(nil)} not measured)" : ""
   slowest = results.sort_by { |_, r| -r[3] }.first(3).map { |l, r| "#{l} #{r[3].round}s" }.join(", ")
   io.puts "harness-gate: #{checks.size} checks in #{elapsed.round(1)}s wall on #{jobs} worker(s) " \
-          "(serial sum #{serial.round(1)}s); slowest: #{slowest}; timings: #{timings}"
+          "(serial sum #{serial.round(1)}s, cpu #{cpu_total}#{cpu_note}); " \
+          "slowest: #{slowest}; timings: #{timings}"
   head = `git -C #{chdir.shellescape} rev-parse HEAD 2>/dev/null`.strip
   at = Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-  record_timings(timings, results.map do |label, (_a, ok, _o, wall)|
+  record_timings(timings, results.map do |label, (_a, ok, _o, wall, cpu)|
     { "at" => at, "tree" => chdir, "head" => head, "label" => label, "wall_s" => wall.round(2),
-      "ok" => ok, "jobs" => jobs }
+      "cpu_s" => cpu&.round(3), "ok" => ok, "jobs" => jobs }
   end)
   [pin_env, failures]
 end
@@ -1290,7 +1669,7 @@ end
 # dry_run stops before executing the real CHECKS list so testing the
 # zero-discovery/stray-suite branches against a fixture never spends the time
 # (or risk) of re-running the whole real gate as a side effect.
-def run_gate(root: CUSTOM_DIR, dry_run: false)
+def run_gate(root: CUSTOM_DIR, dry_run: false, jobs: nil)
   # `root` only ever governs the discovery reporting below (found/self_tests_
   # found?/stray_test_scripts) — missing_executables and the CHECKS execution
   # loop past `return 0 if dry_run` always use the real CUSTOM_DIR/CHECKS,
@@ -1304,7 +1683,9 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
   # harness-gate is the one bin whose pre-fix fall-through would have re-entered
   # the very gate doing the probing. The probe sets this variable, so a gate run
   # started from inside it is refused structurally rather than merely bounded by
-  # the probe's timeout. Nothing else sets it.
+  # the probe's timeout. One other setter: --self-test case 14b sets it on the
+  # bad --jobs / HARNESS_GATE_JOBS runs it drives, so a value that wrongly got
+  # past validation is refused here instead of starting a real gate run.
   if ENV["HARNESS_BIN_HELP_PROBE"]
     warn "harness-gate: REFUSED — started from inside a check-bin-help --help probe."
     warn "  Fix: this means `harness-gate --help` fell through to running the gate instead of printing usage and exiting 0. Restore the --help branch at the bottom of ai/bin/harness-gate; do not unset HARNESS_BIN_HELP_PROBE to get past this."
@@ -1407,14 +1788,11 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
     return 1
   end
 
-  jobs = begin
-    gate_jobs
-  rescue ArgumentError => e
-    warn "harness-gate: usage error — #{e.message}."
-    warn "  Fix: set HARNESS_GATE_JOBS to a positive integer (worker count), or unset it " \
-         "for the default (half the cores, at most 8)."
-    return 2
-  end
+  # The dispatch validated --jobs / HARNESS_GATE_JOBS before anything ran and
+  # passes the count; a caller that passes none gets the same validation here.
+  jobs ||= resolve_gate_jobs(nil)
+  return 2 unless jobs
+
   unless (errs = schedule_errors(CHECKS)).empty?
     warn "harness-gate: FAILED — the check schedule is unsound: #{errs.join('; ')}."
     warn "  Fix: give every check in CHECKS a unique label, and keep PRE_POOL_LABELS, " \
@@ -1517,12 +1895,22 @@ require_relative "../lib/strict_argv"
 
 # Every argument must be a declared flag (DND-526). A typo of --list or
 # --self-test used to fall through to the full gate run.
-CLI_SPEC = { "--self-test" => :switch, "--list" => :switch }.freeze
+CLI_SPEC = { "--self-test" => :switch, "--list" => :switch, "--jobs" => :value, "--group" => :value }.freeze
 
-# -> [opts, nil] on success, [nil, reason] on a usage error.
+# -> [opts, nil] on success, [nil, reason] on a usage error. --jobs's value
+# is checked by gate_jobs (the same rule as HARNESS_GATE_JOBS), not here.
 def parse_cli(argv)
   opts = StrictArgv.parse(argv, CLI_SPEC)
   return [nil, "--self-test and --list are separate modes; pass one"] if opts["--self-test"] && opts["--list"]
+  return [nil, "--jobs applies only to a gate run, not to --self-test or --list"] if opts["--jobs"] &&
+                                                                                    (opts["--self-test"] || opts["--list"])
+  if opts.key?("--group")
+    return [nil, "--group applies only to --self-test"] unless opts["--self-test"]
+    unless HARNESS_GATE_SELF_TEST_GROUPS.include?(opts["--group"])
+      return [nil, "--group #{opts['--group'].inspect} is not a self-test group " \
+                   "(one of: #{HARNESS_GATE_SELF_TEST_GROUPS.join(', ')})"]
+    end
+  end
 
   [opts, nil]
 rescue StrictArgv::UsageError => e
@@ -1536,7 +1924,733 @@ def gate_mode(opts)
   :gate
 end
 
-def run_self_test
+# --self-test case 14b (DND-1005): `--jobs N` and HARNESS_GATE_JOBS share one
+# rule, the flag wins, and a bad value from either is exit 2 with a Fix:
+# before any check runs. Returns true when every assertion holds.
+def self_test_jobs_flag
+  good = true
+  fail_with = lambda do |msg|
+    warn "self-test: FAIL — case 14b (--jobs): #{msg}. Fix: keep gate_jobs/resolve_gate_jobs " \
+         "validating --jobs like HARNESS_GATE_JOBS, --jobs winning, and the dispatch exiting 2 before run_gate."
+    good = false
+  end
+  {
+    [{ "HARNESS_GATE_JOBS" => "3" }, "5"] => 5,
+    [{}, "2"] => 2,
+    [{ "HARNESS_GATE_JOBS" => "x" }, "4"] => 4,
+    [{ "HARNESS_GATE_JOBS" => "3" }, nil] => 3,
+  }.each do |(env, flag), want|
+    got = gate_jobs(env, cores: 16, flag: flag)
+    fail_with.call("gate_jobs(#{env.inspect}, flag: #{flag.inspect}) = #{got}, want #{want}") unless got == want
+  end
+  %w[0 x 2.5 07].each do |bad|
+    gate_jobs({ "HARNESS_GATE_JOBS" => "3" }, cores: 16, flag: bad)
+    fail_with.call("--jobs #{bad} was accepted")
+  rescue ArgumentError => e
+    fail_with.call("--jobs #{bad} was refused without naming --jobs (#{e.message})") unless e.message.include?("--jobs")
+  end
+  %w[07].each do |bad|
+    gate_jobs({ "HARNESS_GATE_JOBS" => bad }, cores: 16)
+    fail_with.call("HARNESS_GATE_JOBS=#{bad} was accepted")
+  rescue ArgumentError
+    nil
+  end
+
+  cli, reason = parse_cli(%w[--jobs 3])
+  fail_with.call("parse_cli(--jobs 3) refused it (#{reason})") unless cli && cli["--jobs"] == "3" && gate_mode(cli) == :gate
+  [%w[--jobs], %w[--jobs 3 --self-test], %w[--list --jobs 3], %w[--jobs 3 --jobs 4]].each do |argv|
+    _c, why = parse_cli(argv)
+    fail_with.call("parse_cli(#{argv.inspect}) was accepted") if why.nil?
+  end
+
+  # End to end, through the real dispatch. HARNESS_BIN_HELP_PROBE makes a
+  # run that got past validation refuse at once (exit 1) instead of gating,
+  # so a regression here can never start a real gate run.
+  gate = File.join(CUSTOM_DIR, "ai/bin/harness-gate")
+  [
+    [{ "HARNESS_GATE_JOBS" => nil }, %w[--jobs 0], "--jobs"],
+    [{ "HARNESS_GATE_JOBS" => "0" }, [], "HARNESS_GATE_JOBS"],
+    [{ "HARNESS_GATE_JOBS" => "4" }, %w[--jobs x], "--jobs"],
+  ].each do |env, argv, names|
+    out, status = Open3.capture2e(env.merge("HARNESS_BIN_HELP_PROBE" => "1"), RbConfig.ruby, gate, *argv,
+                                  chdir: CUSTOM_DIR, stdin_data: "")
+    next if status.exitstatus == 2 && out.include?(names) && out.include?("Fix:")
+
+    why = out.include?("REFUSED") ? " — exit 1 with REFUSED means validation let the bad value through to run_gate" : ""
+    fail_with.call("#{env.compact.map { |k, v| "#{k}=#{v} " }.join}harness-gate #{argv.join(' ')} exited " \
+                   "#{status.exitstatus}, want 2 naming #{names} with a Fix:#{why} (#{out.inspect})")
+  end
+  good
+end
+
+# Case 15c's fixture (DND-1339): runs the block on a new thread that first
+# blocks every signal (pthread_sigmask through Fiddle; Ruby has no API for a
+# thread's mask). Returns { out: <the block's value>, thread_blk: <that
+# thread's SigBlk hex just before the block ran>, error: <why the fixture
+# could not run, or nil> }. The thread's mask is put back before it ends. A
+# fixture that could not block its signals reports an error, never a pass.
+def spawn_from_blocked_thread
+  require "fiddle"
+  libc = Fiddle.dlopen(nil)
+  fill = Fiddle::Function.new(libc["sigfillset"], [Fiddle::TYPE_VOIDP], Fiddle::TYPE_INT)
+  sigmask = Fiddle::Function.new(libc["pthread_sigmask"],
+                                 [Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP], Fiddle::TYPE_INT)
+  sig_block = 0 # SIG_BLOCK on Linux
+  sig_setmask = 2 # SIG_SETMASK on Linux
+  Thread.new do
+    Thread.current.report_on_exception = false # .value re-raises it; rescued below
+    all = Fiddle::Pointer.malloc(128, Fiddle::RUBY_FREE) # sizeof(sigset_t) on glibc
+    old = Fiddle::Pointer.malloc(128, Fiddle::RUBY_FREE)
+    fill.call(all)
+    rc = sigmask.call(sig_block, all, old)
+    next({ out: nil, thread_blk: nil, error: "pthread_sigmask returned #{rc}" }) unless rc.zero?
+
+    # The block runs with SIGVTALRM blocked too, so Ruby cannot interrupt it
+    # mid-call; the probe it runs is short.
+    begin
+      native = File.readlink("/proc/thread-self")
+      thread_blk = File.read("/proc/thread-self/status")[/^SigBlk:\s*(\h+)$/, 1]
+      out = yield
+      # Under M:N threads the Ruby thread could move to another native
+      # thread, and then the spawn did not come from the blocked one. (The
+      # mask itself cannot be re-read to tell: Ruby's vfork spawn leaves the
+      # spawning thread's mask empty afterwards.)
+      now = File.readlink("/proc/thread-self")
+      moved = now == native ? nil : "the Ruby thread moved from native thread #{native} to #{now}"
+      { out: out, thread_blk: thread_blk, error: moved }
+    ensure
+      sigmask.call(sig_setmask, old, nil)
+    end
+  end.value
+rescue LoadError, StandardError => e
+  { out: nil, thread_blk: nil, error: "#{e.class}: #{e.message}" }
+end
+
+# Case 15's probe: a check that prints the SigBlk and SigIgn lines of its own
+# /proc status, then the numbers of its open fds. `hook` runs once per status
+# line, after the line is in $l and before the probe looks at it; only case
+# 15d's fixture passes one.
+#
+# It never forks (DND-1339): a forked reader reads the SHELL's mask at a
+# racing instant instead of the one the check started with. Seen as SigBlk
+# 0x10000 (bash blocks SIGCHLD while it waits) and fffffffffffbfeff (bash
+# inside glibc's _Fork, which blocks every signal around clone(); bits 32
+# and 33 are glibc's own signals, which no public sigprocmask call can block).
+# A pipe or $(...) here would bring the fork back.
+#
+# It reads its status as ONE snapshot and parses it from memory (DND-1399).
+# A /proc status file is rendered again on every seek, and bash's `read`
+# seeks back after each line of a seekable file, to the byte after the
+# newline it stopped at. So a per-line `while read ... done < status` loop
+# read each line from a new rendering, at an offset taken from the old one.
+# A field above SigBlk whose width changed in between shifted every later
+# line: SigQ counts the pending signals of every process of this user, and
+# 10 -> 9 turned the next line into "igBlk:\t...", which matched nothing.
+# `read -d ''` reads to EOF in one call, sequentially, so it sees a single
+# rendering. It is bash's (dash has no -d), so the probe names bash.
+def status_probe(hook: ":")
+  script = <<~'SH'
+    IFS= read -r -d '' s < /proc/$$/status
+    set -f; IFS=$'\n'
+    for l in $s; do
+      HOOK
+      case $l in SigBlk:*|SigIgn:*) echo "$l" ;; esac
+    done
+    set +f; IFS=$' \t\n'
+    for f in /proc/$$/fd/*; do echo "${f##*/}"; done
+  SH
+  ["bash", "-c", script.sub("HOOK") { hook }] # block form: a `\` in hook is literal
+end
+
+# The pending-signal count in this process's own status ("SigQ: <count>/<limit>").
+# It counts the queued signals of every process of this user, so it reads the
+# same from any of them. A status with no SigQ line raises: it is not a 0.
+def own_sigq
+  File.read("/proc/self/status")[%r{^SigQ:[ \t]*(\d+)/}, 1]&.to_i or
+    raise "could not read SigQ from /proc/self/status"
+end
+
+# Case 15d's fixture (DND-1399): raises this user's SigQ by two digits while
+# status_probe runs, and drops it back to its base at the moment the probe
+# has taken its SigPnd line, the line just above ShdPnd and SigBlk. So the
+# count loses at least one digit mid-read, deterministically: no load, no
+# timing. It queues 10**(digits of the base + 1) signals, so a base that moves
+# by a few while the case runs still ends shorter than it started.
+#
+# How: a stopped bash with a handler for SIGRTMIN holds the queued real-time
+# signals (a stopped process dequeues nothing, and real-time signals queue one
+# entry each). The probe's hook writes the go FIFO and waits on the done FIFO;
+# this side then KILLs and reaps the holder, which frees its queue, and only
+# then answers. Both FIFOs are opened read-write here first, so neither open
+# blocks, and a probe that never reaches its hook cannot hang the case.
+# __libc_current_sigrtmin is glibc's: elsewhere the fixture reports an error
+# (15d fails as "could not measure"), which is not a regression of the probe.
+#
+# Returns { out: <the probe's output>, before: <SigQ before>, after: <SigQ
+# after the drop>, error: <why the fixture could not arrange the drop, or nil> }.
+def probe_under_sigq_drop(dir)
+  require "fiddle"
+  rtmin = Fiddle::Function.new(Fiddle.dlopen(nil)["__libc_current_sigrtmin"], [], Fiddle::TYPE_INT).call
+  go = File.join(dir, "sigq-go.fifo")
+  done = File.join(dir, "sigq-done.fifo")
+  [go, done].each { |f| File.mkfifo(f) }
+  go_io = File.open(go, File::RDWR)
+  done_io = File.open(done, File::RDWR)
+  done_io.sync = true # the answer must reach the FIFO now, not at close
+  holder = Process.spawn("bash", "-c", "trap : RTMIN; kill -STOP $$; exit 0", in: File::NULL)
+  _pid, st = Process.wait2(holder, Process::WUNTRACED)
+  unless st.stopped?
+    holder = nil
+    return { out: nil, before: nil, after: nil, error: "the signal holder did not stop (#{st.inspect})" }
+  end
+
+  queued = 10**(own_sigq.to_s.length + 1)
+  queued.times { Process.kill(rtmin, holder) }
+  before = own_sigq
+  dropper = Thread.new do
+    Thread.current.report_on_exception = false # .value re-raises it; rescued below
+    begin
+      go_io.gets
+      Process.kill("KILL", holder)
+      Process.wait(holder)
+      holder = nil
+      own_sigq
+    ensure
+      # Always answer, so the probe never waits forever on the done FIFO.
+      done_io.write("ok\n")
+    end
+  end
+  hook = "case $l in SigPnd:*) echo go > #{go.shellescape}; read -r _ < #{done.shellescape} ;; esac"
+  out, = Open3.capture2e(*status_probe(hook: hook), chdir: dir, stdin_data: "")
+  go_io.close # a dropper still waiting for go (the probe never got there) stops here
+  after = begin
+    dropper.value
+  rescue IOError
+    nil
+  end
+  error = if after.nil?
+            "the probe never reached its SigPnd hook"
+          elsif after.to_s.length >= before.to_s.length
+            "SigQ did not lose a digit (#{before} -> #{after}, #{queued} signals queued and freed)"
+          end
+  { out: out, before: before, after: after, error: error }
+rescue LoadError, StandardError => e
+  { out: nil, before: nil, after: nil, error: "#{e.class}: #{e.message}" }
+ensure
+  # The dropper is done (or stopped by closing go) before the holder is
+  # judged, so the two never both kill and reap it.
+  go_io.close if go_io && !go_io.closed?
+  begin
+    dropper&.join
+  rescue StandardError
+    nil
+  end
+  if holder
+    begin
+      Process.kill("KILL", holder)
+      Process.wait(holder)
+    rescue Errno::ESRCH, Errno::ECHILD
+      nil
+    end
+  end
+  [go_io, done_io].each { |io| io.close if io && !io.closed? }
+end
+
+# --self-test case 15 (DND-1005): cpu_s is the check's OWN process tree, not a
+# share of the gate's. Two checks run at once. "idle" blocks on a FIFO and
+# burns next to nothing. In the other worker, "ruby-self" (a normal Ruby
+# process, which reports its own CPU clock) runs to completion and is reaped,
+# and only then does "release" write the FIFO that lets "idle" finish. So
+# "ruby-self" is reaped inside idle's window: an implementation that took a
+# delta of the gate's process-wide child CPU around each check would charge
+# ruby-self's CPU to idle. The assertions compare CPU with CPU, never with a
+# wall-clock limit, and nothing here generates load (DND-1222).
+def self_test_cpu_attribution
+  good = true
+  Dir.mktmpdir("harness-gate-cpu") do |dir|
+    fifo = File.join(dir, "release.fifo")
+    up = File.join(dir, "idle-up.fifo")
+    File.mkfifo(fifo)
+    File.mkfifo(up)
+    self_cpu = File.join(dir, "ruby-self.cpu")
+    idle = File.join(dir, "idle.sh")
+    # idle announces itself on idle-up before blocking, and ruby-self waits
+    # for that before it measures and exits, so ruby-self is always reaped
+    # inside idle's window. `timeout` only bounds a broken fixture; it never
+    # decides the verdict.
+    File.write(idle, "#!/bin/sh\necho up > #{up.shellescape}\nexec timeout 120 cat #{fifo.shellescape} >/dev/null\n")
+    ruby_self = File.join(dir, "ruby-self.rb")
+    File.write(ruby_self, "#!#{RbConfig.ruby}\nFile.read(#{up.inspect})\n" \
+                          "File.write(ARGV[0], Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID).to_s)\n")
+    release = File.join(dir, "release.sh")
+    File.write(release, "#!/bin/sh\necho go > #{fifo.shellescape}\n")
+    [idle, ruby_self, release].each { |p| FileUtils.chmod(0o755, p) }
+
+    got = {}
+    units = [[["ruby-self", [ruby_self, self_cpu]], ["release", [release]]], [["idle", [idle]]]]
+    run_pool(units, jobs: 2, durations: {}, chdir: dir, env: {}) do |label, _argv, ok, out, wall, cpu|
+      got[label] = { ok: ok, out: out, wall: wall, cpu: cpu }
+    end
+    own = File.exist?(self_cpu) ? File.read(self_cpu).to_f : nil
+    idle_cpu = got.dig("idle", :cpu)
+    ruby_cpu = got.dig("ruby-self", :cpu)
+    checks = {
+      "all three fixture checks passed (#{got.transform_values { |v| v[:ok] }.inspect})" =>
+        got.size == 3 && got.values.all? { |v| v[:ok] },
+      "ruby-self reported its own CPU (#{own.inspect})" => own&.positive?,
+      "every check has a measured cpu_s (#{got.transform_values { |v| v[:cpu] }.inspect})" =>
+        got.size == 3 && got.values.all? { |v| v[:cpu].is_a?(Float) },
+      "ruby-self's cpu_s #{ruby_cpu.inspect} covers the CPU it measured itself (#{own.inspect})" =>
+        ruby_cpu && own && ruby_cpu + 0.001 >= own,
+      "idle's cpu_s #{idle_cpu.inspect} is below ruby-self's own CPU #{own.inspect}, though ruby-self " \
+      "was reaped while idle ran (a shared process-wide delta would charge it to idle)" =>
+        idle_cpu && own && idle_cpu < own,
+    }
+    # 15b. The shim is invisible to the check: the same signal mask and
+    #     ignored set, and the same open file descriptors (fd 3 closed), as
+    #     a check the gate spawns directly. And that mask is empty: Ruby's
+    #     spawn gives every child an empty mask (see CPU SECONDS PER CHECK),
+    #     so a check can always be interrupted.
+    #
+    #     The probe prints the mask the check was started with, from one
+    #     snapshot of its own status (status_probe: DND-1339, DND-1399).
+    probe = status_probe
+    direct, = Open3.capture2e(*probe, chdir: dir, stdin_data: "")
+    _ok, shimmed, = spawn_under_cpu_shim(probe, chdir: dir, env: {})
+    checks["a check sees the same signal state and fds under the shim as spawned directly " \
+           "(direct #{direct.inspect}, shim #{shimmed.inspect})"] = !direct.empty? && direct == shimmed
+    # 15c. The check's mask does not depend on the mask of the gate thread
+    #     that spawns it (DND-1339): a pool thread with every signal blocked
+    #     still starts a check with none blocked.
+    from_blocked = spawn_from_blocked_thread { spawn_under_cpu_shim(probe, chdir: dir, env: {})[1] }
+    { "directly" => direct, "under the shim" => shimmed,
+      "under the shim from a thread with every signal blocked " \
+      "(that thread's SigBlk #{from_blocked[:thread_blk].inspect})" => from_blocked[:out] }.each do |how, seen|
+      blk = seen.to_s[/^SigBlk:[ \t]*(\h+)$/, 1]
+      checks["a check spawned #{how} starts with no signal blocked (SigBlk #{blk.inspect})"] =
+        !blk.nil? && blk.to_i(16).zero?
+    end
+    # The fixture must really have blocked SIGINT, SIGTERM and SIGCHLD (bit
+    # n-1 is signal n), or 15c tested nothing; that failure has its own Fix.
+    want_bits = (1 << 1) | (1 << 14) | (1 << 16)
+    unless from_blocked[:error].nil? && (from_blocked[:thread_blk].to_s.to_i(16) & want_bits) == want_bits
+      warn "self-test: FAIL — case 15c fixture: the spawning thread did not have SIGINT, SIGTERM and " \
+           "SIGCHLD blocked (SigBlk #{from_blocked[:thread_blk].inspect}; #{from_blocked[:error] || 'no error'}). " \
+           "Fix: repair spawn_from_blocked_thread (Fiddle must load, and pthread_sigmask must block every " \
+           "signal on the thread that runs the spawn); never delete or skip case 15c."
+      good = false
+    end
+    # 15d. The probe reads every line of its status whole, even when a field
+    #     above SigBlk changes width while it reads (DND-1399): this user's
+    #     SigQ loses at least one digit just after the probe's SigPnd line. A per-line `read` loop reads SigBlk as "igBlk:..." then.
+    dropped = probe_under_sigq_drop(dir)
+    if dropped[:error]
+      warn "self-test: FAIL — case 15d fixture: could not drop SigQ by a digit mid-read " \
+           "(#{dropped[:error]}). Fix: repair probe_under_sigq_drop (a stopped bash holding " \
+           "queued SIGRTMIN, reaped when the probe's hook writes the go FIFO); never delete or skip case 15d."
+      good = false
+    else
+      %w[SigBlk SigIgn].each do |field|
+        checks["the probe read its #{field} line whole while SigQ went #{dropped[:before]} -> " \
+               "#{dropped[:after]} mid-read (#{dropped[:out].inspect})"] =
+          dropped[:out].match?(/^#{field}:[ \t]*\h+$/)
+      end
+    end
+    checks.each do |what, ok|
+      next if ok
+
+      warn "self-test: FAIL — case 15 (cpu attribution): #{what}. Fix: measure each check's CPU " \
+           "as the child rusage of its own CPU_SHIM (spawn_under_cpu_shim), never as a delta of the " \
+           "gate's Process.times, which the pool's threads share; and keep the shim invisible to the " \
+           "check (fd 3 close-on-exec, no signal handling of its own, an empty signal mask whichever " \
+           "thread spawns it); the 15b probe must read its own status without forking, as one " \
+           "snapshot (status_probe)."
+      good = false
+    end
+  end
+  good
+end
+
+# --self-test case 16 (DND-1005): a hanging check is reported BY NAME. A gate
+# (run_checks, in a forked child, as the real gate runs it) has three checks
+# on two workers: "quick-one" first (the recorded durations put it first),
+# then "hang-one" and "hang-two", which each announce themselves on a FIFO
+# and then block forever. The parent waits for both announcements (a barrier,
+# never a sleep), which also proves quick-one has finished: hang-two could
+# only start on quick-one's worker after it. Then SIGTERM, as test-slot's
+# `timeout` sends. The gate must name exactly the two hanging checks, kill
+# their processes, and re-raise SIGTERM (the fork maps that to exit 143). The 60 s waits only bound a broken
+# gate; they never decide a verdict.
+def self_test_hang_named
+  good = true
+  fail_with = lambda do |msg|
+    warn "self-test: FAIL — case 16 (hang named): #{msg}. Fix: keep run_checks rescuing a signal, " \
+         "naming every check RunningChecks still holds, killing their trees, and re-raising."
+    good = false
+  end
+  Dir.mktmpdir("harness-gate-hang") do |dir|
+    started = File.join(dir, "started.fifo")
+    never = File.join(dir, "never.fifo")
+    File.mkfifo(started)
+    File.mkfifo(never)
+    mk = lambda do |name, body|
+      path = File.join(dir, "#{name}.sh")
+      File.write(path, "#!/bin/sh\n#{body}\n")
+      FileUtils.chmod(0o755, path)
+      [path]
+    end
+    hang = lambda do |name|
+      # `cat` opening a FIFO nobody ever writes blocks in open(2), at no CPU.
+      mk.call(name, "echo $$ > #{dir.shellescape}/#{name}.pid\necho #{name} > #{started.shellescape}\n" \
+                    "exec cat #{never.shellescape} >/dev/null")
+    end
+    fixture = [["quick-one", mk.call("quick-one", "exit 0")], ["hang-one", hang.call("hang-one")],
+               ["hang-two", hang.call("hang-two")]]
+    timings = File.join(dir, "timings.jsonl")
+    File.write(timings, [["quick-one", 100], ["hang-one", 50], ["hang-two", 10]].map do |(l, s)|
+      JSON.generate("label" => l, "wall_s" => s)
+    end.join("\n") + "\n")
+    out_path = File.join(dir, "gate.out")
+    # O_RDWR: opening never blocks, and a reader that is also a writer never
+    # sees EOF, so each announcement is one line to wait for.
+    reader = File.open(started, File::RDWR)
+    pid = fork do
+      $stdout.reopen(out_path, "w")
+      $stderr.reopen($stdout)
+      $stdout.sync = true
+      $stderr.sync = true
+      code = begin
+        run_checks(fixture, root: dir, chdir: dir, io: $stdout, err: $stderr, jobs: 2, timings: timings)
+        0
+      rescue SignalException => e
+        128 + e.signo
+      rescue Exception # any other way out is a failure code, never a pass
+        1
+      end
+      $stdout.flush
+      $stderr.flush
+      exit!(code)
+    end
+    waiter = Process.detach(pid)
+    begin
+      seen = +""
+      deadline = ReapTags.monotonic + 60
+      while seen.lines.size < 2 && (left = deadline - ReapTags.monotonic).positive?
+        next unless reader.wait_readable(left)
+
+        chunk = reader.read_nonblock(4096, exception: false)
+        seen << chunk if chunk.is_a?(String)
+      end
+      names = seen.lines.map(&:strip).sort
+      fail_with.call("both hanging checks never announced themselves (#{names.inspect})") unless names == %w[hang-one hang-two]
+      Process.kill("TERM", pid)
+      status = waiter.join(60)&.value
+      fail_with.call("the gate did not exit within 60 s of SIGTERM") if status.nil?
+      out = File.exist?(out_path) ? File.read(out_path) : ""
+      running = out.lines.grep(/\A  - /).map { |l| l[/\A  - (\S+)/, 1] }.sort
+      fail_with.call("run_checks did not re-raise SIGTERM (status #{status.inspect}; the fork maps it to 143)") unless
+        status&.exitstatus == 128 + 15
+      fail_with.call("no INTERRUPTED line naming SIGTERM (#{out.inspect})") unless out.include?("INTERRUPTED by SIGTERM")
+      fail_with.call("the still-running list is #{running.inspect}, want exactly [hang-one, hang-two]") unless
+        running == %w[hang-one hang-two]
+      fail_with.call("the report carries no Fix: (#{out.inspect})") unless out.include?("Fix:")
+      %w[hang-one hang-two].each do |n|
+        hp = File.read(File.join(dir, "#{n}.pid")).to_i rescue 0
+        # Only the fixture's own `cat` counts, never a recycled pid.
+        mine = hp.positive? && (File.binread("/proc/#{hp}/cmdline").include?(never) rescue false)
+        state = mine ? (File.read("/proc/#{hp}/stat")[/\) (\S)/, 1] rescue nil) : nil
+        fail_with.call("#{n}'s process #{hp} is still running (state #{state})") if hp.positive? && state && state != "Z"
+      end
+    ensure
+      if waiter.alive?
+        Process.kill("KILL", pid) rescue nil
+        waiter.join(10)
+      end
+      # Only a process still running the fixture's `cat` (never a recycled pid).
+      %w[hang-one hang-two].each do |n|
+        hp = File.read(File.join(dir, "#{n}.pid")).to_i rescue 0
+        mine = hp.positive? && (File.binread("/proc/#{hp}/cmdline").include?(never) rescue false)
+        Process.kill("KILL", hp) if mine
+      rescue Errno::ESRCH
+        nil
+      end
+      reader.close
+    end
+  end
+  good
+end
+
+# --self-test group delegate-<installer> (DND-1007): case 4b for ONE
+# SELF_TEST_DELEGATES entry. The assertion is unchanged; the installer's run
+# and the delegated suite's run now go at once instead of one after the
+# other, and each entry is its own gate check.
+#
+# Case 4b's duplicated work (each delegated suite also runs as its own
+# discovered check) is an OWNER decision raised by DND-1007, not taken here:
+# a check that looks redundant is escalated to Cody (owner approval policy
+# item 5). Nothing is dropped, skipped or deduplicated.
+#
+# 4b. A SELF_TEST_DELEGATES value must be the suite the installer ACTUALLY
+#     execs, not merely some other path that happens to be covered — case 4
+#     only checks "the named path is covered by something", so a delegate
+#     entry pointing at a real-but-wrong suite would read as "installer
+#     covered" while the installer's own suite silently goes unrun. That is
+#     this ticket's exact class, one level up in its own bookkeeping.
+#
+#     A textual "does the installer's source mention this path?" check was
+#     tried first and rejected: both real installers build their suite path
+#     via variable interpolation / File.join (`"${SCRIPT_DIR}/test/…"`,
+#     `File.join(repo_dir, "ai", "inbox", …)`), so the literal delegate
+#     string never appears on the line that actually execs it — a substring
+#     search only passed today because a Fix:/error message elsewhere
+#     happens to spell the same path, which proves nothing about what the
+#     installer runs. Verify BEHAVIOR instead: run `<installer> --self-test`
+#     and the delegated suite directly, then assert the installer's captured
+#     output contains the delegate's OWN verdict line (`VERDICT: PASS (N
+#     cases…)`, unique per suite by case count/wording) — not just "both
+#     happened to pass", which two unrelated always-green suites would also
+#     satisfy, but "the installer's run really is this suite's run" (both
+#     installers either `exec` the suite directly or `bash` it without
+#     redirecting output, so its own verdict line passes straight through).
+def self_test_delegate(script, delegate)
+  ok = true
+  script_path = File.join(CUSTOM_DIR, script)
+  unless File.file?(script_path) && File.executable?(script_path)
+    # A group that checked nothing must not read as a pass (core's case 4
+    # flags the same gap; this group says so for itself).
+    warn "self-test: FAIL — SELF_TEST_DELEGATES names #{script.inspect}, which is not an " \
+         "executable file, so its delegation cannot be verified. Fix: restore the installer " \
+         "or remove its SELF_TEST_DELEGATES entry."
+    return false
+  end
+
+  runs = [[script, "--self-test"], [delegate]].map { |argv| Thread.new { run_one(argv) } }
+  (installer_ok, installer_out), (delegate_ok, delegate_out) = runs.map(&:value)
+  verdict = delegate_out.to_s.lines.find { |l| l =~ /^\s*VERDICT:/i }
+  unless installer_ok && delegate_ok && verdict && installer_out.include?(verdict.strip)
+    warn "self-test: FAIL — SELF_TEST_DELEGATES[#{script.inspect}] = " \
+         "#{delegate.inspect}, but `#{script} --self-test`'s output does " \
+         "not contain that suite's own verdict line (#{verdict.inspect}) — " \
+         "the delegation is unverified, so the installer's real self-test " \
+         "suite could be going unrun. (installer_ok=#{installer_ok}, " \
+         "delegate_ok=#{delegate_ok}, installer output tail: " \
+         "#{installer_out.to_s.lines.last(5).join.inspect})"
+    ok = false
+  end
+  ok
+end
+
+# --self-test group reap (DND-1007 split): case 13 (DND-818), the per-check
+# leak reap. Unchanged; it is its own group because it is the next-largest
+# cost after case 4b (about 15 s alone, measured 2026-09-30).
+def self_test_reap
+  ok = true
+
+  # 13 (DND-818). A check that leaves a process running FAILS, in the run that
+  #    leaked it, naming the process -- and the process is gone afterwards.
+  #    Before this, a leak was only ever caught by check-inbox-mock-orphans,
+  #    by name (blind to anything not called mock-athena-inbox-client.rb) and
+  #    after a 60s margin, so a leak in one gate run turned the NEXT gate run
+  #    on the machine red. The leak is a grandchild whose parent exits first,
+  #    so it is reparented: only the tag can still tie it to its check.
+  Dir.mktmpdir("harness-gate-selftest-reap") do |dir|
+    expect = lambda do |cond, msg|
+      unless cond
+        warn "self-test: FAIL — per-check reap (DND-818): #{msg}"
+        ok = false
+      end
+    end
+    pidfile = File.join(dir, "leak.pid")
+    leaky = File.join(dir, "leaky.sh")
+    File.write(leaky, "#!/bin/sh\nsh -c 'sleep 307 >/dev/null 2>&1 & echo $! >\"$0\"' \"$1\"\nexit 0\n")
+    # brief.sh FIFO: leaves a child that is still alive when the check exits
+    # and ends on its own once FIFO is written (DND-1356: an event, where it
+    # used to be `sleep 1` against the 5 s grace, a race a slow host loses).
+    brief = File.join(dir, "brief.sh")
+    File.write(brief, "#!/bin/sh\n(read _x < \"$1\") >/dev/null 2>&1 &\nexit 0\n")
+    [leaky, brief].each { |p| FileUtils.chmod(0o755, p) }
+    # run_brief -> [ok, out, alive_at_sweep, grace_seen]. For this one call
+    # the sweep records the grace run_one asked for and runs it as a hang cap
+    # (600 s), and its FIRST scan that finds the child releases it, returning
+    # the child as still alive. So the sweep's grace wait is what must see the
+    # child go: a sweep that killed at once would find it and fail the check,
+    # and a slow host only makes the wait longer, never the verdict different.
+    brief_n = 0
+    run_brief = lambda do
+      brief_n += 1
+      fifo = File.join(dir, "brief-#{brief_n}.fifo")
+      File.mkfifo(fifo)
+      seen = { alive: false, grace: nil }
+      writer = nil
+      real_reap = ReapTags.method(:reap)
+      real_tp = ReapTags.method(:tagged_pids)
+      ReapTags.define_singleton_method(:tagged_pids) do |*a, **k|
+        found = real_tp.call(*a, **k)
+        if !found.empty? && writer.nil?
+          seen[:alive] = true
+          writer = Thread.new { File.open(fifo, "w") { |f| f.write("go\n") } }
+        end
+        found
+      end
+      ReapTags.define_singleton_method(:reap) do |tag, grace: ReapTags::DEFAULT_GRACE_S, **kw|
+        seen[:grace] = grace
+        real_reap.call(tag, grace: grace.positive? ? 600 : grace, **kw)
+      end
+      begin
+        r_ok, r_out = run_one([brief, fifo], chdir: dir)
+      ensure
+        ReapTags.define_singleton_method(:reap, real_reap)
+        ReapTags.define_singleton_method(:tagged_pids, real_tp)
+        if writer.nil?
+          # The sweep never saw the child (a failing run). Release it anyway,
+          # without blocking: with no reader the open is ENXIO, which is fine.
+          File.open(fifo, File::WRONLY | File::NONBLOCK) { |f| f.write("go\n") } rescue nil
+        elsif !writer.join(10)
+          # The child never opened the FIFO: unblock the writer, never hang.
+          File.open(fifo, File::RDONLY | File::NONBLOCK) { writer.join(10) } rescue nil
+          writer.kill
+        end
+      end
+      [r_ok, r_out, seen[:alive], seen[:grace]]
+    end
+
+    leak_ok, leak_out = run_one([leaky, pidfile], chdir: dir)
+    leak_pid = File.exist?(pidfile) ? File.read(pidfile).strip.to_i : 0
+    alive = leak_pid.positive? && begin
+      Process.kill(0, leak_pid)
+      true
+    rescue Errno::ESRCH
+      false
+    end
+    expect.call(!leak_ok, "a check that exited 0 but left `sleep 307` running was reported PASS")
+    expect.call(leak_out.to_s.include?("left 1 process(es) running") && leak_out.to_s.include?("sleep 307") &&
+                leak_out.to_s.include?("Fix:"),
+                "the failure does not name the leaked process with a Fix: (#{leak_out.inspect})")
+    expect.call(leak_pid.positive? && !alive, "the leaked process (pid #{leak_pid}) is still alive after the check")
+    Process.kill("KILL", leak_pid) if alive
+
+    # A child that finishes inside the grace period is not a leak.
+    brief_ok, brief_out, brief_alive, brief_grace = run_brief.call
+    expect.call(brief_grace == ReapTags::DEFAULT_GRACE_S,
+                "a check that returned was swept with grace #{brief_grace.inspect}, not DEFAULT_GRACE_S")
+    expect.call(brief_alive, "the brief child was already gone when the sweep began, so the grace was never exercised")
+    expect.call(brief_ok, "a child that exits during the grace period was called a leak (#{brief_out.inspect})")
+
+    # Another run's tagged process (a sibling gate) is never touched.
+    other_tag = ReapTags.new_tag("selftest-sibling")
+    sib = Process.spawn(ReapTags.env_with(other_tag), "sleep", "308", out: File::NULL, err: File::NULL)
+    begin
+      sib_ok, = run_brief.call
+      sib_alive = begin
+        Process.kill(0, sib)
+        true
+      rescue Errno::ESRCH
+        false
+      end
+      expect.call(sib_ok && sib_alive, "a sibling run's tagged process was reaped by this check's sweep")
+    ensure
+      Process.kill("KILL", sib) rescue nil
+      Process.wait(sib) rescue nil
+    end
+
+    # DND-1016: a tagged process caught inside execve is still found. Its
+    # environ reads empty (or is cut short) mid-exec; the old scan read that
+    # as untagged and missed this spinner in 11-15% of scans (22, 29 and 31 of
+    # 200 in three runs), so a leak caught mid-exec by the sweep outlived it.
+    spin = File.join(dir, "spin.sh")
+    File.write(spin, "#!/bin/bash\nexec /bin/bash \"$0\"\n")
+    FileUtils.chmod(0o755, spin)
+    spin_tag = ReapTags.new_tag("selftest-exec-spinner")
+    spinner = Process.spawn(ReapTags.env_with(spin_tag), spin, out: File::NULL, err: File::NULL)
+    begin
+      # Until its first exec the child is a fork of this gate, with this
+      # gate's (untagged) environment: it does not carry the tag yet, so
+      # scanning then would be measuring the spawn, not the exec window.
+      spawned_by = ReapTags.monotonic + 5
+      until (File.binread("/proc/#{spinner}/cmdline").include?(spin) rescue false) || ReapTags.monotonic > spawned_by
+        sleep 0.01
+      end
+      misses = 200.times.count { !ReapTags.tagged_pids(spin_tag).include?(spinner) }
+      expect.call(misses.zero?, "a tagged process that re-execs itself was missing from #{misses} of 200 scans " \
+                                "(a mid-exec environ read counted as untagged)")
+    ensure
+      Process.kill("KILL", spinner) rescue nil
+      Process.wait(spinner) rescue nil
+    end
+
+    # A process whose bounds never settle (0 0 on a fixture /proc) cannot be
+    # told: the scan raises ScanError naming it, never returns "none left".
+    fake = File.join(dir, "fakeproc", "4202")
+    FileUtils.mkdir_p(fake)
+    File.write(File.join(fake, "stat"), "4202 (fake) S#{' 0' * 18} 100#{' 0' * 27} 0 0 0\n")
+    File.write(File.join(fake, "status"), "Name:\tfake\nUid:\t#{Process.uid}\t#{Process.uid}\t#{Process.uid}\t#{Process.uid}\n")
+    File.write(File.join(fake, "environ"), "#{ReapTags::VAR}=#{spin_tag}\0")
+    File.write(File.join(fake, "cmdline"), "fake\0")
+    unknown_err = begin
+      ReapTags.tagged_pids(spin_tag, proc_root: File.dirname(fake), since: 0, settle: 0.2)
+      nil
+    rescue ReapTags::ScanError => e
+      e.message
+    end
+    expect.call(unknown_err.to_s.include?("pid=4202") && unknown_err.to_s.include?("UNKNOWN") &&
+                unknown_err.to_s.include?("Fix:"),
+                "a pid whose environment bounds never settle was not reported as UNKNOWN (#{unknown_err.inspect})")
+
+    # ...and run_one turns a sweep that could not look into a FAILED check,
+    # never "nothing leaked". The sweep is stubbed to raise for one call.
+    real_reap = ReapTags.method(:reap)
+    ReapTags.define_singleton_method(:reap) { |*_a, **_k| raise ReapTags::ScanError, "probe pid=4202 UNKNOWN. Fix: none" }
+    begin
+      blind_ok, blind_out = run_one(["true"], chdir: dir)
+    ensure
+      ReapTags.define_singleton_method(:reap, real_reap)
+    end
+    expect.call(!blind_ok && blind_out.to_s.include?("could not look") && blind_out.to_s.include?("pid=4202"),
+                "a leak sweep that could not look was reported as a PASS (#{blind_ok.inspect}, #{blind_out.inspect})")
+
+    # A PARTIAL scan (one pid never settles) still kills the matches it
+    # confirmed, then raises with them in `killed`; dropping them would leave
+    # the very orphan DND-1016 is about. tagged_pids is stubbed to report a
+    # real tagged sleep plus an unknown.
+    part_tag = ReapTags.new_tag("selftest-partial")
+    part = Process.spawn(ReapTags.env_with(part_tag), "sleep", "311", out: File::NULL, err: File::NULL)
+    real_tp = ReapTags.method(:tagged_pids)
+    ReapTags.define_singleton_method(:tagged_pids) do |*_a, **_k|
+      found = begin
+        Process.kill(0, part)
+        Process.waitpid(part, Process::WNOHANG) ? [] : [part]
+      rescue Errno::ESRCH, Errno::ECHILD
+        []
+      end
+      raise ReapTags::ScanError.new("pid=4203 UNKNOWN. Fix: none", found: found)
+    end
+    part_err = begin
+      ReapTags.reap(part_tag, grace: 0)
+      nil
+    rescue ReapTags::ScanError => e
+      e
+    ensure
+      ReapTags.define_singleton_method(:tagged_pids, real_tp)
+    end
+    part_dead = begin
+      Process.waitpid(part, Process::WNOHANG) || !Process.kill(0, part)
+    rescue Errno::ESRCH, Errno::ECHILD
+      true
+    end
+    expect.call(part_err && part_err.killed.any? { |(p, _)| p == part } && part_dead,
+                "a partial scan did not kill the tagged process it confirmed before failing " \
+                "(error: #{part_err.inspect}, killed: #{part_err&.killed.inspect}, dead: #{part_dead.inspect})")
+    unless part_dead
+      Process.kill("KILL", part) rescue nil
+      Process.wait(part) rescue nil
+    end
+  end
+  ok
+end
+
+# --self-test group core (DND-1007 split): every case but 4b and 13
+# (DND-818). Returns true when every assertion holds.
+def self_test_core
   ok = true
 
   # 1. Every declared check exists and is executable.
@@ -1601,47 +2715,6 @@ def run_self_test
     warn "self-test: FAIL — installer self-test(s) on disk but not run by the " \
          "gate: #{unrun.join(', ')}"
     ok = false
-  end
-
-  # 4b. A SELF_TEST_DELEGATES value must be the suite the installer ACTUALLY
-  #     execs, not merely some other path that happens to be covered — case 4
-  #     only checks "the named path is covered by something", so a delegate
-  #     entry pointing at a real-but-wrong suite would read as "installer
-  #     covered" while the installer's own suite silently goes unrun. That is
-  #     this ticket's exact class, one level up in its own bookkeeping.
-  #
-  #     A textual "does the installer's source mention this path?" check was
-  #     tried first and rejected: both real installers build their suite path
-  #     via variable interpolation / File.join (`"${SCRIPT_DIR}/test/…"`,
-  #     `File.join(repo_dir, "ai", "inbox", …)`), so the literal delegate
-  #     string never appears on the line that actually execs it — a substring
-  #     search only passed today because a Fix:/error message elsewhere
-  #     happens to spell the same path, which proves nothing about what the
-  #     installer runs. Verify BEHAVIOR instead: run `<installer> --self-test`
-  #     and the delegated suite directly, then assert the installer's captured
-  #     output contains the delegate's OWN verdict line (`VERDICT: PASS (N
-  #     cases…)`, unique per suite by case count/wording) — not just "both
-  #     happened to pass", which two unrelated always-green suites would also
-  #     satisfy, but "the installer's run really is this suite's run" (both
-  #     installers either `exec` the suite directly or `bash` it without
-  #     redirecting output, so its own verdict line passes straight through).
-  SELF_TEST_DELEGATES.each do |script, delegate|
-    script_path = File.join(CUSTOM_DIR, script)
-    next unless File.file?(script_path) && File.executable?(script_path) # case 4 flags this
-
-    installer_ok, installer_out = run_one([script, "--self-test"])
-    delegate_ok, delegate_out = run_one([delegate])
-    verdict = delegate_out.to_s.lines.find { |l| l =~ /^\s*VERDICT:/i }
-    unless installer_ok && delegate_ok && verdict && installer_out.include?(verdict.strip)
-      warn "self-test: FAIL — SELF_TEST_DELEGATES[#{script.inspect}] = " \
-           "#{delegate.inspect}, but `#{script} --self-test`'s output does " \
-           "not contain that suite's own verdict line (#{verdict.inspect}) — " \
-           "the delegation is unverified, so the installer's real self-test " \
-           "suite could be going unrun. (installer_ok=#{installer_ok}, " \
-           "delegate_ok=#{delegate_ok}, installer output tail: " \
-           "#{installer_out.to_s.lines.last(5).join.inspect})"
-      ok = false
-    end
   end
 
   # Cases 5, 6, 6b and 6c below all plant a fixture suite under a
@@ -1964,7 +3037,7 @@ def run_self_test
     # And the dispatch-level rescue turns that into a Fix:-carrying failure,
     # not a bare Ruby backtrace, end to end via a real subprocess.
     env = { "PATH" => "#{fake_bin}:#{old_path}" }
-    out, status = Open3.capture2e(env, "ruby", File.join(CUSTOM_DIR, "ai/bin/harness-gate"),
+    out, status = Open3.capture2e(env, RbConfig.ruby, File.join(CUSTOM_DIR, "ai/bin/harness-gate"),
                                    "--list", chdir: CUSTOM_DIR, stdin_data: "")
     if status.success?
       warn "self-test: FAIL — harness-gate --list exited 0 despite a " \
@@ -2521,6 +3594,64 @@ def run_self_test
     end
   end
 
+  # 8c. The scratch-HOME sentinel (DND-1316) fires through run_one. A fake asdf
+  #     `shims/ruby` that dies unless HOME is the gate's is on the check's PATH.
+  #     A suite that runs `ruby` through PATH under a scratch HOME, swallows the
+  #     shim's exit 126 and exits 0 (DND-1203's vacuous pass) must FAIL with a
+  #     Fix:; one that resolves the real binary under the real HOME first, then
+  #     uses it under the scratch HOME, must pass.
+  Dir.mktmpdir("harness-gate-sentinel-case") do |tmp|
+    dir = File.realpath(tmp)
+    shims = File.join(dir, "fake-asdf", "shims")
+    FileUtils.mkdir_p(shims)
+    File.write(File.join(shims, "ruby"),
+               "#!/bin/bash\n[ \"$HOME\" = #{ENV.fetch('HOME', '').shellescape} ] || " \
+               "{ echo 'No version is set for command ruby' >&2; exit 126; }\nexec #{RbConfig.ruby.shellescape} \"$@\"\n")
+    flagged = File.join(dir, "flagged.sh")
+    resolved = File.join(dir, "resolved.sh")
+    File.write(flagged, "#!/bin/bash\nmkdir -p scratch\nHOME=\"$PWD/scratch\" ruby -e 0 || echo \"shim exit $?\"\nexit 0\n")
+    File.write(resolved, "#!/bin/bash\nmkdir -p scratch\nR=\"$(ruby -e 'print RbConfig.ruby')\" || exit 1\n" \
+                         "HOME=\"$PWD/scratch\" \"$R\" -e 'puts :booted'\n")
+    [File.join(shims, "ruby"), flagged, resolved].each { |p| FileUtils.chmod(0o755, p) }
+    env = { "PATH" => "#{shims}:#{ENV.fetch('PATH', '')}" }
+
+    f_ok, f_out = run_one([flagged], chdir: dir, env: env)
+    unless !f_ok && f_out.include?("shim exit 126") && f_out.include?("`ruby` with HOME=#{File.join(dir, 'scratch')}") &&
+           f_out.include?("DND-1316") && f_out.include?("Fix:")
+      warn "self-test: FAIL — case 8c: a suite that ran `ruby` through PATH under a scratch HOME was not " \
+           "failed by the sentinel with a Fix: (ok=#{f_ok}): #{f_out.inspect}"
+      ok = false
+    end
+    r_ok, r_out = run_one([resolved], chdir: dir, env: env)
+    unless r_ok && r_out.include?("booted")
+      warn "self-test: FAIL — case 8c: a suite that resolved the real ruby first was failed: #{r_out.inspect}"
+      ok = false
+    end
+
+    # A gate HOME the sentinel cannot anchor: the check fails UNRUN, with a Fix:.
+    marker = File.join(dir, "ran")
+    touch = File.join(dir, "touch.sh")
+    File.write(touch, "#!/bin/sh\n: > #{marker.shellescape}\n")
+    FileUtils.chmod(0o755, touch)
+    s_ok, s_out = with_env("HOME" => "relative-home") { run_one([touch], chdir: dir) }
+    unless !s_ok && !File.exist?(marker) && s_out.include?("was not run") && s_out.include?("Fix:")
+      warn "self-test: FAIL — case 8c: a relative gate HOME did not fail the check unrun with a Fix: " \
+           "(ok=#{s_ok}, ran=#{File.exist?(marker)}): #{s_out.inspect}"
+      ok = false
+    end
+
+    # A check that deletes its sentinel cannot read as clean.
+    wipe = File.join(dir, "wipe.sh")
+    File.write(wipe, "#!/bin/sh\nrm -rf \"${PATH%%:*}\"\nexit 0\n")
+    FileUtils.chmod(0o755, wipe)
+    w_ok, w_out = run_one([wipe], chdir: dir)
+    unless !w_ok && w_out.include?("could not be judged") && w_out.include?("Fix:")
+      warn "self-test: FAIL — case 8c: a check that deleted its sentinel was not failed as " \
+           "could-not-measure (ok=#{w_ok}): #{w_out.inspect}"
+      ok = false
+    end
+  end
+
   # 8b. stash_fixture_optout_env (DND-775) drops exactly the agent-stash layers:
   #     the injection's count and trace2, and every PATH entry whose `git` is
   #     the agent wrapper (by ATHENA_AGENT_BIN or by the wrapper's own text),
@@ -2547,64 +3678,6 @@ def run_self_test
          "entries seeds them with the injection unset inside its own sandbox (see " \
          "ai/test/agent-stash-guard/self-test.sh), it does not get a gate-wide opt-out."
     ok = false
-  end
-
-  # 13 (DND-818). A check that leaves a process running FAILS, in the run that
-  #    leaked it, naming the process -- and the process is gone afterwards.
-  #    Before this, a leak was only ever caught by check-inbox-mock-orphans,
-  #    by name (blind to anything not called mock-athena-inbox-client.rb) and
-  #    after a 60s margin, so a leak in one gate run turned the NEXT gate run
-  #    on the machine red. The leak is a grandchild whose parent exits first,
-  #    so it is reparented: only the tag can still tie it to its check.
-  Dir.mktmpdir("harness-gate-selftest-reap") do |dir|
-    expect = lambda do |cond, msg|
-      unless cond
-        warn "self-test: FAIL — per-check reap (DND-818): #{msg}"
-        ok = false
-      end
-    end
-    pidfile = File.join(dir, "leak.pid")
-    leaky = File.join(dir, "leaky.sh")
-    File.write(leaky, "#!/bin/sh\nsh -c 'sleep 307 >/dev/null 2>&1 & echo $! >\"$0\"' \"$1\"\nexit 0\n")
-    brief = File.join(dir, "brief.sh")
-    File.write(brief, "#!/bin/sh\nsleep 1 >/dev/null 2>&1 &\nexit 0\n")
-    [leaky, brief].each { |p| FileUtils.chmod(0o755, p) }
-
-    leak_ok, leak_out = run_one([leaky, pidfile], chdir: dir)
-    leak_pid = File.exist?(pidfile) ? File.read(pidfile).strip.to_i : 0
-    alive = leak_pid.positive? && begin
-      Process.kill(0, leak_pid)
-      true
-    rescue Errno::ESRCH
-      false
-    end
-    expect.call(!leak_ok, "a check that exited 0 but left `sleep 307` running was reported PASS")
-    expect.call(leak_out.to_s.include?("left 1 process(es) running") && leak_out.to_s.include?("sleep 307") &&
-                leak_out.to_s.include?("Fix:"),
-                "the failure does not name the leaked process with a Fix: (#{leak_out.inspect})")
-    expect.call(leak_pid.positive? && !alive, "the leaked process (pid #{leak_pid}) is still alive after the check")
-    Process.kill("KILL", leak_pid) if alive
-
-    # A child that finishes inside the grace period is not a leak.
-    brief_ok, brief_out = run_one([brief], chdir: dir)
-    expect.call(brief_ok, "a child that exits 1s after its check was called a leak (#{brief_out.inspect})")
-
-    # Another run's tagged process (a sibling gate) is never touched.
-    other_tag = ReapTags.new_tag("selftest-sibling")
-    sib = Process.spawn(ReapTags.env_with(other_tag), "sleep", "308", out: File::NULL, err: File::NULL)
-    begin
-      sib_ok, = run_one([brief], chdir: dir)
-      sib_alive = begin
-        Process.kill(0, sib)
-        true
-      rescue Errno::ESRCH
-        false
-      end
-      expect.call(sib_ok && sib_alive, "a sibling run's tagged process was reaped by this check's sweep")
-    ensure
-      Process.kill("KILL", sib) rescue nil
-      Process.wait(sib) rescue nil
-    end
   end
 
   # 9. The failure report NAMES the failing case even when a chatty suite has
@@ -2676,6 +3749,17 @@ def run_self_test
     expect.call(r[:uncovered].empty? && !failed_inline_coverage?(r), "a STATIC_CHECKS declaration did not cover the tool")
     r = cov.call(red, exceptions: { "ai/bin/fixture-tool" => "model-in-loop: calls claude, never gate-safe" })
     expect.call(r[:uncovered].empty? && !failed_inline_coverage?(r), "a reasoned exception did not cover the tool")
+    # 11b2 (DND-1007). Distinct group argvs of one tool are one tool accounted
+    #      once; the SAME argv declared twice runs one suite twice, an error.
+    groups = [["g1", %w[ai/bin/fixture-tool --self-test --group a]],
+              ["g2", %w[ai/bin/fixture-tool --self-test --group b]]]
+    r = cov.call(red, checks: groups)
+    expect.call(r[:uncovered].empty? && !failed_inline_coverage?(r),
+                "two distinct --group declarations of one tool were refused (#{r.inspect})")
+    r = cov.call(red, checks: [["t1", %w[ai/bin/fixture-tool --self-test]],
+                               ["t2", %w[ai/bin/fixture-tool --self-test]]])
+    expect.call(failed_inline_coverage?(r),
+                "the same --self-test argv declared twice was not an error (#{r.inspect})")
 
     # 11c. Comment-only and near-miss mentions do not make a tool a definer;
     #      test suites are never candidates.
@@ -3097,8 +4181,23 @@ def run_self_test
   #    - one red check fails the run and is reported, in declared order;
   #    - the pre-pool check sees no sibling running, the chained pair keeps its
   #      order, and the final check sees every other check done;
-  #    - four 1 s checks overlap (proof it is parallel at all);
+  #    - four checks ran at once: each waits at a barrier until all four have
+  #      started, so none can finish unless all four were in flight together
+  #      (proof it is parallel at all, whatever the machine's speed; DND-1007
+  #      replaced four `sleep 1` checks timed against `elapsed < 3.0`);
   #    - each check's wall time is printed and recorded.
+  #    And the barrier discriminates: run one check at a time, two barrier
+  #    checks can never both have started, so both FAIL.
+  # barrier_body(started, names, done_mark, polls) -- a check body that waits
+  # until every one of `names` has a start mark, then marks itself done. The
+  # poll count only caps a hang: a correct parallel run opens the barrier as
+  # soon as the last check starts, and a serial run can never open it.
+  barrier_body = lambda do |started_dir, names, done_mark, polls|
+    all = names.map { |n| "[ -e #{File.join(started_dir, n).shellescape} ]" }.join(" && ")
+    "i=0; until #{all}; do i=$((i + 1)); if [ \"$i\" -ge #{polls} ]; then " \
+      "echo 'FAIL: barrier: not every check in #{names.join(' ')} started (the pool is not running them at once)'; " \
+      "exit 1; fi; sleep 0.05; done; touch #{done_mark.shellescape}"
+  end
   Dir.mktmpdir("harness-gate-par") do |dir|
     done = File.join(dir, "done")
     started = File.join(dir, "started")
@@ -3110,25 +4209,24 @@ def run_self_test
       [path]
     end
     count = "ls #{done.shellescape} | wc -l | tr -d ' '"
+    slow = %w[s1 s2 s3 s4]
+    # 1200 polls of 0.05 s: a cap of a minute or more, only ever reached by a hang.
     fixture = [
       ["check-inotify-headroom", mk.call("pre", "sleep 0.3; ls #{started.shellescape} | grep -vx pre | wc -l | tr -d ' ' > #{dir}/pre-saw")],
       ["build-agents --check", mk.call("build", "sleep 0.3; touch #{dir}/built; touch #{done}/build")],
       ["check-agent-size", mk.call("size", "[ -f #{dir}/built ] || exit 1; touch #{done}/size")],
-      ["slow-1", mk.call("s1", "sleep 1; touch #{done}/s1")],
-      ["slow-2", mk.call("s2", "sleep 1; touch #{done}/s2")],
-      ["slow-3", mk.call("s3", "sleep 1; touch #{done}/s3")],
-      ["slow-4", mk.call("s4", "sleep 1; touch #{done}/s4")],
+      *slow.each_with_index.map do |s, i|
+        ["slow-#{i + 1}", mk.call(s, barrier_body.call(started, slow, File.join(done, s), 1200))]
+      end,
       ["red-one", mk.call("red", "echo 'FAIL: fixture case'; touch #{done}/red; exit 1")],
       ["check-inbox-mock-orphans", mk.call("final", "echo $(#{count}) > #{dir}/final-saw")],
     ]
     io = StringIO.new
     timings = File.join(dir, "timings.jsonl")
-    t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     _env, failures = run_checks(fixture, root: dir, chdir: dir, io: io, jobs: 4, timings: timings)
-    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
     ran = Dir.children(done).sort
     want_ran = %w[build red s1 s2 s3 s4 size]
-    lines = io.string.lines.grep(/\s(PASS|FAIL)\s+\d+\.\d+s$/).map { |l| l.split.first }
+    lines = io.string.lines.grep(%r{\s(PASS|FAIL)\s+\d+\.\d+s wall\s+(\d+\.\d+s|n/a) cpu$}).map { |l| l.split.first }
     rows = File.exist?(timings) ? File.readlines(timings).map { |l| JSON.parse(l) } : []
     checks13 = {
       "every pooled check ran once (#{ran.inspect})" => ran == want_ran,
@@ -3137,11 +4235,16 @@ def run_self_test
       "the pre-pool check saw no other check started" => File.read(File.join(dir, "pre-saw")).strip == "0",
       "the final check saw all #{want_ran.size} done" =>
         File.read(File.join(dir, "final-saw")).strip == want_ran.size.to_s,
-      "four 1 s checks overlapped (took #{elapsed.round(2)}s)" => elapsed < 3.0,
+      "all four barrier checks passed, so all four were in flight at once" =>
+        (slow - ran).empty? && failures.none? { |f| f.first.start_with?("slow-") },
       "results printed in declared order with times (#{lines.inspect})" =>
         lines == fixture.map { |(l, _)| l.split.first },
       "one timing row per check (#{rows.size})" =>
         rows.map { |r| r["label"] }.sort == fixture.map(&:first).sort && rows.all? { |r| r["wall_s"].is_a?(Numeric) },
+      "every timing row has a measured cpu_s (#{rows.map { |r| r['cpu_s'] }.inspect})" =>
+        !rows.empty? && rows.all? { |r| r["cpu_s"].is_a?(Numeric) },
+      "every result line carries a measured cpu figure" =>
+        io.string.lines.grep(/\s(PASS|FAIL)\s+\d/).none? { |l| l.include?("n/a cpu") },
     }
     checks13.each do |what, good|
       next if good
@@ -3150,6 +4253,69 @@ def run_self_test
            "CHAINS / FINAL_CHECKS edges, declared-order output, and per-check timing rows."
       ok = false
     end
+  end
+  # The barrier's negative: one worker runs the two checks one after the
+  # other, so the first can never see the second start. Its small poll cap
+  # is safe HERE only because no amount of time lets a serial run pass.
+  Dir.mktmpdir("harness-gate-par-serial") do |dir|
+    started = File.join(dir, "started")
+    FileUtils.mkdir_p(started)
+    pair = %w[b1 b2]
+    fixture = pair.map do |n|
+      path = File.join(dir, "#{n}.sh")
+      File.write(path, "#!/bin/sh\ntouch #{started.shellescape}/#{n}\n" \
+                       "#{barrier_body.call(started, pair, File.join(dir, "#{n}.done"), 4)}\n")
+      FileUtils.chmod(0o755, path)
+      ["barrier-#{n}", [path]]
+    end
+    _env, failures = run_checks(fixture, root: dir, chdir: dir, io: StringIO.new, jobs: 1, timings: File::NULL)
+    unless failures.map(&:first) == %w[barrier-b1] &&
+           failures.first[2].to_s.include?("FAIL: barrier: not every check")
+      warn "self-test: FAIL — case 13 (parallel loop): with one worker the first of two barrier checks " \
+           "must FAIL at the barrier (the second starts only after it ends), got " \
+           "#{failures.map { |f| [f[0], f[2].to_s[0, 80]] }.inspect}. Fix: the barrier fixture must pass " \
+           "only when its checks overlap; restore barrier_body's wait on every start mark."
+      ok = false
+    end
+  end
+
+  # 13d (DND-1007). The gate's own suite runs as independent groups, and
+  # every case runs in exactly one of them, once per gate:
+  #   - HARNESS_GATE_SELF_TEST_GROUPS is core, reap, then one delegate group
+  #     per SELF_TEST_DELEGATES entry, each named once;
+  #   - CHECKS declares each group exactly once, and never the plain
+  #     `--self-test` (which runs every group, so the cases would run twice);
+  #   - case 4b's body lives only in self_test_delegate and case 13
+  #     (DND-818)'s only in self_test_reap, never also in self_test_core;
+  #   - --group is accepted for every group and refused for anything else.
+  want_groups = %w[core reap] + SELF_TEST_DELEGATES.keys.map { |s| self_test_delegate_group(s) }
+  gate_suites = CHECKS.select { |(_, argv)| argv.first == "ai/bin/harness-gate" }.map { |(_, argv)| argv.drop(1) }
+  src = File.read(__FILE__)
+  body = ->(name) { src[/^def #{name}\b.*?^end$/m].to_s }
+  # Built, not written out, so these assertions do not match themselves.
+  reap_mark = ["per-check reap", "(DND-818)"].join(" ")
+  checks13d = {
+    "the groups are core, reap and one per delegate, each once (#{HARNESS_GATE_SELF_TEST_GROUPS.inspect})" =>
+      HARNESS_GATE_SELF_TEST_GROUPS == want_groups && want_groups.uniq == want_groups,
+    "CHECKS runs each group once and never the plain --self-test (#{gate_suites.inspect})" =>
+      gate_suites == want_groups.map { |g| ["--self-test", "--group", g] },
+    "case 4b is only in self_test_delegate" =>
+      body.call("self_test_delegate").include?("SELF_TEST_DELEGATES[#{'#'}{script.inspect}]") &&
+      !body.call("self_test_core").include?("SELF_TEST_DELEGATES[#{'#'}{script.inspect}]"),
+    "case 13 (DND-818) is only in self_test_reap" =>
+      body.call("self_test_reap").include?(reap_mark) && !body.call("self_test_core").include?(reap_mark),
+    "--group accepts every group" =>
+      want_groups.all? { |g| parse_cli(["--self-test", "--group", g])[1].nil? },
+    "--group refuses an unknown group and a --group without --self-test" =>
+      parse_cli(%w[--self-test --group nope])[1].to_s.include?("nope") &&
+      parse_cli(%w[--group core])[1].to_s.include?("--self-test"),
+  }
+  checks13d.each do |what, good|
+    next if good
+
+    warn "self-test: FAIL — case 13d (self-test groups): #{what}. Fix: keep HARNESS_GATE_SELF_TEST_GROUPS, " \
+         "the STATIC_CHECKS entries built from it, and each case's body in exactly one group method."
+    ok = false
   end
 
   # 13b. The schedule is keyed by label, so the real CHECKS must have unique
@@ -3231,12 +4397,29 @@ def run_self_test
     next
   end
 
+  # 14b-16 (DND-1005): --jobs, per-check CPU attribution, and a hanging
+  # check reported by name. Each is its own method, documented there.
+  ok = false unless self_test_jobs_flag
+  ok = false unless self_test_cpu_attribution
+  ok = false unless self_test_hang_named
+
+  ok
+end
+
+# Runs one --self-test group, or every group in HARNESS_GATE_SELF_TEST_GROUPS
+# order when `group` is nil (the plain `--self-test`). Returns the exit code.
+def run_self_test(group = nil)
+  groups = group ? [group] : HARNESS_GATE_SELF_TEST_GROUPS
+  ok = true
+  groups.each { |g| ok = false unless self_test_group(g) }
+  scope = group ? "group #{group}" : "all #{groups.size} groups"
+
   if ok
-    puts "harness-gate: self-test OK (#{CHECKS.size} checks declared, " \
+    puts "harness-gate: self-test OK (#{scope}; #{CHECKS.size} checks declared, " \
          "#{discover_self_tests.size} of them discovered self-test suites)"
     0
   else
-    warn "harness-gate: self-test FAILED"
+    warn "harness-gate: self-test FAILED (#{scope})"
     warn "  Fix: repair CHECKS in ai/bin/harness-gate so every declared check is " \
          "executable and every hook is invoked via its dedicated .self-test.sh " \
          "script (never `<hook>.sh --self-test`, which is a false green); keep " \
@@ -3246,14 +4429,28 @@ def run_self_test
          "suite red/green, and labeling distinct suites uniquely; keep " \
          "self_tests_found?/stray_test_scripts correct against a fixture " \
          "root; keep run_one reporting the child's exit status with " \
-         "stdin closed; and keep inline_self_test_coverage naming every " \
+         "stdin closed; keep run_one failing a check its scratch-HOME " \
+         "sentinel caught (case 8c, ai/lib/scratch_home_sentinel.rb); and keep inline_self_test_coverage naming every " \
          "first-party tool whose inline --self-test the gate never runs (case " \
          "11: declare it in STATIC_CHECKS, map it in " \
          "INLINE_SELF_TEST_COVERED_BY, or except it with a real reason); and " \
          "keep parse_cli refusing every undeclared argument with exit 2 " \
-         "(case 12, ai/lib/strict_argv.rb)."
+         "(case 12, ai/lib/strict_argv.rb); and keep every self-test case in " \
+         "exactly one --group, each group declared once in CHECKS (case 13d)."
     1
   end
+end
+
+# The group a --group name selects, run. Names come from
+# HARNESS_GATE_SELF_TEST_GROUPS, which parse_cli has already checked.
+def self_test_group(name)
+  return self_test_core if name == "core"
+  return self_test_reap if name == "reap"
+
+  script = SELF_TEST_DELEGATES.keys.find { |s| self_test_delegate_group(s) == name }
+  raise ArgumentError, "harness-gate: unknown --self-test group #{name.inspect}" unless script
+
+  self_test_delegate(script, SELF_TEST_DELEGATES[script])
 end
 
 if ARGV.include?("--help") || ARGV.include?("-h")
@@ -3269,9 +4466,26 @@ if ARGV.include?("--help") || ARGV.include?("-h")
                                        from exit 3 elsewhere in this repo,
                                        which means "could not measure" —
                                        origin WAS read here)
+      ai/bin/harness-gate --jobs N     the same, on N workers. --jobs wins over
+                                       the HARNESS_GATE_JOBS variable; with
+                                       neither, half the cores (1 to 8). Both
+                                       must be a positive integer, else exit 2.
+                                       --jobs 1 runs the checks one at a time.
+                                       Each result line carries wall and CPU
+                                       seconds; per-check timings are appended
+                                       to $XDG_STATE_HOME/athena/harness-gate/
+                                       timings.jsonl (schema: the script's
+                                       header). A signal during the checks
+                                       prints INTERRUPTED with every check
+                                       still running, by name.
       ai/bin/harness-gate --list       list the checks without running them
       ai/bin/harness-gate --self-test  assert the declared check list stays correct
-                                       and complete (no model)
+                                       and complete (no model); runs every group
+      ai/bin/harness-gate --self-test --group NAME
+                                       run one self-test group: core, reap, or
+                                       delegate-<installer> (one per
+                                       SELF_TEST_DELEGATES entry). The gate runs
+                                       each group as its own check.
       ai/bin/harness-gate --help       this text
 
     Run the copy that belongs to the tree you are about to commit in —
@@ -3287,18 +4501,24 @@ cli, reason = parse_cli(ARGV)
 if reason
   warn "harness-gate: usage error — #{reason}."
   warn "  Fix: re-run with only the flags `ai/bin/harness-gate --help` lists: no " \
-       "argument (run the gate), --list, or --self-test. An unrecognised " \
+       "argument or `--jobs N` (run the gate), --list, or --self-test [--group NAME]. An unrecognised " \
        "argument is refused, not ignored: ignoring it would run a different " \
        "mode than the one you asked for."
   exit 2
 end
 
+mode = gate_mode(cli)
+# The worker count is validated before anything runs, whether it came from
+# --jobs or HARNESS_GATE_JOBS: a bad value is exit 2, never a gate run.
+cli_jobs = mode == :gate ? resolve_gate_jobs(cli["--jobs"]) : nil
+exit 2 if mode == :gate && cli_jobs.nil?
+
 begin
   exit(
-    case gate_mode(cli)
-    when :self_test then run_self_test
+    case mode
+    when :self_test then run_self_test(cli["--group"])
     when :list then run_list
-    else run_gate
+    else run_gate(jobs: cli_jobs)
     end
   )
 rescue TreeIdentityError => e

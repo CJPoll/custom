@@ -30,7 +30,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby jq; do
+[ -x /usr/bin/ruby ] || { echo "judgment-label self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in jq; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "judgment-label self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 [ -x /usr/bin/script ] || { echo "judgment-label self-test: FAIL -- /usr/bin/script (util-linux) is missing"; echo "  Fix: install util-linux; the confirm step needs a terminal and this suite drives one with script(1)."; exit 1; }
@@ -46,7 +47,7 @@ trap cleanup EXIT INT TERM
 # ruby_eq NAME EXPECTED RUBY-EXPR -- evaluate EXPR against the domain lib.
 ruby_eq() {
   local got
-  got="$(ruby -r "${LIBRB}" -e "puts(begin; $3; rescue JudgmentLabel::InputError => e; 'InputError: ' + e.message; end)" 2>&1)"
+  got="$(/usr/bin/ruby -r "${LIBRB}" -e "puts(begin; $3; rescue JudgmentLabel::InputError => e; 'InputError: ' + e.message; end)" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 
@@ -164,7 +165,7 @@ CTXRB="${AI}/lib/judgment_context.rb"
 # ctx_eq NAME EXPECTED RUBY-EXPR -- evaluate EXPR against the context builder.
 ctx_eq() {
   local got
-  got="$(ruby -r "${CTXRB}" -e "puts(begin; $3; end)" 2>&1)"
+  got="$(/usr/bin/ruby -r "${CTXRB}" -e "puts(begin; $3; end)" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 ATHENA_ID="U0ATHENA01"
@@ -260,7 +261,7 @@ stub_dir() {
 # ad_eq NAME EXPECTED DIR -- one read of A_TOP through the adapter in DIR.
 ad_eq() {
   local got
-  got="$(ruby -r "${ADRB}" -e "r = JudgmentContextSlack.new('$3', timeout_s: 1).read(JudgmentContext.request(${A_TOP})); puts(r.first == :ok ? 'ok ' + r[2].join(',') + ' ' + r[1].size.to_s : 'error: ' + r.last)" 2>&1)"
+  got="$(/usr/bin/ruby -r "${ADRB}" -e "r = JudgmentContextSlack.new('$3', timeout_s: 1).read(JudgmentContext.request(${A_TOP})); puts(r.first == :ok ? 'ok ' + r[2].join(',') + ' ' + r[1].size.to_s : 'error: ' + r.last)" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 WHO_OK='printf "user:    athena\nuser_id: U0ATHENA01\nbot_id:  B0ATHENA01\n"'
@@ -280,7 +281,7 @@ stub_dir "${TMP}/ad-die" "${WHO_OK}" "echo 'athena-slack: conversations.history 
 ad_eq "adapter: a reader failure carries the reader's own reason" "error: conversations.history failed: channel_not_found" "${TMP}/ad-die"
 # Transient whoami failure: fail once, then succeed. Only a success is kept.
 stub_dir "${TMP}/ad-flaky" "if [ -e '${TMP}/ad-flaky/seen' ]; then ${WHO_OK}; else touch '${TMP}/ad-flaky/seen'; echo 'athena-slack: auth.test failed: timeout' >&2; exit 1; fi" "exit 0"
-got="$(ruby -r "${ADRB}" -e "a = JudgmentContextSlack.new('${TMP}/ad-flaky', timeout_s: 5); q = JudgmentContext.request(${A_TOP}); puts [a.read(q).first, a.read(q).first].join(' ')" 2>&1)"
+got="$(/usr/bin/ruby -r "${ADRB}" -e "a = JudgmentContextSlack.new('${TMP}/ad-flaky', timeout_s: 5); q = JudgmentContext.request(${A_TOP}); puts [a.read(q).first, a.read(q).first].join(' ')" 2>&1)"
 eq "adapter: one transient whoami failure does not blank the later reads" "${got}" "error ok"
 
 ruby_eq "owner: a Slack user id passes" "nil" 'JudgmentLabel.owner_problem("UFAKE00001").inspect'
@@ -315,6 +316,12 @@ MAIL="${ROOT}/agent-mail/walt_ui/to-custom"
 mkdir -p "${MAIL}/.acked" "${MAIL}/tmp"
 LABELS="${TMP}/evals/slack-routing-labels.jsonl"
 SLACK="${ROOT}/walt_ui-slack.jsonl"
+# The machine's own inbox root must never reach a case. judgment-eval's
+# slack_routing reads $ATHENA_INBOX_ROOT (else ~/.local/share/athena) when
+# --inbox-root is absent, so a case that forgot the flag passed on a machine
+# holding walt_ui-slack.jsonl and failed on one without it (the laptop,
+# 2026-09-30). A root that does not exist makes that omission fail everywhere.
+export ATHENA_INBOX_ROOT="${TMP}/no-machine-inbox-root"
 
 line() { # line EVENT KIND USER TS THREAD_TS TEXT
   jq -cn --arg e "$1" --arg k "$2" --arg u "$3" --arg ts "$4" --arg th "$5" --arg t "$6" \
@@ -497,7 +504,7 @@ lacks "no mail file name is printed" "${OUT}${ERR}" "fwd-miss"
 
 echo "== end to end: the eval join [ticket]"
 
-run "${EVAL}" --dry-run --use-case slack_routing --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${ROOT}" --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
 eq "judgment-eval --dry-run joins the labels (exit 0) [ticket]" "${RC}" "0"
 has "proposed labels are excluded from the usable count [ticket]" "${OUT}" "proposed excluded: 2"
 has "every usable label joined the corpus [ticket]" "${OUT}" "cases: 2 (gen_saas 1, harness 1)"
@@ -548,7 +555,7 @@ eq "the confirmed row records that its context was shown [DND-1047]" "$(jq -r 's
 eq "the quit row is still proposed" "$(jq -r 'select(.id=="Ev07") | .provenance' "${LABELS}")" "proposed"
 eq "the forward rows are untouched" "$(jq -c 'select(.provenance=="forward_record")' "${LABELS}")" "$(jq -c 'select(.provenance=="forward_record")' <<<"${BEFORE}")"
 
-run "${EVAL}" --dry-run --use-case slack_routing --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${ROOT}" --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
 has "a confirmed label joins the eval [ticket]" "${OUT}" "cases: 3 (gen_saas 1, harness 2)"
 has "the remaining proposed label is still excluded [ticket]" "${OUT}" "proposed excluded: 1"
 
@@ -638,7 +645,7 @@ eq "--slack-bin outside --confirm is a usage error" "${RC}" "2"
 # no context mark. Make Ev03 one of those.
 jq -c 'if .id == "Ev03" then del(.context) else . end' "${LABELS}" >"${TMP}/batch1" && cat "${TMP}/batch1" >"${LABELS}"
 EV07_BEFORE="$(jq -c 'select(.id=="Ev07")' "${LABELS}")"
-run "${EVAL}" --dry-run --use-case slack_routing --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${ROOT}" --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
 eq "judgment-eval still joins a labels file carrying context marks" "${RC}" "0"
 CMD="'${BIN}' --confirm --recheck --batch 3 --inbox-root '${ROOT}' --labels '${LABELS}' --slack-bin '${FAKESLACK}'"
 OUT="$(printf '\ns\nq\n' | /usr/bin/script -qec "${CMD}" /dev/null 2>&1)"
@@ -660,6 +667,126 @@ eq "a recheck with no Slack reader still exits 0" "${RC}" "0"
 has "a missing reader is context unavailable naming it, never an empty context" "${OUT}" "context unavailable: could not resolve Athena's bot user id: the Slack reader ${TMP}/no-such-slack-bin/whoami is missing or not executable"
 has "a row whose root left the inbox is context unavailable, saying so" "${OUT}" "context unavailable: this event_id is no longer in walt_ui-slack.jsonl"
 has "the tally names the rows that can never be shown context" "${OUT}" "(1 no longer in walt_ui-slack.jsonl, so no context can be shown for them)"
+
+echo "== domain: the owner's routing rule as rule_confirmed labels (DND-717, D-R2)"
+
+# The parity vectors: gen_saas apps/athena/test/athena/slack_events/
+# session_mention_test.exs runs this same list against the router's
+# SessionMention.address/1 (grammar session-mention-v1). Keep them in step.
+VECTORS='[
+  ["Gen_saas session (laptop): turn the wifi back on", "gen_saas"],
+  ["harness session: status?", "harness"],
+  ["*harness session (~/dev/custom):* the inbox is dark", "harness"],
+  ["walt_ui session: ship the release", "walt_ui"],
+  ["Walt UI session - no colon", nil],
+  ["  the laptop session: hello", "gen_saas"],
+  ["custom session: hi", "harness"],
+  ["This is a message intended for the harness / custom session: I have HG-18", "harness"],
+  ["Note for the gen saas session: dnd deploy", "gen_saas"],
+  ["Get a status update from the harness session and give yours too.", nil],
+  ["The harness session asked me for 7 things: see above", nil],
+  ["this is why we need the harness session to build routing", nil],
+  ["ask the walt_ui session: it knows", nil],
+  ["harness: judgment routing smoke", nil],
+  ["harness / walt_ui session: both of you", nil],
+  [("x" * 81) + " for the harness session: late", nil],
+  ["hello\nfor the harness session: second line", nil],
+  ["<@U0BOT> harness session: status?", "harness"],
+  ["<@U0BOT|athena>  <@U0OTHER> Gen_saas session (laptop): hi", "gen_saas"],
+  ["<@U0BOT> note for the harness session: x", "harness"],
+  ["<@U0BOT> ask the harness session: x", nil],
+  ["hi <@U0BOT> harness session: x", nil],
+  ["harness session: x", "harness"],
+  [" harness session: x", "harness"],
+  ["harness session : x", "harness"],
+  ["harness　session: x", "harness"],
+  ["harneſſ session: x", nil],
+  ["éfor the harness session: x", nil],
+  ["desktop session: hi", nil],
+  ["", nil]
+]'
+ruby_eq "mention: the parity vectors all read as the router reads them [DND-717]" \
+  "30 ok" \
+  "v = ${VECTORS}; bad = v.reject { |t, want| JudgmentLabel.session_mention(t) == want }; bad.empty? ? \"#{v.size} ok\" : bad.inspect"
+ruby_eq "mention: nil text is no mention" "nil" 'JudgmentLabel.session_mention(nil).inspect'
+ruby_eq "mention: only the lead of a long message is read" "harness" \
+  'JudgmentLabel.session_mention("harness session: " + "y" * 10_000)'
+ruby_eq "mention: invalid UTF-8 in untrusted text is scrubbed, never a crash" "harness" \
+  'JudgmentLabel.session_mention("harness session: \xFF".dup.force_encoding("UTF-8"))'
+ruby_eq "mention: every label it answers is a SlackRouting label" "true" \
+  "(${VECTORS}.filter_map(&:last).uniq - JudgmentLabel::LABELS).empty?"
+ruby_eq "slack: a parsed line keeps the mention it addresses, not its text" \
+  "harness false" \
+  'l = JudgmentLabel.parse_slack(%({"event_id":"Ev1","kind":"im","user":"U","ts":"1.1","text":"harness session: hi"}\n), "S")[:lines].first; "#{l[:mention]} #{l.key?(:text)}"'
+
+# rb ROOTS FORWARD CONFLICTS EXISTING [RULE_DEFAULT] -> "id label provenance rule" per row
+rule_rows() {
+  printf 'b = JudgmentLabel.build(%s, {forward: %s, conflicts: %s}, %s, "NOW", rule_default: %s); b[:rows].map { |r| [r["id"], r["label"], r["provenance"], r["rule"] || "-"].join(" ") }.join(", ") + " overrides=#{b[:mention_overrides]}"' \
+    "$1" "$2" "$3" "$4" "${5:-false}"
+}
+ROOTS='[{event_id: "M", mention: "harness"}, {event_id: "F", mention: nil}, {event_id: "A", mention: "gen_saas"}, {event_id: "O", mention: "harness"}, {event_id: "N", mention: nil}, {event_id: "C", mention: nil}]'
+FWD='{"F" => "gen_saas", "A" => "gen_saas", "O" => "walt_ui", "M" => "walt_ui"}'
+OWNERROW='[{"id" => "O", "label" => "unclear", "provenance" => "owner_confirmed", "labeler" => "U", "labeled_at" => "t"}]'
+ruby_eq "build: mention wins over a disagreeing forward; an agreeing one stays forward_record; the owner's row is never touched [DND-717]" \
+  "M harness rule_confirmed session_mention, F gen_saas forward_record -, A gen_saas forward_record -, O unclear owner_confirmed -, N walt_ui proposed -, C unclear proposed - overrides=1" \
+  "$(rule_rows "${ROOTS}" "${FWD}" '["C"]' "${OWNERROW}")"
+ruby_eq "build: --rule-default labels only the no-evidence root walt_ui, rule_confirmed default_walt_ui; a conflict stays proposed [DND-717]" \
+  "M harness rule_confirmed session_mention, F gen_saas forward_record -, A gen_saas forward_record -, O unclear owner_confirmed -, N walt_ui rule_confirmed default_walt_ui, C unclear proposed - overrides=1" \
+  "$(rule_rows "${ROOTS}" "${FWD}" '["C"]' "${OWNERROW}" true)"
+ruby_eq "build: an unchanged rule row keeps its stamp; a changed rule re-stamps" \
+  "t NOW" \
+  "old = [{'id' => 'N', 'label' => 'walt_ui', 'provenance' => 'rule_confirmed', 'rule' => 'default_walt_ui', 'labeled_at' => 't'}]; r = ->(d) { JudgmentLabel.build([{event_id: 'N', mention: nil}], {forward: {}, conflicts: []}, old, 'NOW', rule_default: d)[:rows].first['labeled_at'] }; [r.(true), r.(false)].join(' ')"
+ruby_eq "labels: a rule_confirmed row round-trips with its rule [DND-717]" \
+  '{"id":"a","label":"harness","provenance":"rule_confirmed","labeler":"judgment-label","labeled_at":"t","rule":"session_mention"}' \
+  'JudgmentLabel.render(JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"rule_confirmed","labeler":"judgment-label","labeled_at":"t","rule":"session_mention"}\n), "L")).strip'
+ruby_eq "labels: a rule_confirmed row without a known rule is refused, naming its line" \
+  "InputError: L:1 is rule_confirmed with a rule outside session_mention|default_walt_ui" \
+  'JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"rule_confirmed","rule":"vibes"}\n), "L")'
+ruby_eq "labels: a rule on a row the rule did not label is refused" \
+  "InputError: L:1 has a rule on a owner_confirmed row" \
+  'JudgmentLabel.parse_labels(%({"id":"a","label":"harness","provenance":"owner_confirmed","rule":"session_mention"}\n), "L")'
+ruby_eq "pending: the confirm step presents default_walt_ui rows with the proposed ones (never session_mention rows: no run scores them); the owner's answer replaces them" \
+  "p r|owner_confirmed -" \
+  "rows = [{'id' => 'p', 'provenance' => 'proposed'}, {'id' => 'r', 'provenance' => 'rule_confirmed', 'rule' => 'default_walt_ui'}, {'id' => 'm', 'provenance' => 'rule_confirmed', 'rule' => 'session_mention'}, {'id' => 'f', 'provenance' => 'forward_record'}]; ids = JudgmentLabel.pending(rows, :proposed).map { |x| x['id'] }.join(' '); c = JudgmentLabel.confirm(rows, 'r', 'harness', 'U', 'now', 'shown').find { |x| x['id'] == 'r' }; ids + '|' + c['provenance'] + ' ' + (c['rule'] || '-')"
+
+echo "== end to end: the owner's rule on a fixture inbox (DND-717)"
+
+RROOT="${TMP}/rule-root"
+RLABELS="${TMP}/evals/rule-labels.jsonl"
+mkdir -p "${RROOT}/agent-mail/walt_ui/to-custom"
+: >"${RROOT}/custom-session.jsonl"
+: >"${RROOT}/gen_saas-session.jsonl"
+{
+  line EvM1 im "${OWNER}" "1790100001.000100" "" "Gen_saas session (laptop): SECRET-MENTION-TEXT"
+  line EvN1 im "${OWNER}" "1790100002.000200" "" "a plain question with no address"
+  line EvA1 im "${OWNER}" "1790100003.000300" "" "ask the harness session: about it"
+} >"${RROOT}/walt_ui-slack.jsonl"
+run "${BIN}" --propose --inbox-root "${RROOT}" --labels "${RLABELS}"
+eq "propose on the rule fixture exits 0" "${RC}" "0"
+eq "a session-addressed root is rule_confirmed session_mention [DND-717]" \
+  "$(jq -r 'select(.id=="EvM1") | .label + " " + .provenance + " " + .rule' "${RLABELS}")" "gen_saas rule_confirmed session_mention"
+eq "without --rule-default a no-evidence root stays proposed" "$(jq -r 'select(.id=="EvN1") | .provenance' "${RLABELS}")" "proposed"
+eq "talking about a session is not addressing it" "$(jq -r 'select(.id=="EvA1") | .label + " " + .provenance' "${RLABELS}")" "walt_ui proposed"
+lacks "the labels file never carries the text" "$(cat "${RLABELS}")" "SECRET-MENTION"
+has "the report counts the mentions" "${OUT}" "session mentions (rule 2, session-mention-v1): 1 rule_confirmed"
+run "${BIN}" --propose --rule-default --inbox-root "${RROOT}" --labels "${RLABELS}"
+eq "--propose --rule-default exits 0" "${RC}" "0"
+eq "--rule-default labels the no-evidence roots walt_ui default_walt_ui [DND-717]" \
+  "$(jq -r 'select(.provenance=="rule_confirmed" and .rule=="default_walt_ui") | .id' "${RLABELS}" | sort | tr '\n' ' ')" "EvA1 EvN1 "
+has "the report prints the rule_confirmed count" "${OUT}" "walt_ui rule_confirmed 2"
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${RLABELS}" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
+eq "judgment-eval joins rule_confirmed rows (exit 0)" "${RC}" "0"
+has "rule_confirmed default_walt_ui rows are usable eval cases [DND-717]" "${OUT}" "cases: 2 (walt_ui 2)"
+has "a session-mention root is not an eval case: the router never judges it [DND-717]" "${OUT}" "session-mention excluded: 1"
+jq -c 'select(.id=="EvM1")' "${RLABELS}" >"${TMP}/mention-only.jsonl"
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${TMP}/mention-only.jsonl" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
+eq "a run whose every label is a session-mention root is refused (exit 1) [DND-717]" "${RC}" "1"
+has "... naming why: the router never judges those roots, not a failed join" "${ERR}" "every joined label is a session-mention root (1)"
+has "... with Fix:" "${ERR}" "Fix:"
+lacks "... and not the generic join refusal" "${ERR}" "no label joined the corpus"
+run "${BIN}" --confirm --rule-default --labels "${RLABELS}"
+eq "--rule-default outside --propose is a usage error" "${RC}" "2"
+has "that usage error carries Fix:" "${ERR}" "Fix:"
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"

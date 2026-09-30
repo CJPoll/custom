@@ -5,12 +5,18 @@ ai/skills/athena:ticket-management/test/self-test.sh; never prod.
 
   Notion (reads only):
     POST /v1/data_sources/<id>/query      answered from SPEC_DIR/query-<id>.json
-    GET  /v1/blocks/<id>/children?...     answered from SPEC_DIR/blocks.json
+    GET  /v1/blocks/<id>/children?...     answered from SPEC_DIR/blocks-<id>.json,
+                                          else SPEC_DIR/blocks.json
+    GET  /v1/pages/<id>                   answered from SPEC_DIR/page-<id>.json
+                                          (ticket-classify --epic, DND-1057)
   Athena:
     POST /api/v1/judgments/finding_triage answered from SPEC_DIR/triage.json
     POST /api/v1/judgments/ticket_classification
                                           answered from SPEC_DIR/classify.json
                                           (ticket-classify, DND-1054)
+    POST /api/v1/judgments/ticket_blocking
+                                          answered from SPEC_DIR/blocking.json
+                                          (ticket-classify --epic, DND-1057)
 
 A spec file is {"status": N, "body": {...}}, or {"status": N, "raw": "..."}
 to answer a body that is not JSON. A missing spec is a 599, so a
@@ -38,7 +44,8 @@ for name, path in (("athena", ATHENA_TOKEN_FILE), ("notion", NOTION_TOKEN_FILE))
 ME = os.getpid()
 
 QUERY = re.compile(r"\A/v1/data_sources/([0-9a-f-]{36})/query\Z")
-BLOCKS = re.compile(r"\A/v1/blocks/[0-9a-f-]{36}/children\?page_size=\d+\Z")
+BLOCKS = re.compile(r"\A/v1/blocks/([0-9a-f-]{36})/children\?page_size=\d+\Z")
+PAGE = re.compile(r"\A/v1/pages/([0-9a-f-]{36})\Z")
 
 
 def scan(name):
@@ -69,12 +76,19 @@ def route(method, path):
     m = QUERY.match(path)
     if method == "POST" and m:
         return "notion", spec("query-" + m.group(1) + ".json")
-    if method == "GET" and BLOCKS.match(path):
-        return "notion", spec("blocks.json")
+    b = BLOCKS.match(path)
+    if method == "GET" and b:
+        own = "blocks-" + b.group(1) + ".json"
+        return "notion", spec(own if os.path.exists(os.path.join(SPEC_DIR, own)) else "blocks.json")
+    p = PAGE.match(path)
+    if method == "GET" and p:
+        return "notion", spec("page-" + p.group(1) + ".json")
     if method == "POST" and path == "/api/v1/judgments/finding_triage":
         return "athena", spec("triage.json")
     if method == "POST" and path == "/api/v1/judgments/ticket_classification":
         return "athena", spec("classify.json")
+    if method == "POST" and path == "/api/v1/judgments/ticket_blocking":
+        return "athena", spec("blocking.json")
     return None, {"status": 405, "body": {"error": "unexpected"}}
 
 

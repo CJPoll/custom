@@ -5,4 +5,4 @@
 # self-test.sh).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec ruby "${here}/docker_stacks_test.rb"
+exec /usr/bin/ruby "${here}/docker_stacks_test.rb"

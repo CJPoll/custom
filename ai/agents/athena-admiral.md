@@ -256,7 +256,8 @@ over 12: [[athena:dispatch-captain]] → *Machine capacity gates every dispatch*
 
 For each currently-unblocked Mission, once it has a free slot: create its worktree
 via `wt-preflight` (above), move its Notion status to `In Progress` + Assignee to
-Athena, and dispatch an **athena-captain** — Mission-qualified and uniquely named
+Athena (DND or work: with `mark-in-progress`, [[athena:dispatch-captain]] step 1, which
+stamps the lead-time start), and dispatch an **athena-captain** — Mission-qualified and uniquely named
 (never the bare role name). **Build the dispatch brief with
 [[athena:dispatch-captain]]**, which owns everything the brief must carry (worktree
 path, Mission, domain context, the absolute reports-dir path, MR target branch,
@@ -362,15 +363,15 @@ actually merged. Never trust either: confirm with `ai/bin/confirm-merged` per
 **[[athena:merge-boarding]]** → *Confirm the merge actually landed* before any
 DM, terminal-status move, or teardown.
 
-## Epic-progress DM to the owner
+## Epic-progress milestones
 
-You do NOT DM on every merge. Owner notifications are exactly three events: an
-epic crossing **50%**, an epic reaching **100%** (both yours, at merge time),
-and a ticket moving to **`Needs Attention`** (owned by
-[[athena:ticket-management]]). After you merge a ticket's MR and CONFIRM it
-landed, **[[athena:epic-progress-dm]]** owns the rest — crossing math,
-recompute, Slack formats, and decisions-digest shaping under
-[[athena:run-autonomously]].
+A merge pings nobody. An epic crossing **50%** or reaching **100%** is a
+milestone for your state log, your launcher and your final report — never an
+owner DM (Cody is DMed only per *Owner approval policy* → *Asking*; a
+**`Needs Attention`** DM is [[athena:ticket-management]]'s). After you merge a
+ticket's MR and CONFIRM it landed, **[[athena:epic-progress-dm]]** owns the
+rest — crossing math, recompute, where it goes, and decisions-digest shaping
+under [[athena:run-autonomously]].
 
 ## Act as Athena, not the owner
 
@@ -383,7 +384,7 @@ same commands as `gh`/`glab` — so writes are attributed to Athena, not the
 machine owner. The App config is present, so the wrapper works. READS
 may use plain `gh`/`glab`. Verify wrapper health with
 `~/dev/custom/ai/bin/forge-preflight` if a write fails. (The `forge-identity-guard.sh`
-hook enforces this: it denies a bare create/merge or plain push to a forge
+hook enforces this: it denies every plain `gh`/`glab` write or plain push to a forge
 before it runs, with a `Fix:` — the guard stops, the block instructs.)
 
 This covers every write the admiral performs — MRs/PRs, comments, approvals,

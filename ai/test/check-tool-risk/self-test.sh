@@ -99,7 +99,7 @@ new_fixture() {
 }
 
 # run <root>: run the fixture's checker; sets RC and OUT (stdout+stderr).
-run() { OUT="$(cd "$1" && ruby ai/bin/check-tool-risk 2>&1)"; RC=$?; }
+run() { OUT="$(cd "$1" && /usr/bin/ruby ai/bin/check-tool-risk 2>&1)"; RC=$?; }
 has() { printf '%s' "${OUT}" | grep -F -- "$1" >/dev/null; }
 # said_ok: the checker printed its OK status line. Anchored to the line start
 # and the program name, so a fixture path in the output never satisfies it
@@ -108,7 +108,7 @@ said_ok() { printf '%s\n' "${OUT}" | grep -E '^check-tool-risk: OK' >/dev/null; 
 
 # scope_carve <root> <prefix>: insert an OUT entry for prefix ahead of ai/.
 scope_carve() {
-  ruby -e 'f, pre = ARGV; t = File.read(f)
+  /usr/bin/ruby -e 'f, pre = ARGV; t = File.read(f)
     t.sub!(/^(\s*)\["ai\/", :in,/) { "#{$1}[\"#{pre}\", :out, \"carved out\"],\n#{$1}[\"ai/\", :in," } or abort "no ai/ entry"
     File.write(f, t)' "$1/ai/lib/harness_tools.rb" "$2"
 }
@@ -201,7 +201,7 @@ else bad "8 an owner-landed SCOPE carve-out passes" "rc=${RC} out=${OUT}"; fi
 # 9. A new OUT entry for a directory that was never in scope is a new scope
 #    decision, not a weakening: passes, named.
 R="$(new_fixture scope-new)"
-ruby -e 'f = ARGV[0]; t = File.read(f)
+/usr/bin/ruby -e 'f = ARGV[0]; t = File.read(f)
   t.sub!(/^(\s*)\["hypr\/"/) { "#{$1}[\"docs/\", :out, \"prose only\"],\n#{$1}[\"hypr/\"" } or abort "no hypr"
   File.write(f, t)' "${R}/ai/lib/harness_tools.rb"; run "${R}"
 if [ "${RC}" -eq 0 ] && has "docs/"; then ok "9 a new OUT entry for a never-scoped directory passes, named"
@@ -210,7 +210,7 @@ else bad "9 a new OUT entry for a never-scoped directory passes, named" "rc=${RC
 # 10. A SCOPE entry the ratchet's reader cannot parse fails as could-not-measure:
 #     writing the table differently must not hide an entry from the ratchet.
 R="$(new_fixture scope-unparseable)"
-ruby -e 'f = ARGV[0]; t = File.read(f)
+/usr/bin/ruby -e 'f = ARGV[0]; t = File.read(f)
   t.sub!(/^(\s*)\["ai\/", :in,/) { "#{$1}[%w[ai/skills/athena:slack/].first, :out, \"hidden\"],\n#{$1}[\"ai/\", :in," } or abort "no ai/"
   File.write(f, t)' "${R}/ai/lib/harness_tools.rb"
 registry "${R}" check-tool-risk=readOnly "${PEEK}=readOnly"; run "${R}"
@@ -265,7 +265,7 @@ move_origin() {
 }
 run_pinned() { # <root> <pinned sha>
   OUT="$(cd "$1" && ATHENA_LANDED_PIN_SHA="$2" ATHENA_LANDED_PIN_REPO="$(realpath "$1/.git")" \
-    ruby ai/bin/check-tool-risk 2>&1)"; RC=$?
+    /usr/bin/ruby ai/bin/check-tool-risk 2>&1)"; RC=$?
 }
 
 # 14b. Origin moves mid-gate: the pinned check still measures the pin -> PASS.
@@ -354,7 +354,7 @@ else bad "18 a genuinely new tool beside a removed one passes, named" "rc=${RC} 
 echo "== check-tool-risk: live tree =="
 
 # 15. The live tree passes (DND-512: keeps the caller's git config).
-if OUT="$("${LIVE_GIT_ENV[@]}" ruby "${AI_DIR}/bin/check-tool-risk" 2>&1)"; then
+if OUT="$("${LIVE_GIT_ENV[@]}" /usr/bin/ruby "${AI_DIR}/bin/check-tool-risk" 2>&1)"; then
   ok "15 the live tree passes check-tool-risk"
 else bad "15 the live tree passes check-tool-risk" "${OUT}"; fi
 

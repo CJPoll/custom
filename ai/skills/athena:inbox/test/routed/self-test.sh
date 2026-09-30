@@ -23,6 +23,10 @@
 # never `printf ... | grep -q X`: under pipefail, grep -q exiting on its first
 # match can SIGPIPE the printf and turn a match into a failure (DND-365).
 set -uo pipefail
+# DND-1163: the bins resolve the session's project from CLAUDE_PROJECT_DIR,
+# then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so the fixtures, not
+# the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL="$(cd "${HERE}/../.." && pwd)"

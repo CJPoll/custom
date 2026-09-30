@@ -85,6 +85,13 @@ assert_refused() {
 # the UNKNOWN mode (the headless-safe 540/600) unless it sets the signals itself.
 unset CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
 
+# THE SESSION'S PROJECT SIGNALS ARE SCRUBBED TOO (DND-1163). Every bin resolves
+# the session's project from CLAUDE_PROJECT_DIR, then /proc/$CLAUDE_PID/cwd,
+# before the shell cwd, and this suite runs inside Claude sessions: left set,
+# every fixture repo would be judged against the real session's project. The
+# DND-1163 cases below set them per case.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
+
 # A case directory + a private inbox root + a private registry, per case.
 CASE_N=0
 setup_case() {
@@ -4432,6 +4439,136 @@ rd="$(cd "${LPROJ}" && inbox_read_json slack)"
 assert_eq "R-12 read (miss): nothing delivered IS never_delivered" "true" "$(jq -r '.never_delivered' <<<"${rd}")"
 err="$(cd "${LPROJ}" && timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"
 assert_contains "R-13 inbox-wait (miss): the never-delivered notice still fires" "EVER been delivered" "${err}"
+
+echo
+echo "== DND-1163: every bin resolves the SESSION's project, not the shell cwd =="
+# The Claude Code Bash tool keeps a `cd` across calls, so a session's shell can
+# stand in another project's repo (or in ~/dev/custom, via a skill path that
+# realpaths there). Keyed on that cwd, a bin reads, acks, sends as, or waits on
+# the OTHER project's channels: exit 0, nothing says the key came from the
+# wrong project. LPROJ plays the project the cwd drifted into; WPROJ plays the
+# session's own project.
+
+# setup_session_case -- a log case (LPROJ, populated) plus WPROJ, registered
+# with its own log channel, and UPROJ, a repo with no entry. NOREPO is a
+# directory in no repository.
+setup_session_case() {
+  setup_log_case
+  WPROJ="$(make_repo wproj)"
+  register wproj "${WPROJ}" '{"slack":{"kind":"log","path":"w-slack.jsonl","schema_v":[1]}}'
+  printf '{"v":1,"ts":"200","channel":"D2","user":"U2","kind":"dm","event_id":"Ew1","text":"wproj-mail"}\n' \
+    > "${ATHENA_INBOX_ROOT}/w-slack.jsonl"
+  : > "${ATHENA_INBOX_ROOT}/w-slack.event"
+  UPROJ="$(make_repo uproj)"
+  NOREPO="${CASE_DIR}/norepo"; mkdir -p "${NOREPO}"
+  WKEY="$(cd "${WPROJ}" && realpath "$(git rev-parse --git-common-dir)")"
+  UKEY="$(cd "${UPROJ}" && realpath "$(git rev-parse --git-common-dir)")"
+}
+# in_session <dir> <NAME=value|-> <command...> -- run a command with cwd <dir>
+# and exactly the named session signal ("-" = none). Sets SOUT, SERR, SRC.
+in_session() {
+  local dir="$1" sig="$2"; shift 2
+  local errf="${CASE_DIR}/session.err"
+  # A subshell, not `env`: lib_fn is a shell function, which env cannot run.
+  SOUT="$(cd "${dir}" && unset CLAUDE_PROJECT_DIR CLAUDE_PID \
+          && { [ "${sig}" = "-" ] || export "${sig?}"; } && "$@" 2>"${errf}" </dev/null)"; SRC=$?
+  SERR="$(cat "${errf}")"
+}
+# lib_fn <function> [args] -- one library function, in a fresh bash that
+# sources the same libraries as the bins (so the env above applies to it).
+lib_fn() {
+  bash -c "$(_in_libs) && . '${LIB}/fence.sh' && . '${LIB}/session.sh' && . '${LIB}/lock.sh' && \"\$@\"" lib_fn "$@"
+}
+
+# S-1 the resolver, unit by unit.
+setup_session_case
+in_session "${LPROJ}" - lib_fn inbox_session_dir
+assert_eq "S-1 no session signal -> the cwd, labelled source cwd" \
+  "cwd	$(cd "${LPROJ}" && pwd -P)" "${SOUT}"
+in_session "${NOREPO}" "CLAUDE_PROJECT_DIR=${WPROJ}" lib_fn inbox_session_dir
+assert_eq "S-1 CLAUDE_PROJECT_DIR wins over a cwd in no project" \
+  "project-dir	$(cd "${WPROJ}" && pwd -P)" "${SOUT}"
+in_session "${LPROJ}" "CLAUDE_PROJECT_DIR=${WPROJ}" lib_fn inbox_session_dir
+assert_eq "S-1 session project and cwd in DIFFERENT entries -> status 3 (mismatch)" "3" "${SRC}"
+assert_contains "S-1 ... the refusal carries a Fix:" "Fix:" "${SERR}"
+assert_contains "S-1 ... and names the session's project" "${WPROJ}" "${SERR}"
+assert_eq "S-1 ... and prints no directory at all" "" "${SOUT}"
+in_session "${LPROJ}" "CLAUDE_PROJECT_DIR=${UPROJ}" lib_fn inbox_session_dir
+assert_eq "S-1 an UNREGISTERED session project with the cwd in a registered one -> mismatch" "3" "${SRC}"
+in_session "${UPROJ}" "CLAUDE_PROJECT_DIR=${WPROJ}" lib_fn inbox_session_dir
+assert_eq "S-1 a cwd in an unregistered repo does not block the session's project" \
+  "project-dir	$(cd "${WPROJ}" && pwd -P)" "${SOUT}"
+in_session "${LPROJ}" "CLAUDE_PROJECT_DIR=relative/dir" lib_fn inbox_session_dir
+assert_eq "S-1 a relative CLAUDE_PROJECT_DIR is refused (status 1), never skipped" "1" "${SRC}"
+assert_contains "S-1 ... naming the bad value" "relative/dir" "${SERR}"
+in_session "${LPROJ}" "CLAUDE_PID=12x" lib_fn inbox_session_dir
+assert_eq "S-1 a malformed CLAUDE_PID is refused (status 1), never skipped" "1" "${SRC}"
+( cd "${WPROJ}" && exec tail -f /dev/null ) & S_STANDIN=$!
+in_session "${NOREPO}" "CLAUDE_PID=${S_STANDIN}" lib_fn inbox_session_dir
+S_PID_OUT="${SOUT}"
+in_session "${LPROJ}" "CLAUDE_PID=${S_STANDIN}" lib_fn inbox_session_dir
+S_PID_RC="${SRC}"
+kill "${S_STANDIN}" 2>/dev/null; wait "${S_STANDIN}" 2>/dev/null
+assert_eq "S-1 CLAUDE_PID -> the Claude Code process's own cwd, labelled session-process" \
+  "session-process	$(cd "${WPROJ}" && pwd -P)" "${S_PID_OUT}"
+assert_eq "S-1 CLAUDE_PID's project vs a cwd in another entry -> mismatch" "3" "${S_PID_RC}"
+
+# S-2 read-inbox: never reads (or acks) the cwd's project for another session.
+setup_session_case
+in_session "${LPROJ}" "CLAUDE_PROJECT_DIR=${WPROJ}" "${BIN}/read-inbox" slack
+assert_eq "S-2 read-inbox: a mismatch refuses (exit non-zero)" "1" "$([ "${SRC}" -ne 0 ] && echo 1 || echo 0)"
+assert_contains "S-2 read-inbox: ... with a Fix:" "Fix:" "${SERR}"
+assert_not_contains "S-2 read-inbox: ... and prints none of the cwd project's mail" "first" "${SOUT}"
+assert_eq "S-2 read-inbox: ... and acks nothing there" "absent" "$([ -e "${LSTATE}" ] && echo present || echo absent)"
+in_session "${NOREPO}" "CLAUDE_PROJECT_DIR=${WPROJ}" "${BIN}/read-inbox" slack
+assert_contains "S-2 read-inbox: the session's project is read even from a cwd in no repo" "wproj-mail" "${SOUT}"
+
+# S-3 send-mail: never sends as the cwd's project.
+setup_send_case
+WPROJ="$(make_repo wproj)"
+register wproj "${WPROJ}" '{"slack":{"kind":"log","path":"w-slack.jsonl","schema_v":[1]}}'
+in_session "${SPROJ}" "CLAUDE_PROJECT_DIR=${WPROJ}" sh -c "printf 'b\n' | '${BIN}/send-mail' mail s1163 --to peer"
+assert_eq "S-3 send-mail: a mismatch refuses (exit non-zero)" "1" "$([ "${SRC}" -ne 0 ] && echo 1 || echo 0)"
+assert_contains "S-3 send-mail: ... with a Fix:" "Fix:" "${SERR}"
+assert_eq "S-3 send-mail: ... and delivers nothing into the cwd project's maildir" "" \
+  "$(find "${SWRITE}" -maxdepth 1 -type f -name '*.md' 2>/dev/null)"
+
+# S-4 inbox-status: counts only the session's project; --repo-key names it.
+setup_session_case
+in_session "${LPROJ}" "CLAUDE_PROJECT_DIR=${WPROJ}" "${BIN}/inbox-status" --json
+assert_eq "S-4 inbox-status: a mismatch refuses (exit non-zero)" "1" "$([ "${SRC}" -ne 0 ] && echo 1 || echo 0)"
+assert_contains "S-4 inbox-status: ... with a Fix:" "Fix:" "${SERR}"
+assert_not_contains "S-4 inbox-status: ... and counts none of the cwd project's channels" "slack" "${SOUT}"
+in_session "${LPROJ}" "CLAUDE_PROJECT_DIR=${WPROJ}" "${BIN}/inbox-status" --repo-key
+assert_eq "S-4 inbox-status --repo-key: the SESSION's key, not the cwd's" "${WKEY}" "${SOUT}"
+in_session "${NOREPO}" "CLAUDE_PROJECT_DIR=${WPROJ}" "${BIN}/inbox-status" --json
+assert_eq "S-4 inbox-status: the session's project is counted from a cwd in no repo" "${WKEY}" \
+  "$(jq -r '.repo_key' <<<"${SOUT}" 2>/dev/null)"
+
+# S-5 inbox-wait: never arms on the cwd project's doorbells.
+setup_session_case
+in_session "${LPROJ}" "CLAUDE_PROJECT_DIR=${WPROJ}" timeout 10 "${BIN}/inbox-wait" --dry-run
+assert_eq "S-5 inbox-wait --dry-run: a mismatch refuses (exit non-zero)" "1" "$([ "${SRC}" -ne 0 ] && echo 1 || echo 0)"
+assert_not_contains "S-5 inbox-wait --dry-run: ... and lists none of the cwd project's doorbells" "p-slack" "${SOUT}"
+in_session "${NOREPO}" "CLAUDE_PROJECT_DIR=${WPROJ}" timeout 10 "${BIN}/inbox-wait" --dry-run
+assert_contains "S-5 inbox-wait --dry-run: the session's own doorbells from a cwd in no repo" "w-slack" "${SOUT}"
+
+# S-7 once the session's own entry resolves, another tenant's unparseable
+#     registry file does not refuse it, even with the cwd in an unregistered
+#     repo (where that broken file could have been the cwd's).
+setup_session_case
+printf '{ not json' > "${ATHENA_INBOX_ROOT}/projects/broken.json"
+in_session "${UPROJ}" "CLAUDE_PROJECT_DIR=${WPROJ}" lib_fn inbox_session_dir
+assert_eq "S-7 a foreign unparseable entry does not block a resolved session project" \
+  "project-dir	$(cd "${WPROJ}" && pwd -P)" "${SOUT}"
+assert_contains "S-7 the mismatch Fix: names the explicit override" "CLAUDE_PROJECT_DIR=<" \
+  "$(cd "${LPROJ}" && CLAUDE_PROJECT_DIR="${WPROJ}" lib_fn inbox_session_dir 2>&1 >/dev/null)"
+
+# S-6 a key that resolves to nothing is an error NAMING THE KEY.
+setup_session_case
+in_session "${NOREPO}" "CLAUDE_PROJECT_DIR=${UPROJ}" "${BIN}/read-inbox" slack
+assert_eq "S-6 read-inbox: the session project has no entry -> refused" "1" "$([ "${SRC}" -ne 0 ] && echo 1 || echo 0)"
+assert_contains "S-6 read-inbox: ... naming the repo key that matched nothing" "${UKEY}" "${SERR}"
 
 echo
 if [ "${FAIL}" -eq 0 ]; then

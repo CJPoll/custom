@@ -79,9 +79,10 @@ notification. Its envelope is:
   or "system" owner.
 - **`occurred_at`** — when the transition happened.
 - **`source`** — provenance, drawn from a **closed set of FORMS**: `webhook:slack`,
-  `webhook:notion`, `poller:<source>`, `emit:<machine_id>`, and `platform` (a
-  platform-originated family, *Which event types an ingress kind may originate*
-  → *Platform-originated*). The set of *forms* is closed (exactly these five),
+  `webhook:notion`, `webhook:gitlab`, `poller:<source>`, `emit:<machine_id>`, and
+  `platform` (a platform-originated family, *Which event types an ingress kind
+  may originate* → *Platform-originated*). The set of *forms* is closed (exactly
+  these six),
   so every enumerated or declared `type` has a legal `source`
   and an owner predicate leaf on the matchable `event.source` field never reads an
   undefined value. Two forms carry a **parameterized, registration-supplied
@@ -103,6 +104,12 @@ notification. Its envelope is:
   family carries `source` `platform`, which no ingress form described. Why:
   its producer is the server itself, not an ingress, so none of the four
   forms is true of it.
+
+  **Later (2026-09-29):** the set of forms was exactly five, without
+  `webhook:gitlab`. Superseded (DND-439): the `forge.review.*` family arrives
+  on a GitLab webhook, which no existing form described. GitLab signs nothing,
+  so that ingress verifies a per-hook secret token instead of a signature
+  (*Sender verification and payload completeness*).
 - **`idempotency_key`** — see *Idempotency is per (event, rule)*.
 
 ### The event taxonomy is open
@@ -850,7 +857,9 @@ source):
 - `notion.ticket.created`
 - `notion.ticket.updated` — the coarse "a property changed" signal; its payload
   carries the changed property identifiers (`changed_properties`) plus the
-  enriched **current** values.
+  enriched **current** values. On a `metadata_only` subscription it carries
+  the current values only, with no `changed_properties` (*Priority index* →
+  *The storage boundary*).
 - `notion.ticket.deleted`
 - `notion.ticket.undeleted`
 - `notion.comment.created`
@@ -865,7 +874,11 @@ cares which property changed filters the coarse `notion.ticket.updated` on its
 declared `changed_properties` collection, e.g.
 `{"field":"payload.changed_properties","op":"contains","value":"<status-prop-id>"}`
 — that carries the full "which property" signal, so a finer separate type would
-buy no routing power and is not minted. (Finer separate types are roadmap; they
+buy no routing power and is not minted. The exception is a `metadata_only`
+subscription (a work workspace): its events carry no `changed_properties`, so
+there "which property changed" cannot be expressed, and such a leaf reads
+`absent` on every one of its events. A rule for a work source matches on the
+current values (`status`, `labels`, `assignee`) instead. (Finer separate types are roadmap; they
 would land with their own payload-schema rows only if a real need appears.) A
 routing rule authored against one of those non-existent finer types fails loud at
 **save** time on **two** independent grounds, so it is caught **whatever its
@@ -921,15 +934,15 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `title` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `revision` — OPTIONAL source-supplied provenance / ordering hint (Notion: `last_edited_time`, or finer); not a dedupe key | string | scalar |
-| | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
-| | `project_resolution` — how the ticket's project was resolved: `resolved`, `no-epic`, `no-epic-property`, `no-project`, `failed` or `unavailable` (*A ticket's project*, below) | string | scalar |
+| | `changed_properties` (`notion.ticket.updated` only; absent on a `metadata_only` subscription, *Priority index* → *The storage boundary*) | string | **collection** |
+| | `project_resolution` — how the ticket's project was resolved: `resolved`, `no-epic`, `no-epic-property`, `no-project`, `failed` or `unavailable` (*A ticket's project*, below). Absent on a `metadata_only` subscription, with every field below it | string | scalar |
 | | `project` — only when `project_resolution` is `resolved`: the project page's title | string | scalar |
 | | `project_id` — only when `project_resolution` is `resolved`: the project page's id, dashed and lower case | string | scalar |
 | | `epic_id` — only when `project_resolution` is `unavailable`: the epic page's id, dashed and lower case, the page the priority index re-reads from | string | scalar |
 | | `database_id` — only when `project_resolution` is `unavailable`: the database of the binding the event was enriched under, whose read-only enrichment token reads the hops | string | scalar |
 | `notion.ticket.deleted` (the **un-enriched** delete type — the entity may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
 | | `revision` — OPTIONAL provenance from the deletion event (not an enrichment fetch); not a dedupe key | string | scalar |
-| `notion.comment.created`, `notion.comment.updated` (the **enriched** comment types) | `entity_id` — stable source entity handle | string | scalar |
+| `notion.comment.created`, `notion.comment.updated` (the **enriched** comment types; never emitted on a `metadata_only` subscription, and neither is `notion.comment.deleted`) | `entity_id` — stable source entity handle | string | scalar |
 | | `comment_text` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `title` | string | scalar |
@@ -951,8 +964,25 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `actor.user_id` — the clicking Slack user | string | scalar |
 | | `approval.grant_id` — present only on a click on a grant button (*Owner approval grants*): the grant the button names | string | scalar |
 | | `approval.decision` — present only with `approval.grant_id`: `approve` or `decline`, the button that was clicked, not the grant's state | string | scalar |
+| `forge.review.requested`, `forge.review.removed`, `forge.review.merged`, `forge.review.closed`, `forge.review.commented` (the forge review family, *Declared families beyond the first pass*) | `entity_id` — `forge:<host>:<project_path>:<mr_iid>`, the merge request | string | scalar |
+| | `host` — the hook's forge host, never the body's | string | scalar |
+| | `project_path` — the hook's project path, never the body's | string | scalar |
+| | `mr_iid` — the merge request's project-scoped number, as a decimal string | string | scalar |
+| | `url` — built from `host`, `project_path` and `mr_iid`, never the body's link | string | scalar |
+| | `title` — the merge request's title | string | scalar |
+| | `state` — `opened`, `merged` or `closed` | string | scalar |
+| | `revision` — the merge request's `updated_at`, ISO 8601 UTC: the family's ordering revision | string | scalar |
+| `forge.token.expiring` (the forge token family, *Declared families beyond the first pass*) | `entity_id` — `forge_token:<host>:<project_path>:<token_id>`, the access token | string | scalar |
+| | `host` — the hook's forge host, never the body's | string | scalar |
+| | `project_path` — the hook's project path, never the body's | string | scalar |
+| | `token_id` — GitLab's numeric id of the token, as a decimal string | string | scalar |
+| | `token_name` — the token's name | string | scalar |
+| | `expires_on` — the token's expiry, an ISO 8601 date | string | scalar |
+| | `interval` — the warning GitLab sent: `seven_days`, `thirty_days` or `sixty_days` | string | scalar |
+| | `url` — the project's access-token settings page, built from `host` and `project_path` | string | scalar |
+| | `revision` — when the ingress received the warning, ISO 8601 UTC: the family's ordering revision | string | scalar |
 
-The event also carries `actor.is_owner`: whether the clicking user is the
+`slack.interaction.received` also carries `actor.is_owner`: whether the clicking user is the
 app's configured owner Slack user. It is a boolean, which the declared field
 types cannot type, so it is **not addressable**: a predicate or template slot
 on it is the ordinary unknown-path save-time error. It is still delivered on
@@ -972,7 +1002,9 @@ property. The project is two relation hops from the ticket: the ticket's
 project page, and the project's name is that page's title. The ingress walks
 those hops when it enriches the ticket, under the same read-only enrichment
 token and the same bounded retry as the ticket's own fetch, and writes the
-outcome into the payload:
+outcome into the payload. On a `metadata_only` subscription (DND-438,
+*Priority index* → *The storage boundary*) it walks no hop and writes no
+project field, `project_resolution` included:
 
 - `resolved`: `project` (the title) and `project_id` (the page id, dashed and
   lower case) are present.
@@ -1012,9 +1044,10 @@ not its epic. Only relation ids and the project's title are read, never page
 content. The reconciliation re-emit (*Poller (fallback only)*) and the
 priority index's one-shot backfill (DND-436) resolve a page exactly this way,
 so every
-`notion.ticket.created`, `.updated` and `.undeleted` event carries
-`project_resolution`. `notion.ticket.deleted` and the comment types carry none
-of these fields. The Epics and Projects databases must be readable by the
+`notion.ticket.created`, `.updated` and `.undeleted` event on a `full`
+subscription carries `project_resolution`. `notion.ticket.deleted`, the
+comment types, and every event on a `metadata_only` subscription carry none of
+these fields. The Epics and Projects databases must be readable by the
 enrichment integration; if they are not, every ticket with an epic reads
 `failed`, which the priority index reports (*Domain and owner-only items*).
 
@@ -1141,9 +1174,9 @@ preserving their identity-only property. `slack.message.received` carries **no**
 `revision`: a Slack message is transient and never updated, and its
 `payload.event_id` is already unique.
 
-### Declared families beyond the first pass — `fleet.session.message`, `notion.agent_message.*`, `fleet.machine.*` and `fleet.session.control_changed`
+### Declared families beyond the first pass — `fleet.session.message`, `notion.agent_message.*`, `fleet.machine.*`, `fleet.session.control_changed`, `forge.review.*` and `forge.token.expiring`
 
-Four type families are **declared** here per *Extending the taxonomy — a new type
+Six type families are **declared** here per *Extending the taxonomy — a new type
 family declares its model* (each declares its five things), so a later increment
 that lands their ingress is a natural addition, not a rewrite. None is one of
 the enumerated first-pass source-webhook types above.
@@ -1423,13 +1456,262 @@ This is the failed-lookup discipline applied at ingress (`~/dev/custom/ai/CLAUDE
 → *A failed lookup must never look like an empty one*): an unrecognised parent is
 a named dead-letter, never a silently mis-mapped `notion.ticket.*`.
 
+**The `forge.review.{requested,removed,merged,closed,commented}` family** (a
+review of the owner's on one merge request, DND-439; or a comment for the
+owner on one, DND-1337). Its only source is the owner's
+GitLab `walt_ui` project (owner decision OQ-10, 2026-09-24); GitHub is not a
+source.
+
+1. **Payload schema** — exactly `entity_id`, `host`, `project_path`, `mr_iid`,
+   `url`, `title`, `state` and `revision`, each a scalar string (*Payload
+   fields and their types per event type*). `host` and `project_path` come
+   from the hook the request verified against, and `url` is built from them,
+   never from the body. The payload never holds the merge request's
+   description, diff, comments, commit messages, author, assignees or
+   reviewer list. For `commented`, the comment's text and the author and
+   reviewer ids are read to classify it and are stored nowhere.
+2. **Identity field** — `payload.entity_id`
+   (`forge:<host>:<project_path>:<mr_iid>`, the priority index's `source_ref`
+   for the item); it is the `subject` of the dedupe window.
+3. **Change/revision token** — `payload.revision`, the merge request's
+   `updated_at`, normalized to ISO 8601 UTC. For `forge.review.commented` it
+   is the later of the comment's `updated_at` and the merge request's,
+   normalized the same way, so a comment is newer evidence than the change
+   before it. It orders the family's events
+   against an item (*Priority index* → *States*). The `idempotency_key` is
+   `gitlab:<hook_id>:<delivery id>:<kind>`, where the delivery id is GitLab's
+   `Idempotency-Key` (stable across GitLab's own retries of one trigger), else
+   its `X-Gitlab-Event-UUID`, each only when it is a UUID; with neither it is
+   `<entity_id>:<kind>:<revision>`. The ingress routes each key once, through
+   the event store's seen-check (*Idempotency is per (event, rule)*), so a
+   redelivery converges on the first event. A key is compared whole and
+   never split, and both shapes are unambiguous although `:` is their
+   separator: every component except the last is checked free of `:` where
+   it is produced (`<hook_id>` as the server-generated UUID of the hook row;
+   the hook's `host` as a bare hostname and its `project_path` as
+   `/`-separated segments, both checked when the hook is registered; the
+   `mr_iid` as a positive integer; `<kind>` from the closed set `requested`,
+   `removed`, `merged`, `closed`, `commented`; the delivery id as a UUID),
+   and the one component that can carry `:`, the ISO 8601 `revision`, is
+   always last. A payload with no `entity_id` or no `revision` is never
+   built (the delivery is skipped malformed), so the fallback key can never
+   be computed from an absent part.
+4. **Origination membership** — **verified-ingress-only**: the GitLab webhook
+   ingress, and only after the request's `X-Gitlab-Token` matched the hook's
+   custodied secret (*Inbound webhook*). Harness-emit refuses the whole
+   `forge.` namespace (*Which event types an ingress kind may originate*).
+5. **Enrichment posture** — **none**. A GitLab merge-request webhook, or a
+   Note Hook's `merge_request` object, carries every field the payload
+   holds, so the ingress makes no source read.
+
+**Which events the ingress emits.** A **hook** registers one project for one
+owner: `(owner, host, project_path, owner_forge_user_id)`, where
+`owner_forge_user_id` is the owner's numeric GitLab user id. The hook's id is
+the webhook URL's key. After verification, a body whose project is not the
+hook's is refused (`project_mismatch`, recorded). Otherwise, for a merge
+request event, the owner's user id is compared with the merge request's
+reviewer ids, never with a username. The merge request's state decides
+first, so a change to a closed request never reads as a new review:
+
+- `merged` or `closed`, with the owner a reviewer now or earlier in the same
+  event → `forge.review.merged` / `forge.review.closed`;
+- `merged` or `closed`, when the owner is not, and in this event was not, a
+  reviewer → the same event, but only to close an existing item (*Comments
+  (DND-1337)* → *A finish closes the owner's item*); otherwise
+  `not-owner-reviewer`;
+- `opened`, with the owner added as a reviewer, or still one → `forge.review.requested`;
+- `opened`, with the owner removed as a reviewer → `forge.review.removed`;
+- anything else is a counted skip (`not-owner-reviewer`, `not-merge-request`,
+  `malformed`, `unhandled-state`), and no event.
+
+**Comments (DND-1337).** A verified Note Hook passes the same project pin. A
+comment on an open merge request routes `forge.review.commented` when the
+owner's numeric id is the merge request's `author_id` or one of its
+`reviewer_ids`, or when the comment's text mentions `@<username>` for the
+username bound to the owner's id. The Note Hook carries no structured
+mention list, so the text is the one signal: it is matched
+case-insensitively, read for the match, and stored nowhere. The binding is
+learned only from a verified, pinned comment by the owner, whose acting
+`user.id` is the owner's id, and only for a username of the shape GitLab
+issues. It is stored on the hook (`forge_hooks.owner_forge_username`) and
+is never operator input. The owner's own comment, a system note, a note on
+an issue, commit or snippet, and a comment on a merged, closed or locked
+merge request raise nothing. The added counted skips are `not-note` (a Note
+Hook header over a body of another kind), `not-merge-request-note`,
+`system-note`, `own-note`, `merge-request-not-open`, `not-owner-note` and
+`owner-username-unbound`. The last is any comment that neither the author
+nor the reviewer ids make the owner's while no username is bound yet, so a
+mention could not be checked; it is a miss that says why, never
+`not-owner-note`. An unreadable id or text is `malformed`. Every event kind
+other than a merge request, a comment or an access token expiry warning
+(*The `forge.token.expiring` family*, below) stays `not-merge-request`. Two
+costs are accepted, each an extra item, never a missed one. A mention
+inside code or a quote matches, though GitLab does not notify for it. And
+after the owner renames their GitLab account, the old username stays bound
+until their next comment.
+
+**A finish closes the owner's item** (DND-1377). A merge request that
+merges or closes closes the owner's `forge_review` item for it, whatever
+raised the item: a review request, or a comment on a merge request the owner
+authored or was mentioned in. The owner's reviewer status decides only
+whether the index is asked first. For a finish the owner did not review, the
+ingress routes `forge.review.merged` / `forge.review.closed` only when the
+owner has an item for that merge request (in any state, not soft-deleted),
+or a `forge.review.requested` / `forge.review.commented` event for it is
+still pending in the index. The index applies obligations oldest first, so
+the close lands after the item that event creates. Otherwise it routes
+nothing and counts `not-owner-reviewer`, as before. Two answers route the
+close without a match, because a close never creates an item and skipping
+one that had an item would leave it open:
+
+- more than 200 pending upserts for the owner are answered "has an item"
+  without scanning them;
+- a lookup that fails (a key that cannot be built, an owner id that names no
+  user) is logged with a `Fix:` and the close is routed anyway, so the index
+  settles or fails it by name. A database fault raises, and the webhook
+  answers 500.
+
+The close is the index's source close: it closes an `active` item
+`source_status` and never creates one (*Priority index* → *States*). A
+comment on a merged or closed merge request stays `merge-request-not-open`,
+so it raises no event and never reopens that close. One window is accepted:
+a comment delivered concurrently with the merge, whose event commits after
+the lookup reads, is not seen, and its item stays open until the owner
+closes it.
+
+**Later (2026-09-30, DND-1377):** this paragraph was a residual: an item a
+comment raised because the owner authored the merge request, or was only
+mentioned, did not close when it merged or closed, since the ingress emitted
+`merged` and `closed` only for a reviewer. Superseded by DND-1377 (gen_saas
+#589, `6383b2bc`): `Athena.Forge.ReviewClassifier` answers
+`{:close_existing, kind}`, and `Athena.Forge` routes it after
+`Athena.Priorities.forge_review_indexed?/4`.
+
+**Later (2026-09-30):** the paragraph before the list said the owner's id
+is compared "never with a username", for every event. Superseded for a
+comment by DND-1337 (gen_saas #579, `ac3a1311`): a mention is found by
+username, bound to the owner's id only from GitLab's own verified
+statement. At `ac3a1311`: `apps/athena/lib/athena/forge/note_classifier.ex`,
+`forge/mention.ex`, `forge/owner_username.ex`, `forge/hook_store.ex`
+(`bind_username/2`), and `forge.ex` (`own_note/3`).
+
+**Later (2026-09-30, DND-1338):** the *Comments* paragraph said every event
+kind other than a merge request or a comment stays `not-merge-request`.
+Superseded by DND-1338 (gen_saas #581, `7259febe`): a Resource Access Token
+Hook takes its own branch (*The `forge.token.expiring` family*, below).
+
+`owner` is the hook's owner and `source` is `webhook:gitlab`. Every refusal and
+skip that has a hook is counted per (hook, cause), with no body, header or
+token. A cause recorded before verification is written at most once per
+window, because anyone can send one. A request with no hook to count against
+(an unknown hook id, 404, or a body over the bound, 413, refused before the
+lookup) is logged, throttled, and recorded against no owner.
+
+**The `forge.token.expiring` family** (a project access token on the hook's
+project nears expiry; DND-1338). Its only source is the same GitLab webhook
+ingress and hook as `forge.review.*`, on `X-Gitlab-Event: Resource Access
+Token Hook` (`object_kind: access_token`). GitLab sends it seven days before
+a token expires, and 30 and 60 days before where configured; its one
+documented `event_name` is `expiring_access_token`. GitLab sends no event on
+expiry and none on rotation. Every project access token on the pinned
+project is the owner's concern: the owner owns the project's webhook, so no
+per-user match applies.
+
+1. **Payload schema** — exactly `entity_id`, `host`, `project_path`,
+   `token_id`, `token_name`, `expires_on` (ISO 8601 date), `interval`
+   (`seven_days`, `thirty_days` or `sixty_days`; a body with none, or with
+   `null`, is `seven_days`), `url` and `revision`, each a scalar string
+   (*Payload fields and their types per event type*). `host` and
+   `project_path` come from the hook, and `url` (the project's access-token
+   settings page) is built from them. `token_id` is the body's token id as a
+   decimal string, and `expires_on` is the date of its `expires_at`. The
+   payload never holds a token value, the token's `user_id`, `created_at` or
+   `last_used_at`, or any project field.
+2. **Identity field** — `payload.entity_id`
+   (`forge_token:<host>:<project_path>:<token_id>`, the index's `source_ref`);
+   the `subject` of the dedupe window.
+3. **Change/revision token** — `payload.revision`, when the ingress received
+   the warning (the body carries no time of its own), ISO 8601 UTC. The
+   `idempotency_key` is
+   `gitlab:<hook_id>:token:<token_id>:<interval>:<expires_on>`, keyed on
+   what the warning says rather than the delivery, so one warning routes once
+   however often it is delivered, through the same seen-check as
+   `forge.review.*`. Every component is free of `:` where it is produced:
+   the hook id a UUID, the token id a positive integer, the interval from
+   its closed set, the expiry an ISO 8601 date.
+4. **Origination membership** — verified-ingress-only, as `forge.review.*`.
+5. **Enrichment posture** — none. The body carries every field the payload
+   holds.
+
+**Which events the ingress emits.** After verification, in order:
+
+- a body that is not a JSON object, has no `object_kind`, or has no
+  `object_attributes` object is skipped `malformed`; an `object_kind` other
+  than `access_token` is skipped `not-access-token`;
+- a body carrying a token value is skipped `token-value-present` and logged,
+  and nothing of it is routed or stored. A token value is a `token`,
+  `token_digest`, `token_encrypted` or `encrypted_token` key at the top level
+  or in `object_attributes`, or an `object_attributes` string holding one of
+  GitLab's documented token prefixes (`glpat-`, `gldt-`, `glrt-`, …) at a
+  word start, followed by at least 20 token characters. This runs before the
+  project pin, so the anomaly is reported whatever project the body names;
+- a body whose project is not the hook's is refused `project_mismatch`
+  (recorded). A group token's body names no project, so it is refused too;
+- an `event_name` other than `expiring_access_token`, a missing one
+  included, is skipped `unhandled-token-event`;
+- a missing or malformed token id, name, expiry or interval is skipped
+  `malformed`, never built into a partial payload.
+
+Every other warning is `forge.token.expiring`. Its `owner` is the hook's owner
+and its `source` is `webhook:gitlab`, and its skips and refusals are counted
+per (hook, cause), as for `forge.review.*`.
+
 ### Idempotency is per (event, rule)
 
 Delivery is **at-least-once**: the platform delivers every matched `(event, rule)`
 at least once, carrying **current enriched state**, and **never silently drops** a
-matched delivery. The platform holds **no** durable idempotency-key store and
-performs **no** content dedupe; it retains only transient in-flight retry state
-(deliver → await ack → retry until acked or terminally FAILED).
+matched delivery. The platform performs **no** content dedupe, and its retry
+state is transient in-flight state (deliver → await ack → retry until acked or
+terminally FAILED).
+
+The one durable key is the event row's `idempotency_key`. The event store
+persists it with every routed event, under no uniqueness constraint. An
+ingress MAY opt into the store's **seen-check** on it. Inside one transaction
+the ingress takes an advisory lock on (owner, `idempotency_key`), asks whether
+an event with the same (owner, `type`, `idempotency_key`) is already stored,
+and routes only if none is. A stored one answers duplicate and routes nothing,
+so two concurrent or repeated arrivals of one source event cannot both route.
+A route that fails rolls back, leaves no row, and a later arrival routes
+again. Both hold because the caller opens that one transaction and the
+router's own transaction nests inside it, so the lock, the check and the
+route's rows commit or roll back together. Four ingresses opt in:
+
+- `slack.interaction.received`, for a click that claims nothing (anyone
+  else's, or the owner's on a non-terminal button), so a repeated delivery of
+  one click routes once (DND-290, DND-549). The owner's terminal click takes
+  the message's claim instead, and does not use the seen-check;
+- `slack.message.received`, so a Slack retry of one message routes once
+  (DND-437);
+- the `forge.review.*` family, so a GitLab redelivery routes once (DND-439;
+  its key is in *Declared families beyond the first pass*);
+- `forge.token.expiring`, so one GitLab warning routes once (DND-1338; its
+  key is in *Declared families beyond the first pass*).
+
+Every other family, and every other path, routes each arrival. The seen-check runs before routing, so
+it never dedupes a retry of a delivery. Delivery stays at-least-once for every
+family, the opted-in ones included, and the consumer rule below binds them all.
+
+**Later (2026-09-29):** this section said "The platform holds **no** durable
+idempotency-key store and performs **no** content dedupe". Superseded: gen_saas
+has had the opt-in seen-check since DND-290 (`a1024992`, 2026-09-24):
+`Athena.Events.EventStore.idempotency_key_seen?/3` behind
+`lock_idempotency_key/2`, called by
+`Athena.SlackInteractions.Events.route_direct_once/3` and
+`Athena.SlackEvents.EventRouterAdapter.route_message/2` on `origin/main`, and by
+`Athena.Forge.EventsAdapter.route_once/1` on the DND-439 branch (gen_saas PR
+#515). The old sentence also contradicted the `forge.review.*` rule that the
+ingress routes each key once. No content dedupe, transient retry state and
+consumer idempotency are unchanged.
 
 Because of fan-out (see *Fan-out: every match fires*), one event fires every
 matching rule independently, so at-least-once delivery and its retry are tracked
@@ -1437,9 +1719,10 @@ per `(event, rule)`, never only at the event grain. The `idempotency_key` in the
 envelope is the **event-level** identity; the platform combines it with the
 matched `rule_id` as the **transient** in-flight retry handle for a delivery
 attempt. This handle is **ack-based in-flight tracking, not a durable content
-key** — a redelivery of the same source change reaches the consumer as another
-at-least-once delivery, and it is the **consumer** (below), not the platform, that
-makes a duplicate harmless.
+key** — a retry of the delivery, or a redelivery of the same source change
+that its ingress routes again, reaches the consumer as another at-least-once
+delivery, and it is the **consumer** (below), not the platform, that makes a
+duplicate harmless.
 
 **Later (2026-09-23):** the retry handle above was, until D40 (HG-16/DND-311),
 always `idempotency_key` + a **matched** `rule_id` — every delivery had a rule.
@@ -1527,19 +1810,46 @@ A verified `POST` from an external source, normalized to an event.
 
 **Sender verification is mandatory and is the ingress's authorization of the
 SOURCE — never of the CONTENT.** Every inbound webhook MUST verify a
-signature/HMAC before doing anything else:
+signature/HMAC, or — for a source that signs nothing — a custodied
+shared-secret token (below), before doing anything else:
 
-- The signature MUST be computed over the **raw request bytes as received**, not
-  over a re-parsed or re-serialized copy — re-serialized JSON produces different
-  bytes and will fail to match a legitimate signature (and, worse, could be made
-  to match a tampered body). Verify the bytes as received.
-- The comparison MUST be **constant-time**.
+**Later (2026-09-29):** this MUST read "verify a signature/HMAC" with no
+exception, and its first sub-bullet required the signature to be computed over
+the raw request bytes with no alternative. Superseded: GitLab signs nothing —
+it has no signature to compute over any bytes — so its verification is a
+shared-secret token comparison instead (*GitLab signs nothing, so its token is
+the verification*, below), not a weaker case of the signature rule.
+
+- Where the source signs its payload, that signature MUST be computed over the
+  **raw request bytes as received**, not over a re-parsed or re-serialized
+  copy — re-serialized JSON produces different bytes and will fail to match a
+  legitimate signature (and, worse, could be made to match a tampered body).
+  Verify the bytes as received. A source that signs nothing instead compares
+  its shared-secret token against the raw request header (below); there is no
+  body to re-serialize into that comparison.
+- The comparison MUST be **constant-time**, signature or token alike.
 - An unverified or failed-verification body is a **hard reject** carrying a
   `Fix:` (name the header checked and that verification failed); it MUST NEVER be
   normalized into an event.
 
-Verifying the *sender* does not make the *content* trusted. A verified Slack or
-Notion webhook still carries a workspace member's arbitrary text, which remains
+**GitLab signs nothing, so its token is the verification.** A GitLab project
+webhook carries a shared secret in `X-Gitlab-Token` and no signature over the
+body. The GitLab ingress (DND-439) therefore:
+
+- compares that header, in constant time over SHA-256 digests, against the
+  hook's custodied `forge_webhook_secret` (*Secret custody*) before it decodes
+  the body or stores anything about it;
+- mints every hook secret itself (256 random bits), so a token of any other
+  shape is refused before custody is read;
+- bounds the unwrap cost under the same per-secret budget as the other
+  webhooks, and the raw body at 5 MB.
+
+A token proves the sender holds the secret; it cannot prove the body is
+unaltered. TLS covers the body in transit. That is weaker than a signature,
+and it is the only verification GitLab offers.
+
+Verifying the *sender* does not make the *content* trusted. A verified Slack,
+Notion or GitLab webhook still carries a member's arbitrary text, which remains
 untrusted wherever it reaches an LLM (see *Trust posture — two paths*).
 
 **Normalization** turns the source-specific verified payload into an event.
@@ -1573,6 +1883,43 @@ credential can serve many accounts. Owner is resolved per ingress kind:
   machine-token analog); this contract states the binding invariant and defers
   custody there. A `team_id`/`enterprise_id` that resolves to **no** install
   record is an **owner-unresolvable reject** (per *The event*), never defaulted.
+- **GitLab webhook** — the URL's hook id is a key into an owner-stamped hook
+  record for one owner and one project. The token that verified the request
+  is custodied per hook, so verifying against it both authenticates the
+  sender and identifies the owner. An unknown or disabled hook id is an
+  owner-unresolvable reject, and records nothing against any owner.
+
+  **Who registers a hook, and whose it is.** A hook is registered, rotated
+  and disabled only by an operator `rpc` on the gen_saas prod host (DND-439).
+  How its secret reaches the owner is *Secret custody*'s. That operator
+  already holds the host and its database, so the path grants no authority
+  the operator did not have. The hook's owner is the account the call names;
+  the owner, or an agent acting on the owner's direction for the owner's own
+  account, makes the call. The owner confirms `owner_forge_user_id` (their own
+  numeric GitLab user id) before registering. This is a named residual of the
+  owner-from-auth invariant: the operator path is the one place a hook's owner
+  is not stamped from an authenticated session, so it has no route, it is
+  never exposed to a machine token or a request, and it never registers a
+  hook for an account the operator does not act for. An owner-facing
+  registration path, should one be built, stamps the owner from the
+  authenticated session like every other seam (*Rule ownership is stamped
+  from the authenticated author*). Rotation and disabling are owner-scoped:
+  another owner's hook reads as absent.
+
+  **The owner-facing route is `/forge/hooks`,** an owner-authenticated page.
+  It lists the owner's own hooks with the URL to paste into GitLab, and
+  reveals a hook's secret once per mint (*Secret custody*). It takes the
+  owner from the authenticated session, and it registers, rotates and
+  disables nothing. The listing and the reveal are owner-scoped too. The
+  reveal is gen_saas ADR 18's rule 2 show-once reveal (*Secret custody*).
+
+  **Later (2026-09-30):** this paragraph said "In the first pass a hook has no
+  owner-facing route". Superseded (DND-1306): gen_saas ships `/forge/hooks`
+  (the DND-439 security fix, D44; `apps/athena/lib/athena/ui.ex:67` at
+  `b1ff8c01`), because an operator call that returned the secret left it in
+  the SSM command history. The page takes the owner from the authenticated
+  session (`apps/athena/lib/athena/ui/pages/forge_hooks.ex:52`). Registration
+  is still operator-only.
 - **Reconciliation poller** — the owner is the account its per-account source-read
   token belongs to, resolved server-side from that token (as harness-emit resolves
   owner from the machine token), never from fetched content.
@@ -1686,7 +2033,7 @@ router still never rejects.
 
 The first-pass permitted-origination rule:
 
-- **Source-emitted webhook types (`slack.*`, `notion.*`) are
+- **Source-emitted webhook types (`slack.*`, `notion.*`, `forge.*`) are
   VERIFIED-INGRESS-ONLY.** They may be originated ONLY by the inbound-webhook
   ingress (or the reconciliation poller) for that source, whose sender
   verification established that the change is real (the poller does no HMAC, but
@@ -1703,11 +2050,16 @@ The first-pass permitted-origination rule:
   Notion members include the `notion.ticket.*` / `notion.comment.*` types and the
   **`notion.agent_message.{created,updated,deleted}`** family (*Declared families
   beyond the first pass*), the latter originated by the Notion inbound-webhook
-  ingress and the reconciliation poller. **Harness-emit MUST NOT be
+  ingress and the reconciliation poller. The registered forge members are the
+  five `forge.review.*` types and `forge.token.expiring` (*Declared families
+  beyond the first pass*),
+  originated only by the GitLab webhook ingress; there is no forge poller.
+  **Harness-emit MUST NOT be
   able to synthesize a source-emitted webhook type** — a machine-token holder
   cannot mint a `notion.ticket.deleted`, a `slack.message.received`, a
-  `slack.interaction.received`, or a `notion.agent_message.*` that no verified
-  webhook produced; such an event MUST be rejected with a `Fix:`.
+  `slack.interaction.received`, a `notion.agent_message.*`, a
+  `forge.review.*` or a `forge.token.expiring` that no verified webhook
+  produced; such an event MUST be rejected with a `Fix:`.
 - **Harness-emit** may originate only the **finite set of `fleet.*` `type` values
   registered to its machine token** at ingress registration — never a
   source-emitted type, and never an unenumerated `fleet.<arbitrary>` value. The
@@ -2016,7 +2368,10 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
   `notion.ticket.updated`, so a rule spanning `notion.ticket.created` and
   `notion.ticket.updated` binds it at save time and it reads `absent` on a
   `created` event. This is the intended interaction of union-binding with the
-  known-field-missing `absent` rule, not a gap.
+  known-field-missing `absent` rule, not a gap. The same holds for a field a
+  `metadata_only` subscription's events never carry (`changed_properties`,
+  the project fields): it binds at save time and reads `absent` on those
+  events.
 - **comparators:**
   - `eq`, `ne`, `lt`, `lte`, `gt`, `gte` — scalar comparison.
   - `in` — scalar is a member of the literal set.
@@ -2656,7 +3011,28 @@ under-encrypted**:
   decrypt, and nothing else. Decrypt happens **only at use time, in memory, for
   the owning account only** — no cross-account use is expressible.
 - A secret MUST NEVER be logged, placed on `argv`, echoed, made API-readable, or
-  written into the inbox root.
+  written into the inbox root. **The one sanctioned echo is a show-once
+  reveal** on an owner-authenticated page, and only for a secret the server
+  holds that the owner must paste somewhere else. The reveal is claimed
+  before the secret is unsealed, so each value is shown at most once, and a
+  new value (a rotation, a re-verify) is revealable once. It is rendered once
+  and kept nowhere after. Two exist: a forge hook's webhook secret on
+  `/forge/hooks`, for GitLab, and a Notion subscription's `verification_token`
+  on `/secrets`, for Notion's Verify dialog. This is rule 2 of gen_saas
+  ADR 18 (`adrs/18-owner-secrets-through-owner-pages.md`, #549, merged
+  `cc9cfc7a`), which also names both reveals. Any other secret that must
+  leave the server this way is added here by name first.
+
+  **Later (2026-09-30):** this bullet said only "A secret MUST NEVER be
+  logged, placed on `argv`, echoed, made API-readable, or written into the
+  inbox root", while the forge secret's reveal was allowed further down and
+  the Notion token's show-once reveal had no contract basis at all.
+  Superseded (DND-1307): the reveal is now named here as the one exception.
+  At gen_saas `b1ff8c01`: `apps/athena/lib/athena/notion_events.ex:629-640`
+  (`reveal_verification_token/2`: owner actor only, claim, then unseal),
+  rendered once by `apps/athena/lib/athena/ui/pages/owner_secrets.ex:66`; the
+  forge reveal is `apps/athena/lib/athena/forge.ex:553`; `Athena.Secrets`
+  names the same two exceptions and no other.
 - The first-pass secret set is: the **Slack bot (`chat.write`) token** (OUTBOUND
   delivery); the **Slack app signing secret** — the INBOUND-webhook HMAC key;
   Slack signs each request `v0=HMAC-SHA256(signing_secret,
@@ -2678,8 +3054,46 @@ under-encrypted**:
   per-account HMAC key for the Slack return address (*Machine↔owner API binding
   and the outbound return-address dual*). Unlike the others, no one outside the
   server ever holds it, so the owner never stores it: the server mints it on
-  first use and never replaces it. Any future adapter
+  first use and never replaces it. The set also holds each **forge hook's
+  webhook secret** (`:forge_webhook_secret`, `scope_ref` = the hook id,
+  DND-439): the GitLab `X-Gitlab-Token` a hook verifies against. The server
+  mints it. **No operator call returns it:** register and rotate return the
+  hook's identifiers only, and refuse the removed `reveal_secret` option, and
+  any other option outside their closed set, by name. The owner reads it
+  once per mint, on the owner-authenticated page `/forge/hooks`, to paste
+  into GitLab: a second reveal of the same secret is refused, whatever
+  session or page load asks. A rotation mints a new one, makes it revealable
+  once, and the old stops verifying at once.
+  Output a host keeps (an `rpc` over `aws ssm send-command`, whose stdout
+  SSM retains) MUST NOT carry it. Two things enforce that: the operator calls
+  cannot be asked for the secret, and gen_saas's static secret-boundary
+  guard fails CI on any public function that takes or returns a secret and
+  is not on its allowlist (ADR 18 rules 3 and 5). The guard holds only while
+  CI runs it: the merge guard judges the checks that report, and CI runs
+  from the PR's own `ci.yml`, so a PR that removes the `Secret allowlist`
+  job, or excludes the guard's test, merges with nothing to stop it.
+  Requiring that check by name is DND-729; until then review is the
+  backstop (ADR 18 → *What holds the ratchet*). A second residual: the
+  reveal function behind the page
+  is public, so an operator on the host could call it over `rpc`. That is
+  not a supported path. It spends the owner's one reveal, so the page then
+  shows the secret as revealed and the owner rotates. The operator already
+  holds the host the server runs on, so it grants no authority the operator
+  did not have. Any future adapter
   credential (SMTP, SMS, Discord bot) joins this set under the same story.
+
+  **Later (2026-09-30):** this bullet said the server returns the forge
+  secret "at most once per mint, only to a call that asks for it", that
+  "what the code enforces is the opt-in", and that running a call that
+  returns the secret "only in an interactive session is an **operator
+  procedure**, not a guarantee". Superseded (DND-1207): gen_saas #515
+  (DND-439, D44, merged `e313ac6c`) removed the opt-in, so no call that
+  procedure governed remains. At gen_saas `b1ff8c01`:
+  `apps/athena/lib/athena/forge.ex:377` and `:395` return `%{hook_id, path,
+  url}` only; `apps/athena/lib/athena/forge/operator_opts.ex` refuses
+  `reveal_secret` by name; `forge.ex:553` (`reveal_gitlab_hook_secret/3`) is
+  the reveal, called only by `ui/pages/forge_hooks.ex:52`; the guard is
+  `apps/athena/test/support/secret_boundary.ex`.
 
   **Later (2026-09-22):** this named the Notion read token a **"read-only,
   DB-scoped Notion enrichment token"** — a token whose *scope* was the
@@ -3809,9 +4223,17 @@ durable trace of an unrouted event, names the stale claim's key too.
 **The line says how it was routed.** Every Slack line the router writes carries
 `route`: `thread_claim` when a live claim chose the channel, `topic_judgment`
 when an accepted topic judgment chose it (*New conversations may route by an
-advisory topic judgment*), `channel_route` otherwise (including a stale-claim
-fallback). The field is defined in `ai/contracts/athena-inbox.md` → *Line
-format*.
+advisory topic judgment*), `session_mention` when the owner's text addressed a
+session (step 2b', *The session mention*), `channel_route` otherwise
+(including a stale-claim fallback). The field is defined in
+`ai/contracts/athena-inbox.md` → *Line format*.
+
+**Later (2026-09-30):** this paragraph listed three `route` values, with
+`channel_route` for everything but a claim or a judgment. Superseded by
+DND-717's step 2b', which adds `session_mention`; *The line* under *New
+conversations may route by an advisory topic judgment* gained the same value
+in the same change. Why: a session-addressed line is routed by the owner's
+own rule, and calling it `channel_route` would misreport it.
 
 **What it does not guarantee.** A claim is owner-scoped isolation, not a security
 boundary between the owner's own projects. Any of the owner's machines can claim
@@ -3845,7 +4267,14 @@ event classified (not ignored), dedupe pre-check passed
    2a. mode off           -> the channel route, UNCHANGED: no call, no
                              judgment_calls row, no topic, no topic outcome  [no call]
    2b. sender != owner    -> the channel route (topic reason: sender_rule)   [no judgment]
-   2c. judge slack_routing -> the caller's decision:
+   2b'. the owner's text addresses a session (owner rule 2, session-mention-v1)
+                          -> that label's topic route, live: its Slack inbox (route: session_mention)
+                             no enabled live route: the channel route (topic reason: label_disabled)
+                             no context read                              [no judgment]
+   2c. read the conversation context (ai/contracts/athena-judgments.md ->
+       Egress and data flow, the slack_routing row)
+         read failed      -> the channel route (topic reason: context_unavailable)  [no judgment]
+       judge slack_routing with the root and its context -> the caller's decision:
          accepted, label enabled, topic route live
                           -> that instance's Slack inbox (route: topic_judgment)
          anything else    -> the channel route (topic reason: the fallback reason)
@@ -3866,8 +4295,28 @@ turned off mid-flight (`ai/contracts/athena-judgments.md` → *Fallback: every
 error equals today's behaviour, loudly*) — never as the pre-call short-circuit's
 own record, since the pre-call short-circuit records nothing.
 
+**Later (2026-09-28):** step 2c read "judge slack_routing", with the root
+alone as the input. Superseded by DND-1048: 2c reads the conversation context
+first, from gen_saas's own tables and never the Slack API, and a failed read
+asks no judgment and falls back as `context_unavailable`. What the context
+holds is `ai/contracts/athena-judgments.md` → *Egress and data flow*, not
+restated here. Why: the owner found roots that cannot be routed without the
+conversation before them.
+
+**Later (2026-09-28):** step 2b went straight to 2c: every owner-written new
+conversation was judged. Superseded by DND-717 (gen_saas
+`Athena.SlackEvents.SessionMention`), which adds step 2b'. Why: the owner's
+routing rule (Cody, 2026-09-28 ~04:25Z): "if I'm replying to a message, the
+session that sent it is the intended recipient. If I specify a session, then
+great. Most messages from slack will be for walt_ui." Rule 1 is step 1 (the
+thread claim) and rule 3 is the channel route; step 2b' is rule 2, so the
+judgment is left as the tiebreak for a new conversation that names no
+session.
+
 - **Only the owner's own text is judged.** A new conversation from anyone else
-  follows the channel route by code, with no judgment and no tokens.
+  follows the channel route by code, with no judgment and no tokens. The
+  context a root carries is also only the owner's own text, plus session
+  labels for Athena's own posts.
 - **The answer is one of the owner's labels, or `unclear`.** `unclear` falls
   back and is recorded as `below_threshold`.
 - **Exactly one destination per event**, as for a claim. A topic route replaces
@@ -3877,6 +4326,40 @@ own record, since the pre-call short-circuit records nothing.
   that overruns falls back as `timeout`.
 - **The content domain is `work`**, because the connected Slack is the work
   Slack (*Domain and owner-only items*).
+
+**The session mention (step 2b').** Grammar `session-mention-v1`, in code and
+versioned. Only the first 400 characters of the owner's text are read, and
+only an ADDRESS counts, ending in a colon. Unicode space separators read as a
+space, and leading Slack user-mention tokens (`<@U…>`, as a channel mention
+of the bot begins) are skipped. Then either the tag form (`harness session:`,
+`*gen_saas session (laptop):*`, as routing agreement R1 tags posts), or a
+single-line lead-in of at most 80 characters ending `for the <names>
+session:`. The word `session` is required. Names: `walt_ui` (`walt ui`,
+`waltui`) is walt_ui; `harness` and `custom` are harness; `gen_saas`
+(`gen saas`, `gensaas`) and `laptop` are gen_saas; `desktop` names none.
+Names joined by `/` must name one label, or there is no mention; so is a
+name the table lacks. A message that talks ABOUT a session ("ask the harness
+session to …") is not one and is judged as before.
+
+- **Modes.** The step is part of the `slack_routing` topic step, so it runs
+  only in `shadow` or `on` and acts only in `on`, under the same rule for
+  setting `on` (`ai/contracts/athena-judgments.md` → *Modes*).
+- **No threshold and no tokens.** The mention is the owner's own words, not
+  a judgment, so no `judgment_calls` row is written and no context is read.
+  Its topic route is looked up exactly as an accepted judgment's, under the
+  same authorization: it selects only among the owner's own topic routes.
+- **The line.** In `on` with a live route, `route: session_mention` and a
+  `topic` of `{label, confidence: null, model: null, reason: null}`. In
+  `shadow`, the channel route with that same `topic`; the outcome record says
+  `by=session_mention` and names the would-be route. A missing route is
+  `label_disabled`, as for a judgment.
+- **One grammar.** The harness applies the same grammar when it labels the
+  eval corpus (`ai/lib/judgment_label.rb`, `rule_confirmed` with
+  `"rule": "session_mention"`), and `judgment-eval` leaves such roots out of
+  a run (`ai/contracts/athena-judgments.md` → *Threshold provenance, n/a and
+  the pinned model*). Both test suites carry the same vector list, as two
+  copies kept in step by hand (nothing compares them); a change to either is
+  a new grammar version in both.
 
 **Topic routes.** A topic route maps `(slack_app, label)` to one AgentInstance,
 with an `enabled` flag. It is written by the owner of the app, holder of
@@ -3892,8 +4375,9 @@ Every judge call also records its own row, per
 `ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
 behaviour, loudly*.
 
-**The line.** A line the topic route chose carries `route: topic_judgment`. A
-new-conversation line that reached step 2b or 2c — mode `shadow` or `on` —
+**The line.** A line the topic route chose carries `route: topic_judgment`, or
+`route: session_mention` when step 2b' chose it. A
+new-conversation line that reached step 2b, 2b' or 2c — mode `shadow` or `on` —
 carries a `topic` object, whether it was routed by topic or fell back. A
 new-conversation line stopped at 2a (mode `off`) carries neither field: it is
 the unchanged channel-route line. Both fields are defined in
@@ -3978,6 +4462,17 @@ the `session_control` read over MCP and `GET
 Pause, Resume and Keep running. One piece is still owed: an override whose
 `expires_at` lapses emits no `fleet.session.control_changed`, so nothing wakes
 a drained session when a timed pause ends. That wake is DND-448's.
+
+**Later (2026-09-27):** DND-876: the label above left the timed-pause wake to
+DND-448. DND-448 builds it, with metering, in gen_saas PR #434, head
+`6079af9a` (read 2026-09-27). That code is not merged or deployed: it is held
+behind gen_saas #407, and gen_saas `origin/main` `793d5dae` (read 2026-09-27)
+has no `Athena.Fleet.MeteringSweeper`. Every sentence below that names the
+metering sweeper, the two metering switches, the span `until`, or the
+project-not-reported exemption is pinned from that head as written, and is an
+obligation on DND-448 until it merges. Until then no
+`fleet.session.control_changed` marks a timed pause's end, though the resume
+waiter still sees it (*Session control: desired state*, the timed-pause wake).
 
 DND-541 adds hook-driven agent lifecycle and per-run aging. Its tickets are
 DND-556 (this amendment), DND-557 (per-run aging), DND-558 (lifecycle ingest),
@@ -4094,6 +4589,24 @@ at every agent depth). The kinds and the other fields each may carry:
   `unclassified`. The fleet page shows `unclassified` as such; the control
   answer's closed `effective_domain` enum carries it as `personal`, the owner's
   default for an unknown project (OQ-4).
+
+  A **live run** (DND-877) has not ended (not `finished`) and either is
+  `running`, `draining` or not yet started (an admiral seen before
+  `admiral_started`) with its own liveness (*Fleet liveness*) not `lost`, or
+  is `drained` and no run of the session started after it. A `drained` run
+  waits for its resume: the page reads it `drained`, never `lost` (*Fleet
+  liveness*, step 1), so its silence does not age it out, and it keeps its
+  scope's domain. A resumed run keeps its `started_at`, so only a fresh
+  admiral (a new run) retires a drain nobody resumed. A `parked` run is not
+  live. (`Athena.Fleet.DomainClassifier.live_runs/1`.)
+
+  **Later (2026-09-28):** DND-877 and DND-578: a live run was any run not
+  ended in `running`, `draining` or not yet started, whatever its own
+  liveness, and a `drained` run did not count. A lost run then kept
+  classifying its session (DND-578), and a metering drain would have read "no
+  live run" the moment it completed, so the resume waiter would respawn the
+  fleet to drain again (*Session control: desired state* → *A session with
+  no live scoped admiral run is never metered*).
 - **`agent_id`** is the admiral's own agentId, the id SendMessage uses, which
   its dispatch briefs already carry. PreToolUse and PostToolUse hook stdin
   carries the same value as `agent_id` inside that admiral (measured, DND-428),
@@ -4616,7 +5129,44 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   `Athena.Fleet.ControlPolicy.desired/3`, from the session's override, its
   effective domain and the owner's policy at time `now`, to `{desired, reason,
   until}`. `desired` is `run` or `drain`. Precedence: an unexpired override,
-  then metering (added by the metering phase; skipped until then), then `run`.
+  then metering, then `run`.
+- **Metering applies only when two switches are both on** (DND-448): the
+  server switch, `config :athena, Athena.Fleet.Metering, enabled:` (on only
+  for exactly `true`; `false` in every environment as shipped, so turning it
+  on is a reviewed config change and a deploy), and the owner's policy
+  `enabled`. With either off the metering step is skipped, and the snapshot's
+  `metering` is `{enabled: false}`. With both on, a session drains when its
+  `effective_domain` is in the policy's `metered_domains` and `now` is in work
+  hours, with reason `metering:<domain>` and `until` the end of the work-hours
+  span (*Reading control state and the control cache* → *Recomputing is
+  `desired/3` run locally*), unless one of the two exemptions below applies.
+- **A session whose project was never reported is never metered.** Such a
+  session has neither `project` nor `repo_key`, because no `session_started`
+  arrived. It runs unless the owner overrides it, whatever the policy says,
+  and its snapshot's `metering` is `{enabled: false}`, so a harness recomputing
+  from that snapshot runs it too. This is not `unclassified`, a reported
+  project no policy maps, which is metered as `personal` (OQ-4). The harness's
+  local rule does not mirror this exemption (*Unknown control state*).
+- **A session with no live scoped admiral run is never metered** (DND-877;
+  epic decision D-6, option (d)). Metering applies only once one of the
+  session's live runs (*Fleet report kinds and their closed schema* →
+  `notion_project_id`) has reported `admiral_scope`. Before that, the
+  session's domain is only its repo default: a gen_saas session with no
+  admiral yet reads `personal`, so metering it would make the drain guard
+  refuse the very admiral whose scope could reclassify it as `blend`, a
+  deadlock by construction. So a session with no run, or whose only runs are
+  unscoped, `lost`, `parked` or `finished`, runs unless the owner overrides
+  it, and its snapshot's `metering` is `{enabled: false}`, so a harness
+  recomputing from that snapshot runs it too. Its first admiral spawns. From
+  the moment that run reports its scope, metering applies: a personal run in
+  work hours drains, and parks at its first checkpoint before any captain
+  (OQ-2: a metering pause parks at once). The cost is one admiral start-up
+  turn. A `drained` run stays live while it is the session's newest run, so
+  the drained session stays drained until the work-hours span ends rather
+  than resuming into the same drain.
+  The harness's local rule does not mirror this exemption either: with no
+  answer and no cache it cannot know the session's runs (*Unknown control
+  state*).
 - **`reason` is one of a closed set of classes.** The drain protocol keys on the
   class (*Enforcement layers* → *Layer 3: the drain protocol*):
   - `override:force_drain` and `override:force_run`: the owner's override;
@@ -4625,14 +5175,35 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   - `default`: nothing overrides or meters, so `run`.
 - **Only the owner changes control.** `Fleet.set_control/3` is authorized by the
   RBAC `control` permission on the session, checked before any write. A
-  non-owner gets `not_found`, with no write and no event. The metering sweeper
-  (metering phase) is the one other writer, and it acts only on the owner's own
-  policy. No inbox line, Slack message or fleet report can change control
-  state.
+  non-owner gets `not_found`, with no write and no event. The metering sweeper,
+  `Athena.Fleet.MeteringSweeper`, is the one other writer. It applies only the
+  owner's own policy and the stored override, and writes only the committed
+  `desired_state`, `desired_reason` and `desired_until`, never the override. No
+  inbox line, Slack message or fleet report can change control state.
 - **Each committed transition emits exactly one `fleet.session.control_changed`**,
   in the transaction that commits the write. That event's model and its direct
   delivery to the session's inbox are in *Declared families beyond the first
   pass*.
+- **The metering sweeper keeps committed state current with the clock.**
+  Desired state depends on `now`, and no request arrives when a boundary
+  passes. Every 60 s by default, the sweeper runs `Fleet.reconcile_control/2`
+  for each session whose liveness is not `ended`. That recomputes `desired/3`
+  at `now` under the session's row lock. When `{desired, reason, until}`
+  differs from the committed row, it commits the new state and emits its one
+  event in that transaction; otherwise it writes and emits nothing. The
+  committed row is its only memory, so a restart emits no second event for a
+  crossing already committed. It runs whether metering is on or off.
+- **The timed-pause wake: the sweeper ends an expired override.** An override
+  whose `expires_at` is at or before `now` no longer counts, and the stored
+  override is left as it was. The first sweep after the expiry commits the
+  session's new state and emits the event that wakes it (*Enforcement layers*
+  → *Layer 4: resume*). With metering off that state is always `run`, so an
+  expired override is the only transition the sweeper can make, and it never
+  drains. With metering on it is whatever metering says at that instant, which
+  can be a drain. The control read does not wait for a sweep: it computes
+  `desired/3` at `now`, never from the committed row, so it answers the new
+  state from the expiry instant, and the event can lag it by up to one sweep
+  interval.
 - **Drain gates fleet spawns only.** It never blocks the human's own turns in a
   top-level session, or any subagent that is not a fleet worker.
 
@@ -4677,8 +5248,40 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   `metering.enabled` is true and `effective_domain` is in `metered_domains`,
   and `now` in `timezone` falls on a work window's weekday, is not a holiday,
   and is at or after `start` and before `end`, it gives
-  `{drain, "metering:<domain>", that window's end}`. Otherwise `{run, default,
-  null}`. P1 has no metering, so its snapshot says `{enabled: false}`.
+  `{drain, "metering:<domain>", until}`. Otherwise `{run, default, null}`.
+  With metering off, for a project-not-reported session, and for a session
+  with no live scoped admiral run (DND-877), the snapshot says `{enabled:
+  false}` (*Session control: desired state*). The harness needs no run
+  knowledge of its own: the exemption reaches it as the snapshot.
+- **A metering `until` is the end of the work-hours span**, the first instant
+  after `now` at which the work-hours test above changes (the server's
+  `Athena.Fleet.WorkHours.next_boundary/2`). Windows of `now`'s local weekday
+  that abut or overlap read as one span: start from the latest `end` among the
+  windows holding `now`, and while some window of that weekday has `start` at
+  or before that end and `end` after it, move to that window's `end`. So
+  08:00–12:00 and 12:00–18:00 drain until 18:00, not 12:00; 08:00–12:00 and
+  12:01–18:00 are two spans, and 10:00 drains until 12:00. A window never
+  crosses local midnight (`start` before `end`, both `HH:MM`, `end`
+  exclusive), so a span ends on `now`'s local date, and a holiday never moves
+  it. A span end the clock skips (spring forward) is the instant the clock
+  jumps past it. A span end in a repeated hour (fall back) happens twice; it
+  is **the pass after `now`** — the first pass, unless `now` is already at or
+  past it (i.e. `now` is itself in the second pass), in which case the
+  second pass (the first pass's wall time, one hour later). This is what
+  "the first instant after `now`" already requires: the server's
+  `next_boundary/2` generates both passes as candidates and keeps only the
+  ones strictly after `now`, so it never answers an instant that has already
+  passed.
+  `ai/bin/fleet-control` computes the same span (`fleet_desired` in
+  `ai/lib/fleet/control-domain.sh`, pinned by its self-test).
+
+  **Later (2026-09-27):** DND-876: `until` was "that window's end", and the
+  harness took the latest end among the windows holding `now`. The server
+  answers the end of the span, so for abutting or overlapping windows the two
+  disagreed (DND-448 captain report, gap 3), and for a window ending in a
+  skipped hour the harness gave no `until` at all. The server's rule is the
+  meaning of `until`, the instant the drain ends, so the contract and the
+  harness now follow it.
 - **`ai/bin/fleet-control` is the one harness reader** (DND-443). The drain
   guard hook, the admiral checkpoint and the resume path all read through it.
   It asks the server first, under a bounded timeout. On an answer it writes the
@@ -4706,6 +5309,28 @@ fail-mode decision (OQ-1, 2026-09-24) applies:
   rule as a built-in snapshot (metering on for `personal` in that window)
   through the same recompute, so a local-rule drain reads reason
   `metering:personal`, until the window's end; the basis says it is local.
+- **The local rule does not apply the server's project-not-reported
+  exemption** (*Session control: desired state*). That exemption rests on a
+  fact only the server holds: it has a row for the session, but no
+  `session_started` reached it. With no usable answer and no cache, the
+  harness cannot learn that. A `not_found` (`session-unregistered`) means the
+  server has no row for the session from this machine at all, so it has no
+  answer to exempt, and an outage reads nothing. The harness takes the project from the session's own cwd
+  instead, and an unmapped project counts as personal. So a personal or
+  unmapped session drains in work hours on the local rule even where the
+  server, once reachable, would have run it. That is the owner's fail-mode
+  rule: unknown state is never loosened toward `run`. The two sides still
+  agree wherever the server has answered, since a cached `{enabled: false}`
+  snapshot recomputes to `run`. The window closes when the server answers
+  again, and `session_started`'s self-heal (DND-497) makes it rarer.
+- **Nor the no-live-scoped-run exemption** (DND-877, *Session control:
+  desired state*). Whether a session holds a live scoped admiral run is a
+  fact of the server's registry (each run's scope and aged liveness), which
+  the harness does not keep. So on the local rule a personal or unmapped
+  session with no admiral yet still drains in work hours, and its first
+  admiral spawn is refused until the server answers or the owner overrides.
+  That is the same fail-mode rule; the no-run deadlock can then recur only
+  while the server is unreachable and no cache exists.
 - **Unknown is never read as `run` silently.** Each basis other than `server`
   prints a warning on stderr naming its cause, and the hook surfaces it to the
   transcript.
@@ -4899,9 +5524,14 @@ build by name:
 - DND-445: pull and leases;
 - DND-438: work Notion;
 - DND-439: forge review requests;
+- DND-1337: forge comments for the owner;
 - DND-440: the surface that requests `priority.transition` grants (*Owner
   approval grants*);
-- DND-446, DND-447 and DND-449: the digest, meetings and meeting catch-up.
+- DND-446: the morning digest (*Morning digest*);
+- DND-447 and DND-449: meetings and meeting catch-up;
+- DND-1157: item summaries (*Item summaries*);
+- DND-1395: work Notion summaries and the one-time summary backfill (*Item
+  summaries*).
 
 None of the server homes named below exists yet (gen_saas `origin/main`
 `b5f85909`, read 2026-09-24). Every sentence about them is an obligation on its
@@ -4922,13 +5552,26 @@ It consumes exactly these event types. Every other type is not consumed:
 | `notion.ticket.created`, `notion.ticket.updated`, `notion.ticket.undeleted` | Upsert the item's pointer fields, and reopen it when *States* allows | `notion_personal`, `notion_work` or `action_item`, from the subscription binding (below) | DND-436, DND-438 |
 | `notion.ticket.deleted` | Close the item it names (`closed_by: source_deleted`) | as above | DND-436, DND-438 |
 | `slack.message.received`, when it is an ask (below) | Create a `proposed` item | `slack_ask` | DND-437 |
-| the forge review-request family | Upsert an `owner_only` item | `forge_review` | DND-439 |
+| `forge.review.requested` | Upsert an `owner_only` item, and reopen it when *States* allows | `forge_review` | DND-439 |
+| `forge.review.commented` | Upsert an `owner_only` item, and reopen it when *States* allows | `forge_review` | DND-1337 |
+| `forge.review.removed`, `forge.review.merged`, `forge.review.closed` | Close the item it names (`closed_by: source_status`); never create one | `forge_review` | DND-439 |
+| `forge.token.expiring` | Upsert an `owner_only` item; never reopen an owner close | `forge_token` | DND-1338 |
 
 - **`notion.comment.*` is never consumed.** No comment reaches the index.
-- **The forge family does not exist yet.** DND-439 declares it per *Extending
-  the taxonomy — a new type family declares its model* before any forge item
-  is indexed. Review requests come from the owner's GitLab `walt_ui` project
-  only (owner decision OQ-10, 2026-09-24). GitHub is not a source.
+- **The forge family is declared** in *Declared families beyond the first
+  pass*. Review requests come from the owner's GitLab `walt_ui` project only
+  (owner decision OQ-10, 2026-09-24). GitHub is not a source. The source is
+  the GitLab ingress's constant, never from its payload: a
+  `forge.review.*` event is bound to `forge_review`, and a
+  `forge.token.expiring` event to `forge_token`.
+
+  **Later (2026-09-30, DND-1338):** this bullet said every forge event is
+  bound to `forge_review`. Superseded by DND-1338 (gen_saas #581,
+  `7259febe`): the token family binds to `forge_token`
+  (`Athena.Forge.EventsAdapter.route_token_once/1`).
+
+  **Later (2026-09-28):** this bullet said the forge family did not exist yet
+  and that DND-439 would declare it. DND-439 declares it.
 - **Action items** (DND-449) arrive as `notion.ticket.*` events on a work
   subscription bound to `action_item`. **Meetings** (DND-447) come from the
   calendar adapter, not from an event. Each of those tickets declares its
@@ -4952,15 +5595,30 @@ indexed. It routes the type through the router, and it amends that payload
 schema to carry the ingress's classification.
 
 **Where the index gets its source.** A Notion event's source (`notion_personal`,
-`notion_work` or `action_item`) comes from the **subscription the ingress
-verified the event against**. Each subscription binds one source, or none.
-The ingress passes that binding to the index with the event, from its
-authenticated context. It is never read from the payload, never inferred from a
-ticket prefix, and never added to the event envelope (*The event*). A Notion
-event on a subscription with no binding is skipped with cause
-`unbound-subscription`. Deny is the default: a subscription is indexed only
-once the owner binds it. The Slack team id comes the same way, from the Slack
-app the event arrived on, never from the payload.
+`notion_work` or `action_item`) comes from the **database binding the
+ingress resolved the verified event to**. A Notion webhook subscription is
+integration-level and can front several databases; each of its databases has
+one binding, and each binding binds one source, or none
+(`notion_database_bindings.index_source`). The ingress passes that source to
+the index with the event, from its authenticated context. It is never read
+from the payload, never inferred from a ticket prefix, and never added to the
+event envelope (*The event*). A Notion event whose binding has no source is
+skipped with cause `unbound-subscription`. Deny is the default: a binding is
+indexed only once the owner binds it. `notion_work` binds only on a binding
+whose subscription is `metadata_only` (*The storage boundary* → *A
+`metadata_only` subscription*). Binding it on a `full` subscription is refused
+(`content_policy_required`, with a `Fix:`), and a subscription that feeds
+`notion_work` cannot be moved back to `full` until it is unbound.
+`notion_personal` is the mirror: it binds only on a `full` subscription,
+because its domain comes from the ticket's project, which a `metadata_only`
+payload never carries. The Slack
+team id comes the same way, from the Slack app the event arrived on, never
+from the payload.
+
+**Later (2026-09-28, DND-438):** this paragraph said the source comes from
+"the **subscription** the ingress verified the event against", and that "each
+subscription binds one source". The grain was already the per-database
+binding in gen_saas (DND-436); DND-763 tracks the rest of that drift.
 
 **At-least-once, row by row.**
 
@@ -4979,10 +5637,12 @@ app the event arrived on, never from the payload.
   A personal ticket whose project stays `unavailable` is one (*Domain and
   owner-only items*).
 - **Each obligation ends in exactly one outcome:**
-  - `indexed`: an item was created, updated or closed;
+  - `indexed`: an item was created, updated or closed, or the event
+    converged on an existing row without writing because the row already
+    holds newer evidence (*Idempotency is per (event, item)*);
   - `skipped:<cause>`: the event is legitimately not an item. The causes are
-    `not-an-ask`, `unbound-subscription` and `unknown-item` (a delete for an
-    item never indexed);
+    `not-an-ask`, `unbound-subscription` and `unknown-item` (a delete, or a
+    forge close, for an item never indexed);
   - `failed:<cause>`: the event should have been an item and is not. The
     causes are `no-source-ref` (*Item identity and `source_ref`*),
     `forbidden-field` (*The storage boundary*), `malformed-payload`,
@@ -5004,9 +5664,13 @@ app the event arrived on, never from the payload.
 (its `idempotency_key`) and the item it resolves to. Ingest is an upsert on the
 item's identity (next subsection), so a redelivered or duplicated event
 converges on the same row. The index does not rely on unique event keys: the
-event store does not enforce one. Each row keeps `source_revision`, the
+event store holds no uniqueness constraint on them, and only the ingresses
+that opt into its seen-check route a key once (*Idempotency is per (event,
+rule)*). Each row keeps `source_revision`, the
 event's `payload.revision`. An event whose revision is older than the row's
-does not overwrite the row. An event with an equal revision, or with none, is
+does not overwrite the row; it writes nothing, and its obligation still
+settles `indexed`, since the item it names exists and is newer. An event with
+an equal revision, or with none, is
 applied in processing order. Notion's revision is minute-granular, so two
 same-minute events processed out of order can leave the older state until the
 item's next change. The index claims no finer ordering than that.
@@ -5025,9 +5689,19 @@ departures (*Poller (fallback only)*), so the index cannot rely on it.
   `action_item` it is the on-demand read the Notion ingress already uses
   (*Sender verification and payload completeness*). The read is mapped through
   the same allow-list as an event (*The storage boundary*), and its result is
-  applied by the same rules as an event carrying that revision (*States*).
-  DND-439 declares the forge read. `slack_ask` and `manual` items have no
-  source state to re-read, and only the owner or a lease closes them.
+  applied by the same rules as an event carrying that revision (*States*),
+  including *A restore is sticky until the source changes*.
+  `forge_review`, `forge_token`, `slack_ask` and `manual` items have no
+  source read. A `forge_review` item closes by its family's events or by the
+  owner; a `forge_token` item only by the owner (*States*); a `slack_ask` or
+  `manual` item only by the owner or a lease. A forge item is
+  `owner_only`, so no session can lease a stale one.
+
+  **Later (2026-09-28):** this bullet said "DND-439 declares the forge read".
+  Superseded (DND-439): there is no forge read. A read of GitLab needs an owner
+  API token the server does not hold, for owner-only rows the owner can
+  dismiss. A dropped webhook leaves the item as it was until the merge
+  request's next change reaches the ingress, or the owner closes it.
 - **What the read finds decides the close.** A page the source reports
   archived or trashed closes `closed_by: source_deleted`. A page that is no
   longer in the database its subscription binds, or whose subscription binding
@@ -5071,6 +5745,7 @@ envelope's diagnostic `source` (*The event*).
 | `notion_work` | `payload.entity_id` | `notion_work:<ticket_number>`, e.g. `notion_work:WEB-123` | this section |
 | `slack_ask` | the `source_ref` | `slack:<team_id>:<channel_id>:<ts>` | this section |
 | `forge_review` | the `source_ref` | `forge:<host>:<project_path>:<mr_iid>` | this section; the event family is DND-439's |
+| `forge_token` | the `source_ref` | `forge_token:<host>:<project_path>:<token_id>` | DND-1338 |
 | `manual` | the item id | `manual:<item_id>` | this section |
 | `action_item` | declared by DND-449 | declared by DND-449 | DND-449 |
 | `meeting` | declared by DND-447 | declared by DND-447 | DND-447 |
@@ -5088,7 +5763,8 @@ envelope's diagnostic `source` (*The event*).
 - `<channel_id>` is the Slack channel id, never its name. `<ts>` is the
   message's own `ts`, which is Slack's message id. `<host>` is the forge
   hostname. `<project_path>` is the project's full path, and `<mr_iid>` is the
-  merge request's project-scoped number.
+  merge request's project-scoped number. `<token_id>` is GitLab's numeric id
+  of the access token.
 - `manual` items are created by the owner on the priorities page. Only the
   owner creates them.
 
@@ -5130,14 +5806,33 @@ closed list. The list has three parts:
 | `notion_work` | `source_ref`, `entity_id`, `url`, `title`, `status`, `source_revision` | `assignee`, `labels` |
 | `action_item` | declared by DND-449, from the `notion_work` list | `assignee`, `labels` |
 | `slack_ask` | `source_ref`, `url` (a link built from the ids alone) | `message_text`, `slack_thread_ts` |
-| `forge_review` | `source_ref`, `url`, `title`, `status` | none |
+| `forge_review` | `source_ref`, `url`, `title`, `status`, `source_revision` | none |
+| `forge_token` | `source_ref`, `url`, `title`, `status`, `due_on`, `source_revision` | none |
 | `meeting` | `source_ref`, `url`, `title` | `starts_at` |
 | `manual` | `source_ref`, `url`, `title`, `source_priority`, `due_on` | none |
 
+**Later (2026-09-28):** the `forge_review` row listed no `source_revision`.
+DND-439 adds it: the merge request's `updated_at`, the family's ordering
+revision. Without it no forge event older than the row could be refused
+(*States*). It is ordering metadata, not content.
+
+For `forge_token`, `title` is `rotate <token name> (<project_path>) by
+<expires_on>`; `status` is `expiring`; `due_on` is the token's expiry;
+`source_revision` is the warning's receipt time. No token value is ever a
+field.
+
 - **Everything else is refused by name.** That includes a body, a comment or
-  `comment_text`, a description, a summary, an attachment, attendees, a
-  message's `text` under any other name, and a permissive field on a source
-  whose row does not list it. A Slack ask stores no `title`.
+  `comment_text`, a description, a summary other than an item summary (*Item
+  summaries*), an attachment, attendees, a message's `text` under any other
+  name, and a permissive field on a source whose row does not list it. A
+  Slack ask stores no `title`.
+
+  **Later (2026-09-30):** this bullet refused "a summary" outright.
+  Superseded by DND-1157 (gen_saas #561, `04f20c58`), the owner's request of
+  2026-09-28 for a one-to-five-sentence model-written summary per item. An
+  item summary is allowed for the sources *Item summaries* lists, stored
+  apart from the item row, and nowhere else. Every other summary is still
+  refused.
 - **The pointer constructor enforces the list.** `Athena.Priorities.Pointer`
   (Domain) takes a source and a field map. It refuses any field that is not on
   that source's allow-list, and names every such field in one refusal. It
@@ -5148,11 +5843,61 @@ closed list. The list has three parts:
   personal ticket reads the payload's `assignee` (*Domain and owner-only items*), and
   never stores it.
 - **The boundary covers every store the index writes:** the items, the index
-  obligations, the skip counts and the index-failure record. It does not make
-  upstream stores content-free. The event store and the Slack ingress's own
+  obligations, the skip counts and the index-failure record. The item
+  summaries and their call ledger are bounded by *Item summaries*. The
+  boundary does not make upstream stores content-free. The event store and the Slack ingress's own
   store hold what their ingress persists. Keeping work-Notion content out of
-  the event store is DND-438's `metadata_only` subscription obligation. It is
-  not a property of this boundary.
+  the event store is the `metadata_only` subscription obligation (next
+  bullet). It is not a property of this boundary.
+- **A `metadata_only` subscription (DND-438).** A Notion subscription carries a
+  content policy, `full` (the default, today's behaviour) or `metadata_only`.
+  The policy is owner config on the subscription row, never read from a
+  payload, and any value other than `full` is read as `metadata_only`. A work
+  workspace's subscription is `metadata_only`. On it, before anything is
+  persisted, logged or written to an inbox line:
+  - **Comments never land.** Every `notion.comment.*` webhook (created,
+    updated, deleted) is dropped after the signature check and before any
+    fetch, as a counted skip with cause `metadata_only_comment`. It is never
+    an error and never a dead letter. The skip count holds owner,
+    subscription, cause, count and times, and no content. The cause is
+    snake_case like the other Notion ingress causes (`unbound_database`,
+    `no_parent`); the kebab-case causes are the index's own.
+  - **The ticket payload is closed.** A `notion.ticket.*` payload holds only
+    `entity_id`, `title`, `status`, `labels`, `assignee` (person ids),
+    `ticket_number` and `revision`. There is no `changed_properties`, no
+    project field and no rich text. This holds on every path that builds a
+    ticket event: the webhook, the reconciliation re-emit and its retry set
+    (a held page keeps only what those fields are read from), and the index
+    snapshot the backfill and re-sync read.
+  - **No Epic or Project page is read.** The project hops of *A ticket's
+    project* are skipped; `notion_work` is `work` by source.
+  - **Side stores carry no values.** An ingress dead-letter exemplar keeps only
+    the event's `type`, `entity_id`, `reason` and field names. An
+    ingress-failure exemplar is identity plus cause, as it is for every
+    subscription.
+
+  `assignee` and `labels` are the OQ-5 permissive fields above; removing one
+  from the allow-list removes it from the persisted payload too.
+
+  The policy's scope is the ticket and comment families, the work tracker's
+  content. The `notion.agent_message.*` family (agent mail, whose payload is
+  already a closed list with no body) is unchanged under either policy,
+  because the one work subscription fronts both and the agent inbox routes on
+  that payload. Cutting agent mail too is the owner's call, not a default.
+
+  Item summaries are the one reader of a work ticket's body (DND-1395). At
+  summary time the body is read through
+  `Athena.NotionEvents.index_page_text/4` under the work Tickets database's
+  enrichment token and sent in the model prompt. It is never persisted,
+  logged or written to an inbox line; only the summary is stored (*Item
+  summaries*). Every cut above is unchanged: the closed ticket payload, the
+  dropped comments, no Epic or Project read, the value-free side stores, and
+  the reconciliation and snapshot paths. Owner decision relayed from Cody,
+  2026-09-30 ("Yes, summarize bodies"); evidence gen_saas #596.
+
+  **Later (2026-09-28):** the bullet before this one said the obligation
+  "is DND-438's `metadata_only` subscription obligation" without stating it;
+  this bullet states it.
 - **Mission pointers are a separate schema.** *Mission pointers are metadata
   only* keeps its own closed list, which refuses labels and assignees. This
   section does not change it.
@@ -5165,10 +5910,21 @@ does three things:
 2. It sets the field to `null` in every stored row.
 3. It drops the column.
 
-No identity, state, eligibility or `owner_only` rule reads a permissive field,
-so removing one changes none of them. Ranking may read one (`vip_assignee`).
-After the field is removed, that reason stops firing. The owner accepts that
-when removing the field.
+No identity, state or eligibility rule reads a permissive field. One
+`owner_only` rule does: a rules edit re-derives a `notion_work` item's
+`owner_only` from its stored `assignee` (*Domain and owner-only items* → *A
+rules edit re-derives the owner's stored items*). It reads the field only
+while the allow-list names it; once the field is removed, that item is treated
+like a `notion_personal` one, its stored `owner_only` is kept, and the
+re-sync converges it. So removing a permissive field changes no stored
+`owner_only` value. Ranking may read one (`vip_assignee`). After the field is
+removed, that reason stops firing. The owner accepts that when removing the
+field.
+
+**Later (2026-09-30):** this paragraph said "No identity, state, eligibility
+or `owner_only` rule reads a permissive field". Superseded by DND-1256
+(gen_saas #558): a rules edit re-derives stored items, and for `notion_work`
+the only stored input to `owner_only` is the permissive `assignee`.
 
 ### States
 
@@ -5179,11 +5935,12 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | created `proposed` | ingest, for a `slack_ask` | |
 | created `active` | ingest, for every other source; the owner, for `manual` | |
 | `proposed` → `active` (promote) | the owner only | |
-| `dismissed` or `done` → `active` (restore) | the owner only | |
+| `dismissed` or `done` → `active` (restore) | the owner only | `restored_from`: the undone `closed_by`, or `dismissed` (*A restore is sticky until the source changes*) |
 | `proposed` or `active` → `dismissed` | the owner only | |
 | `active` → `done` | the lease holder, through `priority_complete` | `closed_by: lease_complete` |
 | `active` → `done` | the owner | `closed_by: owner` |
 | `active` → `done` | ingest, when the source status is terminal | `closed_by: source_status` |
+| `active` → `done` | ingest, on `forge.review.removed`, `.merged` or `.closed` | `closed_by: source_status` |
 | `active` → `done` | ingest, on the source's delete event; or the re-sync, when a read shows the page archived or trashed | `closed_by: source_deleted` |
 | `active` → `done` | the re-sync, when the item left its subscription's scope, or its page read answers not found | `closed_by: source_out_of_scope` |
 | `done` → `active` (reopen) | ingest, for `closed_by` `source_status` or `source_out_of_scope`, on an event whose revision is later than the row's and whose status is non-terminal | |
@@ -5196,23 +5953,101 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 - **A reopen needs evidence newer than the close.** Redelivery and reordering
   are normal (*Idempotency is per (event, item)*). So an update whose revision
   equals the row's, or that has none, never reopens a `source_status` close.
-  A family with no revision token (the forge family, DND-439) declares how it
-  orders a reopen when it registers, and cannot reopen an item until it does.
+  A family with no revision token declares how it orders a reopen when it
+  registers, and cannot reopen an item until it does.
   No update reopens a `source_deleted` close: a pre-delete update delivered
   again after the delete must not bring the item back. A delete that carries a
   revision sets `source_revision`, and an `undeleted` older than it is not
   applied.
+- **The forge family closes by event, not by status** (DND-439). A reviewer
+  removal has no status, and no terminal status is configured for
+  `forge_review`. So `removed`, `merged` and `closed` close an `active` item
+  `source_status` whatever its `status`, at an equal or newer `revision`
+  (the merge request's `updated_at`), or only at a strictly newer one on an
+  item the owner restored (*A restore is sticky until the source changes*);
+  an older one is not applied. They never
+  create an item: one for a merge request never indexed is
+  `skipped:unknown-item`. They leave every other state as it is: on an item
+  already `done` (any `closed_by`) or `dismissed`, a close is applied as a
+  pointer update: the state and `closed_by` stay as they are, and the pointer
+  fields and `source_revision` refresh. It is neither a second close nor a
+  skip, and its obligation settles `indexed` (*At-least-once, row by row*).
+  A close whose `revision` is older than the row's, on any item, writes
+  nothing and also settles `indexed`: the item already holds newer evidence
+  (*Idempotency is per (event, item)*). A new `forge_review` item is created `active` and `owner_only`,
+  never `proposed`: only a merge request that names the owner as a
+  reviewer, or a comment for the owner on an open one, creates an item (a
+  finish the owner did not review only closes one, DND-1377), so the
+  request is already addressed to the owner and has nothing to promote (*created `active`*, above). A
+  `forge.review.requested` whose `revision` is strictly newer than the row's
+  reopens a `source_status` close, like any other, and so does a
+  `forge.review.commented` (DND-1337); neither ever reopens an
+  `owner` or `lease_complete` close. GitLab's `updated_at` has one-second
+  precision, so a removal and a re-request in the same second tie: the
+  re-request does not reopen, and the item shows again on the merge
+  request's next change. That is the safe direction of *A close needs an
+  event no older than the row*, accepted.
+
+  **Later (2026-09-28):** the reopen bullet before this one named "the forge
+  family, DND-439" as a family with no revision token. Superseded: the family
+  declares `updated_at` as its revision, and this bullet is its order.
+- **A `forge_token` item has no source close** (DND-1338). Rotation mints
+  a new token id and GitLab raises no event for it, so the item closes only
+  by the owner (`complete`/`dismiss`). The expiry passing closes nothing
+  either: an expired token still needs replacing. A later warning for the
+  same token refreshes the item and never reopens an owner close.
 - **A close needs an event no older than the row.** An older event is not
   applied at all, so it cannot close an item. An event with an equal revision
-  can: within one minute, a redelivered terminal status can close an item that
-  was just reopened. That is the safe direction, and it is deliberate. A wrong
-  close drops an item from the queue until its next change. A wrong reopen
-  hands finished work to a second session.
+  can close an item the owner has not restored: within one minute, a
+  redelivered terminal status can close an item that was just reopened. That
+  is the safe direction, and it is deliberate. A wrong close drops an item
+  from the queue until its next change. A wrong reopen hands finished work to
+  a second session.
+
+  **Later (2026-09-30):** this bullet said an event with an equal revision
+  "can" close an item, without exception. Superseded for an item the owner
+  restored (DND-1277, gen_saas #567, `b1ff8c01`) by the next bullet. The
+  hourly re-sync re-applies each page at the row's own revision, so an
+  equal-revision close undid every restore within the hour.
+- **A restore is sticky until the source changes** (DND-1277). A restore
+  records what it overrode in `restored_from`: the `closed_by` of the close it
+  undid, or `dismissed`. While it is set, ingest, the re-sync and a rules edit
+  do not re-close the item on the information the owner overrode:
+  - A terminal status, or a forge `removed`, `merged` or `closed`, closes it
+    only at a strictly newer revision. An equal revision is the same
+    information. A missing or unparseable one cannot show it is newer. Either
+    is applied as a pointer update and the item stays `active`. A rules edit
+    that makes the item's status terminal re-applies it at the row's own
+    revision, so it does not close it either.
+  - A delete or a re-sync close whose `closed_by` repeats `restored_from`, at
+    a revision that is not strictly newer than the row's, is not applied. The
+    re-sync counts it kept, not closed, and logs it. A different close is new
+    information and closes: a page trashed after the owner restored a status
+    close closes `source_deleted`.
+  - A strictly newer revision clears the marker, whatever its status. So does
+    every close and every other owner action.
+
+  The source wins on new information; the owner wins on the same
+  information. Two limits follow from the revision's precision. A Notion
+  revision is minute-granular, so a change and a change back within one
+  minute read as the same information. And a source with no revision token
+  could never close a restored item by status, so such a source declares how
+  it orders a close before it may close by status. Every source that closes
+  by status today (Notion, forge) carries one.
 - **Terminal statuses are owner config, per source.** For `notion_personal`
-  the default is `Done`, `Cancelled` and `Won't Fix`. `notion_work` gets its
-  default from DND-438. A status outside the source's declared set is stored
-  and treated as non-terminal. The priorities page flags it as undeclared. It
-  is never silently read as open.
+  the default is `Done`, `Cancelled` and `Won't Fix`. For `notion_work` the
+  default is also `Done`, `Cancelled` and `Won't Fix`; `Ready for Release` is
+  not terminal, because it waits on the owner. The owner's stored list for a
+  source wins over its default, an empty list included; a source the stored
+  rules do not name takes its default. A status outside the source's declared
+  set is stored and treated as non-terminal. The priorities page flags it as
+  undeclared. It is never silently read as open. An edit of the list
+  re-derives the owner's stored items (*Domain and owner-only items* → *A
+  rules edit re-derives the owner's stored items*).
+
+  **Later (2026-09-28, DND-438):** this bullet said "`notion_work` gets its
+  default from DND-438". DND-438 set it, and made the default apply per source
+  to a rules row seeded before that source's default existed.
 
   **Later (2026-09-27):** the `notion_personal` default was `Done` and
   `Cancelled`. The owner made `Won't Fix` a closing status
@@ -5247,8 +6082,8 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 desired state* uses. It is derived per source, and `domain_basis` records how:
 
 - `notion_work`, `action_item`, `slack_ask` (the connected Slack is the work
-  Slack, owner decision OQ-6), `forge_review` and `meeting` are `work`, with
-  basis `source`.
+  Slack, owner decision OQ-6), `forge_review`, `forge_token` and `meeting`
+  are `work`, with basis `source`.
 - `notion_personal` takes its domain from the ticket's project, resolved
   through its Epic (*Payload fields and their types per event type* → *A
   ticket's project*). The owner's fleet policy maps the project's page id to a
@@ -5328,7 +6163,8 @@ report's `failed` count and logged, and the next backfill run reads it again.
 **`owner_only`** marks an item only the owner can act on. It is never
 leasable. It is true for:
 
-- every `forge_review` item (a review request to the owner) and every
+- every `forge_review` item (a review request or a comment for the owner),
+  every `forge_token` item (a token only the owner can rotate) and every
   `meeting` item;
 - a Notion item whose status is `Needs Attention` and whose assignees include
   the owner's own person id in that workspace. The owner's person id per
@@ -5338,6 +6174,38 @@ leasable. It is true for:
 - a `manual` item the owner marks so.
 
 It is false for everything else.
+
+**A rules edit re-derives the owner's stored items** (DND-1256). An item's
+`owner_only` and state are derived at ingest from the owner's rules of that
+moment. When the owner edits the rules, the same transaction re-derives every
+one of the owner's live items, in any state, under the new rules, and rescores
+the open ones. A derivation reads what the row stores, never the source:
+
+- **`owner_person_ids` → `owner_only`**, by the same derivation ingest uses
+  (above). A `notion_work` item re-derives from its stored `assignee`. A
+  `notion_personal` item stores no assignee (*The storage boundary*), so where
+  the answer needs one (a `Needs Attention` item, the person id configured) its
+  stored value is kept, and the re-sync's re-apply of the page converges it
+  (*Re-sync*). Unsetting the id needs no assignee: every `Needs Attention`
+  Notion item is `owner_only` at once, the restrictive reading. A `manual`
+  item keeps the owner's own mark.
+- **`terminal_statuses` → state**, only for an item whose stored status the
+  edit made terminal (terminal now, not before). It is applied as an event
+  carrying the item's own status and the revision the row already holds
+  (*States*), the event the re-sync would apply within the hour. A status that
+  was already terminal is left alone, so an item the owner restored over it
+  stays restored. Nothing reopens: a reopen needs a strictly newer revision,
+  so an item closed by a status the owner no longer calls terminal reopens on
+  its next change in the source. A close from here is recorded like any
+  other `source_status` close, and ends the item's lease.
+- **Not re-derived:** `domain`, `domain_basis` and `project`. Their only rules
+  input is `notion_project_domains`, which lives in the fleet policy, not in
+  the rules; an edit of that map reclassifies nothing (above).
+
+An ingest reads the rules row under a share lock taken before its item lock,
+so an ingest racing an edit either finishes first and is re-derived by the
+edit, or reads the edited rules. Neither leaves `owner_only` or the state
+derived from the old rules.
 
 ### Ranking
 
@@ -5394,6 +6262,232 @@ or a digest can render them:
 - **Rank at `now`.** `priority_next` ranks by a score computed at the call.
   The stored `score`, `reasons` and `scored_at` are the last computation, kept
   for display.
+
+### Item summaries
+
+An **item summary** is one to five sentences a model writes about an item for
+the owner to read on the priorities page (DND-1157). It is derived content, so
+this subsection is its boundary.
+
+- **Sources.** Only `notion_personal`, `notion_work` and `slack_ask` items
+  may have one. Every other source is refused by name, whatever the owner's
+  rules list: `action_item` because its subscription is `metadata_only` and
+  DND-1395 did not open it; `forge_review`, `forge_token`, `meeting` and
+  `manual` because they carry a title only. A missing or unknown source is
+  refused too. Enabling another source is an amendment to this list.
+
+  **Later (2026-09-30, DND-1395):** this bullet refused `notion_work` by
+  name, "because their subscriptions are `metadata_only` and a summary is a
+  store of their body" (decision D-1157-1). Superseded for `notion_work`
+  only by owner decision, relayed from Cody's laptop terminal turn of
+  2026-09-30 ~14:30Z ("Let's enable summaries for all notion sources." /
+  "Yes, summarize bodies"); evidence gen_saas #596 (`1100c1f9`). A work
+  ticket's body is read at summary time, sent in the prompt, and never
+  stored; the summary is stored. `action_item` stays refused.
+- **Owner opt-in per source.** The owner's rules name the enabled sources
+  (`summary_sources`), a subset of the three above. The default is
+  `notion_personal`; `notion_work` and `slack_ask` are off until the owner
+  enables them. Disabling
+  a source deletes its summaries on the next sweep pass.
+- **Only open items.** A `proposed` or `active` item is summarized. A `done`
+  or `dismissed` item keeps its last summary and is never refreshed.
+- **What is sent.** For `notion_personal` and `notion_work`: the title (at
+  most 300 characters), the status, and the plain text of the page's
+  top-level blocks, at most 8,000 characters. A work ticket's labels,
+  assignee and ticket number are not sent. For `slack_ask`: the stored
+  `message_text` when it is not blank; otherwise, for a DM ask, the DM's
+  text read live; at most 4,000 characters either way. A cut falls on a
+  character boundary and is marked `[truncated]`. Nothing else is sent: no
+  ids, links, people, dates, comments, project, asker or channel. The body is
+  read only under the owner's own enrichment token for that page's database,
+  and only when that database is one of the owner's usable `:ticket`
+  bindings bound to the item's own source, on the one content policy that
+  source binds on: `full` for `notion_personal`, `metadata_only` for
+  `notion_work` (`Athena.NotionEvents.IndexSource.text_readable?/2`). The
+  Agent Messages database that a work subscription also fronts is never
+  read. A failed body read is `source_unreadable`, a transient cause, never
+  no text. A DM's text is read only as the owner's
+  own Slack app, through the one lookup the priorities page and the digest
+  also use (`Athena.Priorities.live_ask_text/3`), and it is held only for
+  the call: only the summary is stored. A channel mention is never read
+  live, so with no stored text it has no text to summarize. A read that
+  finds nothing (a blank text, or a thread with no message from the asker)
+  is no text to summarize too. A failed read is never read as no text. A
+  failure about the whole workspace pauses the item and fails nothing
+  (*A Slack workspace failure pauses*). Of the failures about the one ask, a
+  malformed Slack reference or asker fails `slack_ref_invalid`, a permanent
+  cause, and any other fails `slack_unreadable`, a transient one
+  (*Refresh*).
+
+  **Later (2026-09-30, DND-1395):** this bullet read a body only for
+  `notion_personal`, from its bindings on a `full` subscription. Superseded
+  by DND-1395 (gen_saas #596, `1100c1f9`): a `notion_work` body is read too,
+  on its `metadata_only` subscription, for the prompt only.
+
+  **Later (2026-09-30, DND-1335):** this bullet said any failed read other
+  than a malformed reference fails `slack_unreadable`. Superseded by
+  DND-1335 (gen_saas #582, `c9690bbc`): a workspace-level failure (no app, a
+  revoked token, Slack down, a rate limit) failed every Slack ask, spent
+  each item's attempts, and pushed its retry out to 6 h, long after Slack
+  had recovered.
+
+  **Later (2026-09-30):** this bullet said `slack_ask` sends "the stored
+  `message_text`" only. Superseded by DND-1285 (gen_saas #575, `0594cf75`):
+  nothing populates `message_text` for most asks (DND-437, DND-1164), so most
+  Slack asks recorded no text to summarize. A DM ask with no stored text is
+  now summarized from its text read live
+  (`Athena.Priorities.Summaries.SlackText`).
+- **Provider and custody.** The Anthropic Messages API, with the model named
+  in server config, under the owner's key held in `Athena.Secrets` as
+  `(owner_id, :anthropic_api_key)`, account-wide. The owner stores it on the
+  owner-authenticated secret-entry page (`/secrets`, gen_saas ADR 18 rule 1,
+  decision D46); no rpc function takes it, and the page never shows it back.
+  With no key stored, no call is made and the page says so.
+- **What is stored.** In `priority_item_summaries`, one row per item: the last
+  good summary (1 to 1,000 characters), the model, the prompt version, the
+  source revision and a digest of the text it came from, and the latest
+  attempt's status and cause. The row's owner is its item's owner, enforced
+  by a composite foreign key, and the row is deleted with its item. A
+  per-call ledger (`priority_summary_calls`) holds tokens, cost and outcome,
+  never text, and is pruned after 35 days. No source text is stored.
+- **Refresh.** An open item is due when it has no summary row, when its
+  `source_revision` or the prompt version changed, or when a retry time it
+  was given has come. A due item's text is read and digested. The model is
+  called only when that digest differs from the last good summary's, and at
+  most once per item per 6 hours after a generation. A transient failure
+  backs off (1 min, 5 min, 30 min, 2 h, 6 h), then fails `retries_exhausted`,
+  except `slack_unreadable`. That one never exhausts: past the schedule it
+  retries at the schedule's last delay (6 h by default, or a longer
+  retry-after the answer names) until the read succeeds, because a DM ask's
+  revision does not change when its text becomes readable. A permanent
+  failure is not retried until the item's revision, its text or the prompt
+  changes.
+
+  **Later (2026-09-30):** this bullet said every transient failure ends in
+  `retries_exhausted`. Superseded for `slack_unreadable` by DND-1285
+  (gen_saas #575, `Summaries.Cause.exhausts?/1`,
+  `Summaries.Refresh.retry_delay/4`).
+- **A Slack workspace failure pauses, never fails** (DND-1335). A Slack
+  ask's live read can fail for a reason about the whole workspace rather
+  than the one ask. `Athena.Priorities.SlackNames.workspace_failure/1` is
+  the one table of those reasons. The Slack name lookup's own workspace
+  pause (`failure_scope/1`) reads the same table. A DM read reads it through
+  `SlackNames.dm_read_failure/1`, which adds `missing_scope` (DND-1368).
+  There are six causes:
+  - `slack_not_configured`: no Slack app with a stored bot token;
+  - `slack_token_unreadable`: the bot token could not be read;
+  - `slack_auth_rejected`: Slack answered `invalid_auth`, `not_authed`,
+    `account_inactive`, `token_revoked`, `token_expired`,
+    `org_login_required`, `team_access_not_granted` or `ekm_access_denied`;
+  - `slack_rate_limited`: HTTP 429, or Slack's `ratelimited`;
+  - `slack_unavailable`: a transport failure, any other non-2xx status, or
+    Slack's `accesslimited`, `fatal_error`, `internal_error`,
+    `service_unavailable` or `request_timeout`;
+  - `slack_missing_scope` (DND-1368): a Slack ask's live DM read was
+    refused with `missing_scope`. A DM read is `conversations.replies` on a
+    DM channel and needs only `im:history`, so the bot can read no DM on
+    that workspace. Its pause covers that owner's and team's DM reads only
+    (`SlackNames.failure_scope/2`); the workspace's name lookups are not
+    paused by it.
+
+  Any other reason is about the one lookup and stays `slack_unreadable`.
+  The page's name lookups (users, channels) keep `missing_scope` as a
+  failure of the one lookup, because the scope they need differs by kind
+  (`users:read`, `channels:read`, `groups:read`, `mpim:read`). The cause
+  set on `priority_item_summaries.cause` and `priority_summary_calls.outcome`
+  gains `slack_missing_scope` (gen_saas migration `20260930143000`).
+
+  **Later (2026-09-30, DND-1368):** this bullet listed five causes and
+  said `missing_scope` stays `slack_unreadable` for every lookup, with
+  DND-1368 as the follow-up. Superseded for DM reads by DND-1368 (gen_saas
+  #595, `b6c8a4ef`): a bot without `im:history` failed every DM ask one by
+  one as `slack_unreadable`, spent each item's attempts, and named no
+  single cause. Name lookups keep `missing_scope` per lookup.
+
+  A paused item is deferred under its cause until the lookup's pause ends.
+  That is 5 minutes. After an HTTP 429 carrying Slack's retry-after, it is
+  that delay held between 1 and 15 minutes. An item that met a pause already
+  cached may wait up to one more window. The pause spends no attempt,
+  fails no item, and makes no model call and no ledger row. A row with no
+  summary, one already paused, or one retrying a transient failure shows
+  the pause. A row with its own state (a current summary, a permanent
+  failure, no text) keeps it and only waits. When the pause ends, the item
+  is due again with no revision change, so it recovers by itself. The
+  lookup's pause keeps this to one Slack call per workspace per window.
+
+  Each sweep pass counts `slack_paused` per cause in its tally and its pass
+  line. It logs one warning per owner and cause, never one per item, naming
+  the count and the cause's `Fix:` line. The row reads "Summary paused:
+  <cause>, re-checked <time>".
+- **Budget, per owner.** 1,000 model calls and 2,000,000 tokens per UTC day,
+  and $20 per UTC month from metered tokens at configured prices, checked
+  before each scheduled call against the ledger plus the call's estimate. A
+  missing price, or an unpriced call already in the month, fails closed. At
+  a cap no call is made, and the affected rows show the cap and when it
+  resumes.
+
+  **Later (2026-09-30, DND-1395):** this bullet said 200 calls, 400,000
+  tokens and $5. The code had 250 calls before DND-1395, so the 200 was
+  drift. Raised by owner decision, relayed from Cody's laptop terminal turn
+  of 2026-09-30 ("Raise caps"); evidence gen_saas #596 (`1100c1f9`,
+  `config/config.exs`).
+- **The one-time backfill (DND-1395).** By owner decision, relayed from
+  Cody's laptop terminal turn of 2026-09-30 ~14:35Z ("I don't care about
+  the cost or cap for backfilling; please just get everything backfilled
+  (one-time job, haiku is cheap)"; evidence gen_saas #596),
+  `Athena.Priorities.Summaries.backfill/1` summarizes every due open item of
+  each owner's enabled sources with no daily or monthly cap, at most 5,000
+  due rows per owner per run. An owner whose gate is closed (no key, a
+  latch, an unpriced model) is left for the scheduled refresh.
+  - **How it runs.** Operators start it once through
+    `Athena.Priorities.SummaryBackfill.start/0` over rpc. It runs in a
+    supervised task, `status/0` reports its state and a counts-only tally,
+    and a second start while one runs is refused. The one option an operator
+    may pass is the pause after each call; every other key is dropped. Its
+    state lives in that process only: after a node restart, a second start
+    works the rest. The operator already holds the host the server runs on,
+    so this path grants no authority the operator did not have; its access
+    control is in *Access control* (the backfill row).
+  - **Not a standing bypass.** The cap-free mode is `backfill/1`'s own
+    literal (`Summaries.Budget.check/4` with `:uncapped`). No config key,
+    env var or option of the scheduled refresh selects it. Every call still
+    writes its ledger row, and the scheduled refresh's windows count those
+    rows, so after a large backfill the daily caps may pause the scheduled
+    refresh until the next UTC midnight. `price_unknown` still fails closed.
+  - **What it works.** Every row the scheduled refresh finds due, plus rows
+    deferred by a cap and `empty_source` rows, in the page's order. Every
+    other wait (a `price_unknown` pause, a transient backoff, a permanent
+    failure on the same text, a Slack workspace pause) is kept.
+  - **Pacing.** It pauses after each call and treats a 429 as a ledgered
+    wait with backoff, never a failure. Past its wait schedule it stops for
+    that owner with no item failed.
+  - **The scheduled refresh yields.** It skips its passes while the backfill
+    runs, from its next tick on. At most the one pass already in flight (up
+    to 20 items) overlaps; each write is the item's own upsert, so an
+    overlap at worst summarizes one item twice.
+- **Display only.** A summary is untrusted model output over untrusted text.
+  It renders as escaped plain text. No ranking reason, state, eligibility,
+  `owner_only` rule, lease answer, digest or judgment reads it or sends it.
+  It is not a judgment (`ai/contracts/athena-judgments.md` → *Purpose and
+  non-goals*).
+- **Never a silent blank.** Each row shows its summary or exactly one of:
+  pending, paused by a named budget or a named Slack workspace cause,
+  failed with a named cause, no text to summarize, unavailable with an
+  owner-level cause, off for this source, or no summary for this source. A stored status or cause the page does not know
+  shows as failed, never as a summary.
+- **Access control.** Only the owner's page reads summaries, through the
+  owner-scoped item listing (`owner_id` in the query). The sweeper writes
+  only for the item's own owner. No machine-token path reads one (*Access
+  control*).
+- **Removal.** Removing a permissive field removes the summaries derived from
+  it. A `slack_ask` summary may come from a DM's text read live, which no
+  field holds, so dropping `message_text` does not remove every `slack_ask`
+  summary. Disabling the `slack_ask` source does (*Owner opt-in per source*;
+  `SummaryStore.delete_disabled/2`). Removing the feature drops both tables.
+
+  **Later (2026-09-30):** this bullet said "dropping `message_text` removes
+  `slack_ask` summaries". Superseded by DND-1285 (gen_saas #575): a summary
+  may now come from the live DM text.
 
 ### Leases
 
@@ -5474,12 +6568,110 @@ would keep a dead session's lease alive.
 **Leasing never writes to the source tracker.** An admiral still takes scope
 in Notion per `athena:ticket-management`.
 
+### Morning digest
+
+Once per local day the server sends each owner one Slack DM summarising what
+needs them (DND-446; owner decision OQ-11: 07:00 America/Denver). It is v1 of
+the digest: links only. One-click buttons come with DND-440.
+
+**What it reads.** Only the owner's own items, through the owner read path
+(`Athena.Priorities.list_ranked/2` with the owner's user): the query filters
+`owner_id` and checks RBAC `read`. It reads `proposed` and `active` items and
+nothing else. It shows:
+
+- the **owner queue**: `proposed` items and `active` `owner_only` items, in
+  rank order, at most 10, then "and N more";
+- the top N (the owner's setting, default 5) **leasable** `active` items per
+  domain (`work`, `blend`, `personal`, each present even when empty), each with
+  its reason ids;
+- a meetings slot, left out until DND-447 fills it;
+- a footer link to `/priorities`.
+
+An empty index sends one line, "Nothing needs you today.", never silence.
+That line replaces the owner-queue and per-domain sections; only the header
+and the footer link stay.
+
+**Stored metadata only** (*The storage boundary*). A row is the source label,
+the item's ref linked to its `url`, the title and the reason ids. A
+`slack_ask` row reads `Slack ask from <@asker_ref>` with its link. Its
+`message_text` is never in the DM. The DM goes to the work Slack (OQ-6).
+
+**The recipient is the owner, and only the owner.** The server sends through
+`Athena.Slack.owner_dm/3`. It takes the owner id and a `{text, blocks}`
+message. It has no recipient, channel or app argument: any other key is
+refused by name. The app is the owner's one live Slack app
+(`slack_apps.owner_id`). The recipient is that app's `owner_slack_user_id`,
+read from the app row before any Slack call. Each of these is refused before
+anything is sent, recorded, and shown on `/priorities` as "Last digest:
+failed (<cause>)" with a `Fix:`:
+
+- no live app: `slack_not_configured`;
+- more than one live app: `ambiguous_slack_app` (never guessed);
+- no `owner_slack_user_id`: `owner_slack_user_id_unset`;
+- no stored bot token: `token_missing`.
+
+A missing recipient is never a silent skip, and there is never a fallback
+recipient. There is no inbox fallback either: the server holds the bot token
+(OQ-12), so a failure is made visible instead of routed a second way.
+`owner_dm/3` is server-internal. No MCP tool, API route or page exposes it.
+
+**No interactive blocks.** `owner_dm/3` refuses any interactive element
+(`interactive_blocks_refused`), as the click path does. It stamps no return
+address, so no click from a digest can be routed until DND-440 adds that path.
+
+**Schedule.** The owner's settings live on their priority rules, edited in the
+rules editor:
+
+- `digest_enabled` (default `true`);
+- `digest_time`, `HH:MM` from `00:00` to `20:59` (default `07:00`), so the
+  3 h retry window ends on the same local date;
+- `digest_weekdays`, ISO weekdays with 1 = Monday (default Monday to Friday,
+  never empty);
+- `digest_top_n`, 1 to 20 (default 5).
+
+The time zone is the owner's fleet policy time zone, never a second copy. In
+the server it is `Athena.Fleet.Policy.timezone`, the policy value the metering
+policy's `timezone` is read from, and it exists whether metering is on or
+off: an owner with no stored policy has the seed, `America/Denver`. A stored
+policy the owner may not read (DND-798) is not the seed: the digest sends
+nothing that day and records it `failed` with cause `policy_unreadable`, shown
+on `/priorities` with its `Fix:`, the same as the Slack causes above. The day is the owner's **local date**. A send time that
+occurs twice (the fall-back hour) is due at its first occurrence. A send time
+that does not exist (the spring-forward hour) is due at the first instant
+after the gap.
+
+**At most once per local day.** The send log, `digest_sends`, has one row per
+(owner, local date), unique. A pass claims the day before it reads or sends:
+it inserts `sending`, or takes over a `failed` row or a `sending` row whose
+claim is older than 10 minutes. A `sent` or `missed` day is never claimed
+again. A failed send is retried each pass (every 60 s) until 3 h after the
+send time. Then the day is recorded `missed`, keeping its last cause:
+`no_attempt` when no pass ran in the window, `crashed` when the pass that
+held the claim died. `missed` never closes a live claim. The `sent` and
+`failed` writes land only while the row is still the writer's own claim, so a
+pass that outlived its claim writes nothing. A crash between Slack's reply
+and the `sent` write can send a second message once the claim goes stale.
+That at-least-once edge is accepted.
+
+**The send log holds no content.** Each row has the owner, local date, status
+(`sending`, `sent`, `failed`, `missed`), attempts, the last cause (a closed
+code), the Slack channel and ts, and the block count. It never holds the
+rendered text. Each send also writes the outbound audit row every Slack action
+writes: action `owner_dm`, no machine, a body hash, never a body.
+
+**Each owner is its own boundary.** The scheduler runs each owner in
+`Athena.PerRow.run/2`. One owner's failure never stops another's digest.
+
 ### Access control
 
 | Operation | Who | Resource | Where checked | On denial |
 | --- | --- | --- | --- | --- |
-| View the priorities page | the logged-in owner | only the owner's items, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
+| View the priorities page | the logged-in owner | only the owner's items, their summaries, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
 | Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or, for promote, restore and dismiss only, an owner approval grant of class `priority.transition`, executed by the server at click time | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the grant path logs the refusal, the grant stays `approved`, and the approval message says so |
+| Build and send the morning digest | the server, for owner O; no caller | O's `proposed` and `active` items; O's own Slack app; recipient O's `owner_slack_user_id` | `Athena.Digest`: items through `list_ranked/2` with O's user (the `owner_id` filter plus RBAC `read`); `Athena.Slack.owner_dm/3` selects the app by `owner_id` and reads the recipient from it, with no recipient argument | nothing is sent; the cause is recorded on O's send log and shown on O's `/priorities` |
+| Generate an item summary | the server's summary sweeper, for each item's own owner; no caller | one owner's open items of an enabled summary source | `Athena.Priorities.Summaries`: the item loaded by id and `owner_id` in the query, checked against the source allow-list and the owner's enabled sources, and re-checked in the write transaction; a Notion body read only through `Athena.NotionEvents.index_page_text/4` under the owner's own binding; a Slack DM's text read only through `Athena.Priorities.live_ask_text/3`, as the owner's own Slack app, for an item of that owner (any other pair is `not_found` with no Slack call) | the item is skipped and counted; nothing is read or written for another owner |
+| Run the one-time summary backfill (DND-1395) | an operator on the host, over `rpc`, through `Athena.Priorities.SummaryBackfill.start/0`; no web, machine-token or MCP path reaches it | every owner's open items of that owner's enabled summary sources, each owner worked separately; no daily or monthly cap | `Athena.Priorities.Summaries.backfill/1`: owners one at a time, each only while its gate is open (key stored, model priced, no latch or account pause), and each item through the same per-item path as the sweeper (loaded by id and `owner_id`, checked against the allow-list and that owner's enabled sources, re-checked in the write transaction, bodies read as in the row above). `start` keeps only the pause option, so an rpc cannot swap the config, prices or clock | a second start while one runs is `already_running`; an owner whose gate is closed is skipped and counted; an unpriced call is `price_unknown`, and nothing is read or written for another owner |
+| Read the last digest day | the logged-in owner | the owner's own `digest_sends` rows | `Athena.Digest.latest_send/1`: an `owner_id` = viewer filter in the query | none shown ("none yet") |
 | `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
 
 - **Deny by default.** A machine token reaches the index only through the three
@@ -5490,8 +6682,10 @@ in Notion per `athena:ticket-management`.
   so it never replaces the `owner_id` filter (gen_saas DND-434 and DND-441
   added that filter to the fleet reads and to `set_control` for exactly
   this reason). Every read and write of items, index obligations, skip counts,
-  the index-failure record, re-sync runs, subscription bindings and rules
-  filters by `owner_id`. Ingest and the re-sync write only to the owner
+  the index-failure record, re-sync runs, subscription bindings, rules, item
+  summaries and the summary call ledger filters by `owner_id`. The two
+  exceptions are the summary sweeper's own system reads: the list of owners
+  it visits, and the ledger prune past 35 days. Ingest and the re-sync write only to the owner
   stamped from the authenticated ingress (*The event*), or to the item's own
   owner.
 - **Each owner path has a negative test for role-only access:** a user holding
@@ -5599,7 +6793,8 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
 - delivers **at-least-once** and retries at the **`(event, rule)`** grain using the event-level key combined with the
   stable `rule_id` — or, for a direct (rule-less) delivery, its own key (*Declared families beyond
   the first pass* → `fleet.session.message`, stated once there) — holding no durable dedupe store
-  and requiring consumer idempotency (*Idempotency is per (event, rule)*; *Rule identity —
+  for retries, running an ingress's opt-in seen-check before routing only, and requiring
+  consumer idempotency (*Idempotency is per (event, rule)*; *Rule identity —
   `rule_id`*);
 - applies the dedupe window at its declared **`(rule_id, subject)`** grain (*Enabled flag and
   dedupe window*);

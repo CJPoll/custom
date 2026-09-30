@@ -39,7 +39,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby python3 curl jq git; do
+[ -x /usr/bin/ruby ] || { echo "finding-triage self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in python3 curl jq git; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "finding-triage self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 [ -x "${BIN}" ] || { echo "finding-triage self-test: FAIL -- ${BIN} missing or not executable"; echo "  Fix: chmod +x ai/skills/athena:ticket-management/scripts/finding-triage"; exit 1; }
@@ -55,7 +56,7 @@ trap cleanup EXIT INT TERM
 # ruby_eq NAME EXPECTED RUBY-EXPR -- evaluate EXPR with the script loaded.
 ruby_eq() {
   local got
-  got="$(ruby -e "load ARGV.shift; puts(begin; $3; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" 2>&1)"
+  got="$(/usr/bin/ruby -e "load ARGV.shift; puts(begin; $3; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 
@@ -321,7 +322,7 @@ run "${FINDING[@]}" --project harness --candidates-file "${TMP}/bad-cands.json"
 eq "a malformed candidates file is usage (2)" "${RC}" "2"
 
 # A long body is cut to 2,000 characters before it is sent.
-ruby -e 'print "z" * 2600' > "${TMP}/long.txt"
+/usr/bin/ruby -e 'print "z" * 2600' > "${TMP}/long.txt"
 : > "${TMP}/server.log"
 run --title "HIGH: gate passes" --body-file "${TMP}/long.txt" --project harness --candidates-file "${TMP}/cands.json"
 eq "the body sent is at most 2,000 characters" "$(jq -r 'select(.service == "athena") | .body.finding.body | length' "${TMP}/server.log")" "2000"

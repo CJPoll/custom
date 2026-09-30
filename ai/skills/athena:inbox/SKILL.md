@@ -128,8 +128,23 @@ declares both.
 ### How a session finds its entry
 
 ```
-cwd  ->  realpath(git rev-parse --git-common-dir)  ->  the entry whose "repo" equals it
+session project dir  ->  realpath(git rev-parse --git-common-dir)  ->  the entry whose "repo" equals it
 ```
+
+**The session project dir is the session's, not the shell cwd's** (DND-1163):
+`$CLAUDE_PROJECT_DIR`, else the Claude Code process's own cwd
+(`/proc/$CLAUDE_PID/cwd`; the Bash tool exports `CLAUDE_PID` but not
+`CLAUDE_PROJECT_DIR`, and its `cd` never moves that process), else the cwd.
+Every bin resolves it through `inbox_session_dir` (`lib/inbox.sh`) and refuses,
+with a `Fix:`, a shell cwd inside a **different** registered project, and a
+session signal that is set but unusable. `inbox-doctor` reports it as its
+`session-project` finding, naming the source. A cwd in no registered project,
+or in a worktree of the session's own, is fine.
+
+**Later (2026-09-28, DND-1163):** the chain above began at `cwd`. Superseded:
+the Bash tool keeps a `cd` across calls, so a session standing in another
+repo read, acked, sent as, waited on and claimed Slack threads for that repo's
+channels, with exit 0.
 
 The git **common dir** — not the toplevel, not the origin URL. It is identical
 for a repo's main checkout and every one of its worktrees, and distinct per
@@ -166,7 +181,8 @@ Both are woken by a `.event` doorbell beside them.
 ## Commands
 
 Run them from the skill directory (`~/.claude/skills/athena:inbox/bin/…`). Every
-command resolves this session's tenancy from cwd (see *Tenancy* above) and prints
+command resolves this session's tenancy from the session's project dir (see
+*How a session finds its entry* above) and prints
 a `Fix:` clause on any refusal.
 
 | Script | What it does |

@@ -15,6 +15,8 @@ reason** (see the trigger note below) — produce a summary:
 - Missions still blocked, and on what
 - Missions stuck, and why
 - New Missions created for discovered dependencies
+- Epic milestones this run crossed (50% / 100%), each with its decisions
+  digest ([[athena:epic-progress-dm]])
 - Findings ticketed during the run, including captains' proposed tickets you
   filed, as one batched list with priorities (`~/.claude/CLAUDE.md` → *Find it,
   ticket it, fix it, verify it live*)
@@ -85,8 +87,8 @@ then sat untouched for ~2.4 days each — **610,039s (7.06 days) of ready-and-id
 MRs, and ended still holding these three; nothing noticed. The idle is not free
 waiting: when a later run drained them, `origin/main` had moved 19 commits under
 !1187 alone, costing 4 full pipeline runs and 2 extra reviews to absorb the
-drift. `lead-time` could not have caught it — it queries `state=merged`, so an
-orphaned open MR is invisible to it until it merges, which is 2.5 days after the
+drift. `lead-time` could not have caught it — it never lists open requests, so
+an orphaned open MR is invisible to it until it merges, which is 2.5 days after the
 damage stops being recoverable.*
 
 **Also fire this skill whenever your turn is ending for ANY reason** — ceiling,

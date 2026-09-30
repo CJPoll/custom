@@ -20,10 +20,26 @@ a Mission is unblocked and has a free slot (worktree already created via
    every dispatch*, below) before the spawn.
 1. **Move the Mission's Notion status to `In Progress`** and set its `Assignee`
    to **Athena** (the active connection's bot — see [[athena:ticket-management]]).
+   For a DND ticket or a work-tracker (walt_ui) ticket, the status move is
+   `~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref <TICKET>`.
+   It also stamps the dispatch date, the start `ai/bin/lead-time` measures from
+   ([[athena:ticket-management]] → *The transitions an orchestrator performs*).
+   A work ticket needs the private overlay; with none it exits 3 and writes
+   nothing, so make the move with the notion-work connector and say in the
+   state log that the ticket has no lead-time start.
 2. **Dispatch an athena-captain, named uniquely and Mission-qualified** (e.g.
    `athena-captain-DND-398`) — never the bare role name. Several run
    concurrently; `ListAgents` can't disambiguate identical bare names, and a
    report aimed at one can silently misroute.
+   **Start the Agent `description` with the Mission's ticket ref**
+   (`DND-541 captain`) and put a line `Mission: DND-541` in the brief. The
+   fleet-lifecycle hook maps the spawn to its Mission from those two places
+   only; the agent name is not read. A description naming two or more refs is
+   ambiguous and never mapped, so a batch names only its first ticket's ref
+   there. Rules: `ai/contracts/athena-events.md` → *Hook missions carry
+   `ticket_ref` only*. An unmapped spawn shows as an `unmapped captain` row on
+   the fleet page. Measured: three unmapped spawns (2026-09-28, 09-29, 09-30),
+   the last a forward captain whose description lacked the ref.
 
 Give the captain, in the brief:
 
@@ -130,8 +146,27 @@ Give the captain, in the brief:
   ONE Bash command that starts in your worktree: `cd <worktree> &&
   ~/dev/custom/ai/bin/test-slot -- timeout 1500 <cmd>`. For `harness-gate`,
   `<cmd>` is your worktree's own `./ai/bin/harness-gate`. Quote its `gating
-  <root>` line with the result. Exit 75 with `test-slot: TIMEOUT` means it
-  never ran: run it again; never count it as a pass."*
+  <root>` line with the result. A compile or image build outside the gate is
+  heavy too: `docker compose build`, a bootstrap `deps.get`/`compile`, a
+  `mix format` in a fresh container. Run it the same way. Exit 75 with
+  `test-slot: TIMEOUT` means it never ran: run it again; never count it as a
+  pass. Never wrap
+  `critic-review` or an eval by itself in the CPU pool: test-slot routes them
+  to its model pool."* (`integration-gate --with-critic` is not such a wrap:
+  it queues its judge in the model pool itself, beside the gate, DND-1326.)
+  **Later (2026-09-30, DND-1326):** the parenthesis said the judge runs
+  "inside the gate's own slot"; it held no unit in either pool.
+  test-slot has two pools, each a weighted budget (DND-1006). A run with no
+  `--weight` takes its pool's default. In the CPU pool a `harness-gate`
+  weighs its worker count and any other run the CPU default. In the model
+  pool an eval weighs the model calls it keeps in flight, derived from its
+  `--concurrency` (DND-1358), and any other run the model default. The
+  numbers live in `test-slot --help` (the `--weight` line); `test-slot
+  --weight-of -- <cmd>` prints what one command would take. A caller that
+  knows its run is lighter or heavier passes `--weight N`.
+  **Later (2026-09-30, DND-1366):** this said a run with no `--weight`
+  "weighs a third of the budget". That holds only in the CPU pool; an eval's
+  model-pool weight is derived from its concurrency.
   `integration-gate` wraps its whole run, fetch included, in test-slot
   (DND-486, DND-1064); its
   own "never ran" is exit 6, `GATE NOT RUN`, and never a pass either. The
@@ -151,7 +186,8 @@ Give the captain, in the brief:
   timed out after 900 s of its 1500 s spent queued, and DND-790's timed out with
   3/3 slots held and the gate never run. Bound the wait with
   `--wait-timeout` instead.
-- **The one-command final check.** Every brief carries this line: *"Your
+- **The one-command final check.** Every brief carries this line, unless the
+  branch is published (*The published-branch variant* below): *"Your
   final check is ONE command on your final commit: `cd <worktree> &&
   ~/dev/custom/ai/bin/test-slot -- timeout 1500
   ~/dev/custom/ai/bin/integration-gate --with-critic --rebase`. It runs the
@@ -164,7 +200,8 @@ Give the captain, in the brief:
   in one round, commit, and run it again."* It replaces a separate
   `critic-review` then gate on the final commit (`athena:merge-boarding` →
   *Landing onto a moving main*).
-- **The don't-chase-main rule.** Every brief carries this line: *"Your gate bar
+- **The don't-chase-main rule.** Every brief carries this line, unless the
+  branch is published (*The published-branch variant* below): *"Your gate bar
   is ONE green gate on a head that contained `origin/main` when the gate
   started. If main moves after that, do not rebase and re-gate to catch it:
   report the gated SHA and the main it contained. I forward and re-gate the
@@ -188,6 +225,37 @@ Give the captain, in the brief:
   the gap between landings, so the retry refused too (DND-907, DND-896+945 and
   DND-902 each refused twice on 2026-09-28). It now takes the slot first and
   reads main inside it, and `--rebase` replays the branch there.
+- **The published-branch variant.** A branch is published when it already has
+  an open PR/MR at dispatch, or another Mission's branch stacks on it. A batch
+  captain's own stack is not published by this rule; it restacks it itself
+  (*Batch Missions (tier 4)* → *The branches*). A rebase rewrites
+  SHAs that a reviewer, a CI run or a child branch holds. `--rebase` also
+  replays with `--no-rebase-merges`, so it drops the forward merges already on
+  the branch and re-raises every conflict they resolved. For a published
+  branch the brief carries this line in place of the two above: *"This branch
+  is published: never rebase it, never force-push it. Bring main in with
+  `git merge origin/main`, resolve, commit, and push as Athena with a plain
+  push. Your final check is ONE command on that head: `cd <worktree> &&
+  ~/dev/custom/ai/bin/test-slot -- timeout 1500
+  ~/dev/custom/ai/bin/integration-gate --with-critic` (no `--rebase`). Quote
+  its INTEGRATION OK line. On a RED gate or a BLOCK, fix every finding from
+  both in one round, commit, and run it again. Your gate bar is ONE green gate
+  on a head that contained `origin/main` when the gate started. If it refuses
+  because main moved while you queued, merge `origin/main` once more and run
+  it once more; if it refuses again, stop and report. If main moves after a
+  green gate, do not chase it: report the gated SHA and the main it contained.
+  Merge main in earlier only on a real conflict or when I ask."* The bar is
+  unchanged: a green gate and a critic PASS on a head that contains
+  `origin/main`. Merging forward is the move `locked-merge` names on a moved
+  base, and the one *No replay churn* assumes ([[athena:merge-boarding]]).
+  The one rebase a published branch takes is a stacked child's `--onto` after
+  its parent squash-lands ([[athena:captain-return]]); you brief that by hand.
+
+  **Later (2026-09-30):** the final-check and don't-chase-main lines were for
+  every brief. Superseded for a published branch: their `--rebase` and
+  force-push rewrote open PRs, and admirals in two fleets overrode them by
+  hand (gen_saas 2026-09-28-unified-priorities: DND-1155, -1188, -1239,
+  -1253, ADR-18, DND-1350; 2026-09-28-event-platform: DND-229).
 
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)
@@ -257,7 +325,11 @@ The batch brief carries everything above for one Mission, plus:
 - **The branches.** One worktree, one branch per ticket, each cut from the
   branch of the ticket below it. The worktree's own branch is the first
   ticket's. In a forge repo, each PR targets the branch of the ticket below it;
-  the first targets the MR target branch.
+  the first targets the MR target branch. When a lower ticket's head is
+  rewritten before it lands (a review-round amend, a rebase onto main,
+  `integration-gate --rebase`), restack each ticket above it bottom up:
+  `git rebase --onto <new lower head> <old lower head> <upper branch>`. A
+  plain rebase replays the lower ticket's old commits and conflicts.
 - **The critic line:** *"Judge each ticket alone: on that ticket's head, run
   `~/dev/custom/ai/bin/critic-review --base <the branch of the ticket below>`
   (the first ticket: the MR target branch). Without `--base`, the diff is the
@@ -269,7 +341,8 @@ The batch brief carries everything above for one Mission, plus:
   line, the PR URL (forge repos), files changed, and its own proposed findings.
   A STUCK ticket holds every ticket stacked above it; its section says so.
 - **The Notion transitions, per ticket.** Move each ticket to `In Progress` with
-  Athena as `Assignee` at dispatch. In a forge repo, the captain's `In Review`
+  Athena as `Assignee` at dispatch, through `mark-in-progress` (step 1 above),
+  so every ticket in the batch gets its lead-time stamp. In a forge repo, the captain's `In Review`
   rule (or "set NO Notion status at all") applies to each ticket as its own PR
   opens. You move each ticket on its own landing.
 
@@ -308,9 +381,13 @@ below it, these rules decide.
   load-based failure lowers the cap.
 - **Heavy gates go through `test-slot`.** Wrap your own (`integration-gate`,
   `harness-gate`, a full suite) as `~/dev/custom/ai/bin/test-slot -- <cmd>`,
-  always the main checkout's copy, so every fleet shares one pool. Give every
-  captain the test-slot brief line. Exit 75 with `test-slot: TIMEOUT` means the
-  command never ran.
+  always the main checkout's copy, so every fleet shares one pool. So do the
+  builds and compiles your own briefs or bootstrap steps run outside a gate.
+  Give every captain the test-slot brief line. Exit 75 with `test-slot:
+  TIMEOUT` means the command never ran. Measured 2026-09-30 15:15-15:37Z:
+  captains in two walt_ui fleets ran un-slotted compiles beside gated suites
+  (bare `compose run app` calls at 15:22 and 15:32Z; a `mix format` in a fresh
+  container at ~15:18Z), and load1 hit 42 on the owner's desktop.
 - **A load-based failure lowers your cap by one** for the rest of the run, and
   you tell the session that launched you (it apportions the machine across
   admirals). Load-based failures: a captain's `CONTENTION:` line (captains
@@ -323,11 +400,11 @@ below it, these rules decide.
   Exit 75, or an rc 124 from a `timeout` wrapped around `test-slot`, means the
   command never ran, so it measured the pool, not the machine. It does not
   lower the cap and is not reported as a load failure. Tell them apart with
-  `~/dev/custom/ai/bin/test-slot --status`: all N slots held with 1-min load
-  under 12 means the pool is the limiter. Measured 2026-09-26 ~16:30Z: two
+  `~/dev/custom/ai/bin/test-slot --status`: the budget fully held with 1-min
+  load under 12 means the pool is the limiter. Measured 2026-09-26 ~16:30Z: two
   fleets froze dispatch on "load-based failures" that were DND-814's queued
-  gate timing out; one then read load 7.5 on 16 cores with 9 waiters. Pool
-  size and FIFO order are DND-827 and DND-823.
+  gate timing out; one then read load 7.5 on 16 cores with 9 waiters. The
+  weighted budget and its measured basis are DND-1006; FIFO order is DND-823.
 - **The pool is per machine.** Another machine may have its own pool (a captain
   count its admirals share) or its own threshold. The launching session
   apportions it, and the share your brief names is your cap, as a lane brief's

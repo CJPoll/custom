@@ -11,9 +11,10 @@
 # suite was SIGTERMed after starting it but before recording its pid, so the
 # suite's pid-list cleanup never knew it existed.
 #
-# The timing is made deterministic with a `ruby` shim first on PATH. The
-# suites start every client as a bare `ruby ...` (directly, or through a stub
-# that execs `ruby`), so the shim runs as the new client's own process. When it
+# The timing is made deterministic with a `ruby` shim. The suites start every
+# client through REPRO_RUBY (default /usr/bin/ruby; directly, or through a stub
+# that execs it), which this script points at the shim, so the shim runs as the
+# new client's own process. When it
 # is the client a case targets, it SIGTERMs the suite and only then execs the
 # real ruby. The client therefore always exists before the suite can have read
 # its ready file, which is the window the incident needed luck to hit.
@@ -29,6 +30,10 @@
 #   REPRO_CASES    which cases to run, space-separated (default "r1 r2").
 #   REPRO_WAIT_S   hard cap on the wait for each suite (default 1200).
 #   REPRO_STALL_S  a suite that prints nothing for this long is stuck (default 240).
+#   REPRO_READY_S  a hang cap on R2's wait for its target client (default 120).
+#                  The wait ends on an event: the client's ready file names it,
+#                  or the client exited first (R2 FAILs: nothing was tested).
+#                  Only a client still booting at the cap is a no-verdict FAIL.
 # A case that cannot run is a FAIL that says which of two things happened:
 # the suite was still RUNNING when the wait ran out (a slow or stuck suite,
 # killed here, no leak verdict), or it EXITED early (named with its status).
@@ -43,23 +48,25 @@
 set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd -- "${HERE}/../../.." && pwd -P)"
-REAL_RUBY="$(command -v ruby)" || { echo "VERDICT: FAIL -- no ruby on PATH"; echo "  Fix: put ruby on PATH."; exit 1; }
+[ -x /usr/bin/ruby ] || { echo "VERDICT: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958)."; exit 1; }
+[[ "${REPRO_READY_S:-120}" =~ ^[1-9][0-9]*$ ]] || { echo "VERDICT: FAIL -- REPRO_READY_S='${REPRO_READY_S}' is not a whole number of seconds"; echo "  Fix: set REPRO_READY_S to a positive integer, or unset it (default 120)."; exit 2; }
 WORK="$(mktemp -d)"
 FAIL=0
 NORUN=0   # cases whose suite was still running when the wait ran out
 TRACK=()
 
-# pids_with_env <VAR=value> -- own-uid pids whose environ holds exactly it.
+# pids_with_env <VAR=value> -- own-uid pids whose environ holds exactly it,
+# read through the reaper's scan (DND-1016): a plain environ read misses a
+# survivor caught mid-exec and gives a false PASS. It runs inside $(...),
+# where an exit is lost, so a scan that cannot run prints the token
+# SCAN-FAILED in place of a pid: the caller reads "something outlived the
+# suite" and the case FAILs, never "no survivors".
+. "${REPO}/scripts/test/lib/suite-reaper.bash"
 pids_with_env() {
-  local want="$1" d e
-  for d in /proc/[0-9]*; do
-    [ -O "${d}" ] || continue
-    {
-      while IFS= read -r -d '' e; do
-        if [ "${e}" = "${want}" ]; then printf '%s\n' "${d#/proc/}"; break; fi
-      done <"${d}/environ"
-    } 2>/dev/null
-  done
+  suite_env_pids exact "$1" && return 0
+  echo "repro: the process scan could not run, so survivors cannot be counted." >&2
+  echo "  Fix: repair the scan's reason above (scripts/lib/proc-env-scan.awk)." >&2
+  echo "SCAN-FAILED"
 }
 
 report_survivors() { # report_survivors <label> <marker>
@@ -111,8 +118,24 @@ if [ "${fire}" = 1 ] && [ ! -e "${REPRO_FIRED}" ]; then
           # finish booting (its TERM-ignoring trap installed, ready written),
           # then deliver the SIGTERM and thaw it. Only then can the cleanup's
           # own SIGTERM meet a client that ignores it, as in the incident.
+          # The wait ends on an EVENT, never on the clock (DND-1203): the
+          # ready file naming THIS pid (the exec keeps it) proves the client
+          # booted (.ready); the client dead before that means the case tests
+          # nothing (.dead). REPRO_READY_S is only a hang cap; a client still
+          # alive and not ready when it runs out is recorded as .slow, a
+          # no-verdict run, never as "tested nothing".
           kill -STOP "${p}"
-          ( for _ in $(seq 1 300); do [ -s "${MOCK_READY}" ] && break; sleep 0.1; done
+          me=$$; st0="$(cat "/proc/${me}/stat")"; st0="${st0##*) }"
+          st0="$(set -- ${st0}; printf '%s' "${20}")"   # starttime: survives exec, not pid reuse
+          ( out=slow
+            for _ in $(seq 1 $(( ${REPRO_READY_S:-120} * 10 ))); do
+              [ "$(cat "${MOCK_READY}" 2>/dev/null)" = "${me}" ] && { out=ready; break; }
+              s="$(cat "/proc/${me}/stat" 2>/dev/null)"; s="${s##*) }"
+              set -- ${s}
+              { [ -z "${s}" ] || [ "$1" = Z ] || [ "$1" = X ] || [ "${20}" != "${st0}" ]; } && { out=dead; break; }
+              sleep 0.1
+            done
+            : >"${REPRO_FIRED}.${out}"
             kill -TERM "${p}"; kill -CONT "${p}" ) >/dev/null 2>&1 &
         else
           kill -TERM "${p}"
@@ -125,12 +148,30 @@ fi
 exec "${REAL_RUBY}" "$@"
 SHIM
 chmod +x "${WORK}/bin/ruby"
+# R2 runs with HOME pointing at a scratch home, as the incident's supervisor
+# did. scripts/athena-inbox-client-run.sh resets PATH to a fixed list headed by
+# ${HOME}/.local/bin, so the shim cannot come from PATH there: the suite's stub
+# execs the absolute REPRO_RUBY path it was written with (DND-1340).
+mkdir -p "${WORK}/home"
+
+# REAL_RUBY is the interpreter itself, never the first `ruby` on PATH
+# (DND-1203). In an agent session that is the asdf shim, and an asdf shim
+# finds no ruby under R2's scratch HOME (exit 126): every client R2's suite
+# started died at once, the suite waited out each one's ready bound (~835s a
+# gate), and the TERM-ignoring client R2 exists to test never ran. RbConfig.ruby
+# is resolved here, under the real HOME, and must then run under the scratch one.
+REAL_RUBY="$(/usr/bin/ruby -e 'print RbConfig.ruby' 2>/dev/null)"
+if [ -z "${REAL_RUBY}" ] || [ ! -x "${REAL_RUBY}" ]; then
+  echo "VERDICT: FAIL -- could not resolve the ruby interpreter: \`/usr/bin/ruby -e 'print RbConfig.ruby'\` gave '${REAL_RUBY}'"
+  echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958) and check it runs."
+  exit 1
+fi
+if ! HOME="${WORK}/home" "${REAL_RUBY}" -e 0 >/dev/null 2>&1; then
+  echo "VERDICT: FAIL -- the ruby interpreter '${REAL_RUBY}' (RbConfig.ruby of /usr/bin/ruby) does not run with HOME=${WORK}/home"
+  echo "  Fix: the shim must exec a ruby that needs nothing from HOME; check \`/usr/bin/ruby -e 'print RbConfig.ruby'\` names an executable interpreter."
+  exit 1
+fi
 export REAL_RUBY
-# scripts/athena-inbox-client-run.sh resets PATH to a fixed list headed by
-# ${HOME}/.local/bin, so R2 also runs with HOME pointing at a scratch home
-# whose .local/bin holds the same shim.
-mkdir -p "${WORK}/home/.local/bin"
-cp "${WORK}/bin/ruby" "${WORK}/home/.local/bin/ruby"
 
 # wait_suite <pid> <outfile> -- block until the suite exits (status 0), or
 # until it stalls or hits the cap (status 1, WAIT_WHY says which). The bound
@@ -182,7 +223,7 @@ kill_mark() {
 run_case() { # run_case <id> <label> <suite-rel-path> <suite-pattern> [HOME]
   local id="$1" label="$2" suite="$3" pat="$4" home="${5:-${HOME}}" mark="DND818_REPRO_MARK=${1}-$$" pid rc
   printf '%s  %s\n' "${id^^}" "${label}"
-  env "${mark}" HOME="${home}" PATH="${WORK}/bin:${PATH}" REPRO_CASE="${id}" REPRO_SUITE_PAT="${pat}" \
+  env "${mark}" HOME="${home}" PATH="${WORK}/bin:${PATH}" REPRO_RUBY="${WORK}/bin/ruby" REPRO_CASE="${id}" REPRO_SUITE_PAT="${pat}" \
       REPRO_SEEN="${WORK}/${id}.seen" REPRO_FIRED="${WORK}/${id}.fired" \
       bash "${REPO}/${suite}" >"${WORK}/${id}.out" 2>&1 &
   pid=$!; TRACK+=("${pid}")
@@ -206,6 +247,28 @@ run_case() { # run_case <id> <label> <suite-rel-path> <suite-pattern> [HOME]
     return
   fi
   report_survivors "${id} (target client pid $(cat "${WORK}/${id}.fired"))" "${mark}"
+  # R2's window needs the TERM-ignoring client ALIVE when the SIGTERM lands.
+  # A client that died before its ready file named it leaves nothing to leak,
+  # so "nothing outlived" would be a vacuous PASS (DND-1203).
+  [ "${id}" = r2 ] || return
+  local f="${WORK}/${id}.fired" c
+  c="$(cat "${f}")"
+  if [ -e "${f}.ready" ]; then
+    :
+  elif [ -e "${f}.dead" ]; then
+    printf '  FAIL  %s: the target client (pid %s) exited before it became ready, so the SIGTERM met no TERM-ignoring client and this case tested nothing\n' "${id}" "${c}"
+    suite_own_fails "${WORK}/${id}.out"
+    printf '        Fix: the shim execs REAL_RUBY with HOME=%s; make sure that ruby and the mock start there.\n' "${WORK}/home"
+    FAIL=$((FAIL+1))
+  elif [ -e "${f}.slow" ]; then
+    printf '  FAIL  %s: the target client (pid %s) was still alive but not ready when the %ss hang cap ran out; this run gives no verdict\n' "${id}" "${c}" "${REPRO_READY_S:-120}"
+    printf '        Fix: re-run this repro alone (REPRO_CASES=%s); a client that never writes its ready file is hung in its boot.\n' "${id}"
+    FAIL=$((FAIL+1)); NORUN=$((NORUN+1))
+  else
+    printf '  FAIL  %s: the trigger fired (target pid %s) but left no ready/dead/slow record, so whether the client booted is unknown\n' "${id}" "${c}"
+    printf '        Fix: the shim'"'"'s ready waiter did not finish; read %s and the shim in this script.\n' "${WORK}/${id}.out"
+    FAIL=$((FAIL+1))
+  fi
 }
 
 for c in ${REPRO_CASES:-r1 r2}; do

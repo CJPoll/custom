@@ -45,14 +45,10 @@ fleet_start_server || exit 1
 SEEN="${XDG_STATE_HOME}/athena/fleet/seen"
 SID="11111111-2222-4333-8444-555555555555"
 
-# hook <json> -- run the hook with stdin; sets RC, OUT, ERR, MS (wall ms).
+# hook <json> -- run the hook with stdin; sets RC, OUT, ERR.
 hook() {
-  local t0 t1
-  t0="$(date +%s%N)"
   OUT="$(printf '%s' "$1" | "${HOOK}" 2>"${TMP}/err")"; RC=$?
-  t1="$(date +%s%N)"
   ERR="$(cat "${TMP}/err")"
-  MS=$(( (t1 - t0) / 1000000 ))
 }
 post() { jq -n -c --arg s "${SID}" --arg a "${1:-}" --arg t "${2:-}" \
   '{hook_event_name: "PostToolUse", session_id: $s, cwd: "/", tool_name: "Bash"}
@@ -112,13 +108,21 @@ settle 4
 eq "[ticket] 60 s later the admiral reports again" "$(fleet_log_count)" "$((base + 4))"
 
 echo "== hook: never adds latency [ticket]"
-fleet_respond '{"status":202,"body":{"ok":true},"delay_s":3}'
+# The server holds its answer until the test releases it (DND-1007), so the
+# verdict is an event: the hook exited while no answer existed. `timeout 60`
+# is a hang cap only; a hook that waited on the network would exit 124.
+HOLD="${TMP}/hold-latency"
+fleet_respond "{\"status\":202,\"body\":{\"ok\":true},\"hold_file\":\"${HOLD}\"}"
 : > "${PIDS}"
-hook "$(post lat0001 athena-captain)"
-eq "PostToolUse against a 3 s server: exit 0" "${RC}" "0"
-if [ "${MS}" -lt 2500 ]; then ok "[ticket] the hook returned in ${MS} ms while the server was still sleeping 3 s"
-else bad "[ticket] the hook returned in ${MS} ms while the server was still sleeping 3 s" "it waited on the network"; fi
+post lat0001 athena-captain > "${TMP}/in.json"
+# curl's cap and the report's bound are raised past the 60 s hang cap, so a
+# hook that waited on the network could not give up early and exit 0.
+OUT="$(FLEET_MAX_TIME_S=120 FLEET_HOOK_TIMEOUT_S=120 timeout 60 "${HOOK}" < "${TMP}/in.json" 2>/dev/null)"; RC=$?
+eq "[ticket] the hook exited 0 while the server's answer was still held" "${RC}" "0"
+fleet_await_live_reporter "${PIDS}"
+eq "[ticket] the detached report is still waiting on the held answer" "${LIVE_REPORTER}" "yes"
 eq "PostToolUse writes nothing on stdout" "${OUT}" ""
+touch "${HOLD}"
 settle 1
 fleet_respond '{"status":202,"body":{"ok":true}}'
 
@@ -147,18 +151,22 @@ case "${OUT}" in *"1 background fleet registry report(s) failed"*"no usable sess
 settle 3
 
 echo "== hook: the detached report is bounded by timeout"
-fleet_respond '{"status":202,"body":{"ok":true},"delay_s":4}'
+# The answer is held until after the reporter has exited (DND-1007). curl's
+# own cap (FLEET_MAX_TIME_S=30) and the hold's cap (120 s) are both far past
+# the 1 s bound, so the reporter can only end by being killed at that bound:
+# the verdict is which way it ended, never how long it took.
+HOLD="${TMP}/hold-bound"
+fleet_respond "{\"status\":202,\"body\":{\"ok\":true},\"hold_file\":\"${HOLD}\"}"
 : > "${PIDS}"
-t0="$(date +%s)"
 mkdir -p "${TMP}/tmpd"
 ( export FLEET_HOOK_TIMEOUT_S=1 FLEET_MAX_TIME_S=30 TMPDIR="${TMP}/tmpd"; printf '%s' "$(post slow001 athena-captain)" | "${HOOK}" 2>/dev/null )
 settle 1
-el=$(( $(date +%s) - t0 ))
-if [ "${el}" -lt 4 ]; then ok "the detached reporter was killed at its 1 s limit (${el} s)"; else bad "the detached reporter was killed at its 1 s limit (${el} s)"; fi
-case "$(tail -n 1 "${LOG}")" in *"did not finish within 1s"*"Fix: "*) ok "a timeout is logged as its own Fix: line" ;; *) bad "a timeout is logged as its own Fix: line" "$(tail -n 1 "${LOG}")" ;; esac
-# The killed fleet-report finishes its in-flight curl (bash defers the TERM
-# trap until the child returns), then its EXIT trap removes its temp dir.
-for i in $(seq 1 200); do
+case "$(tail -n 1 "${LOG}")" in *"did not finish within 1s"*"Fix: "*) ok "the detached reporter was killed at its 1 s bound, logged as its own Fix: line" ;; *) bad "the detached reporter was killed at its 1 s bound, logged as its own Fix: line" "$(tail -n 1 "${LOG}")" ;; esac
+touch "${HOLD}"
+# timeout(1) signals the killed reporter's whole process group, its in-flight
+# curl included; the reporter's EXIT trap then removes its temp dir. The poll
+# is a hang cap, not a budget.
+for i in $(seq 1 1200); do
   [ -z "$(find "${TMP}/tmpd" -mindepth 1 | head -n 1)" ] && break
   sleep 0.05
 done

@@ -9,5 +9,5 @@
 #                              candidate is reachable from no ref)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ruby "${here}/block_optimize_test.rb"
+/usr/bin/ruby "${here}/block_optimize_test.rb"
 bash "${here}/integration_test.sh"

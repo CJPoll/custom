@@ -84,7 +84,15 @@ blast-radius verdict, the INTEGRATION OK line, and a UTC timestamp.
 locked-merge requires it. Any other
 outcome removes a receipt for that head. There is no flag that skips it.
 
-  --target <ref>   integration target (default: origin/main)
+  --target <ref>   integration target (default: origin/main). It sets the
+                   containment check and the critic base ONLY. The declared
+                   gate runs unchanged and is not told the target, so a
+                   stage of its own may still compare against main
+                   (gen_saas bin/checks/merge-conflicts.sh always merges
+                   against origin/main). A stacked branch whose base
+                   conflicts with main is therefore RED there under any
+                   --target. That red is real: the stack is stale vs main,
+                   and is fixed once at the stack base, not per ticket.
   --since <ref>    the target SHA your branch was last reviewed/gated against
                    (the "baseline main" in your state log). REQUIRED for a
                    meaningful file-set intersection once you have rebased:
@@ -105,18 +113,29 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    changes the gate script itself.
   --no-fetch       skip the fetch; compare against the target ref as-is
   --with-critic    also run the standing judge (critic-review --base <target>)
-                   on this head, CONCURRENTLY with the gate, unless a PASS is
-                   already recorded for it. It is joined before the verdict
+                   on this head, CONCURRENTLY with the gate, unless a PASS
+                   covering the target is already recorded for it (critic-review
+                   --verdict-for --covering: a PASS judged against a stacked
+                   parent does not cover the target and is re-judged). It is joined before the verdict
                    step, which then reads the judge's receipt exactly as
                    without the flag, so wall time is max(gate, critic), not
                    the sum. On a RED gate the judge is still joined, so one
-                   round returns both sets of findings.
+                   round returns both sets of findings. The judge queues in
+                   test-slot's model pool (DND-1326), never the cpu pool.
   --slot-wait-timeout <secs>
                    the gate runs inside the machine's heavy-test slot pool
                    (ai/bin/test-slot in the MAIN checkout of the repo that
                    holds this script, i.e. ~/dev/custom); give up
                    waiting for a slot after <secs> (default: test-slot's own).
                    A give-up is exit 6, GATE NOT RUN -- never OK, never RED.
+                   Run bare, the slot holds the units test-slot gives the
+                   declared gate itself (test-slot --weight-of; a
+                   harness-gate its worker count: HARNESS_GATE_JOBS, else
+                   harness-gate's default). Under a caller's
+                   `test-slot -- integration-gate` (the captain form) the
+                   caller's slot is the one held, at test-slot's default
+                   unless the caller passes --weight. <secs> also bounds
+                   the --with-critic judge's wait in the model pool.
   --rebase         inside the slot, after the fetch, if HEAD does not contain
                    the target: rebase the checked-out branch onto it, then
                    gate (and judge) the rebased head. Refuses a dirty tree
@@ -197,8 +216,11 @@ done
 #
 # WHICH test-slot: the MAIN checkout's copy of the custom repo that holds this
 # script, never a worktree's and never PATH. test-slot's stable interface
-# requires that, so every caller agrees on N; a worktree copy on a branch that
-# edits N would gate against the shared pool with its own N. The main checkout
+# requires that, so every caller agrees on the budget (DND-1006); a worktree
+# copy on a branch that edits it would gate against the shared pool with its
+# own. The run holds the weight test-slot gives the declared gate itself
+# (gate_slot_weight, DND-1326), and the --with-critic judge queues in its
+# model pool (start_critic). The main checkout
 # is found from the git common dir of THIS script's checkout (realpath first,
 # so ~/.claude/skills still lands in ~/dev/custom), which is the same for the
 # main checkout, every worktree, and every shipwright lane. A checkout that
@@ -274,10 +296,22 @@ require_critic_tools() {
 
 # start_critic <head sha> -- the standing judge on <head>, in its own process
 # group. setsid execs in place (a background subshell is not a group leader),
-# so $! is the judge's pid AND its process-group id.
+# so $! is the group leader's pid AND the process-group id; the leader is the
+# test-slot that runs the judge (its argv names critic-review).
+#
+# The judge queues in test-slot's MODEL pool (DND-1326), as a critic-review a
+# caller wraps itself does: it holds no cpu unit, and the model pool bounds
+# how many model runs are in flight machine-wide. test-slot is the group
+# leader here and CMD its child in the same group, so the one group signal
+# still reaches test-slot, critic-review and its `claude -p`. A judge the
+# model pool never admits (a --slot-wait-timeout give-up, a test-slot
+# refusal) records no verdict, and the verdict step reads that absence as
+# it always has; its log keeps test-slot's own lines.
 start_critic() {
+  local -a judge_slot=( --pool model --label "critic-review $(basename "$ROOT") ${1:0:8}" )
+  [ -n "$SLOT_WAIT" ] && judge_slot+=( --wait-timeout "$SLOT_WAIT" )
   CRITIC_LOG="$(mktemp "${TMPDIR:-/tmp}/integration-gate-critic.XXXXXX")"
-  ( cd "$ROOT" && exec setsid "$CRITIC" --base "$TARGET" ) >"$CRITIC_LOG" 2>&1 &
+  ( cd "$ROOT" && exec setsid "$TEST_SLOT" "${judge_slot[@]}" -- "$CRITIC" --base "$TARGET" ) >"$CRITIC_LOG" 2>&1 &
   CRITIC_PGID=$!
   CRITIC_ADOPTED=0; CRITIC_ACTIVE=1
   echo "${PROG}: --with-critic: running the standing judge on $(short "$1") beside the gate (pgid ${CRITIC_PGID}, log ${CRITIC_LOG})"
@@ -333,6 +367,48 @@ slot_really_held() {
   exec {fd}<&-
   return 0
 }
+# gate_slot_weight -- appends --weight to SLOT_ARGS so the outer slot holds
+# what test-slot would weigh the gate itself at (DND-1326): a harness-gate its
+# worker count (--jobs is not passable here, so HARNESS_GATE_JOBS, else its
+# default), anything else test-slot's default. It asks the main checkout's
+# test-slot (--weight-of), so there is one weight rule, test-slot's. The gate
+# is the one declared on the target as it stands before the in-slot fetch
+# (the weight is a scheduling declaration; the gate that runs is still
+# resolved inside the slot), else the words of a caller's --gate. When the
+# weight cannot be read (a test-slot that predates --weight-of, a target not
+# yet fetched) the slot takes test-slot's default, as before DND-1326, and
+# SLOT_WEIGHT_NOTE says so: a failed lookup never reads as a weight.
+gate_slot_weight() {
+  local tsha gate w rc=3 why
+  local -a argv=()
+  if tsha="$(git rev-parse --verify -q "${TARGET}^{commit}" 2>/dev/null)"; then
+    if gate="$(ir_declared_gate_on "$ROOT" "$tsha")"; then rc=0; else rc=$?; fi
+  fi
+  if [ "$rc" -eq 0 ]; then
+    argv=( "$gate" )
+  elif [ -n "$GATE_CMD" ]; then
+    read -r -a argv <<<"$GATE_CMD"
+  fi
+  if [ "${#argv[@]}" -eq 0 ]; then
+    # Three states, three notes: "could not look" never reads as "none".
+    case "$rc" in
+      1) why="${TARGET} declares no gate and no --gate was passed" ;;
+      2) why="${TARGET}'s declared gate could not be read (its commit is not in this object store)" ;;
+      *) why="${TARGET} is not fetched yet, so its declared gate could not be read" ;;
+    esac
+    SLOT_WEIGHT_NOTE="test-slot's default weight: ${why}"
+    return 0
+  fi
+  # --pool cpu: the outer slot is always a cpu-pool slot, so its weight is
+  # read in cpu units even when the gate names a model-pool command.
+  if w="$("$TEST_SLOT" --weight-of --pool cpu -- "${argv[@]}" 2>/dev/null)" && [[ "$w" =~ ^[1-9][0-9]*$ ]]; then
+    SLOT_ARGS+=( --weight "$w" )
+    SLOT_WEIGHT_NOTE="weight ${w}, as test-slot weighs ${argv[0]}"
+  else
+    SLOT_WEIGHT_NOTE="test-slot's default weight: ${TEST_SLOT} --weight-of could not weigh ${argv[0]} (a test-slot older than DND-1326?)"
+  fi
+}
+
 IN_SLOT=0
 if [ "${INTEGRATION_GATE_IN_SLOT:-}" = 1 ] && slot_really_held; then IN_SLOT=1; fi
 PRESTARTED="${INTEGRATION_GATE_PRESTARTED_CRITIC:-}"
@@ -363,7 +439,7 @@ if [ "$IN_SLOT" -eq 0 ]; then
     if [ "$WITH_CRITIC" -eq 1 ]; then
       require_critic_tools
       fetch_target
-      if ! "$CRITIC" --verdict-for "$HEAD0" >/dev/null 2>&1; then
+      if ! "$CRITIC" --verdict-for "$HEAD0" --covering "$TARGET" >/dev/null 2>&1; then
         start_critic "$HEAD0"
         export INTEGRATION_GATE_PRESTARTED_CRITIC="${CRITIC_PGID} ${HEAD0} ${CRITIC_LOG}"
       fi
@@ -384,9 +460,10 @@ if [ "$IN_SLOT" -eq 0 ]; then
     exit 2
   }
   OUTCOME="${SLOT_TMP}/outcome"
-  SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") ${HEAD0:0:8}" --outcome-file "$OUTCOME" )
+  SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") ${HEAD0:0:8}" --outcome-file "$OUTCOME" --pool cpu )
   [ -n "$SLOT_WAIT" ] && SLOT_ARGS+=( --wait-timeout "$SLOT_WAIT" )
-  echo "${PROG}: taking a machine test slot first; the fetch and the containment check run inside it (DND-1064)"
+  gate_slot_weight
+  echo "${PROG}: taking a machine test slot first (${SLOT_WEIGHT_NOTE}); the fetch and the containment check run inside it (DND-1064)"
   "$TEST_SLOT" "${SLOT_ARGS[@]}" -- env INTEGRATION_GATE_IN_SLOT=1 bash "$(realpath "${BASH_SOURCE[0]}")" "${ORIG_ARGS[@]}"
   SLOT_RC=$?
   OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
@@ -835,7 +912,7 @@ if [ "$WITH_CRITIC" -eq 1 ]; then
       echo "${PROG}: --with-critic: stopped the judge started on ${PRE_SHA:0:12} before the slot wait; the head is now $(short "$HEAD_SHA")"
     fi
     [ -n "$PRE_LOG" ] && rm -f "$PRE_LOG" 2>/dev/null
-    if "$CRITIC" --verdict-for "$HEAD_SHA" >/dev/null 2>&1; then
+    if "$CRITIC" --verdict-for "$HEAD_SHA" --covering "$TARGET_SHA" >/dev/null 2>&1; then
       echo "${PROG}: --with-critic: a PASS is already recorded for $(short "$HEAD_SHA"); the judge is not re-run."
     else
       start_critic "$HEAD_SHA"
@@ -876,7 +953,7 @@ esac
 if [ "$GATE_RC" -ne 0 ]; then
   join_critic
   echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA") (gate exit ${GATE_RC})." >&2
-  echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA") although your branch passed alone. A disjoint file set does not imply a disjoint gate (shared budgets/registries). Fix it on this branch and re-run; do not merge." >&2
+  echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA"); read the failing stage above. This tool ran only the integrated head, so it cannot tell a break from a flake. A test failing for a reason unrelated to this change (a timeout under load, a known Flaky ticket's test) is a flake: ticket it per athena:flaky-ticket, then re-run. Otherwise the integration broke it: a disjoint file set does not imply a disjoint gate (shared budgets/registries), so fix it on this branch and re-run. Do not merge on a RED." >&2
   exit 1
 fi
 AFTER_SHA="$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null)"
@@ -912,7 +989,7 @@ if [ ! -x "$CRITIC" ]; then
   echo "Fix: run this script from its committed path under ~/dev/custom so the judge's verdict reader resolves. A judge that cannot be found is an ERROR, never a pass -- and --critic-override does NOT apply here, because with no reader 'no BLOCK recorded' cannot be told apart from 'nothing was read'." >&2
   exit 3
 fi
-VERDICT_OUT="$("$CRITIC" --verdict-for "$HEAD_SHA" 2>&1)"
+VERDICT_OUT="$("$CRITIC" --verdict-for "$HEAD_SHA" --covering "$TARGET_SHA" 2>&1)"
 VERDICT_RC=$?
 # Same streams as before: the reader's PASS line on stdout, everything else on
 # stderr. It is captured only so the override can NAME the state it overrode.

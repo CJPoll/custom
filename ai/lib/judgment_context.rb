@@ -11,9 +11,12 @@
 # terminal, in judgment-label --confirm. Nothing here egresses.
 #
 # The window is the one DND-1048's design ("slack-routing-v2", 2026-09-28)
-# specifies for the routing judge's context. That judge is not built yet; when
-# it is, it builds its input with this module (or a parity check pins the two
-# together), so the owner labels with what the judge will see:
+# specifies for the routing judge's context. That judge is gen_saas Elixir
+# (Athena.SlackEvents.RoutingContext), so it cannot call this module: this is
+# the labeller's copy of the same rule, so the owner labels with what the
+# judge will see. judgment-eval's check of the server's `rules` pins the
+# window, the cap and the text cap to these constants; the selection logic
+# is two hand-kept copies that nothing compares:
 #   - same channel as the message; top-level messages only (thread_ts nil or
 #     equal to ts); ts within WINDOW_S before it; oldest first; at most
 #     MAX_MESSAGES;
@@ -24,7 +27,8 @@
 # A message inside a thread gets its thread instead: the parent plus the latest
 # replies before it. The judge never sees thread context, so every thread
 # message is judge "none". judgment-label never asks for a thread (its roots
-# are top-level); the thread path is kept for DND-1048, which judges replies.
+# are top-level), and the router judges only new-conversation roots (a reply
+# goes by its thread claim), so today nothing asks for the thread path.
 # Nothing after the message is context: the label is what the sender meant
 # then, not what happened next.
 #

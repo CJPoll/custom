@@ -28,7 +28,7 @@ bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 expect() {
   local label="$1" want="$2" contract="$3" fixture="$4"
   local out rc
-  out="$(ruby "${CHECK}" --contract "${contract}" --fixture "${fixture}" 2>&1)"
+  out="$(/usr/bin/ruby "${CHECK}" --contract "${contract}" --fixture "${fixture}" 2>&1)"
   rc=$?
   if [ "${rc}" -eq "${want}" ]; then
     ok "${label} (exit ${rc})"
@@ -48,7 +48,7 @@ expect "real contract quotes match the pinned text" 0 "${CONTRACT}" "${FIXTURE}"
 # 2. The checker can fire.
 cp "${CONTRACT}" "${TMP}/mutated.md"
 # Whitespace-insensitive: the quote may wrap across lines in the contract.
-ruby -e 'p = ARGV[0]; File.write(p, File.read(p).sub(/whatever\s+its\s+registration\s+says/, "whatever its registration claims"))' "${TMP}/mutated.md"
+/usr/bin/ruby -e 'p = ARGV[0]; File.write(p, File.read(p).sub(/whatever\s+its\s+registration\s+says/, "whatever its registration claims"))' "${TMP}/mutated.md"
 if cmp -s "${CONTRACT}" "${TMP}/mutated.md"; then
   bad "mutation applied" "the mutation target is gone from the contract; update this test"
 else
@@ -86,7 +86,7 @@ JCONTRACT="${CONTRACTS}/athena-judgments.md"
 JFIXTURE="${CONTRACTS}/fixtures/athena-judgments-quoted-fix.txt"
 expect "real judgments contract quotes match the pinned text" 0 "${JCONTRACT}" "${JFIXTURE}"
 cp "${JCONTRACT}" "${TMP}/judgments-mutated.md"
-ruby -e 'p = ARGV[0]; File.write(p, File.read(p).sub(/file\s+the\s+ticket\s+as\s+today;\s+this\s+is\s+advisory\.`/, "file it later.`"))' "${TMP}/judgments-mutated.md"
+/usr/bin/ruby -e 'p = ARGV[0]; File.write(p, File.read(p).sub(/file\s+the\s+ticket\s+as\s+today;\s+this\s+is\s+advisory\.`/, "file it later.`"))' "${TMP}/judgments-mutated.md"
 if cmp -s "${JCONTRACT}" "${TMP}/judgments-mutated.md"; then
   bad "judgments mutation applied" "the pinned quote is gone from athena-judgments.md; update this test"
 else
@@ -95,7 +95,7 @@ fi
 # The ticket-classification section's quote (DND-1054) is pinned on its own:
 # reword only the LAST occurrence, which is in that section.
 cp "${JCONTRACT}" "${TMP}/judgments-mutated-tc.md"
-ruby -e 'p = ARGV[0]; s = File.read(p); i = s.rindex(/Fix:\s+file\s+the\s+ticket\s+as\s+today;\s+this\s+is\s+advisory\.`/); abort("no quote") unless i && s[0...i].include?("## Ticket classification: the harness script"); s[i, 9] = "Fix: skip"; File.write(p, s)' "${TMP}/judgments-mutated-tc.md"
+/usr/bin/ruby -e 'p = ARGV[0]; s = File.read(p); i = s.rindex(/Fix:\s+file\s+the\s+ticket\s+as\s+today;\s+this\s+is\s+advisory\.`/); abort("no quote") unless i && s[0...i].include?("## Ticket classification: the harness script"); s[i, 9] = "Fix: skip"; File.write(p, s)' "${TMP}/judgments-mutated-tc.md"
 if cmp -s "${JCONTRACT}" "${TMP}/judgments-mutated-tc.md"; then
   bad "ticket-classification mutation applied" "the pinned quote is gone from its section of athena-judgments.md; update this test"
 else

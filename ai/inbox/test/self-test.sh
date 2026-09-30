@@ -31,6 +31,10 @@
 # match can SIGPIPE the printf and turn a match into a failure (DND-365; seen
 # here as a one-off C5 red in a loaded gate run).
 set -uo pipefail
+# DND-1163: the athena:inbox bins resolve the session's project from
+# CLAUDE_PROJECT_DIR, then /proc/$CLAUDE_PID/cwd, before the cwd. Scrubbed so
+# the fixtures, not the Claude session running this suite, decide the project.
+unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../../.." && pwd)"
@@ -81,13 +85,10 @@ ok()   { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 skip() { printf '  skip  %s\n        %s\n' "$1" "$2"; SKIP=$((SKIP+1)); }
 
-# A version manager's shim resolves its installs through $HOME (asdf, mise,
-# rbenv), so faking HOME without this makes every ruby script exit 126 — twenty
-# assertions failing at once for a reason that has nothing to do with the code
-# under test. Pin the shim at the real home before HOME is replaced.
-export ASDF_DATA_DIR="${ASDF_DATA_DIR:-${HOME}/.asdf}"
-export ASDF_DIR="${ASDF_DIR:-${HOME}/.asdf}"
-RUBY_BIN="$( (cd "${REPO}" && asdf which ruby) 2>/dev/null || command -v ruby)"
+# The harness Ruby, by absolute path (DND-931/958, DND-1340). A `ruby` found
+# through PATH is an asdf shim in an agent session, and a shim resolves its
+# installs through $HOME, so under the fake HOME below it exits 126 (DND-1203).
+RUBY_BIN=/usr/bin/ruby
 
 # Sandbox: a fake HOME (so a declared "~/..." repo cannot reach a real path),
 # a fake inbox root, and a fixture source of truth.
@@ -395,8 +396,8 @@ mkdir -p "${TMP}/gitrepo"
 ( cd "${TMP}/gitrepo" && git init -q . ) >/dev/null 2>&1
 # Run from a cwd that is NOT the repo and NOT the fixture: if resolution were
 # deferred to the caller's cwd, `.git` would resolve here and the assertion
-# below would catch it. RUBY_BIN is resolved outside the sandbox because a
-# version-manager shim needs a .tool-versions it will not find in $TMP.
+# below would catch it. RUBY_BIN is an absolute path, so this cwd cannot pick
+# the interpreter.
 resolved="$(cd "${TMP}" && "${RUBY_BIN}" -r "${REPO}/ai/inbox/lib/registry" -e 'print InboxRegistry.git_common_dir(ARGV[0])' "${TMP}/gitrepo")"
 if [ "${resolved}" = "$(cd "${TMP}/gitrepo" && realpath .git)" ]; then
   ok "C17 a main checkout's common dir resolves absolute, at the point of capture"

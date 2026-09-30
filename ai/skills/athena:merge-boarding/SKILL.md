@@ -28,6 +28,19 @@ items fixed, nits replied/resolved) with threads replied.
   unfixed code and then passing, per `~/dev/custom/ai/CLAUDE.md` → *TDD
   Workflow*. The standing judge's PASS covers the fix commit's message; the
   report and PR body are yours to check.
+- **The review floor ran on this change.** The captain's local `code-reviewer`
+  + `adr-reviewer` pair is mandatory on every PR/MR (`athena-captain` →
+  *Drive CI and review to green*), and the captain names it in its report "so
+  the athena-admiral can board on it". Check that the report names it. A
+  review bot is not the floor, and on a repo with no bot (gen_saas) the bot
+  clause above is empty. A captain that reported DONE-LOCAL (committed, no PR:
+  CI paused) never reached that step and says "Review floor: not run". Before
+  you merge that head, run the floor yourself against the diff over its
+  merge-base, or resume the captain to run it; fix must-fix items like any
+  other round. Measured 2026-09-29 (`2026-09-28-unified-priorities`): DND-1183
+  and DND-1184 both reported DONE-LOCAL with "Review floor: not run … whoever
+  opens the PR should run" it, and the admiral's queue had it push and open
+  those PRs itself.
 
 **A merge criterion is scoped to its evidence model — in a repo with NO CI,
 "green" proves nothing and the report IS the gate.** The readiness rules assume
@@ -43,6 +56,25 @@ EXCEPT an access-control fix.) In such a repo the bar is **the captain's explici
 of repo** — before merging, confirm the head SHA you are landing is the one the
 report names, and never infer readiness from forge state alone while the
 captain's worktree is still moving.
+
+**In a no-CI GitHub repo the pinned merge cannot run.** `gh-athena` refuses a
+merge when no check has reported on the head (`ai/lib/gh-merge-guard.sh`, the
+`EMPTY` case), so `locked-merge` exits 4 there however good the report is. Do
+not retry it, and do not reach for `gh api`: the guard refuses API merges and
+ref writes too. `~/dev/custom` lands by a fast-forward `gh-athena git push` of
+the gated head (the guard's header names that path). That push is the merge
+step, so it takes the same lock `locked-merge` does
+(`~/.local/state/athena/custom-merge.lock`, *Landing onto a moving main*).
+Hold `flock` on it across `integration-gate --rebase` AND the push, and push
+exactly the SHA `INTEGRATION OK` names. Nothing in `gh-athena` checks the lock
+on this path (DND-1370). Measured 2026-09-30 ~10:38Z: an admiral pushed
+DND-1048/717 unlocked while another held the lock gating DND-1359, whose push
+then failed NOT-FF and cost a re-gate. For any other no-CI repo,
+land CI first, or escalate the merge to Cody as a step only Cody can run.
+Measured 2026-09-29 (`2026-09-25-dnd-671-650-644`, 22:02Z): anchor#28 was
+DONE, gated and critic-PASSed, and the merge was refused. It waited on Cody,
+whose click chose "CI first"; DND-1279's workflow took one captain and a 24 s
+run.
 
 - **A standing-judge verdict on the SHA you are landing — "no verdict" is not a
   pass.** `athena-diff-critic` was blocking for the *captain*, but this bar never
@@ -325,9 +357,21 @@ head" is not a reason to skip it: the integrated head is the one being judged.
 a real run.) A branch that edits its own gate still runs its own copy, but the
 run warns and the OK line says `EDITED BY THIS BRANCH` — review that diff.
 
+**`--target` does not retarget the gate's own stages.** A stacked branch whose
+base conflicts with main gates RED under any `--target` (`integration-gate
+--help` → `--target`). So a brief for a local stack behind main cannot ask for
+`INTEGRATION OK`; name what the captain reports instead, and re-integrate the
+stack base onto main once. (DND-302, 2026-09-28: the captain merged main into
+its stacked branch; DND-1187, 2026-09-29: the brief's `INTEGRATION OK` was
+unreachable.)
+
 **Run the judge beside the gate: `integration-gate --with-critic`.** It starts
-`critic-review --base <target>` on this head concurrently with the gate, unless
-a PASS is already recorded for it. It joins the judge even on a RED gate, so
+`critic-review --base <target>` on this head concurrently with the gate (queued
+in test-slot's model pool; see *Weights and pools* below), unless
+a PASS that covers the target is already recorded for it. A PASS covers the
+target when the base it was judged against is the target or an ancestor of it;
+one judged against a stacked parent covers only that branch's commits, so the
+gate re-judges (and without the flag, refuses it, exit 3). It joins the judge even on a RED gate, so
 one round returns both sets of findings, then reads the verdict exactly as
 without the flag. Use it for a captain's final check and after every rebase:
 a new SHA needs both a new gate and a new verdict. It changes the wall time,
@@ -360,9 +404,10 @@ touches the working tree or a ref". Superseded: `--rebase` rebases a clean
 branch inside the test slot and refuses on a conflict (see *`--rebase`* below).
 
 **The gate runs in a machine test slot (DND-486), taken first (DND-1064).**
-`integration-gate` takes a slot of the main checkout's `ai/bin/test-slot`
+`integration-gate` takes a slot of
+the main checkout's `ai/bin/test-slot`
 (`~/dev/custom`, found from the script's own git common dir, so a worktree copy
-never sets N) before it fetches. The fetch, the containment check, `--rebase`,
+never sets the budget) before it fetches. The fetch, the containment check, `--rebase`,
 the gate and the verdict all run inside that slot, so "HEAD contains
 `origin/main`" is judged when the gate starts, never before the queue wait. The
 bar is unchanged; only when it is read moved. You do nothing extra. A
@@ -379,6 +424,26 @@ already holds and does not queue again. A dirty tree and missing `--with-critic`
 tools are refused before the wait, so they never cost a queue. The
 `--with-critic` judge still starts before the wait on the current head; after a
 `--rebase` it is stopped and the rebased head is judged.
+
+**Weights and pools (DND-1326).** Run bare, the slot holds the weight test-slot
+gives the declared gate itself (`test-slot --weight-of`): a `harness-gate` its
+worker count (`HARNESS_GATE_JOBS`, else harness-gate's default), any other gate
+test-slot's default. A main
+checkout whose test-slot predates `--weight-of` gives the default, and the
+run's "taking a machine test slot first" line says which weight it took. The
+`--with-critic` judge queues in test-slot's model pool, never the CPU pool. A
+judge started inside the slot (after a `--rebase`) waits for its model unit
+while the gate holds its CPU units; `--slot-wait-timeout` bounds that wait, and
+a judge the model pool never admits records no verdict (exit 3, test-slot's
+`TIMEOUT` in its log), never a pass.
+In the captain form the caller's own slot is the one that counts, so it holds
+the weight `test-slot -- integration-gate` gives (the default); a caller that
+knows its gate is heavier passes `--weight`.
+
+**Later (2026-09-30, DND-1326):** this section said the slot takes
+"test-slot's default CPU weight", and the judge ran outside both pools.
+Superseded for bare runs: a `HARNESS_GATE_JOBS=16` gate still weighed 8, and
+nothing bounded the in-gate judge by model concurrency.
 
 **`--rebase`: absorb a main that moved while you queued.** Inside the slot,
 after the fetch, if HEAD does not contain the target, it rebases the checked-out
@@ -669,8 +734,8 @@ train-monitor notification is not evidence the merge failed.
 *Premature "Merged!" set Notion Done and the DM too early on ui-bg, pt1124,
 ui-phase1/2/5, aggregate-alignment, mobile-parity, and pt1280.*
 
-Owner DMs fire on merge for an epic-boundary crossing — see
-[[athena:epic-progress-dm]]. Tear the stack down per
+An epic-boundary crossing is reported on merge (a milestone, not an owner DM)
+— see [[athena:epic-progress-dm]]. Tear the stack down per
 [[athena:teardown-worktree-stack]] only after this confirmation. On GitHub,
 `locked-merge` already ran `teardown-stack` for the PR (exit 10: landed,
 teardown failed). On GitLab, run `ai/bin/teardown-stack --mr <n> --repo

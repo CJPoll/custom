@@ -5,32 +5,41 @@
 #
 # Lead time = interval from when a captain STARTS working a ticket to when that
 # ticket is FULLY DEPLOYED (or, for a ticket that does not deploy, when its
-# post-merge pipeline completes; or, for a repo with no CI at all, the merge).
+# post-merge pipeline completes; or, for a repo with no CI at all, the landing:
+# the forge merge, or the push that put a CLOSED PR's change on the base).
 #
-# The whole point of this tool is that it CAPTURES NOTHING and asks NOTHING of
-# any agent. Every timestamp is recovered on demand from git + the forge's CI,
-# which retain history independently of whether an agent set a Notion status.
-# See ai/docs/lead-time-tracking.md for the design and the rejected markers
-# (chiefly: the Notion API exposes no per-property transition time).
+# The END is recovered on demand from git + the forge's CI, which retain
+# history independently of any agent. The START is the one captured value: the
+# ticket's first move to In Progress, stamped in Notion at dispatch (DND-1318).
+# See ai/docs/lead-time-tracking.md for the design and the rejected markers.
 #
 # CROSS-FORGE: the repo's `origin` remote selects the backend —
 #   github.com -> gh   (gen_saas, custom)
 #   gitlab.com -> glab (walt_ui)
 # Nothing about a specific repo is hardcoded; deploy detection is per-ticket.
 #
-# Markers (derived, durable):
-#   START = earliest commit on the ticket's branch (min AUTHOR/commit time
-#           over the PR/MR commits; survives squash merge AND rebase, which
-#           resets only the committer date). It LAGS true dispatch by the
-#           first work chunk, so lead time computed this way slightly
-#           UNDER-reports. It is the honest durable floor.
+# Markers:
+#   START = captain dispatch: the ticket's first move to In Progress (owner
+#           decision, Cody, 2026-09-30), read from the date that
+#           scripts/mark-in-progress stamps: DND Tickets' "In Progress at" for
+#           a DND ticket, or for a work ticket the work tracker's property
+#           named in the private overlay (DND-1341; ai/lib/dispatch_trackers.rb).
+#           The ticket is named by the PR's branch, else its title. No stamp,
+#           no ticket, a ticket in neither tracker, or no overlay on this
+#           machine -> "could not measure" with the reason; never a fallback
+#           to a commit date (reported apart, as first_commit).
 #   END   = 3-tier, matching Cody's definition exactly:
 #           (1) DEPLOY completed  -> the deploy step's completion time
 #                 github: completion of the deploy workflow run for the merge sha
 #                 gitlab: max finished_at over successful `deploy`-stage jobs
 #           (2) else POST-MERGE PIPELINE completed -> its completion time
 #                 (a ticket that ran CI on main but shipped no deploy job)
-#           (3) else MERGE time (no post-merge CI at all, e.g. ~/dev/custom)
+#           (3) else LANDING time (no post-merge CI at all, e.g. ~/dev/custom):
+#                 the forge merge, or for a GitHub PR CLOSED without a merge,
+#                 the push that put its change on the base (DND-1317; see
+#                 ai/docs/lead-time-tracking.md -> A CLOSED PR's landing)
+#   A request whose landing cannot be decided prints "could not measure" with
+#   the reason (via=unmeasured); one closed without landing prints via=closed.
 #
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
@@ -45,6 +54,9 @@ require "time"
 require "json"
 require "open3"
 require "uri"
+require_relative "../lib/next_mission_notion"
+require_relative "../lib/dispatch_trackers"
+require_relative "../lib/dispatch_trackers_overlay"
 
 # Which workflow/stage counts as "the deploy" (overridable, not hardcoded to a
 # repo). GitHub: workflow name matches this regex. GitLab: job stage equals the
@@ -59,7 +71,7 @@ DEPLOY_GL_STAGE  = ENV.fetch("LEAD_TIME_DEPLOY_STAGE", "deploy")
 module LeadTime
   module_function
 
-  # Earliest commit is the start. nil if there are no commits yet.
+  # The earliest commit (reported as first_commit; never the START). nil if none.
   def pick_start(commit_iso_times)
     times = commit_iso_times.compact.map { |t| Time.iso8601(t) }
     times.min
@@ -113,16 +125,45 @@ module LeadTime
   #   code = start -> merge   (development + review; a HARNESS/process lever)
   #   tail = merge -> end      (CI + deploy; a PIPELINE-EFFICIENCY lever, which
   #                             must never be sped up by weakening a check)
-  def compute(start_iso_times:, deploy_at:, pipeline_at:, merged_at:)
-    start = pick_start(start_iso_times)
+  #
+  # closed: the request was closed and its change is NOT on the base branch —
+  #   it never landed, so it has no end (distinct from :open).
+  # unmeasured: a reason string when the landing could not be decided; the row
+  #   then has no end and says why, rather than reading as open or closed.
+  #
+  # start_at: the measured START, the ticket's move to In Progress (DND-1318),
+  #   named by start_source; nil with start_unmeasured saying why. It is never
+  #   replaced by a commit date: first_commit_times only fill `first_commit`,
+  #   reported beside it for reference.
+  def compute(start_at:, deploy_at:, pipeline_at:, merged_at:, start_source: nil, start_unmeasured: nil,
+              first_commit_times: [], closed: false, unmeasured: nil)
+    start = present?(start_at) ? Time.iso8601(start_at) : nil
     finish, end_kind = pick_end(deploy_at: deploy_at, pipeline_at: pipeline_at,
                                 merged_at: merged_at)
+    if unmeasured
+      finish, end_kind = [nil, :unmeasured]
+    elsif closed && finish.nil?
+      end_kind = :closed
+    end
+    # A landed request with no start has no lead; say why rather than print a
+    # bare n/a.
+    unmeasured ||= "start: #{start_unmeasured || 'no start was given'}" if start.nil? && finish
     merged = present?(merged_at) ? Time.iso8601(merged_at) : nil
+    # A start after the landing is not a lead: a stamp made after the work
+    # landed (a later re-dispatch, a mistaken backfill) would read negative,
+    # and --slow would drop it as fast.
+    if start && merged && start > merged
+      unmeasured ||= "start: #{start_source || 'the start'} (#{start.utc.iso8601}) is after the landing " \
+                     "(#{merged.utc.iso8601})"
+      start = nil
+    end
     secs      = (start && finish) ? (finish - start).to_i : nil
     code_secs = (start && merged) ? (merged - start).to_i : nil
     tail_secs = (merged && finish) ? [(finish - merged).to_i, 0].max : nil
     {
       start: start&.utc&.iso8601,
+      start_source: start ? start_source : nil,
+      first_commit: pick_start(first_commit_times)&.utc&.iso8601,
       merged: merged&.utc&.iso8601,
       end: finish&.utc&.iso8601,
       end_kind: end_kind,
@@ -132,8 +173,111 @@ module LeadTime
       code_human: duration_human(code_secs),
       tail_seconds: tail_secs,
       tail_human: duration_human(tail_secs),
+      unmeasured_reason: unmeasured,
     }
   end
+
+  # Did a closed-but-unmerged request's change land on the base branch?
+  # (DND-1317: ~/dev/custom lands by a fast-forward push of the gated,
+  # rebased head, so GitHub shows the PR CLOSED, never MERGED.)
+  #
+  #   pr_only:      [{pid:, subject:}] the request's non-merge commits that are
+  #                 not on the base tip
+  #   combined_pid: patch-id of the request's whole diff from its merge-base
+  #                 (nil when that diff is empty)
+  #   main:         [{sha:, pid:, subject:}] the base's non-merge commits that
+  #                 are not in the request, newest first
+  #
+  # -> {status: :landed, sha:}  every commit's patch is on main (a rebase), or
+  #                             the whole diff is one main commit (a squash);
+  #                             sha is the newest main commit that carries it
+  #    {status: :unknown, reason:}  some but not all commits' patches are on
+  #                             main, or a main commit shares a subject with
+  #                             one of the request's commits but not its patch
+  #                             (a conflict-resolved or edited landing)
+  #    {status: :not_landed}    nothing of it is on main
+  def classify_landing(pr_only:, combined_pid:, main:)
+    by_pid = {}
+    main.each { |m| by_pid[m[:pid]] ||= m[:sha] if m[:pid] }
+    order = main.each_with_index.to_h { |m, i| [m[:sha], i] }
+    found = pr_only.map { |c| by_pid[c[:pid]] }
+    if !pr_only.empty? && found.none?(&:nil?)
+      return { status: :landed, sha: found.min_by { |s| order[s] } }
+    end
+    return { status: :landed, sha: by_pid[combined_pid] } if combined_pid && by_pid[combined_pid]
+    # No commit of its own and no diff to match: nothing here can say whether
+    # it landed, so it is not "closed".
+    if pr_only.empty?
+      return { status: :unknown, reason: "it has no commit of its own off the base branch to match" }
+    end
+
+    hits = found.compact.size
+    if hits.positive?
+      return { status: :unknown,
+               reason: "#{hits} of #{pr_only.size} of its commits are on the base branch by patch-id" }
+    end
+    subjects = main.map { |m| m[:subject] }
+    clash = pr_only.map { |c| c[:subject] }.find { |s| subjects.include?(s) }
+    if clash
+      return { status: :unknown,
+               reason: "a commit titled '#{clash}' is on the base branch with a different patch" }
+    end
+
+    { status: :not_landed }
+  end
+
+  # The push that put `sha` on the base branch. pushes: [{at:, after:}] oldest
+  # first; contains: ->(sha, after) -> true | false | nil (nil = could not
+  # read that push's commit). -> [iso, nil] or [nil, reason]. A push that could
+  # not be read BEFORE the one found makes the time unprovable, so it is a
+  # reason, not a silent later answer.
+  def landing_push(sha, pushes, contains)
+    unread = nil
+    pushes.each do |p|
+      case contains.call(sha, p[:after])
+      when true
+        return [nil, "the push at #{unread} could not be read, so the landing time is unprovable"] if unread
+
+        return [p[:at], nil]
+      when nil then unread ||= p[:at]
+      end
+    end
+    [nil, "no push in the base branch's activity log carried #{sha[0, 12]}"]
+  end
+
+  # A ticket reference: 2-10 letters, a hyphen, a number (DND-1318, dnd-1318).
+  TICKET_REF_RE = /(?<![A-Za-z0-9])([A-Za-z]{2,10})-(\d{1,7})(?![0-9])/.freeze
+
+  # Which ticket a request works: the ticket its branch names, else the one
+  # its title names, counting only `prefixes` (the trackers that record a
+  # start: DND, and the work tracker's prefix when the overlay gives it,
+  # DND-1341). -> ["DND-1318", nil] or [nil, reason]. Ordinary words shaped
+  # like a ticket (resync-404, utf-8, ruby-34) are not one. Two different
+  # tickets in one place are not a guess. With no such ticket anywhere, the
+  # reason names any other ref it saw, and it is never a silent fallback to
+  # some other start.
+  def ticket_ref(branch:, title:, prefixes: ["DND"])
+    names = prefixes.join(" or ")
+    places = [["branch", branch], ["title", title]]
+    places.each do |where, text|
+      refs = refs_in(text).select { |r| prefixes.include?(r.split("-", 2).first) }
+      return [refs.first, nil] if refs.size == 1
+      return [nil, "its #{where} names several #{names} tickets (#{refs.join(', ')})"] if refs.size > 1
+    end
+    others = places.flat_map { |_w, t| refs_in(t) }.uniq
+    return [nil, "it names no #{names} ticket (only #{others.join(', ')})"] unless others.empty?
+
+    [nil, "neither its branch nor its title names a ticket, so no In Progress time can be read"]
+  end
+
+  def refs_in(text)
+    text.to_s.scan(TICKET_REF_RE).map { |p, n| "#{p.upcase}-#{n}" }.uniq
+  end
+
+  # An In Progress stamp must carry its zone: Notion returns a start with no
+  # offset when the date has a time_zone set, and Time.iso8601 would read that
+  # as this machine's local time.
+  ZONED_RE = /(Z|[+-]\d\d:?\d\d)\z/.freeze
 end
 
 # ---------------------------------------------------------------------------
@@ -183,7 +327,7 @@ rescue JSON::ParserError => e
   ProbeFailures.record(printable, "unparseable output: #{e.message}")
 end
 
-# The merged-PR/MR list is capped. A window holding more merges than the cap
+# The candidate PR/MR list is capped. A window holding more requests than the cap
 # comes back as exactly the cap, and the overflow is dropped with exit 0, so a
 # full page is recorded as a failed probe (the scan reports INCOMPLETE), never
 # read as the whole window. GitLab's API caps a page at 100.
@@ -193,8 +337,8 @@ GITLAB_PAGE_CAP = 100
 def note_saturated(printable, count, cap = MERGED_PAGE_CAP)
   return if count < cap
 
-  ProbeFailures.record(printable, "window saturated: #{count} merges returned at a " \
-                                  "cap of #{cap}; merges beyond it would be silently dropped")
+  ProbeFailures.record(printable, "window saturated: #{count} requests returned at a " \
+                                  "cap of #{cap}; requests beyond it would be silently dropped")
 end
 
 def origin_url(dir)
@@ -221,30 +365,187 @@ class GitHubForge
     "github (gh)"
   end
 
-  def merged_since(since_iso)
+  # The candidate landings in the window: every PR CLOSED at or after `since`,
+  # merged or not. A PR landed by a fast-forward push of its rebased head shows
+  # CLOSED, never MERGED (DND-1317), so a merged-only list silently dropped most
+  # ~/dev/custom landings. Whether a closed PR landed, and when, is decided per
+  # PR by #facts; a landing precedes the close.
+  #
+  # The server-side filter is updated:>=, never closed:>=. Closing a PR updates
+  # it, so updated:>= is a superset of the window, and closedAt is filtered
+  # here. Measured 2026-09-30 on CJPoll/custom: `closed:>=2026-09-29` omitted
+  # PRs #127, #125, #123, #122 and #119, all closed that day and unmerged, while
+  # `updated:>=2026-09-29` and an unfiltered list both returned them.
+  def landing_candidates_since(since_iso)
     since = Time.iso8601(since_iso)
-    prs = run_json(["gh", "pr", "list", "--state", "merged", "--search", "merged:>=#{since_iso}",
-                    "--limit", MERGED_PAGE_CAP.to_s, "--json", "number,mergedAt"], @dir) || []
-    note_saturated("gh pr list --search merged:>=#{since_iso}", prs.size)
-    prs.select { |p| p["mergedAt"] && Time.iso8601(p["mergedAt"]) >= since }
-       .sort_by { |p| p["mergedAt"] }.map { |p| p["number"] }
+    prs = run_json(["gh", "pr", "list", "--state", "closed", "--search", "updated:>=#{since_iso}",
+                    "--limit", MERGED_PAGE_CAP.to_s, "--json", "number,mergedAt,closedAt,state"], @dir) || []
+    note_saturated("gh pr list --state closed --search updated:>=#{since_iso}", prs.size)
+    prs.select { |p| p["closedAt"] && Time.iso8601(p["closedAt"]) >= since }
+       .sort_by { |p| p["closedAt"] }.map { |p| p["number"] }
   end
 
   def facts(id)
     d = run_json(["gh", "pr", "view", id.to_s, "--json",
-                  "number,title,mergedAt,headRefName,commits,mergeCommit"], @dir)
+                  "number,title,state,mergedAt,closedAt,headRefName,headRefOid,baseRefName," \
+                  "commits,mergeCommit"], @dir)
     return nil unless d
 
+    merged_at = d["mergedAt"]
     merge_sha = d.dig("mergeCommit", "oid")
+    landed_via = merged_at ? "merge" : nil
+    closed = false
+    unmeasured = nil
+    if merged_at.nil? && d["state"] == "CLOSED"
+      land = landing(d["number"], d["headRefOid"], d["baseRefName"])
+      case land[:status]
+      when :landed
+        merged_at, merge_sha, landed_via = land[:at], land[:sha], "push"
+      when :not_landed then closed = true
+      else unmeasured = land[:reason]
+      end
+    end
     deploy_at, pipeline_at = ci_ends(merge_sha)
     {
       number: d["number"], title: d["title"], branch: d["headRefName"],
-      merged_at: d["mergedAt"], merge_sha: merge_sha,
+      merged_at: merged_at, merge_sha: merge_sha, landed_via: landed_via,
+      closed: closed, unmeasured: unmeasured, closed_at: d["closedAt"],
       # Author AND committer date: a rebase resets only the committer date.
       commit_times: (d["commits"] || []).flat_map { |c| [c["authoredDate"], c["committedDate"]] },
       deploy_at: deploy_at, pipeline_at: pipeline_at,
     }
   end
+
+  # ---- landing of a CLOSED, unmerged PR (DND-1317) -------------------------
+  #
+  # Judged by the PR's CHANGE being on the base branch (its head reachable, or
+  # its commits' patch-ids, or its whole diff's patch-id), and timed by the
+  # push that put it there, from the repository activity log. Every lookup that
+  # cannot run is a recorded probe failure (the scan then reports INCOMPLETE),
+  # and a lookup that runs but cannot decide is :unknown with a reason. Neither
+  # ever reads as open. -> {status:, sha:, at:, reason:}
+  def landing(number, head, base)
+    unless head && base
+      return { status: :unknown, reason: "the forge gave no head commit or base branch for this PR" }
+    end
+
+    pushes = base_pushes(base)
+    return { status: :unknown, reason: "landing probe failed (see SCAN INCOMPLETE)" } unless pushes
+    if pushes.empty?
+      return { status: :unknown, reason: "the activity log for #{base} lists no pushes" }
+    end
+
+    tip = pushes.last[:after]
+    unless have_commits?([tip, head]) ||
+           (git_ok("fetch", "--quiet", "--no-write-fetch-head", "origin",
+                   "refs/heads/#{base}", "refs/pull/#{number}/head") && have_commits?([tip, head]))
+      ProbeFailures.record("git fetch origin #{base} pull/#{number}/head",
+                           "commit #{tip[0, 12]} or #{head[0, 12]} is not readable after a fetch")
+      return { status: :unknown, reason: "landing probe failed (see SCAN INCOMPLETE)" }
+    end
+
+    verdict = classify(head, tip)
+    return verdict unless verdict[:status] == :landed
+
+    at, reason = LeadTime.landing_push(verdict[:sha], pushes_since(pushes, verdict[:sha]),
+                                       ->(sha, after) { ancestor?(sha, after) })
+    return { status: :unknown, reason: reason } unless at
+
+    verdict.merge(at: at)
+  end
+
+  private
+
+  def classify(head, tip)
+    return { status: :landed, sha: head } if ancestor?(head, tip)
+
+    pr_only = commit_patches(["--no-merges", head, "^#{tip}"])
+    main = commit_patches(["--no-merges", tip, "^#{head}"])
+    base = git_ok("merge-base", head, tip)
+    diff = base && git_ok(*PATCH_CONFIG, "diff", *PATCH_FLAGS, base.strip, head)
+    combined_ids = diff && patch_ids(diff)
+    unless pr_only && main && combined_ids
+      return { status: :unknown, reason: "landing probe failed (see SCAN INCOMPLETE)" }
+    end
+
+    LeadTime.classify_landing(pr_only: pr_only, combined_pid: combined_ids.first&.first, main: main)
+  end
+
+  # A patch-id reads the patch text, so user config must not change it: no
+  # colour, no external diff or textconv, and the default a/ b/ prefixes.
+  PATCH_CONFIG = ["-c", "diff.noprefix=false", "-c", "color.ui=never"].freeze
+  PATCH_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv"].freeze
+
+  # [{sha:, pid:, subject:}] for a rev range, newest first; nil on a git failure.
+  def commit_patches(range)
+    subjects = git_ok("log", "--format=%H%x09%s", *range) or return nil
+    patches = git_ok(*PATCH_CONFIG, "log", "-p", *PATCH_FLAGS, "--format=commit %H", *range) or return nil
+    ids = patch_ids(patches) or return nil
+    pid_of = ids.to_h { |pid, sha| [sha, pid] }
+    subjects.lines.map do |l|
+      sha, subject = l.chomp.split("\t", 2)
+      { sha: sha, pid: pid_of[sha], subject: subject.to_s }
+    end
+  end
+
+  # [[patch_id, sha], ...] for a stream of patches; nil when patch-id failed,
+  # which must never read as "no patches".
+  def patch_ids(text)
+    out = git_ok("patch-id", "--stable", stdin: text) or return nil
+    out.lines.map(&:split)
+  end
+
+  # The pushes to refs/heads/<base>, oldest first, cached per base.
+  def base_pushes(base)
+    @pushes ||= {}
+    return @pushes[base] if @pushes.key?(base)
+
+    pages = run_json(["gh", "api", "--paginate", "--slurp",
+                      "repos/{owner}/{repo}/activity?ref=refs/heads/#{base}&per_page=100"], @dir)
+    # A branch deletion's `after` is all zeros; it carries no commit and must
+    # never become the tip.
+    @pushes[base] = pages && pages.flatten.select { |a| a["after"] && a["timestamp"] && a["after"] !~ /\A0+\z/ }
+                                    .map { |a| { at: a["timestamp"], after: a["after"] } }
+                                    .sort_by { |p| p[:at] }
+  end
+
+  # A push cannot precede the commit it carries. Starting from an hour before
+  # the commit's committer date (slack for clock skew) keeps the ancestry
+  # checks few without skipping the push that landed it. An unreadable date
+  # only widens the search to every push, so it is not a failed probe.
+  def pushes_since(pushes, sha)
+    out, _e, st = Open3.capture3("git", "-C", @dir, "show", "-s", "--format=%cI", sha)
+    return pushes unless st.success?
+
+    floor = Time.iso8601(out.strip) - 3600
+    pushes.select { |p| Time.iso8601(p[:at]) >= floor }
+  end
+
+  def have_commits?(shas)
+    shas.all? { |s| git_status("cat-file", "-e", "#{s}^{commit}") == 0 }
+  end
+
+  # true / false, or nil when either commit cannot be read.
+  def ancestor?(a, b)
+    case git_status("merge-base", "--is-ancestor", a, b)
+    when 0 then true
+    when 1 then false
+    end
+  end
+
+  def git_status(*args)
+    _o, _e, st = Open3.capture3("git", "-C", @dir, *args)
+    st.exitstatus
+  end
+
+  def git_ok(*args, stdin: nil)
+    out, err, st = Open3.capture3("git", "-C", @dir, *args, stdin_data: stdin.to_s)
+    return out if st.success?
+
+    ProbeFailures.record("git #{args.first(3).join(' ')}", err)
+  end
+
+  public
 
   # Returns [deploy_completed_at, pipeline_completed_at] for the merge sha.
   # A completed run whose workflow name matches the deploy regex and concluded
@@ -288,7 +589,7 @@ class GitLabForge
     run_json(["glab", "api", path], @dir)
   end
 
-  def merged_since(since_iso)
+  def landing_candidates_since(since_iso)
     since = Time.iso8601(since_iso)
     # A merge at or after `since` was updated at or after it, so updated_after
     # is a server-side superset of the window; saturation then means truncation.
@@ -307,9 +608,16 @@ class GitLabForge
     commits = api("projects/#{@proj}/merge_requests/#{id}/commits") || []
     merge_sha = d["merge_commit_sha"] || d["squash_commit_sha"] || d["sha"]
     deploy_at, pipeline_at = ci_ends(d)
+    # A closed, unmerged MR may still have landed by a push; that is only
+    # detected on GitHub (DND-1317), so here it says so instead of reading open.
+    unmeasured = if d["state"] == "closed" && d["merged_at"].nil?
+                   "closed without a merge; landing by push is only detected on GitHub"
+                 end
     {
       number: d["iid"], title: d["title"], branch: d["source_branch"],
       merged_at: d["merged_at"], merge_sha: merge_sha,
+      landed_via: d["merged_at"] ? "merge" : nil, unmeasured: unmeasured,
+      closed_at: d["merged_at"] || d["closed_at"],
       # authored_date survives a rebase; created_at is the committer date.
       commit_times: commits.flat_map { |c| [c["authored_date"], c["committed_date"], c["created_at"]] },
       deploy_at: deploy_at, pipeline_at: pipeline_at,
@@ -337,6 +645,180 @@ class GitLabForge
   end
 end
 
+# ---- the START: a ticket's move to In Progress (DND-1318, DND-1341) --------
+#
+# Owner decision (Cody, 2026-09-30): lead time = captain dispatch, the ticket's
+# move to In Progress, -> landed on main. The Notion API keeps no history of a
+# property, so the move is recorded as it happens: a date property, stamped
+# once, at the first move to In Progress, by
+# ai/skills/athena:ticket-management/scripts/mark-in-progress. This reads it.
+# Which database and property hold it is the ticket's tracker
+# (ai/lib/dispatch_trackers.rb): DND Tickets for a DND ticket, the work
+# tracker (its values from the private overlay) for a work ticket.
+#
+# lookup(ref) -> [iso, nil] or [nil, reason]. A ticket that is not in the
+# database, has no stamp, or cannot be named is a per-row reason. A read that
+# cannot run (no token, an HTTP failure) is a failed probe, so the run ends
+# SCAN INCOMPLETE: "could not look" never reads as "has no start".
+class NotionStart
+  PROPERTY = DispatchTrackers::DND.property
+
+  attr_reader :tracker
+
+  def initialize(transport, missing_reason: nil, tracker: DispatchTrackers::DND)
+    @transport = transport
+    @missing_reason = missing_reason
+    @tracker = tracker
+    @cache = {}
+  end
+
+  def source(ref)
+    "#{ref} #{@tracker.property}"
+  end
+
+  # Which ticket a request works, among this tracker's tickets only.
+  def ref_for(branch:, title:)
+    LeadTime.ticket_ref(branch: branch, title: title, prefixes: [@tracker.prefix])
+  end
+
+  def lookup(ref)
+    @cache[ref] ||= read(ref)
+  end
+
+  private
+
+  def read(ref)
+    prefix, number = ref.split("-", 2)
+    unless prefix == @tracker.prefix
+      return [nil, "#{ref} is not a #{@tracker.prefix} ticket; " \
+                   "only #{@tracker.label} records '#{@tracker.property}' here"]
+    end
+    unless @transport
+      ProbeFailures.record("notion #{@tracker.label} query #{ref}", @missing_reason)
+      return [nil, "#{ref}: Notion could not be read (see SCAN INCOMPLETE)"]
+    end
+
+    page = query(Integer(number, 10))
+    return [nil, "there is no #{ref} in #{@tracker.label}"] unless page
+
+    stamp(ref, page)
+  rescue NextMissionNotion::ReadError => e
+    ProbeFailures.record("notion #{@tracker.label} query #{ref}", e.message)
+    [nil, "#{ref}: Notion could not be read (see SCAN INCOMPLETE)"]
+  end
+
+  def query(number)
+    body = { "filter" => { "property" => "ID", "unique_id" => { "equals" => number } }, "page_size" => 2 }
+    res = @transport.call(:post, "/v1/data_sources/#{@tracker.data_source}/query", body)
+    (res["results"] || []).first
+  end
+
+  def stamp(ref, page)
+    prop = @tracker.property
+    label = @tracker.label
+    props = page["properties"] || {}
+    return [nil, "#{label} has no '#{prop}' property"] unless props.key?(prop)
+    unless props.dig(prop, "type") == "date"
+      return [nil, "the '#{prop}' property in #{label} is a #{props.dig(prop, 'type').inspect} property, not a date"]
+    end
+
+    start = props.dig(prop, "date", "start")
+    unless start
+      return [nil, "#{ref} has no '#{prop}' date (dispatched before the stamp existed, " \
+                   "or moved to In Progress without mark-in-progress)"]
+    end
+    return [nil, "#{ref}'s '#{prop}' is a date with no time (#{start})"] unless start.include?("T")
+    unless start.match?(LeadTime::ZONED_RE)
+      return [nil, "#{ref}'s '#{prop}' has no UTC offset (#{start}); it cannot be placed in time"]
+    end
+
+    [Time.iso8601(start).utc.iso8601, nil]
+  rescue ArgumentError
+    [nil, "#{ref}'s '#{prop}' is not a time (#{start})"]
+  end
+end
+
+# The START across both trackers (DND-1341). dnd: a NotionStart over DND
+# Tickets. work: -> [NotionStart or nil, DispatchTrackers::Resolution], called
+# at most once, and only for a request that names a ticket-shaped ref other
+# than a DND one (a work ticket, or a word like utf-8), so a request naming only
+# DND tickets, or nothing ticket-shaped, never reads the overlay.
+#
+# A request naming no DND ticket while the work tracker cannot be resolved
+# says why in its row, carrying the overlay's line. An ABSENT overlay is that
+# machine's state (the work tracker is unavailable there), so it is a per-row
+# reason only; a PRESENT overlay that cannot give the tracker (a missing key,
+# a malformed value) is also a failed probe, so the scan ends SCAN INCOMPLETE.
+class TicketStarts
+  def initialize(dnd:, work:)
+    @dnd = dnd
+    @work_source = work
+    @work = nil
+    @fault_recorded = false
+  end
+
+  def ref_for(branch:, title:)
+    others = (LeadTime.refs_in(branch) + LeadTime.refs_in(title)).reject { |r| r.start_with?("#{@dnd.tracker.prefix}-") }
+    return @dnd.ref_for(branch: branch, title: title) if others.empty?
+
+    work_start, res = work
+    if work_start
+      return LeadTime.ticket_ref(branch: branch, title: title,
+                                 prefixes: [@dnd.tracker.prefix, work_start.tracker.prefix])
+    end
+
+    ref, why = @dnd.ref_for(branch: branch, title: title)
+    return [ref, why] if ref
+
+    if res.fault && !@fault_recorded
+      ProbeFailures.record("private-overlay work tracker", res.reason)
+      @fault_recorded = true
+    end
+    [nil, "#{why}; the work tracker is unavailable: #{res.reason}"]
+  end
+
+  def lookup(ref)
+    source_for(ref).lookup(ref)
+  end
+
+  def source(ref)
+    source_for(ref).source(ref)
+  end
+
+  private
+
+  def work
+    @work ||= @work_source.call
+  end
+
+  def source_for(ref)
+    work_start, = ref.start_with?("#{@dnd.tracker.prefix}-") ? nil : work
+    work_start && ref.start_with?("#{work_start.tracker.prefix}-") ? work_start : @dnd
+  end
+end
+
+# A NotionStart over a tracker, reading its token in-process. A missing or
+# empty token is carried as the reason every lookup's probe failure names.
+def notion_start_for(tracker)
+  file = tracker.token_file
+  token = File.exist?(file) ? File.read(file).strip : ""
+  return NotionStart.new(NextMissionNotion::HttpTransport.new(token), tracker: tracker) unless token.empty?
+
+  NotionStart.new(nil, tracker: tracker,
+                       missing_reason: "no Notion token for #{tracker.label} at #{file}. " \
+                                       "Fix: place that integration token there (owner-gated).")
+end
+
+# The real start source: DND Tickets, plus the work tracker read from the
+# private overlay when a request names a non-DND ticket.
+def notion_start
+  work = lambda do
+    res = DispatchTrackers::Overlay.work
+    [res.tracker && notion_start_for(res.tracker), res]
+  end
+  TicketStarts.new(dnd: notion_start_for(DispatchTrackers::DND), work: work)
+end
+
 def forge_for(dir)
   case detect_forge(dir)
   when :github then GitHubForge.new(dir)
@@ -344,13 +826,51 @@ def forge_for(dir)
   end
 end
 
-def analyze(forge, id)
+# starts: the START source (NotionStart, or a test double answering lookup
+# and source). A closed-unlanded request has no lead, so it is never looked up.
+def analyze(forge, id, starts)
   f = forge.facts(id)
   return nil unless f
 
-  LeadTime.compute(start_iso_times: f[:commit_times], deploy_at: f[:deploy_at],
-                   pipeline_at: f[:pipeline_at], merged_at: f[:merged_at])
-          .merge(pr: f[:number], title: f[:title], branch: f[:branch])
+  start_at = start_why = source = nil
+  unless f[:closed]
+    ref, start_why = starts.ref_for(branch: f[:branch], title: f[:title])
+    if ref
+      start_at, start_why = starts.lookup(ref)
+      source = starts.source(ref)
+    end
+  end
+  LeadTime.compute(start_at: start_at, start_source: source, start_unmeasured: start_why,
+                   first_commit_times: f[:commit_times], deploy_at: f[:deploy_at],
+                   pipeline_at: f[:pipeline_at], merged_at: f[:merged_at],
+                   closed: f[:closed], unmeasured: f[:unmeasured])
+          .merge(pr: f[:number], title: f[:title], branch: f[:branch],
+                 landed_via: f[:landed_via], landed_commit: f[:landed_via] == "push" ? f[:merge_sha] : nil,
+                 closed_at: f[:closed_at])
+end
+
+# A window scan's rows. The window is by CLOSE time (`closed_at`), not landing
+# time: a push lands a PR seconds to minutes before its close, so a scan that
+# ticks in between cannot list it yet, and the next scan must keep it even
+# though it landed before `since`. A closed-unlanded PR is not a landing.
+# -> [kept rows, count of closed-unlanded]. A could-not-measure row is KEPT.
+def select_window(rows, since_iso)
+  since = Time.iso8601(since_iso)
+  closed = rows.count { |r| r[:end_kind] == :closed }
+  kept = rows.reject do |r|
+    r[:end_kind] == :closed || r[:end_kind] == :open ||
+      (r[:closed_at] && Time.iso8601(r[:closed_at]) < since)
+  end
+  [kept, closed]
+end
+
+# --slow N: the rows with lead >= N minutes, slowest first, then every
+# could-not-measure row (lead_seconds null, unmeasured_reason set).
+def slow_filter(rows, slow_min)
+  threshold = slow_min * 60
+  rows.select { |r| r[:unmeasured_reason] || (r[:lead_seconds] && r[:lead_seconds] >= threshold) }
+      .each { |r| r[:slow_threshold_min] = slow_min }
+      .sort_by { |r| r[:lead_seconds] ? -r[:lead_seconds] : 1 }
 end
 
 # ---------------------------------------------------------------------------
@@ -407,8 +927,11 @@ def self_test
 
   # compute end-to-end: custom PR14 shape (no CI -> merge)
   r = LeadTime.compute(
-    start_iso_times: ["2026-09-19T04:42:59Z", "2026-09-19T05:35:44Z"],
+    start_at: "2026-09-19T04:42:59Z", start_source: "DND-185 In Progress at",
+    first_commit_times: ["2026-09-19T05:00:00Z", "2026-09-19T05:35:44Z"],
     deploy_at: nil, pipeline_at: nil, merged_at: "2026-09-19T05:41:21Z")
+  check.call("compute start is start_at, not the first commit", r[:start], "2026-09-19T04:42:59Z")
+  check.call("compute first_commit is reported beside it", r[:first_commit], "2026-09-19T05:00:00Z")
   check.call("compute pr14 seconds", r[:lead_seconds], 3502)
   check.call("compute pr14 human", r[:lead_human], "58m 22s")
   check.call("compute pr14 kind", r[:end_kind], :merge)
@@ -417,7 +940,7 @@ def self_test
 
   # compute deploy shape (gitlab walt_ui MR1188: 05:05:41Z -> 06:58:17Z)
   r2 = LeadTime.compute(
-    start_iso_times: ["2026-09-19T05:12:05Z", "2026-09-19T05:05:41Z"],
+    start_at: "2026-09-19T05:05:41Z",
     deploy_at: "2026-09-19T06:58:17Z", pipeline_at: "2026-09-19T07:07:37Z",
     merged_at: "2026-09-19T06:47:40Z")
   check.call("compute deploy kind", r2[:end_kind], :deploy)
@@ -466,7 +989,7 @@ def self_test
   check.call("run query is scoped to the merge sha",
              seen.all? { |c| c.include?("--commit") }, true)
 
-  # merged_since must never silently drop merges. The merged-PR list is capped
+  # landing_candidates_since must never silently drop merges. The merged-PR list is capped
   # (--limit / per_page); a window holding more merges than the cap returned
   # exactly the cap, and the rest vanished with exit 0. Measured 2026-09-26 on
   # gen_saas: 122 merges since the held cursor, `--limit 100` returned 100.
@@ -481,17 +1004,17 @@ def self_test
     lim = cmd[cmd.index("--limit") + 1].to_i
     Array.new(lim) { |n| { "number" => n + 1, "mergedAt" => "2026-09-25T00:00:00Z" } }
   end
-  gh_sat.merged_since(since)
-  check.call("gh merged list filters the window server-side",
-             gh_cmds.first.include?("merged:>=#{since}"), true)
+  gh_sat.landing_candidates_since(since)
+  check.call("gh closed list filters the window server-side",
+             gh_cmds.first.include?("updated:>=#{since}"), true)
   check.call("gh saturated merged list marks the scan incomplete", ProbeFailures.any?, true)
 
   ProbeFailures.reset!
   gh_ok = GitHubForge.new(".")
   gh_ok.define_singleton_method(:run_json) do |_cmd, _dir|
-    [{ "number" => 7, "mergedAt" => "2026-09-25T00:00:00Z" }]
+    [{ "number" => 7, "mergedAt" => "2026-09-25T00:00:00Z", "closedAt" => "2026-09-25T00:00:00Z" }]
   end
-  check.call("gh unsaturated merged list returns its merges", gh_ok.merged_since(since), [7])
+  check.call("gh unsaturated merged list returns its merges", gh_ok.landing_candidates_since(since), [7])
   check.call("gh unsaturated merged list is a clean probe", ProbeFailures.any?, false)
 
   gl_sat = GitLabForge.allocate
@@ -502,7 +1025,7 @@ def self_test
     per = path[/per_page=(\d+)/, 1].to_i
     Array.new(per) { |n| { "iid" => n + 1, "merged_at" => "2026-09-25T00:00:00Z" } }
   end
-  gl_sat.merged_since(since)
+  gl_sat.landing_candidates_since(since)
   check.call("gitlab merged list filters the window server-side",
              gl_paths.first.include?("updated_after="), true)
   check.call("gitlab saturated merged list marks the scan incomplete", ProbeFailures.any?, true)
@@ -578,10 +1101,14 @@ def usage
 end
 
 def print_row(r)
-  kind = { deploy: "deploy", pipeline: "pipeline", merge: "merge", open: "open" }[r[:end_kind]] || r[:end_kind].to_s
-  printf("#%-5s  lead=%-9s (code %-8s + tail %-8s)  via=%-8s %s\n",
+  kind = { deploy: "deploy", pipeline: "pipeline", merge: "merge", open: "open", closed: "closed",
+           unmeasured: "unmeasured" }[r[:end_kind]] || r[:end_kind].to_s
+  printf("#%-5s  lead=%-9s (code %-8s + tail %-8s)  via=%-8s %s%s%s\n",
          r[:pr], r[:lead_human], r[:code_human], r[:tail_human], kind,
-         (r[:title] || "")[0, 46])
+         (r[:title] || "")[0, 46],
+         r[:unmeasured_reason] ? "  [could not measure: #{r[:unmeasured_reason]}]" : "",
+         r[:landed_via] == "push" ? "  [landed by push #{r[:landed_commit].to_s[0, 8]}]" : "")
+  puts "        start=#{r[:start_source]} #{r[:start]}" if r[:start_source]
 end
 
 require_relative "../lib/strict_argv"
@@ -637,35 +1164,48 @@ def main(argv)
     return 1
   end
 
-  ids = id ? [id] : forge.merged_since(since)
-  rows = ids.map { |n| analyze(forge, n) }.compact
+  ids = id ? [id] : forge.landing_candidates_since(since)
+  starts = notion_start
+  rows = ids.map { |n| analyze(forge, n, starts) }.compact
   if id && rows.empty?
     warn "lead-time: #{id} not found or unreadable in #{repo}"
     warn "Fix: check the PR/MR number and that the forge CLI can read this repo."
     return 2
   end
+  unless id
+    rows, closed_n = select_window(rows, since)
+    warn "lead-time: #{closed_n} closed request(s) in the window never landed; not counted" if closed_n.positive?
+  end
+
+  # A row whose landing could not be decided has no lead, so --slow would drop
+  # it with the fast rows. Name each one, so "not an outlier" and "could not
+  # measure" never read the same.
+  rows.select { |r| r[:unmeasured_reason] }.each do |r|
+    warn "lead-time: ##{r[:pr]} could not be measured: #{r[:unmeasured_reason]}"
+  end
 
   # --slow N: keep only tickets whose lead time is >= N minutes (the feedback
-  # loop's outlier filter). Rows without a computable lead are dropped.
-  if slow_min
-    threshold = slow_min * 60
-    rows = rows.select { |r| r[:lead_seconds] && r[:lead_seconds] >= threshold }
-               .each { |r| r[:slow_threshold_min] = slow_min }
-    rows.sort_by! { |r| -(r[:lead_seconds] || 0) }
-  end
+  # loop's outlier filter), plus every could-not-measure row: it cannot be
+  # shown fast, so dropping it would read as "not an outlier". Those rows keep
+  # lead_seconds null and carry unmeasured_reason; they sort last.
+  rows = slow_filter(rows, slow_min) if slow_min
 
   # A scan that could not read the forge is NOT a scan. Refuse to emit a result
   # at all — an empty (or partial) row set here means "could not look", and the
   # caller must not be able to read it as "looked, found nothing".
   if ProbeFailures.any?
-    warn "lead-time: SCAN INCOMPLETE — #{ProbeFailures.list.size} forge probe(s) " \
+    warn "lead-time: SCAN INCOMPLETE — #{ProbeFailures.list.size} probe(s) (forge, git or Notion) " \
          "failed against #{repo}. This is NOT a measurement and MUST NOT be " \
          "recorded as \"0 outliers\" or as a clean scan:"
     ProbeFailures.list.each { |f| warn "  - #{f[:cmd]}: #{f[:detail].lines.first.to_s.strip}" }
     warn "Fix: restore forge auth for this repo and re-run (`gh auth status` / " \
          "`glab auth status`; a cron or other headless session often has no token " \
          "even though an interactive one does). For a \"window saturated\" probe, " \
-         "re-run with a later --since and scan the window in slices. Until it " \
+         "re-run with a later --since and scan the window in slices. For a " \
+         "\"notion\" probe, check the token that probe names (DND Tickets: " \
+         "#{DispatchTrackers::DND.token_file}; the work tracker: #{DispatchTrackers::WORK_TOKEN_FILE}) " \
+         "and Notion's status, then re-run. For a \"private-overlay\" probe, correct the key it " \
+         "names in the private overlay. Until it " \
          "re-runs clean, report the scan as UNAVAILABLE, not as zero outliers."
     return 3
   end
@@ -673,7 +1213,9 @@ def main(argv)
   if as_json
     puts JSON.pretty_generate(rows)
   else
-    warn "repo=#{repo}  forge=#{forge.name}#{slow_min ? "  slow>=#{slow_min}m: #{rows.size}" : ''}"
+    unmeasured_n = rows.count { |r| r[:unmeasured_reason] }
+    counts = slow_min ? "  slow>=#{slow_min}m: #{rows.size - unmeasured_n}  could not measure: #{unmeasured_n}" : ""
+    warn "repo=#{repo}  forge=#{forge.name}#{counts}"
     rows.each { |r| print_row(r) }
   end
   0
@@ -687,15 +1229,20 @@ if $PROGRAM_NAME == __FILE__
       Usage:
         ai/bin/lead-time --repo PATH (--pr N | --mr N | --since WHEN) [OPTIONS]
 
-      Derive each ticket's lead time (earliest branch commit -> fully deployed)
-      from git plus the forge's CI. It splits into `code` (start->merge, a
-      harness/process lever) and `tail` (merge->deploy, a pipeline-efficiency
-      lever). It captures nothing, so no agent has to have recorded a status.
+      Derive each ticket's lead time: captain dispatch (the ticket's dispatch
+      date, stamped by mark-in-progress: DND Tickets' "In Progress at", or for
+      a work ticket the work tracker's property named in the private overlay)
+      -> fully deployed (git plus the forge's CI). It splits into `code`
+      (start->landing, a harness/process lever) and `tail` (landing->deploy, a
+      pipeline-efficiency lever). A row whose start or landing cannot be read
+      says "could not measure" and why. Reads the notion-personal token for a
+      DND start and the notion-work token for a work start.
 
       Options:
         --repo PATH    git checkout to scan (e.g. ~/dev/custom, ~/dev/gen_saas)
         --pr N/--mr N  one pull/merge request by number
-        --since WHEN   scan merges at or after WHEN
+        --since WHEN   scan requests closed at or after WHEN that landed
+                       (merged, or on GitHub closed and landed by a push)
         --slow MIN     only report tickets slower than MIN minutes
         --json         emit JSON instead of the human table
         --help         this text

@@ -139,8 +139,11 @@ Everything you learn from is local, under `~/dev/custom/`:
   (`~/.claude/projects/-home-cjpoll-dev-custom/memory/MEMORY.md`). A lesson
   captured more than once, or a gotcha that keeps recurring, is a signal a
   *systemic* fix (not just a memory note) is due. Every run, also run
-  `ai/skills/athena:memory-maintenance/scripts/index-budget`: exit 1 means
-  compact the index this run (that skill → *Index budget*); exit 2 is a fault.
+  `ai/skills/athena:memory-maintenance/scripts/index-budget --repo <R>` for
+  each repo the fleet ships from (the lead-time list below): exit 1 means
+  compact that index this run (that skill → *Index budget*); exit 2 is a
+  fault. (Measured 2026-09-29: gen_saas's index hit 26455 bytes, past the
+  loader cut, while this repo's read "within"; a captain found it.)
 - **Your own journal** — `journal.md` and the cursor `cursor.txt` in your state
   directory (this directory is gitignored; it is local runtime state, created on
   your first run). The journal records what you changed, the evidence, and —
@@ -419,8 +422,8 @@ so the list was stale from that moment and nothing could have caught it.
   its commits for the iteration history — started from
   `scripts/test/athena-inbox-client/self-test.sh`, widened twice under
   review.)
-- `ai/bin/harness-gate --self-test` — the runner itself (not in its own CHECKS;
-  it would recurse). Run it when you touch the gate's composition.
+- `ai/bin/harness-gate --self-test` — the runner itself. Its CHECKS run it as
+  groups (`--group NAME`). Run it when you touch the gate's composition.
 - Any skill or script self-test relevant to what you changed.
 
 ## Invariants — never violate these
@@ -483,13 +486,13 @@ Alongside mining reports, each run drives down how long fleet work takes to ship
 — under one hard constraint: **never remove or weaken a safety check** (*Speed a
 safety check up; never weaken it* below, carried verbatim). It outranks any speedup.
 
-**The signal.** `ai/bin/lead-time` derives every ticket's lead time from git +
-the forge's CI (no agent has to have set anything). Lead time = earliest branch
-commit → fully deployed; it splits into two phases with different levers:
+**The signal.** `ai/bin/lead-time` gives every ticket's lead time = captain
+dispatch (the ticket's dispatch stamp) → fully deployed (git + the
+forge's CI); it splits into two phases with different levers:
 
-- `code` (start → merge) — development + review. Lever: the **harness/process**
+- `code` (start → landing) — development + review. Lever: the **harness/process**
   (clearer specs, better skills, fewer review round-trips).
-- `tail` (merge → end) — CI + deploy. Lever: **pipeline efficiency**
+- `tail` (landing → end) — CI + deploy. Lever: **pipeline efficiency**
   (parallelize, cache, shard) — never by weakening a check.
 
 Each run, for every repo the fleet ships from (currently `~/dev/custom`,
@@ -502,13 +505,21 @@ ai/bin/lead-time --repo <R> --since "$(cat "$SHIPWRIGHT_STATE_DIR/lead-cursor.<r
 
 `lead-cursor.<repo>.txt` lives beside `cursor.txt` in `$SHIPWRIGHT_STATE_DIR`
 (main checkout) — **one cursor per repo**, advanced to that repo's newest
-scanned merge only once its scan is handled and **never on a `SCAN
+scanned close (`closed_at`) only once its scan is handled and **never on a `SCAN
 INCOMPLETE`**, so a repo whose probe failed keeps its window instead of having
 it eaten by a sibling's success. Missing on first run → a bounded 48h window.
+A row with `unmeasured_reason` could not be measured: report it as unmeasured,
+never as fast or as an outlier. The start is the ticket's dispatch stamp (DND
+`In Progress at`, or the work tracker's property from the private overlay), so
+tickets dispatched before the stamp, and walt_ui rows on a machine with no
+overlay, read unmeasured by design: count their missing starts per repo, not
+as findings.
+Their `tail_seconds` is still measured, so they still count toward a `tail`
+outlier or a stage dominating the `tail`, which is walt_ui's lever.
 
 **Also sweep for finished work nobody is merging** — `ai/bin/ready-and-idle
 --repo <R>` lists open MRs that are green, unblocked and idle; `lead-time` sees
-merged only. Report them; the admiral merges, not you. Read the exit code: **3 =
+landed requests only, never open ones. Report them; the admiral merges, not you. Read the exit code: **3 =
 UNAVAILABLE**, no list; **4 = the list is COMPLETE, act on it** — only `drift`
 went soft, routine from a cron lane. Reading a 4 as a failure reinstates the outage.
 
@@ -522,9 +533,12 @@ Athena's, and all 6 slow lead-time rows were coworkers'.
 ticket is *watched, not actioned*. Act only on a **recurring shape** (≥2 slow
 tickets sharing a cause — the same slow CI stage, the same back-and-forth) or a
 **single unambiguous systemic cost** (a stage dominating the `tail` on every
-ticket). **Ignore a `code` outlier whose
-`start` equals a sibling ticket's** — that is the stacked-branch artefact
-(`ai/docs/lead-time-tracking.md`), not real work time.
+ticket). Tickets that share a `start` were dispatched together as one batch;
+their `code` times overlap, so count the batch once
+(`ai/docs/lead-time-tracking.md` → *The START marker*).
+**Later (2026-09-30, DND-1318):** this said to ignore a `code` outlier whose
+`start` equals a sibling's, as the stacked-branch artefact of the old
+first-commit start. Superseded: the start is now the dispatch stamp.
 
 **Coordinate with an athena-architect.** When something qualifies, do not design
 the improvement yourself — spawn ONE `athena-architect` (Agent tool) and brief it
@@ -591,7 +605,7 @@ same commands as `gh`/`glab` — so writes are attributed to Athena, not the
 machine owner. The App config is present, so the wrapper works. READS
 may use plain `gh`/`glab`. Verify wrapper health with
 `~/dev/custom/ai/bin/forge-preflight` if a write fails. (The `forge-identity-guard.sh`
-hook enforces this: it denies a bare create/merge or plain push to a forge
+hook enforces this: it denies every plain `gh`/`glab` write or plain push to a forge
 before it runs, with a `Fix:` — the guard stops, the block instructs.)
 
 ## Journal format

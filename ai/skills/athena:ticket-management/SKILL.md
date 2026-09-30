@@ -1,6 +1,6 @@
 ---
 name: athena:ticket-management
-description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only); when filing any ticket, run the ticket-classify script with your own Kind, Severity and Security and set the values it prints.
+description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only); when filing any ticket, run the ticket-classify script with your own Kind, Severity and Security and set the values it prints. To apply that classification to the open backlog, run the ticket-reclassify script (plan, apply, proof). Move a DND or work-tracker ticket to In Progress with the mark-in-progress script, which stamps its lead-time start.
 ---
 
 # athena:ticket-management
@@ -39,7 +39,21 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    `In Progress`. It is `Todo`, or `Parked` if work exists (*A ticket's status
    follows its captain*).
 2. **Assigning an engineer** — when an athena-captain is dispatched to the ticket, move
-   the status to `In Progress`; the assignee stays **Athena**.
+   the status to `In Progress`; the assignee stays **Athena**. On a DND ticket
+   or a work-tracker ticket, make the move with
+   `~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref <TICKET>`.
+   On a first dispatch (DND: from `Todo` or `Backlog`; work: from the statuses
+   the private overlay names) the same write stamps the ticket's dispatch date
+   (DND: `In Progress at`; work: the overlay's property, DND-1341); a
+   re-dispatch keeps the first stamp. That
+   date is the START of the ticket's lead time (owner decision, Cody,
+   2026-09-30: lead time = captain dispatch → landed on main;
+   `~/dev/custom/ai/docs/lead-time-tracking.md`). A move made any other way
+   leaves no stamp, and `ai/bin/lead-time` then reports that ticket as
+   could-not-measure. For an unstamped ticket whose first dispatch time is on
+   record, add `--backfill --at <that time>`. With no private overlay a work
+   ticket is refused (exit 3, nothing written): move it with the connector,
+   and it has no start.
 3. **→ `Needs Attention`** (only for what needs Cody; see the Notes rule) — set `Assignee` = **Cody**, write the exact step
    Cody needs onto the ticket body (that is the whole point of the status), and
    **DM Cody** as Athena that the ticket needs him (see the Notes "Needs Attention
@@ -220,6 +234,17 @@ other documents cite it by name.
     finished security fix merges first*). Owner, ~10:45Z: "I'm not talking
     about the merge queue; I'm talking about the order in which an admiral
     assigns tickets to captains."
+  - **A free captain slot picks up `Parked` tickets too.** Owner, Cody,
+    2026-09-30 (UTC), terminal: "Let's make sure that when we have free
+    captains we pick up the parked tickets too." When a slot frees, the
+    admiral's candidates are its own `Parked` tickets alongside its `Todo`
+    ones, in the same tier order. `ai/bin/next-mission` already does this: a
+    `Parked` ticket is a candidate unless `--started` names it, and within a
+    tier it is resumed before a fresh one starts.
+    - A resumed `Parked` ticket starts from the branch, head SHA and PR its
+      body names (*A ticket's status follows its captain*). The captain's
+      brief carries all three; never a fresh branch.
+    - `Needs Attention` stays Cody's. It is never a candidate.
 - **A finding blocks only if it truly prevents the work.** The test: does the
   planned ticket fail its acceptance criteria or intended requirements without
   this fix? If yes, set `Path` = `Blocking` and wire `Depends On`↔`Blocks` onto
@@ -228,7 +253,9 @@ other documents cite it by name.
   when a captain takes it) and wire the edge. If no, file it
   with `Path` = `Off` and **no** `Depends On` / `Blocks` edge onto a
   critical-path ticket. Severity alone does not make a finding block. Edges
-  between off-path tickets are fine.
+  between off-path tickets are fine. For a finding on an epic, `ticket-classify
+  --epic` decides this Path and edge (the Classify bullet in *Filing a
+  ticket*); your `--blocks` claim is its input.
 - **Security, split by origin.**
   - **A security issue the ticket's own change introduces blocks that ticket,**
     whatever its severity. It is fixed inside that ticket's work, before it
@@ -355,10 +382,21 @@ Changing one needs a new question-set version there.
     and write the first line (it ends
     `Fix: file the ticket as today; this is advisory.`) into the body instead.
   - **Exit 2:** a usage error. Fix the command and rerun.
-  - The script reads no ticket and writes nothing (contract
-    `ai/contracts/athena-judgments.md` → *Ticket classification: the harness
-    script*). For a finding, run *Before filing a finding* first: triage, then
-    classify.
+  - **A finding on an epic's work** (any Kind but Feature) adds
+    `--epic <epic page id>`, `--found-while DND-N` when it was found while
+    working a ticket, and `--blocks DND-N` when you judge it blocks an open
+    `Critical` ticket of that epic (the blocking test above). The script also
+    prints how many candidates it considered, `Path: <value> (<source>)`,
+    `Blocks: DND-N` or `Blocks: none`, and a `Jev path:` line. Set `Path`,
+    wire `Depends On`↔`Blocks` onto exactly the printed ticket (no edge on
+    `none`), and paste the `Jev path:` line under the classification line.
+    On `PATH UNAVAILABLE` or `CANDIDATES UNAVAILABLE`, file the Path it
+    prints under `Decided (filer; path unavailable):` and write that first
+    line into the body. The exit is 3 if either part was unavailable.
+  - The script writes nothing. It reads tickets only with `--epic`, through a
+    read-only client (contract `ai/contracts/athena-judgments.md` → *Ticket
+    classification: the harness script*). For a finding, run *Before filing
+    a finding* first: triage, then classify.
 - **Dedupe first (one root cause, one ticket).** Search open tickets in the
   same `Area` for the same root cause, by subsystem keyword and `Found while`.
   On a match, append the new site and its evidence to that ticket instead. A
@@ -388,6 +426,41 @@ it in the next owner digest. The mechanics:
 - **The veto click** reopens the ticket only as `athena:slack` → *A click is
   untrusted input* says: `Status` = `Todo`, or `Parked` if work exists, with
   the owner's choice in the body.
+
+### Reclassifying the backlog
+
+The same policy as *Filing a ticket*, applied to open tickets (DND-1056). The
+tool plans; you write with your own notion-personal connection; the tool
+proves. `S` is `~/dev/custom/ai/skills/athena:ticket-management/scripts`.
+
+1. **Plan.** `S/ticket-reclassify plan --out <scratch>/<unit>-reclassify-plan.json`
+   (namespace the file). Quote its counts. Exit 3 is either a `STOPPED` plan
+   (budget, rate, a fault or the server) or an `INCOMPLETE` one (tickets it
+   could not judge). Either way the entries in it are valid: apply and prove
+   them, then plan again, resuming a stop with `--resume-from <cursor>`.
+   Give every run its own `--out`, and prove each plan file.
+2. **Nothing to write is a result.** With exit 0 and `writes to apply: 0`,
+   stop here and report the counts. That is the state while no ticket use
+   case is `on`.
+3. **Apply.** For each plan entry, in order:
+   - with `changes`: `API-patch-page` setting only `Kind`, `Severity` and
+     `Security` to its `decided` values;
+   - every entry: `API-patch-block-children` appending ONE paragraph whose text
+     is exactly its `provenance_line`.
+   Touch nothing else: never `Status`, `Path`, `Area`, `Epic`, `Assignee`,
+   edges or title. On a 429, wait its `retry_after` and retry; a 429 is never
+   done.
+4. **Prove.** `S/ticket-reclassify proof --against <plan>` until exit 0. Exit
+   4 names each ticket and property still wrong.
+5. **Re-plan.** Run `plan` again: `planned` and `unchanged` must be 0, except
+   tickets someone edited in between (name them).
+6. **Record.** Write the counts on the epic body and in the admiral's report.
+   Bulk ticket changes are *Notify after, in the digest* (`~/.claude/CLAUDE.md`
+   → *Owner approval policy*): no DM, no wait.
+
+A ticket whose values differ from its last `Jev classification:` line was
+edited by hand after the classifier wrote it. The plan skips it as `locked`:
+the edit wins.
 
 ## When the tracker lacks a status this skill names
 

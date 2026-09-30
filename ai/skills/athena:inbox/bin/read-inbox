@@ -145,7 +145,14 @@ trap 'inbox_release_consumer' EXIT
 # unread -- which is `--peek`, arrived at by accident and reported as an error.
 # Better to refuse up front and name `--peek` in the Fix: clause.
 # ============================================================================
-RESOLVED="$(inbox_resolve_channel "${CHANNEL}" ".")" || exit 1
+# THE SESSION'S PROJECT, NOT THE SHELL CWD (DND-1163). The Bash tool keeps a
+# `cd` across calls, so "." can be another project's repo; keyed on it, this
+# would act on that project's channels with exit 0. inbox_session_dir
+# (lib/inbox.sh) names the session's project and refuses a cwd that sits in a
+# different registered project. PROJECT_DIR replaces "." everywhere below.
+PROJECT_LINE="$(inbox_session_dir)" || exit 1
+PROJECT_DIR="${PROJECT_LINE#*$'\t'}"
+RESOLVED="$(inbox_resolve_channel "${CHANNEL}" "${PROJECT_DIR}")" || exit 1
 KIND="$(inbox_field kind "${RESOLVED}")"
 
 if [ "${PEEK}" -eq 0 ]; then
@@ -158,7 +165,7 @@ if [ "${PEEK}" -eq 0 ]; then
   inbox_require_consumer "${LOCK}" "channel \"${CHANNEL}\"" || exit 1
 fi
 
-READ="$(inbox_read_json "${CHANNEL}" ".")" || exit 1
+READ="$(inbox_read_json "${CHANNEL}" "${PROJECT_DIR}")" || exit 1
 
 # The channel's declared producer selects the render form for a log channel.
 # It is read from the read doc (which resolved it from the registry entry), so
@@ -240,7 +247,7 @@ else
       # freshness is this machine's own fact (its delivered files' mtimes, never
       # the doorbell -- DND-937 -- and the client log), so it is safe beside a count. A freshness lookup that FAILS says
       # so, rather than printing a bare "nothing new" that reads as healthy.
-      if ! FRESH="$(inbox_channel_freshness_json "${CHANNEL}" "." 2>/dev/null)" || [ -z "${FRESH}" ]; then
+      if ! FRESH="$(inbox_channel_freshness_json "${CHANNEL}" "${PROJECT_DIR}" 2>/dev/null)" || [ -z "${FRESH}" ]; then
         printf 'athena:inbox: %s — nothing new (freshness could not be determined; run inbox-doctor).\n' "${CHANNEL}"
       elif [ "$(printf '%s' "${FRESH}" | jq -r '.stale')" = "true" ]; then
         printf 'athena:inbox: %s — nothing new; STALE: last delivery %s%s ago (threshold %s)%s.\n' "${CHANNEL}" \
@@ -330,7 +337,7 @@ else
       # unresolved name renders the raw id with a marker saying why.
       NAMES=""
       if printf '%s' "${READ}" | jq -e 'any(.messages[]?; (.payload.kind // "") == "session.message")' >/dev/null 2>&1; then
-        NAMES="$(inbox_machine_names ".")"
+        NAMES="$(inbox_machine_names "${PROJECT_DIR}")"
       fi
       FENCED="$(printf '%s' "${READ}" | routed_render_platform "${NAMES}")" || RENDER_RC=1
       BODY="${FENCED}"
@@ -384,7 +391,7 @@ case "${KIND}" in
     EVIDS="$(printf '%s' "${READ}" | jq -r '.event_ids[]?')"
     KEYS="$(printf '%s' "${READ}" | jq -r '.keys[]?')"
     DLIDS="$(printf '%s' "${READ}" | jq -r '.delivery_ids[]?')"
-    inbox_ack_log "${CHANNEL}" "${OFFSET}" "${EVIDS}" "${KEYS}" "." "" "${DLIDS}" || RC=1
+    inbox_ack_log "${CHANNEL}" "${OFFSET}" "${EVIDS}" "${KEYS}" "${PROJECT_DIR}" "" "${DLIDS}" || RC=1
     ;;
   maildir)
     IDENTITY="$(printf '%s' "${READ}" | jq -r '.identity // ""')"
@@ -416,7 +423,7 @@ case "${KIND}" in
       # A message this identity WROTE is never acked, and one unackable
       # message does not abandon the rest of the batch: the others were read
       # and are owed their move into .acked/.
-      inbox_ack_message "${CHANNEL}" "${NAME}" "." || RC=1
+      inbox_ack_message "${CHANNEL}" "${NAME}" "${PROJECT_DIR}" || RC=1
     done < <(printf '%s' "${READ}" | jq -r --arg id "${IDENTITY}" \
                '.messages[] | select(.from != $id) | .name')
     ;;

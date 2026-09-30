@@ -79,7 +79,7 @@ git -C "${GLREPO}" worktree add -q -b gl-merged "${TMP}/wt/gl-merged"
 fixture() {
   export ST="${TMP}/$1"; mkdir -p "${ST}"
   echo null > "${ST}/pools"
-  ruby -rjson -e '
+  /usr/bin/ruby -rjson -e '
     st, n, tmp = ARGV[0], Integer(ARGV[1]), ARGV[2]
     nets = [{ "Name" => "bridge", "IPAM" => { "Config" => [{ "Subnet" => "172.17.0.0/16" }] }, "Labels" => {}, "Containers" => {} }]
     [["feat-merged", "172.18.0.0/16"], ["feat-live", "172.19.0.0/16"], ["gone", "172.20.0.0/16"]].each do |p, s|
@@ -124,7 +124,7 @@ grep -q "LIVE project feat-merged" <<<"${out}" && bad "h3 read a forge failure a
 
 # h4 GitLab: glab's argv and its iid key produce an --mr teardown line.
 fixture h4 16; echo 12 > "${ST}/merged_gl-merged"
-ruby -rjson -e 'f = ARGV[0]; c = JSON.parse(File.read(f))
+/usr/bin/ruby -rjson -e 'f = ARGV[0]; c = JSON.parse(File.read(f))
   c[1]["Config"]["Labels"]["com.docker.compose.project.working_dir"] = ARGV[1]; File.write(f, JSON.dump(c))' \
   "${ST}/containers.json" "${TMP}/wt/gl-merged"
 run --min-free 12; expect h4 1
@@ -152,7 +152,7 @@ no_survivors() { # <label>: every hung stub process was killed, none orphaned
 }
 # t1 GitLab: glab hangs -> the stack is UNKNOWN within the bound, with a Fix naming the command.
 fixture t1 16; echo 12 > "${ST}/merged_gl-merged"; touch "${ST}/glab_hang"
-ruby -rjson -e 'f = ARGV[0]; c = JSON.parse(File.read(f))
+/usr/bin/ruby -rjson -e 'f = ARGV[0]; c = JSON.parse(File.read(f))
   c[1]["Config"]["Labels"]["com.docker.compose.project.working_dir"] = ARGV[1]; File.write(f, JSON.dump(c))' \
   "${ST}/containers.json" "${TMP}/wt/gl-merged"
 run_bounded --min-free 12

@@ -112,9 +112,16 @@ trimming descriptions only cuts bytes.
 usage). It reads the index and exits 0 within budget, 1 over it (either
 threshold), and 2 when it cannot find or read the index. Exit 2 is never
 "small enough": a wrong project slug must not read as a healthy index. The
-shipwright runs it every run, so an overflow is caught by the next run rather
-than by whichever captain notices first (DND-522, 2026-09-27: 196 lines,
-25039 bytes, past the byte cut, one day after a compaction).
+shipwright runs it every run, once per fleet repo (`--repo <path>`), so an
+overflow is caught by the next run rather than by whichever captain notices
+first (DND-522, 2026-09-27: 196 lines, 25039 bytes, past the byte cut, one
+day after a compaction).
+
+**Later (2026-09-29):** the shipwright ran it with no argument, which measures
+only `~/dev/custom`'s index. Superseded by `--repo`: gen_saas's index, the
+one most captains append to, reached 26455 bytes (past the loader cut) unseen,
+and DND-1239's captain found and compacted it. The slug is every
+non-alphanumeric character as `-` (`gen_saas` → `gen-saas`).
 
 **Who compacts it:** the shipwright, on its cadence, when the file passes
 ~22KB. It is the reviewer this skill names, so it proposes and applies in one

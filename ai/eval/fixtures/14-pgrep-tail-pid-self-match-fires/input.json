@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"timeout 590 tail --pid=$(pgrep -f mytask | head -1) -f /dev/null"}}

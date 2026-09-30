@@ -1,0 +1,5 @@
+regression=tail --pid on a pid from pgrep -f — with no target alive it resolves the waiting shell and blocks its whole timeout on itself (safe-wait rule 4, DND-1330)
+guard=safe-wait-guard
+mode=hook-stdin
+input=input.json
+expect=fires

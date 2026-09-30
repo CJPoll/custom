@@ -169,3 +169,63 @@ Fix texts were swept to the one recommended path.
 | M19 `gmg_receipt_gate` never called (the unfixed guard) | the 17 above |
 | M20 `ir_declared_gate_on` returns "no gate" when the base commit is missing | D10, D10b |
 | M21 `ir_read_receipt` skips the base comparison | D3 |
+
+---
+
+## 2026-09-28 — DND-1140: a superseded failed run kept refusing a green head
+
+- **Code under test:** `ai/lib/gh-merge-guard.sh` (`gmg_checks_green`,
+  `GMG_ROLLUP_SHAPE`, `GMG_ROLLUP_JUDGE`)
+- **Suite:** `bash ai/test/gh-athena-merge-guard/self-test.sh`, cases L1–L13b.
+  L1 replays the live rollup of gen_saas PR #488 head d0889159, saved in
+  `fixtures/gen_saas-pr488-d0889159-rollup-nodes.json`.
+- **Baseline (fixed code):** `RESULT: 184 passed, 0 failed`
+
+### Fail-first: the final suite against the unfixed sources (194a5fe2)
+
+`RESULT: 170 passed, 14 failed`. L1 (the incident), L7 and L4e (a superseded
+failure: check run, commit status, non-Actions app) fail with the incident's
+own refusal:
+
+```
+FAIL  L1. superseded failure no longer refuses
+      rc=3 out='' err=$'gh-athena: REFUSING `gh pr merge 362 --squash --match-head-commit b712de1d…`: not every check on head b712de1d… is green:\n    Test: COMPLETED/FAILURE\n  Fix: …
+```
+
+L3b, L5, L6, L12 and L12b fail on the message only: the old guard refused
+them, as it refused any red run. L8, L8b, L9, L9b, L9c and L10 exercise the new
+GraphQL read, which the old guard never made. Every pre-DND-1140 case, and L2,
+L3, L4, L4b, L4c, L4d, L7b, L11, L13 and L13b, passed against the old code and
+still pass: nothing that refused before passes now unless a newer check suite's
+all-SUCCESS runs of the same check superseded it.
+
+### Fail-first: the first cut (0409ce41) against the final suite
+
+The first cut judged only the run that started last per (app, workflow, event,
+name). The review round found three inputs where that hid a red run, and each
+now has a case. `RESULT: 179 passed, 5 failed` (L11, L12, L12b, L13, L13b). L11
+MERGED a head whose earlier same-named job in the same suite was red:
+
+```
+FAIL  L11. same-suite runs are never superseded
+      rc=0 out=stub:\ MERGED err=$'gh-athena: CHECKS head b712de1d…: the latest run of every check is green; 1 superseded run(s) not judged:\n    Test: COMPLETED/FAILURE (started 2026-09-28T18:40:00Z)'
+```
+
+### Mutations on the fixed code (applied to a copy of `ai/bin` + `ai/lib`)
+
+| Mutation | Cases that fail |
+| --- | --- |
+| M22 the workflow-run event dropped from the check key | L4c |
+| M23 the app id dropped from the check key | L4 |
+| M24 no tie check for the newest start time | L5 |
+| M25 no check that every start time is readable | L3b, L6 |
+| M26 the OLDEST suite judged instead of the newest | L1, L2, L4e, L7, L7b, L12, L12b |
+| M27 totalCount vs returned nodes not compared | L8b |
+| M28 hasNextPage ignored | L8 |
+| M29 the rollup read for another oid than the pinned head | L10 |
+| M30 an Actions run with no readable workflow folded by (app, name) | L4d |
+| M31 an empty rollup passes | 20 |
+| M32 every run is its own suite (same-suite runs supersede each other) | L11 |
+| M33 a newer SKIPPED/NEUTRAL run supersedes (`green`, not `success`) | L12, L12b |
+| M34 the app slug not required for an identity | L13 |
+| M35 the check suite id not required for an identity | L13b |

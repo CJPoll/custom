@@ -30,13 +30,20 @@ NOREPO="${TMP}/no-such-repo"
 SINCE="2026-09-19T00:00:00Z"
 
 OUT=""; ERR=""; CODE=0
-run() { OUT="$(ruby "$bin" "$@" 2>"${TMP}/err" </dev/null)"; CODE=$?; ERR="$(cat "${TMP}/err")"; }
+run() { OUT="$(/usr/bin/ruby "$bin" "$@" 2>"${TMP}/err" </dev/null)"; CODE=$?; ERR="$(cat "${TMP}/err")"; }
 
 # 1. The pure-logic suite.
-if ruby "$bin" --self-test >"${TMP}/st" 2>&1; then
+if /usr/bin/ruby "$bin" --self-test >"${TMP}/st" 2>&1; then
   ok "lead-time --self-test passes"
 else
   bad "lead-time --self-test passes" "$(tail -5 "${TMP}/st")"
+fi
+
+# 1b. The landing rules (DND-1317) against a real fixture repo with a stubbed gh.
+if /usr/bin/ruby "$here/lead_time_test.rb" >"${TMP}/lt" 2>&1; then
+  ok "lead_time_test.rb: landing rules ($(tail -1 "${TMP}/lt"))"
+else
+  bad "lead_time_test.rb: landing rules" "$(cat "${TMP}/lt")"
 fi
 
 # 2a. Refused: exit 1 (lead-time's documented usage code; 2 already means "PR

@@ -195,7 +195,7 @@ CASE = "AE-18-refused-spawn-is-pause"
 SHA12 = "623d9db81022"
 def evidence(rows, subject: true)
   head = subject ? "subject: /x/ai/agents/athena-admiral.md 499 lines sha #{SHA12} (loaded inline via --agents as k)\n" : ""
-  "#{head}#{rows}admiral-eval: 1/2 cases pass (runs/T2 case = 10)\n"
+  "#{head}#{rows}admiral-eval: invocation failures: 0 model call(s)\nadmiral-eval: 1/2 cases pass (runs/T2 case = 10)\n"
 end
 ROW18 = "PASS #{CASE}       8/10   [next-action] ok\n"
 ROW13 = "PASS AE-13a-forge-auth-deny             1/1    [hook-stdin] guard=x\n"
@@ -254,6 +254,34 @@ check("E7 subject sha12 != base render raises STALE") do
   raises_with(BO::EvidenceError, /STALE/) { BO::Evidence.check_subject!(e1, "d6934f982adc" + "0" * 52) }
 end
 check("E7 a matching subject passes") { BO::Evidence.check_subject!(e1, SHA12 + "0" * 52).nil? }
+
+# DND-1364: evidence from a run with failed model calls is an unmeasured run.
+ZERO_FAIL = "admiral-eval: invocation failures: 0 model call(s)\n"
+def evidence_with(rows, failures_line)
+  "subject: /x/ai/agents/athena-admiral.md 499 lines sha #{SHA12} (loaded inline via --agents as k)\n" \
+    "#{rows}#{failures_line}admiral-eval: 1/2 cases pass (runs/T2 case = 10)\n"
+end
+FAILED_ROW = "FAIL #{CASE} 2/6 [next-action] [4 invocation failure(s), not scored] no trailer\n"
+check("E8 a row reporting invocation failures is refused, naming the case") do
+  raises_with(BO::EvidenceError, /#{CASE}.*invocation failure/m) do
+    BO::Evidence.parse(evidence_with(FAILED_ROW, ZERO_FAIL), CASE)
+  end
+end
+check("E8 a summary line with failures above 0 is refused even when the target row is clean") do
+  line = "admiral-eval: invocation failures: 5 model call(s) in 2 case(s), not scored: AE-x(3), AE-y(2)\n"
+  raises_with(BO::EvidenceError, /invocation failure/) { BO::Evidence.parse(evidence_with(ROW18, line), CASE) }
+end
+check("E8 a row whose n is below --runs is refused, naming the case") do
+  raises_with(BO::EvidenceError, /#{CASE}.*6\/10|6 of 10/m) do
+    BO::Evidence.parse(evidence_with("FAIL #{CASE} 2/6 [next-action] no trailer\n", ZERO_FAIL), CASE, runs: 10)
+  end
+end
+check("E8 evidence with no invocation-failure count line is refused (an uncounted run is not a 0)") do
+  raises_with(BO::EvidenceError, /invocation failures/) { BO::Evidence.parse(evidence_with(ROW18, ""), CASE) }
+end
+check("E8 a clean run with n == runs and a 0 count parses") do
+  BO::Evidence.parse(evidence_with(ROW18, ZERO_FAIL), CASE, runs: 10)[:k] == 8
+end
 
 # ---------------------------------------------------------------------------
 # Label

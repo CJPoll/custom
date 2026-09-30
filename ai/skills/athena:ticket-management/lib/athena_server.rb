@@ -4,7 +4,8 @@
 # (DND-1054). Extracted from finding-triage (DND-713) so ticket-classify does
 # not copy it. Side Effects only: files, the MCP registry, and curl.
 #
-# Callers: scripts/finding-triage and scripts/ticket-classify. Each maps the
+# Callers: scripts/finding-triage, scripts/ticket-classify and
+# scripts/ticket-reclassify (DND-1056). Each maps the
 # two exceptions below to its own unavailable line, which carries the `Fix:`.
 #
 # TOKENS NEVER TOUCH ARGV OR THE ENVIRONMENT. Every header value, the token

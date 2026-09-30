@@ -1,6 +1,6 @@
 ---
 name: athena:teardown-worktree-stack
-description: How the athena-admiral resolves and runs the per-repo teardown of a merged Mission's docker-compose stack(s) — executable as ai/bin/teardown-stack, which locked-merge runs per merged PR — and how ai/bin/pool-headroom gates dispatch on docker address-pool headroom. Use once a Mission's MR is CONFIRMED merged, to reclaim database memory/connections, containers, volumes, and the address-pool network. Encodes the 3-tier resolution (repo teardown script → generic default only when the compose project name is docker's default → documented prose fallback) and the confirm-it-is-gone check. The merge-gating and only-your-fleet's-stacks rules stay resident in the admiral definition.
+description: How the athena-admiral resolves and runs the per-repo teardown of a merged Mission's docker-compose stack(s) — executable as ai/bin/teardown-stack, which locked-merge runs per merged PR — and how ai/bin/pool-headroom gates dispatch on docker address-pool headroom. Use once a Mission's MR is CONFIRMED merged, when a Mission is parked, or when a run ends with a Mission's PR still open, to reclaim database memory/connections, containers, volumes, and the address-pool network. Encodes the 3-tier resolution (repo teardown script → generic default only when the compose project name is docker's default → documented prose fallback) and the confirm-it-is-gone check. The merge-gating and only-your-fleet's-stacks rules stay resident in the admiral definition.
 ---
 
 # athena:teardown-worktree-stack
@@ -15,8 +15,18 @@ drifts into pool starvation and "all predefined address pools have been fully
 subnetted".
 
 Tear a Mission's stack down as soon as its MR is **merged** (not merely green — a
-green-but-open MR may still need its stack for review follow-ups) — every
-per-worktree stack the repo runs, including volumes, orphans, and the network.
+green-but-open MR may still need its stack for review follow-ups, **while a
+captain or admiral of this run is live to act on them**) — every per-worktree
+stack the repo runs, including volumes, orphans, and the network. When the run
+ends with the MR still open, the stack goes too (*Merged is not the only exit*,
+below).
+
+**Later (2026-09-29):** the green-but-open exception had no end. A run that
+ended with its PRs open left every stack up, classified `LIVE`, and no actor
+was permitted to reclaim it. Measured 2026-09-29, three times in one day: a
+walt_ui dispatch found all 30 held subnets were stacks of paused or ended
+fleets, and two more walt_ui dispatches were refused at 1/31 free with 25
+gen_saas stacks up, 20 of them behind open PRs days old.
 
 ## The merge drives it: `ai/bin/teardown-stack`
 
@@ -64,6 +74,25 @@ still holding database memory, containers, volumes, and an address-pool slot,
 which is precisely what this skill exists to prevent. A parked Mission has no
 review follow-up for its stack to serve, so nothing is being preserved by
 leaving it up.
+
+**The run ending is an exit too.** When your run ends (the triggers in
+[[athena:admiral-final-report]], a usage ceiling included) with a Mission's PR
+still open — finished-but-unmerged, handed off, blocked or stuck — tear its
+stack down: `teardown-stack --worktree <wt> --parked "run-end: PR #<n> open"`.
+Once no captain or admiral of the run is live, no review follow-up remains for
+the stack to serve, and only the owning run knows it has ended, so it is the
+one actor that can release the subnet safely. Record `stack: down (run-end)` in
+the Mission's state-log entry, and name the teardown in the final report. The
+one exception is a PR you are still riding to landed
+([[athena:merge-boarding]]); that run has not ended.
+
+**Whoever adopts that PR re-ups first.** A resumed or later run that adopts a
+Mission whose state-log entry says `stack: down`, or whose worktree has no
+running stack, brings the repo's worktree stack up before the first gate, and
+says so in the captain's brief ("stack is down; bring it up before the first
+gate"). Otherwise the gate's first symptom is a bare database error (gen_saas:
+`3D000`, the DND-1229 class). The re-up, and the recompile `-v` costs, are the
+accepted price of not starving every fleet's pool.
 
 **Tear down the STACK; keep the TREE.** The work is the worktree, the branch,
 and the commits — never the containers. So this does not conflict with "never on

@@ -1,0 +1,612 @@
+# frozen_string_literal: true
+
+# Deterministic suite for ai/bin/lead-time's landing rules (DND-1317).
+#
+# The forge is stubbed: every `gh` call is answered from fixtures by
+# overriding GitHubForge#run_json on the instance. git is REAL, against a
+# throwaway repository whose `origin` is a local bare repo, so the patch-id
+# and ancestry logic runs on real commits. No network, no model.
+# Run by ai/test/lead-time/self-test.sh, which harness-gate discovers.
+
+require "json"
+require "open3"
+require "tmpdir"
+require "fileutils"
+require "stringio"
+
+load File.expand_path("../../bin/lead-time", __dir__)
+
+$failures = []
+$checks = 0
+
+def check(desc)
+  $checks += 1
+  $failures << desc unless yield
+rescue StandardError => e
+  $failures << "#{desc} (raised #{e.class}: #{e.message})"
+end
+
+# ---------------------------------------------------------------------------
+# Fixture repository
+# ---------------------------------------------------------------------------
+
+GIT_ENV = {
+  "GIT_CONFIG_NOSYSTEM" => "1",
+  "GIT_AUTHOR_NAME" => "Fixture", "GIT_AUTHOR_EMAIL" => "fixture@example.invalid",
+  "GIT_COMMITTER_NAME" => "Fixture", "GIT_COMMITTER_EMAIL" => "fixture@example.invalid",
+}.freeze
+
+def sh_git(dir, *args, date: "2026-09-29T00:00:00Z")
+  env = GIT_ENV.merge("GIT_AUTHOR_DATE" => date, "GIT_COMMITTER_DATE" => date)
+  out, err, st = Open3.capture3(env, "git", "-C", dir, "-c", "commit.gpgsign=false",
+                                "-c", "init.defaultBranch=main", *args)
+  raise "fixture git #{args.join(' ')} failed: #{err}" unless st.success?
+
+  out.strip
+end
+
+def commit_file(dir, path, body, subject, date)
+  File.write(File.join(dir, path), body)
+  sh_git(dir, "add", path)
+  sh_git(dir, "commit", "-q", "-m", subject, date: date)
+  sh_git(dir, "rev-parse", "HEAD")
+end
+
+# Builds one repo holding every scenario. Returns a Hash of named oids.
+#   main:   c0 -> c1 -> p7' (PR 7 rebased) -> s10 (PR 10 squashed) -> y9
+#   PR 7:   c0 -> p7              (landed by a rebase: same patch, new sha)
+#   PR 8:   c0 -> p8              (never landed)
+#   PR 9:   c0 -> x9 "DND-9: fix" (main carries y9, same subject, other patch)
+#   PR 10:  c0 -> q1 -> q2        (landed squashed into one commit s10)
+#   PR 11:  c0 -> p11             (partly landed: see p11b)
+def build_fixture(root)
+  origin = File.join(root, "origin.git")
+  work = File.join(root, "work")
+  FileUtils.mkdir_p(origin)
+  sh_git(origin, "init", "-q", "--bare")
+  sh_git(root, "clone", "-q", origin, work)
+  o = {}
+  o[:c0] = commit_file(work, "a.txt", "a\n", "init", "2026-09-28T00:00:00Z")
+  sh_git(work, "push", "-q", "origin", "HEAD:refs/heads/main")
+
+  pr = lambda do |n, &blk|
+    sh_git(work, "checkout", "-q", "-B", "pr#{n}", o[:c0])
+    head = blk.call
+    sh_git(work, "push", "-q", "origin", "HEAD:refs/pull/#{n}/head")
+    head
+  end
+  o[:p7] = pr.call(7) { commit_file(work, "b.txt", "seven\n", "DND-7: add b", "2026-09-28T01:00:00Z") }
+  o[:p8] = pr.call(8) { commit_file(work, "c.txt", "eight\n", "DND-8: add c", "2026-09-28T02:00:00Z") }
+  o[:x9] = pr.call(9) { commit_file(work, "d.txt", "nine-pr\n", "DND-9: fix", "2026-09-28T03:00:00Z") }
+  o[:q2] = pr.call(10) do
+    commit_file(work, "e.txt", "ten-1\n", "DND-10: part one", "2026-09-28T04:00:00Z")
+    commit_file(work, "f.txt", "ten-2\n", "DND-10: part two", "2026-09-28T04:10:00Z")
+  end
+  o[:p11] = pr.call(11) do
+    commit_file(work, "g.txt", "eleven-1\n", "DND-11: part one", "2026-09-28T05:00:00Z")
+    commit_file(work, "h.txt", "eleven-2\n", "DND-11: part two", "2026-09-28T05:10:00Z")
+  end
+
+  sh_git(work, "checkout", "-q", "-B", "main", o[:c0])
+  o[:c1] = commit_file(work, "z.txt", "z\n", "unrelated", "2026-09-29T06:00:00Z")
+  # PR 7 lands rebased: same patch, new sha, new committer date.
+  o[:p7_landed] = commit_file(work, "b.txt", "seven\n", "DND-7: add b", "2026-09-29T07:00:00Z")
+  # PR 10 lands squashed: both files in one commit.
+  File.write(File.join(work, "e.txt"), "ten-1\n")
+  File.write(File.join(work, "f.txt"), "ten-2\n")
+  sh_git(work, "add", "e.txt", "f.txt")
+  sh_git(work, "commit", "-q", "-m", "DND-10: squashed", date: "2026-09-29T08:00:00Z")
+  o[:s10] = sh_git(work, "rev-parse", "HEAD")
+  # A commit titled like PR 9's, with a different change (a conflict-resolved
+  # or hand-edited landing): not provably PR 9's change, not provably absent.
+  o[:y9] = commit_file(work, "d.txt", "nine-main\n", "DND-9: fix", "2026-09-29T09:00:00Z")
+  # Only the first of PR 11's two commits reaches main.
+  o[:p11b] = commit_file(work, "g.txt", "eleven-1\n", "DND-11: part one", "2026-09-29T10:00:00Z")
+  sh_git(work, "push", "-q", "origin", "HEAD:refs/heads/main")
+  sh_git(work, "push", "-q", "origin", "#{o[:c0]}:refs/heads/start")
+  o[:origin] = origin
+  o
+end
+
+# A checkout that knows only the first commit: the PR heads and the landed
+# main are not in it, so the tool has to fetch them, as in a real checkout.
+def fresh_clone(o, root, name)
+  dir = File.join(root, name)
+  sh_git(root, "clone", "-q", "--no-local", "--single-branch", "--branch", "start", o[:origin], dir)
+  dir
+end
+
+# Pushes to refs/heads/main as GitHub's activity API reports them, newest
+# first, one page per inner array (gh api --paginate --slurp).
+def activity(o)
+  [[
+    { "timestamp" => "2026-09-29T10:00:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
+      "before" => o[:y9], "after" => o[:p11b] },
+    { "timestamp" => "2026-09-29T09:00:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
+      "before" => o[:s10], "after" => o[:y9] },
+    { "timestamp" => "2026-09-29T08:18:58Z", "activity_type" => "push", "ref" => "refs/heads/main",
+      "before" => o[:p7_landed], "after" => o[:s10] },
+  ], [
+    { "timestamp" => "2026-09-29T07:05:00Z", "activity_type" => "push", "ref" => "refs/heads/main",
+      "before" => o[:c1], "after" => o[:p7_landed] },
+    { "timestamp" => "2026-09-29T06:00:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
+      "before" => o[:c0], "after" => o[:c1] },
+  ]]
+end
+
+def pr_view(o, n, state:, merged_at: nil, closed_at: "2026-09-29T11:00:00Z", head:, commits:)
+  { "number" => n, "title" => "DND-#{n}: t", "headRefName" => "dnd-#{n}-b", "state" => state,
+    "mergedAt" => merged_at, "closedAt" => closed_at, "createdAt" => "2026-09-28T00:30:00Z",
+    "baseRefName" => "main", "headRefOid" => o[head],
+    "mergeCommit" => merged_at ? { "oid" => o[:c1] } : nil,
+    "commits" => commits.map { |t| { "authoredDate" => t, "committedDate" => t } } }
+end
+
+# A GitHubForge over the fixture whose gh answers come from `views`.
+def forge_over(o, views, calls = [], list: [], dir: o[:work])
+  f = GitHubForge.new(dir)
+  act = activity(o)
+  f.define_singleton_method(:run_json) do |cmd, _dir|
+    calls << cmd
+    next [] if cmd[1] == "run"
+    next list if cmd[1] == "pr" && cmd[2] == "list"
+    next act if cmd[1] == "api" && cmd.any? { |c| c.include?("/activity") }
+    next views.fetch(cmd[3].to_i) if cmd[1] == "pr" && cmd[2] == "view"
+
+    raise "unexpected gh call: #{cmd.inspect}"
+  end
+  f
+end
+
+# A Notion transport over fixture pages: DND number -> the page's
+# "In Progress at" property (a Hash, or :absent for a page without it).
+class FakeNotion
+  attr_reader :calls
+
+  def initialize(pages, fail_with = nil)
+    @pages = pages
+    @fail = fail_with
+    @calls = []
+  end
+
+  def call(method, path, body = nil)
+    @calls << [method, path, body]
+    raise NextMissionNotion::ReadError, @fail if @fail
+
+    n = body.dig("filter", "unique_id", "equals")
+    prop = @pages[n]
+    return { "results" => [] } if prop.nil?
+
+    props = { "ID" => { "type" => "unique_id", "unique_id" => { "prefix" => "DND", "number" => n } } }
+    props[NotionStart::PROPERTY] = prop unless prop == :absent
+    { "results" => [{ "id" => "page-#{n}", "properties" => props }] }
+  end
+end
+
+def at_prop(iso)
+  { "type" => "date", "date" => iso && { "start" => iso, "end" => nil, "time_zone" => nil } }
+end
+
+def capture_row(row)
+  old = $stdout
+  $stdout = StringIO.new
+  print_row(row)
+  $stdout.string
+ensure
+  $stdout = old
+end
+
+Dir.mktmpdir("lead-time-test") do |root|
+  o = build_fixture(root)
+  o[:work] = fresh_clone(o, root, "checkout")
+  views = {
+    7 => pr_view(o, 7, state: "CLOSED", head: :p7, commits: ["2026-09-28T01:00:00Z"]),
+    8 => pr_view(o, 8, state: "CLOSED", head: :p8, commits: ["2026-09-28T02:00:00Z"]),
+    9 => pr_view(o, 9, state: "CLOSED", head: :x9, commits: ["2026-09-28T03:00:00Z"]),
+    10 => pr_view(o, 10, state: "CLOSED", head: :q2,
+                         commits: ["2026-09-28T04:00:00Z", "2026-09-28T04:10:00Z"]),
+    11 => pr_view(o, 11, state: "CLOSED", head: :p11,
+                         commits: ["2026-09-28T05:00:00Z", "2026-09-28T05:10:00Z"]),
+    12 => pr_view(o, 12, state: "OPEN", closed_at: nil, head: :p8, commits: ["2026-09-28T02:00:00Z"]),
+    13 => pr_view(o, 13, state: "MERGED", merged_at: "2026-09-29T06:30:00Z",
+                         closed_at: "2026-09-29T06:30:00Z", head: :p8, commits: ["2026-09-28T02:00:00Z"]),
+    # Its head itself was fast-forwarded onto main (no rebase).
+    14 => pr_view(o, 14, state: "CLOSED", head: :c1, commits: ["2026-09-29T05:00:00Z"]),
+  }
+
+  # The start is the ticket's In Progress date (DND-1318); these landing cases
+  # stamp each ticket at its first commit, so the leads below are unchanged.
+  starts = NotionStart.new(FakeNotion.new(views.to_h do |n, v|
+    [n, at_prop(v["commits"].map { |c| c["authoredDate"] }.min)]
+  end))
+  ProbeFailures.reset!
+  forge = forge_over(o, views)
+
+  # --- the DND-1317 regression: CLOSED on GitHub, but its change is on main.
+  r7 = analyze(forge, 7, starts)
+  check("a CLOSED PR landed by a rebase reads as landed, not open (DND-1317)") { r7[:end_kind] == :merge }
+  check("its landing time is the push that put the change on main") { r7[:merged] == "2026-09-29T07:05:00Z" }
+  check("its lead runs from its start to that push") { r7[:lead_seconds] == (30 * 3600) + (5 * 60) }
+  check("the row names how it landed") { r7[:landed_via] == "push" }
+  check("the row names the landed commit") { r7[:landed_commit] == o[:p7_landed] }
+
+  r10 = analyze(forge, 10, starts)
+  check("a CLOSED PR landed squashed reads as landed") { r10[:end_kind] == :merge }
+  check("a squashed landing is timed by the push that carried it") { r10[:merged] == "2026-09-29T08:18:58Z" }
+
+  r14 = analyze(forge, 14, starts)
+  check("a CLOSED PR whose own head is on main reads as landed") { r14[:end_kind] == :merge }
+  check("its head is the landed commit, timed by the push that carried it") do
+    r14[:landed_commit] == o[:c1] && r14[:merged] == "2026-09-29T06:00:30Z"
+  end
+
+  # --- CLOSED and not on main: distinct from open, never a lead.
+  r8 = analyze(forge, 8, starts)
+  check("a CLOSED PR whose change is not on main reads as closed, not open") { r8[:end_kind] == :closed }
+  check("a closed-unlanded PR has no lead") { r8[:lead_seconds].nil? }
+
+  # --- cannot decide: says so, never open and never closed.
+  r9 = analyze(forge, 9, starts)
+  check("a same-subject, different-patch commit on main is could-not-measure") { r9[:end_kind] == :unmeasured }
+  check("the could-not-measure row says why") { r9[:unmeasured_reason].to_s.include?("DND-9: fix") }
+  r11 = analyze(forge, 11, starts)
+  check("a partly-landed PR is could-not-measure") { r11[:end_kind] == :unmeasured }
+  check("the partial landing names the count") { r11[:unmeasured_reason].to_s.include?("1 of 2") }
+
+  # --- the states that already worked still do.
+  r12 = analyze(forge, 12, starts)
+  check("an OPEN PR still reads as open") { r12[:end_kind] == :open }
+  r13 = analyze(forge, 13, starts)
+  check("a MERGED PR still ends at mergedAt") { r13[:merged] == "2026-09-29T06:30:00Z" && r13[:end_kind] == :merge }
+  check("a MERGED PR names the forge merge") { r13[:landed_via] == "merge" }
+  check("no probe failed on a readable fixture") { !ProbeFailures.any? }
+
+  # --- a landing probe that cannot run is a probe failure, never "open".
+  ProbeFailures.reset!
+  cut_off = fresh_clone(o, root, "cut-off")
+  sh_git(cut_off, "remote", "set-url", "origin", File.join(root, "no-such-origin.git"))
+  rb = analyze(forge_over(o, views, dir: cut_off), 7, starts)
+  check("a landing probe whose fetch fails is recorded as a failed probe") { ProbeFailures.any? }
+  check("and the row does not read as open") { rb.nil? || rb[:end_kind] != :open }
+  check("and the row says it could not measure") { rb.nil? || rb[:end_kind] == :unmeasured }
+  ProbeFailures.reset!
+  broken_log = forge_over(o, views, dir: o[:work])
+  broken_log.define_singleton_method(:base_pushes) { |_b| ProbeFailures.record("gh api activity", "HTTP 502") }
+  rl = analyze(broken_log, 7, starts)
+  check("an unreadable activity log is a failed probe, not open") { ProbeFailures.any? && rl[:end_kind] == :unmeasured }
+  ProbeFailures.reset!
+
+  # --- the window scan sees closed PRs too.
+  scan_calls = []
+  listed = [{ "number" => 7, "mergedAt" => nil, "closedAt" => "2026-09-29T11:00:00Z", "state" => "CLOSED" },
+            { "number" => 13, "mergedAt" => "2026-09-29T06:30:00Z", "closedAt" => "2026-09-29T06:30:00Z",
+              "state" => "MERGED" }]
+  scanner = forge_over(o, views, scan_calls, list: listed)
+  ids = scanner.landing_candidates_since("2026-09-29T00:00:00Z")
+  list_cmd = scan_calls.find { |c| c[1] == "pr" && c[2] == "list" }
+  check("the window scan lists closed PRs, not only merged ones") do
+    list_cmd.include?("closed") && list_cmd.any? { |c| c.start_with?("updated:>=") }
+  end
+  check("the window scan returns a CLOSED candidate for the landing check") { ids.include?(7) && ids.include?(13) }
+
+  # --- the scan keeps a landing inside the window, drops one before it, and
+  #     counts the closed-unlanded rows instead of silently losing them.
+  window = -> { select_window([r7, r8, r13], "2026-09-29T07:00:00Z") }
+  check("a request closed inside the window is kept") { window.call[0].map { |r| r[:pr] } == [7] }
+  check("a closed-unlanded row is counted, not kept") { window.call[1] == 1 }
+  # r7 landed by push at 07:05 and closed at 11:00. A scan between the two
+  # could not list it; the next scan, from 08:00, must still keep it.
+  check("a push landing before the window whose close is inside it is kept") do
+    select_window([r7], "2026-09-29T08:00:00Z")[0].map { |r| r[:pr] } == [7]
+  end
+
+  # --- --slow keeps could-not-measure rows: they cannot be shown fast.
+  slow = slow_filter([r9, { pr: 99, lead_seconds: 60 }, r7], 90)
+  check("--slow keeps an outlier and a could-not-measure row, drops a fast one") do
+    slow.map { |r| r[:pr] } == [7, 9]
+  end
+
+  # --- the landing rules on their own (pure).
+  cls = LeadTime.classify_landing(pr_only: [], combined_pid: nil, main: [{ sha: "m", pid: "p", subject: "s" }])
+  check("no commit of its own and no diff match is could-not-measure, never closed") { cls[:status] == :unknown }
+  pushes = [{ at: "T1", after: "a1" }, { at: "T2", after: "a2" }, { at: "T3", after: "a3" }]
+  carries = ->(hits) { ->(_s, after) { hits.fetch(after) } }
+  check("the landing is the FIRST push that carries the commit") do
+    LeadTime.landing_push("s", pushes, carries.call("a1" => false, "a2" => true, "a3" => true)) == ["T2", nil]
+  end
+  check("an unreadable push before the carrier makes the time unprovable") do
+    at, why = LeadTime.landing_push("s", pushes, carries.call("a1" => nil, "a2" => true, "a3" => true))
+    at.nil? && why.include?("T1")
+  end
+  check("no carrying push is a reason, not a time") do
+    at, why = LeadTime.landing_push("s", pushes, carries.call("a1" => false, "a2" => false, "a3" => false))
+    at.nil? && why.include?("no push")
+  end
+
+  # --- presentation: could-not-measure and closed are named on the row.
+  out = capture_row(r9)
+  check("a could-not-measure row prints 'could not measure'") { out.include?("could not measure") }
+  check("a closed row prints via=closed") { capture_row(r8).include?("via=closed") }
+  check("a landed-by-push row prints its landing") do
+    capture_row(r7).include?("landed by push #{o[:p7_landed][0, 8]}") && !capture_row(r13).include?("landed by push")
+  end
+end
+
+# ---------------------------------------------------------------------------
+# DND-1318: the START is the ticket's move to In Progress (captain dispatch),
+# read from the DND Tickets "In Progress at" date. Owner decision, Cody,
+# 2026-09-30 ~04:05Z: lead time = captain dispatch -> landed on main.
+# ---------------------------------------------------------------------------
+
+# PR #129's shape (DND-1203): the captain was dispatched 02:41Z, squashed its
+# work into one commit authored 03:06:00Z, and the PR merged 03:27:17Z. The old
+# start (the earliest commit) read lead=21m 19s; the dispatch start reads 46m 17s.
+pr129 = { "number" => 129, "title" => "DND-1203: suite-reaper repro execs the real ruby",
+          "headRefName" => "dnd-1203-suite-reaper-worktree-time", "state" => "MERGED",
+          "mergedAt" => "2026-09-30T03:27:17Z", "closedAt" => "2026-09-30T03:27:17Z",
+          "baseRefName" => "main", "headRefOid" => "h129", "mergeCommit" => { "oid" => "m129" },
+          "commits" => [{ "authoredDate" => "2026-09-30T03:05:58Z", "committedDate" => "2026-09-30T03:05:58Z" }] }
+gh129 = GitHubForge.new(".")
+gh129.define_singleton_method(:run_json) do |cmd, _dir|
+  next [] if cmd[1] == "run"
+
+  pr129
+end
+
+ProbeFailures.reset!
+stamped = NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000Z")))
+r129 = analyze(gh129, 129, stamped)
+check("the start is the ticket's move to In Progress, not the squashed commit (DND-1318)") do
+  r129[:start] == "2026-09-30T02:41:00Z"
+end
+check("the lead runs from dispatch to landing: 46m 17s, not 21m 19s") { r129[:lead_seconds] == (46 * 60) + 17 }
+check("the row names its measured start") { r129[:start_source] == "DND-1203 In Progress at" }
+check("the earliest commit is still reported, as first_commit") { r129[:first_commit] == "2026-09-30T03:05:58Z" }
+check("the human row names the start source") { capture_row(r129).include?("start=DND-1203 In Progress at") }
+
+unstamped = NotionStart.new(FakeNotion.new(1203 => at_prop(nil)))
+ru = analyze(gh129, 129, unstamped)
+check("a ticket with no In Progress date has no lead (never the commit date)") { ru[:lead_seconds].nil? && ru[:start].nil? }
+check("and says it could not measure the start, naming the ticket") do
+  ru[:unmeasured_reason].to_s.include?("start") && ru[:unmeasured_reason].to_s.include?("DND-1203")
+end
+check("the unstamped row prints 'could not measure'") { capture_row(ru).include?("could not measure") }
+
+absent = NotionStart.new(FakeNotion.new(1203 => :absent))
+check("a database without the property says so") do
+  analyze(gh129, 129, absent)[:unmeasured_reason].to_s.include?("has no 'In Progress at' property")
+end
+missing = NotionStart.new(FakeNotion.new({}))
+check("a ticket that is not in the database says so") do
+  analyze(gh129, 129, missing)[:unmeasured_reason].to_s.include?("no DND-1203 in DND Tickets")
+end
+dateonly = NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30")))
+check("a date with no time is not a start") do
+  analyze(gh129, 129, dateonly)[:unmeasured_reason].to_s.include?("no time")
+end
+check("no Notion read failed on readable fixtures") { !ProbeFailures.any? }
+
+# --- which ticket a PR is: its branch, else its title; never a guess.
+check("the ticket comes from the branch") do
+  LeadTime.ticket_ref(branch: "dnd-1203-suite-reaper", title: "x") == ["DND-1203", nil]
+end
+check("else from the title") { LeadTime.ticket_ref(branch: "shipwright-docs", title: "DND-77: y") == ["DND-77", nil] }
+check("a PR naming no ticket has no start, and says so") do
+  ref, why = LeadTime.ticket_ref(branch: "harness-gate-jobs", title: "harness-gate: --jobs N")
+  ref.nil? && why.to_s.include?("names a ticket")
+end
+check("a branch naming two tickets is not a guess") do
+  ref, why = LeadTime.ticket_ref(branch: "dnd-1-and-dnd-2", title: "t")
+  ref.nil? && why.to_s.include?("DND-1") && why.to_s.include?("DND-2")
+end
+check("a word shaped like a ticket beside the real one is not a second ticket") do
+  LeadTime.ticket_ref(branch: "dnd-897-contract-resync-404", title: "t") == ["DND-897", nil] &&
+    LeadTime.ticket_ref(branch: "dnd-931-harness-ruby-34", title: "t") == ["DND-931", nil]
+end
+check("a branch naming only a non-DND word falls through to the title") do
+  LeadTime.ticket_ref(branch: "shipwright/admiral-500-stage1", title: "DND-77: x") == ["DND-77", nil]
+end
+check("a lone non-DND ref is named in the reason") do
+  ref, why = LeadTime.ticket_ref(branch: "athena/zq-2032-foo", title: "t")
+  ref.nil? && why.include?("ZQ-2032")
+end
+check("a cron lane branch names no ticket") do
+  LeadTime.ticket_ref(branch: "shipwright/run-20260930-1234", title: "shipwright: x")[0].nil?
+end
+check("the start query goes to DND Tickets by ID") do
+  fake = FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000Z"))
+  NotionStart.new(fake).lookup("DND-1203")
+  m, path, body = fake.calls.first
+  m == :post && path == "/v1/data_sources/#{NextMissionNotion::TICKETS_DATA_SOURCE}/query" &&
+    body.dig("filter", "property") == "ID"
+end
+check("a stamp with no UTC offset is not read as local time") do
+  _at, why = NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000"))).lookup("DND-1203")
+  why.to_s.include?("no UTC offset")
+end
+check("a non-date property is not a start") do
+  _at, why = NotionStart.new(FakeNotion.new(1203 => { "type" => "rich_text", "rich_text" => [] })).lookup("DND-1203")
+  why.to_s.include?("not a date")
+end
+late = NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30T04:00:00.000Z")))
+rlate = analyze(gh129, 129, late)
+check("a stamp after the landing is could-not-measure, never a negative lead") do
+  rlate[:lead_seconds].nil? && rlate[:code_seconds].nil? && rlate[:unmeasured_reason].to_s.include?("after the landing")
+end
+nondnd = NotionStart.new(FakeNotion.new({}))
+check("a ticket outside the DND database is could-not-measure") do
+  _at, why = nondnd.lookup("ZQ-12")
+  why.to_s.include?("ZQ-12") && nondnd.instance_variable_get(:@transport).calls.empty?
+end
+pr_none = pr129.merge("headRefName" => "harness-gate-jobs", "title" => "harness-gate: --jobs N")
+gh_none = GitHubForge.new(".")
+gh_none.define_singleton_method(:run_json) { |cmd, _d| cmd[1] == "run" ? [] : pr_none }
+check("a PR with no ticket reads could-not-measure, not a commit-date lead") do
+  r = analyze(gh_none, 129, stamped)
+  r[:lead_seconds].nil? && r[:unmeasured_reason].to_s.include?("names a ticket")
+end
+
+# --- a Notion read that cannot run is a failed probe (SCAN INCOMPLETE).
+ProbeFailures.reset!
+down = NotionStart.new(FakeNotion.new({}, "HTTP 502 on POST /v1/data_sources/x/query"))
+rd = analyze(gh129, 129, down)
+check("a Notion failure is a recorded probe failure") { ProbeFailures.any? }
+check("and the row has no lead") { rd[:lead_seconds].nil? }
+ProbeFailures.reset!
+notoken = NotionStart.new(nil, missing_reason: "no notion-personal token at /nowhere")
+analyze(gh129, 129, notoken)
+check("no Notion token is a recorded probe failure, not an empty answer") do
+  ProbeFailures.list.any? { |f| f[:detail].include?("no notion-personal token") }
+end
+ProbeFailures.reset!
+check("one lookup per ticket per run") do
+  fake = FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000Z"))
+  s = NotionStart.new(fake)
+  analyze(gh129, 129, s)
+  analyze(gh129, 129, s)
+  fake.calls.size == 1
+end
+
+# ---------------------------------------------------------------------------
+# DND-1341: a work-tracker ticket's start, through the private overlay's work
+# tracker. Every work value here is synthetic (prefix ZQ, a zero data source).
+# ---------------------------------------------------------------------------
+
+PR129 = pr129
+WORK_T = DispatchTrackers.work_from(
+  data_source: "0000aaaa-1111-2222-3333-444455556666", prefix: "ZQ", property: "Synthetic stamp",
+  first_dispatch_from: '["Todo","Backlog"]',
+).tracker
+
+# A work-tracker transport: ticket number -> its stamp (ISO or nil).
+class FakeWorkNotion
+  attr_reader :calls
+
+  def initialize(stamps)
+    @stamps = stamps
+    @calls = []
+  end
+
+  def call(method, path, body = nil)
+    @calls << [method, path, body]
+    n = body.dig("filter", "unique_id", "equals")
+    return { "results" => [] } unless @stamps.key?(n)
+
+    props = { "Synthetic stamp" => at_prop(@stamps[n]) }
+    { "results" => [{ "id" => "w-#{n}", "properties" => props }] }
+  end
+end
+
+def gh_pr(branch, title, base: PR129)
+  view = base.merge("headRefName" => branch, "title" => title)
+  gh = GitHubForge.new(".")
+  gh.define_singleton_method(:run_json) { |cmd, _d| cmd[1] == "run" ? [] : view }
+  gh
+end
+
+def starts_with(work_result, dnd: NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000Z"))))
+  asked = []
+  s = TicketStarts.new(dnd: dnd, work: lambda {
+    asked << 1
+    work_result
+  })
+  [s, asked]
+end
+
+ProbeFailures.reset!
+work_fake = FakeWorkNotion.new(2032 => "2026-09-30T02:00:00.000Z")
+ok_res = DispatchTrackers::Resolution.new(tracker: WORK_T, reason: nil, fault: false)
+ts, asked = starts_with([NotionStart.new(work_fake, tracker: WORK_T), ok_res])
+rw = analyze(gh_pr("athena/ZQ-2032-foo", "feat: x (ZQ-2032)"), 129, ts)
+check("a work ticket's start is its work-tracker stamp (DND-1341)") { rw[:start] == "2026-09-30T02:00:00Z" }
+check("its lead runs from that dispatch to the landing") do
+  rw[:lead_seconds] == Time.iso8601("2026-09-30T03:27:17Z") - Time.iso8601("2026-09-30T02:00:00Z")
+end
+check("the row names the overlay's property as its start source") { rw[:start_source] == "ZQ-2032 Synthetic stamp" }
+check("the start query goes to the overlay's work data source") do
+  m, path, body = work_fake.calls.first
+  m == :post && path == "/v1/data_sources/#{WORK_T.data_source}/query" && body.dig("filter", "unique_id", "equals") == 2032
+end
+check("a lower-case work branch still names the ticket") do
+  r = analyze(gh_pr("agent/zq-2032-move-floor", "t"), 129, ts)
+  r[:start_source] == "ZQ-2032 Synthetic stamp"
+end
+check("a work ticket that is not stamped is could-not-measure, naming the ticket and property") do
+  s2, = starts_with([NotionStart.new(FakeWorkNotion.new(7 => nil), tracker: WORK_T), ok_res])
+  r = analyze(gh_pr("athena/ZQ-7-x", "t"), 129, s2)
+  r[:lead_seconds].nil? && r[:unmeasured_reason].include?("ZQ-7") && r[:unmeasured_reason].include?("Synthetic stamp")
+end
+check("the overlay is resolved once per run, not per row") { asked.size == 1 }
+check("no probe failed on readable fixtures") { !ProbeFailures.any? }
+
+dnd_only, asked_dnd = starts_with(nil)
+rd2 = analyze(gh129, 129, dnd_only)
+check("a DND-only request never reads the overlay") { asked_dnd.empty? && rd2[:start] == "2026-09-30T02:41:00Z" }
+check("nor does a request that names no ticket at all") do
+  s3, a3 = starts_with(nil)
+  analyze(gh_pr("harness-gate-jobs", "harness-gate: --jobs N"), 129, s3)
+  a3.empty?
+end
+check("a ticket-shaped word that is neither tracker's does not displace the DND ticket") do
+  s4, = starts_with([NotionStart.new(work_fake, tracker: WORK_T), ok_res])
+  analyze(gh_pr("shipwright/admiral-500-stage1", "DND-1203: x"), 129, s4)[:start] == "2026-09-30T02:41:00Z"
+end
+check("a branch naming a DND and a work ticket is not a guess") do
+  s5, = starts_with([NotionStart.new(work_fake, tracker: WORK_T), ok_res])
+  r = analyze(gh_pr("dnd-1203-zq-2032", "t"), 129, s5)
+  r[:lead_seconds].nil? && r[:unmeasured_reason].include?("several")
+end
+
+ProbeFailures.reset!
+absent_res = DispatchTrackers::Resolution.new(
+  tracker: nil, fault: false,
+  reason: "private-overlay: ABSENT: key=notion.work.tickets_data_source probed=/nowhere. Fix: unavailable here",
+)
+s6, = starts_with([nil, absent_res])
+ra = analyze(gh_pr("athena/ZQ-2032-foo", "t"), 129, s6)
+check("with no overlay a work ticket is could-not-measure, carrying the overlay's line") do
+  ra[:lead_seconds].nil? && ra[:unmeasured_reason].include?("work tracker is unavailable") &&
+    ra[:unmeasured_reason].include?("ABSENT") && ra[:unmeasured_reason].include?("ZQ-2032")
+end
+check("an absent overlay is this machine's state, not a failed probe") { !ProbeFailures.any? }
+
+ProbeFailures.reset!
+fault_res = DispatchTrackers::Resolution.new(
+  tracker: nil, fault: true,
+  reason: "private-overlay: KEY_NOT_FOUND: key=notion.work.ticket_prefix root=/r. Fix: add it",
+)
+s7, = starts_with([nil, fault_res])
+analyze(gh_pr("athena/ZQ-2032-foo", "t"), 129, s7)
+analyze(gh_pr("athena/ZQ-2033-bar", "t"), 129, s7)
+check("a present overlay missing a key is a failed probe (SCAN INCOMPLETE), recorded once") do
+  ProbeFailures.list.count { |f| f[:cmd] == "private-overlay work tracker" } == 1 &&
+    ProbeFailures.list.first[:detail].include?(".work.ticket_prefix")
+end
+
+ProbeFailures.reset!
+s7b, = starts_with([nil, fault_res])
+rn = analyze(gh_pr("fix-utf-8-decoding", "t"), 129, s7b)
+check("a noise word with a broken overlay is a failed probe, and the row says why (never a silent no-ticket)") do
+  ProbeFailures.list.any? { |f| f[:cmd] == "private-overlay work tracker" } &&
+    rn[:unmeasured_reason].include?("work tracker is unavailable")
+end
+
+ProbeFailures.reset!
+nowork_token = NotionStart.new(nil, tracker: WORK_T, missing_reason: "no Notion token for the work tracker at /x/notion-api-token")
+s8, = starts_with([nowork_token, ok_res])
+analyze(gh_pr("athena/ZQ-2032-foo", "t"), 129, s8)
+check("no work token is a failed probe naming the work tracker") do
+  ProbeFailures.list.any? { |f| f[:cmd].include?("the work tracker") && f[:detail].include?("notion-api-token") }
+end
+ProbeFailures.reset!
+
+if $failures.empty?
+  puts "lead_time_test: PASS (#{$checks} checks)"
+  exit 0
+end
+warn "lead_time_test: FAIL (#{$failures.size} of #{$checks})"
+$failures.each { |f| warn "  - #{f}" }
+warn "Fix: make ai/bin/lead-time judge a CLOSED GitHub PR's landing by its change " \
+     "(patch-id) on the base branch, timed by the push that carried it; a PR it cannot " \
+     "place must read 'could not measure', and a closed-unlanded one 'closed', never 'open'."
+exit 1

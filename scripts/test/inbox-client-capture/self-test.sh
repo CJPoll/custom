@@ -75,9 +75,13 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-command -v ruby >/dev/null 2>&1 || {
-  echo "VERDICT: FAIL — ruby is not on PATH; the mock client is ruby so the identity check is the real one."
-  echo "  Fix: put a ruby on PATH (the harness gate itself needs one)."
+# The mock client's interpreter: /usr/bin/ruby (DND-931/958, DND-1340), never a
+# `ruby` found through PATH. REPRO_RUBY is the one seam: the suite-reaper repro
+# (scripts/test/suite-reaper/repro-real-suites.sh) sets it to its trigger shim.
+MOCK_RUBY="${REPRO_RUBY:-/usr/bin/ruby}"
+[ -x "${MOCK_RUBY}" ] || {
+  echo "VERDICT: FAIL — ${MOCK_RUBY} is not executable; the mock client is ruby so the identity check is the real one."
+  echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958; the harness gate itself needs it), or unset REPRO_RUBY."
   exit 1
 }
 
@@ -123,7 +127,7 @@ start_mock() {
   rm -f "${ready}"
   env MOCK_DUMP_DIR="${DUMPS}" MOCK_LOG="${LOG}" MOCK_READY="${ready}" \
       MOCK_TERM_FILE="${TMP}/${name}.term" MOCK_TOKEN="${TOKEN}" "$@" \
-      ruby "${MOCK}" >/dev/null 2>&1 &
+      "${MOCK_RUBY}" "${MOCK}" >/dev/null 2>&1 &
   PIDS+=("$!")
   MOCK_PID=""
   wait_file "${ready}" 100 || { echo "mock ${name} never became ready" >&2; return 1; }
@@ -231,7 +235,7 @@ printf '%s\n' '# a pre-LV-1 client: no QUIT handler, so Ruby'"'"'s default would
   'File.write(ENV["MOCK_READY"], Process.pid.to_s)' 'sleep' > "${TMP}/old/athena-inbox-client.rb"
 touch -d '@1' "${TMP}/old/athena-inbox-client.rb"
 rm -f "${TMP}/old.ready"
-MOCK_READY="${TMP}/old.ready" ruby "${TMP}/old/athena-inbox-client.rb" >/dev/null 2>&1 &
+MOCK_READY="${TMP}/old.ready" "${MOCK_RUBY}" "${TMP}/old/athena-inbox-client.rb" >/dev/null 2>&1 &
 PIDS+=("$!")
 wait_file "${TMP}/old.ready" 100; OLD="$(cat "${TMP}/old.ready")"; PIDS+=("${OLD}")
 out="$(ATHENA_INBOX_CAPTURE_DUMP_WAIT=1 "${CAPTURE}" "${OLD}" 2>&1)"; rc=$?
@@ -247,7 +251,7 @@ cp "${MOCK}" "${TMP}/old/changed-athena-inbox-client.rb"
 touch -d '@1' "${TMP}/old/changed-athena-inbox-client.rb"
 rm -f "${TMP}/chg.ready"
 env MOCK_DUMP_DIR="${DUMPS}" MOCK_LOG="${LOG}" MOCK_READY="${TMP}/chg.ready" MOCK_TERM_FILE="${TMP}/chg.term" \
-  ruby "${TMP}/old/changed-athena-inbox-client.rb" >/dev/null 2>&1 &
+  "${MOCK_RUBY}" "${TMP}/old/changed-athena-inbox-client.rb" >/dev/null 2>&1 &
 PIDS+=("$!")
 wait_file "${TMP}/chg.ready" 100; CHG="$(cat "${TMP}/chg.ready")"; PIDS+=("${CHG}")
 touch "${TMP}/old/changed-athena-inbox-client.rb"
@@ -357,7 +361,7 @@ if [ "${rc}" -eq 1 ] && grep -q 'Fix:' <<<"${out}"; then ok "HARD_MAX below KEEP
 printf '\nC-5  identity: the supervisor'"'"'s ONE child, and exit 3 is distinct\n'
 PF="${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.pid"
 # A fake supervisor whose single child is the mock client.
-bash -c 'env MOCK_DUMP_DIR="$1" MOCK_LOG="$2" MOCK_READY="$3" MOCK_TERM_FILE="$4" MOCK_MODE=dump ruby "$5" & wait' _ \
+bash -c 'env MOCK_DUMP_DIR="$1" MOCK_LOG="$2" MOCK_READY="$3" MOCK_TERM_FILE="$4" MOCK_MODE=dump "${REPRO_RUBY:-/usr/bin/ruby}" "$5" & wait' _ \
   "${DUMPS}" "${LOG}" "${TMP}/sup.ready" "${TMP}/sup.term" "${MOCK}" >/dev/null 2>&1 &
 SUP=$!; PIDS+=("${SUP}")
 wait_file "${TMP}/sup.ready" 100
@@ -443,7 +447,7 @@ cat >"${FAKE_SUITE}" <<'FAKE'
 #!/usr/bin/env bash
 set -uo pipefail
 env MOCK_DUMP_DIR="$1" MOCK_LOG="$2" MOCK_READY="$3" MOCK_TERM_FILE="$4" MOCK_TOKEN="$5" MOCK_MODE=dump \
-    ruby "$6" >/dev/null 2>&1 &
+    "${REPRO_RUBY:-/usr/bin/ruby}" "$6" >/dev/null 2>&1 &
 wait
 FAKE
 chmod +x "${FAKE_SUITE}"

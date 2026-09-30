@@ -2,47 +2,60 @@
 # frozen_string_literal: true
 
 # ticket-classify -- the Jev-advised Kind, Severity and Security of a ticket
-# about to be filed (DND-1054). Normative home:
-# ~/dev/custom/ai/contracts/athena-judgments.md -> *Ticket classification: the
-# harness script*. The server is gen_saas Athena.Judgments.TicketClassification
-# (POST /api/v1/judgments/ticket_classification, DND-991), which applies the
-# policy and returns the DECIDED values. The procedure that runs it is
-# athena:ticket-management -> *Filing a ticket* (the Classify bullet).
+# about to be filed (DND-1054), and for a finding its Path and Blocks edge
+# (DND-1057). Normative home: ~/dev/custom/ai/contracts/athena-judgments.md
+# -> *Ticket classification: the harness script*. The servers are gen_saas
+# Athena.Judgments.TicketClassification (POST
+# /api/v1/judgments/ticket_classification, DND-991) and
+# Athena.Judgments.TicketBlocking (POST /api/v1/judgments/ticket_blocking,
+# DND-1057), which apply the policy and return the DECIDED values. The
+# procedure that runs it is athena:ticket-management -> *Filing a ticket*
+# (the Classify bullet).
 #
-# ADVISORY ONLY. This script has no tracker client: it reads no ticket and
-# writes nothing anywhere but the server's own call records. The filer sets
-# the properties. It adds no policy of its own; it prints what the server
-# decided, or, when the server cannot be used, the filer's own values under a
-# heading that says so.
+# ADVISORY ONLY. It writes nothing anywhere but the server's own call
+# records; the filer sets the properties and wires the edge. Its only tracker
+# access is --epic's candidate read, through the read-only
+# ai/lib/notion_read.rb (a data source query, block lists and one page
+# read; any other request is refused before it is sent). It adds no policy of
+# its own; it prints what the server decided, or, when a server cannot be
+# used, the filer's own values under a heading that says so.
 #
-# Buckets: DOMAIN (pure: filer checks, the request body, reading and rendering
-# the answer), EFFECTS (the body file; the Athena server through
-# ../lib/athena_server.rb), MANAGER (validate, post, render) and FRAMEWORK
-# (argv).
+# Buckets: DOMAIN (pure: ../lib/classify.rb and ../lib/blocking.rb), EFFECTS
+# (the body file; Notion through ai/lib/notion_read.rb; the Athena server
+# through ../lib/athena_server.rb), MANAGER (validate, read, post, render)
+# and FRAMEWORK (argv).
 #
-# THE TOKEN NEVER TOUCHES ARGV OR THE ENVIRONMENT: athena_server.rb writes it
-# into a curl config that curl reads on STDIN. No token is ever printed.
+# NO TOKEN TOUCHES ARGV OR THE ENVIRONMENT: athena_server.rb and
+# notion_read.rb write each into a curl config that curl reads on STDIN. No
+# token is ever printed.
 #
 # Deliberately gem-free (stdlib only).
 
 require "json"
 require_relative "../../../lib/strict_argv"
+require_relative "../../../lib/notion_read"
 require_relative "../lib/athena_server"
+require_relative "../lib/classify"
+require_relative "../lib/blocking"
 
 PROG = "ticket-classify"
 UNAVAILABLE_FIX = "Fix: file the ticket as today; this is advisory."
 ENDPOINT = "/api/v1/judgments/ticket_classification"
+BLOCKING_ENDPOINT = "/api/v1/judgments/ticket_blocking"
+TICKETS_DATA_SOURCE = "219349da-87fb-8063-8f36-000b362fbd60"
+EPICS_DATA_SOURCE = "f4231817-18f3-4c2d-ac5b-b1151a5bb020"
 
 USAGE = <<~EOF
   Usage: ticket-classify --title T --body-file F --project P
                          --kind K --severity S --security X
                          [--ref DND-N] [--json]
+         ticket-classify ... --epic EPIC_PAGE_ID [--found-while DND-N] [--blocks DND-N]
          ticket-classify --help
 
-  The Jev-advised classification of a ticket about to be filed (DND-1054).
-  You pass the values you would file; the server decides by policy and this
-  prints the DECIDED values. ADVISORY ONLY: it reads no tracker and writes
-  nothing. You set the properties.
+  The Jev-advised classification of a ticket about to be filed (DND-1054),
+  and for a finding its Path (DND-1057). You pass the values you would file;
+  the server decides by policy and this prints the DECIDED values. ADVISORY
+  ONLY: it writes nothing. You set the properties and wire the edge.
 
     --title T        the ticket's title (at most 300 characters are sent)
     --body-file F    a file holding the ticket's body. Only this path is read;
@@ -56,9 +69,19 @@ USAGE = <<~EOF
                      only with --kind Feature (a Feature has no Severity)
     --security X     your Security: none, introduced or pre-existing
     --ref DND-N      an existing ticket's id (a reclassification); omit it
-                     for a new filing
-    --json           on exit 0, print the server's result as JSON instead of
-                     lines (exit 2 and 3 print as without it)
+                     for a new filing. Not with --epic.
+    --json           on exit 0, print the classification server's result as
+                     JSON instead of lines. Not with --epic.
+
+  For a finding (any Kind but Feature; a Feature's Path is authored):
+    --epic ID        the epic's Notion page id. Its open tickets with Path
+                     Critical are read (read-only), by ID ascending, at most
+                     #{Blocking::MAX_CANDIDATES}, each with the first #{Blocking::MAX_SUMMARY} characters of its body,
+                     and the server decides Path and Blocks.
+    --found-while DND-N  the ticket you were working on. With --security
+                     introduced it is blocked by rule, never judged.
+    --blocks DND-N   the Critical ticket you believe this finding blocks. It
+                     must be one of the candidates (else usage, exit 2).
 
   Output (stdout), exit 0 -- the server's decision, one line per property,
   then its provenance line verbatim (paste that into the ticket body):
@@ -66,14 +89,24 @@ USAGE = <<~EOF
     Severity: MEDIUM (filer: mode_off)
     Security: none (filer: mode_off)
     Jev classification: {...}
-  The parenthesis is the value's source: `jev <confidence>`, `filer: <reason>`
-  or `policy: <reason>`. With every mode off (the shipped state) each is your
-  own value with `filer: mode_off`, except: a Feature's severity is
-  `(none: Feature) (filer: feature)`; a Vulnerability filed with Security
-  none is decided `pre-existing (policy: vulnerability_floor)`; and an
-  unknown project reads `filer: domain_not_permitted`.
+  With --epic, then the candidate count (0 included), Path and Blocks with
+  their source, and the path provenance line verbatim (paste it too):
+    3 candidates considered (epic <title>, open Critical)
+    Path: Blocking (filer: mode_off)
+    Blocks: DND-717
+    Jev path: {...}
+  Set Path, and wire Depends On <-> Blocks onto exactly the printed ticket
+  (`Blocks: none` wires no edge onto a Critical ticket).
+  The parenthesis is the value's source: `jev <confidence>`, `filer: <reason>`,
+  `policy: <reason>` or `rule: introduced_security`. With every mode off (the
+  shipped state) each is your own value with `filer: mode_off`, except: a
+  Feature's severity is `(none: Feature) (filer: feature)`; a Vulnerability
+  filed with Security none is decided `pre-existing (policy:
+  vulnerability_floor)`; an unknown project reads `filer: domain_not_permitted`;
+  an epic with no open Critical ticket reads `filer: no_candidates`; and
+  --security introduced with --found-while blocks that ticket by rule.
 
-  Output, exit 3 -- the classification is unavailable. One line ending
+  Output, exit 3 -- a part is unavailable. One line ending
   "#{UNAVAILABLE_FIX}", then your own values:
       "COULD NOT REACH SERVER: <why>. #{UNAVAILABLE_FIX}"
       "SERVER REFUSED THE REQUEST: HTTP <status> <error>: <server fix>. #{UNAVAILABLE_FIX}"
@@ -84,20 +117,30 @@ USAGE = <<~EOF
     Kind: Bug
     Severity: MEDIUM
     Security: none
+  For the Path part the same lines start "PATH UNAVAILABLE: ", or
+      "CANDIDATES UNAVAILABLE: <why>. #{UNAVAILABLE_FIX}"   (the Notion read failed)
+  and are followed by
+    Decided (filer; path unavailable):
+    Path: Blocking
+    Blocks: DND-717
+  The classification part still prints whatever the Path part does.
 
   Exit codes:
-    0  decided (whatever each property's source)
-    2  usage
-    3  unavailable; file the ticket with your own values
+    0  decided (whatever each value's source)
+    2  usage (nothing was sent)
+    3  a part is unavailable; file that part with your own values
 
   The Athena server URL is the origin of the `athena` MCP entry in
   ~/.claude.json and its token is read from
   ~/.config/athena-inbox-client/config.json, fed to curl on stdin, never
-  argv. Environment (optional): ATHENA_INBOX_CLIENT_CONFIG, FLEET_CLAUDE_JSON,
-  TICKET_CLASSIFY_MAX_TIME_S (per request, default 60).
+  argv. The Notion token is the file the notion-personal MCP entry names.
+  Environment (optional): ATHENA_INBOX_CLIENT_CONFIG, FLEET_CLAUDE_JSON,
+  TICKET_CLASSIFY_MAX_TIME_S (per request, default 60),
+  TICKET_CLASSIFY_NOTION_API (a loopback URL, for tests),
+  TICKET_CLASSIFY_PACE_S (seconds between Notion reads, default 0.34).
 EOF
 
-# A failure that ends the run: exit `code`, printing `line` (stdout for the
+# A failure that ends a part: exit `code`, printing `line` (stdout for the
 # unavailable lines a filer pastes, stderr for usage).
 class Failure < StandardError
   attr_reader :code, :stream
@@ -126,149 +169,16 @@ def unreadable!(what)
   raise Failure.new(3, "UNREADABLE SERVER ANSWER: HTTP 200 #{what}. #{UNAVAILABLE_FIX}")
 end
 
+def candidates_unavailable!(why)
+  raise Failure.new(3, "CANDIDATES UNAVAILABLE: #{why}. #{UNAVAILABLE_FIX}")
+end
+
 # ── DOMAIN (pure) ────────────────────────────────────────────────────────────
 
-module Classify
-  module_function
-
-  # The tracker's values (athena:ticket-management -> *Ticket properties*),
-  # in its spelling. The server's input schema holds the same sets.
-  KINDS = %w[Feature Bug Vulnerability Hardening Refactor Test Flake Docs Ops].freeze
-  SEVERITIES = %w[LOW MEDIUM HIGH CRITICAL].freeze
-  SECURITIES = %w[none introduced pre-existing].freeze
-  SOURCES = %w[jev filer policy].freeze
-  PROPERTIES = { "kind" => "Kind", "severity" => "Severity", "security" => "Security" }.freeze
-  PROJECT = /\A[a-z0-9_]{1,32}\z/
-  REF = /\A[A-Z]+-[0-9]+\z/
-  REASON = /\A[a-z0-9_]{1,64}\z/
-  PREFIX = "Jev classification: "
-  MAX_TITLE = 300
-  MAX_BODY = 2_000
-  NO_SEVERITY = "(none: Feature)"
-
-  # filer_error(filer) -> [what, fix] when the filer's three values cannot be
-  # sent, or nil.
-  def filer_error(filer)
-    kind, severity, security = filer.values_at(:kind, :severity, :security)
-    severities = "pass one of #{SEVERITIES.join(', ')} (tracker spelling), or none with --kind Feature"
-    return ["--kind #{kind} is not a Kind", "pass one of #{KINDS.join(', ')}"] unless KINDS.include?(kind)
-    return ["--security #{security} is not a Security value", "pass one of #{SECURITIES.join(', ')}"] unless SECURITIES.include?(security)
-    return ["--kind Feature takes --severity none (a Feature has no Severity)", "pass --severity none"] if kind == "Feature" && severity != "none"
-    return ["--severity none is only for --kind Feature", severities] if kind != "Feature" && severity == "none"
-    return ["--severity #{severity} is not a Severity", severities] unless severity == "none" || SEVERITIES.include?(severity)
-
-    nil
-  end
-
-  # blank?(text) -> true for "" and Unicode whitespace only. The server trims
-  # Unicode whitespace (String.trim), so an ASCII-only strip would send a
-  # title it refuses. Zero-width characters are not whitespace to either side.
-  def blank?(text)
-    text.to_s.gsub(/[[:space:]]/, "").empty?
-  end
-
-  # length(text) -> the length the server measures: grapheme clusters, as
-  # Elixir's String.length counts them.
-  def length(text)
-    text.grapheme_clusters.size
-  end
-
-  # truncate(text, max) -> at most max grapheme clusters, never a split one.
-  def truncate(text, max)
-    length(text) > max ? text.grapheme_clusters.first(max).join : text
-  end
-
-  # request_body(...) -> the closed body the server's schema accepts: the
-  # ticket (ref only when given) and the filer's values (`none` severity is
-  # null). Nothing else, and no identity field: the owner is the token's.
-  def request_body(title, body, project, ref, filer)
-    ticket = { "title" => truncate(title, MAX_TITLE), "body" => truncate(body, MAX_BODY), "project" => project }
-    ticket["ref"] = ref if ref
-    severity = filer[:severity] == "none" ? nil : filer[:severity]
-    { "ticket" => ticket, "filer" => { "kind" => filer[:kind], "severity" => severity, "security" => filer[:security] } }
-  end
-
-  # parse_result(doc, filer) -> doc, when it is the contract's judged shape
-  # for this filer; raises ArgumentError naming the first field at fault
-  # (never its value).
-  def parse_result(doc, filer)
-    raise ArgumentError, "is not a JSON object" unless doc.is_a?(Hash)
-    raise ArgumentError, "status is not \"judged\"" unless doc["status"] == "judged"
-
-    props = doc["properties"]
-    raise ArgumentError, "properties is missing or not an object" unless props.is_a?(Hash)
-
-    PROPERTIES.each_key { |name| check_property(name, props[name]) }
-    check_decided(props, filer)
-    line = doc["provenance_line"]
-    unless line.is_a?(String) && line.start_with?(PREFIX) && !/[[:cntrl:]]/.match?(line)
-      raise ArgumentError, "provenance_line is missing, lacks the \"#{PREFIX}\" prefix, or holds a control character"
-    end
-
-    doc
-  end
-
-  def check_property(name, prop)
-    where = "properties.#{name}"
-    raise ArgumentError, "#{where} is missing or not an object" unless prop.is_a?(Hash)
-    raise ArgumentError, "#{where}.source is not jev, filer or policy" unless SOURCES.include?(prop["source"])
-    raise ArgumentError, "#{where}.reason is not an identifier" unless prop["reason"].nil? || (prop["reason"].is_a?(String) && REASON.match?(prop["reason"]))
-
-    judged = prop["judged"]
-    return if judged.nil? || (judged.is_a?(Hash) && judged["confidence"].is_a?(Numeric))
-
-    raise ArgumentError, "#{where}.judged has no numeric confidence"
-  end
-
-  # The decided values must be the tracker's. Feature is authored: it is
-  # decided exactly when the filer sent it, and only a Feature has an empty
-  # severity. An empty value is never read as a decision.
-  def check_decided(props, filer)
-    kind = props["kind"]["decided"]
-    raise ArgumentError, "properties.kind.decided is not one of the tracker's values" unless KINDS.include?(kind)
-    raise ArgumentError, "properties.security.decided is not one of the tracker's values" unless SECURITIES.include?(props["security"]["decided"])
-    if (kind == "Feature") != (filer[:kind] == "Feature")
-      raise ArgumentError, "properties.kind.decided assigns or replaces Feature, which the policy never does"
-    end
-
-    severity = props["severity"]["decided"]
-    if kind == "Feature"
-      raise ArgumentError, "properties.severity.decided is set but the decided kind is Feature" unless severity.nil?
-    elsif severity.nil?
-      raise ArgumentError, "properties.severity.decided is empty but the decided kind is not Feature"
-    elsif !SEVERITIES.include?(severity)
-      raise ArgumentError, "properties.severity.decided is not one of the tracker's values"
-    end
-  end
-
-  # decision_lines(result) -> one line per property with its source, then the
-  # provenance line verbatim.
-  def decision_lines(result)
-    props = result["properties"]
-    PROPERTIES.map { |name, label| "#{label}: #{shown(props[name]['decided'])} (#{source_note(props[name])})" } +
-      [result["provenance_line"]]
-  end
-
-  def shown(value)
-    value.nil? ? NO_SEVERITY : value
-  end
-
-  def source_note(prop)
-    if prop["source"] == "jev"
-      confidence = prop.dig("judged", "confidence")
-      confidence.is_a?(Numeric) ? format("jev %.2f", confidence) : "jev"
-    else
-      prop["reason"] ? "#{prop['source']}: #{prop['reason']}" : prop["source"]
-    end
-  end
-
-  # fallback_lines(filer) -> the filer's own values under a heading that says
-  # the classification was unavailable (never a provenance line).
-  def fallback_lines(filer)
-    severity = filer[:severity] == "none" ? NO_SEVERITY : filer[:severity]
-    ["Decided (filer; classification unavailable):", "Kind: #{filer[:kind]}", "Severity: #{severity}", "Security: #{filer[:security]}"]
-  end
-end
+# Classify (the value sets, filer checks, request body, answer check and
+# rendering) lives in ../lib/classify.rb, shared with ticket-reclassify.
+# Blocking (candidate choice, summaries, the blocking request, answer check
+# and rendering) lives in ../lib/blocking.rb.
 
 # ── EFFECTS ──────────────────────────────────────────────────────────────────
 
@@ -281,15 +191,58 @@ module Effects
     File.read(path, encoding: "UTF-8").scrub
   end
 
-  # post(body) -> {curl_rc:, status:, body:}, or server_unreachable!.
-  def post(body)
+  # post(path, body) -> {curl_rc:, status:, body:}, or server_unreachable!.
+  def post(path, body)
     origin, token = AthenaServer.endpoint
-    AthenaServer.post_json(origin, token, ENDPOINT, body, max_time: AthenaServer.max_time("TICKET_CLASSIFY_MAX_TIME_S"))
+    AthenaServer.post_json(origin, token, path, body, max_time: AthenaServer.max_time("TICKET_CLASSIFY_MAX_TIME_S"))
   rescue AthenaServer::Unreachable => e
     server_unreachable!(e.message)
   rescue AthenaServer::UnsafeValue => e
     # Nothing was sent: the server cannot be used with this configuration.
     server_unreachable!(e.message)
+  end
+
+  def pace
+    value = ENV["TICKET_CLASSIFY_PACE_S"].to_s
+    /\A\d{1,2}(\.\d{1,3})?\z/.match?(value) ? value.to_f : 0.34
+  end
+
+  # epic_candidates(epic_id) -> {chosen: [{ref, page_id, title, summary}],
+  # open:, epic_title:}, read only through NotionRead; or
+  # candidates_unavailable! naming what failed. Never an empty list for a
+  # failed read.
+  def epic_candidates(epic_id)
+    origin, token = NotionRead.credentials(ENV["TICKET_CLASSIFY_NOTION_API"])
+    epic_title = verified_epic_title(origin, token, epic_id)
+
+    rows = NotionRead.query_all(origin, token, TICKETS_DATA_SOURCE, pace: pace, filter: Blocking.query_filter(epic_id)["filter"])
+    chosen = Blocking.candidates(rows)
+    with_summaries = chosen[:chosen].map do |c|
+      page = NotionRead.read(origin, token, "GET", "/v1/blocks/#{c[:page_id]}/children?page_size=100", pace: pace)
+      candidates_unavailable!("the block list of #{c[:ref]} has no results array") unless page.is_a?(Hash) && page["results"].is_a?(Array)
+
+      c.merge(summary: Blocking.summary(page["results"]))
+    end
+    { chosen: with_summaries, open: chosen[:open], epic_title: epic_title }
+  rescue NotionRead::Error => e
+    candidates_unavailable!("#{e.message} (#{e.fix.sub(/\.\z/, '')})")
+  rescue ArgumentError => e
+    candidates_unavailable!("a tracker row could not be read: #{e.message}")
+  rescue Failure
+    raise
+  rescue StandardError => e
+    candidates_unavailable!("an unexpected #{e.class} reading the candidates")
+  end
+
+  # The epic page must be a live page of DND Epics: a wrong id would
+  # otherwise read as an epic with 0 candidates.
+  def verified_epic_title(origin, token, epic_id)
+    page = NotionRead.page(origin, token, epic_id, pace: pace)
+    begin
+      Blocking.epic_title(page, EPICS_DATA_SOURCE)
+    rescue ArgumentError => e
+      candidates_unavailable!(e.message)
+    end
   end
 end
 
@@ -302,14 +255,14 @@ module Manager
     body = Effects.read_body_file(opts[:body_file])
     note_truncation(err, "--title", opts[:title], Classify::MAX_TITLE)
     note_truncation(err, "--body-file", body, Classify::MAX_BODY)
-    request = Classify.request_body(opts[:title], body, opts[:project], opts[:ref], opts[:filer])
-    result = classify(Effects.post(request), opts[:filer])
-    if opts[:json]
-      out.puts JSON.generate(result)
-    else
-      Classify.decision_lines(result).each { |line| out.puts line }
-    end
-    0
+    path_part = opts[:epic] && opts[:filer][:kind] != "Feature"
+    err.puts "#{PROG}: note: --epic is ignored for a Feature; its Path is authored, never judged" if opts[:epic] && !path_part
+    # Candidates are read BEFORE anything is sent, so a --blocks outside
+    # them is a usage error with nothing sent.
+    candidates = path_part ? read_candidates(opts) : nil
+    codes = [classification(opts, body, out)]
+    codes << path(opts, body, candidates, out) if path_part
+    codes.max
   end
 
   def note_truncation(err, flag, text, max)
@@ -319,9 +272,76 @@ module Manager
     err.puts "#{PROG}: note: #{flag} is #{size} characters; the first #{max} were sent [truncated]"
   end
 
-  # classify(reply, filer) -> the judged result, or raises the unavailable
-  # Failure.
-  def classify(reply, filer)
+  # read_candidates(opts) -> the epic's candidates, or {unavailable: line}.
+  # Raises the usage Failure when --blocks names none of them.
+  def read_candidates(opts)
+    found = Effects.epic_candidates(opts[:epic])
+    claimed = opts[:claimed_blocks]
+    refs = found[:chosen].map { |c| c[:ref] }
+    if claimed && !refs.include?(claimed)
+      usage!("--blocks #{claimed} is not one of the epic's open Critical tickets considered (#{refs.empty? ? 'none' : refs.join(', ')})",
+             "name one of them, or omit --blocks (a finding blocks only a planned Critical ticket of its epic)")
+    end
+    found
+  rescue Failure => e
+    raise unless e.code == 3
+
+    { unavailable: e.message }
+  end
+
+  # classification(opts, body, out) -> 0 or 3, having printed the decision or
+  # the unavailable line and the filer's values.
+  def classification(opts, body, out)
+    request = Classify.request_body(opts[:title], body, opts[:project], opts[:ref], opts[:filer])
+    result = Classify.parse_result(answer(Effects.post(ENDPOINT, request), "ticket_classification", "DND-991"), opts[:filer])
+    opts[:json] ? out.puts(JSON.generate(result)) : Classify.decision_lines(result).each { |line| out.puts line }
+    0
+  rescue ArgumentError => e
+    unavailable(out, "UNREADABLE SERVER ANSWER: HTTP 200 but #{e.message}. #{UNAVAILABLE_FIX}", Classify.fallback_lines(opts[:filer]))
+  rescue Failure => e
+    raise unless e.code == 3
+
+    unavailable(out, e.message, Classify.fallback_lines(opts[:filer]))
+  rescue StandardError => e
+    unavailable(out, "#{PROG}: UNEXPECTED ERROR: #{e.class}. #{UNAVAILABLE_FIX}", Classify.fallback_lines(opts[:filer]))
+  end
+
+  # path(opts, body, candidates, out) -> 0 or 3, having printed the count,
+  # the decided Path and Blocks and the path provenance line, or the
+  # unavailable line and the filer's Path.
+  def path(opts, body, candidates, out)
+    filer = path_filer(opts)
+    return unavailable(out, candidates[:unavailable], Blocking.fallback_lines(filer)) if candidates[:unavailable]
+
+    out.puts Blocking.considered_line(candidates[:chosen], candidates[:open], candidates[:epic_title])
+    request = Blocking.request_body(opts[:title], body, opts[:project], candidates[:chosen], filer)
+    refs = candidates[:chosen].map { |c| c[:ref] }
+    result = Blocking.parse_result(answer(Effects.post(BLOCKING_ENDPOINT, request), "ticket_blocking", "DND-1057"), refs, filer)
+    Blocking.decision_lines(result).each { |line| out.puts line }
+    0
+  rescue ArgumentError => e
+    unavailable(out, "PATH UNAVAILABLE: UNREADABLE SERVER ANSWER: HTTP 200 but #{e.message}. #{UNAVAILABLE_FIX}", Blocking.fallback_lines(filer))
+  rescue Failure => e
+    raise unless e.code == 3
+
+    unavailable(out, "PATH UNAVAILABLE: #{e.message}", Blocking.fallback_lines(filer))
+  rescue StandardError => e
+    unavailable(out, "PATH UNAVAILABLE: #{PROG}: UNEXPECTED ERROR: #{e.class}. #{UNAVAILABLE_FIX}", Blocking.fallback_lines(filer))
+  end
+
+  def path_filer(opts)
+    { security: opts[:filer][:security], found_while: opts[:found_while], claimed_blocks: opts[:claimed_blocks] }
+  end
+
+  def unavailable(out, line, fallback)
+    out.puts line
+    fallback.each { |l| out.puts l }
+    3
+  end
+
+  # answer(reply, use_case, ticket) -> the parsed 200 body, or raises the
+  # unavailable Failure naming why.
+  def answer(reply, use_case, ticket)
     server_unreachable!("curl exit #{reply[:curl_rc]} reaching the Athena server") if reply[:curl_rc] != 0
 
     doc = begin
@@ -332,16 +352,12 @@ module Manager
     status = reply[:status]
     if status == 200
       unreadable!("with a body that is not JSON") if doc == :not_json
-      begin
-        return Classify.parse_result(doc, filer)
-      rescue ArgumentError => e
-        unreadable!("but #{e.message}")
-      end
+      return doc
     end
     error = doc.is_a?(Hash) && doc["error"].is_a?(String) ? safe_reason(doc["error"]) : nil
     # A 4xx means the server was reached and refused: never "could not reach".
     server_refused!(status, error, "the machine token was rejected; it is owner-issued, never mint one") if status == 401
-    server_refused!(status, error, "this server does not serve ticket_classification (DND-991 not deployed?)") if status == 404
+    server_refused!(status, error, "this server does not serve #{use_case} (#{ticket} not deployed?)") if status == 404
     server_refused!(status, error, safe_fix(doc)) if (400..499).cover?(status)
     # A 5xx: the server was reached and failed. Anything else (no status, a
     # redirect) is a server we could not use.
@@ -366,7 +382,8 @@ end
 SPEC = {
   "--help" => :switch, "-h" => :switch, "--title" => :value, "--body-file" => :value,
   "--project" => :value, "--kind" => :value, "--severity" => :value, "--security" => :value,
-  "--ref" => :value, "--json" => :switch
+  "--ref" => :value, "--json" => :switch, "--epic" => :value, "--found-while" => :value,
+  "--blocks" => :value
 }.freeze
 
 REQUIRED = [
@@ -390,7 +407,8 @@ def parse_options(argv)
   filer = { kind: raw["--kind"], severity: raw["--severity"], security: raw["--security"] }
   problem = Classify.filer_error(filer)
   usage!(*problem) if problem
-  { title: title, body_file: raw["--body-file"], project: raw["--project"], ref: raw["--ref"], json: raw["--json"] == true, filer: filer }
+  path = path_options(raw)
+  { title: title, body_file: raw["--body-file"], project: raw["--project"], ref: raw["--ref"], json: raw["--json"] == true, filer: filer }.merge(path)
 rescue StrictArgv::UsageError => e
   usage!(e.message, "run #{PROG} --help for the flags")
 rescue Failure
@@ -399,6 +417,24 @@ rescue StandardError => e
   # Before the filer's values are known there is no fallback to print, so
   # this is a usage failure (exit 2), never an exit 3 without them.
   usage!("could not read the arguments (#{e.class})", "run #{PROG} --help for the flags")
+end
+
+# path_options(raw) -> {epic:, found_while:, claimed_blocks:}. --found-while
+# and --blocks belong to --epic; --epic is a new finding's, never a
+# reclassification's (--ref) and never --json's.
+def path_options(raw)
+  epic_raw = raw["--epic"]
+  %w[--found-while --blocks].each { |flag| usage!("#{flag} needs --epic", "pass the epic's Notion page id with --epic") if raw[flag] && epic_raw.nil? }
+  return { epic: nil, found_while: nil, claimed_blocks: nil } if epic_raw.nil?
+
+  usage!("--epic with --ref: a reclassification never judges Path", "drop --epic (Path is not reclassified)") if raw["--ref"]
+  usage!("--epic with --json", "drop --json; the Path lines are the output") if raw["--json"]
+  epic = Blocking.epic_id(epic_raw)
+  usage!("--epic #{epic_raw} is not a Notion page id", "pass the epic's page id (32 hex digits, dashed or not)") if epic.nil?
+  %w[--found-while --blocks].each do |flag|
+    usage!("#{flag} #{raw[flag]} is not a ticket id", "pass an id such as DND-717") if raw[flag] && !Classify::REF.match?(raw[flag])
+  end
+  { epic: epic, found_while: raw["--found-while"], claimed_blocks: raw["--blocks"] }
 end
 
 def main(argv)

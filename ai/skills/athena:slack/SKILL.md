@@ -44,10 +44,15 @@ it is DND-301, gated on the parity gaps in DND-542.
 
 ## Setup
 
-- Token: `~/.claude/slack-bot-token`, mode 600, one `xoxb-…` line. `$SLACK_BOT_TOKEN`
-  overrides it. Nothing here ever prints the token, puts it in argv, or puts it
+- Token: `~/.claude/slack-bot-token`, mode 600, one `xoxb-…` line. It is the
+  only source: no env var is read (`ai/contracts/athena-machine-secrets.md` →
+  *Never*). Nothing here ever prints the token, puts it in argv, or puts it
   in a URL: it reaches curl as an `Authorization: Bearer` header inside a 0600
   config file.
+
+  **Later (2026-09-30, DND-845):** this said `$SLACK_BOT_TOKEN` overrides the
+  file. Superseded: an env fallback invites a global export, which puts the
+  token in every child of a session.
 - Requires `curl` and `jq`. POSIX `sh`; no GNU-only flags.
 - Caches live in `~/.cache/athena-slack/` (`users.json`, `channels.json`,
   `identity.json`). All are disposable — delete any of them to force a refresh.
@@ -97,24 +102,47 @@ A reply in a Slack thread is routed by the server to whichever inbox
 route (walt_ui's `slack` channel today). The rule and the server side are in
 `ai/contracts/athena-events.md` → *Thread replies route to the thread's
 claimant*. So `post`, and `dm` without `--thread_ts`, claim the thread they
-start for **this session's project** (DND-491): cwd → realpath of the git
-common dir → this project's inbox registry entry → its one Slack `log`
-channel (no `producer`, or `producer: "slack"`) → its path, e.g.
-`custom-slack.jsonl`. The call is the athena MCP tool `slack_thread_claim`
-with the bot's `bot_id`/`team_id` (auth.test, cached); the machine token is
-read from the inbox client config and reaches curl only on stdin, as
-`send-mail --routed` sends it.
+start for **this session's project** (DND-491): the session's project
+directory → realpath of the git common dir → this project's inbox registry
+entry → its one Slack `log` channel (no `producer`, or `producer: "slack"`) →
+its path, e.g. `custom-slack.jsonl`. The call is the athena MCP tool
+`slack_thread_claim` with the bot's `bot_id`/`team_id` (auth.test, cached);
+the machine token is read from the inbox client config and reaches curl only
+on stdin, as `send-mail --routed` sends it.
+
+**The project is the session's, never just the shell cwd** (DND-1163):
+`$CLAUDE_PROJECT_DIR`, else the Claude Code process's own cwd
+(`/proc/$CLAUDE_PID/cwd`, which a `cd` in the Bash tool never moves), else the
+cwd (ai/contracts/athena-inbox.md → *Repo identity: the git common dir*). A
+shell cwd inside a **different** registered project is refused as
+`cwd-project-mismatch`, because a claim cannot be taken back.
+
+**Later (2026-09-28, DND-1163):** this read "cwd → realpath of the git common
+dir". Superseded: a walt_ui session whose shell had `cd`'d into `~/dev/custom`
+claimed its DM thread for `custom-slack.jsonl` with exit 0, and the walt_ui
+re-claim was then refused `already_claimed`.
 
 After the `ts=... channel=...` line, exactly one of:
 
-- `claim=claimed inbox=<inbox>` or `claim=already_yours inbox=<inbox>` — exit 0;
+- `claim=claimed inbox=<inbox> source=<source>` or
+  `claim=already_yours inbox=<inbox> source=<source>` — exit 0. `source` is
+  `project-dir`, `session-process` or `cwd`: where the project came from;
 - `claim=skipped` — `--no-claim`, exit 0 (use it when no reply is expected);
 - on stderr, `claim=FAILED reason=<token> key=<team>/<channel>/<ts> inbox=<inbox|none>`
-  then `Fix: ...` — exit **3**. The message **was posted**; never re-post.
-  Reasons, each distinct: `no-registry-entry`, `registry-error`,
+  (plus `source=<source> project=<dir>` once the project is known) then
+  `Fix: ...` — exit **3**. The message **was posted**; never re-post.
+  Reasons, each distinct: `no-registry-entry` (with a `lookup:` line naming
+  the repo key that matched nothing), `registry-error`,
   `no-slack-channel`, `ambiguous-slack-channel`, `no-identity`, `no-token`,
   `mcp-unregistered`, `mcp-error:<words>`, `not-found`, `refused` (with the
-  server's words on a `server:` line), `already-claimed`, `invalid`.
+  server's words on a `server:` line), `already-claimed`, `invalid`,
+  `cwd-project-mismatch`, `project-unresolved` (a `CLAUDE_PROJECT_DIR` or
+  `CLAUDE_PID` that is set but unusable).
+
+**A claim cannot be released or transferred yet.** The athena server has no
+release path (`slack_thread_claim` is claim-only; first claim wins). A thread
+claimed by the wrong inbox keeps routing there: the holding session forwards
+its replies, or a new thread is started from the right project.
 
 `reply` and `dm --thread_ts` never claim: the thread belongs to whoever
 started it. A claim needs the project's Slack channel declared in its

@@ -117,22 +117,35 @@ Keys in use (DND-704), with where each is used:
 
 | File | Key | Shape | Used by |
 |---|---|---|---|
-| `slack` | `.people.owner.user_id` | Slack user id | `athena:slack` (owner DM, click check), `athena:ticket-management` (Needs Attention DM), `athena:epic-progress-dm`, `ai/bin/judgment-label` |
+| `slack` | `.people.owner.user_id` | Slack user id | `athena:slack` (owner DM, click check), `athena:ticket-management` (Needs Attention DM), `ai/bin/judgment-label`, `ai/bin/judgment-eval` (`--use-case slack_routing`) |
 | `slack` | `.people` | `{alias: {user_id, name}}` | `athena:slack` → *Reading the workspace* |
 | `slack` | `.channels` | `{name: channel id}` | `athena:slack` → *Reading the workspace* |
 | `slack` | `.channels.owner_dm` | DM channel id | `athena:epic-clustering` (the daily digest) |
 | `notion` | `.work.owner_person_id` | notion-work person id | `athena:ticket-management`, `athena:flaky-ticket` (after the roster) |
+| `notion` | `.work.tickets_data_source` | work Tickets data source id | `mark-in-progress`, `ai/bin/lead-time` (the work tracker's dispatch stamp, DND-1341; `ai/lib/dispatch_trackers.rb`) |
+| `notion` | `.work.ticket_prefix` | the work tickets' `ID` prefix (2-10 upper-case letters) | same |
+| `notion` | `.work.in_progress_property` | name of the work Tickets date property holding the dispatch stamp | same |
+| `notion` | `.work.first_dispatch_from` | array of status names a move to `In Progress` from which is a first dispatch | same |
 | `notion` | `.vip_person_ids` | array of notion-work person ids | declared as the VIP seed in `athena-events.md`; the server keeps its own copy in its config |
 
 The Athena bot's own Slack user and bot ids are not overlay keys: `athena:slack`
 `bin/whoami` reports the live identity.
+
+**`secrets.json` (optional).** `overlay/secrets.json` declares the work-domain
+per-machine secrets: their names, paths, copies, consumers and restart
+commands. It uses the registry schema in `ai/contracts/athena-machine-secrets.md`
+→ *The registry*. Like every overlay file it holds names and paths only, never
+a value (*No credentials*). `ai/bin/check-machine-secrets` and
+`ai/bin/with-secret` read it when the overlay is present. An absent overlay
+means no work-domain secrets are declared on that machine.
 
 ## No credentials
 
 The overlay holds identifiers and procedures, never credentials. Tokens and
 keys stay where they are today (`~/.claude/*token*`,
 `~/.config/athena-inbox-client/`, the GitHub App key). A credential found in the
-overlay is a defect to report.
+overlay is a defect to report. Where a secret lives, how it is declared and
+how it is loaded: `ai/contracts/athena-machine-secrets.md`.
 
 ## Consumer obligation
 

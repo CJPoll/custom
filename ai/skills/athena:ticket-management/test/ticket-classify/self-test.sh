@@ -32,7 +32,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby python3 curl jq git; do
+[ -x /usr/bin/ruby ] || { echo "ticket-classify self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in python3 curl jq git; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "ticket-classify self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 [ -x "${BIN}" ] || { echo "ticket-classify self-test: FAIL -- ${BIN} missing or not executable"; echo "  Fix: chmod +x ai/skills/athena:ticket-management/scripts/ticket-classify"; exit 1; }
@@ -48,14 +49,14 @@ trap cleanup EXIT INT TERM
 # ruby_eq NAME EXPECTED RUBY-EXPR -- evaluate EXPR with the script loaded.
 ruby_eq() {
   local got
-  got="$(ruby -e "load ARGV.shift; puts(begin; $3; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" 2>&1)"
+  got="$(/usr/bin/ruby -e "load ARGV.shift; puts(begin; $3; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 # ruby_eq_args NAME EXPECTED RUBY-EXPR ARG... -- the same, with ARGV = ARG...
 ruby_eq_args() {
   local name="$1" want="$2" expr="$3" got
   shift 3
-  got="$(ruby -e "load ARGV.shift; puts(begin; ${expr}; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" "$@" 2>&1)"
+  got="$(/usr/bin/ruby -e "load ARGV.shift; puts(begin; ${expr}; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" "$@" 2>&1)"
   eq "${name}" "${got}" "${want}"
 }
 
@@ -129,10 +130,17 @@ ruby_eq "filer check: severity none only with Feature, Feature only with none" \
   "--severity none is only for --kind Feature|--kind Feature takes --severity none (a Feature has no Severity)|" \
   '[Classify.filer_error({kind: "Bug", severity: "none", security: "none"}).first, Classify.filer_error({kind: "Feature", severity: "LOW", security: "none"}).first, Classify.filer_error({kind: "Flake", severity: "LOW", security: "introduced"}).inspect.sub("nil", "")].join("|")'
 
-echo "== no tracker client [qa manager 8]"
+echo "== no tracker writer [qa manager 8]"
 
-lacks "the script has no Notion client (no Notion URL, token or API in code)" \
-  "$(grep -v '^\s*#' "${BIN}" | grep -in 'notion' || true)" "otion"
+# DND-1057: --epic reads the epic's candidates, and only through the
+# read-only ai/lib/notion_read.rb (its allowlist refuses any other request
+# before it is sent). The script itself names no Notion URL and no write.
+CODE="$(grep -v '^\s*#' "${BIN}")"
+lacks "the script names no Notion API URL (all Notion access is NotionRead)" "${CODE}" "api.notion.com"
+lacks "the script makes no PATCH" "${CODE}" '"PATCH"'
+lacks "the script makes no DELETE" "${CODE}" '"DELETE"'
+has "its Notion access is the read-only client" "${CODE}" 'require_relative "../../../lib/notion_read"'
+eq "every NotionRead call is a read" "$(printf '%s\n' "${CODE}" | grep -o 'NotionRead\.[a-z_]*' | sort -u | tr '\n' ' ')" "NotionRead.credentials NotionRead.page NotionRead.query_all NotionRead.read "
 
 echo "== argv"
 
@@ -244,7 +252,7 @@ eq "--json prints the server's result" "$(printf '%s' "${OUT}" | jq -cS .)" "$(p
 run --title "New feature" --body-file "${TMP}/body.txt" --project harness --kind Feature --severity none --security none
 eq "a Feature sends severity null" "$(sent | jq -c '.filer')" '{"kind":"Feature","severity":null,"security":"none"}'
 
-ruby -e 'print "z" * 3000' > "${TMP}/long.txt"
+/usr/bin/ruby -e 'print "z" * 3000' > "${TMP}/long.txt"
 run --title "T" --body-file "${TMP}/long.txt" --project harness "${FILER[@]}"
 eq "a 3,000-character body is sent as 2,000 [qa manager 7]" "$(sent | jq -r '.ticket.body | length')" "2000"
 has "stderr says it was truncated [qa manager 7]" "${ERR}" "[truncated]"

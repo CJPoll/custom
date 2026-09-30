@@ -321,7 +321,8 @@ migration. That is a one-time judgement recorded here so it is not read as
 permission to redefine `v: 1` again. Everything the
 superseded text said about resolving ownership from the **session's cwd**, and
 about a session never seeing another project's channels, is unchanged — restated
-under *Repo identity: the git common dir* below, not weakened.
+under *Repo identity: the git common dir* below, not weakened. (The cwd itself
+was later replaced there by the session's project directory, DND-1163.)
 
 **The opt-in claim is about the reader side only.** A `maildir` channel really is
 self-service: declare it, and provisioning creates the directories. A `log`
@@ -395,20 +396,65 @@ channel is normal — so the misconfiguration is invisible. Therefore:
 
 ### Repo identity: the git common dir
 
-**Ownership resolves from the session's cwd.** That invariant is unchanged and
-is the whole resolution rule; it is load-bearing rather than a convenience,
+**Ownership resolves from the session's project directory.** That invariant is
+the whole resolution rule; it is load-bearing rather than a convenience,
 because it is the only thing that decides which session a channel's traffic
-reaches. What changed is the key it resolves through:
+reaches. The key it resolves through:
 
 ```
-cwd → realpath of `git rev-parse --git-common-dir` → the registry entry
-      whose `repo` is that path → that entry's declared channels
+session project dir → realpath of `git rev-parse --git-common-dir` → the
+      registry entry whose `repo` is that path → that entry's declared channels
 ```
+
+**The session's project directory** is, in precedence order:
+
+1. `$CLAUDE_PROJECT_DIR` (Claude Code sets it for hooks);
+2. the Claude Code process's own cwd, `/proc/$CLAUDE_PID/cwd` (the Bash tool
+   exports `CLAUDE_PID` but not `CLAUDE_PROJECT_DIR`; that process's cwd is
+   where the session started, and a `cd` in the tool shell never moves it);
+3. the shell's cwd, only when neither signal is set (a terminal, cron, a test).
+
+A reader MUST say which source it used wherever it reports the project, MUST
+refuse (with a `Fix:`) a signal that is set but unusable rather than fall
+through to the next source, and MUST refuse when the shell's cwd lies inside a
+**different** registered project from the session's own, rather than act on
+either project's channels. A cwd in no registered project, or in the session's
+own (a worktree, a subdirectory), is not a mismatch. The one implementation is
+athena:inbox `lib/session.sh` → `session_project_dir` and `lib/inbox.sh` →
+`inbox_session_dir`.
+
+Two refusals follow from this and are **intended**:
+
+- **A subagent dispatched into another repo.** A subagent inherits its
+  parent's `CLAUDE_PID`, so a captain that a `~/dev/custom` session dispatched
+  into a walt_ui worktree resolves custom, and is refused while its cwd is in
+  walt_ui.
+- **A session started outside every registered project** (`~`, `~/dev`), once
+  its shell is inside one.
+
+Each is the same ambiguity as a drifted cwd, and each has the same way out:
+name the project explicitly, `CLAUDE_PROJECT_DIR=<dir> <command>`, which
+outranks both other sources. The refusal's `Fix:` says so.
+
+**Residuals, named.** A `CLAUDE_PID` that outlived its session and was
+recycled to another of the user's processes resolves that process's cwd; the
+pid is not checked to be Claude Code, whose process name varies by install. A
+Claude Code action that moves the process itself (`EnterWorktree`,
+`/add-dir`) was not measured.
+
+**Later (2026-09-28, DND-1163):** this section read "**Ownership resolves from
+the session's cwd.**", with `cwd →` heading the chain above, and the realpath
+rule below was taken "against the session's cwd". Superseded: the Claude Code
+Bash tool keeps a `cd` across calls, so a walt_ui session whose shell had
+drifted into `~/dev/custom` (or through `~/.claude/skills`, which realpaths
+there) claimed a Slack thread for `custom-slack.jsonl` with exit 0. The cwd was
+the right *kind* of key computed from the wrong directory.
 
 **Repo identity is the realpath of `git rev-parse --git-common-dir`.**
 
 **That command returns a *cwd-relative* path in a main checkout, and the
-realpath MUST be taken against the session's cwd.** Verified on this machine
+realpath MUST be taken against the directory it was run in: the session's
+project directory, captured when it is chosen.** Verified on this machine
 (2026-09-19 UTC):
 
 | cwd | raw `git rev-parse --git-common-dir` |
@@ -423,7 +469,7 @@ somewhere else — produces a path that exists nowhere, matches no entry, and
 therefore reports **zero channels and exit 0**, because that is what this
 contract says an unmatched identity means. The channel goes dark with no error
 and no skip count, since nothing was skipped. Resolve it at the point of
-capture, in the session's cwd, or do not capture it.
+capture, in the session's project directory, or do not capture it.
 
 The identity so resolved is
 identical across a repo's main checkout and every one of its worktrees, and
@@ -805,7 +851,7 @@ One JSON object per line, UTF-8, no pretty-printing, newline-terminated:
 {"v":1,"received_at":"2026-09-01T22:10:03Z","kind":"im|mpim|channel|mention|thread_reply",
  "channel":"C…|D…","user":"U…","ts":"1788….…","thread_ts":"1788….… or null",
  "text":"…raw text…","permalink":"https://… (optional)","event_id":"Ev…",
- "route":"thread_claim|topic_judgment|channel_route (optional)",
+ "route":"thread_claim|topic_judgment|session_mention|channel_route (optional)",
  "topic":{"label":"… or null","confidence":0.0,"model":"jev-1.13.0 or null","reason":"… or null"} (optional)}
 ```
 
@@ -915,9 +961,11 @@ none and read as legacy.
 claimant*). `thread_claim`: a live claim on the reply's thread chose it.
 `topic_judgment`: an accepted topic judgment chose it
 (`ai/contracts/athena-events.md` → *New conversations may route by an advisory
-topic judgment*). `channel_route`: the app's channel route chose it, including a
-stale-claim fallback and every topic-judgment fallback. The field is optional
-and additive:
+topic judgment*). `session_mention`: the owner's text addressed one of the
+owner's sessions and that session's topic route chose it, with no judgment
+(the same section, *The session mention (step 2b')*). `channel_route`: the
+app's channel route chose it, including a stale-claim fallback and every
+topic-judgment fallback. The field is optional and additive:
 
 - **Absent** means a line written before the producer stamped the field. It is
   read and counted normally.
@@ -925,22 +973,26 @@ and additive:
 - A reader MAY display it and MUST NOT fail on it, on an unknown value, or on
   its absence. It is Slack-producer only; a platform line carries none.
 
-**`topic` says what the topic judgment decided** for a new-conversation line
+**`topic` says what the topic judgment or the session mention decided** for a new-conversation line
 (`ai/contracts/athena-events.md` → *New conversations may route by an advisory
 topic judgment*). It is an object with exactly four members:
 
-- `label`: the session label the judgment chose, or `null` when no judgment
-  answered;
+- `label`: the session label the judgment chose or the owner's session
+  mention named, or `null` when neither did;
 - `confidence`: the judgment's confidence in `[0,1]`, or `null`;
 - `model`: the versioned model id that answered, or `null`;
-- `reason`: `null` when the judgment was accepted, otherwise a reason from
+- `reason`: `null` when the judgment was accepted or the mention's label
+  had a live topic route, otherwise a reason from
   `ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
   behaviour, loudly* (for example `mode_off`, `sender_rule`, `key_missing`,
   `below_threshold`).
 
 `route: topic_judgment` with `reason: null` is a routed judgment.
-`route: channel_route` with `reason: null` is a shadow-mode judgment that would
-have been accepted and was not acted on. The object carries no probabilities and
+`route: session_mention` is a routed session mention: `label` is the session
+the owner addressed, and `confidence` and `model` are `null` because no model
+answered. `route: channel_route` with `reason: null` is a shadow-mode judgment
+or session mention that would have been routed and was not; `model: null`
+there means the mention. The object carries no probabilities and
 no text. It is optional and additive on the same terms as `route`: absent on
 lines written before the producer stamped it, absent when the routing mode is
 `off`, and absent on every line that is not a new conversation; not a dedupe
@@ -954,6 +1006,13 @@ DND-716 (gen_saas PR #479): a new conversation while the routing mode is `off`
 writes no `topic` object at all — the line is byte-identical to the pre-epic
 line, matching `ai/contracts/athena-events.md` → *New conversations may route
 by an advisory topic judgment*.
+
+**Later (2026-09-28):** `route` had three values and `topic.label` was only
+ever a judgment's answer, so `route: channel_route` with `reason: null` was
+always a shadow judgment. Superseded by DND-717: the router's session-mention
+step adds `route: session_mention`, and its `topic` names the addressed session
+with `confidence` and `model` null. A reader already tolerates the new value
+(*unknown value* above).
 
 ### `received_at` — what it is and is not
 
@@ -1273,10 +1332,10 @@ producer. Made explicit:
   `*.consumer.lock`, `*.jsonl.1`, or anything under `projects/`, and put no
   credential in a line.
 - Delivery is **at-least-once**, exactly as for Slack. A re-dispatched Event —
-  `athena-events.md` **retries** per `(event, rule)`, holding **no** durable
-  idempotency-key store and doing **no** content dedup itself, only transient
-  in-flight retry state (`athena-events.md` → *Idempotency is per (event, rule)*)
-  — may append a duplicate line. Absorbing that duplicate is the **reader's and
+  `athena-events.md` **retries** per `(event, rule)` on transient in-flight
+  retry state, and its ingress seen-check never dedupes a retry
+  (`athena-events.md` → *Idempotency is per (event, rule)*) — may append a
+  duplicate line. Absorbing that duplicate is the **reader's and
   consumer's** job, not the platform's. A retry of one `(event, rule)` delivery
   is a repeated frame, which the reader collapses on `delivery_id` (*Line
   format*). The consumer absorbs anything else: for a regular (non-lane)
@@ -2811,7 +2870,9 @@ prohibition is narrowed to a `*.consumer.lock`, matching *Derived paths*: the
 `.sender.lock` is exactly the writer's and is now named as such.
 
 **A reader is conformant when it:** resolves channels only from the registry
-entry matching its own repo identity — resolved against the session's cwd, and
+entry matching its own repo identity — resolved against the session's project
+directory (*Repo identity: the git common dir*), refusing a shell cwd inside a
+different registered project, and
 treating two entries claiming that identity as a hard error — and never from a
 scan of the root for surfaces; refuses a `path` or `namespace` resolving inside
 `projects/`;

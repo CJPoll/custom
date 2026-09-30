@@ -21,8 +21,6 @@
 # prompts on /dev/tty stops (SIGTTIN) until the bound kills it. That is the
 # intent: these callers are unattended, and a prompt is a hang.
 
-require "open3"
-
 module BoundedCommand
   Result = Struct.new(:out, :err, :exitstatus, :timed_out, :seconds, keyword_init: true) do
     def success?
@@ -54,46 +52,67 @@ module BoundedCommand
   #
   # Residuals: a member that calls setsid() leaves the group and is not killed
   # (the call still returns); a process in uninterruptible sleep (D state)
-  # survives KILL, and Open3's own cleanup then waits for the kernel to
+  # survives KILL, and run's cleanup then waits for the kernel to
   # release it.
   def self.run(argv, timeout:, chdir: nil, env: {})
     check_bound!(timeout)
-    opts = { pgroup: true }
+    opts = { pgroup: true, in: File::NULL }
     opts[:chdir] = chdir if chdir
     deadline = now + timeout
-    Open3.popen3(env, *argv, **opts) do |stdin, out, err, wait|
-      settled = false
-      readers = []
-      begin
-        stdin.close
-        readers = [Thread.new { read_all(out) }, Thread.new { read_all(err) }]
-        status = wait.join(timeout)&.value
-        drained = status && readers.all? { |t| t.join([deadline - now, 0].max + READER_GRACE_S) }
-        if drained
-          settled = true
-          return Result.new(out: readers[0].value, err: readers[1].value,
-                            exitstatus: status.exitstatus || (128 + status.termsig.to_i),
-                            timed_out: false, seconds: timeout)
-        end
-
+    out_r, out_w = IO.pipe
+    err_r, err_w = IO.pipe
+    pid = nil
+    wait = nil
+    settled = false
+    readers = []
+    # The cleanup is armed BEFORE the spawn, and the pid is its only input.
+    # Open3's block form left a window between its spawn and the block: an
+    # interrupt there escaped with the child alive in its own group, or reached
+    # Open3's ensure, which joins the child and so waited out its whole life.
+    # Measured 2026-09-28 at load 42: b8 of the suite hit it 2 runs in 4.
+    # (Thread.handle_interrupt cannot close it: it does not mask signal traps.)
+    begin
+      pid = Process.spawn(env, *argv, **opts, out: out_w, err: err_w)
+      wait = Process.detach(pid)
+      out_w.close
+      err_w.close
+      settled, result = wait_bounded(out_r, err_r, wait, readers, timeout, deadline)
+      result
+    ensure
+      if pid && !settled
+        wait ||= Process.detach(pid)
         kill_group(wait)
-        settled = true
-        texts = readers.map { |t| t.join(READER_GRACE_S) ? t.value.to_s : "" }
-        return Result.new(out: texts[0], err: texts[1], exitstatus: nil, timed_out: true, seconds: timeout)
-      ensure
-        kill_group(wait) unless settled
-        readers.each { |t| t.kill if t.alive? }
       end
+      readers.each { |t| t.kill if t.alive? }
+      [out_r, out_w, err_r, err_w].each { |io| io.close unless io.closed? }
+      wait&.join
     end
   rescue SystemCallError => e
     Result.new(out: "", err: e.message, exitstatus: 127, timed_out: false, seconds: timeout)
+  end
+
+  # -> [settled, Result]. `readers` is filled in place so run's cleanup can
+  # kill them whatever raises here.
+  def self.wait_bounded(out, err, wait, readers, timeout, deadline)
+    readers.push(Thread.new { read_all(out) }, Thread.new { read_all(err) })
+    status = wait.join(timeout)&.value
+    drained = status && readers.all? { |t| t.join([deadline - now, 0].max + READER_GRACE_S) }
+    if drained
+      return [true, Result.new(out: readers[0].value, err: readers[1].value,
+                               exitstatus: status.exitstatus || (128 + status.termsig.to_i),
+                               timed_out: false, seconds: timeout)]
+    end
+
+    kill_group(wait)
+    texts = readers.map { |t| t.join(READER_GRACE_S) ? t.value.to_s : "" }
+    [true, Result.new(out: texts[0], err: texts[1], exitstatus: nil, timed_out: true, seconds: timeout)]
   end
 
   def self.now
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 
-  # A pipe closed under a reader (Open3's cleanup) ends the read quietly.
+  # A pipe closed under a reader (run's cleanup) ends the read quietly.
   def self.read_all(io)
     io.read
   rescue IOError
@@ -114,5 +133,5 @@ module BoundedCommand
   rescue Errno::ESRCH, Errno::EPERM
     nil
   end
-  private_class_method :now, :read_all, :kill_group, :signal_group
+  private_class_method :now, :read_all, :kill_group, :signal_group, :wait_bounded
 end

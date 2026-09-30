@@ -155,6 +155,10 @@ agent.** Some GitHub or GitLab operation cannot be done under the Athena
 identity. The cause does not matter: a wrapper error, a 401/403, the token not
 resolving to the bot, a guard denial or refusal, anything. Then:
 
+(A refusal listed in *Expected refusals* below is not this case. It is a
+known, permanent limit of the App or the plan, not a broken identity. Its row
+names the next step, and that step never uses the owner's login.)
+
 1. **Stop that operation.** Do not fall back to the owner's `gh`/`glab` login,
    a plain `git push`, the owner's credential helper, or any
    auth/setup/login subcommand.
@@ -216,6 +220,11 @@ shell loop. "CI is done" = every **required** check-run has concluded.
 When a check **fails in ~1-2s with an empty log** (BlobNotFound), it did not
 flake — read **athena:diagnose-github-actions-failure** before re-running; the
 usual cause is billing exhaustion, which no re-run can clear.
+
+**`gh-athena run rerun` always fails** (`Resource not accessible by
+integration`). To re-trigger a run that failed on infra, use the `run rerun`
+row in *Expected refusals*: close and reopen the PR, same SHA. An empty commit
+is a new SHA and a re-gate.
 
 `--watch` only blocks *usefully* if a runner ever picks the job up. When checks
 stay **`queued` with nothing reaching `in_progress`** for more than a few
@@ -279,14 +288,28 @@ declares a gate, and the only documented path is `integration-gate` then
 - **`gh-athena` enforces a merge floor itself (DND-609).** Before gh runs, the
   wrapper reads the PR and REFUSES (exit 3, `Fix:`) a merge unless it pins the
   head with `--match-head-commit <sha>`, that sha IS the PR's head, and every
-  check reported on it concluded green (CheckRun `SUCCESS`/`NEUTRAL`/`SKIPPED`,
-  commit status `SUCCESS`). Zero reported checks is refused: no evidence is not
-  green. The pin also makes GitHub refuse the merge if the head moves after the
+  judged run on it concluded green (CheckRun `SUCCESS`/`NEUTRAL`/`SKIPPED`,
+  commit status `SUCCESS`). A run is NOT judged only when a newer check suite
+  (a close/reopen, a new workflow run) holds runs of the same check, all
+  `SUCCESS`; it is printed instead. A check is one (app, workflow, event,
+  name), or one status context. Runs inside one suite are all judged, a newer
+  `SKIPPED`/`NEUTRAL` run supersedes nothing, and an order the wrapper cannot
+  read (a missing start time, a tie for newest) refuses (DND-1140; the rules
+  are in `ai/lib/gh-merge-guard.sh` → `gmg_checks_green`). So after a flaky
+  red run, a close/reopen that re-runs CI green unblocks the merge; a
+  "re-run failed jobs" inside the same run does not. Zero reported checks is
+  refused: no evidence is not green. The pin also makes GitHub refuse the merge if the head moves after the
   read. A `gh api` merge (REST `PUT …/pulls/<n>/merge`, `…/merges`,
   `…/merge-upstream`, or a GraphQL merge / auto-merge / merge-queue mutation) is
   refused outright by `gh-athena` (DND-728); a bare `gh api` merge is denied by
   the forge-identity hook. `pr merge`, made by `locked-merge`, is the one merge
   path.
+
+  **Later (2026-09-28, DND-1140):** this said "every check reported on it
+  concluded green", and the wrapper judged every check-run on the head. A
+  superseded failure then refused forever: gen_saas PR #488's close/reopen
+  re-ran CI green on the same head, `gh pr checks` was green, and the merge
+  was still refused on the old run's `Test: COMPLETED/FAILURE`.
 - **In a gated repo the wrapper also requires `integration-gate`'s receipt
   (DND-969).** A repo declares a gate when the base branch's tip carries
   `bin/prep-commit.sh` or `ai/bin/harness-gate` (the rule `integration-gate`

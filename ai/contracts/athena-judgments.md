@@ -30,7 +30,7 @@ Sections are cited **by name**, never by number.
 **Conformance language.** MUST / MUST NOT / SHOULD / MAY carry their usual force.
 A **use case** is one fixed purpose Athena judges for (`finding_triage`,
 `slack_routing`, `priority_scoring`, `ticket_kind`, `ticket_severity`,
-`ticket_security`, or `eval:<use_case>`). A **question set** is
+`ticket_security`, `ticket_blocking`, or `eval:<use_case>`). A **question set** is
 the versioned code that turns a use case's input into the request. A **caller**
 is the consumer that asked for a judgment and acts on the result. An
 implementation that violates a MUST is non-conformant.
@@ -64,13 +64,18 @@ score on a fixed scale — with a confidence. Four consumers use it today:
 - **Ticket classification** (DND-991, DND-1054): when a ticket is filed, decide
   its `Kind`, `Severity` and `Security` by deterministic policy from the
   filer's values and three judgments (`ticket_kind`, `ticket_severity`,
-  `ticket_security`).
+  `ticket_security`). For a finding filed with `--epic` (DND-1057), also
+  decide its `Path` (`Blocking` or `Off`) and the one critical-path ticket it
+  blocks, from the filer's claim and a fourth judgment (`ticket_blocking`).
 
 Non-goals. A judgment never:
 
 - authorizes anything, closes, merges or cancels a ticket, sends a reply, or
   decides an owner-gated step;
-- generates text (no generative use);
+- generates text (no generative use). Item summaries
+  (`ai/contracts/athena-events.md` → *Priority index* → *Item summaries*) are
+  generative. They are not judgments: they use their own port, key and
+  budget, and nothing in this contract governs them;
 - routes a thread reply (thread claims own that:
   `ai/contracts/athena-events.md` → *Thread replies route to the thread's
   claimant*);
@@ -97,17 +102,38 @@ Concretely:
   authorized by `:add_slack_route` when it was written.
 - **Only the owner's own text is judged for routing.** A new conversation from
   anyone else follows the channel route by code, with no call. This bounds the
-  adversarial surface.
+  adversarial surface. The conversation context sent with a root (*Egress and
+  data flow*, the `slack_routing` row) holds only the owner's own earlier text
+  and session labels for Athena's own posts; the owner filter is applied in
+  code, on the server, whatever the caller passed.
 - **Triage prints advice only.** It never closes, merges or re-prioritizes a
   ticket. The filer decides.
 - **Priority adds bounded reason deltas.** An owner override always wins, and
   the default `vip_asker` weight exceeds the largest combined judged delta.
 - **Ticket classification sets only Kind, Severity and Security**, through
   deterministic policy. It never lowers a security classification, never
-  assigns or replaces `Feature`, and never touches `Status` or `Path`. Every
+  assigns or replaces `Feature`, and never touches `Status`. Every
   fallback starts from the filer's own value; the one change with no judgment
   is a raise (the Vulnerability floor, *Ticket classification: the harness
   script*).
+- **Ticket blocking decides only a finding's `Path` and one `Blocks` edge**
+  (DND-1057), through deterministic policy (gen_saas
+  `TicketBlockingPolicy`). The value is `Blocking` or `Off`, never `Critical`
+  or `Promoted`: those are authored, and a ticket the filer names a
+  `Feature` is never sent. The edge may point only at a candidate the
+  harness chose in code (the epic's open `Critical` tickets, at most 10, by
+  ID) or, by the introduced-security rule below, the Found while ticket. A
+  security
+  issue the ticket's own change introduced blocks the ticket it was found
+  while working, by rule, with no call. A judgment never removes a blocking
+  claim the filer made for a finding whose Security is not `none`. The
+  filer sets `Path` and wires the edge from the printed decision; nothing
+  writes the tracker.
+
+  **Later (2026-09-30, DND-1057):** the bullet above ended "and never touches
+  `Status` or `Path`". Superseded by the ticket-blocking bullet: Path's
+  `Blocking`/`Off` choice for a finding is now decided by policy, with a
+  judgment as one input. `Critical` and `Promoted` stay authored.
 - **Arithmetic, dates, sender identity and all policy stay in code.** jev-1.13
   is unreliable at counting, math, dates and indirection, so none of them is
   asked of it.
@@ -133,17 +159,30 @@ the request's `state`.
 | Use case | Sent |
 | --- | --- |
 | `finding_triage` | the finding's title, body (at most 2,000 characters) and project; up to 20 candidate tickets as ref, title and summary (at most 500 characters each) |
-| `slack_routing` | the owner's own message text and its line `kind` (`im`, `mpim` or `mention`) |
+| `slack_routing` | the owner's own message text and its line `kind` (`im`, `mpim` or `mention`); and the conversation before it: of the six most recent top-level messages in the same channel within the 60 minutes before it (whoever sent them, oldest first), the owner's own text (each at most 500 characters), and Athena's own posts as the posting session's label only (`walt_ui`, `harness`, `gen_saas` or `other`), never their text. Anyone else's message holds its place among the six and is sent in no form: nobody else's text is ever sent. The window, the cap and the text cap are part of the question-set version (`slack-routing-v2`) |
 | `priority_scoring` | the item's `title`, `source` and `status`, plus `message_text` for a `slack_ask`; never a date and never the asker |
 | `ticket_kind`, `ticket_severity`, `ticket_security` | the ticket's title, body (at most 2,000 characters) and project; never its status, dates, assignee or author |
+| `ticket_blocking` | the finding's title, body (at most 2,000 characters) and project; up to 10 candidate tickets as ref, title and summary (at most 800 characters of the candidate's body, its requirements); never a status, date, assignee, author or the filer's claim |
 | `eval:<use_case>` | the same request the product use case builds, for a labelled case |
+
+**Later (2026-09-28):** the `slack_routing` row read "the owner's own message
+text and its line `kind` (`im`, `mpim` or `mention`)", the root alone
+(`slack-routing-v1`). Superseded by DND-1048 (`slack-routing-v2`). Why: the
+owner, labelling DND-715's corpus, found roots they could not route without the
+conversation before them, so a root-only judge would be blind on them. Athena's
+posts go as a session label, not text, because their text can quote a third
+party. The context is read from gen_saas's own `slack_events` and
+`slack_thread_claims`, never from the Slack API; it is built in memory for the
+request and stored nowhere.
 
 **What is stored: no text.** gen_saas stores no state text for any judgment.
 The call record (`judgment_calls`) holds an opaque `subject_ref` (an event id, a
 ticket ref or an item id), the outcome and reason, the model, the answers
-(choice or score, probabilities, confidence), token usage, cost and latency. It
-MUST refuse a `state`, `text` or `body` key in the stored answers. Rows are
-pruned after 30 days. The eval corpus stays machine-local and untracked, joined
+(choice or score, probabilities, confidence) and token usage and cost. For a
+call that reached the port it also holds the call's latency (`latency_ms`)
+and, when the caller declared when it began waiting, its wait (`wait_ms`,
+*Modes*). It MUST refuse a `state`, `text` or `body` key in the stored
+answers. Rows are pruned after 30 days. The eval corpus stays machine-local and untracked, joined
 to its source by id, never copied into a second file.
 
 **What TypeSafe keeps** is TypeSafe's data-handling terms, read 2026-09-25:
@@ -170,13 +209,25 @@ A port error is exactly one of:
 | Port error | Cause |
 | --- | --- |
 | `unauthorized` | HTTP 401 or 403 |
-| `request_rejected` (with detail) | HTTP 422 |
+| `request_rejected` (with detail) | HTTP 400 or 422 |
 | `rate_limited` (with `retry-after` seconds, or none) | HTTP 429 |
 | `overloaded` | HTTP 529 |
 | `http_status` (with the status) | any other non-2xx status |
 | `timeout` | no response within the deadline |
 | `transport_error` | connection failure |
 | `undecodable_body` | a 2xx whose body is not JSON |
+
+A `request_rejected` detail never quotes the response body, which can echo the
+request's state text. A 422's detail is its first error's `type` and `loc`
+identifiers, or `unprocessable` when it has none it can use; a 400's detail is
+`bad_request`.
+
+**Later (2026-09-30, DND-948):** `request_rejected` was HTTP 422 only, and a 400
+fell into `http_status`. Replaced by 400 or 422: the real API refuses most
+requests we built badly with 400 (too many options or levels, a noul with
+neither instructions nor criteria, an unknown model; captured 2026-09-27), and
+sends 422 only for a schema failure. As `http_status`, our own bug read as a
+TypeSafe service fault.
 
 A test double of the port MUST reject what the real API rejects (for example,
 a Choice with 256 options), so a request the real API would refuse cannot pass
@@ -241,7 +292,7 @@ one is an amendment to this table.
 | `timeout` | fault | judge | the deadline passed |
 | `rate_limited` | fault | judge | TypeSafe returned 429 |
 | `overloaded` | fault | judge | TypeSafe returned 529 |
-| `request_rejected` | fault | judge | TypeSafe returned 422 (our bug: error-level log) |
+| `request_rejected` | fault | judge | TypeSafe returned 400 or 422 (our bug: error-level log) |
 | `http_status` | fault | judge | TypeSafe returned another non-2xx status; the record carries it |
 | `transport_error` | fault | judge | the connection failed |
 | `undecodable_body` | fault | judge | the response body was not JSON |
@@ -249,8 +300,9 @@ one is an amendment to this table.
 | `model_mismatch` | fault | judge | the answering model is not the pinned model |
 | `below_threshold` | state | caller | the confidence is under the accepted threshold, or the answer is `unclear` |
 | `threshold_unset` | state | caller | no threshold exists for the key; never accepts, whatever the confidence |
-| `label_disabled` | state | caller | the answer's label is disabled, or has no live destination |
+| `label_disabled` | state | caller | the answer's label is disabled, or has no live destination (also the Slack router's session mention, DND-717, whose label has no live topic route) |
 | `sender_rule` | state | Slack router | the conversation is not the owner's own, so no judgment is asked |
+| `context_unavailable` | fault | Slack router | reading the conversation context failed (or the root's `ts` is malformed), so no judgment was asked; the caller-side record is the router's outcome log, with no `judgment_calls` row |
 
 A successful call records outcome `answered` with no reason.
 
@@ -323,14 +375,39 @@ label is n/a, or where only a non-advisory label is enabled, cannot turn a use
 case on. Finding triage's advisory labels are `duplicate` and `related`;
 `unrelated` is never advice, so an enabled `unrelated` alone does not count.
 Every option of `ticket_kind`, `ticket_severity` and `ticket_security` is an
-advisory label, since the policy may act on each. A
+advisory label, since the policy may act on each. `ticket_blocking`'s one
+advisory label is `blocks`: an enabled `does_not_block` alone cannot turn it
+on. In `on` the policy also acts on an accepted `does_not_block` (it may
+remove a non-security claim), and a `does_not_block` is accepted only when
+its OWN threshold row is enabled and met (gen_saas `Decision.decide_reading`
+reads the answered label's row; a disabled or absent row is
+`label_disabled` or `threshold_unset`, a fallback). So an `on` set on
+`blocks` alone never removes a claim. A
 use case whose question set declares no advisory label cannot be turned on.
 **`shadow` is refused** unless the use case has a registered question set,
 because shadow makes real calls. **`off` is never refused.** A use case MAY
-add a refusal of its own; Slack routing refuses `on` while the p95 of
-`latency_ms` over its shadow-mode `judgment_calls` rows exceeds 1,000 ms. That
-measurement is not built yet (DND-717), so until it is, Slack routing's `on`
-is refused outright. `eval:*` ignores the mode, but not the key, the domain or
+add a refusal of its own. Slack routing's advisory labels are its routable
+ones (`walt_ui`, `harness`, `gen_saas`; never `unclear`), and it refuses `on`
+unless its live latency is measured and fast enough (DND-717, DND-1334).
+The bar reads the owner's own `slack_routing` rows of the last 30 days that
+reached the port, are of the registered question set's version, and carry a
+`wait_ms`. It needs at least 20 such calls, the first at least 3 days old
+(else `latency_unmeasured`), with a discrete p95 `wait_ms` of at most
+1,000 ms (else `latency_too_high`). `wait_ms` is what the router waited: from
+its topic step's start, read before the mode read and the context reads
+(`judge/4`'s `:wait_started_ms`), to the end of the TypeSafe call. It is the
+topic step's share of Slack's 3 s ack, not the whole: the webhook work before
+the step (signature check, classify, dedupe, thread claim) and the decision
+and topic-route lookup after the call are outside it. A start that is not a
+past `System.monotonic_time(:millisecond)` raises; it is never read as no
+wait. `latency_ms` is the call task alone (the custody read and the call,
+capped at the deadline), and the bar never reads it. A row with no `wait_ms`
+is not measured and does not count: a caller that declares no start records
+none, and neither does any row written before DND-1334 deployed. So `on`
+refuses as `latency_unmeasured` until at least 20 fresh calls of the
+registered version exist, the first at least 3 days old. `judgment_calls` rows carry no mode, so shadow
+and `on` calls both count; before `on` is first set, every such call is a
+shadow call. `eval:*` ignores the mode, but not the key, the domain or
 the budget. The writer is gen_saas `Athena.Judgments.Settings.set_mode/3`
 (DND-714), the owner's only one; every refusal carries `Fix:`.
 
@@ -340,6 +417,26 @@ run produced", and named no refusal for `shadow`. Replaced by the text above
 (DND-714). Why: a row existing is not calibration. An all-n/a run writes rows,
 and an enabled `unrelated` row enables nothing a caller acts on, so either
 would have turned a use case on with no advice it could give.
+
+**Later (2026-09-28):** this said Slack routing refuses `on` while the p95
+over its "shadow-mode" rows exceeds 1,000 ms, and that until the measurement
+was built its `on` was refused outright. Replaced by the text above (DND-717,
+gen_saas `ModePolicy.permit/5` and `CallStore.latency/3`, stacked on the
+DND-714 mode writer). Why: the rows record no mode, so the bar reads every
+call that reached the port; and a p95 over too few calls or too short a
+window is not a measurement, so it is refused as `latency_unmeasured`, never
+passed. The 20 calls and 3 days are DND-717's shadow bar ("at least 3 days,
+or at least 20 new owner conversations, whichever is later").
+
+**Later (2026-09-30, DND-1334):** this said the Slack routing `on` bar is a p95
+`latency_ms` over all of the owner's `slack_routing` rows that reached the
+port, whatever their question-set version (gen_saas `CallStore.latency/3`).
+Replaced by the text above: a p95 `wait_ms` over the registered version's
+rows only (DND-1334, gen_saas PR #594, `CallStore.latency/4`). Why: DND-1048's
+`slack-routing-v2` sends the conversation context, so v1 calls say nothing
+about v2's latency; and the router waits on its context reads as well as the
+call, inside Slack's 3 s ack, so the call alone understated the wait. The
+1,000 ms bar, the 20 calls and the 3 days are unchanged.
 
 ## Threshold provenance, n/a and the pinned model
 
@@ -380,7 +477,15 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   is the label (its eval reading). A use case whose question set has not
   shipped is refused as such, never read as an empty run.
 - **The owner is the machine token's**, never the body's. An eval run belongs
-  to one owner; another owner's run id reads exactly as an absent one.
+  to one owner; another owner's run id reads exactly as an absent one. The
+  one run a token does not start is priority scoring's owner-action run
+  (below): an operator starts it by rpc for one owner, and it reads only
+  that owner's index. Its thresholds are applied like any other run's.
+
+  **Later (2026-09-28):** this said only that the owner is the machine
+  token's. Replaced by the text above (DND-719). Why: owner-action labels are
+  read from the index on the server, so no request body carries them, and
+  an operator starts that run in system context.
 - **What a run stores**: the caller's opaque case id, the owner's label, and
   the chosen label with its confidence, or the unscored reason. Never the
   input.
@@ -398,8 +503,19 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
 - **Proposed labels** (confirmed by no owner, record or rule) never enter a
   run, so they never select a threshold. A label whose id the corpus lacks is
   reported by count and id. A run's provenances are `forward_record`,
-  `owner_confirmed`, `tracker_record` and `rule_confirmed`; each names what
-  confirmed it, and only `owner_confirmed` means the owner did.
+  `owner_confirmed`, `tracker_record`, `rule_confirmed`, `title_prefix` and
+  `owner_action`; each names what confirmed it. Only `owner_confirmed` (the
+  owner confirmed the label) and `owner_action` (the owner acted on the
+  item) come from the owner.
+
+  **Later (2026-09-28, DND-1055):** the list above ended at `rule_confirmed`.
+  Ticket classification adds `title_prefix` (*Ticket classification labels*
+  below); the rule that `proposed` never enters is unchanged.
+
+  **Later (2026-09-28):** this ended "only `owner_confirmed` means the owner
+  did". Replaced by the text above (DND-719). Why: priority scoring's labels
+  are `owner_action`, read from what the owner did on the index, which is the
+  owner's own evidence without a confirmation step.
 
   **Later (2026-09-28):** this read "Proposed labels (not yet confirmed by the
   owner)", which read as if only the owner's confirmation lets a label into a
@@ -410,22 +526,73 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
 - **Slack routing labels** (DND-715, `ai/bin/judgment-label`) cover the
   owner's new-conversation roots only (D7), one row per `event_id`, in the
   machine-local `slack-routing-labels.jsonl`. The corpus is
-  `walt_ui-slack.jsonl` itself, so the text is never copied. A root that an R4
-  forward record names is `forward_record`; the owner confirms the rest one
-  message at a time at a terminal.
+  `walt_ui-slack.jsonl` itself, so the text is never copied. The owner's
+  answer at a terminal (`--confirm`, one message at a time) is
+  `owner_confirmed` and always wins. Otherwise a root whose text addresses a
+  session is `rule_confirmed` with `"rule": "session_mention"`, by the
+  router's own grammar (`ai/contracts/athena-events.md` → *New conversations
+  may route by an advisory topic judgment*, rule 2; a forward record that
+  agrees stays `forward_record`, one that disagrees is overridden and
+  counted). A root that an R4 forward record names is `forward_record`. With
+  `--propose --rule-default`, a root nothing else labels is `walt_ui`,
+  `rule_confirmed` with `"rule": "default_walt_ui"` (the owner's rule 3);
+  without it that root stays `proposed`. `--confirm` presents the
+  `default_walt_ui` rows with the `proposed` ones, and the owner's answer
+  replaces them; it never presents a `session_mention` row, which no run
+  scores. An agent never writes `owner_confirmed`. A session-addressed
+  root is routed by the rule and never judged, so `judgment-eval` leaves it
+  out of a `slack_routing` run, whatever its provenance, and counts it
+  (`session-mention excluded: N`): its label records the router's rule, not
+  ground truth for the judge. An eval case carries the context the
+  server's `POST /api/v1/judgments/slack_routing/context` builds (DND-1048),
+  which runs the router's own selection over the local inbox lines (anyone
+  but the owner with the text emptied) and the app's claims. The rule is the
+  router's; the data is this machine's inbox, which can differ from the
+  server's `slack_events`. `judgment-eval` refuses a reply whose question-set
+  version, rules or owner id differ from its own, so a mismatch fails loudly
+  instead of starving the context. Its owner id is the private overlay's
+  `slack .people.owner.user_id` (`athena-private-overlay.md`); one that does
+  not resolve, or that matches none of the labelled roots, stops the run
+  before anything is sent, never reading as "no root is the owner's". A case
+  whose context cannot be built is
+  unscored `context_unavailable` and is never sent with an empty context.
+
+  **Later (2026-09-28):** this said "the owner confirms the rest one message
+  at a time at a terminal": every root without a forward record waited for
+  the owner. Replaced by the text above (DND-717, epic decision D-R2): the
+  owner's routing rule of 2026-09-28 ~04:25Z ("if I'm replying to a message,
+  the session that sent it is the intended recipient. If I specify a session,
+  then great. Most messages from slack will be for walt_ui") is applied
+  mechanically under `rule_confirmed`, so the eval does not wait on a confirm
+  batch. The Wilson bar is unchanged. Rule 1 labels no root: a root is not a
+  reply.
 - **The owner confirms with the conversation context** (DND-1047). Before
   each message, `judgment-label --confirm` shows the context window that
-  DND-1048's routing-judge design (slack-routing-v2) specifies: the same
-  channel's top-level messages from the hour before, at most 6, each marked
-  with what that judge will see of it (the owner's text, Athena's post as a
-  session label, or nothing, D7). The builder is `ai/lib/judgment_context.rb`;
-  when DND-1048 builds its judge input it uses that builder, or a parity
-  check pins the two windows together. It reads Slack as Athena's bot, for
-  that terminal only; nothing egresses. A row
+  the routing judge uses (slack-routing-v2): the same channel's top-level
+  messages from the hour before, at most 6, each marked with what that judge
+  will see of it (the owner's text, Athena's post as a session label, or
+  nothing, D7). The builder is `ai/lib/judgment_context.rb`. The judge's
+  selection (gen_saas `Athena.SlackEvents.RoutingContext`, DND-1048) applies
+  the same rule: the six most recent top-level messages from any sender, then
+  only the owner's text and Athena's session labels. `judgment-eval` takes its
+  window from this builder's constants and refuses a server whose context
+  rules differ, so the window, the cap and the text cap cannot drift apart
+  silently. That check compares those three numbers only: the selection
+  logic itself (counting every sender toward the six, what is top-level) is
+  two hand-kept copies, Ruby and Elixir, and nothing pins them together. It
+  reads Slack as
+  Athena's bot, for that terminal only; nothing egresses. A row
   records `"context": "shown"` or `"unavailable"`; an `owner_confirmed` row
   without `"shown"` is re-presented by `--confirm --recheck`, and its answer
   stays in force until then. judgment-eval reads only `id`, `label` and
   `provenance`, so the mark never changes a run.
+
+  **Later (2026-09-28):** this bullet said DND-1048 "uses that builder, or a
+  parity check pins the two windows together". Replaced by the rule above
+  (DND-1048): the judge is gen_saas Elixir, so it cannot call this Ruby
+  builder; the pin is judgment-eval's check of the server's `rules` against
+  this builder's constants, which covers the three numbers and not the
+  selection logic.
 - **Finding triage labels** (DND-714, `ai/bin/triage-corpus`) come from the
   DND tracker's own history, in the machine-local
   `finding-triage-labels.jsonl` (ids only) and `finding-triage-corpus.jsonl`
@@ -440,6 +607,110 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   confirms (different Areas, no link, no citation). `rule_confirmed` is never
   `owner_confirmed`. Every other sampled pair stays `proposed`. Severity labels
   are weak (an agent assigned them) and are not evaluated.
+- **Ticket classification labels** (DND-1055, `ai/bin/ticket-corpus`) come
+  from the same tracker snapshot (`triage-corpus --fetch`, which reads through
+  the read-only `ai/lib/notion_read.rb`), one case per ticket per use case, in the machine-local
+  `ticket-{kind,severity,security}-{labels,corpus}.jsonl`. Labels use the
+  tracker's spelling (`Bug`, `MEDIUM`; Security reads `security` for
+  `introduced` or `pre-existing` and `none` for `none`; an unset or other
+  value is excluded, never read as `none`). Every row is weak (an agent filer
+  set it, `"weak": true`) and never `owner_confirmed`:
+  - `tracker_record`: the property, on a ticket created at or after
+    2026-09-27T22:00Z (filed under the W2 rules). Earlier values are the W4
+    backfill and are excluded as `before_cutoff`.
+  - `title_prefix`: Severity from a title that starts `CRITICAL`, `HIGH`,
+    `MEDIUM` or `LOW`, at any date; a post-cutoff property wins.
+  - Excluded and counted by reason: `feature` (Kind and Severity; Feature is
+    authored), `property_unset`, `unknown_value`, `unknown_project` (never
+    guessed), `body_unread`, `blank_title`, `jev_decided` (a ticket whose
+    provenance line says Jev set that property is excluded for that use
+    case, a title prefix included), `provenance_unparseable`, and
+    `provenance_unread` (a truncated body: its last provenance line may lie
+    past the page read; the shadow report skips it the same way). A snapshot whose rows lack a Kind, Severity or Security
+    select (a renamed property) is refused, never read as unset.
+  - The input sent is the title without its severity prefix, and the title
+    and body without the `Jev classification:` line or any classification
+    statement ("Kind Bug", "Severity: HIGH", "a HIGH severity", "Bug
+    MEDIUM"), so a case is judged on content, not on a label leak.
+  - `ticket_blocking` (DND-1057) is one case per (finding, candidate) pair,
+    in `ticket-blocking-{labels,corpus}.jsonl`, from post-cutoff findings
+    (any Kind but `Feature`), all `tracker_record` and weak. `blocks`: a
+    finding with `Path` = `Blocking` and a `Blocks` edge onto a `Critical`
+    ticket, one pair per such edge. `does_not_block`: a finding with `Path`
+    = `Off` whose Found while ticket's epic has open `Critical` tickets, one
+    pair per ticket, at most 3 by ID. The candidate is sent as the script
+    sends it (title, first 800 characters of its body); the finding drops its
+    `Jev` lines, its Path statements, refs and stated edges. Excluded by
+    reason as above, plus `authored_path` (`Critical`, `Promoted`),
+    `path_unset`, `relations_truncated`, `blocking_without_critical_edge`,
+    `no_found_while`, `no_open_critical` and `candidate_unread`. A snapshot
+    fetched before DND-1057 (no Path) is refused, never read as unset. The
+    candidates are today's open tickets, not those open at filing: the
+    corpus is an approximation, and that is why its rows are weak. Two
+    known skews: a `blocks` pair may name a `Critical` ticket of another
+    epic, or one closed since, which the live script would not offer; and
+    the negatives are the lowest (oldest) ids.
+
+  `ticket-corpus --shadow-report --since` measures DND-1055's shadow bar
+  (Product Requirements R1055-3: at least 3 days, at least 35 accepted
+  judgments, and a Wilson 95% lower bound of at least 0.90 on their
+  agreement; a use case short of it at 14 days stays shadow) from ticket
+  bodies alone: each ticket's LAST provenance line, every ACCEPTED judgment
+  made in mode `shadow` compared with the value the ticket ended up with.
+  A judgment in mode `on` is excluded (`mode_on`: the value may be Jev's
+  own), as are a Feature's Kind and Severity (`feature`) and an unset value
+  (`current_unset`). Nothing accepted reads n/a, never 0.
+  `ticket_blocking`'s section reads each finding's last `Jev path:` line:
+  a shadow line whose `would` has source `jev` is an accepted judgment,
+  agreeing when the ticket's current `Path` (and, for `Blocking`, its
+  `Blocks` edge) matches. The bar is the same.
+- **Priority scoring labels come from the owner's actions** (DND-719, gen_saas
+  `Athena.Priorities.OwnerActionEvaluation`). Provenance `owner_action`: what
+  the owner did on the priority index, as the index records it now. An active
+  item's `pin_top`, `pin_bottom` or `score` override, and a `dismissed` item,
+  are actions; an active item with no override is `unmarked`. The index keeps
+  no action history, so a promotion and a completion are not labels. The
+  server reads these from the owner's own index and builds the run itself; a
+  request body carrying an owner-action label is refused, so the label cannot
+  be supplied by a caller. One case is one (item, dimension).
+  - **`unmarked` is inferred, not confirmed.** The owner never said an
+    unmarked item belongs below a pin; it is the list the pin was placed
+    against. It is still a record, read from what the index holds, not a
+    `proposed` label. It is the weakest side of any pair, and it enters only
+    as a pin's or a dismissal's partner.
+  - **Pairs.** "The owner put A above B": `pin_top` above a score override,
+    `pin_bottom` and `dismissed`; a score override above the overrides with
+    the next lower value (not every lower one) and above `pin_bottom` and
+    `dismissed`; each pin or dismissal against up to five `unmarked` items.
+    Other combinations say nothing about order and are not pairs.
+  - **Pairs share items, so every item's pairs are capped, on both sides.**
+    A pair reuses both sides' judgments, so the pairs are not independent. To
+    bound that, among the acted items each item is the upper side of at most
+    five pairs and the lower side of at most five; each pin or dismissal
+    takes at most five unmarked partners, and each unmarked item serves at
+    most five. Counterparts are picked by a fixed rotation that skips one
+    already used five times. The Wilson bound below is computed over pairs
+    anyway: the cap limits how far one judgment can be counted, and it does
+    not make the pairs independent. A dimension clears the bar only with at
+    least 35 decisive pairs; the gen_saas readiness check counts the pairs an
+    index implies before any call.
+  - **The curve is pairwise, per dimension.** At threshold t an item's delta
+    is its judged level when accepted at t, else 0, as the product ranks it.
+    A pair is correct when the deltas order it as the owner did, wrong when
+    they reverse it, and decides nothing on a tie; ties are counted and
+    excluded. For a pairwise curve, `n` is the decisive pairs, precision is
+    correct over decisive, and coverage is correct over the scored pairs.
+    The chosen threshold follows *How a threshold is chosen* with decisive
+    pairs in place of routed cases. A pair with an unscored side is
+    excluded, never scored as wrong.
+  - **Rows.** A dimension's result is written to each of its level labels,
+    because the product accepts a level by its label's row: one threshold per
+    dimension, with no per-level precision. A dimension with too few pairs is
+    `n/a` on every level label, its row carrying the point with the most
+    decisive pairs. A run holds owner-action labels or level labels, never
+    both, and a mixed run cannot be applied.
+  - **Paced.** Eval calls count toward the local rate limit (*Budget*), so
+    the run pauses a minute between batches of at most 50 cases.
 - **n/a reads "insufficient evidence"** in `judgment-eval`'s run and apply
   lines: the label stays disabled.
 - **One case, one label.** A question set's eval reading names exactly one
@@ -449,7 +720,9 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   relation (`duplicate`, `related` or `unrelated`). A case with no candidate
   or several is unscored `malformed_answer`, never scored. Its severity Score
   is not evaluated, so severity has no threshold and is only ever shown as an
-  uncalibrated suggestion.
+  uncalibrated suggestion. `ticket_blocking` (DND-1057) is the same shape:
+  one case is ONE (finding, candidate) pair, labelled `blocks` or
+  `does_not_block`; a case with any other candidate count is never scored.
 
 ## Finding triage: the harness script
 
@@ -518,9 +791,17 @@ The second product consumer (DND-991, DND-1054). The server is gen_saas
 `ai/skills/athena:ticket-management/scripts/ticket-classify`; the procedure is
 athena:ticket-management → *Filing a ticket* (the Classify bullet).
 
-- **The script writes nothing.** It has no tracker client: it reads no ticket
-  and writes to no tracker. The filer sets the properties. It adds no policy of
-  its own and prints what the server decided.
+- **The script writes nothing.** It writes to no tracker. Without `--epic`
+  it reads no ticket either. With `--epic` it reads the epic's candidate
+  tickets through the read-only `ai/lib/notion_read.rb`, which refuses any
+  request but a data-source query and a page or block-children read. The
+  filer sets the properties. It adds no policy of its own and prints what the
+  server decided.
+
+  **Later (2026-09-30, DND-1057):** this read "It has no tracker client: it
+  reads no ticket and writes to no tracker." Superseded by the `--epic` path
+  part below, which must read the candidates in code (Product Requirements
+  R1057-3). It still writes nothing.
 - **The filer's values are required.** The caller sends its own `Kind`,
   `Severity` and `Security` (tracker spelling; a `Feature` sends no Severity).
   Every fallback starts from them, so a fallback is always defined and is
@@ -564,6 +845,57 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   inside a 200 is not unavailable: it is a decision with source `filer`.
 - **The machine token never reaches argv or the environment**; it goes to curl
   on stdin, as for finding triage.
+- **A finding's Path** (DND-1057). With `--epic <page id>` (and optionally
+  `--found-while DND-N` and `--blocks DND-N`, the filer's claim), the script
+  also decides `Path` through `POST /api/v1/judgments/ticket_blocking`, after
+  the classification and independently of it:
+  - It reads the candidates first: the epic's open `Path` = `Critical`
+    tickets (not Done, Cancelled or Won't Fix), by ID ascending, at most 10,
+    and prints how many it considered, `0 candidates considered` included. A
+    failed read is its own `CANDIDATES UNAVAILABLE` line, never 0. A
+    `--blocks` that is not one of them is a usage error (exit 2) and nothing
+    is sent.
+  - A ticket the filer files as a `Feature` is never sent (its Path is
+    authored). The Path part does not wait for the classification, so a
+    Kind the server decides differently does not change this. With no candidates, or
+    for an introduced security issue with `--found-while`, the server decides
+    by rule and makes no model call. `--epic` with `--ref` or `--json`, and
+    `--found-while` or `--blocks` without `--epic`, are usage errors.
+  - The output is `Path: <value> (<source>)`, then `Blocks: DND-N` or
+    `Blocks: none`, then the server's second provenance line verbatim, which
+    starts `Jev path: `. The source is `jev` (an accepted judgment), `filer`
+    (the claim stands) or `rule` (introduced security, no call). A `filer`
+    or `rule` value carries a reason: one from *The closed reason list*, or
+    one that is not a fallback (`shadow`, `policy_guard`,
+    `introduced_security`, `no_candidates`, `no_blocks_judged`). The script
+    refuses, as an unreadable answer, a target outside the candidates, a
+    `rule` answer for anything but an introduced security issue's Found while
+    ticket, and a `jev` `Off` over a security finding's claim. It is a separate line, so the classification line
+    DND-1354 and DND-1056 parse is unchanged. Its `would` object is the
+    decision the policy would take in `on`, so a shadow report can measure
+    it.
+  - Unavailable is exit 3 for the path part alone: `PATH UNAVAILABLE: `
+    followed by the same cause lines as above, or the `CANDIDATES
+    UNAVAILABLE` line, each ending with the same clause, then the filer's claim under
+    `Decided (filer; path unavailable):`. An introduced security issue with
+    `--found-while` still reads `Blocking` onto that ticket in the fallback,
+    since it is a rule, not a judgment. The exit is the higher of the two
+    parts'.
+- **The open backlog is reclassified the same way** (DND-1056):
+  `scripts/ticket-reclassify plan` sends each open, non-Feature ticket's
+  CURRENT values as the filer's and its id as `ticket.ref`, and records the
+  server's decided values and provenance line verbatim. It reads Notion only
+  (`ai/lib/notion_read.rb` refuses any other request) and writes no tracker;
+  the agent applies only `Kind`, `Severity`, `Security` and the line. A ticket
+  whose values differ from its last provenance line is locked: a hand edit
+  wins. A line at the server's model and versions now, with no fault reason
+  and every property `on` or the modes now, is not re-judged (the first
+  ticket asked is, since its answer is what reports the model, versions and
+  modes now). A fault answer is never recorded as a classification: an
+  account-wide fault stops the plan, a per-call one skips the ticket as
+  `unavailable`. `proof` re-reads every written ticket and fails on any
+  difference, an unreadable page included. Procedure:
+  athena:ticket-management → *Reclassifying the backlog*.
 
 ## Budget
 
@@ -578,8 +910,12 @@ $10 / month cap".
 - **Per-use-case shares** of both caps: `slack_routing` 10%, `finding_triage`
   20%, `priority_scoring` 20%, `ticket_classification` 10%, `eval:*` 40%.
   `ticket_classification` is one share group for `ticket_kind`,
-  `ticket_severity` and `ticket_security` together. A call must fit both its
-  use case's share and the total.
+  `ticket_severity`, `ticket_security` and `ticket_blocking` together. A call
+  must fit both its use case's share and the total.
+
+  **Later (2026-09-30, DND-1057):** the group was the three classification
+  use cases. `ticket_blocking` joins it with no new share: it is one call per
+  finding filed with `--epic`, and the 10% is unchanged.
 
   **Later (2026-09-28):** this read `finding_triage` 30% and had no
   `ticket_classification` share. Superseded by DND-991 (decision J-991-5),
@@ -611,8 +947,22 @@ work Slack webhooks end. Personal-domain use (D2) rides the same key and ends
 with it.
 
 - **The key is held in `Athena.Secrets`** as `(owner_id, :typesafe_api_key)`,
-  per DND-711. It is stored out of band by the owner. No API or UI path writes
-  it.
+  account-wide (`scope_ref` `""`). The owner enters it on `/secrets`, the
+  write-only, owner-authenticated secret page (DND-1239). That is rule 1 of
+  gen_saas ADR 18 (`adrs/18-owner-secrets-through-owner-pages.md`, #549,
+  merged `cc9cfc7a`). That page stores for the logged-in owner's own account
+  only and never returns or logs the value. No API route or MCP tool writes
+  the key. No operator procedure may pass it over rpc (ADR 18 rule 3),
+  because an rpc parameter stays in the SSM command history. That
+  last rule is a procedure, not an enforced guarantee: an rpc evaluates
+  arbitrary code, so it could still call `Athena.Secrets` directly.
+
+  **Later (2026-09-30):** this bullet said the key "is stored out of band by
+  the owner. No API or UI path writes it." Superseded by DND-1239 (gen_saas
+  #553, `82916630`): the out-of-band store was an rpc over SSM, and the owner
+  now enters the key on `/secrets` (`Athena.OwnerSecrets.store/2`;
+  `Athena.Secrets.SecretType` classes `typesafe_api_key` as `:owner_entered`,
+  scope `:account`).
 - **Loss of access is a designed state.** A revoked key or a gone account falls
   back exactly like a missing key: loud, one health-transition alert, and no
   retry loop or crash loop.
@@ -660,5 +1010,20 @@ with it.
       lowers a security classification or replaces `Feature`, and on an
       unreachable server, a refusal, a server failure or an unreadable answer
       exits 3 with a distinct line and the filer's values.
+- [ ] Ticket blocking chooses its candidates in code (open `Critical`, by ID,
+      at most 10), prints their count even when 0 and a failed read as its
+      own line, never sends a `Feature`, decides an introduced security
+      issue by rule, never sets `Critical` or `Promoted`, never removes a
+      security ticket's claim by judgment, and prints one edge at most.
+- [ ] Reclassifying the backlog reads Notion only and writes no tracker,
+      sends the current values as the filer's, skips a ticket whose values
+      differ from its last provenance line as locked, never records a fault
+      fallback as a classification, and its `proof` counts an unreadable page
+      as a mismatch.
 - [ ] A question set with several questions defines its eval case unit; a
       finding triage case is one (finding, candidate) pair.
+- [ ] A request body carrying an `owner_action` label is refused; only the
+      server builds an owner-action run, from the owner's own index, with no
+      item in more than five pairs on either side of a pair group.
+- [ ] An owner-action run's threshold is one per dimension, written to each
+      of that dimension's level labels; a mixed run is never applied.

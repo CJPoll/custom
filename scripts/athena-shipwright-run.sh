@@ -291,7 +291,7 @@ esac
 #     temp paths and SHAs.
 #   * classify_block reads the SESSION's output only, measured before teardown
 #     appends git's own chatter to the same log (see section 6).
-BLOCK_PATTERNS='usage limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
+BLOCK_PATTERNS='usage limit|session limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
 classify_block() { # <log> <bytes> -> the matched signature in the first <bytes> of <log>, or nothing
   [ -r "$1" ] || return 0
   head -c "${2:-0}" -- "$1" 2>/dev/null | grep -m1 -i -E -o "${BLOCK_PATTERNS}" 2>/dev/null || true

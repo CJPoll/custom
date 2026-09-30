@@ -56,7 +56,8 @@ path fleets already share) it:
      No flag skips this; integration-gate writes it only on INTEGRATION OK;
   4. optionally refuses while <workflow-file> has a queued/running run on <base>;
   5. merges via gh-athena pr merge --squash --match-head-commit <head> (no --auto);
-  6. confirm-merged --pr <n> --fetch (bounded retry);
+  6. confirm-merged --pr <n> --fetch (bounded retry), also after a failed
+     merge call, which can still have landed (DND-1324);
   7. asserts the merge commit's parent == the checked base and its tree ==
      the gated head's tree;
   8. releases the lock and runs teardown-stack --pr <n> --repo DIR, which
@@ -66,7 +67,8 @@ Exit (every non-zero prints a Fix: line):
   0 merged, confirmed, tree matches          (landed)
   2 usage / prerequisite / non-GitHub remote (nothing landed)
   3 stale: PR not open, head moved, or base not contained -- re-gate (nothing landed)
-  4 forge refused the merge                  (nothing landed)
+  4 forge refused the merge, and confirm-merged does not show it landed
+    (a failed call that DID land is verified and reported as a merge)
   5 required-idle workflow busy -- retry later (nothing landed)
   6 lock wait timed out; the lock is never broken (nothing landed)
   7 LANDED UNGATED: parent or tree mismatch -- re-gate origin/main now, report it
@@ -195,14 +197,28 @@ if [ -n "${IDLE_WF}" ]; then
     "wait for that deploy to finish (athena:merge-boarding -> GitHub path), then re-run; nothing was merged."
 fi
 
-( cd "${REPO}" && "${AI_BIN}/gh-athena" pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}" ) \
-  || die 4 "gh-athena pr merge ${PR} refused or failed" "read the wrapper's own Fix: above (checks not green, conflict); nothing was merged."
-
+# confirm_landed <tries> -- confirm-merged, bounded; sets confirmed=1 on a landing.
 confirmed=""
-for _ in 1 2 3 4 5 6; do
-  if "${AI_BIN}/confirm-merged" --pr "${PR}" --repo "${REPO}" --fetch >/dev/null 2>&1; then confirmed=1; break; fi
-  sleep "${LOCKED_MERGE_CONFIRM_SLEEP:-20}"
-done
+confirm_landed() {
+  local i
+  for i in $(seq 1 "$1"); do
+    if "${AI_BIN}/confirm-merged" --pr "${PR}" --repo "${REPO}" --fetch >/dev/null 2>&1; then confirmed=1; return 0; fi
+    [ "${i}" -lt "$1" ] && sleep "${LOCKED_MERGE_CONFIRM_SLEEP:-20}"
+  done
+  return 1
+}
+
+# A failed merge call does not mean nothing landed (DND-1324: GitHub answered
+# 502 after the squash landed, and exit 4 said "nothing was merged"). Ask the
+# forge before claiming either; a landing goes on to the same checks below.
+if ! ( cd "${REPO}" && "${AI_BIN}/gh-athena" pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}" ); then
+  confirm_landed 3 \
+    || die 4 "gh-athena pr merge ${PR} refused or failed, and confirm-merged does not show it landed" \
+         "read the wrapper's own Fix: above (checks not green, conflict). If it was a forge error (5xx, timeout), check the PR on the forge before re-running."
+  echo "locked-merge: the merge call failed, but PR ${PR} landed (confirm-merged); verifying it like any other merge" >&2
+fi
+
+[ -n "${confirmed}" ] || confirm_landed 6
 [ -n "${confirmed}" ] || die 8 "merge of PR ${PR} ran but confirm-merged did not confirm it" \
   "check the PR on the forge by hand; do not retry the merge blind."
 

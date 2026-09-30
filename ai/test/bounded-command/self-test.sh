@@ -5,4 +5,4 @@
 # self-test.sh).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec ruby "${here}/bounded_command_test.rb"
+exec /usr/bin/ruby "${here}/bounded_command_test.rb"
