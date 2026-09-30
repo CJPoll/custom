@@ -283,6 +283,12 @@ d	e"
   t eq "$(unwrap_index ruby timeout 5 x)" 1
   t eq "$(unwrap_index ruby -e 1 x)" 0
   t eq "$(unwrap_index bash -o)" 2
+  # shopt -O and bash's startup switches are bash's alone: dash refuses
+  # them and zsh reads -O as a flag, so there the shell stays the COMMAND.
+  t eq "$(unwrap_index bash -O extglob --norc x)" 4
+  t eq "$(unwrap_index zsh -O x y)" 0
+  t eq "$(unwrap_index dash --posix x)" 0
+  t eq "$(unwrap_index sh -eu x)" 2
   t eq "$(eval_calls '' ruby ai/bin/admiral-eval --run --concurrency 8)" 8
   t eq "$(eval_calls 6 env -u ATHENA_EVAL_CONCURRENCY ruby -w ai/bin/admiral-eval --run)" 4
   t eq "$(eval_calls 6 ruby ai/bin/critic-eval --run)" 6
@@ -1466,9 +1472,14 @@ printf 'exit 0\n' >"$W/fake49/critic-review"
 RUBY49=/usr/bin/ruby
 [ -x "$RUBY49" ] || RUBY49=ruby
 w49() { jq -s --arg l "$2" '[.[] | select(.event == "acquired" and .label == $l) | .weight] | first' "$1" 2>/dev/null; }
+# The syntax check runs first, so the cpu pool's events exist before the
+# absence check below reads them (a missing file must not pass it).
+timeout 20 "$BIN" --label C49 -- "$RUBY49" -c "$W/fake49/admiral-eval" >/dev/null 2>&1
+check 49-syntax-check-cpu eq "$(w49 "$POOL/events.jsonl" C49)" 1
 timeout 20 "$BIN" --label R49 -- "$RUBY49" "$W/fake49/admiral-eval" --run --concurrency 4 2>"$W/R49.err"; rc=$?
 check 49-ruby-eval-ran eq "$rc" 0
 check 49-ruby-eval-model-weight eq "$(w49 "$POOL/model/events.jsonl" R49)" 4
+check 49-cpu-events-exist present "$POOL/events.jsonl"
 check 49-ruby-eval-not-cpu eq "$(w49 "$POOL/events.jsonl" R49)" null
 timeout 20 "$BIN" --label S49 -- bash "$W/fake49/critic-review" --base main 2>/dev/null
 check 49-bash-critic-model eq "$(w49 "$POOL/model/events.jsonl" S49)" 1
@@ -1476,8 +1487,6 @@ check 49-bash-critic-model eq "$(w49 "$POOL/model/events.jsonl" S49)" 1
 timeout 20 "$BIN" -- "$RUBY49" "$W/fake49/admiral-eval" --run 2>/dev/null
 l49="$(jq -rs '[.[] | select(.event == "acquired") | .label] | last' "$POOL/model/events.jsonl" 2>/dev/null)"
 check 49-default-label eval '[[ "$l49" == *" admiral-eval" ]]'
-timeout 20 "$BIN" --label C49 -- "$RUBY49" -c "$W/fake49/admiral-eval" >/dev/null 2>&1
-check 49-syntax-check-cpu eq "$(w49 "$POOL/events.jsonl" C49)" 1
 unset ATHENA_TEST_MODEL_SLOTS
 
 # 48 (DND-1357): a fixture that ends on its own hang cap says so by name.

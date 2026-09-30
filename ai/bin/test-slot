@@ -527,16 +527,17 @@ unwrap_index() {
         ;;
       bash | sh | dash | zsh)
         # DND-1365: `bash [OPTS] SCRIPT` runs SCRIPT. Skipped: shell flag
-        # clusters that still run SCRIPT, set/shopt -o/-O NAME, and bash's
-        # startup-file switches. -c, -s, -i, -n, -l, -r (and anything else)
-        # are unknown here, so the shell stays the COMMAND.
+        # clusters that still run SCRIPT and set -o/+o NAME; for bash only,
+        # shopt -O/+O NAME and its startup-file switches (dash refuses them,
+        # zsh reads -O as a flag). -c, -s, -i, -n, -l, -r (and anything
+        # else) are unknown here, so the shell stays the COMMAND.
         while ((i < n)); do
           a=${v[i]}
-          case $a in
-            --) i=$((i + 1)); break ;;
-            -o | +o | -O | +O) i=$((i + 2)) ;;
-            --noprofile | --norc | --posix) i=$((i + 1)) ;;
-            [-+]*)
+          case $b:$a in
+            *:--) i=$((i + 1)); break ;;
+            *:-o | *:+o | bash:-O | bash:+O) i=$((i + 2)) ;;
+            bash:--noprofile | bash:--norc | bash:--posix) i=$((i + 1)) ;;
+            *:[-+]*)
               [[ $a =~ ^[-+][aefhuvxBCEHPT]+$ ]] || { printf '%s\n' "$w"; return; }
               i=$((i + 1))
               ;;
