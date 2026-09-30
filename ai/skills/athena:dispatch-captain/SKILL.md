@@ -24,6 +24,15 @@ a Mission is unblocked and has a free slot (worktree already created via
    `athena-captain-DND-398`) — never the bare role name. Several run
    concurrently; `ListAgents` can't disambiguate identical bare names, and a
    report aimed at one can silently misroute.
+   **Start the Agent `description` with the Mission's ticket ref**
+   (`DND-541 captain`) and put a line `Mission: DND-541` in the brief. The
+   fleet-lifecycle hook maps the spawn to its Mission from those two places
+   only; the agent name is not read. A description naming two or more refs is
+   ambiguous and never mapped, so a batch names only its first ticket's ref
+   there. Rules: `ai/contracts/athena-events.md` → *Hook missions carry
+   `ticket_ref` only*. An unmapped spawn shows as an `unmapped captain` row on
+   the fleet page. Measured: three unmapped spawns (2026-09-28, 09-29, 09-30),
+   the last a forward captain whose description lacked the ref.
 
 Give the captain, in the brief:
 
