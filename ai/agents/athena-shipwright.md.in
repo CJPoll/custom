@@ -372,8 +372,8 @@ so the list was stale from that moment and nothing could have caught it.
   its commits for the iteration history — started from
   `scripts/test/athena-inbox-client/self-test.sh`, widened twice under
   review.)
-- `ai/bin/harness-gate --self-test` — the runner itself (not in its own CHECKS;
-  it would recurse). Run it when you touch the gate's composition.
+- `ai/bin/harness-gate --self-test` — the runner itself. Its CHECKS run it as
+  groups (`--group NAME`). Run it when you touch the gate's composition.
 - Any skill or script self-test relevant to what you changed.
 
 ## Invariants — never violate these
