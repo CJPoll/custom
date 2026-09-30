@@ -624,9 +624,13 @@ wrapped_env() {
 #     --concurrency K, else its per-side default (it ignores the env var).
 #     Weight 2K.
 #   block-optimize: runs variant-eval --corpus full at that default. 2K.
-# A K the eval would refuse (not an integer in EvalPool's range) weighs the
-# eval's default K: the eval exits 2 before any call, so this over-weighs an
-# instant, never under-weighs a run. Prints nothing, returning 1, when the
+# A K that is not plain digits in EvalPool's range weighs the most an eval can
+# run, EVAL_MAX_CONCURRENCY (per side for variant-eval). The eval parses K
+# with Ruby's Integer(raw, 10), which also takes " 12", "+12" or "1_2", so it
+# may run such a K; or it refuses it and exits 2 before any call. Either way
+# the weight is never below the calls. The scan does not skip a value flag's
+# value: every eval's StrictArgv refuses a value starting with `-`, so a
+# `--run` or `--corpus` word is always the flag itself. Prints nothing, returning 1, when the
 # COMMAND is not one of these or will make no model call (no --run, a
 # deterministic corpus, --self-test, --help); the caller falls back to the
 # pool's default weight. The caller clamps a weight over the budget.
@@ -664,10 +668,12 @@ eval_calls() {
       ;;
     *) return 1 ;;
   esac
-  if [[ $k =~ ^[0-9]{1,6}$ ]] && ((10#$k >= 1 && 10#$k <= EVAL_MAX_CONCURRENCY)); then
+  if [ -z "$k" ]; then
+    k=$dflt
+  elif [[ $k =~ ^[0-9]{1,6}$ ]] && ((10#$k >= 1 && 10#$k <= EVAL_MAX_CONCURRENCY)); then
     k=$((10#$k))
   else
-    k=$dflt
+    k=$EVAL_MAX_CONCURRENCY
   fi
   printf '%s\n' "$((k * mult))"
 }

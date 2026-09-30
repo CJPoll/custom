@@ -219,8 +219,21 @@ d	e"
   t eq "$(eval_calls 6 env -i ai/bin/critic-eval --run)" 4
   t eq "$(eval_calls '' env ATHENA_EVAL_CONCURRENCY=3 ai/bin/critic-eval --run --only core)" 3
   t eq "$(eval_calls '' ai/bin/critic-eval --run)" 4
-  t eq "$(eval_calls x ai/bin/admiral-eval --run)" 4
-  t eq "$(eval_calls '' ai/bin/admiral-eval --run --concurrency 99)" 4
+  # A K this parser does not read as plain digits in 1..16 weighs the most
+  # an eval can run (16, clamped to the budget by the caller): Ruby's
+  # Integer(raw, 10) also accepts " 12", "+12" and "1_2", so the eval may run
+  # that K, and the weight must never be lower than the calls (review round).
+  t eq "$(eval_calls x ai/bin/admiral-eval --run)" 16
+  t eq "$(eval_calls ' 12' ai/bin/admiral-eval --run)" 16
+  t eq "$(eval_calls '+12' ai/bin/critic-eval --run)" 16
+  t eq "$(eval_calls 1_2 ai/bin/admiral-eval --run)" 16
+  t eq "$(eval_calls '' ai/bin/admiral-eval --run --concurrency 99)" 16
+  t eq "$(eval_calls '' ai/bin/admiral-eval --run --concurrency 17)" 16
+  t eq "$(eval_calls '' ai/bin/admiral-eval --run --concurrency 0)" 16
+  t eq "$(eval_calls '' ai/bin/variant-eval --variant v --corpus full --concurrency 17)" 32
+  # test-slot's own copies of the eval constants (pinned to their sources in 47).
+  t eq "$EVAL_MAX_CONCURRENCY $EVAL_DEFAULT_CONCURRENCY $EVAL_ENV $VARIANT_SIDE_CONCURRENCY" \
+    "16 4 ATHENA_EVAL_CONCURRENCY 2"
   t eq "$(eval_calls '' ai/bin/variant-eval --variant v --corpus full)" 4
   t eq "$(eval_calls '' ai/bin/variant-eval --corpus full --variant v --concurrency 3)" 6
   t eq "$(eval_calls 9 ai/bin/variant-eval --variant v --corpus full)" 4
