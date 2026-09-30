@@ -183,7 +183,8 @@ Give the captain, in the brief:
   timed out after 900 s of its 1500 s spent queued, and DND-790's timed out with
   3/3 slots held and the gate never run. Bound the wait with
   `--wait-timeout` instead.
-- **The one-command final check.** Every brief carries this line: *"Your
+- **The one-command final check.** Every brief carries this line, unless the
+  branch is published (*The published-branch variant* below): *"Your
   final check is ONE command on your final commit: `cd <worktree> &&
   ~/dev/custom/ai/bin/test-slot -- timeout 1500
   ~/dev/custom/ai/bin/integration-gate --with-critic --rebase`. It runs the
@@ -196,7 +197,8 @@ Give the captain, in the brief:
   in one round, commit, and run it again."* It replaces a separate
   `critic-review` then gate on the final commit (`athena:merge-boarding` →
   *Landing onto a moving main*).
-- **The don't-chase-main rule.** Every brief carries this line: *"Your gate bar
+- **The don't-chase-main rule.** Every brief carries this line, unless the
+  branch is published (*The published-branch variant* below): *"Your gate bar
   is ONE green gate on a head that contained `origin/main` when the gate
   started. If main moves after that, do not rebase and re-gate to catch it:
   report the gated SHA and the main it contained. I forward and re-gate the
@@ -220,6 +222,35 @@ Give the captain, in the brief:
   the gap between landings, so the retry refused too (DND-907, DND-896+945 and
   DND-902 each refused twice on 2026-09-28). It now takes the slot first and
   reads main inside it, and `--rebase` replays the branch there.
+- **The published-branch variant.** A branch is published when it already has
+  an open PR/MR at dispatch, or another branch stacks on it. A rebase rewrites
+  SHAs that a reviewer, a CI run or a child branch holds. `--rebase` also
+  replays with `--no-rebase-merges`, so it drops the forward merges already on
+  the branch and re-raises every conflict they resolved. For a published
+  branch the brief carries this line in place of the two above: *"This branch
+  is published: never rebase it, never force-push it. Bring main in with
+  `git merge origin/main`, resolve, commit, and push as Athena with a plain
+  push. Your final check is ONE command on that head: `cd <worktree> &&
+  ~/dev/custom/ai/bin/test-slot -- timeout 1500
+  ~/dev/custom/ai/bin/integration-gate --with-critic` (no `--rebase`). Quote
+  its INTEGRATION OK line. On a RED gate or a BLOCK, fix every finding from
+  both in one round, commit, and run it again. Your gate bar is ONE green gate
+  on a head that contained `origin/main` when the gate started. If it refuses
+  because main moved while you queued, merge `origin/main` once more and run
+  it once more; if it refuses again, stop and report. If main moves after a
+  green gate, do not chase it: report the gated SHA and the main it contained.
+  Merge main in earlier only on a real conflict or when I ask."* The bar is
+  unchanged: a green gate and a critic PASS on a head that contains
+  `origin/main`. Merging forward is the move `locked-merge` names on a moved
+  base, and the one *No replay churn* assumes ([[athena:merge-boarding]]).
+  The one rebase a published branch takes is a stacked child's `--onto` after
+  its parent squash-lands ([[athena:captain-return]]); you brief that by hand.
+
+  **Later (2026-09-30):** the final-check and don't-chase-main lines were for
+  every brief. Superseded for a published branch: their `--rebase` and
+  force-push rewrote open PRs, and admirals in two fleets overrode them by
+  hand (gen_saas 2026-09-28-unified-priorities: DND-1155, -1188, -1239,
+  -1253, ADR-18, DND-1350; 2026-09-28-event-platform: DND-229).
 
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)
