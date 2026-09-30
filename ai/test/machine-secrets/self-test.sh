@@ -83,7 +83,7 @@ write_registry "${BASE_ENTRIES[@]}"
 
 TENANT="${TMP}/tenant"
 mkdir -p "${TENANT}/backend/ai-artifacts/node_modules/pkg"
-git -C "${TENANT}" init -q
+git -C "${TENANT}" init -q -b main
 cat > "${REPO}/ai/inbox/registry.json" <<EOF
 {"v":1,"projects":[{"file":"tenant.json","entry":{"repo":"${TENANT}/.git"}},
                    {"file":"gone.json","entry":{"repo":"~/no-such-repo/.git"}}]}
@@ -199,9 +199,9 @@ git -C "${TMP}/mover" -c user.email=t@example.invalid -c user.name=t commit -q -
 git -C "${TMP}/mover" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
 STALE_NEW="$(git -C "${TMP}/mover" rev-parse HEAD)"
 # The cases below prove nothing unless origin really moved one commit past the
-# local ref. Say so here, naming the three SHAs, not as three downstream misses.
+# local ref. Say so here, naming the three SHAs, before the downstream cases miss.
 ORIGIN_NOW="$(git --git-dir="${ORIGIN}" rev-parse --verify -q refs/heads/main)"
-if [ -n "${ORIGIN_NOW}" ] && [ "${ORIGIN_NOW}" = "${STALE_NEW}" ] && [ "${ORIGIN_NOW}" != "${STALE_BASE}" ] \
+if [ -n "${ORIGIN_NOW}" ] && [ "${ORIGIN_NOW}" = "${STALE_NEW}" ] \
    && [ "$(git --git-dir="${ORIGIN}" rev-parse -q --verify "${ORIGIN_NOW}^")" = "${STALE_BASE}" ]; then
   ok "(fixture) origin's main moved one commit past the local origin/main"
 else
