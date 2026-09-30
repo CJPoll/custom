@@ -30,7 +30,7 @@ Sections are cited **by name**, never by number.
 **Conformance language.** MUST / MUST NOT / SHOULD / MAY carry their usual force.
 A **use case** is one fixed purpose Athena judges for (`finding_triage`,
 `slack_routing`, `priority_scoring`, `ticket_kind`, `ticket_severity`,
-`ticket_security`, or `eval:<use_case>`). A **question set** is
+`ticket_security`, `ticket_blocking`, or `eval:<use_case>`). A **question set** is
 the versioned code that turns a use case's input into the request. A **caller**
 is the consumer that asked for a judgment and acts on the result. An
 implementation that violates a MUST is non-conformant.
@@ -64,7 +64,9 @@ score on a fixed scale — with a confidence. Four consumers use it today:
 - **Ticket classification** (DND-991, DND-1054): when a ticket is filed, decide
   its `Kind`, `Severity` and `Security` by deterministic policy from the
   filer's values and three judgments (`ticket_kind`, `ticket_severity`,
-  `ticket_security`).
+  `ticket_security`). For a finding filed with `--epic` (DND-1057), also
+  decide its `Path` (`Blocking` or `Off`) and the one critical-path ticket it
+  blocks, from the filer's claim and a fourth judgment (`ticket_blocking`).
 
 Non-goals. A judgment never:
 
@@ -110,10 +112,26 @@ Concretely:
   the default `vip_asker` weight exceeds the largest combined judged delta.
 - **Ticket classification sets only Kind, Severity and Security**, through
   deterministic policy. It never lowers a security classification, never
-  assigns or replaces `Feature`, and never touches `Status` or `Path`. Every
+  assigns or replaces `Feature`, and never touches `Status`. Every
   fallback starts from the filer's own value; the one change with no judgment
   is a raise (the Vulnerability floor, *Ticket classification: the harness
   script*).
+- **Ticket blocking decides only a finding's `Path` and one `Blocks` edge**
+  (DND-1057), through deterministic policy (gen_saas
+  `TicketBlockingPolicy`). The value is `Blocking` or `Off`, never `Critical`
+  or `Promoted`: those are authored, and a planned ticket (a `Feature`) is
+  never sent. The edge may point only at a candidate the harness chose in
+  code: the epic's open `Critical` tickets, at most 10, by ID. A security
+  issue the ticket's own change introduced blocks the ticket it was found
+  while working, by rule, with no call. A judgment never removes a blocking
+  claim the filer made for a finding whose Security is not `none`. The
+  filer sets `Path` and wires the edge from the printed decision; nothing
+  writes the tracker.
+
+  **Later (2026-09-30, DND-1057):** the bullet above ended "and never touches
+  `Status` or `Path`". Superseded by the ticket-blocking bullet: Path's
+  `Blocking`/`Off` choice for a finding is now decided by policy, with a
+  judgment as one input. `Critical` and `Promoted` stay authored.
 - **Arithmetic, dates, sender identity and all policy stay in code.** jev-1.13
   is unreliable at counting, math, dates and indirection, so none of them is
   asked of it.
@@ -142,6 +160,7 @@ the request's `state`.
 | `slack_routing` | the owner's own message text and its line `kind` (`im`, `mpim` or `mention`); and the conversation before it: of the six most recent top-level messages in the same channel within the 60 minutes before it (whoever sent them, oldest first), the owner's own text (each at most 500 characters), and Athena's own posts as the posting session's label only (`walt_ui`, `harness`, `gen_saas` or `other`), never their text. Anyone else's message holds its place among the six and is sent in no form: nobody else's text is ever sent. The window, the cap and the text cap are part of the question-set version (`slack-routing-v2`) |
 | `priority_scoring` | the item's `title`, `source` and `status`, plus `message_text` for a `slack_ask`; never a date and never the asker |
 | `ticket_kind`, `ticket_severity`, `ticket_security` | the ticket's title, body (at most 2,000 characters) and project; never its status, dates, assignee or author |
+| `ticket_blocking` | the finding's title, body (at most 2,000 characters) and project; up to 10 candidate tickets as ref, title and summary (at most 800 characters of the candidate's body, its requirements); never a status, date, assignee, author or the filer's claim |
 | `eval:<use_case>` | the same request the product use case builds, for a labelled case |
 
 **Later (2026-09-28):** the `slack_routing` row read "the owner's own message
@@ -340,7 +359,10 @@ label is n/a, or where only a non-advisory label is enabled, cannot turn a use
 case on. Finding triage's advisory labels are `duplicate` and `related`;
 `unrelated` is never advice, so an enabled `unrelated` alone does not count.
 Every option of `ticket_kind`, `ticket_severity` and `ticket_security` is an
-advisory label, since the policy may act on each. A
+advisory label, since the policy may act on each. `ticket_blocking`'s one
+advisory label is `blocks`: an enabled `does_not_block` alone cannot turn it
+on, although in `on` the policy also acts on an accepted `does_not_block`
+(it may remove a non-security claim). A
 use case whose question set declares no advisory label cannot be turned on.
 **`shadow` is refused** unless the use case has a registered question set,
 because shadow makes real calls. **`off` is never refused.** A use case MAY
@@ -553,6 +575,21 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
     and body without the `Jev classification:` line or any classification
     statement ("Kind Bug", "Severity: HIGH", "a HIGH severity", "Bug
     MEDIUM"), so a case is judged on content, not on a label leak.
+  - `ticket_blocking` (DND-1057) is one case per (finding, candidate) pair,
+    in `ticket-blocking-{labels,corpus}.jsonl`, from post-cutoff findings
+    (any Kind but `Feature`), all `tracker_record` and weak. `blocks`: a
+    finding with `Path` = `Blocking` and a `Blocks` edge onto a `Critical`
+    ticket, one pair per such edge. `does_not_block`: a finding with `Path`
+    = `Off` whose Found while ticket's epic has open `Critical` tickets, one
+    pair per ticket, at most 3 by ID. The candidate is sent as the script
+    sends it (title, first 800 characters of its body); the finding drops its
+    `Jev` lines, its Path statements, refs and stated edges. Excluded by
+    reason as above, plus `authored_path` (`Critical`, `Promoted`),
+    `path_unset`, `relations_truncated`, `blocking_without_critical_edge`,
+    `no_found_while`, `no_open_critical` and `candidate_unread`. A snapshot
+    fetched before DND-1057 (no Path) is refused, never read as unset. The
+    candidates are today's open tickets, not those open at filing: the
+    corpus is an approximation, and that is why its rows are weak.
 
   `ticket-corpus --shadow-report --since` measures DND-1055's shadow bar
   (Product Requirements R1055-3: at least 3 days, at least 35 accepted
@@ -563,6 +600,10 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   A judgment in mode `on` is excluded (`mode_on`: the value may be Jev's
   own), as are a Feature's Kind and Severity (`feature`) and an unset value
   (`current_unset`). Nothing accepted reads n/a, never 0.
+  `ticket_blocking`'s section reads each finding's last `Jev path:` line:
+  a shadow line whose `would` has source `jev` is an accepted judgment,
+  agreeing when the ticket's current `Path` (and, for `Blocking`, its
+  `Blocks` edge) matches. The bar is the same.
 - **n/a reads "insufficient evidence"** in `judgment-eval`'s run and apply
   lines: the label stays disabled.
 - **One case, one label.** A question set's eval reading names exactly one
@@ -572,7 +613,9 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   relation (`duplicate`, `related` or `unrelated`). A case with no candidate
   or several is unscored `malformed_answer`, never scored. Its severity Score
   is not evaluated, so severity has no threshold and is only ever shown as an
-  uncalibrated suggestion.
+  uncalibrated suggestion. `ticket_blocking` (DND-1057) is the same shape:
+  one case is ONE (finding, candidate) pair, labelled `blocks` or
+  `does_not_block`; a case with any other candidate count is never scored.
 
 ## Finding triage: the harness script
 
@@ -641,9 +684,17 @@ The second product consumer (DND-991, DND-1054). The server is gen_saas
 `ai/skills/athena:ticket-management/scripts/ticket-classify`; the procedure is
 athena:ticket-management → *Filing a ticket* (the Classify bullet).
 
-- **The script writes nothing.** It has no tracker client: it reads no ticket
-  and writes to no tracker. The filer sets the properties. It adds no policy of
-  its own and prints what the server decided.
+- **The script writes nothing.** It writes to no tracker. Without `--epic`
+  it reads no ticket either. With `--epic` it reads the epic's candidate
+  tickets through the read-only `ai/lib/notion_read.rb`, which refuses any
+  request but a data-source query and a page or block-children read. The
+  filer sets the properties. It adds no policy of its own and prints what the
+  server decided.
+
+  **Later (2026-09-30, DND-1057):** this read "It has no tracker client: it
+  reads no ticket and writes to no tracker." Superseded by the `--epic` path
+  part below, which must read the candidates in code (Product Requirements
+  R1057-3). It still writes nothing.
 - **The filer's values are required.** The caller sends its own `Kind`,
   `Severity` and `Security` (tracker spelling; a `Feature` sends no Severity).
   Every fallback starts from them, so a fallback is always defined and is
@@ -687,6 +738,33 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   inside a 200 is not unavailable: it is a decision with source `filer`.
 - **The machine token never reaches argv or the environment**; it goes to curl
   on stdin, as for finding triage.
+- **A finding's Path** (DND-1057). With `--epic <page id>` (and optionally
+  `--found-while DND-N` and `--blocks DND-N`, the filer's claim), the script
+  also decides `Path` through `POST /api/v1/judgments/ticket_blocking`, after
+  the classification and independently of it:
+  - It reads the candidates first: the epic's open `Path` = `Critical`
+    tickets (not Done, Cancelled or Won't Fix), by ID ascending, at most 10,
+    and prints how many it considered, `0 candidates considered` included. A
+    failed read is its own `CANDIDATES UNAVAILABLE` line, never 0. A
+    `--blocks` that is not one of them is a usage error (exit 2) and nothing
+    is sent.
+  - A `Feature` is never sent (its Path is authored). With no candidates, or
+    for an introduced security issue with `--found-while`, the server decides
+    by rule and makes no model call. `--epic` with `--ref` or `--json`, and
+    `--found-while` or `--blocks` without `--epic`, are usage errors.
+  - The output is `Path: <value> (<source>)`, then `Blocks: DND-N` or
+    `Blocks: none`, then the server's second provenance line verbatim, which
+    starts `Jev path: `. It is a separate line, so the classification line
+    DND-1354 and DND-1056 parse is unchanged. Its `would` object is the
+    decision the policy would take in `on`, so a shadow report can measure
+    it.
+  - Unavailable is exit 3 for the path part alone: `PATH UNAVAILABLE: `
+    followed by the same cause lines as above, or the `CANDIDATES
+    UNAVAILABLE` line, each ending with the same clause, then the filer's claim under
+    `Decided (filer; path unavailable):`. An introduced security issue with
+    `--found-while` still reads `Blocking` onto that ticket in the fallback,
+    since it is a rule, not a judgment. The exit is the higher of the two
+    parts'.
 - **The open backlog is reclassified the same way** (DND-1056):
   `scripts/ticket-reclassify plan` sends each open, non-Feature ticket's
   CURRENT values as the filer's and its id as `ticket.ref`, and records the
@@ -716,8 +794,12 @@ $10 / month cap".
 - **Per-use-case shares** of both caps: `slack_routing` 10%, `finding_triage`
   20%, `priority_scoring` 20%, `ticket_classification` 10%, `eval:*` 40%.
   `ticket_classification` is one share group for `ticket_kind`,
-  `ticket_severity` and `ticket_security` together. A call must fit both its
-  use case's share and the total.
+  `ticket_severity`, `ticket_security` and `ticket_blocking` together. A call
+  must fit both its use case's share and the total.
+
+  **Later (2026-09-30, DND-1057):** the group was the three classification
+  use cases. `ticket_blocking` joins it with no new share: it is one call per
+  finding filed with `--epic`, and the 10% is unchanged.
 
   **Later (2026-09-28):** this read `finding_triage` 30% and had no
   `ticket_classification` share. Superseded by DND-991 (decision J-991-5),
@@ -812,6 +894,11 @@ with it.
       lowers a security classification or replaces `Feature`, and on an
       unreachable server, a refusal, a server failure or an unreadable answer
       exits 3 with a distinct line and the filer's values.
+- [ ] Ticket blocking chooses its candidates in code (open `Critical`, by ID,
+      at most 10), prints their count even when 0 and a failed read as its
+      own line, never sends a `Feature`, decides an introduced security
+      issue by rule, never sets `Critical` or `Promoted`, never removes a
+      security ticket's claim by judgment, and prints one edge at most.
 - [ ] Reclassifying the backlog reads Notion only and writes no tracker,
       sends the current values as the filer's, skips a ticket whose values
       differ from its last provenance line as locked, never records a fault

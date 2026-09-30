@@ -249,7 +249,9 @@ other documents cite it by name.
   when a captain takes it) and wire the edge. If no, file it
   with `Path` = `Off` and **no** `Depends On` / `Blocks` edge onto a
   critical-path ticket. Severity alone does not make a finding block. Edges
-  between off-path tickets are fine.
+  between off-path tickets are fine. For a finding on an epic, `ticket-classify
+  --epic` decides this Path and edge (the Classify bullet in *Filing a
+  ticket*); your `--blocks` claim is its input.
 - **Security, split by origin.**
   - **A security issue the ticket's own change introduces blocks that ticket,**
     whatever its severity. It is fixed inside that ticket's work, before it
@@ -376,10 +378,21 @@ Changing one needs a new question-set version there.
     and write the first line (it ends
     `Fix: file the ticket as today; this is advisory.`) into the body instead.
   - **Exit 2:** a usage error. Fix the command and rerun.
-  - The script reads no ticket and writes nothing (contract
-    `ai/contracts/athena-judgments.md` → *Ticket classification: the harness
-    script*). For a finding, run *Before filing a finding* first: triage, then
-    classify.
+  - **A finding on an epic's work** (any Kind but Feature) adds
+    `--epic <epic page id>`, `--found-while DND-N` when it was found while
+    working a ticket, and `--blocks DND-N` when you judge it blocks an open
+    `Critical` ticket of that epic (the blocking test above). The script also
+    prints how many candidates it considered, `Path: <value> (<source>)`,
+    `Blocks: DND-N` or `Blocks: none`, and a `Jev path:` line. Set `Path`,
+    wire `Depends On`↔`Blocks` onto exactly the printed ticket (no edge on
+    `none`), and paste the `Jev path:` line under the classification line.
+    On `PATH UNAVAILABLE` or `CANDIDATES UNAVAILABLE`, file the Path it
+    prints under `Decided (filer; path unavailable):` and write that first
+    line into the body. The exit is 3 if either part was unavailable.
+  - The script writes nothing. It reads tickets only with `--epic`, through a
+    read-only client (contract `ai/contracts/athena-judgments.md` → *Ticket
+    classification: the harness script*). For a finding, run *Before filing
+    a finding* first: triage, then classify.
 - **Dedupe first (one root cause, one ticket).** Search open tickets in the
   same `Area` for the same root cause, by subsystem keyword and `Found while`.
   On a match, append the new site and its evidence to that ticket instead. A
