@@ -340,7 +340,7 @@ module Manager
 
     report = data["report"]
     if JudgmentEval.only_not_configured?(report)
-      err.puts "#{PROG}: no key; see DND-711. Fix: the owner stores the TypeSafe key (DND-711); every case was unscored not_configured, so nothing can be chosen."
+      err.puts "#{PROG}: no key; see DND-711. Fix: the owner enters the TypeSafe key on /secrets (DND-1239); every case was unscored not_configured, so nothing can be chosen."
       return 3
     end
     if report["scored"].zero?
