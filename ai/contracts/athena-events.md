@@ -5387,7 +5387,8 @@ departures (*Poller (fallback only)*), so the index cannot rely on it.
   `action_item` it is the on-demand read the Notion ingress already uses
   (*Sender verification and payload completeness*). The read is mapped through
   the same allow-list as an event (*The storage boundary*), and its result is
-  applied by the same rules as an event carrying that revision (*States*).
+  applied by the same rules as an event carrying that revision (*States*),
+  including *A restore is sticky until the source changes*.
   `forge_review`, `slack_ask` and `manual` items have no source read. A
   `forge_review` item closes by its family's events or by the owner; a
   `slack_ask` or `manual` item only by the owner or a lease. A forge item is
@@ -5604,7 +5605,7 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | created `proposed` | ingest, for a `slack_ask` | |
 | created `active` | ingest, for every other source; the owner, for `manual` | |
 | `proposed` → `active` (promote) | the owner only | |
-| `dismissed` or `done` → `active` (restore) | the owner only | |
+| `dismissed` or `done` → `active` (restore) | the owner only | `restored_from`: the undone `closed_by`, or `dismissed` (*A restore is sticky until the source changes*) |
 | `proposed` or `active` → `dismissed` | the owner only | |
 | `active` → `done` | the lease holder, through `priority_complete` | `closed_by: lease_complete` |
 | `active` → `done` | the owner | `closed_by: owner` |
@@ -5632,7 +5633,9 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   removal has no status, and no terminal status is configured for
   `forge_review`. So `removed`, `merged` and `closed` close an `active` item
   `source_status` whatever its `status`, at an equal or newer `revision`
-  (the merge request's `updated_at`); an older one is not applied. They never
+  (the merge request's `updated_at`), or only at a strictly newer one on an
+  item the owner restored (*A restore is sticky until the source changes*);
+  an older one is not applied. They never
   create an item: one for a merge request never indexed is
   `skipped:unknown-item`. They leave every other state as it is: on an item
   already `done` (any `closed_by`) or `dismissed`, a close is applied as a
@@ -5658,10 +5661,42 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   declares `updated_at` as its revision, and this bullet is its order.
 - **A close needs an event no older than the row.** An older event is not
   applied at all, so it cannot close an item. An event with an equal revision
-  can: within one minute, a redelivered terminal status can close an item that
-  was just reopened. That is the safe direction, and it is deliberate. A wrong
-  close drops an item from the queue until its next change. A wrong reopen
-  hands finished work to a second session.
+  can close an item the owner has not restored: within one minute, a
+  redelivered terminal status can close an item that was just reopened. That
+  is the safe direction, and it is deliberate. A wrong close drops an item
+  from the queue until its next change. A wrong reopen hands finished work to
+  a second session.
+
+  **Later (2026-09-30):** this bullet said an event with an equal revision
+  "can" close an item, without exception. Superseded for an item the owner
+  restored (DND-1277, gen_saas #567, `b1ff8c01`) by the next bullet. The
+  hourly re-sync re-applies each page at the row's own revision, so an
+  equal-revision close undid every restore within the hour.
+- **A restore is sticky until the source changes** (DND-1277). A restore
+  records what it overrode in `restored_from`: the `closed_by` of the close it
+  undid, or `dismissed`. While it is set, ingest, the re-sync and a rules edit
+  do not re-close the item on the information the owner overrode:
+  - A terminal status, or a forge `removed`, `merged` or `closed`, closes it
+    only at a strictly newer revision. An equal revision is the same
+    information. A missing or unparseable one cannot show it is newer. Either
+    is applied as a pointer update and the item stays `active`. A rules edit
+    that makes the item's status terminal re-applies it at the row's own
+    revision, so it does not close it either.
+  - A delete or a re-sync close whose `closed_by` repeats `restored_from`, at
+    a revision that is not strictly newer than the row's, is not applied. The
+    re-sync counts it kept, not closed, and logs it. A different close is new
+    information and closes: a page trashed after the owner restored a status
+    close closes `source_deleted`.
+  - A strictly newer revision clears the marker, whatever its status. So does
+    every close and every other owner action.
+
+  The source wins on new information; the owner wins on the same
+  information. Two limits follow from the revision's precision. A Notion
+  revision is minute-granular, so a change and a change back within one
+  minute read as the same information. And a source with no revision token
+  could never close a restored item by status, so such a source declares how
+  it orders a close before it may close by status. Every source that closes
+  by status today (Notion, forge) carries one.
 - **Terminal statuses are owner config, per source.** For `notion_personal`
   the default is `Done`, `Cancelled` and `Won't Fix`. For `notion_work` the
   default is also `Done`, `Cancelled` and `Won't Fix`; `Ready for Release` is
