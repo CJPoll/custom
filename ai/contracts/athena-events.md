@@ -1733,22 +1733,36 @@ credential can serve many accounts. Owner is resolved per ingress kind:
   sender and identifies the owner. An unknown or disabled hook id is an
   owner-unresolvable reject, and records nothing against any owner.
 
-  **Who registers a hook, and whose it is.** In the first pass a hook has no
-  owner-facing route. It is registered, rotated and disabled only by an
-  operator `rpc` on the gen_saas prod host (DND-439). That operator already
-  holds the host and its database, so the path grants no authority the
-  operator did not have. The hook's owner is the account the call names; the
-  owner, or an agent acting on the owner's direction for the owner's own
+  **Who registers a hook, and whose it is.** A hook is registered, rotated
+  and disabled only by an operator `rpc` on the gen_saas prod host (DND-439).
+  How its secret reaches the owner is *Secret custody*'s. That operator
+  already holds the host and its database, so the path grants no authority
+  the operator did not have. The hook's owner is the account the call names;
+  the owner, or an agent acting on the owner's direction for the owner's own
   account, makes the call. The owner confirms `owner_forge_user_id` (their own
   numeric GitLab user id) before registering. This is a named residual of the
   owner-from-auth invariant: the operator path is the one place a hook's owner
   is not stamped from an authenticated session, so it has no route, it is
   never exposed to a machine token or a request, and it never registers a
-  hook for an account the operator does not act for. An owner-facing path,
-  should one be built, stamps the owner from the authenticated session like
-  every other seam (*Rule ownership is stamped from the authenticated
-  author*). Rotation and disabling are owner-scoped: another owner's hook
-  reads as absent.
+  hook for an account the operator does not act for. An owner-facing
+  registration path, should one be built, stamps the owner from the
+  authenticated session like every other seam (*Rule ownership is stamped
+  from the authenticated author*). Rotation and disabling are owner-scoped:
+  another owner's hook reads as absent.
+
+  **The owner-facing route is `/forge/hooks`,** an owner-authenticated page.
+  It lists the owner's own hooks with the URL to paste into GitLab, and
+  reveals a hook's secret once per mint (*Secret custody*). It takes the
+  owner from the authenticated session, and it registers, rotates and
+  disables nothing. The listing and the reveal are owner-scoped too.
+
+  **Later (2026-09-30):** this paragraph said "In the first pass a hook has no
+  owner-facing route". Superseded (DND-1306): gen_saas ships `/forge/hooks`
+  (the DND-439 security fix, D44; `apps/athena/lib/athena/ui.ex:67` at
+  `b1ff8c01`), because an operator call that returned the secret left it in
+  the SSM command history. The page takes the owner from the authenticated
+  session (`apps/athena/lib/athena/ui/pages/forge_hooks.ex:52`). Registration
+  is still operator-only.
 - **Reconciliation poller** — the owner is the account its per-account source-read
   token belongs to, resolved server-side from that token (as harness-emit resolves
   owner from the machine token), never from fetched content.
