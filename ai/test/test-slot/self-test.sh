@@ -360,13 +360,15 @@ release A12; reap A12; check 12-A-rc eq "$RC" 0
 # 18: a waiter prints heartbeats while it waits (seam 1 s). DND-1007: this
 # used to count B12's heartbeats inside its 3 s --wait-timeout, so a slow host
 # could print fewer than two before the timeout: a verdict that flipped with
-# machine speed. B18 has no --wait-timeout, so it waits until A18 is released,
-# and the poll below is only a hang cap. The verdict is the event itself:
-# two heartbeats were printed while B18 waited and before it ran.
+# machine speed. B18 keeps a --wait-timeout (20 s, like B12 it is a waiter
+# that CAN time out), but A18 is released as soon as two heartbeats are seen,
+# so the timer only has to outlast two 1 s heartbeats; the poll below caps at
+# 15 s, under both the 20 s timeout and the holder's own 30 s bound. The
+# verdict is the event: two heartbeats were printed while B18 waited.
 newpool p18 1
 hold A18 holder-A18
-ATHENA_TEST_SLOT_HEARTBEAT=1 bg B18 --label B18 -- sh -c ': > "$1"' _ "$W/B18.ran"
-for ((i = 0; i < 1200; i++)); do [ "$(grep -c "still waiting" "$W/B18.err" 2>/dev/null)" -ge 2 ] && break; sleep 0.05; done
+ATHENA_TEST_SLOT_HEARTBEAT=1 bg B18 --label B18 --wait-timeout 20 -- sh -c ': > "$1"' _ "$W/B18.ran"
+for ((i = 0; i < 300; i++)); do [ "$(grep -c "still waiting" "$W/B18.err" 2>/dev/null)" -ge 2 ] && break; sleep 0.05; done
 check 18-heartbeats eval '[ "$(grep -c "still waiting" "$W/B18.err")" -ge 2 ]'
 check 18-not-run-while-waiting absent "$W/B18.ran"
 release A18
@@ -719,11 +721,13 @@ check 32-fifo eq "$(tr '\n' ' ' <"$W/32.order" 2>/dev/null)" "W1 W2 W3 "
 # times out with exit 75, and the queue closes up behind it.
 # DND-1007: W4 used to carry --wait-timeout 8 through every check below, so a
 # slow host could time it out before the position checks ran: a verdict that
-# flipped with machine speed. No waiter here has a timeout until W5, which is
-# added only after the position checks are done. The narrowing, stated: W5
-# joins after W2 left, so no case now times out a waiter whose queue changed
-# DURING its wait; the property asserted (behind the head, exit 75, the queue
-# closes up) is unchanged.
+# flipped with machine speed. W1-W4 now wait with no timeout. W5 joins after
+# the position checks, with --wait-timeout 10, and W2 is killed while W5
+# waits: W5 must time out ACROSS that queue change (the closed-up queue shows
+# it still waiting, at 4). Its 10 s only has to outlast one kill and a status
+# read, so it caps a stall rather than racing the position checks. It stays
+# well under the holder's own 30 s bound (HOLD_CMD's read -t 30), which the
+# whole case must finish inside.
 newpool p33 1
 hold A33 holder-A33
 for k in 1 2 3 4; do
@@ -737,12 +741,14 @@ check 33-json-tickets-rise eq "$(jq '[.waiters[].ticket] | . == sort' <<<"$st")"
 txt="$("$BIN" --status 2>/dev/null)"
 check 33-text-positions eval '[[ "$txt" == *"WAITING #1: W331 "*"WAITING #2: W332 "*"WAITING #3: W333 "*"WAITING #4: W334 "* ]]'
 check 33-W4-told-position await_grep "$W/W334.err" "queue position 4 of 4" 20
+bg W335 --label W335 --wait-timeout 10 --outcome-file "$W/33.outcome" -- sh -c 'echo W5 >> "$1"' _ "$W/33.order"
+check 33-W5-queued await_waiters 5
 kill -9 "$(pid_of_bg W332)"
 reap W332; check 33-W2-killed eq "$RC" 137
 # await_gone LABEL — bounded poll until no live waiter carries LABEL.
 await_gone() {
   local i
-  for ((i = 0; i < 100; i++)); do
+  for ((i = 0; i < 400; i++)); do
     [ "$("$BIN" --status --json 2>/dev/null | jq --arg l "$1" '[.waiters[] | select(.label == $l)] | length')" = 0 ] && return 0
     sleep 0.05
   done
@@ -751,10 +757,8 @@ await_gone() {
 check 33-W2-left-queue await_gone W332
 st="$("$BIN" --status --json 2>/dev/null)"
 check 33-closed-up eq "$(jq -c '[.waiters[] | [.position, .label]]' <<<"$st")" \
-  '[[1,"W331"],[2,"W333"],[3,"W334"]]'
-# W5 queues behind the head with a timeout. A33 holds until released, so the
-# timeout is the only way W5 can end: exit 75, whatever the machine's speed.
-bg W335 --label W335 --wait-timeout 1 --outcome-file "$W/33.outcome" -- sh -c 'echo W5 >> "$1"' _ "$W/33.order"
+  '[[1,"W331"],[2,"W333"],[3,"W334"],[4,"W335"]]'
+# A33 holds until released, so W5's timeout is the only way it can end.
 reap W335; check 33-W5-timeout-rc eq "$RC" 75
 check 33-W5-timeout-msg has "$W/W335.err" "TIMEOUT"
 check 33-W5-outcome eq "$(cat "$W/33.outcome" 2>/dev/null)" "timeout"
