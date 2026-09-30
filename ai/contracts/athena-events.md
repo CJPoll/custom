@@ -2863,17 +2863,37 @@ under-encrypted**:
   first use and never replaces it. The set also holds each **forge hook's
   webhook secret** (`:forge_webhook_secret`, `scope_ref` = the hook id,
   DND-439): the GitLab `X-Gitlab-Token` a hook verifies against. The server
-  mints it and returns it at most once per mint, only to a call that asks
-  for it, for the owner to paste into GitLab; no read returns it again. A
-  rotation mints a new one and the old stops verifying at once. Output a
-  host keeps (an `rpc` over `aws ssm send-command`, whose stdout SSM
-  retains) MUST NOT carry it. What the code enforces is the opt-in: a
-  default register call returns no secret, so it is safe over
-  send-command. Running a call that does return the secret (a register that
-  asks for it, or any rotation) only in an interactive session is an
-  **operator procedure**, not a guarantee: nothing refuses such a call over
-  send-command. Any future adapter
+  mints it. **No operator call returns it:** register and rotate return the
+  hook's identifiers only, and refuse the removed `reveal_secret` option, and
+  any other option outside their closed set, by name. The owner reads it
+  once per mint, on the owner-authenticated page `/forge/hooks`, to paste
+  into GitLab: a second reveal of the same secret is refused, whatever
+  session or page load asks. A rotation mints a new one, makes it revealable
+  once, and the old stops verifying at once.
+  Output a host keeps (an `rpc` over `aws ssm send-command`, whose stdout
+  SSM retains) MUST NOT carry it. Two things enforce that: the operator calls
+  cannot be asked for the secret, and gen_saas's static secret-boundary
+  guard fails CI on any public function that takes or returns a secret and
+  is not on its allowlist. The residual: the reveal function behind the page
+  is public, so an operator on the host could call it over `rpc`. That is
+  not a supported path. It spends the owner's one reveal, so the page then
+  shows the secret as revealed and the owner rotates. The operator already
+  holds the host the server runs on, so it grants no authority the operator
+  did not have. Any future adapter
   credential (SMTP, SMS, Discord bot) joins this set under the same story.
+
+  **Later (2026-09-30):** this bullet said the server returns the forge
+  secret "at most once per mint, only to a call that asks for it", that
+  "what the code enforces is the opt-in", and that running a call that
+  returns the secret "only in an interactive session is an **operator
+  procedure**, not a guarantee". Superseded (DND-1207): gen_saas #515
+  (DND-439, D44, merged `e313ac6c`) removed the opt-in, so no call that
+  procedure governed remains. At gen_saas `b1ff8c01`:
+  `apps/athena/lib/athena/forge.ex:377` and `:395` return `%{hook_id, path,
+  url}` only; `apps/athena/lib/athena/forge/operator_opts.ex` refuses
+  `reveal_secret` by name; `forge.ex:553` (`reveal_gitlab_hook_secret/3`) is
+  the reveal, called only by `ui/pages/forge_hooks.ex:52`; the guard is
+  `apps/athena/test/support/secret_boundary.ex`.
 
   **Later (2026-09-22):** this named the Notion read token a **"read-only,
   DB-scoped Notion enrichment token"** — a token whose *scope* was the
