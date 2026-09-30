@@ -289,7 +289,11 @@ The batch brief carries everything above for one Mission, plus:
 - **The branches.** One worktree, one branch per ticket, each cut from the
   branch of the ticket below it. The worktree's own branch is the first
   ticket's. In a forge repo, each PR targets the branch of the ticket below it;
-  the first targets the MR target branch.
+  the first targets the MR target branch. When a lower ticket's head is
+  rewritten before it lands (a review-round amend, a rebase onto main,
+  `integration-gate --rebase`), restack each ticket above it bottom up:
+  `git rebase --onto <new lower head> <old lower head> <upper branch>`. A
+  plain rebase replays the lower ticket's old commits and conflicts.
 - **The critic line:** *"Judge each ticket alone: on that ticket's head, run
   `~/dev/custom/ai/bin/critic-review --base <the branch of the ticket below>`
   (the first ticket: the MR target branch). Without `--base`, the diff is the
