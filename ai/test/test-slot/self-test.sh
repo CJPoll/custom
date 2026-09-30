@@ -3,9 +3,11 @@
 #
 # Every case runs in a throwaway pool (ATHENA_TEST_SLOT_DIR + ATHENA_TEST_SLOTS
 # seams under a mktemp dir), never the real machine pool. No sleep stands in
-# for a timing assumption: a held command blocks on a FIFO the suite writes to,
-# bounded by `read -t`; every "wait until X" is a bounded condition poll; every
-# background run is bounded by timeout(1). Case numbers are the QA Plan's rows.
+# for a timing assumption: a held command blocks on a FIFO until the suite
+# releases it, and every "wait until X" is a bounded condition poll. The
+# fixtures' own bounds (HOLD_CAP_S, BG_CAP_S) only cap a hang: none decides a
+# verdict, and one that fires is named as a FIXTURE CAP (DND-1357). Case
+# numbers are the QA Plan's rows.
 set -u -o pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -36,7 +38,7 @@ cleanup() {
   local f p
   # Held commands are single bash processes (no children); kill each by the
   # pid it recorded, then every bounded background wrapper we started.
-  for f in "$W"/*.pid; do
+  for f in "$W"/*.pid "$W"/*/*.pid; do
     [ -e "$f" ] || continue
     p="$(cat "$f" 2>/dev/null)"
     [ -n "$p" ] && kill -9 "$p" 2>/dev/null
@@ -52,7 +54,7 @@ trap 'exit 143' TERM
 PASS=0
 FAIL=0
 ok() { PASS=$((PASS + 1)); }
-bad() { FAIL=$((FAIL + 1)); printf 'FAIL [%s] %s\n' "$1" "$2" >&2; }
+bad() { FAIL=$((FAIL + 1)); printf 'FAIL [%s] %s\n' "$1" "$2" >&2; report_caps; }
 check() { local name=$1; shift; if "$@"; then ok; else bad "$name" "$*"; fi; }
 has() { grep -qF -- "$2" "$1" 2>/dev/null; }
 lacks() { ! grep -qF -- "$2" "$1" 2>/dev/null; }
@@ -81,8 +83,62 @@ newpool() { # newpool NAME N — fresh (not yet created) pool for one case
   export ATHENA_TEST_SLOT_DIR="$POOL" ATHENA_TEST_SLOTS="$2" ATHENA_TEST_SLOT_DEFAULT_WEIGHT=1
 }
 
-# bg NAME ARGS... — run test-slot ARGS in the background, bounded by
-# timeout 60; stdout/stderr land in $W/NAME.out / .err; pid in $W/NAME.bg.
+# Fixture hang caps (DND-1357). A holder ends when its case releases it (an
+# event) and a background run when test-slot exits; these bounds only stop a
+# hang from outliving the suite. They were 30 s and 60 s and ended a run
+# silently, so a case that outlived 30 s on a busy host failed as a queue
+# defect: its waiter ran, and "left-queue" named the wrong cause. Now each is
+# far past any case, BG_CAP_S outlasts HOLD_CAP_S so a holder's own cap fires
+# first, and a cap that fires leaves a marker fixture_caps names.
+HOLD_CAP_S=600
+BG_CAP_S=660
+
+# fixture_caps DIR — one FIXTURE CAP line per hang cap that fired in DIR: a
+# holder that ended itself (NAME.capped) or a background run its bound killed
+# (timeout's --verbose line in NAME.err). Empty when none fired.
+fixture_caps() {
+  local f n
+  for f in "$1"/*.capped; do
+    [ -e "$f" ] || continue
+    n=${f##*/}; n=${n%.capped}
+    printf 'FIXTURE CAP [%s]: the holder was never released and ended itself at HOLD_CAP_S=%s s. A queue or exit check that failed beside it failed on this fixture cap, not test-slot. Fix: release the holder in its case, or find why the case outlived the cap.\n' \
+      "$n" "$(cat "$f" 2>/dev/null)"
+  done
+  for f in "$1"/*.err; do
+    grep -qF 'timeout: sending signal' "$f" 2>/dev/null || continue
+    n=${f##*/}; n=${n%.err}
+    printf 'FIXTURE CAP [%s]: the background run was killed by its BG_CAP_S=%s s bound. A check on it failed on this fixture cap, not test-slot. Fix: find what kept test-slot or its command running that long.\n' \
+      "$n" "$(cat "${f%.err}.bgcap" 2>/dev/null)"
+  done
+}
+# report_caps — print each fixture cap that fired in $W once, beside the first
+# FAIL after it, so that FAIL is read against its real cause.
+CAPS_SEEN=""
+report_caps() {
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$CAPS_SEEN" in *"$line"*) continue ;; esac
+    CAPS_SEEN+="$line"$'\n'
+    printf '%s\n' "$line" >&2
+  done < <(fixture_caps "$W")
+}
+
+# bounded NAME CMD... — run CMD in the background under the BG_CAP_S hang cap;
+# stdout/stderr land in $W/NAME.out / .err, pid in $W/NAME.bg. timeout(1)
+# runs in the C locale so its --verbose line can be matched, and CMD gets the
+# caller's LC_ALL back. `env` execs, so timeout's child is CMD itself.
+bounded() {
+  local name=$1; shift
+  local restore=(-u LC_ALL)
+  [ "${LC_ALL+set}" = set ] && restore=("LC_ALL=$LC_ALL")
+  echo "$BG_CAP_S" >"$W/$name.bgcap"
+  env LC_ALL=C timeout --verbose "$BG_CAP_S" env "${restore[@]}" "$@" >"$W/$name.out" 2>"$W/$name.err" &
+  echo $! >"$W/$name.bg"
+  BG_PIDS+=("$!")
+}
+
+# bg NAME ARGS... — run test-slot ARGS in the background via bounded.
 # BG_PRE (array) is put before test-slot, e.g. to launch it with INT/QUIT at
 # default (a background job of this non-job-control suite starts them ignored).
 BG_PRE=()
@@ -97,19 +153,19 @@ BG_PRE=()
 SIG_DEFAULT=(env --default-signal=INT,QUIT,TERM,HUP)
 bg() {
   local name=$1; shift
-  timeout 60 "${BG_PRE[@]}" "$BIN" "$@" >"$W/$name.out" 2>"$W/$name.err" &
-  echo $! >"$W/$name.bg"
-  BG_PIDS+=("$!")
+  bounded "$name" "${BG_PRE[@]}" "$BIN" "$@"
 }
 # reap NAME — wait for a bg run (bounded by its timeout); its exit code -> $RC.
 # Never call it in $(...): a subshell cannot wait for the suite's children.
 RC=""
 reap() { wait "$(cat "$W/$1.bg")"; RC=$?; }
 
-# The held command: records its own pid and its parent (the wrapper) pid,
-# marks itself started, then blocks on its FIFO until released (read -t
-# bounds it, so an unreleased holder can never outlive the suite by long).
-HOLD_CMD='echo $$ > "$1.pid"; echo $PPID > "$1.wrapper"; : > "$1.started"; exec 3<>"$1.fifo"; read -t 30 -u 3 _x; : > "$1.done"'
+# The held command (bash -c "$HOLD_CMD" _ PREFIX [CAP]): records its own pid
+# and its parent (the wrapper) pid, marks itself started, then blocks on its
+# FIFO until released, writing PREFIX.done. If nothing releases it within CAP
+# (default HOLD_CAP_S) it ends itself and writes PREFIX.capped instead, which
+# fixture_caps names: the cap only stops a leaked holder, it never ends a case.
+HOLD_CMD='echo $$ > "$1.pid"; echo $PPID > "$1.wrapper"; : > "$1.started"; exec 3<>"$1.fifo"; cap=${2:-'"$HOLD_CAP_S"'}; if read -t "$cap" -u 3 _x; then : > "$1.done"; else echo "$cap" > "$1.capped"; fi'
 
 # hold NAME LABEL [EXTRA test-slot ARGS...] — start a holder and wait until
 # its command is running (so its slot is certainly held).
@@ -563,13 +619,14 @@ newpool p25 2
 mkdir -p "$W/fake25"
 cat >"$W/fake25/prep-commit.sh" <<'EOF'
 #!/usr/bin/env bash
-echo $$ > "$1.pid"; : > "$1.started"; exec 3<>"$1.fifo"; read -t 30 -u 3 _x
+echo $$ > "$1.pid"; : > "$1.started"; exec 3<>"$1.fifo"
+read -t "$2" -u 3 _x || echo "$2" > "$1.capped"
 EOF
 chmod +x "$W/fake25/prep-commit.sh"
 mkfifo "$W/U25.fifo" "$W/S25.fifo"
-(cd "$W/fake25" && timeout 60 ./prep-commit.sh "$W/U25" >/dev/null 2>&1) &
+(cd "$W/fake25" && timeout "$BG_CAP_S" ./prep-commit.sh "$W/U25" "$HOLD_CAP_S" >/dev/null 2>&1) &
 BG_PIDS+=("$!"); u25_bg=$!
-bg S25 --label S25 -- "$W/fake25/prep-commit.sh" "$W/S25"
+bg S25 --label S25 -- "$W/fake25/prep-commit.sh" "$W/S25" "$HOLD_CAP_S"
 await_file "$W/U25.started" 20; await_file "$W/S25.started" 20
 st="$("$BIN" --status 2>/dev/null)"
 u_pid="$(cat "$W/U25.pid")"; s_pid="$(cat "$W/S25.pid")"
@@ -767,9 +824,9 @@ check 32-fifo eq "$(tr '\n' ' ' <"$W/32.order" 2>/dev/null)" "W1 W2 W3 "
 # the position checks, with --wait-timeout 10, and W2 is killed while W5
 # waits: W5 must time out ACROSS that queue change (the closed-up queue shows
 # it still waiting, at 4). Its 10 s only has to outlast one kill and a status
-# read, so it caps a stall rather than racing the position checks. It stays
-# well under the holder's own 30 s bound (HOLD_CMD's read -t 30), which the
-# whole case must finish inside.
+# read, so it caps a stall rather than racing the position checks. A33 is
+# released only by the case; its HOLD_CAP_S is a hang cap, named as a FIXTURE
+# CAP if it ever fires (DND-1357).
 newpool p33 1
 hold A33 holder-A33
 for k in 1 2 3 4; do
@@ -826,9 +883,7 @@ if git -C "$here" show "$OLD_REV:ai/bin/test-slot" >"$OLD" 2>"$W/34.git.err" && 
   # oldbg NAME ARGS... — like bg, but runs the pre-fix copy.
   oldbg() {
     local name=$1; shift
-    timeout 60 "$OLD" "$@" >"$W/$name.out" 2>"$W/$name.err" &
-    echo $! >"$W/$name.bg"
-    BG_PIDS+=("$!")
+    bounded "$name" "$OLD" "$@"
   }
   # ORDER_CONC NAME ORDERFILE DIR: record the run order, then concurrency.
   ORDER_CONC='echo "$1" >> "$2"; exec "$3" "$4" 2 20'
@@ -1248,9 +1303,7 @@ if git -C "$here" show "$OLD6_REV:ai/bin/test-slot" >"$OLD6" 2>"$W/45.git.err" &
   check 45-old-runs eq "$rc" 0
   check 45-old-no-wait lacks "$W/O45a.err" "WAITING"
   mkfifo "$W/O45.fifo"
-  ATHENA_TEST_SLOTS=3 timeout 60 "$OLD6" --label holder-O45 -- bash -c "$HOLD_CMD" _ "$W/O45" >"$W/O45.out" 2>"$W/O45.err" &
-  echo $! >"$W/O45.bg"
-  BG_PIDS+=("$!")
+  ATHENA_TEST_SLOTS=3 bounded O45 "$OLD6" --label holder-O45 -- bash -c "$HOLD_CMD" _ "$W/O45"
   started45=0
   for ((i = 0; i < 20; i++)); do [ -e "$W/O45.started" ] && { started45=1; break; }; sleep 1; done
   [ "$started45" = 1 ] || bad 45-old-hold "old holder never started: $(cat "$W/O45.err" 2>/dev/null)"
@@ -1319,6 +1372,51 @@ for pin in 'RANGE = (1..16)' 'DEFAULT = 4' 'ENV_VAR = "ATHENA_EVAL_CONCURRENCY"'
 done
 if grep -qF 'DEFAULT_SIDE_CONCURRENCY = 2' "$VE47" 2>/dev/null; then ok; else
   bad 47-variant-side-pinned "$VE47 no longer reads 'DEFAULT_SIDE_CONCURRENCY = 2'. Fix: update VARIANT_SIDE_CONCURRENCY in ai/bin/test-slot to match it, then this pin."
+fi
+
+# 48 (DND-1357): a fixture that ends on its own hang cap says so by name.
+# HOLD_CMD's `read -t` and bg's timeout(1) are hang caps: a holder is ended by
+# release(), an event, and a background run by its own exit. Before this, the
+# caps were 30 s and 60 s and ended a run silently, so a case that outlived
+# 30 s failed as a queue defect: its waiter ran, and "left-queue" named the
+# wrong cause. Each cap is injected small here, so it is the only thing that
+# can end the run. The verdict is the marker the cap leaves and what the
+# report names, never how long anything took.
+mkdir -p "$W/r48"
+newpool p48 1
+mkfifo "$W/r48/H48.fifo"
+bg r48/H48 --label holder-H48 -- bash -c "$HOLD_CMD" _ "$W/r48/H48" 1
+check 48-holder-started await_file "$W/r48/H48.started" 20
+bg r48/Q48 --label Q48 -- sh -c ': > "$1"' _ "$W/r48/Q48.ran"
+# H48 is never released, so only its cap can free the slot Q48 needs.
+reap r48/Q48; check 48-queued-ran-after-cap eq "$RC" 0
+reap r48/H48; check 48-holder-rc eq "$RC" 0
+check 48-holder-capped present "$W/r48/H48.capped"
+check 48-holder-not-released absent "$W/r48/H48.done"
+rep48="$(fixture_caps "$W/r48" 2>&1)"
+check 48-names-holder-cap eval '[[ "$rep48" == *"FIXTURE CAP [H48]"* && "$rep48" == *"HOLD_CAP_S=1 "* ]]'
+check 48-not-a-queue-verdict eval '[[ "$rep48" == *"not test-slot"* ]]'
+# A holder the case released is never reported.
+newpool p48r 1
+mkfifo "$W/r48/R48.fifo"
+bg r48/R48 --label holder-R48 -- bash -c "$HOLD_CMD" _ "$W/r48/R48"
+check 48-released-started await_file "$W/r48/R48.started" 20
+release r48/R48; reap r48/R48; check 48-released-rc eq "$RC" 0
+check 48-released-done present "$W/r48/R48.done"
+check 48-released-not-capped absent "$W/r48/R48.capped"
+# bg's own bound: the run is killed by it, and the report names that bound.
+newpool p48b 1
+mkfifo "$W/r48/B48.fifo"
+BG_CAP_S=1 bg r48/B48 --label holder-B48 -- bash -c "$HOLD_CMD" _ "$W/r48/B48"
+reap r48/B48; check 48-bg-capped-rc eq "$RC" 124
+rep48="$(fixture_caps "$W/r48" 2>&1)"
+check 48-names-bg-cap eval '[[ "$rep48" == *"FIXTURE CAP [B48]"* && "$rep48" == *"BG_CAP_S=1 "* ]]'
+check 48-released-unnamed eval '[[ "$rep48" != *"[R48]"* && "$rep48" != *"[Q48]"* ]]'
+
+# DND-1357: a fixture cap that fired anywhere is a FAIL by name, even when no
+# other check noticed it.
+if [ -z "$(fixture_caps "$W")" ]; then ok; else
+  bad no-fixture-cap "a fixture hang cap fired (named above). Fix: every holder is released and every background run exits inside its case."
 fi
 
 # ------------------------------------------------------------------- summary
