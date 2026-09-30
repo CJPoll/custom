@@ -88,6 +88,23 @@ check("a budget or rate reason stops the plan") do
     R.read_reply(reply(answer(VALUES, "on", reason: why)), R.filer(VALUES)).first == :stop
   end
 end
+check("an account-wide fault stops the plan (a revoked key never stamps the backlog)") do
+  %w[key_missing credential_rejected custody_fault price_unknown invalid_request request_rejected model_mismatch].all? do |why|
+    R.read_reply(reply(answer(VALUES, "on", reason: why)), R.filer(VALUES)).first == :stop
+  end
+end
+check("a per-call fault makes this ticket unavailable, never an entry") do
+  %w[timeout overloaded http_status transport_error undecodable_body malformed_answer domain_not_permitted].all? do |why|
+    R.read_reply(reply(answer(VALUES, "on", reason: why)), R.filer(VALUES)) == [:unavailable, "the server answered #{why}"]
+  end
+end
+check("a state reason is a decision, not a fault") do
+  %w[mode_off below_threshold threshold_unset label_disabled].all? { |why| R.read_reply(reply(answer(VALUES, "on", reason: why)), R.filer(VALUES)).first == :ok }
+end
+check("a line carrying a fault reason is never already classified") do
+  R.eligibility(ticket(lines: [line(VALUES, "on", reason: "timeout")]), NOW_ON) == :eligible
+end
+check("a ticket with no Status is skipped, never read as open") { R.eligibility(ticket(status: nil), nil) == [:skip, :no_status] }
 check("an unreachable server stops") { R.read_reply({ unreachable: "curl exit 7" }, R.filer(VALUES)) == [:stop, "COULD NOT REACH SERVER: curl exit 7"] }
 check("a 401 stops, naming the owner-issued token") { R.read_reply(reply("{}", status: 401), R.filer(VALUES)).then { |k, why| k == :stop && why.include?("HTTP 401") } }
 check("a 5xx stops") { R.read_reply(reply("{}", status: 503), R.filer(VALUES)).first == :stop }

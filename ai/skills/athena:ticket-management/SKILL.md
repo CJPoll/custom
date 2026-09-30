@@ -1,6 +1,6 @@
 ---
 name: athena:ticket-management
-description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only); when filing any ticket, run the ticket-classify script with your own Kind, Severity and Security and set the values it prints. Move a DND ticket to In Progress with the mark-in-progress script, which stamps its lead-time start.
+description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only); when filing any ticket, run the ticket-classify script with your own Kind, Severity and Security and set the values it prints. To apply that classification to the open backlog, run the ticket-reclassify script (plan, apply, proof). Move a DND ticket to In Progress with the mark-in-progress script, which stamps its lead-time start.
 ---
 
 # athena:ticket-management
@@ -417,11 +417,14 @@ tool plans; you write with your own notion-personal connection; the tool
 proves. `S` is `~/dev/custom/ai/skills/athena:ticket-management/scripts`.
 
 1. **Plan.** `S/ticket-reclassify plan --out <scratch>/<unit>-reclassify-plan.json`
-   (namespace the file). Quote its counts. Exit 3 is a stop (budget, rate or
-   server): the entries above the cursor are still a valid plan; apply them
-   and resume later with `--resume-from <cursor>`.
-2. **Nothing to write is a result.** With `writes to apply: 0`, stop here and
-   report the counts. That is the state while no ticket use case is `on`.
+   (namespace the file). Quote its counts. Exit 3 is either a `STOPPED` plan
+   (budget, rate, a fault or the server) or an `INCOMPLETE` one (tickets it
+   could not judge). Either way the entries in it are valid: apply and prove
+   them, then plan again, resuming a stop with `--resume-from <cursor>`.
+   Give every run its own `--out`, and prove each plan file.
+2. **Nothing to write is a result.** With exit 0 and `writes to apply: 0`,
+   stop here and report the counts. That is the state while no ticket use
+   case is `on`.
 3. **Apply.** For each plan entry, in order:
    - with `changes`: `API-patch-page` setting only `Kind`, `Severity` and
      `Security` to its `decided` values;

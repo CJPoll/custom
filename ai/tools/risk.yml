@@ -157,8 +157,8 @@ tools:
   # confirmation. No forge, tracker, server or remote write. --confirm READS
   # Slack as Athena's bot for conversation context (DND-1047); it never posts.
   judgment-label:          { class: idempotent, reason: labels }
-  # triage-corpus (DND-714) only READS Notion (its Notion effect refuses any
-  # other request) and writes machine-local snapshot/label/corpus files; a
+  # triage-corpus (DND-714) only READS Notion (ai/lib/notion_read.rb refuses
+  # any other request) and writes machine-local snapshot/label/corpus files; a
   # rebuild from one snapshot is byte-identical. No forge, tracker or server write.
   triage-corpus:           { class: idempotent, reason: labels }
   # ticket-corpus (DND-1055) makes no network call: it reads triage-corpus's

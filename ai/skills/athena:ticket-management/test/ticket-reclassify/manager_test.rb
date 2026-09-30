@@ -79,7 +79,7 @@ check("a budget stop writes a cursor and exits 3 [qa plan 4]") do
   code, out, doc = run_plan(FakeNotion.new((1..6).map { |n| ticket(number: n) }), server, "#{TMP}/p4.json")
   code == 3 && doc["entries"].size == 4 && doc["cursor"] == "DND-5" && doc["complete"] == false &&
     doc["stopped_because"] == "the server answered budget_exhausted" && doc["counts"]["not_reached"] == 2 &&
-    out.include?("Fix: resume later with --resume-from the cursor (--resume-from DND-5)")
+    out.include?("Fix: resume later with --resume-from the cursor (--resume-from DND-5, into a new --out)")
 end
 
 check("--resume-from starts at the cursor") do
@@ -126,7 +126,8 @@ check("counts account for every ticket [qa plan 6]") do
   code, out, doc = run_plan(notion, server, "#{TMP}/p6.json")
   c = doc["counts"]
   sum = c["skipped"].values.sum + c["planned"] + c["unchanged"] + c["inert"] + c["not_reached"]
-  code.zero? && c["considered"] == 12 && sum == 12 && c["planned"] == 1 && c["unchanged"] == 3 && c["inert"].zero? &&
+  # DND-8's unread body makes the plan INCOMPLETE: exit 3.
+  code == 3 && c["considered"] == 12 && sum == 12 && c["planned"] == 1 && c["unchanged"] == 3 && c["inert"].zero? &&
     c["skipped"].values_at("closed", "feature", "unset_properties", "locked", "unparseable_provenance", "no_project", "unknown_value", "body_unread") == [1] * 8 &&
     doc["skipped_refs"]["locked"] == ["DND-4"] && out.include?("sum check: considered 12 = skipped 8 + planned 1 + unchanged 3 + inert 0 + not reached 0")
 end
@@ -159,6 +160,68 @@ check("a closed ticket's body is never read (skips decidable from the row cost n
   notion = FakeNotion.new([ticket(number: 1, status: "Done")])
   run_plan(notion, FakeServer.new { |b| [filer_of(b), "on"] }, "#{TMP}/p7b.json")
   notion.calls.none? { |c| c.first == :children }
+end
+
+def failure_of
+  yield
+  nil
+rescue Failure => e
+  [e.code, e.message]
+end
+
+check("a per-call fault in mode on is no entry and no classification; the plan is incomplete (exit 3, Fix:)") do
+  server = FakeServer.new { |b| [filer_of(b), "on", b["ticket"]["ref"] == "DND-2" ? "timeout" : nil] }
+  code, out, doc = run_plan(FakeNotion.new([ticket(number: 1), ticket(number: 2)]), server, "#{TMP}/f1.json")
+  code == 3 && doc["entries"].map { |e| e["ref"] } == ["DND-1"] && doc["skipped_refs"]["unavailable"] == ["DND-2"] &&
+    doc["complete"] == false && out.include?("INCOMPLETE: 1 ticket(s) could not be judged (unavailable DND-2)") && out.include?("Fix:")
+end
+
+check("an account-wide fault stops the plan at that ticket") do
+  server = FakeServer.new { |b| [filer_of(b), "on", "credential_rejected"] }
+  code, _, doc = run_plan(FakeNotion.new([ticket(number: 4)]), server, "#{TMP}/f2.json")
+  code == 3 && doc["cursor"] == "DND-4" && doc["stopped_because"] == "the server answered credential_rejected"
+end
+
+check("a 422 through the manager is refused, listed, and the plan is incomplete") do
+  server = Object.new
+  def server.post(_body) = { curl_rc: 0, status: 422, body: '{"error":"invalid_request"}' }
+  code, out, doc = run_plan(FakeNotion.new([ticket(number: 5)]), server, "#{TMP}/f3.json")
+  code == 3 && doc["skipped_refs"]["refused"] == ["DND-5"] && out.include?("INCOMPLETE") && doc["complete"] == false
+end
+
+check("an unreadable body makes the plan incomplete, never complete with 0 writes") do
+  notion = FakeNotion.new([ticket(number: 6)])
+  notion.unreadable << page_id(6)
+  code, out, doc = run_plan(notion, FakeServer.new { |b| [filer_of(b), "on"] }, "#{TMP}/f4.json")
+  code == 3 && doc["skipped_refs"]["body_unread"] == ["DND-6"] && out.include?("INCOMPLETE") && out.include?("body_unread DND-6")
+end
+
+check("a ticket with no Status is skipped as no_status, never read as open") do
+  _, _, doc = run_plan(FakeNotion.new([ticket(number: 7, status: nil)]), FakeServer.new { |b| [filer_of(b), "on"] }, "#{TMP}/f5.json")
+  doc["skipped_refs"]["no_status"] == ["DND-7"]
+end
+
+check("rows with no Status property fail the plan (a renamed property is not an open ticket)") do
+  notion = FakeNotion.new([ticket(number: 8)])
+  def notion.row(t) = super.tap { |r| r["properties"].delete("Status") }
+  code, message = failure_of { run_plan(notion, FakeServer.new { |b| [filer_of(b), "on"] }, "#{TMP}/f6.json") }
+  code == 1 && message.include?("no Status status property") && message.include?("Fix:")
+end
+
+check("a --resume-from that matches no ticket fails, never an empty complete plan") do
+  code, message = failure_of { run_plan(FakeNotion.new([ticket(number: 9)]), FakeServer.new { |b| [filer_of(b), "on"] }, "#{TMP}/f7.json", resume_from: "DND-90") }
+  code == 1 && message.include?("--resume-from DND-90 matches no ticket") && !File.exist?("#{TMP}/f7.json")
+end
+
+check("an unexpected error stops with a cursor and keeps the answers so far") do
+  server = FakeServer.new do |b|
+    raise NoMethodError, "boom" if b["ticket"]["ref"] == "DND-2"
+
+    [filer_of(b).merge("severity" => "LOW"), "on"]
+  end
+  code, out, doc = run_plan(FakeNotion.new([ticket(number: 1), ticket(number: 2)]), server, "#{TMP}/f8.json")
+  code == 3 && doc["entries"].map { |e| e["ref"] } == ["DND-1"] && doc["cursor"] == "DND-2" &&
+    doc["stopped_because"] == "UNEXPECTED ERROR: NoMethodError" && out.include?("Fix:")
 end
 
 section "proof"
@@ -217,6 +280,28 @@ check("a second plan after the apply plans nothing (idempotence) [qa procedure 3
   _, _, again = run_plan(notion, server, "#{TMP}/q6-again.json")
   again["counts"]["planned"].zero? && again["counts"]["unchanged"].zero? && server.bodies.size == 1 &&
     again["counts"]["skipped"]["already_classified"] == 3
+end
+
+section "notion_read"
+
+check("a query page that says has_more with no cursor raises, never a cut-off list") do
+  original = NotionRead.method(:read)
+  NotionRead.define_singleton_method(:read) { |*_args, **_kw| { "results" => [{ "id" => "x" }], "has_more" => true, "next_cursor" => nil } }
+  begin
+    NotionRead.query_all("http://127.0.0.1:1", "t", Effects::TICKETS_DATA_SOURCE, pace: 0)
+    false
+  rescue NotionRead::Error => e
+    e.message.include?("has_more") && e.message.include?("no usable next_cursor")
+  ensure
+    NotionRead.define_singleton_method(:read, original)
+  end
+end
+
+check("the allowlist refuses a write before it is sent") do
+  NotionRead.read("http://127.0.0.1:1", "t", "PATCH", "/v1/pages/#{page_id(1)}", pace: 0)
+  false
+rescue NotionRead::Error => e
+  e.message.start_with?("refused a Notion PATCH")
 end
 
 finish("ticket-reclassify manager")

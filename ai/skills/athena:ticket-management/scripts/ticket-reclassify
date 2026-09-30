@@ -10,7 +10,7 @@
 # ~/dev/custom/ai/contracts/athena-judgments.md -> *Ticket classification:
 # the harness script*.
 #
-# READ ONLY toward Notion. The tool plans; the captain writes with its own
+# READ ONLY toward Notion. The tool plans; the agent writes with its own
 # notion-personal connection; `proof` re-reads. Every Notion request goes
 # through ai/lib/notion_read.rb, whose allowlist refuses anything but a read
 # before it is sent. The only other call is the classification endpoint,
@@ -47,7 +47,7 @@ USAGE = <<~EOF
 
   Apply the ticket classification policy (DND-991) to the OPEN backlog
   (DND-1056). The tool never decides and never writes Notion: the server
-  decides, the captain writes, and proof checks.
+  decides, the agent writes, and proof checks.
 
   plan   Read every DND ticket (read-only, paced), skip what may not be
          re-judged, ask the classification endpoint about the rest with each
@@ -55,6 +55,7 @@ USAGE = <<~EOF
          and its id as ticket.ref, and write FILE (0600): per ticket the
          current and decided values, the changes, and the server's provenance
          line verbatim. Skipped, counted and listed by reason, in this order:
+           no_status               the ticket has no Status (never read as open)
            closed                  Status Done, Cancelled or Won't Fix
            feature                 Kind Feature (authored, never judged)
            unset_properties        Kind, Severity or Security empty
@@ -67,23 +68,32 @@ USAGE = <<~EOF
            locked                  a current value differs from that line's
                                    value: someone edited it; the edit wins
            already_classified      that line has the server's model and
-                                   versions now, and every property in mode
-                                   on or the modes now (no call made)
+                                   versions now, no fault reason, and every
+                                   property in mode on or the modes now. No
+                                   call is made, except for the first ticket
+                                   asked, whose answer is what reports the
+                                   server's model, versions and modes
            refused                 the server refused the request (HTTP 422)
+           unavailable             the server answered with a fault for this
+                                   one call (timeout, overloaded, ...)
          Each answered ticket is one of:
            planned    a decided value differs: write the properties and the
                       provenance line
            unchanged  no change and some mode on: write the provenance line
                       (a later hand edit then locks the ticket)
            inert      no change and no mode on: write nothing
-         At most #{Reclassify::TICKETS_PER_MINUTE} tickets a minute. A budget_exhausted,
-         rate_limited or rate_limited_local reason, or a server that cannot be
-         used, stops the plan at that ticket: FILE records the cursor and why,
-         and the exit is 3.
-    --out FILE            where to write the plan (absolute path)
+         At most #{Reclassify::TICKETS_PER_MINUTE} tickets a minute. A budget or rate reason, an
+         account-wide fault (key, credential, custody, price, our own bug,
+         model), a server that cannot be used or an unexpected error stops
+         the plan at that ticket: FILE records the cursor and why (exit 3).
+         A plan whose tickets include body_unread, refused or unavailable
+         ones is INCOMPLETE (exit 3): apply it, then plan again.
+    --out FILE            where to write the plan (absolute path; use a new
+                          one for each run)
     --limit N             ask about at most N tickets, then stop with a cursor
                           (a partial plan, exit 0)
-    --resume-from DND-N   start at this ticket (a plan's cursor)
+    --resume-from DND-N   start at this ticket (a plan's cursor; it must be a
+                          real ticket id)
   proof  Re-read every ticket the plan writes (planned and unchanged): its
          Kind, Severity and Security must equal the plan's decided values
          and its body's LAST "Jev classification:" line must equal the plan's
@@ -93,9 +103,9 @@ USAGE = <<~EOF
 
   Exit codes:
     0  plan written (complete, or partial by --limit) / proof holds
-    1  an input is missing or malformed, or Notion could not be read
+    1  an input is missing or malformed, Notion could not be read, or a bug
     2  usage
-    3  plan stopped early (budget, rate, server); resume with --resume-from
+    3  plan stopped early (resume with --resume-from) or INCOMPLETE
     4  proof mismatch
 
   Every failure prints one line carrying Fix:. The Notion token is the file
@@ -105,8 +115,8 @@ USAGE = <<~EOF
   FLEET_CLAUDE_JSON, ATHENA_INBOX_CLIENT_CONFIG, TICKET_RECLASSIFY_NOTION_API
   (a loopback URL), TICKET_RECLASSIFY_PACE_S (seconds between Notion reads,
   default 0.4), TICKET_RECLASSIFY_CALL_INTERVAL_S (seconds between
-  classification calls, default #{Reclassify::CALL_INTERVAL_S}; the server's own local limit still
-  applies), TICKET_RECLASSIFY_MAX_TIME_S (per server request, default 60).
+  classification calls, default #{format('%.2f', Reclassify::CALL_INTERVAL_S)}; the server's own local
+  limit still applies), TICKET_RECLASSIFY_MAX_TIME_S (per server request, default 60).
 EOF
 
 class Failure < StandardError
@@ -199,7 +209,8 @@ module Manager
   module_function
 
   def deps
-    { notion: Effects::Notion.new, server: Effects::Server.new, clock: Effects::Clock.new, interval: Effects.call_interval }
+    { notion: Effects::Notion.new, server: Effects::Server.new, clock: Effects::Clock.new, interval: Effects.call_interval,
+      progress: $stderr }
   end
 
   # tickets(notion) -> every DND ticket, by number, each with its project.
@@ -212,6 +223,10 @@ module Manager
     fail!(1, "the DND Tickets data source returned no ticket with a DND id (#{rows.size} rows)", "a failed lookup, not an empty tracker: check the share, then re-run") if list.empty?
     missing = list.flat_map { |t| t["schema_missing"] }.uniq.sort
     fail!(1, "the tracker rows carry no select property #{missing.join(', ')}", "the DND Tickets schema changed: update TriageCorpus.ticket_from_row and this tool") unless missing.empty?
+    # A renamed Status would read nil on every row, and nil is not closed:
+    # every closed ticket would be re-judged. That is an error, not "open".
+    no_status = rows.count { |r| TriageCorpus.ticket_from_row(r) && !(r.dig("properties", "Status").is_a?(Hash) && r.dig("properties", "Status").key?("status")) }
+    fail!(1, "#{no_status} tracker rows carry no Status status property", "the DND Tickets schema changed: update TriageCorpus.ticket_from_row and this tool") if no_status.positive?
     list.each { |t| t["project"] = TriageCorpus.project_of(t, epic_projects) }
     list.sort_by { |t| TriageCorpus.number(t["ref"]) }
   rescue TriageCorpus::InputError => e
@@ -232,18 +247,23 @@ module Manager
   # plan(opts, out, deps) -> exit code. Writes the plan file.
   def plan(opts, out, deps)
     all = tickets(deps[:notion])
-    start = opts[:resume_from] ? TriageCorpus.number(opts[:resume_from]) : nil
-    scope = start ? all.select { |t| TriageCorpus.number(t["ref"]) >= start } : all
+    scope = all
+    if opts[:resume_from]
+      # A cursor is always a real ticket: a typo must never read as an empty,
+      # complete plan.
+      fail!(1, "--resume-from #{opts[:resume_from]} matches no ticket", "pass the cursor a plan printed, exactly") unless all.any? { |t| t["ref"] == opts[:resume_from] }
+      start = TriageCorpus.number(opts[:resume_from])
+      scope = all.select { |t| TriageCorpus.number(t["ref"]) >= start }
+    end
     state = { now: nil, entries: [], skipped: Hash.new { |h, k| h[k] = [] }, inert: [], asked: 0,
               stop: nil, cursor: nil, last_call: nil }
     scope.each_with_index do |t, i|
-      if opts[:limit] && state[:asked] >= opts[:limit]
-        state[:stop] = "--limit #{opts[:limit]} reached"
-        state[:cursor] = t["ref"]
-        state[:not_reached] = scope.size - i
-        break
-      end
-      stopped = consider(t, state, deps)
+      stopped = if opts[:limit] && state[:asked] >= opts[:limit]
+                  "--limit #{opts[:limit]} reached"
+                else
+                  guarded_consider(t, state, deps)
+                end
+      deps[:progress]&.puts("#{PROG}: #{i + 1} of #{scope.size} considered, #{state[:asked]} asked") if ((i + 1) % 50).zero?
       next unless stopped
 
       state[:stop] = stopped
@@ -252,12 +272,45 @@ module Manager
       break
     end
     doc = plan_doc(opts, scope, state)
+    check_sum!(doc["counts"])
     Effects.write_private(opts[:out], JSON.pretty_generate(doc) + "\n")
     summary(doc, opts[:out]).each { |l| out.puts l }
-    return 0 if state[:stop].nil? || state[:stop].start_with?("--limit")
+    finish(state, doc, out)
+  end
 
-    out.puts "#{PROG}: STOPPED at #{state[:cursor]}: #{state[:stop]}. #{Reclassify::UNAVAILABLE_FIX} (--resume-from #{state[:cursor]}); the entries above it are a valid partial plan."
+  # finish(state, doc, out) -> the exit code, after the line that says why a
+  # plan is not whole. Exit 3 for a stop (budget, rate, server) or for
+  # tickets that could not be judged; 0 for a whole plan or a --limit stop.
+  def finish(state, doc, out)
+    if state[:stop] && !state[:stop].start_with?("--limit")
+      out.puts "#{PROG}: STOPPED at #{state[:cursor]}: #{state[:stop]}. #{Reclassify::UNAVAILABLE_FIX} (--resume-from #{state[:cursor]}, into a new --out); the entries above it are a valid partial plan."
+      return 3
+    end
+    unjudged = Reclassify::INCOMPLETE_REASONS.flat_map { |r| state[:skipped][r].map { |ref| "#{r} #{ref}" } }
+    return 0 if unjudged.empty?
+
+    out.puts "#{PROG}: INCOMPLETE: #{unjudged.size} ticket(s) could not be judged (#{unjudged.join(', ')}). " \
+             "Fix: apply this plan, then re-run plan into a new --out to retry them; a refused ticket (HTTP 422) is a request bug to report"
     3
+  end
+
+  # check_sum!(counts) -> raises unless every considered ticket is counted
+  # exactly once (an accounting bug must never print a false equation).
+  def check_sum!(counts)
+    sum = counts["skipped"].values.sum + counts["planned"] + counts["unchanged"] + counts["inert"] + counts["not_reached"]
+    return if sum == counts["considered"]
+
+    fail!(1, "the plan counts #{sum} tickets but considered #{counts['considered']}", "this is a bug in #{PROG}; report it with the plan's counts")
+  end
+
+  # guarded_consider -> consider, with any unexpected error turned into a
+  # stop at this ticket, so the answers so far are kept in the plan file.
+  def guarded_consider(ticket, state, deps)
+    consider(ticket, state, deps)
+  rescue Failure
+    raise
+  rescue StandardError => e
+    "UNEXPECTED ERROR: #{e.class}"
   end
 
   # consider(ticket, state, deps) -> nil, or why the plan stops here.
@@ -276,6 +329,7 @@ module Manager
     kind, result = Reclassify.read_reply(deps[:server].post(Reclassify.request_body(ticket)), Reclassify.filer(Reclassify.current(ticket)))
     return result if kind == :stop
     return skip(state, ticket, "refused") if kind == :refused
+    return skip(state, ticket, "unavailable") if kind == :unavailable
 
     now = Reclassify.now_of(result)
     if state[:now].nil?
@@ -313,7 +367,7 @@ module Manager
                "unchanged" => entries.size - planned.size, "inert" => state[:inert].size,
                "not_reached" => state[:not_reached] || 0, "asked" => state[:asked], "changes" => changes }
     { "format" => PLAN_FORMAT, "planned_at" => Time.now.utc.iso8601, "resumed_from" => opts[:resume_from],
-      "complete" => state[:stop].nil?, "cursor" => state[:cursor], "stopped_because" => state[:stop],
+      "complete" => state[:stop].nil? && Reclassify::INCOMPLETE_REASONS.none? { |r| state[:skipped][r].any? }, "cursor" => state[:cursor], "stopped_because" => state[:stop],
       "now" => state[:now], "counts" => counts,
       "skipped_refs" => Reclassify::SKIP_REASONS.to_h { |r| [r, state[:skipped][r]] }.reject { |r, _| %w[closed feature].include?(r) },
       "inert_refs" => state[:inert], "entries" => entries }
@@ -333,7 +387,7 @@ module Manager
     "#{list.size} (#{shown}#{list.size > 20 ? ', ...' : ''})"
   end
 
-  # summary(doc, path) -> the lines a captain quotes. A plan with no writes
+  # summary(doc, path) -> the lines the agent quotes. A plan with no writes
   # says so with its counts; it never reads as a silent success.
   def summary(doc, path)
     c = doc["counts"]
@@ -457,6 +511,9 @@ def main(argv)
 rescue Failure => e
   $stderr.puts e.message
   e.code
+rescue StandardError => e
+  $stderr.puts "#{PROG}: UNEXPECTED ERROR: #{e.class}. Fix: this is a bug in #{PROG}; re-run, and report it if it repeats"
+  1
 end
 
 exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

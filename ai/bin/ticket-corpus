@@ -12,9 +12,9 @@
 # (files only), the MANAGER (build; shadow report) and the FRAMEWORK (argv).
 #
 # This tool makes NO network call. It reads the snapshot that
-# `ai/bin/triage-corpus --fetch` writes (that tool's read-only Notion effect is
-# the one tracker reader; DND-1055 added created_time, Kind and Security to
-# it). Ticket text is untrusted data, written only to machine-local 0600
+# `ai/bin/triage-corpus --fetch` writes (that tool reads the tracker through
+# the read-only ai/lib/notion_read.rb; DND-1055 added created_time, Kind and
+# Security to its snapshot). Ticket text is untrusted data, written only to machine-local 0600
 # files, never committed; the labels files hold ids.
 #
 # Deliberately gem-free (stdlib only).

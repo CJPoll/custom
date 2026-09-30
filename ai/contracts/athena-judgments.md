@@ -449,8 +449,8 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   `owner_confirmed`. Every other sampled pair stays `proposed`. Severity labels
   are weak (an agent assigned them) and are not evaluated.
 - **Ticket classification labels** (DND-1055, `ai/bin/ticket-corpus`) come
-  from the same tracker snapshot (`triage-corpus --fetch`, the one read-only
-  tracker reader), one case per ticket per use case, in the machine-local
+  from the same tracker snapshot (`triage-corpus --fetch`, which reads through
+  the read-only `ai/lib/notion_read.rb`), one case per ticket per use case, in the machine-local
   `ticket-{kind,severity,security}-{labels,corpus}.jsonl`. Labels use the
   tracker's spelling (`Bug`, `MEDIUM`; Security reads `security` for
   `introduced` or `pre-existing` and `none` for `none`; an unset or other
@@ -614,9 +614,13 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   (`ai/lib/notion_read.rb` refuses any other request) and writes no tracker;
   the agent applies only `Kind`, `Severity`, `Security` and the line. A ticket
   whose values differ from its last provenance line is locked: a hand edit
-  wins. A line at the server's model and versions now, with every property
-  `on` or the modes now, is not re-judged. `proof` re-reads every written
-  ticket and fails on any difference, an unreadable page included. Procedure:
+  wins. A line at the server's model and versions now, with no fault reason
+  and every property `on` or the modes now, is not re-judged (the first
+  ticket asked is, since its answer is what reports the model, versions and
+  modes now). A fault answer is never recorded as a classification: an
+  account-wide fault stops the plan, a per-call one skips the ticket as
+  `unavailable`. `proof` re-reads every written ticket and fails on any
+  difference, an unreadable page included. Procedure:
   athena:ticket-management → *Reclassifying the backlog*.
 
 ## Budget
@@ -728,5 +732,10 @@ with it.
       lowers a security classification or replaces `Feature`, and on an
       unreachable server, a refusal, a server failure or an unreadable answer
       exits 3 with a distinct line and the filer's values.
+- [ ] Reclassifying the backlog reads Notion only and writes no tracker,
+      sends the current values as the filer's, skips a ticket whose values
+      differ from its last provenance line as locked, never records a fault
+      fallback as a classification, and its `proof` counts an unreadable page
+      as a mismatch.
 - [ ] A question set with several questions defines its eval case unit; a
       finding triage case is one (finding, candidate) pair.

@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
-# ai/lib/notion_read.rb -- the harness's one READ-ONLY Notion client (Side
-# Effects). Extracted from ai/bin/triage-corpus (DND-714) by DND-1056 so
-# ticket-reclassify reads the tracker through the same allowlist instead of a
-# second client.
+# ai/lib/notion_read.rb -- a READ-ONLY Notion client (Side Effects) shared by
+# triage-corpus and ticket-reclassify. Extracted from ai/bin/triage-corpus
+# (DND-714) by DND-1056 so ticket-reclassify reads the tracker through the
+# same allowlist instead of a copy.
 #
 # Callers: ai/bin/triage-corpus and
 # ai/skills/athena:ticket-management/scripts/ticket-reclassify. Each maps
@@ -158,9 +158,11 @@ module NotionRead
       body["start_cursor"] = cursor if cursor
       page = read(origin, token, "POST", "/v1/data_sources/#{data_source}/query", body, pace: pace)
       rows.concat(Array(page["results"]))
-      break unless page["has_more"] == true && page["next_cursor"].is_a?(String)
+      break unless page["has_more"] == true
 
       cursor = page["next_cursor"]
+      # A cut-off list must never read as the whole data source.
+      raise Error.new("Notion said has_more for data source #{data_source} with no usable next_cursor", "re-run; the rest of the rows could not be reached") unless cursor.is_a?(String) && !cursor.empty?
     end
     rows
   end

@@ -2,13 +2,14 @@
 
 # reclassify.rb -- DOMAIN (pure) for scripts/ticket-reclassify (DND-1056):
 # which open tickets the ticket classification policy may re-judge, what the
-# server decided for each, what the captain must write, and whether a page
+# server decided for each, what the agent must write, and whether a page
 # matches the plan afterwards.
 #
-# Design: DND-1056 Architecture & Engineering section 1; the provenance line
-# is DND-991's (A&E section 4): the prefix "Jev classification: " then compact
-# JSON with kind, severity and security (each value, source, judged,
-# confidence, accepted, mode, reason), model and versions.
+# Design: DND-1056's Architecture & Engineering page (*Structure*); the
+# provenance line is DND-991's (its Architecture & Engineering page, *The
+# policy*): the prefix "Jev classification: " then compact JSON with kind,
+# severity and security (each value, source, judged, confidence, accepted,
+# mode, reason), model and versions.
 #
 # THE TOOL NEVER DECIDES. The decided values and the provenance line are the
 # server's, verbatim (R1056-4). This module only chooses which tickets to ask
@@ -31,15 +32,28 @@ module Reclassify
   # The three properties, in the order a change is listed; key => tracker name.
   PROPS = { "kind" => "Kind", "severity" => "Severity", "security" => "Security" }.freeze
   MODES = %w[off shadow on].freeze
-  # R1056-6: a property reason that stops the plan at this ticket.
-  STOP_REASONS = %w[budget_exhausted rate_limited rate_limited_local].freeze
+  # A property reason that stops the plan at this ticket: R1056-6's budget
+  # and rate reasons, and every fault that holds for the whole account (a
+  # missing or rejected key, custody, price, our own bug, the pinned model),
+  # so a revoked key never stamps the backlog with fallbacks.
+  STOP_REASONS = %w[budget_exhausted rate_limited rate_limited_local key_missing credential_rejected
+                    custody_fault price_unknown invalid_request request_rejected model_mismatch].freeze
+  # A fault of this one call: the ticket is skipped as `unavailable` (never an
+  # entry, never read as a judgment) and the plan is incomplete. Every fault
+  # reason is in one of the two lists (contract *The closed reason list*).
+  CALL_FAULTS = %w[timeout overloaded http_status transport_error undecodable_body malformed_answer
+                   domain_not_permitted].freeze
+  FAULT_REASONS = (STOP_REASONS + CALL_FAULTS).freeze
   # Every skip reason, in the order eligibility checks them.
-  SKIP_REASONS = %w[closed feature unset_properties unknown_value no_project blank_title body_unread
-                    unparseable_provenance locked already_classified refused].freeze
+  SKIP_REASONS = %w[no_status closed feature unset_properties unknown_value no_project blank_title body_unread
+                    unparseable_provenance locked already_classified refused unavailable].freeze
+  # A skip that means the ticket could not be judged: the plan is INCOMPLETE.
+  INCOMPLETE_REASONS = %w[body_unread refused unavailable].freeze
   VALUES = { "kind" => Classify::KINDS, "severity" => Classify::SEVERITIES, "security" => Classify::SECURITIES }.freeze
   # R1056-6: at most 20 tickets a minute (3 calls each, under the server's
-  # local 60 a minute).
-  TICKETS_PER_MINUTE = 20
+  # local 60 a minute). 18 leaves room for the owner's other consumers, which
+  # share that local limit.
+  TICKETS_PER_MINUTE = 18
   CALL_INTERVAL_S = 60.0 / TICKETS_PER_MINUTE
   UNAVAILABLE_FIX = "Fix: resume later with --resume-from the cursor"
 
@@ -61,6 +75,7 @@ module Reclassify
   # property_skip(ticket) -> the skip reason decidable from the tracker row
   # alone, or nil. Checked before the body is read.
   def property_skip(ticket)
+    return "no_status" if blank?(ticket["status"])
     return "closed" if CLOSED.include?(ticket["status"])
     return "feature" if ticket["kind"] == "Feature"
     return "unset_properties" if PROPS.keys.any? { |k| blank?(ticket[k]) }
@@ -110,6 +125,17 @@ module Reclassify
     { "model" => doc["model"], "versions" => doc["versions"].slice(*PROPS.keys), "modes" => PROPS.keys.to_h { |k| [k, doc[k]["mode"]] } }
   end
 
+  # line_facts(doc) -> line_now plus each property's reason, for the
+  # already_classified check (the reasons are not part of "now").
+  def line_facts(doc)
+    line_now(doc).merge("reasons" => PROPS.keys.filter_map { |k| doc[k]["reason"] })
+  end
+
+  # base_reason("malformed_answer:detail") -> "malformed_answer".
+  def base_reason(reason)
+    reason.to_s.split(":", 2).first
+  end
+
   # eligibility(ticket, now) -> :eligible | [:skip, reason]. `now` is the
   # model, versions and modes the server reports this run, or nil until the
   # first answer. R1056-3 (locked) and R1056-7 (already_classified).
@@ -123,7 +149,7 @@ module Reclassify
     return :eligible if state == :none
     # Someone changed a value after the classifier wrote it: their edit wins.
     return [:skip, :locked] if PROPS.keys.any? { |k| doc[k]["value"] != ticket[k] }
-    return [:skip, :already_classified] if already_classified?(line_now(doc), now)
+    return [:skip, :already_classified] if already_classified?(line_facts(doc), now)
 
     :eligible
   end
@@ -134,6 +160,8 @@ module Reclassify
   # Before the first answer `now` is unknown and nothing is skipped here.
   def already_classified?(line, now)
     return false if now.nil?
+    # A line that records a fault is a fallback, not a judgment: re-judge it.
+    return false if Array(line["reasons"]).any? { |r| FAULT_REASONS.include?(base_reason(r)) }
     return false unless line["model"] == now["model"] && line["versions"] == now["versions"]
 
     line["modes"].values.all?("on") || line["modes"] == now["modes"]
@@ -182,7 +210,8 @@ module Reclassify
     Classify.request_body(ticket["title"].to_s, sent_body(ticket), ticket["project"], ticket["ref"], filer(current(ticket)))
   end
 
-  # read_reply(reply, filer) -> [:ok, result] | [:refused, why] | [:stop, why].
+  # read_reply(reply, filer) -> [:ok, result] | [:refused, why] |
+  # [:unavailable, why] | [:stop, why].
   # `reply` is {unreachable: why} or {curl_rc:, status:, body:}. Only a 422
   # is this ticket's own refusal; every other failure stops the plan.
   def read_reply(reply, filer)
@@ -217,8 +246,12 @@ module Reclassify
     end
     return [:stop, "UNREADABLE SERVER ANSWER: HTTP 200 but its provenance line lacks a value, mode, model or versions"] if now_of(doc).nil?
 
-    stop = PROPS.keys.map { |k| doc.dig("properties", k, "reason") }.find { |r| STOP_REASONS.include?(r) }
-    stop ? [:stop, "the server answered #{stop}"] : [:ok, doc]
+    reasons = PROPS.keys.filter_map { |k| doc.dig("properties", k, "reason") }
+    stop = reasons.find { |r| STOP_REASONS.include?(base_reason(r)) }
+    return [:stop, "the server answered #{stop}"] if stop
+
+    fault = reasons.find { |r| CALL_FAULTS.include?(base_reason(r)) }
+    fault ? [:unavailable, "the server answered #{fault}"] : [:ok, doc]
   end
 
   # proof_mismatches(entry, page_values, body_lines) -> one line per way the
