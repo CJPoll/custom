@@ -111,6 +111,8 @@ BIN_STDIN_TIMEOUT_S = 30
 # the bin dir (`../hooks/x`, `/bin/sh`).
 GUARD_NAME_RE = /\A[a-z0-9][a-z0-9-]{1,62}\z/
 BIN_STDIN_EXPECTS = %w[fires clean].freeze
+# input= is a bare file name in the case dir, never a path out of it.
+INPUT_NAME_RE = /\A(?!\.\.?\z)[A-Za-z0-9._-]+\z/
 
 # Domain (pure): the verdict table. -> [verdict, detail]. The checks run from
 # the most to the least decisive, so a timeout or signal is never read from
@@ -151,14 +153,17 @@ def validate_bin_stdin_meta(meta, case_dir)
 
   input = meta["input"].to_s
   path = File.join(case_dir, input)
-  return "input missing: #{path}" if input.empty? || !File.file?(path)
+  return "input missing: #{path}" if input.empty?
+  return "bad input name: #{input.inspect}" unless INPUT_NAME_RE.match?(input)
+  return "input missing: #{path}" unless File.file?(path)
 
   nil
 end
 
 # Side Effects: the one exec site. Runs bin_dir/<guard> with argv (no shell),
-# stdin = the input file, a fresh HOME per run (a tool's HOME state must not
-# carry between cases), cwd = the repo root, and a process-group bound.
+# stdin = the input file, cwd = the repo root, and a process-group bound. A
+# fresh HOME per run, with the XDG state/config/cache dirs under it, so a
+# tool's per-user state cannot carry between cases. Other env is inherited.
 # -> the raw outcome bin_stdin_verdict classifies.
 def bin_stdin_run(guard, input_path, args, bin_dir:, timeout:)
   bin = File.join(bin_dir, guard)
@@ -167,10 +172,15 @@ def bin_stdin_run(guard, input_path, args, bin_dir:, timeout:)
 
   Dir.mktmpdir("harness-eval-home-") do |home|
     r = BoundedCommand.run([bin, *args], timeout: timeout, chdir: REPO_ROOT,
-                                         env: { "HOME" => home }, stdin: input_path)
+                                         env: bin_stdin_env(home), stdin: input_path)
     { exit_status: r.exitstatus, termsig: r.termsig, timed_out: r.timed_out,
-      output: "#{r.out}#{r.err}" }
+      output: [r.out, r.err].join("\n") }
   end
+end
+
+def bin_stdin_env(home)
+  { "HOME" => home, "XDG_STATE_HOME" => File.join(home, ".local/state"),
+    "XDG_CONFIG_HOME" => File.join(home, ".config"), "XDG_CACHE_HOME" => File.join(home, ".cache") }
 end
 
 # Manager: validate, run, classify. Nothing executes on invalid meta.
@@ -364,6 +374,8 @@ def self_test_bin_stdin(dir)
     "M-4 bad expect" => ["expect", "pass", "bad expect"],
     "M-5 input missing" => ["input", "nope.txt", "input missing"],
     "M-5b input blank" => ["input", "", "input missing"],
+    "M-8 input path out of the case dir" => ["input", "../in.txt", "bad input name"],
+    "M-8b input dot-dot" => ["input", "..", "bad input name"],
     "M-6 args object" => ["args", '{"a":1}', "bad args"],
     "M-6b args non-string" => ["args", "[1]", "bad args"],
     "M-6c args not JSON" => ["args", "--strict", "bad args"] }.each do |label, (key, val, needle)|
@@ -387,6 +399,11 @@ def self_test_bin_stdin(dir)
   stub.call("args-bin", "cat >/dev/null; if [ \"$1\" = --strict ]; then echo 'Fix: strict' >&2; exit 1; fi; exit 0")
   stub.call("home-bin", "if [ -e \"$HOME/marker\" ]; then echo 'Fix: HOME leaked' >&2; exit 1; fi; touch \"$HOME/marker\"; exit 0")
   stub.call("hang-bin", "echo $$ > \"#{File.join(dir, 'hang.pid')}\"; exec sleep 60")
+  stub.call("stdout-fix-bin", "cat >/dev/null; echo 'Fix: on stdout'; exit 1")
+  stub.call("killed-bin", "kill -9 $$")
+  stub.call("cwd-bin", "if [ \"$(pwd -P)\" = \"#{File.realpath(REPO_ROOT)}\" ]; then exit 0; fi; " \
+                       "echo \"cwd $(pwd -P) Fix: x\"; exit 1")
+  stub.call("xdg-bin", "case \"$XDG_STATE_HOME\" in \"$HOME\"/*) exit 0;; esac; echo 'Fix: XDG_STATE_HOME outside HOME'; exit 1")
   stub.call("noexec-bin", "exit 0")
   File.chmod(0o644, File.join(bin_dir, "noexec-bin"))
   escape_marker = File.join(dir, "escaped")
@@ -434,18 +451,25 @@ def self_test_bin_stdin(dir)
   end
   check.call("B-10 a hang is capped", run_case.call({ "guard" => "hang-bin", "expect" => "clean" }, timeout: 1),
              "error", false, "timeout 1s")
+  # The kill is checked only if the stub wrote its pid file before the cap: on
+  # a slow machine it may not, and that is not a defect (DND-1222). The group
+  # kill itself is proven by bounded_command_test b5. Matching the cmdline
+  # keeps a recycled pid from reading as a survivor.
   hang_pid = File.file?(File.join(dir, "hang.pid")) ? File.read(File.join(dir, "hang.pid")).to_i : 0
   if hang_pid.positive?
-    begin
-      Process.kill(0, hang_pid)
-      stat = File.read("/proc/#{hang_pid}/stat") rescue "" # rubocop:disable Style/RescueModifier
-      fails << "B-10 the hung child #{hang_pid} was not reaped" unless stat.split(") ").last.to_s.start_with?("Z")
-    rescue Errno::ESRCH
-      nil
+    cmd = begin
+      File.read("/proc/#{hang_pid}/cmdline")
+    rescue Errno::ENOENT, Errno::ESRCH
+      ""
     end
-  else
-    fails << "B-10 the hung child never started (no pid file)"
+    fails << "B-10 the hung child #{hang_pid} survived the cap" if cmd == "sleep\u000060\u0000"
   end
+  check.call("B-13 Fix: on stdout counts", run_case.call("guard" => "stdout-fix-bin", "expect" => "fires"), "fires", true)
+  check.call("B-14 a signalled bin is an error", run_case.call("guard" => "killed-bin", "expect" => "clean"),
+             "error", false, "signal 9")
+  check.call("B-15 cwd is the repo root", run_case.call("guard" => "cwd-bin", "expect" => "clean"), "clean", true)
+  check.call("B-16 XDG state lives under the fresh HOME", run_case.call("guard" => "xdg-bin", "expect" => "clean"),
+             "clean", true)
   check.call("B-11 bad guard name executes nothing", run_case.call("guard" => "../x", "expect" => "clean"),
              "error", false, "bad guard name")
   fails << "B-11 ../x was executed (marker exists)" if File.exist?(escape_marker)

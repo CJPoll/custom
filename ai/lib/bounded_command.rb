@@ -22,7 +22,8 @@
 # intent: these callers are unattended, and a prompt is a hang.
 
 module BoundedCommand
-  # termsig is the signal that ended the child, or nil when it exited. A
+  # termsig is the signal that ended the child; nil when it exited, timed out
+  # (see timed_out) or never spawned. A
   # signalled child also reads exitstatus 128+n (existing callers depend on
   # it), which alone cannot tell a KILL from a real `exit 137`.
   Result = Struct.new(:out, :err, :exitstatus, :timed_out, :seconds, :termsig, keyword_init: true) do
