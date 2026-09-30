@@ -219,7 +219,8 @@ A port error is exactly one of:
 
 A `request_rejected` detail never quotes the response body, which can echo the
 request's state text. A 422's detail is its first error's `type` and `loc`
-identifiers; a 400's detail is `bad_request`.
+identifiers, or `unprocessable` when it has none it can use; a 400's detail is
+`bad_request`.
 
 **Later (2026-09-30, DND-948):** `request_rejected` was HTTP 422 only, and a 400
 fell into `http_status`. Replaced by 400 or 422: the real API refuses most
