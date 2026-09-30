@@ -294,7 +294,7 @@ INLINE_SELF_TEST_RE = /(?<![\w-])--self-test(?![\w-])/.freeze
 # self-test.sh), or the suite's code names the tool together with --self-test.
 INLINE_SELF_TEST_COVERED_BY = {
   # The tool's --self-test execs a discovered/declared suite.
-  # fleet-control --self-test runs all four parts of its suite (DND-1007);
+  # fleet-control --self-test runs all six parts of its suite (DND-1007/DND-1361);
   # each part is discovered on its own. The map names one of them.
   "ai/bin/fleet-control"         => "ai/lib/fleet/test/control/domain/self-test.sh",
   "ai/bin/fleet-report"          => "ai/lib/fleet/test/self-test.sh",
