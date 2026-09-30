@@ -489,7 +489,8 @@ the issues." This section is its one home; other documents cite it by name.
   fine; a verdict that flips when the machine is slow is not. A flake that
   shows only under load gets a deterministic test (a fixture, an injected
   clock, a fake, or a block on the event), never a stress repro. How:
-  `athena:test-specification` → *Scope: functional tests only*. Owner, Cody,
+  `athena:test-specification` → *Scope: functional tests only*. Briefs cite
+  this rule as DND-1222. Owner, Cody,
   2026-09-29: "I want us only doing functional testing in the agent
   definitions, skill definitions, etc." Measured that day: a captain's `yes`
   and spin-loop repro of DND-1202 drove load to 46 while Cody was gaming.
