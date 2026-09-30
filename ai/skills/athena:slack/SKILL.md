@@ -44,10 +44,15 @@ it is DND-301, gated on the parity gaps in DND-542.
 
 ## Setup
 
-- Token: `~/.claude/slack-bot-token`, mode 600, one `xoxb-…` line. `$SLACK_BOT_TOKEN`
-  overrides it. Nothing here ever prints the token, puts it in argv, or puts it
+- Token: `~/.claude/slack-bot-token`, mode 600, one `xoxb-…` line. It is the
+  only source: no env var is read (`ai/contracts/athena-machine-secrets.md` →
+  *Never*). Nothing here ever prints the token, puts it in argv, or puts it
   in a URL: it reaches curl as an `Authorization: Bearer` header inside a 0600
   config file.
+
+  **Later (2026-09-30, DND-845):** this said `$SLACK_BOT_TOKEN` overrides the
+  file. Superseded: an env fallback invites a global export, which puts the
+  token in every child of a session.
 - Requires `curl` and `jq`. POSIX `sh`; no GNU-only flags.
 - Caches live in `~/.cache/athena-slack/` (`users.json`, `channels.json`,
   `identity.json`). All are disposable — delete any of them to force a refresh.

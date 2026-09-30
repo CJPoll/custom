@@ -297,6 +297,24 @@ if [[ "${RC}" != 0 && "${ERR}" == *"slack-bot-token"* ]] && ! any_curl; then
   ok "no token: named error, non-zero, and no request is made"
 else bad "no token: named error, non-zero, and no request is made" "rc=${RC} err='${ERR}'"; fi
 
+# 4b. DND-845: there is no env-var fallback for the token. A token in the
+#     caller's env is ignored, because a fallback invites a global export
+#     (ai/contracts/athena-machine-secrets.md -> Never). Both the retired
+#     $SLACK_BOT_TOKEN and an inherited $SLACK_TOKEN_VALUE (the lib's
+#     same-shell cache) are covered.
+setup_case
+rm -f "${CHOME}/.claude/slack-bot-token"
+SLACK_BOT_TOKEN="${FAKE_TOKEN}" run_bin whoami
+if [[ "${RC}" != 0 && "${ERR}" == *"slack-bot-token"* ]] && ! any_curl; then
+  ok "a \$SLACK_BOT_TOKEN in the env is not a token source (no request)"
+else bad "a \$SLACK_BOT_TOKEN in the env is not a token source (no request)" "rc=${RC} err='${ERR}'"; fi
+setup_case
+rm -f "${CHOME}/.claude/slack-bot-token"
+SLACK_TOKEN_VALUE="${FAKE_TOKEN}" run_bin whoami
+if [[ "${RC}" != 0 && "${ERR}" == *"slack-bot-token"* ]] && ! any_curl; then
+  ok "an inherited \$SLACK_TOKEN_VALUE is not a token source (no request)"
+else bad "an inherited \$SLACK_TOKEN_VALUE is not a token source (no request)" "rc=${RC} err='${ERR}'"; fi
+
 # 5. A user token where a bot token belongs. This is the failure that would
 #    silently make Athena post AS CODY -- the one thing the skill exists to
 #    prevent -- so it is refused by shape before it is ever sent.
@@ -551,6 +569,15 @@ run_hook
 if [[ -z "${OUT}" && "${RC}" == 0 ]] && ! any_curl && [[ -z "${HOOKLOG}" ]]; then
   ok "hook: no token configured is silent, unlogged, and makes no request"
 else bad "hook: no token configured is silent, unlogged, and makes no request" \
+  "rc=${RC} out='${OUT}' log='${HOOKLOG}'"; fi
+
+# 27b. DND-845: a $SLACK_BOT_TOKEN in the env does not configure the hook.
+setup_case
+rm -f "${CHOME}/.claude/slack-bot-token"
+run_hook SLACK_BOT_TOKEN="${FAKE_TOKEN}"
+if [[ -z "${OUT}" && "${RC}" == 0 ]] && ! any_curl && [[ -z "${HOOKLOG}" ]]; then
+  ok "hook: a \$SLACK_BOT_TOKEN in the env is not configuration (silent, no request)"
+else bad "hook: a \$SLACK_BOT_TOKEN in the env is not configuration (silent, no request)" \
   "rc=${RC} out='${OUT}' log='${HOOKLOG}'"; fi
 
 # 28. Inside the 5-minute window: no output and, crucially, no network call.
