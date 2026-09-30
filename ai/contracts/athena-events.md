@@ -5579,10 +5579,21 @@ does three things:
 2. It sets the field to `null` in every stored row.
 3. It drops the column.
 
-No identity, state, eligibility or `owner_only` rule reads a permissive field,
-so removing one changes none of them. Ranking may read one (`vip_assignee`).
-After the field is removed, that reason stops firing. The owner accepts that
-when removing the field.
+No identity, state or eligibility rule reads a permissive field. One
+`owner_only` rule does: a rules edit re-derives a `notion_work` item's
+`owner_only` from its stored `assignee` (*Domain and owner-only items* → *A
+rules edit re-derives the owner's stored items*). It reads the field only
+while the allow-list names it; once the field is removed, that item is treated
+like a `notion_personal` one, its stored `owner_only` is kept, and the
+re-sync converges it. So removing a permissive field changes no stored
+`owner_only` value. Ranking may read one (`vip_assignee`). After the field is
+removed, that reason stops firing. The owner accepts that when removing the
+field.
+
+**Later (2026-09-30):** this paragraph said "No identity, state, eligibility
+or `owner_only` rule reads a permissive field". Superseded by DND-1256
+(gen_saas #558): a rules edit re-derives stored items, and for `notion_work`
+the only stored input to `owner_only` is the permissive `assignee`.
 
 ### States
 
@@ -5658,7 +5669,9 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   source wins over its default, an empty list included; a source the stored
   rules do not name takes its default. A status outside the source's declared
   set is stored and treated as non-terminal. The priorities page flags it as
-  undeclared. It is never silently read as open.
+  undeclared. It is never silently read as open. An edit of the list
+  re-derives the owner's stored items (*Domain and owner-only items* → *A
+  rules edit re-derives the owner's stored items*).
 
   **Later (2026-09-28, DND-438):** this bullet said "`notion_work` gets its
   default from DND-438". DND-438 set it, and made the default apply per source
@@ -5788,6 +5801,38 @@ leasable. It is true for:
 - a `manual` item the owner marks so.
 
 It is false for everything else.
+
+**A rules edit re-derives the owner's stored items** (DND-1256). An item's
+`owner_only` and state are derived at ingest from the owner's rules of that
+moment. When the owner edits the rules, the same transaction re-derives every
+one of the owner's live items, in any state, under the new rules, and rescores
+the open ones. A derivation reads what the row stores, never the source:
+
+- **`owner_person_ids` → `owner_only`**, by the same derivation ingest uses
+  (above). A `notion_work` item re-derives from its stored `assignee`. A
+  `notion_personal` item stores no assignee (*The storage boundary*), so where
+  the answer needs one (a `Needs Attention` item, the person id configured) its
+  stored value is kept, and the re-sync's re-apply of the page converges it
+  (*Re-sync*). Unsetting the id needs no assignee: every `Needs Attention`
+  Notion item is `owner_only` at once, the restrictive reading. A `manual`
+  item keeps the owner's own mark.
+- **`terminal_statuses` → state**, only for an item whose stored status the
+  edit made terminal (terminal now, not before). It is applied as an event
+  carrying the item's own status and the revision the row already holds
+  (*States*), the event the re-sync would apply within the hour. A status that
+  was already terminal is left alone, so an item the owner restored over it
+  stays restored. Nothing reopens: a reopen needs a strictly newer revision,
+  so an item closed by a status the owner no longer calls terminal reopens on
+  its next change in the source. A close from here is recorded like any
+  other `source_status` close, and ends the item's lease.
+- **Not re-derived:** `domain`, `domain_basis` and `project`. Their only rules
+  input is `notion_project_domains`, which lives in the fleet policy, not in
+  the rules; an edit of that map reclassifies nothing (above).
+
+An ingest reads the rules row under a share lock taken before its item lock,
+so an ingest racing an edit either finishes first and is re-derived by the
+edit, or reads the edited rules. Neither leaves `owner_only` or the state
+derived from the old rules.
 
 ### Ranking
 
