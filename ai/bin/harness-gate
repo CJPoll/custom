@@ -904,7 +904,10 @@ end
 # process between the gate and the check (the check's parent is the shim)
 # and about 15 ms of startup per check (`time ruby --disable=all -e ...`:
 # 0.015 s wall, 0.01 s user; measured once, 2026-09-29). The shim changes no signal
-# disposition, so the check inherits what it did before. The shim's command
+# disposition, so the check inherits what it did before. Its signal mask is
+# empty either way: Ruby's spawn empties the mask in the child before exec,
+# whichever thread spawns it and whatever that thread blocks (process.c,
+# disable_child_handler_fork_child; self-test cases 15b and 15c). The shim's command
 # line carries the check's argv, so a tool matching processes by argument
 # sees one extra match per running check; the shim never outlives its
 # check, so it is never an orphan of its own. A cpu figure the
@@ -1882,6 +1885,39 @@ def self_test_jobs_flag
   good
 end
 
+# Case 15c's fixture (DND-1339): runs the block on a new thread that first
+# blocks every signal (pthread_sigmask through Fiddle; Ruby has no API for a
+# thread's mask). Returns { out: <the block's value>, thread_blk: <that
+# thread's SigBlk hex just before the block ran>, error: <why the fixture
+# could not run, or nil> }. The thread's mask is put back before it ends. A
+# fixture that could not block its signals reports an error, never a pass.
+def spawn_from_blocked_thread
+  require "fiddle"
+  libc = Fiddle.dlopen(nil)
+  fill = Fiddle::Function.new(libc["sigfillset"], [Fiddle::TYPE_VOIDP], Fiddle::TYPE_INT)
+  sigmask = Fiddle::Function.new(libc["pthread_sigmask"],
+                                 [Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP], Fiddle::TYPE_INT)
+  sig_block = 0 # SIG_BLOCK on Linux
+  sig_setmask = 2 # SIG_SETMASK on Linux
+  Thread.new do
+    Thread.current.report_on_exception = false # .value re-raises it; rescued below
+    all = Fiddle::Pointer.malloc(128, Fiddle::RUBY_FREE) # sizeof(sigset_t) on glibc
+    old = Fiddle::Pointer.malloc(128, Fiddle::RUBY_FREE)
+    fill.call(all)
+    rc = sigmask.call(sig_block, all, old)
+    next { out: nil, thread_blk: nil, error: "pthread_sigmask returned #{rc}" } unless rc.zero?
+
+    begin
+      thread_blk = File.read("/proc/thread-self/status")[/^SigBlk:\s*(\h+)$/, 1]
+      { out: yield, thread_blk: thread_blk, error: nil }
+    ensure
+      sigmask.call(sig_setmask, old, nil)
+    end
+  end.value
+rescue LoadError, StandardError => e
+  { out: nil, thread_blk: nil, error: "#{e.class}: #{e.message}" }
+end
+
 # --self-test case 15 (DND-1005): cpu_s is the check's OWN process tree, not a
 # share of the gate's. Two checks run at once. "idle" blocks on a FIFO and
 # burns next to nothing. In the other worker, "ruby-self" (a normal Ruby
@@ -1934,19 +1970,45 @@ def self_test_cpu_attribution
     }
     # 15b. The shim is invisible to the check: the same signal mask and
     #     ignored set, and the same open file descriptors (fd 3 closed), as
-    #     a check the gate spawns directly.
-    probe = ["sh", "-c", "grep -E '^Sig(Ign|Blk)' /proc/$$/status; for f in /proc/$$/fd/*; do echo \"${f##*/}\"; done"]
+    #     a check the gate spawns directly. And that mask is empty: Ruby's
+    #     spawn gives every child an empty mask (see CPU SECONDS PER CHECK),
+    #     so a check can always be interrupted.
+    #
+    #     The probe reads its OWN status with shell builtins and never forks
+    #     (DND-1339), so what it prints is the mask it was started with. A
+    #     probe that forked a reader (`grep /proc/$$/status`) read the shell's
+    #     mask at a racing instant instead: SIGCHLD blocked while it waits
+    #     (0x10000), or every signal blocked while it is inside glibc's
+    #     _Fork, which holds them all blocked around clone(). Seen once as
+    #     SigBlk fffffffffffbfeff: bits 32 and 33 are glibc's own signals,
+    #     which no public sigprocmask call can block.
+    probe = ["sh", "-c", 'while IFS= read -r l; do case $l in SigBlk:*|SigIgn:*) echo "$l" ;; esac; ' \
+                         'done < /proc/$$/status; for f in /proc/$$/fd/*; do echo "${f##*/}"; done']
     direct, = Open3.capture2e(*probe, chdir: dir, stdin_data: "")
     _ok, shimmed, = spawn_under_cpu_shim(probe, chdir: dir, env: {})
     checks["a check sees the same signal state and fds under the shim as spawned directly " \
            "(direct #{direct.inspect}, shim #{shimmed.inspect})"] = !direct.empty? && direct == shimmed
+    # 15c. The check's mask does not depend on the mask of the gate thread
+    #     that spawns it (DND-1339): a pool thread with every signal blocked
+    #     still starts a check with none blocked.
+    from_blocked = spawn_from_blocked_thread { spawn_under_cpu_shim(probe, chdir: dir, env: {})[1] }
+    { "directly" => direct, "under the shim" => shimmed,
+      "under the shim from a thread with every signal blocked " \
+      "(that thread's SigBlk #{from_blocked[:thread_blk].inspect})" => from_blocked[:out] }.each do |how, seen|
+      blk = seen.to_s[/^SigBlk:\s*(\h+)$/, 1]
+      checks["a check spawned #{how} starts with no signal blocked (SigBlk #{blk.inspect})"] =
+        !blk.nil? && blk.to_i(16).zero?
+    end
+    checks["the blocked-thread fixture blocked its signals (#{from_blocked[:error] || 'ok'})"] =
+      from_blocked[:error].nil? && from_blocked[:thread_blk].to_s.to_i(16).positive?
     checks.each do |what, ok|
       next if ok
 
       warn "self-test: FAIL — case 15 (cpu attribution): #{what}. Fix: measure each check's CPU " \
            "as the child rusage of its own CPU_SHIM (spawn_under_cpu_shim), never as a delta of the " \
            "gate's Process.times, which the pool's threads share; and keep the shim invisible to the " \
-           "check (fd 3 close-on-exec, no signal handling of its own)."
+           "check (fd 3 close-on-exec, no signal handling of its own, an empty signal mask whichever " \
+           "thread spawns it); the 15b probe must read its own status without forking."
       good = false
     end
   end
