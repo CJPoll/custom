@@ -366,7 +366,8 @@ its stacked branch; DND-1187, 2026-09-29: the brief's `INTEGRATION OK` was
 unreachable.)
 
 **Run the judge beside the gate: `integration-gate --with-critic`.** It starts
-`critic-review --base <target>` on this head concurrently with the gate, unless
+`critic-review --base <target>` on this head concurrently with the gate (queued
+in test-slot's model pool; see *Weights and pools* below), unless
 a PASS that covers the target is already recorded for it. A PASS covers the
 target when the base it was judged against is the target or an ancestor of it;
 one judged against a stacked parent covers only that branch's commits, so the
@@ -424,20 +425,25 @@ tools are refused before the wait, so they never cost a queue. The
 `--with-critic` judge still starts before the wait on the current head; after a
 `--rebase` it is stopped and the rebased head is judged.
 
-**Weights and pools (DND-1326).** The slot holds the weight test-slot gives the
-declared gate itself (`test-slot --weight-of`): a `harness-gate` its
-`HARNESS_GATE_JOBS` workers, any other gate test-slot's default. A main
+**Weights and pools (DND-1326).** Run bare, the slot holds the weight test-slot
+gives the declared gate itself (`test-slot --weight-of`): a `harness-gate` its
+worker count (`HARNESS_GATE_JOBS`, else harness-gate's default), any other gate
+test-slot's default. A main
 checkout whose test-slot predates `--weight-of` gives the default, and the
 run's "taking a machine test slot first" line says which weight it took. The
-`--with-critic` judge queues in test-slot's model pool, never the CPU pool.
+`--with-critic` judge queues in test-slot's model pool, never the CPU pool. A
+judge started inside the slot (after a `--rebase`) waits for its model unit
+while the gate holds its CPU units; `--slot-wait-timeout` bounds that wait, and
+a judge the model pool never admits records no verdict (exit 3, test-slot's
+`TIMEOUT` in its log), never a pass.
 In the captain form the caller's own slot is the one that counts, so it holds
 the weight `test-slot -- integration-gate` gives (the default); a caller that
 knows its gate is heavier passes `--weight`.
 
 **Later (2026-09-30, DND-1326):** this section said the slot takes
 "test-slot's default CPU weight", and the judge ran outside both pools.
-Superseded: a `HARNESS_GATE_JOBS=16` gate still weighed 8, and nothing bounded
-the in-gate judge by model concurrency.
+Superseded for bare runs: a `HARNESS_GATE_JOBS=16` gate still weighed 8, and
+nothing bounded the in-gate judge by model concurrency.
 
 **`--rebase`: absorb a main that moved while you queued.** Inside the slot,
 after the fetch, if HEAD does not contain the target, it rebases the checked-out

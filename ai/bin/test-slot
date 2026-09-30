@@ -1764,7 +1764,7 @@ main() {
     case $1 in
       -h | --help) usage; exit 0 ;;
       --self-test | --status | --weight-of)
-        [ "$mode" = run ] || die_usage "--self-test, --status and --weight-of are separate modes." "pass one of them."
+        [ "$mode" = run ] || die_usage "two modes given: --self-test, --status and --weight-of are separate modes." "pass one of them."
         case $1 in
           --self-test) mode=selftest ;;
           --status) mode=status ;;

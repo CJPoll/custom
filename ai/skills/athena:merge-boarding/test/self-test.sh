@@ -1363,8 +1363,8 @@ out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 TMPDIR="$C31T
   && ok "w3 --with-critic in the model pool: judged PASS, INTEGRATION OK" || bad "w3 expected exit 0 with a PASS (rc=$rc)" "$out"
 [ "$(w_weight "$WS" "critic-review " model)" = 1 ] \
   && ok "w3 the judge held one model-pool unit" || bad "w3 the judge was not in the model pool (weight '$(w_weight "$WS" "critic-review " model)')" "$out"
-[ "$(w_weight "$WS" "critic-review ")" = null ] \
-  && ok "w3 the judge held no cpu unit" || bad "w3 the judge took cpu units" "$out"
+[ -s "$WS/events.jsonl" ] && [ "$(w_weight "$WS" "critic-review ")" = null ] \
+  && ok "w3 the judge held no cpu unit (the cpu pool's events exist)" || bad "w3 the judge took cpu units, or the cpu events are missing" "$out"
 # w4: a main-checkout test-slot that predates --weight-of (it refuses the
 # flag) is not a failure: the slot takes test-slot's default, and says so.
 L4="${TMP}/w4-layout"; layout_copy "$L4"
@@ -1376,6 +1376,42 @@ out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 HARNESS_GATE_
 [ "$rc" -eq 0 ] && [ "$(w_weight "$WS" "integration-gate ")" = 8 ] \
   && ok "w4 an older test-slot: exit 0 at its default weight" || bad "w4 expected exit 0 at weight 8 (rc=$rc, weight $(w_weight "$WS" "integration-gate "))" "$out"
 grep -q "default weight" <<<"$out" && ok "w4 the fallback to the default weight is named" || bad "w4 fallback not named" "$out"
+# w5: a target that cannot be read and a target that declares no gate take
+# the default weight with DIFFERENT notes: "could not look" never reads as
+# "none". (Each run is then refused inside the slot, as before.)
+WS="${TMP}/w5-slots"; R="${TMP}/w5"; slot_repo "$R" "exit 0"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 "$WGATE" --target nosuch/main --no-fetch 2>&1 )"
+grep -q "nosuch/main is not fetched yet, so its declared gate could not be read" <<<"$out" \
+  && ok "w5 an unreadable target is named as could-not-read" || bad "w5 unreadable target note" "$out"
+R="${TMP}/w5b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 "$WGATE" --target main --no-fetch 2>&1 )"
+grep -q "main declares no gate and no --gate was passed" <<<"$out" \
+  && ok "w5 a target with no declared gate is named as none" || bad "w5 no-gate note" "$out"
+# w6: the outer slot is a cpu slot, so a caller --gate naming a model-pool
+# command is still weighed in cpu units (the cpu default), never as model calls.
+WS="${TMP}/w6-slots"; R="${TMP}/w6"; new_repo "$R"; mkdir -p "$R/ai/bin"
+printf '#!/bin/sh\nexit 0\n' > "$R/ai/bin/critic-eval"; chmod +x "$R/ai/bin/critic-eval"
+( cd "$R" && git add -A && git commit -qm tool && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+record_pass "$R"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 "$WGATE" --target main --no-fetch --gate 'ai/bin/critic-eval --run --concurrency 2' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ "$(w_weight "$WS" "integration-gate ")" = 8 ] \
+  && ok "w6 a model-pool --gate command is weighed in cpu units" || bad "w6 expected exit 0 at cpu weight 8 (rc=$rc, weight $(w_weight "$WS" "integration-gate "))" "$out"
+# w7: a judge the model pool never admits records no verdict. The gate still
+# runs; the verdict step reads the absence (exit 3) and the judge's log shows
+# test-slot's TIMEOUT, so it never reads as a PASS or a BLOCK.
+WS="${TMP}/w7-slots"; R="${TMP}/w7"; slot_repo "$R" "exit 0"
+rm -rf "${R}/$(cd "$R" && git rev-parse --git-path critic-verdicts)"
+mkfifo "${TMP}/w7.fifo"
+ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 ATHENA_TEST_MODEL_SLOTS=1 "$L/ai/bin/test-slot" --pool model --label 'w7 foreign holder' -- \
+  bash -c ': > "$1"; exec 3<>"$2"; read -t 60 -u 3 _x' _ "${TMP}/w7.started" "${TMP}/w7.fifo" 2>/dev/null &
+holder=$!
+await_file "${TMP}/w7.started" || bad "w7 fixture: the model-pool holder never started"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 ATHENA_TEST_MODEL_SLOTS=1 TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/critic-pass" "$WGATE" --target main --no-fetch --with-critic --slot-wait-timeout 1 2>&1 )"; rc=$?
+timeout 5 bash -c 'printf "go\n" > "$1"' _ "${TMP}/w7.fifo"; wait "$holder" 2>/dev/null
+[ "$rc" -eq 3 ] && grep -q 'test-slot: TIMEOUT' <<<"$out" && ! grep -q '^INTEGRATION OK' <<<"$out" \
+  && ok "w7 a judge the model pool never admits is an absent verdict (exit 3), with test-slot's TIMEOUT shown" \
+  || bad "w7 expected exit 3 with a TIMEOUT line (rc=$rc)" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

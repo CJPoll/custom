@@ -150,9 +150,9 @@ Give the captain, in the brief:
   pass. Never wrap
   `critic-review` or an eval by itself in the CPU pool: test-slot routes them
   to its model pool."* (`integration-gate --with-critic` is not such a wrap:
-  it queues its judge in the model pool itself, beside the gate, DND-1326.
-  **Later (2026-09-30, DND-1326):** this said the judge runs "inside the
-  gate's own slot"; it held no unit in either pool.)
+  it queues its judge in the model pool itself, beside the gate, DND-1326.)
+  **Later (2026-09-30, DND-1326):** the parenthesis said the judge runs
+  "inside the gate's own slot"; it held no unit in either pool.
   The pool is a weighted budget (DND-1006): a `harness-gate` weighs its
   `--jobs`, a run with no `--weight` weighs a third of the budget, and a caller
   that knows its run is lighter or heavier passes `--weight N`.

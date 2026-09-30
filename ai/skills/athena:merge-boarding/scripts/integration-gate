@@ -128,10 +128,14 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    holds this script, i.e. ~/dev/custom); give up
                    waiting for a slot after <secs> (default: test-slot's own).
                    A give-up is exit 6, GATE NOT RUN -- never OK, never RED.
-                   The slot holds the units test-slot gives the declared
-                   gate itself (test-slot --weight-of; a harness-gate its
-                   HARNESS_GATE_JOBS workers). <secs> also bounds the
-                   --with-critic judge's wait in the model pool.
+                   Run bare, the slot holds the units test-slot gives the
+                   declared gate itself (test-slot --weight-of; a
+                   harness-gate its worker count: HARNESS_GATE_JOBS, else
+                   harness-gate's default). Under a caller's
+                   `test-slot -- integration-gate` (the captain form) the
+                   caller's slot is the one held, at test-slot's default
+                   unless the caller passes --weight. <secs> also bounds
+                   the --with-critic judge's wait in the model pool.
   --rebase         inside the slot, after the fetch, if HEAD does not contain
                    the target: rebase the checked-out branch onto it, then
                    gate (and judge) the rebased head. Refuses a dirty tree
@@ -375,19 +379,29 @@ slot_really_held() {
 # yet fetched) the slot takes test-slot's default, as before DND-1326, and
 # SLOT_WEIGHT_NOTE says so: a failed lookup never reads as a weight.
 gate_slot_weight() {
-  local tsha gate w
+  local tsha gate w rc=3 why
   local -a argv=()
-  if tsha="$(git rev-parse --verify -q "${TARGET}^{commit}" 2>/dev/null)" \
-     && gate="$(ir_declared_gate_on "$ROOT" "$tsha")"; then
+  if tsha="$(git rev-parse --verify -q "${TARGET}^{commit}" 2>/dev/null)"; then
+    if gate="$(ir_declared_gate_on "$ROOT" "$tsha")"; then rc=0; else rc=$?; fi
+  fi
+  if [ "$rc" -eq 0 ]; then
     argv=( "$gate" )
   elif [ -n "$GATE_CMD" ]; then
     read -r -a argv <<<"$GATE_CMD"
   fi
   if [ "${#argv[@]}" -eq 0 ]; then
-    SLOT_WEIGHT_NOTE="test-slot's default weight: no gate is declared on ${TARGET} as fetched so far"
+    # Three states, three notes: "could not look" never reads as "none".
+    case "$rc" in
+      1) why="${TARGET} declares no gate and no --gate was passed" ;;
+      2) why="${TARGET}'s declared gate could not be read (its commit is not in this object store)" ;;
+      *) why="${TARGET} is not fetched yet, so its declared gate could not be read" ;;
+    esac
+    SLOT_WEIGHT_NOTE="test-slot's default weight: ${why}"
     return 0
   fi
-  if w="$("$TEST_SLOT" --weight-of -- "${argv[@]}" 2>/dev/null)" && [[ "$w" =~ ^[1-9][0-9]*$ ]]; then
+  # --pool cpu: the outer slot is always a cpu-pool slot, so its weight is
+  # read in cpu units even when the gate names a model-pool command.
+  if w="$("$TEST_SLOT" --weight-of --pool cpu -- "${argv[@]}" 2>/dev/null)" && [[ "$w" =~ ^[1-9][0-9]*$ ]]; then
     SLOT_ARGS+=( --weight "$w" )
     SLOT_WEIGHT_NOTE="weight ${w}, as test-slot weighs ${argv[0]}"
   else
@@ -446,7 +460,7 @@ if [ "$IN_SLOT" -eq 0 ]; then
     exit 2
   }
   OUTCOME="${SLOT_TMP}/outcome"
-  SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") ${HEAD0:0:8}" --outcome-file "$OUTCOME" )
+  SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") ${HEAD0:0:8}" --outcome-file "$OUTCOME" --pool cpu )
   [ -n "$SLOT_WAIT" ] && SLOT_ARGS+=( --wait-timeout "$SLOT_WAIT" )
   gate_slot_weight
   echo "${PROG}: taking a machine test slot first (${SLOT_WEIGHT_NOTE}); the fetch and the containment check run inside it (DND-1064)"
