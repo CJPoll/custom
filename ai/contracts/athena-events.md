@@ -5237,7 +5237,8 @@ build by name:
 - DND-440: the surface that requests `priority.transition` grants (*Owner
   approval grants*);
 - DND-446: the morning digest (*Morning digest*);
-- DND-447 and DND-449: meetings and meeting catch-up.
+- DND-447 and DND-449: meetings and meeting catch-up;
+- DND-1157: item summaries (*Item summaries*).
 
 None of the server homes named below exists yet (gen_saas `origin/main`
 `b5f85909`, read 2026-09-24). Every sentence about them is an obligation on its
@@ -5510,9 +5511,17 @@ revision. Without it no forge event older than the row could be refused
 (*States*). It is ordering metadata, not content.
 
 - **Everything else is refused by name.** That includes a body, a comment or
-  `comment_text`, a description, a summary, an attachment, attendees, a
-  message's `text` under any other name, and a permissive field on a source
-  whose row does not list it. A Slack ask stores no `title`.
+  `comment_text`, a description, a summary other than an item summary (*Item
+  summaries*), an attachment, attendees, a message's `text` under any other
+  name, and a permissive field on a source whose row does not list it. A
+  Slack ask stores no `title`.
+
+  **Later (2026-09-30):** this bullet refused "a summary" outright.
+  Superseded by DND-1157 (gen_saas #561, `04f20c58`), the owner's request of
+  2026-09-28 for a one-to-five-sentence model-written summary per item. An
+  item summary is allowed for the sources *Item summaries* lists, stored
+  apart from the item row, and nowhere else. Every other summary is still
+  refused.
 - **The pointer constructor enforces the list.** `Athena.Priorities.Pointer`
   (Domain) takes a source and a field map. It refuses any field that is not on
   that source's allow-list, and names every such field in one refusal. It
@@ -5523,8 +5532,9 @@ revision. Without it no forge event older than the row could be refused
   personal ticket reads the payload's `assignee` (*Domain and owner-only items*), and
   never stores it.
 - **The boundary covers every store the index writes:** the items, the index
-  obligations, the skip counts and the index-failure record. It does not make
-  upstream stores content-free. The event store and the Slack ingress's own
+  obligations, the skip counts and the index-failure record. The item
+  summaries and their call ledger are bounded by *Item summaries*. The
+  boundary does not make upstream stores content-free. The event store and the Slack ingress's own
   store hold what their ingress persists. Keeping work-Notion content out of
   the event store is the `metadata_only` subscription obligation (next
   bullet). It is not a property of this boundary.
@@ -5845,6 +5855,77 @@ or a digest can render them:
   The stored `score`, `reasons` and `scored_at` are the last computation, kept
   for display.
 
+### Item summaries
+
+An **item summary** is one to five sentences a model writes about an item for
+the owner to read on the priorities page (DND-1157). It is derived content, so
+this subsection is its boundary.
+
+- **Sources.** Only `notion_personal` and `slack_ask` items may have one.
+  Every other source is refused by name, whatever the owner's rules list:
+  `notion_work` and `action_item` because their subscriptions are
+  `metadata_only` and a summary is a store of their body; `forge_review`,
+  `meeting` and `manual` because they carry a title only. A missing or
+  unknown source is refused too. Enabling another source is an amendment to
+  this list.
+- **Owner opt-in per source.** The owner's rules name the enabled sources
+  (`summary_sources`), a subset of the two above. The default is
+  `notion_personal`; `slack_ask` is off until the owner enables it. Disabling
+  a source deletes its summaries on the next sweep pass.
+- **Only open items.** A `proposed` or `active` item is summarized. A `done`
+  or `dismissed` item keeps its last summary and is never refreshed.
+- **What is sent.** For `notion_personal`: the title (at most 300
+  characters), the status, and the plain text of the page's top-level
+  blocks, at most 8,000 characters. For `slack_ask`: the stored
+  `message_text`, at most 4,000 characters. A cut falls on a character
+  boundary and is marked `[truncated]`. Nothing else is sent: no ids, links,
+  people, dates, comments, project, asker or channel. The body is read only
+  under the owner's own enrichment token for that page's database, and only
+  when that database is one of the owner's usable `notion_personal` bindings
+  on a `full` subscription.
+- **Provider and custody.** The Anthropic Messages API, with the model named
+  in server config, under the owner's key held in `Athena.Secrets` as
+  `(owner_id, :anthropic_api_key)`, account-wide. The owner stores it on the
+  owner-authenticated secret-entry page (`/secrets`); no rpc function takes
+  it, and the page never shows it back. With no key stored, no call is made
+  and the page says so.
+- **What is stored.** In `priority_item_summaries`, one row per item: the last
+  good summary (1 to 1,000 characters), the model, the prompt version, the
+  source revision and a digest of the text it came from, and the latest
+  attempt's status and cause. The row's owner is its item's owner, enforced
+  by a composite foreign key, and the row is deleted with its item. A
+  per-call ledger (`priority_summary_calls`) holds tokens, cost and outcome,
+  never text, and is pruned after 35 days. No source text is stored.
+- **Refresh.** An open item is due when it has no summary row, when its
+  `source_revision` or the prompt version changed, or when a retry time it
+  was given has come. A due item's text is read and digested. The model is
+  called only when that digest differs from the last good summary's, and at
+  most once per item per 6 hours after a generation. A transient failure
+  backs off (1 min, 5 min, 30 min, 2 h, 6 h), then fails `retries_exhausted`.
+  A permanent failure is not retried until the text or the prompt changes.
+- **Budget, per owner.** 200 model calls and 400,000 tokens per UTC day, and
+  $5 per UTC month from metered tokens at configured prices, checked before
+  each call against the ledger plus the call's estimate. A missing price, or
+  an unpriced call already in the month, fails closed. At a cap no call is
+  made, and the affected rows show the cap and when it resumes.
+- **Display only.** A summary is untrusted model output over untrusted text.
+  It renders as escaped plain text. No ranking reason, state, eligibility,
+  `owner_only` rule, lease answer, digest or judgment reads it or sends it.
+  It is not a judgment (`ai/contracts/athena-judgments.md` → *Purpose and
+  non-goals*).
+- **Never a silent blank.** Each row shows its summary or exactly one of:
+  pending, paused by a named budget, failed with a named cause, no text to
+  summarize, unavailable with an owner-level cause, off for this source, or
+  no summary for this source. A stored status or cause the page does not know
+  shows as failed, never as a summary.
+- **Access control.** Only the owner's page reads summaries, through the
+  owner-scoped item listing (`owner_id` in the query). The sweeper writes
+  only for the item's own owner. No machine-token path reads one (*Access
+  control*).
+- **Removal.** Removing a permissive field removes the summaries derived from
+  it: dropping `message_text` removes `slack_ask` summaries. Removing the
+  feature drops both tables.
+
 ### Leases
 
 A session pulls work through three `athena` MCP tools, authenticated by the
@@ -6022,9 +6103,10 @@ writes: action `owner_dm`, no machine, a body hash, never a body.
 
 | Operation | Who | Resource | Where checked | On denial |
 | --- | --- | --- | --- | --- |
-| View the priorities page | the logged-in owner | only the owner's items, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
+| View the priorities page | the logged-in owner | only the owner's items, their summaries, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
 | Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or, for promote, restore and dismiss only, an owner approval grant of class `priority.transition`, executed by the server at click time | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the grant path logs the refusal, the grant stays `approved`, and the approval message says so |
 | Build and send the morning digest | the server, for owner O; no caller | O's `proposed` and `active` items; O's own Slack app; recipient O's `owner_slack_user_id` | `Athena.Digest`: items through `list_ranked/2` with O's user (the `owner_id` filter plus RBAC `read`); `Athena.Slack.owner_dm/3` selects the app by `owner_id` and reads the recipient from it, with no recipient argument | nothing is sent; the cause is recorded on O's send log and shown on O's `/priorities` |
+| Generate an item summary | the server's summary sweeper, for each item's own owner; no caller | one owner's open items of an enabled summary source | `Athena.Priorities.Summaries`: the item loaded by id and `owner_id` in the query, checked against the source allow-list and the owner's enabled sources, and re-checked in the write transaction; a Notion body read only through `Athena.NotionEvents.index_page_text/4` under the owner's own binding | the item is skipped and counted; nothing is read or written for another owner |
 | Read the last digest day | the logged-in owner | the owner's own `digest_sends` rows | `Athena.Digest.latest_send/1`: an `owner_id` = viewer filter in the query | none shown ("none yet") |
 | `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
 
@@ -6036,8 +6118,10 @@ writes: action `owner_dm`, no machine, a body hash, never a body.
   so it never replaces the `owner_id` filter (gen_saas DND-434 and DND-441
   added that filter to the fleet reads and to `set_control` for exactly
   this reason). Every read and write of items, index obligations, skip counts,
-  the index-failure record, re-sync runs, subscription bindings and rules
-  filters by `owner_id`. Ingest and the re-sync write only to the owner
+  the index-failure record, re-sync runs, subscription bindings, rules, item
+  summaries and the summary call ledger filters by `owner_id`. The two
+  exceptions are the summary sweeper's own system reads: the list of owners
+  it visits, and the ledger prune past 35 days. Ingest and the re-sync write only to the owner
   stamped from the authenticated ingress (*The event*), or to the item's own
   owner.
 - **Each owner path has a negative test for role-only access:** a user holding

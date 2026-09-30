@@ -70,7 +70,10 @@ Non-goals. A judgment never:
 
 - authorizes anything, closes, merges or cancels a ticket, sends a reply, or
   decides an owner-gated step;
-- generates text (no generative use);
+- generates text (no generative use). Item summaries
+  (`ai/contracts/athena-events.md` → *Priority index* → *Item summaries*) are
+  generative. They are not judgments: they use their own port, key and
+  budget, and nothing in this contract governs them;
 - routes a thread reply (thread claims own that:
   `ai/contracts/athena-events.md` → *Thread replies route to the thread's
   claimant*);
