@@ -401,8 +401,42 @@ before="$(find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d | wc -l)"
 out="$("${CAPTURE}" "${SL}" 2>&1)"; rc=$?
 after="$(find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d | wc -l)"
 if [ "${rc}" -eq 3 ] && [ "${before}" = "${after}" ] && kill -0 "${SL}" 2>/dev/null; then ok "a non-client pid -> exit 3, nothing captured, not signalled"; else bad "a non-client pid -> exit 3, nothing captured, not signalled" "rc=${rc} dirs ${before}->${after}"; fi
-out="$("${CAPTURE}" 1 2>&1)"; rc=$?
-if [ "${rc}" -eq 3 ] && grep -q 'uid' <<<"${out}"; then ok "another user's process (pid 1) -> exit 3 on the uid check"; else bad "another user's process (pid 1) -> exit 3 on the uid check" "rc=${rc} ${out}"; fi
+# Another user's process is refused on the uid check (DND-1437). The fixture
+# is the test's own, never the host's process table: pid 1 is another user
+# only on a host. In a pid namespace (tool-sandbox) pid 1 is bwrap under OUR
+# uid, so the uid check passed and the exe check answered instead. Here an
+# `id` shim, first on PATH for this one call, reports a uid that is not ours.
+# That makes our own live mock client (CHILD) a process owned by someone else.
+# CHILD passes every other identity check (--resolve-client accepted it
+# above), so only the uid check can refuse it.
+ID_BIN="$(command -v id)"
+MY_UID="$("${ID_BIN}" -u)"
+OTHER_UID=$((MY_UID + 1))
+mkdir -p "${TMP}/other-user-bin"
+cat >"${TMP}/other-user-bin/id" <<SHIM
+#!/bin/bash
+# Test fixture (DND-1437): the invoking user is uid ${OTHER_UID}, not ${MY_UID}.
+if [ "\$*" = "-u" ]; then echo "${OTHER_UID}"; exit 0; fi
+exec "${ID_BIN}" "\$@"
+SHIM
+chmod +x "${TMP}/other-user-bin/id"
+if [ "$(PATH="${TMP}/other-user-bin:${PATH}" id -u)" = "${OTHER_UID}" ] && kill -0 "${CHILD}" 2>/dev/null; then
+  ok "(fixture) the id shim reports uid ${OTHER_UID}, and our mock client ${CHILD} is alive"
+else
+  bad "(fixture) the id shim reports uid ${OTHER_UID}, and our mock client ${CHILD} is alive" "shim=$(PATH="${TMP}/other-user-bin:${PATH}" id -u 2>&1)"
+fi
+# "Nothing captured" is read as "no capture dir newer than a marker", never a
+# count: retention (KEEP=5) prunes one dir per capture, so a count holds still
+# even when a capture was written.
+touch "${TMP}/uid-case.marker"
+out="$(PATH="${TMP}/other-user-bin:${PATH}" "${CAPTURE}" "${CHILD}" 2>&1)"; rc=$?
+made="$(find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d -newer "${TMP}/uid-case.marker")"
+if [ "${rc}" -eq 3 ] && grep -q "pid ${CHILD} belongs to uid ${MY_UID}, not this user (${OTHER_UID})" <<<"${out}" \
+   && [ -z "${made}" ] && kill -0 "${CHILD}" 2>/dev/null; then
+  ok "another user's process -> exit 3 on the uid check, nothing captured, not signalled"
+else
+  bad "another user's process -> exit 3 on the uid check, nothing captured, not signalled" "rc=${rc} new dirs: ${made:-none} ${out}"
+fi
 
 # ---------------------------------------------------------------------------
 printf '\nC-6  usage\n'
