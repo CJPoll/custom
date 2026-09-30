@@ -705,8 +705,8 @@ train-monitor notification is not evidence the merge failed.
 *Premature "Merged!" set Notion Done and the DM too early on ui-bg, pt1124,
 ui-phase1/2/5, aggregate-alignment, mobile-parity, and pt1280.*
 
-Owner DMs fire on merge for an epic-boundary crossing — see
-[[athena:epic-progress-dm]]. Tear the stack down per
+An epic-boundary crossing is reported on merge (a milestone, not an owner DM)
+— see [[athena:epic-progress-dm]]. Tear the stack down per
 [[athena:teardown-worktree-stack]] only after this confirmation. On GitHub,
 `locked-merge` already ran `teardown-stack` for the PR (exit 10: landed,
 teardown failed). On GitLab, run `ai/bin/teardown-stack --mr <n> --repo
