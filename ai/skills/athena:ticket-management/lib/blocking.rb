@@ -113,6 +113,23 @@ module Blocking
     text.strip.empty? ? nil : text
   end
 
+  # epic_title(page, epics_data_source) -> the epic's title; raises
+  # ArgumentError unless the page lives in the Epics data source and is not
+  # trashed. A well-formed id is only a key: a ticket's page id would make the
+  # Epic filter match nothing and read as "0 candidates" (a failed lookup
+  # looking like an empty one).
+  def epic_title(page, epics_data_source)
+    raise ArgumentError, "the epic page read is not a JSON object" unless page.is_a?(Hash)
+
+    parent = page.dig("parent", "data_source_id")
+    unless parent == epics_data_source
+      raise ArgumentError, "page #{page['id']} is not a DND epic (its parent is data source #{parent.inspect.delete('"')}); pass the epic's page id"
+    end
+    raise ArgumentError, "epic page #{page['id']} is in the trash" if page["in_trash"]
+
+    page_title(page) || raise(ArgumentError, "epic page #{page['id']} has no title")
+  end
+
   # considered_line(chosen, open, epic_title) -> the candidate count, printed
   # before any decision (0 included).
   def considered_line(chosen, open, epic_title)
@@ -159,11 +176,25 @@ module Blocking
     blocks = path["blocks"]
     if path["decided"] == "Off"
       raise ArgumentError, "path.blocks is set but path.decided is Off" unless blocks.nil?
+      raise ArgumentError, "path is a jev Off over a claim on a security finding (a judgment never removes it)" if security_claim_removed?(path, filer)
     elsif path["source"] == "rule"
-      raise ArgumentError, "path.blocks is not the found_while ticket the rule blocks" unless blocks == filer[:found_while]
+      check_rule(blocks, filer)
     elsif !refs.include?(blocks)
       raise ArgumentError, "path.blocks is not one of the candidates"
     end
+  end
+
+  # The rule blocks the found_while ticket of an introduced security issue,
+  # and nothing else: a rule answer for any other filing is not this rule.
+  def check_rule(blocks, filer)
+    raise ArgumentError, "path.blocks is not the found_while ticket the rule blocks" unless blocks.is_a?(String) && blocks == filer[:found_while]
+    raise ArgumentError, "path.source is rule but the filer's security is not introduced" unless filer[:security] == "introduced"
+  end
+
+  # The server's policy never lets a judgment remove a blocking claim on a
+  # finding whose Security is not none; the harness refuses an answer that did.
+  def security_claim_removed?(path, filer)
+    path["source"] == "jev" && filer[:claimed_blocks] && filer[:security] != "none"
   end
 
   # decision_lines(result) -> Path with its source, Blocks, then the

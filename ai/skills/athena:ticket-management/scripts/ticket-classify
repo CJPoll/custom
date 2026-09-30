@@ -43,6 +43,7 @@ UNAVAILABLE_FIX = "Fix: file the ticket as today; this is advisory."
 ENDPOINT = "/api/v1/judgments/ticket_classification"
 BLOCKING_ENDPOINT = "/api/v1/judgments/ticket_blocking"
 TICKETS_DATA_SOURCE = "219349da-87fb-8063-8f36-000b362fbd60"
+EPICS_DATA_SOURCE = "f4231817-18f3-4c2d-ac5b-b1151a5bb020"
 
 USAGE = <<~EOF
   Usage: ticket-classify --title T --body-file F --project P
@@ -212,13 +213,14 @@ module Effects
   # failed read.
   def epic_candidates(epic_id)
     origin, token = NotionRead.credentials(ENV["TICKET_CLASSIFY_NOTION_API"])
-    epic_title = Blocking.page_title(NotionRead.page(origin, token, epic_id, pace: pace))
-    candidates_unavailable!("the epic page #{epic_id} has no title (is it an epic page?)") if epic_title.nil?
+    epic_title = verified_epic_title(origin, token, epic_id)
 
     rows = NotionRead.query_all(origin, token, TICKETS_DATA_SOURCE, pace: pace, filter: Blocking.query_filter(epic_id)["filter"])
     chosen = Blocking.candidates(rows)
     with_summaries = chosen[:chosen].map do |c|
       page = NotionRead.read(origin, token, "GET", "/v1/blocks/#{c[:page_id]}/children?page_size=100", pace: pace)
+      candidates_unavailable!("the block list of #{c[:ref]} has no results array") unless page.is_a?(Hash) && page["results"].is_a?(Array)
+
       c.merge(summary: Blocking.summary(page["results"]))
     end
     { chosen: with_summaries, open: chosen[:open], epic_title: epic_title }
@@ -226,6 +228,21 @@ module Effects
     candidates_unavailable!("#{e.message} (#{e.fix.sub(/\.\z/, '')})")
   rescue ArgumentError => e
     candidates_unavailable!("a tracker row could not be read: #{e.message}")
+  rescue Failure
+    raise
+  rescue StandardError => e
+    candidates_unavailable!("an unexpected #{e.class} reading the candidates")
+  end
+
+  # The epic page must be a live page of DND Epics: a wrong id would
+  # otherwise read as an epic with 0 candidates.
+  def verified_epic_title(origin, token, epic_id)
+    page = NotionRead.page(origin, token, epic_id, pace: pace)
+    begin
+      Blocking.epic_title(page, EPICS_DATA_SOURCE)
+    rescue ArgumentError => e
+      candidates_unavailable!(e.message)
+    end
   end
 end
 

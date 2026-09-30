@@ -119,9 +119,11 @@ Concretely:
 - **Ticket blocking decides only a finding's `Path` and one `Blocks` edge**
   (DND-1057), through deterministic policy (gen_saas
   `TicketBlockingPolicy`). The value is `Blocking` or `Off`, never `Critical`
-  or `Promoted`: those are authored, and a planned ticket (a `Feature`) is
-  never sent. The edge may point only at a candidate the harness chose in
-  code: the epic's open `Critical` tickets, at most 10, by ID. A security
+  or `Promoted`: those are authored, and a ticket the filer names a
+  `Feature` is never sent. The edge may point only at a candidate the
+  harness chose in code (the epic's open `Critical` tickets, at most 10, by
+  ID) or, by the introduced-security rule below, the Found while ticket. A
+  security
   issue the ticket's own change introduced blocks the ticket it was found
   while working, by rule, with no call. A judgment never removes a blocking
   claim the filer made for a finding whose Security is not `none`. The
@@ -361,8 +363,12 @@ case on. Finding triage's advisory labels are `duplicate` and `related`;
 Every option of `ticket_kind`, `ticket_severity` and `ticket_security` is an
 advisory label, since the policy may act on each. `ticket_blocking`'s one
 advisory label is `blocks`: an enabled `does_not_block` alone cannot turn it
-on, although in `on` the policy also acts on an accepted `does_not_block`
-(it may remove a non-security claim). A
+on. In `on` the policy also acts on an accepted `does_not_block` (it may
+remove a non-security claim), and a `does_not_block` is accepted only when
+its OWN threshold row is enabled and met (gen_saas `Decision.decide_reading`
+reads the answered label's row; a disabled or absent row is
+`label_disabled` or `threshold_unset`, a fallback). So an `on` set on
+`blocks` alone never removes a claim. A
 use case whose question set declares no advisory label cannot be turned on.
 **`shadow` is refused** unless the use case has a registered question set,
 because shadow makes real calls. **`off` is never refused.** A use case MAY
@@ -589,7 +595,10 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
     `no_found_while`, `no_open_critical` and `candidate_unread`. A snapshot
     fetched before DND-1057 (no Path) is refused, never read as unset. The
     candidates are today's open tickets, not those open at filing: the
-    corpus is an approximation, and that is why its rows are weak.
+    corpus is an approximation, and that is why its rows are weak. Two
+    known skews: a `blocks` pair may name a `Critical` ticket of another
+    epic, or one closed since, which the live script would not offer; and
+    the negatives are the lowest (oldest) ids.
 
   `ticket-corpus --shadow-report --since` measures DND-1055's shadow bar
   (Product Requirements R1055-3: at least 3 days, at least 35 accepted
@@ -748,13 +757,22 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
     failed read is its own `CANDIDATES UNAVAILABLE` line, never 0. A
     `--blocks` that is not one of them is a usage error (exit 2) and nothing
     is sent.
-  - A `Feature` is never sent (its Path is authored). With no candidates, or
+  - A ticket the filer files as a `Feature` is never sent (its Path is
+    authored). The Path part does not wait for the classification, so a
+    Kind the server decides differently does not change this. With no candidates, or
     for an introduced security issue with `--found-while`, the server decides
     by rule and makes no model call. `--epic` with `--ref` or `--json`, and
     `--found-while` or `--blocks` without `--epic`, are usage errors.
   - The output is `Path: <value> (<source>)`, then `Blocks: DND-N` or
     `Blocks: none`, then the server's second provenance line verbatim, which
-    starts `Jev path: `. It is a separate line, so the classification line
+    starts `Jev path: `. The source is `jev` (an accepted judgment), `filer`
+    (the claim stands) or `rule` (introduced security, no call). A `filer`
+    or `rule` value carries a reason: one from *The closed reason list*, or
+    one that is not a fallback (`shadow`, `policy_guard`,
+    `introduced_security`, `no_candidates`, `no_blocks_judged`). The script
+    refuses, as an unreadable answer, a target outside the candidates, a
+    `rule` answer for anything but an introduced security issue's Found while
+    ticket, and a `jev` `Off` over a security finding's claim. It is a separate line, so the classification line
     DND-1354 and DND-1056 parse is unchanged. Its `would` object is the
     decision the policy would take in `on`, so a shadow report can measure
     it.

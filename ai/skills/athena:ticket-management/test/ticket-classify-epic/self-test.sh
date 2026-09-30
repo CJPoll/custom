@@ -61,6 +61,12 @@ rows() { jq -cs '{results: ., has_more: false}'; }
 EPIC="3e6349da87fb817aacfbd72c30bf9986"
 EPIC_DASHED="3e6349da-87fb-817a-acfb-d72c30bf9986"
 TICKETS_DS="219349da-87fb-8063-8f36-000b362fbd60"
+EPICS_DS="f4231817-18f3-4c2d-ac5b-b1151a5bb020"
+# epic_page PARENT_DS -- a page as Notion's GET /v1/pages answers it.
+epic_page() {
+  jq -cn --arg ds "$1" --arg id "${EPIC_DASHED}" '{status: 200, body: {object: "page", id: $id, parent: {type: "data_source_id", data_source_id: $ds}, in_trash: false, properties: {Name: {type: "title", title: [{plain_text: "Jev judgments"}]}}}}'
+}
+EPIC_PAGE="$(epic_page "${EPICS_DS}")"
 
 echo "== domain"
 
@@ -107,13 +113,35 @@ ruby_eq "parse: Critical or Promoted is never a decision" \
   'Blocking.parse_result({"status" => "judged", "path" => {"decided" => "Critical", "source" => "jev"}, "provenance_line" => "Jev path: {}"}, [], {})'
 ruby_eq "parse: the rule may block found_while, which is no candidate" \
   "ok" \
-  'Blocking.parse_result({"status" => "judged", "path" => {"decided" => "Blocking", "blocks" => "DND-9", "source" => "rule", "reason" => "introduced_security"}, "provenance_line" => "Jev path: {}"}, [], {found_while: "DND-9"}); "ok"'
+  'Blocking.parse_result({"status" => "judged", "path" => {"decided" => "Blocking", "blocks" => "DND-9", "source" => "rule", "reason" => "introduced_security"}, "provenance_line" => "Jev path: {}"}, [], {security: "introduced", found_while: "DND-9"}); "ok"'
 ruby_eq "parse: a provenance line with a newline is refused" \
   "ArgumentError: provenance_line is missing, lacks the \"Jev path: \" prefix, or holds a control character" \
   'Blocking.parse_result({"status" => "judged", "path" => {"decided" => "Off", "blocks" => nil, "source" => "filer", "reason" => "mode_off"}, "provenance_line" => "Jev path: {}\nPath: Blocking"}, [], {})'
 ruby_eq "fallback: the claim, or by rule the found_while ticket" \
   "Path: Blocking|Blocks: DND-2|Path: Blocking|Blocks: DND-9|Path: Off|Blocks: none" \
   '[Blocking.fallback_lines({security: "none", claimed_blocks: "DND-2"}), Blocking.fallback_lines({security: "introduced", found_while: "DND-9", claimed_blocks: "DND-2"}), Blocking.fallback_lines({security: "pre-existing", found_while: "DND-9"})].map { |l| l[1, 2] }.flatten.join("|")'
+
+ruby_eq "a rule Blocking with no found_while and no target is unreadable [review 2]" \
+  "ArgumentError: path.blocks is not the found_while ticket the rule blocks" \
+  'Blocking.parse_result({"status" => "judged", "path" => {"decided" => "Blocking", "blocks" => nil, "source" => "rule", "reason" => "introduced_security"}, "provenance_line" => "Jev path: {}"}, [], {security: "introduced"}); "ok"'
+ruby_eq "a rule Blocking for a finding that is not introduced security is unreadable [review 2]" \
+  "ArgumentError: path.source is rule but the filer's security is not introduced" \
+  'Blocking.parse_result({"status" => "judged", "path" => {"decided" => "Blocking", "blocks" => "DND-9", "source" => "rule"}, "provenance_line" => "Jev path: {}"}, [], {security: "none", found_while: "DND-9"}); "ok"'
+ruby_eq "a jev Off that removes a security finding's claim is unreadable [review 7]" \
+  "ArgumentError: path is a jev Off over a claim on a security finding (a judgment never removes it)" \
+  'Blocking.parse_result({"status" => "judged", "path" => {"decided" => "Off", "blocks" => nil, "source" => "jev", "confidence" => 0.9}, "provenance_line" => "Jev path: {}"}, ["DND-1"], {security: "pre-existing", claimed_blocks: "DND-1"}); "ok"'
+ruby_eq "a jev Off over a non-security claim is readable" \
+  "ok" \
+  'Blocking.parse_result({"status" => "judged", "path" => {"decided" => "Off", "blocks" => nil, "source" => "jev", "confidence" => 0.9}, "provenance_line" => "Jev path: {}"}, ["DND-1"], {security: "none", claimed_blocks: "DND-1"}); "ok"'
+ruby_eq "epic_title: a page outside the Epics data source is refused [review 1]" \
+  "ArgumentError: page p is not a DND epic (its parent is data source 219349da-87fb-8063-8f36-000b362fbd60); pass the epic's page id" \
+  'Blocking.epic_title({"id" => "p", "parent" => {"data_source_id" => "219349da-87fb-8063-8f36-000b362fbd60"}, "properties" => {"Name" => {"type" => "title", "title" => [{"plain_text" => "T"}]}}}, "f4231817-18f3-4c2d-ac5b-b1151a5bb020")'
+ruby_eq "epic_title: a trashed epic is refused" \
+  "ArgumentError: epic page p is in the trash" \
+  'Blocking.epic_title({"id" => "p", "in_trash" => true, "parent" => {"data_source_id" => "E"}, "properties" => {"Name" => {"type" => "title", "title" => [{"plain_text" => "T"}]}}}, "E")'
+ruby_eq "epic_title: an epic page gives its title" \
+  "T" \
+  'Blocking.epic_title({"id" => "p", "parent" => {"data_source_id" => "E"}, "properties" => {"Name" => {"type" => "title", "title" => [{"plain_text" => "T"}]}}}, "E")'
 
 echo "== end to end"
 
@@ -161,7 +189,7 @@ OFF_CLASSIFY="$(jq -cn --arg p "${PROV_CLASSIFY}" '{status: "judged", properties
 spec classify.json "$(jq -cn --argjson b "${OFF_CLASSIFY}" '{status: 200, body: $b}')"
 
 # The epic page, three open Critical tickets (one Done, one Off excluded).
-spec "page-${EPIC_DASHED}.json" '{"status":200,"body":{"object":"page","properties":{"Name":{"type":"title","title":[{"plain_text":"Jev judgments"}]}}}}'
+spec "page-${EPIC_DASHED}.json" "${EPIC_PAGE}"
 spec "query-${TICKETS_DS}.json" "$(jq -cn --argjson b "$( { row 717 Critical "Not Started"; row 700 Critical "In Progress"; row 710 Critical Done; row 720 Off "Not Started"; row 730 Critical Parked; } | rows)" '{status: 200, body: $b}')"
 spec blocks.json '{"status":200,"body":{"results":[{"type":"paragraph","paragraph":{"rich_text":[{"plain_text":"Requirement: route by session."}]}}],"has_more":false}}'
 
@@ -279,8 +307,23 @@ eq "an unreadable epic page exits 3" "${RC}" "3"
 has "it is CANDIDATES UNAVAILABLE" "${OUT}" "CANDIDATES UNAVAILABLE: Notion answered HTTP 404"
 has "the fallback applies the introduced rule" "${OUT}" "Path: Blocking
 Blocks: DND-600"
-spec "page-${EPIC_DASHED}.json" '{"status":200,"body":{"object":"page","properties":{"Name":{"type":"title","title":[{"plain_text":"Jev judgments"}]}}}}'
+spec "page-${EPIC_DASHED}.json" "${EPIC_PAGE}"
 spec "query-${TICKETS_DS}.json" "$(jq -cn --argjson b "$( { row 717 Critical "Not Started"; row 700 Critical "In Progress"; } | rows)" '{status: 200, body: $b}')"
+
+spec "page-${EPIC_DASHED}.json" "$(epic_page "${TICKETS_DS}")"
+run "${TICKET[@]}" "${FILER[@]}" --epic "${EPIC}"
+eq "a ticket's page id passed as --epic exits 3, never 0 candidates [review 1]" "${RC}" "3"
+has "it is CANDIDATES UNAVAILABLE naming the wrong parent" "${OUT}" "CANDIDATES UNAVAILABLE: page ${EPIC_DASHED} is not a DND epic"
+lacks "no candidate count is printed for a wrong key" "${OUT}" "candidates considered"
+eq "and Notion's ticket rows were never queried" "$(jq -s '[.[] | select(.service == "notion" and .method == "POST")] | length' "${TMP}/server.log")" "0"
+spec "page-${EPIC_DASHED}.json" "${EPIC_PAGE}"
+
+spec blocks.json '{"status":200,"body":{"object":"list","has_more":false}}'
+run "${TICKET[@]}" "${FILER[@]}" --epic "${EPIC}"
+eq "a block list with no results exits 3, never a blank summary [review 4]" "${RC}" "3"
+has "it is CANDIDATES UNAVAILABLE" "${OUT}" "CANDIDATES UNAVAILABLE: "
+eq "the blocking endpoint was not called" "$(athena_paths)" "/api/v1/judgments/ticket_classification"
+spec blocks.json '{"status":200,"body":{"results":[{"type":"paragraph","paragraph":{"rich_text":[{"plain_text":"Requirement: route by session."}]}}],"has_more":false}}'
 
 spec blocking.json '{"status":422,"body":{"error":"unprocessable_entity","fix":"filer.claimed_blocks is not one of the candidates. Fix: --blocks must name an open Critical ticket of the epic."}}'
 run "${TICKET[@]}" "${FILER[@]}" --epic "${EPIC}" --blocks DND-700

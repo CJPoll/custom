@@ -108,10 +108,11 @@ module BlockingCorpus
   end
 
   # summary(candidate) -> its body as ticket-classify --epic sends it: the
-  # text blocks joined, the first MAX_SUMMARY characters.
+  # text blocks joined, cut to MAX_SUMMARY by TicketCorpus.truncate (the
+  # corpus's one truncation rule).
   def summary(candidate)
     text = Array(candidate["blocks_text"]).reject { |b| b.to_s.strip.empty? }.join("\n")
-    text.length > MAX_SUMMARY ? text[0, MAX_SUMMARY] : text
+    TicketCorpus.truncate(text, MAX_SUMMARY)
   end
 
   def open_critical?(ticket) = ticket["path"] == CRITICAL && !CLOSED.include?(ticket["status"])
@@ -193,8 +194,8 @@ module BlockingCorpus
   def input(finding, candidate, project)
     body = redact_finding(TicketCorpus.lines(finding).join("\n"))
     {
-      "finding" => { "title" => sent_title(finding["title"]), "body" => body.length > TicketCorpus::MAX_BODY ? body[0, TicketCorpus::MAX_BODY] : body, "project" => project },
-      "candidates" => [{ "ref" => candidate["ref"], "title" => candidate["title"].to_s[0, TicketCorpus::MAX_TITLE], "summary" => summary(candidate) }]
+      "finding" => { "title" => sent_title(finding["title"]), "body" => TicketCorpus.truncate(body, TicketCorpus::MAX_BODY), "project" => project },
+      "candidates" => [{ "ref" => candidate["ref"], "title" => TicketCorpus.truncate(candidate["title"].to_s, TicketCorpus::MAX_TITLE), "summary" => summary(candidate) }]
     }
   end
 
@@ -232,7 +233,7 @@ module BlockingCorpus
 
   def tally(report, ticket, doc, by_page)
     mode = doc.dig("path", "mode")
-    return report[:excluded]["mode_#{mode}"] += 1 unless mode == "shadow"
+    return report[:excluded]["mode_#{mode || 'missing'}"] += 1 unless mode == "shadow"
 
     would = doc["would"]
     return report[:excluded]["no_accepted_judgment"] += 1 unless would.is_a?(Hash) && would["source"] == "jev"
