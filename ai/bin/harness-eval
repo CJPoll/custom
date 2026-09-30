@@ -19,6 +19,18 @@
 #   guard-health  run ai/bin/<guard> AND ai/bin/<guard> --self-test; the case
 #                 passes iff both exit 0 (the guard both catches its regression,
 #                 via its self-test, and passes clean on the current tree).
+#                 It credits any bin that exits 0, so it cannot tell a no-op
+#                 tool from a real one; bin-stdin can.
+#   bin-stdin     run ai/bin/<guard> [args...] with <input> on stdin, a fresh
+#                 HOME, cwd = the repo root, and a 30 s process-group cap
+#                 (DND-1427). Exit 0 = clean; exit 1 with `Fix:` in stdout or
+#                 stderr = fires; anything else (bin missing or not
+#                 executable, input missing, bad meta, another exit, a signal,
+#                 the cap) = error, which matches NEITHER expectation: a
+#                 missing tool never reads as clean. Meta: guard= must match
+#                 GUARD_NAME_RE (a bare ai/bin name; a bad one executes
+#                 nothing), expect=fires|clean, input=<file in the case dir>,
+#                 optional args=<JSON array of strings>.
 #
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
@@ -27,15 +39,18 @@
 #   ai/bin/harness-eval --self-test verify the runner's own mechanics
 #
 # Adding a case: create ai/eval/fixtures/<NN-name>/meta with regression=, guard=,
-# mode=, expect= (and input= for hook-stdin), plus the input file. Keep it
+# mode=, expect= (and input= for hook-stdin and bin-stdin; optional args= for
+# bin-stdin), plus the input file. Keep it
 # deterministic — assert a guard verdict, never a model judgement.
 
 require "json"
 require "open3"
 require "fileutils"
 require "tmpdir"
+require_relative "../lib/bounded_command"
 
 AI_DIR       = File.expand_path("..", __dir__)
+REPO_ROOT    = File.expand_path("..", AI_DIR)
 FIXTURES_DIR = File.join(AI_DIR, "eval", "fixtures")
 SCORECARD    = File.join(AI_DIR, "eval", "scorecard.json")
 BASELINE     = File.join(AI_DIR, "eval", "baseline.json")
@@ -85,8 +100,99 @@ rescue StandardError => e
   [false, "guard error: #{e.message}"]
 end
 
+# --- bin-stdin (DND-1427) ----------------------------------------------------
+# Pipe a fixture into ai/bin/<guard> and read its verdict from the exit: 0 is
+# clean, 1 with a `Fix:` line is fires, anything else is an error that matches
+# no expectation. A missing tool must never read as clean.
+
+# The cap only stops a hang; it is never a verdict threshold.
+BIN_STDIN_TIMEOUT_S = 30
+# A bare ai/bin name: no `/`, no `..`, so a fixture cannot name a path outside
+# the bin dir (`../hooks/x`, `/bin/sh`).
+GUARD_NAME_RE = /\A[a-z0-9][a-z0-9-]{1,62}\z/
+BIN_STDIN_EXPECTS = %w[fires clean].freeze
+
+# Domain (pure): the verdict table. -> [verdict, detail]. The checks run from
+# the most to the least decisive, so a timeout or signal is never read from
+# whatever output the tool left behind, and no outcome at all is an error.
+def bin_stdin_verdict(exit_status:, termsig:, timed_out:, output:, precheck_error:,
+                      timeout_s: BIN_STDIN_TIMEOUT_S)
+  return ["error", precheck_error] if precheck_error
+  return ["error", "timeout #{timeout_s}s"] if timed_out
+  return ["error", "signal #{termsig}"] if termsig
+  return ["error", "no exit status"] if exit_status.nil?
+  return ["clean", "exit 0"] if exit_status.zero?
+  return ["fires", "exit 1 with Fix:"] if exit_status == 1 && output.to_s.include?("Fix:")
+  return ["error", "exit 1 without Fix:"] if exit_status == 1
+
+  ["error", "exit #{exit_status}"]
+end
+
+# Parse the optional args= key. -> [array, nil] or [nil, reason].
+def bin_stdin_args(raw)
+  return [[], nil] if raw.nil? || raw.empty?
+
+  args = JSON.parse(raw)
+  return [nil, "bad args: not a JSON array of strings: #{raw}"] unless args.is_a?(Array) && args.all?(String)
+
+  [args, nil]
+rescue JSON::ParserError
+  [nil, "bad args: not JSON: #{raw}"]
+end
+
+# Domain (pure but for one file-existence check): -> nil, or an error detail.
+def validate_bin_stdin_meta(meta, case_dir)
+  guard = meta["guard"].to_s
+  return "bad guard name: #{guard.inspect}" unless GUARD_NAME_RE.match?(guard)
+  return "bad expect: #{meta['expect'].inspect}" unless BIN_STDIN_EXPECTS.include?(meta["expect"])
+
+  _args, reason = bin_stdin_args(meta["args"])
+  return reason if reason
+
+  input = meta["input"].to_s
+  path = File.join(case_dir, input)
+  return "input missing: #{path}" if input.empty? || !File.file?(path)
+
+  nil
+end
+
+# Side Effects: the one exec site. Runs bin_dir/<guard> with argv (no shell),
+# stdin = the input file, a fresh HOME per run (a tool's HOME state must not
+# carry between cases), cwd = the repo root, and a process-group bound.
+# -> the raw outcome bin_stdin_verdict classifies.
+def bin_stdin_run(guard, input_path, args, bin_dir:, timeout:)
+  bin = File.join(bin_dir, guard)
+  return { precheck_error: "bin not found: #{bin}" } unless File.file?(bin)
+  return { precheck_error: "not executable: #{bin}" } unless File.executable?(bin)
+
+  Dir.mktmpdir("harness-eval-home-") do |home|
+    r = BoundedCommand.run([bin, *args], timeout: timeout, chdir: REPO_ROOT,
+                                         env: { "HOME" => home }, stdin: input_path)
+    { exit_status: r.exitstatus, termsig: r.termsig, timed_out: r.timed_out,
+      output: "#{r.out}#{r.err}" }
+  end
+end
+
+# Manager: validate, run, classify. Nothing executes on invalid meta.
+def evaluate_bin_stdin(dir, meta, base, bin_dir:, timeout:)
+  invalid = validate_bin_stdin_meta(meta, dir)
+  outcome = if invalid
+              { precheck_error: invalid }
+            else
+              args, _reason = bin_stdin_args(meta["args"])
+              bin_stdin_run(meta["guard"], File.join(dir, meta["input"]), args, bin_dir: bin_dir, timeout: timeout)
+            end
+  raw = { exit_status: nil, termsig: nil, timed_out: false, output: "", precheck_error: nil }.merge(outcome)
+  verdict, detail = bin_stdin_verdict(**raw, timeout_s: timeout)
+  output = raw[:output].to_s.strip
+  detail = "#{detail} -- #{output}" unless output.empty?
+  base.merge(verdict: verdict, pass: (verdict != "error" && verdict == meta["expect"]), detail: detail[0, 200])
+end
+
 # Evaluate one case dir -> {name, regression, guard, expect, verdict, pass, detail}
-def evaluate(dir)
+# bin_dir and bin_stdin_timeout are seams for the self-test; production uses
+# ai/bin and the 30 s cap.
+def evaluate(dir, bin_dir: BIN_DIR, bin_stdin_timeout: BIN_STDIN_TIMEOUT_S)
   meta = parse_meta(File.join(dir, "meta"))
   name = File.basename(dir)
   mode = meta["mode"]
@@ -102,6 +208,8 @@ def evaluate(dir)
     healthy, detail = guard_healthy?(meta["guard"])
     verdict = healthy ? "pass" : "fail"
     base.merge(verdict: verdict, pass: (healthy && expect == "pass"), detail: detail)
+  when "bin-stdin"
+    evaluate_bin_stdin(dir, meta, base, bin_dir: bin_dir, timeout: bin_stdin_timeout)
   else
     base.merge(verdict: "error", pass: false, detail: "unknown mode: #{mode.inspect}")
   end
@@ -217,6 +325,135 @@ def mode_for(opts)
   :corpus
 end
 
+# bin-stdin self-test (DND-1427): the pure verdict table (V), meta validation
+# (M), and the real spawn over stub bins in a tmpdir (B). -> [failure, ...].
+def self_test_bin_stdin(dir)
+  fails = []
+  expect_eq = lambda do |label, got, want|
+    fails << "#{label}: expected #{want.inspect}, got #{got.inspect}" unless got == want
+  end
+
+  # V: bin_stdin_verdict, pure.
+  v = ->(**kw) { bin_stdin_verdict(**{ exit_status: nil, termsig: nil, timed_out: false, output: "", precheck_error: nil }.merge(kw)) }
+  expect_eq.call("V-1 exit 0", v.call(exit_status: 0)[0], "clean")
+  expect_eq.call("V-1b exit 0 with Fix: is still clean", v.call(exit_status: 0, output: "Fix: x")[0], "clean")
+  expect_eq.call("V-2 exit 1 with Fix:", v.call(exit_status: 1, output: "bad\n  Fix: do y")[0], "fires")
+  expect_eq.call("V-3 exit 1 without Fix:", v.call(exit_status: 1, output: "bad"), ["error", "exit 1 without Fix:"])
+  expect_eq.call("V-4 exit 2 with Fix: is still an error", v.call(exit_status: 2, output: "Fix: x")[0], "error")
+  expect_eq.call("V-4 exit 2 detail", v.call(exit_status: 2)[1], "exit 2")
+  expect_eq.call("V-4 exit 127 detail", v.call(exit_status: 127)[1], "exit 127")
+  expect_eq.call("V-5 signal", v.call(exit_status: 137, termsig: 9), ["error", "signal 9"])
+  expect_eq.call("V-6 timeout", v.call(timed_out: true, timeout_s: 30), ["error", "timeout 30s"])
+  expect_eq.call("V-6b timeout outranks output", v.call(timed_out: true, timeout_s: 30, output: "Fix: y")[0], "error")
+  expect_eq.call("V-7 precheck carried", v.call(precheck_error: "bin not found: /x", exit_status: 0),
+                 ["error", "bin not found: /x"])
+  expect_eq.call("V-8 no outcome at all is an error, never clean", v.call[0], "error")
+
+  # M: validate_bin_stdin_meta.
+  case_dir = File.join(dir, "case")
+  FileUtils.mkdir_p(case_dir)
+  File.write(File.join(case_dir, "in.txt"), "x\n")
+  good = { "guard" => "foo-check", "mode" => "bin-stdin", "expect" => "fires", "input" => "in.txt" }
+  m = ->(over) { validate_bin_stdin_meta(good.merge(over), case_dir).to_s }
+  expect_eq.call("M-1 valid", validate_bin_stdin_meta(good, case_dir), nil)
+  expect_eq.call("M-1b valid with args", validate_bin_stdin_meta(good.merge("args" => '["--strict"]'), case_dir), nil)
+  { "M-2 path in guard" => ["guard", "../hooks/x", "bad guard name"],
+    "M-3 absolute guard" => ["guard", "/bin/sh", "bad guard name"],
+    "M-7 empty guard" => ["guard", "", "bad guard name"],
+    "M-7b uppercase guard" => ["guard", "Foo", "bad guard name"],
+    "M-4 bad expect" => ["expect", "pass", "bad expect"],
+    "M-5 input missing" => ["input", "nope.txt", "input missing"],
+    "M-5b input blank" => ["input", "", "input missing"],
+    "M-6 args object" => ["args", '{"a":1}', "bad args"],
+    "M-6b args non-string" => ["args", "[1]", "bad args"],
+    "M-6c args not JSON" => ["args", "--strict", "bad args"] }.each do |label, (key, val, needle)|
+    got = m.call(key => val)
+    fails << "#{label}: expected an error naming #{needle.inspect}, got #{got.inspect}" unless got.include?(needle)
+  end
+  no_input = good.reject { |k, _| k == "input" }
+  fails << "M-5c no input key must be an error" unless validate_bin_stdin_meta(no_input, case_dir).to_s.include?("input missing")
+
+  # B: evaluate with stub bins and a real spawn.
+  bin_dir = File.join(dir, "bin")
+  FileUtils.mkdir_p(bin_dir)
+  stub = lambda do |name, body|
+    path = File.join(bin_dir, name)
+    File.write(path, "#!/bin/sh\n#{body}\n")
+    File.chmod(0o755, path)
+  end
+  stub.call("fires-bin", "cat >/dev/null; echo 'x Fix: y' >&2; exit 1")
+  stub.call("clean-bin", "cat >/dev/null; exit 0")
+  stub.call("mark-bin", "if grep -q MARK; then echo 'found MARK. Fix: remove it' >&2; exit 1; fi; exit 0")
+  stub.call("args-bin", "cat >/dev/null; if [ \"$1\" = --strict ]; then echo 'Fix: strict' >&2; exit 1; fi; exit 0")
+  stub.call("home-bin", "if [ -e \"$HOME/marker\" ]; then echo 'Fix: HOME leaked' >&2; exit 1; fi; touch \"$HOME/marker\"; exit 0")
+  stub.call("hang-bin", "echo $$ > \"#{File.join(dir, 'hang.pid')}\"; exec sleep 60")
+  stub.call("noexec-bin", "exit 0")
+  File.chmod(0o644, File.join(bin_dir, "noexec-bin"))
+  escape_marker = File.join(dir, "escaped")
+  File.write(File.join(dir, "x"), "#!/bin/sh\ntouch '#{escape_marker}'\nexit 0\n")
+  File.chmod(0o755, File.join(dir, "x"))
+
+  n = 0
+  # opts: input: (the fixture's stdin), timeout: (the injected cap).
+  run_case = lambda do |meta, opts = {}|
+    input = opts.fetch(:input, "hello\n")
+    timeout = opts.fetch(:timeout, BIN_STDIN_TIMEOUT_S)
+    n += 1
+    cdir = File.join(dir, "cases", format("%02d", n))
+    FileUtils.mkdir_p(cdir)
+    File.write(File.join(cdir, "in.txt"), input)
+    File.write(File.join(cdir, "meta"),
+               { "regression" => "r", "mode" => "bin-stdin", "input" => "in.txt" }.merge(meta)
+                 .map { |k, val| "#{k}=#{val}" }.join("\n") + "\n")
+    evaluate(cdir, bin_dir: bin_dir, bin_stdin_timeout: timeout)
+  end
+  check = lambda do |label, r, verdict, pass, detail = nil|
+    ok = r[:verdict] == verdict && r[:pass] == pass && (detail.nil? || r[:detail].to_s.include?(detail))
+    fails << "#{label}: expected verdict=#{verdict} pass=#{pass} detail~#{detail.inspect}, got #{r.inspect}" unless ok
+  end
+
+  check.call("B-1 fires matches", run_case.call("guard" => "fires-bin", "expect" => "fires"), "fires", true)
+  check.call("B-2 clean matches", run_case.call("guard" => "clean-bin", "expect" => "clean"), "clean", true)
+  check.call("B-3 no-op tool on a fires case", run_case.call("guard" => "clean-bin", "expect" => "fires"), "clean", false)
+  check.call("B-4 always-deny on a clean case", run_case.call("guard" => "fires-bin", "expect" => "clean"), "fires", false)
+  check.call("B-5 missing bin, expect=clean", run_case.call("guard" => "absent-bin", "expect" => "clean"),
+             "error", false, "bin not found: #{File.join(bin_dir, 'absent-bin')}")
+  check.call("B-6 missing bin, expect=fires", run_case.call("guard" => "absent-bin", "expect" => "fires"),
+             "error", false, "bin not found")
+  check.call("B-6b not executable", run_case.call("guard" => "noexec-bin", "expect" => "clean"),
+             "error", false, "not executable")
+  check.call("B-7 stdin with MARK", run_case.call({ "guard" => "mark-bin", "expect" => "fires" }, input: "a MARK b\n"),
+             "fires", true)
+  check.call("B-7 stdin without MARK", run_case.call({ "guard" => "mark-bin", "expect" => "clean" }, input: "a b\n"),
+             "clean", true)
+  check.call("B-8 args passed as argv", run_case.call("guard" => "args-bin", "expect" => "fires", "args" => '["--strict"]'),
+             "fires", true)
+  check.call("B-8 no args by default", run_case.call("guard" => "args-bin", "expect" => "clean"), "clean", true)
+  2.times do |i|
+    check.call("B-9 isolated HOME run #{i + 1}", run_case.call("guard" => "home-bin", "expect" => "clean"), "clean", true)
+  end
+  check.call("B-10 a hang is capped", run_case.call({ "guard" => "hang-bin", "expect" => "clean" }, timeout: 1),
+             "error", false, "timeout 1s")
+  hang_pid = File.file?(File.join(dir, "hang.pid")) ? File.read(File.join(dir, "hang.pid")).to_i : 0
+  if hang_pid.positive?
+    begin
+      Process.kill(0, hang_pid)
+      stat = File.read("/proc/#{hang_pid}/stat") rescue "" # rubocop:disable Style/RescueModifier
+      fails << "B-10 the hung child #{hang_pid} was not reaped" unless stat.split(") ").last.to_s.start_with?("Z")
+    rescue Errno::ESRCH
+      nil
+    end
+  else
+    fails << "B-10 the hung child never started (no pid file)"
+  end
+  check.call("B-11 bad guard name executes nothing", run_case.call("guard" => "../x", "expect" => "clean"),
+             "error", false, "bad guard name")
+  fails << "B-11 ../x was executed (marker exists)" if File.exist?(escape_marker)
+  check.call("B-12 missing input executes nothing", run_case.call("guard" => "home-bin", "expect" => "clean", "input" => "gone.txt"),
+             "error", false, "input missing")
+  fails
+end
+
 def run_self_test
   dir = File.join(Dir.tmpdir, "harness-eval-selftest-#{Process.pid}")
   FileUtils.mkdir_p(dir)
@@ -267,6 +504,9 @@ def run_self_test
       warn "self-test: FAIL — parse_cli(#{args.inspect}) must accept and select #{want}, got #{reason.inspect}"
       ok = false
     end
+    failures = self_test_bin_stdin(File.join(dir, "bin-stdin"))
+    failures.each { |f| warn "self-test: FAIL — bin-stdin #{f}" }
+    ok = false unless failures.empty?
   ensure
     FileUtils.rm_rf(dir)
   end

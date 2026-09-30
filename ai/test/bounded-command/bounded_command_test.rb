@@ -63,6 +63,23 @@ Dir.mktmpdir do |tmp|
   r = BoundedCommand.run(["pwd"], timeout: 10, chdir: tmp)
   check("b4 chdir honoured", r.out.strip == File.realpath(tmp), r.out)
 
+  # b10 stdin (DND-1427): a file path is the child's stdin, read to EOF; the
+  # default stays /dev/null, so a reader of stdin never blocks.
+  input = File.join(tmp, "stdin.txt")
+  File.write(input, "MARK line\nsecond\n")
+  r = BoundedCommand.run(["cat"], timeout: 10, stdin: input)
+  check("b10 stdin file reaches the child", r.success? && r.out == "MARK line\nsecond\n", r.inspect)
+  r = BoundedCommand.run(["cat"], timeout: 10)
+  check("b10 default stdin is empty, not inherited", r.success? && r.out == "", r.inspect)
+
+  # b11 a signalled child reports termsig; an exited one reports nil. The
+  # 128+n exitstatus is kept for existing callers, but only termsig can tell a
+  # real `exit 137` from a KILL.
+  r = BoundedCommand.run(["sh", "-c", "kill -9 $$"], timeout: 10)
+  check("b11 signalled child reports termsig 9", r.termsig == 9 && !r.success? && !r.timed_out, r.inspect)
+  r = BoundedCommand.run(["sh", "-c", "exit 137"], timeout: 10)
+  check("b11 exit 137 is not a signal", r.termsig.nil? && r.exitstatus == 137, r.inspect)
+
   # b5 the hang: a leader that waits on a TERM-ignoring child holding stdout.
   pids = File.join(tmp, "pids")
   script = "echo $$ > #{pids}; (trap '' TERM; echo $$ >> #{pids}; exec sleep 300) & wait"

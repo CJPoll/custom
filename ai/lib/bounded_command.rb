@@ -22,7 +22,10 @@
 # intent: these callers are unattended, and a prompt is a hang.
 
 module BoundedCommand
-  Result = Struct.new(:out, :err, :exitstatus, :timed_out, :seconds, keyword_init: true) do
+  # termsig is the signal that ended the child, or nil when it exited. A
+  # signalled child also reads exitstatus 128+n (existing callers depend on
+  # it), which alone cannot tell a KILL from a real `exit 137`.
+  Result = Struct.new(:out, :err, :exitstatus, :timed_out, :seconds, :termsig, keyword_init: true) do
     def success?
       !timed_out && exitstatus.zero?
     end
@@ -41,7 +44,9 @@ module BoundedCommand
     raise ArgumentError, "#{name} must be a positive number of seconds, got #{seconds.inspect}"
   end
 
-  # -> Result. argv is an Array of Strings; chdir is optional.
+  # -> Result. argv is an Array of Strings; chdir is optional. stdin is a file
+  # path the child reads as its stdin (default /dev/null: a child that reads
+  # stdin sees EOF, never the caller's terminal).
   #
   # The bound covers the reads too. A command that exits in time while a
   # helper it started still holds stdout/stderr open is timed_out (its output
@@ -54,9 +59,9 @@ module BoundedCommand
   # (the call still returns); a process in uninterruptible sleep (D state)
   # survives KILL, and run's cleanup then waits for the kernel to
   # release it.
-  def self.run(argv, timeout:, chdir: nil, env: {})
+  def self.run(argv, timeout:, chdir: nil, env: {}, stdin: File::NULL)
     check_bound!(timeout)
-    opts = { pgroup: true, in: File::NULL }
+    opts = { pgroup: true, in: stdin }
     opts[:chdir] = chdir if chdir
     deadline = now + timeout
     out_r, out_w = IO.pipe
@@ -100,7 +105,7 @@ module BoundedCommand
     if drained
       return [true, Result.new(out: readers[0].value, err: readers[1].value,
                                exitstatus: status.exitstatus || (128 + status.termsig.to_i),
-                               timed_out: false, seconds: timeout)]
+                               termsig: status.termsig, timed_out: false, seconds: timeout)]
     end
 
     kill_group(wait)
