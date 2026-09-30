@@ -410,33 +410,44 @@ if [ "${rc}" -eq 3 ] && [ "${before}" = "${after}" ] && kill -0 "${SL}" 2>/dev/n
 # CHILD passes every other identity check (--resolve-client accepted it
 # above), so only the uid check can refuse it.
 ID_BIN="$(command -v id)"
-MY_UID="$("${ID_BIN}" -u)"
-OTHER_UID=$((MY_UID + 1))
-mkdir -p "${TMP}/other-user-bin"
-cat >"${TMP}/other-user-bin/id" <<SHIM
+MY_UID="$([ -n "${ID_BIN}" ] && "${ID_BIN}" -u)"
+case "${MY_UID}" in
+  ''|*[!0-9]*)
+    # Could not measure our own uid: a failure named here, never a fixture
+    # built on an empty uid (which would make OTHER_UID 1).
+    bad "(fixture) our own uid is readable from id" "id=${ID_BIN:-not on PATH} uid=${MY_UID:-empty}" ;;
+  *)
+    OTHER_UID=$((MY_UID + 1))
+    mkdir -p "${TMP}/other-user-bin"
+    cat >"${TMP}/other-user-bin/id" <<SHIM
 #!/bin/bash
 # Test fixture (DND-1437): the invoking user is uid ${OTHER_UID}, not ${MY_UID}.
 if [ "\$*" = "-u" ]; then echo "${OTHER_UID}"; exit 0; fi
 exec "${ID_BIN}" "\$@"
 SHIM
-chmod +x "${TMP}/other-user-bin/id"
-if [ "$(PATH="${TMP}/other-user-bin:${PATH}" id -u)" = "${OTHER_UID}" ] && kill -0 "${CHILD}" 2>/dev/null; then
-  ok "(fixture) the id shim reports uid ${OTHER_UID}, and our mock client ${CHILD} is alive"
-else
-  bad "(fixture) the id shim reports uid ${OTHER_UID}, and our mock client ${CHILD} is alive" "shim=$(PATH="${TMP}/other-user-bin:${PATH}" id -u 2>&1)"
-fi
-# "Nothing captured" is read as "no capture dir newer than a marker", never a
-# count: retention (KEEP=5) prunes one dir per capture, so a count holds still
-# even when a capture was written.
-touch "${TMP}/uid-case.marker"
-out="$(PATH="${TMP}/other-user-bin:${PATH}" "${CAPTURE}" "${CHILD}" 2>&1)"; rc=$?
-made="$(find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d -newer "${TMP}/uid-case.marker")"
-if [ "${rc}" -eq 3 ] && grep -q "pid ${CHILD} belongs to uid ${MY_UID}, not this user (${OTHER_UID})" <<<"${out}" \
-   && [ -z "${made}" ] && kill -0 "${CHILD}" 2>/dev/null; then
-  ok "another user's process -> exit 3 on the uid check, nothing captured, not signalled"
-else
-  bad "another user's process -> exit 3 on the uid check, nothing captured, not signalled" "rc=${rc} new dirs: ${made:-none} ${out}"
-fi
+    chmod +x "${TMP}/other-user-bin/id"
+    shim_uid="$(PATH="${TMP}/other-user-bin:${PATH}" id -u 2>&1)"
+    if [ "${shim_uid}" = "${OTHER_UID}" ] && kill -0 "${CHILD}" 2>/dev/null; then
+      ok "(fixture) the id shim reports uid ${OTHER_UID}, and our mock client ${CHILD} is alive"
+    else
+      bad "(fixture) the id shim reports uid ${OTHER_UID}, and our mock client ${CHILD} is alive" \
+          "shim=${shim_uid} alive=$(kill -0 "${CHILD}" 2>/dev/null && echo yes || echo no)"
+    fi
+    # "Nothing captured" is a set difference of capture dir names, never a
+    # count: retention (KEEP=5) prunes one dir per capture, so a count holds
+    # still even when a capture was written. Names carry a stamp and the pid,
+    # so a new capture never reuses an old name.
+    names_before="$(find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)"
+    out="$(PATH="${TMP}/other-user-bin:${PATH}" "${CAPTURE}" "${CHILD}" 2>&1)"; rc=$?
+    names_after="$(find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)"
+    made="$(comm -13 <(printf '%s\n' "${names_before}") <(printf '%s\n' "${names_after}"))"
+    if [ "${rc}" -eq 3 ] && grep -q "pid ${CHILD} belongs to uid ${MY_UID}, not this user (${OTHER_UID})" <<<"${out}" \
+       && [ -z "${made}" ] && kill -0 "${CHILD}" 2>/dev/null; then
+      ok "another user's process -> exit 3 on the uid check, nothing captured, not signalled"
+    else
+      bad "another user's process -> exit 3 on the uid check, nothing captured, not signalled" "rc=${rc} new dirs: ${made:-none} ${out}"
+    fi ;;
+esac
 
 # ---------------------------------------------------------------------------
 printf '\nC-6  usage\n'

@@ -218,6 +218,9 @@ assert_client() {
   case "${p}" in ''|*[!0-9]*) printf 'not a pid: "%s"\n' "${p}"; return 3 ;; esac
   [ -d "/proc/${p}" ] || { printf 'pid %s is not running\n' "${p}"; return 3; }
   uid="$(stat -c %u "/proc/${p}" 2>/dev/null)"
+  # `id` is resolved through PATH on purpose: the self-test proves this refusal
+  # with an `id` shim (DND-1437). Moving to $EUID or an absolute path needs a
+  # new seam there, or that case goes red.
   [ "${uid}" = "$(id -u)" ] || { printf 'pid %s belongs to uid %s, not this user (%s)\n' "${p}" "${uid:-?}" "$(id -u)"; return 3; }
   exe="$(readlink "/proc/${p}/exe" 2>/dev/null)"
   case "${exe##*/}" in
