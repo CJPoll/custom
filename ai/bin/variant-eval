@@ -224,7 +224,9 @@ class Cancelled < StandardError; end
 # still registered (capture runs a cancellable command in its own group, so
 # its admiral-eval and that run's `claude` calls stop together) and KILLs any
 # group still registered GRACE_S later. A command registered after cancel! is
-# stopped at once.
+# stopped at once. Limit: a SIGKILL to variant-eval itself runs no Ruby code,
+# so nothing stops the sides' groups then (a TERM, INT or HUP does: see
+# release_all).
 class Cancel
   GRACE_S = 10
 
@@ -308,6 +310,9 @@ def capture(argv, chdir: nil, stdin_data: "", env: nil, cancel: nil)
     stdin.close
     out, err = readers.map(&:value)
     st = wait_thr.value
+    # Not in an `ensure`, on purpose: if reading raises, popen3's own ensure
+    # still waits for the command, so it must stay registered for
+    # both_sides' release_all to stop it.
     cancel&.unregister(wait_thr.pid)
     # After a cancel, any unsuccessful end is the cancel's doing (a command may
     # catch TERM and exit non-zero); a command that finished cleanly first
