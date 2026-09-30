@@ -5529,7 +5529,9 @@ build by name:
   approval grants*);
 - DND-446: the morning digest (*Morning digest*);
 - DND-447 and DND-449: meetings and meeting catch-up;
-- DND-1157: item summaries (*Item summaries*).
+- DND-1157: item summaries (*Item summaries*);
+- DND-1395: work Notion summaries and the one-time summary backfill (*Item
+  summaries*).
 
 None of the server homes named below exists yet (gen_saas `origin/main`
 `b5f85909`, read 2026-09-24). Every sentence about them is an obligation on its
@@ -5882,6 +5884,16 @@ field.
   already a closed list with no body) is unchanged under either policy,
   because the one work subscription fronts both and the agent inbox routes on
   that payload. Cutting agent mail too is the owner's call, not a default.
+
+  Item summaries are the one reader of a work ticket's body (DND-1395). At
+  summary time the body is read through
+  `Athena.NotionEvents.index_page_text/4` under the work Tickets database's
+  enrichment token and sent in the model prompt. It is never persisted,
+  logged or written to an inbox line; only the summary is stored (*Item
+  summaries*). Every cut above is unchanged: the closed ticket payload, the
+  dropped comments, no Epic or Project read, the value-free side stores, and
+  the reconciliation and snapshot paths. Owner decision relayed from Cody,
+  2026-09-30 ("Yes, summarize bodies"); evidence gen_saas #596.
 
   **Later (2026-09-28):** the bullet before this one said the obligation
   "is DND-438's `metadata_only` subscription obligation" without stating it;
@@ -6257,29 +6269,44 @@ An **item summary** is one to five sentences a model writes about an item for
 the owner to read on the priorities page (DND-1157). It is derived content, so
 this subsection is its boundary.
 
-- **Sources.** Only `notion_personal` and `slack_ask` items may have one.
-  Every other source is refused by name, whatever the owner's rules list:
-  `notion_work` and `action_item` because their subscriptions are
-  `metadata_only` and a summary is a store of their body; `forge_review`,
-  `forge_token`, `meeting` and `manual` because they carry a title only. A missing or
-  unknown source is refused too. Enabling another source is an amendment to
-  this list.
+- **Sources.** Only `notion_personal`, `notion_work` and `slack_ask` items
+  may have one. Every other source is refused by name, whatever the owner's
+  rules list: `action_item` because its subscription is `metadata_only` and
+  DND-1395 did not open it; `forge_review`, `forge_token`, `meeting` and
+  `manual` because they carry a title only. A missing or unknown source is
+  refused too. Enabling another source is an amendment to this list.
+
+  **Later (2026-09-30, DND-1395):** this bullet refused `notion_work` by
+  name, "because their subscriptions are `metadata_only` and a summary is a
+  store of their body" (decision D-1157-1). Superseded for `notion_work`
+  only by owner decision, relayed from Cody's laptop terminal turn of
+  2026-09-30 ~14:30Z ("Let's enable summaries for all notion sources." /
+  "Yes, summarize bodies"); evidence gen_saas #596 (`1100c1f9`). A work
+  ticket's body is read at summary time, sent in the prompt, and never
+  stored; the summary is stored. `action_item` stays refused.
 - **Owner opt-in per source.** The owner's rules name the enabled sources
-  (`summary_sources`), a subset of the two above. The default is
-  `notion_personal`; `slack_ask` is off until the owner enables it. Disabling
+  (`summary_sources`), a subset of the three above. The default is
+  `notion_personal`; `notion_work` and `slack_ask` are off until the owner
+  enables them. Disabling
   a source deletes its summaries on the next sweep pass.
 - **Only open items.** A `proposed` or `active` item is summarized. A `done`
   or `dismissed` item keeps its last summary and is never refreshed.
-- **What is sent.** For `notion_personal`: the title (at most 300
-  characters), the status, and the plain text of the page's top-level
-  blocks, at most 8,000 characters. For `slack_ask`: the stored
+- **What is sent.** For `notion_personal` and `notion_work`: the title (at
+  most 300 characters), the status, and the plain text of the page's
+  top-level blocks, at most 8,000 characters. A work ticket's labels,
+  assignee and ticket number are not sent. For `slack_ask`: the stored
   `message_text` when it is not blank; otherwise, for a DM ask, the DM's
   text read live; at most 4,000 characters either way. A cut falls on a
   character boundary and is marked `[truncated]`. Nothing else is sent: no
   ids, links, people, dates, comments, project, asker or channel. The body is
   read only under the owner's own enrichment token for that page's database,
-  and only when that database is one of the owner's usable `notion_personal`
-  bindings on a `full` subscription. A DM's text is read only as the owner's
+  and only when that database is one of the owner's usable `:ticket`
+  bindings bound to the item's own source, on the one content policy that
+  source binds on: `full` for `notion_personal`, `metadata_only` for
+  `notion_work` (`Athena.NotionEvents.IndexSource.text_readable?/2`). The
+  Agent Messages database that a work subscription also fronts is never
+  read. A failed body read is `source_unreadable`, a transient cause, never
+  no text. A DM's text is read only as the owner's
   own Slack app, through the one lookup the priorities page and the digest
   also use (`Athena.Priorities.live_ask_text/3`), and it is held only for
   the call: only the summary is stored. A channel mention is never read
@@ -6291,6 +6318,11 @@ this subsection is its boundary.
   malformed Slack reference or asker fails `slack_ref_invalid`, a permanent
   cause, and any other fails `slack_unreadable`, a transient one
   (*Refresh*).
+
+  **Later (2026-09-30, DND-1395):** this bullet read a body only for
+  `notion_personal`, from its bindings on a `full` subscription. Superseded
+  by DND-1395 (gen_saas #596, `1100c1f9`): a `notion_work` body is read too,
+  on its `metadata_only` subscription, for the prompt only.
 
   **Later (2026-09-30, DND-1335):** this bullet said any failed read other
   than a malformed reference fails `slack_unreadable`. Superseded by
@@ -6369,11 +6401,50 @@ this subsection is its boundary.
   line. It logs one warning per owner and cause, never one per item, naming
   the count and the cause's `Fix:` line. The row reads "Summary paused:
   <cause>, re-checked <time>".
-- **Budget, per owner.** 200 model calls and 400,000 tokens per UTC day, and
-  $5 per UTC month from metered tokens at configured prices, checked before
-  each call against the ledger plus the call's estimate. A missing price, or
-  an unpriced call already in the month, fails closed. At a cap no call is
-  made, and the affected rows show the cap and when it resumes.
+- **Budget, per owner.** 1,000 model calls and 2,000,000 tokens per UTC day,
+  and $20 per UTC month from metered tokens at configured prices, checked
+  before each scheduled call against the ledger plus the call's estimate. A
+  missing price, or an unpriced call already in the month, fails closed. At
+  a cap no call is made, and the affected rows show the cap and when it
+  resumes.
+
+  **Later (2026-09-30, DND-1395):** this bullet said 200 calls, 400,000
+  tokens and $5. The code had 250 calls before DND-1395, so the 200 was
+  drift. Raised by owner decision, relayed from Cody's laptop terminal turn
+  of 2026-09-30 ("Raise caps"); evidence gen_saas #596 (`1100c1f9`,
+  `config/config.exs`).
+- **The one-time backfill (DND-1395).** By owner decision, relayed from
+  Cody's laptop terminal turn of 2026-09-30 ~14:35Z ("I don't care about
+  the cost or cap for backfilling; please just get everything backfilled
+  (one-time job, haiku is cheap)"; evidence gen_saas #596),
+  `Athena.Priorities.Summaries.backfill/1` summarizes every due open item of
+  each owner's enabled sources with no daily or monthly cap, at most 5,000
+  due rows per owner per run. An owner whose gate is closed (no key, a
+  latch, an unpriced model) is left for the scheduled refresh.
+  - **How it runs.** Operators start it once through
+    `Athena.Priorities.SummaryBackfill.start/0` over rpc. It runs in a
+    supervised task, `status/0` reports its state and a counts-only tally,
+    and a second start while one runs is refused. The one option an operator
+    may pass is the pause after each call; every other key is dropped. Its
+    state lives in that process only: after a node restart, a second start
+    works the rest.
+  - **Not a standing bypass.** The cap-free mode is `backfill/1`'s own
+    literal (`Summaries.Budget.check/4` with `:uncapped`). No config key,
+    env var or option of the scheduled refresh selects it. Every call still
+    writes its ledger row, and the scheduled refresh's windows count those
+    rows, so after a large backfill the daily caps may pause the scheduled
+    refresh until the next UTC midnight. `price_unknown` still fails closed.
+  - **What it works.** Every row the scheduled refresh finds due, plus rows
+    deferred by a cap and `empty_source` rows, in the page's order. Every
+    other wait (a `price_unknown` pause, a transient backoff, a permanent
+    failure on the same text, a Slack workspace pause) is kept.
+  - **Pacing.** It pauses after each call and treats a 429 as a ledgered
+    wait with backoff, never a failure. Past its wait schedule it stops for
+    that owner with no item failed.
+  - **The scheduled refresh yields.** It skips its passes while the backfill
+    runs, from its next tick on. At most the one pass already in flight (up
+    to 20 items) overlaps; each write is the item's own upsert, so an
+    overlap at worst summarizes one item twice.
 - **Display only.** A summary is untrusted model output over untrusted text.
   It renders as escaped plain text. No ranking reason, state, eligibility,
   `owner_only` rule, lease answer, digest or judgment reads it or sends it.
