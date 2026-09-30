@@ -256,6 +256,12 @@ STATIC_CHECKS = [
   # ai/lib/test/block-optimize/self-test.sh. A real `--case ...` run spends
   # ~500 model calls via variant-eval and is NEVER declared here.
   ["block-optimize self-test",  %w[ai/bin/block-optimize --self-test]],
+  # tool-sandbox's escape probes (DND-1426): each runs REAL bubblewrap and
+  # asserts one denial functionally; a probe that cannot start FAILS, never
+  # skips. No model, no network, no load (the timeout probe is `sleep`). The
+  # policy and pinned-clone suites are the discovered
+  # ai/lib/test/tool-sandbox/self-test.sh.
+  ["tool-sandbox self-test",    %w[ai/bin/tool-sandbox --self-test]],
   # setup-hooks' --self-test is INLINE in the installer (no dedicated
   # **/test/self-test.sh file backs it), so it stays hand-declared here.
   ["setup-hooks self-test",     %w[scripts/setup-hooks --self-test]],

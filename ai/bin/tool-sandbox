@@ -1,0 +1,737 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# tool-sandbox -- run a command so it cannot reach the network, the owner's
+# HOME and credentials, ~/.claude, the ~/dev/custom main checkout, forge
+# tokens, the Athena inbox root, or the docker socket (DND-1426, epic
+# "Harness -- sandboxed tool creation"). It is the execution boundary for
+# model-written code. Operator doc: ai/docs/tool-sandbox.md.
+#
+#   ai/bin/tool-sandbox --work DIR [--out DIR] [--timeout SECS] -- CMD [ARGS...]
+#   ai/bin/tool-sandbox --prepare-clone DEST [--sha SHA]
+#   ai/bin/tool-sandbox --self-test
+#   ai/bin/tool-sandbox --help
+#
+# 5-bucket layout: this file is Framework (argv, exit codes, messages) and
+# Manager (validate -> build argv -> execute -> classify). The Domain is
+# ai/lib/tool_sandbox/policy.rb, the ONLY place a bind or an env var is added;
+# the Side Effects are ai/lib/tool_sandbox/host.rb (host facts, the one exec
+# site) and ai/lib/tool_sandbox/clone.rb (the throwaway pinned clone).
+#
+# There is no fallback that runs CMD unsandboxed: anything that stops the
+# sandbox from being set up is exit 125 with a Fix:.
+#
+# Stdlib only; run with the system ruby.
+
+require "etc"
+require "fileutils"
+require "json"
+require "open3"
+require "rbconfig"
+require "socket"
+require "tmpdir"
+require_relative "../lib/strict_argv"
+require_relative "../lib/tool_sandbox/policy"
+require_relative "../lib/tool_sandbox/host"
+require_relative "../lib/tool_sandbox/clone"
+
+HELP = <<~HELP
+  Usage:
+    tool-sandbox --work DIR [--out DIR] [--timeout SECS] -- CMD [ARGS...]
+    tool-sandbox --prepare-clone DEST [--sha SHA]
+    tool-sandbox --self-test
+    tool-sandbox --help
+
+  Runs CMD under bubblewrap, deny by default: no network (not even abstract
+  unix sockets), no HOME, no ~/.claude, no main checkout, no inbox root, no
+  docker socket, and an environment of PATH HOME LANG TMPDIR TERM
+  XDG_STATE_HOME XDG_CACHE_HOME only. /usr and /etc are read-only; /tmp and
+  /home/sandbox are fresh and discarded; stdin is /dev/null.
+
+    --work DIR       read-write at /work, the working directory (required)
+    --out DIR        read-write at /out (optional)
+    --timeout SECS   wall limit, 1-7200 (default 1800); also the CPU rlimit
+    --prepare-clone DEST
+                     build DEST/origin.git (only ref: main = SHA) and DEST/repo
+                     (detached at SHA, origin url /origin) from this checkout's
+                     origin/main; prints repo=... origin=... sha=...
+    --sha SHA        pin to SHA instead; it must be on origin/main
+
+  With --work DEST/repo, DEST/origin.git is bound read-only at /origin, so
+  `git ls-remote origin` inside answers the pinned SHA with no network.
+
+  DIR and DEST must be absolute, real directories (not a symlink), owned by
+  you, beneath the temp root (#{Dir.tmpdir}) and not the root itself, with no
+  socket, fifo, device or hardlinked file inside. A --work whose .git is a
+  file (a linked worktree), or that holds an origin.git (a DEST itself), is
+  refused. A DEST is single-use: never run host git in DEST/repo after a
+  sandboxed command has touched it.
+
+  Exit: CMD's own status (128+N if signalled); 124 the wall timeout fired;
+  125 tool-sandbox could not set the sandbox up (nothing ran); 128+N
+  tool-sandbox got signal N and stopped the sandbox; 2 usage.
+HELP
+
+CLI_SPEC = {
+  "--work" => :value, "--out" => :value, "--timeout" => :integer,
+  "--prepare-clone" => :value, "--sha" => :value,
+  "--self-test" => :switch, "--help" => :switch
+}.freeze
+
+P = ToolSandbox::Policy
+H = ToolSandbox::Host
+
+module ToolSandboxCLI
+  class Refusal < StandardError
+    attr_reader :code, :fix
+
+    def initialize(message, code:, fix:)
+      super(message)
+      @code = code
+      @fix = fix
+    end
+  end
+
+  FIX_USAGE = "run `ai/bin/tool-sandbox --help` and pass only its flags; CMD goes after `--`."
+  FIX_PATH = "pass a fresh directory you created beneath the temp root (e.g. `mktemp -d`), not a symlink, " \
+             "not a linked worktree, holding no socket/fifo/device; for a repo use --prepare-clone DEST " \
+             "and --work DEST/repo."
+  FIX_TMP_ROOT = "leave TMPDIR unset or point it at a sticky, world-writable temp dir such as /tmp; a private " \
+                 "(0700) TMPDIR is refused, since the temp root bounds what may be bound."
+  FIX_INTERRUPTED = "tool-sandbox was sent a signal and stopped the sandbox; nothing was left running. Re-run it " \
+                    "if the interruption was not intended."
+  FIX_CLONE = "run it from inside a git checkout whose refs/remotes/origin/main is current (`git fetch origin`), " \
+              "with --sha naming a commit on origin/main; if the message names a git step, that step's error is " \
+              "above it. DEST was removed (or emptied) again."
+  FIX_HOST = "this host needs bubblewrap, timeout and prlimit in /usr/bin (or /usr/sbin) and a merged-/usr " \
+             "layout; install them (e.g. `emerge sys-apps/bubblewrap`). tool-sandbox never runs CMD without them."
+  FIX_SETUP = "read bwrap's message above. Check unprivileged user namespaces work (`bwrap --unshare-all " \
+              "--ro-bind /usr /usr -- /usr/bin/true`), and that CMD exists INSIDE the sandbox: it sees only " \
+              "/usr, /etc, /work, /out and /origin, so use /usr/bin/<tool> or a /work-relative path."
+  FIX_TIMEOUT = "CMD ran past --timeout and was stopped; raise --timeout (max 7200) or make CMD finish sooner."
+
+  module_function
+
+  def main(argv)
+    flags, cmd = split(argv)
+    opts = StrictArgv.parse(flags, CLI_SPEC)
+    if opts["--help"]
+      $stdout.print(HELP)
+      return 0
+    end
+    return self_test(opts, cmd) if opts["--self-test"]
+    return prepare_clone(opts, cmd) if opts["--prepare-clone"]
+
+    run(opts, cmd)
+  rescue StrictArgv::UsageError => e
+    fail_with(Refusal.new(e.message, code: P::EXIT_USAGE, fix: FIX_USAGE))
+  rescue Refusal => e
+    fail_with(e)
+  rescue StandardError => e
+    # Never exit 1 on our own error: 1 is a verdict the child could have given.
+    fail_with(Refusal.new("internal error before or around the sandbox: #{e.class}: #{e.message}",
+                          code: P::EXIT_SETUP, fix: "this is a tool-sandbox defect; file it with the message above. " \
+                                                    "Nothing ran unsandboxed."))
+  end
+
+  # Flags before the first `--`; CMD after it (nil when there is no `--`).
+  def split(argv)
+    i = argv.index("--")
+    i.nil? ? [argv, nil] : [argv[0...i], argv[(i + 1)..]]
+  end
+
+  def fail_with(refusal)
+    warn "tool-sandbox: #{refusal.message}"
+    warn "  Fix: #{refusal.fix}"
+    refusal.code
+  end
+
+  def usage!(msg)
+    raise Refusal.new(msg, code: P::EXIT_USAGE, fix: FIX_USAGE)
+  end
+
+  def unwrap(result, code:, fix:)
+    raise Refusal.new(result[1], code: code, fix: fix) unless result[0] == :ok
+
+    result[1]
+  end
+
+  def tmp_root!
+    real, mode = H.tmp_root
+    unwrap(P.validate_tmp_root(realpath: real, mode: mode), code: P::EXIT_SETUP, fix: FIX_TMP_ROOT)
+  end
+
+  # Validate the path itself; only then walk what is beneath it.
+  def dir!(path, role, root)
+    real = unwrap(P.validate_dir(H.facts(path, role: role), tmp_root: root, role: role), code: P::EXIT_SETUP,
+                                                                                         fix: FIX_PATH)
+    return real if role == :dest && !H.exists?(real)
+
+    unwrap(P.validate_contents(path: path, role: role, special: H.first_special(real)), code: P::EXIT_SETUP,
+                                                                                         fix: FIX_PATH)
+    real
+  end
+
+  # ---------------------------------------------------------------- run mode
+  def run(opts, cmd)
+    usage!("--work DIR is required (or one of --prepare-clone, --self-test, --help)") unless opts["--work"]
+    usage!("CMD is required after `--`") if cmd.nil? || cmd.empty?
+    usage!("--sha only goes with --prepare-clone") if opts["--sha"]
+    timeout = unwrap(P.validate_timeout(opts["--timeout"]), code: P::EXIT_USAGE, fix: FIX_USAGE)
+
+    root = tmp_root!
+    work = dir!(opts["--work"], :work, root)
+    out = opts["--out"] ? dir!(opts["--out"], :out, root) : nil
+    origin = origin_sibling(work, root)
+    unwrap(P.validate_disjoint(work: work, out: out, origin: origin), code: P::EXIT_SETUP, fix: FIX_PATH)
+    argv = policy_argv(work: work, out: out, origin: origin, timeout: timeout, cmd: cmd)
+    launch(argv, timeout)
+  end
+
+  # DEST/origin.git beside a --work DEST/repo. A sibling that is present but
+  # fails validation is refused, never silently left unbound. No sibling is
+  # not an error: /origin is then simply absent inside.
+  def origin_sibling(work, root)
+    return nil unless File.basename(work) == "repo"
+
+    sibling = File.join(File.dirname(work), H::MIRROR)
+    return nil unless H.exists?(sibling)
+
+    dir!(sibling, :origin, root)
+  end
+
+  def policy_argv(work:, timeout:, cmd:, out: nil, origin: nil)
+    links = unwrap(P.top_links(H.top_links), code: P::EXIT_SETUP, fix: FIX_HOST)
+    tools, missing = H.tools
+    unless missing.empty?
+      raise Refusal.new("#{missing.join(', ')} not found in #{H::TRUSTED_TOOL_DIRS.join(' ')}",
+                        code: P::EXIT_SETUP, fix: FIX_HOST)
+    end
+
+    P.argv(tools: tools, links: links, work: work, out: out, origin: origin, timeout: timeout,
+           status_fd: H::STATUS_FD, cmd: cmd, hard_limits: H.hard_limits)
+  end
+
+  # Execute a Policy argv and map its outcome to our exit code.
+  def launch(argv, timeout)
+    result = begin
+      H.execute(argv)
+    rescue SystemCallError => e
+      raise Refusal.new("could not start the sandbox: #{e.message}", code: P::EXIT_SETUP, fix: FIX_SETUP)
+    end
+    status = P.parse_status(result[:status_text])
+    outcome = P.classify_exit(status: result[:status], **status, elapsed: result[:elapsed], timeout: timeout,
+                                                                 interrupted: result[:interrupted])
+    case outcome[0]
+    when :timeout then raise Refusal.new("TIMEOUT after #{timeout}s", code: P::EXIT_TIMEOUT, fix: FIX_TIMEOUT)
+    when :setup then raise Refusal.new(outcome[1], code: P::EXIT_SETUP, fix: FIX_SETUP)
+    when :interrupted
+      raise Refusal.new("interrupted by SIG#{outcome[1]}; the sandbox was stopped", code: P.exit_code_for(outcome),
+                                                                                   fix: FIX_INTERRUPTED)
+    end
+    P.exit_code_for(outcome)
+  end
+
+  # ----------------------------------------------------------- prepare-clone
+  def prepare_clone(opts, cmd)
+    usage!("--prepare-clone takes no CMD") unless cmd.nil?
+    extra = opts.keys - %w[--prepare-clone --sha]
+    usage!("--prepare-clone does not take #{extra.join(', ')}") unless extra.empty?
+
+    root = tmp_root!
+    dest = dir!(opts["--prepare-clone"], :dest, root)
+    created = H.make_dest(dest)
+    begin
+      r = ToolSandbox::Clone.prepare(host_repo: Dir.pwd, dest: dest, sha: opts["--sha"])
+    rescue ToolSandbox::Clone::Error, SystemCallError => e
+      H.remove_clone(dest, created)
+      raise Refusal.new("--prepare-clone: #{e.message}", code: P::EXIT_SETUP, fix: FIX_CLONE)
+    end
+    puts "repo=#{r[:repo]} origin=#{r[:origin]} sha=#{r[:sha]}"
+    0
+  end
+
+  # --------------------------------------------------------------- self-test
+  def self_test(opts, cmd)
+    usage!("--self-test takes no other flag and no CMD") unless opts.keys == ["--self-test"] && cmd.nil?
+
+    SelfTest.new.run
+  end
+end
+
+# The escape probes (DND-1426 QA plan, E-*). Each runs REAL bwrap through the
+# real CLI and asserts a denial functionally. A probe whose sandbox could not
+# start FAILS; nothing here skips. No probe generates load (DND-1222): the
+# timeout probe is `sleep`, and the CPU limit is read from /proc/self/limits.
+class SelfTest
+  SELF = File.expand_path(__FILE__)
+  AI_DIR = File.expand_path("..", __dir__)
+  CHECKOUT = File.expand_path("..", AI_DIR)
+  INSIDE_RUBY = "/usr/bin/ruby"
+  # Files a nested tool-sandbox needs (E-14), relative to the checkout.
+  NESTED_FILES = %w[ai/bin/tool-sandbox ai/lib/strict_argv.rb ai/lib/tool_sandbox/policy.rb
+                    ai/lib/tool_sandbox/host.rb ai/lib/tool_sandbox/clone.rb].freeze
+  HANG_CAP = "120"
+  # The probes this file defines produce at least this many results; fewer
+  # means discovery found nothing, which must never read as a pass.
+  MIN_PROBES = 34
+
+  def initialize
+    @results = []
+    @scratch = nil
+  end
+
+  def run
+    @scratch = Dir.mktmpdir("tool-sandbox-selftest-")
+    private_methods.grep(/\Aprobe_e\d+/).sort_by { |m| m.to_s[/\d+/].to_i }.each { |m| send(m) }
+    report
+  ensure
+    FileUtils.rm_rf(@scratch) if @scratch
+  end
+
+  private
+
+  def report
+    @results.each { |id, ok, detail| puts "#{ok ? 'ok  ' : 'FAIL'} #{id}#{ok ? '' : " -- #{detail}"}" }
+    failed = @results.reject { |_, ok, _| ok }
+    if @results.size < MIN_PROBES
+      warn "tool-sandbox: self-test FAILED: only #{@results.size} probes ran, expected at least #{MIN_PROBES}"
+      warn "  Fix: a probe_eNN method was renamed or removed; restore it (probe discovery is by name)."
+      return 1
+    end
+    if failed.empty?
+      puts "tool-sandbox: self-test OK (#{@results.size} escape probes)"
+      return 0
+    end
+    warn "tool-sandbox: self-test FAILED (#{failed.size}/#{@results.size} probes)"
+    warn "  Fix: each FAIL line names a resource the sandbox must deny and what the probe saw. Restore the " \
+         "denial in ai/lib/tool_sandbox/policy.rb (the only bind/env source); if the sandbox could not start at " \
+         "all, install bubblewrap and check unprivileged user namespaces (`bwrap --unshare-all --ro-bind /usr " \
+         "/usr -- /usr/bin/true`). Never skip a probe."
+    1
+  end
+
+  def record(id, ok, detail = "")
+    @results << [id, ok ? true : false, detail]
+  rescue StandardError => e
+    @results << [id, false, "probe raised #{e.class}: #{e.message}"]
+  end
+
+  def probe(id)
+    ok, detail = yield
+    record(id, ok, detail)
+  rescue StandardError => e
+    record(id, false, "probe raised #{e.class}: #{e.message}")
+  end
+
+  def dir(name)
+    d = File.join(@scratch, name)
+    Dir.mkdir(d, 0o700)
+    d
+  end
+
+  def timeout_bin
+    H.tools[0][:timeout] || "/usr/bin/timeout"
+  end
+
+  # The real CLI, as a subprocess, capped against a hang.
+  # -> [stdout, stderr, exit]
+  def cli(*args, env: {}, stdin_data: "", chdir: @scratch, **spawn_opts)
+    out, err, st = Open3.capture3(env, timeout_bin, HANG_CAP, RbConfig.ruby, SELF, *args,
+                                  stdin_data: stdin_data, chdir: chdir, **spawn_opts)
+    [out, err, st.exitstatus || (128 + st.termsig.to_i)]
+  end
+
+  # Write a ruby probe into WORK and run it inside the sandbox.
+  def inside(work, code, *args, timeout: 30, **opts)
+    File.write(File.join(work, "probe.rb"), code)
+    cli("--work", work, "--timeout", timeout.to_s, "--", INSIDE_RUBY, "/work/probe.rb", *args, **opts)
+  end
+
+  def started?(err, code)
+    code != P::EXIT_SETUP && !err.include?("bwrap:")
+  end
+
+  def real_home
+    Etc.getpwuid(Process.uid).dir
+  end
+
+  # ---- E-1 network --------------------------------------------------------
+  def probe_e01_network
+    probe("E-1 network denied (loopback listener and a public IP)") do
+      server = TCPServer.new("127.0.0.1", 0)
+      port = server.addr[1]
+      TCPSocket.new("127.0.0.1", port).close # host control: the listener is reachable here
+      out, err, code = inside(dir("e1"), <<~RUBY, port.to_s)
+        require "socket"
+        def try(host, port)
+          Socket.tcp(host, port, connect_timeout: 3).close
+          "CONNECTED"
+        rescue StandardError => e
+          e.class.name
+        end
+        puts try("127.0.0.1", ARGV[0].to_i)
+        puts try("1.1.1.1", 80)
+      RUBY
+      server.close
+      lines = out.split("\n")
+      [code.zero? && lines[0] != "CONNECTED" && lines[1] == "Errno::ENETUNREACH",
+       "exit #{code}, saw #{lines.inspect}, stderr #{err.strip[0, 200].inspect}"]
+    end
+  end
+
+  # ---- E-2 abstract unix sockets ------------------------------------------
+  def probe_e02_abstract_socket
+    probe("E-2 abstract unix sockets denied (a host listener and X11)") do
+      name = "\0tool-sandbox-selftest-#{Process.pid}"
+      server = UNIXServer.new(name)
+      UNIXSocket.new(name).close # host control
+      # The probe gets the names without their leading NUL and adds it back.
+      out, err, code = inside(dir("e2"), <<~'RUBY', name.delete("\0"), "/tmp/.X11-unix/X0")
+        require "socket"
+        ARGV.each do |n|
+          UNIXSocket.new("\0" + n).close
+          puts "CONNECTED"
+        rescue StandardError => e
+          puts e.class.name
+        end
+      RUBY
+      server.close
+      lines = out.split("\n")
+      denied = %w[Errno::ECONNREFUSED Errno::ENOENT]
+      [code.zero? && lines.size == 2 && lines.all? { |l| denied.include?(l) },
+       "exit #{code}, saw #{lines.inspect} #{err.strip[0, 200]}"]
+    end
+  end
+
+  # ---- E-3..E-7 host paths absent -----------------------------------------
+  def probe_e03_host_paths
+    inbox = [File.join(real_home, ".local/share/athena"), ENV.fetch("ATHENA_INBOX_ROOT", nil)].compact
+                                                                                              .select { |p| p.start_with?("/") }
+    paths = {
+      "E-3 real HOME" => [real_home],
+      "E-4 ~/.claude" => [File.join(real_home, ".claude")],
+      "E-5 main checkout" => [File.join(CHECKOUT, "ai/bin/tool-sandbox"), File.join(real_home, "dev/custom")],
+      "E-6 inbox root" => inbox,
+      "E-7 docker socket" => ["/run/docker.sock", "/var/run/docker.sock"]
+    }
+    all = paths.values.flatten.uniq
+    out, err, code = inside(dir("e3"), <<~RUBY, *all)
+      ARGV.each do |p|
+        File.lstat(p)
+        puts "PRESENT\\t\#{p}"
+      rescue Errno::ENOENT
+        puts "ENOENT\\t\#{p}"
+      rescue StandardError => e
+        puts "\#{e.class.name}\\t\#{p}"
+      end
+    RUBY
+    seen = out.split("\n").to_h { |l| l.split("\t", 2).reverse }
+    paths.each do |id, list|
+      probe("#{id} absent inside") do
+        [code.zero? && list.all? { |p| seen[p] == "ENOENT" },
+         "exit #{code}, saw #{list.to_h { |p| [p, seen[p]] }.inspect} #{err.strip[0, 200]}"]
+      end
+    end
+  end
+
+  # ---- E-8 env scrubbed ---------------------------------------------------
+  def probe_e08_env
+    probe("E-8 env is the allowlist only (tokens and ATHENA_INBOX_ROOT scrubbed)") do
+      env = { "GH_TOKEN" => "x", "ATHENA_INBOX_ROOT" => "/y", "AWS_SECRET_ACCESS_KEY" => "z",
+              "SLACK_BOT_TOKEN" => "t", "PASSWORD" => "p" }
+      out, err, code = inside(dir("e8"), %(require "json"; puts JSON.generate(ENV.to_h)), env: env)
+      got = JSON.parse(out)
+      want = P::ENV_ALLOWLIST.merge(P::BWRAP_SET_ENV)
+      bad = got.keys.grep(/TOKEN|SECRET|KEY|PASS|AUTH/)
+      [code.zero? && got == want && bad.empty?, "exit #{code}, env #{got.inspect} #{err.strip[0, 200]}"]
+    rescue JSON::ParserError
+      [false, "exit #{code}, unparseable #{out[0, 200].inspect} #{err.strip[0, 200]}"]
+    end
+  end
+
+  # ---- E-9 read-only system -----------------------------------------------
+  def probe_e09_readonly
+    probe("E-9 /usr and /etc are read-only (EROFS)") do
+      name = "tool-sandbox-selftest-#{Process.pid}"
+      out, err, code = inside(dir("e9"), <<~RUBY, name)
+        ["/usr", "/etc"].each do |d|
+          File.write(File.join(d, ARGV[0]), "x")
+          puts "WROTE"
+        rescue StandardError => e
+          puts e.class.name
+        end
+      RUBY
+      lines = out.split("\n")
+      [code.zero? && lines == %w[Errno::EROFS Errno::EROFS] && !File.exist?("/usr/#{name}") && !File.exist?("/etc/#{name}"),
+       "exit #{code}, saw #{lines.inspect} #{err.strip[0, 200]}"]
+    end
+  end
+
+  # ---- E-10 only /work and /out persist -----------------------------------
+  def probe_e10_persistence
+    probe("E-10 /work and /out persist; /tmp and HOME do not reach the host") do
+      work = dir("e10w")
+      outd = dir("e10o")
+      name = "tool-sandbox-selftest-#{Process.pid}-e10"
+      File.write(File.join(work, "probe.rb"), <<~RUBY)
+        ["/work/f", "/out/f", "/home/sandbox/\#{ARGV[0]}", "/tmp/\#{ARGV[0]}"].each { |p| File.write(p, "x") }
+        puts "WROTE"
+      RUBY
+      out, err, code = cli("--work", work, "--out", outd, "--timeout", "30", "--", INSIDE_RUBY, "/work/probe.rb", name)
+      ok = code.zero? && out.include?("WROTE") && File.exist?(File.join(work, "f")) && File.exist?(File.join(outd, "f")) &&
+           !File.exist?(File.join("/tmp", name)) && !File.exist?(File.join(Dir.tmpdir, name)) &&
+           !File.exist?(File.join("/home/sandbox", name))
+      [ok, "exit #{code} #{out.strip.inspect} #{err.strip[0, 200]}"]
+    end
+  end
+
+  # ---- E-11 wall timeout --------------------------------------------------
+  def probe_e11_timeout
+    probe("E-11 the wall timeout stops `sleep 30` under --timeout 2 with exit 124 TIMEOUT") do
+      _, err, code = cli("--work", dir("e11"), "--timeout", "2", "--", "/usr/bin/sleep", "30")
+      [code == 124 && err.include?("TIMEOUT after 2s") && err.include?("Fix:"), "exit #{code}, stderr #{err.strip[0, 300]}"]
+    end
+  end
+
+  # ---- E-12 rlimits -------------------------------------------------------
+  def probe_e12_limits
+    probe("E-12 rlimits: cpu = --timeout, file size 1 GiB, open files 1024, core 0") do
+      out, err, code = inside(dir("e12"), %(puts File.read("/proc/self/limits")), timeout: 7)
+      row = lambda do |label|
+        line = out.lines.find { |l| l.start_with?(label) }
+        line&.split(/\s{2,}/)&.values_at(1, 2)
+      end
+      hard = H.hard_limits # under a nested run the policy narrows to these
+      want = ->(ours, key) { [[ours, hard[key]].compact.min.to_s] * 2 }
+      ok = code.zero? && row.call("Max cpu time") == want.call(7, :cpu) &&
+           row.call("Max file size") == want.call(P::FSIZE_BYTES, :fsize) &&
+           row.call("Max open files") == want.call(P::NOFILE, :nofile) && row.call("Max core file size") == %w[0 0]
+      [ok, "exit #{code}, limits #{out.lines.grep(/cpu time|file size|open files|core/).map(&:strip)} #{err.strip[0, 200]}"]
+    end
+  end
+
+  # ---- E-13 pid isolation -------------------------------------------------
+  def probe_e13_pids
+    probe("E-13 pid namespace: host pids invisible") do
+      host_ns = File.readlink("/proc/self/ns/pid")
+      out, err, code = inside(dir("e13"), <<~RUBY, Process.pid.to_s)
+        pids = Dir.children("/proc").grep(/\\A\\d+\\z/).map(&:to_i)
+        puts File.readlink("/proc/self/ns/pid")
+        puts Process.pid
+        puts pids.sort.join(",")
+        puts pids.include?(ARGV[0].to_i) && ARGV[0].to_i > 3 ? "HOSTPID" : "NOHOSTPID"
+      RUBY
+      ns, pid, pids, host = out.split("\n")
+      ok = code.zero? && !ns.to_s.empty? && ns != host_ns && pid.to_i.between?(1, 3) &&
+           pids.to_s.split(",").size <= 3 && host == "NOHOSTPID"
+      [ok, "exit #{code}, ns #{ns} vs host #{host_ns}, pid #{pid}, pids #{pids} #{err.strip[0, 200]}"]
+    end
+  end
+
+  # ---- E-14 nested --------------------------------------------------------
+  def probe_e14_nested
+    probe("E-14 tool-sandbox runs nested inside tool-sandbox") do
+      work = dir("e14")
+      NESTED_FILES.each do |rel|
+        FileUtils.mkdir_p(File.join(work, "ts", File.dirname(rel)))
+        FileUtils.cp(File.join(CHECKOUT, rel), File.join(work, "ts", rel))
+      end
+      # The inner run takes the default --timeout (1800), above the outer
+      # run's CPU hard limit (60): the inner limits must narrow, not fail.
+      script = "mkdir /tmp/n && exec #{INSIDE_RUBY} /work/ts/ai/bin/tool-sandbox --work /tmp/n " \
+               "-- /usr/bin/sh -c 'test ! -e /work/ts && grep \"Max cpu time\" /proc/self/limits && echo NESTED-OK'"
+      out, err, code = cli("--work", work, "--timeout", "60", "--", "/usr/bin/sh", "-c", script)
+      [code.zero? && out.include?("NESTED-OK") && out.match?(/Max cpu time\s+60\s+60/), "exit #{code} #{out.strip.inspect} #{err.strip[0, 300]}"]
+    end
+  end
+
+  # ---- E-15 exit pass-through ---------------------------------------------
+  def probe_e15_exit_passthrough
+    { "3" => 3, "1" => 1, "124" => 124 }.each do |arg, want|
+      probe("E-15 the child's exit #{arg} passes through#{arg == '1' ? " (not bwrap's own 1)" : ''}") do
+        _, err, code = cli("--work", dir("e15-#{arg}"), "--", "/usr/bin/sh", "-c", "exit #{arg}")
+        [code == want && !err.include?("Fix:"), "exit #{code}, stderr #{err.strip[0, 200]}"]
+      end
+    end
+    probe("E-15 a child killed by SIGKILL is 137") do
+      _, err, code = cli("--work", dir("e15-kill"), "--", "/usr/bin/sh", "-c", "kill -9 $$")
+      [code == 137 && !err.include?("TIMEOUT"), "exit #{code}, stderr #{err.strip[0, 200]}"]
+    end
+  end
+
+  # ---- E-16 setup failure is 125 ------------------------------------------
+  def probe_e16_setup_failure
+    probe("E-16 bwrap failing before the child starts is 125 with Fix:, not 1") do
+      work = dir("e16")
+      marker = File.join(work, "ran")
+      # The seam is in-process: a Policy argv whose origin bind source does not
+      # exist. No flag or env var of the CLI can build it.
+      argv = ToolSandboxCLI.policy_argv(work: work, origin: File.join(@scratch, "no-such-origin"), timeout: 30,
+                                        cmd: ["/usr/bin/touch", "/work/ran"])
+      code, err = capture_stderr { ToolSandboxCLI.launch(argv, 30) }
+      [code == 125 && err.include?("failed while setting the sandbox up") && err.include?("Fix:") &&
+        !File.exist?(marker),
+       "exit #{code}, stderr #{err.strip[0, 300]}"]
+    end
+    probe("E-16 a CMD that does not exist inside the sandbox is 125 with Fix:, not 1") do
+      _, err, code = cli("--work", dir("e16b"), "--", "/nonexistent/tool-sandbox-probe")
+      [code == 125 && err.include?("could not be executed") && err.include?("Fix:"), "exit #{code}, stderr #{err.strip[0, 300]}"]
+    end
+  end
+
+  def capture_stderr
+    r, w = IO.pipe
+    saved = $stderr
+    $stderr = w
+    code = begin
+      yield
+    rescue ToolSandboxCLI::Refusal => e
+      ToolSandboxCLI.fail_with(e)
+    ensure
+      $stderr = saved
+      w.close
+    end
+    [code, r.read]
+  ensure
+    r&.close
+  end
+
+  # ---- E-17 a refused path never runs CMD ---------------------------------
+  def probe_e17_refused_paths
+    real = dir("e17-real")
+    link = File.join(@scratch, "e17-link")
+    File.symlink(real, link)
+    wt = dir("e17-worktree")
+    File.write(File.join(wt, ".git"), "gitdir: /nonexistent/.git/worktrees/x\n")
+    sock = dir("e17-socket")
+    server = UNIXServer.new(File.join(sock, "s"))
+    hard = dir("e17-hardlink")
+    File.write(File.join(@scratch, "e17-host-file"), "host\n")
+    File.link(File.join(@scratch, "e17-host-file"), File.join(hard, "h"))
+    dest = dir("e17-dest")
+    Dir.mkdir(File.join(dest, "origin.git"))
+    locked = dir("e17-locked")
+    Dir.mkdir(File.join(locked, "w"))
+    File.chmod(0o000, locked)
+    marker = "tool-sandbox-selftest-#{Process.pid}-e17"
+    cases = {
+      "a symlink leaf" => [link, real, "symlink"], "a linked worktree" => [wt, wt, "linked worktree"],
+      "a dir holding a socket" => [sock, sock, "socket"], "the temp root itself" => [Dir.tmpdir, Dir.tmpdir, "temp root"],
+      "a dir holding a hardlinked file" => [hard, hard, "hardlink"],
+      "a --prepare-clone DEST (holds origin.git)" => [dest, dest, "origin.git mirror"],
+      "a path that cannot be inspected (EACCES)" => [File.join(locked, "w"), nil, "cannot be inspected"],
+      "outside the temp root (/usr)" => ["/usr", nil, "outside the temp root"]
+    }
+    cases.each do |what, (arg, target, reason)|
+      probe("E-17 --work #{what} is refused (125) and CMD never runs") do
+        _, err, code = cli("--work", arg, "--", "/usr/bin/touch", "/work/#{marker}")
+        ran = target && File.exist?(File.join(target, marker))
+        [code == 125 && err.include?(reason) && err.include?("Fix:") && !ran, "exit #{code}, stderr #{err.strip[0, 300]}"]
+      end
+    end
+  ensure
+    server&.close
+    File.chmod(0o700, locked) if locked
+  end
+
+  # ---- E-18 --help ---------------------------------------------------------
+  def probe_e18_help
+    probe("E-18 --help: stdout, exit 0, nothing written") do
+      cwd = dir("e18")
+      out, err, code = cli("--help", chdir: cwd)
+      [code.zero? && out.include?("Usage:") && err.empty? && Dir.empty?(cwd), "exit #{code}, stderr #{err[0, 200]}"]
+    end
+  end
+
+  # ---- E-19 unknown flag --------------------------------------------------
+  def probe_e19_unknown_flag
+    probe("E-19 an unknown flag is exit 2, named, with Fix:") do
+      _, err, code = cli("--nope")
+      [code == 2 && err.include?("--nope") && err.include?("Fix:"), "exit #{code}, stderr #{err.strip[0, 200]}"]
+    end
+    probe("E-19 --timeout out of range is exit 2") do
+      _, err, code = cli("--work", dir("e19"), "--timeout", "7201", "--", "/usr/bin/true")
+      [code == 2 && err.include?("1-7200"), "exit #{code}, stderr #{err.strip[0, 200]}"]
+    end
+  end
+
+  # ---- E-20 no inherited file descriptor reaches the child ----------------
+  def probe_e20_inherited_fds
+    probe("E-20 an fd the caller leaks does not reach the child") do
+      path = File.join(@scratch, "e20-secret-fd")
+      f = File.open(path, "w")
+      f.close_on_exec = false
+      out, err, code = inside(dir("e20"), <<~RUBY, f.fileno => f.fileno)
+        Dir.children("/proc/self/fd").each do |fd|
+          puts "\#{fd} \#{File.readlink("/proc/self/fd/" + fd)}"
+        rescue StandardError
+          nil
+        end
+      RUBY
+      f.close
+      # 0-2 are the caller's streams (stdin /dev/null). Every other fd must be
+      # the probe ruby's own: its eventfd/epoll and the /proc/<pid>/fd listing.
+      # A leaked pipe (the status fd) or file fails this.
+      fds = out.split("\n").map { |l| l.split(" ", 2) }.reject { |n, _| n.to_i < 3 }
+      own = fds.all? { |_, t| t.to_s.start_with?("anon_inode:") || t.to_s.match?(%r{\A/proc/\d+/fd\z}) }
+      [code.zero? && !out.include?("e20-secret-fd") && out.include?("0 /dev/null") && own,
+       "exit #{code}, fds #{out.split("\n").inspect} #{err.strip[0, 200]}"]
+    end
+  end
+
+  # ---- E-22 a signal to tool-sandbox stops the sandbox --------------------
+  def probe_e22_interrupted
+    probe("E-22 a TERM to tool-sandbox stops the sandbox: exit 143, named, nothing left running") do
+      work = dir("e22")
+      started = File.join(work, "started")
+      r, w = IO.pipe
+      # The child would write /work/finished after its sleep, well inside
+      # --timeout: if the TERM is not forwarded, the child finishes, the file
+      # appears and the exit is the child's 0. Neither is a timing threshold.
+      pid = Process.spawn(RbConfig.ruby, SELF, "--work", work, "--timeout", "60", "--", "/usr/bin/sh", "-c",
+                          "touch /work/started && /usr/bin/sleep 20 && touch /work/finished",
+                          err: w, out: File::NULL, in: File::NULL)
+      w.close
+      wait_for(10) { File.exist?(started) } # bounded condition poll, not a timing guess
+      Process.kill("TERM", pid)
+      code = Process.wait2(pid)[1].then { |st| st.exitstatus || (128 + st.termsig.to_i) }
+      err = r.read
+      r.close
+      gone = wait_for(5) { sandboxes_on(work).empty? }
+      [code == 143 && err.include?("interrupted by SIGTERM") && err.include?("Fix:") && gone &&
+        !File.exist?(File.join(work, "finished")),
+       "exit #{code}, sandbox processes left #{sandboxes_on(work).inspect}, stderr #{err.strip[0, 300]}"]
+    end
+  end
+
+  # Poll a condition every 50 ms for at most SECS; -> whether it came true.
+  def wait_for(secs)
+    (secs * 20).times do
+      return true if yield
+
+      sleep 0.05
+    end
+    yield
+  end
+
+  # Pids whose command line names WORK (the bwrap processes binding it).
+  def sandboxes_on(work)
+    Dir.children("/proc").grep(/\A\d+\z/).select do |p|
+      File.binread("/proc/#{p}/cmdline").split("\0").include?(work)
+    rescue SystemCallError
+      false
+    end
+  end
+
+  # ---- E-21 stdin is /dev/null --------------------------------------------
+  def probe_e21_stdin
+    probe("E-21 stdin is /dev/null (the caller's stdin does not reach the child)") do
+      out, err, code = inside(dir("e21"), %(puts File.readlink("/proc/self/fd/0"); puts STDIN.read.inspect),
+                              stdin_data: "SECRET-STDIN")
+      [code.zero? && out.split("\n") == ["/dev/null", '""'], "exit #{code}, saw #{out.inspect} #{err.strip[0, 200]}"]
+    end
+  end
+end
+
+exit(ToolSandboxCLI.main(ARGV)) if $PROGRAM_NAME == __FILE__

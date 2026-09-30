@@ -196,6 +196,11 @@ tools:
   # teardown-stack (DND-864) runs `docker compose down -v` or the repo's
   # teardown script: containers, networks and volumes (data) are destroyed.
   teardown-stack:          { class: destructive, reason: docker }
+  # tool-sandbox (DND-1426) executes a caller-supplied CMD (model-written code
+  # is its purpose) under bubblewrap. The sandbox narrows what CMD reaches, but
+  # CMD still writes its --work and --out dirs, and --prepare-clone writes a
+  # clone. Classed by worst-case capability, like test-slot: it runs a command.
+  tool-sandbox:            { class: destructive, reason: executes }
 
   # --- skill executables (DND-508), keyed by their path under ai/ ---
   # readOnly
