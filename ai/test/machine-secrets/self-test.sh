@@ -178,7 +178,28 @@ check "HL_INITIAL_WORKSPACE_TOKEN=${SYN_C}" -- --probe a
 expect "(a) landed allowlist unreadable -> allowlisted name is could-not-measure, exit 3" 3 "COULD NOT MEASURE  HL_INITIAL_WORKSPACE_TOKEN"
 check "HL_INITIAL_WORKSPACE_TOKEN=${SYN_C}" "SYN_API_KEY=${SYN_C}" -- --probe a
 expect "(a) unreadable allowlist + a real finding -> exit 1 (finding wins)" 1 "FAIL  SYN_API_KEY"
+check "HL_INITIAL_WORKSPACE_TOKEN=${SYN_C}" -- --probe a,c
+expect "(c) origin unreachable: the landed-registry line names the failed ls-remote" 3 \
+  "COULD NOT MEASURE  the landed registry could not be read.*git ls-remote origin refs/heads/main"
+expect "(a) origin unreachable: the unverified line names the failed ls-remote" 3 \
+  "COULD NOT MEASURE  HL_INITIAL_WORKSPACE_TOKEN.*git ls-remote origin refs/heads/main"
 restore_repo
+# A STALE local origin/main (origin moved since the last fetch; measured on the
+# laptop 2026-09-30) is a different cause with a different Fix: the Fix must
+# name the two SHAs and `git fetch origin`, never "make origin reachable".
+STALE_BASE="$(git -C "${REPO}" rev-parse refs/remotes/origin/main)"
+git clone -q "${ORIGIN}" "${TMP}/mover" >/dev/null 2>&1
+git -C "${TMP}/mover" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m "origin moves"
+git -C "${TMP}/mover" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+STALE_NEW="$(git -C "${TMP}/mover" rev-parse HEAD)"
+check "HL_INITIAL_WORKSPACE_TOKEN=${SYN_C}" -- --probe a,c
+expect "(c) stale local origin/main: the Fix names both SHAs and git fetch origin" 3 \
+  "COULD NOT MEASURE  the landed registry could not be read.*${STALE_BASE:0:12}.*${STALE_NEW:0:12}" "make origin reachable"
+expect "(c) stale local origin/main: its Fix is git fetch origin" 3 "Fix: git fetch origin, then re-run"
+expect "(a) stale local origin/main: the unverified Fix names the stale ref" 3 \
+  "COULD NOT MEASURE  HL_INITIAL_WORKSPACE_TOKEN.*${STALE_BASE:0:12}"
+git -C "${TMP}/mover" push -q -f origin "${STALE_BASE}:refs/heads/main" >/dev/null 2>&1
+rm -rf "${TMP}/mover"
 check "SYN_API_KEY=${SYN_C}" -- --probe a --brief
 expect "(a) --brief: one line per name with Fix" 1 "^secret-env-warn: SYN_API_KEY .*Fix: move SYN_API_KEY" "allowlist"
 check -- --probe a --brief
