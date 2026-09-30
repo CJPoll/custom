@@ -122,6 +122,10 @@ Keys in use (DND-704), with where each is used:
 | `slack` | `.channels` | `{name: channel id}` | `athena:slack` → *Reading the workspace* |
 | `slack` | `.channels.owner_dm` | DM channel id | `athena:epic-clustering` (the daily digest) |
 | `notion` | `.work.owner_person_id` | notion-work person id | `athena:ticket-management`, `athena:flaky-ticket` (after the roster) |
+| `notion` | `.work.tickets_data_source` | work Tickets data source id | `mark-in-progress`, `ai/bin/lead-time` (the work tracker's dispatch stamp, DND-1341; `ai/lib/dispatch_trackers.rb`) |
+| `notion` | `.work.ticket_prefix` | the work tickets' `ID` prefix (2-10 upper-case letters) | same |
+| `notion` | `.work.in_progress_property` | name of the work Tickets date property holding the dispatch stamp | same |
+| `notion` | `.work.first_dispatch_from` | array of status names a move to `In Progress` from which is a first dispatch | same |
 | `notion` | `.vip_person_ids` | array of notion-work person ids | declared as the VIP seed in `athena-events.md`; the server keeps its own copy in its config |
 
 The Athena bot's own Slack user and bot ids are not overlay keys: `athena:slack`

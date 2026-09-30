@@ -503,12 +503,13 @@ across sessions — it is not a one-shot queue drain.
   record or the send does.
 - **Lead-time feedback loop.** The same cron also drives fleet **lead time**
   (captain dispatch → fully deployed) down over time. `ai/bin/lead-time`
-  reads the start from the DND ticket's `In Progress at` date, which
-  `mark-in-progress` stamps at dispatch, and derives the end from git + the
-  forge's CI (GitHub `gh` / GitLab `glab`, auto-detected). A row with no stamp
-  reads could-not-measure. The stamp is DND-only, so a repo on another tracker
-  (walt_ui) measures only its `tail`. The design and the rejected markers are in
-  `ai/docs/lead-time-tracking.md`. Each
+  reads the start from the ticket's dispatch date, which `mark-in-progress`
+  stamps at dispatch, and derives the end from git + the forge's CI (GitHub
+  `gh` / GitLab `glab`, auto-detected). A DND ticket's date is `In Progress
+  at`; a work (walt_ui) ticket's tracker and property come from the private
+  overlay (DND-1341). A row with no stamp reads could-not-measure, and so does
+  a walt_ui row on a machine with no overlay. The design and the rejected
+  markers are in `ai/docs/lead-time-tracking.md`. Each
   run scans `--slow 90` outliers newer than a per-repo cursor
   (`lead-cursor.<repo>.txt`, never advanced on a `SCAN INCOMPLETE`),
   splits each into `code` (start→landing, a harness/process lever) and `tail`
@@ -525,6 +526,11 @@ across sessions — it is not a one-shot queue drain.
   "capturing nothing". Superseded by the owner's definition, lead time =
   captain dispatch → landed: a squash reset the commit start (PR #129 read
   21m 19s for a 46m 17s ticket).
+
+  **Later (2026-09-30, DND-1341):** "The stamp is DND-only, so a repo on
+  another tracker (walt_ui) measures only its `tail`." Superseded: the work
+  tracker carries the same stamp, its database and property read from the
+  private overlay, so the owner's metric covers walt_ui work.
 
 ## Epic-clustering cron (12h, DND-983)
 

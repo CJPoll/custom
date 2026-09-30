@@ -20,10 +20,13 @@ a Mission is unblocked and has a free slot (worktree already created via
    every dispatch*, below) before the spawn.
 1. **Move the Mission's Notion status to `In Progress`** and set its `Assignee`
    to **Athena** (the active connection's bot — see [[athena:ticket-management]]).
-   For a DND ticket, the status move is
-   `~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref DND-N`.
-   It also stamps `In Progress at`, the start `ai/bin/lead-time` measures from
+   For a DND ticket or a work-tracker (walt_ui) ticket, the status move is
+   `~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref <TICKET>`.
+   It also stamps the dispatch date, the start `ai/bin/lead-time` measures from
    ([[athena:ticket-management]] → *The transitions an orchestrator performs*).
+   A work ticket needs the private overlay; with none it exits 3 and writes
+   nothing, so make the move with the notion-work connector and say in the
+   state log that the ticket has no lead-time start.
 2. **Dispatch an athena-captain, named uniquely and Mission-qualified** (e.g.
    `athena-captain-DND-398`) — never the bare role name. Several run
    concurrently; `ListAgents` can't disambiguate identical bare names, and a

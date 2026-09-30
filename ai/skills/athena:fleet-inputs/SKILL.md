@@ -106,8 +106,8 @@ Follow the [[athena:ticket-management]] skill, which owns it. The `Assignee`
 always names whoever currently holds the Mission, so reconcile it on every
 status move: take scope → **Athena** (the active connection's bot, resolved via
 `get-self`, and `Backlog`→`Todo`); dispatch a captain → `In Progress` (still
-Athena; on a DND ticket via
-`~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref DND-N`,
+Athena; on a DND or work-tracker ticket via
+`~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref <TICKET>`,
 which stamps the lead-time start); any waiting-on-the-human status (`Needs Attention`, `Done`,
 work-workspace `Ready for Release`) → **Cody** (for `Needs Attention` also write
 the context Cody needs onto the Mission body); `Attention Given` stays Cody

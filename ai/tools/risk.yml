@@ -145,8 +145,8 @@ tools:
   # priority-next (DND-445) takes, releases and completes leases on the Athena
   # server's priority index: external state.
   priority-next:           { class: destructive, reason: lease }
-  # mark-in-progress (DND-1318) writes a DND ticket's Status and its
-  # "In Progress at" stamp in Notion: tracker state.
+  # mark-in-progress (DND-1318, DND-1341) writes a DND or work-tracker
+  # ticket's Status and its dispatch stamp in Notion: tracker state.
   skills/athena:ticket-management/scripts/mark-in-progress: { class: destructive, reason: tracker }
   # judgment-eval (DND-710) sends labelled cases to the Athena server, which
   # records judgment_calls and eval-run rows (and, with a key, spends TypeSafe

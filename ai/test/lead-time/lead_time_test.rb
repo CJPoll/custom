@@ -467,6 +467,139 @@ check("one lookup per ticket per run") do
   fake.calls.size == 1
 end
 
+# ---------------------------------------------------------------------------
+# DND-1341: a work-tracker ticket's start, through the private overlay's work
+# tracker. Every work value here is synthetic (prefix ZQ, a zero data source).
+# ---------------------------------------------------------------------------
+
+PR129 = pr129
+WORK_T = DispatchTrackers.work_from(
+  data_source: "0000aaaa-1111-2222-3333-444455556666", prefix: "ZQ", property: "Synthetic stamp",
+  first_dispatch_from: '["Todo","Backlog"]',
+).tracker
+
+# A work-tracker transport: ticket number -> its stamp (ISO or nil).
+class FakeWorkNotion
+  attr_reader :calls
+
+  def initialize(stamps)
+    @stamps = stamps
+    @calls = []
+  end
+
+  def call(method, path, body = nil)
+    @calls << [method, path, body]
+    n = body.dig("filter", "unique_id", "equals")
+    return { "results" => [] } unless @stamps.key?(n)
+
+    props = { "Synthetic stamp" => at_prop(@stamps[n]) }
+    { "results" => [{ "id" => "w-#{n}", "properties" => props }] }
+  end
+end
+
+def gh_pr(branch, title, base: PR129)
+  view = base.merge("headRefName" => branch, "title" => title)
+  gh = GitHubForge.new(".")
+  gh.define_singleton_method(:run_json) { |cmd, _d| cmd[1] == "run" ? [] : view }
+  gh
+end
+
+def starts_with(work_result, dnd: NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000Z"))))
+  asked = []
+  s = TicketStarts.new(dnd: dnd, work: lambda {
+    asked << 1
+    work_result
+  })
+  [s, asked]
+end
+
+ProbeFailures.reset!
+work_fake = FakeWorkNotion.new(2032 => "2026-09-30T02:00:00.000Z")
+ok_res = DispatchTrackers::Resolution.new(tracker: WORK_T, reason: nil, fault: false)
+ts, asked = starts_with([NotionStart.new(work_fake, tracker: WORK_T), ok_res])
+rw = analyze(gh_pr("athena/ZQ-2032-foo", "feat: x (ZQ-2032)"), 129, ts)
+check("a work ticket's start is its work-tracker stamp (DND-1341)") { rw[:start] == "2026-09-30T02:00:00Z" }
+check("its lead runs from that dispatch to the landing") do
+  rw[:lead_seconds] == Time.iso8601("2026-09-30T03:27:17Z") - Time.iso8601("2026-09-30T02:00:00Z")
+end
+check("the row names the overlay's property as its start source") { rw[:start_source] == "ZQ-2032 Synthetic stamp" }
+check("the start query goes to the overlay's work data source") do
+  m, path, body = work_fake.calls.first
+  m == :post && path == "/v1/data_sources/#{WORK_T.data_source}/query" && body.dig("filter", "unique_id", "equals") == 2032
+end
+check("a lower-case work branch still names the ticket") do
+  r = analyze(gh_pr("agent/zq-2032-move-floor", "t"), 129, ts)
+  r[:start_source] == "ZQ-2032 Synthetic stamp"
+end
+check("a work ticket that is not stamped is could-not-measure, naming the ticket and property") do
+  s2, = starts_with([NotionStart.new(FakeWorkNotion.new(7 => nil), tracker: WORK_T), ok_res])
+  r = analyze(gh_pr("athena/ZQ-7-x", "t"), 129, s2)
+  r[:lead_seconds].nil? && r[:unmeasured_reason].include?("ZQ-7") && r[:unmeasured_reason].include?("Synthetic stamp")
+end
+check("the overlay is resolved once per run, not per row") { asked.size == 1 }
+check("no probe failed on readable fixtures") { !ProbeFailures.any? }
+
+dnd_only, asked_dnd = starts_with(nil)
+rd2 = analyze(gh129, 129, dnd_only)
+check("a DND-only request never reads the overlay") { asked_dnd.empty? && rd2[:start] == "2026-09-30T02:41:00Z" }
+check("nor does a request that names no ticket at all") do
+  s3, a3 = starts_with(nil)
+  analyze(gh_pr("harness-gate-jobs", "harness-gate: --jobs N"), 129, s3)
+  a3.empty?
+end
+check("a ticket-shaped word that is neither tracker's does not displace the DND ticket") do
+  s4, = starts_with([NotionStart.new(work_fake, tracker: WORK_T), ok_res])
+  analyze(gh_pr("shipwright/admiral-500-stage1", "DND-1203: x"), 129, s4)[:start] == "2026-09-30T02:41:00Z"
+end
+check("a branch naming a DND and a work ticket is not a guess") do
+  s5, = starts_with([NotionStart.new(work_fake, tracker: WORK_T), ok_res])
+  r = analyze(gh_pr("dnd-1203-zq-2032", "t"), 129, s5)
+  r[:lead_seconds].nil? && r[:unmeasured_reason].include?("several")
+end
+
+ProbeFailures.reset!
+absent_res = DispatchTrackers::Resolution.new(
+  tracker: nil, fault: false,
+  reason: "private-overlay: ABSENT: key=notion.work.tickets_data_source probed=/nowhere. Fix: unavailable here",
+)
+s6, = starts_with([nil, absent_res])
+ra = analyze(gh_pr("athena/ZQ-2032-foo", "t"), 129, s6)
+check("with no overlay a work ticket is could-not-measure, carrying the overlay's line") do
+  ra[:lead_seconds].nil? && ra[:unmeasured_reason].include?("work tracker is unavailable") &&
+    ra[:unmeasured_reason].include?("ABSENT") && ra[:unmeasured_reason].include?("ZQ-2032")
+end
+check("an absent overlay is this machine's state, not a failed probe") { !ProbeFailures.any? }
+
+ProbeFailures.reset!
+fault_res = DispatchTrackers::Resolution.new(
+  tracker: nil, fault: true,
+  reason: "private-overlay: KEY_NOT_FOUND: key=notion.work.ticket_prefix root=/r. Fix: add it",
+)
+s7, = starts_with([nil, fault_res])
+analyze(gh_pr("athena/ZQ-2032-foo", "t"), 129, s7)
+analyze(gh_pr("athena/ZQ-2033-bar", "t"), 129, s7)
+check("a present overlay missing a key is a failed probe (SCAN INCOMPLETE), recorded once") do
+  ProbeFailures.list.count { |f| f[:cmd] == "private-overlay work tracker" } == 1 &&
+    ProbeFailures.list.first[:detail].include?(".work.ticket_prefix")
+end
+
+ProbeFailures.reset!
+s7b, = starts_with([nil, fault_res])
+rn = analyze(gh_pr("fix-utf-8-decoding", "t"), 129, s7b)
+check("a noise word with a broken overlay is a failed probe, and the row says why (never a silent no-ticket)") do
+  ProbeFailures.list.any? { |f| f[:cmd] == "private-overlay work tracker" } &&
+    rn[:unmeasured_reason].include?("work tracker is unavailable")
+end
+
+ProbeFailures.reset!
+nowork_token = NotionStart.new(nil, tracker: WORK_T, missing_reason: "no Notion token for the work tracker at /x/notion-api-token")
+s8, = starts_with([nowork_token, ok_res])
+analyze(gh_pr("athena/ZQ-2032-foo", "t"), 129, s8)
+check("no work token is a failed probe naming the work tracker") do
+  ProbeFailures.list.any? { |f| f[:cmd].include?("the work tracker") && f[:detail].include?("notion-api-token") }
+end
+ProbeFailures.reset!
+
 if $failures.empty?
   puts "lead_time_test: PASS (#{$checks} checks)"
   exit 0

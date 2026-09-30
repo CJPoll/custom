@@ -437,7 +437,7 @@ Alongside mining reports, each run drives down how long fleet work takes to ship
 safety check up; never weaken it* below, carried verbatim). It outranks any speedup.
 
 **The signal.** `ai/bin/lead-time` gives every ticket's lead time = captain
-dispatch (the ticket's `In Progress at` stamp) → fully deployed (git + the
+dispatch (the ticket's dispatch stamp) → fully deployed (git + the
 forge's CI); it splits into two phases with different levers:
 
 - `code` (start → landing) — development + review. Lever: the **harness/process**
@@ -459,9 +459,11 @@ scanned close (`closed_at`) only once its scan is handled and **never on a `SCAN
 INCOMPLETE`**, so a repo whose probe failed keeps its window instead of having
 it eaten by a sibling's success. Missing on first run → a bounded 48h window.
 A row with `unmeasured_reason` could not be measured: report it as unmeasured,
-never as fast or as an outlier. The start is the DND `In Progress at` stamp, so
-walt_ui (another tracker) and tickets dispatched before the stamp read
-unmeasured by design: count their missing starts per repo, not as findings.
+never as fast or as an outlier. The start is the ticket's dispatch stamp (DND
+`In Progress at`, or the work tracker's property from the private overlay), so
+tickets dispatched before the stamp, and walt_ui rows on a machine with no
+overlay, read unmeasured by design: count their missing starts per repo, not
+as findings.
 Their `tail_seconds` is still measured, so they still count toward a `tail`
 outlier or a stage dominating the `tail`, which is walt_ui's lever.
 

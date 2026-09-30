@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
-# Deterministic suite for scripts/mark-in-progress (DND-1318): the pure plan,
-# and the manager behind a fake Notion transport. No network, no token.
+# Deterministic suite for scripts/mark-in-progress (DND-1318; the work
+# tracker, DND-1341): the pure plan, and the manager behind a fake Notion
+# transport and a fake work-tracker resolution. No network, no token, no
+# overlay read; work values are synthetic.
 # Run by ./self-test.sh, which harness-gate discovers.
 
 require "stringio"
@@ -47,10 +49,24 @@ end
 
 NOW = Time.utc(2026, 9, 30, 5, 32, 0)
 
-def run(argv, notion)
+# The work tracker as the private overlay would give it: synthetic values only.
+WORK = DispatchTrackers.work_from(
+  data_source: "0000aaaa-1111-2222-3333-444455556666", prefix: "ZQ", property: "Synthetic stamp",
+  first_dispatch_from: '["Todo","Backlog","Shaping"]',
+)
+ABSENT = DispatchTrackers::Resolution.new(
+  tracker: nil, fault: false,
+  reason: "private-overlay: ABSENT: key=notion.work.tickets_data_source probed=/nowhere. Fix: overlay unavailable here",
+)
+$used_trackers = []
+
+def run(argv, notion, work: WORK)
   out = StringIO.new
   err = StringIO.new
-  code = MarkInProgress.run(argv, transport: notion, now: NOW, out: out, err: err)
+  asked = false
+  code = MarkInProgress.run(argv, transport_for: ->(t) { $used_trackers << t; notion }, now: NOW,
+                                  work: -> { asked = true; work }, out: out, err: err)
+  $work_asked = asked
   [code, out.string, err.string]
 end
 
@@ -138,8 +154,88 @@ check("a database without the property exits 3 with Fix:") { code == 3 && err.in
 down = FakeNotion.new(page(nil), "HTTP 502 on POST /v1/data_sources/x/query")
 code, _o, err = run(["--ref", "DND-1318"], down)
 check("an unreachable Notion exits 3 with Fix:") { code == 3 && err.include?("Fix:") }
-code, _o, err = run(["--ref", "ZQ-12"], FakeNotion.new(page(nil)))
-check("a ticket outside DND is a usage error") { code == 2 && err.include?("Fix:") }
+code, _o, err = run(["--ref", "XY-12"], FakeNotion.new(page(nil)))
+check("a ticket in no known tracker is a usage error naming both prefixes") do
+  code == 2 && err.include?("Fix:") && err.include?("DND") && err.include?("ZQ")
+end
+$used_trackers.clear
+run(["--ref", "DND-1318", "--dry-run"], FakeNotion.new(page(nil)))
+check("a DND ticket never reads the overlay") { !$work_asked }
+check("a DND ticket uses the DND tracker's transport (notion-personal)") do
+  $used_trackers == [DispatchTrackers::DND]
+end
+
+# --- DND-1341: a work ticket, through the overlay's work tracker.
+def work_page(stamp, status: "Todo", with_property: true)
+  props = { "Status" => { "status" => { "name" => status } } }
+  props["Synthetic stamp"] = { "type" => "date", "date" => stamp && { "start" => stamp } } if with_property
+  { "id" => "pzq12", "properties" => props }
+end
+$used_trackers.clear
+wfresh = FakeNotion.new(work_page(nil))
+code, out, = run(["--ref", "ZQ-12"], wfresh)
+check("a work ticket exits 0") { code == 0 }
+check("it queries the overlay's work data source by the ticket number") do
+  m, path, body = wfresh.calls.first
+  m == :post && path == "/v1/data_sources/0000aaaa-1111-2222-3333-444455556666/query" &&
+    body.dig("filter", "unique_id", "equals") == 12
+end
+check("one PATCH sets the status and the overlay's stamp property together") do
+  wfresh.patches.size == 1 &&
+    wfresh.patches.first[2]["properties"] == {
+      "Status" => { "status" => { "name" => "In Progress" } },
+      "Synthetic stamp" => { "date" => { "start" => "2026-09-30T05:32:00Z" } },
+    }
+end
+check("it never writes the DND property on a work ticket") do
+  !wfresh.patches.first[2]["properties"].key?("In Progress at")
+end
+check("it names the overlay's property in its output") { out.include?("Synthetic stamp") && out.include?("stamped") }
+check("it uses the work tracker's transport (notion-work token)") do
+  $used_trackers.map(&:prefix) == ["ZQ"] && $used_trackers.first.token_file.end_with?("notion-api-token")
+end
+wshape = FakeNotion.new(work_page(nil, status: "Shaping"))
+run(["--ref", "ZQ-12"], wshape)
+check("a move from an overlay first-dispatch status stamps") do
+  wshape.patches.first[2]["properties"].key?("Synthetic stamp")
+end
+wpark = FakeNotion.new(work_page(nil, status: "Parked"))
+_c, _o, err = run(["--ref", "ZQ-12"], wpark)
+check("a move from any other status does not stamp, and says so") do
+  wpark.patches.first[2]["properties"].keys == ["Status"] && err.include?("--backfill")
+end
+wkept = FakeNotion.new(work_page("2026-09-29T01:00:00.000Z"))
+run(["--ref", "ZQ-12"], wkept)
+check("a work re-dispatch keeps its first stamp") { wkept.patches.first[2]["properties"].keys == ["Status"] }
+wnoprop = FakeNotion.new(work_page(nil, with_property: false))
+code, _o, err = run(["--ref", "ZQ-12"], wnoprop)
+check("a work tracker without the stamp property exits 3 naming it, with Fix:") do
+  code == 3 && err.include?("Synthetic stamp") && err.include?("the work tracker") && err.include?("Fix:") &&
+    wnoprop.patches.empty?
+end
+wnone = FakeNotion.new(nil)
+code, _o, err = run(["--ref", "ZQ-99"], wnone)
+check("a work ticket that is not there exits 3") { code == 3 && err.include?("no ZQ-99 in the work tracker") }
+untouched = FakeNotion.new(work_page(nil))
+code, _o, err = run(["--ref", "ZQ-12"], untouched, work: ABSENT)
+check("with no overlay a work ticket is refused with exit 3, carrying the resolver's line") do
+  code == 3 && err.include?("ABSENT") && err.include?("Fix:") && untouched.calls.empty?
+end
+fault = DispatchTrackers::Resolution.new(tracker: nil, fault: true,
+                                         reason: "private-overlay: KEY_NOT_FOUND: key=notion.work.ticket_prefix. Fix: add it")
+code, _o, err = run(["--ref", "ZQ-12"], FakeNotion.new(work_page(nil)), work: fault)
+check("a missing overlay key is refused with exit 3, naming the key") do
+  code == 3 && err.include?(".work.ticket_prefix")
+end
+check("a missing token is exit 3 naming the token file, never a write") do
+  o = StringIO.new
+  e = StringIO.new
+  bad_file = lambda do |t|
+    MarkInProgress.transport_for_token_file(t.dup.tap { |x| x.token_file = "/nonexistent/token" })
+  end
+  c = MarkInProgress.run(["--ref", "ZQ-12"], now: NOW, work: -> { WORK }, out: o, err: e, transport_for: bad_file)
+  c == 3 && e.string.include?("/nonexistent/token") && e.string.include?("Fix:")
+end
 code, _o, err = run([], FakeNotion.new(page(nil)))
 check("no --ref is a usage error") { code == 2 && err.include?("Fix:") }
 code, _o, err = run(["--ref", "DND-1", "--bogus"], FakeNotion.new(page(nil)))

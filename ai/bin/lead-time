@@ -20,11 +20,14 @@
 #
 # Markers:
 #   START = captain dispatch: the ticket's first move to In Progress (owner
-#           decision, Cody, 2026-09-30), read from the DND Tickets date
-#           "In Progress at" that scripts/mark-in-progress stamps. The ticket
-#           is named by the PR's branch, else its title. No stamp, no ticket,
-#           or a non-DND ticket -> "could not measure" with the reason; never
-#           a fallback to a commit date (reported apart, as first_commit).
+#           decision, Cody, 2026-09-30), read from the date that
+#           scripts/mark-in-progress stamps: DND Tickets' "In Progress at" for
+#           a DND ticket, or for a work ticket the work tracker's property
+#           named in the private overlay (DND-1341; ai/lib/dispatch_trackers.rb).
+#           The ticket is named by the PR's branch, else its title. No stamp,
+#           no ticket, a ticket in neither tracker, or no overlay on this
+#           machine -> "could not measure" with the reason; never a fallback
+#           to a commit date (reported apart, as first_commit).
 #   END   = 3-tier, matching Cody's definition exactly:
 #           (1) DEPLOY completed  -> the deploy step's completion time
 #                 github: completion of the deploy workflow run for the merge sha
@@ -52,6 +55,8 @@ require "json"
 require "open3"
 require "uri"
 require_relative "../lib/next_mission_notion"
+require_relative "../lib/dispatch_trackers"
+require_relative "../lib/dispatch_trackers_overlay"
 
 # Which workflow/stage counts as "the deploy" (overridable, not hardcoded to a
 # repo). GitHub: workflow name matches this regex. GitLab: job stage equals the
@@ -243,21 +248,24 @@ module LeadTime
   # A ticket reference: 2-10 letters, a hyphen, a number (DND-1318, dnd-1318).
   TICKET_REF_RE = /(?<![A-Za-z0-9])([A-Za-z]{2,10})-(\d{1,7})(?![0-9])/.freeze
 
-  # Which ticket a request works: the `prefix` ticket its branch names, else
-  # the one its title names. -> ["DND-1318", nil] or [nil, reason]. Only the
-  # prefix counts as a ticket: ordinary words shaped like one (resync-404,
-  # utf-8, ruby-34) are not. Two different tickets in one place are not a
-  # guess. With no prefix ticket anywhere, the reason names any other-tracker
-  # ref it saw, and it is never a silent fallback to some other start.
-  def ticket_ref(branch:, title:, prefix: "DND")
+  # Which ticket a request works: the ticket its branch names, else the one
+  # its title names, counting only `prefixes` (the trackers that record a
+  # start: DND, and the work tracker's prefix when the overlay gives it,
+  # DND-1341). -> ["DND-1318", nil] or [nil, reason]. Ordinary words shaped
+  # like a ticket (resync-404, utf-8, ruby-34) are not one. Two different
+  # tickets in one place are not a guess. With no such ticket anywhere, the
+  # reason names any other ref it saw, and it is never a silent fallback to
+  # some other start.
+  def ticket_ref(branch:, title:, prefixes: ["DND"])
+    names = prefixes.join(" or ")
     places = [["branch", branch], ["title", title]]
     places.each do |where, text|
-      refs = refs_in(text).select { |r| r.start_with?("#{prefix}-") }
+      refs = refs_in(text).select { |r| prefixes.include?(r.split("-", 2).first) }
       return [refs.first, nil] if refs.size == 1
-      return [nil, "its #{where} names several #{prefix} tickets (#{refs.join(', ')})"] if refs.size > 1
+      return [nil, "its #{where} names several #{names} tickets (#{refs.join(', ')})"] if refs.size > 1
     end
     others = places.flat_map { |_w, t| refs_in(t) }.uniq
-    return [nil, "it names no #{prefix} ticket (only #{others.join(', ')})"] unless others.empty?
+    return [nil, "it names no #{names} ticket (only #{others.join(', ')})"] unless others.empty?
 
     [nil, "neither its branch nor its title names a ticket, so no In Progress time can be read"]
   end
@@ -637,29 +645,40 @@ class GitLabForge
   end
 end
 
-# ---- the START: a ticket's move to In Progress (DND-1318) ------------------
+# ---- the START: a ticket's move to In Progress (DND-1318, DND-1341) --------
 #
 # Owner decision (Cody, 2026-09-30): lead time = captain dispatch, the ticket's
 # move to In Progress, -> landed on main. The Notion API keeps no history of a
-# property, so the move is recorded as it happens: the DND Tickets date
-# property PROPERTY, stamped once, at the first move to In Progress, by
+# property, so the move is recorded as it happens: a date property, stamped
+# once, at the first move to In Progress, by
 # ai/skills/athena:ticket-management/scripts/mark-in-progress. This reads it.
+# Which database and property hold it is the ticket's tracker
+# (ai/lib/dispatch_trackers.rb): DND Tickets for a DND ticket, the work
+# tracker (its values from the private overlay) for a work ticket.
 #
 # lookup(ref) -> [iso, nil] or [nil, reason]. A ticket that is not in the
 # database, has no stamp, or cannot be named is a per-row reason. A read that
 # cannot run (no token, an HTTP failure) is a failed probe, so the run ends
 # SCAN INCOMPLETE: "could not look" never reads as "has no start".
 class NotionStart
-  PROPERTY = "In Progress at"
+  PROPERTY = DispatchTrackers::DND.property
 
-  def initialize(transport, missing_reason: nil)
+  attr_reader :tracker
+
+  def initialize(transport, missing_reason: nil, tracker: DispatchTrackers::DND)
     @transport = transport
     @missing_reason = missing_reason
+    @tracker = tracker
     @cache = {}
   end
 
   def source(ref)
-    "#{ref} #{PROPERTY}"
+    "#{ref} #{@tracker.property}"
+  end
+
+  # Which ticket a request works, among this tracker's tickets only.
+  def ref_for(branch:, title:)
+    LeadTime.ticket_ref(branch: branch, title: title, prefixes: [@tracker.prefix])
   end
 
   def lookup(ref)
@@ -670,63 +689,134 @@ class NotionStart
 
   def read(ref)
     prefix, number = ref.split("-", 2)
-    unless prefix == NextMissionNotion::TICKET_PREFIX
-      return [nil, "#{ref} is not a #{NextMissionNotion::TICKET_PREFIX} ticket; " \
-                   "only DND Tickets records '#{PROPERTY}'"]
+    unless prefix == @tracker.prefix
+      return [nil, "#{ref} is not a #{@tracker.prefix} ticket; " \
+                   "only #{@tracker.label} records '#{@tracker.property}' here"]
     end
     unless @transport
-      ProbeFailures.record("notion DND Tickets query #{ref}", @missing_reason)
+      ProbeFailures.record("notion #{@tracker.label} query #{ref}", @missing_reason)
       return [nil, "#{ref}: Notion could not be read (see SCAN INCOMPLETE)"]
     end
 
     page = query(Integer(number, 10))
-    return [nil, "there is no #{ref} in DND Tickets"] unless page
+    return [nil, "there is no #{ref} in #{@tracker.label}"] unless page
 
     stamp(ref, page)
   rescue NextMissionNotion::ReadError => e
-    ProbeFailures.record("notion DND Tickets query #{ref}", e.message)
+    ProbeFailures.record("notion #{@tracker.label} query #{ref}", e.message)
     [nil, "#{ref}: Notion could not be read (see SCAN INCOMPLETE)"]
   end
 
   def query(number)
     body = { "filter" => { "property" => "ID", "unique_id" => { "equals" => number } }, "page_size" => 2 }
-    res = @transport.call(:post, "/v1/data_sources/#{NextMissionNotion::TICKETS_DATA_SOURCE}/query", body)
+    res = @transport.call(:post, "/v1/data_sources/#{@tracker.data_source}/query", body)
     (res["results"] || []).first
   end
 
   def stamp(ref, page)
+    prop = @tracker.property
+    label = @tracker.label
     props = page["properties"] || {}
-    return [nil, "DND Tickets has no '#{PROPERTY}' property"] unless props.key?(PROPERTY)
-    unless props.dig(PROPERTY, "type") == "date"
-      return [nil, "DND Tickets' '#{PROPERTY}' is a #{props.dig(PROPERTY, 'type').inspect} property, not a date"]
+    return [nil, "#{label} has no '#{prop}' property"] unless props.key?(prop)
+    unless props.dig(prop, "type") == "date"
+      return [nil, "the '#{prop}' property in #{label} is a #{props.dig(prop, 'type').inspect} property, not a date"]
     end
 
-    start = props.dig(PROPERTY, "date", "start")
+    start = props.dig(prop, "date", "start")
     unless start
-      return [nil, "#{ref} has no '#{PROPERTY}' date (dispatched before the stamp existed, " \
+      return [nil, "#{ref} has no '#{prop}' date (dispatched before the stamp existed, " \
                    "or moved to In Progress without mark-in-progress)"]
     end
-    return [nil, "#{ref}'s '#{PROPERTY}' is a date with no time (#{start})"] unless start.include?("T")
+    return [nil, "#{ref}'s '#{prop}' is a date with no time (#{start})"] unless start.include?("T")
     unless start.match?(LeadTime::ZONED_RE)
-      return [nil, "#{ref}'s '#{PROPERTY}' has no UTC offset (#{start}); it cannot be placed in time"]
+      return [nil, "#{ref}'s '#{prop}' has no UTC offset (#{start}); it cannot be placed in time"]
     end
 
     [Time.iso8601(start).utc.iso8601, nil]
   rescue ArgumentError
-    [nil, "#{ref}'s '#{PROPERTY}' is not a time (#{start})"]
+    [nil, "#{ref}'s '#{prop}' is not a time (#{start})"]
   end
 end
 
-NOTION_TOKEN_FILE = File.join(Dir.home, ".claude", "notion-personal-token")
+# The START across both trackers (DND-1341). dnd: a NotionStart over DND
+# Tickets. work: -> [NotionStart or nil, DispatchTrackers::Resolution], called
+# at most once, and only for a request that names a ticket-shaped ref other
+# than a DND one (a work ticket, or a word like utf-8), so a request naming only
+# DND tickets, or nothing ticket-shaped, never reads the overlay.
+#
+# A request naming no DND ticket while the work tracker cannot be resolved
+# says why in its row, carrying the overlay's line. An ABSENT overlay is that
+# machine's state (the work tracker is unavailable there), so it is a per-row
+# reason only; a PRESENT overlay that cannot give the tracker (a missing key,
+# a malformed value) is also a failed probe, so the scan ends SCAN INCOMPLETE.
+class TicketStarts
+  def initialize(dnd:, work:)
+    @dnd = dnd
+    @work_source = work
+    @work = nil
+    @fault_recorded = false
+  end
 
-# The real start source: Notion over the notion-personal token. A missing or
+  def ref_for(branch:, title:)
+    others = (LeadTime.refs_in(branch) + LeadTime.refs_in(title)).reject { |r| r.start_with?("#{@dnd.tracker.prefix}-") }
+    return @dnd.ref_for(branch: branch, title: title) if others.empty?
+
+    work_start, res = work
+    if work_start
+      return LeadTime.ticket_ref(branch: branch, title: title,
+                                 prefixes: [@dnd.tracker.prefix, work_start.tracker.prefix])
+    end
+
+    ref, why = @dnd.ref_for(branch: branch, title: title)
+    return [ref, why] if ref
+
+    if res.fault && !@fault_recorded
+      ProbeFailures.record("private-overlay work tracker", res.reason)
+      @fault_recorded = true
+    end
+    [nil, "#{why}; the work tracker is unavailable: #{res.reason}"]
+  end
+
+  def lookup(ref)
+    source_for(ref).lookup(ref)
+  end
+
+  def source(ref)
+    source_for(ref).source(ref)
+  end
+
+  private
+
+  def work
+    @work ||= @work_source.call
+  end
+
+  def source_for(ref)
+    work_start, = ref.start_with?("#{@dnd.tracker.prefix}-") ? nil : work
+    work_start && ref.start_with?("#{work_start.tracker.prefix}-") ? work_start : @dnd
+  end
+end
+
+# A NotionStart over a tracker, reading its token in-process. A missing or
 # empty token is carried as the reason every lookup's probe failure names.
-def notion_start
-  token = File.exist?(NOTION_TOKEN_FILE) ? File.read(NOTION_TOKEN_FILE).strip : ""
-  return NotionStart.new(NextMissionNotion::HttpTransport.new(token)) unless token.empty?
+def notion_start_for(tracker)
+  file = tracker.token_file
+  token = File.exist?(file) ? File.read(file).strip : ""
+  return NotionStart.new(NextMissionNotion::HttpTransport.new(token), tracker: tracker) unless token.empty?
 
-  NotionStart.new(nil, missing_reason: "no notion-personal token at #{NOTION_TOKEN_FILE}. " \
-                                       "Fix: place the notion-personal integration token there (owner-gated).")
+  NotionStart.new(nil, tracker: tracker,
+                       missing_reason: "no Notion token for #{tracker.label} at #{file}. " \
+                                       "Fix: place that integration token there (owner-gated).")
+end
+
+# The real start source: DND Tickets, plus the work tracker read from the
+# private overlay when a request names a non-DND ticket.
+def notion_start
+  work = lambda do
+    res = DispatchTrackers::Overlay.work
+    [res.tracker && notion_start_for(res.tracker), res]
+  end
+  TicketStarts.new(dnd: notion_start_for(DispatchTrackers::DND), work: work)
 end
 
 def forge_for(dir)
@@ -744,8 +834,7 @@ def analyze(forge, id, starts)
 
   start_at = start_why = source = nil
   unless f[:closed]
-    ref, start_why = LeadTime.ticket_ref(branch: f[:branch], title: f[:title],
-                                         prefix: NextMissionNotion::TICKET_PREFIX)
+    ref, start_why = starts.ref_for(branch: f[:branch], title: f[:title])
     if ref
       start_at, start_why = starts.lookup(ref)
       source = starts.source(ref)
@@ -1113,8 +1202,10 @@ def main(argv)
          "`glab auth status`; a cron or other headless session often has no token " \
          "even though an interactive one does). For a \"window saturated\" probe, " \
          "re-run with a later --since and scan the window in slices. For a " \
-         "\"notion\" probe, check the notion-personal token at #{NOTION_TOKEN_FILE} " \
-         "and Notion's status, then re-run. Until it " \
+         "\"notion\" probe, check the token that probe names (DND Tickets: " \
+         "#{DispatchTrackers::DND.token_file}; the work tracker: #{DispatchTrackers::WORK_TOKEN_FILE}) " \
+         "and Notion's status, then re-run. For a \"private-overlay\" probe, correct the key it " \
+         "names in the private overlay. Until it " \
          "re-runs clean, report the scan as UNAVAILABLE, not as zero outliers."
     return 3
   end
@@ -1138,12 +1229,14 @@ if $PROGRAM_NAME == __FILE__
       Usage:
         ai/bin/lead-time --repo PATH (--pr N | --mr N | --since WHEN) [OPTIONS]
 
-      Derive each ticket's lead time: captain dispatch (the DND ticket's
-      "In Progress at" date, stamped by mark-in-progress) -> fully deployed
-      (git plus the forge's CI). It splits into `code` (start->landing, a
-      harness/process lever) and `tail` (landing->deploy, a pipeline-efficiency
-      lever). A row whose start or landing cannot be read says "could not
-      measure" and why. Reads the notion-personal token for the start.
+      Derive each ticket's lead time: captain dispatch (the ticket's dispatch
+      date, stamped by mark-in-progress: DND Tickets' "In Progress at", or for
+      a work ticket the work tracker's property named in the private overlay)
+      -> fully deployed (git plus the forge's CI). It splits into `code`
+      (start->landing, a harness/process lever) and `tail` (landing->deploy, a
+      pipeline-efficiency lever). A row whose start or landing cannot be read
+      says "could not measure" and why. Reads the notion-personal token for a
+      DND start and the notion-work token for a work start.
 
       Options:
         --repo PATH    git checkout to scan (e.g. ~/dev/custom, ~/dev/gen_saas)

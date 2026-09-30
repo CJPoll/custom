@@ -38,7 +38,7 @@ job stage).
 
 | | Marker | Where it lives |
 |---|---|---|
-| **START** | the ticket's first move to `In Progress` (captain dispatch) | the DND Tickets date property `In Progress at`, stamped by `mark-in-progress` |
+| **START** | the ticket's first move to `In Progress` (captain dispatch) | a date property on the ticket, stamped by `mark-in-progress`: DND Tickets' `In Progress at`, or the work tracker's property named in the private overlay |
 | **END** | first of the 3 tiers below that exists | GitHub Actions runs / GitLab pipeline jobs / landing time (the merge, or the push that carried it) |
 
 ### The END rule — one 3-tier rule, forge-independent
@@ -125,18 +125,35 @@ START is when the ticket first moved to `In Progress`, which is when its captain
 was dispatched. The Notion API keeps no history of a property, so the move is
 recorded as it happens:
 
-- **The stamp.** DND Tickets has a date property, `In Progress at`.
-  `ai/skills/athena:ticket-management/scripts/mark-in-progress --ref DND-N`
-  sets `Status` to `In Progress` and, only when the date is empty, stamps it,
-  in one write. A re-dispatched ticket keeps its **first** stamp.
+- **The trackers.** Two trackers carry the stamp (`ai/lib/dispatch_trackers.rb`):
+  - **DND Tickets** (notion-personal): the date property `In Progress at`.
+    First dispatch is a move from `Todo` or `Backlog`.
+  - **The work tracker** (notion-work; walt_ui's tickets, DND-1341). Its data
+    source, ticket prefix, stamp property and first-dispatch statuses are work
+    values, so they live in the private overlay, `overlay/notion.json`
+    `.work.tickets_data_source`, `.work.ticket_prefix`,
+    `.work.in_progress_property` and `.work.first_dispatch_from`
+    (`ai/contracts/athena-private-overlay.md` → *Keys in use*).
+- **The stamp.** `ai/skills/athena:ticket-management/scripts/mark-in-progress
+  --ref <TICKET>` picks the tracker from the ticket's prefix, sets `Status` to
+  `In Progress` and, only when the date is empty and the move is a first
+  dispatch, stamps it, in one write. A re-dispatched ticket keeps its
+  **first** stamp. A work ticket on a machine with no overlay, or with a key
+  missing, is refused (exit 3) with the resolver's line; nothing is guessed.
 - **The read.** `lead-time` names the ticket from the PR's branch, else its
-  title (`DND-1318`, `dnd-1318-…`), and reads that date. Each row carries
-  `start_source` (`DND-1318 In Progress at`). The earliest commit is still
-  reported, as `first_commit`, and is **never** used as the start.
+  title (`DND-1318`, `dnd-1318-…`, or a work ticket), and reads that tracker's
+  date. Each row carries `start_source` (`DND-1318 In Progress at`, or the work
+  ticket and its property). The overlay is read only when a request names a
+  ticket-shaped ref other than a DND one (a work ticket, or a word such as
+  `utf-8`); a request naming only DND tickets never touches it. The earliest commit is
+  still reported, as `first_commit`, and is **never** used as the start.
 - **Could not measure.** The row has no lead and says why, on the row and on
   stderr, when: the branch and title name no ticket, or two tickets; the ticket
-  is not a DND ticket; it is not in DND Tickets; it has no stamp; or the stamp
-  has no time. A Notion read that cannot run (no token, an HTTP failure) is a
+  is in neither tracker; it is not in its tracker's database; it has no stamp;
+  or the stamp has no time. With no overlay on the machine, a work ticket's row
+  says the work tracker is unavailable and carries the resolver's line. A
+  Notion read that cannot run (no token, an HTTP failure), or an overlay that
+  exists but cannot give the work tracker (a missing or malformed key), is a
   failed probe, so the run ends `SCAN INCOMPLETE`.
 
 **Where it can misattribute.**
@@ -153,18 +170,24 @@ recorded as it happens:
 What reads could-not-measure instead of a guess:
 
 - A ticket moved to `In Progress` without `mark-in-progress` has no stamp.
-- `mark-in-progress` stamps only a first dispatch (a move from `Todo` or
-  `Backlog`). An unstamped ticket resumed from `Parked` or `Attention Given`
-  is not stamped with the resume time. The script says so and names the
-  `--backfill` fix.
+- `mark-in-progress` stamps only a first dispatch (a move from one of the
+  tracker's first-dispatch statuses; DND: `Todo` or `Backlog`). An unstamped
+  ticket resumed from `Parked` or `Attention Given` is not stamped with the
+  resume time. The script says so and names the `--backfill` fix.
 - A stamp with no UTC offset cannot be placed in time.
 - A stamp later than the landing (a re-dispatch after the work landed, or a
   mistaken backfill) never yields a negative lead.
 
-**The start is DND-only.** Only DND Tickets carries the stamp. A repo whose
-tickets live elsewhere (walt_ui's work tracker) reads every row
-could-not-measure for its start. Its `tail` is still measured, and `--slow`
-keeps those rows, so the shipwright still reads walt_ui's `tail` (its lever).
+**A walt_ui row is measured only on a machine with the overlay.** Without it,
+a walt_ui row reads could-not-measure for its start. Its `tail` is still
+measured, and `--slow` keeps those rows, so the shipwright still reads
+walt_ui's `tail` (its lever). A walt_ui ticket dispatched before DND-1341 has
+no stamp, like a DND ticket dispatched before DND-1318.
+
+**Later (2026-09-30, DND-1341):** this said "The start is DND-only": only DND
+Tickets carried the stamp, so every walt_ui row read could-not-measure for its
+start. Superseded by the work tracker above. The owner's metric (dispatch →
+landed) did not cover walt_ui work.
 
 **Later (2026-09-30, DND-1318):** START was the earliest commit on the PR,
 authored or committed. Superseded by the owner's definition above. Captains
