@@ -691,8 +691,9 @@ T1_MODE = "hook-stdin"
 # set alone print KEEP. admiral-eval exits 1 on its own baseline regression, so
 # exit 1 is a measurement when the run COMPLETED: its closing summary is
 # present and agrees with the rows, at least one T2 row parsed, and no model
-# call failed (a failed call scores as a FAIL sample, so p would be the auth
-# outage, not the admiral).
+# call failed (before DND-1359 a failed call scored as a FAIL sample, so p
+# would be the auth outage, not the admiral; since, it is left out of the
+# rate, so p would be sampled below N; a baseline ref may be either).
 #
 # DND-1007: `concurrency` reaches the side's admiral-eval through
 # EvalPool::ENV_VAR, not a flag, so a baseline ref from before DND-1007 (whose
@@ -741,6 +742,15 @@ def t2_run_problem(out, err, rows)
     return "its summary counts #{summary[2]} case(s) but #{rows.size} row(s) parsed"
   end
 
+  # A failed call is checked BEFORE a 0/0 row: since DND-1359 admiral-eval
+  # leaves a failed call out of the rate, so a case whose every call failed
+  # prints 0/0, and its cause is the invocation, not an unsampled config.
+  failed = err.to_s.each_line.select { |l| l.match?(T2_INVOCATION_FAILED) }
+  if failed.any?
+    return "#{failed.size} model invocation(s) failed — the model never answered those samples, so the " \
+           "run measured the invocation (auth, quota, rate limit, network), not the admiral (first: " \
+           "#{failed.first.strip[0, 200]})"
+  end
   unsampled = rows.select { |r| r[:fraction].nil? }.map { |r| r[:name] }
   return "#{unsampled.size} case(s) scored 0/0, never sampled: #{unsampled.join(', ')}" if unsampled.any?
 
@@ -751,12 +761,6 @@ def t2_run_problem(out, err, rows)
   return "#{unmoded.size} case(s) had no [mode] tag, matching neither T1 nor T2: #{unmoded.join(', ')}" \
     if unmoded.any?
 
-  failed = err.to_s.each_line.select { |l| l.match?(T2_INVOCATION_FAILED) }
-  if failed.any?
-    return "#{failed.size} model invocation(s) failed — the model never answered those samples, so their " \
-           "FAILs measure the invocation (auth, quota, network), not the admiral (first: " \
-           "#{failed.first.strip[0, 200]})"
-  end
   t2 = rows.count { |r| r[:mode] && r[:mode] != T1_MODE }
   return "0 T2 cases parsed (#{rows.size} T1 row(s) only)" if t2.zero?
 
@@ -1163,6 +1167,15 @@ def self_test
         [["echo \"$SUBJECT\"", "echo '  ! admiral invocation failed (exit 1): not logged in' >&2",
           "echo 'FAIL AE-01-confirm-before-done 0/3 [next-action] no output'", "echo '#{row_t1}'",
           "echo 'admiral-eval: 1/2 cases pass (runs/T2 case = 3)'", "exit 1"], /invocation/],
+      # DND-1359: admiral-eval no longer scores a failed call as a sample, so a
+      # case whose every call failed prints 0/0. The refusal must still name the
+      # failed invocations (the cause), not "never sampled" (a config error).
+      "every call of a case failed (DND-1359 row: 0/0)" =>
+        [["echo \"$SUBJECT\"", "echo '  ! admiral invocation failed (exit 1): 429 rate_limit_error' >&2",
+          "echo 'FAIL AE-01-confirm-before-done 0/0 [next-action] admiral produced no scored sample'",
+          "echo '#{row_t1}'", "echo 'admiral-eval: 1/2 cases pass (runs/T2 case = 3)'",
+          "echo 'admiral-eval: invocation failures: 3 model call(s) in 1 case(s), not scored'", "exit 1"],
+         /model invocation\(s\) failed/],
       # DND-513: a row with NO [mode] tag matches neither the T1 (hook-stdin)
       # nor the T2 (model-in-loop) shape. It must be surfaced, never silently
       # folded into either bucket or dropped from the row count.

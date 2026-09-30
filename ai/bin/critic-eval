@@ -37,6 +37,7 @@
 # critic is wired as a BLOCKING step. Until then it runs advisory-only.
 
 require "json"
+require "shellwords"
 
 AI_DIR       = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "critic_prompt")
@@ -114,8 +115,11 @@ def select_fixtures(only)
 end
 
 # Score a list of result rows into precision/recall.
-# row = {label: "bad"|"good", expect: kind, flagged: [kinds]}
+# row = {label: "bad"|"good", expect: kind, flagged: [kinds], failed: bool}
+# A failed call (DND-1359) is never scored: it is neither a miss nor a clean
+# good case, because the critic never answered it.
 def score(rows)
+  rows = rows.reject { |r| r[:failed] }
   bad  = rows.select { |r| r[:label] == "bad" }
   good = rows.select { |r| r[:label] == "good" }
   detected = bad.count { |r| r[:flagged].include?(r[:expect]) }
@@ -166,10 +170,37 @@ def judge(fx, argv)
     [spec[:key], File.read(File.join(fx[:dir], spec[:file]))]
   end
   prompt = CriticPrompt.build(**args)
-  out, _e, st = require_open3 { Open3.capture3(*argv, stdin_data: prompt) }
-  flagged = st&.success? ? parse_findings(out.to_s) : []
-  warn "  ! critic invocation failed for #{fx[:name]} (is `claude` on PATH?)" unless st&.success?
-  { name: fx[:name], label: fx[:label], expect: fx[:expect], flagged: flagged }
+  out, err, st = require_open3 { Open3.capture3(*argv, stdin_data: prompt) }
+  failed = !st&.success?
+  flagged = failed ? [] : parse_findings(out.to_s)
+  if failed
+    warn "  ! critic invocation failed for #{fx[:name]} (exit #{st ? st.exitstatus : '?'}): " \
+         "#{err.to_s.lines.last(2).join.strip} (is `claude` on PATH?)"
+  end
+  { name: fx[:name], label: fx[:label], expect: fx[:expect], flagged: flagged, failed: failed }
+end
+
+# One result row's verdict column. DND-1359: a failed call is ERR, never a
+# MISS (bad case) or an OK (good case): the critic never answered it.
+def row_tag(row)
+  return "ERR " if row[:failed]
+  return (row[:flagged].include?(row[:expect]) ? "HIT " : "MISS") if row[:label] == "bad"
+
+  row[:flagged].empty? ? "OK  " : "FP  "
+end
+
+# DND-1359: a run with any failed critic call is UNMEASURED. It prints the
+# failed rows and no recall/precision (a partial corpus's score reads like the
+# whole corpus's), and exits 3, apart from BELOW BAR's 1.
+UNMEASURED_EXIT = 3
+
+def refuse_failed_calls(failed)
+  warn "critic-eval: UNMEASURED — #{failed.size} critic call(s) failed and were not scored: " \
+       "#{failed.map { |r| r[:name] }.join(', ')}. No recall/precision is reported for this run."
+  warn "  Fix: find why the calls failed (the `! critic invocation failed` lines above: auth, quota, a 429 " \
+       "burst, a crash), fix it or lower --concurrency, and re-run. A failed call is never a MISS or an OK: " \
+       "the critic never saw that diff."
+  UNMEASURED_EXIT
 end
 
 # Every fixture judged, up to `concurrency` calls in flight (DND-1007). Returns
@@ -206,13 +237,16 @@ def run_model(only = nil, agent_file: DEFAULT_AGENT_FILE, concurrency: EvalPool:
   warn EvalPool.timing_line("critic-eval", wall: EvalPool.monotonic - started, concurrency: concurrency,
                                            seconds: judged.map(&:seconds))
   rows = judged.map(&:value)
-  rows.each { |r| puts "#{r[:label] == 'bad' ? (r[:flagged].include?(r[:expect]) ? 'HIT ' : 'MISS') : (r[:flagged].empty? ? 'OK  ' : 'FP  ')}  #{r[:name]}  expect=#{r[:expect]} got=#{r[:flagged].join('|')}" }
-  s = score(rows)
+  rows.each { |r| puts "#{row_tag(r)}  #{r[:name]}  expect=#{r[:expect]} got=#{r[:flagged].join('|')}" }
   # Corpus membership prints WITH the aggregate, always. The same recall and
   # precision numbers read identically over 7 fixtures and over 11 while meaning
   # something else, so an aggregate without its membership is not comparable to
   # anything -- including its own earlier self.
   puts "critic-eval: corpus=#{only || 'all'} (#{rows.size} fixture(s): #{rows.map { |r| r[:name] }.join(', ')})"
+  failed = rows.select { |r| r[:failed] }
+  return refuse_failed_calls(failed) unless failed.empty?
+
+  s = score(rows)
   puts "critic-eval: recall=#{s[:recall]} precision=#{s[:precision]} " \
        "(detected #{s[:detected]}/#{s[:bad]} bad, #{s[:false_pos]} false pos over #{s[:good]} good)"
   if s[:pass]
@@ -480,6 +514,45 @@ def run_self_test
            "`critic-eval #{args.join(' ')}` must exit 2 naming --concurrency with a Fix: (got exit " \
            "#{st.exitstatus}); never clamped")
   end
+  # DND-1359: a critic call that fails (a 429, a session limit, a crash) is its
+  # OWN outcome, never a MISS (bad case) or an OK (good case). The scorer
+  # leaves it out, and a run with any is UNMEASURED (exit 3): no recall or
+  # precision is printed for it. Unit first, then end to end through the real
+  # CLI with a stub `claude` on PATH that fails the 2nd of the 7 core calls.
+  flag = lambda do |cond, what|
+    next if cond
+
+    warn "self-test: FAIL — #{what}"
+    ok = false
+  end
+  with_failed = perfect + [{ label: "bad", expect: "a", flagged: [], failed: true },
+                           { label: "good", expect: "none", flagged: [], failed: true }]
+  sf = score(with_failed)
+  flag.(sf[:recall] == 1.0 && sf[:precision] == 1.0 && sf[:bad] == 3 && sf[:good] == 2,
+        "a failed critic call must not be scored (want recall 1.0 precision 1.0 over 3 bad/2 good, got " \
+        "#{sf.inspect}). Fix: score must leave out every row with failed: true")
+  Dir.mktmpdir("critic-eval-failed-call") do |tmp|
+    bin = File.join(tmp, "bin")
+    FileUtils.mkdir_p(bin)
+    count = File.join(tmp, "calls")
+    File.write(File.join(bin, "claude"),
+               "#!/bin/sh\nn=$(( $(cat #{count.shellescape} 2>/dev/null || echo 0) + 1 ))\n" \
+               "echo \"$n\" > #{count.shellescape}\ncat >/dev/null\n" \
+               "if [ \"$n\" -eq 2 ]; then echo 'API Error: 429 rate_limit_error' >&2; exit 1; fi\n" \
+               "echo 'review'; echo 'FINDINGS: none'\n")
+    FileUtils.chmod(0o755, File.join(bin, "claude"))
+    out, err, st = Open3.capture3({ "PATH" => "#{bin}:#{ENV['PATH']}" }, RbConfig.ruby, File.expand_path(__FILE__),
+                                  "--run", "--only", "core", "--concurrency", "1")
+    second = select_fixtures("core").first[1]&.fetch(:name)
+    flag.(st.exitstatus == 3,
+          "a run with a failed critic call must exit 3 (UNMEASURED), got #{st.exitstatus}; stdout:\n#{out}")
+    flag.(out.lines.grep(/\AERR\s/).map { |l| l.split[1] } == [second],
+          "the failed call must print as its own ERR row for #{second}, never MISS/OK; stdout:\n#{out}")
+    flag.(!out.include?("recall="), "a run with a failed call must print no recall/precision; stdout:\n#{out}")
+    flag.(err.include?("UNMEASURED") && err.include?("1 critic call(s) failed") && err.include?(second.to_s) &&
+            err.include?("Fix:"),
+          "the refusal must count and name the failed call, with a Fix:; stderr:\n#{err}")
+  end
   # A bad --agent-file is refused before any model call (exit 2, Fix:).
   _out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), "--run", "--agent-file", missing_render)
   check.(st.exitstatus == 2 && err.include?("Fix:"),
@@ -541,6 +614,12 @@ if ARGV.include?("--help") || ARGV.include?("-h")
       since=<step>          the step that authored it (core for 01-07)
     `--run` REFUSES to score a fixture naming an input CriticPrompt does not
     carry, rather than recording it as a miss.
+
+    A critic call that fails (auth, quota, a 429, a crash) prints as an ERR
+    row, never MISS or OK, and the run is UNMEASURED: no recall/precision.
+
+    Exit (--run): 0 PASS | 1 BELOW BAR or refused fixtures | 2 usage |
+                  3 UNMEASURED (a critic call failed)
   TXT
   exit 0
 end

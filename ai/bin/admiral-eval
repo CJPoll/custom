@@ -95,6 +95,13 @@
 # covers. A present-but-unreadable baseline is an error, never "no baseline".
 # --update-baseline refuses --only and --runs below the default N.
 #
+# FAILED MODEL CALLS (DND-1359): a T2 call that never answered (a 429, a
+# session limit, a crash) is its own outcome, never a scored sample. The row's
+# rate counts only the answered samples, every run prints one
+# `admiral-eval: invocation failures: N model call(s)` line (0 included), a
+# diff with any is UNCERTIFIED, and --update-baseline refuses the run (exit 1,
+# naming each case) without writing the baseline.
+#
 # Adding a case: create ai/eval/admiral-fixtures/<AE-NN-name>/meta plus scenario.md
 # (T2) or an input.json (T1 hook-stdin). Keep the scorer deterministic — assert a
 # parsed decision token / labeled answer / guard verdict, never a model judgement.
@@ -793,24 +800,73 @@ end
 
 # Pure: a case's samples (text or nil, in sample order) -> its result. The same
 # fold the serial loop did: the rate counts passes, the majority decides, and
-# `detail` carries the LAST failing sample's reasons (or the first invocation
-# failure, if no sample was scored as a failure after it).
+# `detail` carries the LAST failing sample's reasons.
+#
+# DND-1359: a nil text is a model call that never answered (a 429, a session
+# limit, a crash). It is its OWN outcome, never a sample: it is counted in
+# `failed_calls` and left out of the rate, so "7 of 8 answered samples passed"
+# never reads as "7 of 10", and a case whose every call failed is 0/0 (never
+# sampled), never 0/N. Before, each failed call scored as a FAIL sample, so an
+# auth or quota outage read as the agent failing the case.
 def fold_samples(plan, texts, agent)
   meta = plan[:meta]
   last_reasons = nil
-  samples = texts.map do |out|
-    if out.nil?
-      last_reasons ||= ["#{agent.key} produced no output (invocation failed)"]
-      next false
-    end
+  failed = texts.count(&:nil?)
+  samples = texts.compact.map do |out|
     ok, reasons = score_decision(meta, parse_trailer(out))
     last_reasons = reasons unless ok
     ok
   end
   passes = samples.count(true)
-  pass = majority(samples)
-  detail = pass ? "invariant=#{meta['invariant']}" : (last_reasons || []).join("; ")[0, 200]
-  { name: plan[:name], mode: plan[:mode], pass: pass, rate: "#{passes}/#{samples.size}", detail: detail }
+  pass = !samples.empty? && majority(samples)
+  { name: plan[:name], mode: plan[:mode], pass: pass, rate: "#{passes}/#{samples.size}",
+    failed_calls: failed, detail: fold_detail(meta, pass, last_reasons, failed, samples.size, agent) }
+end
+
+# A case's detail column. A failed-call note leads, so the 200-byte cut never
+# drops it.
+def fold_detail(meta, pass, last_reasons, failed, scored, agent)
+  if scored.zero?
+    return "#{agent.key} produced no scored sample: #{failed} invocation failure(s) (invocation failed)"
+  end
+
+  note = failed.positive? ? "[#{failed} invocation failure(s), not scored] " : ""
+  body = pass ? "invariant=#{meta['invariant']}" : (last_reasons || []).join("; ")
+  (note + body)[0, 200]
+end
+
+# DND-1359: [[case name, failed calls], ...] for every case with a failed model
+# call, in result order.
+def invocation_failures(results)
+  results.filter_map { |r| [r[:name], r[:failed_calls]] if r[:failed_calls].to_i.positive? }
+end
+
+# The run's one stdout line counting failed model calls. Always printed, so
+# "no call failed" (0) reads differently from a runner that never counted.
+def invocation_failure_line(failures)
+  total = failures.sum { |_, n| n }
+  return "admiral-eval: invocation failures: 0 model call(s)" if total.zero?
+
+  "admiral-eval: invocation failures: #{total} model call(s) in #{failures.size} case(s), not scored: " \
+    "#{failure_names(failures)}"
+end
+
+def failure_names(failures)
+  failures.map { |name, n| "#{name} (#{n})" }.join(", ")
+end
+
+# Why --update-baseline must refuse this run's results, or nil (DND-1359). A
+# failed call measured the invocation (auth, quota, rate limit, network), not
+# the agent, so a baseline written from it would record the outage as the
+# agent's behavior and exit 0.
+def baseline_refusal(failures, agent)
+  return nil if failures.empty?
+
+  "--update-baseline refused: #{failures.sum { |_, n| n }} model call(s) failed in #{failures.size} case(s): " \
+    "#{failure_names(failures)}. The baseline was NOT written. Fix: find why the calls failed (the " \
+    "`! #{agent.key} invocation failed` lines above: auth, quota, a 429 burst, a crash), fix it or lower " \
+    "--concurrency, and re-run `#{rerun_hint(agent)} --run --update-baseline`. A baseline must record " \
+    "only calls the model answered."
 end
 
 # Evaluates every dir; returns [results in dir order, per-sample seconds].
@@ -1005,6 +1061,7 @@ def baseline_comparison(results, baseline, only: nil)
     improved: with_flip.call(:improved),
     new_cases: new_cases, changed: changed,
     unmeasured_failing: unmeasured.reject { |n| now[n] && now[n][:pass] },
+    invocation_failures: invocation_failures(results),
     compared: flips.count { |_, (f, _)| !%i[unusable missing changed new].include?(f) }
   }
 end
@@ -1105,6 +1162,10 @@ def certification_gaps(cmp, subject_state:, corpus_state:, only:)
     gaps << "#{cmp[:changed].size} case(s) whose fixture changed since the baseline (#{names.(cmp[:changed].keys)})"
   end
   gaps << "--only #{only}: a partial run, not the corpus" if only
+  failed = cmp[:invocation_failures] || []
+  unless failed.empty?
+    gaps << "#{failed.sum { |_, n| n }} model call(s) failed, not scored (#{names.(failed.map(&:first))})"
+  end
   gaps
 end
 
@@ -1310,9 +1371,15 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
     printf("%-4s %-34s %-6s [%s] %s\n", r[:pass] ? "PASS" : "FAIL", r[:name], r[:rate], r[:mode], r[:detail])
   end
   puts "admiral-eval: #{results.count { |r| r[:pass] }}/#{results.size} cases pass (runs/T2 case = #{runs})"
+  failed_calls = invocation_failures(results)
+  puts invocation_failure_line(failed_calls)
   score_lines(results, corpus_fingerprint(dirs)).each { |l| puts l }
 
   if update
+    if (why = baseline_refusal(failed_calls, agent))
+      warn "admiral-eval: FAILED — #{why}"
+      return 1
+    end
     FileUtils.mkdir_p(File.dirname(baseline_path(agent)))
     File.write(baseline_path(agent), JSON.pretty_generate(
       baseline_doc(results, subject: subject, corpus: corpus_fingerprint(fixtures(agent)), runs: runs, agent: agent)
@@ -1322,6 +1389,7 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
     return 0
   end
 
+  report_failed_calls(failed_calls, agent)
   if baseline
     return compare_to_baseline(results, baseline, subject: subject, corpus: corpus_fingerprint(fixtures(agent)),
                                                   only: only, agent: agent)
@@ -1336,6 +1404,18 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
        "against the CURRENT #{agent.name} with `#{rerun_hint(agent)} --run --update-baseline` once the cases " \
        "pass on today's #{agent.name}; never baseline a case that cannot pass reliably (mark it advisory)."
   1
+end
+
+# DND-1359: a run (not an --update-baseline) with failed calls still scores
+# what the model answered, but says so: those cases were sampled below the N
+# asked for, and a case with none answered is 0/0.
+def report_failed_calls(failures, agent)
+  return if failures.empty?
+
+  warn "admiral-eval: Note: #{failures.sum { |_, n| n }} model call(s) failed and were NOT scored: " \
+       "#{failure_names(failures)}. Those cases were scored on the calls the model answered only. " \
+       "Fix: find why they failed (the `! #{agent.key} invocation failed` lines above), fix it, and re-run; " \
+       "never re-baseline from a run with failed calls."
 end
 
 def list(agent = eval_agent)
@@ -1379,6 +1459,9 @@ end
 # that many have started: the pool can only get past the barrier if it really
 # ran that many at once. The barrier's wait is capped at HANG_S only to end a
 # broken run; a capped call answers BARRIER-HANG, which scores as a miss.
+# DND-1359: FAILS=<f> makes the case's first f calls fail the way a 429 or a
+# session limit does (exit 1, no stdout), and PASSES then counts the calls
+# after those.
 STUB_SUBJECT = <<~'RUBY'
   #!/usr/bin/ruby
   # frozen_string_literal: true
@@ -1420,8 +1503,13 @@ STUB_SUBJECT = <<~'RUBY'
   end
   n = bump("case-#{name}") { |v| v + 1 }
   bump("in_flight") { |v| v - 1 }
+  fails = prompt[/FAILS=(\d+)/, 1].to_i
+  if n <= fails
+    warn "API Error: 429 rate_limit_error (stub call #{n} of #{name})"
+    exit 1
+  end
   text = if hung then "BARRIER-HANG"
-         elsif n <= passes then "NEXT_ACTIONS: confirm-merged"
+         elsif n - fails <= passes then "NEXT_ACTIONS: confirm-merged"
          else "NEXT_ACTIONS: wait"
          end
   puts JSON.generate({ "result" => text })
@@ -1474,6 +1562,96 @@ def self_test_concurrency(fail)
       unless s_secs.size == 30 && p_secs.size == 30 && (s_secs + p_secs).all? { |s| s.is_a?(Float) && s >= 0 }
     fail.("one usage entry per model call at any K (K=1 #{s_usage.size}, K=4 #{p_usage.size})") \
       unless s_usage.size == 30 && p_usage.size == 30
+  end
+end
+
+# --self-test (DND-1359): a model call that fails (a 429, a session limit, a
+# crash) is its OWN outcome, never a scored sample. Proven on the stub subject
+# (FAILS=<f>): the rate counts only the samples the model answered, the
+# result carries the failed-call count, the run's report counts them, and
+# --update-baseline refuses the run, naming the cases, without writing.
+def self_test_invocation_failures(fail)
+  Dir.mktmpdir("admiral-eval-failed-calls-") do |d|
+    stub = File.join(d, "claude-stub")
+    File.write(stub, STUB_SUBJECT)
+    FileUtils.chmod(0o755, stub)
+    fx_root = File.join(d, "fixtures")
+    mk = lambda do |name, passes, fails|
+      fx = File.join(fx_root, name)
+      FileUtils.mkdir_p(fx)
+      File.write(File.join(fx, "meta"), "mode = next-action\ninvariant = stub #{name}\n" \
+                                        "expect_action = confirm-merged\n")
+      File.write(File.join(fx, "scenario.md"), "STUBCASE=#{name} PASSES=#{passes} FAILS=#{fails}\n")
+      fx
+    end
+    # F-01 (4 runs): 1 call fails, then 2 pass and 1 misses. F-02: every call
+    # fails. F-03: no call fails.
+    dirs = [mk.("F-01-some-fail", 2, 1), mk.("F-02-all-fail", 0, 4), mk.("F-03-clean", 4, 0)]
+    state_for = lambda do |tag|
+      state = File.join(d, "state-#{tag}")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "barrier"), "1")
+      state
+    end
+
+    # (a) the fold: a failed call is not a sample, at K=1 and at K=4.
+    [1, 4].each do |k|
+      results, = capture_io { evaluate_all(dirs, runs: 4, argv: [stub, state_for.("k#{k}")], concurrency: k) }.first
+      got = results.to_h { |r| [r[:name], [r[:rate], r[:failed_calls], r[:pass]]] }
+      want = { "F-01-some-fail" => ["2/3", 1, true], "F-02-all-fail" => ["0/0", 4, false],
+               "F-03-clean" => ["4/4", 0, true] }
+      fail.("K=#{k}: a failed model call must be its own outcome, never a scored sample: want " \
+            "[rate, failed_calls, pass] #{want.inspect}, got #{got.inspect}. Fix: fold_samples must count a nil " \
+            "text as a failed call (failed_calls), not as a FAIL sample in the rate") unless got == want
+      all_fail = results.find { |r| r[:name] == "F-02-all-fail" }
+      fail.("K=#{k}: a case whose every call failed must say so in its detail, got #{all_fail[:detail].inspect}") \
+        unless all_fail && all_fail[:detail].to_s.include?("4 invocation failure(s)")
+    end
+
+    # (b) end to end through run_model, with the stub as `claude` on PATH and a
+    # throwaway agent whose baseline lives in the tmpdir (never the real one).
+    agent_file = File.join(d, "athena-admiral.md")
+    File.write(agent_file, "---\nname: athena-admiral\ndescription: eval subject\nmodel: opus\ncolor: red\n---\n\n" \
+                           "You are a stub admiral.\n")
+    run = lambda do |tag, fixture_dirs, update|
+      root = File.join(d, "agent-#{tag}")
+      FileUtils.mkdir_p(File.join(root, "fx"))
+      fixture_dirs.each { |fx| FileUtils.cp_r(fx, File.join(root, "fx")) }
+      agent = EvalSubject::Agent.new(key: "admiral", name: "athena-admiral", runner: RUNNER,
+                                     fixtures_rel: File.join(root, "fx"), baseline_rel: File.join(root, "b.json"))
+      bin = File.join(root, "bin")
+      FileUtils.mkdir_p(bin)
+      File.write(File.join(bin, "claude"), "#!/bin/sh\nexec #{RbConfig.ruby.shellescape} #{stub.shellescape} " \
+                                           "#{state_for.(tag).shellescape}\n")
+      FileUtils.chmod(0o755, File.join(bin, "claude"))
+      old_path = ENV.fetch("PATH", nil)
+      begin
+        ENV["PATH"] = "#{bin}:#{old_path}"
+        code, out, err = capture_io do
+          run_model(runs: 4, only: nil, update: update, agent: agent, agent_file: agent_file, concurrency: 2)
+        end
+      ensure
+        ENV["PATH"] = old_path
+      end
+      [code, out, err, File.join(root, "b.json")]
+    end
+
+    code, out, err, baseline = run.("update-failing", dirs, true)
+    fail.("--update-baseline must refuse a run with failed model calls (exit 1), got exit #{code}; stderr:\n#{err}") \
+      unless code == 1
+    fail.("--update-baseline must NOT write a baseline from a run with failed model calls " \
+          "(#{baseline} exists)") if File.exist?(baseline)
+    fail.("the refusal must name each case with failed calls and its count, with a Fix:, got stderr:\n#{err}") \
+      unless err.include?("F-01-some-fail (1)") && err.include?("F-02-all-fail (4)") && err.include?("Fix:") &&
+             !err.include?("F-03-clean (")
+    fail.("the report must count the failed calls on stdout, got:\n#{out}") \
+      unless out.include?("admiral-eval: invocation failures: 5 model call(s) in 2 case(s), not scored")
+
+    code, out, _err, baseline = run.("update-clean", [dirs[2]], true)
+    fail.("--update-baseline over a run with NO failed call must still write the baseline (exit #{code})") \
+      unless code.zero? && File.exist?(baseline)
+    fail.("a clean run must report zero failed calls, never omit the count, got:\n#{out}") \
+      unless out.include?("admiral-eval: invocation failures: 0 model call(s)")
   end
 end
 
@@ -2350,10 +2528,11 @@ def self_test
     fail.("that stderr line must never say 'invocation succeeded' (critic finding on ffd8309)") \
       if err_c.include?("invocation succeeded")
     fail.("the case must score as an invocation failure, not a subject FAIL, got stdout:\n#{out_c}") \
-      unless out_c.include?("produced no output (invocation failed)")
+      unless out_c.match?(%r{^FAIL AE-01-confirm-before-done\s+0/0 .*produced no scored sample: 1 invocation failure})
   end
 
   self_test_concurrency(fail)
+  self_test_invocation_failures(fail)
 
   if ok
     puts "admiral-eval: self-test OK"
@@ -2447,7 +2626,9 @@ USAGE = <<~TXT
     --only NAME         restrict to one case
     --update-baseline   rewrite the baseline from this run's results (the
                         full corpus at --runs >= #{DEFAULT_RUNS}: --only or a
-                        smaller --runs is refused, exit 2)
+                        smaller --runs is refused, exit 2; a run in which
+                        any model call failed is refused after it, exit 1,
+                        and the baseline is not written)
     --concurrency K     model calls in flight at once (#{EvalPool::RANGE.first}-#{EvalPool::RANGE.last}, default
                         #{EvalPool::DEFAULT}; else $#{EvalPool::ENV_VAR}). Every T2 sample of
                         every case shares one pool; each sample keeps its own
