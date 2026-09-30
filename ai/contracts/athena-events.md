@@ -6371,7 +6371,9 @@ this subsection is its boundary.
   ask's live read can fail for a reason about the whole workspace rather
   than the one ask. `Athena.Priorities.SlackNames.workspace_failure/1` is
   the one table of those reasons. The Slack name lookup's own workspace
-  pause (`failure_scope/1`) reads the same table. There are five causes:
+  pause (`failure_scope/1`) reads the same table. A DM read reads it through
+  `SlackNames.dm_read_failure/1`, which adds `missing_scope` (DND-1368).
+  There are six causes:
   - `slack_not_configured`: no Slack app with a stored bot token;
   - `slack_token_unreadable`: the bot token could not be read;
   - `slack_auth_rejected`: Slack answered `invalid_auth`, `not_authed`,
@@ -6380,11 +6382,27 @@ this subsection is its boundary.
   - `slack_rate_limited`: HTTP 429, or Slack's `ratelimited`;
   - `slack_unavailable`: a transport failure, any other non-2xx status, or
     Slack's `accesslimited`, `fatal_error`, `internal_error`,
-    `service_unavailable` or `request_timeout`.
+    `service_unavailable` or `request_timeout`;
+  - `slack_missing_scope` (DND-1368): a Slack ask's live DM read was
+    refused with `missing_scope`. A DM read is `conversations.replies` on a
+    DM channel and needs only `im:history`, so the bot can read no DM on
+    that workspace. Its pause covers that owner's and team's DM reads only
+    (`SlackNames.failure_scope/2`); the workspace's name lookups are not
+    paused by it.
 
-  Any other reason, `missing_scope` included, is about the one lookup and
-  stays `slack_unreadable`. Treating `missing_scope` as workspace-level is
-  DND-1368.
+  Any other reason is about the one lookup and stays `slack_unreadable`.
+  The page's name lookups (users, channels) keep `missing_scope` as a
+  failure of the one lookup, because the scope they need differs by kind
+  (`users:read`, `channels:read`, `groups:read`, `mpim:read`). The cause
+  set on `priority_item_summaries.cause` and `priority_summary_calls.outcome`
+  gains `slack_missing_scope` (gen_saas migration `20260930143000`).
+
+  **Later (2026-09-30, DND-1368):** this bullet listed five causes and
+  said `missing_scope` stays `slack_unreadable` for every lookup, with
+  DND-1368 as the follow-up. Superseded for DM reads by DND-1368 (gen_saas
+  #595, `b6c8a4ef`): a bot without `im:history` failed every DM ask one by
+  one as `slack_unreadable`, spent each item's attempts, and named no
+  single cause. Name lookups keep `missing_scope` per lookup.
 
   A paused item is deferred under its cause until the lookup's pause ends.
   That is 5 minutes. After an HTTP 429 carrying Slack's retry-after, it is
