@@ -2053,27 +2053,32 @@ def status_probe(hook: ":")
     set +f; IFS=$' \t\n'
     for f in /proc/$$/fd/*; do echo "${f##*/}"; done
   SH
-  ["bash", "-c", script.sub("HOOK", hook)]
+  ["bash", "-c", script.sub("HOOK") { hook }] # block form: a `\` in hook is literal
 end
 
 # The pending-signal count in this process's own status ("SigQ: <count>/<limit>").
 # It counts the queued signals of every process of this user, so it reads the
-# same from any of them.
+# same from any of them. A status with no SigQ line raises: it is not a 0.
 def own_sigq
-  File.read("/proc/self/status")[%r{^SigQ:\s*(\d+)/}, 1]
+  File.read("/proc/self/status")[%r{^SigQ:[ \t]*(\d+)/}, 1]&.to_i or
+    raise "could not read SigQ from /proc/self/status"
 end
 
-# Case 15d's fixture (DND-1399): runs status_probe while this user's SigQ is
-# at least 200, and drops it back to its base (under 100) at the moment the
-# probe has taken its SigPnd line, the line just above ShdPnd and SigBlk. So
-# the count loses a digit mid-read, deterministically: no load, no timing.
+# Case 15d's fixture (DND-1399): raises this user's SigQ by two digits while
+# status_probe runs, and drops it back to its base at the moment the probe
+# has taken its SigPnd line, the line just above ShdPnd and SigBlk. So the
+# count loses at least one digit mid-read, deterministically: no load, no
+# timing. It queues 10**(digits of the base + 1) signals, so a base that moves
+# by a few while the case runs still ends shorter than it started.
 #
-# How: a stopped bash with a handler for SIGRTMIN holds 200 queued real-time
+# How: a stopped bash with a handler for SIGRTMIN holds the queued real-time
 # signals (a stopped process dequeues nothing, and real-time signals queue one
 # entry each). The probe's hook writes the go FIFO and waits on the done FIFO;
 # this side then KILLs and reaps the holder, which frees its queue, and only
 # then answers. Both FIFOs are opened read-write here first, so neither open
 # blocks, and a probe that never reaches its hook cannot hang the case.
+# __libc_current_sigrtmin is glibc's: elsewhere the fixture reports an error
+# (15d fails as "could not measure"), which is not a regression of the probe.
 #
 # Returns { out: <the probe's output>, before: <SigQ before>, after: <SigQ
 # after the drop>, error: <why the fixture could not arrange the drop, or nil> }.
@@ -2093,7 +2098,8 @@ def probe_under_sigq_drop(dir)
     return { out: nil, before: nil, after: nil, error: "the signal holder did not stop (#{st.inspect})" }
   end
 
-  200.times { Process.kill(rtmin, holder) }
+  queued = 10**(own_sigq.to_s.length + 1)
+  queued.times { Process.kill(rtmin, holder) }
   before = own_sigq
   dropper = Thread.new do
     Thread.current.report_on_exception = false # .value re-raises it; rescued below
@@ -2118,14 +2124,21 @@ def probe_under_sigq_drop(dir)
   end
   error = if after.nil?
             "the probe never reached its SigPnd hook"
-          elsif after.length >= before.to_s.length
-            "SigQ did not lose a digit (#{before.inspect} -> #{after.inspect}): this user has 100 or " \
-              "more other signals pending"
+          elsif after.to_s.length >= before.to_s.length
+            "SigQ did not lose a digit (#{before} -> #{after}, #{queued} signals queued and freed)"
           end
   { out: out, before: before, after: after, error: error }
 rescue LoadError, StandardError => e
   { out: nil, before: nil, after: nil, error: "#{e.class}: #{e.message}" }
 ensure
+  # The dropper is done (or stopped by closing go) before the holder is
+  # judged, so the two never both kill and reap it.
+  go_io.close if go_io && !go_io.closed?
+  begin
+    dropper&.join
+  rescue StandardError
+    nil
+  end
   if holder
     begin
       Process.kill("KILL", holder)
@@ -2207,7 +2220,7 @@ def self_test_cpu_attribution
     { "directly" => direct, "under the shim" => shimmed,
       "under the shim from a thread with every signal blocked " \
       "(that thread's SigBlk #{from_blocked[:thread_blk].inspect})" => from_blocked[:out] }.each do |how, seen|
-      blk = seen.to_s[/^SigBlk:\s*(\h+)$/, 1]
+      blk = seen.to_s[/^SigBlk:[ \t]*(\h+)$/, 1]
       checks["a check spawned #{how} starts with no signal blocked (SigBlk #{blk.inspect})"] =
         !blk.nil? && blk.to_i(16).zero?
     end
@@ -2223,19 +2236,18 @@ def self_test_cpu_attribution
     end
     # 15d. The probe reads every line of its status whole, even when a field
     #     above SigBlk changes width while it reads (DND-1399): this user's
-    #     SigQ drops from 3 digits to 1 or 2 just after the probe's SigPnd
-    #     line. A per-line `read` loop reads SigBlk as "igBlk:..." then.
+    #     SigQ loses at least one digit just after the probe's SigPnd line. A per-line `read` loop reads SigBlk as "igBlk:..." then.
     dropped = probe_under_sigq_drop(dir)
     if dropped[:error]
       warn "self-test: FAIL — case 15d fixture: could not drop SigQ by a digit mid-read " \
-           "(#{dropped[:error]}). Fix: repair probe_under_sigq_drop (a stopped bash holding 200 " \
+           "(#{dropped[:error]}). Fix: repair probe_under_sigq_drop (a stopped bash holding " \
            "queued SIGRTMIN, reaped when the probe's hook writes the go FIFO); never delete or skip case 15d."
       good = false
     else
       %w[SigBlk SigIgn].each do |field|
         checks["the probe read its #{field} line whole while SigQ went #{dropped[:before]} -> " \
                "#{dropped[:after]} mid-read (#{dropped[:out].inspect})"] =
-          dropped[:out].match?(/^#{field}:\s*\h+$/)
+          dropped[:out].match?(/^#{field}:[ \t]*\h+$/)
       end
     end
     checks.each do |what, ok|
