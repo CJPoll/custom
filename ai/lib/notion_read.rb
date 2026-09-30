@@ -5,7 +5,7 @@
 # (DND-714) by DND-1056 so ticket-reclassify reads the tracker through the
 # same allowlist instead of a copy.
 #
-# Callers: ai/bin/triage-corpus and
+# Callers: ai/bin/triage-corpus, scripts/ticket-classify --epic (DND-1057) and
 # ai/skills/athena:ticket-management/scripts/ticket-reclassify. Each maps
 # NotionRead::Error to its own failure line, which carries the Fix:.
 #
@@ -148,13 +148,15 @@ module NotionRead
     raise Error.new("curl is not on PATH", "install curl")
   end
 
-  # query_all(origin, token, data_source, pace:) -> every row, following the
-  # cursor.
-  def query_all(origin, token, data_source, pace:)
+  # query_all(origin, token, data_source, pace:, filter: nil) -> every row
+  # (matching `filter`, a Notion data source filter, when given), following
+  # the cursor.
+  def query_all(origin, token, data_source, pace:, filter: nil)
     rows = []
     cursor = nil
     loop do
       body = { "page_size" => 100 }
+      body["filter"] = filter if filter
       body["start_cursor"] = cursor if cursor
       page = read(origin, token, "POST", "/v1/data_sources/#{data_source}/query", body, pace: pace)
       rows.concat(Array(page["results"]))

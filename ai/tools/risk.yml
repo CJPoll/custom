@@ -234,7 +234,8 @@ tools:
   # a judgment_calls row (and, with a key, spends TypeSafe budget). External
   # state, so destructive, like judgment-eval.
   skills/athena:ticket-management/scripts/finding-triage: { class: destructive, reason: judgments }
-  # ticket-classify (DND-1054) has no tracker client at all, but like
+  # ticket-classify (DND-1054) writes no tracker; with --epic (DND-1057) it
+  # only READS Notion (ai/lib/notion_read.rb refuses any other request). Like
   # finding-triage it posts to the Athena server, which records judgment_calls
   # rows and spends the owner's judgments budget: server state, so destructive.
   skills/athena:ticket-management/scripts/ticket-classify: { class: destructive, reason: judgments }

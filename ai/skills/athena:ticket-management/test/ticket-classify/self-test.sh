@@ -129,10 +129,17 @@ ruby_eq "filer check: severity none only with Feature, Feature only with none" \
   "--severity none is only for --kind Feature|--kind Feature takes --severity none (a Feature has no Severity)|" \
   '[Classify.filer_error({kind: "Bug", severity: "none", security: "none"}).first, Classify.filer_error({kind: "Feature", severity: "LOW", security: "none"}).first, Classify.filer_error({kind: "Flake", severity: "LOW", security: "introduced"}).inspect.sub("nil", "")].join("|")'
 
-echo "== no tracker client [qa manager 8]"
+echo "== no tracker writer [qa manager 8]"
 
-lacks "the script has no Notion client (no Notion URL, token or API in code)" \
-  "$(grep -v '^\s*#' "${BIN}" | grep -in 'notion' || true)" "otion"
+# DND-1057: --epic reads the epic's candidates, and only through the
+# read-only ai/lib/notion_read.rb (its allowlist refuses any other request
+# before it is sent). The script itself names no Notion URL and no write.
+CODE="$(grep -v '^\s*#' "${BIN}")"
+lacks "the script names no Notion API URL (all Notion access is NotionRead)" "${CODE}" "api.notion.com"
+lacks "the script makes no PATCH" "${CODE}" '"PATCH"'
+lacks "the script makes no DELETE" "${CODE}" '"DELETE"'
+has "its Notion access is the read-only client" "${CODE}" 'require_relative "../../../lib/notion_read"'
+eq "every NotionRead call is a read" "$(printf '%s\n' "${CODE}" | grep -o 'NotionRead\.[a-z_]*' | sort -u | tr '\n' ' ')" "NotionRead.credentials NotionRead.page NotionRead.query_all NotionRead.read "
 
 echo "== argv"
 
