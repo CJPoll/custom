@@ -276,14 +276,16 @@ json.dump({"tool_name": "Write", "tool_input": {"file_path": "big.txt",
            "content": "he said " + "x" * (6 * 1024 * 1024)}}, open(sys.argv[1], "w"))
 PY
 rm -f "$LOG"
-T0=$(date +%s%N)
-OUT=$(HOME="$SANDBOX" XDG_STATE_HOME="$SANDBOX/state" sh "$HOOK" < "$HUGE" 2>"${SANDBOX}/huge.err"); STATUS=$?
-T1=$(date +%s%N)
-MS=$(( (T1 - T0) / 1000000 ))
-if is_deny && [ ! -s "${SANDBOX}/huge.err" ] && [ "$MS" -lt 5000 ]; then
-  PASS=$((PASS + 1)); printf '  PASS  %s (%sms)\n' "10i. 6 MiB input, pronoun at the start -> deny within 5s, no stderr" "$MS"
+# DND-1356: no wall-clock verdict (the owner's functional-tests rule). This
+# used to require the deny within 5 s, a verdict that flips on a slow host.
+# What it guards is that a huge input is finished, not hung: `timeout` only
+# caps a hang (exit 124 is a FAIL named as such), and the verdict is the deny
+# with nothing on stderr (no E2BIG, no truncated scan).
+OUT=$(HOME="$SANDBOX" XDG_STATE_HOME="$SANDBOX/state" timeout 120 sh "$HOOK" < "$HUGE" 2>"${SANDBOX}/huge.err"); STATUS=$?
+if [ "$STATUS" -ne 124 ] && is_deny && [ ! -s "${SANDBOX}/huge.err" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "10i. 6 MiB input, pronoun at the start -> deny, no stderr, never a hang"
 else
-  FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s %sms err=[%s] out=[%s]\n' "10i. 6 MiB input, pronoun at the start -> deny within 5s, no stderr" "$STATUS" "$MS" "$(head -c 200 "${SANDBOX}/huge.err")" "$(printf '%s' "$OUT" | head -c 80)"
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s%s err=[%s] out=[%s]\n' "10i. 6 MiB input, pronoun at the start -> deny, no stderr, never a hang" "$STATUS" "$([ "$STATUS" -eq 124 ] && printf ' (hung: killed by the 120 s hang cap)')" "$(head -c 200 "${SANDBOX}/huge.err")" "$(printf '%s' "$OUT" | head -c 80)"
 fi
 python3 - "$HUGE" <<'PY'
 import json, sys

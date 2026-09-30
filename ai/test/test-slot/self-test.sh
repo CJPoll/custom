@@ -28,7 +28,7 @@ done
 
 # A suite launched from inside a slot (DND-486 wraps the gate) must not carry
 # that slot into its fixtures: every case here decides re-entrancy itself.
-unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HELD_MODEL ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_HEARTBEAT \
+unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HELD_MODEL ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK \
   ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS HARNESS_GATE_JOBS ATHENA_EVAL_CONCURRENCY
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/test-slot-selftest.XXXXXX")"
@@ -707,6 +707,14 @@ done
 pid_of_bg() { pgrep -P "$(cat "$W/$1.bg")" | head -n 1; }
 # exits_within PID SECONDS — 0 when PID is gone within SECONDS (blocking).
 exits_within() { timeout "$2" tail --pid="$1" -f /dev/null; }
+# DND-1356: "exits promptly" is not a clock verdict. Each case below first
+# makes the event it is about the ONLY thing that can end the wait: the
+# signal (30), or the parent check (35/36), with the other bounds raised to
+# an hour through the seams (WAIT_SEAMS). A wait that ignored the event
+# would then block for that hour; EXIT_CAP_S only caps that hang, far below
+# it, so a slow host cannot flip the verdict.
+EXIT_CAP_S=120
+WAIT_SEAMS=(ATHENA_TEST_SLOT_HEARTBEAT=3600 ATHENA_TEST_SLOT_PARENT_CHECK=3600)
 # await_kids PID — bounded poll until PID has a child (its wait helper);
 # prints the child pids. Never empty on success, so a no-orphan check below
 # can not pass vacuously.
@@ -745,7 +753,9 @@ for sig in TERM INT HUP; do
   # file (queue.lock before DND-823).
   bg "B30$sig" --label "B30$sig" -- sh -c ': > "$1"' _ "$W/B30$sig.ran"
   await_grep "$W/B30$sig.err" "WAITING" 20 || bad "30-$sig-B-wait" "B never waited"
-  BG_PRE=("${SIG_DEFAULT[@]}")
+  # C's blocking wait has no bound but the signal (WAIT_SEAMS): before
+  # DND-815 a foreground wait deferred the trap until that wait returned.
+  BG_PRE=("${SIG_DEFAULT[@]}" "${WAIT_SEAMS[@]}")
   bg "C30$sig" --label "C30$sig" --outcome-file "$W/30$sig.outcome" -- sh -c ': > "$1"' _ "$W/C30$sig.ran"
   BG_PRE=()
   await_grep "$W/C30$sig.err" "WAITING" 20 || bad "30-$sig-C-wait" "C never waited"
@@ -754,7 +764,7 @@ for sig in TERM INT HUP; do
   kids="$(await_kids "$cpid")"
   check "30-$sig-has-helper" eval '[ -n "$kids" ]'
   kill -s "$sig" "$cpid"
-  check "30-$sig-exits-promptly" exits_within "$cpid" 10
+  check "30-$sig-exits-promptly" exits_within "$cpid" "$EXIT_CAP_S"
   reap "C30$sig"
   check "30-$sig-rc" eq "$RC" "$want"
   check "30-$sig-C-not-run" absent "$W/C30$sig.ran"
@@ -790,7 +800,7 @@ xpid="$(pid_of_bg X31)"
 xkids="$(await_kids "$xpid")"
 check 31-has-helper eval '[ -n "$xkids" ]'
 kill -TERM "$xpid"
-check 31-exits-promptly exits_within "$xpid" 10
+check 31-exits-promptly exits_within "$xpid" "$EXIT_CAP_S"
 reap X31; check 31-rc eq "$RC" 143
 # shellcheck disable=SC2086 # word-split pid list
 check 31-no-orphan-helper no_orphans $xkids
@@ -940,6 +950,14 @@ else
   bad 34-old-copy "could not extract the pre-fix test-slot at $OLD_REV: $(cat "$W/34.git.err" 2>/dev/null). Fix: run the suite from a git checkout of ~/dev/custom that contains $OLD_REV (git fetch origin)."
 fi
 
+# 30b (DND-1356): the parent-check seam is honored only on a test pool and
+# an invalid value is refused (exit 2, with a Fix), never a fallback.
+newpool p30b 1
+ATHENA_TEST_SLOT_PARENT_CHECK=0 timeout "$EXIT_CAP_S" "$BIN" --label P30b -- true 2>"$W/30b.err"; rc=$?
+check 30b-invalid-rc eq "$rc" 2
+check 30b-invalid-names has "$W/30b.err" "ATHENA_TEST_SLOT_PARENT_CHECK='0'"
+check 30b-invalid-fix has "$W/30b.err" "Fix:"
+
 # ------------------------------------------------- parent death (DND-925)
 # A queued test-slot whose caller died used to keep its queue place (the
 # kernel reparents it and sends it no signal), later take a slot and run a
@@ -984,20 +1002,22 @@ orphan_start() {
 
 # 35: the queue HEAD (polling the slots) loses its caller. It must leave the
 # queue within a bound, say ORPHANED with a Fix, log `orphaned`, and never run
-# CMD, even once the slot frees.
+# CMD, even once the slot frees. In 35 and 36 the heartbeat chunk is an hour
+# (DND-1356), so the parent check is the only thing that can end the wait.
 newpool p35 1
+export ATHENA_TEST_SLOT_HEARTBEAT=3600
 hold A35 holder-A35
 orphan_start O35
 check 35-orphan-pid eval '[ -n "$ORPHAN_PID" ]'
 kill -9 "$PARENT_PID"
 wait "$PARENT_PID" 2>/dev/null
-check 35-exits-promptly exits_within "${ORPHAN_PID:-0}" 15
+check 35-exits-promptly exits_within "${ORPHAN_PID:-0}" "$EXIT_CAP_S"
 check 35-left-queue await_waiters_s 0 5
 check 35-says-orphaned has "$W/O35.err" "ORPHANED"
 check 35-fix has "$W/O35.err" "Fix:"
 check 35-event eq "$(event_count orphaned O35)" 1
 release A35; reap A35; check 35-A-rc eq "$RC" 0
-exits_within "${ORPHAN_PID:-0}" 15
+exits_within "${ORPHAN_PID:-0}" "$EXIT_CAP_S"
 check 35-never-ran absent "$W/O35.order"
 check 35-no-acquire eq "$(event_count acquired O35)" 0
 
@@ -1015,7 +1035,7 @@ bg W363 --label W363 -- sh -c 'echo W3 >> "$1"' _ "$W/36.order"
 check 36-W3-queued await_waiters_s 3 20
 kill -9 "$PARENT_PID"
 wait "$PARENT_PID" 2>/dev/null
-check 36-exits-promptly exits_within "${ORPHAN_PID:-0}" 15
+check 36-exits-promptly exits_within "${ORPHAN_PID:-0}" "$EXIT_CAP_S"
 st="$("$BIN" --status --json 2>/dev/null)"
 check 36-closed-up eq "$(jq -c '[.waiters[] | [.position, .label]]' <<<"$st")" '[[1,"W361"],[2,"W363"]]'
 check 36-event eq "$(event_count orphaned O36)" 1
@@ -1023,9 +1043,10 @@ release A36
 reap W361; check 36-W1-rc eq "$RC" 0
 reap W363; check 36-W3-rc eq "$RC" 0
 reap A36
-exits_within "${ORPHAN_PID:-0}" 15
+exits_within "${ORPHAN_PID:-0}" "$EXIT_CAP_S"
 check 36-order eq "$(tr '\n' ' ' <"$W/36.order" 2>/dev/null)" "W1 W3 "
 check 36-never-ran absent "$W/O36.order"
+unset ATHENA_TEST_SLOT_HEARTBEAT
 
 # 37: the MISSING case: the caller is already gone when test-slot starts (its
 # first check). C blocks on a FIFO under parent P; P is killed, so C is
@@ -1070,7 +1091,7 @@ if [ "$c37_ppid" != 1 ]; then
 fi
 await_file "$W/C37.ready" 120 || bad 37-ready "c37.sh never opened its FIFO: $(cat "$W/O37.err" 2>/dev/null)"
 release C37
-check 37-exits-promptly exits_within "${c37:-0}" 15
+check 37-exits-promptly exits_within "${c37:-0}" "$EXIT_CAP_S"
 check 37-never-ran absent "$W/O37.ran"
 check 37-says-orphaned has "$W/O37.err" "ORPHANED"
 check 37-fix has "$W/O37.err" "Fix:"

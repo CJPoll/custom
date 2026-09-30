@@ -219,7 +219,8 @@
 #   Test seams (self-test only): ATHENA_TEST_SLOT_DIR (cpu pool dir; the
 #   model pool is its model/); ATHENA_TEST_SLOTS (cpu budget),
 #   ATHENA_TEST_SLOT_DEFAULT_WEIGHT (cpu default weight), ATHENA_TEST_MODEL_SLOTS
-#   (model budget) and ATHENA_TEST_SLOT_HEARTBEAT (seconds) are honored ONLY
+#   (model budget), ATHENA_TEST_SLOT_HEARTBEAT and ATHENA_TEST_SLOT_PARENT_CHECK
+#   (seconds) are honored ONLY
 #   when ATHENA_TEST_SLOT_DIR is set to a non-default path, so no override can
 #   change the real pool. An honored-but-invalid value is exit 2, never a
 #   fallback.
@@ -325,7 +326,8 @@ DEFAULT_HEARTBEAT_S=60
 QUEUE_GRACE_S=1
 WAITER_REAP_AGE_S=10
 # DND-925: a blocked waiter re-checks its caller at least this often.
-PARENT_CHECK_S=5
+# resolve_pool sets PARENT_CHECK_S from this and the seam.
+DEFAULT_PARENT_CHECK_S=5
 # PROC_PID_INIT_INO: the kernel's fixed inode for the initial (host) pid
 # namespace, so "parent is PID 1" means init only when this matches.
 HOST_PID_NS='pid:[4026531836]'
@@ -843,13 +845,14 @@ seam_count() {
 
 # resolve_pool — sets POOL_ROOT (the cpu pool dir), POOL (the dir of pool
 # POOL_KIND), N (its budget in units), N_BASIS, DEFAULT_WEIGHT, NPROC and
-# HEARTBEAT_S from the defaults and the seams.
+# HEARTBEAT_S and PARENT_CHECK_S from the defaults and the seams.
 resolve_pool() {
   local def seam v
   def=$(canon "$(default_pool_dir)")
   POOL_ROOT=$def
   read_nproc
   HEARTBEAT_S=$DEFAULT_HEARTBEAT_S
+  PARENT_CHECK_S=$DEFAULT_PARENT_CHECK_S
   seam=${ATHENA_TEST_SLOT_DIR:-}
   if [ -n "$seam" ]; then
     POOL_ROOT=$(canon "$seam")
@@ -875,8 +878,16 @@ resolve_pool() {
         "set it to whole seconds, or unset it (it is a self-test seam)."
       HEARTBEAT_S=$ATHENA_TEST_SLOT_HEARTBEAT
     fi
+    # DND-1356: a self-test raises it (with the heartbeat) so that only a
+    # signal can end a blocked wait, and asserts on that event, not a clock.
+    if [ -n "${ATHENA_TEST_SLOT_PARENT_CHECK+x}" ]; then
+      is_pos_int "$ATHENA_TEST_SLOT_PARENT_CHECK" || die_usage \
+        "ATHENA_TEST_SLOT_PARENT_CHECK='$ATHENA_TEST_SLOT_PARENT_CHECK' is not a positive integer." \
+        "set it to whole seconds, or unset it (it is a self-test seam)."
+      PARENT_CHECK_S=$ATHENA_TEST_SLOT_PARENT_CHECK
+    fi
   else
-    for v in ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS ATHENA_TEST_SLOT_HEARTBEAT; do
+    for v in ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK; do
       [ -n "${!v+x}" ] || continue
       say "WARN ignoring $v: the test seams apply only with ATHENA_TEST_SLOT_DIR set to a non-default pool; the real pools use their measured budgets."
     done
