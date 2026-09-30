@@ -271,6 +271,17 @@ printf 'A=%s\n' "${SYN_C}" > "${FHOME}/wt/two/app/.env"; chmod 644 "${FHOME}/wt/
 check -- --probe c
 expect "(c) copies: counts matches and violators" 1 "copies fx-dotenv ~/wt/\*/app/.env: 2 matched, 1 violator"
 expect "(c) copies: names the 0644 copy" 1 "FAIL  fx-dotenv copy ~/wt/two/app/.env: mode 0644"
+# A copies glob with a `*/*` segment must match dotfiles (.boto) but never the
+# `.` directory entry: with FNM_DOTMATCH a bare `*` also matches `.`, which
+# made `dir/./sub` a "copy" that is not a regular file (measured live on the
+# desktop 2026-09-30: gcloud legacy_credentials/./<account> read as violators).
+chmod 600 "${FHOME}/wt/two/app/.env"
+mkdir -p "${FHOME}/.fx/gdir/acct"; chmod 700 "${FHOME}/.fx/gdir" "${FHOME}/.fx/gdir/acct"
+( umask 077; printf 'x\n' > "${FHOME}/.fx/gdir/acct/.boto" )
+write_registry "${BASE_ENTRIES[@]}" "$(entry fx-gdir '~/.fx/token' token '~/.fx/gdir/*/*')"
+check -- --probe c
+expect "(c) a */* copies glob matches a dotfile and not the . entry" 0 "copies fx-gdir ~/.fx/gdir/\*/\*: 1 matched, 0 violator" "gdir/\./"
+restore_repo; rm -rf "${FHOME}/.fx/gdir"; chmod 644 "${FHOME}/wt/two/app/.env"
 # Every probe (c) refusal branch, one at a time.
 chmod 770 "${FHOME}/.fx"
 check -- --probe c
