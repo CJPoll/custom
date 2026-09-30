@@ -972,6 +972,15 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `title` — the merge request's title | string | scalar |
 | | `state` — `opened`, `merged` or `closed` | string | scalar |
 | | `revision` — the merge request's `updated_at`, ISO 8601 UTC: the family's ordering revision | string | scalar |
+| `forge.token.expiring` (the forge token family, *Declared families beyond the first pass*) | `entity_id` — `forge_token:<host>:<project_path>:<token_id>`, the access token | string | scalar |
+| | `host` — the hook's forge host, never the body's | string | scalar |
+| | `project_path` — the hook's project path, never the body's | string | scalar |
+| | `token_id` — GitLab's numeric id of the token, as a decimal string | string | scalar |
+| | `token_name` — the token's name | string | scalar |
+| | `expires_on` — the token's expiry, an ISO 8601 date | string | scalar |
+| | `interval` — the warning GitLab sent: `seven_days`, `thirty_days` or `sixty_days` | string | scalar |
+| | `url` — the project's access-token settings page, built from `host` and `project_path` | string | scalar |
+| | `revision` — when the ingress received the warning, ISO 8601 UTC: the family's ordering revision | string | scalar |
 
 `slack.interaction.received` also carries `actor.is_owner`: whether the clicking user is the
 app's configured owner Slack user. It is a boolean, which the declared field
@@ -1165,9 +1174,9 @@ preserving their identity-only property. `slack.message.received` carries **no**
 `revision`: a Slack message is transient and never updated, and its
 `payload.event_id` is already unique.
 
-### Declared families beyond the first pass — `fleet.session.message`, `notion.agent_message.*`, `fleet.machine.*`, `fleet.session.control_changed` and `forge.review.*`
+### Declared families beyond the first pass — `fleet.session.message`, `notion.agent_message.*`, `fleet.machine.*`, `fleet.session.control_changed`, `forge.review.*` and `forge.token.expiring`
 
-Five type families are **declared** here per *Extending the taxonomy — a new type
+Six type families are **declared** here per *Extending the taxonomy — a new type
 family declares its model* (each declares its five things), so a later increment
 that lands their ingress is a natural addition, not a rewrite. None is one of
 the enumerated first-pass source-webhook types above.
@@ -1530,7 +1539,8 @@ Hook header over a body of another kind), `not-merge-request-note`,
 nor the reviewer ids make the owner's while no username is bound yet, so a
 mention could not be checked; it is a miss that says why, never
 `not-owner-note`. An unreadable id or text is `malformed`. Every event kind
-other than a merge request or a comment stays `not-merge-request`. Two
+other than a merge request, a comment or an access token expiry warning
+(*The `forge.token.expiring` family*, below) stays `not-merge-request`. Two
 costs are accepted, each an extra item, never a missed one. A mention
 inside code or a quote matches, though GitLab does not notify for it. And
 after the owner renames their GitLab account, the old username stays bound
@@ -1554,12 +1564,76 @@ statement. At `ac3a1311`: `apps/athena/lib/athena/forge/note_classifier.ex`,
 `forge/mention.ex`, `forge/owner_username.ex`, `forge/hook_store.ex`
 (`bind_username/2`), and `forge.ex` (`own_note/3`).
 
+**Later (2026-09-30, DND-1338):** the *Comments* paragraph said every event
+kind other than a merge request or a comment stays `not-merge-request`.
+Superseded by DND-1338 (gen_saas #581, `7259febe`): a Resource Access Token
+Hook takes its own branch (*The `forge.token.expiring` family*, below).
+
 `owner` is the hook's owner and `source` is `webhook:gitlab`. Every refusal and
 skip that has a hook is counted per (hook, cause), with no body, header or
 token. A cause recorded before verification is written at most once per
 window, because anyone can send one. A request with no hook to count against
 (an unknown hook id, 404, or a body over the bound, 413, refused before the
 lookup) is logged, throttled, and recorded against no owner.
+
+**The `forge.token.expiring` family** (a project access token on the hook's
+project nears expiry; DND-1338). Its only source is the same GitLab webhook
+ingress and hook as `forge.review.*`, on `X-Gitlab-Event: Resource Access
+Token Hook` (`object_kind: access_token`). GitLab sends it seven days before
+a token expires, and 30 and 60 days before where configured; its one
+documented `event_name` is `expiring_access_token`. GitLab sends no event on
+expiry and none on rotation. Every project access token on the pinned
+project is the owner's concern: the owner owns the project's webhook, so no
+per-user match applies.
+
+1. **Payload schema** — exactly `entity_id`, `host`, `project_path`,
+   `token_id`, `token_name`, `expires_on` (ISO 8601 date), `interval`
+   (`seven_days`, `thirty_days` or `sixty_days`; a body with none, or with
+   `null`, is `seven_days`), `url` and `revision`, each a scalar string
+   (*Payload fields and their types per event type*). `host` and
+   `project_path` come from the hook, and `url` (the project's access-token
+   settings page) is built from them. `token_id` is the body's token id as a
+   decimal string, and `expires_on` is the date of its `expires_at`. The
+   payload never holds a token value, the token's `user_id`, `created_at` or
+   `last_used_at`, or any project field.
+2. **Identity field** — `payload.entity_id`
+   (`forge_token:<host>:<project_path>:<token_id>`, the index's `source_ref`);
+   the `subject` of the dedupe window.
+3. **Change/revision token** — `payload.revision`, when the ingress received
+   the warning (the body carries no time of its own), ISO 8601 UTC. The
+   `idempotency_key` is
+   `gitlab:<hook_id>:token:<token_id>:<interval>:<expires_on>`, keyed on
+   what the warning says rather than the delivery, so one warning routes once
+   however often it is delivered, through the same seen-check as
+   `forge.review.*`. Every component is free of `:` where it is produced:
+   the hook id a UUID, the token id a positive integer, the interval from
+   its closed set, the expiry an ISO 8601 date.
+4. **Origination membership** — verified-ingress-only, as `forge.review.*`.
+5. **Enrichment posture** — none. The body carries every field the payload
+   holds.
+
+**Which events the ingress emits.** After verification, in order:
+
+- a body that is not a JSON object, has no `object_kind`, or has no
+  `object_attributes` object is skipped `malformed`; an `object_kind` other
+  than `access_token` is skipped `not-access-token`;
+- a body carrying a token value is skipped `token-value-present` and logged,
+  and nothing of it is routed or stored. A token value is a `token`,
+  `token_digest`, `token_encrypted` or `encrypted_token` key at the top level
+  or in `object_attributes`, or an `object_attributes` string holding one of
+  GitLab's documented token prefixes (`glpat-`, `gldt-`, `glrt-`, …) at a
+  word start, followed by at least 20 token characters. This runs before the
+  project pin, so the anomaly is reported whatever project the body names;
+- a body whose project is not the hook's is refused `project_mismatch`
+  (recorded). A group token's body names no project, so it is refused too;
+- an `event_name` other than `expiring_access_token`, a missing one
+  included, is skipped `unhandled-token-event`;
+- a missing or malformed token id, name, expiry or interval is skipped
+  `malformed`, never built into a partial payload.
+
+Every other warning is `forge.token.expiring`. Its `owner` is the hook's owner
+and its `source` is `webhook:gitlab`, and its skips and refusals are counted
+per (hook, cause), as for `forge.review.*`.
 
 ### Idempotency is per (event, rule)
 
@@ -1579,7 +1653,7 @@ so two concurrent or repeated arrivals of one source event cannot both route.
 A route that fails rolls back, leaves no row, and a later arrival routes
 again. Both hold because the caller opens that one transaction and the
 router's own transaction nests inside it, so the lock, the check and the
-route's rows commit or roll back together. Three ingresses opt in:
+route's rows commit or roll back together. Four ingresses opt in:
 
 - `slack.interaction.received`, for a click that claims nothing (anyone
   else's, or the owner's on a non-terminal button), so a repeated delivery of
@@ -1588,7 +1662,9 @@ route's rows commit or roll back together. Three ingresses opt in:
 - `slack.message.received`, so a Slack retry of one message routes once
   (DND-437);
 - the `forge.review.*` family, so a GitLab redelivery routes once (DND-439;
-  its key is in *Declared families beyond the first pass*).
+  its key is in *Declared families beyond the first pass*);
+- `forge.token.expiring`, so one GitLab warning routes once (DND-1338; its
+  key is in *Declared families beyond the first pass*).
 
 Every other family, and every other path, routes each arrival. The seen-check runs before routing, so
 it never dedupes a retry of a delivery. Delivery stays at-least-once for every
@@ -1944,13 +2020,15 @@ The first-pass permitted-origination rule:
   **`notion.agent_message.{created,updated,deleted}`** family (*Declared families
   beyond the first pass*), the latter originated by the Notion inbound-webhook
   ingress and the reconciliation poller. The registered forge members are the
-  five `forge.review.*` types (*Declared families beyond the first pass*),
+  five `forge.review.*` types and `forge.token.expiring` (*Declared families
+  beyond the first pass*),
   originated only by the GitLab webhook ingress; there is no forge poller.
   **Harness-emit MUST NOT be
   able to synthesize a source-emitted webhook type** — a machine-token holder
   cannot mint a `notion.ticket.deleted`, a `slack.message.received`, a
-  `slack.interaction.received`, a `notion.agent_message.*` or a
-  `forge.review.*` that no verified webhook produced; such an event MUST be rejected with a `Fix:`.
+  `slack.interaction.received`, a `notion.agent_message.*`, a
+  `forge.review.*` or a `forge.token.expiring` that no verified webhook
+  produced; such an event MUST be rejected with a `Fix:`.
 - **Harness-emit** may originate only the **finite set of `fleet.*` `type` values
   registered to its machine token** at ingress registration — never a
   source-emitted type, and never an unenumerated `fleet.<arbitrary>` value. The
@@ -5444,13 +5522,20 @@ It consumes exactly these event types. Every other type is not consumed:
 | `forge.review.requested` | Upsert an `owner_only` item, and reopen it when *States* allows | `forge_review` | DND-439 |
 | `forge.review.commented` | Upsert an `owner_only` item, and reopen it when *States* allows | `forge_review` | DND-1337 |
 | `forge.review.removed`, `forge.review.merged`, `forge.review.closed` | Close the item it names (`closed_by: source_status`); never create one | `forge_review` | DND-439 |
+| `forge.token.expiring` | Upsert an `owner_only` item; never reopen an owner close | `forge_token` | DND-1338 |
 
 - **`notion.comment.*` is never consumed.** No comment reaches the index.
 - **The forge family is declared** in *Declared families beyond the first
   pass*. Review requests come from the owner's GitLab `walt_ui` project only
   (owner decision OQ-10, 2026-09-24). GitHub is not a source. The source is
-  the GitLab ingress's constant: every forge event is bound to
-  `forge_review`, never from its payload.
+  the GitLab ingress's constant, never from its payload: a
+  `forge.review.*` event is bound to `forge_review`, and a
+  `forge.token.expiring` event to `forge_token`.
+
+  **Later (2026-09-30, DND-1338):** this bullet said every forge event is
+  bound to `forge_review`. Superseded by DND-1338 (gen_saas #581,
+  `7259febe`): the token family binds to `forge_token`
+  (`Athena.Forge.EventsAdapter.route_token_once/1`).
 
   **Later (2026-09-28):** this bullet said the forge family did not exist yet
   and that DND-439 would declare it. DND-439 declares it.
@@ -5573,9 +5658,10 @@ departures (*Poller (fallback only)*), so the index cannot rely on it.
   the same allow-list as an event (*The storage boundary*), and its result is
   applied by the same rules as an event carrying that revision (*States*),
   including *A restore is sticky until the source changes*.
-  `forge_review`, `slack_ask` and `manual` items have no source read. A
-  `forge_review` item closes by its family's events or by the owner; a
-  `slack_ask` or `manual` item only by the owner or a lease. A forge item is
+  `forge_review`, `forge_token`, `slack_ask` and `manual` items have no
+  source read. A `forge_review` item closes by its family's events or by the
+  owner; a `forge_token` item only by the owner (*States*); a `slack_ask` or
+  `manual` item only by the owner or a lease. A forge item is
   `owner_only`, so no session can lease a stale one.
 
   **Later (2026-09-28):** this bullet said "DND-439 declares the forge read".
@@ -5626,6 +5712,7 @@ envelope's diagnostic `source` (*The event*).
 | `notion_work` | `payload.entity_id` | `notion_work:<ticket_number>`, e.g. `notion_work:WEB-123` | this section |
 | `slack_ask` | the `source_ref` | `slack:<team_id>:<channel_id>:<ts>` | this section |
 | `forge_review` | the `source_ref` | `forge:<host>:<project_path>:<mr_iid>` | this section; the event family is DND-439's |
+| `forge_token` | the `source_ref` | `forge_token:<host>:<project_path>:<token_id>` | DND-1338 |
 | `manual` | the item id | `manual:<item_id>` | this section |
 | `action_item` | declared by DND-449 | declared by DND-449 | DND-449 |
 | `meeting` | declared by DND-447 | declared by DND-447 | DND-447 |
@@ -5643,7 +5730,8 @@ envelope's diagnostic `source` (*The event*).
 - `<channel_id>` is the Slack channel id, never its name. `<ts>` is the
   message's own `ts`, which is Slack's message id. `<host>` is the forge
   hostname. `<project_path>` is the project's full path, and `<mr_iid>` is the
-  merge request's project-scoped number.
+  merge request's project-scoped number. `<token_id>` is GitLab's numeric id
+  of the access token.
 - `manual` items are created by the owner on the priorities page. Only the
   owner creates them.
 
@@ -5686,6 +5774,7 @@ closed list. The list has three parts:
 | `action_item` | declared by DND-449, from the `notion_work` list | `assignee`, `labels` |
 | `slack_ask` | `source_ref`, `url` (a link built from the ids alone) | `message_text`, `slack_thread_ts` |
 | `forge_review` | `source_ref`, `url`, `title`, `status`, `source_revision` | none |
+| `forge_token` | `source_ref`, `url`, `title`, `status`, `due_on`, `source_revision` | none |
 | `meeting` | `source_ref`, `url`, `title` | `starts_at` |
 | `manual` | `source_ref`, `url`, `title`, `source_priority`, `due_on` | none |
 
@@ -5693,6 +5782,11 @@ closed list. The list has three parts:
 DND-439 adds it: the merge request's `updated_at`, the family's ordering
 revision. Without it no forge event older than the row could be refused
 (*States*). It is ordering metadata, not content.
+
+For `forge_token`, `title` is `rotate <token name> (<project_path>) by
+<expires_on>`; `status` is `expiring`; `due_on` is the token's expiry;
+`source_revision` is the warning's receipt time. No token value is ever a
+field.
 
 - **Everything else is refused by name.** That includes a body, a comment or
   `comment_text`, a description, a summary other than an item summary (*Item
@@ -5853,6 +5947,11 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   **Later (2026-09-28):** the reopen bullet before this one named "the forge
   family, DND-439" as a family with no revision token. Superseded: the family
   declares `updated_at` as its revision, and this bullet is its order.
+- **A `forge_token` item has no source close** (DND-1338). Rotation mints
+  a new token id and GitLab raises no event for it, so the item closes only
+  by the owner (`complete`/`dismiss`). The expiry passing closes nothing
+  either: an expired token still needs replacing. A later warning for the
+  same token refreshes the item and never reopens an owner close.
 - **A close needs an event no older than the row.** An older event is not
   applied at all, so it cannot close an item. An event with an equal revision
   can close an item the owner has not restored: within one minute, a
@@ -5939,8 +6038,8 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 desired state* uses. It is derived per source, and `domain_basis` records how:
 
 - `notion_work`, `action_item`, `slack_ask` (the connected Slack is the work
-  Slack, owner decision OQ-6), `forge_review` and `meeting` are `work`, with
-  basis `source`.
+  Slack, owner decision OQ-6), `forge_review`, `forge_token` and `meeting`
+  are `work`, with basis `source`.
 - `notion_personal` takes its domain from the ticket's project, resolved
   through its Epic (*Payload fields and their types per event type* → *A
   ticket's project*). The owner's fleet policy maps the project's page id to a
@@ -6020,8 +6119,8 @@ report's `failed` count and logged, and the next backfill run reads it again.
 **`owner_only`** marks an item only the owner can act on. It is never
 leasable. It is true for:
 
-- every `forge_review` item (a review request or a comment for the owner)
-  and every
+- every `forge_review` item (a review request or a comment for the owner),
+  every `forge_token` item (a token only the owner can rotate) and every
   `meeting` item;
 - a Notion item whose status is `Needs Attention` and whose assignees include
   the owner's own person id in that workspace. The owner's person id per
@@ -6130,7 +6229,7 @@ this subsection is its boundary.
   Every other source is refused by name, whatever the owner's rules list:
   `notion_work` and `action_item` because their subscriptions are
   `metadata_only` and a summary is a store of their body; `forge_review`,
-  `meeting` and `manual` because they carry a title only. A missing or
+  `forge_token`, `meeting` and `manual` because they carry a title only. A missing or
   unknown source is refused too. Enabling another source is an amendment to
   this list.
 - **Owner opt-in per source.** The owner's rules name the enabled sources
