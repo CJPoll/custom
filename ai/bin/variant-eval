@@ -155,7 +155,9 @@ MUTATION_COMMAND_STRINGS = [
 # that is not read-only. The self-test asserts (i) command_allowed? rejects each
 # mutation family, and (ii) the SOURCE routes ALL execution through this single
 # guarded call site (no backticks, %x, system(, IO.popen, spawn(, exec(, and
-# exactly one Open3.capture3( in the whole file).
+# exactly one Open3 exec call in the whole file: Open3.popen3(, since
+# DND-1360; it was Open3.capture3( before, which hid the child pid a
+# cancellation needs).
 # ---------------------------------------------------------------------------
 class MutationAttempt < StandardError; end
 
@@ -213,9 +215,79 @@ def command_allowed?(argv)
   true
 end
 
+# DND-1360: raised by capture when its command was stopped by a Cancel (the
+# other side of a both_sides run failed). Never a measurement.
+class Cancelled < StandardError; end
+
+# DND-1360: a cancellation shared by the sides of one both_sides run. A side
+# that fails calls cancel!, which TERMs the process group of every command
+# still registered (capture runs a cancellable command in its own group, so
+# its admiral-eval and that run's `claude` calls stop together) and KILLs any
+# group still registered GRACE_S later. A command registered after cancel! is
+# stopped at once. Limit: a SIGKILL to variant-eval itself runs no Ruby code,
+# so nothing stops the sides' groups then (a TERM, INT or HUP does: see
+# release_all).
+class Cancel
+  GRACE_S = 10
+
+  def initialize
+    @lock = Mutex.new
+    @pids = []
+    @cancelled = false
+  end
+
+  def cancelled?
+    @lock.synchronize { @cancelled }
+  end
+
+  def register(pid)
+    now = @lock.synchronize do
+      @pids << pid
+      @cancelled
+    end
+    signal_group(pid, "TERM") if now
+  end
+
+  def unregister(pid)
+    @lock.synchronize { @pids.delete(pid) }
+  end
+
+  def cancel!
+    pids = @lock.synchronize do
+      return if @cancelled
+
+      @cancelled = true
+      @pids.dup
+    end
+    pids.each { |pid| signal_group(pid, "TERM") }
+    Thread.new do
+      sleep GRACE_S
+      @lock.synchronize { @pids.dup }.each { |pid| signal_group(pid, "KILL") }
+    end
+  end
+
+  # TERMs every command still registered, cancelled or not. both_sides calls
+  # it on its way out: a cancellable command runs in its own process group,
+  # so a Ctrl-C or TERM that stops variant-eval does not reach it, and without
+  # this an interrupted run would leave both sides' T2 making model calls.
+  def release_all
+    @lock.synchronize { @pids.dup }.each { |pid| signal_group(pid, "TERM") }
+  end
+
+  private
+
+  def signal_group(pid, sig)
+    Process.kill(sig, -pid)
+  rescue Errno::ESRCH, Errno::EPERM
+    nil
+  end
+end
+
 # The ONE guarded execution primitive. Refuses a forbidden argv rather than
-# running it. Returns [stdout, stderr, Process::Status].
-def capture(argv, chdir: nil, stdin_data: "", env: nil)
+# running it. Returns [stdout, stderr, Process::Status]. With `cancel` (a
+# Cancel), the command runs in its own process group so a failing side can
+# stop it; a command stopped that way raises Cancelled instead of returning.
+def capture(argv, chdir: nil, stdin_data: "", env: nil, cancel: nil)
   unless command_allowed?(argv)
     raise MutationAttempt,
           "variant-eval refused a non-read-only command: #{argv.inspect}. " \
@@ -223,10 +295,33 @@ def capture(argv, chdir: nil, stdin_data: "", env: nil)
           "commit, push, or re-baseline. Route only read-only/worktree commands " \
           "through the single guarded exec primitive."
   end
-  opts = { stdin_data: stdin_data }
+  opts = {}
   opts[:chdir] = chdir if chdir
+  opts[:pgroup] = true if cancel
   cmd = env ? [env, *argv] : argv
-  Open3.capture3(*cmd, **opts)
+  Open3.popen3(*cmd, **opts) do |stdin, stdout, stderr, wait_thr|
+    cancel&.register(wait_thr.pid)
+    readers = [stdout, stderr].map { |io| Thread.new { io.read } }
+    begin
+      stdin.write(stdin_data)
+    rescue Errno::EPIPE
+      nil # the command exited without reading its stdin
+    end
+    stdin.close
+    out, err = readers.map(&:value)
+    st = wait_thr.value
+    # Not in an `ensure`, on purpose: if reading raises, popen3's own ensure
+    # still waits for the command, so it must stay registered for
+    # both_sides' release_all to stop it.
+    cancel&.unregister(wait_thr.pid)
+    # After a cancel, any unsuccessful end is the cancel's doing (a command may
+    # catch TERM and exit non-zero); a command that finished cleanly first
+    # still returns its result.
+    raise Cancelled, "#{argv.first(3).join(' ')} was cancelled (#{exit_phrase(st)})" \
+      if cancel&.cancelled? && !st.success?
+
+    [out, err, st]
+  end
 end
 
 # ---------------------------------------------------------------------------
@@ -699,8 +794,9 @@ T1_MODE = "hook-stdin"
 # EvalPool::ENV_VAR, not a flag, so a baseline ref from before DND-1007 (whose
 # admiral-eval refuses an unknown flag) still measures, one call at a time.
 # The side's own timing line is echoed to stderr, named by side.
-def collect_t2_counts(wt, runs, subject, side, concurrency: DEFAULT_SIDE_CONCURRENCY)
-  out, err, st = capture(t2_argv(wt, runs), chdir: wt, env: { EvalPool::ENV_VAR => concurrency.to_s })
+def collect_t2_counts(wt, runs, subject, side, concurrency: DEFAULT_SIDE_CONCURRENCY, cancel: nil)
+  out, err, st = capture(t2_argv(wt, runs), chdir: wt, env: { EvalPool::ENV_VAR => concurrency.to_s },
+                                            cancel: cancel)
   err.to_s.each_line.grep(/^admiral-eval: timing --/) { |l| warn "variant-eval: #{side} T2 #{l.strip}" }
   unless st&.exited? && [0, 1].include?(st.exitstatus)
     raise_t2_unmeasured(side, "admiral-eval #{exit_phrase(st)}#{stderr_tail(err)}")
@@ -829,16 +925,51 @@ end
 # returns the values in side order. When a side raises, the FIRST side in
 # order that raised is re-raised, after both finished, so the verdict never
 # depends on which side happened to fail first in time.
+#
+# DND-1360: the block gets (side, cancel). A side that raises calls
+# cancel.cancel!, which stops every command the other side is running through
+# capture(..., cancel:), so a fast failure no longer waits out the other
+# side's whole T2 (model calls spent on a result that is discarded). The
+# re-raised error names the other side too: cancelled, or failed on its own.
+# A side's name is the element itself, or its last item ([wt, subject, side]).
 def both_sides(sides)
+  cancel = Cancel.new
   outcomes = EvalPool.map(sides, concurrency: sides.size) do |side, _i|
-    [:ok, yield(side)]
+    [:ok, yield(side, cancel)]
+  rescue Cancelled => e
+    [:cancelled, e]
   rescue StandardError => e
+    cancel.cancel!
     [:raised, e]
   end
-  failed = outcomes.find { |r| r.value.first == :raised }
-  raise failed.value.last if failed
+  failed = outcomes.index { |r| r.value.first == :raised }
+  return outcomes.map { |r| r.value.last } unless failed || outcomes.any? { |r| r.value.first == :cancelled }
 
-  outcomes.map { |r| r.value.last }
+  failed ||= outcomes.index { |r| r.value.first == :cancelled }
+  raise with_other_sides(outcomes, failed, sides.map { |s| Array(s).last.to_s })
+ensure
+  # Leaving with a command still running (Ctrl-C, whose Interrupt Ruby raises
+  # in this thread; a TERM's SignalException; any escaped exception) must not
+  # orphan its process group. After a normal finish nothing is registered.
+  cancel&.release_all
+end
+
+# The error of side `index`, its message extended with what happened to every
+# other side that did not finish: cancelled, or failed on its own. Same class
+# (Unmeasured keeps its side and part), so every rescue still matches.
+def with_other_sides(outcomes, index, names)
+  error = outcomes[index].value.last
+  notes = outcomes.each_with_index.filter_map do |r, i|
+    next if i == index
+
+    case r.value.first
+    when :cancelled
+      "the #{names[i]} side was cancelled when the #{names[index]} side failed: its T2 run was stopped, " \
+        "so it made no further model calls and has no measurement"
+    when :raised then "the #{names[i]} side also failed: #{r.value.last.message}"
+    end
+  end
+  notes.empty? ? error : error.exception("#{error.message} Also: #{notes.join('; ')}.")
 end
 
 def measure_sides(res, variant:, baseline:, corpus:, runs:, concurrency: DEFAULT_SIDE_CONCURRENCY)
@@ -868,7 +999,9 @@ def measure_sides(res, variant:, baseline:, corpus:, runs:, concurrency: DEFAULT
         started = EvalPool.monotonic
         base_counts, var_counts = both_sides(
           [[base_wt, res[:t2_subjects][:base], "baseline"], [var_wt, res[:t2_subjects][:var], "variant"]]
-        ) { |(wt, subject, side)| collect_t2_counts(wt, runs, subject, side, concurrency: concurrency) }
+        ) do |(wt, subject, side), cancel|
+          collect_t2_counts(wt, runs, subject, side, concurrency: concurrency, cancel: cancel)
+        end
         warn "variant-eval: T2 wall #{format('%.1f', EvalPool.monotonic - started)}s, both sides at once, " \
              "concurrency #{concurrency} per side"
         t2_out = t2_rows(base_counts, var_counts)
@@ -1739,6 +1872,91 @@ def self_test
   end
   fail.("when both sides raise, the baseline's error must win (side order, not time order); got " \
         "#{raised&.side.inspect}") unless raised && raised.side == "baseline"
+  fail.("when both sides raise, the error must report the other side's failure too; got " \
+        "#{raised&.message.inspect}") unless raised&.message.to_s.include?("variant failed")
+
+  # DND-1360: when one side fails, the other side's run is cancelled, not left
+  # to finish a T2 whose result is discarded. The variant runs a real
+  # subprocess through the guarded capture (marks `started`, then would run 30
+  # s and mark `done`); the baseline fails once it has started. The variant's
+  # process must be stopped (no `done`), its side reported as cancelled, and
+  # the baseline's failure re-raised with both named. No timing verdict: the
+  # proof is the absent `done` marker and the reported cancellation.
+  Dir.mktmpdir("variant-eval-cancel-") do |d|
+    started = File.join(d, "started")
+    done = File.join(d, "done")
+    raised = begin
+      both_sides(%w[baseline variant]) do |side, cancel|
+        if side == "variant"
+          capture(["sh", "-c", ': > "$1"; sleep 30; : > "$2"', "_", started, done], **{ cancel: cancel }.compact)
+          next :variant_finished
+        end
+        400.times do
+          break if File.exist?(started)
+
+          sleep 0.05
+        end
+        raise Unmeasured.new("baseline", "T2", "baseline failed fast")
+      end
+      nil
+    rescue Unmeasured => e
+      e
+    end
+    fail.("the variant's T2 subprocess must have started before the baseline failed (no #{started})") \
+      unless File.exist?(started)
+    fail.("a side that fails must be re-raised (got #{raised.inspect})") \
+      unless raised && raised.side == "baseline" && raised.message.include?("baseline failed fast")
+    fail.("when the baseline fails, the variant's running T2 must be cancelled: it ran to the end " \
+          "(#{done} exists). Fix: both_sides must cancel the other side's capture on a failure") \
+      if File.exist?(done)
+    fail.("the refusal must report the variant side as cancelled (got #{raised&.message.inspect})") \
+      unless raised&.message.to_s.include?("the variant side was cancelled")
+  end
+
+  # DND-1360 (critic round on a7ad72c4): a cancellable capture runs in its own
+  # process group, so a Ctrl-C or TERM that stops variant-eval no longer
+  # reaches it. Leaving both_sides by an exception (Interrupt here, as Ruby's
+  # default SIGINT raises it in the main thread) must stop every side's
+  # command. The side's subprocess records its pid, then would run 30 s and
+  # mark `done`; the proof is that it exits WITHOUT `done` (the wait below
+  # only caps a hang; the verdict is the marker, never a time).
+  Dir.mktmpdir("variant-eval-interrupt-") do |d|
+    pidfile = File.join(d, "pid")
+    done = File.join(d, "done")
+    runner = Thread.new do
+      Thread.current.report_on_exception = false
+      both_sides(%w[baseline variant]) do |_side, cancel|
+        capture(["sh", "-c", 'echo $$ > "$1.$$"; mv "$1.$$" "$1"; sleep 30; : > "$2"', "_", pidfile, done],
+                **{ cancel: cancel }.compact)
+      end
+    rescue Interrupt
+      :interrupted
+    end
+    400.times do
+      break if File.exist?(pidfile)
+
+      sleep 0.05
+    end
+    pid = File.read(pidfile).to_i if File.exist?(pidfile)
+    runner.raise(Interrupt)
+    got = runner.value
+    alive = lambda do
+      Process.kill(0, pid)
+      true
+    rescue Errno::ESRCH
+      false
+    end
+    1200.times do
+      break unless pid && alive.call
+
+      sleep 0.05
+    end
+    fail.("the interrupt test's side never started (no #{pidfile})") unless pid
+    fail.("an Interrupt must still leave both_sides (got #{got.inspect})") unless got == :interrupted
+    fail.("an interrupted both_sides must stop its sides' commands: the side ran to the end (#{done} " \
+          "exists). Fix: both_sides must TERM every still-registered process group on its way out") \
+      if File.exist?(done)
+  end
 
   # collect_t2_counts hands K to the side's admiral-eval through
   # EvalPool::ENV_VAR (an old ref's admiral-eval ignores it; a flag it would
@@ -1793,11 +2011,16 @@ def self_test
     fail.("source must not call #{prim} as code (found #{n}) — route through the guarded exec primitive") \
       unless n.zero?
   end
-  # The one permitted exec primitive is Open3.capture3, called exactly once
-  # (inside the guarded wrapper). `capture3` is an :on_ident only at a real call.
-  exec_calls = code_idents.count("capture3")
-  fail.("source must invoke the exec library exactly once (the guarded site), found #{exec_calls}") \
-    unless exec_calls == 1
+  # The one permitted exec primitive is Open3.popen3, called exactly once
+  # (inside the guarded wrapper); no other Open3 primitive appears at all. An
+  # Open3 method name is an :on_ident only at a real call. DND-1360 moved the
+  # site from capture3 to popen3, whose child pid lets a failing side cancel
+  # the other; the count still covers every Open3 exec primitive.
+  open3_prims = %w[capture3 capture2 capture2e popen3 popen2 popen2e pipeline pipeline_r pipeline_w
+                   pipeline_rw pipeline_start]
+  exec_calls = code_idents.select { |i| open3_prims.include?(i) }
+  fail.("source must invoke the exec library exactly once, as Open3.popen3 in the guarded capture, found " \
+        "#{exec_calls.inspect}") unless exec_calls == ["popen3"]
 
   # DND-505: every first-party lib this process has loaded runs in-process, so
   # it is held to the same rule: no exec primitive of any kind (the one guarded
