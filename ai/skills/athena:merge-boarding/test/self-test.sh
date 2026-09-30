@@ -1324,6 +1324,59 @@ out="$( cd "$D/wt" && INTEGRATION_GATE_IN_SLOT=1 ATHENA_TEST_SLOT_HELD="$(realpa
 out="$( cd "$TMP" && "${TMP}/s5-layout/ai/skills/athena:merge-boarding/scripts/integration-gate" --help 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && grep -q -- '--rebase' <<<"$out" && ok "r7 --help documents --rebase" || bad "r7 --help missing --rebase (rc=$rc)" "$out"
 
+# ---------------------------------------------------------------- DND-1326
+# The outer slot is weighed as test-slot weighs the declared gate itself
+# (test-slot --weight-of), and the --with-critic judge queues in test-slot's
+# model pool. The layout carries THIS checkout's test-slot, which has
+# --weight-of; each case reads the weight from the pool's own events.
+L="${TMP}/w-layout"; layout_copy "$L"
+cp "$(cd "${ROOT}/../../bin" && pwd)/test-slot" "$L/ai/bin/test-slot"
+( cd "$L" && git add -A && git commit -qm layout )
+WGATE="$L/ai/skills/athena:merge-boarding/scripts/integration-gate"
+# w_weight <pool dir> <label prefix> [model] -- the weight of the first run
+# acquired in that pool whose label starts with the prefix.
+w_weight() {
+  jq -s --arg p "$2" '[.[] | select(.event == "acquired" and (.label | startswith($p))) | .weight] | first' \
+    "$1/${3:+model/}events.jsonl" 2>/dev/null
+}
+# w1: a harness-gate run at HARNESS_GATE_JOBS=16 holds 16 units, not the default.
+WS="${TMP}/w1-slots"; R="${TMP}/w1"; slot_repo "$R" "exit 0"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 HARNESS_GATE_JOBS=16 "$WGATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$out" && ok "w1 exit 0 with a weighed outer slot" || bad "w1 expected exit 0, got $rc" "$out"
+[ "$(w_weight "$WS" "integration-gate ")" = 16 ] \
+  && ok "w1 a HARNESS_GATE_JOBS=16 gate's outer slot holds 16 units" || bad "w1 outer slot weight $(w_weight "$WS" "integration-gate ") (want 16)" "$out"
+grep -q 'weight 16' <<<"$out" && ok "w1 the run names the weight it takes" || bad "w1 weight not named" "$out"
+# w2: a gate test-slot cannot weigh by its workers (prep-commit.sh) keeps
+# test-slot's default (budget/3), as before DND-1326.
+WS="${TMP}/w2-slots"; R="${TMP}/w2"; new_repo "$R"; mkdir -p "$R/bin"
+printf '#!/bin/sh\nexit 0\n' > "$R/bin/prep-commit.sh"; chmod +x "$R/bin/prep-commit.sh"
+( cd "$R" && git add -A && git commit -qm gate && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+record_pass "$R"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 HARNESS_GATE_JOBS=16 "$WGATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ "$(w_weight "$WS" "integration-gate ")" = 8 ] \
+  && ok "w2 a prep-commit.sh gate keeps test-slot's default weight" || bad "w2 expected exit 0 at weight 8 (rc=$rc, weight $(w_weight "$WS" "integration-gate "))" "$out"
+# w3: --with-critic's judge queues in the MODEL pool (one unit), beside the gate.
+WS="${TMP}/w3-slots"; R="${TMP}/w3"; slot_repo "$R" "exit 0"
+rm -rf "${R}/$(cd "$R" && git rev-parse --git-path critic-verdicts)"   # no verdict yet
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/critic-pass" "$WGATE" --target main --no-fetch --with-critic 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q '^critic-review: PASS' <<<"$out" && grep -q '^INTEGRATION OK' <<<"$out" \
+  && ok "w3 --with-critic in the model pool: judged PASS, INTEGRATION OK" || bad "w3 expected exit 0 with a PASS (rc=$rc)" "$out"
+[ "$(w_weight "$WS" "critic-review " model)" = 1 ] \
+  && ok "w3 the judge held one model-pool unit" || bad "w3 the judge was not in the model pool (weight '$(w_weight "$WS" "critic-review " model)')" "$out"
+[ "$(w_weight "$WS" "critic-review ")" = null ] \
+  && ok "w3 the judge held no cpu unit" || bad "w3 the judge took cpu units" "$out"
+# w4: a main-checkout test-slot that predates --weight-of (it refuses the
+# flag) is not a failure: the slot takes test-slot's default, and says so.
+L4="${TMP}/w4-layout"; layout_copy "$L4"
+printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = --weight-of ] && { echo "test-slot: unknown argument --weight-of" >&2; exit 2; }; done\nexec "%s" "$@"\n' \
+  "$L/ai/bin/test-slot" > "$L4/ai/bin/test-slot"; chmod +x "$L4/ai/bin/test-slot"
+( cd "$L4" && git add -A && git commit -qm layout )
+WS="${TMP}/w4-slots"; R="${TMP}/w4"; slot_repo "$R" "exit 0"
+out="$( cd "$R" && ATHENA_TEST_SLOT_DIR="$WS" ATHENA_TEST_SLOTS=24 HARNESS_GATE_JOBS=16 "$L4/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ "$(w_weight "$WS" "integration-gate ")" = 8 ] \
+  && ok "w4 an older test-slot: exit 0 at its default weight" || bad "w4 expected exit 0 at weight 8 (rc=$rc, weight $(w_weight "$WS" "integration-gate "))" "$out"
+grep -q "default weight" <<<"$out" && ok "w4 the fallback to the default weight is named" || bad "w4 fallback not named" "$out"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

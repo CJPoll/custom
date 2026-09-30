@@ -1489,6 +1489,33 @@ l49="$(jq -rs '[.[] | select(.event == "acquired") | .label] | last' "$POOL/mode
 check 49-default-label eval '[[ "$l49" == *" admiral-eval" ]]'
 unset ATHENA_TEST_MODEL_SLOTS
 
+# 50 (DND-1326): --weight-of prints the units `test-slot -- CMD` would hold,
+# by the same rules a run uses, and does nothing else: no pool is created and
+# CMD never runs. integration-gate weighs its outer slot with it.
+newpool p50 24
+unset ATHENA_TEST_SLOT_DEFAULT_WEIGHT
+export ATHENA_TEST_MODEL_SLOTS=8
+wo50() { "$BIN" --weight-of "$@" 2>/dev/null; }
+check 50-gate-jobs-16 eq "$(wo50 -- ./ai/bin/harness-gate --jobs 16)" 16
+check 50-gate-env-jobs eq "$(HARNESS_GATE_JOBS=12 wo50 -- ai/bin/harness-gate)" 12
+check 50-gate-over-budget-clamped eq "$(wo50 -- ai/bin/harness-gate --jobs 99)" 24
+check 50-undeclared-default eq "$(wo50 -- bin/prep-commit.sh)" 8
+check 50-explicit-weight eq "$(wo50 --weight 3 -- bin/prep-commit.sh)" 3
+check 50-model-eval eq "$(wo50 -- ruby ai/bin/admiral-eval --run --concurrency 4)" 4
+check 50-model-critic eq "$(wo50 -- ai/bin/critic-review --base main)" 1
+check 50-pool-flag eq "$(wo50 --pool model -- bin/prep-commit.sh)" 1
+wo50 -- sh -c ': > "$1"' _ "$W/p50.ran" >/dev/null
+check 50-cmd-never-runs absent "$W/p50.ran"
+check 50-no-pool-created absent "$POOL"
+"$BIN" --weight-of --outcome-file "$W/p50.outcome" -- true >/dev/null 2>"$W/p50.err"; rc=$?
+check 50-outcome-file-refused eq "$rc" 2
+check 50-outcome-file-fix has "$W/p50.err" "Fix:"
+"$BIN" --weight-of --status >/dev/null 2>&1; rc=$?
+check 50-one-mode eq "$rc" 2
+"$BIN" --weight-of >/dev/null 2>&1; rc=$?
+check 50-needs-cmd eq "$rc" 2
+unset ATHENA_TEST_MODEL_SLOTS
+
 # 48 (DND-1357): a fixture that ends on its own hang cap says so by name.
 # HOLD_CMD's `read -t` and bg's timeout(1) are hang caps: a holder is ended by
 # release(), an event, and a background run by its own exit. Before this, the

@@ -123,7 +123,14 @@
 #   test-slot [--label TEXT] [--wait-timeout SECONDS] [--outcome-file PATH]
 #             [--weight UNITS] [--pool cpu|model] [--exclusive] -- CMD [ARGS...]
 #   test-slot --status [--pool cpu|model] [--json]
+#   test-slot --weight-of [--pool cpu|model] -- CMD [ARGS...]
 #   test-slot --help | --self-test
+#
+#   --weight-of (DND-1326) prints, on one stdout line, the units
+#   `test-slot [--pool P] -- CMD` would hold (the weight rules below, clamped
+#   to the budget), and exits 0. It creates no pool, takes no unit and never
+#   runs CMD. integration-gate asks it for its declared gate's weight, so
+#   the gate's outer slot is weighed as the gate itself would be.
 #
 #   Always invoke the MAIN checkout's copy by absolute path
 #   (~/dev/custom/ai/bin/test-slot), so every caller agrees on the budget.
@@ -342,6 +349,7 @@ Usage:
   test-slot [--label TEXT] [--wait-timeout SECONDS] [--outcome-file PATH]
             [--weight UNITS] [--pool cpu|model] [--exclusive] -- CMD [ARGS...]
   test-slot --status [--pool cpu|model] [--json]
+  test-slot --weight-of [--pool cpu|model] -- CMD [ARGS...]
   test-slot --help | --self-test
 
 Run CMD once its weight fits the machine-wide budget of its pool. The cpu pool
@@ -363,6 +371,7 @@ dash, zsh) runs.
                         critic-eval, variant-eval, block-optimize; else cpu
   --exclusive           BENCH ONLY: hold the whole cpu budget while CMD runs
   --status              show the budget, holders, waiters, UNSLOTTED runs
+  --weight-of           print the units `test-slot -- CMD` would hold; run nothing
   --self-test           run the hermetic self-test suite
 
 Exit: CMD's code if it ran | 75 wait timed out, CMD never ran | 2 usage |
@@ -1754,9 +1763,13 @@ main() {
     esac
     case $1 in
       -h | --help) usage; exit 0 ;;
-      --self-test | --status)
-        [ "$mode" = run ] || die_usage "--self-test and --status are two modes." "pass one of them."
-        [ "$1" = --self-test ] && mode=selftest || mode=status
+      --self-test | --status | --weight-of)
+        [ "$mode" = run ] || die_usage "--self-test, --status and --weight-of are separate modes." "pass one of them."
+        case $1 in
+          --self-test) mode=selftest ;;
+          --status) mode=status ;;
+          --weight-of) mode=weightof ;;
+        esac
         ;;
       --json) JSON=1 ;;
       --exclusive) EXCLUSIVE=1 ;;
@@ -1788,6 +1801,12 @@ main() {
     shift
   done
 
+  # --weight-of runs nothing, so it has no outcome to record, and it must not
+  # remove a file some real run owns.
+  if [ "$mode" = weightof ] && [ -n "$OUTCOME_FILE" ]; then
+    die_usage "--weight-of runs nothing, so --outcome-file does not apply to it." \
+      "drop --outcome-file: --weight-of only prints the weight \`test-slot -- CMD\` would take."
+  fi
   # A stale outcome file must never survive to be read as this run's result.
   if [ -n "$OUTCOME_FILE" ]; then
     rm -f -- "$OUTCOME_FILE" 2>/dev/null
@@ -1877,6 +1896,13 @@ main() {
       say "note: this run's weight $WEIGHT exceeds the $POOL_KIND budget $N; it holds the whole budget."
       WEIGHT=$N
     fi
+  fi
+
+  # --weight-of (DND-1326): the weight this run would hold, and nothing else:
+  # no pool is created, no unit taken, CMD never runs.
+  if [ "$mode" = weightof ]; then
+    printf '%s\n' "$WEIGHT"
+    exit 0
   fi
 
   ensure_pool

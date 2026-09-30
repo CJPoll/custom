@@ -120,13 +120,18 @@ outcome removes a receipt for that head. There is no flag that skips it.
                    step, which then reads the judge's receipt exactly as
                    without the flag, so wall time is max(gate, critic), not
                    the sum. On a RED gate the judge is still joined, so one
-                   round returns both sets of findings.
+                   round returns both sets of findings. The judge queues in
+                   test-slot's model pool (DND-1326), never the cpu pool.
   --slot-wait-timeout <secs>
                    the gate runs inside the machine's heavy-test slot pool
                    (ai/bin/test-slot in the MAIN checkout of the repo that
                    holds this script, i.e. ~/dev/custom); give up
                    waiting for a slot after <secs> (default: test-slot's own).
                    A give-up is exit 6, GATE NOT RUN -- never OK, never RED.
+                   The slot holds the units test-slot gives the declared
+                   gate itself (test-slot --weight-of; a harness-gate its
+                   HARNESS_GATE_JOBS workers). <secs> also bounds the
+                   --with-critic judge's wait in the model pool.
   --rebase         inside the slot, after the fetch, if HEAD does not contain
                    the target: rebase the checked-out branch onto it, then
                    gate (and judge) the rebased head. Refuses a dirty tree
@@ -209,7 +214,9 @@ done
 # script, never a worktree's and never PATH. test-slot's stable interface
 # requires that, so every caller agrees on the budget (DND-1006); a worktree
 # copy on a branch that edits it would gate against the shared pool with its
-# own. The run takes test-slot's default cpu weight. The main checkout
+# own. The run holds the weight test-slot gives the declared gate itself
+# (gate_slot_weight, DND-1326), and the --with-critic judge queues in its
+# model pool (start_critic). The main checkout
 # is found from the git common dir of THIS script's checkout (realpath first,
 # so ~/.claude/skills still lands in ~/dev/custom), which is the same for the
 # main checkout, every worktree, and every shipwright lane. A checkout that
@@ -285,10 +292,22 @@ require_critic_tools() {
 
 # start_critic <head sha> -- the standing judge on <head>, in its own process
 # group. setsid execs in place (a background subshell is not a group leader),
-# so $! is the judge's pid AND its process-group id.
+# so $! is the group leader's pid AND the process-group id; the leader is the
+# test-slot that runs the judge (its argv names critic-review).
+#
+# The judge queues in test-slot's MODEL pool (DND-1326), as a critic-review a
+# caller wraps itself does: it holds no cpu unit, and the model pool bounds
+# how many model runs are in flight machine-wide. test-slot is the group
+# leader here and CMD its child in the same group, so the one group signal
+# still reaches test-slot, critic-review and its `claude -p`. A judge the
+# model pool never admits (a --slot-wait-timeout give-up, a test-slot
+# refusal) records no verdict, and the verdict step reads that absence as
+# it always has; its log keeps test-slot's own lines.
 start_critic() {
+  local -a judge_slot=( --pool model --label "critic-review $(basename "$ROOT") ${1:0:8}" )
+  [ -n "$SLOT_WAIT" ] && judge_slot+=( --wait-timeout "$SLOT_WAIT" )
   CRITIC_LOG="$(mktemp "${TMPDIR:-/tmp}/integration-gate-critic.XXXXXX")"
-  ( cd "$ROOT" && exec setsid "$CRITIC" --base "$TARGET" ) >"$CRITIC_LOG" 2>&1 &
+  ( cd "$ROOT" && exec setsid "$TEST_SLOT" "${judge_slot[@]}" -- "$CRITIC" --base "$TARGET" ) >"$CRITIC_LOG" 2>&1 &
   CRITIC_PGID=$!
   CRITIC_ADOPTED=0; CRITIC_ACTIVE=1
   echo "${PROG}: --with-critic: running the standing judge on $(short "$1") beside the gate (pgid ${CRITIC_PGID}, log ${CRITIC_LOG})"
@@ -344,6 +363,38 @@ slot_really_held() {
   exec {fd}<&-
   return 0
 }
+# gate_slot_weight -- appends --weight to SLOT_ARGS so the outer slot holds
+# what test-slot would weigh the gate itself at (DND-1326): a harness-gate its
+# worker count (--jobs is not passable here, so HARNESS_GATE_JOBS, else its
+# default), anything else test-slot's default. It asks the main checkout's
+# test-slot (--weight-of), so there is one weight rule, test-slot's. The gate
+# is the one declared on the target as it stands before the in-slot fetch
+# (the weight is a scheduling declaration; the gate that runs is still
+# resolved inside the slot), else the words of a caller's --gate. When the
+# weight cannot be read (a test-slot that predates --weight-of, a target not
+# yet fetched) the slot takes test-slot's default, as before DND-1326, and
+# SLOT_WEIGHT_NOTE says so: a failed lookup never reads as a weight.
+gate_slot_weight() {
+  local tsha gate w
+  local -a argv=()
+  if tsha="$(git rev-parse --verify -q "${TARGET}^{commit}" 2>/dev/null)" \
+     && gate="$(ir_declared_gate_on "$ROOT" "$tsha")"; then
+    argv=( "$gate" )
+  elif [ -n "$GATE_CMD" ]; then
+    read -r -a argv <<<"$GATE_CMD"
+  fi
+  if [ "${#argv[@]}" -eq 0 ]; then
+    SLOT_WEIGHT_NOTE="test-slot's default weight: no gate is declared on ${TARGET} as fetched so far"
+    return 0
+  fi
+  if w="$("$TEST_SLOT" --weight-of -- "${argv[@]}" 2>/dev/null)" && [[ "$w" =~ ^[1-9][0-9]*$ ]]; then
+    SLOT_ARGS+=( --weight "$w" )
+    SLOT_WEIGHT_NOTE="weight ${w}, as test-slot weighs ${argv[0]}"
+  else
+    SLOT_WEIGHT_NOTE="test-slot's default weight: ${TEST_SLOT} --weight-of could not weigh ${argv[0]} (a test-slot older than DND-1326?)"
+  fi
+}
+
 IN_SLOT=0
 if [ "${INTEGRATION_GATE_IN_SLOT:-}" = 1 ] && slot_really_held; then IN_SLOT=1; fi
 PRESTARTED="${INTEGRATION_GATE_PRESTARTED_CRITIC:-}"
@@ -397,7 +448,8 @@ if [ "$IN_SLOT" -eq 0 ]; then
   OUTCOME="${SLOT_TMP}/outcome"
   SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") ${HEAD0:0:8}" --outcome-file "$OUTCOME" )
   [ -n "$SLOT_WAIT" ] && SLOT_ARGS+=( --wait-timeout "$SLOT_WAIT" )
-  echo "${PROG}: taking a machine test slot first; the fetch and the containment check run inside it (DND-1064)"
+  gate_slot_weight
+  echo "${PROG}: taking a machine test slot first (${SLOT_WEIGHT_NOTE}); the fetch and the containment check run inside it (DND-1064)"
   "$TEST_SLOT" "${SLOT_ARGS[@]}" -- env INTEGRATION_GATE_IN_SLOT=1 bash "$(realpath "${BASH_SOURCE[0]}")" "${ORIG_ARGS[@]}"
   SLOT_RC=$?
   OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"

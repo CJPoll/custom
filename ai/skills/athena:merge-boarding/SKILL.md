@@ -403,7 +403,7 @@ touches the working tree or a ref". Superseded: `--rebase` rebases a clean
 branch inside the test slot and refuses on a conflict (see *`--rebase`* below).
 
 **The gate runs in a machine test slot (DND-486), taken first (DND-1064).**
-`integration-gate` takes a slot (test-slot's default CPU weight, DND-1006) of
+`integration-gate` takes a slot of
 the main checkout's `ai/bin/test-slot`
 (`~/dev/custom`, found from the script's own git common dir, so a worktree copy
 never sets the budget) before it fetches. The fetch, the containment check, `--rebase`,
@@ -423,6 +423,21 @@ already holds and does not queue again. A dirty tree and missing `--with-critic`
 tools are refused before the wait, so they never cost a queue. The
 `--with-critic` judge still starts before the wait on the current head; after a
 `--rebase` it is stopped and the rebased head is judged.
+
+**Weights and pools (DND-1326).** The slot holds the weight test-slot gives the
+declared gate itself (`test-slot --weight-of`): a `harness-gate` its
+`HARNESS_GATE_JOBS` workers, any other gate test-slot's default. A main
+checkout whose test-slot predates `--weight-of` gives the default, and the
+run's "taking a machine test slot first" line says which weight it took. The
+`--with-critic` judge queues in test-slot's model pool, never the CPU pool.
+In the captain form the caller's own slot is the one that counts, so it holds
+the weight `test-slot -- integration-gate` gives (the default); a caller that
+knows its gate is heavier passes `--weight`.
+
+**Later (2026-09-30, DND-1326):** this section said the slot takes
+"test-slot's default CPU weight", and the judge ran outside both pools.
+Superseded: a `HARNESS_GATE_JOBS=16` gate still weighed 8, and nothing bounded
+the in-gate judge by model concurrency.
 
 **`--rebase`: absorb a main that moved while you queued.** Inside the slot,
 after the fetch, if HEAD does not contain the target, it rebases the checked-out
