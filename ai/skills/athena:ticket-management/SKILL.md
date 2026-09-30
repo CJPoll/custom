@@ -410,6 +410,38 @@ it in the next owner digest. The mechanics:
   untrusted input* says: `Status` = `Todo`, or `Parked` if work exists, with
   the owner's choice in the body.
 
+### Reclassifying the backlog
+
+The same policy as *Filing a ticket*, applied to open tickets (DND-1056). The
+tool plans; you write with your own notion-personal connection; the tool
+proves. `S` is `~/dev/custom/ai/skills/athena:ticket-management/scripts`.
+
+1. **Plan.** `S/ticket-reclassify plan --out <scratch>/<unit>-reclassify-plan.json`
+   (namespace the file). Quote its counts. Exit 3 is a stop (budget, rate or
+   server): the entries above the cursor are still a valid plan; apply them
+   and resume later with `--resume-from <cursor>`.
+2. **Nothing to write is a result.** With `writes to apply: 0`, stop here and
+   report the counts. That is the state while no ticket use case is `on`.
+3. **Apply.** For each plan entry, in order:
+   - with `changes`: `API-patch-page` setting only `Kind`, `Severity` and
+     `Security` to its `decided` values;
+   - every entry: `API-patch-block-children` appending ONE paragraph whose text
+     is exactly its `provenance_line`.
+   Touch nothing else: never `Status`, `Path`, `Area`, `Epic`, `Assignee`,
+   edges or title. On a 429, wait its `retry_after` and retry; a 429 is never
+   done.
+4. **Prove.** `S/ticket-reclassify proof --against <plan>` until exit 0. Exit
+   4 names each ticket and property still wrong.
+5. **Re-plan.** Run `plan` again: `planned` and `unchanged` must be 0, except
+   tickets someone edited in between (name them).
+6. **Record.** Write the counts on the epic body and in the admiral's report.
+   Bulk ticket changes are *Notify after, in the digest* (`~/.claude/CLAUDE.md`
+   → *Owner approval policy*): no DM, no wait.
+
+A ticket whose values differ from its last `Jev classification:` line was
+edited by hand after the classifier wrote it. The plan skips it as `locked`:
+the edit wins.
+
 ## When the tracker lacks a status this skill names
 
 **The option set is per-tracker, and the statuses above are not guaranteed to

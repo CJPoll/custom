@@ -607,6 +607,17 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   inside a 200 is not unavailable: it is a decision with source `filer`.
 - **The machine token never reaches argv or the environment**; it goes to curl
   on stdin, as for finding triage.
+- **The open backlog is reclassified the same way** (DND-1056):
+  `scripts/ticket-reclassify plan` sends each open, non-Feature ticket's
+  CURRENT values as the filer's and its id as `ticket.ref`, and records the
+  server's decided values and provenance line verbatim. It reads Notion only
+  (`ai/lib/notion_read.rb` refuses any other request) and writes no tracker;
+  the agent applies only `Kind`, `Severity`, `Security` and the line. A ticket
+  whose values differ from its last provenance line is locked: a hand edit
+  wins. A line at the server's model and versions now, with every property
+  `on` or the modes now, is not re-judged. `proof` re-reads every written
+  ticket and fails on any difference, an unreadable page included. Procedure:
+  athena:ticket-management → *Reclassifying the backlog*.
 
 ## Budget
 

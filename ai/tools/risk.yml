@@ -238,6 +238,11 @@ tools:
   # finding-triage it posts to the Athena server, which records judgment_calls
   # rows and spends the owner's judgments budget: server state, so destructive.
   skills/athena:ticket-management/scripts/ticket-classify: { class: destructive, reason: judgments }
+  # ticket-reclassify (DND-1056) only READS Notion (ai/lib/notion_read.rb
+  # refuses any other request) and writes a local plan file, but `plan` posts
+  # each open ticket to the classification endpoint, which records
+  # judgment_calls rows and spends the owner's judgments budget: destructive.
+  skills/athena:ticket-management/scripts/ticket-reclassify: { class: destructive, reason: judgments }
   # DND-775: the agent PATH git wrapper. It refuses stash-list writes, then
   # execs the real git with argv unchanged, so it can do anything git can.
   agent-bin/git: { class: destructive, reason: git }

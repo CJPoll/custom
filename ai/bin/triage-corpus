@@ -23,9 +23,8 @@
 
 require "fileutils"
 require "json"
-require "open3"
 require "time"
-require "tmpdir"
+require_relative "../lib/notion_read"
 require_relative "../lib/triage_corpus"
 require_relative "../lib/strict_argv"
 
@@ -121,12 +120,10 @@ module Effects
 
   TICKETS_DATA_SOURCE = "219349da-87fb-8063-8f36-000b362fbd60"
   PROJECTS_DATA_SOURCE = "3e2349da-87fb-809a-a93e-000b167fd855"
-  NOTION_VERSION = "2025-09-03"
-  NOTION_READS = [
-    ["POST", %r{\A/v1/data_sources/[0-9a-f-]{36}/query\z}],
-    ["GET", %r{\A/v1/blocks/[0-9a-f-]{36}/children\?page_size=\d{1,3}\z}]
-  ].freeze
-  TRIES = 3
+
+  # The Notion reads go through ai/lib/notion_read.rb, the harness's one
+  # read-only Notion client (extracted from here by DND-1056). Its allowlist
+  # refuses anything but a read before it is sent.
 
   def default_dir
     base = ENV["XDG_DATA_HOME"].to_s
@@ -140,106 +137,26 @@ module Effects
     /\A\d{1,2}(\.\d{1,3})?\z/.match?(value) ? value.to_f : 0.4
   end
 
-  def main_checkout(dir)
-    out, status = Open3.capture2e("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    return nil unless status.success?
-
-    common = out.strip
-    common.start_with?("/") ? common.delete_suffix("/.git") : nil
-  rescue SystemCallError
-    nil
-  end
-
   # notion -> [origin, token]; every miss names what it looked for.
   def notion
-    path = ENV["FLEET_CLAUDE_JSON"] || File.join(Dir.home, ".claude.json")
-    doc = begin
-      JSON.parse(File.read(path))
-    rescue JSON::ParserError, SystemCallError
-      fail!(1, "cannot read #{path} to find the notion-personal MCP entry", "register notion-personal (its env names NOTION_ATHENA_TOKEN_FILE)")
-    end
-    keys = [main_checkout(Dir.pwd), main_checkout(HARNESS)].compact.uniq
-    entry = keys.lazy.map { |k| doc.dig("projects", k, "mcpServers", "notion-personal") }.find(&:itself) || doc.dig("mcpServers", "notion-personal")
-    token_file = entry.is_a?(Hash) ? entry.dig("env", "NOTION_ATHENA_TOKEN_FILE") : nil
-    fail!(1, "the notion-personal MCP entry in #{path} names no absolute NOTION_ATHENA_TOKEN_FILE", "repair that entry (owner-gated credential); this tool only reads it") unless token_file.is_a?(String) && token_file.start_with?("/")
-    token = begin
-      File.read(token_file).strip
-    rescue SystemCallError
-      nil
-    end
-    fail!(1, "the Notion token file #{token_file} is missing or empty", "the token is owner-issued; never mint one") if token.nil? || token.empty?
-    origin = ENV["TRIAGE_CORPUS_NOTION_API"] ? loopback(ENV["TRIAGE_CORPUS_NOTION_API"]) : "https://api.notion.com"
-    [origin, token]
+    NotionRead.credentials(ENV["TRIAGE_CORPUS_NOTION_API"])
+  rescue NotionRead::Error => e
+    # A malformed test override is a usage error, as before the extraction.
+    fail!(e.message.start_with?("the Notion API override") ? 2 : 1, e.message.sub("the Notion API override", "TRIAGE_CORPUS_NOTION_API"), e.fix)
   end
 
-  def loopback(url)
-    m = %r{\Ahttp://(127\.0\.0\.1|localhost)(:\d{1,5})?/?\z}.match(url)
-    fail!(2, "TRIAGE_CORPUS_NOTION_API must be a loopback http URL", "unset it (tests only)") unless m
-    "http://#{m[1]}#{m[2]}"
-  end
-
-  # read(origin, token, method, path, body) -> parsed JSON, or raises
-  # Failure. Anything but an allow-listed READ is refused before it is sent.
+  # read(origin, token, method, path, body) -> parsed JSON, or raises Failure.
   def read(origin, token, method, path, body = nil)
-    unless NOTION_READS.any? { |m, re| m == method && re.match?(path) }
-      fail!(1, "refused a Notion #{method} #{path}: this tool only reads", "this is a bug in triage-corpus")
-    end
-    reply = nil
-    TRIES.times do |i|
-      sleep(pace) if pace.positive?
-      reply = request(method, "#{origin}#{path}", token, body)
-      break unless reply[:status] == 429 && i < TRIES - 1
-
-      sleep([reply[:retry_after], 10].min)
-    end
-    fail!(1, "could not reach Notion (curl exit #{reply[:curl_rc]})", "check the network, then re-run --fetch") if reply[:curl_rc] != 0
-    fail!(1, "Notion answered HTTP #{reply[:status]} to #{method} #{path.sub(/\?.*/, '')}", "re-run --fetch; on 401/403 the token or the page share is the owner's to fix") unless reply[:status] == 200
-    JSON.parse(reply[:body])
-  rescue JSON::ParserError
-    fail!(1, "Notion answered a body that is not JSON", "re-run --fetch")
-  end
-
-  def request(method, url, token, body)
-    [url, token].each do |value|
-      fail!(1, "a request value contains a quote, backslash or control character", "repair the Notion token file or the URL") if /["\\[:cntrl:]]/.match?(value)
-    end
-    Dir.mktmpdir("triage-corpus-") do |dir|
-      File.chmod(0o700, dir)
-      resp = File.join(dir, "resp")
-      hdrs = File.join(dir, "hdrs")
-      config = +""
-      config << %(url = "#{url}"\nrequest = "#{method}"\n)
-      config << %(header = "Authorization: Bearer #{token}"\nheader = "Notion-Version: #{NOTION_VERSION}"\nheader = "Accept: application/json"\n)
-      if body
-        req = File.join(dir, "req.json")
-        File.write(req, JSON.generate(body), perm: 0o600)
-        config << %(header = "Content-Type: application/json"\ndata-binary = "@#{req}"\n)
-      end
-      config << %(output = "#{resp}"\ndump-header = "#{hdrs}"\nwrite-out = "%{http_code}"\n)
-      config << "connect-timeout = 10\nmax-time = 60\nsilent\n"
-      out, _err, status = Open3.capture3("curl", "--config", "-", stdin_data: config)
-      config.clear
-      retry_after = File.exist?(hdrs) ? File.read(hdrs)[/^retry-after:\s*(\d+)/i, 1].to_i : 0
-      { curl_rc: status.exitstatus, status: out.strip.to_i, body: File.exist?(resp) ? File.read(resp) : "", retry_after: [retry_after, 1].max }
-    end
-  rescue Errno::ENOENT
-    fail!(1, "curl is not on PATH", "install curl")
+    NotionRead.read(origin, token, method, path, body, pace: pace)
+  rescue NotionRead::Error => e
+    fail!(1, e.message, e.fix.sub(/\Are-run/, "re-run --fetch"))
   end
 
   # query_all(origin, token, data_source) -> every row, following the cursor.
   def query_all(origin, token, data_source)
-    rows = []
-    cursor = nil
-    loop do
-      body = { "page_size" => 100 }
-      body["start_cursor"] = cursor if cursor
-      page = read(origin, token, "POST", "/v1/data_sources/#{data_source}/query", body)
-      rows.concat(Array(page["results"]))
-      break unless page["has_more"] == true && page["next_cursor"].is_a?(String)
-
-      cursor = page["next_cursor"]
-    end
-    rows
+    NotionRead.query_all(origin, token, data_source, pace: pace)
+  rescue NotionRead::Error => e
+    fail!(1, e.message, e.fix.sub(/\Are-run/, "re-run --fetch"))
   end
 
   def read_input(path, what)
