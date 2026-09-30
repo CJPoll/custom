@@ -65,6 +65,9 @@ tree="$(${G} rev-parse "${sha}^{tree}")"
 m="$(${G} commit-tree "${tree}" -p "$(${G} rev-parse main)" -m squash)"
 ${G} update-ref refs/heads/main "${m}"
 jq --arg m "${m}" '.state="MERGED" | .mergeCommit={oid:$m}' "${ST}/pr.json" > "${ST}/pr.tmp" && mv "${ST}/pr.tmp" "${ST}/pr.json"
+# DND-1324: the forge lands the squash, then answers 502 to the caller.
+[ "${mode}" = err502 ] && { echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1; }
+exit 0
 EOF
 cat > "${STUBS}/confirm-merged" <<'EOF'
 #!/usr/bin/env bash
@@ -149,9 +152,20 @@ run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c3.lock"; expect c3 3; no
 fixture c4; jq '.state="CLOSED"' "${ST}/pr.json" > "${ST}/x" && mv "${ST}/x" "${ST}/pr.json"
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c4.lock"; expect c4 3; no_merge c4
 
-# c5 forge refuses.
-fixture c5; echo refuse > "${ST}/merge_mode"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c5.lock"; expect c5 4
+# c5 forge refuses, and the forge does not show the PR merged either.
+fixture c5; echo refuse > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c5.lock"; expect c5 4; no_teardown c5
+
+# c19 DND-1324 THE MISS: the merge call fails (forge 502) but the squash
+# landed. Exit 4 said "nothing was merged", so the admiral would re-merge or
+# report a landed PR as unmerged. It must confirm, verify the landing and
+# report it like any other merge.
+fixture c19; echo err502 > "${ST}/merge_mode"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c19.lock"; expect c19 0
+grep -q '^MERGED 7 [0-9a-f]\{40\} ON [0-9a-f]\{40\} TREE-MATCH$' <<<"${out}" && ok "c19 reports the landing" || bad "c19 MERGED line" "${out}"
+grep -qi 'merge call failed' <<<"${out}" && ok "c19 names the failed merge call" || bad "c19 hides the failed merge call" "${out}"
+grep -qxF -- "--pr 7 --repo ${WT}" "${ST}/teardown.log" && ok "c19 tears down the landed PR" || bad "c19 no teardown" "$(cat "${ST}/teardown.log")"
+[ "$(grep -c -- '--squash' "${ST}/merge.log")" -eq 1 ] && ok "c19 merge called once, not retried" || bad "c19 merge call count" "$(cat "${ST}/merge.log")"
 
 # c6 required-idle workflow busy.
 fixture c6; echo '[{"status":"queued"}]' > "${ST}/runs.json"
