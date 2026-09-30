@@ -24,6 +24,9 @@ ai/bin/block-optimize --case AE-18 --evidence /tmp/ae18.txt --out-dir /tmp/bo-ae
   case's row must be a T2 failure (`0 < n`, `k < n`). The `subject:` sha must
   equal origin/main's rendered admiral. Anything else is refused with `Fix:`:
   case absent, `k == n`, `0/0`, `[hook-stdin]`, no `subject:` line, or STALE.
+  A run that reports model invocation failures above 0 (DND-1364), has no
+  `admiral-eval: invocation failures: N` line, or whose row has `n` below the
+  run's 10 samples is refused too: it is an unmeasured run, not evidence.
 - `--diff PATCH`: a human-authored candidate (a raw unified diff) in place of
   the model proposer. It takes the identical checks and measurement.
   `--evidence` is optional with `--diff`.

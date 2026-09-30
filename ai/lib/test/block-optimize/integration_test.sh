@@ -97,6 +97,7 @@ render_sha12="$(git -C "${repo}" show HEAD:ai/agents/athena-admiral.md | sha256s
 evidence() { # $1 = sha12
   printf 'subject: %s 4 lines sha %s (loaded inline via --agents as x)\n' "${repo}/ai/agents/athena-admiral.md" "$1"
   printf 'PASS AE-18-refused-spawn-is-pause   8/10   [next-action] ok\n'
+  printf 'admiral-eval: invocation failures: 0 model call(s)\n'
   printf 'admiral-eval: 1/1 cases pass (runs/T2 case = 10)\n'
 }
 evidence "${render_sha12}" > "${tmp}/evidence.txt"

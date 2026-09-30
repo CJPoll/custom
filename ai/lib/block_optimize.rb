@@ -314,6 +314,10 @@ module BlockOptimize
     SUBJECT = /^subject: .* sha ([0-9a-f]{12}) \(loaded inline via --agents/
     ROW = %r{\A(PASS|FAIL)\s+(\S+)\s+(\d+)/(\d+)\b(?:\s+\[([^\]]+)\])?\s*(.*)\z}
     T1_MODE = "hook-stdin"
+    # admiral-eval (DND-1359) prints this line on every run, 0 included, and
+    # marks a row that left a failed model call out of its score.
+    FAILURES_LINE = /^admiral-eval: invocation failures: (\d+) model call\(s\)/
+    ROW_FAILURE_NOTE = /\d+ invocation failure\(s\)/
     FIX_RUN = "Fix: pass --evidence the saved stdout of `ai/bin/admiral-eval --run --runs 10 --only <case>` run " \
               "at origin/main (with the rendered admiral origin/main carries)."
 
@@ -321,7 +325,7 @@ module BlockOptimize
 
     # -> { case_name:, k:, n:, mode:, detail:, subject_sha12: } or raises
     # EvidenceError with one distinct reason per refusal.
-    def parse(text, case_name)
+    def parse(text, case_name, runs: RUNS)
       raise EvidenceError, "the evidence file is empty. #{FIX_RUN}" if text.nil? || text.strip.empty?
 
       shas = text.scan(SUBJECT).flatten.uniq
@@ -330,6 +334,7 @@ module BlockOptimize
       raise EvidenceError, "the evidence has more than one `subject:` sha (#{shas.join(', ')}); it mixes runs. #{FIX_RUN}" \
         if shas.size > 1
 
+      refuse_unmeasured_run!(text)
       rows = text.each_line.filter_map { |l| l.chomp.match(ROW) }
       name = resolve_name(rows.map { |m| m[2] }.uniq, case_name)
       mine = rows.select { |m| m[2] == name }
@@ -346,12 +351,37 @@ module BlockOptimize
       end
       raise EvidenceError, "#{name} scored 0/0: it was never sampled (an unsampled case is not a failure). #{FIX_RUN}" \
         if n.zero?
+      if m[6].to_s.match?(ROW_FAILURE_NOTE)
+        raise EvidenceError, "#{name}'s row reports model invocation failure(s) (#{m[6].to_s.strip[0, 120]}): " \
+                             "the failed samples were not scored, so the row is not a measurement. #{FIX_RUN}"
+      end
+      if n < runs
+        raise EvidenceError, "#{name} scored #{k}/#{n} but the run asked for #{runs} samples per case (#{n} of " \
+                             "#{runs}): a sample was left out, so this is a partly unmeasured run, not a " \
+                             "measurement. #{FIX_RUN}"
+      end
       if k == n
         raise EvidenceError, "#{name} passed #{k}/#{n}: not a failure, nothing to optimize. Fix: pick a case with " \
                              "k < n; if you expected a failure, re-run the evidence (variant-eval re-samples the " \
                              "baseline independently, so a fresh evidence run is legitimate)."
       end
       { case_name: name, k: k, n: n, mode: mode, detail: m[6].to_s.strip, subject_sha12: shas.first }
+    end
+
+    # A run that reports failed model calls, or never counted them, measured the
+    # invocation (auth, quota, network), not the admiral. Refused for the whole
+    # file: DND-1359 leaves a failed call out of the score, so the target row
+    # can look clean while the run is partly unmeasured.
+    def refuse_unmeasured_run!(text)
+      counts = text.scan(FAILURES_LINE).flatten.map(&:to_i)
+      if counts.empty?
+        raise EvidenceError, "the evidence has no `admiral-eval: invocation failures: N` line, so it cannot prove " \
+                             "no model call failed (an uncounted run is not a 0). #{FIX_RUN}"
+      end
+      return if counts.all?(&:zero?)
+
+      raise EvidenceError, "the evidence reports invocation failures (#{counts.sum} model call(s) failed and were " \
+                           "left out of the score): an unmeasured run is not evidence. #{FIX_RUN}"
     end
 
     # An exact case name, else the unique fixture that starts "<case>-".
