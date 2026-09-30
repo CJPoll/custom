@@ -61,7 +61,9 @@
 # own exit status does not matter. In an agent session that tool is an asdf
 # shim, which exits 126 under a scratch HOME (DND-1203). The sentinel execs
 # the next tool on PATH, so a check that keeps its PATH behaves as it would
-# without it. It fires on any machine, lane or agent session.
+# without it. It fires on any machine, lane or agent session. A check that
+# deletes its sentinel, or a gate HOME that is not absolute, fails the check as
+# "could not measure", never as clean.
 #
 # Not in the list: the gate RUN itself (it would recurse). Its --self-test IS
 # declared (DND-507): it never runs the gate, only `--list` and fixtures.
@@ -1099,6 +1101,7 @@ def run_one(argv, chdir: CUSTOM_DIR, env: {}, label: nil, running: nil)
   scan_failure = nil
   returned = false
   sentinel = nil
+  unmeasured = nil
   begin
     # DND-1316: see SCRATCH-HOME SENTINEL. A HOME that cannot anchor the
     # comparison is a failed check (could not measure), never a clean one.
@@ -1126,13 +1129,26 @@ def run_one(argv, chdir: CUSTOM_DIR, env: {}, label: nil, running: nil)
       leaked = e.killed
     end
     # Read after the reap, so nothing the check left running can still log.
-    hits = sentinel ? ScratchHomeSentinel.violations(sentinel) : []
-    ScratchHomeSentinel.remove(sentinel)
+    # A sentinel the check deleted is "could not measure", never clean.
+    hits = []
+    begin
+      hits = ScratchHomeSentinel.violations(sentinel) if sentinel
+    rescue ScratchHomeSentinel::MeasureError => e
+      unmeasured = "harness-gate: FAIL — `#{argv.join(' ')}` could not be judged for scratch-HOME " \
+                   "shims (DND-1316): #{e.message}.\n  Fix: the check must leave the first PATH " \
+                   "directory it was given (the gate's sentinel) in place; do not delete it."
+    ensure
+      ScratchHomeSentinel.remove(sentinel)
+    end
   end
   running&.finish(name)
   unless hits.empty?
     ok = false
     out = "#{out}\n#{ScratchHomeSentinel.report(hits, ENV.fetch('HOME', ''))}"
+  end
+  if unmeasured
+    ok = false
+    out = "#{out}\n#{unmeasured}"
   end
   return [false, "#{out}#{scan_failure}#{leaked.empty? ? '' : leak_report(argv, leaked)}", cpu] if scan_failure
   return [ok, out, cpu] if leaked.empty?
@@ -3465,6 +3481,29 @@ def self_test_core
     r_ok, r_out = run_one([resolved], chdir: dir, env: env)
     unless r_ok && r_out.include?("booted")
       warn "self-test: FAIL — case 8c: a suite that resolved the real ruby first was failed: #{r_out.inspect}"
+      ok = false
+    end
+
+    # A gate HOME the sentinel cannot anchor: the check fails UNRUN, with a Fix:.
+    marker = File.join(dir, "ran")
+    touch = File.join(dir, "touch.sh")
+    File.write(touch, "#!/bin/sh\n: > #{marker.shellescape}\n")
+    FileUtils.chmod(0o755, touch)
+    s_ok, s_out = with_env("HOME" => "relative-home") { run_one([touch], chdir: dir) }
+    unless !s_ok && !File.exist?(marker) && s_out.include?("was not run") && s_out.include?("Fix:")
+      warn "self-test: FAIL — case 8c: a relative gate HOME did not fail the check unrun with a Fix: " \
+           "(ok=#{s_ok}, ran=#{File.exist?(marker)}): #{s_out.inspect}"
+      ok = false
+    end
+
+    # A check that deletes its sentinel cannot read as clean.
+    wipe = File.join(dir, "wipe.sh")
+    File.write(wipe, "#!/bin/sh\nrm -rf \"${PATH%%:*}\"\nexit 0\n")
+    FileUtils.chmod(0o755, wipe)
+    w_ok, w_out = run_one([wipe], chdir: dir)
+    unless !w_ok && w_out.include?("could not be judged") && w_out.include?("Fix:")
+      warn "self-test: FAIL — case 8c: a check that deleted its sentinel was not failed as " \
+           "could-not-measure (ok=#{w_ok}): #{w_out.inspect}"
       ok = false
     end
   end

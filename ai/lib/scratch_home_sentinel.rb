@@ -34,6 +34,12 @@
 # first (`/usr/bin/ruby -e 'print RbConfig.ruby'`); a PATH the check builds
 # itself with its own stub first; a call with HOME set back to the real home.
 #
+# A sentinel never execs another sentinel (a nested gate's, or its own
+# directory under a second spelling): it skips them, so no PATH shape loops.
+#
+# A sentinel directory, script or log that is gone after the check (a check
+# that deleted it) FAILS the check as "could not measure", never as clean.
+#
 # What it cannot see (named, not hidden): a check that rebuilds PATH from a
 # fixed list (it drops the sentinel directory with the rest), a tool reached by
 # an absolute path into a shim directory, and a tool name outside the watched
@@ -61,10 +67,14 @@ module ScratchHomeSentinel
 
   Violation = Struct.new(:tool, :home, :cwd)
 
-  # Raised when the real HOME cannot anchor the comparison. The sentinel then
-  # cannot tell a scratch HOME from the real one, which is "could not measure",
-  # never "no violation".
+  # Raised when the sentinel cannot be built: a real HOME that cannot anchor
+  # the comparison, or a directory that cannot be written. The check then
+  # cannot be judged, which is "could not measure", never "no violation".
   class SetupError < StandardError; end
+
+  # Raised when the sentinel directory, its script or its (pre-created) log is
+  # gone after the check: whatever ran cannot be read, so it is not "none".
+  class MeasureError < StandardError; end
 
   module_function
 
@@ -104,10 +114,18 @@ module ScratchHomeSentinel
           printf '%s\\t%s\\t%s\\n' "$name" "${HOME-(unset)}" "$PWD" >> "$self/#{LOG}"
         fi
       fi
-      IFS=: read -r -a entries <<< "${PATH-}"
+      # Split as bash does: the appended colon keeps a trailing empty entry (cwd).
+      set -f; IFS=:
+      path_="${PATH-}:"; entries=($path_)
+      unset IFS; set +f
       for d in "${entries[@]}"; do
         [ -n "$d" ] || d=.
-        [ "$d" = "$self" ] && continue
+        # Skip every spelling of this sentinel (same file), or two spellings of
+        # its directory would exec each other forever.
+        [ "$d/$name" -ef "$0" ] && continue
+        # Never exec another sentinel (a nested gate's): two sentinels that
+        # each exec the other's first would loop forever. This one has logged.
+        [ -e "$d/#{SCRIPT}" ] && [ "$d/$name" -ef "$d/#{SCRIPT}" ] && continue
         if [ -f "$d/$name" ] && [ -x "$d/$name" ]; then exec "$d/$name" "$@"; fi
       done
       printf 'harness-gate sentinel: %s not found on PATH beyond %s\\n' "$name" "$self" >&2
@@ -129,11 +147,18 @@ module ScratchHomeSentinel
     rescue SystemCallError
       home
     end
-    dir = Dir.mktmpdir("harness-gate-sentinel-", tmp)
-    File.write(File.join(dir, SCRIPT), script(home, physical))
-    File.chmod(0o755, File.join(dir, SCRIPT))
-    names(path).each { |n| File.symlink(SCRIPT, File.join(dir, n)) }
-    dir
+    dir = nil
+    begin
+      dir = Dir.mktmpdir("harness-gate-sentinel-", tmp)
+      File.write(File.join(dir, SCRIPT), script(home, physical))
+      File.chmod(0o755, File.join(dir, SCRIPT))
+      File.write(File.join(dir, LOG), "")
+      names(path).each { |n| File.symlink(SCRIPT, File.join(dir, n)) }
+      dir
+    rescue SystemCallError => e
+      remove(dir)
+      raise SetupError, "could not build the sentinel directory under #{tmp}: #{e.message}"
+    end
   end
 
   # The PATH a check runs with: the sentinel directory first.
@@ -141,11 +166,16 @@ module ScratchHomeSentinel
     path.to_s.empty? ? dir : "#{dir}:#{path}"
   end
 
+  # The logged violations. The log is created empty with the directory, so a
+  # missing directory, script or log raises MeasureError instead of reading as
+  # "none".
   def violations(dir)
-    log = File.join(dir, LOG)
-    return [] unless File.exist?(log)
+    missing = [dir, File.join(dir, SCRIPT), File.join(dir, LOG)].reject { |p| File.exist?(p) }
+    raise MeasureError, "the sentinel lost #{missing.join(', ')} while the check ran" unless missing.empty?
 
-    File.readlines(log, chomp: true).map { |l| Violation.new(*l.split("\t", 3)) }
+    File.readlines(File.join(dir, LOG), chomp: true).map { |l| Violation.new(*l.split("\t", 3)) }
+  rescue SystemCallError => e
+    raise MeasureError, "could not read the sentinel log in #{dir}: #{e.message}"
   end
 
   def remove(dir)

@@ -58,8 +58,15 @@ def run_suite(root, body, home:, base_path:)
                     "mkdir -p \"$scratch\"\n#{body}\n")
   File.chmod(0o755, suite)
   env = { "HOME" => home, "PATH" => ScratchHomeSentinel.path_with(sentinel, base_path) }
-  out, status = Open3.capture2e(env, suite, chdir: root)
-  [status, out, ScratchHomeSentinel.violations(sentinel), sentinel]
+  # `timeout` only caps a hang (a regressed skip would exec-loop); no verdict
+  # depends on it.
+  out, status = Open3.capture2e(env, "timeout", "30", suite, chdir: root)
+  hits = begin
+    ScratchHomeSentinel.violations(sentinel)
+  rescue ScratchHomeSentinel::MeasureError => e
+    e
+  end
+  [status, out, hits, sentinel]
 end
 
 Dir.mktmpdir("scratch-home-sentinel-test") do |root|
@@ -132,6 +139,43 @@ Dir.mktmpdir("scratch-home-sentinel-test") do |root|
   check("named limit: a PATH left with only the sentinel exits 127 with a Fix:",
         out.include?("rc=127") && out.include?("Fix:") && v.empty?, "#{out} #{v.inspect}")
 
+  # --- PATH shapes the sentinel must walk as bash does ---------------------
+  # Two spellings of the sentinel directory: each must skip the other, never
+  # exec it (an endless exec loop). `timeout` only caps that hang.
+  status, out, v, = run_suite(root, "PATH=\"${PATH%%:*}/:$PATH\" timeout 5 ruby -e 'puts :ran'; echo rc=$?",
+                              home: home, base_path: base_path)
+  check("PATH: the sentinel dir under two spellings still reaches the tool (no exec loop)",
+        out.include?("ran") && out.include?("rc=0") && v.empty?, "#{out} #{v.inspect}")
+  outer = ScratchHomeSentinel.create(path: base_path, real_home: home, tmp: root)
+  status, out, v, = run_suite(root, "HOME=\"$scratch\" timeout 5 ruby -e 'puts :ran'; echo rc=$?",
+                              home: home, base_path: "#{outer}:#{base_path}")
+  check("PATH: a nested gate's sentinel is skipped, not exec'd (no loop); the inner one logs",
+        out.include?("rc=126") && v.is_a?(Array) && v.map(&:tool) == ["ruby"] &&
+        ScratchHomeSentinel.violations(outer).empty?, "#{out} #{v.inspect}")
+  ScratchHomeSentinel.remove(outer)
+  cwd_tool = File.join(root, "cwdtool")
+  FileUtils.mkdir_p(cwd_tool)
+  File.write(File.join(cwd_tool, "ruby"), "#!/bin/sh\necho from-cwd\n")
+  File.chmod(0o755, File.join(cwd_tool, "ruby"))
+  status, out, v, = run_suite(root, "cd #{cwd_tool.shellescape} && PATH=\"${PATH%%:*}:\" ruby",
+                              home: home, base_path: base_path)
+  check("PATH: a trailing empty entry (cwd) is searched, as bash does", out.include?("from-cwd"), out)
+
+  # --- a sentinel that is gone cannot read as "no violation" --------------
+  _status, _out, v, dir = run_suite(root, "rm -rf \"${PATH%%:*}\"", home: home, base_path: base_path)
+  check("measure: a sentinel directory the check deleted raises MeasureError naming it, never []",
+        v.is_a?(ScratchHomeSentinel::MeasureError) && v.message.include?(dir), v.inspect)
+  kept = ScratchHomeSentinel.create(path: base_path, real_home: home, tmp: root)
+  File.delete(File.join(kept, ScratchHomeSentinel::LOG))
+  raised = begin
+    ScratchHomeSentinel.violations(kept)
+    false
+  rescue ScratchHomeSentinel::MeasureError
+    true
+  end
+  check("measure: a deleted log raises MeasureError, never []", raised)
+  ScratchHomeSentinel.remove(kept)
+
   # --- HOME spellings -----------------------------------------------------
   link = File.join(root, "home-link")
   File.symlink(home, link)
@@ -151,6 +195,16 @@ Dir.mktmpdir("scratch-home-sentinel-test") do |root|
     end
     check("setup: real HOME #{bad.inspect} raises SetupError (could not measure, never 'no violation')", raised)
   end
+
+  no_tmp = File.join(root, "no-such-tmp")
+  raised = begin
+    ScratchHomeSentinel.create(path: base_path, real_home: home, tmp: no_tmp)
+    false
+  rescue ScratchHomeSentinel::SetupError => e
+    e.message.include?(no_tmp)
+  end
+  check("setup: an unwritable tmp raises SetupError naming it, and leaves nothing behind",
+        raised && !File.exist?(no_tmp))
 
   # --- cleanup ------------------------------------------------------------
   dir = ScratchHomeSentinel.create(path: base_path, real_home: home, tmp: root)
