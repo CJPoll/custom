@@ -54,7 +54,13 @@ path fleets already share) it:
      <git common dir>/integration-receipts/<head>.json: verdict pass, head ==
      --head, and recorded base == the origin/<base> SHA checked in step 2.
      No flag skips this; integration-gate writes it only on INTEGRATION OK;
-  4. optionally refuses while <workflow-file> has a queued/running run on <base>;
+  4. with --require-idle-workflow <workflow-file>, keyed on the base SHA from
+     step 2 (DND-1378): the base commit's own push run, looked up by SHA and
+     re-read by id, must be completed, and the <base> run list must show no
+     queued/running run. No run for the base SHA is NOT SEEN YET (under 600s)
+     or NO RUN FOR BASE (exit 5), never idle, unless the commit carries a skip
+     marker ([skip ci] and kin). Any read it cannot make is COULD NOT LOOK
+     (exit 2). The base run's conclusion is printed; a non-success is a WARN;
   5. merges via gh-athena pr merge --squash --match-head-commit <head> (no --auto);
   6. confirm-merged --pr <n> --fetch (bounded retry), also after a failed
      merge call, which can still have landed (DND-1324);
@@ -69,7 +75,7 @@ Exit (every non-zero prints a Fix: line):
   3 stale: PR not open, head moved, or base not contained -- re-gate (nothing landed)
   4 forge refused the merge, and confirm-merged does not show it landed
     (a failed call that DID land is verified and reported as a merge)
-  5 required-idle workflow busy -- retry later (nothing landed)
+  5 required-idle workflow busy, NOT SEEN YET or NO RUN FOR BASE -- retry later (nothing landed)
   6 lock wait timed out; the lock is never broken (nothing landed)
   7 LANDED UNGATED: parent or tree mismatch -- re-gate origin/main now, report it
   8 merge ran but landing not confirmed -- investigate, do not retry blind
@@ -188,14 +194,68 @@ if ! ir_read_receipt "${COMMON}" "${HEAD_SHA}" "${B}"; then
 fi
 echo "RECEIPT ${IR_RECEIPT} base ${B} recorded ${IR_RECORDED_AT}"
 
-if [ -n "${IDLE_WF}" ]; then
-  busy="$(cd "${REPO}" && gh run list --workflow "${IDLE_WF}" --branch "${base}" --json status \
-           -q '[.[] | select(.status != "completed")] | length' 2>/dev/null)" \
-    || die 2 "gh run list --workflow ${IDLE_WF} failed" "check the workflow file name and gh auth; nothing was merged."
-  case "${busy}" in ''|*[!0-9]*) die 2 "gh run list returned '${busy}', not a count" "check gh auth; nothing was merged." ;; esac
-  [ "${busy}" -eq 0 ] || die 5 "${IDLE_WF} has ${busy} queued/in-progress run(s) on ${base}" \
-    "wait for that deploy to finish (athena:merge-boarding -> GitHub path), then re-run; nothing was merged."
-fi
+# ---- required-idle workflow, keyed on the base SHA (DND-1378) ----
+# A single base-branch list read can miss the run for the commit that just
+# landed (not listed yet, or a stale list), and "no live run listed" then read
+# as idle: gen_saas #562 merged during #579's deploy. So the base commit's OWN
+# run is looked up by SHA and re-read by id; a run that cannot be found is
+# NOT SEEN YET / NO RUN FOR BASE, never idle (ai/CLAUDE.md -> "A failed lookup
+# must never look like an empty one"). The base-branch count stays on top, so a
+# re-run of an older run still holds. The base run's conclusion is printed; a
+# non-success is a WARN, not a refusal: no ratified rule holds a merge on a
+# failed deploy, and such a hold would also refuse the fix or revert merge.
+BASE_RUN_GRACE_S=600
+idle_check() {
+  local wf="$1" commit_json ids id view st conc now ct age msg marker branch_json live
+  commit_json="$(cd "${REPO}" && gh run list --workflow "${wf}" --commit "${B}" --event push --limit 20 \
+                  --json databaseId,status,conclusion,headSha,createdAt 2>/dev/null)" \
+    || die 2 "COULD NOT LOOK: gh run list --workflow ${wf} --commit ${B} failed" \
+         "check the workflow file name, gh auth, and that gh supports 'run list --commit' (gh >= 2.x). Could-not-read is never idle; nothing was merged."
+  jq -e 'type == "array"' <<<"${commit_json}" >/dev/null 2>&1 \
+    || die 2 "COULD NOT LOOK: gh run list --commit returned non-JSON" "check gh auth; nothing was merged."
+  jq -e --arg b "${B}" 'all(.[]; .headSha == $b)' <<<"${commit_json}" >/dev/null \
+    || die 2 "COULD NOT LOOK: gh run list --commit ${B} returned a run for another SHA" \
+         "gh ignored --commit (upgrade gh). A list keyed on the wrong SHA is never idle; nothing was merged."
+  ids="$(jq -r '.[].databaseId' <<<"${commit_json}")"
+  local base_run="" base_conc=""
+  for id in ${ids}; do
+    view="$(cd "${REPO}" && gh run view "${id}" --json databaseId,status,conclusion,headSha 2>/dev/null)" \
+      || die 2 "COULD NOT LOOK: gh run view ${id} failed" "check gh auth; nothing was merged."
+    jq -e --arg b "${B}" --argjson i "${id}" '.databaseId == $i and .headSha == $b' <<<"${view}" >/dev/null 2>&1 \
+      || die 2 "COULD NOT LOOK: gh run view ${id} did not return run ${id} for ${B}" "check gh auth; nothing was merged."
+    st="$(jq -r '.status' <<<"${view}")"; conc="$(jq -r '.conclusion // ""' <<<"${view}")"
+    [ "${st}" = completed ] || die 5 "BASE DEPLOY BUSY: ${wf} run ${id} for base ${B} is ${st}" \
+      "gh run watch ${id}, then re-run locked-merge; nothing was merged."
+    [ -n "${base_run}" ] || { base_run="${id}"; base_conc="${conc}"; }
+  done
+  if [ -z "${base_run}" ]; then
+    now="$(date +%s)"; ct="$(git -C "${REPO}" show -s --format=%ct "${B}")"; age=$(( now - ct ))
+    msg="$(git -C "${REPO}" show -s --format=%B "${B}")"
+    marker="$(grep -o -i -E '\[(skip ci|ci skip|no ci|skip actions|actions skip)\]|^skip-checks: *true' <<<"${msg}" | head -1)"
+    if [ "${age}" -lt "${BASE_RUN_GRACE_S}" ]; then
+      die 5 "NOT SEEN YET: no ${wf} run for base ${B} (committed ${age}s ago; GitHub lists a push's run after a delay)" \
+        "retry in a minute. A missing run is never idle; nothing was merged."
+    elif [ -n "${marker}" ]; then
+      echo "BASE-RUN none: ${B} carries '${marker}', no run expected; idle judged by the ${base} run list alone"
+    else
+      die 5 "NO RUN FOR BASE: ${B} has no ${wf} push run ${age}s after commit" \
+        "find on the forge why the push started no run (workflow disabled, Actions outage, a skip marker this check does not know); re-run once a run exists. Merging without --require-idle-workflow is an owner decision (~/.claude/CLAUDE.md -> Owner approval policy, item 5). Nothing was merged."
+    fi
+  fi
+  branch_json="$(cd "${REPO}" && gh run list --workflow "${wf}" --branch "${base}" --limit 100 \
+                  --json databaseId,status,headSha 2>/dev/null)" \
+    || die 2 "COULD NOT LOOK: gh run list --workflow ${wf} --branch ${base} failed" "check the workflow file name and gh auth; nothing was merged."
+  jq -e 'type == "array"' <<<"${branch_json}" >/dev/null 2>&1 \
+    || die 2 "COULD NOT LOOK: gh run list --branch returned non-JSON" "check gh auth; nothing was merged."
+  live="$(jq -r '[.[] | select(.status != "completed") | .databaseId] | map(tostring) | join(" ")' <<<"${branch_json}")"
+  [ -z "${live}" ] || die 5 "${base} BUSY: ${wf} has queued/in-progress run(s): ${live}" \
+    "wait for those runs to finish (gh run watch <id>), then re-run; nothing was merged."
+  if [ -n "${base_run}" ]; then
+    echo "IDLE ${wf} base ${B}: BASE-RUN ${base_run} completed/${base_conc}; ${base} list counted $(jq length <<<"${branch_json}") runs, none live"
+    [ "${base_conc}" = success ] || echo "WARN base deploy ${base_run} for ${B} concluded ${base_conc:-unknown}; merging anyway: no ratified rule holds a merge on a failed deploy (DND-1378 escalation)"
+  fi
+}
+[ -z "${IDLE_WF}" ] || idle_check "${IDLE_WF}"
 
 # confirm_landed <tries> -- confirm-merged, bounded; sets confirmed=1 on a landing.
 confirmed=""
