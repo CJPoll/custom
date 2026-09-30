@@ -130,7 +130,9 @@ warn_text_if_stale() {
 # Unconfigured is silent AND unlogged: it would be every session on every
 # machine that has not set this up.
 TOKEN_FILE="${SLACK_TOKEN_FILE:-$HOME/.claude/slack-bot-token}"
-if [ -z "${SLACK_BOT_TOKEN:-}" ] && [ ! -f "$TOKEN_FILE" ]; then
+# The token file is the only configuration: an env var is not read (DND-845,
+# ai/contracts/athena-machine-secrets.md -> Never).
+if [ ! -f "$TOKEN_FILE" ]; then
   exit 0
 fi
 

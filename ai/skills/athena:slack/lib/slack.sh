@@ -59,14 +59,20 @@ slack_need_tools() {
 # `x="$(slack_token)"` accessor: slack_die inside a command substitution kills
 # only the subshell, so a token failure would come back as an empty string and
 # the script would sail on and make an unauthenticated request.
+#
+# The token comes from $SLACK_TOKEN_FILE and nowhere else. There is no env-var
+# fallback (DND-845): a fallback invites a global export, which puts the token
+# in every child of a session (ai/contracts/athena-machine-secrets.md ->
+# Never). So the same-shell cache below is cleared when this lib is sourced: a
+# $SLACK_TOKEN_VALUE inherited from the caller's env is not a token source.
+unset SLACK_TOKEN_VALUE
 slack_load_token() {
   if [ -n "${SLACK_TOKEN_VALUE:-}" ]; then return 0; fi
-  SLACK_TOKEN_VALUE="${SLACK_BOT_TOKEN:-}"
-  if [ -z "$SLACK_TOKEN_VALUE" ] && [ -f "$SLACK_TOKEN_FILE" ]; then
+  if [ -f "$SLACK_TOKEN_FILE" ]; then
     SLACK_TOKEN_VALUE="$(head -n1 "$SLACK_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')"
   fi
-  if [ -z "$SLACK_TOKEN_VALUE" ]; then
-    slack_die "no bot token: set \$SLACK_BOT_TOKEN or put one in $SLACK_TOKEN_FILE (chmod 600)"
+  if [ -z "${SLACK_TOKEN_VALUE:-}" ]; then
+    slack_die "no bot token: put one in $SLACK_TOKEN_FILE (chmod 600); an env var is not read"
   fi
   # The token is interpolated into a QUOTED curl-config value, where " and \
   # are escape characters. Slack tokens are [A-Za-z0-9-] in practice, so this
