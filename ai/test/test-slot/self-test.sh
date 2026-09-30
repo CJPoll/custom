@@ -104,6 +104,12 @@ fixture_caps() {
     printf 'FIXTURE CAP [%s]: the holder was never released and ended itself at HOLD_CAP_S=%s s. A queue or exit check that failed beside it failed on this fixture cap, not test-slot. Fix: release the holder in its case, or find why the case outlived the cap.\n' \
       "$n" "$(cat "$f" 2>/dev/null)"
   done
+  for f in "$1"/*.releasecap; do
+    [ -e "$f" ] || continue
+    n=${f##*/}; n=${n%.releasecap}
+    printf 'FIXTURE CAP [release %s]: the release write never reached the holder within RELEASE_CAP_S=%s s, so it was never released. A check that failed beside it failed on this fixture cap, not test-slot. Fix: make the case wait until the holder has its FIFO open before releasing it.\n' \
+      "$n" "$(cat "$f" 2>/dev/null)"
+  done
   for f in "$1"/*.err; do
     grep -qF 'timeout: sending signal' "$f" 2>/dev/null || continue
     n=${f##*/}; n=${n%.err}
@@ -175,7 +181,16 @@ hold() {
   bg "$name" --label "$label" "$@" -- bash -c "$HOLD_CMD" _ "$W/$name"
   await_file "$W/$name.started" 20 || bad "hold:$name" "holder never started: $(cat "$W/$name.err" 2>/dev/null)"
 }
-release() { timeout 5 bash -c 'printf "go\n" > "$1"' _ "$W/$1.fifo"; }
+# release NAME — write NAME's FIFO. The write blocks until the holder has the
+# FIFO open, so it is capped (RELEASE_CAP_S, a hang cap). A cap that fires
+# leaves NAME.releasecap, which fixture_caps names (and no-fixture-cap fails
+# on), so an unreleased holder is never blamed on test-slot (DND-1357).
+RELEASE_CAP_S=120
+release() {
+  timeout "$RELEASE_CAP_S" bash -c 'printf "go\n" > "$1"' _ "$W/$1.fifo" && return 0
+  echo "$RELEASE_CAP_S" >"$W/$1.releasecap"
+  return 1
+}
 
 # conc.sh DIR TARGET MAXPOLLS — records concurrency: bumps DIR/cur under a
 # lock, tracks DIR/max, holds until cur >= TARGET (bounded poll), then leaves.
@@ -1024,6 +1039,7 @@ cat >"$W/c37.sh" <<'EOF'
 # test-slot. Unreleased within CAP (a hang cap), it writes C37.capped for
 # fixture_caps and exits without ever running test-slot (DND-1357).
 exec 3<>"$1"
+: >"${1%.fifo}.ready"
 if ! read -t "$5" -u 3 _; then echo "$5" >"${1%.fifo}.capped"; exit 0; fi
 exec "$2" --label O37 -- sh -c ': > "$1"' _ "$3" 2>"$4"
 EOF
@@ -1052,7 +1068,8 @@ fi
 if [ "$c37_ppid" != 1 ]; then
   bad 37-born-orphan "C (pid '${c37:-}') has parent '$c37_ppid', not PID 1. Fix: this case needs a host where an orphan is reparented to PID 1 of the host pid namespace; here a child subreaper (e.g. systemd --user) or a container adopted it, which test-slot cannot tell from a live caller at startup (a named RESIDUAL in ai/bin/test-slot). Run the gate from a login shell outside any subreaper or container."
 fi
-timeout 5 bash -c 'printf "go\n" > "$1"' _ "$W/C37.fifo"
+await_file "$W/C37.ready" 120 || bad 37-ready "c37.sh never opened its FIFO: $(cat "$W/O37.err" 2>/dev/null)"
+release C37
 check 37-exits-promptly exits_within "${c37:-0}" 15
 check 37-never-ran absent "$W/O37.ran"
 check 37-says-orphaned has "$W/O37.err" "ORPHANED"
@@ -1415,6 +1432,12 @@ reap r48/B48; check 48-bg-capped-rc eq "$RC" 124
 rep48="$(fixture_caps "$W/r48" 2>&1)"
 check 48-names-bg-cap eval '[[ "$rep48" == *"FIXTURE CAP [B48]"* && "$rep48" == *"BG_CAP_S=1 "* ]]'
 check 48-released-unnamed eval '[[ "$rep48" != *"[R48]"* && "$rep48" != *"[Q48]"* ]]'
+# release's own bound: a FIFO no holder ever opens. The write cannot land,
+# so the cap is the only way out, and it is named.
+mkfifo "$W/r48/N48.fifo"
+RELEASE_CAP_S=1 release r48/N48; check 48-release-capped-rc eq "$?" 1
+rep48="$(fixture_caps "$W/r48" 2>&1)"
+check 48-names-release-cap eval '[[ "$rep48" == *"FIXTURE CAP [release N48]"* && "$rep48" == *"RELEASE_CAP_S=1 "* ]]'
 
 # DND-1357: a fixture cap that fired anywhere is a FAIL by name, even when no
 # other check noticed it.
