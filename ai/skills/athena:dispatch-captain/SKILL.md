@@ -143,8 +143,11 @@ Give the captain, in the brief:
   ONE Bash command that starts in your worktree: `cd <worktree> &&
   ~/dev/custom/ai/bin/test-slot -- timeout 1500 <cmd>`. For `harness-gate`,
   `<cmd>` is your worktree's own `./ai/bin/harness-gate`. Quote its `gating
-  <root>` line with the result. Exit 75 with `test-slot: TIMEOUT` means it
-  never ran: run it again; never count it as a pass. Never wrap
+  <root>` line with the result. A compile or image build outside the gate is
+  heavy too: `docker compose build`, a bootstrap `deps.get`/`compile`, a
+  `mix format` in a fresh container. Run it the same way. Exit 75 with
+  `test-slot: TIMEOUT` means it never ran: run it again; never count it as a
+  pass. Never wrap
   `critic-review` or an eval by itself in the CPU pool: test-slot routes them
   to its model pool."* (`integration-gate --with-critic` is not such a wrap:
   its judge runs beside the gate, inside the gate's own slot.)
@@ -328,9 +331,13 @@ below it, these rules decide.
   load-based failure lowers the cap.
 - **Heavy gates go through `test-slot`.** Wrap your own (`integration-gate`,
   `harness-gate`, a full suite) as `~/dev/custom/ai/bin/test-slot -- <cmd>`,
-  always the main checkout's copy, so every fleet shares one pool. Give every
-  captain the test-slot brief line. Exit 75 with `test-slot: TIMEOUT` means the
-  command never ran.
+  always the main checkout's copy, so every fleet shares one pool. So do the
+  builds and compiles your own briefs or bootstrap steps run outside a gate.
+  Give every captain the test-slot brief line. Exit 75 with `test-slot:
+  TIMEOUT` means the command never ran. Measured 2026-09-30 15:15-15:37Z:
+  captains in two walt_ui fleets ran un-slotted compiles beside gated suites
+  (bare `compose run app` calls at 15:22 and 15:32Z; a `mix format` in a fresh
+  container at ~15:18Z), and load1 hit 42 on the owner's desktop.
 - **A load-based failure lowers your cap by one** for the rest of the run, and
   you tell the session that launched you (it apportions the machine across
   admirals). Load-based failures: a captain's `CONTENTION:` line (captains
