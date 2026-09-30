@@ -52,8 +52,43 @@ exists**. This maps exactly onto Cody's definition:
    ticket), the completion of the post-merge pipeline/run itself.
    - GitHub: latest successful non-deploy run for the merge commit.
    - GitLab: latest `finished_at` among all successful jobs in that pipeline.
-3. **MERGE time** — if there is no post-merge CI at all (e.g. `~/dev/custom`, no
-   CI, no deploy), the merge commit time (`mergedAt` / `merged_at`).
+3. **LANDING time** — if there is no post-merge CI at all (e.g. `~/dev/custom`,
+   no CI, no deploy), the time the change landed on the base branch: the forge
+   merge (`mergedAt` / `merged_at`), or, for a GitHub PR that is CLOSED without a
+   merge, the push that put its change on the base (below).
+
+**Later (2026-09-30, DND-1317):** tier 3 was "the merge commit time
+(`mergedAt` / `merged_at`)", and a PR with no `mergedAt` read `via=open`.
+Superseded: `~/dev/custom` lands by a fast-forward push of the gated, rebased
+head (`athena:merge-boarding`), so GitHub shows those PRs CLOSED, never MERGED.
+Measured 2026-09-30: `lead-time --pr 127` printed `via=open lead=n/a` while its
+change was on main as `6da07d1b`, and the window scan missed #127, #125, #123
+and #122 outright.
+
+### A CLOSED PR's landing (GitHub)
+
+A PR that is CLOSED with no `mergedAt` is judged by its **change**, not its state:
+
+- **Landed** when its head is on the base, or every one of its non-merge
+  commits' patch-ids is on the base (a rebase), or its whole diff's patch-id is
+  one base commit (a squash). The landing time is the **push** to
+  `refs/heads/<base>` that first carried that commit, read from GitHub's
+  repository activity log (`gh api repos/{owner}/{repo}/activity`). The row
+  carries `landed_via: "push"` and `landed_commit`; a forge merge carries
+  `landed_via: "merge"`.
+- **Closed** (`via=closed`, no lead) when none of it is on the base.
+- **Could not measure** (`via=unmeasured`, with the reason on the row and on
+  stderr) when only some of its commits are on the base, or a base commit shares
+  a commit subject with it but not its patch (a conflict-resolved or edited
+  landing), or no push carried the landed commit.
+- A lookup that cannot run (the activity log, a `git fetch` of the base and
+  `refs/pull/<n>/head`) is a failed probe, so the run ends `SCAN INCOMPLETE`.
+
+The window scan lists every PR **updated** since `--since` (`updated:>=`) and
+filters on `closedAt` locally. GitHub's `closed:>=` qualifier omitted five
+unmerged PRs closed inside the window (measured 2026-09-30). A GitLab MR closed
+without a merge reads could-not-measure: landing by push is detected on GitHub
+only.
 
 This is Cody's offered simplification, made regular: a **single rule** yields a
 consistently-available, trustworthy end for every ticket on every forge. It is

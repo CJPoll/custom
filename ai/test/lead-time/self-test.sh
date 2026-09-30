@@ -39,6 +39,13 @@ else
   bad "lead-time --self-test passes" "$(tail -5 "${TMP}/st")"
 fi
 
+# 1b. The landing rules (DND-1317) against a real fixture repo with a stubbed gh.
+if ruby "$here/lead_time_test.rb" >"${TMP}/lt" 2>&1; then
+  ok "lead_time_test.rb: landing rules ($(tail -1 "${TMP}/lt"))"
+else
+  bad "lead_time_test.rb: landing rules" "$(cat "${TMP}/lt")"
+fi
+
 # 2a. Refused: exit 1 (lead-time's documented usage code; 2 already means "PR
 #     not found"), names the flag, carries Fix:, stdout empty, and the repo
 #     was never consulted.
