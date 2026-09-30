@@ -1558,8 +1558,10 @@ whether the index is asked first. For a finish the owner did not review, the
 ingress routes `forge.review.merged` / `forge.review.closed` only when the
 owner has an item for that merge request (in any state, not soft-deleted),
 or a `forge.review.requested` / `forge.review.commented` event for it is
-still pending in the index. The index applies obligations oldest first, so
-the close lands after the item that event creates. Otherwise it routes
+still pending in the index. A close that finds no item waits while that
+event is still owed (*Priority index* → *A close never overtakes the event
+that creates its item*), so the close lands after the item that event
+creates. Otherwise it routes
 nothing and counts `not-owner-reviewer`, as before. Two answers route the
 close without a match, because a close never creates an item and skipping
 one that had an item would leave it open:
@@ -1578,6 +1580,11 @@ so it raises no event and never reopens that close. One window is accepted:
 a comment delivered concurrently with the merge, whose event commits after
 the lookup reads, is not seen, and its item stays open until the owner
 closes it.
+
+**Later (2026-09-30, DND-1384):** this paragraph said "the index applies
+obligations oldest first". It does not: the sweeper drains by due time, so a
+create in retry backoff came due after its close. Superseded by DND-1384
+(gen_saas #598, `a9b304d4`), which makes a close wait for it.
 
 **Later (2026-09-30, DND-1377):** this paragraph was a residual: an item a
 comment raised because the owner authored the merge request, or was only
@@ -5636,13 +5643,39 @@ binding in gen_saas (DND-436); DND-763 tracks the rest of that drift.
   next pass still runs. A transient failure is retried under a bounded budget.
   A personal ticket whose project stays `unavailable` is one (*Domain and
   owner-only items*).
+- **A close never overtakes the event that creates its item** (DND-1384).
+  The sweeper drains obligations by when they are due, oldest record first
+  only among those due together. So an event that would create an item and
+  is in retry backoff can come due after a later event that closes that
+  item (a `notion.ticket.deleted`, or a `forge.review.removed`, `.merged`
+  or `.closed`). Each obligation therefore keeps its event's subject: a
+  SHA-256 digest of `payload.entity_id`, and none when the payload has no
+  `entity_id`, as for a Slack message. A close that finds no item does not
+  settle while an obligation recorded earlier for the same owner, source
+  and subject is still pending. It stays pending, spends no attempt, and
+  comes due again when that obligation does. Once nothing earlier is owed
+  (the create settled, failed, or never existed), it settles
+  `skipped:unknown-item`. An upsert never waits: its revision orders it
+  (*Idempotency is per (event, item)*). An obligation with no subject, or
+  no bound source, waits for nothing and holds nothing back. "Earlier" is
+  record order: an event recorded after its close, or in the same
+  microsecond, is not waited for.
 - **Each obligation ends in exactly one outcome:**
   - `indexed`: an item was created, updated or closed, or the event
     converged on an existing row without writing because the row already
     holds newer evidence (*Idempotency is per (event, item)*);
   - `skipped:<cause>`: the event is legitimately not an item. The causes are
     `not-an-ask`, `unbound-subscription` and `unknown-item` (a delete, or a
-    forge close, for an item never indexed);
+    forge close, for an item never indexed, once no earlier obligation for
+    its subject is still pending);
+
+    **Later (2026-09-30, DND-1384):** `unknown-item` read "a delete, or a
+    forge close, for an item never indexed", settled on first sight.
+    Superseded by DND-1384 (gen_saas #598, `a9b304d4`): a close for an item
+    not yet indexed waits while an earlier obligation for its subject is
+    pending (*A close never overtakes the event that creates its item*).
+    Settling on first sight let a create in retry backoff land after its
+    close and leave the item open for good.
   - `failed:<cause>`: the event should have been an item and is not. The
     causes are `no-source-ref` (*Item identity and `source_ref`*),
     `forbidden-field` (*The storage boundary*), `malformed-payload`,
@@ -5848,7 +5881,10 @@ field.
   boundary does not make upstream stores content-free. The event store and the Slack ingress's own
   store hold what their ingress persists. Keeping work-Notion content out of
   the event store is the `metadata_only` subscription obligation (next
-  bullet). It is not a property of this boundary.
+  bullet). It is not a property of this boundary. An index obligation
+  stores the event's id and type, its bound source and scope, its subject
+  (a SHA-256 digest of `payload.entity_id`, used only for equality), its
+  outcome and retry state, and field names. It stores no payload value.
 - **A `metadata_only` subscription (DND-438).** A Notion subscription carries a
   content policy, `full` (the default, today's behaviour) or `metadata_only`.
   The policy is owner config on the subscription row, never read from a
@@ -5967,7 +6003,8 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   item the owner restored (*A restore is sticky until the source changes*);
   an older one is not applied. They never
   create an item: one for a merge request never indexed is
-  `skipped:unknown-item`. They leave every other state as it is: on an item
+  `skipped:unknown-item`, once no earlier obligation for it is still
+  pending (*The index consumer*). They leave every other state as it is: on an item
   already `done` (any `closed_by`) or `dismissed`, a close is applied as a
   pointer update: the state and `closed_by` stay as they are, and the pointer
   fields and `source_revision` refresh. It is neither a second close nor a
