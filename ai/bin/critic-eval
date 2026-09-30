@@ -19,6 +19,9 @@
 #   ai/bin/critic-eval --run         invoke the critic per fixture (MODEL IN LOOP;
 #                                    NOT part of the deterministic gate) and print
 #                                    the precision/recall report vs the trust bar
+#   ai/bin/critic-eval --run --concurrency K
+#                                    K critic calls in flight (DND-1007,
+#                                    ai/lib/eval_pool.rb); same rows and score
 #   ai/bin/critic-eval               list fixtures + the trust bar + how to run
 #
 # SUBJECT + CONTAINMENT (DND-529): the critic evaluated is the render named by
@@ -39,6 +42,7 @@ AI_DIR       = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "critic_prompt")
 require File.join(AI_DIR, "lib", "strict_argv")
 require File.join(AI_DIR, "lib", "eval_subject")
+require File.join(AI_DIR, "lib", "eval_pool")
 
 FIXTURES_DIR = File.join(AI_DIR, "eval", "critic-fixtures")
 CRITIC       = "athena-diff-critic"
@@ -153,7 +157,29 @@ rescue EvalSubject::SubjectError => e
   [nil, e.message]
 end
 
-def run_model(only = nil, agent_file: DEFAULT_AGENT_FILE)
+# One critic call for one fixture: its prompt from the fixture's declared
+# inputs, the contained argv, and the FINDINGS trailer. Returns the result row.
+# Safe to run on several threads at once (each call is its own subprocess).
+def judge(fx, argv)
+  args = fx[:requires].to_h do |tok|
+    spec = CriticPrompt::INPUTS[tok]
+    [spec[:key], File.read(File.join(fx[:dir], spec[:file]))]
+  end
+  prompt = CriticPrompt.build(**args)
+  out, _e, st = require_open3 { Open3.capture3(*argv, stdin_data: prompt) }
+  flagged = st&.success? ? parse_findings(out.to_s) : []
+  warn "  ! critic invocation failed for #{fx[:name]} (is `claude` on PATH?)" unless st&.success?
+  { name: fx[:name], label: fx[:label], expect: fx[:expect], flagged: flagged }
+end
+
+# Every fixture judged, up to `concurrency` calls in flight (DND-1007). Returns
+# EvalPool::Result per fixture IN FIXTURE ORDER, so the rows, the score and the
+# printed report are those of a serial run.
+def judge_all(selected, argv, concurrency:)
+  EvalPool.map(selected, concurrency: concurrency) { |fx, _i| judge(fx, argv) }
+end
+
+def run_model(only = nil, agent_file: DEFAULT_AGENT_FILE, concurrency: EvalPool::DEFAULT)
   argv, subject_err = critic_argv(agent_file)
   if subject_err
     warn "critic-eval: FAILED — #{subject_err}"
@@ -175,17 +201,11 @@ def run_model(only = nil, agent_file: DEFAULT_AGENT_FILE)
   fp = EvalSubject.fingerprint(agent_file, agent_file.delete_prefix("#{REPO_ROOT}/"))
   puts "subject: #{fp['file']} #{fp['lines']} lines sha #{fp['sha256'][0, 12]} " \
        "(loaded inline via --agents as #{SUBJECT.subject_key})"
-  rows = selected.map do |fx|
-    args = fx[:requires].to_h do |tok|
-      spec = CriticPrompt::INPUTS[tok]
-      [spec[:key], File.read(File.join(fx[:dir], spec[:file]))]
-    end
-    prompt = CriticPrompt.build(**args)
-    out, _e, st = require_open3 { Open3.capture3(*argv, stdin_data: prompt) }
-    flagged = st&.success? ? parse_findings(out.to_s) : []
-    warn "  ! critic invocation failed for #{fx[:name]} (is `claude` on PATH?)" unless st&.success?
-    { name: fx[:name], label: fx[:label], expect: fx[:expect], flagged: flagged }
-  end
+  started = EvalPool.monotonic
+  judged = judge_all(selected, argv, concurrency: concurrency)
+  warn EvalPool.timing_line("critic-eval", wall: EvalPool.monotonic - started, concurrency: concurrency,
+                                           seconds: judged.map(&:seconds))
+  rows = judged.map(&:value)
   rows.each { |r| puts "#{r[:label] == 'bad' ? (r[:flagged].include?(r[:expect]) ? 'HIT ' : 'MISS') : (r[:flagged].empty? ? 'OK  ' : 'FP  ')}  #{r[:name]}  expect=#{r[:expect]} got=#{r[:flagged].join('|')}" }
   s = score(rows)
   # Corpus membership prints WITH the aggregate, always. The same recall and
@@ -226,6 +246,48 @@ def list
   puts "Run the model-in-loop evaluation with: ai/bin/critic-eval --run [--only <since>]"
   0
 end
+
+# DND-1007: the stub critic for the concurrency proof. Answers FINDINGS from the
+# diff's STUBFLAG=<kinds> marker alone, records the most calls in flight, and
+# holds its first `barrier` calls until that many have started (a wait capped
+# at HANG_S only to end a broken run; a capped call answers FINDINGS: hang).
+CONCURRENCY_STUB = <<~'RUBY'
+  #!/usr/bin/ruby
+  # frozen_string_literal: true
+
+  STATE = ARGV.fetch(0)
+  HANG_S = 60
+  def bump(name)
+    File.open(File.join(STATE, name), File::RDWR | File::CREAT, 0o644) do |f|
+      f.flock(File::LOCK_EX)
+      now = yield(f.read.to_i)
+      f.rewind
+      f.truncate(0)
+      f.write(now.to_s)
+      f.flush
+      now
+    end
+  end
+  def mono = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  flag = $stdin.read[/STUBFLAG=(\S+)/, 1]
+  barrier = File.read(File.join(STATE, "barrier")).to_i
+  started = bump("started") { |v| v + 1 }
+  in_flight = bump("in_flight") { |v| v + 1 }
+  bump("max_in_flight") { |v| [v, in_flight].max }
+  hung = false
+  if started <= barrier
+    deadline = mono + HANG_S
+    until File.read(File.join(STATE, "started")).to_i >= barrier
+      if mono > deadline
+        hung = true
+        break
+      end
+      sleep 0.01
+    end
+  end
+  bump("in_flight") { |v| v - 1 }
+  puts "review text\nFINDINGS: #{hung ? 'hang' : flag}"
+RUBY
 
 def run_self_test
   ok = true
@@ -363,9 +425,59 @@ def run_self_test
   check.(why.to_s.include?("Fix:"), "an unloadable --agent-file must be an error carrying a Fix: (got #{why.inspect})")
   # The model call must go through that argv: a correct critic_argv the run
   # ignores would still evaluate main's copy.
-  runner = File.read(__FILE__)[/^def run_model.*?^end$/m].to_s
-  check.(runner.include?("Open3.capture3(*argv") && !runner.include?('"--agent", CRITIC'),
-         "run_model must invoke the critic via critic_argv's argv, never `--agent #{CRITIC}`")
+  src = File.read(__FILE__)
+  runner = src[/^def run_model.*?^end$/m].to_s
+  judge_src = src[/^def judge\b.*?^end$/m].to_s
+  check.(runner.include?("judge_all(selected, argv,") && judge_src.include?("Open3.capture3(*argv") &&
+           !(runner + judge_src).include?('"--agent", CRITIC'),
+         "run_model must invoke the critic via critic_argv's argv (run_model -> judge_all -> judge), " \
+         "never `--agent #{CRITIC}`")
+
+  # DND-1007: K critic calls in flight give the rows of K=1, in fixture order.
+  # A stub `claude` answers from the diff alone (STUBFLAG=<kinds>), so each
+  # row is fixed whatever order the calls run in; its first K calls wait until
+  # K have started, so max-in-flight == K proves the pool really ran K at once.
+  Dir.mktmpdir("critic-eval-concurrency") do |tmp|
+    flags = { "C1" => "a", "C2" => "none", "C3" => "b,c", "C4" => "none", "C5" => "a" }
+    sel = flags.map do |name, f|
+      d = File.join(tmp, "fx", name)
+      FileUtils.mkdir_p(d)
+      File.write(File.join(d, "meta"), "label=bad\nexpect=a\n")
+      File.write(File.join(d, "input.diff"), "+ STUBFLAG=#{f}\n")
+      fixture_spec(d)
+    end
+    stub = File.join(tmp, "claude-stub")
+    File.write(stub, CONCURRENCY_STUB)
+    FileUtils.chmod(0o755, stub)
+    run = lambda do |k|
+      state = File.join(tmp, "state-#{k}")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "barrier"), k.to_s)
+      res = judge_all(sel, [stub, state], concurrency: k)
+      [res.map(&:value), res.map(&:seconds), File.read(File.join(state, "max_in_flight")).to_i]
+    end
+    s_rows, s_secs, s_max = run.call(1)
+    p_rows, p_secs, p_max = run.call(4)
+    want = [["a"], [], %w[b c], [], ["a"]]
+    check.(s_rows.map { |r| r[:flagged] } == want && s_rows.map { |r| r[:name] } == flags.keys,
+           "K=1 rows on the stub critic are wrong: #{s_rows.inspect}")
+    check.(p_rows == s_rows, "K=4 must give the rows of K=1, in fixture order (K=1 #{s_rows.inspect}, " \
+                             "K=4 #{p_rows.inspect}). Fix: judge_all must return EvalPool.map results in input order")
+    check.(s_max == 1 && p_max == 4, "K=1 must run 1 call at a time and K=4 must have 4 in flight " \
+                                     "(saw #{s_max} and #{p_max}). Fix: judge_all must pass concurrency to EvalPool.map")
+    check.((s_secs + p_secs).size == 10 && (s_secs + p_secs).all? { |x| x.is_a?(Float) && x >= 0 },
+           "every critic call must record its duration")
+  end
+  { %w[--concurrency 2] => "--run" }.each do |args, named|
+    _o, reason = parse_cli(args)
+    check.(reason.to_s.include?(named), "`#{args.join(' ')}` without --run must be a usage error naming #{named}")
+  end
+  [%w[--run --concurrency 0 --only no-such-step], %w[--run --concurrency 17 --only no-such-step]].each do |args|
+    _out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), *args)
+    check.(st.exitstatus == 2 && err.include?("--concurrency") && err.include?("Fix:"),
+           "`critic-eval #{args.join(' ')}` must exit 2 naming --concurrency with a Fix: (got exit " \
+           "#{st.exitstatus}); never clamped")
+  end
   # A bad --agent-file is refused before any model call (exit 2, Fix:).
   _out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), "--run", "--agent-file", missing_render)
   check.(st.exitstatus == 2 && err.include?("Fix:"),
@@ -412,6 +524,12 @@ if ARGV.include?("--help") || ARGV.include?("-h")
       ai/bin/critic-eval --run --only S   score only fixtures declaring since=S
                                           (e.g. --only core, the frozen 01-07
                                           series that is comparable across steps)
+      ai/bin/critic-eval --run --concurrency K
+                                          K critic calls in flight (1-16, default 4,
+                                          else $ATHENA_EVAL_CONCURRENCY); rows and
+                                          score are those of K=1. Wall time and
+                                          per-call durations go to stderr. The
+                                          model's rate-limit ceiling is unmeasured.
       ai/bin/critic-eval --self-test      deterministic scorer/parser/declaration
                                           suite (no model)
       ai/bin/critic-eval --help           this text
@@ -428,7 +546,8 @@ end
 # DND-505: every argument must be one this tool declares. The old ad-hoc
 # `ARGV.index` lookup ignored anything else, so `--run --onyl core` scored the
 # WHOLE corpus (a different, slower measurement) and `--rnu` listed and exited 0.
-CLI_SPEC = { "--run" => :switch, "--self-test" => :switch, "--only" => :value, "--agent-file" => :value }.freeze
+CLI_SPEC = { "--run" => :switch, "--self-test" => :switch, "--only" => :value, "--agent-file" => :value,
+             "--concurrency" => :integer }.freeze
 
 # -> [opts, nil] on a well-formed argv, else [nil, reason naming the argument].
 def parse_cli(argv)
@@ -436,6 +555,7 @@ def parse_cli(argv)
   return [nil, "--run and --self-test are separate modes; pass one"] if opts["--run"] && opts["--self-test"]
   return [nil, "--only only applies to --run"] if opts.key?("--only") && !opts["--run"]
   return [nil, "--agent-file only applies to --run"] if opts.key?("--agent-file") && !opts["--run"]
+  return [nil, "--concurrency only applies to --run"] if opts.key?("--concurrency") && !opts["--run"]
 
   [opts, nil]
 rescue StrictArgv::UsageError => e
@@ -453,7 +573,16 @@ def main(argv)
   end
   return run_self_test if opts["--self-test"]
   if opts["--run"]
-    return run_model(opts["--only"], agent_file: File.expand_path(opts.fetch("--agent-file", DEFAULT_AGENT_FILE)))
+    concurrency = begin
+      EvalPool.resolve(opts["--concurrency"])
+    rescue EvalPool::UsageError => e
+      warn "critic-eval: usage error — #{e.message}."
+      warn "  Fix: pass --concurrency K (or set #{EvalPool::ENV_VAR}) with K an integer " \
+           "#{EvalPool::RANGE.first}-#{EvalPool::RANGE.last}; an out-of-range value is refused, never clamped."
+      return 2
+    end
+    return run_model(opts["--only"], agent_file: File.expand_path(opts.fetch("--agent-file", DEFAULT_AGENT_FILE)),
+                                     concurrency: concurrency)
   end
 
   list

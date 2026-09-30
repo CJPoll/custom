@@ -77,7 +77,7 @@
 #
 # Usage:
 #   ai/bin/variant-eval --variant <ref> [--baseline <ref>] [--corpus deterministic|full]
-#                       [--runs N] [--out <file>] [--json <file>]
+#                       [--runs N] [--concurrency K] [--out <file>] [--json <file>]
 #   ai/bin/variant-eval --self-test    verify the runner's own logic (NO model, NO git)
 #
 # The model-in-loop `variant-eval --variant … --corpus full` stays OUT of the
@@ -95,7 +95,12 @@ require_relative "../lib/strict_argv"
 
 AI_DIR              = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "eval_score")
+require File.join(AI_DIR, "lib", "eval_pool")
 ADMIRAL_FIXTURES    = File.join("ai", "eval", "admiral-fixtures")
+# DND-1007: model calls in flight PER SIDE. The two sides' T2 runs go at once,
+# so a run has up to 2K calls in flight; the default keeps that at 4, the
+# admiral-eval default. The model's rate-limit ceiling is unmeasured.
+DEFAULT_SIDE_CONCURRENCY = 2
 SCORECARD_REL       = File.join("ai", "eval", "scorecard.json")
 # The rendered admiral each side's T2 run evaluates (DND-503): the worktree's
 # OWN render, passed to admiral-eval via --agent-file.
@@ -688,8 +693,14 @@ T1_MODE = "hook-stdin"
 # present and agrees with the rows, at least one T2 row parsed, and no model
 # call failed (a failed call scores as a FAIL sample, so p would be the auth
 # outage, not the admiral).
-def collect_t2_counts(wt, runs, subject, side)
-  out, err, st = capture(t2_argv(wt, runs), chdir: wt)
+#
+# DND-1007: `concurrency` reaches the side's admiral-eval through
+# EvalPool::ENV_VAR, not a flag, so a baseline ref from before DND-1007 (whose
+# admiral-eval refuses an unknown flag) still measures, one call at a time.
+# The side's own timing line is echoed to stderr, named by side.
+def collect_t2_counts(wt, runs, subject, side, concurrency: DEFAULT_SIDE_CONCURRENCY)
+  out, err, st = capture(t2_argv(wt, runs), chdir: wt, env: { EvalPool::ENV_VAR => concurrency.to_s })
+  err.to_s.each_line.grep(/^admiral-eval: timing --/) { |l| warn "variant-eval: #{side} T2 #{l.strip}" }
   unless st&.exited? && [0, 1].include?(st.exitstatus)
     raise_t2_unmeasured(side, "admiral-eval #{exit_phrase(st)}#{stderr_tail(err)}")
   end
@@ -778,12 +789,14 @@ def t2_rows(base_counts, var_counts)
   { rows: rows, regressions: regressions, improvements: improvements }
 end
 
-def measure(variant:, baseline:, corpus:, runs:, out_file:, json_file: nil)
+def measure(variant:, baseline:, corpus:, runs:, out_file:, json_file: nil,
+            concurrency: DEFAULT_SIDE_CONCURRENCY)
   # DND-527: each ref is resolved to a commit ONCE, and that sha is what gets
   # checked out and recorded, so the proposal names exactly what was measured.
   res = { variant: variant, variant_sha: resolve_commit(variant), baseline: baseline,
           baseline_sha: resolve_commit(baseline), corpus: corpus, runs: runs }
-  measure_sides(res, variant: res[:variant_sha], baseline: res[:baseline_sha], corpus: corpus, runs: runs)
+  measure_sides(res, variant: res[:variant_sha], baseline: res[:baseline_sha], corpus: corpus, runs: runs,
+                     concurrency: concurrency)
   emit(res, out_file, json_file)
 rescue Unmeasured => e
   # A side ran but did not measure. What WAS measured stays in res and is
@@ -808,7 +821,23 @@ end
 
 # Fill res with the gate result, the deterministic diff and (for --corpus full)
 # the T2 characterization. Raises Unmeasured when a side ran but did not measure.
-def measure_sides(res, variant:, baseline:, corpus:, runs:)
+# DND-1007: runs the block for each side AT ONCE (one thread per side) and
+# returns the values in side order. When a side raises, the FIRST side in
+# order that raised is re-raised, after both finished, so the verdict never
+# depends on which side happened to fail first in time.
+def both_sides(sides)
+  outcomes = EvalPool.map(sides, concurrency: sides.size) do |side, _i|
+    [:ok, yield(side)]
+  rescue StandardError => e
+    [:raised, e]
+  end
+  failed = outcomes.find { |r| r.value.first == :raised }
+  raise failed.value.last if failed
+
+  outcomes.map { |r| r.value.last }
+end
+
+def measure_sides(res, variant:, baseline:, corpus:, runs:, concurrency: DEFAULT_SIDE_CONCURRENCY)
   with_worktree(variant) do |var_wt|
     # Gate short-circuit BEFORE any delta (never-commit-a-broken-harness).
     gate_ok, gate_detail = run_gate(var_wt)
@@ -832,8 +861,13 @@ def measure_sides(res, variant:, baseline:, corpus:, runs:)
 
       if corpus == "full"
         res[:t2_subjects] = { base: t2_subject(base_wt), var: t2_subject(var_wt) }
-        t2_out = t2_rows(collect_t2_counts(base_wt, runs, res[:t2_subjects][:base], "baseline"),
-                         collect_t2_counts(var_wt, runs, res[:t2_subjects][:var], "variant"))
+        started = EvalPool.monotonic
+        base_counts, var_counts = both_sides(
+          [[base_wt, res[:t2_subjects][:base], "baseline"], [var_wt, res[:t2_subjects][:var], "variant"]]
+        ) { |(wt, subject, side)| collect_t2_counts(wt, runs, subject, side, concurrency: concurrency) }
+        warn "variant-eval: T2 wall #{format('%.1f', EvalPool.monotonic - started)}s, both sides at once, " \
+             "concurrency #{concurrency} per side"
+        t2_out = t2_rows(base_counts, var_counts)
         t2 = t2_out[:rows]
         regressions.concat(t2_out[:regressions])
         improvements.concat(t2_out[:improvements])
@@ -1581,7 +1615,10 @@ def self_test
     # "--runs" in the message) rather than exit 2 naming --runs — never a
     # real measurement.
     [%w[--variant does-not-exist-ref --runs 0], "--runs"],
-    [%w[--variant does-not-exist-ref --runs 100], "--runs"]
+    [%w[--variant does-not-exist-ref --runs 100], "--runs"],
+    # DND-1007: --concurrency is refused out of range, never clamped.
+    [%w[--variant does-not-exist-ref --concurrency 0], "--concurrency"],
+    [%w[--variant does-not-exist-ref --concurrency 17], "--concurrency"]
   ].each do |args, named|
     _out, err, st = capture([RbConfig.ruby, File.expand_path(__FILE__), *args])
     fail.("`variant-eval #{args.join(' ')}` must exit 2 (usage), got #{st.exitstatus}") unless st.exitstatus == 2
@@ -1654,6 +1691,74 @@ def self_test
   fail.("--runs must parse as an Integer") unless o1 && o1["--runs"] == 5
   _o, reason = parse_cli(%w[--self-test])
   fail.("--self-test alone must parse, got #{reason.inspect}") unless reason.nil?
+
+  # -- DND-1007: the two sides' T2 runs go at once, and K reaches each side --
+  # both_sides: each side waits until the other has started, so it returns
+  # only if they ran concurrently (a serial both_sides would block the first
+  # side until the hang cap and fail). Values come back in side order.
+  arrived = { "baseline" => Queue.new, "variant" => Queue.new }
+  seen = both_sides(%w[baseline variant]) do |side|
+    arrived[side] << :started
+    other = side == "baseline" ? "variant" : "baseline"
+    raise "hang: the #{other} side never started" unless arrived[other].pop(timeout: 60)
+
+    "#{side}-done"
+  rescue RuntimeError => e
+    e.message
+  end
+  fail.("both_sides must run the sides at once and return them in side order (got #{seen.inspect})") \
+    unless seen == %w[baseline-done variant-done]
+  # When both raise, the FIRST side in order wins, whichever raised first in
+  # time: the variant raises at once, the baseline only after it has.
+  order = Queue.new
+  raised = begin
+    both_sides(%w[baseline variant]) do |side|
+      if side == "variant"
+        order << :variant_raised
+        raise Unmeasured.new("variant", "T2", "variant failed")
+      end
+      order.pop(timeout: 60)
+      raise Unmeasured.new("baseline", "T2", "baseline failed")
+    end
+    nil
+  rescue Unmeasured => e
+    e
+  end
+  fail.("when both sides raise, the baseline's error must win (side order, not time order); got " \
+        "#{raised&.side.inspect}") unless raised && raised.side == "baseline"
+
+  # collect_t2_counts hands K to the side's admiral-eval through
+  # EvalPool::ENV_VAR (an old ref's admiral-eval ignores it; a flag it would
+  # refuse) and echoes that side's timing line. A stub worktree whose
+  # ai/bin/admiral-eval reports the K it was given proves it end to end.
+  Dir.mktmpdir("variant-eval-k-") do |wt|
+    FileUtils.mkdir_p(File.join(wt, "ai", "bin"))
+    FileUtils.mkdir_p(File.dirname(File.join(wt, ADMIRAL_AGENT_REL)))
+    File.write(File.join(wt, ADMIRAL_AGENT_REL), "stub admiral\n")
+    subject = t2_subject(wt)
+    stub = File.join(wt, "ai", "bin", "admiral-eval")
+    File.write(stub, <<~SH)
+      #!/bin/sh
+      echo "subject: stub 1 lines sha #{subject['sha256'][0, 12]} (loaded inline via --agents as x)"
+      echo "PASS C-01 3/3 [next-action] ok"
+      echo "admiral-eval: 1/1 cases pass (runs/T2 case = 3)"
+      echo "admiral-eval: timing -- wall 1.0s, concurrency ${ATHENA_EVAL_CONCURRENCY:-unset}, 3 model call(s)" >&2
+    SH
+    FileUtils.chmod(0o755, stub)
+    old_err = $stderr
+    $stderr = StringIO.new
+    begin
+      counts = collect_t2_counts(wt, 3, subject, "baseline", concurrency: 3)
+      echoed = $stderr.string
+    ensure
+      $stderr = old_err
+    end
+    fail.("collect_t2_counts must parse the stub side's counts (got #{counts.inspect})") \
+      unless counts.keys == ["C-01"] && counts["C-01"].k == 3 && counts["C-01"].n == 3
+    fail.("collect_t2_counts must hand K to the side's admiral-eval via #{EvalPool::ENV_VAR} and echo its " \
+          "timing line, named by side (stderr: #{echoed.inspect})") \
+      unless echoed.include?("variant-eval: baseline T2 admiral-eval: timing -- wall 1.0s, concurrency 3,")
+  end
 
   # -- SOURCE containment: all execution is funneled through the ONE guarded
   # exec call site. This is the "grep its own source for a mutation path"
@@ -1733,6 +1838,7 @@ CLI_SPEC = {
   "--baseline" => :value,
   "--corpus" => :value,
   "--runs" => :integer,
+  "--concurrency" => :integer,
   "--out" => :value,
   "--json" => :value
 }.freeze
@@ -1759,6 +1865,12 @@ def help_text
                                      which stays OUT of harness-gate)
       --runs N                      samples per case, #{RUNS_RANGE.first}-#{RUNS_RANGE.last} \
 (default: #{DEFAULT_RUNS})
+      --concurrency K               T2 model calls in flight PER SIDE, \
+#{EvalPool::RANGE.first}-#{EvalPool::RANGE.last}
+                                     (default: #{DEFAULT_SIDE_CONCURRENCY}); both sides' T2 runs go at once,
+                                     so up to 2K calls are in flight. Counts and
+                                     verdict are those of K=1 (DND-1007). The
+                                     model's rate-limit ceiling is unmeasured.
       --out PATH                    write the scorecard here
       --json PATH                   also write the proposal as JSON (schema
                                      #{JSON_SCHEMA_ID}), atomically; a stale
@@ -1825,6 +1937,17 @@ def run_measurement(opts)
     return 2
   end
 
+  concurrency = begin
+    # The flag only: ATHENA_EVAL_CONCURRENCY is how THIS tool talks to each
+    # side's admiral-eval, not a setting for variant-eval itself.
+    EvalPool.resolve(opts["--concurrency"], {}, default: DEFAULT_SIDE_CONCURRENCY)
+  rescue EvalPool::UsageError => e
+    warn "variant-eval: FAILED — #{e.message}."
+    warn "  Fix: pass --concurrency K with K an integer #{EvalPool::RANGE.first}-#{EvalPool::RANGE.last} " \
+         "(default: #{DEFAULT_SIDE_CONCURRENCY} per side); an out-of-range value is refused, never clamped."
+    return 2
+  end
+
   json_file = opts["--json"]
   why = opts["--out"] && output_path_problem("--out", opts["--out"])
   why ||= json_file && prepare_json_path(json_file, opts["--out"])
@@ -1842,7 +1965,8 @@ def run_measurement(opts)
     corpus: corpus,
     runs: runs,
     out_file: opts["--out"],
-    json_file: json_file
+    json_file: json_file,
+    concurrency: concurrency
   )
 rescue MutationAttempt => e
   warn "variant-eval: FAILED — #{e.message}"
