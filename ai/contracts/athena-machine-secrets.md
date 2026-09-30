@@ -194,7 +194,7 @@ Each entry:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `name` | yes | Unique across the public registry and the overlay's. `[A-Za-z0-9][A-Za-z0-9_.-]*`. A secret loaded by `with-secret` is named by the env variable its consumer reads (`[A-Za-z_][A-Za-z0-9_]*`). |
+| `name` | yes | Unique across the public registry and the overlay's: a name in both is could-not-measure for the check and a refusal for `with-secret`. `[A-Za-z0-9][A-Za-z0-9_.-]*`. A secret loaded by `with-secret` is named by the env variable its consumer reads (`[A-Za-z_][A-Za-z0-9_]*`). |
 | `path` | yes | The primary file. Absolute, or `~/…` (expanded against `$HOME`). A symlink is allowed; its target is what is checked. |
 | `copies` | no | A glob naming every copy of the primary (`*`, `**`, `?`, `[…]`, `{a,b}`). Same path rules. |
 | `consumers` | yes | Non-empty list of strings: what reads the file. |

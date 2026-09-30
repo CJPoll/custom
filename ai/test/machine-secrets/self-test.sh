@@ -207,6 +207,21 @@ expect "(b) MCP \${VAR} reference does not" 1 "" "mcpServers.ref"
 expect "(b) literal Bearer header fires" 1 "mcpServers.hdr.headers.Authorization"
 expect "(b) --api-key=value in args fires" 1 "mcpServers.arg.args\[0\] API_KEY"
 rm -f "${FHOME}/.claude.json"
+cat > "${FHOME}/.claude.json" <<EOF
+{"projects":{"/p":{"mcpServers":{"q":{"url":"https://example.invalid/mcp?token=${SYN_C}&x=1"},"clean":{"url":"https://example.invalid/mcp?x=1"}}}}}
+EOF
+check -- --probe b
+expect "(b) a credential in a per-project MCP url query fires" 1 "projects\[/p\].mcpServers.q.url token" "clean"
+rm -f "${FHOME}/.claude.json"
+printf '{"env":{"SVC_API_KEY":"%s","SVC_KEY_FILE":"~/.fx/token","SVC_TOKEN_FILE":"%s/.fx/token","OTHER":"1"}}\n' "${SYN_C}" "${FHOME}" > "${FHOME}/.claude/settings.json"
+chmod 600 "${FHOME}/.claude/settings.json"
+check -- --probe b
+expect "(b) a literal credential in settings.json env fires" 1 "~/.claude/settings.json:env.SVC_API_KEY SVC_API_KEY"
+expect "(b) settings.json _FILE paths are not findings" 1 "" "SVC_KEY_FILE|SVC_TOKEN_FILE"
+printf '{"env":{"SVC_TOKEN_FILE":"~/.fx/token"}}\n' > "${FHOME}/.claude/settings.json"
+check -- --probe b
+expect "(b) settings.json holding only a _FILE path is clean" 1 "" "FAIL  ~/.claude/settings.json"
+rm -f "${FHOME}/.claude/settings.json"
 
 # ---------------------------------------------------------------- PENDING RESTART
 # The export at ~/.zshrc.local:3 is recorded (above). Remove it, then judge.
@@ -338,6 +353,12 @@ run with-secret -- OVL_KEY -- /bin/sh -c 'printf "len=%s" "${#OVL_KEY}"'
 expect "with-secret: an overlay entry resolves" 0 "len=${#SYN_A}"
 check -- --probe c
 expect "(c) overlay entries are checked" 0 "overlay 1\).*|ok    OVL_KEY"
+printf '{"kind":"athena-machine-secrets","schema":1,"secrets":[%s]}\n' "$(entry SYN_KEY '~/.fx/token' api-key)" > "${FHOME}/.config/athena/work/overlay/secrets.json"
+check -- --probe c
+expect "(c) a name in both the public and the overlay registry is could-not-measure" 3 "SYN_KEY is declared in both"
+run with-secret -- SYN_KEY -- /bin/true
+expect "with-secret: a name in both registries is refused" 1 "declared in both"
+has_fix "with-secret: a name in both registries is refused"
 printf '{"kind":"athena-machine-secrets","schema":1,"secrets":[%s]}\n' "$(entry "${SYN_B}" '~/.fx/syn-key' api-key)" > "${FHOME}/.config/athena/work/overlay/secrets.json"
 check -- --probe c
 expect "(c) a credential-valued NAME in the overlay is could-not-measure and not echoed" 3 "overlay's secrets are not checked" "SYNTHb"
