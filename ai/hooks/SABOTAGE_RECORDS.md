@@ -769,3 +769,69 @@ After the fix: `RESULT: 258 passed, 0 failed`.
 | S-DND560-6 | The unmapped failure-log line not written | `unmapped: one failure-log line`, `... carries Fix:`, `... names the spawn` |
 | S-DND560-7 | `--caller-agent-id` dropped from a nested spawn | the b1.3 replay: `sends exactly the contract body` |
 | S-DND560-8 | The drain guard's `report_denied` call removed | `the two denies above each sent one report`, `the deny sent exactly one fleet report`, `that report is agent_end spawn_denied …` (6 FAIL) |
+
+## 2026-09-28 — DND-1095, git-stash-guard when the git layer is live
+
+- **Domain:** the text guard's second pass when the DND-775 git layer is live
+  (`git_layer_live`, `exposed`, and the `active` rules in the evaluator).
+- **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, section L. Each
+  mutation was applied to a copy of the `ai/` tree and the suite run there.
+- **Fail-first:** the new suite against origin/main's guard (`git archive
+  origin/main ai`, new self-test copied in) gave `RESULT: 435 passed, 19
+  failed`, every failure an L2 case (a false positive still denied with the
+  layer live). After: `RESULT: 456 passed, 0 failed`.
+- Measured before two later tightenings (a nested text inherits its
+  enclosing text's stash mention; an unknown subcommand after an expanded
+  command word stays denied when the text names stash), each added with its
+  own failing L3 case (`sh -c '$*' sh /usr/bin/g?t stash drop`).
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND1095-1 | `git_layer_live` returns 0 first | 49 FAIL: every L1 and L4 case, and legacy cases a live session now leaves to the wrapper (I21, I42, I43, I47, I63, O48, O95, O99, O103a/b) |
+| S-DND1095-2 | `! exposed` dropped from the second-pass condition | the 6 L5 cases (`/usr/bin/git log; ...`, `PATH=`, `env -u`, `GIT_CONFIG_COUNT=0`, `which`, `command -p`) |
+| S-DND1095-3 | active `stash_write` always false | 15 L3 cases, from `git stash pop` to `tmux new -d '...'` |
+| S-DND1095-4 | the glob-head rule loses its TSTASH clause | `L3 ... g?t stash drop` |
+| S-DND1095-5 | the glob-head rule loses its `/` clause | `L3 ... /usr/bin/g?t $V` |
+| S-DND1095-6 | `git <expanded>` relaxed even when the text names stash | `L3 ... X=stash; git $X`, `L3 ... ssh h 'X=stash; git $X'` |
+| S-DND1095-7 | the pending-restart comparison removed | both `L4. session predates the install` cases |
+| S-DND1095-8 | a shell alias re-expanded inside its own expansion | `L2.3 ... grep -i stash (DND-853)` |
+| S-DND1095-9 | the expanded-head unknown-subcommand relaxation removed | `L2.13 ... $H/ticket.rb`, `L2.14 ... [ -n "$s" ]` |
+| S-DND1095-10 | the install-stamp shape check removed (`date -d ""` reads today) | both `L4. install stamp unset` cases |
+
+Review round 1 (critic BLOCK on 30197e59, code-reviewer, adr-reviewer). The
+suite at this round, run against 30197e59's guard: `RESULT: 435 passed, 49
+failed` (L4 said nothing about why; L5, L7, L8, L9 were allowed). After:
+`RESULT: 484 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND1095-11 | a nested text no longer inherits its enclosing text's stash mention | `L3 ... sh -c 'g?t "$@"' sh stash drop` |
+| S-DND1095-12 | the expanded-head relaxation ignores TSTASH | `L3 ... sh -c '$*' sh /usr/bin/g?t stash drop` |
+| S-DND1095-13 | the launcher list dropped from `exposed` | the 5 L5 tmux / ssh / sudo / at cases |
+| S-DND1095-14 | a glob word holding `$` relaxed like any other | both L7 cases (`${D}?sh drop`, `${G}? ... drop`) |
+| S-DND1095-15 | `exposed` reads only the raw text, not FLAT | `L5 ... /usr/bin/"git" $X drop`, `... gi\t ...`, `... P""ATH=...` |
+| S-DND1095-16 | `git <expanded>` relaxed under cfgov | `L8. autocorrect on ... X=stsh; git $X drop` |
+| S-DND1095-17 | `can_become_stash` always false | `L8 ... $G stsh drop`, `L8 ... $G stas drop` |
+| S-DND1095-18 | STASH_ALIAS never set | `L8. a ! alias whose body hides stash from the wrapper ...` |
+| S-DND1095-19 | a failed second pass returns an empty verdict | `L9. a failed second pass keeps the deny and names the fault` |
+| S-DND1095-20 | the glob-head relaxation ignores its words' verdict (gv) | `L8. autocorrect on ... g?t stsh drop` |
+
+Option B (admiral decision after critic round 2 BLOCKed 713a5c03 [guardrail]:
+a computed stash spelling in a quoted payload handed to a launcher the
+exposure list does not name, such as `pueue add -- 'X=$(printf st%s ash); git
+$X pop'`). Inside a quoted payload (INPAY), a computed first verb keeps the
+deny, both after a glob or brace command word (xw) and after a literal git
+(decide). A literal git's glob or brace verb (LITGIT) keeps it too. The suite
+at this round, run against 713a5c03's guard: `RESULT: 485 passed, 12 failed`
+(L2.8/9/11/12/17 now expected denied; every L10 payload case allowed, e.g.
+`FAIL L10. git layer live, payload verb computed, still denied: pueue add --
+'X=$(printf st%s ash); git $X pop'`). After: `RESULT: 497 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND1095-21 | xw forced 0 in the glob-head rule | `L2.12 ... B: athena-harness[bot] in echo text` (the other B cases also deny through gv) |
+| S-DND1095-22 | decide ignores INPAY | 4 L10 cases: `pueue ... git $X pop`, `emacsclient ... git $S drop`, `git st{a,}sh drop`, `git -C /tmp/x $(printf ...) drop` |
+| S-DND1095-23 | INPAY never set | 11: L2.8/9/11/12/17 and all 6 L10 payload cases |
+| S-DND1095-24 | LITGIT never set | `L10 ... pueue add -- 'git st{a,}sh drop'` |
+| S-DND1095-25 | the `$(` mark dropped from tokenize | `L10 ... {git,} $(printf st%s ash) drop`, `L10 ... git -C /tmp/x $(printf ...) drop` |
+| S-DND1095-26 | computed() takes a lone `$` | `L2.5 ... grep d{4} pattern`, `L10 ... a lone $ and $? after a glob word` |

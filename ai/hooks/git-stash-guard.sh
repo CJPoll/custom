@@ -100,7 +100,114 @@
 # lexical, so a command that only MENTIONS a mutating stash (a heredoc, a
 # `git commit -m`, a `grep`) is denied too. That costs one retry: move the text
 # into a file with the Write tool and pass the file (`git commit -F`), or use
-# the Grep tool. A miss costs the owner's saved work.
+# the Grep tool. A miss costs the owner's saved work. Where the git layer is
+# live, most of this class is gone (next section).
+#
+# WHEN THE GIT LAYER IS LIVE (DND-1095). DND-775 put two layers under this
+# guard in agent sessions: the PATH git wrapper ai/agent-bin/git (refuses a
+# stash write from argv, before git runs) and the reference-transaction hook
+# ai/git-hooks/agent-stash-guard.sh (refuses any refs/stash change, whatever
+# spelled the git call). Both were live-verified on the desktop and the laptop
+# (evidence on DND-775). The text guard then only needs to deny what those
+# layers cannot refuse. So a command the rules above deny is judged again,
+# with the active rules below, when ALL of these hold:
+#   * git_layer_live: the hook's own env (Claude Code's, carrying the settings
+#     env) registers the hook as git resolves it (event reference-transaction,
+#     a command naming an executable agent-stash-guard.sh, both switches
+#     true), GIT_TRACE2 is set, git is >= 2.54, ATHENA_AGENT_BIN holds the
+#     wrapper, CLAUDE_ENV_FILE carries the agent PATH line, and the nearest
+#     `claude` ancestor started after ATHENA_AGENT_ENV_INSTALLED_AT. That last
+#     check is PENDING RESTART: Claude Code reads CLAUDE_ENV_FILE once per
+#     process, so an older session may lack the wrapper on its PATH. Anything
+#     unmeasurable (no /proc, no stamp, no claude ancestor) reads as not live.
+#   * not exposed: the command text (as typed, and with quotes and
+#     backslashes removed) shows no way around those layers: git by path
+#     (`/usr/bin/git`, an exec-path `git-*`), a PATH change (any mention of
+#     PATH, `command -p`, `read`, a login shell `sh -l`/`--login`, a sourced
+#     file `.`/`source`), a lookup (`which`, `whence`, `where`, `type`, `hash`,
+#     zsh `$commands[...]`), or an edit of the hook's env (`env -`, `unset`,
+#     `exec -`, GIT_CONFIG*, GIT_TRACE2, GIT_EXEC_PATH, `--exec-path`, any
+#     `hook.` config key), or a launcher that runs its payload OUTSIDE the
+#     agent env, where neither layer exists (ssh, mosh, tmux, screen, zellij,
+#     sudo, doas, su, runuser, pkexec, at, batch, crontab, systemd-run,
+#     machinectl, nsenter, docker, podman, flatpak-spawn, hyprctl, swaymsg,
+#     kitty, wezterm). Matched in any case, since git reads a key's section
+#     and name in any case. Over-inclusive: a match only keeps the full guard.
+# The active rules. Each finding keeps its deny unless named here:
+#   * `git stash <word>` denies only for a word git 2.54 runs as a write
+#     (push save pop apply drop clear store branch import export), a bare or
+#     option-first stash, or an expanded word. git refuses any other word
+#     (`git stash guard`: fatal, rc 128), so a search term is not a write.
+#   * a glob or brace command word with no `/` and no expansion (`{print`,
+#     `[.x[]`, `#{x}`), or an assignment word (`X=${A:-b}`, not a command),
+#     no longer denies unless the text it sits in names stash: it expands to a
+#     bare name, found on PATH, where git is the wrapper and no git-stash
+#     exists (the DND-775 verify: rc 127). A `$` or backtick in the word
+#     keeps the deny (`${D}?sh` can expand to a path), and so do words after
+#     it that read as a stash write, a stash alias or an autocorrect risk.
+#     In a quoted payload a computed first verb word (`$X`, `$(...)`, a
+#     backtick; not a lone `$` or `$?`) keeps it too (option B, below).
+#   * `git <expanded subcommand>` no longer denies unless its text names
+#     stash: the wrapper reads argv after expansion. It still denies in a
+#     quoted payload when the subcommand is computed (option B), when git
+#     may read a config this guard did not, or help.autocorrect is on (the
+#     unread-config condition: the wrapper passes a typo through), or when a
+#     git `!` alias this guard read resolves to a stash write while its body
+#     does not spell stash (`!git st\ash drop` as git reads it): the wrapper
+#     resolves every
+#     other alias through git, and refuses only a `!` body naming stash.
+#   * an unknown subcommand after a command word built by expansion (`$s ]`
+#     after a `git -C "$d"`, `$H/ticket.rb DND-1 --flag`) no longer denies
+#     unless its text names stash or git's autocorrect could turn the word
+#     into stash (can_become_stash: git's own weighted distance, and stash
+#     must be the unique best builtin). A stash word, a known stash alias or
+#     stash plumbing there still does.
+#   * a shell alias is not expanded inside its own expansion, as the shell
+#     does not (the owner's `grep` alias is `grep --color ...`).
+# "The text it sits in" is the whole command, one quoted payload, or one
+# alias expansion, as analyze reads it, plus every text enclosing it: a
+# payload can run the words around it (`sh -c '$*' sh ... stash drop`).
+# What stays denied, and why:
+#   * every literal stash write, in a payload or heredoc too: a payload can run
+#     outside the agent env (`ssh h '...'`, `tmux new '...'`, sudo, at), where
+#     neither layer exists. So `git commit -m "... git stash pop ..."` still
+#     denies; pass the message with -F.
+#   * refs/stash file writes (rm, a redirect ...), gc.reflogExpire,
+#     help.autocorrect and alias definitions: git sees no ref transaction for
+#     a file write or a gc expiry, and the wrapper passes a typo through.
+#   * unread-config under a literal git: help.autocorrect in an unread config
+#     turns a typo into `stash drop`, which the hook cannot see.
+# OPTION B (DND-1095, admiral decision after critic round 2). A quoted
+# payload may be handed to a launcher the exposure list does not name
+# (`pueue add -- '...'`, `emacsclient -e '...'`), which runs it outside the
+# agent env, where neither git layer exists. A launcher blocklist is
+# open-ended, so inside a quoted payload a verb computed by parameter or
+# command expansion keeps the deny, after a literal git or a glob or brace
+# command word; after a literal git, so does a glob or brace verb. That keeps these false positives DENIED with the layer live,
+# accepted for now (lifting them is option A, the owner's call): awk
+# `'{print $4}'`, JSON or jq text with `[x] $VAR`, ruby `"#{x} $X"`, and
+# `"athena-harness[bot] -- $X"`. The same shapes typed at the top level run
+# in the agent env, where the wrapper judges them, so they stay allowed.
+# RESIDUAL of the active rules, beyond the two layers' own (DND-775 Q2), each
+# needing a stash spelling computed at run time (no `stash` in its text):
+#   * a quoted payload handed to a launcher the list above does not name,
+#     whose command word AND verb are both built by glob or brace with no
+#     `$` (`{git,} st{a,}sh drop`; under a literal git the brace verb is
+#     denied): telling that verb from a grep pattern
+#     (`[_ ]id{0,8}`) needs a glob model (option C), so it is left;
+#   * an unquoted command handed to such a launcher as argv (`pueue add --
+#     git $X pop`): the old guard never read it either, since git is not in
+#     command position there;
+#   * a PATH changed by something the text does not show (a script it runs,
+#     direnv, nix-shell), so a bare `git` in that script may not be the
+#     wrapper;
+#   * a git reached by a computed path together with an alias or typo from a
+#     config this guard cannot read.
+# The old guard denied these only because a computed word is unknowable. They
+# are the "string computed then executed" class of NOT CATCHABLE below.
+# When the active rules allow a command the first pass denied, the hook says
+# so in additionalContext and allows it. When a first-pass deny stands, its
+# reason says why the second pass did not run (LIVE_WHY, or the exposure).
 #
 # PRECISION (DND-780, narrow cut): the leading test bracket `[` / `[[` and
 # the lone brace-group word `{` are not glob command words (as globs they
@@ -440,10 +547,123 @@ case $? in
   *) FAULT="the prefilter grep failed"; fault_verdict ;;
 esac
 
+# ---- is the DND-775 git layer live for this session? ------------------------
+# The hook runs in Claude Code's own environment, which carries the settings
+# env. Every condition below must hold; any that cannot be measured reads as
+# NOT live, so the guard keeps its full behaviour. LIVE_WHY names the first
+# failed condition; a standing deny reports it (see LAYER_NOTE below).
+# GSG_ENV_LINE must equal AgentStashEnv::ENV_LINE (ai/lib/agent_stash_env.rb),
+# the line ai/agent-env/session-env.sh runs before every Bash tool command.
+# Enforced by construction on both sides: check-hooks-registered FAILs an
+# ACTIVE install whose session-env.sh runs any other line, and this suite's
+# L2 cases read that real file, so a drift here fails them.
+GSG_ENV_LINE='if [ -n "${ATHENA_AGENT_BIN:-}" ] && [ -x "$ATHENA_AGENT_BIN/git" ]; then PATH="$ATHENA_AGENT_BIN:$PATH"; export PATH; fi'
+git_layer_live() {
+  LIVE_WHY=""
+  # 1. The reference-transaction hook, as git itself resolves the config
+  #    (GIT_CONFIG_COUNT/KEY/VALUE, GIT_CONFIG_PARAMETERS, global): the event,
+  #    a command naming an executable agent-stash-guard.sh, both switches on.
+  (cd / && git config --get-regexp '^hook\.') > "$GSG_TMP/hookcfg" 2>/dev/null \
+    || { LIVE_WHY="no hook config (git config lists no hook.* key)"; return 1; }
+  _ev=$(awk '$1 == "hook.agentstash.event" { v = $2 } END { print v }' "$GSG_TMP/hookcfg")
+  [ "$_ev" = reference-transaction ] || { LIVE_WHY="hook.agentstash.event is not reference-transaction"; return 1; }
+  for _k in hook.agentstash.enabled hook.reference-transaction.enabled; do
+    _v=$(awk -v k="$_k" '$1 == k { v = tolower($2) } END { print v }' "$GSG_TMP/hookcfg")
+    case "$_v" in true | yes | on | 1) ;; *) LIVE_WHY="$_k is not true"; return 1 ;; esac
+  done
+  _h=$(sed -n "s#^hook\.agentstash\.command h='\([^']*/ai/git-hooks/agent-stash-guard\.sh\)';.*#\1#p" "$GSG_TMP/hookcfg" | tail -n 1)
+  [ -n "$_h" ] && [ -f "$_h" ] && [ -x "$_h" ] || { LIVE_WHY="the hook command names no executable agent-stash-guard.sh"; return 1; }
+  [ -n "${GIT_TRACE2:-}" ] || { LIVE_WHY="GIT_TRACE2 is unset"; return 1; }
+  # 2. git loads config-based hooks from 2.54 (DND-775 probe 3).
+  _gv=$(git --version 2>/dev/null) || { LIVE_WHY="git --version failed"; return 1; }
+  _gv=${_gv#git version }
+  _maj=${_gv%%.*}; _min=${_gv#*.}; _min=${_min%%.*}
+  case "$_maj$_min" in '' | *[!0-9]*) LIVE_WHY="unreadable git version"; return 1 ;; esac
+  [ "$_maj" -gt 2 ] || { [ "$_maj" -eq 2 ] && [ "$_min" -ge 54 ]; } || { LIVE_WHY="git $_gv predates config-based hooks"; return 1; }
+  # 3. The PATH wrapper, and the CLAUDE_ENV_FILE line that puts it first on
+  #    the Bash tool's PATH.
+  _w="${ATHENA_AGENT_BIN:-}/git"
+  [ -n "${ATHENA_AGENT_BIN:-}" ] && [ -f "$_w" ] && [ -x "$_w" ] \
+    && head -n 5 "$_w" 2>/dev/null | grep -q 'git (agent wrapper)' \
+    || { LIVE_WHY="no PATH git wrapper at ATHENA_AGENT_BIN"; return 1; }
+  [ -n "${CLAUDE_ENV_FILE:-}" ] && grep -Fxq "$GSG_ENV_LINE" "$CLAUDE_ENV_FILE" 2>/dev/null \
+    || { LIVE_WHY="CLAUDE_ENV_FILE does not carry the agent PATH line"; return 1; }
+  # 4. Not PENDING RESTART: Claude Code reads CLAUDE_ENV_FILE once per
+  #    process, so the nearest `claude` ancestor must have started strictly
+  #    after ATHENA_AGENT_ENV_INSTALLED_AT (whole seconds; a tie is pending).
+  # The stamp is an ISO UTC second; `date -d ""` would read an empty one as
+  # today's midnight, so the shape is checked first.
+  case "${ATHENA_AGENT_ENV_INSTALLED_AT:-}" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    *) LIVE_WHY="ATHENA_AGENT_ENV_INSTALLED_AT is not an ISO UTC second"; return 1 ;;
+  esac
+  _inst=$(date -u -d "$ATHENA_AGENT_ENV_INSTALLED_AT" +%s 2>/dev/null)
+  case "$_inst" in '' | *[!0-9]*) LIVE_WHY="ATHENA_AGENT_ENV_INSTALLED_AT is unreadable"; return 1 ;; esac
+  _start=$(claude_start_epoch) || { LIVE_WHY="no claude ancestor start time"; return 1; }
+  [ "$_start" -gt "$_inst" ] || { LIVE_WHY="this session predates the install (pending restart)"; return 1; }
+  return 0
+}
+
+# claude_start_epoch : the start time (epoch seconds) of the nearest ancestor
+# whose comm is `claude`, from /proc. Fails when none is found in 12 levels
+# or /proc cannot be read.
+claude_start_epoch() {
+  _hz=$(getconf CLK_TCK 2>/dev/null)
+  case "$_hz" in '' | *[!0-9]* | 0) return 1 ;; esac
+  _bt=$(awk '$1 == "btime" { print $2 }' /proc/stat 2>/dev/null)
+  case "$_bt" in '' | *[!0-9]*) return 1 ;; esac
+  _p=$PPID; _d=0
+  while [ "$_d" -lt 12 ]; do
+    case "$_p" in '' | *[!0-9]* | 0 | 1) return 1 ;; esac
+    IFS= read -r _st 2>/dev/null < "/proc/$_p/stat" || return 1
+    _comm=${_st#*\(}; _comm=${_comm%\)*}
+    _rest=${_st##*\) }
+    set -f; set -- $_rest; set +f
+    # $_rest starts at field 3 (state), so field 4 (ppid) is $2 and field
+    # 22 (starttime) is ${20}.
+    if [ "$_comm" = claude ]; then
+      case "${20:-}" in '' | *[!0-9]*) return 1 ;; esac
+      echo $((_bt + ${20} / _hz))
+      return 0
+    fi
+    _p=$2; _d=$((_d + 1))
+  done
+  return 1
+}
+
+# exposed : the command text shows a way around the git layer: git by path
+# (the exec-path binaries included), a PATH change, a lookup of the real git,
+# or an edit of the hook's env, including any git config key under `hook.`
+# (git matches a key's section and name in any case, so the match ignores
+# case), a login shell or a sourced file (either can reset PATH), a `read`
+# (it can set PATH), any mention of PATH, or a launcher whose payload runs
+# outside the agent env (see the header). Over-inclusive on purpose: a match
+# only keeps the full text guard.
+# It reads the raw text AND FLAT (quotes and backslashes removed), so a
+# quoted or escaped spelling (`/usr/bin/"git"`, `gi\t`, `P""ATH=`) matches.
+exposed() {
+  printf '%s\n%s' "$CMD" "$FLAT" | grep -Eiq \
+    -e '/git(-[[:alnum:]-]+)?([^[:alnum:]_./-]|$)' \
+    -e '(^|[^[:alnum:]_])path([^[:alnum:]_]|$)' \
+    -e '(^|[^[:alnum:]_./-])(sh|bash|zsh|dash|ksh|mksh|fish)[[:space:]]+([^;&|]*[[:space:]])?(-[[:alnum:]]*l|--login)' \
+    -e '(^|[;&|({[:space:]])(\.|source)[[:space:]]' \
+    -e '(^|[^[:alnum:]_-])read([[:space:]]|$)' \
+    -e '(^|[^[:alnum:]_-])(command|env|exec)[[:space:]]+-' \
+    -e '(^|[^[:alnum:]_-])(unset|which|whence|where|type|hash)([[:space:]]|$)' \
+    -e 'commands\[' \
+    -e '(^|[^[:alnum:]_])hook\.' \
+    -e 'GIT_CONFIG|GIT_TRACE2|GIT_EXEC_PATH|exec-path' \
+    -e '(^|[^[:alnum:]_.-])(ssh|mosh|tmux|screen|zellij|sudo|doas|su|runuser|pkexec|at|batch|crontab|systemd-run|machinectl|nsenter|docker|podman|flatpak-spawn|hyprctl|swaymsg|kitty|wezterm)([^[:alnum:]_.-]|$)' 2>/dev/null
+  # grep exit 2 (an error) counts as exposed: the full guard stays on.
+  [ $? -ne 1 ]
+}
+
 # ---- git stash, through every head the header lists -------------------------
 # Its inputs are files (BOUNDED HAND-OFF): argv carries only their paths.
-VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/shaliases" \
-  -v cfgov="$UNREAD_CONFIG" -v bif="$GSG_TMP/builtins" '
+# `active` is 1 only on the second pass WHEN THE GIT LAYER IS LIVE (see the
+# header): each rule marked "active" there narrows to what the git layer
+# cannot refuse.
+GSG_PROG='
   # slurp(f): the whole file, lines joined by newlines. An unreadable file
   # exits 3, which the caller reads as a fault.
   function slurp(f,   s, l, n, rc) {
@@ -454,6 +674,50 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     return s
   }
   function is_read(v) { sub(/[<>].*/, "", v); return v ~ /^(list|show|create)$/ }
+  # wlev(a, b): git'"'"'s weighted edit distance from a typed word a to a
+  # command b, as help.c scores autocorrect candidates: a swap 0, a
+  # substitution 2, an insertion 1, a deletion 3. A prefix of b scores 0.
+  function wlev(a, b,    la, lb, i, j, d, c, x) {
+    if (index(b, a) == 1) return 0
+    la = length(a); lb = length(b)
+    for (i = 0; i <= la; i++) d[i, 0] = i * 3
+    for (j = 0; j <= lb; j++) d[0, j] = j
+    for (i = 1; i <= la; i++) for (j = 1; j <= lb; j++) {
+      c = d[i - 1, j - 1] + (substr(a, i, 1) == substr(b, j, 1) ? 0 : 2)
+      x = d[i - 1, j] + 3; if (x < c) c = x
+      x = d[i, j - 1] + 1; if (x < c) c = x
+      if (i > 1 && j > 1 && substr(a, i, 1) == substr(b, j - 1, 1) && substr(a, i - 1, 1) == substr(b, j, 1)) {
+        x = d[i - 2, j - 2]; if (x < c) c = x
+      }
+      d[i, j] = c
+    }
+    return d[la, lb]
+  }
+  # can_become_stash(v): help.autocorrect could turn the word v into stash.
+  # git autocorrects only to a UNIQUE best candidate scoring under its
+  # floor (7, on distance + 1), so v is safe when stash scores 6 or more, or
+  # when some other builtin scores no worse. Conservative on ties.
+  function can_become_stash(v,    ds, b) {
+    v = tolower(v); gsub(/\001/, "", v)
+    ds = wlev(v, "stash")
+    if (ds >= 6) return 0
+    for (b in builtin) if (b != "stash" && wlev(v, b) <= ds) return 0
+    return 1
+  }
+  # stash_write(v): `git stash v` writes the stash list (v is "" when no word
+  # follows). Legacy: any verb but the three reads. Active: only what git 2.54
+  # runs as a write (every verb in its usage but list/show/create, a bare or
+  # option-first push, or a verb built by expansion). git itself refuses any
+  # other word (`git stash guard`: fatal, rc 128, the list untouched).
+  function stash_write(v) {
+    if (!active) return !is_read(v)
+    sub(/[<>].*/, "", v)
+    return v == "" || v ~ /^-/ || v ~ /[$`\001]/ || v ~ /^(push|save|pop|apply|drop|clear|store|branch|import|export)$/
+  }
+  # TSTASH: the text analyze is reading (the whole command, one quoted
+  # payload, or one alias expansion) holds `stash` in any case. Active rules
+  # keep a heuristic deny when it does, so `X=stash; git $X` handed to ssh or
+  # tmux still denies. See analyze.
   function mentions_stash(v) { return v ~ /(^|[^[:alnum:]_.-])stash([^[:alnum:]_.-]|$)/ }
   function is_sep(c) { return c ~ /[ \t\n;&|()`]/ }
   # tokenize(text, W, QF, SB): split text into shell words, honouring quotes
@@ -523,6 +787,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (c == "$") {
         ux = 1; has = 1
         if (substr(text, i + 1, 1) == "?") { cur = cur "$?"; i++; continue }
+        # `$(` ends this word at the `(`, which leaves a lone `$`: mark it
+        # \003 so computed() tells a command substitution from a literal `$`.
+        if (substr(text, i + 1, 1) == "(") { cur = cur "$\003"; continue }
         cur = cur c; continue
       }
       if (c ~ /[*?[{]/) { cur = cur c "\001"; has = 1; continue }
@@ -533,7 +800,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   }
   # refpart(t): the ref a revision/refspec word names: glob marks, a leading
   # `+` and any `@{...}` reflog selector removed (`stash@{0}` -> stash).
-  function refpart(t) { gsub(/\001/, "", t); sub(/^\+/, "", t); sub(/@\{.*$/, "", t); return t }
+  function refpart(t) { gsub(/[\001\003]/, "", t); sub(/^\+/, "", t); sub(/@\{.*$/, "", t); return t }
   # is_assign(t): t has the shape of an assignment word (NAME=...,
   # NAME[i]=..., NAME+=...). Used ONLY to give the next word command
   # position (cmd_prefix), which can only add checks. The glob and
@@ -541,6 +808,17 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # quotes, so `"A"=/usr/bin/g?t` (a command word, not an assignment) has
   # the same shape (DND-780 narrow cut, critic round 1).
   function is_assign(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=/ }
+  # computed(t): t holds a parameter or command expansion, so its value is
+  # made at run time (`$X`, `${X}`, `$(...)`, `$4`, a backtick). A lone `$`
+  # is a literal, and `$?` is an exit status (a number, never stash). A `$(`
+  # reaches here as `$` and the \003 mark (see tokenize).
+  function computed(t) { return t ~ /`/ || t ~ /\$[\003A-Za-z0-9_{(@*#!$-]/ }
+  # INPAY is 1 while analyze reads a quoted payload (QF): text another
+  # program may run, possibly through a launcher outside the agent env that
+  # the exposure list does not name (pueue, emacsclient, ...), where neither
+  # git layer exists. There a verb computed at run time keeps its deny
+  # (DND-1095 option B): the critic'"'"'s `pueue add -- '"'"'X=$(printf st%s
+  # ash); git $X pop'"'"'`.
   # literal_non_git(t, ux): word t holds an expansion only inside double
   # quotes (ux == 0, so it is never split into several words or globbed) and
   # ends in a literal path component that is not git or git-stash
@@ -623,8 +901,19 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # it like a shell and runs it through its own option parser, so
   # `-c k=v stash pop` in an alias pops. The user'"'"'s remaining words follow it.
   function decide(sc, w, n, j, depth,    i, k, v, a, aq, as, na, r) {
-    if (sc == "stash") return is_read(j + 1 <= n ? w[j + 1] : "") ? "" : "stash"
-    if (sc ~ /[$`\001]/) return "expanded"
+    if (sc == "stash") return stash_write(j + 1 <= n ? w[j + 1] : "") ? "stash" : ""
+    # Active: git reached by name is the PATH wrapper, which judges the
+    # subcommand after expansion. The deny stays when the text names stash
+    # (TSTASH), when git may autocorrect a typo or read an alias this guard
+    # could not (cfgov: the wrapper passes a typo through), or when an alias
+    # this guard read resolves to a stash write through a `!` body that does
+    # not spell stash (STASH_ALIAS), which the wrapper cannot see, or when a
+    # quoted payload computes it (INPAY): the payload may run outside the
+    # agent env, where no wrapper judges it. Under a literal git (LITGIT) a
+    # glob or brace subcommand counts as computed there too (`git
+    # st{a,}sh drop`); under a glob command word it does not, since that is
+    # the shape of a grep pattern (`[_ ]id{0,8}`).
+    if (sc ~ /[$`\001]/) return (active && !TSTASH && !cfgov && !STASH_ALIAS && !(INPAY && (computed(sc) || (LITGIT && sc ~ /\001/)))) ? "" : "expanded"
     r = plumb(sc, w, n, j)
     if (r != "") return r
     # Alias names are config keys, so git matches them case-insensitively
@@ -682,6 +971,13 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       r = decide(w[j], w, n, j, depth)
       maybe_value = (j > 1 && w[j - 1] ~ /^-/ && w[j - 1] !~ /=/ && !two_word(w[j - 1]) && !one_word(w[j - 1]))
       if (unknown) {
+        # Active: under a head built by expansion, a word that is only an
+        # unknown subcommand (`$s ]`, `$H/t.rb DND-1 --flag`) no longer
+        # denies unless the text names stash (TSTASH: `sh -c '"'"'$*'"'"' sh
+        # /usr/bin/g?t stash drop` runs its later words); a stash word, a
+        # known stash alias or stash plumbing still does.
+        # A word git could autocorrect to stash keeps it too.
+        if (r == "unread-config" && active && expanded_head && !TSTASH && !can_become_stash(w[j])) r = ""
         if (r == "stash" || r == "alias" || r == "refwrite" || r == "unread-config") return (expanded_head ? "expanded-git" : r)
       } else if (r != "") return r
       if (maybe_value) { j++; continue }
@@ -710,12 +1006,25 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     NT[c] = clip(t); NP[c] = k; ND[c] = depth
   }
   function clip(t) {
-    gsub(/\001/, "", t); gsub(/\002/, "$", t); gsub(/[\n\r\t]+/, " ", t)
+    gsub(/[\001\003]/, "", t); gsub(/\002/, "$", t); gsub(/[\n\r\t]+/, " ", t)
     return length(t) > 120 ? substr(t, 1, 117) "..." : t
   }
   # analyze(text, depth): the most specific finding in text (see rank), or
   # "" when it runs no stash write. It stops early only on a literal stash.
-  function analyze(text, depth,    W, QF, SB, UX, PQ, n, k, e, r, sw, m, i, cp, t, j, x, best) {
+  # analyze(text, depth) sets TSTASH for this text and restores the caller'"'"'s
+  # on return. A nested text inherits its enclosing text'"'"'s TSTASH: a payload
+  # can run words of the command around it (`sh -c '"'"'$*'"'"' sh ... stash
+  # drop`, `read`, xargs), so those words count as its own.
+  # It also restores LITGIT (is the git_verdict in progress under a literal
+  # git), which analyze_text sets at each git_verdict it starts, so a `!`
+  # alias body read mid-verdict cannot clear its caller'"'"'s.
+  function analyze(text, depth,    saved, lg, r) {
+    saved = TSTASH; TSTASH = saved || (tolower(text) ~ /stash/); lg = LITGIT
+    r = analyze_text(text, depth)
+    TSTASH = saved; LITGIT = lg
+    return r
+  }
+  function analyze_text(text, depth,    W, QF, SB, UX, PQ, n, k, e, r, sw, m, i, cp, t, j, x, best, gv, xw, sp) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) {
       if (!mentions_stash(text)) return ""
@@ -723,7 +1032,10 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       return "stash"
     }
     n = tokenize(text, W, QF, SB, UX, PQ); best = ""
-    for (k = 1; k <= n; k++) if (QF[k]) { best = better(best, analyze(W[k], depth + 1)); if (best == "stash") return best }
+    for (k = 1; k <= n; k++) if (QF[k]) {
+      sp = INPAY; INPAY = 1; r = analyze(W[k], depth + 1); INPAY = sp
+      best = better(best, r); if (best == "stash") return best
+    }
     cp = 0
     for (k = 1; k <= n; k++) {
       # cp: word k is in command position (starts a simple command, or
@@ -735,12 +1047,17 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # looked up without glob marks: an alias named `gs?` expands before
       # globbing, so the matcher must not judge it as a glob (DND-780).
       x = W[k]; gsub(/\001/, "", x)
-      if (cp && (x in shal)) {
+      # Active: the shell does not expand an alias inside its own expansion
+      # (`grep=grep --color ...` runs grep once), so a name already being
+      # expanded is not expanded again.
+      if (cp && (x in shal) && !(active && (x in EXPANDING))) {
+        EXPANDING[x] = 1
         for (j = 1; j <= shal[x]; j++) {
           t = shv[x, j]
           for (i = k + 1; i <= e; i++) t = t " " squote(W[i])
           if (analyze(t, depth + 1) != "") { best = better(best, "shell-alias"); note("shell-alias", W, k, e, depth, 1) }
         }
+        delete EXPANDING[x]
       }
       # A zsh SUFFIX alias (`alias -s ext=cmd`): a command word `x.ext` runs
       # `cmd x.ext ...`.
@@ -756,8 +1073,8 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       for (i = k + 1; i <= e; i++) sw[++m] = W[i]
       # A simple command that starts at `stash` followed a `)` or backtick:
       # the tail of `$(command -v git) stash`.
-      if (SB[k] && W[k] == "stash" && !is_read(m >= 1 ? sw[1] : "")) { note("stash", W, k, e, depth, 0); return "stash" }
-      if (W[k] ~ /(^|\/)git-stash$/ && !is_read(m >= 1 ? sw[1] : "")) { note("stash", W, k, e, depth, 0); return "stash" }
+      if (SB[k] && W[k] == "stash" && stash_write(m >= 1 ? sw[1] : "")) { note("stash", W, k, e, depth, 0); return "stash" }
+      if (W[k] ~ /(^|\/)git-stash$/ && stash_write(m >= 1 ? sw[1] : "")) { note("stash", W, k, e, depth, 0); return "stash" }
       # A command word the shell rewrites by glob or brace (`/usr/bin/g?t`,
       # `git-st*sh`) may be git or may be git-stash, so it is judged as both:
       # as git-stash, no verb (a bare or option-first push), a writing verb,
@@ -770,13 +1087,27 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # cmd_prefix).
       if (cp && W[k] ~ /\001/ && W[k] != "[\001" && W[k] != "[\001[\001" && W[k] != "{\001") {
         for (i = 1; i <= m && sw[i] ~ /^-/; i++) ;
-        if (i > m || sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/ || sw[i] ~ /[$`\001]/ || git_verdict(sw, m, 1, 0, 0) != "") {
+        # Active: a glob word with no `/` expands to a bare name, which the
+        # shell looks up on PATH, where git is the wrapper, and no git-stash
+        # is on PATH (DND-775 verify: rc 127). So it denies only when it holds
+        # a `/`, holds an expansion (`${D}?sh` can expand to a path) and is
+        # not an assignment word, it sits in a quoted payload and its first
+        # verb word is computed (xw), the text names stash (TSTASH), or its
+        # words read, by the active rules, as a stash write, a stash alias or
+        # a possible autocorrect (gv). xw is DND-1095 option B: a launcher the
+        # exposure list does not name runs the payload outside the agent env,
+        # where the glob head can be git and the verb a computed stash, which
+        # neither git layer can refuse. So `{print $4}` in awk stays denied.
+        LITGIT = 0; gv = git_verdict(sw, m, 1, 0, 0)
+        xw = INPAY && i <= m && computed(sw[i])
+        if ((i > m || sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/ || sw[i] ~ /[$`\001]/ || gv != "") \
+          && (!active || W[k] ~ /\// || (W[k] ~ /[$`]/ && !is_assign(W[k])) || xw || TSTASH || gv != "")) {
           best = better(best, "glob-head"); note("glob-head", W, k, e, depth, 0)
         }
         continue
       }
-      if (W[k] ~ /(^|\/)git$/) r = git_verdict(sw, m, 1, 0, 0)
-      else if (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k])) r = git_verdict(sw, m, 1, 1, 0)
+      if (W[k] ~ /(^|\/)git$/) { LITGIT = 1; r = git_verdict(sw, m, 1, 0, 0) }
+      else if (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k])) { LITGIT = 0; r = git_verdict(sw, m, 1, 1, 0) }
       else r = ""
       note(r, W, k, e, depth, 0)
       if (r == "stash") return r
@@ -797,6 +1128,15 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     if (cfgov) {
       nb = split(slurp(bif), bl, "\n")
       for (k = 1; k <= nb; k++) if (bl[k] != "") builtin[bl[k]] = 1
+    }
+    # STASH_ALIAS: a git `!` alias this guard read resolves to a stash write
+    # while its body does not spell stash, so the wrapper (which asks git for
+    # every other alias and refuses a `!` body naming stash) cannot see it.
+    for (name in nal) {
+      bang = 0
+      for (k = 1; k <= nal[name]; k++) if (aval[name, k] ~ /^!/ && tolower(aval[name, k]) !~ /stash/) bang = 1
+      aw[1] = name
+      if (bang && decide(name, aw, 1, 1, 0) != "") { STASH_ALIAS = 1; break }
     }
     ns = split(slurp(shf), slines, "\n")
     for (k = 1; k <= ns; k++) {
@@ -846,14 +1186,54 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       }
     }
     if (r != "") print r "\t" ((r in NT) ? NT[r] : "") "\t" ((r in NP) ? NP[r] : 0) "\t" ((r in ND) ? ND[r] : 0)
-  }' 2>/dev/null)
-AWK_RC=$?
+  }'
 
-# An evaluator that crashed must not read as "nothing found" (see AN
-# EVALUATION FAULT IS NOT "NOTHING FOUND" in the header).
-if [ "$AWK_RC" -ne 0 ]; then
-  FAULT="its awk evaluator exited $AWK_RC"
-  fault_verdict
+# evaluate <active> : run the evaluator; sets VERDICT. An evaluator that
+# crashed must not read as "nothing found" (see AN EVALUATION FAULT IS NOT
+# "NOTHING FOUND" in the header).
+# A second pass that fails keeps the first pass's deny (PASS2_FAULT): a
+# failed measurement must never turn a deny into an allow.
+evaluate() {
+  VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/shaliases" \
+    -v cfgov="$UNREAD_CONFIG" -v bif="$GSG_TMP/builtins" -v active="$1" "$GSG_PROG" 2>/dev/null)
+  AWK_RC=$?
+  if [ "$AWK_RC" -ne 0 ] && [ "$1" = 1 ]; then
+    VERDICT=$LEGACY; PASS2_FAULT="its second-pass evaluator exited $AWK_RC"
+    return
+  fi
+  if [ "$AWK_RC" -ne 0 ]; then
+    FAULT="its awk evaluator exited $AWK_RC"
+    fault_verdict
+  fi
+}
+
+evaluate 0
+# WHEN THE GIT LAYER IS LIVE (see the header), a finding is re-judged by the
+# active rules: only what the git layer cannot refuse still denies.
+# LAYER_NOTE says, in a standing deny, why the second pass did not allow it,
+# so a session that should be live but is not can be told apart from a real
+# hit (a failed lookup must not read as an empty one).
+LAYER_NOTE=""
+if [ -n "$VERDICT" ]; then
+  if ! git_layer_live; then
+    LAYER_NOTE=" The DND-775 git layer is not live for this session ($LIVE_WHY), so the full text guard applies."
+  elif exposed; then
+    LAYER_NOTE=" The DND-775 git layer is live, but this command shows a way around it (git by path, a PATH change, a git lookup, a hook env or config edit, or a launcher that runs outside the agent env), so the full text guard applies."
+  else
+    LEGACY=$VERDICT; PASS2_FAULT=""
+    evaluate 1
+    if [ -z "$VERDICT" ] && [ -z "$PASS2_FAULT" ]; then
+      _lt=$(printf '%s' "$LEGACY" | cut -f2)
+      jq -cn --arg c "git-stash-guard: left \`$_lt\` to the DND-775 git layer, which is live in this session (the PATH git wrapper and the reference-transaction hook). It refuses a stash write by a git this session runs; see the hook header for what it cannot see." \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",additionalContext:$c}}' 2>/dev/null
+      exit 0
+    fi
+    if [ -n "$PASS2_FAULT" ]; then
+      LAYER_NOTE=" The DND-775 git layer is live, but the guard could not re-judge this command ($PASS2_FAULT), so the full text guard applies. Run \`sh ~/dev/custom/ai/hooks/git-stash-guard.self-test.sh\` and report the failure to your admiral."
+    else
+      LAYER_NOTE=" The DND-775 git layer is live; this finding is one it cannot refuse, so it stands."
+    fi
+  fi
 fi
 
 # The verdict line is: category TAB matched words TAB word position TAB depth.
@@ -872,6 +1252,7 @@ if [ -n "$V_TOK" ]; then
   fi
   MATCHED="$MATCHED."
 fi
+MATCHED="$MATCHED$LAYER_NOTE"
 
 case "$V_CAT" in
   refwrite) deny 'this runs git plumbing that rewrites or expires the stash ref or its reflog without the stash subcommand: `reflog delete|expire|drop` naming `stash`/`stash@{N}`/`refs/stash` or given `--all`, `update-ref`/`symbolic-ref` on the stash ref (or with `--stdin`, or with refs supplied from elsewhere), a fetch/push refspec whose destination is the stash ref (either spelling) or refs/*, a push naming the stash ref (`push . --delete stash`) or `--mirror`, or filter-branch/filter-repo `--all`.'"$MATCHED" ;;
