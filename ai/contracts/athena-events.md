@@ -6019,12 +6019,29 @@ this subsection is its boundary.
 - **What is sent.** For `notion_personal`: the title (at most 300
   characters), the status, and the plain text of the page's top-level
   blocks, at most 8,000 characters. For `slack_ask`: the stored
-  `message_text`, at most 4,000 characters. A cut falls on a character
-  boundary and is marked `[truncated]`. Nothing else is sent: no ids, links,
-  people, dates, comments, project, asker or channel. The body is read only
-  under the owner's own enrichment token for that page's database, and only
-  when that database is one of the owner's usable `notion_personal` bindings
-  on a `full` subscription.
+  `message_text` when it is not blank; otherwise, for a DM ask, the DM's
+  text read live; at most 4,000 characters either way. A cut falls on a
+  character boundary and is marked `[truncated]`. Nothing else is sent: no
+  ids, links, people, dates, comments, project, asker or channel. The body is
+  read only under the owner's own enrichment token for that page's database,
+  and only when that database is one of the owner's usable `notion_personal`
+  bindings on a `full` subscription. A DM's text is read only as the owner's
+  own Slack app, through the one lookup the priorities page and the digest
+  also use (`Athena.Priorities.live_ask_text/3`), and it is held only for
+  the call: only the summary is stored. A channel mention is never read
+  live, so with no stored text it has no text to summarize. A read that
+  finds nothing (a blank text, or a thread with no message from the asker)
+  is no text to summarize too. A failed read is never read as no text: a
+  malformed Slack reference or asker fails `slack_ref_invalid`, a permanent
+  cause, and any other failure fails `slack_unreadable`, a transient one
+  (*Refresh*).
+
+  **Later (2026-09-30):** this bullet said `slack_ask` sends "the stored
+  `message_text`" only. Superseded by DND-1285 (gen_saas #575, `0594cf75`):
+  nothing populates `message_text` for most asks (DND-437, DND-1164), so most
+  Slack asks recorded no text to summarize. A DM ask with no stored text is
+  now summarized from its text read live
+  (`Athena.Priorities.Summaries.SlackText`).
 - **Provider and custody.** The Anthropic Messages API, with the model named
   in server config, under the owner's key held in `Athena.Secrets` as
   `(owner_id, :anthropic_api_key)`, account-wide. The owner stores it on the
@@ -6043,8 +6060,18 @@ this subsection is its boundary.
   was given has come. A due item's text is read and digested. The model is
   called only when that digest differs from the last good summary's, and at
   most once per item per 6 hours after a generation. A transient failure
-  backs off (1 min, 5 min, 30 min, 2 h, 6 h), then fails `retries_exhausted`.
-  A permanent failure is not retried until the text or the prompt changes.
+  backs off (1 min, 5 min, 30 min, 2 h, 6 h), then fails `retries_exhausted`,
+  except `slack_unreadable`. That one never exhausts: past the schedule it
+  retries at the schedule's last delay (6 h by default, or a longer
+  retry-after the answer names) until the read succeeds, because a DM ask's
+  revision does not change when its text becomes readable. A permanent
+  failure is not retried until the item's revision, its text or the prompt
+  changes.
+
+  **Later (2026-09-30):** this bullet said every transient failure ends in
+  `retries_exhausted`. Superseded for `slack_unreadable` by DND-1285
+  (gen_saas #575, `Summaries.Cause.exhausts?/1`,
+  `Summaries.Refresh.retry_delay/4`).
 - **Budget, per owner.** 200 model calls and 400,000 tokens per UTC day, and
   $5 per UTC month from metered tokens at configured prices, checked before
   each call against the ledger plus the call's estimate. A missing price, or
@@ -6065,8 +6092,14 @@ this subsection is its boundary.
   only for the item's own owner. No machine-token path reads one (*Access
   control*).
 - **Removal.** Removing a permissive field removes the summaries derived from
-  it: dropping `message_text` removes `slack_ask` summaries. Removing the
-  feature drops both tables.
+  it. A `slack_ask` summary may come from a DM's text read live, which no
+  field holds, so dropping `message_text` does not remove every `slack_ask`
+  summary. Disabling the `slack_ask` source does (*Owner opt-in per source*;
+  `SummaryStore.delete_disabled/2`). Removing the feature drops both tables.
+
+  **Later (2026-09-30):** this bullet said "dropping `message_text` removes
+  `slack_ask` summaries". Superseded by DND-1285 (gen_saas #575): a summary
+  may now come from the live DM text.
 
 ### Leases
 
@@ -6248,7 +6281,7 @@ writes: action `owner_dm`, no machine, a body hash, never a body.
 | View the priorities page | the logged-in owner | only the owner's items, their summaries, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
 | Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or, for promote, restore and dismiss only, an owner approval grant of class `priority.transition`, executed by the server at click time | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the grant path logs the refusal, the grant stays `approved`, and the approval message says so |
 | Build and send the morning digest | the server, for owner O; no caller | O's `proposed` and `active` items; O's own Slack app; recipient O's `owner_slack_user_id` | `Athena.Digest`: items through `list_ranked/2` with O's user (the `owner_id` filter plus RBAC `read`); `Athena.Slack.owner_dm/3` selects the app by `owner_id` and reads the recipient from it, with no recipient argument | nothing is sent; the cause is recorded on O's send log and shown on O's `/priorities` |
-| Generate an item summary | the server's summary sweeper, for each item's own owner; no caller | one owner's open items of an enabled summary source | `Athena.Priorities.Summaries`: the item loaded by id and `owner_id` in the query, checked against the source allow-list and the owner's enabled sources, and re-checked in the write transaction; a Notion body read only through `Athena.NotionEvents.index_page_text/4` under the owner's own binding | the item is skipped and counted; nothing is read or written for another owner |
+| Generate an item summary | the server's summary sweeper, for each item's own owner; no caller | one owner's open items of an enabled summary source | `Athena.Priorities.Summaries`: the item loaded by id and `owner_id` in the query, checked against the source allow-list and the owner's enabled sources, and re-checked in the write transaction; a Notion body read only through `Athena.NotionEvents.index_page_text/4` under the owner's own binding; a Slack DM's text read only through `Athena.Priorities.live_ask_text/3`, as the owner's own Slack app, for an item of that owner (any other pair is `not_found` with no Slack call) | the item is skipped and counted; nothing is read or written for another owner |
 | Read the last digest day | the logged-in owner | the owner's own `digest_sends` rows | `Athena.Digest.latest_send/1`: an `owner_id` = viewer filter in the query | none shown ("none yet") |
 | `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
 
