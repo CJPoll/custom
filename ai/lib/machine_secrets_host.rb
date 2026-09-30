@@ -124,8 +124,11 @@ module MachineSecretsHost
 
   GLOB_FLAGS = File::FNM_EXTGLOB | File::FNM_DOTMATCH
 
+  # FNM_DOTMATCH lets `*` match dotfiles (a copy may be `.boto`), but it also
+  # lets `*` match the `.` and `..` directory entries at ANY segment, so
+  # `dir/*/*` yields `dir/./sub`. Drop every match with such a segment.
   def glob(pattern)
-    Dir.glob(pattern, GLOB_FLAGS).reject { |p| %w[. ..].include?(File.basename(p)) }.sort
+    Dir.glob(pattern, GLOB_FLAGS).reject { |p| p.split("/").any? { |s| s == "." || s == ".." } }.sort
   end
 
   # with-secret's one read of a value. Drops one trailing newline.
