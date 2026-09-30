@@ -541,6 +541,7 @@ WRAPPER_OPTS = {
                            "--outcome-file": ("outcome-file", True), "--exclusive": ("exclusive", False),
                            "--weight": ("weight", True), "--pool": ("pool", True),
                            "--status": ("status", False), "--json": ("json", False),
+                           "--weight-of": ("weight-of", False),
                            "--help": ("help", False), "--self-test": ("self-test", False)}},
 }
 WRAPPER_OPTS["sudoedit"] = WRAPPER_OPTS["sudo"]

@@ -247,6 +247,10 @@ bash_sub "nice -5 (legacy) git -C MAIN add . -> deny" deny "nice -5 git -C ${MAI
 bash_sub "nice --adjustment 5 git -C MAIN add . -> deny" deny "nice --adjustment 5 git -C ${MAIN} add ."
 bash_sub "test-slot --weight 4 --pool cpu git -C MAIN add . -> deny" deny "test-slot --weight 4 --pool cpu -- git -C ${MAIN} add ."
 bash_sub "test-slot --weight=2 --pool=model git -C MAIN add . -> deny" deny "test-slot --weight=2 --pool=model -- git -C ${MAIN} add ."
+# DND-1326: --weight-of is a known switch, so it draws no unknown-option warning.
+bash_sub "test-slot --weight-of git -C MAIN add . -> deny" deny "test-slot --weight-of -- git -C ${MAIN} add ."
+bash_sub "test-slot --weight-of -- true -> allow" allow "test-slot --weight-of -- true"
+case "${OUT}" in *"not in its option table"*) bad "test-slot --weight-of is in the option table" "${OUT}" ;; *) ok "test-slot --weight-of is in the option table" ;; esac
 bash_sub "stdbuf -o L git -C MAIN add . -> deny" deny "stdbuf -o L git -C ${MAIN} add ."
 bash_sub "stdbuf -oL --error=0 git -C MAIN add . -> deny" deny "stdbuf -oL --error=0 git -C ${MAIN} add ."
 bash_sub "exec -a NAME git -C MAIN add . -> deny" deny "exec -a NAME git -C ${MAIN} add ."
