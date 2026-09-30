@@ -341,11 +341,12 @@ check 11-B-ran present "$W/B10.ran"
 check 11-waited eq "$(events | jq -s '[.[] | select(.event=="acquired" and .label=="B10" and .waited_s > 0)] | length')" 1
 reap A10; check 11-A-rc eq "$RC" 0
 
-# 12/18: N=1, holder A, B --wait-timeout 3 → exit 75, TIMEOUT + did NOT run +
-# Fix + A's label, CMD never ran, outcome `timeout`; heartbeats (seam 1 s).
+# 12: N=1, holder A, B --wait-timeout 3 → exit 75, TIMEOUT + did NOT run +
+# Fix + A's label, CMD never ran, outcome `timeout`. A holds until released,
+# so B's timeout is the only way out: no verdict here depends on speed.
 newpool p12 1
 hold A12 holder-A12
-ATHENA_TEST_SLOT_HEARTBEAT=1 bg B12 --label B12 --wait-timeout 3 --outcome-file "$W/12.outcome" -- sh -c ': > "$1"' _ "$W/B12.ran"
+bg B12 --label B12 --wait-timeout 3 --outcome-file "$W/12.outcome" -- sh -c ': > "$1"' _ "$W/B12.ran"
 reap B12; check 12-rc eq "$RC" 75
 check 12-timeout has "$W/B12.err" "TIMEOUT"
 check 12-not-run-msg has "$W/B12.err" "did NOT run"
@@ -354,8 +355,24 @@ check 12-label has "$W/B12.err" "holder-A12"
 check 12-not-run absent "$W/B12.ran"
 check 12-outcome eq "$(cat "$W/12.outcome" 2>/dev/null)" "timeout"
 check 12-event eq "$(event_count timeout B12)" 1
-check 18-heartbeats eval '[ "$(grep -c "still waiting" "$W/B12.err")" -ge 2 ]'
 release A12; reap A12; check 12-A-rc eq "$RC" 0
+
+# 18: a waiter prints heartbeats while it waits (seam 1 s). DND-1007: this
+# used to count B12's heartbeats inside its 3 s --wait-timeout, so a slow host
+# could print fewer than two before the timeout: a verdict that flipped with
+# machine speed. B18 has no --wait-timeout, so it waits until A18 is released,
+# and the poll below is only a hang cap. The verdict is the event itself:
+# two heartbeats were printed while B18 waited and before it ran.
+newpool p18 1
+hold A18 holder-A18
+ATHENA_TEST_SLOT_HEARTBEAT=1 bg B18 --label B18 -- sh -c ': > "$1"' _ "$W/B18.ran"
+for ((i = 0; i < 1200; i++)); do [ "$(grep -c "still waiting" "$W/B18.err" 2>/dev/null)" -ge 2 ] && break; sleep 0.05; done
+check 18-heartbeats eval '[ "$(grep -c "still waiting" "$W/B18.err")" -ge 2 ]'
+check 18-not-run-while-waiting absent "$W/B18.ran"
+release A18
+reap B18; check 18-B-rc eq "$RC" 0
+check 18-B-ran present "$W/B18.ran"
+reap A18; check 18-A-rc eq "$RC" 0
 
 # 13: a CMD that itself exits 75 is distinguishable through the outcome file.
 newpool p13 1
@@ -686,9 +703,10 @@ ATHENA_TEST_SLOT_HEARTBEAT=1 bg W322 --label W322 -- sh -c 'echo W2 >> "$1"' _ "
 check 32-W2-queued await_waiters 2
 bg W323 --label W323 -- sh -c 'echo W3 >> "$1"' _ "$W/32.order"
 check 32-W3-queued await_waiters 3
-# W2 renews its wait twice more AFTER W3 queued (bounded poll).
+# W2 renews its wait twice more AFTER W3 queued. W2 has no --wait-timeout, so
+# the poll is a hang cap only (DND-1007).
 hb0="$(heartbeats "$W/W322.err")"
-for ((i = 0; i < 200; i++)); do [ "$(heartbeats "$W/W322.err")" -ge $((hb0 + 2)) ] && break; sleep 0.05; done
+for ((i = 0; i < 1200; i++)); do [ "$(heartbeats "$W/W322.err")" -ge $((hb0 + 2)) ] && break; sleep 0.05; done
 check 32-W2-renewed eval '[ "$(heartbeats "$W/W322.err")" -ge $((hb0 + 2)) ]'
 release A32
 for k in 1 2 3; do reap "W32$k"; check "32-W$k-rc" eq "$RC" 0; done
@@ -699,14 +717,16 @@ check 32-fifo eq "$(tr '\n' ' ' <"$W/32.order" 2>/dev/null)" "W1 W2 W3 "
 # queued waiter leaves the queue at once (its place is judged by its flock,
 # never its pid) and blocks nobody behind it; a waiter behind the head still
 # times out with exit 75, and the queue closes up behind it.
+# DND-1007: W4 used to carry --wait-timeout 8 through every check below, so a
+# slow host could time it out before the position checks ran: a verdict that
+# flipped with machine speed. No waiter here has a timeout until W5, which is
+# added only after the position checks are done.
 newpool p33 1
 hold A33 holder-A33
-for k in 1 2 3; do
+for k in 1 2 3 4; do
   bg "W33$k" --label "W33$k" -- sh -c 'echo "$1" >> "$2"' _ "W$k" "$W/33.order"
   check "33-W$k-queued" await_waiters "$k"
 done
-bg W334 --label W334 --wait-timeout 8 --outcome-file "$W/33.outcome" -- sh -c 'echo W4 >> "$1"' _ "$W/33.order"
-check 33-W4-queued await_waiters 4
 st="$("$BIN" --status --json 2>/dev/null)"
 check 33-json-positions eq "$(jq -c '[.waiters[] | [.position, .label]]' <<<"$st")" \
   '[[1,"W331"],[2,"W332"],[3,"W333"],[4,"W334"]]'
@@ -729,15 +749,19 @@ check 33-W2-left-queue await_gone W332
 st="$("$BIN" --status --json 2>/dev/null)"
 check 33-closed-up eq "$(jq -c '[.waiters[] | [.position, .label]]' <<<"$st")" \
   '[[1,"W331"],[2,"W333"],[3,"W334"]]'
-reap W334; check 33-W4-timeout-rc eq "$RC" 75
-check 33-W4-timeout-msg has "$W/W334.err" "TIMEOUT"
-check 33-W4-outcome eq "$(cat "$W/33.outcome" 2>/dev/null)" "timeout"
-check 33-W4-left-queue await_waiters 2
+# W5 queues behind the head with a timeout. A33 holds until released, so the
+# timeout is the only way W5 can end: exit 75, whatever the machine's speed.
+bg W335 --label W335 --wait-timeout 1 --outcome-file "$W/33.outcome" -- sh -c 'echo W5 >> "$1"' _ "$W/33.order"
+reap W335; check 33-W5-timeout-rc eq "$RC" 75
+check 33-W5-timeout-msg has "$W/W335.err" "TIMEOUT"
+check 33-W5-outcome eq "$(cat "$W/33.outcome" 2>/dev/null)" "timeout"
+check 33-W5-left-queue await_waiters 3
 release A33
 reap W331; check 33-W1-rc eq "$RC" 0
 reap W333; check 33-W3-rc eq "$RC" 0
+reap W334; check 33-W4-rc eq "$RC" 0
 reap A33
-check 33-order eq "$(tr '\n' ' ' <"$W/33.order" 2>/dev/null)" "W1 W3 "
+check 33-order eq "$(tr '\n' ' ' <"$W/33.order" 2>/dev/null)" "W1 W3 W4 "
 check 33-queue-empty eq "$("$BIN" --status --json 2>/dev/null | jq .waiting)" 0
 
 # 34 (DND-823 rollout): pre-fix and fixed test-slot share one live pool while

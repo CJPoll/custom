@@ -94,9 +94,19 @@ mk_stub() { # path name child-cmd
   cat > "$1" <<EOF
 #!/bin/sh
 echo \$\$ >> "${state}/all.pids"
-# A slow start on purpose (SELFTEST_STUB_DELAY seconds): what a loaded host
-# does to the reap-then-exec path. Readiness must be waited on as an event.
-[ -n "\${SELFTEST_STUB_DELAY:-}" ] && sleep "\${SELFTEST_STUB_DELAY}"
+# A slow start on purpose: what a loaded host does to the reap-then-exec
+# path. Readiness must be waited on as an event. DND-1007: the stub holds its
+# start until the test's own readiness wait has polled SELFTEST_STUB_GATE_TICKS
+# times (wait_ready appends one line to <name>.ticks per poll), so the start is
+# later than any fixed poll budget below that count on a fast host and a slow
+# one alike. It used to sleep a fixed 6 s, which a fixed budget on a slow host
+# could outlast. The 2400-iteration bound only caps a hang.
+if [ -n "\${SELFTEST_STUB_GATE_TICKS:-}" ]; then
+  gi=0
+  while [ "\$(cat "${state}/$2.ticks" 2>/dev/null | wc -l)" -lt "\${SELFTEST_STUB_GATE_TICKS}" ] && [ "\${gi}" -lt 2400 ]; do
+    gi=\$((gi + 1)); sleep 0.05
+  done
+fi
 sh -c 'echo \$\$ >> "${state}/all.pids"; echo \$\$ > "${state}/$2.helper"; $3 & echo \$! >> "${state}/all.pids"; echo \$! > "${state}/$2.child"; wait' &
 helper=\$!
 # Wait for the EVENT (the child's pid file), for as long as the helper that
@@ -229,7 +239,14 @@ wait_for() { # PID CMD...: poll CMD until it succeeds while PID lives
   done
 }
 wait_ready() { # name: the stub's ready file, while the supervised pid lives
-  wait_for "$(cat "${state}/$1.supervised" 2>/dev/null)" test -e "${state}/$1.ready"
+  wait_for "$(cat "${state}/$1.supervised" 2>/dev/null)" ready_or_tick "$1"
+}
+# ready_or_tick NAME: true once the stub is ready; otherwise records one poll
+# in NAME.ticks, the count a SELFTEST_STUB_GATE_TICKS stub waits on (DND-1007).
+ready_or_tick() {
+  [ -e "${state}/$1.ready" ] && return 0
+  echo tick >> "${state}/$1.ticks"
+  return 1
 }
 exe_is() { [ "$(readlink "/proc/$1/exe" 2>/dev/null)" = "$2" ]; }
 
@@ -391,7 +408,7 @@ respawn_case() { # initd name stub|"" env...
   if ! alive "${old_child}"; then
     fail "${initd}: respawn: the crash also ended the child, so this case proves nothing"; return
   fi
-  rm -f "${state}/${name}.ready" "${state}/${name}.child" "${state}/${name}.helper"
+  rm -f "${state}/${name}.ready" "${state}/${name}.child" "${state}/${name}.helper" "${state}/${name}.ticks"
   out="$(run_driver respawn "${sysfiles}/${initd}" "${name}" "${override}" "$@" 2>&1)"; rc=$?
   if [ "${rc}" -ne 0 ] || ! wait_ready "${name}" || ! alive "$(child_of "${name}")"; then
     fail "${initd}: respawn: the respawned command never came up (rc=${rc}): ${out}"
@@ -424,7 +441,9 @@ respawn_case docker-rootless-github-runner.initd dgh-respawn stub DOCKER_ROOTLES
 respawn_case docker-rootless-gitlab-runner.initd dgl-respawn stub DOCKER_ROOTLESS_USER="${me}"
 # The same path with a start slower than any fixed poll budget: the test must
 # wait on the start EVENT, bounded by the process being alive, not by a clock.
-respawn_case docker-rootless-github-runner.initd dgh-slow stub DOCKER_ROOTLESS_USER="${me}" SELFTEST_STUB_DELAY=6
+# The stub starts only after 120 readiness polls, past the old fixed budget of
+# 100, however fast or slow the host is (DND-1007).
+respawn_case docker-rootless-github-runner.initd dgh-slow stub DOCKER_ROOTLESS_USER="${me}" SELFTEST_STUB_GATE_TICKS=120
 
 supervised=""
 for f in "${sysfiles}"/*.initd; do

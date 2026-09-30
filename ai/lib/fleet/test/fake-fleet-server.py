@@ -66,6 +66,23 @@ def next_spec():
     return spec
 
 
+# A held answer (DND-1007): with "hold_file": PATH in the spec, the request is
+# logged, then NOT answered until PATH exists. A test that must prove "the
+# client did not wait for the server" or "the client's own bound fired" holds
+# the answer and creates PATH only after it has seen the outcome, so the
+# verdict rests on that event and never on how fast the machine is. The wait
+# is capped at HOLD_CAP_S only so a test that forgets to release cannot hang.
+HOLD_CAP_S = 120
+
+
+def hold(path):
+    if not path:
+        return
+    deadline = time.monotonic() + HOLD_CAP_S
+    while not os.path.exists(path) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -98,6 +115,7 @@ class Handler(BaseHTTPRequestHandler):
         with open(LOG_FILE, "a") as fh:
             fh.write(json.dumps(entry) + "\n")
         time.sleep(float(spec.get("delay_s", 0)))
+        hold(spec.get("hold_file"))
         status = int(spec.get("status", 202))
         payload = spec.get("raw_body")
         if payload is None:

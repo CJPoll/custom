@@ -61,7 +61,7 @@ fleet_last_request() { tail -n 1 "${TMP}/server.log"; }
 # fleet_wait_count <n> -- bounded poll until at least <n> requests are logged.
 fleet_wait_count() {
   local want="$1" i
-  for i in $(seq 1 200); do
+  for i in $(seq 1 1200); do
     [ "$(fleet_log_count)" -ge "${want}" ] && return 0
     sleep 0.05
   done
@@ -72,7 +72,7 @@ fleet_wait_count() {
 # their pids, then block on each until it exits (bounded).
 fleet_wait_pids() {
   local f="$1" n="$2" i p c
-  for i in $(seq 1 200); do
+  for i in $(seq 1 1200); do
     c="$(grep -c . "${f}" 2>/dev/null)"
     [ "${c:-0}" -ge "${n}" ] && break
     sleep 0.05

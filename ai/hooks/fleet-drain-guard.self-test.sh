@@ -54,7 +54,12 @@ trap cleanup EXIT INT TERM
 # shellcheck source=../lib/fleet/control-domain.sh
 . "${AI}/lib/fleet/control-domain.sh"
 fleet_fixture_env
-export FLEET_CONNECT_TIMEOUT_S=2 FLEET_MAX_TIME_S=3
+# DND-1007: these only cap a HANG. No verdict here depends on either firing:
+# every answer comes from the loopback fake server, and the unreachable case is
+# a closed port (refused at once, never a timeout). They were 2 s and 3 s, so a
+# loaded host could turn a server answer into "unreachable": a verdict that
+# flipped with machine speed.
+export FLEET_CONNECT_TIMEOUT_S=30 FLEET_MAX_TIME_S=60
 export FLEET_HOOK_PIDFILE="${PIDS}"
 # The fake server logs both the guard's control reads (GET) and the detached
 # spawn_denied reports (POST /api/v1/fleet/reports); these split them.

@@ -143,7 +143,9 @@ has "[DND-484 test 5] ... with Fix:" "$(cat "${TMP}/uerr")" "Fix:"
 has "[DND-484 test 5] headless default budget is the inbox policy's 540s" "$(cat "${TMP}/uerr")" "budget 540s, ceiling 600s, mode headless"
 
 # The trap: a waiter killed mid-request leaves no curl behind.
-fleet_respond "{\"status\":200,\"delay_s\":20,\"body\":${DRAIN_B}}"
+# The answer is held until the checks below are done (DND-1007), so the curl
+# is still in flight when the waiter is killed however slow the machine is.
+fleet_respond "{\"status\":200,\"hold_file\":\"${TMP}/hold-trap\",\"body\":${DRAIN_B}}"
 before="$(fleet_log_count)"
 # curl's own timeout (FLEET_MAX_TIME_S) is raised past the check below, so a
 # curl that died is one the trap killed, not one that timed out.
@@ -161,6 +163,7 @@ left=""
 for i in $(seq 1 20); do left="$(marked)"; [ -z "${left}" ] && break; sleep 0.05; done
 eq "wait: ... and no descendant (its curl included) survives it" "${left}" ""
 [ -n "${left}" ] && kill ${left} 2>/dev/null
+touch "${TMP}/hold-trap"
 fleet_respond "{\"status\":200,\"body\":${DRAIN_B}}"
 
 # Without pgrep the trap cannot list the poll's tree: wait refuses to start

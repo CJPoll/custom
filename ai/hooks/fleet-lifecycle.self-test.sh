@@ -14,7 +14,8 @@
 # 3. Prompt and description text never leave the machine.
 # 4. The hook always exits 0 and never blocks: server down, 422, a timeout,
 #    jq missing, garbage stdin. Each failure is in report-failures.log with Fix:.
-# 5. It never adds latency: it returns while the server is still sleeping.
+# 5. It never adds latency: it returns while the server's answer is still
+#    held (DND-1007: an event, not a wall-clock budget).
 
 set -u
 
@@ -56,14 +57,10 @@ fleet_start_server || exit 1
 LOG="${XDG_STATE_HOME}/athena/fleet/report-failures.log"
 logn() { local c; c="$(cat "${LOG}.1" "${LOG}" 2>/dev/null | grep -c .)"; printf '%s\n' "${c:-0}"; }
 
-# hook <json> -- run the hook with stdin; sets RC, OUT, ERR, MS (wall ms).
+# hook <json> -- run the hook with stdin; sets RC, OUT, ERR.
 hook() {
-  local t0 t1
-  t0="$(date +%s%N)"
   OUT="$(printf '%s' "$1" | "${HOOK}" 2>"${TMP}/err")"; RC=$?
-  t1="$(date +%s%N)"
   ERR="$(cat "${TMP}/err")"
-  MS=$(( (t1 - t0) / 1000000 ))
 }
 fixture() { jq -c --arg id "$1" 'select(.id == $id) | .stdin' "${FIXTURES}"; }
 
@@ -241,19 +238,27 @@ fleet_wait_pids "${PIDS}" 1
 eq "a 422 refusal: the hook still exited 0" "${RC}" "0"
 eq "a 422 refusal: logged" "$(logn)" "$((n0 + 1))"
 has "a 422 refusal: the server's Fix: is in the log" "$(tail -n 1 "${LOG}")" "Fix: agent_type must be a fleet worker"
-fleet_respond '{"status":202,"body":{"ok":true},"delay_s":3}'
+# Both cases below hold the server's answer until the test releases it
+# (DND-1007), so each verdict rests on an event, never on machine speed. The
+# `timeout 60` is a hang cap only: a hook that waited on the network would sit
+# on the held answer and exit 124, however fast the machine is.
+HOLD="${TMP}/hold-latency"
+fleet_respond "{\"status\":202,\"body\":{\"ok\":true},\"hold_file\":\"${HOLD}\"}"
 : > "${PIDS}"
-hook "$(fixture b3.3-StopFailure-athena-captain)"
-eq "a slow server: exit 0" "${RC}" "0"
-if [ "${MS}" -lt 2500 ]; then ok "never adds latency: returned in ${MS} ms while the server sleeps 3 s"
-else bad "never adds latency: returned in ${MS} ms while the server sleeps 3 s" "it waited on the network"; fi
+fixture b3.3-StopFailure-athena-captain > "${TMP}/in.json"
+timeout 60 "${HOOK}" < "${TMP}/in.json" >/dev/null 2>&1; RC=$?
+eq "never adds latency: the hook exited 0 while the server's answer was still held" "${RC}" "0"
+touch "${HOLD}"
 fleet_wait_pids "${PIDS}" 1
+HOLD="${TMP}/hold-bound"
+fleet_respond "{\"status\":202,\"body\":{\"ok\":true},\"hold_file\":\"${HOLD}\"}"
 : > "${PIDS}"
 export FLEET_HOOK_TIMEOUT_S=1
 hook "$(fixture b3.3-StopFailure-athena-captain)"
 unset FLEET_HOOK_TIMEOUT_S
 fleet_wait_pids "${PIDS}" 1
-has "a report past its bound is killed and logged with Fix:" "$(tail -n 1 "${LOG}")" "did not finish within 1s"
+has "a report past its bound is killed and logged with Fix: (the answer was held, so only the bound could end it)" "$(tail -n 1 "${LOG}")" "did not finish within 1s"
+touch "${HOLD}"
 fleet_respond '{"status":202,"body":{"ok":true}}'
 kill "${SERVER_PID}" 2>/dev/null; wait "${SERVER_PID}" 2>/dev/null; SERVER_PID=""
 fleet_point_at "http://127.0.0.1:$(fleet_closed_port)/mcp"
