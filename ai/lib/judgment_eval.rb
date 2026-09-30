@@ -230,7 +230,9 @@ module JudgmentEval
   QUESTION_SET_VERSION = "slack-routing-v2"
   # The labeller's constants (DND-1047) ARE this harness's expectation of the
   # server: one definition, so the labeller, the eval and (through
-  # check_context/2) the router's rules cannot drift apart silently.
+  # check_context/2) the router's window, cap and text cap cannot drift apart
+  # silently. The selection logic itself is not compared: nothing pins the
+  # Ruby and Elixir copies together.
   CONTEXT_RULES = {
     "window_s" => JudgmentContext::WINDOW_S,
     "max_entries" => JudgmentContext::MAX_MESSAGES,

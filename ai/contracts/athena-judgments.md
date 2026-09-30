@@ -443,8 +443,9 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   version, rules or owner id differ from its own, so a mismatch fails loudly
   instead of starving the context. Its owner id is the private overlay's
   `slack .people.owner.user_id` (`athena-private-overlay.md`); one that does
-  not resolve stops the run before anything is read or sent, never reading as
-  "no root is the owner's". A case whose context cannot be built is
+  not resolve, or that matches none of the labelled roots, stops the run
+  before anything is sent, never reading as "no root is the owner's". A case
+  whose context cannot be built is
   unscored `context_unavailable` and is never sent with an empty context.
 - **The owner confirms with the conversation context** (DND-1047). Before
   each message, `judgment-label --confirm` shows the context window that
@@ -456,7 +457,11 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   the same rule: the six most recent top-level messages from any sender, then
   only the owner's text and Athena's session labels. `judgment-eval` takes its
   window from this builder's constants and refuses a server whose context
-  rules differ, so the two cannot drift apart silently. It reads Slack as
+  rules differ, so the window, the cap and the text cap cannot drift apart
+  silently. That check compares those three numbers only: the selection
+  logic itself (counting every sender toward the six, what is top-level) is
+  two hand-kept copies, Ruby and Elixir, and nothing pins them together. It
+  reads Slack as
   Athena's bot, for that terminal only; nothing egresses. A row
   records `"context": "shown"` or `"unavailable"`; an `owner_confirmed` row
   without `"shown"` is re-presented by `--confirm --recheck`, and its answer
@@ -467,7 +472,8 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   parity check pins the two windows together". Replaced by the rule above
   (DND-1048): the judge is gen_saas Elixir, so it cannot call this Ruby
   builder; the pin is judgment-eval's check of the server's `rules` against
-  this builder's constants.
+  this builder's constants, which covers the three numbers and not the
+  selection logic.
 - **Finding triage labels** (DND-714, `ai/bin/triage-corpus`) come from the
   DND tracker's own history, in the machine-local
   `finding-triage-labels.jsonl` (ids only) and `finding-triage-corpus.jsonl`

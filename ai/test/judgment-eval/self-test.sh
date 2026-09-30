@@ -577,6 +577,23 @@ has "the malformed-value refusal says what is wrong" "${ERR}" "is not a Slack us
 lacks "the malformed-value refusal never prints the value" "${ERR}" "cody"
 has "the malformed-value refusal carries Fix:" "${ERR}" "Fix: "
 eq "the malformed-value refusal makes no request" "$(requests)" "0"
+# A well-formed owner id that is not the one the labels were made under (a
+# stale overlay) matches no root. That is a wrong key, not "no root is the
+# owner's": exit 1 naming the overlay key, before any request, not exit 3
+# with every case context_unavailable (and the server's owner check, which
+# would name it, is never reached).
+STALE="${TMP}/overlay-stale"
+overlay_root "${STALE}" '{"people":{"owner":{"user_id":"UFAKE00003"}}}'
+: > "${TMP}/server.log"
+ATHENA_PRIVATE_ROOT="${STALE}" slr
+eq "an overlay owner id that matches no labelled root refuses (exit 1)" "${RC}" "1"
+has "the no-owner-root refusal names the overlay key" "${ERR}" "slack .people.owner.user_id"
+has "the no-owner-root refusal counts the roots considered" "${ERR}" "0 of 2 labelled root(s)"
+has "the no-owner-root refusal carries Fix:" "${ERR}" "Fix: "
+lacks "the no-owner-root refusal never prints the id" "${ERR}" "UFAKE00003"
+eq "the no-owner-root refusal makes no request" "$(requests)" "0"
+ATHENA_PRIVATE_ROOT="${STALE}" slr --dry-run
+eq "the no-owner-root refusal holds under --dry-run (exit 1)" "${RC}" "1"
 OUT="$(env -u ATHENA_PRIVATE_ROOT HOME="${NOHOME}" "${BIN}" --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --dry-run 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
 eq "another use case needs no overlay (--dry-run exits 0)" "${RC}" "0"
 lacks "another use case never reads the overlay" "${ERR}" "private-overlay"

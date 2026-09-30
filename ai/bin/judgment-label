@@ -405,7 +405,8 @@ module Manager
   end
 
   # The per-line note: what the routing judge (DND-1048) sees of each line.
-  # The judge is DND-1048's design (slack-routing-v2), not yet built.
+  # The judge is gen_saas's slack-routing-v2 (Athena.SlackEvents.RoutingContext);
+  # this labeller shows the same rule from its own copy (judgment_context.rb).
   JUDGE_NOTES = {
     "text" => "the judge will see this text (first #{JudgmentContext::JUDGE_TEXT_CAP} chars)",
     "session_label" => "shown to you only; the judge will see the session",
