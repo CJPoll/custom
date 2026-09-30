@@ -87,8 +87,8 @@ then sat untouched for ~2.4 days each — **610,039s (7.06 days) of ready-and-id
 MRs, and ended still holding these three; nothing noticed. The idle is not free
 waiting: when a later run drained them, `origin/main` had moved 19 commits under
 !1187 alone, costing 4 full pipeline runs and 2 extra reviews to absorb the
-drift. `lead-time` could not have caught it — it queries `state=merged`, so an
-orphaned open MR is invisible to it until it merges, which is 2.5 days after the
+drift. `lead-time` could not have caught it — it never lists open requests, so
+an orphaned open MR is invisible to it until it merges, which is 2.5 days after the
 damage stops being recoverable.*
 
 **Also fire this skill whenever your turn is ending for ANY reason** — ceiling,

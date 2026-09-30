@@ -505,13 +505,15 @@ ai/bin/lead-time --repo <R> --since "$(cat "$SHIPWRIGHT_STATE_DIR/lead-cursor.<r
 
 `lead-cursor.<repo>.txt` lives beside `cursor.txt` in `$SHIPWRIGHT_STATE_DIR`
 (main checkout) — **one cursor per repo**, advanced to that repo's newest
-scanned merge only once its scan is handled and **never on a `SCAN
+scanned close (`closed_at`) only once its scan is handled and **never on a `SCAN
 INCOMPLETE`**, so a repo whose probe failed keeps its window instead of having
 it eaten by a sibling's success. Missing on first run → a bounded 48h window.
+A row with `unmeasured_reason` could not be measured: report it as unmeasured,
+never as fast or as an outlier.
 
 **Also sweep for finished work nobody is merging** — `ai/bin/ready-and-idle
 --repo <R>` lists open MRs that are green, unblocked and idle; `lead-time` sees
-merged only. Report them; the admiral merges, not you. Read the exit code: **3 =
+landed requests only, never open ones. Report them; the admiral merges, not you. Read the exit code: **3 =
 UNAVAILABLE**, no list; **4 = the list is COMPLETE, act on it** — only `drift`
 went soft, routine from a cron lane. Reading a 4 as a failure reinstates the outage.
 

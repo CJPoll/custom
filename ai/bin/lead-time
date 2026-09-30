@@ -5,7 +5,8 @@
 #
 # Lead time = interval from when a captain STARTS working a ticket to when that
 # ticket is FULLY DEPLOYED (or, for a ticket that does not deploy, when its
-# post-merge pipeline completes; or, for a repo with no CI at all, the merge).
+# post-merge pipeline completes; or, for a repo with no CI at all, the landing:
+# the forge merge, or the push that put a CLOSED PR's change on the base).
 #
 # The whole point of this tool is that it CAPTURES NOTHING and asks NOTHING of
 # any agent. Every timestamp is recovered on demand from git + the forge's CI,
@@ -183,6 +184,11 @@ module LeadTime
       return { status: :landed, sha: found.min_by { |s| order[s] } }
     end
     return { status: :landed, sha: by_pid[combined_pid] } if combined_pid && by_pid[combined_pid]
+    # No commit of its own and no diff to match: nothing here can say whether
+    # it landed, so it is not "closed".
+    if pr_only.empty?
+      return { status: :unknown, reason: "it has no commit of its own off the base branch to match" }
+    end
 
     hits = found.compact.size
     if hits.positive?
@@ -266,7 +272,7 @@ rescue JSON::ParserError => e
   ProbeFailures.record(printable, "unparseable output: #{e.message}")
 end
 
-# The merged-PR/MR list is capped. A window holding more merges than the cap
+# The candidate PR/MR list is capped. A window holding more requests than the cap
 # comes back as exactly the cap, and the overflow is dropped with exit 0, so a
 # full page is recorded as a failed probe (the scan reports INCOMPLETE), never
 # read as the whole window. GitLab's API caps a page at 100.
@@ -276,8 +282,8 @@ GITLAB_PAGE_CAP = 100
 def note_saturated(printable, count, cap = MERGED_PAGE_CAP)
   return if count < cap
 
-  ProbeFailures.record(printable, "window saturated: #{count} merges returned at a " \
-                                  "cap of #{cap}; merges beyond it would be silently dropped")
+  ProbeFailures.record(printable, "window saturated: #{count} requests returned at a " \
+                                  "cap of #{cap}; requests beyond it would be silently dropped")
 end
 
 def origin_url(dir)
@@ -315,7 +321,7 @@ class GitHubForge
   # here. Measured 2026-09-30 on CJPoll/custom: `closed:>=2026-09-29` omitted
   # PRs #127, #125, #123, #122 and #119, all closed that day and unmerged, while
   # `updated:>=2026-09-29` and an unfiltered list both returned them.
-  def merged_since(since_iso)
+  def landing_candidates_since(since_iso)
     since = Time.iso8601(since_iso)
     prs = run_json(["gh", "pr", "list", "--state", "closed", "--search", "updated:>=#{since_iso}",
                     "--limit", MERGED_PAGE_CAP.to_s, "--json", "number,mergedAt,closedAt,state"], @dir) || []
@@ -348,7 +354,7 @@ class GitHubForge
     {
       number: d["number"], title: d["title"], branch: d["headRefName"],
       merged_at: merged_at, merge_sha: merge_sha, landed_via: landed_via,
-      closed: closed, unmeasured: unmeasured,
+      closed: closed, unmeasured: unmeasured, closed_at: d["closedAt"],
       # Author AND committer date: a rebase resets only the committer date.
       commit_times: (d["commits"] || []).flat_map { |c| [c["authoredDate"], c["committedDate"]] },
       deploy_at: deploy_at, pipeline_at: pipeline_at,
@@ -401,29 +407,36 @@ class GitHubForge
     pr_only = commit_patches(["--no-merges", head, "^#{tip}"])
     main = commit_patches(["--no-merges", tip, "^#{head}"])
     base = git_ok("merge-base", head, tip)
-    diff = base && git_ok("diff", base.strip, head)
-    combined = diff && patch_ids(diff).first&.first
-    unless pr_only && main && diff
+    diff = base && git_ok(*PATCH_CONFIG, "diff", *PATCH_FLAGS, base.strip, head)
+    combined_ids = diff && patch_ids(diff)
+    unless pr_only && main && combined_ids
       return { status: :unknown, reason: "landing probe failed (see SCAN INCOMPLETE)" }
     end
 
-    LeadTime.classify_landing(pr_only: pr_only, combined_pid: combined, main: main)
+    LeadTime.classify_landing(pr_only: pr_only, combined_pid: combined_ids.first&.first, main: main)
   end
+
+  # A patch-id reads the patch text, so user config must not change it: no
+  # colour, no external diff or textconv, and the default a/ b/ prefixes.
+  PATCH_CONFIG = ["-c", "diff.noprefix=false", "-c", "color.ui=never"].freeze
+  PATCH_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv"].freeze
 
   # [{sha:, pid:, subject:}] for a rev range, newest first; nil on a git failure.
   def commit_patches(range)
     subjects = git_ok("log", "--format=%H%x09%s", *range) or return nil
-    patches = git_ok("log", "-p", "--format=commit %H", *range) or return nil
-    pid_of = patch_ids(patches).to_h { |pid, sha| [sha, pid] }
+    patches = git_ok(*PATCH_CONFIG, "log", "-p", *PATCH_FLAGS, "--format=commit %H", *range) or return nil
+    ids = patch_ids(patches) or return nil
+    pid_of = ids.to_h { |pid, sha| [sha, pid] }
     subjects.lines.map do |l|
       sha, subject = l.chomp.split("\t", 2)
       { sha: sha, pid: pid_of[sha], subject: subject.to_s }
     end
   end
 
-  # [[patch_id, sha], ...] for a stream of patches.
+  # [[patch_id, sha], ...] for a stream of patches; nil when patch-id failed,
+  # which must never read as "no patches".
   def patch_ids(text)
-    out = git_ok("patch-id", "--stable", stdin: text) or return []
+    out = git_ok("patch-id", "--stable", stdin: text) or return nil
     out.lines.map(&:split)
   end
 
@@ -434,19 +447,22 @@ class GitHubForge
 
     pages = run_json(["gh", "api", "--paginate", "--slurp",
                       "repos/{owner}/{repo}/activity?ref=refs/heads/#{base}&per_page=100"], @dir)
-    @pushes[base] = pages && pages.flatten.select { |a| a["after"] && a["timestamp"] }
+    # A branch deletion's `after` is all zeros; it carries no commit and must
+    # never become the tip.
+    @pushes[base] = pages && pages.flatten.select { |a| a["after"] && a["timestamp"] && a["after"] !~ /\A0+\z/ }
                                     .map { |a| { at: a["timestamp"], after: a["after"] } }
                                     .sort_by { |p| p[:at] }
   end
 
   # A push cannot precede the commit it carries. Starting from an hour before
   # the commit's committer date (slack for clock skew) keeps the ancestry
-  # checks few without skipping the push that landed it.
+  # checks few without skipping the push that landed it. An unreadable date
+  # only widens the search to every push, so it is not a failed probe.
   def pushes_since(pushes, sha)
-    cdate = git_ok("show", "-s", "--format=%cI", sha)
-    return pushes unless cdate
+    out, _e, st = Open3.capture3("git", "-C", @dir, "show", "-s", "--format=%cI", sha)
+    return pushes unless st.success?
 
-    floor = Time.iso8601(cdate.strip) - 3600
+    floor = Time.iso8601(out.strip) - 3600
     pushes.select { |p| Time.iso8601(p[:at]) >= floor }
   end
 
@@ -518,7 +534,7 @@ class GitLabForge
     run_json(["glab", "api", path], @dir)
   end
 
-  def merged_since(since_iso)
+  def landing_candidates_since(since_iso)
     since = Time.iso8601(since_iso)
     # A merge at or after `since` was updated at or after it, so updated_after
     # is a server-side superset of the window; saturation then means truncation.
@@ -546,6 +562,7 @@ class GitLabForge
       number: d["iid"], title: d["title"], branch: d["source_branch"],
       merged_at: d["merged_at"], merge_sha: merge_sha,
       landed_via: d["merged_at"] ? "merge" : nil, unmeasured: unmeasured,
+      closed_at: d["merged_at"] || d["closed_at"],
       # authored_date survives a rebase; created_at is the committer date.
       commit_times: commits.flat_map { |c| [c["authored_date"], c["committed_date"], c["created_at"]] },
       deploy_at: deploy_at, pipeline_at: pipeline_at,
@@ -588,21 +605,32 @@ def analyze(forge, id)
                    pipeline_at: f[:pipeline_at], merged_at: f[:merged_at],
                    closed: f[:closed], unmeasured: f[:unmeasured])
           .merge(pr: f[:number], title: f[:title], branch: f[:branch],
-                 landed_via: f[:landed_via], landed_commit: f[:landed_via] == "push" ? f[:merge_sha] : nil)
+                 landed_via: f[:landed_via], landed_commit: f[:landed_via] == "push" ? f[:merge_sha] : nil,
+                 closed_at: f[:closed_at])
 end
 
-# A window scan's rows: a landing before `since` is outside the window (the
-# candidate list is by close time, and a PR can close after it landed), and a
-# closed-unlanded PR is not a landing. -> [kept rows, count of closed-unlanded].
-# A could-not-measure row is KEPT, so the caller sees it.
+# A window scan's rows. The window is by CLOSE time (`closed_at`), not landing
+# time: a push lands a PR seconds to minutes before its close, so a scan that
+# ticks in between cannot list it yet, and the next scan must keep it even
+# though it landed before `since`. A closed-unlanded PR is not a landing.
+# -> [kept rows, count of closed-unlanded]. A could-not-measure row is KEPT.
 def select_window(rows, since_iso)
   since = Time.iso8601(since_iso)
   closed = rows.count { |r| r[:end_kind] == :closed }
   kept = rows.reject do |r|
     r[:end_kind] == :closed || r[:end_kind] == :open ||
-      (r[:merged] && Time.iso8601(r[:merged]) < since)
+      (r[:closed_at] && Time.iso8601(r[:closed_at]) < since)
   end
   [kept, closed]
+end
+
+# --slow N: the rows with lead >= N minutes, slowest first, then every
+# could-not-measure row (lead_seconds null, unmeasured_reason set).
+def slow_filter(rows, slow_min)
+  threshold = slow_min * 60
+  rows.select { |r| r[:unmeasured_reason] || (r[:lead_seconds] && r[:lead_seconds] >= threshold) }
+      .each { |r| r[:slow_threshold_min] = slow_min }
+      .sort_by { |r| r[:lead_seconds] ? -r[:lead_seconds] : 1 }
 end
 
 # ---------------------------------------------------------------------------
@@ -718,7 +746,7 @@ def self_test
   check.call("run query is scoped to the merge sha",
              seen.all? { |c| c.include?("--commit") }, true)
 
-  # merged_since must never silently drop merges. The merged-PR list is capped
+  # landing_candidates_since must never silently drop merges. The merged-PR list is capped
   # (--limit / per_page); a window holding more merges than the cap returned
   # exactly the cap, and the rest vanished with exit 0. Measured 2026-09-26 on
   # gen_saas: 122 merges since the held cursor, `--limit 100` returned 100.
@@ -733,7 +761,7 @@ def self_test
     lim = cmd[cmd.index("--limit") + 1].to_i
     Array.new(lim) { |n| { "number" => n + 1, "mergedAt" => "2026-09-25T00:00:00Z" } }
   end
-  gh_sat.merged_since(since)
+  gh_sat.landing_candidates_since(since)
   check.call("gh closed list filters the window server-side",
              gh_cmds.first.include?("updated:>=#{since}"), true)
   check.call("gh saturated merged list marks the scan incomplete", ProbeFailures.any?, true)
@@ -743,7 +771,7 @@ def self_test
   gh_ok.define_singleton_method(:run_json) do |_cmd, _dir|
     [{ "number" => 7, "mergedAt" => "2026-09-25T00:00:00Z", "closedAt" => "2026-09-25T00:00:00Z" }]
   end
-  check.call("gh unsaturated merged list returns its merges", gh_ok.merged_since(since), [7])
+  check.call("gh unsaturated merged list returns its merges", gh_ok.landing_candidates_since(since), [7])
   check.call("gh unsaturated merged list is a clean probe", ProbeFailures.any?, false)
 
   gl_sat = GitLabForge.allocate
@@ -754,7 +782,7 @@ def self_test
     per = path[/per_page=(\d+)/, 1].to_i
     Array.new(per) { |n| { "iid" => n + 1, "merged_at" => "2026-09-25T00:00:00Z" } }
   end
-  gl_sat.merged_since(since)
+  gl_sat.landing_candidates_since(since)
   check.call("gitlab merged list filters the window server-side",
              gl_paths.first.include?("updated_after="), true)
   check.call("gitlab saturated merged list marks the scan incomplete", ProbeFailures.any?, true)
@@ -832,10 +860,11 @@ end
 def print_row(r)
   kind = { deploy: "deploy", pipeline: "pipeline", merge: "merge", open: "open", closed: "closed",
            unmeasured: "unmeasured" }[r[:end_kind]] || r[:end_kind].to_s
-  printf("#%-5s  lead=%-9s (code %-8s + tail %-8s)  via=%-8s %s%s\n",
+  printf("#%-5s  lead=%-9s (code %-8s + tail %-8s)  via=%-8s %s%s%s\n",
          r[:pr], r[:lead_human], r[:code_human], r[:tail_human], kind,
          (r[:title] || "")[0, 46],
-         r[:unmeasured_reason] ? "  [could not measure: #{r[:unmeasured_reason]}]" : "")
+         r[:unmeasured_reason] ? "  [could not measure: #{r[:unmeasured_reason]}]" : "",
+         r[:landed_via] == "push" ? "  [landed by push #{r[:landed_commit].to_s[0, 8]}]" : "")
 end
 
 require_relative "../lib/strict_argv"
@@ -891,7 +920,7 @@ def main(argv)
     return 1
   end
 
-  ids = id ? [id] : forge.merged_since(since)
+  ids = id ? [id] : forge.landing_candidates_since(since)
   rows = ids.map { |n| analyze(forge, n) }.compact
   if id && rows.empty?
     warn "lead-time: #{id} not found or unreadable in #{repo}"
@@ -911,13 +940,10 @@ def main(argv)
   end
 
   # --slow N: keep only tickets whose lead time is >= N minutes (the feedback
-  # loop's outlier filter). Rows without a computable lead are dropped.
-  if slow_min
-    threshold = slow_min * 60
-    rows = rows.select { |r| r[:lead_seconds] && r[:lead_seconds] >= threshold }
-               .each { |r| r[:slow_threshold_min] = slow_min }
-    rows.sort_by! { |r| -(r[:lead_seconds] || 0) }
-  end
+  # loop's outlier filter), plus every could-not-measure row: it cannot be
+  # shown fast, so dropping it would read as "not an outlier". Those rows keep
+  # lead_seconds null and carry unmeasured_reason; they sort last.
+  rows = slow_filter(rows, slow_min) if slow_min
 
   # A scan that could not read the forge is NOT a scan. Refuse to emit a result
   # at all — an empty (or partial) row set here means "could not look", and the
@@ -938,7 +964,9 @@ def main(argv)
   if as_json
     puts JSON.pretty_generate(rows)
   else
-    warn "repo=#{repo}  forge=#{forge.name}#{slow_min ? "  slow>=#{slow_min}m: #{rows.size}" : ''}"
+    unmeasured_n = rows.count { |r| r[:unmeasured_reason] }
+    counts = slow_min ? "  slow>=#{slow_min}m: #{rows.size - unmeasured_n}  could not measure: #{unmeasured_n}" : ""
+    warn "repo=#{repo}  forge=#{forge.name}#{counts}"
     rows.each { |r| print_row(r) }
   end
   0
@@ -960,7 +988,8 @@ if $PROGRAM_NAME == __FILE__
       Options:
         --repo PATH    git checkout to scan (e.g. ~/dev/custom, ~/dev/gen_saas)
         --pr N/--mr N  one pull/merge request by number
-        --since WHEN   scan merges at or after WHEN
+        --since WHEN   scan requests closed at or after WHEN that landed
+                       (merged, or on GitHub closed and landed by a push)
         --slow MIN     only report tickets slower than MIN minutes
         --json         emit JSON instead of the human table
         --help         this text

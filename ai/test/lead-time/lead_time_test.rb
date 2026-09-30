@@ -179,8 +179,10 @@ Dir.mktmpdir("lead-time-test") do |root|
     11 => pr_view(o, 11, state: "CLOSED", head: :p11,
                          commits: ["2026-09-28T05:00:00Z", "2026-09-28T05:10:00Z"]),
     12 => pr_view(o, 12, state: "OPEN", closed_at: nil, head: :p8, commits: ["2026-09-28T02:00:00Z"]),
-    13 => pr_view(o, 13, state: "MERGED", merged_at: "2026-09-29T06:30:00Z", head: :p8,
-                         commits: ["2026-09-28T02:00:00Z"]),
+    13 => pr_view(o, 13, state: "MERGED", merged_at: "2026-09-29T06:30:00Z",
+                         closed_at: "2026-09-29T06:30:00Z", head: :p8, commits: ["2026-09-28T02:00:00Z"]),
+    # Its head itself was fast-forwarded onto main (no rebase).
+    14 => pr_view(o, 14, state: "CLOSED", head: :c1, commits: ["2026-09-29T05:00:00Z"]),
   }
 
   ProbeFailures.reset!
@@ -197,6 +199,12 @@ Dir.mktmpdir("lead-time-test") do |root|
   r10 = analyze(forge, 10)
   check("a CLOSED PR landed squashed reads as landed") { r10[:end_kind] == :merge }
   check("a squashed landing is timed by the push that carried it") { r10[:merged] == "2026-09-29T08:18:58Z" }
+
+  r14 = analyze(forge, 14)
+  check("a CLOSED PR whose own head is on main reads as landed") { r14[:end_kind] == :merge }
+  check("its head is the landed commit, timed by the push that carried it") do
+    r14[:landed_commit] == o[:c1] && r14[:merged] == "2026-09-29T06:00:30Z"
+  end
 
   # --- CLOSED and not on main: distinct from open, never a lead.
   r8 = analyze(forge, 8)
@@ -240,7 +248,7 @@ Dir.mktmpdir("lead-time-test") do |root|
             { "number" => 13, "mergedAt" => "2026-09-29T06:30:00Z", "closedAt" => "2026-09-29T06:30:00Z",
               "state" => "MERGED" }]
   scanner = forge_over(o, views, scan_calls, list: listed)
-  ids = scanner.merged_since("2026-09-29T00:00:00Z")
+  ids = scanner.landing_candidates_since("2026-09-29T00:00:00Z")
   list_cmd = scan_calls.find { |c| c[1] == "pr" && c[2] == "list" }
   check("the window scan lists closed PRs, not only merged ones") do
     list_cmd.include?("closed") && list_cmd.any? { |c| c.start_with?("updated:>=") }
@@ -250,8 +258,36 @@ Dir.mktmpdir("lead-time-test") do |root|
   # --- the scan keeps a landing inside the window, drops one before it, and
   #     counts the closed-unlanded rows instead of silently losing them.
   window = -> { select_window([r7, r8, r13], "2026-09-29T07:00:00Z") }
-  check("a landing inside the window is kept") { window.call[0].map { |r| r[:pr] } == [7] }
+  check("a request closed inside the window is kept") { window.call[0].map { |r| r[:pr] } == [7] }
   check("a closed-unlanded row is counted, not kept") { window.call[1] == 1 }
+  # r7 landed by push at 07:05 and closed at 11:00. A scan between the two
+  # could not list it; the next scan, from 08:00, must still keep it.
+  check("a push landing before the window whose close is inside it is kept") do
+    select_window([r7], "2026-09-29T08:00:00Z")[0].map { |r| r[:pr] } == [7]
+  end
+
+  # --- --slow keeps could-not-measure rows: they cannot be shown fast.
+  slow = slow_filter([r9, { pr: 99, lead_seconds: 60 }, r7], 90)
+  check("--slow keeps an outlier and a could-not-measure row, drops a fast one") do
+    slow.map { |r| r[:pr] } == [7, 9]
+  end
+
+  # --- the landing rules on their own (pure).
+  cls = LeadTime.classify_landing(pr_only: [], combined_pid: nil, main: [{ sha: "m", pid: "p", subject: "s" }])
+  check("no commit of its own and no diff match is could-not-measure, never closed") { cls[:status] == :unknown }
+  pushes = [{ at: "T1", after: "a1" }, { at: "T2", after: "a2" }, { at: "T3", after: "a3" }]
+  carries = ->(hits) { ->(_s, after) { hits.fetch(after) } }
+  check("the landing is the FIRST push that carries the commit") do
+    LeadTime.landing_push("s", pushes, carries.call("a1" => false, "a2" => true, "a3" => true)) == ["T2", nil]
+  end
+  check("an unreadable push before the carrier makes the time unprovable") do
+    at, why = LeadTime.landing_push("s", pushes, carries.call("a1" => nil, "a2" => true, "a3" => true))
+    at.nil? && why.include?("T1")
+  end
+  check("no carrying push is a reason, not a time") do
+    at, why = LeadTime.landing_push("s", pushes, carries.call("a1" => false, "a2" => false, "a3" => false))
+    at.nil? && why.include?("no push")
+  end
 
   # --- a landed request with no commits has no start, and says so.
   nostart = LeadTime.compute(start_iso_times: [], deploy_at: nil, pipeline_at: nil,
@@ -264,7 +300,9 @@ Dir.mktmpdir("lead-time-test") do |root|
   out = capture_row(r9)
   check("a could-not-measure row prints 'could not measure'") { out.include?("could not measure") }
   check("a closed row prints via=closed") { capture_row(r8).include?("via=closed") }
-  check("a landed-by-push row prints its landing") { capture_row(r7).include?("via=merge") }
+  check("a landed-by-push row prints its landing") do
+    capture_row(r7).include?("landed by push #{o[:p7_landed][0, 8]}") && !capture_row(r13).include?("landed by push")
+  end
 end
 
 if $failures.empty?

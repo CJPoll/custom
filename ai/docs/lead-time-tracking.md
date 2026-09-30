@@ -35,11 +35,11 @@ job stage).
 | | Marker | Where it lives |
 |---|---|---|
 | **START** | earliest commit on the ticket's branch | git; `gh pr view --json commits` / `glab api …/merge_requests/:iid/commits` |
-| **END** | first of the 3 tiers below that exists | GitHub Actions runs / GitLab pipeline jobs / merge time |
+| **END** | first of the 3 tiers below that exists | GitHub Actions runs / GitLab pipeline jobs / landing time (the merge, or the push that carried it) |
 
 ### The END rule — one 3-tier rule, forge-independent
 
-For a merged ticket, gather three candidate end times and take the **first that
+For a landed ticket, gather three candidate end times and take the **first that
 exists**. This maps exactly onto Cody's definition:
 
 1. **DEPLOY completed** — the deploy step's completion time.
@@ -63,7 +63,9 @@ Superseded: `~/dev/custom` lands by a fast-forward push of the gated, rebased
 head (`athena:merge-boarding`), so GitHub shows those PRs CLOSED, never MERGED.
 Measured 2026-09-30: `lead-time --pr 127` printed `via=open lead=n/a` while its
 change was on main as `6da07d1b`, and the window scan missed #127, #125, #123
-and #122 outright.
+and #122 outright. The same change made `--slow` keep could-not-measure rows;
+it had dropped every row without a lead, so "could not measure" read as "not an
+outlier".
 
 ### A CLOSED PR's landing (GitHub)
 
@@ -80,9 +82,17 @@ A PR that is CLOSED with no `mergedAt` is judged by its **change**, not its stat
 - **Could not measure** (`via=unmeasured`, with the reason on the row and on
   stderr) when only some of its commits are on the base, or a base commit shares
   a commit subject with it but not its patch (a conflict-resolved or edited
-  landing), or no push carried the landed commit.
+  landing), or it has no commit of its own off the base, or no push carried the
+  landed commit, or a push before the carrying one could not be read.
+  `--slow` keeps these rows (lead `null`, `unmeasured_reason` set): a row that
+  cannot be shown fast must not read as "not an outlier".
 - A lookup that cannot run (the activity log, a `git fetch` of the base and
-  `refs/pull/<n>/head`) is a failed probe, so the run ends `SCAN INCOMPLETE`.
+  `refs/pull/<n>/head`, `git patch-id`) is a failed probe, so the run ends
+  `SCAN INCOMPLETE`.
+- The scan window is by **close** time: every row carries `closed_at`. A push
+  lands a PR seconds to minutes before its close, so a scan between the two
+  cannot list it, and the next scan keeps it though it landed before `--since`.
+  The JSON key `merged` holds the landing time, whichever way it landed.
 
 The window scan lists every PR **updated** since `--since` (`updated:>=`) and
 filters on `closedAt` locally. GitHub's `closed:>=` qualifier omitted five
@@ -194,13 +204,14 @@ unreliable signal and new maintenance. First-commit stays the marker.
 Every row splits lead time into two phases, because they have **different
 improvement levers**:
 
-- **`code` = start → merge** — development + review. Lever: the **harness/process**
+- **`code` = start → landing** — development + review. Lever: the **harness/process**
   (clearer specs, better skills, fewer review round-trips).
-- **`tail` = merge → end** — CI + deploy. Lever: **pipeline efficiency**
+- **`tail` = landing → end** — CI + deploy. Lever: **pipeline efficiency**
   (parallelize, cache, shard, faster-equivalent tooling).
 
-`ai/bin/lead-time --slow N` keeps only tickets with lead ≥ N minutes (sorted
-slowest-first, each tagged `slow_threshold_min`) — the outlier filter. Both
+`ai/bin/lead-time --slow N` keeps the tickets with lead ≥ N minutes (sorted
+slowest-first, each tagged `slow_threshold_min`) — the outlier filter — and,
+after them, every could-not-measure row. Both
 phases appear in the human table and in `--json` (`code_seconds`/`tail_seconds`).
 
 The **athena-shipwright cron** runs this at `--slow 90` over every repo the fleet
