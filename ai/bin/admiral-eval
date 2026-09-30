@@ -98,9 +98,11 @@
 # FAILED MODEL CALLS (DND-1359): a T2 call that never answered (a 429, a
 # session limit, a crash) is its own outcome, never a scored sample. The row's
 # rate counts only the answered samples, every run prints one
-# `admiral-eval: invocation failures: N model call(s)` line (0 included), a
-# diff with any is UNCERTIFIED, and --update-baseline refuses the run (exit 1,
-# naming each case) without writing the baseline.
+# `admiral-eval: invocation failures: N model call(s)` line (0 included), and a
+# run with any is UNMEASURED: exit 3 (a diff also names them as a certification
+# gap), and --update-baseline refuses it, naming each case, without writing the
+# baseline. Exit codes of --run: 0 pass, 1 regression or failing case, 2 usage,
+# 3 UNMEASURED.
 #
 # Adding a case: create ai/eval/admiral-fixtures/<AE-NN-name>/meta plus scenario.md
 # (T2) or an input.json (T1 hook-stdin). Keep the scorer deterministic — assert a
@@ -827,7 +829,7 @@ end
 # drops it.
 def fold_detail(meta, pass, last_reasons, failed, scored, agent)
   if scored.zero?
-    return "#{agent.key} produced no scored sample: #{failed} invocation failure(s) (invocation failed)"
+    return "#{agent.key} produced no scored sample: #{failed} invocation failure(s)"
   end
 
   note = failed.positive? ? "[#{failed} invocation failure(s), not scored] " : ""
@@ -1377,8 +1379,8 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
 
   if update
     if (why = baseline_refusal(failed_calls, agent))
-      warn "admiral-eval: FAILED — #{why}"
-      return 1
+      warn "admiral-eval: UNMEASURED — #{why}"
+      return UNMEASURED_EXIT
     end
     FileUtils.mkdir_p(File.dirname(baseline_path(agent)))
     File.write(baseline_path(agent), JSON.pretty_generate(
@@ -1389,14 +1391,19 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
     return 0
   end
 
-  report_failed_calls(failed_calls, agent)
-  if baseline
-    return compare_to_baseline(results, baseline, subject: subject, corpus: corpus_fingerprint(fixtures(agent)),
+  code = if baseline
+           compare_to_baseline(results, baseline, subject: subject, corpus: corpus_fingerprint(fixtures(agent)),
                                                   only: only, agent: agent)
-  end
+         else
+           report_no_baseline(results, agent)
+         end
+  failed_calls.empty? ? code : report_unmeasured(failed_calls, agent)
+end
 
+def report_no_baseline(results, agent)
   failures = results.reject { |r| r[:pass] }
   return 0 if failures.empty?
+
   warn ""
   warn "admiral-eval: #{failures.size} case(s) failed (no baseline committed yet — reporting only):"
   failures.each { |r| warn "  - #{r[:name]}: #{r[:detail]}" }
@@ -1406,16 +1413,21 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
   1
 end
 
-# DND-1359: a run (not an --update-baseline) with failed calls still scores
-# what the model answered, but says so: those cases were sampled below the N
-# asked for, and a case with none answered is 0/0.
-def report_failed_calls(failures, agent)
-  return if failures.empty?
+# DND-1359: the exit code of a run in which any model call failed, whatever
+# its answered samples scored (critic-eval uses the same code). Exit 0 and 1
+# stay the measured verdicts: pass, and regression / failing case.
+UNMEASURED_EXIT = 3
 
-  warn "admiral-eval: Note: #{failures.sum { |_, n| n }} model call(s) failed and were NOT scored: " \
-       "#{failure_names(failures)}. Those cases were scored on the calls the model answered only. " \
-       "Fix: find why they failed (the `! #{agent.key} invocation failed` lines above), fix it, and re-run; " \
-       "never re-baseline from a run with failed calls."
+# DND-1359: a run with failed calls still prints what the model answered, but
+# it is UNMEASURED: those cases were sampled below the N asked for (a case
+# with none answered is 0/0), so neither its PASS rows nor "0 regressed" may
+# read as a clean measurement through the exit code.
+def report_unmeasured(failures, agent)
+  warn "admiral-eval: UNMEASURED — #{failures.sum { |_, n| n }} model call(s) failed and were NOT scored: " \
+       "#{failure_names(failures)}. The rows above count only the calls the model answered. " \
+       "Fix: find why they failed (the `! #{agent.key} invocation failed` lines above: auth, quota, a 429 " \
+       "burst, a crash), fix it or lower --concurrency, and re-run; never re-baseline from a run with failed calls."
+  UNMEASURED_EXIT
 end
 
 def list(agent = eval_agent)
@@ -1637,8 +1649,8 @@ def self_test_invocation_failures(fail)
     end
 
     code, out, err, baseline = run.("update-failing", dirs, true)
-    fail.("--update-baseline must refuse a run with failed model calls (exit 1), got exit #{code}; stderr:\n#{err}") \
-      unless code == 1
+    fail.("--update-baseline must refuse a run with failed model calls (exit 3, UNMEASURED), got exit #{code}; " \
+          "stderr:\n#{err}") unless code == 3
     fail.("--update-baseline must NOT write a baseline from a run with failed model calls " \
           "(#{baseline} exists)") if File.exist?(baseline)
     fail.("the refusal must name each case with failed calls and its count, with a Fix:, got stderr:\n#{err}") \
@@ -1652,6 +1664,18 @@ def self_test_invocation_failures(fail)
       unless code.zero? && File.exist?(baseline)
     fail.("a clean run must report zero failed calls, never omit the count, got:\n#{out}") \
       unless out.include?("admiral-eval: invocation failures: 0 model call(s)")
+
+    # (c) review round: a plain --run with a failed call is UNMEASURED (exit
+    # 3), even when every case's answered samples pass. F-01 alone passes 2 of
+    # its 3 answered samples, so before this it printed PASS and exited 0: the
+    # exit code alone read as a clean measurement.
+    code, out, err, = run.("run-failing", [dirs[0]], false)
+    fail.("a --run with a failed model call must exit 3 (UNMEASURED), got exit #{code}; stdout:\n#{out}") \
+      unless code == 3
+    fail.("that run must say UNMEASURED, naming the case and a Fix:, got stderr:\n#{err}") \
+      unless err.include?("UNMEASURED") && err.include?("F-01-some-fail (1)") && err.include?("Fix:")
+    code, = run.("run-clean", [dirs[2]], false)
+    fail.("a --run with no failed call and every case passing must still exit 0, got #{code}") unless code.zero?
   end
 end
 
@@ -2627,7 +2651,7 @@ USAGE = <<~TXT
     --update-baseline   rewrite the baseline from this run's results (the
                         full corpus at --runs >= #{DEFAULT_RUNS}: --only or a
                         smaller --runs is refused, exit 2; a run in which
-                        any model call failed is refused after it, exit 1,
+                        any model call failed is refused after it, exit 3,
                         and the baseline is not written)
     --concurrency K     model calls in flight at once (#{EvalPool::RANGE.first}-#{EvalPool::RANGE.last}, default
                         #{EvalPool::DEFAULT}; else $#{EvalPool::ENV_VAR}). Every T2 sample of
@@ -2642,6 +2666,9 @@ USAGE = <<~TXT
                         to the ~/.claude/agents copy (the main checkout's).
 
   An unrecognised argument, or a value flag with no value, exits 2.
+
+  Exit (--run): 0 pass | 1 regression or a failing case | 2 usage |
+                3 UNMEASURED (a model call failed; it is never scored)
 TXT
 
 def main(argv)
