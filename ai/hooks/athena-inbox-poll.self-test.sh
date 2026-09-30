@@ -1351,7 +1351,7 @@ export ATHENA_INBOX_STATUS_TIMEOUT_SECONDS=1
 mkfifo "${CASE_DIR}/r14.fifo"
 stub_repo '#!/usr/bin/env bash
 case "$1" in --repo-key) realpath "$(git rev-parse --git-common-dir)"; exit 0 ;; esac
-: > "'"${CASE_DIR}"'/r14.started"
+echo $$ > "'"${CASE_DIR}"'/r14.started"
 exec 3<>"'"${CASE_DIR}"'/r14.fifo"
 read -t 600 -u 3 _ && : > "'"${CASE_DIR}"'/r14.finished"
 printf '"'"'{"channels":[]}'"'"''
@@ -1366,6 +1366,9 @@ else
   bad "R14 a hanging inbox-status does not hang session start" \
       "rc=${RC}$([ "${RC}" -eq 124 ] && printf ' (hung: killed by the 120 s hang cap)') started=$([ -e "${CASE_DIR}/r14.started" ] && echo yes || echo no) finished=$([ -e "${CASE_DIR}/r14.finished" ] && echo yes || echo no)"
 fi
+# A regressed bound leaves the stub blocked for its 600 s cap: end it.
+R14_PID="$(cat "${CASE_DIR}/r14.started" 2>/dev/null)"
+[ -n "${R14_PID}" ] && grep -qa inbox-status "/proc/${R14_PID}/cmdline" 2>/dev/null && kill "${R14_PID}" 2>/dev/null
 assert_eq "R14 the expiry still exits 0" "0" "${RC}"
 assert_no_file "R14 an expired poll does NOT stamp success" \
   "$(pm success)"

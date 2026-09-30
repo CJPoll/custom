@@ -2308,7 +2308,11 @@ def self_test_reap
       ensure
         ReapTags.define_singleton_method(:reap, real_reap)
         ReapTags.define_singleton_method(:tagged_pids, real_tp)
-        if writer && !writer.join(10)
+        if writer.nil?
+          # The sweep never saw the child (a failing run). Release it anyway,
+          # without blocking: with no reader the open is ENXIO, which is fine.
+          File.open(fifo, File::WRONLY | File::NONBLOCK) { |f| f.write("go\n") } rescue nil
+        elsif !writer.join(10)
           # The child never opened the FIFO: unblock the writer, never hang.
           File.open(fifo, File::RDONLY | File::NONBLOCK) { writer.join(10) } rescue nil
           writer.kill

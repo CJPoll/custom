@@ -865,6 +865,8 @@ if wait_for_nonempty "${CALLS}" 100 && wait_for_log 'restart 1 in 3600s' 300; th
   if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
     bad "SIGTERM is honoured during the backoff sleep, not deferred until it ends" \
         "still alive 120s after TERM, inside a 3600s backoff"
+    # Its backoff `sleep 3600` would outlive a SIGKILLed supervisor.
+    pkill -KILL -P "$SUPERVISOR_PID" 2>/dev/null
     kill -9 "$SUPERVISOR_PID" 2>/dev/null
   else
     ok "SIGTERM is honoured during the backoff sleep, not deferred until it ends"

@@ -707,12 +707,14 @@ done
 pid_of_bg() { pgrep -P "$(cat "$W/$1.bg")" | head -n 1; }
 # exits_within PID SECONDS — 0 when PID is gone within SECONDS (blocking).
 exits_within() { timeout "$2" tail --pid="$1" -f /dev/null; }
-# DND-1356: "exits promptly" is not a clock verdict. Each case below first
-# makes the event it is about the ONLY thing that can end the wait: the
+# DND-1356: "exits promptly" is not a clock verdict. Cases 30 and 35/36 first
+# make the event they are about the ONLY thing that can end the wait: the
 # signal (30), or the parent check (35/36), with the other bounds raised to
 # an hour through the seams (WAIT_SEAMS). A wait that ignored the event
 # would then block for that hour; EXIT_CAP_S only caps that hang, far below
-# it, so a slow host cannot flip the verdict.
+# it, so a slow host cannot flip the verdict. Cases 31 and 37 need no seam:
+# 31's queue head re-polls every POLL_S (2 s) and its slot never frees while
+# A31 is held, and 37 exits on its first check, before it ever waits.
 EXIT_CAP_S=120
 WAIT_SEAMS=(ATHENA_TEST_SLOT_HEARTBEAT=3600 ATHENA_TEST_SLOT_PARENT_CHECK=3600)
 # await_kids PID — bounded poll until PID has a child (its wait helper);
@@ -1023,7 +1025,7 @@ check 35-no-acquire eq "$(event_count acquired O35)" 0
 
 # 36: a waiter in the MIDDLE of the queue (blocked in the kernel on its
 # predecessor's queue file) loses its caller. It leaves within the parent
-# check bound (5 s), not the 60 s heartbeat chunk, and the waiter behind it
+# check bound (5 s), not the heartbeat chunk (an hour here, DND-1356), and the waiter behind it
 # moves up.
 newpool p36 1
 hold A36 holder-A36
