@@ -245,6 +245,8 @@ bash_sub "timeout --kill-after 3 5 git -C MAIN add . -> deny" deny "timeout --ki
 bash_sub "timeout --signal=KILL 5 git -C MAIN add . -> deny" deny "timeout --signal=KILL 5 git -C ${MAIN} add ."
 bash_sub "nice -5 (legacy) git -C MAIN add . -> deny" deny "nice -5 git -C ${MAIN} add ."
 bash_sub "nice --adjustment 5 git -C MAIN add . -> deny" deny "nice --adjustment 5 git -C ${MAIN} add ."
+bash_sub "test-slot --weight 4 --pool cpu git -C MAIN add . -> deny" deny "test-slot --weight 4 --pool cpu -- git -C ${MAIN} add ."
+bash_sub "test-slot --weight=2 --pool=model git -C MAIN add . -> deny" deny "test-slot --weight=2 --pool=model -- git -C ${MAIN} add ."
 bash_sub "stdbuf -o L git -C MAIN add . -> deny" deny "stdbuf -o L git -C ${MAIN} add ."
 bash_sub "stdbuf -oL --error=0 git -C MAIN add . -> deny" deny "stdbuf -oL --error=0 git -C ${MAIN} add ."
 bash_sub "exec -a NAME git -C MAIN add . -> deny" deny "exec -a NAME git -C ${MAIN} add ."

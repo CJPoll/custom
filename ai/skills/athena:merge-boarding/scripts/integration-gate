@@ -207,8 +207,9 @@ done
 #
 # WHICH test-slot: the MAIN checkout's copy of the custom repo that holds this
 # script, never a worktree's and never PATH. test-slot's stable interface
-# requires that, so every caller agrees on N; a worktree copy on a branch that
-# edits N would gate against the shared pool with its own N. The main checkout
+# requires that, so every caller agrees on the budget (DND-1006); a worktree
+# copy on a branch that edits it would gate against the shared pool with its
+# own. The run takes test-slot's default cpu weight. The main checkout
 # is found from the git common dir of THIS script's checkout (realpath first,
 # so ~/.claude/skills still lands in ~/dev/custom), which is the same for the
 # main checkout, every worktree, and every shipwright lane. A checkout that

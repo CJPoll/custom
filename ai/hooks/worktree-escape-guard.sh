@@ -539,6 +539,7 @@ WRAPPER_OPTS = {
     "test-slot": {"short": {},
                   "long": {"--label": ("label", True), "--wait-timeout": ("wait-timeout", True),
                            "--outcome-file": ("outcome-file", True), "--exclusive": ("exclusive", False),
+                           "--weight": ("weight", True), "--pool": ("pool", True),
                            "--status": ("status", False), "--json": ("json", False),
                            "--help": ("help", False), "--self-test": ("self-test", False)}},
 }

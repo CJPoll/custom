@@ -209,11 +209,17 @@ def tree_dirty?
   !st.success? || !out.strip.empty?
 end
 
+# -> the judge's start Time. The caller hands it to write_verdict, so the
+# receipt keeps started_at and duration_s (DND-1006). Before that the start was
+# only in <sha>.running, which a completed run deletes, so no run recorded how
+# long it took.
 def mark_running(sha)
+  started = Time.now.utc
   dir = verdict_dir
-  return unless dir && sha
+  return started unless dir && sha
   FileUtils.mkdir_p(dir)
-  File.write(File.join(dir, "#{sha}.running"), Time.now.utc.iso8601)
+  File.write(File.join(dir, "#{sha}.running"), started.iso8601)
+  started
 end
 
 # The critic's REPORT BODY, persisted beside the verdict.
@@ -291,7 +297,12 @@ end
 # interaction: { range: "<from>..<to>", verdict: } (round 3) records the
 # interaction review that decided a carried head: upstream_range and
 # interaction are null on every other receipt.
-def write_verdict(sha, base, action, findings, dirty, keys: nil, carried: nil, exclusive: false, interaction: nil)
+#
+# started_at: the Time mark_running returned (DND-1006). The receipt records
+# it and duration_s (seconds from it to "at"); both are null when no judge ran
+# (a carried PASS with nothing upstream).
+def write_verdict(sha, base, action, findings, dirty, keys: nil, carried: nil, exclusive: false, interaction: nil,
+                  started_at: nil)
   dir = verdict_dir
   unless dir && sha
     warn "critic-review: NOTE no verdict receipt written (not inside a resolvable git work tree)."
@@ -301,10 +312,13 @@ def write_verdict(sha, base, action, findings, dirty, keys: nil, carried: nil, e
   FileUtils.mkdir_p(dir)
   path = File.join(dir, "#{sha}.json")
   key_fields = CriticCarry::HEAD_KEYS.to_h { |k| [k, keys && CriticCarry.key_ok?(keys[k]) ? keys[k] : nil] }
+  now = Time.now.utc
   body = JSON.generate(
     { "schema" => VERDICT_SCHEMA, "tool" => "critic-review", "sha" => sha,
       "base" => base.to_s, "verdict" => action, "findings" => findings,
-      "dirty" => dirty, "at" => Time.now.utc.iso8601 }
+      "dirty" => dirty, "at" => now.iso8601,
+      "started_at" => started_at&.utc&.iso8601,
+      "duration_s" => started_at && (now - started_at).round(3) }
       .merge(key_fields)
       .merge("carried_from" => carried&.fetch(:root), "carried_receipt" => carried&.fetch(:receipt))
       .merge("upstream_range" => interaction&.fetch(:range), "interaction" => interaction&.fetch(:verdict))
@@ -1048,7 +1062,7 @@ end
 
 # Run the interaction review a carry hit planned. -> exit code, like run().
 def run_interaction(base, sha, keys, plan)
-  mark_running(sha)
+  started = mark_running(sha)
   raw, invoke_ok = judge_call(plan[:prompt], :interaction)
   findings, trailer_ok = parse_findings(raw)
   iaction, = decide(findings || [], trailer_ok, invoke_ok)
@@ -1057,7 +1071,7 @@ def run_interaction(base, sha, keys, plan)
   range12 = "#{short12(from)}..#{short12(to)}"
   path = write_verdict(sha, base, action, findings || [], false, keys: keys,
                        carried: { root: plan[:root], receipt: plan[:receipt] },
-                       interaction: { range: plan[:range], verdict: iaction })
+                       interaction: { range: plan[:range], verdict: iaction }, started_at: started)
   case action
   when "pass"
     puts "critic-review: #{label} — the branch's diff passed at #{short12(plan[:root])}; the upstream delta #{range12} " \
@@ -1111,11 +1125,11 @@ def run(argv)
     return run_interaction(base, sha, keys, carried)
   end
 
-  mark_running(sha)
+  started = mark_running(sha)
   raw, invoke_ok = critic_output(judge_diff, log)
   findings, trailer_ok = parse_findings(raw)
   action, code = decide(findings || [], trailer_ok, invoke_ok)
-  write_verdict(sha, base, action, findings || [], dirty, keys: key_reason ? nil : keys)
+  write_verdict(sha, base, action, findings || [], dirty, keys: key_reason ? nil : keys, started_at: started)
 
   case action
   when "pass"
@@ -1307,6 +1321,15 @@ def run_receipt_self_test
       ok &&= !File.exist?(File.join(dir, "#{sha}.running"))
       code, _err = capture_err { verdict_for(sha) }
       ok &&= (code == 0)
+      # (10b, DND-1006) the start survives the marker's removal: the receipt
+      # carries started_at, at or before "at", and duration_s, their gap.
+      rec = JSON.parse(File.read(File.join(dir, "#{sha}.json")))
+      t_start = (Time.iso8601(rec["started_at"].to_s) rescue nil)
+      t_at = (Time.iso8601(rec["at"].to_s) rescue nil)
+      dur_ok = t_start && t_at && rec["duration_s"].is_a?(Numeric) && rec["duration_s"] >= 0 &&
+               t_start <= t_at && (t_at - t_start - rec["duration_s"]).abs <= 1
+      warn "self-test: FAIL — (10b) the receipt lacks a consistent started_at/duration_s: #{rec.slice('started_at', 'at', 'duration_s').inspect}. Fix: pass mark_running's start to write_verdict (started_at:)." unless dur_ok
+      ok &&= dur_ok
 
       # (5) stale SHA: the PASS above belongs to `sha`, not to `parent`.
       code, err = capture_err { verdict_for(parent) }

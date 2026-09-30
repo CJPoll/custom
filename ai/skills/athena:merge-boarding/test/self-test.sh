@@ -1070,7 +1070,7 @@ grep -q '^critic-review: PASS' <<<"$out" && ok "s11 the judge was joined and its
 
 # s12: run from a LINKED WORKTREE of the custom repo, the gate uses the MAIN
 # checkout's test-slot, never the worktree's copy (test-slot's stable
-# interface: every caller agrees on N). Each copy marks which one ran, then
+# interface: every caller agrees on the budget). Each copy marks which one ran, then
 # execs the real test-slot.
 L="${TMP}/s12-layout"; layout_copy "$L"
 REAL_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
