@@ -18,6 +18,12 @@ SRC="$(cd "${HERE}/../../.." && pwd -P)"
 
 TMP="$(mktemp -d)" || { echo "FAIL: mktemp"; exit 1; }
 trap 'rm -rf "${TMP}"' EXIT INT TERM
+# The fixture's own git commands read no global or system git config (DND-1436).
+# An owner's ~/.gitconfig (init.defaultBranch=main) once made a fixture pass on
+# the host and fail in tool-sandbox, whose HOME is empty. Hermetic here, the
+# fixture fails the same way everywhere, so it has to name its branches itself.
+: > "${TMP}/gitconfig-empty"
+export GIT_CONFIG_GLOBAL="${TMP}/gitconfig-empty" GIT_CONFIG_NOSYSTEM=1
 PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "${@:2}"; FAIL=$((FAIL+1)); }
@@ -86,7 +92,7 @@ EOF
 git -C "${REPO}" init -q -b main
 git -C "${REPO}" -c user.email=t@example.invalid -c user.name=t add -A
 git -C "${REPO}" -c user.email=t@example.invalid -c user.name=t commit -q -m landed
-git init -q --bare "${ORIGIN}"
+git init -q --bare -b main "${ORIGIN}"
 git -C "${REPO}" remote add origin "${ORIGIN}"
 git -C "${REPO}" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
 git -C "${REPO}" fetch -q origin >/dev/null 2>&1
@@ -188,10 +194,20 @@ restore_repo
 # laptop 2026-09-30) is a different cause with a different Fix: the Fix must
 # name the two SHAs and `git fetch origin`, never "make origin reachable".
 STALE_BASE="$(git -C "${REPO}" rev-parse refs/remotes/origin/main)"
-git clone -q "${ORIGIN}" "${TMP}/mover" >/dev/null 2>&1
+git clone -q -b main "${ORIGIN}" "${TMP}/mover" >/dev/null 2>&1
 git -C "${TMP}/mover" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m "origin moves"
 git -C "${TMP}/mover" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
 STALE_NEW="$(git -C "${TMP}/mover" rev-parse HEAD)"
+# The cases below prove nothing unless origin really moved one commit past the
+# local ref. Say so here, naming the three SHAs, not as three downstream misses.
+ORIGIN_NOW="$(git --git-dir="${ORIGIN}" rev-parse --verify -q refs/heads/main)"
+if [ -n "${ORIGIN_NOW}" ] && [ "${ORIGIN_NOW}" = "${STALE_NEW}" ] && [ "${ORIGIN_NOW}" != "${STALE_BASE}" ] \
+   && [ "$(git --git-dir="${ORIGIN}" rev-parse -q --verify "${ORIGIN_NOW}^")" = "${STALE_BASE}" ]; then
+  ok "(fixture) origin's main moved one commit past the local origin/main"
+else
+  bad "(fixture) origin's main moved one commit past the local origin/main" \
+    "local origin/main ${STALE_BASE:-<none>}, mover HEAD ${STALE_NEW:-<none>}, origin main ${ORIGIN_NOW:-<none>}"
+fi
 check "HL_INITIAL_WORKSPACE_TOKEN=${SYN_C}" -- --probe a,c
 expect "(c) stale local origin/main: the Fix names both SHAs and git fetch origin" 3 \
   "COULD NOT MEASURE  the landed registry could not be read.*${STALE_BASE:0:12}.*${STALE_NEW:0:12}" "make origin reachable"
