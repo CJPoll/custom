@@ -315,6 +315,12 @@ MAIL="${ROOT}/agent-mail/walt_ui/to-custom"
 mkdir -p "${MAIL}/.acked" "${MAIL}/tmp"
 LABELS="${TMP}/evals/slack-routing-labels.jsonl"
 SLACK="${ROOT}/walt_ui-slack.jsonl"
+# The machine's own inbox root must never reach a case. judgment-eval's
+# slack_routing reads $ATHENA_INBOX_ROOT (else ~/.local/share/athena) when
+# --inbox-root is absent, so a case that forgot the flag passed on a machine
+# holding walt_ui-slack.jsonl and failed on one without it (the laptop,
+# 2026-09-30). A root that does not exist makes that omission fail everywhere.
+export ATHENA_INBOX_ROOT="${TMP}/no-machine-inbox-root"
 
 line() { # line EVENT KIND USER TS THREAD_TS TEXT
   jq -cn --arg e "$1" --arg k "$2" --arg u "$3" --arg ts "$4" --arg th "$5" --arg t "$6" \
@@ -497,7 +503,7 @@ lacks "no mail file name is printed" "${OUT}${ERR}" "fwd-miss"
 
 echo "== end to end: the eval join [ticket]"
 
-run "${EVAL}" --dry-run --use-case slack_routing --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${ROOT}" --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
 eq "judgment-eval --dry-run joins the labels (exit 0) [ticket]" "${RC}" "0"
 has "proposed labels are excluded from the usable count [ticket]" "${OUT}" "proposed excluded: 2"
 has "every usable label joined the corpus [ticket]" "${OUT}" "cases: 2 (gen_saas 1, harness 1)"
@@ -548,7 +554,7 @@ eq "the confirmed row records that its context was shown [DND-1047]" "$(jq -r 's
 eq "the quit row is still proposed" "$(jq -r 'select(.id=="Ev07") | .provenance' "${LABELS}")" "proposed"
 eq "the forward rows are untouched" "$(jq -c 'select(.provenance=="forward_record")' "${LABELS}")" "$(jq -c 'select(.provenance=="forward_record")' <<<"${BEFORE}")"
 
-run "${EVAL}" --dry-run --use-case slack_routing --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${ROOT}" --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
 has "a confirmed label joins the eval [ticket]" "${OUT}" "cases: 3 (gen_saas 1, harness 2)"
 has "the remaining proposed label is still excluded [ticket]" "${OUT}" "proposed excluded: 1"
 
@@ -638,7 +644,7 @@ eq "--slack-bin outside --confirm is a usage error" "${RC}" "2"
 # no context mark. Make Ev03 one of those.
 jq -c 'if .id == "Ev03" then del(.context) else . end' "${LABELS}" >"${TMP}/batch1" && cat "${TMP}/batch1" >"${LABELS}"
 EV07_BEFORE="$(jq -c 'select(.id=="Ev07")' "${LABELS}")"
-run "${EVAL}" --dry-run --use-case slack_routing --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${ROOT}" --labels "${LABELS}" --corpus "${SLACK}" --content-domain work
 eq "judgment-eval still joins a labels file carrying context marks" "${RC}" "0"
 CMD="'${BIN}' --confirm --recheck --batch 3 --inbox-root '${ROOT}' --labels '${LABELS}' --slack-bin '${FAKESLACK}'"
 OUT="$(printf '\ns\nq\n' | /usr/bin/script -qec "${CMD}" /dev/null 2>&1)"
@@ -767,12 +773,12 @@ eq "--propose --rule-default exits 0" "${RC}" "0"
 eq "--rule-default labels the no-evidence roots walt_ui default_walt_ui [DND-717]" \
   "$(jq -r 'select(.provenance=="rule_confirmed" and .rule=="default_walt_ui") | .id' "${RLABELS}" | sort | tr '\n' ' ')" "EvA1 EvN1 "
 has "the report prints the rule_confirmed count" "${OUT}" "walt_ui rule_confirmed 2"
-run "${EVAL}" --dry-run --use-case slack_routing --labels "${RLABELS}" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${RLABELS}" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
 eq "judgment-eval joins rule_confirmed rows (exit 0)" "${RC}" "0"
 has "rule_confirmed default_walt_ui rows are usable eval cases [DND-717]" "${OUT}" "cases: 2 (walt_ui 2)"
 has "a session-mention root is not an eval case: the router never judges it [DND-717]" "${OUT}" "session-mention excluded: 1"
 jq -c 'select(.id=="EvM1")' "${RLABELS}" >"${TMP}/mention-only.jsonl"
-run "${EVAL}" --dry-run --use-case slack_routing --labels "${TMP}/mention-only.jsonl" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${TMP}/mention-only.jsonl" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
 eq "a run whose every label is a session-mention root is refused (exit 1) [DND-717]" "${RC}" "1"
 has "... naming why: the router never judges those roots, not a failed join" "${ERR}" "every joined label is a session-mention root (1)"
 has "... with Fix:" "${ERR}" "Fix:"
