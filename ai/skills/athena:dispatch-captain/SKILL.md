@@ -332,8 +332,11 @@ The batch brief carries everything above for one Mission, plus:
   plain rebase replays the lower ticket's old commits and conflicts.
 - **The critic line:** *"Judge each ticket alone: on that ticket's head, run
   `~/dev/custom/ai/bin/critic-review --base <the branch of the ticket below>`
-  (the first ticket: the MR target branch). Without `--base`, the diff is the
-  whole stack."*
+  (the first ticket: `origin/<MR target branch>`, never the bare name). Without
+  `--base`, the diff is the whole stack."* A bare `main` in a worktree is the
+  main checkout's local branch, which lags `origin/main`, so the judge reviews
+  other tickets' merges too (DND-1264, 2026-09-30: local `a9b304d4` vs
+  `origin/main` `5b6c29a2`; re-recorded with `--base origin/main`).
 - **The gate line:** one heavy gate on the tip of the stack, per the test-slot
   line.
 - **The report.** One file, named for the batch (e.g. `DND-539+538-report.md`),
