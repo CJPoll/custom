@@ -101,7 +101,7 @@ module MachineSecrets
     raise Malformed, "#{source}: schema is not #{SCHEMA}" unless doc["schema"] == SCHEMA
 
     unknown = doc.keys.reject { |k| %w[kind schema secrets].include?(k) || k.start_with?("_") }
-    raise Malformed, "#{source}: unknown top-level key(s) #{unknown.sort.join(', ')}" unless unknown.empty?
+    raise Malformed, "#{source}: unknown top-level key(s) #{printable(unknown)}" unless unknown.empty?
 
     list = doc["secrets"]
     raise Malformed, "#{source}: secrets is not a list" unless list.is_a?(Array)
@@ -117,6 +117,16 @@ module MachineSecrets
 
   def parse_entry(raw, where, source)
     raise Malformed, "#{where} is not an object" unless raw.is_a?(Hash)
+
+    # FIRST, before any message can name the entry: a field (or a key) that
+    # holds a credential value is refused by position only. The name is one of
+    # the fields checked, so a pasted value used as a name is never echoed.
+    leaky = raw.flat_map { |k, v| [[k, nil], *Array(v).map { |x| [x, k] }] }
+               .find { |x, _| x.is_a?(String) && looks_secret?(x) }
+    if leaky
+      field = leaky[1].nil? || looks_secret?(leaky[1]) ? "a field name or value" : leaky[1]
+      raise Malformed, "#{where}: #{field} looks like a credential value (a registry never holds one)"
+    end
 
     REQUIRED_STRINGS.each do |f|
       v = raw[f]
@@ -139,16 +149,17 @@ module MachineSecrets
     copies && path_problem(copies).then { |p| raise Malformed, "#{where}: copies #{p}" if p }
 
     unknown = raw.keys - %w[name path copies consumers kind restart rotate]
-    raise Malformed, "#{where}: unknown field(s) #{unknown.sort.join(', ')}" unless unknown.empty?
-
-    strings = [*REQUIRED_STRINGS.map { |f| [f, raw[f]] }, ["copies", copies], *consumers.map { |c| ["consumers", c] }]
-    strings.each do |field, v|
-      next if v.nil?
-      raise Malformed, "#{where}: #{field} looks like a credential value (a registry never holds one)" if looks_secret?(v)
-    end
+    raise Malformed, "#{where}: unknown field(s) #{printable(unknown)}" unless unknown.empty?
 
     Entry.new(name: name, path: raw["path"], copies: copies, consumers: consumers, kind: raw["kind"],
               restart: raw["restart"], rotate: raw["rotate"], source: source)
+  end
+
+  # Keys for a message: a plain identifier is shown, anything else is only
+  # counted, so a pasted value used as a key is never echoed.
+  def printable(keys)
+    shown, hidden = keys.map(&:to_s).partition { |k| k.match?(/\A[A-Za-z_][A-Za-z0-9_-]{0,40}\z/) && !looks_secret?(k) }
+    [*shown.sort, (hidden.empty? ? nil : "#{hidden.size} unprintable")].compact.join(", ")
   end
 
   # nil when path is well formed, else the reason.
@@ -208,7 +219,7 @@ module MachineSecrets
     raise Malformed, "#{source}: rules is not a list" unless rules.is_a?(Array)
 
     bad = rules - ALLOWLIST_RULES
-    raise Malformed, "#{source}: unknown rule(s) #{bad.map(&:to_s).join(', ')}" unless bad.empty?
+    raise Malformed, "#{source}: unknown rule(s) #{printable(bad)}" unless bad.empty?
 
     Allowlist.new(exact: exact.to_set.freeze, rules: rules.to_set.freeze)
   end

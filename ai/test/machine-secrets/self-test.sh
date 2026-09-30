@@ -114,14 +114,14 @@ check() { run check-machine-secrets "$@"; }
 expect() {
   local label="$1" want="$2" must="${3:-}" mustnot="${4:-}"
   if [ "${RC}" != "${want}" ]; then bad "${label}" "exit ${RC}, want ${want}" "${OUT}"; return; fi
-  if [ -n "${must}" ] && ! printf '%s' "${OUT}" | grep -Eq -- "${must}"; then bad "${label}" "missing /${must}/" "${OUT}"; return; fi
-  if [ -n "${mustnot}" ] && printf '%s' "${OUT}" | grep -Eq -- "${mustnot}"; then bad "${label}" "unexpected /${mustnot}/" "${OUT}"; return; fi
+  if [ -n "${must}" ] && ! grep -Eq -- "${must}" <<<"${OUT}"; then bad "${label}" "missing /${must}/" "${OUT}"; return; fi
+  if [ -n "${mustnot}" ] && [ -n "${OUT}" ] && grep -Eq -- "${mustnot}" <<<"${OUT}"; then bad "${label}" "unexpected /${mustnot}/" "${OUT}"; return; fi
   ok "${label}"
 }
 
 # has_fix <label>: the last output carries a line starting "Fix: ".
 has_fix() {
-  if printf '%s\n' "${OUT}" | grep -q '^Fix: '; then ok "$1 carries a Fix: line"; else bad "$1 carries a Fix: line" "${OUT}"; fi
+  if grep -q '^Fix: ' <<<"${OUT}"; then ok "$1 carries a Fix: line"; else bad "$1 carries a Fix: line" "${OUT}"; fi
 }
 
 echo "machine-secrets self-test (tools: ${SRC}/ai/bin)"
@@ -258,6 +258,15 @@ write_registry "${BASE_ENTRIES[@]}" "$(entry leaky '~/.fx/x' token)"
 sed -i "s|\"rotate\":\"fixture\"}]|\"rotate\":\"${SYN_B}\"}]|" "${REPO}/ai/secrets/registry.json"
 check -- --probe c
 expect "(c) a registry field holding a credential value is malformed (and not echoed)" 3 "looks like a credential value"
+# A pasted value used as the entry NAME: every message names entries, so this
+# is the field most likely to echo. Refused by position, never by name.
+write_registry "${BASE_ENTRIES[@]}" "$(entry "${SYN_D}" '~/.fx/x' token)"
+check -- --probe c
+expect "(c) a credential-valued NAME is malformed and not echoed" 3 "secrets\[6\]: name looks like a credential value" "SYNTHd"
+run with-secret -- SYN_KEY -- /bin/true
+expect "with-secret: a credential-valued NAME in the registry is refused and not echoed" 1 "looks like a credential" "SYNTHd"
+run with-secret -- "${SYN_A}" -- /bin/true
+expect "with-secret: a value passed as NAME is refused and not echoed" 1 "NAME argument looks like a credential value" "SYNTHa"
 restore_repo
 check "HOME=relative/home" -- --probe c
 expect "(c) a relative HOME is could-not-measure, not a pass" 3 "HOME .* not absolute|HOME is unset"
@@ -329,6 +338,11 @@ run with-secret -- OVL_KEY -- /bin/sh -c 'printf "len=%s" "${#OVL_KEY}"'
 expect "with-secret: an overlay entry resolves" 0 "len=${#SYN_A}"
 check -- --probe c
 expect "(c) overlay entries are checked" 0 "overlay 1\).*|ok    OVL_KEY"
+printf '{"kind":"athena-machine-secrets","schema":1,"secrets":[%s]}\n' "$(entry "${SYN_B}" '~/.fx/syn-key' api-key)" > "${FHOME}/.config/athena/work/overlay/secrets.json"
+check -- --probe c
+expect "(c) a credential-valued NAME in the overlay is could-not-measure and not echoed" 3 "overlay's secrets are not checked" "SYNTHb"
+run with-secret -- OVL_KEY -- /bin/true
+expect "with-secret: a credential-valued overlay NAME is refused and not echoed" 1 "overlay's registry could not be read" "SYNTHb"
 printf 'not json' > "${FHOME}/.config/athena/work/overlay/secrets.json"
 check -- --probe c
 expect "(c) a malformed overlay registry is could-not-measure" 3 "overlay's secrets are not checked"

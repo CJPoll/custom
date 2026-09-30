@@ -208,9 +208,11 @@ top level or in an entry, is malformed.
 A registry is **malformed** when it is not JSON, has the wrong `kind` or
 `schema`, an entry lacks a required field or has one of the wrong type, a name
 repeats, a path is neither absolute nor `~/…`, a path contains `..` or a NUL,
-or any string field matches a credential prefix (*check-machine-secrets* →
-*Credential patterns*). A malformed registry is never read as an empty one:
-the check exits 3 and `with-secret` refuses.
+or any string field or key matches a credential prefix (*check-machine-secrets*
+→ *Credential patterns*). A malformed registry is never read as an empty one:
+the check exits 3 and `with-secret` refuses. The credential test runs first and
+its error names the entry by position and the field by name, so a value pasted
+as an entry's `name` is never echoed.
 
 The public registry declares the harness's own secrets. A secret that is absent
 on a machine is fine: the check lists it as `not provisioned here: NAME`.
@@ -333,7 +335,8 @@ every other assignment is judged: `export X=$Y` puts Y's value in the env as
 X. An MCP `env`, `headers` or `args` value that is only a `${VAR}` reference is
 not reported, because Claude Code expands it into that one child. A header
 `Bearer <literal>` is reported whatever the header's name. It also reports a
-shell init file that is group- or world-readable **and** holds a finding.
+scanned file (a shell init file or one of the two JSON files) that is group-
+or world-readable **and** holds a finding.
 
 ### Probe (c): declared files
 
@@ -374,7 +377,7 @@ because it carries the process environ.
   (ai/contracts/athena-machine-secrets.md -> Adding a secret), load it with
   with-secret or a _FILE path, delete the export at FILE:LINE, then restart the
   terminal and every Claude session started from it.`
-- (b), a readable init file: `Fix: chmod 600 PATH`.
+- (b), a readable scanned file: `Fix: chmod 600 PATH`.
 - (c): `Fix: chmod 600 PATH` (or `chmod 700 DIR`).
 - (d): `Fix: delete PATH, or redact the value in it; if the value was ever
   readable elsewhere, rotate it (Rotating a secret).` For a core dump: `Fix:
