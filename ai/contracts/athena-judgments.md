@@ -178,8 +178,9 @@ request and stored nowhere.
 **What is stored: no text.** gen_saas stores no state text for any judgment.
 The call record (`judgment_calls`) holds an opaque `subject_ref` (an event id, a
 ticket ref or an item id), the outcome and reason, the model, the answers
-(choice or score, probabilities, confidence), token usage, cost and latency. It
-MUST refuse a `state`, `text` or `body` key in the stored answers. Rows are
+(choice or score, probabilities, confidence), token usage, cost, the call's
+latency (`latency_ms`) and, when the caller declared when it began waiting,
+its wait (`wait_ms`, *Modes*). It MUST refuse a `state`, `text` or `body` key in the stored answers. Rows are
 pruned after 30 days. The eval corpus stays machine-local and untracked, joined
 to its source by id, never copied into a second file.
 
@@ -374,13 +375,21 @@ use case whose question set declares no advisory label cannot be turned on.
 because shadow makes real calls. **`off` is never refused.** A use case MAY
 add a refusal of its own. Slack routing's advisory labels are its routable
 ones (`walt_ui`, `harness`, `gen_saas`; never `unclear`), and it refuses `on`
-unless its live latency is measured and fast enough (DND-717): over the
-owner's own `slack_routing` rows of the last 30 days that reached the port,
-at least 20 calls, the first at least 3 days old (else `latency_unmeasured`),
-with a discrete p95 `latency_ms` of at most 1,000 ms (else
-`latency_too_high`). `judgment_calls` rows carry no mode, so shadow and `on`
-calls both count; before `on` is first set, every such call is a shadow
-call. `eval:*` ignores the mode, but not the key, the domain or
+unless its live latency is measured and fast enough (DND-717, DND-1334).
+The bar reads the owner's own `slack_routing` rows of the last 30 days that
+reached the port, are of the registered question set's version, and carry a
+`wait_ms`. It needs at least 20 such calls, the first at least 3 days old
+(else `latency_unmeasured`), with a discrete p95 `wait_ms` of at most
+1,000 ms (else `latency_too_high`). `wait_ms` is what the router waited: from
+its topic step's start, read before the mode read and the context reads
+(`judge/4`'s `:wait_started_ms`), to the end of the TypeSafe call.
+`latency_ms` is still the call alone, and the bar never reads it. A row with
+no `wait_ms` is not measured and does not count: a caller that declares no
+start records none, and neither does any row written before DND-1334
+deployed. So `on` refuses as `latency_unmeasured` until 20 fresh calls of the
+current version span 3 days. `judgment_calls` rows carry no mode, so shadow
+and `on` calls both count; before `on` is first set, every such call is a
+shadow call. `eval:*` ignores the mode, but not the key, the domain or
 the budget. The writer is gen_saas `Athena.Judgments.Settings.set_mode/3`
 (DND-714), the owner's only one; every refusal carries `Fix:`.
 
@@ -400,6 +409,16 @@ call that reached the port; and a p95 over too few calls or too short a
 window is not a measurement, so it is refused as `latency_unmeasured`, never
 passed. The 20 calls and 3 days are DND-717's shadow bar ("at least 3 days,
 or at least 20 new owner conversations, whichever is later").
+
+**Later (2026-09-30):** this said the Slack routing `on` bar is a p95
+`latency_ms` over all of the owner's `slack_routing` rows that reached the
+port, whatever their question-set version (gen_saas `CallStore.latency/3`).
+Replaced by the text above: a p95 `wait_ms` over the registered version's
+rows only (DND-1334, gen_saas PR #594, `CallStore.latency/4`). Why: DND-1048's
+`slack-routing-v2` sends the conversation context, so v1 calls say nothing
+about v2's latency; and the router waits on its context reads as well as the
+call, inside Slack's 3 s ack, so the call alone understated the wait. The
+1,000 ms bar, the 20 calls and the 3 days are unchanged.
 
 ## Threshold provenance, n/a and the pinned model
 
