@@ -53,6 +53,18 @@
 # orders the pool longest-first. A failed write is a NOTE, never a verdict.
 # An interrupted run (see INTERRUPTED RUNS below) records nothing.
 #
+# SCRATCH-HOME SENTINEL (DND-1316). Every check runs with a fresh sentinel
+# directory first on PATH (ai/lib/scratch_home_sentinel.rb). The watched tools
+# are what asdf shims here (ruby, node, mix, ...) plus every name in a PATH
+# `shims` directory. A check that runs one through PATH while HOME is not the
+# gate's own HOME FAILS. The report names the tool and the HOME. The check's
+# own exit status does not matter. In an agent session that tool is an asdf
+# shim, which exits 126 under a scratch HOME (DND-1203). The sentinel execs
+# the next tool on PATH, so a check that keeps its PATH behaves as it would
+# without it. It fires on any machine, lane or agent session. A check that
+# deletes its sentinel, or a gate HOME that is not absolute, fails the check as
+# "could not measure", never as clean.
+#
 # Not in the list: the gate RUN itself (it would recurse). Its --self-test IS
 # declared (DND-507): it never runs the gate, only `--list` and fixtures.
 
@@ -68,6 +80,7 @@ require "digest"
 require_relative "../lib/first_party"
 require_relative "../lib/landed"
 require_relative "../lib/reap_tags"
+require_relative "../lib/scratch_home_sentinel"
 
 CUSTOM_DIR = File.expand_path("../..", __dir__)
 
@@ -1072,6 +1085,11 @@ end
 # is killed and the check FAILS, naming each process. The sweep is in an
 # `ensure`, so it also runs when this gate is interrupted mid-check; then it
 # kills at once (no grace), because the check did not exit on its own.
+#
+# DND-1316: every check also runs with a scratch-HOME sentinel first on PATH
+# (SCRATCH-HOME SENTINEL above). A logged violation FAILS the check, with the
+# sentinel's report appended; a gate HOME the sentinel cannot anchor fails it
+# unrun.
 def run_one(argv, chdir: CUSTOM_DIR, env: {}, label: nil, running: nil)
   tag = ReapTags.new_tag("gate-check")
   name = label || argv.join(" ")
@@ -1082,10 +1100,21 @@ def run_one(argv, chdir: CUSTOM_DIR, env: {}, label: nil, running: nil)
   cpu = nil
   scan_failure = nil
   returned = false
+  sentinel = nil
+  unmeasured = nil
   begin
-    ok, out, cpu = spawn_under_cpu_shim(argv, chdir: chdir,
-                                        env: env.merge(ReapTags.env_with(tag, env.fetch(ReapTags::VAR, ENV[ReapTags::VAR]))),
+    # DND-1316: see SCRATCH-HOME SENTINEL. A HOME that cannot anchor the
+    # comparison is a failed check (could not measure), never a clean one.
+    path = env.key?("PATH") ? env["PATH"].to_s : ENV.fetch("PATH", "")
+    sentinel = ScratchHomeSentinel.create(path: path, real_home: ENV.fetch("HOME", ""))
+    spawn_env = env.merge("PATH" => ScratchHomeSentinel.path_with(sentinel, path))
+                   .merge(ReapTags.env_with(tag, env.fetch(ReapTags::VAR, ENV[ReapTags::VAR])))
+    ok, out, cpu = spawn_under_cpu_shim(argv, chdir: chdir, env: spawn_env,
                                         aborted: -> { running&.aborted? })
+    returned = true
+  rescue ScratchHomeSentinel::SetupError => e
+    out = "harness-gate: FAIL — `#{argv.join(' ')}` was not run: the scratch-HOME sentinel could not be set " \
+          "up: #{e.message}.\n  Fix: run the gate with HOME set to your real, absolute home directory."
     returned = true
   rescue Errno::ENOENT, Errno::EACCES => e
     out = "harness-gate: cannot execute #{argv.first}: #{e.class}: #{e.message}"
@@ -1099,8 +1128,28 @@ def run_one(argv, chdir: CUSTOM_DIR, env: {}, label: nil, running: nil)
       scan_failure = "\nharness-gate: FAIL — the leak sweep after `#{argv.join(' ')}` could not look: #{e.message}\n"
       leaked = e.killed
     end
+    # Read after the reap, so nothing the check left running can still log.
+    # A sentinel the check deleted is "could not measure", never clean.
+    hits = []
+    begin
+      hits = ScratchHomeSentinel.violations(sentinel) if sentinel
+    rescue ScratchHomeSentinel::MeasureError => e
+      unmeasured = "harness-gate: FAIL — `#{argv.join(' ')}` could not be judged for scratch-HOME " \
+                   "shims (DND-1316): #{e.message}.\n  Fix: the check must leave the first PATH " \
+                   "directory it was given (the gate's sentinel) in place; do not delete it."
+    ensure
+      ScratchHomeSentinel.remove(sentinel)
+    end
   end
   running&.finish(name)
+  unless hits.empty?
+    ok = false
+    out = "#{out}\n#{ScratchHomeSentinel.report(hits, ENV.fetch('HOME', ''))}"
+  end
+  if unmeasured
+    ok = false
+    out = "#{out}\n#{unmeasured}"
+  end
   return [false, "#{out}#{scan_failure}#{leaked.empty? ? '' : leak_report(argv, leaked)}", cpu] if scan_failure
   return [ok, out, cpu] if leaked.empty?
 
@@ -3401,6 +3450,64 @@ def self_test_core
     end
   end
 
+  # 8c. The scratch-HOME sentinel (DND-1316) fires through run_one. A fake asdf
+  #     `shims/ruby` that dies unless HOME is the gate's is on the check's PATH.
+  #     A suite that runs `ruby` through PATH under a scratch HOME, swallows the
+  #     shim's exit 126 and exits 0 (DND-1203's vacuous pass) must FAIL with a
+  #     Fix:; one that resolves the real binary under the real HOME first, then
+  #     uses it under the scratch HOME, must pass.
+  Dir.mktmpdir("harness-gate-sentinel-case") do |tmp|
+    dir = File.realpath(tmp)
+    shims = File.join(dir, "fake-asdf", "shims")
+    FileUtils.mkdir_p(shims)
+    File.write(File.join(shims, "ruby"),
+               "#!/bin/bash\n[ \"$HOME\" = #{ENV.fetch('HOME', '').shellescape} ] || " \
+               "{ echo 'No version is set for command ruby' >&2; exit 126; }\nexec #{RbConfig.ruby.shellescape} \"$@\"\n")
+    flagged = File.join(dir, "flagged.sh")
+    resolved = File.join(dir, "resolved.sh")
+    File.write(flagged, "#!/bin/bash\nmkdir -p scratch\nHOME=\"$PWD/scratch\" ruby -e 0 || echo \"shim exit $?\"\nexit 0\n")
+    File.write(resolved, "#!/bin/bash\nmkdir -p scratch\nR=\"$(ruby -e 'print RbConfig.ruby')\" || exit 1\n" \
+                         "HOME=\"$PWD/scratch\" \"$R\" -e 'puts :booted'\n")
+    [File.join(shims, "ruby"), flagged, resolved].each { |p| FileUtils.chmod(0o755, p) }
+    env = { "PATH" => "#{shims}:#{ENV.fetch('PATH', '')}" }
+
+    f_ok, f_out = run_one([flagged], chdir: dir, env: env)
+    unless !f_ok && f_out.include?("shim exit 126") && f_out.include?("`ruby` with HOME=#{File.join(dir, 'scratch')}") &&
+           f_out.include?("DND-1316") && f_out.include?("Fix:")
+      warn "self-test: FAIL — case 8c: a suite that ran `ruby` through PATH under a scratch HOME was not " \
+           "failed by the sentinel with a Fix: (ok=#{f_ok}): #{f_out.inspect}"
+      ok = false
+    end
+    r_ok, r_out = run_one([resolved], chdir: dir, env: env)
+    unless r_ok && r_out.include?("booted")
+      warn "self-test: FAIL — case 8c: a suite that resolved the real ruby first was failed: #{r_out.inspect}"
+      ok = false
+    end
+
+    # A gate HOME the sentinel cannot anchor: the check fails UNRUN, with a Fix:.
+    marker = File.join(dir, "ran")
+    touch = File.join(dir, "touch.sh")
+    File.write(touch, "#!/bin/sh\n: > #{marker.shellescape}\n")
+    FileUtils.chmod(0o755, touch)
+    s_ok, s_out = with_env("HOME" => "relative-home") { run_one([touch], chdir: dir) }
+    unless !s_ok && !File.exist?(marker) && s_out.include?("was not run") && s_out.include?("Fix:")
+      warn "self-test: FAIL — case 8c: a relative gate HOME did not fail the check unrun with a Fix: " \
+           "(ok=#{s_ok}, ran=#{File.exist?(marker)}): #{s_out.inspect}"
+      ok = false
+    end
+
+    # A check that deletes its sentinel cannot read as clean.
+    wipe = File.join(dir, "wipe.sh")
+    File.write(wipe, "#!/bin/sh\nrm -rf \"${PATH%%:*}\"\nexit 0\n")
+    FileUtils.chmod(0o755, wipe)
+    w_ok, w_out = run_one([wipe], chdir: dir)
+    unless !w_ok && w_out.include?("could not be judged") && w_out.include?("Fix:")
+      warn "self-test: FAIL — case 8c: a check that deleted its sentinel was not failed as " \
+           "could-not-measure (ok=#{w_ok}): #{w_out.inspect}"
+      ok = false
+    end
+  end
+
   # 8b. stash_fixture_optout_env (DND-775) drops exactly the agent-stash layers:
   #     the injection's count and trace2, and every PATH entry whose `git` is
   #     the agent wrapper (by ATHENA_AGENT_BIN or by the wrapper's own text),
@@ -4178,7 +4285,8 @@ def run_self_test(group = nil)
          "suite red/green, and labeling distinct suites uniquely; keep " \
          "self_tests_found?/stray_test_scripts correct against a fixture " \
          "root; keep run_one reporting the child's exit status with " \
-         "stdin closed; and keep inline_self_test_coverage naming every " \
+         "stdin closed; keep run_one failing a check its scratch-HOME " \
+         "sentinel caught (case 8c, ai/lib/scratch_home_sentinel.rb); and keep inline_self_test_coverage naming every " \
          "first-party tool whose inline --self-test the gate never runs (case " \
          "11: declare it in STATIC_CHECKS, map it in " \
          "INLINE_SELF_TEST_COVERED_BY, or except it with a real reason); and " \
