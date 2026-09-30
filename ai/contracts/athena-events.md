@@ -1515,6 +1515,10 @@ first, so a change to a closed request never reads as a new review:
 
 - `merged` or `closed`, with the owner a reviewer now or earlier in the same
   event → `forge.review.merged` / `forge.review.closed`;
+- `merged` or `closed`, when the owner is not, and in this event was not, a
+  reviewer → the same event, but only to close an existing item (*Comments
+  (DND-1337)* → *A finish closes the owner's item*); otherwise
+  `not-owner-reviewer`;
 - `opened`, with the owner added as a reviewer, or still one → `forge.review.requested`;
 - `opened`, with the owner removed as a reviewer → `forge.review.removed`;
 - anything else is a counted skip (`not-owner-reviewer`, `not-merge-request`,
@@ -1546,15 +1550,42 @@ inside code or a quote matches, though GitLab does not notify for it. And
 after the owner renames their GitLab account, the old username stays bound
 until their next comment.
 
-A residual, not an accepted cost: an item a comment raised because the owner
-is the merge request's author, or was only mentioned, does not close when
-the merge request merges or closes. The ingress emits `merged` and `closed`
-only for an owner who is, or in that event was, a reviewer (the list above),
-and a later comment on the finished merge request is skipped
-`merge-request-not-open`. So such an item stays `active` until the owner
-closes it. DND-1377 closes it: a merged or closed event closes an existing
-item for its merge request whatever the owner's reviewer status, and never
-creates one.
+**A finish closes the owner's item** (DND-1377). A merge request that
+merges or closes closes the owner's `forge_review` item for it, whatever
+raised the item: a review request, or a comment on a merge request the owner
+authored or was mentioned in. The owner's reviewer status decides only
+whether the index is asked first. For a finish the owner did not review, the
+ingress routes `forge.review.merged` / `forge.review.closed` only when the
+owner has an item for that merge request (in any state, not soft-deleted),
+or a `forge.review.requested` / `forge.review.commented` event for it is
+still pending in the index. The index applies obligations oldest first, so
+the close lands after the item that event creates. Otherwise it routes
+nothing and counts `not-owner-reviewer`, as before. Two answers route the
+close without a match, because a close never creates an item and skipping
+one that had an item would leave it open:
+
+- more than 200 pending upserts for the owner are answered "has an item"
+  without scanning them;
+- a lookup that fails (a key that cannot be built, an owner id that names no
+  user) is logged with a `Fix:` and the close is routed anyway, so the index
+  settles or fails it by name. A database fault raises, and the webhook
+  answers 500.
+
+The close is the index's source close: it closes an `active` item
+`source_status` and never creates one (*Priority index* → *States*). A
+comment on a merged or closed merge request stays `merge-request-not-open`,
+so it raises no event and never reopens that close. One window is accepted:
+a comment delivered concurrently with the merge, whose event commits after
+the lookup reads, is not seen, and its item stays open until the owner
+closes it.
+
+**Later (2026-09-30, DND-1377):** this paragraph was a residual: an item a
+comment raised because the owner authored the merge request, or was only
+mentioned, did not close when it merged or closed, since the ingress emitted
+`merged` and `closed` only for a reviewer. Superseded by DND-1377 (gen_saas
+#589, `6383b2bc`): `Athena.Forge.ReviewClassifier` answers
+`{:close_existing, kind}`, and `Athena.Forge` routes it after
+`Athena.Priorities.forge_review_indexed?/4`.
 
 **Later (2026-09-30):** the paragraph before the list said the owner's id
 is compared "never with a username", for every event. Superseded for a
@@ -5932,8 +5963,9 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   A close whose `revision` is older than the row's, on any item, writes
   nothing and also settles `indexed`: the item already holds newer evidence
   (*Idempotency is per (event, item)*). A new `forge_review` item is created `active` and `owner_only`,
-  never `proposed`: the ingress routes only a merge request that names the
-  owner as a reviewer, or a comment for the owner on an open one, so the
+  never `proposed`: only a merge request that names the owner as a
+  reviewer, or a comment for the owner on an open one, creates an item (a
+  finish the owner did not review only closes one, DND-1377), so the
   request is already addressed to the owner and has nothing to promote (*created `active`*, above). A
   `forge.review.requested` whose `revision` is strictly newer than the row's
   reopens a `source_status` close, like any other, and so does a
