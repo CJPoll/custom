@@ -462,11 +462,14 @@ fi
 # repro's shim used to exec `command -v ruby`, which in an agent session is
 # the asdf shim, and an asdf shim finds no ruby under a scratch HOME (exit 126).
 # So every ruby client R2's suite started died at once: the suite waited out
-# each client's ready bound (~835s a gate, against ~24s in a cron lane, whose
-# PATH has no asdf shims), and the TERM-ignoring client the case exists to
-# test never ran, so R2 passed without testing anything. The fake `ruby` here
+# each client's ready bound (R2 ~835s in a worktree gate; in a cron lane,
+# whose PATH has no asdf shim, the whole suite-reaper check took ~96s), and
+# the TERM-ignoring client the case exists to test never ran, so R2 passed
+# without testing anything. Neither sub-case below depends on the clock: the
+# repro's wait ends when the client's ready file names it, or when it exits. The fake `ruby` here
 # stands in for the asdf shim: it works only under the HOME it was made for.
 S17_REAL="$(ruby -e 'print RbConfig.ruby' 2>/dev/null)"
+[ -x "${S17_REAL}" ] || bad "S17 setup: resolve the ruby interpreter" "ruby -e 'print RbConfig.ruby' gave '${S17_REAL}'"
 S17_BIN="${TMP}/s17bin"; mkdir -p "${S17_BIN}"
 printf '#!/usr/bin/env bash\n[ "${HOME}" = %q ] || { echo "fake asdf shim: no ruby version set under HOME=${HOME}" >&2; exit 126; }\nexec %q "$@"\n' \
   "${HOME}" "${S17_REAL}" >"${S17_BIN}/ruby"
@@ -491,7 +494,7 @@ sleep 300
 RB
 r="$(s11_repo s17boot "$(s17_suite boot)")"
 MARK="DND818_ST_MARK=s17boot-$$"; MARKS+=("${MARK}")
-O="$(env "${MARK}" PATH="${S17_BIN}:${PATH}" REPRO_CASES=r2 REPRO_WAIT_S=60 REPRO_STALL_S=60 REPRO_READY_S=5 \
+O="$(env "${MARK}" PATH="${S17_BIN}:${PATH}" REPRO_CASES=r2 \
       bash "${r}/scripts/test/suite-reaper/repro-real-suites.sh" 2>&1)"; ORC=$?
 if [ -n "${S17_REAL}" ] && [ "${ORC}" -eq 0 ] && grep -q '^VERDICT: PASS' <<<"${O}" && [ -s "${TMP}/s17-boot.booted" ]; then
   ok "S17 with an asdf-style ruby first on PATH, R2's TERM-ignoring client still boots under the scratch HOME (pid $(cat "${TMP}/s17-boot.booted"))"
@@ -502,10 +505,10 @@ fi
 gone "${MARK}" || { bad "S17 the fake suite's processes are reaped" "$(survivors "${MARK}")"; kill_marked "${MARK}"; }
 r="$(s11_repo s17noboot "$(s17_suite noboot)")"
 MARK="DND818_ST_MARK=s17noboot-$$"; MARKS+=("${MARK}")
-O="$(env "${MARK}" PATH="${S17_BIN}:${PATH}" REPRO_CASES=r2 REPRO_WAIT_S=60 REPRO_STALL_S=60 REPRO_READY_S=2 \
+O="$(env "${MARK}" PATH="${S17_BIN}:${PATH}" REPRO_CASES=r2 \
       bash "${r}/scripts/test/suite-reaper/repro-real-suites.sh" 2>&1)"; ORC=$?
-if [ "${ORC}" -eq 1 ] && grep -q '^VERDICT: FAIL' <<<"${O}" && grep -q 'never became ready' <<<"${O}"; then
-  ok "S17 a target client that never boots makes R2 FAIL ('never became ready'), never a vacuous PASS"
+if [ "${ORC}" -eq 1 ] && grep -q '^VERDICT: FAIL' <<<"${O}" && grep -q 'exited before it became ready' <<<"${O}"; then
+  ok "S17 a target client that never boots makes R2 FAIL ('exited before it became ready'), never a vacuous PASS"
 else
   bad "S17 a target client that never boots makes R2 FAIL, never a vacuous PASS" "rc=${ORC} $(printf '%s' "${O}" | tr '\n' '|')"
 fi
