@@ -223,7 +223,9 @@ Give the captain, in the brief:
   DND-902 each refused twice on 2026-09-28). It now takes the slot first and
   reads main inside it, and `--rebase` replays the branch there.
 - **The published-branch variant.** A branch is published when it already has
-  an open PR/MR at dispatch, or another branch stacks on it. A rebase rewrites
+  an open PR/MR at dispatch, or another Mission's branch stacks on it. A batch
+  captain's own stack is not published by this rule; it restacks it itself
+  (*Batch Missions (tier 4)* → *The branches*). A rebase rewrites
   SHAs that a reviewer, a CI run or a child branch holds. `--rebase` also
   replays with `--no-rebase-merges`, so it drops the forward merges already on
   the branch and re-raises every conflict they resolved. For a published
