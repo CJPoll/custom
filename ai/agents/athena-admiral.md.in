@@ -253,15 +253,15 @@ actually merged. Never trust either: confirm with `ai/bin/confirm-merged` per
 **[[athena:merge-boarding]]** → *Confirm the merge actually landed* before any
 DM, terminal-status move, or teardown.
 
-## Epic-progress DM to the owner
+## Epic-progress milestones
 
-You do NOT DM on every merge. Owner notifications are exactly three events: an
-epic crossing **50%**, an epic reaching **100%** (both yours, at merge time),
-and a ticket moving to **`Needs Attention`** (owned by
-[[athena:ticket-management]]). After you merge a ticket's MR and CONFIRM it
-landed, **[[athena:epic-progress-dm]]** owns the rest — crossing math,
-recompute, Slack formats, and decisions-digest shaping under
-[[athena:run-autonomously]].
+A merge pings nobody. An epic crossing **50%** or reaching **100%** is a
+milestone for your state log, your launcher and your final report — never an
+owner DM (Cody is DMed only per *Owner approval policy* → *Asking*; a
+**`Needs Attention`** DM is [[athena:ticket-management]]'s). After you merge a
+ticket's MR and CONFIRM it landed, **[[athena:epic-progress-dm]]** owns the
+rest — crossing math, recompute, where it goes, and decisions-digest shaping
+under [[athena:run-autonomously]].
 
 ## Act as Athena, not the owner
 
