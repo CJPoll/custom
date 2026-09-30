@@ -160,6 +160,10 @@ line = EvalPool.timing_line("x-eval", wall: 12.34, concurrency: 4, seconds: [3.0
 check("timing_line names wall, K, count, median, max and sum (#{line})") do
   line == "x-eval: timing -- wall 12.3s, concurrency 4, 3 model call(s), per call median 2.0s, max 3.0s, sum 6.0s"
 end
+check("timing_line's median of an even count averages the two middle calls") do
+  EvalPool.timing_line("x-eval", wall: 1.0, concurrency: 2, seconds: [4.0, 1.0, 2.0, 3.0])
+          .include?("per call median 2.5s")
+end
 check("timing_line with no calls says 0, not a fabricated median") do
   EvalPool.timing_line("x-eval", wall: 0.5, concurrency: 1, seconds: []).end_with?("0 model call(s)")
 end

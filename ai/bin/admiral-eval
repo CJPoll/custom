@@ -1402,9 +1402,11 @@ STUB_SUBJECT = <<~'RUBY'
   name = prompt[/STUBCASE=(\S+)/, 1]
   passes = prompt[/PASSES=(\d+)/, 1].to_i
   barrier = File.read(File.join(STATE, "barrier")).to_i
-  started = bump("started") { |v| v + 1 }
+  # Enter (in_flight) BEFORE arriving (started): a caller released by the
+  # barrier then cannot leave before the last arrival has counted itself in.
   in_flight = bump("in_flight") { |v| v + 1 }
   bump("max_in_flight") { |v| [v, in_flight].max }
+  started = bump("started") { |v| v + 1 }
   hung = false
   if started <= barrier
     deadline = mono + HANG_S

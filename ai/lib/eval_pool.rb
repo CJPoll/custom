@@ -111,7 +111,8 @@ module EvalPool
       if seconds.empty?
 
     sorted = seconds.sort
-    median = sorted[sorted.size / 2]
+    mid = sorted.size / 2
+    median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
     "#{tool}: timing -- wall #{format('%.1f', wall)}s, concurrency #{concurrency}, " \
       "#{sorted.size} model call(s), per call median #{format('%.1f', median)}s, " \
       "max #{format('%.1f', sorted.last)}s, sum #{format('%.1f', sorted.sum)}s"

@@ -115,8 +115,12 @@ HOLD="${TMP}/hold-latency"
 fleet_respond "{\"status\":202,\"body\":{\"ok\":true},\"hold_file\":\"${HOLD}\"}"
 : > "${PIDS}"
 post lat0001 athena-captain > "${TMP}/in.json"
-OUT="$(timeout 60 "${HOOK}" < "${TMP}/in.json" 2>/dev/null)"; RC=$?
+# curl's cap and the report's bound are raised past the 60 s hang cap, so a
+# hook that waited on the network could not give up early and exit 0.
+OUT="$(FLEET_MAX_TIME_S=120 FLEET_HOOK_TIMEOUT_S=120 timeout 60 "${HOOK}" < "${TMP}/in.json" 2>/dev/null)"; RC=$?
 eq "[ticket] the hook exited 0 while the server's answer was still held" "${RC}" "0"
+fleet_await_live_reporter "${PIDS}"
+eq "[ticket] the detached report is still waiting on the held answer" "${LIVE_REPORTER}" "yes"
 eq "PostToolUse writes nothing on stdout" "${OUT}" ""
 touch "${HOLD}"
 settle 1

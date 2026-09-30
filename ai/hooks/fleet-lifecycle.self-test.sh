@@ -246,16 +246,21 @@ HOLD="${TMP}/hold-latency"
 fleet_respond "{\"status\":202,\"body\":{\"ok\":true},\"hold_file\":\"${HOLD}\"}"
 : > "${PIDS}"
 fixture b3.3-StopFailure-athena-captain > "${TMP}/in.json"
-timeout 60 "${HOOK}" < "${TMP}/in.json" >/dev/null 2>&1; RC=$?
+# curl's cap and the report's bound are raised past the 60 s hang cap, so a
+# hook that waited on the network could not give up early and exit 0.
+FLEET_MAX_TIME_S=120 FLEET_HOOK_TIMEOUT_S=120 timeout 60 "${HOOK}" < "${TMP}/in.json" >/dev/null 2>&1; RC=$?
 eq "never adds latency: the hook exited 0 while the server's answer was still held" "${RC}" "0"
+fleet_await_live_reporter "${PIDS}"
+eq "never adds latency: the detached report is still waiting on the held answer" "${LIVE_REPORTER}" "yes"
 touch "${HOLD}"
 fleet_wait_pids "${PIDS}" 1
 HOLD="${TMP}/hold-bound"
 fleet_respond "{\"status\":202,\"body\":{\"ok\":true},\"hold_file\":\"${HOLD}\"}"
 : > "${PIDS}"
-export FLEET_HOOK_TIMEOUT_S=1
+# curl's cap is set well past the 1 s bound, so only the bound can end it.
+export FLEET_HOOK_TIMEOUT_S=1 FLEET_MAX_TIME_S=30
 hook "$(fixture b3.3-StopFailure-athena-captain)"
-unset FLEET_HOOK_TIMEOUT_S
+unset FLEET_HOOK_TIMEOUT_S FLEET_MAX_TIME_S
 fleet_wait_pids "${PIDS}" 1
 has "a report past its bound is killed and logged with Fix: (the answer was held, so only the bound could end it)" "$(tail -n 1 "${LOG}")" "did not finish within 1s"
 touch "${HOLD}"

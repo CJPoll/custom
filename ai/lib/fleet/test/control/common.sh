@@ -9,11 +9,7 @@
 # They were one 124-137 s suite (DND-443), the parallel gate's floor.
 # `fleet-control --self-test` runs all four.
 #
-# The fleet-control suite (DND-443), in four parts. Each part is discovered by harness-gate
-# (every committed `self-test.sh` runs) and run by `ai/bin/fleet-control
-# --self-test`.
-#
-# TDD order:
+# TDD order (DND-443):
 #   1. domain  -- lib/fleet/control-domain.sh: shapes, desired/3 mirror, the
 #      local rule, work-hours math (DST, weekend, holiday, boundaries), causes;
 #   2. effects -- lib/fleet/control-effects.sh: cache path, atomic write, read;

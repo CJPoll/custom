@@ -388,10 +388,19 @@ def inline_self_test_coverage(root:, checks: STATIC_CHECKS + self_test_checks(ro
   end
 
   run_paths = checks.map { |(_, argv)| argv.first }
-  # uniq: one tool may declare its suite as several groups (harness-gate's
-  # own --self-test --group NAME, DND-1007); that is one tool accounted once.
-  declared = checks.select { |(_, argv)| argv.drop(1).include?("--self-test") }.map { |(_, argv)| argv.first }.uniq
+  # One tool may declare its suite as several DISTINCT argvs (harness-gate's
+  # own --self-test --group NAME, DND-1007): each runs a different part, so
+  # that tool is accounted once. The same argv declared twice still runs the
+  # same suite twice, and is an error below.
+  declared_argvs = checks.map { |(_, argv)| argv }.select { |argv| argv.drop(1).include?("--self-test") }
+  declared = declared_argvs.map(&:first).uniq
   errors = []
+  declared_argvs.tally.each do |argv, n|
+    next if n < 2
+
+    errors << "#{argv.join(' ')} is declared #{n} times in STATIC_CHECKS; " \
+              "its suite would run #{n} times"
+  end
 
   accounted = Hash.new { |h, k| h[k] = [] }
   declared.each { |t| accounted[t] << "STATIC_CHECKS" }
@@ -2213,7 +2222,14 @@ end
 def self_test_delegate(script, delegate)
   ok = true
   script_path = File.join(CUSTOM_DIR, script)
-  return true unless File.file?(script_path) && File.executable?(script_path) # core's case 4 flags this
+  unless File.file?(script_path) && File.executable?(script_path)
+    # A group that checked nothing must not read as a pass (core's case 4
+    # flags the same gap; this group says so for itself).
+    warn "self-test: FAIL — SELF_TEST_DELEGATES names #{script.inspect}, which is not an " \
+         "executable file, so its delegation cannot be verified. Fix: restore the installer " \
+         "or remove its SELF_TEST_DELEGATES entry."
+    return false
+  end
 
   runs = [[script, "--self-test"], [delegate]].map { |argv| Thread.new { run_one(argv) } }
   (installer_ok, installer_out), (delegate_ok, delegate_out) = runs.map(&:value)
@@ -3432,6 +3448,17 @@ def self_test_core
     expect.call(r[:uncovered].empty? && !failed_inline_coverage?(r), "a STATIC_CHECKS declaration did not cover the tool")
     r = cov.call(red, exceptions: { "ai/bin/fixture-tool" => "model-in-loop: calls claude, never gate-safe" })
     expect.call(r[:uncovered].empty? && !failed_inline_coverage?(r), "a reasoned exception did not cover the tool")
+    # 11b2 (DND-1007). Distinct group argvs of one tool are one tool accounted
+    #      once; the SAME argv declared twice runs one suite twice, an error.
+    groups = [["g1", %w[ai/bin/fixture-tool --self-test --group a]],
+              ["g2", %w[ai/bin/fixture-tool --self-test --group b]]]
+    r = cov.call(red, checks: groups)
+    expect.call(r[:uncovered].empty? && !failed_inline_coverage?(r),
+                "two distinct --group declarations of one tool were refused (#{r.inspect})")
+    r = cov.call(red, checks: [["t1", %w[ai/bin/fixture-tool --self-test]],
+                               ["t2", %w[ai/bin/fixture-tool --self-test]]])
+    expect.call(failed_inline_coverage?(r),
+                "the same --self-test argv declared twice was not an error (#{r.inspect})")
 
     # 11c. Comment-only and near-miss mentions do not make a tool a definer;
     #      test suites are never candidates.

@@ -720,7 +720,10 @@ check 32-fifo eq "$(tr '\n' ' ' <"$W/32.order" 2>/dev/null)" "W1 W2 W3 "
 # DND-1007: W4 used to carry --wait-timeout 8 through every check below, so a
 # slow host could time it out before the position checks ran: a verdict that
 # flipped with machine speed. No waiter here has a timeout until W5, which is
-# added only after the position checks are done.
+# added only after the position checks are done. The narrowing, stated: W5
+# joins after W2 left, so no case now times out a waiter whose queue changed
+# DURING its wait; the property asserted (behind the head, exit 75, the queue
+# closes up) is unchanged.
 newpool p33 1
 hold A33 holder-A33
 for k in 1 2 3 4; do

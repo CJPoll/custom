@@ -40,7 +40,8 @@ jq -n -c --argjson o "$(stat -c %s "${SCH}")" '{offset: $o}' > "${ATHENA_INBOX_R
 flock "${ATHENA_INBOX_ROOT}/custom-session.consumer.lock" sleep 120 &
 HOLDER_PID=$!
 held=""
-for i in $(seq 1 100); do
+# A hang cap, not a budget (DND-1007: it was 5 s); the holder keeps the lock 120 s.
+for i in $(seq 1 1200); do
   if ! flock -n "${ATHENA_INBOX_ROOT}/custom-session.consumer.lock" true; then held=1; break; fi
   sleep 0.05
 done
@@ -137,8 +138,10 @@ eq "[DND-484 test 5] ... one drain notice, not one per poll" "$(grep -c 'desired
 eq "[DND-484 test 5] headless: a budget at the 600s ceiling is refused (exit 2)" "$(cat "${TMP}/rc")" 2
 has "[DND-484 test 5] ... with Fix:" "$(cat "${TMP}/uerr")" "Fix:"
 ( export CLAUDE_CODE_ENTRYPOINT=sdk-cli CLAUDE_CODE_SESSION_ATTENDED=0 FLEET_WAIT_INTERVAL_S=1; unset CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
-  timeout 5 "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" >/dev/null 2>"${TMP}/uerr" & p=$!
-  for i in $(seq 1 100); do grep -q 'budget' "${TMP}/uerr" 2>/dev/null && break; sleep 0.05; done
+  # The waiter is killed as soon as it prints its budget line; the 60 s timeout
+  # and the poll bound are hang caps only (DND-1007: they were 5 s).
+  timeout 60 "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" >/dev/null 2>"${TMP}/uerr" & p=$!
+  for i in $(seq 1 1200); do grep -q 'budget' "${TMP}/uerr" 2>/dev/null && break; sleep 0.05; done
   kill "${p}" 2>/dev/null; wait "${p}" 2>/dev/null )
 has "[DND-484 test 5] headless default budget is the inbox policy's 540s" "$(cat "${TMP}/uerr")" "budget 540s, ceiling 600s, mode headless"
 
@@ -147,20 +150,22 @@ has "[DND-484 test 5] headless default budget is the inbox policy's 540s" "$(cat
 # is still in flight when the waiter is killed however slow the machine is.
 fleet_respond "{\"status\":200,\"hold_file\":\"${TMP}/hold-trap\",\"body\":${DRAIN_B}}"
 before="$(fleet_log_count)"
-# curl's own timeout (FLEET_MAX_TIME_S) is raised past the check below, so a
-# curl that died is one the trap killed, not one that timed out.
+# Every bound here outlasts the checks below (DND-1007), so none of them can
+# end the request first: curl's max-time is 300 s, the waiter's budget 300 s,
+# the server's hold cap 120 s, and each wait below caps at 60 s. A curl that
+# died is one the trap killed, and a waiter that exited is one TERM ended.
 # curl's argv is only `curl --config -` (the URL rides stdin), so its survivors
 # are found by an environment marker every descendant inherits.
 MARK="dnd484-reap-$$-${RANDOM}"
-FLEET_WAIT_TEST_MARK="${MARK}" FLEET_MAX_TIME_S=40 "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" --interval 1 --budget 30 >/dev/null 2>&1 &
+FLEET_WAIT_TEST_MARK="${MARK}" FLEET_MAX_TIME_S=300 "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" --interval 1 --budget 300 >/dev/null 2>&1 &
 WPID=$!
 marked() { grep -lz "^FLEET_WAIT_TEST_MARK=${MARK}\$" /proc/[0-9]*/environ 2>/dev/null | cut -d/ -f3 | tr '\n' ' ' | sed 's/ $//'; }
 fleet_wait_count "$((before + 1))"
 has "wait: fixture: a curl is in flight when the waiter is killed" "$(for p in $(marked); do cat "/proc/${p}/comm" 2>/dev/null; done)" curl
-kill -TERM "${WPID}"; timeout 10 tail --pid="${WPID}" -f /dev/null
+kill -TERM "${WPID}"; timeout 60 tail --pid="${WPID}" -f /dev/null
 check "wait: killed mid-request, it exits" bash -c '! kill -0 "$0" 2>/dev/null' "${WPID}"
 left=""
-for i in $(seq 1 20); do left="$(marked)"; [ -z "${left}" ] && break; sleep 0.05; done
+for i in $(seq 1 1200); do left="$(marked)"; [ -z "${left}" ] && break; sleep 0.05; done
 eq "wait: ... and no descendant (its curl included) survives it" "${left}" ""
 [ -n "${left}" ] && kill ${left} 2>/dev/null
 touch "${TMP}/hold-trap"

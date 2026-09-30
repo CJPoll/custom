@@ -68,6 +68,22 @@ fleet_wait_count() {
   return 1
 }
 
+# fleet_await_live_reporter <pidfile> -- wait (hang cap only) until a detached
+# reporter has recorded its pid, then set LIVE_REPORTER=yes if that pid is
+# still running, else no. With the server's answer held, a live reporter is
+# the event that proves the hook returned without waiting for it (DND-1007).
+fleet_await_live_reporter() {
+  local f="$1" i p=""
+  for i in $(seq 1 1200); do
+    p="$(head -n 1 "${f}" 2>/dev/null)"
+    [ -n "${p}" ] && break
+    sleep 0.05
+  done
+  LIVE_REPORTER=no
+  [ -n "${p}" ] && kill -0 "${p}" 2>/dev/null && LIVE_REPORTER=yes
+  return 0
+}
+
 # fleet_wait_pids <pidfile> <n> -- wait until <n> detached reporters recorded
 # their pids, then block on each until it exits (bounded).
 fleet_wait_pids() {
