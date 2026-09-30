@@ -27,7 +27,7 @@ done
 # A suite launched from inside a slot (DND-486 wraps the gate) must not carry
 # that slot into its fixtures: every case here decides re-entrancy itself.
 unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HELD_MODEL ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_HEARTBEAT \
-  ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS HARNESS_GATE_JOBS
+  ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS HARNESS_GATE_JOBS ATHENA_EVAL_CONCURRENCY
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/test-slot-selftest.XXXXXX")"
 BG_PIDS=()
@@ -205,6 +205,35 @@ d	e"
   t eq "$(gate_jobs 16 '' ./ai/bin/harness-gate --jobs 12345678)" 999999
   t eval '! gate_jobs 16 "" ./ai/bin/harness-gate --jobs x >/dev/null'
   t eval '! gate_jobs 16 "" ./ai/bin/integration-gate >/dev/null'
+  # DND-1358: an eval's weight is the model calls it keeps in flight, resolved
+  # as the eval resolves them: --concurrency K, else the ATHENA_EVAL_CONCURRENCY
+  # it will see (admiral-eval, critic-eval), else EvalPool's default 4.
+  # variant-eval runs both sides at once (2K, K default 2, env ignored);
+  # block-optimize runs variant-eval at its default (4). No model call, no weight.
+  t eq "$(eval_calls '' ai/bin/admiral-eval --run)" 4
+  t eq "$(eval_calls '' timeout 3600 ai/bin/admiral-eval --run --concurrency 8)" 8
+  t eq "$(eval_calls '' ai/bin/admiral-eval --concurrency 016 --run)" 16
+  t eq "$(eval_calls 6 ai/bin/admiral-eval --run)" 6
+  t eq "$(eval_calls 6 ai/bin/admiral-eval --run --concurrency 2)" 2
+  t eq "$(eval_calls 6 env -u ATHENA_EVAL_CONCURRENCY ai/bin/admiral-eval --run)" 4
+  t eq "$(eval_calls 6 env -i ai/bin/critic-eval --run)" 4
+  t eq "$(eval_calls '' env ATHENA_EVAL_CONCURRENCY=3 ai/bin/critic-eval --run --only core)" 3
+  t eq "$(eval_calls '' ai/bin/critic-eval --run)" 4
+  t eq "$(eval_calls x ai/bin/admiral-eval --run)" 4
+  t eq "$(eval_calls '' ai/bin/admiral-eval --run --concurrency 99)" 4
+  t eq "$(eval_calls '' ai/bin/variant-eval --variant v --corpus full)" 4
+  t eq "$(eval_calls '' ai/bin/variant-eval --corpus full --variant v --concurrency 3)" 6
+  t eq "$(eval_calls 9 ai/bin/variant-eval --variant v --corpus full)" 4
+  t eq "$(eval_calls '' ai/bin/block-optimize --case AE-01 --evidence e --out-dir o)" 4
+  t eval '! eval_calls "" ai/bin/admiral-eval >/dev/null'
+  t eval '! eval_calls "" ai/bin/admiral-eval --self-test >/dev/null'
+  t eval '! eval_calls "" ai/bin/admiral-eval --run --help >/dev/null'
+  t eval '! eval_calls "" ai/bin/critic-eval --self-test >/dev/null'
+  t eval '! eval_calls "" ai/bin/variant-eval --variant v >/dev/null'
+  t eval '! eval_calls "" ai/bin/variant-eval --variant v --corpus deterministic >/dev/null'
+  t eval '! eval_calls "" ai/bin/block-optimize --self-test >/dev/null'
+  t eval '! eval_calls "" ai/bin/critic-review --base main >/dev/null'
+  t eval '! eval_calls "" ./ai/bin/harness-gate >/dev/null'
   # The measured budget formula and the undeclared default (its N=3 share).
   t eq "$(cpu_budget 16)" 24
   t eq "$(cpu_budget 8)" 12
@@ -1236,6 +1265,48 @@ check 46-rc eq "$rc" 0
 check 46-inner-reentrant eq "$(event_count reentrant inner46)" 1
 check 46-mid-in-model eq "$(jq -s '[.[] | select(.event == "acquired" and .label == "mid46")] | length' "$POOL/model/events.jsonl" 2>/dev/null)" 1
 check 46-reentrant-weight0 eq "$(events | jq -s '[.[] | select(.event == "reentrant" and .label == "inner46") | .weight] | first')" 0
+
+# 47 (DND-1358): an eval holds one model unit per model call it keeps in
+# flight. A K=4 admiral-eval holds 4, a variant-eval 2K (both sides at once),
+# an eval that makes no model call 1, and an explicit --weight still wins.
+# Past the budget it holds the whole budget, with the note.
+newpool p47 2
+export ATHENA_TEST_MODEL_SLOTS=8
+mkdir -p "$W/fake47"
+for m in admiral-eval critic-eval variant-eval; do
+  printf '#!/bin/sh\nexit 0\n' >"$W/fake47/$m"
+  chmod +x "$W/fake47/$m"
+done
+w47() { jq -s --arg l "$1" '[.[] | select(.event == "acquired" and .label == $l) | .weight] | first' "$POOL/model/events.jsonl" 2>/dev/null; }
+timeout 20 "$BIN" --label A47 -- timeout 10 "$W/fake47/admiral-eval" --run --concurrency 4 2>/dev/null
+check 47-k4-holds-4 eq "$(w47 A47)" 4
+timeout 20 "$BIN" --label B47 -- "$W/fake47/admiral-eval" --run 2>/dev/null
+check 47-default-k-holds-4 eq "$(w47 B47)" 4
+timeout 20 "$BIN" --label E47 -- env ATHENA_EVAL_CONCURRENCY=2 "$W/fake47/critic-eval" --run 2>/dev/null
+check 47-env-k eq "$(w47 E47)" 2
+timeout 20 "$BIN" --label V47 -- "$W/fake47/variant-eval" --variant v --corpus full --concurrency 3 2>/dev/null
+check 47-variant-2k eq "$(w47 V47)" 6
+timeout 20 "$BIN" --label L47 -- "$W/fake47/admiral-eval" 2>/dev/null
+check 47-list-holds-1 eq "$(w47 L47)" 1
+timeout 20 "$BIN" --label X47 --weight 1 -- "$W/fake47/admiral-eval" --run --concurrency 4 2>/dev/null
+check 47-explicit-wins eq "$(w47 X47)" 1
+timeout 20 "$BIN" --label O47 -- "$W/fake47/variant-eval" --variant v --corpus full --concurrency 8 2>"$W/O47.err"
+check 47-clamped eq "$(w47 O47)" 8
+check 47-clamp-note has "$W/O47.err" "holds the whole budget"
+unset ATHENA_TEST_MODEL_SLOTS
+# test-slot restates EvalPool's default, range and env name and variant-eval's
+# per-side default (eval_calls); these pin them together, so a change to one
+# without the other turns this suite red.
+EP47="$(cd "$here/../../lib" && pwd)/eval_pool.rb"
+VE47="$(cd "$here/../../bin" && pwd)/variant-eval"
+for pin in 'RANGE = (1..16)' 'DEFAULT = 4' 'ENV_VAR = "ATHENA_EVAL_CONCURRENCY"'; do
+  if grep -qF -- "$pin" "$EP47" 2>/dev/null; then ok; else
+    bad 47-eval-pool-pinned "$EP47 no longer reads '$pin'. Fix: update EVAL_MAX_CONCURRENCY, EVAL_DEFAULT_CONCURRENCY or EVAL_ENV in ai/bin/test-slot to match it, then this pin."
+  fi
+done
+if grep -qF 'DEFAULT_SIDE_CONCURRENCY = 2' "$VE47" 2>/dev/null; then ok; else
+  bad 47-variant-side-pinned "$VE47 no longer reads 'DEFAULT_SIDE_CONCURRENCY = 2'. Fix: update VARIANT_SIDE_CONCURRENCY in ai/bin/test-slot to match it, then this pin."
+fi
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then

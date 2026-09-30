@@ -22,11 +22,14 @@
 #              harness-gate (DND-1005) weighs W; an undeclared run weighs
 #              budget/3 (8), which is exactly its pre-DND-1006 share of N=3,
 #              so a caller that never says --weight sees the old concurrency.
-#   model pool budget = 8 runs in flight, weight 1 each. Model-in-loop evals
+#   model pool budget = 8 model calls in flight. Model-in-loop evals
 #              (admiral-eval, critic-eval, variant-eval, block-optimize) and
 #              critic-review are network- and model-bound, so they queue here
 #              and never hold CPU units. They are routed here by name; any
-#              other run by --pool model.
+#              other run by --pool model. An eval weighs the model calls it
+#              keeps in flight (DND-1358, eval_calls): a K-concurrency
+#              admiral-eval or critic-eval K, variant-eval 2K (both sides
+#              at once), block-optimize 4; any other model run weighs 1.
 # BASIS (recorded passively from real traffic; DND-1222 forbids generating
 # load to measure it, so the DND-489 bench was NOT re-run):
 #   * 0.5 core per unit: harness-gate at W=8 on heads 423674a7 and 0d08cb1d
@@ -46,7 +49,9 @@
 #   * model 8: transcripts touched 2026-09-27..30 show the account sustained
 #     23 concurrent claude sessions at peak (p90 8 at 5-minute samples) with
 #     no rate-limit failure recorded, so 8 eval/critic runs in flight on top
-#     of the fleet's own p90 stays inside what was already sustained.
+#     of the fleet's own p90 stays inside what was already sustained. Since
+#     DND-1358 a unit is one model CALL in flight, not one run (an eval
+#     weighs its K), so the same 8 now bounds calls, not K-call runs.
 #   * queue wait BEFORE (events.jsonl, every caller, N=3): 2026-09-26..28:
 #     n=1087 at 15.1 runs/h, median 121 s, p90 836 s, 599 over 60 s.
 #     2026-09-29: n=327 at 13.6/h, median 0 s, p90 34 s. AFTER: n/a until
@@ -131,7 +136,10 @@
 #   --weight UNITS: units this run holds, 1..budget (DND-1006). Default: a
 #     harness-gate COMMAND weighs its worker count (its --jobs, else
 #     HARNESS_GATE_JOBS, else min(8, nproc/2), as harness-gate resolves it);
-#     any other cpu run weighs the cpu default (budget/3); a model run 1.
+#     any other cpu run weighs the cpu default (budget/3). In the model pool
+#     an eval weighs its model calls in flight (eval_calls, DND-1358: its
+#     --concurrency K or ATHENA_EVAL_CONCURRENCY, variant-eval 2K); any
+#     other model run weighs 1.
 #   --pool cpu|model: default model for a critic-review, admiral-eval,
 #     critic-eval, variant-eval or block-optimize COMMAND, else cpu.
 #
@@ -291,9 +299,16 @@ CPU_DEFAULT_SHARES=3
 CPU_BUDGET_BASIS="measured 2026-09-30: 0.5 core/unit (W=8 harness-gate = 4.0 cores); 3/4 of nproc for slotted runs"
 MODEL_BUDGET=8
 MODEL_DEFAULT_WEIGHT=1
-MODEL_BUDGET_BASIS="8 runs in flight; the account sustained 23 concurrent sessions 2026-09-27..30"
+MODEL_BUDGET_BASIS="8 model calls in flight; the account sustained 23 concurrent sessions 2026-09-27..30"
 # COMMANDs that queue in the model pool unless --pool says otherwise.
 MODEL_COMMANDS=" critic-review admiral-eval critic-eval variant-eval block-optimize "
+# The evals' model calls in flight (eval_calls, DND-1358), restated from
+# ai/lib/eval_pool.rb (RANGE, DEFAULT, ENV_VAR) and ai/bin/variant-eval
+# (DEFAULT_SIDE_CONCURRENCY); the self-test pins them to those sources.
+EVAL_MAX_CONCURRENCY=16
+EVAL_DEFAULT_CONCURRENCY=4
+EVAL_ENV=ATHENA_EVAL_CONCURRENCY
+VARIANT_SIDE_CONCURRENCY=2
 # harness-gate's own worker default (ai/bin/harness-gate gate_jobs):
 # min(max(nproc/2, 1), HARNESS_GATE_MAX_JOBS).
 HARNESS_GATE_MAX_JOBS=8
@@ -326,7 +341,7 @@ Usage:
 
 Run CMD once its weight fits the machine-wide budget of its pool. The cpu pool
 holds nproc*3/2 units (one unit = one gate worker, ~0.5 core); the model pool
-holds 8 model-bound runs. CMD's argv, stdin, stdout, stderr, and exit code pass
+holds 8 model calls in flight. CMD's argv, stdin, stdout, stderr, and exit code pass
 through unchanged. The COMMAND is CMD after timeout/env/nice/ionice/nohup/
 setsid/stdbuf/time wrappers.
 
@@ -335,7 +350,9 @@ setsid/stdbuf/time wrappers.
   --wait-timeout SECS   give up waiting after SECS (default 7200); exit 75
   --outcome-file PATH   write `timeout` or `ran exit=<n>` (removed at start)
   --weight UNITS        units to hold (default: a harness-gate's worker count,
-                        else budget/3 in the cpu pool, 1 in the model pool)
+                        else budget/3 in the cpu pool; in the model pool an
+                        eval's model calls in flight (its --concurrency K,
+                        variant-eval 2K), else 1)
   --pool cpu|model      default model for critic-review, admiral-eval,
                         critic-eval, variant-eval, block-optimize; else cpu
   --exclusive           BENCH ONLY: hold the whole cpu budget while CMD runs
@@ -545,7 +562,7 @@ cpu_default_weight() {
 # Etc.nprocessors, which honours CPU affinity, so under taskset this weighs a
 # gate heavier than its workers, never lighter.
 gate_jobs() {
-  local nproc=$1 cur=$2 i j a b wrap="" val="" found=0
+  local nproc=$1 cur=$2 i j a val="" found=0
   shift 2
   local -a v=("$@")
   i=$(unwrap_index "$@")
@@ -558,19 +575,7 @@ gate_jobs() {
     esac
   done
   if ((!found)); then
-    for ((j = 0; j < i; j++)); do
-      a=${v[j]}
-      b=${a##*/}
-      case $b in
-        timeout | env | nice | ionice | nohup | setsid | stdbuf | time) wrap=$b; continue ;;
-      esac
-      [ "$wrap" = env ] || continue
-      case $a in
-        -i | - | --ignore-environment | -uHARNESS_GATE_JOBS | --unset=HARNESS_GATE_JOBS) cur="" ;;
-        -u | --unset) [ "${v[j + 1]:-}" = HARNESS_GATE_JOBS ] && cur=""; j=$((j + 1)) ;;
-        HARNESS_GATE_JOBS=*) cur=${a#HARNESS_GATE_JOBS=} ;;
-      esac
-    done
+    cur=$(wrapped_env HARNESS_GATE_JOBS "$cur" "$@")
     if [ -n "$cur" ]; then val=$cur; found=1; fi
   fi
   if ((!found)); then
@@ -581,6 +586,90 @@ gate_jobs() {
   [[ $val =~ ^[1-9][0-9]*$ ]] || return 1
   ((${#val} > 6)) && val=999999
   printf '%s\n' "$val"
+}
+
+# wrapped_env NAME CUR ARGV... — the value of environment variable NAME that
+# the COMMAND in ARGV will see. It starts as CUR (this environment's value)
+# and follows the env wrappers in front of the COMMAND: NAME=V sets it; -i,
+# -u/--unset NAME clear it. Prints it; empty means unset.
+wrapped_env() {
+  local name=$1 cur=$2 i j a b wrap=""
+  shift 2
+  local -a v=("$@")
+  i=$(unwrap_index "$@")
+  for ((j = 0; j < i; j++)); do
+    a=${v[j]}
+    b=${a##*/}
+    case $b in
+      timeout | env | nice | ionice | nohup | setsid | stdbuf | time) wrap=$b; continue ;;
+    esac
+    [ "$wrap" = env ] || continue
+    case $a in
+      -i | - | --ignore-environment | "-u$name" | "--unset=$name") cur="" ;;
+      -u | --unset) [ "${v[j + 1]:-}" = "$name" ] && cur=""; j=$((j + 1)) ;;
+      "$name"=*) cur=${a#"$name"=} ;;
+    esac
+  done
+  printf '%s\n' "$cur"
+}
+
+# eval_calls ENV_K ARGV... — the model calls an eval COMMAND in ARGV keeps in
+# flight, which is its weight in the model pool (DND-1358). DND-1007 made the
+# evals sample K calls at once; weighing each run 1 let the 8-unit pool admit
+# 8 runs of K calls. Resolved as each eval resolves K (ai/lib/eval_pool.rb):
+#   admiral-eval, critic-eval: with --run, K is --concurrency K, else the
+#     ATHENA_EVAL_CONCURRENCY it will see (ENV_K through the env wrappers,
+#     see wrapped_env; empty is unset), else EvalPool's default. Weight K.
+#   variant-eval: with --corpus full, both sides run at once with K per side:
+#     --concurrency K, else its per-side default (it ignores the env var).
+#     Weight 2K.
+#   block-optimize: runs variant-eval --corpus full at that default. 2K.
+# A K the eval would refuse (not an integer in EvalPool's range) weighs the
+# eval's default K: the eval exits 2 before any call, so this over-weighs an
+# instant, never under-weighs a run. Prints nothing, returning 1, when the
+# COMMAND is not one of these or will make no model call (no --run, a
+# deterministic corpus, --self-test, --help); the caller falls back to the
+# pool's default weight. The caller clamps a weight over the budget.
+eval_calls() {
+  local cur=$1 i j a cmd k="" dflt mult=1 model=0
+  shift
+  local -a v=("$@")
+  i=$(unwrap_index "$@")
+  ((i < ${#v[@]})) || return 1
+  cmd=${v[i]##*/}
+  for ((j = i + 1; j < ${#v[@]}; j++)); do
+    a=${v[j]}
+    case $a in
+      --help | -h | --self-test) return 1 ;;
+      --run) model=1 ;;
+      --concurrency) k=${v[j + 1]:-} ;;
+      --corpus) [ "${v[j + 1]:-}" = full ] && model=1 ;;
+    esac
+  done
+  case $cmd in
+    admiral-eval | critic-eval)
+      ((model)) || return 1
+      dflt=$EVAL_DEFAULT_CONCURRENCY
+      [ -n "$k" ] || k=$(wrapped_env "$EVAL_ENV" "$cur" "$@")
+      ;;
+    variant-eval)
+      ((model)) || return 1
+      dflt=$VARIANT_SIDE_CONCURRENCY
+      mult=2
+      ;;
+    block-optimize)
+      dflt=$VARIANT_SIDE_CONCURRENCY
+      k=""
+      mult=2
+      ;;
+    *) return 1 ;;
+  esac
+  if [[ $k =~ ^[0-9]{1,6}$ ]] && ((10#$k >= 1 && 10#$k <= EVAL_MAX_CONCURRENCY)); then
+    k=$((10#$k))
+  else
+    k=$dflt
+  fi
+  printf '%s\n' "$((k * mult))"
 }
 
 # json_str S — S as a JSON string literal (quotes included).
@@ -1699,7 +1788,8 @@ main() {
 
   resolve_pool
 
-  # The weight: --weight, else a harness-gate's worker count, else the pool's
+  # The weight: --weight, else a harness-gate's worker count (cpu) or an
+  # eval's model calls in flight (model, DND-1358), else the pool's
   # default. --exclusive holds the whole budget.
   if ((EXCLUSIVE)); then
     WEIGHT=$N
@@ -1712,6 +1802,8 @@ main() {
     WEIGHT=""
     if [ "$POOL_KIND" = cpu ]; then
       WEIGHT=$(gate_jobs "$NPROC" "${HARNESS_GATE_JOBS:-}" "${CMD[@]}") || WEIGHT=""
+    else
+      WEIGHT=$(eval_calls "${ATHENA_EVAL_CONCURRENCY:-}" "${CMD[@]}") || WEIGHT=""
     fi
     [ -n "$WEIGHT" ] || WEIGHT=$DEFAULT_WEIGHT
     if ((WEIGHT > N)); then
