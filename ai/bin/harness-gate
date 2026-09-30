@@ -2020,6 +2020,123 @@ rescue LoadError, StandardError => e
   { out: nil, thread_blk: nil, error: "#{e.class}: #{e.message}" }
 end
 
+# Case 15's probe: a check that prints the SigBlk and SigIgn lines of its own
+# /proc status, then the numbers of its open fds. `hook` runs once per status
+# line, after the line is in $l and before the probe looks at it; only case
+# 15d's fixture passes one.
+#
+# It never forks (DND-1339): a forked reader reads the SHELL's mask at a
+# racing instant instead of the one the check started with. Seen as SigBlk
+# 0x10000 (bash blocks SIGCHLD while it waits) and fffffffffffbfeff (bash
+# inside glibc's _Fork, which blocks every signal around clone(); bits 32
+# and 33 are glibc's own signals, which no public sigprocmask call can block).
+# A pipe or $(...) here would bring the fork back.
+#
+# It reads its status as ONE snapshot and parses it from memory (DND-1399).
+# A /proc status file is rendered again on every seek, and bash's `read`
+# seeks back after each line of a seekable file, to the byte after the
+# newline it stopped at. So a per-line `while read ... done < status` loop
+# read each line from a new rendering, at an offset taken from the old one.
+# A field above SigBlk whose width changed in between shifted every later
+# line: SigQ counts the pending signals of every process of this user, and
+# 10 -> 9 turned the next line into "igBlk:\t...", which matched nothing.
+# `read -d ''` reads to EOF in one call, sequentially, so it sees a single
+# rendering. It is bash's (dash has no -d), so the probe names bash.
+def status_probe(hook: ":")
+  script = <<~'SH'
+    IFS= read -r -d '' s < /proc/$$/status
+    set -f; IFS=$'\n'
+    for l in $s; do
+      HOOK
+      case $l in SigBlk:*|SigIgn:*) echo "$l" ;; esac
+    done
+    set +f; IFS=$' \t\n'
+    for f in /proc/$$/fd/*; do echo "${f##*/}"; done
+  SH
+  ["bash", "-c", script.sub("HOOK", hook)]
+end
+
+# The pending-signal count in this process's own status ("SigQ: <count>/<limit>").
+# It counts the queued signals of every process of this user, so it reads the
+# same from any of them.
+def own_sigq
+  File.read("/proc/self/status")[%r{^SigQ:\s*(\d+)/}, 1]
+end
+
+# Case 15d's fixture (DND-1399): runs status_probe while this user's SigQ is
+# at least 200, and drops it back to its base (under 100) at the moment the
+# probe has taken its SigPnd line, the line just above ShdPnd and SigBlk. So
+# the count loses a digit mid-read, deterministically: no load, no timing.
+#
+# How: a stopped bash with a handler for SIGRTMIN holds 200 queued real-time
+# signals (a stopped process dequeues nothing, and real-time signals queue one
+# entry each). The probe's hook writes the go FIFO and waits on the done FIFO;
+# this side then KILLs and reaps the holder, which frees its queue, and only
+# then answers. Both FIFOs are opened read-write here first, so neither open
+# blocks, and a probe that never reaches its hook cannot hang the case.
+#
+# Returns { out: <the probe's output>, before: <SigQ before>, after: <SigQ
+# after the drop>, error: <why the fixture could not arrange the drop, or nil> }.
+def probe_under_sigq_drop(dir)
+  require "fiddle"
+  rtmin = Fiddle::Function.new(Fiddle.dlopen(nil)["__libc_current_sigrtmin"], [], Fiddle::TYPE_INT).call
+  go = File.join(dir, "sigq-go.fifo")
+  done = File.join(dir, "sigq-done.fifo")
+  [go, done].each { |f| File.mkfifo(f) }
+  go_io = File.open(go, File::RDWR)
+  done_io = File.open(done, File::RDWR)
+  done_io.sync = true # the answer must reach the FIFO now, not at close
+  holder = Process.spawn("bash", "-c", "trap : RTMIN; kill -STOP $$; exit 0", in: File::NULL)
+  _pid, st = Process.wait2(holder, Process::WUNTRACED)
+  unless st.stopped?
+    holder = nil
+    return { out: nil, before: nil, after: nil, error: "the signal holder did not stop (#{st.inspect})" }
+  end
+
+  200.times { Process.kill(rtmin, holder) }
+  before = own_sigq
+  dropper = Thread.new do
+    Thread.current.report_on_exception = false # .value re-raises it; rescued below
+    begin
+      go_io.gets
+      Process.kill("KILL", holder)
+      Process.wait(holder)
+      holder = nil
+      own_sigq
+    ensure
+      # Always answer, so the probe never waits forever on the done FIFO.
+      done_io.write("ok\n")
+    end
+  end
+  hook = "case $l in SigPnd:*) echo go > #{go.shellescape}; read -r _ < #{done.shellescape} ;; esac"
+  out, = Open3.capture2e(*status_probe(hook: hook), chdir: dir, stdin_data: "")
+  go_io.close # a dropper still waiting for go (the probe never got there) stops here
+  after = begin
+    dropper.value
+  rescue IOError
+    nil
+  end
+  error = if after.nil?
+            "the probe never reached its SigPnd hook"
+          elsif after.length >= before.to_s.length
+            "SigQ did not lose a digit (#{before.inspect} -> #{after.inspect}): this user has 100 or " \
+              "more other signals pending"
+          end
+  { out: out, before: before, after: after, error: error }
+rescue LoadError, StandardError => e
+  { out: nil, before: nil, after: nil, error: "#{e.class}: #{e.message}" }
+ensure
+  if holder
+    begin
+      Process.kill("KILL", holder)
+      Process.wait(holder)
+    rescue Errno::ESRCH, Errno::ECHILD
+      nil
+    end
+  end
+  [go_io, done_io].each { |io| io.close if io && !io.closed? }
+end
+
 # --self-test case 15 (DND-1005): cpu_s is the check's OWN process tree, not a
 # share of the gate's. Two checks run at once. "idle" blocks on a FIFO and
 # burns next to nothing. In the other worker, "ruby-self" (a normal Ruby
@@ -2076,18 +2193,9 @@ def self_test_cpu_attribution
     #     spawn gives every child an empty mask (see CPU SECONDS PER CHECK),
     #     so a check can always be interrupted.
     #
-    #     The probe reads its OWN status with shell builtins and never forks
-    #     (DND-1339), so what it prints is the mask it was started with. A
-    #     probe that forked a reader (`grep /proc/$$/status`) read the shell's
-    #     mask at a racing instant instead: SIGCHLD blocked while it waits
-    #     (0x10000), or every signal blocked while it is inside glibc's
-    #     _Fork, which holds them all blocked around clone(). Seen once as
-    #     SigBlk fffffffffffbfeff: bits 32 and 33 are glibc's own signals,
-    #     which no public sigprocmask call can block. A redirected loop runs
-    #     in the shell itself (bash and dash); a pipe or $(...) in this probe
-    #     would bring the fork back.
-    probe = ["sh", "-c", 'while IFS= read -r l; do case $l in SigBlk:*|SigIgn:*) echo "$l" ;; esac; ' \
-                         'done < /proc/$$/status; for f in /proc/$$/fd/*; do echo "${f##*/}"; done']
+    #     The probe prints the mask the check was started with, from one
+    #     snapshot of its own status (status_probe: DND-1339, DND-1399).
+    probe = status_probe
     direct, = Open3.capture2e(*probe, chdir: dir, stdin_data: "")
     _ok, shimmed, = spawn_under_cpu_shim(probe, chdir: dir, env: {})
     checks["a check sees the same signal state and fds under the shim as spawned directly " \
@@ -2113,6 +2221,23 @@ def self_test_cpu_attribution
            "signal on the thread that runs the spawn); never delete or skip case 15c."
       good = false
     end
+    # 15d. The probe reads every line of its status whole, even when a field
+    #     above SigBlk changes width while it reads (DND-1399): this user's
+    #     SigQ drops from 3 digits to 1 or 2 just after the probe's SigPnd
+    #     line. A per-line `read` loop reads SigBlk as "igBlk:..." then.
+    dropped = probe_under_sigq_drop(dir)
+    if dropped[:error]
+      warn "self-test: FAIL — case 15d fixture: could not drop SigQ by a digit mid-read " \
+           "(#{dropped[:error]}). Fix: repair probe_under_sigq_drop (a stopped bash holding 200 " \
+           "queued SIGRTMIN, reaped when the probe's hook writes the go FIFO); never delete or skip case 15d."
+      good = false
+    else
+      %w[SigBlk SigIgn].each do |field|
+        checks["the probe read its #{field} line whole while SigQ went #{dropped[:before]} -> " \
+               "#{dropped[:after]} mid-read (#{dropped[:out].inspect})"] =
+          dropped[:out].match?(/^#{field}:\s*\h+$/)
+      end
+    end
     checks.each do |what, ok|
       next if ok
 
@@ -2120,7 +2245,8 @@ def self_test_cpu_attribution
            "as the child rusage of its own CPU_SHIM (spawn_under_cpu_shim), never as a delta of the " \
            "gate's Process.times, which the pool's threads share; and keep the shim invisible to the " \
            "check (fd 3 close-on-exec, no signal handling of its own, an empty signal mask whichever " \
-           "thread spawns it); the 15b probe must read its own status without forking."
+           "thread spawns it); the 15b probe must read its own status without forking, as one " \
+           "snapshot (status_probe)."
       good = false
     end
   end
