@@ -2852,7 +2852,26 @@ under-encrypted**:
   decrypt, and nothing else. Decrypt happens **only at use time, in memory, for
   the owning account only** — no cross-account use is expressible.
 - A secret MUST NEVER be logged, placed on `argv`, echoed, made API-readable, or
-  written into the inbox root.
+  written into the inbox root. **The one sanctioned echo is a show-once
+  reveal** on an owner-authenticated page, and only for a secret the server
+  holds that the owner must paste somewhere else. The reveal is claimed
+  before the secret is unsealed, so each value is shown at most once, and a
+  new value (a rotation, a re-verify) is revealable once. It is rendered once
+  and kept nowhere after. Two exist: a forge hook's webhook secret on
+  `/forge/hooks`, for GitLab, and a Notion subscription's `verification_token`
+  on `/secrets`, for Notion's Verify dialog. Any other secret that must leave
+  the server this way is added here by name first.
+
+  **Later (2026-09-30):** this bullet said only "A secret MUST NEVER be
+  logged, placed on `argv`, echoed, made API-readable, or written into the
+  inbox root", while the forge secret's reveal was allowed further down and
+  the Notion token's show-once reveal had no contract basis at all.
+  Superseded (DND-1307): the reveal is now named here as the one exception.
+  At gen_saas `b1ff8c01`: `apps/athena/lib/athena/notion_events.ex:629-640`
+  (`reveal_verification_token/2`: owner actor only, claim, then unseal),
+  rendered once by `apps/athena/lib/athena/ui/pages/owner_secrets.ex:66`; the
+  forge reveal is `apps/athena/lib/athena/forge.ex:553`; `Athena.Secrets`
+  names the same two exceptions and no other.
 - The first-pass secret set is: the **Slack bot (`chat.write`) token** (OUTBOUND
   delivery); the **Slack app signing secret** — the INBOUND-webhook HMAC key;
   Slack signs each request `v0=HMAC-SHA256(signing_secret,
