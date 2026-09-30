@@ -130,9 +130,12 @@
 #
 #   The COMMAND is CMD with its wrappers skipped: timeout, env, nice, ionice,
 #   nohup, setsid, stdbuf and time, with their own options and arguments
-#   (DND-1006). It names the default label, picks the pool and the weight. An
-#   option a wrapper table does not know stops the skip there, so the wrapper
-#   itself is the command (the default weight and the cpu pool: never lighter).
+#   (DND-1006), then through an interpreter running a script: ruby, bash, sh,
+#   dash or zsh SCRIPT (DND-1365), so `ruby ai/bin/admiral-eval` is the
+#   COMMAND admiral-eval. It names the default label, picks the pool and the
+#   weight. An option a wrapper or interpreter table does not know (ruby -e,
+#   bash -c among them) stops the skip there, so the wrapper itself is the
+#   command (the default weight and the cpu pool: never lighter).
 #   --weight UNITS: units this run holds, 1..budget (DND-1006). Default: a
 #     harness-gate COMMAND weighs its worker count (its --jobs, else
 #     HARNESS_GATE_JOBS, else min(8, nproc/2), as harness-gate resolves it);
@@ -345,7 +348,8 @@ Run CMD once its weight fits the machine-wide budget of its pool. The cpu pool
 holds nproc*3/2 units (one unit = one gate worker, ~0.5 core); the model pool
 holds 8 model calls in flight. CMD's argv, stdin, stdout, stderr, and exit code pass
 through unchanged. The COMMAND is CMD after timeout/env/nice/ionice/nohup/
-setsid/stdbuf/time wrappers.
+setsid/stdbuf/time wrappers, and the SCRIPT an interpreter (ruby, bash, sh,
+dash, zsh) runs.
 
   --label TEXT          shown to waiters and in --status
                         (default: "<repo or cwd basename> <COMMAND basename>")
@@ -392,7 +396,10 @@ outcome_line() {
 # is not a timeout/env/nice/ionice/nohup/setsid/stdbuf/time wrapper, its
 # options, or their arguments (timeout's DURATION, env's NAME=VALUE). A wrapper
 # option not in these tables stops the skip at that wrapper, so the wrapper is
-# the COMMAND. Prints n (one past the end) when wrappers wrap nothing.
+# the COMMAND. An interpreter (ruby, bash, sh, dash, zsh) with only
+# script-running options before a SCRIPT resolves to the SCRIPT, which is the
+# COMMAND whatever it is named (DND-1365). Prints n (one past the end) when
+# wrappers wrap nothing.
 unwrap_index() {
   local -a v=("$@")
   local n=${#v[@]} i=0 w b a dd
@@ -499,6 +506,47 @@ unwrap_index() {
           esac
         done
         ;;
+      ruby | ruby[0-9]*)
+        # DND-1365: `ruby [OPTS] SCRIPT` runs SCRIPT, so SCRIPT is the
+        # COMMAND. Only options that still run SCRIPT are skipped; one that
+        # runs other code or none (-e, -n, -p, -c, -S, -x, ...) is unknown
+        # here, so ruby stays the COMMAND.
+        while ((i < n)); do
+          a=${v[i]}
+          case $a in
+            --) i=$((i + 1)); break ;;
+            -I | -r | -E | -C) i=$((i + 2)) ;;
+            -I?* | -r?* | -E?* | -C?* | -w | -W | -W[012] | -W:* | -d | -v | -U | --debug | --verbose | --jit | --yjit | --jit-* | --yjit-* | --disable-* | --disable=* | --enable-* | --enable=* | --encoding=* | --external-encoding=* | --internal-encoding=*) i=$((i + 1)) ;;
+            -*) printf '%s\n' "$w"; return ;;
+            *) break ;;
+          esac
+        done
+        ((i < n)) || { printf '%s\n' "$n"; return; }
+        printf '%s\n' "$i"
+        return
+        ;;
+      bash | sh | dash | zsh)
+        # DND-1365: `bash [OPTS] SCRIPT` runs SCRIPT. Skipped: shell flag
+        # clusters that still run SCRIPT, set/shopt -o/-O NAME, and bash's
+        # startup-file switches. -c, -s, -i, -n, -l, -r (and anything else)
+        # are unknown here, so the shell stays the COMMAND.
+        while ((i < n)); do
+          a=${v[i]}
+          case $a in
+            --) i=$((i + 1)); break ;;
+            -o | +o | -O | +O) i=$((i + 2)) ;;
+            --noprofile | --norc | --posix) i=$((i + 1)) ;;
+            [-+]*)
+              [[ $a =~ ^[-+][aefhuvxBCEHPT]+$ ]] || { printf '%s\n' "$w"; return; }
+              i=$((i + 1))
+              ;;
+            *) break ;;
+          esac
+        done
+        ((i < n)) || { printf '%s\n' "$n"; return; }
+        printf '%s\n' "$i"
+        return
+        ;;
       *)
         printf '%s\n' "$w"
         return
@@ -603,7 +651,8 @@ wrapped_env() {
     a=${v[j]}
     b=${a##*/}
     case $b in
-      timeout | env | nice | ionice | nohup | setsid | stdbuf | time) wrap=$b; continue ;;
+      # An interpreter's options (bash -u is nounset) are never env's.
+      timeout | env | nice | ionice | nohup | setsid | stdbuf | time | ruby | ruby[0-9]* | bash | sh | dash | zsh) wrap=$b; continue ;;
     esac
     [ "$wrap" = env ] || continue
     case $a in

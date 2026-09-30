@@ -245,7 +245,7 @@ d	e"
   t eq "$(pick_label /r/repo timeout 1500 bin/prep-commit.sh)" "repo prep-commit.sh"
   t eq "$(pick_label /r/repo timeout -s KILL -k5 --foreground 1500 ./ai/bin/harness-gate)" "repo harness-gate"
   t eq "$(pick_label /r/repo env -u X A=1 B=2 nice -n 19 ionice -c3 -n7 mix test)" "repo mix"
-  t eq "$(pick_label /r/repo nice -19 nohup setsid -f stdbuf -oL time -p -o /tmp/t ruby x)" "repo ruby"
+  t eq "$(pick_label /r/repo nice -19 nohup setsid -f stdbuf -oL time -p -o /tmp/t ruby x)" "repo x"
   t eq "$(pick_label /r/repo env -- A=1 -dash-cmd)" "repo -dash-cmd"
   t eq "$(pick_label /r/repo timeout --bogus 5 x)" "repo timeout"
   t eq "$(pick_label /r/repo env -S 'a b' x)" "repo env"
@@ -257,6 +257,42 @@ d	e"
   for m in admiral-eval critic-eval variant-eval block-optimize; do t eq "$(infer_pool "ai/bin/$m" --run)" model; done
   t eq "$(infer_pool timeout 1500 ./ai/bin/harness-gate)" cpu
   t eq "$(infer_pool echo critic-review)" cpu
+  # DND-1365: an interpreter running a script (ruby/bash/sh/dash/zsh SCRIPT)
+  # resolves to the SCRIPT, so `ruby ai/bin/admiral-eval` queues where
+  # `ai/bin/admiral-eval` does. Only options that still run SCRIPT are
+  # skipped; one that runs something else (-e, -c, -n, bash -c/-s/-i) or is
+  # not in the table leaves the interpreter as the COMMAND (cpu, default).
+  t eq "$(infer_pool ruby ai/bin/admiral-eval --run)" model
+  t eq "$(infer_pool timeout 3600 /usr/bin/ruby -W0 -I lib -rjson -- ai/bin/critic-eval --run)" model
+  t eq "$(infer_pool env A=1 nice ruby -w ai/bin/variant-eval --corpus full)" model
+  for sh in bash sh dash zsh; do t eq "$(infer_pool "$sh" ai/bin/critic-review --base main)" model; done
+  t eq "$(infer_pool bash -eu -o pipefail +x -- ai/bin/block-optimize --case c)" model
+  t eq "$(infer_pool ruby -e 'load ARGV[0]' ai/bin/admiral-eval --run)" cpu
+  t eq "$(infer_pool ruby -c ai/bin/admiral-eval)" cpu
+  t eq "$(infer_pool ruby --bogus ai/bin/admiral-eval --run)" cpu
+  t eq "$(infer_pool bash -c 'ai/bin/critic-review' x)" cpu
+  t eq "$(infer_pool bash -n ai/bin/critic-review)" cpu
+  t eq "$(infer_pool ruby)" cpu
+  t eq "$(infer_pool ruby ai/bin/harness-gate)" cpu
+  t eq "$(pick_label /r/repo ruby -w ai/bin/admiral-eval --run)" "repo admiral-eval"
+  t eq "$(pick_label /r/repo bash -c 'x y')" "repo bash"
+  t eq "$(pick_label /r/repo ruby)" "repo ruby"
+  t eq "$(unwrap_index ruby -W0 -I lib -rjson x)" 5
+  t eq "$(unwrap_index env A=1 bash -o pipefail x y)" 5
+  # The script is the COMMAND even when it is named like a wrapper.
+  t eq "$(unwrap_index ruby timeout 5 x)" 1
+  t eq "$(unwrap_index ruby -e 1 x)" 0
+  t eq "$(unwrap_index bash -o)" 2
+  t eq "$(eval_calls '' ruby ai/bin/admiral-eval --run --concurrency 8)" 8
+  t eq "$(eval_calls 6 env -u ATHENA_EVAL_CONCURRENCY ruby -w ai/bin/admiral-eval --run)" 4
+  t eq "$(eval_calls 6 ruby ai/bin/critic-eval --run)" 6
+  t eq "$(eval_calls '' bash ai/bin/variant-eval --corpus full --concurrency 3)" 6
+  t eval '! eval_calls "" ruby -c ai/bin/admiral-eval --run >/dev/null'
+  t eq "$(gate_jobs 16 '' ruby ./ai/bin/harness-gate --jobs 3)" 3
+  t eq "$(gate_jobs 16 5 env HARNESS_GATE_JOBS=2 ruby -w ./ai/bin/harness-gate)" 2
+  # An interpreter option is never read as an env option: bash -u is
+  # nounset, not env's --unset.
+  t eq "$(wrapped_env HARNESS_GATE_JOBS 5 env bash -u HARNESS_GATE_JOBS)" 5
   # harness-gate's weight is its worker count, resolved as harness-gate does.
   t eq "$(gate_jobs 16 '' timeout 1500 ./ai/bin/harness-gate)" 8
   t eq "$(gate_jobs 6 '' ./ai/bin/harness-gate)" 3
@@ -1416,6 +1452,33 @@ done
 if grep -qF 'DEFAULT_SIDE_CONCURRENCY = 2' "$VE47" 2>/dev/null; then ok; else
   bad 47-variant-side-pinned "$VE47 no longer reads 'DEFAULT_SIDE_CONCURRENCY = 2'. Fix: update VARIANT_SIDE_CONCURRENCY in ai/bin/test-slot to match it, then this pin."
 fi
+
+# 49 (DND-1365, fail-first): an eval launched through its interpreter
+# (`test-slot -- ruby ai/bin/admiral-eval --run`) queues in the MODEL pool at
+# its model weight, as the bare script does. Before the fix the COMMAND was
+# `ruby`, so it queued in the cpu pool at the cpu default and escaped the
+# model pool's bound. A `ruby -c` syntax check runs no eval and stays cpu.
+newpool p49 2
+export ATHENA_TEST_MODEL_SLOTS=8
+mkdir -p "$W/fake49"
+printf 'exit 0\n' >"$W/fake49/admiral-eval"
+printf 'exit 0\n' >"$W/fake49/critic-review"
+RUBY49=/usr/bin/ruby
+[ -x "$RUBY49" ] || RUBY49=ruby
+w49() { jq -s --arg l "$2" '[.[] | select(.event == "acquired" and .label == $l) | .weight] | first' "$1" 2>/dev/null; }
+timeout 20 "$BIN" --label R49 -- "$RUBY49" "$W/fake49/admiral-eval" --run --concurrency 4 2>"$W/R49.err"; rc=$?
+check 49-ruby-eval-ran eq "$rc" 0
+check 49-ruby-eval-model-weight eq "$(w49 "$POOL/model/events.jsonl" R49)" 4
+check 49-ruby-eval-not-cpu eq "$(w49 "$POOL/events.jsonl" R49)" null
+timeout 20 "$BIN" --label S49 -- bash "$W/fake49/critic-review" --base main 2>/dev/null
+check 49-bash-critic-model eq "$(w49 "$POOL/model/events.jsonl" S49)" 1
+# With no --label, the default label names the script, not `ruby`.
+timeout 20 "$BIN" -- "$RUBY49" "$W/fake49/admiral-eval" --run 2>/dev/null
+l49="$(jq -rs '[.[] | select(.event == "acquired") | .label] | last' "$POOL/model/events.jsonl" 2>/dev/null)"
+check 49-default-label eval '[[ "$l49" == *" admiral-eval" ]]'
+timeout 20 "$BIN" --label C49 -- "$RUBY49" -c "$W/fake49/admiral-eval" >/dev/null 2>&1
+check 49-syntax-check-cpu eq "$(w49 "$POOL/events.jsonl" C49)" 1
+unset ATHENA_TEST_MODEL_SLOTS
 
 # 48 (DND-1357): a fixture that ends on its own hang cap says so by name.
 # HOLD_CMD's `read -t` and bg's timeout(1) are hang caps: a holder is ended by
