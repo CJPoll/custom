@@ -1536,6 +1536,16 @@ inside code or a quote matches, though GitLab does not notify for it. And
 after the owner renames their GitLab account, the old username stays bound
 until their next comment.
 
+A residual, not an accepted cost: an item a comment raised because the owner
+is the merge request's author, or was only mentioned, does not close when
+the merge request merges or closes. The ingress emits `merged` and `closed`
+only for an owner who is, or in that event was, a reviewer (the list above),
+and a later comment on the finished merge request is skipped
+`merge-request-not-open`. So such an item stays `active` until the owner
+closes it. DND-1377 closes it: a merged or closed event closes an existing
+item for its merge request whatever the owner's reviewer status, and never
+creates one.
+
 **Later (2026-09-30):** the paragraph before the list said the owner's id
 is compared "never with a username", for every event. Superseded for a
 comment by DND-1337 (gen_saas #579, `ac3a1311`): a mention is found by
