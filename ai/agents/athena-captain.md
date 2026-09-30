@@ -616,20 +616,20 @@ cross-test leak that a re-run would have flaked away. Record what failed and
 why it went green in your report; "passed on retry" alone is not acceptable.
 
 **Don't self-induce the flake, and don't let a masked exit code hide a real
-one.** Much "failed then green on retry" is your own verification hygiene, not a
-test defect — and both a false red and a false green have cost real loops:
+one.** Much "failed then green on retry" starts in your own verification
+hygiene — and both a false red and a false green have cost real loops:
 
 - **Don't oversubscribe the host.** Running the whole suite while Metro, an
   emulator, or capture loops compete — or several suites (core/web/mobile) at
   once — starves workers and blows real-timer budgets (a `waitFor`'s ~1000ms
-  wall clock), so correct-but-slow tests fail. A failure that reproduces ONLY
-  under load you yourself created is self-induced: re-run it ISOLATED (one
-  suite, nothing else running) before you read it as red. File a flaky-test
-  ticket only for a flake that SURVIVES an isolated re-run — a self-induced one
-  is yours to avoid, not the lane's to drain (six work-repo tickets,
-  measured). **Two kinds of load, two owners.** Load YOU created — a second
+  wall clock). Re-run it ISOLATED (one suite, nothing else running) so your
+  gate reads clean. An isolated green does not clear the test: a verdict that
+  flips when the machine is slow is a defect (`~/.claude/CLAUDE.md` → *Hard
+  Rule*), so file it (`athena:flaky-ticket`) naming the timer and its budget.
+  Never write "host load" as a root cause; name the timer or the shared
+  resource. **Two kinds of load, two owners.** Load YOU created — a second
   build/test invocation against your own worktree, an emulator, capture loops —
-  is yours to isolate against and never to file. Load your SIBLING captains
+  is yours to avoid. Load your SIBLING captains
   created is NOT: you do not command them, so "re-run isolated" is unsatisfiable
   and the finding otherwise belongs to nobody. Run
   `~/dev/custom/ai/bin/contention-census` at the failure AND at the re-run, and
