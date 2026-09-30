@@ -1020,8 +1020,11 @@ newpool p37 1
 mkfifo "$W/C37.fifo" "$W/P37.fifo"
 cat >"$W/c37.sh" <<'EOF'
 #!/usr/bin/env bash
-# c37.sh FIFO BIN RAN ERR: block on FIFO, then become test-slot.
-read -t 20 _ <"$1"
+# c37.sh FIFO BIN RAN ERR CAP: block on FIFO until released, then become
+# test-slot. Unreleased within CAP (a hang cap), it writes C37.capped for
+# fixture_caps and exits without ever running test-slot (DND-1357).
+exec 3<>"$1"
+if ! read -t "$5" -u 3 _; then echo "$5" >"${1%.fifo}.capped"; exit 0; fi
 exec "$2" --label O37 -- sh -c ': > "$1"' _ "$3" 2>"$4"
 EOF
 cat >"$W/p37.sh" <<'EOF'
@@ -1034,7 +1037,7 @@ exec 3<>"$hold"
 read -t 30 -u 3 _
 EOF
 chmod +x "$W/c37.sh" "$W/p37.sh"
-"$W/p37.sh" "$W/C37.orphan.pid" "$W/P37.fifo" "$W/c37.sh" "$W/C37.fifo" "$BIN" "$W/O37.ran" "$W/O37.err" &
+"$W/p37.sh" "$W/C37.orphan.pid" "$W/P37.fifo" "$W/c37.sh" "$W/C37.fifo" "$BIN" "$W/O37.ran" "$W/O37.err" "$HOLD_CAP_S" &
 p37=$!
 BG_PIDS+=("$p37")
 await_grep_s "$W/C37.orphan.pid" "" 20
@@ -1389,7 +1392,7 @@ bg r48/H48 --label holder-H48 -- bash -c "$HOLD_CMD" _ "$W/r48/H48" 1
 check 48-holder-started await_file "$W/r48/H48.started" 20
 bg r48/Q48 --label Q48 -- sh -c ': > "$1"' _ "$W/r48/Q48.ran"
 # H48 is never released, so only its cap can free the slot Q48 needs.
-reap r48/Q48; check 48-queued-ran-after-cap eq "$RC" 0
+reap r48/Q48; check 48-queued-ran eq "$RC" 0
 reap r48/H48; check 48-holder-rc eq "$RC" 0
 check 48-holder-capped present "$W/r48/H48.capped"
 check 48-holder-not-released absent "$W/r48/H48.done"
