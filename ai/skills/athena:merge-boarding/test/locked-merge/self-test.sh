@@ -37,12 +37,17 @@ bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [ -n "${2-}" ] && printf ' 
 STUBS="${TMP}/stubs"; mkdir -p "${STUBS}"
 cat > "${STUBS}/gh" <<'EOF'
 #!/usr/bin/env bash
-# gh stub: `pr view ... [-q Q]` reads $ST/pr.json; `run list ... -q Q` reads $ST/runs.json.
-q=""; prev=""
-for a in "$@"; do [ "${prev}" = "-q" ] && q="${a}"; prev="${a}"; done
+# gh stub (argv logged to $ST/gh.log): `pr view` reads $ST/pr.json;
+# `run list --commit` reads $ST/runs_commit.json; `run list --branch` reads
+# $ST/runs.json; `run view <id>` reads $ST/run_<id>.json. $ST/gh_fail -> exit 1.
+echo "$*" >> "${ST}/gh.log"
+q=""; prev=""; commit=""
+for a in "$@"; do [ "${prev}" = "-q" ] && q="${a}"; [ "${a}" = "--commit" ] && commit=1; prev="${a}"; done
 case "$1 $2" in
   "pr view")  f="${ST}/pr.json" ;;
-  "run list") f="${ST}/runs.json" ;;
+  "run list") [ -e "${ST}/gh_fail" ] && exit 1
+              if [ -n "${commit}" ]; then f="${ST}/runs_commit.json"; else f="${ST}/runs.json"; fi ;;
+  "run view") [ -e "${ST}/gh_fail" ] && exit 1; f="${ST}/run_$3.json" ;;
   *) echo "gh stub: unexpected $*" >&2; exit 99 ;;
 esac
 if [ -n "${q}" ]; then jq -r "${q}" "${f}"; else cat "${f}"; fi
@@ -167,11 +172,71 @@ grep -qi 'merge call failed' <<<"${out}" && ok "c19 names the failed merge call"
 grep -qxF -- "--pr 7 --repo ${WT}" "${ST}/teardown.log" && ok "c19 tears down the landed PR" || bad "c19 no teardown" "$(cat "${ST}/teardown.log")"
 [ "$(grep -c -- '--squash' "${ST}/merge.log")" -eq 1 ] && ok "c19 merge called once, not retried" || bad "c19 merge call count" "$(cat "${ST}/merge.log")"
 
-# c6 required-idle workflow busy.
-fixture c6; echo '[{"status":"queued"}]' > "${ST}/runs.json"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c6.lock" --require-idle-workflow post-merge.yml; expect c6 5; no_merge c6
-echo '[{"status":"completed"}]' > "${ST}/runs.json"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c6.lock" --require-idle-workflow post-merge.yml; expect c6-idle 0
+# ---- DND-1378: the required-idle check is keyed on the base SHA ----
+# idle_fixture <name> [status] [conclusion] -- fixture whose main is AGED two
+# hours (fixed committer date, no wall-clock race) and merged into the feature
+# head, with base run 101 for that SHA in both the --commit list and
+# `run view 101`. The branch list is empty.
+idle_fixture() {
+  fixture "$1"; local G="git --git-dir=${BARE}" old
+  old="$(date -u -d '-2 hours' +%Y-%m-%dT%H:%M:%SZ)"
+  ${G} update-ref refs/heads/main "$(GIT_COMMITTER_DATE="${old}" ${G} commit-tree "$(${G} rev-parse main^{tree})" -p "$(${G} rev-parse main)" -m "${IDLE_MSG:-base}")"
+  follow_main
+  set_base_run "${2:-completed}" "${3:-success}"
+  : > "${ST}/gh.log"
+}
+# follow_main -- merge origin/main into the feature head and re-plant its receipt.
+follow_main() {
+  BASE_SHA="$(git --git-dir="${BARE}" rev-parse main)"
+  ( cd "${WT}" && git fetch -q origin && git merge -q --no-edit origin/main && git push -q origin feature )
+  H="$(git -C "${WT}" rev-parse HEAD)"
+  jq --arg h "${H}" '.headRefOid=$h' "${ST}/pr.json" > "${ST}/x" && mv "${ST}/x" "${ST}/pr.json"
+  plant_receipt "${H}" "${BASE_SHA}"
+}
+set_base_run() { # <status> <conclusion> [view-status]
+  jq -n --arg b "${BASE_SHA}" --arg s "$1" --arg c "$2" '[{databaseId:101,status:$s,conclusion:$c,headSha:$b,createdAt:"2026-09-30T00:00:00Z"}]' > "${ST}/runs_commit.json"
+  jq -n --arg b "${BASE_SHA}" --arg s "${3:-$1}" --arg c "$2" '{databaseId:101,status:$s,conclusion:$c,headSha:$b}' > "${ST}/run_101.json"
+}
+idle_run() { run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/$1.lock" --require-idle-workflow post-merge.yml; }
+names() { grep -qF -- "$2" <<<"${out}" && ok "$1 names '$2'" || bad "$1 does not name '$2'" "${out}"; }
+
+# i1 THE #562 MISS: the branch list reads idle (empty), but the base commit's
+# own run is in progress. The old check merged here.
+idle_fixture i1 in_progress ""
+idle_run i1; expect i1 5; no_merge i1; names i1 "BASE DEPLOY BUSY"; names i1 "101"
+# i2 a stale list status: the list says completed, the by-id read says running.
+idle_fixture i2; set_base_run completed "" in_progress
+idle_run i2; expect i2 5; no_merge i2; names i2 "BASE DEPLOY BUSY"
+# i3 the #595 case, made observable: completed/failure merges with a WARN.
+# Flip to a refusal only on an owner-ratified rule (DND-1378 escalation).
+idle_fixture i3 completed failure
+idle_run i3; expect i3 0; names i3 "concluded failure"; names i3 "no ratified rule"
+# i4 no run for a base committed moments ago: NOT SEEN YET, never idle.
+idle_fixture i4; advance_main; follow_main; echo '[]' > "${ST}/runs_commit.json"
+idle_run i4; expect i4 5; no_merge i4; names i4 "NOT SEEN YET"
+# i5 no run for an aged base with no skip marker: NO RUN FOR BASE.
+idle_fixture i5; echo '[]' > "${ST}/runs_commit.json"
+idle_run i5; expect i5 5; no_merge i5; names i5 "NO RUN FOR BASE"; names i5 "Owner approval policy"
+# i6 an aged base carrying [skip ci]: no run expected, the branch list decides.
+IDLE_MSG="base [skip ci]" idle_fixture i6; echo '[]' > "${ST}/runs_commit.json"
+idle_run i6; expect i6 0; names i6 "BASE-RUN none"
+IDLE_MSG="base [skip ci]" idle_fixture i6b; echo '[]' > "${ST}/runs_commit.json"
+echo '[{"databaseId":55,"status":"queued","headSha":"x"}]' > "${ST}/runs.json"
+idle_run i6b; expect i6b 5; no_merge i6b
+# i7 base run done, but the branch list has a live run (a re-run of an older
+# run): refuse and name it. (Was c6.)
+idle_fixture i7; echo '[{"databaseId":55,"status":"queued","headSha":"x"}]' > "${ST}/runs.json"
+idle_run i7; expect i7 5; no_merge i7; names i7 "55"
+# i8 a lookup that cannot be trusted is COULD NOT LOOK, never idle.
+idle_fixture i8a; jq '.[0].headSha="'"$(printf 'c%.0s' {1..40})"'"' "${ST}/runs_commit.json" > "${ST}/x" && mv "${ST}/x" "${ST}/runs_commit.json"
+idle_run i8a; expect i8a 2; no_merge i8a; names i8a "COULD NOT LOOK"
+idle_fixture i8b; : > "${ST}/gh_fail"
+idle_run i8b; expect i8b 2; no_merge i8b; names i8b "COULD NOT LOOK"
+# i9 happy path: IDLE line names the base run; lookups keyed on the full SHA.
+idle_fixture i9
+idle_run i9; expect i9 0; names i9 "IDLE post-merge.yml base ${BASE_SHA}: BASE-RUN 101 completed/success"
+grep -qF -- "--commit ${BASE_SHA}" "${ST}/gh.log" && ok "i9 run list keyed on the full base SHA" || bad "i9 no --commit <base>" "$(cat "${ST}/gh.log")"
+grep -qF -- "--limit 100" "${ST}/gh.log" && ok "i9 branch list reads 100 runs" || bad "i9 branch list limit" "$(cat "${ST}/gh.log")"
 
 # c7 lock held elsewhere -> timeout, lock file left intact.
 fixture c7; exec 8>>"${TMP}/c7.lock"; flock 8
@@ -280,6 +345,9 @@ hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?
 [ "${rc}" -eq 0 ] && grep -q '^Usage:' <<<"${hout}" && ok "c14 --help on stdout, exit 0" || bad "c14 --help" "${hout}"
 grep -q '^  9 ' <<<"${hout}" && ok "c14 --help documents exit 9" || bad "c14 --help lacks exit 9" "${hout}"
 grep -q '^  10 ' <<<"${hout}" && ok "c14 --help documents exit 10 (DND-864 teardown)" || bad "c14 --help lacks exit 10" "${hout}"
+for w in "NOT SEEN YET" "NO RUN FOR BASE" "COULD NOT LOOK" "base SHA"; do
+  grep -qF "${w}" <<<"${hout}" && ok "c14 --help documents '${w}' (DND-1378)" || bad "c14 --help lacks '${w}'" "${hout}"
+done
 
 # c15 DND-986: integration-gate's receipt gains critic_carried_from when the
 # critic PASS was carried. The field is additive, so locked-merge must accept a

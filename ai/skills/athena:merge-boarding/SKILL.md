@@ -540,8 +540,27 @@ So the merge step is a critical section on every GitHub-merged repo:
   `integration-gate` on that head and merge the SHA its `INTEGRATION OK` names.
   No flag or env var skips the receipt; an owner-approved HOT merge goes through
   `integration-gate --owner-approval`, which the receipt records. On gen_saas pass
-  `--require-idle-workflow post-merge.yml` until that workflow has a
-  `concurrency` group (two interleaved deploys: the last one wins).
+  `--require-idle-workflow post-merge.yml`. The workflow's `prod-deploy`
+  concurrency group and deploy guard now close interleaving (gen_saas ADR 15).
+  The flag keeps one merge per deploy run, so each run's verdict belongs to one
+  PR and no merge makes a running deploy refuse with exit 6. It is keyed on the
+  base SHA checked under the lock (DND-1378):
+  - the base commit's own run must read `completed`, re-read by id;
+  - no run for that SHA is `NOT SEEN YET` or `NO RUN FOR BASE` (exit 5), never
+    idle, unless the commit carries a skip marker;
+  - the base-branch run list must show nothing live.
+
+  The base run's conclusion is printed. A non-success is a `WARN`, not a
+  refusal: no ratified rule holds merges on a failed deploy. Do not hand-roll a
+  deploy waiter around it; retry on exit 5.
+
+  **Later (2026-09-30, DND-1378):** this said to pass the flag "until that
+  workflow has a `concurrency` group (two interleaved deploys: the last one
+  wins)", and the flag counted live runs in one base-branch list read. That
+  read missed the just-landed commit's run, so #562 merged during #579's
+  deploy. Two fleets then hand-rolled SHA-keyed waiters, and both accepted a
+  failed deploy as done. Whether the flag is still needed now that the group
+  exists is escalated to Cody (dropping it loosens a bar).
 - **Across machines:** a local lock cannot span machines. When admirals on more
   than one machine merge to one repo, follow the coordinator session's current
   cross-machine protocol (today: the FIFO merge token,
