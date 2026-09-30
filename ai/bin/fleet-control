@@ -56,7 +56,7 @@ Flags (any order):
                    clamped). The budget, ceiling and mode go to stderr first.
   --line-session-id S  own: the line's payload claude_session_id
   --help           this text
-  --self-test      run the fleet-control suite, all four parts (fake server;
+  --self-test      run the fleet-control suite, all six parts (fake server;
                    never prod)
 
 Causes (never shared): server-unconfigured, server-unreachable, server-refused,
@@ -84,11 +84,13 @@ for a in "$@"; do
   case "${a}" in
     -h|--help) usage; exit 0 ;;
     --self-test)
-      # DND-1007: the suite is four parts, each discovered by harness-gate on
-      # its own. Run every part; the exit is 1 when any part failed.
+      # DND-1007/DND-1361: the suite is six parts, each discovered by
+      # harness-gate on its own. Run every part; the exit is 1 when any
+      # part failed.
       rc=0
       for suite in control/domain/self-test.sh control/server/self-test.sh \
-                   control/watch/self-test.sh control/wait/self-test.sh; do
+                   control/watch/self-test.sh control/wait/self-test.sh \
+                   control/wait-basis/self-test.sh control/wait-limits/self-test.sh; do
         "${AI}/lib/fleet/test/${suite}" || rc=1
       done
       exit "${rc}" ;;

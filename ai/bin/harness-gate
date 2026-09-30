@@ -133,7 +133,7 @@ STATIC_CHECKS = [
   ["fleet-report hook self-test", %w[ai/hooks/fleet-report.self-test.sh]],
   # fleet-drain-guard (DND-443): the PreToolUse(Agent|Task) drain guard. Its
   # matrix is a dedicated .self-test.sh; the fleet-control suite
-  # (ai/lib/fleet/test/control/*/self-test.sh, four parts) is discovered.
+  # (ai/lib/fleet/test/control/*/self-test.sh, six parts) is discovered.
   ["fleet-drain-guard self-test", %w[ai/hooks/fleet-drain-guard.self-test.sh]],
   # fleet-lifecycle (DND-560): the PreToolUse/PostToolUse/PostToolUseFailure
   # (Agent|Task), SubagentStart/Stop and StopFailure lifecycle reporter. Replays

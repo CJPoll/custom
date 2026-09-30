@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# common.sh -- the preamble the four fleet-control suites share (DND-1007).
+# common.sh -- the preamble the six fleet-control suites share (DND-1007).
 # Sourced, never run. Each suite is its own self-test.sh under control/, so
-# harness-gate discovers and runs them as four checks side by side:
-#   domain/  the pure domain rules and the cache/zone effects (no server)
-#   server/  fleet-control check/fetch against the fake server, and usage
-#   watch/   admiral-report-watch CONTROL lines
-#   wait/    the resume waiter (DND-484), its trap, own, and test 7b
-# They were one 124-137 s suite (DND-443), the parallel gate's floor.
-# `fleet-control --self-test` runs all four.
+# harness-gate discovers and runs them as six checks side by side:
+#   domain/       the pure domain rules and the cache/zone effects (no server)
+#   server/       fleet-control check/fetch against the fake server, and usage
+#   watch/        admiral-report-watch CONTROL lines
+#   wait/         the resume waiter (DND-484) test 1: resuming from the server
+#   wait-basis/   the waiter's test 2: a non-server run is never a resume
+#   wait-limits/  its tests 3-5 (refusals, usage, budget), trap, own, test 7b
+# They were one 124-137 s suite (DND-443), the parallel gate's floor. The
+# wait part was then the floor (about 17 s alone, all in the waiter's real
+# polls and budgets), so DND-1361 split it three ways (wait-fixture.sh holds
+# what they share). `fleet-control --self-test` runs all six.
 #
 # TDD order (DND-443):
 #   1. domain  -- lib/fleet/control-domain.sh: shapes, desired/3 mirror, the
