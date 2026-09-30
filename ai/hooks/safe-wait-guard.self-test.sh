@@ -141,6 +141,33 @@ check "M11. done && (logical AND, not backgrounding)" allow
 run "$(bash_json 'pgrep -f mypattern')"
 check "M12. one-off pgrep -f, no loop" allow
 
+# A PID resolved by `pgrep -f` for `tail --pid` is the same self-match with no
+# loop around it. With no target alive, `pgrep -f X | head -1` returns the
+# waiting `zsh -c` itself (measured 2026-09-30: `pgrep -f <unique> | head -1`
+# printed the Bash tool's own zsh), so the tail blocks its full timeout on its
+# own shell. With a sibling alive it returns the sibling's process (DND-1330:
+# "integration-gate --with-critic" matched another captain's gate).
+run "$(bash_json "timeout 590 tail --pid=\$(pgrep -f 'critic-review --base origin/main' | head -1) -f /dev/null")"
+check "4c. tail --pid resolved by pgrep -f (command substitution)" deny
+
+run "$(bash_json 'P=$(pgrep -f -o "integration-gate --with-critic"); timeout 600 tail --pid=$P -f /dev/null')"
+check "4d. tail --pid on a variable set from pgrep -f -o" deny
+
+run "$(bash_json 'timeout 900 tail --pid=$(pgrep -o -f up-critic.sh) -f /dev/null')"
+check "4e. pgrep -o -f (flag after another flag) for tail --pid" deny
+
+run "$(bash_json 'timeout 900 tail --pid=$(pgrep --full up-critic.sh) -f /dev/null')"
+check "4f. pgrep --full for tail --pid" deny
+
+run "$(bash_json 'timeout 600 tail --pid=12345 -f /dev/null')"
+check "M13. tail --pid on a literal pid" allow
+
+run "$(bash_json 'timeout 600 tail --pid=$(pgrep -x -o beam.smp) -f /dev/null')"
+check "M14. tail --pid resolved by pgrep -x (comm match)" allow
+
+run "$(bash_json 'pgrep -f mypattern; tail -n 5 /tmp/gate.log')"
+check "M15. pgrep -f next to a tail with no --pid" allow
+
 echo
 echo "--- HEREDOC cases (only a one-line send-mail shape is exempt) ---"
 

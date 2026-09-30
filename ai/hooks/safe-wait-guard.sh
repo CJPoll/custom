@@ -19,6 +19,10 @@
 #                            it never exits. `grep -v $$` does not help: the
 #                            forked pipeline children carry the same argv under
 #                            other pids (measured 2026-09-25, DND-589/DND-541).
+#      Also `tail --pid` on a PID that `pgrep -f` resolved, loop or not: with
+#      no target alive it returns the waiting shell, so the tail blocks its
+#      whole timeout on itself; with a sibling alive it returns the sibling's
+#      process (measured 2026-09-30, DND-1330).
 # (Rule #3, the foreground-`sleep`-returns-immediately gotcha, is surfaced inside
 #  the messages above rather than as a standalone block, because every sanctioned
 #  poll uses a foreground `sleep` — blocking on it would nuke the good pattern.)
@@ -203,9 +207,20 @@ if [ "$HAS_WHILE_UNTIL" = true ] || has_word 'for'; then HAS_LOOP_KW=true; fi
 # pgrep -f (or -lf, -af, …) in a while/until loop. A `$$` exclusion is NOT an
 # escape: the Bash tool runs `zsh -c '<command>'`, and every forked pipeline or
 # $(…) child carries that argv (pattern included) under a pid other than $$.
+# `pgrep` with -f in any flag cluster or position, or --full.
+PGREP_FULL='pgrep([[:space:]]+[^|;&)]*)?[[:space:]]+(-[[:alnum:]]*f[[:alnum:]]*|--full)([[:space:]]|$)'
 if [ "$HAS_WHILE_UNTIL" = true ] \
-  && has 'pgrep[[:space:]]+-[[:alnum:]]*f'; then
+  && has "$PGREP_FULL"; then
   deny 'SAFE-WAIT (pgrep -f self-match): `pgrep -f "<pattern>"` inside a wait loop matches the waiting shell'"'"'s own argv, so the loop never exits. `| grep -v $$` does not fix it: the forked pipeline children carry the same argv under other pids. Fix: block on the known PID — `timeout N tail --pid=<pid> -f /dev/null` (capture it with `$!` when you start the process) — or match by process name, not argv (`pgrep -x <comm>`), or wait on the output artifact the process writes.'
+fi
+
+# `tail --pid` on a PID from `pgrep -f`, with or without a loop. Measured
+# 2026-09-30: `pgrep -f <unique> | head -1` with no target alive printed the
+# Bash tool's own `zsh -c` pid, so `timeout N tail --pid=$(...)` waits out its
+# full timeout on itself; DND-1330's `pgrep -f "integration-gate --with-critic"`
+# returned a sibling captain's gate instead of its own.
+if has "$PGREP_FULL" && has 'tail[[:space:]][^|;&]*--pid'; then
+  deny 'SAFE-WAIT (pgrep -f pid for tail --pid): a PID found by `pgrep -f "<pattern>"` is not the process you started. The Bash tool runs your command as `zsh -c '"'"'<command>'"'"'`, so the pattern is in the waiting shell'"'"'s own argv: with the target already gone, pgrep returns that shell and the tail blocks its whole timeout on itself. With a sibling agent running the same command, it returns the sibling'"'"'s process. `head -1`, `-o` and `|| echo 1` do not fix either case. Fix: capture the PID when you start the process (`cmd >"$log" 2>&1 & echo $!`, or have the script write its own pidfile) and pass that literal pid to `timeout N tail --pid=<pid> -f /dev/null`; or, for a `run_in_background` task, let its completion notification wake you; or wait on the artifact it writes (a receipt, a final log line) with a bounded poll. `pgrep -x <comm>` is allowed but matches any process with that name.'
 fi
 
 # ---- Shape 1: busy-spin loop (while/until with no sleep) -------------------

@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-25T23:11:49Z",
+  "generated": "2026-09-30T08:03:49Z",
   "cases": [
     {
       "name": "01-spin-loop-fires",
@@ -51,6 +51,10 @@
     },
     {
       "name": "13-pgrep-grep-v-self-match-fires",
+      "pass": true
+    },
+    {
+      "name": "14-pgrep-tail-pid-self-match-fires",
       "pass": true
     }
   ]
