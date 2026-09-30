@@ -964,7 +964,7 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `actor.user_id` — the clicking Slack user | string | scalar |
 | | `approval.grant_id` — present only on a click on a grant button (*Owner approval grants*): the grant the button names | string | scalar |
 | | `approval.decision` — present only with `approval.grant_id`: `approve` or `decline`, the button that was clicked, not the grant's state | string | scalar |
-| `forge.review.requested`, `forge.review.removed`, `forge.review.merged`, `forge.review.closed` (the forge review family, *Declared families beyond the first pass*) | `entity_id` — `forge:<host>:<project_path>:<mr_iid>`, the merge request | string | scalar |
+| `forge.review.requested`, `forge.review.removed`, `forge.review.merged`, `forge.review.closed`, `forge.review.commented` (the forge review family, *Declared families beyond the first pass*) | `entity_id` — `forge:<host>:<project_path>:<mr_iid>`, the merge request | string | scalar |
 | | `host` — the hook's forge host, never the body's | string | scalar |
 | | `project_path` — the hook's project path, never the body's | string | scalar |
 | | `mr_iid` — the merge request's project-scoped number, as a decimal string | string | scalar |
@@ -1447,8 +1447,9 @@ This is the failed-lookup discipline applied at ingress (`~/dev/custom/ai/CLAUDE
 → *A failed lookup must never look like an empty one*): an unrecognised parent is
 a named dead-letter, never a silently mis-mapped `notion.ticket.*`.
 
-**The `forge.review.{requested,removed,merged,closed}` family** (a review of
-the owner's on one merge request; DND-439). Its only source is the owner's
+**The `forge.review.{requested,removed,merged,closed,commented}` family** (a
+review of the owner's on one merge request, DND-439; or a comment for the
+owner on one, DND-1337). Its only source is the owner's
 GitLab `walt_ui` project (owner decision OQ-10, 2026-09-24); GitHub is not a
 source.
 
@@ -1458,12 +1459,16 @@ source.
    from the hook the request verified against, and `url` is built from them,
    never from the body. The payload never holds the merge request's
    description, diff, comments, commit messages, author, assignees or
-   reviewer list.
+   reviewer list. For `commented`, the comment's text and the author and
+   reviewer ids are read to classify it and are stored nowhere.
 2. **Identity field** — `payload.entity_id`
    (`forge:<host>:<project_path>:<mr_iid>`, the priority index's `source_ref`
    for the item); it is the `subject` of the dedupe window.
 3. **Change/revision token** — `payload.revision`, the merge request's
-   `updated_at`, normalized to ISO 8601 UTC. It orders the family's events
+   `updated_at`, normalized to ISO 8601 UTC. For `forge.review.commented` it
+   is the later of the comment's `updated_at` and the merge request's,
+   normalized the same way, so a comment is newer evidence than the change
+   before it. It orders the family's events
    against an item (*Priority index* → *States*). The `idempotency_key` is
    `gitlab:<hook_id>:<delivery id>:<kind>`, where the delivery id is GitLab's
    `Idempotency-Key` (stable across GitLab's own retries of one trigger), else
@@ -1477,7 +1482,7 @@ source.
    the hook's `host` as a bare hostname and its `project_path` as
    `/`-separated segments, both checked when the hook is registered; the
    `mr_iid` as a positive integer; `<kind>` from the closed set `requested`,
-   `removed`, `merged`, `closed`; the delivery id as a UUID),
+   `removed`, `merged`, `closed`, `commented`; the delivery id as a UUID),
    and the one component that can carry `:`, the ISO 8601 `revision`, is
    always last. A payload with no `entity_id` or no `revision` is never
    built (the delivery is skipped malformed), so the fallback key can never
@@ -1486,17 +1491,18 @@ source.
    ingress, and only after the request's `X-Gitlab-Token` matched the hook's
    custodied secret (*Inbound webhook*). Harness-emit refuses the whole
    `forge.` namespace (*Which event types an ingress kind may originate*).
-5. **Enrichment posture** — **none**. A GitLab merge-request webhook carries
-   every field the payload holds, so the ingress makes no source read.
+5. **Enrichment posture** — **none**. A GitLab merge-request webhook, or a
+   Note Hook's `merge_request` object, carries every field the payload
+   holds, so the ingress makes no source read.
 
 **Which events the ingress emits.** A **hook** registers one project for one
 owner: `(owner, host, project_path, owner_forge_user_id)`, where
 `owner_forge_user_id` is the owner's numeric GitLab user id. The hook's id is
 the webhook URL's key. After verification, a body whose project is not the
-hook's is refused (`project_mismatch`, recorded). Otherwise the owner's user id
-is compared with the merge request's reviewer ids, never with a username. The
-merge request's state decides first, so a change to a closed request never
-reads as a new review:
+hook's is refused (`project_mismatch`, recorded). Otherwise, for a merge
+request event, the owner's user id is compared with the merge request's
+reviewer ids, never with a username. The merge request's state decides
+first, so a change to a closed request never reads as a new review:
 
 - `merged` or `closed`, with the owner a reviewer now or earlier in the same
   event → `forge.review.merged` / `forge.review.closed`;
@@ -1504,6 +1510,39 @@ reads as a new review:
 - `opened`, with the owner removed as a reviewer → `forge.review.removed`;
 - anything else is a counted skip (`not-owner-reviewer`, `not-merge-request`,
   `malformed`, `unhandled-state`), and no event.
+
+**Comments (DND-1337).** A verified Note Hook passes the same project pin. A
+comment on an open merge request routes `forge.review.commented` when the
+owner's numeric id is the merge request's `author_id` or one of its
+`reviewer_ids`, or when the comment's text mentions `@<username>` for the
+username bound to the owner's id. The Note Hook carries no structured
+mention list, so the text is the one signal: it is matched
+case-insensitively, read for the match, and stored nowhere. The binding is
+learned only from a verified, pinned comment by the owner, whose acting
+`user.id` is the owner's id, and only for a username of the shape GitLab
+issues. It is stored on the hook (`forge_hooks.owner_forge_username`) and
+is never operator input. The owner's own comment, a system note, a note on
+an issue, commit or snippet, and a comment on a merged, closed or locked
+merge request raise nothing. The added counted skips are `not-note` (a Note
+Hook header over a body of another kind), `not-merge-request-note`,
+`system-note`, `own-note`, `merge-request-not-open`, `not-owner-note` and
+`owner-username-unbound`. The last is any comment that neither the author
+nor the reviewer ids make the owner's while no username is bound yet, so a
+mention could not be checked; it is a miss that says why, never
+`not-owner-note`. An unreadable id or text is `malformed`. Every event kind
+other than a merge request or a comment stays `not-merge-request`. Two
+costs are accepted, each an extra item, never a missed one. A mention
+inside code or a quote matches, though GitLab does not notify for it. And
+after the owner renames their GitLab account, the old username stays bound
+until their next comment.
+
+**Later (2026-09-30):** the paragraph before the list said the owner's id
+is compared "never with a username", for every event. Superseded for a
+comment by DND-1337 (gen_saas #579, `ac3a1311`): a mention is found by
+username, bound to the owner's id only from GitLab's own verified
+statement. At `ac3a1311`: `apps/athena/lib/athena/forge/note_classifier.ex`,
+`forge/mention.ex`, `forge/owner_username.ex`, `forge/hook_store.ex`
+(`bind_username/2`), and `forge.ex` (`own_note/3`).
 
 `owner` is the hook's owner and `source` is `webhook:gitlab`. Every refusal and
 skip that has a hook is counted per (hook, cause), with no body, header or
@@ -1895,7 +1934,7 @@ The first-pass permitted-origination rule:
   **`notion.agent_message.{created,updated,deleted}`** family (*Declared families
   beyond the first pass*), the latter originated by the Notion inbound-webhook
   ingress and the reconciliation poller. The registered forge members are the
-  four `forge.review.*` types (*Declared families beyond the first pass*),
+  five `forge.review.*` types (*Declared families beyond the first pass*),
   originated only by the GitLab webhook ingress; there is no forge poller.
   **Harness-emit MUST NOT be
   able to synthesize a source-emitted webhook type** — a machine-token holder
@@ -5366,6 +5405,7 @@ build by name:
 - DND-445: pull and leases;
 - DND-438: work Notion;
 - DND-439: forge review requests;
+- DND-1337: forge comments for the owner;
 - DND-440: the surface that requests `priority.transition` grants (*Owner
   approval grants*);
 - DND-446: the morning digest (*Morning digest*);
@@ -5392,6 +5432,7 @@ It consumes exactly these event types. Every other type is not consumed:
 | `notion.ticket.deleted` | Close the item it names (`closed_by: source_deleted`) | as above | DND-436, DND-438 |
 | `slack.message.received`, when it is an ask (below) | Create a `proposed` item | `slack_ask` | DND-437 |
 | `forge.review.requested` | Upsert an `owner_only` item, and reopen it when *States* allows | `forge_review` | DND-439 |
+| `forge.review.commented` | Upsert an `owner_only` item, and reopen it when *States* allows | `forge_review` | DND-1337 |
 | `forge.review.removed`, `forge.review.merged`, `forge.review.closed` | Close the item it names (`closed_by: source_status`); never create one | `forge_review` | DND-439 |
 
 - **`notion.comment.*` is never consumed.** No comment reaches the index.
@@ -5788,10 +5829,11 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   nothing and also settles `indexed`: the item already holds newer evidence
   (*Idempotency is per (event, item)*). A new `forge_review` item is created `active` and `owner_only`,
   never `proposed`: the ingress routes only a merge request that names the
-  owner as a reviewer, so the request is already addressed to the owner and
-  has nothing to promote (*created `active`*, above). A
+  owner as a reviewer, or a comment for the owner on an open one, so the
+  request is already addressed to the owner and has nothing to promote (*created `active`*, above). A
   `forge.review.requested` whose `revision` is strictly newer than the row's
-  reopens a `source_status` close, like any other; it never reopens an
+  reopens a `source_status` close, like any other, and so does a
+  `forge.review.commented` (DND-1337); neither ever reopens an
   `owner` or `lease_complete` close. GitLab's `updated_at` has one-second
   precision, so a removal and a re-request in the same second tie: the
   re-request does not reopen, and the item shows again on the merge
@@ -5968,7 +6010,8 @@ report's `failed` count and logged, and the next backfill run reads it again.
 **`owner_only`** marks an item only the owner can act on. It is never
 leasable. It is true for:
 
-- every `forge_review` item (a review request to the owner) and every
+- every `forge_review` item (a review request or a comment for the owner)
+  and every
   `meeting` item;
 - a Notion item whose status is `Needs Attention` and whose assignees include
   the owner's own person id in that workspace. The owner's person id per
