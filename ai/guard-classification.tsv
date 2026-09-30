@@ -21,6 +21,7 @@ ai/hooks/notify-idle.sh	no-fail-path	idle notifier; emits a desktop notification
 ai/hooks/harness-event.sh	no-fail-path	PostToolUse telemetry emitter; fail-open, never denies or fails a turn
 ai/hooks/athena-inbox-poll.sh	no-fail-path	SessionStart inbox count; emits a notice or stays quiet, never denies or fails a turn (its Fix: text is diagnostic guidance, not a denial)
 ai/hooks/athena-slack-poll.sh	no-fail-path	SessionStart Slack backstop poll; emits a notice, never denies or fails a turn (its Fix: text is diagnostic guidance, not a denial)
+ai/hooks/secret-env-warn.sh	no-fail-path	SessionStart warning (DND-845); prints one context line per secret in the session env, never denies or fails a turn (its Fix: text is guidance, not a denial)
 ai/bin/contention-census	tool	reads and prints host load/contention numbers for a report; never denies, gates, or retries anything
 
 # --- DND-775 agent-stash guard: a git reference-transaction hook and the agent PATH git wrapper. Both refuse with a Fix:.
@@ -281,6 +282,8 @@ ai/lib/docker_stacks_host.rb	library	docker/git/gh/glab adapter required by ai/b
 ai/lib/bounded_command.rb	library	bounded external-command runner (DND-1088) required by ai/lib/docker_stacks_host.rb; returns a Result with timed_out and never prints, so each caller prints the Fix:
 ai/lib/private_overlay.rb	guard
 ai/lib/private_overlay_resolver.rb	library	env/filesystem adapter required by ai/bin/private-overlay (DND-702); returns a PrivateOverlay::Result and the caller prints the one stderr line that carries Fix:
+ai/lib/machine_secrets.rb	library	pure rules required by ai/bin/check-machine-secrets and ai/bin/with-secret (DND-845); raises MachineSecrets::Malformed and the callers print it with a Fix:
+ai/lib/machine_secrets_host.rb	library	env, filesystem, /proc and git adapter required by ai/bin/check-machine-secrets and ai/bin/with-secret (DND-845); returns states and reasons, and the callers print the Fix:
 ai/lib/outbound_scan.rb	guard
 ai/lib/outbound_scan_sources.rb	library	git/overlay/file adapter required by ai/bin/outbound-scan (DND-699); raises OutboundScan::Unmeasurable naming the reason, and the bin prints the exit-3 COULD NOT MEASURE line that carries Fix:
 ai/lib/gh-outbound-scan.sh	guard

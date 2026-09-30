@@ -507,6 +507,12 @@ the issues." This section is its one home; other documents cite it by name.
   judgement, even if it's a CI runner change, or makes reasonable changes to
   the system."
 
+## Per-machine secrets
+
+- Never export a secret into a shell or session env. Load it at point of use: a `_FILE` path, `ai/bin/with-secret`, or a headersHelper.
+- Inspect a secret by metadata only: name, path, mode. Over any file that might hold a value, `grep -l`/`-c` only; never `cat`, `printenv NAME`, an unfiltered `env`, or a parse of `env` output.
+- The rules, the registry and the check: `~/dev/custom/ai/contracts/athena-machine-secrets.md`.
+
 ## Structure
 
 Projects are kept at "${HOME}/dev/<project-name>".

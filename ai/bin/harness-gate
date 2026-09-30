@@ -120,6 +120,10 @@ STATIC_CHECKS = [
   # dispatched into a worktree out of the MAIN checkout. Dedicated .self-test.sh
   # against throwaway repos under a fake HOME (never the live checkout).
   ["worktree-escape-guard self-test", %w[ai/hooks/worktree-escape-guard.self-test.sh]],
+  # secret-env-warn (DND-845): the SessionStart per-machine-secrets warning. Only
+  # its SELF-TEST is gated here; the check it runs (check-machine-secrets) and
+  # its registry row join at the migration's final step (contract -> Rollout).
+  ["secret-env-warn self-test", %w[ai/hooks/secret-env-warn.self-test.sh]],
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
   ["check-generic-skills self-test", %w[ai/bin/check-generic-skills --self-test]],
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
