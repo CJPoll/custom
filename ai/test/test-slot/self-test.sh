@@ -26,7 +26,8 @@ done
 
 # A suite launched from inside a slot (DND-486 wraps the gate) must not carry
 # that slot into its fixtures: every case here decides re-entrancy itself.
-unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_HEARTBEAT
+unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_HEARTBEAT \
+  ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS HARNESS_GATE_JOBS
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/test-slot-selftest.XXXXXX")"
 BG_PIDS=()
@@ -75,7 +76,9 @@ await_grep() {
 newpool() { # newpool NAME N — fresh (not yet created) pool for one case
   POOL="$W/pools/$1"
   mkdir -p "$W/pools"
-  export ATHENA_TEST_SLOT_DIR="$POOL" ATHENA_TEST_SLOTS="$2"
+  # Weight 1 by default, so a budget of N units runs N undeclared runs: the
+  # pre-DND-1006 N-slot semantics every case below 39 was written against.
+  export ATHENA_TEST_SLOT_DIR="$POOL" ATHENA_TEST_SLOTS="$2" ATHENA_TEST_SLOT_DEFAULT_WEIGHT=1
 }
 
 # bg NAME ARGS... — run test-slot ARGS in the background, bounded by
@@ -165,6 +168,43 @@ event_count() { # event_count EVENT [LABEL]
 d	e" | jq -r .)" "a\"b\\c
 d	e"
   t eq "$(pick_label /home/x/repo /usr/bin/mix)" "repo mix"
+  # DND-1006 label rule: timeout/env/nice (and ionice, nohup, setsid, stdbuf,
+  # time) wrappers are skipped with their options, so the label names what
+  # ran. 768 of 1623 events were "... timeout" before.
+  t eq "$(pick_label /r/repo timeout 1500 bin/prep-commit.sh)" "repo prep-commit.sh"
+  t eq "$(pick_label /r/repo timeout -s KILL -k5 --foreground 1500 ./ai/bin/harness-gate)" "repo harness-gate"
+  t eq "$(pick_label /r/repo env -u X A=1 B=2 nice -n 19 ionice -c3 -n7 mix test)" "repo mix"
+  t eq "$(pick_label /r/repo nice -19 nohup setsid -f stdbuf -oL time -p -o /tmp/t ruby x)" "repo ruby"
+  t eq "$(pick_label /r/repo env -- A=1 -dash-cmd)" "repo -dash-cmd"
+  t eq "$(pick_label /r/repo timeout --bogus 5 x)" "repo timeout"
+  t eq "$(pick_label /r/repo env -S 'a b' x)" "repo env"
+  t eq "$(pick_label /r/repo timeout 5)" "repo timeout"
+  t eq "$(unwrap_index timeout 5)" 2
+  t eq "$(unwrap_index env A=1 nice x y)" 3
+  # Pool routing by COMMAND.
+  t eq "$(infer_pool timeout 1500 /h/dev/custom/ai/bin/critic-review --base main)" model
+  for m in admiral-eval critic-eval variant-eval block-optimize; do t eq "$(infer_pool "ai/bin/$m" --run)" model; done
+  t eq "$(infer_pool timeout 1500 ./ai/bin/harness-gate)" cpu
+  t eq "$(infer_pool echo critic-review)" cpu
+  # harness-gate's weight is its worker count, resolved as harness-gate does.
+  t eq "$(gate_jobs 16 '' timeout 1500 ./ai/bin/harness-gate)" 8
+  t eq "$(gate_jobs 6 '' ./ai/bin/harness-gate)" 3
+  t eq "$(gate_jobs 1 '' ./ai/bin/harness-gate)" 1
+  t eq "$(gate_jobs 16 '' ./ai/bin/harness-gate --jobs 4)" 4
+  t eq "$(gate_jobs 16 '' ./ai/bin/harness-gate --jobs=2)" 2
+  t eq "$(gate_jobs 16 5 env HARNESS_GATE_JOBS=3 ./ai/bin/harness-gate)" 3
+  t eq "$(gate_jobs 16 5 ./ai/bin/harness-gate)" 5
+  t eq "$(gate_jobs 16 5 ./ai/bin/harness-gate --jobs 2)" 2
+  t eval '! gate_jobs 16 "" ./ai/bin/harness-gate --jobs x >/dev/null'
+  t eval '! gate_jobs 16 "" ./ai/bin/integration-gate >/dev/null'
+  # The measured budget formula and the undeclared default (its N=3 share).
+  t eq "$(cpu_budget 16)" 24
+  t eq "$(cpu_budget 8)" 12
+  t eq "$(cpu_budget 1)" 1
+  t eq "$(cpu_default_weight 24)" 8
+  t eq "$(cpu_default_weight 2)" 1
+  t eq "$(compact_units "1 2 3 5 7 8")" "1-3,5,7-8"
+  t eq "$(compact_units "4")" "4"
   t eq "$(unslotted_state 'pid:[1]' 'pid:[1]' 0)" slotted
   t eq "$(unslotted_state 'pid:[1]' 'pid:[1]' 1)" unslotted
   t eq "$(unslotted_state 'pid:[1]' 'pid:[1]' 2)" unknown
@@ -228,11 +268,16 @@ for bad_n in 0 x; do
 done
 
 # 5: ATHENA_TEST_SLOTS without the dir seam (or with the dir seam = the
-# default path) is ignored: N shown is the script constant.
-out="$(env -u ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS=9 XDG_STATE_HOME="$W/xdg5" "$BIN" --status 2>&1)"
-check 5-const eval '[[ "$out" == *"N=3 (provisional, unmeasured)"* && "$out" != *"N=9"* ]]'
-out="$(ATHENA_TEST_SLOT_DIR="$W/xdg5b/athena/test-slots" ATHENA_TEST_SLOTS=9 XDG_STATE_HOME="$W/xdg5b" "$BIN" --status 2>&1)"
-check 5-default-path-const eval '[[ "$out" == *"N=3 (provisional, unmeasured)"* && "$out" != *"N=9"* ]]'
+# default path) is ignored: the budget shown is the measured one, derived
+# from nproc (DND-1006), with its basis and default weight.
+want5=$(($(getconf _NPROCESSORS_ONLN) * 3 / 2))
+seam5=$((want5 + 1))
+out="$(env -u ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS=$seam5 XDG_STATE_HOME="$W/xdg5" "$BIN" --status 2>&1)"
+check 5-const eval '[[ "$out" == *"cpu pool: budget=$want5 units (measured"* && "$out" != *"budget=$seam5 "* ]]'
+check 5-warns eval '[[ "$out" == *"WARN ignoring ATHENA_TEST_SLOTS"* ]]'
+out="$(ATHENA_TEST_SLOT_DIR="$W/xdg5b/athena/test-slots" ATHENA_TEST_SLOTS=$seam5 XDG_STATE_HOME="$W/xdg5b" "$BIN" --status 2>&1)"
+check 5-default-path-const eval '[[ "$out" == *"cpu pool: budget=$want5 units (measured"* && "$out" != *"budget=$seam5 "* ]]'
+check 5-default-weight eval '[[ "$out" == *"default_weight=$((want5 / 3)) "* ]]'
 check 5-status-created-nothing absent "$W/xdg5/athena"
 
 # 6: an existing pool dir with mode 0755 is refused with a chmod Fix.
@@ -261,7 +306,8 @@ printf 'a\0b\n\tc' >"$W/8.direct"
 check 8-bytes cmp -s "$W/8.wrapped" "$W/8.direct"
 check 8-rc eval '"$BIN" -- true 2>/dev/null'
 
-# 9: N=2, one holder → a second run starts at once, in slot 2.
+# 9: N=2, one holder → a second run starts at once. (Units are taken highest
+# first since DND-1006, so the holder is in slot 2.)
 newpool p9 2
 hold A9 A9
 "$BIN" --label B9 -- true 2>"$W/9.err"; rc=$?
@@ -277,7 +323,7 @@ hold A10 holder-A10
 bg B10 --label B10 -- sh -c ': > "$1"' _ "$W/B10.ran"
 check 10-waiting await_grep "$W/B10.err" "WAITING" 20
 check 10-pool has "$W/B10.err" "$POOL"
-check 10-N has "$W/B10.err" "N=1"
+check 10-N has "$W/B10.err" "budget=1"
 check 10-held has "$W/B10.err" "1 held"
 check 10-label has "$W/B10.err" "holder-A10"
 check 10-not-run absent "$W/B10.ran"
@@ -406,7 +452,7 @@ check 22-D-sees-exclusive has "$W/D22.err" "EXCLUSIVE"
 release A22
 check 22-X-runs await_file "$W/X22.started" 20
 st="$("$BIN" --status --json 2>/dev/null)"
-check 22-all-3-exclusive eq "$(jq '[.holders[] | select(.exclusive == true and .label == "X22")] | length' <<<"$st")" 3
+check 22-all-3-exclusive eq "$(jq -c '[.holders[] | select(.exclusive == true and .label == "X22") | .units]' <<<"$st")" '[[1,2,3]]'
 check 22-D-not-run absent "$W/D22.ran"
 release X22
 reap X22; check 22-X-rc eq "$RC" 0
@@ -434,7 +480,7 @@ check 24-held eq "$(jq .held <<<"$st")" 2
 check 24-waiting eq "$(jq .waiting <<<"$st")" 1
 check 24-label eq "$(jq '[.holders[].label] | index("holder-A24") != null' <<<"$st")" true
 check 24-waiter-label eq "$(jq -r '.waiters[0].label' <<<"$st")" waiter-C24
-check 24-provisional eq "$(jq .provisional <<<"$st")" true
+check 24-provisional eq "$(jq .provisional <<<"$st")" false
 check 24-N eq "$(jq .n <<<"$st")" 2
 txt="$("$BIN" --status 2>/dev/null)"
 check 24-text-line eval '[[ "$txt" == *"held=2 waiting=1"* && "$txt" == *load1=* && "$txt" == *nproc=* ]]'
@@ -910,6 +956,211 @@ cp_run L38d "$$" unreadable "" >"$W/38d.out" 2>"$W/38d.err"; rc=$?; out38="$(cat
 check 38-unreadable-wait-rc eq "$rc" 129
 check 38-unreadable-wait-orphaned has "$W/38d.err" "ORPHANED"
 check 38-unreadable-wait-event eq "$(event_count orphaned L38d)" 1
+
+# ------------------------------------------------ weighted budget (DND-1006)
+# 39: budget 4. A (--weight 3) holds units 2-4 (highest first). B (--weight 2)
+# cannot fit: it WAITs naming its weight, and as the head keeps the one free
+# unit it took. When A leaves, B runs, and its events carry pool and weight.
+newpool p39 4
+hold A39 holder-A39 --weight 3
+st="$("$BIN" --status --json 2>/dev/null)"
+check 39-A-units eq "$(jq -c '.holders[] | select(.label == "holder-A39") | [.units, .weight]' <<<"$st")" '[[2,3,4],3]'
+check 39-A-held eq "$(jq .held <<<"$st")" 3
+bg B39 --label B39 --weight 2 -- sh -c ': > "$1"' _ "$W/B39.ran"
+check 39-B-waits await_grep "$W/B39.err" "WAITING for 2 unit(s)" 20
+check 39-B-not-run absent "$W/B39.ran"
+check 39-B-head-keeps-free-unit eq "$("$BIN" --status --json 2>/dev/null | jq .held)" 4
+release A39; reap A39
+reap B39; check 39-B-rc eq "$RC" 0
+check 39-B-ran present "$W/B39.ran"
+check 39-B-event eq "$(events | jq -s '[.[] | select(.event == "acquired" and .label == "B39" and .weight == 2 and .pool == "cpu")] | length')" 1
+
+# 39b: budget 4, four --weight 2 runs at once: exactly two run together.
+newpool p39b 4
+mkdir -p "$W/c39b"
+for k in 1 2 3 4; do bg "R39b$k" --label "R39b$k" --weight 2 -- "$W/conc.sh" "$W/c39b" 2 200; done
+all0=1
+for k in 1 2 3 4; do reap "R39b$k"; [ "$RC" = 0 ] || all0=0; done
+check 39b-all-exit0 eq "$all0" 1
+check 39b-max2 eq "$(cat "$W/c39b/max" 2>/dev/null)" 2
+check 39b-all-ran eq "$(wc -l <"$W/c39b/ran" 2>/dev/null)" 4
+
+# 40: an UNDECLARED run weighs budget/3, so undeclared callers keep the
+# pre-DND-1006 concurrency of 3: budget 6, six runs, at most three at once.
+newpool p40 6
+unset ATHENA_TEST_SLOT_DEFAULT_WEIGHT
+mkdir -p "$W/c40"
+for k in 1 2 3 4 5 6; do bg "R40$k" --label "R40$k" -- "$W/conc.sh" "$W/c40" 3 200; done
+all0=1
+for k in 1 2 3 4 5 6; do reap "R40$k"; [ "$RC" = 0 ] || all0=0; done
+check 40-all-exit0 eq "$all0" 1
+check 40-max3 eq "$(cat "$W/c40/max" 2>/dev/null)" 3
+check 40-weight2 eq "$(events | jq -s '[.[] | select(.event == "acquired" and .weight == 2)] | length')" 6
+
+# 41: a harness-gate COMMAND weighs its worker count (DND-1005's W): --jobs,
+# then HARNESS_GATE_JOBS, then harness-gate's own default; --weight wins; a
+# count over the budget holds the whole budget and says so.
+newpool p41 6
+mkdir -p "$W/fake41"
+printf '#!/bin/sh\nexit 0\n' >"$W/fake41/harness-gate"
+chmod +x "$W/fake41/harness-gate"
+w41() { events | jq -rs --arg l "$1" '[.[] | select(.event == "acquired" and .label == $l) | .weight] | last'; }
+"$BIN" --label L41a -- timeout 10 "$W/fake41/harness-gate" --jobs 3 2>/dev/null
+check 41-jobs-flag eq "$(w41 L41a | tail -n 1)" 3
+"$BIN" --label L41b -- env HARNESS_GATE_JOBS=2 "$W/fake41/harness-gate" 2>/dev/null
+check 41-jobs-env eq "$(w41 L41b | tail -n 1)" 2
+"$BIN" --label L41c -- "$W/fake41/harness-gate" --jobs 9 2>"$W/41c.err"
+check 41-clamped eq "$(w41 L41c | tail -n 1)" 6
+check 41-clamp-note has "$W/41c.err" "holds the whole budget"
+"$BIN" --label L41d --weight 1 -- "$W/fake41/harness-gate" --jobs 3 2>/dev/null
+check 41-explicit-wins eq "$(w41 L41d | tail -n 1)" 1
+j41=$(($(getconf _NPROCESSORS_ONLN) / 2))
+((j41 < 1)) && j41=1
+((j41 > 8)) && j41=8
+((j41 > 6)) && j41=6
+"$BIN" --label L41e -- "$W/fake41/harness-gate" 2>/dev/null
+check 41-default-jobs eq "$(w41 L41e | tail -n 1)" "$j41"
+# test-slot restates harness-gate's worker default (gate_jobs); this pins the
+# two together, so a change to one without the other turns this suite red.
+HG41="$(cd "$here/../../bin" && pwd)/harness-gate"
+if grep -qF 'return [[cores / 2, 1].max, 8].min if raw.nil? || raw.empty?' "$HG41" 2>/dev/null; then
+  ok
+else
+  bad 41-default-pinned "harness-gate's worker default at $HG41 no longer reads min(max(nproc/2, 1), 8). Fix: update gate_jobs and HARNESS_GATE_MAX_JOBS in ai/bin/test-slot to match it, then this pin."
+fi
+"$BIN" -- timeout 10 "$W/fake41/harness-gate" 2>/dev/null
+check 41-label-skips-wrapper eq "$(events | jq -rs '[.[] | select(.event == "acquired")] | last | .label' | sed 's/.* //')" harness-gate
+for bad_w in 0 x 7; do
+  "$BIN" --weight "$bad_w" -- touch "$W/41w$bad_w.ran" 2>"$W/41w$bad_w.err"
+  check "41-weight-$bad_w-rc" eq "$?" 2
+  check "41-weight-$bad_w-fix" has "$W/41w$bad_w.err" "Fix:"
+  check "41-weight-$bad_w-not-run" absent "$W/41w$bad_w.ran"
+done
+"$BIN" --exclusive --weight 2 -- touch "$W/41x.ran" 2>"$W/41x.err"
+check 41-exclusive-weight-rc eq "$?" 2
+check 41-exclusive-weight-not-run absent "$W/41x.ran"
+
+# 42: the MODEL pool is separate. With the whole cpu budget held, a
+# critic-review COMMAND (routed by name) and a --pool model run start at once
+# and are logged in the model pool; --pool cpu sends it back to the cpu queue.
+# The model pool has its own budget; --exclusive never applies to it.
+newpool p42 2
+mkdir -p "$W/fake42"
+printf '#!/bin/sh\n: > "$1"\n' >"$W/fake42/critic-review"
+chmod +x "$W/fake42/critic-review"
+hold A42 holder-A42 --weight 2
+timeout 20 "$BIN" --label C42 -- timeout 10 "$W/fake42/critic-review" "$W/C42.ran" 2>"$W/C42.err"; rc=$?
+check 42-critic-rc eq "$rc" 0
+check 42-critic-ran present "$W/C42.ran"
+check 42-critic-no-wait lacks "$W/C42.err" "WAITING"
+check 42-critic-in-model eq "$(jq -s '[.[] | select(.event == "acquired" and .label == "C42" and .pool == "model" and .weight == 1)] | length' "$POOL/model/events.jsonl" 2>/dev/null)" 1
+check 42-critic-not-in-cpu eq "$(event_count acquired C42)" 0
+check 42-model-dir-mode eq "$(stat -c %a "$POOL/model" 2>/dev/null)" 700
+timeout 20 "$BIN" --label P42 --pool model -- sh -c ': > "$1"' _ "$W/P42.ran" 2>"$W/P42.err"; rc=$?
+check 42-pool-model-rc eq "$rc" 0
+check 42-pool-model-no-wait lacks "$W/P42.err" "WAITING"
+bg Q42 --label Q42 --pool cpu -- "$W/fake42/critic-review" "$W/Q42.ran"
+check 42-pool-cpu-waits await_grep "$W/Q42.err" "WAITING" 20
+check 42-pool-cpu-not-run absent "$W/Q42.ran"
+release A42; reap A42
+reap Q42; check 42-pool-cpu-rc eq "$RC" 0
+check 42-pool-cpu-ran present "$W/Q42.ran"
+"$BIN" --exclusive -- "$W/fake42/critic-review" "$W/X42.ran" 2>"$W/X42.err"
+check 42-exclusive-model-rc eq "$?" 2
+check 42-exclusive-model-fix has "$W/X42.err" "Fix:"
+check 42-exclusive-model-not-run absent "$W/X42.ran"
+"$BIN" --pool gpu -- true 2>"$W/G42.err"
+check 42-bad-pool-rc eq "$?" 2
+export ATHENA_TEST_MODEL_SLOTS=1
+hold M42 holder-M42 --pool model
+bg N42 --label N42 --pool model -- sh -c ': > "$1"' _ "$W/N42.ran"
+check 42-model-budget-waits await_grep "$W/N42.err" "WAITING" 20
+check 42-model-budget-names-pool has "$W/N42.err" "model pool"
+timeout 20 "$BIN" --label K42 -- true 2>"$W/K42.err"; rc=$?
+check 42-cpu-free-while-model-full eq "$rc" 0
+check 42-cpu-no-wait lacks "$W/K42.err" "WAITING"
+st="$("$BIN" --status --pool model --json 2>/dev/null)"
+check 42-model-status eq "$(jq -c '[.kind, .n, .held, .waiting, (.holders[0].label)]' <<<"$st")" '["model",1,1,1,"holder-M42"]'
+release M42; reap M42
+reap N42; check 42-model-next-rc eq "$RC" 0
+unset ATHENA_TEST_MODEL_SLOTS
+
+# 43: every event names what was gated: the git HEAD and top level of the
+# caller's cwd, read again at release (a commit inside the slot shows), and
+# null outside a work tree.
+R43="$W/repo43"
+git init -q "$R43" && git -C "$R43" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m one
+sha43a="$(git -C "$R43" rev-parse HEAD)"
+top43="$(git -C "$R43" rev-parse --show-toplevel)"
+newpool p43 1
+(cd "$R43" && "$BIN" --label L43 -- git -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m two) 2>"$W/43.err"
+sha43b="$(git -C "$R43" rev-parse HEAD)"
+check 43-acquired-ref eq "$(events | jq -r 'select(.event == "acquired" and .label == "L43") | "\(.sha) \(.tree)"')" "$sha43a $top43"
+check 43-released-ref eq "$(events | jq -r 'select(.event == "released" and .label == "L43") | "\(.sha) \(.tree)"')" "$sha43b $top43"
+check 43-moved eval '[ "$sha43a" != "$sha43b" ]'
+mkdir -p "$W/nogit43"
+(cd "$W/nogit43" && GIT_CEILING_DIRECTORIES="$W" "$BIN" --label L43b -- true) 2>/dev/null
+check 43-outside-null eq "$(events | jq -c 'select(.event == "acquired" and .label == "L43b") | [.sha, .tree]')" '[null,null]'
+
+# 44: --exclusive stays BENCH ONLY: no gate, eval or critic tool passes it, and
+# no repo caller outside test-slot's own tests and option tables wraps a run
+# with it (the one machine-wide mutex, DND-1006).
+REPO44="$(cd "$here/../../.." && pwd)"
+if git -C "$REPO44" rev-parse --git-dir >/dev/null 2>&1; then
+  for tool in ai/bin/harness-gate ai/bin/integration-gate ai/skills/athena:merge-boarding/scripts/integration-gate \
+    ai/bin/critic-review ai/bin/admiral-eval ai/bin/critic-eval ai/bin/variant-eval ai/bin/block-optimize; do
+    if [ ! -f "$REPO44/$tool" ]; then
+      bad 44-tool-missing "$tool is gone; this check cannot see whether it takes --exclusive. Fix: update the tool list in case 44."
+    elif grep -qF -e '--exclusive' "$REPO44/$tool"; then
+      bad 44-no-exclusive "$tool passes --exclusive. Fix: --exclusive is for the DND-489 bench only; give the run a --weight instead."
+    else
+      ok
+    fi
+  done
+  callers44="$(git -C "$REPO44" grep -l -e 'test-slot.*--exclusive' -- . ':!ai/bin/test-slot' ':!ai/test/test-slot' \
+    ':!ai/test/strict-argv-cli/self-test.sh' ':!ai/hooks/worktree-escape-guard.sh' ':!*.md' 2>"$W/44.err")"
+  rc44=$?
+  # git grep: 0 = a caller found, 1 = none; anything else could not look.
+  case $rc44 in
+    1) ok ;;
+    0) bad 44-no-exclusive-callers "these files wrap a run in test-slot --exclusive: $callers44. Fix: --exclusive is for the DND-489 bench only; give the run a --weight instead." ;;
+    *) bad 44-grep "git grep could not search $REPO44 (exit $rc44: $(cat "$W/44.err")); no caller was ruled out. Fix: run the suite from a readable checkout of ~/dev/custom." ;;
+  esac
+else
+  bad 44-no-repo "the suite is not in a git checkout ($REPO44), so no caller of --exclusive can be ruled out. Fix: run it from a checkout of ~/dev/custom."
+fi
+
+# 45 (DND-1006 rollout): a pre-DND-1006 test-slot (0d08cb1d, N=3 slots, one
+# per run) shares the live pool while the budget lands. New runs take units
+# highest first, so an old run finds slot 1 free next to a weight-2 holder; an
+# old holder counts as one unit, so a new weight-2 run fits beside it once the
+# other units free.
+OLD6_REV=0d08cb1d3763b04d64fd5188beeb969fea56ca99
+OLD6="$W/test-slot-pre-dnd-1006"
+if git -C "$here" show "$OLD6_REV:ai/bin/test-slot" >"$OLD6" 2>"$W/45.git.err" && [ -s "$OLD6" ]; then
+  chmod +x "$OLD6"
+  newpool p45 3
+  hold N45 holder-N45 --weight 2
+  timeout 20 "$OLD6" --label O45a -- true 2>"$W/O45a.err"; rc=$?
+  check 45-old-runs eq "$rc" 0
+  check 45-old-no-wait lacks "$W/O45a.err" "WAITING"
+  mkfifo "$W/O45.fifo"
+  timeout 60 "$OLD6" --label holder-O45 -- bash -c "$HOLD_CMD" _ "$W/O45" >"$W/O45.out" 2>"$W/O45.err" &
+  echo $! >"$W/O45.bg"
+  BG_PIDS+=("$!")
+  await_file "$W/O45.started" 20 || bad 45-old-hold "old holder never started: $(cat "$W/O45.err" 2>/dev/null)"
+  st="$("$BIN" --status --json 2>/dev/null)"
+  check 45-old-holder-one-unit eq "$(jq -c '.holders[] | select(.label == "holder-O45") | [.units, .weight]' <<<"$st")" '[[1],1]'
+  bg X45 --label X45 --weight 2 -- sh -c ': > "$1"' _ "$W/X45.ran"
+  check 45-new-waits await_grep "$W/X45.err" "WAITING" 20
+  release N45; reap N45
+  reap X45; check 45-new-rc eq "$RC" 0
+  check 45-new-ran present "$W/X45.ran"
+  check 45-old-still-holding absent "$W/O45.done"
+  release O45; reap O45; check 45-old-holder-rc eq "$RC" 0
+else
+  bad 45-old-copy "could not extract the pre-DND-1006 test-slot at $OLD6_REV: $(cat "$W/45.git.err" 2>/dev/null). Fix: run the suite from a git checkout of ~/dev/custom that contains $OLD6_REV (git fetch origin)."
+fi
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then

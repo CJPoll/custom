@@ -1272,7 +1272,8 @@ end
 # Workers: `--jobs N` (flag), else HARNESS_GATE_JOBS, else half the cores,
 # capped at 8. At 8 workers the measured makespan equals the longest suite
 # (~124 s), so more buys nothing. test-slot still caps how many gates run at
-# once; this is per gate. The flag and the variable share one validation: a
+# once; this is per gate. test-slot weighs a gate by this count (DND-1006)
+# and restates this default to do so: change both together. The flag and the variable share one validation: a
 # positive integer, anything else raises. When the flag is given the
 # variable is not read, so it cannot override or fail the flag.
 JOBS_FORMAT = /\A[1-9]\d*\z/.freeze

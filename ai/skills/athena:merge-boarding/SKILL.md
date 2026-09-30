@@ -398,7 +398,7 @@ branch inside the test slot and refuses on a conflict (see *`--rebase`* below).
 **The gate runs in a machine test slot (DND-486), taken first (DND-1064).**
 `integration-gate` takes a slot of the main checkout's `ai/bin/test-slot`
 (`~/dev/custom`, found from the script's own git common dir, so a worktree copy
-never sets N) before it fetches. The fetch, the containment check, `--rebase`,
+never sets the budget) before it fetches. The fetch, the containment check, `--rebase`,
 the gate and the verdict all run inside that slot, so "HEAD contains
 `origin/main`" is judged when the gate starts, never before the queue wait. The
 bar is unchanged; only when it is read moved. You do nothing extra. A

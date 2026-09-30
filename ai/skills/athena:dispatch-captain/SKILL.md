@@ -131,7 +131,12 @@ Give the captain, in the brief:
   ~/dev/custom/ai/bin/test-slot -- timeout 1500 <cmd>`. For `harness-gate`,
   `<cmd>` is your worktree's own `./ai/bin/harness-gate`. Quote its `gating
   <root>` line with the result. Exit 75 with `test-slot: TIMEOUT` means it
-  never ran: run it again; never count it as a pass."*
+  never ran: run it again; never count it as a pass. Never wrap
+  `critic-review` or an eval in the CPU pool: test-slot routes them to its
+  model pool."*
+  The pool is a weighted budget (DND-1006): a `harness-gate` weighs its
+  `--jobs`, a run with no `--weight` weighs a third of the budget, and a caller
+  that knows its run is lighter or heavier passes `--weight N`.
   `integration-gate` wraps its whole run, fetch included, in test-slot
   (DND-486, DND-1064); its
   own "never ran" is exit 6, `GATE NOT RUN`, and never a pass either. The
@@ -323,11 +328,11 @@ below it, these rules decide.
   Exit 75, or an rc 124 from a `timeout` wrapped around `test-slot`, means the
   command never ran, so it measured the pool, not the machine. It does not
   lower the cap and is not reported as a load failure. Tell them apart with
-  `~/dev/custom/ai/bin/test-slot --status`: all N slots held with 1-min load
-  under 12 means the pool is the limiter. Measured 2026-09-26 ~16:30Z: two
+  `~/dev/custom/ai/bin/test-slot --status`: the budget fully held with 1-min
+  load under 12 means the pool is the limiter. Measured 2026-09-26 ~16:30Z: two
   fleets froze dispatch on "load-based failures" that were DND-814's queued
-  gate timing out; one then read load 7.5 on 16 cores with 9 waiters. Pool
-  size and FIFO order are DND-827 and DND-823.
+  gate timing out; one then read load 7.5 on 16 cores with 9 waiters. The
+  weighted budget and its measured basis are DND-1006; FIFO order is DND-823.
 - **The pool is per machine.** Another machine may have its own pool (a captain
   count its admirals share) or its own threshold. The launching session
   apportions it, and the share your brief names is your cap, as a lane brief's

@@ -31,8 +31,10 @@ ai/bin/block-optimize --case AE-18 --evidence /tmp/ae18.txt --out-dir /tmp/bo-ae
   read as this run's.
 
 **Cost.** One proposer call, plus about 500 opus calls (2 sides x 25 T2 cases x
-10) and about 65 minutes for the measurement. Run it through
-`~/dev/custom/ai/bin/test-slot -- timeout <secs> ...`. A doomed candidate
+10) and about 65 minutes for the measurement. It is model-bound, not
+CPU-bound, so it queues in test-slot's MODEL pool, never a CPU unit (DND-1006):
+`~/dev/custom/ai/bin/test-slot --pool model -- timeout <secs> ...`. (test-slot
+routes a `block-optimize` command there by name too.) A doomed candidate
 spends none of that: every scope and size check runs first.
 
 ## What it writes
