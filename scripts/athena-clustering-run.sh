@@ -533,7 +533,7 @@ finish() {
 # usage limit clears on its own), but BLOCK_ESCALATE in a row send one alert
 # (an auth or account fault does not clear). Anything else with no receipt is a
 # failure (a missing binary or a crash must still wedge).
-BLOCK_PATTERNS='usage limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
+BLOCK_PATTERNS='usage limit|session limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
 if [ ! -e "${RECEIPT}" ]; then
   sig="$(grep -m1 -i -E -o "${BLOCK_PATTERNS}" -- "${log}" 2>/dev/null || true)"
   if [ "${status}" -eq 0 ] || [ -n "${sig}" ]; then

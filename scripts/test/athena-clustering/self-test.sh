@@ -102,6 +102,7 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   nosummary) : >"$CLUSTERING_RECEIPT"; exit 0 ;;
   blocked0)  exit 0 ;;
   limit)     echo "You've hit your weekly limit"; exit 1 ;;
+  slimit)    echo "You've hit your session limit · resets 6:30am (America/Denver)"; exit 1 ;;
   crash)     echo "segmentation fault"; exit 3 ;;
 esac
 EOF
@@ -419,6 +420,13 @@ if [ "$rc" = 69 ] && [ ! -e "$(sd "$c")/consecutive-failures" ] && grep -q 'week
   ok "no receipt, non-zero exit with a usage-limit signature: BLOCKED, never a wedge failure"
 else
   bad "blocked limit" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo slimit >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 69 ] && [ ! -e "$(sd "$c")/consecutive-failures" ] && grep -q 'session limit' "$(newest "$c" blocked)"; then
+  ok "no receipt, non-zero exit with the session-limit wording: BLOCKED, never a wedge failure"
+else
+  bad "blocked session limit" "rc=$rc failures='$(cat "$(sd "$c")/consecutive-failures" 2>/dev/null)' err=$(cat "$c/runner.err")"
 fi
 echo crash >"$c/mode"
 rc="$(run_runner "$c")"

@@ -1329,6 +1329,22 @@ else
       "failures='$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)' blocked='$(cat "$(sd "$r")/consecutive-blocked" 2>/dev/null)'"
 fi
 
+# The five-hour SESSION limit is worded differently from the weekly one.
+# Measured on the desktop, 2026-09-30 12:00Z: the tick logged "You've hit your
+# session limit · resets 6:30am (America/Denver)", exited 1, matched no
+# signature, and was counted as a wedge FAILURE (consecutive-failures=1) for a
+# limit that cleared by itself 30 minutes later.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked_rc "$a/stub-claude" "You've hit your session limit · resets 6:30am (America/Denver)" 1
+rc="$(run_runner "$r")"
+m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
+if [ "$rc" -eq 69 ] && grep -q 'signature: session limit' <<<"$m" \
+   && [ ! -e "$(sd "$r")/consecutive-failures" ]; then
+  ok "a receipt-less session-limit tick that exits 1 is BLOCKED, never a wedge failure"
+else
+  bad "non-zero session-limit tick is blocked" "rc=$rc marker=$m failures='$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)'"
+fi
+
 # The laptop's exact shape, end to end: six non-zero usage-limit ticks against a
 # threshold of 3 must never wedge, and must spawn a session every tick.
 r="$(new_repo)"; a="$(aux "$r")"
