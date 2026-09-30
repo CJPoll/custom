@@ -1332,7 +1332,7 @@ def run_receipt_self_test
   Dir.mktmpdir("critic-review-repo-") do |repo|
     Dir.chdir(repo) do
       sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
-      sh.call("git", "init", "-q", ".")
+      sh.call("git", "init", "-q", "-b", "main", ".")
       sh.call("git", "config", "user.email", "t@example.invalid")
       sh.call("git", "config", "user.name", "t")
       File.write("a.txt", "one\n")
@@ -1533,7 +1533,7 @@ def run_receipt_self_test
   Dir.mktmpdir("critic-review-rounds-") do |repo|
     Dir.chdir(repo) do
       sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
-      sh.call("git", "init", "-q", ".")
+      sh.call("git", "init", "-q", "-b", "main", ".")
       sh.call("git", "config", "user.email", "t@example.invalid")
       sh.call("git", "config", "user.name", "t")
       commit = lambda do |body|
@@ -1612,7 +1612,7 @@ def run_receipt_self_test
   Dir.mktmpdir("critic-review-ceiling-") do |repo|
     Dir.chdir(repo) do
       sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
-      sh.call("git", "init", "-q", ".")
+      sh.call("git", "init", "-q", "-b", "main", ".")
       sh.call("git", "config", "user.email", "t@example.invalid")
       sh.call("git", "config", "user.name", "t")
       commit = lambda do |body|
@@ -2781,7 +2781,7 @@ def run_core_self_test
     Dir.mktmpdir("critic-review-e2e-") do |repo|
       Dir.chdir(repo) do
         sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
-        sh.call("git", "init", "-q", ".")
+        sh.call("git", "init", "-q", "-b", "main", ".")
         sh.call("git", "config", "user.email", "t@example.invalid")
         sh.call("git", "config", "user.name", "t")
         File.write("a.txt", "one\n")
