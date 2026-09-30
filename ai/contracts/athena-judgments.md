@@ -209,13 +209,24 @@ A port error is exactly one of:
 | Port error | Cause |
 | --- | --- |
 | `unauthorized` | HTTP 401 or 403 |
-| `request_rejected` (with detail) | HTTP 422 |
+| `request_rejected` (with detail) | HTTP 400 or 422 |
 | `rate_limited` (with `retry-after` seconds, or none) | HTTP 429 |
 | `overloaded` | HTTP 529 |
 | `http_status` (with the status) | any other non-2xx status |
 | `timeout` | no response within the deadline |
 | `transport_error` | connection failure |
 | `undecodable_body` | a 2xx whose body is not JSON |
+
+A `request_rejected` detail never quotes the response body, which can echo the
+request's state text. A 422's detail is its first error's `type` and `loc`
+identifiers; a 400's detail is `bad_request`.
+
+**Later (2026-09-30, DND-948):** `request_rejected` was HTTP 422 only, and a 400
+fell into `http_status`. Replaced by 400 or 422: the real API refuses most
+requests we built badly with 400 (too many options or levels, a noul with
+neither instructions nor criteria, an unknown model; captured 2026-09-27), and
+sends 422 only for a schema failure. As `http_status`, our own bug read as a
+TypeSafe service fault.
 
 A test double of the port MUST reject what the real API rejects (for example,
 a Choice with 256 options), so a request the real API would refuse cannot pass
@@ -280,7 +291,7 @@ one is an amendment to this table.
 | `timeout` | fault | judge | the deadline passed |
 | `rate_limited` | fault | judge | TypeSafe returned 429 |
 | `overloaded` | fault | judge | TypeSafe returned 529 |
-| `request_rejected` | fault | judge | TypeSafe returned 422 (our bug: error-level log) |
+| `request_rejected` | fault | judge | TypeSafe returned 400 or 422 (our bug: error-level log) |
 | `http_status` | fault | judge | TypeSafe returned another non-2xx status; the record carries it |
 | `transport_error` | fault | judge | the connection failed |
 | `undecodable_body` | fault | judge | the response body was not JSON |
