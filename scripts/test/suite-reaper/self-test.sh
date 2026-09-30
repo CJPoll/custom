@@ -37,6 +37,10 @@
 #       needle's own entry read torn ('=' a NUL, bash mid-import) is UNKNOWN,
 #       another variable torn is not (DND-1202).
 #   S16 a non-dumpable process (0 0 forever) is skipped at once, not waited out.
+#   S17 R2's target client boots under the scratch HOME even when the `ruby`
+#       first on PATH is an asdf-style shim that works only under the real
+#       HOME, and a target client that never boots FAILs R2 instead of
+#       passing it vacuously (DND-1203).
 set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd -- "${HERE}/../../.." && pwd -P)"
@@ -453,6 +457,59 @@ if command -v ssh-agent >/dev/null 2>&1; then
 else
   printf '  n/a   S16 not run: no ssh-agent on PATH, so no non-dumpable process to start\n'
 fi
+
+# S17 (DND-1203): R2 runs its suite with HOME pointing at a scratch home. The
+# repro's shim used to exec `command -v ruby`, which in an agent session is
+# the asdf shim, and an asdf shim finds no ruby under a scratch HOME (exit 126).
+# So every ruby client R2's suite started died at once: the suite waited out
+# each client's ready bound (~835s a gate, against ~24s in a cron lane, whose
+# PATH has no asdf shims), and the TERM-ignoring client the case exists to
+# test never ran, so R2 passed without testing anything. The fake `ruby` here
+# stands in for the asdf shim: it works only under the HOME it was made for.
+S17_REAL="$(ruby -e 'print RbConfig.ruby' 2>/dev/null)"
+S17_BIN="${TMP}/s17bin"; mkdir -p "${S17_BIN}"
+printf '#!/usr/bin/env bash\n[ "${HOME}" = %q ] || { echo "fake asdf shim: no ruby version set under HOME=${HOME}" >&2; exit 126; }\nexec %q "$@"\n' \
+  "${HOME}" "${S17_REAL}" >"${S17_BIN}/ruby"
+chmod +x "${S17_BIN}/ruby"
+# s17_suite <boot|noboot> -- a fake athena-inbox-client suite that starts the
+# mock twice with MOCK_IGNORE_TERM=1, as case 45c does. `boot` mocks install
+# their TERM trap and write the ready file; `noboot` mocks exit at once.
+s17_suite() {
+  printf '%s\n' '. "$(dirname "$0")/../lib/suite-reaper.bash"; suite_reaper_begin "$@"' \
+    'trap suite_reap_tagged EXIT; trap "exit 143" TERM' \
+    "export MOCK_READY=${TMP}/s17-$1.ready MOCK_IGNORE_TERM=1 S17_MODE=$1 S17_BOOTED=${TMP}/s17-$1.booted" \
+    "ruby ${TMP}/s17/mock-athena-inbox-client.rb first" \
+    "ruby ${TMP}/s17/mock-athena-inbox-client.rb & wait"
+}
+mkdir -p "${TMP}/s17"
+cat >"${TMP}/s17/mock-athena-inbox-client.rb" <<'RB'
+exit 0 if ARGV[0] == "first" || ENV["S17_MODE"] == "noboot"
+trap("TERM") {}
+File.write(ENV.fetch("S17_BOOTED"), Process.pid.to_s)
+File.write(ENV.fetch("MOCK_READY"), Process.pid.to_s)
+sleep 300
+RB
+r="$(s11_repo s17boot "$(s17_suite boot)")"
+MARK="DND818_ST_MARK=s17boot-$$"; MARKS+=("${MARK}")
+O="$(env "${MARK}" PATH="${S17_BIN}:${PATH}" REPRO_CASES=r2 REPRO_WAIT_S=60 REPRO_STALL_S=60 REPRO_READY_S=5 \
+      bash "${r}/scripts/test/suite-reaper/repro-real-suites.sh" 2>&1)"; ORC=$?
+if [ -n "${S17_REAL}" ] && [ "${ORC}" -eq 0 ] && grep -q '^VERDICT: PASS' <<<"${O}" && [ -s "${TMP}/s17-boot.booted" ]; then
+  ok "S17 with an asdf-style ruby first on PATH, R2's TERM-ignoring client still boots under the scratch HOME (pid $(cat "${TMP}/s17-boot.booted"))"
+else
+  bad "S17 with an asdf-style ruby first on PATH, R2's TERM-ignoring client boots under the scratch HOME" \
+      "real_ruby=${S17_REAL:-none} rc=${ORC} booted=$(cat "${TMP}/s17-boot.booted" 2>/dev/null || echo none) $(printf '%s' "${O}" | tr '\n' '|')"
+fi
+gone "${MARK}" || { bad "S17 the fake suite's processes are reaped" "$(survivors "${MARK}")"; kill_marked "${MARK}"; }
+r="$(s11_repo s17noboot "$(s17_suite noboot)")"
+MARK="DND818_ST_MARK=s17noboot-$$"; MARKS+=("${MARK}")
+O="$(env "${MARK}" PATH="${S17_BIN}:${PATH}" REPRO_CASES=r2 REPRO_WAIT_S=60 REPRO_STALL_S=60 REPRO_READY_S=2 \
+      bash "${r}/scripts/test/suite-reaper/repro-real-suites.sh" 2>&1)"; ORC=$?
+if [ "${ORC}" -eq 1 ] && grep -q '^VERDICT: FAIL' <<<"${O}" && grep -q 'never became ready' <<<"${O}"; then
+  ok "S17 a target client that never boots makes R2 FAIL ('never became ready'), never a vacuous PASS"
+else
+  bad "S17 a target client that never boots makes R2 FAIL, never a vacuous PASS" "rc=${ORC} $(printf '%s' "${O}" | tr '\n' '|')"
+fi
+gone "${MARK}" || { bad "S17 the no-boot fake suite's processes are reaped" "$(survivors "${MARK}")"; kill_marked "${MARK}"; }
 
 # S10: the real suites, at the two measured windows (the deterministic repro).
 R="$("${HERE}/repro-real-suites.sh" 2>&1)"; RRC=$?
