@@ -153,9 +153,17 @@ Give the captain, in the brief:
   it queues its judge in the model pool itself, beside the gate, DND-1326.)
   **Later (2026-09-30, DND-1326):** the parenthesis said the judge runs
   "inside the gate's own slot"; it held no unit in either pool.
-  The pool is a weighted budget (DND-1006): a `harness-gate` weighs its
-  `--jobs`, a run with no `--weight` weighs a third of the budget, and a caller
-  that knows its run is lighter or heavier passes `--weight N`.
+  test-slot has two pools, each a weighted budget (DND-1006). A run with no
+  `--weight` takes its pool's default. In the CPU pool a `harness-gate`
+  weighs its worker count and any other run the CPU default. In the model
+  pool an eval weighs the model calls it keeps in flight, derived from its
+  `--concurrency` (DND-1358), and any other run the model default. The
+  numbers live in `test-slot --help` (the `--weight` line); `test-slot
+  --weight-of -- <cmd>` prints what one command would take. A caller that
+  knows its run is lighter or heavier passes `--weight N`.
+  **Later (2026-09-30, DND-1366):** this said a run with no `--weight`
+  "weighs a third of the budget". That holds only in the CPU pool; an eval's
+  model-pool weight is derived from its concurrency.
   `integration-gate` wraps its whole run, fetch included, in test-slot
   (DND-486, DND-1064); its
   own "never ran" is exit 6, `GATE NOT RUN`, and never a pass either. The
