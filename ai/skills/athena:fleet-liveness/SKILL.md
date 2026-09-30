@@ -77,7 +77,9 @@ Judge a Mission's captain by what it leaves on disk, in this order:
 3. **Harness task-notifications**, as a latency optimization only (above).
 4. **The machine test-slot pool** (`~/dev/custom/ai/bin/test-slot --status`). A
    captain whose worktree is quiet but whose label is listed as a waiter or
-   holder is queued or gating, not stalled. An UNSLOTTED line names a heavy run
+   holder is queued or gating, not stalled. That holds in either pool: the cpu
+   pool runs gates and suites, the model pool runs critic-review and evals
+   (DND-1006), and `--status` lists both. An UNSLOTTED line names a heavy run
    that bypassed the pool; tell its captain to wrap it. A CONTAINER line is a
    heavy run inside docker whose slot cannot be read; it is not evidence either
    way.

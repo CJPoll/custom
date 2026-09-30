@@ -35,8 +35,9 @@
 #     (events.jsonl ran_s): 4.00 and 4.08 cores, 0.50 per worker. The one
 #     earlier W=8 run (ef3f2a90, before DND-1203) was 1.31 cores, held down
 #     by the 946 s suite-reaper self-test; it is not used.
-#   * 3/4 of nproc: 2026-09-27 doc (ai-artifacts/coordination/
-#     2026-09-27-gate-timing-parallelism.md A1, B2 row 7): three serial gates
+#   * 3/4 of nproc: 2026-09-27 timing study (a local, gitignored note:
+#     ai-artifacts/coordination/2026-09-27-gate-timing-parallelism.md A1, B2
+#     row 7; its figures are quoted here): three serial gates
 #     holding N=3 ran at load1 2.2-2.8 on 16 cores. 2026-09-30T03:35Z: two
 #     undeclared walt_ui gates held 2 of 3 slots at load1 21-26, ~12 cores of
 #     containerised beam.smp between them. Undeclared runs are therefore not
@@ -56,7 +57,8 @@
 # FASTER, NEVER WEAKER (ai/blocks/ops/safety-checks.md). test-slot changes only
 # WHEN the command runs. It never edits the command's argv, stdin, stdout,
 # stderr, or exit status, and adds exactly one environment variable
-# (ATHENA_TEST_SLOT_HELD). Nothing is skipped, filtered, or loosened. Its own
+# (ATHENA_TEST_SLOT_HELD, or ATHENA_TEST_SLOT_HELD_MODEL in the model pool).
+# Nothing is skipped, filtered, or loosened. Its own
 # messages go to stderr, prefixed `test-slot:`.
 #
 # LIVENESS IS THE FLOCK, NEVER A PID. A slot is held exactly while some process
@@ -157,9 +159,12 @@
 #                       SIGKILLed (see RESIDUALS)
 #   This is how a caller tells "CMD exited 75" from "the wait timed out".
 #
-#   Environment set for CMD: ATHENA_TEST_SLOT_HELD=<pool dir>:<slot>. A nested
-#   test-slot that sees it (and finds that slot's lock still held) runs its CMD
-#   directly without taking a second slot, so nesting cannot self-deadlock.
+#   Environment set for CMD: ATHENA_TEST_SLOT_HELD=<pool dir>:<slot> (cpu
+#   pool; <slot> is the run's lowest unit), or ATHENA_TEST_SLOT_HELD_MODEL
+#   for a model run (DND-1006: one marker per pool, so nesting across pools
+#   never hides the outer marker). A nested test-slot in the same pool that
+#   sees it (and finds that unit's lock still held) runs its CMD directly
+#   without taking more units, so nesting cannot self-deadlock.
 #
 #   Pools: cpu = ${XDG_STATE_HOME:-$HOME/.local/state}/athena/test-slots/
 #   (0700), model = its model/ subdirectory (0700). Each holds the files below.
@@ -180,7 +185,8 @@
 #                        slot is the lowest unit held; sha/tree are the git
 #                        HEAD and top level of the caller's cwd (null outside
 #                        a work tree), read again for `released` so a rebase
-#                        inside the slot shows (DND-1006); event is one of
+#                        inside the slot shows (DND-1006); a `reentrant`
+#                        event has weight 0 (it takes no units); event is one of
 #                        waiting|acquired|released|timeout|reentrant|orphaned
 #                        (orphaned: DND-925, the caller died; it can follow
 #                        an `acquired` whose CMD then never started, and no
@@ -196,8 +202,11 @@
 #     holder (one line per run, with its units and weight), waiter, and heavy
 #     run WITHOUT a slot (UNSLOTTED; cpu pool only). Each waiter has its queue
 #     position (text `WAITING #<k>:`, JSON "position": k; 1 = served next;
-#     null for a pre-DND-823 waiter). JSON keeps "n" (= the budget) and
-#     "n_basis". Read-only: never creates the pool.
+#     null for a pre-DND-823 waiter). With no --pool it shows both pools; its
+#     JSON is the cpu pool's document with the model pool's under "model".
+#     JSON keeps "n" (= the budget) and "n_basis"; "held" counts units; each
+#     holder is one RUN with "units", "weight" and "slot" (its lowest unit,
+#     the pre-DND-1006 key). Read-only: never creates the pool.
 #
 #   Test seams (self-test only): ATHENA_TEST_SLOT_DIR (cpu pool dir; the
 #   model pool is its model/); ATHENA_TEST_SLOTS (cpu budget),
@@ -524,13 +533,19 @@ cpu_default_weight() {
 }
 
 # gate_jobs NPROC ENV_JOBS ARGV... — the worker count a harness-gate COMMAND in
-# ARGV will use, resolved as harness-gate resolves it: its --jobs, else a
-# HARNESS_GATE_JOBS=V an env wrapper sets, else ENV_JOBS (this environment's
-# HARNESS_GATE_JOBS), else min(max(NPROC/2, 1), 8). Prints nothing, returning
-# 1, when the COMMAND is not harness-gate or the value is not a positive
-# integer (harness-gate refuses that itself; the caller falls back).
+# ARGV will use, resolved as harness-gate resolves it: its --jobs, else the
+# HARNESS_GATE_JOBS it will see, else min(max(NPROC/2, 1), 8). What it will
+# see starts as ENV_JOBS (this environment's value) and follows the env
+# wrappers in front of it: NAME=V sets it; -i, -u/--unset HARNESS_GATE_JOBS
+# clear it; empty means unset, as in harness-gate. A value over 6 digits
+# prints 999999 (the caller clamps it to the budget). Prints nothing,
+# returning 1, when the COMMAND is not harness-gate or the value is not a
+# positive integer (harness-gate refuses that itself; the caller falls back).
+# NPROC is the machine's online CPU count; harness-gate counts cores with
+# Etc.nprocessors, which honours CPU affinity, so under taskset this weighs a
+# gate heavier than its workers, never lighter.
 gate_jobs() {
-  local nproc=$1 envj=$2 i j a val="" found=0
+  local nproc=$1 cur=$2 i j a b wrap="" val="" found=0
   shift 2
   local -a v=("$@")
   i=$(unwrap_index "$@")
@@ -544,16 +559,27 @@ gate_jobs() {
   done
   if ((!found)); then
     for ((j = 0; j < i; j++)); do
-      [[ ${v[j]} == HARNESS_GATE_JOBS=* ]] && { val=${v[j]#HARNESS_GATE_JOBS=}; found=1; }
+      a=${v[j]}
+      b=${a##*/}
+      case $b in
+        timeout | env | nice | ionice | nohup | setsid | stdbuf | time) wrap=$b; continue ;;
+      esac
+      [ "$wrap" = env ] || continue
+      case $a in
+        -i | - | --ignore-environment | -uHARNESS_GATE_JOBS | --unset=HARNESS_GATE_JOBS) cur="" ;;
+        -u | --unset) [ "${v[j + 1]:-}" = HARNESS_GATE_JOBS ] && cur=""; j=$((j + 1)) ;;
+        HARNESS_GATE_JOBS=*) cur=${a#HARNESS_GATE_JOBS=} ;;
+      esac
     done
+    if [ -n "$cur" ]; then val=$cur; found=1; fi
   fi
-  if ((!found)) && [ -n "$envj" ]; then val=$envj; found=1; fi
   if ((!found)); then
     val=$((nproc / 2))
     ((val < 1)) && val=1
     ((val > HARNESS_GATE_MAX_JOBS)) && val=$HARNESS_GATE_MAX_JOBS
   fi
-  [[ $val =~ ^[1-9][0-9]{0,5}$ ]] || return 1
+  [[ $val =~ ^[1-9][0-9]*$ ]] || return 1
+  ((${#val} > 6)) && val=999999
   printf '%s\n' "$val"
 }
 
@@ -891,12 +917,15 @@ read_gate_ref() {
 # rotating past EVENTS_MAX_BYTES. A logging failure warns; it never changes
 # whether or how CMD runs.
 append_event() {
-  local fd size line excl=false
+  local fd size line excl=false weight=$WEIGHT
   ((EXCLUSIVE)) && excl=true
+  # A re-entrant run takes no units: weight 0, so summing weights over events
+  # never counts the outer run twice.
+  [ "$1" = reentrant ] && weight=0
   line=$(printf '{"ts":"%s","event":"%s","slot":%s,"label":%s,"cwd":%s,"pid":%s,"exclusive":%s,"waited_s":%s,"ran_s":%s,"exit":%s,"pool":"%s","weight":%s,"sha":%s,"tree":%s}' \
     "$(iso_now)" "$1" "${2:-null}" "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$excl" \
     "${3:+$(fmt_ms "$3")}" "${4:+$(fmt_ms "$4")}" "${5:-null}" \
-    "$POOL_KIND" "$WEIGHT" "$(json_or_null "$GATE_SHA")" "$(json_or_null "$GATE_TREE")")
+    "$POOL_KIND" "$weight" "$(json_or_null "$GATE_SHA")" "$(json_or_null "$GATE_TREE")")
   line=${line//\"waited_s\":,/\"waited_s\":null,}
   line=${line//\"ran_s\":,/\"ran_s\":null,}
   if ! { exec {fd}>>"$POOL/events.lock"; } 2>/dev/null; then
@@ -1308,9 +1337,18 @@ acquire() {
   unregister_waiter
 }
 
-# reentrant_slot — 0 when ATHENA_TEST_SLOT_HELD names a held slot of THIS pool.
+# held_var — the environment variable that marks a held unit of this pool
+# kind: one per pool (DND-1006), so a model run nested in a cpu run (or the
+# reverse) never hides the outer run's marker from a run nested deeper.
+held_var() {
+  if [ "$POOL_KIND" = model ]; then printf 'ATHENA_TEST_SLOT_HELD_MODEL\n'; else printf 'ATHENA_TEST_SLOT_HELD\n'; fi
+}
+
+# reentrant_slot — 0 when this pool's held_var names a held unit of THIS pool.
 reentrant_slot() {
-  local held=${ATHENA_TEST_SLOT_HELD:-} hpool hslot
+  local var held hpool hslot
+  var=$(held_var)
+  held=${!var:-}
   [ -n "$held" ] || return 1
   hpool=${held%:*}
   hslot=${held##*:}
@@ -1319,7 +1357,7 @@ reentrant_slot() {
     SLOT=$hslot
     return 0
   fi
-  say "WARN stale ATHENA_TEST_SLOT_HELD=$held (that slot is not held); taking a slot normally."
+  say "WARN stale $var=$held (that slot is not held); taking a slot normally."
   return 1
 }
 
@@ -1462,10 +1500,18 @@ status() {
           printf '{"slot":%s,"label":null,"pid":null,"diagnostics":"unreadable"}' "$i")"$'\n'
       done
       if [ -n "$per_unit" ]; then
-        mapfile -t holders_json < <(jq -c -s \
+        # "slot" stays (the run's lowest unit) for pre-DND-1006 readers.
+        local grouped
+        if grouped=$(jq -c -s \
           'group_by(if .pid == null then "unit:\(.slot)" else "pid:\(.pid)" end)
-           | map(.[0] + {units: map(.slot), weight: (.[0].weight // 1)} | del(.slot))
-           | sort_by(.units[0]) | .[]' <<<"$per_unit")
+           | map(.[0] + {units: map(.slot), weight: (.[0].weight // 1)} | .slot = .units[0])
+           | sort_by(.units[0]) | .[]' <<<"$per_unit") && [ -n "$grouped" ]; then
+          mapfile -t holders_json <<<"$grouped"
+        else
+          # Grouping failed: list every held unit ungrouped rather than none,
+          # so a held pool never reads as an empty one.
+          mapfile -t holders_json <<<"${per_unit%$'\n'}"
+        fi
       fi
       local wpos jpos
       while IFS=$'\t' read -r wpos w; do
@@ -1488,14 +1534,15 @@ status() {
     return 0
   fi
 
-  local head
+  local head ucol=""
   head=$(printf '%s pool: budget=%s units (%s) default_weight=%s' "$POOL_KIND" "$N" "$N_BASIS" "$DEFAULT_WEIGHT")
+  [ "$POOL_KIND" = cpu ] && ucol=" unslotted=$ucount in_container=$ccount"
   if [ "$initialised" = false ]; then
-    printf '%s pool not initialised at %s unslotted=%s in_container=%s load1=%s nproc=%s\n' \
-      "$head" "$POOL" "$ucount" "$ccount" "$load1" "$NPROC"
+    printf '%s pool not initialised at %s%s load1=%s nproc=%s\n' \
+      "$head" "$POOL" "$ucol" "$load1" "$NPROC"
   else
-    printf '%s held=%s waiting=%s unslotted=%s in_container=%s load1=%s nproc=%s pool=%s\n' \
-      "$head" "$held" "$waiting" "$ucount" "$ccount" "$load1" "$NPROC" "$POOL"
+    printf '%s held=%s waiting=%s%s load1=%s nproc=%s pool=%s\n' \
+      "$head" "$held" "$waiting" "$ucol" "$load1" "$NPROC" "$POOL"
     [ -n "$lines" ] && printf '%s\n' "$lines"
     local w wpos tag label wcwd since wpid wweight
     while IFS=$'\t' read -r wpos w; do
@@ -1607,9 +1654,24 @@ main() {
       exec "$suite"
       ;;
     status)
-      POOL_KIND=${pool_raw:-cpu}
-      resolve_pool
-      status
+      # With no --pool, both pools: a run queued for the model pool (a
+      # critic-review, an eval) must show wherever the cpu pool's runs do.
+      # JSON keeps the cpu pool at the top level and nests the model pool.
+      if [ -n "$pool_raw" ]; then
+        POOL_KIND=$pool_raw
+        resolve_pool
+        status
+      elif ((JSON)); then
+        local cpu_json model_json
+        POOL_KIND=cpu; resolve_pool; cpu_json=$(status) || exit $?
+        POOL_KIND=model; resolve_pool; model_json=$(status) || exit $?
+        jq -c --argjson m "$model_json" '. + {model: $m}' <<<"$cpu_json" || die_usage \
+          "could not merge the two pools' --status --json documents." \
+          "check jq works, or read each pool with --status --pool cpu --json and --status --pool model --json."
+      else
+        POOL_KIND=cpu; resolve_pool; status
+        POOL_KIND=model; resolve_pool; status
+      fi
       exit 0
       ;;
   esac
@@ -1622,11 +1684,8 @@ main() {
   ((have_dd)) || die_usage "no \`--\` before the command." \
     "write: test-slot [flags] -- CMD ARGS (the \`--\` is required)."
   ((${#CMD[@]})) || die_usage "no command after \`--\`." "write: test-slot [flags] -- CMD ARGS."
-  if [ -z "$LABEL" ]; then
-    local top
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=$PWD
-    LABEL=$(pick_label "$top" "${CMD[@]}")
-  fi
+  read_gate_ref
+  [ -n "$LABEL" ] || LABEL=$(pick_label "${GATE_TREE:-$PWD}" "${CMD[@]}")
 
   # The pool: --pool, else by the COMMAND. --exclusive is the bench's
   # machine-wide mutex over the CPU budget only (DND-1006).
@@ -1661,7 +1720,6 @@ main() {
     fi
   fi
 
-  read_gate_ref
   ensure_pool
   START_MS=$(now_ms)
   DEADLINE_MS=$((START_MS + WAIT_TIMEOUT_S * 1000))
@@ -1696,7 +1754,7 @@ main() {
     fi
   fi
 
-  export ATHENA_TEST_SLOT_HELD="$POOL:$SLOT"
+  export "$(held_var)=$POOL:$SLOT"
   # The caller may have died during the last wait or the logging above: never
   # start CMD for it (DND-925). Its slot fds close with this process.
   check_parent

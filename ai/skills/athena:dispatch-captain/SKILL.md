@@ -132,8 +132,9 @@ Give the captain, in the brief:
   `<cmd>` is your worktree's own `./ai/bin/harness-gate`. Quote its `gating
   <root>` line with the result. Exit 75 with `test-slot: TIMEOUT` means it
   never ran: run it again; never count it as a pass. Never wrap
-  `critic-review` or an eval in the CPU pool: test-slot routes them to its
-  model pool."*
+  `critic-review` or an eval by itself in the CPU pool: test-slot routes them
+  to its model pool."* (`integration-gate --with-critic` is not such a wrap:
+  its judge runs beside the gate, inside the gate's own slot.)
   The pool is a weighted budget (DND-1006): a `harness-gate` weighs its
   `--jobs`, a run with no `--weight` weighs a third of the budget, and a caller
   that knows its run is lighter or heavier passes `--weight N`.
