@@ -70,7 +70,10 @@ Non-goals. A judgment never:
 
 - authorizes anything, closes, merges or cancels a ticket, sends a reply, or
   decides an owner-gated step;
-- generates text (no generative use);
+- generates text (no generative use). Item summaries
+  (`ai/contracts/athena-events.md` → *Priority index* → *Item summaries*) are
+  generative. They are not judgments: they use their own port, key and
+  budget, and nothing in this contract governs them;
 - routes a thread reply (thread claims own that:
   `ai/contracts/athena-events.md` → *Thread replies route to the thread's
   claimant*);
@@ -651,8 +654,20 @@ work Slack webhooks end. Personal-domain use (D2) rides the same key and ends
 with it.
 
 - **The key is held in `Athena.Secrets`** as `(owner_id, :typesafe_api_key)`,
-  per DND-711. It is stored out of band by the owner. No API or UI path writes
-  it.
+  account-wide (`scope_ref` `""`). The owner enters it on `/secrets`, the
+  write-only, owner-authenticated secret page (DND-1239). That page stores for
+  the logged-in owner's own account only and never returns or logs the value.
+  No API route or MCP tool writes the key. No operator procedure may pass it
+  over rpc, because an rpc parameter stays in the SSM command history. That
+  last rule is a procedure, not an enforced guarantee: an rpc evaluates
+  arbitrary code, so it could still call `Athena.Secrets` directly.
+
+  **Later (2026-09-30):** this bullet said the key "is stored out of band by
+  the owner. No API or UI path writes it." Superseded by DND-1239 (gen_saas
+  #553, `82916630`): the out-of-band store was an rpc over SSM, and the owner
+  now enters the key on `/secrets` (`Athena.OwnerSecrets.store/2`;
+  `Athena.Secrets.SecretType` classes `typesafe_api_key` as `:owner_entered`,
+  scope `:account`).
 - **Loss of access is a designed state.** A revoked key or a gone account falls
   back exactly like a missing key: loud, one health-transition alert, and no
   retry loop or crash loop.

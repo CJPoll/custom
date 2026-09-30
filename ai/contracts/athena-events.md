@@ -5257,7 +5257,8 @@ build by name:
 - DND-440: the surface that requests `priority.transition` grants (*Owner
   approval grants*);
 - DND-446: the morning digest (*Morning digest*);
-- DND-447 and DND-449: meetings and meeting catch-up.
+- DND-447 and DND-449: meetings and meeting catch-up;
+- DND-1157: item summaries (*Item summaries*).
 
 None of the server homes named below exists yet (gen_saas `origin/main`
 `b5f85909`, read 2026-09-24). Every sentence about them is an obligation on its
@@ -5407,7 +5408,8 @@ departures (*Poller (fallback only)*), so the index cannot rely on it.
   `action_item` it is the on-demand read the Notion ingress already uses
   (*Sender verification and payload completeness*). The read is mapped through
   the same allow-list as an event (*The storage boundary*), and its result is
-  applied by the same rules as an event carrying that revision (*States*).
+  applied by the same rules as an event carrying that revision (*States*),
+  including *A restore is sticky until the source changes*.
   `forge_review`, `slack_ask` and `manual` items have no source read. A
   `forge_review` item closes by its family's events or by the owner; a
   `slack_ask` or `manual` item only by the owner or a lease. A forge item is
@@ -5530,9 +5532,17 @@ revision. Without it no forge event older than the row could be refused
 (*States*). It is ordering metadata, not content.
 
 - **Everything else is refused by name.** That includes a body, a comment or
-  `comment_text`, a description, a summary, an attachment, attendees, a
-  message's `text` under any other name, and a permissive field on a source
-  whose row does not list it. A Slack ask stores no `title`.
+  `comment_text`, a description, a summary other than an item summary (*Item
+  summaries*), an attachment, attendees, a message's `text` under any other
+  name, and a permissive field on a source whose row does not list it. A
+  Slack ask stores no `title`.
+
+  **Later (2026-09-30):** this bullet refused "a summary" outright.
+  Superseded by DND-1157 (gen_saas #561, `04f20c58`), the owner's request of
+  2026-09-28 for a one-to-five-sentence model-written summary per item. An
+  item summary is allowed for the sources *Item summaries* lists, stored
+  apart from the item row, and nowhere else. Every other summary is still
+  refused.
 - **The pointer constructor enforces the list.** `Athena.Priorities.Pointer`
   (Domain) takes a source and a field map. It refuses any field that is not on
   that source's allow-list, and names every such field in one refusal. It
@@ -5543,8 +5553,9 @@ revision. Without it no forge event older than the row could be refused
   personal ticket reads the payload's `assignee` (*Domain and owner-only items*), and
   never stores it.
 - **The boundary covers every store the index writes:** the items, the index
-  obligations, the skip counts and the index-failure record. It does not make
-  upstream stores content-free. The event store and the Slack ingress's own
+  obligations, the skip counts and the index-failure record. The item
+  summaries and their call ledger are bounded by *Item summaries*. The
+  boundary does not make upstream stores content-free. The event store and the Slack ingress's own
   store hold what their ingress persists. Keeping work-Notion content out of
   the event store is the `metadata_only` subscription obligation (next
   bullet). It is not a property of this boundary.
@@ -5599,10 +5610,21 @@ does three things:
 2. It sets the field to `null` in every stored row.
 3. It drops the column.
 
-No identity, state, eligibility or `owner_only` rule reads a permissive field,
-so removing one changes none of them. Ranking may read one (`vip_assignee`).
-After the field is removed, that reason stops firing. The owner accepts that
-when removing the field.
+No identity, state or eligibility rule reads a permissive field. One
+`owner_only` rule does: a rules edit re-derives a `notion_work` item's
+`owner_only` from its stored `assignee` (*Domain and owner-only items* → *A
+rules edit re-derives the owner's stored items*). It reads the field only
+while the allow-list names it; once the field is removed, that item is treated
+like a `notion_personal` one, its stored `owner_only` is kept, and the
+re-sync converges it. So removing a permissive field changes no stored
+`owner_only` value. Ranking may read one (`vip_assignee`). After the field is
+removed, that reason stops firing. The owner accepts that when removing the
+field.
+
+**Later (2026-09-30):** this paragraph said "No identity, state, eligibility
+or `owner_only` rule reads a permissive field". Superseded by DND-1256
+(gen_saas #558): a rules edit re-derives stored items, and for `notion_work`
+the only stored input to `owner_only` is the permissive `assignee`.
 
 ### States
 
@@ -5613,7 +5635,7 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | created `proposed` | ingest, for a `slack_ask` | |
 | created `active` | ingest, for every other source; the owner, for `manual` | |
 | `proposed` → `active` (promote) | the owner only | |
-| `dismissed` or `done` → `active` (restore) | the owner only | |
+| `dismissed` or `done` → `active` (restore) | the owner only | `restored_from`: the undone `closed_by`, or `dismissed` (*A restore is sticky until the source changes*) |
 | `proposed` or `active` → `dismissed` | the owner only | |
 | `active` → `done` | the lease holder, through `priority_complete` | `closed_by: lease_complete` |
 | `active` → `done` | the owner | `closed_by: owner` |
@@ -5641,7 +5663,9 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   removal has no status, and no terminal status is configured for
   `forge_review`. So `removed`, `merged` and `closed` close an `active` item
   `source_status` whatever its `status`, at an equal or newer `revision`
-  (the merge request's `updated_at`); an older one is not applied. They never
+  (the merge request's `updated_at`), or only at a strictly newer one on an
+  item the owner restored (*A restore is sticky until the source changes*);
+  an older one is not applied. They never
   create an item: one for a merge request never indexed is
   `skipped:unknown-item`. They leave every other state as it is: on an item
   already `done` (any `closed_by`) or `dismissed`, a close is applied as a
@@ -5667,10 +5691,42 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   declares `updated_at` as its revision, and this bullet is its order.
 - **A close needs an event no older than the row.** An older event is not
   applied at all, so it cannot close an item. An event with an equal revision
-  can: within one minute, a redelivered terminal status can close an item that
-  was just reopened. That is the safe direction, and it is deliberate. A wrong
-  close drops an item from the queue until its next change. A wrong reopen
-  hands finished work to a second session.
+  can close an item the owner has not restored: within one minute, a
+  redelivered terminal status can close an item that was just reopened. That
+  is the safe direction, and it is deliberate. A wrong close drops an item
+  from the queue until its next change. A wrong reopen hands finished work to
+  a second session.
+
+  **Later (2026-09-30):** this bullet said an event with an equal revision
+  "can" close an item, without exception. Superseded for an item the owner
+  restored (DND-1277, gen_saas #567, `b1ff8c01`) by the next bullet. The
+  hourly re-sync re-applies each page at the row's own revision, so an
+  equal-revision close undid every restore within the hour.
+- **A restore is sticky until the source changes** (DND-1277). A restore
+  records what it overrode in `restored_from`: the `closed_by` of the close it
+  undid, or `dismissed`. While it is set, ingest, the re-sync and a rules edit
+  do not re-close the item on the information the owner overrode:
+  - A terminal status, or a forge `removed`, `merged` or `closed`, closes it
+    only at a strictly newer revision. An equal revision is the same
+    information. A missing or unparseable one cannot show it is newer. Either
+    is applied as a pointer update and the item stays `active`. A rules edit
+    that makes the item's status terminal re-applies it at the row's own
+    revision, so it does not close it either.
+  - A delete or a re-sync close whose `closed_by` repeats `restored_from`, at
+    a revision that is not strictly newer than the row's, is not applied. The
+    re-sync counts it kept, not closed, and logs it. A different close is new
+    information and closes: a page trashed after the owner restored a status
+    close closes `source_deleted`.
+  - A strictly newer revision clears the marker, whatever its status. So does
+    every close and every other owner action.
+
+  The source wins on new information; the owner wins on the same
+  information. Two limits follow from the revision's precision. A Notion
+  revision is minute-granular, so a change and a change back within one
+  minute read as the same information. And a source with no revision token
+  could never close a restored item by status, so such a source declares how
+  it orders a close before it may close by status. Every source that closes
+  by status today (Notion, forge) carries one.
 - **Terminal statuses are owner config, per source.** For `notion_personal`
   the default is `Done`, `Cancelled` and `Won't Fix`. For `notion_work` the
   default is also `Done`, `Cancelled` and `Won't Fix`; `Ready for Release` is
@@ -5678,7 +5734,9 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   source wins over its default, an empty list included; a source the stored
   rules do not name takes its default. A status outside the source's declared
   set is stored and treated as non-terminal. The priorities page flags it as
-  undeclared. It is never silently read as open.
+  undeclared. It is never silently read as open. An edit of the list
+  re-derives the owner's stored items (*Domain and owner-only items* → *A
+  rules edit re-derives the owner's stored items*).
 
   **Later (2026-09-28, DND-438):** this bullet said "`notion_work` gets its
   default from DND-438". DND-438 set it, and made the default apply per source
@@ -5809,6 +5867,38 @@ leasable. It is true for:
 
 It is false for everything else.
 
+**A rules edit re-derives the owner's stored items** (DND-1256). An item's
+`owner_only` and state are derived at ingest from the owner's rules of that
+moment. When the owner edits the rules, the same transaction re-derives every
+one of the owner's live items, in any state, under the new rules, and rescores
+the open ones. A derivation reads what the row stores, never the source:
+
+- **`owner_person_ids` → `owner_only`**, by the same derivation ingest uses
+  (above). A `notion_work` item re-derives from its stored `assignee`. A
+  `notion_personal` item stores no assignee (*The storage boundary*), so where
+  the answer needs one (a `Needs Attention` item, the person id configured) its
+  stored value is kept, and the re-sync's re-apply of the page converges it
+  (*Re-sync*). Unsetting the id needs no assignee: every `Needs Attention`
+  Notion item is `owner_only` at once, the restrictive reading. A `manual`
+  item keeps the owner's own mark.
+- **`terminal_statuses` → state**, only for an item whose stored status the
+  edit made terminal (terminal now, not before). It is applied as an event
+  carrying the item's own status and the revision the row already holds
+  (*States*), the event the re-sync would apply within the hour. A status that
+  was already terminal is left alone, so an item the owner restored over it
+  stays restored. Nothing reopens: a reopen needs a strictly newer revision,
+  so an item closed by a status the owner no longer calls terminal reopens on
+  its next change in the source. A close from here is recorded like any
+  other `source_status` close, and ends the item's lease.
+- **Not re-derived:** `domain`, `domain_basis` and `project`. Their only rules
+  input is `notion_project_domains`, which lives in the fleet policy, not in
+  the rules; an edit of that map reclassifies nothing (above).
+
+An ingest reads the rules row under a share lock taken before its item lock,
+so an ingest racing an edit either finishes first and is re-derived by the
+edit, or reads the edited rules. Neither leaves `owner_only` or the state
+derived from the old rules.
+
 ### Ranking
 
 `Athena.Priorities.Ranking.score/3` is pure. It maps (item, the owner's rules,
@@ -5864,6 +5954,77 @@ or a digest can render them:
 - **Rank at `now`.** `priority_next` ranks by a score computed at the call.
   The stored `score`, `reasons` and `scored_at` are the last computation, kept
   for display.
+
+### Item summaries
+
+An **item summary** is one to five sentences a model writes about an item for
+the owner to read on the priorities page (DND-1157). It is derived content, so
+this subsection is its boundary.
+
+- **Sources.** Only `notion_personal` and `slack_ask` items may have one.
+  Every other source is refused by name, whatever the owner's rules list:
+  `notion_work` and `action_item` because their subscriptions are
+  `metadata_only` and a summary is a store of their body; `forge_review`,
+  `meeting` and `manual` because they carry a title only. A missing or
+  unknown source is refused too. Enabling another source is an amendment to
+  this list.
+- **Owner opt-in per source.** The owner's rules name the enabled sources
+  (`summary_sources`), a subset of the two above. The default is
+  `notion_personal`; `slack_ask` is off until the owner enables it. Disabling
+  a source deletes its summaries on the next sweep pass.
+- **Only open items.** A `proposed` or `active` item is summarized. A `done`
+  or `dismissed` item keeps its last summary and is never refreshed.
+- **What is sent.** For `notion_personal`: the title (at most 300
+  characters), the status, and the plain text of the page's top-level
+  blocks, at most 8,000 characters. For `slack_ask`: the stored
+  `message_text`, at most 4,000 characters. A cut falls on a character
+  boundary and is marked `[truncated]`. Nothing else is sent: no ids, links,
+  people, dates, comments, project, asker or channel. The body is read only
+  under the owner's own enrichment token for that page's database, and only
+  when that database is one of the owner's usable `notion_personal` bindings
+  on a `full` subscription.
+- **Provider and custody.** The Anthropic Messages API, with the model named
+  in server config, under the owner's key held in `Athena.Secrets` as
+  `(owner_id, :anthropic_api_key)`, account-wide. The owner stores it on the
+  owner-authenticated secret-entry page (`/secrets`); no rpc function takes
+  it, and the page never shows it back. With no key stored, no call is made
+  and the page says so.
+- **What is stored.** In `priority_item_summaries`, one row per item: the last
+  good summary (1 to 1,000 characters), the model, the prompt version, the
+  source revision and a digest of the text it came from, and the latest
+  attempt's status and cause. The row's owner is its item's owner, enforced
+  by a composite foreign key, and the row is deleted with its item. A
+  per-call ledger (`priority_summary_calls`) holds tokens, cost and outcome,
+  never text, and is pruned after 35 days. No source text is stored.
+- **Refresh.** An open item is due when it has no summary row, when its
+  `source_revision` or the prompt version changed, or when a retry time it
+  was given has come. A due item's text is read and digested. The model is
+  called only when that digest differs from the last good summary's, and at
+  most once per item per 6 hours after a generation. A transient failure
+  backs off (1 min, 5 min, 30 min, 2 h, 6 h), then fails `retries_exhausted`.
+  A permanent failure is not retried until the text or the prompt changes.
+- **Budget, per owner.** 200 model calls and 400,000 tokens per UTC day, and
+  $5 per UTC month from metered tokens at configured prices, checked before
+  each call against the ledger plus the call's estimate. A missing price, or
+  an unpriced call already in the month, fails closed. At a cap no call is
+  made, and the affected rows show the cap and when it resumes.
+- **Display only.** A summary is untrusted model output over untrusted text.
+  It renders as escaped plain text. No ranking reason, state, eligibility,
+  `owner_only` rule, lease answer, digest or judgment reads it or sends it.
+  It is not a judgment (`ai/contracts/athena-judgments.md` → *Purpose and
+  non-goals*).
+- **Never a silent blank.** Each row shows its summary or exactly one of:
+  pending, paused by a named budget, failed with a named cause, no text to
+  summarize, unavailable with an owner-level cause, off for this source, or
+  no summary for this source. A stored status or cause the page does not know
+  shows as failed, never as a summary.
+- **Access control.** Only the owner's page reads summaries, through the
+  owner-scoped item listing (`owner_id` in the query). The sweeper writes
+  only for the item's own owner. No machine-token path reads one (*Access
+  control*).
+- **Removal.** Removing a permissive field removes the summaries derived from
+  it: dropping `message_text` removes `slack_ask` summaries. Removing the
+  feature drops both tables.
 
 ### Leases
 
@@ -6042,9 +6203,10 @@ writes: action `owner_dm`, no machine, a body hash, never a body.
 
 | Operation | Who | Resource | Where checked | On denial |
 | --- | --- | --- | --- | --- |
-| View the priorities page | the logged-in owner | only the owner's items, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
+| View the priorities page | the logged-in owner | only the owner's items, their summaries, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
 | Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or, for promote, restore and dismiss only, an owner approval grant of class `priority.transition`, executed by the server at click time | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the grant path logs the refusal, the grant stays `approved`, and the approval message says so |
 | Build and send the morning digest | the server, for owner O; no caller | O's `proposed` and `active` items; O's own Slack app; recipient O's `owner_slack_user_id` | `Athena.Digest`: items through `list_ranked/2` with O's user (the `owner_id` filter plus RBAC `read`); `Athena.Slack.owner_dm/3` selects the app by `owner_id` and reads the recipient from it, with no recipient argument | nothing is sent; the cause is recorded on O's send log and shown on O's `/priorities` |
+| Generate an item summary | the server's summary sweeper, for each item's own owner; no caller | one owner's open items of an enabled summary source | `Athena.Priorities.Summaries`: the item loaded by id and `owner_id` in the query, checked against the source allow-list and the owner's enabled sources, and re-checked in the write transaction; a Notion body read only through `Athena.NotionEvents.index_page_text/4` under the owner's own binding | the item is skipped and counted; nothing is read or written for another owner |
 | Read the last digest day | the logged-in owner | the owner's own `digest_sends` rows | `Athena.Digest.latest_send/1`: an `owner_id` = viewer filter in the query | none shown ("none yet") |
 | `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
 
@@ -6056,8 +6218,10 @@ writes: action `owner_dm`, no machine, a body hash, never a body.
   so it never replaces the `owner_id` filter (gen_saas DND-434 and DND-441
   added that filter to the fleet reads and to `set_control` for exactly
   this reason). Every read and write of items, index obligations, skip counts,
-  the index-failure record, re-sync runs, subscription bindings and rules
-  filters by `owner_id`. Ingest and the re-sync write only to the owner
+  the index-failure record, re-sync runs, subscription bindings, rules, item
+  summaries and the summary call ledger filters by `owner_id`. The two
+  exceptions are the summary sweeper's own system reads: the list of owners
+  it visits, and the ledger prune past 35 days. Ingest and the re-sync write only to the owner
   stamped from the authenticated ingress (*The event*), or to the item's own
   owner.
 - **Each owner path has a negative test for role-only access:** a user holding

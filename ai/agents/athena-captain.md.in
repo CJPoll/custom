@@ -590,7 +590,7 @@ Which wrapper follows this repo's forge — **GitLab** (e.g. walt_ui) via
 `athena-harness[bot]`); for the full per-forge operational playbook (open, watch
 CI, review, merge) see **athena:gitlab** (default) / **athena:github**. Never
 merge (athena-admiral's job) — but if you ever hold merge authority, the
-owner-notification rules in athena-admiral.md apply: the epic-progress DM at
-merge time, and the `Needs Attention` DM that rides the ticket-lifecycle
-transition. (Acting as Athena rather than the owner is an owner rule,
+owner-notification rules in athena-admiral.md apply: the epic-progress
+milestone at merge time, and the `Needs Attention` DM that rides the
+ticket-lifecycle transition. (Acting as Athena rather than the owner is an owner rule,
 2026-09-01.)
