@@ -15,6 +15,7 @@
 # Deliberately gem-free (stdlib only).
 
 require "json"
+require_relative "judgment_context"
 
 module JudgmentEval
   USE_CASES = %w[finding_triage slack_routing priority_scoring ticket_kind ticket_severity ticket_security].freeze
@@ -205,5 +206,108 @@ module JudgmentEval
   # A value from an input file, shown only if it is an identifier.
   def safe(value)
     value.is_a?(String) && LABEL.match?(value) ? value : "(unprintable)"
+  end
+
+
+  # ── slack_routing: the conversation context (DND-1048) ───────────────────
+  #
+  # Each slack_routing case is judged with the conversation before its root
+  # (contract athena-judgments.md -> Egress and data flow, the slack_routing
+  # row). The SERVER selects the context: POST
+  # /api/v1/judgments/slack_routing/context runs the router's own function.
+  # This side gathers the candidates, and it does re-state two of the
+  # server's rules to do so: the root's channel, top-level only, one line per
+  # ts, the window before the root. So check_context/2 refuses a reply whose
+  # version, rules or owner differ from what this side assumed: a mismatch
+  # must fail loudly, never quietly starve the context.
+  #
+  # Every sender's line is a candidate, because the server's cap counts every
+  # sender (the labeller's rule, ai/lib/judgment_context.rb). Only the
+  # owner's lines carry their text; anyone else's goes with an empty text,
+  # so another person's words never leave this machine. The server sends
+  # nothing of them to the judge either way.
+
+  QUESTION_SET_VERSION = "slack-routing-v2"
+  # The labeller's constants (DND-1047) ARE this harness's expectation of the
+  # server: one definition, so the labeller, the eval and (through
+  # check_context/2) the router's rules cannot drift apart silently.
+  CONTEXT_RULES = {
+    "window_s" => JudgmentContext::WINDOW_S,
+    "max_entries" => JudgmentContext::MAX_MESSAGES,
+    "max_text" => JudgmentContext::JUDGE_TEXT_CAP
+  }.freeze
+  CONTEXT_WINDOW_S = CONTEXT_RULES.fetch("window_s")
+  MAX_CANDIDATES = 200
+  SLACK_TS = /\A(\d{1,10})\.(\d{6})\z/
+
+  # slack_ts_us(ts) -> integer microseconds, or nil for anything but a Slack
+  # ts ("<seconds>.<6 digits>"). Never coerced.
+  def slack_ts_us(ts)
+    m = ts.is_a?(String) ? SLACK_TS.match(ts) : nil
+    m && (m[1].to_i * 1_000_000 + m[2].to_i)
+  end
+
+  # context_candidates(root, lines, owner) -> [candidate]. The top-level lines
+  # in the root's channel with a ts in the window strictly before the root's,
+  # one per ts, oldest first, at most MAX_CANDIDATES (the most recent), each
+  # reduced to the endpoint's fields. Only the owner's lines keep their text.
+  # A root with a malformed ts gets none; the server refuses it, and the case
+  # is unscored context_unavailable.
+  def context_candidates(root, lines, owner)
+    root_us = slack_ts_us(root["ts"])
+    return [] if root_us.nil? || !owner.is_a?(String) || owner.empty?
+
+    from_us = root_us - CONTEXT_WINDOW_S * 1_000_000
+    kept = lines.select do |line|
+      line.is_a?(Hash) && line["channel"] == root["channel"] && top_level?(line) &&
+        line["user"].is_a?(String) && (ts = slack_ts_us(line["ts"])) && ts < root_us && ts >= from_us
+    end
+    kept.uniq { |line| line["ts"] }.sort_by { |line| slack_ts_us(line["ts"]) }.last(MAX_CANDIDATES).map { |line| candidate(line, owner) }
+  end
+
+  def top_level?(line)
+    line["thread_ts"].nil? || line["thread_ts"] == line["ts"]
+  end
+
+  def candidate(line, owner)
+    text = line["user"] == owner && line["text"].is_a?(String) ? line["text"] : ""
+    { "channel" => line["channel"], "user" => line["user"], "ts" => line["ts"], "text" => text, "thread_ts" => nil }
+  end
+
+  # context_request(root, candidates, bot_id) -> the endpoint's body for one root.
+  def context_request(root, candidates, bot_id = nil)
+    body = { "channel" => root["channel"], "ts" => root["ts"], "kind" => root["kind"], "candidates" => candidates }
+    bot_id ? body.merge("bot_id" => bot_id) : body
+  end
+
+  # check_context(doc, owner) -> nil when the server's reply matches what this
+  # side assumed, else the mismatch as text. A reply that is missing a field
+  # is a mismatch too: "could not check" is never "checked". OWNER is the
+  # private overlay's owner Slack id, a work value: the text never quotes it,
+  # nor the server's.
+  def check_context(doc, owner)
+    version = doc["question_set_version"]
+    return "the server's question set is #{safe(version)}, this harness builds for #{QUESTION_SET_VERSION}" unless version == QUESTION_SET_VERSION
+    return "the server's context rules #{JSON.generate(doc['rules'])} differ from #{JSON.generate(CONTEXT_RULES)}" unless doc["rules"] == CONTEXT_RULES
+    return "the server's owner Slack user id differs from the private overlay's (neither is printed)" unless doc["owner_slack_user_id"] == owner
+
+    nil
+  end
+
+  # context_input(root, context) -> the v2 case input: the root's text and
+  # kind, and the context the server built. Nothing else from the line.
+  def context_input(root, context)
+    { "text" => root["text"], "kind" => root["kind"], "context" => context }
+  end
+
+  # context_lines(built, unavailable) -> lines. A case whose context could not
+  # be built is unscored context_unavailable and named, never sent with an
+  # empty context.
+  def context_lines(built, unavailable)
+    total = built + unavailable.size
+    lines = ["context: built #{built} of #{total}"]
+    return lines if unavailable.empty?
+
+    lines << "unscored #{unavailable.size} (context_unavailable, not sent): #{unavailable.map { |u| u[:case_id] }.join(', ')}"
   end
 end

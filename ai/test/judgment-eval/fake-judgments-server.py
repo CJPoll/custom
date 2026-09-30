@@ -17,7 +17,18 @@ While each request is in flight it scans every other process's
 /proc/<pid>/cmdline and /proc/<pid>/environ for the machine token and logs the
 pids where it appears: the suite's proof the token never reaches argv or env.
 
-Usage: fake-judgments-server.py PORT_FILE LOG_FILE RESPONSES_FILE TOKEN_FILE
+POST /api/v1/judgments/slack_routing/context (DND-1048) answers from its own
+CONTEXT_RESPONSES file (optional fifth argument), the same spec shapes, plus
+
+  {"auto": "context"}              200: of the request's last 6 candidates,
+                                    the owner's as owner entries, with the
+                                    version, rules and owner id the real
+                                    server returns (a stand-in for its
+                                    selection).
+
+Its default, when the file is absent, is {"auto": "context"}.
+
+Usage: FAKE_OWNER_SLACK_USER_ID=U... fake-judgments-server.py PORT_FILE LOG_FILE RESPONSES_FILE TOKEN_FILE [CONTEXT_RESPONSES_FILE]
 """
 import json
 import os
@@ -25,6 +36,15 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT_FILE, LOG_FILE, RESPONSES_FILE, TOKEN_FILE = sys.argv[1:5]
+CONTEXT_FILE = sys.argv[5] if len(sys.argv) > 5 else None
+CONTEXT_PATH = "/api/v1/judgments/slack_routing/context"
+# The owner id the real server reads from the owner's Slack app. It is a work
+# value, so the suite passes a SYNTHETIC one, the same one its fixture private
+# overlay gives judgment-eval (never the real id: this repo is public).
+OWNER = os.environ.get("FAKE_OWNER_SLACK_USER_ID", "")
+if not OWNER:
+    sys.exit("fake-judgments-server: FAKE_OWNER_SLACK_USER_ID is unset. "
+             "Fix: export a synthetic owner id (e.g. UFAKE00001) before starting it.")
 with open(TOKEN_FILE, "rb") as fh:
     TOKEN = fh.read().strip()
 ME = os.getpid()
@@ -45,20 +65,33 @@ def scan(name):
     return hits
 
 
-def next_spec():
+def next_spec(path, default):
     try:
-        with open(RESPONSES_FILE) as fh:
+        with open(path) as fh:
             spec = json.load(fh)
-    except (OSError, ValueError):
-        return {"auto": "not_configured"}
+    except (OSError, TypeError, ValueError):
+        return default
     if isinstance(spec, list):
         head = spec[0]
         if len(spec) > 1:
-            with open(RESPONSES_FILE + ".tmp", "w") as fh:
+            with open(path + ".tmp", "w") as fh:
                 json.dump(spec[1:], fh)
-            os.rename(RESPONSES_FILE + ".tmp", RESPONSES_FILE)
+            os.rename(path + ".tmp", path)
         return head
     return spec
+
+
+def auto_context(body):
+    candidates = body.get("candidates", []) if isinstance(body, dict) else []
+    window = candidates[-6:]
+    entries = [{"from": "owner", "text": c.get("text")} for c in window if c.get("user") == OWNER]
+    return {
+        "context": entries,
+        "counts": {"owner": len(entries), "athena": 0, "not_owner": len(window) - len(entries)},
+        "question_set_version": "slack-routing-v2",
+        "rules": {"window_s": 3600, "max_entries": 6, "max_text": 500},
+        "owner_slack_user_id": OWNER,
+    }
 
 
 def not_configured(body):
@@ -104,9 +137,14 @@ class Handler(BaseHTTPRequestHandler):
         }
         with open(LOG_FILE, "a") as fh:
             fh.write(json.dumps(entry) + "\n")
-        spec = next_spec()
+        if self.path == CONTEXT_PATH:
+            spec = next_spec(CONTEXT_FILE, {"auto": "context"})
+        else:
+            spec = next_spec(RESPONSES_FILE, {"auto": "not_configured"})
         if spec.get("auto") == "not_configured":
             status, payload = 200, not_configured(body or {})
+        elif spec.get("auto") == "context":
+            status, payload = 200, auto_context(body or {})
         else:
             status, payload = int(spec.get("status", 200)), spec.get("body", {})
         data = json.dumps(payload).encode()

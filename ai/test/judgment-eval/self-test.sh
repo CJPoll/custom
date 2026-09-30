@@ -106,6 +106,54 @@ ruby_eq "domain: a case with neither its own nor a default domain is counted" \
   "1" \
   'JudgmentEval.with_domain([{"case_id"=>"a","content_domain"=>nil},{"case_id"=>"b","content_domain"=>"work"}], nil)[1]'
 
+# DND-1048: the slack_routing context candidates. Root D1 at 1790570000.000100.
+CTX_ROOT='r = {"channel"=>"D1","ts"=>"1790570000.000100","kind"=>"im","text"=>"ROOT","user"=>"U0O"}; ln = ->(o) { {"channel"=>"D1","user"=>"U0O","ts"=>"#{1790570000 + o}.000100","text"=>"t#{o}"}.merge(o == -1 ? {"user"=>"UFAKE00009","text"=>"OTHER"} : {}) }'
+ruby_eq "context: slack ts parses to microseconds; anything else is nil [DND-1048]" \
+  "1790570000000100 nil nil nil" \
+  '[JudgmentEval.slack_ts_us("1790570000.000100"), JudgmentEval.slack_ts_us("1790570000.1"), JudgmentEval.slack_ts_us("99999999999.000100"), JudgmentEval.slack_ts_us(nil)].map(&:inspect).join(" ")'
+ruby_eq "context: candidates are the root channel's top-level lines in its hour, oldest first [DND-1048]" \
+  "t-3600 t-60" \
+  "${CTX_ROOT}"'; JudgmentEval.context_candidates(r, [ln[-60], ln[-3600], ln[-3601], ln[0], ln[5], ln[-30].merge("channel"=>"D2")], "U0O").map { |c| c["text"] }.join(" ")'
+ruby_eq "context: another person's line is a candidate with its text emptied (D7) [DND-1048]" \
+  'UFAKE00009:' \
+  "${CTX_ROOT}"'; JudgmentEval.context_candidates(r, [ln[-1]], "U0O").map { |c| c["user"] + ":" + c["text"] }.join(" ")'
+ruby_eq "context: a thread reply is never a candidate; a thread parent is [DND-1048]" \
+  "t-60" \
+  "${CTX_ROOT}"'; JudgmentEval.context_candidates(r, [ln[-60].merge("thread_ts"=>"1790569940.000100"), ln[-30].merge("thread_ts"=>"1790560000.000100")], "U0O").map { |c| c["text"] }.join(" ")'
+ruby_eq "context: a line the inbox holds twice is one candidate [DND-1048]" \
+  "1" \
+  "${CTX_ROOT}"'; JudgmentEval.context_candidates(r, [ln[-60], ln[-60], ln[-60]], "U0O").size'
+ruby_eq "context: a candidate carries only the endpoint's fields [DND-1048]" \
+  '["channel","user","ts","text","thread_ts"]' \
+  "${CTX_ROOT}"'; JSON.generate(JudgmentEval.context_candidates(r, [ln[-60].merge("event_id"=>"Ev1","route"=>"x")], "U0O").first.keys)'
+ruby_eq "context: at most 200 candidates, the most recent [DND-1048]" \
+  "200 t-1" \
+  "${CTX_ROOT}"'; c = JudgmentEval.context_candidates(r, (2..250).map { |o| ln[-o] } + [ln[-60].merge("text"=>"t-1","ts"=>"1790569999.000100")], "U0O"); [c.size, c.last["text"]].join(" ")'
+ruby_eq "context: a root with a malformed ts gets no candidates [DND-1048]" \
+  "0" \
+  "${CTX_ROOT}"'; JudgmentEval.context_candidates(r.merge("ts"=>"bad"), [ln[-60]], "U0O").size'
+ruby_eq "context: the request names bot_id only when given [DND-1048]" \
+  'false B0X' \
+  "${CTX_ROOT}"'; [JudgmentEval.context_request(r, []).key?("bot_id"), JudgmentEval.context_request(r, [], "B0X")["bot_id"]].join(" ")'
+ruby_eq "context: the harness's rules are the labeller's constants, and the router's (3600/6/500) [DND-1048 x DND-1047]" \
+  '{"window_s":3600,"max_entries":6,"max_text":500} true' \
+  '[JSON.generate(JudgmentEval::CONTEXT_RULES), JudgmentEval::CONTEXT_RULES == {"window_s"=>JudgmentContext::WINDOW_S,"max_entries"=>JudgmentContext::MAX_MESSAGES,"max_text"=>JudgmentContext::JUDGE_TEXT_CAP}].join(" ")'
+ruby_eq "context: a reply that matches the harness passes the check [DND-1048]" \
+  "nil" \
+  'JudgmentEval.check_context({"question_set_version"=>"slack-routing-v2","rules"=>{"window_s"=>3600,"max_entries"=>6,"max_text"=>500},"owner_slack_user_id"=>"U0O"}, "U0O").inspect'
+ruby_eq "context: another version, other rules, another owner or a missing field each fail the check [DND-1048]" \
+  "4" \
+  'ok = {"question_set_version"=>"slack-routing-v2","rules"=>{"window_s"=>3600,"max_entries"=>6,"max_text"=>500},"owner_slack_user_id"=>"U0O"}; [ok.merge("question_set_version"=>"slack-routing-v3"), ok.merge("rules"=>{"window_s"=>7200,"max_entries"=>6,"max_text"=>500}), ok.merge("owner_slack_user_id"=>"U0X"), ok.reject { |k, _| k == "rules" }].count { |d| JudgmentEval.check_context(d, "U0O") }'
+ruby_eq "context: an owner mismatch names neither owner id (a work value) [DND-1048 x DND-704]" \
+  "the server's owner Slack user id differs from the private overlay's (neither is printed)" \
+  'JudgmentEval.check_context({"question_set_version"=>"slack-routing-v2","rules"=>{"window_s"=>3600,"max_entries"=>6,"max_text"=>500},"owner_slack_user_id"=>"UFAKE00002"}, "UFAKE00001")'
+ruby_eq "context: the case input is the root's text and kind with the context, nothing else [DND-1048]" \
+  '{"text":"ROOT","kind":"im","context":[]}' \
+  "${CTX_ROOT}"'; JSON.generate(JudgmentEval.context_input(r, []))'
+ruby_eq "context: an unavailable case is counted and named [DND-1048]" \
+  "context: built 1 of 2|unscored 1 (context_unavailable, not sent): Ev2" \
+  'JudgmentEval.context_lines(1, [{case_id: "Ev2"}]).join("|")'
+
 echo "== end to end"
 
 TOKEN="judgment-eval-test-token-$$-${RANDOM}-c4e1"
@@ -116,10 +164,26 @@ chmod 600 "${TMP}/cfg/config.json"
 export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/cfg/config.json"
 export FLEET_CLAUDE_JSON="${TMP}/claude.json"
 export XDG_DATA_HOME="${TMP}/data"
+# The owner's Slack id is a work value: it lives only in the private overlay
+# (ai/contracts/athena-private-overlay.md), never in this public repo. The
+# suite feeds a SYNTHETIC id the way the real one is fed: to judgment-eval
+# through a fixture overlay (ATHENA_PRIVATE_ROOT), and to the fake server as
+# the owner id its app would hold.
+OWNER_ID="UFAKE00001"
+overlay_root() { # overlay_root DIR SLACK_JSON
+  mkdir -p "$1/overlay"
+  printf '{"kind":"athena-private-overlay","schema":1}\n' >"$1/athena-overlay.json"
+  printf '%s\n' "$2" >"$1/overlay/slack.json"
+  chmod 700 "$1" "$1/overlay"
+}
+OVERLAY="${TMP}/overlay"
+overlay_root "${OVERLAY}" "{\"people\":{\"owner\":{\"user_id\":\"${OWNER_ID}\"}}}"
+export ATHENA_PRIVATE_ROOT="${OVERLAY}"
+export FAKE_OWNER_SLACK_USER_ID="${OWNER_ID}"
 : > "${TMP}/server.log"
 printf '{"auto":"not_configured"}\n' > "${TMP}/responses.json"
 
-python3 "${FAKE}" "${TMP}/port" "${TMP}/server.log" "${TMP}/responses.json" "${TMP}/token" &
+python3 "${FAKE}" "${TMP}/port" "${TMP}/server.log" "${TMP}/responses.json" "${TMP}/token" "${TMP}/context.json" &
 SERVER_PID=$!
 for _i in $(seq 1 100); do
   [ -s "${TMP}/port" ] && break
@@ -152,9 +216,14 @@ run() {
   ERR="$(cat "${TMP}/err")"
 }
 
-run --help
-eq "--help exits 0" "${RC}" "0"
+NOHOME="${TMP}/no-overlay-home"
+mkdir -p "${NOHOME}"
+OUT="$(env -u ATHENA_PRIVATE_ROOT HOME="${NOHOME}" "${BIN}" --help 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+eq "--help exits 0 with no private overlay [DND-1048 x DND-704]" "${RC}" "0"
 has "--help prints the usage on stdout" "${OUT}" "Usage: judgment-eval"
+has "--help names the overlay key the owner id is read from [DND-1048 x DND-704]" "${OUT}" "slack .people.owner.user_id"
+lacks "--help prints no owner id [DND-1048 x DND-704]" "${OUT}" "${OWNER_ID}"
+eq "--help writes nothing to stderr [DND-1048 x DND-704]" "${ERR}" ""
 
 run --use-case finding_triage --labels "${TMP}/labels.jsonl"
 eq "a missing --corpus is usage (2)" "${RC}" "2"
@@ -314,6 +383,203 @@ respond '{"status":404,"body":{"error":"not_found"}}'
 run --apply "5f0c3a1e-8b2d-4c6f-9a7e-1d2b3c4d5e6f"
 eq "--apply of a run that is absent or another owner's exits 5" "${RC}" "5"
 has "the not_found line says it may not be this owner's" "${ERR}" "not this machine owner's"
+
+echo "== slack_routing context (DND-1048)"
+
+# Synthetic inbox: two *-slack.jsonl files. The corpus IS walt_ui-slack.jsonl
+# (the labels join its event_id), as judgment-label makes it.
+INBOX="${TMP}/inbox"
+mkdir -p "${INBOX}"
+{
+  printf '{"channel":"D1","user":"%s","ts":"1790570000.000100","thread_ts":null,"text":"ROOT-ONE","kind":"im","event_id":"Ev-r1"}\n' "${OWNER_ID}"
+  printf '{"channel":"D2","user":"%s","ts":"1790571000.000100","thread_ts":null,"text":"ROOT-TWO","kind":"mpim","event_id":"Ev-r2"}\n' "${OWNER_ID}"
+  printf '{"channel":"D1","user":"UFAKE00009","ts":"1790569700.000100","thread_ts":null,"text":"OTHER-SECRET","kind":"im","event_id":"Ev-m"}\n'
+  printf '{"channel":"D3","user":"UFAKE00009","ts":"1790572000.000100","thread_ts":null,"text":"OTHER-ROOT","kind":"im","event_id":"Ev-mr"}\n'
+} > "${INBOX}/walt_ui-slack.jsonl"
+{
+  printf '{"channel":"D1","user":"%s","ts":"1790569400.000100","thread_ts":null,"text":"OWNER-EARLIER","kind":"im","event_id":"Ev-e"}\n' "${OWNER_ID}"
+  printf '{"channel":"D1","user":"%s","ts":"1790569400.000100","thread_ts":null,"text":"OWNER-EARLIER","kind":"im","event_id":"Ev-e"}\n' "${OWNER_ID}"
+  printf '{"channel":"D1","user":"%s","ts":"1790569500.000100","thread_ts":"1790569000.000100","text":"OWNER-IN-THREAD","kind":"thread_reply","event_id":"Ev-t"}\n' "${OWNER_ID}"
+  printf '{"channel":"D1","user":"%s","ts":"1790566000.000100","thread_ts":null,"text":"OWNER-OLD","kind":"im","event_id":"Ev-o"}\n' "${OWNER_ID}"
+} > "${INBOX}/custom-slack.jsonl"
+cat > "${TMP}/labels-slr.jsonl" <<'EOF'
+{"id":"Ev-r1","label":"harness","provenance":"owner_confirmed","labeler":"owner","labeled_at":"2026-09-28T00:00:00Z"}
+{"id":"Ev-r2","label":"walt_ui","provenance":"owner_confirmed","labeler":"owner","labeled_at":"2026-09-28T00:00:00Z"}
+EOF
+slr() { run --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${INBOX}/walt_ui-slack.jsonl" --content-domain work --pause 0 --inbox-root "${INBOX}" "$@"; }
+ctx_requests() { jq -c 'select(.path == "/api/v1/judgments/slack_routing/context")' "${TMP}/server.log"; }
+eval_requests() { jq -c 'select(.path == "/api/v1/judgments/eval")' "${TMP}/server.log"; }
+ctx_respond() { printf '%s\n' "$1" > "${TMP}/context.json"; }
+GOOD_META='"question_set_version":"slack-routing-v2","rules":{"window_s":3600,"max_entries":6,"max_text":500},"owner_slack_user_id":"'"${OWNER_ID}"'"'
+
+n="$(requests)"
+slr --dry-run
+eq "slack_routing --dry-run exits 0 [DND-1048]" "${RC}" "0"
+has "--dry-run builds no context [DND-1048]" "${OUT}" "context: not built (dry run)"
+has "--dry-run prints the candidate counts [DND-1048]" "${OUT}" "context candidates: 2 line(s), 1 the owner's, for 1 of 2 case(s)"
+has "the run names the inbox files it read [DND-1048]" "${OUT}" "inbox files: 2 read (custom-slack.jsonl, walt_ui-slack.jsonl)"
+eq "--dry-run makes no call at all [DND-1048]" "$(requests)" "${n}"
+lacks "--dry-run never prints a context's text [DND-1048]" "${OUT}" "OWNER-EARLIER"
+
+respond '{"auto":"not_configured"}'
+rm -f "${TMP}/context.json"
+: > "${TMP}/server.log"
+slr
+eq "a slack_routing run with no key still exits 3 [DND-1048]" "${RC}" "3"
+eq "one context request per root, then one eval batch [DND-1048]" "$(requests)" "3"
+first_ctx="$(ctx_requests | head -n 1)"
+eq "the context request is for the root's channel, ts and kind [DND-1048]" \
+  "$(jq -c '.body | [.channel, .ts, .kind]' <<<"${first_ctx}")" '["D1","1790570000.000100","im"]'
+eq "candidates: top-level, one per ts, in the hour; only the owner's keeps its text (D7) [DND-1048]" \
+  "$(jq -c '[.body.candidates[] | [.user, .text]]' <<<"${first_ctx}")" '[["'"${OWNER_ID}"'","OWNER-EARLIER"],["UFAKE00009",""]]'
+eq "the request names no bot_id unless given [DND-1048]" "$(jq -c '.body | has("bot_id")' <<<"${first_ctx}")" "false"
+eq "the context request authenticated with the machine token [DND-1048]" "$(jq -r .auth_ok <<<"${first_ctx}")" "true"
+eq "the token was in no argv during the context request [DND-1048]" "$(jq -c .argv_leak <<<"${first_ctx}")" "[]"
+if ctx_requests | grep -q OTHER-SECRET; then bad "no context request carries another person's text (D7) [DND-1048]"; else ok "no context request carries another person's text (D7) [DND-1048]"; fi
+eval_req="$(eval_requests)"
+eq "each case input is {text, kind, context} from the endpoint [DND-1048]" \
+  "$(jq -c '.body.cases[0].input' <<<"${eval_req}")" '{"text":"ROOT-ONE","kind":"im","context":[{"from":"owner","text":"OWNER-EARLIER"}]}'
+eq "an empty context is still a context [DND-1048]" \
+  "$(jq -c '.body.cases[1].input' <<<"${eval_req}")" '{"text":"ROOT-TWO","kind":"mpim","context":[]}'
+has "the run reports the contexts built [DND-1048]" "${OUT}" "context: built 2 of 2"
+
+# --bot-id reaches the request.
+: > "${TMP}/server.log"
+slr --bot-id B0ATHENA
+eq "--bot-id is sent as bot_id [DND-1048]" "$(ctx_requests | head -n 1 | jq -r .body.bot_id)" "B0ATHENA"
+run --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${INBOX}/walt_ui-slack.jsonl" --content-domain work --inbox-root "${INBOX}" --bot-id "not a bot" --dry-run
+eq "a malformed --bot-id is usage (2) [DND-1048]" "${RC}" "2"
+
+# A failed context call leaves that case unscored context_unavailable, with the server's own fix.
+ctx_respond '[{"status":503,"body":{"error":"context_unavailable","fix":"Fix: check the database."}},{"auto":"context"}]'
+: > "${TMP}/server.log"
+rm -rf "${XDG_DATA_HOME}/athena/evals/runs"
+slr
+eq "a run with one unavailable context still exits 3 with no key [DND-1048]" "${RC}" "3"
+eq "the unavailable case is not sent to the eval [DND-1048]" \
+  "$(eval_requests | jq -c '[.body.cases[].case_id]')" '["Ev-r2"]'
+has "the unavailable case is named as unscored context_unavailable [DND-1048]" "${OUT}" "unscored 1 (context_unavailable, not sent): Ev-r1"
+has "the stderr line quotes the server's fix [DND-1048]" "${ERR}" "1 case(s) have no context (HTTP 503: Fix: check the database. x1): Ev-r1"
+run_file="$(find "${XDG_DATA_HOME}/athena/evals/runs" -maxdepth 1 -type f | head -n 1)"
+eq "exactly one file is written: the run file, no second corpus [DND-1048]" \
+  "$(find "${XDG_DATA_HOME}" -type f | wc -l | tr -d ' ')" "1"
+eq "the run file records the case as unscored context_unavailable [DND-1048]" \
+  "$(jq -c '[.results[] | select(.reason == "context_unavailable") | .case_id]' "${run_file}")" '["Ev-r1"]'
+eq "the run file names the inbox files [DND-1048]" "$(jq -c .context.inbox_files "${run_file}")" '["custom-slack.jsonl","walt_ui-slack.jsonl"]'
+for text in ROOT-ONE ROOT-TWO OWNER-EARLIER OTHER-SECRET; do
+  if grep -q "${text}" "${run_file}"; then bad "the run file holds no text (${text}) [DND-1048]"; else ok "the run file holds no text (${text}) [DND-1048]"; fi
+done
+
+# A 422 about one root is that case's; its fix is quoted.
+ctx_respond '[{"status":422,"body":{"error":"unprocessable_entity","fix":"ts must be a Slack ts. Fix: send the root line'"'"'s ts unchanged."}},{"auto":"context"}]'
+slr
+has "a per-root 422 is unscored with the server's fix [DND-1048]" "${ERR}" "HTTP 422: ts must be a Slack ts. Fix: send the root line's ts unchanged."
+
+# Several apps and no bot_id dooms every case: fatal, pointing at --bot-id.
+ctx_respond '{"status":422,"body":{"error":"unprocessable_entity","fix":"the owner has more than one Slack app. Fix: pass bot_id."}}'
+: > "${TMP}/server.log"
+slr
+eq "an ambiguous-app 422 exits 5 [DND-1048]" "${RC}" "5"
+has "it names --bot-id as the fix [DND-1048]" "${ERR}" "Fix: re-run with --bot-id"
+eq "it stops after the first context request [DND-1048]" "$(requests)" "1"
+
+# A reply that does not match this harness stops the run: never a quiet empty context.
+ctx_respond "{\"status\":200,\"body\":{\"context\":[],\"counts\":{},${GOOD_META/${OWNER_ID}/UFAKE00002}}}"
+slr
+eq "an owner id mismatch exits 5 [DND-1048]" "${RC}" "5"
+has "it says the owner id differs, with a Fix [DND-1048]" "${ERR}" "the server's owner Slack user id differs from the private overlay's (neither is printed). Fix: "
+lacks "the mismatch never prints the overlay's owner id [DND-1048 x DND-704]" "${ERR}" "${OWNER_ID}"
+lacks "the mismatch never prints the server's owner id [DND-1048 x DND-704]" "${ERR}" "UFAKE00002"
+ctx_respond "{\"status\":200,\"body\":{\"context\":[],\"counts\":{},${GOOD_META/slack-routing-v2/slack-routing-v3}}}"
+slr
+eq "a question-set version mismatch exits 5 [DND-1048]" "${RC}" "5"
+has "it names both versions [DND-1048]" "${ERR}" "the server's question set is slack-routing-v3, this harness builds for slack-routing-v2"
+ctx_respond '{"status":200,"body":{"context":[],"counts":{},"question_set_version":"slack-routing-v2","owner_slack_user_id":"'"${OWNER_ID}"'"}}'
+slr
+eq "a reply with no rules exits 5: could not check is never checked [DND-1048]" "${RC}" "5"
+
+# Every context unavailable: nothing is judged.
+ctx_respond '{"status":503,"body":{"error":"context_unavailable","fix":"Fix: check the database."}}'
+: > "${TMP}/server.log"
+slr
+eq "every context unavailable exits 3 [DND-1048]" "${RC}" "3"
+has "it says nothing was sent, with a Fix [DND-1048]" "${ERR}" "nothing was sent: every case's context was unavailable"
+eq "no eval request is made [DND-1048]" "$(eval_requests | wc -l | tr -d ' ')" "0"
+
+# A 404: no owner app, or no endpoint at all. Both doom every case, and they say which.
+ctx_respond '{"status":404,"body":{"error":"not_found"}}'
+slr
+eq "a not_found 404 exits 5 [DND-1048]" "${RC}" "5"
+has "the not_found 404 names the owner Slack user id, with a Fix [DND-1048]" "${ERR}" "owner Slack user id (and that bot id, if --bot-id was given) (HTTP 404). Fix: "
+ctx_respond '{"status":404,"body":{}}'
+slr
+eq "a 404 from a server without the endpoint exits 5 [DND-1048]" "${RC}" "5"
+has "it says the endpoint is missing [DND-1048]" "${ERR}" "the server has no slack_routing context endpoint (HTTP 404). Fix: deploy gen_saas with DND-1048"
+rm -f "${TMP}/context.json"
+
+# A labelled root the owner did not write is never sent (D7).
+printf '{"id":"Ev-mr","label":"walt_ui","provenance":"owner_confirmed"}\n{"id":"Ev-r1","label":"harness","provenance":"owner_confirmed"}\n' > "${TMP}/labels-other.jsonl"
+: > "${TMP}/server.log"
+run --use-case slack_routing --labels "${TMP}/labels-other.jsonl" --corpus "${INBOX}/walt_ui-slack.jsonl" --content-domain work --pause 0 --inbox-root "${INBOX}"
+has "a root someone else wrote is unscored, never sent (D7) [DND-1048]" "${ERR}" "the root is not the owner's x1): Ev-mr"
+if grep -q OTHER-ROOT "${TMP}/server.log"; then bad "no request carries another person's root (D7) [DND-1048]"; else ok "no request carries another person's root (D7) [DND-1048]"; fi
+
+# The inbox root: a missing one is an error, never an empty context.
+run --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${INBOX}/walt_ui-slack.jsonl" --content-domain work --inbox-root "${TMP}/no-inbox" --dry-run
+eq "a missing inbox root is exit 1 [DND-1048]" "${RC}" "1"
+has "a missing inbox root says so, with a Fix [DND-1048]" "${ERR}" "the inbox root ${TMP}/no-inbox does not exist. Fix: "
+mkdir -p "${TMP}/empty-inbox"
+run --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${INBOX}/walt_ui-slack.jsonl" --content-domain work --inbox-root "${TMP}/empty-inbox" --dry-run
+eq "an inbox root with no *-slack.jsonl is exit 1, never zero candidates [DND-1048]" "${RC}" "1"
+has "it names the 0 files [DND-1048]" "${ERR}" "(0 files)"
+ATHENA_INBOX_ROOT="${INBOX}" run --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${INBOX}/walt_ui-slack.jsonl" --content-domain work --dry-run
+eq "ATHENA_INBOX_ROOT is the default inbox root [DND-1048]" "${RC}" "0"
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --inbox-root "${INBOX}" --dry-run
+eq "--inbox-root with another use case is usage (2) [DND-1048]" "${RC}" "2"
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --bot-id B0X --dry-run
+eq "--bot-id with another use case is usage (2) [DND-1048]" "${RC}" "2"
+
+echo "== slack_routing: the owner id comes from the private overlay (DND-1048 x DND-704)"
+
+# Each failure is exit 1 (local configuration), carries the resolver's own
+# Fix: line, makes no request at all, and never reads as "not the owner's"
+# (which would leave every case context_unavailable, exit 3).
+overlay_refused() { # overlay_refused NAME STATE -- after a run
+  eq "${1} refuses slack_routing (exit 1)" "${RC}" "1"
+  has "${1}: the refusal names the state ${2}" "${ERR}" "private-overlay: ${2}: key=slack.people.owner.user_id"
+  has "${1}: the refusal carries Fix:" "${ERR}" "Fix: "
+  eq "${1}: the refusal is one stderr line" "$(printf '%s\n' "${ERR}" | wc -l | tr -d ' ')" "1"
+  lacks "${1}: it never reads as not the owner's" "${ERR}" "not the owner's"
+  eq "${1}: no request is made" "$(requests)" "0"
+}
+respond '{"auto":"not_configured"}'
+: > "${TMP}/server.log"
+OUT="$(env -u ATHENA_PRIVATE_ROOT HOME="${NOHOME}" "${BIN}" --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${INBOX}/walt_ui-slack.jsonl" --content-domain work --pause 0 --inbox-root "${INBOX}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+overlay_refused "an ABSENT overlay" "ABSENT"
+has "an ABSENT overlay: the refusal names the probed path" "${ERR}" "${NOHOME}/.config/athena/work"
+OUT="$(env -u ATHENA_PRIVATE_ROOT HOME="${NOHOME}" "${BIN}" --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${INBOX}/walt_ui-slack.jsonl" --content-domain work --inbox-root "${INBOX}" --dry-run 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+overlay_refused "an ABSENT overlay under --dry-run" "ABSENT"
+ATHENA_PRIVATE_ROOT="" slr
+overlay_refused "a MALFORMED overlay root" "MALFORMED"
+BADJSON="${TMP}/overlay-badjson"
+overlay_root "${BADJSON}" '{"people": not json'
+ATHENA_PRIVATE_ROOT="${BADJSON}" slr
+overlay_refused "an overlay whose slack.json is not JSON" "MALFORMED"
+NOKEY="${TMP}/overlay-nokey"
+overlay_root "${NOKEY}" '{"people":{}}'
+ATHENA_PRIVATE_ROOT="${NOKEY}" slr
+overlay_refused "an overlay without the owner key" "KEY_NOT_FOUND"
+NOTID="${TMP}/overlay-notid"
+overlay_root "${NOTID}" '{"people":{"owner":{"user_id":"cody"}}}'
+ATHENA_PRIVATE_ROOT="${NOTID}" slr
+eq "an owner value that is not a Slack user id refuses (exit 1)" "${RC}" "1"
+has "the malformed-value refusal says what is wrong" "${ERR}" "is not a Slack user id"
+lacks "the malformed-value refusal never prints the value" "${ERR}" "cody"
+has "the malformed-value refusal carries Fix:" "${ERR}" "Fix: "
+eq "the malformed-value refusal makes no request" "$(requests)" "0"
+OUT="$(env -u ATHENA_PRIVATE_ROOT HOME="${NOHOME}" "${BIN}" --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --dry-run 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+eq "another use case needs no overlay (--dry-run exits 0)" "${RC}" "0"
+lacks "another use case never reads the overlay" "${ERR}" "private-overlay"
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"

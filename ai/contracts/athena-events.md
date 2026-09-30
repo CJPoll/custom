@@ -4101,7 +4101,10 @@ event classified (not ignored), dedupe pre-check passed
    2a. mode off           -> the channel route, UNCHANGED: no call, no
                              judgment_calls row, no topic, no topic outcome  [no call]
    2b. sender != owner    -> the channel route (topic reason: sender_rule)   [no judgment]
-   2c. judge slack_routing -> the caller's decision:
+   2c. read the conversation context (ai/contracts/athena-judgments.md ->
+       Egress and data flow, the slack_routing row)
+         read failed      -> the channel route (topic reason: context_unavailable)  [no judgment]
+       judge slack_routing with the root and its context -> the caller's decision:
          accepted, label enabled, topic route live
                           -> that instance's Slack inbox (route: topic_judgment)
          anything else    -> the channel route (topic reason: the fallback reason)
@@ -4122,8 +4125,18 @@ turned off mid-flight (`ai/contracts/athena-judgments.md` → *Fallback: every
 error equals today's behaviour, loudly*) — never as the pre-call short-circuit's
 own record, since the pre-call short-circuit records nothing.
 
+**Later (2026-09-28):** step 2c read "judge slack_routing", with the root
+alone as the input. Superseded by DND-1048: 2c reads the conversation context
+first, from gen_saas's own tables and never the Slack API, and a failed read
+asks no judgment and falls back as `context_unavailable`. What the context
+holds is `ai/contracts/athena-judgments.md` → *Egress and data flow*, not
+restated here. Why: the owner found roots that cannot be routed without the
+conversation before them.
+
 - **Only the owner's own text is judged.** A new conversation from anyone else
-  follows the channel route by code, with no judgment and no tokens.
+  follows the channel route by code, with no judgment and no tokens. The
+  context a root carries is also only the owner's own text, plus session
+  labels for Athena's own posts.
 - **The answer is one of the owner's labels, or `unclear`.** `unclear` falls
   back and is recorded as `below_threshold`.
 - **Exactly one destination per event**, as for a claim. A topic route replaces

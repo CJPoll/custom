@@ -117,7 +117,7 @@ Keys in use (DND-704), with where each is used:
 
 | File | Key | Shape | Used by |
 |---|---|---|---|
-| `slack` | `.people.owner.user_id` | Slack user id | `athena:slack` (owner DM, click check), `athena:ticket-management` (Needs Attention DM), `ai/bin/judgment-label` |
+| `slack` | `.people.owner.user_id` | Slack user id | `athena:slack` (owner DM, click check), `athena:ticket-management` (Needs Attention DM), `ai/bin/judgment-label`, `ai/bin/judgment-eval` (`--use-case slack_routing`) |
 | `slack` | `.people` | `{alias: {user_id, name}}` | `athena:slack` → *Reading the workspace* |
 | `slack` | `.channels` | `{name: channel id}` | `athena:slack` → *Reading the workspace* |
 | `slack` | `.channels.owner_dm` | DM channel id | `athena:epic-clustering` (the daily digest) |

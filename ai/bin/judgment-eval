@@ -29,6 +29,8 @@ require "open3"
 require "time"
 require "tmpdir"
 require_relative "../lib/judgment_eval"
+require_relative "../lib/judgment_label"
+require_relative "../lib/private_overlay_resolver"
 require_relative "../lib/strict_argv"
 
 PROG = "judgment-eval"
@@ -36,7 +38,8 @@ HARNESS = File.expand_path("../..", __dir__)
 
 USAGE = <<~EOF
   Usage: judgment-eval --use-case U --labels FILE --corpus FILE [--content-domain D]
-                       [--batch-size N] [--pause S] [--dry-run]
+                       [--batch-size N] [--pause S] [--inbox-root DIR] [--bot-id B]
+                       [--dry-run]
          judgment-eval --apply RUN_ID [--dry-run]
          judgment-eval --help
 
@@ -57,7 +60,9 @@ USAGE = <<~EOF
                         (they never select a threshold) and counted.
     --corpus FILE       JSONL the labels were made from. A row joins on "id"
                         ("event_id" for slack_routing); its "input" member is
-                        sent, or the whole row if it has none. A row's
+                        sent, or the whole row if it has none (slack_routing
+                        sends only the line's text and kind, with its
+                        context: see below). A row's
                         "content_domain" (work|blend|personal) wins over
                         --content-domain.
     --content-domain D  the domain of cases whose row names none. Required if
@@ -65,8 +70,34 @@ USAGE = <<~EOF
     --batch-size N      cases per request, 1..50 (default 50)
     --pause S           seconds between batches (default 60: the server allows
                         60 judged calls per minute)
+    --inbox-root DIR    slack_routing only: where the Slack inbox lines live
+                        (default $ATHENA_INBOX_ROOT, else ~/.local/share/athena).
+                        Every *-slack.jsonl directly under it is read, and the
+                        run names each file. Lines only on another machine are
+                        not seen.
+    --bot-id B          slack_routing only: the Slack app's bot id, needed when
+                        the owner has more than one Slack app (the server
+                        refuses to guess)
     --dry-run           validate the files and the join, print the counts, and
-                        stop. Reads no token and makes no network call.
+                        stop. Reads no token and makes no network call. For
+                        slack_routing it prints the context candidate counts
+                        and "context: not built (dry run)".
+
+  slack_routing context (DND-1048): each case is judged with the conversation
+  before its root, by the router's rule. For each root the OWNER wrote (the
+  owner's Slack id is read from the private overlay, `private-overlay get
+  #{JudgmentLabel::OWNER_KEY.join(' ')}`, ai/contracts/athena-private-overlay.md,
+  and never printed) this gathers the top-level lines in the same channel
+  in the hour before it, one per ts, from the inbox files, in memory only, and
+  POSTs them to /api/v1/judgments/slack_routing/context. Only the owner's lines
+  carry their text; anyone else's goes with an empty text (it still takes its
+  slot, as the labeller shows it). The server selects the context with the
+  router's own function (six most recent top-level messages in 60 minutes;
+  the owner's text and Athena's posts as a session label). The case input is
+  then {text, kind, context}. A reply whose question-set version, rules or
+  owner id differ from this harness's stops the run (exit 5). A case whose
+  context cannot be built is unscored context_unavailable, named with its
+  reason, and never sent with an empty context.
 
   Apply:
     --apply RUN_ID      PUT the run to /api/v1/judgments/thresholds. The server
@@ -86,10 +117,13 @@ USAGE = <<~EOF
   Exit codes:
     0  scored at least one case (or applied / dry run ok)
     1  local input or configuration (a missing or empty file, a bad row, no
-       join, no token config, no athena MCP entry)
+       join, no token config, no athena MCP entry), or (slack_routing) the
+       owner's Slack id did not resolve from the private overlay (absent,
+       malformed, key missing, or not a Slack user id): nothing was sent
     2  usage
-    3  nothing scored: no key ("no key; see DND-711"), every case unscored, or
-       the use case's question set is not on the server yet
+    3  nothing scored: no key ("no key; see DND-711"), every case unscored, the
+       use case's question set is not on the server yet, or (slack_routing)
+       no case's context could be built, so nothing was sent
     4  the server was unreachable
     5  the server refused (4xx) or faulted (5xx); its Fix: is printed
 
@@ -97,7 +131,8 @@ USAGE = <<~EOF
   origin of the `athena` MCP entry in ~/.claude.json; the token is read from
   ~/.config/athena-inbox-client/config.json and fed to curl on stdin, never
   argv. Environment (optional): ATHENA_INBOX_CLIENT_CONFIG, FLEET_CLAUDE_JSON,
-  XDG_DATA_HOME, JUDGMENT_EVAL_MAX_TIME_S (per request, default 600).
+  XDG_DATA_HOME, JUDGMENT_EVAL_MAX_TIME_S (per request, default 600),
+  ATHENA_INBOX_ROOT (slack_routing's inbox root when --inbox-root is absent).
 EOF
 
 class Failure < StandardError
@@ -230,6 +265,56 @@ module Effects
     /\A[1-9]\d{0,4}\z/.match?(value) ? value : "600"
   end
 
+  # owner_id -> the owner's Slack user id from the private overlay, at
+  # DND-704's key (JudgmentLabel::OWNER_KEY). A resolve that fails, or a value
+  # that is not a Slack user id, is exit 1 carrying the resolver's one line
+  # (its Fix:), before any inbox read or request: it must never read as "no
+  # root is the owner's". Never a fallback; the value is never printed.
+  def owner_id
+    file, path = JudgmentLabel::OWNER_KEY
+    r = PrivateOverlay::Resolver.get(file, path)
+    unless r.state == :found
+      raise Failure.new(1, "#{PROG}: the owner's Slack id did not resolve, so no slack_routing context was built and nothing was sent: " \
+                           "#{PrivateOverlay.failure_line(r, "#{file}#{path}")}")
+    end
+    problem = JudgmentLabel.owner_problem(r.value)
+    fail!(1, "#{problem}, so nothing was sent", "set #{path} in overlay/#{file}.json of the private overlay (#{r.root}) to the owner's Slack user id") if problem
+    r.value
+  end
+
+  def inbox_root(flag)
+    root = flag || ENV["ATHENA_INBOX_ROOT"] || File.join(Dir.home, ".local", "share", "athena")
+    fail!(1, "the inbox root #{root} is not absolute", "pass --inbox-root with an absolute path") unless root.start_with?("/")
+    root
+  end
+
+  # read_slack_inboxes(root) -> {files: [basename], lines: [Hash], unreadable: n}.
+  # A root that is missing, or holds no *-slack.jsonl, is an ERROR: zero
+  # files must never read as "no context before any root".
+  def read_slack_inboxes(root)
+    fail!(1, "the inbox root #{root} does not exist", "pass --inbox-root (or set ATHENA_INBOX_ROOT) to the directory holding the *-slack.jsonl inboxes") unless File.directory?(root)
+    paths = Dir.glob(File.join(root, "*-slack.jsonl")).sort
+    fail!(1, "no *-slack.jsonl file directly under #{root} (0 files)", "pass --inbox-root to the directory holding walt_ui-slack.jsonl; with no inbox lines no context can be built") if paths.empty?
+
+    lines = []
+    unreadable = 0
+    paths.each do |path|
+      File.foreach(path, encoding: "UTF-8") do |raw|
+        next if raw.strip.empty?
+
+        row = begin
+          JSON.parse(raw)
+        rescue JSON::ParserError, EncodingError
+          nil
+        end
+        row.is_a?(Hash) ? lines << row : unreadable += 1
+      end
+    rescue SystemCallError => e
+      fail!(1, "could not read #{path}: #{e.class}", "check that inbox file's permissions")
+    end
+    { files: paths.map { |p| File.basename(p) }, lines: lines, unreadable: unreadable }
+  end
+
   def runs_dir
     base = ENV["XDG_DATA_HOME"] || File.join(Dir.home, ".local", "share")
     fail!(1, "XDG_DATA_HOME is not absolute", "set it to an absolute path or unset it") unless base.start_with?("/")
@@ -291,16 +376,26 @@ module Manager
   end
 
   def run_eval(opts, out, err)
+    # D7 needs the owner's id before anything is read: slack_routing only.
+    opts = opts.merge(owner: Effects.owner_id) if opts[:use_case] == "slack_routing"
     loaded = load_cases(opts)
     report_join(loaded, out, err)
-    batches = JudgmentEval.batches(loaded[:cases], opts[:batch_size])
+    inbox = opts[:use_case] == "slack_routing" ? gather_candidates(opts, loaded[:cases], out) : nil
     if opts[:dry_run]
+      out.puts "context: not built (dry run)" if inbox
+      batches = JudgmentEval.batches(loaded[:cases], opts[:batch_size])
       out.puts "dry run: #{batches.size} batch(es) of at most #{opts[:batch_size]}; nothing sent"
       return 0
     end
 
     origin = Effects.api_origin(Effects.mcp_url)
     token = Effects.read_token
+    context = inbox && build_contexts(loaded[:cases], inbox, origin, token, opts, out, err)
+    cases = context ? context[:cases] : loaded[:cases]
+    return nothing_sent(err) if cases.empty?
+
+    batches = JudgmentEval.batches(cases, opts[:batch_size])
+    loaded = loaded.merge(context: context)
     started = Time.now.utc
     state = { run_id: nil, results: [], response: nil, sent: 0, stopped: nil }
     batches.each_with_index do |batch, i|
@@ -334,6 +429,8 @@ module Manager
       out.puts "#{PROG}: #{opts[:use_case]} run #{data['eval_run_id']} (question set #{data['question_set_version']}, model #{data['model']}): " \
                "#{state[:results].size} cases in #{state[:sent]} of #{batch_count} batch(es)"
       JudgmentEval.summary_lines(data["report"]).each { |line| out.puts line }
+      context = loaded[:context]
+      JudgmentEval.context_lines(context[:built], context[:unavailable]).each { |line| out.puts line } if context
       out.puts "run file: #{run_path}"
     end
     return stopped(state[:stopped], state[:sent], batch_count, err) if state[:stopped]
@@ -362,8 +459,131 @@ module Manager
       "proposed_excluded" => loaded[:joined][:proposed], "join_missing" => loaded[:joined][:missing],
       "batches" => { "planned" => batch_count, "sent" => state[:sent], "stopped" => state[:stopped] && state[:stopped][:line] },
       "labels" => loaded[:cases].to_h { |c| [c["case_id"], c["label"]] },
-      "results" => state[:results], "report" => data["report"]
-    }
+      "results" => state[:results] + context_results(loaded[:context]), "report" => data["report"]
+    }.merge(context_doc(loaded[:context]))
+  end
+
+  # ── slack_routing context (DND-1048) ─────────────────────────────────────
+
+  def context_results(context)
+    return [] unless context
+
+    context[:unavailable].map { |u| { "case_id" => u[:case_id], "outcome" => "unscored", "reason" => "context_unavailable" } }
+  end
+
+  # Counts and ids only: the run file never holds a context's text.
+  def context_doc(context)
+    return {} unless context
+
+    { "context" => { "inbox_files" => context[:files], "built" => context[:built], "context_unavailable" => context[:unavailable].map { |u| u[:case_id] } } }
+  end
+
+  # gather_candidates(opts, cases, out) -> {files:, candidates: {case_id => [candidate]}}.
+  # In memory only: the inbox lines are never copied to a second file.
+  def gather_candidates(opts, cases, out)
+    inbox = Effects.read_slack_inboxes(Effects.inbox_root(opts[:inbox_root]))
+    by_case = cases.to_h { |c| [c["case_id"], JudgmentEval.context_candidates(c["input"], inbox[:lines], opts[:owner])] }
+    with_any = by_case.count { |_id, candidates| candidates.any? }
+    out.puts "inbox files: #{inbox[:files].size} read (#{inbox[:files].join(', ')})" + (inbox[:unreadable].positive? ? ", #{inbox[:unreadable]} unreadable line(s) skipped" : "")
+    owner_lines = by_case.values.sum { |cands| cands.count { |cand| cand["user"] == opts[:owner] } }
+    out.puts "context candidates: #{by_case.values.sum(&:size)} line(s), #{owner_lines} the owner's, for #{with_any} of #{cases.size} case(s)"
+    { files: inbox[:files], candidates: by_case }
+  end
+
+  # build_contexts(cases, inbox, origin, token, opts, out, err) -> {cases:, built:, unavailable:, files:}.
+  # One POST per root. A case whose context is unavailable is left out of the
+  # run and named; it is never sent with an empty context.
+  def build_contexts(cases, inbox, origin, token, opts, out, err)
+    url = "#{origin}/api/v1/judgments/slack_routing/context"
+    built = []
+    unavailable = []
+    cases.each do |c|
+      root = c["input"]
+      outcome = context_for(root, inbox[:candidates].fetch(c["case_id"]), url, token, opts)
+      raise Failure.new(outcome[:code], outcome[:line]) if outcome[:kind] == :fatal
+
+      if outcome[:kind] == :ok
+        built << c.merge("input" => JudgmentEval.context_input(root, outcome[:context]))
+      else
+        unavailable << { case_id: c["case_id"], why: outcome[:why] }
+      end
+    end
+    report_unavailable(unavailable, err)
+    out.puts "context: built #{built.size} of #{cases.size}"
+    { cases: built, built: built.size, unavailable: unavailable, files: inbox[:files] }
+  end
+
+  # D7: a root the owner did not write is never judged, so it is never sent.
+  def context_for(root, candidates, url, token, opts)
+    return { kind: :unavailable, why: "the root is not the owner's" } unless root.is_a?(Hash) && root["user"] == opts[:owner]
+
+    body = JudgmentEval.context_request(root, candidates, opts[:bot_id])
+    classify_context(Effects.request("POST", url, token, body), opts[:owner])
+  end
+
+  def report_unavailable(unavailable, err)
+    return if unavailable.empty?
+
+    whys = unavailable.group_by { |u| u[:why] }.map { |why, us| "#{why} x#{us.size}" }.join("; ")
+    err.puts "#{PROG}: #{unavailable.size} case(s) have no context (#{whys}): #{unavailable.map { |u| u[:case_id] }.join(', ')}; " \
+             "they are unscored context_unavailable and not sent. Fix: act on the reason each names (the server's own Fix: is quoted), then re-run."
+  end
+
+  def nothing_sent(err)
+    err.puts "#{PROG}: nothing was sent: every case's context was unavailable (named above). Fix: resolve the context failures, then re-run; no case was judged."
+    3
+  end
+
+  # classify_context(reply, owner) -> {kind: :ok, context:} | {kind: :unavailable, why:} | {kind: :fatal, code:, line:}.
+  # A failure that dooms every case (unreachable, bad token, no app, several
+  # apps, an endpoint that is not there, a reply that does not match this
+  # harness) stops the run; one about this root (a 503, another 422, a 5xx)
+  # leaves the case unscored context_unavailable, with the server's fix.
+  def classify_context(reply, owner)
+    return fatal(4, "could not reach the Athena server for a slack_routing context (curl exit #{reply[:curl_rc]})", "check the network and that the server is up; nothing was judged") if reply[:curl_rc] != 0
+
+    doc = begin
+      JSON.parse(reply[:body])
+    rescue JSON::ParserError
+      nil
+    end
+    doc = {} unless doc.is_a?(Hash)
+    status = reply[:status]
+    return context_reply(doc, owner) if status == 200 && doc["context"].is_a?(Array)
+
+    context_failure(status, doc)
+  end
+
+  def context_reply(doc, owner)
+    mismatch = JudgmentEval.check_context(doc, owner)
+    return fatal(5, "the context reply does not match this harness: #{mismatch}", "deploy the gen_saas and harness halves of the same question set together, and keep the private overlay's #{JudgmentLabel::OWNER_KEY.join(' ')} equal to the Slack app's owner_slack_user_id; a mismatch would change the eval's input silently") if mismatch
+
+    { kind: :ok, context: doc["context"] }
+  end
+
+  def context_failure(status, doc)
+    server_fix = doc["fix"].is_a?(String) ? doc["fix"] : nil
+    case status
+    when 401 then fatal(1, "the server rejected the machine token (HTTP 401)", "the inbox client token is owner-issued; ask the owner to re-issue it, never mint one yourself")
+    when 404
+      if doc["error"] == "not_found"
+        fatal(5, "the server found no Slack app of this machine owner's with an owner Slack user id (and that bot id, if --bot-id was given) (HTTP 404)", "set owner_slack_user_id on the owner's Slack app, or check --bot-id; the context is the owner's own conversation")
+      else
+        fatal(5, "the server has no slack_routing context endpoint (HTTP 404)", "deploy gen_saas with DND-1048 before running the slack_routing eval")
+      end
+    when 422
+      if server_fix&.include?("pass bot_id")
+        fatal(5, "the server refused the context request (HTTP 422): #{server_fix}", "re-run with --bot-id <the Slack app's bot id>")
+      else
+        { kind: :unavailable, why: "HTTP 422: #{with_fix(server_fix)}" }
+      end
+    when 200 then { kind: :unavailable, why: "HTTP 200 without a context" }
+    else { kind: :unavailable, why: "HTTP #{status}: #{with_fix(server_fix)}" }
+    end
+  end
+
+  def fatal(code, what, fix)
+    { kind: :fatal, code: code, line: "#{PROG}: #{what}. Fix: #{fix}" }
   end
 
   def stopped(outcome, sent, planned, err)
@@ -441,7 +661,7 @@ end
 SPEC = {
   "--help" => :switch, "-h" => :switch, "--use-case" => :value, "--labels" => :value, "--corpus" => :value,
   "--content-domain" => :value, "--batch-size" => :integer, "--pause" => :integer, "--dry-run" => :switch,
-  "--apply" => :value
+  "--apply" => :value, "--inbox-root" => :value, "--bot-id" => :value
 }.freeze
 
 def parse_options(argv)
@@ -449,7 +669,8 @@ def parse_options(argv)
   {
     help: raw["--help"] || raw["-h"], use_case: raw["--use-case"], labels: raw["--labels"], corpus: raw["--corpus"],
     content_domain: raw["--content-domain"], batch_size: raw.fetch("--batch-size", JudgmentEval::MAX_BATCH),
-    pause: raw.fetch("--pause", 60), dry_run: raw["--dry-run"] || false, apply: raw["--apply"], given: raw.keys
+    pause: raw.fetch("--pause", 60), dry_run: raw["--dry-run"] || false, apply: raw["--apply"],
+    inbox_root: raw["--inbox-root"], bot_id: raw["--bot-id"], given: raw.keys
   }
 rescue StrictArgv::UsageError => e
   fail!(2, e.message, "run #{PROG} --help for the flags")
@@ -465,6 +686,14 @@ def validate_eval!(opts)
   end
   fail!(2, "--batch-size must be 1..#{JudgmentEval::MAX_BATCH}", "the server takes at most #{JudgmentEval::MAX_BATCH} cases per call") unless (1..JudgmentEval::MAX_BATCH).cover?(opts[:batch_size])
   fail!(2, "--pause must be 0..3600", "pass seconds between batches") unless (0..3600).cover?(opts[:pause])
+  if opts[:bot_id] && !/\AB[A-Z0-9]{2,30}\z/.match?(opts[:bot_id])
+    fail!(2, "--bot-id #{JudgmentEval.safe(opts[:bot_id])} is not a Slack bot id", "pass the app's bot id (B...)")
+  end
+  return if opts[:use_case] == "slack_routing"
+
+  %w[inbox_root bot_id].each do |key|
+    fail!(2, "--#{key.tr('_', '-')} is for --use-case slack_routing only", "drop it; only slack_routing builds a conversation context") if opts[key.to_sym]
+  end
 end
 
 def main(argv)

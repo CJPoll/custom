@@ -100,7 +100,10 @@ Concretely:
   authorized by `:add_slack_route` when it was written.
 - **Only the owner's own text is judged for routing.** A new conversation from
   anyone else follows the channel route by code, with no call. This bounds the
-  adversarial surface.
+  adversarial surface. The conversation context sent with a root (*Egress and
+  data flow*, the `slack_routing` row) holds only the owner's own earlier text
+  and session labels for Athena's own posts; the owner filter is applied in
+  code, on the server, whatever the caller passed.
 - **Triage prints advice only.** It never closes, merges or re-prioritizes a
   ticket. The filer decides.
 - **Priority adds bounded reason deltas.** An owner override always wins, and
@@ -136,10 +139,20 @@ the request's `state`.
 | Use case | Sent |
 | --- | --- |
 | `finding_triage` | the finding's title, body (at most 2,000 characters) and project; up to 20 candidate tickets as ref, title and summary (at most 500 characters each) |
-| `slack_routing` | the owner's own message text and its line `kind` (`im`, `mpim` or `mention`) |
+| `slack_routing` | the owner's own message text and its line `kind` (`im`, `mpim` or `mention`); and the conversation before it: of the six most recent top-level messages in the same channel within the 60 minutes before it (whoever sent them, oldest first), the owner's own text (each at most 500 characters), and Athena's own posts as the posting session's label only (`walt_ui`, `harness`, `gen_saas` or `other`), never their text. Anyone else's message holds its place among the six and is sent in no form: nobody else's text is ever sent. The window, the cap and the text cap are part of the question-set version (`slack-routing-v2`) |
 | `priority_scoring` | the item's `title`, `source` and `status`, plus `message_text` for a `slack_ask`; never a date and never the asker |
 | `ticket_kind`, `ticket_severity`, `ticket_security` | the ticket's title, body (at most 2,000 characters) and project; never its status, dates, assignee or author |
 | `eval:<use_case>` | the same request the product use case builds, for a labelled case |
+
+**Later (2026-09-28):** the `slack_routing` row read "the owner's own message
+text and its line `kind` (`im`, `mpim` or `mention`)", the root alone
+(`slack-routing-v1`). Superseded by DND-1048 (`slack-routing-v2`). Why: the
+owner, labelling DND-715's corpus, found roots they could not route without the
+conversation before them, so a root-only judge would be blind on them. Athena's
+posts go as a session label, not text, because their text can quote a third
+party. The context is read from gen_saas's own `slack_events` and
+`slack_thread_claims`, never from the Slack API; it is built in memory for the
+request and stored nowhere.
 
 **What is stored: no text.** gen_saas stores no state text for any judgment.
 The call record (`judgment_calls`) holds an opaque `subject_ref` (an event id, a
@@ -254,6 +267,7 @@ one is an amendment to this table.
 | `threshold_unset` | state | caller | no threshold exists for the key; never accepts, whatever the confidence |
 | `label_disabled` | state | caller | the answer's label is disabled, or has no live destination |
 | `sender_rule` | state | Slack router | the conversation is not the owner's own, so no judgment is asked |
+| `context_unavailable` | fault | Slack router | reading the conversation context failed (or the root's `ts` is malformed), so no judgment was asked; the caller-side record is the router's outcome log, with no `judgment_calls` row |
 
 A successful call records outcome `answered` with no reason.
 
@@ -420,20 +434,40 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   machine-local `slack-routing-labels.jsonl`. The corpus is
   `walt_ui-slack.jsonl` itself, so the text is never copied. A root that an R4
   forward record names is `forward_record`; the owner confirms the rest one
-  message at a time at a terminal.
+  message at a time at a terminal. An eval case carries the context the
+  server's `POST /api/v1/judgments/slack_routing/context` builds (DND-1048),
+  which runs the router's own selection over the local inbox lines (anyone
+  but the owner with the text emptied) and the app's claims. The rule is the
+  router's; the data is this machine's inbox, which can differ from the
+  server's `slack_events`. `judgment-eval` refuses a reply whose question-set
+  version, rules or owner id differ from its own, so a mismatch fails loudly
+  instead of starving the context. Its owner id is the private overlay's
+  `slack .people.owner.user_id` (`athena-private-overlay.md`); one that does
+  not resolve stops the run before anything is read or sent, never reading as
+  "no root is the owner's". A case whose context cannot be built is
+  unscored `context_unavailable` and is never sent with an empty context.
 - **The owner confirms with the conversation context** (DND-1047). Before
   each message, `judgment-label --confirm` shows the context window that
-  DND-1048's routing-judge design (slack-routing-v2) specifies: the same
-  channel's top-level messages from the hour before, at most 6, each marked
-  with what that judge will see of it (the owner's text, Athena's post as a
-  session label, or nothing, D7). The builder is `ai/lib/judgment_context.rb`;
-  when DND-1048 builds its judge input it uses that builder, or a parity
-  check pins the two windows together. It reads Slack as Athena's bot, for
-  that terminal only; nothing egresses. A row
+  the routing judge uses (slack-routing-v2): the same channel's top-level
+  messages from the hour before, at most 6, each marked with what that judge
+  will see of it (the owner's text, Athena's post as a session label, or
+  nothing, D7). The builder is `ai/lib/judgment_context.rb`. The judge's
+  selection (gen_saas `Athena.SlackEvents.RoutingContext`, DND-1048) applies
+  the same rule: the six most recent top-level messages from any sender, then
+  only the owner's text and Athena's session labels. `judgment-eval` takes its
+  window from this builder's constants and refuses a server whose context
+  rules differ, so the two cannot drift apart silently. It reads Slack as
+  Athena's bot, for that terminal only; nothing egresses. A row
   records `"context": "shown"` or `"unavailable"`; an `owner_confirmed` row
   without `"shown"` is re-presented by `--confirm --recheck`, and its answer
   stays in force until then. judgment-eval reads only `id`, `label` and
   `provenance`, so the mark never changes a run.
+
+  **Later (2026-09-28):** this bullet said DND-1048 "uses that builder, or a
+  parity check pins the two windows together". Replaced by the rule above
+  (DND-1048): the judge is gen_saas Elixir, so it cannot call this Ruby
+  builder; the pin is judgment-eval's check of the server's `rules` against
+  this builder's constants.
 - **Finding triage labels** (DND-714, `ai/bin/triage-corpus`) come from the
   DND tracker's own history, in the machine-local
   `finding-triage-labels.jsonl` (ids only) and `finding-triage-corpus.jsonl`
