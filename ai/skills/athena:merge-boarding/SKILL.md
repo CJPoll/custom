@@ -62,7 +62,14 @@ merge when no check has reported on the head (`ai/lib/gh-merge-guard.sh`, the
 `EMPTY` case), so `locked-merge` exits 4 there however good the report is. Do
 not retry it, and do not reach for `gh api`: the guard refuses API merges and
 ref writes too. `~/dev/custom` lands by a fast-forward `gh-athena git push` of
-the gated head (the guard's header names that path). For any other no-CI repo,
+the gated head (the guard's header names that path). That push is the merge
+step, so it takes the same lock `locked-merge` does
+(`~/.local/state/athena/custom-merge.lock`, *Landing onto a moving main*).
+Hold `flock` on it across `integration-gate --rebase` AND the push, and push
+exactly the SHA `INTEGRATION OK` names. Nothing in `gh-athena` checks the lock
+on this path (DND-1370). Measured 2026-09-30 ~10:38Z: an admiral pushed
+DND-1048/717 unlocked while another held the lock gating DND-1359, whose push
+then failed NOT-FF and cost a re-gate. For any other no-CI repo,
 land CI first, or escalate the merge to Cody as a step only Cody can run.
 Measured 2026-09-29 (`2026-09-25-dnd-671-650-644`, 22:02Z): anchor#28 was
 DONE, gated and critic-PASSed, and the merge was refused. It waited on Cody,
