@@ -50,7 +50,9 @@ USAGE = <<~EOF
 
   Eval run:
     --use-case U        finding_triage | slack_routing | priority_scoring |
-                        ticket_kind | ticket_severity | ticket_security
+                        ticket_kind | ticket_severity | ticket_security |
+                        ticket_blocking (one case is one (finding,
+                        candidate) pair; ai/bin/ticket-corpus writes them)
     --labels FILE       JSONL, one per line: {"id", "label", "provenance",
                         "labeler", "labeled_at"}; provenance is forward_record,
                         owner_confirmed, tracker_record, rule_confirmed,

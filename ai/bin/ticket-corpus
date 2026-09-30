@@ -23,6 +23,7 @@ require "fileutils"
 require "json"
 require "time"
 require_relative "../lib/ticket_corpus"
+require_relative "../lib/blocking_corpus"
 require_relative "../lib/strict_argv"
 
 PROG = "ticket-corpus"
@@ -59,6 +60,19 @@ USAGE = <<~EOF
              Jev classification line; at most #{TicketCorpus::MAX_BODY} characters of body.
              A snapshot whose rows lack a Kind, Severity or Security select
              (a renamed property) is refused, never read as unset.
+             Also ticket_blocking (DND-1057), one case per (finding,
+             candidate) pair, from post-cutoff findings (any Kind but
+             Feature): Path Blocking with a Blocks edge onto a Critical
+             ticket -> (finding, that ticket) blocks; Path Off whose Found
+             while ticket's epic has open Critical tickets -> (finding, each,
+             at most #{BlockingCorpus::MAX_NEGATIVES} by ID) does_not_block. The candidate is sent as
+             ticket-classify --epic sends it (title, first #{BlockingCorpus::MAX_SUMMARY} characters);
+             the finding drops its Path statements, refs, stated edges and
+             provenance lines. Excluded by reason as above, plus
+             authored_path (Critical, Promoted), path_unset,
+             relations_truncated, blocking_without_critical_edge,
+             no_found_while, no_open_critical and candidate_unread. A
+             snapshot from before DND-1057 (no path) is refused.
   --dry-run  with --build: print the counts, write nothing
   --shadow-report --since UTC
              Over tickets created at or after UTC (e.g. 2026-09-29T00:00:00Z),
@@ -71,11 +85,16 @@ USAGE = <<~EOF
              when nothing was accepted, never 0), per judged label, and the
              bar: at least #{TicketCorpus::MIN_WINDOW_DAYS} days, #{TicketCorpus::MIN_ACCEPTED} accepted and lb >= #{TicketCorpus::MIN_LB}
              (a use case short of it at #{TicketCorpus::MAX_WINDOW_DAYS} days stays shadow).
+             ticket_blocking reads each finding's LAST "Jev path:" line: a
+             shadow line whose "would" decision has source jev is an
+             accepted judgment, agreeing when the ticket's CURRENT Path (and,
+             for Blocking, its Blocks edge) matches; the same bar.
   --dir DIR  default ${XDG_DATA_HOME:-~/.local/share}/athena/evals
              (machine-local, 0600 files, never committed)
 
   Then: judgment-eval --use-case ticket_kind --labels DIR/ticket-kind-labels.jsonl
-          --corpus DIR/ticket-kind-corpus.jsonl   (and severity, security)
+          --corpus DIR/ticket-kind-corpus.jsonl   (and severity, security,
+          and ticket_blocking with DIR/ticket-blocking-*.jsonl)
 
   Exit codes:
     0  done
@@ -141,13 +160,15 @@ module Manager
   def build(opts, out)
     snapshot = Effects.read_snapshot(opts[:dir])
     result = TicketCorpus.labels(snapshot)
+    blocking = BlockingCorpus.labels(snapshot)
     out.puts "#{PROG}: snapshot #{snapshot['fetched_at']}, #{Array(snapshot['tickets']).size} tickets, cutoff #{TicketCorpus::CUTOFF}"
     TicketCorpus::USE_CASES.each do |uc|
       rows = result[:labels][uc]
       out.puts "#{uc}: #{rows.size} labels (#{fmt(TicketCorpus.counts(rows))}); excluded: #{fmt(result[:exclusions][uc])}"
     end
+    out.puts "#{BlockingCorpus::USE_CASE}: #{blocking[:labels].size} labels (#{fmt(TicketCorpus.counts(blocking[:labels]))}); excluded: #{fmt(blocking[:exclusions])}"
     out.puts "every label is weak (an agent filer set it): provenance tracker_record or title_prefix, never owner_confirmed"
-    if result[:labels].values.all?(&:empty?)
+    if result[:labels].values.all?(&:empty?) && blocking[:labels].empty?
       out.puts "0 labels: every ticket was excluded (reasons above); no use case can be evaluated from this snapshot"
     end
     return 0 if opts[:dry_run]
@@ -160,6 +181,11 @@ module Manager
         out.puts "wrote #{path} (#{rows.size} rows)"
       end
     end
+    { "labels" => blocking[:labels], "corpus" => blocking[:corpus] }.each do |kind, rows|
+      path = File.join(opts[:dir], "#{BlockingCorpus::STEM}-#{kind}.jsonl")
+      Effects.write_private(path, rows.map { |r| JSON.generate(r) }.join("\n") + (rows.empty? ? "" : "\n"))
+      out.puts "wrote #{path} (#{rows.size} rows)"
+    end
     0
   rescue TicketCorpus::InputError => e
     fail!(1, e.message, e.fix)
@@ -170,6 +196,7 @@ module Manager
   def shadow(opts, out)
     snapshot = Effects.read_snapshot(opts[:dir])
     TicketCorpus.shadow_lines(TicketCorpus.shadow_report(snapshot, opts[:since])).each { |l| out.puts l }
+    BlockingCorpus.shadow_lines(BlockingCorpus.shadow_report(snapshot, opts[:since])).each { |l| out.puts l }
     0
   rescue TicketCorpus::InputError => e
     fail!(1, e.message, e.fix)

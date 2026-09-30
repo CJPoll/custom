@@ -19,7 +19,7 @@ require_relative "judgment_context"
 require_relative "judgment_label"
 
 module JudgmentEval
-  USE_CASES = %w[finding_triage slack_routing priority_scoring ticket_kind ticket_severity ticket_security].freeze
+  USE_CASES = %w[finding_triage slack_routing priority_scoring ticket_kind ticket_severity ticket_security ticket_blocking].freeze
   PROVENANCES = %w[forward_record owner_confirmed tracker_record rule_confirmed title_prefix proposed].freeze
   DOMAINS = %w[work blend personal].freeze
   MAX_BATCH = 50

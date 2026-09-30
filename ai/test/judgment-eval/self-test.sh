@@ -84,6 +84,9 @@ ruby_eq "labels: tracker_record and rule_confirmed are provenances [DND-714]" \
 ruby_eq "labels: title_prefix is a provenance and enters the run [DND-1055]" \
   "title_prefix 1 0" \
   'l = JudgmentEval.parse_labels(%({"id":"DND-1","label":"HIGH","provenance":"title_prefix"}\n), "L"); c = JudgmentEval.parse_corpus(%({"id":"DND-1"}\n), "C", "ticket_severity"); j = JudgmentEval.join(l, c); [l.first[:provenance], j[:cases].size, j[:proposed]].join(" ")'
+ruby_eq "use cases: ticket_blocking is evaluable, joined on id [DND-1057]" \
+  "true id" \
+  '[JudgmentEval::USE_CASES.include?("ticket_blocking"), JudgmentEval::ID_KEYS["ticket_blocking"]].join(" ")'
 ruby_eq "use cases: ticket_kind, ticket_severity and ticket_security are evaluable, joined on id [DND-1055]" \
   "true id id id" \
   '[%w[ticket_kind ticket_severity ticket_security].all? { |u| JudgmentEval::USE_CASES.include?(u) }, *%w[ticket_kind ticket_severity ticket_security].map { |u| JudgmentEval::ID_KEYS[u] }].join(" ")'

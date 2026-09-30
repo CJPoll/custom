@@ -50,6 +50,8 @@ def ticket(n, epic, area, rel=None):
     # DND-1055: Kind, Security and the page's created_time (ticket-corpus).
     props["Kind"] = {"select": {"name": "Bug"}}
     props["Security"] = {"select": {"name": "none"}}
+    # DND-1057: Path (ticket-corpus ticket_blocking labels).
+    props["Path"] = {"select": {"name": "Off"}}
     return {"id": page(n), "created_time": "2026-09-28T01:00:00.000Z", "properties": props}
 
 

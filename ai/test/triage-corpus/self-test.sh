@@ -131,6 +131,9 @@ ruby_eq "ticket_from_row: an unset Kind or Security is recorded as nil, never ab
   "true true nil" \
   'r = TriageCorpus.ticket_from_row({"id"=>"x","created_time"=>"t","properties"=>{"ID"=>{"unique_id"=>{"prefix"=>"DND","number"=>3}},"Kind"=>{"select"=>nil}}}); [r.key?("kind"), r.key?("security"), r["kind"].inspect].join(" ")'
 
+ruby_eq "ticket_from_row: records Path, and whether the row carries a Path select at all [DND-1057]" \
+  "Blocking true|nil true|nil false" \
+  'id = {"ID"=>{"unique_id"=>{"prefix"=>"DND","number"=>3}}}; a = TriageCorpus.ticket_from_row({"id"=>"x","properties"=>id.merge("Path"=>{"select"=>{"name"=>"Blocking"}})}); b = TriageCorpus.ticket_from_row({"id"=>"x","properties"=>id.merge("Path"=>{"select"=>nil})}); c = TriageCorpus.ticket_from_row({"id"=>"x","properties"=>id}); [a, b, c].map { |r| [r["path"] || "nil", r["path_select"]].join(" ") }.join("|")'
 # ── the fixture snapshot ────────────────────────────────────────────────────
 # harness epic EH, walt_ui epic EW. Tickets (ref, area, text / links):
 #   10 Harness  base defect

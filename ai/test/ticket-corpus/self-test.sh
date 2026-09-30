@@ -44,7 +44,7 @@ trap 'rm -rf "${TMP}"' EXIT INT TERM
 # PRE builds tickets: t.(n, created, props = {}) -> a snapshot ticket in the
 # harness epic EH, post-cutoff unless `created` says otherwise.
 PRE='POST = "2026-09-28T01:00:00.000Z"; PRE_CUT = "2026-09-26T12:00:00.000Z";
-t = ->(n, created = POST, extra = {}) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>"Ticket #{n} widget","area"=>"Harness","epic_ids"=>["EH"],"created_time"=>created,"kind"=>"Bug","severity"=>"MEDIUM","security"=>"none","schema_missing"=>[],"blocks_text"=>["Body #{n}."],"body_read"=>true,"body_truncated"=>false}.merge(extra) };
+t = ->(n, created = POST, extra = {}) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>"Ticket #{n} widget","area"=>"Harness","epic_ids"=>["EH"],"created_time"=>created,"kind"=>"Bug","severity"=>"MEDIUM","security"=>"none","schema_missing"=>[],"status"=>"Not Started","path"=>"Off","path_select"=>true,"blocks"=>[],"found_while"=>[],"blocks_text"=>["Body #{n}."],"body_read"=>true,"body_truncated"=>false}.merge(extra) };
 snap = ->(ts, at = "2026-10-02T00:00:00Z") { {"fetched_at"=>at,"epic_projects"=>{"EH"=>"harness","EW"=>"walt_ui"},"tickets"=>ts} };
 rows = ->(r, uc) { r[:labels][uc].map { |l| [l["id"], l["label"], l["provenance"]].join(" ") }.join("|") };
 ex = ->(r, uc) { r[:exclusions][uc].map { |k, v| "#{k} #{v}" }.join(", ") };
@@ -245,7 +245,7 @@ eq "--dry-run writes nothing" "$(find "${TMP}/evals" -maxdepth 1 -name 'ticket-*
 
 OUT="$("${BIN}" --build --dir "${TMP}/evals" 2>&1)"; RC=$?
 eq "--build exits 0" "${RC}" "0"
-eq "--build writes six files" "$(find "${TMP}/evals" -maxdepth 1 -name 'ticket-*.jsonl' | wc -l | tr -d ' ')" "6"
+eq "--build writes eight files (three classification use cases and ticket_blocking)" "$(find "${TMP}/evals" -maxdepth 1 -name 'ticket-*.jsonl' | wc -l | tr -d ' ')" "8"
 eq "every file is 0600 (machine-local ticket text)" \
   "$(find "${TMP}/evals" -maxdepth 1 -name 'ticket-*.jsonl' -printf '%m\n' | sort -u | tr '\n' ' ')" "600 "
 lacks "the labels file holds ids and labels, never ticket text" "$(cat "${TMP}/evals/ticket-kind-labels.jsonl")" "widget"
