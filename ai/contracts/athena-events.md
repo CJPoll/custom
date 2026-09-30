@@ -1754,7 +1754,8 @@ credential can serve many accounts. Owner is resolved per ingress kind:
   It lists the owner's own hooks with the URL to paste into GitLab, and
   reveals a hook's secret once per mint (*Secret custody*). It takes the
   owner from the authenticated session, and it registers, rotates and
-  disables nothing. The listing and the reveal are owner-scoped too.
+  disables nothing. The listing and the reveal are owner-scoped too. The
+  reveal is gen_saas ADR 18's rule 2 show-once reveal (*Secret custody*).
 
   **Later (2026-09-30):** this paragraph said "In the first pass a hook has no
   owner-facing route". Superseded (DND-1306): gen_saas ships `/forge/hooks`
@@ -2859,8 +2860,10 @@ under-encrypted**:
   new value (a rotation, a re-verify) is revealable once. It is rendered once
   and kept nowhere after. Two exist: a forge hook's webhook secret on
   `/forge/hooks`, for GitLab, and a Notion subscription's `verification_token`
-  on `/secrets`, for Notion's Verify dialog. Any other secret that must leave
-  the server this way is added here by name first.
+  on `/secrets`, for Notion's Verify dialog. This is rule 2 of gen_saas
+  ADR 18 (`adrs/18-owner-secrets-through-owner-pages.md`, #549, merged
+  `cc9cfc7a`), which also names both reveals. Any other secret that must
+  leave the server this way is added here by name first.
 
   **Later (2026-09-30):** this bullet said only "A secret MUST NEVER be
   logged, placed on `argv`, echoed, made API-readable, or written into the
@@ -2907,7 +2910,13 @@ under-encrypted**:
   SSM retains) MUST NOT carry it. Two things enforce that: the operator calls
   cannot be asked for the secret, and gen_saas's static secret-boundary
   guard fails CI on any public function that takes or returns a secret and
-  is not on its allowlist. The residual: the reveal function behind the page
+  is not on its allowlist (ADR 18 rules 3 and 5). The guard holds only while
+  CI runs it: the merge guard judges the checks that report, and CI runs
+  from the PR's own `ci.yml`, so a PR that removes the `Secret allowlist`
+  job, or excludes the guard's test, merges with nothing to stop it.
+  Requiring that check by name is DND-729; until then review is the
+  backstop (ADR 18 → *What holds the ratchet*). A second residual: the
+  reveal function behind the page
   is public, so an operator on the host could call it over `rpc`. That is
   not a supported path. It spends the owner's one reveal, so the page then
   shows the secret as revealed and the owner rotates. The operator already
@@ -6019,9 +6028,9 @@ this subsection is its boundary.
 - **Provider and custody.** The Anthropic Messages API, with the model named
   in server config, under the owner's key held in `Athena.Secrets` as
   `(owner_id, :anthropic_api_key)`, account-wide. The owner stores it on the
-  owner-authenticated secret-entry page (`/secrets`); no rpc function takes
-  it, and the page never shows it back. With no key stored, no call is made
-  and the page says so.
+  owner-authenticated secret-entry page (`/secrets`, gen_saas ADR 18 rule 1,
+  decision D46); no rpc function takes it, and the page never shows it back.
+  With no key stored, no call is made and the page says so.
 - **What is stored.** In `priority_item_summaries`, one row per item: the last
   good summary (1 to 1,000 characters), the model, the prompt version, the
   source revision and a digest of the text it came from, and the latest

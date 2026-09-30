@@ -655,10 +655,12 @@ with it.
 
 - **The key is held in `Athena.Secrets`** as `(owner_id, :typesafe_api_key)`,
   account-wide (`scope_ref` `""`). The owner enters it on `/secrets`, the
-  write-only, owner-authenticated secret page (DND-1239). That page stores for
-  the logged-in owner's own account only and never returns or logs the value.
-  No API route or MCP tool writes the key. No operator procedure may pass it
-  over rpc, because an rpc parameter stays in the SSM command history. That
+  write-only, owner-authenticated secret page (DND-1239). That is rule 1 of
+  gen_saas ADR 18 (`adrs/18-owner-secrets-through-owner-pages.md`, #549,
+  merged `cc9cfc7a`). That page stores for the logged-in owner's own account
+  only and never returns or logs the value. No API route or MCP tool writes
+  the key. No operator procedure may pass it over rpc (ADR 18 rule 3),
+  because an rpc parameter stays in the SSM command history. That
   last rule is a procedure, not an enforced guarantee: an rpc evaluates
   arbitrary code, so it could still call `Athena.Secrets` directly.
 
