@@ -264,6 +264,14 @@ class Cancel
     end
   end
 
+  # TERMs every command still registered, cancelled or not. both_sides calls
+  # it on its way out: a cancellable command runs in its own process group,
+  # so a Ctrl-C or TERM that stops variant-eval does not reach it, and without
+  # this an interrupted run would leave both sides' T2 making model calls.
+  def release_all
+    @lock.synchronize { @pids.dup }.each { |pid| signal_group(pid, "TERM") }
+  end
+
   private
 
   def signal_group(pid, sig)
@@ -301,7 +309,11 @@ def capture(argv, chdir: nil, stdin_data: "", env: nil, cancel: nil)
     out, err = readers.map(&:value)
     st = wait_thr.value
     cancel&.unregister(wait_thr.pid)
-    raise Cancelled, "#{argv.first(3).join(' ')} was cancelled (#{exit_phrase(st)})" if cancel&.cancelled? && st.signaled?
+    # After a cancel, any unsuccessful end is the cancel's doing (a command may
+    # catch TERM and exit non-zero); a command that finished cleanly first
+    # still returns its result.
+    raise Cancelled, "#{argv.first(3).join(' ')} was cancelled (#{exit_phrase(st)})" \
+      if cancel&.cancelled? && !st.success?
 
     [out, err, st]
   end
@@ -930,6 +942,11 @@ def both_sides(sides)
 
   failed ||= outcomes.index { |r| r.value.first == :cancelled }
   raise with_other_sides(outcomes, failed, sides.map { |s| Array(s).last.to_s })
+ensure
+  # Leaving with a command still running (Ctrl-C, whose Interrupt Ruby raises
+  # in this thread; a TERM's SignalException; any escaped exception) must not
+  # orphan its process group. After a normal finish nothing is registered.
+  cancel&.release_all
 end
 
 # The error of side `index`, its message extended with what happened to every
@@ -1889,6 +1906,51 @@ def self_test
       if File.exist?(done)
     fail.("the refusal must report the variant side as cancelled (got #{raised&.message.inspect})") \
       unless raised&.message.to_s.include?("the variant side was cancelled")
+  end
+
+  # DND-1360 (critic round on a7ad72c4): a cancellable capture runs in its own
+  # process group, so a Ctrl-C or TERM that stops variant-eval no longer
+  # reaches it. Leaving both_sides by an exception (Interrupt here, as Ruby's
+  # default SIGINT raises it in the main thread) must stop every side's
+  # command. The side's subprocess records its pid, then would run 30 s and
+  # mark `done`; the proof is that it exits WITHOUT `done` (the wait below
+  # only caps a hang; the verdict is the marker, never a time).
+  Dir.mktmpdir("variant-eval-interrupt-") do |d|
+    pidfile = File.join(d, "pid")
+    done = File.join(d, "done")
+    runner = Thread.new do
+      Thread.current.report_on_exception = false
+      both_sides(%w[baseline variant]) do |_side, cancel|
+        capture(["sh", "-c", 'echo $$ > "$1.$$"; mv "$1.$$" "$1"; sleep 30; : > "$2"', "_", pidfile, done],
+                **{ cancel: cancel }.compact)
+      end
+    rescue Interrupt
+      :interrupted
+    end
+    400.times do
+      break if File.exist?(pidfile)
+
+      sleep 0.05
+    end
+    pid = File.read(pidfile).to_i if File.exist?(pidfile)
+    runner.raise(Interrupt)
+    got = runner.value
+    alive = lambda do
+      Process.kill(0, pid)
+      true
+    rescue Errno::ESRCH
+      false
+    end
+    1200.times do
+      break unless pid && alive.call
+
+      sleep 0.05
+    end
+    fail.("the interrupt test's side never started (no #{pidfile})") unless pid
+    fail.("an Interrupt must still leave both_sides (got #{got.inspect})") unless got == :interrupted
+    fail.("an interrupted both_sides must stop its sides' commands: the side ran to the end (#{done} " \
+          "exists). Fix: both_sides must TERM every still-registered process group on its way out") \
+      if File.exist?(done)
   end
 
   # collect_t2_counts hands K to the side's admiral-eval through
