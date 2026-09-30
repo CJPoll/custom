@@ -128,6 +128,10 @@ Dir.mktmpdir("scratch-home-sentinel-test") do |root|
   check("named limit: a PATH rebuilt from a fixed list bypasses the sentinel (not logged)",
         status.success? && out.include?("direct") && v.empty?, "#{out} #{v.inspect}")
 
+  status, out, v, = run_suite(root, "PATH=\"${PATH%%:*}\" ruby -e 0; echo rc=$?", home: home, base_path: base_path)
+  check("named limit: a PATH left with only the sentinel exits 127 with a Fix:",
+        out.include?("rc=127") && out.include?("Fix:") && v.empty?, "#{out} #{v.inspect}")
+
   # --- HOME spellings -----------------------------------------------------
   link = File.join(root, "home-link")
   File.symlink(home, link)

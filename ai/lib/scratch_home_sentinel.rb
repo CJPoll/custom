@@ -16,8 +16,8 @@
 # one small bash script. When a check runs a watched tool through PATH, the
 # sentinel runs first: if HOME is not the gate's own HOME, it appends one line
 # (tool, HOME, cwd) to the directory's `violations` log. Either way it then
-# execs the next `<tool>` on the check's PATH, so the check behaves exactly as
-# it would without the sentinel. After the check exits the gate reads the log;
+# execs the next `<tool>` on the check's PATH, so a check that keeps that PATH
+# behaves exactly as it would without the sentinel. After the check exits the gate reads the log;
 # any line FAILS the check with a Fix:, whatever the check's own exit status.
 # The directory is per check, so a line names the check that caused it.
 #
@@ -26,8 +26,8 @@
 # lane catches `ruby` under a scratch HOME as surely as an agent session does.
 # Every name in a PATH directory named `shims` (asdf, rbenv, pyenv, mise) is
 # watched too, which adds the machine's own shimmed tools (glab, terraform...).
-# A name nothing on PATH provides gets no sentinel, so `command -v` in a check
-# answers as it would without one.
+# A name nothing on PATH provides gets no sentinel. While a check keeps the
+# PATH it was given, `command -v` answers as it would without the sentinel.
 #
 # Legitimate forms, which never reach the sentinel or pass it: an absolute path
 # (/usr/bin/ruby, DND-931/958); an interpreter resolved under the real HOME
@@ -37,17 +37,21 @@
 # What it cannot see (named, not hidden): a check that rebuilds PATH from a
 # fixed list (it drops the sentinel directory with the rest), a tool reached by
 # an absolute path into a shim directory, and a tool name outside the watched
-# set. Each passes with no log line.
+# set. Each passes with no log line. A check that drops a tool's provider from
+# PATH but keeps the sentinel's directory still finds the sentinel with
+# `command -v`, and running it exits 127 with a Fix:.
 require "fileutils"
 require "shellwords"
 require "tmpdir"
 
 module ScratchHomeSentinel
-  # Interpreters and tools that version managers commonly shim. Watched on
-  # every machine where PATH provides them, shim or not.
+  # The tools asdf shims on this fleet's machines (~/.asdf/shims, measured
+  # 2026-09-30). Watched on every machine where PATH provides them, shim or
+  # not. python3 is not here: it is /usr/bin/python3 on these machines, and
+  # the hook suites run it under a scratch HOME by design. Where a version
+  # manager shims it, the `shims` directory adds it.
   FLOOR = %w[
     ruby gem bundle bundler irb erb rake
-    python python3 pip pip3
     node npm npx pnpm yarn
     elixir elixirc mix iex erl escript
     terraform glab
@@ -107,6 +111,7 @@ module ScratchHomeSentinel
         if [ -f "$d/$name" ] && [ -x "$d/$name" ]; then exec "$d/$name" "$@"; fi
       done
       printf 'harness-gate sentinel: %s not found on PATH beyond %s\\n' "$name" "$self" >&2
+      printf 'Fix: this check removed the directory that provides %s from PATH but kept the sentinel directory; build PATH from a fixed list instead, or keep the provider on it.\\n' "$name" >&2
       exit 127
     SH
   end

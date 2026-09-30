@@ -54,13 +54,14 @@
 # An interrupted run (see INTERRUPTED RUNS below) records nothing.
 #
 # SCRATCH-HOME SENTINEL (DND-1316). Every check runs with a fresh sentinel
-# directory first on PATH (ai/lib/scratch_home_sentinel.rb). A check that runs
-# a version-manager-shimmed tool (ruby, node, mix, ... and every name in a PATH
-# `shims` directory) through PATH while HOME is not the gate's own HOME FAILS,
-# naming the tool and the HOME, whatever the check's own exit status: in an
-# agent session that tool is an asdf shim, which exits 126 under a scratch HOME
-# (DND-1203). The sentinel execs the next tool on PATH, so a check behaves as
-# it would without it. It fires on any machine, lane or agent session.
+# directory first on PATH (ai/lib/scratch_home_sentinel.rb). The watched tools
+# are what asdf shims here (ruby, node, mix, ...) plus every name in a PATH
+# `shims` directory. A check that runs one through PATH while HOME is not the
+# gate's own HOME FAILS. The report names the tool and the HOME. The check's
+# own exit status does not matter. In an agent session that tool is an asdf
+# shim, which exits 126 under a scratch HOME (DND-1203). The sentinel execs
+# the next tool on PATH, so a check that keeps its PATH behaves as it would
+# without it. It fires on any machine, lane or agent session.
 #
 # Not in the list: the gate RUN itself (it would recurse). Its --self-test IS
 # declared (DND-507): it never runs the gate, only `--list` and fixtures.
@@ -4245,8 +4246,8 @@ def run_self_test(group = nil)
          "suite red/green, and labeling distinct suites uniquely; keep " \
          "self_tests_found?/stray_test_scripts correct against a fixture " \
          "root; keep run_one reporting the child's exit status with " \
-         "stdin closed, and failing a check its scratch-HOME sentinel " \
-         "caught (case 8c, ai/lib/scratch_home_sentinel.rb); and keep inline_self_test_coverage naming every " \
+         "stdin closed; keep run_one failing a check its scratch-HOME " \
+         "sentinel caught (case 8c, ai/lib/scratch_home_sentinel.rb); and keep inline_self_test_coverage naming every " \
          "first-party tool whose inline --self-test the gate never runs (case " \
          "11: declare it in STATIC_CHECKS, map it in " \
          "INLINE_SELF_TEST_COVERED_BY, or except it with a real reason); and " \
