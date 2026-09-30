@@ -11,9 +11,10 @@
 # suite was SIGTERMed after starting it but before recording its pid, so the
 # suite's pid-list cleanup never knew it existed.
 #
-# The timing is made deterministic with a `ruby` shim first on PATH. The
-# suites start every client as a bare `ruby ...` (directly, or through a stub
-# that execs `ruby`), so the shim runs as the new client's own process. When it
+# The timing is made deterministic with a `ruby` shim. The suites start every
+# client through REPRO_RUBY (default /usr/bin/ruby; directly, or through a stub
+# that execs it), which this script points at the shim, so the shim runs as the
+# new client's own process. When it
 # is the client a case targets, it SIGTERMs the suite and only then execs the
 # real ruby. The client therefore always exists before the suite can have read
 # its ready file, which is the window the incident needed luck to hit.
@@ -47,7 +48,7 @@
 set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd -- "${HERE}/../../.." && pwd -P)"
-command -v ruby >/dev/null 2>&1 || { echo "VERDICT: FAIL -- no ruby on PATH"; echo "  Fix: put ruby on PATH."; exit 1; }
+[ -x /usr/bin/ruby ] || { echo "VERDICT: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958)."; exit 1; }
 [[ "${REPRO_READY_S:-120}" =~ ^[1-9][0-9]*$ ]] || { echo "VERDICT: FAIL -- REPRO_READY_S='${REPRO_READY_S}' is not a whole number of seconds"; echo "  Fix: set REPRO_READY_S to a positive integer, or unset it (default 120)."; exit 2; }
 WORK="$(mktemp -d)"
 FAIL=0
@@ -147,11 +148,11 @@ fi
 exec "${REAL_RUBY}" "$@"
 SHIM
 chmod +x "${WORK}/bin/ruby"
-# scripts/athena-inbox-client-run.sh resets PATH to a fixed list headed by
-# ${HOME}/.local/bin, so R2 also runs with HOME pointing at a scratch home
-# whose .local/bin holds the same shim.
+# R2 runs with HOME pointing at a scratch home, as the incident's supervisor
+# did. scripts/athena-inbox-client-run.sh resets PATH to a fixed list headed by
+# ${HOME}/.local/bin, so the shim cannot come from PATH there: the suite's stub
+# execs the absolute REPRO_RUBY path it was written with (DND-1340).
 mkdir -p "${WORK}/home/.local/bin"
-cp "${WORK}/bin/ruby" "${WORK}/home/.local/bin/ruby"
 
 # REAL_RUBY is the interpreter itself, never the first `ruby` on PATH
 # (DND-1203). In an agent session that is the asdf shim, and an asdf shim
@@ -159,15 +160,15 @@ cp "${WORK}/bin/ruby" "${WORK}/home/.local/bin/ruby"
 # started died at once, the suite waited out each one's ready bound (~835s a
 # gate), and the TERM-ignoring client R2 exists to test never ran. RbConfig.ruby
 # is resolved here, under the real HOME, and must then run under the scratch one.
-REAL_RUBY="$(ruby -e 'print RbConfig.ruby' 2>/dev/null)"
+REAL_RUBY="$(/usr/bin/ruby -e 'print RbConfig.ruby' 2>/dev/null)"
 if [ -z "${REAL_RUBY}" ] || [ ! -x "${REAL_RUBY}" ]; then
-  echo "VERDICT: FAIL -- could not resolve the ruby interpreter: \`ruby -e 'print RbConfig.ruby'\` gave '${REAL_RUBY}' (the first ruby on PATH is $(command -v ruby))"
-  echo "  Fix: make the first ruby on PATH run under this HOME (an asdf shim needs a version set for this directory)."
+  echo "VERDICT: FAIL -- could not resolve the ruby interpreter: \`/usr/bin/ruby -e 'print RbConfig.ruby'\` gave '${REAL_RUBY}'"
+  echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958) and check it runs."
   exit 1
 fi
 if ! HOME="${WORK}/home" "${REAL_RUBY}" -e 0 >/dev/null 2>&1; then
-  echo "VERDICT: FAIL -- the ruby interpreter '${REAL_RUBY}' (RbConfig.ruby of the first ruby on PATH) does not run with HOME=${WORK}/home"
-  echo "  Fix: the shim must exec a ruby that needs nothing from HOME; check \`ruby -e 'print RbConfig.ruby'\` names an executable interpreter."
+  echo "VERDICT: FAIL -- the ruby interpreter '${REAL_RUBY}' (RbConfig.ruby of /usr/bin/ruby) does not run with HOME=${WORK}/home"
+  echo "  Fix: the shim must exec a ruby that needs nothing from HOME; check \`/usr/bin/ruby -e 'print RbConfig.ruby'\` names an executable interpreter."
   exit 1
 fi
 export REAL_RUBY
@@ -222,7 +223,7 @@ kill_mark() {
 run_case() { # run_case <id> <label> <suite-rel-path> <suite-pattern> [HOME]
   local id="$1" label="$2" suite="$3" pat="$4" home="${5:-${HOME}}" mark="DND818_REPRO_MARK=${1}-$$" pid rc
   printf '%s  %s\n' "${id^^}" "${label}"
-  env "${mark}" HOME="${home}" PATH="${WORK}/bin:${PATH}" REPRO_CASE="${id}" REPRO_SUITE_PAT="${pat}" \
+  env "${mark}" HOME="${home}" PATH="${WORK}/bin:${PATH}" REPRO_RUBY="${WORK}/bin/ruby" REPRO_CASE="${id}" REPRO_SUITE_PAT="${pat}" \
       REPRO_SEEN="${WORK}/${id}.seen" REPRO_FIRED="${WORK}/${id}.fired" \
       bash "${REPO}/${suite}" >"${WORK}/${id}.out" 2>&1 &
   pid=$!; TRACK+=("${pid}")

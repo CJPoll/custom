@@ -29,7 +29,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby python3 curl jq; do
+[ -x /usr/bin/ruby ] || { echo "ticket-classify-epic self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in python3 curl jq; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "ticket-classify-epic self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 [ -x "${BIN}" ] || { echo "ticket-classify-epic self-test: FAIL -- ${BIN} missing or not executable"; echo "  Fix: chmod +x ai/skills/athena:ticket-management/scripts/ticket-classify"; exit 1; }
@@ -46,7 +47,7 @@ trap cleanup EXIT INT TERM
 ruby_eq() {
   local name="$1" want="$2" expr="$3" got
   shift 3
-  got="$(ruby -rjson -e "require ARGV.shift; puts(begin; ${expr}; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${LIB}" "$@" 2>&1)"
+  got="$(/usr/bin/ruby -rjson -e "require ARGV.shift; puts(begin; ${expr}; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${LIB}" "$@" 2>&1)"
   eq "${name}" "${got}" "${want}"
 }
 

@@ -30,7 +30,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby jq; do
+[ -x /usr/bin/ruby ] || { echo "ticket-corpus self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in jq; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "ticket-corpus self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 for f in "${BIN}" "${EVAL}"; do
@@ -49,7 +50,7 @@ snap = ->(ts, at = "2026-10-02T00:00:00Z") { {"fetched_at"=>at,"epic_projects"=>
 rows = ->(r, uc) { r[:labels][uc].map { |l| [l["id"], l["label"], l["provenance"]].join(" ") }.join("|") };
 ex = ->(r, uc) { r[:exclusions][uc].map { |k, v| "#{k} #{v}" }.join(", ") };
 exsum = ->(r, reason) { r[:exclusions].values.sum { |h| h[reason] || 0 } }'
-rb() { ruby -rjson -r "${LIBRB}" -e "${PRE}; $1" 2>&1; }
+rb() { /usr/bin/ruby -rjson -r "${LIBRB}" -e "${PRE}; $1" 2>&1; }
 
 echo "== domain: labels/2"
 
@@ -159,7 +160,7 @@ echo "== domain: shadow_report/2"
 LINE='prop = ->(v, j, acc, src = "filer") { {"value"=>v,"source"=>src,"judged"=>j,"confidence"=>0.9,"accepted"=>acc,"mode"=>"shadow","reason"=>acc ? "shadow" : "below_threshold"} };
 line = ->(kj, kacc, sj = "MEDIUM", sacc = false, secj = "none", secacc = false) { "Jev classification: " + JSON.generate({"kind"=>prop.("Bug", kj, kacc),"severity"=>prop.("MEDIUM", sj, sacc),"security"=>prop.("none", secj, secacc),"model"=>"jev-1.13.0","versions"=>{}}) };
 SINCE = "2026-09-28T00:00:00Z"'
-sh() { ruby -rjson -r "${LIBRB}" -e "${PRE}; ${LINE}; $1" 2>&1; }
+sh() { /usr/bin/ruby -rjson -r "${LIBRB}" -e "${PRE}; ${LINE}; $1" 2>&1; }
 
 eq "s1 counts agreement over accepted judgments only [ticket]" \
   "accepted 2 agreed 1" \
@@ -226,7 +227,7 @@ eq "s17 an accepted judgment outside the label set is unparseable [review 3]" \
 echo "== bin"
 
 mkdir -p "${TMP}/evals"
-ruby -rjson -r "${LIBRB}" -e "${PRE}; ${LINE};
+/usr/bin/ruby -rjson -r "${LIBRB}" -e "${PRE}; ${LINE};
   ts = [t.(1), t.(2, POST, \"kind\"=>\"Docs\", \"severity\"=>\"LOW\"), t.(3, PRE_CUT, \"title\"=>\"HIGH: old widget\"),
         t.(4, POST, \"kind\"=>\"Feature\", \"severity\"=>nil), t.(5, POST, \"security\"=>\"introduced\", \"kind\"=>\"Vulnerability\", \"severity\"=>\"HIGH\"),
         t.(6, POST, \"body_read\"=>false, \"blocks_text\"=>[]), t.(7, POST, \"blocks_text\"=>[line.(\"Bug\", true)])]
@@ -284,7 +285,7 @@ eq "--build over a pre-DND-1055 snapshot exits 1 [ticket]" "${RC}" "1"
 has "--build over a pre-DND-1055 snapshot names the missing field, with Fix:" "${OUT}" "created_time"
 lacks "--build prints no backtrace" "${OUT}" "ticket_corpus.rb:"
 mkdir -p "${TMP}/allold"
-ruby -rjson -r "${LIBRB}" -e "${PRE}; File.write(ARGV[0], JSON.generate(snap.([t.(1, PRE_CUT), t.(2, PRE_CUT)])))" "${TMP}/allold/finding-triage-snapshot.json"
+/usr/bin/ruby -rjson -r "${LIBRB}" -e "${PRE}; File.write(ARGV[0], JSON.generate(snap.([t.(1, PRE_CUT), t.(2, PRE_CUT)])))" "${TMP}/allold/finding-triage-snapshot.json"
 OUT="$("${BIN}" --build --dry-run --dir "${TMP}/allold" 2>&1)"
 has "--build says so when every ticket is excluded (0 labels is never silent) [review 9]" "${OUT}" "0 labels: every ticket was excluded"
 OUT="$("${BIN}" --bogus 2>&1)"; RC=$?

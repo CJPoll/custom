@@ -1103,7 +1103,7 @@ echo "== repo-root resolves through a symlinked skills dir (bin uses -P) =="
 # the committed registry list"` on a wrongly computed root -- the
 # missing-looks-empty trap. We invoke through a symlink that replaces the
 # `skills` segment, with DOCTOR_REPO_DIR UNSET so the bin must compute it.
-if command -v ruby >/dev/null 2>&1 && [ -f "${REPO}/ai/inbox/lib/registry.rb" ]; then
+if [ -x /usr/bin/ruby ] && [ -f "${REPO}/ai/inbox/lib/registry.rb" ]; then
   export ATHENA_INBOX_ROOT="${TMP}/slroot"; mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/projects"; chmod 700 "${ATHENA_INBOX_ROOT}"
   SLINK="${TMP}/skills"; ln -sfn "${REPO}/ai/skills" "${SLINK}"
   SLCOMMIT="${TMP}/sl-committed.json"; printf '{"v":1,"projects":[]}' > "${SLCOMMIT}"
@@ -1114,7 +1114,7 @@ if command -v ruby >/dev/null 2>&1 && [ -f "${REPO}/ai/inbox/lib/registry.rb" ];
     "$(printf '%s' "${SLOUT}" | jq -r '[.findings[]|select(.check=="undeclared-entry" and .state=="na")]|length')"
   export DOCTOR_REPO_DIR="${REPO}"
 else
-  ok "symlinked-skills root test skipped (no ruby or no registry.rb in this checkout)"
+  ok "symlinked-skills root test skipped (no /usr/bin/ruby or no registry.rb in this checkout)"
 fi
 
 echo "== session-project (DND-1163): the doctor diagnoses the SESSION's project =="

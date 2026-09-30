@@ -122,7 +122,7 @@ track() { git -C "$1" add -A >/dev/null 2>&1; }
 
 # run <root>: run the fixture's checker; sets RC and OUT (stdout+stderr).
 run() {
-  OUT="$(cd "$1" && ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
+  OUT="$(cd "$1" && /usr/bin/ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
 }
 
 # said_ok: the checker printed its OK status line. Anchored to the line start
@@ -289,7 +289,7 @@ else bad "16 look-alike directory names are not third-party; their scripts still
 A="$(new_fixture root-runner)"; track "${A}"
 B="$(new_fixture root-target)"; track "${B}"
 add_exec "${B}" scripts/only-in-target "${BARE}"
-OUT="$(cd "${A}" && ruby ai/bin/check-guard-messages --root "${B}" 2>&1)"; RC=$?
+OUT="$(cd "${A}" && /usr/bin/ruby ai/bin/check-guard-messages --root "${B}" 2>&1)"; RC=$?
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/only-in-target' >/dev/null; then
   ok "17 --root <dir> measures that tree, not the checker's own"
 else bad "17 --root <dir> measures that tree, not the checker's own" "rc=${RC} out=${OUT}"; fi
@@ -409,7 +409,7 @@ R="$(new_fixture shallow-src)"; land "${R}"
 S="${TMP}/shallow"
 git clone -q --depth 1 "file://${R}" "${S}" 2>/dev/null
 git -C "${S}" update-ref refs/remotes/origin/main HEAD   # the ref exists; only depth is missing
-OUT="$(cd "${S}" && ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
+OUT="$(cd "${S}" && /usr/bin/ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
    && printf '%s' "${OUT}" | grep -F 'shallow' >/dev/null; then
   ok "26 a shallow clone fails as could-not-measure"
@@ -617,7 +617,7 @@ pin() { PIN=(env "ATHENA_LANDED_PIN_SHA=$2" "ATHENA_LANDED_PIN_REPO=$(realpath "
 
 # run_pinned <root>: run the fixture's checker under PIN.
 run_pinned() {
-  OUT="$(cd "$1" && "${PIN[@]}" ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
+  OUT="$(cd "$1" && "${PIN[@]}" /usr/bin/ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
 }
 
 # move_origin <root>: another machine lands a commit on origin's main (the
@@ -749,7 +749,7 @@ else bad "38 a malformed pin fails as could-not-measure, the variable named" "rc
 
 # 38b. Half a pin (the SHA without its repository key) -> could-not-measure.
 P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"
-OUT="$(cd "${R}" && env -u ATHENA_LANDED_PIN_REPO ATHENA_LANDED_PIN_SHA="${P}" ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
+OUT="$(cd "${R}" && env -u ATHENA_LANDED_PIN_REPO ATHENA_LANDED_PIN_SHA="${P}" /usr/bin/ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
    && printf '%s' "${OUT}" | grep -F 'ATHENA_LANDED_PIN_REPO' >/dev/null; then
   ok "38b a pin SHA without its repository key fails as could-not-measure"
@@ -768,7 +768,7 @@ else bad "39 a pin keyed to another repository is not applied; origin is read li
 echo "== check-guard-messages: live tree =="
 
 # 12. The live tree: every first-party executable is classified and compliant.
-if OUT="$("${LIVE_GIT_ENV[@]}" ruby "${AI_DIR}/bin/check-guard-messages" 2>&1)"; then
+if OUT="$("${LIVE_GIT_ENV[@]}" /usr/bin/ruby "${AI_DIR}/bin/check-guard-messages" 2>&1)"; then
   ok "12 the live tree passes check-guard-messages"
 else bad "12 the live tree passes check-guard-messages" "${OUT}"; fi
 

@@ -46,11 +46,9 @@ for f in "${SOURCES[@]}"; do
   fi
 done
 
-# A version manager's shim resolves its installs through $HOME, so pin it at the
-# real home before HOME is faked (the same reason as ai/inbox/test/self-test.sh).
-export ASDF_DATA_DIR="${ASDF_DATA_DIR:-${HOME}/.asdf}"
-export ASDF_DIR="${ASDF_DIR:-${HOME}/.asdf}"
-RUBY_BIN="$( (cd "${SRC_ROOT}" && asdf which ruby) 2>/dev/null || command -v ruby)"
+# The harness Ruby by absolute path, never a PATH shim that dies under the fake
+# HOME below (the same reason as ai/inbox/test/self-test.sh; DND-1340).
+RUBY_BIN=/usr/bin/ruby
 
 TMP="$(mktemp -d)"; TMP="$(cd "${TMP}" && pwd -P)"
 trap 'rm -rf "${TMP}"' EXIT

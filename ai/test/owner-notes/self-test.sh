@@ -187,7 +187,7 @@ else
 fi
 
 # Undo N3 so the numbering cases below stay as written.
-ruby -e 'p=ARGV[0]; s=File.read(p); File.write(p, s.sub(/\n## N3 .*\z/m, "\n"))' "${f}"
+/usr/bin/ruby -e 'p=ARGV[0]; s=File.read(p); File.write(p, s.sub(/\n## N3 .*\z/m, "\n"))' "${f}"
 
 # --- inline --text that starts with "-" is a usage error, pointing at --text-file
 run "${sd}" --add --source owner --text "-leading dash"

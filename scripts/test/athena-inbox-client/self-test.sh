@@ -1050,8 +1050,12 @@ printf '\nI-13 watchdog: a wedge is CAPTURED, then restarted; a progressing clie
 # watchdog reads — backdated past its allowance.
 MOCK="${SCRIPTS}/test/inbox-client-capture/mock-athena-inbox-client.rb"
 WD_PIDS=()
-if ! command -v ruby >/dev/null 2>&1; then
-  bad "the watchdog cases need ruby for the mock client" "no ruby on PATH"
+# The mock client's interpreter: /usr/bin/ruby (DND-931/958, DND-1340), never a
+# `ruby` found through PATH. REPRO_RUBY is the one seam: the suite-reaper repro
+# (scripts/test/suite-reaper/repro-real-suites.sh) sets it to its trigger shim.
+MOCK_RUBY="${REPRO_RUBY:-/usr/bin/ruby}"
+if [ ! -x /usr/bin/ruby ]; then
+  bad "the watchdog cases need ruby for the mock client" "no /usr/bin/ruby (the harness Ruby, DND-931/958)"
 else
 
 # start_wd_supervisor <mode> — a supervised mock client. Sets SUPERVISOR_PID
@@ -1059,7 +1063,7 @@ else
 start_wd_supervisor() {
   cat > "${STUB}" <<STUBEOF
 #!/bin/sh
-exec ruby '${MOCK}'
+exec '${MOCK_RUBY}' '${MOCK}'
 STUBEOF
   chmod +x "${STUB}"
   rm -f "${CASE_DIR}/ready"

@@ -28,7 +28,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby jq; do
+[ -x /usr/bin/ruby ] || { echo "blocking-corpus self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in jq; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "blocking-corpus self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 for f in "${BIN}" "${EVAL}"; do
@@ -47,7 +48,7 @@ F = ->(n, path, extra = {}) { t.(n, POST, {"path"=>path}.merge(extra)) };
 snap = ->(ts, at = "2026-10-02T00:00:00Z") { {"fetched_at"=>at,"epic_projects"=>{"EH"=>"harness","EW"=>"walt_ui"},"tickets"=>ts} };
 rows = ->(r) { r[:labels].map { |l| [l["id"], l["label"], l["provenance"]].join(" ") }.join("|") };
 ex = ->(r) { r[:exclusions].map { |k, v| "#{k} #{v}" }.join(", ") }'
-rb() { ruby -rjson -r "${LIBRB}" -e "${PRE}; $1" 2>&1; }
+rb() { /usr/bin/ruby -rjson -r "${LIBRB}" -e "${PRE}; $1" 2>&1; }
 
 echo "== domain: labels/2"
 
@@ -110,7 +111,7 @@ eq "8c nothing accepted prints n/a, never 0" \
 echo "== bin"
 
 mkdir -p "${TMP}/evals"
-ruby -rjson -r "${LIBRB}" -e "${PRE};
+/usr/bin/ruby -rjson -r "${LIBRB}" -e "${PRE};
   ts = [C.(10), C.(11), t.(40), F.(50, \"Blocking\", \"blocks\"=>[\"p10\"]), F.(51, \"Off\", \"found_while\"=>[\"p40\"]), F.(52, \"Off\")]
   File.write(ARGV[0], JSON.generate(snap.(ts)))" "${TMP}/evals/finding-triage-snapshot.json"
 

@@ -580,8 +580,8 @@ doctor_declared_files() {
   [ -n "${repo}" ] || return 1
   lib="${repo}/ai/inbox/lib/registry"
   [ -f "${lib}.rb" ] || return 1
-  command -v ruby >/dev/null 2>&1 || return 1
-  ruby -r "${lib}" -e 'begin; puts InboxRegistry.declared.map { |p| p["file"] }; rescue StandardError; exit 1; end' 2>/dev/null
+  [ -x /usr/bin/ruby ] || return 1
+  /usr/bin/ruby -r "${lib}" -e 'begin; puts InboxRegistry.declared.map { |p| p["file"] }; rescue StandardError; exit 1; end' 2>/dev/null
 }
 
 # doctor_check_undeclared_live

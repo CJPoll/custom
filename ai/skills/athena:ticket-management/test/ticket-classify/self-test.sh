@@ -32,7 +32,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby python3 curl jq git; do
+[ -x /usr/bin/ruby ] || { echo "ticket-classify self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in python3 curl jq git; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "ticket-classify self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 [ -x "${BIN}" ] || { echo "ticket-classify self-test: FAIL -- ${BIN} missing or not executable"; echo "  Fix: chmod +x ai/skills/athena:ticket-management/scripts/ticket-classify"; exit 1; }
@@ -48,14 +49,14 @@ trap cleanup EXIT INT TERM
 # ruby_eq NAME EXPECTED RUBY-EXPR -- evaluate EXPR with the script loaded.
 ruby_eq() {
   local got
-  got="$(ruby -e "load ARGV.shift; puts(begin; $3; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" 2>&1)"
+  got="$(/usr/bin/ruby -e "load ARGV.shift; puts(begin; $3; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 # ruby_eq_args NAME EXPECTED RUBY-EXPR ARG... -- the same, with ARGV = ARG...
 ruby_eq_args() {
   local name="$1" want="$2" expr="$3" got
   shift 3
-  got="$(ruby -e "load ARGV.shift; puts(begin; ${expr}; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" "$@" 2>&1)"
+  got="$(/usr/bin/ruby -e "load ARGV.shift; puts(begin; ${expr}; rescue ArgumentError => e; 'ArgumentError: ' + e.message; end)" "${BIN}" "$@" 2>&1)"
   eq "${name}" "${got}" "${want}"
 }
 
@@ -251,7 +252,7 @@ eq "--json prints the server's result" "$(printf '%s' "${OUT}" | jq -cS .)" "$(p
 run --title "New feature" --body-file "${TMP}/body.txt" --project harness --kind Feature --severity none --security none
 eq "a Feature sends severity null" "$(sent | jq -c '.filer')" '{"kind":"Feature","severity":null,"security":"none"}'
 
-ruby -e 'print "z" * 3000' > "${TMP}/long.txt"
+/usr/bin/ruby -e 'print "z" * 3000' > "${TMP}/long.txt"
 run --title "T" --body-file "${TMP}/long.txt" --project harness "${FILER[@]}"
 eq "a 3,000-character body is sent as 2,000 [qa manager 7]" "$(sent | jq -r '.ticket.body | length')" "2000"
 has "stderr says it was truncated [qa manager 7]" "${ERR}" "[truncated]"

@@ -103,7 +103,7 @@ fixture() {
   containers "dnd-1-x=${WT}/dnd-1-x" "dnd-1-x=${WT}/dnd-1-x"
 }
 containers() { # project=dir ...
-  ruby -rjson -e 'puts JSON.dump(ARGV.map { |a| p, d = a.split("=", 2)
+  /usr/bin/ruby -rjson -e 'puts JSON.dump(ARGV.map { |a| p, d = a.split("=", 2)
     { "Config" => { "Labels" => { "com.docker.compose.project" => p, "com.docker.compose.project.working_dir" => d } } } })' "$@" \
     > "${ST}/containers.json"
 }

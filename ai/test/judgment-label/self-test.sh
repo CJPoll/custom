@@ -30,7 +30,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby jq; do
+[ -x /usr/bin/ruby ] || { echo "judgment-label self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in jq; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "judgment-label self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 [ -x /usr/bin/script ] || { echo "judgment-label self-test: FAIL -- /usr/bin/script (util-linux) is missing"; echo "  Fix: install util-linux; the confirm step needs a terminal and this suite drives one with script(1)."; exit 1; }
@@ -46,7 +47,7 @@ trap cleanup EXIT INT TERM
 # ruby_eq NAME EXPECTED RUBY-EXPR -- evaluate EXPR against the domain lib.
 ruby_eq() {
   local got
-  got="$(ruby -r "${LIBRB}" -e "puts(begin; $3; rescue JudgmentLabel::InputError => e; 'InputError: ' + e.message; end)" 2>&1)"
+  got="$(/usr/bin/ruby -r "${LIBRB}" -e "puts(begin; $3; rescue JudgmentLabel::InputError => e; 'InputError: ' + e.message; end)" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 
@@ -164,7 +165,7 @@ CTXRB="${AI}/lib/judgment_context.rb"
 # ctx_eq NAME EXPECTED RUBY-EXPR -- evaluate EXPR against the context builder.
 ctx_eq() {
   local got
-  got="$(ruby -r "${CTXRB}" -e "puts(begin; $3; end)" 2>&1)"
+  got="$(/usr/bin/ruby -r "${CTXRB}" -e "puts(begin; $3; end)" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 ATHENA_ID="U0ATHENA01"
@@ -260,7 +261,7 @@ stub_dir() {
 # ad_eq NAME EXPECTED DIR -- one read of A_TOP through the adapter in DIR.
 ad_eq() {
   local got
-  got="$(ruby -r "${ADRB}" -e "r = JudgmentContextSlack.new('$3', timeout_s: 1).read(JudgmentContext.request(${A_TOP})); puts(r.first == :ok ? 'ok ' + r[2].join(',') + ' ' + r[1].size.to_s : 'error: ' + r.last)" 2>&1)"
+  got="$(/usr/bin/ruby -r "${ADRB}" -e "r = JudgmentContextSlack.new('$3', timeout_s: 1).read(JudgmentContext.request(${A_TOP})); puts(r.first == :ok ? 'ok ' + r[2].join(',') + ' ' + r[1].size.to_s : 'error: ' + r.last)" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 WHO_OK='printf "user:    athena\nuser_id: U0ATHENA01\nbot_id:  B0ATHENA01\n"'
@@ -280,7 +281,7 @@ stub_dir "${TMP}/ad-die" "${WHO_OK}" "echo 'athena-slack: conversations.history 
 ad_eq "adapter: a reader failure carries the reader's own reason" "error: conversations.history failed: channel_not_found" "${TMP}/ad-die"
 # Transient whoami failure: fail once, then succeed. Only a success is kept.
 stub_dir "${TMP}/ad-flaky" "if [ -e '${TMP}/ad-flaky/seen' ]; then ${WHO_OK}; else touch '${TMP}/ad-flaky/seen'; echo 'athena-slack: auth.test failed: timeout' >&2; exit 1; fi" "exit 0"
-got="$(ruby -r "${ADRB}" -e "a = JudgmentContextSlack.new('${TMP}/ad-flaky', timeout_s: 5); q = JudgmentContext.request(${A_TOP}); puts [a.read(q).first, a.read(q).first].join(' ')" 2>&1)"
+got="$(/usr/bin/ruby -r "${ADRB}" -e "a = JudgmentContextSlack.new('${TMP}/ad-flaky', timeout_s: 5); q = JudgmentContext.request(${A_TOP}); puts [a.read(q).first, a.read(q).first].join(' ')" 2>&1)"
 eq "adapter: one transient whoami failure does not blank the later reads" "${got}" "error ok"
 
 ruby_eq "owner: a Slack user id passes" "nil" 'JudgmentLabel.owner_problem("UFAKE00001").inspect'

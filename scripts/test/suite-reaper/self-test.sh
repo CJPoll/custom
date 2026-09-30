@@ -468,8 +468,8 @@ fi
 # without testing anything. Neither sub-case below depends on the clock: the
 # repro's wait ends when the client's ready file names it, or when it exits. The fake `ruby` here
 # stands in for the asdf shim: it works only under the HOME it was made for.
-S17_REAL="$(ruby -e 'print RbConfig.ruby' 2>/dev/null)"
-[ -x "${S17_REAL}" ] || bad "S17 setup: resolve the ruby interpreter" "ruby -e 'print RbConfig.ruby' gave '${S17_REAL}'"
+S17_REAL="$(/usr/bin/ruby -e 'print RbConfig.ruby' 2>/dev/null)"
+[ -x "${S17_REAL}" ] || bad "S17 setup: resolve the ruby interpreter" "/usr/bin/ruby -e 'print RbConfig.ruby' gave '${S17_REAL}'"
 S17_BIN="${TMP}/s17bin"; mkdir -p "${S17_BIN}"
 printf '#!/usr/bin/env bash\n[ "${HOME}" = %q ] || { echo "fake asdf shim: no ruby version set under HOME=${HOME}" >&2; exit 126; }\nexec %q "$@"\n' \
   "${HOME}" "${S17_REAL}" >"${S17_BIN}/ruby"

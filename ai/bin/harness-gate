@@ -2844,7 +2844,7 @@ def self_test_core
     # And the dispatch-level rescue turns that into a Fix:-carrying failure,
     # not a bare Ruby backtrace, end to end via a real subprocess.
     env = { "PATH" => "#{fake_bin}:#{old_path}" }
-    out, status = Open3.capture2e(env, "ruby", File.join(CUSTOM_DIR, "ai/bin/harness-gate"),
+    out, status = Open3.capture2e(env, RbConfig.ruby, File.join(CUSTOM_DIR, "ai/bin/harness-gate"),
                                    "--list", chdir: CUSTOM_DIR, stdin_data: "")
     if status.success?
       warn "self-test: FAIL — harness-gate --list exited 0 despite a " \

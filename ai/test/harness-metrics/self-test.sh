@@ -26,9 +26,9 @@ bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 
 # Resolve the real interpreter BEFORE any case swaps HOME: a version-manager
 # shim (asdf) reads its config from HOME and exits 126 under a sandboxed one.
-RUBY="$(ruby -e 'print RbConfig.ruby')" || {
+RUBY="$(/usr/bin/ruby -e 'print RbConfig.ruby')" || {
   echo "harness-metrics CLI self-test: FAIL — could not resolve the ruby interpreter" >&2
-  echo "Fix: put a working ruby on PATH." >&2
+  echo "Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958)." >&2
   exit 1
 }
 

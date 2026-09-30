@@ -140,7 +140,7 @@ run_bo() { # $1 = out dir name; rest = args. Sets rc; never aborts the suite.
   local out="${tmp}/$1"
   shift
   rc=0
-  (cd "${repo}" && ruby "${bin}" --out-dir "${out}" "$@") > "${tmp}/stdout" 2> "${tmp}/stderr" || rc=$?
+  (cd "${repo}" && /usr/bin/ruby "${bin}" --out-dir "${out}" "$@") > "${tmp}/stdout" 2> "${tmp}/stderr" || rc=$?
 }
 
 export STUB_VE_MARK="${tmp}/ve-called"
@@ -161,7 +161,7 @@ done
 expect "I-happy proposal.diff carries source paths only" \
   'grep -q "athena-admiral.md.in" "${tmp}/out1/proposal.diff" && ! grep -q "^+++ b/ai/agents/athena-admiral.md$" "${tmp}/out1/proposal.diff"'
 expect "I1 refs, HEAD, index, worktree list and status are byte-identical" 'cmp -s "${tmp}/before" "${tmp}/after"'
-cand="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0]))["variant_sha"]' "${tmp}/out1/scorecard.json")"
+cand="$(/usr/bin/ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0]))["variant_sha"]' "${tmp}/out1/scorecard.json")"
 expect "I2 the candidate is a commit object" '[ "$(git -C "${repo}" cat-file -t "${cand}")" = commit ]'
 expect "I2 the candidate is reachable from no ref" '[ -z "$(git -C "${repo}" for-each-ref --contains "${cand}")" ]'
 expect "I2 the candidate's parent is origin/main" \

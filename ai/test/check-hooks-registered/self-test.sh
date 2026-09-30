@@ -76,7 +76,7 @@ registry() { # registry <root> <event=script-basename>...
 
 wire() { # wire <settings-file> <event=absolute-command>...
   local file="$1"; shift
-  ruby -rjson -e '
+  /usr/bin/ruby -rjson -e '
     hooks = {}
     ARGV.each do |kv|
       ev, cmd = kv.split("=", 2)
@@ -273,7 +273,7 @@ env_fixture() { # env_fixture <name>: new_fixture plus the env landed on origin
   cp "${SRC_ROOT}/ai/git-hooks/agent-stash-guard.sh" "${d}/main/ai/git-hooks/agent-stash-guard.sh"
   cp "${SRC_ROOT}/ai/agent-bin/git" "${d}/main/ai/agent-bin/git"
   chmod +x "${d}/main/ai/git-hooks/agent-stash-guard.sh" "${d}/main/ai/agent-bin/git"
-  REG_SRC="${SRC_ROOT}/ai/hooks/registry.json" REG_DST="${d}/main/ai/hooks/registry.json" ruby -rjson -e '
+  REG_SRC="${SRC_ROOT}/ai/hooks/registry.json" REG_DST="${d}/main/ai/hooks/registry.json" /usr/bin/ruby -rjson -e '
     src = JSON.parse(File.read(ENV["REG_SRC"]))
     dst = JSON.parse(File.read(ENV["REG_DST"]))
     File.write(ENV["REG_DST"], JSON.pretty_generate(dst.merge("env" => src.fetch("env"))) + "\n")'
@@ -290,7 +290,7 @@ env_fixture() { # env_fixture <name>: new_fixture plus the env landed on origin
 # installer writes -- the landed hook wired, the env expanded against the MAIN
 # checkout, and the install stamp (omitted for "-"; drop-key removes one key).
 env_settings() {
-  D_MAIN="$1/main" STAMP="$2" DROP="${3:-}" OUTF="$1/settings.json" ruby -rjson -e '
+  D_MAIN="$1/main" STAMP="$2" DROP="${3:-}" OUTF="$1/settings.json" /usr/bin/ruby -rjson -e '
     main = ENV["D_MAIN"]
     spec = JSON.parse(File.read(File.join(main, "ai/hooks/registry.json"))).fetch("env")
     ex = ->(v) { v.gsub("{{MAIN}}", main) }
@@ -317,7 +317,7 @@ env_settings() {
 session_check() {
   local d="$1" ms="$2" mode="$3" path="/usr/bin:/bin" envfile=""
   [ "${mode}" = "wrapper" ] && path="${d}/main/ai/agent-bin:${path}"
-  [ "${mode}" = "fresh" ] && envfile="$(ruby -rjson -e \
+  [ "${mode}" = "fresh" ] && envfile="$(/usr/bin/ruby -rjson -e \
     'print JSON.parse(File.read(ARGV[0])).fetch("env", {}).fetch("CLAUDE_ENV_FILE", "")' "${d}/settings.json")"
   local snap="${d}/home/.claude/shell-snapshots/snapshot-zsh-${ms}-fx0001.sh"
   # Keep the trailing `exit $?`: without it bash execs the checker in place of

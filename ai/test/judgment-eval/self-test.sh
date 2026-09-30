@@ -32,7 +32,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby python3 curl jq git; do
+[ -x /usr/bin/ruby ] || { echo "judgment-eval self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in python3 curl jq git; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "judgment-eval self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 [ -x "${BIN}" ] || { echo "judgment-eval self-test: FAIL -- ${BIN} missing or not executable"; echo "  Fix: chmod +x ai/bin/judgment-eval"; exit 1; }
@@ -48,7 +49,7 @@ trap cleanup EXIT INT TERM
 # ruby_eq NAME EXPECTED RUBY-EXPR -- evaluate EXPR against the domain lib.
 ruby_eq() {
   local got
-  got="$(ruby -r "${LIBRB}" -e "puts(begin; $3; rescue JudgmentEval::InputError => e; 'InputError: ' + e.message; end)" 2>&1)"
+  got="$(/usr/bin/ruby -r "${LIBRB}" -e "puts(begin; $3; rescue JudgmentEval::InputError => e; 'InputError: ' + e.message; end)" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 

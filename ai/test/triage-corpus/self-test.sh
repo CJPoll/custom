@@ -32,7 +32,8 @@ eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2
 has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac; }
 lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;; esac; }
 
-for dep in ruby python3 curl jq git; do
+[ -x /usr/bin/ruby ] || { echo "triage-corpus self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931/958); this suite does not skip."; exit 1; }
+for dep in python3 curl jq git; do
   command -v "${dep}" >/dev/null 2>&1 || { echo "triage-corpus self-test: FAIL -- ${dep} is not on PATH"; echo "  Fix: install ${dep}; this suite does not skip."; exit 1; }
 done
 for f in "${BIN}" "${EVAL}"; do
@@ -51,7 +52,7 @@ trap cleanup EXIT INT TERM
 # ruby_eq NAME EXPECTED RUBY-EXPR -- evaluate EXPR against the domain lib.
 ruby_eq() {
   local got
-  got="$(ruby -rjson -r "${LIBRB}" -e "puts(begin; $3; rescue TriageCorpus::InputError => e; 'InputError: ' + e.message; end)" 2>&1)"
+  got="$(/usr/bin/ruby -rjson -r "${LIBRB}" -e "puts(begin; $3; rescue TriageCorpus::InputError => e; 'InputError: ' + e.message; end)" 2>&1)"
   eq "$1" "${got}" "$2"
 }
 
@@ -97,10 +98,10 @@ ruby_eq "duplicate: 'a duplicate: DND-12' still counts" \
   "DND-12" 'TriageCorpus.duplicate_refs("This is a duplicate: DND-12").join(",")'
 eq "build: a case whose sent title would be blank is excluded as blank_title, never sent" \
   "blank_title 1" \
-  "$(ruby -rjson -r "${LIBRB}" -e 't = ->(n, title, text) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>title,"area"=>"Harness","epic_ids"=>[],"depends_on"=>[],"blocks"=>[],"found_while"=>[],"blocks_text"=>text,"body_read"=>true} }; s = {"fetched_at"=>"x","epic_projects"=>{},"tickets"=>[t.(1,"  ",["b"]), t.(2,"Real",["Follows DND-1."])]}; r = TriageCorpus.build(s, unrelated: 0, related: 10, seed: "s"); puts r[:excluded].select { |k, _| k == :blank_title }.map { |k, v| "#{k} #{v}" }.join(",")')"
+  "$(/usr/bin/ruby -rjson -r "${LIBRB}" -e 't = ->(n, title, text) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>title,"area"=>"Harness","epic_ids"=>[],"depends_on"=>[],"blocks"=>[],"found_while"=>[],"blocks_text"=>text,"body_read"=>true} }; s = {"fetched_at"=>"x","epic_projects"=>{},"tickets"=>[t.(1,"  ",["b"]), t.(2,"Real",["Follows DND-1."])]}; r = TriageCorpus.build(s, unrelated: 0, related: 10, seed: "s"); puts r[:excluded].select { |k, _| k == :blank_title }.map { |k, v| "#{k} #{v}" }.join(",")')"
 # small -- build over a Harness-epic snapshot of t.(n, area, blocks_text, extra) rows.
 SMALL='t = ->(n, area, text, extra = {}) { {"page_id"=>"p#{n}","ref"=>"DND-#{n}","title"=>"Ticket #{n} widget","area"=>area,"epic_ids"=>["EH"],"depends_on"=>[],"blocks"=>[],"found_while"=>[],"relations_truncated"=>false,"blocks_text"=>text,"body_read"=>true}.merge(extra) }; snap = ->(ts) { {"fetched_at"=>"x","epic_projects"=>{"EH"=>"harness"},"tickets"=>ts} }'
-small() { ruby -rjson -r "${LIBRB}" -e "${SMALL}; $1" 2>&1; }
+small() { /usr/bin/ruby -rjson -r "${LIBRB}" -e "${SMALL}; $1" 2>&1; }
 eq "build: a citation-list ticket is linked to what it cites, never sampled unrelated with it [review g]" \
   "$(small 'ts = (1..9).map { |n| t.(n, "Product", ["body #{n}"]) } + [t.(20, "Harness", ["Sweep: " + (1..9).map { |i| "DND-#{i}" }.join(" ")])]; r = TriageCorpus.build(snap.(ts), unrelated: 100, related: 0, seed: "s"); puts [r[:labels].count { |l| l["id"].start_with?("DND-20:") }, "citation_list_skipped", r[:excluded][:citation_list_skipped]].join(" ")')" \
   "0 citation_list_skipped 1"
@@ -149,7 +150,7 @@ ruby_eq "ticket_from_row: records Path, and whether the row carries a Path selec
 #   20 Harness  cites 9 tickets                    -> citation_list_skipped
 #   21 Harness  cites DND-999 (unknown)            -> unknown_ref
 mkdir -p "${TMP}/evals"
-ruby -rjson -e '
+/usr/bin/ruby -rjson -e '
   def t(n, epic, area, text, extra = {})
     { "page_id" => "p#{n}", "ref" => "DND-#{n}", "title" => "Ticket #{n} about the widget", "status" => "Todo",
       "area" => area, "severity" => nil, "epic_ids" => epic ? [epic] : [], "depends_on" => [], "blocks" => [],
@@ -178,7 +179,7 @@ ruby -rjson -e '
   File.write(ARGV[0], JSON.generate(snap))
 ' "${TMP}/evals/finding-triage-snapshot.json"
 
-build() { ruby -rjson -r "${LIBRB}" -e "r = TriageCorpus.build(JSON.parse(File.read('${TMP}/evals/finding-triage-snapshot.json')), unrelated: 3, related: 100, seed: 's'); $1"; }
+build() { /usr/bin/ruby -rjson -r "${LIBRB}" -e "r = TriageCorpus.build(JSON.parse(File.read('${TMP}/evals/finding-triage-snapshot.json')), unrelated: 3, related: 100, seed: 's'); $1"; }
 
 eq "build: duplicate from the body text [ticket]" \
   "$(build 'puts r[:labels].select { |l| l["label"] == "duplicate" }.map { |l| [l["id"], l["provenance"], l["rule"]].join(" ") }')" \
@@ -215,13 +216,13 @@ eq "build: counts by relation/provenance" \
   "$(build 'puts r[:counts]["by_label_provenance"].map { |k, v| "#{k} #{v}" }.join(", ")')"
 eq "build: --related caps the related pairs (a deterministic sample), duplicates are all kept" \
   "1 2 related_not_sampled 1" \
-  "$(ruby -rjson -r "${LIBRB}" -e "r = TriageCorpus.build(JSON.parse(File.read('${TMP}/evals/finding-triage-snapshot.json')), unrelated: 0, related: 2, seed: 's'); c = r[:labels].group_by { |l| l['label'] }.transform_values(&:size); puts [c['duplicate'], c['related'], 'related_not_sampled', r[:excluded][:related_not_sampled]].join(' ')")"
+  "$(/usr/bin/ruby -rjson -r "${LIBRB}" -e "r = TriageCorpus.build(JSON.parse(File.read('${TMP}/evals/finding-triage-snapshot.json')), unrelated: 0, related: 2, seed: 's'); c = r[:labels].group_by { |l| l['label'] }.transform_values(&:size); puts [c['duplicate'], c['related'], 'related_not_sampled', r[:excluded][:related_not_sampled]].join(' ')")"
 eq "unrelated: pairs sharing a title keyword are sampled first (live candidates share one)" \
   "DND-3:DND-1" \
-  "$(ruby -r "${LIBRB}" -e 't = ->(n, a, title) { {"ref"=>"DND-#{n}","area"=>a,"title"=>title,"body_read"=>true} }; ts = [t.(1,"Harness","inbox waiter hangs"), t.(2,"Harness","billing copy"), t.(3,"Product","inbox waiter crash"), t.(4,"Product","colour theme")]; pr = ts.to_h { |x| [x["ref"], "harness"] }; puts TriageCorpus.unrelated_pairs(ts, pr, {}, 1, "s").select { |p| p[2] == "rule_confirmed" }.map { |p| p[0,2].join(":") }.join(",")')"
+  "$(/usr/bin/ruby -r "${LIBRB}" -e 't = ->(n, a, title) { {"ref"=>"DND-#{n}","area"=>a,"title"=>title,"body_read"=>true} }; ts = [t.(1,"Harness","inbox waiter hangs"), t.(2,"Harness","billing copy"), t.(3,"Product","inbox waiter crash"), t.(4,"Product","colour theme")]; pr = ts.to_h { |x| [x["ref"], "harness"] }; puts TriageCorpus.unrelated_pairs(ts, pr, {}, 1, "s").select { |p| p[2] == "rule_confirmed" }.map { |p| p[0,2].join(":") }.join(",")')"
 eq "build: a snapshot with no tickets is an error, not an empty corpus" \
   "InputError: the snapshot holds no tickets" \
-  "$(ruby -r "${LIBRB}" -e 'begin; TriageCorpus.build({"tickets"=>[],"epic_projects"=>{},"fetched_at"=>"x"}, unrelated: 1, related: 1, seed: "s"); rescue TriageCorpus::InputError => e; puts "InputError: #{e.message}"; end')"
+  "$(/usr/bin/ruby -r "${LIBRB}" -e 'begin; TriageCorpus.build({"tickets"=>[],"epic_projects"=>{},"fetched_at"=>"x"}, unrelated: 1, related: 1, seed: "s"); rescue TriageCorpus::InputError => e; puts "InputError: #{e.message}"; end')"
 
 echo "== build (bin) + judgment-eval --dry-run"
 
