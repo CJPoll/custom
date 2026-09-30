@@ -20,6 +20,10 @@ a Mission is unblocked and has a free slot (worktree already created via
    every dispatch*, below) before the spawn.
 1. **Move the Mission's Notion status to `In Progress`** and set its `Assignee`
    to **Athena** (the active connection's bot — see [[athena:ticket-management]]).
+   For a DND ticket, the status move is
+   `~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref DND-N`.
+   It also stamps `In Progress at`, the start `ai/bin/lead-time` measures from
+   ([[athena:ticket-management]] → *The transitions an orchestrator performs*).
 2. **Dispatch an athena-captain, named uniquely and Mission-qualified** (e.g.
    `athena-captain-DND-398`) — never the bare role name. Several run
    concurrently; `ListAgents` can't disambiguate identical bare names, and a
@@ -284,7 +288,8 @@ The batch brief carries everything above for one Mission, plus:
   line, the PR URL (forge repos), files changed, and its own proposed findings.
   A STUCK ticket holds every ticket stacked above it; its section says so.
 - **The Notion transitions, per ticket.** Move each ticket to `In Progress` with
-  Athena as `Assignee` at dispatch. In a forge repo, the captain's `In Review`
+  Athena as `Assignee` at dispatch, through `mark-in-progress` (step 1 above),
+  so every ticket in the batch gets its lead-time stamp. In a forge repo, the captain's `In Review`
   rule (or "set NO Notion status at all") applies to each ticket as its own PR
   opens. You move each ticket on its own landing.
 

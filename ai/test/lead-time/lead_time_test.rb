@@ -158,6 +158,35 @@ def forge_over(o, views, calls = [], list: [], dir: o[:work])
   f
 end
 
+# A Notion transport over fixture pages: DND number -> the page's
+# "In Progress at" property (a Hash, or :absent for a page without it).
+class FakeNotion
+  attr_reader :calls
+
+  def initialize(pages, fail_with = nil)
+    @pages = pages
+    @fail = fail_with
+    @calls = []
+  end
+
+  def call(method, path, body = nil)
+    @calls << [method, path, body]
+    raise NextMissionNotion::ReadError, @fail if @fail
+
+    n = body.dig("filter", "unique_id", "equals")
+    prop = @pages[n]
+    return { "results" => [] } if prop.nil?
+
+    props = { "ID" => { "type" => "unique_id", "unique_id" => { "prefix" => "DND", "number" => n } } }
+    props[NotionStart::PROPERTY] = prop unless prop == :absent
+    { "results" => [{ "id" => "page-#{n}", "properties" => props }] }
+  end
+end
+
+def at_prop(iso)
+  { "type" => "date", "date" => iso && { "start" => iso, "end" => nil, "time_zone" => nil } }
+end
+
 def capture_row(row)
   old = $stdout
   $stdout = StringIO.new
@@ -185,44 +214,49 @@ Dir.mktmpdir("lead-time-test") do |root|
     14 => pr_view(o, 14, state: "CLOSED", head: :c1, commits: ["2026-09-29T05:00:00Z"]),
   }
 
+  # The start is the ticket's In Progress date (DND-1318); these landing cases
+  # stamp each ticket at its first commit, so the leads below are unchanged.
+  starts = NotionStart.new(FakeNotion.new(views.to_h do |n, v|
+    [n, at_prop(v["commits"].map { |c| c["authoredDate"] }.min)]
+  end))
   ProbeFailures.reset!
   forge = forge_over(o, views)
 
   # --- the DND-1317 regression: CLOSED on GitHub, but its change is on main.
-  r7 = analyze(forge, 7)
+  r7 = analyze(forge, 7, starts)
   check("a CLOSED PR landed by a rebase reads as landed, not open (DND-1317)") { r7[:end_kind] == :merge }
   check("its landing time is the push that put the change on main") { r7[:merged] == "2026-09-29T07:05:00Z" }
   check("its lead runs from its start to that push") { r7[:lead_seconds] == (30 * 3600) + (5 * 60) }
   check("the row names how it landed") { r7[:landed_via] == "push" }
   check("the row names the landed commit") { r7[:landed_commit] == o[:p7_landed] }
 
-  r10 = analyze(forge, 10)
+  r10 = analyze(forge, 10, starts)
   check("a CLOSED PR landed squashed reads as landed") { r10[:end_kind] == :merge }
   check("a squashed landing is timed by the push that carried it") { r10[:merged] == "2026-09-29T08:18:58Z" }
 
-  r14 = analyze(forge, 14)
+  r14 = analyze(forge, 14, starts)
   check("a CLOSED PR whose own head is on main reads as landed") { r14[:end_kind] == :merge }
   check("its head is the landed commit, timed by the push that carried it") do
     r14[:landed_commit] == o[:c1] && r14[:merged] == "2026-09-29T06:00:30Z"
   end
 
   # --- CLOSED and not on main: distinct from open, never a lead.
-  r8 = analyze(forge, 8)
+  r8 = analyze(forge, 8, starts)
   check("a CLOSED PR whose change is not on main reads as closed, not open") { r8[:end_kind] == :closed }
   check("a closed-unlanded PR has no lead") { r8[:lead_seconds].nil? }
 
   # --- cannot decide: says so, never open and never closed.
-  r9 = analyze(forge, 9)
+  r9 = analyze(forge, 9, starts)
   check("a same-subject, different-patch commit on main is could-not-measure") { r9[:end_kind] == :unmeasured }
   check("the could-not-measure row says why") { r9[:unmeasured_reason].to_s.include?("DND-9: fix") }
-  r11 = analyze(forge, 11)
+  r11 = analyze(forge, 11, starts)
   check("a partly-landed PR is could-not-measure") { r11[:end_kind] == :unmeasured }
   check("the partial landing names the count") { r11[:unmeasured_reason].to_s.include?("1 of 2") }
 
   # --- the states that already worked still do.
-  r12 = analyze(forge, 12)
+  r12 = analyze(forge, 12, starts)
   check("an OPEN PR still reads as open") { r12[:end_kind] == :open }
-  r13 = analyze(forge, 13)
+  r13 = analyze(forge, 13, starts)
   check("a MERGED PR still ends at mergedAt") { r13[:merged] == "2026-09-29T06:30:00Z" && r13[:end_kind] == :merge }
   check("a MERGED PR names the forge merge") { r13[:landed_via] == "merge" }
   check("no probe failed on a readable fixture") { !ProbeFailures.any? }
@@ -231,14 +265,14 @@ Dir.mktmpdir("lead-time-test") do |root|
   ProbeFailures.reset!
   cut_off = fresh_clone(o, root, "cut-off")
   sh_git(cut_off, "remote", "set-url", "origin", File.join(root, "no-such-origin.git"))
-  rb = analyze(forge_over(o, views, dir: cut_off), 7)
+  rb = analyze(forge_over(o, views, dir: cut_off), 7, starts)
   check("a landing probe whose fetch fails is recorded as a failed probe") { ProbeFailures.any? }
   check("and the row does not read as open") { rb.nil? || rb[:end_kind] != :open }
   check("and the row says it could not measure") { rb.nil? || rb[:end_kind] == :unmeasured }
   ProbeFailures.reset!
   broken_log = forge_over(o, views, dir: o[:work])
   broken_log.define_singleton_method(:base_pushes) { |_b| ProbeFailures.record("gh api activity", "HTTP 502") }
-  rl = analyze(broken_log, 7)
+  rl = analyze(broken_log, 7, starts)
   check("an unreadable activity log is a failed probe, not open") { ProbeFailures.any? && rl[:end_kind] == :unmeasured }
   ProbeFailures.reset!
 
@@ -289,13 +323,6 @@ Dir.mktmpdir("lead-time-test") do |root|
     at.nil? && why.include?("no push")
   end
 
-  # --- a landed request with no commits has no start, and says so.
-  nostart = LeadTime.compute(start_iso_times: [], deploy_at: nil, pipeline_at: nil,
-                             merged_at: "2026-09-29T07:05:00Z")
-  check("a landed request with no commits names why it has no lead") do
-    nostart[:lead_seconds].nil? && nostart[:unmeasured_reason].to_s.include?("no commits")
-  end
-
   # --- presentation: could-not-measure and closed are named on the row.
   out = capture_row(r9)
   check("a could-not-measure row prints 'could not measure'") { out.include?("could not measure") }
@@ -303,6 +330,141 @@ Dir.mktmpdir("lead-time-test") do |root|
   check("a landed-by-push row prints its landing") do
     capture_row(r7).include?("landed by push #{o[:p7_landed][0, 8]}") && !capture_row(r13).include?("landed by push")
   end
+end
+
+# ---------------------------------------------------------------------------
+# DND-1318: the START is the ticket's move to In Progress (captain dispatch),
+# read from the DND Tickets "In Progress at" date. Owner decision, Cody,
+# 2026-09-30 ~04:05Z: lead time = captain dispatch -> landed on main.
+# ---------------------------------------------------------------------------
+
+# PR #129's shape (DND-1203): the captain was dispatched 02:41Z, squashed its
+# work into one commit authored 03:06:00Z, and the PR merged 03:27:17Z. The old
+# start (the earliest commit) read lead=21m 19s; the dispatch start reads 46m 17s.
+pr129 = { "number" => 129, "title" => "DND-1203: suite-reaper repro execs the real ruby",
+          "headRefName" => "dnd-1203-suite-reaper-worktree-time", "state" => "MERGED",
+          "mergedAt" => "2026-09-30T03:27:17Z", "closedAt" => "2026-09-30T03:27:17Z",
+          "baseRefName" => "main", "headRefOid" => "h129", "mergeCommit" => { "oid" => "m129" },
+          "commits" => [{ "authoredDate" => "2026-09-30T03:05:58Z", "committedDate" => "2026-09-30T03:05:58Z" }] }
+gh129 = GitHubForge.new(".")
+gh129.define_singleton_method(:run_json) do |cmd, _dir|
+  next [] if cmd[1] == "run"
+
+  pr129
+end
+
+ProbeFailures.reset!
+stamped = NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000Z")))
+r129 = analyze(gh129, 129, stamped)
+check("the start is the ticket's move to In Progress, not the squashed commit (DND-1318)") do
+  r129[:start] == "2026-09-30T02:41:00Z"
+end
+check("the lead runs from dispatch to landing: 46m 17s, not 21m 19s") { r129[:lead_seconds] == (46 * 60) + 17 }
+check("the row names its measured start") { r129[:start_source] == "DND-1203 In Progress at" }
+check("the earliest commit is still reported, as first_commit") { r129[:first_commit] == "2026-09-30T03:05:58Z" }
+check("the human row names the start source") { capture_row(r129).include?("start=DND-1203 In Progress at") }
+
+unstamped = NotionStart.new(FakeNotion.new(1203 => at_prop(nil)))
+ru = analyze(gh129, 129, unstamped)
+check("a ticket with no In Progress date has no lead (never the commit date)") { ru[:lead_seconds].nil? && ru[:start].nil? }
+check("and says it could not measure the start, naming the ticket") do
+  ru[:unmeasured_reason].to_s.include?("start") && ru[:unmeasured_reason].to_s.include?("DND-1203")
+end
+check("the unstamped row prints 'could not measure'") { capture_row(ru).include?("could not measure") }
+
+absent = NotionStart.new(FakeNotion.new(1203 => :absent))
+check("a database without the property says so") do
+  analyze(gh129, 129, absent)[:unmeasured_reason].to_s.include?("has no 'In Progress at' property")
+end
+missing = NotionStart.new(FakeNotion.new({}))
+check("a ticket that is not in the database says so") do
+  analyze(gh129, 129, missing)[:unmeasured_reason].to_s.include?("no DND-1203 in DND Tickets")
+end
+dateonly = NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30")))
+check("a date with no time is not a start") do
+  analyze(gh129, 129, dateonly)[:unmeasured_reason].to_s.include?("no time")
+end
+check("no Notion read failed on readable fixtures") { !ProbeFailures.any? }
+
+# --- which ticket a PR is: its branch, else its title; never a guess.
+check("the ticket comes from the branch") do
+  LeadTime.ticket_ref(branch: "dnd-1203-suite-reaper", title: "x") == ["DND-1203", nil]
+end
+check("else from the title") { LeadTime.ticket_ref(branch: "shipwright-docs", title: "DND-77: y") == ["DND-77", nil] }
+check("a PR naming no ticket has no start, and says so") do
+  ref, why = LeadTime.ticket_ref(branch: "harness-gate-jobs", title: "harness-gate: --jobs N")
+  ref.nil? && why.to_s.include?("names a ticket")
+end
+check("a branch naming two tickets is not a guess") do
+  ref, why = LeadTime.ticket_ref(branch: "dnd-1-and-dnd-2", title: "t")
+  ref.nil? && why.to_s.include?("DND-1") && why.to_s.include?("DND-2")
+end
+check("a word shaped like a ticket beside the real one is not a second ticket") do
+  LeadTime.ticket_ref(branch: "dnd-897-contract-resync-404", title: "t") == ["DND-897", nil] &&
+    LeadTime.ticket_ref(branch: "dnd-931-harness-ruby-34", title: "t") == ["DND-931", nil]
+end
+check("a branch naming only a non-DND word falls through to the title") do
+  LeadTime.ticket_ref(branch: "shipwright/admiral-500-stage1", title: "DND-77: x") == ["DND-77", nil]
+end
+check("a lone non-DND ref is named in the reason") do
+  ref, why = LeadTime.ticket_ref(branch: "athena/zq-2032-foo", title: "t")
+  ref.nil? && why.include?("ZQ-2032")
+end
+check("a cron lane branch names no ticket") do
+  LeadTime.ticket_ref(branch: "shipwright/run-20260930-1234", title: "shipwright: x")[0].nil?
+end
+check("the start query goes to DND Tickets by ID") do
+  fake = FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000Z"))
+  NotionStart.new(fake).lookup("DND-1203")
+  m, path, body = fake.calls.first
+  m == :post && path == "/v1/data_sources/#{NextMissionNotion::TICKETS_DATA_SOURCE}/query" &&
+    body.dig("filter", "property") == "ID"
+end
+check("a stamp with no UTC offset is not read as local time") do
+  _at, why = NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000"))).lookup("DND-1203")
+  why.to_s.include?("no UTC offset")
+end
+check("a non-date property is not a start") do
+  _at, why = NotionStart.new(FakeNotion.new(1203 => { "type" => "rich_text", "rich_text" => [] })).lookup("DND-1203")
+  why.to_s.include?("not a date")
+end
+late = NotionStart.new(FakeNotion.new(1203 => at_prop("2026-09-30T04:00:00.000Z")))
+rlate = analyze(gh129, 129, late)
+check("a stamp after the landing is could-not-measure, never a negative lead") do
+  rlate[:lead_seconds].nil? && rlate[:code_seconds].nil? && rlate[:unmeasured_reason].to_s.include?("after the landing")
+end
+nondnd = NotionStart.new(FakeNotion.new({}))
+check("a ticket outside the DND database is could-not-measure") do
+  _at, why = nondnd.lookup("ZQ-12")
+  why.to_s.include?("ZQ-12") && nondnd.instance_variable_get(:@transport).calls.empty?
+end
+pr_none = pr129.merge("headRefName" => "harness-gate-jobs", "title" => "harness-gate: --jobs N")
+gh_none = GitHubForge.new(".")
+gh_none.define_singleton_method(:run_json) { |cmd, _d| cmd[1] == "run" ? [] : pr_none }
+check("a PR with no ticket reads could-not-measure, not a commit-date lead") do
+  r = analyze(gh_none, 129, stamped)
+  r[:lead_seconds].nil? && r[:unmeasured_reason].to_s.include?("names a ticket")
+end
+
+# --- a Notion read that cannot run is a failed probe (SCAN INCOMPLETE).
+ProbeFailures.reset!
+down = NotionStart.new(FakeNotion.new({}, "HTTP 502 on POST /v1/data_sources/x/query"))
+rd = analyze(gh129, 129, down)
+check("a Notion failure is a recorded probe failure") { ProbeFailures.any? }
+check("and the row has no lead") { rd[:lead_seconds].nil? }
+ProbeFailures.reset!
+notoken = NotionStart.new(nil, missing_reason: "no notion-personal token at /nowhere")
+analyze(gh129, 129, notoken)
+check("no Notion token is a recorded probe failure, not an empty answer") do
+  ProbeFailures.list.any? { |f| f[:detail].include?("no notion-personal token") }
+end
+ProbeFailures.reset!
+check("one lookup per ticket per run") do
+  fake = FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000Z"))
+  s = NotionStart.new(fake)
+  analyze(gh129, 129, s)
+  analyze(gh129, 129, s)
+  fake.calls.size == 1
 end
 
 if $failures.empty?

@@ -436,13 +436,13 @@ Alongside mining reports, each run drives down how long fleet work takes to ship
 — under one hard constraint: **never remove or weaken a safety check** (*Speed a
 safety check up; never weaken it* below, carried verbatim). It outranks any speedup.
 
-**The signal.** `ai/bin/lead-time` derives every ticket's lead time from git +
-the forge's CI (no agent has to have set anything). Lead time = earliest branch
-commit → fully deployed; it splits into two phases with different levers:
+**The signal.** `ai/bin/lead-time` gives every ticket's lead time = captain
+dispatch (the ticket's `In Progress at` stamp) → fully deployed (git + the
+forge's CI); it splits into two phases with different levers:
 
-- `code` (start → merge) — development + review. Lever: the **harness/process**
+- `code` (start → landing) — development + review. Lever: the **harness/process**
   (clearer specs, better skills, fewer review round-trips).
-- `tail` (merge → end) — CI + deploy. Lever: **pipeline efficiency**
+- `tail` (landing → end) — CI + deploy. Lever: **pipeline efficiency**
   (parallelize, cache, shard) — never by weakening a check.
 
 Each run, for every repo the fleet ships from (currently `~/dev/custom`,
@@ -459,7 +459,11 @@ scanned close (`closed_at`) only once its scan is handled and **never on a `SCAN
 INCOMPLETE`**, so a repo whose probe failed keeps its window instead of having
 it eaten by a sibling's success. Missing on first run → a bounded 48h window.
 A row with `unmeasured_reason` could not be measured: report it as unmeasured,
-never as fast or as an outlier.
+never as fast or as an outlier. The start is the DND `In Progress at` stamp, so
+walt_ui (another tracker) and tickets dispatched before the stamp read
+unmeasured by design: count their missing starts per repo, not as findings.
+Their `tail_seconds` is still measured, so they still count toward a `tail`
+outlier or a stage dominating the `tail`, which is walt_ui's lever.
 
 **Also sweep for finished work nobody is merging** — `ai/bin/ready-and-idle
 --repo <R>` lists open MRs that are green, unblocked and idle; `lead-time` sees
@@ -477,9 +481,12 @@ Athena's, and all 6 slow lead-time rows were coworkers'.
 ticket is *watched, not actioned*. Act only on a **recurring shape** (≥2 slow
 tickets sharing a cause — the same slow CI stage, the same back-and-forth) or a
 **single unambiguous systemic cost** (a stage dominating the `tail` on every
-ticket). **Ignore a `code` outlier whose
-`start` equals a sibling ticket's** — that is the stacked-branch artefact
-(`ai/docs/lead-time-tracking.md`), not real work time.
+ticket). Tickets that share a `start` were dispatched together as one batch;
+their `code` times overlap, so count the batch once
+(`ai/docs/lead-time-tracking.md` → *The START marker*).
+**Later (2026-09-30, DND-1318):** this said to ignore a `code` outlier whose
+`start` equals a sibling's, as the stacked-branch artefact of the old
+first-commit start. Superseded: the start is now the dispatch stamp.
 
 **Coordinate with an athena-architect.** When something qualifies, do not design
 the improvement yourself — spawn ONE `athena-architect` (Agent tool) and brief it

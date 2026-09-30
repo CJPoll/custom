@@ -256,7 +256,8 @@ over 12: [[athena:dispatch-captain]] → *Machine capacity gates every dispatch*
 
 For each currently-unblocked Mission, once it has a free slot: create its worktree
 via `wt-preflight` (above), move its Notion status to `In Progress` + Assignee to
-Athena, and dispatch an **athena-captain** — Mission-qualified and uniquely named
+Athena (DND: with `mark-in-progress`, [[athena:dispatch-captain]] step 1, which
+stamps the lead-time start), and dispatch an **athena-captain** — Mission-qualified and uniquely named
 (never the bare role name). **Build the dispatch brief with
 [[athena:dispatch-captain]]**, which owns everything the brief must carry (worktree
 path, Mission, domain context, the absolute reports-dir path, MR target branch,

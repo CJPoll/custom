@@ -8,23 +8,23 @@
 # post-merge pipeline completes; or, for a repo with no CI at all, the landing:
 # the forge merge, or the push that put a CLOSED PR's change on the base).
 #
-# The whole point of this tool is that it CAPTURES NOTHING and asks NOTHING of
-# any agent. Every timestamp is recovered on demand from git + the forge's CI,
-# which retain history independently of whether an agent set a Notion status.
-# See ai/docs/lead-time-tracking.md for the design and the rejected markers
-# (chiefly: the Notion API exposes no per-property transition time).
+# The END is recovered on demand from git + the forge's CI, which retain
+# history independently of any agent. The START is the one captured value: the
+# ticket's first move to In Progress, stamped in Notion at dispatch (DND-1318).
+# See ai/docs/lead-time-tracking.md for the design and the rejected markers.
 #
 # CROSS-FORGE: the repo's `origin` remote selects the backend —
 #   github.com -> gh   (gen_saas, custom)
 #   gitlab.com -> glab (walt_ui)
 # Nothing about a specific repo is hardcoded; deploy detection is per-ticket.
 #
-# Markers (derived, durable):
-#   START = earliest commit on the ticket's branch (min AUTHOR/commit time
-#           over the PR/MR commits; survives squash merge AND rebase, which
-#           resets only the committer date). It LAGS true dispatch by the
-#           first work chunk, so lead time computed this way slightly
-#           UNDER-reports. It is the honest durable floor.
+# Markers:
+#   START = captain dispatch: the ticket's first move to In Progress (owner
+#           decision, Cody, 2026-09-30), read from the DND Tickets date
+#           "In Progress at" that scripts/mark-in-progress stamps. The ticket
+#           is named by the PR's branch, else its title. No stamp, no ticket,
+#           or a non-DND ticket -> "could not measure" with the reason; never
+#           a fallback to a commit date (reported apart, as first_commit).
 #   END   = 3-tier, matching Cody's definition exactly:
 #           (1) DEPLOY completed  -> the deploy step's completion time
 #                 github: completion of the deploy workflow run for the merge sha
@@ -51,6 +51,7 @@ require "time"
 require "json"
 require "open3"
 require "uri"
+require_relative "../lib/next_mission_notion"
 
 # Which workflow/stage counts as "the deploy" (overridable, not hardcoded to a
 # repo). GitHub: workflow name matches this regex. GitLab: job stage equals the
@@ -65,7 +66,7 @@ DEPLOY_GL_STAGE  = ENV.fetch("LEAD_TIME_DEPLOY_STAGE", "deploy")
 module LeadTime
   module_function
 
-  # Earliest commit is the start. nil if there are no commits yet.
+  # The earliest commit (reported as first_commit; never the START). nil if none.
   def pick_start(commit_iso_times)
     times = commit_iso_times.compact.map { |t| Time.iso8601(t) }
     times.min
@@ -124,8 +125,14 @@ module LeadTime
   #   it never landed, so it has no end (distinct from :open).
   # unmeasured: a reason string when the landing could not be decided; the row
   #   then has no end and says why, rather than reading as open or closed.
-  def compute(start_iso_times:, deploy_at:, pipeline_at:, merged_at:, closed: false, unmeasured: nil)
-    start = pick_start(start_iso_times)
+  #
+  # start_at: the measured START, the ticket's move to In Progress (DND-1318),
+  #   named by start_source; nil with start_unmeasured saying why. It is never
+  #   replaced by a commit date: first_commit_times only fill `first_commit`,
+  #   reported beside it for reference.
+  def compute(start_at:, deploy_at:, pipeline_at:, merged_at:, start_source: nil, start_unmeasured: nil,
+              first_commit_times: [], closed: false, unmeasured: nil)
+    start = present?(start_at) ? Time.iso8601(start_at) : nil
     finish, end_kind = pick_end(deploy_at: deploy_at, pipeline_at: pipeline_at,
                                 merged_at: merged_at)
     if unmeasured
@@ -134,15 +141,24 @@ module LeadTime
       end_kind = :closed
     end
     # A landed request with no start has no lead; say why rather than print a
-    # bare n/a. Seen live: GitHub lists 0 commits for a CLOSED PR whose head is
-    # already on its base (custom #137, #138).
-    unmeasured ||= "the forge lists no commits for it, so it has no start" if start.nil? && finish
+    # bare n/a.
+    unmeasured ||= "start: #{start_unmeasured || 'no start was given'}" if start.nil? && finish
     merged = present?(merged_at) ? Time.iso8601(merged_at) : nil
+    # A start after the landing is not a lead: a stamp made after the work
+    # landed (a later re-dispatch, a mistaken backfill) would read negative,
+    # and --slow would drop it as fast.
+    if start && merged && start > merged
+      unmeasured ||= "start: #{start_source || 'the start'} (#{start.utc.iso8601}) is after the landing " \
+                     "(#{merged.utc.iso8601})"
+      start = nil
+    end
     secs      = (start && finish) ? (finish - start).to_i : nil
     code_secs = (start && merged) ? (merged - start).to_i : nil
     tail_secs = (merged && finish) ? [(finish - merged).to_i, 0].max : nil
     {
       start: start&.utc&.iso8601,
+      start_source: start ? start_source : nil,
+      first_commit: pick_start(first_commit_times)&.utc&.iso8601,
       merged: merged&.utc&.iso8601,
       end: finish&.utc&.iso8601,
       end_kind: end_kind,
@@ -223,6 +239,37 @@ module LeadTime
     end
     [nil, "no push in the base branch's activity log carried #{sha[0, 12]}"]
   end
+
+  # A ticket reference: 2-10 letters, a hyphen, a number (DND-1318, dnd-1318).
+  TICKET_REF_RE = /(?<![A-Za-z0-9])([A-Za-z]{2,10})-(\d{1,7})(?![0-9])/.freeze
+
+  # Which ticket a request works: the `prefix` ticket its branch names, else
+  # the one its title names. -> ["DND-1318", nil] or [nil, reason]. Only the
+  # prefix counts as a ticket: ordinary words shaped like one (resync-404,
+  # utf-8, ruby-34) are not. Two different tickets in one place are not a
+  # guess. With no prefix ticket anywhere, the reason names any other-tracker
+  # ref it saw, and it is never a silent fallback to some other start.
+  def ticket_ref(branch:, title:, prefix: "DND")
+    places = [["branch", branch], ["title", title]]
+    places.each do |where, text|
+      refs = refs_in(text).select { |r| r.start_with?("#{prefix}-") }
+      return [refs.first, nil] if refs.size == 1
+      return [nil, "its #{where} names several #{prefix} tickets (#{refs.join(', ')})"] if refs.size > 1
+    end
+    others = places.flat_map { |_w, t| refs_in(t) }.uniq
+    return [nil, "it names no #{prefix} ticket (only #{others.join(', ')})"] unless others.empty?
+
+    [nil, "neither its branch nor its title names a ticket, so no In Progress time can be read"]
+  end
+
+  def refs_in(text)
+    text.to_s.scan(TICKET_REF_RE).map { |p, n| "#{p.upcase}-#{n}" }.uniq
+  end
+
+  # An In Progress stamp must carry its zone: Notion returns a start with no
+  # offset when the date has a time_zone set, and Time.iso8601 would read that
+  # as this machine's local time.
+  ZONED_RE = /(Z|[+-]\d\d:?\d\d)\z/.freeze
 end
 
 # ---------------------------------------------------------------------------
@@ -590,6 +637,98 @@ class GitLabForge
   end
 end
 
+# ---- the START: a ticket's move to In Progress (DND-1318) ------------------
+#
+# Owner decision (Cody, 2026-09-30): lead time = captain dispatch, the ticket's
+# move to In Progress, -> landed on main. The Notion API keeps no history of a
+# property, so the move is recorded as it happens: the DND Tickets date
+# property PROPERTY, stamped once, at the first move to In Progress, by
+# ai/skills/athena:ticket-management/scripts/mark-in-progress. This reads it.
+#
+# lookup(ref) -> [iso, nil] or [nil, reason]. A ticket that is not in the
+# database, has no stamp, or cannot be named is a per-row reason. A read that
+# cannot run (no token, an HTTP failure) is a failed probe, so the run ends
+# SCAN INCOMPLETE: "could not look" never reads as "has no start".
+class NotionStart
+  PROPERTY = "In Progress at"
+
+  def initialize(transport, missing_reason: nil)
+    @transport = transport
+    @missing_reason = missing_reason
+    @cache = {}
+  end
+
+  def source(ref)
+    "#{ref} #{PROPERTY}"
+  end
+
+  def lookup(ref)
+    @cache[ref] ||= read(ref)
+  end
+
+  private
+
+  def read(ref)
+    prefix, number = ref.split("-", 2)
+    unless prefix == NextMissionNotion::TICKET_PREFIX
+      return [nil, "#{ref} is not a #{NextMissionNotion::TICKET_PREFIX} ticket; " \
+                   "only DND Tickets records '#{PROPERTY}'"]
+    end
+    unless @transport
+      ProbeFailures.record("notion DND Tickets query #{ref}", @missing_reason)
+      return [nil, "#{ref}: Notion could not be read (see SCAN INCOMPLETE)"]
+    end
+
+    page = query(Integer(number, 10))
+    return [nil, "there is no #{ref} in DND Tickets"] unless page
+
+    stamp(ref, page)
+  rescue NextMissionNotion::ReadError => e
+    ProbeFailures.record("notion DND Tickets query #{ref}", e.message)
+    [nil, "#{ref}: Notion could not be read (see SCAN INCOMPLETE)"]
+  end
+
+  def query(number)
+    body = { "filter" => { "property" => "ID", "unique_id" => { "equals" => number } }, "page_size" => 2 }
+    res = @transport.call(:post, "/v1/data_sources/#{NextMissionNotion::TICKETS_DATA_SOURCE}/query", body)
+    (res["results"] || []).first
+  end
+
+  def stamp(ref, page)
+    props = page["properties"] || {}
+    return [nil, "DND Tickets has no '#{PROPERTY}' property"] unless props.key?(PROPERTY)
+    unless props.dig(PROPERTY, "type") == "date"
+      return [nil, "DND Tickets' '#{PROPERTY}' is a #{props.dig(PROPERTY, 'type').inspect} property, not a date"]
+    end
+
+    start = props.dig(PROPERTY, "date", "start")
+    unless start
+      return [nil, "#{ref} has no '#{PROPERTY}' date (dispatched before the stamp existed, " \
+                   "or moved to In Progress without mark-in-progress)"]
+    end
+    return [nil, "#{ref}'s '#{PROPERTY}' is a date with no time (#{start})"] unless start.include?("T")
+    unless start.match?(LeadTime::ZONED_RE)
+      return [nil, "#{ref}'s '#{PROPERTY}' has no UTC offset (#{start}); it cannot be placed in time"]
+    end
+
+    [Time.iso8601(start).utc.iso8601, nil]
+  rescue ArgumentError
+    [nil, "#{ref}'s '#{PROPERTY}' is not a time (#{start})"]
+  end
+end
+
+NOTION_TOKEN_FILE = File.join(Dir.home, ".claude", "notion-personal-token")
+
+# The real start source: Notion over the notion-personal token. A missing or
+# empty token is carried as the reason every lookup's probe failure names.
+def notion_start
+  token = File.exist?(NOTION_TOKEN_FILE) ? File.read(NOTION_TOKEN_FILE).strip : ""
+  return NotionStart.new(NextMissionNotion::HttpTransport.new(token)) unless token.empty?
+
+  NotionStart.new(nil, missing_reason: "no notion-personal token at #{NOTION_TOKEN_FILE}. " \
+                                       "Fix: place the notion-personal integration token there (owner-gated).")
+end
+
 def forge_for(dir)
   case detect_forge(dir)
   when :github then GitHubForge.new(dir)
@@ -597,11 +736,23 @@ def forge_for(dir)
   end
 end
 
-def analyze(forge, id)
+# starts: the START source (NotionStart, or a test double answering lookup
+# and source). A closed-unlanded request has no lead, so it is never looked up.
+def analyze(forge, id, starts)
   f = forge.facts(id)
   return nil unless f
 
-  LeadTime.compute(start_iso_times: f[:commit_times], deploy_at: f[:deploy_at],
+  start_at = start_why = source = nil
+  unless f[:closed]
+    ref, start_why = LeadTime.ticket_ref(branch: f[:branch], title: f[:title],
+                                         prefix: NextMissionNotion::TICKET_PREFIX)
+    if ref
+      start_at, start_why = starts.lookup(ref)
+      source = starts.source(ref)
+    end
+  end
+  LeadTime.compute(start_at: start_at, start_source: source, start_unmeasured: start_why,
+                   first_commit_times: f[:commit_times], deploy_at: f[:deploy_at],
                    pipeline_at: f[:pipeline_at], merged_at: f[:merged_at],
                    closed: f[:closed], unmeasured: f[:unmeasured])
           .merge(pr: f[:number], title: f[:title], branch: f[:branch],
@@ -687,8 +838,11 @@ def self_test
 
   # compute end-to-end: custom PR14 shape (no CI -> merge)
   r = LeadTime.compute(
-    start_iso_times: ["2026-09-19T04:42:59Z", "2026-09-19T05:35:44Z"],
+    start_at: "2026-09-19T04:42:59Z", start_source: "DND-185 In Progress at",
+    first_commit_times: ["2026-09-19T05:00:00Z", "2026-09-19T05:35:44Z"],
     deploy_at: nil, pipeline_at: nil, merged_at: "2026-09-19T05:41:21Z")
+  check.call("compute start is start_at, not the first commit", r[:start], "2026-09-19T04:42:59Z")
+  check.call("compute first_commit is reported beside it", r[:first_commit], "2026-09-19T05:00:00Z")
   check.call("compute pr14 seconds", r[:lead_seconds], 3502)
   check.call("compute pr14 human", r[:lead_human], "58m 22s")
   check.call("compute pr14 kind", r[:end_kind], :merge)
@@ -697,7 +851,7 @@ def self_test
 
   # compute deploy shape (gitlab walt_ui MR1188: 05:05:41Z -> 06:58:17Z)
   r2 = LeadTime.compute(
-    start_iso_times: ["2026-09-19T05:12:05Z", "2026-09-19T05:05:41Z"],
+    start_at: "2026-09-19T05:05:41Z",
     deploy_at: "2026-09-19T06:58:17Z", pipeline_at: "2026-09-19T07:07:37Z",
     merged_at: "2026-09-19T06:47:40Z")
   check.call("compute deploy kind", r2[:end_kind], :deploy)
@@ -865,6 +1019,7 @@ def print_row(r)
          (r[:title] || "")[0, 46],
          r[:unmeasured_reason] ? "  [could not measure: #{r[:unmeasured_reason]}]" : "",
          r[:landed_via] == "push" ? "  [landed by push #{r[:landed_commit].to_s[0, 8]}]" : "")
+  puts "        start=#{r[:start_source]} #{r[:start]}" if r[:start_source]
 end
 
 require_relative "../lib/strict_argv"
@@ -921,7 +1076,8 @@ def main(argv)
   end
 
   ids = id ? [id] : forge.landing_candidates_since(since)
-  rows = ids.map { |n| analyze(forge, n) }.compact
+  starts = notion_start
+  rows = ids.map { |n| analyze(forge, n, starts) }.compact
   if id && rows.empty?
     warn "lead-time: #{id} not found or unreadable in #{repo}"
     warn "Fix: check the PR/MR number and that the forge CLI can read this repo."
@@ -949,14 +1105,16 @@ def main(argv)
   # at all — an empty (or partial) row set here means "could not look", and the
   # caller must not be able to read it as "looked, found nothing".
   if ProbeFailures.any?
-    warn "lead-time: SCAN INCOMPLETE — #{ProbeFailures.list.size} forge probe(s) " \
+    warn "lead-time: SCAN INCOMPLETE — #{ProbeFailures.list.size} probe(s) (forge, git or Notion) " \
          "failed against #{repo}. This is NOT a measurement and MUST NOT be " \
          "recorded as \"0 outliers\" or as a clean scan:"
     ProbeFailures.list.each { |f| warn "  - #{f[:cmd]}: #{f[:detail].lines.first.to_s.strip}" }
     warn "Fix: restore forge auth for this repo and re-run (`gh auth status` / " \
          "`glab auth status`; a cron or other headless session often has no token " \
          "even though an interactive one does). For a \"window saturated\" probe, " \
-         "re-run with a later --since and scan the window in slices. Until it " \
+         "re-run with a later --since and scan the window in slices. For a " \
+         "\"notion\" probe, check the notion-personal token at #{NOTION_TOKEN_FILE} " \
+         "and Notion's status, then re-run. Until it " \
          "re-runs clean, report the scan as UNAVAILABLE, not as zero outliers."
     return 3
   end
@@ -980,10 +1138,12 @@ if $PROGRAM_NAME == __FILE__
       Usage:
         ai/bin/lead-time --repo PATH (--pr N | --mr N | --since WHEN) [OPTIONS]
 
-      Derive each ticket's lead time (earliest branch commit -> fully deployed)
-      from git plus the forge's CI. It splits into `code` (start->merge, a
-      harness/process lever) and `tail` (merge->deploy, a pipeline-efficiency
-      lever). It captures nothing, so no agent has to have recorded a status.
+      Derive each ticket's lead time: captain dispatch (the DND ticket's
+      "In Progress at" date, stamped by mark-in-progress) -> fully deployed
+      (git plus the forge's CI). It splits into `code` (start->landing, a
+      harness/process lever) and `tail` (landing->deploy, a pipeline-efficiency
+      lever). A row whose start or landing cannot be read says "could not
+      measure" and why. Reads the notion-personal token for the start.
 
       Options:
         --repo PATH    git checkout to scan (e.g. ~/dev/custom, ~/dev/gen_saas)

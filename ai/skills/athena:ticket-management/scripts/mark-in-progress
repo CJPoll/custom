@@ -1,0 +1,208 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# mark-in-progress -- move a DND ticket to In Progress and stamp when it first
+# got there (DND-1318).
+#
+# Lead time is captain dispatch -> landed on main (owner decision, Cody,
+# 2026-09-30). Dispatch is the ticket's move to In Progress. The Notion API
+# keeps no history of a property, so that move is recorded as it happens, in
+# the DND Tickets date property "In Progress at". ai/bin/lead-time reads it as
+# the START (ai/docs/lead-time-tracking.md -> The START marker).
+#
+# One call does both writes, so the status and the stamp cannot drift apart:
+#   - Status -> In Progress;
+#   - "In Progress at" -> now (or --at), ONLY when it is empty AND the ticket
+#     is moving from Todo or Backlog (a first dispatch). A re-dispatch keeps
+#     its FIRST stamp; an unstamped ticket moving from any other status is not
+#     stamped (its first dispatch is unknown here) and says so, with the
+#     --backfill fix. Two dispatches of one ticket at the same instant could
+#     both see an empty stamp; the later write wins, seconds apart.
+# It does not touch Assignee: that stays the admiral's step
+# (athena:ticket-management -> Status -> Assignee map).
+#
+# Buckets: DOMAIN (MarkInProgress.plan: what to write, pure), EFFECTS (the
+# Notion transport), MANAGER (MarkInProgress.run) and FRAMEWORK (argv).
+# The token is read from the notion-personal token file in-process and never
+# reaches argv, the environment, or any output.
+#
+# Deliberately gem-free (stdlib only).
+
+require "json"
+require "net/http"
+require "time"
+require "uri"
+require_relative "../../../lib/strict_argv"
+require_relative "../../../lib/next_mission_notion"
+
+module MarkInProgress
+  PROG = "mark-in-progress"
+  PROPERTY = "In Progress at"
+  STATUS = "In Progress"
+  TOKEN_FILE = File.join(Dir.home, ".claude", "notion-personal-token")
+  REF_RE = /\A#{NextMissionNotion::TICKET_PREFIX}-([1-9][0-9]{0,6})\z/.freeze
+
+  USAGE = <<~TXT
+    Usage: mark-in-progress --ref DND-N [--at ISO8601] [--dry-run]
+           mark-in-progress --ref DND-N --backfill --at ISO8601 [--dry-run]
+           mark-in-progress --help
+
+    Move a DND ticket to In Progress and, only if it has none yet, stamp its
+    "In Progress at" date: the START ai/bin/lead-time measures lead time from
+    (DND-1318). A re-dispatched ticket keeps its first stamp. Assignee is not
+    touched.
+
+      --at ISO8601  stamp this time instead of now (a recorded dispatch time;
+                    it must carry a time and a zone)
+      --backfill    stamp only; leave Status as it is. For a ticket already
+                    past In Progress whose dispatch time is on record. Needs --at.
+      --dry-run     print what would be written; write nothing
+      --help        this text
+
+    Exit: 0 written (or dry run), 2 usage, 3 Notion could not be read or
+    written, or the ticket or its property is missing.
+  TXT
+
+  class Refused < StandardError; end
+  class BadUsage < StandardError; end
+
+  module_function
+
+  # A move from one of these is a FIRST dispatch, so it may stamp now. From
+  # any other status (Parked, Attention Given, Needs Attention, ...) the ticket
+  # was dispatched before, at a time this call cannot know.
+  FIRST_DISPATCH_FROM = %w[Todo Backlog].freeze
+
+  # DOMAIN. page: the ticket page; at: the ISO time to stamp; status: false
+  # for a backfill, which writes the stamp only (at an explicit time).
+  # -> {properties:, stamp:, kept:, skipped:} or raises Refused naming the fix.
+  # properties is empty when there is nothing to write; skipped is the reason
+  # a move did not stamp.
+  def plan(ref, page, at, status: true)
+    props = page["properties"] || {}
+    unless props.dig(PROPERTY, "type") == "date"
+      raise Refused, "DND Tickets has no date property '#{PROPERTY}' " \
+                     "(found #{props.dig(PROPERTY, 'type').inspect}). " \
+                     "Fix: add a date property named '#{PROPERTY}' to DND Tickets, then re-run."
+    end
+
+    existing = props.dig(PROPERTY, "date", "start")
+    now_status = props.dig("Status", "status", "name")
+    write = status ? { "Status" => { "status" => { "name" => STATUS } } } : {}
+    skipped = nil
+    if existing.nil? && status && !FIRST_DISPATCH_FROM.include?(now_status)
+      skipped = "not stamped: it was #{now_status.inspect}, so this is not its first dispatch. " \
+                "Fix: stamp its recorded first dispatch with --backfill --at ISO8601"
+    elsif existing.nil?
+      write[PROPERTY] = { "date" => { "start" => at } }
+    end
+    { properties: write, stamp: existing || (skipped ? nil : at), kept: !existing.nil?, skipped: skipped, ref: ref }
+  end
+
+  ZONED_RE = /T.*(Z|[+-]\d\d:?\d\d)\z/.freeze
+
+  def parse_at(text)
+    unless text.match?(ZONED_RE)
+      raise BadUsage, "--at needs a time with a zone (e.g. 2026-09-30T02:41:00Z). Fix: pass one."
+    end
+
+    Time.iso8601(text).utc.iso8601
+  rescue ArgumentError
+    raise BadUsage, "--at #{text.inspect} is not an ISO 8601 time. Fix: pass e.g. 2026-09-30T02:41:00Z."
+  end
+
+  # MANAGER. transport: call(method, path, body) -> Hash, raising
+  # NextMissionNotion::ReadError. -> exit code.
+  def run(argv, transport:, now:, out: $stdout, err: $stderr)
+    opts = StrictArgv.parse(argv, { "--ref" => :value, "--at" => :value, "--dry-run" => :switch,
+                                    "--backfill" => :switch })
+    refs = [opts["--ref"]].compact
+    unless refs.size == 1 && (m = REF_RE.match(refs.first))
+      err.puts "#{PROG}: pass one ticket id with --ref, like --ref DND-1318 (got #{refs.inspect})."
+      err.puts "Fix: #{PROG} --ref DND-N [--at ISO8601] [--dry-run]"
+      return 2
+    end
+    backfill = opts.fetch("--backfill", false)
+    raise BadUsage, "--backfill needs --at, the recorded dispatch time. Fix: add --at ISO8601." if backfill && !opts["--at"]
+
+    at = opts["--at"] ? parse_at(opts["--at"]) : now.utc.iso8601
+    page = find(transport, Integer(m[1], 10), refs.first)
+    p = plan(refs.first, page, at, status: !backfill)
+    unless opts["--dry-run"] || p[:properties].empty?
+      transport.call(:patch, "/v1/pages/#{page['id']}", { "properties" => p[:properties] })
+    end
+    status_note = backfill ? "Status unchanged" : "Status #{STATUS}"
+    stamp_note = if p[:skipped] then "#{PROPERTY} #{p[:skipped]}"
+                 else "#{PROPERTY} #{p[:stamp]} (#{p[:kept] ? 'kept, already stamped' : 'stamped'})"
+                 end
+    out.puts "#{refs.first}: #{status_note}; #{stamp_note}#{opts['--dry-run'] ? ' [dry run]' : ''}"
+    err.puts "#{PROG}: #{refs.first} #{p[:skipped]}" if p[:skipped]
+    0
+  rescue BadUsage => e
+    err.puts "#{PROG}: #{e.message}"
+    2
+  rescue StrictArgv::UsageError => e
+    err.puts "#{PROG}: #{e.message}."
+    err.puts "Fix: #{PROG} --ref DND-N [--at ISO8601] [--dry-run]"
+    2
+  rescue Refused => e
+    err.puts "#{PROG}: #{e.message}"
+    3
+  rescue NextMissionNotion::ReadError => e
+    err.puts "#{PROG}: Notion could not be reached: #{e.message}"
+    err.puts "Fix: check the notion-personal token at #{TOKEN_FILE} and Notion's status, then re-run."
+    3
+  end
+
+  def find(transport, number, ref)
+    body = { "filter" => { "property" => "ID", "unique_id" => { "equals" => number } }, "page_size" => 2 }
+    res = transport.call(:post, "/v1/data_sources/#{NextMissionNotion::TICKETS_DATA_SOURCE}/query", body)
+    page = (res["results"] || []).first
+    raise Refused, "there is no #{ref} in DND Tickets. Fix: check the ticket id." unless page
+
+    page
+  end
+
+  # EFFECTS. Notion REST with GET/POST/PATCH; the token stays in-process.
+  class Transport
+    def initialize(token)
+      @token = token
+    end
+
+    def call(method, path, body = nil)
+      klass = { get: Net::HTTP::Get, post: Net::HTTP::Post, patch: Net::HTTP::Patch }.fetch(method)
+      req = klass.new(path)
+      req["Authorization"] = "Bearer #{@token}"
+      req["Notion-Version"] = NextMissionNotion::NOTION_VERSION
+      if body
+        req["Content-Type"] = "application/json"
+        req.body = JSON.generate(body)
+      end
+      res = Net::HTTP.start("api.notion.com", 443, use_ssl: true, open_timeout: 15, read_timeout: 30) do |h|
+        h.request(req)
+      end
+      unless res.code.to_i.between?(200, 299)
+        raise NextMissionNotion::ReadError, "HTTP #{res.code} on #{method.upcase} #{path}"
+      end
+
+      JSON.parse(res.body)
+    rescue SocketError, SystemCallError, Timeout::Error, OpenSSL::SSL::SSLError, IOError, Net::HTTPBadResponse,
+           JSON::ParserError => e
+      raise NextMissionNotion::ReadError, "#{e.class} on #{method.upcase} #{path}: #{e.message}"
+    end
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.include?("--help") || ARGV.include?("-h")
+    puts MarkInProgress::USAGE
+    exit 0
+  end
+  token = File.exist?(MarkInProgress::TOKEN_FILE) ? File.read(MarkInProgress::TOKEN_FILE).strip : ""
+  if token.empty?
+    warn "#{MarkInProgress::PROG}: no notion-personal token at #{MarkInProgress::TOKEN_FILE}."
+    warn "Fix: the owner places the notion-personal integration token there (owner-gated)."
+    exit 3
+  end
+  exit MarkInProgress.run(ARGV, transport: MarkInProgress::Transport.new(token), now: Time.now)
+end

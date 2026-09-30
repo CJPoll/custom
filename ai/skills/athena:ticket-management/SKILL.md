@@ -1,6 +1,6 @@
 ---
 name: athena:ticket-management
-description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only); when filing any ticket, run the ticket-classify script with your own Kind, Severity and Security and set the values it prints.
+description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only); when filing any ticket, run the ticket-classify script with your own Kind, Severity and Security and set the values it prints. Move a DND ticket to In Progress with the mark-in-progress script, which stamps its lead-time start.
 ---
 
 # athena:ticket-management
@@ -39,7 +39,17 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    `In Progress`. It is `Todo`, or `Parked` if work exists (*A ticket's status
    follows its captain*).
 2. **Assigning an engineer** — when an athena-captain is dispatched to the ticket, move
-   the status to `In Progress`; the assignee stays **Athena**.
+   the status to `In Progress`; the assignee stays **Athena**. On a DND ticket,
+   make the move with
+   `~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref DND-N`.
+   On a first dispatch (from `Todo` or `Backlog`) the same write stamps the
+   ticket's `In Progress at` date; a re-dispatch keeps the first stamp. That
+   date is the START of the ticket's lead time (owner decision, Cody,
+   2026-09-30: lead time = captain dispatch → landed on main;
+   `~/dev/custom/ai/docs/lead-time-tracking.md`). A move made any other way
+   leaves no stamp, and `ai/bin/lead-time` then reports that ticket as
+   could-not-measure. For an unstamped ticket whose first dispatch time is on
+   record, add `--backfill --at <that time>`.
 3. **→ `Needs Attention`** (only for what needs Cody; see the Notes rule) — set `Assignee` = **Cody**, write the exact step
    Cody needs onto the ticket body (that is the whole point of the status), and
    **DM Cody** as Athena that the ticket needs him (see the Notes "Needs Attention

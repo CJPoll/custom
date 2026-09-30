@@ -131,6 +131,7 @@ ai/skills/athena:slack/bin/update	tool	Slack Web API action wrapper; fails only 
 ai/skills/athena:slack/bin/upload	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/whoami	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:ticket-management/scripts/finding-triage	guard	
+ai/skills/athena:ticket-management/scripts/mark-in-progress	guard	
 ai/skills/athena:ticket-management/scripts/ticket-classify	guard	
 
 # --- scripts/: guards (deny, check, gate, or preflight).

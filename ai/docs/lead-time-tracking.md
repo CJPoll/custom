@@ -9,6 +9,10 @@ and is labelled as such.
 **Lead time = the interval from when a captain starts working a ticket to when
 that ticket is fully deployed in production.** Cody's definition, precisely:
 
+- It **starts at captain dispatch**: the ticket's move to `In Progress` in
+  Notion (owner decision, Cody, Slack 2026-09-30 ~04:05Z, relayed by the
+  coordinator and recorded on DND-1318).
+
 - A ticket that **deploys to prod**: lead time ends when the production
   deployment completes.
 - A ticket that **does not deploy** (doc-/test-/harness-only, and possibly other
@@ -34,7 +38,7 @@ job stage).
 
 | | Marker | Where it lives |
 |---|---|---|
-| **START** | earliest commit on the ticket's branch | git; `gh pr view --json commits` / `glab api …/merge_requests/:iid/commits` |
+| **START** | the ticket's first move to `In Progress` (captain dispatch) | the DND Tickets date property `In Progress at`, stamped by `mark-in-progress` |
 | **END** | first of the 3 tiers below that exists | GitHub Actions runs / GitLab pipeline jobs / landing time (the merge, or the push that carried it) |
 
 ### The END rule — one 3-tier rule, forge-independent
@@ -115,38 +119,59 @@ The precise, durable signal is the latest successful **`deploy`-stage** job's
 succeeded ~06:58–07:07Z while the pipeline read `manual`). Reading the job, not
 the pipeline status, is what makes the GitLab end trustworthy.
 
-### The START marker is honest about under-reporting
+### The START marker: the ticket's move to In Progress
 
-Earliest-commit-on-branch **lags true start** by the first chunk of work (read
-the ticket, plan, write code before the first commit). It therefore **slightly
-under-reports**. Worked example, GitHub PR #14 (DND-185): first commit
-`04:42:59Z`, PR opened `05:19:29Z`, admiral dispatched earlier still. We accept
-the under-report rather than invent a start we cannot prove.
+START is when the ticket first moved to `In Progress`, which is when its captain
+was dispatched. The Notion API keeps no history of a property, so the move is
+recorded as it happens:
 
-**A commit's time is its AUTHOR date as well as its committer date.** START is
-the minimum over both.
+- **The stamp.** DND Tickets has a date property, `In Progress at`.
+  `ai/skills/athena:ticket-management/scripts/mark-in-progress --ref DND-N`
+  sets `Status` to `In Progress` and, only when the date is empty, stamps it,
+  in one write. A re-dispatched ticket keeps its **first** stamp.
+- **The read.** `lead-time` names the ticket from the PR's branch, else its
+  title (`DND-1318`, `dnd-1318-…`), and reads that date. Each row carries
+  `start_source` (`DND-1318 In Progress at`). The earliest commit is still
+  reported, as `first_commit`, and is **never** used as the start.
+- **Could not measure.** The row has no lead and says why, on the row and on
+  stderr, when: the branch and title name no ticket, or two tickets; the ticket
+  is not a DND ticket; it is not in DND Tickets; it has no stamp; or the stamp
+  has no time. A Notion read that cannot run (no token, an HTTP failure) is a
+  failed probe, so the run ends `SCAN INCOMPLETE`.
 
-**Later (2026-09-28):** START read the committer date only (`committedDate` on
-GitHub, `created_at` on GitLab). Superseded: a rebase rewrites the committer
-date to the rebase time and keeps the author date, and every landing rebases
-onto `origin/main` first. So START moved to the last rebase, and the under-report
-was not slight. Measured 2026-09-27: custom PR #90 (DND-978) first authored
-`06:58:52Z`, rebased `22:50:12Z`, merged `23:43:13Z`, read **53m** instead of
-**16h 44m** and never crossed `--slow 90`; gen_saas PR #478 read 5h 1m instead
-of 9h 43m. A cherry-picked commit keeps its author date too, so a ticket built
-from another branch's commits over-reports, like the stacked case below.
+**Where it can misattribute.**
 
-**Known limitation — stacked branches over-report.** For a **stacked** MR/PR
-whose branch still contains an unmerged parent's commits, the forge's commit list
-includes those ancestor commits, so `min(commit time)` reaches back to the
-stack's base and the lead time is inflated. Observed on walt_ui's
-stacked MRs (2026-09-19 backfill): MRs 1170/1175/1176 all resolve to the same start
-`2026-09-17T22:52:20Z`, yielding 19–22h — an artefact of the stack, not the work.
-GitHub's `dnd-*` branches tonight were not stacked, so they were clean. Treat a
-lead time that shares a start with a sibling ticket as suspect. A robust fix
-(counting only commits unique to the ticket after its stack-parent merges) is
-forge- and tooling-specific and was **not** built; the plain first-commit floor
-is kept, with this caveat, rather than adding fragile stack-aware logic.
+- A ticket parked and resumed days later counts the parked time, because the
+  first stamp is kept.
+- A follow-up PR on a ticket that already landed once inherits the first
+  dispatch, so it reads long.
+- A batch Mission stamps all its tickets at one dispatch, so they share a
+  start. That is real, not an artefact.
+- A stamp set with `--backfill --at` is only as good as the record it came
+  from.
+
+What reads could-not-measure instead of a guess:
+
+- A ticket moved to `In Progress` without `mark-in-progress` has no stamp.
+- `mark-in-progress` stamps only a first dispatch (a move from `Todo` or
+  `Backlog`). An unstamped ticket resumed from `Parked` or `Attention Given`
+  is not stamped with the resume time. The script says so and names the
+  `--backfill` fix.
+- A stamp with no UTC offset cannot be placed in time.
+- A stamp later than the landing (a re-dispatch after the work landed, or a
+  mistaken backfill) never yields a negative lead.
+
+**The start is DND-only.** Only DND Tickets carries the stamp. A repo whose
+tickets live elsewhere (walt_ui's work tracker) reads every row
+could-not-measure for its start. Its `tail` is still measured, and `--slow`
+keeps those rows, so the shipwright still reads walt_ui's `tail` (its lever).
+
+**Later (2026-09-30, DND-1318):** START was the earliest commit on the PR,
+authored or committed. Superseded by the owner's definition above. Captains
+squash or rewrite before landing, which resets that date: `lead-time --pr 129`
+read **21m 19s** for DND-1203, whose captain was dispatched at 02:41Z and whose
+PR merged at 03:27:17Z (46m 17s). The commit start also over-reported stacked
+branches, whose commit lists reach back to the stack's base.
 
 ## The markers we rejected, with evidence
 
@@ -159,18 +184,29 @@ is kept, with this caveat, rather than adding fragile stack-aware logic.
   `last_edited_time` is whole-page and equals the status→Done edit at merge, so it
   cannot isolate the start even approximately. Compounded by captains
   historically not setting the status. Unrecoverable and unreliable.
+
+  **Later (2026-09-30, DND-1318):** adopted, by owner decision. The API fact
+  still holds, so the transition time is not read back; it is **stamped** as it
+  happens (`In Progress at`, *The START marker* above). A ticket dispatched
+  before the stamp existed has no start and reads could-not-measure, unless it
+  is backfilled from a recorded dispatch time.
 - **Admiral dispatch time.** Not persisted queryably — `state.md` records
   dispatch *ordering* in prose, not a machine-readable per-ticket timestamp; the
   only trace is gitignored, local `ai-artifacts/coordination/*` file mtimes.
+
+  **Later (2026-09-30, DND-1318):** dispatch time is now persisted, as the
+  `In Progress at` stamp the dispatch writes. `state.md` dispatch lines are a
+  source for `--backfill`, not for `lead-time`.
 - **Branch / worktree creation time.** Not recoverable across machines or after
   cleanup; a branch can be cut early or reused. No better than first-commit.
 
 ## The capture mechanism: derive, don't capture
 
 **The best capture mechanism is no capture at all.** `ai/bin/lead-time` recovers
-every timestamp on demand from git + the forge's CI, both of which retain history
-independently of whether any agent remembered to do anything. There is **no new
-manual step** for an agent to skip — the whole lesson that motivated this work.
+every END timestamp on demand from git + the forge's CI, both of which retain
+history independently of whether any agent remembered to do anything. START is
+the one exception (below): a stamp the dispatch step writes, and a missing stamp
+reads could-not-measure, never a guess.
 
 ```
 ai/bin/lead-time --repo ~/dev/gen_saas --since 2026-09-19T00:00:00Z   # github/gh
@@ -193,11 +229,12 @@ ai/bin/lead-time --self-test            # pure date/marker logic, no network
   local ledger under `ai-artifacts/` if a running history is wanted. Because it
   derives, re-running is idempotent and back-datable.
 
-**If a manual start-capture is ever wanted** (to beat the first-commit lag and the
-stacked-branch artefact), the only near-zero-agent-dependence place to add it is
-worktree creation (`wt` could stamp a start file). It was deliberately **not**
-built: worktrees can be created early or reused, trading a known bias for a new
-unreliable signal and new maintenance. First-commit stays the marker.
+**The one captured timestamp is START.** The dispatch writes it
+(`mark-in-progress`), because nothing else keeps it. The end is still derived.
+
+**Later (2026-09-30, DND-1318):** this said no start was captured and that
+first-commit stays the marker. Superseded by the owner's definition (*What is
+measured*).
 
 ## Phase decomposition and the feedback loop
 
@@ -245,6 +282,10 @@ tail 48m 40s`) is a pipeline-efficiency target; a `code`-dominated ticket (PR
 242: `code 1h 59m + tail 5m 25s`) is a harness/process target.
 
 ## Worked backfill — 2026-09-19 fleet run (dated snapshot)
+
+**Later (2026-09-30):** this snapshot used the old first-commit START. The
+stacked-branch limitation it points to ("see limitation above") now lives in
+*The START marker*'s DND-1318 note.
 
 **As-of 2026-09-19.** Acceptance test: every ticket that shipped, lead time
 derived from durable data alone. All timestamps UTC. `via=deploy` = ended at the
