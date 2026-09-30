@@ -2604,6 +2604,7 @@ def run_self_test
     warn "critic-review: self-test FAILED — #{SELF_TEST_FAILED_CASES.size} failed case(s):"
     SELF_TEST_FAILED_CASES.each { |name| warn "  - #{name}" }
     warn "  Fix: keep the semantics exact — findings BLOCK (exit 2), none PASSES, any infra/no-trailer error FAILS OPEN (exit 0, loud) for the CAPTAIN, and records a receipt so --verdict-for tells the ADMIRAL apart: pass=0, block=2, and none/running/fail-open/stale-SHA/dirty/malformed=3. A state that cannot be verified is never a pass."
+    warn "  Fix: a case that fails in only one environment (tool-sandbox, CI, a fresh HOME) relies on host state: build that state in the case's own fixture. The self-test already runs with no global or system git config; never add a skip for the environment."
     1
   end
 end
@@ -2613,7 +2614,7 @@ def run_core_self_test
   require "tmpdir"
   ok = true
   c = ->(name, cond) { ok = st_check("core #{name}", cond) && ok }
-  c.call("(N1) every self-test assertion is named: no anonymous `ok &&=` chain",
+  c.call("(N1) no anonymous `ok &&=` chain remains in this file",
          anonymous_assertion_lines(File.read(__FILE__)).empty?)
   c.call("(N2) a failing case prints its name and is listed", named_case_reports_itself?)
   Dir.mktmpdir("critic-review-selftest-") do |d|
@@ -2641,8 +2642,11 @@ def run_core_self_test
     built = CriticPrompt.build(diff: "DIFFBODY")
     c.call("(B1) the prompt starts with the instruction", built.start_with?(CriticPrompt::INSTRUCTION))
     c.call("(B2) the prompt fences the diff", built.include?("```diff\nDIFFBODY\n```"))
+    # x sits before y. An absent side (nil) is a failed case, not a raise that
+    # would abandon every later case in this suite.
+    before = ->(x, y) { !x.nil? && !y.nil? && x < y }
     c.call("(B3) the varying part comes LAST (cache prefix)",
-           built.rindex("DIFFBODY") > built.rindex(CriticPrompt::INSTRUCTION))
+           before.call(built.rindex(CriticPrompt::INSTRUCTION), built.rindex("DIFFBODY")))
 
     # BUG-FIX REGRESSION EVIDENCE (DND-400). The rule lives in ai/CLAUDE.md ->
     # "TDD Workflow"; the enforceable half rides in the prompt, because the
@@ -2655,8 +2659,9 @@ def run_core_self_test
     with_msgs = CriticPrompt.build(diff: "DIFFBODY", commit_messages: "fix: MSGBODY")
     c.call("(B4) the bug-fix rule is in the prompt", with_msgs.include?(CriticPrompt::BUG_FIX_RULE))
     c.call("(B5) the bug-fix rule precedes the commit messages",
-           with_msgs.index(CriticPrompt::BUG_FIX_RULE) < with_msgs.index("MSGBODY"))
-    c.call("(B6) the commit messages precede the diff", with_msgs.index("MSGBODY") < with_msgs.index("DIFFBODY"))
+           before.call(with_msgs.index(CriticPrompt::BUG_FIX_RULE), with_msgs.index("MSGBODY")))
+    c.call("(B6) the commit messages precede the diff",
+           before.call(with_msgs.index("MSGBODY"), with_msgs.index("DIFFBODY")))
     c.call("(B7) the bug-fix rule is in a prompt with no commits passed", built.include?(CriticPrompt::BUG_FIX_RULE))
     c.call("(B8) a nil commit log reads NOT SUPPLIED", built.include?(CriticPrompt::COMMITS_NOT_SUPPLIED))
     none = CriticPrompt.build(diff: "DIFFBODY", commit_messages: "")
@@ -2843,6 +2848,9 @@ def run_core_self_test
     end
   end
   ok
+ensure
+  # A raise mid-suite must not leave a stub set for the suites after this one.
+  ENV.delete("CRITIC_REVIEW_STUB")
 end
 
 # (N1) The lines of SRC that assert anonymously: `ok &&= <cond>` chains, the
