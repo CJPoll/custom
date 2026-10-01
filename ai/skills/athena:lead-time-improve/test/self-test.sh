@@ -704,7 +704,7 @@ mkdir -p "${STATETH}"
 /usr/bin/ruby "${HERE}/make_tail_ledger.rb" "${STATETH}/ledger.jsonl" gen_saas "${TH}" 4000 2026-10-16T00:00:00Z
 HTID="gen_saas:tail:${TH:0:12}"
 eq "record a tail change that added a test in gen_saas: exit 0" "$(tl "${STATETH}" 2026-10-17T12:00:00Z trec phase "${TH}")" "0"
-has "... record reads gen_saas's test paths (FirstParty.test_path?)" "$(out)" "a plain revert would delete test additions in apps/x/test/deploy_test.exs"
+has "... record reads gen_saas's test paths (FirstParty.test_file_any_layout?)" "$(out)" "a plain revert would delete test additions in apps/x/test/deploy_test.exs"
 eq "judge: exit 0" "$(tl "${STATETH}" 2026-10-17T12:00:00Z run judge --repo gen_saas)" "0"
 has "REVERT HELD applies to the product repo's tests" "$(out)" "${HTID} REVERT HELD kind=change"
 has "... the partial revert lands as a revert PR in gen_saas through its bar" "$(out)" \

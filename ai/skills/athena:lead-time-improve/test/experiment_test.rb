@@ -573,7 +573,7 @@ end
 TEST_LAYOUTS = %w[
   spec/models/user_spec.rb __tests__/button.js app/__tests__/button.js tests/test_api.py src/tests/api.rs
   src/user_test.go lib/user_spec.rb web/button.test.ts web/button.spec.tsx
-  src/main/FooTest.java src/main/FooSpec.kt test_api.py e2e/login.ts
+  src/main/FooTest.java src/main/FooSpec.kt test_api.py e2e/login.ts conftest.py src/HTTPTest.java
 ].freeze
 PLAIN_SOURCE = %w[
   src/latest.rb lib/contest.go app/attestation.ts src/protest/main.rs lib/inspector.rb apps/x/lib/deploy.ex

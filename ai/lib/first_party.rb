@@ -68,7 +68,7 @@ module FirstParty
   # Words that name a test file or directory in the layouts product repos
   # use: test/ tests/ __tests__/ spec/ specs/ e2e/ testdata/, foo_test.go,
   # foo_spec.rb, foo.test.ts, foo.spec.tsx, test_foo.py, FooTest.java.
-  TEST_WORDS = %w[test tests spec specs e2e testdata].freeze
+  TEST_WORDS = %w[test tests spec specs e2e testdata conftest].freeze
 
   # A test file in ANY repo's layout (DND-1630), for a repo whose layout is
   # not this one's. A path is a test when a directory name or the file name
@@ -83,7 +83,7 @@ module FirstParty
     return true if test_path?(rel)
 
     segments(rel).any? do |seg|
-      seg.gsub(/([a-z0-9])([A-Z])/, '\1 \2').downcase.split(/[^a-z0-9]+/).any? { |w| TEST_WORDS.include?(w) }
+      seg.gsub(/([a-z0-9])([A-Z])/, '\1 \2').gsub(/([A-Z]+)([A-Z][a-z])/, '\1 \2').downcase.split(/[^a-z0-9]+/).any? { |w| TEST_WORDS.include?(w) }
     end
   end
 

@@ -112,8 +112,9 @@ HELP = <<~TXT
            before and after n, median and p90 (n/a share for
            instrumentation) and the guards. A REVERT line repeats each run
            until main carries the revert; judge then records `reverted`.
-           A revert of a commit that added test lines (a test/ path or a
-           *.self-test.sh), or one where git could not tell, prints
+           A revert of a commit that added test lines (a test/, tests/, spec/
+           or __tests__/ path, a *_test.*, *.spec.* or *.self-test.sh file;
+           DND-1630), or one where git could not tell, prints
            REVERT HELD instead (DND-1549): a plain git revert would delete
            the tests, so the Fix names a partial revert (which keeps git's
            "This reverts commit <sha>." line, so judge still records
