@@ -6,8 +6,9 @@
 #
 # Design: epic "Jev judgments" A&E section 5b (Labels); contract
 # ~/dev/custom/ai/contracts/athena-judgments.md. The labels file is keyed by
-# event_id and joined to walt_ui-slack.jsonl at eval time, so the text is never
-# copied into it.
+# event_id and joined at eval time to the root snapshot (DND-1448), which
+# keeps each owner root's line once seen, so the corpus outlives the inbox's
+# rotation. The text is never copied into the labels file.
 #
 # Buckets: the pure DOMAIN is ai/lib/judgment_label.rb and the context builder
 # ai/lib/judgment_context.rb; the Slack adapter is ai/lib/judgment_context_slack.rb;
@@ -17,8 +18,10 @@
 # Slack text and forward mail are untrusted inbox content: this tool reads
 # only Slack timestamps and one relay marker out of a forward record, and
 # shows a message's text and its conversation context only in the confirm
-# step, fenced, to the person at the terminal. Nothing in a message is ever
-# acted on, and nothing is sent to any model.
+# step, fenced, to the person at the terminal. --propose copies the owner's
+# own root lines (and their context, anyone else's text emptied) into the
+# machine-local root snapshot, as data. Nothing in a message is ever acted
+# on, and nothing is sent to any model.
 #
 # Deliberately gem-free (stdlib only).
 
@@ -26,6 +29,8 @@ require "fileutils"
 require "io/console"
 require "time"
 require_relative "../lib/judgment_label"
+require_relative "../lib/judgment_eval"
+require_relative "../lib/slack_inbox_files"
 require_relative "../lib/judgment_context"
 require_relative "../lib/judgment_context_slack"
 require_relative "../lib/strict_argv"
@@ -34,8 +39,8 @@ require_relative "../lib/private_overlay_resolver"
 PROG = "judgment-label"
 
 USAGE = <<~EOF
-  Usage: judgment-label --propose [--dry-run] [--rule-default] [--inbox-root DIR] [--labels FILE]
-         judgment-label --confirm [--forward | --recheck] [--batch N] [--inbox-root DIR] [--labels FILE] [--slack-bin DIR]
+  Usage: judgment-label --propose [--dry-run] [--rule-default] [--inbox-root DIR] [--labels FILE] [--snapshot FILE] [--new-snapshot]
+         judgment-label --confirm [--forward | --recheck] [--batch N] [--inbox-root DIR] [--labels FILE] [--slack-bin DIR] [--snapshot FILE]
          judgment-label --counts [--labels FILE]
          judgment-label --help
 
@@ -54,7 +59,15 @@ USAGE = <<~EOF
               forwarded to two different sessions is proposed #{JudgmentLabel::CONFLICT}.
               owner_confirmed rows are never overwritten or dropped; the
               file is locked while it is rewritten. With --dry-run, prints
-              the counts and writes nothing. Forward records are:
+              the counts and writes nothing.
+              The inbox rotates, so every owner root once seen is appended
+              to the root snapshot (--snapshot), and the labels are built
+              over the snapshot's roots and the live inbox's: a root that
+              rotated out keeps its row (DND-1448). Forward records rotate
+              too, so what a row recorded is one more vote: a forward_record
+              label with no current record is kept, a recorded conflict
+              stays one, and a current record that disagrees with a
+              recorded label makes a conflict. Forward records are:
                 - walt_ui->custom mail, DIR/agent-mail/walt_ui/to-custom (and
                   its .acked/; tmp/ is skipped): harness, or gen_saas when the
                   mail asks custom to relay it to gen_saas;
@@ -117,12 +130,27 @@ USAGE = <<~EOF
   --labels FILE     default ${XDG_DATA_HOME:-~/.local/share}/athena/evals/
                     slack-routing-labels.jsonl (machine-local, 0600, never
                     committed)
+  --snapshot FILE   with --propose or --confirm: the root snapshot, default
+                    DIR/evals/slack-routing-roots.jsonl (DIR the inbox
+                    root). Append-only JSONL, 0600, machine-local, never
+                    committed: one line per owner root, the first time it is
+                    seen, with the root's own fields and text (the owner's,
+                    D7) and the context judgment-eval would build for it then
+                    (anyone else's text emptied), marked window_complete
+                    when every inbox file holding the root's channel
+                    reached back over the window.
+                    --confirm reads a rotated root's text from it. An
+                    ABSENT snapshot while the labels file has rows whose
+                    roots are not in the inbox is refused, exit 1: a wrong
+                    path or a lost file would drop them.
+  --new-snapshot    with --propose: start the snapshot even though rows
+                    would be dropped (a machine that never had one)
 
   Rows are {id, label, provenance, labeler, labeled_at}, the judgment-eval
   label format, plus "context" on an owner_confirmed row and "rule" on a
-  rule_confirmed row. Check the join with:
+  rule_confirmed row. The eval's corpus is the snapshot. Check the join with:
     judgment-eval --dry-run --use-case slack_routing --labels FILE \\
-      --corpus DIR/walt_ui-slack.jsonl --content-domain work
+      --corpus DIR/evals/slack-routing-roots.jsonl --content-domain work
 
   Exit codes:
     0  done
@@ -231,6 +259,42 @@ module Effects
     fail!(1, "could not write #{path}: #{e.class}", "check that #{dir} is writable")
   end
 
+  def default_snapshot(inbox_root)
+    File.join(inbox_root, "evals", "slack-routing-roots.jsonl")
+  end
+
+  # snapshot_text(path) -> its text, or nil when it does not exist yet (the
+  # first --propose creates it). Unreadable is an error, never "empty".
+  def snapshot_text(path)
+    return nil unless File.exist?(path)
+
+    read_input(path, "root snapshot", "it is judgment-label's own file; check its permissions")
+  end
+
+  # append_snapshot(path, text) -- append only, 0600 in a 0700 directory.
+  # A file whose last line is unterminated is refused: appending to it would
+  # weld two lines into one.
+  def append_snapshot(path, text)
+    dir = File.dirname(path)
+    FileUtils.mkdir_p(dir, mode: 0o700)
+    if File.size?(path) && File.open(path, "rb") { |f| f.seek(-1, IO::SEEK_END) && f.read(1) } != "\n"
+      fail!(1, "the root snapshot #{path} does not end in a newline", "repair its last line (the file is append-only JSONL; nothing was appended)")
+    end
+    File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o600) { |f| f.write(text) }
+    File.chmod(0o600, path)
+  rescue SystemCallError => e
+    fail!(1, "could not append to #{path}: #{e.class}", "check that #{dir} is writable")
+  end
+
+  # slack_inbox_files(root) -> {files: [{name:, rows:}], unreadable: n}:
+  # every *-slack.jsonl directly under root, read by the reader judgment-eval
+  # uses for a context (ai/lib/slack_inbox_files.rb).
+  def slack_inbox_files(root)
+    SlackInboxFiles.read(root)
+  rescue SlackInboxFiles::Error => e
+    fail!(1, e.message, e.fix)
+  end
+
   def terminal?
     $stdin.tty? && $stdout.tty?
   end
@@ -292,16 +356,15 @@ module Manager
     slack = JudgmentLabel.parse_slack(text, path)
     sel = JudgmentLabel.select_roots(slack[:lines], opts[:owner])
     records, by_source = forward_records(opts)
-    matched = JudgmentLabel.match(records, slack[:lines], sel[:roots])
-    report_inputs(path, slack, sel, records, by_source, matched, out, err)
+    input = { path: path, text: text, slack: slack, sel: sel, records: records, by_source: by_source }
     if opts[:dry_run]
-      report_rows(merge(opts, sel, matched), out)
+      propose(opts, input, out, err, write: false)
       out.puts "dry run: nothing written"
     else
+      # One --propose at a time, end to end: the labels lock, then the
+      # snapshot's, so a root another run appends is never left unlabelled.
       Effects.with_lock(opts[:labels]) do
-        built = merge(opts, sel, matched)
-        report_rows(built, out)
-        Effects.write_labels(opts[:labels], JudgmentLabel.render(built[:rows]))
+        Effects.with_lock(opts[:snapshot]) { propose(opts, input, out, err, write: true) }
       end
       out.puts "wrote #{opts[:labels]}"
     end
@@ -310,19 +373,78 @@ module Manager
     fail!(1, e.message, e.fix)
   end
 
-  # merge -- read the file on disk NOW (under the lock when writing) and
-  # rebuild on it, so an owner confirmation made meanwhile is kept.
-  def merge(opts, sel, matched)
-    JudgmentLabel.build(sel[:roots], matched, existing_rows(opts, must_exist: false), Effects.now,
-                        rule_default: opts[:rule_default])
+  # propose -- read the snapshot and the labels file NOW, build, refuse a
+  # build that a missing snapshot would make drop rows, then (write:) append
+  # the new roots to the snapshot and write the labels. Nothing already in
+  # the snapshot is ever rewritten.
+  def propose(opts, input, out, err, write:)
+    snap = snapshot(opts, input[:sel])
+    # A forward record may name a root that has rotated out: the snapshot's
+    # roots count as known lines too.
+    matched = JudgmentLabel.match(input[:records], input[:slack][:lines] + snap[:kept], snap[:roots])
+    report_inputs(input, snap, matched, write, out, err)
+    built = JudgmentLabel.build(snap[:roots], matched, existing_rows(opts, must_exist: false), Effects.now,
+                                rule_default: opts[:rule_default])
+    report_rows(built, out)
+    refuse_missing_snapshot(opts, built) if snap[:absent]
+    return unless write
+
+    Effects.append_snapshot(opts[:snapshot], JudgmentLabel.render(snapshot_lines(opts, snap[:appended], input, out))) if snap[:appended].any?
+    Effects.write_labels(opts[:labels], JudgmentLabel.render(built[:rows]))
   end
 
-  def report_inputs(path, slack, sel, records, by_source, matched, out, err)
+  # A snapshot that is absent while label rows would be dropped is a wrong
+  # path or a lost file, never "no rotated roots yet" (DND-1448).
+  def refuse_missing_snapshot(opts, built)
+    return if built[:dropped].zero? || opts[:new_snapshot]
+
+    fail!(1, "the root snapshot #{opts[:snapshot]} does not exist, and #{built[:dropped]} label row(s) have a root in neither the inbox nor any snapshot; " \
+             "writing would drop them, so nothing was written",
+          "point --snapshot (or --inbox-root) at the existing snapshot; if this machine never had one, run once with --new-snapshot to start it and accept that drop")
+  end
+
+  # snapshot -- the root snapshot's roots plus the live roots it lacks.
+  def snapshot(opts, sel)
+    text = Effects.snapshot_text(opts[:snapshot])
+    kept = JudgmentLabel.snapshot_roots(text.nil? ? [] : JudgmentLabel.parse_snapshot(text, opts[:snapshot]), opts[:owner])
+    merged = JudgmentLabel.merge_roots(kept[:roots], sel[:roots])
+    merged.merge(kept: kept[:roots], not_roots: kept[:not_roots], path: opts[:snapshot], absent: text.nil?)
+  end
+
+  # snapshot_lines -- each new root's line, with the context judgment-eval
+  # would build for it from the inbox files as they are now.
+  def snapshot_lines(opts, roots, input, out)
+    read = Effects.slack_inbox_files(opts[:inbox_root])
+    files = read[:files]
+    lines = files.flat_map { |f| f[:rows] }
+    out.puts "snapshot context: #{files.size} inbox file(s) read" + (read[:unreadable].positive? ? ", #{read[:unreadable]} unreadable line(s) skipped" : "")
+    raw = JudgmentLabel.raw_rows(input[:text], input[:path], roots.map { |r| r[:event_id] })
+    now = Effects.now
+    roots.map do |root|
+      row = raw.fetch(root[:event_id])
+      candidates = JudgmentEval.context_candidates(row, lines, opts[:owner])
+      JudgmentLabel.snapshot_row(row, candidates, JudgmentEval.window_covered?(row, files), now)
+    end
+  end
+
+  # snapshot_line -- an absent snapshot never reads like an empty one.
+  def snapshot_line(snap, inbox, write)
+    verb = write ? "appended" : "to append (dry run: nothing written)"
+    notes = []
+    notes << "#{snap[:rotated]} no longer in #{inbox}" if snap[:rotated].positive?
+    notes << "#{snap[:not_roots]} not this owner's roots, ignored" if snap[:not_roots].positive?
+    kept = snap[:absent] ? "absent, starting it" : "#{snap[:kept].size} roots kept"
+    "snapshot: #{snap[:path]}: #{kept}, #{snap[:appended].size} #{verb}" + (notes.empty? ? "" : " (#{notes.join('; ')})")
+  end
+
+  def report_inputs(input, snap, matched, write, out, err)
+    path, slack, sel, records, by_source = input.values_at(:path, :slack, :sel, :records, :by_source)
     out.puts "slack: #{path}: #{slack[:lines].size + slack[:without_id]} lines" + (slack[:without_id].positive? ? " (#{slack[:without_id]} without event_id, ignored)" : "")
     out.puts "roots: #{sel[:roots].size} owner new-conversation roots " \
              "(excluded: #{sel[:duplicates]} duplicate, #{sel[:non_owner]} not from the owner, #{sel[:replies]} thread replies, #{sel[:other]} other kinds)"
-    if sel[:roots].empty?
-      fail!(1, "no owner new-conversation root in #{path} (#{slack[:lines].size} lines considered)", "check the owner id (private overlay #{JudgmentLabel::OWNER_KEY.join(' ')}) and that this is the walt_ui slack inbox; nothing was written")
+    out.puts snapshot_line(snap, File.basename(path), write)
+    if snap[:roots].empty?
+      fail!(1, "no owner new-conversation root in #{path} (#{slack[:lines].size} lines considered) or in the root snapshot", "check the owner id (private overlay #{JudgmentLabel::OWNER_KEY.join(' ')}) and that this is the walt_ui slack inbox; nothing was written")
     end
     out.puts "forward records: #{records.size} (#{by_source.map { |k, v| "#{k} #{v}" }.join(', ')}): " \
              "matched #{matched[:matched]}, thread only #{matched[:thread_only]}, unmatched #{matched[:unmatched].size}, conflicts #{matched[:conflicts].size}"
@@ -340,8 +462,9 @@ module Manager
     out.puts "labels: #{built[:rows].size} rows"
     JudgmentLabel.counts(built[:rows]).each { |l, p, n| out.puts "  #{l} #{p} #{n}" }
     out.puts "owner_confirmed kept: #{built[:rows].count { |r| r['provenance'] == 'owner_confirmed' }} " \
-             "(#{built[:kept_orphans]} not in this inbox); forward records disagreeing with the owner: #{built[:disagreements]}; " \
-             "dropped (root no longer in this inbox): #{built[:dropped]}"
+             "(#{built[:kept_orphans]} in neither this inbox nor the snapshot); forward records disagreeing with the owner: #{built[:disagreements]}; " \
+             "dropped (root in neither this inbox nor the snapshot): #{built[:dropped]}"
+    out.puts "forward labels kept after their records rotated out: #{built[:kept_forwards]}"
     out.puts "session mentions (rule 2, #{JudgmentLabel::MENTION_GRAMMAR}): " \
              "#{built[:rows].count { |r| r['rule'] == 'session_mention' }} rule_confirmed; " \
              "forward records a mention overrode: #{built[:mention_overrides]}"
@@ -358,14 +481,15 @@ module Manager
       return 0
     end
     path, text = read_slack(opts)
-    msgs = JudgmentLabel.messages(text, path, pending.map { |r| r["id"] })
+    msgs = messages_for(opts, text, path, pending.map { |r| r["id"] })
+    where = "#{File.basename(path)} or the root snapshot"
     reader = Effects.context_reader(opts[:slack_bin])
     done = 0
     skipped = 0
     pending.each_with_index do |row, i|
       msg = msgs[row["id"]]
-      context = context_for(msg, reader, File.basename(path), opts[:owner])
-      show(row, msg, context, mode, i, pending.size, File.basename(path), out)
+      context = context_for(msg, reader, where, opts[:owner])
+      show(row, msg, context, mode, i, pending.size, where, out)
       verdict = ask(row["label"], mode, out, input)
       case verdict.first
       when :quit then break
@@ -376,12 +500,25 @@ module Manager
       end
     end
     left = JudgmentLabel.pending(existing_rows(opts, must_exist: true), mode)
-    gone = left.size - JudgmentLabel.messages(text, path, left.map { |r| r["id"] }).size
+    gone = left.size - messages_for(opts, text, path, left.map { |r| r["id"] }).size
     out.puts "#{mode == :recheck ? 'rechecked' : 'confirmed'} #{done}, skipped #{skipped}; #{left.size} #{MODE_ROWS[mode]} remain" +
-             (gone.positive? ? " (#{gone} no longer in #{File.basename(path)}, so no context can be shown for them)" : "")
+             (gone.positive? ? " (#{gone} no longer in #{where}, so no context can be shown for them)" : "")
     0
   rescue JudgmentLabel::InputError => e
     fail!(1, e.message, e.fix)
+  end
+
+  # messages_for(opts, text, path, ids) -> the live inbox's messages for ids,
+  # and the root snapshot's for those that rotated out (DND-1448).
+  def messages_for(opts, text, path, ids)
+    live = JudgmentLabel.messages(text, path, ids)
+    missing = ids.reject { |id| live.key?(id) }
+    snap = missing.empty? ? nil : Effects.snapshot_text(opts[:snapshot])
+    return live if snap.nil?
+
+    # Validated as --propose reads it, so a malformed snapshot is named as one.
+    JudgmentLabel.parse_snapshot(snap, opts[:snapshot])
+    JudgmentLabel.messages(snap, opts[:snapshot], missing).merge(live)
   end
 
   # context_for(msg, reader, inbox, owner) -> a JudgmentContext context: what to
@@ -536,7 +673,8 @@ end
 SPEC = {
   "--help" => :switch, "-h" => :switch, "--propose" => :switch, "--confirm" => :switch, "--counts" => :switch,
   "--dry-run" => :switch, "--rule-default" => :switch, "--forward" => :switch, "--recheck" => :switch, "--batch" => :integer,
-  "--inbox-root" => :value, "--labels" => :value, "--slack-bin" => :value
+  "--inbox-root" => :value, "--labels" => :value, "--slack-bin" => :value, "--snapshot" => :value,
+  "--new-snapshot" => :switch
 }.freeze
 
 MODES = %w[--propose --confirm --counts].freeze
@@ -554,15 +692,19 @@ def parse_options(argv)
   fail!(2, "--forward and --recheck given together", "pass one: --forward reviews forward_record rows, --recheck re-presents rows confirmed without context") if raw["--forward"] && raw["--recheck"]
   fail!(2, "--slack-bin applies only to --confirm", "drop --slack-bin") if raw.key?("--slack-bin") && mode != "--confirm"
   fail!(2, "--inbox-root does not apply to --counts", "drop --inbox-root") if raw.key?("--inbox-root") && mode == "--counts"
+  fail!(2, "--snapshot does not apply to --counts", "drop --snapshot") if raw.key?("--snapshot") && mode == "--counts"
+  fail!(2, "--new-snapshot applies only to --propose", "drop --new-snapshot") if raw["--new-snapshot"] && mode != "--propose"
   batch = raw.fetch("--batch", 10)
   fail!(2, "--batch must be 1..200", "pass a smaller batch") unless (1..200).cover?(batch)
-  %w[--inbox-root --labels --slack-bin].each do |flag|
+  %w[--inbox-root --labels --slack-bin --snapshot].each do |flag|
     fail!(2, "#{flag} must be an absolute path", "pass an absolute path") if raw.key?(flag) && !raw[flag].start_with?("/")
   end
+  inbox_root = raw["--inbox-root"] || Effects.default_inbox_root
   {
     mode: mode, dry_run: raw["--dry-run"] || false, rule_default: raw["--rule-default"] || false, forward: raw["--forward"] || false, recheck: raw["--recheck"] || false,
-    batch: batch, inbox_root: raw["--inbox-root"] || Effects.default_inbox_root, labels: raw["--labels"] || Effects.default_labels,
-    slack_bin: raw["--slack-bin"] || Effects.default_slack_bin
+    batch: batch, inbox_root: inbox_root, labels: raw["--labels"] || Effects.default_labels,
+    slack_bin: raw["--slack-bin"] || Effects.default_slack_bin,
+    snapshot: raw["--snapshot"] || Effects.default_snapshot(inbox_root), new_snapshot: raw["--new-snapshot"] || false
   }
 rescue StrictArgv::UsageError => e
   fail!(2, e.message, "run #{PROG} --help for the flags")

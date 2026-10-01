@@ -8,8 +8,9 @@
 # disk, and count. No file, terminal or process access; the bin owns those.
 #
 # Design: epic "Jev judgments" A&E section 5b (Labels). The labels file is
-# keyed by event_id and joined to walt_ui-slack.jsonl at eval time by
-# ai/bin/judgment-eval, so the text is never copied into a second file.
+# keyed by event_id and joined at eval time by ai/bin/judgment-eval to the
+# root snapshot (DND-1448, below), which keeps each owner root's line once
+# seen because the inbox rotates. The labels file never holds text.
 #
 # Trust: slack text and forward mail are untrusted inbox content. This module
 # reads only Slack timestamps and one relay marker out of a forward record; a
@@ -271,7 +272,7 @@ module JudgmentLabel
   end
 
   # build(roots, matched, existing, now, rule_default: false)
-  #   -> {rows:, kept_orphans:, dropped:, disagreements:, mention_overrides:}
+  #   -> {rows:, kept_orphans:, dropped:, disagreements:, mention_overrides:, kept_forwards:}
   # owner_confirmed rows are the owner's work: never overwritten or dropped.
   # Otherwise, in order (the owner's rule, D-R2):
   #   1. the root's text addresses a session (rule 2): that label. A forward
@@ -282,32 +283,54 @@ module JudgmentLabel
   #   3. forwarded to two sessions: proposed unclear;
   #   4. no evidence: walt_ui, rule_confirmed/default_walt_ui with
   #      rule_default (rule 3), proposed without it.
+  # Forward records rotate out of their inboxes too (DND-1448). What a row
+  # recorded is one more vote beside the current records (recorded_evidence):
+  # a forward_record row with no current record keeps its label (counted in
+  # kept_forwards), a conflict row stays a conflict, and a current record
+  # that disagrees with a recorded forward makes a conflict.
   # A recomputed row keeps its labeled_at when its label, provenance and rule
   # are unchanged, so an unchanged input writes a byte-identical file.
   def build(roots, matched, existing, now, rule_default: false)
     prior = existing.to_h { |r| [r["id"], r] }
     root_ids = {}
-    disagreements = 0
-    mention_overrides = 0
+    counts = { disagreements: 0, mention_overrides: 0, kept_forwards: 0 }
     rows = roots.map do |root|
       id = root[:event_id]
       root_ids[id] = true
       old = prior[id]
       forward = matched[:forward][id]
       if old && old["provenance"] == "owner_confirmed"
-        disagreements += 1 if forward && forward != old["label"]
+        counts[:disagreements] += 1 if forward && forward != old["label"]
         next old
       end
-      mention_overrides += 1 if root[:mention] && forward && forward != root[:mention]
-      label, provenance, rule = derive(root[:mention], forward, matched[:conflicts].include?(id), rule_default)
+      forward, conflict, kept = recorded_evidence(old, forward, matched[:conflicts].include?(id))
+      counts[:mention_overrides] += 1 if root[:mention] && forward && forward != root[:mention]
+      label, provenance, rule = derive(root[:mention], forward, conflict, rule_default)
+      counts[:kept_forwards] += 1 if kept && provenance == "forward_record"
       stamp = old && old["label"] == label && old["provenance"] == provenance && old["rule"] == rule ? old["labeled_at"] : now
       row = { "id" => id, "label" => label, "provenance" => provenance, "labeler" => TOOL, "labeled_at" => stamp }
       rule ? row.merge("rule" => rule) : row
     end
     gone = existing.reject { |r| root_ids.key?(r["id"]) }
     orphans = gone.select { |r| r["provenance"] == "owner_confirmed" }
-    { rows: rows + orphans, kept_orphans: orphans.size, dropped: gone.size - orphans.size, disagreements: disagreements,
-      mention_overrides: mention_overrides }
+    { rows: rows + orphans, kept_orphans: orphans.size, dropped: gone.size - orphans.size }.merge(counts)
+  end
+
+  # recorded_evidence(old, forward, conflict) -> [forward, conflict, kept].
+  # What the old row recorded is one more vote beside the current records
+  # (see build), since the records it came from may have rotated out:
+  #   - a recorded conflict stays a conflict;
+  #   - a recorded forward and a current one that differs is a conflict;
+  #   - a recorded forward with no current record is kept (`kept`).
+  # Otherwise the current evidence stands.
+  def recorded_evidence(old, forward, conflict)
+    recorded_conflict = old && old["provenance"] == "proposed" && old["label"] == CONFLICT
+    recorded_forward = old && old["provenance"] == "forward_record" ? old["label"] : nil
+    return [nil, true, recorded_conflict && !conflict] if conflict || recorded_conflict
+    return [nil, true, false] if forward && recorded_forward && forward != recorded_forward
+    return [recorded_forward, false, true] if forward.nil? && recorded_forward
+
+    [forward, false, false]
   end
 
   # derive(mention, forward, conflict, rule_default) -> [label, provenance, rule-or-nil]; see build.
@@ -361,8 +384,9 @@ module JudgmentLabel
   end
 
   # messages(text, path, ids) -> {event_id => {kind, received_at, text,
-  # channel, ts, thread_ts}} for the confirm step only: the one place the text
-  # is read, shown, never stored. channel/ts/thread_ts anchor its context.
+  # channel, ts, thread_ts}} for the confirm step, which shows the text and
+  # stores none of it (the root snapshot is --propose's, DND-1448).
+  # channel/ts/thread_ts anchor its context.
   def messages(text, path, ids)
     wanted = ids.to_h { |id| [id, true] }
     out = {}
@@ -374,6 +398,98 @@ module JudgmentLabel
                   channel: row["channel"], ts: row["ts"], thread_ts: row["thread_ts"] }
     end
     out
+  end
+
+  # ── The root snapshot (DND-1448) ──────────────────────────────────────────
+  # walt_ui-slack.jsonl rotates, so a root leaves it. The snapshot keeps each
+  # owner root once seen, append-only: the labels and judgment-eval join it,
+  # so the corpus accumulates. It holds the owner's own root text (D7) and
+  # the context lines the eval would build for the root, anyone else's text
+  # emptied. It lives under the inbox root, machine-local, never in a repo.
+  SNAPSHOT_FIELDS = %w[event_id kind user channel ts thread_ts text received_at].freeze
+
+  # raw_rows(text, path, ids) -> {event_id => the inbox line as parsed}, the
+  # first line per id. Read only to write the snapshot.
+  def raw_rows(text, path, ids)
+    wanted = ids.to_h { |id| [id, true] }
+    out = {}
+    jsonl(text, path, "slack").each do |_line_no, row|
+      id = row["event_id"]
+      out[id] = row if wanted.key?(id) && !out.key?(id)
+    end
+    out
+  end
+
+  # snapshot_row(raw, candidates, window_complete, now) -> one snapshot line:
+  # the root's fields (never any other key of the inbox line), then what was
+  # known of its context when it was first seen.
+  def snapshot_row(raw, candidates, window_complete, now)
+    raw.slice(*SNAPSHOT_FIELDS).merge(
+      "snapshot" => { "at" => now, "window_complete" => window_complete, "context_candidates" => candidates }
+    )
+  end
+
+  # A Slack message ts as the snapshot stores it.
+  SNAPSHOT_TS = /\A\d{1,10}\.\d{6}\z/
+
+  # parse_snapshot(text, path) -> [row]. A line that is not an object, has
+  # no valid event_id, repeats one, or is not a root's shape (kind, ts,
+  # user, channel, text) is an error naming its line: a malformed snapshot
+  # never reads as a shorter corpus. Who the root's owner is, is not checked
+  # here (snapshot_roots counts another owner's rows).
+  def parse_snapshot(text, path)
+    seen = {}
+    fix = "repair or remove that line; the file is judgment-label's append-only root snapshot"
+    jsonl(text, path, "snapshot").map do |line_no, row|
+      where = "#{path}:#{line_no}"
+      raise InputError.new("#{where} has no event id", fix) unless row["event_id"].is_a?(String) && EVENT_ID.match?(row["event_id"])
+      raise InputError.new("#{where} repeats the event id of line #{seen[row['event_id']]}", fix) if seen.key?(row["event_id"])
+
+      problem = snapshot_shape_problem(row)
+      raise InputError.new("#{where} #{problem}", fix) if problem
+
+      seen[row["event_id"]] = line_no
+      row
+    end
+  end
+
+  def snapshot_shape_problem(row)
+    return "has a kind outside #{ROOT_KINDS.join('|')}" unless ROOT_KINDS.include?(row["kind"])
+    return "has no Slack ts" unless row["ts"].is_a?(String) && SNAPSHOT_TS.match?(row["ts"])
+    return "has no user" unless row["user"].is_a?(String) && !row["user"].empty?
+    return "has no channel" unless row["channel"].is_a?(String) && !row["channel"].empty?
+    return "has no text" unless row["text"].is_a?(String)
+    return "is inside a thread (thread_ts differs from ts), so it is no root" unless row["thread_ts"].nil? || row["thread_ts"] == row["ts"]
+
+    nil
+  end
+
+  # snapshot_roots(rows, owner) -> {roots: [line as parse_slack shapes it],
+  # not_roots: n}. Rows are parse_snapshot's, so a row that is not a root
+  # here is another owner's: counted, never labelled.
+  def snapshot_roots(rows, owner)
+    roots = []
+    not_roots = 0
+    rows.each do |row|
+      line = { event_id: row["event_id"], kind: row["kind"], user: row["user"], channel: row["channel"], ts: row["ts"],
+               thread_ts: row["thread_ts"], mention: session_mention(row["text"]) }
+      root?(line, owner) ? roots << line : not_roots += 1
+    end
+    { roots: roots, not_roots: not_roots }
+  end
+
+  # merge_roots(kept, live) -> {roots:, appended:, rotated:}. The snapshot's
+  # roots in file order, then each live root it lacks (by event_id, then by
+  # channel and ts, as select_roots collapses). `rotated` counts the kept
+  # roots the live inbox no longer holds by either key.
+  def merge_roots(kept, live)
+    ids = kept.to_h { |r| [r[:event_id], true] }
+    msgs = kept.to_h { |r| [[r[:channel], r[:ts]], true] }
+    appended = live.reject { |r| ids.key?(r[:event_id]) || msgs.key?([r[:channel], r[:ts]]) }
+    live_ids = live.to_h { |r| [r[:event_id], true] }
+    live_msgs = live.to_h { |r| [[r[:channel], r[:ts]], true] }
+    rotated = kept.count { |r| !live_ids.key?(r[:event_id]) && !live_msgs.key?([r[:channel], r[:ts]]) }
+    { roots: kept + appended, appended: appended, rotated: rotated }
   end
 
   # printable(text) -> untrusted text made safe for a terminal: invalid UTF-8

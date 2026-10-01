@@ -396,8 +396,10 @@ has "the not_found line says it may not be this owner's" "${ERR}" "not this mach
 
 echo "== slack_routing context (DND-1048)"
 
-# Synthetic inbox: two *-slack.jsonl files. The corpus IS walt_ui-slack.jsonl
-# (the labels join its event_id), as judgment-label makes it.
+# Synthetic inbox: two *-slack.jsonl files. The corpus here is
+# walt_ui-slack.jsonl itself (the labels join its event_id): a live inbox
+# still joins. judgment-label's root snapshot (DND-1448) is the corpus it
+# documents; ai/test/judgment-label covers that join.
 INBOX="${TMP}/inbox"
 mkdir -p "${INBOX}"
 {
@@ -476,6 +478,7 @@ eq "exactly one file is written: the run file, no second corpus [DND-1048]" \
 eq "the run file records the case as unscored context_unavailable [DND-1048]" \
   "$(jq -c '[.results[] | select(.reason == "context_unavailable") | .case_id]' "${run_file}")" '["Ev-r1"]'
 eq "the run file names the inbox files [DND-1048]" "$(jq -c .context.inbox_files "${run_file}")" '["custom-slack.jsonl","walt_ui-slack.jsonl"]'
+eq "the run file counts the root-snapshot contexts, 0 for a live-inbox corpus [DND-1448]" "$(jq -c .context.snapshot "${run_file}")" '{"cases":0,"window_incomplete":0}'
 for text in ROOT-ONE ROOT-TWO OWNER-EARLIER OTHER-SECRET; do
   if grep -q "${text}" "${run_file}"; then bad "the run file holds no text (${text}) [DND-1048]"; else ok "the run file holds no text (${text}) [DND-1048]"; fi
 done

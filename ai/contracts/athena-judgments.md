@@ -199,7 +199,17 @@ Text is stored in exactly two places, both for *Receiver feedback*:
 
 Neither holds anything that was not already sent to TypeSafe, except the
 receiver's own `note`. The eval corpus stays machine-local and untracked,
-joined to its source by id, never copied into a second file.
+joined to its source by id. The `slack_routing` root snapshot
+(*Threshold provenance, n/a and the pinned model* → *Slack routing labels*)
+also copies Slack lines, because the Slack inbox rotates: the owner's root
+text and the owner's earlier text in its context window. Anyone else's line
+keeps only its user id and ts, with its text emptied. It is 0600 under the
+inbox root, never in a repo.
+
+**Later (2026-10-01, DND-1448):** this read "joined to its source by id,
+never copied into a second file". Superseded by the root snapshot: joined
+to the rotating inbox, the `slack_routing` corpus shrank instead of
+accumulating.
 
 **Later (2026-10-01):** this paragraph was "**What is stored: no text.**
 gen_saas stores no state text for any judgment." Superseded by the owner's
@@ -578,8 +588,24 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   enters is unchanged.
 - **Slack routing labels** (DND-715, `ai/bin/judgment-label`) cover the
   owner's new-conversation roots only (D7), one row per `event_id`, in the
-  machine-local `slack-routing-labels.jsonl`. The corpus is
-  `walt_ui-slack.jsonl` itself, so the text is never copied. The owner's
+  machine-local `slack-routing-labels.jsonl`. The corpus is the root
+  snapshot, `<inbox root>/evals/slack-routing-roots.jsonl` (DND-1448):
+  append-only, one line per owner root the first time `--propose` sees it,
+  with the root's own fields and text and the context `judgment-eval` would
+  build for it then (anyone else's text emptied, D7), marked
+  `window_complete` when every inbox file reached back over the window. The
+  labels are built over the snapshot's roots and the live inbox's, so a
+  root that rotated out of `walt_ui-slack.jsonl` keeps its row. Forward
+  records rotate too, so what a row recorded is one more vote beside the
+  current records: a `forward_record` label with no current record is kept,
+  a recorded conflict stays a conflict, and a current record that disagrees
+  with a recorded label makes a conflict. An absent snapshot while label
+  rows would be dropped is refused, exit 1, unless `--new-snapshot` starts
+  one. `judgment-eval` adds a snapshot row's context lines to the inbox's,
+  and prints and records in the run file how many cases carry one and how
+  many of their windows the inbox did not reach back over (a file holding
+  the root's channel began after the window opened). Those cases are scored
+  on the context known. The labels file still holds no text. The owner's
   answer at a terminal (`--confirm`, one message at a time) is
   `owner_confirmed` and always wins. Otherwise a root whose text addresses a
   session is `rule_confirmed` with `"rule": "session_mention"`, by the
@@ -609,6 +635,12 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   before anything is sent, never reading as "no root is the owner's". A case
   whose context cannot be built is
   unscored `context_unavailable` and is never sent with an empty context.
+
+  **Later (2026-10-01, DND-1448):** this read "The corpus is
+  `walt_ui-slack.jsonl` itself, so the text is never copied." Superseded by
+  the root snapshot above. The inbox rotates, and `--propose` dropped every
+  non-owner-confirmed row whose root had left it, so the corpus could never
+  reach the bar's n.
 
   **Later (2026-09-28):** this said "the owner confirms the rest one message
   at a time at a terminal": every root without a forward record waited for

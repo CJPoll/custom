@@ -23,8 +23,8 @@ module JudgmentEval
   PROVENANCES = %w[forward_record owner_confirmed tracker_record rule_confirmed title_prefix proposed].freeze
   DOMAINS = %w[work blend personal].freeze
   MAX_BATCH = 50
-  # The corpus key a label's id joins on. Slack routing joins the inbox's own
-  # lines on event_id (A&E 5b: the text is never copied into a second file).
+  # The corpus key a label's id joins on. Slack routing joins judgment-label's
+  # root snapshot of the inbox's lines on event_id (DND-1448).
   ID_KEYS = Hash.new("id").merge("slack_routing" => "event_id").freeze
   CASE_ID = /\A[A-Za-z0-9_:.#\/-]{1,200}\z/
   LABEL = /\A[A-Za-z0-9_.:-]{1,64}\z/
@@ -283,6 +283,37 @@ module JudgmentEval
         line["user"].is_a?(String) && (ts = slack_ts_us(line["ts"])) && ts < root_us && ts >= from_us
     end
     kept.uniq { |line| line["ts"] }.sort_by { |line| slack_ts_us(line["ts"]) }.last(MAX_CANDIDATES).map { |line| candidate(line, owner) }
+  end
+
+  # window_covered?(root, files) -> whether every inbox file holding a line
+  # in the root's channel reaches back to the start of the root's context
+  # window: its earliest line's ts is at or before root ts - CONTEXT_WINDOW_S
+  # (DND-1448). A file that starts later may have rotated lines of that
+  # window away; a file with no line in the channel cannot hold its context.
+  # FILES is [{name:, rows:}]. No such file, or an unreadable ts, is false:
+  # "could not tell" never reads as covered.
+  def window_covered?(root, files)
+    root_us = slack_ts_us(root["ts"])
+    holding = files.select { |f| f[:rows].any? { |line| line.is_a?(Hash) && line["channel"] == root["channel"] } }
+    return false if root_us.nil? || holding.empty?
+
+    from_us = root_us - CONTEXT_WINDOW_S * 1_000_000
+    holding.all? { |f| (us = earliest_us(f[:rows])) && us <= from_us }
+  end
+
+  # earliest_us(lines) -> the smallest Slack ts (microseconds) among lines,
+  # or nil when none has one.
+  def earliest_us(lines)
+    lines.filter_map { |line| line.is_a?(Hash) ? slack_ts_us(line["ts"]) : nil }.min
+  end
+
+  # snapshot_candidates(cases) -> the context lines the root snapshot kept
+  # for these cases (DND-1448), and the counts the run reports. A case whose
+  # input is no snapshot row contributes nothing.
+  def snapshot_candidates(cases)
+    snaps = cases.filter_map { |c| c["input"].is_a?(Hash) && c["input"]["snapshot"].is_a?(Hash) ? c["input"]["snapshot"] : nil }
+    lines = snaps.flat_map { |s| s["context_candidates"].is_a?(Array) ? s["context_candidates"].select { |l| l.is_a?(Hash) } : [] }
+    { lines: lines, cases: snaps.size, uncovered: snaps.count { |s| s["window_complete"] != true } }
   end
 
   def top_level?(line)

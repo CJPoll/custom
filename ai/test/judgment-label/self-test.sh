@@ -585,9 +585,9 @@ eq "re-propose with a disagreeing forward exits 0" "${RC}" "0"
 eq "a disagreeing forward record leaves the owner's row alone" "$(jq -r 'select(.id=="Ev03") | .label + " " + .provenance' "${LABELS}")" "harness owner_confirmed"
 has "the disagreement is counted" "${OUT}" "forward records disagreeing with the owner: 1"
 eq "an owner_confirmed row whose root left the inbox is kept" "$(jq -r 'select(.id=="EvGone") | .provenance' "${LABELS}")" "owner_confirmed"
-has "the kept orphan is counted" "${OUT}" "(1 not in this inbox)"
+has "the kept orphan is counted" "${OUT}" "(1 in neither this inbox nor the snapshot)"
 lacks "a proposed row whose root left the inbox is dropped" "$(cat "${LABELS}")" "EvStale"
-has "the dropped row is counted" "${OUT}" "dropped (root no longer in this inbox): 1"
+has "the dropped row is counted" "${OUT}" "dropped (root in neither this inbox nor the snapshot): 1"
 rm -f "${MAIL}/20260920T000007Z-007-fwd-disagree.md"
 
 echo "== end to end: confirm --forward reviews the forward rows"
@@ -666,7 +666,7 @@ RC=$?
 eq "a recheck with no Slack reader still exits 0" "${RC}" "0"
 has "a missing reader is context unavailable naming it, never an empty context" "${OUT}" "context unavailable: could not resolve Athena's bot user id: the Slack reader ${TMP}/no-such-slack-bin/whoami is missing or not executable"
 has "a row whose root left the inbox is context unavailable, saying so" "${OUT}" "context unavailable: this event_id is no longer in walt_ui-slack.jsonl"
-has "the tally names the rows that can never be shown context" "${OUT}" "(1 no longer in walt_ui-slack.jsonl, so no context can be shown for them)"
+has "the tally names the rows that can never be shown context" "${OUT}" "(1 no longer in walt_ui-slack.jsonl or the root snapshot, so no context can be shown for them)"
 
 echo "== domain: the owner's routing rule as rule_confirmed labels (DND-717, D-R2)"
 
@@ -787,6 +787,154 @@ lacks "... and not the generic join refusal" "${ERR}" "no label joined the corpu
 run "${BIN}" --confirm --rule-default --labels "${RLABELS}"
 eq "--rule-default outside --propose is a usage error" "${RC}" "2"
 has "that usage error carries Fix:" "${ERR}" "Fix:"
+
+echo "== domain: the root snapshot (DND-1448)"
+
+ruby_eq "snapshot_row keeps only the root's fields, then its context" \
+  '["channel","event_id","kind","received_at","snapshot","text","thread_ts","ts","user"]' \
+  'JSON.generate(JudgmentLabel.snapshot_row({"event_id" => "E", "kind" => "im", "user" => "U", "channel" => "D", "ts" => "1.000001", "thread_ts" => nil, "text" => "t", "received_at" => "r", "files" => ["x"], "bot_profile" => {}}, [], true, "NOW").keys.sort)'
+SNAPROW='{"event_id":"E","kind":"im","user":"U1","channel":"D1","ts":"1790000001.000100","thread_ts":null,"text":"t"}'
+ruby_eq "parse_snapshot: a well-formed root row parses" \
+  "E" \
+  "JudgmentLabel.parse_snapshot(%(${SNAPROW}\n), 'S').map { |r| r['event_id'] }.join"
+ruby_eq "parse_snapshot: a repeated event id is an error naming both lines" \
+  "InputError: S:2 repeats the event id of line 1" \
+  "JudgmentLabel.parse_snapshot(%(${SNAPROW}\n${SNAPROW}\n), 'S')"
+ruby_eq "parse_snapshot: a line with no event id is an error, never skipped" \
+  "InputError: S:1 has no event id" \
+  'JudgmentLabel.parse_snapshot(%({"text":"x"}\n), "S")'
+ruby_eq "parse_snapshot: a row with a bad shape is an error naming the line, never 'another owner's'" \
+  "InputError: S:1 has a kind outside dm|im|mpim|mention|InputError: S:1 has no Slack ts|InputError: S:1 has no text|InputError: S:1 is inside a thread (thread_ts differs from ts), so it is no root" \
+  "row = JSON.parse('${SNAPROW}'); [{'kind' => 'thread_reply'}, {'ts' => 'x'}, {'text' => nil}, {'thread_ts' => '1.000001'}].map { |bad| begin; JudgmentLabel.parse_snapshot(JSON.generate(row.merge(bad)) + %(\n), 'S'); 'parsed'; rescue JudgmentLabel::InputError => e; 'InputError: ' + e.message; end }.join('|')"
+ruby_eq "snapshot_roots: another owner's row is counted, never a root" \
+  "E1|1" \
+  "s = JudgmentLabel.snapshot_roots([{'event_id' => 'E1', 'kind' => 'im', 'user' => '${OWNER}', 'ts' => '1.000001'}, {'event_id' => 'E2', 'kind' => 'im', 'user' => '${OTHER}', 'ts' => '1.000002'}], '${OWNER}'); [s[:roots].map { |r| r[:event_id] }.join(','), s[:not_roots]].join('|')"
+ruby_eq "merge_roots: kept roots first, then live roots it lacks by id or by channel and ts; a redelivered root is live, not rotated" \
+  "K1 L2|L2|0|1" \
+  "m = JudgmentLabel.merge_roots([{event_id: 'K1', channel: 'D', ts: '1'}], [{event_id: 'L1', channel: 'D', ts: '1'}, {event_id: 'L2', channel: 'D', ts: '2'}]); g = JudgmentLabel.merge_roots([{event_id: 'K1', channel: 'D', ts: '1'}], []); [m[:roots].map { |r| r[:event_id] }.join(' '), m[:appended].map { |r| r[:event_id] }.join(' '), m[:rotated], g[:rotated]].join('|')"
+ruby_eq "build: a recorded forward label is one vote beside the current records [DND-1448]" \
+  "harness forward_record 1|unclear proposed 0|harness forward_record 0|unclear proposed 0|unclear proposed 0|unclear proposed 0" \
+  "old = ->(l, p) { [{'id' => 'R', 'label' => l, 'provenance' => p, 'labeled_at' => 't'}] }; b = ->(fwd, conf, ex) { x = JudgmentLabel.build([{event_id: 'R', mention: nil}], {forward: fwd, conflicts: conf}, ex, 'NOW'); r = x[:rows].first; [r['label'], r['provenance'], x[:kept_forwards]].join(' ') }; [b.({}, [], old.('harness', 'forward_record')), b.({'R' => 'gen_saas'}, [], old.('harness', 'forward_record')), b.({'R' => 'harness'}, [], old.('harness', 'forward_record')), b.({}, [], old.('unclear', 'proposed')), b.({'R' => 'harness'}, [], old.('unclear', 'proposed')), b.({}, ['R'], old.('harness', 'forward_record'))].join('|')"
+EVALRB="${AI}/lib/judgment_eval.rb"
+ruby_eq "window_covered?: every file holding the root's channel must reach back over the hour; none, or an unreadable ts, is not covered" \
+  "true|false|true|false|false" \
+  "require '${EVALRB}'; r = {'ts' => '1790200000.000000', 'channel' => 'D1'}; f = ->(name, ch, ts) { {name: name, rows: [{'channel' => ch, 'ts' => ts}]} }; old = f.('a', 'D1', '1790196400.000000'); late = f.('b', 'D1', '1790199000.000000'); other = f.('c', 'D9', '1790199000.000000'); [JudgmentEval.window_covered?(r, [old]), JudgmentEval.window_covered?(r, [old, late]), JudgmentEval.window_covered?(r, [old, other]), JudgmentEval.window_covered?(r, [other]), JudgmentEval.window_covered?(r, [f.('a', 'D1', 'x')])].join('|')"
+ruby_eq "snapshot_candidates: only snapshot rows count; an incomplete window is counted" \
+  "2|2|1" \
+  "require '${EVALRB}'; s = JudgmentEval.snapshot_candidates([{'input' => {'snapshot' => {'window_complete' => true, 'context_candidates' => [{'ts' => '1'}]}}}, {'input' => {'snapshot' => {'window_complete' => false, 'context_candidates' => [{'ts' => '2'}, 'junk']}}}, {'input' => {'text' => 'live'}}]); [s[:lines].size, s[:cases], s[:uncovered]].join('|')"
+
+echo "== end to end: a root that rotated out keeps its row and its text (DND-1448)"
+
+# The Slack inbox rotates, so its roots leave walt_ui-slack.jsonl. Before
+# DND-1448 --propose dropped every row whose root had left, and the corpus
+# shrank instead of accumulating. The snapshot keeps each owner root once
+# seen, append-only, under the inbox root.
+SROOT="${TMP}/snap-root"
+SLABELS="${TMP}/evals/snap-labels.jsonl"
+SNAP="${SROOT}/evals/slack-routing-roots.jsonl"
+mkdir -p "${SROOT}/agent-mail/walt_ui/to-custom"
+: >"${SROOT}/gen_saas-session.jsonl"
+session "walt_ui-session.jsonl" "Relay: Cody DM ts 1790200001.000100" >"${SROOT}/custom-session.jsonl"
+{
+  line EvO0 thread_reply "${OTHER}" "1790190000.000000" "1790189000.000000" "an old reply from someone else"
+  line EvC0 im "${OWNER}" "1790200000.000000" "" "CONTEXT-BEFORE-TEXT"
+  line EvS0 im "${OTHER}" "1790200000.500000" "" "STRANGER-CONTEXT-TEXT"
+  line EvR1 im "${OWNER}" "1790200001.000100" "" "ROTATED-ROOT-TEXT forwarded to the harness"
+  line EvR2 im "${OWNER}" "1790200002.000200" "" "ROTATED-PROPOSED-TEXT"
+} >"${SROOT}/walt_ui-slack.jsonl"
+run "${BIN}" --propose --inbox-root "${SROOT}" --labels "${SLABELS}"
+eq "propose before the rotation exits 0" "${RC}" "0"
+eq "EvR1 is harness forward_record before the rotation" "$(jq -r 'select(.id=="EvR1") | .label + " " + .provenance' "${SLABELS}" 2>/dev/null)" "harness forward_record"
+[ -f "${SNAP}" ] && ok "propose wrote the root snapshot under the inbox root [DND-1448]" || bad "propose wrote the root snapshot under the inbox root [DND-1448]" "${OUT}${ERR}"
+eq "the snapshot is 0600 [DND-1448]" "$(stat -c %a "${SNAP}" 2>/dev/null)" "600"
+eq "the snapshot holds the owner's roots, once each [DND-1448]" "$(jq -r .event_id "${SNAP}" 2>/dev/null | tr '\n' ' ')" "EvC0 EvR1 EvR2 "
+has "the report names the snapshot and what it appended" "${OUT}" "snapshot: ${SNAP}: absent, starting it, 3 appended"
+SNAP_BEFORE="$(cat "${SNAP}" 2>/dev/null)"
+
+# Rotation: the slack inbox and the session inbox start again, empty but for a
+# new root.
+line EvN1 im "${OWNER}" "1790300001.000100" "" "after the rotation" >"${SROOT}/walt_ui-slack.jsonl"
+: >"${SROOT}/custom-session.jsonl"
+run "${BIN}" --propose --inbox-root "${SROOT}" --labels "${SLABELS}"
+eq "propose after the rotation exits 0" "${RC}" "0"
+eq "a root that rotated out keeps its row: every root once seen is labelled [DND-1448]" \
+  "$(jq -r .id "${SLABELS}" 2>/dev/null | sort | tr '\n' ' ')" "EvC0 EvN1 EvR1 EvR2 "
+eq "its forward label survives its forward record rotating out too [DND-1448]" \
+  "$(jq -r 'select(.id=="EvR1") | .label + " " + .provenance' "${SLABELS}" 2>/dev/null)" "harness forward_record"
+has "nothing was dropped" "${OUT}" "dropped (root in neither this inbox nor the snapshot): 0"
+has "the kept forward label is counted, not silent" "${OUT}" "forward labels kept after their records rotated out: 1"
+has "the report counts the snapshot roots no longer in the inbox" "${OUT}" "snapshot: ${SNAP}: 3 roots kept, 1 appended (3 no longer in walt_ui-slack.jsonl)"
+case "$(cat "${SNAP}" 2>/dev/null)" in
+  "${SNAP_BEFORE}"*) ok "the snapshot is append-only: earlier lines are byte-identical [DND-1448]" ;;
+  *) bad "the snapshot is append-only: earlier lines are byte-identical [DND-1448]" "$(cat "${SNAP}" 2>/dev/null)" ;;
+esac
+eq "a rotated root keeps its text in the snapshot [DND-1448]" \
+  "$(jq -r 'select(.event_id=="EvR1") | .text' "${SNAP}" 2>/dev/null)" "ROTATED-ROOT-TEXT forwarded to the harness"
+eq "the snapshot keeps the context the eval would have built, owner text only [DND-1448]" \
+  "$(jq -c 'select(.event_id=="EvR1") | .snapshot | {complete: .window_complete, c: [.context_candidates[] | .ts + " " + .text]}' "${SNAP}" 2>/dev/null)" \
+  '{"complete":true,"c":["1790200000.000000 CONTEXT-BEFORE-TEXT","1790200000.500000 "]}'
+lacks "anyone else's text is never written to the snapshot (D7) [DND-1448]" "$(cat "${SNAP}")" "STRANGER-CONTEXT-TEXT"
+eq "a root whose window the inbox did not reach back over is marked so" \
+  "$(jq -r 'select(.event_id=="EvN1") | .snapshot.window_complete' "${SNAP}" 2>/dev/null)" "false"
+lacks "the labels file still never carries text" "$(cat "${SLABELS}")" "ROTATED"
+run "${BIN}" --propose --dry-run --inbox-root "${SROOT}" --labels "${SLABELS}"
+eq "a dry run after the rotation exits 0" "${RC}" "0"
+eq "a dry run appends nothing to the snapshot" "$(jq -r .event_id "${SNAP}" | tr '\n' ' ')" "EvC0 EvR1 EvR2 EvN1 "
+
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${SROOT}" --labels "${SLABELS}" --corpus "${SNAP}" --content-domain work
+eq "judgment-eval joins the snapshot (exit 0) [DND-1448]" "${RC}" "0"
+has "the rotated forward_record root is an eval case [DND-1448]" "${OUT}" "cases: 1 (harness 1)"
+lacks "no label missed the join" "${ERR}" "have no corpus row"
+has "its context comes from the snapshot, not an empty window [DND-1448]" "${OUT}" "context candidates: 2 line(s), 1 the owner's, for 1 of 1 case(s)"
+has "the eval says how many cases carry a snapshot context" "${OUT}" "snapshot context: 1 of 1 case(s), 0 with a window the inbox did not reach back over"
+cp "${SROOT}/walt_ui-slack.jsonl" "${TMP}/rotated-inbox.jsonl"
+line EvC0 im "${OWNER}" "1790200000.000000" "" "CONTEXT-BEFORE-TEXT" >>"${SROOT}/walt_ui-slack.jsonl"
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${SROOT}" --labels "${SLABELS}" --corpus "${SNAP}" --content-domain work
+has "a context line in both the inbox and the snapshot counts once" "${OUT}" "context candidates: 2 line(s), 1 the owner's, for 1 of 1 case(s)"
+cp "${TMP}/rotated-inbox.jsonl" "${SROOT}/walt_ui-slack.jsonl"
+
+cp "${SLABELS}" "${TMP}/evals/lost-labels.jsonl"
+LOST_BEFORE="$(cat "${TMP}/evals/lost-labels.jsonl")"
+run "${BIN}" --propose --inbox-root "${SROOT}" --labels "${TMP}/evals/lost-labels.jsonl" --snapshot "${TMP}/lost/roots.jsonl"
+eq "a MISSING snapshot that would drop rows is refused (exit 1), never read as empty [DND-1448]" "${RC}" "1"
+has "it names the missing snapshot and the rows at stake, with Fix:" "${ERR}" "the root snapshot ${TMP}/lost/roots.jsonl does not exist, and 3 label row(s) have a root in neither the inbox nor any snapshot"
+has "... and the way out" "${ERR}" "Fix: point --snapshot (or --inbox-root) at the existing snapshot"
+has "the report says the snapshot is absent, not 0 roots" "${OUT}" "snapshot: ${TMP}/lost/roots.jsonl: absent, starting it"
+eq "the labels file is unchanged" "$(cat "${TMP}/evals/lost-labels.jsonl")" "${LOST_BEFORE}"
+[ -e "${TMP}/lost/roots.jsonl" ] && bad "a refused run starts no snapshot" || ok "a refused run starts no snapshot"
+run "${BIN}" --propose --new-snapshot --inbox-root "${SROOT}" --labels "${TMP}/evals/lost-labels.jsonl" --snapshot "${TMP}/lost/roots.jsonl"
+eq "--new-snapshot starts it and accepts the drop (exit 0)" "${RC}" "0"
+has "the drop is counted" "${OUT}" "dropped (root in neither this inbox nor the snapshot): 3"
+run "${BIN}" --confirm --new-snapshot --labels "${SLABELS}"
+eq "--new-snapshot outside --propose is a usage error" "${RC}" "2"
+
+CMD="'${BIN}' --confirm --batch 5 --inbox-root '${SROOT}' --labels '${SLABELS}' --slack-bin '${FAKESLACK}'"
+OUT="$(printf 's\ns\ns\nq\n' | /usr/bin/script -qec "${CMD}" /dev/null 2>&1)"
+RC=$?
+eq "--confirm after the rotation exits 0" "${RC}" "0"
+has "--confirm shows a rotated root's text from the snapshot [DND-1448]" "${OUT}" "ROTATED-PROPOSED-TEXT"
+lacks "a rotated root is not 'no longer in' anything" "${OUT}" "is no longer in"
+
+run "${BIN}" --counts --snapshot "${SNAP}" --labels "${SLABELS}"
+eq "--snapshot with --counts is a usage error" "${RC}" "2"
+has "that usage error carries Fix:" "${ERR}" "Fix:"
+ALT="${TMP}/alt/roots.jsonl"
+run "${BIN}" --propose --inbox-root "${SROOT}" --labels "${TMP}/evals/alt-labels.jsonl" --snapshot "${ALT}"
+eq "--snapshot FILE writes that file instead" "$(jq -r .event_id "${ALT}" 2>/dev/null | tr '\n' ' ')" "EvN1 "
+
+CUT="${TMP}/cut/roots.jsonl"
+mkdir -p "${TMP}/cut"
+printf '%s' "$(head -n 1 "${SNAP}")" >"${CUT}"
+CUT_BEFORE="$(od -An -c "${CUT}")"
+run "${BIN}" --propose --inbox-root "${SROOT}" --labels "${TMP}/evals/cut-labels.jsonl" --snapshot "${CUT}"
+eq "appending to a snapshot whose last line is unterminated is refused (exit 1)" "${RC}" "1"
+has "it says so, with Fix:" "${ERR}" "does not end in a newline. Fix: "
+eq "and the snapshot is unchanged, never welded" "$(od -An -c "${CUT}")" "${CUT_BEFORE}"
+
+printf '{"event_id":"EvBad"\n' >>"${SNAP}"
+run "${BIN}" --propose --dry-run --inbox-root "${SROOT}" --labels "${SLABELS}"
+eq "a malformed snapshot line is an error (exit 1), never a shorter corpus" "${RC}" "1"
+has "it names the line, with Fix:" "${ERR}" "slack-routing-roots.jsonl:5 is not a JSON object"
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"

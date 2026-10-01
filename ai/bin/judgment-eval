@@ -31,6 +31,7 @@ require "tmpdir"
 require_relative "../lib/judgment_eval"
 require_relative "../lib/judgment_label"
 require_relative "../lib/private_overlay_resolver"
+require_relative "../lib/slack_inbox_files"
 require_relative "../lib/strict_argv"
 
 PROG = "judgment-eval"
@@ -70,7 +71,12 @@ USAGE = <<~EOF
                         sends only the line's text and kind, with its
                         context: see below). A row's
                         "content_domain" (work|blend|personal) wins over
-                        --content-domain.
+                        --content-domain. For slack_routing the corpus is
+                        judgment-label's root snapshot,
+                        DIR/evals/slack-routing-roots.jsonl (DND-1448): a
+                        root that rotated out of the inbox is still there,
+                        and its row's snapshot context lines join the
+                        inbox's for the context below.
     --content-domain D  the domain of cases whose row names none. Required if
                         any case lacks one (deny by default: never guessed).
     --batch-size N      cases per request, 1..50 (default 50)
@@ -299,28 +305,13 @@ module Effects
   # read_slack_inboxes(root) -> {files: [basename], lines: [Hash], unreadable: n}.
   # A root that is missing, or holds no *-slack.jsonl, is an ERROR: zero
   # files must never read as "no context before any root".
+  # The reader is ai/lib/slack_inbox_files.rb, shared with judgment-label's
+  # root snapshot (DND-1448).
   def read_slack_inboxes(root)
-    fail!(1, "the inbox root #{root} does not exist", "pass --inbox-root (or set ATHENA_INBOX_ROOT) to the directory holding the *-slack.jsonl inboxes") unless File.directory?(root)
-    paths = Dir.glob(File.join(root, "*-slack.jsonl")).sort
-    fail!(1, "no *-slack.jsonl file directly under #{root} (0 files)", "pass --inbox-root to the directory holding walt_ui-slack.jsonl; with no inbox lines no context can be built") if paths.empty?
-
-    lines = []
-    unreadable = 0
-    paths.each do |path|
-      File.foreach(path, encoding: "UTF-8") do |raw|
-        next if raw.strip.empty?
-
-        row = begin
-          JSON.parse(raw)
-        rescue JSON::ParserError, EncodingError
-          nil
-        end
-        row.is_a?(Hash) ? lines << row : unreadable += 1
-      end
-    rescue SystemCallError => e
-      fail!(1, "could not read #{path}: #{e.class}", "check that inbox file's permissions")
-    end
-    { files: paths.map { |p| File.basename(p) }, lines: lines, unreadable: unreadable }
+    read = SlackInboxFiles.read(root)
+    { files: read[:files].map { |f| f[:name] }, lines: read[:files].flat_map { |f| f[:rows] }, unreadable: read[:unreadable] }
+  rescue SlackInboxFiles::Error => e
+    fail!(1, e.message, e.fix)
   end
 
   def runs_dir
@@ -491,7 +482,11 @@ module Manager
   def context_doc(context)
     return {} unless context
 
-    { "context" => { "inbox_files" => context[:files], "built" => context[:built], "context_unavailable" => context[:unavailable].map { |u| u[:case_id] } } }
+    # snapshot: how many cases carried a root-snapshot context (DND-1448) and
+    # how many of those windows the inbox did not reach back over; they are
+    # scored on the context known.
+    { "context" => { "inbox_files" => context[:files], "built" => context[:built], "context_unavailable" => context[:unavailable].map { |u| u[:case_id] },
+                     "snapshot" => context[:snapshot] } }
   end
 
   # gather_candidates(opts, cases, out) -> {files:, candidates: {case_id => [candidate]}}.
@@ -505,12 +500,20 @@ module Manager
             "check #{JudgmentLabel::OWNER_KEY.join(' ')} in the private overlay: it must be the id the labels were made under (judgment-label reads the same key)")
     end
     inbox = Effects.read_slack_inboxes(Effects.inbox_root(opts[:inbox_root]))
-    by_case = cases.to_h { |c| [c["case_id"], JudgmentEval.context_candidates(c["input"], inbox[:lines], opts[:owner])] }
+    # A root snapshot corpus (DND-1448) carries the context each root had
+    # when first seen; its lines join the live inbox's, so a root that
+    # rotated out is not judged with an empty window.
+    snap = JudgmentEval.snapshot_candidates(cases)
+    lines = inbox[:lines] + snap[:lines]
+    by_case = cases.to_h { |c| [c["case_id"], JudgmentEval.context_candidates(c["input"], lines, opts[:owner])] }
     with_any = by_case.count { |_id, candidates| candidates.any? }
     out.puts "inbox files: #{inbox[:files].size} read (#{inbox[:files].join(', ')})" + (inbox[:unreadable].positive? ? ", #{inbox[:unreadable]} unreadable line(s) skipped" : "")
+    if snap[:cases].positive?
+      out.puts "snapshot context: #{snap[:cases]} of #{cases.size} case(s), #{snap[:uncovered]} with a window the inbox did not reach back over"
+    end
     owner_lines = by_case.values.sum { |cands| cands.count { |cand| cand["user"] == opts[:owner] } }
     out.puts "context candidates: #{by_case.values.sum(&:size)} line(s), #{owner_lines} the owner's, for #{with_any} of #{cases.size} case(s)"
-    { files: inbox[:files], candidates: by_case }
+    { files: inbox[:files], candidates: by_case, snapshot: { "cases" => snap[:cases], "window_incomplete" => snap[:uncovered] } }
   end
 
   # build_contexts(cases, inbox, origin, token, opts, out, err) -> {cases:, built:, unavailable:, files:}.
@@ -533,7 +536,7 @@ module Manager
     end
     report_unavailable(unavailable, err)
     out.puts "context: built #{built.size} of #{cases.size}"
-    { cases: built, built: built.size, unavailable: unavailable, files: inbox[:files] }
+    { cases: built, built: built.size, unavailable: unavailable, files: inbox[:files], snapshot: inbox[:snapshot] }
   end
 
   # D7: a root the owner did not write is never judged, so it is never sent.
