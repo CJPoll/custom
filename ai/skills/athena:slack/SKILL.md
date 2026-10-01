@@ -81,9 +81,9 @@ can thread onto it.
 |---|---|
 | `whoami` | `auth.test` — prints user, user_id, bot_id, team. Which identity is this? |
 | `post <channel\|#name> [text] [--blocks JSON] [--no-claim]` | New top-level message. Text from the argument or stdin. Then **claims the thread** it started (`claim=...` line). Exit **3** = posted but NOT claimed: do not re-post; fix the cause and run `claim-thread`. See *Thread replies come back to the session that started the thread*. |
-| `reply <channel> <thread_ts> [text] [--broadcast]` | Threaded reply. `thread_ts` is the **parent** ts. |
-| `dm <user_id> [text] [--thread_ts TS] [--no-claim]` | `conversations.open` then post. User **id**, not name. A new DM claims its thread like `post` (exit 3 = posted, not claimed); `--thread_ts` replies into an existing thread and never claims. |
-| `claim-thread <channel_id> <thread_ts>` | Claims a thread for this session's project Slack inbox, so its replies route here. `post`/`dm` run it; run it by hand to retry a failed claim without re-posting. Exit 0 claimed / already yours, 3 failed (`claim=FAILED reason=...` + `Fix:`), 2 a malformed channel or ts. |
+| `reply <channel> <thread_ts> [text] [--broadcast] [--no-claim]` | Threaded reply. `thread_ts` is the **parent** ts. Then claims the thread **if it is unclaimed** (`claim=...` line); every claim outcome exits 0, because the reply is posted. |
+| `dm <user_id> [text] [--thread_ts TS] [--no-claim]` | `conversations.open` then post. User **id**, not name. A new DM claims its thread like `post` (exit 3 = posted, not claimed); `--thread_ts` replies into an existing thread and claims it only if unclaimed, like `reply` (exit 0). |
+| `claim-thread <channel_id> <thread_ts> [--already-claimed-ok]` | Claims a thread for this session's project Slack inbox, so its replies route here. `post`/`dm`/`reply` run it; run it by hand to retry a failed claim without re-posting. Exit 0 claimed / already yours, 3 failed (`claim=FAILED reason=...` + `Fix:`), 2 a malformed channel or ts or an unknown flag. `--already-claimed-ok` makes another inbox's thread `claim=already_claimed`, exit 0. |
 | `update <channel> <ts> [text]` | Edit — bot's own messages only. |
 | `delete <channel> <ts>` | Delete — bot's own messages only. No undo. |
 | `react <channel> <ts> <emoji> [--remove]` | Add/remove a reaction. Bare name (`eyes`, not `:eyes:`). |
@@ -105,7 +105,8 @@ claimant*. So `post`, and `dm` without `--thread_ts`, claim the thread they
 start for **this session's project** (DND-491): the session's project
 directory → realpath of the git common dir → this project's inbox registry
 entry → its one Slack `log` channel (no `producer`, or `producer: "slack"`) →
-its path, e.g. `custom-slack.jsonl`. The call is the athena MCP tool
+its path, e.g. `custom-slack.jsonl`. A reply claims too, only an unclaimed
+thread (*A reply claims an unclaimed thread* below). The call is the athena MCP tool
 `slack_thread_claim` with the bot's `bot_id`/`team_id` (auth.test, cached);
 the machine token is read from the inbox client config and reaches curl only
 on stdin, as `send-mail --routed` sends it.
@@ -144,8 +145,39 @@ release path (`slack_thread_claim` is claim-only; first claim wins). A thread
 claimed by the wrong inbox keeps routing there: the holding session forwards
 its replies, or a new thread is started from the right project.
 
-`reply` and `dm --thread_ts` never claim: the thread belongs to whoever
-started it. A claim needs the project's Slack channel declared in its
+**A reply claims an unclaimed thread** (DND-1521). `reply`, and `dm
+--thread_ts`, claim the thread they reply into (the parent `thread_ts`) for
+this session's project inbox, so the session that answered hears the next
+reply. The server's first claim wins, so a thread another inbox already holds
+stays theirs. After the `ts=...` line, exactly one of:
+
+- `claim=claimed ...` or `claim=already_yours ...` — the thread is this
+  session's;
+- `claim=already_claimed holder=another-inbox inbox=<inbox> source=<source>`
+  — another inbox holds it (`inbox=` is this session's, which did not get it;
+  the server never names the holder). Its replies go there;
+- `claim=skipped` — `--no-claim`;
+- on stderr, `claim=FAILED reason=<token> ...` and `Fix: ...` — the same
+  reasons as above.
+
+Every one of these exits **0**: the reply is posted, and a failed claim never
+fails it. A caller that read a non-zero exit as a failed reply would re-post.
+Fix the cause and run `claim-thread <channel> <thread_ts> --already-claimed-ok`;
+never re-post. `reply` claims the thread Slack threaded the reply into (the
+response's `message.thread_ts`), so a reply's ts passed by mistake never
+claims a different thread. `dm --thread_ts --no-claim` now prints
+`claim=skipped` like every other `--no-claim`.
+`post` and a new `dm` keep exit 3, because the claim is the only return
+address of the thread they start.
+
+**Later (2026-10-01, DND-1521):** this read "`reply` and `dm --thread_ts`
+never claim: the thread belongs to whoever started it." Superseded: a session
+answered an owner thread forwarded to it, nothing claimed the thread, and the
+owner's next reply went by the channel route to another session (measured
+2026-10-01). The contract says so too (`ai/contracts/athena-events.md` →
+*Thread replies route to the thread's claimant*).
+
+A claim needs the project's Slack channel declared in its
 registry entry **and** a matching server-side AgentInstance for that inbox
 on this machine (both ends, or the reply goes dark). Posts made through
 `mcp__athena__slack_post` are not claimed by this path; claim them with the
@@ -760,7 +792,9 @@ kind vocabulary, and `status`'s request shape, flag order and miss paths, and
 the thread claim (DND-491): the result parser, the per-reason `Fix:` texts, the
 inbox resolution (worktree, subdirectory, platform channel skipped, ambiguity),
 `claim-thread`'s request and failure lines, the machine token staying off argv
-and disk, and `post`/`dm`/`reply` claiming only the threads they start, plus
+and disk, and `post`/`dm` claiming the threads they start, plus `reply` and
+`dm --thread_ts` claiming an unclaimed thread they reply into (DND-1521:
+`already_claimed` an exit-0 outcome, a failed claim never failing the reply), plus
 four negative tests added in a fix round: a registry with an unparseable OTHER
 entry (`registry-error`, never folded into `no-registry-entry`),
 `mcp_registered_url`'s internal-error status for a computed-wrong key, a

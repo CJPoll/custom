@@ -397,6 +397,30 @@ slack_claim_started_thread() {
   esac
 }
 
+# slack_claim_replied_thread <bin-dir> <channel> <thread_ts> -- EXITS 0, never
+# returns.
+#
+# Runs bin/claim-thread --already-claimed-ok for a thread `reply` or
+# `dm --thread_ts` just replied into (DND-1521), so a session that answers an
+# unclaimed thread hears the next reply in it. The server's first claim wins,
+# so a thread another inbox holds is never taken: claim-thread prints
+# claim=already_claimed on stdout. The claim is opportunistic here and the
+# reply is already in Slack, so EVERY outcome exits 0: a failure is printed
+# (claim=FAILED + Fix: on stderr, from claim-thread or from here when
+# claim-thread could not run or exited a code it never documents), never
+# turned into a failed reply, which a caller could answer by re-posting.
+slack_claim_replied_thread() {
+  _cr_rc=0
+  "$1/claim-thread" "$2" "$3" --already-claimed-ok || _cr_rc=$?
+  case "$_cr_rc" in
+    0|2|3) exit 0 ;;
+    *)
+      printf 'claim=FAILED reason=mcp-error:claim-thread-exit-%s key=?/%s/%s inbox=none\n' "$_cr_rc" "$2" "$3" >&2
+      printf 'Fix: the reply WAS posted; do not re-post. Run %s/claim-thread %s %s --already-claimed-ok by hand and read its error.\n' "$1" "$2" "$3" >&2
+      exit 0 ;;
+  esac
+}
+
 # slack_read_text <arg...> -- the trailing text argument, or stdin when absent.
 slack_read_text() {
   if [ "$#" -gt 0 ] && [ -n "$1" ]; then

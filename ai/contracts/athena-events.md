@@ -4214,8 +4214,19 @@ follow it.
 - **A claim seeds thread participation** for the key, so a channel-thread reply
   to a bot-started thread is routed rather than classified as not addressed to
   the bot.
-- **The harness claims only threads it starts**: a `post`, or a `dm` without
-  `--thread_ts` (`athena:slack`). It never claims a thread it merely replies in.
+- **The harness claims the threads it starts, and an unclaimed thread it
+  replies in**: a `post`, or a `dm` without `--thread_ts`, claims the thread it
+  starts; a `reply`, or a `dm --thread_ts`, claims the thread it replies into
+  only when no instance holds it (`athena:slack`, DND-1521). First claim wins,
+  so a reply never takes a thread another instance holds: the harness reports
+  `already_claimed` as an outcome and the reply stands.
+
+  **Later (2026-10-01, DND-1521):** this read "The harness claims only threads
+  it starts … It never claims a thread it merely replies in." Superseded: a
+  session that answered an owner thread forwarded to it never claimed it, so
+  the owner's next reply went by the channel route to another session. The
+  rest of this epic's contract amendments (route flags, miss reasons,
+  `slack_post` claiming) are DND-1539's.
 - **The router claims a root it routed by topic.** When the Slack router
   delivers a new conversation's root by its topic route in mode `on` (`route:
   topic_judgment` or `route: session_mention`, *New conversations may route by

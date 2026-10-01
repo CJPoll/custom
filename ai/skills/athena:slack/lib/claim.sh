@@ -8,7 +8,9 @@
 # the thread's claimant*). Nothing claimed a thread a session started with
 # `post` or `dm`, so every reply fell through to the channel route (walt_ui's
 # `slack` channel) and the session that asked the question never heard the
-# answer. `post` and `dm` now run `claim-thread` on the thread they start.
+# answer. `post` and `dm` now run `claim-thread` on the thread they start, and
+# `reply` and `dm --thread_ts` on an unclaimed thread they reply into
+# (DND-1521).
 #
 # BUCKETS.
 #   claim_parse_result, claim_reason_fix, claim_pick_slack_channel -- Domain:

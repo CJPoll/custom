@@ -1,5 +1,5 @@
 #!/bin/sh
-# reply <channel_id|#name> <thread_ts> [text] [--broadcast]
+# reply <channel_id|#name> <thread_ts> [text] [--broadcast] [--no-claim]
 #
 # thread_ts MUST be the ts of the thread's PARENT message. Slack does not
 # accept a reply's ts there; passing one either starts a second thread or is
@@ -10,6 +10,25 @@
 # --broadcast also shows the reply in the channel (reply_broadcast). Use it
 # sparingly: it is a notification to everyone in the channel, not a formatting
 # choice.
+#
+# Then it CLAIMS the thread for this session's project inbox IF the thread is
+# unclaimed (DND-1521), so the next reply in it comes back to the session that
+# answered rather than to the channel route. A claim cannot be taken back, and
+# the server's first claim wins, so a thread another inbox holds stays theirs.
+# One more line follows the ts/permalink lines:
+#   claim=claimed|already_yours inbox=<inbox> source=<source>      (stdout)
+#   claim=already_claimed holder=another-inbox inbox=<inbox> ...    (stdout)
+#   claim=skipped                     (--no-claim: no reply expected)
+#   claim=FAILED reason=... + Fix:    (stderr) replied, not claimed
+# The exit is 0 in every one of those: the reply is posted, and a failed claim
+# never fails it (do not re-post; run `claim-thread <channel> <thread_ts>
+# --already-claimed-ok` once the cause is fixed). A non-zero exit is a failed
+# post, as before.
+#
+# The thread claimed is the one Slack actually threaded the reply into (the
+# response's message.thread_ts), falling back to the thread_ts argument when
+# the response carries none: a caller that passed a reply's ts by mistake
+# never gets a different thread claimed for good.
 set -eu
 SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 . "$SELF_DIR/../lib/slack.sh"
@@ -17,23 +36,35 @@ case "${1:-}" in -h|--help) slack_help "$0"; exit 0 ;; esac
 slack_need_tools
 
 usage() {
-  printf 'usage: reply <channel_id|#name> <thread_ts> [text] [--broadcast]\n' >&2
+  printf 'usage: reply <channel_id|#name> <thread_ts> [text] [--broadcast] [--no-claim]\n' >&2
   exit 2
 }
 
-[ "$#" -ge 2 ] || usage
-CHAN_ARG="$1"; shift
-THREAD_TS="$1"; shift
+# Flags may come in any position; the first two positionals are the channel
+# and the thread_ts, the third is the text.
+CHAN_ARG=""
+THREAD_TS=""
 TEXT=""
+NPOS=0
 BROADCAST=false
+CLAIM=true
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --broadcast) BROADCAST=true; shift ;;
+    --no-claim) CLAIM=false; shift ;;
     --) shift; TEXT="${1:-}"; break ;;
     -*) usage ;;
-    *) TEXT="$1"; shift ;;
+    *)
+      case "$NPOS" in
+        0) CHAN_ARG="$1" ;;
+        1) THREAD_TS="$1" ;;
+        2) TEXT="$1" ;;
+        *) usage ;;
+      esac
+      NPOS=$((NPOS + 1)); shift ;;
   esac
 done
+[ "$NPOS" -ge 2 ] || usage
 if [ -z "$TEXT" ]; then TEXT="$(cat)"; fi
 [ -n "$TEXT" ] || { printf 'reply: refusing to send an empty message\n' >&2; exit 2; }
 
@@ -48,3 +79,6 @@ OUT_CHAN="$(printf '%s' "$RESP" | jq -r '.channel')"
 printf 'ts=%s channel=%s thread_ts=%s\n' "$TS" "$OUT_CHAN" "$THREAD_TS"
 PERMALINK="$(slack_permalink "$OUT_CHAN" "$TS" || printf '')"
 if [ -n "$PERMALINK" ]; then printf 'permalink=%s\n' "$PERMALINK"; fi
+CLAIM_TS="$(printf '%s' "$RESP" | jq -r --arg tt "$THREAD_TS" '.message.thread_ts // $tt')"
+if [ "$CLAIM" = true ]; then slack_claim_replied_thread "$SELF_DIR" "$OUT_CHAN" "$CLAIM_TS"; fi
+printf 'claim=skipped\n'

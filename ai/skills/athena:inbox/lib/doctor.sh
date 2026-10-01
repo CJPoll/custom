@@ -1037,7 +1037,7 @@ doctor_check_slack_producer() {
     case "${st}" in
       registered)
         doctor_finding warn "never-routed" "log channel \"${chan}\" has never received anything (${inbox} does not exist), yet its server producer IS registered (agent instance \"${a}\" on \"${b}\"): nothing has been ROUTED to it" \
-          "the chain is wired and still silent. A channel fed only by claimed thread replies (custom's slack) stays empty until a session claims a thread and someone replies in it: athena:slack post and dm claim the threads they start, and bin/claim-thread claims one by hand. If replies to a claimed thread still land in another project's file, the server's thread-claim routing is at fault (ai/contracts/athena-events.md, Thread replies route to the thread's claimant)."
+          "the chain is wired and still silent. A channel fed only by claimed thread replies (custom's slack) stays empty until a session claims a thread and someone replies in it: athena:slack post and dm claim the threads they start, reply claims an unclaimed thread it answers, and bin/claim-thread claims one by hand. If replies to a claimed thread still land in another project's file, the server's thread-claim routing is at fault (ai/contracts/athena-events.md, Thread replies route to the thread's claimant)."
         return 0 ;;
       unregistered)
         doctor_finding fail "producer-unregistered" "log channel \"${chan}\" has never received anything, and the server has NO agent instance for ${inbox} on this machine (\"${a}\", ${b}): NO SERVER PRODUCER REGISTERED" \

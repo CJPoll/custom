@@ -1562,6 +1562,34 @@ for bad_args in "D0DMCHAN abc" "D0DMCHAN 1790" "UFAKE00001 1.2" "d0dm 1.2"; do
   else bad "claim-thread: '${bad_args}' -> exit 2 reason=invalid, Fix:, no call" "rc=${RC} err='${ERR}'"; fi
 done
 
+# c5b. DND-1521: --already-claimed-ok (either position) turns the server's
+#      already_claimed into an outcome on stdout, exit 0; without it the same
+#      answer is still claim=FAILED, exit 3. An unknown flag is invalid.
+for args in "--already-claimed-ok D0DMCHAN 1.2" "D0DMCHAN 1.2 --already-claimed-ok"; do
+  setup_case; claim_setup; claim_err_answer "already_claimed: another inbox holds this thread"
+  # shellcheck disable=SC2086
+  run_bin claim-thread ${args}
+  if [[ "${RC}" == 0 && "${OUT}" == "claim=already_claimed holder=another-inbox inbox=cproj-slack.jsonl source=cwd" && -z "${ERR}" ]] \
+     && [[ "$(jq -r '.channel + " " + .thread_ts' <<<"$(claim_args)")" == "D0DMCHAN 1.2" ]]; then
+    ok "claim-thread '${args}': already_claimed -> stdout outcome, exit 0"
+  else bad "claim-thread '${args}': already_claimed -> stdout outcome, exit 0" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+done
+setup_case; claim_setup; claim_err_answer "already_claimed: another inbox holds this thread"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"claim=FAILED reason=already-claimed "* && -z "${OUT}" ]]; then
+  ok "claim-thread: already_claimed without the flag -> claim=FAILED, exit 3"
+else bad "claim-thread: already_claimed without the flag -> claim=FAILED, exit 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+setup_case; claim_setup; claim_err_answer "not found"
+run_bin claim-thread D0DMCHAN 1.2 --already-claimed-ok
+if [[ "${RC}" == 3 && "${ERR}" == *"claim=FAILED reason=not-found "* && -z "${OUT}" ]]; then
+  ok "claim-thread --already-claimed-ok: any other refusal is still claim=FAILED, exit 3"
+else bad "claim-thread --already-claimed-ok: any other refusal is still claim=FAILED, exit 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+setup_case; claim_setup
+run_bin claim-thread D0DMCHAN 1.2 --loud
+if [[ "${RC}" == 2 && "${ERR}" == *"reason=invalid"* && "${ERR}" == *"Fix:"* && -z "$(mcp_calls)" ]]; then
+  ok "claim-thread: an unknown flag -> exit 2 reason=invalid, no call"
+else bad "claim-thread: an unknown flag -> exit 2 reason=invalid, no call" "rc=${RC} err='${ERR}'"; fi
+
 # c6. A 500 or garbage from the server is an mcp-error, never claimed.
 setup_case; claim_setup; mkdir -p "${SHIM_DIR}/mcp"; printf 500 > "${SHIM_DIR}/mcp/slack_thread_claim.code"
 run_bin claim-thread D0DMCHAN 1.2
@@ -1787,21 +1815,140 @@ if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-sl
   ok "dm: a new DM claims (D... from conversations.open, ts from the post)"
 else bad "dm: a new DM claims (D... from conversations.open, ts from the post)" "rc=${RC} out='${OUT}' err='${ERR}' args=$(claim_args)"; fi
 
-# p4. dm --thread_ts replies into someone's thread: no claim, no claim line.
+# p4. DND-1521: dm --thread_ts replies into an existing thread and claims it
+#     only if unclaimed: the key is the PARENT ts, never the reply's own ts.
 setup_case; claim_setup
 fixture conversations.open '{"ok":true,"channel":{"id":"D0PENED"}}'
 fixture chat.postMessage '{"ok":true,"ts":"1790.6","channel":"D0PENED"}'
 run_bin dm "${CODY}" "hi" --thread_ts 1790.5
-if [[ "${RC}" == 0 && "${OUT}" != *"claim="* && -z "$(mcp_calls)" ]]; then
-  ok "dm --thread_ts: no MCP call, no claim line, exit 0"
-else bad "dm --thread_ts: no MCP call, no claim line, exit 0" "rc=${RC} out='${OUT}' calls=$(mcp_calls)"; fi
+if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-slack.jsonl source=cwd" ]] \
+   && [[ "$(jq -r '.channel + " " + .thread_ts' <<<"$(claim_args)")" == "D0PENED 1790.5" ]]; then
+  ok "dm --thread_ts: claims the parent thread (D0PENED 1790.5), claim=claimed, exit 0"
+else bad "dm --thread_ts: claims the parent thread (D0PENED 1790.5), claim=claimed, exit 0" "rc=${RC} out='${OUT}' err='${ERR}' args=$(claim_args)"; fi
 
-# p5. reply never claims.
+# p5. DND-1521: reply claims an unclaimed thread for this session's inbox.
+#     Measured 2026-10-01: a session answered an owner thread with reply,
+#     nothing claimed it, and the owner's next reply went by channel_route to
+#     another session. The claim key is (resolved channel, PARENT ts).
 setup_case; claim_setup
-fixture chat.postMessage '{"ok":true,"ts":"1790.7","channel":"C1"}'
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790.7\",\"channel\":\"${ENG_CHANNEL}\"}"
 run_bin reply "${ENG_CHANNEL}" 1790.5 "threaded"
-if [[ "${RC}" == 0 && -z "$(mcp_calls)" && "${OUT}" != *"claim="* ]]; then ok "reply: never claims"
-else bad "reply: never claims" "rc=${RC} out='${OUT}' calls=$(mcp_calls)"; fi
+if [[ "${RC}" == 0 && "$(head -n1 <<<"${OUT}")" == "ts=1790.7 channel=${ENG_CHANNEL} thread_ts=1790.5" ]] \
+   && [[ "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-slack.jsonl source=cwd" ]] \
+   && [[ "$(jq -r '.channel + " " + .thread_ts + " " + .inbox_name' <<<"$(claim_args)")" == "${ENG_CHANNEL} 1790.5 cproj-slack.jsonl" ]]; then
+  ok "reply: claims the unclaimed parent thread (channel, thread_ts) for this inbox, exit 0"
+else bad "reply: claims the unclaimed parent thread (channel, thread_ts) for this inbox, exit 0" "rc=${RC} out='${OUT}' err='${ERR}' args=$(claim_args)"; fi
+
+# p5b. A thread another inbox holds stays theirs: an outcome on stdout, never a
+#      failure, and the reply is posted exactly once.
+setup_case; claim_setup; claim_err_answer "already_claimed: another inbox holds this thread"
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790.8\",\"channel\":\"${ENG_CHANNEL}\"}"
+run_bin reply "${ENG_CHANNEL}" 1790.5 "threaded"
+if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=already_claimed holder=another-inbox inbox=cproj-slack.jsonl source=cwd" ]] \
+   && [[ "${ERR}" != *"claim=FAILED"* && "$(calls_of chat.postMessage)" == 1 ]]; then
+  ok "reply: a thread another inbox holds -> claim=already_claimed holder=another-inbox, exit 0, posted once"
+else bad "reply: a thread another inbox holds -> claim=already_claimed holder=another-inbox, exit 0, posted once" \
+  "rc=${RC} out='${OUT}' err='${ERR}' posts=$(calls_of chat.postMessage)"; fi
+
+# p5c. A reply into the session's own thread: already_yours, exit 0.
+setup_case; claim_setup; claim_ok_answer already_yours
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790.9\",\"channel\":\"${ENG_CHANNEL}\"}"
+run_bin reply "${ENG_CHANNEL}" 1790.5 "threaded"
+if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=already_yours inbox=cproj-slack.jsonl source=cwd" ]]; then
+  ok "reply: the session's own thread -> claim=already_yours, exit 0"
+else bad "reply: the session's own thread -> claim=already_yours, exit 0" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# p5d. A failed claim never fails the reply (the post happened): claim=FAILED
+#      and Fix: on stderr, exit 0, posted exactly once.
+setup_case; claim_setup; claim_err_answer "not found"
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790.10\",\"channel\":\"${ENG_CHANNEL}\"}"
+run_bin reply "${ENG_CHANNEL}" 1790.5 "threaded"
+if [[ "${RC}" == 0 && "$(head -n1 <<<"${OUT}")" == "ts=1790.10 channel=${ENG_CHANNEL} thread_ts=1790.5" ]] \
+   && [[ "${ERR}" == *"claim=FAILED reason=not-found"* && "${ERR}" == *"Fix:"* && "${OUT}" != *"claim="* ]] \
+   && [[ "$(calls_of chat.postMessage)" == 1 ]]; then
+  ok "reply: a failed claim -> claim=FAILED + Fix: on stderr, exit 0 (the reply is posted), posted once"
+else bad "reply: a failed claim -> claim=FAILED + Fix: on stderr, exit 0 (the reply is posted), posted once" \
+  "rc=${RC} out='${OUT}' err='${ERR}' posts=$(calls_of chat.postMessage)"; fi
+
+# p5e. reply --no-claim (either position): claim=skipped, no MCP call.
+for args in "--no-claim ${ENG_CHANNEL} 1790.5 threaded" "${ENG_CHANNEL} 1790.5 threaded --no-claim"; do
+  setup_case; claim_setup
+  fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790.11\",\"channel\":\"${ENG_CHANNEL}\"}"
+  # shellcheck disable=SC2086
+  run_bin reply ${args}
+  if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=skipped" && -z "$(mcp_calls)" && "$(calls_of chat.postMessage)" == 1 ]]; then
+    ok "reply '${args}': claim=skipped, no MCP call, exit 0"
+  else bad "reply '${args}': claim=skipped, no MCP call, exit 0" "rc=${RC} out='${OUT}' err='${ERR}' calls=$(mcp_calls)"; fi
+done
+
+# p5i. Slack's own message.thread_ts wins over the argument: a reply's ts
+#      passed by mistake never gets a different thread claimed for good.
+setup_case; claim_setup
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790.14\",\"channel\":\"${ENG_CHANNEL}\",\"message\":{\"ts\":\"1790.14\",\"thread_ts\":\"1790.1\"}}"
+run_bin reply "${ENG_CHANNEL}" 1790.5 "threaded"
+if [[ "${RC}" == 0 && "$(jq -r '.channel + " " + .thread_ts' <<<"$(claim_args)")" == "${ENG_CHANNEL} 1790.1" ]]; then
+  ok "reply: claims the response's message.thread_ts (1790.1), not the argument (1790.5)"
+else bad "reply: claims the response's message.thread_ts (1790.1), not the argument (1790.5)" "rc=${RC} out='${OUT}' args=$(claim_args)"; fi
+setup_case; claim_setup
+fixture conversations.open '{"ok":true,"channel":{"id":"D0PENED"}}'
+fixture chat.postMessage '{"ok":true,"ts":"1790.15","channel":"D0PENED","message":{"ts":"1790.15","thread_ts":"1790.1"}}'
+run_bin dm "${CODY}" "hi" --thread_ts 1790.5
+if [[ "${RC}" == 0 && "$(jq -r '.channel + " " + .thread_ts' <<<"$(claim_args)")" == "D0PENED 1790.1" ]]; then
+  ok "dm --thread_ts: claims the response's message.thread_ts, not the argument"
+else bad "dm --thread_ts: claims the response's message.thread_ts, not the argument" "rc=${RC} out='${OUT}' args=$(claim_args)"; fi
+
+# p5j. The reply parser: `--` text (alone and after a flag), stdin text, and a
+#      #name channel all post and claim the resolved (channel, thread_ts).
+for form in "dashdash" "flag-dashdash" "stdin" "name"; do
+  setup_case; claim_setup
+  fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790.16\",\"channel\":\"${ENG_CHANNEL}\"}"
+  case "${form}" in
+    dashdash) run_bin reply "${ENG_CHANNEL}" 1790.5 -- "--looks-like-a-flag" ;;
+    flag-dashdash) run_bin reply --broadcast "${ENG_CHANNEL}" 1790.5 -- "--looks-like-a-flag" ;;
+    stdin) run_bin_stdin "from stdin" reply "${ENG_CHANNEL}" 1790.5 ;;
+    name) run_bin reply '#eng-fixture' 1790.5 "hi" ;;  # resolved from the seeded channel cache
+  esac
+  if [[ "${RC}" == 0 && "$(calls_of chat.postMessage)" == 1 && "$(tail -n1 <<<"${OUT}")" == "claim=claimed inbox=cproj-slack.jsonl source=cwd" ]] \
+     && [[ "$(jq -r '.channel + " " + .thread_ts' <<<"$(claim_args)")" == "${ENG_CHANNEL} 1790.5" ]]; then
+    ok "reply parser (${form}): posts once, claims (${ENG_CHANNEL}, 1790.5)"
+  else bad "reply parser (${form}): posts once, claims (${ENG_CHANNEL}, 1790.5)" "rc=${RC} out='${OUT}' err='${ERR}' args=$(claim_args)"; fi
+done
+# p5k. A 4th positional, or `--` before the thread_ts: usage, exit 2, nothing sent.
+for args in "${ENG_CHANNEL} 1790.5 one two" "${ENG_CHANNEL} -- text"; do
+  setup_case; claim_setup
+  # shellcheck disable=SC2086
+  run_bin reply ${args}
+  if [[ "${RC}" == 2 && "${ERR}" == *"usage: reply"* && "$(calls_of chat.postMessage)" == 0 && -z "$(mcp_calls)" ]]; then
+    ok "reply '${args}': usage, exit 2, nothing posted or claimed"
+  else bad "reply '${args}': usage, exit 2, nothing posted or claimed" "rc=${RC} err='${ERR}'"; fi
+done
+
+# p5f. A failed reply post is the post's failure: exit 1, no claim attempted.
+setup_case; claim_setup
+fixture chat.postMessage '{"ok":false,"error":"thread_not_found"}'
+run_bin reply "${ENG_CHANNEL}" 1790.5 "threaded"
+if [[ "${RC}" == 1 && "${ERR}" == *"thread_not_found"* && -z "$(mcp_calls)" && "${ERR}" != *"claim="* ]]; then
+  ok "reply: a failed post exits 1, and no claim is attempted"
+else bad "reply: a failed post exits 1, and no claim is attempted" "rc=${RC} err='${ERR}' calls=$(mcp_calls)"; fi
+
+# p5g. dm --thread_ts into a thread another inbox holds: already_claimed, exit 0.
+setup_case; claim_setup; claim_err_answer "already_claimed: another inbox holds this thread"
+fixture conversations.open '{"ok":true,"channel":{"id":"D0PENED"}}'
+fixture chat.postMessage '{"ok":true,"ts":"1790.12","channel":"D0PENED"}'
+run_bin dm "${CODY}" "hi" --thread_ts 1790.5
+if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=already_claimed holder=another-inbox inbox=cproj-slack.jsonl source=cwd" ]]; then
+  ok "dm --thread_ts: a thread another inbox holds -> claim=already_claimed, exit 0"
+else bad "dm --thread_ts: a thread another inbox holds -> claim=already_claimed, exit 0" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# p5h. A new DM (no --thread_ts) is unchanged: another holder of a thread it
+#      just started is still a failure, exit 3 (its claim is the return address).
+setup_case; claim_setup; claim_err_answer "already_claimed: another inbox holds this thread"
+fixture conversations.open '{"ok":true,"channel":{"id":"D0PENED"}}'
+fixture chat.postMessage '{"ok":true,"ts":"1790.13","channel":"D0PENED"}'
+run_bin dm "${CODY}" "hi"
+if [[ "${RC}" == 3 && "${ERR}" == *"claim=FAILED reason=already-claimed"* ]]; then
+  ok "dm (new thread): already_claimed is still claim=FAILED, exit 3"
+else bad "dm (new thread): already_claimed is still claim=FAILED, exit 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 # p6. --no-claim: claim=skipped, no MCP call, on post and dm.
 setup_case; claim_setup
@@ -1867,6 +2014,25 @@ if [[ "${RC}" == 3 ]] && [[ "$(head -n1 <<<"${OUT}")" == "ts=1.1 channel=${ENG_C
    && [[ "$(calls_of chat.postMessage)" == 1 ]]; then
   ok "post: claim-thread exiting an undocumented code (1) -> claim=FAILED reason=mcp-error:claim-thread-exit-1, Fix:, exit 3"
 else bad "post: claim-thread exiting an undocumented code (1) -> claim=FAILED reason=mcp-error:claim-thread-exit-1, Fix:, exit 3" \
+  "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# p10. DND-1521: the same undocumented exit under reply is named, never silent,
+#      and never fails the reply: claim=FAILED + Fix:, exit 0.
+cp "${BIN}/reply" "${ALTBIN}/reply"
+fixture chat.postMessage "{\"ok\":true,\"ts\":\"1.2\",\"channel\":\"${ENG_CHANNEL}\"}"
+set +e
+OUT="$(cd "${RUN_CWD:-${TMP}}" && env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" SHIM_DIR="${SHIM_DIR}" \
+  ATHENA_INBOX_ROOT="${CHOME}/inbox-root" ATHENA_INBOX_CLIENT_CONFIG="${CHOME}/client.json" \
+  SHIM_MCP_BEARER="${MCP_BEARER}" \
+  SLACK_INBOX_STATE="${STATE}" SLACK_INBOX_LEGACY_STATE="${LEGACY}" \
+  "${ALTBIN}/reply" "${ENG_CHANNEL}" 1.1 "hi" 2>"${TMP}/rerr${CASE_N}")"
+RC=$?
+set -e
+ERR="$(cat "${TMP}/rerr${CASE_N}")"
+if [[ "${RC}" == 0 ]] && [[ "$(head -n1 <<<"${OUT}")" == "ts=1.2 channel=${ENG_CHANNEL} thread_ts=1.1" ]] \
+   && [[ "${ERR}" == *"claim=FAILED reason=mcp-error:claim-thread-exit-1"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
+  ok "reply: claim-thread exiting an undocumented code (1) -> claim=FAILED + Fix:, exit 0"
+else bad "reply: claim-thread exiting an undocumented code (1) -> claim=FAILED + Fix:, exit 0" \
   "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 # 84. The owner's decision-question rules (2026-09-25) stay in the doctrine,

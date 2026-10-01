@@ -13,8 +13,10 @@
 # session's project inbox, exactly as `post` does (see post's header for the
 # claim=... line; a failed claim prints claim=FAILED and a Fix: line on stderr
 # and exits 3 = posted, not claimed). A reply into an existing
-# thread (--thread_ts) never claims: the thread belongs to whoever started it.
-# --no-claim skips the claim and prints claim=skipped.
+# thread (--thread_ts) claims it only IF it is unclaimed, exactly as `reply`
+# does (DND-1521; see reply's header): another inbox's thread stays theirs
+# (claim=already_claimed), and every claim outcome exits 0 because the reply
+# is posted. --no-claim skips the claim and prints claim=skipped.
 set -eu
 SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 . "$SELF_DIR/../lib/slack.sh"
@@ -61,7 +63,12 @@ TS="$(printf '%s' "$RESP" | jq -r '.ts')"
 printf 'ts=%s channel=%s user=%s\n' "$TS" "$CHANNEL" "$USER_ID"
 PERMALINK="$(slack_permalink "$CHANNEL" "$TS" || printf '')"
 if [ -n "$PERMALINK" ]; then printf 'permalink=%s\n' "$PERMALINK"; fi
-# A reply into an existing thread prints no claim line at all.
-if [ -n "$THREAD_TS" ]; then exit 0; fi
-if [ "$CLAIM" = true ]; then slack_claim_started_thread "$SELF_DIR" "$CHANNEL" "$TS"; fi
+if [ "$CLAIM" = true ]; then
+  if [ -n "$THREAD_TS" ]; then
+    # The thread Slack actually threaded the reply into, as `reply` does.
+    slack_claim_replied_thread "$SELF_DIR" "$CHANNEL" \
+      "$(printf '%s' "$RESP" | jq -r --arg tt "$THREAD_TS" '.message.thread_ts // $tt')"
+  fi
+  slack_claim_started_thread "$SELF_DIR" "$CHANNEL" "$TS"
+fi
 printf 'claim=skipped\n'

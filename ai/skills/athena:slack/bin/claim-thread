@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# claim-thread <channel_id> <thread_ts>
+# claim-thread <channel_id> <thread_ts> [--already-claimed-ok]
 #
 # Claims a Slack thread for THIS session's project inbox, so the thread's
 # replies are routed back here (ai/contracts/athena-events.md -> *Thread
 # replies route to the thread's claimant*). `post` and `dm` run it on every
-# thread they start; run it by hand to retry a claim that failed, without
-# re-posting.
+# thread they start, and `reply` and `dm --thread_ts` on the thread they reply
+# into (with --already-claimed-ok, below); run it by hand to retry a claim that
+# failed, without re-posting.
 #
 # The inbox is found from the SESSION's project, not the shell's cwd
 # (DND-1163): $CLAUDE_PROJECT_DIR, else the Claude Code process's own cwd
@@ -20,6 +21,16 @@
 # client config and reaches curl only on stdin.
 #
 # thread_ts is the PARENT message's ts, as post/dm print it.
+#
+# Every claim is first-claim-wins on the server: a thread another inbox holds
+# is never taken. --already-claimed-ok (DND-1521; `reply` and `dm --thread_ts`
+# pass it) says the caller wanted the thread only IF it was unclaimed, so the
+# server's already_claimed is an outcome, not a failure:
+#   claim=already_claimed holder=another-inbox inbox=<inbox> source=<source>
+#                                                      (stdout) exit 0
+# `inbox=` there is THIS session's inbox, the one that did not get the thread;
+# the server never names the holder. Without the flag, already_claimed stays
+# claim=FAILED reason=already-claimed, exit 3. Flags may come in any position.
 #
 # Output (source = project-dir | session-process | cwd: where the project came
 # from; project = the directory it names, on a failure once known):
@@ -43,11 +54,26 @@ case "${1:-}" in -h|--help)
   awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${SELF}"; exit 0 ;;
 esac
 
+# Flags in any position; parsed first so every failure line, the
+# missing-library one included, names the positional channel and ts.
+ALREADY_CLAIMED_OK=false
+POSITIONAL=()
+BAD_FLAG=""
+for arg in "$@"; do
+  case "${arg}" in
+    --already-claimed-ok) ALREADY_CLAIMED_OK=true ;;
+    -*) BAD_FLAG="${arg}" ;;
+    *) POSITIONAL+=("${arg}") ;;
+  esac
+done
+CHANNEL="${POSITIONAL[0]:-}"
+TS="${POSITIONAL[1]:-}"
+
 SLACK_LIB="${SELF_DIR}/../lib"
 INBOX_LIB="${SELF_DIR}/../../athena:inbox/lib"
 for f in err.sh names.sh descriptor.sh logchan.sh maildir.sh fence.sh session.sh fs.sh lock.sh inbox.sh; do
   if [ ! -f "${INBOX_LIB}/${f}" ]; then
-    printf 'claim=FAILED reason=mcp-error:missing-library key=?/%s/%s inbox=none\n' "${1:-?}" "${2:-?}" >&2
+    printf 'claim=FAILED reason=mcp-error:missing-library key=?/%s/%s inbox=none\n' "${CHANNEL:-?}" "${TS:-?}" >&2
     printf 'Fix: athena:inbox is not beside athena:slack (%s/%s is missing); both skills ship together from ~/dev/custom/ai/skills.\n' "${INBOX_LIB}" "${f}" >&2
     exit 3
   fi
@@ -57,8 +83,6 @@ done
 # shellcheck source=/dev/null
 . "${SLACK_LIB}/claim.sh"
 
-CHANNEL="${1:-}"
-TS="${2:-}"
 TEAM="?"
 INBOX="none"
 SOURCE=""
@@ -80,7 +104,8 @@ fail() {
   exit "${code}"
 }
 
-[ "$#" -eq 2 ] || fail invalid
+[ -z "${BAD_FLAG}" ] || fail invalid
+[ "${#POSITIONAL[@]}" -eq 2 ] || fail invalid
 [[ "${CHANNEL}" =~ ^[CDG][A-Z0-9]+$ ]] || fail invalid
 [[ "${TS}" =~ ^[0-9]+\.[0-9]+$ ]] || fail invalid
 
@@ -129,6 +154,12 @@ ARGS="$(jq -n -c --arg b "${BOT_ID}" --arg t "${TEAM}" --arg c "${CHANNEL}" \
 MSG="$(mcp_call_tool "${URL}" slack_thread_claim "${ARGS}")"; RC=$?
 [ "${RC}" -eq 0 ] || fail "mcp-error:$(claim_oneline "${MSG}")"
 
-STATUS="$(claim_parse_result "${MSG}")" || fail "${STATUS}" "$(claim_server_words "${MSG}")"
+STATUS="$(claim_parse_result "${MSG}")" || {
+  if [ "${STATUS}" = "already-claimed" ] && [ "${ALREADY_CLAIMED_OK}" = true ]; then
+    printf 'claim=already_claimed holder=another-inbox inbox=%s source=%s\n' "${INBOX}" "${SOURCE}"
+    exit 0
+  fi
+  fail "${STATUS}" "$(claim_server_words "${MSG}")"
+}
 printf 'claim=%s inbox=%s source=%s\n' "${STATUS}" "${INBOX}" "${SOURCE}"
 exit 0

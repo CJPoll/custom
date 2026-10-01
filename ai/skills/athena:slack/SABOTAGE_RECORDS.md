@@ -452,3 +452,43 @@ no-identity`), so that second case is a genuine regression test of
 check -- the same relationship the original bot_id-missing pair (S76's sibling
 case) already has. After each row the suite returned to
 `VERDICT: PASS (180 cases)`.
+
+## A reply claims an unclaimed thread (DND-1521, 2026-10-01)
+
+`reply` and `dm --thread_ts` now claim the thread they reply into, only if it
+is unclaimed. `claim-thread --already-claimed-ok` turns the server's
+`already_claimed` into an exit-0 outcome, and a failed claim never fails a
+reply.
+
+- **Code under test:** `bin/reply`, `bin/dm`, `bin/claim-thread`,
+  `lib/slack.sh` (`slack_claim_replied_thread`).
+- **Suite run:** `bash test/self-test.sh` (athena:slack).
+- **Red (unfixed code):** `VERDICT: FAIL (12 of 211 cases)`, among them
+  `FAIL  reply: claims the unclaimed parent thread (channel, thread_ts) for
+  this inbox, exit 0` with `rc=0 out='ts=1790.7 channel=CFAKE00001
+  thread_ts=1790.5' err='' args=` (no claim call at all).
+- **Baseline (fixed):** `VERDICT: PASS (211 cases)`.
+- **Runner:** one mutation at a time, an exact-anchor Python replace asserted
+  to occur exactly once, full suite, the original text written back.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S82 | `reply` never calls `slack_claim_replied_thread` | 5 | `FAIL reply: claims the unclaimed parent thread ...` / `... another inbox holds ...` / `... already_yours ...` / `... a failed claim ...` / `... undocumented code (1) ...` |
+| S83 | `reply` claims its own new ts instead of the parent `thread_ts` | 1 | `FAIL reply: claims the unclaimed parent thread (channel, thread_ts) for this inbox, exit 0` |
+| S84 | `claim-thread` parses `--already-claimed-ok` but ignores it | 4 | `FAIL claim-thread '--already-claimed-ok D0DMCHAN 1.2': ...` / `FAIL claim-thread 'D0DMCHAN 1.2 --already-claimed-ok': ...` / `FAIL reply: a thread another inbox holds ...` / `FAIL dm --thread_ts: a thread another inbox holds ...` |
+| S85 | `slack_claim_replied_thread` exits 3 on a failed claim | 1 | `FAIL reply: a failed claim -> claim=FAILED + Fix: on stderr, exit 0 (the reply is posted), posted once` |
+| S86 | `dm --thread_ts` claims the reply's own ts | 1 | `FAIL dm --thread_ts: claims the parent thread (D0PENED 1790.5), claim=claimed, exit 0` |
+| S87 | `slack_claim_replied_thread` drops `--already-claimed-ok` | 2 | `FAIL reply: a thread another inbox holds ...` / `FAIL dm --thread_ts: a thread another inbox holds ...` |
+| S88 | `claim-thread` silently ignores an unknown flag | 1 | `FAIL claim-thread: an unknown flag -> exit 2 reason=invalid, no call` |
+
+After each row the suite returned to `VERDICT: PASS (211 cases)`.
+
+Review round (code-reviewer nits): `reply` and `dm --thread_ts` claim the
+response's `message.thread_ts` when Slack returns one, and the reply parser
+got its own cases (`--` text, stdin, `#name`, a 4th positional, `--` before
+the thread_ts). Baseline `VERDICT: PASS (219 cases)`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S89 | `reply` claims the argument, ignoring `message.thread_ts` | 1 | `FAIL reply: claims the response's message.thread_ts (1790.1), not the argument (1790.5)` |
+| S90 | `reply`'s `--` branch drops its "two positionals first" check | 0 | survived: the post-loop `[ "$NPOS" -ge 2 ] \|\| usage` already refuses `reply C -- text`, so the in-branch check was redundant and was removed |
