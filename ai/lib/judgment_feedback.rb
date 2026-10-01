@@ -33,9 +33,13 @@ module JudgmentFeedback
   # A time with a zone, as the server's cursor prints it (fraction optional).
   TIME = /\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|[+-]\d\d:\d\d)\z/
 
-  # Fields a row carries that hold text: the receiver's note and the request
-  # Jev was sent. Printed only with --with-payloads.
-  TEXT_FIELDS = %w[note request].freeze
+  # The row fields printed by default: ids, names, answers, times and counts
+  # (gen_saas FeedbackWire.row/1). The note and the request Jev was sent are
+  # printed only with --with-payloads, and so is any field the server adds
+  # later: an allowlist, so new text is never printed by default.
+  PRINTED_FIELDS = %w[id cursor call_id use_case question_set_version model content_domain subject_ref
+                      answers called_at signal strength correction reporter session_label
+                      payload_state reported_at].freeze
 
   module_function
 
@@ -177,24 +181,41 @@ module JudgmentFeedback
 
   # ── pages ─────────────────────────────────────────────────────────────────
 
-  # page(raw) -> {rows:, has_more:, next_cursor:}, or UnreadableAnswer. Every
-  # row must carry a uuid id and a readable cursor.
-  def page(raw)
+  # page(raw, limit:, after:) -> {rows:, has_more:, next_cursor:}, or
+  # UnreadableAnswer. The server is held to its own paging rules
+  # (FeedbackWire.page/3), because a page that breaks one skips rows with no
+  # error: every row carries a uuid id and a readable cursor; rows ascend,
+  # strictly after the cursor asked for; has_more is true exactly when the
+  # page is full; a non-empty page's next_cursor is its last row's cursor.
+  def page(raw, limit:, after:)
     doc = parse_object(raw)
     rows = doc["feedback"]
     raise UnreadableAnswer, "feedback is not a list" unless rows.is_a?(Array)
     raise UnreadableAnswer, "count #{doc['count'].inspect} but #{rows.size} rows" unless doc["count"] == rows.size
     raise UnreadableAnswer, "has_more is not true or false" unless [true, false].include?(doc["has_more"])
+    raise UnreadableAnswer, "has_more #{doc['has_more']} for #{rows.size} rows at limit #{limit}" unless doc["has_more"] == (rows.size >= limit)
 
-    rows.each_with_index do |row, i|
-      raise UnreadableAnswer, "row #{i} is not an object" unless row.is_a?(Hash)
-      raise UnreadableAnswer, "row #{i} has no uuid id" unless UUID.match?(row["id"].to_s)
-      raise UnreadableAnswer, "row #{i} has no readable cursor" unless cursor(row["cursor"])
-    end
+    last = check_rows(rows, after)
     nxt = doc["next_cursor"]
     raise UnreadableAnswer, "next_cursor is not a cursor" unless nxt.nil? || cursor(nxt)
+    raise UnreadableAnswer, "next_cursor is not the last row's cursor" if last && (nxt.nil? || cursor(nxt) != last)
 
     { rows: rows, has_more: doc["has_more"], next_cursor: nxt && cursor(nxt) }
+  end
+
+  # check_rows(rows, after) -> the last row's cursor (nil for no rows), or
+  # UnreadableAnswer.
+  def check_rows(rows, after)
+    rows.each_with_index.reduce(after) do |prev, (row, i)|
+      raise UnreadableAnswer, "row #{i} is not an object" unless row.is_a?(Hash)
+      raise UnreadableAnswer, "row #{i} has no uuid id" unless UUID.match?(row["id"].to_s)
+
+      cur = cursor(row["cursor"])
+      raise UnreadableAnswer, "row #{i} has no readable cursor" unless cur
+      raise UnreadableAnswer, "row #{i} is not after #{i.zero? ? 'the cursor asked for' : 'the row before it'}" if prev && !after?(cur, prev)
+
+      cur
+    end.then { |last| rows.empty? ? nil : last }
   end
 
   # final_cursor(start, rows) -> the cursor to resume from: the last row read,
@@ -234,13 +255,15 @@ module JudgmentFeedback
   def redact(row, with_payloads)
     return row if with_payloads
 
-    out = row.reject { |k, _| TEXT_FIELDS.include?(k) }
+    out = row.slice(*PRINTED_FIELDS)
     out["has_note"] = row["note"].is_a?(String) && !row["note"].empty?
     out
   end
 
-  # The human line for one row: ids, names and counts only.
+  # The human line for one row: ids and names only, one line whatever the
+  # server sent (a control character prints as a space).
   def row_line(row)
-    %w[id use_case question_set_version signal strength].map { |k| row[k] || "-" }.join(" ") + " call #{row['call_id'] || '-'}"
+    field = ->(k) { row[k].nil? ? "-" : row[k].to_s.gsub(/[[:cntrl:]]/, " ") }
+    %w[id use_case question_set_version signal strength].map(&field).join(" ") + " call #{field.call('call_id')}"
   end
 end

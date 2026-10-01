@@ -150,21 +150,39 @@ ruby_eq "recorded: an answer missing a field is unreadable" \
   'begin; JF.recorded_line(%({"status":"recorded","call_id":"'"${U1}"'","replaced":false})); rescue JF::UnreadableAnswer => e; "UnreadableAnswer: " + e.message; end'
 
 ROW1="{\"id\":\"${U1}\",\"cursor\":\"2026-10-01T07:00:00.000001Z,${U1}\",\"call_id\":\"${U3}\",\"note\":\"SYNTHETIC-NOTE\",\"request\":{\"state\":\"SYNTHETIC-PAYLOAD\"}}"
+C1="2026-10-01T07:00:00.000001Z,${U1}"
+ROW2="{\"id\":\"${U2}\",\"cursor\":\"2026-10-01T07:00:00.000002Z,${U2}\"}"
+unreadable() { ruby_eq "$1" "UnreadableAnswer: $2" "begin; $3; rescue JF::UnreadableAnswer => e; \"UnreadableAnswer: \" + e.message; end"; }
 ruby_eq "page: a well-formed page reads" \
-  "1|false|2026-10-01T07:00:00.000001Z,${U1}" \
-  'p = JF.page(%({"feedback":['"${ROW1}"'],"count":1,"has_more":false,"next_cursor":"2026-10-01T07:00:00.000001Z,'"${U1}"'"})); [p[:rows].size, p[:has_more], JF.encode(p[:next_cursor])].join("|")'
-ruby_eq "page: count disagreeing with the rows is unreadable" \
-  "UnreadableAnswer: count 2 but 1 rows" \
-  'begin; JF.page(%({"feedback":['"${ROW1}"'],"count":2,"has_more":false,"next_cursor":null})); rescue JF::UnreadableAnswer => e; "UnreadableAnswer: " + e.message; end'
-ruby_eq "page: a row with no id is unreadable" \
-  "UnreadableAnswer: row 0 has no uuid id" \
-  'begin; JF.page(%({"feedback":[{"cursor":"x"}],"count":1,"has_more":false,"next_cursor":null})); rescue JF::UnreadableAnswer => e; "UnreadableAnswer: " + e.message; end'
-ruby_eq "page: no has_more is unreadable, never read as the last page" \
-  "UnreadableAnswer: has_more is not true or false" \
-  'begin; JF.page(%({"feedback":[],"count":0,"next_cursor":null})); rescue JF::UnreadableAnswer => e; "UnreadableAnswer: " + e.message; end'
+  "1|false|${C1}" \
+  'p = JF.page(%({"feedback":['"${ROW1}"'],"count":1,"has_more":false,"next_cursor":"'"${C1}"'"}), limit: 2, after: nil); [p[:rows].size, p[:has_more], JF.encode(p[:next_cursor])].join("|")'
+unreadable "page: count disagreeing with the rows is unreadable" "count 2 but 1 rows" \
+  'JF.page(%({"feedback":['"${ROW1}"'],"count":2,"has_more":false,"next_cursor":null}), limit: 5, after: nil)'
+unreadable "page: a row with no id is unreadable" "row 0 has no uuid id" \
+  'JF.page(%({"feedback":[{"cursor":"x"}],"count":1,"has_more":false,"next_cursor":null}), limit: 5, after: nil)'
+unreadable "page: no has_more is unreadable, never read as the last page" "has_more is not true or false" \
+  'JF.page(%({"feedback":[],"count":0,"next_cursor":null}), limit: 5, after: nil)'
+unreadable "page: a full page that says it is the last is unreadable (it would truncate the read)" "has_more false for 1 rows at limit 1" \
+  'JF.page(%({"feedback":['"${ROW1}"'],"count":1,"has_more":false,"next_cursor":"'"${C1}"'"}), limit: 1, after: nil)'
+unreadable "page: a short page that says there is more is unreadable" "has_more true for 1 rows at limit 2" \
+  'JF.page(%({"feedback":['"${ROW1}"'],"count":1,"has_more":true,"next_cursor":"'"${C1}"'"}), limit: 2, after: nil)'
+unreadable "page: a next_cursor ahead of the last row would skip rows: unreadable" "next_cursor is not the last row's cursor" \
+  'JF.page(%({"feedback":['"${ROW1}"'],"count":1,"has_more":true,"next_cursor":"2026-10-01T09:00:00.000000Z,'"${U1}"'"}), limit: 1, after: nil)'
+unreadable "page: has_more with no next_cursor is unreadable" "next_cursor is not the last row's cursor" \
+  'JF.page(%({"feedback":['"${ROW1}"'],"count":1,"has_more":true,"next_cursor":null}), limit: 1, after: nil)'
+unreadable "page: rows out of order are unreadable" "row 1 is not after the row before it" \
+  'JF.page(%({"feedback":['"${ROW2}"','"${ROW1}"'],"count":2,"has_more":false,"next_cursor":"'"${C1}"'"}), limit: 5, after: nil)'
+unreadable "page: a row at or behind the cursor asked for is unreadable" "row 0 is not after the cursor asked for" \
+  'JF.page(%({"feedback":['"${ROW1}"'],"count":1,"has_more":false,"next_cursor":"'"${C1}"'"}), limit: 5, after: JF.parse_after("'"${C1}"'"))'
 ruby_eq "redact: note and request are dropped, has_note said" \
   "call_id,cursor,has_note,id|true" \
   'r = JF.redact(JSON.parse(%('"${ROW1}"')), false); [r.keys.sort.join(","), r["has_note"]].join("|")'
+ruby_eq "redact: only the listed fields print; a field the server adds later does not" \
+  "call_id,cursor,has_note,id,use_case" \
+  'JF.redact({"id"=>"x","cursor"=>"c","call_id"=>"y","use_case"=>"u","summary"=>"NEW TEXT FIELD"}, false).keys.sort.join(",")'
+ruby_eq "row line: a control character in a server string is not printed" \
+  "${U1} finding triage - - - call -" \
+  'JF.row_line({"id"=>"'"${U1}"'","use_case"=>"finding\ntriage"})'
 ruby_eq "redact: --with-payloads keeps them" \
   "SYNTHETIC-NOTE" \
   'JF.redact(JSON.parse(%('"${ROW1}"')), true)["note"]'
@@ -250,8 +268,8 @@ eq "--correct with no value is usage" "${RC}" "2"
 run record --call "${U1}" --note-file "${TMP}/absent"
 eq "a missing --note-file is usage" "${RC}" "2"
 has "...with Fix:" "${ERR}" "Fix: "
-run list --overlap-s 60
-eq "--overlap-s without --after is usage" "${RC}" "2"
+run list --overlap-s 3601
+eq "--overlap-s over an hour is usage" "${RC}" "2"
 run list --limit 201
 eq "--limit over 200 is usage" "${RC}" "2"
 eq "no usage error sent a request" "$(requests)" "${n}"
@@ -299,6 +317,10 @@ eq "422 invalid exits 4 and names the field" "${RC}|$(head -n 1 <<<"${ERR}")" "4
 spec post.json '{"status":500,"raw":"oops"}'
 run record --call "${U1}"
 eq "500 exits 3 SERVER FAILED" "${RC}|$(head -n 1 <<<"${ERR}" | cut -d. -f1)" "3|SERVER FAILED: HTTP 500"
+spec post.json '{"status":403,"body":{"error":"forbidden","fix":"Fix: x"}}'
+run record --call "${U1}"
+eq "403 exits 3 SERVER FAILED (the token), never a refusal to work around" "${RC}|$(head -n 1 <<<"${ERR}" | cut -d'(' -f1)" "3|SERVER FAILED: HTTP 403 "
+has "...naming the owner-issued token" "${ERR}" "owner-issued"
 spec post.json '{"status":200,"raw":"not json"}'
 run record --call "${U1}"
 eq "a 200 that is not JSON exits 3 UNREADABLE SERVER ANSWER" "${RC}|$(head -n 1 <<<"${ERR}" | cut -d: -f1)" "3|UNREADABLE SERVER ANSWER"
@@ -378,6 +400,22 @@ reset_gets
 page 1 "{\"status\":200,\"body\":{\"feedback\":[],\"count\":0,\"has_more\":false,\"next_cursor\":\"2026-10-01T06:59:30.000000Z,${ZERO}\"}}"
 run list --json --after "${T2},${U2}" --overlap-s 60
 eq "an empty overlap read keeps the reader's own cursor, never the stepped-back one" "${RC}|$(printf '%s\n' "${OUT}" | tail -n 1 | jq -c '{next_cursor, complete, rows}')" "0|{\"next_cursor\":\"${T2},${U2}\",\"complete\":true,\"rows\":0}"
+
+# A first run (no cursor) then a second: the second re-reads the first's
+# last minute and must drop every row of it by id (review round, must-fix 1).
+reset_gets
+page 1 "{\"status\":200,\"body\":{\"feedback\":[$(row "${U1}" "${T1}"),$(row "${U2}" "${T2}")],\"count\":2,\"has_more\":true,\"next_cursor\":\"${T2},${U2}\"}}"
+page 2 "{\"status\":200,\"body\":{\"feedback\":[],\"count\":0,\"has_more\":false,\"next_cursor\":\"${T2},${U2}\"}}"
+run list --overlap-s 60 --limit 2 --json
+eq "a first run with --overlap-s and no --after reads from the oldest row" "${RC}|$(sed -n "$(( $(requests) - 1 ))p" "${TMP}/server.log" | jq -c '.query')" "0|{\"limit\":\"2\"}"
+FIRST_FINAL="$(printf '%s\n' "${OUT}" | tail -n 1)"
+eq "...and its seen tail holds the rows of its last minute" "$(jq -c '{next_cursor, seen_tail}' <<<"${FIRST_FINAL}")" "{\"next_cursor\":\"${T2},${U2}\",\"seen_tail\":[\"${U1}\",\"${U2}\"]}"
+jq -r '.seen_tail[]' <<<"${FIRST_FINAL}" > "${TMP}/seen2.txt"
+reset_gets
+page 1 "{\"status\":200,\"body\":{\"feedback\":[$(row "${U1}" "${T1}"),$(row "${U2}" "${T2}"),$(row "${U3}" "${T3}")],\"count\":3,\"has_more\":false,\"next_cursor\":\"${T3},${U3}\"}}"
+run list --seen-file "${TMP}/seen2.txt" --overlap-s 60 --json --after "$(jq -r '.next_cursor' <<<"${FIRST_FINAL}")"
+eq "the second run (flags in another order) drops both re-read rows and keeps the new one" "${RC}|$(printf '%s\n' "${OUT}" | jq -r '.id // "final"' | tr '\n' ' ')" "0|${U3} final "
+eq "...counting them as deduped" "$(printf '%s\n' "${OUT}" | tail -n 1 | jq -c '{rows, deduped}')" '{"rows":1,"deduped":2}'
 
 reset_gets
 page 1 "{\"status\":200,\"body\":{\"feedback\":[$(row "${U1}" "${T1}")],\"count\":1,\"has_more\":false,\"next_cursor\":\"${T1},${U1}\"}}"

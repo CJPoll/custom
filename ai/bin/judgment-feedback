@@ -63,7 +63,9 @@ USAGE = <<~EOF
              --overlap-s N re-read N seconds behind --after (0 to 3600). Rows
                         commit with the time their transaction began, so a row
                         can land behind a cursor already passed; the overlap
-                        finds it. Pair it with --seen-file.
+                        finds it. Pair it with --seen-file. Pass it on
+                        every run, the first (no --after) included: it also
+                        sizes seen_tail, which the next run drops by id.
              --seen-file f ids already handled, one per line (the previous
                         run's seen_tail). A row with one of them is dropped and
                         counted as deduped.
@@ -193,7 +195,7 @@ module Manager
     deduped = rows.size - kept.size
     if failure
       err.puts failure[1]
-      out.puts(opts["--json"] ? JSON.generate("next_cursor" => nil, "complete" => false, "rows" => kept.size, "deduped" => deduped, "reason" => reason_of(failure[1])) : "INCOMPLETE: #{kept.size} rows read before the failure; keep the old cursor.")
+      out.puts(opts["--json"] ? JSON.generate("next_cursor" => nil, "complete" => false, "rows" => kept.size, "deduped" => deduped, "reason" => reason_of(failure[1])) : "INCOMPLETE (#{reason_of(failure[1])}): #{kept.size} rows, #{deduped} deduped read before the failure; keep the old cursor.")
       return failure[0]
     end
     final = JF.final_cursor(view.start, rows)
@@ -216,7 +218,6 @@ module Manager
       usage!("--limit must be 1 to #{JF::MAX_LIMIT}", "ask for 1 to #{JF::MAX_LIMIT} rows per page") unless (1..JF::MAX_LIMIT).cover?(@limit)
       @overlap = opts.fetch("--overlap-s", 0)
       usage!("--overlap-s must be 0 to #{JF::MAX_OVERLAP_S}", "a minute (60) is ample") unless (0..JF::MAX_OVERLAP_S).cover?(@overlap)
-      usage!("--overlap-s needs --after", "pass the cursor to re-read behind") if opts["--overlap-s"] && !opts["--after"]
       @start = opts["--after"] && JF.parse_after(opts["--after"])
       @seen = opts["--seen-file"] ? JF.seen_ids(Effects.read_file("--seen-file", opts["--seen-file"])) : Set.new
     end
@@ -251,7 +252,7 @@ module Manager
       failure = JF.http_failure(resp)
       raise Failure.new(*failure) if failure
 
-      JF.page(resp[:body])
+      JF.page(resp[:body], limit: @limit, after: cur)
     end
   end
 end

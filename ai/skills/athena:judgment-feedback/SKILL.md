@@ -79,16 +79,19 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
      --overlap-s 60 --seen-file "$S/judgment-feedback-seen.txt" > "$S/runs/<run>-feedback.jsonl"
    ```
 
-   On a first run (no cursor file) leave out `--after`, `--overlap-s` and
-   `--seen-file`: it reads everything kept. A cursor file with no seen file
-   is exit 2: create an empty seen file once, and say so in the journal.
-   The overlap re-reads a minute behind the cursor, because a row is stamped
-   when its transaction began and can commit behind a cursor already passed;
-   the seen file drops the rows the last run handled, by id. Exit 3 or 4, or
-   a last line with `"complete": false`, is **could not measure**: report
-   it, keep the old cursor and seen file, and act on nothing from this run's
-   partial read. The rows carry ids, answers and counts; the note and the
-   request are left out (`has_note` says whether there is a note).
+   On a first run (no cursor file) leave out `--after` and `--seen-file`
+   and keep `--overlap-s 60`: it reads everything kept, and the overlap
+   still sizes the `seen_tail` the next run drops. A cursor file with no
+   seen file is exit 2: never create an empty seen file to get past it (the
+   rows of the last minute would be handled twice); report it as could not
+   measure. The overlap re-reads a minute behind the cursor, because a row
+   is stamped when its transaction began and can commit behind a cursor
+   already passed; the seen file drops the rows the last run handled, by
+   id. Any non-zero exit, or a last line with `"complete": false`, is
+   **could not measure**: report it, keep the old cursor and seen file, and
+   act on nothing from this run's partial read. The rows carry ids, answers
+   and counts; the note and the request are left out (`has_note` says
+   whether there is a note).
 3. **Cluster** strong rows by (use case, question-set version, Jev's label →
    the corrected label). Weak rows (`owner_override`) are context for a
    cluster, never a cluster on their own. A row with no correction joins its
@@ -97,9 +100,10 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
    distinct subjects. One report is watched, not actioned, as for any
    shipwright pattern.
 5. **Diagnose from the payloads, in session only.** Read the qualifying rows'
-   `request` (what Jev was sent) and answers: rerun the same `list` with
-   `--with-payloads` and read its output in session, never into a file the
-   journal or a commit carries. Ask what in the request misled
+   `request` (what Jev was sent) and answers: rerun `list` with the same
+   `--after`, no `--seen-file`, and `--with-payloads`, and read only the
+   qualifying ids' rows in session, never into a file the journal or a
+   commit carries. Ask what in the request misled
    it: a criterion that does not separate the two labels, missing context, a
    field cut by its cap, an option the owner does not use, a label leak in the
    input. Brief an `athena-architect` when the change carries design weight

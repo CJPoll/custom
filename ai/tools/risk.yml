@@ -161,6 +161,10 @@ tools:
   # confirmation. No forge, tracker, server or remote write. --confirm READS
   # Slack as Athena's bot for conversation context (DND-1047); it never posts.
   judgment-label:          { class: idempotent, reason: labels }
+  # judgment-feedback (DND-1466): `record` writes a judgment_feedback row on
+  # the Athena server (it counts in the owner's wrong-rate); `list` only
+  # reads. External state.
+  judgment-feedback:       { class: destructive, reason: judgments }
   # triage-corpus (DND-714) only READS Notion (ai/lib/notion_read.rb refuses
   # any other request) and writes machine-local snapshot/label/corpus files; a
   # rebuild from one snapshot is byte-identical. No forge, tracker or server write.
