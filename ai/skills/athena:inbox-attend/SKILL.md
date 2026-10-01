@@ -190,8 +190,9 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
     to answer. If the root was posted by another session (its session-name
     prefix), the reply is that session's: forward it there rather than
     answering it yourself. A note you post in the thread about the forward
-    never claims it (`athena:slack` → *Forwarding a misroute*). Measured: Cody's "OK, done. Let's test that
-    here" under the harness session's DND-299 post read as a plain walt_ui DM.
+    uses `reply --no-claim` (`athena:slack` → *Forwarding a misroute*).
+    Measured: Cody's "OK, done. Let's test that here" under the harness
+    session's DND-299 post read as a plain walt_ui DM.
   - **Read the whole thread fresh, right before composing.** `read-thread` the
     conversation immediately before you write the reply, not only on the wake.
     Check the draft against the newest replies (`athena:slack` → *Etiquette*).
@@ -211,9 +212,11 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
     output and never resend. If you tell the owner in the thread where it
     went, post that note with `athena:slack/bin/reply <channel> <thread_ts>
     <text> --reroute-of <event_id>`, which never claims the thread
-    (`athena:slack` → *Forwarding a misroute*). A plain `reply` claims it, and
-    the owner's follow-ups then come to you instead of the session you
-    forwarded to.
+    (`athena:slack` → *Forwarding a misroute*). A plain `reply` claims an
+    unclaimed thread, and the owner's follow-ups then come to you instead of
+    the session you forwarded to. A line with `route: topic_judgment` in
+    mode `on` already has its thread claimed for you: forward each follow-up
+    as it arrives (that section says why).
   - **The owner says "wrong session" in the thread.** Record it with the
     `judgment_feedback` tool (`use_case: slack_routing`, `subject_ref:
     <event_id>`), the session Cody named as `correction: {"session": <label>}`

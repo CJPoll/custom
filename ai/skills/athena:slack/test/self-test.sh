@@ -1886,7 +1886,8 @@ done
 #      event_id it passed to session_send as reroute_of_event_id) implies no
 #      claim, in either position: claim=skipped, no MCP call, posted once.
 #      Claiming it would route the owner's follow-ups to the forwarder.
-for args in "--reroute-of EVFAKE00001 ${ENG_CHANNEL} 1790.5 forwarded" "${ENG_CHANNEL} 1790.5 forwarded --reroute-of EVFAKE00001"; do
+for args in "--reroute-of EVFAKE00001 ${ENG_CHANNEL} 1790.5 forwarded" "${ENG_CHANNEL} 1790.5 forwarded --reroute-of EVFAKE00001" \
+            "${ENG_CHANNEL} 1790.5 forwarded --no-claim --reroute-of EVFAKE00001"; do
   setup_case; claim_setup
   fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790.17\",\"channel\":\"${ENG_CHANNEL}\"}"
   # shellcheck disable=SC2086

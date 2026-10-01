@@ -4238,7 +4238,9 @@ follow it.
   <event_id>`, the note a session posts when it forwards a misrouted
   conversation (DND-1605, `athena:slack` → *Forwarding a misroute*): a
   forwarder that claimed the thread would hear the owner's follow-ups, and
-  the session it forwarded to would not.
+  the session it forwarded to would not. It keeps an unclaimed thread
+  unclaimed and cannot free one the router already claimed (*The router
+  claims a root it routed by topic*, below).
 
   **Later (2026-10-01, DND-1521, DND-1539):** this read "The harness claims
   only threads it starts … It never claims a thread it merely replies in", and
@@ -4294,8 +4296,8 @@ follow it.
   - **The server folds a failed claim into `skipped`; the harness does not.**
     The harness bins (`athena:slack` → *Thread replies come back to the
     session that started the thread*) print `claim=skipped` only for
-    `--no-claim` (or `reply --reroute-of`, which implies it), and a failed claim as `claim=FAILED reason=<token>` with a
-    `Fix:`. So server `skipped`/`opted_out` is harness `claim=skipped`;
+    `--no-claim` (or `reply --reroute-of`, which implies it), and a failed
+    claim as `claim=FAILED reason=<token>` with a `Fix:`. So server `skipped`/`opted_out` is harness `claim=skipped`;
     server `skipped` with any other reason is harness `claim=FAILED`; and
     `claimed` and `already_yours` mean the same on both sides.
     `already_claimed` depends on the harness caller: `reply` and

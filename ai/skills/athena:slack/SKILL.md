@@ -81,7 +81,7 @@ can thread onto it.
 |---|---|
 | `whoami` | `auth.test` — prints user, user_id, bot_id, team. Which identity is this? |
 | `post <channel\|#name> [text] [--blocks JSON] [--no-claim]` | New top-level message. Text from the argument or stdin. Then **claims the thread** it started (`claim=...` line). Exit **3** = posted but NOT claimed: do not re-post; fix the cause and run `claim-thread`. See *Thread replies come back to the session that started the thread*. |
-| `reply <channel> <thread_ts> [text] [--broadcast] [--no-claim] [--reroute-of <event_id>]` | Threaded reply. `thread_ts` is the **parent** ts. Then claims the thread **if it is unclaimed** (`claim=...` line); every claim outcome exits 0, because the reply is posted. `--reroute-of` marks the note a forwarder posts, and never claims (*Forwarding a misroute*). |
+| `reply <channel> <thread_ts> [text] [--broadcast] [--no-claim] [--reroute-of <event_id>]` | Threaded reply. `thread_ts` is the **parent** ts. Then claims the thread **if it is unclaimed** (`claim=...` line); every claim outcome exits 0, because the reply is posted. `--reroute-of` is for the note a forwarder posts: it implies `--no-claim` (*Forwarding a misroute*). |
 | `dm <user_id> [text] [--thread_ts TS] [--no-claim]` | `conversations.open` then post. User **id**, not name. A new DM claims its thread like `post` (exit 3 = posted, not claimed); `--thread_ts` replies into an existing thread and claims it only if unclaimed, like `reply` (exit 0). |
 | `claim-thread <channel_id> <thread_ts> [--already-claimed-ok]` | Claims a thread for this session's project Slack inbox, so its replies route here. `post`/`dm`/`reply` run it; run it by hand to retry a failed claim without re-posting. Exit 0 claimed / already yours, 3 failed (`claim=FAILED reason=...` + `Fix:`), 2 a malformed channel or ts or an unknown flag. `--already-claimed-ok` makes another inbox's thread `claim=already_claimed`, exit 0. |
 | `topic-route list [--bot-id B...]`, `topic-route put <label> <agent_instance_id> [--disabled] [--bot-id B...]` | Reads or sets the owner's Slack **topic routes**: which `<project>-slack.jsonl` inbox gets the conversations the topic judgment labels `walt_ui`, `harness`, `gen_saas` or `other`. Calls the athena MCP `slack_topic_route_list` / `slack_topic_route_put`. `list` prints one `label= inbox= machine= name= enabled= live= instance=` line (`machine=` is the machine id, an address `send-mail --to-project <project>@<machine>` accepts; `name=` is its quoted display name) per route, then `count=<n> app=<A...>` (always, even at 0). `put` prints `put label= inbox= enabled=`. A server refusal exits 3 with its words and its `Fix:` on a `server:` line; a usage error exits 2 and makes no call. **A put changes where the owner's Slack conversations go: list it in the owner digest** (`~/.claude/CLAUDE.md` → *Owner approval policy*, a judgement call). There is no delete; `--disabled` reverses a put. `agent_instance_id` comes from `list`'s `instance=` or the MCP `list_my_machines`. |
@@ -209,8 +209,10 @@ messages (Block Kit)* below).
 A session that forwards a conversation that is not its own never claims the
 thread (DND-1605). A claim cannot be released, so the forwarder would hear
 every follow-up the owner writes there, and the session it forwarded to would
-hear none of them. The owner decided Jev does not re-judge replies in a
-claimed thread, so nothing downstream corrects it.
+hear none of them. A thread reply follows a live claim, and is not judged
+again (`ai/contracts/athena-events.md` → *Thread replies route to the
+thread's claimant* → *Routing*; the owner kept it so on DND-1605), so nothing
+downstream corrects it.
 
 1. Forward the conversation with the athena MCP `session_send`, passing
    `reroute_of_event_id: <event_id>` (`athena:inbox-attend` → *A
@@ -218,13 +220,27 @@ claimed thread, so nothing downstream corrects it.
 2. If you post a note in the owner's thread to say where it went, post it
    with `reply <channel> <thread_ts> <text> --reroute-of <event_id>`, the same
    `event_id`. `--reroute-of` implies `--no-claim` and prints
-   `claim=skipped`. A missing or empty `event_id` is exit 2, and nothing is
-   sent. Through the MCP instead, pass `claim: false` to
-   `mcp__athena__slack_post`; it has no forward marker of its own.
+   `claim=skipped`. The `event_id` is required but not sent: it makes the
+   command say it is a forward note. A missing, empty or flag-shaped
+   `event_id` is exit 2, and nothing is sent. A forward with no
+   `reroute_of_event_id` (a reply under another session's root, say) posts
+   its note with `--no-claim`. Through the MCP instead, pass `claim: false`
+   to `mcp__athena__slack_post`; it has no forward marker of its own.
 
 The session that receives the forward claims the thread when it first replies
 there (*A reply claims an unclaimed thread* above). Never post the note with a
 plain `reply` or `dm --thread_ts`: each claims an unclaimed thread.
+
+**This keeps an unclaimed thread unclaimed; it cannot free a claimed one.** A
+root the router delivered by topic in mode `on` (the line's `topic.route` is
+`topic_judgment` or `session_mention`) arrives with its thread already claimed
+for your inbox (`ai/contracts/athena-events.md` → *The router claims a root it
+routed by topic*). There the note changes nothing: the owner's follow-ups
+still come to you, and the receiver's first reply reads
+`claim=already_claimed`. Forward each follow-up with `session_send` as it
+arrives, and say in the note that the thread stays with you. The fix applies
+in full to a root that came by the channel route (`channel_route`, or a line
+with no `topic`), which is the measured case.
 
 ## The thinking status
 

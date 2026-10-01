@@ -31,7 +31,9 @@
 # <event_id> is the one it passed to session_send as reroute_of_event_id. It
 # implies --no-claim and prints claim=skipped: a forwarder that claimed the
 # thread would get the owner's follow-ups instead of the session it forwarded
-# to. A missing or empty <event_id> is a usage error, and nothing is sent.
+# to. The <event_id> is required but not sent anywhere: it makes the command
+# say it is a forward note. A missing, empty or flag-shaped <event_id> is a
+# usage error, and nothing is sent.
 #
 # The thread claimed is the one Slack actually threaded the reply into (the
 # response's message.thread_ts), falling back to the thread_ts argument when
