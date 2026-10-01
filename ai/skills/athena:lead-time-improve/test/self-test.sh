@@ -49,9 +49,12 @@ commit() {
   GIT_COMMITTER_DATE="$1" GIT_AUTHOR_DATE="$1" "${G[@]}" commit -q --allow-empty -m "$2" ${3:+-m "$3"} \
     && "${G[@]}" rev-parse HEAD
 }
-LANDING="$(commit 2026-09-01T00:00:00Z "fixture: landing")"
-OTHER="$(commit 2026-09-01T00:01:00Z "fixture: other")"
-NEWSHA="$(commit 2026-09-01T00:02:00Z "fixture: not ingested yet")"
+# Each experiment commit carries the Lead-time-experiment trailer for every
+# repo/phase/metric this suite records it on (DND-1529).
+tr() { printf 'Lead-time-experiment: %s\n' "$@"; }
+LANDING="$(commit 2026-09-01T00:00:00Z "fixture: landing" "$(tr "custom verify phase" "custom implement na_share")")"
+OTHER="$(commit 2026-09-01T00:01:00Z "fixture: other" "$(tr "custom verify phase")")"
+NEWSHA="$(commit 2026-09-01T00:02:00Z "fixture: not ingested yet" "$(tr "custom merge phase" "custom verify phase")")"
 NEVER="$(printf '1%.0s' $(seq 40))"
 [ ${#LANDING} -eq 40 ] && [ ${#OTHER} -eq 40 ] && [ ${#NEWSHA} -eq 40 ] || { echo "FAIL fixture commits"; echo "  Fix: install git"; exit 1; }
 
@@ -198,8 +201,10 @@ eq "record the change" "$(s3 rec verify phase "${OTHER}" change)" "0"
 eq "judge: exit 0" "$(s3 run judge --repo custom)" "0"
 has "a guard worsened by an unrelated revert: REVERT" "$(out)" "custom:verify:${OTHER:0:12} REVERT"
 has "... naming the guard" "$(out)" "reverts 0 -> 1"
+has "... and the trailer line its revert lands with (DND-1529)" "$(out)" 'land the revert with the trailer line `Lead-time-experiment: custom verify phase`'
 eq "re-judge: exit 0" "$(s3 run judge --repo custom)" "0"
 has "the revert is OWED while main lacks it" "$(out)" "REVERT OWED"
+has "... still naming the trailer line" "$(out)" 'land the revert with the trailer line `Lead-time-experiment: custom verify phase`'
 has "... and nothing new is recorded" "$(out)" "0 status row(s) appended"
 eq "a new change on verify is refused while the revert is owed" "$(s3 rec verify phase "${NEWSHA}" change)" "2"
 has "... saying it owes a revert" "$(err)" "owes a revert"
@@ -212,7 +217,7 @@ eq "the phase is free again" "$(s3 rec verify phase "${NEWSHA}" change)" "0"
 echo "== decline"
 # A median-only revert: after-set verify 700 s, windows on the 24th, no revert
 # of anything in either window, so every guard is ok.
-DECL="$(commit 2026-09-24T11:00:00Z "fixture: a fixture fix a revert would delete")"
+DECL="$(commit 2026-09-24T11:00:00Z "fixture: a fixture fix a revert would delete" "$(tr "custom verify phase")")"
 STATE4="${TMP}/state4"
 mkdir -p "${STATE4}"
 /usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE4}/ledger.jsonl" "${DECL}" 700 2026-09-24T00:00:00Z
@@ -274,7 +279,7 @@ eq "... still one declined row" "$(grep -c '"status":"declined"' "${STATE4}/expe
 eq "the phase now admits a new change" "$(s4 rec verify phase "${OTHER}" change)" "0"
 
 echo "== decline refuses a guard-worse revert"
-WORSE="$(commit 2026-09-26T11:00:00Z "fixture: a change whose window saw a revert")"
+WORSE="$(commit 2026-09-26T11:00:00Z "fixture: a change whose window saw a revert" "$(tr "custom verify phase")")"
 commit 2026-09-26T15:00:00Z "Revert \"something else\"" "This reverts commit $(printf '3%.0s' $(seq 40))." >/dev/null
 STATE5="${TMP}/state5"
 mkdir -p "${STATE5}"
@@ -292,9 +297,9 @@ eq "... nothing written" "$(grep -c . "${STATE5}/experiments.jsonl")" "${N5}"
 
 # ── check:<label>: a change judged on its own check's wall (DND-1548) ───────
 echo "== check metric"
-CHK="$(commit 2026-09-28T11:00:00Z "fixture: a one-check fix")"
-CID="custom:verify:${CHK:0:12}"
 WAITL="self-test: fixture/control/wait"
+CHK="$(commit 2026-09-28T11:00:00Z "fixture: a one-check fix" "$(tr "custom verify check:${WAITL}")")"
+CID="custom:verify:${CHK:0:12}"
 STATE6="${TMP}/state6"
 mkdir -p "${STATE6}"
 s6() { LEAD_TIME_STATE_DIR="${STATE6}" LEAD_TIME_EXPERIMENT_NOW=2026-09-29T12:00:00Z "$@"; }
@@ -333,28 +338,34 @@ mkdir -p "${STATE2}"
 eq "record with no main to read: could not look (exit 3)" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/nomain.json" rec verify phase "${LANDING}" change)" "3"
 has "... saying it could not look whether it is on main" "$(err)" "could not look whether"
 eq "record with the repo present" "$(LEAD_TIME_STATE_DIR="${STATE2}" rec verify phase "${LANDING}" change)" "0"
-eq "judge with no main to read: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/nomain.json" run judge --repo custom)" "0"
-has "no keep while reverts could not be read" "$(out)" "custom:verify:${SHORT} PENDING"
-has "... and it says the guard is unmeasured" "$(out)" "reverts unmeasured"
+# DND-1529: judge reads the harness repo's log for confounders before it
+# would read the reverts; a log it cannot read is exit 3, never "no
+# confounder" (and never a keep while the guards could not be read).
+N2="$(statuses "${STATE2}/experiments.jsonl")"
+eq "regression: judge with no main to read: could not look (exit 3)" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/nomain.json" run judge --repo custom)" "3"
+has "... saying it could not look for confounders in custom's log" "$(err)" "could not look for confounders: custom's log cannot be read"
+has "... never no confounder, with Fix:" "$(err)" "this is not \"no confounder\""
+lacks "... no verdict printed" "$(out)" "KEEP"
+eq "... nothing written" "$(statuses "${STATE2}/experiments.jsonl")" "${N2}"
 
 # ── revert held: a plain revert would delete test additions (DND-1549) ─────
 echo "== revert held"
-# commit_files AT SUBJECT -> stages the work tree, commits, prints the SHA
+# commit_files AT SUBJECT [BODY] -> stages the work tree, commits, prints the SHA
 commit_files() {
-  "${G[@]}" add -A && GIT_COMMITTER_DATE="$1" GIT_AUTHOR_DATE="$1" "${G[@]}" commit -q -m "$2" \
+  "${G[@]}" add -A && GIT_COMMITTER_DATE="$1" GIT_AUTHOR_DATE="$1" "${G[@]}" commit -q -m "$2" ${3:+-m "$3"} \
     && "${G[@]}" rev-parse HEAD
 }
 mkdir -p "${REPO}/ai/x/test" "${REPO}/ai/bin"
 printf 'echo one\necho two\n' >"${REPO}/ai/x/test/foo.sh"
 printf 'echo fixed\n' >"${REPO}/ai/x/fix.sh"
-TADD="$(commit_files 2026-09-30T11:00:00Z "fixture: a fix with its regression test")"
+TADD="$(commit_files 2026-09-30T11:00:00Z "fixture: a fix with its regression test" "$(tr "custom verify phase" "gen_saas verify phase")")"
 printf 'echo tool\n' >"${REPO}/ai/bin/x"
-TBIN="$(commit_files 2026-09-30T11:01:00Z "fixture: a tool-only change")"
+TBIN="$(commit_files 2026-09-30T11:01:00Z "fixture: a tool-only change" "$(tr "custom implement phase")")"
 printf 'echo one\n' >"${REPO}/ai/x/test/foo.sh"
-TDEL="$(commit_files 2026-09-30T11:02:00Z "fixture: a change that only deletes a test line")"
+TDEL="$(commit_files 2026-09-30T11:02:00Z "fixture: a change that only deletes a test line" "$(tr "custom queue phase")")"
 mkdir -p "${REPO}/ai/y/test"
 "${G[@]}" mv ai/x/test/foo.sh ai/y/test/foo.sh
-TREN="$(commit_files 2026-09-30T11:03:00Z "fixture: a test moved to a new path")"
+TREN="$(commit_files 2026-09-30T11:03:00Z "fixture: a test moved to a new path" "$(tr "custom integrate phase")")"
 STATE7="${TMP}/state7"
 mkdir -p "${STATE7}"
 # after-set verify 700 s, windows on the 30th, no revert in either: median-only
@@ -438,7 +449,7 @@ GS_ONLY="$(GIT_COMMITTER_DATE=2026-09-01T00:00:00Z GIT_AUTHOR_DATE=2026-09-01T00
 XCONF="${TMP}/xrepo.json"
 printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${XGS}\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${XCONF}"
 # The custom change: written at 02:00 (author date), landed at 11:30 (committer).
-XC="$(GIT_AUTHOR_DATE=2026-10-02T02:00:00Z GIT_COMMITTER_DATE=2026-10-02T11:30:00Z "${G[@]}" commit -q --allow-empty -m "fixture: a harness change for gen_saas" && "${G[@]}" rev-parse HEAD)"
+XC="$(GIT_AUTHOR_DATE=2026-10-02T02:00:00Z GIT_COMMITTER_DATE=2026-10-02T11:30:00Z "${G[@]}" commit -q --allow-empty -m "fixture: a harness change for gen_saas" -m "$(tr "gen_saas verify phase")" && "${G[@]}" rev-parse HEAD)"
 XID="gen_saas:verify:${XC:0:12}"
 # The push that carried it to main was 12:15 (the forge's time, in custom's
 # ledger), with one more commit on top: the ledger's landed commit is that tip.
@@ -527,8 +538,8 @@ STATEZ="${TMP}/statez"
 mkdir -p "${STATEY}" "${STATEZ}"
 cp "${STATE7}/ledger.jsonl" "${STATEY}/"
 cp "${STATE7}/ledger.jsonl" "${STATEZ}/"
-eq "custom on custom, no --change-repo: exit 0" "$(LEAD_TIME_STATE_DIR="${STATEY}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z rec verify phase "${TBIN}" change)" "0"
-eq "custom on custom, --change-repo custom: exit 0" "$(LEAD_TIME_STATE_DIR="${STATEZ}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z run record --repo custom --change-repo custom --phase verify --metric phase --commit "${TBIN}" --kind change --hypothesis-file "${HYP}")" "0"
+eq "custom on custom, no --change-repo: exit 0" "$(LEAD_TIME_STATE_DIR="${STATEY}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z rec implement phase "${TBIN}" change)" "0"
+eq "custom on custom, --change-repo custom: exit 0" "$(LEAD_TIME_STATE_DIR="${STATEZ}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z run record --repo custom --change-repo custom --phase implement --metric phase --commit "${TBIN}" --kind change --hypothesis-file "${HYP}")" "0"
 eq "... the two rows are byte-identical" "$(cmp -s "${STATEY}/experiments.jsonl" "${STATEZ}/experiments.jsonl" && echo same || echo differ)" "same"
 lacks "... and carry no change_repo or live_at" "$(cat "${STATEY}/experiments.jsonl")" "live_at"
 
@@ -560,6 +571,69 @@ eq "a merged side commit went live with its merge, at the merge's time" "${LAND}
 LAND="$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.landed_at(ARGV[1], ARGV[2]); puts(s.could_not_look? ? "could_not_look: #{s.reason}" : s.items.size.to_s)' \
   "${HERE}/../lib/experiment_git.rb" "${NOMAIN}" "${SIDE}")"
 has "a repo with no main: could not look, never 'no landing'" "${LAND}" "could_not_look:"
+
+# ── confounds: another experiment's trailer on the same phase (DND-1529) ───
+echo "== confounded"
+# custom's main gains, inside the experiment's window (the 6th, 01:00-21:00),
+# the laptop's harness change on the same phase: its trailer names gen_saas,
+# and this machine's store has never heard of it.
+CF="$(commit 2026-10-06T11:00:00Z "fixture: a verify change measured here" "$(tr "custom verify phase")")"
+CO="$(commit 2026-10-06T13:00:00Z "fixture: the laptop's harness change" "$(tr "gen_saas verify phase")")"
+STATEC1="${TMP}/statec1"
+mkdir -p "${STATEC1}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATEC1}/ledger.jsonl" "${CF}" 500 2026-10-06T00:00:00Z
+sc1() { LEAD_TIME_STATE_DIR="${STATEC1}" LEAD_TIME_EXPERIMENT_NOW=2026-10-07T12:00:00Z "$@"; }
+FID="custom:verify:${CF:0:12}"
+eq "record the change: exit 0" "$(sc1 rec verify phase "${CF}" change)" "0"
+eq "judge: exit 0" "$(sc1 run judge --repo custom)" "0"
+has "regression: two trailers on one phase inside the window: CONFOUNDED" "$(out)" "${FID} CONFOUNDED kind=change"
+has "... naming the other commit, its trailer and when it landed" "$(out)" "${CO:0:12} (gen_saas verify phase, 2026-10-06T13:00:00Z)"
+has "... and what it would have read (never keep)" "$(out)" "treated as inconclusive (unconfounded it read keep"
+has "... the tally is unchanged, with confounded counted on its own" "$(out)" "1 judged (0 pending, 0 keep, 0 revert, 0 inconclusive, 0 reverted); 1 status row(s) appended"
+has "... 1 confounded" "$(out)" "1 confounded"
+has "the status row records the confounder" "$(grep '"status":"confounded"' "${STATEC1}/experiments.jsonl")" "\"confounders\":[{\"commit\":\"${CO}\""
+eq "re-judge: exit 0" "$(sc1 run judge --repo custom)" "0"
+has "confounded is terminal: nothing is judged again" "$(out)" "0 judged"
+eq "list: exit 0" "$(sc1 run list --repo custom)" "0"
+has "list shows CONFOUNDED" "$(out)" "${FID} CONFOUNDED"
+has "... and its confounders" "$(out)" "confounders: ${CO:0:12} (gen_saas verify phase"
+eq "a commit whose trailer names another measured repo is refused for this one: exit 2" "$(sc1 rec verify phase "${CO}" change)" "2"
+has "... naming what its trailer says" "$(err)" "trailer(s) name gen_saas verify phase, not custom verify phase"
+CN="$(commit 2026-10-06T22:00:00Z "fixture: the next verify change" "$(tr "custom verify phase")")"
+eq "confounded does not block its phase: a new change records, exit 0" "$(sc1 rec verify phase "${CN}" change)" "0"
+
+echo "== not confounded"
+# Inside the window (the 8th, 01:00-21:00): a trailer on another phase, a
+# malformed trailer, and this experiment's own revert carrying its trailer.
+CV="$(commit 2026-10-08T11:00:00Z "fixture: a verify change" "$(tr "custom verify phase")")"
+CI="$(commit 2026-10-08T13:00:00Z "fixture: an implement change" "$(tr "custom implement phase")")"
+CM="$(commit 2026-10-08T14:00:00Z "fixture: a hand-written trailer" "$(tr "custom")")"
+commit 2026-10-08T15:00:00Z "Revert \"fixture: a verify change\"" "This reverts commit ${CV}.
+
+$(tr "custom verify phase")" >/dev/null
+STATEC2="${TMP}/statec2"
+mkdir -p "${STATEC2}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATEC2}/ledger.jsonl" "${CV}" 500 2026-10-08T00:00:00Z
+sc2() { LEAD_TIME_STATE_DIR="${STATEC2}" LEAD_TIME_EXPERIMENT_NOW=2026-10-09T12:00:00Z "$@"; }
+eq "record: exit 0" "$(sc2 rec verify phase "${CV}" change)" "0"
+eq "judge: exit 0" "$(sc2 run judge --repo custom)" "0"
+has "a trailer on another phase, and its own revert, have no effect: KEEP" "$(out)" "custom:verify:${CV:0:12} KEEP"
+has "... 0 confounded" "$(out)" "0 confounded"
+has "a malformed trailer in the window is named on stderr, not counted" "$(err)" "${CM:0:12} has a malformed Lead-time-experiment trailer \"custom\" (no phase after custom)"
+
+echo "== record needs the trailer"
+NOTR="$(commit 2026-10-08T16:00:00Z "fixture: a change landed with no trailer")"
+RC2="$(grep -c '"type":"record"' "${STATEC2}/experiments.jsonl")"
+eq "regression: a change commit with no trailer is refused: exit 2" "$(sc2 rec queue phase "${NOTR}" change)" "2"
+has "... saying so" "$(err)" "${NOTR:0:12} carries no Lead-time-experiment trailer"
+has "... the Fix names the line to carry and the format" "$(err)" 'Fix: every improver change and revert lands with the trailer line `Lead-time-experiment: custom queue phase` (format: Lead-time-experiment: <measured repo> <phase> <metric>)'
+eq "an instrumentation commit with no trailer is refused too: exit 2" "$(sc2 rec implement na_share "${NOTR}" instrumentation)" "2"
+eq "a trailer for another phase is refused: exit 2" "$(sc2 rec verify phase "${CI}" change)" "2"
+has "... naming the trailer it carries" "$(err)" "name custom implement phase, not custom verify phase"
+eq "... nothing written by any refusal" "$(grep -c '"type":"record"' "${STATEC2}/experiments.jsonl")" "${RC2}"
+eq "the git adapter reads a bad repo path as could not look, never as no trailer" \
+  "$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.trailer_commits(ARGV[1], "2026-10-01T00:00:00Z"); puts s.could_not_look? ? "could_not_look" : "ok"' \
+     "${HERE}/../lib/experiment_git.rb" "${TMP}/no-such-repo")" "could_not_look"
 
 # ── a configured repo not on this machine (DND-1526) ────────────────────────
 echo "== skipped on this machine"

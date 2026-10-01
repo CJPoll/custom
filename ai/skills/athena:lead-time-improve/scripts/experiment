@@ -10,16 +10,20 @@
 #   judge   every pending experiment of a repo: keep | revert | pending |
 #           inconclusive, with the before/after numbers; appends a status
 #           row only when the verdict changed (re-running is idempotent);
-#           and every owed revert: `reverted` once main carries it
+#           and every owed revert: `reverted` once main carries it; a change
+#           another experiment's Lead-time-experiment trailer on the same
+#           phase confounds is `confounded` (DND-1529)
 #   list    every experiment and its latest status
 #   decline record that an owed revert will not land because the hard
 #           constraint forbids it (DND-1547); only this verb writes `declined`
 #
 # It reads the lead-time-phases ledger (DND-1477) and git (read-only: is a
-# commit on main, reverts on main, which test paths a commit added lines to),
-# and writes only <state>/experiments.jsonl.
+# commit on main, reverts on main, which test paths a commit added lines to,
+# a commit's message and the trailers on main), and writes only
+# <state>/experiments.jsonl.
 #
-# Buckets: FRAMEWORK (argv, output) and MANAGER (Record, Judge, List, Decline) here;
+# Buckets: FRAMEWORK (argv, output) and MANAGER (Record, Judge, List, Decline,
+# Live, Confound) here;
 # DOMAIN in ../lib/experiment.rb; SIDE EFFECTS in ../lib/experiment_store.rb,
 # ../lib/experiment_git.rb and ai/lib/lead_time_phases_io.rb (the ledger).
 #
@@ -40,6 +44,7 @@ require_relative "../../../lib/strict_argv"
 require_relative "../../../lib/lead_time_phases"
 require_relative "../../../lib/lead_time_phases_io"
 require_relative "../../../lib/lead_time_config_io"
+require_relative "../../../lib/lead_time_trailer"
 require_relative "../lib/experiment"
 require_relative "../lib/experiment_store"
 require_relative "../lib/experiment_git"
@@ -81,8 +86,15 @@ HELP = <<~TXT
            live_at and live_at_source; judge and list print them. The test-additions
            read and the owed revert use C's git: a revert is of that commit
            in C. Default: R (same-repo, unchanged).
+           The commit must carry the trailer line (DND-1529)
+             Lead-time-experiment: <R> <P> <M>
+           naming this record's repo, phase and metric, change and
+           instrumentation alike; without it record refuses (exit 2), and
+           a message git cannot show is exit 3. Records already in the
+           store are not re-validated.
   judge    Judge every pending experiment of the repo and print one line
-           per experiment: keep | revert | pending | inconclusive, with the
+           per experiment: keep | revert | pending | inconclusive |
+           confounded, with the
            before and after n, median and p90 (n/a share for
            instrumentation) and the guards. A REVERT line repeats each run
            until main carries the revert; judge then records `reverted`.
@@ -93,10 +105,26 @@ HELP = <<~TXT
            "This reverts commit <sha>." line, so judge still records
            `reverted`) or decline. The status stays revert; a fresh revert's
            status row carries `held`; the tally counts held on its own.
+           A pending change is CONFOUNDED (DND-1529) when another commit
+           on the harness repo's main (custom, the runner's own repo; and
+           R's main when R is another repo) carries a Lead-time-experiment
+           trailer for the same phase, from any machine and any measured
+           repo, committed inside the window: the before-set's first
+           landing to the after-set's last. Its own commit and a revert of
+           it do not count. Instrumentation is exempt both ways, as it is
+           from the one-pending-change rule: an na_share trailer confounds
+           nothing, and an instrumentation experiment is never confounded. The line names each
+           other commit; the status is recorded, terminal, and treated as
+           inconclusive: never keep, never revert. A log that cannot be
+           read is exit 3, never "no confounder"; nothing is written.
+           It reads origin/main as this clone last fetched it: a trailer
+           pushed since is not seen until the next fetch (a missed
+           confounder, never a wrong one). A REVERT line names the trailer
+           line its revert lands with.
            Appends a status row only when the verdict changed, so a re-run
            with the same inputs writes nothing.
   list     Every experiment and its latest status (DECLINED with its
-           constraint and reason).
+           constraint and reason; CONFOUNDED with its confounders).
   decline  Record that an owed revert will not land because the hard
            constraint (ai/blocks/ops/safety-checks.md) outranks the
            experiment rule. Appends one `declined` status row, which is
@@ -130,6 +158,8 @@ HELP = <<~TXT
     revert      median up, or any guard worse
     pending     a side short of K=10, or neither keep nor revert
     inconclusive  still pending 7 days after it was recorded
+    confounded  another experiment's change on the same phase landed
+                inside the window; settled as inconclusive
     instrumentation  keep when its phase's n/a share falls; never reverted
                 for a share that did not fall
 
@@ -168,7 +198,8 @@ HELP = <<~TXT
 
   Exit: 0 ok; 1 tool or state error; 2 usage error or refusal; 3 could not
   look (no ledger: run ai/bin/lead-time-phases --ingest first; git could
-  not say whether the commit is on main; or the config could not be read);
+  not say whether the commit is on main, or show its message; a log judge
+  reads for confounders could not be read; or the config could not be read);
   4 the --repo is configured but skipped on this machine (its checkout is
   missing).
 TXT
@@ -395,6 +426,7 @@ module Record
     rows = Setup.ledger_rows(state, repo.name)
     check_label!(rows, metric, repo, res.window) if metric.check?
     on_main!(change, change_path, commit)
+    trailer!(change, change_path, commit, repo, metric)
     cross = change == repo.name ? {} : { "change_repo" => change }.merge(Live.resolve(state, change, change_path, commit, live_at!(change, change_path, commit)))
     tests = X.deletes_tests_fields(XG.numstat(change_path, commit))
     row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows, cross).merge(tests)
@@ -450,6 +482,19 @@ module Record
 
     refuse(2, "#{short(commit)} is not on #{name}'s main (a pre-rebase SHA, or not landed yet)",
            "record the experiment after it lands, with the SHA as it is on main (git log origin/main)")
+  end
+
+  # The commit must carry `Lead-time-experiment: <repo> <phase> <metric>`
+  # (DND-1529), so another machine's judge sees this change on its phase.
+  # Instrumentation too. Records already in the store are not re-validated.
+  def trailer!(name, path, commit, repo, metric)
+    src = XG.message(path, commit)
+    if src.could_not_look?
+      refuse(3, "could not look at #{short(commit)}'s message in #{name}: #{src.reason}",
+             "run from a machine where #{path} is checked out with main fetched")
+    end
+    what, fix = X.trailer_error(src.items.first, sha: commit, repo: repo.name, phase: metric.phase, metric: metric.name)
+    refuse(2, what, fix) if what
   end
 
   # The committer time of the commit's first-parent landing on the change
@@ -524,6 +569,55 @@ module Record
   end
 end
 
+# ── MANAGER: confounds (DND-1529) ────────────────────────────────────────────
+
+# Another experiment's change on the same phase, from any machine, inside an
+# experiment's window. It reads the trailers on the harness repo's main (the
+# runner's own repo, custom: every harness change lands there, whichever
+# machine measured it) and, when the measured repo is another, that repo's
+# main too (a product-repo change, DND-1540). Either log unreadable is exit
+# 3, never "no confounder".
+module Confound
+  module_function
+
+  # Main may hold a commit a little older than the window by its committer
+  # clock; git's --since cut is widened, the domain cuts exactly.
+  SLACK_S = 86_400
+
+  # -> [confounder]
+  def find(exp, repo, res, from, to)
+    commits = paths(repo, res).flat_map { |name, path| log(name, path, from) }
+    found = X.confounders(exp, commits, from: from, to: to)
+    found[:malformed].each do |sha, v, why|
+      warn "experiment: #{exp['id']}: #{short(sha)} has a malformed #{LeadTimeTrailer::KEY} trailer #{v.inspect} (#{why}); " \
+           "it names no phase, so it is not counted as a confounder"
+    end
+    found[:confounders]
+  end
+
+  # [[name, path]]: the harness repo, then the measured repo when it differs.
+  def paths(repo, res)
+    own = LeadTimeConfigIO.own_repo
+    refuse(3, "could not look for confounders: the harness repo cannot be found: #{own.error}", "run from a checkout of ~/dev/custom") if own.error
+    begin
+      harness = LeadTimeConfigIO.repo_path(res, own.label, own: own)
+    rescue LeadTimeConfig::Error => e
+      refuse(3, "could not look for confounders: #{own.label}: #{e.message}", e.fix)
+    end
+    out = [[own.label, harness]]
+    out << [repo.name, repo.path] unless File.expand_path(repo.path) == File.expand_path(harness)
+    out
+  end
+
+  def log(name, path, from)
+    src = XG.trailer_commits(path, (from - SLACK_S).utc.iso8601)
+    return src.items unless src.could_not_look?
+
+    refuse(3, "could not look for confounders: #{name}'s log cannot be read: #{src.reason}",
+           "run from a machine where #{path} is checked out with main fetched; this is not \"no confounder\"")
+  end
+end
+
 # ── MANAGER: judge ───────────────────────────────────────────────────────────
 
 module Judge
@@ -546,19 +640,21 @@ module Judge
     shas = all.map { |e| e["commit"] }
     # [experiment, verdict, phase context (check metrics only; printed, never judged)]
     pending = mine.select { |e| e["status"] == "pending" }.map { |e| Live.upgrade(e, state, repo, res) }
-    results = pending.map { |e| [e, *verdict(e, rows, repo, shas, now)] }
+    results = pending.map { |e| [e, *verdict(e, rows, repo, shas, now, res)] }
     results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo, res), nil] }
     # + the HELD explanation (DND-1549), nil unless a revert verdict is held
     results = results.map { |e, v, ctx| held(e, v, ctx, repo, res) }
     appended = Setup.append(store) { |existing| fresh_rows(existing, results, now) }
     results.each { |e, v, ctx, why| puts line(e, v, ctx, why) }
     judged = results.map { |_, v| v["status"] }
-    tally = X::JUDGED.map { |s| "#{judged.count(s)} #{s}" }.join(", ")
+    tally = (X::JUDGED - %w[confounded]).map { |s| "#{judged.count(s)} #{s}" }.join(", ")
     declined = mine.count { |e| e["status"] == "declined" }
     held_count = results.count { |_, v| v["held"] }
     puts "experiment judge: #{repo.name}: #{results.size} judged (#{tally}); #{appended.size} status row(s) appended; " \
          "#{rows.size} landing(s) in the ledger; #{declined} declined (a revert the hard constraint forbids; not judged); " \
-         "#{held_count} held (a revert whose plain git revert would delete test additions, or could not tell)"
+         "#{held_count} held (a revert whose plain git revert would delete test additions, or could not tell); " \
+         "#{judged.count('confounded')} confounded (another experiment's change on the same phase landed inside the window; " \
+         "treated as inconclusive)"
     0
   end
 
@@ -573,7 +669,16 @@ module Judge
 
     refusal, = X.decline_error(exp.merge("status" => "revert", "last" => v))
     change = X.cross_repo?(exp) ? exp["change_repo"] : nil
-    [exp, v.merge("held" => hold), ctx, X.hold_text(repo.name, exp["id"], exp["commit"], hold, refusal, change_repo: change)]
+    [exp, v.merge("held" => hold), ctx, X.hold_text(repo.name, exp["id"], exp["commit"], hold, refusal, change_repo: change, trailer: trailer_line(exp))]
+  end
+
+  # The revert's trailer line (DND-1529), or nil for a record whose parts do
+  # not build one (stored records are not re-validated): warned, never fatal.
+  def trailer_line(exp)
+    LeadTimeTrailer.line(exp["repo"], exp["phase"], exp["metric"])
+  rescue LeadTimeTrailer::Error => e
+    warn "experiment: #{exp['id']}: #{e.message}"
+    nil
   end
 
   # Runs a git reader against the repo the experiment's commit landed in:
@@ -619,7 +724,7 @@ module Judge
 
   # -> [verdict, context]. context: for a check metric, the phase's own
   # stats over the same two sides, else nil. It is printed, never judged.
-  def verdict(exp, rows, repo, shas, now)
+  def verdict(exp, rows, repo, shas, now, res)
     split = X.split(exp, rows)
     return [unlanded(exp, repo, now), nil] unless split
 
@@ -627,6 +732,11 @@ module Judge
     s = X.sides(rows, metric: metric, exclude: split[:exclude], boundary: split[:boundary])
     v = X.judge(exp, before: s[:before], after: s[:after], guards_before: guards(s[:before], repo, shas),
                      guards_after: guards(s[:after], repo, shas), now: now)
+    # Instrumentation is never confounded (X.confounders), so its logs are not read.
+    unless exp["kind"] == "instrumentation"
+      from, to = X.window(s, split[:boundary])
+      v = X.confound(v, Confound.find(exp, repo, res, from, to), phase: exp["phase"])
+    end
     [v, metric.check? ? X.phase_context(s[:before], s[:after], phase: exp["phase"]) : nil]
   end
 
@@ -677,6 +787,10 @@ module Judge
     phase = ctx ? " | phase (context, not judged): before #{side(ctx['before'])} | after #{side(ctx['after'])}" : ""
     status = held_why ? "REVERT HELD" : v["status"].upcase
     reason = held_why ? "#{v['reason'].to_s.sub(/\AREVERT OWED: /, 'owed: ')} | #{held_why}" : v["reason"]
+    # A revert lands with its experiment's trailer (DND-1529), so another
+    # machine sees the phase move back.
+    trailer = !held_why && v["status"] == "revert" ? trailer_line(exp) : nil
+    reason = "#{reason} | land the revert with the trailer line `#{trailer}`" if trailer
     xtext = X.cross_text(exp)
     "experiment: #{exp['id']} #{status} kind=#{exp['kind']} metric=#{exp['metric']}#{xtext ? " #{xtext}" : ''} | " \
       "before #{side(v['before'])} | after #{side(v['after'])} | guards #{g ? g.join(', ') : 'n/a'} | #{reason}#{phase}"
@@ -711,8 +825,10 @@ module List
     tag = declined ? " constraint=#{e.dig('last', 'constraint')}" : ""
     was = declined ? " (revert verdict was: #{e.dig('last', 'prior_reason')})" : ""
     xtext = X.cross_text(e)
+    confs = e.dig("last", "confounders")
+    ctext = confs.is_a?(Array) && !confs.empty? ? " | confounders: #{confs.map { |c| X.confounder_text(c) }.join(', ')}" : ""
     "experiment: #{e['id']} #{e['status'].upcase}#{tag} kind=#{e['kind']} metric=#{e['metric']}#{xtext ? " #{xtext}" : ''} " \
-      "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}#{was}" : ''}"
+      "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}#{was}" : ''}#{ctext}"
   end
 end
 

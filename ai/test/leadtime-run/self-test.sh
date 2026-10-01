@@ -62,7 +62,7 @@ esac
 ALERTS="${ATHENA_INBOX_ROOT}/harness-alerts/to-custom"
 NOW_FIXED="$(date -d '2026-10-01 12:30 UTC' +%s)"
 G=(-c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false -c init.defaultBranch=main)
-RESOLVER_LIBS="strict_argv.rb lead_time_config.rb lead_time_config_io.rb leadtime_product.rb leadtime_product_io.rb"
+RESOLVER_LIBS="strict_argv.rb lead_time_config.rb lead_time_config_io.rb leadtime_product.rb leadtime_product_io.rb lead_time_trailer.rb"
 
 # --- shared fakes ----------------------------------------------------------------
 cat >"$TMP/fake-send-mail" <<'EOF'
@@ -173,7 +173,9 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
     if flock -n "$lock" true; then echo free >"$d/product-lock"; else echo held >"$d/product-lock"; fi
     lane="$(sed -n 's/^lane=//p' "$d/cut.out")"
     if [ "$(cat "$d/mode")" != product-cut ] && [ -n "$lane" ]; then
-      echo change >"$lane/fix.txt"; g -C "$lane" add fix.txt >/dev/null; g -C "$lane" commit -q -m "product change"
+      # The commit carries the trailer line cut printed (DND-1529).
+      echo change >"$lane/fix.txt"; g -C "$lane" add fix.txt >/dev/null
+      g -C "$lane" commit -q -m "product change" -m "$(sed -n 's/^trailer=//p' "$d/cut.out")"
       if [ "$(cat "$d/mode")" = product-pr ]; then
         echo "before/after evidence" >"$d/evidence.md"
         "$tool" pr --repo gen_saas --title "speed up verify" --body-file "$d/evidence.md" >"$d/pr.out" 2>&1 || echo "pr-rc=$?" >>"$d/pr.out"

@@ -27,6 +27,7 @@ require "json"
 require "open3"
 require "time"
 require_relative "leadtime_product"
+require_relative "lead_time_trailer"
 
 module LeadTimeProductIO
   P = LeadTimeProduct
@@ -345,8 +346,11 @@ module LeadTimeProductIO
   end
 
   # cut: the session's product lane in R (one per repo per run).
-  def cut(m, repo, phase)
+  def cut(m, repo, phase, metric = "phase")
     rl = m.repo(repo)
+    # The trailer the lane's commits carry (DND-1529): refused here, before
+    # any lane exists, when it cannot be built.
+    trailer = experiment_trailer(rl, "phase" => phase, "metric" => metric)
     refuse_if_stopped(m, rl)
     Locks.held!(rl.lock)
     if File.exist?(rl.lane)
@@ -362,17 +366,44 @@ module LeadTimeProductIO
     raise P::Error.new("could not cut #{rl.lane} on #{branch}: #{out.strip}", "read git's reason; a branch-name collision is never forced.") unless code.zero?
 
     meta = "#{rl.lane}.meta"
-    Meta.add(meta, "repo" => rl.name, "branch" => branch, "phase" => phase, "base" => base, "bootstrap" => "pending")
+    Meta.add(meta, "repo" => rl.name, "branch" => branch, "phase" => phase, "metric" => metric, "base" => base, "bootstrap" => "pending")
     Meta.add(meta, "bootstrap" => bootstrap(m, rl, rl.lane, "work"))
-    { lane: rl.lane, branch: branch, base: base, fetch: fetched }
+    { lane: rl.lane, branch: branch, base: base, fetch: fetched, trailer: trailer }
   rescue CannotAct
     Meta.add("#{rl.lane}.meta", "bootstrap" => "failed") if rl && File.exist?(rl.lane)
     raise
   end
 
-  # The Lead-time-experiment trailer for the PR body: DND-1529's hook. It
-  # returns nil until DND-1529 lands the trailer (a commit's experiment id).
-  def experiment_trailer(_repo_lane, _meta) = nil
+  # The lane's Lead-time-experiment trailer (DND-1529):
+  # `Lead-time-experiment: <R> <phase> <metric>`, from the lane's meta (the
+  # phase and metric `cut` wrote; `phase` for a lane cut before the metric
+  # was recorded). A lane commit must carry it (open_pr refuses otherwise):
+  # locked-merge squashes with no --body, so what lands on R's main is the
+  # repo's default squash message, which keeps the commit messages
+  # (COMMIT_MESSAGES) but not necessarily the PR body. The PR body carries it
+  # too, for a reader. `experiment judge` reads it on R's main for confounds
+  # and `experiment record` requires it. A lane with no phase cannot build
+  # one: refused, so no product PR opens without its trailer.
+  def experiment_trailer(repo_lane, meta)
+    metric = meta["metric"].to_s.empty? ? "phase" : meta["metric"]
+    LeadTimeTrailer.line(repo_lane.name, meta["phase"], metric)
+  rescue LeadTimeTrailer::Error => e
+    raise P::Error.new("the #{repo_lane.name} lane: #{e.message}", "re-cut the lane with 'leadtime-product cut --repo #{repo_lane.name} --phase <phase>'.")
+  end
+
+  # A commit in origin/main..HEAD must carry the lane's trailer line
+  # (DND-1529): the squash keeps commit messages, not the PR body.
+  def trailer_carried!(rl, line)
+    out, code = Git.call(rl.lane, "log", "--format=%B", "refs/remotes/origin/main..HEAD")
+    raise CouldNotLook.new("git log failed in #{rl.lane}", "check the lane is intact.") unless code.zero?
+
+    want = LeadTimeTrailer.scan(line)[:trailers].first
+    return if LeadTimeTrailer.scan(out)[:trailers].include?(want)
+
+    raise P::Error.new("no commit in the #{rl.name} lane carries the line `#{line}`",
+                       "amend the lane's commit message to end with `#{line}` (git commit --amend in #{rl.lane}); " \
+                       "the squash merge keeps commit messages, not the PR body, and experiment record refuses a landing without it.")
+  end
 
   # pr: push the lane's branch as Athena, open the PR, record it.
   def open_pr(m, repo, title:, body_file:)
@@ -399,6 +430,7 @@ module LeadTimeProductIO
     out, code = Git.call(rl.lane, "rev-list", "--count", "refs/remotes/origin/main..HEAD")
     raise CouldNotLook.new("git rev-list failed in #{rl.lane}", "check the lane is intact.") unless code.zero?
     raise P::Error.new("the #{rl.name} lane has no commit beyond origin/main", "commit the change in #{rl.lane} first.") if out.strip == "0"
+    trailer_carried!(rl, experiment_trailer(rl, meta))
 
     out, code = Forge.push(rl.lane, "-u", "origin", "HEAD")
     unless code.zero?

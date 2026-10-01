@@ -127,8 +127,9 @@ hold_lock() { # <file> -- a fixture process holds an flock on <file> until relea
   timeout 30 cat "$fifo" >/dev/null
 }
 lp() { "${BIN}" "$@" --manifest "$MAN" >"${TMP}/out" 2>"${TMP}/err"; echo $?; }
-lane_commit() { # <file> -- one commit in this run's lane
-  echo change >"$LANES/$RUN_ID/$1"; git -C "$LANES/$RUN_ID" add "$1"; git "${G[@]}" -C "$LANES/$RUN_ID" commit -q -m "change $1"
+lane_commit() { # <file> -- one commit in this run's lane, carrying the lane's trailer (DND-1529)
+  echo change >"$LANES/$RUN_ID/$1"; git -C "$LANES/$RUN_ID" add "$1"
+  git "${G[@]}" -C "$LANES/$RUN_ID" commit -q -m "change $1" -m "Lead-time-experiment: prod verify phase"
 }
 pr_json() { # <n> <state> <head> <ci-rollup-json> [merge-oid]
   jq -n --arg st "$2" --arg h "$3" --argjson ci "$4" --arg m "${5:-}" \
@@ -199,6 +200,12 @@ echo dirty >"$LANES/$RUN_ID/dirty.txt"
 rc="$(lp pr --repo prod --title t --body-file "$TMP/evidence.md")"
 [ "$rc" = 2 ] && grep -q 'uncommitted' "${TMP}/err" && ok "pr with uncommitted changes: exit 2" || bad "pr dirty" "rc=$rc"
 rm -f "$LANES/$RUN_ID/dirty.txt"
+echo bare >"$LANES/$RUN_ID/bare.txt"; git -C "$LANES/$RUN_ID" add bare.txt; git "${G[@]}" -C "$LANES/$RUN_ID" commit -q -m "a change with no trailer"
+rc="$(lp pr --repo prod --title t --body-file "$TMP/evidence.md")"
+[ "$rc" = 2 ] && grep -q 'no commit in the prod lane carries the line `Lead-time-experiment: prod verify phase`' "${TMP}/err" \
+  && grep -q 'Fix:.*the squash merge keeps commit messages, not the PR body' "${TMP}/err" && ! grep -q '^gh-athena pr create' "$FAKE/calls" \
+  && ok "regression: pr with no lane commit carrying the trailer: exit 2 with Fix:, nothing opened (the squash keeps commit messages, not the body)" \
+  || bad "pr no trailer" "rc=$rc $(cat "${TMP}/err")"
 lane_commit fix.txt
 tip="$(git -C "$LANES/$RUN_ID" rev-parse HEAD)"
 rc="$(lp pr --repo prod --title "speed up verify" --body-file "$TMP/evidence.md")"
@@ -207,8 +214,8 @@ if [ "$rc" = 0 ] && [ "$(git -C "$ORIGIN" rev-parse leadtime/prod-verify-2026100
    && grep -q '^gh-athena git -c credential.helper= -c url.https://github.com/.insteadOf=git@github.com: push -u origin HEAD' "$FAKE/calls" \
    && grep -q '^gh-athena pr create --base main --head leadtime/prod-verify-20261001T123000Z --title speed up verify' "$FAKE/calls" \
    && [ "$(jq -r .head <<<"$rec")" = "$tip" ] && [ "$(jq -r .pr <<<"$rec")" = 7 ] && [ "$(jq -r .phase <<<"$rec")" = verify ] \
-   && [ "$(cat "$FAKE/body-7.md")" = evidence ] && [ "$(stat -c %a "$S/product-prs.jsonl")" = 600 ]; then
-  ok "pr: pushed as Athena (gh-athena git push), opened with gh-athena pr create, recorded (repo, pr, phase, head) in product-prs.jsonl"
+   && [ "$(cat "$FAKE/body-7.md")" = "$(printf 'evidence\n\nLead-time-experiment: prod verify phase')" ] && [ "$(stat -c %a "$S/product-prs.jsonl")" = 600 ]; then
+  ok "pr: pushed as Athena (gh-athena git push), opened with gh-athena pr create (the body ends with the lane's Lead-time-experiment trailer, DND-1529), recorded (repo, pr, phase, head) in product-prs.jsonl"
 else bad "pr" "rc=$rc err=$(cat "${TMP}/err") rec=$rec calls=$(cat "$FAKE/calls")"; fi
 
 lane_commit more.txt
@@ -218,6 +225,28 @@ if [ "$rc" = 0 ] && grep -qx 'https://github.com/example/prod/pull/7' "${TMP}/ou
    && [ "$(jq -r 'select(.event=="head") | .head' "$S/product-prs.jsonl")" = "$tip2" ] && [ "$(git -C "$ORIGIN" rev-parse leadtime/prod-verify-20261001T123000Z)" = "$tip2" ]; then
   ok "a second pr in the same lane pushes to the same PR and records its new head (never a duplicate PR)"
 else bad "second pr" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+
+echo "== experiment trailer (DND-1529)"
+# The hook itself, called directly: the lane's phase, its metric when the
+# meta names one, and a refusal (never a PR without a trailer) with no phase.
+hook() {
+  /usr/bin/ruby -e '
+    require ARGV[0]
+    rl = LeadTimeProduct::RepoLane.new(name: "prod")
+    meta = ARGV[1].split(",").to_h { |kv| kv.split("=", 2) }
+    begin
+      puts LeadTimeProductIO.experiment_trailer(rl, meta)
+    rescue LeadTimeProduct::Error => e
+      puts "refused: #{e.message} | #{e.fix}"
+    end' "${ROOT}/ai/lib/leadtime_product_io.rb" "$1"
+}
+[ "$(hook "phase=verify")" = "Lead-time-experiment: prod verify phase" ] \
+  && ok "the hook builds 'Lead-time-experiment: <R> <phase> phase' from the lane's phase" || bad "hook phase" "$(hook "phase=verify")"
+[ "$(hook "phase=integrate,metric=counter:slot_wait_s")" = "Lead-time-experiment: prod integrate counter:slot_wait_s" ] \
+  && ok "... with the lane's metric when its meta names one" || bad "hook metric" "$(hook "phase=integrate,metric=counter:slot_wait_s")"
+out="$(hook "branch=b")"
+[[ "$out" == "refused: the prod lane: cannot build a Lead-time-experiment trailer: no phase"*"leadtime-product cut --repo prod --phase"* ]] \
+  && ok "a lane with no phase is refused with a Fix:, never a PR without a trailer" || bad "hook no phase" "$out"
 
 echo "== teardown"
 rc="$(lp teardown)"
@@ -447,6 +476,19 @@ new_repo
 printf '{"event":"opened","at":"x","repo":"prod","pr":3,"url":"u","phase":"p","branch":"b","head":"h","run_id":"r"}\nnot json\n' >"$S/product-prs.jsonl"
 rc="$(lp sweep)"
 [ "$rc" = 3 ] && grep -q 'line 2 is not JSON' "${TMP}/err" && ok "an unreadable store line is could-not-look (exit 3) naming the line, never an empty sweep" || bad "bad store" "rc=$rc $(cat "${TMP}/err")"
+
+echo "== cut --metric (DND-1529)"
+new_repo
+hold_lock "$LANES/$RUN_ID.lock"
+rc="$(lp cut --repo prod --phase integrate --metric "check:self-test: x/y")"
+[ "$rc" = 0 ] && grep -qx 'trailer=Lead-time-experiment: prod integrate check:self-test: x/y' "${TMP}/out" \
+  && grep -qx 'metric=check:self-test: x/y' "$LANES/$RUN_ID.meta" \
+  && ok "cut --metric: the lane's meta records it, and cut prints the trailer line its commits carry" || bad "cut --metric" "rc=$rc $(cat "${TMP}/out" "${TMP}/err")"
+new_repo
+hold_lock "$LANES/$RUN_ID.lock"
+rc="$(lp cut --repo prod --phase verify --metric " ")"
+[ "$rc" = 2 ] && grep -q 'no metric' "${TMP}/err" && [ ! -e "$LANES/$RUN_ID" ] \
+  && ok "cut with a blank --metric: exit 2 before any lane is cut" || bad "cut empty metric" "rc=$rc $(cat "${TMP}/err")"
 
 echo "== classification"
 if grep -q $'^ai/lib/leadtime_product.rb\tlibrary' "${ROOT}/ai/guard-classification.tsv" \

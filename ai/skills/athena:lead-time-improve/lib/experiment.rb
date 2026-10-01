@@ -30,6 +30,13 @@
 #     is HELD (DND-1549): still `revert`, but a plain git revert is ruled
 #     out. Only FirstParty.test_path? (a pure function) is used from
 #     ai/lib/first_party.rb; its git readers are not called here.
+#   * a change on the same phase from ANOTHER experiment (any machine), seen
+#     as a `Lead-time-experiment:` commit trailer (ai/lib/lead_time_trailer.rb)
+#     landed inside the window (the before-set's first landing to the
+#     after-set's last), makes the verdict `confounded` (DND-1529): recorded,
+#     terminal, treated as inconclusive. It never becomes keep or revert. The
+#     store is machine-local; the trailer is what another machine can see.
+#     Instrumentation is exempt both ways, as it is from the blocker rule.
 #   * only `improve`-mode rows count, one row per landing (batch tickets
 #     sharing a landed commit are one landing).
 #   * cross-repo (DND-1528): a change that landed in another repo (the
@@ -51,6 +58,7 @@ require "time"
 require_relative "../../../lib/lead_time_phases"
 require_relative "../../../lib/first_party"
 require_relative "../../../lib/lead_time_config"
+require_relative "../../../lib/lead_time_trailer"
 
 module LeadTimeExperiment
   SCHEMA = 1
@@ -58,11 +66,12 @@ module LeadTimeExperiment
   MIN_DROP = 0.10
   PENDING_DAYS = 7
   KINDS = %w[change instrumentation].freeze
-  STATUSES = %w[pending keep revert inconclusive reverted declined].freeze
+  STATUSES = %w[pending keep revert inconclusive reverted declined confounded].freeze
   # A revert verdict is settled as a judgement but OWED as an action until
   # the revert lands, so it is not terminal. `declined` (DND-1547) is a
   # revert the hard constraint forbids landing: terminal, and not blocking.
-  TERMINAL = %w[keep inconclusive reverted declined].freeze
+  # `confounded` (DND-1529) is settled as inconclusive: terminal, not blocking.
+  TERMINAL = %w[keep inconclusive reverted declined confounded].freeze
   BLOCKING = %w[pending revert].freeze
   # The statuses judge may write. `declined` is written only by the decline
   # verb (decline_row), so the loop never declines on its own.
@@ -606,9 +615,10 @@ module LeadTimeExperiment
   # decline verb would admit this revert, else why it would refuse it.
   # change_repo: the repo the commit landed in when it is not `repo`
   # (DND-1528); the revert lands there.
-  def hold_text(repo, id, commit, hold, decline_refusal, change_repo: nil)
+  def hold_text(repo, id, commit, hold, decline_refusal, change_repo: nil, trailer: nil)
     sha = commit.to_s[0, 12]
     where = change_repo ? "in #{change_repo}: " : ""
+    keep_trailer = trailer ? " and the trailer line `#{trailer}` (DND-1529)" : ""
     what = if hold["could_not_look"]
              "could not look whether reverting #{sha} deletes test additions: #{hold['could_not_look']}"
            else
@@ -618,12 +628,91 @@ module LeadTimeExperiment
     # <sha>" line (reverted?), so a partial revert must keep it.
     partial = "land a partial revert that keeps every test addition and its fixture fix " \
               "(#{where}git revert --no-commit #{commit}, restore the test paths, commit keeping git's " \
-              "\"This reverts commit #{commit}.\" line so judge records reverted)"
+              "\"This reverts commit #{commit}.\" line so judge records reverted#{keep_trailer})"
     fix = if decline_refusal
             "#{partial}; decline does not cover this revert (#{decline_refusal})"
           else
             "#{partial}, or run experiment decline --repo #{repo} --id #{id} --constraint safety-checks --reason-file <F>"
           end
     "#{what}; the hard constraint rules out a plain git revert. Fix: #{fix}"
+  end
+
+  # ── the experiment trailer and confounds (DND-1529) ──────────────────────
+
+  T = LeadTimeTrailer
+
+  # nil when the commit message carries the trailer this record needs, else
+  # [what, fix]. The trailer must name the record's repo, phase and metric,
+  # so judge on another machine reads the phase this record is judged on.
+  def trailer_error(message, sha:, repo:, phase:, metric:)
+    want = "#{T::KEY}: #{repo} #{phase} #{metric}"
+    s = T.scan(message)
+    return nil if s[:trailers].any? { |t| t.repo == repo && t.phase == phase && t.metric == metric }
+
+    fix = "every improver change and revert lands with the trailer line `#{want}` (format: #{T::FORMAT}). " \
+          "A landed commit without it cannot be recorded: journal it as unrecorded, and land the next change with the trailer"
+    bad = s[:malformed].map { |v, why| "#{v.inspect} (#{why})" }
+    if s[:trailers].empty?
+      extra = bad.empty? ? "" : "; malformed trailer line(s): #{bad.join(', ')}"
+      return ["#{sha.to_s[0, 12]} carries no #{T::KEY} trailer#{extra}", fix]
+    end
+
+    ["#{sha.to_s[0, 12]}'s #{T::KEY} trailer(s) name #{s[:trailers].map(&:to_s).join('; ')}, not #{repo} #{phase} #{metric}",
+     "record with the repo, phase and metric its trailer names; #{fix}"]
+  end
+
+  # The confound window: from the before-set's first landing (the boundary
+  # when there is no before-set) to the after-set's last (the boundary while
+  # there is no after landing yet). A confounder inside it stays inside as
+  # the after-set grows, so a pending verdict can be confounded now.
+  def window(sides, boundary)
+    before = sides[:before]
+    after = sides[:after]
+    [before.nil? || before.empty? ? boundary : at(before.first), after.empty? ? boundary : at(after.last)]
+  end
+
+  # commits: [[sha, committer Time, message]] from the harness repo's main
+  # (and the measured repo's, when it is another). -> {confounders: [...],
+  # malformed: [[sha, value, why]]}. A confounder is a commit inside the
+  # window, other than the experiment's own and a revert of it, whose
+  # trailer names the experiment's phase (any measured repo: one harness
+  # serves every repo). A malformed trailer names no phase, so it is never a
+  # confounder; it is returned so the caller can say so.
+  # It carries the blocker rule's exemption: instrumentation does not move a
+  # duration, so an instrumentation trailer (metric na_share, which
+  # kind_error ties to instrumentation) confounds nothing, and an
+  # instrumentation experiment is never confounded. Unlike the blocker,
+  # which only refuses overlapping PENDING changes, the window reaches back
+  # over the whole before-set: a settled predecessor's change, or its revert,
+  # that landed inside it confounds too (its baseline straddles that change).
+  def confounders(exp, commits, from:, to:)
+    return { confounders: [], malformed: [] } if exp["kind"] == "instrumentation"
+
+    own = exp["commit"]
+    inside = commits.select { |_, t, _| t >= from && t <= to }
+                    .reject { |sha, _, msg| sha == own || revert_refs(msg).include?(own) }
+    out = { confounders: [], malformed: [] }
+    inside.each do |sha, t, msg|
+      s = T.scan(msg)
+      s[:malformed].each { |v, why| out[:malformed] << [sha, v, why] }
+      hit = s[:trailers].find { |tr| tr.phase == exp["phase"] && tr.metric != NA_SHARE }
+      out[:confounders] << { "commit" => sha, "at" => t.utc.iso8601 }.merge(hit.to_h) if hit
+    end
+    out[:confounders] = out[:confounders].uniq { |c| c["commit"] }.sort_by { |c| [c["at"], c["commit"]] }
+    out
+  end
+
+  def confounder_text(c) = "#{c['commit'].to_s[0, 12]} (#{c['repo']} #{c['phase']} #{c['metric']}, #{c['at']})"
+
+  # The verdict once confounders are known: unchanged when there are none,
+  # else `confounded`, naming each other commit and what the verdict would
+  # have been. Never keep, never revert.
+  def confound(v, confounders, phase:)
+    return v if confounders.empty?
+
+    reason = "another experiment's change on #{phase} landed inside the window: " \
+             "#{confounders.map { |c| confounder_text(c) }.join(', ')}; treated as inconclusive " \
+             "(unconfounded it read #{v['status']}: #{v['reason']})"
+    v.merge("status" => "confounded", "reason" => reason, "confounders" => confounders)
   end
 end

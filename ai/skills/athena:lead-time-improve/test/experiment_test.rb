@@ -728,6 +728,137 @@ check("hold_text: same-repo text is unchanged when no change_repo is given") do
     X.hold_text("custom", "i", LANDING, { "tests" => ["a/test/t.sh"] }, nil, change_repo: nil)
 end
 
+# ── the experiment trailer and confounds (DND-1529) ─────────────────────────
+
+TR = LeadTimeTrailer
+OTHER_SHA = "f" * 40
+THIRD_SHA = "d" * 40
+
+check("trailer: line builds the documented format") do
+  TR.line("custom", "verify", "phase") == "Lead-time-experiment: custom verify phase"
+end
+check("trailer: a check:<label> metric keeps its spaces (the rest of the line)") do
+  t, = TR.parse("custom integrate check:self-test: fixture/control/wait")
+  t.metric == "check:self-test: fixture/control/wait" && t.phase == "integrate"
+end
+check("trailer: line refuses parts that would not parse back (an empty phase)") do
+  TR.line("custom", "", "phase")
+  false
+rescue TR::Error => e
+  e.message.include?("no phase") && e.fix.include?(TR::FORMAT)
+end
+check("trailer: scan finds every trailer line, case-insensitive key, and reports malformed ones") do
+  s = TR.scan("subject\n\nbody\n\nlead-time-experiment: custom verify phase\nLead-time-experiment: gen_saas queue lead\n" \
+              "Lead-time-experiment: custom VERIFY phase\nCo-Authored-By: x\n")
+  s[:trailers].map(&:to_s) == ["custom verify phase", "gen_saas queue lead"] &&
+    s[:malformed].size == 1 && s[:malformed][0][1].include?("not a phase name")
+end
+check("trailer: a message with none scans to nothing") { TR.scan("fix: a thing\n")[:trailers].empty? }
+
+check("record: the matching trailer passes") do
+  X.trailer_error("x\n\nLead-time-experiment: custom verify phase\n", sha: LANDING, repo: "custom", phase: "verify", metric: "phase").nil?
+end
+check("record: no trailer is refused, the Fix naming the line and its format") do
+  what, fix = X.trailer_error("x\n", sha: LANDING, repo: "custom", phase: "verify", metric: "phase")
+  what.include?("carries no Lead-time-experiment trailer") &&
+    fix.include?("`Lead-time-experiment: custom verify phase`") && fix.include?(TR::FORMAT)
+end
+check("record: a trailer for another phase or metric is refused, naming what it carries") do
+  what, = X.trailer_error("Lead-time-experiment: custom queue phase\n", sha: LANDING, repo: "custom", phase: "verify", metric: "phase")
+  what.include?("name custom queue phase, not custom verify phase")
+end
+check("record: a malformed trailer line is named in the refusal") do
+  what, = X.trailer_error("Lead-time-experiment: custom\n", sha: LANDING, repo: "custom", phase: "verify", metric: "phase")
+  what.include?("malformed") && what.include?("no phase after custom")
+end
+
+# commits for confounders: [sha, Time, message], RECORDED-relative hours
+def tc(sha, hours, msg) = [sha, t(RECORDED) + (hours * 3600), msg]
+FROM = t(RECORDED) - (10 * 3600)
+TO = t(RECORDED) + (10 * 3600)
+
+check("window: the before-set's first landing to the after-set's last") do
+  s = { before: before_rows([600] * 10).reverse, after: after_rows([500] * 10) } # landing order, as sides gives
+  X.window(s, t(RECORDED)) == [t(RECORDED) - (10 * 3600), t(RECORDED) + (10 * 3600)]
+end
+check("window: no before-set and no after landing yet: the boundary on that side") do
+  X.window({ before: nil, after: [] }, t(RECORDED)) == [t(RECORDED), t(RECORDED)]
+end
+
+check("confounders: regression: another experiment's trailer on the same phase inside the window is named") do
+  c = X.confounders(exp, [tc(OTHER_SHA, 3, "y\n\nLead-time-experiment: gen_saas verify phase\n")], from: FROM, to: TO)
+  c[:confounders].size == 1 && c[:confounders][0]["commit"] == OTHER_SHA && c[:confounders][0]["repo"] == "gen_saas" &&
+    c[:confounders][0]["phase"] == "verify"
+end
+check("confounders: a trailer on another phase has no effect") do
+  X.confounders(exp, [tc(OTHER_SHA, 3, "Lead-time-experiment: custom queue phase\n")], from: FROM, to: TO)[:confounders].empty?
+end
+check("confounders: outside the window has no effect (either side)") do
+  m = "Lead-time-experiment: custom verify phase\n"
+  X.confounders(exp, [tc(OTHER_SHA, -11, m), tc(THIRD_SHA, 11, m)], from: FROM, to: TO)[:confounders].empty?
+end
+check("confounders: the window's edges are inside") do
+  m = "Lead-time-experiment: custom verify phase\n"
+  X.confounders(exp, [tc(OTHER_SHA, -10, m), tc(THIRD_SHA, 10, m)], from: FROM, to: TO)[:confounders].size == 2
+end
+check("confounders: the experiment's own commit and a revert of it do not count") do
+  m = "Lead-time-experiment: custom verify phase\n"
+  own_revert = "Revert x\n\nThis reverts commit #{LANDING}.\n\n#{m}"
+  X.confounders(exp, [tc(LANDING, 0, m), tc(OTHER_SHA, 2, own_revert)], from: FROM, to: TO)[:confounders].empty?
+end
+check("confounders: an instrumentation trailer (na_share) on the phase confounds no change, as it blocks none") do
+  X.confounders(exp, [tc(OTHER_SHA, 2, "Lead-time-experiment: custom verify na_share\n")], from: FROM, to: TO)[:confounders].empty?
+end
+check("confounders: an instrumentation experiment is never confounded, as it is never blocked") do
+  X.confounders(exp(kind: "instrumentation", metric: "na_share"), [tc(OTHER_SHA, 2, "Lead-time-experiment: custom verify phase\n")],
+                from: FROM, to: TO)[:confounders].empty?
+end
+check("confounders: a change trailer with another metric on the phase still confounds") do
+  X.confounders(exp, [tc(OTHER_SHA, 2, "Lead-time-experiment: custom verify check:x y\n")], from: FROM, to: TO)[:confounders].size == 1
+end
+check("confounders: phase alone matches across measured repos (one harness serves every repo)") do
+  gs = exp.merge("repo" => "gen_saas", "id" => "gen_saas:verify:x")
+  X.confounders(gs, [tc(OTHER_SHA, 2, "Lead-time-experiment: custom verify phase\n")], from: FROM, to: TO)[:confounders].size == 1
+end
+check("confounders: a settled predecessor's change inside the before-set confounds too (the window reaches back)") do
+  X.confounders(exp, [tc(OTHER_SHA, -5, "Revert y\n\nThis reverts commit #{THIRD_SHA}.\n\nLead-time-experiment: custom verify phase\n")],
+                from: FROM, to: TO)[:confounders].size == 1
+end
+check("confounders: a commit with no trailer has no effect") do
+  X.confounders(exp, [tc(OTHER_SHA, 2, "a plain commit\n")], from: FROM, to: TO)[:confounders].empty?
+end
+check("confounders: a malformed trailer is not a confounder, and is returned to be named") do
+  c = X.confounders(exp, [tc(OTHER_SHA, 2, "Lead-time-experiment: custom\n")], from: FROM, to: TO)
+  c[:confounders].empty? && c[:malformed] == [[OTHER_SHA, "custom", "no phase after custom"]]
+end
+
+KEEP_V = { "status" => "keep", "reason" => "median 600s -> 500s", "before" => { "n" => 10 }, "after" => { "n" => 10 }, "guards" => {} }.freeze
+CONF = [{ "commit" => OTHER_SHA, "at" => "2026-10-01T15:00:00Z", "repo" => "gen_saas", "phase" => "verify", "metric" => "phase" }].freeze
+
+check("confound: no confounder leaves the verdict alone") { X.confound(KEEP_V, [], phase: "verify") == KEEP_V }
+check("confound: a keep becomes confounded, naming the other commit and what it would have read") do
+  v = X.confound(KEEP_V, CONF, phase: "verify")
+  v["status"] == "confounded" && v["confounders"] == CONF && v["reason"].include?(OTHER_SHA[0, 12]) &&
+    v["reason"].include?("gen_saas verify phase") && v["reason"].include?("unconfounded it read keep") && v["before"] == KEEP_V["before"]
+end
+check("confound: a revert never stays a revert") do
+  X.confound(KEEP_V.merge("status" => "revert"), CONF, phase: "verify")["status"] == "confounded"
+end
+check("confounded: terminal, not blocking, judged, and never declinable") do
+  X.terminal?("confounded") && !X::BLOCKING.include?("confounded") && X::JUDGED.include?("confounded") &&
+    X.admit?([exp.merge("status" => "confounded")], phase: "verify", kind: "change") &&
+    X.decline_error(exp.merge("status" => "confounded", "id" => "i")).first.include?("not an owed revert")
+end
+check("confounded: a status row folds in") do
+  rows = [exp.merge("type" => "record"), { "type" => "status", "id" => exp["id"], "status" => "confounded" }]
+  f = X.fold_all(rows)
+  f[:bad_status].empty? && f[:experiments][0]["status"] == "confounded"
+end
+check("hold_text: the partial revert keeps the trailer line when given") do
+  X.hold_text("custom", "i", LANDING, { "tests" => ["a/test/t.sh"] }, nil, trailer: "Lead-time-experiment: custom verify phase")
+   .include?("and the trailer line `Lead-time-experiment: custom verify phase`")
+end
+
 # ── store ───────────────────────────────────────────────────────────────────
 
 Dir.mktmpdir("experiment-store-") do |dir|

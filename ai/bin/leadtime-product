@@ -14,7 +14,7 @@ require_relative "../lib/leadtime_product_io"
 
 HELP = <<~TXT
   Usage:
-    leadtime-product cut --repo R --phase P [--manifest FILE]
+    leadtime-product cut --repo R --phase P [--metric M] [--manifest FILE]
     leadtime-product pr --repo R --title T --body-file FILE [--manifest FILE]
     leadtime-product sweep [--manifest FILE]
     leadtime-product reap [--manifest FILE]
@@ -31,9 +31,15 @@ HELP = <<~TXT
               from R's origin/main, on branch leadtime/<R>-<phase>-<utc>, and run
               R's worktree bootstrap there (its bin/dev-setup, when it has one).
               A failed bootstrap is journaled "cannot act on R" and not retried
-              (exit 5). Prints the lane.
+              (exit 5). Prints the lane and the trailer line every lane
+              commit for this change carries (DND-1529):
+              `Lead-time-experiment: <R> <P> <M>`; --metric M is what the
+              experiment will be recorded on (default: phase).
     pr        push the lane's branch as Athena (gh-athena git push) and open the
-              PR (gh-athena pr create) with --body-file as its evidence. Records
+              PR (gh-athena pr create) with --body-file as its evidence and
+              the lane's trailer line appended. Refused (exit 2) when no lane
+              commit carries that trailer: the squash merge keeps commit
+              messages, not the PR body (DND-1529). Records
               it in <state>/product-prs.jsonl. The PR is "awaiting landing";
               the run never merges it.
   The runner uses:
@@ -84,7 +90,7 @@ def fail_with(code, msg, fix)
 end
 
 SPECS = {
-  "cut" => { "--repo" => :value, "--phase" => :value, "--manifest" => :value },
+  "cut" => { "--repo" => :value, "--phase" => :value, "--metric" => :value, "--manifest" => :value },
   "pr" => { "--repo" => :value, "--title" => :value, "--body-file" => :value, "--manifest" => :value },
   "sweep" => { "--manifest" => :value },
   "reap" => { "--manifest" => :value },
@@ -117,8 +123,9 @@ begin
   m = IO_.load_manifest(opts["--manifest"] || ENV["LEADTIME_PRODUCT_MANIFEST"])
   case sub
   when "cut"
-    r = IO_.cut(m, opts["--repo"], opts["--phase"])
+    r = IO_.cut(m, opts["--repo"], opts["--phase"], opts["--metric"] || "phase")
     puts "lane=#{r[:lane]}"
+    puts "trailer=#{r[:trailer]}"
     puts "branch=#{r[:branch]}"
     puts "base=#{r[:base]} (#{r[:fetch]})"
   when "pr"

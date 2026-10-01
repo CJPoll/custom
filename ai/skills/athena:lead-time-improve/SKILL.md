@@ -49,16 +49,17 @@ Tools, from your lane (`<skill>` is `ai/skills/athena:lead-time-improve`):
 ```
 ai/bin/lead-time-phases --ingest --repo R
 ai/bin/lead-time-phases --summary --repo R --json
-<skill>/scripts/experiment judge --repo R
-<skill>/scripts/experiment record --repo R [--change-repo C] --phase P --metric M --commit SHA --kind change|instrumentation --hypothesis-file F
+<skill>/scripts/experiment judge --repo R    # also reads Lead-time-experiment trailers: CONFOUNDED
+<skill>/scripts/experiment record --repo R [--change-repo C] --phase P --metric M --commit SHA --kind change|instrumentation --hypothesis-file F    # SHA carries "Lead-time-experiment: R P M"
 <skill>/scripts/experiment list --repo R
 <skill>/scripts/experiment decline --repo R --id ID --constraint safety-checks|bug-fix --reason-file F
 ```
 
 Each answers `--help`. Read an exit code before its output:
 `lead-time-phases` exit 3 is SCAN INCOMPLETE; `experiment` exit 3 is "could
-not look" (no ledger). Neither is "nothing to do". Exit 4 from either is
-"configured, but its checkout is not on this machine"
+not look" (no ledger, or a git log it could not read). Neither is "nothing
+to do". Exit 4 from either is "configured, but its checkout is not on this
+machine"
 (`ai/bin/lead-time-repos`): skip that repo this run and journal the skip.
 
 ## For each `improve` repo, in order
@@ -200,6 +201,27 @@ The lane and the commit wrapper are `athena:shipwright-lane`. The bar and the
 push are `athena:merge-boarding` → *The merge bar*, its no-CI `~/dev/custom`
 landing. A cron run lands that way; a directly-spawned run opens a PR, per
 `athena:shipwright-lane`.
+
+Every change, instrumentation change and revert lands with this trailer
+line in its commit message (DND-1529), in the final paragraph with the
+other trailers:
+
+```
+Lead-time-experiment: <measured repo> <phase> <metric>
+```
+
+It names what the experiment is recorded on (`custom verify phase`,
+`gen_saas integrate check:<label>`); a revert repeats its experiment's
+trailer. `experiment record` refuses a commit without the matching trailer
+(exit 2), and a landed commit cannot gain one: journal it as unrecorded. The
+store is per machine, but the trailer is on custom's main for every machine
+to read: `experiment judge` reads it, and a change on the same phase from
+another experiment inside a pending change's window makes that change
+`confounded`, settled as inconclusive, never keep and never revert. An
+`na_share` trailer confounds nothing. In a product repo, a lane commit
+carries it: `leadtime-product cut --metric M` prints the line, and `pr`
+refuses a lane with no commit carrying it (the squash keeps commit
+messages, not the PR body).
 
 A gate or the judge refusing the change (a RED, a BLOCK) is journaled, and
 the run's action ends there. Never retry around a gate. On the cron path,

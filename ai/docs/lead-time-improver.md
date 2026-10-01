@@ -242,6 +242,28 @@ Each `improve`-mode run does these steps in order:
    that never closes, distinct from the epic that built the loop. The config
    first named the build epic, so the first live run filed its tickets on an
    epic meant to close. `improvement_epic` now names the standing epic.
+
+   **Later (2026-10-01, DND-1529):** "one pending change per phase" held per
+   machine only: `experiments.jsonl` is machine-local, and the desktop and
+   the laptop both land harness changes in custom (residual R1 of the
+   multi-project design, on the epic's Architecture & Engineering page). Every
+   change, instrumentation change and revert now lands with the commit
+   trailer `Lead-time-experiment: <measured repo> <phase> <metric>`
+   (`ai/lib/lead_time_trailer.rb`); `record` refuses a commit without the
+   matching one (exit 2), and records already stored are not re-validated.
+   Judge reads custom's main (the runner's own repo; and the measured repo's
+   main when it is another, for a product-repo PR) for trailers committed
+   between the before-set's first landing and the after-set's last. A
+   trailer for the same phase from another commit, other than the
+   experiment's own and a revert of it, from any machine and any measured
+   repo, makes the verdict `confounded`: recorded, terminal, treated as
+   inconclusive, naming each other commit. It is never keep and never
+   revert. Instrumentation stays exempt both ways. A log judge cannot read
+   is exit 3, never "no confounder". No threshold or guard moved. A
+   product-repo lane commit carries the trailer (`leadtime-product cut
+   --metric` records it, and `pr` refuses a lane with no commit carrying
+   it), because locked-merge's squash keeps commit messages, not the PR
+   body.
 5. **Journal** in `ai-artifacts/lead-time/journal.md`, with a *Decisions /
    Won't-change* section the next run honours.
 

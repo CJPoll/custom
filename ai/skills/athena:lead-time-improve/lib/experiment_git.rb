@@ -140,6 +140,43 @@ module LeadTimeExperimentGit
 
   def count(field) = field.to_s.match?(/\A\d+\z/) ? Integer(field, 10) : nil
 
+  # A commit's full message (DND-1529: record reads its trailer).
+  # Source.ok([message]); a commit git cannot show is could not look.
+  def message(repo, sha)
+    return Source.could_not_look("#{repo} is not on this machine") unless File.directory?(repo)
+
+    out, err, st = Open3.capture3("git", "-C", repo, "log", "-1", "--format=%B", "#{sha}^{commit}")
+    return Source.could_not_look("git log #{sha.to_s[0, 12]} in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
+
+    Source.ok([out])
+  rescue SystemCallError => e
+    Source.could_not_look("git could not run (#{e.message})")
+  end
+
+  # Every commit reachable from the repo's main committed since `since`
+  # (DND-1529: the confound read): Source.ok([[sha, committer Time,
+  # message], ...]). Not first-parent: a trailer on a merged side commit
+  # committed since `since` still names its phase (its committer time, not
+  # its merge's, is what the domain compares; a side commit older than
+  # `since` is not seen). Which commits fall in the window, and which
+  # trailers confound, is the domain's (LeadTimeExperiment.confounders).
+  # No main, or git failing, is could not look: never "no confounder".
+  def trailer_commits(repo, since)
+    ref, why = main_ref(repo)
+    return Source.could_not_look(why) unless ref
+
+    out, err, st = Open3.capture3("git", "-C", repo, "log", "--format=%H#{FS}%ct#{FS}%B#{SEP}", "--since=#{since}", ref)
+    return Source.could_not_look("git log in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
+
+    commits = out.split(SEP).map { |c| c.sub(/\A\n+/, "") }.reject(&:empty?).map { |c| c.split(FS, 3) }
+    odd = commits.find { |sha, t, _| !LeadTimeExperiment::SHA_RE.match?(sha.to_s) || !t.to_s.match?(/\A\d+\z/) }
+    return Source.could_not_look("git log in #{repo}: an entry with no SHA or time (#{odd.first.to_s[0, 40].inspect})") if odd
+
+    Source.ok(commits.map { |sha, t, msg| [sha, Time.at(Integer(t, 10)).utc, msg.to_s] })
+  rescue SystemCallError => e
+    Source.could_not_look("git could not run (#{e.message})")
+  end
+
   # Whether main carries a commit reverting sha. Source.ok([true|false]).
   def reverted?(repo, sha)
     ref, why = main_ref(repo)
