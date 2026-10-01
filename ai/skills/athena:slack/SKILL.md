@@ -180,9 +180,23 @@ owner's next reply went by the channel route to another session (measured
 
 A claim needs the project's Slack channel declared in its
 registry entry **and** a matching server-side AgentInstance for that inbox
-on this machine (both ends, or the reply goes dark). Posts made through
+on this machine (both ends, or the reply goes dark).
+
+**A `mcp__athena__slack_post` claims its own thread** (DND-1027), server-side,
+not by this path. Pass `inbox_name` (any inbox of this project; it names the
+project) and the post claims the thread it started or joined for this
+project's Slack inbox. Pass `claim: false` when no reply is expected, or when
+you answer in a thread that should stay free for another project's session.
+Read the reply's `claim` object; on `skipped` with a reason, follow its `fix`,
+and never re-post. What each status and reason means, and how they map to this
+section's `claim=` lines: `ai/contracts/athena-events.md` → *Thread replies
+route to the thread's claimant* → *`slack_post` claims the thread it posts in*.
+
+**Later (2026-10-01, DND-1558):** this read "Posts made through
 `mcp__athena__slack_post` are not claimed by this path; claim them with the
-athena MCP `slack_thread_claim` when their replies should come back.
+athena MCP `slack_thread_claim` when their replies should come back."
+Superseded: gen_saas PR #653 shipped, so the post claims its own thread.
+`slack_thread_claim` is now the retry for a post whose claim was skipped.
 
 **Later (2026-09-25):** `post --blocks` renders display-only blocks, but a
 **button** posted through it carries no server-stamped return address. A click
@@ -364,7 +378,9 @@ Post with `mcp__athena__slack_post`:
   channel, `<project>-session.jsonl` (`athena:inbox` → *Session messages*).
   Confirm it before the first post: `mcp__athena__list_my_machines` lists this
   machine (`self: true`) with its inboxes, and `mcp__athena__lookup_inbox`
-  resolves one by name.
+  resolves one by name. It also names the project whose Slack inbox claims
+  the message's thread, so the owner's reply comes back to this project
+  (*Thread replies come back to the session that started the thread*).
 - **Never `return_to`, `return_address` or `rt`.** They are refused. The
   server stamps the return address into each button itself.
 - **`"athena_terminal": false` on an informational button** ("show details",

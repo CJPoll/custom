@@ -179,11 +179,18 @@ It's ok for there not to be any."
    exit means the digest is not posted: report the resolver's stderr line and
    its `Fix:` (`ai/contracts/athena-private-overlay.md` → *Consumer obligation*).
    Post it with `mcp__athena__slack_post` to that DM, `text`
-   plus the `blocks` array, per [[athena:slack]] → *Sending one: the athena
-   MCP, never `bin/*`*. It carries no buttons. Then claim its thread with
-   `mcp__athena__slack_thread_claim` (`channel`, `thread_ts` = the returned
-   `ts`, `inbox_name` = `custom-slack.jsonl`), so Cody's replies route to this
-   project's Slack inbox.
+   plus the `blocks` array and `inbox_name` = `custom-slack.jsonl`, per
+   [[athena:slack]] → *Sending one: the athena MCP, never `bin/*`*. It carries
+   no buttons. The post claims its own thread for that inbox, so Cody's
+   replies route to this project's Slack inbox. Check the reply's `claim`:
+   `claimed` or `already_yours` is done; on `skipped`, follow its `fix`
+   (usually `mcp__athena__slack_thread_claim` with `thread_ts` = the returned
+   `ts`), never re-post. The statuses: `ai/contracts/athena-events.md` →
+   *`slack_post` claims the thread it posts in*.
+
+   **Later (2026-10-01, DND-1558):** this step posted without `inbox_name`
+   and then claimed the thread with a separate `slack_thread_claim` call.
+   Superseded: gen_saas PR #653 made `slack_post` claim its own thread.
 4. Close the candidates you kept, one notice each (*Won't-fix notices*
    below). List them under `wont_fix` in the next pass summary, so the next
    digest names them.

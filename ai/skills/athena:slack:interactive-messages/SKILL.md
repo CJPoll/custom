@@ -57,7 +57,10 @@ before relying on it.
   (<https://docs.slack.dev/reference/methods/chat.postMessage>).
 - **`blocks` is a JSON array** in the MCP call, never a JSON-encoded string.
 - **Only buttons** may be interactive (see the phase-1 page), and a message
-  with a button needs `inbox_name`.
+  with a button needs `inbox_name`. That `inbox_name` also claims the
+  message's thread for the project's Slack inbox, unless the post passes
+  `claim: false` (`ai/contracts/athena-events.md` → *`slack_post` claims the
+  thread it posts in*).
 - **Buttons go in `slack_post` only**, never in `slack_ephemeral`: an
   ephemeral message cannot be updated, so the click never visibly settles
   (athena:slack → *After a click: the two-phase update*).
@@ -147,7 +150,10 @@ and a "your call" button.
 
 Sent with `mcp__athena__slack_post`, `text: "harness session (~/dev/custom):
 which ticket should I start next? I recommend DND-542."`, the DM's `channel`, and
-`inbox_name: "custom-session.jsonl"`. Keep the returned `{channel, ts}`. An
+`inbox_name: "custom-session.jsonl"`. Keep the returned `{channel, ts}`. The
+reply's `claim` should read `claimed` (or `already_yours`) with
+`custom-slack.jsonl`, so the owner's typed replies in the thread come back to
+this project too; on `skipped`, follow its `fix`. An
 owner click on `DND-542` arrives as a `slack.interaction` line with
 `action_id: "next_dnd_542"` and `value: "dnd-542"`. The session relays it as
 the owner's choice, and the phase-2 `slack_update` replaces the question with

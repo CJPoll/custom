@@ -4174,16 +4174,16 @@ above: the harness names only its own inbox, and the server stamps the machine
 from the authenticated token. Implementing tickets: DND-487 (claims and the MCP
 tool), DND-490 (the router), DND-491 (the harness claims on post), DND-1451
 (the router's claim), DND-1521 (a harness reply claims an unclaimed thread),
-DND-1027 (`slack_post` claims, not yet shipped). Until the router ships, every reply routes by the channel route, as before.
+DND-1027 (`slack_post` claims the thread it posts in, gen_saas PR #653). Until the router ships, every reply routes by the channel route, as before.
 
 **The claim.** A claim maps `(slack_app, team_id, channel, thread_ts)` to one
-AgentInstance. It has two writers today and a third to come. The harness
+AgentInstance. It has three writers. The harness
 writes one through the `athena` MCP tool **`slack_thread_claim`**, which takes
 five arguments: `bot_id` (selects the app), `team_id`, `channel`, `thread_ts` (the parent `ts`), and
 `inbox_name`. The Slack router writes one for a root it routed by topic (*The
 router claims a root it routed by topic*, below). The `athena` MCP tool
-`slack_post` will write one for the thread it posts in (*`slack_post` claims
-the thread it posts in*, below; DND-1027, not yet shipped).
+`slack_post` writes one for the thread it posts in (*`slack_post` claims
+the thread it posts in*, below; DND-1027).
 
 **Later (2026-10-01):** a claim was written only by the `slack_thread_claim`
 MCP tool, so a reply to a root the router had sent to a topic route followed
@@ -4236,18 +4236,70 @@ follow it.
   topic; that session answered with `reply`, claimed nothing, and the owner's
   next reply went by the channel route to another session. The owner's rule
   is that a reply goes to the session that has the conversation.
-- **`slack_post` claims the thread it posts in** (DND-1027, not yet shipped).
-  A post through the `athena` MCP tool `slack_post` claims the thread it
-  posts in for the caller's project Slack inbox, when no instance holds it.
-  The checks are the claim's own above (`ThreadClaims.claim/3`): the
-  machine is the caller's token machine, the inbox a live
-  `<project>-slack.jsonl` instance on it, and the app check
-  `:add_slack_route`. How the tool's reply reports the claim is DND-1027's
-  to define, and this bullet names it once it ships. Until then, an MCP post
-  claims nothing. Why the server can do this for `slack_post` and not for the
-  harness's own posts: the harness posts with the bot token straight to
-  Slack, and Slack's echo of a bot message carries the shared bot id, not the
-  posting session, so the server can claim only on a post it makes itself.
+- **`slack_post` claims the thread it posts in** (DND-1027, gen_saas PR #653;
+  gen_saas `Athena.Slack.PostClaim`). After a successful post through the
+  `athena` MCP tool `slack_post`, the server claims the thread the message
+  started or joined for the caller's project Slack inbox. The checks are the
+  claim's own above (`ThreadClaims.claim/3`): the machine is the caller's
+  token machine, the inbox a live `<project>-slack.jsonl` instance on it,
+  and the app check `:add_slack_route`. First claim wins. The other Slack
+  actions, and the server's own posts (the owner DM, a rule post, a route
+  flag), claim nothing.
+  - **`inbox_name` names the project, and a claim needs it.** The claim
+    targets that project's Slack inbox: `custom-slack.jsonl` is itself, and
+    `custom-session.jsonl` claims for `custom-slack.jsonl`. The project is
+    everything before the LAST `-` of the inbox stem, so a project name may
+    hold dashes and a channel name may not: `custom-harness-alerts.jsonl`
+    reads as project `custom-harness`, which has no Slack inbox, and the
+    claim is skipped as `no_slack_inbox` (follow-up DND-1556). A post with
+    no `inbox_name` claims nothing and answers `skipped`, reason
+    `no_inbox_name`.
+  - **The key is the thread Slack reports.** The thread is Slack's own
+    `message.thread_ts` when the post landed in a thread, else the caller's
+    `thread_ts`, else the new message's `ts`. Slack's answer wins, so a
+    caller that passed a reply's `ts` as `thread_ts` still claims the thread
+    Slack put the message in. The team is Slack's `message.team`.
+  - **A post with `thread_ts` claims that thread when nobody holds it**,
+    even one another project started. A thread already claimed stays its
+    holder's.
+  - **`claim: false` opts out.** The post claims nothing and answers
+    `skipped`, reason `opted_out`. The default is `true`.
+  - **The reply's `claim` object** says what happened, and a claim never
+    fails the post (the message is already sent):
+    `{"status": "claimed" | "already_yours", "inbox_name"}` (the Slack inbox
+    that holds it); `{"status": "already_claimed"}` (another inbox holds the
+    thread, never named); or `{"status": "skipped", "reason", "fix"}`. The
+    reasons are `opted_out` (no `fix`), `no_inbox_name`, `no_slack_inbox`
+    (also a claim target that is not a live Slack inbox on this machine),
+    `team_unknown` (Slack's answer carried no team id), `not_permitted` (the
+    owner may not route this app), `invalid_key`, and `claim_failed`.
+    `claim_failed` means the claim write raised after the message was sent:
+    the caller must not re-post, and claims the thread with
+    `slack_thread_claim` instead. Each `fix` is a `Fix:` line. An outcome a
+    successful post should never produce is also logged as a server warning.
+  - **The server folds a failed claim into `skipped`; the harness does not.**
+    The harness bins (`athena:slack` → *Thread replies come back to the
+    session that started the thread*) print `claim=skipped` only for
+    `--no-claim`, and a failed claim as `claim=FAILED reason=<token>` with a
+    `Fix:`. So server `skipped`/`opted_out` is harness `claim=skipped`;
+    server `skipped` with any other reason is harness `claim=FAILED`; and
+    `claimed`, `already_yours` and `already_claimed` mean the same on both
+    sides. The reason tokens are two separate vocabularies (the server's
+    snake_case, the harness's dashed tokens), not one list.
+
+  Why the server can do this for `slack_post` and not for the harness's own
+  posts: the harness posts with the bot token straight to Slack, and Slack's
+  echo of a bot message carries the shared bot id, not the posting session,
+  so the server can claim only on a post it makes itself.
+
+  **Later (2026-10-01, DND-1558):** this bullet read "DND-1027, not yet
+  shipped … How the tool's reply reports the claim is DND-1027's to define …
+  Until then, an MCP post claims nothing", and the claim had "two writers
+  today and a third to come". Superseded: gen_saas PR #653 shipped and
+  deployed on 2026-10-01, so every `slack_post` with an `inbox_name` now
+  claims its thread unless it passes `claim: false`. The reply's `claim`
+  object and its reasons above are quoted from gen_saas `origin/main`
+  (`Athena.Slack.PostClaim`, `Athena.Slack`, the `slack_post` tool).
 - **The router claims a root it routed by topic.** When the Slack router
   delivers a new conversation's root by its topic route in mode `on` (`route:
   topic_judgment` or `route: session_mention`, *New conversations may route by
@@ -4455,15 +4507,38 @@ request** and answers Slack; the route worker finishes it.
   delivered before the root's route is decided, and with the router's claim
   (*Thread replies route to the thread's claimant*) it follows the root to the
   same session. Order is promised within a key only.
-- **Step 0 is a read before a write, not a lock.** A reply whose webhook reads
-  its key before its root's webhook has committed the root's request finds no
-  request owed. So does a reply that arrives after the root's first delivery
-  failed (`storage_failed`) and before Slack's retry of the root. Such a reply
-  is routed in its own webhook by step 1 (the claim, or the channel route),
+- **Step 0 runs under a lock on the conversation key** (DND-1516, gen_saas
+  PR #656; `ConversationLock`, `ConversationLockStore`). The webhook takes a
+  transaction-scoped advisory lock on the key, and holds it from step 0's
+  read through the routing decision and the write it leads to: the route
+  request, or the line and the router's claim. So a reply whose webhook
+  overlaps its root's waits for the root's commit, then finds the root's
+  request owed (and queues behind it) or the root's line and claim (and
+  follows the claim). The nudge, the broadcast and the outcome rows run after
+  the commit. Two residuals remain. A reply whose webhook takes the lock
+  before its root's webhook does routes as a reply to a root not yet seen.
+  So does a reply that arrives after the root's first delivery failed
+  (`storage_failed`) and before Slack's retry of the root. Either is routed
+  in its own webhook by step 1 (the thread's claim, or the channel route),
   ahead of its root, and does not follow a root the worker later routes by
-  topic. Slack sends a root before its replies, so the window is that of the
-  root's own webhook. No lock is taken on the key; an advisory lock on it
-  would close the window.
+  topic.
+- **A database fault under the lock fails the delivery.** A Postgres error
+  or a lost connection anywhere in the locked phase rolls the whole phase
+  back and answers `:storage_failed` (outcome step `conversation_lock`), so
+  Slack retries (gen_saas ADR 21 rule 2). This includes a fault the topic
+  step's own guard rescued, because that leaves the transaction aborted.
+  Any other topic-step failure (a bug, an exit) still falls back to the
+  channel route with no topic, and so does any failure in the route worker,
+  which takes no lock.
+
+  **Later (2026-10-01, DND-1558):** this read "Step 0 is a read before a
+  write, not a lock … No lock is taken on the key; an advisory lock on it
+  would close the window", and a database fault in the topic step fell back
+  silently to the channel route inside the webhook. Superseded by DND-1516
+  (gen_saas PR #656, deployed 2026-10-01): the lock closes the overlap
+  window, and a database fault in the locked phase is now `:storage_failed`,
+  which Slack retries. Quoted from gen_saas `origin/main`'s
+  `Athena.SlackEvents` moduledoc (*Route requests*) and `locked/4`.
 - **Two conversations are independent, including two in one channel.** The
   worker routes up to four requests at once, so two new conversations may be
   delivered in either order. Two top-level DMs seconds apart are two keys: the
