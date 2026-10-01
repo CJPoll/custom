@@ -157,7 +157,9 @@ If the wrapper refuses with exit 3 and `RED MAIN`, `origin/main` is red
 (`ai/bin/main-health`, DND-1482) and only a gated fix may land: journal it,
 leave the commits local, and do not retry this run.
 **Never `git push --force`** on this repo. Push only `~/dev/custom` — never a
-product repo. If a run made no commits, there is nothing to push; still leave
+product repo through this skill. (A lead-time run's product-repo change is
+pushed by `ai/bin/leadtime-product`, not here: `athena:lead-time-improve` →
+*The product lane*.) If a run made no commits, there is nothing to push; still leave
 your worktree current from *Sync down first*. You do **not** update the main
 checkout yourself — the cron runner fast-forwards it after you exit, and
 doing it by hand is work in the main checkout.

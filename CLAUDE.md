@@ -597,8 +597,19 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   runner, the installer and the skill read only its result. The tracked
   default has custom `improve` and gen_saas, walt_ui `watch`. An `improve`
   repo gets the phase ledger, before/after experiments, and at most one
-  landed change per run. A `watch` repo gets the outlier scan, the
-  `ready-and-idle` sweep and an architect hand-off, and is read-only to it. A
+  change per run. A harness change lands in custom. A lead-time improve run
+  may also change any repo its OWN machine's list has in `improve` mode,
+  its local tooling and its CI/CD and deploy included, through that repo's
+  normal bar (the DND-1540 product lane: a PR, CI green, a critic PASS,
+  `integration-gate --with-critic`, `locked-merge`, `confirm-merged`, the
+  deploy concluded): a run opens the PR, and a later tick lands it. No
+  quality bar is lowered: moving a bar stays with Cody (`~/.claude/CLAUDE.md`
+  → *Owner approval policy*, item 5), and the run never clears an
+  `integration-gate` exit 4. Every other agent, and the shipwright outside
+  `MODE: lead-time`, is unchanged. The grant's words and the procedure:
+  `athena:lead-time-improve` → *The grant*, *The product lane*. A `watch`
+  repo gets the outlier scan, the `ready-and-idle` sweep and an architect
+  hand-off, and is read-only to it. A
   repo not checked out on the machine is skipped by name in the run's `.run`.
   A list that does not resolve, zero repos included, is a failed tick (exit
   78) with the resolver's `Fix:`.
@@ -607,6 +618,20 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   `ai/config/lead-time-repos.json`". Superseded: a machine-local override
   (DND-1526) can replace that file, and a session's lane copy of it cannot
   see the override, so every reader goes through the resolver.
+
+  **Later (2026-10-01, DND-1542):** the lead-time loop never touched a
+  product repo, and this bullet said "at most one landed change per run": an
+  `improve` repo other than custom acted in custom only (DND-1533;
+  `ai/docs/lead-time-improver.md` → *Who may do what*). Superseded for
+  improve-mode lead-time runs only, by the owner's grant. Cody, laptop
+  terminal, 2026-10-01 ~14:20Z: "improve gen_saas should be able to change
+  whatever in the gen_saas repo is causing lead time issues without lowering
+  quality bars. This includes things that are locally run and also CI/CD
+  improvements." Confirmed by Cody, Slack DM to Athena, 2026-10-01, relayed
+  by the custom coordinator: "Yes, the cron should work in the repos it is
+  configured to work in to improve lead time without closing quality bars".
+  A product change is a PR that a later tick lands, so "landed change" became
+  "change".
 - **One machine per repo** (coordinator, 2026-10-01): a repo appears in at
   most one machine's list, in either mode. Two journals on one repo split its
   history and double-count its landings. An overlap is a config error.
@@ -638,14 +663,20 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   an improve repo's `cursor.<repo>.txt` at 14 days back. Who may run it:
   `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify after*.
 - **State** (gitignored) is in `ai-artifacts/lead-time/`: `ledger.jsonl`,
-  `experiments.jsonl`, `journal.md`, the cursors and `runs/`. Each run's lane
-  is `.git/leadtime-lanes/run-<utc>-<pid>`, cut from `origin/main`.
+  `experiments.jsonl`, `journal.md`, the cursors and `runs/`, plus
+  `product-prs.jsonl` and `product-line-stopped.<R>` for a product repo
+  (`ai/bin/leadtime-product --help`). Each run's lane is
+  `.git/leadtime-lanes/run-<utc>-<pid>`, cut from `origin/main`; a product
+  repo's lane is the same path under that repo's git common dir.
 - **Failures:** the runner's `--help` is the normative list. Three
   unsuccessful outcomes in a row wedge it: exit 75, a `runs/<ts>.wedged`
   record, and ONE `leadtime-wedged` alert per episode. Re-arm:
   `rm ai-artifacts/lead-time/consecutive-failures`. Two blocked ticks in a row
   send ONE `leadtime-blocked` alert. A lane commit not on origin/main is
-  STRANDED (exit 72) and its branch is kept. Unlike the shipwright runner, it
+  STRANDED (exit 72) and its branch is kept; in a product lane, a commit
+  pushed on a recorded improver PR is awaiting landing instead. A failed
+  post-merge deploy stops that repo's line until the owner re-arms it (`rm`
+  its `product-line-stopped.<R>`). Unlike the shipwright runner, it
   has no dirty-main-checkout yield.
 
 ## Cron D-Bus autolaunch leak (orphaned `dbus-daemon`, inotify exhaustion)

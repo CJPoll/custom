@@ -366,14 +366,21 @@ The **lead-time improver cron** (`~/dev/custom/CLAUDE.md` → *Lead-time
 improver cron*) runs this at `--slow 90` over each `watch` repo that
 `ai/bin/lead-time-repos` resolves for the machine, newer than that repo's own
 `watch-cursor.<repo>.txt`. Each `improve` repo is measured per phase
-instead, by `ai/bin/lead-time-phases`; one other than custom acts in
-custom (`athena:lead-time-improve` → *An improve repo other than custom*).
-When a slow shape recurs (≥2 tickets sharing a cause) or one pipeline
-stage dominates the `tail`, it spawns an **athena-architect** to design a **safety-preserving** improvement. A harness
-change to `~/dev/custom` lands only as that run's one action; otherwise it is
-filed as a DND ticket on the improvement epic. Product-repo changes are filed
-as Notion tickets for the fleet (it never touches a product repo). Details
-live in `athena:lead-time-improve` (*For each `watch` repo*).
+instead, by `ai/bin/lead-time-phases`; one other than custom acts in custom
+or, through its product lane, in itself (`athena:lead-time-improve` → *An
+improve repo other than custom*). When a slow shape recurs (≥2 tickets
+sharing a cause) or one pipeline stage dominates the `tail`, it spawns an
+**athena-architect** to design a **safety-preserving** improvement. A
+harness change to `~/dev/custom` lands only as that run's one action;
+otherwise it is filed as a DND ticket on the improvement epic. A `watch`
+repo's own changes are filed as Notion tickets for the fleet: it never
+changes a `watch` repo. Details live in `athena:lead-time-improve` (*For
+each `watch` repo*, and *The product lane* for an `improve` repo).
+
+**Later (2026-10-01, DND-1542):** this read "Product-repo changes are filed
+as Notion tickets for the fleet (it never touches a product repo)".
+Superseded for `improve` repos by the owner's grant
+(`~/dev/custom/CLAUDE.md` → *Lead-time improver cron* → *Scope*).
 
 **Later (2026-10-01, DND-1533):** this read "The `improve` repo (custom) is
 measured per phase instead". Superseded: a machine's list may name an

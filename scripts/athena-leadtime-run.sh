@@ -309,7 +309,7 @@ resolve_repos
 # common dir, a PR opened as Athena, and a landing by a LATER run
 # (ai/bin/leadtime-product). With none, nothing below runs and the brief, the
 # lane and the exits are what they were before DND-1540. The lane is also off
-# until the skill names "leadtime-product pr" (DND-1533; see below).
+# unless the skill names "leadtime-product pr" (DND-1542; see below).
 PRODUCT_NAMES=(); PRODUCT_PATHS=(); PRODUCT_IDLE=()
 if [ "${RES_RC}" -eq 0 ]; then
   while IFS=$'\t' read -r pn pp pw; do
@@ -330,14 +330,15 @@ export LEADTIME_PRODUCT_SWEEP_TIMEOUT="${SWEEP_TIMEOUT}"
 PRODUCT_TOOL="${MAIN_CHECKOUT}/ai/bin/leadtime-product"
 PRODUCT_LINE="product_prs=0 landed=none"
 PRODUCT_DETAIL=""
-# The product lane stays OFF until the skill the session runs carries its
-# procedure (DND-1533). Until then the skill says a product repo is never the
-# session's to commit, and a brief saying the opposite would give the session
-# two contradictory orders. The skill opts in by naming the command
+# The product lane is OFF unless the skill the session runs carries its
+# procedure (athena:lead-time-improve -> The product lane, DND-1542). A skill
+# without it says a product repo is never the session's to commit, and a
+# brief saying the opposite would give the session two contradictory orders.
+# The skill opts in by naming the command
 # "leadtime-product pr" in the main checkout's SKILL.md. While OFF, a listed
 # repo gets no lane and no product text in the brief, and .run says so.
 if [ "${#PRODUCT_NAMES[@]}" -gt 0 ] && ! grep -qF 'leadtime-product pr' -- "${SKILL_FILE}" 2>/dev/null; then
-  PRODUCT_DETAIL="product_lane=OFF repos=${PRODUCT_NAMES[*]}: ${SKILL_FILE} has no product-lane procedure yet (DND-1533), so these improve repos get no lane, no PR and no product text in the brief"
+  PRODUCT_DETAIL="product_lane=OFF repos=${PRODUCT_NAMES[*]}: ${SKILL_FILE} has no product-lane procedure (DND-1542), so these improve repos get no lane, no PR and no product text in the brief"
   PRODUCT_NAMES=(); PRODUCT_PATHS=(); PRODUCT_IDLE=()
 fi
 PRODUCT_SWEEP_TEXT="not run (dry run)"
@@ -367,8 +368,8 @@ product_brief() {
   sweep="${PRODUCT_LINE}${PRODUCT_SWEEP_TEXT:+ (${PRODUCT_SWEEP_TEXT})}"
   PRODUCT_BRIEF="Product repos (improve, other than custom) on this machine: ${list}. Unlike your \
 custom lane, a change to a product repo goes in that repo's own product lane and a PR: run \
-${PRODUCT_TOOL} cut --repo <name> --phase <phase> (it prints the lane; work only there), commit \
-there, then ${PRODUCT_TOOL} pr --repo <name> --title <title> --body-file <your evidence file>, which \
+${PRODUCT_TOOL} cut --repo <name> --phase <phase> --metric <metric> (it prints the lane and the \
+trailer line; work only there), commit there with that trailer line in the message, then ${PRODUCT_TOOL} pr --repo <name> --title <title> --body-file <your evidence file>, which \
 pushes as Athena and opens the PR (LEADTIME_PRODUCT_MANIFEST is already exported). Never merge, land \
 or wait on a product PR or its CI: a later run lands it through that repo's own bar. An unpushed \
 commit left in a product lane is STRANDED. Product PRs this tick: ${sweep}. "

@@ -427,6 +427,19 @@ This is single-user, on-machine harness work. Who and how:
   architect files.
 - It never touches a product repo. The lane is a custom worktree, and
   `watch`-mode repos are read-only to it.
+
+  **Later (2026-10-01, DND-1542):** this bullet, "It writes only
+  `~/dev/custom`" above it, decision 9's "Never a product repo", and
+  "acts in custom only" in the DND-1533 note under decision 3 are
+  superseded for improve-mode runs only, by the owner's grant (Cody, laptop
+  terminal, 2026-10-01 ~14:20Z, and Cody's confirmation by Slack DM to
+  Athena the same day). A run may change
+  any repo its own machine's list has in `improve` mode, its local tooling
+  and CI/CD included, through that repo's normal bar and the DND-1540
+  product lane: a run opens the PR, and a later tick lands it. No quality
+  bar is lowered, and `watch`-mode repos stay read-only. The grant's words
+  and scope: `~/dev/custom/CLAUDE.md` → *Lead-time improver cron* →
+  *Scope*; the procedure: `athena:lead-time-improve` → *The product lane*.
 - Telemetry files are 0600 in a 0700 directory, and the registry keeps
   secrets and work values out by construction.
 - Running the installer is a *Notify after* item
