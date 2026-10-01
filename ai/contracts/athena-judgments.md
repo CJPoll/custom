@@ -382,8 +382,8 @@ above the lowest (DND-1097). `urgency:none` and `importance:nice_to_have` add
 nothing to the rank (`athena-events.md` → *Ranking*), so an enabled lowest
 level alone cannot turn it on. In `on` the policy also acts on an accepted
 `does_not_block` (it may remove a non-security claim), and a `does_not_block`
-is accepted only when its OWN threshold row is enabled and met (gen_saas `Decision.decide_reading`
-reads the answered label's row; a disabled or absent row is
+is accepted only when its OWN threshold row is enabled and met (gen_saas
+`Decision.decide_reading` reads the answered label's row; a disabled or absent row is
 `label_disabled` or `threshold_unset`, a fallback). So an `on` set on
 `blocks` alone never removes a claim. A
 use case whose question set declares no advisory label cannot be turned on.

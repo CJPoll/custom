@@ -6272,12 +6272,12 @@ or a digest can render them:
   them. In `round(weight × (level - 1))`, `level` is the accepted level's
   position on the question set's scale, 1 to 4 in `priority_scoring` v1, so a
   judged delta is 0 to `3 × weight`. The lowest level ("no urgency", "nice to
-  have") adds 0: an item judged lowest on both Scores ties on score with an
-  item never judged (*Ties* below), and never outranks it. The weights live in
-  code as `Rules` defaults. At the default judged weights of 10 the largest
-  combined judged delta is `3 × (10 + 10)` = 60. The default `vip_asker`
-  weight is strictly greater than it, so a VIP ask outranks an otherwise-equal
-  ask. A weight change rescores with no new judgment.
+  have") adds 0: an item judged lowest on both scores ties on score with an
+  otherwise-equal item never judged, so the judgment gains it nothing; *Ties*
+  below orders the two. The weights live in code as `Rules` defaults. At the
+  default judged weights of 10 the largest combined judged delta is
+  `3 × (10 + 10)` = 60. The default `vip_asker` weight (100) is strictly
+  greater than it, so a VIP ask outranks an otherwise-equal ask. A weight change rescores with no new judgment.
 
   **Later (2026-10-01, DND-1097):** the delta was `round(weight × score)`,
   `score` 1 to 4, so a judged delta was at most `4 × weight` and the lowest
