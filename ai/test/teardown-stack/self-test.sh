@@ -51,7 +51,8 @@ case "$1" in
           lines = Dir.glob(File.join(root, "res", "*", kind)).flat_map { |f| File.readlines(f, chomp: true) }
           puts JSON.dump(want.map { |w| l = lines.find { |x| x.split(" ").first == w } or abort("no such #{kind} #{w}")
             a, b = l.split(" ")
-            kind == "volumes" ? { "Name" => a, "CreatedAt" => b || "2026-01-01T00:00:00Z" } : { "Id" => a, "Name" => b || a } })
+            kind == "volumes" ? { "Name" => a, "CreatedAt" => b || "2026-01-01T00:00:00Z", "Labels" => { "com.docker.compose.volume" => a } }
+                              : { "Id" => a, "Name" => b || a, "Labels" => { "com.docker.compose.network" => b || a } } })
         ' "${kind}" "${ST}" "$@" ;;
       rm)
         [ -f "${ST}/rm_fail" ] && { echo "Error response from daemon: remove: volume is in use" >&2; exit 1; }
@@ -66,6 +67,15 @@ case "$1" in
       *) echo "docker stub: unexpected ${kind} ${sub} $*" >&2; exit 99 ;;
     esac ;;
   compose)
+    # `compose -p P config --volumes|--networks`: the keys the compose file
+    # declares; $ST/declared_<kind> overrides (default: every resource of P).
+    if [ "$4" = config ]; then
+      k="${5#--}"
+      if [ -f "${ST}/declared_${k}" ]; then cat "${ST}/declared_${k}"
+      elif [ "${k}" = volumes ]; then list "$3" volumes | cut -d' ' -f1
+      else list "$3" networks | awk '{ print ($2 == "" ? $1 : $2) }'; fi
+      exit 0
+    fi
     echo "CWD $(pwd -P) PROJECT $3" >> "${ST}/compose.log"
     [ -f "${ST}/linger" ] || rm -rf "${ST}/res/$3" ;;
   *) echo "docker stub: unexpected $*" >&2; exit 99 ;;
@@ -244,6 +254,33 @@ fixture r5 unused; run --record --worktree "${REPO}"; expect "r5 record, main ch
 # r6 docker unreachable: 3, no marker.
 fixture r6 unused; touch "${ST}/down"; run --record --worktree "${WT}/dnd-1-x"; expect "r6 record, docker down" 3
 [ -f "${MARKER}" ] && bad "r6 wrote a marker" || ok "r6 no marker"
+# r8 a volume re-created (down -v, up) and re-recorded is pinned at its new
+# creation time only, so the merge still removes it.
+fixture r8 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"
+printf 'v1\nv2 2026-10-02T00:00:00Z\nv3\n' > "${ST}/res/dnd-1-x/volumes"
+run --record --worktree "${WT}/dnd-1-x"; expect "r8 re-record" 0; captain_down
+run --pr 5; expect "r8 re-created then re-recorded volume" 0; has "r8 torn down" "TORN DOWN project dnd-1-x"
+# r9 a labelled volume this worktree's compose config does not declare (a
+# same-basename checkout's leftover) is never recorded, and so never removed.
+fixture r9 dnd-1-x; printf 'v1\nv2\nv3\n' > "${ST}/declared_volumes"; printf 'v1\nv2\nv3\nvX\n' > "${ST}/res/dnd-1-x/volumes"
+run --record --worktree "${WT}/dnd-1-x"; expect "r9 record with an undeclared volume" 0
+has "r9 names the undeclared volume it skipped" "NOT recorded, labelled dnd-1-x but not declared by ${WT}/dnd-1-x's compose config: volume vX"
+grep -qF '"name":"vX"' "${MARKER}" && bad "r9 recorded an undeclared volume" "$(cat "${MARKER}")" || ok "r9 vX not in the marker"
+captain_down; run --pr 5; expect "r9 merge refuses the undeclared volume" 2; no_rm r9; has "r9 names vX" "volume vX: not recorded"
+# r10 --record over a corrupt marker replaces it.
+fixture r10 dnd-1-x; echo garbage > "${MARKER}"; run --record --worktree "${WT}/dnd-1-x"; expect "r10 record over a corrupt marker" 0
+has "r10 says it replaced it" "replacing an unreadable stack marker"; grep -qF '"name":"v1"' "${MARKER}" && ok "r10 marker rewritten" || bad "r10 marker" "$(cat "${MARKER}")"
+# m8 `docker volume rm` fails: 4, docker's error carried.
+fixture m8 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; captain_down; touch "${ST}/rm_fail"
+run --pr 5; expect "m8 volume rm fails" 4; has "m8 carries docker's error" "docker said: Error response from daemon"
+# m9 parked mode goes through the same marker path.
+fixture m9 unused; run --record --worktree "${WT}/dnd-1-x"; captain_down
+run --worktree "${WT}/dnd-1-x" --parked STUCK; expect "m9 parked, volumes only" 0; has "m9 torn down by its marker" "by its stack marker"
+# m10 a marker that exists but cannot be read: 3, never "no marker".
+if [ "$(id -u)" -ne 0 ]; then
+  fixture m10 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; captain_down; chmod 000 "${MARKER}"
+  run --pr 5; expect "m10 unreadable marker file" 3; no_rm m10; chmod 600 "${MARKER}"
+fi
 # r7 --record is a mode of its own.
 fixture r7 unused; run --record --pr 5; expect "r7 record with --pr" 2; run --record --worktree "${WT}/dnd-1-x" --parked x; expect "r7 record with --parked" 2
 # t9 docker down: 3, not "nothing up".

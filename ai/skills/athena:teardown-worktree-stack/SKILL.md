@@ -59,8 +59,10 @@ a script (tier 1 below).
   project name is the worktree basename, which another checkout can share. So
   `teardown-stack --record --worktree <wt>` writes
   `<the worktree's git dir>/athena-stack-marker.json` while the containers
-  still prove the stack is that worktree's: the worktree, the project, each
-  volume by name and creation time, each network by id. `integration-gate`
+  still prove the stack is that worktree's: the worktree, the project, and
+  each volume (by name and creation time) and network (by id) whose compose
+  key the worktree's own `docker compose config` declares. A labelled
+  resource it does not declare is named and not recorded. `integration-gate`
   runs it after every gate, so every gated worktree has one. The git dir
   belongs to that one worktree and goes with it. At teardown, exactly the
   matched volumes and networks are removed (`docker volume rm`, `docker

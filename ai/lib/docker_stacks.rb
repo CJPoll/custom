@@ -43,6 +43,9 @@ module DockerStacks
   REPO_SCRIPTS = %w[bin/teardown-worktree-stack.sh .claude/teardown-worktree-stack.sh].freeze
   PROJECT_LABEL = "com.docker.compose.project"
   WORKDIR_LABEL = "com.docker.compose.project.working_dir"
+  # The compose-file key a volume / network was created for.
+  VOLUME_LABEL = "com.docker.compose.volume"
+  NETWORK_LABEL = "com.docker.compose.network"
 
   module_function
 
@@ -91,7 +94,8 @@ module DockerStacks
       configs = (n.dig("IPAM", "Config") || [])
       subnets = configs.map { |c| c["Subnet"] }.compact.select { |s| ip(s).ipv4? }
       labels = n["Labels"] || {}
-      { id: n["Id"], name: n["Name"], subnets: subnets, project: labels[PROJECT_LABEL], containers: (n["Containers"] || {}).size }
+      { id: n["Id"], name: n["Name"], key: labels[NETWORK_LABEL], subnets: subnets, project: labels[PROJECT_LABEL],
+        containers: (n["Containers"] || {}).size }
     end
   end
 
@@ -104,7 +108,7 @@ module DockerStacks
       ok = v.is_a?(Hash) && v["Name"].is_a?(String) && v["CreatedAt"].is_a?(String) && !v["CreatedAt"].empty?
       raise Unreadable, "volume entry without a Name and CreatedAt: #{v.inspect[0, 120]}" unless ok
 
-      { name: v["Name"], created_at: v["CreatedAt"] }
+      { name: v["Name"], created_at: v["CreatedAt"], key: (v["Labels"] || {})[VOLUME_LABEL] }
     end
   end
 
@@ -130,9 +134,24 @@ module DockerStacks
     raise Refused, "marker project is empty" if project.to_s.empty?
 
     same = prior && prior[:worktree] == worktree && prior[:project] == project
-    vols = ((same ? prior[:volumes] : []) + volumes).uniq
-    nets = ((same ? prior[:networks] : []) + networks).uniq
+    vols = volumes.map { |v| { name: v[:name], created_at: v[:created_at] } }
+    nets = networks.map { |n| { id: n[:id], name: n[:name] } }
+    if same
+      # This record's view of a volume wins: a volume re-created since the last
+      # record is pinned at its new creation time, never at both.
+      vols = prior[:volumes].reject { |v| vols.map { |c| c[:name] }.include?(v[:name]) } + vols
+      nets = (prior[:networks] + nets).uniq
+    end
     { schema: MARKER_SCHEMA, worktree: worktree, project: project, recorded_at: at, volumes: vols, networks: nets }
+  end
+
+  # -> [declared, undeclared]: resources whose compose key (VOLUME_LABEL or
+  # NETWORK_LABEL) this worktree's compose config declares, and the rest. Only
+  # the declared ones are this worktree's to record: the project label alone is
+  # shared by any checkout with the same basename, and `down -v` itself only
+  # removes what the compose file declares. A resource with no key is undeclared.
+  def split_declared(resources, keys)
+    resources.partition { |r| r[:key] && keys.include?(r[:key]) }
   end
 
   # raw: the marker file's text. A marker that cannot be read is Unreadable,

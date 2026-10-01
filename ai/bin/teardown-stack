@@ -42,8 +42,9 @@
 # project's volumes and no container, and a volume's labels name the project
 # but not the worktree, so tier 2 cannot attribute them. --record writes
 # <the worktree's git dir>/athena-stack-marker.json while the containers still
-# prove the stack is this worktree's: the worktree, the project, each volume
-# by name and creation time, each network by id. integration-gate records it
+# prove the stack is this worktree's: the worktree, the project, and each
+# volume (by name and creation time) and network (by id) whose compose key the
+# worktree's own compose config declares. integration-gate records it
 # on every run in a linked worktree. At teardown, a project with no container
 # left is removed only when the marker names this worktree and project and
 # matches every remaining resource; then exactly those volumes and networks
@@ -268,6 +269,15 @@ def teardown_by_marker(host, wt, project, left, dry_run)
   what = "#{names.size} volume(s) [#{names.join(' ')}], #{ids.size} network(s) [#{nets.map { |n| n[:name] }.join(' ')}]"
   return puts("teardown-stack: DRY RUN would remove #{what} of project #{project} by its stack marker #{path}") if dry_run
 
+  # Re-read right before removing: a resource re-created between the match and
+  # the removal would otherwise be removed unmatched. Residual, accepted: the
+  # window between this read and `docker volume rm` (docker refuses to remove a
+  # volume a container uses).
+  pin = ->(v, n) { [v.map { |x| [x[:name], x[:created_at]] }.sort, n.map { |x| x[:id] }.sort] }
+  unless pin.call(host.project_volumes(project), host.project_networks(project)) == pin.call(vols, nets)
+    stop(2, "project #{project}'s volumes or networks changed between the stack-marker match and the removal; nothing removed",
+         "something is re-creating this stack; check who (docker ps -a, docker volume ls filtered by label #{DockerStacks::PROJECT_LABEL}=#{project}), then re-run.")
+  end
   $destroying = true
   failed = []
   [[names, :remove_volumes], [ids, :remove_networks]].each do |list, op|
@@ -297,7 +307,8 @@ def record(host, wt, dry_run)
   return puts("teardown-stack: #{wt} is a main checkout, which runs no fleet stack; nothing recorded") if git_dir == common
 
   top = host.git(wt, "rev-parse", "--show-toplevel")
-  stop(2, "#{wt} is not a worktree's top level (that is #{top})", "pass --worktree #{top}.") unless top && File.realpath(top) == wt
+  raise DockerStacks::Unreadable, "git rev-parse --show-toplevel failed in #{wt}" if top.nil? || top.empty?
+  stop(2, "#{wt} is not a worktree's top level (that is #{top})", "pass --worktree #{top}.") unless File.realpath(top) == wt
   if (script = repo_script(host, wt, wt))
     return puts("teardown-stack: #{wt} is torn down by its repo script #{script}, which needs no stack marker; nothing recorded")
   end
@@ -329,9 +340,20 @@ def record(host, wt, dry_run)
     warn "teardown-stack: replacing an unreadable stack marker: #{e.message}"
     nil
   end
-  doc = DockerStacks.build_marker(worktree: wt, project: project, volumes: host.project_volumes(project),
-                                  networks: host.project_networks(project), prior: prior, at: Time.now.utc.iso8601)
+  # Only what this worktree's compose config declares: the project label alone
+  # is shared by any checkout with the same basename (a stopped-and-downed
+  # stack of another repo's same-named branch leaves volumes no container ties
+  # to anyone).
+  declared = host.compose_declared(project, wt)
+  vols, other_vols = DockerStacks.split_declared(host.project_volumes(project), declared[:volumes])
+  nets, other_nets = DockerStacks.split_declared(host.project_networks(project), declared[:networks])
+  doc = DockerStacks.build_marker(worktree: wt, project: project, volumes: vols, networks: nets, prior: prior,
+                                  at: Time.now.utc.iso8601)
   summary = "project #{project}, #{doc[:volumes].size} volume(s), #{doc[:networks].size} network(s)"
+  skipped = other_vols.map { |v| "volume #{v[:name]}" } + other_nets.map { |n| "network #{n[:name]}" }
+  unless skipped.empty?
+    summary += "; NOT recorded, labelled #{project} but not declared by #{wt}'s compose config: #{skipped.join(', ')}"
+  end
   return puts("teardown-stack: DRY RUN would record stack marker #{path}: #{summary}") if dry_run
 
   host.write_marker(path, "#{JSON.generate(doc)}\n")

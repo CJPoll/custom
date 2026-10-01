@@ -199,7 +199,25 @@ m = DS.match_marker(round, wt, "dnd-1-x", vols, nets, 1)
 check("match: a container of the project still exists -> refused") { m[:verdict] == :refused }
 
 ins = DS.volumes_from_inspect('[{"Name":"v1","CreatedAt":"2026-10-01T10:00:00-06:00","Labels":{}}]')
-check("volume inspect: name and creation time") { ins == [{ name: "v1", created_at: "2026-10-01T10:00:00-06:00" }] }
+check("volume inspect: name and creation time") { ins == [{ name: "v1", created_at: "2026-10-01T10:00:00-06:00", key: nil }] }
+ins = DS.volumes_from_inspect('[{"Name":"p_pg","CreatedAt":"t","Labels":{"com.docker.compose.volume":"pg"}}]')
+check("volume inspect: the compose key") { ins.first[:key] == "pg" }
+
+re1 = DS.build_marker(worktree: wt, project: "dnd-1-x", volumes: [{ name: "dnd-1-x_pg", created_at: "T1" }], networks: [], prior: nil, at: "t")
+re2 = DS.build_marker(worktree: wt, project: "dnd-1-x", volumes: [{ name: "dnd-1-x_pg", created_at: "T2" }], networks: [], prior: re1, at: "t")
+check("marker: a volume re-created and re-recorded is pinned once, at its new time") do
+  re2[:volumes] == [{ name: "dnd-1-x_pg", created_at: "T2" }] &&
+    DS.match_marker(re2, wt, "dnd-1-x", [{ name: "dnd-1-x_pg", created_at: "T2" }], [], 0)[:verdict] == :ok
+end
+check("marker: the compose key is not stored") do
+  DS.build_marker(worktree: wt, project: "p", volumes: [{ name: "v", created_at: "t", key: "k" }], networks: [], prior: nil, at: "t")[:volumes] ==
+    [{ name: "v", created_at: "t" }]
+end
+
+mine, theirs = DS.split_declared([{ name: "p_pg", key: "pg" }, { name: "p_other", key: "other" }, { name: "x", key: nil }], %w[pg])
+check("split_declared: only keys this compose config declares are this worktree's") do
+  mine.map { |r| r[:name] } == ["p_pg"] && theirs.map { |r| r[:name] } == %w[p_other x]
+end
 check("volume inspect: an entry without CreatedAt is unreadable") do
   raises?(DS::Unreadable) { DS.volumes_from_inspect('[{"Name":"v1"}]') }
 end

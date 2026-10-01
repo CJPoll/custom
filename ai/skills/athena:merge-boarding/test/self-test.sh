@@ -1543,7 +1543,8 @@ case "\$1 \$2" in
   "ps "*) case "\$*" in *"project=sm1-wt"*) echo c1 ;; *) echo c1 ;; esac ;;
   "inspect "*) echo '[{"Config":{"Labels":{"com.docker.compose.project":"sm1-wt","com.docker.compose.project.working_dir":"$2"}}}]' ;;
   "volume ls") echo sm1-wt_pg ;;
-  "volume inspect") echo '[{"Name":"sm1-wt_pg","CreatedAt":"2026-10-01T00:00:00Z"}]' ;;
+  "volume inspect") echo '[{"Name":"sm1-wt_pg","CreatedAt":"2026-10-01T00:00:00Z","Labels":{"com.docker.compose.volume":"pg"}}]' ;;
+  "compose -p") case "\$*" in *--volumes*) echo pg ;; *) : ;; esac ;;
   "network ls") : ;;
   *) echo "sm docker stub: unexpected \$*" >&2; exit 99 ;;
 esac

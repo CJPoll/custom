@@ -132,8 +132,19 @@ module DockerStacks
       DockerStacks.networks_from_inspect(run!([@docker, "network", "inspect", *ids])).map do |n|
         raise Unreadable, "docker network inspect: network #{n[:name]} has no Id" if n[:id].to_s.empty?
 
-        { id: n[:id], name: n[:name] }
+        { id: n[:id], name: n[:name], key: n[:key] }
       end
+    end
+
+    # The volume and network keys the worktree's compose config declares
+    # (`docker compose config --volumes / --networks`, run in the worktree, so
+    # its override file is merged as compose itself would). A config that
+    # cannot be read raises Unreadable, never "declares nothing".
+    def compose_declared(project, wt)
+      keys = lambda do |flag|
+        run!([@docker, "compose", "-p", project, "config", flag], chdir: wt).split
+      end
+      { volumes: keys.call("--volumes"), networks: keys.call("--networks") }
     end
 
     # Remove exactly these volumes / networks. -> [stdout, stderr, success?]
