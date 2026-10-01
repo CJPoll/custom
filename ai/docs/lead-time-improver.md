@@ -207,6 +207,11 @@ Each `improve`-mode run does these steps in order:
      on the improvement epic named in the config; or
    - record "no action" with the reason.
 
+   **Later (2026-10-01, DND-1508):** the improvement epic is a standing epic
+   that never closes, distinct from the epic that built the loop. The config
+   first named the build epic, so the first live run filed its tickets on an
+   epic meant to close. `improvement_epic` now names the standing epic.
+
    No new experiment may start on a phase that already has one pending.
    Two changes on one phase confound each other. Instrumentation is exempt,
    because it does not move a duration.
