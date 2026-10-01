@@ -1,0 +1,8 @@
+{"id": "over-1-ahead-line-before-fail", "label": "LOW", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "over-2-eval-cannot-measure-undeployed", "label": "LOW", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "over-3-lint-misses-bound-phrase", "label": "LOW", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "over-4-parity-one-codepoint", "label": "LOW", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "over-5-dev-seed-prints-token", "label": "LOW", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "over-6-ingress-lock-no-timeout", "label": "HIGH", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "under-1-async-refute-generic", "label": "MEDIUM", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "under-2-flaky-turned-main-red", "label": "HIGH", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}

@@ -339,6 +339,18 @@ has "the DND-1607 fixture excludes no proposed label" "${OUT}" "proposed exclude
 eq "the DND-1607 fixture dry run reports no join miss" "${ERR}" ""
 eq "the DND-1607 fixture dry run sends nothing" "$(requests)" "${n}"
 
+# The committed ticket_severity measurement fixture (DND-1600): the eight
+# owner overrides of ticket-severity-v1, paraphrased. It is the before/after
+# set for ticket-severity-v2, judged on the bar its README registered before
+# any run, so it must keep joining: 8 cases, nothing excluded.
+TSF="${HERE}/fixtures/ticket-severity-dnd-1600"
+run --use-case ticket_severity --labels "${TSF}/labels.jsonl" --corpus "${TSF}/corpus.jsonl" --dry-run
+eq "the DND-1600 ticket_severity fixture dry-runs clean" "${RC}" "0"
+has "the DND-1600 fixture joins all 8 cases, HIGH 2, LOW 5, MEDIUM 1" "${OUT}" "cases: 8 (HIGH 2, LOW 5, MEDIUM 1)"
+has "the DND-1600 fixture excludes no proposed label" "${OUT}" "proposed excluded: 0"
+eq "the DND-1600 fixture dry run reports no join miss" "${ERR}" ""
+eq "the DND-1600 fixture dry run sends nothing" "$(requests)" "${n}"
+
 printf '{"id":"zz","label":"x","provenance":"owner_confirmed"}\n' > "${TMP}/labels-none.jsonl"
 run --use-case finding_triage --labels "${TMP}/labels-none.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --dry-run
 eq "no label joining the corpus is exit 1, never an empty run" "${RC}" "1"
