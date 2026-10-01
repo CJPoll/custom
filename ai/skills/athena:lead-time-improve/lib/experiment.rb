@@ -336,18 +336,35 @@ module LeadTimeExperiment
     end
 
     worse = guards.select { |_, d| d.is_a?(Hash) && d["state"] == "worse" }.keys
-    return nil if worse.empty?
+    unless worse.empty?
+      names = worse.join(", ")
+      return ["#{exp['id']}'s revert verdict came from a worse guard: #{names}",
+              "a guard worsened (#{names}): land the revert, or a fix-forward ticketed by an architect; " \
+              "decline does not cover a quality regression"]
+    end
 
-    names = worse.join(", ")
-    ["#{exp['id']}'s revert verdict came from a worse guard: #{names}",
-     "a guard worsened (#{names}): land the revert, or a fix-forward ticketed by an architect; " \
-     "decline does not cover a quality regression"]
+    # A guard that could not be measured may hide a regression, the same
+    # reason keep waits on one: only an all-ok revert is median-only.
+    unsure = guards.reject { |_, d| d.is_a?(Hash) && d["state"] == "ok" }.keys
+    return nil if unsure.empty?
+
+    ["#{exp['id']}'s revert verdict has guard(s) not measured ok: #{unsure.join(', ')}",
+     "re-judge once #{unsure.join(', ')} can be measured, or land the revert; " \
+     "decline covers only a revert whose guards are all measured and not worse"]
+  end
+
+  # nil, or why a decline constraint is not one of CONSTRAINTS.
+  def constraint_error(constraint)
+    return nil if CONSTRAINTS.include?(constraint)
+
+    "unknown constraint #{constraint.inspect} (known: #{CONSTRAINTS.join(', ')})"
   end
 
   # The status row the decline verb appends: the revert row's numbers and
   # reason kept beside the constraint and why it was declined.
   def decline_row(exp, constraint:, reason:, now:)
-    raise UsageError, "unknown constraint #{constraint.inspect} (known: #{CONSTRAINTS.join(', ')})" unless CONSTRAINTS.include?(constraint)
+    why = constraint_error(constraint)
+    raise UsageError, why if why
 
     last = exp["last"] || {}
     { "type" => "status", "schema" => SCHEMA, "id" => exp["id"], "status" => "declined", "constraint" => constraint,

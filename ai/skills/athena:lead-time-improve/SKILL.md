@@ -1,6 +1,6 @@
 ---
 name: athena:lead-time-improve
-description: The procedure an athena-shipwright runs when its brief says `MODE: lead-time` (a lead-time improver run) — for each `improve` repo in ai/config/lead-time-repos.json, ingest the phase ledger, judge pending before/after experiments (keep, revert, pending, inconclusive) with scripts/experiment, pick the biggest phase, act exactly once (one safety-preserving change, one instrumentation change, one architect, or no action), and journal; for each `watch` repo, the outlier scan and architect hand-off the shipwright ran before. Use whenever a brief or prompt says "MODE: lead-time" or "lead-time improver run".
+description: The procedure an athena-shipwright runs when its brief says `MODE: lead-time` (a lead-time improver run) — for each `improve` repo in ai/config/lead-time-repos.json, ingest the phase ledger, judge pending before/after experiments (keep, revert, pending, inconclusive; decline a revert the hard constraint forbids) with scripts/experiment, pick the biggest phase, act exactly once (one safety-preserving change, one instrumentation change, one architect, or no action), and journal; for each `watch` repo, the outlier scan and architect hand-off the shipwright ran before. Use whenever a brief or prompt says "MODE: lead-time" or "lead-time improver run".
 ---
 
 # athena:lead-time-improve
@@ -46,6 +46,7 @@ ai/bin/lead-time-phases --summary --repo R --json
 <skill>/scripts/experiment judge --repo R
 <skill>/scripts/experiment record --repo R --phase P --metric M --commit SHA --kind change|instrumentation --hypothesis-file F
 <skill>/scripts/experiment list --repo R
+<skill>/scripts/experiment decline --repo R --id ID --constraint safety-checks|bug-fix --reason-file F
 ```
 
 Each answers `--help`. Read an exit code before its output:
@@ -78,8 +79,9 @@ before and after numbers, and records the verdict.
   `experiment decline --repo R --id <id> --constraint <safety-checks|bug-fix>
   --reason-file <F>` and journal the decision under *Decisions /
   Won't-change* with the reason. Decline is bookkeeping, not the run's one
-  action, so steps 3-5 proceed. `decline` refuses a revert that a worse guard
-  drove (critic BLOCK rate, gate red rate, reverts): that one is a quality
+  action: after a decline, continue to step 3 as usual. `decline` refuses a
+  revert that a worse guard drove (critic BLOCK rate, gate red rate,
+  reverts), or one with a guard it could not measure: that may be a quality
   regression, so land the revert or hand a fix-forward to an architect.
   Otherwise this run's one action is a `git revert` of that experiment's
   commit, landed through *Landing* below. Skip steps 4 and 5. Judge records
@@ -202,6 +204,7 @@ Append to `<state>/journal.md`, in the shipwright's journal shape (its
 ### Experiments
 - <id> <verdict>: before n/median/p90 -> after n/median/p90; guards; reason
 - recorded <id>: <phase> <metric>, baseline <numbers>
+- <id> declined (<constraint>): <reason>
 
 ### Watched, not actioned
 - <finding> (biggest phase, n/a reasons, why no action)
@@ -304,7 +307,7 @@ Write one summary line per repo to the summary file your brief names; else
 `<state>/runs/<UTC %Y%m%dT%H%M%SZ>.summary`:
 
 ```
-repo=<R> mode=improve biggest=<phase|none> action=<change|instrumentation|architect|revert|no-action> experiments=keep:<n>,revert:<n>,pending:<n>,inconclusive:<n> reason="<one line>"
+repo=<R> mode=improve biggest=<phase|none> action=<change|instrumentation|architect|revert|no-action> experiments=keep:<n>,revert:<n>,pending:<n>,inconclusive:<n>,declined:<n> reason="<one line>"
 repo=<R> mode=watch outliers=<n> qualified=<n> handed_off=<n> ready_and_idle=<n|unavailable>
 ```
 

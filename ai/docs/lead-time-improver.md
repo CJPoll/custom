@@ -260,8 +260,8 @@ p90 over the last K comparable landings), and a status.
   admitted no new change. `experiment decline --constraint
   <safety-checks|bug-fix> --reason-file F` now records a `declined` status:
   terminal, never a gain, and not blocking its phase. It is admitted only on
-  a latest status of `revert` whose guards are all not worse. A revert a worse
-  guard drove is never declined: land it, or a fix-forward an architect
+  a latest status of `revert` whose guards are all measured and not worse. A
+  revert a worse or unmeasured guard drove is never declined: land it, or a fix-forward an architect
   tickets. Judge never writes `declined`; only the verb does. Keep's
   thresholds are unchanged.
 - **Pending** while either side has fewer than K. A pending row is never

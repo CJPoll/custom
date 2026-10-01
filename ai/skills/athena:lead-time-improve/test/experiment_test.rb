@@ -366,6 +366,17 @@ check("decline_error: a revert from a worse guard is refused, naming the guard a
     fix.to_s.include?("a guard worsened (gate_red_rate)")
 end
 
+check("decline_error: a revert with an unmeasured guard is refused, naming it (it may hide a regression)") do
+  gap = ok_guards.merge("reverts" => { "before" => 0, "after" => nil, "state" => "unmeasured" })
+  why, fix = X.decline_error(X.fold([rec, median_revert.merge("guards" => gap)])[0])
+  why.to_s.include?("reverts") && fix.to_s.include?("re-judge once reverts can be measured")
+end
+
+check("constraint_error: safety-checks and bug-fix pass; anything else names both") do
+  X.constraint_error("safety-checks").nil? && X.constraint_error("bug-fix").nil? &&
+    X.constraint_error("speed").to_s.include?("safety-checks, bug-fix")
+end
+
 check("decline_error: a revert row whose guards are missing is refused (cannot tell it was median-only)") do
   why, = X.decline_error(X.fold([rec, median_revert.reject { |k, _| k == "guards" }])[0])
   why.to_s.include?("guards")

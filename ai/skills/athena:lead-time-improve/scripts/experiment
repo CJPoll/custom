@@ -84,7 +84,9 @@ HELP = <<~TXT
                gate red rate, reverts): land the revert, or a fix-forward
                ticketed by an architect. Decline covers a median-only
                revert, never a quality regression;
-             - the revert row carries no guards to show it was median-only;
+             - a guard is unmeasured, or the revert row carries no guards:
+               only a revert whose guards are all measured and not worse is
+               median-only;
              - the id is unknown (the refusal lists the repo's ids);
              - --constraint is not one of the two below, or the reason file
                is missing, empty or not UTF-8.
@@ -482,9 +484,11 @@ module List
   def line(e)
     b = e["baseline"].is_a?(Hash) ? e["baseline"] : {}
     base = b["na_reason"] ? "n/a (#{b['na_reason']})" : Judge.side(b)
-    declined = e["status"] == "declined" ? " constraint=#{e.dig('last', 'constraint')}" : ""
-    "experiment: #{e['id']} #{e['status'].upcase}#{declined} kind=#{e['kind']} metric=#{e['metric']} " \
-      "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}" : ''}"
+    declined = e["status"] == "declined"
+    tag = declined ? " constraint=#{e.dig('last', 'constraint')}" : ""
+    was = declined ? " (revert verdict was: #{e.dig('last', 'prior_reason')})" : ""
+    "experiment: #{e['id']} #{e['status'].upcase}#{tag} kind=#{e['kind']} metric=#{e['metric']} " \
+      "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}#{was}" : ''}"
   end
 end
 
@@ -496,8 +500,8 @@ module Decline
   def run(opts, env)
     now = Setup.now(env)
     constraint = opts["--constraint"]
-    unless X::CONSTRAINTS.include?(constraint)
-      refuse(2, "unknown --constraint #{constraint.inspect} (known: #{X::CONSTRAINTS.join(', ')})",
+    if (why = X.constraint_error(constraint))
+      refuse(2, "--constraint: #{why}",
              "safety-checks when the revert would delete, skip or weaken a check or test; " \
              "bug-fix when it would reinstate a defect the commit fixed")
     end
@@ -556,6 +560,12 @@ rescue Refusal => e
   warn "experiment: #{e.message}"
   warn "Fix: #{e.fix}"
   e.code
+rescue X::UsageError => e
+  # A domain invariant tripped past the CLI's own checks (e.g. judge asked to
+  # write a status only the decline verb writes): a tool bug, not a usage one.
+  warn "experiment: internal error: #{e.message}"
+  warn "Fix: nothing was written by the failing step; file a ticket against scripts/experiment with this line"
+  1
 rescue SystemCallError, JSON::GeneratorError => e
   warn "experiment: #{e.class}: #{e.message}"
   warn "Fix: check the state dir and its files are readable and writable, then re-run"
