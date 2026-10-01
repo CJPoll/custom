@@ -253,6 +253,8 @@ end
 #   * a failed `ps` is a loud, distinct FAIL (exit 2), never read as "no
 #     orphans found" (exit 0) -- the class this suite's own r1 bug was.
 def self_test
+  # Only the self-test needs it; the check itself loads nothing relative.
+  require_relative "../lib/proc_state"
   pass = 0
   fail_count = 0
   ok = lambda do |label|
@@ -389,19 +391,12 @@ def self_test
       bad.call("a real, freshly orphaned mock -> exit 1", "rc=#{rc}")
     end
 
-    still_alive = true
-    40.times do
-      still_alive = begin
-        Process.kill(0, mock_pid.to_i)
-        true
-      rescue Errno::ESRCH
-        false
-      end
-      break unless still_alive
-
-      sleep 0.05
-    end
-    if still_alive
+    # Gone is judged on the kernel state, never Process.kill(0) (DND-1550):
+    # the check SIGKILLs the orphan and returns, the kill lands
+    # asynchronously, and the dead orphan stays a ZOMBIE until PID 1 reaps it
+    # -- kill(0) succeeds on a zombie. The 30 s bound only caps a hang: an
+    # orphan the check never killed lives for its whole sleep and still fails.
+    if !ProcState.wait_gone(mock_pid, timeout: 30)
       bad.call("the orphan was killed by the check", "pid #{mock_pid} still alive")
     else
       ok.call("the orphan was killed by the check (pid #{mock_pid} gone)")

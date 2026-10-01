@@ -19,6 +19,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "${HERE}")"
 GATE="${ROOT}/scripts/integration-gate"
+# shellcheck source=scripts/test/lib/proc-state.bash
+. "${ROOT}/../../../scripts/test/lib/proc-state.bash"
 
 PASS=0; FAIL=0
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
@@ -763,12 +765,14 @@ printf '#!/bin/sh\necho y > y.txt && git add y.txt && git commit -qm auto-fix\ne
 mkfifo "${TMP}/critic-fifo"
 out="$(wc_gate "$R" "${TMP}/critic-fifo" "${R}/g.sh")"; rc=$?
 pg="$(sed -n 's/.*beside the gate (pgid \([0-9]*\),.*/\1/p' <<<"$out")"
+# Gone is judged on the kernel state of every group member, never `kill -0
+# -pgid` (DND-1550): the gate exits without joining the judge, so its killed
+# members are orphans and stay ZOMBIES until PID 1 reaps them, and kill -0
+# succeeds on a zombie. The 30 s bound only caps a hang; a judge that was
+# never stopped blocks on its FIFO forever and still fails.
 gone=0
 if [ -n "$pg" ]; then
-  for _ in $(seq 1 50); do
-    kill -0 -- "-${pg}" 2>/dev/null || { gone=1; break; }
-    sleep 0.1
-  done
+  proc_group_wait_gone "$pg" 300 && gone=1
 fi
 [ "$rc" -eq 2 ] && [ -n "$pg" ] && [ "$gone" -eq 1 ] \
   && ok "c31 a gate step that exits early stops the judge's process group (no orphan)" \

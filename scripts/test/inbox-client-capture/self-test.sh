@@ -48,6 +48,10 @@ SCRIPTS="$(cd -- "${HERE}/../.." && pwd -P)"
 # shellcheck source=scripts/test/lib/suite-reaper.bash
 . "${SCRIPTS}/test/lib/suite-reaper.bash"
 suite_reaper_begin "$@"
+# DND-1550: "is it gone" is read from the kernel state, never `kill -0`,
+# which succeeds on a zombie.
+# shellcheck source=scripts/test/lib/proc-state.bash
+. "${SCRIPTS}/test/lib/proc-state.bash"
 CAPTURE="${SCRIPTS}/inbox-client-capture"
 MOCK="${HERE}/mock-athena-inbox-client.rb"
 
@@ -501,6 +505,9 @@ rm -f "${TMP}/nested.ready"
 FAKE_SUITE_PID=$!
 if wait_file "${TMP}/nested.ready" 100; then
   NESTED_CHILD="$(cat "${TMP}/nested.ready")"
+  # Its start time, so the "gone" check below can never be fooled by another
+  # process that later reuses the pid (DND-1550).
+  NESTED_START="$(proc_starttime "${NESTED_CHILD}")"
   # The incident: SIGKILL the process running the suite, never the mock. No
   # trap sees this -- that is exactly the property under test.
   kill -9 "${FAKE_SUITE_PID}" 2>/dev/null
@@ -517,10 +524,10 @@ if wait_file "${TMP}/nested.ready" 100; then
   # (the plain reparent-to-init case; a subreaper would instead reparent to
   # its own pid, which is why the gate itself no longer trusts PPID alone --
   # see check-inbox-mock-orphans's ancestor-chain walk).
-  if kill -0 "${NESTED_CHILD}" 2>/dev/null && [ "${ppid}" = "1" ]; then
+  if proc_running "${NESTED_CHILD}" "${NESTED_START}" && [ "${ppid}" = "1" ]; then
     ok "reproduces the incident: mock (pid ${NESTED_CHILD}) outlives its SIGKILLed launcher, ppid now 1 (orphaned-spin-loop class)"
   else
-    bad "reproduces the incident (mock outlives its SIGKILLed launcher, ppid == 1)" "pid ${NESTED_CHILD} alive=$(kill -0 "${NESTED_CHILD}" 2>/dev/null && echo yes || echo no) ppid=${ppid:-?}"
+    bad "reproduces the incident (mock outlives its SIGKILLed launcher, ppid == 1)" "pid ${NESTED_CHILD} running=$(proc_running "${NESTED_CHILD}" "${NESTED_START}" && echo yes || echo no) ppid=${ppid:-?}"
   fi
   GATE="${SCRIPTS}/../ai/bin/check-inbox-mock-orphans"
   # --min-age 0: this fixture's whole point is that a dead launcher's mock is
@@ -536,10 +543,19 @@ if wait_file "${TMP}/nested.ready" 100; then
   else
     bad "check-inbox-mock-orphans finds the orphan" "rc=${GATE_RC} ${GATE_OUT}"
   fi
-  if ! kill -0 "${NESTED_CHILD}" 2>/dev/null; then
+  # Gone is an EVENT, judged on the kernel state (DND-1550). The backstop
+  # SIGKILLs the orphan and returns; the kill lands asynchronously, and the
+  # dead orphan then stays a ZOMBIE until PID 1 reaps it -- and `kill -0`
+  # succeeds on a zombie. The old instant `! kill -0` raced init's reap and
+  # failed at load 23 (2026-10-01 14:27Z). proc_wait_gone counts a zombie as
+  # gone. Its bound (30 s) only caps a hang: an orphan the backstop never
+  # killed lives for its whole sleep and still fails here. Waiting also keeps
+  # the re-run below from finding a not-yet-dead orphan again.
+  proc_wait_gone "${NESTED_CHILD}" 300 "${NESTED_START}"; GONE_RC=$?
+  if [ "${GONE_RC}" -eq 0 ]; then
     ok "the orphan is gone once the backstop has run (what no trap could do)"
   else
-    bad "the orphan is gone once the backstop has run" "pid ${NESTED_CHILD} still alive"
+    bad "the orphan is gone once the backstop has run" "pid ${NESTED_CHILD} still running 30s later (proc_wait_gone rc=${GONE_RC})"
   fi
   GATE_OUT2="$("${GATE}" --min-age 0 --pid "${NESTED_CHILD}" 2>&1)"; GATE_RC2=$?
   if [ "${GATE_RC2}" -eq 0 ]; then

@@ -312,16 +312,19 @@ fi
 
 # S13: end to end. The spinner is ORPHANED (its launcher exits first, as R1's
 # fake suite is killed first), so only the tag can find it; then the suite
-# reaps. 30 rounds, each asking the kernel afterwards whether it survived.
+# reaps. 30 rounds, each asking the kernel afterwards whether it survived
+# (still running; a dead orphan stays a zombie until PID 1 reaps it).
 printf '#!%s\n%q & printf "%%s\\n" "$!" >"$1"\n' "${BASH}" "${TMP}/spin.sh" >"${TMP}/s13-launcher.sh"
-run_fixture s13 '. "${LIB}"; suite_reaper_begin "$@"
+run_fixture s13 '. "${LIB}"; . "${LIB%/*}/proc-state.bash"; suite_reaper_begin "$@"
 trap suite_reap_tagged EXIT
 left=0
 for i in $(seq 1 30); do
   bash '"${TMP}"'/s13-launcher.sh '"${TMP}"'/s13.pid
   c="$(cat '"${TMP}"'/s13.pid)"
   suite_reap_tagged 2>/dev/null
-  if kill -0 "$c" 2>/dev/null; then left=$((left+1)); kill -9 "$c"; fi
+  # proc_running, never kill -0 (DND-1550): the reap leaves the orphan a
+  # ZOMBIE until PID 1 reaps it, and kill -0 succeeds on a zombie.
+  if proc_running "$c"; then left=$((left+1)); kill -9 "$c"; fi
 done
 echo "survived=${left}"'
 S13="$(cat "${TMP}/s13.out")"

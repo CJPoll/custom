@@ -66,6 +66,7 @@ ai/lib/integration-receipt.sh	library	sourced by ai/lib/gh-merge-guard.sh and at
 ai/lib/critic_prompt.rb	library	prompt-text constants required by ai/bin/critic-review; emits nothing and has no failure path of its own
 ai/lib/critic_carry.rb	library	pure carry-key and decision functions required by ai/bin/critic-review; no I/O, no failure path
 ai/lib/reap_tags.rb	guard	
+ai/lib/proc_state.rb	guard	
 ai/lib/scratch_home_sentinel.rb	guard	
 ai/lib/strict_argv.rb	library	required by the Ruby ai/bin tools that refuse unknown arguments (DND-505/526/813); raises StrictArgv::UsageError with a one-line reason, and each caller composes the exit-2 refusal that carries Fix:
 ai/lib/eval_pool.rb	library	required by ai/bin/admiral-eval, critic-eval and variant-eval for bounded concurrent sampling (DND-1007); raises EvalPool::UsageError with a one-line reason, and each caller composes the exit-2 refusal that carries Fix:
