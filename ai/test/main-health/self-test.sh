@@ -165,7 +165,7 @@ run status --repo "${W}"
 mv "${T}/red.saved" "${STORE}/red"
 
 N="$(slot_n)"; run check --repo "${W}" --recheck --slot-wait 77
-[ "${RC}" = 1 ] && [ "$(slot_n)" = "$((N + 1))" ] && tail -n 1 "${T}/slot.log" | grep -q -- '--wait-timeout 77 ' \
+[ "${RC}" = 1 ] && [ "$(slot_n)" = "$((N + 1))" ] && grep -q -- '--wait-timeout 77 ' <<<"$(tail -n 1 "${T}/slot.log")" \
   && ok "12. --recheck re-gates a tip that already has a verdict; --slot-wait reaches test-slot" \
   || bad "12. recheck" "rc=${RC} slots=$(slot_n) was ${N}"
 
