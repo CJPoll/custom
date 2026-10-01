@@ -31,11 +31,14 @@ bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 cat > "${T}/judgment-label" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${SR_T}/jl.log"
+# The run lock is the tool's fd 9; a child must never hold it.
+[ -e /proc/self/fd/9 ] && echo "fd9-open" >> "${SR_T}/fd9.log"
 case "${SR_JL_MODE:-ok}" in
   ok)
     echo "slack: /inbox/walt_ui-slack.jsonl.1 + /inbox/walt_ui-slack.jsonl: 378 lines"
     echo "roots: 70 owner new-conversation roots"
-    echo "snapshot: /inbox/evals/slack-routing-roots.jsonl: 70 roots kept, ${SR_JL_APPENDED:-0} appended"
+    echo "${SR_JL_SUMMARY:-snapshot: /inbox/evals/slack-routing-roots.jsonl: 70 roots kept, ${SR_JL_APPENDED:-0} appended}"
+    echo "snapshot context: 3 lines"
     echo "owner_confirmed kept: 10 (0 in neither this inbox nor the snapshot)"
     exit 0 ;;
   fail)
@@ -50,6 +53,7 @@ cat > "${T}/send-mail" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${SR_T}/mail.log"
 [ "${SR_MAIL_FAIL:-}" = 1 ] && { echo "send-mail: simulated failure" >&2; exit 1; }
+[ "${SR_MAIL_SILENT:-}" = 1 ] && { echo "athena:inbox: path: local -- stub"; exit 0; }
 while [ $# -gt 0 ]; do
   [ "$1" = "--body-file" ] && cp "$2" "${SR_T}/mail-body"
   shift
@@ -87,11 +91,17 @@ if [ "${rc}" = 2 ] && grep -q 'Fix:' "${T}/err" && [ "$(jl_n)" = 0 ]; then
 else
   bad "unknown argument" "rc=${rc} err=$(cat "${T}/err")"
 fi
-for bad_n in 0 x ''; do
-  "${TOOL}" --state-dir "${S}" --alert-after "${bad_n}" >"${T}/out" 2>"${T}/err"; rc=$?
-  [ "${rc}" = 2 ] && grep -q 'Fix:' "${T}/err" || bad "--alert-after '${bad_n}'" "rc=${rc} err=$(cat "${T}/err")"
+for flag in --alert-after --timeout; do
+  all=1
+  for bad_n in 0 x ''; do
+    "${TOOL}" --state-dir "${S}" "${flag}" "${bad_n}" >"${T}/out" 2>"${T}/err"; rc=$?
+    if [ "${rc}" != 2 ] || ! grep -q 'Fix:' "${T}/err"; then
+      all=0; bad "${flag} '${bad_n}'" "rc=${rc} err=$(cat "${T}/err")"
+    fi
+  done
+  [ "${all}" = 1 ] && ok "${flag} must be a positive integer (exit 2, Fix:), and nothing ran"
 done
-ok "--alert-after must be a positive integer (exit 2, Fix:)"
+[ "$(jl_n)" = 0 ] || bad "usage errors ran judgment-label" "jl=$(jl_n)"
 
 # --- a healthy tick: propose runs, the record carries its summary -----------------------
 SR_JL_APPENDED=3 run t1
@@ -113,6 +123,22 @@ if grep -q 'appended=3' "${T}/err" && grep -q "${r}" "${T}/err"; then
   ok "the one-line outcome on stderr names the appended count and the record"
 else
   bad "stderr outcome" "$(cat "${T}/err")"
+fi
+
+if [ ! -e "${T}/fd9.log" ]; then
+  ok "judgment-label does not inherit the run lock (fd 9 closed in the child)"
+else
+  bad "lock inheritance" "the child saw fd 9 open"
+fi
+
+# The real summary shapes judgment-label prints (ai/bin/judgment-label, the
+# snapshot: line): with a trailing notes parenthesis, and on a new snapshot.
+SR_JL_SUMMARY='snapshot: /inbox/evals/r.jsonl: 70 roots kept, 2 appended (3 no longer in this inbox; 1 not this owner'"'"'s roots, ignored)' run p1
+SR_JL_SUMMARY='snapshot: /inbox/evals/r.jsonl: absent, starting it, 5 appended' run p2
+if grep -q '^ok: appended=2 exit=0$' "$(rec p1)" && grep -q '^ok: appended=5 exit=0$' "$(rec p2)"; then
+  ok "the summary parse reads the notes-suffixed and new-snapshot shapes (appended=2, appended=5)"
+else
+  bad "summary shapes" "p1=$(tail -n 1 "$(rec p1)") p2=$(tail -n 1 "$(rec p2)")"
 fi
 
 # Idempotent: a second tick with nothing new appends nothing and is still ok.
@@ -207,6 +233,16 @@ else
   bad "send retry" "mail=$(mail_n) M=${M} rec=$(cat "$(rec m4)" 2>&1)"
 fi
 run s5
+
+# A send that exits 0 but names no delivered message is not a delivery.
+for t in d1 d2; do SR_JL_MODE=fail run "${t}"; done
+SR_MAIL_SILENT=1 SR_JL_MODE=fail run d3
+if grep -q '^alert: FAILED to send$' "$(rec d3)" && [ -z "$(kv "${S}/failing" alerted)" ]; then
+  ok "a send with no 'delivered' line is recorded as FAILED and retried, never stored as sent"
+else
+  bad "silent send" "alerted=$(kv "${S}/failing" alerted) rec=$(cat "$(rec d3)" 2>&1)"
+fi
+run s6
 
 # --- a tick already in flight: skip, run nothing, count nothing ---------------------------
 N="$(jl_n)"

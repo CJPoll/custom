@@ -507,12 +507,16 @@ across sessions — it is not a one-shot queue drain.
   wedge guards, the tick runs `ai/bin/slack-roots-tick`, which runs
   `judgment-label --propose`. An inbox generation is deleted at its second
   rotation, so a root not snapshotted by then is lost to the slack_routing
-  eval for good. The run is idempotent and bounded (600 s). Each tick leaves
-  `ai-artifacts/slack-roots/runs/<ts>.propose`: judgment-label's output, then
-  `ok: appended=N` or `failed: …`. After 3 failed ticks in a row, ONE
+  eval for good. The run is idempotent and bounded (600 s). A tick that ran
+  leaves `ai-artifacts/slack-roots/runs/<ts>.propose`: judgment-label's
+  output, then `ok: appended=N` or `failed: …`. A tick that found another
+  running leaves `<ts>.skipped`. The tool's stderr is in the shipwright's
+  `runs/<ts>.slack-roots.log`. After 3 failed ticks in a row, ONE
   `harness-alerts` message (slug `slack-roots-failing`) goes out per episode;
   a healthy tick ends the episode. Its outcome never changes the tick's exit
-  code. No crontab change: it rides the existing hourly entry.
+  code. No crontab change: it rides the existing hourly entry. Residual: a
+  tool that cannot make its state dir (exit 3, no record) or is missing is
+  named in that log and never alerts.
 - **Lead time is not this cron's.** The lead-time improver cron owns it
   (*Lead-time improver cron* below); this cron does no lead-time work. Fleet
   **lead time** is captain dispatch → landed. `ai/bin/lead-time`

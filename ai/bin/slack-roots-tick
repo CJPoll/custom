@@ -11,6 +11,12 @@
 # no signal. The hourly shipwright tick (scripts/athena-shipwright-run.sh) runs
 # this tool, so the snapshot is at most an hour behind the inbox.
 #
+# Residual, said out loud: an exit 3 (no usable state dir, so no record) or a
+# missing tool is never counted toward an episode and never alerts. The runner
+# names it in the tick's own runs/<ts>.slack-roots.log, and the same unwritable
+# ai-artifacts/ breaks the shipwright's own state too, but nothing sends a
+# harness-alert for it.
+#
 # What it never does: pass --rule-default or --new-snapshot. It records no
 # label of its own; --propose keeps owner_confirmed rows and the snapshot is
 # append-only, so a re-run with nothing new appends nothing.
@@ -47,9 +53,13 @@ appends nothing. The hourly shipwright tick runs it.
                    runs/<tick>.skipped   a tick that found another one running
                    consecutive-failures  the failure counter
                    failing               the open failure episode
-                                         (episode=, first_failed=, alerted=)
---tick ID        this tick's id, used in file names (default: UTC
-                 YYYY-MM-DDTHHMMSSZ). No '/' and no leading '.'.
+                                         (episode=, opened=, alerted=;
+                                         opened is when the threshold-th
+                                         failure opened the episode)
+--tick ID        this tick's id, used in file names and as the episode id
+                 (default: UTC YYYY-MM-DDTHHMMSSZ; the shipwright runner
+                 passes its own local-time tick stamp). No '/' and no
+                 leading '.'.
 --timeout SECS   cap on one --propose run (default 600). judgment-label waits
                  on the labels lock, which an interactive --confirm can hold.
 --alert-after N  consecutive failed ticks before the episode's ONE alert
@@ -175,7 +185,7 @@ printf '%s\n' "${n}" > "${FAIL_COUNT}" \
   || echo "slack-roots-tick: could not save the failure counter ${FAIL_COUNT}. Fix: check that ${STATE} is writable; until then every failure counts as the first." >&2
 [ -n "${why}" ] || why="judgment-label exited ${rc}; its Fix: line is in the output above"
 
-episode="$(kv "${EPISODE}" episode)"; first="$(kv "${EPISODE}" first_failed)"; alerted="$(kv "${EPISODE}" alerted)"
+episode="$(kv "${EPISODE}" episode)"; first="$(kv "${EPISODE}" opened)"; alerted="$(kv "${EPISODE}" alerted)"
 if [ "${n}" -ge "${ALERT_AFTER}" ] && [ -z "${episode}" ]; then
   episode="${TICK}"; first="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; alerted=""
 fi
@@ -189,7 +199,7 @@ send_alert() { # prints the delivered message name; non-zero on a failed send
     printf 'slack-roots-failing: the scheduled judgment-label --propose has failed %s ticks in a row\n' "${n}"
     printf 'This is a report. The run record named in re: is the authority.\n\n'
     printf 'episode: %s\n' "${episode}"
-    printf 'first_failed: %s\n' "${first}"
+    printf 'opened: %s\n' "${first}"
     printf 'consecutive_failures: %s\n' "${n}"
     printf 'threshold: %s\n' "${ALERT_AFTER}"
     printf 'record: %s\n' "${REC}"
@@ -201,7 +211,9 @@ send_alert() { # prints the delivered message name; non-zero on a failed send
   rm -f "${body}"
   if [ "${src}" -ne 0 ]; then printf '%s\n' "${out}" | head -n 3 >&2; return "${src}"; fi
   name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
-  printf '%s\n' "${name:-?}"
+  # No delivered line is not a delivery: report it failed, so the next tick retries.
+  [ -n "${name}" ] || { echo "send-mail exited 0 but printed no 'athena:inbox: delivered' line" >&2; return 5; }
+  printf '%s\n' "${name}"
 }
 
 if [ -z "${episode}" ]; then
@@ -220,7 +232,7 @@ else
   rm -f "${err}"
 fi
 if [ -n "${episode}" ]; then
-  printf 'episode=%s\nfirst_failed=%s\nalerted=%s\n' "${episode}" "${first}" "${alerted}" > "${EPISODE}.tmp.$$" \
+  printf 'episode=%s\nopened=%s\nalerted=%s\n' "${episode}" "${first}" "${alerted}" > "${EPISODE}.tmp.$$" \
     && mv -f "${EPISODE}.tmp.$$" "${EPISODE}" \
     || echo "slack-roots-tick: could not save the episode state ${EPISODE}. Fix: check that ${STATE} is writable; the next failure treats this as a new episode and alerts again." >&2
 fi

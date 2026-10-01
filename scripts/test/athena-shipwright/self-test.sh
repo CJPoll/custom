@@ -78,7 +78,7 @@ export SHIPWRIGHT_MAIN_HEALTH="$MH_STUB"
 # the machine's real inbox and labels. The stub records its argv in
 # SR_STUB_LOG and exits SR_STUB_RC (default 0).
 SR_STUB="${TMP}/stub-slack-roots-tick"
-printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "${SR_STUB_LOG:-/dev/null}"\nexit "${SR_STUB_RC:-0}"\n' > "$SR_STUB"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "${SR_STUB_LOG:-/dev/null}"\necho "stub-slack-roots-tick stderr" >&2\nexit "${SR_STUB_RC:-0}"\n' > "$SR_STUB"
 chmod +x "$SR_STUB"
 export SHIPWRIGHT_SLACK_ROOTS="$SR_STUB"
 unset CLAUDE_AGENT_ID CLAUDE_AGENT_TYPE
@@ -2136,6 +2136,31 @@ if [ "$rc" -eq 0 ] && [ "$(grep -c . "$a/sr.log" 2>/dev/null)" = 1 ] \
   ok "a yielding tick still runs slack-roots-tick once, with the main checkout's ai-artifacts/slack-roots state dir"
 else
   bad "slack-roots-tick runs every tick" "rc=$rc sr='$sr' err=$(cat "$a/runner.err")"
+fi
+
+# A tick that reaches the session keeps the tool's output: it goes to its own
+# runs/<ts>.slack-roots.log, which the session's log write cannot truncate.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+rc="$(run_runner "$r" SR_STUB_LOG="$a/sr.log")"
+srl="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.slack-roots.log' 2>/dev/null | head -n 1)"
+if [ "$rc" -eq 0 ] && [ -n "$srl" ] && grep -q 'stub-slack-roots-tick stderr' "$srl" \
+   && [ "$(grep -c . "$a/sr.log" 2>/dev/null)" = 1 ]; then
+  ok "a tick that ran its session keeps slack-roots-tick's output in runs/<ts>.slack-roots.log"
+else
+  bad "slack-roots log survives the session" "rc=$rc srl='$srl' content=$(cat "$srl" 2>&1) err=$(cat "$a/runner.err")"
+fi
+
+# A skipped tool tick (its lock held) is logged as skipped, not as ran.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+sr_skip_stub="$a/stub-sr-skip"
+printf '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in --state-dir) d="$2";; --tick) t="$2";; esac; shift; done\nmkdir -p "$d/runs"; : > "$d/runs/$t.skipped"\nexit 0\n' > "$sr_skip_stub"
+chmod +x "$sr_skip_stub"
+rc="$(run_runner "$r" SHIPWRIGHT_SLACK_ROOTS="$sr_skip_stub")"
+if [ "$rc" -eq 0 ] && grep -q 'slack roots: skipped' "$a/runner.err" && ! grep -q 'propose ran' "$a/runner.err"; then
+  ok "a slack-roots-tick that skipped on its lock is logged as skipped, not as ran"
+else
+  bad "skip logged as skip" "rc=$rc err=$(cat "$a/runner.err")"
 fi
 
 # A wedged lane still snapshots the roots (the step is before the wedge guard).

@@ -67,7 +67,9 @@ USAGE = <<~EOF
               walt_ui-slack.jsonl and its rotated generation
               walt_ui-slack.jsonl.1, read together, oldest first
               (DND-1497): a root that has left the live file is still
-              snapshotted until the next rotation deletes the generation. Forward records rotate
+              snapshotted until the next rotation deletes the generation.
+              Every hourly shipwright tick runs --propose through
+              ai/bin/slack-roots-tick (DND-1502). Forward records rotate
               too, so what a row recorded is one more vote: a forward_record
               label with no current record is kept, a recorded conflict
               stays one, and a current record that disagrees with a

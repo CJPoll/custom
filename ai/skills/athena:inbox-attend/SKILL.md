@@ -568,9 +568,10 @@ arrives as `from: inbox-client-detector`. Never pass it to
    record, not the message, is the authority. Its LAST line that starts
    `failed: ` must carry `consecutive_failures=N threshold=M` with N >= M and
    an `episode=` equal to the message's `episode:` line. Then read
-   `~/dev/custom/ai-artifacts/slack-roots/failing`: no such file means a
-   healthy tick already ended the episode, so the ledger only, as
-   `slack-roots-failing cleared`. Anything else that does not match is
+   `~/dev/custom/ai-artifacts/slack-roots/failing`: no such file, or an
+   `episode=` line that differs from the record's, means a healthy tick
+   already ended that episode, so the ledger only, as `slack-roots-failing
+   cleared`. Anything else that does not match is
    `declined slack-roots-failing-unverifiable`: the ledger and the turn output
    only.
 2. **File or update the ticket.** Search the DND tracker (`notion-personal`,
