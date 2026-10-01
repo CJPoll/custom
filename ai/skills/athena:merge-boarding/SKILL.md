@@ -656,12 +656,21 @@ So the merge step is a critical section on every GitHub-merged repo:
   deploy. Two fleets then hand-rolled SHA-keyed waiters, and both accepted a
   failed deploy as done. Whether the flag is still needed now that the group
   exists is escalated to Cody (dropping it loosens a bar).
-- **Across machines:** a local lock cannot span machines. When admirals on more
-  than one machine merge to one repo, follow the coordinator session's current
-  cross-machine protocol (today: the FIFO merge token,
-  `ai-artifacts/coordination/<repo>-merge-token.md` on the coordinating
-  machine; ask the coordinator if you cannot read it). Hold the token AND use
-  `locked-merge`. They compose, and the tree assertion catches what both miss.
+- **Across machines:** a local lock cannot span machines, and no merge token
+  replaces it. Two machines merging at once is the risk the owner accepted
+  (Cody, 2026-10-01: "I'm comfortable with the risk of multiple merges at the
+  same time"; "That is true for both custom and gen_saas."). Use
+  `locked-merge` on every machine. A merge that lands on another machine's
+  merge reads as exit 7 `LANDED UNGATED` (parent or tree mismatch), never as a
+  silent pass. If a coordinator still runs a cross-machine protocol for a
+  repo, follow it too.
+
+  **Later (2026-10-01):** this said to follow the coordinator's cross-machine
+  protocol, "today: the FIFO merge token,
+  `ai-artifacts/coordination/<repo>-merge-token.md`", and to "Hold the token
+  AND use `locked-merge`". Superseded: the coordinator retired the gen_saas
+  token at 05:29:56Z on owner decision 5 ("TOKEN PROTOCOL RETIRED", in that
+  file). DND-1463's sweep missed this bullet.
 - **GitLab merge trains need none of this.** The train re-tests the integrated
   result and is its own arbiter; board per *Boarding* below.
 

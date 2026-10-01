@@ -96,7 +96,7 @@ home; other documents cite it by name.
   skill names*). If the admiral stops first, the ticket is `Parked`.
 - **`In Merge Queue`** (owner, 2026-09-27: "Please add an "In Merge Queue"
   status."): the PR passed review, critic and CI, and waits in a merge queue
-  for its turn (the gen_saas merge-token queue, or a coordinator train). The
+  for its turn (the merge lock, or a coordinator train). The
   admiral sets it when it queues the PR (`athena:merge-boarding`). It counts
   as active, so the live-captain check exempts it. Out of the queue on a red
   gate or critic → `Parked`.
