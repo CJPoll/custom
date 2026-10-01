@@ -68,18 +68,22 @@ HELP = <<~TXT
   A phase whose anchor is missing is null with a reason; one whose anchors
   are out of order is "invalid" with a reason. Never 0, never negative.
 
-  Origin (DND-1531): telemetry is machine-local, so --ingest records where
-  each improve landing was worked. `foreign`: ticketed, with a dispatch
-  stamp, a telemetry store readable and recording since the dispatch day,
-  and no local event of any kind (any repo), integration receipt, critic
-  verdict or harness-gate timings for it. Its five phases are null with
-  "worked on another machine (no local events for <unit>)"; its forge totals
-  are kept. `local`: any of those found here. Otherwise origin is null with
-  `origin_na` (no store, no stamp, unticketed, a store that begins after the
-  dispatch), and the row counts as before. --summary leaves foreign rows out
-  of the phase stats and the biggest pick, keeps them in the totals, and
-  reports `foreign: N` beside the rows with each foreign unit named
-  (null when no row's origin was decided, never 0).
+  Origin (DND-1531). Telemetry is machine-local, so --ingest records where
+  each improve landing was worked:
+    foreign    ticketed and stamped; the store is readable and its first
+               ticket.dispatched (any unit) is at or before the stamp; and
+               nothing local for it: no event of any kind (any repo), no
+               integration receipt, critic verdict or harness-gate timings.
+               Its five phases are null with "worked on another machine (no
+               local events for <unit>)". Its forge totals are kept.
+    local      any of that evidence found here.
+    null       neither: `origin_na` says why (no store, no stamp,
+               unticketed, a dispatch before the store recorded any). The
+               row counts as before.
+  --summary leaves foreign rows out of the phase stats and the biggest pick
+  (tail included) and keeps them in the totals. It reports `foreign: N`
+  beside the rows and names each foreign unit. N is null, never 0, when no
+  row's origin was decided.
 
   Modes:
     --ingest       read the repo's cursor (none: a 14-day backfill), run
@@ -299,7 +303,6 @@ module Ingest
     # Every kind, every repo: the origin check (DND-1531). The phase events
     # are the registered phase kinds written in this repo.
     all_events, = io::TelemetryReader.read_all(env)
-    first_day, first_day_na = io::TelemetryReader.first_day(env)
     common, common_why = io::Git.common_dir(repo.path)
     no_common = LeadTimePhases::Source.could_not_look(common_why.to_s)
     events = LeadTimePhases.scope_events(LeadTimePhases.only_events(all_events, LeadTimePhases::EVENTS),
@@ -313,8 +316,7 @@ module Ingest
       anchors = LeadTimePhases::Anchors.from(landing: l, events: events, receipt: receipt, verdicts: verdicts)
       counters = LeadTimePhases::Counters.compute(landing: l, events: events, timings: timing)
       evidence = LeadTimePhases::Origin.local_evidence(l, receipt: receipt, verdicts: verdicts, timings: timing)
-      origin = LeadTimePhases::Origin.decide(landing: l, unit_events: all_events, store_first_day: first_day,
-                                             store_na: first_day_na, evidence: evidence)
+      origin = LeadTimePhases::Origin.decide(landing: l, unit_events: all_events, evidence: evidence)
       LeadTimePhases::Ledger.improve_row(repo: repo.name, landing: l, anchors: anchors, counters: counters,
                                          telemetry_status: events.status, ingested_at: now, origin: origin)
     end

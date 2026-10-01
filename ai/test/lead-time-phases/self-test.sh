@@ -377,12 +377,14 @@ eq "--json: tail, product, 14400 s over 2 measured, the no-run landing n/a (neve
 CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
 
 echo "== ingest + summary: landings worked on another machine are foreign (DND-1531)"
-# A store recording since 2026-09-20. Only DND-9102 was worked here: its
-# dispatch was written from another repo's checkout, its gate run in
-# gen_saas. DND-9101 and DND-9103 have stamps and nothing local: foreign.
+# A store recording dispatches since 2026-09-20 (another ticket's). Only
+# DND-9102 was worked here: its dispatch was written from another repo's
+# checkout, its gate run in gen_saas. DND-9101 and DND-9103 have stamps and
+# nothing local: foreign.
 TEL_LAPTOP="${TMP}/telemetry-laptop"
 mkdir -p "${TEL_LAPTOP}" && chmod 700 "${TEL_LAPTOP}"
-: >"${TEL_LAPTOP}/2026-09-20.jsonl"
+printf '{"v":1,"event":"ticket.dispatched","at":"2026-09-20T00:00:00.000Z","duration_s":null,"unit":"DND-9100","unit_source":"explicit","repo":"custom","head":null,"host":"h","pid":1,"attrs":{"tracker":"dnd"}}\n' \
+  >"${TEL_LAPTOP}/2026-09-20.jsonl"
 {
   printf '{"v":1,"event":"ticket.dispatched","at":"2026-10-01T05:30:00.000Z","duration_s":null,"unit":"DND-9102","unit_source":"explicit","repo":"custom","head":null,"host":"h","pid":1,"attrs":{"tracker":"dnd"}}\n'
   printf '{"v":1,"event":"gate.run","at":"2026-10-01T05:40:00.000Z","duration_s":60,"unit":"DND-9102","unit_source":"branch","repo":"gen_saas","head":null,"host":"h","pid":1,"attrs":{"ok":true,"exit":0}}\n'
@@ -410,6 +412,16 @@ eq "MISS: no store: origin is null, never foreign" "$(row_field "${HEAD_PUSH}" o
 has "MISS: and says it could not look" "$(row_field "${HEAD_PUSH}" origin_na)" "telemetry: could not look (no telemetry store"
 run "${TEL_NONE}" --summary --repo gen_saas
 has "MISS: the summary's foreign is n/a, never 0" "${OUT}" "foreign: n/a;"
+# The miss: the store's first dispatch (DND-9102, 05:30) is after DND-9101's
+# (04:00), so its absence proves nothing; DND-9103 (06:30) is still foreign.
+TEL_LATE="${TMP}/telemetry-late"
+mkdir -p "${TEL_LATE}" && chmod 700 "${TEL_LATE}"
+cp "${TEL_LAPTOP}/2026-10-01.jsonl" "${TEL_LATE}/"
+STATE="${TMP}/state-origin-late"
+ROWS="${TMP}/rows-gs.json" run "${TEL_LATE}" --ingest --repo gen_saas
+eq "MISS: a dispatch before the store recorded any is undecided" "$(row_field "${HEAD_PUSH}" origin)" "null"
+has "MISS: and says the emitter was not yet recording" "$(row_field "${HEAD_PUSH}" origin_na)" "after the dispatch at 2026-10-01T04:00:00Z"
+eq "a dispatch after the store's first one is still foreign" "$(row_field "${HEAD_BARE}" origin)" "foreign"
 CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
 
 echo "== summary: no ledger is not an empty ledger"

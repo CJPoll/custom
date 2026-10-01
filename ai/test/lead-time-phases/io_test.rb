@@ -158,29 +158,12 @@ Dir.mktmpdir("ltp-io-") do |tmp|
              "#{JSON.generate('event' => 'harness_gate.run', 'at' => '2026-10-01T01:00:00Z', 'unit' => 'DND-9001')}\n")
   src, = IO_::TelemetryReader.read("ATHENA_TELEMETRY_DIR" => store, "HOME" => tmp)
   check("I6 telemetry.probe is never read as a phase event") { src.items.map { |e| e["event"] } == ["harness_gate.run"] }
-  # DND-1531: the origin check reads every kind, and the store's first day.
+  # DND-1531: the origin check reads every kind.
   all, = IO_::TelemetryReader.read_all("ATHENA_TELEMETRY_DIR" => store, "HOME" => tmp)
   check("I10 read_all keeps every kind") { all.items.map { |e| e["event"] } == %w[telemetry.probe harness_gate.run] }
-  check("I10 first_day is the store's oldest day file") do
-    File.write(File.join(store, "2026-09-28.jsonl"), "")
-    File.write(File.join(store, "notes.txt"), "")
-    IO_::TelemetryReader.first_day("ATHENA_TELEMETRY_DIR" => store, "HOME" => tmp) == ["2026-09-28", nil]
+  check("I10 MISS: read_all of no store is could not look") do
+    IO_::TelemetryReader.read_all("ATHENA_TELEMETRY_DIR" => File.join(tmp, "no-store"), "HOME" => tmp)[0].could_not_look?
   end
-  check("I10 MISS: no store is a reason, never a day") do
-    day, why = IO_::TelemetryReader.first_day("ATHENA_TELEMETRY_DIR" => File.join(tmp, "no-store"), "HOME" => tmp)
-    day.nil? && why.include?("no telemetry store")
-  end
-  check("I10 MISS: a store with no day file is a reason") do
-    bare = File.join(tmp, "tel-bare")
-    FileUtils.mkdir_p(bare, mode: 0o700)
-    day, why = IO_::TelemetryReader.first_day("ATHENA_TELEMETRY_DIR" => bare, "HOME" => tmp)
-    day.nil? && why.include?("holds no day file")
-  end
-  check("I10 MISS: an unusable store path is a reason") do
-    day, why = IO_::TelemetryReader.first_day("ATHENA_TELEMETRY_DIR" => "relative/x", "HOME" => tmp)
-    day.nil? && why.include?("unusable")
-  end
-  File.delete(File.join(store, "2026-09-28.jsonl"))
 
   locked = File.join(store, "2026-10-02.jsonl")
   File.write(locked, "#{JSON.generate('event' => 'harness_gate.run', 'at' => '2026-10-02T01:00:00Z')}\n")

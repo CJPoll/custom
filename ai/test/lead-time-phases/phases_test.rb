@@ -507,20 +507,28 @@ end
 
 # ── origin: a landing worked on another machine is foreign (DND-1531) ──────
 # Telemetry is machine-local. Foreign needs positive evidence: a dispatch
-# stamp, a readable store recording since the dispatch day, and no local
-# event (of any kind), receipt, verdict or timings for the unit.
+# stamp, a readable store already recording dispatches at that instant (its
+# first ticket.dispatched, of any unit, at or before it), and no local event
+# (of any kind), receipt, verdict or timings for the unit.
 
 O = L::Origin
 NONE_HERE = S.empty("no receipt")
-def origin(l, events, first_day: "2026-09-20", store_na: nil, evidence: nil)
-  O.decide(landing: l, unit_events: events, store_first_day: first_day, store_na: store_na, evidence: evidence)
+# events: a Source; since: the store's first ticket.dispatched (another
+# unit's), prepended to an ok Source, or nil for none.
+def origin(l, events, since: "2026-09-20T00:00:00Z", evidence: nil)
+  if since && !events.could_not_look?
+    events = S.ok([ev("ticket.dispatched", since, unit: "DND-9050")] + events.items)
+  end
+  O.decide(landing: l, unit_events: events, evidence: evidence)
 end
 
 o1 = origin(l, S.ok([ev("harness_gate.run", "2026-10-01T02:00:00Z", unit: "DND-9002")]))
 check("O1 a stamp, a covering store and zero local events for the unit: foreign") { o1["origin"] == "foreign" }
-check("O1 the decision names its evidence") { o1["origin_source"].include?("dispatch stamp on 2026-10-01") && o1["origin_source"].include?("DND-9001") }
+check("O1 the decision names its evidence") do
+  o1["origin_source"].include?("dispatched at 2026-10-01T01:00:00Z") && o1["origin_source"].include?("DND-9001")
+end
 check("O1 another unit's events are not evidence for this one") { !o1.key?("origin_na") }
-check("O1 an empty store that covers the day is still foreign (looked, found nothing)") do
+check("O1 a store with only another unit's dispatch is still foreign (looked, found nothing)") do
   origin(l, S.ok([]))["origin"] == "foreign"
 end
 
@@ -548,15 +556,20 @@ end
 o5 = origin(landing(start: nil), S.ok([]))
 check("O5 MISS: no dispatch stamp is undecided, never foreign") { o5["origin"].nil? && o5["origin_na"].include?("no dispatch stamp") }
 
-o6 = origin(l, S.ok([]), first_day: "2026-10-01")
-check("O6 a store whose first day is the dispatch day covers it") { o6["origin"] == "foreign" }
-o6b = origin(l, S.ok([]), first_day: "2026-10-02")
-check("O6 MISS: a store that begins after the dispatch day is undecided") do
-  o6b["origin"].nil? && o6b["origin_na"].include?("begins 2026-10-02, after the dispatch on 2026-10-01")
+o6 = origin(l, S.ok([]), since: "2026-10-01T01:00:00Z")
+check("O6 a first dispatch event at the dispatch instant covers it") { o6["origin"] == "foreign" }
+o6b = origin(l, S.ok([]), since: "2026-10-01T01:00:01Z")
+check("O6 MISS: the same day, the dispatch emitter not yet recording: undecided") do
+  o6b["origin"].nil? &&
+    o6b["origin_na"].include?("first ticket.dispatched is at 2026-10-01T01:00:01Z, after the dispatch at 2026-10-01T01:00:00Z")
 end
-o7 = origin(l, S.ok([]), first_day: nil, store_na: "the store at /t holds no day file")
-check("O7 MISS: a store with no day file is undecided, with the store's reason") do
-  o7["origin"].nil? && o7["origin_na"].include?("the store at /t holds no day file")
+o7 = origin(l, S.ok([ev("harness_gate.run", "2026-09-01T00:00:00Z", unit: "DND-9002")]), since: nil)
+check("O7 MISS: a store with no ticket.dispatched at all is undecided, never foreign") do
+  o7["origin"].nil? && o7["origin_na"].include?("holds no ticket.dispatched")
+end
+check("O7 the earliest dispatch event is the one that counts") do
+  evs = S.ok([ev("ticket.dispatched", "2026-10-03T00:00:00Z", unit: "DND-1"), ev("ticket.dispatched", "2026-09-02T00:00:00Z", unit: "DND-2")])
+  O.dispatch_recording_since(evs) == t("2026-09-02T00:00:00Z")
 end
 
 o8 = origin(landing(ticket: nil, start: nil), S.ok([]))
@@ -602,6 +615,16 @@ check("F1 the totals still include foreign rows") do
 end
 check("F1 local and unknown are counted too") { fs["origin"]["local"] == 2 && fs["origin"]["unknown"] == 0 }
 
+tailing = [foreign_row(2), foreign_row(4)].map { |r| r.merge("tail_s" => 9000, "tail_end" => "deploy") }
+ft = L::Stats.summarize(loc + tailing)
+check("F1 a foreign landing's tail never enters the biggest pick") do
+  ft["biggest"].values_at("phase", "sum_s", "lever") == ["verify", 50, "harness"] && ft["biggest"]["tail_candidate"] == false
+end
+check("F1 but its tail is still in the totals") { ft["totals"]["tail"]["sum_s"] == 18_000 }
+check("F2 every landing foreign, with nonzero tails: still no biggest, the foreign reason") do
+  b = L::Stats.summarize(tailing)["biggest"]
+  b["phase"].nil? && b["reason"].include?("worked on another machine")
+end
 all_f = L::Stats.summarize([foreign_row(1), foreign_row(2)])
 check("F2 every landing foreign: no biggest, and the reason says so") do
   all_f["biggest"]["phase"].nil? && all_f["biggest"]["reason"].include?("worked on another machine") && all_f["foreign"] == 2

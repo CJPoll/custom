@@ -470,8 +470,8 @@ module LeadTimePhases
   # is "foreign": counted and named, kept out of the phase stats and the
   # biggest pick. Foreign is decided only from positive evidence: a ticketed
   # landing with a dispatch stamp, a telemetry store this reader could read
-  # that was already recording on the dispatch day, and no local event of any
-  # kind for the unit. Any local event, or a local receipt, verdict or
+  # that was already recording dispatches at that instant, and no local event
+  # of any kind for the unit. Any local event, or a local receipt, verdict or
   # harness-gate timings row for the gated head, makes it "local". Anything
   # else stays undecided (origin null) with the reason, and is treated as
   # before.
@@ -494,13 +494,29 @@ module LeadTimePhases
       nil
     end
 
+    # The earliest ticket.dispatched in the store (any unit), or nil. Every
+    # dispatch stamp is written by mark-in-progress, which emits that event,
+    # so from this instant on a dispatch made here would be in the store.
+    # Retention prunes oldest first, so a pruned store moves it later.
+    def dispatch_recording_since(events)
+      events.items.select { |e| e["event"] == "ticket.dispatched" }.filter_map { |e| Util.time(e["at"]) }.min
+    end
+
     # unit_events: a Source of every local telemetry event, of any registered
     # kind and any repo (a ticket's dispatch may be written from another
-    # repo's checkout). store_first_day: the store's oldest day file
-    # ("YYYY-MM-DD"), or nil with store_na saying why. evidence: from
-    # local_evidence. -> {"origin"=>"local"|"foreign"|nil, "origin_source"=>..
-    # | "origin_na"=>why}
-    def decide(landing:, unit_events:, store_first_day:, store_na: nil, evidence: nil)
+    # repo's checkout). evidence: from local_evidence.
+    # -> {"origin"=>"local"|"foreign"|nil, "origin_source"=>.. | "origin_na"=>why}
+    #
+    # Any event for the unit counts, at any time: a merge.landed is confirmed
+    # after the landing, and a ticket landed twice whose first landing was
+    # worked here reads local for both. That errs toward local, which only
+    # keeps the old n/a reading. The ledger is first-write-wins, so an
+    # undecided row (a store unreadable at ingest) stays undecided.
+    #
+    # Residual: a landing worked here with none of the evidence above (no
+    # unit-tagged event, receipt, verdict or timings) would read foreign. Every
+    # local gate, critic and integration run is unit-tagged from its branch.
+    def decide(landing:, unit_events:, evidence: nil)
       unit = landing["ticket"]
       return undecided(Anchors.no_unit(landing, "unticketed landing: no unit to look for local events on")) unless unit
 
@@ -514,20 +530,20 @@ module LeadTimePhases
         why = landing["start_na"] || "no stamp for #{unit}"
         return undecided("no local events for #{unit}, and no dispatch stamp (#{why}): where it was worked is unknown")
       end
-      day = start.utc.strftime("%Y-%m-%d")
-      unless store_first_day
-        return undecided("no local events for #{unit}, but the telemetry store cannot show the dispatch day #{day} " \
-                         "(#{store_na || 'it holds no day file'})")
+      since = dispatch_recording_since(unit_events)
+      unless since
+        return undecided("no local events for #{unit}, but the telemetry store holds no ticket.dispatched, so it " \
+                         "cannot show that a dispatch made here at #{Util.iso(start)} would be recorded")
       end
-      if store_first_day > day
-        return undecided("no local events for #{unit}, but the telemetry store begins #{store_first_day}, after the " \
-                         "dispatch on #{day} (pruned, or not yet recording): a missing event cannot be told from an " \
-                         "unrecorded one")
+      if since > start
+        return undecided("no local events for #{unit}, but the store's first ticket.dispatched is at " \
+                         "#{Util.iso(since)}, after the dispatch at #{Util.iso(start)} (pruned, or not yet " \
+                         "recording): a missing event cannot be told from an unrecorded one")
       end
 
-      { "origin" => FOREIGN, "origin_source" => "a dispatch stamp on #{day}, the telemetry store recording since " \
-                                                "#{store_first_day}, and no local event, receipt, verdict or timings " \
-                                                "for #{unit}" }
+      { "origin" => FOREIGN, "origin_source" => "dispatched at #{Util.iso(start)}, the store recording dispatches " \
+                                                "since #{Util.iso(since)}, and no local event, receipt, verdict or " \
+                                                "timings for #{unit}" }
     end
 
     def local(source) = { "origin" => LOCAL, "origin_source" => source }
@@ -771,7 +787,7 @@ module LeadTimePhases
       ph = phases(local)
       tot = totals(rows)
       org = origins(rows)
-      big = biggest(ph, tot["tail"])
+      big = biggest(ph, totals(local)["tail"])
       if big["phase"].nil? && local.empty? && !rows.empty?
         big["reason"] = "every landing in the window was worked on another machine (foreign: #{org['foreign']})"
       end
