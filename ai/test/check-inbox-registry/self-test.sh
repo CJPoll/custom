@@ -226,6 +226,61 @@ OUT="$(cd "${D}/wt" && env -u ATHENA_LANDED_PIN_SHA -u ATHENA_LANDED_PIN_REPO AT
   "${D}/wt/ai/bin/check-inbox-registry" 2>&1)"; RC=$?
 expect "...and unpinned, the stale local origin/main -> could not measure, exit 3" 3 "disagrees with origin"
 
+# 14. AHEAD OF THE PINNED BAR (DND-1552). The gate pins origin's main at its
+#     start; then a newer commit lands and the owner installs it from the MAIN
+#     checkout. The live entry now equals what the NEWER origin/main declares,
+#     and the pinned bar read it as drift: every concurrent gate went red. A
+#     live entry equal to a newer origin/main's declaration passes, named as
+#     "ahead of the pinned bar". Anything else is still drift.
+# ahead_fixture <name> <registry spec...>: pin origin main (PIN, KEY), land the
+# spec on main as a newer commit, and install it live from the main checkout.
+ahead_fixture() {
+  D="$(new_fixture "$1")"; shift
+  PIN="$(git -C "${D}/main" rev-parse HEAD)"
+  KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+  registry "${D}/main" "$@"; commit "${D}/main" newer
+  git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+  git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+  install_live "${D}"
+}
+pinned_check() { # run the worktree's checker under the gate's pin
+  OUT="$(cd "${D}/wt" && ATHENA_LANDED_PIN_SHA="${PIN}" ATHENA_LANDED_PIN_REPO="${KEY}" ATHENA_INBOX_ROOT="${D}/root" \
+    "${D}/wt/ai/bin/check-inbox-registry" 2>&1)"; RC=$?
+}
+
+ahead_fixture ahead "demo.json=-=slack,extra"
+pinned_check; expect "live entry equals a NEWER origin/main -> pass, named ahead of the pinned bar" 0 \
+  "demo\.json.*ahead of the pinned bar"
+
+# The miss: a live entry that equals neither the pinned bar nor the newer one.
+ahead_fixture ahead-miss "demo.json=-=slack,extra"
+"${RUBY_BIN}" -rjson -e 'p = ARGV[0]; e = JSON.parse(File.read(p)); e["channels"].delete("slack"); File.write(p, JSON.pretty_generate(e) + "\n")' \
+  "${D}/root/projects/demo.json"
+pinned_check; expect "live entry matches neither the pinned nor the newer bar -> still FAIL" 1 "demo\.json" \
+  ": ahead of the pinned bar"
+
+# Ahead content does not excuse the rest of the entry's contract: mode 0600.
+ahead_fixture ahead-mode "demo.json=-=slack,extra"
+chmod 0644 "${D}/root/projects/demo.json"
+pinned_check; expect "live entry ahead in content but mode 0644 -> still FAIL" 1 "0644"
+
+# One entry ahead does not excuse another that is plainly missing.
+D="$(new_fixture ahead-partial "demo.json=-=slack" "peer.json=-=slack")"
+PIN="$(git -C "${D}/main" rev-parse HEAD)"
+KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+registry "${D}/main" "demo.json=-=slack,extra" "peer.json=-=slack"; commit "${D}/main" newer
+git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+install_live "${D}"
+rm -f "${D}/root/projects/peer.json"
+pinned_check; expect "one entry ahead, another missing -> still FAIL naming the missing one" 1 "peer\.json is missing"
+
+# Unpinned, there is no newer origin/main to be ahead of: the bar IS the tip,
+# and a live entry the tip does not declare is drift, as before.
+D="$(new_fixture unpinned-edit)"
+"${RUBY_BIN}" -rjson -e 'p = ARGV[0]; e = JSON.parse(File.read(p)); e["channels"]["extra"] = e["channels"]["slack"]; File.write(p, JSON.pretty_generate(e) + "\n")' \
+  "${D}/root/projects/demo.json"
+check "${D}"; expect "unpinned, a live entry no origin/main declares -> FAIL" 1 "demo\.json" ": ahead of the pinned bar"
+
 echo "check-inbox-registry landed-bar suite: ${PASS} passed, ${FAIL} failed"
 if [ "${FAIL}" -eq 0 ]; then echo "ALL CASES PASS"; exit 0; fi
 echo "SELF-TEST FAILED"; exit 1

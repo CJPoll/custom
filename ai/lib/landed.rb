@@ -340,6 +340,33 @@ module Landed
     [pts, probes]
   end
 
+  # AHEAD OF THE PINNED BAR (DND-1552). Under harness-gate the bar is origin's
+  # main as of the gate start. A machine-wide installer run from the main
+  # checkout after a newer commit lands makes machine state match that NEWER
+  # main, so a check measuring it against the pin reads drift that is not
+  # there, and every concurrent gate goes red. A check that found drift asks
+  # this for the newer commit, and may pass live state only when it equals what
+  # that commit declares, naming it "ahead of the pinned bar". It never lowers
+  # the pinned bar: state matching neither stays drift.
+  #
+  # Returns [label, sha] for origin's main as read NOW, when there is a pin for
+  # root's repository and origin's main has moved past it (descends from it).
+  # Returns nil when there is no pin (the bar is already origin's live tip), or
+  # origin's main is the pin. Raises Unreadable when origin cannot be read or
+  # its objects cannot be fetched, and Mismatch when origin's main no longer
+  # descends from the pin: the caller reports its drift as it stands.
+  def newer_tip(root)
+    probes = []
+    pinned = pinned_tip(root, probes)
+    return nil unless pinned
+
+    remote = remote_tip(root, probes)
+    return nil if remote == pinned
+    raise Mismatch.new(pinned, remote) unless pin_on_origin?(root, pinned, remote, probes)
+
+    ["origin/main as read now (#{LS_REMOTE_PROBE}), newer than the pin", remote]
+  end
+
   # The blob sha of path at commit sha, or nil when the commit's tree has no
   # such path. "No such path" is a MEASUREMENT (it had not landed at that
   # point); anything else that stops the read raises Unreadable.

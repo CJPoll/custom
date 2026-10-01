@@ -140,10 +140,11 @@ real_hooks_fingerprint() {
 REAL_HOOKS_BEFORE="$(real_hooks_fingerprint)"
 
 # scripts/setup-hooks backs its target up as "${SETTINGS}.bak-<ts>" before
-# merging. Nothing else on this machine writes that name, so a NEW one beside
-# the real settings file is a zero-false-positive trace of a leaked --install --
-# and it fires even when the merge happened to be a no-op on the command set,
-# which the hook-set check alone would miss.
+# merging, so a NEW one beside the real settings file made during one of this
+# suite's own setup-hooks calls is a trace of a leaked --install -- and it
+# fires even when the merge happened to be a no-op on the command set, which
+# the hook-set check alone would miss. A backup made outside every such call is
+# a main-checkout install by someone else (see backup_trail_verdict below).
 real_settings_backups() {
   local b
   for b in "${REAL_SETTINGS}".bak-*; do
@@ -151,6 +152,53 @@ real_settings_backups() {
   done | LC_ALL=C sort
 }
 REAL_SETTINGS_BACKUPS_BEFORE="$(real_settings_backups)"
+
+# WHOSE backup is it? (DND-1552.) "Nothing else on this machine writes that
+# name" was wrong in one direction: the owner or an admiral runs
+# `setup-hooks --install` from the MAIN checkout after a landing, and that
+# backs the live file up too. Measured 2026-10-01 14:22:04Z: one such install
+# reddened a concurrent gate's run of this suite. So a new backup counts as
+# this suite's leak only when its timestamp (setup-hooks names it
+# .bak-%Y%m%d-%H%M%S, local time, one second resolution) falls inside one of
+# this suite's OWN setup-hooks calls, each recorded in SH_WINDOWS as
+# "<start> <end>" by suite_setup_hooks. A name whose time cannot be read, or a
+# windows file that cannot be read, counts as the suite's: never assumed
+# external. Residual, said out loud: an external install inside the same
+# second as a suite call still reads as the suite's (a false red, never a
+# false green).
+SH_WINDOWS="${TMP}/setup-hooks-windows"
+: > "${SH_WINDOWS}"
+sh_now() { date +%Y%m%d-%H%M%S; }
+# suite_setup_hooks <checkout> <settings-file> <args...>: every setup-hooks
+# call in this suite goes through here, so its window is on record.
+suite_setup_hooks() {
+  local dir="$1" set="$2" start rc; shift 2
+  start="$(sh_now)"
+  ( cd "${dir}" && HOOKS_SETTINGS_FILE="${set}" scripts/setup-hooks "$@" ); rc=$?
+  printf '%s %s\n' "${start}" "$(sh_now)" >> "${SH_WINDOWS}"
+  return "${rc}"
+}
+
+# backup_trail_verdict <before-list> <after-list> <windows-file>: one line per
+# backup in <after-list> that is not in <before-list>, "suite <path>" or
+# "external <path>".
+backup_trail_verdict() {
+  local b ts s e inside
+  comm -13 <(printf '%s\n' "$1" | grep -v '^$' | LC_ALL=C sort) \
+           <(printf '%s\n' "$2" | grep -v '^$' | LC_ALL=C sort) |
+  while IFS= read -r b; do
+    [ -n "${b}" ] || continue
+    ts="${b##*.bak-}"
+    if ! [[ "${ts}" =~ ^[0-9]{8}-[0-9]{6}$ ]] || [ ! -r "$3" ]; then
+      printf 'suite %s\n' "${b}"; continue
+    fi
+    inside=0
+    while read -r s e; do
+      if [[ ! "${ts}" < "${s}" && ! "${ts}" > "${e}" ]]; then inside=1; fi
+    done < "$3"
+    if [ "${inside}" = 1 ]; then printf 'suite %s\n' "${b}"; else printf 'external %s\n' "${b}"; fi
+  done
+}
 
 # The real-$HOME seen dir. The live poll may ADD a marker here keyed to the REAL
 # repo hash while the suite runs -- that is allowed and must not fail the guard.
@@ -1490,8 +1538,8 @@ HFIX="${CASE_DIR}/hooks-fixture"
 landed_fixture "${REPO_DIR}" "${HFIX}" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
   || bad "F-11 the fixture repo is built" "landed_fixture failed; every F-11 installer case below is void"
 printf '{\n  "model": "x",\n  "permissions": {"allow": ["Bash(ls:*)"]}\n}\n' > "${SET}"
-( cd "${HFIX}" && HOOKS_SETTINGS_FILE="${SET}" scripts/setup-hooks --install >/dev/null 2>&1 )
-R2="$( cd "${HFIX}" && HOOKS_SETTINGS_FILE="${SET}" scripts/setup-hooks --install 2>&1 )"
+suite_setup_hooks "${HFIX}" "${SET}" --install >/dev/null 2>&1
+R2="$(suite_setup_hooks "${HFIX}" "${SET}" --install 2>&1)"
 assert_contains "F-11 a second --install is a no-op (idempotent)" "nothing to do" "${R2}"
 assert_eq "F-11 the merge preserves an unrelated scalar key" "x" \
   "$(jq -r '.model' "${SET}" 2>/dev/null)"
@@ -1503,6 +1551,37 @@ for s in safe-wait-guard pronoun-guard notify-idle main-session-policy; do
   assert_eq "F-11 the merge leaves pre-existing hook [${s}] wired" "1" \
     "$(jq --arg s "${s}.sh" '[.hooks[]?[]?.hooks[]? | select(.command | endswith($s))] | length' "${SET}" 2>/dev/null)"
 done
+# F-11b (DND-1552). The end-of-suite backup-trail check (4) attributes a new
+# backup beside the real settings file to THIS suite only when its timestamp
+# falls inside one of this suite's own setup-hooks calls. A main-checkout
+# `setup-hooks --install` the owner or an admiral runs while the suite runs
+# (after a landing) is not this suite's leak, and reddened every concurrent
+# gate (DND-1539, 14:22:04Z on 2026-10-01). Exercised on synthetic names.
+BT_W="${CASE_DIR}/bt-windows"
+printf '20261001-142200 20261001-142203\n' > "${BT_W}"
+BT_B="${CASE_DIR}/settings.json.bak-20261001-142000"
+assert_eq "F-11b a backup made outside every suite setup-hooks call is external" \
+  "external ${CASE_DIR}/settings.json.bak-20261001-142204" \
+  "$(backup_trail_verdict "${BT_B}" "${BT_B}
+${CASE_DIR}/settings.json.bak-20261001-142204" "${BT_W}")"
+assert_eq "F-11b a backup made inside a suite setup-hooks call is the suite's" \
+  "suite ${CASE_DIR}/settings.json.bak-20261001-142203" \
+  "$(backup_trail_verdict "${BT_B}" "${BT_B}
+${CASE_DIR}/settings.json.bak-20261001-142203" "${BT_W}")"
+assert_eq "F-11b a backup whose time cannot be read is the suite's (never assumed external)" \
+  "suite ${CASE_DIR}/settings.json.bak-oops" \
+  "$(backup_trail_verdict "" "${CASE_DIR}/settings.json.bak-oops" "${BT_W}")"
+assert_eq "F-11b an unreadable windows file makes every new backup the suite's" \
+  "suite ${CASE_DIR}/settings.json.bak-20261001-142204" \
+  "$(backup_trail_verdict "" "${CASE_DIR}/settings.json.bak-20261001-142204" "${CASE_DIR}/no-such-windows")"
+assert_eq "F-11b a backup that existed before the suite is not new" "" \
+  "$(backup_trail_verdict "${BT_B}" "${BT_B}" "${BT_W}")"
+# The attribution holds only while every setup-hooks call records its window,
+# so the suite runs setup-hooks in exactly one place: suite_setup_hooks. Every
+# call here sets HOOKS_SETTINGS_FILE on the same line as the command.
+assert_eq "F-11b setup-hooks is invoked only inside suite_setup_hooks" "1" \
+  "$(grep -cE '^[^#]*HOOKS_SETTINGS_FILE=[^ ]+ +scripts/setup-hooks' "${HERE}/athena-inbox-poll.self-test.sh")"
+
 # HOME is restored for the ruby checks: `ruby` here is an asdf shim that
 # resolves its version data under $HOME, so running it with the fake HOME makes
 # the checker fail for a reason that has nothing to do with the thing under
@@ -1874,7 +1953,26 @@ fi
 
 # (4) The real settings.json, by CONTENT and by backup trail (see the prologue
 # for why not by mtime, and for why assert_fake_home does not cover this file).
+#
+# Attribution (DND-1552). A change here is this suite's leak unless it is
+# provably another writer's. The backup trail decides it (backup_trail_verdict,
+# in the prologue): a new backup made inside one of this suite's own
+# setup-hooks calls is the suite's; one made outside all of them is an
+# external `setup-hooks --install` (the owner or an admiral, after a landing),
+# named and not failed. A hook-set change is the suite's when the new set wires
+# a command under ${TMP} (every setup-hooks call here runs from a fixture repo
+# under ${TMP}, so a leaked install wires paths there), or when no external
+# backup explains it.
 real_hooks_after="$(real_hooks_fingerprint)"
+real_backups_after="$(real_settings_backups)"
+if ! command -v comm >/dev/null 2>&1; then
+  trail_verdict="UNREADABLE"
+else
+  trail_verdict="$(backup_trail_verdict "${REAL_SETTINGS_BACKUPS_BEFORE}" "${real_backups_after}" "${SH_WINDOWS}")"
+fi
+suite_backups="$(printf '%s\n' "${trail_verdict}" | sed -n 's/^suite //p')"
+external_backups="$(printf '%s\n' "${trail_verdict}" | sed -n 's/^external //p')"
+
 case "${REAL_HOOKS_BEFORE}|${real_hooks_after}" in
   *UNREADABLE*)
     bad "the suite left the real settings.json hook wiring untouched" \
@@ -1891,6 +1989,9 @@ case "${REAL_HOOKS_BEFORE}|${real_hooks_after}" in
   *)
     if [ "${REAL_HOOKS_BEFORE}" = "${real_hooks_after}" ]; then
       ok "the suite left the real settings.json hook wiring untouched"
+    elif ! grep -qF -- "${TMP}" <<<"${real_hooks_after}" && [ -n "${external_backups}" ] \
+         && [ "${trail_verdict}" != "UNREADABLE" ]; then
+      ok "the suite left the real settings.json hook wiring untouched (it changed, by an external setup-hooks run: $(printf '%s' "${external_backups}" | tr '\n' ' '))"
     else
       bad "the suite left the real settings.json hook wiring untouched" \
 "the set of hooks registered in ${REAL_SETTINGS} CHANGED while this suite ran:
@@ -1898,46 +1999,45 @@ case "${REAL_HOOKS_BEFORE}|${real_hooks_after}" in
           after =[${real_hooks_after}]
         The live Claude Code process rewrites this file asynchronously (model, theme,
         enabledPlugins, permissions) -- which is why its mtime is NOT asserted -- but it
-        does not add, drop or re-point a hook COMMAND, so a change in this set is a write
-        this suite caused.
+        does not add, drop or re-point a hook COMMAND. The new set wires a path under
+        ${TMP}, or no setup-hooks backup made outside this suite's own setup-hooks calls
+        explains the change, so this suite caused it.
         Fix: find the scripts/setup-hooks (or settings-writing) call that ran WITHOUT
         HOOKS_SETTINGS_FILE pointing at a per-case file under ${TMP}. Every such call in
-        this suite must set it -- including the ones that restore HOME=\"\${REAL_HOME}\"
-        for the asdf ruby shims, because an unset HOOKS_SETTINGS_FILE defaults to
-        \${HOME}/.claude/settings.json, i.e. the live harness. Then repair the live
-        wiring: run 'scripts/setup-hooks --install' from the MAIN checkout and confirm
-        with 'ai/bin/check-hooks-registered'. If no suite call did this, a human or
-        another agent edited the live hooks block mid-run -- verify that was intended
-        (the 2026-09-17 outage was exactly a silent hooks-block rewrite)."
+        this suite must go through suite_setup_hooks with a per-case settings file,
+        including the ones that restore HOME=\"\${REAL_HOME}\" for the asdf ruby shims,
+        because an unset HOOKS_SETTINGS_FILE defaults to \${HOME}/.claude/settings.json,
+        i.e. the live harness. Then repair the live wiring: run 'scripts/setup-hooks
+        --install' from the MAIN checkout and confirm with 'ai/bin/check-hooks-registered'.
+        If no suite call did this, a human or another agent edited the live hooks block
+        mid-run -- verify that was intended (the 2026-09-17 outage was exactly a silent
+        hooks-block rewrite)."
     fi ;;
 esac
 
-if ! command -v comm >/dev/null 2>&1; then
+if [ "${trail_verdict}" = "UNREADABLE" ]; then
   bad "no settings.json backup appeared in the real \$HOME" \
 "comm(1) is not on PATH, so the before/after backup sets could not be compared and a
         leaked 'setup-hooks --install' against the live settings file could not be ruled
         out -- a check that cannot evaluate must not print ok.
         Fix: install coreutils (comm) and re-run the suite."
-else
-  new_backups="$(comm -13 \
-    <(printf '%s\n' "${REAL_SETTINGS_BACKUPS_BEFORE}" | grep -v '^$' | LC_ALL=C sort) \
-    <(printf '%s\n' "$(real_settings_backups)"        | grep -v '^$' | LC_ALL=C sort) )"
-  if [ -n "${new_backups}" ]; then
-    bad "no settings.json backup appeared in the real \$HOME" \
-"new backup file(s) appeared beside the live settings file while this suite ran:
-        $(printf '%s' "${new_backups}" | tr '\n' ' ')
+elif [ -n "${suite_backups}" ]; then
+  bad "no settings.json backup appeared in the real \$HOME" \
+"new backup file(s) appeared beside the live settings file inside one of this suite's own
+        setup-hooks calls (or with a time that cannot be read):
+        $(printf '%s' "${suite_backups}" | tr '\n' ' ')
         scripts/setup-hooks backs its target up as \"\${SETTINGS}.bak-<ts>\" before
-        merging, and nothing else on this machine writes that name -- so a
-        'setup-hooks --install' ran against the LIVE settings file instead of a per-case
-        one under ${TMP}.
+        merging, so a 'setup-hooks --install' from this suite ran against the LIVE
+        settings file instead of a per-case one under ${TMP}.
         Fix: set HOOKS_SETTINGS_FILE=\"\${CASE_DIR}/settings.json\" on every
-        scripts/setup-hooks invocation in this suite (unset defaults to
-        \${HOME}/.claude/settings.json). Then restore the live file from the OLDEST
-        backup listed above, confirm with 'ai/bin/check-hooks-registered', and delete the
-        stray backup(s) only once the live file is correct."
-  else
-    ok "no settings.json backup appeared in the real \$HOME"
-  fi
+        scripts/setup-hooks invocation in this suite (call it through suite_setup_hooks;
+        unset defaults to \${HOME}/.claude/settings.json). Then restore the live file from
+        the OLDEST backup listed above, confirm with 'ai/bin/check-hooks-registered', and
+        delete the stray backup(s) only once the live file is correct."
+elif [ -n "${external_backups}" ]; then
+  ok "no settings.json backup appeared in the real \$HOME from this suite (external setup-hooks run(s), outside every suite call: $(printf '%s' "${external_backups}" | tr '\n' ' '))"
+else
+  ok "no settings.json backup appeared in the real \$HOME"
 fi
 
 echo

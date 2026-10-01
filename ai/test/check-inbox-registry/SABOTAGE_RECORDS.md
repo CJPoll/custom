@@ -54,3 +54,17 @@ committed files untouched, so there is nothing to restore.
 The last two are caught only by the black-box suite: the inline suite injects
 the landed bar, so it cannot see how the real read treats a malformed file or
 which list the discriminator uses. That is why both suites run in the gate.
+
+## DND-1552: a live entry ahead of the pinned bar
+
+Fail-first: the new black-box case `live entry equals a NEWER origin/main -> pass,
+named ahead of the pinned bar` failed on the unfixed checker with `exit 1, want 0;
+output: check-inbox-registry: FAIL — 1 registry problem(s) ... - demo.json does not
+match the committed entry (differing key(s): channels)`, 20 passed, 1 failed.
+After the fix: 21 passed, 0 failed.
+
+| Mutation | Caught by |
+|---|---|
+| `ahead-without-live-equality`: an entry counts as ahead when the newer declaration differs, whatever the live file holds | black-box `live entry matches neither the pinned nor the newer bar -> still FAIL` |
+| `ahead-skips-mode`: ahead entries are dropped from the bar instead of replaced by the newer declaration | black-box `live entry ahead in content but mode 0644 -> still FAIL` |
+| `newer-tip-disabled`: `Landed.newer_tip` always returns nil | black-box `live entry equals a NEWER origin/main -> pass ...` |

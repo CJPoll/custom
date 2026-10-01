@@ -120,3 +120,16 @@ check-hooks-registered landed-bar suite: 34 passed, 4 failed
 | M2: retirements read from the branch registry, not the landed one | branch drops a landed retirement, hook still wired (1 failed) |
 | M3: no declared-and-retired consistency check | branch registry both declares and retires one row (1 failed) |
 | M4: a non-array `retired` read as empty | landed retired list malformed -> could not measure (1 failed) |
+
+## DND-1552: live wiring ahead of the pinned bar
+
+Fail-first: the new black-box case `live wiring equals a NEWER origin/main -> pass,
+named ahead of the pinned bar` failed on the unfixed checker with `exit 1, want 0;
+output: check-hooks-registered: FAIL / 1 landed registry row(s) are NOT wired ...
+SessionStart "" -> ai/hooks/a.sh`, 42 passed, 1 failed. After the fix: 44 passed, 0 failed.
+
+| Mutation (in `ai/bin/check-hooks-registered` / `ai/lib/landed.rb`) | Caught by |
+|---|---|
+| `ahead-skips-newer-drift`: the newer bar's drift rule is dropped | `live wiring matches neither the pinned nor the newer bar -> still FAIL` |
+| `ahead-skips-stale`: the newer bar's stale-matcher rule is dropped | `newer rows wired plus a stale matcher -> still FAIL` (added after this mutation first survived) |
+| `newer-tip-disabled`: `Landed.newer_tip` always returns nil | `live wiring equals a NEWER origin/main -> pass ...` |

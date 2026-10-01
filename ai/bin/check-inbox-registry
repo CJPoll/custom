@@ -46,6 +46,15 @@
 #      a machine where a landed entry's repo is checked out.
 #   4. PENDING: what this branch adds, retires or edits in registry.json. Named,
 #      never a failure: it is provisioned after it lands, from the main checkout.
+#   5. AHEAD OF THE PINNED BAR (DND-1552): under harness-gate the bar is
+#      origin's main as of the gate start. When an entry drifts from it, and
+#      origin's main has since moved past the pin, a live entry that equals
+#      exactly what the NEWER origin/main declares for that file is measured
+#      against the newer declaration instead, and named. Its mode, file type
+#      and repo identity are still checked. A live entry that equals neither
+#      declaration is drift, as before; so is every other problem. The newer
+#      declaration is read from git (ai/lib/landed.rb, Landed.newer_tip), never
+#      from the working tree, and only after the pinned bar found drift.
 #
 # Environment-safe, like check-hooks-registered: if the inbox root does not
 # exist and no LANDED entry's repo is checked out here, this machine does not
@@ -174,6 +183,54 @@ INSTALLER_WHO = "Who runs it: a session on this machine that its own owner turn 
                 "Notify after). A captain or other subagent without that brief reports it to its " \
                 "admiral instead and does not run the installer."
 
+# The newer origin/main's entries, as [description, entries], or nil when
+# there is no pin or origin's main is the pin (see Landed.newer_tip). Raises
+# Landed::Unreadable, Landed::Mismatch or InboxRegistry::Error.
+def newer_entries(root = InboxRegistry.repo_dir)
+  tip = Landed.newer_tip(root)
+  return nil unless tip
+
+  label, sha = tip
+  where = "#{REGISTRY_REL} @ #{label} #{sha[0, 12]}"
+  text = Landed.file_at(root, sha, REGISTRY_REL, label)
+  [where, text ? InboxRegistry.parse(text, where) : []]
+end
+
+# Splits the pinned bar's entries by whether the live entry is AHEAD of it:
+# it differs from the pinned declaration and equals the newer origin/main's
+# declaration for the same file. Returns [effective, ahead, note]: effective is
+# the bar with each ahead entry replaced by its newer declaration (so drift()
+# still checks its mode, file type and repo identity), ahead the file names,
+# note a line for the output (nil when there is nothing to say). Any failure to
+# read the newer declaration leaves the pinned bar as it is, and says so.
+def ahead_of_pin(entries, newer)
+  got = newer.call
+  return [entries, [], nil] if got.nil?
+
+  desc, newer_list = got
+  by_file = newer_list.to_h { |p| [p["file"], p["entry"]] }
+  ahead = entries.filter_map do |p|
+    want = by_file[p["file"]]
+    p["file"] if want && want != p["entry"] && InboxRegistry.live_entry(p["file"]) == want
+  end
+  effective = entries.map { |p| ahead.include?(p["file"]) ? p.merge("entry" => by_file[p["file"]]) : p }
+  [effective, ahead, ahead.empty? ? nil : desc]
+rescue Landed::Unreadable, Landed::Mismatch, InboxRegistry::Error => e
+  [entries, [], "could not read a newer origin/main to tell whether the live registry is ahead of the " \
+                "pinned bar (#{e.message}); it is measured against the pinned bar alone"]
+end
+
+# Names each ahead entry (or the note on why none could be judged ahead).
+def report_ahead(ahead, desc, out = $stdout)
+  return if desc.nil?
+  return out.puts("  note: #{desc}") if ahead.empty?
+
+  out.puts "  #{ahead.size} live entr#{ahead.size == 1 ? 'y is' : 'ies are'} ahead of the pinned bar " \
+           "(not drift): #{ahead.size == 1 ? 'it equals' : 'each equals'} what #{desc} declares, a commit " \
+           "that landed after harness-gate pinned origin/main:"
+  ahead.each { |f| out.puts "  ~ #{f}: ahead of the pinned bar" }
+end
+
 def unmeasured(lines)
   warn "check-inbox-registry: COULD NOT MEASURE — this is not a pass."
   lines.each { |l| warn l }
@@ -182,7 +239,7 @@ end
 
 # The check. `landed` is how the landed registry is read (origin, via Landed);
 # the inline self-test injects it so that suite stays hermetic.
-def run(landed: -> { landed_entries })
+def run(landed: -> { landed_entries }, newer: -> { newer_entries })
   begin
     branch = InboxRegistry.declared
   rescue InboxRegistry::Error => e
@@ -224,11 +281,19 @@ def run(landed: -> { landed_entries })
   end
 
   problems = InboxRegistry.drift(entries)
+  ahead = []
+  ahead_desc = nil
+  unless problems.empty?
+    # Only on drift: a pass against the pinned bar needs no newer read.
+    effective, ahead, ahead_desc = ahead_of_pin(entries, newer)
+    problems = InboxRegistry.drift(effective) unless ahead.empty?
+  end
   if problems.empty?
     puts "check-inbox-registry: all #{entries.size} landed registry " \
          "entr#{entries.size == 1 ? 'y' : 'ies'} #{entries.size == 1 ? 'is' : 'are'} installed and " \
-         "#{entries.size == 1 ? 'matches' : 'match'} the #{bar}. OK." +
+         "#{entries.size == 1 ? 'matches' : 'match'} the #{bar}#{ahead.empty? ? '' : ', or is ahead of it'}. OK." +
          (note ? " (#{note})" : "")
+    report_ahead(ahead, ahead_desc)
     report_pending(pending)
     return EXIT_OK
   end
@@ -237,6 +302,7 @@ def run(landed: -> { landed_entries })
        "(bar: #{bar}):"
   problems.each { |p| warn "  - #{p}" }
   warn "  note: #{note}" if note
+  report_ahead(ahead, ahead_desc, $stderr)
   warn "Fix: run `scripts/setup-inbox-registry --install` from the MAIN checkout, up to date with " \
        "origin/main, to re-materialise the landed entries (it writes only the entries it " \
        "declares, backs up anything it replaces, and never touches another entry " \
@@ -303,7 +369,8 @@ def self_test
     # proven end to end, on fixture repos with a bare origin, by
     # ai/test/check-inbox-registry/self-test.sh.
     as_landed = ->(file) { -> { ["fixture landed #{File.basename(file)}", InboxRegistry.parse(File.read(file), file)] } }
-    go = ->(landed = as_landed.call(src)) { quiet.call { run(landed: landed) } }
+    no_newer = -> {}
+    go = ->(landed = as_landed.call(src), newer = no_newer) { quiet.call { run(landed: landed, newer: newer) } }
 
     # 1. Absent root -> not this environment, exit 0. (Env-safety: the check
     #    must never false-fail a machine that does not run the facility.)
@@ -332,7 +399,7 @@ def self_test
     # The Fix: names who may run the installer, so a captain that hits it
     # mid-gate reports instead of editing machine state (DND-864 fix3).
     check.call("drift Fix: says a subagent reports it to its admiral",
-               capture.call { run(landed: as_landed.call(src)) }.include?("reports it to its admiral"))
+               capture.call { run(landed: as_landed.call(src), newer: no_newer) }.include?("reports it to its admiral"))
 
     # 5. A wrong file mode is drift on its own (0600 is a contract MUST).
     File.write(path, InboxRegistry.render(entry))
@@ -394,7 +461,7 @@ def self_test
     FileUtils.rm_rf(root)
     check.call("absent root + a declared repo checked out here -> exit 1", go.call == 1)
     check.call("absent-root Fix: says a subagent reports it to its admiral",
-               capture.call { run(landed: as_landed.call(src)) }.include?("reports it to its admiral"))
+               capture.call { run(landed: as_landed.call(src), newer: no_newer) }.include?("reports it to its admiral"))
 
     # 13. A malformed source of truth exits 2 (a code error, not machine state).
     File.write(src, "{ not json")
@@ -431,6 +498,25 @@ def self_test
     check.call("landed bar unreadable -> exit 3", go.call(unreadable) == 3)
     mismatch = -> { raise Landed::Mismatch.new("a" * 40, "b" * 40) }
     check.call("local origin/main disagrees with origin -> exit 3", go.call(mismatch) == 3)
+
+    # 20-23. AHEAD OF THE PINNED BAR (DND-1552). The live entry equals what a
+    #        newer origin/main declares; the pinned (landed) bar differs. The
+    #        origin-backed read is proven end to end by
+    #        ai/test/check-inbox-registry/self-test.sh.
+    File.write(src, JSON.pretty_generate({ "projects" => [{ "file" => "demo.json", "entry" => entry }] }))
+    File.write(path, InboxRegistry.render(wider))
+    File.chmod(0o600, path)
+    newer_of = ->(e) { -> { ["fixture newer", [{ "file" => "demo.json", "entry" => e }]] } }
+    check.call("live entry equals the newer declaration -> exit 0", go.call(landed, newer_of.call(wider)) == 0)
+    check.call("...and it is named as ahead of the pinned bar",
+               capture.call { run(landed: landed, newer: newer_of.call(wider)) }
+                 .include?("demo.json: ahead of the pinned bar"))
+    check.call("live entry equals neither declaration -> still drift, exit 1",
+               go.call(landed, newer_of.call(entry.merge("channels" => {}))) == 1)
+    unread_newer = -> { raise Landed::Unreadable.new([["fixture probe", "unreachable"]]) }
+    check.call("newer origin/main unreadable -> the pinned drift stands, exit 1, and says so",
+               go.call(landed, unread_newer) == 1 &&
+               capture.call { run(landed: landed, newer: unread_newer) }.include?("could not read a newer origin/main"))
   end
 
   # 10. Repo identity resolves at the point of capture: this repo's common dir

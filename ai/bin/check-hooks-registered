@@ -47,6 +47,18 @@
 #      this branch adds is pending; one the branch drops still counts. A row
 #      the landed union still requires wins over its retirement. A branch row
 #      both declared and retired is an inconsistent branch registry (exit 1).
+#   6. AHEAD OF THE PINNED BAR (DND-1552): under harness-gate the bar is
+#      origin's main as of the gate start. When origin's main has since moved
+#      past the pin and the owner ran `setup-hooks --install` from the main
+#      checkout, the live wiring matches the NEWER main, and steps 3 and 5 read
+#      that as drift. So when 3 or 5 (or a stale matcher) fails, the live
+#      settings are measured against the newer origin/main's registry ALONE,
+#      with the same three rules (every row wired, no stale matcher, no retired
+#      row wired). Only if they pass it in full is each pinned failure named
+#      "ahead of the pinned bar" instead of failing. Wiring that passes neither
+#      bar fails as before; dangling and an inconsistent branch registry are
+#      never excused. The newer registry is read from git (ai/lib/landed.rb,
+#      Landed.newer_tip), never from the working tree.
 # A bar that cannot be read (origin unreachable, local origin/main disagreeing
 # with origin, a malformed registry or settings file) is COULD NOT MEASURE,
 # exit 3, never a pass. An offline machine with a settings file is exit 3. When
@@ -378,6 +390,52 @@ rescue SystemCallError => e
   raise RegistryError, "#{path}: cannot be read (#{e.message})"
 end
 
+# The newer origin/main's registry, as [description, entries, retired], or nil
+# when there is no pin or origin's main is the pin (see Landed.newer_tip).
+# Raises Landed::Unreadable (a malformed newer registry included) or
+# Landed::Mismatch.
+def newer_registry(root = REPO_DIR)
+  tip = Landed.newer_tip(root)
+  return nil unless tip
+
+  label, sha = tip
+  where = "#{REGISTRY_REL} @ #{label} #{sha[0, 12]}"
+  text = Landed.file_at(root, sha, REGISTRY_REL, label)
+  return [where, [], []] unless text
+
+  [where, parse_registry(text, where), parse_retired(text, where)]
+rescue RegistryError => e
+  raise Landed::Unreadable.new([[label, e.message]])
+end
+
+# Does the live wiring pass the newer origin/main's bar in full? Returns
+# [desc, nil] when it does, [nil, note] when it does not or the newer bar
+# cannot be read, and [nil, nil] when there is no newer origin/main.
+def ahead_of_pin(settings, registry, newer, root, dirs)
+  got = newer.call(root)
+  return [nil, nil] if got.nil?
+
+  desc, entries, retired = got
+  keys = entries.map { |e| row_key(e) }
+  retiring = retired.reject { |e| keys.include?(row_key(e)) }
+  misses = drift_for(settings, entries, dirs) +
+           stale_for(settings, entries + registry, dirs, except: retiring) +
+           retired_wired(settings, retiring, dirs).map(&:last)
+  return [desc, nil] if misses.empty?
+
+  [nil, "the live wiring is not ahead of the pinned bar either: against #{desc} it still has " \
+        "#{misses.size} problem(s) (#{misses.join('; ')})"]
+rescue Landed::Unreadable, Landed::Mismatch => e
+  [nil, "could not read a newer origin/main to tell whether the live wiring is ahead of the pinned " \
+        "bar (#{e.message}); it is measured against the pinned bar alone"]
+end
+
+def report_ahead(items, desc, out = $stdout)
+  out.puts "  #{items.size} pinned-bar failure(s) are ahead of the pinned bar (not drift): the live " \
+           "wiring passes #{desc} in full, a commit that landed after harness-gate pinned origin/main:"
+  items.each { |m| out.puts "  ~ #{m}: ahead of the pinned bar" }
+end
+
 # The landed bar as [description, entries, retired], or [nil, lines] when it could not
 # be measured (lines explain why).
 def measure_landed(landed, root)
@@ -392,7 +450,7 @@ end
 # The check. Keyword arguments exist for the inline self-test; the CLI passes
 # none. `landed` is how the landed registry is read (Landed, from origin).
 def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
-        landed: ->(r) { landed_registry(r) }, dirs: checkout_dirs)
+        landed: ->(r) { landed_registry(r) }, newer: ->(r) { newer_registry(r) }, dirs: checkout_dirs)
   begin
     registry = load_registry(registry_file)
     branch_retired = load_retired(registry_file)
@@ -456,10 +514,24 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
   rkeys    = landed_retired.map { |e| row_key(e) }
   pending_retired = retired_wired(settings, branch_retired.reject { |e| rkeys.include?(row_key(e)) }, dirs)
   stale   = stale_for(settings, landed_entries + registry, dirs, except: retiring)
+  ahead_note = nil
+  ahead_desc = nil
+  ahead = []
+  unless drift.empty? && stale.empty? && still_wired.empty?
+    # Only on a pinned-bar failure: a pass needs no newer read.
+    ahead_desc, ahead_note = ahead_of_pin(settings, registry, newer, root, dirs)
+    if ahead_desc
+      ahead = drift.map { |m| "#{m} (not wired)" } + stale + still_wired.map { |_e, d| "#{d} (retired, still wired)" }
+      drift = []
+      stale = []
+      still_wired = []
+    end
+  end
   if broken.empty? && dangle.empty? && drift.empty? && stale.empty? && still_wired.empty?
     puts "check-hooks-registered: all #{landed_entries.size} landed registry rows are wired in #{path}, " \
          "each on its declared (event, matcher), and none of the #{retiring.size} landed retired row(s) is still wired " \
-         "(bar: #{bar}). OK."
+         "(bar: #{bar})#{ahead_desc ? ', or the live wiring is ahead of it' : ''}. OK."
+    report_ahead(ahead, ahead_desc) if ahead_desc
     report_pending(pending)
     report_pending_retired(pending_retired)
     return EXIT_OK
@@ -467,6 +539,8 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
 
   report_failures(path, broken, dangle, drift, pending, stale: stale, retired: still_wired.map(&:last),
                                                         pending_retired: pending_retired)
+  warn "  note: #{ahead_note}" if ahead_note
+  report_ahead(ahead, ahead_desc, $stderr) if ahead_desc
   EXIT_FAIL
 end
 
@@ -575,7 +649,7 @@ def matcher_key_cases(check)
       $stdout = $stderr = buf
       begin
         rc = run(path: f, registry_file: reg, root: dir, dirs: [dir],
-                 landed: ->(_r) { [[["fixture landed", "0" * 40]], landed, []] })
+                 landed: ->(_r) { [[["fixture landed", "0" * 40]], landed, []] }, newer: ->(_r) {})
       ensure
         $stdout, $stderr = o, e
       end
@@ -693,7 +767,7 @@ def retired_cases(check)
       $stdout = $stderr = buf
       begin
         rc = run(path: f, registry_file: reg, root: dir, dirs: [dir],
-                 landed: ->(_r) { [[["fixture landed", "0" * 40]], landed, landed_retired] })
+                 landed: ->(_r) { [[["fixture landed", "0" * 40]], landed, landed_retired] }, newer: ->(_r) {})
       ensure
         $stdout, $stderr = o, e
       end
@@ -1282,7 +1356,7 @@ def self_test
     end
     JSON.generate(s)
   end
-  go = ->(f, landed, **kw) { quiet.call { run(path: f, landed: landed, dirs: here, **kw) } }
+  go = ->(f, landed, **kw) { quiet.call { run(path: f, landed: landed, newer: ->(_r) {}, dirs: here, **kw) } }
   Dir.mktmpdir do |dir|
     check.call("absent settings file -> exit 0, landed bar not read",
                go.call(File.join(dir, "nope.json"), never) == EXIT_OK)

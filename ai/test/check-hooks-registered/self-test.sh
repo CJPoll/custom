@@ -443,6 +443,64 @@ session_check "${D}" "${SNAP_OLD}" stale
 expect "install time in the future -> COULD NOT MEASURE, exit 3 (it would make every session pending)" 3 \
   "agent-stash env: COULD NOT MEASURE" "PENDING RESTART"
 
+# 16. AHEAD OF THE PINNED BAR (DND-1552). The gate pins origin's main at its
+#     start; then a newer commit lands (it retires a.sh and adds b.sh) and the
+#     owner runs `setup-hooks --install` from the MAIN checkout. The live wiring
+#     now equals what the NEWER origin/main declares, and the pinned bar read
+#     the unwired a.sh as drift: every concurrent gate went red. Live wiring
+#     that passes the newer origin/main's bar in full passes, named as "ahead
+#     of the pinned bar". Anything else still fails.
+# ahead_fixture <name>: pin origin main (PIN, KEY), land the newer registry on
+# main, and install it into D/settings.json from the main checkout.
+ahead_fixture() {
+  D="$(new_fixture "$1")"
+  wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh"
+  PIN="$(git -C "${D}/main" rev-parse HEAD)"
+  KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+  hook "${D}/main" b.sh; registry "${D}/main" "SessionStart=b.sh"; retire "${D}/main" "SessionStart=a.sh"
+  commit "${D}/main" newer
+  git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+  git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+  ( cd "${D}/main" && HOOKS_SETTINGS_FILE="${D}/settings.json" scripts/setup-hooks --install >/dev/null 2>&1 )
+}
+pinned_check() { # run the worktree's checker under the gate's pin
+  OUT="$(ATHENA_LANDED_PIN_SHA="${PIN}" ATHENA_LANDED_PIN_REPO="${KEY}" HOOKS_SETTINGS_FILE="${D}/settings.json" \
+    "${D}/wt/ai/bin/check-hooks-registered" 2>&1)"; RC=$?
+}
+
+ahead_fixture ahead
+if grep -q "a\.sh" "${D}/settings.json" || ! grep -q "${D}/main/ai/hooks/b\.sh" "${D}/settings.json"; then
+  bad "16 fixture: the main-checkout install unwired a.sh and wired b.sh" "settings: $(cat "${D}/settings.json")"
+fi
+pinned_check; expect "live wiring equals a NEWER origin/main -> pass, named ahead of the pinned bar" 0 \
+  "a\.sh.*ahead of the pinned bar"
+
+# The miss: neither the pinned row (a.sh) nor the newer one (b.sh) is wired.
+ahead_fixture ahead-miss
+printf '{"hooks": {}}\n' > "${D}/settings.json"
+pinned_check; expect "live wiring matches neither the pinned nor the newer bar -> still FAIL" 1 "a\.sh" \
+  ": ahead of the pinned bar"
+
+# The miss, again: the newer row is wired under a matcher neither bar declares.
+ahead_fixture ahead-matcher
+/usr/bin/ruby -rjson -e '
+  s = { "hooks" => { "SessionStart" => [{ "matcher" => "Bash", "hooks" => [{ "type" => "command", "command" => ARGV[0] }] }] } }
+  File.write(ARGV[1], JSON.generate(s))' "${D}/main/ai/hooks/b.sh" "${D}/settings.json"
+pinned_check; expect "newer row wired under the wrong matcher -> still FAIL" 1 "a\.sh" ": ahead of the pinned bar"
+
+# The miss, a third way: every newer row is wired, plus a stale extra matcher.
+ahead_fixture ahead-stale
+/usr/bin/ruby -rjson -e '
+  g = ->(m) { { "matcher" => m, "hooks" => [{ "type" => "command", "command" => ARGV[0] }] } }
+  File.write(ARGV[1], JSON.generate({ "hooks" => { "SessionStart" => [g.call(""), g.call("Bash")] } }))' \
+  "${D}/main/ai/hooks/b.sh" "${D}/settings.json"
+pinned_check; expect "newer rows wired plus a stale matcher -> still FAIL" 1 "a\.sh" ": ahead of the pinned bar"
+
+# Unpinned, there is no newer origin/main to be ahead of.
+D="$(new_fixture unpinned-unwired)"
+printf '{"hooks": {}}\n' > "${D}/settings.json"
+check "${D}"; expect "unpinned, the landed row unwired -> FAIL" 1 "a\.sh" ": ahead of the pinned bar"
+
 echo "check-hooks-registered landed-bar suite: ${PASS} passed, ${FAIL} failed"
 if [ "${FAIL}" -eq 0 ]; then echo "ALL CASES PASS"; exit 0; fi
 echo "SELF-TEST FAILED"; exit 1

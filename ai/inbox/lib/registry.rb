@@ -227,6 +227,19 @@ module InboxRegistry
     "#{JSON.pretty_generate(entry)}\n"
   end
 
+  # The parsed live entry for a declared file, or nil when it is absent, not a
+  # regular file (never followed), or not valid JSON. Only a declared file is
+  # ever read. For comparison only: drift() is what reports each of those
+  # states, so nil here is never read as "fine".
+  def live_entry(file)
+    path = entry_path(file)
+    return nil unless File.lstat(path).file?
+
+    JSON.parse(File.read(path))
+  rescue SystemCallError, JSON::ParserError
+    nil
+  end
+
   def mode_of(path)
     File.stat(path).mode & 0o777
   rescue StandardError

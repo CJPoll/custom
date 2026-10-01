@@ -720,6 +720,11 @@ and pronoun-guard; nothing detected it. The durable fix:
   branch registry declares for it fails as *stale*. A branch that changes a
   landed row's matcher cannot lower its own bar: the landed matcher stays
   required until the change lands, and the new one is pending.
+  Under harness-gate the bar is origin/main as pinned at gate start. When it
+  fails and origin/main has since moved past the pin, live wiring that passes
+  the NEWER origin/main's registry in full is named *ahead of the pinned bar*
+  and passes (DND-1552). So a main-checkout install after a landing no longer
+  reddens every concurrent gate. Wiring that passes neither bar still fails.
 - **Recover:** `scripts/setup-hooks --install` MERGES the registry into
   `settings.json` (backing it up first, idempotent) — it never rewrites the whole
   block, because a full rewrite is exactly what caused the outage. Run from the
@@ -848,7 +853,10 @@ failure, no diff, no `git` undo. The same three artifacts answer it:
   channel a branch adds, retires or edits is reported as *pending* and does not
   fail; provision it after it lands, from the main checkout. A malformed branch
   `registry.json` is exit 2; a landed bar it cannot read is exit 3, could not
-  measure.
+  measure. Under harness-gate, a live entry that drifts from the pinned bar but
+  equals what a NEWER origin/main declares for it is named *ahead of the
+  pinned bar* and passes. Its mode and repo identity are still checked
+  (DND-1552).
 
   **Later (2026-09-26):** this bullet said the check compares against "the
   committed text", which was the branch's own `registry.json`. Superseded by

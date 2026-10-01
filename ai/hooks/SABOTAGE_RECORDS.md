@@ -769,3 +769,15 @@ After the fix: `RESULT: 258 passed, 0 failed`.
 | S-DND560-6 | The unmapped failure-log line not written | `unmapped: one failure-log line`, `... carries Fix:`, `... names the spawn` |
 | S-DND560-7 | `--caller-agent-id` dropped from a nested spawn | the b1.3 replay: `sends exactly the contract body` |
 | S-DND560-8 | The drain guard's `report_denied` call removed | `the two denies above each sent one report`, `the deny sent exactly one fleet report`, `that report is agent_end spawn_denied …` (6 FAIL) |
+
+## DND-1552: athena-inbox-poll.self-test.sh, settings backup attribution
+
+Fail-first: `backup_trail_verdict` with the old rule (every new backup is the
+suite's) failed `F-11b a backup made outside every suite setup-hooks call is
+external`: `expected [external .../settings.json.bak-20261001-142204], got [suite
+...]`, VERDICT: FAIL (1 of 217 cases). After the fix: VERDICT: PASS (218 cases).
+
+| ID | Mutation | Caught by |
+|---|---|---|
+| S-DND1552-1 | every new backup classed external | `F-11b a backup made inside a suite setup-hooks call is the suite's` |
+| S-DND1552-2 | old rule: every new backup classed the suite's | `F-11b a backup made outside every suite setup-hooks call is external` |
