@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+# Self-test for scripts/setup-leadtime-cron (DND-1480).
+#
+# Run: bash ai/test/setup-leadtime-cron/self-test.sh
+#
+# Nothing real is touched:
+#   * the installer runs against a FAKE crontab through its LEADTIME_CRONTAB
+#     seam, backed by a file. A poisoned `crontab` is first on PATH, so a call
+#     that bypasses the seam fails the case instead of reaching the real one.
+#   * the "main checkout" is a throwaway git repo under a temp dir, holding a
+#     copy of the installer, a stub runner, the skill, a synthetic repo config
+#     and fixture shipwright cursors. Its state dirs are all inside it.
+#   * time comes from LEADTIME_NOW.
+
+set -uo pipefail
+unset CLAUDE_PROJECT_DIR CLAUDE_PID LEAD_TIME_STATE_DIR SHIPWRIGHT_STATE_DIR
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "${HERE}/../../.." && pwd -P)"
+INSTALLER="${REPO_ROOT}/scripts/setup-leadtime-cron"
+
+PASS=0; FAIL=0
+TMP="$(mktemp -d)"
+trap 'rm -rf -- "$TMP"' EXIT INT TERM
+
+ok()    { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
+bad()   { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "${2:-}"; FAIL=$((FAIL+1)); }
+case_() { printf '\n%s\n' "$1"; }
+
+[ -x "${INSTALLER}" ] || { echo "self-test: ${INSTALLER} is missing or not executable." >&2
+  echo "  Fix: restore scripts/setup-leadtime-cron (chmod +x)." >&2; exit 2; }
+
+# 2026-10-01T12:00:00Z; the custom ingest cursor seeds to 14 days before it.
+NOW="$(date -u -d '2026-10-01T12:00:00Z' +%s)"
+NOW_MINUS_14D='2026-09-17T12:00:00Z'
+
+# --- fakes ---------------------------------------------------------------------
+BIN="${TMP}/bin"; mkdir -p "$BIN"
+cat >"$BIN/fake-crontab" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"${FAKE_CRONTAB}.calls"
+case "$1" in
+  -l) if [ -n "${FAKE_CRONTAB_FAIL:-}" ]; then echo "${FAKE_CRONTAB_FAIL}" >&2; exit 1; fi
+      [ -e "$FAKE_CRONTAB" ] || { echo "no crontab for $(id -un)" >&2; exit 1; }
+      cat "$FAKE_CRONTAB" ;;
+  -)  cat >"$FAKE_CRONTAB" ;;
+  *)  echo "fake crontab: unsupported $*" >&2; exit 9 ;;
+esac
+EOF
+POISON="${TMP}/real-crontab-touched"
+cat >"$BIN/crontab" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"${POISON}"
+echo "self-test: the REAL crontab path was called; the LEADTIME_CRONTAB seam was bypassed" >&2
+exit 99
+EOF
+chmod +x "$BIN/fake-crontab" "$BIN/crontab"
+
+# --- a throwaway main checkout --------------------------------------------------
+IR="${TMP}/inst/repo"
+mkdir -p "$IR/scripts" "$IR/ai/skills/athena:lead-time-improve" "$IR/ai/config"
+cp "$INSTALLER" "$IR/scripts/"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$IR/scripts/athena-leadtime-run.sh"
+chmod +x "$IR/scripts/athena-leadtime-run.sh"
+printf -- '---\nname: athena:lead-time-improve\n---\n' >"$IR/ai/skills/athena:lead-time-improve/SKILL.md"
+cat >"$IR/ai/config/lead-time-repos.json" <<'EOF'
+{"repos":[{"name":"custom","path":"/x/custom","mode":"improve"},{"name":"gen_saas","path":"/x/g","mode":"watch"},{"name":"walt_ui","path":"/x/w","mode":"watch"}],"window":20,"improvement_epic":"epic-id"}
+EOF
+git -C "$IR" init -q -b main >&2
+git -C "$IR" add -A >&2
+git -C "$IR" -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false commit -qm seed >&2
+IR="$(cd -- "$IR" && pwd -P)"
+git -C "$IR" worktree add -q "${TMP}/inst/wt" >&2
+WT="$(cd -- "${TMP}/inst/wt" && pwd -P)"
+IRUN="$IR/scripts/athena-leadtime-run.sh"
+LT="$IR/ai-artifacts/lead-time"
+SW="$IR/ai-artifacts/shipwright"
+ENTRY="30 * * * * ${IRUN}"
+
+# Shipwright fixture cursors: gen_saas and walt_ui. Reset per seeding case.
+shipwright_cursors() {
+  rm -rf -- "$SW" "$LT"; mkdir -p "$SW"
+  printf '2026-10-01T10:11:43Z\n' >"$SW/lead-cursor.gen_saas.txt"
+  printf '2026-10-01T09:50:16Z\n' >"$SW/lead-cursor.walt_ui.txt"
+  printf '2026-10-01T11:00:13Z\n' >"$SW/lead-cursor.custom.txt"
+}
+
+inst() { # <crontab-file> [VAR=val ...] [-- args...]  (runs the MAIN checkout's installer)
+  local f="$1"; shift; local envs=()
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+  [ "${1:-}" = "--" ] && shift
+  env PATH="$BIN:$PATH" LEADTIME_CRONTAB="$BIN/fake-crontab" FAKE_CRONTAB="$f" LEADTIME_NOW="$NOW" \
+    "${envs[@]}" "${INST:-$IR/scripts/setup-leadtime-cron}" "$@" >"${TMP}/inst.out" 2>"${TMP}/inst.err"
+  printf '%s' "$?"
+}
+out() { cat "${TMP}/inst.out" "${TMP}/inst.err"; }
+poisoned() { [ -e "$POISON" ]; }
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — read-only modes (QA 1, 2, 7)'
+
+shipwright_cursors
+ct="${TMP}/ct1"
+rc="$(inst "$ct" -- --help)"
+if [ "$rc" = 0 ] && grep -q 'Usage:' "${TMP}/inst.out" && [ ! -s "${TMP}/inst.err" ] \
+   && [ ! -e "$ct.calls" ] && [ ! -e "$LT" ] && ! poisoned; then
+  ok "QA1: --help prints usage on stdout, exits 0, never runs crontab, seeds nothing"
+else
+  bad "QA1 --help" "rc=$rc $(out | head -5) calls=$(cat "$ct.calls" 2>&1)"
+fi
+
+printf '# mine\n0 * * * * /opt/other-job\n' >"$ct"
+before="$(cat "$ct")"
+rc="$(inst "$ct" -- --dry-run)"
+if [ "$rc" = 0 ] && grep -qF "${ENTRY}" "${TMP}/inst.out" && [ "$(cat "$ct")" = "$before" ] \
+   && ! grep -qx -- '-' "$ct.calls" && [ ! -e "$LT" ] && grep -q 'would seed' "${TMP}/inst.out" && ! poisoned; then
+  ok "QA2: --dry-run prints the entry and the seeding plan; the crontab and state are untouched"
+else
+  bad "QA2 --dry-run" "rc=$rc $(out) ct=$(cat "$ct") calls=$(cat "$ct.calls" 2>&1)"
+fi
+
+rc="$(inst "$ct" -- --backup "${TMP}/ct-backup")"
+if [ "$rc" = 0 ] && cmp -s "$ct" "${TMP}/ct-backup" && [ "$(stat -c %a "${TMP}/ct-backup")" = 600 ]; then
+  ok "QA7: --backup writes the current crontab (mode 600)"
+else
+  bad "QA7 --backup" "rc=$rc $(out)"
+fi
+rc="$(inst "${TMP}/ct-none" -- --backup "${TMP}/ct-backup-empty")"
+if [ "$rc" = 0 ] && [ -e "${TMP}/ct-backup-empty" ] && [ "$(cat "${TMP}/ct-backup-empty")" = "" ]; then
+  ok "QA7: --backup of 'no crontab for <user>' writes an empty file"
+else
+  bad "QA7 --backup empty" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — install, idempotence, foreign lines (QA 3, 4)'
+
+shipwright_cursors
+ct="${TMP}/ct-empty"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "${ENTRY}" ]; then
+  ok "QA3: --install on an empty crontab writes exactly one ':30' entry for the main checkout's runner"
+else
+  bad "QA3 install empty" "rc=$rc ct=$(cat "$ct" 2>&1) $(out)"
+fi
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "${ENTRY}" ]; then
+  ok "QA3: a second --install still leaves exactly one entry"
+else
+  bad "QA3 idempotent" "rc=$rc ct=$(cat "$ct")"
+fi
+rc="$(inst "$ct")"
+if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "${ENTRY}" ]; then
+  ok "no mode flag is --install (the setup-clustering-cron form)"
+else
+  bad "default mode" "rc=$rc ct=$(cat "$ct")"
+fi
+
+ct="${TMP}/ct-foreign"
+printf '# owner comment\n0 * * * * /home/u/dev/custom/scripts/athena-shipwright-run.sh\n\n0 7,19 * * * /home/u/dev/custom/scripts/athena-clustering-run.sh\n*/5 * * * * /opt/x --flag "a  b"\t# tab\n' >"$ct"
+cp "$ct" "${TMP}/ct-foreign.orig"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && [ "$(head -n 5 "$ct")" = "$(cat "${TMP}/ct-foreign.orig")" ] \
+   && [ "$(tail -n 1 "$ct")" = "${ENTRY}" ] && [ "$(wc -l <"$ct")" = 6 ]; then
+  ok "QA4: --install keeps the shipwright, clustering, comment, blank and tabbed lines byte for byte"
+else
+  bad "QA4 foreign" "rc=$rc ct=$(cat -A "$ct")"
+fi
+
+rc="$(inst "$ct" -- --schedule '45 * * * *')"
+if [ "$rc" = 0 ] && [ "$(grep -cF "$IRUN" "$ct")" = 1 ] && grep -qxF "45 * * * * ${IRUN}" "$ct"; then
+  ok "--schedule updates the entry in place (still one)"
+else
+  bad "schedule in place" "rc=$rc ct=$(cat "$ct")"
+fi
+rc="$(inst "$ct" -- --schedule '30 * *')"
+if [ "$rc" = 1 ] && grep -q 'Fix:' "${TMP}/inst.err" && grep -qxF "45 * * * * ${IRUN}" "$ct"; then
+  ok "a malformed --schedule is refused and changes nothing"
+else
+  bad "bad schedule" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — --check (QA 5)'
+
+ct="${TMP}/ct-check"
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 1 ] && grep -q 'MISSING' "${TMP}/inst.err" && grep -q 'Fix:.*--install' "${TMP}/inst.err" \
+   && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
+  ok "QA5: --check without the entry: exit 1, Fix: names --install, writes nothing"
+else
+  bad "QA5 check absent" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" -- --install)"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 0 ] && grep -q '^OK' "${TMP}/inst.out" && grep -qF "${ENTRY}" "${TMP}/inst.out"; then
+  ok "QA5: --check with the entry: exit 0, prints it"
+else
+  bad "QA5 check present" "rc=$rc $(out)"
+fi
+sed -i "s|^30 \* \* \* \*|#30 * * * *|" "$ct"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 1 ] && grep -q 'MISSING' "${TMP}/inst.err"; then
+  ok "QA5: a commented-out entry is not live"
+else
+  bad "QA5 commented" "rc=$rc $(out)"
+fi
+printf '%s\n%s\n' "${ENTRY}" "${ENTRY}" >"$ct"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 1 ] && grep -q 'DUPLICATE' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "QA5: two live entries are red (DUPLICATE), never 'installed'"
+else
+  bad "QA5 duplicate" "rc=$rc $(out)"
+fi
+printf '30 * * * * /gone/worktree/scripts/athena-leadtime-run.sh\n' >"$ct"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 1 ] && grep -q 'STALE' "${TMP}/inst.err" && grep -qF '/gone/worktree/scripts/athena-leadtime-run.sh' "${TMP}/inst.err"; then
+  ok "QA5: an entry for another runner path is red and named (STALE)"
+else
+  bad "QA5 stale path" "rc=$rc $(out)"
+fi
+printf '%s\n' "${ENTRY}" >"$ct"
+chmod -x "$IRUN"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 1 ] && grep -qF "$IRUN" "${TMP}/inst.err" && grep -q 'not executable\|absent' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "QA5: the entry pointing at a missing/non-executable runner is red and names it"
+else
+  bad "QA5 missing runner" "rc=$rc $(out)"
+fi
+chmod +x "$IRUN"
+rc="$(inst "$ct" FAKE_CRONTAB_FAIL='crontab: Permission denied' -- --check)"
+if [ "$rc" = 2 ] && grep -q 'could not read' "${TMP}/inst.err" && ! grep -q 'MISSING' "${TMP}/inst.err"; then
+  ok "--check on an unreadable crontab is exit 2 'could not read', never MISSING"
+else
+  bad "check unreadable" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — --remove (QA 6)'
+
+ct="${TMP}/ct-remove"
+printf '0 * * * * /opt/other-job\n\n%s\n5 * * * * /opt/third\n' "${ENTRY}" >"$ct"
+rc="$(inst "$ct" -- --remove)"
+if [ "$rc" = 0 ] && ! grep -qF "$IRUN" "$ct" \
+   && [ "$(cat "$ct")" = "$(printf '0 * * * * /opt/other-job\n\n5 * * * * /opt/third')" ]; then
+  ok "QA6: --remove drops only our line and keeps the owner's blank line"
+else
+  bad "QA6 remove" "rc=$rc ct=$(cat -A "$ct") $(out)"
+fi
+printf '%s\n' "${ENTRY}" >"$ct"
+mv "$IRUN" "${TMP}/runner.aside"
+rc="$(inst "$ct" -- --remove)"
+mv "${TMP}/runner.aside" "$IRUN"
+if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "" ]; then
+  ok "QA6: --remove works when the runner is gone"
+else
+  bad "QA6 remove without runner" "rc=$rc ct=$(cat "$ct") $(out)"
+fi
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — refusals (QA 8)'
+
+shipwright_cursors
+ct="${TMP}/ct-wt"
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(INST="$WT/scripts/setup-leadtime-cron" inst "$ct" -- --install)"
+if [ "$rc" = 3 ] && grep -q 'Fix:' "${TMP}/inst.err" && grep -qF "$IR" "${TMP}/inst.err" \
+   && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
+  ok "QA8: --install from a linked worktree is refused (exit 3), Fix: names the main checkout, nothing written"
+else
+  bad "QA8 worktree install" "rc=$rc ct=$(cat "$ct") $(out)"
+fi
+printf '0 * * * * /opt/other-job\n%s\n' "${ENTRY}" >"$ct"
+rc="$(INST="$WT/scripts/setup-leadtime-cron" inst "$ct" -- --remove)"
+if [ "$rc" = 3 ] && grep -qF "${ENTRY}" "$ct"; then
+  ok "QA8: --remove from a linked worktree is refused too"
+else
+  bad "QA8 worktree remove" "rc=$rc ct=$(cat "$ct") $(out)"
+fi
+rc="$(INST="$WT/scripts/setup-leadtime-cron" inst "$ct" -- --check)"
+if [ "$rc" = 0 ] && grep -qF "${ENTRY}" "${TMP}/inst.out"; then
+  ok "--check from a linked worktree reads the main checkout's entry"
+else
+  bad "worktree check" "rc=$rc $(out)"
+fi
+
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" FAKE_CRONTAB_FAIL='crontab: Permission denied' -- --install)"
+if [ "$rc" = 2 ] && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "a crontab that cannot be read is never overwritten (exit 2, Fix:)"
+else
+  bad "unreadable crontab" "rc=$rc $(out)"
+fi
+mv "$IR/ai/skills/athena:lead-time-improve/SKILL.md" "${TMP}/skill.aside"
+rc="$(inst "$ct" -- --install)"
+mv "${TMP}/skill.aside" "$IR/ai/skills/athena:lead-time-improve/SKILL.md"
+if [ "$rc" = 2 ] && grep -q 'lead-time-improve' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
+  ok "the skill not in the main checkout: install refused (every tick would exit 78)"
+else
+  bad "unlanded skill" "rc=$rc $(out)"
+fi
+chmod -x "$IRUN"
+rc="$(inst "$ct" -- --install)"
+chmod +x "$IRUN"
+if [ "$rc" = 2 ] && grep -qF "$IRUN" "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
+  ok "a runner that is not executable in the main checkout: install refused"
+else
+  bad "unlanded runner" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" LEADTIME_NOW=yesterday -- --install)"
+if [ "$rc" = 1 ] && grep -q 'Fix:' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
+  ok "a malformed LEADTIME_NOW is refused before any write"
+else
+  bad "bad now" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" -- --bogus)"
+if [ "$rc" = 1 ] && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "an unknown flag is a usage error with Fix:"
+else
+  bad "unknown flag" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — cursor seeding (QA 9)'
+
+shipwright_cursors
+ct="${TMP}/ct-seed"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] \
+   && [ "$(cat "$LT/watch-cursor.gen_saas.txt")" = '2026-10-01T10:11:43Z' ] \
+   && [ "$(cat "$LT/watch-cursor.walt_ui.txt")" = '2026-10-01T09:50:16Z' ] \
+   && [ "$(cat "$LT/cursor.custom.txt")" = "${NOW_MINUS_14D}" ] \
+   && [ ! -e "$LT/watch-cursor.custom.txt" ] && [ ! -e "$LT/cursor.gen_saas.txt" ]; then
+  ok "QA9: absent cursors are seeded (watch repos from the shipwright's files; custom = now - 14 days)"
+else
+  bad "QA9 seed" "rc=$rc $(out) files=$(find "$LT" -type f -printf '%f ' 2>&1)"
+fi
+
+printf '2026-09-30T00:00:00Z\n' >"$LT/watch-cursor.gen_saas.txt"
+printf '2026-09-29T00:00:00Z\n' >"$LT/cursor.custom.txt"
+rm -f "$LT/watch-cursor.walt_ui.txt"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && [ "$(cat "$LT/watch-cursor.gen_saas.txt")" = '2026-09-30T00:00:00Z' ] \
+   && [ "$(cat "$LT/cursor.custom.txt")" = '2026-09-29T00:00:00Z' ] \
+   && [ "$(cat "$LT/watch-cursor.walt_ui.txt")" = '2026-10-01T09:50:16Z' ] \
+   && grep -q 'kept' "${TMP}/inst.out"; then
+  ok "QA9: existing cursors are never overwritten; only the absent one is seeded"
+else
+  bad "QA9 keep" "rc=$rc $(out)"
+fi
+
+shipwright_cursors
+rm -f "$SW/lead-cursor.walt_ui.txt"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && [ ! -e "$LT/watch-cursor.walt_ui.txt" ] \
+   && grep -q 'walt_ui' "${TMP}/inst.out" && grep -q '48h' "${TMP}/inst.out" \
+   && [ -e "$LT/watch-cursor.gen_saas.txt" ]; then
+  ok "QA9: a missing shipwright cursor leaves that repo's cursor absent, and the installer says so"
+else
+  bad "QA9 missing source" "rc=$rc $(out)"
+fi
+
+shipwright_cursors
+printf 'null\n' >"$SW/lead-cursor.gen_saas.txt"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && [ ! -e "$LT/watch-cursor.gen_saas.txt" ] \
+   && grep -q 'gen_saas' "${TMP}/inst.err" && grep -q 'not an RFC 3339' "${TMP}/inst.err"; then
+  ok "QA9: a malformed shipwright cursor is not copied, and is named (never read as 'no cursor')"
+else
+  bad "QA9 malformed source" "rc=$rc $(out)"
+fi
+
+shipwright_cursors
+cp "$IR/ai/config/lead-time-repos.json" "${TMP}/config.aside"
+printf '{"repos":[{"name":"../x","mode":"watch"}]}\n' >"$IR/ai/config/lead-time-repos.json"
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" -- --install)"
+cp "${TMP}/config.aside" "$IR/ai/config/lead-time-repos.json"
+if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
+  ok "a repo name that is not a plain file-name label is refused before any write"
+else
+  bad "bad repo name" "rc=$rc $(out)"
+fi
+
+if poisoned; then
+  bad "no case reached the real crontab" "calls: $(cat "$POISON")"
+else
+  ok "no case reached the real crontab (the poisoned PATH crontab never ran)"
+fi
+
+# ---------------------------------------------------------------------------
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || {
+  printf 'Fix: read each FAIL line above; it names the guarantee that broke. Re-run with: bash ai/test/setup-leadtime-cron/self-test.sh\n' >&2
+  exit 1
+}
+exit 0

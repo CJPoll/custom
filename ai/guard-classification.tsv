@@ -182,6 +182,7 @@ scripts/setup-athena-inbox-client	guard
 scripts/setup-hooks	guard	
 scripts/setup-inbox-registry	guard	
 scripts/setup-clustering-cron	guard	
+scripts/setup-leadtime-cron	guard	
 scripts/setup-shipwright-cron	guard	
 scripts/wt	guard	
 scripts/wt-preflight	guard	
