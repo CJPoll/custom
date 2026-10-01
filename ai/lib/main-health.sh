@@ -28,7 +28,11 @@
 # (~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the diff it
 # is checking"). The one way past it is a fix: a commit that contains the red
 # SHA and has integration-gate's pass receipt for exactly itself. Refreshing
-# the verdict (main-health check) clears a stale marker.
+# the verdict (main-health check) clears a stale marker. Residual, said out
+# loud: the marker is local machine state, so a process that can write the git
+# common dir (`rm .git/main-health/red`) skips the refusal; a diff cannot. It
+# is also per machine: a landing from another machine reads that machine's
+# marker.
 
 MH_SCHEMA_VERDICT="main-health/1"
 MH_SCHEMA_RED="main-health-red/1"
