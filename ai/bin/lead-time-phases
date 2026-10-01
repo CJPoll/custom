@@ -14,7 +14,9 @@
 #              head_commit) for a squash merge (DND-1490). --rejoin backfills
 #              merge rows ledgered without one; see --help.
 #   --summary  median, p90 and sum per phase over the last N landings, the
-#              biggest contributor, and the quality guards.
+#              biggest contributor (a phase, or tail when the window has a
+#              measured nonzero tail; with its lever, harness or product:
+#              DND-1532), and the quality guards.
 #
 # A phase it cannot measure is null with a reason, never 0. The repo list and
 # modes resolve through ai/lib/lead_time_config_io.rb (ai/bin/lead-time-repos,
@@ -79,6 +81,16 @@ HELP = <<~TXT
                    (nearest rank), summed time; the biggest contributor; the
                    critic BLOCK rate, gate red rate and reverts on main;
                    telemetry status and write-failures.
+                   The biggest contributor is the phase with the largest
+                   sum, or `tail` (landing -> deploy, from lead-time) when
+                   the window has a measured nonzero tail and its sum is
+                   larger (a tie goes to the phase). `lever` says where the
+                   fix lands: `harness` for a phase, `product` (the repo's
+                   own CI and deploy) for tail. With post-merge CI in the
+                   window, a 0 tail with no post-merge run found is n/a
+                   with its reason, never a measured 0. A tail that is all
+                   0 (no post-merge CI, as in custom) or all n/a is never
+                   a candidate; --json says why in biggest.tail_reason.
     --self-test    run the domain and IO suites.
 
   Options:
@@ -392,7 +404,7 @@ module Summary
     else
       r["phases"].each { |name, s| puts line(name, s) }
       b = r["biggest"]
-      puts b["phase"] ? "  biggest contributor: #{b['phase']} (sum #{fmt(b['sum_s'])})" : "  biggest contributor: none (#{b['reason']})"
+      puts b["phase"] ? "  biggest contributor: #{b['phase']} (sum #{fmt(b['sum_s'])}; lever #{b['lever']})" : "  biggest contributor: none (#{b['reason']})"
       print_guards(r["guards"])
       print_telemetry(r["telemetry"])
     end

@@ -427,6 +427,83 @@ w = L::Ledger.watch_row(repo: "gen_saas", landing: lnd, ingested_at: t("2026-10-
 check("L4 a watch row's phases are n/a by design") { w["phases"].values.all? { |p| p["s"].nil? && p["na_reason"].include?("watch mode") } }
 check("L4 rows carry schema 1") { w["schema"] == 1 }
 
+# ── tail as a biggest-contributor candidate (DND-1532) ─────────────────────
+# A gen_saas-shaped window (post-merge CI: tail is landing -> Post-Merge
+# Deploy) and a custom-shaped one (no CI: tail 0). Synthetic values only.
+
+check("T0 a landing keeps lead-time's end kind as tail_end") do
+  L::Landing.from_row(pr_row.merge("end_kind" => "deploy"), ticket: "DND-9001")[0]["tail_end"] == "deploy"
+end
+check("T0 a row with no end kind has tail_end nil, never a guess") { lnd["tail_end"].nil? }
+check("T0 the ledger row carries tail_end") do
+  dl, = L::Landing.from_row(pr_row.merge("end_kind" => "pipeline"), ticket: "DND-9001")
+  L::Ledger.watch_row(repo: "gen_saas", landing: dl, ingested_at: t("2026-10-01T06:00:00Z"))["tail_end"] == "pipeline"
+end
+
+custom_rows = [row(1, verify: 40), row(2, verify: nil), row(3, verify: 10), row(4, verify: 30), row(5, verify: 20)]
+cst = L::Stats.summarize(custom_rows)
+check("T1 custom-shaped (tail 0): biggest is unchanged") { cst["biggest"].values_at("phase", "sum_s") == ["implement", 150] }
+check("T1 custom-shaped: the lever is harness") { cst["biggest"]["lever"] == "harness" }
+check("T1 custom-shaped: tail is not a candidate, with a reason") do
+  cst["biggest"]["tail_candidate"] == false && cst["biggest"]["tail_reason"].to_s.include?("no measured nonzero tail")
+end
+check("T1 custom-shaped: the tail total is unchanged (five measured zeros)") do
+  cst["totals"]["tail"].values_at("n", "n_na", "sum_s") == [5, 0, 0]
+end
+legacy_custom = custom_rows.map { |r| r.merge("tail_end" => nil) }
+check("T1 custom-shaped rows with no tail_end are still measured zeros") do
+  L::Stats.summarize(legacy_custom)["totals"]["tail"].values_at("n", "n_na") == [5, 0]
+end
+
+gs_rows = (1..5).map { |i| row(i).merge("repo" => "gen_saas", "tail_s" => 3600, "tail_end" => "deploy") }
+gst = L::Stats.summarize(gs_rows)
+check("T2 gen_saas-shaped with a dominant tail: biggest is tail") { gst["biggest"]["phase"] == "tail" }
+check("T2 the tail's sum is the measured tails") { gst["biggest"]["sum_s"] == 18_000 }
+check("T2 a tail biggest has lever product") { gst["biggest"]["lever"] == "product" }
+check("T2 tail is a candidate") { gst["biggest"]["tail_candidate"] == true && !gst["biggest"].key?("tail_reason") }
+
+small_tail = (1..5).map { |i| row(i).merge("tail_s" => 10, "tail_end" => "deploy") }
+check("T3 a measured tail smaller than a phase: the phase wins, lever harness") do
+  b = L::Stats.summarize(small_tail)["biggest"]
+  b["phase"] == "verify" && b["sum_s"] == 500 && b["lever"] == "harness" && b["tail_candidate"] == true
+end
+tie_tail = [row(1).merge("phases" => L::PHASES.to_h { |p| [p, { "s" => p == "verify" ? 50 : 1 }] },
+                         "tail_s" => 50, "tail_end" => "deploy")]
+check("T3 a tie between a phase and tail goes to the phase") { L::Stats.summarize(tie_tail)["biggest"]["phase"] == "verify" }
+
+na_tail = custom_rows.map { |r| r.merge("tail_s" => nil, "lead_na_reason" => "start: no stamp") }
+nst = L::Stats.summarize(na_tail)
+check("T4 an all-n/a tail is not a candidate, with its reason") do
+  nst["biggest"]["phase"] == "implement" && nst["biggest"]["tail_candidate"] == false &&
+    nst["biggest"]["tail_reason"].to_s.include?("not measured")
+end
+check("T4 an n/a tail is n/a in the totals, never 0") { nst["totals"]["tail"].values_at("n", "n_na", "sum_s") == [0, 5, nil] }
+
+no_deploy = gs_rows.first(4) + [row(5).merge("tail_s" => 0, "tail_end" => "merge")]
+ndt = L::Stats.summarize(no_deploy)["totals"]["tail"]
+check("T5 in a post-merge-CI window, a landing with no CI run found is n/a, never 0") do
+  ndt["n"] == 4 && ndt["n_na"] == 1 && ndt["median"] == 3600
+end
+check("T5 its reason says no post-merge run was found") { ndt["na_reasons"].first["reason"].include?("no successful post-merge CI run") }
+pre = gs_rows.first(4) + [row(5).merge("tail_s" => 0)]
+pret = L::Stats.summarize(pre)["totals"]["tail"]
+check("T5 a 0 tail ingested before tail_end, in a post-merge-CI window, is n/a with why") do
+  pret["n_na"] == 1 && pret["na_reasons"].first["reason"].include?("no end kind")
+end
+zero_deploy = gs_rows.first(4) + [row(5).merge("tail_s" => 0, "tail_end" => "deploy")]
+check("T5 a 0 tail whose deploy run was found is a measured 0") { L::Stats.summarize(zero_deploy)["totals"]["tail"]["n"] == 5 }
+
+only_tail = [row(1).merge("phases" => L::PHASES.to_h { |p| [p, { "s" => nil, "na_reason" => "x" }] },
+                          "tail_s" => 600, "tail_end" => "deploy")]
+check("T6 no phase measured but a tail: biggest is tail, lever product") do
+  b = L::Stats.summarize(only_tail)["biggest"]
+  b["phase"] == "tail" && b["lever"] == "product" && b["sum_s"] == 600
+end
+check("T6 nothing measured at all: no biggest, no lever, a reason") do
+  b = L::Stats.summarize([row(1).merge("phases" => {}, "tail_s" => nil)])["biggest"]
+  b["phase"].nil? && !b.key?("lever") && b["reason"]
+end
+
 if $failures.empty?
   puts "lead-time-phases: #{$checks} checks passed"
   exit 0

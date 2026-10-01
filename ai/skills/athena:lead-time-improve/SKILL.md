@@ -129,6 +129,12 @@ and for an architect's brief.
 it is null, no phase is measured: the action is instrumentation for the phase
 whose n/a reasons are the most tractable, or `no action` with the reason.
 
+`biggest.phase` can also be `tail` (landing to deploy), in a repo with
+post-merge CI. `biggest.lever` says where the fix lands: `harness` for the
+five phases, `product` for `tail`, the repo's own CI and deploy. A tail that
+is all 0 or n/a is never a candidate; `biggest.tail_reason` says why
+(`ai/bin/lead-time-phases --help`).
+
 **The choice rule:** if the biggest phase has `n_na > n` in the window, the
 finding is "cannot measure <phase>" and the action is **instrumentation** for
 it. Read its top `na_reasons` first:

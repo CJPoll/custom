@@ -127,7 +127,7 @@ module LeadTimePhases
          "landed_via" => row["landed_via"], "pr" => row["pr"], "start" => start,
          "start_na" => start ? nil : row["unmeasured_reason"],
          "lead_s" => row["lead_seconds"], "code_s" => row["code_seconds"], "tail_s" => row["tail_seconds"],
-         "lead_na_reason" => row["unmeasured_reason"] }, nil]
+         "tail_end" => row["end_kind"]&.to_s, "lead_na_reason" => row["unmeasured_reason"] }, nil]
     end
 
     def unit_desc(landing) = landing["ticket"] || "head #{head_desc(landing)}"
@@ -468,6 +468,7 @@ module LeadTimePhases
         "landed_at" => Util.iso(landing["landed_at"]),
         "landed_via" => landing["landed_via"], "pr" => landing["pr"], "start" => Util.iso(landing["start"]),
         "lead_s" => landing["lead_s"], "code_s" => landing["code_s"], "tail_s" => landing["tail_s"],
+        "tail_end" => landing["tail_end"],
         "lead_na_reason" => landing["lead_na_reason"], "ingested_at" => Util.iso(ingested_at) }
         .merge(landing["gated_head"] ? {} : { "gated_head_na" => landing["gated_head_na"] })
     end
@@ -601,25 +602,80 @@ module LeadTimePhases
     end
 
     def totals(rows)
+      ci = post_merge_ci?(rows)
       TOTALS.to_h do |name, key|
-        reasons = rows.map { |r| r[key].nil? ? generic(r["lead_na_reason"] || "#{name}: not measured", r) : nil }
-        [name, series(rows.map { |r| r[key] }, reasons)]
+        cells = rows.map do |r|
+          next tail_cell(r, ci) if name == "tail"
+
+          r[key].nil? ? [nil, generic(r["lead_na_reason"] || "#{name}: not measured", r)] : [r[key], nil]
+        end
+        [name, series(cells.map(&:first), cells.map(&:last))]
       end
     end
 
-    # The phase with the largest sum; ties go to the earlier phase.
-    def biggest(phase_stats)
-      best = nil
-      PHASES.each do |p|
-        s = phase_stats[p]["sum_s"]
-        best = p if s && (best.nil? || s > phase_stats[best]["sum_s"])
-      end
-      best ? { "phase" => best, "sum_s" => phase_stats[best]["sum_s"] } : { "phase" => nil, "reason" => "no phase measured in the window" }
+    # A window has post-merge CI when one of its landings has a measured
+    # nonzero tail (landing -> deploy or pipeline end, ai/bin/lead-time).
+    def post_merge_ci?(rows) = rows.any? { |r| r["tail_s"].is_a?(Numeric) && r["tail_s"].positive? }
+
+    # The end kinds at which lead-time found a post-merge run (ai/bin/lead-time
+    # pick_end). "merge" means it found none, and the tail reads 0.
+    TAIL_RUN_ENDS = %w[deploy pipeline].freeze
+
+    # -> [seconds or nil, reason or nil]. In a window with post-merge CI, a 0
+    # tail with no post-merge run found (end kind "merge", or a row ingested
+    # before tail_end was kept) is not a measured 0: it is n/a with why. With
+    # no post-merge CI (custom) a 0 tail is a measured 0, as before.
+    def tail_cell(row, ci)
+      s = row["tail_s"]
+      return [nil, generic(row["lead_na_reason"] || "tail: not measured", row)] if s.nil?
+      return [s, nil] unless ci && s.zero? && !TAIL_RUN_ENDS.include?(row["tail_end"])
+
+      why = if row["tail_end"].nil?
+              "tail: 0 with no end kind in the ledger row (ingested before DND-1532), so a 0 cannot be told " \
+                "from a missing post-merge run"
+            else
+              "tail: no successful post-merge CI run found for the landing (end kind #{row['tail_end']}), " \
+                "where other landings in the window have one"
+            end
+      [nil, why]
+    end
+
+    # Where the fix for each biggest-contributor candidate lands: a phase is
+    # the harness's; tail (landing -> deploy) is the product repo's own CI and
+    # deploy.
+    LEVERS = PHASES.to_h { |p| [p, "harness"] }.merge("tail" => "product").freeze
+
+    # Whether tail competes: only with a measured nonzero tail in the window.
+    # A tail all 0 (no post-merge CI) or all n/a never does.
+    # -> {"tail_candidate"=>bool[, "tail_reason"=>why]}
+    def tail_candidacy(tail_stats)
+      sum = tail_stats["sum_s"]
+      return { "tail_candidate" => true } if sum&.positive?
+
+      why = if sum.nil?
+              "tail not measured in the window (#{tail_stats['n_na']} n/a)"
+            else
+              "no measured nonzero tail in the window (no post-merge CI)"
+            end
+      { "tail_candidate" => false, "tail_reason" => why }
+    end
+
+    # The candidate with the largest sum: the five phases, then tail when it
+    # is a candidate. Ties go to the earlier candidate, so a phase beats tail.
+    def biggest(phase_stats, tail_stats)
+      cands = PHASES.filter_map { |p| (s = phase_stats[p]["sum_s"]) && [p, s] }
+      tail = tail_candidacy(tail_stats)
+      cands << ["tail", tail_stats["sum_s"]] if tail["tail_candidate"]
+      best = cands.reduce(nil) { |b, c| b.nil? || c[1] > b[1] ? c : b }
+      return { "phase" => nil, "reason" => "no phase measured in the window" }.merge(tail) unless best
+
+      { "phase" => best[0], "sum_s" => best[1], "lever" => LEVERS.fetch(best[0]) }.merge(tail)
     end
 
     def summarize(rows)
       ph = phases(rows)
-      { "rows" => rows.size, "phases" => ph, "biggest" => biggest(ph), "totals" => totals(rows) }
+      tot = totals(rows)
+      { "rows" => rows.size, "phases" => ph, "biggest" => biggest(ph, tot["tail"]), "totals" => tot }
     end
   end
 

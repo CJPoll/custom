@@ -233,6 +233,7 @@ run "${TEL_NONE}" --summary --repo custom
 eq "summary exits 0" "${CODE}" "0"
 has "no store reads could not look" "${OUT}" "telemetry: could not look"
 has "the biggest contributor is the only measured phase" "${OUT}" "biggest contributor: merge"
+has "custom-shaped (tail 0): its lever is harness (DND-1532)" "${OUT}" "; lever harness)"
 has "no store: write-failures are unknown, never 0" "${OUT}" "write-failures unknown"
 lacks "no store: no event count is claimed" "${OUT}" "phase event(s) in the window"
 run "${TEL_EMPTY}" --summary --repo custom
@@ -243,6 +244,8 @@ JSON_STATUS="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'puts JSON.parse($
 eq "--json carries the telemetry status" "${JSON_STATUS}" "could not look"
 JSON_N="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); puts [j["rows"], j.dig("phases", "merge", "n"), j.dig("phases", "implement", "n_na")].join(",")')"
 eq "--json: 3 rows, merge measured on the push and the squash, implement n/a on all" "${JSON_N}" "3,2,3"
+JSON_B="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'b = JSON.parse($stdin.read)["biggest"]; puts [b["phase"], b["lever"], b["tail_candidate"]].join(",")')"
+eq "--json custom-shaped: biggest unchanged, lever harness, tail not a candidate" "${JSON_B}" "merge,harness,false"
 
 echo "== summary: an unreadable or corrupt write-failures counter reads unknown"
 printf '{"x":' >"${TEL_EMPTY}/write-failures"
@@ -337,6 +340,41 @@ has "a watch summary shows code" "${OUT}" "code"
 has "a watch summary shows tail" "${OUT}" "tail"
 has "it states phases are n/a by design" "${OUT}" "phases: n/a by design (watch mode)"
 lacks "it prints no phase rows" "${OUT}" "implement"
+
+echo "== summary: a gen_saas-shaped improve repo with a dominant tail (DND-1532)"
+# Post-merge CI: tail is landing -> the deploy workflow's end. One landing
+# whose post-merge run was not found reads 0 in lead-time: n/a here.
+GS_PRHEAD="$(printf 'e%.0s' $(seq 40))"
+cat >"${TMP}/rows-gs.json" <<JSON
+[
+  {"pr": 51, "title": "x", "branch": "dnd-9101-x", "landed_via": "merge", "landed_commit": null,
+   "merge_commit": "${HEAD_PUSH}", "head_commit": "${GS_PRHEAD}", "head_commit_unmeasured": null,
+   "merged": "2026-10-01T05:00:00Z", "closed_at": "2026-10-01T05:00:00Z", "start": "2026-10-01T04:00:00Z",
+   "end_kind": "deploy", "lead_seconds": 10800, "code_seconds": 3600, "tail_seconds": 7200, "unmeasured_reason": null},
+  {"pr": 52, "title": "y", "branch": "dnd-9102-y", "landed_via": "merge", "landed_commit": null,
+   "merge_commit": "${HEAD_PR}", "head_commit": "${GS_PRHEAD}", "head_commit_unmeasured": null,
+   "merged": "2026-10-01T06:00:00Z", "closed_at": "2026-10-01T06:00:00Z", "start": "2026-10-01T05:30:00Z",
+   "end_kind": "deploy", "lead_seconds": 9000, "code_seconds": 1800, "tail_seconds": 7200, "unmeasured_reason": null},
+  {"pr": 53, "title": "z", "branch": "dnd-9103-z", "landed_via": "merge", "landed_commit": null,
+   "merge_commit": "${HEAD_BARE}", "head_commit": "${GS_PRHEAD}", "head_commit_unmeasured": null,
+   "merged": "2026-10-01T07:00:00Z", "closed_at": "2026-10-01T07:00:00Z", "start": "2026-10-01T06:30:00Z",
+   "end_kind": "merge", "lead_seconds": 1800, "code_seconds": 1800, "tail_seconds": 0, "unmeasured_reason": null}
+]
+JSON
+GS_CONFIG="${TMP}/repos-gs.json"
+printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${GS_CONFIG}"
+CONFIG_SAVE="${CONFIG}"; STATE_SAVE="${STATE}"
+CONFIG="${GS_CONFIG}"; STATE="${TMP}/state-gs"
+ROWS="${TMP}/rows-gs.json" run "${TEL_EMPTY}" --ingest --repo gen_saas
+eq "a gen_saas-shaped improve ingest exits 0" "${CODE}" "0"
+eq "the ledger keeps lead-time's end kind" "$(row_field "${HEAD_PUSH}" tail_end)" "deploy"
+run "${TEL_EMPTY}" --summary --repo gen_saas
+eq "its summary exits 0" "${CODE}" "0"
+has "the biggest contributor is tail, lever product" "${OUT}" "biggest contributor: tail (sum 4h; lever product)"
+run "${TEL_EMPTY}" --summary --repo gen_saas --json
+JSON_GS="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); b = j["biggest"]; t = j.dig("totals", "tail"); puts [b["phase"], b["lever"], b["sum_s"], t["n"], t["n_na"]].join(",")')"
+eq "--json: tail, product, 14400 s over 2 measured, the no-run landing n/a (never 0)" "${JSON_GS}" "tail,product,14400,2,1"
+CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
 
 echo "== summary: no ledger is not an empty ledger"
 STATE="${TMP}/state-none" run "${TEL_EMPTY}" --summary --repo custom
