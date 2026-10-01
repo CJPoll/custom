@@ -681,7 +681,8 @@ car of a batch you intend to deploy, assert at least the tail MR carries
 ## GitHub path (no merge train)
 
 On a `github.com` remote there is **no merge train or queue**: once
-`gh pr checks <n> --watch` shows every check green on the exact head, run
+`gh pr checks <n> --watch` shows every check green on the exact head (pin it
+first: `athena:github` → *Watching CI — Actions checks, not a pipeline*), run
 `integration-gate`, then
 `scripts/locked-merge --pr <n> --head <sha>` with the SHA its `INTEGRATION OK`
 names (*Landing onto a moving main*). `locked-merge` makes the pinned

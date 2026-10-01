@@ -215,7 +215,24 @@ gh run watch <run-id>        # block on one specific workflow run
 
 `gh pr checks --watch` **blocks and returns when checks are terminal** — it
 satisfies the safe-wait rule (block, don't spin) directly; prefer it over any
-shell loop. "CI is done" = every **required** check-run has concluded.
+shell loop. "CI is done" = every **required** check-run has concluded **on the
+head you pushed**.
+
+**Right after a push, `gh pr checks` can still show the previous head's
+finished checks**, so `--watch` can return at once on a stale green. Measured
+2026-09-30, gen_saas #617: seconds after a push it listed the old head's 9
+passing checks while the new head's CI was 4 of 6 pending. The merge was
+refused only because the merge helper re-read the checks. Pin the head before
+you trust a result:
+
+```sh
+gh pr view <n> --json headRefOid -q .headRefOid   # must equal the sha you pushed
+gh api repos/<owner>/<repo>/commits/<sha>/check-runs \
+  -q '.check_runs[] | [.name, .status, .conclusion] | @tsv'
+```
+
+Until `headRefOid` is your sha, the rollup is not yours. Count checks from the
+sha's own check-runs, never from a check count alone.
 
 When a check **fails in ~1-2s with an empty log** (BlobNotFound), it did not
 flake — read **athena:diagnose-github-actions-failure** before re-running; the
