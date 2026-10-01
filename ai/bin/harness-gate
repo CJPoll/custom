@@ -361,6 +361,7 @@ INLINE_SELF_TEST_COVERED_BY = {
   # A discovered suite runs `<tool> --self-test` itself.
   "ai/bin/contention-census"  => "ai/test/contention-census/self-test.sh",
   "ai/bin/lead-time"          => "ai/test/lead-time/self-test.sh",
+  "ai/bin/lead-time-phases"   => "ai/test/lead-time-phases/self-test.sh",
   "ai/bin/ready-and-idle"     => "ai/test/ready-and-idle/self-test.sh",
   "scripts/reap-orphan-dbus"  => "scripts/test/reap-orphan-dbus/self-test.sh",
 }.freeze
