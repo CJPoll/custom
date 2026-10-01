@@ -53,7 +53,7 @@ APPROVAL="session:${FX_SID}/${FX_MID} quote:yes, provision the KMS key"
 # real pool, whatever fleet is running.
 # A suite launched from inside a real slot (a captain's wrapped harness-gate)
 # must not carry that slot into its fixtures.
-unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC
+unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC ATHENA_TEST_SLOT_GATE_RUN
 export ATHENA_TEST_SLOT_DIR="${TMP}/slots" ATHENA_TEST_SLOTS=1
 TEST_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
 
@@ -1106,6 +1106,43 @@ R="${TMP}/s12c"; slot_repo "$R" "touch '${R}/GATE_RAN'"
 out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && grep -q 'cannot load .*integration-receipt.sh' <<<"$out" && grep -q '^Fix:' <<<"$out" && [ ! -f "${R}/GATE_RAN" ] \
   && ok "s12 a missing receipt library is exit 2 with Fix:, gate not run" || bad "s12 missing library expected exit 2 naming it, got $rc" "$out"
+
+# s13: integration-gate holds its gate as `bash -c`, so it names a declared
+# gate to test-slot in ATHENA_TEST_SLOT_GATE_RUN, and test-slot writes that
+# run's gate.run (DND-1530): lead time's implement/verify anchor on the first
+# gate run, and a captain whose only gate is integration-gate had none. The
+# layout's test-slot records each claim, then execs this checkout's real one.
+L="${TMP}/s13-layout"; layout_copy "$L"
+REAL_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
+printf '#!/bin/sh\nprintf "%%s\\n" "${ATHENA_TEST_SLOT_GATE_RUN-unset}" >> "%s"\nexec "%s" "$@"\n' "${TMP}/s13.claims" "$REAL_SLOT" > "$L/ai/bin/test-slot"
+chmod +x "$L/ai/bin/test-slot"
+( cd "$L" && git add -A && git commit -qm layout )
+R="${TMP}/s13"; new_repo "$R"; mkdir -p "$R/bin"
+printf '#!/bin/sh\nprintf "%%s" "${ATHENA_TEST_SLOT_GATE_RUN-unset}" > "%s"\nexit 0\n' "${TMP}/s13.gate-env" > "$R/bin/prep-commit.sh"
+chmod +x "$R/bin/prep-commit.sh"
+( cd "$R" && git add -A && git commit -qm gate && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+record_pass "$R"
+out="$( cd "$R" && ATHENA_TELEMETRY_DIR="${TMP}/s13-tel" "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "s13 exit 0 for a green declared bin/prep-commit.sh" || bad "s13 expected exit 0, got $rc" "$out"
+grep -qxF "$(realpath "$R")/bin/prep-commit.sh" "${TMP}/s13.claims" 2>/dev/null \
+  && ok "s13 the gate's test-slot run names the declared gate" || bad "s13 no claim naming the declared gate (claims: $(tr '\n' ' ' < "${TMP}/s13.claims" 2>/dev/null))" "$out"
+[ "$(cat "${TMP}/s13.gate-env" 2>/dev/null)" = unset ] \
+  && ok "s13 the claim never reaches the gate's own environment" || bad "s13 the gate saw the claim ('$(cat "${TMP}/s13.gate-env" 2>/dev/null)')" "$out"
+s13_ev="$(cat "${TMP}/s13-tel"/*.jsonl 2>/dev/null | jq -c 'select(.event == "gate.run") | [.attrs.gate, .attrs.ok, .attrs.exit]')"
+[ "$s13_ev" = '["bin/prep-commit.sh",true,0]' ] \
+  && ok "s13 one gate.run for the declared gate" || bad "s13 expected one gate.run for bin/prep-commit.sh, got '${s13_ev}'" "$out"
+# A harness-gate repo: harness-gate writes harness_gate.run itself, so it is
+# never claimed (an older test-slot would pass the claim on to the gate's
+# environment, and a test-slot self-test inside harness-gate would read it),
+# and test-slot writes no gate.run for it.
+R="${TMP}/s13b"; slot_repo "$R" "exit 0"
+: > "${TMP}/s13.claims"
+out="$( cd "$R" && ATHENA_TELEMETRY_DIR="${TMP}/s13b-tel" "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+s13b_ev="$(cat "${TMP}/s13b-tel"/*.jsonl 2>/dev/null | jq -c 'select(.event == "gate.run")' | wc -l)"
+[ "$rc" -eq 0 ] && [ "$s13b_ev" -eq 0 ] \
+  && ok "s13 a declared harness-gate writes no gate.run" || bad "s13 harness-gate expected exit 0 and no gate.run, got rc $rc, $s13b_ev event(s)" "$out"
+grep -q / "${TMP}/s13.claims" \
+  && bad "s13 harness-gate was claimed (claims: $(tr '\n' ' ' < "${TMP}/s13.claims"))" "$out" || ok "s13 a declared harness-gate is never claimed"
 
 # ---------------------------------------------------------------- DND-1064
 # The containment bar ("HEAD contains the target when the gate starts") was

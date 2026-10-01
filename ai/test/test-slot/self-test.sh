@@ -30,7 +30,8 @@ done
 # A suite launched from inside a slot (DND-486 wraps the gate) must not carry
 # that slot into its fixtures: every case here decides re-entrancy itself.
 unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HELD_MODEL ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK \
-  ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS HARNESS_GATE_JOBS ATHENA_EVAL_CONCURRENCY
+  ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS HARNESS_GATE_JOBS ATHENA_EVAL_CONCURRENCY \
+  ATHENA_TEST_SLOT_GATE_RUN
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/test-slot-selftest.XXXXXX")"
 BG_PIDS=()
@@ -1897,6 +1898,31 @@ check G10-stdout eq "$(cat "$W/G10.out")" "gate-out y"
 check G10-warn has "$W/G10.err" "WARN could not look up this repo's declared gate"
 check G10-fix has "$W/G10.err" "Fix: restore ai/lib/integration-receipt.sh"
 check G10-none eq "$(gate_events "$W/tel-g10" | wc -l)" 0
+
+# G11: a caller that holds the declared gate as `bash -c` (integration-gate's
+# own run) names it in ATHENA_TEST_SLOT_GATE_RUN. test-slot checks that claim
+# as it checks a COMMAND (the declared gate on HEAD, never harness-gate), so
+# the run writes one gate.run with the declared path; the exit code and
+# stdout are the command's; the claim never reaches the command's own env.
+G11_CMD='cd "$1" && printf "claim=%s\n" "${ATHENA_TEST_SLOT_GATE_RUN-unset}" && eval "$2"'
+newpool pG11 2
+(cd "$W/gA" && FAKE_GATE_EXIT=3 ATHENA_TEST_SLOT_GATE_RUN="$W/gA/bin/prep-commit.sh" ATHENA_TELEMETRY_DIR="$W/tel-g11" \
+  "$BIN" -- bash -c "$G11_CMD" _ "$W/gA" bin/prep-commit.sh) >"$W/G11.out" 2>"$W/G11.err"
+check G11-rc eq "$?" 3
+check G11-stdout eq "$(cat "$W/G11.out")" "$(printf 'claim=unset\ngate-out ')"
+check G11-one-event eq "$(gate_events "$W/tel-g11" | wc -l)" 1
+check G11-attrs eq "$(gate_events "$W/tel-g11" | jq -c '[.attrs.gate, .attrs.ok, .attrs.exit]')" '["bin/prep-commit.sh",false,3]'
+check G11-head eq "$(gate_events "$W/tel-g11" | jq -r '.head')" "$HEAD_GA"
+# A claim that is not the declared gate writes nothing: a path outside the
+# tree, and harness-gate (which writes harness_gate.run itself).
+newpool pG11b 2
+(cd "$W/gA" && ATHENA_TEST_SLOT_GATE_RUN="$W/elsewhere/bin/prep-commit.sh" ATHENA_TELEMETRY_DIR="$W/tel-g11b" \
+  "$BIN" -- bash -c "$G11_CMD" _ "$W/gA" bin/prep-commit.sh) >/dev/null 2>"$W/G11b.err"
+check G11-rc-elsewhere eq "$?" 0
+(cd "$W/gH" && ATHENA_TEST_SLOT_GATE_RUN="$W/gH/ai/bin/harness-gate" ATHENA_TELEMETRY_DIR="$W/tel-g11b" \
+  "$BIN" --weight 1 -- bash -c "$G11_CMD" _ "$W/gH" ai/bin/harness-gate) >/dev/null 2>>"$W/G11b.err"
+check G11-rc-harness eq "$?" 0
+check G11-none eq "$(gate_events "$W/tel-g11b" | wc -l)" 0
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then

@@ -206,12 +206,24 @@ is a blob on the caller's HEAD; test-slot reads that list, never a copy.
 test-slot writes the event through the shell binding after the command exits,
 when the command (wrappers and interpreter skipped) is that file in the
 caller's work tree. Attrs: `gate` (the declared path, never argv), `ok`,
-`exit`, `interrupted` and `slot_wait_s`. None is written for a gate run
-outside test-slot, one whose wait timed out, or one test-slot holds as
-`bash -c` rather than as the gate file: integration-gate runs its gate that
-way, so its run counts as a `harness_gate.run` in custom and as nothing in
-gen_saas. Readers that anchor on the first gate run read both events for the
-unit (`ai/lib/lead_time_phases.rb`). They are measured where that repo is in
+`exit`, `interrupted` and `slot_wait_s`. A command test-slot cannot read as
+the gate file (integration-gate holds its gate as `bash -c`) gets one only
+when the caller names the gate in `ATHENA_TEST_SLOT_GATE_RUN`. test-slot
+checks that claim as it checks a command, and removes it from the command's
+environment. integration-gate names its declared gate, so its run counts as
+a `harness_gate.run` in custom and as a `gate.run` in gen_saas. None is
+written for a gate run outside test-slot or one whose wait timed out.
+Readers that anchor on the first gate run read both events for the unit
+(`ai/lib/lead_time_phases.rb`).
+
+**Later (2026-10-01):** integration-gate's own gate run in gen_saas wrote no
+`gate.run`: test-slot held it as `bash -c`. Superseded by the
+`ATHENA_TEST_SLOT_GATE_RUN` claim above. Measured that day: gen_saas
+captains that gate only through integration-gate (DND-1578, DND-1582,
+DND-1597) had no gate run, so `implement` and `verify` were n/a on 7 and 8
+of the 12 local landings in the lead-time window.
+
+Gate-run phases are measured where that repo is in
 `improve` mode on the machine that does its work (the list
 `ai/bin/lead-time-repos` resolves); a `watch` repo's phases stay n/a by design.
 

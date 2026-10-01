@@ -73,8 +73,10 @@
 # exits (DND-1530): gen_saas's bin/prep-commit.sh has no event of its own, and
 # lead time's implement/verify anchor on the first gate run (for a repo in
 # improve mode). harness-gate writes harness_gate.run itself, so it gets none
-# here; nor does a gate this run holds as `bash -c` (integration-gate's). Both
-# are fail-open: neither changes CMD's exit code or output.
+# here. A gate this run holds as `bash -c` gets one only when the caller names
+# it in ATHENA_TEST_SLOT_GATE_RUN (integration-gate does, for its declared
+# gate), checked exactly as a COMMAND is, and removed from CMD's environment.
+# Both are fail-open: neither changes CMD's exit code or output.
 #
 # LIVENESS IS THE FLOCK, NEVER A PID. A slot is held exactly while some process
 # holds flock(2) on slot-<i>.lock. The wrapped command inherits that lock's fd,
@@ -193,6 +195,12 @@
 #   never hides the outer marker). A nested test-slot in the same pool that
 #   sees it (and finds that unit's lock still held) runs its CMD directly
 #   without taking more units, so nesting cannot self-deadlock.
+#
+#   ATHENA_TEST_SLOT_GATE_RUN=<path> (read, then removed from CMD's
+#   environment): the caller's claim that CMD runs the repo's declared gate at
+#   <path>, for a CMD test-slot cannot read as that gate (integration-gate's
+#   `bash -c`). The claim is checked as a COMMAND is (gate_label_of); one that
+#   is not the declared gate, or is harness-gate, writes no gate.run.
 #
 #   Pools: cpu = ${XDG_STATE_HOME:-$HOME/.local/state}/athena/test-slots/
 #   (0700), model = its model/ subdirectory (0700). Each holds the files below.
@@ -1473,15 +1481,23 @@ gate_label_of() {
   printf '%s\n' "$g"
 }
 
-# resolve_gate_run — sets GATE_RUN_LABEL (and GATE_RUN_HEAD) when CMD is a
-# declared gate gate_label_of names. Reads GATE_TREE/GATE_SHA, so it runs
+# resolve_gate_run — sets GATE_RUN_LABEL (and GATE_RUN_HEAD) when CMD, or the
+# caller's ATHENA_TEST_SLOT_GATE_RUN claim in its place, is a declared gate
+# gate_label_of names. Reads GATE_TREE/GATE_SHA, so it runs
 # after read_gate_ref. A library that could not be loaded is named on stderr
 # (with Fix:); CMD still runs, and no gate.run is written for it.
 resolve_gate_run() {
-  local g rc=0
+  local g rc=0 claim=${ATHENA_TEST_SLOT_GATE_RUN-}
   GATE_RUN_LABEL=""
   GATE_RUN_HEAD=""
-  g=$(gate_label_of "$GATE_TREE" "$GATE_SHA" "${CMD[@]}") || rc=$?
+  # The claim is this run's only: never CMD's, and never a nested
+  # test-slot's (a step inside the gate is not the gate).
+  unset ATHENA_TEST_SLOT_GATE_RUN
+  if [ -n "$claim" ]; then
+    g=$(gate_label_of "$GATE_TREE" "$GATE_SHA" "$claim") || rc=$?
+  else
+    g=$(gate_label_of "$GATE_TREE" "$GATE_SHA" "${CMD[@]}") || rc=$?
+  fi
   if ((rc == 3)); then
     say "WARN could not look up this repo's declared gate (ai/lib/integration-receipt.sh beside $PROG not loaded, or git cannot read HEAD ${GATE_SHA:0:12} in $GATE_TREE); no gate.run telemetry for this run. Fix: restore ai/lib/integration-receipt.sh in the checkout this test-slot runs from, or repair the repository at $GATE_TREE."
     return 0

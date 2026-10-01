@@ -1040,7 +1040,17 @@ SLOT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/integration-gate-slot.XXXXXX")" || {
 OUTCOME="${SLOT_TMP}/outcome"
 SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") $(short "$HEAD_SHA")" --outcome-file "$OUTCOME" )
 [ -n "$SLOT_WAIT" ] && SLOT_ARGS+=( --wait-timeout "$SLOT_WAIT" )
-"$TEST_SLOT" "${SLOT_ARGS[@]}" -- bash -c 'set -uo pipefail; cd "$1" && eval "$2"' _ "$ROOT" "$GATE_CMD"
+# A declared gate held as `bash -c` is not one test-slot can read from argv,
+# so it is named in ATHENA_TEST_SLOT_GATE_RUN: test-slot checks that claim
+# against HEAD's declaration and writes the run's gate.run (DND-1530), which
+# lead time's implement/verify anchor on. harness-gate writes its own event,
+# so it is never claimed: an older test-slot ignores the variable and passes
+# it on to the gate's environment, where a test-slot under test would read
+# it. Telemetry only, and fail-open: nothing about the run changes.
+GATE_RUN_CLAIM=""
+[ "$DECL_RC" -eq 0 ] && [ "$LANDED_GATE" != ai/bin/harness-gate ] && GATE_RUN_CLAIM="${ROOT}/${LANDED_GATE}"
+ATHENA_TEST_SLOT_GATE_RUN="$GATE_RUN_CLAIM" \
+  "$TEST_SLOT" "${SLOT_ARGS[@]}" -- bash -c 'set -uo pipefail; cd "$1" && eval "$2"' _ "$ROOT" "$GATE_CMD"
 SLOT_RC=$?
 OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
 case "$OUTCOME_LINE" in
