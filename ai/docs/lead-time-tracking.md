@@ -147,7 +147,14 @@ improver's watch scan, `lead-time-phases --ingest`): neither moves its cursor
 on a `SCAN INCOMPLETE`.
 
 `--since` takes `YYYY-MM-DD` (00:00:00Z that day) or RFC 3339 with a zone.
-Anything else exits 2 with a `Fix:` before the repo is read.
+Anything else exits 1, like every other usage error, with a `Fix:` before
+the repo is read. Exit 2 means only that a requested PR/MR is missing.
+
+**Later (2026-10-01, DND-1489):** a malformed `--since` exited 2. Superseded
+by exit 1: 2 already meant a requested PR/MR is missing, so a caller could not
+tell a malformed argument from a legitimate not-found by its code. The callers
+were swept: `lead-time-phases --ingest` reads only 0 and 3 as distinct and any
+other code as a fault, and the improver's watch scan reads its meta only on 0.
 
 ### Why GitLab reads the deploy *job*, not the whole pipeline
 

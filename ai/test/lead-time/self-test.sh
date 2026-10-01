@@ -118,17 +118,37 @@ else
   bad "a date-only --since reaches the forge scan without a backtrace" "code=${CODE} err=$(head -c 300 <<<"${ERR}")"
 fi
 
-# 2d. Anything else unparseable is a usage error: exit 2, Fix:, the accepted
-#     forms named, and the repo never reached.
+# 2d. Anything else unparseable is a usage error: exit 1 like every other
+#     usage error (DND-1489: it was 2, the code for a missing PR), Fix:, the
+#     accepted forms named, and the repo never reached.
 for bad_since in yesterday 2026-09-30T22:00:00 2026-02-31; do
   run --repo "${NOREPO}" --since "${bad_since}"
-  if [ "${CODE}" -eq 2 ] && grep -q 'Fix:' <<<"${ERR}" && grep -q 'YYYY-MM-DD' <<<"${ERR}" \
+  if [ "${CODE}" -eq 1 ] && grep -q 'Fix:' <<<"${ERR}" && grep -q 'YYYY-MM-DD' <<<"${ERR}" \
      && ! grep -q 'not a git worktree' <<<"${ERR}" && [ -z "${OUT}" ]; then
-    ok "--since ${bad_since} is refused (exit 2, Fix:), repo never reached"
+    ok "--since ${bad_since} is refused (exit 1, Fix:), repo never reached"
   else
-    bad "--since ${bad_since} is refused" "code=${CODE} err=$(head -c 240 <<<"${ERR}")"
+    bad "--since ${bad_since} is refused (exit 1)" "code=${CODE} err=$(head -c 240 <<<"${ERR}")"
   fi
 done
+
+# 2e. DND-1489: a malformed argument and a legitimate not-found must not share
+#     an exit code, or a caller cannot tell them apart. A requested PR the
+#     forge cannot find is exit 2; a malformed --since is not.
+PATH="${FAKEBIN}:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" --pr 424242 >"${TMP}/pr-out" 2>"${TMP}/pr-err" </dev/null
+PR_CODE=$?
+run --repo "${GHREPO}" --since nonsense
+SINCE_CODE="${CODE}"
+if [ "${PR_CODE}" -eq 2 ] && grep -q 'not found' "${TMP}/pr-err" && grep -q 'Fix:' "${TMP}/pr-err" \
+   && [ ! -s "${TMP}/pr-out" ]; then
+  ok "a missing PR exits 2 (not found), with a Fix:"
+else
+  bad "a missing PR exits 2" "code=${PR_CODE} err=$(head -c 240 "${TMP}/pr-err")"
+fi
+if [ "${SINCE_CODE}" -ne "${PR_CODE}" ]; then
+  ok "a malformed --since (exit ${SINCE_CODE}) and a missing PR (exit ${PR_CODE}) have distinct codes"
+else
+  bad "a malformed --since and a missing PR have distinct codes" "both exit ${PR_CODE}"
+fi
 
 run --help --bogus
 [ "${CODE}" -eq 0 ] && grep -q 'Usage:' <<<"${OUT}" \
