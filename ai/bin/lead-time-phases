@@ -9,6 +9,10 @@
 #              integrate / merge plus counters, appends new rows to the ledger
 #              (idempotent on repo + landed commit + ticket), and moves the
 #              cursor to the scan's scanned_through. Never on SCAN INCOMPLETE.
+#              Receipts, verdicts and timings join on the GATED head: the
+#              landed commit for a push, the PR head (lead-time's
+#              head_commit) for a squash merge (DND-1490). --rejoin backfills
+#              merge rows ledgered without one; see --help.
 #   --summary  median, p90 and sum per phase over the last N landings, the
 #              biggest contributor, and the quality guards.
 #
@@ -41,7 +45,7 @@ BACKFILL_DAYS = 14
 
 HELP = <<~TXT
   Usage:
-    ai/bin/lead-time-phases --ingest --repo NAME [--since WHEN]
+    ai/bin/lead-time-phases --ingest --repo NAME [--since WHEN [--rejoin]]
     ai/bin/lead-time-phases --summary --repo NAME [--window N] [--json]
     ai/bin/lead-time-phases --self-test
 
@@ -77,6 +81,12 @@ HELP = <<~TXT
     --since WHEN   with --ingest: scan from WHEN instead of the cursor
                    (YYYY-MM-DD or RFC 3339 with a zone). An explicit --since
                    run never moves the cursor.
+    --rejoin       with --ingest and --since: the ledger is first-write-wins,
+                   so a plain re-ingest never rewrites a row. This replaces
+                   each merge landing ledgered with no gated head (before
+                   DND-1490, or its PR head unread) with this scan's row, if
+                   that row found the head. Every original is appended to
+                   <state>/ledger-replaced.jsonl first; nothing else changes.
     --window N     with --summary: the last N landings (default: the config's)
     --json         with --summary: JSON instead of the table
     --help         this text
@@ -90,7 +100,7 @@ HELP = <<~TXT
 TXT
 
 SPEC = { "--ingest" => :switch, "--summary" => :switch, "--self-test" => :switch, "--repo" => :value,
-         "--since" => :value, "--window" => :integer, "--json" => :switch }.freeze
+         "--since" => :value, "--window" => :integer, "--json" => :switch, "--rejoin" => :switch }.freeze
 
 def fail_with(code, what, fix)
   warn "lead-time-phases: #{what}"
@@ -152,7 +162,7 @@ end
 module Ingest
   module_function
 
-  def run(repo, since_opt, state, env)
+  def run(repo, since_opt, state, env, rejoin: false)
     io = LeadTimePhasesIO
     unless io::Paths.dir?(repo.path)
       puts "lead-time-phases: #{repo.name}: not on this machine (#{repo.path}); nothing ingested, cursor unchanged"
@@ -181,7 +191,19 @@ module Ingest
     moved = since_opt ? "cursor unchanged (an explicit --since run never moves it)" : move_cursor(cursor, res.meta)
     puts "lead-time-phases: #{repo.name}: scanned since #{since}: #{res.rows.size} landing row(s), " \
          "#{added} new in the ledger, #{present} already there; #{moved}"
+    puts rejoin_rows(ledger, rows, state) if rejoin
     0
+  end
+
+  # --rejoin (DND-1490): the ledger is first-write-wins, so a plain re-ingest
+  # never rewrites a row. This explicit mode replaces only the merge landings
+  # ledgered with no gated head, with this scan's row that found it; each
+  # original moves to ledger-replaced.jsonl.
+  def rejoin_rows(ledger, rows, state)
+    archive = File.join(state, "ledger-replaced.jsonl")
+    n = ledger.replace(LeadTimePhases::Ledger.rejoins(rows), archive)
+    kept = n.positive? ? " (the originals are in #{archive})" : ""
+    "lead-time-phases: #{n} merge landing row(s) rejoined on their PR head#{kept}"
   end
 
   # -> nil when the scan is usable, else the exit code (having said why).
@@ -233,37 +255,38 @@ module Ingest
     common, common_why = io::Git.common_dir(repo.path)
     no_common = LeadTimePhases::Source.could_not_look(common_why.to_s)
     events = LeadTimePhases.scope_events(events, common ? io::Git.repo_label(common) : repo.name)
-    heads = landings.map { |l| l["landed_commit"] }.uniq
+    heads = landings.filter_map { |l| l["gated_head"] }.uniq
     timings, bad = io::TimingsReader.read(io::TimingsReader.path(env), heads)
     warn "lead-time-phases: #{bad} malformed harness-gate timings line(s) skipped" if bad.positive?
     landings.map do |l|
-      head = l["landed_commit"]
       receipt, verdicts = head_sources(l, common, no_common)
       anchors = LeadTimePhases::Anchors.from(landing: l, events: events, receipt: receipt, verdicts: verdicts)
-      counters = LeadTimePhases::Counters.compute(landing: l, events: events, timings: timing_source(l, timings[head]))
+      counters = LeadTimePhases::Counters.compute(landing: l, events: events, timings: timing_source(l, timings))
       LeadTimePhases::Ledger.improve_row(repo: repo.name, landing: l, anchors: anchors, counters: counters,
                                          telemetry_status: events.status, ingested_at: now)
     end
   end
 
-  # A merge landing's commit is the forge's, not the gated head: receipts,
-  # verdicts and timings keyed by it could only miss, so say why instead.
+  # Receipts, verdicts and timings are keyed by the gated head: the landed
+  # commit for a push, the PR head for a merge (DND-1490). A landing with no
+  # gated head could only miss, so it says why instead.
   def head_sources(landing, common, no_common)
     io = LeadTimePhasesIO
-    unless LeadTimePhases::Landing.gated_head?(landing)
-      why = LeadTimePhases::Source.could_not_look("merge landing: #{landing['landed_commit'][0, 8]} is the forge's " \
-                                                  "commit, not the gated head")
+    head = landing["gated_head"]
+    unless head
+      why = LeadTimePhases::Source.could_not_look(landing["gated_head_na"])
       return [why, why]
     end
     return [no_common, no_common] unless common
 
-    [io::ReceiptReader.read(common, landing["landed_commit"]), io::VerdictReader.read(common, landing["landed_commit"])]
+    [io::ReceiptReader.read(common, head), io::VerdictReader.read(common, head)]
   end
 
-  def timing_source(landing, source)
-    return source if LeadTimePhases::Landing.gated_head?(landing)
+  def timing_source(landing, timings)
+    head = landing["gated_head"]
+    return timings[head] if head
 
-    LeadTimePhases::Source.could_not_look("merge landing: timings are keyed by the gated head")
+    LeadTimePhases::Source.could_not_look("timings are keyed by the gated head: #{landing['gated_head_na']}")
   end
 
   def move_cursor(cursor, meta)
@@ -414,6 +437,10 @@ def main(argv, env)
   return fail_with(2, "usage error: pass exactly one of --ingest or --summary", "see --help") unless modes.size == 1
   return fail_with(2, "usage error: --repo NAME is required", "pass --repo with a repo from ai/config/lead-time-repos.json") unless opts["--repo"]
   return fail_with(2, "usage error: --since goes with --ingest", "drop --since, or use --ingest") if opts["--since"] && !opts["--ingest"]
+  if opts["--rejoin"] && !(opts["--ingest"] && opts["--since"])
+    return fail_with(2, "usage error: --rejoin goes with --ingest and an explicit --since",
+                     "pass --ingest --since WHEN --rejoin, WHEN at or before the oldest landing to rejoin")
+  end
   if (opts["--window"] || opts["--json"]) && !opts["--summary"]
     return fail_with(2, "usage error: --window and --json go with --summary", "drop them, or use --summary")
   end
@@ -425,7 +452,7 @@ def main(argv, env)
   return code unless ctx
 
   if opts["--ingest"]
-    Ingest.run(ctx.repo, ctx.since, ctx.state, env)
+    Ingest.run(ctx.repo, ctx.since, ctx.state, env, rejoin: opts["--rejoin"])
   else
     Summary.run(ctx.repo, opts["--window"] || ctx.config.window, opts["--json"], ctx.state, env)
   end

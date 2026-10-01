@@ -5,7 +5,8 @@
 # Each reader returns a LeadTimePhases::Source, so "could not look" (a missing
 # store, an unreadable file) never reads as "looked, found nothing".
 #
-# It writes only the state dir: ledger.jsonl and cursor.<repo>.txt. Everything
+# It writes only the state dir: ledger.jsonl, cursor.<repo>.txt, and (on an
+# explicit --rejoin) ledger-replaced.jsonl, the rows it replaced. Everything
 # else (git, integration receipts, critic verdicts, harness-gate timings,
 # telemetry) is read-only.
 
@@ -49,14 +50,65 @@ module LeadTimePhasesIO
     # Append the rows whose key is not in the ledger yet, under an exclusive
     # lock so two ingests cannot both add one key. -> [added, already present]
     def append(rows)
-      FileUtils.mkdir_p(File.dirname(path))
-      File.open(path, File::RDWR | File::CREAT | File::APPEND, 0o644) do |f|
-        f.flock(File::LOCK_EX)
+      with_lock do |f|
         existing, = read
         fresh = LeadTimePhases::Ledger.fresh(rows, existing)
         fresh.each { |r| f.write("#{JSON.generate(r)}\n") }
         f.flush
         [fresh.size, rows.size - fresh.size]
+      end
+    end
+
+    # DND-1490 --rejoin: replace each rejoinable row (Ledger.rejoinable?)
+    # whose key `replacements` holds, under the same lock as append. Every
+    # other line, malformed ones included, is kept verbatim and in order. The
+    # replaced originals are appended to `archive` before the new ledger is
+    # renamed into place, so history is moved aside, never dropped.
+    # -> the number of rows replaced (0 writes nothing).
+    def replace(replacements, archive)
+      with_lock do |f|
+        lines = File.readlines(path)
+        old = []
+        out = lines.map do |line|
+          row = JSON.parse(line) rescue nil
+          new_row = row.is_a?(Hash) && LeadTimePhases::Ledger.rejoinable?(row) &&
+                    replacements[LeadTimePhases::Ledger.key(row)]
+          next line unless new_row
+
+          old << line
+          "#{JSON.generate(new_row)}\n"
+        end
+        next 0 if old.empty?
+
+        File.open(archive, File::WRONLY | File::CREAT | File::APPEND, 0o644) { |a| a.write(old.join) }
+        tmp = "#{path}.tmp.#{Process.pid}"
+        File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, f.stat.mode & 0o777) { |t| t.write(out.join) }
+        File.rename(tmp, path)
+        old.size
+      end
+    end
+
+    # True while `f` is the file at `path`. A replace renames a new file into
+    # place; a writer that opened the old one before that holds a lock on an
+    # unlinked file and must reopen.
+    def live?(f)
+      st = File.stat(path)
+      st.ino == f.stat.ino && st.dev == f.stat.dev
+    rescue Errno::ENOENT
+      false
+    end
+
+    private
+
+    # Yields the ledger opened for append and exclusively locked, reopening
+    # when a replace moved the file while this waited on the lock.
+    def with_lock
+      FileUtils.mkdir_p(File.dirname(path))
+      loop do
+        File.open(path, File::RDWR | File::CREAT | File::APPEND, 0o644) do |f|
+          f.flock(File::LOCK_EX)
+          return yield(f) if live?(f)
+        end
       end
     end
   end

@@ -39,7 +39,8 @@ def ev(name, at, unit: "DND-9001", head: HEAD, duration_s: nil, attrs: {})
 end
 
 def landing(ticket: "DND-9001", start: "2026-10-01T01:00:00Z", landed: "2026-10-01T05:00:00Z", commit: HEAD)
-  { "ticket" => ticket, "landed_commit" => commit, "landed_at" => t(landed), "landed_via" => "push",
+  { "ticket" => ticket, "landed_commit" => commit, "gated_head" => commit, "gated_head_na" => nil,
+    "landed_at" => t(landed), "landed_via" => "push",
     "pr" => nil, "start" => start && t(start), "start_na" => start ? nil : "no stamp",
     "lead_s" => nil, "code_s" => nil, "tail_s" => nil, "lead_na_reason" => nil }
 end
@@ -146,7 +147,7 @@ check("R2 a dirty PASS is never a verify anchor") { anchors(l, S.ok(dirty))["cri
 dirty_receipt = S.ok([{ "verdict" => "pass", "at" => "2026-10-01T03:40:00Z", "dirty" => true }])
 check("R2 a dirty verdict receipt is never one either") { anchors(l, S.ok(dirty), verdicts: dirty_receipt)["critic_pass"].at.nil? }
 
-merged = landing(commit: OTHER).merge("landed_via" => "merge")
+merged = landing(commit: OTHER).merge("landed_via" => "merge", "gated_head" => nil, "gated_head_na" => "no head")
 ph_m = L::Phases.compute(anchors(merged, S.ok(FULL)))
 check("R3 a merge landing joins integration by unit, not the squash sha") { ph_m["integrate"]["s"] == 300 }
 
@@ -301,6 +302,65 @@ _, why = L::Landing.from_row(pr_row.merge("merge_commit" => nil), ticket: nil)
 check("L2 no landed commit: refused with a reason") { why.to_s.include?("no landed commit") }
 _, why = L::Landing.from_row(pr_row.merge("merged" => nil), ticket: nil)
 check("L2 no landing time: refused with a reason") { why.to_s.include?("no landing time") }
+
+# DND-1490: the gated head. A squash landing's commit is the forge's; the
+# head integration-gate, the critic and harness-gate saw is the PR's own head.
+push_row = { "pr" => nil, "landed_via" => "push", "landed_commit" => HEAD, "merged" => "2026-10-01T05:00:00Z" }
+gp, = L::Landing.from_row(push_row, ticket: "DND-9001")
+check("G1 a push landing's gated head is its landed commit") { gp["gated_head"] == HEAD && gp["gated_head_na"].nil? }
+sq, = L::Landing.from_row(pr_row.merge("head_commit" => HEAD, "head_commit_unmeasured" => nil), ticket: "DND-9001")
+check("G2 a squash landing's gated head is the PR head") { sq["gated_head"] == HEAD && sq["gated_head_na"].nil? }
+check("G2 its landed commit is still the forge's") { sq["landed_commit"] == OTHER }
+unread, = L::Landing.from_row(pr_row.merge("head_commit" => nil, "head_commit_unmeasured" => "the forge gave no head commit (headRefOid)"),
+                              ticket: "DND-9001")
+check("G3 an unread PR head is null with lead-time's reason, never empty") do
+  unread["gated_head"].nil? && unread["gated_head_na"].include?("the forge gave no head commit (headRefOid)")
+end
+legacy, = L::Landing.from_row(pr_row, ticket: "DND-9001")
+check("G4 a row from before head_commit names that, and the rejoin") do
+  legacy["gated_head"].nil? && legacy["gated_head_na"].include?("no head_commit") && legacy["gated_head_na"].include?("--rejoin")
+end
+check("G4 the reason still names the forge's commit") { legacy["gated_head_na"].include?("is the forge's commit") }
+bad_head, = L::Landing.from_row(pr_row.merge("head_commit" => "h129"), ticket: "DND-9001")
+check("G5 a malformed head is refused, never joined on") { bad_head["gated_head"].nil? && bad_head["gated_head_na"].include?("not a commit sha") }
+empty_head, = L::Landing.from_row(pr_row.merge("head_commit" => ""), ticket: "DND-9001")
+check("G5 an empty head is refused too") { empty_head["gated_head"].nil? && !empty_head["gated_head_na"].to_s.empty? }
+
+# An unticketed squash landing joins its gate events on the PR head.
+unt_sq = landing(ticket: nil, start: nil, commit: OTHER).merge("landed_via" => "merge", "gated_head" => HEAD)
+ph_us = L::Phases.compute(anchors(unt_sq, S.ok(FULL.map { |e| e.merge("unit" => "some-branch") })))
+check("G6 an unticketed squash landing: integrate measured on the PR head") { ph_us["integrate"]["s"] == 300 }
+unt_nohead = unt_sq.merge("gated_head" => nil, "gated_head_na" => "no head")
+ph_un = L::Phases.compute(anchors(unt_nohead, S.ok(FULL.map { |e| e.merge("unit" => "some-branch", "head" => nil) })))
+check("G6 no gated head never matches an event with no head") { ph_un["integrate"]["s"].nil? }
+
+base_sq = L::Ledger.improve_row(repo: "custom", landing: sq, anchors: anchors(sq, S.ok(FULL)), counters: {},
+                                telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"))
+check("G7 a ledger row records the gated head") { base_sq["gated_head"] == HEAD && !base_sq.key?("gated_head_na") }
+base_un = L::Ledger.improve_row(repo: "custom", landing: unread, anchors: anchors(unread, S.ok(FULL)), counters: {},
+                                telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"))
+check("G7 an unread gated head is recorded null with its reason") do
+  base_un.key?("gated_head") && base_un["gated_head"].nil? && base_un["gated_head_na"].include?("headRefOid")
+end
+
+miss = L::Phases.compute(anchors(sq, S.ok([])))
+check("G8 a squash landing's head-keyed miss names the PR head, not the forge's commit") do
+  miss["merge"]["na_reason"].include?(HEAD[0, 8]) && !miss["merge"]["na_reason"].include?(OTHER[0, 8])
+end
+check("G8 the gated head is masked when reasons are grouped") do
+  L::Stats.generic("no receipt for #{HEAD[0, 8]}", { "landed_commit" => OTHER, "gated_head" => HEAD }) == "no receipt for <sha>"
+end
+
+old_sq = { "repo" => "custom", "mode" => "improve", "landed_via" => "merge", "landed_commit" => OTHER, "ticket" => "DND-9001" }
+check("J1 an improve merge row with no gated head is rejoinable") { L::Ledger.rejoinable?(old_sq) }
+check("J1 one whose head was unread is rejoinable") { L::Ledger.rejoinable?(old_sq.merge("gated_head" => nil)) }
+check("J1 one already joined is not") { !L::Ledger.rejoinable?(old_sq.merge("gated_head" => HEAD)) }
+check("J1 a push row is not") { !L::Ledger.rejoinable?(old_sq.merge("landed_via" => "push")) }
+check("J1 a watch row is not") { !L::Ledger.rejoinable?(old_sq.merge("mode" => "watch")) }
+new_sq = old_sq.merge("gated_head" => HEAD, "x" => 1)
+plan = L::Ledger.rejoins([new_sq, old_sq.merge("ticket" => "DND-9002", "gated_head" => nil),
+                          new_sq.merge("landed_via" => "push", "ticket" => "DND-9003")])
+check("J2 only fresh squash rows that found their head can replace") { plan.keys == [L::Ledger.key(new_sq)] }
 
 r1 = { "repo" => "custom", "landed_commit" => HEAD, "ticket" => "DND-1" }
 r2 = r1.merge("ticket" => "DND-2")

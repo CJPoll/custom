@@ -327,6 +327,12 @@ Dir.mktmpdir("lead-time-test") do |root|
   out = capture_row(r9)
   check("a could-not-measure row prints 'could not measure'") { out.include?("could not measure") }
   check("a closed row prints via=closed") { capture_row(r8).include?("via=closed") }
+  # --- DND-1490: a PR row carries its own head (the gated head), apart from
+  #     the commit the forge or the push landed.
+  check("a MERGED PR row carries the PR head beside the forge's merge commit") do
+    r13[:head_commit] == o[:p8] && r13[:merge_commit] == o[:c1] && r13[:head_commit_unmeasured].nil?
+  end
+  check("a push-landed PR row carries its PR head too") { r7[:head_commit] == o[:p7] && r7[:landed_commit] == o[:p7_landed] }
   check("a landed-by-push row prints its landing") do
     capture_row(r7).include?("landed by push #{o[:p7_landed][0, 8]}") && !capture_row(r13).include?("landed by push")
   end
@@ -363,6 +369,49 @@ check("the lead runs from dispatch to landing: 46m 17s, not 21m 19s") { r129[:le
 check("the row names its measured start") { r129[:start_source] == "DND-1203 In Progress at" }
 check("the earliest commit is still reported, as first_commit") { r129[:first_commit] == "2026-09-30T03:05:58Z" }
 check("the human row names the start source") { capture_row(r129).include?("start=DND-1203 In Progress at") }
+
+# --- DND-1490: a head the forge did not give, or gave malformed, is a named
+#     could-not-measure: head_commit null with a reason, never "".
+check("a head that is not a commit sha is refused, with the reason") do
+  r129[:head_commit].nil? && r129[:head_commit_unmeasured] == 'the forge\'s head commit (headRefOid) "h129" is not a commit sha'
+end
+gh_nohead = GitHubForge.new(".")
+gh_nohead.define_singleton_method(:run_json) do |cmd, _dir|
+  next [] if cmd[1] == "run"
+
+  pr129.merge("headRefOid" => nil)
+end
+r_nohead = analyze(gh_nohead, 129, stamped)
+check("a head the forge did not give is null with a reason") do
+  r_nohead[:head_commit].nil? && r_nohead[:head_commit_unmeasured] == "the forge gave no head commit (headRefOid)"
+end
+check("an empty head reads the same as none, never an empty sha") do
+  h, why = LeadTime.head_commit("", "headRefOid")
+  h.nil? && why == "the forge gave no head commit (headRefOid)"
+end
+check("a full sha is the head, with no reason") { LeadTime.head_commit("ab" * 20, "sha") == ["ab" * 20, nil] }
+check("a SHA-256 object name is a head too") { LeadTime.head_commit("cd" * 32, "sha") == ["cd" * 32, nil] }
+
+gl = GitLabForge.allocate
+gl.instance_variable_set(:@dir, ".")
+gl.instance_variable_set(:@proj, "group%2Frepo")
+gl_mr = { "iid" => 5, "title" => "DND-1203: t", "source_branch" => "dnd-1203-b", "state" => "merged",
+          "merged_at" => "2026-09-30T03:27:17Z", "closed_at" => nil, "sha" => "ef" * 20,
+          "merge_commit_sha" => nil, "squash_commit_sha" => "12" * 20 }
+gl.define_singleton_method(:api) do |path|
+  next gl_mr if path.end_with?("/merge_requests/5")
+  next [] if path.include?("/commits") || path.include?("/pipelines")
+
+  raise "unexpected glab call: #{path}"
+end
+r_gl = analyze(gl, 5, stamped)
+check("a GitLab MR row carries the MR head (sha) beside its squash commit") do
+  r_gl[:head_commit] == "ef" * 20 && r_gl[:merge_commit] == "12" * 20 && r_gl[:head_commit_unmeasured].nil?
+end
+gl_mr["sha"] = nil
+check("a GitLab MR with no head says so") do
+  analyze(gl, 5, stamped)[:head_commit_unmeasured] == "the forge gave no head commit (sha)"
+end
 
 unstamped = NotionStart.new(FakeNotion.new(1203 => at_prop(nil)))
 ru = analyze(gh129, 129, unstamped)

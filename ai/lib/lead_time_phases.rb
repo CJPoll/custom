@@ -42,6 +42,8 @@ module LeadTimePhases
   EVENTS = %w[harness_gate.run harness_gate.check test_slot.wait critic.round
               integration_gate.run merge.lock_wait merge.landed].freeze
   TOP_CHECKS = 5
+  # A full git object name (SHA-1 or SHA-256).
+  SHA_RE = /\A(?:\h{40}|\h{64})\z/.freeze
 
   class ConfigError < StandardError; end
 
@@ -170,14 +172,20 @@ module LeadTimePhases
       return [nil, "no landing time for #{Util.short(commit)}"] unless landed
 
       start = Util.time(row["start"])
+      gated, gated_na = gated_head_of(row, commit)
       [{ "ticket" => ticket, "ticket_na" => ticket ? nil : ticket_na, "landed_commit" => commit, "landed_at" => landed,
+         "gated_head" => gated, "gated_head_na" => gated_na,
          "landed_via" => row["landed_via"], "pr" => row["pr"], "start" => start,
          "start_na" => start ? nil : row["unmeasured_reason"],
          "lead_s" => row["lead_seconds"], "code_s" => row["code_seconds"], "tail_s" => row["tail_seconds"],
          "lead_na_reason" => row["unmeasured_reason"] }, nil]
     end
 
-    def unit_desc(landing) = landing["ticket"] || "head #{Util.short(landing['landed_commit'])}"
+    def unit_desc(landing) = landing["ticket"] || "head #{head_desc(landing)}"
+
+    # The sha a head-keyed lookup used: the gated head, else (none known) the
+    # landed commit, which is what the row is named by.
+    def head_desc(landing) = Util.short(landing["gated_head"] || landing["landed_commit"])
 
     # Set each ticketed landing's "after": the previous landing of the same
     # ticket (from the ledger's prior rows or this batch), so a ticket that
@@ -196,6 +204,28 @@ module LeadTimePhases
     # A merge (squash) landing's commit is made by the forge: it is not the
     # head integration-gate, the critic or harness-gate saw.
     def gated_head?(landing) = landing["landed_via"] != "merge"
+
+    # The head integration-gate, the critic and harness-gate saw, which their
+    # receipts, verdicts and timings are keyed on (DND-1490). A push landing's
+    # commit IS that head; a merge landing's is the forge's, so its head is the
+    # PR's own head (lead-time's head_commit). -> [sha, nil] or [nil, reason].
+    # A head that is absent, unread or not a sha is a reason, never "".
+    def gated_head_of(row, commit)
+      return [commit, nil] unless row["landed_via"] == "merge"
+
+      head = row["head_commit"]
+      return [head, nil] if head.is_a?(String) && head.match?(SHA_RE)
+
+      forge = "merge landing: #{Util.short(commit)} is the forge's commit"
+      why = if !row.key?("head_commit")
+              "the row has no head_commit (it predates DND-1490; re-ingest with --since and --rejoin)"
+            elsif head.to_s.empty?
+              "its PR head could not be read (#{row['head_commit_unmeasured'] || 'lead-time gave no reason'})"
+            else
+              "its PR head #{head.inspect} is not a commit sha"
+            end
+      [nil, "#{forge}, and #{why}"]
+    end
   end
 
   # Telemetry events written in this repo only (`repo` is the writer's label,
@@ -221,7 +251,7 @@ module LeadTimePhases
     def for_unit(events, landing, name)
       key = landing["ticket"]
       in_span(events, landing).select do |e|
-        e["event"] == name && (key ? e["unit"] == key : e["head"] == landing["landed_commit"])
+        e["event"] == name && (key ? e["unit"] == key : on_gated_head?(e, landing))
       end
     end
 
@@ -230,7 +260,14 @@ module LeadTimePhases
     def for_gated(events, landing, name)
       return for_unit(events, landing, name) unless Landing.gated_head?(landing)
 
-      in_span(events, landing).select { |e| e["event"] == name && e["head"] == landing["landed_commit"] }
+      in_span(events, landing).select { |e| e["event"] == name && on_gated_head?(e, landing) }
+    end
+
+    # An event about the landing's gated head. No gated head matches nothing,
+    # never an event that carries no head.
+    def on_gated_head?(event, landing)
+      head = landing["gated_head"]
+      !head.nil? && event["head"] == head
     end
 
     def dirty?(event_or_receipt)
@@ -327,7 +364,7 @@ module LeadTimePhases
       return looked.join("; ") unless looked.empty?
 
       "no critic PASS for #{Landing.unit_desc(landing)} (no critic.round, no verdict receipt on " \
-        "#{Util.short(landing['landed_commit'])})"
+        "#{Landing.head_desc(landing)})"
     end
 
     # -> [start Anchor, end Anchor]: the last successful integration_gate.run
@@ -336,7 +373,7 @@ module LeadTimePhases
       runs = Match.for_gated(events.items, landing, "integration_gate.run")
                   .select { |e| Match.attr(e, "exit_code") == 0 }
       run = runs.max_by { |e| Match.at(e) }
-      sha = Util.short(landing["landed_commit"])
+      sha = Landing.head_desc(landing)
       rec = receipt.items.first && Util.time(receipt.items.first["recorded_at"])
       if run
         start = found(Match.at(run), "telemetry integration_gate.run")
@@ -433,7 +470,7 @@ module LeadTimePhases
         list = latest.map { |r| { "label" => r["label"], "wall_s" => r["wall_s"] } }
         return { "top_checks" => top(list), "top_checks_source" => "harness-gate timings.jsonl" }
       end
-      sha = Util.short(landing["landed_commit"])
+      sha = Landing.head_desc(landing)
       tel = Anchors.telemetry_miss(events, "no harness_gate.check on #{sha}")
       tim = timings.could_not_look? ? "timings: could not look (#{timings.reason})" : "no timings rows for #{sha}"
       { "top_checks" => nil, "top_checks_na" => "#{tel}; #{tim}" }
@@ -451,10 +488,25 @@ module LeadTimePhases
 
     def base(repo:, mode:, landing:, ingested_at:)
       { "schema" => SCHEMA, "repo" => repo, "mode" => mode, "ticket" => landing["ticket"],
-        "landed_commit" => landing["landed_commit"], "landed_at" => Util.iso(landing["landed_at"]),
+        "landed_commit" => landing["landed_commit"], "gated_head" => landing["gated_head"],
+        "landed_at" => Util.iso(landing["landed_at"]),
         "landed_via" => landing["landed_via"], "pr" => landing["pr"], "start" => Util.iso(landing["start"]),
         "lead_s" => landing["lead_s"], "code_s" => landing["code_s"], "tail_s" => landing["tail_s"],
         "lead_na_reason" => landing["lead_na_reason"], "ingested_at" => Util.iso(ingested_at) }
+        .merge(landing["gated_head"] ? {} : { "gated_head_na" => landing["gated_head_na"] })
+    end
+
+    # An improve-mode merge landing ledgered with no gated head: the rows
+    # DND-1490's --rejoin may replace, once each.
+    def rejoinable?(row)
+      row["mode"] == "improve" && row["landed_via"] == "merge" && row["gated_head"].nil?
+    end
+
+    # The fresh rows that can replace a rejoinable one: improve-mode merge
+    # landings that found their gated head. -> {key => row}
+    def rejoins(rows)
+      rows.select { |r| r["mode"] == "improve" && r["landed_via"] == "merge" && r["gated_head"] }
+          .to_h { |r| [key(r), r] }
     end
 
     def improve_row(repo:, landing:, anchors:, counters:, telemetry_status:, ingested_at:)
@@ -516,13 +568,15 @@ module LeadTimePhases
 
     module_function
 
-    # A reason with its row's own ticket and landed commit masked, so one
-    # cause on many landings groups as one reason.
+    # A reason with its row's own ticket, landed commit and gated head masked,
+    # so one cause on many landings groups as one reason.
     def generic(reason, row)
       out = reason.to_s
       out = out.gsub(row["ticket"], "<unit>") if row["ticket"].is_a?(String) && !row["ticket"].empty?
-      sha = row["landed_commit"].to_s
-      out = out.gsub(sha, "<sha>").gsub(sha[0, 8], "<sha>") if sha.size >= 8
+      [row["landed_commit"], row["gated_head"]].each do |s|
+        sha = s.to_s
+        out = out.gsub(sha, "<sha>").gsub(sha[0, 8], "<sha>") if sha.size >= 8
+      end
       out.gsub(ISO_RE, "<time>")
     end
 

@@ -37,6 +37,43 @@ Dir.mktmpdir("ltp-io-") do |tmp|
   File.write(ledger.path, "not json\n", mode: "a")
   check("I1 a malformed line is counted, not dropped silently") { ledger.read[1] == 1 }
 
+  # ── LedgerStore#replace (DND-1490 --rejoin) ──
+  rj = IO_::LedgerStore.new(File.join(tmp, "rejoin", "ledger.jsonl"))
+  archive = File.join(tmp, "rejoin", "ledger-replaced.jsonl")
+  sq = { "repo" => "custom", "mode" => "improve", "landed_via" => "merge", "landed_commit" => HEAD, "ticket" => "DND-9001" }
+  done = sq.merge("ticket" => "DND-9002", "gated_head" => "d" * 40)
+  push = sq.merge("ticket" => "DND-9003", "landed_via" => "push", "gated_head" => HEAD)
+  rj.append([sq, done, push])
+  File.write(rj.path, "not json\n", mode: "a")
+  joined = sq.merge("gated_head" => "d" * 40, "phases" => { "merge" => { "s" => 1 } })
+  replacements = { %w[custom] + [HEAD, "DND-9001"] => joined,
+                   %w[custom] + [HEAD, "DND-9002"] => done.merge("x" => 2),
+                   %w[custom] + [HEAD, "DND-9003"] => push.merge("landed_via" => "merge", "x" => 3) }
+  check("J3 replace swaps only the rejoinable row") { rj.replace(replacements, archive) == 1 }
+  lines = File.readlines(rj.path)
+  check("J3 the ledger keeps every line, in order") { lines.size == 4 && lines[3] == "not json\n" }
+  check("J3 the rejoinable row now carries its head") { JSON.parse(lines[0]) == joined }
+  check("J3 a joined row and a push row are untouched") { JSON.parse(lines[1]) == done && JSON.parse(lines[2]) == push }
+  check("J3 the replaced original is archived, never dropped") do
+    File.readlines(archive).map { |l| JSON.parse(l) } == [sq]
+  end
+  check("J3 a second rejoin replaces nothing (idempotent)") { rj.replace(replacements, archive) == 0 }
+  check("J3 and archives nothing more") { File.readlines(archive).size == 1 }
+  check("J3 an empty plan writes nothing") { rj.replace({}, archive) == 0 && File.readlines(rj.path).size == 4 }
+  check("J3 the ledger keeps its mode") { (File.stat(rj.path).mode & 0o777) == 0o644 }
+  # A writer that opened the ledger before a rename locks the unlinked old
+  # file: it must see that and reopen, or its append is lost.
+  rl = IO_::LedgerStore.new(File.join(tmp, "race", "ledger.jsonl"))
+  rl.append([sq])
+  stale = File.open(rl.path, File::RDWR | File::APPEND)
+  check("J4 an open ledger is live before a rename") { rl.live?(stale) }
+  rl.replace({ %w[custom] + [HEAD, "DND-9001"] => joined }, File.join(tmp, "race", "ledger-replaced.jsonl"))
+  check("J4 after replace renames, the old handle is not live") { !rl.live?(stale) }
+  stale.close
+  check("J4 an append after the rename lands in the live ledger") do
+    rl.append([sq.merge("ticket" => "DND-9004")]) == [1, 0] && File.readlines(rl.path).size == 2
+  end
+
   # ── CursorStore ──
   cur = IO_::CursorStore.new(File.join(tmp, "state"), "custom")
   check("I2 no cursor reads nil without an error") { cur.read == [nil, nil] }

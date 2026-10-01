@@ -43,12 +43,16 @@ fi
 HEAD_PUSH="$(printf 'a%.0s' $(seq 40))"
 HEAD_PR="$(printf 'b%.0s' $(seq 40))"
 HEAD_BARE="$(printf 'c%.0s' $(seq 40))"
+# PR 41's own head: the commit integration-gate gated and the receipt is keyed
+# on. Its landing is the forge's squash commit HEAD_PR (DND-1490).
+HEAD_PRHEAD="$(printf 'd%.0s' $(seq 40))"
 
 REPO="${TMP}/repo"
 GENV=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1)
 "${GENV[@]}" git init -q -b main "${REPO}" || { echo "FAIL git init"; echo "  Fix: install git"; exit 1; }
 mkdir -p "${REPO}/.git/integration-receipts"
 printf '{"recorded_at":"2026-10-01T04:30:00Z","head":"%s"}\n' "${HEAD_PUSH}" >"${REPO}/.git/integration-receipts/${HEAD_PUSH}.json"
+printf '{"recorded_at":"2026-10-01T05:30:00Z","head":"%s"}\n' "${HEAD_PRHEAD}" >"${REPO}/.git/integration-receipts/${HEAD_PRHEAD}.json"
 
 WATCH="${TMP}/watchrepo"
 mkdir -p "${WATCH}"
@@ -89,7 +93,8 @@ cat >"${TMP}/rows.json" <<JSON
    "start": "2026-10-01T01:00:00Z", "lead_seconds": 14400, "code_seconds": 14400, "tail_seconds": 0,
    "unmeasured_reason": null},
   {"pr": 41, "title": "a change", "branch": "dnd-9002-a-change", "landed_via": "merge",
-   "landed_commit": null, "merge_commit": "${HEAD_PR}", "merged": "2026-10-01T06:00:00Z",
+   "landed_commit": null, "merge_commit": "${HEAD_PR}", "head_commit": "${HEAD_PRHEAD}",
+   "head_commit_unmeasured": null, "merged": "2026-10-01T06:00:00Z",
    "closed_at": "2026-10-01T06:00:00Z", "start": "2026-10-01T02:00:00Z", "lead_seconds": 14400,
    "code_seconds": 14400, "tail_seconds": 0, "unmeasured_reason": null},
   {"pr": null, "ticket": null, "landed_via": "push", "landed_commit": "${HEAD_BARE}",
@@ -164,6 +169,12 @@ eq "the reason names the unit" "$(row_field "${HEAD_PUSH}" phases.implement.na_r
 eq "merge is measured from the integration receipt" "$(row_field "${HEAD_PUSH}" phases.merge.s)" "1800"
 eq "gate_runs is null, not 0" "$(row_field "${HEAD_PUSH}" counters.gate_runs)" "null"
 eq "the unticketed row's verify reads unticketed" "$(row_field "${HEAD_BARE}" phases.verify.na_reason)" "unticketed landing: no unit to join gate runs on"
+# DND-1490 regression: a squash landing's commit is the forge's, so the
+# receipt keyed on the gated PR head was never read (merge read "could not
+# look (merge landing: ... is the forge's commit, not the gated head)").
+eq "REGRESSION: a squash-merged PR joins its receipt on the PR head" "$(row_field "${HEAD_PR}" phases.merge.s)" "1800"
+eq "the squash row records the head it joined on" "$(row_field "${HEAD_PR}" gated_head)" "${HEAD_PRHEAD}"
+eq "the squash row's ledger identity is still its landed commit" "$(row_field "${HEAD_PR}" landed_commit)" "${HEAD_PR}"
 
 echo "== ingest: at-least-once delivery is idempotent"
 run "${TEL_EMPTY}" --ingest --repo custom
@@ -215,7 +226,7 @@ run "${TEL_NONE}" --summary --repo custom --json
 JSON_STATUS="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'puts JSON.parse($stdin.read).dig("telemetry", "status")')"
 eq "--json carries the telemetry status" "${JSON_STATUS}" "could not look"
 JSON_N="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); puts [j["rows"], j.dig("phases", "merge", "n"), j.dig("phases", "implement", "n_na")].join(",")')"
-eq "--json: 3 rows, merge measured once, implement n/a on all" "${JSON_N}" "3,1,3"
+eq "--json: 3 rows, merge measured on the push and the squash, implement n/a on all" "${JSON_N}" "3,2,3"
 
 echo "== summary: an unreadable or corrupt write-failures counter reads unknown"
 printf '{"x":' >"${TEL_EMPTY}/write-failures"
@@ -257,6 +268,44 @@ eq "a scoped ingest exits 0" "${CODE}" "0"
 STATE_SAVE="${STATE}"; STATE="${TMP}/state-scoped"
 eq "implement ends at this repo's gate run, not another repo's" "$(row_field "${HEAD_PUSH}" phases.implement.s)" "7200"
 eq "gate_runs counts this repo's run only" "$(row_field "${HEAD_PUSH}" counters.gate_runs)" "1"
+STATE="${STATE_SAVE}"
+
+echo "== ingest --rejoin: first-write-wins rows are backfilled only on request (DND-1490)"
+# A ledger ingested before DND-1490: the squash row has no gated head.
+RSTATE="${TMP}/state-rejoin"
+mkdir -p "${RSTATE}"
+cat >"${TMP}/rows-legacy.json" <<JSON
+[
+  {"pr": 41, "title": "a change", "branch": "dnd-9002-a-change", "landed_via": "merge",
+   "landed_commit": null, "merge_commit": "${HEAD_PR}", "merged": "2026-10-01T06:00:00Z",
+   "closed_at": "2026-10-01T06:00:00Z", "start": "2026-10-01T02:00:00Z", "lead_seconds": 14400,
+   "code_seconds": 14400, "tail_seconds": 0, "unmeasured_reason": null}
+]
+JSON
+STATE_SAVE="${STATE}"; STATE="${RSTATE}"
+ROWS="${TMP}/rows-legacy.json" run "${TEL_EMPTY}" --ingest --repo custom --since 2026-10-01
+eq "a legacy ingest exits 0" "${CODE}" "0"
+eq "the legacy squash row has no gated head" "$(row_field "${HEAD_PR}" gated_head)" "null"
+has "and says why, naming the rejoin" "$(row_field "${HEAD_PR}" phases.merge.na_reason)" "--rejoin"
+run "${TEL_EMPTY}" --ingest --repo custom --since 2026-10-01
+eq "a plain re-ingest exits 0" "${CODE}" "0"
+eq "a plain re-ingest never rewrites a ledgered row" "$(row_field "${HEAD_PR}" phases.merge.s)" "null"
+run "${TEL_EMPTY}" --ingest --repo custom --rejoin
+eq "--rejoin without --since is refused" "${CODE}" "2"
+has "the refusal carries Fix:" "${ERR}" "Fix:"
+run "${TEL_EMPTY}" --summary --repo custom --rejoin
+eq "--rejoin with --summary is refused" "${CODE}" "2"
+LINES_BEFORE="$(ledger_lines)"
+run "${TEL_EMPTY}" --ingest --repo custom --since 2026-10-01 --rejoin
+eq "--rejoin exits 0" "${CODE}" "0"
+has "it says how many rows it rejoined" "${OUT}" "1 merge landing row(s) rejoined on their PR head"
+eq "the rejoined row joins its receipt" "$(row_field "${HEAD_PR}" phases.merge.s)" "1800"
+eq "the ledger gains no line" "$(ledger_lines)" "${LINES_BEFORE}"
+eq "the original row is kept in ledger-replaced.jsonl" "$(wc -l <"${RSTATE}/ledger-replaced.jsonl" | tr -d ' ')" "1"
+has "the kept original is the legacy row" "$(cat "${RSTATE}/ledger-replaced.jsonl")" "predates DND-1490"
+run "${TEL_EMPTY}" --ingest --repo custom --since 2026-10-01 --rejoin
+has "a second --rejoin replaces nothing" "${OUT}" "0 merge landing row(s) rejoined"
+eq "and archives nothing more" "$(wc -l <"${RSTATE}/ledger-replaced.jsonl" | tr -d ' ')" "1"
 STATE="${STATE_SAVE}"
 
 echo "== summary: a watch repo"

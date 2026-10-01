@@ -103,6 +103,20 @@ module LeadTime
     v && !v.to_s.empty?
   end
 
+  # A full git object name (SHA-1 or SHA-256).
+  SHA_RE = /\A(?:\h{40}|\h{64})\z/.freeze
+
+  # A PR's own head, the commit integration-gate, the critic and harness-gate
+  # saw (DND-1490). A squash merge lands a commit the forge made, so the gated
+  # head is only this. `field` names the forge's key for the reason.
+  # -> [sha, nil] or [nil, reason]: absent or malformed is never "".
+  def head_commit(raw, field)
+    return [raw, nil] if raw.is_a?(String) && raw.match?(SHA_RE)
+    return [nil, "the forge gave no head commit (#{field})"] if raw.to_s.empty?
+
+    [nil, "the forge's head commit (#{field}) #{raw.inspect} is not a commit sha"]
+  end
+
   # Latest finished_at among the given iso strings, as an ISO string (ignoring
   # blanks). nil if none. Returns a string so it composes with pick_end.
   def latest(iso_times)
@@ -545,8 +559,10 @@ class GitHubForge
       end
     end
     deploy_at, pipeline_at = ci_ends(merge_sha)
+    head, head_why = LeadTime.head_commit(d["headRefOid"], "headRefOid")
     {
       number: d["number"], title: d["title"], branch: d["headRefName"],
+      head_commit: head, head_commit_unmeasured: head_why,
       merged_at: merged_at, merge_sha: merge_sha, landed_via: landed_via,
       closed: closed, unmeasured: unmeasured, closed_at: d["closedAt"],
       # Author AND committer date: a rebase resets only the committer date.
@@ -818,8 +834,10 @@ class GitLabForge
     unmeasured = if d["state"] == "closed" && d["merged_at"].nil?
                    "closed without a merge; landing by push is only detected on GitHub"
                  end
+    head, head_why = LeadTime.head_commit(d["sha"], "sha")
     {
       number: d["iid"], title: d["title"], branch: d["source_branch"],
+      head_commit: head, head_commit_unmeasured: head_why,
       merged_at: d["merged_at"], merge_sha: merge_sha,
       landed_via: d["merged_at"] ? "merge" : nil, unmeasured: unmeasured,
       closed_at: d["merged_at"] || d["closed_at"],
@@ -1087,7 +1105,8 @@ def analyze(forge, id, starts)
                    closed: f[:closed], unmeasured: f[:unmeasured])
           .merge(pr: f[:number], title: f[:title], branch: f[:branch],
                  landed_via: f[:landed_via], landed_commit: f[:landed_via] == "push" ? f[:merge_sha] : nil,
-                 merge_commit: f[:landed_via] == "merge" ? f[:merge_sha] : nil, closed_at: f[:closed_at])
+                 merge_commit: f[:landed_via] == "merge" ? f[:merge_sha] : nil, closed_at: f[:closed_at],
+                 head_commit: f[:head_commit], head_commit_unmeasured: f[:head_commit_unmeasured])
 end
 
 # One direct-push landing row from a LeadTime.build_push_rows skeleton: its
