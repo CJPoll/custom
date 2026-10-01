@@ -29,7 +29,9 @@ that split against `Classify.sent_body`.
   `Classify.sent_body`, the function `ticket-classify` sends through.
 
 Both runs go to the same server question set. Measurement only: no run was
-applied.
+applied. Each run file records the corpus it sent: before
+`e7601ac4…` (this `corpus.jsonl`), after `b7139e53…` (the same rows through
+`Classify.sent_body`), labels `f0e82048…`.
 
 ```
 ai/bin/judgment-eval --use-case ticket_severity --labels labels.jsonl --corpus corpus.jsonl

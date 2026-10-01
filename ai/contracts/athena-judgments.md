@@ -1210,11 +1210,12 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   `domain_not_permitted`, because the domain is checked before the mode.
 - **A trailing provenance block is not sent** (DND-1590). The body sent is
   `Classify.sent_body` of the filed body: the run of `Source:` and
-  `Context:` clauses that ends it is dropped. The block starts at a label
-  that begins a line or a sentence, and every sentence from there to the end
-  starts with a label. Anything else is sent as filed: a label inside a
-  sentence, a block followed by any other sentence, and a body that is
-  nothing but provenance. Where a finding was found is background, not its
+  `Context:` clauses that ends it is dropped. A clause ends at a line break
+  or at a sentence end and a space (not the stop in "e.g." or "i.e."; a
+  bracket or quote alone ends nothing), and every clause in the run starts
+  with a label. Anything else is sent as filed: a label inside a clause, a
+  block followed by any other clause, a label in another form (lower case,
+  bold, a list item), and a body that is nothing but provenance. Where a finding was found is background, not its
   impact, so a filer states the defect's current impact in the body proper.
   `ticket-classify` and `ticket-reclassify` send through it, and
   `ticket-corpus` builds its eval cases with it, so an eval sends what the

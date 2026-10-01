@@ -66,30 +66,30 @@ module Classify
   end
 
   # A provenance label: where a finding came from, not what it does (DND-1590).
-  PROVENANCE_LABEL = /(?:Source|Context):/
-  # What may precede a label for it to start a clause: the start of a line,
-  # or the end of a sentence and a space.
-  CLAUSE_START = /(?:\n|[.!?)\]"'`][ \t]+)[ \t]*\z/
-  SENTENCE_END = /(?<=[.!?])\s+/
+  PROVENANCE_LABELS = ["Source:", "Context:"].freeze
+  # Where a clause ends: a line break, or a sentence end (., ! or ?, not the
+  # one in "e.g." or "i.e.", closing brackets or quotes allowed after it)
+  # and a space. A bracket or quote alone ends nothing.
+  CLAUSE_END = /\n|(?<!e\.g|i\.e)[.!?][)\]"'`]*[ \t ]+/
 
   # sent_body(body) -> the body with its trailing provenance block dropped
-  # (DND-1590), else the body unchanged. The block is the run of `Source:`
-  # and `Context:` clauses that ends the body: from a label that starts a
-  # line or a sentence, every sentence to the end starts with a label.
-  # ticket-severity-v1 rated the incident a finding was found during, not
-  # the finding's own impact, so that background is not sent. A label
-  # inside a sentence, one followed by any other sentence, and a body that
-  # is nothing but provenance are all kept as they are.
+  # (DND-1590), else the body unchanged. The body is cut into clauses once,
+  # at CLAUSE_END. The block is the run of clauses that ends the body and
+  # each starts with `Source:` or `Context:`. ticket-severity-v1 rated the
+  # incident a finding was found during, not the finding's own impact, so
+  # that background is not sent. A label inside a clause, a block followed
+  # by any other clause, and a body that is nothing but provenance are all
+  # kept as they are.
   def sent_body(body)
     text = body.to_s
-    text.to_enum(:scan, PROVENANCE_LABEL).map { Regexp.last_match.begin(0) }.each do |at|
-      head = text[0, at]
-      next unless blank?(head) || head.match?(CLAUSE_START)
-      next unless text[at..].strip.split(SENTENCE_END).all? { |s| s.start_with?("Source:", "Context:") }
+    starts = [0] + text.to_enum(:scan, CLAUSE_END).map { Regexp.last_match.end(0) }
+    clauses = starts.each_with_index.map { |at, i| [at, text[at...(starts[i + 1] || text.length)]] }
+    clauses.pop while clauses.any? && blank?(clauses.last[1])
+    block = clauses.reverse.take_while { |_, clause| clause.lstrip.start_with?(*PROVENANCE_LABELS) }
+    return text if block.empty?
 
-      return blank?(head) ? text : head.rstrip
-    end
-    text
+    head = text[0, block.last[0]]
+    blank?(head) ? text : head.rstrip
   end
 
   # request_body(...) -> the closed body the server's schema accepts: the

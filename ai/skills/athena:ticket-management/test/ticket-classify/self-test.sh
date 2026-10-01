@@ -153,6 +153,21 @@ ruby_eq "sent body: a body with no block is byte-identical [DND-1590]" \
 ruby_eq "sent body: only the trailing block goes; an earlier labelled sentence followed by content stays [DND-1590]" \
   "Context: seen twice. The fix is X." \
   'Classify.sent_body("Context: seen twice. The fix is X. Source: r.md.")'
+ruby_eq "sent body: a line after a Source: line, with no full stop between, is content: kept whole [DND-1590 review]" \
+  "true" \
+  'b = "Fix the gate.\nSource: logs\nImpact: prod is down for every tenant"; Classify.sent_body(b) == b'
+ruby_eq "sent body: a bracket or quote alone does not end a sentence [DND-1590 review]" \
+  "true|true" \
+  'a = "Call f(x) Source: the logs."; b = "Run `X` Context: an outage."; [Classify.sent_body(a) == a, Classify.sent_body(b) == b].join("|")'
+ruby_eq "sent body: an e.g. before a label does not end a sentence [DND-1590 review]" \
+  "true" \
+  'b = "Use a header, e.g. Source: the gateway."; Classify.sent_body(b) == b'
+ruby_eq "sent body: a quoted sentence end and a CRLF block are dropped; trailing whitespace too [DND-1590 review]" \
+  "It read \"stop.\"|Pool is 3.|Pool is 3." \
+  '[Classify.sent_body("It read \"stop.\" Source: r.md."), Classify.sent_body("Pool is 3.\r\nSource: r.md.\r\n"), Classify.sent_body("Pool is 3. Context: x.  \n\n")].join("|")'
+ruby_eq "sent body: many labelled clauses before a closing sentence are all kept [DND-1590 review]" \
+  "true" \
+  'b = "Lead. " + ("Source: a. x " * 50) + "End."; Classify.sent_body(b) == b'
 ruby_eq_args "sent body: on the DND-1590 fixtures, exactly the 15 bodies with a block change, and none keeps a label [DND-1590]" \
   "15|0|6" \
   'rows = File.readlines(ARGV[0]).map { |l| JSON.parse(l)["input"]["body"] }; sent = rows.map { |b| Classify.sent_body(b) }; changed = rows.zip(sent).reject { |a, b| a == b }; [changed.size, changed.count { |_, b| b.match?(/(?:Source|Context):/) }, rows.zip(sent).count { |a, b| a == b }].join("|")' \
