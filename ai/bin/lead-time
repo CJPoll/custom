@@ -267,13 +267,20 @@ module LeadTime
       return { status: :unknown,
                reason: "#{hits} of #{pr_only.size} of its commits are on the base branch by patch-id" }
     end
-    other = pr_only.lazy.filter_map { |c| c[:pid0] && main.find { |m| m[:pid0] == c[:pid0] } }.first
+    c, other = pr_only.lazy.filter_map { |x| x[:pid0] && (m = main.find { |y| y[:pid0] == x[:pid0] }) && [x, m] }.first
     if other
-      # The DND-1491 tier refused it (another subject): its change is on the
-      # base, so it is not "closed", but nothing proves this is its landing.
+      # The DND-1491 tier refused it (another subject, or a subject several
+      # base commits share): its change is on the base, so it is not
+      # "closed", but nothing proves this is its landing.
+      where = "as #{other[:sha].to_s[0, 12]} ('#{other[:subject]}')"
+      if other[:subject] == c[:subject]
+        n = main.count { |m| m[:subject] == c[:subject] }
+        return { status: :unknown,
+                 reason: "its change is on the base branch #{where} with a different context, but " \
+                         "#{n} base commits share that subject, so none is paired with it" }
+      end
       return { status: :unknown,
-               reason: "its change is on the base branch as #{other[:sha].to_s[0, 12]} ('#{other[:subject]}') " \
-                       "under another subject, with a different context" }
+               reason: "its change is on the base branch #{where} under another subject, with a different context" }
     end
 
     subjects = main.map { |m| m[:subject] }

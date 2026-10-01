@@ -403,10 +403,15 @@ Dir.mktmpdir("lead-time-test") do |root|
   check("one base commit never carries two request commits") do
     two.call([{ sha: "mx", pid: "a", pid0: "a0", subject: "DND-1: one" }])[:status] == :unknown
   end
-  check("a subject two base commits share never pairs by zero-context patch-id") do
-    LeadTime.classify_landing(pr_only: [{ pid: "pr", pid0: "z0", subject: "fix typo" }], combined_pid: "pr",
-                              main: [{ sha: "m1", pid: "o1", pid0: "z0", subject: "fix typo" },
-                                     { sha: "m2", pid: "o2", pid0: "y0", subject: "fix typo" }])[:status] == :unknown
+  check("a subject two base commits share never pairs by zero-context patch-id, and the reason says so") do
+    c = LeadTime.classify_landing(pr_only: [{ pid: "pr", pid0: "z0", subject: "fix typo" }], combined_pid: "pr",
+                                  main: [{ sha: "m1", pid: "o1", pid0: "z0", subject: "fix typo" },
+                                         { sha: "m2", pid: "o2", pid0: "y0", subject: "fix typo" }])
+    c[:status] == :unknown && c[:reason].include?("2 base commits share that subject") &&
+      !c[:reason].include?("another subject")
+  end
+  check("the another-subject reason is kept for a truly different subject") do
+    ctx.call("z0", "DND-2: y")[:reason].include?("under another subject")
   end
   pushes = [{ at: "T1", after: "a1" }, { at: "T2", after: "a2" }, { at: "T3", after: "a3" }]
   carries = ->(hits) { ->(_s, after) { hits.fetch(after) } }
