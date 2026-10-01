@@ -11,8 +11,14 @@ is synthetic or paraphrased; refs are `TKT-9xxx` placeholders.
 - `control-1..3`: findings that truly block (a required CI gate red on every
   change, a missing endpoint the candidate calls, a dropped column the
   candidate reads).
-- `control-4..5`: findings that truly do not block (a severe defect in an
-  unrelated subsystem, a cosmetic issue in the candidate's own area).
+- `control-4..6`: findings that truly do not block (a severe defect in an
+  unrelated subsystem, a cosmetic issue in the candidate's own area, a flake
+  in an optional job that never gates a merge).
+
+The paraphrases keep only what the original finding said. Override 1's
+original named the contract residual; override 2's did not (only the
+filer's note did), so its paraphrase does not either. Override 4's candidate
+never mentions CI, as in the original.
 
 Controls are labelled `rule_confirmed` by `dnd-1579-synthetic-control`.
 

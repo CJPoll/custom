@@ -7,3 +7,4 @@
 {"id": "control-3-dropped-column", "label": "blocks", "provenance": "rule_confirmed", "labeler": "dnd-1579-synthetic-control", "labeled_at": "2026-10-01T18:00:00Z"}
 {"id": "control-4-severe-unrelated", "label": "does_not_block", "provenance": "rule_confirmed", "labeler": "dnd-1579-synthetic-control", "labeled_at": "2026-10-01T18:00:00Z"}
 {"id": "control-5-same-area-cosmetic", "label": "does_not_block", "provenance": "rule_confirmed", "labeler": "dnd-1579-synthetic-control", "labeled_at": "2026-10-01T18:00:00Z"}
+{"id": "control-6-optional-job-flake", "label": "does_not_block", "provenance": "rule_confirmed", "labeler": "dnd-1579-synthetic-control", "labeled_at": "2026-10-01T18:00:00Z"}
