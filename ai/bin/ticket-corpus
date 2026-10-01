@@ -81,6 +81,9 @@ USAGE = <<~EOF
              CURRENT value (mode on is excluded, as mode_on: that value may be
              Jev's own; Feature and an unset value are excluded too). Prints
              filings, lines, no_provenance / unparseable / unread by ref,
+             the paraphrased lines it recovered by shape and the
+             unparseable ones by reason (DND-1354: malformed_json,
+             lossy_paraphrase, unrecognized_prose),
              per use case accepted, agreed and the Wilson 95% lower bound (n/a
              when nothing was accepted, never 0), per judged label, and the
              accuracy bar: at least #{TicketCorpus::MIN_WINDOW_DAYS} days, #{TicketCorpus::MIN_ACCEPTED} accepted and lb >= #{TicketCorpus::MIN_LB}

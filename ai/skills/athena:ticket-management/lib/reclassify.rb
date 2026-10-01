@@ -111,14 +111,36 @@ module Reclassify
     doc
   end
 
-  # provenance(ticket) -> [:none] | [:ok, doc] | [:unparseable]. The LAST
-  # line wins: a re-classification appends a newer one.
+  # provenance(ticket) -> [:none] | [:ok, doc] | [:recovered, doc] |
+  # [:unparseable, reason]. The LAST line wins: a re-classification appends
+  # a newer one. A paraphrase TicketCorpus recovers (DND-1354: all three
+  # values, each the filer's) is :recovered: its values lock it, and the plan
+  # re-judges it so the apply step appends the verbatim line. A line that
+  # reads for TicketCorpus but lacks a model, versions or modes is
+  # malformed_json here: the lock and the version check read those.
   def provenance(ticket)
     line = last_line(lines(ticket))
     return [:none] if line.nil?
 
     doc = parse_line(line)
-    doc ? [:ok, doc] : [:unparseable]
+    return [:ok, doc] if doc
+
+    state, read = TicketCorpus.read_line(line)
+    return [:unparseable, read] if state == :unparseable
+
+    read.key?("recovered") ? [:recovered, read] : [:unparseable, "malformed_json"]
+  end
+
+  # heal(ticket) -> the recovered shape of its last line, or nil.
+  def heal(ticket)
+    state, doc = provenance(ticket)
+    state == :recovered ? doc["recovered"] : nil
+  end
+
+  # unparseable_reason(ticket) -> why its last line is unparseable, or nil.
+  def unparseable_reason(ticket)
+    state, reason = provenance(ticket)
+    state == :unparseable ? reason : nil
   end
 
   def line_now(doc)
@@ -149,6 +171,8 @@ module Reclassify
     return :eligible if state == :none
     # Someone changed a value after the classifier wrote it: their edit wins.
     return [:skip, :locked] if PROPS.keys.any? { |k| doc[k]["value"] != ticket[k] }
+    # A paraphrase has no model, versions or modes: always re-judge it.
+    return :eligible if state == :recovered
     return [:skip, :already_classified] if already_classified?(line_facts(doc), now)
 
     :eligible
@@ -184,13 +208,15 @@ module Reclassify
     doc && line_now(doc)
   end
 
-  # outcome(changes, modes) -> :planned (write properties and the line),
-  # :unchanged (a mode is on: write the line so a later hand edit locks it,
-  # R1056-7), or :inert (nothing is on and nothing changed: no write; A-1056-1).
-  def outcome(changes, modes)
+  # outcome(changes, modes, heal: nil) -> :planned (write properties and the
+  # line), :unchanged (a mode is on, or `heal` names a paraphrased line to
+  # replace: write the line so a later hand edit locks it and the readers can
+  # read it, R1056-7, DND-1354), or :inert (nothing is on, nothing changed
+  # and nothing to heal: no write; A-1056-1).
+  def outcome(changes, modes, heal: nil)
     return :planned unless changes.empty?
 
-    modes.values.include?("on") ? :unchanged : :inert
+    modes.values.include?("on") || heal ? :unchanged : :inert
   end
 
   def plan_entry(ticket, result)

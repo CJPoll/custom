@@ -6,7 +6,8 @@
 # same allowlist instead of a copy.
 #
 # Callers: ai/bin/triage-corpus, scripts/ticket-classify --epic (DND-1057),
-# ai/bin/judgment-feedback scan-tickets (DND-1469) and
+# ai/bin/judgment-feedback scan-tickets (DND-1469), scripts/ticket-provenance-check
+# (DND-1354) and
 # ai/skills/athena:ticket-management/scripts/ticket-reclassify. Each maps
 # NotionRead::Error to its own failure line, which carries the Fix:.
 #

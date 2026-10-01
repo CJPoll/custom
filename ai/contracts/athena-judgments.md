@@ -1204,6 +1204,37 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   `unavailable`. `proof` re-reads every written ticket and fails on any
   difference, an unreadable page included. Procedure:
   athena:ticket-management → *Reclassifying the backlog*.
+- **The lines are machine-written and checked, never retyped** (DND-1354).
+  Filers pasted paraphrases of the `Jev classification:` line, which lose its
+  `calls`, its judged labels and often its values. `ticket-classify
+  --lines-out FILE` writes the `Jev` lines it printed to FILE, byte for byte
+  (emptied, with a stderr line, when none was printed). After filing,
+  `scripts/ticket-provenance-check --ref DND-N --lines-file FILE` reads the
+  ticket (Notion reads only) and compares the body's LAST line of each prefix
+  with FILE: exit 0 verbatim, 4 missing or not verbatim (its `Fix:` names the
+  one paragraph to append), 3 unreadable, 2 usage. An empty FILE or an id that
+  matches no ticket is usage, never a pass.
+- **Every reader reads a known paraphrase, or counts it by reason**
+  (DND-1354). `TicketCorpus.read_line` is the one parser
+  (`ai/lib/ticket_corpus.rb`). A paraphrase that keeps all three values, one
+  value each, and names no source but the filer is **recovered** (shapes
+  `abbreviated_json`, JSON missing `accepted`/`judged`/`versions` with every
+  mode off or absent and no call id; and `prose_values`, "Kind Bug, Severity
+  LOW, Security none (filer: mode_off)" or "filer values Bug / LOW / none"): a
+  filer value is never feedback and never an accepted judgment, so nothing a
+  reader needs is lost. Every other broken line is **unparseable** with one
+  reason: `malformed_json`, `lossy_paraphrase` (prose naming Jev, a judgment,
+  `shadow`, a rule or a policy decision: its call and judged label are gone)
+  or `unrecognized_prose`. A Feature's paraphrase has no Severity and is never
+  recovered. `ticket-classify` exits 1 when `--lines-out` cannot be written;
+  that file is never pasted or checked. `judgment-feedback scan-tickets`
+  counts every line as `verbatim`, `recovered_<shape>` or
+  `unparseable_<reason>` and names each ticket that is not verbatim;
+  `ticket-corpus --shadow-report` names recovered lines by shape and
+  unparseable ones by reason; `ticket-reclassify plan` lists
+  `unparseable_provenance` by reason, reads a recovered line's values for the
+  lock, re-judges it, and plans its verbatim line even when nothing is `on`
+  (`healed_refs`), so applying the plan repairs the body.
 
 ## Budget
 
@@ -1336,6 +1367,10 @@ with it.
       differ from its last provenance line as locked, never records a fault
       fallback as a classification, and its `proof` counts an unreadable page
       as a mismatch.
+- [ ] A filed ticket's `Jev` lines come from `ticket-classify --lines-out`
+      and are checked by `ticket-provenance-check`; every reader recovers a
+      lossless paraphrase and counts every other broken line by reason,
+      never as absent.
 - [ ] A question set with several questions defines its eval case unit; a
       finding triage case is one (finding, candidate) pair.
 - [ ] Every product use case has a receiver-side wrong signal; every judged

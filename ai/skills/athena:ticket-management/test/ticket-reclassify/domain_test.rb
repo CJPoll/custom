@@ -64,6 +64,28 @@ check("a line missing a value or a mode is unparseable") do
   R.eligibility(ticket(lines: [R::PREFIX + JSON.generate(doc)]), NOW_ON) == [:skip, :unparseable_provenance] &&
     R.eligibility(ticket(lines: [R::PREFIX + JSON.generate(no_mode)]), NOW_ON) == [:skip, :unparseable_provenance]
 end
+PROSE = "Jev classification: Kind Bug, Severity MEDIUM, Security none (filer: mode_off)."
+LOSSY = "Jev classification: security none (jev 1.00, mode on, accepted); kind and severity from the filer (mode_off)."
+check("a recovered paraphrase whose values match is eligible, to heal it with a verbatim line [ticket 1354]") do
+  t = ticket(lines: [PROSE])
+  R.eligibility(t, NOW_ON) == :eligible && R.heal(t) == "prose_values"
+end
+check("a recovered paraphrase is never already_classified (it has no model, versions or modes) [ticket 1354]") do
+  now_off = NOW_ON.merge("modes" => { "kind" => "off", "severity" => "off", "security" => "off" })
+  R.eligibility(ticket(lines: [PROSE]), now_off) == :eligible
+end
+check("a recovered paraphrase whose values were edited by hand is locked: the edit wins [ticket 1354]") do
+  R.eligibility(ticket(severity: "HIGH", lines: [PROSE]), NOW_ON) == [:skip, :locked]
+end
+check("a lossy paraphrase is unparseable_provenance, with its reason [ticket 1354]") do
+  t = ticket(lines: [LOSSY])
+  R.eligibility(t, NOW_ON) == [:skip, :unparseable_provenance] && R.unparseable_reason(t) == "lossy_paraphrase" && R.heal(t).nil?
+end
+check("a verbatim line heals nothing and has no unparseable reason") do
+  t = ticket(lines: [line(VALUES, "on")])
+  R.heal(t).nil? && R.unparseable_reason(t).nil?
+end
+check("a truncated JSON line's reason is malformed_json") { R.unparseable_reason(ticket(lines: [line(VALUES, "on")[0, 60]])) == "malformed_json" }
 check("no line and versions_now unknown is eligible [qa eligibility 10]") { R.eligibility(ticket(lines: ["A W4-era body."]), nil) == :eligible }
 check("the reasons are checked in order: closed before unset") { R.eligibility(ticket(status: "Done", severity: nil), nil) == [:skip, :closed] }
 
@@ -124,6 +146,9 @@ check("a change is planned") { R.outcome([{ "prop" => "Severity" }], NOW_ON["mod
 check("no change with a mode on is unchanged (gets the provenance line) [R1056-7]") { R.outcome([], NOW_ON["modes"]) == :unchanged }
 check("no change and no mode on is inert: nothing to write (A-1056-1)") do
   R.outcome([], { "kind" => "off", "severity" => "shadow", "security" => "off" }) == :inert
+end
+check("a healed paraphrase with no change and no mode on is unchanged: the verbatim line is written [ticket 1354]") do
+  R.outcome([], { "kind" => "off", "severity" => "off", "security" => "off" }, heal: "prose_values") == :unchanged
 end
 check("the plan entry holds the server's decision and line verbatim, and no body text") do
   _, result = R.read_reply(reply(answer(VALUES.merge("severity" => "LOW"), "on")), R.filer(VALUES))

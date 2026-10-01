@@ -113,7 +113,7 @@ end
 
 puts "== ticket verdicts"
 check("an unread body is provenance_unread, never no_provenance [ticket 3]") do
-  S.ticket_verdict(ticket(body_read: false, lines: [])) == { reason: "provenance_unread", properties: [] }
+  S.ticket_verdict(ticket(body_read: false, lines: [])) == { reason: "provenance_unread", properties: [], line: nil }
 end
 check("no line is no_provenance") { S.ticket_verdict(ticket(lines: []))[:reason] == "no_provenance" }
 check("a broken last line is unparseable, even with a good earlier one") do
@@ -130,6 +130,31 @@ end
 check("the LAST line decides: a re-classification line supersedes the first") do
   older = doc(kind: prop("Docs"))
   verdicts(ticket(kind: "Bug", lines: [line(older), line(doc)]))["kind"] == ["unchanged"]
+end
+
+puts "== paraphrased lines (DND-1354)"
+PROSE = "Jev classification: Kind Bug, Severity LOW, Security none (filer: mode_off)."
+LOSSY = "Jev classification: security none (jev 1.00, mode on, accepted); kind and severity from the filer (mode_off)."
+check("a recovered prose line is read: its properties are filer_sourced, never unparseable [ticket 1354]") do
+  v = S.ticket_verdict(ticket(severity: "LOW", lines: [PROSE]))
+  v[:reason] == "lines" && v[:line] == "recovered_prose_values" && v[:properties].map { |_, x| x.first }.uniq == ["filer_sourced"]
+end
+check("a lossy paraphrase is unparseable and says why [ticket 1354]") do
+  v = S.ticket_verdict(ticket(lines: [LOSSY]))
+  v[:reason] == "unparseable" && v[:line] == "unparseable_lossy_paraphrase"
+end
+check("a verbatim line is classed verbatim; a line with no value key is malformed_json") do
+  d = doc
+  d["kind"].delete("value")
+  S.ticket_verdict(ticket)[:line] == "verbatim" && S.ticket_verdict(ticket(lines: [line(d)]))[:line] == "unparseable_malformed_json"
+end
+check("tally counts every line by class and names each non-verbatim ticket [ticket 1354]") do
+  rows = [["DND-1", S.ticket_verdict(ticket)], ["DND-2", S.ticket_verdict(ticket(lines: [PROSE]))],
+          ["DND-3", S.ticket_verdict(ticket(lines: [LOSSY]))], ["DND-4", S.ticket_verdict(ticket(lines: []))]]
+  t = S.tally(rows)
+  t[:lines] == { "verbatim" => 1, "recovered_prose_values" => 1, "unparseable_lossy_paraphrase" => 1 } &&
+    t[:line_refs] == { "recovered_prose_values" => ["DND-2"], "unparseable_lossy_paraphrase" => ["DND-3"] } &&
+    t[:refs]["unparseable"] == ["DND-3"]
 end
 
 puts "== tally"

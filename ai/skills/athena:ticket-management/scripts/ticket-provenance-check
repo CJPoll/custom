@@ -1,0 +1,195 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# ticket-provenance-check -- confirm a filed ticket carries the Jev lines
+# ticket-classify printed, byte for byte (DND-1354). Filers pasted
+# paraphrases of the `Jev classification:` line, so ticket-reclassify,
+# judgment-feedback scan-tickets and ticket-corpus --shadow-report could not
+# read it, and the line's call ids were lost. ticket-classify --lines-out
+# writes the lines to a file; this reads the filed ticket and compares its
+# LAST line of each prefix with that file. The procedure that runs it is
+# athena:ticket-management -> *Filing a ticket* (the Classify bullet).
+#
+# READ ONLY. Its only tracker access is ai/lib/notion_read.rb (a data source
+# query and block lists; any other request is refused before it is sent). It
+# writes nothing anywhere; on a mismatch it says what to append.
+#
+# Buckets: DOMAIN (pure: ../lib/provenance_lines.rb; ai/lib/ticket_corpus.rb
+# names how a paraphrase reads), EFFECTS (the lines file; Notion through
+# ai/lib/notion_read.rb), MANAGER (read, compare, report) and FRAMEWORK
+# (argv).
+#
+# NO TOKEN TOUCHES ARGV OR THE ENVIRONMENT: notion_read.rb writes it into a
+# curl config that curl reads on STDIN. No token is ever printed.
+#
+# Deliberately gem-free (stdlib only).
+
+require "json"
+require_relative "../../../lib/strict_argv"
+require_relative "../../../lib/notion_read"
+require_relative "../../../lib/triage_corpus"
+require_relative "../../../lib/ticket_corpus"
+require_relative "../lib/provenance_lines"
+
+PROG = "ticket-provenance-check"
+TICKETS_DATA_SOURCE = "219349da-87fb-8063-8f36-000b362fbd60"
+REF = /\ADND-([1-9][0-9]{0,6})\z/
+
+USAGE = <<~EOF
+  Usage: ticket-provenance-check --ref DND-N --lines-file FILE
+         ticket-provenance-check --help
+
+  Confirm a filed ticket's body carries the Jev lines ticket-classify
+  printed, byte for byte (DND-1354). Run it right after filing, with the
+  FILE `ticket-classify --lines-out FILE` wrote. READ ONLY: it reads the
+  ticket and writes nothing.
+
+    --ref DND-N        the ticket you filed (the DND tracker)
+    --lines-file FILE  the file ticket-classify --lines-out wrote: one
+                       "Jev classification:" line and, for a finding with
+                       --epic, one "Jev path:" line
+
+  For each line of FILE it reads the ticket body's LAST line with the same
+  prefix (what every reader reads) and prints one of:
+    verbatim: DND-N's last Jev classification: line is the one ticket-classify printed
+    NOT VERBATIM: DND-N's last Jev classification: line is not the one ticket-classify printed (it reads as <class>). Fix: ...
+    MISSING: DND-N has no Jev path: line. Fix: ...
+  where <class> is how the readers read that line (TicketCorpus.line_class:
+  recovered_prose_values, unparseable_lossy_paraphrase, ...). The Fix: says
+  to append ONE paragraph whose text is exactly that line of FILE (with
+  notion-personal API-patch-block-children; a new last line supersedes the
+  wrong one, so nothing is edited or deleted), then run this again.
+
+  Exit codes:
+    0  every line is in the body verbatim
+    2  usage (a bad flag, FILE unreadable or holding no Jev line, or DND-N
+       matching no ticket); nothing was compared
+    3  the ticket could not be read (Notion); nothing was compared
+    4  a line is missing or not verbatim
+
+  The Notion token is the file the notion-personal MCP entry names; it is fed
+  to curl on stdin, never argv. Environment (optional, tests):
+  TICKET_PROVENANCE_CHECK_NOTION_API (a loopback URL),
+  TICKET_PROVENANCE_CHECK_PACE_S (seconds between Notion reads, default 0.34).
+EOF
+
+class Failure < StandardError
+  attr_reader :code
+
+  def initialize(code, line)
+    super(line)
+    @code = code
+  end
+end
+
+def usage!(what, fix)
+  raise Failure.new(2, "#{PROG}: #{what}. Fix: #{fix}")
+end
+
+# ── EFFECTS ──────────────────────────────────────────────────────────────────
+
+module Effects
+  module_function
+
+  def read_lines_file(path)
+    usage!("--lines-file #{path} does not exist", "pass the file `ticket-classify --lines-out FILE` wrote") unless File.file?(path)
+    usage!("--lines-file #{path} is not readable", "check its permissions") unless File.readable?(path)
+    File.read(path, encoding: "UTF-8").scrub
+  end
+
+  def pace
+    value = ENV["TICKET_PROVENANCE_CHECK_PACE_S"].to_s
+    /\A\d{1,2}(\.\d{1,3})?\z/.match?(value) ? value.to_f : 0.34
+  end
+
+  # body_lines(number) -> [ref, the body's lines]. A ticket id matching no
+  # row is usage (a typo must never read as "no line"); a failed read is
+  # exit 3.
+  def body_lines(number)
+    origin, token = NotionRead.credentials(ENV["TICKET_PROVENANCE_CHECK_NOTION_API"])
+    filter = { "property" => "ID", "unique_id" => { "equals" => number } }
+    rows = NotionRead.query_all(origin, token, TICKETS_DATA_SOURCE, pace: pace, filter: filter)
+    hits = rows.select { |r| r.dig("properties", "ID", "unique_id", "number") == number && r.dig("properties", "ID", "unique_id", "prefix") == "DND" }
+    usage!("DND-#{number} matches no ticket in the DND tracker", "pass the id of the ticket you filed") if hits.empty?
+    raise Failure.new(3, "COULD NOT READ NOTION: DND-#{number} matched #{hits.size} rows. Fix: report it; a ticket id is unique") if hits.size > 1
+
+    blocks = NotionRead.children_all(origin, token, hits.first["id"], pace: pace)
+    blocks.filter_map { |b| TriageCorpus.block_text(b) }.flat_map { |t| t.split("\n") }
+  rescue NotionRead::Error => e
+    raise Failure.new(3, "COULD NOT READ NOTION: #{e.message}. Fix: #{e.fix.sub(/\.\z/, '')}; then run #{PROG} again")
+  end
+end
+
+# ── MANAGER ──────────────────────────────────────────────────────────────────
+
+module Manager
+  module_function
+
+  def run(opts, out)
+    expected = begin
+      ProvenanceLines.parse_file(Effects.read_lines_file(opts[:lines_file]))
+    rescue ArgumentError => e
+      usage!("--lines-file #{opts[:lines_file]}: #{e.message}", "pass the file `ticket-classify --lines-out FILE` wrote for this filing; " \
+                                                           "with no line printed there is nothing to check")
+    end
+    body = Effects.body_lines(opts[:number])
+    verdicts = ProvenanceLines.compare(expected, body)
+    verdicts.each_with_index { |(line, verdict), i| out.puts report(opts, line, verdict, i + 1, body) }
+    verdicts.all? { |_, v| v == :verbatim } ? 0 : 4
+  end
+
+  def report(opts, line, verdict, number, body)
+    ref = opts[:ref]
+    name = ProvenanceLines.prefix(line).strip
+    fix = "Fix: append ONE paragraph to #{ref} whose text is exactly line #{number} of #{opts[:lines_file]} " \
+          "(notion-personal API-patch-block-children; copy the file's text, never retype it), then run #{PROG} again"
+    case verdict
+    when :verbatim then "verbatim: #{ref}'s last #{name} line is the one ticket-classify printed"
+    when :missing then "MISSING: #{ref} has no #{name} line. #{fix}"
+    else "NOT VERBATIM: #{ref}'s last #{name} line is not the one ticket-classify printed#{read_as(line, body)}. #{fix}"
+    end
+  end
+
+  # read_as -> how the readers read the body's last classification line
+  # (recovered or unparseable, by reason), for a classification line only.
+  def read_as(line, body)
+    return "" unless line.start_with?(TicketCorpus::PROVENANCE_PREFIX)
+
+    klass = TicketCorpus.line_class(TicketCorpus.provenance({ "blocks_text" => body }))
+    return " (the body's line is well formed but not this one byte for byte: another run, or a re-serialised copy)" if klass == "verbatim"
+
+    " (it reads as #{klass})"
+  end
+end
+
+# ── FRAMEWORK ────────────────────────────────────────────────────────────────
+
+SPEC = { "--help" => :switch, "-h" => :switch, "--ref" => :value, "--lines-file" => :value }.freeze
+
+def parse_options(argv)
+  raw = StrictArgv.parse(argv, SPEC)
+  usage!("--ref is required", "pass the id of the ticket you filed, e.g. DND-1354") if raw["--ref"].nil?
+  usage!("--lines-file is required", "pass the file `ticket-classify --lines-out FILE` wrote") if raw["--lines-file"].nil?
+  m = REF.match(raw["--ref"])
+  usage!("--ref #{raw['--ref']} is not a DND ticket id", "pass an id such as DND-1354 (this checks the DND tracker)") unless m
+  { ref: raw["--ref"], number: m[1].to_i, lines_file: raw["--lines-file"] }
+rescue StrictArgv::UsageError => e
+  usage!(e.message, "run #{PROG} --help for the flags")
+end
+
+def main(argv)
+  if argv.include?("--help") || argv.include?("-h")
+    $stdout.puts USAGE
+    return 0
+  end
+
+  Manager.run(parse_options(argv), $stdout)
+rescue Failure => e
+  $stderr.puts e.message
+  e.code
+rescue StandardError => e
+  $stderr.puts "#{PROG}: UNEXPECTED ERROR: #{e.class}. Fix: report it with the command you ran; nothing was compared"
+  3
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

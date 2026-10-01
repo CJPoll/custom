@@ -64,9 +64,17 @@ USAGE = <<~EOF
            blank_title             a title the server would refuse
            body_unread             the body could not be read
            unparseable_provenance  the LAST "Jev classification:" line is
-                                   broken (never read as absent)
+                                   broken (never read as absent), listed
+                                   again by reason: malformed_json,
+                                   lossy_paraphrase (prose naming a Jev
+                                   judgment whose call is gone) or
+                                   unrecognized_prose (DND-1354)
            locked                  a current value differs from that line's
-                                   value: someone edited it; the edit wins
+                                   value: someone edited it; the edit wins.
+                                   A paraphrase that kept all three values,
+                                   each the filer's, is read for this check
+                                   and then re-judged (never
+                                   already_classified)
            already_classified      that line has the server's model and
                                    versions now, no fault reason, and every
                                    property in mode on or the modes now. No
@@ -79,8 +87,10 @@ USAGE = <<~EOF
          Each answered ticket is one of:
            planned    a decided value differs: write the properties and the
                       provenance line
-           unchanged  no change and some mode on: write the provenance line
-                      (a later hand edit then locks the ticket)
+           unchanged  no change and some mode on, or a paraphrased line to
+                      heal: write the provenance line (a later hand edit
+                      then locks the ticket; the readers can read it). The
+                      healed tickets are listed by shape (healed_refs)
            inert      no change and no mode on: write nothing
          At most #{Reclassify::TICKETS_PER_MINUTE} tickets a minute. A budget or rate reason, an
          account-wide fault (key, credential, custody, price, our own bug,
@@ -256,7 +266,8 @@ module Manager
       scope = all.select { |t| TriageCorpus.number(t["ref"]) >= start }
     end
     state = { now: nil, entries: [], skipped: Hash.new { |h, k| h[k] = [] }, inert: [], asked: 0,
-              stop: nil, cursor: nil, last_call: nil }
+              stop: nil, cursor: nil, last_call: nil,
+              healed: Hash.new { |h, k| h[k] = [] }, unparseable: Hash.new { |h, k| h[k] = [] } }
     scope.each_with_index do |t, i|
       stopped = if opts[:limit] && state[:asked] >= opts[:limit]
                   "--limit #{opts[:limit]} reached"
@@ -347,14 +358,18 @@ module Manager
 
   def skip(state, ticket, reason)
     state[:skipped][reason] << ticket["ref"]
+    state[:unparseable][Reclassify.unparseable_reason(ticket)] << ticket["ref"] if reason == "unparseable_provenance"
     nil
   end
 
   def record(state, ticket, result, now)
     entry = Reclassify.plan_entry(ticket, result)
-    case Reclassify.outcome(entry["changes"], now["modes"])
+    heal = Reclassify.heal(ticket)
+    case Reclassify.outcome(entry["changes"], now["modes"], heal: heal)
     when :inert then state[:inert] << ticket["ref"]
-    else state[:entries] << entry
+    else
+      state[:entries] << entry
+      state[:healed][heal] << ticket["ref"] if heal
     end
   end
 
@@ -370,7 +385,8 @@ module Manager
       "complete" => state[:stop].nil? && Reclassify::INCOMPLETE_REASONS.none? { |r| state[:skipped][r].any? }, "cursor" => state[:cursor], "stopped_because" => state[:stop],
       "now" => state[:now], "counts" => counts,
       "skipped_refs" => Reclassify::SKIP_REASONS.to_h { |r| [r, state[:skipped][r]] }.reject { |r, _| %w[closed feature].include?(r) },
-      "inert_refs" => state[:inert], "entries" => entries }
+      "inert_refs" => state[:inert], "healed_refs" => state[:healed].sort.to_h,
+      "unparseable_reasons" => state[:unparseable].sort.to_h, "entries" => entries }
   end
 
   def describe_now(now)
@@ -397,8 +413,18 @@ module Manager
     lines << "#{PROG} plan: considered #{c['considered']}#{doc['resumed_from'] ? " (resumed from #{doc['resumed_from']})" : ''}, " \
              "asked #{c['asked']}, #{doc['complete'] ? 'complete' : "PARTIAL (cursor #{doc['cursor']}, not reached #{c['not_reached']})"}"
     lines << "skipped: #{skips}"
-    doc["skipped_refs"].each { |r, list| lines << "  #{r}: #{refs(list)}" unless list.empty? }
+    doc["skipped_refs"].each do |r, list|
+      next if list.empty?
+
+      lines << "  #{r}: #{refs(list)}"
+      doc["unparseable_reasons"].each { |why, l| lines << "    #{why}: #{refs(l)}" } if r == "unparseable_provenance"
+    end
     lines << "answered: planned #{c['planned']}, unchanged #{c['unchanged']}, inert #{c['inert']}"
+    healed = doc["healed_refs"]
+    unless healed.empty?
+      lines << "healed paraphrases: #{healed.values.sum(&:size)} (#{healed.map { |shape, l| "#{shape}: #{l.join(', ')}" }.join('; ')}); " \
+               "each entry's provenance_line replaces a paraphrase the readers could not use"
+    end
     lines << "changes: #{c['changes'].empty? ? 'none' : c['changes'].map { |k, v| "#{k}: #{v}" }.join(', ')}"
     lines << "server now: #{describe_now(doc['now'])}"
     lines << if writes.zero?

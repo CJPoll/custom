@@ -37,6 +37,7 @@ require_relative "../../../lib/notion_read"
 require_relative "../lib/athena_server"
 require_relative "../lib/classify"
 require_relative "../lib/blocking"
+require_relative "../lib/provenance_lines"
 
 PROG = "ticket-classify"
 UNAVAILABLE_FIX = "Fix: file the ticket as today; this is advisory."
@@ -48,7 +49,7 @@ EPICS_DATA_SOURCE = "f4231817-18f3-4c2d-ac5b-b1151a5bb020"
 USAGE = <<~EOF
   Usage: ticket-classify --title T --body-file F --project P
                          --kind K --severity S --security X
-                         [--ref DND-N] [--json]
+                         [--ref DND-N] [--json] [--lines-out FILE]
          ticket-classify ... --epic EPIC_PAGE_ID [--found-while DND-N] [--blocks DND-N]
          ticket-classify --help
 
@@ -72,6 +73,14 @@ USAGE = <<~EOF
                      for a new filing. Not with --epic.
     --json           on exit 0, print the classification server's result as
                      JSON instead of lines. Not with --epic.
+    --lines-out FILE also write the Jev lines printed (the "Jev
+                     classification:" line, and with --epic the "Jev path:"
+                     line), byte for byte, one per line, to FILE (0600;
+                     replaced each run). Paste FILE's lines into the ticket
+                     body unchanged, then run ticket-provenance-check --ref
+                     DND-N --lines-file FILE (DND-1354). On exit 3 with no
+                     line printed, FILE is emptied and stderr says so. Not
+                     with --json, and never the --body-file.
 
   For a finding (any Kind but Feature; a Feature's Path is authored). The
   Path part runs after the classification and judges the Kind that is filed:
@@ -129,6 +138,8 @@ USAGE = <<~EOF
 
   Exit codes:
     0  decided (whatever each value's source)
+    1  the decision printed, but --lines-out could not be written: never
+       paste or check that file; re-run with a new path
     2  usage (nothing was sent)
     3  a part is unavailable; file that part with your own values
 
@@ -395,7 +406,7 @@ SPEC = {
   "--help" => :switch, "-h" => :switch, "--title" => :value, "--body-file" => :value,
   "--project" => :value, "--kind" => :value, "--severity" => :value, "--security" => :value,
   "--ref" => :value, "--json" => :switch, "--epic" => :value, "--found-while" => :value,
-  "--blocks" => :value
+  "--blocks" => :value, "--lines-out" => :value
 }.freeze
 
 REQUIRED = [
@@ -420,7 +431,8 @@ def parse_options(argv)
   problem = Classify.filer_error(filer)
   usage!(*problem) if problem
   path = path_options(raw)
-  { title: title, body_file: raw["--body-file"], project: raw["--project"], ref: raw["--ref"], json: raw["--json"] == true, filer: filer }.merge(path)
+  { title: title, body_file: raw["--body-file"], project: raw["--project"], ref: raw["--ref"], json: raw["--json"] == true, filer: filer,
+    lines_out: lines_out_option(raw) }.merge(path)
 rescue StrictArgv::UsageError => e
   usage!(e.message, "run #{PROG} --help for the flags")
 rescue Failure
@@ -429,6 +441,23 @@ rescue StandardError => e
   # Before the filer's values are known there is no fallback to print, so
   # this is a usage failure (exit 2), never an exit 3 without them.
   usage!("could not read the arguments (#{e.class})", "run #{PROG} --help for the flags")
+end
+
+# lines_out_option(raw) -> the --lines-out path, or nil. Checked before
+# anything is sent: the file must be writable, never the body file.
+def lines_out_option(raw)
+  path = raw["--lines-out"]
+  return nil if path.nil?
+
+  usage!("--lines-out with --json", "drop --json; --lines-out writes the lines the plain output prints") if raw["--json"]
+  usage!("--lines-out is the --body-file", "pass a separate file; the draft body must not be overwritten") if File.expand_path(path) == File.expand_path(raw["--body-file"])
+  dir = File.dirname(File.expand_path(path))
+  usage!("--lines-out #{path}: its directory is missing or not writable", "pass a path in a writable directory") unless File.directory?(dir) && File.writable?(dir)
+  usage!("--lines-out #{path} is a directory", "pass a file path") if File.directory?(path)
+  # An existing file that cannot be replaced would keep an older filing's
+  # lines, which the check would then tell the filer to paste.
+  usage!("--lines-out #{path} is not writable", "pass a new path, or make it writable") if File.exist?(path) && !File.writable?(path)
+  path
 end
 
 # path_options(raw) -> {epic:, found_while:, claimed_blocks:}. --found-while
@@ -457,9 +486,10 @@ def main(argv)
   end
 
   opts = nil
-  begin
+  tap = LineTap.new($stdout)
+  code = begin
     opts = parse_options(argv)
-    Manager.run(opts, $stdout, $stderr)
+    Manager.run(opts, tap, $stderr)
   rescue Failure => e
     (e.stream == :stderr ? $stderr : $stdout).puts e.message
     fallback(opts) if e.code == 3
@@ -469,6 +499,44 @@ def main(argv)
     fallback(opts)
     3
   end
+  # A usage exit sent nothing: leave the file alone. A file that could not
+  # be written is exit 1: its content must never be pasted or checked.
+  return code unless opts&.dig(:lines_out) && code != 2
+
+  write_lines_out(opts[:lines_out], ProvenanceLines.select(tap.lines)) ? code : 1
+end
+
+# LineTap -- stdout that also keeps each line printed, for --lines-out.
+class LineTap
+  attr_reader :lines
+
+  def initialize(io)
+    @io = io
+    @lines = []
+  end
+
+  def puts(*args)
+    args.flatten.each { |a| @lines.concat(a.to_s.split("\n")) }
+    @io.puts(*args)
+  end
+end
+
+# write_lines_out(path, lines) -> true after writing the Jev lines (0600),
+# or emptying the file and saying so: a stale line from an earlier run must
+# never be checked against this filing. false (said on stderr) when the
+# file could not be written.
+def write_lines_out(path, lines)
+  File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |f| lines.each { |l| f.puts(l) } }
+  File.chmod(0o600, path)
+  if lines.empty?
+    $stderr.puts "#{PROG}: --lines-out: no Jev line was printed (a part was unavailable); #{path} is now empty. " \
+                 "Fix: paste the unavailable line printed above into the body instead; there is no line to check"
+  end
+  true
+rescue SystemCallError => e
+  $stderr.puts "#{PROG}: --lines-out #{path} could not be written (#{e.class}); never paste or check that file. " \
+               "Fix: re-run with a new --lines-out path; the decision printed above stands"
+  false
 end
 
 # The filer's own values, after an unavailable line: the filer files these.

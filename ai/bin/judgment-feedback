@@ -122,6 +122,13 @@ USAGE = <<~EOF
              edited, unchanged, filer_sourced, policy_sourced, unlinked (a
              line filed before calls existed), no_call, not_accepted,
              no_label, same_label
+           and every ticket with a line once by how its line read
+           (DND-1354; "provenance lines:", named per class below it):
+             verbatim, recovered_<shape> (a paraphrase that kept all three
+             values, each the filer's: abbreviated_json, prose_values; read
+             as filer_sourced), unparseable_<reason> (malformed_json,
+             lossy_paraphrase: it names a Jev judgment whose call is gone,
+             unrecognized_prose)
            and every edited one once by what sending it came to:
              recorded, replaced, already_recorded, refused, not_sent (not
              tried after the sending stopped)
@@ -468,6 +475,7 @@ module Manager
       { "complete" => failure.nil?, "since" => JFS.iso(since), "next_since" => failure ? nil : JFS.iso(JFS.next_since(started)),
         "rows" => rows, "not_a_ticket" => rows - tickets, "tickets" => tally[:tickets], "properties" => tally[:properties],
         "ticket_blocking" => tally[:paths][:counts], "ticket_blocking_named" => tally[:paths][:refs],
+        "provenance_lines" => tally[:lines], "provenance_named" => tally[:line_refs],
         "records" => sent[:counts], "named" => NAMED.to_h { |r| [r, tally[:refs].fetch(r, [])] }.reject { |_, v| v.empty? },
         "refused" => sent[:refused], "failure" => failure }.tap { |v| v["reason"] = reason_of(failure[1]) if failure }
     end
@@ -493,9 +501,11 @@ module Manager
       out.puts "scan-tickets: since #{view['since']}: #{view['rows']} rows edited (#{view['not_a_ticket']} without a DND id)"
       out.puts "tickets: #{line.call(view['tickets'])}"
       out.puts "properties: #{line.call(view['properties'])}"
+      out.puts "provenance lines: #{view['provenance_lines'].empty? ? 'none read' : line.call(view['provenance_lines'])}"
       out.puts "ticket_blocking: #{line.call(view['ticket_blocking'])}"
       out.puts "records: #{line.call(view['records'])}"
       view["named"].each { |reason, refs| out.puts "  #{reason}: #{refs.join(', ')}" }
+      view["provenance_named"].each { |klass, refs| out.puts "  provenance #{klass}: #{refs.join(', ')}" }
       view["ticket_blocking_named"].each { |reason, refs| out.puts "  ticket_blocking #{reason}: #{refs.join(', ')}" }
       view["refused"].each { |r| out.puts "  refused: #{r}" }
       out.puts "complete: next_since #{view['next_since']}" if view["complete"]

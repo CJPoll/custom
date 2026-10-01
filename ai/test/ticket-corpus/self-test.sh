@@ -52,6 +52,9 @@ ex = ->(r, uc) { r[:exclusions][uc].map { |k, v| "#{k} #{v}" }.join(", ") };
 exsum = ->(r, reason) { r[:exclusions].values.sum { |h| h[reason] || 0 } }'
 rb() { /usr/bin/ruby -rjson -r "${LIBRB}" -e "${PRE}; $1" 2>&1; }
 
+echo "== domain: provenance lines (DND-1354, provenance_test.rb)"
+if /usr/bin/ruby "${HERE}/provenance_test.rb"; then ok "provenance_test.rb: paraphrased lines recovered or counted by reason [ticket 1354]"; else bad "provenance_test.rb: paraphrased lines recovered or counted by reason [ticket 1354]" "read its FAIL lines above"; fi
+
 echo "== domain: labels/2"
 
 eq "1 a post-cutoff Bug yields a Kind label, tracker_record [ticket]" \
@@ -223,6 +226,16 @@ eq "s16 an accepted judgment with no judged label is unparseable, never a crash 
 eq "s17 an accepted judgment outside the label set is unparseable [review 3]" \
   "unparseable DND-3" \
   "$(sh 'r = TicketCorpus.shadow_report(snap.([t.(3, POST, "blocks_text"=>[line.("Feature", true)])]), SINCE); puts "unparseable #{r[:unparseable].join(",")}"')"
+
+eq "s18 a recovered paraphrase is a read line, named by shape [ticket 1354]" \
+  "lines 1 recovered prose_values DND-1 unparseable 0" \
+  "$(sh 'r = TicketCorpus.shadow_report(snap.([t.(1, POST, "blocks_text"=>["Jev classification: Kind Bug, Severity MEDIUM, Security none (filer: mode_off)."])]), SINCE); puts "lines #{r[:lines]} recovered #{r[:recovered].map { |k, v| "#{k} #{v.join(",")}" }.join} unparseable #{r[:unparseable].size}"')"
+eq "s19 an unparseable line is named by its reason [ticket 1354]" \
+  "lossy_paraphrase DND-2|malformed_json DND-3" \
+  "$(sh 'r = TicketCorpus.shadow_report(snap.([t.(2, POST, "blocks_text"=>["Jev classification: security none (jev 1.00, mode on, accepted)"]), t.(3, POST, "blocks_text"=>["Jev classification: {\"kind\":{\"val"])]), SINCE); puts r[:unparseable_reasons].map { |k, v| "#{k} #{v.join(",")}" }.join("|")')"
+eq "s20 the printed report names recovered lines and unparseable ones by reason [ticket 1354]" \
+  "recovered paraphrases 1 (DND-1): prose_values 1|unparseable 1 (DND-2): lossy_paraphrase 1" \
+  "$(sh 'r = TicketCorpus.shadow_report(snap.([t.(1, POST, "blocks_text"=>["Jev classification: Kind Bug, Severity MEDIUM, Security none (filer: mode_off)."]), t.(2, POST, "blocks_text"=>["Jev classification: security none (jev 1.00, mode on, accepted)"])]), SINCE); l = TicketCorpus.shadow_lines(r); puts [l.find { |x| x.start_with?("recovered") }, l.find { |x| x.start_with?("unparseable") }].join("|")')"
 
 echo "== bin"
 

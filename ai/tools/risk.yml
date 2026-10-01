@@ -271,6 +271,10 @@ tools:
   # each open ticket to the classification endpoint, which records
   # judgment_calls rows and spends the owner's judgments budget: destructive.
   skills/athena:ticket-management/scripts/ticket-reclassify: { class: destructive, reason: judgments }
+  # ticket-provenance-check (DND-1354) only READS Notion (ai/lib/notion_read.rb
+  # refuses any other request), posts nothing to the Athena server and writes
+  # no file: it compares a filed ticket's Jev lines with a local file.
+  skills/athena:ticket-management/scripts/ticket-provenance-check: { class: readOnly, reason: check }
   # DND-775: the agent PATH git wrapper. It refuses stash-list writes, then
   # execs the real git with argv unchanged, so it can do anything git can.
   agent-bin/git: { class: destructive, reason: git }

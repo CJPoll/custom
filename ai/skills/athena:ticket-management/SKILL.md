@@ -372,10 +372,19 @@ Changing one needs a new question-set version there.
   Feature). On a tracker
   without them, write the values as the body's first line.
 - **Classify.** Write the draft body to a file, then run
-  `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-classify --title "<TITLE>" --body-file <FILE> --project <athena|harness|walt_ui|dnd|lms|admiral> --kind <KIND> --severity <SEVERITY|none> --security <none|introduced|pre-existing>`
-  with the values you would file (`--severity none` only on a Feature). It
-  prints the decided `Kind`, `Severity` and `Security`, each with its source,
-  then a `Jev classification:` line.
+  `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-classify --title "<TITLE>" --body-file <FILE> --project <athena|harness|walt_ui|dnd|lms|admiral> --kind <KIND> --severity <SEVERITY|none> --security <none|introduced|pre-existing> --lines-out <LINES>`
+  with the values you would file (`--severity none` only on a Feature).
+  Namespace `<LINES>` with your unit of work. It prints the decided `Kind`,
+  `Severity` and `Security`, each with its source, then a
+  `Jev classification:` line, and writes the `Jev` lines to `<LINES>`.
+  - **The lines are data, never prose.** Each line of `<LINES>` goes into the
+    body as its own paragraph, copied from the file byte for byte. Never
+    summarize, reformat or retype it: a paraphrase loses the call ids the
+    feedback scan records against (DND-1354).
+  - **Check after filing:**
+    `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-provenance-check --ref DND-N --lines-file <LINES>`.
+    On exit 4, append the paragraph its `Fix:` names and run it again until
+    exit 0. Exit 2 on an empty `<LINES>` means nothing was printed to paste.
   - **Exit 0:** set the three properties exactly as printed, and paste the
     `Jev classification:` line into the body. The one exception: a value
     with source `jev` that you judge wrong. File your own value instead,
@@ -394,7 +403,8 @@ Changing one needs a new question-set version there.
     prints how many candidates it considered, `Path: <value> (<source>)`,
     `Blocks: DND-N` or `Blocks: none`, and a `Jev path:` line. Set `Path`,
     wire `Depends On`↔`Blocks` onto exactly the printed ticket (no edge on
-    `none`), and paste the `Jev path:` line under the classification line.
+    `none`), and paste the `Jev path:` line (also in `<LINES>`) under the
+    classification line, the same way.
     If you judge a `jev` Path or edge wrong, set your own and leave the line
     as it is: `scan-tickets` records it against the line's `call`. Record by
     hand (`judgment-feedback record --call <call> --correct
@@ -451,7 +461,8 @@ proves. `S` is `~/dev/custom/ai/skills/athena:ticket-management/scripts`.
    Give every run its own `--out`, and prove each plan file.
 2. **Nothing to write is a result.** With exit 0 and `writes to apply: 0`,
    stop here and report the counts. That is the state while no ticket use
-   case is `on`.
+   case is `on` and no paraphrased line needs healing (`healed paraphrases:`,
+   DND-1354).
 3. **Apply.** For each plan entry, in order:
    - with `changes`: `API-patch-page` setting only `Kind`, `Severity` and
      `Security` to its `decided` values;

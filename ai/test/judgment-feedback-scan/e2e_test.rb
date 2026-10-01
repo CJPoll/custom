@@ -194,6 +194,30 @@ check("an edit already recorded is counted, not sent again (flags in any order)"
   rc.zero? && out.include?("records: recorded 0, replaced 0, already_recorded 2, refused 1, not_sent 0") && posts(log).size == before + 1
 end
 
+puts "== paraphrased lines are recovered or named by reason (DND-1354)"
+para_rows = [row(7, kind: "Bug", severity: "LOW", security: "none"), row(8, kind: "Bug", severity: "LOW", security: "none"),
+             row(9, kind: "Bug", severity: "LOW", security: "none")]
+para_blocks = {
+  page(7) => [[block("Jev classification: Kind Bug, Severity LOW, Security none (filer: mode_off).")]],
+  page(8) => [[block("Jev classification: security none (jev 1.00, mode on, accepted); kind and severity from the filer (mode_off).")]],
+  page(9) => [[block(line(calls: calls(9)))]]
+}
+_plog, penv = fake("paraphrase", "rows" => para_rows, "blocks" => para_blocks)
+rc, out, err = run(penv, "scan-tickets", "--since", SINCE)
+check("a recovered paraphrase is a read line, a lossy one is unparseable [ticket 1354]", "rc #{rc}; out: #{out}; err: #{err}") do
+  rc.zero? && out.include?("tickets: provenance_unread 0, no_provenance 0, unparseable 1, lines 2")
+end
+check("lines are counted by how they read, and each non-verbatim ticket is named [ticket 1354]", out) do
+  out.include?("provenance lines: recovered_prose_values 1, unparseable_lossy_paraphrase 1, verbatim 1") &&
+    out.include?("  provenance recovered_prose_values: DND-7") && out.include?("  provenance unparseable_lossy_paraphrase: DND-8")
+end
+rc, out, = run(penv, "scan-tickets", "--since", SINCE, "--json")
+check("--json carries the line counts and names [ticket 1354]", out) do
+  v = JSON.parse(out.lines.last)
+  rc.zero? && v["provenance_lines"] == { "recovered_prose_values" => 1, "unparseable_lossy_paraphrase" => 1, "verbatim" => 1 } &&
+    v["provenance_named"] == { "recovered_prose_values" => ["DND-7"], "unparseable_lossy_paraphrase" => ["DND-8"] }
+end
+
 puts "== incomplete scans keep the old --since"
 log2, env2 = fake("unread", "fail_blocks" => [page(4)])
 rc, out, err = run(env2, "scan-tickets", "--since", SINCE)

@@ -120,16 +120,22 @@ module JudgmentFeedbackScan
   # ticket_verdict(ticket) -> {reason:, properties: [[property, verdict]]}.
   # `ticket` is TriageCorpus.ticket_from_row's shape plus body_read and
   # blocks_text. An unread body is never read as "no line".
+  #
+  # `line` (DND-1354) is how the last line read: TicketCorpus.line_class,
+  # "verbatim", "recovered_<shape>" (a paraphrase that kept every value, all
+  # the filer's) or "unparseable_<reason>"; nil when there is no line.
   def ticket_verdict(ticket)
-    return { reason: "provenance_unread", properties: [] } unless ticket["body_read"] == true
+    return { reason: "provenance_unread", properties: [], line: nil } unless ticket["body_read"] == true
 
-    state, doc = TicketCorpus.provenance(ticket)
-    return { reason: "no_provenance", properties: [] } if state == :none
-    return { reason: "unparseable", properties: [] } if state == :unparseable || !values?(doc)
+    prov = TicketCorpus.provenance(ticket)
+    state, doc = prov
+    return { reason: "no_provenance", properties: [], line: nil } if state == :none
+    return { reason: "unparseable", properties: [], line: TicketCorpus.line_class(prov) } if state == :unparseable
+    return { reason: "unparseable", properties: [], line: "unparseable_malformed_json" } unless values?(doc)
 
     calls = TicketCorpus.calls(doc)
     props = PROPERTIES.keys.map { |p| [p, property_verdict(p, ticket[p], doc[p], calls)] }
-    { reason: "lines", properties: props }
+    { reason: "lines", properties: props, line: TicketCorpus.line_class(prov) }
   end
 
   # The scan compares values, so a line whose properties carry no `value`
@@ -192,15 +198,23 @@ module JudgmentFeedbackScan
   end
 
   # tally(verdicts) -> {tickets: {reason => n}, properties: {reason => n},
-  # refs: {reason => [DND refs]}, edits: [[ref, property, call, correction]]}.
-  # Every ticket is counted once and every property of a read line once.
+  # refs: {reason => [DND refs]}, edits: [[ref, property, call, correction]],
+  # lines: {line class => n}, line_refs: {non-verbatim class => [DND refs]}}.
+  # Every ticket is counted once and every property of a read line once;
+  # every ticket with a line once more, by how its line read (DND-1354).
   def tally(verdicts)
     tickets = TICKET_REASONS.to_h { |r| [r, 0] }
     props = PROPERTY_REASONS.to_h { |r| [r, 0] }
     refs = Hash.new { |h, k| h[k] = [] }
+    lines = Hash.new(0)
+    line_refs = Hash.new { |h, k| h[k] = [] }
     edits = []
     verdicts.each do |ref, v|
       tickets[v[:reason]] += 1
+      if v[:line]
+        lines[v[:line]] += 1
+        line_refs[v[:line]] << ref unless v[:line] == "verbatim"
+      end
       refs[v[:reason]] << ref unless v[:reason] == "lines"
       v[:properties].each do |property, verdict|
         props[verdict.first] += 1
@@ -208,7 +222,8 @@ module JudgmentFeedbackScan
         edits << [ref, property, verdict[1], verdict[2]] if verdict.first == "edited"
       end
     end
-    { tickets: tickets, properties: props, refs: refs.transform_values(&:uniq), edits: edits }
+    { tickets: tickets, properties: props, refs: refs.transform_values(&:uniq), edits: edits,
+      lines: lines.sort.to_h, line_refs: line_refs.sort.to_h }
   end
   # ── ticket_blocking (DND-1470) ─────────────────────────────────────────
   #

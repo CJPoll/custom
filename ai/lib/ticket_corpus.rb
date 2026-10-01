@@ -136,18 +136,124 @@ module TicketCorpus
     Array(ticket["blocks_text"]).flat_map { |b| b.to_s.split("\n") }
   end
 
-  # provenance(ticket) -> [:none] | [:ok, Hash] | [:unparseable]. The LAST
-  # line wins: a re-classification appends a newer one.
+  # provenance(ticket) -> [:none] | [:ok, Hash] | [:unparseable, reason].
+  # The LAST line wins: a re-classification appends a newer one.
   def provenance(ticket)
     line = lines(ticket).reverse.find { |l| l.lstrip.start_with?(PROVENANCE_PREFIX) }
     return [:none] if line.nil?
 
+    read_line(line)
+  end
+
+  # ── paraphrased lines (DND-1354) ─────────────────────────────────────────
+  #
+  # Filers pasted paraphrases of the line instead of the line. A paraphrase
+  # that keeps all three values and says each is the filer's loses nothing a
+  # reader needs (a filer value is never feedback and never an accepted
+  # judgment), so it is RECOVERED: the doc is the contract shape with
+  # accepted false and judged null, marked "recovered" => <shape>. Anything
+  # else is UNPARSEABLE with a reason, never read as absent:
+  #   malformed_json      JSON that is neither the contract's shape nor an
+  #                       all-filer abbreviation of it
+  #   lossy_paraphrase    prose naming Jev, a judgment, shadow, a rule or a
+  #                       policy decision: its call, judged label or source
+  #                       is gone
+  #   unrecognized_prose  prose missing a value or the filer attribution, or
+  #                       naming two values for one property
+  # A Feature has no Severity, so its paraphrase is never recovered.
+  UNPARSEABLE_REASONS = %w[malformed_json lossy_paraphrase unrecognized_prose].freeze
+  RECOVERED_SHAPES = %w[abbreviated_json prose_values].freeze
+  # What a property may hold, per property, in the tracker's spelling.
+  TRACKER_VALUES = { "kind" => ALL_KINDS, "severity" => SEVERITIES, "security" => SECURITY.keys }.freeze
+  # A paraphrase naming Jev ("(jev)", "Jev: 0.93", "judged"), a judgment's
+  # outcome ("accepted", "shadow", "mode on"), a rule or a policy decision
+  # lost the part a reader needs: never read as the filer's. Only "jev-"
+  # (the model, "jev-1.13.0") passes. Any other source word is lossy, so the
+  # one source left in a recovered line is the filer.
+  LOSSY = /\bjev\b(?!-)|\bjudged\b|\baccepted\b|\bshadow\b|\bmode\s+on\b|\bpolicy|\brule\b|\bfloor\b|vulnerability_floor|introduced_security/i
+  FILER = /\bfiler\b|\bmode_off\b/i
+  PROSE_VALUE = {
+    "kind" => /\bKind:?\s+(#{Regexp.union(ALL_KINDS).source})\b/,
+    "severity" => /\bSeverity:?\s+(#{Regexp.union(SEVERITIES).source})\b/,
+    "security" => /\bSecurity:?\s+(none|introduced|pre-existing)(?![\w-])/
+  }.freeze
+  FILER_VALUES = %r{\bfiler values\s+(#{Regexp.union(ALL_KINDS).source})\s*/\s*(#{Regexp.union(SEVERITIES).source})\s*/\s*(none|introduced|pre-existing)(?![\w-])}
+
+  # read_line(line) -> [:ok, doc] | [:unparseable, reason], for one line
+  # that starts with the prefix.
+  def read_line(line)
+    text = line.lstrip.delete_prefix(PROVENANCE_PREFIX).strip
+    return read_json(text) if text.start_with?("{")
+
+    read_prose(text)
+  end
+
+  def read_json(text)
     doc = begin
-      JSON.parse(line.lstrip.delete_prefix(PROVENANCE_PREFIX))
+      JSON.parse(text)
     rescue JSON::ParserError
       nil
     end
-    valid_provenance?(doc) ? [:ok, doc] : [:unparseable]
+    return [:ok, doc] if valid_provenance?(doc)
+
+    filer = abbreviated_filer(doc)
+    filer ? [:ok, recovered(filer, "abbreviated_json", doc.slice("model", "versions"))] : [:unparseable, "malformed_json"]
+  end
+
+  # abbreviated_filer(doc) -> {property => value} when every property is a
+  # filer value in the tracker's set with no judgment behind it (no
+  # accepted, no judged label, mode off or absent, no call id), else nil. A
+  # shadow or on mode, or a call that answered, means Jev judged: never
+  # recovered as the filer's.
+  def abbreviated_filer(doc)
+    return nil unless doc.is_a?(Hash) && valid_calls?(doc)
+    return nil if doc["calls"].is_a?(Hash) && doc["calls"].values.any?
+
+    PROPERTY.values.to_h do |key|
+      p = doc[key]
+      return nil unless p.is_a?(Hash) && p["source"] == "filer" && TRACKER_VALUES.fetch(key).include?(p["value"])
+      return nil unless [nil, false].include?(p["accepted"]) && p["judged"].nil? && [nil, "off"].include?(p["mode"])
+
+      [key, p["value"]]
+    end
+  end
+
+  def read_prose(text)
+    return [:unparseable, "lossy_paraphrase"] if LOSSY.match?(text)
+    return [:unparseable, "unrecognized_prose"] unless FILER.match?(text)
+
+    values = prose_values(text)
+    values ? [:ok, recovered(values, "prose_values", {})] : [:unparseable, "unrecognized_prose"]
+  end
+
+  # prose_values(text) -> {property => value} when the text names all three,
+  # either labelled ("Kind Bug, Severity LOW, Security none") or as
+  # "filer values Bug / LOW / none"; else nil.
+  def prose_values(text)
+    m = FILER_VALUES.match(text)
+    return { "kind" => m[1], "severity" => m[2], "security" => m[3] } if m
+
+    # Every mention, not the first: two different values for one property
+    # are not a reading.
+    found = PROSE_VALUE.transform_values { |re| text.scan(re).flatten.uniq }
+    found.values.all? { |v| v.size == 1 } ? found.transform_values(&:first) : nil
+  end
+
+  def recovered(values, shape, extra)
+    doc = values.to_h do |key, value|
+      [key, { "value" => value, "source" => "filer", "accepted" => false, "judged" => nil, "mode" => nil, "reason" => nil }]
+    end
+    doc.merge(extra).merge("recovered" => shape)
+  end
+
+  # line_class(provenance) -> "none" | "verbatim" | "recovered_<shape>" |
+  # "unparseable_<reason>": how each reader counts a ticket's last line.
+  def line_class(prov)
+    case prov.first
+    when :none then "none"
+    when :unparseable then "unparseable_#{prov[1]}"
+    else prov[1].key?("recovered") ? "recovered_#{prov[1]['recovered']}" : "verbatim"
+    end
   end
 
   # An accepted judgment must name a label of its property: an accepted
@@ -322,6 +428,7 @@ module TicketCorpus
     tickets = tickets!(snapshot).select { |t| time(t["created_time"], "#{t['ref']} created_time") >= from }.sort_by { |t| [number(t["ref"]), t["ref"].to_s] }
     report = { since: since, fetched_at: snapshot["fetched_at"], window_days: ((fetched - from) / 86_400.0).round(1),
                filings: tickets.size, lines: 0, no_provenance: [], unparseable: [], body_unread: [], provenance_unread: [],
+               recovered: Hash.new { |h, k| h[k] = [] }, unparseable_reasons: Hash.new { |h, k| h[k] = [] },
                use_cases: USE_CASES.to_h { |uc| [uc, { accepted: 0, agreed: 0, excluded: Hash.new(0), by_label: Hash.new { |h, k| h[k] = { accepted: 0, agreed: 0 } } }] } }
     tickets.each do |t|
       next report[:body_unread] << t["ref"] unless t["body_read"] == true
@@ -331,12 +438,17 @@ module TicketCorpus
       state, doc = provenance(t)
       case state
       when :none then report[:no_provenance] << t["ref"]
-      when :unparseable then report[:unparseable] << t["ref"]
+      when :unparseable
+        report[:unparseable] << t["ref"]
+        report[:unparseable_reasons][doc] << t["ref"]
       else
         report[:lines] += 1
+        report[:recovered][doc["recovered"]] << t["ref"] if doc.key?("recovered")
         USE_CASES.each { |uc| tally(report[:use_cases][uc], uc, t, doc[PROPERTY[uc]]) }
       end
     end
+    report[:recovered] = report[:recovered].sort.to_h
+    report[:unparseable_reasons] = report[:unparseable_reasons].sort.to_h
     report[:use_cases].each_value do |u|
       u[:lb] = wilson_lower_bound(u[:agreed], u[:accepted])
       u[:excluded] = u[:excluded].sort.to_h
@@ -378,10 +490,18 @@ module TicketCorpus
 
   def names(refs) = refs.empty? ? "0" : "#{refs.size} (#{refs.join(', ')})"
 
+  # by_reason(refs, groups) -> "N (refs)", then ": reason n, ..." when any.
+  def by_reason(refs, groups)
+    detail = groups.map { |k, v| "#{k} #{v.size}" }.join(", ")
+    detail.empty? ? names(refs) : "#{names(refs)}: #{detail}"
+  end
+
   # shadow_lines(report) -> the printed report.
   def shadow_lines(report)
     out = ["since #{report[:since]} to #{report[:fetched_at]} (#{report[:window_days]} days): filings #{report[:filings]}, provenance lines #{report[:lines]}",
-           "no_provenance #{names(report[:no_provenance])}", "unparseable #{names(report[:unparseable])}",
+           "no_provenance #{names(report[:no_provenance])}",
+           "recovered paraphrases #{by_reason(report[:recovered].values.flatten.sort_by { |r| [number(r), r] }, report[:recovered])}",
+           "unparseable #{by_reason(report[:unparseable], report[:unparseable_reasons])}",
            "body_unread #{names(report[:body_unread])}", "provenance_unread (body truncated) #{names(report[:provenance_unread])}"]
     USE_CASES.each do |uc|
       u = report[:use_cases][uc]

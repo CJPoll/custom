@@ -66,6 +66,24 @@ check("every mode off: no entries, every answered ticket inert, reported with co
     out.include?("server now: model jev-1.13.0") && out.include?("modes kind off, severity off, security off")
 end
 
+check("every mode off: a paraphrased line is re-judged and its verbatim line planned (healed) [ticket 1354]") do
+  server = FakeServer.new { |b| [filer_of(b), "off"] }
+  prose = "Jev classification: Kind Bug, Severity MEDIUM, Security none (filer: mode_off)."
+  code, out, doc = run_plan(FakeNotion.new([ticket(number: 1), ticket(number: 2, lines: ["Body.", prose])]), server, "#{TMP}/p3h.json")
+  e = doc["entries"].first
+  code.zero? && doc["entries"].size == 1 && e["ref"] == "DND-2" && e["changes"] == [] && e["provenance_line"] == line(VALUES, "off") &&
+    doc["counts"]["unchanged"] == 1 && doc["counts"]["inert"] == 1 && doc["healed_refs"] == { "prose_values" => ["DND-2"] } &&
+    out.include?("healed paraphrases: 1 (prose_values: DND-2)") && out.include?("writes to apply: 1 tickets")
+end
+
+check("a lossy paraphrase is skipped and named by its reason, never asked [ticket 1354]") do
+  server = FakeServer.new { |b| [filer_of(b), "off"] }
+  lossy = "Jev classification: security none (jev 1.00, mode on, accepted); kind and severity from the filer (mode_off)."
+  code, out, doc = run_plan(FakeNotion.new([ticket(number: 3, lines: [lossy])]), server, "#{TMP}/p3l.json")
+  code.zero? && server.bodies.empty? && doc["counts"]["skipped"]["unparseable_provenance"] == 1 &&
+    doc["unparseable_reasons"] == { "lossy_paraphrase" => ["DND-3"] } && out.include?("    lossy_paraphrase: 1 (DND-3)")
+end
+
 check("a policy change with every mode off is still planned (the Vulnerability floor)") do
   server = FakeServer.new { |b| [filer_of(b).merge("security" => "pre-existing"), "off"] }
   _, _, doc = run_plan(FakeNotion.new([ticket(kind: "Vulnerability")]), server, "#{TMP}/p3c.json")
