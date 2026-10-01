@@ -138,6 +138,10 @@ tools:
   # lane-lock (DND-261) takes and drops a machine-local flock(2) on a lane lock
   # file under $XDG_STATE_HOME, through a holder process of this user. Local only.
   lane-lock:               { class: idempotent, reason: lock }
+  # telemetry-emit (DND-1473) appends to, prunes and summarizes the machine-local
+  # telemetry store under $XDG_STATE_HOME/athena/telemetry. Local state only: no
+  # repo, forge, tracker or remote; --prune removes only its own expired day files.
+  telemetry-emit:          { class: idempotent, reason: telemetry }
 
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }

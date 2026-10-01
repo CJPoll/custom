@@ -1,0 +1,242 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# telemetry-emit -- the CLI over ai/lib/athena_telemetry.rb, the one telemetry
+# writer (DND-1473). Normative home: ai/contracts/athena-telemetry.md.
+#
+# FRAMEWORK only: argv, output and exit codes. Every rule lives in the
+# library, so a shell emitter and a Ruby emitter write the same line.
+#
+# A shell emitter runs it outside any measured check, bounded and fail-open:
+#   timeout 2 ai/bin/telemetry-emit --event NAME ... || true
+
+require_relative "../lib/strict_argv"
+
+PROG = "telemetry-emit"
+
+USAGE = <<~EOF
+  Usage: telemetry-emit --event NAME [--at ISO|now] [--duration S] [--head SHA]
+                        [--unit U] [--attr KEY=VALUE]...
+         telemetry-emit --prune [--retain-days N]
+         telemetry-emit --stats [--since ISO] [--until ISO]
+         telemetry-emit --self-test
+         telemetry-emit --help
+
+  Append one on-system telemetry event, prune old day files, or summarize the
+  store. The schema, the registry (ai/telemetry/events.json) and the rules are
+  in ai/contracts/athena-telemetry.md. Local files only; no network.
+
+  --event NAME   emit one event. NAME must be registered. Always exits 0 once
+                 the command line parses: a write that fails, or an event or
+                 attr the registry refuses, is counted in write-failures and
+                 never changes the exit code.
+      --at ISO|now    the start, ISO 8601 with a zone (default now)
+      --duration S    seconds; leave out for a point event
+      --head SHA      40-hex sha (default the current repo's HEAD)
+      --unit U        the unit of work (default ATHENA_UNIT, then the ticket
+                      the branch names, then the branch name)
+      --attr K=V      a registered attr; repeat per attr. The value is
+                      converted to the registered type (int, float, bool,
+                      sha, label).
+  --prune        remove day files older than N days (--retain-days N, else
+                 ATHENA_TELEMETRY_RETAIN_DAYS, else 30). Touches no other file.
+                 Prints "pruned N" and exits 0; exit 1 with Fix: when the
+                 store cannot be read or a file cannot be removed.
+  --stats        events per day and per event, the latest line, and the
+                 write-failures counter. Exit 0 when the store was read (with
+                 or without events); exit 3, "COULD NOT LOOK", when there is no
+                 store or part of it cannot be read.
+      --since ISO / --until ISO   bound the event's `at` (until exclusive)
+  --self-test    run the library suite (ai/test/telemetry/telemetry_test.rb)
+  --help         this text (stdout, exit 0, no write)
+
+  Exit codes: 0 ok; 1 prune failed; 2 usage; 3 --stats could not look.
+
+  Store: ${XDG_STATE_HOME:-$HOME/.local/state}/athena/telemetry/<UTC date>.jsonl
+  (0700 directory, 0600 files). Test seams: ATHENA_TELEMETRY_DIR,
+  ATHENA_TELEMETRY_NOW, ATHENA_TELEMETRY_DAY_CAP_BYTES.
+EOF
+
+USAGE_FIX = "run `telemetry-emit --help` for the forms"
+
+def usage_error(what, fix = USAGE_FIX)
+  warn "#{PROG}: #{what}. Fix: #{fix}"
+  exit 2
+end
+
+MODES = %w[--event --prune --stats --self-test].freeze
+SPEC = {
+  "--event" => :value, "--at" => :value, "--duration" => :value, "--head" => :value, "--unit" => :value,
+  "--prune" => :switch, "--retain-days" => :value,
+  "--stats" => :switch, "--since" => :value, "--until" => :value,
+  "--self-test" => :switch,
+}.freeze
+MODE_FLAGS = {
+  "--event" => %w[--event --at --duration --head --unit],
+  "--prune" => %w[--prune --retain-days],
+  "--stats" => %w[--stats --since --until],
+  "--self-test" => %w[--self-test],
+}.freeze
+
+# --attr repeats, so it is taken out before StrictArgv, which refuses a
+# repeated flag. -> [opts, attrs].
+def parse_argv(argv)
+  rest = []
+  attrs = {}
+  i = 0
+  while i < argv.length
+    if argv[i] == "--attr"
+      pair = argv[i + 1]
+      usage_error("--attr needs KEY=VALUE") if pair.nil? || pair.start_with?("-")
+      key, eq, value = pair.partition("=")
+      usage_error("--attr #{pair.inspect} is not KEY=VALUE", "pass --attr key=value, e.g. --attr jobs=8") if eq.empty? || key.empty?
+      attrs[key] = value
+      i += 2
+    else
+      rest << argv[i]
+      i += 1
+    end
+  end
+  [StrictArgv.parse(rest, SPEC), attrs]
+rescue StrictArgv::UsageError => e
+  usage_error(e.message)
+end
+
+def mode_of(opts, attrs)
+  modes = MODES.select { |m| opts.key?(m) }
+  usage_error("give one of #{MODES.join(', ')}") if modes.empty?
+  usage_error("#{modes.join(' and ')} cannot be combined") if modes.size > 1
+  mode = modes.first
+  stray = opts.keys - MODE_FLAGS[mode]
+  stray << "--attr" if !attrs.empty? && mode != "--event"
+  usage_error("#{stray.join(', ')} does not apply to #{mode}") unless stray.empty?
+  mode
+end
+
+def time_arg(flag, raw)
+  Time.iso8601(raw)
+rescue ArgumentError
+  usage_error("#{flag} #{raw.inspect} is not an ISO 8601 time with a zone", "e.g. #{flag} 2026-10-01T05:00:00Z")
+end
+
+def emit(opts, attrs)
+  at = opts["--at"]
+  at = nil if at == "now"
+  at &&= (Time.iso8601(at) rescue at) # an unparseable time is counted as at_invalid by the library
+  duration = opts["--duration"]
+  duration &&= (Float(duration) rescue duration) # counted as duration_invalid
+  name = opts["--event"]
+  typed = (AthenaTelemetry.registry.coerce(name, attrs) rescue attrs)
+  AthenaTelemetry.emit(name, at: at, duration_s: duration, unit: opts["--unit"], head: opts["--head"], attrs: typed)
+  0
+end
+
+def retain_days(opts)
+  raw = opts["--retain-days"]
+  source = "--retain-days"
+  if raw.nil?
+    raw = ENV["ATHENA_TELEMETRY_RETAIN_DAYS"]
+    source = "ATHENA_TELEMETRY_RETAIN_DAYS"
+  end
+  return AthenaTelemetry::DEFAULT_RETAIN_DAYS if raw.nil? || raw.empty?
+  usage_error("#{source} #{raw.inspect} is not a positive whole number of days", "pass e.g. #{source == '--retain-days' ? '--retain-days 30' : 'ATHENA_TELEMETRY_RETAIN_DAYS=30'}") unless raw.match?(/\A[1-9]\d*\z/)
+
+  Integer(raw, 10)
+end
+
+def prune(opts)
+  days = retain_days(opts)
+  result = begin
+    AthenaTelemetry.prune(days: days)
+  rescue ArgumentError => e
+    warn "#{PROG}: PRUNE FAILED: #{e.message}. Fix: set HOME (or XDG_STATE_HOME) to an absolute path; seams must be well-formed (ai/contracts/athena-telemetry.md -> Store)."
+    return 1
+  end
+  case result.status
+  when :ok
+    puts "pruned #{result.removed.size} day file(s) older than #{days} days from #{result.dir}#{result.removed.empty? ? '' : ": #{result.removed.join(' ')}"}"
+    0
+  when :no_store
+    puts "pruned 0: no telemetry store at #{result.dir} (nothing has been written on this machine)"
+    0
+  else
+    warn "#{PROG}: PRUNE FAILED: #{result.reason}#{result.removed.empty? ? '' : " after removing #{result.removed.join(' ')}"}. " \
+         "Fix: make #{result.dir} a readable, writable 0700 directory of this user, then run --prune again."
+    1
+  end
+end
+
+def failures_line(result)
+  return "write-failures: could not read (#{result.failures_reason})" if result.failures.nil?
+  return "write-failures: none" if result.failures.empty?
+
+  "write-failures: #{result.failures.sort.map { |k, v| "#{k}=#{v}" }.join(' ')}"
+end
+
+def stats(opts)
+  since = opts["--since"] && time_arg("--since", opts["--since"])
+  until_t = opts["--until"] && time_arg("--until", opts["--until"])
+  result = begin
+    AthenaTelemetry.read(since: since, until: until_t)
+  rescue ArgumentError => e
+    warn "#{PROG}: COULD NOT LOOK: #{e.message}. Fix: set HOME (or XDG_STATE_HOME) to an absolute path."
+    return 3
+  end
+  if result.status == :no_store
+    warn "#{PROG}: COULD NOT LOOK: #{result.reason}. This is not an empty store. Fix: nothing has emitted on this " \
+         "machine yet, or HOME / XDG_STATE_HOME / ATHENA_TELEMETRY_DIR points somewhere else; emit one with " \
+         "`telemetry-emit --event telemetry.probe` to create the store."
+    return 3
+  end
+  range = [since && "since #{since.utc.iso8601}", until_t && "until #{until_t.utc.iso8601}"].compact.join(" ")
+  puts "telemetry store: #{result.dir}"
+  if result.status == :ok_empty
+    puts "status: ok_empty -- 0 events#{range.empty? ? '' : " #{range}"} (the store exists; nothing is recorded there)"
+  else
+    puts "status: ok -- #{result.events.size} event(s)#{range.empty? ? '' : " #{range}"}"
+    result.events.group_by { |e| e["at"][0, 10] }.sort.each { |day, evs| puts "  day #{day}: #{evs.size}" }
+    result.events.group_by { |e| e["event"] }.sort.each { |name, evs| puts "  event #{name}: #{evs.size}" }
+    puts "latest: #{JSON.generate(result.events.last)}"
+  end
+  puts failures_line(result)
+  puts "malformed lines: #{result.malformed}"
+  return 0 if result.unreadable.empty?
+
+  warn "#{PROG}: COULD NOT LOOK at #{result.unreadable.join(', ')} in #{result.dir}; the counts above leave them out. " \
+       "Fix: make those files readable (0600, owned by this user)."
+  3
+end
+
+def self_test
+  suite = File.expand_path("../test/telemetry/telemetry_test.rb", __dir__)
+  unless File.file?(suite)
+    warn "#{PROG}: SELF-TEST MISSING: #{suite}. Fix: restore ai/test/telemetry/telemetry_test.rb from git."
+    return 1
+  end
+  ok = system("/usr/bin/ruby", suite)
+  warn "#{PROG}: SELF-TEST FAILED. Fix: read the FAIL lines above and repair ai/lib/athena_telemetry.rb." unless ok
+  ok ? 0 : 1
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.include?("--help") || ARGV.include?("-h")
+    puts USAGE
+    exit 0
+  end
+  opts, attrs = parse_argv(ARGV)
+  mode = mode_of(opts, attrs)
+  require "json"
+  require "time"
+  require_relative "../lib/athena_telemetry"
+  code = case mode
+         when "--event" then begin
+           emit(opts, attrs)
+         rescue StandardError
+           0 # fails open: the library already counted what it could
+         end
+         when "--prune" then prune(opts)
+         when "--stats" then stats(opts)
+         else self_test
+         end
+  exit code
+end

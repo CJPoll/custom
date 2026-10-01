@@ -1,0 +1,91 @@
+{
+  "v": 1,
+  "events": {
+    "harness_gate.run": {
+      "description": "One harness-gate run, at the end of every exit path that ran checks. at = run start, duration_s = run wall, head = the gated HEAD. Emitter: DND-1474.",
+      "attrs": {
+        "run_id": "label",
+        "jobs": "int",
+        "checks": "int",
+        "failed": "int",
+        "ok": "bool",
+        "interrupted": "bool"
+      }
+    },
+    "harness_gate.check": {
+      "description": "One finished check inside a harness-gate run. at = check start, duration_s = its wall_s. Emitter: DND-1474.",
+      "attrs": {
+        "run_id": "label",
+        "label": "label",
+        "cpu_s": "float",
+        "ok": "bool"
+      }
+    },
+    "test_slot.wait": {
+      "description": "test-slot's queue wait, after the slot is acquired or the wait times out and before CMD runs. at = wait start, duration_s = the wait. Emitter: DND-1474.",
+      "attrs": {
+        "pool": "label",
+        "weight": "int",
+        "outcome": "label",
+        "slot_label": "label"
+      }
+    },
+    "critic.round": {
+      "description": "One critic-review round, when its verdict receipt is written. at = started_at, duration_s = the receipt's duration_s, head = the judged sha. Emitter: DND-1474.",
+      "attrs": {
+        "verdict": "label",
+        "findings": "int",
+        "carried": "bool",
+        "dirty": "bool"
+      }
+    },
+    "integration_gate.run": {
+      "description": "Exactly one per integration-gate invocation, on every exit path. at = start, duration_s = wall, head = the head it judged. Emitter: DND-1475.",
+      "attrs": {
+        "exit_code": "int",
+        "outcome": "label",
+        "base": "sha",
+        "rebased": "bool",
+        "with_critic": "bool"
+      }
+    },
+    "merge.lock_wait": {
+      "description": "Time blocked waiting for a merge lock (flock -w). duration_s = the wait. Emitter: DND-1475.",
+      "attrs": {
+        "lock": "label",
+        "outcome": "label"
+      }
+    },
+    "merge.landed": {
+      "description": "A landing on the default branch: a confirmed PR merge (via=pr) or a push that updated refs/heads/main (via=push). Emitter: DND-1475.",
+      "attrs": {
+        "via": "label",
+        "pr": "int",
+        "before": "sha",
+        "after": "sha"
+      }
+    },
+    "ticket.dispatched": {
+      "description": "A ticket moved to In Progress by mark-in-progress, after a successful status write. unit = the ticket ref. Emitter: DND-1476.",
+      "attrs": {
+        "tracker": "label",
+        "first_dispatch": "bool",
+        "backfill": "bool"
+      }
+    },
+    "mission.status": {
+      "description": "A Mission status reported by fleet-report admiral-scope, written locally before the POST. unit = the mission's ticket ref. Emitter: DND-1476.",
+      "attrs": {
+        "status": "label",
+        "captain_state": "label",
+        "run_id": "label"
+      }
+    },
+    "telemetry.probe": {
+      "description": "A by-hand or test probe of the writer itself (telemetry-emit --event telemetry.probe). Never a phase anchor: readers that compute phases ignore it.",
+      "attrs": {
+        "note": "label"
+      }
+    }
+  }
+}

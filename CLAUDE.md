@@ -77,7 +77,8 @@ Contains AI-related resources:
   `athena-events.md`, the Athena event platform — the deterministic
   notification/event-handling substrate `apps/athena` implements, of which the
   inbox is one delivery adapter; and `athena-judgments.md`, the advisory
-  model judgments that deterministic policy may consume). A project opts
+  model judgments that deterministic policy may consume; and
+  `athena-telemetry.md`, the on-system telemetry schema, writer and store). A project opts
   into the inbox through a machine-local registry entry under
   `$ATHENA_INBOX_ROOT/projects/` (default `~/.local/share/athena`), keyed by the
   realpath of the repo's git common dir — **never** a file committed to the
