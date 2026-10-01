@@ -1924,6 +1924,96 @@ check G11-rc-elsewhere eq "$?" 0
 check G11-rc-harness eq "$?" 0
 check G11-none eq "$(gate_events "$W/tel-g11b" | wc -l)" 0
 
+# ------------------------------------------- deleted output file (DND-1621)
+# A caller redirects test-slot's stdout and stderr to a log, and something
+# deletes that log while CMD runs (2026-10-01: a reviewer subagent's
+# `rm -f scratchpad/dnd-1601-*`). CMD keeps writing into the unlinked inode,
+# the caller's `echo exit=$? >> log` creates a NEW file, and the log reads
+# `exit=0` with no gate output. CMD deletes its own log here, so the case
+# needs no timing. Each case runs `test-slot ... > log 2>&1; echo exit >> log`,
+# the incident's command shape.
+L_CMD='printf "before-rm\n"; printf "err-before\n" >&2; rm -f "$1"; [ -z "${2:-}" ] || printf "%s\n" "$2" >"$1"; printf "after-rm VERDICT: PASS\n"; exit "${3:-0}"'
+lrun() { # lrun LOG [REPLACEMENT [EXIT]] — the incident's shape; rc -> $RC
+  fg_capped "$BIN" --label L -- bash -c "$L_CMD" _ "$@" >"$1" 2>&1
+  RC=$?
+  echo "exit=$RC" >>"$1"
+}
+
+# L1: the incident. The log is restored at its own path, whole, in order,
+# with test-slot's named notice (and its Fix:) before the caller's exit line.
+newpool pL1 2
+mkdir -p "$W/L1"
+lrun "$W/L1/gate.log"
+check L1-rc eq "$RC" 0
+check L1-before has "$W/L1/gate.log" "before-rm"
+check L1-stderr has "$W/L1/gate.log" "err-before"
+check L1-after has "$W/L1/gate.log" "after-rm VERDICT: PASS"
+check L1-named has "$W/L1/gate.log" "test-slot: OUTPUT FILE DELETED"
+check L1-fix has "$W/L1/gate.log" "Fix: "
+check L1-exit-last eq "$(tail -n 1 "$W/L1/gate.log")" "exit=0"
+check L1-order eq "$(grep -c -e before-rm -e after-rm "$W/L1/gate.log")" 2
+check L1-one-file eq "$(find "$W/L1" -type f | wc -l)" 1
+
+# L2: CMD's own exit code is never changed by the restore.
+newpool pL2 2
+mkdir -p "$W/L2"
+lrun "$W/L2/gate.log" "" 3
+check L2-rc eq "$RC" 3
+check L2-after has "$W/L2/gate.log" "after-rm VERDICT: PASS"
+check L2-exit-last eq "$(tail -n 1 "$W/L2/gate.log")" "exit=3"
+
+# L3: another writer re-created the path before CMD ended. Its file is never
+# clobbered; the output goes to a named sibling, and the notice says where.
+newpool pL3 2
+mkdir -p "$W/L3"
+lrun "$W/L3/gate.log" "someone-else"
+check L3-rc eq "$RC" 0
+check L3-untouched eq "$(head -n 1 "$W/L3/gate.log")" "someone-else"
+L3_SIB=$(find "$W/L3" -name 'gate.log.test-slot-restored.*' -type f | head -n 1)
+check L3-sibling present "${L3_SIB:-$W/L3/none}"
+check L3-sibling-whole has "${L3_SIB:-$W/L3/none}" "after-rm VERDICT: PASS"
+check L3-sibling-named has "${L3_SIB:-$W/L3/none}" "test-slot: OUTPUT FILE DELETED"
+
+# L4: stdout and stderr to two different files, both deleted: each restored.
+newpool pL4 2
+mkdir -p "$W/L4"
+fg_capped "$BIN" -- bash -c 'printf "out-line\n"; printf "err-line\n" >&2; rm -f "$1" "$2"' _ "$W/L4/out.log" "$W/L4/err.log" \
+  >"$W/L4/out.log" 2>"$W/L4/err.log"
+check L4-rc eq "$?" 0
+check L4-out has "$W/L4/out.log" "out-line"
+check L4-err has "$W/L4/err.log" "err-line"
+check L4-out-named has "$W/L4/out.log" "test-slot: OUTPUT FILE DELETED"
+check L4-err-named has "$W/L4/err.log" "test-slot: OUTPUT FILE DELETED"
+
+# L5: the directory itself is gone, so neither the path nor a sibling can be
+# written: the output lands in the pool's lost-output/ and stays findable.
+newpool pL5 2
+mkdir -p "$W/L5"
+fg_capped "$BIN" -- bash -c 'printf "keep-me\n"; rm -rf "$1"' _ "$W/L5" >"$W/L5/gate.log" 2>&1
+check L5-rc eq "$?" 0
+L5_LOST=$(find "$POOL/lost-output" -type f -name '*.log' 2>/dev/null | head -n 1)
+check L5-lost present "${L5_LOST:-$POOL/none}"
+check L5-lost-whole has "${L5_LOST:-$POOL/none}" "keep-me"
+check L5-lost-named has "${L5_LOST:-$POOL/none}" "test-slot: OUTPUT FILE DELETED"
+
+# L6: no deletion, no change: the log is CMD's output and the exit line only.
+newpool pL6 2
+mkdir -p "$W/L6"
+fg_capped "$BIN" -- bash -c 'printf "plain\n"' >"$W/L6/gate.log" 2>&1
+echo "exit=$?" >>"$W/L6/gate.log"
+check L6-exact eq "$(cat "$W/L6/gate.log")" "$(printf 'plain\nexit=0')"
+check L6-one-file eq "$(find "$W/L6" -type f | wc -l)" 1
+
+# L7: a nested (re-entrant) test-slot shares the outer run's log. Only the
+# outermost run restores it, so the output is restored once, not twice.
+newpool pL7 2
+mkdir -p "$W/L7"
+fg_capped "$BIN" -- "$BIN" -- bash -c 'printf "nested-out\n"; rm -f "$1"' _ "$W/L7/gate.log" >"$W/L7/gate.log" 2>&1
+check L7-rc eq "$?" 0
+check L7-restored has "$W/L7/gate.log" "nested-out"
+check L7-once eq "$(grep -c 'test-slot: OUTPUT FILE DELETED' "$W/L7/gate.log")" 1
+check L7-no-sibling eq "$(find "$W/L7" -type f | wc -l)" 1
+
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then
   echo "test-slot: self-test OK ($PASS checks)"

@@ -66,6 +66,20 @@
 # Nothing is skipped, filtered, or loosened. Its own
 # messages go to stderr, prefixed `test-slot:`.
 #
+# A DELETED OUTPUT FILE IS RESTORED, AND NAMED (DND-1621). On 2026-10-01 a
+# captain ran `test-slot -- integration-gate ... > LOG 2>&1; echo exit=$? >>
+# LOG`, and its own reviewer subagent ran `rm -f <scratchpad>/dnd-1601-*`
+# mid-gate. The gate wrote on into the unlinked inode, the `>>` made a new
+# file, and the log read `exit=0` with no gate output. So after CMD exits, the
+# outermost run checks its own stdout and stderr: a regular file with no links
+# left is copied back to its path, else PATH.test-slot-restored.<pid> (another
+# writer's file is never overwritten), else <pool>/lost-output/, and the copy
+# ends with a `test-slot: OUTPUT FILE DELETED` line naming where it went, with
+# a Fix:. The same line goes to stderr. CMD's exit code is unchanged.
+# Residuals: a log overwritten or truncated in place (not deleted) is not
+# detected; output CMD's daemonized descendants write after CMD exits is not
+# in the copy; a run outside test-slot gets none of this.
+#
 # TELEMETRY (ai/contracts/athena-telemetry.md). Every run that waited writes
 # one test_slot.wait before CMD (DND-1474). A run whose COMMAND is the repo's
 # declared gate (ai/lib/integration-receipt.sh IR_DECLARED_GATES, the one
@@ -228,6 +242,9 @@
 #                        an `acquired` whose CMD then never started, and no
 #                        `released` follows it); rotated to
 #                        events.jsonl.1 past 1 MiB (one generation kept)
+#     lost-output/       (0700, DND-1621) a deleted stdout/stderr file's copy
+#                        when neither its path nor a sibling could be written:
+#                        <utc>-<pid>-<name>.log; created only then
 #   --exclusive: BENCH ONLY. Holds the whole cpu budget before CMD runs
 #     (DND-489's bench quiesces the fleet with it). No gate, eval or critic
 #     path takes it: it is the one machine-wide mutex, and the self-test
@@ -1763,6 +1780,59 @@ run_cmd() {
   return "$rc"
 }
 
+# restore_copy SRC PATH — copy SRC (a deleted file, read through its
+# /proc/<pid>/fd link) to the first of PATH, PATH.test-slot-restored.<pid>, or
+# <pool>/lost-output/<utc>-<pid>-<name> that does not exist yet, never
+# overwriting a file (noclobber). Prints where it went; 1 when nowhere.
+restore_copy() {
+  local src=$1 path=$2 lost="$POOL/lost-output" dest
+  local -a tries=("$path" "$path.test-slot-restored.$$")
+  [ -d "$lost" ] || mkdir -m 0700 -- "$lost" 2>/dev/null
+  [ -d "$lost" ] && tries+=("$lost/$(date -u +%Y%m%dT%H%M%SZ)-$$-${path##*/}.log")
+  for dest in "${tries[@]}"; do
+    if (set -C && cat -- "$src" >"$dest") 2>/dev/null; then
+      printf '%s\n' "$dest"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# restore_deleted_output — DND-1621. When CMD's stdout or stderr is a regular
+# file that was deleted while CMD ran, the output lives only in the unlinked
+# inode this process still holds, and the caller's next `>> log` creates a new
+# file without it: a gate log that reads as `exit=0` and nothing else. Copy
+# each such file back (restore_copy) and append a named notice to the copy.
+# Only the outermost run does this (a re-entrant run shares its fds).
+restore_deleted_output() {
+  local fd link path id id1="" id2="" seen=" " which dest bytes note
+  id1=$(stat -L -c %d:%i "/proc/$$/fd/1" 2>/dev/null)
+  id2=$(stat -L -c %d:%i "/proc/$$/fd/2" 2>/dev/null)
+  for fd in 1 2; do
+    [ -f "/proc/$$/fd/$fd" ] || continue
+    [ "$(stat -L -c %h "/proc/$$/fd/$fd" 2>/dev/null)" = 0 ] || continue
+    link=$(readlink "/proc/$$/fd/$fd" 2>/dev/null) || continue
+    id=$(stat -L -c %d:%i "/proc/$$/fd/$fd" 2>/dev/null) || continue
+    case $seen in *" $id "*) continue ;; esac
+    seen+="$id "
+    path=${link% (deleted)}
+    which=stdout
+    [ "$fd" = 2 ] && which=stderr
+    [ -n "$id1" ] && [ "$id1" = "$id2" ] && which="stdout and stderr"
+    bytes=$(stat -L -c %s "/proc/$$/fd/$fd" 2>/dev/null)
+    if dest=$(restore_copy "/proc/$$/fd/$fd" "$path"); then
+      note="OUTPUT FILE DELETED: CMD's $which file $path was deleted while CMD ran; its ${bytes:-?} bytes are restored to $dest."
+      [ "$dest" = "$path" ] || note+=" $path was not free (re-created by another writer, or its directory is gone), so nothing there was touched."
+      note+=" Fix: read this run's output at $dest; give each log a name no other writer's glob can match, and delete only files you created, by exact path (DND-1621)."
+      printf '%s: %s\n' "$PROG" "$note" >>"$dest" 2>/dev/null
+      say "$note"
+    else
+      say "OUTPUT FILE DELETED: CMD's $which file $path was deleted while CMD ran, and its ${bytes:-?} bytes could not be restored to $path, a sibling, or $POOL/lost-output: the output is lost. Fix: check that $POOL is writable, give each log a name no other writer's glob can match, and delete only files you created, by exact path (DND-1621)."
+    fi
+  done
+  return 0
+}
+
 # ============================================================ status
 
 scan_unslotted() { # prints "pid<TAB>state<TAB>cwd<TAB>cmd", state unslotted|unknown|container
@@ -2122,6 +2192,7 @@ main() {
   mark_gate_start
   run_cmd
   rc=$?
+  restore_deleted_output
   # Read again: a rebase inside the slot (integration-gate --rebase) moved HEAD.
   read_gate_ref
   append_event released "$SLOT" "" "$(($(now_ms) - ran_start))" "$rc"
