@@ -79,7 +79,8 @@ HOLDER=""; TARGET=""
 # An optional second argument is the program to spawn instead of `sleep 600`.
 start_holder() {
   local ready="${TMP}/$1.ready" prog="${2:-}"
-  "${RUBY}" -e 'cmd = ARGV[1].empty? ? ["sleep", "600"] : [ARGV[1]]
+  # [[path, argv0]]: never a single string, which ruby would hand to /bin/sh.
+  "${RUBY}" -e 'cmd = ARGV[1].empty? ? ["sleep", "600"] : [[ARGV[1], ARGV[1]]]
                 pid = Process.spawn(*cmd, pgroup: true)
                 File.write(ARGV[0] + ".tmp", pid.to_s); File.rename(ARGV[0] + ".tmp", ARGV[0])
                 sleep' "${ready}" "${prog}" >/dev/null 2>&1 &
@@ -187,6 +188,14 @@ WEIRD="${TMP}/x) Z ("$'\n'"y"
 printf '#!/bin/bash\nwhile :; do sleep 600; done\n' >"${WEIRD}"; chmod +x "${WEIRD}"
 start_holder p6 "${WEIRD}" || bad "P-6 fixture" "the holder never reported its child"
 if [ -n "${TARGET}" ]; then
+  # Premise: the target has exec'd the script, so its name is the weird one.
+  COMM=""; i=0
+  while [ "${i}" -lt 300 ]; do
+    COMM=""; { IFS= read -r -d '' COMM <"/proc/${TARGET}/comm"; } 2>/dev/null
+    [ "${COMM}" = "x) Z ("$'\n'"y"$'\n' ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ "${COMM}" = "x) Z ("$'\n'"y"$'\n' ] && ok "P-6 premise: the process name is 'x) Z (<newline>y'" || bad "P-6 premise: the process name" "comm=$(printf '%q' "${COMM}")"
   START="$(proc_starttime "${TARGET}")"; rc=$?
   [ "${rc}" -eq 0 ] && _proc_state_posint "${START}" && ok "P-6 its start time parses (${START})" || bad "P-6 its start time parses" "rc=${rc} start=${START:-none}"
   proc_running "${TARGET}" "${START}"; rc=$?

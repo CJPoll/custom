@@ -76,8 +76,17 @@ begin
     weird = File.join(dir, "x) Z (\ny")
     File.write(weird, "#!/bin/bash\nwhile :; do sleep 600; done\n")
     File.chmod(0o755, weird)
-    w = Process.spawn(weird, pgroup: true, out: File::NULL, err: File::NULL)
+    # [path, argv0]: a single string with metacharacters would go to /bin/sh.
+    w = Process.spawn([weird, weird], pgroup: true, out: File::NULL, err: File::NULL)
     pids << w
+    comm = nil
+    300.times do
+      comm = File.read("/proc/#{w}/comm") rescue nil
+      break if comm == "x) Z (\ny\n"
+
+      sleep 0.05
+    end
+    check("R-5 premise: the process name is \"x) Z (\\ny\"", comm == "x) Z (\ny\n", comm.inspect)
     ws = ProcState.starttime(w)
     check("R-5 its start time parses", ws.to_s.match?(/\A[0-9]+\z/), ws.inspect)
     check("R-5 it is running, not a zombie", ProcState.running?(w, start: ws))
