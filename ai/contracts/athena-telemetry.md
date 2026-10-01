@@ -310,14 +310,14 @@ costs one Ruby start; it is not wall-clock tested (DND-1222).
 
 `ai/lib/telemetry-emit.sh` is that call, written once (DND-1475): a bash
 emitter sources it and calls `athena_telemetry_emit --event …`. It runs the
-CLI under `timeout -k 1 2`: TERM at two seconds, KILL one second later. That
-one-second gap is the outer bound the git grace in *Unit of work* is shorter
-than. It drops stdout and returns 0 whatever happens; of the CLI's stderr
+CLI under `timeout -k 1 2`: TERM at two seconds, KILL one second later. The
+git grace in *Unit of work* (half a second) is shorter than that one-second
+gap. It drops stdout and returns 0 whatever happens; of the CLI's stderr
 only the one `athena-telemetry:` line reaches the caller. Its clock helpers
 give `--at` and `--duration`.
 
-**Later (2026-10-01, DND-1492):** this section said a shell emitter calls
-the CLI under `timeout 2`, and that the binding does. Superseded by
+**Later (2026-10-01, DND-1492):** this section said a shell emitter, and
+the binding, call the CLI under `timeout 2`. Superseded by
 `timeout -k 1 2`, which the binding has run since it landed (DND-1475): a
 bare `timeout 2` only sends TERM, so a CLI that does not exit on TERM is not
 bounded.
