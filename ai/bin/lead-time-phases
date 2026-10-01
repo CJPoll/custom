@@ -68,6 +68,19 @@ HELP = <<~TXT
   A phase whose anchor is missing is null with a reason; one whose anchors
   are out of order is "invalid" with a reason. Never 0, never negative.
 
+  Origin (DND-1531): telemetry is machine-local, so --ingest records where
+  each improve landing was worked. `foreign`: ticketed, with a dispatch
+  stamp, a telemetry store readable and recording since the dispatch day,
+  and no local event of any kind (any repo), integration receipt, critic
+  verdict or harness-gate timings for it. Its five phases are null with
+  "worked on another machine (no local events for <unit>)"; its forge totals
+  are kept. `local`: any of those found here. Otherwise origin is null with
+  `origin_na` (no store, no stamp, unticketed, a store that begins after the
+  dispatch), and the row counts as before. --summary leaves foreign rows out
+  of the phase stats and the biggest pick, keeps them in the totals, and
+  reports `foreign: N` beside the rows with each foreign unit named
+  (null when no row's origin was decided, never 0).
+
   Modes:
     --ingest       read the repo's cursor (none: a 14-day backfill), run
                    ai/bin/lead-time --since CURSOR --json --meta, join each
@@ -283,19 +296,27 @@ module Ingest
 
   def improve_rows(repo, landings, now, env)
     io = LeadTimePhasesIO
-    events, = io::TelemetryReader.read(env)
+    # Every kind, every repo: the origin check (DND-1531). The phase events
+    # are the registered phase kinds written in this repo.
+    all_events, = io::TelemetryReader.read_all(env)
+    first_day, first_day_na = io::TelemetryReader.first_day(env)
     common, common_why = io::Git.common_dir(repo.path)
     no_common = LeadTimePhases::Source.could_not_look(common_why.to_s)
-    events = LeadTimePhases.scope_events(events, common ? io::Git.repo_label(common) : repo.name)
+    events = LeadTimePhases.scope_events(LeadTimePhases.only_events(all_events, LeadTimePhases::EVENTS),
+                                         common ? io::Git.repo_label(common) : repo.name)
     heads = landings.filter_map { |l| l["gated_head"] }.uniq
     timings, bad = io::TimingsReader.read(io::TimingsReader.path(env), heads)
     warn "lead-time-phases: #{bad} malformed harness-gate timings line(s) skipped" if bad.positive?
     landings.map do |l|
       receipt, verdicts = head_sources(l, common, no_common)
+      timing = timing_source(l, timings)
       anchors = LeadTimePhases::Anchors.from(landing: l, events: events, receipt: receipt, verdicts: verdicts)
-      counters = LeadTimePhases::Counters.compute(landing: l, events: events, timings: timing_source(l, timings))
+      counters = LeadTimePhases::Counters.compute(landing: l, events: events, timings: timing)
+      evidence = LeadTimePhases::Origin.local_evidence(l, receipt: receipt, verdicts: verdicts, timings: timing)
+      origin = LeadTimePhases::Origin.decide(landing: l, unit_events: all_events, store_first_day: first_day,
+                                             store_na: first_day_na, evidence: evidence)
       LeadTimePhases::Ledger.improve_row(repo: repo.name, landing: l, anchors: anchors, counters: counters,
-                                         telemetry_status: events.status, ingested_at: now)
+                                         telemetry_status: events.status, ingested_at: now, origin: origin)
     end
   end
 
@@ -391,8 +412,10 @@ module Summary
   def fmt(s) = LeadTimePhases::Util.human(s)
 
   def print_report(r)
+    foreign = r["foreign"].nil? ? "n/a" : r["foreign"]
     puts "lead-time-phases summary: repo=#{r['repo']} mode=#{r['mode']} window=#{r['window']} " \
-         "(#{r['rows']} row(s) of #{r['ledger_rows']} in the ledger; #{r['batch_folded']} batch duplicate(s) folded)"
+         "(#{r['rows']} row(s) of #{r['ledger_rows']} in the ledger, foreign: #{foreign}; " \
+         "#{r['batch_folded']} batch duplicate(s) folded)"
     puts "  #{r['malformed_lines']} malformed ledger line(s) skipped" if r["malformed_lines"].positive?
     unless r["ledger_exists"]
       puts "  no ledger at #{r['ledger']}: nothing has been ingested here (run --ingest --repo #{r['repo']})"
@@ -407,12 +430,24 @@ module Summary
     if r["mode"] == "watch"
       puts "  phases: n/a by design (watch mode)"
     else
+      print_origin(r)
       r["phases"].each { |name, s| puts line(name, s) }
       b = r["biggest"]
       puts b["phase"] ? "  biggest contributor: #{b['phase']} (sum #{fmt(b['sum_s'])}; lever #{b['lever']})" : "  biggest contributor: none (#{b['reason']})"
       print_guards(r["guards"])
       print_telemetry(r["telemetry"])
     end
+  end
+
+  # Where the window's landings were worked (DND-1531). Foreign ones are
+  # named; the phase lines below leave them out, the totals above do not.
+  def print_origin(r)
+    o = r["origin"]
+    foreign = r["foreign"].nil? ? "n/a (no landing's origin decided)" : r["foreign"].to_s
+    named = o["foreign_units"].empty? ? "" : " (#{o['foreign_units'].join(', ')}; out of the phase stats and biggest)"
+    reasons = o["unknown_reasons"].map { |x| "#{x['reason']} (#{x['count']})" }.join("; ")
+    unknown = o["unknown"].positive? ? "; #{o['unknown']} unknown: #{reasons}" : ""
+    puts "  origin: #{o['local']} local; foreign: #{foreign}#{named}#{unknown}"
   end
 
   def line(name, s)

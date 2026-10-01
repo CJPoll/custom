@@ -261,8 +261,14 @@ module LeadTimePhasesIO
     # (a day file it could not read) keeps NO events: a partial set would
     # undercount counters and move anchors, so every telemetry anchor reads
     # "could not look" (ai/contracts/athena-telemetry.md -> The reader).
-    def read(env)
-      res = AthenaTelemetry.read(events: LeadTimePhases::EVENTS, env: env)
+    def read(env) = read_kinds(env, LeadTimePhases::EVENTS)
+
+    # Every kind: the origin check (DND-1531) counts a local event of any kind.
+    def read_all(env) = read_kinds(env, nil)
+
+    # names: the event names to keep, or nil for every kind.
+    def read_kinds(env, names)
+      res = AthenaTelemetry.read(events: names, env: env)
       src = case res.status
             when :no_store, :incomplete then Source.could_not_look(res.reason)
             else Source.ok(res.events)
@@ -270,6 +276,21 @@ module LeadTimePhasesIO
       [src, res]
     rescue AthenaTelemetry::ConfigError => e
       [Source.could_not_look("the telemetry store path is unusable (#{e.message})"), nil]
+    end
+
+    # The store's oldest day file, "YYYY-MM-DD": from then on the store was
+    # recording (retention prunes oldest first). -> [day, nil] or [nil, why]
+    # (no store, no day file, or a store it could not list).
+    def first_day(env)
+      dir = AthenaTelemetry::Store.dir(env)
+      return [nil, "no telemetry store at #{dir}"] unless File.directory?(dir)
+
+      days = AthenaTelemetry::Store.list(dir).filter_map { |n| AthenaTelemetry::DAY_FILE_RE.match(n)&.[](1) }
+      days.empty? ? [nil, "the store at #{dir} holds no day file"] : [days.min, nil]
+    rescue AthenaTelemetry::ConfigError => e
+      [nil, "the telemetry store path is unusable (#{e.message})"]
+    rescue SystemCallError => e
+      [nil, "could not list the telemetry store (#{e.class.name.split('::').last})"]
     end
   end
 

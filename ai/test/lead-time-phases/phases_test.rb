@@ -376,11 +376,12 @@ unt_nohead = unt_sq.merge("gated_head" => nil, "gated_head_na" => "no head")
 ph_un = L::Phases.compute(anchors(unt_nohead, S.ok(FULL.map { |e| e.merge("unit" => "some-branch", "head" => nil) })))
 check("G6 no gated head never matches an event with no head") { ph_un["integrate"]["s"].nil? }
 
+LOCAL_ORIGIN = L::Origin.local("fixture")
 base_sq = L::Ledger.improve_row(repo: "custom", landing: sq, anchors: anchors(sq, S.ok(FULL)), counters: {},
-                                telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"))
+                                telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"), origin: LOCAL_ORIGIN)
 check("G7 a ledger row records the gated head") { base_sq["gated_head"] == HEAD && !base_sq.key?("gated_head_na") }
 base_un = L::Ledger.improve_row(repo: "custom", landing: unread, anchors: anchors(unread, S.ok(FULL)), counters: {},
-                                telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"))
+                                telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"), origin: LOCAL_ORIGIN)
 check("G7 an unread gated head is recorded null with its reason") do
   base_un.key?("gated_head") && base_un["gated_head"].nil? && base_un["gated_head_na"].include?("headRefOid")
 end
@@ -502,6 +503,124 @@ end
 check("T6 nothing measured at all: no biggest, no lever, a reason") do
   b = L::Stats.summarize([row(1).merge("phases" => {}, "tail_s" => nil)])["biggest"]
   b["phase"].nil? && !b.key?("lever") && b["reason"]
+end
+
+# ── origin: a landing worked on another machine is foreign (DND-1531) ──────
+# Telemetry is machine-local. Foreign needs positive evidence: a dispatch
+# stamp, a readable store recording since the dispatch day, and no local
+# event (of any kind), receipt, verdict or timings for the unit.
+
+O = L::Origin
+NONE_HERE = S.empty("no receipt")
+def origin(l, events, first_day: "2026-09-20", store_na: nil, evidence: nil)
+  O.decide(landing: l, unit_events: events, store_first_day: first_day, store_na: store_na, evidence: evidence)
+end
+
+o1 = origin(l, S.ok([ev("harness_gate.run", "2026-10-01T02:00:00Z", unit: "DND-9002")]))
+check("O1 a stamp, a covering store and zero local events for the unit: foreign") { o1["origin"] == "foreign" }
+check("O1 the decision names its evidence") { o1["origin_source"].include?("dispatch stamp on 2026-10-01") && o1["origin_source"].include?("DND-9001") }
+check("O1 another unit's events are not evidence for this one") { !o1.key?("origin_na") }
+check("O1 an empty store that covers the day is still foreign (looked, found nothing)") do
+  origin(l, S.ok([]))["origin"] == "foreign"
+end
+
+dispatched_only = [ev("ticket.dispatched", "2026-10-01T01:00:00Z", attrs: { "tracker" => "dnd" }).merge("repo" => "other_repo")]
+o2 = origin(l, S.ok(dispatched_only))
+check("O2 any local event for the unit (ticket.dispatched, any repo) makes it local") { o2["origin"] == "local" }
+check("O2 the source counts the events") { o2["origin_source"] == "1 local telemetry event(s) for DND-9001" }
+check("O2 a local event after the landing still counts (merge.landed is confirmed after it)") do
+  origin(l, S.ok([ev("merge.landed", "2026-10-01T05:00:30Z")]))["origin"] == "local"
+end
+
+o3 = origin(l, S.could_not_look("no telemetry store at /x"))
+check("O3 MISS: no store is could not look, never foreign") { o3["origin"].nil? && o3["origin_na"] == "telemetry: could not look (no telemetry store at /x)" }
+
+ev_rec = O.local_evidence(l, receipt: S.ok([{ "recorded_at" => "x" }]), verdicts: NO_VERDICTS, timings: S.empty("none"))
+check("O4 a local integration receipt is evidence, named with the head") { ev_rec == "integration receipt for #{HEAD[0, 8]} on this machine" }
+check("O4 nothing found on any head source: no evidence") do
+  O.local_evidence(l, receipt: NONE_HERE, verdicts: S.could_not_look("x"), timings: S.empty("none")).nil?
+end
+check("O4 local evidence makes a zero-event landing local") { origin(l, S.ok([]), evidence: ev_rec)["origin"] == "local" }
+check("O4 local evidence wins over an unreadable store") do
+  origin(l, S.could_not_look("x"), evidence: ev_rec)["origin"] == "local"
+end
+
+o5 = origin(landing(start: nil), S.ok([]))
+check("O5 MISS: no dispatch stamp is undecided, never foreign") { o5["origin"].nil? && o5["origin_na"].include?("no dispatch stamp") }
+
+o6 = origin(l, S.ok([]), first_day: "2026-10-01")
+check("O6 a store whose first day is the dispatch day covers it") { o6["origin"] == "foreign" }
+o6b = origin(l, S.ok([]), first_day: "2026-10-02")
+check("O6 MISS: a store that begins after the dispatch day is undecided") do
+  o6b["origin"].nil? && o6b["origin_na"].include?("begins 2026-10-02, after the dispatch on 2026-10-01")
+end
+o7 = origin(l, S.ok([]), first_day: nil, store_na: "the store at /t holds no day file")
+check("O7 MISS: a store with no day file is undecided, with the store's reason") do
+  o7["origin"].nil? && o7["origin_na"].include?("the store at /t holds no day file")
+end
+
+o8 = origin(landing(ticket: nil, start: nil), S.ok([]))
+check("O8 an unticketed landing is undecided") { o8["origin"].nil? && o8["origin_na"].start_with?("unticketed landing") }
+check("O8 a ticket that could not be read is could not look, not unticketed") do
+  origin(faulty, S.ok([]))["origin_na"].start_with?("ticket: could not look")
+end
+
+fl = L::Ledger.improve_row(repo: "gen_saas", landing: l, anchors: anchors(l, S.ok([])), counters: {},
+                           telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"), origin: o1)
+check("O9 a foreign ledger row records its origin and why") { fl["origin"] == "foreign" && fl["origin_source"] == o1["origin_source"] }
+check("O9 its five phases are null with the foreign reason") do
+  fl["phases"].values.all? { |c| c["s"].nil? && c["na_reason"] == "worked on another machine (no local events for DND-9001)" }
+end
+check("O9 its forge totals are kept") { fl.key?("lead_s") && fl.key?("tail_s") }
+ll = L::Ledger.improve_row(repo: "custom", landing: l, anchors: anchors(l, S.ok(FULL)), counters: {},
+                           telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"), origin: o2)
+check("O9 a local row keeps its measured phases") { ll["origin"] == "local" && ll["phases"] == ph }
+ul = L::Ledger.improve_row(repo: "custom", landing: l, anchors: anchors(l, S.ok([])), counters: {},
+                           telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"), origin: o3)
+check("O9 an undecided row records origin null with its reason, phases as measured") do
+  ul.key?("origin") && ul["origin"].nil? && ul["origin_na"] == o3["origin_na"] && !ul["phases"]["implement"]["na_reason"].include?("another machine")
+end
+
+# Summary: foreign rows are out of the phase stats and the biggest pick, in
+# the totals, counted and named.
+def foreign_row(i)
+  row(i, verify: nil).merge("origin" => "foreign", "phases" => O.foreign_phases("DND-#{9000 + i}"),
+                            "tail_s" => 0)
+end
+loc = [row(1, verify: 40).merge("origin" => "local"), row(3, verify: 10).merge("origin" => "local")]
+mixed_w = loc + [foreign_row(2), foreign_row(4)]
+fs = L::Stats.summarize(mixed_w)
+check("F1 foreign is counted beside rows") { fs["rows"] == 4 && fs["foreign"] == 2 }
+check("F1 foreign landings are named") { fs["origin"]["foreign_units"] == %w[DND-9002 DND-9004] }
+check("F1 the phase stats see only local rows (no foreign n/a)") do
+  fs["phases"]["verify"].values_at("n", "n_na", "sum_s") == [2, 0, 50] &&
+    fs["phases"]["implement"]["na_reasons"].empty?
+end
+check("F1 the biggest pick is over local rows") { fs["biggest"]["phase"] == "verify" && fs["biggest"]["sum_s"] == 50 }
+check("F1 the totals still include foreign rows") do
+  fs["totals"]["lead"].values_at("n", "sum_s") == [4, 10_000]
+end
+check("F1 local and unknown are counted too") { fs["origin"]["local"] == 2 && fs["origin"]["unknown"] == 0 }
+
+all_f = L::Stats.summarize([foreign_row(1), foreign_row(2)])
+check("F2 every landing foreign: no biggest, and the reason says so") do
+  all_f["biggest"]["phase"].nil? && all_f["biggest"]["reason"].include?("worked on another machine") && all_f["foreign"] == 2
+end
+
+legacy_w = L::Stats.summarize([row(1).merge("mode" => "improve"), row(2).merge("mode" => "improve")])
+check("F3 MISS: rows with no origin judged: foreign is null, never 0") { legacy_w["foreign"].nil? }
+check("F3 they count as unknown, with the reason") do
+  legacy_w["origin"]["unknown"] == 2 && legacy_w["origin"]["unknown_reasons"].first["reason"].include?("before DND-1531")
+end
+check("F3 and stay in the phase stats, as before") { legacy_w["phases"]["implement"]["n"] == 2 }
+watch_w = L::Stats.summarize([row(1).merge("mode" => "watch")])
+check("F4 a watch row is unknown with a watch reason, foreign null") do
+  watch_w["foreign"].nil? && watch_w["origin"]["unknown_reasons"].first["reason"].start_with?("watch mode")
+end
+und = L::Stats.summarize(loc + [row(5).merge("mode" => "improve", "origin" => nil, "origin_na" => "telemetry: could not look (x)")])
+check("F5 an undecided row is unknown with its own reason, and foreign counts the judged rows") do
+  und["foreign"] == 0 && und["origin"]["unknown"] == 1 &&
+    und["origin"]["unknown_reasons"].first["reason"] == "telemetry: could not look (x)"
 end
 
 if $failures.empty?

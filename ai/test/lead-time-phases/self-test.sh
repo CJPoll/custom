@@ -376,6 +376,42 @@ JSON_GS="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin
 eq "--json: tail, product, 14400 s over 2 measured, the no-run landing n/a (never 0)" "${JSON_GS}" "tail,product,14400,2,1"
 CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
 
+echo "== ingest + summary: landings worked on another machine are foreign (DND-1531)"
+# A store recording since 2026-09-20. Only DND-9102 was worked here: its
+# dispatch was written from another repo's checkout, its gate run in
+# gen_saas. DND-9101 and DND-9103 have stamps and nothing local: foreign.
+TEL_LAPTOP="${TMP}/telemetry-laptop"
+mkdir -p "${TEL_LAPTOP}" && chmod 700 "${TEL_LAPTOP}"
+: >"${TEL_LAPTOP}/2026-09-20.jsonl"
+{
+  printf '{"v":1,"event":"ticket.dispatched","at":"2026-10-01T05:30:00.000Z","duration_s":null,"unit":"DND-9102","unit_source":"explicit","repo":"custom","head":null,"host":"h","pid":1,"attrs":{"tracker":"dnd"}}\n'
+  printf '{"v":1,"event":"gate.run","at":"2026-10-01T05:40:00.000Z","duration_s":60,"unit":"DND-9102","unit_source":"branch","repo":"gen_saas","head":null,"host":"h","pid":1,"attrs":{"ok":true,"exit":0}}\n'
+} >"${TEL_LAPTOP}/2026-10-01.jsonl"
+CONFIG="${GS_CONFIG}"; STATE="${TMP}/state-origin"
+ROWS="${TMP}/rows-gs.json" run "${TEL_LAPTOP}" --ingest --repo gen_saas
+eq "an origin ingest exits 0" "${CODE}" "0"
+eq "a stamped landing with no local event is foreign" "$(row_field "${HEAD_PUSH}" origin)" "foreign"
+eq "its phases are null with the foreign reason" "$(row_field "${HEAD_PUSH}" phases.implement.na_reason)" "worked on another machine (no local events for DND-9101)"
+eq "its forge totals are kept" "$(row_field "${HEAD_PUSH}" tail_s)" "7200"
+eq "a landing with local events is local" "$(row_field "${HEAD_PR}" origin)" "local"
+eq "the local landing's implement is measured from its gate run" "$(row_field "${HEAD_PR}" phases.implement.s)" "600"
+run "${TEL_LAPTOP}" --summary --repo gen_saas
+eq "the origin summary exits 0" "${CODE}" "0"
+has "the header reports foreign beside the rows" "${OUT}" "3 row(s) of 3 in the ledger, foreign: 2;"
+has "foreign landings are named" "${OUT}" "foreign: 2 (DND-9101, DND-9103; out of the phase stats and biggest)"
+lacks "no phase n/a reason is the foreign one" "${OUT}" "worked on another machine (no local"
+run "${TEL_LAPTOP}" --summary --repo gen_saas --json
+JSON_OR="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); i = j.dig("phases", "implement"); puts [j["rows"], j["foreign"], i["n"], i["n_na"], j.dig("totals", "lead", "n")].join(",")')"
+eq "--json: 3 rows, 2 foreign, implement over the 1 local row, lead over all 3" "${JSON_OR}" "3,2,1,0,3"
+# The miss: no store is could not look, never foreign.
+STATE="${TMP}/state-origin-none"
+ROWS="${TMP}/rows-gs.json" run "${TEL_NONE}" --ingest --repo gen_saas
+eq "MISS: no store: origin is null, never foreign" "$(row_field "${HEAD_PUSH}" origin)" "null"
+has "MISS: and says it could not look" "$(row_field "${HEAD_PUSH}" origin_na)" "telemetry: could not look (no telemetry store"
+run "${TEL_NONE}" --summary --repo gen_saas
+has "MISS: the summary's foreign is n/a, never 0" "${OUT}" "foreign: n/a;"
+CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
+
 echo "== summary: no ledger is not an empty ledger"
 STATE="${TMP}/state-none" run "${TEL_EMPTY}" --summary --repo custom
 has "no ledger is named as such" "${OUT}" "no ledger at"

@@ -185,6 +185,13 @@ module LeadTimePhases
                items: source.items.select { |e| e["repo"] == repo_label })
   end
 
+  # The events of the named kinds (EVENTS: the phase and counter events),
+  # from a read of every kind.
+  def self.only_events(source, names)
+    Source.new(status: source.status, reason: source.reason,
+               items: source.items.select { |e| names.include?(e["event"]) })
+  end
+
   # Which telemetry events belong to a landing: by unit for a ticketed one,
   # by head for an unticketed one (P5), after the ticket's previous landing
   # and at or before this one.
@@ -457,6 +464,82 @@ module LeadTimePhases
     end
   end
 
+  # Where a landing was worked (DND-1531). Telemetry is machine-local, so a
+  # ticket worked on another machine has no local events, and its phases
+  # would read n/a as if the harness could not measure them. Such a landing
+  # is "foreign": counted and named, kept out of the phase stats and the
+  # biggest pick. Foreign is decided only from positive evidence: a ticketed
+  # landing with a dispatch stamp, a telemetry store this reader could read
+  # that was already recording on the dispatch day, and no local event of any
+  # kind for the unit. Any local event, or a local receipt, verdict or
+  # harness-gate timings row for the gated head, makes it "local". Anything
+  # else stays undecided (origin null) with the reason, and is treated as
+  # before.
+  module Origin
+    FOREIGN = "foreign"
+    LOCAL = "local"
+
+    module_function
+
+    def foreign_reason(unit) = "worked on another machine (no local events for #{unit})"
+
+    # receipt/verdicts/timings: the head Sources. -> a description of the
+    # first one that found something here, or nil.
+    def local_evidence(landing, receipt:, verdicts:, timings:)
+      sha = Landing.head_desc(landing)
+      { "integration receipt" => receipt, "critic verdict receipt" => verdicts,
+        "harness-gate timings" => timings }.each do |what, src|
+        return "#{what} for #{sha} on this machine" if src && !src.items.empty?
+      end
+      nil
+    end
+
+    # unit_events: a Source of every local telemetry event, of any registered
+    # kind and any repo (a ticket's dispatch may be written from another
+    # repo's checkout). store_first_day: the store's oldest day file
+    # ("YYYY-MM-DD"), or nil with store_na saying why. evidence: from
+    # local_evidence. -> {"origin"=>"local"|"foreign"|nil, "origin_source"=>..
+    # | "origin_na"=>why}
+    def decide(landing:, unit_events:, store_first_day:, store_na: nil, evidence: nil)
+      unit = landing["ticket"]
+      return undecided(Anchors.no_unit(landing, "unticketed landing: no unit to look for local events on")) unless unit
+
+      mine = unit_events.items.count { |e| e["unit"] == unit }
+      return local("#{mine} local telemetry event(s) for #{unit}") if mine.positive?
+      return local(evidence) if evidence
+      return undecided("telemetry: could not look (#{unit_events.reason})") if unit_events.could_not_look?
+
+      start = landing["start"]
+      unless start
+        why = landing["start_na"] || "no stamp for #{unit}"
+        return undecided("no local events for #{unit}, and no dispatch stamp (#{why}): where it was worked is unknown")
+      end
+      day = start.utc.strftime("%Y-%m-%d")
+      unless store_first_day
+        return undecided("no local events for #{unit}, but the telemetry store cannot show the dispatch day #{day} " \
+                         "(#{store_na || 'it holds no day file'})")
+      end
+      if store_first_day > day
+        return undecided("no local events for #{unit}, but the telemetry store begins #{store_first_day}, after the " \
+                         "dispatch on #{day} (pruned, or not yet recording): a missing event cannot be told from an " \
+                         "unrecorded one")
+      end
+
+      { "origin" => FOREIGN, "origin_source" => "a dispatch stamp on #{day}, the telemetry store recording since " \
+                                                "#{store_first_day}, and no local event, receipt, verdict or timings " \
+                                                "for #{unit}" }
+    end
+
+    def local(source) = { "origin" => LOCAL, "origin_source" => source }
+    def undecided(why) = { "origin" => nil, "origin_na" => why }
+
+    def foreign?(row) = row["origin"] == FOREIGN
+
+    # A foreign landing's five phases: null with the reason. Its anchors and
+    # counters are kept as measured (they read the same misses).
+    def foreign_phases(unit) = PHASES.to_h { |p| [p, { "s" => nil, "na_reason" => foreign_reason(unit) }] }
+  end
+
   module Ledger
     module_function
 
@@ -511,9 +594,13 @@ module LeadTimePhases
         lost.call(old["top_checks"], fresh["top_checks"])
     end
 
-    def improve_row(repo:, landing:, anchors:, counters:, telemetry_status:, ingested_at:)
+    # origin: Origin.decide's result (DND-1531). A foreign landing's phases
+    # are null with the foreign reason; its anchors and counters are kept.
+    def improve_row(repo:, landing:, anchors:, counters:, telemetry_status:, ingested_at:, origin:)
+      phases = Origin.foreign?(origin) ? Origin.foreign_phases(landing["ticket"]) : Phases.compute(anchors)
       base(repo: repo, mode: "improve", landing: landing, ingested_at: ingested_at)
-        .merge("phases" => Phases.compute(anchors),
+        .merge(origin)
+        .merge("phases" => phases,
                "anchors" => anchors.transform_values(&:to_h_json),
                "telemetry" => telemetry_status.to_s)
         .merge(counters)
@@ -677,10 +764,40 @@ module LeadTimePhases
       { "phase" => best[0], "sum_s" => best[1], "lever" => LEVERS.fetch(best[0]) }.merge(tail)
     end
 
+    # Foreign landings (DND-1531) are out of the phase stats and the biggest
+    # pick; the forge totals (lead, code, tail) still include them.
     def summarize(rows)
-      ph = phases(rows)
+      local = rows.reject { |r| Origin.foreign?(r) }
+      ph = phases(local)
       tot = totals(rows)
-      { "rows" => rows.size, "phases" => ph, "biggest" => biggest(ph, tot["tail"]), "totals" => tot }
+      org = origins(rows)
+      big = biggest(ph, tot["tail"])
+      if big["phase"].nil? && local.empty? && !rows.empty?
+        big["reason"] = "every landing in the window was worked on another machine (foreign: #{org['foreign']})"
+      end
+      { "rows" => rows.size, "foreign" => org["judged"].zero? ? nil : org["foreign"],
+        "origin" => org.except("judged"), "phases" => ph, "biggest" => big, "totals" => tot }
+    end
+
+    # Where the window's landings were worked. foreign_units names each
+    # foreign landing. A row with no origin decided is unknown with its
+    # reason: undecided at ingest, a watch row, or one ingested before
+    # DND-1531. "foreign" is null (not 0) when no row was decided.
+    def origins(rows)
+      unknown = rows.reject { |r| [Origin::LOCAL, Origin::FOREIGN].include?(r["origin"]) }
+      foreign = rows.select { |r| Origin.foreign?(r) }
+      reasons = unknown.map { |r| generic(unknown_reason(r), r) }.tally
+                       .sort_by { |r, n| [-n, r] }.first(TOP_REASONS).map { |r, n| { "reason" => r, "count" => n } }
+      { "local" => rows.count { |r| r["origin"] == Origin::LOCAL }, "foreign" => foreign.size,
+        "foreign_units" => foreign.map { |r| Landing.unit_desc(r) }, "unknown" => unknown.size,
+        "unknown_reasons" => reasons, "judged" => rows.size - unknown.size }
+    end
+
+    def unknown_reason(row)
+      return "watch mode: where a landing was worked is not measured" if row["mode"] == "watch"
+      return row["origin_na"] if row["origin_na"]
+
+      "no origin in the ledger row (ingested before DND-1531)"
     end
   end
 

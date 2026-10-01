@@ -122,7 +122,10 @@ before and after numbers, and records the verdict.
 ### 3. Summarize
 
 `lead-time-phases --summary --repo R --json`. Keep the JSON for the journal
-and for an architect's brief.
+and for an architect's brief. `foreign` counts the landings worked on
+another machine (DND-1531), named in `origin.foreign_units`. They are already
+out of `phases` and `biggest`, so the rules below see local landings only.
+Journal the count; a foreign landing is never an instrumentation gap.
 
 ### 4. Pick the biggest contributor
 
