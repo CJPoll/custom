@@ -101,8 +101,11 @@ function stat_of(pid,    f, line, n, fld, saved_rs, r) {
   close(f); RS = saved_rs
   if (r <= 0) return 0
   sub(/\n$/, "", line)
-  if (index(line, ") ") == 0) die(3, "/proc/" pid "/stat is not in the kernel's format (no \") \" after the comm): " line,
-                                   "run on Linux with /proc mounted; this scan must not guess at a stat line.")
+  if (index(line, ") ") == 0) {
+    gsub(/\n/, "\\n", line)        # shown on one line
+    die(3, "/proc/" pid "/stat is not in the kernel's format (no \") \" after the comm): " line,
+        "run on Linux with /proc mounted; this scan must not guess at a stat line.")
+  }
   sub(/^.*\) /, "", line)          # "pid (comm) ": comm may hold spaces, ")" and newlines
   n = split(line, fld, " ")
   if (n < 49) die(3, "/proc/" pid "/stat has " n + 2 " fields; env_start/env_end (fields 50-51, Linux 3.5+) are missing, so a mid-exec read cannot be told from an untagged one.",

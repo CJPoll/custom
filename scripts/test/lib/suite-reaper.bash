@@ -104,7 +104,7 @@ suite_env_pids() {
     # The whole file (-d ''): a name may hold a newline (DND-1616). read
     # returns 1 at end of file even when it read it all; an unreadable stat
     # leaves s empty, which the check below names.
-    s=""; { IFS= read -r -d '' s <"/proc/$$/stat"; } 2>/dev/null
+    s=""; { IFS= read -r -d '' s <"/proc/$$/stat" || :; } 2>/dev/null
     s="${s%$'\n'}"; s="${s##*) }"; read -r -a f <<<"${s}"
     since="${f[19]:-}"
     if [ -z "${since}" ]; then

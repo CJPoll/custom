@@ -558,11 +558,13 @@ gone "${MARK}" || { bad "S17 the no-boot fake suite's processes are reaped" "$(s
 # alive (proc-state P-6's shape, untagged by the fixture), the reap still
 # kills the fixture's process and returns 0, and leaves the untagged one alone.
 # The named process blocks opening a FIFO, so it has no child and its name
-# never changes; it is killed by pid here, whatever the scan can see.
+# never changes; it is killed by pid here, whatever the scan can see, and it
+# carries a marker of its own, so an interrupted run's cleanup reaps it too.
 mkdir -p "${TMP}/s18"; mkfifo "${TMP}/s18/fifo"
 NLP="${TMP}/s18/${NL_COMM}"
 printf '#!/bin/bash\nread -r _ <"$1"\n' >"${NLP}"; chmod +x "${NLP}"
-"${NLP}" "${TMP}/s18/fifo" & nlp=$!
+NL_MARK="DND818_ST_MARK=s18named-$$"; MARKS+=("${NL_MARK}")
+env "${NL_MARK}" "${NLP}" "${TMP}/s18/fifo" & nlp=$!
 NLC=""
 for i in $(seq 1 100); do
   { IFS= read -r -d '' NLC <"/proc/${nlp}/comm"; } 2>/dev/null
