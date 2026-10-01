@@ -20,7 +20,9 @@
 #
 # Output:
 #   list: one line per route, then the count line (always, even when 0):
-#     label=<l> inbox=<inbox|none> machine=<name|none> enabled=<b> live=<b> instance=<id>
+#     label=<l> inbox=<inbox|none> machine=<machine_id|none> name=<"real name"|none> enabled=<b> live=<b> instance=<id>
+#     (machine= is the id send-mail --to-project <project>@<machine> and --to
+#     <machine_id>/<inbox> accept; name= is the quoted display name, DND-1568)
 #     count=<n> app=<A...>                                     (stdout) exit 0
 #   put:
 #     put label=<l> inbox=<inbox|none> enabled=<b>             (stdout) exit 0

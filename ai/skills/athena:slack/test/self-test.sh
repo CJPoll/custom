@@ -2117,7 +2117,7 @@ if [[ "${RC}" == 0 && "${OUT}" == "count=0 app=${TR_APP}" ]]; then
 else bad "topic_route_render_list: an empty list -> 'count=0 app=<A...>', never nothing" "got '${OUT}' rc=${RC}"; fi
 tr_fn topic_route_render_list "$(jq -n -c --arg a "${TR_APP}" '{jsonrpc:"2.0", id:2, result:{structuredContent:{app_id:$a, count:1, routes:[
   {label:"other", agent_instance_id:"inst-3", inbox_name:null, machine_id:null, machine_name:null, enabled:true, live:false}]}}}')"
-if [[ "${RC}" == 0 && "$(head -n1 <<<"${OUT}")" == "label=other inbox=none machine=none enabled=true live=false instance=inst-3" ]]; then
+if [[ "${RC}" == 0 && "$(head -n1 <<<"${OUT}")" == "label=other inbox=none machine=none name=none enabled=true live=false instance=inst-3" ]]; then
   ok "topic_route_render_list: a route with no machine -> inbox=none machine=none"
 else bad "topic_route_render_list: a route with no machine -> inbox=none machine=none" "got '${OUT}' rc=${RC}"; fi
 for bad_reply in '{"count":0,"routes":[]}' "{\"app_id\":\"${TR_APP}\",\"count\":2,\"routes\":[]}" \
@@ -2129,9 +2129,37 @@ for bad_reply in '{"count":0,"routes":[]}' "{\"app_id\":\"${TR_APP}\",\"count\":
 done
 tr_fn topic_route_render_list "$(jq -n -c --arg a "${TR_APP}" '{jsonrpc:"2.0", id:2, result:{structuredContent:{app_id:$a, count:1, routes:[
   {label:"harness\nlabel=forged", agent_instance_id:"inst 1", inbox_name:"x.jsonl", machine_id:"m", machine_name:"my desk\u202e\u009b", enabled:true, live:true}]}}}')"
-if [[ "${RC}" == 0 && "$(wc -l <<<"${OUT}")" -eq 2 && "$(head -n1 <<<"${OUT}")" == "label=harness_label_forged inbox=x.jsonl machine=my_desk_____ enabled=true live=true instance=inst_1" ]]; then
+if [[ "${RC}" == 0 && "$(wc -l <<<"${OUT}")" -eq 2 && "$(head -n1 <<<"${OUT}")" == "label=harness_label_forged inbox=x.jsonl machine=m name=\"my desk_____\" enabled=true live=true instance=inst_1" ]]; then
   ok "topic_route_render_list: server whitespace, '=', newlines, bidi and C1 controls cannot forge a field or a line"
 else bad "topic_route_render_list: server whitespace, '=', newlines, bidi and C1 controls cannot forge a field or a line" "got '${OUT}' rc=${RC}"; fi
+
+# t-u3b. DND-1568: the machine a list line prints is an ADDRESS another tool
+#        accepts. machine= is the machine id and name= the real name, quoted
+#        (names carry spaces). Both resolve through the lookup send-mail
+#        --to-project <project>@<machine> uses (routed_pick_machine). The old
+#        machine=Fake_Desktop matched no machine.
+setup_case
+TR_SPACE_REPLY="$(jq -n -c --arg a "${TR_APP}" '{jsonrpc:"2.0", id:2, result:{structuredContent:{app_id:$a, count:1, routes:[
+  {label:"harness", agent_instance_id:"inst-1", inbox_name:"custom-slack.jsonl", machine_id:"m-fake-1", machine_name:"Fake Desktop", enabled:true, live:true}]}}}')"
+tr_fn topic_route_render_list "${TR_SPACE_REPLY}"
+TR_LINE="$(head -n1 <<<"${OUT}")"
+TR_MACHINES='[{"id":"m-fake-1","name":"Fake Desktop","instances":[{"inbox_name":"custom-session.jsonl"}]},{"id":"m-fake-2","name":"Fake Laptop","instances":[{"inbox_name":"custom-session.jsonl"}]}]'
+TR_ID="$(sed -n 's/.* machine=\([^ ]*\) .*/\1/p' <<<"${TR_LINE}")"
+TR_NAME_Q="$(sed -n 's/.* name=\("[^"]*"\) .*/\1/p' <<<"${TR_LINE}")"
+TR_NAME="$(jq -r '.' <<<"${TR_NAME_Q:-null}" 2>/dev/null)"
+pick() { env INBOX_LIB_DIR="${ROOT}/../athena:inbox/lib" bash -c '. "${INBOX_LIB_DIR}/err.sh"; . "${INBOX_LIB_DIR}/routed.sh"; routed_pick_machine "$@"' pick "$@" 2>&1; }
+if [[ "${TR_LINE}" == 'label=harness inbox=custom-slack.jsonl machine=m-fake-1 name="Fake Desktop" enabled=true live=true instance=inst-1' \
+   && "$(pick "${TR_MACHINES}" custom-session.jsonl "${TR_ID}")" == "m-fake-1" \
+   && "$(pick "${TR_MACHINES}" custom-session.jsonl "${TR_NAME}")" == "m-fake-1" ]]; then
+  ok "topic_route_render_list: machine=<id> name=\"<real name>\" both resolve through send-mail's routed_pick_machine"
+else bad "topic_route_render_list: machine=<id> name=\"<real name>\" both resolve through send-mail's routed_pick_machine" \
+  "line='${TR_LINE}' id='${TR_ID}' name='${TR_NAME}' pick-id='$(pick "${TR_MACHINES}" custom-session.jsonl "${TR_ID}")'"; fi
+# A name with a quote, a backslash and a forged field stays inside its quotes.
+tr_fn topic_route_render_list "$(jq -n -c --arg a "${TR_APP}" '{jsonrpc:"2.0", id:2, result:{structuredContent:{app_id:$a, count:1, routes:[
+  {label:"harness", agent_instance_id:"i", inbox_name:"x.jsonl", machine_id:"m-fake-1", machine_name:"a\" enabled=false \\ b\n", enabled:true, live:true}]}}}')"
+if [[ "${RC}" == 0 && "$(wc -l <<<"${OUT}")" -eq 2 && "$(head -n1 <<<"${OUT}")" == 'label=harness inbox=x.jsonl machine=m-fake-1 name="a\" enabled=false \\ b" enabled=true live=true instance=i' ]]; then
+  ok "topic_route_render_list: a name with a quote, backslash, newline cannot forge a field"
+else bad "topic_route_render_list: a name with a quote, backslash, newline cannot forge a field" "got '${OUT}' rc=${RC}"; fi
 
 # t-u4. Domain: every reason has its own Fix text.
 setup_case
@@ -2148,8 +2176,8 @@ else bad "topic_route_fix: all 8 reasons have a non-empty, distinct Fix text" "$
 # Q1. list, two routes: one line each, then the count line; one tools/call.
 setup_case; claim_setup; tr_text_answer slack_topic_route_list "${TR_TWO_ROUTES}"
 run_bin topic-route list
-WANT="label=harness inbox=custom-slack.jsonl machine=desktop enabled=true live=true instance=inst-1
-label=walt_ui inbox=walt_ui-slack.jsonl machine=laptop enabled=false live=false instance=inst-2
+WANT="label=harness inbox=custom-slack.jsonl machine=m-1 name=\"desktop\" enabled=true live=true instance=inst-1
+label=walt_ui inbox=walt_ui-slack.jsonl machine=m-2 name=\"laptop\" enabled=false live=false instance=inst-2
 count=2 app=${TR_APP}"
 if [[ "${RC}" == 0 && "${OUT}" == "${WANT}" && "$(tr_args slack_topic_route_list)" == '{}' ]] \
    && [[ "$(mcp_calls | tr '\n' '|')" == "initialize|initialized|tools/call slack_topic_route_list|" ]]; then

@@ -528,3 +528,9 @@ asserted to occur once), one suite run, then restored with `cp`:
 | S95 | `topic_route_render_put` drops the label/enabled match | 1 | `FAIL topic-route put --disabled: a reply saying enabled=true -> mcp-error:put-reply-mismatch, no put line` |
 
 After the restore the suite returned to `VERDICT: PASS (275 cases)`.
+
+DND-1568: `topic-route list` printed the machine's display name through the bare-field allowlist (`machine=Fake_Desktop`), an address no tool resolves.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S96 | `topic_route_render_list` prints `machine_name` (not `machine_id`) as `machine=`, with no `name=` | 4 | `FAIL topic_route_render_list: machine=<id> name="<real name>" both resolve through send-mail's routed_pick_machine` (`none of your machines matching "Fake_Desktop" declares custom-session.jsonl`) / `... a name with a quote, backslash, newline cannot forge a field` / `... a route with no machine -> inbox=none machine=none` / `FAIL topic-route list: two routes -> two label= lines and count=2 app=...` |

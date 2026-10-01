@@ -33,6 +33,19 @@ topic_route_field() {
   printf '%s' "${v:-none}"
 }
 
+# topic_route_quoted <text> -- a display name as one double-quoted field
+# (DND-1568). Names carry spaces ("Fake Desktop"), so the bare-field allowlist
+# above would turn them into an underscore name that no tool resolves. Here
+# printable ASCII is kept, `"` and `\` are backslash-escaped, every other byte
+# becomes `_`, at most 120 bytes; empty is `none` (unquoted). Nothing inside
+# the quotes can end them, forge a field, or start a line. It is a label for a
+# human: the address another tool accepts is the machine id beside it.
+topic_route_quoted() {
+  local v
+  v="$(printf '%s' "$1" | LC_ALL=C tr -c ' -~' '_' | cut -c1-120 | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+  if [ -z "${v}" ]; then printf 'none'; else printf '"%s"' "${v}"; fi
+}
+
 # topic_route_words <text> -- the server's words as one line of printable
 # ASCII (every other byte becomes a space), at most 600 bytes: long enough to
 # keep the server's own `Fix:` clause, which is the point of printing them.
@@ -108,7 +121,10 @@ _topic_route_reply() {
 
 # topic_route_render_list <json-rpc-message>
 # Status 0: one line per route, then `count=<n> app=<A...>`:
-#   label=<l> inbox=<inbox|none> machine=<name|none> enabled=<b> live=<b> instance=<id>
+#   label=<l> inbox=<inbox|none> machine=<machine_id|none> name=<"real name"|none> enabled=<b> live=<b> instance=<id>
+# machine= is the server's machine id and name= its display name, quoted
+# (DND-1568): the id is what send-mail --to-project <project>@<machine>, --to
+# <machine_id>/<inbox> and list_my_machines accept; the name is for reading.
 # Status 1: `mcp-error:<what>` on stdout when the reply is not a well-formed
 # list (no app_id, no count, a count that disagrees with the routes, or a
 # route missing its label, enabled or live).
@@ -126,20 +142,21 @@ topic_route_render_list() {
   app="$(printf '%s' "${reply}" | jq -r '.app_id')"
   count="$(printf '%s' "${reply}" | jq -r '.count')"
   rows="$(printf '%s' "${reply}" | jq -r '.routes[]
-      | [.label, (.inbox_name // ""), (.machine_name // ""), (.enabled | tostring), (.live | tostring),
+      | [.label, (.inbox_name // ""), (.machine_id // "" | tostring), (.machine_name // ""), (.enabled | tostring), (.live | tostring),
          (.agent_instance_id // "" | tostring)] | @json')"
-  local row label inbox machine enabled live instance
+  local row label inbox machine_id machine_name enabled live instance
   while IFS= read -r row; do
     [ -n "${row}" ] || continue
     label="$(printf '%s' "${row}" | jq -r '.[0]')"
     inbox="$(printf '%s' "${row}" | jq -r '.[1]')"
-    machine="$(printf '%s' "${row}" | jq -r '.[2]')"
-    enabled="$(printf '%s' "${row}" | jq -r '.[3]')"
-    live="$(printf '%s' "${row}" | jq -r '.[4]')"
-    instance="$(printf '%s' "${row}" | jq -r '.[5]')"
-    printf 'label=%s inbox=%s machine=%s enabled=%s live=%s instance=%s\n' \
+    machine_id="$(printf '%s' "${row}" | jq -r '.[2]')"
+    machine_name="$(printf '%s' "${row}" | jq -r '.[3]')"
+    enabled="$(printf '%s' "${row}" | jq -r '.[4]')"
+    live="$(printf '%s' "${row}" | jq -r '.[5]')"
+    instance="$(printf '%s' "${row}" | jq -r '.[6]')"
+    printf 'label=%s inbox=%s machine=%s name=%s enabled=%s live=%s instance=%s\n' \
       "$(topic_route_field "${label}")" "$(topic_route_field "${inbox}")" \
-      "$(topic_route_field "${machine}")" "${enabled}" "${live}" "$(topic_route_field "${instance}")"
+      "$(topic_route_field "${machine_id}")" "$(topic_route_quoted "${machine_name}")" "${enabled}" "${live}" "$(topic_route_field "${instance}")"
   done <<<"${rows}"
   printf 'count=%s app=%s\n' "${count}" "$(topic_route_field "${app}")"
 }
