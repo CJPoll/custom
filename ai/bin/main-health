@@ -45,7 +45,7 @@ usage() {
 main-health -- gate origin/main after a landing; keep the red-main marker (DND-1482).
 
 Usage:
-  main-health check  [--repo DIR] [--recheck] [--wait SECS]
+  main-health check  [--repo DIR] [--recheck] [--wait SECS] [--slot-wait SECS]
   main-health status [--repo DIR]
   main-health --help
 
@@ -60,8 +60,11 @@ check   Fetch origin. If the origin/main tip has no verdict, gate it: a pass
           --recheck   re-gate a tip that already has a verdict (a red you
                       believe was environmental)
           --wait S    how long to wait for another check's lock (default 1800)
+          --slot-wait S  how long the gate may queue in test-slot (default
+                      3600); a slot that never frees is exit 3, no verdict
 status  Read-only. Prints the marker (RED <sha> ...), else the verdict for the
-        local refs/remotes/origin/main (green / red / unchecked).
+        local refs/remotes/origin/main (green / unchecked). A red verdict with
+        no marker is exit 1 (the marker is missing, so pushes are not refused).
 --repo  any checkout or worktree of the repo (default: the current directory).
 
 While main is RED, gh-athena / glab-athena refuse a push to main unless the
@@ -91,7 +94,7 @@ die() { # <exit> <message> <fix>
 . "${AI_DIR}/lib/main-health.sh" \
   || die 2 "cannot load ${AI_DIR}/lib/main-health.sh" "run main-health from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
 
-CMD=""; REPO="."; RECHECK=0; WAIT=1800
+CMD=""; REPO="."; RECHECK=0; WAIT=1800; SLOT_WAIT=3600
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -100,12 +103,14 @@ while [ $# -gt 0 ]; do
       CMD="$1"; shift ;;
     --repo) [ $# -ge 2 ] || die 2 "--repo needs a value" "pass --repo <a checkout of the repo>."; REPO="$2"; shift 2 ;;
     --wait) [ $# -ge 2 ] || die 2 "--wait needs a value" "pass --wait <seconds>."; WAIT="$2"; shift 2 ;;
+    --slot-wait) [ $# -ge 2 ] || die 2 "--slot-wait needs a value" "pass --slot-wait <seconds>."; SLOT_WAIT="$2"; shift 2 ;;
     --recheck) RECHECK=1; shift ;;
-    *) die 2 "unknown argument: $1" "see main-health --help; subcommands are check and status, flags --repo, --recheck, --wait." ;;
+    *) die 2 "unknown argument: $1" "see main-health --help; subcommands are check and status, flags --repo, --recheck, --wait, --slot-wait." ;;
   esac
 done
 [ -n "${CMD}" ] || die 2 "no subcommand" "pass check or status (main-health --help)."
 case "${WAIT}" in ''|*[!0-9]*) die 2 "--wait must be whole seconds (got '${WAIT}')" "pass --wait <seconds>." ;; esac
+case "${SLOT_WAIT}" in ''|*[!0-9]*|0) die 2 "--slot-wait must be a positive whole number of seconds (got '${SLOT_WAIT}')" "pass --slot-wait <seconds>." ;; esac
 
 # ---- resolve the repo; a key that cannot be computed is an error ------------
 REPO="$(cd "${REPO}" 2>/dev/null && pwd -P)" || die 2 "--repo is not a directory" "pass --repo <a checkout of the repo>."
@@ -125,6 +130,8 @@ if [ "${CMD}" = status ]; then
   case "${rc}" in
     0) printf 'RED %s since %s (first red %s); record %s; alert %s\n' \
          "${MH_RED_SHA}" "${MH_RED_SINCE:-?}" "${MH_RED_FIRST:-?}" "${MH_RED_RECORD:-?}" "${MH_RED_ALERT:-none}"
+       printf 'Fix: read the log named in %s; land a fix gated by integration-gate --with-critic on a branch containing %s; then run main-health check --repo %s.\n' \
+         "${MH_RED_RECORD:-the verdict record}" "${MH_RED_SHA}" "${REPO}" >&2
        exit 1 ;;
     2) printf 'COULD NOT LOOK: %s\n' "${MH_WHY}"
        die 3 "COULD NOT LOOK whether main is red: ${MH_WHY}" "inspect ${STORE}; remove a corrupt marker only after re-running main-health check --repo ${REPO}, which rewrites it from a real gate run." ;;
@@ -135,6 +142,10 @@ if [ "${CMD}" = status ]; then
     exit 0
   fi
   v="$(mh_kv "$(mh_verdict_path "${COMMON}" "${tip}")" verdict)"
+  if [ "${v}" = red ]; then
+    printf 'RED %s by its verdict record, but the red marker is MISSING\n' "${tip}"
+    die 1 "origin/main ${tip} has a red verdict and no red marker, so pushes are not being refused" "run main-health check --repo ${REPO}; it rewrites the marker from the verdict."
+  fi
   printf 'no red known; origin/main %s: %s\n' "${tip}" "${v:-unchecked}"
   exit 0
 fi
@@ -150,11 +161,13 @@ flock -w "${WAIT}" 8 \
 # Under the lock, any lane left in LANES is a crashed run's corpse.
 for d in "${LANES}"/*; do
   [ -e "${d}" ] || continue
-  git -C "${REPO}" worktree remove --force "${d}" >/dev/null 2>&1 || rm -rf -- "${d}"
+  git -C "${REPO}" worktree remove --force "${d}" >/dev/null 2>&1 8>&- || rm -rf -- "${d}"
 done
-git -C "${REPO}" worktree prune >/dev/null 2>&1 || true
+git -C "${REPO}" worktree prune >/dev/null 2>&1 8>&- || true
 
-timeout 120 git -C "${REPO}" fetch -q origin 2>"${STORE}/.fetch-err.$$"; frc=$?
+# Children never inherit the lock fd (8>&-): a child that outlives this run
+# must not hold the next check's lock.
+timeout 120 git -C "${REPO}" fetch -q origin 2>"${STORE}/.fetch-err.$$" 8>&-; frc=$?
 ferr="$(head -n 3 "${STORE}/.fetch-err.$$" 2>/dev/null | tr '\n' ' ')"; rm -f "${STORE}/.fetch-err.$$"
 [ "${frc}" -eq 0 ] \
   || die 3 "COULD NOT MEASURE: git fetch origin failed (exit ${frc}: ${ferr}); no verdict on a possibly stale ref" "fix the remote or the network (git -C ${REPO} fetch origin), then re-run main-health check."
@@ -197,7 +210,7 @@ send_alert() {
   } > "${body}" || { rm -f "${body}"; return 4; }
   [ -x "${sm}" ] || { echo "send-mail is missing: ${sm}" >&2; rm -f "${body}"; return 4; }
   out="$(cd -- "${TOOL_REPO}" && timeout 20 "${sm}" --local harness-alerts-detector main-red \
-          --to custom --re "${REC}" --body-file "${body}" 2>&1)"; rc=$?
+          --to custom --re "${REC}" --body-file "${body}" 2>&1 8>&-)"; rc=$?
   rm -f "${body}"
   if [ "${rc}" -ne 0 ]; then printf '%s\n' "${out}" | head -n 3 >&2; return "${rc}"; fi
   name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
@@ -265,12 +278,16 @@ cleanup() {
   rm -f "${STORE}/.slot-outcome.$$"
 }
 trap cleanup EXIT
-git -C "${REPO}" worktree add -q --detach "${LANE}" "${TIP}" >/dev/null 2>&1 \
+# A TERM/INT waits for the foreground gate to end, then exits through cleanup,
+# so the lane is never removed under a running gate.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+git -C "${REPO}" worktree add -q --detach "${LANE}" "${TIP}" >/dev/null 2>&1 8>&- \
   || die 3 "COULD NOT MEASURE: cannot create the lane ${LANE} at ${TIP}" "check disk space and git -C ${REPO} worktree list, then re-run."
 
 SLOT="${MAIN_HEALTH_TEST_SLOT:-${HERE}/test-slot}"
 rm -f "${STORE}/.slot-outcome.$$"
-( cd "${LANE}" && "${SLOT}" --label "main-health ${TIP:0:12}" --wait-timeout 3600 \
+( cd "${LANE}" && "${SLOT}" --label "main-health ${TIP:0:12}" --wait-timeout "${SLOT_WAIT}" \
     --outcome-file "${STORE}/.slot-outcome.$$" -- timeout 1500 ./ai/bin/harness-gate ) >"${LOG}" 2>&1 8>&-
 rc=$?
 outcome="$(cat "${STORE}/.slot-outcome.$$" 2>/dev/null || true)"
@@ -290,6 +307,4 @@ esac
 write_kv "${REC}" "schema=${MH_SCHEMA_VERDICT}" "sha=${TIP}" "verdict=${v}" "source=gate" \
   "checked_at=$(now)" "gate_rc=${rc}" "log=${LOG}" \
   || die 3 "cannot write the verdict record ${REC}" "check that ${STORE} is writable."
-# Keep 30 days of gate logs.
-find "${STORE}/logs" -maxdepth 1 -type f -name '*.log' -mtime +30 -delete 2>/dev/null || true
 apply "${v}"

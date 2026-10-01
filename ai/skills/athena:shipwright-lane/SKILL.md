@@ -153,6 +153,9 @@ landing on main, and the remote rejects a non-fast-forward. If the push is
 rejected because the remote moved under you, re-run *Sync down first* and
 push again (bounded: at most a couple of attempts); if it still fails,
 journal it and leave the commits local for the owner rather than forcing.
+If the wrapper refuses with exit 3 and `RED MAIN`, `origin/main` is red
+(`ai/bin/main-health`, DND-1482) and only a gated fix may land: journal it,
+leave the commits local, and do not retry this run.
 **Never `git push --force`** on this repo. Push only `~/dev/custom` — never a
 product repo. If a run made no commits, there is nothing to push; still leave
 your worktree current from *Sync down first*. You do **not** update the main

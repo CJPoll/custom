@@ -459,6 +459,26 @@ gha "${W}" push origin HEAD
 is_red_refusal && ok "33b. main RED: push origin HEAD from the main branch is refused" \
   || bad "33b. HEAD push refused" "rc=${RC} err='${ERR}'"
 
+# 33c. The refspec spellings a parse could miss: an alias for push, --repo,
+# a wildcard. A delete and a push to another remote land nothing on origin/main.
+origin_with_main r5; red_marker "${W}" "${BEFORE}"
+gha "${W}" -c alias.p=push p origin HEAD:main
+is_red_refusal && ok "33c. main RED: a push through a git alias (alias.p=push) is refused" \
+  || bad "33c. alias push refused" "rc=${RC} err='${ERR}'"
+gha "${W}" push --repo origin HEAD:main
+is_red_refusal && ok "33d. main RED: push --repo origin HEAD:main is refused" \
+  || bad "33d. --repo push refused" "rc=${RC} err='${ERR}'"
+gha "${W}" push origin 'refs/heads/*:refs/heads/*'
+is_red_refusal && ok "33e. main RED: a wildcard refspec that covers main is refused" \
+  || bad "33e. wildcard push refused" "rc=${RC} err='${ERR}'"
+gha "${W}" push -d origin topic
+[ "${RC}" = 0 ] && ok "33f. main RED: push -d (a delete) proceeds" \
+  || bad "33f. delete push blocked" "rc=${RC} err='${ERR}'"
+git init -q --bare -b main "${TMP}/r5-other.git"; git -C "${W}" remote add other "${TMP}/r5-other.git"
+gha "${W}" push other HEAD:main
+[ "${RC}" = 0 ] && ok "33g. main RED: a push to main on a remote other than origin proceeds (the marker is origin's)" \
+  || bad "33g. other-remote push blocked" "rc=${RC} err='${ERR}'"
+
 # 34. A marker that cannot be read is COULD NOT LOOK, never "no red".
 origin_with_main r4
 C4="$(git -C "${W}" rev-parse --path-format=absolute --git-common-dir)"

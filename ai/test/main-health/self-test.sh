@@ -147,7 +147,7 @@ run check --repo "${W}"
   || bad "9. no repeat alert" "rc=${RC} mails=$(mail_n)"
 
 run status --repo "${W}"
-[ "${RC}" = 1 ] && [[ "${OUT}" == *"RED ${R1}"* ]] && ok "10. status: exit 1, RED <sha>" \
+[ "${RC}" = 1 ] && [[ "${OUT}" == *"RED ${R1}"* ]] && [[ "${ERR}" == *"Fix:"* ]] && ok "10. status: exit 1, RED <sha>, Fix:" \
   || bad "10. status red" "rc=${RC} out='${OUT}'"
 
 R2="$(land 1)"
@@ -157,8 +157,16 @@ run check --repo "${W}"
   && ok "11. a newer red tip in the same episode: marker moves to it, keeps first_red, no new alert" \
   || bad "11. red episode continues" "rc=${RC} red=$(cat "${STORE}/red") mails=$(mail_n)"
 
-N="$(slot_n)"; run check --repo "${W}" --recheck
-[ "${RC}" = 1 ] && [ "$(slot_n)" = "$((N + 1))" ] && ok "12. --recheck re-gates a tip that already has a verdict" \
+mv "${STORE}/red" "${T}/red.saved"
+run status --repo "${W}"
+[ "${RC}" = 1 ] && [[ "${OUT}" == *"MISSING"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && ok "11b. status: a red verdict with no marker is exit 1 (marker MISSING), never 'no red known'" \
+  || bad "11b. missing marker" "rc=${RC} out='${OUT}' err='${ERR}'"
+mv "${T}/red.saved" "${STORE}/red"
+
+N="$(slot_n)"; run check --repo "${W}" --recheck --slot-wait 77
+[ "${RC}" = 1 ] && [ "$(slot_n)" = "$((N + 1))" ] && tail -n 1 "${T}/slot.log" | grep -q -- '--wait-timeout 77 ' \
+  && ok "12. --recheck re-gates a tip that already has a verdict; --slot-wait reaches test-slot" \
   || bad "12. recheck" "rc=${RC} slots=$(slot_n) was ${N}"
 
 echo "--- the fix clears the marker ---"

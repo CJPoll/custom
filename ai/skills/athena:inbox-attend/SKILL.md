@@ -531,7 +531,9 @@ to `wedge-ticket-decide`. Instead:
 2. **File the stop-the-line ticket** when main is still red. Search the DND
    tracker (`notion-personal`, data source
    `219349da-87fb-8063-8f36-000b362fbd60`) for a title containing
-   `main-red:<first 12 of the record's first_red, else sha>`. None open:
+   `main-red:<sha12>`, where `<sha12>` is the first 12 characters of the
+   `first_red=` line of the marker `~/dev/custom/.git/main-health/red` (the
+   episode's first red tip; never take it from the message). None open:
    create one per `athena:ticket-management` → filing, titled `HIGH [harness]
    custom origin/main is red at <sha12> [main-red:<sha12>]`, Kind Bug,
    Severity HIGH, Area Harness, Status Todo, no assignee. Its body is the

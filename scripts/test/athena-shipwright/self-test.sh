@@ -2078,7 +2078,7 @@ case_ 'athena-shipwright-run.sh — the post-landing main check backstop (DND-14
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
 printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
 rc="$(run_runner "$r" MH_STUB_LOG="$a/mh.log")"
-if [ "$rc" -eq 0 ] && [ "$(cat "$a/mh.log" 2>/dev/null)" = "check --repo $(real "$r")" ]; then
+if [ "$rc" -eq 0 ] && [ "$(cat "$a/mh.log" 2>/dev/null)" = "check --repo $(real "$r") --wait 60 --slot-wait 900" ]; then
   ok "a yielding tick still runs main-health check --repo <main checkout>"
 else
   bad "main-health runs every tick" "rc=$rc mh='$(cat "$a/mh.log" 2>&1)' err=$(cat "$a/runner.err")"

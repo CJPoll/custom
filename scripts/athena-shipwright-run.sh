@@ -740,7 +740,11 @@ MAIN_HEALTH="${SHIPWRIGHT_MAIN_HEALTH:-${__wrapper_dir%/scripts}/ai/bin/main-hea
 mh_log="${LOG_DIR}/${ts}.main-health.log"
 if [ -x "${MAIN_HEALTH}" ]; then
   mh_rc=0
-  "${MAIN_HEALTH}" check --repo "${MAIN_CHECKOUT}" >"${mh_log}" 2>&1 </dev/null || mh_rc=$?
+  # Bounded so the tick stays inside its hour: 60 s for another check's lock
+  # (a held lock means a check is already running), 15 min to queue in
+  # test-slot, then the gate's own 1500 s cap. A miss is exit 3 and retries.
+  "${MAIN_HEALTH}" check --repo "${MAIN_CHECKOUT}" --wait 60 --slot-wait 900 \
+    >"${mh_log}" 2>&1 </dev/null || mh_rc=$?
   case "${mh_rc}" in
     0) echo "athena-shipwright: main-health: origin/main GREEN (${mh_log})" >&2 ;;
     1) echo "athena-shipwright: main-health: origin/main is RED; the check alerted on harness-alerts (${mh_log})" >&2 ;;

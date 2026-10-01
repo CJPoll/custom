@@ -109,10 +109,12 @@ EOF
 # reach and refuse on the first one that goes to FG_HOST over non-HTTPS.
 # Sets FG_RESOLVED_URLS (newline-separated) for the dry-run report, and, for a
 # `push`, FG_PUSH_URL (the first URL it pushes to) and FG_PUSH_GLOB (its git
-# global options) for the landing telemetry below.
+# global options) for the landing telemetry below, and FG_PUSH_ARGS (the
+# alias-expanded args after `push`) for the red-main refusal.
 FG_RESOLVED_URLS=""
 FG_PUSH_URL=""
 FG_PUSH_GLOB=()
+FG_PUSH_ARGS=()
 FG_AUTH_INDEX=""
 fg_refuse_non_https() {
   local -a glob=() ex=()
@@ -173,6 +175,9 @@ fg_refuse_non_https() {
       shift ;;
     *) return 0 ;;
   esac
+  # The subcommand's own args, alias-expanded, for the red-main refusal
+  # (DND-1482): it must parse what git will run, not the raw argv.
+  local -a sub_args=( "$@" )
 
   local -a remotes=()
   mapfile -t remotes < <(G remote 2>/dev/null || true)
@@ -281,6 +286,7 @@ fg_refuse_non_https() {
   if [ "$sub" = push ]; then
     FG_PUSH_URL="${FG_RESOLVED_URLS%%$'\n'*}"
     FG_PUSH_GLOB=( "${glob[@]}" )
+    FG_PUSH_ARGS=( "${sub_args[@]}" )
   fi
   return 0
 }
@@ -442,11 +448,21 @@ fg_record_landing() {
 # means no red is known, and the push proceeds; a repo main-health never checked
 # (gen_saas, walt_ui) has none. A marker that cannot be read refuses (COULD NOT
 # LOOK). It runs before the dry-run print, so FG_DRY_RUN=1 exercises it.
+#
+# Scope: the marker describes origin/main, so only a push whose URL is
+# origin's push URL is judged; a push to another remote is not. The refspecs
+# judged are FG_PUSH_ARGS, the alias-expanded args, so `alias.p=push` cannot
+# carry a push past it. The parse's residuals are in mh_push_main_sources.
 fg_refuse_red_main() {
-  local common src sha rc
+  local common src sha rc origin_url cur
   [ -n "$FG_PUSH_URL" ] || return 0
   common="$(git "${FG_PUSH_GLOB[@]}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
   [ -n "$common" ] || return 0
+  # No marker store at all: no red can be known; skip the rest of the reads.
+  [ -e "$common/main-health" ] || return 0
+  origin_url="$(git "${FG_PUSH_GLOB[@]}" -c "$(fg_rewrite)" remote get-url --push origin 2>/dev/null || true)"
+  [ -n "$origin_url" ] && [ "$origin_url" = "$FG_PUSH_URL" ] || return 0
+  cur="$(git "${FG_PUSH_GLOB[@]}" symbolic-ref --short -q HEAD 2>/dev/null || true)"
   # shellcheck source=main-health.sh
   if ! . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/main-health.sh" 2>/dev/null; then
     printf '%s: REFUSING `git push`: cannot load ai/lib/main-health.sh, so whether main is red is unknown.\n  Fix: run %s from a full ~/dev/custom checkout (ai/bin and ai/lib side by side).\n' "$FG_TOOL" "$FG_TOOL" >&2
@@ -467,7 +483,7 @@ fg_refuse_red_main() {
            "$FG_TOOL" "$sha" "$MH_WHY" >&2
          exit 3 ;;
     esac
-  done < <(mh_push_main_sources main "$@")
+  done < <(mh_push_main_sources main "$cur" "${FG_PUSH_ARGS[@]}")
   return 0
 }
 
@@ -481,7 +497,7 @@ fg_refuse_red_main() {
 fg_git_exec() {
   local user="$1" token="$2" header auth_key a n
   shift 2
-  fg_refuse_red_main "$@"
+  fg_refuse_red_main
   auth_key="http.https://$FG_HOST/.extraheader"
   header="AUTHORIZATION: basic $(printf '%s:%s' "$user" "$token" | openssl base64 -A)"
   n="${GIT_CONFIG_COUNT:-0}"
