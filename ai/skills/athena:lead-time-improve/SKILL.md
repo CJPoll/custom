@@ -136,6 +136,10 @@ out of the summary's `phases` and `biggest`, so *Pick the biggest
 contributor* and its choice rule see local landings only. Journal the count;
 a foreign landing is never an instrumentation gap.
 
+Then run the `ready-and-idle` sweep on R, as *For each `watch` repo* →
+*Also sweep for finished work nobody is merging* says. Open work is outside
+the summary, which sees landings only.
+
 ### 4. Pick the biggest contributor
 
 `biggest.phase` is the candidate with the largest summed time in the window:
@@ -547,8 +551,17 @@ name: `--repo ~/dev/gen_saas`, not `--repo gen_saas`.
 landed requests only, never open ones. Report them; the admiral merges, not you. Read the exit code: **3 =
 UNAVAILABLE**, no list; **4 = the list is COMPLETE, act on it** — only `drift`
 went soft, routine from a cron lane. Reading a 4 as a failure reinstates the outage.
-Do not run it on `~/dev/custom`: with no CI, every request there is NOT
-JUDGED (`ready-and-idle --help`), so the sweep cannot find anything.
+Run it on every resolved repo, `improve` repos included, and put its count in
+that repo's summary line. In a repo with no CI (custom) a request is judged
+on an integration-gate receipt and a critic PASS for its head
+(`ready-and-idle --help`). A scan that says NOT JUDGED is not a clean scan:
+report its JSON `unjudged` as `unjudged=<n>`, never as zero.
+
+**Later (2026-10-01, DND-1505):** this said "Do not run it on `~/dev/custom`",
+because with no CI every request there read NOT JUDGED. Superseded: the
+sweep now judges a no-CI request by the merge bar's machine-readable evidence,
+so custom's abandoned PRs are covered. One limit: integration receipts are
+local, so it sees only PRs gated on this machine, and the scan says so.
 
 **Count only the fleet's own rows.** Neither tool filters by author, and
 `walt_ui` is shared with human coworkers. A row is fleet work only if Athena
@@ -596,8 +609,8 @@ Write one summary line per repo to the summary file your brief names; else
 `<state>/runs/<UTC %Y%m%dT%H%M%SZ>.summary`:
 
 ```
-repo=<R> mode=improve biggest=<phase|none> action=<change|instrumentation|architect|revert|no-action> experiments=keep:<n>,revert:<n>,pending:<n>,inconclusive:<n>,confounded:<n>,declined:<n>,held:<n> reason="<one line>"
-repo=<R> mode=watch outliers=<n> qualified=<n> handed_off=<n> ready_and_idle=<n|unavailable>
+repo=<R> mode=improve biggest=<phase|none> action=<change|instrumentation|architect|revert|no-action> experiments=keep:<n>,revert:<n>,pending:<n>,inconclusive:<n>,confounded:<n>,declined:<n>,held:<n> ready_and_idle=<n|unavailable> unjudged=<n> reason="<one line>"
+repo=<R> mode=watch outliers=<n> qualified=<n> handed_off=<n> ready_and_idle=<n|unavailable> unjudged=<n>
 repo=<R> skipped="<reason>"
 ```
 

@@ -45,7 +45,8 @@ terminal status, and **diff them in both directions**:
   `In Progress` for `Parked`, `Needs Attention` or `Todo`:
   [[athena:ticket-management]] → *A ticket's status follows its captain*.
 - **Every MR you OPENED is merged, or named as a live hand-off.** An open MR
-  that is non-draft, green on its head SHA, with no unresolved discussion and no
+  that is non-draft, green on its head SHA (with no CI: an integration-gate
+  receipt and a critic PASS for it), with no unresolved discussion and no
   unmet approval is **not** "unmerged work in progress" — the direction above
   *passes* on it, because the predicate it checks is satisfied. It is finished
   work with no actor, which is the most expensive state in the fleet. Enumerate
@@ -98,9 +99,13 @@ terminal state, so gating this on terminal state means the check cannot fire in
 the one case it exists for. [[athena:admiral-resume]] is the resume half of a
 pair; this is the suspend half. (A HARD kill executes nothing, so this cannot
 cover that case — the lead-time improver cron's hourly `ready-and-idle` sweep
-of its `watch` repos (`athena:lead-time-improve` → *For each `watch` repo*) is
-what covers a hard kill. Do not read this paragraph as making that sweep
-redundant.)
+of every repo it resolves, `improve` repos included (`athena:lead-time-improve`
+→ *For each `watch` repo* → *Also sweep for finished work nobody is merging*),
+is what covers a hard kill. In a repo with no CI it can only see a PR gated on
+its own machine. Do not read this paragraph as making that sweep redundant.)
+
+**Later (2026-10-01, DND-1505):** this named the sweep "of its `watch` repos".
+Superseded: the sweep runs on `improve` repos too, so custom is covered.
 
 **Later (2026-10-01, DND-1480):** this credited the athena-shipwright cron
 with that sweep. Superseded: the sweep moved with the shipwright's lead-time

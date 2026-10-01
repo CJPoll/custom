@@ -4,7 +4,9 @@
 # ready-and-idle — find open change requests that are DONE and UNATTENDED.
 #
 # A "ready-and-idle" change request is one that is open, not a draft, green on
-# its CURRENT head, has no unresolved blocking discussion and no unmet required
+# its CURRENT head (in a repo with no CI: free of conflicts, with an
+# integration-gate receipt and a critic PASS for that head, DND-1505), has no
+# unresolved blocking discussion and no unmet required
 # approval — and has had no activity for --idle-hours. Nothing is waiting on a
 # human and nothing is waiting on CI: it is finished work that nobody is
 # carrying. Every second in this state is pure lead time, and it accrues rebase
@@ -114,24 +116,93 @@ module ReadyAndIdle
     s.empty? || s == "none"
   end
 
+  # The exclusion reasons that mean NOT JUDGED rather than "looked, not ready":
+  #   no_ci_result         no CI result, and either the repo HAS CI (so its
+  #                        checks simply did not run on this head) or the head
+  #                        declares no gate whose receipt could stand in for
+  #                        one (DND-1505)
+  #   evidence_unreadable  the no-CI evidence could not be read: COULD NOT
+  #                        LOOK, not "no receipt"
+  UNJUDGED_REASONS = %i[no_ci_result evidence_unreadable].freeze
+
+  def unjudged_count(excluded)
+    UNJUDGED_REASONS.sum { |k| excluded[k].to_i }
+  end
+
+  # Receipts live under THIS machine's git common dir. A request gated on
+  # another machine has none here, so a scan that counted any must say so: "no
+  # receipt here" is not "the gate never passed".
+  def local_receipt_note(excluded)
+    n = excluded[:no_local_receipt].to_i
+    return "" unless n.positive?
+
+    " Note: no_local_receipt=#{n} searched THIS machine's integration receipts only; a request " \
+      "gated on another machine reads the same, so check it there before calling it unfinished."
+  end
+
   # The line for a scan that emitted no rows. It says CLEAN SCAN only when
-  # every candidate was JUDGED. A candidate with no CI result was not, so the
+  # every candidate was JUDGED. A candidate nothing could judge was not, so the
   # line says NOT JUDGED instead. Measured 2026-09-28: custom has no CI, and
   # this line read "CLEAN SCAN ... excluded: not_green=6" every hourly run
   # while three finished shipwright PRs (#88, #98, #101) sat unmerged, #88 for
   # 18h. That is "could not look" printed as "looked, found nothing".
   def empty_scan_line(scanned:, repo:, excluded:)
     tail = excluded.empty? ? "" : " (excluded: #{excluded.map { |k, v| "#{k}=#{v}" }.join(', ')})"
-    unjudged = excluded[:no_ci_result].to_i
+    unjudged = unjudged_count(excluded)
     return "ready-and-idle: CLEAN SCAN — looked at #{scanned} open change request(s) in #{repo}; " \
-           "0 are ready-and-idle.#{tail}" unless unjudged.positive?
+           "0 are ready-and-idle.#{tail}#{local_receipt_note(excluded)}" unless unjudged.positive?
 
     "ready-and-idle: NOT JUDGED — #{unjudged} of #{scanned} open change request(s) in #{repo} " \
-      "have no CI result on their head, so whether they are finished was not measured; " \
-      "0 of the rest are ready-and-idle.#{tail} " \
-      "Fix: check each un-judged change request by hand (in a repo that declares a gate, a " \
-      "critic PASS and an integration-gate receipt for its head mean finished); never report " \
-      "this scan as clean."
+      "could not be judged, so whether they are finished was not measured; " \
+      "0 of the rest are ready-and-idle.#{tail}#{local_receipt_note(excluded)} #{UNJUDGED_FIX}"
+  end
+
+  UNJUDGED_FIX = "Fix: for evidence_unreadable, act on the reason named on stderr for each " \
+                 "request (fetch origin so the head is local, wait for the forge to compute " \
+                 "mergeability, or repair the store), then re-run; for no_ci_result, check each " \
+                 "request by hand. Never report this scan as clean."
+
+  # DND-1505. A request with no CI result, in a repo with no CI, is judged by
+  # the machine-readable evidence of the merge bar (athena:merge-boarding ->
+  # The merge bar): an integration-gate receipt for exactly its head, recorded
+  # against origin/<target> or an ancestor of it, and a critic PASS for that
+  # head. The forge must also report it free of conflicts: a receipt says
+  # nothing about a target that moved into a conflict.
+  #
+  # `ev` is the impure probe's facts (`noci_evidence`), or nil when none were
+  # gathered. Returns nil when the evidence proves the request finished, else
+  # the reason it does not. Only UNJUDGED_REASONS mean "could not look"; the
+  # rest are judged exclusions. A repo WITH CI (`ev[:ci_configured]`) is never
+  # judged this way: an empty rollup there means its checks did not run (a
+  # conflicting PR gets none), and the merge guard refuses it anyway.
+  #
+  # The critic leg accepts the gate's own attestation. integration-gate writes
+  # a receipt only after critic-review's reader returned a PASS for that head,
+  # or under --critic-override, which the receipt records. So a receipt with
+  # no override proves a PASS even after the critic receipt went with a removed
+  # worktree. A recorded BLOCK still excludes, and an overridden receipt needs a
+  # PASS readable now.
+  def noci_disqualifier(ev)
+    return :no_ci_result if ev.nil? || ev[:gate] == :none || ev[:ci_configured]
+    return :evidence_unreadable if [ev[:gate], ev[:mergeable], ev[:receipt], ev[:critic]].include?(:could_not_look)
+    return :conflicting if ev[:mergeable] == :conflicting
+    return :no_local_receipt if ev[:receipt] == :none
+    return :stale_gate_receipt unless ev[:receipt] == :ok
+    return :critic_block if ev[:critic] == :block
+    return nil if ev[:critic] == :pass
+    return :no_critic_pass if ev[:critic_override]
+
+    nil
+  end
+
+  # What a qualifying no-CI row was judged on, for the row's `evidence` key.
+  def noci_evidence_text(ev)
+    leg = if ev[:critic] == :pass
+            "integration receipt + critic PASS on the head"
+          else
+            "integration receipt (critic PASS attested by the gate; no critic receipt readable now)"
+          end
+    "#{leg}; receipt #{ev[:receipt_path]}"
   end
 
   # THE predicate. Returns nil when the change request IS ready-and-idle, and
@@ -144,12 +215,18 @@ module ReadyAndIdle
   # :unknown_activity is a MISSING measurement, not a disqualification on the
   # merits; the caller surfaces it as a probe failure rather than swallowing it.
   #
-  # :no_ci_result is NOT JUDGED, not "not green": nothing measured readiness.
-  # In a repo with no CI at all (custom) every candidate lands here.
+  # A request with no CI result is judged by its no-CI evidence
+  # (`noci_disqualifier`, DND-1505). :no_ci_result and :evidence_unreadable
+  # are NOT JUDGED, not "not green": nothing measured readiness.
   def disqualifier(mr, now:, idle_hours:)
     return :draft if mr[:draft]
-    return :no_ci_result if ci_absent?(mr[:pipeline_status])
-    return :not_green unless green?(mr[:pipeline_status])
+
+    if ci_absent?(mr[:pipeline_status])
+      why = noci_disqualifier(mr[:noci_evidence])
+      return why if why
+    elsif !green?(mr[:pipeline_status])
+      return :not_green
+    end
     return :blocking_discussions if mr[:blocking_unresolved]
 
     left = mr[:approvals_left]
@@ -222,6 +299,8 @@ module ReadyAndIdle
       title: mr[:title],
       head_sha: mr[:head_sha],
       pipeline_status: mr[:pipeline_status],
+      # What "finished" was judged on: the CI result, or the no-CI evidence.
+      evidence: (mr[:noci_evidence] ? noci_evidence_text(mr[:noci_evidence]) : "CI #{mr[:pipeline_status]} on the head"),
       last_activity: mr[:last_activity],
       idle_seconds: secs,
       idle_human: duration_human(secs),
@@ -382,6 +461,130 @@ def count_drift(dir, sha, target)
   Integer(out.strip, exception: false)
 end
 
+# ---- no-CI evidence (DND-1505) --------------------------------------------
+
+AI_DIR = File.expand_path("..", __dir__)
+IR_LIB = File.join(AI_DIR, "lib", "integration-receipt.sh")
+CRITIC_REVIEW = File.join(AI_DIR, "bin", "critic-review")
+CRITIC_TIMEOUT_S = 120
+
+# The receipt rules have ONE implementation, ai/lib/integration-receipt.sh;
+# this bridge runs it rather than re-reading the JSON by its own rules. Args:
+# lib, checkout, head, common dir, tip. It prints the declared-gate lookup,
+# then (only when a gate is declared and a tip resolved) the receipt read.
+IR_BRIDGE = <<~'SH'
+  . "$1" || exit 9
+  g="$(ir_declared_gate_on "$2" "$3")"; grc=$?
+  printf 'gate\t%s\t%s\n' "$grc" "$g"
+  [ "$grc" -eq 0 ] && [ -n "$5" ] || exit 0
+  ir_read_receipt "$4" "$3" "$5"; rrc=$?
+  printf 'receipt\t%s\t%s\t%s\t%s\n' "$rrc" "$IR_KIND" "$IR_RECEIPT" "$IR_WHY"
+SH
+
+RECEIPT_KINDS = { "NO RECEIPT" => :none, "RECEIPT INVALID" => :invalid,
+                  "RECEIPT FOR ANOTHER BASE" => :other_base }.freeze
+
+def git_line(dir, *args)
+  out, _err, st = Open3.capture3("git", "-C", dir, *args)
+  st.success? ? out.strip : nil
+end
+
+# The facts `ReadyAndIdle.noci_disqualifier` judges, for ONE request's head.
+# Every leg that cannot be read is :could_not_look with a `why` naming what
+# was searched, never :none: "no receipt" and "could not look" call for
+# different next steps (~/.claude/CLAUDE.md -> "A failed lookup must never
+# look like an empty one").
+#
+# The block returns the forge's mergeability for the request. It is called
+# only after the head is known to declare a gate in a repo with no CI, because
+# settling it may re-query the forge.
+def noci_evidence(dir, head, target)
+  unknown = ->(why) { { gate: :could_not_look, why: why } }
+  return unknown.call("head sha #{head.inspect} is not a full commit SHA") unless head.to_s.match?(/\A[0-9a-f]{40}\z/)
+
+  common = git_line(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+  return unknown.call("git rev-parse --git-common-dir failed in #{dir}") if common.to_s.empty?
+
+  tip = git_line(dir, "rev-parse", "--verify", "-q", "refs/remotes/origin/#{target}^{commit}")
+  out, err, st = Open3.capture3("bash", "-c", IR_BRIDGE, "ready-and-idle", IR_LIB, dir, head, common, tip.to_s)
+  return unknown.call("cannot run #{IR_LIB}: #{err.strip}") unless st.success?
+
+  fields = out.lines.to_h { |l| f = l.chomp.split("\t", 5); [f.first, f.drop(1)] }
+  grc, _gate = fields["gate"]
+  case grc
+  when "1" then return { gate: :none }
+  when "0" then nil
+  when "2" then return unknown.call("head #{head[0, 12]} is not in #{dir}'s object store, so whether it declares a gate is unknown")
+  else return unknown.call("the declared-gate lookup for #{head[0, 12]} printed no result (#{err.strip.lines.first.to_s.strip})")
+  end
+
+  ci = ci_configured(dir, [head, tip].compact.reject(&:empty?))
+  return unknown.call(ci) if ci.is_a?(String)
+  return { gate: :declared, ci_configured: true } if ci
+
+  mergeable = yield
+  merge_state = { "MERGEABLE" => :ok, "CONFLICTING" => :conflicting }[mergeable.to_s]
+  unless merge_state
+    return { gate: :declared, mergeable: :could_not_look,
+             why: "the forge reports mergeable=#{mergeable.inspect} for this request (GitHub computes it " \
+                  "lazily; a re-run a few minutes later reads it)" }
+  end
+  return { gate: :declared, mergeable: :conflicting } if merge_state == :conflicting
+
+  if tip.to_s.empty?
+    return { gate: :declared, receipt: :could_not_look,
+             why: "origin/#{target} does not resolve in #{dir}, so a receipt's base cannot be checked" }
+  end
+
+  rrc, kind, path, why = fields["receipt"]
+  ev = { gate: :declared, receipt_path: path, why: why }
+  return ev.merge(receipt: RECEIPT_KINDS.fetch(kind, :could_not_look)) unless rrc == "0"
+
+  override = begin
+    JSON.parse(File.read(path))["critic_override"]
+  rescue StandardError => e
+    return ev.merge(receipt: :could_not_look, why: "#{path} passed the receipt reader but cannot be re-read: #{e.message}")
+  end
+  ev.merge(receipt: :ok, critic_override: !override.to_s.strip.empty?, **critic_leg(dir, head, tip))
+end
+
+CI_CONFIG_PATHS = %w[.github/workflows .gitlab-ci.yml].freeze
+
+# Does any of `shas` carry CI configuration? -> true, false, or a String
+# naming why it could not be read. ls-tree exits 0 with an EMPTY listing for an
+# absent path, and non-zero only on an error, so "absent" and "could not look"
+# stay apart.
+def ci_configured(dir, shas)
+  shas.each do |sha|
+    out, err, st = Open3.capture3("git", "-C", dir, "ls-tree", "--name-only", sha, "--", *CI_CONFIG_PATHS)
+    return "git ls-tree #{sha[0, 12]} failed in #{dir}: #{err.strip}" unless st.success?
+    return true unless out.strip.empty?
+  end
+  false
+end
+
+# The critic leg, read through critic-review's OWN reader (never a second copy
+# of its rules): 0 PASS, 2 BLOCK, 3 no green verdict. Within 3, only its
+# COULD NOT LOOK is told apart; every other 3 (no receipt in any checkout,
+# running, fail-open, dirty, conflicting) leaves the gate's attestation to
+# decide, which is sound whatever the wording says.
+def critic_leg(dir, head, tip)
+  # The timeout caps a hang (a git lock), nothing else: the reader only reads.
+  out, err, st = Open3.capture3("timeout", CRITIC_TIMEOUT_S.to_s, CRITIC_REVIEW,
+                                "--verdict-for", head, "--covering", tip, chdir: dir)
+  text = "#{out}#{err}"
+  case st.exitstatus
+  when 0 then { critic: :pass }
+  when 2 then { critic: :block }
+  when 124 then { critic: :could_not_look, why: "critic-review --verdict-for hung past #{CRITIC_TIMEOUT_S}s and was stopped" }
+  when 3
+    text.include?("COULD NOT LOOK") ? { critic: :could_not_look, why: text.lines.first.to_s.strip } : { critic: :absent }
+  else { critic: :could_not_look, why: "critic-review --verdict-for exited #{st.exitstatus.inspect}: #{text.lines.first.to_s.strip}" }
+  end
+rescue SystemCallError => e
+  { critic: :could_not_look, why: "cannot run #{CRITIC_REVIEW}: #{e.message}" }
+end
+
 # ---- GitHub (gh) ----------------------------------------------------------
 
 class GitHubForge
@@ -401,10 +604,33 @@ class GitHubForge
   # PR's head commit, so it is by construction "green on the CURRENT head".
   def open_requests
     prs = run_json(%w[gh pr list --state open --limit 200 --json
-                      number,title,headRefName,baseRefName,headRefOid,isDraft,updatedAt,reviewDecision,statusCheckRollup], @dir)
+                      number,title,headRefName,baseRefName,headRefOid,isDraft,updatedAt,reviewDecision,statusCheckRollup,mergeable], @dir)
     return nil unless prs
 
     prs.map { |p| to_facts(p) }
+  end
+
+  # GitHub computes `mergeable` lazily: the first read after the base moves
+  # says UNKNOWN and starts the computation. Measured 2026-10-01 on custom:
+  # `gh pr list` read UNKNOWN for all 6 open PRs, and a second read a moment
+  # later read MERGEABLE or CONFLICTING for each. So an UNKNOWN is re-read,
+  # a bounded number of times; what is still UNKNOWN after that is returned
+  # as-is and reads NOT JUDGED (evidence_unreadable), never a pass.
+  MERGEABLE_RECHECKS = 3
+  MERGEABLE_RECHECK_WAIT_S = 2
+
+  def settle_mergeable(number, current)
+    value = current
+    MERGEABLE_RECHECKS.times do
+      break unless value == "UNKNOWN"
+
+      sleep MERGEABLE_RECHECK_WAIT_S
+      out, _err, st = Open3.capture3("gh", "pr", "view", number.to_s, "--json", "mergeable", chdir: @dir)
+      break unless st.success?
+
+      value = (JSON.parse(out)["mergeable"] rescue value)
+    end
+    value
   end
 
   def to_facts(p)
@@ -414,6 +640,8 @@ class GitHubForge
       target: p["baseRefName"], head_sha: p["headRefOid"],
       draft: !!p["isDraft"],
       pipeline_status: rollup_status(p["statusCheckRollup"]),
+      # MERGEABLE / CONFLICTING / UNKNOWN (computed lazily by GitHub).
+      mergeable: p["mergeable"],
       # GitHub has no per-thread "blocking" flag reachable from `gh pr list`;
       # CHANGES_REQUESTED is the equivalent standing block, and it is the one
       # that actually stops a merge.
@@ -466,6 +694,11 @@ class GitLabForge
     "!"
   end
 
+  # GitLab's has_conflicts is computed with the list; nothing to settle.
+  def settle_mergeable(_iid, current)
+    current
+  end
+
   def project_path(dir)
     # git@gitlab.com:group/sub/repo.git  OR  https://gitlab.com/group/repo.git
     require "uri"
@@ -494,6 +727,8 @@ class GitLabForge
         draft: !!(m["draft"] || m["work_in_progress"]),
         blocking_unresolved: m["blocking_discussions_resolved"] == false,
         last_activity: m["updated_at"],
+        # The same vocabulary as GitHub's; absent stays nil (could not look).
+        mergeable: { true => "CONFLICTING", false => "MERGEABLE" }[m["has_conflicts"]],
         pipeline_status: nil, approvals_left: nil,
       }
       next base if base[:draft] || base[:blocking_unresolved]
@@ -620,6 +855,57 @@ def self_test
   clean_line = ReadyAndIdle.empty_scan_line(scanned: 2, repo: "/r", excluded: { not_green: 2 })
   check.call("all judged and none ready is CLEAN", clean_line.include?("CLEAN SCAN"), true)
   check.call("CLEAN keeps its exclusion counts", clean_line.include?("not_green=2"), true)
+  # DND-1505: the no-CI evidence model. A request with no CI result is judged
+  # by an integration receipt plus a critic PASS for its head.
+  noci = ready.merge(pipeline_status: "none")
+  ev_ok = { gate: :declared, mergeable: :ok, receipt: :ok, critic_override: false, critic: :pass,
+            receipt_path: "/c/r.json" }
+  nd = ->(ev) { ReadyAndIdle.disqualifier(noci.merge(noci_evidence: ev), now: now, idle_hours: 2) }
+  check.call("noci: receipt + critic PASS qualifies", nd.call(ev_ok), nil)
+  check.call("noci: receipt attests the PASS when the critic receipt is gone",
+             nd.call(ev_ok.merge(critic: :absent)), nil)
+  check.call("noci: an overridden receipt needs a PASS readable now",
+             nd.call(ev_ok.merge(critic: :absent, critic_override: true)), :no_critic_pass)
+  check.call("noci: an overridden receipt with a PASS qualifies",
+             nd.call(ev_ok.merge(critic_override: true)), nil)
+  check.call("noci: a recorded BLOCK excludes", nd.call(ev_ok.merge(critic: :block)), :critic_block)
+  check.call("noci: no receipt excludes", nd.call(ev_ok.merge(receipt: :none)), :no_local_receipt)
+  check.call("noci: an invalid receipt is stale", nd.call(ev_ok.merge(receipt: :invalid)), :stale_gate_receipt)
+  check.call("noci: another base is stale", nd.call(ev_ok.merge(receipt: :other_base)), :stale_gate_receipt)
+  check.call("noci: no declared gate is NOT JUDGED", nd.call({ gate: :none }), :no_ci_result)
+  check.call("noci: no evidence gathered is NOT JUDGED", nd.call(nil), :no_ci_result)
+  %i[gate mergeable receipt critic].each do |leg|
+    check.call("noci: an unreadable #{leg} is evidence_unreadable, never a miss",
+               nd.call(ev_ok.merge(leg => :could_not_look)), :evidence_unreadable)
+  end
+  # A receipt says nothing about a target that moved into a conflict, and a
+  # repo WITH CI is never judged on receipts (an empty rollup there means its
+  # checks did not run; a conflicting PR gets none).
+  check.call("noci: a conflicting request is excluded", nd.call(ev_ok.merge(mergeable: :conflicting)), :conflicting)
+  check.call("noci: a repo with CI is NOT JUDGED, receipts or not",
+             nd.call(ev_ok.merge(ci_configured: true)), :no_ci_result)
+  check.call("noci: no_local_receipt says it searched this machine only",
+             ReadyAndIdle.empty_scan_line(scanned: 1, repo: "/r", excluded: { no_local_receipt: 1 })
+               .include?("THIS machine"), true)
+  check.call("noci: no note without no_local_receipt",
+             ReadyAndIdle.local_receipt_note({ critic_block: 1 }), "")
+  check.call("noci: evidence never skips the idle test",
+             ReadyAndIdle.disqualifier(noci.merge(noci_evidence: ev_ok, last_activity: "2026-09-21T11:30:00Z"),
+                                       now: now, idle_hours: 2), :recently_active)
+  check.call("noci: evidence is ignored when CI reported",
+             ReadyAndIdle.disqualifier(ready.merge(pipeline_status: "failed", noci_evidence: ev_ok),
+                                       now: now, idle_hours: 2), :not_green)
+  check.call("noci: unreadable evidence never reads CLEAN",
+             ReadyAndIdle.empty_scan_line(scanned: 1, repo: "/r", excluded: { evidence_unreadable: 1 })
+               .include?("CLEAN SCAN"), false)
+  check.call("noci: a judged miss reads CLEAN",
+             ReadyAndIdle.empty_scan_line(scanned: 1, repo: "/r", excluded: { no_local_receipt: 1 })
+               .include?("CLEAN SCAN"), true)
+  check.call("noci: the row names its evidence",
+             ReadyAndIdle.row(noci.merge(noci_evidence: ev_ok), now: now,
+                              drift: { commits: 0, quality: :measured })[:evidence],
+             "integration receipt + critic PASS on the head; receipt /c/r.json")
+
   check.call("unresolved discussion excluded",
              ReadyAndIdle.disqualifier(ready.merge(blocking_unresolved: true), now: now, idle_hours: 2), :blocking_discussions)
   check.call("unmet approval excluded",
@@ -888,7 +1174,18 @@ def main(argv)
   rows = []
   excluded = Hash.new(0)
   candidates.each do |mr|
+    # No CI result: gather the no-CI evidence. Draft and blocked requests are
+    # excluded before it is read, so they never pay for it.
+    if !mr[:draft] && !mr[:blocking_unresolved] && ReadyAndIdle.ci_absent?(mr[:pipeline_status])
+      # Mergeability is settled only once the head is known to need it.
+      ev = noci_evidence(repo, mr[:head_sha], mr[:target]) { forge.settle_mergeable(mr[:id], mr[:mergeable]) }
+      mr = mr.merge(noci_evidence: ev)
+    end
     why = ReadyAndIdle.disqualifier(mr, now: now, idle_hours: idle_hours)
+    if why == :evidence_unreadable
+      warn "ready-and-idle: #{forge.marker}#{mr[:id]} NOT JUDGED — COULD NOT LOOK at its no-CI " \
+           "evidence: #{mr[:noci_evidence][:why]}"
+    end
     # An UNKNOWN input is a probe that did not land, not a verdict on the
     # change request. Record it, so the run refuses to call itself a scan.
     if %i[unknown_approvals unknown_activity].include?(why)
@@ -945,8 +1242,11 @@ def main(argv)
       repo: repo, forge: forge.name, idle_hours: idle_hours,
       scanned: candidates.size, orphans: rows.size,
       excluded: excluded.transform_keys(&:to_s),
-      # Candidates with no CI result: readiness NOT measured, never "0 orphans".
-      unjudged: excluded[:no_ci_result].to_i,
+      # Candidates nothing could judge (ReadyAndIdle::UNJUDGED_REASONS):
+      # readiness NOT measured, never "0 orphans".
+      unjudged: ReadyAndIdle.unjudged_count(excluded),
+      # no_local_receipt searched THIS machine only; the note says so.
+      notes: [ReadyAndIdle.local_receipt_note(excluded).strip].reject(&:empty?),
       refs_refreshed: refs_refreshed,
       refs_note: refs_note,
       refs_last_moved: (refs_refreshed ? {} : { banner_target => refs_last_moved(repo, banner_target) }),
@@ -973,10 +1273,14 @@ def main(argv)
       warn "ready-and-idle: #{rows.size} of #{candidates.size} open change request(s) are " \
            "ready-and-idle (finished work nobody is carrying)."
       rows.each { |r| print_row(r, forge.marker) }
-      if excluded[:no_ci_result].to_i.positive?
-        warn "ready-and-idle: NOT JUDGED — #{excluded[:no_ci_result]} more open change request(s) " \
-             "have no CI result on their head; they are not in this list because nothing measured them."
+      unjudged = ReadyAndIdle.unjudged_count(excluded)
+      if unjudged.positive?
+        warn "ready-and-idle: NOT JUDGED — #{unjudged} more open change request(s) could not be " \
+             "judged (#{ReadyAndIdle::UNJUDGED_REASONS.map { |k| "#{k}=#{excluded[k]}" }.join(', ')}); " \
+             "they are not in this list because nothing measured them. #{ReadyAndIdle::UNJUDGED_FIX}"
       end
+      note = ReadyAndIdle.local_receipt_note(excluded).strip
+      warn "ready-and-idle: #{note}" unless note.empty?
     end
   end
   degraded ? 4 : 0
@@ -1010,14 +1314,36 @@ if $PROGRAM_NAME == __FILE__
                 were NOT refreshed this run, so N is a LOWER BOUND (the target
                 branch only gains commits between fetches). A bare integer
                 ALWAYS means the refs were refreshed this run.
-        sha     the green head sha the pipeline/check suite passed on
+        sha     the head sha its CI result (or its no-CI evidence) was judged on
 
       Notes:
-        * A change request with NO CI result at all is never reported as
-          finished-and-abandoned. It is counted as NOT JUDGED
-          (excluded: no_ci_result; JSON `unjudged`), and a scan with any such
-          request never says CLEAN SCAN. In a repo with no CI (custom) that is
-          every request: check them by hand.
+        * A change request with NO CI result, in a repo with NO CI
+          configuration (no .github/workflows or .gitlab-ci.yml on its head
+          or target), is judged by the merge bar's machine-readable evidence
+          (DND-1505): the forge reports it free of conflicts; an
+          integration-gate receipt for exactly its head, recorded against
+          origin/<target> or an ancestor of it (<git common
+          dir>/integration-receipts, read by ai/lib/integration-receipt.sh);
+          and a critic PASS for that head (critic-review --verdict-for). A
+          receipt with no --critic-override attests the PASS by itself,
+          because integration-gate writes one only after reading a PASS; that
+          covers a critic receipt that went with a removed worktree. The
+          row's `evidence` names what it was judged on. A GitHub UNKNOWN
+          mergeability is re-read up to 3 times, 2s apart (GitHub computes
+          it lazily).
+          Judged exclusions: conflicting, no_local_receipt (searched THIS
+          machine only, and the scan says so), stale_gate_receipt (invalid,
+          or for another base), critic_block, no_critic_pass (an overridden
+          receipt and no PASS readable now).
+        * NOT JUDGED (JSON `unjudged`; a scan with any never says CLEAN SCAN):
+          no_ci_result = no CI result, and either the repo has CI (its checks
+          did not run on this head; a conflicting PR gets none) or the head
+          declares no gate (bin/prep-commit.sh or ai/bin/harness-gate) whose
+          receipt could stand in; evidence_unreadable = COULD NOT LOOK (the
+          head is not in this checkout, origin/<target> does not resolve,
+          mergeability is still UNKNOWN, or a receipt or verdict store cannot
+          be read). Each evidence_unreadable request is named on stderr with
+          what was searched.
         * `approvals_required: 0` satisfies the approval test trivially, which
           is correct — the question is whether anything is WAITING on a human.
         * Read-only: it merges, approves, comments, relabels and resolves

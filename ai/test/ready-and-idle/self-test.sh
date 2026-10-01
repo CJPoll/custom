@@ -101,6 +101,11 @@ if [ -e "${STUB}/fail" ]; then
   echo "HTTP 401: Requires authentication" >&2
   exit 1
 fi
+# \`gh pr view N --json mergeable\` (the settle re-read): view.json, else UNKNOWN.
+if [ "\${1:-}" = pr ] && [ "\${2:-}" = view ]; then
+  if [ -e "${FIX}/view.json" ]; then cat "${FIX}/view.json"; else echo '{"mergeable":"UNKNOWN"}'; fi
+  exit 0
+fi
 cat "${FIX}/prs.json"
 STUBEOF
 chmod +x "${STUB}/glab" "${STUB}/gh"
@@ -405,6 +410,196 @@ rm -f "${STUB}/fail"
 [ "${GH_CODE}" -eq 3 ] && [ -z "${GH_OUT}" ] && grep -q 'SCAN INCOMPLETE' <<<"${GH_ERR}" \
   && ok "github: a failed probe also refuses to report a result" \
   || bad "github: a failed probe refuses to report" "code=${GH_CODE} out=${GH_OUT}"
+
+# ---------------------------------------------------------------------------
+# 14. DND-1505: a NO-CI repo's requests are judged by the merge bar's own
+# evidence (athena:merge-boarding -> The merge bar): an integration-gate
+# receipt for the exact head, recorded against origin/<target> or an ancestor
+# of it, plus a critic PASS for that head. Before this, every request in a
+# repo with no CI (custom) read NOT JUDGED forever, so a finished, abandoned
+# custom PR had no adopt cover at all.
+# ---------------------------------------------------------------------------
+COMMON="${WORK}/.git"
+# A head that DECLARES a gate (ai/bin/harness-gate, as custom does). Built with
+# commit-tree on a private index, so the work tree and HEAD never move.
+GATE_BLOB="$(printf '#!/bin/sh\nexit 0\n' | git -C "${WORK}" hash-object -w --stdin)"
+SHA_GATED="$(
+  export GIT_INDEX_FILE="${TMP}/gated.index"
+  git -C "${WORK}" read-tree "${SHA_TIP}" \
+    && git -C "${WORK}" update-index --add --cacheinfo "100755,${GATE_BLOB},ai/bin/harness-gate" \
+    && git -C "${WORK}" commit-tree -p "${SHA_TIP}" -m gated "$(git -C "${WORK}" write-tree)"
+)"
+
+# The same head plus CI configuration: a repo WITH CI (gen_saas-shaped).
+CI_BLOB="$(printf 'on: push\n' | git -C "${WORK}" hash-object -w --stdin)"
+SHA_CI="$(
+  export GIT_INDEX_FILE="${TMP}/ci.index"
+  git -C "${WORK}" read-tree "${SHA_GATED}" \
+    && git -C "${WORK}" update-index --add --cacheinfo "100644,${CI_BLOB},.github/workflows/ci.yml" \
+    && git -C "${WORK}" commit-tree -p "${SHA_GATED}" -m ci "$(git -C "${WORK}" write-tree)"
+)"
+
+# mk_noci_pr <number> <head sha> [mergeable] [base] : one open PR with NO check
+mk_noci_pr() {
+  cat > "${FIX}/prs.json" <<EOF
+[{"number":$1,"title":"fixture no-ci pr $1","headRefName":"b$1","baseRefName":"${4:-main}",
+  "headRefOid":"$2","isDraft":false,"updatedAt":"$(ago '10 hours')",
+  "reviewDecision":"","statusCheckRollup":[],"mergeable":"${3:-MERGEABLE}"}]
+EOF
+}
+mk_ir_receipt() { # mk_ir_receipt <head> <base> [critic override reason]
+  local co="null"
+  [ -n "${3:-}" ] && co="\"$3\""
+  mkdir -p "${COMMON}/integration-receipts"
+  printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s","base":"%s","target_ref":"main","critic_override":%s,"recorded_at":"2026-10-01T00:00:00Z"}\n' \
+    "$1" "$2" "${co}" > "${COMMON}/integration-receipts/$1.json"
+}
+mk_critic() { # mk_critic <head> <pass|block>
+  mkdir -p "${COMMON}/critic-verdicts"
+  printf '{"schema":2,"tool":"critic-review","sha":"%s","base":"main","merge_base":"%s","verdict":"%s","findings":["fixture finding"],"dirty":false,"at":"2026-10-01T00:00:00Z"}\n' \
+    "$1" "${SHA_TIP}" "$2" > "${COMMON}/critic-verdicts/$1.json"
+}
+clear_evidence() { rm -rf "${COMMON}/integration-receipts" "${COMMON}/critic-verdicts"; }
+
+git -C "${WORK}" remote set-url origin git@github.com:fixture/proj.git
+
+# 14a. THE ACCEPTANCE CASE: a green (receipt + critic PASS), abandoned no-CI PR
+# is REPORTED. On the unfixed tool this read NOT JUDGED and listed nothing.
+clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_TIP}"; mk_critic "${SHA_GATED}" pass
+mk_noci_pr 77 "${SHA_GATED}"
+run --repo "${WORK}" --no-fetch --json
+[ "${CODE}" -eq 4 ] && grep -q '"orphans": 1' <<<"${OUT}" && grep -q '"id": 77' <<<"${OUT}" \
+  && grep -q '"evidence": "integration receipt + critic PASS' <<<"${OUT}" \
+  && grep -q '"unjudged": 0' <<<"${OUT}" \
+  && ok "no-CI: a PR with an integration receipt and a critic PASS on its head is reported" \
+  || bad "no-CI: a receipted, critic-PASSed PR is reported" "code=${CODE} out=${OUT} err=${ERR}"
+run --repo "${WORK}" --no-fetch
+grep -q '^#77 ' <<<"${OUT}" && ! grep -q 'NOT JUDGED' <<<"${OUT}${ERR}" \
+  && ok "no-CI: the table lists it and does not call it NOT JUDGED" \
+  || bad "no-CI: the table lists it" "code=${CODE} out=${OUT} err=${ERR}"
+
+# 14b. The critic receipt went with a REMOVED worktree. The integration receipt
+# alone still proves the PASS: integration-gate writes one only after reading a
+# green verdict for that head, unless it records a --critic-override.
+clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_TIP}"
+run --repo "${WORK}" --no-fetch --json
+[ "${CODE}" -eq 4 ] && grep -q '"orphans": 1' <<<"${OUT}" \
+  && grep -q '"evidence": "integration receipt (critic PASS attested by the gate' <<<"${OUT}" \
+  && ok "no-CI: a receipt with no override attests the critic PASS when the critic receipt is gone" \
+  || bad "no-CI: the receipt attests the critic PASS" "code=${CODE} out=${OUT} err=${ERR}"
+
+# 14c-f. Evidence that LOOKED and found the PR not finished: a judged
+# exclusion, so the scan is CLEAN, and the reason is counted by name.
+noci_excl() { # noci_excl <label> <excluded key>
+  local label="$1"
+  run --repo "${WORK}" --no-fetch
+  if [ "${CODE}" -eq 0 ] && grep -q 'CLEAN SCAN' <<<"${OUT}" && grep -q "$2=1" <<<"${OUT}" \
+     && ! grep -q 'NOT JUDGED' <<<"${OUT}${ERR}"; then
+    ok "no-CI: ${label} excludes the PR as $2 (judged, not NOT JUDGED)"
+  else
+    bad "no-CI: ${label} excludes the PR as $2" "code=${CODE} out=${OUT} err=${ERR}"
+  fi
+}
+clear_evidence; mk_critic "${SHA_GATED}" pass
+noci_excl "no integration receipt" no_local_receipt
+# Receipts are local to this machine, so the clean line must say where it looked.
+grep -q 'THIS machine' <<<"${OUT}" \
+  && ok "no-CI: no_local_receipt says it searched this machine's receipts only" \
+  || bad "no-CI: no_local_receipt names the machine-local search" "out=${OUT}"
+# A receipt says nothing about a target that moved into a conflict.
+clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_TIP}"; mk_critic "${SHA_GATED}" pass
+mk_noci_pr 77 "${SHA_GATED}" CONFLICTING
+noci_excl "a conflicting PR, receipt or not," conflicting
+mk_noci_pr 77 "${SHA_GATED}"
+clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_TIP}"; mk_critic "${SHA_GATED}" block
+noci_excl "a recorded critic BLOCK" critic_block
+clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_TIP}" "model unreachable"
+noci_excl "a receipt that overrode the critic, and no PASS" no_critic_pass
+# The recorded base is not an ancestor of origin/main (the PR head itself).
+clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_GATED}"; mk_critic "${SHA_GATED}" pass
+noci_excl "a receipt for another base" stale_gate_receipt
+
+# 14g. COULD NOT LOOK is not "no receipt": a head this checkout does not have
+# cannot be asked whether it declares a gate. It is NOT JUDGED, never CLEAN,
+# and the line names the request and the Fix.
+clear_evidence
+mk_noci_pr 78 "1111111111111111111111111111111111111111"
+run --repo "${WORK}" --no-fetch
+[ "${CODE}" -eq 0 ] && grep -q 'NOT JUDGED' <<<"${OUT}" && grep -q 'evidence_unreadable=1' <<<"${OUT}" \
+  && ! grep -q 'CLEAN SCAN' <<<"${OUT}${ERR}" && grep -q '#78' <<<"${ERR}" && grep -q 'Fix:' <<<"${OUT}" \
+  && ok "no-CI: an unreadable head is NOT JUDGED (could not look), never a clean miss" \
+  || bad "no-CI: an unreadable head is NOT JUDGED" "code=${CODE} out=${OUT} err=${ERR}"
+run --repo "${WORK}" --no-fetch --json
+grep -q '"unjudged": 1' <<<"${OUT}" \
+  && ok "no-CI: the JSON counts the unreadable one as unjudged" \
+  || bad "no-CI: the JSON counts it as unjudged" "out=${OUT}"
+
+# 14h. An UNREADABLE receipt store is could-not-look too, not "no receipt".
+if [ "$(id -u)" -ne 0 ]; then
+  clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_TIP}"; mk_critic "${SHA_GATED}" pass
+  chmod 000 "${COMMON}/integration-receipts"
+  mk_noci_pr 79 "${SHA_GATED}"
+  run --repo "${WORK}" --no-fetch
+  chmod 755 "${COMMON}/integration-receipts"
+  [ "${CODE}" -eq 0 ] && grep -q 'NOT JUDGED' <<<"${OUT}" && grep -q 'evidence_unreadable=1' <<<"${OUT}" \
+    && ! grep -q 'no_local_receipt' <<<"${OUT}" && grep -q 'COULD NOT LOOK' <<<"${ERR}" \
+    && ok "no-CI: an unreadable receipt store is NOT JUDGED, not no_local_receipt" \
+    || bad "no-CI: an unreadable receipt store is NOT JUDGED" "code=${CODE} out=${OUT} err=${ERR}"
+fi
+
+# 14i. A head that declares NO gate keeps the old reading: nothing can judge
+# it, so it is NOT JUDGED (no_ci_result), whatever receipts exist.
+clear_evidence
+mk_noci_pr 80 "${SHA_OLD}"
+run --repo "${WORK}" --no-fetch
+[ "${CODE}" -eq 0 ] && grep -q 'NOT JUDGED' <<<"${OUT}" && grep -q 'no_ci_result=1' <<<"${OUT}" \
+  && ! grep -q 'CLEAN SCAN' <<<"${OUT}" \
+  && ok "no-CI: a head that declares no gate stays NOT JUDGED" \
+  || bad "no-CI: a head that declares no gate stays NOT JUDGED" "code=${CODE} out=${OUT} err=${ERR}"
+
+# 14j. A repo WITH CI is never judged on receipts: an empty rollup there means
+# its checks did not run on this head (a conflicting PR gets none), so a
+# receipt + PASS must not report it.
+clear_evidence; mk_ir_receipt "${SHA_CI}" "${SHA_TIP}"; mk_critic "${SHA_CI}" pass
+mk_noci_pr 81 "${SHA_CI}"
+run --repo "${WORK}" --no-fetch
+[ "${CODE}" -eq 0 ] && grep -q 'NOT JUDGED' <<<"${OUT}" && grep -q 'no_ci_result=1' <<<"${OUT}" \
+  && ! grep -q '^#81 ' <<<"${OUT}" \
+  && ok "no-CI: a head carrying CI configuration is never judged on its receipt" \
+  || bad "no-CI: a CI repo is never judged on its receipt" "code=${CODE} out=${OUT} err=${ERR}"
+
+# 14k. Unknown mergeability and an unresolvable target are COULD NOT LOOK.
+clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_TIP}"; mk_critic "${SHA_GATED}" pass
+mk_noci_pr 82 "${SHA_GATED}" UNKNOWN
+run --repo "${WORK}" --no-fetch
+[ "${CODE}" -eq 0 ] && grep -q 'evidence_unreadable=1' <<<"${OUT}" && ! grep -q 'CLEAN SCAN' <<<"${OUT}" \
+  && grep -q '#82 NOT JUDGED.*mergeable="UNKNOWN"' <<<"${ERR}" \
+  && ok "no-CI: mergeability still UNKNOWN after the re-reads is NOT JUDGED and named, never a pass" \
+  || bad "no-CI: unknown mergeability is NOT JUDGED" "code=${CODE} out=${OUT} err=${ERR}"
+grep -qx 3 <<<"$(grep -c 'gh pr view 82 --json mergeable' "${TMP}/invoked.log")" \
+  && ok "no-CI: UNKNOWN is re-read a bounded number of times (3)" \
+  || bad "no-CI: UNKNOWN is re-read 3 times" "$(grep 'pr view' "${TMP}/invoked.log")"
+# GitHub computes mergeability lazily: the list says UNKNOWN, a re-read settles it.
+echo '{"mergeable":"MERGEABLE"}' > "${FIX}/view.json"
+run --repo "${WORK}" --no-fetch --json
+rm -f "${FIX}/view.json"
+[ "${CODE}" -eq 4 ] && grep -q '"id": 82' <<<"${OUT}" \
+  && ok "no-CI: an UNKNOWN that a re-read settles to MERGEABLE is judged and reported" \
+  || bad "no-CI: a settled UNKNOWN is judged" "code=${CODE} out=${OUT} err=${ERR}"
+# A head with no declared gate never pays for the re-read.
+: > "${TMP}/invoked.log"
+mk_noci_pr 84 "${SHA_OLD}" UNKNOWN
+run --repo "${WORK}" --no-fetch
+! grep -q 'pr view' "${TMP}/invoked.log" \
+  && ok "no-CI: mergeability is not re-read for a head nothing could judge" \
+  || bad "no-CI: no re-read for an ungated head" "$(cat "${TMP}/invoked.log")"
+mk_noci_pr 83 "${SHA_GATED}" MERGEABLE nosuchbranch
+run --repo "${WORK}" --no-fetch
+[ "${CODE}" -eq 0 ] && grep -q 'evidence_unreadable=1' <<<"${OUT}" \
+  && grep -q '#83 NOT JUDGED.*origin/nosuchbranch does not resolve' <<<"${ERR}" \
+  && ok "no-CI: an unresolvable target is NOT JUDGED and named" \
+  || bad "no-CI: an unresolvable target is NOT JUDGED" "code=${CODE} out=${OUT} err=${ERR}"
+clear_evidence
 
 git -C "${WORK}" remote set-url origin git@gitlab.com:fixture/proj.git
 

@@ -27,10 +27,15 @@ sibling architect is your escalation target instead of a silent human.
 
 Run `ai/bin/ready-and-idle --repo <repo>` on each repo in scope, **and again at
 each [[athena:merge-boarding]] pass**. It lists open MRs that are non-draft,
-green on their head SHA, unblocked and idle — finished work with no actor,
+green on their head SHA (in a repo with no CI: an integration-gate receipt and
+a critic PASS for that head), unblocked and idle — finished work with no actor,
 left behind when an earlier run hit a ceiling, was killed, or simply ended
 while still holding it. Adopt any that falls in your scope and carry it through
 the **full, unchanged** merge bar; it is not pre-approved by having sat there.
+
+A NOT JUDGED line is not a clean scan: those requests could not be judged
+(`ready-and-idle --help`), so check each one by hand before calling the
+repo clear.
 
 **Read its exit code; do not judge it by "non-zero".** `3` means UNAVAILABLE —
 membership could not be established, so there is no list and you must not read

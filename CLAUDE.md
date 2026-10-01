@@ -598,8 +598,9 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   repos and their modes; its `--help` says where the list comes from. The
   runner, the installer and the skill read only its result. The tracked
   default has custom `improve` and gen_saas, walt_ui `watch`. An `improve`
-  repo gets the phase ledger, before/after experiments, and at most one
-  change per run. A harness change lands in custom. A lead-time improve run
+  repo gets the phase ledger, before/after experiments, the `ready-and-idle`
+  sweep (no CI: `ready-and-idle --help`), and at most one change per run. A
+  harness change lands in custom. A lead-time improve run
   may also change any repo its OWN machine's list has in `improve` mode,
   its local tooling and its CI/CD and deploy included, through that repo's
   normal bar (the DND-1540 product lane: a PR, CI green, a critic PASS,
