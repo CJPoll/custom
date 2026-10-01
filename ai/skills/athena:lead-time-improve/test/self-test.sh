@@ -337,6 +337,73 @@ eq "judge with no main to read: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHEN
 has "no keep while reverts could not be read" "$(out)" "custom:verify:${SHORT} PENDING"
 has "... and it says the guard is unmeasured" "$(out)" "reverts unmeasured"
 
+# ── revert held: a plain revert would delete test additions (DND-1549) ─────
+echo "== revert held"
+# commit_files AT SUBJECT -> stages the work tree, commits, prints the SHA
+commit_files() {
+  "${G[@]}" add -A && GIT_COMMITTER_DATE="$1" GIT_AUTHOR_DATE="$1" "${G[@]}" commit -q -m "$2" \
+    && "${G[@]}" rev-parse HEAD
+}
+mkdir -p "${REPO}/ai/x/test" "${REPO}/ai/bin"
+printf 'echo one\necho two\n' >"${REPO}/ai/x/test/foo.sh"
+printf 'echo fixed\n' >"${REPO}/ai/x/fix.sh"
+TADD="$(commit_files 2026-09-30T11:00:00Z "fixture: a fix with its regression test")"
+printf 'echo tool\n' >"${REPO}/ai/bin/x"
+TBIN="$(commit_files 2026-09-30T11:01:00Z "fixture: a tool-only change")"
+printf 'echo one\n' >"${REPO}/ai/x/test/foo.sh"
+TDEL="$(commit_files 2026-09-30T11:02:00Z "fixture: a change that only deletes a test line")"
+STATE7="${TMP}/state7"
+mkdir -p "${STATE7}"
+# after-set verify 700 s, windows on the 30th, no revert in either: median-only
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE7}/ledger.jsonl" "${TADD}" 700 2026-09-30T00:00:00Z
+s7() { LEAD_TIME_STATE_DIR="${STATE7}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z "$@"; }
+recrow() { grep '"type":"record"' "$1" | grep "\"id\":\"$2\""; }
+HID="custom:verify:${TADD:0:12}"
+eq "record a change whose commit adds a test: exit 0" "$(s7 rec verify phase "${TADD}" change)" "0"
+has "... the record row lists the test path, not the fix" "$(recrow "${STATE7}/experiments.jsonl" "${HID}")" '"revert_deletes_tests":["ai/x/test/foo.sh"]'
+eq "record a tool-only change: exit 0" "$(s7 rec implement phase "${TBIN}" change)" "0"
+has "... lists no test" "$(recrow "${STATE7}/experiments.jsonl" "custom:implement:${TBIN:0:12}")" '"revert_deletes_tests":[]'
+eq "record a change that only deletes test lines: exit 0" "$(s7 rec queue phase "${TDEL}" change)" "0"
+has "... lists no test (reverting it adds them back)" "$(recrow "${STATE7}/experiments.jsonl" "custom:queue:${TDEL:0:12}")" '"revert_deletes_tests":[]'
+eq "judge: exit 0" "$(s7 run judge --repo custom)" "0"
+has "regression: a revert of a test-adding commit reads REVERT HELD" "$(out)" "${HID} REVERT HELD kind=change"
+has "... naming the test additions" "$(out)" "reverting ${TADD:0:12} deletes test additions in ai/x/test/foo.sh"
+has "... ruling out a plain git revert" "$(out)" "the hard constraint rules out a plain git revert"
+has "... with the Fix" "$(out)" "Fix: land a partial revert that keeps every test addition and its fixture fix"
+has "... offering decline (a median-only revert)" "$(out)" "experiment decline --repo custom --id ${HID} --constraint safety-checks"
+has "the verdict is still revert, and held is tallied on its own" "$(out)" "1 revert, 0 inconclusive, 0 reverted)"
+has "... 1 held" "$(out)" "1 held"
+ROW7="$(grep '"type":"status"' "${STATE7}/experiments.jsonl" | grep "\"id\":\"${HID}\"")"
+has "the status row stays revert" "${ROW7}" '"status":"revert"'
+has "... and carries held" "${ROW7}" '"held":{"tests":["ai/x/test/foo.sh"]}'
+eq "re-judge: exit 0" "$(s7 run judge --repo custom)" "0"
+has "the owed revert still reads REVERT HELD" "$(out)" "${HID} REVERT HELD kind=change"
+lacks "... never a plain REVERT OWED" "$(out)" "REVERT OWED"
+has "... and is still owed" "$(out)" "main has no revert of it yet"
+
+echo "== revert held: a record with no field"
+STATE8="${TMP}/state8"
+mkdir -p "${STATE8}"
+cp "${STATE7}/ledger.jsonl" "${STATE8}/ledger.jsonl"
+s8() { LEAD_TIME_STATE_DIR="${STATE8}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z "$@"; }
+recrow "${STATE7}/experiments.jsonl" "${HID}" | sed 's/,"revert_deletes_tests":\[[^]]*\]//' >"${STATE8}/experiments.jsonl"
+lacks "the fixture record predates the field" "$(cat "${STATE8}/experiments.jsonl")" "revert_deletes_tests"
+eq "judge: exit 0" "$(s8 run judge --repo custom)" "0"
+has "the field is computed on the fly: REVERT HELD" "$(out)" "${HID} REVERT HELD kind=change"
+has "... naming the test additions" "$(out)" "deletes test additions in ai/x/test/foo.sh"
+lacks "... and the record is not rewritten" "$(recrow "${STATE8}/experiments.jsonl" "${HID}")" "revert_deletes_tests"
+
+echo "== revert held: git could not look"
+STATE9="${TMP}/state9"
+mkdir -p "${STATE9}"
+cp "${STATE8}/ledger.jsonl" "${STATE8}/experiments.jsonl" "${STATE9}/"
+eq "judge an owed revert where git cannot show the commit: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE9}" ATHENA_LEADTIME_CONFIG="${TMP}/nomain.json" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z run judge --repo custom)" "0"
+has "an unknown answer is held (fail closed)" "$(out)" "${HID} REVERT HELD kind=change"
+has "... saying it could not look" "$(out)" "could not look whether reverting ${TADD:0:12} deletes test additions"
+has "the git adapter reads a bad repo path as could not look, never as no tests" \
+  "$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.numstat(ARGV[1], ARGV[2]); puts s.could_not_look? ? "could_not_look: #{s.reason}" : "ok: #{s.items.inspect}"' \
+     "${HERE}/../lib/experiment_git.rb" "${TMP}/no-such-repo" "${TADD}")" "could_not_look:"
+
 # ── a configured repo not on this machine (DND-1526) ────────────────────────
 echo "== skipped on this machine"
 printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gone/gen_saas\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/gone.json"

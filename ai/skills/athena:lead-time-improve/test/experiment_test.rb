@@ -548,6 +548,81 @@ rescue X::UsageError => e
   e.message.include?("declined")
 end
 
+# ── revert held (DND-1549) ──────────────────────────────────────────────────
+
+Source = LeadTimePhases::Source
+
+check("test_additions: a test/ path with additions counts; a non-test path does not") do
+  X.test_additions([[3, 0, "ai/x/test/foo.sh"], [5, 1, "ai/bin/x"], [1, 0, "ai/x/fix.sh"]]) == ["ai/x/test/foo.sh"]
+end
+
+check("test_additions: a *.self-test.sh counts (FirstParty.test_path?, the one rule)") do
+  X.test_additions([[1, 0, "scripts/lib/thing.self-test.sh"]]) == ["scripts/lib/thing.self-test.sh"]
+end
+
+check("test_additions: a test path with only deletions does not count (reverting it adds them back)") do
+  X.test_additions([[0, 4, "ai/x/test/foo.sh"]]) == []
+end
+
+check("test_additions: a binary test file (no line counts) counts: unknown is held") do
+  X.test_additions([[nil, nil, "ai/x/test/fixture.bin"]]) == ["ai/x/test/fixture.bin"]
+end
+
+check("deletes_tests_fields: an answer lists the paths, [] when there are none") do
+  X.deletes_tests_fields(Source.ok([[2, 0, "a/test/t.sh"]])) == { "revert_deletes_tests" => ["a/test/t.sh"] } &&
+    X.deletes_tests_fields(Source.ok([[2, 0, "a/bin/t"]])) == { "revert_deletes_tests" => [] }
+end
+
+check("deletes_tests_fields: could not look stores _na with the reason, never []") do
+  f = X.deletes_tests_fields(Source.could_not_look("git show failed"))
+  f == { "revert_deletes_tests_na" => "git show failed" }
+end
+
+check("hold: revert with revert_deletes_tests non-empty is held, naming the tests") do
+  X.hold("revert", { "revert_deletes_tests" => ["a/test/t.sh"] }) == { "tests" => ["a/test/t.sh"] }
+end
+
+check("hold: revert with _na is held (fail closed)") do
+  X.hold("revert", { "revert_deletes_tests_na" => "no repo" }) == { "could_not_look" => "no repo" }
+end
+
+check("hold: revert with [] is not held") do
+  X.hold("revert", { "revert_deletes_tests" => [] }).nil?
+end
+
+check("hold: revert with neither field is held (could not look), never read as []") do
+  X.hold("revert", {})&.key?("could_not_look")
+end
+
+check("hold: pending, keep, inconclusive and reverted are never held") do
+  tests = { "revert_deletes_tests" => ["a/test/t.sh"] }
+  %w[pending keep inconclusive reverted].all? { |s| X.hold(s, tests).nil? }
+end
+
+check("hold_text: tests, the Fix and decline when decline would be admitted") do
+  s = X.hold_text("custom", "custom:verify:abc", LANDING, { "tests" => ["a/test/t.sh", "b/test/u.sh"] }, nil)
+  s.include?("reverting #{LANDING[0, 12]} deletes test additions in a/test/t.sh, b/test/u.sh") &&
+    s.include?("the hard constraint rules out a plain git revert") &&
+    s.include?("Fix: land a partial revert that keeps every test addition and its fixture fix, or run " \
+               "experiment decline --repo custom --id custom:verify:abc --constraint safety-checks --reason-file <F>")
+end
+
+check("hold_text: could not look names the reason") do
+  s = X.hold_text("custom", "i", LANDING, { "could_not_look" => "no repo" }, nil)
+  s.include?("could not look whether reverting #{LANDING[0, 12]} deletes test additions: no repo")
+end
+
+check("hold_text: when decline would refuse (a worse guard), it is not offered and says why") do
+  s = X.hold_text("custom", "i", LANDING, { "tests" => ["a/test/t.sh"] }, "a guard worsened")
+  s.include?("Fix: land a partial revert that keeps every test addition and its fixture fix") &&
+    !s.include?("experiment decline") && s.include?("decline does not cover this revert (a guard worsened)")
+end
+
+check("hold never changes the verdict: status_row of a held revert stays revert") do
+  r = X.status_row(exp, { "status" => "revert", "reason" => "median rose", "held" => { "tests" => ["a/test/t.sh"] } }, NOW)
+  r["status"] == "revert" && r["held"] == { "tests" => ["a/test/t.sh"] }
+end
+
 # ── store ───────────────────────────────────────────────────────────────────
 
 Dir.mktmpdir("experiment-store-") do |dir|

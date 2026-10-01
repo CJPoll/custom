@@ -72,6 +72,34 @@ module LeadTimeExperimentGit
                        .map(&:first))
   end
 
+  # A commit's line counts against its first parent (DND-1549):
+  # Source.ok([[added | nil, deleted | nil, path], ...]), nil for a binary
+  # file. Renames are split into a delete and an add, so an added test is
+  # seen under its new path. Which paths are tests is the domain's
+  # (LeadTimeExperiment.test_additions).
+  def numstat(repo, sha)
+    return Source.could_not_look("#{repo} is not on this machine") unless File.directory?(repo)
+
+    out, err, st = Open3.capture3("git", "-C", repo, "show", "--numstat", "-z", "--no-renames", "--format=",
+                                  "--diff-merges=first-parent", "#{sha}^{commit}")
+    return Source.could_not_look("git show #{sha.to_s[0, 12]} in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
+
+    entries = out.split("\0").map { |e| e.sub(/\A\n+/, "") }.reject(&:empty?).map { |e| numstat_entry(e) }
+    odd = entries.find { |_, _, path| path.empty? }
+    return Source.could_not_look("git show #{sha.to_s[0, 12]} in #{repo}: a numstat entry with no path") if odd
+
+    Source.ok(entries)
+  rescue SystemCallError => e
+    Source.could_not_look("git could not run (#{e.message})")
+  end
+
+  def numstat_entry(entry)
+    added, deleted, path = entry.split("\t", 3)
+    [count(added), count(deleted), path.to_s]
+  end
+
+  def count(field) = field.to_s.match?(/\A\d+\z/) ? Integer(field, 10) : nil
+
   # Whether main carries a commit reverting sha. Source.ok([true|false]).
   def reverted?(repo, sha)
     ref, why = main_ref(repo)

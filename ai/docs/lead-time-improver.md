@@ -295,6 +295,20 @@ p90 over the last K comparable landings), and a status.
   phase median beside the verdict, labelled context; it never feeds it. The
   verdict rules, thresholds and guards are unchanged, `--phase` still admits
   the experiment, and no recorded experiment changes its metric.
+
+  **Later (2026-10-01, DND-1549):** the revert rule was mechanical, and only
+  the shipwright's judgement caught that reverting
+  custom:integrate:25c8114295af would delete a self-test assertion. `record`
+  now stores `revert_deletes_tests`: the commit's paths where
+  `FirstParty.test_path?` holds and lines were added (`git show --numstat`),
+  or `revert_deletes_tests_na` with the reason, never `[]` for unknown. A
+  revert verdict (fresh or owed) whose record lists a test, or carries
+  `_na`, prints `REVERT HELD` with the paths and a Fix: a partial revert
+  that keeps the tests, or `decline --constraint safety-checks` when decline
+  would admit it. A record written earlier has no field, so judge computes
+  it with the same adapter. The status stays `revert`, the status row gains
+  a `held` field, and judge's tally counts held on its own. No threshold or
+  guard moved, and nothing becomes keep.
 - **Pending** while either side has fewer than K. A pending row is never
   reported as a gain. Still pending after 7 days: journaled as inconclusive,
   and it no longer blocks its phase.

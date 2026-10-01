@@ -15,7 +15,8 @@
 #           constraint forbids it (DND-1547); only this verb writes `declined`
 #
 # It reads the lead-time-phases ledger (DND-1477) and git (read-only: is a
-# commit on main, reverts on main), and writes only <state>/experiments.jsonl.
+# commit on main, reverts on main, which test paths a commit added lines to),
+# and writes only <state>/experiments.jsonl.
 #
 # Buckets: FRAMEWORK (argv, output) and MANAGER (Record, Judge, List, Decline) here;
 # DOMAIN in ../lib/experiment.rb; SIDE EFFECTS in ../lib/experiment_store.rb,
@@ -59,7 +60,8 @@ HELP = <<~TXT
 
   record   Record one LANDED change. --commit is the 40-hex SHA as it landed
            on main (after any rebase); it is refused when git does not show
-           it on the repo's main. The baseline is the last K=10 comparable
+           it on the repo's main. It also stores the test paths the commit
+           added lines to (revert_deletes_tests), or why git could not tell. The baseline is the last K=10 comparable
            landings before that landing. Refused (exit 2, naming the
            blocking experiment) while a `change` on the same phase is
            pending or owes a revert; `instrumentation` is exempt.
@@ -68,6 +70,11 @@ HELP = <<~TXT
            before and after n, median and p90 (n/a share for
            instrumentation) and the guards. A REVERT line repeats each run
            until main carries the revert; judge then records `reverted`.
+           A revert of a commit that added test lines (a test/ path or a
+           *.self-test.sh), or one where git could not tell, prints
+           REVERT HELD instead (DND-1549): a plain git revert would delete
+           the tests, so the Fix names a partial revert or decline. The
+           status stays revert; the tally counts held on its own.
            Appends a status row only when the verdict changed, so a re-run
            with the same inputs writes nothing.
   list     Every experiment and its latest status (DECLINED with its
@@ -298,10 +305,11 @@ module Record
     rows = Setup.ledger_rows(state, repo)
     check_label!(rows, metric, repo, res.window) if metric.check?
     on_main!(repo, commit)
-    row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows)
+    tests = X.deletes_tests_fields(XG.numstat(repo.path, commit))
+    row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows).merge(tests)
     Setup.append(Setup.store(state)) { |existing| admit!(X.fold(existing), row) }
     puts "experiment: recorded #{row['id']} kind=#{row['kind']} metric=#{row['metric']} phase=#{row['phase']} " \
-         "baseline #{describe_baseline(row['baseline'])}"
+         "baseline #{describe_baseline(row['baseline'])}#{describe_tests(tests)}"
     0
   end
 
@@ -369,6 +377,16 @@ module Record
     X.stats(s[:before], metric).merge("from" => s[:before].first["landed_at"], "to" => s[:before].last["landed_at"])
   end
 
+  # What a plain revert of the commit would delete (DND-1549).
+  def describe_tests(tests)
+    if tests["revert_deletes_tests_na"]
+      return "; revert_deletes_tests n/a (#{tests['revert_deletes_tests_na']}): a revert verdict on it is held"
+    end
+    return "" if tests["revert_deletes_tests"].empty?
+
+    "; a plain revert would delete test additions in #{tests['revert_deletes_tests'].join(', ')}"
+  end
+
   def describe_baseline(b)
     out = if b["na_reason"] then "n/a (#{b['na_reason']})"
           elsif b.key?("na_share") then "n=#{b['n']} n/a share=#{b['na_share']}"
@@ -414,14 +432,39 @@ module Judge
     # [experiment, verdict, phase context (check metrics only; printed, never judged)]
     results = mine.select { |e| e["status"] == "pending" }.map { |e| [e, *verdict(e, rows, repo, shas, now)] }
     results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo), nil] }
+    # + the HELD explanation (DND-1549), nil unless a revert verdict is held
+    results = results.map { |e, v, ctx| held(e, v, ctx, repo) }
     appended = Setup.append(store) { |existing| fresh_rows(existing, results, now) }
-    results.each { |e, v, ctx| puts line(e, v, ctx) }
+    results.each { |e, v, ctx, why| puts line(e, v, ctx, why) }
     judged = results.map { |_, v| v["status"] }
     tally = X::JUDGED.map { |s| "#{judged.count(s)} #{s}" }.join(", ")
     declined = mine.count { |e| e["status"] == "declined" }
+    held = results.count { |_, v| v["held"] }
     puts "experiment judge: #{repo.name}: #{results.size} judged (#{tally}); #{appended.size} status row(s) appended; " \
-         "#{rows.size} landing(s) in the ledger; #{declined} declined (a revert the hard constraint forbids; not judged)"
+         "#{rows.size} landing(s) in the ledger; #{declined} declined (a revert the hard constraint forbids; not judged); " \
+         "#{held} held (a revert whose plain git revert would delete test additions, or could not tell)"
     0
+  end
+
+  # -> [exp, verdict, ctx, why]. A revert verdict (fresh or owed) whose
+  # commit added test lines, or whose answer is unknown, is held: the
+  # verdict gains a `held` field and stays revert; why is the line's text.
+  def held(exp, v, ctx, repo)
+    return [exp, v, ctx, nil] unless v["status"] == "revert"
+
+    hold = X.hold(v["status"], tests_fields(exp, repo))
+    return [exp, v, ctx, nil] unless hold
+
+    refusal, = X.decline_error(exp.merge("status" => "revert", "last" => v))
+    [exp, v.merge("held" => hold), ctx, X.hold_text(repo.name, exp["id"], exp["commit"], hold, refusal)]
+  end
+
+  # The record's revert_deletes_tests(_na), or, for a record written before
+  # DND-1549, the same answer computed now with the same adapter.
+  def tests_fields(exp, repo)
+    return exp if exp.key?("revert_deletes_tests") || exp.key?("revert_deletes_tests_na")
+
+    X.deletes_tests_fields(XG.numstat(repo.path, exp["commit"]))
   end
 
   # Under the lock: only experiments whose status is still the one judged
@@ -491,11 +534,14 @@ module Judge
     "n=#{s['n']} median=#{fmt(s['median'])} p90=#{fmt(s['p90'])}"
   end
 
-  def line(exp, v, ctx = nil)
+  # A held revert reads REVERT HELD instead of REVERT / REVERT OWED.
+  def line(exp, v, ctx = nil, held_why = nil)
     g = v["guards"]&.map { |name, d| "#{name} #{d['before'].nil? ? 'n/a' : d['before']}->#{d['after'].nil? ? 'n/a' : d['after']} #{d['state']}" }
     phase = ctx ? " | phase (context, not judged): before #{side(ctx['before'])} | after #{side(ctx['after'])}" : ""
-    "experiment: #{exp['id']} #{v['status'].upcase} kind=#{exp['kind']} metric=#{exp['metric']} | " \
-      "before #{side(v['before'])} | after #{side(v['after'])} | guards #{g ? g.join(', ') : 'n/a'} | #{v['reason']}#{phase}"
+    status = held_why ? "REVERT HELD" : v["status"].upcase
+    reason = held_why ? "#{v['reason'].to_s.sub(/\AREVERT OWED: /, 'owed: ')} | #{held_why}" : v["reason"]
+    "experiment: #{exp['id']} #{status} kind=#{exp['kind']} metric=#{exp['metric']} | " \
+      "before #{side(v['before'])} | after #{side(v['after'])} | guards #{g ? g.join(', ') : 'n/a'} | #{reason}#{phase}"
   end
 end
 

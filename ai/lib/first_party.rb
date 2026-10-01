@@ -10,6 +10,8 @@
 # rendered agents through `files` (DND-508). Two checks that each keep their
 # own idea of the scope drift apart silently: one of them stops reading a
 # directory, and prints OK anyway.
+# athena:lead-time-improve's experiment (DND-1549) reuses only `test_path?`,
+# to tell which of a commit's additions a plain revert would delete.
 # ai/bin/check-pipefail-grep (DND-509) reuses only `git_ls`: it scans every
 # TRACKED shell file, and its shell test is by content, not by this rule.
 #

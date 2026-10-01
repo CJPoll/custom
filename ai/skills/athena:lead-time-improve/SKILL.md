@@ -94,6 +94,17 @@ before and after numbers, and records the verdict.
   `reverted` once main carries it, and until then no new change starts on
   that phase. If two reverts are owed, land the first; the second is still
   owed next run.
+- **REVERT HELD**: judge found that the commit added test lines (a `test/`
+  path or a `*.self-test.sh`, the `FirstParty.test_path?` rule), or could
+  not look. A plain `git revert` would delete them, so it is never the
+  action. The status is still `revert`. Either land a partial revert that
+  keeps every test addition and its fixture fix (a change like any other:
+  harness-gate, critic PASS, integration-gate), or decline it as above
+  (`--constraint safety-checks`) and journal it under *Decisions /
+  Won't-change*. A bug-fix commit carries its regression test
+  (`~/.claude/CLAUDE.md` → *TDD Workflow*), so this rule covers it with no
+  commit-message parsing. If the line says decline does not cover it (a
+  worse or unmeasured guard), the partial revert is the only path.
 - **declined** is never a gain. It no longer blocks its phase. Judge never
   writes it; only the `decline` verb does.
 - **keep, inconclusive:** journal them. An inconclusive experiment no longer

@@ -26,6 +26,10 @@
 #     judge records `reverted`, or until the decline verb records `declined`
 #     (DND-1547): a median-only revert the hard constraint forbids landing.
 #     Judge never writes `declined`, and a worse guard is never declined.
+#   * a revert whose commit added test lines, or where git could not tell,
+#     is HELD (DND-1549): still `revert`, but a plain git revert is ruled
+#     out. Only FirstParty.test_path? (a pure function) is used from
+#     ai/lib/first_party.rb; its git readers are not called here.
 #   * only `improve`-mode rows count, one row per landing (batch tickets
 #     sharing a landed commit are one landing).
 #
@@ -35,6 +39,7 @@
 
 require "time"
 require_relative "../../../lib/lead_time_phases"
+require_relative "../../../lib/first_party"
 
 module LeadTimeExperiment
   SCHEMA = 1
@@ -480,4 +485,60 @@ module LeadTimeExperiment
   end
 
   def id_for(repo, phase, commit) = "#{repo}:#{phase}:#{commit.to_s[0, 12]}"
+
+  # ── revert held (DND-1549) ──────────────────────────────────────────────
+  # A plain `git revert` of a commit that added test lines deletes them: the
+  # weakening ai/blocks/ops/safety-checks.md forbids. HELD is presentation
+  # plus a `held` field on the status row. The verdict stays `revert`;
+  # nothing becomes keep and no bar moves.
+
+  # The test paths a commit added lines to, from its numstat entries
+  # [[added | nil, deleted | nil, path]] (nil: a binary file, whose change
+  # git does not count in lines: held, since unknown fails closed). The
+  # test-path rule is FirstParty.test_path?, the guard classification's own.
+  def test_additions(entries)
+    entries.select { |added, _, path| FirstParty.test_path?(path) && (added.nil? || added.positive?) }
+           .map(&:last).uniq.sort
+  end
+
+  # The record fields for a numstat Source: the test paths (possibly []), or
+  # `_na` with the reason when git could not answer. Never [] for unknown.
+  def deletes_tests_fields(src)
+    return { "revert_deletes_tests_na" => src.reason } if src.could_not_look?
+
+    { "revert_deletes_tests" => test_additions(src.items) }
+  end
+
+  # nil, or why a revert verdict is held: {"tests" => paths} or
+  # {"could_not_look" => reason}. `fields` carries revert_deletes_tests or
+  # revert_deletes_tests_na; neither (or a non-list) is could not look.
+  def hold(status, fields)
+    return nil unless status == "revert"
+
+    na = fields["revert_deletes_tests_na"]
+    return { "could_not_look" => na.to_s } if na
+
+    tests = fields["revert_deletes_tests"]
+    return { "could_not_look" => "the record carries no revert_deletes_tests list" } unless tests.is_a?(Array)
+
+    tests.empty? ? nil : { "tests" => tests }
+  end
+
+  # The HELD line's explanation and Fix. decline_refusal: nil when the
+  # decline verb would admit this revert, else why it would refuse it.
+  def hold_text(repo, id, commit, hold, decline_refusal)
+    sha = commit.to_s[0, 12]
+    what = if hold["could_not_look"]
+             "could not look whether reverting #{sha} deletes test additions: #{hold['could_not_look']}"
+           else
+             "reverting #{sha} deletes test additions in #{hold['tests'].join(', ')}"
+           end
+    partial = "land a partial revert that keeps every test addition and its fixture fix"
+    fix = if decline_refusal
+            "#{partial}; decline does not cover this revert (#{decline_refusal})"
+          else
+            "#{partial}, or run experiment decline --repo #{repo} --id #{id} --constraint safety-checks --reason-file <F>"
+          end
+    "#{what}; the hard constraint rules out a plain git revert. Fix: #{fix}"
+  end
 end
