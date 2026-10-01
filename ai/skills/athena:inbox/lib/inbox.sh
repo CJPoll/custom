@@ -788,7 +788,7 @@ _inbox_retain() {
     2)
       # Abandoned: bytes landed between the trigger and the rename. Not a
       # failure -- the trigger will still hold next time, and carrying those
-      # bytes into a `.1` nothing ever reads would lose them silently.
+      # bytes into a `.1` no delivery path reads would lose them silently.
       printf '{}\n'
       ;;
     *)

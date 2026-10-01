@@ -998,6 +998,9 @@ late() { printf "{name: 'c', rows: [{'channel' => 'D1', 'ts' => '1790199000.0000
 files_eq "window_covered?: a later-starting stream that never rotated covers the window [DND-1497]" \
   "true" \
   "JudgmentEval.window_covered?(${COVR}, [$(late "generation: false, rotated_at: '2026-09-27T11:02:36Z'")], now: ${NOW})"
+files_eq "window_covered?: a rotated_at exactly 14 days old is past the sweep's reach: not covered [DND-1497]" \
+  "false" \
+  "JudgmentEval.window_covered?(${COVR}, [$(late "generation: false, rotated_at: '2026-09-17T00:00:00Z'")], now: ${NOW})"
 files_eq "window_covered?: one with a generation may have lost an older one: not covered [DND-1497]" \
   "false" \
   "JudgmentEval.window_covered?(${COVR}, [$(late "generation: true, rotated_at: '2026-09-27T11:02:36Z'")], now: ${NOW})"
@@ -1084,6 +1087,18 @@ has "it is a case [DND-1497]" "${OUT}" "cases: 1 (walt_ui 1)"
 lacks "it is not excluded for its window [DND-1497]" "${OUT}" "window-incomplete excluded"
 has "the eval names only the root that is in neither file [DND-1497]" "${ERR}" \
   "join: 1 of 2 labels have no corpus row with that event_id (n/a, not scored; 1 owner_confirmed): EvGone"
+
+# A rotated, quiet channel: the generation exists, the live file does not
+# (the writer recreates it on its next append). That is an inbox, not a
+# missing one.
+mv "${RROOT}/walt_ui-slack.jsonl" "${TMP}/gen-root-live.jsonl"
+run "${BIN}" --propose --dry-run --inbox-root "${RROOT}" --labels "${RLAB}"
+eq "propose with only the rotated generation exits 0 [DND-1497]" "${RC}" "0"
+has "it reads the generation alone [DND-1497]" "${OUT}" "slack: ${RROOT}/walt_ui-slack.jsonl.1: 3 lines"
+mv "${RROOT}/walt_ui-slack.jsonl.1" "${TMP}/gen-root-gen.jsonl"
+run "${BIN}" --propose --dry-run --inbox-root "${RROOT}" --labels "${RLAB}"
+eq "neither file is the missing-inbox error (exit 1) [DND-1497]" "${RC}" "1"
+has "it names both files, with Fix: [DND-1497]" "${ERR}" "walt_ui-slack.jsonl does not exist (nor its rotated generation walt_ui-slack.jsonl.1). Fix:"
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"

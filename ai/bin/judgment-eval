@@ -313,7 +313,7 @@ module Effects
   end
 
   # read_slack_inboxes(root) -> {files: [basename], lines: [Hash], unreadable: n}.
-  # A root that is missing, or holds no *-slack.jsonl, is an ERROR: zero
+  # A root that is missing, or holds no *-slack.jsonl nor *-slack.jsonl.1, is an ERROR: zero
   # files must never read as "no context before any root".
   # The reader is ai/lib/slack_inbox_files.rb, shared with judgment-label's
   # root snapshot (DND-1448). A channel's rotated generation (<name>.1) is
@@ -525,7 +525,7 @@ module Manager
     end
     inbox = Effects.read_slack_inboxes(Effects.inbox_root(opts[:inbox_root]))
     # A root snapshot corpus (DND-1448) carries the context each root had
-    # when first seen; its lines join the live inbox's, so a root that
+    # when first seen; its lines join the inbox's, so a root that
     # rotated out is not judged with an empty window.
     snap = JudgmentEval.snapshot_candidates(cases)
     lines = inbox[:lines] + snap[:lines]

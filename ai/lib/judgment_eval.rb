@@ -338,7 +338,8 @@ module JudgmentEval
   # window: its earliest line's ts is at or before root ts - CONTEXT_WINDOW_S
   # (DND-1448). A file that starts later may have rotated lines of that
   # window away; a file with no line in the channel cannot hold its context.
-  # FILES is [{name:, rows:}]. No such file, or an unreadable ts, is false:
+  # FILES is SlackInboxFiles.read's streams, [{name:, rows:, generation:,
+  # rotated_at:}]. No such file, or an unreadable ts, is false:
   # "could not tell" never reads as covered.
   #
   # NOW given (DND-1497): a stream that NEVER ROTATED lost nothing, however
@@ -349,7 +350,10 @@ module JudgmentEval
   # false, stated, never assumed) and a rotated_at no older than the sweep
   # window means the channel never rotated. A missing, malformed or future
   # rotated_at, or no clock, is "could not tell": the earliest-line rule
-  # above. Residual: a .1 deleted by hand reads as never rotated.
+  # above. Residual: reads as never rotated when it did -- a .1 deleted by
+  # hand, a state file recreated or its rotated_at reset after a sweep
+  # (the reader restamps it to now), or a stream that once held the channel
+  # and has vanished entirely.
   def window_covered?(root, files, now: nil)
     root_us = slack_ts_us(root["ts"])
     holding = files.select { |f| f[:rows].any? { |line| line.is_a?(Hash) && line["channel"] == root["channel"] } }

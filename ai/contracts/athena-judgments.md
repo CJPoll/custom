@@ -655,8 +655,10 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   `window_complete` when every inbox file reached back over the window. The
   inbox is a channel's live file and its rotated generation (`<file>.1`,
   `athena-inbox.md` → *Retention*), read together as one stream, oldest
-  first (DND-1497). `judgment-label` and `judgment-eval` read it through one
-  reader, `ai/lib/slack_inbox_files.rb`. The labels are built over the
+  first (DND-1497). `judgment-label` reads its roots from
+  `walt_ui-slack.jsonl.1` and `walt_ui-slack.jsonl` itself (a bad line
+  stops it); both tools read context and coverage through one reader,
+  `ai/lib/slack_inbox_files.rb`. The labels are built over the
   snapshot's roots and the inbox's, so a root that rotated out of
   `walt_ui-slack.jsonl` keeps its row, and a root still in
   `walt_ui-slack.jsonl.1` is snapshotted until the next rotation deletes
@@ -666,8 +668,9 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   `rotated_at` in its state file within the 14-day sweep (`athena-inbox.md`
   → *Lifetimes*: every rotation leaves a `.1` until the next rotation or that
   sweep). A missing or unreadable `rotated_at` is "could not tell", so the
-  earliest-line rule applies. A `.1` deleted by hand would read as never
-  rotated; that is the residual. A label whose root is in no corpus row is `n/a`, never
+  earliest-line rule applies. The residual reads as never rotated when it
+  did: a `.1` deleted by hand, a state file recreated or its `rotated_at`
+  reset after a sweep, or a stream that held the channel and has vanished. A label whose root is in no corpus row is `n/a`, never
   scored: `judgment-eval` names it with how many such labels are
   `owner_confirmed`, and its `Fix:` says how a root reaches the snapshot.
   Forward

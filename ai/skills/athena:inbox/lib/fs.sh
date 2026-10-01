@@ -402,8 +402,9 @@ fs_rotated_name() { printf '%s.1\n' "$1"; }
 # the writer re-creates the live file only on its next append. A check of the
 # live file alone read a rotated, quiet channel as "nothing has EVER been
 # delivered" and sent the operator to register a producer that was registered
-# all along. The `.1` is only probed for existence: its CONTENT is still never
-# read, counted or deduped against (contract -> "The rotated generation").
+# all along. The `.1` is only probed for existence: its CONTENT is never read
+# by any delivery path, counted or deduped against (contract -> "The rotated
+# generation").
 #
 # EXISTENCE, NOT SIZE. The writer creates the file on its first append, so an
 # existing file is a delivery. Freshness asks a different question (how old is
@@ -454,7 +455,7 @@ _fs_probe_exists() {
 #
 # THE RE-CHECK IS THE WHOLE FUNCTION. The lock excludes other READERS, not the
 # writer, which appends at any moment -- so a line landing between the trigger
-# evaluation and the rename is carried into `.1`, and NOTHING EVER READS `.1`.
+# evaluation and the rename is carried into `.1`, and NO DELIVERY PATH READS `.1`.
 # Those bytes are lost with no error, no doorbell anomaly and no way to notice.
 # It is the same defect the contract forbids when it says ack MUST NOT
 # recompute EOF, arriving from the other direction. Abandoning costs one

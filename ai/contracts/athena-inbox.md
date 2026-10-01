@@ -2318,8 +2318,8 @@ covers only the first rotation; this covers every one after it.
 **Re-check `size == offset` under the consumer lock, immediately before the
 `rename(2)`, and abandon the rotation if it moved.** The lock excludes other
 *readers*, not the writer, which appends at any moment — so a line landing
-between the trigger evaluation and the rename is carried into `.1`, and nothing
-ever reads `.1`. Those bytes would be lost with no error, no doorbell anomaly,
+between the trigger evaluation and the rename is carried into `.1`, and no
+delivery path reads `.1`. Those bytes would be lost with no error, no doorbell anomaly,
 and no way to notice. This is the same defect *Reader obligations* forbids when
 it says ack MUST NOT recompute EOF, arriving from the other direction:
 rotation must not act on a stale EOF either. Abandoning costs one deferred

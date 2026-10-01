@@ -295,9 +295,10 @@ module Effects
     fail!(1, "could not append to #{path}: #{e.class}", "check that #{dir} is writable")
   end
 
-  # slack_inbox_files(root) -> {files: [{name:, rows:}], unreadable: n}:
-  # every *-slack.jsonl directly under root, read by the reader judgment-eval
-  # uses for a context (ai/lib/slack_inbox_files.rb).
+  # slack_inbox_files(root) -> {files: [{name:, sources:, rows:, generation:,
+  # rotated_at:}], unreadable: n}: one stream per *-slack.jsonl directly
+  # under root, each with its rotated generation (*-slack.jsonl.1), read by
+  # the reader judgment-eval uses for a context (ai/lib/slack_inbox_files.rb).
   def slack_inbox_files(root)
     SlackInboxFiles.read(root)
   rescue SlackInboxFiles::Error => e
@@ -443,7 +444,7 @@ module Manager
     read = Effects.slack_inbox_files(opts[:inbox_root])
     files = read[:files]
     lines = files.flat_map { |f| f[:rows] }
-    out.puts "snapshot context: #{files.size} inbox file(s) read" + (read[:unreadable].positive? ? ", #{read[:unreadable]} unreadable line(s) skipped" : "")
+    out.puts "snapshot context: #{files.size} inbox stream(s) (#{files.sum { |f| f[:sources].size }} file(s)) read" + (read[:unreadable].positive? ? ", #{read[:unreadable]} unreadable line(s) skipped" : "")
     raw = JudgmentLabel.raw_rows_in(input[:sources], roots.map { |r| r[:event_id] })
     now = Effects.now
     roots.map do |root|
