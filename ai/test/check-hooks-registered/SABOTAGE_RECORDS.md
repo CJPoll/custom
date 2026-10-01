@@ -144,3 +144,18 @@ RED against the first-round checker (commit d3d06680), 44 passed, 2 failed:
   `exit 0, want 1` (a missing newer registry read as an empty bar). Fixed: it is
   Unreadable, and the pinned drift stands.
 After the fix: 46 passed, 0 failed.
+
+## DND-1570: the agent-stash env ahead of the pinned bar
+
+Fail-first, against the unfixed checker (47 passed, 2 failed):
+- `live env equals a NEWER origin/main's env -> ACTIVE, named ahead of the pinned bar,
+  exit 0`: `exit 1, want 0; output: ... agent-stash env: DRIFT ... CLAUDE_ENV_FILE
+  differs: have ".../session-env2.sh", want ".../session-env.sh"`.
+- `newer origin/main has no registry -> pinned DRIFT stands, says it could not judge`:
+  `output lacks /could not read a newer origin/main/` (exit was already 1).
+After the fix: 49 passed, 0 failed.
+
+| Mutation (in `ai/bin/check-hooks-registered`) | Caught by |
+|---|---|
+| `env-ahead-accepts-any`: `env_ahead_of_pin` passes without the exact-match test | `live env matches neither the pinned nor the newer env -> still DRIFT` |
+| `env-newer-reader-nil`: `newer_env_section` reads as no newer main | `live env equals a NEWER origin/main's env -> ACTIVE ...` |

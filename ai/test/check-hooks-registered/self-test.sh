@@ -522,6 +522,50 @@ printf '{"hooks": {}}\n' > "${D}/settings.json"
 pinned_check; expect "newer origin/main has no registry -> pinned drift stands, says it could not judge" 1 \
   "could not read a newer origin/main" ": ahead of the pinned bar"
 
+# 17. THE AGENT-STASH ENV, AHEAD OF THE PINNED BAR (DND-1570). Same shape as
+#     16: the gate pinned origin's main, a newer commit changed the registry's
+#     env (CLAUDE_ENV_FILE names a new script), and the owner's `--install-env` from the main checkout
+#     wrote the NEWER env into the settings. Live env == the newer main's env:
+#     named ahead, exit 0. Live env == neither: DRIFT, exit 1. A newer main
+#     whose env cannot be read is "could not judge", never an empty bar.
+env_ahead_fixture() { # env_ahead_fixture <name>: pin, then land a newer env
+  D="$(env_fixture "$1")"
+  PIN="$(git -C "${D}/main" rev-parse HEAD)"
+  KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+  REG="${D}/main/ai/hooks/registry.json" /usr/bin/ruby -rjson -e '
+    r = JSON.parse(File.read(ENV["REG"])); r["env"]["vars"]["CLAUDE_ENV_FILE"] = "{{MAIN}}/ai/agent-env/session-env2.sh"
+    File.write(ENV["REG"], JSON.pretty_generate(r) + "\n")'
+  cp "${D}/main/ai/agent-env/session-env.sh" "${D}/main/ai/agent-env/session-env2.sh"
+  commit "${D}/main" newer-env
+  git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+  git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+}
+pinned_session() { # session_check under the gate's pin
+  export ATHENA_LANDED_PIN_SHA="${PIN}" ATHENA_LANDED_PIN_REPO="${KEY}"
+  session_check "$@"
+  unset ATHENA_LANDED_PIN_SHA ATHENA_LANDED_PIN_REPO
+}
+
+env_ahead_fixture env-ahead
+env_settings "${D}" "${INSTALL_AFTER}"   # expanded from main's working tree: the NEWER env
+pinned_session "${D}" "${SNAP_OLD}" wrapper
+expect "live env equals a NEWER origin/main's env -> ACTIVE, named ahead of the pinned bar, exit 0" 0 \
+  "agent-stash env: ACTIVE.*ahead of the pinned bar|ahead of the pinned bar.*agent-stash env: ACTIVE" "agent-stash env: DRIFT"
+
+env_ahead_fixture env-ahead-miss
+env_settings "${D}" "${INSTALL_AFTER}" ATHENA_AGENT_BIN
+pinned_session "${D}" "${SNAP_OLD}" stale
+expect "live env matches neither the pinned nor the newer env -> still DRIFT" 1 "agent-stash env: DRIFT" \
+  "agent-stash env: ahead of the pinned bar"
+
+env_ahead_fixture env-ahead-no-registry
+env_settings "${D}" "${INSTALL_AFTER}"
+git -C "${D}/main" rm -q ai/hooks/registry.json >/dev/null 2>&1; commit "${D}/main" drop-registry
+git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+pinned_session "${D}" "${SNAP_OLD}" wrapper
+expect "newer origin/main has no registry -> pinned DRIFT stands, says it could not judge" 1 \
+  "could not read a newer origin/main" "agent-stash env: ahead of the pinned bar"
+
 # Unpinned, there is no newer origin/main to be ahead of.
 D="$(new_fixture unpinned-unwired)"
 printf '{"hooks": {}}\n' > "${D}/settings.json"

@@ -829,6 +829,11 @@ end
 # predates the install, DND-1036), DRIFT/FAIL (exit 1), or COULD NOT MEASURE
 # (exit 3). The overall exit is the worse of the two checks.
 #
+# AHEAD OF THE PINNED BAR (DND-1570): drift against the pin is retried against a
+# NEWER origin/main (Landed.newer_tip); a live env that equals that env exactly is
+# named ahead and passes, anything else stays DRIFT, and a newer main whose env
+# cannot be read is "could not judge" (the pinned drift stands).
+#
 # THE BAR IS THE ENV AS LANDED, like the hooks' (DND-743). The expected values
 # come from ai/hooks/registry.json at origin/main's tip (ai/lib/landed.rb,
 # honouring the harness-gate pin), expanded against the MAIN checkout. The tip,
@@ -853,11 +858,59 @@ def landed_env_section(root = REPO_DIR)
   [Landed.describe([pts.first]), tip ? tip[1] : nil]
 end
 
+# AHEAD OF THE PINNED BAR (DND-1570), the agent-stash env's counterpart of the
+# hook rows' (DND-1552). The newer origin/main's env section as
+# [description, section], or nil when there is no pin or origin's main is the
+# pin (Landed.newer_tip). A newer main with no registry, or one that is not
+# valid JSON, raises Landed::Unreadable: a newer bar that cannot be read is
+# never an empty one. A newer main whose registry has no env section yields a
+# nil section (it declares no env, so no live env is ahead of it).
+def newer_env_section(root = REPO_DIR)
+  tip = Landed.newer_tip(root)
+  return nil unless tip
+
+  label, sha = tip
+  where = "#{REGISTRY_REL} @ #{sha[0, 12]}"
+  text = Landed.file_at(root, sha, REGISTRY_REL, label)
+  raise Landed::Unreadable.new([[label, "#{where} does not exist, so it cannot say what the live env should be"]]) if text.nil?
+
+  data = begin
+    JSON.parse(text)
+  rescue JSON::ParserError => e
+    raise Landed::Unreadable.new([[where, "not valid JSON (#{e.message.lines.first.to_s.strip})"]])
+  end
+  ["#{REGISTRY_REL} @ newer origin/main #{sha[0, 12]}", data.is_a?(Hash) ? data["env"] : nil]
+end
+
+# Does the live env equal the NEWER origin/main's declared env? Returns
+# [desc, exp, nil] when it does (exp is that env expanded for main),
+# [nil, nil, note] when it does not or the newer bar cannot be read, and
+# [nil, nil, nil] when there is no newer origin/main. Only an exact match
+# passes: an env equal to neither bar stays drift.
+def env_ahead_of_pin(env, main, root, newer_env)
+  got = newer_env.call(root)
+  return [nil, nil, nil] if got.nil?
+
+  desc, section = got
+  return [nil, nil, "the newer origin/main (#{desc}) declares no agent-stash env, so the live env is not ahead of the pinned bar"] if section.nil?
+
+  exp = AgentStashEnv.expected({ "env" => section }, main)
+  res = AgentStashEnv.settings_state(env, exp)
+  return [desc, exp, nil] if res.state == :active
+
+  why = res.state == :inactive ? "carries none of that env's keys" : "differs (#{res.lines.join('; ')})"
+  [nil, nil, "the live env is not ahead of the pinned bar either: against #{desc} it #{why}"]
+rescue Landed::Unreadable, Landed::Mismatch => e
+  [nil, nil, "could not read a newer origin/main to tell whether the live env is ahead of the pinned bar " \
+             "(#{e.message}); it is measured against the pinned bar alone"]
+end
+
 # The branch's own registry is never read here: neither the INACTIVE decision
 # (a fixed key rule, AgentStashEnv.any_guard_key?) nor the expected values (the
 # landed env) comes from the diff under check (critic round 4).
 def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO_DIR,
                         landed_env: ->(r) { landed_env_section(r) },
+                        newer_env: ->(r) { newer_env_section(r) },
                         proc_env: ENV,
                         session_snapshot: ->(now) { AgentStashEnv.session_snapshot(now: now) },
                         now: -> { Time.now }, out: $stdout, err: $stderr)
@@ -885,15 +938,20 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
     Landed.mismatch_lines(e.local, e.remote, e.source).each { |l| err.puts l }
     return EXIT_UNMEASURED
   end
-  if section.nil?
+  ahead_desc = nil
+  ahead_note = nil
+  ahead_exp = nil
+  ahead_desc, ahead_exp, ahead_note = env_ahead_of_pin(env, main, root, newer_env) if section.nil?
+  if section.nil? && ahead_desc.nil?
+    err.puts "  note: #{ahead_note}" if ahead_note
     err.puts "#{tag}: FAIL — #{path} carries agent-stash keys, but the env has not landed (#{bar}). " \
              "The guard is live ahead of its script: every agent ref update may fail closed."
     err.puts "  Fix: the owner runs `#{File.join(main, 'scripts/setup-hooks')} --remove-env` and restarts " \
              "sessions, then re-installs after the branch lands."
     return EXIT_FAIL
   end
-  exp = AgentStashEnv.expected({ "env" => section }, main)
-  res = AgentStashEnv.settings_state(env, exp)
+  exp = ahead_exp || AgentStashEnv.expected({ "env" => section }, main)
+  res = ahead_desc ? AgentStashEnv::Result.new(:active, [], 0) : AgentStashEnv.settings_state(env, exp)
   if res.state == :inactive
     # A guard trace exists (any_guard_key? above) but none of the landed keys
     # does: a renamed or case-variant key. That is drift, never INACTIVE.
@@ -902,7 +960,21 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
                                              "#{AgentStashEnv::INSTALLED_AT}), " \
                                              "but none of the landed env's keys"], 1)
   end
+  if res.state == :drift && ahead_desc.nil?
+    ahead_desc, ahead_exp, ahead_note = env_ahead_of_pin(env, main, root, newer_env)
+    if ahead_desc
+      exp = ahead_exp
+      res = AgentStashEnv::Result.new(:active, [], 0)
+    end
+  end
+  if ahead_desc
+    bar = "#{ahead_desc}, ahead of the pinned bar (#{bar})"
+    out.puts "#{tag}: ahead of the pinned bar — the live env equals the env #{ahead_desc} declares, a commit " \
+             "that landed after harness-gate pinned origin/main; it differs from the pinned bar only by that " \
+             "newer commit (not drift)."
+  end
   if res.state == :drift
+    err.puts "  note: #{ahead_note}" if ahead_note
     err.puts "#{tag}: DRIFT — #{path} holds part of the agent-stash env, or values that differ from #{bar}:"
     res.lines.each { |l| err.puts "  - #{l}" }
     err.puts "  Fix: the owner re-applies it from the MAIN checkout (fast-forwarded to origin/main): " \
