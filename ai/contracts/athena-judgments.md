@@ -377,9 +377,12 @@ case on. Finding triage's advisory labels are `duplicate` and `related`;
 Every option of `ticket_kind`, `ticket_severity` and `ticket_security` is an
 advisory label, since the policy may act on each. `ticket_blocking`'s one
 advisory label is `blocks`: an enabled `does_not_block` alone cannot turn it
-on. In `on` the policy also acts on an accepted `does_not_block` (it may
-remove a non-security claim), and a `does_not_block` is accepted only when
-its OWN threshold row is enabled and met (gen_saas `Decision.decide_reading`
+on. `priority_scoring`'s advisory labels are the urgency and importance levels
+above the lowest (DND-1097). `urgency:none` and `importance:nice_to_have` add
+nothing to the rank (`athena-events.md` → *Ranking*), so an enabled lowest
+level alone cannot turn it on. In `on` the policy also acts on an accepted
+`does_not_block` (it may remove a non-security claim), and a `does_not_block`
+is accepted only when its OWN threshold row is enabled and met (gen_saas `Decision.decide_reading`
 reads the answered label's row; a disabled or absent row is
 `label_disabled` or `threshold_unset`, a fallback). So an `on` set on
 `blocks` alone never removes a claim. A

@@ -6262,19 +6262,28 @@ or a digest can render them:
 | `overdue` | `due_on` is before `now` |
 | `age` | the owner's age curve gives the item's age a weight |
 | `domain_hours` | the owner weights the item's domain for the current time (work hours or not, per the owner's policy) |
-| `judged_urgency` | the item's urgency judgment was accepted against the `priority_scoring` threshold; the delta is `round(weight × score)` |
-| `judged_importance` | the item's importance judgment was accepted against the `priority_scoring` threshold; the delta is `round(weight × score)` |
+| `judged_urgency` | the item's urgency judgment was accepted against the `priority_scoring` threshold; the delta is `round(weight × (level - 1))` |
+| `judged_importance` | the item's importance judgment was accepted against the `priority_scoring` threshold; the delta is `round(weight × (level - 1))` |
 | `judgment_unavailable` | no judgment was accepted for the item; delta 0, display only; `judged_reason` names why |
 
 - **Judged reasons are advisory** (`ai/contracts/athena-judgments.md` → *Trust
   posture*). When a judgment is not accepted, `judged_urgency` and
   `judged_importance` are absent and the item ranks exactly as it would without
-  them. In `round(weight × score)`, `score` is the accepted level's position on
-  the question set's scale, 1 to 4 in `priority_scoring` v1, so a judged delta
-  is at most `4 × weight`. The weights live in code as `Rules` defaults. The
-  default `vip_asker` weight is strictly greater than the largest combined
-  judged delta, so a VIP ask outranks an otherwise-equal ask. A weight change
-  rescores with no new judgment.
+  them. In `round(weight × (level - 1))`, `level` is the accepted level's
+  position on the question set's scale, 1 to 4 in `priority_scoring` v1, so a
+  judged delta is 0 to `3 × weight`. The lowest level ("no urgency", "nice to
+  have") adds 0: an item judged lowest on both Scores ties on score with an
+  item never judged (*Ties* below), and never outranks it. The weights live in
+  code as `Rules` defaults. At the default judged weights of 10 the largest
+  combined judged delta is `3 × (10 + 10)` = 60. The default `vip_asker`
+  weight is strictly greater than it, so a VIP ask outranks an otherwise-equal
+  ask. A weight change rescores with no new judgment.
+
+  **Later (2026-10-01, DND-1097):** the delta was `round(weight × score)`,
+  `score` 1 to 4, so a judged delta was at most `4 × weight` and the lowest
+  level added one weight. Replaced by `round(weight × (level - 1))`. Under the
+  old formula an item the judge confidently rated least urgent and least
+  important ranked above an item it never judged.
 - **An override always wins.** `pin_top` ranks the item above every item
   without it, `pin_bottom` below every item without it, and `score` replaces
   the computed score. `owner_override` then leads the reasons. The computed
