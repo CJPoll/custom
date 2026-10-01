@@ -76,16 +76,21 @@ outlier".
 A PR that is CLOSED with no `mergedAt` is judged by its **change**, not its state:
 
 - **Landed** when its head is on the base, or every one of its non-merge
-  commits' patch-ids is on the base (a rebase), or its whole diff's patch-id is
-  one base commit (a squash), or every one of its commits is on the base under
-  its own subject with the same zero-context patch-id (`git diff -U0`): the
-  base edited a line next to the change before it landed, so only the
-  context differs (DND-1491). The landing time is the **push** to
+  commits is on the base, one base commit each (a rebase), or its whole diff's
+  patch-id is one base commit (a squash). A commit is on the base when its
+  patch-id is, or when a base commit with the same subject has its
+  zero-context patch-id (`git diff -U0`): the base edited a line next to the
+  change before it landed, so only the context differs (DND-1491). The second
+  kind counts only when that subject names one base commit in the range, so a
+  generic subject never pairs on a near-empty patch. The landing time is the **push** to
   `refs/heads/<base>` that first carried that commit, read from GitHub's
   repository activity log (`gh api repos/{owner}/{repo}/activity`). The row
   carries `landed_via: "push"` and `landed_commit`; a forge merge carries
   `landed_via: "merge"`.
-- **Closed** (`via=closed`, no lead) when none of it is on the base.
+- **Closed** (`via=closed`, no lead) when none of it is on the base. Known
+  residual: a multi-commit PR squashed under a new subject AFTER the base
+  edited its diff context matches neither its whole-diff patch-id nor any
+  per-commit one, so it reads closed though it landed.
 - **Could not measure** (`via=unmeasured`, with the reason on the row and on
   stderr) when only some of its commits are on the base, or its change is on
   the base only under another subject, or a base commit (named in the reason)
@@ -101,6 +106,9 @@ A PR that is CLOSED with no `mergedAt` is judged by its **change**, not its stat
   no landed commit while its change was on main as `38d76482`, landed by
   the 02:20:24Z push on 2026-09-27; main had edited a line next to its hunk.
   `lead-time-phases` skipped the row as "not ledgered" without the reason.
+  The same change also superseded "closed" for a PR whose change is on the
+  base only under another subject, with its context changed: it read closed,
+  and now reads could-not-measure, because that match proves neither.
 - A lookup that cannot run (the activity log, a `git fetch` of the base and
   `refs/pull/<n>/head`, `git patch-id`) is a failed probe, so the run ends
   `SCAN INCOMPLETE`.
@@ -150,7 +158,9 @@ uses) and adds:
   `before..after`. It gives one row per ticket its commit subjects name, with
   the ticket parser the PR path uses: `pr: null`, `ticket`, `landed_via:
   "push"`, `landed_commit` = the push's after sha, `commits`, and `merged` =
-  the push time. A push naming no ticket gives one row with lead `null` and
+  the push time. A malformed after sha is `landed_commit: null` with
+  `landing_commit_unmeasured` naming it (*Every row carries its landed commit
+  or says why not*). A push naming no ticket gives one row with lead `null` and
   "no ticket in the pushed commits' subjects".
 - **A force push**: could not measure, "force push to base".
 - **A PR merge no listed PR claims**: could not measure, never dropped.

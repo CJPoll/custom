@@ -384,7 +384,29 @@ Dir.mktmpdir("lead-time-test") do |root|
     ctx.call("q0", "DND-1: x")[:status] == :unknown
   end
   check("a commit with no zero-context patch-id never matches on it") do
-    ctx.call(nil, "DND-1: x")[:status] == :unknown
+    LeadTime.classify_landing(pr_only: [{ pid: "pr", pid0: nil, subject: "DND-1: x" }], combined_pid: "pr",
+                              main: [{ sha: "m1", pid: "other", pid0: nil, subject: "DND-1: x" }])[:status] == :unknown
+  end
+  two = lambda do |main|
+    LeadTime.classify_landing(pr_only: [{ pid: "a", pid0: "a0", subject: "DND-1: one" },
+                                        { pid: "b", pid0: "b0", subject: "DND-1: two" }],
+                              combined_pid: "ab", main: main)
+  end
+  check("a mixed rebase lands: one commit by patch-id, one with only its context changed") do
+    two.call([{ sha: "mb", pid: "other", pid0: "b0", subject: "DND-1: two" },
+              { sha: "ma", pid: "a", pid0: "a0", subject: "DND-1: one" }]) == { status: :landed, sha: "mb" }
+  end
+  check("only one commit on main, by either tier, is a partial landing, never closed") do
+    c = two.call([{ sha: "mb", pid: "other", pid0: "b0", subject: "DND-1: two" }])
+    c[:status] == :unknown && c[:reason].include?("1 of 2")
+  end
+  check("one base commit never carries two request commits") do
+    two.call([{ sha: "mx", pid: "a", pid0: "a0", subject: "DND-1: one" }])[:status] == :unknown
+  end
+  check("a subject two base commits share never pairs by zero-context patch-id") do
+    LeadTime.classify_landing(pr_only: [{ pid: "pr", pid0: "z0", subject: "fix typo" }], combined_pid: "pr",
+                              main: [{ sha: "m1", pid: "o1", pid0: "z0", subject: "fix typo" },
+                                     { sha: "m2", pid: "o2", pid0: "y0", subject: "fix typo" }])[:status] == :unknown
   end
   pushes = [{ at: "T1", after: "a1" }, { at: "T2", after: "a2" }, { at: "T3", after: "a3" }]
   carries = ->(hits) { ->(_s, after) { hits.fetch(after) } }
@@ -1093,5 +1115,7 @@ warn "Fix: make ai/bin/lead-time judge a CLOSED GitHub PR's landing by its chang
      "place must read 'could not measure', and a closed-unlanded one 'closed', never 'open'. " \
      "A window scan must also list every direct push to the base branch (one row per ticket its " \
      "commit subjects name, deduped against PR rows), write --meta's scanned_through before --slow, " \
-     "and parse --since as YYYY-MM-DD or zoned RFC 3339 (DND-1009)."
+     "and parse --since as YYYY-MM-DD or zoned RFC 3339 (DND-1009). A same-subject base commit " \
+     "whose zero-context (-U0) patch-id matches is that commit's landing, and every row carries " \
+     "landed_commit or merge_commit, or landing_commit_unmeasured naming why not (DND-1491)."
 exit 1

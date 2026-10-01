@@ -174,7 +174,10 @@ module LeadTimePhases
         # lead-time names why a row has no landed commit (DND-1491); a row
         # with neither is lead-time breaking that contract, never a quiet skip.
         why = row["landing_commit_unmeasured"].to_s
-        why = "lead-time named no reason (landing_commit_unmeasured is absent)" if why.empty?
+        if why.empty?
+          why = "lead-time named no reason (landing_commit_unmeasured is absent: a row from before " \
+                "DND-1491, or lead-time broke the rule; see landing_commit_keys in ai/bin/lead-time)"
+        end
         return [nil, "no landed commit (#{what}): #{why}"]
       end
       return [nil, "no landing time for #{Util.short(commit)}"] unless landed

@@ -235,12 +235,12 @@ module LeadTime
   #   main:         [{sha:, pid:, pid0:, subject:}] the base's non-merge
   #                 commits that are not in the request, newest first
   #
-  # -> {status: :landed, sha:}  every commit's patch is on main (a rebase), or
-  #                             the whole diff is one main commit (a squash),
-  #                             or every commit is on main under its own
-  #                             subject with only its context changed
-  #                             (DND-1491); sha is the newest main commit that
-  #                             carries it
+  # -> {status: :landed, sha:}  every commit is on main, one for one, by its
+  #                             patch or, under its own subject, by its patch
+  #                             with only the context changed (DND-1491; see
+  #                             match_commits), or the whole diff is one main
+  #                             commit (a squash); sha is the newest main
+  #                             commit that carries it
   #    {status: :unknown, reason:}  some but not all commits' patches are on
   #                             main, or its change is on main under another
   #                             subject, or a main commit (named) shares a
@@ -249,14 +249,13 @@ module LeadTime
   #                             landing)
   #    {status: :not_landed}    nothing of it is on main
   def classify_landing(pr_only:, combined_pid:, main:)
-    by_pid = {}
-    main.each { |m| by_pid[m[:pid]] ||= m[:sha] if m[:pid] }
     order = main.each_with_index.to_h { |m, i| [m[:sha], i] }
-    found = pr_only.map { |c| by_pid[c[:pid]] }
+    found = match_commits(pr_only, main)
     if !pr_only.empty? && found.none?(&:nil?)
       return { status: :landed, sha: found.min_by { |s| order[s] } }
     end
-    return { status: :landed, sha: by_pid[combined_pid] } if combined_pid && by_pid[combined_pid]
+    squash = combined_pid && main.find { |m| m[:pid] == combined_pid }
+    return { status: :landed, sha: squash[:sha] } if squash
     # No commit of its own and no diff to match: nothing here can say whether
     # it landed, so it is not "closed".
     if pr_only.empty?
@@ -268,8 +267,14 @@ module LeadTime
       return { status: :unknown,
                reason: "#{hits} of #{pr_only.size} of its commits are on the base branch by patch-id" }
     end
-    in_context = landed_in_other_context(pr_only, main, order)
-    return in_context if in_context
+    other = pr_only.lazy.filter_map { |c| c[:pid0] && main.find { |m| m[:pid0] == c[:pid0] } }.first
+    if other
+      # The DND-1491 tier refused it (another subject): its change is on the
+      # base, so it is not "closed", but nothing proves this is its landing.
+      return { status: :unknown,
+               reason: "its change is on the base branch as #{other[:sha].to_s[0, 12]} ('#{other[:subject]}') " \
+                       "under another subject, with a different context" }
+    end
 
     subjects = main.map { |m| m[:subject] }
     clash = pr_only.map { |c| c[:subject] }.find { |s| subjects.include?(s) }
@@ -282,32 +287,29 @@ module LeadTime
     { status: :not_landed }
   end
 
-  # The DND-1491 tier: a landing whose patch differs from the request's only in
-  # its CONTEXT lines, because the base changed a line next to the change
-  # before it landed (custom PR #83). pid0 is the patch-id of the commit's
-  # zero-context diff: its added and removed lines and their files only. A
-  # zero-context match is weaker than a full one, so it counts as the landing
-  # only under the same subject, commit for commit. The same change under
-  # another subject is not proof either way, so it is could-not-measure, never
-  # closed. -> {status:, sha:} | {status:, reason:} | nil (no zero-context
-  # match at all).
-  def landed_in_other_context(pr_only, main, order)
-    return nil if pr_only.empty? || pr_only.any? { |c| c[:pid0].nil? }
-
-    same = pr_only.map { |c| main.find { |m| m[:pid0] == c[:pid0] && m[:subject] == c[:subject] }&.dig(:sha) }
-    return { status: :landed, sha: same.min_by { |s| order[s] } } if same.none?(&:nil?)
-
-    hits = same.compact.size
-    if hits.positive?
-      return { status: :unknown,
-               reason: "#{hits} of #{pr_only.size} of its commits are on the base branch with a different context" }
+  # The base commit each request commit landed as, one for one (a base commit
+  # carries at most one request commit), or nil. A commit matches on its full
+  # patch-id, under any subject (a rebase). Failing that, the DND-1491 tier: a
+  # patch that differs only in its CONTEXT lines, because the base changed a
+  # line next to the change before it landed (custom PR #83). pid0 is the
+  # patch-id of the zero-context diff, its changed lines and their files only.
+  # That is weaker than a full match, so it counts only under the same subject,
+  # and only when that subject names ONE base commit in the range (a generic
+  # subject such as "fix typo" never pairs on a near-empty patch).
+  def match_commits(pr_only, main)
+    used = {}
+    subject_n = main.map { |m| m[:subject] }.tally
+    pick = lambda do |pred|
+      m = main.find { |x| !used[x[:sha]] && pred.call(x) }
+      m && (used[m[:sha]] = true) && m[:sha]
     end
-    other = pr_only.lazy.filter_map { |c| main.find { |m| m[:pid0] && m[:pid0] == c[:pid0] } }.first
-    return nil unless other
+    full = pr_only.map { |c| c[:pid] && pick.call(->(m) { m[:pid] == c[:pid] }) }
+    pr_only.each_with_index.map do |c, i|
+      next full[i] if full[i]
+      next nil unless c[:pid0] && subject_n[c[:subject]] == 1
 
-    { status: :unknown,
-      reason: "its change is on the base branch as #{other[:sha].to_s[0, 12]} ('#{other[:subject]}') " \
-              "under another subject, with a different context" }
+      pick.call(->(m) { m[:pid0] == c[:pid0] && m[:subject] == c[:subject] })
+    end
   end
 
   # The push that put `sha` on the base branch. pushes: [{at:, after:}] oldest
@@ -739,16 +741,34 @@ class GitHubForge
   def classify(head, tip)
     return { status: :landed, sha: head } if ancestor?(head, tip)
 
-    pr_only = commit_patches(["--no-merges", head, "^#{tip}"])
-    main = commit_patches(["--no-merges", tip, "^#{head}"])
+    pr_range = ["--no-merges", head, "^#{tip}"]
+    main_range = ["--no-merges", tip, "^#{head}"]
+    pr_only = commit_patches(pr_range)
+    main = commit_patches(main_range)
     base = git_ok("merge-base", head, tip)
     diff = base && git_ok(*PATCH_CONFIG, "diff", *PATCH_FLAGS, base.strip, head)
     combined_ids = diff && patch_ids(diff)
-    unless pr_only && main && combined_ids
-      return { status: :unknown, reason: "landing probe failed (see SCAN INCOMPLETE)" }
-    end
+    probe_failed = { status: :unknown, reason: "landing probe failed (see SCAN INCOMPLETE)" }
+    return probe_failed unless pr_only && main && combined_ids
 
-    LeadTime.classify_landing(pr_only: pr_only, combined_pid: combined_ids.first&.first, main: main)
+    combined = combined_ids.first&.first
+    verdict = LeadTime.classify_landing(pr_only: pr_only, combined_pid: combined, main: main)
+    return verdict if verdict[:status] == :landed || pr_only.empty?
+
+    # The zero-context patch-ids (DND-1491) cost a second pass over the
+    # base's range, so they are read only when the full patch-ids decided
+    # nothing.
+    pr_only = with_pid0(pr_only, pr_range)
+    main = with_pid0(main, main_range)
+    return probe_failed unless pr_only && main
+
+    LeadTime.classify_landing(pr_only: pr_only, combined_pid: combined, main: main)
+  end
+
+  # commits with pid0, the zero-context patch-id, added; nil on a git failure.
+  def with_pid0(commits, range)
+    pid0_of = range_patch_ids(range, ["-U0"]) or return nil
+    commits.map { |c| c.merge(pid0: pid0_of[c[:sha]]) }
   end
 
   # A patch-id reads the patch text, so user config must not change it: no
@@ -756,16 +776,14 @@ class GitHubForge
   PATCH_CONFIG = ["-c", "diff.noprefix=false", "-c", "color.ui=never"].freeze
   PATCH_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv"].freeze
 
-  # [{sha:, pid:, pid0:, subject:}] for a rev range, newest first; nil on a
-  # git failure. pid0 is the patch-id of the zero-context diff (-U0), which
-  # a change keeps when the base edits a line next to it (DND-1491).
+  # [{sha:, pid:, subject:}] for a rev range, newest first; nil on a git
+  # failure. with_pid0 adds the zero-context patch-id when it is needed.
   def commit_patches(range)
     subjects = git_ok("log", "--format=%H%x09%s", *range) or return nil
     pid_of = range_patch_ids(range, []) or return nil
-    pid0_of = range_patch_ids(range, ["-U0"]) or return nil
     subjects.lines.map do |l|
       sha, subject = l.chomp.split("\t", 2)
-      { sha: sha, pid: pid_of[sha], pid0: pid0_of[sha], subject: subject.to_s }
+      { sha: sha, pid: pid_of[sha], subject: subject.to_s }
     end
   end
 
