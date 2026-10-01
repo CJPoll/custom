@@ -7,7 +7,18 @@
 # Run by ./self-test.sh, which harness-gate discovers.
 
 require "stringio"
+require "tmpdir"
+require "fileutils"
+# Every run in this suite writes telemetry to a temp store, never the real one
+# (DND-1476). Set before the script loads, so no event can escape.
+TELEMETRY_ROOT = Dir.mktmpdir("mip-telemetry")
+at_exit do
+  FileUtils.chmod_R("u+rwx", TELEMETRY_ROOT)
+  FileUtils.rm_rf(TELEMETRY_ROOT)
+end
+ENV["ATHENA_TELEMETRY_DIR"] = File.join(TELEMETRY_ROOT, "store")
 load File.expand_path("../../scripts/mark-in-progress", __dir__)
+require_relative "../../../../lib/athena_telemetry"
 
 $failures = []
 $checks = 0
@@ -240,6 +251,111 @@ code, _o, err = run([], FakeNotion.new(page(nil)))
 check("no --ref is a usage error") { code == 2 && err.include?("Fix:") }
 code, _o, err = run(["--ref", "DND-1", "--bogus"], FakeNotion.new(page(nil)))
 check("an unknown flag is a usage error") { code == 2 && err.include?("--bogus") }
+
+# --- DND-1476: one ticket.dispatched event after a successful write, into a
+#     temp store. Synthetic refs only (DND-9001, ZQ-12).
+$store_n = 0
+def fresh_store
+  $store_n += 1
+  ENV["ATHENA_TELEMETRY_DIR"] = File.join(TELEMETRY_ROOT, "s#{$store_n}")
+end
+
+def dispatched
+  AthenaTelemetry.read(events: ["ticket.dispatched"], env: ENV)
+end
+
+class PatchFails < FakeNotion
+  def call(method, path, body = nil)
+    res = super
+    raise NextMissionNotion::ReadError, "HTTP 502 on PATCH #{path}" if method == :patch
+
+    res
+  end
+end
+
+fresh_store
+code, = run(["--ref", "DND-9001"], FakeNotion.new(page(nil)))
+r = dispatched
+ev = r.events.first
+check("T1 a first dispatch writes one ticket.dispatched") { code == 0 && r.status == :ok && r.events.size == 1 }
+check("T1 its unit is the ticket ref, given explicitly") { ev["unit"] == "DND-9001" && ev["unit_source"] == "explicit" }
+check("T1 tracker=dnd, first_dispatch=true, backfill=false") do
+  ev["attrs"] == { "tracker" => "dnd", "first_dispatch" => true, "backfill" => false }
+end
+check("T1 its at is the dispatch instant (now)") { ev["at"] == "2026-09-30T05:32:00.000Z" && ev["duration_s"].nil? }
+check("T1 zero drops") { r.failures.empty? && r.malformed.zero? }
+
+fresh_store
+run(["--ref", "DND-9001"], FakeNotion.new(page("2026-09-29T01:00:00.000Z")))
+r = dispatched
+check("T2 a re-dispatch gives first_dispatch=false") do
+  r.events.size == 1 && r.events.first["attrs"]["first_dispatch"] == false && r.failures.empty?
+end
+
+fresh_store
+run(["--ref", "DND-9001", "--backfill", "--at", "2026-09-30T02:41:00Z"], FakeNotion.new(page(nil)))
+r = dispatched
+check("T3 --backfill --at gives backfill=true at the recorded time") do
+  e = r.events.first
+  r.events.size == 1 && e["attrs"] == { "tracker" => "dnd", "first_dispatch" => true, "backfill" => true } &&
+    e["at"] == "2026-09-30T02:41:00.000Z" && r.failures.empty?
+end
+
+fresh_store
+run(["--ref", "DND-9001"], FakeNotion.new(page(nil, status: "Parked")))
+r = dispatched
+check("T3b a status-only move (resume from Parked) is a dispatch, first_dispatch=false") do
+  r.events.size == 1 && r.events.first["attrs"]["first_dispatch"] == false
+end
+
+fresh_store
+run(["--ref", "ZQ-12"], FakeNotion.new(work_page(nil)))
+r = dispatched
+check("T3c a work ticket gives tracker=work, unit = its ref") do
+  r.events.size == 1 && r.events.first["unit"] == "ZQ-12" && r.events.first["attrs"]["tracker"] == "work" &&
+    r.failures.empty?
+end
+
+fresh_store
+code, = run(["--ref", "ZQ-12"], FakeNotion.new(work_page(nil)), work: ABSENT)
+check("T4 a refusal (work ticket, no overlay) exits 3 and writes no event") do
+  code == 3 && dispatched.status == :no_store
+end
+code, = run(["--ref", "DND-9"], FakeNotion.new(nil))
+check("T4b a ticket that is not there writes no event") { code == 3 && dispatched.status == :no_store }
+pf = PatchFails.new(page(nil))
+code, = run(["--ref", "DND-9001"], pf)
+check("T4c a failed Notion write writes no event") { code == 3 && pf.patches.size == 1 && dispatched.status == :no_store }
+code, = run(["--ref", "DND-9001", "--dry-run"], FakeNotion.new(page(nil)))
+check("T4d a dry run writes no event") { code == 0 && dispatched.status == :no_store }
+code, = run(["--ref", "DND-9001", "--backfill", "--at", "2026-09-30T02:41:00Z"],
+            FakeNotion.new(page("2026-09-30T01:00:00.000Z")))
+check("T4e a backfill that writes nothing writes no event") { code == 0 && dispatched.status == :no_store }
+
+# T5 fail-open: an unwritable store changes neither the write, the exit code
+# nor stdout. The store's parent is read-only, so the writer cannot create it.
+fresh_store
+rw = FakeNotion.new(page(nil))
+c1, o1, = run(["--ref", "DND-9001"], rw)
+ro_parent = File.join(TELEMETRY_ROOT, "ro")
+Dir.mkdir(ro_parent)
+File.chmod(0o500, ro_parent)
+ENV["ATHENA_TELEMETRY_DIR"] = File.join(ro_parent, "store")
+ro = FakeNotion.new(page(nil))
+real_stderr = $stderr
+$stderr = StringIO.new
+begin
+  c2, o2, = run(["--ref", "DND-9001"], ro)
+  writer_line = $stderr.string
+ensure
+  $stderr = real_stderr
+end
+check("T5 an unwritable store: the writer's one last-resort line names it, with Fix:") do
+  writer_line.lines.size == 1 && writer_line.start_with?("athena-telemetry:") && writer_line.include?("Fix:")
+end
+check("T5 an unwritable store: the Notion write still happens") { ro.patches == rw.patches && ro.patches.size == 1 }
+check("T5 an unwritable store: exit and stdout unchanged") { c1 == 0 && c1 == c2 && o1 == o2 }
+check("T5 an unwritable store: nothing was written there") { !File.exist?(ENV["ATHENA_TELEMETRY_DIR"]) }
 
 if $failures.empty?
   puts "mark_in_progress_test: PASS (#{$checks} checks)"

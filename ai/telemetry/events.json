@@ -65,7 +65,7 @@
       }
     },
     "ticket.dispatched": {
-      "description": "A ticket moved to In Progress by mark-in-progress, after a successful status write. unit = the ticket ref. Emitter: DND-1476.",
+      "description": "A ticket moved to In Progress (or backfilled) by mark-in-progress, after its Notion write returned; never on a refusal, a dry run or a run that wrote nothing. at = the dispatch instant (--at, else now), a point event; head = the caller cwd HEAD, not the work. unit = the ticket ref (explicit). first_dispatch = this write set the stamp. Emitter: DND-1476.",
       "attrs": {
         "tracker": "label",
         "first_dispatch": "bool",
@@ -73,7 +73,7 @@
       }
     },
     "mission.status": {
-      "description": "A Mission status reported by fleet-report admiral-scope, written locally before the POST. unit = the mission's ticket ref. Emitter: DND-1476.",
+      "description": "One per mission of a fleet-report admiral-scope report, written locally after the missions file is accepted and before the POST (not on --dry-run). at = the write time, a point event; head = the caller cwd HEAD, not the work. unit = the mission ticket_ref (explicit). Emitter: DND-1476.",
       "attrs": {
         "status": "label",
         "captain_state": "label",

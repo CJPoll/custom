@@ -307,6 +307,9 @@ for f in err names descriptor logchan maildir fence session fs lock inbox; do . 
 . "${LIB}/effects.sh"
 . "${HERE}/helpers.sh"
 fleet_fixture_env
+# admiral-scope writes mission.status telemetry (DND-1476): never into the real
+# store. The telemetry section below points each case at its own store.
+export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
 
 eq "token: read from the client config" "$(fleet_read_token)" "${FLEET_TEST_TOKEN}"
 ( export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/nope.json"; fleet_read_token >/dev/null ); eq "token: missing config is status 1" "$?" "1"
@@ -470,6 +473,66 @@ run admiral-state --run-id r1 --state finished
 eq "admiral_state body" "$(fleet_last_request | jq -c '.body | [.kind, .run_id, .state]')" '["admiral_state","r1","finished"]'
 run session-end --reason other
 eq "session_ended body" "$(fleet_last_request | jq -c '.body | [.kind, .end_reason]')" '["session_ended","other"]'
+
+echo "== fleet-report admiral-scope: mission.status telemetry (DND-1476)"
+# Synthetic refs only (DND-, ZQ-). Each case has its own store; events are
+# read straight from its day files.
+TWO_M='[{"tracker":"notion-personal","ticket_ref":"DND-9001","url":"https://notion.so/a","title":"A","status":"In Progress","captain_state":"running"},{"tracker":"notion-work","ticket_ref":"ZQ-12","url":"https://notion.so/b","title":"B","status":"Todo","captain_state":"queued"}]'
+printf '%s' "${TWO_M}" > "${TMP}/two-missions.json"
+tel_events() { cat "$1"/*.jsonl 2>/dev/null | jq -c 'select(.event == "mission.status") | [.unit, .unit_source, .attrs.status, .attrs.captain_state, .attrs.run_id]' | sort; }
+tel_drops() { if [ -f "$1/write-failures" ]; then jq -c . "$1/write-failures"; else printf '{}'; fi; }
+WANT_EV="$(printf '%s\n' '["DND-9001","explicit","In Progress","running","r9"]' '["ZQ-12","explicit","Todo","queued","r9"]')"
+
+export ATHENA_TELEMETRY_DIR="${TMP}/tel-1"
+n="$(fleet_log_count)"
+run admiral-scope --run-id r9 --missions "${TMP}/two-missions.json"
+eq "M1 a two-mission scope sends (0)" "${RC}" "0"
+eq "M1 the POST still happened" "$(fleet_log_count)" "$((n + 1))"
+eq "M1 two mission.status events: unit, status, captain_state, run_id" "$(tel_events "${ATHENA_TELEMETRY_DIR}")" "${WANT_EV}"
+eq "M1 zero drops" "$(tel_drops "${ATHENA_TELEMETRY_DIR}")" "{}"
+eq "M1 stdout is the report line only" "${OUT}" "fleet-report: admiral_scope ok (HTTP 202)"
+
+export ATHENA_TELEMETRY_DIR="${TMP}/tel-2"
+fleet_respond '{"status":500,"body":{"error":"boom"}}'
+run admiral-scope --run-id r9 --missions "${TMP}/two-missions.json"
+eq "M2 a failed POST keeps its server-fault exit (5)" "${RC}" "5"
+eq "M2 both events were written before the POST" "$(tel_events "${ATHENA_TELEMETRY_DIR}")" "${WANT_EV}"
+fleet_respond '{"status":202,"body":{"ok":true}}'
+
+export ATHENA_TELEMETRY_DIR="${TMP}/tel-2b"
+fleet_point_at "http://127.0.0.1:$(fleet_closed_port)/mcp"
+run admiral-scope --run-id r9 --missions "${TMP}/two-missions.json"
+eq "M2b an unreachable server keeps exit 4" "${RC}" "4"
+eq "M2b both events were still written" "$(tel_events "${ATHENA_TELEMETRY_DIR}")" "${WANT_EV}"
+fleet_point_at "http://127.0.0.1:${SERVER_PORT}/mcp"
+
+export ATHENA_TELEMETRY_DIR="${TMP}/tel-3"
+n="$(fleet_log_count)"
+run admiral-scope --run-id r9 --missions "${TMP}/bad-missions.json"
+eq "M3 a malformed missions file is refused (2)" "${RC}" "2"
+eq "M3 and writes no event" "$(tel_events "${ATHENA_TELEMETRY_DIR}")" ""
+check "M3 not even a store" test ! -e "${ATHENA_TELEMETRY_DIR}"
+eq "M3 nothing was sent" "$(fleet_log_count)" "${n}"
+
+export ATHENA_TELEMETRY_DIR="${TMP}/tel-4"
+run admiral-scope --run-id r9 --missions "${TMP}/two-missions.json" --dry-run
+eq "M4 a dry run exits 0" "${RC}" "0"
+check "M4 a dry run records nothing" test ! -e "${ATHENA_TELEMETRY_DIR}"
+
+# M5 fail-open: an unwritable store changes neither the POST, the exit code nor stdout.
+mkdir -p "${TMP}/tel-ro"; chmod 500 "${TMP}/tel-ro"
+export ATHENA_TELEMETRY_DIR="${TMP}/tel-5"
+run admiral-scope --run-id r9 --missions "${TMP}/two-missions.json"; rc1="${RC}"; out1="${OUT}"
+export ATHENA_TELEMETRY_DIR="${TMP}/tel-ro/store"
+n="$(fleet_log_count)"
+run admiral-scope --run-id r9 --missions "${TMP}/two-missions.json"
+eq "M5 an unwritable store: the POST still happened" "$(fleet_log_count)" "$((n + 1))"
+eq "M5 an unwritable store: exit unchanged" "${RC}" "${rc1}"
+eq "M5 an unwritable store: stdout unchanged" "${OUT}" "${out1}"
+case "${ERR}" in *"athena-telemetry:"*"Fix:"*) ok "M5 the writer's last-resort line names the store, with Fix:" ;; *) bad "M5 the writer's last-resort line names the store, with Fix:" "${ERR}" ;; esac
+check "M5 nothing was written there" test ! -e "${ATHENA_TELEMETRY_DIR}"
+chmod 700 "${TMP}/tel-ro"
+export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
 
 echo "== fleet-report CLI: lifecycle subcommands (DND-560)"
 run admiral-state --run-id r1 --state parked

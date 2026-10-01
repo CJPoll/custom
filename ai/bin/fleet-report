@@ -99,6 +99,9 @@ for f in err names descriptor logchan maildir fence session fs lock inbox; do . 
 . "${AI}/lib/fleet/effects.sh"
 # shellcheck source=../lib/fleet/manager.sh
 . "${AI}/lib/fleet/manager.sh"
+# The one shell binding to the telemetry CLI (admiral-scope's mission.status).
+# shellcheck source=../lib/telemetry-emit.sh
+. "${AI}/lib/telemetry-emit.sh" 2>/dev/null || true
 
 # A report killed mid-request (the hook's timeout) still removes its temp dir.
 FLEET_POST_TMP=""
@@ -266,6 +269,10 @@ if [ -n "${dry_run}" ]; then
   printf '%s\n' "${body}"
   exit 0
 fi
+
+# DND-1476: the local mission.status record, before the POST, so a network
+# failure still leaves it. A dry run sends nothing and records nothing.
+[ "${kind}" = admiral_scope ] && fleet_record_mission_status "${run_id}" "${missions}"
 
 fleet_send "${kind}" "${body}" "${cwd}" "${AI}"
 exit $?

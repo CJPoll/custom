@@ -30,6 +30,11 @@
 # It does not touch Assignee: that stays the admiral's step
 # (athena:ticket-management -> Status -> Assignee map).
 #
+# Telemetry (DND-1476): after a successful write, one local `ticket.dispatched`
+# event (ai/contracts/athena-telemetry.md), unit = the ticket ref. Never on a
+# refusal, a dry run, or a run that wrote nothing. It fails open: the event
+# never changes this tool's exit code or stdout.
+#
 # Buckets: DOMAIN (MarkInProgress.plan: what to write, pure; DispatchTrackers:
 # which tracker), EFFECTS (the Notion transport, the overlay read), MANAGER
 # (MarkInProgress.run) and FRAMEWORK (argv). A token is read from its file
@@ -149,6 +154,7 @@ module MarkInProgress
     p = plan(ref, page, at, status: !backfill, tracker: tracker)
     unless opts["--dry-run"] || p[:properties].empty?
       transport.call(:patch, "/v1/pages/#{page['id']}", { "properties" => p[:properties] })
+      emit_dispatched(ref, tracker, p, at, backfill)
     end
     status_note = backfill ? "Status unchanged" : "Status #{STATUS}"
     stamp_note = if p[:skipped] then "#{tracker.property} #{p[:skipped]}"
@@ -171,6 +177,25 @@ module MarkInProgress
     err.puts "#{PROG}: Notion could not be reached: #{e.message}"
     err.puts "Fix: check the token at #{tracker&.token_file} and Notion's status, then re-run."
     3
+  end
+
+  # DOMAIN. The ticket.dispatched attrs for a write that happened. tracker is
+  # dnd or work; first_dispatch is true when this write set the stamp.
+  def dispatched_attrs(tracker, plan, backfill)
+    { "tracker" => tracker.prefix == DispatchTrackers::DND.prefix ? "dnd" : "work",
+      "first_dispatch" => plan[:properties].key?(tracker.property),
+      "backfill" => backfill }
+  end
+
+  # EFFECTS. One local ticket.dispatched event, after the Notion write
+  # returned. at is the dispatch instant: --at when given, else now. Fails
+  # open: a missing writer or any error leaves the run as it was.
+  def emit_dispatched(ref, tracker, plan, at, backfill)
+    require_relative "../../../lib/athena_telemetry"
+    AthenaTelemetry.emit("ticket.dispatched", at: Time.iso8601(at), unit: ref,
+                                              attrs: dispatched_attrs(tracker, plan, backfill))
+  rescue StandardError, LoadError
+    nil
   end
 
   def find(transport, tracker, number, ref)

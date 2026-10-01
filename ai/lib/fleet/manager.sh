@@ -109,6 +109,23 @@ fleet_load_missions() {
   jq -c . <<<"${raw}"
 }
 
+# fleet_record_mission_status <run_id> <missions-json>
+# One local `mission.status` telemetry event per mission (DND-1476;
+# ai/contracts/athena-telemetry.md), unit = its ticket_ref. The caller runs it
+# on a list fleet_load_missions accepted, BEFORE the POST, so a network failure
+# still leaves the local record. Fails open: it prints nothing on stdout and
+# returns 0 whatever happens, so the report's exit code and output are what
+# they were. Needs athena_telemetry_emit (ai/lib/telemetry-emit.sh); without
+# it, nothing is written.
+fleet_record_mission_status() {
+  local run_id="$1" ref status cstate
+  declare -F athena_telemetry_emit >/dev/null 2>&1 || return 0
+  while IFS= read -r -d '' ref && IFS= read -r -d '' status && IFS= read -r -d '' cstate; do
+    athena_telemetry_emit --event mission.status --unit "${ref}" --attr "status=${status}" --attr "captain_state=${cstate}" --attr "run_id=${run_id}"
+  done < <(jq -j '.[] | .ticket_ref, "\u0000", .status, "\u0000", .captain_state, "\u0000"' <<<"$2" 2>/dev/null)
+  return 0
+}
+
 # fleet_claim_seen <session_id> <agent_id-or-empty>
 # Status 0 = a seen report is due and now claimed; 1 = not due; 2 = the stamp
 # directory is unusable, which is LOGGED (a silent 2 would silence every seen
