@@ -8,9 +8,11 @@
 require "tmpdir"
 require "rbconfig"
 require_relative "../../lib/bounded_command"
+require_relative "../../lib/proc_state"
 
 $pass = 0
 $fail = 0
+$hang = 0
 def check(label, cond, detail = nil)
   if cond
     $pass += 1
@@ -21,33 +23,128 @@ def check(label, cond, detail = nil)
   end
 end
 
-def alive?(pid)
-  Process.kill(0, pid)
-  # A zombie answers kill(0); read its state so it counts as dead.
-  File.read("/proc/#{pid}/stat").split(") ").last.start_with?("Z") ? false : true
-rescue Errno::ESRCH, Errno::ENOENT
-  false
+# "Gone after a kill" is an EVENT, waited on (DND-1569). A KILL lands
+# asynchronously, and a killed orphan is a zombie until PID 1 reaps it, so the
+# verdict is the kernel's: absent, state Z or X, or a reused pid
+# (ProcState.running?, DND-1550). The clock never decides it. HANG_CAP_S only
+# caps a hang; a lapsed cap is :hang, which the suite reports apart from a
+# FAIL. Before DND-1569 a 2 s bound was the verdict, and it failed about 1 run
+# in 6 at load 32 on the unchanged library.
+HANG_CAP_S = 120
+MONO = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+PAUSE = -> { sleep 0.05 }
+
+# :gone, or :hang when the cap lapsed while the process still ran.
+def await_gone(pid, cap: HANG_CAP_S, clock: MONO, pause: PAUSE)
+  start = ProcState.starttime(pid)
+  return :gone if start.nil?
+
+  deadline = clock.call + cap
+  loop do
+    return :gone unless ProcState.running?(pid, start: start)
+    return :hang if clock.call >= deadline
+
+    pause.call
+  end
 end
 
-# A KILL is delivered asynchronously: a loaded machine may not have run the
-# target's exit yet when run returns. Poll a short bound for it to die. A leaked
-# process was never signalled and lives for its whole sleep, so it still fails.
-# Measured 2026-09-28 at load 32: b7's bare alive? check failed 1 run in 6 on
-# the unchanged library.
-def dead_soon?(pid, bound = 2)
-  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + bound
-  while alive?(pid)
-    return false if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+# Whether SIGKILL reached +pid+: pending, or the process already exiting
+# (PF_EXITING). Diagnostic text for a HANG line only, never a verdict.
+def kill_landed(pid)
+  status = File.read("/proc/#{pid}/status")
+  pending = status.scan(/^(?:SigPnd|ShdPnd):\s*(\h+)/).flatten.any? { |m| (m.to_i(16) >> 8).odd? }
+  f = ProcState.fields(pid)
+  exiting = f && (f[6].to_i & 0x4).positive?
+  pending || exiting ? "yes (the machine has not run its exit yet)" : "no (nothing killed it: a leak)"
+rescue SystemCallError, ProcState::Unreadable => e
+  "unknown (#{e.class})"
+end
 
-    sleep 0.05
+# Records a check that +pid+ is gone; false only on a HANG. A process still running at the cap is a
+# HANG line and $hang, never a FAIL. A missing pid is a FAIL: it must never
+# read as gone.
+def check_gone(label, pid)
+  unless pid.is_a?(Integer) && pid.positive?
+    check(label, false, "no pid recorded (#{pid.inspect})")
+    return true
   end
-  true
+  if await_gone(pid) == :gone
+    check(label, true)
+    true
+  else
+    $hang += 1
+    puts "  HANG #{label} -- pid #{pid} still running after the #{HANG_CAP_S}s hang cap; KILL landed: #{kill_landed(pid)}"
+    false
+  end
 end
 
 def elapsed
   t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   r = yield
   [r, Process.clock_gettime(Process::CLOCK_MONOTONIC) - t]
+end
+
+# d-cases (DND-1569): the helper that judges "gone after a kill". The verdict
+# is the kernel's (absent, zombie, dead); the clock only caps a hang, and a
+# lapsed cap is :hang, never a FAIL verdict. Each clock is injected, so these
+# cases do not depend on how fast this machine is.
+def proc_state_letter(pid)
+  raw = File.read("/proc/#{pid}/stat")
+  raw[(raw.rindex(") ") + 2)..].split.first
+rescue SystemCallError
+  nil
+end
+
+d_pids = []
+begin
+  # d1 a forced zombie: our own child, killed and not reaped. With a clock
+  # already past any cap it is still :gone, because the kernel says so.
+  z = Process.spawn("sleep", "600", out: File::NULL, err: File::NULL)
+  d_pids << z
+  Process.kill("KILL", z)
+  600.times do
+    break if proc_state_letter(z) == "Z"
+
+    sleep 0.05
+  end
+  check("d1 premise: the killed, unreaped child is a zombie", proc_state_letter(z) == "Z", proc_state_letter(z).inspect)
+  lapsed = 0.0
+  r = await_gone(z, clock: -> { lapsed += 1000 })
+  check("d1 a zombie is :gone whatever the clock reads", r == :gone, r.inspect)
+
+  # d2 a delayed exit on a slow machine: three polls pass while the clock
+  # races 1 s per poll (past the old 2 s bound), then the KILL lands. The wait
+  # ends on the exit, not on the clock.
+  late = Process.spawn("sleep", "600", out: File::NULL, err: File::NULL)
+  d_pids << late
+  polls = 0
+  skew = 0.0
+  r = await_gone(late,
+                 clock: -> { MONO.call + skew },
+                 pause: lambda {
+                   polls += 1
+                   if polls <= 3
+                     skew += 1
+                   elsif polls == 4
+                     Process.kill("KILL", late)
+                   end
+                   sleep 0.05
+                 })
+  check("d2 a KILL that lands after 3 s of slow-machine time is :gone, not a FAIL", r == :gone,
+        "#{r.inspect} after #{polls} polls")
+
+  # d3 a process nobody kills, with a clock past the cap at once: the cap
+  # lapses, and that is :hang (reported apart from a FAIL), never a verdict.
+  never = Process.spawn("sleep", "600", out: File::NULL, err: File::NULL)
+  d_pids << never
+  lapsed = 0.0
+  r = await_gone(never, clock: -> { lapsed += 1000 }, pause: -> {})
+  check("d3 a lapsed cap is :hang, never a FAIL verdict", r == :hang, r.inspect)
+ensure
+  d_pids.each do |p|
+    Process.kill("KILL", p) rescue nil # rubocop:disable Style/RescueModifier
+    Process.wait(p) rescue nil # rubocop:disable Style/RescueModifier
+  end
 end
 
 Dir.mktmpdir do |tmp|
@@ -89,8 +186,7 @@ Dir.mktmpdir do |tmp|
   check("b5 returns within the bound plus grace (#{secs.round(1)}s <= #{bound}s)", secs <= bound)
   recorded = File.exist?(pids) ? File.read(pids).split.map(&:to_i) : []
   check("b5 recorded the leader and the child", recorded.size == 2, recorded.inspect)
-  survivors = recorded.reject { |p| dead_soon?(p) }
-  check("b5 no process of the group survives (TERM-ignoring child included)", survivors.empty?, survivors.inspect)
+  survivors = recorded.reject { |p| check_gone("b5 no process of the group survives (TERM-ignoring child included): pid #{p}", p) }
   survivors.each { |p| Process.kill("KILL", p) rescue nil } # rubocop:disable Style/RescueModifier
 
   # b7 the leader exits 0 in time, but a helper it started keeps stdout open
@@ -101,7 +197,7 @@ Dir.mktmpdir do |tmp|
   check("b7 exit 0 with a helper holding stdout is timed_out", r.timed_out && !r.success?, r.inspect)
   check("b7 returns within the bound plus grace (#{secs.round(1)}s <= #{bound}s)", secs <= bound)
   helper = File.exist?(hpids) ? File.read(hpids).to_i : 0
-  check("b7 the helper holding stdout was killed", helper.positive? && dead_soon?(helper), helper.to_s)
+  check_gone("b7 the helper holding stdout was killed", helper)
 
   # b8 the CALLER is interrupted (Ctrl-C, an outer timeout) while the child
   # hangs: the child is in its own group, so the caller must kill it on the way
@@ -135,12 +231,12 @@ Dir.mktmpdir do |tmp|
     end
   end
   check("b8 an interrupted caller exits promptly (#{secs.round(1)}s)", !gone.nil?)
-  check("b8 an interrupted caller leaves no hung child", child.positive? && dead_soon?(child), child.to_s)
+  check_gone("b8 an interrupted caller leaves no hung child", child)
   unless gone
     Process.kill("KILL", caller)
     Process.wait(caller)
   end
-  Process.kill("KILL", child) if child.positive? && alive?(child)
+  Process.kill("KILL", child) if child.positive? && ProcState.running?(child)
 
   # b9 the caller is interrupted just AFTER the child is spawned. With Open3's
   # block form that was before run's cleanup was armed: the interrupt left a
@@ -168,12 +264,12 @@ Dir.mktmpdir do |tmp|
     end
   end
   check("b9 a caller interrupted before cleanup is armed exits promptly (#{secs9.round(1)}s)", !gone9.nil?)
-  check("b9 it leaves no hung child", child9.positive? && dead_soon?(child9), child9.to_s)
+  check_gone("b9 it leaves no hung child", child9)
   unless gone9
     Process.kill("KILL", caller9)
     Process.wait(caller9)
   end
-  Process.kill("KILL", child9) if child9.positive? && alive?(child9)
+  Process.kill("KILL", child9) if child9.positive? && ProcState.running?(child9)
   Signal.trap("INT", prior_int)
 
   [0, -1, nil, "5"].each do |bad|
@@ -201,8 +297,13 @@ Dir.mktmpdir do |tmp|
   check("b12 a fractional kill_grace is accepted", r.success?, r.inspect)
 end
 
-puts "bounded_command: #{$pass}/#{$pass + $fail} checks passed"
+puts "bounded_command: #{$pass}/#{$pass + $fail} checks passed, #{$hang} hung"
 if $fail.positive?
   warn "Fix: repair ai/lib/bounded_command.rb until every case above passes; a hung command must return within its bound and leave no process behind."
-  exit 1
 end
+if $hang.positive?
+  warn "HANG: #{$hang} process(es) still ran at the #{HANG_CAP_S}s hang cap. That is not a verdict on the timing. " \
+       "Fix: read each HANG line; \"KILL landed: no\" is a leak in ai/lib/bounded_command.rb, \"yes\" is a machine " \
+       "too stalled to run an exit in #{HANG_CAP_S}s, so re-run when it is idle."
+end
+exit 1 if $fail.positive? || $hang.positive?
