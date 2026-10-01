@@ -35,12 +35,14 @@ reason. It is never landed, and it is never your run's action.
   Every commit goes through its commit wrapper.
 - **Read the journal first.** Its *Decisions / Won't-change* entries bind
   this run.
-- **Repos and modes:** the ones your brief names, which
-  `ai/bin/lead-time-repos` resolved for this machine. Never your lane copy of
-  `ai/config/lead-time-repos.json`: it cannot see a machine override. For each
-  repo the brief says was skipped, write one summary line
-  `repo=<R> skipped="<reason>"`. `improvement_epic` (`--json`) is the epic an
-  architect files tickets on.
+- **Repos and modes:** the ones your brief names, with their paths, which
+  `ai/bin/lead-time-repos` resolved for this machine. If your brief names
+  none, run `ai/bin/lead-time-repos --json` from your lane and use its `repos`
+  and `skipped`; a non-zero exit is a fault to report with its `Fix:`, never
+  an empty run. Never your lane copy of `ai/config/lead-time-repos.json`: it
+  cannot see a machine override. For each skipped repo, write one summary
+  line `repo=<R> skipped="<reason>"`. `improvement_epic` (`--json`) is the
+  epic an architect files tickets on.
 
 Tools, from your lane (`<skill>` is `ai/skills/athena:lead-time-improve`):
 
@@ -248,7 +250,7 @@ forge's CI); it splits into two phases with different levers:
 - `tail` (landing → end) — CI + deploy. Lever: **pipeline efficiency**
   (parallelize, cache, shard) — never by weakening a check.
 
-Each run, for every `watch` repo in the config (forge auto-detected),
+Each run, for every resolved `watch` repo (forge auto-detected),
 scan for outliers newer than your **watch cursor**:
 
 ```
@@ -269,7 +271,7 @@ as findings.
 Their `tail_seconds` is still measured, so they still count toward a `tail`
 outlier or a stage dominating the `tail`, which is walt_ui's lever.
 
-The watch tools take the repo's checkout PATH (the config's `path`), not its
+The watch tools take the repo's checkout PATH (its resolved `path`), not its
 name: `--repo ~/dev/gen_saas`, not `--repo gen_saas`.
 
 **Also sweep for finished work nobody is merging** — `ai/bin/ready-and-idle
@@ -326,6 +328,7 @@ Write one summary line per repo to the summary file your brief names; else
 ```
 repo=<R> mode=improve biggest=<phase|none> action=<change|instrumentation|architect|revert|no-action> experiments=keep:<n>,revert:<n>,pending:<n>,inconclusive:<n>,declined:<n> reason="<one line>"
 repo=<R> mode=watch outliers=<n> qualified=<n> handed_off=<n> ready_and_idle=<n|unavailable>
+repo=<R> skipped="<reason>"
 ```
 
 Then end with the shipwright's short summary to whoever invoked you: the sync

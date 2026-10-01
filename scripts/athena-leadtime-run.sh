@@ -56,7 +56,8 @@
 #   runs/<ts>.run       every tick that spawned a session: outcome, exit,
 #                       config=<default|override> repos=<names>
 #                       skipped=<name(reason),...|none> and config_file= (the
-#                       list ai/bin/lead-time-repos resolved), lane, main_moved= (origin/main's motion during the run, any
+#                       list ai/bin/lead-time-repos resolved), lane,
+#                       main_moved= (origin/main's motion during the run, any
 #                       author), own_landed= (the run's own commits on
 #                       origin/main: <n> <sha>..., or UNKNOWN), ff= (the
 #                       main-checkout fast-forward), the prune result and the
@@ -210,17 +211,31 @@ SUMMARY="${LOG_DIR}/${ts}.summary"
 # that does not resolve is acted on at the preconditions (6), or by --dry-run.
 # Any non-zero exit (2 refused, 3 could not look, 4 no repo checked out here,
 # 1 internal) and a missing resolver are all faults: never an empty run.
-RES_RC=0; RES_ERR=""; RES_SOURCE=""; RES_PATH=""; RES_NAMES=""; RES_DESC=""; RES_SKIPPED=""
+# RES_RAN is "exit <n>" once the resolver ran, else "not run"; RES_FIX is the
+# runner's own Fix: for a fault of its own (the resolver or jq missing),
+# preferred over the resolver's.
+RES_RC=0; RES_RAN="not run"; RES_FIX=""; RES_ERR=""; RES_SOURCE=""; RES_PATH=""
+RES_NAMES=""; RES_DESC=""; RES_SKIPPED=""; RES_SKIPPED_RUN=""
 resolve_repos() {
   local out err_file
   if [ ! -x "${RESOLVER}" ]; then
-    RES_RC=127; RES_ERR="${RESOLVER} is absent or not executable in the main checkout"; return 0
+    RES_RC=127; RES_ERR="${RESOLVER} is absent or not executable in the main checkout"
+    RES_FIX="land ai/bin/lead-time-repos (DND-1526) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs."
+    return 0
   fi
   if ! command -v jq >/dev/null 2>&1; then
-    RES_RC=127; RES_ERR="jq is not on PATH, so the resolver's --json cannot be read"; return 0
+    RES_RC=127; RES_ERR="jq is not on PATH, so the resolver's --json cannot be read"
+    RES_FIX="install jq."
+    return 0
   fi
-  err_file="$(mktemp)" || { RES_RC=73; RES_ERR="mktemp failed, so the resolver could not be run"; return 0; }
+  err_file="$(mktemp)" || {
+    RES_RC=73; RES_ERR="mktemp failed, so the resolver could not be run"
+    RES_FIX="check that \${TMPDIR:-/tmp} is writable and the disk is not full."
+    return 0
+  }
+  RES_RAN="exit 0"
   out="$("${RESOLVER}" --json 2>"${err_file}" </dev/null)" || RES_RC=$?
+  RES_RAN="exit ${RES_RC}"
   RES_ERR="$(cat -- "${err_file}" 2>/dev/null || true)"
   rm -f -- "${err_file}"
   [ "${RES_RC}" -eq 0 ] || return 0
@@ -234,16 +249,17 @@ resolve_repos() {
         if (.repos | type) != "array" or (.repos | length) == 0 then error("no resolved repos") else . end
         | (.source | one), (.path | one),
           ([.repos[].name | one] | join(",")),
-          ([.repos[] | "\(.name) (\(.mode))" | one] | join(", ")),
+          ([.repos[] | "\(.name) (\(.mode), \(.path))" | one] | join("; ")),
           ([(.skipped // [])[] | "\(.name) (\(.reason))" | one] | join("; ")),
           ([(.skipped // [])[] | "\(.name)(\(.reason))" | one] | if length == 0 then "none" else join(",") end)' \
         <<<"${out}" 2>&1)"; then
-    RES_RC=1; RES_ERR="the resolver exited 0 but its --json is unreadable or lists no repo (${fields})"; return 0
+    RES_RC=1; RES_ERR="the resolver exited 0 but its --json is unreadable or lists no repo (${fields})"
+    RES_FIX="run ${RESOLVER} --json by hand and compare it with its --help; this is a resolver or runner bug."
+    return 0
   fi
   { IFS= read -r RES_SOURCE; IFS= read -r RES_PATH; IFS= read -r RES_NAMES; IFS= read -r RES_DESC
     IFS= read -r RES_SKIPPED; IFS= read -r RES_SKIPPED_RUN; } <<<"${fields}"
 }
-RES_SKIPPED_RUN=""
 resolve_repos
 SKIP_BRIEF=""
 if [ -n "${RES_SKIPPED}" ]; then
@@ -282,14 +298,15 @@ is your block Speed a safety check up; never weaken it (ai/blocks/ops/safety-che
 End with your summary lines.' When it finishes, print the contents of ${SUMMARY} \
 and stop. Never write to that file yourself."
 
-# res_fix — the resolver's own Fix: text, else how to see why.
+# res_fix — the runner's own Fix: for its own fault, else the resolver's, else
+# how to see why.
 res_fix() {
-  local f
-  f="$(printf '%s\n' "${RES_ERR}" | sed -n 's/^Fix: //p' | head -n1)"
+  local f="${RES_FIX}"
+  [ -n "${f}" ] || f="$(printf '%s\n' "${RES_ERR}" | sed -n 's/^Fix: //p' | head -n1)"
   printf '%s' "${f:-run ${RESOLVER} by hand to see why the repo list does not resolve.}"
 }
 res_why() {
-  printf 'the repo list did not resolve (ai/bin/lead-time-repos exit %s): %s' "${RES_RC}" \
+  printf 'the repo list did not resolve (ai/bin/lead-time-repos %s): %s' "${RES_RAN}" \
     "$(printf '%s\n' "${RES_ERR}" | grep -v '^Fix: ' | grep -v '^[[:space:]]*$' | head -n1)"
 }
 

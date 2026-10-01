@@ -23,8 +23,8 @@ HELP = <<~TXT
     ai/bin/lead-time-repos --self-test
 
   Resolve the lead-time repo list for THIS machine (DND-1526). Every reader
-  of the list (lead-time-phases, the skill's experiment script) resolves
-  through the same rules.
+  of the list (lead-time-phases, the skill's experiment script, the cron
+  runner and setup-leadtime-cron) resolves through the same rules.
 
   Where the list comes from:
     1. ATHENA_LEADTIME_CONFIG, when set (even empty): authoritative. It must

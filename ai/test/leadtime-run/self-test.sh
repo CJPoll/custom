@@ -318,8 +318,9 @@ fi
 c="$(new_case)"
 rm -f "$c/repo/ai/bin/lead-time-repos"
 rc="$(run_runner "$c")"
-if [ "$rc" = 78 ] && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ] && grep -q 'ai/bin/lead-time-repos' "$c/runner.err" \
-   && grep -q 'Fix:' "$c/runner.err"; then
+if [ "$rc" = 78 ] && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ] \
+   && grep -qF "lead-time-repos not run): $c/repo/ai/bin/lead-time-repos is absent" "$c/runner.err" \
+   && grep -qF 'Fix: land ai/bin/lead-time-repos (DND-1526) on main' "$c/runner.err"; then
   ok "the resolver missing from the main checkout: exit 78, counted, no session (never the tracked file read directly)"
 else
   bad "resolver missing" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
@@ -337,7 +338,8 @@ override() { ( umask 077; printf '%s\n' "$2" >"$1/override.json" ); }
 c="$(new_case)"
 jq --arg d "$c/checkouts" '.repos |= map(.path = ($d + "/" + .name))' "${REPO_ROOT}/ai/config/lead-time-repos.json" \
   >"$c/repo/ai/config/lead-time-repos.json"
-want="$(jq -r '[.repos[] | "\(.name) (\(.mode))"] | join(", ")' "${REPO_ROOT}/ai/config/lead-time-repos.json")"
+want="$(jq -r --arg d "$c/checkouts" '[.repos[] | "\(.name) (\(.mode), \($d)/\(.name))"] | join("; ")' \
+  "${REPO_ROOT}/ai/config/lead-time-repos.json")"
 want_names="$(jq -r '[.repos[].name] | join(",")' "${REPO_ROOT}/ai/config/lead-time-repos.json")"
 rc="$(run_runner "$c")"
 run="$(newest "$c" run)"
@@ -355,7 +357,7 @@ c="$(new_case)"
 override "$c" "{\"repos\":[{\"name\":\"gen_saas\",\"path\":\"$c/checkouts/gen_saas\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
 rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json")"
 run="$(newest "$c" run)"
-if [ "$rc" = 0 ] && grep -qF "(config=override $c/override.json): gen_saas (improve)." "$c/claude-args" \
+if [ "$rc" = 0 ] && grep -qF "(config=override $c/override.json): gen_saas (improve, $c/checkouts/gen_saas)." "$c/claude-args" \
    && ! grep -q 'custom (improve)' "$c/claude-args" \
    && grep -qxF "config=override repos=gen_saas skipped=none" "$run" \
    && grep -qxF "config_file=$c/override.json" "$run"; then
@@ -370,7 +372,7 @@ mkdir -p "$c/xdg/athena"
     "$c/checkouts/walt_ui" >"$c/xdg/athena/lead-time-repos.json" )
 rc="$(run_runner "$c")"
 run="$(newest "$c" run)"
-if [ "$rc" = 0 ] && grep -qxF "config=override repos=walt_ui skipped=none" "$run" && grep -qF 'walt_ui (watch).' "$c/claude-args"; then
+if [ "$rc" = 0 ] && grep -qxF "config=override repos=walt_ui skipped=none" "$run" && grep -qF "walt_ui (watch, $c/checkouts/walt_ui)." "$c/claude-args"; then
   ok "the XDG override file is found the same way (the runner passes no path of its own)"
 else
   bad "xdg override" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
@@ -382,7 +384,7 @@ rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json")"
 run="$(newest "$c" run)"
 if [ "$rc" = 0 ] && grep -qxF "config=override repos=custom skipped=walt_ui(no such path $c/absent/walt_ui)" "$run" \
    && grep -qF "Skipped on this machine, so not run: walt_ui (no such path $c/absent/walt_ui)" "$c/claude-args" \
-   && grep -qF 'repo=<R> skipped=' "$c/claude-args" && grep -qF ': custom (improve).' "$c/claude-args"; then
+   && grep -qF 'repo=<R> skipped=' "$c/claude-args" && grep -qF ": custom (improve, $c/checkouts/custom)." "$c/claude-args"; then
   ok "a repo not checked out here is skipped by name: in .run (skipped=<name>(<reason>)) and in the brief, never silently"
 else
   bad "skipped repo" "rc=$rc run=$(cat "$run" 2>/dev/null) args=$(cat "$c/claude-args" 2>/dev/null) err=$(cat "$c/runner.err")"

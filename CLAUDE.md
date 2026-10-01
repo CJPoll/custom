@@ -607,7 +607,8 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   most one machine's list, in either mode. Two journals on one repo split its
   history and double-count its landings. An overlap is a config error.
   Nothing locks or detects it across machines: each resolver sees only its
-  own machine's config, so whoever writes an override checks the others.
+  own machine's config, so whoever writes an override checks the others by
+  running `ai/bin/lead-time-repos` on each.
 - **The hard constraint** is `ai/blocks/ops/safety-checks.md`, carried
   verbatim by the shipwright, architect, admiral and captain: **make a safety
   check faster, never weaker**. Never drop, skip, downgrade, or path-exclude

@@ -383,11 +383,12 @@ fi
 
 shipwright_cursors
 cp "$IR/ai/config/lead-time-repos.json" "${TMP}/config.aside"
-printf '{"repos":[{"name":"../x","mode":"watch"}]}\n' >"$IR/ai/config/lead-time-repos.json"
+printf '{"repos":[{"name":"../x","path":"%s","mode":"watch"}],"window":20,"improvement_epic":"epic-id"}\n' "$CO/custom" \
+  >"$IR/ai/config/lead-time-repos.json"
 printf '0 * * * * /opt/other-job\n' >"$ct"
 rc="$(inst "$ct" -- --install)"
 cp "${TMP}/config.aside" "$IR/ai/config/lead-time-repos.json"
-if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
+if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && grep -q 'is not a plain name' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
   ok "a repo name that is not a plain file-name label is refused before any write"
 else
   bad "bad repo name" "rc=$rc $(out)"
@@ -468,24 +469,26 @@ fi
 case_ 'setup-leadtime-cron — config and state faults (review round)'
 
 cp "$IR/ai/config/lead-time-repos.json" "${TMP}/config.aside"
-config_case() { # <label> <json>
+config_case() { # <label> <json> <the resolver's reason, as a grep -F needle>
   shipwright_cursors
   printf '0 * * * * /opt/other-job\n' >"$ct"
   printf '%s\n' "$2" >"$IR/ai/config/lead-time-repos.json"
   rc="$(inst "$ct" -- --install)"
-  if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] \
+  if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && grep -qF -- "$3" "${TMP}/inst.err" \
+     && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] \
      && [ ! -e "$LT" ] && ! grep -q 'null' "${TMP}/inst.out"; then
     ok "config $1: refused (exit 2, Fix:) before any write; never a repo called 'null'"
   else
     bad "config $1" "rc=$rc $(out) files=$(find "$LT" -type f -printf '%f ' 2>/dev/null)"
   fi
 }
-config_case 'repo with no name'  '{"repos":[{"mode":"watch"}]}'
-config_case 'repo with no mode'  '{"repos":[{"name":"gen_saas"}]}'
-config_case 'numeric name'       '{"repos":[{"name":5,"mode":"watch"}]}'
-config_case 'invalid JSON'       '{"repos":['
-config_case 'no .repos'          '{"window":20}'
-config_case 'empty .repos'       '{"repos":[]}'
+TAIL='"window":20,"improvement_epic":"epic-id"'
+config_case 'repo with no name'  "{\"repos\":[{\"path\":\"$CO/gen_saas\",\"mode\":\"watch\"}],$TAIL}" 'is missing name'
+config_case 'repo with bad mode' "{\"repos\":[{\"name\":\"gen_saas\",\"path\":\"$CO/gen_saas\",\"mode\":\"tweak\"}],$TAIL}" 'mode'
+config_case 'numeric name'       "{\"repos\":[{\"name\":5,\"path\":\"$CO/gen_saas\",\"mode\":\"watch\"}],$TAIL}" 'is not a plain name'
+config_case 'invalid JSON'       '{"repos":[' 'not valid JSON'
+config_case 'no .repos'          "{$TAIL}" 'repos'
+config_case 'empty .repos'       "{\"repos\":[],$TAIL}" 'repos'
 cp "${TMP}/config.aside" "$IR/ai/config/lead-time-repos.json"
 
 shipwright_cursors
@@ -589,7 +592,8 @@ mv "$IR/ai/bin/lead-time-repos" "${TMP}/resolver.aside"
 printf '0 * * * * /opt/other-job\n' >"$ct"
 rc="$(inst "$ct" -- --install)"
 mv "${TMP}/resolver.aside" "$IR/ai/bin/lead-time-repos"
-if [ "$rc" = 2 ] && grep -qF "$IR/ai/bin/lead-time-repos" "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+if [ "$rc" = 2 ] && grep -qF "lead-time-repos not run): $IR/ai/bin/lead-time-repos is absent" "${TMP}/inst.err" \
+   && grep -qF 'Fix: land ai/bin/lead-time-repos (DND-1526) on main' "${TMP}/inst.err" \
    && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
   ok "the resolver missing from the main checkout: install refused (exit 2), nothing written"
 else

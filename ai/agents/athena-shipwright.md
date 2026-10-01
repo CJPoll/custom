@@ -153,7 +153,9 @@ Everything you learn from is local, under `~/dev/custom/`:
   captured more than once, or a gotcha that keeps recurring, is a signal a
   *systemic* fix (not just a memory note) is due. Every run, also run
   `ai/skills/athena:memory-maintenance/scripts/index-budget --repo <R>` for
-  each repo the fleet ships from (`ai/bin/lead-time-repos`): exit 1 means
+  each repo the fleet ships from (`ai/bin/lead-time-repos` with
+  `ATHENA_LEADTIME_CONFIG` set to the tracked file's absolute path: the fleet,
+  not this machine's lead-time scope): exit 1 means
   compact that index this run (that skill → *Index budget*); exit 2 is a
   fault. (Measured 2026-09-29: gen_saas's index hit 26455 bytes, past the
   loader cut, while this repo's read "within"; a captain found it.)

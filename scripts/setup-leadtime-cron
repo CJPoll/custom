@@ -124,17 +124,28 @@ SKILL_FILE="${MAIN_CHECKOUT}/ai/skills/athena:lead-time-improve/SKILL.md"
 # Sets RES_RC (0 ok; the resolver's exit, or 127 when it or jq is missing),
 # RES_ERR (its stderr, Fix: included), RES_TSV ("<name>\t<mode>" per repo) and
 # RES_TEXT (the printable list: source, each repo, each skip by name, counts).
-RES_RC=0; RES_ERR=""; RES_TSV=""; RES_TEXT=""
+# RES_RAN is "exit <n>" once the resolver ran, else "not run"; RES_FIX is this
+# script's own Fix: for its own fault, preferred over the resolver's.
+RES_RC=0; RES_RAN="not run"; RES_FIX=""; RES_ERR=""; RES_TSV=""; RES_TEXT=""
 resolve_repos() {
   local out err_file
   if [ ! -x "${RESOLVER}" ]; then
-    RES_RC=127; RES_ERR="${RESOLVER} is absent or not executable in the main checkout"; return 0
+    RES_RC=127; RES_ERR="${RESOLVER} is absent or not executable in the main checkout"
+    RES_FIX="land ai/bin/lead-time-repos (DND-1526) on main and fast-forward ${MAIN_CHECKOUT} first."
+    return 0
   fi
   if ! command -v jq >/dev/null 2>&1; then
-    RES_RC=127; RES_ERR="jq is not installed, so the resolver's --json cannot be read"; return 0
+    RES_RC=127; RES_ERR="jq is not installed, so the resolver's --json cannot be read"
+    RES_FIX="install jq, then re-run."
+    return 0
   fi
-  err_file="$(mktemp)"
+  err_file="$(mktemp)" || {
+    RES_RC=73; RES_ERR="mktemp failed, so the resolver could not be run"
+    RES_FIX="check that \${TMPDIR:-/tmp} is writable and the disk is not full, then re-run."
+    return 0
+  }
   out="$("${RESOLVER}" --json 2>"${err_file}" </dev/null)" || RES_RC=$?
+  RES_RAN="exit ${RES_RC}"
   RES_ERR="$(cat -- "${err_file}")"; rm -f -- "${err_file}"
   [ "${RES_RC}" -eq 0 ] || return 0
   local bad
@@ -149,15 +160,17 @@ resolve_repos() {
         "  \(.considered) considered, \(.repos | length) resolved, \((.skipped // []) | length) skipped"' <<<"${out}" 2>&1)"; then
     bad="${RES_TSV}${RES_TEXT}"
     RES_RC=1; RES_ERR="the resolver exited 0 but its --json is unreadable or lists no repo (${bad})"; RES_TSV=""; RES_TEXT=""
+    RES_FIX="run ${RESOLVER} --json by hand and compare it with its --help; this is a resolver or installer bug."
   fi
   return 0
 }
-# res_fail <exit> — the list did not resolve: say why with the resolver's own Fix:.
+# res_fail <exit> — the list did not resolve: say why, with this script's own
+# Fix: for its own fault, else the resolver's.
 res_fail() {
-  local fix why
-  fix="$(printf '%s\n' "${RES_ERR}" | sed -n 's/^Fix: //p' | head -n1)"
+  local fix="${RES_FIX}" why
+  [ -n "${fix}" ] || fix="$(printf '%s\n' "${RES_ERR}" | sed -n 's/^Fix: //p' | head -n1)"
   why="$(printf '%s\n' "${RES_ERR}" | grep -v '^Fix: ' | grep -v '^[[:space:]]*$' | head -n1 || true)"
-  die "$1" "the repo list does not resolve on this machine (ai/bin/lead-time-repos exit ${RES_RC}): ${why}; every tick would exit 78" \
+  die "$1" "the repo list does not resolve on this machine (ai/bin/lead-time-repos ${RES_RAN}): ${why}; every tick would exit 78" \
     "${fix:-run ${RESOLVER} by hand to see why.} Nothing was written."
 }
 
@@ -224,7 +237,8 @@ if [ "${MODE}" = "check" ]; then
   if [ "${RES_RC}" -eq 0 ]; then
     printf '%s\n' "${RES_TEXT}" >&2
   else
-    echo "${ME}: the repo list does not resolve either (ai/bin/lead-time-repos exit ${RES_RC}); run ${RESOLVER} to see why." >&2
+    echo "${ME}: the repo list does not resolve either (ai/bin/lead-time-repos ${RES_RAN})." >&2
+    echo "  Fix: ${RES_FIX:-run ${RESOLVER} by hand to see why.}" >&2
   fi
   if [ -n "${stale}" ]; then
     echo "STALE: the crontab runs a lead-time runner that is not ${RUNNER}:" >&2
