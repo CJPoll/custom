@@ -297,7 +297,7 @@ eq "a second report says replaced" "${RC}|${OUT}" "0|replaced ${U2} call ${U1}"
 eq "--signal is passed through" "$(last | jq -r '.body.signal')" "explicit"
 
 # [ticket 2] the slack form.
-run record --subject Ev0FAKE01 --use-case slack_routing --correct route=harness
+run record --subject Ev0FAKE01 --use-case slack_routing --correct session=harness
 eq "record slack form exits 0 [ticket 2]" "${RC}" "0"
 eq "the body has use_case and subject_ref [ticket 2]" "$(last | jq -c '.body | {use_case, subject_ref, call_id}')" '{"use_case":"slack_routing","subject_ref":"Ev0FAKE01","call_id":null}'
 

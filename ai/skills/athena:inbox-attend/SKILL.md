@@ -197,6 +197,22 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
   - **Reply in the thread, DMs included.** `athena:slack/bin/reply <channel>
     <thread_ts>`, with the line's `thread_ts` when set, else its `ts`. A
     top-level `dm` is only for a new, unprompted topic.
+- **A topic-routed conversation that is not yours is a wrong judgment**
+  (DND-1467). The line carries a `topic` object (`route: topic_judgment`, or
+  `channel_route` after a fallback). Record it per
+  `athena:judgment-feedback` → *Recording a wrong judgment*, keyed by the
+  line's `event_id`:
+  - **Forwarding it** to the session that owns it is the report. Send it with
+    the athena MCP `session_send` tool and pass `reroute_of_event_id: <event_id>`.
+    `send-mail --routed` does not pass that argument yet. The reply's
+    `feedback:` field says `recorded`, `not_found` or `refused:<reason>`; the
+    message is delivered whatever it says, so name a refusal in your turn
+    output and never resend.
+  - **The owner says "wrong session" in the thread.** Record it with the
+    `judgment_feedback` tool (`use_case: slack_routing`, `subject_ref:
+    <event_id>`), the session Cody named as `correction: {"session": <label>}`
+    and `session_label`, and the note "owner said so". Never put message
+    text in the note. The reporter is your machine; the server stamps it.
 - **Tier 0 for a session message:** reply into the same conversation, which is
   a new routed message back to its sender: `athena:inbox/bin/send-mail --routed
   --to <from.machine_id>/<from.inbox_name> --thread <event_id> --subject <line>`

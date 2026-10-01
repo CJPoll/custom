@@ -36,7 +36,7 @@ You are the receiver when a judged result reaches you and you act on it.
 
    ```
    ai/bin/judgment-feedback record --call <uuid> --correct <question>=<label>
-   ai/bin/judgment-feedback record --use-case slack_routing --subject <event_id> --correct route=<label>
+   ai/bin/judgment-feedback record --use-case slack_routing --subject <event_id> --correct session=<label>
    ```
 
    Agents with the athena MCP may use the `judgment_feedback` tool instead.
