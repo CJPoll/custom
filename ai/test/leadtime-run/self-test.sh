@@ -144,9 +144,17 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   moved-land) : >"$LEADTIME_RECEIPT"; other_fleet; sync_down; own_land own.txt; summary; exit 0 ;;
   land-moved) : >"$LEADTIME_RECEIPT"; own_land own.txt; other_fleet; sync_down; summary; exit 0 ;;
   rebase-land) : >"$LEADTIME_RECEIPT"; echo change >own.txt; g add own.txt >/dev/null; g commit -q -m "own change"
-             other_fleet; git fetch -q origin main && g pull -q --rebase origin main
+             # pull by URL, as an improvised HTTPS fallback would: the argv in
+             # the reflog action then holds a colon
+             other_fleet; g pull -q --rebase "file://$(git remote get-url origin)" main
              g rev-parse HEAD >>"$d/own-shas"; g push -q origin HEAD:main 2>/dev/null || exit 9; summary; exit 0 ;;
-  noreflog-land): >"$LEADTIME_RECEIPT"; own_land own.txt; rm -f "$(git rev-parse --git-path logs/HEAD)"; summary; exit 0 ;;
+  land-strand) : >"$LEADTIME_RECEIPT"; own_land own.txt; echo more >more.txt; g add more.txt >/dev/null
+             g commit -q -m "unpushed own change"; g rev-parse HEAD >>"$d/unpushed-shas"; summary; exit 0 ;;
+  truncreflog-land): >"$LEADTIME_RECEIPT"; b="$(git rev-parse HEAD)"; own_land own.txt
+             # drop the lane-creation entries (every entry whose new value is BASE)
+             f="$(git rev-parse --git-path logs/HEAD)"; awk -v b="$b" '$2 != b' "$f" >"$f.t" && mv "$f.t" "$f"
+             summary; exit 0 ;;
+  noreflog-land) : >"$LEADTIME_RECEIPT"; own_land own.txt; rm -f "$(git rev-parse --git-path logs/HEAD)"; summary; exit 0 ;;
 esac
 EOF
   chmod +x "$c/stub-claude"
@@ -663,6 +671,20 @@ else
   bad "rebased own landing" "rc=$rc own=$own run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
+# The run lands one commit, then makes a second it never pushes: the tick is
+# STRANDED, and the main checkout still gets the run's landed commit.
+c="$(new_case)"; echo land-strand >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+own="$(cat "$c/own-shas" 2>/dev/null)"; unpushed="$(cat "$c/unpushed-shas" 2>/dev/null)"
+if [ "$rc" = 72 ] && [ -n "$own" ] && grep -q "^own_landed=1 $own\$" "$run" \
+   && grep -q "^ff=$own (the newest own landed commit; the run's newer own commit $unpushed is not on origin/main)" "$run" \
+   && [ "$(git -C "$c/repo" rev-parse main)" = "$own" ]; then
+  ok "an own landed commit under an unpushed own commit: stranded (72), own_landed names the landed one, ff reaches it"
+else
+  bad "landed then stranded" "rc=$rc own=$own run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
 # The lane's HEAD reflog is gone, so the run's own commits cannot be told from
 # a sync: that is UNKNOWN and no ff, never "none" and never the lane tip.
 c="$(new_case)"; echo noreflog-land >"$c/mode"
@@ -674,6 +696,20 @@ if [ "$rc" = 0 ] && grep -q '^own_landed=UNKNOWN' "$run" && grep -q '^ff=none (o
   ok "an unreadable lane reflog reads own_landed=UNKNOWN with a Fix:, and the main checkout is not moved"
 else
   bad "no reflog" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# The reflog lost its first entry (expired or rewritten mid-run): it no longer
+# starts at BASE, so it cannot prove what the run made. UNKNOWN, its own Fix:.
+c="$(new_case)"; echo truncreflog-land >"$c/mode"
+main_before="$(git -C "$c/repo" rev-parse main)"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -q '^own_landed=UNKNOWN (the lane.s HEAD reflog does not start at BASE' "$run" \
+   && grep -q '^ff=none (own commits UNKNOWN' "$run" && [ "$(git -C "$c/repo" rev-parse main)" = "$main_before" ] \
+   && grep -q 'Fix: the reflog was rewritten or expired' "$c/runner.err"; then
+  ok "a lane reflog that does not start at BASE reads own_landed=UNKNOWN with its own Fix:; main is not moved"
+else
+  bad "truncated reflog" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 c="$(new_case)"
