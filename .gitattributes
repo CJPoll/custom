@@ -1,0 +1,10 @@
+# Merge drivers for shared append-mostly tables.
+#
+# ai/guard-classification.tsv: one row per first-party file. Parallel branches
+# each add rows at the same spot, so every rebase onto a main that landed a
+# sibling's rows conflicted, and a captain resolved it by hand by keeping both
+# sides (DND-507 on 2026-09-24; DND-1475 and DND-1478 on 2026-10-01, each one
+# integration-gate --rebase refusal and a re-run). `union` keeps both sides.
+# It cannot hide a real conflict: if both sides changed the SAME row, union
+# keeps both versions and check-guard-messages fails "classified twice".
+ai/guard-classification.tsv merge=union
