@@ -73,7 +73,9 @@ USAGE = <<~EOF
     --json           on exit 0, print the classification server's result as
                      JSON instead of lines. Not with --epic.
 
-  For a finding (any Kind but Feature; a Feature's Path is authored):
+  For a finding (any Kind but Feature; a Feature's Path is authored). The
+  Path part runs after the classification and judges the Kind that is filed:
+  the decided Kind, or yours when the classification is unavailable.
     --epic ID        the epic's Notion page id. Its open tickets with Path
                      Critical are read (read-only), by ID ascending, at most
                      #{Blocking::MAX_CANDIDATES}, each with the first #{Blocking::MAX_SUMMARY} characters of its body,
@@ -255,14 +257,23 @@ module Manager
     body = Effects.read_body_file(opts[:body_file])
     note_truncation(err, "--title", opts[:title], Classify::MAX_TITLE)
     note_truncation(err, "--body-file", body, Classify::MAX_BODY)
-    path_part = opts[:epic] && opts[:filer][:kind] != "Feature"
+    path_part = opts[:epic] && Blocking.judged?(opts[:filer][:kind])
     err.puts "#{PROG}: note: --epic is ignored for a Feature; its Path is authored, never judged" if opts[:epic] && !path_part
     # Candidates are read BEFORE anything is sent, so a --blocks outside
     # them is a usage error with nothing sent.
     candidates = path_part ? read_candidates(opts) : nil
-    codes = [classification(opts, body, out)]
-    codes << path(opts, body, candidates, out) if path_part
-    codes.max
+    code, decided = classification(opts, body, out)
+    return code unless path_part
+
+    # The Path part runs after the classification and keys on the Kind that
+    # is filed (DND-1382): the decided Kind, or the filer's when the
+    # classification is unavailable.
+    kind = Blocking.filed_kind(decided, opts[:filer])
+    unless Blocking.judged?(kind)
+      err.puts "#{PROG}: note: the decided Kind is #{kind}; its Path is authored, never judged"
+      return code
+    end
+    [code, path(opts, body, candidates, out)].max
   end
 
   def note_truncation(err, flag, text, max)
@@ -289,21 +300,22 @@ module Manager
     { unavailable: e.message }
   end
 
-  # classification(opts, body, out) -> 0 or 3, having printed the decision or
-  # the unavailable line and the filer's values.
+  # classification(opts, body, out) -> [0, the parsed result] or [3, nil],
+  # having printed the decision or the unavailable line and the filer's
+  # values.
   def classification(opts, body, out)
     request = Classify.request_body(opts[:title], body, opts[:project], opts[:ref], opts[:filer])
     result = Classify.parse_result(answer(Effects.post(ENDPOINT, request), "ticket_classification", "DND-991"), opts[:filer])
     opts[:json] ? out.puts(JSON.generate(result)) : Classify.decision_lines(result).each { |line| out.puts line }
-    0
+    [0, result]
   rescue ArgumentError => e
-    unavailable(out, "UNREADABLE SERVER ANSWER: HTTP 200 but #{e.message}. #{UNAVAILABLE_FIX}", Classify.fallback_lines(opts[:filer]))
+    [unavailable(out, "UNREADABLE SERVER ANSWER: HTTP 200 but #{e.message}. #{UNAVAILABLE_FIX}", Classify.fallback_lines(opts[:filer])), nil]
   rescue Failure => e
     raise unless e.code == 3
 
-    unavailable(out, e.message, Classify.fallback_lines(opts[:filer]))
+    [unavailable(out, e.message, Classify.fallback_lines(opts[:filer])), nil]
   rescue StandardError => e
-    unavailable(out, "#{PROG}: UNEXPECTED ERROR: #{e.class}. #{UNAVAILABLE_FIX}", Classify.fallback_lines(opts[:filer]))
+    [unavailable(out, "#{PROG}: UNEXPECTED ERROR: #{e.class}. #{UNAVAILABLE_FIX}", Classify.fallback_lines(opts[:filer])), nil]
   end
 
   # path(opts, body, candidates, out) -> 0 or 3, having printed the count,

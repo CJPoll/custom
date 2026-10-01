@@ -1016,19 +1016,30 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
 - **A finding's Path** (DND-1057). With `--epic <page id>` (and optionally
   `--found-while DND-N` and `--blocks DND-N`, the filer's claim), the script
   also decides `Path` through `POST /api/v1/judgments/ticket_blocking`, after
-  the classification and independently of it:
+  the classification. Only its gate reads the classification (the filed
+  Kind, below); its request and answer do not:
   - It reads the candidates first: the epic's open `Path` = `Critical`
     tickets (not Done, Cancelled or Won't Fix), by ID ascending, at most 10,
     and prints how many it considered, `0 candidates considered` included. A
     failed read is its own `CANDIDATES UNAVAILABLE` line, never 0. A
     `--blocks` that is not one of them is a usage error (exit 2) and nothing
     is sent.
-  - A ticket the filer files as a `Feature` is never sent (its Path is
-    authored). The Path part does not wait for the classification, so a
-    Kind the server decides differently does not change this. With no candidates, or
-    for an introduced security issue with `--found-while`, the server decides
-    by rule and makes no model call. `--epic` with `--ref` or `--json`, and
+  - A ticket filed as a `Feature` is never sent (its Path is authored). The
+    Path part runs after the classification and keys on the Kind that is
+    filed: the decided Kind, or the filer's own when the classification is
+    unavailable. The policy never assigns `Feature`, and the script refuses
+    an answer that does as unreadable, so the filer files its own Kind and
+    the Path is judged for it. With no candidates, or for an introduced
+    security issue with `--found-while`, the server decides by rule and
+    makes no model call. `--epic` with `--ref` or `--json`, and
     `--found-while` or `--blocks` without `--epic`, are usage errors.
+
+    **Later (2026-10-01, DND-1382):** this read "The Path part does not
+    wait for the classification, so a Kind the server decides differently
+    does not change this", and the bullet above said the Path part runs
+    "independently of" the classification: the Path was gated on the
+    filer's Kind alone.
+    Superseded by the gate on the filed Kind above.
   - The output is `Path: <value> (<source>)`, then `Blocks: DND-N` or
     `Blocks: none`, then the server's second provenance line verbatim, which
     starts `Jev path: `. The source is `jev` (an accepted judgment), `filer`

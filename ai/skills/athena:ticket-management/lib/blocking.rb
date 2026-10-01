@@ -3,7 +3,8 @@
 # blocking.rb -- DOMAIN (pure) for the Path part of ticket-classify
 # (DND-1057): choosing the candidates from the tracker rows, the candidate
 # summaries, the request body, the judged-shape check and the rendering of
-# the server's decision. The server is gen_saas
+# the server's decision, and which Kind's Path is judged at all (DND-1382).
+# The server is gen_saas
 # Athena.Judgments.TicketBlocking (POST /api/v1/judgments/ticket_blocking),
 # which applies the policy; this adds none.
 #
@@ -36,6 +37,25 @@ module Blocking
 
     hex = value.downcase.delete("-")
     [hex[0, 8], hex[8, 4], hex[12, 4], hex[16, 4], hex[20, 12]].join("-")
+  end
+
+  # filed_kind(classification, filer) -> the Kind the filer will file: the
+  # decided Kind of a parsed classification result, or the filer's own when
+  # the classification was unavailable (nil). The Path part keys on it
+  # (DND-1382), so Path is judged for the Kind that is filed.
+  def filed_kind(classification, filer)
+    return filer[:kind] if classification.nil?
+
+    kind = classification.dig("properties", "kind", "decided")
+    raise ArgumentError, "properties.kind.decided is not one of the tracker's values" unless Classify::KINDS.include?(kind)
+
+    kind
+  end
+
+  # judged?(kind) -> whether a ticket of this Kind has its Path judged. A
+  # Feature's Path is authored, never judged.
+  def judged?(kind)
+    kind != "Feature"
   end
 
   # query_filter(epic_id) -> the data source query body: the epic's tickets

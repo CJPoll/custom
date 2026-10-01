@@ -144,6 +144,25 @@ ruby_eq "epic_title: an epic page gives its title" \
   "T" \
   'Blocking.epic_title({"id" => "p", "parent" => {"data_source_id" => "E"}, "properties" => {"Name" => {"type" => "title", "title" => [{"plain_text" => "T"}]}}}, "E")'
 
+ruby_eq "filed_kind: the decided Kind, or the filer's when unavailable [DND-1382]" \
+  "Vulnerability|Bug" \
+  '[Blocking.filed_kind({"properties" => {"kind" => {"decided" => "Vulnerability"}}}, {kind: "Bug"}), Blocking.filed_kind(nil, {kind: "Bug"})].join("|")'
+ruby_eq "filed_kind: a decided Kind outside the tracker's is an error, never a Kind" \
+  "ArgumentError: properties.kind.decided is not one of the tracker's values" \
+  'Blocking.filed_kind({"properties" => {}}, {kind: "Bug"})'
+ruby_eq "judged?: a Feature's Path is authored; every other Kind's is judged" \
+  "false|true|true" \
+  '[Blocking.judged?("Feature"), Blocking.judged?("Bug"), Blocking.judged?("Vulnerability")].join("|")'
+
+echo "== manager (stubbed effects) [DND-1382]"
+
+if MANAGER_OUT="$(/usr/bin/ruby "${HERE}/manager_test.rb" "${BIN}" 2>&1)"; then
+  ok "manager: the Path part keys on the Kind that is filed"
+else
+  bad "manager: the Path part keys on the Kind that is filed" "$(printf '%s\n' "${MANAGER_OUT}" | grep -E '^(FAIL|     )' | head -20)"
+fi
+printf '%s\n' "${MANAGER_OUT}" | grep -E '^manager: '
+
 echo "== end to end"
 
 ATHENA_TOKEN="epic-athena-token-$$-${RANDOM}-8c1d"
@@ -257,6 +276,21 @@ eq "only the classification endpoint was called" "$(athena_paths)" "/api/v1/judg
 eq "and Notion was not read" "$(notion_count)" "0"
 lacks "no Path line" "${OUT}" "Path:"
 has "stderr says the Path is authored" "${ERR}" "its Path is authored, never judged"
+
+echo "== the Path keys on the Kind that is filed [DND-1382]"
+
+spec blocking.json "$(path_body Off null filer '"mode_off"' null 'Jev path: {}')"
+spec classify.json "$(jq -cn --argjson b "${OFF_CLASSIFY}" '{status: 200, body: ($b | .properties.kind = {decided: "Vulnerability", source: "jev", judged: {confidence: 0.91}, accepted: true, reason: null, mode: "on"})}')"
+run "${TICKET[@]}" "${FILER[@]}" --epic "${EPIC}"
+eq "a Bug the server re-kinds Vulnerability exits 0" "${RC}" "0"
+eq "and its Path is judged, after the classification" "$(athena_paths)" "/api/v1/judgments/ticket_classification,/api/v1/judgments/ticket_blocking"
+spec classify.json "$(jq -cn --argjson b "${OFF_CLASSIFY}" '{status: 200, body: ($b | .properties.kind.decided = "Feature" | .properties.severity = {decided: null, source: "filer", judged: null, accepted: false, reason: "feature", mode: "off"})}')"
+run "${TICKET[@]}" "${FILER[@]}" --epic "${EPIC}"
+eq "a Bug answered Feature is unreadable (the policy never assigns Feature): exit 3" "${RC}" "3"
+has "the filer's Kind is what is filed" "${OUT}" "Decided (filer; classification unavailable):
+Kind: Bug"
+has "and the Path is judged for it" "${OUT}" "Path: Off (filer: mode_off)"
+spec classify.json "$(jq -cn --argjson b "${OFF_CLASSIFY}" '{status: 200, body: $b}')"
 
 echo "== zero candidates [qa 3]"
 
