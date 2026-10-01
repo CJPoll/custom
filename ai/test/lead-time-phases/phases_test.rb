@@ -82,7 +82,7 @@ receipt = S.ok([{ "recorded_at" => "2026-10-01T04:10:00Z" }])
 ph2 = L::Phases.compute(anchors(l, S.ok(no_gate.reject { |e| e["event"] == "integration_gate.run" }), receipt: receipt))
 check("P2 no gate events: implement is null") { ph2["implement"]["s"].nil? }
 check("P2 no gate events: verify is null") { ph2["verify"]["s"].nil? }
-check("P2 the reason names the unit") { ph2["implement"]["na_reason"] == "no harness_gate.run for DND-9001" }
+check("P2 the reason names the unit and both gate events") { ph2["implement"]["na_reason"] == "no harness_gate.run or gate.run for DND-9001" }
 check("P2 merge is still measured from the receipt") { ph2["merge"]["s"] == 50 * 60 }
 check("P2 integrate is n/a: the receipt gives the end only") { ph2["integrate"]["s"].nil? && ph2["integrate"]["na_reason"].include?("the receipt gives the end only") }
 
@@ -215,8 +215,40 @@ check("C2 both empty: null with a reason naming both sources") do
   c4["top_checks"].nil? && c4["top_checks_na"].include?("no harness_gate.check") && c4["top_checks_na"].include?("timings: could not look")
 end
 check("C3 a counter with no source events is null with a reason, never 0") do
-  c4["counters"]["gate_runs"].nil? && c4["counters_na"]["gate_runs"] == "no harness_gate.run for DND-9001"
+  c4["counters"]["gate_runs"].nil? && c4["counters_na"]["gate_runs"] == "no harness_gate.run or gate.run for DND-9001"
 end
+
+# ── gate.run: a declared gate other than harness-gate, run under test-slot
+# (DND-1530). It anchors implement/verify and feeds the gate counters exactly
+# as harness_gate.run does.
+GATE_RUNS = [
+  ev("gate.run", "2026-10-01T02:00:00.400Z", duration_s: 100.0, attrs: { "gate" => "bin/prep-commit.sh", "ok" => false, "exit" => 1, "slot_wait_s" => 4.0 }),
+  ev("gate.run", "2026-10-01T02:30:00Z", duration_s: 120.5, attrs: { "gate" => "bin/prep-commit.sh", "ok" => true, "exit" => 0, "slot_wait_s" => 0.0 }),
+].freeze
+product = FULL.reject { |e| e["event"].start_with?("harness_gate") } + GATE_RUNS
+ph_g = L::Phases.compute(anchors(l, S.ok(product)))
+check("G1 gate.run alone: implement is measured from it") { ph_g["implement"]["s"] == 3600 }
+check("G1 gate.run alone: verify is measured from it") { ph_g["verify"]["s"] == (t("2026-10-01T03:20:45Z") - t("2026-10-01T02:00:00Z")).to_i }
+check("G1 the anchor names its source event") { anchors(l, S.ok(product))["gate_first"].source == "telemetry gate.run" }
+c_g = L::Counters.compute(landing: l, events: S.ok(product), timings: S.empty("none"))["counters"]
+check("G2 gate.run feeds gate_runs, gate_wall_s and gate_red") do
+  c_g["gate_runs"] == 2 && c_g["gate_wall_s"] == 220.5 && c_g["gate_red"] == 1
+end
+both_kinds = FULL + [ev("gate.run", "2026-10-01T01:30:00Z", duration_s: 10.0, attrs: { "ok" => true, "exit" => 0 })]
+check("G3 the first gate is the earliest of either event") do
+  a = anchors(l, S.ok(both_kinds))["gate_first"]
+  a.at == t("2026-10-01T01:30:00Z") && a.source == "telemetry gate.run"
+end
+c_b = L::Counters.compute(landing: l, events: S.ok(both_kinds), timings: S.empty("none"))["counters"]
+check("G3 both events count as gate runs") { c_b["gate_runs"] == 4 && c_b["gate_red"] == 1 }
+other_unit = [ev("gate.run", "2026-10-01T02:00:00Z", unit: "DND-9002", duration_s: 5.0, attrs: { "ok" => true })]
+check("G4 another unit's gate.run never anchors this landing") do
+  anchors(l, S.ok(other_unit))["gate_first"].reason == "no harness_gate.run or gate.run for DND-9001"
+end
+check("G5 the red-rate guard's reason names both events") do
+  L::Guards.compute([{ "counters" => {} }], reverts: nil)["gate_red_rate"]["reason"] == "no harness_gate.run or gate.run measured in the window"
+end
+check("G6 gate.run is read from the store") { L::EVENTS.include?("gate.run") }
 
 # ── Stats.summarize, Batch, Window ─────────────────────────────────────────
 

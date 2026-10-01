@@ -21,6 +21,15 @@
         "ok": "bool"
       }
     },
+    "gate.run": {
+      "description": "One run of a repo's declared gate other than ai/bin/harness-gate (which writes harness_gate.run itself), written by test-slot after the command it held exits. A declared gate is the first ai/lib/integration-receipt.sh IR_DECLARED_GATES path that is a blob on the caller's HEAD, and the command (wrappers and interpreter skipped) is that file in the caller's work tree. at = the command's start, duration_s = its wall, head = the caller's HEAD when it started. gate = the IR_DECLARED_GATES entry (never argv); exit = the command's exit code; ok = exit was 0; slot_wait_s = the queue wait before it (0 for a nested run inside a held slot). None when the command never ran (a wait timeout, an orphaned or signalled waiter), or outside test-slot. Emitter: DND-1530.",
+      "attrs": {
+        "gate": "label",
+        "ok": "bool",
+        "exit": "int",
+        "slot_wait_s": "float"
+      }
+    },
     "test_slot.wait": {
       "description": "test-slot's queue wait, after the slot is acquired (outcome=ran) or the wait times out (outcome=timeout) and before CMD runs. at = wait start, duration_s = the wait. A nested run already inside a slot waits for nothing and emits none. The run's --label is not an attr: it is caller free text (a work ticket id, a tree or command name), which Privacy keeps out. Emitter: DND-1474.",
       "attrs": {

@@ -199,6 +199,17 @@ Still owed, not done here:
   `critic.round`, which their requirements dropped. An emitter ticket that
   wants them adds them here.
 
+`gate.run` (DND-1530) is one run of a repo's declared gate other than
+`ai/bin/harness-gate`, which writes `harness_gate.run` itself. A declared gate
+is the first `IR_DECLARED_GATES` path in `ai/lib/integration-receipt.sh` that
+is a blob on the caller's HEAD; test-slot reads that list, never a copy.
+test-slot writes the event through the shell binding after the command exits,
+when the command (wrappers and interpreter skipped) is that file in the
+caller's work tree. Attrs: `gate` (the declared path, never argv), `ok`,
+`exit` and `slot_wait_s`. A gate run outside test-slot, or one whose wait
+timed out, writes none. Readers that anchor on the first gate run read both
+events for the unit (`ai/lib/lead_time_phases.rb`).
+
 `telemetry.probe` is the writer's own probe (attr `note`). Use it to check the
 writer by hand. It is never a phase anchor.
 

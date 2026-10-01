@@ -10,6 +10,10 @@
 #   dispatch --implement--> gate_first --verify--> critic_pass --queue-->
 #   integrate_start --integrate--> integrate_end --merge--> landed
 #
+# gate_first is the unit's first run of its repo's declared gate: a
+# harness_gate.run (custom) or a gate.run that test-slot writes for any other
+# declared gate (DND-1530; gen_saas's bin/prep-commit.sh).
+#
 # Each phase is whole seconds, or null with `na_reason` when an anchor is
 # missing, or null with `invalid: true` when its anchors are out of order.
 # Never 0 for a missing input, never negative. Anchors are floored to whole
@@ -38,8 +42,13 @@ module LeadTimePhases
   TOTALS = { "lead" => "lead_s", "code" => "code_s", "tail" => "tail_s" }.freeze
   # The telemetry events a phase or counter reads. telemetry.probe is never an
   # anchor (ai/telemetry/events.json).
-  EVENTS = %w[harness_gate.run harness_gate.check test_slot.wait critic.round
+  EVENTS = %w[harness_gate.run gate.run harness_gate.check test_slot.wait critic.round
               integration_gate.run merge.lock_wait merge.landed].freeze
+  # The events that are one run of a repo's declared gate: harness-gate's own,
+  # and the one test-slot writes for any other declared gate (DND-1530). Each
+  # run is one of them, never both, so the gate anchor and counters read both.
+  GATE_RUN_EVENTS = %w[harness_gate.run gate.run].freeze
+  GATE_RUN_DESC = GATE_RUN_EVENTS.join(" or ")
   TOP_CHECKS = 5
   # A full git object name (SHA-1 or SHA-256), lowercase as git writes it and
   # as receipts and verdicts are keyed: an uppercase one would join nothing.
@@ -188,10 +197,12 @@ module LeadTimePhases
       events.select { |e| (t = at(e)) && t <= landing["landed_at"] && (after.nil? || t > after) }
     end
 
+    # name: one event name, or a list of them.
     def for_unit(events, landing, name)
       key = landing["ticket"]
+      names = Array(name)
       in_span(events, landing).select do |e|
-        e["event"] == name && (key ? e["unit"] == key : on_gated_head?(e, landing))
+        names.include?(e["event"]) && (key ? e["unit"] == key : on_gated_head?(e, landing))
       end
     end
 
@@ -265,10 +276,11 @@ module LeadTimePhases
     def gate_first(landing, events)
       return missing(no_unit(landing, "unticketed landing: no unit to join gate runs on")) unless landing["ticket"]
 
-      runs = Match.for_unit(events.items, landing, "harness_gate.run")
-      return missing(telemetry_miss(events, "no harness_gate.run for #{landing['ticket']}")) if runs.empty?
+      runs = Match.for_unit(events.items, landing, GATE_RUN_EVENTS)
+      return missing(telemetry_miss(events, "no #{GATE_RUN_DESC} for #{landing['ticket']}")) if runs.empty?
 
-      found(runs.map { |e| Match.at(e) }.min, "telemetry harness_gate.run")
+      first = runs.min_by { |e| Match.at(e) }
+      found(Match.at(first), "telemetry #{first['event']}")
     end
 
     # The last clean critic PASS before the integration run started (with
@@ -362,8 +374,9 @@ module LeadTimePhases
     def compute(landing:, events:, timings:)
       out = {}
       na = {}
-      family(landing, events, "harness_gate.run", %w[gate_runs gate_wall_s gate_red], out, na) do |evs|
+      family(landing, events, GATE_RUN_EVENTS, %w[gate_runs gate_wall_s gate_red], out, na) do |evs|
         # An interrupted run (ok=false, interrupted=true) was stopped, not red.
+        # gate.run carries no interrupted attr: a signalled run is red.
         [evs.size, wall(evs), evs.count { |e| Match.attr(e, "ok") == false && Match.attr(e, "interrupted") != true }]
       end
       family(landing, events, "test_slot.wait", %w[slot_wait_s], out, na) { |evs| [wall(evs)] }
@@ -382,16 +395,18 @@ module LeadTimePhases
       ds.empty? ? nil : ds.sum.round(3)
     end
 
+    # name: one event name, or a list of them (any of which counts).
     def family(landing, events, name, keys, out, na)
       evs = Match.for_unit(events.items, landing, name)
       unit = Landing.unit_desc(landing)
+      desc = Array(name).join(" or ")
       if evs.empty?
-        why = Anchors.telemetry_miss(events, "no #{name} for #{unit}")
+        why = Anchors.telemetry_miss(events, "no #{desc} for #{unit}")
         keys.each { |k| out[k] = nil; na[k] = why }
       else
         keys.zip(yield(evs)).each do |k, v|
           out[k] = v
-          na[k] = "no duration_s on any #{name} for #{unit}" if v.nil?
+          na[k] = "no duration_s on any #{desc} for #{unit}" if v.nil?
         end
       end
     end
@@ -595,7 +610,7 @@ module LeadTimePhases
     def compute(rows, reverts:)
       {
         "critic_block_rate" => rate(rows, "critic_blocks", "critic_rounds", "no critic rounds measured in the window"),
-        "gate_red_rate" => rate(rows, "gate_red", "gate_runs", "no harness_gate.run measured in the window"),
+        "gate_red_rate" => rate(rows, "gate_red", "gate_runs", "no #{GATE_RUN_DESC} measured in the window"),
         "reverts" => reverts_value(reverts),
       }
     end

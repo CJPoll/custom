@@ -66,6 +66,15 @@
 # Nothing is skipped, filtered, or loosened. Its own
 # messages go to stderr, prefixed `test-slot:`.
 #
+# TELEMETRY (ai/contracts/athena-telemetry.md). Every run that waited writes
+# one test_slot.wait before CMD (DND-1474). A run whose COMMAND is the repo's
+# declared gate (ai/lib/integration-receipt.sh IR_DECLARED_GATES, the one
+# HEAD declares) other than ai/bin/harness-gate writes one gate.run after CMD
+# exits (DND-1530): gen_saas's bin/prep-commit.sh has no event of its own, and
+# lead time's implement/verify anchor on the first gate run. harness-gate
+# writes harness_gate.run itself, so it gets none here. Both are fail-open:
+# neither changes CMD's exit code or output.
+#
 # LIVENESS IS THE FLOCK, NEVER A PID. A slot is held exactly while some process
 # holds flock(2) on slot-<i>.lock. The wrapped command inherits that lock's fd,
 # so the slot stays held while the command (or any descendant that kept the fd)
@@ -342,6 +351,26 @@ DEFAULT_PARENT_CHECK_S=5
 # namespace, so "parent is PID 1" means init only when this matches.
 HOST_PID_NS='pid:[4026531836]'
 EVENTS_MAX_BYTES=1048576
+# DND-1530: the declared gate this run's COMMAND is (empty: none), the HEAD
+# it started on, and when it started. main sets them.
+GATE_RUN_LABEL=""
+GATE_RUN_HEAD=""
+GATE_RUN_AT=""
+GATE_RUN_CLOCK=""
+
+# The repo-gate declaration (IR_DECLARED_GATES, ir_declared_gate_on: one list,
+# never a copy) and the shell telemetry binding (athena_telemetry_emit). Both
+# only define names. One that cannot be read leaves its functions undefined,
+# and gate_label_of / emit_gate_run say so or skip: CMD runs either way.
+TS_LIB=$(cd "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")/../lib" 2>/dev/null && pwd) || TS_LIB=""
+if [ -n "$TS_LIB" ] && [ -r "$TS_LIB/integration-receipt.sh" ]; then
+  # shellcheck source=../lib/integration-receipt.sh
+  . "$TS_LIB/integration-receipt.sh"
+fi
+if [ -n "$TS_LIB" ] && [ -r "$TS_LIB/telemetry-emit.sh" ]; then
+  # shellcheck source=../lib/telemetry-emit.sh
+  . "$TS_LIB/telemetry-emit.sh"
+fi
 
 usage() {
   cat <<'TXT'
@@ -1402,6 +1431,84 @@ emit_wait() {
   return 0
 }
 
+# gate_label_of TREE SHA ARGV... — print the repo's declared gate (an
+# IR_DECLARED_GATES entry, ai/lib/integration-receipt.sh) when the COMMAND in
+# ARGV (wrappers and interpreter skipped, unwrap_index) is that file in TREE,
+# and it is not ai/bin/harness-gate, which writes harness_gate.run itself
+# (DND-1530). The gate is the one SHA declares, read out of git, as
+# integration-gate resolves it. A relative COMMAND resolves against $PWD, a
+# bare one through PATH; both sides are realpath'd. Returns 1, printing
+# nothing, for any other command, outside a work tree or with no HEAD; 3 when
+# the declaration library is not loaded (could not look, never "no gate").
+gate_label_of() {
+  local tree=$1 sha=$2 i word path g want
+  shift 2
+  [ -n "$tree" ] && [ -n "$sha" ] || return 1
+  declare -F ir_declared_gate_on >/dev/null || return 3
+  i=$(unwrap_index "$@")
+  ((i < $#)) || return 1
+  local -a v=("$@")
+  word=${v[i]}
+  case $word in
+    */*) path=$word ;;
+    *) path=$(type -P -- "$word") || return 1 ;;
+  esac
+  path=$(realpath -e -- "$path" 2>/dev/null) || return 1
+  g=$(ir_declared_gate_on "$tree" "$sha") || return 1
+  [ "$g" = ai/bin/harness-gate ] && return 1
+  want=$(realpath -e -- "$tree/$g" 2>/dev/null) || return 1
+  [ "$path" = "$want" ] || return 1
+  printf '%s\n' "$g"
+}
+
+# resolve_gate_run — sets GATE_RUN_LABEL (and GATE_RUN_HEAD) when CMD is a
+# declared gate gate_label_of names. Reads GATE_TREE/GATE_SHA, so it runs
+# after read_gate_ref. A library that could not be loaded is named on stderr
+# (with Fix:); CMD still runs, and no gate.run is written for it.
+resolve_gate_run() {
+  local g rc=0
+  GATE_RUN_LABEL=""
+  GATE_RUN_HEAD=""
+  g=$(gate_label_of "$GATE_TREE" "$GATE_SHA" "${CMD[@]}") || rc=$?
+  if ((rc == 3)); then
+    say "WARN could not load the declared-gate list (ai/lib/integration-receipt.sh beside $PROG); no gate.run telemetry for this run. Fix: restore ai/lib/integration-receipt.sh in the checkout this test-slot runs from."
+    return 0
+  fi
+  ((rc == 0)) || return 0
+  GATE_RUN_LABEL=$g
+  GATE_RUN_HEAD=$GATE_SHA
+}
+
+# mark_gate_start — the declared gate's start (--at) and clock, just before
+# CMD runs. Nothing for any other command.
+mark_gate_start() {
+  [ -n "$GATE_RUN_LABEL" ] || return 0
+  declare -F athena_telemetry_now >/dev/null || return 0
+  GATE_RUN_AT=$(athena_telemetry_now)
+  GATE_RUN_CLOCK=$(athena_telemetry_clock_us)
+}
+
+# emit_gate_run RC WAITED_MS — one gate.run event (DND-1530) once a declared
+# gate has run: at = its start, duration_s = its wall, head = the HEAD it
+# started on; attrs gate (the declared path, never argv), ok, exit and
+# slot_wait_s (WAITED_MS; 0 for a nested run, which waits for nothing). Through
+# the shell binding ai/lib/telemetry-emit.sh, which is bounded and fail-open,
+# drops stdout and returns 0, so CMD's exit code and output are unchanged. A
+# binding that is not loaded writes nothing.
+emit_gate_run() {
+  [ -n "$GATE_RUN_LABEL" ] || return 0
+  declare -F athena_telemetry_emit >/dev/null || return 0
+  local ok=false dur=""
+  (($1 == 0)) && ok=true
+  dur=$(athena_telemetry_seconds_since "$GATE_RUN_CLOCK")
+  local -a opt=()
+  [ -n "$GATE_RUN_AT" ] && opt+=(--at "$GATE_RUN_AT")
+  [ -n "$dur" ] && opt+=(--duration "$dur")
+  [ -n "$GATE_RUN_HEAD" ] && opt+=(--head "$GATE_RUN_HEAD")
+  athena_telemetry_emit --event gate.run "${opt[@]}" --attr "gate=$GATE_RUN_LABEL" --attr "ok=$ok" --attr "exit=$1" --attr "slot_wait_s=$(fmt_ms "$2")"
+  return 0
+}
+
 timeout_exit() {
   local waited_ms=$(($(now_ms) - START_MS)) lines
   lines=$(holder_lines)
@@ -1930,6 +2037,9 @@ main() {
   fi
 
   ensure_pool
+  # DND-1530: is CMD the repo's declared gate (not harness-gate)? Decided on
+  # the HEAD it starts from, before any wait.
+  resolve_gate_run
   START_MS=$(now_ms)
   DEADLINE_MS=$((START_MS + WAIT_TIMEOUT_S * 1000))
   SLOT=""
@@ -1941,8 +2051,10 @@ main() {
   if reentrant_slot; then
     ((EXCLUSIVE)) && say "note: already inside unit $SLOT; --exclusive not re-applied (nested run)."
     append_event reentrant "$SLOT" 0 "" ""
+    mark_gate_start
     run_cmd
     rc=$?
+    emit_gate_run "$rc" 0
     write_outcome ran "$rc"
     exit "$rc"
   fi
@@ -1969,11 +2081,13 @@ main() {
   # start CMD for it (DND-925). Its slot fds close with this process.
   check_parent
   ran_start=$(now_ms)
+  mark_gate_start
   run_cmd
   rc=$?
   # Read again: a rebase inside the slot (integration-gate --rebase) moved HEAD.
   read_gate_ref
   append_event released "$SLOT" "" "$(($(now_ms) - ran_start))" "$rc"
+  emit_gate_run "$rc" "$waited_ms"
   write_outcome ran "$rc"
   exit "$rc"
 }

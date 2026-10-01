@@ -1625,6 +1625,124 @@ check T4-rc eq "$?" 0
 check T4-before-cmd eq "$(jq -r 'select(.event == "test_slot.wait") | .attrs.outcome' "$W/T4.out" 2>/dev/null)" ran
 check T4-no-drops eq "$(tel_drops "$W/tel-t4")" '{}'
 
+# ----------------------------------------------------------- gate.run (DND-1530)
+# test-slot writes one gate.run after its command exits when that command is
+# the repo's declared gate (ai/lib/integration-receipt.sh IR_DECLARED_GATES,
+# the first that is a blob on HEAD) and that gate is not ai/bin/harness-gate,
+# which writes harness_gate.run itself. Every repo is a temp fixture with a
+# FAKE gate (it prints its argv and exits FAKE_GATE_EXIT); never a real gate.
+gate_events() { cat "$1"/*.jsonl 2>/dev/null | jq -c 'select(.event == "gate.run")'; }
+
+# gate_repo DIR TRACKED... — a git repo on a synthetic ticket branch whose
+# HEAD commits each TRACKED path as an executable fake gate.
+gate_repo() {
+  local d=$1 g
+  shift
+  git init -q -b dnd-9999-gate-fixture "$d" || return 1
+  for g in "$@"; do
+    mkdir -p "$d/$(dirname "$g")"
+    printf '#!/bin/sh\necho "gate-out $*"\nexit "${FAKE_GATE_EXIT:-0}"\n' >"$d/$g"
+    chmod +x "$d/$g"
+  done
+  : >"$d/README"
+  git -C "$d" add -A &&
+    git -C "$d" -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false \
+      commit -q -m fixture
+}
+gate_repo "$W/gA" bin/prep-commit.sh
+gate_repo "$W/gH" ai/bin/harness-gate
+gate_repo "$W/gB" bin/prep-commit.sh ai/bin/harness-gate
+gate_repo "$W/gU"
+mkdir -p "$W/gU/bin" && cp "$W/gA/bin/prep-commit.sh" "$W/gU/bin/prep-commit.sh"
+mkdir -p "$W/elsewhere/bin" && cp "$W/gA/bin/prep-commit.sh" "$W/elsewhere/bin/prep-commit.sh"
+HEAD_GA=$(git -C "$W/gA" rev-parse HEAD)
+
+# G1: the declared gate behind wrappers, failing: rc and stdout are the
+# gate's; one gate.run with gate = the declared path (never argv), ok false,
+# exit 5, a slot wait and a duration; head and unit from the caller's tree;
+# no write failure; the queue wait is still its own event.
+newpool pG1 2
+(cd "$W/gA" && FAKE_GATE_EXIT=5 ATHENA_TELEMETRY_DIR="$W/tel-g1" "$BIN" -- timeout 60 bin/prep-commit.sh --flag secret-arg) \
+  >"$W/G1.out" 2>"$W/G1.err"
+check G1-rc eq "$?" 5
+check G1-stdout eq "$(cat "$W/G1.out")" "gate-out --flag secret-arg"
+check G1-one-event eq "$(gate_events "$W/tel-g1" | wc -l)" 1
+check G1-attrs eq "$(gate_events "$W/tel-g1" | jq -c '[.attrs.gate, .attrs.ok, .attrs.exit]')" '["bin/prep-commit.sh",false,5]'
+check G1-slot-wait eq "$(gate_events "$W/tel-g1" | jq '(.attrs.slot_wait_s | type) == "number" and .attrs.slot_wait_s >= 0')" true
+check G1-duration eq "$(gate_events "$W/tel-g1" | jq '(.duration_s | type) == "number" and .duration_s >= 0')" true
+check G1-head eq "$(gate_events "$W/tel-g1" | jq -r '.head')" "$HEAD_GA"
+check G1-unit eq "$(gate_events "$W/tel-g1" | jq -r '.unit')" "DND-9999"
+check G1-no-argv eval '! grep -q secret-arg "$W/tel-g1"/*.jsonl'
+check G1-no-drops eq "$(tel_drops "$W/tel-g1")" '{}'
+check G1-wait-too eq "$(tel_events "$W/tel-g1" | wc -l)" 1
+
+# G2: through an interpreter, by ./ path, passing: ok true, exit 0.
+newpool pG2 2
+(cd "$W/gA" && ATHENA_TELEMETRY_DIR="$W/tel-g2" "$BIN" -- bash ./bin/prep-commit.sh) >/dev/null 2>"$W/G2.err"
+check G2-rc eq "$?" 0
+check G2-attrs eq "$(gate_events "$W/tel-g2" | jq -c '[.attrs.gate, .attrs.ok, .attrs.exit]')" '["bin/prep-commit.sh",true,0]'
+
+# G3: harness-gate writes its own event, so test-slot writes no gate.run for
+# it: neither where it is the declared gate (gH) nor where it is not (gB).
+newpool pG3 2
+(cd "$W/gH" && ATHENA_TELEMETRY_DIR="$W/tel-g3" "$BIN" --weight 1 -- ai/bin/harness-gate) >/dev/null 2>"$W/G3.err"
+check G3-rc eq "$?" 0
+(cd "$W/gB" && ATHENA_TELEMETRY_DIR="$W/tel-g3" "$BIN" --weight 1 -- ai/bin/harness-gate) >/dev/null 2>>"$W/G3.err"
+check G3-rc-b eq "$?" 0
+check G3-none eq "$(gate_events "$W/tel-g3" | wc -l)" 0
+check G3-ran eq "$(tel_events "$W/tel-g3" | wc -l)" 2
+
+# G4: no gate.run for a command that is not the declared gate: an undeclared
+# command, the same script outside the tree, a gate on disk but not on HEAD.
+newpool pG4 2
+(cd "$W/gA" && ATHENA_TELEMETRY_DIR="$W/tel-g4" "$BIN" -- sh -c 'exit 0') >/dev/null 2>"$W/G4.err"
+check G4-rc-undeclared eq "$?" 0
+(cd "$W/gA" && ATHENA_TELEMETRY_DIR="$W/tel-g4" "$BIN" -- "$W/elsewhere/bin/prep-commit.sh") >/dev/null 2>>"$W/G4.err"
+check G4-rc-elsewhere eq "$?" 0
+(cd "$W/gU" && ATHENA_TELEMETRY_DIR="$W/tel-g4" "$BIN" -- bin/prep-commit.sh) >/dev/null 2>>"$W/G4.err"
+check G4-rc-untracked eq "$?" 0
+(cd "$W/elsewhere" && ATHENA_TELEMETRY_DIR="$W/tel-g4" "$BIN" -- bin/prep-commit.sh) >/dev/null 2>>"$W/G4.err"
+check G4-rc-no-repo eq "$?" 0
+check G4-none eq "$(gate_events "$W/tel-g4" | wc -l)" 0
+check G4-ran eq "$(tel_events "$W/tel-g4" | wc -l)" 4
+
+# G5: a nested run inside a held slot runs the gate directly and still
+# writes gate.run, with slot_wait_s 0: it waited for nothing itself.
+newpool pG5 2
+ATHENA_TELEMETRY_DIR="$W/tel-g5" "$BIN" -- sh -c 'cd "$1" && "$2" -- bin/prep-commit.sh' _ "$W/gA" "$BIN" \
+  >/dev/null 2>"$W/G5.err"
+check G5-rc eq "$?" 0
+check G5-one-event eq "$(gate_events "$W/tel-g5" | wc -l)" 1
+check G5-nested-wait eq "$(gate_events "$W/tel-g5" | jq -c '[(.attrs.slot_wait_s == 0), .attrs.ok]')" '[true,true]'
+check G5-reentrant eq "$(event_count reentrant)" 1
+
+# G6: fail-open. An unwritable store changes neither the gate's exit code
+# nor its stdout, and stderr differs by at most the writer's one line.
+newpool pG6 2
+mkdir -p "$W/ro-g6"; chmod 500 "$W/ro-g6"
+(cd "$W/gA" && FAKE_GATE_EXIT=4 ATHENA_TELEMETRY_DIR="$W/ro-g6/store" "$BIN" -- bin/prep-commit.sh x) >"$W/G6u.out" 2>"$W/G6u.err"
+rc_u=$?
+(cd "$W/gA" && FAKE_GATE_EXIT=4 ATHENA_TELEMETRY_DIR="$W/tel-g6" "$BIN" -- bin/prep-commit.sh x) >"$W/G6w.out" 2>"$W/G6w.err"
+rc_w=$?
+chmod 700 "$W/ro-g6"
+check G6-rc eq "$rc_u/$rc_w" "4/4"
+check G6-stdout eq "$(cat "$W/G6u.out")" "$(cat "$W/G6w.out")"
+check G6-stderr eq "$(grep -v '^athena-telemetry:' "$W/G6u.err")" "$(cat "$W/G6w.err")"
+check G6-at-most-two-lines eval '[ "$(grep -c "^athena-telemetry:" "$W/G6u.err")" -le 2 ]'
+check G6-not-written absent "$W/ro-g6/store"
+check G6-written eq "$(gate_events "$W/tel-g6" | wc -l)" 1
+
+# G7: a gate whose wait times out never ran, so it writes no gate.run.
+newpool pG7 1
+hold AG7 holder-AG7
+cd "$W/gA" || exit 1
+ATHENA_TELEMETRY_DIR="$W/tel-g7" bg BG7 --label BG7 --wait-timeout 1 -- bin/prep-commit.sh
+cd - >/dev/null || exit 1
+reap BG7; check G7-rc eq "$RC" 75
+check G7-none eq "$(gate_events "$W/tel-g7" | wc -l)" 0
+check G7-wait-timeout eq "$(tel_events "$W/tel-g7" | jq -r '.attrs.outcome')" timeout
+release AG7; reap AG7; check G7-A-rc eq "$RC" 0
+
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then
   echo "test-slot: self-test OK ($PASS checks)"

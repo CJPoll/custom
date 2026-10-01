@@ -24,7 +24,7 @@ def row(at, sha, verify, implement)
     "landed_commit" => sha, "landed_at" => at.utc.iso8601, "landed_via" => "push", "start" => nil,
     "lead_s" => nil, "code_s" => nil, "tail_s" => 0,
     "phases" => {
-      "implement" => { "s" => implement, "na_reason" => implement ? nil : "no harness_gate.run for DND-9000" },
+      "implement" => { "s" => implement, "na_reason" => implement ? nil : "no harness_gate.run or gate.run for DND-9000" },
       "verify" => { "s" => verify, "na_reason" => verify ? nil : "no critic PASS" },
       "queue" => { "s" => nil, "na_reason" => "no critic PASS" },
       "integrate" => { "s" => nil, "na_reason" => "no integration_gate.run" },

@@ -167,7 +167,7 @@ eq "the unticketed push is ingested with no ticket" "$(row_field "${HEAD_BARE}" 
 eq "the cursor advances to scanned_through" "$(cat "${STATE}/cursor.custom.txt")" "2026-10-01T07:00:00Z"
 # With no emitter events yet, real phases read n/a, never 0 (build plan step 6).
 eq "implement is null before the gate emitter lands" "$(row_field "${HEAD_PUSH}" phases.implement.s)" "null"
-eq "the reason names the unit" "$(row_field "${HEAD_PUSH}" phases.implement.na_reason)" "no harness_gate.run for DND-9001"
+eq "the reason names the unit" "$(row_field "${HEAD_PUSH}" phases.implement.na_reason)" "no harness_gate.run or gate.run for DND-9001"
 eq "merge is measured from the integration receipt" "$(row_field "${HEAD_PUSH}" phases.merge.s)" "1800"
 eq "gate_runs is null, not 0" "$(row_field "${HEAD_PUSH}" counters.gate_runs)" "null"
 eq "the unticketed row's verify reads unticketed" "$(row_field "${HEAD_BARE}" phases.verify.na_reason)" "unticketed landing: no unit to join gate runs on"

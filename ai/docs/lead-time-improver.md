@@ -104,6 +104,12 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    reason. An anchor out of order (a gate before the dispatch stamp, from a
    re-dispatch) makes the phase `invalid` with a reason, never negative.
 
+   **Later (2026-10-01, DND-1530):** the `implement` end is the first
+   `harness_gate.run` **or `gate.run`** for the unit, and the gate counters
+   read both. `gate.run` is written by test-slot for a declared gate other
+   than harness-gate (gen_saas's `bin/prep-commit.sh`), which emitted
+   nothing, so a gen_saas landing's `implement` and `verify` read n/a.
+
    **Later (2026-10-01, DND-1477):** as built, `verify` ends at the last clean
    critic PASS before the `integration_gate.run` start (before its end when
    only the receipt is known), not "before landing". A `--with-critic` PASS

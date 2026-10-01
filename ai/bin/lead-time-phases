@@ -57,7 +57,7 @@ HELP = <<~TXT
   Split every landing on a repo's main into phases and summarize them
   (DND-1477; ai/docs/lead-time-improver.md, Decisions 3-6).
 
-    implement  dispatch stamp -> first harness_gate.run for the ticket
+    implement  dispatch stamp -> first harness_gate.run or gate.run for the ticket
     verify     first gate run -> last critic PASS before integration-gate
     queue      that PASS -> the integration_gate.run start
     integrate  the integration_gate.run's duration
