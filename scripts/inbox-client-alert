@@ -39,11 +39,14 @@
 #   ATHENA_INBOX_ROOT              the inbox root send-mail delivers under
 #   ATHENA_INBOX_CLIENT_CONFIG     client config, read ONLY for the token guard
 #   ATHENA_INBOX_ALERT_TIMEOUT     seconds before the send is abandoned (20)
+#   INBOX_CLIENT_ALERT_SEND_MAIL   the send-mail to use (self-test seam; default
+#                                  this checkout's athena:inbox send-mail)
 #
 # Output: `sent\t<message filename>` on success.
 # Exit codes: 0 sent (or dry-run printed) · 1 usage · 2 the capture is not one
 #             this tool will describe (outside the dump dir, malformed, or it
-#             would carry the token) · 4 the send failed or timed out
+#             would carry the token) · 4 the send failed, timed out, or was
+#             not confirmed (send-mail exited 0 with no delivered line, DND-1513)
 
 set -uo pipefail
 export LC_ALL="${LC_ALL:-C.UTF-8}"
@@ -53,7 +56,7 @@ usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd -- "${HERE}/.." && pwd -P)"
 LIB="${REPO}/ai/skills/athena:inbox/lib"
-SEND_MAIL="${REPO}/ai/skills/athena:inbox/bin/send-mail"
+SEND_MAIL="${INBOX_CLIENT_ALERT_SEND_MAIL:-${REPO}/ai/skills/athena:inbox/bin/send-mail}"
 CHANNEL="harness-alerts-detector"
 PEER="custom"
 
@@ -156,13 +159,19 @@ printf '%s\n' "${BODY}" >"${BODY_FILE}"
 
 # send-mail resolves the channel from the registry entry of its cwd's repo, so
 # it runs from this checkout. Bounded: a stuck send is abandoned, never waited on.
-OUT="$(cd -- "${REPO}" && timeout "${TIMEOUT}" "${SEND_MAIL}" --local "${CHANNEL}" "wedge-${SIG:0:8}" \
-        --to "${PEER}" --re "${REAL_CAP}" --body-file "${BODY_FILE}" 2>&1)"; RC=$?
+# A send is confirmed only by send-mail's delivered line: exit 0 without it is
+# a FAILED send, never `sent ?` (DND-1513, ai/lib/harness-alert-send.sh).
+# shellcheck source=ai/lib/harness-alert-send.sh
+. "${REPO}/ai/lib/harness-alert-send.sh" || { echo "error: cannot load ${REPO}/ai/lib/harness-alert-send.sh" >&2; echo "  Fix: restore ai/lib/harness-alert-send.sh with git. The capture is intact; send it later with inbox-client-alert ${REAL_CAP}." >&2; exit 4; }
+ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/dnd334-alert-err.XXXXXX")" || { echo "error: cannot create a temporary error file" >&2; echo "  Fix: check \$TMPDIR is writable, then re-run inbox-client-alert ${REAL_CAP}." >&2; exit 4; }
+trap 'rm -f -- "${BODY_FILE}" "${ERR_FILE}"' EXIT
+RC=0
+NAME="$(harness_alert_deliver "${SEND_MAIL}" "${REPO}" "${TIMEOUT}" 1 --local "${CHANNEL}" "wedge-${SIG:0:8}" \
+        --to "${PEER}" --re "${REAL_CAP}" --body-file "${BODY_FILE}" 2>"${ERR_FILE}")" || RC=$?
 if [ "${RC}" -ne 0 ]; then
-  echo "error: the harness-alerts send FAILED (exit ${RC}$([ "${RC}" -eq 124 ] && echo ', timed out')): $(printf '%s' "${OUT}" | head -n 3 | tr '\n' ' ')" >&2
+  echo "error: the harness-alerts send FAILED (exit ${RC}$([ "${RC}" -eq 124 ] && echo ', timed out')): $(head -n 3 "${ERR_FILE}" | tr '\n' ' ')" >&2
   echo "  Fix: run inbox-doctor from ${REPO} (is the custom registry entry installed with the harness-alerts channels? scripts/setup-inbox-registry --install), then re-send by hand: scripts/inbox-client-alert ${REAL_CAP}. The capture is intact." >&2
   exit 4
 fi
-NAME="$(printf '%s\n' "${OUT}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
-printf 'sent\t%s\n' "${NAME:-?}"
+printf 'sent\t%s\n' "${NAME}"
 exit 0

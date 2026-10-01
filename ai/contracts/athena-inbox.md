@@ -2843,6 +2843,13 @@ also reports:
   `<git common dir>/main-health/verdicts/`, which is the message's authority;
   it names no capture, so retention ignores it. Its reader is
   `athena:inbox-attend` → *The post-landing main check: a red main*.
+  Every program that writes this side counts a message as sent only when
+  `send-mail` exits 0 AND prints its `athena:inbox: delivered <name>` line;
+  exit 0 without that line is a FAILED send (DND-1513). A ticking sender
+  keeps its episode unalerted, so its next tick retries; the clustering
+  drain request is recorded FAILED and the next run sends a fresh one;
+  `scripts/inbox-client-alert` exits 4 with its Fix:. The one implementation is
+  `ai/lib/harness-alert-send.sh`, which every such sender sources.
 - **`watchdog`** — the watchdog's three tools (the liveness library,
   `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
   Missing any, the supervisor keeps the client running, but a wedge is then

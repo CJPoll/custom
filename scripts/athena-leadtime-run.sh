@@ -300,26 +300,16 @@ record_failure() {
 # tick and ends when its counter clears. The record, never the message, is the
 # authority the reader verifies.
 
-harness_alert_send() { # <record> <slug> <body-file>; prints the delivered name
-  local record="$1" slug="$2" body="$3" repo send_mail out rc=0 attempt=0
+# Prints the delivered name. Exit 0 with no delivered line is NOT sent (exit 5):
+# the episode stays unalerted and the next tick retries (DND-1513,
+# ai/lib/harness-alert-send.sh).
+harness_alert_send() { # <record> <slug> <body-file>
+  local record="$1" slug="$2" body="$3" repo
   repo="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-  send_mail="${LEADTIME_SEND_MAIL:-${repo}/ai/skills/athena:inbox/bin/send-mail}"
-  [ -x "${send_mail}" ] || { echo "send-mail is missing: ${send_mail}" >&2; return 4; }
-  while :; do
-    attempt=$(( attempt + 1 )); rc=0
-    out="$(cd -- "${repo}" && timeout 20 "${send_mail}" --local harness-alerts-detector "${slug}" \
-            --to custom --re "${record}" --body-file "${body}" 2>&1)" || rc=$?
-    if [ "${rc}" -eq 0 ] || [ "${attempt}" -ge 3 ] || ! grep -q 'already sending on' <<<"${out}"; then
-      break
-    fi
-    sleep 2
-  done
-  if [ "${rc}" -ne 0 ]; then printf '%s\n' "${out}" | head -n 3 >&2; return "${rc}"; fi
-  # A delivery whose name send-mail did not print is still a delivery: never an
-  # empty name, which the episode state would read as "not yet sent".
-  local name
-  name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
-  printf '%s\n' "${name:-(delivered; name not reported)}"
+  # shellcheck source=ai/lib/harness-alert-send.sh
+  . "${repo}/ai/lib/harness-alert-send.sh" || { echo "cannot load ${repo}/ai/lib/harness-alert-send.sh" >&2; return 4; }
+  harness_alert_deliver "${LEADTIME_SEND_MAIL:-${repo}/ai/skills/athena:inbox/bin/send-mail}" "${repo}" 20 3 \
+    --local harness-alerts-detector "${slug}" --to custom --re "${record}" --body-file "${body}"
 }
 
 # episode_load <state> <counter> — sets ep_id, ep_first, ep_alerted. A new
@@ -327,6 +317,9 @@ harness_alert_send() { # <record> <slug> <body-file>; prints the delivered name
 episode_load() {
   local mt
   ep_id="$(state_get "$1" episode)"; ep_first="$(state_get "$1" first)"; ep_alerted="$(state_get "$1" alerted)"
+  # An older runner stored "exit 0, no delivered line" as sent under this
+  # placeholder. It was never confirmed, so the episode retries (DND-1513).
+  [ "${ep_alerted}" != '(delivered; name not reported)' ] || ep_alerted=""
   if [ -z "${ep_id}" ]; then
     ep_id="${ts}"; ep_alerted=""; ep_first="unknown"
     if mt="$(stat -c %Y -- "$2" 2>/dev/null)"; then ep_first="$(date -u -d "@${mt}" +%Y-%m-%dT%H:%M:%SZ)"; fi

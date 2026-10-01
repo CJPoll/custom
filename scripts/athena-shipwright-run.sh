@@ -65,6 +65,9 @@
 #   SHIPWRIGHT_MAIN_HEALTH    the main-health to run each tick (self-test seam)
 #   SHIPWRIGHT_SLACK_ROOTS    the slack-roots-tick to run each tick (self-test
 #                             seam; DND-1502)
+#   SHIPWRIGHT_SEND_MAIL      the send-mail for the wedge and stale-dirt alerts
+#                             (self-test seam; DND-1513; default this checkout's
+#                             athena:inbox send-mail)
 #
 # Exported to the session:
 #   SHIPWRIGHT_STATE_DIR      the ONE canonical state directory (cursor.txt,
@@ -553,37 +556,27 @@ record_note() {
 }
 
 # harness_alert_send <record> <slug> <body-file> — deliver one message, re:
-# <record>. Prints the delivered message name. Non-zero (with send-mail's words
-# on stderr) when the send failed.
+# <record>. Prints the delivered message name. Non-zero (with the reason on
+# stderr) when the send failed OR was not confirmed: exit 0 with no delivered
+# line is NOT sent (DND-1513, ai/lib/harness-alert-send.sh), so the episode
+# stays unalerted and the next tick retries.
+#
+# This channel's detector side has a second writer, the inbox-client watchdog,
+# under the same identity. send-mail serialises the two with the channel's
+# .sender.lock and REFUSES (never collides) when the other holds it, so a
+# refusal is retried briefly; any other failure is not. Each refusal is noted
+# in the record, so a reader can see the retry happened.
 harness_alert_send() {
-  local record="$1" slug="$2" body="$3" repo send_mail out rc name attempt=0
+  local record="$1" slug="$2" body="$3" repo HARNESS_ALERT_ON_BUSY=harness_alert_busy_note
   repo="$(cd -- "${__wrapper_dir}/.." && pwd -P)"
-  send_mail="${repo}/ai/skills/athena:inbox/bin/send-mail"
-  if [ ! -x "${send_mail}" ]; then
-    echo "send-mail is missing: ${send_mail}" >&2
-    return 4
-  fi
-  # This channel's detector side has a second writer, the inbox-client
-  # watchdog, under the same identity. send-mail serialises the two with the
-  # channel's .sender.lock and REFUSES (never collides) when the other holds
-  # it, so a refusal is retried briefly here; any other failure is not. Each
-  # refusal is noted in the record, so a reader can see the retry happened.
-  while :; do
-    attempt=$(( attempt + 1 ))
-    out="$(cd -- "${repo}" && timeout 20 "${send_mail}" --local harness-alerts-detector "${slug}" \
-            --to custom --re "${record}" --body-file "${body}" 2>&1)"; rc=$?
-    if [ "${rc}" -eq 0 ] || [ "${attempt}" -ge 3 ] || ! grep -q 'already sending on' <<<"${out}"; then
-      break
-    fi
-    record_note "${record}" "alert: sender lock busy (attempt ${attempt}/3); retrying"
-    sleep 2
-  done
-  if [ "${rc}" -ne 0 ]; then
-    printf '%s\n' "${out}" | head -n 3 >&2
-    return "${rc}"
-  fi
-  name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
-  printf '%s\n' "${name:-?}"
+  # shellcheck source=ai/lib/harness-alert-send.sh
+  . "${repo}/ai/lib/harness-alert-send.sh" || { echo "cannot load ${repo}/ai/lib/harness-alert-send.sh" >&2; return 4; }
+  __alert_record="${record}"
+  harness_alert_deliver "${SHIPWRIGHT_SEND_MAIL:-${repo}/ai/skills/athena:inbox/bin/send-mail}" "${repo}" 20 3 \
+    --local harness-alerts-detector "${slug}" --to custom --re "${record}" --body-file "${body}"
+}
+harness_alert_busy_note() { # <attempt>/<attempts>
+  record_note "${__alert_record}" "alert: sender lock busy (attempt $1); retrying"
 }
 
 # --- the wedge record and its one alert per episode (DND-834) -----------------
@@ -645,6 +638,9 @@ wedge_track() {
   episode="$(sd_state_get "${WEDGE_STATE}" episode)"
   first="$(sd_state_get "${WEDGE_STATE}" first_wedged)"
   alerted="$(sd_state_get "${WEDGE_STATE}" alerted)"
+  # An older runner stored "exit 0, no delivered line" as sent under `?`. It
+  # was never confirmed, so it is retried (DND-1513).
+  [ "${alerted}" != '?' ] || alerted=""
   if [ -z "${episode}" ]; then
     episode="${tick}"; alerted=""
     first="unknown"
@@ -889,6 +885,9 @@ stale_dirt_track() {
   prev_streak="$(sd_state_get "${STALE_DIRT_STATE}" streak)"
   first="$(sd_state_get "${STALE_DIRT_STATE}" first_seen)"
   alerted="$(sd_state_get "${STALE_DIRT_STATE}" alerted)"
+  # An older runner stored "exit 0, no delivered line" as sent under `?`. It
+  # was never confirmed, so it is retried (DND-1513).
+  [ "${alerted}" != '?' ] || alerted=""
   if [ "${prev_sig}" != "${sig}" ] || [ -z "${first}" ]; then first="${tick}"; alerted=""; fi
   streak="$(sd_next_streak "${prev_sig}" "${prev_streak}" "${sig}" "${stale}")"
 

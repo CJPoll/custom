@@ -92,6 +92,10 @@ die() { # <exit> <message> <fix>
   exit "$1"
 }
 
+# shellcheck source=../lib/harness-alert-send.sh
+. "${AI_DIR}/lib/harness-alert-send.sh" \
+  || die 2 "cannot load ${AI_DIR}/lib/harness-alert-send.sh" "run slack-roots-tick from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
+
 STATE=""; TICK=""; TIMEOUT=600; ALERT_AFTER=3
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -191,8 +195,9 @@ if [ "${n}" -ge "${ALERT_AFTER}" ] && [ -z "${episode}" ]; then
 fi
 note "failed: exit=${rc} consecutive_failures=${n} threshold=${ALERT_AFTER} episode=${episode:-none} why=${why}"
 
-send_alert() { # prints the delivered message name; non-zero on a failed send
-  local body out src name sm="${SLACK_ROOTS_SEND_MAIL:-${AI_DIR}/skills/athena:inbox/bin/send-mail}"
+send_alert() { # prints the delivered name; non-zero on a failed or unconfirmed send (DND-1513)
+  local body src=0 sm="${SLACK_ROOTS_SEND_MAIL:-${AI_DIR}/skills/athena:inbox/bin/send-mail}"
+  # Checked before the body is written; the helper checks it again.
   [ -x "${sm}" ] || { echo "send-mail is missing: ${sm}" >&2; return 4; }
   body="${STATE}/.alert-body.$$"
   {
@@ -206,14 +211,12 @@ send_alert() { # prints the delivered message name; non-zero on a failed send
     printf '\nWhile it fails, Slack roots are not copied into the slack_routing snapshot, and a root still only in walt_ui-slack.jsonl.1 is lost at the next inbox rotation.\n'
     printf 'Fix: read the record (its judgment-label output carries the Fix:), fix the cause, then run ~/dev/custom/ai/bin/judgment-label --propose by hand. The next healthy tick ends the episode.\n'
   } > "${body}" || { rm -f "${body}"; return 4; }
-  out="$(cd -- "${TOOL_REPO}" && timeout 20 "${sm}" --local harness-alerts-detector slack-roots-failing \
-          --to custom --re "${REC}" --body-file "${body}" 2>&1 9>&-)"; src=$?
+  # No delivered line is not a delivery: the helper reports it failed (5), so
+  # the next tick retries.
+  harness_alert_deliver "${sm}" "${TOOL_REPO}" 20 3 --local harness-alerts-detector slack-roots-failing \
+    --to custom --re "${REC}" --body-file "${body}" 9>&- || src=$?
   rm -f "${body}"
-  if [ "${src}" -ne 0 ]; then printf '%s\n' "${out}" | head -n 3 >&2; return "${src}"; fi
-  name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
-  # No delivered line is not a delivery: report it failed, so the next tick retries.
-  [ -n "${name}" ] || { echo "send-mail exited 0 but printed no 'athena:inbox: delivered' line" >&2; return 5; }
-  printf '%s\n' "${name}"
+  return "${src}"
 }
 
 if [ -z "${episode}" ]; then

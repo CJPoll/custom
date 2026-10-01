@@ -55,6 +55,8 @@ cat > "${T}/send-mail" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${MH_T}/mail.log"
 [ "${MH_MAIL_FAIL:-}" = 1 ] && { echo "send-mail: simulated failure" >&2; exit 1; }
+# MH_MAIL_QUIET=1 plays a send that exits 0 but prints no delivered line (DND-1513).
+[ "${MH_MAIL_QUIET:-}" = 1 ] && { echo "athena:inbox: path: local -- stub"; exit 0; }
 while [ $# -gt 0 ]; do
   [ "$1" = "--body-file" ] && cp "$2" "${MH_T}/mail-body"
   shift
@@ -213,6 +215,24 @@ run check --repo "${W}"
 [ "${RC}" = 1 ] && [ "$(mail_n)" = "$((M + 1))" ] && [ "$(kv "${STORE}/red" alert)" = 20261001T000000Z-stub-main-red.md ] \
   && ok "19. the next check retries the alert and records it" \
   || bad "19. alert retry" "rc=${RC} mails=$(mail_n) red=$(cat "${STORE}/red")"
+
+echo "--- exit 0 with no delivered line is not a send (DND-1513) ---"
+rm -f "${STORE}/red"
+M="$(mail_n)"
+MH_MAIL_QUIET=1 run check --repo "${W}"
+[ "${RC}" = 1 ] && [ "$(mail_n)" = "$((M + 1))" ] && [ "$(kv "${STORE}/red" alert)" = FAILED ] \
+  && [[ "${ERR}" == *"no 'athena:inbox: delivered' line"* ]] && [[ "${ERR}" == *"could NOT be sent"* ]] \
+  && ok "19a. send-mail exits 0 with no delivered line: alert=FAILED (never '?'), loud, still exit 1" \
+  || bad "19a. quiet send" "rc=${RC} red=$(cat "${STORE}/red" 2>/dev/null) err='${ERR}'"
+run check --repo "${W}"
+[ "${RC}" = 1 ] && [ "$(mail_n)" = "$((M + 2))" ] && [ "$(kv "${STORE}/red" alert)" = 20261001T000000Z-stub-main-red.md ] \
+  && ok "19b. the next check retries the unconfirmed alert and records the delivered name" \
+  || bad "19b. quiet retry" "rc=${RC} mails=$(mail_n) red=$(cat "${STORE}/red" 2>/dev/null)"
+sed -i 's/^alert=.*/alert=?/' "${STORE}/red"
+run check --repo "${W}"
+[ "${RC}" = 1 ] && [ "$(mail_n)" = "$((M + 3))" ] && [ "$(kv "${STORE}/red" alert)" = 20261001T000000Z-stub-main-red.md ] \
+  && ok "19c. a marker an older main-health wrote as alert=? is unconfirmed: the next check retries it" \
+  || bad "19c. legacy alert=?" "rc=${RC} mails=$(mail_n) red=$(cat "${STORE}/red" 2>/dev/null)"
 
 echo "--- corpses, fetch failures, and repos it does not cover ---"
 git -C "${W}" worktree add -q --detach "${COMMON}/main-health-lanes/deadbeef-1" HEAD

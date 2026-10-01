@@ -254,8 +254,8 @@ if [ "$rc" = 69 ] && grep -q 'outcome=blocked exit=69' "$(newest "$c" run)" && [
 else
   bad "blocked drain" "rc=$rc calls=$(cat "$TMP/send-mail-calls" 2>&1)"
 fi
-# send-mail exits 0 but prints no delivered name: still a delivery, never an
-# empty name that the episode state would read as "not yet sent".
+# send-mail exits 0 but prints no delivered line: NOT a confirmed delivery
+# (DND-1513). The episode stays unalerted, so the next wedged tick retries.
 cat >"$TMP/quiet-send-mail" <<'EOF'
 #!/usr/bin/env bash
 echo x >>"$(dirname "$0")/quiet-calls"; exit 0
@@ -264,10 +264,20 @@ chmod +x "$TMP/quiet-send-mail"
 cq="$(new_case)"; mkdir -p "$(sd "$cq")"; echo 2 >"$(sd "$cq")/consecutive-failures"
 run_runner "$cq" CLUSTERING_SEND_MAIL="$TMP/quiet-send-mail" >/dev/null
 run_runner "$cq" CLUSTERING_SEND_MAIL="$TMP/quiet-send-mail" >/dev/null
-if [ "$(grep -c . "$TMP/quiet-calls")" = 1 ] && grep -q '^alert: already sent for this episode ((delivered; name not reported))' "$(newest "$cq" wedged)"; then
-  ok "a delivery with no reported name counts as sent: the episode does not alert twice"
+if [ "$(grep -c . "$TMP/quiet-calls")" = 2 ] && grep -qx 'alert: FAILED to send' "$(newest "$cq" wedged)" \
+   && grep -q "no 'athena:inbox: delivered' line" "$cq/runner.err" && [ -z "$(sed -n 's/^alerted=//p' "$(sd "$cq")/wedged")" ]; then
+  ok "exit 0 with no delivered line is not sent: recorded FAILED, never stored as alerted, retried next tick"
 else
-  bad "unnamed delivery" "calls=$(cat "$TMP/quiet-calls" 2>&1) rec=$(cat "$(newest "$cq" wedged)" 2>&1)"
+  bad "unnamed delivery" "calls=$(cat "$TMP/quiet-calls" 2>&1) rec=$(cat "$(newest "$cq" wedged)" 2>&1) state=$(cat "$(sd "$cq")/wedged" 2>&1)"
+fi
+# A state an older runner wrote with the unconfirmed placeholder is retried.
+sed -i 's/^alerted=.*/alerted=(delivered; name not reported)/' "$(sd "$cq")/wedged"
+rm -f "$TMP/send-mail-calls"; echo ok >"$TMP/send-mail-mode"
+run_runner "$cq" CLUSTERING_SEND_MAIL="$TMP/fake-send-mail" >/dev/null
+if [ "$(grep -c . "$TMP/send-mail-calls")" = 1 ] && grep -qx 'alert: harness-alerts 0001-fake-harness-lane-drain.md' "$(newest "$cq" wedged)"; then
+  ok "a stored '(delivered; name not reported)' is unconfirmed: the next wedged tick sends and records the name"
+else
+  bad "legacy placeholder" "calls=$(cat "$TMP/send-mail-calls" 2>&1) rec=$(cat "$(newest "$cq" wedged)" 2>&1)"
 fi
 # The reader has landed (DND-987), so the request is unconditional: the
 # runner no longer looks for a reader in the main checkout before sending.

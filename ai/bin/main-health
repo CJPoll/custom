@@ -93,6 +93,9 @@ die() { # <exit> <message> <fix>
 # shellcheck source=../lib/main-health.sh
 . "${AI_DIR}/lib/main-health.sh" \
   || die 2 "cannot load ${AI_DIR}/lib/main-health.sh" "run main-health from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
+# shellcheck source=../lib/harness-alert-send.sh
+. "${AI_DIR}/lib/harness-alert-send.sh" \
+  || die 2 "cannot load ${AI_DIR}/lib/harness-alert-send.sh" "run main-health from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
 
 CMD=""; REPO="."; RECHECK=0; WAIT=1800; SLOT_WAIT=3600
 while [ $# -gt 0 ]; do
@@ -193,9 +196,10 @@ write_kv() {
 }
 
 # send_alert : one harness-alerts message for the red episode. Prints the
-# delivered message name; non-zero when the send failed.
+# delivered message name; non-zero when the send failed or was not confirmed
+# (exit 0 with no delivered line is NOT sent, DND-1513: ai/lib/harness-alert-send.sh).
 send_alert() {
-  local body out rc name sm="${MAIN_HEALTH_SEND_MAIL:-${AI_DIR}/skills/athena:inbox/bin/send-mail}"
+  local body rc=0 sm="${MAIN_HEALTH_SEND_MAIL:-${AI_DIR}/skills/athena:inbox/bin/send-mail}"
   body="${STORE}/.alert-body.$$"
   {
     printf 'main-red: origin/main of %s is RED\n' "$(basename "$(dirname "${COMMON}")")"
@@ -208,13 +212,10 @@ send_alert() {
     printf 'Pushes to main are refused until a gated fix lands (stop the line).\n'
     printf 'Fix: read the log, land a fix gated by integration-gate --with-critic on a branch that contains %s, then run main-health check to clear the marker.\n' "${TIP}"
   } > "${body}" || { rm -f "${body}"; return 4; }
-  [ -x "${sm}" ] || { echo "send-mail is missing: ${sm}" >&2; rm -f "${body}"; return 4; }
-  out="$(cd -- "${TOOL_REPO}" && timeout 20 "${sm}" --local harness-alerts-detector main-red \
-          --to custom --re "${REC}" --body-file "${body}" 2>&1 8>&-)"; rc=$?
+  harness_alert_deliver "${sm}" "${TOOL_REPO}" 20 3 --local harness-alerts-detector main-red \
+    --to custom --re "${REC}" --body-file "${body}" 8>&- || rc=$?
   rm -f "${body}"
-  if [ "${rc}" -ne 0 ]; then printf '%s\n' "${out}" | head -n 3 >&2; return "${rc}"; fi
-  name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
-  printf '%s\n' "${name:-?}"
+  return "${rc}"
 }
 
 # apply <green|red> : keep the marker in step with the tip's verdict; exit.
@@ -236,10 +237,13 @@ apply() {
   else
     first="${TIP}"; since="$(now)"; alert=""
   fi
-  if [ -z "${alert}" ] || [ "${alert}" = FAILED ]; then
+  # Not yet confirmed sent: empty (a new episode), FAILED, or `?` (an older
+  # main-health recorded exit 0 with no delivered line that way, DND-1513).
+  if [ -z "${alert}" ] || [ "${alert}" = FAILED ] || [ "${alert}" = '?' ]; then
     if alert="$(send_alert)"; then :; else
       alert=FAILED
       echo "main-health: the main-red harness-alert could NOT be sent. Nothing was recorded as sent, so the next check retries." >&2
+      echo "Fix: run inbox-doctor from ${TOOL_REPO} (is the custom registry entry installed with its harness-alerts channels? scripts/setup-inbox-registry --install), then re-run main-health check --repo ${REPO}." >&2
     fi
   fi
   write_kv "$(mh_red_path "${COMMON}")" "schema=${MH_SCHEMA_RED}" "sha=${TIP}" "first_red=${first}" \

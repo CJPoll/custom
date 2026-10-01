@@ -454,6 +454,34 @@ else
   bad "real send-mail" "rc=$rc msg=$msg err=$(cat "$c/runner.err")"
 fi
 
+# send-mail exits 0 but prints no delivered line: NOT a confirmed delivery
+# (DND-1513). It is recorded FAILED, never stored as alerted, and the next
+# wedged tick retries.
+cat >"$TMP/quiet-send-mail" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FAKE_SEND_LOG:?}"; exit 0
+EOF
+chmod +x "$TMP/quiet-send-mail"
+c="$(new_case)"; echo fail >"$c/mode"
+run_runner "$c" LEADTIME_FAIL_ESCALATE=1 >/dev/null
+r1="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=1 LEADTIME_SEND_MAIL="$TMP/quiet-send-mail")"
+s1="$(sends "$c" leadtime-wedged)"; w1="$(newest "$c" wedged)"
+r2="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=1)"
+if [ "$r1$r2" = 7575 ] && [ "$s1" = 1 ] && grep -qx 'alert: FAILED to send' "$w1" \
+   && [ "$(sends "$c" leadtime-wedged)" = 2 ] && grep -q '^alert: harness-alerts msg-2.md' "$(newest "$c" wedged)"; then
+  ok "exit 0 with no delivered line is not sent: recorded FAILED, and the next wedged tick sends it"
+else
+  bad "quiet send" "rcs=$r1$r2 s1=$s1 w1=$(cat "$w1" 2>&1) sends=$(cat "$c/send.log" 2>&1) err=$(cat "$c/runner.err")"
+fi
+# A state an older runner wrote with the unconfirmed placeholder is retried.
+sed -i 's/^alerted=.*/alerted=(delivered; name not reported)/' "$(sd "$c")/wedged"
+r3="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=1)"
+if [ "$r3" = 75 ] && [ "$(sends "$c" leadtime-wedged)" = 3 ] && grep -q '^alert: harness-alerts msg-3.md' "$(newest "$c" wedged)"; then
+  ok "a stored '(delivered; name not reported)' is unconfirmed: the next wedged tick sends and records the name"
+else
+  bad "legacy placeholder" "rc=$r3 sends=$(cat "$c/send.log" 2>&1) state=$(cat "$(sd "$c")/wedged" 2>&1)"
+fi
+
 # ---------------------------------------------------------------------------------
 case_ '10. BLOCKED: never counted, ONE alert per episode, cleared by a session that reaches the model'
 

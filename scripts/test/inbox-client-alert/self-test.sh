@@ -209,6 +209,15 @@ if [ "${rc}" -eq 4 ] && grep -q 'harness-alerts send FAILED' <<<"${out}" && grep
 else bad "no registry entry -> exit 4 with a Fix:" "rc=${rc} ${out}"; fi
 if [ -z "$(find "${EMPTY_ROOT}" -name '*.md')" ]; then ok "nothing was delivered anywhere on the failed send"; else bad "nothing was delivered on the failed send" "$(find "${EMPTY_ROOT}" -name '*.md')"; fi
 
+# DND-1513: send-mail exits 0 but prints no delivered line. Not a confirmed
+# send: exit 4 with a Fix:, never `sent ?`.
+printf '#!/usr/bin/env bash\necho "athena:inbox: path: local -- quiet"; exit 0\n' >"${TMP}/quiet-send-mail"; chmod +x "${TMP}/quiet-send-mail"
+out="$(INBOX_CLIENT_ALERT_SEND_MAIL="${TMP}/quiet-send-mail" "${ALERT}" "${CAP}" 2>&1)"; rc=$?
+if [ "${rc}" -eq 4 ] && grep -q 'harness-alerts send FAILED' <<<"${out}" && grep -q "no 'athena:inbox: delivered' line" <<<"${out}" \
+   && grep -q '^  Fix: ' <<<"${out}" && ! grep -q '^sent' <<<"${out}"; then
+  ok "send-mail exits 0 with no delivered line -> exit 4, 'send FAILED', a Fix:, never 'sent ?'"
+else bad "unconfirmed send -> exit 4" "rc=${rc} ${out}"; fi
+
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi
 echo "VERDICT: FAIL (${FAIL} of $((PASS+FAIL)) cases failed)"

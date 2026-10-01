@@ -1966,6 +1966,29 @@ else
   bad "last dirt: line" "record=$(cat "$rec" 2>&1)"
 fi
 
+# DND-1513: a stale-dirt send that exits 0 with no delivered line is not sent:
+# recorded FAILED, never stored as alerted; and a state an older runner wrote
+# as alerted=? is retried on the next skip.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'x\n' >"$r/stray.log"; touch -h -d '2 days ago' "$r/stray.log"
+printf '#!/usr/bin/env bash\necho x >>"%s/quiet-calls"; exit 0\n' "$a" >"$a/quiet-send-mail"; chmod +x "$a/quiet-send-mail"
+run_runner "$r" SHIPWRIGHT_STALE_DIRT_ESCALATE=1 SHIPWRIGHT_SEND_MAIL="$a/quiet-send-mail" >/dev/null
+rec="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.skipped' | sort | tail -n1)"
+if [ "$(grep -c . "$a/quiet-calls" 2>/dev/null)" = 1 ] && grep -q '^alert: FAILED to send' "$rec" 2>/dev/null \
+   && [ -z "$(sed -n 's/^alerted=//p' "$(sd "$r")/stale-dirt")" ] && [ "$(alert_msgs | grep -c .)" = 0 ]; then
+  ok "a stale-dirt send that exits 0 with no delivered line is recorded FAILED and never stored as alerted"
+else
+  bad "quiet stale-dirt send" "record=$(cat "$rec" 2>&1) state=$(cat "$(sd "$r")/stale-dirt" 2>&1) err=$(cat "$a/runner.err")"
+fi
+sed -i 's/^alerted=.*/alerted=?/' "$(sd "$r")/stale-dirt"
+next_second; run_runner "$r" SHIPWRIGHT_STALE_DIRT_ESCALATE=1 >/dev/null
+if [ "$(alert_msgs | grep -c .)" = 1 ] && [ -n "$(sed -n 's/^alerted=//p' "$(sd "$r")/stale-dirt" | grep -v '^?$')" ]; then
+  ok "a stale-dirt state stored as alerted=? by an older runner is retried and records the delivered name"
+else
+  bad "legacy stale-dirt alerted=?" "alerts=$(alert_msgs | grep -c .) state=$(cat "$(sd "$r")/stale-dirt" 2>&1) err=$(cat "$a/runner.err")"
+fi
+
 # A listing git cannot produce must fail, not print an empty list the
 # attendant would relay as "no paths". Every git-reading function in the
 # classifier is held to that.
@@ -2146,6 +2169,37 @@ if [ "$rc" -eq 75 ] && [ "$(wedge_count)" = "1" ]; then
   ok "and the next tick of the episode sends it (a failed send is never recorded as sent)"
 else
   bad "retry after failed wedge send" "rc=$rc alerts=$(wedge_count) err=$(cat "$a/runner.err")"
+fi
+
+# DND-1513: send-mail exits 0 but prints no delivered line. That is not a
+# confirmed send: recorded FAILED, never stored as alerted (the old runner
+# stored `?`), and the next tick of the episode sends it.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+arm_wedge "$r" 2
+printf '#!/usr/bin/env bash\necho x >>"%s/quiet-calls"; exit 0\n' "$a" >"$a/quiet-send-mail"; chmod +x "$a/quiet-send-mail"
+rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2 SHIPWRIGHT_SEND_MAIL="$a/quiet-send-mail")"
+rec="$(newest_wedged "$r")"
+if [ "$rc" -eq 75 ] && [ "$(grep -c . "$a/quiet-calls" 2>/dev/null)" = 1 ] && grep -q '^alert: FAILED to send' "$rec" 2>/dev/null \
+   && grep -q "no 'athena:inbox: delivered' line" "$a/runner.err" && [ -z "$(sed -n 's/^alerted=//p' "$(sd "$r")/wedged")" ]; then
+  ok "a wedge alert send that exits 0 with no delivered line is recorded FAILED and never stored as alerted"
+else
+  bad "quiet wedge send" "rc=$rc record=$(cat "$rec" 2>&1) state=$(cat "$(sd "$r")/wedged" 2>&1) err=$(cat "$a/runner.err")"
+fi
+next_second; rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+if [ "$rc" -eq 75 ] && [ "$(wedge_count)" = "1" ]; then
+  ok "and the next tick of the episode sends it with the real send-mail"
+else
+  bad "retry after quiet wedge send" "rc=$rc alerts=$(wedge_count) err=$(cat "$a/runner.err")"
+fi
+# A state an older runner wrote as alerted=? is unconfirmed: retried.
+clear_alerts
+sed -i 's/^alerted=.*/alerted=?/' "$(sd "$r")/wedged"
+next_second; rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+if [ "$rc" -eq 75 ] && [ "$(wedge_count)" = "1" ]; then
+  ok "a wedge state stored as alerted=? by an older runner is retried"
+else
+  bad "legacy alerted=?" "rc=$rc alerts=$(wedge_count) state=$(cat "$(sd "$r")/wedged" 2>&1)"
 fi
 
 # A record that cannot be written is loud, sends nothing (the record is the
