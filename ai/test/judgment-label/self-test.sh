@@ -776,15 +776,18 @@ mkdir -p "${RROOT}/agent-mail/walt_ui/to-custom"
   line EvM1 im "${OWNER}" "1790100001.000100" "" "Gen_saas session (laptop): SECRET-MENTION-TEXT"
   line EvN1 im "${OWNER}" "1790100002.000200" "" "a plain question with no address"
   line EvA1 im "${OWNER}" "1790100003.000300" "" "ask the harness session: about it"
+  line EvC1 im "${OWNER}" "1790100004.000400" "" "Harness session, SECRET-MENTION-TEXT"
 } >"${RROOT}/walt_ui-slack.jsonl"
 run "${BIN}" --propose --inbox-root "${RROOT}" --labels "${RLABELS}"
 eq "propose on the rule fixture exits 0" "${RC}" "0"
 eq "a session-addressed root is rule_confirmed session_mention [DND-717]" \
   "$(jq -r 'select(.id=="EvM1") | .label + " " + .provenance + " " + .rule' "${RLABELS}")" "gen_saas rule_confirmed session_mention"
+eq "a comma-form root is rule_confirmed session_mention too (session-mention-v2) [DND-1537]" \
+  "$(jq -r 'select(.id=="EvC1") | .label + " " + .provenance + " " + .rule' "${RLABELS}")" "harness rule_confirmed session_mention"
 eq "without --rule-default a no-evidence root stays proposed" "$(jq -r 'select(.id=="EvN1") | .provenance' "${RLABELS}")" "proposed"
 eq "talking about a session is not addressing it" "$(jq -r 'select(.id=="EvA1") | .label + " " + .provenance' "${RLABELS}")" "walt_ui proposed"
 lacks "the labels file never carries the text" "$(cat "${RLABELS}")" "SECRET-MENTION"
-has "the report counts the mentions" "${OUT}" "session mentions (rule 2, session-mention-v2): 1 rule_confirmed"
+has "the report counts the mentions" "${OUT}" "session mentions (rule 2, session-mention-v2): 2 rule_confirmed"
 run "${BIN}" --propose --rule-default --inbox-root "${RROOT}" --labels "${RLABELS}"
 eq "--propose --rule-default exits 0" "${RC}" "0"
 eq "--rule-default labels the no-evidence roots walt_ui default_walt_ui [DND-717]" \
@@ -793,7 +796,7 @@ has "the report prints the rule_confirmed count" "${OUT}" "walt_ui rule_confirme
 run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${RLABELS}" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
 eq "judgment-eval joins rule_confirmed rows (exit 0)" "${RC}" "0"
 has "rule_confirmed default_walt_ui rows are usable eval cases [DND-717]" "${OUT}" "cases: 2 (walt_ui 2)"
-has "a session-mention root is not an eval case: the router never judges it [DND-717]" "${OUT}" "session-mention excluded: 1"
+has "a session-mention root is not an eval case: the router never judges it [DND-717]" "${OUT}" "session-mention excluded: 2"
 jq -c 'select(.id=="EvM1")' "${RLABELS}" >"${TMP}/mention-only.jsonl"
 run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${TMP}/mention-only.jsonl" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
 eq "a run whose every label is a session-mention root is refused (exit 1) [DND-717]" "${RC}" "1"

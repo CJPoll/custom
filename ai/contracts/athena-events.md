@@ -4552,9 +4552,9 @@ Names: `walt_ui` (`walt ui`, `waltui`) is walt_ui; `harness` and `custom` are
 harness; `gen_saas` (`gen saas`, `gensaas`) and `laptop` are gen_saas;
 `desktop` names none. Names joined by `/` must name one label, or there is no
 mention; so is a name the table lacks. A message that talks ABOUT a session
-("ask the harness session to …") is not one and is judged as before. Until
-DND-1535 deploys, the router reads `session-mention-v1`, which is the colon
-forms alone.
+("ask the harness session to …") is not one and is judged as before. The
+router has read v2 since DND-1535 deployed (gen_saas Post-Merge Deploy run
+36877991286, 2026-10-01).
 
 **Later (2026-10-01, DND-1539):** the grammar was `session-mention-v1`, an
 address "ending in a colon" in the tag form or the lead-in. Superseded by
@@ -4584,11 +4584,14 @@ vector `Walt UI session - no colon` stays no mention.
   a run (`ai/contracts/athena-judgments.md` → *Threshold provenance, n/a and
   the pinned model*). Both test suites carry the same vector list, as two
   copies kept in step by hand (nothing compares them); a change to either is
-  a new grammar version in both. The harness copy is still
-  `session-mention-v1`; its move to v2 is DND-1537. Until it lands, the two
-  disagree on the comma form alone: a v2 router routes such a root as a
-  mention, and the labeller does not label it `rule_confirmed`, so
-  `judgment-eval` does not leave it out of a run.
+  a new grammar version in both. Both copies are on `session-mention-v2`
+  and try the forms in the same order.
+
+  **Later (2026-10-01, DND-1537):** this bullet said the harness copy was
+  still `session-mention-v1` until DND-1537, so a comma-form root was routed
+  as a mention but not labelled `rule_confirmed`, and `judgment-eval` scored
+  it. Superseded: DND-1537 moved the labeller to v2, with gen_saas's 14 v2
+  vectors added to its parity list.
 
 **Topic routes.** A topic route maps `(slack_app, label)` to one AgentInstance,
 with an `enabled` flag. It is written by the owner of the app, holder of
