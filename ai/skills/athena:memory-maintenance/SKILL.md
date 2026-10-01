@@ -131,6 +131,11 @@ than rewriting a shared file.
 **How, losslessly:**
 - Change index LINES only. The linked note files hold the facts; never edit or
   delete one here.
+- Compact to ~20.5KB and ~180 lines, not just under the compact line. A
+  busy index grows ~0.5KB an hour. Measured on gen_saas: one compaction left
+  224 bytes of headroom and re-tripped within hours; four ran in 29h
+  (2026-09-30 09:00Z, 21:00Z; 2026-10-01 00:00Z, 14:00Z); 20846 -> 21365
+  bytes in the hour after the last.
 - Back up the whole file first (the shipwright keeps copies in
   `ai-artifacts/shipwright/memory-index-backups/`).
 - Merge a duplicate pair into ONE line that links BOTH files.
