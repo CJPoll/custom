@@ -1157,7 +1157,8 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
     starts `Jev path: `. Since DND-1470 the line ends with `candidate_refs`
     (the candidates' refs, so `cand_<i>` is `candidate_refs[i]`) and `call`
     (the answering call id, or null), after every older key; a line without
-    them was filed before, and every reader accepts both. The source is `jev` (an accepted judgment), `filer`
+    them was filed before, and every reader accepts both. The source is
+    `jev` (an accepted judgment), `filer`
     (the claim stands) or `rule` (introduced security, no call). A `filer`
     or `rule` value carries a reason: one from *The closed reason list*, or
     one that is not a fallback (`shadow`, `policy_guard`,

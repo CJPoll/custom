@@ -150,7 +150,8 @@ check("the unlinked ticket is named", out) { out.include?("  unlinked: DND-3") }
 check("a row with no DND id is counted, not dropped", out) { out.include?("7 rows edited (1 without a DND id)") }
 check("the ticket_blocking line counts every ticket once: none has a Jev path line here", out) do
   out.include?("ticket_blocking: provenance_unread 0, no_path_line 6, unparseable 0, filer_sourced 0, rule_sourced 0, path_unset 0, " \
-               "authored_override 0, edges_unread 0, unchanged 0, unlinked 0, no_call 0, no_candidate_named 0, edited 0")
+               "authored_override 0, edges_unread 0, blocking_no_edge 0, unchanged 0, unlinked 0, no_call 0, no_candidate_named 0, " \
+               "not_contradicted 0, edited 0")
 end
 sent = posts(log)
 check("the bodies carry call, correction, field_changed and harness; no identity key", sent.map { |r| r["body"] }.inspect) do
@@ -238,64 +239,86 @@ check("Notion unreachable is exit 3 COULD NOT READ NOTION with a Fix:, never an 
 end
 
 puts "== ticket_blocking: a Path or Blocks change away from a jev Jev path line (DND-1470)"
-# Candidates DND-101 (page 101, in the scan) and DND-102 (page 102, outside
-# the scan: its ref is read from its page).
-#   DND-21 jev Blocking DND-101, now Off: cand_0=does_not_block
-#   DND-22 jev Blocking DND-101, now Blocking onto DND-102: cand_0=does_not_block, cand_1=blocks
-#   DND-23 jev Blocking DND-101, now Promoted: authored_override, no record
-#   DND-24 jev Blocking DND-101 on a line with no call, now Off: unlinked
-#   DND-25 jev Blocking DND-101, still Blocking onto it: unchanged
+# Candidates, in cand_<i> order: DND-102 (cand_0, page 102, outside the
+# scan: its ref is read from its page) and DND-101 (cand_1, page 101, in the
+# scan). Jev blocked DND-101 (cand_1) unless a row says otherwise.
+#   DND-21 now Off: cand_1=does_not_block
+#   DND-22 now Blocking onto DND-102 (earlier): cand_0=blocks, cand_1=does_not_block
+#   DND-23 now Promoted: authored_override, no record
+#   DND-24 a line with no call, now Off: unlinked
+#   DND-25 still Blocking onto DND-101: unchanged
 #   DND-26 filer Off, now Blocking onto DND-101: filer_sourced
+#   DND-27 Jev blocked DND-102 (cand_0); now also onto DND-101 (later): not_contradicted
+#   DND-28 still onto DND-101, plus an edge onto DND-102 (earlier): cand_0=blocks
+#   DND-29 Blocking with no edge: blocking_no_edge
 #   DND-101 a candidate with no line: no_path_line
-P_CALL = { 21 => call(210), 22 => call(220), 23 => call(230), 25 => call(250) }.freeze
+REFS2 = %w[DND-102 DND-101].freeze
+P_CALL = { 21 => call(210), 22 => call(220), 23 => call(230), 25 => call(250), 27 => call(270), 28 => call(280), 29 => call(290) }.freeze
 def pline(n, value: "Blocking", blocks: "DND-101", source: "jev", linked: true)
   d = { "path" => { "value" => value, "blocks" => blocks, "source" => source, "reason" => source == "jev" ? nil : "mode_off", "mode" => "on",
                     "confidence" => source == "jev" ? 0.95 : nil }, "would" => nil, "candidates" => 2, "model" => "jev-1.13.0", "version" => "ticket-blocking-v1" }
-  d.merge!("candidate_refs" => %w[DND-101 DND-102], "call" => P_CALL[n]) if linked
+  d.merge!("candidate_refs" => REFS2, "call" => P_CALL[n]) if linked
   "Jev path: #{JSON.generate(d)}"
 end
-BROWS = [row(21, kind: "Bug", severity: "MEDIUM", security: "none", path: "Off"),
-         row(22, kind: "Bug", severity: "MEDIUM", security: "none", path: "Blocking", blocks: [page(102)]),
-         row(23, kind: "Bug", severity: "MEDIUM", security: "none", path: "Promoted", blocks: [page(101)]),
-         row(24, kind: "Bug", severity: "MEDIUM", security: "none", path: "Off"),
-         row(25, kind: "Bug", severity: "MEDIUM", security: "none", path: "Blocking", blocks: [page(101)]),
-         row(26, kind: "Bug", severity: "MEDIUM", security: "none", path: "Blocking", blocks: [page(101)]),
+def brow(n, path, blocks = []) = row(n, kind: "Bug", severity: "MEDIUM", security: "none", path: path, blocks: blocks)
+BROWS = [brow(21, "Off"), brow(22, "Blocking", [page(102)]), brow(23, "Promoted", [page(101)]), brow(24, "Off"),
+         brow(25, "Blocking", [page(101)]), brow(26, "Blocking", [page(101)]), brow(27, "Blocking", [page(102), page(101)]),
+         brow(28, "Blocking", [page(101), page(102)]), brow(29, "Blocking"),
          row(101, kind: "Feature", severity: nil, security: "none", path: "Critical")].freeze
 BBLOCKS = {
   page(21) => [[block(pline(21))]], page(22) => [[block("Body."), block(pline(22))]], page(23) => [[block(pline(23))]],
   page(24) => [[block(pline(24, linked: false))]], page(25) => [[block(pline(25))]],
-  page(26) => [[block(pline(26, value: "Off", blocks: nil, source: "filer"))]], page(101) => [[block("Requirement.")]]
+  page(26) => [[block(pline(26, value: "Off", blocks: nil, source: "filer"))]], page(27) => [[block(pline(27, blocks: "DND-102"))]],
+  page(28) => [[block(pline(28))]], page(29) => [[block(pline(29))]], page(101) => [[block("Requirement.")]]
 }.freeze
 blog, benv = fake("blocking", "rows" => BROWS, "blocks" => BBLOCKS, "pages" => { page(102) => 102 })
 rc, out, err = run(benv, "scan-tickets", "--since", SINCE)
 check("exit 0, complete, the ticket_blocking counts by reason [ticket 4]", "rc #{rc}; out: #{out}; err: #{err}") do
   rc.zero? && out =~ /^complete: next_since / &&
     out.include?("ticket_blocking: provenance_unread 0, no_path_line 1, unparseable 0, filer_sourced 1, rule_sourced 0, path_unset 0, " \
-                 "authored_override 1, edges_unread 0, unchanged 1, unlinked 1, no_call 0, no_candidate_named 0, edited 2")
+                 "authored_override 1, edges_unread 0, blocking_no_edge 1, unchanged 1, unlinked 1, no_call 0, no_candidate_named 0, " \
+                 "not_contradicted 1, edited 3")
 end
-check("the unlinked finding is named on the ticket_blocking line", out) { out.include?("  ticket_blocking unlinked: DND-24") }
-check("two records, one per call, each with every contradicted candidate", posts(blog).map { |r| r["body"] }.inspect) do
+check("the unlinked and edgeless findings are named on the ticket_blocking line", out) do
+  out.include?("  ticket_blocking unlinked: DND-24") && out.include?("  ticket_blocking blocking_no_edge: DND-29")
+end
+check("three records, one per call, each with every contradicted candidate", posts(blog).map { |r| r["body"] }.inspect) do
   posts(blog).map { |r| r["body"] } == [
-    { "call_id" => call(210), "correction" => { "cand_0" => "does_not_block" }, "signal" => "field_changed", "session_label" => "harness" },
-    { "call_id" => call(220), "correction" => { "cand_0" => "does_not_block", "cand_1" => "blocks" }, "signal" => "field_changed", "session_label" => "harness" }
-  ] && out.include?("records: recorded 2, replaced 0, already_recorded 0, refused 0, not_sent 0")
+    { "call_id" => call(210), "correction" => { "cand_1" => "does_not_block" }, "signal" => "field_changed", "session_label" => "harness" },
+    { "call_id" => call(220), "correction" => { "cand_0" => "blocks", "cand_1" => "does_not_block" }, "signal" => "field_changed", "session_label" => "harness" },
+    { "call_id" => call(280), "correction" => { "cand_0" => "blocks" }, "signal" => "field_changed", "session_label" => "harness" }
+  ] && out.include?("records: recorded 3, replaced 0, already_recorded 0, refused 0, not_sent 0")
 end
-check("only the edge onto a ticket outside the scan cost a page read") do
+check("an edge onto a page outside the scan is read once, however many findings name it") do
   requests(blog).select { |r| r["path"].start_with?("/v1/pages/") }.map { |r| r["path"] } == ["/v1/pages/#{page(102)}"]
 end
 brec = File.join(DIR, "blocking-recorded.txt")
 run(benv, "scan-tickets", "--since", SINCE, "--recorded-file", brec)
 rc, out, = run(benv, "scan-tickets", "--since", SINCE, "--recorded-file", brec)
-check("a re-run with the recorded file sends neither again [ticket 4]", out) do
-  rc.zero? && out.include?("records: recorded 0, replaced 0, already_recorded 2, refused 0, not_sent 0") &&
-    File.readlines(brec).map(&:strip).sort == ["#{call(210)} cand_0=does_not_block", "#{call(220)} cand_0=does_not_block,cand_1=blocks"]
+check("a re-run with the recorded file sends none again [ticket 4]", out) do
+  rc.zero? && out.include?("records: recorded 0, replaced 0, already_recorded 3, refused 0, not_sent 0") &&
+    File.readlines(brec).map(&:strip).sort == ["#{call(210)} cand_1=does_not_block", "#{call(220)} cand_0=blocks,cand_1=does_not_block",
+                                               "#{call(280)} cand_0=blocks"]
 end
 
 _ulog, uenv = fake("edges-unread", "rows" => BROWS, "blocks" => BBLOCKS, "pages" => { page(102) => 102 }, "fail_pages" => [page(102)])
 rc, out, err = run(uenv, "scan-tickets", "--since", SINCE)
 check("a Blocks target that cannot be read is edges_unread: named, exit 3, no next_since", "rc #{rc}; out: #{out}; err: #{err}") do
-  rc == 3 && out.include?("edges_unread 1") && out.include?("  ticket_blocking edges_unread: DND-22") && !out.include?("next_since") &&
+  rc == 3 && out.include?("edges_unread 3") && out.include?("  ticket_blocking edges_unread: DND-22, DND-27, DND-28") && !out.include?("next_since") &&
     err.include?("Blocks edges could not be read") && err.include?("Fix:")
+end
+
+truncated = BROWS.map { |r| r["id"] == page(25) ? r.merge("properties" => r["properties"].merge("Blocks" => { "relation" => [{ "id" => page(101) }], "has_more" => true })) : r }
+_tlog, tenv = fake("truncated", "rows" => truncated, "blocks" => BBLOCKS, "pages" => { page(102) => 102 })
+rc, out, err = run(tenv, "scan-tickets", "--since", SINCE)
+check("a truncated Blocks relation is edges_unread, never read as the whole edge list", "rc #{rc}; out: #{out}; err: #{err}") do
+  rc == 3 && out.include?("  ticket_blocking edges_unread: DND-25") && !out.include?("next_since")
+end
+
+_plog, penv = fake("no-dnd-id", "rows" => BROWS, "blocks" => BBLOCKS, "pages" => { page(102) => nil })
+rc, out, err = run(penv, "scan-tickets", "--since", SINCE)
+check("a Blocks target with no DND id is read, and is no candidate (never edges_unread)", "rc #{rc}; out: #{out}; err: #{err}") do
+  rc.zero? && out.include?("edges_unread 0")
 end
 
 no_path = ROWS.map { |r| r.merge("properties" => r["properties"].except("Path")) }

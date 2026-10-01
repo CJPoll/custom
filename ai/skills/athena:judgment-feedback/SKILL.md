@@ -88,7 +88,7 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
 
    ```
    - scan-tickets: tickets <lines> lines (no_provenance <n>, unparseable <n>, provenance_unread <n>); edited <e> (recorded <r>, replaced <p>, already_recorded <a>, refused <f>, not_sent <s>); unlinked <u>, filer_sourced <s>; since <since>
-   - scan-tickets ticket_blocking: edited <e>, unchanged <u>, authored_override <a>, unlinked <l>, no_path_line <n>, edges_unread <r>
+   - scan-tickets ticket_blocking: edited <e>, unchanged <u>, authored_override <a>, not_contradicted <c>, no_path_line <n>; named: unparseable <n>, path_unset <n>, edges_unread <n>, blocking_no_edge <n>, unlinked <n>, no_call <n>, no_candidate_named <n>, provenance_unread <n>
    - scan-tickets: COULD NOT MEASURE (<the JSON's reason>, exit <n>); since kept
    ```
 
@@ -98,7 +98,10 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
    second send. A `refused` edit is the server's answer (`not_found` for a
    call that is not the owner's or was pruned); name it in the journal,
    never retry it. A refusal as `invalid` is exit 4: the scan's labels no
-   longer match the question set, so file a ticket for the scan. Never
+   longer match the question set, so file a ticket for the scan. Journal
+   the tickets named on the `ticket_blocking` line by id; a reason that
+   names tickets in two runs running (`unparseable`, `blocking_no_edge`,
+   `no_candidate_named`, `no_call`) is a finding to file. Never
    create or edit the recorded file by hand.
 
    A filer who disagrees with a `jev` classification or Path files its own

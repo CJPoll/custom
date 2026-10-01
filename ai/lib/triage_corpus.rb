@@ -126,7 +126,9 @@ module TriageCorpus
       "depends_on" => relation_ids(row, "Depends On"),
       "blocks" => relation_ids(row, "Blocks"),
       "found_while" => relation_ids(row, "Found while"),
-      "relations_truncated" => relation_truncated?(row)
+      "relations_truncated" => relation_truncated?(row),
+      # judgment-feedback scan-tickets (DND-1470) needs the Blocks edges only.
+      "blocks_truncated" => row.dig("properties", "Blocks", "has_more") == true
     }
   end
 

@@ -203,8 +203,11 @@ puts "== ticket_blocking verdicts"
 check("jev Blocking -> current Off: does_not_block for the judged-blocks candidate [ticket 3]") do
   bv(finding(path: "Off")) == ["edited", CALL_P, { "cand_0" => "does_not_block" }]
 end
-check("Blocks edge moved to another candidate: two corrections, one record [ticket 3]") do
-  bv(finding, ["DND-103"]) == ["edited", CALL_P, { "cand_0" => "does_not_block", "cand_2" => "blocks" }]
+check("Blocks edge moved to an earlier candidate: two corrections, one record [ticket 3]") do
+  bv(finding(lines: [pline(blocks: "DND-103")]), ["DND-101"]) == ["edited", CALL_P, { "cand_0" => "blocks", "cand_2" => "does_not_block" }]
+end
+check("Blocks edge moved to a later candidate: does_not_block only (Jev may have accepted blocks there too)") do
+  bv(finding, ["DND-103"]) == ["edited", CALL_P, { "cand_0" => "does_not_block" }]
 end
 check("Path changed to Promoted: authored_override, no record [ticket 3]") do
   bv(finding(path: "Promoted")) == ["authored_override"]
@@ -224,8 +227,23 @@ end
 check("an unlinked line that was not changed is unchanged, not unlinked (nothing to report)") do
   bv(finding(lines: [pline(refs: :absent, call: :absent)]), ["DND-101"]) == ["unchanged"]
 end
-check("jev Blocking, an extra edge onto another candidate: blocks for it only") do
-  bv(finding, %w[DND-101 DND-102]) == ["edited", CALL_P, { "cand_1" => "blocks" }]
+check("jev Blocking, an extra edge onto an earlier candidate: blocks for it only") do
+  bv(finding(lines: [pline(blocks: "DND-102")]), %w[DND-101 DND-102]) == ["edited", CALL_P, { "cand_0" => "blocks" }]
+end
+check("jev Blocking, an extra edge onto a later candidate: not_contradicted, no record") do
+  bv(finding, %w[DND-101 DND-102]) == ["not_contradicted"]
+end
+check("Blocking with no edge is blocking_no_edge (both ways), never unchanged or a correction") do
+  bv(finding, []) == ["blocking_no_edge"] && bv(finding(lines: [pline(value: "Off", blocks: nil)]), []) == ["blocking_no_edge"]
+end
+check("a duplicate edge onto Jev's candidate is unchanged") do
+  bv(finding, %w[DND-101 DND-101]) == ["unchanged"]
+end
+check("an edge onto the finding itself (not a candidate) under a jev Off: no_candidate_named") do
+  bv(finding(lines: [pline(value: "Off", blocks: nil)]), ["DND-9002"]) == ["no_candidate_named"]
+end
+check("a single-pair recorded-file key from DND-1469 still reads back") do
+  S.recorded_keys("#{CALL_K} kind=docs\n").include?("#{CALL_K} kind=docs")
 end
 check("jev Off (Jev removed the claim), now Blocking onto a candidate: blocks for it") do
   bv(finding(lines: [pline(value: "Off", blocks: nil)]), ["DND-102"]) == ["edited", CALL_P, { "cand_1" => "blocks" }]

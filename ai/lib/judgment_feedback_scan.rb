@@ -221,7 +221,12 @@ module JudgmentFeedbackScan
   # candidate the change contradicts, keyed `cand_<i>` by the line's
   # `candidate_refs`:
   #   * the judged-blocks candidate no longer blocked: does_not_block;
-  #   * a candidate now blocked that Jev's decision did not block: blocks.
+  #   * a candidate now blocked that Jev accepted no `blocks` for: blocks.
+  #     Under a jev Off that is every candidate (an accepted `blocks` would
+  #     have decided Blocking). Under a jev Blocking onto cand_k it is only
+  #     a candidate before k: the policy blocks the FIRST accepted `blocks`
+  #     (TicketBlockingPolicy rule 2), so a later one may have had one too
+  #     and a new edge onto it is not known to contradict Jev.
   # Only Blocking carries a Blocks claim: a stale edge under Off is not one.
   # Critical and Promoted are authored (J-991-2), never a contradiction of
   # the judgment by themselves.
@@ -237,15 +242,21 @@ module JudgmentFeedbackScan
   #   authored_override   the Path is now Critical or Promoted (authored)
   #   edges_unread        the ticket is Blocking but its Blocks edges could
   #                       not be read (the scan is incomplete)
+  #   blocking_no_edge    the ticket is Blocking with no Blocks edge: a half
+  #                       edit that says nothing about which candidate
   #   unchanged           the Path and edge still match Jev's decision
   #   unlinked            the line predates DND-1470 and names no call
   #   no_call             the line names no call (its row was not written)
   #   no_candidate_named  changed, but onto no candidate Jev was asked about
+  #   not_contradicted    changed only onto a candidate after Jev's blocked
+  #                       one: Jev may have accepted `blocks` for it too
   #   edited              changed away from Jev's decision: record it
   BLOCKING_REASONS = %w[provenance_unread no_path_line unparseable filer_sourced rule_sourced path_unset
-                        authored_override edges_unread unchanged unlinked no_call no_candidate_named edited].freeze
+                        authored_override edges_unread blocking_no_edge unchanged unlinked no_call no_candidate_named
+                        not_contradicted edited].freeze
   # The reasons whose tickets are named: each needs a person or a re-run.
-  BLOCKING_NAMED = %w[provenance_unread unparseable path_unset edges_unread unlinked no_call no_candidate_named].freeze
+  BLOCKING_NAMED = %w[provenance_unread unparseable path_unset edges_unread blocking_no_edge unlinked no_call
+                      no_candidate_named].freeze
   # The pseudo-property a Path edit is recorded under (the bin's refusals).
   PATH_PROPERTY = "path"
   AUTHORED_PATHS = %w[Critical Promoted].freeze
@@ -284,6 +295,7 @@ module JudgmentFeedbackScan
 
     blocked_now = ticket["path"] == "Blocking" ? edge_refs : []
     return ["edges_unread"] if blocked_now.nil?
+    return ["blocking_no_edge"] if ticket["path"] == "Blocking" && blocked_now.empty?
 
     judged = doc.dig("path", "value") == "Blocking" ? [doc.dig("path", "blocks")] : []
     unblocked = judged - blocked_now
@@ -292,14 +304,21 @@ module JudgmentFeedbackScan
     return ["unlinked"] unless doc.key?("call")
     return ["no_call"] if doc["call"].nil?
 
-    correction = path_correction(doc["candidate_refs"], unblocked, newly)
-    correction.empty? ? ["no_candidate_named"] : ["edited", doc["call"], correction]
+    refs = doc["candidate_refs"]
+    correction = path_correction(refs, unblocked, newly, judged.first)
+    return ["edited", doc["call"], correction] unless correction.empty?
+
+    newly.any? { |r| refs.include?(r) } ? ["not_contradicted"] : ["no_candidate_named"]
   end
 
-  # path_correction(refs, unblocked, newly) -> {"cand_<i>" => label}, by
-  # candidate index. A ticket that was not a candidate has no question.
-  def path_correction(refs, unblocked, newly)
-    pairs = unblocked.map { |r| [refs.index(r), DOES_NOT_BLOCK_LABEL] } + newly.map { |r| [refs.index(r), BLOCKS_LABEL] }
+  # path_correction(refs, unblocked, newly, judged) -> {"cand_<i>" =>
+  # label}, by candidate index. `judged` is the ref Jev blocked, or nil for
+  # a jev Off. A ticket that was not a candidate has no question, and a
+  # newly blocked candidate after the judged one is not a contradiction.
+  def path_correction(refs, unblocked, newly, judged)
+    limit = judged ? refs.index(judged) : refs.size
+    pairs = unblocked.map { |r| [refs.index(r), DOES_NOT_BLOCK_LABEL] } +
+            newly.map { |r| [refs.index(r), BLOCKS_LABEL] }.select { |i, _| i && i < limit }
     pairs.reject { |i, _| i.nil? }.sort_by(&:first).to_h { |i, label| ["cand_#{i}", label] }
   end
 
