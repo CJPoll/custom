@@ -859,6 +859,235 @@ check("hold_text: the partial revert keeps the trailer line when given") do
    .include?("and the trailer line `Lead-time-experiment: custom verify phase`")
 end
 
+# ── tail (DND-1613): a product change judged on landing -> post-merge run ────
+
+def tail_metric = X::Metric.parse("phase", phase: "tail")
+
+# A ledger row with a tail: tail_s seconds, lead-time's end kind tail_end
+# (deploy | pipeline: a post-merge run concluded; merge: none was found).
+# :absent leaves tail_end out (a row ingested before DND-1532).
+def trow(hours, tail_s, tail_end = "deploy", origin: nil)
+  r = row(hours, verify: 600).merge("tail_s" => tail_s)
+  r["tail_end"] = tail_end unless tail_end == :absent
+  r["origin"] = origin if origin
+  r
+end
+
+def texp(**kw) = exp(phase: "tail", **kw)
+
+check("tail: Metric.parse takes --phase tail with --metric phase") do
+  m = tail_metric
+  m.phase == "tail" && m.name == "phase" && m.tail?
+end
+
+check("tail: every other metric on tail raises, naming tail and phase") do
+  %w[lead code na_share counter:gate_runs check:x].all? do |n|
+    X::Metric.parse(n, phase: "tail")
+    false
+  rescue X::UsageError => e
+    e.message.include?("tail") && e.message.include?("--metric phase")
+  end
+end
+
+check("tail: an unknown phase still raises, and the message lists tail") do
+  X::Metric.parse("phase", phase: "deploy")
+  false
+rescue X::UsageError => e
+  e.message.include?("deploy") && e.message.include?("tail")
+end
+
+check("tail: a row whose post-merge run concluded (deploy or pipeline) is measured") do
+  tail_metric.value(trow(1, 2400, "deploy")) == 2400 && tail_metric.value(trow(1, 900, "pipeline")) == 900 &&
+    tail_metric.na_reason(trow(1, 2400, "deploy")).nil?
+end
+
+check("tail: a 0 tail with no post-merge run (end kind merge) is n/a with its reason, never 0") do
+  r = trow(1, 0, "merge")
+  tail_metric.value(r).nil? && tail_metric.na_reason(r).include?("no post-merge run") &&
+    tail_metric.na_reason(r).include?("merge")
+end
+
+check("tail: a row ingested before DND-1532 (no tail_end) is n/a, never a measured 0") do
+  r = trow(1, 0, :absent)
+  tail_metric.value(r).nil? && tail_metric.na_reason(r).include?("DND-1532")
+end
+
+check("tail: a nonzero tail on a row with no tail_end is measured (only a deploy or pipeline end gives one), as the summary reads it") do
+  r = trow(1, 2400, :absent)
+  tail_metric.value(r) == 2400 && tail_metric.na_reason(r).nil? &&
+    LeadTimePhases::Stats.tail_cell(r, true) == [2400, nil]
+end
+
+# lead-time gives these kinds no tail (nil); the nonzero tail here is a
+# defensive input: the end kind alone keeps them out.
+check("tail: closed, open and unmeasured end kinds are n/a, each naming its kind") do
+  %w[closed open unmeasured].all? do |k|
+    r = trow(1, 50, k)
+    tail_metric.value(r).nil? && tail_metric.na_reason(r).include?(k)
+  end
+end
+
+check("tail: a null tail_s is n/a with the ledger's own reason") do
+  r = trow(1, nil, "deploy").merge("lead_na_reason" => "no merge time")
+  tail_metric.value(r).nil? && tail_metric.na_reason(r).include?("no merge time")
+end
+
+check("tail: a phase metric on another phase is unchanged (reads phases.<p>.s)") do
+  X::Metric.parse("phase", phase: "verify").value(trow(1, 2400)) == 600
+end
+
+# A fixture repo with post-merge CI: before, ten measured tails of 3600 s
+# with three landings that had no post-merge run between them; after, ten
+# measured tails of 2400 s with two such landings and one pre-DND-1532 row.
+TAIL_BEFORE = (1..13).map { |i| [4, 8, 11].include?(i) ? trow(-i, 0, "merge") : trow(-i, 3600) }
+TAIL_AFTER = (1..13).map { |i| i == 3 ? trow(i, 0, :absent) : ([6, 9].include?(i) ? trow(i, 0, "merge") : trow(i, 2400)) }
+TAIL_ROWS = TAIL_BEFORE + TAIL_AFTER
+
+check("tail sides: the split counts measured tails only; a no-run landing is never a 0 in either side") do
+  s = X.sides(TAIL_ROWS, metric: tail_metric, exclude: [LANDING], boundary: t(RECORDED))
+  s[:before].size == 10 && s[:after].size == 10 &&
+    s[:before].all? { |r| r["tail_s"] == 3600 } && s[:after].all? { |r| r["tail_s"] == 2400 }
+end
+
+check("tail excluded: the landings inside the window without a measured tail are tallied by reason") do
+  s = X.sides(TAIL_ROWS, metric: tail_metric, exclude: [LANDING], boundary: t(RECORDED))
+  from, to = X.window(s, t(RECORDED))
+  ex = X.excluded(TAIL_ROWS, metric: tail_metric, exclude: [LANDING], from: from, to: to)
+  ex.sum { |e| e["count"] } == 6 &&
+    ex.find { |e| e["reason"].include?("no post-merge run") }["count"] == 5 &&
+    ex.find { |e| e["reason"].include?("DND-1532") }["count"] == 1
+end
+
+check("excluded: na_share excludes nothing (its n/a IS the measurement)") do
+  m = X::Metric.parse(X::NA_SHARE, phase: "verify")
+  X.excluded([row(1), row(2)], metric: m, exclude: [], from: t(RECORDED), to: TO).empty?
+end
+
+check("excluded: a phase metric names its null rows' reasons, landing order irrelevant") do
+  m = X::Metric.parse("phase", phase: "verify")
+  ex = X.excluded([row(2), row(1, verify: 5), row(3)], metric: m, exclude: [], from: t(RECORDED), to: TO)
+  ex == [{ "reason" => "no critic PASS", "count" => 2 }]
+end
+
+check("excluded: a batch landing a side kept is never also excluded (one landing, one place)") do
+  m = X::Metric.parse("phase", phase: "verify")
+  sha = "f" * 40
+  rows = [row(1, sha: sha, ticket: "DND-1"), row(1, verify: 600, sha: sha, ticket: "DND-2")]
+  X.comparable(rows, metric: m, exclude: []).map { |r| r["ticket"] } == ["DND-2"] &&
+    X.excluded(rows, metric: m, exclude: [], from: t(RECORDED), to: TO).empty?
+end
+
+check("excluded: reasons are tallied with the unit and SHAs made generic, as the summary does") do
+  m = X::Metric.parse("phase", phase: "verify")
+  rows = [1, 2, 3].map do |h|
+    r = row(h, ticket: "DND-#{h}")
+    r["phases"]["verify"]["na_reason"] = "worked on another machine (no local events for DND-#{h})"
+    r
+  end
+  X.excluded(rows, metric: m, exclude: [], from: t(RECORDED), to: TO) ==
+    [{ "reason" => "worked on another machine (no local events for <unit>)", "count" => 3 }]
+end
+
+check("tail judge: 3600 -> 2400 on measured tails, guards equal: keep (as for any phase)") do
+  s = X.sides(TAIL_ROWS, metric: tail_metric, exclude: [LANDING], boundary: t(RECORDED))
+  v = X.judge(texp, before: s[:before], after: s[:after], guards_before: guards, guards_after: guards, now: NOW)
+  v["status"] == "keep" && v["before"]["median"] == 3600 && v["after"]["median"] == 2400 && v["after"]["n"] == 10
+end
+
+check("tail judge: a rising tail is a revert, as for any phase") do
+  rows = TAIL_BEFORE + (1..10).map { |i| trow(i, 4000) }
+  s = X.sides(rows, metric: tail_metric, exclude: [LANDING], boundary: t(RECORDED))
+  X.judge(texp, before: s[:before], after: s[:after], guards_before: guards, guards_after: guards, now: NOW)["status"] == "revert"
+end
+
+check("tail judge: no measured tail before the landing is no before-set (pending), never a 0 baseline") do
+  rows = (1..10).map { |i| trow(-i, 0, "merge") } + (1..10).map { |i| trow(i, 2400) }
+  s = X.sides(rows, metric: tail_metric, exclude: [LANDING], boundary: t(RECORDED))
+  v = X.judge(texp, before: s[:before], after: s[:after], guards_before: guards, guards_after: guards, now: NOW)
+  s[:before].nil? && s[:before_na].include?("no post-merge run") && v["status"] == "pending"
+end
+
+check("tail foreign: a landing worked on another machine keeps its measured tail and counts on both sides") do
+  rows = (1..10).map { |i| trow(-i, 3600, origin: i.even? ? "foreign" : "local") } +
+         (1..10).map { |i| trow(i, 2400, origin: "foreign") }
+  s = X.sides(rows, metric: tail_metric, exclude: [LANDING], boundary: t(RECORDED))
+  s[:before].size == 10 && s[:after].size == 10
+end
+
+check("tail_error: a measured tail on one of the window's landings passes") do
+  X.tail_error([trow(-2, 0, "merge"), trow(-1, 3600)], window: 20).nil?
+end
+
+check("tail_error: tail_end on rows but no post-merge run concluded on any: unmeasured, tallied by reason") do
+  e = X.tail_error([trow(-3, 0, "merge"), trow(-2, 0, "merge"), trow(-1, 0, :absent)], window: 20)
+  e[:state] == :unmeasured && e[:n] == 3 && e[:reasons].sum { |r| r["count"] } == 3
+end
+
+check("tail_error: no row carries tail_end (all ingested before DND-1532): could not look, never unmeasured") do
+  e = X.tail_error([trow(-2, 0, :absent), trow(-1, 0, :absent)], window: 20)
+  e[:state] == :could_not_look && e[:n] == 2
+end
+
+check("tail_error: only the last `window` landings are read") do
+  rows = [trow(-5, 3600)] + (1..3).map { |i| trow(-5 + i, 0, "merge") }
+  X.tail_error(rows, window: 3)[:state] == :unmeasured && X.tail_error(rows, window: 4).nil?
+end
+
+check("tail_error: an empty ledger is could not look") do
+  X.tail_error([], window: 20)[:state] == :could_not_look
+end
+
+check("tail blocker: a pending tail change blocks tail only; one-pending-per-phase unchanged") do
+  pend = [texp.merge("status" => "pending")]
+  !X.admit?(pend, phase: "tail", kind: "change") && X.admit?(pend, phase: "verify", kind: "change") &&
+    X.admit?([exp.merge("status" => "pending")], phase: "tail", kind: "change")
+end
+
+check("tail trailer: record wants `<R> tail phase`") do
+  X.trailer_error("x\n\nLead-time-experiment: gen_saas tail phase\n", sha: LANDING, repo: "gen_saas", phase: "tail", metric: "phase").nil? &&
+    X.trailer_error("x\n\nLead-time-experiment: gen_saas verify phase\n", sha: LANDING, repo: "gen_saas", phase: "tail", metric: "phase")
+end
+
+check("tail confound: another tail trailer inside the window confounds; a harness phase's does not") do
+  c = X.confounders(texp, [tc(OTHER_SHA, 2, "Lead-time-experiment: gen_saas tail phase\n")], from: FROM, to: TO)
+  n = X.confounders(texp, [tc(OTHER_SHA, 2, "Lead-time-experiment: gen_saas verify phase\n")], from: FROM, to: TO)
+  c[:confounders].size == 1 && n[:confounders].empty?
+end
+
+check("revert_route: tail (lever product) reverts by a PR in the measured repo through its own bar") do
+  r = X.revert_route(texp.merge("repo" => "gen_saas"), harness: "custom")
+  r.include?("PR in gen_saas") && r.include?("its own bar") && r.include?("DND-1540") &&
+    X.revert_route(texp.merge("repo" => "gen_saas"), harness: nil).include?("PR in gen_saas")
+end
+
+check("revert_route: a same-repo change in a repo other than the harness repo is a product revert too") do
+  X.revert_route(exp.merge("repo" => "gen_saas"), harness: "custom").include?("PR in gen_saas")
+end
+
+check("revert_route: a harness change has none (custom's own, or cross-repo landed in custom)") do
+  X.revert_route(exp, harness: "custom").nil? &&
+    X.revert_route(exp.merge("repo" => "gen_saas", "change_repo" => "custom"), harness: "custom").nil? &&
+    X.revert_route(exp.merge("repo" => "gen_saas"), harness: nil).nil?
+end
+
+check("hold_text: a held tail revert routes its partial revert through the product repo's PR") do
+  txt = X.hold_text("gen_saas", "i", LANDING, { "tests" => ["apps/x/test/a_test.exs"] }, nil,
+                    trailer: "Lead-time-experiment: gen_saas tail phase",
+                    route: X.revert_route(texp.merge("repo" => "gen_saas"), harness: "custom"))
+  txt.include?("apps/x/test/a_test.exs") && txt.include?("PR in gen_saas") && txt.include?("Lead-time-experiment: gen_saas tail phase")
+end
+
+check("tail_change_repo_error: a tail change must land in the measured repo itself (the product lever)") do
+  X.tail_change_repo_error("tail", "gen_saas", "custom").include?("lands in gen_saas itself") &&
+    X.tail_change_repo_error("tail", "gen_saas", "gen_saas").nil? &&
+    X.tail_change_repo_error("verify", "gen_saas", "custom").nil?
+end
+
+check("record_error: a tail record parses; a tail record on another metric is malformed") do
+  rec = texp.merge("commit" => LANDING)
+  X.record_error(rec).nil? && X.record_error(rec.merge("metric" => "lead")).to_s.include?("tail")
+end
+
 # ── store ───────────────────────────────────────────────────────────────────
 
 Dir.mktmpdir("experiment-store-") do |dir|

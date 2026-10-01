@@ -49,6 +49,17 @@
 #     time of its first-parent landing commit ("committer"), which a
 #     fast-forward push follows later. Never the author date. A record with
 #     no change_repo, or one equal to its repo, is same-repo, unchanged.
+#   * tail (DND-1613): a product change (the measured repo's own CI/CD, lever
+#     product) is judged on tail, landing -> post-merge run, on `--metric
+#     phase` only. A row is comparable on tail only when lead-time found a
+#     post-merge run that concluded (tail_end deploy or pipeline, or a
+#     nonzero tail on a row ingested before tail_end existed); a 0 from a
+#     landing with no such run, or a 0 with no tail_end, is n/a with its
+#     reason, never a measured 0. The change lands in the measured repo
+#     itself (no --change-repo). Foreign rows (DND-1531) count:
+#     their tail is read from the forge, not from this machine's telemetry,
+#     so where the work was done does not change it. Its revert is a revert
+#     PR in the measured repo through that repo's own bar (DND-1540).
 #
 # The store (experiments.jsonl) is rows of two types, latest status wins:
 #   {"type":"record", "id", "repo", "phase", "metric", "kind", "commit", ...}
@@ -83,6 +94,16 @@ module LeadTimeExperiment
   SHA_RE = /\A[0-9a-f]{40}\z/.freeze
   REVERT_RE = /This reverts commit ([0-9a-f]{40})/.freeze
   PHASES = LeadTimePhases::PHASES
+  # tail: landing -> post-merge run (DND-1532's biggest candidate, lever
+  # product). Not a ledger phase: its seconds are the row's tail_s.
+  TAIL = "tail"
+  EXPERIMENT_PHASES = (PHASES + [TAIL]).freeze
+  # The end kinds at which lead-time found a post-merge run that concluded,
+  # lead-time-phases' own constant (Metric#measured_tail applies its rule).
+  # One difference is deliberate: the summary picks a tail candidate from
+  # local rows only (DND-1531), while a tail experiment compares foreign
+  # rows too, since their tail is read from the forge.
+  TAIL_RUN_ENDS = LeadTimePhases::Stats::TAIL_RUN_ENDS
   TOTALS = { "lead" => "lead_s", "code" => "code_s" }.freeze
   COUNTERS = %w[gate_runs gate_wall_s gate_red slot_wait_s critic_rounds critic_blocks critic_wall_s lock_wait_s].freeze
   GUARDS = %w[critic_block_rate gate_red_rate reverts].freeze
@@ -101,11 +122,18 @@ module LeadTimeExperiment
   #                      head (check_walls.<label>, DND-1548): a change whose
   #                      mechanism is one check is judged on that check
   #   na_share           instrumentation: whether the phase is n/a at all
+  # On tail (DND-1613) only `phase` exists: the row's measured tail_s.
   Metric = Struct.new(:name, :phase, keyword_init: true) do
     def self.parse(name, phase:)
-      raise UsageError, "unknown phase #{phase.inspect} (known: #{PHASES.join(', ')})" unless PHASES.include?(phase)
+      unless EXPERIMENT_PHASES.include?(phase)
+        raise UsageError, "unknown phase #{phase.inspect} (known: #{EXPERIMENT_PHASES.join(', ')})"
+      end
 
       n = name.to_s
+      if phase == TAIL && n != "phase"
+        raise UsageError, "tail is judged on --metric phase only (its measured landing -> post-merge run time), " \
+                          "not #{n.inspect}"
+      end
       if n.start_with?(CHECK_PREFIX)
         label = n.delete_prefix(CHECK_PREFIX)
         raise UsageError, "#{CHECK_PREFIX} needs a check label (#{CHECK_PREFIX}<label>, as harness-gate prints it)" if label.empty?
@@ -129,8 +157,12 @@ module LeadTimeExperiment
 
     def check_label = check? ? name.delete_prefix(CHECK_PREFIX) : nil
 
+    def tail? = phase == TAIL
+
     # The row's value, or nil when it is n/a there.
     def value(row)
+      return measured_tail(row) if tail?
+
       case name
       when "phase", NA_SHARE then row.dig("phases", phase, "s")
       when "lead", "code" then row[TOTALS[name]]
@@ -142,6 +174,7 @@ module LeadTimeExperiment
     # has three distinct reasons; none of them is ever read as 0.
     def na_reason(row)
       return nil unless value(row).nil?
+      return tail_na_reason(row) if tail?
       return check_na_reason(row) if check?
 
       why = case name
@@ -153,6 +186,32 @@ module LeadTimeExperiment
     end
 
     private
+
+    # tail_s only when a post-merge run concluded; a 0 from a landing with
+    # none is not a measured tail. A row ingested before DND-1532 kept
+    # tail_end still proves a run when its tail is nonzero: lead-time's tail
+    # is nonzero only when its end was a deploy or pipeline (an end at the
+    # merge reads 0; closed, open and unmeasured have no tail). This is
+    # lead-time-phases' tail_cell rule, so a tail the summary measures is
+    # one the judge compares.
+    def measured_tail(row)
+      s = row["tail_s"]
+      return nil unless s.is_a?(Numeric)
+      return s if TAIL_RUN_ENDS.include?(row["tail_end"])
+
+      row["tail_end"].nil? && s.positive? ? s : nil
+    end
+
+    def tail_na_reason(row)
+      return row["lead_na_reason"] || "tail: not measured on this row" unless row["tail_s"].is_a?(Numeric)
+      if row["tail_end"].nil?
+        return "tail: the row was ingested before DND-1532 kept its end kind, so its #{row['tail_s']}s cannot be " \
+               "told apart from a landing whose run was never found"
+      end
+
+      "tail: no post-merge run concluded for the landing (lead-time end kind #{row['tail_end']}); " \
+        "its #{row['tail_s']}s is not a measured tail"
+    end
 
     def check_wall(row)
       walls = row["check_walls"]
@@ -289,6 +348,59 @@ module LeadTimeExperiment
   def latest_unmeasured(rows, metric, exclude, boundary)
     last = improve_landings(rows, exclude: exclude) { |r| at(r) < boundary && metric.value(r).nil? }.last
     last && metric.na_reason(last)
+  end
+
+  # The landings from `from` to `to` (X.window) that the metric could not
+  # compare, tallied by n/a reason, most first: [{"reason", "count"}]. They
+  # are left out of both sides, and said so, never read as 0. na_share
+  # excludes nothing: its n/a IS the measurement. A batch landing whose
+  # commit a side kept (another ticket row measured it) is not excluded. The
+  # reasons are made generic as the summary's are (the unit and SHAs
+  # replaced), so one cause is one count, not one entry per landing.
+  def excluded(rows, metric:, exclude:, from:, to:)
+    return [] if metric.na_share?
+
+    kept = comparable(rows, metric: metric, exclude: exclude).to_h { |r| [r["landed_commit"], true] }
+    out = improve_landings(rows, exclude: exclude) do |r|
+      (t = at(r)) >= from && t <= to && metric.value(r).nil? && !kept.key?(r["landed_commit"])
+    end
+    tally(out.map { |r| LeadTimePhases::Stats.generic(metric.na_reason(r), r) })
+  end
+
+  def tally(reasons) = reasons.tally.sort_by { |r, n| [-n, r] }.map { |r, n| { "reason" => r, "count" => n } }
+
+  # nil, or why a change on `phase` cannot be recorded as landed in
+  # change_repo while measured on repo. tail's lever is product: R's own
+  # CI/CD and deploy, so a tail change lands in R itself, never as a
+  # cross-repo harness change (DND-1613).
+  def tail_change_repo_error(phase, repo, change_repo)
+    return nil unless phase == TAIL && change_repo != repo
+
+    "a change on tail lands in #{repo} itself (its CI/CD or deploy, lever product), not in #{change_repo}"
+  end
+
+  # The judge/record text for excluded landings, or nil when there are none.
+  def excluded_text(ex)
+    return nil if ex.nil? || ex.empty?
+
+    "excluded #{ex.sum { |e| e['count'] }} landing(s) in the window, never read as 0: " +
+      ex.map { |e| "#{e['reason']} (#{e['count']})" }.join("; ")
+  end
+
+  # nil when one of the last `window` landings has a measured tail, else why
+  # tail cannot be judged on this repo now:
+  #   {state: :could_not_look, n:}  no landing carries tail_end (all ingested
+  #     before DND-1532, or none at all): a 0 cannot be told from no run
+  #   {state: :unmeasured, n:, reasons: tally}  lead-time found no concluded
+  #     post-merge run for any of them (a repo with no post-merge CI, or none
+  #     succeeded in the window)
+  def tail_error(rows, window:)
+    m = Metric.parse("phase", phase: TAIL)
+    last = improve_landings(rows) { true }.last(window)
+    return nil if last.any? { |r| !m.value(r).nil? }
+    return { state: :could_not_look, n: last.size } if last.all? { |r| r["tail_end"].nil? }
+
+    { state: :unmeasured, n: last.size, reasons: tally(last.map { |r| m.na_reason(r) }) }
   end
 
   # The phase's own before/after stats over a check metric's two sides:
@@ -615,9 +727,11 @@ module LeadTimeExperiment
   # decline verb would admit this revert, else why it would refuse it.
   # change_repo: the repo the commit landed in when it is not `repo`
   # (DND-1528); the revert lands there.
-  def hold_text(repo, id, commit, hold, decline_refusal, change_repo: nil, trailer: nil)
+  # route: revert_route's text for a product revert (DND-1613), else nil.
+  def hold_text(repo, id, commit, hold, decline_refusal, change_repo: nil, trailer: nil, route: nil)
     sha = commit.to_s[0, 12]
     where = change_repo ? "in #{change_repo}: " : ""
+    landed = route ? ", landed #{route}" : ""
     keep_trailer = trailer ? " and the trailer line `#{trailer}` (DND-1529)" : ""
     what = if hold["could_not_look"]
              "could not look whether reverting #{sha} deletes test additions: #{hold['could_not_look']}"
@@ -628,13 +742,29 @@ module LeadTimeExperiment
     # <sha>" line (reverted?), so a partial revert must keep it.
     partial = "land a partial revert that keeps every test addition and its fixture fix " \
               "(#{where}git revert --no-commit #{commit}, restore the test paths, commit keeping git's " \
-              "\"This reverts commit #{commit}.\" line so judge records reverted#{keep_trailer})"
+              "\"This reverts commit #{commit}.\" line so judge records reverted#{keep_trailer}#{landed})"
     fix = if decline_refusal
             "#{partial}; decline does not cover this revert (#{decline_refusal})"
           else
             "#{partial}, or run experiment decline --repo #{repo} --id #{id} --constraint safety-checks --reason-file <F>"
           end
     "#{what}; the hard constraint rules out a plain git revert. Fix: #{fix}"
+  end
+
+  # How a revert lands when it is not the harness's own (DND-1613): a
+  # product change is reverted by a PR in the repo it landed in, through
+  # that repo's own bar (the product lane, DND-1540). A product change is
+  # one on a product-lever phase (tail), or one whose commit landed in a
+  # repo other than the harness repo (DND-1542: an improve repo changing
+  # itself). nil for a harness change, whose revert lands through the
+  # skill's *Landing*. harness: the harness repo's name, or nil when it could
+  # not be found (then only the phase can say product).
+  def revert_route(exp, harness:)
+    landed_in = exp["change_repo"] || exp["repo"]
+    product = LeadTimePhases::Stats::LEVERS[exp["phase"]] == "product" || (!harness.nil? && landed_in != harness)
+    return nil unless product
+
+    "as a revert PR in #{landed_in} through its own bar (the product lane, DND-1540)"
   end
 
   # ── the experiment trailer and confounds (DND-1529) ──────────────────────

@@ -151,15 +151,15 @@ now a candidate too, so a repo's post-merge CI and deploy time can be picked.
 `product` for `tail`, the repo's own CI and deploy. With no measured nonzero
 tail, `tail` is never a candidate; `biggest.tail_reason` says why
 (`ai/bin/lead-time-phases --help`). For `tail`, its `n`, `n_na` and
-`na_reasons` are in `totals.tail`, not `phases`. `experiment` records phases
-only and refuses `tail`, so no change on `tail` could be judged. Until
-DND-1613 gives `tail` experiments, a `tail` biggest is never the target, in
-any repo: journal the finding "tail dominant: <sum>, lever product", say it
-in the summary line's reason, then run the choice rule below on the largest
-phase by `phases.<p>.sum_s`, as if it were `biggest`. With no phase
-measured, the action is instrumentation as above. In a repo other than
-custom, that phase's change may land in the repo itself (*An improve repo
-other than custom*).
+`na_reasons` are in `totals.tail`, not `phases`. A `tail` biggest is the
+target like a phase: its change is a product change in the repo itself (its
+CI/CD or deploy, *An improve repo other than custom*), recorded on
+`--phase tail --metric phase` (*Recording the experiment*). The choice
+rule's instrumentation branch does not apply to `tail`: a tail n/a is a
+landing whose post-merge run never concluded, which no emitter fixes. When
+`totals.tail` has `n_na > n`, journal "tail not judgeable: <na_reasons>"
+and run the choice rule on the largest phase by `phases.<p>.sum_s` instead. In custom,
+with no post-merge CI, `tail` is never a candidate.
 
 **Later (2026-10-01, DND-1533):** this read "The product-side action for a
 `product` lever is not set by this step (DND-1533, DND-1542). Until it is,
@@ -170,6 +170,12 @@ other than custom: its product lever is now the architect hand-off below.
 `product` lever in an improve repo other than custom to an architect.
 Superseded: such a repo may now change itself, but a change on `tail` cannot
 be judged yet, so `tail` is not a target anywhere while DND-1613 is open.
+
+**Later (2026-10-01, DND-1613):** this read "`experiment` records phases
+only and refuses `tail` … Until DND-1613 gives `tail` experiments, a `tail`
+biggest is never the target, in any repo", and the run worked the largest
+phase instead. Superseded: `experiment` now records and judges a change on
+`tail`, so a `tail` biggest is the target.
 
 **The choice rule:** if the biggest phase has `n_na > n` in the window, the
 finding is "cannot measure <phase>" and the action is **instrumentation** for
@@ -302,6 +308,13 @@ experiment record --repo R --phase P --kind change --metric phase \
   experiment: `--repo R`, no `--change-repo`, and `--commit` the commit as it
   landed on R's main (a squash: the `merge_sha` *The product lane* reads). It
   is recorded by the first run that sees it merged.
+- A change in R aimed at `tail` (its CI/CD or deploy) is recorded with
+  `--phase tail --metric phase`, the only metric on `tail` (DND-1613). Only
+  landings whose post-merge run concluded count; the others are named as
+  excluded with their reason, never as 0. Record refuses `tail` (exit 2)
+  when none of R's last `window` landings has a measured tail, and exit 3
+  means none carries an end kind yet. Its revert is a revert PR in R
+  through *The product lane*.
 - A refusal (exit 2) names the pending experiment that blocks it, or the
   trailer the commit lacks (*Landing*). Do not work around it.
 - A directly-spawned run whose PR has not landed yet journals "awaiting
@@ -370,11 +383,15 @@ differs.
   (`bin/`, its declared gate, its test setup) and its CI/CD and deploy
   workflows are yours to change, through *The product lane* below and R's
   normal bar. This is the owner's grant (*The grant*).
-- **`tail` is not a target while DND-1613 is open.** `experiment` cannot
-  record `tail`, so a change aimed at it would go unjudged. Step 4 works the
-  largest measurable phase instead and journals the tail finding; DND-1613
-  lifts this rule. A change in R on any other phase is recorded on that
-  phase as usual (*Recording the experiment*).
+- **`tail` is a target (DND-1613).** A change to R's CI/CD or deploy aimed
+  at `tail` goes through *The product lane* (`cut --phase tail --metric
+  phase`) and is recorded on `tail` once merged (*Recording the
+  experiment*). Its revert is a revert PR in R through R's bar. A change in
+  R on any other phase is recorded on that phase as usual.
+
+  **Later (2026-10-01, DND-1613):** this read "`tail` is not a target while
+  DND-1613 is open", and step 4 worked the largest measurable phase instead.
+  Superseded: `experiment` records and judges `tail`.
 - **Too large for one run:** first read the journal: if an earlier run
   already handed off this finding for R (the same phase, its ticket not
   closed), journal "already handed off: <ticket>" and pick another action.

@@ -346,6 +346,24 @@ p90 over the last K comparable landings), and a status.
   gains a `held` field, and judge's tally counts held on its own. No threshold or
   guard moved, and nothing becomes keep.
 
+  **Later (2026-10-01, DND-1613):** `experiment` accepted only the five
+  harness phases, so a product change on `tail` (DND-1532's lever product)
+  could not be recorded or judged. It now takes `--phase tail` with
+  `--metric phase`. A landing is comparable on tail only when lead-time found
+  a post-merge run that concluded (`tail_end` deploy or pipeline); one with
+  none, or a row ingested before `tail_end`, is excluded with its reason and
+  never read as 0. A nonzero tail on a row with no `tail_end` is measured,
+  as the summary reads it: lead-time's tail is nonzero only at a deploy or
+  pipeline end. Judge and record name every excluded landing in the
+  window, for any metric but `na_share` (its n/a is the measurement). A
+  tail change must land in the measured repo itself: `--change-repo` with
+  `--phase tail` is refused. Foreign rows (DND-1531) count on tail, because
+  their tail comes from the forge, not from local telemetry. Record refuses
+  `tail` where no recent landing has a measured tail. A product change's
+  revert line routes it as a revert PR in that repo through its own bar
+  (DND-1540); REVERT HELD reads that repo's tests. Thresholds, guards and
+  the one-pending-per-phase rule are unchanged.
+
   **Later (2026-10-01, DND-1528):** an experiment's commit had to be on the
   measured repo's main, and the split was that commit's own landing row. A
   harness change for gen_saas lands in custom, so a gen_saas improve run

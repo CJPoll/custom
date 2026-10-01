@@ -92,6 +92,20 @@ HELP = <<~TXT
            instrumentation alike; without it record refuses (exit 2), and
            a message git cannot show is exit 3. Records already in the
            store are not re-validated.
+           --phase tail (DND-1613): a product change (R's own CI/CD and
+           deploy, lever product) judged on tail, landing -> post-merge run,
+           with --metric phase only. A landing counts on tail only when
+           lead-time found a post-merge run that concluded (tail_end deploy
+           or pipeline, or a nonzero tail on a row ingested before
+           tail_end, which only such an end gives); a landing with none
+           (tail_end merge), or a 0 on a row ingested before tail_end, is
+           excluded with its reason, never a measured 0. --change-repo is
+           refused on tail: a tail change lands in R itself. Landings
+           worked on another machine (origin foreign)
+           count: their tail is read from the forge. Refused (exit 2) when
+           none of the config window's last landings has a measured tail;
+           exit 3 when none carries tail_end at all. Its revert is a revert
+           PR in R through R's own bar (the product lane, DND-1540).
   judge    Judge every pending experiment of the repo and print one line
            per experiment: keep | revert | pending | inconclusive |
            confounded, with the
@@ -120,7 +134,12 @@ HELP = <<~TXT
            It reads origin/main as this clone last fetched it: a trailer
            pushed since is not seen until the next fetch (a missed
            confounder, never a wrong one). A REVERT line names the trailer
-           line its revert lands with.
+           line its revert lands with, and, for a product change (on tail,
+           or one that landed in a repo other than the harness repo), that
+           it lands as a revert PR in that repo through its own bar.
+           Landings inside the window whose metric is n/a are named with
+           their reasons and counts ("excluded N landing(s) ..."), never
+           read as 0; record prints the same for its baseline (DND-1613).
            Appends a status row only when the verdict changed, so a re-run
            with the same inputs writes nothing.
   list     Every experiment and its latest status (DECLINED with its
@@ -150,7 +169,8 @@ HELP = <<~TXT
                 metric measured (null rows, e.g. landings before a phase's
                 emitter, never count); the experiment's own landing
                 excluded. A metric with no measured landing before the
-                experiment has NO before-set: pending, never a gain.
+                experiment has NO before-set: pending, never a gain. On
+                tail, only landings whose post-merge run concluded.
     keep        median down >= 10% (a 0s baseline never qualifies), p90 not
                 up, every guard (critic BLOCK rate, gate red rate, reverts on
                 main other than reverts of experiments) measured on both
@@ -171,7 +191,8 @@ HELP = <<~TXT
                          configured repo, or the runner's own repo (custom)
                          even where it is not configured (custom: the basename
                          of the runner's main checkout). Unresolvable: exit 2
-    --phase P            implement | verify | queue | integrate | merge
+    --phase P            implement | verify | queue | integrate | merge | tail
+                         (tail takes --metric phase only)
     --metric M           phase | lead | code | counter:<name> | check:<label> | na_share
                          (instrumentation measures na_share; a change does not).
                          check:<label> is one harness-gate check's wall on each
@@ -422,9 +443,14 @@ module Record
     hypothesis = read_hypothesis(opts["--hypothesis-file"])
     state = Setup.state_dir(env)
     change = opts["--change-repo"] || repo.name
+    if (why = X.tail_change_repo_error(metric.phase, repo.name, change))
+      refuse(2, why, "record a tail change with --repo #{repo.name} and no --change-repo; a harness change in " \
+                     "#{change} is recorded on the harness phase it moves")
+    end
     change_path = change == repo.name ? repo.path : Setup.change_repo_path(res, change)
     rows = Setup.ledger_rows(state, repo.name)
     check_label!(rows, metric, repo, res.window) if metric.check?
+    tail!(rows, repo, res.window) if metric.tail?
     on_main!(change, change_path, commit)
     trailer!(change, change_path, commit, repo, metric)
     cross = change == repo.name ? {} : { "change_repo" => change }.merge(Live.resolve(state, change, change_path, commit, live_at!(change, change_path, commit)))
@@ -464,6 +490,28 @@ module Record
            "copy the label exactly from harness-gate's timings.jsonl ($XDG_STATE_HOME/athena/harness-gate/, " \
            "default ~/.local/state/athena/harness-gate/; " \
            "its \"label\" field) or the gate's output, then re-run record")
+  end
+
+  # A tail experiment on a repo where no recent landing has a measured tail
+  # (no post-merge run concluded) would judge nothing for 7 days and block
+  # tail meanwhile: refuse it (DND-1613). Rows that predate tail_end are
+  # could not look, never "no post-merge CI".
+  def tail!(rows, repo, window)
+    err = X.tail_error(rows, window: window)
+    return unless err
+
+    if err[:state] == :could_not_look
+      refuse(3, "could not look: none of #{repo.name}'s last #{window} landing(s) (#{err[:n]} in the ledger window) " \
+                "carries lead-time's end kind (tail_end, DND-1532), so a 0 tail cannot be told from a landing with " \
+                "no post-merge run",
+             "run ai/bin/lead-time-phases --ingest --repo #{repo.name} after a landing; this is not a repo without " \
+             "post-merge CI")
+    end
+    reasons = err[:reasons].map { |r| "#{r['reason']} (#{r['count']})" }.join("; ")
+    refuse(2, "none of #{repo.name}'s last #{window} landing(s) has a measured tail (#{err[:n]} read: #{reasons}), " \
+              "so a change on tail cannot be judged there",
+           "record a change on tail only in a repo whose post-merge runs conclude (lead-time-phases --summary: " \
+           "biggest.tail_candidate); otherwise work the largest measurable phase")
   end
 
   def read_hypothesis(path) = Setup.read_text(path, "hypothesis", "write what the change should move, and why")
@@ -533,7 +581,9 @@ module Record
     s = X.sides(rows, metric: metric, exclude: exclude, boundary: boundary)
     return { "n" => 0, "na_reason" => s[:before_na] } if s[:before].nil?
 
-    X.stats(s[:before], metric).merge("from" => s[:before].first["landed_at"], "to" => s[:before].last["landed_at"])
+    out = X.stats(s[:before], metric).merge("from" => s[:before].first["landed_at"], "to" => s[:before].last["landed_at"])
+    ex = X.excluded(rows, metric: metric, exclude: exclude, from: X.at(s[:before].first), to: boundary)
+    ex.empty? ? out : out.merge("excluded" => ex)
   end
 
   # What a plain revert of the commit would delete (DND-1549).
@@ -551,6 +601,8 @@ module Record
           elsif b.key?("na_share") then "n=#{b['n']} n/a share=#{b['na_share']}"
           else "n=#{b['n']} median=#{fmt(b['median'])} p90=#{fmt(b['p90'])}"
           end
+    ex = X.excluded_text(b["excluded"])
+    out = "#{out}; #{ex}" if ex
     b["provisional"] ? "#{out} (provisional: #{b['provisional']})" : out
   end
 
@@ -643,9 +695,10 @@ module Judge
     results = pending.map { |e| [e, *verdict(e, rows, repo, shas, now, res)] }
     results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo, res), nil] }
     # + the HELD explanation (DND-1549), nil unless a revert verdict is held
-    results = results.map { |e, v, ctx| held(e, v, ctx, repo, res) }
+    harness = harness_name
+    results = results.map { |e, v, ctx| held(e, v, ctx, repo, res, harness: harness) }
     appended = Setup.append(store) { |existing| fresh_rows(existing, results, now) }
-    results.each { |e, v, ctx, why| puts line(e, v, ctx, why) }
+    results.each { |e, v, ctx, why| puts line(e, v, ctx, why, route: X.revert_route(e, harness: harness)) }
     judged = results.map { |_, v| v["status"] }
     tally = (X::JUDGED - %w[confounded]).map { |s| "#{judged.count(s)} #{s}" }.join(", ")
     declined = mine.count { |e| e["status"] == "declined" }
@@ -661,7 +714,7 @@ module Judge
   # -> [exp, verdict, ctx, why]. A revert verdict (fresh or owed) whose
   # commit added test lines, or whose answer is unknown, is held: the
   # verdict gains a `held` field and stays revert; why is the line's text.
-  def held(exp, v, ctx, repo, res)
+  def held(exp, v, ctx, repo, res, harness: nil)
     return [exp, v, ctx, nil] unless v["status"] == "revert"
 
     hold = X.hold(v["status"], tests_fields(exp, repo, res))
@@ -669,7 +722,19 @@ module Judge
 
     refusal, = X.decline_error(exp.merge("status" => "revert", "last" => v))
     change = X.cross_repo?(exp) ? exp["change_repo"] : nil
-    [exp, v.merge("held" => hold), ctx, X.hold_text(repo.name, exp["id"], exp["commit"], hold, refusal, change_repo: change, trailer: trailer_line(exp))]
+    [exp, v.merge("held" => hold), ctx, X.hold_text(repo.name, exp["id"], exp["commit"], hold, refusal, change_repo: change, trailer: trailer_line(exp),
+                                             route: X.revert_route(exp, harness: harness))]
+  end
+
+  # The harness repo's name (the runner's own repo), which tells a product
+  # revert from a harness one (X.revert_route, DND-1613); nil, warned, when
+  # it cannot be found: then only a product-lever phase (tail) is routed.
+  def harness_name
+    own = LeadTimeConfigIO.own_repo
+    return own.label unless own.error
+
+    warn "experiment: the harness repo cannot be found (#{own.error}); a revert route is named for tail only"
+    nil
   end
 
   # The revert's trailer line (DND-1529), or nil for a record whose parts do
@@ -732,11 +797,15 @@ module Judge
     s = X.sides(rows, metric: metric, exclude: split[:exclude], boundary: split[:boundary])
     v = X.judge(exp, before: s[:before], after: s[:after], guards_before: guards(s[:before], repo, shas),
                      guards_after: guards(s[:after], repo, shas), now: now)
+    from, to = X.window(s, split[:boundary])
+    # Landings in the window the metric could not compare (DND-1613): named,
+    # never read as 0. Printed fresh each run and kept on the status row as
+    # written; never judged, and not in X::COMPARED, so a change in it alone
+    # appends no row.
+    ex = X.excluded(rows, metric: metric, exclude: split[:exclude], from: from, to: to)
+    v = v.merge("excluded" => ex) unless ex.empty?
     # Instrumentation is never confounded (X.confounders), so its logs are not read.
-    unless exp["kind"] == "instrumentation"
-      from, to = X.window(s, split[:boundary])
-      v = X.confound(v, Confound.find(exp, repo, res, from, to), phase: exp["phase"])
-    end
+    v = X.confound(v, Confound.find(exp, repo, res, from, to), phase: exp["phase"]) unless exp["kind"] == "instrumentation"
     [v, metric.check? ? X.phase_context(s[:before], s[:after], phase: exp["phase"]) : nil]
   end
 
@@ -782,7 +851,8 @@ module Judge
   end
 
   # A held revert reads REVERT HELD instead of REVERT / REVERT OWED.
-  def line(exp, v, ctx = nil, held_why = nil)
+  # route: X.revert_route's text for a product revert (DND-1613), else nil.
+  def line(exp, v, ctx = nil, held_why = nil, route: nil)
     g = v["guards"]&.map { |name, d| "#{name} #{d['before'].nil? ? 'n/a' : d['before']}->#{d['after'].nil? ? 'n/a' : d['after']} #{d['state']}" }
     phase = ctx ? " | phase (context, not judged): before #{side(ctx['before'])} | after #{side(ctx['after'])}" : ""
     status = held_why ? "REVERT HELD" : v["status"].upcase
@@ -790,7 +860,11 @@ module Judge
     # A revert lands with its experiment's trailer (DND-1529), so another
     # machine sees the phase move back.
     trailer = !held_why && v["status"] == "revert" ? trailer_line(exp) : nil
-    reason = "#{reason} | land the revert with the trailer line `#{trailer}`" if trailer
+    if !held_why && v["status"] == "revert" && (trailer || route)
+      reason = "#{reason} | land the revert#{route ? " #{route}" : ''}#{trailer ? " with the trailer line `#{trailer}`" : ''}"
+    end
+    ex = X.excluded_text(v["excluded"])
+    reason = "#{reason} | #{ex}" if ex
     xtext = X.cross_text(exp)
     "experiment: #{exp['id']} #{status} kind=#{exp['kind']} metric=#{exp['metric']}#{xtext ? " #{xtext}" : ''} | " \
       "before #{side(v['before'])} | after #{side(v['after'])} | guards #{g ? g.join(', ') : 'n/a'} | #{reason}#{phase}"

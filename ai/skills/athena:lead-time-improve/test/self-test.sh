@@ -635,6 +635,92 @@ eq "the git adapter reads a bad repo path as could not look, never as no trailer
   "$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.trailer_commits(ARGV[1], "2026-10-01T00:00:00Z"); puts s.could_not_look? ? "could_not_look" : "ok"' \
      "${HERE}/../lib/experiment_git.rb" "${TMP}/no-such-repo")" "could_not_look"
 
+# ── tail: a product change judged on landing -> post-merge run (DND-1613) ───
+echo "== tail"
+# A product repo with post-merge CI (gen_saas-shaped, synthetic), configured
+# improve beside custom. Its changes land in itself (DND-1542).
+PGS="${TMP}/tl/gen_saas"
+mkdir -p "${PGS}"
+GP=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid
+    GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid git -C "${PGS}")
+"${GP[@]}" init -q -b main
+pcommit() { # AT SUBJECT [BODY]: stages the work tree, commits, prints the SHA
+  "${GP[@]}" add -A && GIT_COMMITTER_DATE="$1" GIT_AUTHOR_DATE="$1" "${GP[@]}" commit -q --allow-empty -m "$2" ${3:+-m "$3"} \
+    && "${GP[@]}" rev-parse HEAD
+}
+mkdir -p "${PGS}/.github/workflows" "${PGS}/apps/x/test"
+printf 'jobs: {}\n' >"${PGS}/.github/workflows/deploy.yml"
+TK="$(pcommit 2026-10-12T14:00:00Z "fixture: cache the deploy build" "$(tr "gen_saas tail phase")")"
+printf 'jobs: {build: {}}\n' >"${PGS}/.github/workflows/deploy.yml"
+TV="$(pcommit 2026-10-14T14:00:00Z "fixture: a slower deploy step" "$(tr "gen_saas tail phase")")"
+printf 'defmodule T do end\n' >"${PGS}/apps/x/test/deploy_test.exs"
+printf 'jobs: {build: {}, smoke: {}}\n' >"${PGS}/.github/workflows/deploy.yml"
+TH="$(pcommit 2026-10-16T14:00:00Z "fixture: a deploy step with its test" "$(tr "gen_saas tail phase")")"
+TNR="$(pcommit 2026-10-18T14:00:00Z "fixture: a change where no run concluded" "$(tr "gen_saas tail phase")")"
+TCONF="${TMP}/tail.json"
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${PGS}\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TCONF}"
+# tl STATE NOW CMD...: runs CMD against that state dir and the tail config.
+tl() { local st="$1" now="$2"; shift 2; LEAD_TIME_STATE_DIR="${st}" ATHENA_LEADTIME_CONFIG="${TCONF}" LEAD_TIME_EXPERIMENT_NOW="${now}" "$@"; }
+trec() { run record --repo gen_saas --phase tail --metric "$1" --commit "$2" --kind "${3:-change}" --hypothesis-file "${HYP}"; }
+
+STATETK="${TMP}/statetk"
+mkdir -p "${STATETK}"
+/usr/bin/ruby "${HERE}/make_tail_ledger.rb" "${STATETK}/ledger.jsonl" gen_saas "${TK}" 2400 2026-10-12T00:00:00Z
+KID="gen_saas:tail:${TK:0:12}"
+eq "tail on any metric but phase is refused: exit 2" "$(tl "${STATETK}" 2026-10-13T12:00:00Z trec lead "${TK}")" "2"
+has "... naming tail and --metric phase" "$(err)" "tail is judged on --metric phase only"
+eq "... instrumentation on tail too (na_share is not a tail metric)" "$(tl "${STATETK}" 2026-10-13T12:00:00Z trec na_share "${TK}" instrumentation)" "2"
+eq "a tail change attributed to a custom commit (--change-repo) is refused: exit 2" \
+  "$(tl "${STATETK}" 2026-10-13T12:00:00Z run record --repo gen_saas --change-repo custom --phase tail --metric phase --commit "${LANDING}" --kind change --hypothesis-file "${HYP}")" "2"
+has "... naming the product lever" "$(err)" "a change on tail lands in gen_saas itself"
+eq "record a product change on tail: exit 0" "$(tl "${STATETK}" 2026-10-13T12:00:00Z trec phase "${TK}")" "0"
+has "the baseline is the ten measured tails before it" "$(out)" "${KID} kind=change metric=phase phase=tail"
+has "... n=10 median 3600s" "$(out)" "baseline n=10 median=3600s p90=3600s"
+has "... the three landings with no post-merge run are excluded with their reason, never 0" "$(out)" \
+  "excluded 3 landing(s) in the window, never read as 0: tail: no post-merge run concluded for the landing (lead-time end kind merge); its 0s is not a measured tail (3)"
+eq "judge: exit 0" "$(tl "${STATETK}" 2026-10-13T12:00:00Z run judge --repo gen_saas)" "0"
+has "regression: a change recorded on tail splits before/after on measured tails: KEEP 3600 -> 2400" "$(out)" \
+  "${KID} KEEP kind=change metric=phase | before n=10 median=3600s p90=3600s | after n=10 median=2400s p90=2400s"
+has "... foreign landings count on tail (their tail is the forge's)" "$(out)" "after n=10"
+has "... the six unmeasured landings in the window are named, never 0" "$(out)" "excluded 6 landing(s) in the window, never read as 0"
+has "... with the pre-DND-1532 row named apart" "$(out)" "tail: the row was ingested before DND-1532 kept its end kind, so its 0s cannot be told apart from a landing whose run was never found (1)"
+has "... the guards read gen_saas" "$(out)" "reverts 0->0 ok"
+has "the status row records the exclusions" "$(grep '"status":"keep"' "${STATETK}/experiments.jsonl")" '"excluded":[{"reason":"tail: no post-merge run concluded'
+
+STATETV="${TMP}/statetv"
+mkdir -p "${STATETV}"
+/usr/bin/ruby "${HERE}/make_tail_ledger.rb" "${STATETV}/ledger.jsonl" gen_saas "${TV}" 4000 2026-10-14T00:00:00Z
+VID="gen_saas:tail:${TV:0:12}"
+eq "record a tail change that slows the deploy: exit 0" "$(tl "${STATETV}" 2026-10-15T12:00:00Z trec phase "${TV}")" "0"
+eq "judge: exit 0" "$(tl "${STATETV}" 2026-10-15T12:00:00Z run judge --repo gen_saas)" "0"
+has "a rising tail is REVERT, as for any phase" "$(out)" "${VID} REVERT kind=change"
+has "... its revert is a PR in gen_saas through its own bar (the product lane)" "$(out)" \
+  "land the revert as a revert PR in gen_saas through its own bar (the product lane, DND-1540) with the trailer line \`Lead-time-experiment: gen_saas tail phase\`"
+has "... the one-pending-per-phase rule holds: an owed tail revert blocks tail" \
+  "$(tl "${STATETV}" 2026-10-15T12:00:00Z trec phase "${TNR}" >/dev/null; err)" "a change on tail owes a revert that has not landed: ${VID}"
+
+STATETH="${TMP}/stateth"
+mkdir -p "${STATETH}"
+/usr/bin/ruby "${HERE}/make_tail_ledger.rb" "${STATETH}/ledger.jsonl" gen_saas "${TH}" 4000 2026-10-16T00:00:00Z
+HTID="gen_saas:tail:${TH:0:12}"
+eq "record a tail change that added a test in gen_saas: exit 0" "$(tl "${STATETH}" 2026-10-17T12:00:00Z trec phase "${TH}")" "0"
+has "... record reads gen_saas's test paths (FirstParty.test_path?)" "$(out)" "a plain revert would delete test additions in apps/x/test/deploy_test.exs"
+eq "judge: exit 0" "$(tl "${STATETH}" 2026-10-17T12:00:00Z run judge --repo gen_saas)" "0"
+has "REVERT HELD applies to the product repo's tests" "$(out)" "${HTID} REVERT HELD kind=change"
+has "... the partial revert lands as a revert PR in gen_saas through its bar" "$(out)" \
+  "and the trailer line \`Lead-time-experiment: gen_saas tail phase\` (DND-1529), landed as a revert PR in gen_saas through its own bar (the product lane, DND-1540))"
+
+STATETN="${TMP}/statetn"
+mkdir -p "${STATETN}"
+/usr/bin/ruby "${HERE}/make_tail_ledger.rb" "${STATETN}/ledger.jsonl" gen_saas "${TNR}" 2400 2026-10-18T00:00:00Z no-runs
+eq "a repo where no landing in the window had a post-merge run: tail refused, exit 2" "$(tl "${STATETN}" 2026-10-19T12:00:00Z trec phase "${TNR}")" "2"
+has "... naming the reasons it counted, never a 0 baseline" "$(err)" "none of gen_saas's last 20 landing(s) has a measured tail"
+has "... with the reasons" "$(err)" "lead-time end kind merge"
+has "... and a Fix:" "$(err)" "Fix:"
+eq "... nothing written" "$(test -e "${STATETN}/experiments.jsonl" && echo yes || echo no)" "no"
+eq "custom's ledger rows carry no tail end kind (ingested before DND-1532): could not look, exit 3" "$(rec tail phase "${NEWSHA}" change)" "3"
+has "... saying could not look, not unmeasured" "$(err)" "could not look: none of custom's"
+
 # ── a configured repo not on this machine (DND-1526) ────────────────────────
 echo "== skipped on this machine"
 printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gone/gen_saas\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/gone.json"
