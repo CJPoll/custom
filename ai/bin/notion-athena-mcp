@@ -24,4 +24,16 @@ if [ -z "${ASDF_NODEJS_VERSION:-}" ] && ! npx -v >/dev/null 2>&1; then
   fi
 fi
 
+# DND-1449: server 2.5.x sends Notion-Version only on the page-markdown tools,
+# so create-a-comment fails 400 missing_version. Preload a shim that adds the
+# spec's default version to any Notion request that carries none. A missing
+# shim must fail loud: a silent skip is the bug coming back.
+SHIM="$(cd "$(dirname "$0")" && pwd)/../lib/notion-version-shim.cjs"
+[ -r "$SHIM" ] || {
+  echo "notion-athena-mcp: $SHIM missing/unreadable" >&2
+  echo "Fix: restore ai/lib/notion-version-shim.cjs from version control; without it every comment call fails 400 missing_version (DND-1449)" >&2
+  exit 1
+}
+export NODE_OPTIONS="--require $SHIM${NODE_OPTIONS:+ $NODE_OPTIONS}"
+
 exec npx -y @notionhq/notion-mcp-server

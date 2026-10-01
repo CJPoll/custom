@@ -331,3 +331,4 @@ ai/git-hooks/outbound-pre-push.sh	guard
 scripts/setup-private-overlay	guard
 ai/lib/private_overlay_install.rb	library	pure verdict/plan rules required by scripts/setup-private-overlay (DND-703); returns Verdicts and the Fix: text (fix_for) that the installer prints
 ai/lib/private_overlay_install_host.rb	library	claude/git/filesystem adapter required by scripts/setup-private-overlay (DND-703); returns [nil, reason] or raises PrivateOverlayInstall::HostError, and the installer prints the Fix:
+ai/lib/notion-version-shim.cjs	library	preloaded by ai/bin/notion-athena-mcp; adds the default Notion-Version header to requests that carry none (DND-1449); no failure path of its own
