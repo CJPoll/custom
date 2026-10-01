@@ -1950,7 +1950,8 @@ lenient about what I receive.
   and the shipwright runner, which sends its stale-dirt report (DND-692) and
   its wedge report (DND-834) through the same `send-mail` path, and the
   epic-clustering runner's wedge and blocked reports and its per-run
-  harness-lane drain request (DND-983), sent the same way.
+  harness-lane drain request (DND-983), sent the same way, and the lead-time
+  improver runner's wedge and blocked reports (DND-1479), sent the same way.
 
   **Later (2026-09-27):** DND-987 adds a third kind of sender on that side:
   the harness lane's drain request (`-harness-lane-drain.md`). An
