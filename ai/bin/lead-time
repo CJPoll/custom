@@ -118,6 +118,28 @@ module LeadTime
     [nil, "the forge's head commit (#{field}) #{raw.inspect} is not a commit sha"]
   end
 
+  # The commit a row LANDED as (DND-1491): the forge's merge commit, or the
+  # base commit a push landed. Every row has one or names why it has none, so
+  # "no landed commit" never reads the same as a landing whose key was lost.
+  #   landed_via: "merge" | "push" | nil (it did not land, or cannot be decided)
+  #   sha, field: the landed commit and the key it was read from
+  #   closed:     it closed without landing
+  #   unmeasured: why its landing could not be decided
+  # -> [sha, nil] or [nil, reason]: absent or malformed is never "".
+  def landing_commit(landed_via:, sha:, field:, closed: false, unmeasured: nil)
+    if landed_via
+      return [sha, nil] if sha.is_a?(String) && sha.match?(SHA_RE)
+      what = landed_via == "merge" ? "merge commit" : "landed commit"
+      return [nil, "the forge gave no #{what} (#{field})"] if sha.to_s.empty?
+
+      return [nil, "the #{what} (#{field}) #{sha.inspect} is not a commit sha"]
+    end
+    return [nil, "the landing could not be decided: #{unmeasured}"] if unmeasured
+    return [nil, "it closed without landing on the base branch"] if closed
+
+    [nil, "it is open: it has not landed"]
+  end
+
   # Latest finished_at among the given iso strings, as an ISO string (ignoring
   # blanks). nil if none. Returns a string so it composes with pick_end.
   def latest(iso_times)
@@ -205,20 +227,26 @@ module LeadTime
   # (DND-1317: ~/dev/custom lands by a fast-forward push of the gated,
   # rebased head, so GitHub shows the PR CLOSED, never MERGED.)
   #
-  #   pr_only:      [{pid:, subject:}] the request's non-merge commits that are
-  #                 not on the base tip
+  #   pr_only:      [{pid:, pid0:, subject:}] the request's non-merge commits
+  #                 that are not on the base tip; pid0 is the zero-context
+  #                 patch-id (nil when unknown)
   #   combined_pid: patch-id of the request's whole diff from its merge-base
   #                 (nil when that diff is empty)
-  #   main:         [{sha:, pid:, subject:}] the base's non-merge commits that
-  #                 are not in the request, newest first
+  #   main:         [{sha:, pid:, pid0:, subject:}] the base's non-merge
+  #                 commits that are not in the request, newest first
   #
   # -> {status: :landed, sha:}  every commit's patch is on main (a rebase), or
-  #                             the whole diff is one main commit (a squash);
-  #                             sha is the newest main commit that carries it
+  #                             the whole diff is one main commit (a squash),
+  #                             or every commit is on main under its own
+  #                             subject with only its context changed
+  #                             (DND-1491); sha is the newest main commit that
+  #                             carries it
   #    {status: :unknown, reason:}  some but not all commits' patches are on
-  #                             main, or a main commit shares a subject with
-  #                             one of the request's commits but not its patch
-  #                             (a conflict-resolved or edited landing)
+  #                             main, or its change is on main under another
+  #                             subject, or a main commit (named) shares a
+  #                             subject with one of the request's commits but
+  #                             not its change (a conflict-resolved or edited
+  #                             landing)
   #    {status: :not_landed}    nothing of it is on main
   def classify_landing(pr_only:, combined_pid:, main:)
     by_pid = {}
@@ -240,14 +268,46 @@ module LeadTime
       return { status: :unknown,
                reason: "#{hits} of #{pr_only.size} of its commits are on the base branch by patch-id" }
     end
+    in_context = landed_in_other_context(pr_only, main, order)
+    return in_context if in_context
+
     subjects = main.map { |m| m[:subject] }
     clash = pr_only.map { |c| c[:subject] }.find { |s| subjects.include?(s) }
     if clash
+      sha = main.find { |m| m[:subject] == clash }[:sha]
       return { status: :unknown,
-               reason: "a commit titled '#{clash}' is on the base branch with a different patch" }
+               reason: "a commit titled '#{clash}' (#{sha.to_s[0, 12]}) is on the base branch with a different patch" }
     end
 
     { status: :not_landed }
+  end
+
+  # The DND-1491 tier: a landing whose patch differs from the request's only in
+  # its CONTEXT lines, because the base changed a line next to the change
+  # before it landed (custom PR #83). pid0 is the patch-id of the commit's
+  # zero-context diff: its added and removed lines and their files only. A
+  # zero-context match is weaker than a full one, so it counts as the landing
+  # only under the same subject, commit for commit. The same change under
+  # another subject is not proof either way, so it is could-not-measure, never
+  # closed. -> {status:, sha:} | {status:, reason:} | nil (no zero-context
+  # match at all).
+  def landed_in_other_context(pr_only, main, order)
+    return nil if pr_only.empty? || pr_only.any? { |c| c[:pid0].nil? }
+
+    same = pr_only.map { |c| main.find { |m| m[:pid0] == c[:pid0] && m[:subject] == c[:subject] }&.dig(:sha) }
+    return { status: :landed, sha: same.min_by { |s| order[s] } } if same.none?(&:nil?)
+
+    hits = same.compact.size
+    if hits.positive?
+      return { status: :unknown,
+               reason: "#{hits} of #{pr_only.size} of its commits are on the base branch with a different context" }
+    end
+    other = pr_only.lazy.filter_map { |c| main.find { |m| m[:pid0] && m[:pid0] == c[:pid0] } }.first
+    return nil unless other
+
+    { status: :unknown,
+      reason: "its change is on the base branch as #{other[:sha].to_s[0, 12]} ('#{other[:subject]}') " \
+              "under another subject, with a different context" }
   end
 
   # The push that put `sha` on the base branch. pushes: [{at:, after:}] oldest
@@ -565,6 +625,7 @@ class GitHubForge
       number: d["number"], title: d["title"], branch: d["headRefName"],
       head_commit: head, head_commit_unmeasured: head_why,
       merged_at: merged_at, merge_sha: merge_sha, landed_via: landed_via,
+      merge_sha_field: landed_via == "push" ? "the landing push" : "mergeCommit",
       closed: closed, unmeasured: unmeasured, closed_at: d["closedAt"],
       # Author AND committer date: a rebase resets only the committer date.
       commit_times: (d["commits"] || []).flat_map { |c| [c["authoredDate"], c["committedDate"]] },
@@ -695,16 +756,24 @@ class GitHubForge
   PATCH_CONFIG = ["-c", "diff.noprefix=false", "-c", "color.ui=never"].freeze
   PATCH_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv"].freeze
 
-  # [{sha:, pid:, subject:}] for a rev range, newest first; nil on a git failure.
+  # [{sha:, pid:, pid0:, subject:}] for a rev range, newest first; nil on a
+  # git failure. pid0 is the patch-id of the zero-context diff (-U0), which
+  # a change keeps when the base edits a line next to it (DND-1491).
   def commit_patches(range)
     subjects = git_ok("log", "--format=%H%x09%s", *range) or return nil
-    patches = git_ok(*PATCH_CONFIG, "log", "-p", *PATCH_FLAGS, "--format=commit %H", *range) or return nil
-    ids = patch_ids(patches) or return nil
-    pid_of = ids.to_h { |pid, sha| [sha, pid] }
+    pid_of = range_patch_ids(range, []) or return nil
+    pid0_of = range_patch_ids(range, ["-U0"]) or return nil
     subjects.lines.map do |l|
       sha, subject = l.chomp.split("\t", 2)
-      { sha: sha, pid: pid_of[sha], subject: subject.to_s }
+      { sha: sha, pid: pid_of[sha], pid0: pid0_of[sha], subject: subject.to_s }
     end
+  end
+
+  # {sha => patch_id} for a rev range's commits; nil on a git failure.
+  def range_patch_ids(range, extra)
+    patches = git_ok(*PATCH_CONFIG, "log", "-p", *PATCH_FLAGS, *extra, "--format=commit %H", *range) or return nil
+    ids = patch_ids(patches) or return nil
+    ids.to_h { |pid, sha| [sha, pid] }
   end
 
   # [[patch_id, sha], ...] for a stream of patches; nil when patch-id failed,
@@ -840,6 +909,7 @@ class GitLabForge
       number: d["iid"], title: d["title"], branch: d["source_branch"],
       head_commit: head, head_commit_unmeasured: head_why,
       merged_at: d["merged_at"], merge_sha: merge_sha,
+      merge_sha_field: "merge_commit_sha, squash_commit_sha, sha",
       landed_via: d["merged_at"] ? "merge" : nil, unmeasured: unmeasured,
       closed_at: d["merged_at"] || d["closed_at"],
       # authored_date survives a rebase; created_at is the committer date.
@@ -1104,10 +1174,21 @@ def analyze(forge, id, starts)
                    first_commit_times: f[:commit_times], deploy_at: f[:deploy_at],
                    pipeline_at: f[:pipeline_at], merged_at: f[:merged_at],
                    closed: f[:closed], unmeasured: f[:unmeasured])
-          .merge(pr: f[:number], title: f[:title], branch: f[:branch],
-                 landed_via: f[:landed_via], landed_commit: f[:landed_via] == "push" ? f[:merge_sha] : nil,
-                 merge_commit: f[:landed_via] == "merge" ? f[:merge_sha] : nil, closed_at: f[:closed_at],
+          .merge(pr: f[:number], title: f[:title], branch: f[:branch], landed_via: f[:landed_via])
+          .merge(landing_commit_keys(f[:landed_via], f[:merge_sha], f[:merge_sha_field],
+                                     closed: f[:closed], unmeasured: f[:unmeasured]))
+          .merge(closed_at: f[:closed_at],
                  head_commit: f[:head_commit], head_commit_unmeasured: f[:head_commit_unmeasured])
+end
+
+# A row's landed_commit (a push landing), merge_commit (a forge merge), and
+# landing_commit_unmeasured: null when one of the two is set, else why neither
+# is (DND-1491). Never an empty string.
+def landing_commit_keys(landed_via, sha, field, closed: false, unmeasured: nil)
+  commit, why = LeadTime.landing_commit(landed_via: landed_via, sha: sha, field: field,
+                                        closed: closed, unmeasured: unmeasured)
+  { landed_commit: landed_via == "push" ? commit : nil, merge_commit: landed_via == "merge" ? commit : nil,
+    landing_commit_unmeasured: why }
 end
 
 # One direct-push landing row from a LeadTime.build_push_rows skeleton: its
@@ -1126,8 +1207,9 @@ def push_row(forge, sk, starts, ci = {})
   LeadTime.compute(start_at: start_at, start_source: source, start_unmeasured: why,
                    first_commit_times: sk[:first_commit_times], deploy_at: deploy_at,
                    pipeline_at: pipeline_at, merged_at: sk[:at], unmeasured: sk[:unmeasured])
-          .merge(pr: nil, ticket: sk[:ticket], title: sk[:title], branch: nil, landed_via: "push",
-                 landed_commit: sk[:landed_commit], commits: sk[:commits], closed_at: sk[:at])
+          .merge(pr: nil, ticket: sk[:ticket], title: sk[:title], branch: nil, landed_via: "push")
+          .merge(landing_commit_keys("push", sk[:landed_commit], "the activity log's after"))
+          .merge(commits: sk[:commits], closed_at: sk[:at])
 end
 
 # The direct-push landings in the window (DND-1009), deduped against the PR

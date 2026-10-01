@@ -169,7 +169,14 @@ module LeadTimePhases
     def from_row(row, ticket:, ticket_na: nil)
       commit = row["landed_commit"] || row["merge_commit"]
       landed = Util.time(row["merged"])
-      return [nil, "no landed commit (#{row['pr'] ? "PR ##{row['pr']}" : 'a push'})"] if commit.to_s.empty?
+      if commit.to_s.empty?
+        what = row["pr"] ? "PR ##{row['pr']}" : "a push"
+        # lead-time names why a row has no landed commit (DND-1491); a row
+        # with neither is lead-time breaking that contract, never a quiet skip.
+        why = row["landing_commit_unmeasured"].to_s
+        why = "lead-time named no reason (landing_commit_unmeasured is absent)" if why.empty?
+        return [nil, "no landed commit (#{what}): #{why}"]
+      end
       return [nil, "no landing time for #{Util.short(commit)}"] unless landed
 
       start = Util.time(row["start"])

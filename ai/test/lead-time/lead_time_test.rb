@@ -59,6 +59,8 @@ end
 #   PR 9:   c0 -> x9 "DND-9: fix" (main carries y9, same subject, other patch)
 #   PR 10:  c0 -> q1 -> q2        (landed squashed into one commit s10)
 #   PR 11:  c0 -> p11             (partly landed: see p11b)
+#   PR 15:  c0 -> p15 "DND-15: edit k" (lands as l15 after m15 edits an
+#                                  adjacent line: same change, other context)
 def build_fixture(root)
   origin = File.join(root, "origin.git")
   work = File.join(root, "work")
@@ -66,6 +68,8 @@ def build_fixture(root)
   sh_git(origin, "init", "-q", "--bare")
   sh_git(root, "clone", "-q", origin, work)
   o = {}
+  File.write(File.join(work, "k.txt"), "k1\nk2\nk3\n")
+  sh_git(work, "add", "k.txt")
   o[:c0] = commit_file(work, "a.txt", "a\n", "init", "2026-09-28T00:00:00Z")
   sh_git(work, "push", "-q", "origin", "HEAD:refs/heads/main")
 
@@ -86,6 +90,7 @@ def build_fixture(root)
     commit_file(work, "g.txt", "eleven-1\n", "DND-11: part one", "2026-09-28T05:00:00Z")
     commit_file(work, "h.txt", "eleven-2\n", "DND-11: part two", "2026-09-28T05:10:00Z")
   end
+  o[:p15] = pr.call(15) { commit_file(work, "k.txt", "k1\nk2\nk3-pr\n", "DND-15: edit k", "2026-09-28T06:00:00Z") }
 
   sh_git(work, "checkout", "-q", "-B", "main", o[:c0])
   o[:c1] = commit_file(work, "z.txt", "z\n", "unrelated", "2026-09-29T06:00:00Z")
@@ -102,6 +107,11 @@ def build_fixture(root)
   o[:y9] = commit_file(work, "d.txt", "nine-main\n", "DND-9: fix", "2026-09-29T09:00:00Z")
   # Only the first of PR 11's two commits reaches main.
   o[:p11b] = commit_file(work, "g.txt", "eleven-1\n", "DND-11: part one", "2026-09-29T10:00:00Z")
+  # PR 15's shape is custom PR #83 (DND-1491): main edits a line inside PR
+  # 15's diff context, then PR 15's change lands on top. Its added and removed
+  # lines are PR 15's; its context is not, so its patch-id differs.
+  o[:m15] = commit_file(work, "k.txt", "k1-main\nk2\nk3\n", "unrelated k", "2026-09-29T10:30:00Z")
+  o[:l15] = commit_file(work, "k.txt", "k1-main\nk2\nk3-pr\n", "DND-15: edit k", "2026-09-29T10:40:00Z")
   sh_git(work, "push", "-q", "origin", "HEAD:refs/heads/main")
   sh_git(work, "push", "-q", "origin", "#{o[:c0]}:refs/heads/start")
   o[:origin] = origin
@@ -120,6 +130,8 @@ end
 # first, one page per inner array (gh api --paginate --slurp).
 def activity(o)
   [[
+    { "timestamp" => "2026-09-29T10:45:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
+      "before" => o[:p11b], "after" => o[:l15] },
     { "timestamp" => "2026-09-29T10:00:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
       "before" => o[:y9], "after" => o[:p11b] },
     { "timestamp" => "2026-09-29T09:00:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
@@ -212,6 +224,11 @@ Dir.mktmpdir("lead-time-test") do |root|
                          closed_at: "2026-09-29T06:30:00Z", head: :p8, commits: ["2026-09-28T02:00:00Z"]),
     # Its head itself was fast-forwarded onto main (no rebase).
     14 => pr_view(o, 14, state: "CLOSED", head: :c1, commits: ["2026-09-29T05:00:00Z"]),
+    15 => pr_view(o, 15, state: "CLOSED", head: :p15, commits: ["2026-09-28T06:00:00Z"]),
+    # MERGED, but the forge named no merge commit.
+    16 => pr_view(o, 16, state: "MERGED", merged_at: "2026-09-29T06:30:00Z",
+                         closed_at: "2026-09-29T06:30:00Z", head: :p8, commits: ["2026-09-28T02:00:00Z"])
+            .merge("mergeCommit" => nil),
   }
 
   # The start is the ticket's In Progress date (DND-1318); these landing cases
@@ -259,6 +276,49 @@ Dir.mktmpdir("lead-time-test") do |root|
   r13 = analyze(forge, 13, starts)
   check("a MERGED PR still ends at mergedAt") { r13[:merged] == "2026-09-29T06:30:00Z" && r13[:end_kind] == :merge }
   check("a MERGED PR names the forge merge") { r13[:landed_via] == "merge" }
+
+  # --- DND-1491: custom PR #83's shape. Main edited a line inside the PR's
+  #     diff context before the PR's change landed, so the landed commit's
+  #     patch-id differs only by context. It is that PR's landing.
+  r15 = analyze(forge, 15, starts)
+  check("REGRESSION (DND-1491): a same-subject landing whose patch differs only in context is landed") do
+    r15[:end_kind] == :merge && r15[:landed_via] == "push" && r15[:landed_commit] == o[:l15]
+  end
+  check("it is timed by the push that carried the landed commit") { r15[:merged] == "2026-09-29T10:45:30Z" }
+  check("and names no could-not-measure reason for its commit") do
+    r15.key?(:landing_commit_unmeasured) && r15[:landing_commit_unmeasured].nil?
+  end
+  check("a same-subject commit with a DIFFERENT change still reads could-not-measure") do
+    r9[:end_kind] == :unmeasured && r9[:landed_commit].nil?
+  end
+  check("its reason names the base commit it clashed with") { r9[:unmeasured_reason].to_s.include?(o[:y9][0, 12]) }
+
+  # --- DND-1491, the class: every row has a landed commit, or says why not.
+  check("REGRESSION (DND-1491): a could-not-measure row names why it has no landed commit") do
+    r9[:landing_commit_unmeasured].to_s.include?("could not be decided") &&
+      r9[:landing_commit_unmeasured].to_s.include?("DND-9: fix")
+  end
+  check("a closed-unlanded row names why it has no landed commit") do
+    r8[:landing_commit_unmeasured] == "it closed without landing on the base branch"
+  end
+  check("an open row names why it has no landed commit") do
+    r12[:landing_commit_unmeasured] == "it is open: it has not landed"
+  end
+  check("a landed row carries its commit and no reason") do
+    [r7, r10, r13, r14].all? do |r|
+      (r[:landed_commit] || r[:merge_commit]) && r.key?(:landing_commit_unmeasured) && r[:landing_commit_unmeasured].nil?
+    end
+  end
+  r16 = analyze(forge, 16, starts)
+  check("a MERGED PR the forge gave no merge commit for names why, never an empty key") do
+    r16[:merge_commit].nil? && r16[:landing_commit_unmeasured] == "the forge gave no merge commit (mergeCommit)"
+  end
+  check("every analysed row has a landed commit XOR a reason for its absence") do
+    [r7, r8, r9, r10, r11, r12, r13, r14, r15, r16].all? do |r|
+      no_commit = (r[:landed_commit] || r[:merge_commit]).nil?
+      r.key?(:landing_commit_unmeasured) && no_commit != r[:landing_commit_unmeasured].nil?
+    end
+  end
   check("no probe failed on a readable fixture") { !ProbeFailures.any? }
 
   # --- a landing probe that cannot run is a probe failure, never "open".
@@ -309,6 +369,23 @@ Dir.mktmpdir("lead-time-test") do |root|
   # --- the landing rules on their own (pure).
   cls = LeadTime.classify_landing(pr_only: [], combined_pid: nil, main: [{ sha: "m", pid: "p", subject: "s" }])
   check("no commit of its own and no diff match is could-not-measure, never closed") { cls[:status] == :unknown }
+  ctx = lambda do |pr_pid0, main_subject|
+    LeadTime.classify_landing(pr_only: [{ pid: "pr", pid0: pr_pid0, subject: "DND-1: x" }], combined_pid: "pr",
+                              main: [{ sha: "m1", pid: "other", pid0: "z0", subject: main_subject }])
+  end
+  check("a context-only difference under the same subject is landed (DND-1491)") do
+    ctx.call("z0", "DND-1: x") == { status: :landed, sha: "m1" }
+  end
+  check("the same change under ANOTHER subject is could-not-measure, never closed") do
+    c = ctx.call("z0", "DND-2: y")
+    c[:status] == :unknown && c[:reason].include?("m1")
+  end
+  check("a same-subject commit whose change differs is still could-not-measure") do
+    ctx.call("q0", "DND-1: x")[:status] == :unknown
+  end
+  check("a commit with no zero-context patch-id never matches on it") do
+    ctx.call(nil, "DND-1: x")[:status] == :unknown
+  end
   pushes = [{ at: "T1", after: "a1" }, { at: "T2", after: "a2" }, { at: "T3", after: "a3" }]
   carries = ->(hits) { ->(_s, after) { hits.fetch(after) } }
   check("the landing is the FIRST push that carries the commit") do
@@ -411,9 +488,22 @@ r_gl = analyze(gl, 5, stamped)
 check("a GitLab MR row carries the MR head (sha) beside its squash commit") do
   r_gl[:head_commit] == "ef" * 20 && r_gl[:merge_commit] == "12" * 20 && r_gl[:head_commit_unmeasured].nil?
 end
+check("a merged GitLab MR's commit carries no reason (DND-1491)") do
+  r_gl.key?(:landing_commit_unmeasured) && r_gl[:landing_commit_unmeasured].nil?
+end
 gl_mr["sha"] = nil
 check("a GitLab MR with no head says so") do
   analyze(gl, 5, stamped)[:head_commit_unmeasured] == "the forge gave no head commit (sha)"
+end
+gl_mr["squash_commit_sha"] = nil
+check("a merged GitLab MR the forge gave no commit for names why (DND-1491)") do
+  r = analyze(gl, 5, stamped)
+  r[:merge_commit].nil? &&
+    r[:landing_commit_unmeasured] == "the forge gave no merge commit (merge_commit_sha, squash_commit_sha, sha)"
+end
+gl_mr.merge!("state" => "closed", "merged_at" => nil, "closed_at" => "2026-09-30T03:27:17Z", "sha" => "ef" * 20)
+check("a closed-unmerged GitLab MR names why it has no landed commit (DND-1491)") do
+  analyze(gl, 5, stamped)[:landing_commit_unmeasured].to_s.include?("landing by push is only detected on GitHub")
 end
 
 unstamped = NotionStart.new(FakeNotion.new(1203 => at_prop(nil)))
@@ -895,6 +985,12 @@ Dir.mktmpdir("lead-time-push") do |root|
   end
   check("the PR-landed push is the PR's row only, never counted twice") do
     rows.count { |x| x["landed_commit"] == po[:d6] } == 1 && rows.find { |x| x["pr"] == 31 }
+  end
+  check("DND-1491: every scanned row has a landed commit XOR a named reason for its absence") do
+    !rows.empty? && rows.all? do |r|
+      no_commit = (r["landed_commit"] || r["merge_commit"]).nil?
+      r.key?("landing_commit_unmeasured") && no_commit != r["landing_commit_unmeasured"].nil?
+    end
   end
   check("the meta file names the newest landing, the landing count and kept") do
     m = JSON.parse(File.read(meta_path))

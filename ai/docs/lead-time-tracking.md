@@ -77,19 +77,30 @@ A PR that is CLOSED with no `mergedAt` is judged by its **change**, not its stat
 
 - **Landed** when its head is on the base, or every one of its non-merge
   commits' patch-ids is on the base (a rebase), or its whole diff's patch-id is
-  one base commit (a squash). The landing time is the **push** to
+  one base commit (a squash), or every one of its commits is on the base under
+  its own subject with the same zero-context patch-id (`git diff -U0`): the
+  base edited a line next to the change before it landed, so only the
+  context differs (DND-1491). The landing time is the **push** to
   `refs/heads/<base>` that first carried that commit, read from GitHub's
   repository activity log (`gh api repos/{owner}/{repo}/activity`). The row
   carries `landed_via: "push"` and `landed_commit`; a forge merge carries
   `landed_via: "merge"`.
 - **Closed** (`via=closed`, no lead) when none of it is on the base.
 - **Could not measure** (`via=unmeasured`, with the reason on the row and on
-  stderr) when only some of its commits are on the base, or a base commit shares
-  a commit subject with it but not its patch (a conflict-resolved or edited
-  landing), or it has no commit of its own off the base, or no push carried the
+  stderr) when only some of its commits are on the base, or its change is on
+  the base only under another subject, or a base commit (named in the reason)
+  shares a commit subject with it but not its change (a conflict-resolved or
+  edited landing), or it has no commit of its own off the base, or no push carried the
   landed commit, or a push before the carrying one could not be read.
   `--slow` keeps these rows (lead `null`, `unmeasured_reason` set): a row that
   cannot be shown fast must not read as "not an outlier".
+
+  **Later (2026-10-01, DND-1491):** every same-subject, different-patch base
+  commit read could-not-measure. Superseded for a patch that differs only in
+  context: that is the landing. Measured: PR #83 read could-not-measure with
+  no landed commit while its change was on main as `38d76482`, landed by
+  the 02:20:24Z push on 2026-09-27; main had edited a line next to its hunk.
+  `lead-time-phases` skipped the row as "not ledgered" without the reason.
 - A lookup that cannot run (the activity log, a `git fetch` of the base and
   `refs/pull/<n>/head`, `git patch-id`) is a failed probe, so the run ends
   `SCAN INCOMPLETE`.
@@ -106,6 +117,15 @@ integration-gate, the critic or harness-gate saw; `head_commit` is, and
 did not give, or gave malformed (not a full lowercase sha), is `head_commit:
 null` with `head_commit_unmeasured` naming why, never an empty string. A
 direct-push row has no PR and no `head_commit`: its `landed_commit` is the head.
+
+**Every row carries its landed commit or says why not** (DND-1491):
+`landed_commit` (a push landing) or `merge_commit` (a forge merge), and
+`landing_commit_unmeasured`, which is `null` when one of them is set and
+otherwise names why neither is: the landing could not be decided (with that
+reason), it closed without landing, it is open, or the forge gave no merge
+commit or a malformed one. Never an empty string. `lead-time-phases` quotes
+that reason when it leaves a row out of the ledger, and names a row with
+neither a commit nor a reason as lead-time breaking this rule.
 
 The window scan lists every PR **updated** since `--since` (`updated:>=`) and
 filters on `closedAt` locally. GitHub's `closed:>=` qualifier omitted five

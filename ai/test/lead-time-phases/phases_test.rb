@@ -300,6 +300,17 @@ check("L1 a merge row's landed commit is its merge commit") { lnd["landed_commit
 check("L1 a missing start carries lead-time's reason") { lnd["start"].nil? && lnd["start_na"] == "start: no stamp" }
 _, why = L::Landing.from_row(pr_row.merge("merge_commit" => nil), ticket: nil)
 check("L2 no landed commit: refused with a reason") { why.to_s.include?("no landed commit") }
+# DND-1491: the refusal carries lead-time's own reason for the missing commit,
+# and a row with neither a commit nor a reason is named as lead-time's fault.
+_, why = L::Landing.from_row(pr_row.merge("merge_commit" => nil, "landing_commit_unmeasured" => "it is open: it has not landed"),
+                             ticket: nil)
+check("L2 DND-1491 no landed commit names lead-time's reason") do
+  why == "no landed commit (PR #7): it is open: it has not landed"
+end
+_, why = L::Landing.from_row(pr_row.merge("merge_commit" => nil), ticket: nil)
+check("L2 DND-1491 no commit and no reason is named as lead-time's contract break") do
+  why.to_s.include?("lead-time named no reason")
+end
 _, why = L::Landing.from_row(pr_row.merge("merged" => nil), ticket: nil)
 check("L2 no landing time: refused with a reason") { why.to_s.include?("no landing time") }
 
