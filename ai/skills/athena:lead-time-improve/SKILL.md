@@ -191,6 +191,15 @@ The procedure the shipwright ran before this skill, moved here. A `watch`
 repo is read-only to you: you never commit to it, and its improvements are
 filed as tickets.
 
+**The signal.** `ai/bin/lead-time` gives every ticket's lead time = captain
+dispatch (the ticket's dispatch stamp) → fully deployed (git + the
+forge's CI); it splits into two phases with different levers:
+
+- `code` (start → landing) — development + review. Lever: the **harness/process**
+  (clearer specs, better skills, fewer review round-trips).
+- `tail` (landing → end) — CI + deploy. Lever: **pipeline efficiency**
+  (parallelize, cache, shard) — never by weakening a check.
+
 Each run, for every `watch` repo in the config (forge auto-detected),
 scan for outliers newer than your **watch cursor**:
 
