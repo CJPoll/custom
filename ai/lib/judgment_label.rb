@@ -40,18 +40,28 @@ module JudgmentLabel
   #                    applied only with --rule-default, to a root no other
   #                    evidence labels
   RULES = %w[session_mention default_walt_ui].freeze
-  # Grammar session-mention-v1, the SAME grammar the server's router applies
+  # Grammar session-mention-v2, the SAME grammar the server's router applies
   # (gen_saas Athena.SlackEvents.SessionMention; both suites carry the same
-  # vector list, two copies kept in step by hand). Only a LEADING address counts: "harness session:" (the tag form,
-  # as R1 tags posts) or a single-line lead-in of at most 80 characters
-  # ending "for the harness session:". "session" is required. Names that
-  # disagree are no mention.
-  MENTION_GRAMMAR = "session-mention-v1"
+  # vector list, two copies kept in step by hand). Only a LEADING address
+  # counts. The forms are tried in this order, as the router tries them:
+  #   1. the tag form, ending in a colon: "harness session:" (as R1 tags
+  #      posts), "the laptop session:";
+  #   2. the comma form (v2, DND-1535): the tag form ending in a comma, with
+  #      no leading "the": "Harness session, give me a report". With "the",
+  #      a comma talks ABOUT a session ("The harness session, I think, is
+  #      down"). A dash is still no mention;
+  #   3. the address form, colon only: a single-line lead-in of at most 80
+  #      characters ending "for the harness session:".
+  # "session" is required. Names that disagree are no mention.
+  MENTION_GRAMMAR = "session-mention-v2"
   MENTION_NAME = "(?:walt[_ ]?ui|harness|custom|gen[_ ]?saas|laptop)"
   MENTION_NAMES = "(#{MENTION_NAME}(?:\\s*/\\s*#{MENTION_NAME})*)".freeze
-  MENTION_TAIL = "\\s+session(?:\\s*\\([^)\\n]{0,60}\\))?[*_]*\\s*:"
+  MENTION_QUALIFIER = "(?:\\s*\\([^)\\n]{0,60}\\))?"
+  MENTION_TAIL = "\\s+session#{MENTION_QUALIFIER}[*_]*\\s*:".freeze
+  MENTION_COMMA_TAIL = "\\s+session#{MENTION_QUALIFIER}[*_]*\\s*,".freeze
   MENTION_FORMS = [
     Regexp.new("\\A\\s*[*_]*\\s*(?:the\\s+)?#{MENTION_NAMES}#{MENTION_TAIL}", Regexp::IGNORECASE),
+    Regexp.new("\\A\\s*[*_]*\\s*#{MENTION_NAMES}#{MENTION_COMMA_TAIL}", Regexp::IGNORECASE),
     Regexp.new("\\A[^\\n:]{0,80}?(?<![\\p{L}\\p{N}_])for\\s+the\\s+#{MENTION_NAMES}#{MENTION_TAIL}", Regexp::IGNORECASE)
   ].freeze
   # Leading Slack user-mention tokens (<@U0BOT>, <@U0BOT|name>) are skipped:
@@ -102,7 +112,7 @@ module JudgmentLabel
   end
 
   # session_mention(text) -> the label the text addresses, or nil (grammar
-  # session-mention-v1, above). Untrusted text: invalid UTF-8 is scrubbed.
+  # session-mention-v2, above). Untrusted text: invalid UTF-8 is scrubbed.
   def session_mention(text)
     return nil unless text.is_a?(String)
 

@@ -672,7 +672,7 @@ echo "== domain: the owner's routing rule as rule_confirmed labels (DND-717, D-R
 
 # The parity vectors: gen_saas apps/athena/test/athena/slack_events/
 # session_mention_test.exs runs this same list against the router's
-# SessionMention.address/1 (grammar session-mention-v1). Keep them in step.
+# SessionMention.address/1 (grammar session-mention-v2). Keep them in step.
 VECTORS='[
   ["Gen_saas session (laptop): turn the wifi back on", "gen_saas"],
   ["harness session: status?", "harness"],
@@ -703,14 +703,30 @@ VECTORS='[
   ["harneſſ session: x", nil],
   ["éfor the harness session: x", nil],
   ["desktop session: hi", nil],
-  ["", nil]
+  ["", nil],
+  ["Harness session, give me a report on the inbox", "harness"],
+  ["harness session, status?", "harness"],
+  ["harness session , status?", "harness"],
+  ["Gen_saas session (laptop), turn the wifi back on", "gen_saas"],
+  ["*walt_ui session*, ship it", "walt_ui"],
+  ["custom session, hi", "harness"],
+  ["<@U0BOT> harness session, status?", "harness"],
+  ["the harness session, I think, is down", nil],
+  ["The harness session, which you started, is dark", nil],
+  ["ask the harness session, it knows", nil],
+  ["harness sessions, all of you", nil],
+  ["Note for the harness session, dnd deploy", nil],
+  ["harness / walt_ui session, both of you", nil],
+  ["desktop session, hi", nil]
 ]'
 ruby_eq "mention: the parity vectors all read as the router reads them [DND-717]" \
-  "30 ok" \
+  "44 ok" \
   "v = ${VECTORS}; bad = v.reject { |t, want| JudgmentLabel.session_mention(t) == want }; bad.empty? ? \"#{v.size} ok\" : bad.inspect"
 ruby_eq "mention: nil text is no mention" "nil" 'JudgmentLabel.session_mention(nil).inspect'
 ruby_eq "mention: only the lead of a long message is read" "harness" \
   'JudgmentLabel.session_mention("harness session: " + "y" * 10_000)'
+ruby_eq "mention: only the lead of a long comma-form message is read [DND-1537]" "harness" \
+  'JudgmentLabel.session_mention("harness session, " + "y" * 10_000)'
 ruby_eq "mention: invalid UTF-8 in untrusted text is scrubbed, never a crash" "harness" \
   'JudgmentLabel.session_mention("harness session: \xFF".dup.force_encoding("UTF-8"))'
 ruby_eq "mention: every label it answers is a SlackRouting label" "true" \
@@ -768,7 +784,7 @@ eq "a session-addressed root is rule_confirmed session_mention [DND-717]" \
 eq "without --rule-default a no-evidence root stays proposed" "$(jq -r 'select(.id=="EvN1") | .provenance' "${RLABELS}")" "proposed"
 eq "talking about a session is not addressing it" "$(jq -r 'select(.id=="EvA1") | .label + " " + .provenance' "${RLABELS}")" "walt_ui proposed"
 lacks "the labels file never carries the text" "$(cat "${RLABELS}")" "SECRET-MENTION"
-has "the report counts the mentions" "${OUT}" "session mentions (rule 2, session-mention-v1): 1 rule_confirmed"
+has "the report counts the mentions" "${OUT}" "session mentions (rule 2, session-mention-v2): 1 rule_confirmed"
 run "${BIN}" --propose --rule-default --inbox-root "${RROOT}" --labels "${RLABELS}"
 eq "--propose --rule-default exits 0" "${RC}" "0"
 eq "--rule-default labels the no-evidence roots walt_ui default_walt_ui [DND-717]" \

@@ -62,7 +62,7 @@ USAGE = <<~EOF
                         is made). proposed rows are excluded from the run
                         (they never select a threshold) and counted.
                         slack_routing: a root whose text addresses a session
-                        (session-mention-v1) is excluded and counted too,
+                        (session-mention-v2) is excluded and counted too,
                         whatever its provenance: the router routes it by
                         rule and never judges it (DND-717).
     --corpus FILE       JSONL the labels were made from. A row joins on "id"

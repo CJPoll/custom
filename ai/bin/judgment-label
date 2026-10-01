@@ -90,7 +90,8 @@ USAGE = <<~EOF
               mechanically, as provenance rule_confirmed with a "rule"
               field (epic decision D-R2, DND-717); never owner_confirmed:
                 - rule 2, session_mention: a root whose text ADDRESSES a
-                  session ("harness session: ...", or a short lead-in
+                  session ("harness session: ...", "harness session,
+                  ..." with no leading "the", or a short lead-in
                   ending "for the harness session:"; grammar
                   #{JudgmentLabel::MENTION_GRAMMAR}, the server router's own) is labelled that
                   session, over a forward record that disagrees (counted);
