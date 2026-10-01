@@ -232,11 +232,11 @@ The reasons:
 | `config_invalid` | a malformed seam (*Test seams*) | no |
 | `registry_unreadable` | `events.json` cannot be read or parsed | no |
 | `internal_error` | a bug in the writer | no |
+| `counter_corrupt` | the counter itself was unreadable JSON and was restarted | n/a |
 
 A store path that cannot be resolved at all (a relative `ATHENA_TELEMETRY_DIR`,
 no absolute `HOME` or `XDG_STATE_HOME`) has no counter to write. It goes to
 the stderr line.
-| `counter_corrupt` | the counter itself was unreadable JSON and was restarted | n/a |
 
 ## Retention
 
@@ -305,14 +305,22 @@ measure", never as zero. A store path that cannot be resolved raises
 - Exit codes: 0 ok, 1 prune failed, 2 usage (with `Fix:`), 3 could not look.
 
 A shell emitter calls it outside any measured check's own execution, bounded
-and fail-open: `timeout 2 ai/bin/telemetry-emit --event … || true`. That costs
-one Ruby start; it is not wall-clock tested (DND-1222).
+and fail-open: `timeout -k 1 2 ai/bin/telemetry-emit --event … || true`. That
+costs one Ruby start; it is not wall-clock tested (DND-1222).
 
 `ai/lib/telemetry-emit.sh` is that call, written once (DND-1475): a bash
 emitter sources it and calls `athena_telemetry_emit --event …`. It runs the
-CLI under `timeout 2` with stdout dropped and returns 0 whatever happens; of
-the CLI's stderr only the one `athena-telemetry:` line reaches the caller. Its
-clock helpers give `--at` and `--duration`.
+CLI under `timeout -k 1 2`: TERM at two seconds, KILL one second later. That
+one-second gap is the outer bound the git grace in *Unit of work* is shorter
+than. It drops stdout and returns 0 whatever happens; of the CLI's stderr
+only the one `athena-telemetry:` line reaches the caller. Its clock helpers
+give `--at` and `--duration`.
+
+**Later (2026-10-01, DND-1492):** this section said a shell emitter calls
+the CLI under `timeout 2`, and that the binding does. Superseded by
+`timeout -k 1 2`, which the binding has run since it landed (DND-1475): a
+bare `timeout 2` only sends TERM, so a CLI that does not exit on TERM is not
+bounded.
 
 ## Privacy
 

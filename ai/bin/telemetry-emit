@@ -8,7 +8,8 @@
 # library, so a shell emitter and a Ruby emitter write the same line.
 #
 # A shell emitter runs it outside any measured check, bounded and fail-open:
-#   timeout 2 ai/bin/telemetry-emit --event NAME ... || true
+#   timeout -k 1 2 ai/bin/telemetry-emit --event NAME ... || true
+# A bash emitter gets exactly that from ai/lib/telemetry-emit.sh.
 
 require_relative "../lib/strict_argv"
 
