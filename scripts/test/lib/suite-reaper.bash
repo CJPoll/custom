@@ -101,8 +101,11 @@ suite_env_pids() {
     return 2
   fi
   if [ -z "${since}" ]; then
-    { IFS= read -r s <"/proc/$$/stat"; } 2>/dev/null || s=""
-    s="${s##*) }"; read -r -a f <<<"${s}"
+    # The whole file (-d ''): a name may hold a newline (DND-1616). read
+    # returns 1 at end of file even when it read it all; an unreadable stat
+    # leaves s empty, which the check below names.
+    s=""; { IFS= read -r -d '' s <"/proc/$$/stat"; } 2>/dev/null
+    s="${s%$'\n'}"; s="${s##*) }"; read -r -a f <<<"${s}"
     since="${f[19]:-}"
     if [ -z "${since}" ]; then
       echo "suite-reaper: cannot read this shell's start time from /proc/$$/stat." >&2

@@ -87,13 +87,23 @@ function die(code, msg, fix) {
 }
 
 # stat_of(pid) -- 1 and ST_STATE, ST_START, ST_E0, ST_E1 set; 0 when gone.
-function stat_of(pid,    f, line, n, fld) {
+# The WHOLE file is one record (DND-1616): a process name may hold a newline
+# as well as ") ", and every pid's stat is read before the scan knows whose
+# the process is. Read one line at a time, `x) Z (<newline>y` (proc-state's
+# P-6) cut the line inside the name, so ANY such process on the machine, of
+# any user, made every scan die with exit 3 and every reap kill nothing. No
+# NUL can occur in a stat file, so RS="\0" reads it whole; the fields start
+# after its LAST ") " (gawk's "." matches a newline, and ".*" is greedy).
+function stat_of(pid,    f, line, n, fld, saved_rs, r) {
   f = root "/" pid "/stat"
-  if ((getline line < f) <= 0) { close(f); return 0 }
-  close(f)
+  saved_rs = RS; RS = "\0"
+  r = (getline line < f)
+  close(f); RS = saved_rs
+  if (r <= 0) return 0
+  sub(/\n$/, "", line)
   if (index(line, ") ") == 0) die(3, "/proc/" pid "/stat is not in the kernel's format (no \") \" after the comm): " line,
                                    "run on Linux with /proc mounted; this scan must not guess at a stat line.")
-  sub(/^.*\) /, "", line)          # "pid (comm) ": comm may hold spaces and ")"
+  sub(/^.*\) /, "", line)          # "pid (comm) ": comm may hold spaces, ")" and newlines
   n = split(line, fld, " ")
   if (n < 49) die(3, "/proc/" pid "/stat has " n + 2 " fields; env_start/env_end (fields 50-51, Linux 3.5+) are missing, so a mid-exec read cannot be told from an untagged one.",
                   "run on Linux 3.5 or later; this scan must not fall back to an unbracketed read.")

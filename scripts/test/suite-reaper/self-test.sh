@@ -41,6 +41,13 @@
 #       first on PATH is an asdf-style shim that works only under the real
 #       HOME, and a target client that never boots FAILs R2 instead of
 #       passing it vacuously (DND-1203).
+#   S18 a process ANYWHERE on the machine whose name holds a newline (any
+#       user's; proc-state's own P-6 makes one) does not blind the scan or the
+#       reap: on a fixture /proc, and end to end with a live one (DND-1616).
+#
+# Case isolation: each run_fixture case gets its own marker, and the next
+# run_fixture kills whatever the previous case left, by pid, before it starts,
+# so one case's leftover can never count against the next.
 set -uo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd -- "${HERE}/../../.." && pwd -P)"
@@ -58,6 +65,7 @@ MARKS=()
 # the token SCAN-FAILED in place of a pid: every caller then reads "something
 # survived" and the case FAILs, never "no survivors".
 . "${LIB}"
+. "${REPO}/scripts/test/lib/proc-state.bash"
 marked() {
   suite_env_pids exact "$1" && return 0
   echo "self-test: the process scan could not run, so survivors cannot be counted." >&2
@@ -87,6 +95,9 @@ trap 'exit 143' TERM
 # under a fresh marker; sets MARK and FX_RC, and FX_ERR to its stderr file.
 run_fixture() {
   local name="$1" body="$2"
+  # Isolation: the previous case's leftovers (a failed case's survivors) are
+  # killed by pid here, before this case starts.
+  [ -n "${MARK:-}" ] && kill_marked "${MARK}"
   MARK="DND818_ST_MARK=${name}-$$"; MARKS+=("${MARK}")
   printf '#!/usr/bin/env bash\nset -uo pipefail\nLIB=%q\n%s\n' "${LIB}" "${body}" >"${TMP}/${name}.sh"
   FX_ERR="${TMP}/${name}.err"
@@ -322,11 +333,15 @@ for i in $(seq 1 30); do
   bash '"${TMP}"'/s13-launcher.sh '"${TMP}"'/s13.pid
   c="$(cat '"${TMP}"'/s13.pid)"
   suite_reap_tagged 2>/dev/null
-  # proc_running, never kill -0 (DND-1550): the reap leaves the orphan a
-  # ZOMBIE until PID 1 reaps it, and kill -0 succeeds on a zombie.
+  # proc_wait_gone, never kill -0 (DND-1550): the reap leaves the orphan a
+  # ZOMBIE until PID 1 reaps it, and kill -0 succeeds on a zombie. And never
+  # an instant proc_running (DND-1616): a SIGKILLed process that has already
+  # dropped its memory (do_exit) reads "not ours" to the next reap pass but
+  # is not a zombie yet, so "gone" is an event to wait on. The bound only caps
+  # a hang: an orphan the reap missed is still running at it, and counts.
   # rc 2/3 (an unread or malformed pid) is never "reaped".
-  proc_running "$c"; prc=$?
-  case "${prc}" in 0) left=$((left+1)); kill -9 "$c" ;; 1) ;; *) blind=$((blind+1)) ;; esac
+  proc_wait_gone "$c" 50; prc=$?
+  case "${prc}" in 1) left=$((left+1)); kill -9 "$c" ;; 0) ;; *) blind=$((blind+1)) ;; esac
 done
 echo "survived=${left} unread=${blind}"'
 S13="$(cat "${TMP}/s13.out")"
@@ -372,14 +387,14 @@ fi
 # <env_end> <environ-bytes> writes a stat line in the kernel's shape (fields
 # 50-51 are the env bounds), a status with our uid, and the environ.
 SCAN="${REPO}/scripts/lib/proc-env-scan.awk"
-fake_proc() {
-  local d="${TMP}/fakeproc/$1" i f=""
+fake_proc() { # fake_proc <pid> <env_start> <env_end> <environ> [<comm> [<uid>]]
+  local d="${TMP}/fakeproc/$1" i f="" comm="${5:-fake}" u="${6:-${UID}}"
   mkdir -p "${d}"
   for i in $(seq 4 49); do
     case "${i}" in 22) f="${f} 100" ;; *) f="${f} 0" ;; esac
   done
-  printf '%s (fake) S%s %s %s 0\n' "$1" "${f}" "$2" "$3" >"${d}/stat"
-  printf 'Name:\tfake\nUid:\t%s\t%s\t%s\t%s\n' "${UID}" "${UID}" "${UID}" "${UID}" >"${d}/status"
+  printf '%s (%s) S%s %s %s 0\n' "$1" "${comm}" "${f}" "$2" "$3" >"${d}/stat"
+  printf 'Name:\tfake\nUid:\t%s\t%s\t%s\t%s\n' "${u}" "${u}" "${u}" "${u}" >"${d}/status"
   printf '%b' "$4" >"${d}/environ"
   printf 'fake\0' >"${d}/cmdline"
 }
@@ -441,6 +456,26 @@ if [ "${SRC}" -eq 4 ] && [ -z "${SO}" ] && grep -q 'pid 4207 .*UNKNOWN' <<<"${SE
   ok "S15 mode exact: the needle's entry read mid-rewrite is UNKNOWN, exit 4, never 'no'"
 else
   bad "S15 mode exact: the needle's entry read mid-rewrite is UNKNOWN, exit 4" "rc=${SRC} out=${SO} err=${SE}"
+fi
+
+# S18 (DND-1616): a process name may hold a newline (and ") "), and the scan
+# reads EVERY pid's stat before it knows whose the process is. Read one line
+# at a time, the stat of `x) Z (<newline>y` ends inside the name: 4 fields, so
+# the scan died (exit 3) and the reap killed nothing. proc-state's own P-6
+# runs such a process, so any gate that ran P-6 beside this suite turned S13
+# and S14 red at 1454c234. The fields start after the LAST ") " of the whole
+# file. Another user's process (uid 0) must not blind the scan; one of ours
+# with that name is still read.
+NL_COMM="x) Z ("$'\n'"y"
+fake_proc 4208 1000 1031 "${ENV1}" "${NL_COMM}" 0
+fake_proc 4209 1000 1031 "${ENV1}" "${NL_COMM}"
+SO="$(gawk -b -f "${SCAN}" -v mode=tag -v needle=t1 -v uid="${UID}" -v since=0 -v settle_s=0.2 \
+      -v root="${TMP}/fakeproc" "${TMP}/fakeproc/4208" "${TMP}/fakeproc/4209" "${TMP}/fakeproc/4201" 2>"${TMP}/scan.err")"; SRC=$?
+SE="$(cat "${TMP}/scan.err")"
+if [ "${SRC}" -eq 0 ] && [ "${SO}" = $'4209\n4201' ] && [ -z "${SE}" ]; then
+  ok "S18 a process name holding a newline and ') ' does not blind the scan: exit 0, the tagged pids (one of them so named) found"
+else
+  bad "S18 a process name holding a newline does not blind the scan" "rc=${SRC} out=$(printf '%s' "${SO}" | tr '\n' ' ') err=${SE}"
 fi
 
 # S16: a NON-DUMPABLE process of ours (ssh-agent disables tracing) shows 0 0
@@ -518,6 +553,38 @@ else
   bad "S17 a target client that never boots makes R2 FAIL, never a vacuous PASS" "rc=${ORC} $(printf '%s' "${O}" | tr '\n' '|')"
 fi
 gone "${MARK}" || { bad "S17 the no-boot fake suite's processes are reaped" "$(survivors "${MARK}")"; kill_marked "${MARK}"; }
+
+# S18 end to end (DND-1616): with a live process named `x) Z (<newline>y`
+# alive (proc-state P-6's shape, untagged by the fixture), the reap still
+# kills the fixture's process and returns 0, and leaves the untagged one alone.
+# The named process blocks opening a FIFO, so it has no child and its name
+# never changes; it is killed by pid here, whatever the scan can see.
+mkdir -p "${TMP}/s18"; mkfifo "${TMP}/s18/fifo"
+NLP="${TMP}/s18/${NL_COMM}"
+printf '#!/bin/bash\nread -r _ <"$1"\n' >"${NLP}"; chmod +x "${NLP}"
+"${NLP}" "${TMP}/s18/fifo" & nlp=$!
+NLC=""
+for i in $(seq 1 100); do
+  { IFS= read -r -d '' NLC <"/proc/${nlp}/comm"; } 2>/dev/null
+  [ "${NLC}" = "${NL_COMM}"$'\n' ] && break
+  sleep 0.05
+done
+if [ "${NLC}" = "${NL_COMM}"$'\n' ]; then
+  run_fixture s18 '. "${LIB}"; suite_reaper_begin "$@"
+sleep 311 &
+suite_reap_tagged; echo "rc=$?"'
+  S18="$(cat "${TMP}/s18.out")"
+  if [ "${S18}" = "rc=0" ] && gone "${MARK}" && proc_running "${nlp}"; then
+    ok "S18 with a live newline-named process (pid ${nlp}) on the machine, the reap still kills the fixture's process and returns 0"
+  else
+    bad "S18 with a live newline-named process on the machine, the reap still works" \
+        "${S18:-no output} survivors=$(survivors "${MARK}") named_alive=$(proc_running "${nlp}" && echo y || echo n) err=$(head -c 400 "${FX_ERR}")"
+  fi
+else
+  bad "S18 premise: the live process is named 'x) Z (<newline>y'" "comm=$(printf '%q' "${NLC}")"
+fi
+kill -9 "${nlp}" 2>/dev/null; wait "${nlp}" 2>/dev/null
+kill_marked "${MARK}"
 
 # S10: the real suites, at the two measured windows (the deterministic repro).
 R="$("${HERE}/repro-real-suites.sh" 2>&1)"; RRC=$?
