@@ -183,6 +183,11 @@ n/a or is too coarse.
   | `locked-merge`, custom ff push | `merge.lock_wait`, `merge.landed` (before/after sha) | `merge`, lock wait |
   | `mark-in-progress`, `fleet-report admiral-scope` | `ticket.dispatched`, `mission.status` | dispatch cross-check, captain DONE → boarding |
 
+  **Later (2026-10-01, DND-1475):** the custom ff push emits
+  `merge.landed` (via=push) only. Its lock is taken by hand, so its
+  `merge.lock_wait` reads n/a until DND-1370 gives that path a tool;
+  `locked-merge` emits both.
+
 ## The improvement procedure (`athena:lead-time-improve`)
 
 Each `improve`-mode run does these steps in order:

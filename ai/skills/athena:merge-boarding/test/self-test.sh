@@ -29,6 +29,9 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t
 export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+# integration-gate, test-slot and critic-review emit telemetry (DND-1474,
+# DND-1475): never into the machine's real store from a fixture.
+export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
 
 # --owner-approval takes a VERIFIABLE record of the owner's own words (owner
 # approval policy, 2026-09-28): session:<session-uuid>/<message-uuid>
@@ -1412,6 +1415,114 @@ timeout 5 bash -c 'printf "go\n" > "$1"' _ "${TMP}/w7.fifo"; wait "$holder" 2>/d
 [ "$rc" -eq 3 ] && grep -q 'test-slot: TIMEOUT' <<<"$out" && ! grep -q '^INTEGRATION OK' <<<"$out" \
   && ok "w7 a judge the model pool never admits is an absent verdict (exit 3), with test-slot's TIMEOUT shown" \
   || bad "w7 expected exit 3 with a TIMEOUT line (rc=$rc)" "$out"
+
+# ---------------------------------------------------------------- DND-1475
+# Telemetry: exactly one integration_gate.run per invocation, on every exit
+# path, emitted by the outer run only (the run re-executes itself inside
+# test-slot, so a naive emitter writes two). Each case has its own store.
+# ig_events <store> -- the integration_gate.run lines in a store.
+ig_events() { cat "$1"/*.jsonl 2>/dev/null | jq -c 'select(.event == "integration_gate.run")'; }
+ig_count() { local n; n="$(ig_events "$1" | grep -c .)"; printf '%s' "${n:-0}"; }
+# ig_one <case> <store> <expected exit> <expected outcome> -- exactly one
+# event, carrying that exit code and outcome; sets EV to the line.
+ig_one() {
+  EV="$(ig_events "$2")"
+  [ "$(ig_count "$2")" = 1 ] && ok "$1 exactly one integration_gate.run" || bad "$1 expected one integration_gate.run, got $(ig_count "$2")" "$(cat "$2"/*.jsonl 2>/dev/null)"
+  [ "$(jq -r '.attrs.exit_code' <<<"$EV")" = "$3" ] && [ "$(jq -r '.attrs.outcome' <<<"$EV")" = "$4" ] \
+    && ok "$1 exit_code=$3 outcome=$4" || bad "$1 expected exit_code=$3 outcome=$4" "$EV"
+  jq -e '.duration_s | type == "number" and . >= 0' <<<"$EV" >/dev/null && ok "$1 duration_s is the wall, a number" || bad "$1 duration_s" "$EV"
+  [ -e "$2/write-failures" ] && bad "$1 the writer counted a drop" "$(cat "$2/write-failures")" || ok "$1 no write-failures"
+}
+
+# t1 OK, no --with-critic: exit_code 0, with_critic false, head = the judged head.
+R="${TMP}/t1"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"; record_pass "$R"
+T="${TMP}/t1-store"
+out="$( cd "$R" && ATHENA_TELEMETRY_DIR="$T" "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "t1 the run is OK" || bad "t1 expected exit 0, got $rc" "$out"
+ig_one t1 "$T" 0 ok
+[ "$(jq -r '.head' <<<"$EV")" = "$(git -C "$R" rev-parse HEAD)" ] && ok "t1 head is the judged head" || bad "t1 head" "$EV"
+[ "$(jq -r '.attrs.with_critic' <<<"$EV")" = false ] && [ "$(jq -r '.attrs.rebased' <<<"$EV")" = false ] \
+  && ok "t1 with_critic=false rebased=false" || bad "t1 with_critic/rebased" "$EV"
+[ "$(jq -r '.attrs.base' <<<"$EV")" = "$(git -C "$R" rev-parse main)" ] && ok "t1 base is the target it contained" || bad "t1 base" "$EV"
+
+# t2 --with-critic --rebase onto a main that moved: one event, head = the
+# REBASED head, rebased=true, with_critic=true, base = the new main.
+D="${TMP}/t2"; remote_repo "$D" "exit 0"; move_main "$D" moved.txt "landed"
+T="${TMP}/t2-store"
+out="$( cd "$D/wt" && ATHENA_TELEMETRY_DIR="$T" TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/critic-pass" "$GATE" --with-critic --rebase 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "t2 the rebased run is OK" || bad "t2 expected exit 0, got $rc" "$out"
+ig_one t2 "$T" 0 ok
+[ "$(jq -r '.head' <<<"$EV")" = "$(git -C "$D/wt" rev-parse HEAD)" ] && ok "t2 head is the rebased head" || bad "t2 head" "$EV"
+[ "$(jq -r '.attrs.rebased' <<<"$EV")" = true ] && [ "$(jq -r '.attrs.with_critic' <<<"$EV")" = true ] \
+  && ok "t2 rebased=true with_critic=true" || bad "t2 rebased/with_critic" "$EV"
+[ "$(jq -r '.attrs.base' <<<"$EV")" = "$(git -C "$D/up" rev-parse HEAD)" ] && ok "t2 base is the main that moved" || bad "t2 base" "$EV"
+
+# t3 a refusal: no critic verdict on the head -> exit 3, one event, not two.
+R="${TMP}/t3"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+T="${TMP}/t3-store"
+out="$( cd "$R" && ATHENA_TELEMETRY_DIR="$T" "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "t3 no verdict is exit 3" || bad "t3 expected exit 3, got $rc" "$out"
+ig_one t3 "$T" 3 no_critic_pass
+
+# t4 a refusal inside the slot after the parse (an unresolvable target): one event.
+T="${TMP}/t4-store"
+out="$( cd "$R" && ATHENA_TELEMETRY_DIR="$T" "$GATE" --target origin/nope --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "t4 an unresolvable target is exit 2" || bad "t4 expected exit 2, got $rc" "$out"
+ig_one t4 "$T" 2 refused
+[ "$(jq -r '.attrs | has("base")' <<<"$EV")" = false ] && ok "t4 no base when the target never resolved (null, not a guess)" || bad "t4 base" "$EV"
+# ...a refusal in the OUTER run before the slot (a dirty tree): one event.
+T="${TMP}/t4b-store"; echo wip > "${R}/wip.txt"
+out="$( cd "$R" && ATHENA_TELEMETRY_DIR="$T" "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+rm -f "${R}/wip.txt"
+[ "$rc" -eq 2 ] && ok "t4b a dirty tree is exit 2" || bad "t4b expected exit 2, got $rc" "$out"
+ig_one t4b "$T" 2 refused
+# ...a usage error INSIDE the parse (an unknown flag) emits nothing: the run
+# has not started, and --help / an unknown flag must write nothing.
+T="${TMP}/t4c-store"
+( cd "$R" && ATHENA_TELEMETRY_DIR="$T" "$GATE" --bogus >/dev/null 2>&1 ); rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$T" ] && ok "t4c an unknown flag (inside the parse) is exit 2 and emits nothing" || bad "t4c expected exit 2 and no store, got $rc" "$(ls -la "$T" 2>&1)"
+( cd "$R" && ATHENA_TELEMETRY_DIR="$T" "$GATE" --help >/dev/null 2>&1 )
+[ ! -e "$T" ] && ok "t4c --help emits nothing" || bad "t4c --help wrote telemetry"
+
+# t5 the captain form, `test-slot -- integration-gate`: still exactly one.
+R="${TMP}/t5"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"; record_pass "$R"
+T="${TMP}/t5-store"
+out="$( cd "$R" && ATHENA_TELEMETRY_DIR="$T" "$TEST_SLOT" -- "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "t5 wrapped run is OK" || bad "t5 expected exit 0, got $rc" "$out"
+ig_one t5 "$T" 0 ok
+
+# t6 RED gate: exit 1, outcome red.
+R="${TMP}/t6"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+printf '#!/bin/sh\nexit 1\n' > "${R}/g.sh"; chmod +x "${R}/g.sh"; record_pass "$R"
+T="${TMP}/t6-store"
+out="$( cd "$R" && ATHENA_TELEMETRY_DIR="$T" "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 1 ] && ok "t6 a red gate is exit 1" || bad "t6 expected exit 1, got $rc" "$out"
+ig_one t6 "$T" 1 red
+
+# t7 FAIL-OPEN: an unwritable store changes neither the exit code nor stdout,
+# for the OK run and for the refusal. Each pair runs the same repo twice.
+fail_open_pair() { # <case> <repo> <args...>
+  local name="$1" r="$2" ro="${TMP}/$1-ro" o1 o2 c1 c2; shift 2
+  mkdir -p "$ro"; chmod 500 "$ro"
+  o1="$( cd "$r" && ATHENA_TELEMETRY_DIR="${TMP}/$name-rw" "$GATE" "$@" 2>/dev/null )"; c1=$?
+  o2="$( cd "$r" && ATHENA_TELEMETRY_DIR="$ro/telemetry" "$GATE" "$@" 2>/dev/null )"; c2=$?
+  chmod 700 "$ro"
+  [ "$c1" = "$c2" ] && [ "$o1" = "$o2" ] && ok "$name unwritable store: exit $c2 and stdout unchanged" \
+    || bad "$name unwritable store changed the run (exit $c1 vs $c2)" "$(diff <(printf '%s\n' "$o1") <(printf '%s\n' "$o2"))"
+  [ "$(ig_count "${TMP}/$name-rw")" = 1 ] && ok "$name the writable twin wrote its one event" || bad "$name writable twin" "$(ig_count "${TMP}/$name-rw")"
+  [ ! -e "$ro/telemetry" ] && ok "$name nothing was written to the unwritable store" || bad "$name unwritable store"
+}
+R="${TMP}/t1"
+fail_open_pair t7ok "$R" --target main --no-fetch --gate "${R}/g.sh"
+R="${TMP}/t3"
+fail_open_pair t7refused "$R" --target main --no-fetch --gate "${R}/g.sh"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

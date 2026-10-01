@@ -266,6 +266,24 @@ with_store do |dir, tmp|
   check("emit: ATHENA_UNIT gives source env") { ev["unit"] == "DND-77" && ev["unit_source"] == "env" }
 end
 
+# unit_branch (DND-1475): a tool that knows the work's branch but does not run
+# on it (locked-merge has the PR's head branch) resolves the unit through the
+# same parser, as if that branch were checked out.
+with_store do |dir, tmp|
+  ev = T.emit("telemetry.probe", repo_dir: tmp, unit_branch: "dnd-1475-merge-emitters", env: env_for(dir))
+  check("emit: unit_branch naming a ticket gives that ticket, source branch") do
+    ev["unit"] == "DND-1475" && ev["unit_source"] == "branch"
+  end
+  ev = T.emit("telemetry.probe", repo_dir: tmp, unit_branch: "harness-tidy", env: env_for(dir))
+  check("emit: an unticketed unit_branch gives its name, source branch-name") do
+    ev["unit"] == "harness-tidy" && ev["unit_source"] == "branch-name"
+  end
+  ev = T.emit("telemetry.probe", repo_dir: tmp, unit_branch: "dnd-1475-x", env: env_for(dir, "ATHENA_UNIT" => "DND-77"))
+  check("emit: ATHENA_UNIT still wins over unit_branch") { ev["unit"] == "DND-77" && ev["unit_source"] == "env" }
+  ev = T.emit("telemetry.probe", repo_dir: tmp, unit_branch: "", env: env_for(dir))
+  check("emit: an empty unit_branch is no hint (outside a repo: none)") { ev["unit"].nil? && ev["unit_source"] == "none" }
+end
+
 with_store do |dir, tmp|
   repo = File.join(tmp, "myrepo")
   FileUtils.mkdir_p(repo)

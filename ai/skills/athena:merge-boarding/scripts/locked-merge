@@ -144,7 +144,9 @@ case "${ORIGIN_URL}" in
   *) die 2 "origin '${ORIGIN_URL}' is not github.com" "GitLab repos merge through the merge train (athena:merge-boarding -> Boarding); this tool is for GitHub squash merges only." ;;
 esac
 
+LM_LOCK_KIND=explicit   # telemetry's closed `lock` label: never the caller's path
 if [ -z "${LOCK}" ]; then
+  LM_LOCK_KIND=default
   # Deliberately NOT $XDG_STATE_HOME: a second derivation would split the lock
   # silently (two admirals, two files, no exclusion).
   [ -n "${HOME:-}" ] || die 2 "HOME is unset, so the default lock path cannot be computed" "set HOME or pass --lock <absolute path>."
@@ -162,9 +164,55 @@ command -v gh >/dev/null 2>&1 || die 2 "gh (read-only forge CLI) not on PATH" "i
 command -v flock >/dev/null 2>&1 || die 2 "flock not on PATH" "install util-linux flock."
 command -v jq >/dev/null 2>&1 || die 2 "jq not on PATH" "install jq; the PR state and the integration-gate receipt are read with it."
 
+# ---- telemetry (DND-1475) ----
+# merge.lock_wait (the time blocked in flock -w, acquired or timeout) and
+# merge.landed (a merge confirm-merged confirmed: via=pr, the PR, the base
+# before, the merge commit after) feed the lead-time ledger's lock-wait counter
+# and its `merge` phase. Both are recorded where they happen and EMITTED from
+# the EXIT trap, after fd 9 is closed, so the merge lock is never held while
+# the writer runs. Fails open through ai/lib/telemetry-emit.sh: no exit code
+# or stdout changes. A binding that will not load is no telemetry.
+# Both carry the gated head (--head) and resolve their unit from the PR's head
+# branch once it is read (--unit-branch), because this tool runs from a
+# checkout whose own branch need not name the ticket; the ledger joins them to
+# the landing by unit or head.
+LM_TEL_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/telemetry-emit.sh"
+# shellcheck source=../../../lib/telemetry-emit.sh
+if ! . "${LM_TEL_LIB}" 2>/dev/null; then
+  athena_telemetry_emit() { :; }; athena_telemetry_now() { :; }
+  athena_telemetry_clock_us() { :; }; athena_telemetry_seconds_since() { :; }
+fi
+LM_WAIT_AT=""; LM_WAIT_S=""; LM_WAIT_OUTCOME=""; LM_LANDED_AT=""; LM_LANDED_AFTER=""; LM_BEFORE=""
+LM_UNIT_BRANCH=""
+lm_emit() {
+  local -a base=( --head "${HEAD_SHA}" ) opt=()
+  exec 9>&-
+  # The writer reads repo (and, with no --unit-branch, unit) from its cwd: the
+  # repo being merged.
+  cd "${REPO}" 2>/dev/null || return 0
+  [ -n "${LM_UNIT_BRANCH}" ] && base+=( --unit-branch "${LM_UNIT_BRANCH}" )
+  if [ -n "${LM_WAIT_OUTCOME}" ]; then
+    opt=( "${base[@]}" )
+    [ -n "${LM_WAIT_AT}" ] && opt+=( --at "${LM_WAIT_AT}" )
+    [ -n "${LM_WAIT_S}" ] && opt+=( --duration "${LM_WAIT_S}" )
+    athena_telemetry_emit --event merge.lock_wait --attr "lock=${LM_LOCK_KIND}" --attr "outcome=${LM_WAIT_OUTCOME}" "${opt[@]}"
+  fi
+  if [ -n "${LM_LANDED_AFTER}" ]; then
+    opt=( "${base[@]}" )
+    [ -n "${LM_LANDED_AT}" ] && opt+=( --at "${LM_LANDED_AT}" )
+    [ -n "${LM_BEFORE}" ] && opt+=( --attr "before=${LM_BEFORE}" )
+    athena_telemetry_emit --event merge.landed --attr via=pr --attr "pr=${PR}" --attr "after=${LM_LANDED_AFTER}" "${opt[@]}"
+  fi
+  return 0
+}
+trap lm_emit EXIT
+
 # ---- the critical section ----
 exec 9>>"${LOCK}"
-if ! flock -w "${WAIT}" 9; then
+LM_WAIT_AT="$(athena_telemetry_now)"; lm_t0="$(athena_telemetry_clock_us)"
+if flock -w "${WAIT}" 9; then LM_WAIT_OUTCOME=acquired; else LM_WAIT_OUTCOME=timeout; fi
+LM_WAIT_S="$(athena_telemetry_seconds_since "${lm_t0}")"
+if [ "${LM_WAIT_OUTCOME}" = timeout ]; then
   held="$(date -u -r "${LOCK}" +%FT%TZ 2>/dev/null || echo unknown)"
   die 6 "timed out after ${WAIT}s waiting for ${LOCK} (last touched ${held})" \
     "another merge holds the lock; retry later. Never delete the lock file -- a held flock is a live merge."
@@ -174,11 +222,13 @@ touch "${LOCK}" 2>/dev/null || true
 git -C "${REPO}" fetch -q origin \
   || die 3 "git fetch origin failed" "check the network/credentials, then re-run; nothing was merged."
 
-pr_json="$(cd "${REPO}" && gh pr view "${PR}" --json state,headRefOid,baseRefName 2>/dev/null)" \
+pr_json="$(cd "${REPO}" && gh pr view "${PR}" --json state,headRefOid,headRefName,baseRefName 2>/dev/null)" \
   || die 2 "gh pr view ${PR} failed" "check gh auth and that PR ${PR} exists in this repo; nothing was merged."
 state="$(jq -r '.state // empty' <<<"${pr_json}")"
 pr_head="$(jq -r '.headRefOid // empty' <<<"${pr_json}")"
 base="$(jq -r '.baseRefName // empty' <<<"${pr_json}")"
+# The PR's head branch names the work (a ticket branch): telemetry's unit.
+LM_UNIT_BRANCH="$(jq -r '.headRefName // empty' <<<"${pr_json}")"
 [ -n "${state}" ] && [ -n "${pr_head}" ] && [ -n "${base}" ] \
   || die 2 "gh pr view ${PR} returned no state/head/base" "check gh auth; an empty answer is not a PR."
 
@@ -333,6 +383,11 @@ fi
 
 M="$(cd "${REPO}" && gh pr view "${PR}" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)"
 [ -n "${M}" ] || die 8 "PR ${PR} reports no merge commit" "check the PR on the forge by hand; do not retry the merge blind."
+# Confirmed landed (confirm-merged), with its merge commit: that is the event,
+# whatever the parent/tree checks below then say about it.
+if [[ "${M}" =~ ^[0-9a-f]{40}$ ]]; then
+  LM_LANDED_AT="$(athena_telemetry_now)"; LM_LANDED_AFTER="${M}"; LM_BEFORE="${B}"
+fi
 git -C "${REPO}" fetch -q origin 2>/dev/null
 git -C "${REPO}" cat-file -e "${M}^{commit}" 2>/dev/null \
   || die 8 "merge commit ${M} not fetchable" "fetch origin and compare ${M}^{tree} with the expected tree ${EXPECTED_TREE} by hand."

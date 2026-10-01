@@ -16,7 +16,7 @@ PROG = "telemetry-emit"
 
 USAGE = <<~EOF
   Usage: telemetry-emit --event NAME [--at ISO|now] [--duration S] [--head SHA]
-                        [--unit U] [--attr KEY=VALUE]...
+                        [--unit U] [--unit-branch B] [--attr KEY=VALUE]...
          telemetry-emit --prune [--retain-days N]
          telemetry-emit --stats [--since ISO] [--until ISO]
          telemetry-emit --self-test
@@ -35,6 +35,9 @@ USAGE = <<~EOF
       --head SHA      40-hex sha (default the current repo's HEAD)
       --unit U        the unit of work (default ATHENA_UNIT, then the ticket
                       the branch names, then the branch name)
+      --unit-branch B resolve the unit from branch B instead of the checked-out
+                      one (a tool that knows the work's branch but runs
+                      elsewhere); --unit and ATHENA_UNIT still win
       --attr K=V      a registered attr; repeat per attr. The value is
                       converted to the registered type (int, float, bool,
                       sha, label).
@@ -69,12 +72,13 @@ end
 MODES = %w[--event --prune --stats --self-test].freeze
 SPEC = {
   "--event" => :value, "--at" => :value, "--duration" => :value, "--head" => :value, "--unit" => :value,
+  "--unit-branch" => :value,
   "--prune" => :switch, "--retain-days" => :value,
   "--stats" => :switch, "--since" => :value, "--until" => :value,
   "--self-test" => :switch,
 }.freeze
 MODE_FLAGS = {
-  "--event" => %w[--event --at --duration --head --unit],
+  "--event" => %w[--event --at --duration --head --unit --unit-branch],
   "--prune" => %w[--prune --retain-days],
   "--stats" => %w[--stats --since --until],
   "--self-test" => %w[--self-test],
@@ -130,7 +134,8 @@ def emit(opts, attrs)
   duration &&= (Float(duration) rescue duration) # counted as duration_invalid
   name = opts["--event"]
   typed = (AthenaTelemetry.registry.coerce(name, attrs) rescue attrs)
-  AthenaTelemetry.emit(name, at: at, duration_s: duration, unit: opts["--unit"], head: opts["--head"], attrs: typed)
+  AthenaTelemetry.emit(name, at: at, duration_s: duration, unit: opts["--unit"], head: opts["--head"], attrs: typed,
+                             unit_branch: opts["--unit-branch"])
   0
 end
 

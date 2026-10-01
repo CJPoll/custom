@@ -47,6 +47,10 @@ chmod 600 "${TMP}/token-cache"
 export GH_ATHENA_APP_ID_FILE="${TMP}/app-id"
 export GH_ATHENA_KEY="${TMP}/key.pem"
 export GH_ATHENA_TOKEN_CACHE="${TMP}/token-cache"
+# A push through the wrapper emits merge.landed (DND-1475): never into the
+# machine's real store from a fixture.
+export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
+unset ATHENA_UNIT
 
 # new_repo <name> <origin-url> -> a repo with one commit, origin set, echoes path.
 new_repo() {
@@ -254,6 +258,134 @@ if [ "${RC}" = 0 ] && [[ "${OUT}" == *"GIT_CONFIG_KEY_${N}=[http.https://github.
   && [ "$(cat "${TMP}/out")" = "caller-kept"$'\n'"AUTHORIZATION: basic ${B64}"$'\n'"agentstash" ]; then
   ok "18. injected entries (count ${N}) are kept: the header lands at index ${N} and the agent-stash hook stays registered"
 else bad "18. append after injected entries" "rc=${RC} rc2=${RC2} n=${N} out='${OUT}' real='$(cat "${TMP}/out")' err='$(cat "${TMP}/err")'"; fi
+
+echo
+echo "--- DND-1475: a push that moves the remote's default branch is merge.landed ---"
+# Real pushes to local bare origins. Each case has its own store.
+landed() { cat "$1"/*.jsonl 2>/dev/null | jq -c 'select(.event == "merge.landed")'; }
+landed_n() { local n; n="$(landed "$1" | grep -c .)"; printf '%s' "${n:-0}"; }
+# origin_with_main <name> -> a bare origin whose main has one commit, and a
+# clone "<name>-wt" of it with one more commit on main. Sets O, W, BEFORE, AFTER.
+origin_with_main() {
+  O="${TMP}/$1-origin.git"; W="${TMP}/$1-wt"
+  git init -q --bare -b main "${O}"
+  git init -q -b main "${W}" && git -C "${W}" commit -q --allow-empty -m c0 && git -C "${W}" remote add origin "${O}"
+  git -C "${W}" push -q origin main 2>/dev/null
+  BEFORE="$(git -C "${W}" rev-parse HEAD)"
+  git -C "${W}" commit -q --allow-empty -m c1; AFTER="$(git -C "${W}" rev-parse HEAD)"
+}
+ghpush() { # <dir> <store> <git args...> -> OUT RC ERR
+  local d="$1" s="$2"; shift 2
+  OUT="$(cd "${d}" && ATHENA_TELEMETRY_DIR="${s}" "${WRAPPER}" git "$@" 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+
+origin_with_main p1; S="${TMP}/p1-store"
+ghpush "${W}" "${S}" push -q origin HEAD:main
+EV="$(landed "${S}")"
+if [ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 1 ] \
+  && [ "$(jq -cS .attrs <<<"${EV}")" = "$(jq -cnS --arg b "${BEFORE}" --arg a "${AFTER}" '{via:"push",before:$b,after:$a}')" ] \
+  && [ "$(jq -r .head <<<"${EV}")" = "${AFTER}" ] && [ "$(jq -r .duration_s <<<"${EV}")" = null ] \
+  && [ ! -e "${S}/write-failures" ]; then
+  ok "19. a push that moves origin's main: one merge.landed via=push, before/after/head right, no drops"
+else bad "19. merge.landed on a main push" "rc=${RC} ev='${EV}' err='${ERR}' failures='$(cat "${S}/write-failures" 2>/dev/null)'"; fi
+
+S="${TMP}/p2-store"; git -C "${W}" commit -q --allow-empty -m c2
+ghpush "${W}" "${S}" push -q origin HEAD:refs/heads/topic
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && ok "20. a push to a non-default branch: no event" \
+  || bad "20. non-default branch push" "rc=${RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)'"
+
+S="${TMP}/p3-store"; git -C "${W}" reset -q --hard "${BEFORE}"; git -C "${W}" commit -q --allow-empty -m diverged
+( cd "${W}" && git push -q origin HEAD:main ) >/dev/null 2>&1; PLAIN_RC=$?
+ghpush "${W}" "${S}" push -q origin HEAD:main
+[ "${RC}" != 0 ] && [ "${RC}" = "${PLAIN_RC}" ] && [ "$(landed_n "${S}")" = 0 ] \
+  && ok "21. a refused (non-ff) push: exit ${RC} passed through as plain git's, no event" \
+  || bad "21. refused push" "rc=${RC} plain=${PLAIN_RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)'"
+
+S="${TMP}/p4-store"
+ghpush "${W}" "${S}" push -q origin "${AFTER}:main"
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && ok "22. a push that leaves main where it was: no event" \
+  || bad "22. up-to-date push" "rc=${RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)'"
+
+O5="${TMP}/p5-origin.git"; git init -q --bare -b main "${O5}"; git -C "${W}" remote add empty "${O5}"
+S="${TMP}/p5-store"
+ghpush "${W}" "${S}" push -q empty HEAD:main
+EV="$(landed "${S}")"
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 1 ] && [ "$(jq -r '.attrs | has("before")' <<<"${EV}")" = false ] \
+  && [ "$(jq -r .attrs.after <<<"${EV}")" = "$(git -C "${W}" rev-parse HEAD)" ] \
+  && ok "23. creating main on an empty origin: merge.landed with no before (null, never a guess)" \
+  || bad "23. main created" "rc=${RC} ev='${EV}'"
+
+origin_with_main p6; S="${TMP}/p6-store"
+OUT="$(cd "${TMP}" && ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git -C "${W}" push -q origin HEAD:main 2>"${TMP}/err")"; RC=$?
+EV="$(landed "${S}")"
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 1 ] && [ "$(jq -r .repo <<<"${EV}")" = p6-wt ] && [ "$(jq -r .attrs.after <<<"${EV}")" = "${AFTER}" ] \
+  && ok "24. \`git -C <repo> push\` from elsewhere: the event names that repo" \
+  || bad "24. -C push" "rc=${RC} ev='${EV}' err='$(cat "${TMP}/err")'"
+
+origin_with_main p7; S="${TMP}/p7-store"
+( cd "${W}" && ATHENA_TELEMETRY_DIR="${S}" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD:main ) >/dev/null 2>&1
+[ ! -e "${S}" ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${BEFORE}" ] && ok "25. the dry-run seam pushes nothing and emits nothing" \
+  || bad "25. dry-run emitted" "$(cat "${S}"/*.jsonl 2>/dev/null)"
+
+# 25b. The unit: the one local branch (not main) whose tip is the pushed
+# commit names the work, as the Mission branch does after the admiral's
+# rebase. The ledger joins the landing by unit or head (DND-1477).
+origin_with_main p9; S="${TMP}/p9-store"; git -C "${W}" branch dnd-42-fixture "${AFTER}"
+ghpush "${W}" "${S}" push -q origin "${AFTER}:main"
+EV="$(landed "${S}")"
+[ "${RC}" = 0 ] && [ "$(jq -r '[.unit, .unit_source, .head] | join(" ")' <<<"${EV}")" = "DND-42 branch ${AFTER}" ] \
+  && ok "25b. pushed from main: unit from the Mission branch at the pushed commit (DND-42), head = after" \
+  || bad "25b. unit from the pushed commit's branch" "rc=${RC} ev='${EV}'"
+
+# 25d. Another actor moves main DURING a push to another branch (a git shim
+# lands a commit on origin/main right after the real push): main moved, but
+# not by this push, so no landing.
+SHIM2="${TMP}/shim2"; mkdir -p "${SHIM2}"; REALGIT="$(command -v git)"
+origin_with_main p11; S="${TMP}/p11-store"
+OTHER="$(git --git-dir="${O}" commit-tree "$(git --git-dir="${O}" rev-parse main^{tree})" -p "$(git --git-dir="${O}" rev-parse main)" -m other)"
+printf '#!/bin/sh\n%s "$@"; rc=$?\nfor a in "$@"; do\n  if [ "$a" = push ]; then %s --git-dir=%s update-ref refs/heads/main %s; fi\ndone\nexit $rc\n' \
+  "${REALGIT}" "${REALGIT}" "${O}" "${OTHER}" > "${SHIM2}/git"; chmod +x "${SHIM2}/git"
+OUT="$(cd "${W}" && PATH="${SHIM2}:${PATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:refs/heads/topic 2>&1)"; RC=$?
+[ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${OTHER}" ] && [ "$(landed_n "${S}")" = 0 ] \
+  && ok "25d. main moved by another actor during a topic push: no phantom landing" \
+  || bad "25d. concurrent move read as a landing" "rc=${RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)' out='${OUT}'"
+
+# 25e. Two local branches at the pushed commit: the unit is ambiguous, so no
+# hint; it falls back to the checked-out branch (main).
+origin_with_main p12; S="${TMP}/p12-store"
+git -C "${W}" branch dnd-42-a "${AFTER}"; git -C "${W}" branch dnd-43-b "${AFTER}"
+ghpush "${W}" "${S}" push -q origin HEAD:main
+[ "${RC}" = 0 ] && [ "$(landed "${S}" | jq -r '[.unit, .unit_source] | join(" ")')" = "main branch-name" ] \
+  && ok "25e. two branches at the pushed commit: no guess, the checked-out branch names the unit" \
+  || bad "25e. ambiguous unit" "rc=${RC} ev='$(landed "${S}")'"
+
+# 25c. The BEFORE read fails (a git shim fails the first ls-remote only): a
+# push naming main still lands with no before; a push to another branch does
+# not become a phantom landing. The telemetry child never sees the auth header.
+SHIM="${TMP}/shim"; mkdir -p "${SHIM}"; REALGIT="$(command -v git)"
+printf '#!/bin/sh\nfor a in "$@"; do\n  if [ "$a" = --symref ]; then exit 128; fi\ndone\nexec %s "$@"\n' "${REALGIT}" > "${SHIM}/git"; chmod +x "${SHIM}/git"
+origin_with_main p10; S="${TMP}/p10-store"
+OUT="$(cd "${W}" && PATH="${SHIM}:${PATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:refs/heads/topic 2>&1)"; RC=$?
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && ok "25c. before unreadable, a push to another branch: no phantom landing" \
+  || bad "25c. phantom landing" "rc=${RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)' out='${OUT}'"
+OUT="$(cd "${W}" && PATH="${SHIM}:${PATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:main 2>&1)"; RC=$?
+EV="$(landed "${S}")"
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 1 ] && [ "$(jq -r '.attrs | has("before")' <<<"${EV}")" = false ] \
+  && [ "$(jq -r .attrs.after <<<"${EV}")" = "${AFTER}" ] \
+  && ok "25c. before unreadable, a push naming main: landed with no before (null)" \
+  || bad "25c. before-unknown landing" "rc=${RC} ev='${EV}' out='${OUT}'"
+
+# 26. FAIL-OPEN: an unwritable store. The push still lands, exits 0, and its
+# stdout is identical to the writable twin's (each twin its own origin).
+mkdir -p "${TMP}/ro"; chmod 500 "${TMP}/ro"
+origin_with_main p8a; ghpush "${W}" "${TMP}/p8-rw" push origin HEAD:main; O1="${OUT}"; R1="${RC}"
+origin_with_main p8b; ghpush "${W}" "${TMP}/ro/telemetry" push origin HEAD:main; O2="${OUT}"; R2="${RC}"
+chmod 700 "${TMP}/ro"
+[ "${R1}" = 0 ] && [ "${R2}" = 0 ] && [ "${O1}" = "${O2}" ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${AFTER}" ] \
+  && [ ! -e "${TMP}/ro/telemetry" ] && [ "$(landed_n "${TMP}/p8-rw")" = 1 ] \
+  && ok "26. unwritable store: the push lands, exit 0, stdout identical to the writable twin's" \
+  || bad "26. fail-open push" "rc=${R1}/${R2} out1='${O1}' out2='${O2}' err='${ERR}'"
 
 echo
 echo "==================================================="

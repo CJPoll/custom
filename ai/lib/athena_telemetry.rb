@@ -549,15 +549,19 @@ module AthenaTelemetry
   #   at          the start (Time); default now
   #   duration_s  seconds (Numeric), or nil for a point event
   #   unit        an explicit unit of work; default ATHENA_UNIT, then the branch
+  #   unit_branch the branch to resolve the unit from in place of the checked-out
+  #               one, for a tool that knows the work's branch but does not run
+  #               on it (locked-merge: the PR's head branch). Same parser, same
+  #               sources (branch / branch-name); nil or "" is no hint (DND-1475).
   #   head        a 40-hex sha; default the repo's HEAD
   #   attrs       a Hash of registered attrs
   #   repo_dir    the directory whose git context applies; default Dir.pwd
-  def emit(name, at: nil, duration_s: nil, unit: nil, head: nil, attrs: {}, repo_dir: nil, env: ENV)
+  def emit(name, at: nil, duration_s: nil, unit: nil, head: nil, attrs: {}, repo_dir: nil, env: ENV, unit_branch: nil)
     drops = Hash.new(0)
     dir = nil
     begin
       dir = Store.dir(env)
-      written = emit_into(dir, drops, name.to_s, at, duration_s, unit, head, attrs || {}, repo_dir, env)
+      written = emit_into(dir, drops, name.to_s, at, duration_s, unit, head, attrs || {}, repo_dir, env, unit_branch)
       record(dir, drops)
       written
     rescue ConfigError => e
@@ -575,7 +579,7 @@ module AthenaTelemetry
     nil
   end
 
-  def emit_into(dir, drops, name, at, duration_s, unit, head, attrs, repo_dir, env)
+  def emit_into(dir, drops, name, at, duration_s, unit, head, attrs, repo_dir, env, unit_branch = nil)
     reg = begin
       registry
     rescue RegistryError, SystemCallError
@@ -599,7 +603,8 @@ module AthenaTelemetry
       overlay_fault = TicketRefs.last_overlay_fault?
       ref
     end
-    unit, source, d = Unit.parse(branch: ctx.branch, env_unit: env["ATHENA_UNIT"], explicit: unit, ticket_ref: lazy_parser)
+    branch = unit_branch.is_a?(String) && !unit_branch.empty? ? unit_branch : ctx.branch
+    unit, source, d = Unit.parse(branch: branch, env_unit: env["ATHENA_UNIT"], explicit: unit, ticket_ref: lazy_parser)
     d.each { |r| drops[r] += 1 }
     drops["unit_overlay_unavailable"] += 1 if source == "branch-name" && overlay_fault
     line, d = Event.build(name: name, at: at || now, duration_s: duration_s, unit: unit, unit_source: source,

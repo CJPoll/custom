@@ -56,6 +56,12 @@ The writer resolves the unit once, in this order:
 4. the branch name itself. Source `branch-name`.
 5. `null`, with source `none`: a detached HEAD, or not in a repo.
 
+In steps 3 and 4, a caller may name the branch instead of the checked-out
+one: `unit_branch:` in Ruby, `--unit-branch` on the CLI (DND-1475). It is for
+a tool that knows the work's branch but runs elsewhere: `locked-merge` names
+the PR's head branch, and the `gh-athena` push names the local branch at the
+pushed commit. Empty is no hint.
+
 The branch, `repo` and `head` come from one `git rev-parse`. Outside a repo
 they are `null` with nothing counted. Any other git failure (no git, a git
 older than 2.31, an unborn branch) leaves them `null` too, and counts
@@ -123,11 +129,13 @@ with the attrs their requirements list.
 first-party emitter whose event is not registered, or whose `telemetry-emit`
 call passes an unregistered `--attr`. It reads an event only when it is
 written as a literal: `AthenaTelemetry.emit("<event>", …)`, or
-`…/telemetry-emit --event <event>` on one logical line (backslash
-continuations are joined). An emitter it cannot read fails too. Its header
-names what it does not see: the attrs of an in-process Ruby call, which each
-emitter's own tests cover (*Adding an event* step 4), and a second CLI call
-made through a variable in a file that also has a readable one.
+`…/telemetry-emit --event <event>` or `athena_telemetry_emit --event <event>`
+on one logical line (backslash continuations are joined). An emitter it
+cannot read fails too. Its header names what it does not see: the attrs of an
+in-process Ruby call, and attrs a shell emitter passes through an array or a
+variable, which each emitter's own tests cover (*Adding an event* step 4), and
+a second CLI call made through a variable in a file that also has a readable
+one.
 
 **Later (2026-10-01, DND-1474):** the paragraph above replaces a bullet that
 listed the registration check as owed by the emitter tickets, with an
@@ -245,7 +253,7 @@ measure", never as zero. A store path that cannot be resolved raises
 `ai/bin/telemetry-emit` (`--help` for the full text):
 
 - `--event NAME [--at ISO|now] [--duration S] [--head SHA] [--unit U]
-  [--attr K=V]...` emits one event. `--attr` values are converted to the
+  [--unit-branch B] [--attr K=V]...` emits one event. `--attr` values are converted to the
   registered type; a key given twice is a usage error. Once the command line
   parses it always exits 0.
 - `--prune [--retain-days N]` (*Retention*).
@@ -260,6 +268,12 @@ measure", never as zero. A store path that cannot be resolved raises
 A shell emitter calls it outside any measured check's own execution, bounded
 and fail-open: `timeout 2 ai/bin/telemetry-emit --event … || true`. That costs
 one Ruby start; it is not wall-clock tested (DND-1222).
+
+`ai/lib/telemetry-emit.sh` is that call, written once (DND-1475): a bash
+emitter sources it and calls `athena_telemetry_emit --event …`. It runs the
+CLI under `timeout 2` with stdout dropped and returns 0 whatever happens; of
+the CLI's stderr only the one `athena-telemetry:` line reaches the caller. Its
+clock helpers give `--at` and `--duration`.
 
 ## Privacy
 

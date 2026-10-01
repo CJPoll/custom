@@ -104,8 +104,13 @@ EOF
 
 # fg_refuse_non_https <git args...> : resolve every URL the network op would
 # reach and refuse on the first one that goes to FG_HOST over non-HTTPS.
-# Sets FG_RESOLVED_URLS (newline-separated) for the dry-run report.
+# Sets FG_RESOLVED_URLS (newline-separated) for the dry-run report, and, for a
+# `push`, FG_PUSH_URL (the first URL it pushes to) and FG_PUSH_GLOB (its git
+# global options) for the landing telemetry below.
 FG_RESOLVED_URLS=""
+FG_PUSH_URL=""
+FG_PUSH_GLOB=()
+FG_AUTH_INDEX=""
 fg_refuse_non_https() {
   local -a glob=() ex=()
   local sub="" mode depth=0 alias_val rewrite
@@ -270,6 +275,157 @@ fg_refuse_non_https() {
       fg_reaches_forge_insecurely "$u" && fg_refuse "$sub" "$t" "$u"
     done
   done
+  if [ "$sub" = push ]; then
+    FG_PUSH_URL="${FG_RESOLVED_URLS%%$'\n'*}"
+    FG_PUSH_GLOB=( "${glob[@]}" )
+  fi
+  return 0
+}
+
+# ---- Landing telemetry (DND-1475) -------------------------------------------
+# With FG_LANDING_TELEMETRY=1 (gh-athena sets it; glab-athena does not), a
+# `push` runs git as a CHILD instead of exec'ing it, so that after a push that
+# exits 0 the wrapper can tell whether the remote's default branch moved, and
+# record that as one `merge.landed` event (via=push, before, after). That is
+# how ~/dev/custom lands (athena:merge-boarding, the no-CI ff push), and the
+# lead-time ledger's `merge` phase reads it.
+#
+# How "moved" is read: `git ls-remote --symref <url> HEAD refs/heads/main`
+# BEFORE the push gives the default branch (HEAD's symref; refs/heads/main when
+# the server does not say) and its sha; the same ref read AFTER a push that
+# exited 0 gives the new sha. Different (or created), AND the new sha is a
+# commit this push sent (fg_push_sent: a refspec's source resolves to it), is
+# a landing; a main another actor moved meanwhile is not this push's. A refused
+# push, a push to another branch, an up-to-date push and a --dry-run push move
+# nothing and emit nothing. If the BEFORE read fails, before is unknown: the
+# event is still written when the after read succeeds and the push's own argv
+# names the default branch (fg_push_names_default; a --dry-run never), with no
+# `before` (null, never a guess). Residual, said out loud: in that state a push
+# that names main but was already up to date reads as a landing.
+#
+# Fails open: both reads are bounded (timeout 10), silent, read-only and authed
+# as the bot exactly as the push is; the emit goes through
+# ai/lib/telemetry-emit.sh. git's own stdout, stderr and exit code are what the
+# caller sees. Differences from exec, said out loud: a git killed by a signal
+# reads as exit 128+n from this wrapper rather than as a signal death; a signal
+# sent to the wrapper's pid alone (not its process group, as a terminal or
+# `timeout` sends) no longer reaches git; and a push that lands main but exits
+# non-zero because another refspec was rejected records no landing. Cost: two
+# ls-remote round trips per push (each capped at 10 s) plus the emit (capped
+# at 2 s), paid also inside the custom ff landing's hand-held lock.
+#
+# Unit: the event carries head = after. Its unit resolves from the one local
+# branch (other than the default branch) whose tip is the pushed commit (the
+# Mission branch after the admiral's rebase), else from the checked-out branch.
+
+# fg_probe <git argv...> : run a read-only probe bounded, quiet, never prompting.
+fg_probe() { timeout 10 env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 "$@" 2>/dev/null </dev/null; }
+
+# fg_push_and_record <git args...> : push as a child, record a landing, exit
+# with git's status. Never returns.
+fg_push_and_record() {
+  local -a probe=( git "${FG_PUSH_GLOB[@]}" -c credential.helper= -c core.askPass= -c "$(fg_rewrite)" )
+  local ls="" line name sha ref="" sym="" head_sha="" main_sha="" before="" known=0 rc=0 after=""
+  if ls="$(fg_probe "${probe[@]}" ls-remote --symref "$FG_PUSH_URL" HEAD refs/heads/main)"; then
+    known=1
+    while IFS= read -r line; do
+      case "$line" in
+        "ref: "*) name="${line##*$'\t'}"; line="${line#ref: }"; [ "$name" = HEAD ] && sym="${line%%$'\t'*}" ;;
+        *$'\t'*) sha="${line%%$'\t'*}"; name="${line#*$'\t'}"
+                 [ "$name" = HEAD ] && head_sha="$sha"
+                 [ "$name" = refs/heads/main ] && main_sha="$sha" ;;
+      esac
+    done <<<"$ls"
+  fi
+  ref="${sym:-refs/heads/main}"
+  if [ "$ref" = refs/heads/main ]; then before="$main_sha"; else before="$head_sha"; fi
+  env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 git "$@" || rc=$?
+  if [ "$rc" -eq 0 ] && ls="$(fg_probe "${probe[@]}" ls-remote "$FG_PUSH_URL" "$ref")"; then
+    while IFS= read -r line; do
+      [ "${line#*$'\t'}" = "$ref" ] && after="${line%%$'\t'*}"
+    done <<<"$ls"
+    if [[ "$after" =~ ^[0-9a-f]{40}$ ]] && fg_push_sent "$after" "${ref#refs/heads/}" "$@" \
+       && { { [ "$known" -eq 0 ] && fg_push_names_default "${ref#refs/heads/}" "$@"; } || { [ "$known" -eq 1 ] && [ "$after" != "$before" ]; }; }; then
+      fg_record_landing "$before" "$after" "${ref#refs/heads/}"
+    fi
+  fi
+  exit "$rc"
+}
+
+# fg_push_sent <after> <default branch> <git args...> : 0 when THIS push sent
+# <after>, i.e. the source of one of its refspecs (HEAD when it names none;
+# the local default branch for --all / --mirror) resolves to that commit.
+# Without it, another actor moving main between the two reads (a squash
+# merge, another fleet's push) would read as this push's landing.
+fg_push_sent() {
+  local after="$1" def="$2" a src seen_push=0 seen_repo=0 refspecs=0
+  local -a cands=()
+  shift 2
+  while [ $# -gt 0 ]; do
+    a="$1"; shift
+    if [ "$seen_push" -eq 0 ]; then
+      case "$a" in
+        -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) [ $# -gt 0 ] && shift ;;
+        push) seen_push=1 ;;
+      esac
+      continue
+    fi
+    case "$a" in
+      --all|--mirror) cands+=( "refs/heads/$def" ) ;;
+      -o|--push-option|--receive-pack|--exec|--repo) [ $# -gt 0 ] && shift ;;
+      -*) ;;
+      *) if [ "$seen_repo" -eq 0 ]; then seen_repo=1; else
+           src="${a#+}"; src="${src%%:*}"; refspecs=1
+           [ -n "$src" ] && cands+=( "$src" )
+         fi ;;
+    esac
+  done
+  [ "$refspecs" -eq 1 ] || cands+=( HEAD )
+  for src in "${cands[@]}"; do
+    [ "$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q "${src}^{commit}" 2>/dev/null || true)" = "$after" ] && return 0
+  done
+  return 1
+}
+
+# fg_push_names_default <default branch> <git args...> : with no BEFORE read,
+# the only evidence the push targeted the default branch is its own argv: a
+# refspec whose destination is it (`main`, `x:main`, `x:refs/heads/main`), or
+# --all / --mirror; and never a --dry-run / -n push. Anything else is not
+# recorded, so an unreadable BEFORE cannot turn a branch push into a landing.
+fg_push_names_default() {
+  local def="$1" a hit=1
+  shift
+  for a in "$@"; do
+    case "$a" in
+      --dry-run|-n) return 1 ;;
+      --all|--mirror|"$def"|*:"$def"|refs/heads/"$def"|*:refs/heads/"$def") hit=0 ;;
+    esac
+  done
+  return "$hit"
+}
+
+# fg_record_landing <before or ""> <after> <default branch name> : one
+# merge.landed event, from the pushed repo's top level. Never fails.
+fg_record_landing() {
+  local before="$1" after="$2" def="$3" top="" b n=0 ub=""
+  local -a opt=( --head "$after" )
+  if ! . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/telemetry-emit.sh" 2>/dev/null; then
+    return 0
+  fi
+  [[ "$before" =~ ^[0-9a-f]{40}$ ]] && opt+=( --attr "before=$before" )
+  while IFS= read -r b; do
+    [ -n "$b" ] && [ "$b" != "$def" ] && { ub="$b"; n=$((n + 1)); }
+  done < <(git "${FG_PUSH_GLOB[@]}" for-each-ref --points-at "$after" --format='%(refname:short)' refs/heads 2>/dev/null || true)
+  [ "$n" -eq 1 ] && opt+=( --unit-branch "$ub" )
+  top="$(git "${FG_PUSH_GLOB[@]}" rev-parse --show-toplevel 2>/dev/null || true)"
+  (
+    # The bot's auth header (fg_git_exec exported it for git) never reaches
+    # the telemetry writer: it needs no credential.
+    [ -n "$FG_AUTH_INDEX" ] && unset "GIT_CONFIG_KEY_$FG_AUTH_INDEX" "GIT_CONFIG_VALUE_$FG_AUTH_INDEX" \
+      && export GIT_CONFIG_COUNT="$FG_AUTH_INDEX"
+    [ -n "$top" ] && cd "$top" 2>/dev/null
+    athena_telemetry_emit --event merge.landed --attr via=push --attr "after=$after" "${opt[@]}"
+  ) || true
   return 0
 }
 
@@ -299,5 +455,9 @@ fg_git_exec() {
   fi
   export "GIT_CONFIG_KEY_$n=$auth_key" "GIT_CONFIG_VALUE_$n=$header" \
     GIT_CONFIG_COUNT="$((n + 1))"
+  FG_AUTH_INDEX="$n"
+  if [ "${FG_LANDING_TELEMETRY:-}" = 1 ] && [ -n "$FG_PUSH_URL" ]; then
+    fg_push_and_record "$@"
+  fi
   exec env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 git "$@"
 }

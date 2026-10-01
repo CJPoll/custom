@@ -209,6 +209,72 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- telemetry: one integration_gate.run per invocation (DND-1475) ----------
+# The lead-time ledger reads `queue` (to this run's start) and `integrate`
+# (its wall) from this event. Exactly ONE per invocation, on every exit path
+# after the parse above (--help, --self-test and an unknown flag never reach
+# here and emit nothing). This script runs twice per invocation: the outer run
+# re-executes itself inside test-slot (section 1b). Only the OUTER run emits,
+# from its EXIT trap, so its at/duration cover the whole invocation (slot wait
+# included) and its exit code is the caller's. The run inside the slot knows
+# what the outer cannot: the head it judged (after a --rebase, the rebased
+# head), the target SHA it contained and whether it rebased. It appends those
+# to a facts file in the outer run's private temp dir (INTEGRATION_GATE_FACTS);
+# a fact it never reached stays unknown, and the event omits it (null, never a
+# guess). Contract: ai/contracts/athena-telemetry.md. Fails open: the emit runs
+# through ai/lib/telemetry-emit.sh, which never changes an exit code or stdout.
+# A binding that will not load is no telemetry, never a refusal.
+IG_TEL_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/telemetry-emit.sh"
+# shellcheck source=../../../lib/telemetry-emit.sh
+if ! . "$IG_TEL_LIB" 2>/dev/null; then
+  athena_telemetry_emit() { :; }; athena_telemetry_now() { :; }
+  athena_telemetry_clock_us() { :; }; athena_telemetry_seconds_since() { :; }
+fi
+IG_TEL_AT="$(athena_telemetry_now)"
+IG_TEL_T0="$(athena_telemetry_clock_us)"
+# The emitting role. An env marker alone never makes a run the inner one: the
+# slot check in section 1b settles it (IN_SLOT), and resets this to 1 when the
+# marker was not backed by a held slot.
+IG_TEL_EMIT=1
+[ "${INTEGRATION_GATE_IN_SLOT:-}" = 1 ] && IG_TEL_EMIT=0
+IG_FACTS=""       # inner run: the file it appends facts to
+IG_FACTS_OUT=""   # outer run: the file the inner run wrote
+# ig_fact KEY VALUE -- the run inside the slot records one fact for the outer.
+ig_fact() { [ -n "$IG_FACTS" ] && printf '%s=%s\n' "$1" "$2" >>"$IG_FACTS" 2>/dev/null; return 0; }
+# ig_emit_run RC -- the one event, once. Outcome is a closed vocabulary keyed
+# on the exit code (see --help's exit codes), never free text.
+ig_emit_run() {
+  local rc="$1" head="" base="" rebased=false outcome k v dur
+  local -a opt=()
+  [ "$IG_TEL_EMIT" = 1 ] || return 0
+  IG_TEL_EMIT=0
+  if [ -n "$IG_FACTS_OUT" ] && [ -f "$IG_FACTS_OUT" ]; then
+    while IFS='=' read -r k v; do
+      case "$k" in
+        head) [[ "$v" =~ ^[0-9a-f]{40}$ ]] && head="$v" ;;
+        base) [[ "$v" =~ ^[0-9a-f]{40}$ ]] && base="$v" ;;
+        rebased) [ "$v" = true ] && rebased=true ;;
+      esac
+    done <"$IG_FACTS_OUT"
+  fi
+  [ -n "$head" ] || head="${HEAD0:-}"
+  case "$rc" in
+    0) outcome=ok ;; 1) outcome=red ;; 2) outcome=refused ;; 3) outcome=no_critic_pass ;;
+    4) outcome=held ;; 5) outcome=receipt_error ;; 6) outcome=not_run ;;
+    *) if [ "$rc" -gt 128 ]; then outcome=interrupted; else outcome=other; fi ;;
+  esac
+  dur="$(athena_telemetry_seconds_since "$IG_TEL_T0")"
+  [ -n "$IG_TEL_AT" ] && opt+=( --at "$IG_TEL_AT" )
+  [ -n "$dur" ] && opt+=( --duration "$dur" )
+  [[ "$head" =~ ^[0-9a-f]{40}$ ]] && opt+=( --head "$head" )
+  [ -n "$base" ] && opt+=( --attr "base=$base" )
+  local wc=false; [ "$WITH_CRITIC" -eq 1 ] && wc=true
+  athena_telemetry_emit --event integration_gate.run --attr "exit_code=$rc" --attr "outcome=$outcome" \
+    --attr "rebased=$rebased" --attr "with_critic=$wc" "${opt[@]}"
+  return 0
+}
+trap 'ig_emit_run $?' EXIT
+
 # --- 0. the machine test-slot pool (DND-486) -------------------------------
 # The gate is the heaviest run an admiral starts, and ~23 unbounded heavy runs
 # at once took this box to load 54 and flaked timing-sensitive suites (DND-473).
@@ -412,7 +478,14 @@ gate_slot_weight() {
 IN_SLOT=0
 if [ "${INTEGRATION_GATE_IN_SLOT:-}" = 1 ] && slot_really_held; then IN_SLOT=1; fi
 PRESTARTED="${INTEGRATION_GATE_PRESTARTED_CRITIC:-}"
-unset INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC
+# Telemetry (DND-1475): the run inside the slot reports facts, the outer emits.
+if [ "$IN_SLOT" -eq 1 ]; then
+  IG_TEL_EMIT=0
+  [[ "${INTEGRATION_GATE_FACTS:-}" == *integration-gate-slot.*/facts ]] && IG_FACTS="$INTEGRATION_GATE_FACTS"
+else
+  IG_TEL_EMIT=1
+fi
+unset INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC INTEGRATION_GATE_FACTS
 
 if [ "$IN_SLOT" -eq 0 ]; then
   HEAD0="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)"
@@ -445,10 +518,13 @@ if [ "$IN_SLOT" -eq 0 ]; then
       fi
     fi
   fi
+  # It replaces the telemetry trap, so it emits too: after the judge is
+  # stopped, before SLOT_TMP (which holds the facts file) is removed.
   outer_cleanup() {
     local rc=$?
     [ -n "$CRITIC_PGID" ] && kill -TERM -- "-${CRITIC_PGID}" 2>/dev/null
     [ -n "$CRITIC_LOG" ] && rm -f "$CRITIC_LOG" 2>/dev/null
+    ig_emit_run "$rc"
     [ -n "$SLOT_TMP" ] && rm -rf "$SLOT_TMP" 2>/dev/null
     return "$rc"
   }
@@ -460,11 +536,12 @@ if [ "$IN_SLOT" -eq 0 ]; then
     exit 2
   }
   OUTCOME="${SLOT_TMP}/outcome"
+  IG_FACTS_OUT="${SLOT_TMP}/facts"
   SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") ${HEAD0:0:8}" --outcome-file "$OUTCOME" --pool cpu )
   [ -n "$SLOT_WAIT" ] && SLOT_ARGS+=( --wait-timeout "$SLOT_WAIT" )
   gate_slot_weight
   echo "${PROG}: taking a machine test slot first (${SLOT_WEIGHT_NOTE}); the fetch and the containment check run inside it (DND-1064)"
-  "$TEST_SLOT" "${SLOT_ARGS[@]}" -- env INTEGRATION_GATE_IN_SLOT=1 bash "$(realpath "${BASH_SOURCE[0]}")" "${ORIG_ARGS[@]}"
+  "$TEST_SLOT" "${SLOT_ARGS[@]}" -- env INTEGRATION_GATE_IN_SLOT=1 INTEGRATION_GATE_FACTS="$IG_FACTS_OUT" bash "$(realpath "${BASH_SOURCE[0]}")" "${ORIG_ARGS[@]}"
   SLOT_RC=$?
   OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
   if [[ "$OUTCOME_LINE" =~ ^ran\ exit=([0-9]+)$ ]]; then
@@ -577,6 +654,7 @@ if [ "$REBASE" -eq 1 ] \
     exit 2
   fi
   echo "${PROG}: rebased $(short "$R_HEAD") onto ${TARGET} ($(short "$R_TARGET")) inside the slot -> $(git rev-parse --short HEAD)"
+  ig_fact rebased true
   [ -z "$SINCE" ] && [ -n "$R_BASE" ] && SINCE="$R_BASE"
 fi
 
@@ -586,6 +664,7 @@ if ! HEAD_SHA="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null)"; then
   echo "Fix: check out the Mission branch with at least one commit, then re-run." >&2
   exit 2
 fi
+ig_fact head "$HEAD_SHA"
 
 # --- 3a. the receipt (DND-965) ---------------------------------------------
 # One store per REPO, not per checkout: the git common dir is the same for the
@@ -636,6 +715,7 @@ if ! TARGET_SHA="$(git rev-parse --verify "${TARGET}^{commit}" 2>/dev/null)"; th
   echo "Fix: name a ref that exists here (git remote -v; git branch -r). A wrong ref must not be mistaken for 'no drift' -- this is an error, not an empty result." >&2
   exit 2
 fi
+ig_fact base "$TARGET_SHA"
 BASE_SHA="$(git merge-base HEAD "$TARGET_SHA" 2>/dev/null)"
 if [ -z "$BASE_SHA" ]; then
   echo "${PROG}: HEAD and '${TARGET}' share no merge base (unrelated histories)." >&2

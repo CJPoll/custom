@@ -28,7 +28,8 @@
 #
 #   Ruby, in process:  every `AthenaTelemetry.emit(` is a call site. Its first
 #     argument must be a string literal naming the event.
-#   The CLI:  a file is a CLI emitter when it names `telemetry-emit` and has
+#   The CLI:  a file is a CLI emitter when it names `telemetry-emit` (or the
+#     shell binding `athena_telemetry_emit`, ai/lib/telemetry-emit.sh) and has
 #     `--event` somewhere. A call site is a logical line (backslash
 #     continuations joined) that names `telemetry-emit` AND has `--event NAME`.
 #     NAME must be a literal. Each `--attr KEY=` on that line must be a
@@ -40,7 +41,10 @@
 #   would otherwise read as "nothing to check". So is a run that finds no
 #   emitter at all (the discovery is broken, or every emitter vanished).
 #
-# NOT CHECKED, said out loud: the attrs of an in-process Ruby call (a Hash
+# NOT CHECKED, said out loud: attrs a shell emitter passes through an array
+# or a variable (`"${opt[@]}"` carrying `--attr base=...`; DND-1475's
+# emitters do, and their tests assert zero drops), the attrs of an in-process
+# Ruby call (a Hash
 # built in code; each emitter's own tests assert zero `attr_*` drops, contract
 # *Adding an event* step 4), and a file that makes one readable CLI call and
 # another through a variable (the readable one makes it an emitter with a
@@ -82,7 +86,8 @@ TXT
 module TelemetryCallSites
   RUBY_CALL = /AthenaTelemetry\.emit\(/.freeze
   RUBY_LITERAL = /\AAthenaTelemetry\.emit\(\s*(["'])([^"'\s]+)\1/.freeze
-  CLI_NAME = /telemetry-emit\b/.freeze
+  # The CLI by its name, or the shell binding ai/lib/telemetry-emit.sh (DND-1475).
+  CLI_NAME = /telemetry-emit\b|\bathena_telemetry_emit\b/.freeze
   EVENT_FLAG = /(?<![\w-])--event(?![\w-])/.freeze
   EVENT_VALUE = /(?<![\w-])--event(?:\s+|=|["']\s*,\s*)["']?([^\s"',)]*)/.freeze
   ATTR_VALUE = /(?<![\w-])--attr(?:\s+|["']\s*,\s*)["']?([^=\s"',]*)=/.freeze
@@ -165,7 +170,8 @@ module TelemetryCallSites
     if list.empty?
       return ["#{rel}: it references the telemetry writer but no call site could be read. " \
               "Fix: call `AthenaTelemetry.emit(\"<event>\", ...)` with the event as a string literal, or the CLI " \
-              "as `.../telemetry-emit --event <event>` on one line (not through a variable), so the event can be checked."]
+              "as `.../telemetry-emit --event <event>` (or `athena_telemetry_emit --event <event>`) on one line " \
+              "(not through a variable), so the event can be checked."]
     end
     list.flat_map do |s|
       next ["#{rel}:#{s.line}: #{s.problem}. Fix: name the event as a literal, so this check and a reader can see it."] if s.problem
@@ -299,6 +305,12 @@ def run_self_test
               find.call("timeout 2 telemetry-emit \\\n  --event demo.nope \\\n  --attr ok=true\n").first.to_s.include?("demo.nope"))
   expect.call("D12 a Ruby argv call to the CLI is read",
               find.call("system(\"ai/bin/telemetry-emit\", \"--event\", \"demo.nope\")\n").first.to_s.include?("demo.nope"))
+  expect.call("D14 a call through the shell binding is read and checked",
+              find.call(". ai/lib/telemetry-emit.sh\nathena_telemetry_emit --event demo.nope --attr ok=true\n").first.to_s.include?("demo.nope is not registered"))
+  expect.call("D15 a shell-binding call's unregistered attr is named",
+              find.call("athena_telemetry_emit --event demo.run --attr \"nope=$x\"\n").first.to_s.include?("attr nope is not registered"))
+  expect.call("D16 the shell binding's own definition is not an emitter",
+              find.call("athena_telemetry_emit() {\n  timeout 2 \"$cli\" \"$@\"\n}\n").empty?)
   expect.call("D13 the finding names the line",
               find.call("x = 1\nAthenaTelemetry.emit(\"demo.nope\")\n").first.to_s.start_with?("x:2:"))
 

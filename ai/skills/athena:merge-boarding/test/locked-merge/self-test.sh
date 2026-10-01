@@ -35,6 +35,10 @@ TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export LOCKED_MERGE_CONFIRM_SLEEP=0
+# locked-merge (and the real integration-gate r2/r7 run) emit telemetry
+# (DND-1475): never into the machine's real store from a fixture.
+export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
+unset ATHENA_UNIT
 
 ok()  { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [ -n "${2-}" ] && printf '       %s\n' "$2"; }
@@ -117,7 +121,7 @@ fixture() {
   ( cd "${WT}" && echo seed > seed.txt && git add seed.txt && git commit -qm seed && git push -q origin main \
     && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f && git push -q origin feature )
   H="$(git -C "${WT}" rev-parse HEAD)"
-  printf '{"state":"OPEN","headRefOid":"%s","baseRefName":"main"}\n' "${H}" > "${ST}/pr.json"
+  printf '{"state":"OPEN","headRefOid":"%s","headRefName":"dnd-42-fixture","baseRefName":"main"}\n' "${H}" > "${ST}/pr.json"
   echo '[]' > "${ST}/runs.json"; echo good > "${ST}/merge_mode"; echo 0 > "${ST}/confirm_rc"
   echo 0 > "${ST}/teardown_rc"; : > "${ST}/teardown.log"; export LOCK_PATH="${TMP}/$1.lock"
   : > "${ST}/merge.log"
@@ -431,6 +435,85 @@ fixture c15
 f="$(receipt_path "${H}")"
 jq --arg s "$(printf 'f%.0s' {1..40})" '.critic_carried_from = $s' "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c15.lock"; expect c15-carried-receipt 0
+
+# ---- DND-1475: telemetry, merge.lock_wait and merge.landed ----
+# Each case has its own store. tel_events <store> <event> -> the lines.
+tel_events() { cat "$1"/*.jsonl 2>/dev/null | jq -c --arg e "$2" 'select(.event == $e)'; }
+tel_count() { local n; n="$(tel_events "$1" "$2" | grep -c .)"; printf '%s' "${n:-0}"; }
+no_drops() { [ -e "$2/write-failures" ] && bad "$1 the writer counted a drop" "$(cat "$2/write-failures")" || ok "$1 no write-failures"; }
+
+# t1 lock free: lock_wait acquired, then landed via=pr with the PR, base and merge commit.
+fixture t1; T="${TMP}/t1-store"; B1="$(git --git-dir="${BARE}" rev-parse main)"
+out="$(ATHENA_TELEMETRY_DIR="${T}" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/t1.lock" 2>&1)"; rc=$?
+expect t1 0
+M1="$(git --git-dir="${BARE}" rev-parse main)"
+lw="$(tel_events "${T}" merge.lock_wait)"; ld="$(tel_events "${T}" merge.landed)"
+[ "$(tel_count "${T}" merge.lock_wait)" = 1 ] && [ "$(jq -c .attrs <<<"${lw}")" = '{"lock":"explicit","outcome":"acquired"}' ] \
+  && jq -e '.duration_s | type == "number" and . >= 0' <<<"${lw}" >/dev/null \
+  && ok "t1 one merge.lock_wait: acquired, lock=explicit (a closed label, never the path), a duration" || bad "t1 merge.lock_wait" "${lw}"
+[ "$(tel_count "${T}" merge.landed)" = 1 ] \
+  && [ "$(jq -cS .attrs <<<"${ld}")" = "$(jq -cnS --arg b "${B1}" --arg m "${M1}" '{via:"pr",pr:7,before:$b,after:$m}')" ] \
+  && [ "$(jq -r .head <<<"${ld}")" = "${H}" ] && [ "$(jq -r .duration_s <<<"${ld}")" = null ] \
+  && [ "$(jq -r .repo <<<"${ld}")" = wt ] \
+  && ok "t1 one merge.landed: via=pr pr=7 before=base after=merge commit, head = the gated head, a point event, repo of --repo" \
+  || bad "t1 merge.landed" "${ld}"
+# The ledger joins these to the landing by unit or head (DND-1477): both carry
+# the gated head, and the unit the PR's head branch names, not the checkout's.
+[ "$(jq -r '[.unit, .unit_source, .head] | join(" ")' <<<"${lw}")" = "DND-42 branch ${H}" ] \
+  && [ "$(jq -r '[.unit, .unit_source] | join(" ")' <<<"${ld}")" = "DND-42 branch" ] \
+  && ok "t1 both events: unit from the PR's head branch (DND-42), head = the gated head" \
+  || bad "t1 unit/head" "${lw} ${ld}"
+no_drops t1 "${T}"
+
+# t2 lock held, --wait 1: lock_wait timeout, no landed, exit 6 unchanged.
+fixture t2; T="${TMP}/t2-store"; exec 8>>"${TMP}/t2.lock"; flock 8
+out="$(ATHENA_TELEMETRY_DIR="${T}" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/t2.lock" --wait 1 2>&1)"; rc=$?
+exec 8>&-
+expect t2 6; no_merge t2
+[ "$(tel_count "${T}" merge.lock_wait)" = 1 ] && [ "$(tel_events "${T}" merge.lock_wait | jq -r .attrs.outcome)" = timeout ] \
+  && ok "t2 one merge.lock_wait with outcome=timeout" || bad "t2 merge.lock_wait" "$(cat "${T}"/*.jsonl 2>/dev/null)"
+[ "$(tel_count "${T}" merge.landed)" = 0 ] && ok "t2 no merge.landed" || bad "t2 a timeout emitted merge.landed"
+no_drops t2 "${T}"
+
+# t3 refused under the lock (no receipt): lock_wait, no landed.
+fixture t3; T="${TMP}/t3-store"; rm -f "$(receipt_path "${H}")"
+out="$(ATHENA_TELEMETRY_DIR="${T}" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/t3.lock" 2>&1)"; rc=$?
+expect t3 9
+[ "$(tel_count "${T}" merge.lock_wait)" = 1 ] && [ "$(tel_count "${T}" merge.landed)" = 0 ] \
+  && ok "t3 a refusal under the lock: lock_wait only, no landed" || bad "t3 events" "$(cat "${T}"/*.jsonl 2>/dev/null)"
+
+# t4 LANDED UNGATED (exit 7): the merge is confirmed, so it is still a landing.
+fixture t4; T="${TMP}/t4-store"; echo badtree > "${ST}/merge_mode"
+out="$(ATHENA_TELEMETRY_DIR="${T}" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/t4.lock" 2>&1)"; rc=$?
+expect t4 7
+[ "$(tel_count "${T}" merge.landed)" = 1 ] && ok "t4 a confirmed landing that failed the tree check is still merge.landed" \
+  || bad "t4 merge.landed" "$(cat "${T}"/*.jsonl 2>/dev/null)"
+
+# t5 refused before the lock (bad args): nothing at all.
+fixture t5; T="${TMP}/t5-store"
+out="$(ATHENA_TELEMETRY_DIR="${T}" "${TOOL}" --pr x --head "${H}" --repo "${WT}" 2>&1)"; rc=$?
+expect t5 2
+[ ! -e "${T}" ] && ok "t5 a usage refusal emits nothing" || bad "t5 wrote telemetry" "$(cat "${T}"/*.jsonl 2>/dev/null)"
+
+# t6 FAIL-OPEN: an unwritable store changes neither the exit code nor stdout
+# (shas and fixture names normalised: each twin is its own fixture).
+norm() { sed -E 's/[0-9a-f]{40}/SHA/g; s/t6[a-d]/T6/g'; }
+mkdir -p "${TMP}/t6-ro"; chmod 500 "${TMP}/t6-ro"
+fixture t6a; o1="$(ATHENA_TELEMETRY_DIR="${TMP}/t6-rw" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/t6a.lock" 2>/dev/null | norm)"; c1=${PIPESTATUS[0]}
+fixture t6b; o2="$(ATHENA_TELEMETRY_DIR="${TMP}/t6-ro/telemetry" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/t6b.lock" 2>"${TMP}/t6b.err" | norm)"; c2=${PIPESTATUS[0]}
+# The writer's last-resort line (contract: Fails open) must still reach stderr.
+grep -q '^athena-telemetry:.*Fix:' "${TMP}/t6b.err" && ok "t6 the writer's athena-telemetry: Fix: line reaches stderr" \
+  || bad "t6 the athena-telemetry: line was swallowed" "$(cat "${TMP}/t6b.err")"
+[ "${c1}" = 0 ] && [ "${c1}" = "${c2}" ] && [ "${o1}" = "${o2}" ] && ok "t6 merged: unwritable store, exit and stdout unchanged" \
+  || bad "t6 merged: the unwritable store changed the run (exit ${c1} vs ${c2})" "$(diff <(printf '%s\n' "${o1}") <(printf '%s\n' "${o2}"))"
+fixture t6c; exec 8>>"${TMP}/t6c.lock"; flock 8
+o1="$(ATHENA_TELEMETRY_DIR="${TMP}/t6-rw2" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/t6c.lock" --wait 1 2>/dev/null | norm)"; c1=${PIPESTATUS[0]}
+o2="$(ATHENA_TELEMETRY_DIR="${TMP}/t6-ro/telemetry" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/t6c.lock" --wait 1 2>/dev/null | norm)"; c2=${PIPESTATUS[0]}
+exec 8>&-
+[ "${c1}" = 6 ] && [ "${c1}" = "${c2}" ] && [ "${o1}" = "${o2}" ] && ok "t6 timeout: unwritable store, exit 6 and stdout unchanged" \
+  || bad "t6 timeout: the unwritable store changed the run (exit ${c1} vs ${c2})" "$(diff <(printf '%s\n' "${o1}") <(printf '%s\n' "${o2}"))"
+chmod 700 "${TMP}/t6-ro"
+[ ! -e "${TMP}/t6-ro/telemetry" ] && ok "t6 nothing was written to the unwritable store" || bad "t6 unwritable store written"
 
 echo "locked-merge self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]

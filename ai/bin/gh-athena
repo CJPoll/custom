@@ -134,6 +134,9 @@ if [ "${1:-}" = "git" ]; then
   . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/forge-git-passthrough.sh" \
     || die "cannot load ai/lib/forge-git-passthrough.sh. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
   FG_TOOL=gh-athena FG_HOST=github.com FG_BOT='athena-harness[bot]'
+  # A push that moves the remote's default branch is recorded as merge.landed
+  # (DND-1475; the lib's "Landing telemetry" section). Fails open.
+  FG_LANDING_TELEMETRY=1
   FG_DRY_RUN="${GH_ATHENA_GIT_DRY_RUN:-}"
   fg_refuse_non_https "$@"
   TOKEN="$(get_token)"   # an assignment, so a mint failure stops here (set -e)
