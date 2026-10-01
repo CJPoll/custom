@@ -33,6 +33,10 @@ end
 # FAIL. Before DND-1569 a 2 s bound was the verdict, and it failed about 1 run
 # in 6 at load 32 on the unchanged library.
 HANG_CAP_S = 120
+# How long a hung child sleeps: past every hang cap and the b8/b9 callers' 600
+# s bound, so it never ends on its own while a case waits on it, yet finite,
+# so a child a broken library leaks dies within the hour (DND-1595).
+CHILD_LIFE_S = 3600
 MONO = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
 PAUSE = -> { sleep 0.05 }
 
@@ -97,17 +101,18 @@ end
 
 # "The call returned" is an EVENT too (DND-1595). The block runs on a thread
 # and the wait ends when that thread does: [:returned, value]. The clock only
-# caps a hang: [:hang, nil], and the thread is killed, so run's own cleanup
-# kills its group. Before DND-1595, b5 and b7 judged `seconds <= bound`, so a
-# call that returned correctly on a slow machine read as a FAIL.
+# caps a hang: [:hang, note], and the thread is killed, so run's own cleanup
+# kills its group; the note says whether that cleanup itself finished. Before
+# DND-1595, b5 and b7 judged `seconds <= bound`, so a call that returned
+# correctly on a slow machine read as a FAIL.
 def await_return(cap: HANG_CAP_S, clock: MONO, pause: PAUSE, &blk)
   t = Thread.new(&blk)
   t.report_on_exception = false
   return [:returned, t.value] if await_event(cap: cap, clock: clock, pause: pause) { !t.alive? } == :done
 
   t.kill
-  t.join(cap)
-  [:hang, nil]
+  ended = t.join(cap)
+  [:hang, ended ? "its cleanup then finished" : "its cleanup was still running after a second cap"]
 end
 
 # Kernel state of +pid+ for a HANG line: diagnostic text, never a verdict.
@@ -180,16 +185,22 @@ end
 #
 # r1 a call that returns after 10 s of slow-machine time. b5 and b7 used to
 # judge `seconds <= 7` (the 1 s bound plus graces), so this correct return
-# read as a FAIL.
+# read as a FAIL. The call moves the clock only after the wait has read its
+# deadline (the first pause), so the 10 s always fall inside the wait.
 skew = 0.0
-state, v = await_return(clock: -> { MONO.call + skew }) do
+waiting = Queue.new
+state, v = await_return(clock: -> { MONO.call + skew }, pause: lambda {
+  waiting << true if waiting.empty?
+  PAUSE.call
+}) do
+  waiting.pop
   skew += 10
   :ok
 end
 check("r1 a call that returns after 10 s of slow-machine time is :returned, not a FAIL",
       state == :returned && v == :ok, [state, v].inspect)
 
-# r2 an event (a pid file, a caller's exit) that comes after 12 s of
+# r2 an event (a pid file, a caller's exit) that comes after 16 s of
 # slow-machine time. b8 and b9 used to give up at 10 s and FAIL.
 polls = 0
 skew = 0.0
@@ -239,13 +250,13 @@ Dir.mktmpdir do |tmp|
   # b5 the hang: a leader that waits on a TERM-ignoring child holding stdout.
   # The child names itself with $BASHPID: inside a ( ) subshell $$ is still
   # the leader's pid, so the gone checks never looked at the child (DND-1594).
-  # The child sleeps forever, so the call can only return through its own
+  # The child outlives every cap, so the call can only return through its own
   # bound: the return is the event (DND-1595), and nothing times it.
   pids = File.join(tmp, "pids")
-  script = "echo $$ > #{pids}; (trap '' TERM; echo $BASHPID >> #{pids}; exec sleep infinity) & wait"
+  script = "echo $$ > #{pids}; (trap '' TERM; echo $BASHPID >> #{pids}; exec sleep #{CHILD_LIFE_S}) & wait"
   state, r = await_return { BoundedCommand.run(["bash", "-c", script], timeout: 1) }
   if state == :hang
-    hang("b5 the hang returns", "BoundedCommand.run still blocked at the #{HANG_CAP_S}s hang cap")
+    hang("b5 the hang returns", "BoundedCommand.run still blocked at the #{HANG_CAP_S}s hang cap; #{r}")
   else
     check("b5 hang returns timed_out", r.timed_out && r.exitstatus.nil? && !r.success?, r.inspect)
   end
@@ -260,16 +271,18 @@ Dir.mktmpdir do |tmp|
   # b7 the leader exits 0 in time, but a helper it started keeps stdout open
   # (a keyring/credential helper): the bound covers the reads, so this is
   # timed_out and the helper is killed, never an endless block. The helper
-  # never exits on its own, so a return at all is the bound's.
+  # outlives every cap, so a return at all is the bound's.
   hpids = File.join(tmp, "helper")
-  state, r = await_return { BoundedCommand.run(["bash", "-c", "sleep infinity & echo $! > #{hpids}; echo hi"], timeout: 1) }
+  state, r = await_return { BoundedCommand.run(["bash", "-c", "sleep #{CHILD_LIFE_S} & echo $! > #{hpids}; echo hi"], timeout: 1) }
   if state == :hang
-    hang("b7 a helper holding stdout does not block the call", "BoundedCommand.run still blocked at the #{HANG_CAP_S}s hang cap")
+    hang("b7 a helper holding stdout does not block the call", "BoundedCommand.run still blocked at the #{HANG_CAP_S}s hang cap; #{r}")
   else
     check("b7 exit 0 with a helper holding stdout is timed_out", r.timed_out && !r.success?, r.inspect)
   end
   helper = File.exist?(hpids) ? File.read(hpids).to_i : 0
-  check_gone("b7 the helper holding stdout was killed", helper)
+  unless check_gone("b7 the helper holding stdout was killed", helper)
+    Process.kill("KILL", helper) rescue nil # rubocop:disable Style/RescueModifier
+  end
 
   # b8 the CALLER is interrupted (Ctrl-C, an outer timeout) while the child
   # hangs: the child is in its own group, so the caller must kill it on the way
@@ -290,8 +303,20 @@ Dir.mktmpdir do |tmp|
   lib = File.expand_path("../../lib/bounded_command", __dir__)
   default_int = ["env", "--default-signal=INT"]
   prior_int = Signal.trap("INT", "IGNORE")
-  interrupted_caller = lambda do |label, prelude, pidfile|
-    code = "#{prelude}BoundedCommand.run(['bash', '-c', 'echo $$ > #{pidfile}; exec sleep infinity'], timeout: 600)"
+  # A caller still running at a cap is KILLed with the groups of its children,
+  # which run started in their own groups: nothing a HANG leaves outlives it.
+  kill_caller = lambda do |caller|
+    kids = begin
+      File.read("/proc/#{caller}/task/#{caller}/children").split.map(&:to_i)
+    rescue SystemCallError
+      []
+    end
+    Process.kill("KILL", caller)
+    Process.wait(caller)
+    kids.each { |k| Process.kill("KILL", -k) rescue nil } # rubocop:disable Style/RescueModifier
+  end
+  interrupted_caller = lambda do |label, what, prelude, pidfile|
+    code = "#{prelude}BoundedCommand.run(['bash', '-c', 'echo $$ > #{pidfile}; exec sleep #{CHILD_LIFE_S}'], timeout: 600)"
     caller = Process.spawn(*default_int, RbConfig.ruby, "-r", lib, "-e", code, %i[out err] => File::NULL)
     status = nil
     reap = -> { status ||= Process.waitpid2(caller, Process::WNOHANG)&.last }
@@ -304,30 +329,33 @@ Dir.mktmpdir do |tmp|
     end
     Process.kill("INT", caller) unless status
     if await_event { reap.call } == :hang
-      kill = child.positive? ? kill_landed(child) : "no child recorded"
-      hang("#{label} an interrupted caller exits",
-           "caller #{caller} #{proc_note(caller)} at the #{HANG_CAP_S}s hang cap; child KILL landed: #{kill}")
-      Process.kill("KILL", caller)
-      Process.wait(caller)
+      hang("#{label} a caller #{what} exits",
+           "caller #{caller} #{proc_note(caller)} at the #{HANG_CAP_S}s hang cap; child #{child.positive? ? proc_note(child) : 'not recorded'}")
+      kill_caller.call(caller)
     else
-      check("#{label} an interrupted caller exits on the interrupt", status.termsig == Signal.list["INT"], status.inspect)
+      check("#{label} a caller #{what} exits on the interrupt", status.termsig == Signal.list["INT"], status.inspect)
     end
-    check_gone("#{label} an interrupted caller leaves no hung child", child)
-    Process.kill("KILL", child) if child.positive? && ProcState.running?(child)
+    check_gone("#{label} a caller #{what} leaves no hung child", child)
+    begin
+      Process.kill("KILL", child) if child.positive? && ProcState.running?(child)
+    rescue SystemCallError, ProcState::Unreadable
+      nil
+    end
   end
-  interrupted_caller.call("b8", "", File.join(tmp, "caller-child"))
+  interrupted_caller.call("b8", "interrupted while run waits", "", File.join(tmp, "caller-child"))
 
   # b9 the caller is interrupted just AFTER the child is spawned. With Open3's
   # block form that was before run's cleanup was armed: the interrupt left a
   # hung orphan, or Open3's ensure joined the child and waited out its whole
   # life. Measured 2026-09-28 under load 42: b8 hit the window 2 runs in 4.
   # The first Process.detach (called right after the spawn) blocks until the
-  # INT arrives, so the INT always lands in that window, however slow the
-  # machine. The flag is set before the real detach, so run's cleanup, which
-  # detaches again, never blocks.
+  # INT arrives, so the INT lands between the spawn and wait_bounded however
+  # slow the machine is. It may land even earlier, between the spawn and that
+  # first detach; then run's cleanup makes the first call, while unwinding the
+  # Interrupt ($! is set), so the override never blocks on the cleanup path.
   slow_detach = "module Process; class << self; alias_method :bc_detach, :detach; " \
-                "def detach(pid); first = !@bc_held; @bc_held = true; t = bc_detach(pid); sleep if first; t; end; end; end; "
-  interrupted_caller.call("b9", slow_detach, File.join(tmp, "caller-child-9"))
+                "def detach(pid); held = @bc_held; @bc_held = true; t = bc_detach(pid); sleep unless held || $!; t; end; end; end; "
+  interrupted_caller.call("b9", "interrupted before cleanup is armed", slow_detach, File.join(tmp, "caller-child-9"))
   Signal.trap("INT", prior_int)
 
   [0, -1, nil, "5"].each do |bad|
