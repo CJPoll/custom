@@ -4814,8 +4814,12 @@ A flag surfaces in three places:
   writes one `slack_route_flags` obligation row per event, in the transaction
   that stores the line, and a supervised worker posts ONE threaded reply as
   the event's own app, in its channel, under the owner's root. It names the
-  requested session, how it was requested, where the message went and why,
-  and the fix, and never quotes the owner's text. It posts only in an `im`,
+  requested session, how it was requested, and where the message went and
+  why, in plain words for the owner. Only a message that reached no session
+  gets a next step, and it names the owner's own route settings: add a
+  channel route or a `<label>` topic route. The notice names no tool,
+  argument or internal code, gives no agent an instruction, and never quotes
+  the owner's text (DND-1573, gen_saas PR #663). It posts only in an `im`,
   the owner's DM with the bot. In an `mpim` or a channel other people would
   see it (`~/.claude/CLAUDE.md` → *Owner approval policy*, item 3), so there
   the row is recorded `skipped` with `skip_reason: not_dm`, and the record
@@ -4832,6 +4836,13 @@ DND-1522 deploys, all three causes read `label_disabled`." Superseded: DND-1522
 (gen_saas PR #655) and DND-1536 (PR #657) deployed on 2026-10-01, and the
 rules above match gen_saas `origin/main` (`TopicRouteRules.lookup/1`,
 `RouteFlag.decide/2`, `RouteFlagNotice`).
+
+**Later (2026-10-01, DND-1573):** the notice bullet said the notice names
+"where the message went and why, and the fix". Superseded: the shipped notice
+ended a delivered flag with an agent instruction ("can forward it with
+session_send reroute_of_event_id"), which the owner flagged live. gen_saas PR
+#663 (`RouteFlagNotice.text/1`) gives a next step only to an undelivered
+message, in the owner's route settings.
 
 **The record.** The Slack receiver's per-event outcome log records the router's
 path, as for a stale claim (*Thread replies route to the thread's claimant*).
