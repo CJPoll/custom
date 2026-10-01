@@ -94,6 +94,24 @@ module LeadTimeExperimentGit
     Source.could_not_look("git could not run (#{e.message})")
   end
 
+  # Whether `tip` carries `sha` (sha is tip or an ancestor of it), DND-1528:
+  # does a change-repo ledger landing contain the change? Source.ok([bool]);
+  # a tip this clone has never seen is could not look, never "no".
+  def contains?(repo, sha, tip)
+    return Source.could_not_look("#{repo} is not on this machine") unless File.directory?(repo)
+
+    _, _, known = Open3.capture3("git", "-C", repo, "cat-file", "-e", "#{tip}^{commit}")
+    return Source.could_not_look("#{tip.to_s[0, 12]} is not in #{repo} (fetch it)") unless known.success?
+
+    _, err, st = Open3.capture3("git", "-C", repo, "merge-base", "--is-ancestor", sha, tip)
+    return Source.ok([true]) if st.success?
+    return Source.ok([false]) if st.exitstatus == 1
+
+    Source.could_not_look("git merge-base in #{repo} failed (#{err.strip.lines.first.to_s.strip})")
+  rescue SystemCallError => e
+    Source.could_not_look("git could not run (#{e.message})")
+  end
+
   # A commit's line counts against its first parent (DND-1549):
   # Source.ok([[added | nil, deleted | nil, path], ...]), nil for a binary
   # file. Renames are split into a delete and an add, so an added test is

@@ -194,8 +194,8 @@ case that leaves commits in the lane.
 
 #### Recording the experiment
 
-After the change is **on main**, record it with the SHA as it landed (a
-rebase changes it):
+After the change is **on main** (the main of the repo it landed in), record
+it with the SHA as it landed (a rebase changes it):
 
 ```
 experiment record --repo R --phase P --kind change --metric phase \
@@ -222,16 +222,18 @@ experiment record --repo R --phase P --kind change --metric phase \
 - When the change landed in another repo than R (a harness change in
   custom, measured on R's landings), add `--change-repo <that repo>`
   (DND-1528). The SHA must be on that repo's main. The split point is
-  `live_at`, when the commit landed there (first-parent, committer time,
-  never the author date), and R's landings either side of it are the
-  before- and after-sets. `ai/bin/lead-time-repos --repo-path C` shows which
+  `live_at`, when it went live there: the push or merge time from that
+  repo's ledger row that carries it, else, until that row is ingested, its
+  first-parent landing's committer time (record says so, and judge moves to
+  the ledger time once the row exists). Never the author date. R's landings
+  either side of it are the before- and after-sets. `ai/bin/lead-time-repos --repo-path C` shows which
   checkout C resolves to; custom resolves even where it is not configured.
   An unresolvable change repo is refused (exit 2).
 - A refusal (exit 2) names the pending experiment that blocks it. Do not work
   around it.
 - A directly-spawned run whose PR has not landed yet journals "awaiting
   landing: PR #n" under `### Experiments`. The next run records it once the
-  commit is on main.
+  commit is on the main it landed in.
 
 A revert (step 2) and an architect hand-off record no experiment.
 

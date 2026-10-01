@@ -69,12 +69,16 @@ HELP = <<~TXT
            pending or owes a revert; `instrumentation` is exempt.
            --change-repo C (DND-1528): the commit landed in repo C, not in
            R (a harness change in custom measured on gen_saas). It must be
-           on C's main; the split point is live_at, its first-parent
-           landing time on C's main (the committer time of the commit, or
-           of the merge that brought it in; never the author date). R's
-           landings before live_at are the before-set, those after it the
-           after-set; no landing is excluded. The row records change_repo,
-           commit and live_at; judge and list print them. The test-additions
+           on C's main; the split point is live_at, when it went live
+           there: the landed_at (push or merge time) of C's first ledger
+           row whose landed commit carries it (live_at_source=ledger), else,
+           until such a row is ingested, the committer time of its
+           first-parent landing commit (live_at_source=committer, which a
+           fast-forward push follows later; judge moves to the ledger time
+           once a row carries it). Never the author date. R's landings
+           before live_at are the before-set, those after it the after-set;
+           no landing is excluded. The row records change_repo, commit,
+           live_at and live_at_source; judge and list print them. The test-additions
            read and the owed revert use C's git: a revert is of that commit
            in C. Default: R (same-repo, unchanged).
   judge    Judge every pending experiment of the repo and print one line
@@ -135,7 +139,8 @@ HELP = <<~TXT
     --change-repo C      the repo the commit landed in (default: R). Resolved
                          as ai/bin/lead-time-repos --repo-path C does: a
                          configured repo, or the runner's own repo (custom)
-                         even where it is not configured. Unresolvable: exit 2
+                         even where it is not configured (custom: the basename
+                         of the runner's main checkout). Unresolvable: exit 2
     --phase P            implement | verify | queue | integrate | merge
     --metric M           phase | lead | code | counter:<name> | check:<label> | na_share
                          (instrumentation measures na_share; a change does not).
@@ -257,17 +262,17 @@ module Setup
 
   def store(state) = LeadTimeExperimentStore.new(File.join(state, "experiments.jsonl"))
 
-  # The repo's ledger rows, batches folded once. A missing ledger is "could
-  # not look" (exit 3), never "0 landings".
-  def ledger_rows(state, repo)
+  # The named repo's ledger rows, batches folded once. A missing ledger is
+  # "could not look" (exit 3), never "0 landings".
+  def ledger_rows(state, name)
     ledger = LeadTimePhasesIO::LedgerStore.new(File.join(state, "ledger.jsonl"))
     unless ledger.exist?
       refuse(3, "could not look: no ledger at #{ledger.path}",
-             "run ai/bin/lead-time-phases --ingest --repo #{repo.name} first; this is not an empty ledger")
+             "run ai/bin/lead-time-phases --ingest --repo #{name} first; this is not an empty ledger")
     end
     rows, bad = ledger.read
     warn "experiment: #{bad} malformed ledger line(s) skipped" if bad.positive?
-    LeadTimePhases::Batch.dedupe(rows.select { |r| r["repo"] == repo.name }).first
+    LeadTimePhases::Batch.dedupe(rows.select { |r| r["repo"] == name }).first
   rescue SystemCallError => e
     refuse(1, "cannot read #{ledger.path} (#{e.class.name.split('::').last})", "check the state dir's permissions")
   end
@@ -314,6 +319,63 @@ module Setup
   end
 end
 
+# ── MANAGER: live_at (DND-1528) ──────────────────────────────────────────────
+
+# When a cross-repo change went live. The change repo's ledger row whose
+# landed commit carries it gives the push or merge time (live_at_source
+# "ledger"); until one is ingested, the committer time of its first-parent
+# landing commit stands in ("committer"), which a fast-forward push follows
+# later. A ledger that cannot be read, or a carrier git cannot check, falls
+# back too, and says why on stderr.
+module Live
+  module_function
+
+  # -> {"live_at" => RFC 3339, "live_at_source" => "ledger" | "committer"}
+  def resolve(state, change, path, commit, committed_at)
+    row, why = carrier(state, change, path, commit, committed_at)
+    return { "live_at" => X.at(row).utc.iso8601, "live_at_source" => "ledger" } if row
+
+    warn "experiment: live_at for #{short(commit)} is its committer time on #{change}'s main: #{why}; " \
+         "judge uses #{change}'s ledger landing once one carries it"
+    { "live_at" => committed_at.utc.iso8601, "live_at_source" => "committer" }
+  end
+
+  # -> [ledger row, nil] or [nil, why not]
+  def carrier(state, change, path, commit, committed_at)
+    rows = change_rows(state, change)
+    return [nil, rows] if rows.is_a?(String)
+
+    cands = X.ledger_live_candidates(rows, committed_at: committed_at)
+    cands.each do |r|
+      src = XG.contains?(path, commit, r["landed_commit"])
+      return [nil, "could not look whether #{short(r['landed_commit'])} carries it: #{src.reason}"] if src.could_not_look?
+      return [r, nil] if src.items.first
+    end
+    [nil, "none of #{change}'s #{cands.size} ledger landing(s) since #{(committed_at - X::LIVE_SKEW_S).utc.iso8601} carries it yet"]
+  end
+
+  # The change repo's ledger rows, or why they could not be read (a String).
+  def change_rows(state, change)
+    Setup.ledger_rows(state, change)
+  rescue Refusal => e
+    "#{change}'s ledger could not be read (#{e.message})"
+  end
+
+  # A pending cross-repo experiment recorded on the committer fallback:
+  # judge looks again, and splits at the ledger landing once one carries it.
+  # The record is not rewritten; the line prints the source used.
+  def upgrade(exp, state, repo, res)
+    return exp unless X.cross_repo?(exp) && exp["live_at_source"] == "committer"
+
+    committed = LeadTimePhases::Util.time(exp["live_at"])
+    path = Judge.in_change_repo(exp, repo, res) { |p| p }
+    return exp unless committed && path.is_a?(String)
+
+    row, = carrier(state, exp["change_repo"], path, exp["commit"], committed)
+    row ? exp.merge("live_at" => X.at(row).utc.iso8601, "live_at_source" => "ledger") : exp
+  end
+end
+
 # ── MANAGER: record ──────────────────────────────────────────────────────────
 
 module Record
@@ -330,10 +392,10 @@ module Record
     state = Setup.state_dir(env)
     change = opts["--change-repo"] || repo.name
     change_path = change == repo.name ? repo.path : Setup.change_repo_path(res, change)
-    rows = Setup.ledger_rows(state, repo)
+    rows = Setup.ledger_rows(state, repo.name)
     check_label!(rows, metric, repo, res.window) if metric.check?
     on_main!(change, change_path, commit)
-    cross = change == repo.name ? {} : { "change_repo" => change, "live_at" => live_at!(change, change_path, commit) }
+    cross = change == repo.name ? {} : { "change_repo" => change }.merge(Live.resolve(state, change, change_path, commit, live_at!(change, change_path, commit)))
     tests = X.deletes_tests_fields(XG.numstat(change_path, commit))
     row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows, cross).merge(tests)
     Setup.append(Setup.store(state)) { |existing| admit!(X.fold(existing), row) }
@@ -390,8 +452,9 @@ module Record
            "record the experiment after it lands, with the SHA as it is on main (git log origin/main)")
   end
 
-  # When the commit went live on the change repo's main (DND-1528): its
-  # first-parent landing's committer time, RFC 3339. Never the author date.
+  # The committer time of the commit's first-parent landing on the change
+  # repo's main (DND-1528): the earliest it can have gone live, and the
+  # fallback live_at (Live.resolve). Never the author date.
   def live_at!(name, path, commit)
     src = XG.landed_at(path, commit)
     if src.could_not_look?
@@ -403,7 +466,7 @@ module Record
       refuse(2, "#{short(commit)} has no first-parent landing on #{name}'s main",
              "record the experiment with the SHA as it landed on #{name}'s main (git log --first-parent origin/main)")
     end
-    landing.last.utc.iso8601
+    landing.last.utc
   end
 
   # cross: {} (same-repo), or change_repo and live_at (DND-1528), which the
@@ -471,7 +534,7 @@ module Judge
     res = Setup.resolution(env)
     repo = Setup.improve_repo(env, opts["--repo"], res)
     state = Setup.state_dir(env)
-    rows = Setup.ledger_rows(state, repo)
+    rows = Setup.ledger_rows(state, repo.name)
     store = Setup.store(state)
     unless store.exist?
       puts "experiment judge: #{repo.name}: no experiments file at #{store.path} (none recorded yet); #{rows.size} landing(s) in the ledger"
@@ -482,7 +545,8 @@ module Judge
     mine = all.select { |e| e["repo"] == repo.name }
     shas = all.map { |e| e["commit"] }
     # [experiment, verdict, phase context (check metrics only; printed, never judged)]
-    results = mine.select { |e| e["status"] == "pending" }.map { |e| [e, *verdict(e, rows, repo, shas, now)] }
+    pending = mine.select { |e| e["status"] == "pending" }.map { |e| Live.upgrade(e, state, repo, res) }
+    results = pending.map { |e| [e, *verdict(e, rows, repo, shas, now)] }
     results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo, res), nil] }
     # + the HELD explanation (DND-1549), nil unless a revert verdict is held
     results = results.map { |e, v, ctx| held(e, v, ctx, repo, res) }
@@ -647,7 +711,7 @@ module List
     tag = declined ? " constraint=#{e.dig('last', 'constraint')}" : ""
     was = declined ? " (revert verdict was: #{e.dig('last', 'prior_reason')})" : ""
     xtext = X.cross_text(e)
-    "experiment: #{e['id']} #{e['status'].upcase}#{tag}#{xtext ? " #{xtext}" : ''} kind=#{e['kind']} metric=#{e['metric']} " \
+    "experiment: #{e['id']} #{e['status'].upcase}#{tag} kind=#{e['kind']} metric=#{e['metric']}#{xtext ? " #{xtext}" : ''} " \
       "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}#{was}" : ''}"
   end
 end

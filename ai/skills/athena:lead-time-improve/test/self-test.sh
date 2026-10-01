@@ -440,6 +440,15 @@ printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"
 # The custom change: written at 02:00 (author date), landed at 11:30 (committer).
 XC="$(GIT_AUTHOR_DATE=2026-10-02T02:00:00Z GIT_COMMITTER_DATE=2026-10-02T11:30:00Z "${G[@]}" commit -q --allow-empty -m "fixture: a harness change for gen_saas" && "${G[@]}" rev-parse HEAD)"
 XID="gen_saas:verify:${XC:0:12}"
+# The push that carried it to main was 12:15 (the forge's time, in custom's
+# ledger), with one more commit on top: the ledger's landed commit is that tip.
+XTIP="$(GIT_AUTHOR_DATE=2026-10-02T11:40:00Z GIT_COMMITTER_DATE=2026-10-02T11:40:00Z "${G[@]}" commit -q --allow-empty -m "fixture: the next commit in the same push" && "${G[@]}" rev-parse HEAD)"
+# custom_rows OUT: custom's ledger rows near it. 11:50 is a landing that does
+# not carry XC (OTHER is an older custom commit); 12:15 is the push that does.
+custom_rows() {
+  printf '%s\n' "{\"schema\":1,\"repo\":\"custom\",\"mode\":\"improve\",\"ticket\":\"DND-9901\",\"landed_commit\":\"${OTHER}\",\"landed_at\":\"2026-10-02T11:50:00Z\",\"landed_via\":\"push\",\"phases\":{}}" \
+    "{\"schema\":1,\"repo\":\"custom\",\"mode\":\"improve\",\"ticket\":\"DND-9902\",\"landed_commit\":\"${XTIP}\",\"landed_at\":\"2026-10-02T12:15:00Z\",\"landed_via\":\"push\",\"phases\":{}}" >>"$1"
+}
 # gen_saas's own landings, hourly from 2026-10-02T00:00Z: 600 s before, 500 s after.
 STATEX="${TMP}/statex"
 mkdir -p "${STATEX}"
@@ -461,17 +470,45 @@ eq "a commit on custom's main: accepted, exit 0" "$(xrec custom "${XC}")" "0"
 has "record prints the change repo and live_at" "$(out)" "change_repo=custom commit=${XC:0:12} live_at=2026-10-02T11:30:00Z"
 XROW="$(recrow "${STATEX}/experiments.jsonl" "${XID}")"
 has "the row records change_repo" "${XROW}" '"change_repo":"custom"'
-has "... live_at, the landing (committer) time, never the author date" "${XROW}" '"live_at":"2026-10-02T11:30:00Z"'
+has "... live_at: with no custom ledger row carrying it, the landing commit's committer time, never the author date" "${XROW}" '"live_at":"2026-10-02T11:30:00Z"'
+has "... and says that is its source" "${XROW}" '"live_at_source":"committer"'
+has "record warns that live_at is the committer time, and why" "$(err)" "live_at for ${XC:0:12} is its committer time on custom's main: none of custom's 0 ledger landing(s)"
 has "... the commit" "${XROW}" "\"commit\":\"${XC}\""
 has "the baseline splits at live_at: gen_saas's 11:00 landing is in it (no own landing excluded)" "${XROW}" '"to":"2026-10-02T11:00:00Z"'
 has "... ten landings back from live_at, not from the 02:00 author date" "${XROW}" '"from":"2026-10-02T02:00:00Z"'
 lacks "... and it is not provisional" "${XROW}" "provisional"
 eq "list: exit 0" "$(sx run list --repo gen_saas)" "0"
-has "list prints change_repo, commit and live_at" "$(out)" "${XID} PENDING change_repo=custom commit=${XC:0:12} live_at=2026-10-02T11:30:00Z"
+has "list prints change_repo, commit and live_at" "$(out)" "${XID} PENDING kind=change metric=phase change_repo=custom commit=${XC:0:12} live_at=2026-10-02T11:30:00Z"
 eq "judge: exit 0" "$(sx run judge --repo gen_saas)" "0"
 has "judge: before/after from gen_saas's rows around live_at: KEEP 600 -> 500" "$(out)" "${XID} KEEP kind=change metric=phase change_repo=custom commit=${XC:0:12} live_at=2026-10-02T11:30:00Z"
 has "... before = the ten up to 11:00, after = the ten from 12:00" "$(out)" "before n=10 median=600s p90=600s | after n=10 median=500s p90=500s"
 has "... the guards read gen_saas's main" "$(out)" "reverts 0->0 ok"
+
+echo "== cross-repo: live_at is the push that carried it, from custom's ledger"
+STATEU="${TMP}/stateu"
+mkdir -p "${STATEU}"
+gs_ledger "${STATEU}/ledger.jsonl" "$(printf 'd%.0s' $(seq 40))" 500 2026-10-02T00:00:00Z
+custom_rows "${STATEU}/ledger.jsonl"
+su() { LEAD_TIME_STATE_DIR="${STATEU}" ATHENA_LEADTIME_CONFIG="${XCONF}" LEAD_TIME_EXPERIMENT_NOW=2026-10-03T12:00:00Z "$@"; }
+eq "record with custom's ledger row ingested: exit 0" "$(su run record --repo gen_saas --change-repo custom --phase verify --metric phase --commit "${XC}" --kind change --hypothesis-file "${HYP}")" "0"
+UROW="$(recrow "${STATEU}/experiments.jsonl" "${XID}")"
+has "live_at is the 12:15 push, not the 11:50 landing that does not carry it, nor the 11:30 commit" "${UROW}" '"live_at":"2026-10-02T12:15:00Z"'
+has "... from the ledger" "${UROW}" '"live_at_source":"ledger"'
+has "... so gen_saas's 12:00 landing is in the before-set" "${UROW}" '"to":"2026-10-02T12:00:00Z"'
+lacks "... and record warns of no fallback" "$(err)" "committer time"
+
+echo "== cross-repo: judge moves a committer-time live_at to the ledger landing once ingested"
+STATEV="${TMP}/statev"
+mkdir -p "${STATEV}"
+gs_ledger "${STATEV}/ledger.jsonl" "$(printf 'd%.0s' $(seq 40))" 500 2026-10-02T00:00:00Z
+sv() { LEAD_TIME_STATE_DIR="${STATEV}" ATHENA_LEADTIME_CONFIG="${XCONF}" LEAD_TIME_EXPERIMENT_NOW=2026-10-03T12:00:00Z "$@"; }
+eq "record before custom's landing is ingested: exit 0" "$(sv run record --repo gen_saas --change-repo custom --phase verify --metric phase --commit "${XC}" --kind change --hypothesis-file "${HYP}")" "0"
+has "... on the committer fallback" "$(recrow "${STATEV}/experiments.jsonl" "${XID}")" '"live_at_source":"committer"'
+custom_rows "${STATEV}/ledger.jsonl"
+eq "judge after custom's landing is ingested: exit 0" "$(sv run judge --repo gen_saas)" "0"
+has "judge splits at the 12:15 push" "$(out)" "change_repo=custom commit=${XC:0:12} live_at=2026-10-02T12:15:00Z |"
+has "... so the after-set starts at 13:00: nine landings, pending" "$(out)" "after-set n=9 of K=10"
+lacks "... and the record is not rewritten" "$(recrow "${STATEV}/experiments.jsonl" "${XID}")" "12:15"
 
 echo "== cross-repo: same-repo is unchanged"
 STATEY="${TMP}/statey"

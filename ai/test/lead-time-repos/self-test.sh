@@ -219,6 +219,8 @@ refused "a repo neither configured nor the runner's own" "not the runner's own r
 eq "... and nothing on stdout" "${OUT}" ""
 run ATHENA_LEADTIME_CONFIG="${GOOD}" -- --repo-path "${OWN_NAME}" --json
 refused "--repo-path with --json" "--repo-path prints one path"
+run ATHENA_LEADTIME_CONFIG="${GOOD}" -- --self-test --repo-path "${OWN_NAME}"
+refused "--repo-path with --self-test" "--repo-path prints one path"
 run ATHENA_LEADTIME_CONFIG="${NOTGIT}" -- --repo-path "${OWN_NAME}"
 refused "a refused config refuses --repo-path too (one resolver)" "is not a git repository"
 

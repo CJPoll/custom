@@ -34,10 +34,14 @@
 #     sharing a landed commit are one landing).
 #   * cross-repo (DND-1528): a change that landed in another repo (the
 #     change repo, e.g. a harness change in custom) measured on this repo's
-#     landings. It splits at live_at, the change's first-parent landing time
-#     on the change repo's main (never its author date), and excludes no
-#     landing: the measured repo has none of its own. A record with no
-#     change_repo, or one equal to its repo, is same-repo, unchanged.
+#     landings. It splits at live_at, when the change went live on the
+#     change repo's main, and excludes no landing: the measured repo has none
+#     of its own. live_at is the landed_at of the change repo's first ledger
+#     row whose landed commit carries it (the push or merge time;
+#     live_at_source "ledger"); until such a row is ingested, the committer
+#     time of its first-parent landing commit ("committer"), which a
+#     fast-forward push follows later. Never the author date. A record with
+#     no change_repo, or one equal to its repo, is same-repo, unchanged.
 #
 # The store (experiments.jsonl) is rows of two types, latest status wins:
 #   {"type":"record", "id", "repo", "phase", "metric", "kind", "commit", ...}
@@ -176,6 +180,14 @@ module LeadTimeExperiment
 
   # ── cross-repo (DND-1528) ──────────────────────────────────────────────
 
+  # Where a cross-repo live_at came from: the change repo's ledger (the
+  # push or merge time) or the landing commit's committer time (a fallback).
+  LIVE_SOURCES = %w[ledger committer].freeze
+  # The committer's clock and the forge's can disagree; a landing this much
+  # before the commit was made is still looked at (git decides whether it
+  # carries the commit, so the slack costs only reads).
+  LIVE_SKEW_S = 3600
+
   # Whether the experiment's commit landed in a repo other than the one it
   # is measured on. A record written before DND-1528 has no change_repo.
   def cross_repo?(exp) = !exp["change_repo"].nil? && exp["change_repo"] != exp["repo"]
@@ -204,11 +216,24 @@ module LeadTimeExperiment
     first_parent.select { |c, _| contains.key?(c) }.last
   end
 
+  # The change repo's ledger rows that may be the landing that carried a
+  # commit made at committed_at: from LIVE_SKEW_S before it on, oldest
+  # first, one per landed commit. Which one carries it is git's answer.
+  def ledger_live_candidates(rows, committed_at:)
+    from = committed_at - LIVE_SKEW_S
+    rows.select { |r| SHA_RE.match?(r["landed_commit"].to_s) && (t = at(r)) && t >= from }
+        .sort_by { |r| [r["landed_at"].to_s, r["landed_commit"].to_s] }
+        .uniq { |r| r["landed_commit"] }
+  end
+
   # The judge/list text for a cross-repo experiment, nil for same-repo.
   def cross_text(exp)
     return nil unless cross_repo?(exp)
 
-    "change_repo=#{exp['change_repo']} commit=#{exp['commit'].to_s[0, 12]} live_at=#{exp['live_at']}"
+    out = "change_repo=#{exp['change_repo']} commit=#{exp['commit'].to_s[0, 12]} live_at=#{exp['live_at']}"
+    return out unless exp["live_at_source"] == "committer"
+
+    "#{out} (committer time: no change-repo ledger row carried it when recorded)"
   end
 
   # The rows a metric can compare, in landing order: the excluded landings
@@ -418,6 +443,9 @@ module LeadTimeExperiment
       return "change_repo #{r['change_repo'].inspect} is not a repo name" unless LeadTimeConfig::NAME_RE.match?(r["change_repo"].to_s)
       if cross_repo?(r) && !LeadTimePhases::Util.time(r["live_at"])
         return "live_at #{r['live_at'].inspect} is not RFC 3339 (a cross-repo record splits at it)"
+      end
+      if r.key?("live_at_source") && !LIVE_SOURCES.include?(r["live_at_source"])
+        return "live_at_source #{r['live_at_source'].inspect} is not one of #{LIVE_SOURCES.join(', ')}"
       end
     end
 

@@ -259,6 +259,8 @@ p90 over the last K comparable landings), and a status.
 - **Comparable:** same repo, same metric measured on both sides, excluding
   the experiment's own landing. A phase that telemetry added after the
   baseline was taken has no before-set, so it is `n/a`, never compared.
+  (A cross-repo experiment splits at `live_at` and excludes no landing: see
+  the DND-1528 note under *Revert*.)
 - **K = 10 per side.**
 - **Keep** when the median falls at least 10%, the p90 does not rise, and the
   quality guards do not worsen. The guards are: critic BLOCK rate, gate red
@@ -316,12 +318,19 @@ p90 over the last K comparable landings), and a status.
   measured repo's main, and the split was that commit's own landing row. A
   harness change for gen_saas lands in custom, so a gen_saas improve run
   could never record one. `record --change-repo C` (default: `--repo`) now
-  takes a commit on C's main. The split is `live_at`: the commit's
-  first-parent landing time on C's main (the committer time of the commit,
-  or of the merge that brought it in; never the author date). The measured
-  repo's landings before it are the before-set, those after it the
-  after-set, and none is excluded. The row records `change_repo`, `commit`
-  and `live_at`; judge and list print them. The test-additions read
+  takes a commit on C's main. The split is `live_at`, when it went live on
+  C's main: the `landed_at` (push or merge time) of C's first ledger row
+  whose landed commit carries it (`live_at_source: ledger`). Until such a
+  row is ingested, it is the committer time of the commit's first-parent
+  landing (the commit, or the merge that brought it in;
+  `live_at_source: committer`). A fast-forward push follows that time,
+  often by the whole gate and critic round, so record warns, and judge
+  splits at the ledger time once a row carries it. Never the author date.
+  The measured repo's landings before it are the before-set, those after
+  it the after-set, and none is excluded. The row records `change_repo`,
+  `commit`, `live_at` and `live_at_source`; judge and list print them. One
+  commit can be an experiment on custom and on gen_saas at once, with
+  different ids; their verdicts are judged apart and never reconciled. The test-additions read
   (DND-1549) and the owed revert use C's git: a revert is of that commit in
   C. C resolves as `ai/bin/lead-time-repos --repo-path C` prints: its
   configured path, or, for the runner's own repo (custom), its main checkout

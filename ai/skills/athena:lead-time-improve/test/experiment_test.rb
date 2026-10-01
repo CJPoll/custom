@@ -686,6 +686,32 @@ check("record_error: a same-repo record needs no live_at (unchanged)") { X.recor
 check("cross_text: a cross-repo experiment names change_repo, commit and live_at") do
   X.cross_text(xexp) == "change_repo=custom commit=#{CUSTOM_SHA[0, 12]} live_at=#{LIVE}"
 end
+check("cross_text: a committer-time live_at says so, so it never reads as the push time") do
+  X.cross_text(xexp("live_at_source" => "committer")).end_with?("live_at=#{LIVE} (committer time: no change-repo ledger row carried it when recorded)")
+end
+check("record_error: an unknown live_at_source is malformed") do
+  X.record_error(xexp("live_at_source" => "guess")).to_s.include?("live_at_source")
+end
+check("record_error: ledger and committer are the known live_at sources") do
+  X.record_error(xexp("live_at_source" => "ledger")).nil? && X.record_error(xexp("live_at_source" => "committer")).nil?
+end
+
+crow = lambda do |at, sha, repo: "custom"|
+  { "repo" => repo, "landed_commit" => sha, "landed_at" => at }
+end
+cands = X.ledger_live_candidates(
+  [crow.call("2026-10-01T13:00:00Z", "b" * 40), crow.call("2026-10-01T09:00:00Z", "a" * 40),
+   crow.call("2026-10-01T12:45:00Z", "d" * 40), crow.call("2026-10-01T12:45:00Z", "d" * 40),
+   crow.call("2026-10-01T12:50:00Z", nil), crow.call("2026-10-01T11:40:00Z", "e" * 40)],
+  committed_at: t("2026-10-01T12:30:00Z")
+)
+check("ledger_live_candidates: the change repo's landings from (committer time - skew) on, oldest first, one per landed commit") do
+  cands.map { |r| r["landed_commit"][0] } == %w[e d b]
+end
+check("ledger_live_candidates: a landing more than the skew before the commit was made is never a candidate") do
+  cands.none? { |r| r["landed_commit"] == "a" * 40 }
+end
+check("ledger_live_candidates: a row with no landed commit is never a candidate") { cands.none? { |r| r["landed_commit"].nil? } }
 check("cross_text: a same-repo experiment prints nothing new") { X.cross_text(exp).nil? }
 
 check("hold_text: a cross-repo revert names the change repo it lands in") do

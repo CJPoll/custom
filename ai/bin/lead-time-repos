@@ -59,8 +59,8 @@ HELP = <<~TXT
     1. NAME configured and present: its configured path;
     2. NAME is the runner's own repo (the repo this tool runs from): its
        main checkout, from `git rev-parse --git-common-dir`, so the harness
-       repo resolves on a machine that does not configure it. Never a
-       hardcoded path;
+       repo resolves on a machine that does not configure it. Its name is
+       that checkout's basename (custom). Never a hardcoded path;
     3. otherwise refused, exit 2 with Fix: (configured but skipped here, or
        neither configured nor the runner's own). Exit 3 when the runner's
        own repo could not be looked at and NAME is not configured.
@@ -108,7 +108,9 @@ end
 # --repo-path NAME: one line, the path. The config is resolved in full (a
 # refused config refuses this too), but no measured repo need be present.
 def repo_path(env, opts)
-  return fail_with(2, "usage error: --repo-path prints one path; it takes no --json", "drop --json") if opts["--json"]
+  if opts["--json"] || opts["--self-test"]
+    return fail_with(2, "usage error: --repo-path prints one path; it takes no --json or --self-test", "pass --repo-path alone")
+  end
 
   puts LeadTimeConfigIO.repo_path(LeadTimeConfigIO.resolve(env), opts["--repo-path"])
   0
@@ -116,8 +118,8 @@ end
 
 def main(argv, env)
   opts = StrictArgv.parse(argv, SPEC)
-  return self_test if opts["--self-test"]
   return repo_path(env, opts) if opts.key?("--repo-path")
+  return self_test if opts["--self-test"]
 
   res = LeadTimeConfigIO.resolve(env).require_any!
   puts(opts["--json"] ? JSON.generate(res.to_h) : table(res))
