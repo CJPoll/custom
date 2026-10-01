@@ -981,11 +981,11 @@ topic judgment*). It is an object with exactly four members:
   mention named, or `null` when neither did;
 - `confidence`: the judgment's confidence in `[0,1]`, or `null`;
 - `model`: the versioned model id that answered, or `null`;
-- `reason`: `null` when the judgment was accepted or the mention's label
-  had a live topic route, otherwise a reason from
+- `reason`: `null` when the judgment was accepted, or the mention named a
+  label, and that label's topic route was usable; otherwise a reason from
   `ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
   behaviour, loudly* (for example `mode_off`, `sender_rule`, `key_missing`,
-  `below_threshold`).
+  `below_threshold`, `label_unconfigured`).
 
 `route: topic_judgment` with `reason: null` is a routed judgment.
 `route: session_mention` is a routed session mention: `label` is the session

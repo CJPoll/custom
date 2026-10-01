@@ -349,7 +349,9 @@ one is an amendment to this table.
 | `model_mismatch` | fault | judge | the answering model is not the pinned model |
 | `below_threshold` | state | caller | the confidence is under the accepted threshold, or the answer is `unclear` |
 | `threshold_unset` | state | caller | the label's threshold row is malformed (our bug); never accepts, whatever the confidence |
-| `label_disabled` | state | caller | the accepted label has no live destination: the Slack router's topic route is missing, disabled or not live (also its session mention, DND-717) |
+| `label_disabled` | state | caller | the Slack router's topic route for the accepted label (or the session mention's label, DND-717) has `enabled=false`: the owner's own opt-out |
+| `label_unconfigured` | state | caller | the Slack router has no topic route for the accepted or mentioned label (DND-1522) |
+| `label_stale` | state | caller | the label's topic route exists and cannot be used: its instance or machine is soft-deleted, the machine's owner is not the app's owner, or the instance is no longer a `<project>-slack.jsonl` inbox; the record names the instance and which (DND-1522) |
 | `sender_rule` | state | Slack router | the conversation is not the owner's own, so no judgment is asked |
 | `context_unavailable` | fault | Slack router | reading the conversation context failed (or the root's `ts` is malformed), so no judgment was asked; the caller-side record is the router's outcome log, with no `judgment_calls` row |
 | `route_overdue` | fault | Slack router | the route request was not routed within its routing deadline or its attempt budget (the route worker is down, stuck or behind), so it was delivered by the channel route; the caller-side record is the router's outcome log, and a `judgment_calls` row exists only if a call was made (`ai/contracts/athena-events.md` → *Routing runs after the ack*) |
@@ -374,6 +376,15 @@ reads as an accept.
 label is disabled" (an `n/a` threshold row). Replaced by the row above: an
 `n/a` row accepts the model's answer, so `label_disabled` names only a
 missing destination. Why: the same waiver.
+
+**Later (2026-10-01, DND-1539):** `label_disabled` meant every missing
+destination: a topic route that is missing, disabled or not live. Replaced
+by the three rows above (DND-1522). Why: a label with no route read the same
+as the owner's opt-out, so a broken route looked deliberate. All three are
+state reasons and never move health. Whether a miss is a route flag is the
+Slack router's rule (`ai/contracts/athena-events.md` → *New conversations
+may route by an advisory topic judgment* → *Route flags*). Until DND-1522
+deploys, the router records every miss as `label_disabled`.
 
 **The credential latch.** An `unauthorized` port error (HTTP 401 or 403) sets a
 latch keyed on the key's stored-at time. While it holds, every call falls back

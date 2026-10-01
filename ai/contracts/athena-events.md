@@ -4172,15 +4172,18 @@ thread to whichever project owns the channel route. A **thread claim** is that
 record. It is the thread-reply analogue of the server-stamped return address
 above: the harness names only its own inbox, and the server stamps the machine
 from the authenticated token. Implementing tickets: DND-487 (claims and the MCP
-tool), DND-490 (the router), DND-491 (the harness claims on post). Until the
-router ships, every reply routes by the channel route, as before.
+tool), DND-490 (the router), DND-491 (the harness claims on post), DND-1451
+(the router's claim), DND-1521 (a harness reply claims an unclaimed thread),
+DND-1027 (`slack_post` claims, not yet shipped). Until the router ships, every reply routes by the channel route, as before.
 
 **The claim.** A claim maps `(slack_app, team_id, channel, thread_ts)` to one
-AgentInstance. It has two writers. The harness writes one through the `athena`
-MCP tool **`slack_thread_claim`**, which takes five arguments: `bot_id`
-(selects the app), `team_id`, `channel`, `thread_ts` (the parent `ts`), and
+AgentInstance. It has two writers today and a third to come. The harness
+writes one through the `athena` MCP tool **`slack_thread_claim`**, which takes
+five arguments: `bot_id` (selects the app), `team_id`, `channel`, `thread_ts` (the parent `ts`), and
 `inbox_name`. The Slack router writes one for a root it routed by topic (*The
-router claims a root it routed by topic*, below).
+router claims a root it routed by topic*, below). The `athena` MCP tool
+`slack_post` will write one for the thread it posts in (*`slack_post` claims
+the thread it posts in*, below; DND-1027, not yet shipped).
 
 **Later (2026-10-01):** a claim was written only by the `slack_thread_claim`
 MCP tool, so a reply to a root the router had sent to a topic route followed
@@ -4215,18 +4218,36 @@ follow it.
   to a bot-started thread is routed rather than classified as not addressed to
   the bot.
 - **The harness claims the threads it starts, and an unclaimed thread it
-  replies in**: a `post`, or a `dm` without `--thread_ts`, claims the thread it
-  starts; a `reply`, or a `dm --thread_ts`, claims the thread it replies into
-  only when no instance holds it (`athena:slack`, DND-1521). First claim wins,
-  so a reply never takes a thread another instance holds: the harness reports
-  `already_claimed` as an outcome and the reply stands.
+  replies in.** A `post`, or a `dm` without `--thread_ts`, claims the thread
+  it starts. A `reply`, or a `dm --thread_ts`, claims the thread it replies
+  into (its parent `thread_ts`) for the replying session's Slack inbox, only
+  when no instance holds it (`athena:slack`, DND-1521). First claim wins, so a
+  reply never takes a thread another instance holds: the harness reports
+  `already_claimed` as an outcome, changes nothing, and the reply stands.
+  `reply --no-claim` claims nothing.
 
-  **Later (2026-10-01, DND-1521):** this read "The harness claims only threads
-  it starts … It never claims a thread it merely replies in." Superseded: a
-  session that answered an owner thread forwarded to it never claimed it, so
-  the owner's next reply went by the channel route to another session. The
-  rest of this epic's contract amendments (route flags, miss reasons,
-  `slack_post` claiming) are DND-1539's.
+  **Later (2026-10-01, DND-1521, DND-1539):** this read "The harness claims
+  only threads it starts … It never claims a thread it merely replies in", and
+  the claim had two writers. Superseded by DND-1521 (a reply claims an
+  unclaimed thread) and DND-1027 (`slack_post` claims the thread it posts in,
+  below). *What it does not guarantee* below no longer cites
+  "claim-only-what-you-started". Why: measured 2026-10-01, a root delivered by
+  the channel route was forwarded by hand to the session that owned its
+  topic; that session answered with `reply`, claimed nothing, and the owner's
+  next reply went by the channel route to another session. The owner's rule
+  is that a reply goes to the session that has the conversation.
+- **`slack_post` claims the thread it posts in** (DND-1027, not yet shipped).
+  A post through the `athena` MCP tool `slack_post` claims the thread it
+  posts in for the caller's project Slack inbox, when no instance holds it.
+  The checks are the claim's own above (`ThreadClaims.claim/3`): the
+  machine is the caller's token machine, the inbox a live
+  `<project>-slack.jsonl` instance on it, and the app check
+  `:add_slack_route`. How the tool's reply reports the claim is DND-1027's
+  to define, and this bullet names it once it ships. Until then, an MCP post
+  claims nothing. Why the server can do this for `slack_post` and not for the
+  harness's own posts: the harness posts with the bot token straight to
+  Slack, and Slack's echo of a bot message carries the shared bot id, not the
+  posting session, so the server can claim only on a post it makes itself.
 - **The router claims a root it routed by topic.** When the Slack router
   delivers a new conversation's root by its topic route in mode `on` (`route:
   topic_judgment` or `route: session_mention`, *New conversations may route by
@@ -4278,8 +4299,8 @@ own rule, and calling it `channel_route` would misreport it.
 
 **What it does not guarantee.** A claim is owner-scoped isolation, not a security
 boundary between the owner's own projects. Any of the owner's machines can claim
-any thread of the owner's app, including one another project started; first-wins
-and claim-only-what-you-started limit that, nothing enforces it. The server also
+any thread of the owner's app, including one another project started; first
+claim wins limits that, nothing else does. The server also
 cannot verify the bot authored `thread_ts`. See `ai/contracts/athena-inbox.md` →
 *What tenancy does and does not guarantee*.
 
@@ -4322,9 +4343,10 @@ event classified (not ignored), dedupe pre-check passed
    2a. mode off           -> the channel route, UNCHANGED: no call, no request row,
                              no judgment_calls row, no topic, no topic outcome     [webhook]
    2b. sender != owner    -> the channel route (topic reason: sender_rule)         [webhook]
-   2b'. the owner's text addresses a session (owner rule 2, session-mention-v1)
-                          -> that label's topic route, live: its Slack inbox (route: session_mention)
-                             no enabled live route: the channel route (topic reason: label_disabled)
+   2b'. the owner's text addresses a session (owner rule 2, session-mention-v2)
+                          -> that label's topic route, usable: its Slack inbox (route: session_mention)
+                             no usable route: the channel route (topic reason: label_disabled,
+                             label_unconfigured or label_stale; flagged per Route flags)
                              no context read                                      [webhook]
    2c. write a route request and answer Slack                                     [webhook]
        then read the conversation context (ai/contracts/athena-judgments.md ->
@@ -4332,14 +4354,24 @@ event classified (not ignored), dedupe pre-check passed
          read failed      -> the channel route (topic reason: context_unavailable) [worker]
        judge slack_routing with the root and its context -> the caller's decision
        (ai/contracts/athena-judgments.md -> What `on` accepts):
-         accepted, topic route enabled and live
+         accepted, topic route usable
                           -> that instance's Slack inbox (route: topic_judgment)   [worker]
+         accepted, no usable route
+                          -> the channel route (topic reason: label_disabled,
+                             label_unconfigured or label_stale; flagged per
+                             Route flags)                                         [worker]
          anything else    -> the channel route (topic reason: the fallback reason) [worker]
        mode shadow: always the channel route; topic records what would have happened
        not routed by the routing deadline
                           -> the channel route (topic reason: route_overdue)       [worker or sweeper]
 3. anything else          -> the channel route (unchanged)                         [webhook]
 ```
+
+Steps 2b' and 2c are written to the decided design of 2026-10-01, and part of
+it has not shipped. Grammar v2 is DND-1535; until it deploys the router reads
+v1 (*The session mention (step 2b')*). The three miss reasons and the route
+flag are DND-1522; until it deploys every miss reads `label_disabled` and
+nothing is flagged (*Topic routes*, *Route flags*).
 
 **Later (2026-10-01):** this block ran every step inside the webhook, so step
 2c's context read and judgment sat inside Slack's HTTP ack, and Slack routing
@@ -4498,19 +4530,39 @@ request** and answers Slack; the route worker finishes it.
   DND-1455's and were read from `slack_route_requests` until it shipped.
   Replaced by the text above, now that the tile shows them.
 
-**The session mention (step 2b').** Grammar `session-mention-v1`, in code and
-versioned. Only the first 400 characters of the owner's text are read, and
-only an ADDRESS counts, ending in a colon. Unicode space separators read as a
-space, and leading Slack user-mention tokens (`<@U…>`, as a channel mention
-of the bot begins) are skipped. Then either the tag form (`harness session:`,
-`*gen_saas session (laptop):*`, as routing agreement R1 tags posts), or a
-single-line lead-in of at most 80 characters ending `for the <names>
-session:`. The word `session` is required. Names: `walt_ui` (`walt ui`,
-`waltui`) is walt_ui; `harness` and `custom` are harness; `gen_saas`
-(`gen saas`, `gensaas`) and `laptop` are gen_saas; `desktop` names none.
-Names joined by `/` must name one label, or there is no mention; so is a
-name the table lacks. A message that talks ABOUT a session ("ask the harness
-session to …") is not one and is judged as before.
+**The session mention (step 2b').** Grammar `session-mention-v2`, in code and
+versioned (gen_saas `Athena.SlackEvents.SessionMention`; DND-1535, gen_saas
+#652). Only the
+first 400 characters of the owner's text are read, and only an ADDRESS
+counts. Unicode space separators read as a space, and leading Slack
+user-mention tokens (`<@U…>`, as a channel mention of the bot begins) are
+skipped. Then one of three forms, first match wins:
+
+- the tag form ending in a colon (`harness session:`,
+  `*gen_saas session (laptop):*`, as routing agreement R1 tags posts);
+- the tag form ending in a comma, with no leading `the` (`Harness session,
+  give me a report`);
+- a single-line lead-in of at most 80 characters ending `for the <names>
+  session:`.
+
+The word `session` is required. A dash is no terminator: `Walt UI session -
+no colon` is no mention, as in v1. A comma after `the <name> session` is no
+mention either: "the harness session, I think, is down" talks ABOUT a session.
+Names: `walt_ui` (`walt ui`, `waltui`) is walt_ui; `harness` and `custom` are
+harness; `gen_saas` (`gen saas`, `gensaas`) and `laptop` are gen_saas;
+`desktop` names none. Names joined by `/` must name one label, or there is no
+mention; so is a name the table lacks. A message that talks ABOUT a session
+("ask the harness session to …") is not one and is judged as before. Until
+DND-1535 deploys, the router reads `session-mention-v1`, which is the colon
+forms alone.
+
+**Later (2026-10-01, DND-1539):** the grammar was `session-mention-v1`, an
+address "ending in a colon" in the tag form or the lead-in. Superseded by
+`session-mention-v2` (DND-1535), which adds the comma tag form. Why: the
+owner wrote "Harness session, give me a report …" on 2026-10-01; v1 read no
+mention, and only Jev's judgment kept the request's intent. A mention must not
+depend on a model. A spaced dash was considered and dropped: v1's deliberate
+vector `Walt UI session - no colon` stays no mention.
 
 - **Modes.** The step is part of the `slack_routing` topic step, so it runs
   only in `shadow` or `on` and acts only in `on`, under the same rule for
@@ -4519,26 +4571,127 @@ session to …") is not one and is judged as before.
   a judgment, so no `judgment_calls` row is written and no context is read.
   Its topic route is looked up exactly as an accepted judgment's, under the
   same authorization: it selects only among the owner's own topic routes.
-- **The line.** In `on` with a live route, `route: session_mention` and a
+- **The line.** In `on` with a usable route, `route: session_mention` and a
   `topic` of `{label, confidence: null, model: null, reason: null}`. In
   `shadow`, the channel route with that same `topic`; the outcome record says
-  `by=session_mention` and names the would-be route. A missing route is
-  `label_disabled`, as for a judgment.
+  `by=session_mention` and names the would-be route. A route that is not
+  usable gets the same three reasons as for a judgment (*Topic routes*).
+  Whether it is a route flag is *Route flags*, which treats a mention more
+  strictly than a judgment.
 - **One grammar.** The harness applies the same grammar when it labels the
   eval corpus (`ai/lib/judgment_label.rb`, `rule_confirmed` with
   `"rule": "session_mention"`), and `judgment-eval` leaves such roots out of
   a run (`ai/contracts/athena-judgments.md` → *Threshold provenance, n/a and
   the pinned model*). Both test suites carry the same vector list, as two
   copies kept in step by hand (nothing compares them); a change to either is
-  a new grammar version in both.
+  a new grammar version in both. The harness copy is still
+  `session-mention-v1`; its move to v2 is DND-1537. Until it lands, the two
+  disagree on the comma form alone: a v2 router routes such a root as a
+  mention, and the labeller does not label it `rule_confirmed`, so
+  `judgment-eval` does not leave it out of a run.
 
 **Topic routes.** A topic route maps `(slack_app, label)` to one AgentInstance,
 with an `enabled` flag. It is written by the owner of the app, holder of
 `:add_slack_route` on it, under the same checks as a thread claim: the
 destination MUST be a live `<project>-slack.jsonl` instance of that owner, and
 an unknown app and an app the caller may not route answer the same `not found`.
-A label with no enabled, live topic route falls back as `label_disabled`, and
-the outcome record names the label it looked up.
+The owner writes and reads routes in the Athena UI, and the fleet through the
+`athena` MCP tools **`slack_topic_route_put`** (`label`, `agent_instance_id`,
+optional `enabled`, default true, and optional `bot_id` to choose among the
+owner's apps) and **`slack_topic_route_list`** (optional `bot_id`), from a
+machine token, under the same checks (DND-1523, gen_saas #651). There is
+no delete: put `enabled` false instead. Like
+`slack_thread_claim`, they refuse identity arguments (`owner`, `owner_id`,
+`machine_id`, `slack_app_id`) with a `Fix:`, and an argument outside their
+closed schema is refused, never ignored. The list says, per route, whether
+the router could use it today (`live`), computed by the router's own rule.
+
+A route is **usable** when it is enabled and none of `label_stale`'s
+conditions below holds: the router delivers by a usable route and by no
+other. `live` in the list means the same thing.
+
+**A miss names its cause.** The router looks up the route for
+`(slack_app, label)` and, when it cannot deliver by it, falls back with one of
+three reasons, decided in this order (DND-1522, not yet shipped):
+
+1. `label_unconfigured`: no route row for the label. The owner has not routed
+   that label by topic.
+2. `label_disabled`: a row with `enabled=false`, the owner's own opt-out. It
+   wins over staleness.
+3. `label_stale`: a row exists and cannot be used. Its instance or its
+   machine is soft-deleted, the machine's owner is not the app's owner, or
+   the instance is no longer a `<project>-slack.jsonl` inbox. The outcome
+   record names the stale instance and which of these it is.
+
+Each is a state reason (`ai/contracts/athena-judgments.md` → *The closed
+reason list*): it never moves the use case's health. The outcome record names
+the app and the label it looked up. Until DND-1522 deploys, all three causes
+read `label_disabled`.
+
+**Later (2026-10-01, DND-1539):** this said "a label with no enabled, live
+topic route falls back as `label_disabled`", one reason for every miss.
+Superseded by the three reasons above (DND-1522; the Slack-routing epic's
+decision D2'). Why: measured 2026-10-01, a label with no route row read
+`label_disabled` just as an owner's opt-out does, so a missing route looked
+like a deliberate one (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must
+never look like an empty one*). Three reasons, not two: with only `harness`
+routed, every judgment for another label is `label_unconfigured` by the
+owner's own configuration, while a stale row is a configured route that
+broke, and only that one is a fault.
+
+**Route flags.** A route flag says the router could not honour what the owner
+asked for. It is decided per new conversation, in mode `on` only (DND-1522,
+not yet shipped), first match wins:
+
+1. Delivered by its topic route: no flag.
+2. A reason other than the three miss reasons above (`below_threshold`,
+   `context_unavailable`, `route_overdue` and the other fallbacks, where no
+   label was accepted or named): no flag.
+3. The delivered instance already belongs to the requested label (gen_saas
+   `RouteLabel.from_inbox`: `walt_ui-*` is walt_ui, `custom-*` is harness,
+   `gen_saas-*` is gen_saas): no flag. "walt_ui session: …" with no walt_ui
+   row still reaches walt_ui by the channel route.
+4. A session mention: a flag, whatever the reason. A session the owner named
+   must be reached.
+5. An accepted judgment: a flag only for `label_stale`.
+6. Anything else: no flag. An accepted judgment for an unconfigured or
+   disabled label is recorded with its precise reason, not flagged.
+
+A flag surfaces in three places:
+
+- **The record** (DND-1522). The outcome log records `route_flagged` with the
+  requested label, how it was requested (`session_mention` or `judgment`, with
+  the confidence), the reason, and the delivered label or `unrouted`, beside
+  the usual `topic_routing` outcome. A warning log line says the same with a
+  `Fix:` per reason: add the route with `slack_topic_route_put`, enable it, or
+  put it again with a live instance.
+- **The line.** The delivered line's `topic` already carries the requested
+  `label` and the precise `reason` (`ai/contracts/athena-inbox.md` → *Line
+  format*), flag or not, so the receiving session can see the message was
+  meant for another session. It forwards with `session_send` and
+  `reroute_of_event_id`. That argument is safe to pass even on a forward to
+  the session Jev chose: the server records no "wrong" feedback for it,
+  because a correction equal to Jev's answer is refused (`refused:invalid:correction`,
+  "a forward to the session Jev chose is no reroute"), and a session mention
+  has no judgment call to record against (`not_found`). The message is sent
+  either way, and the reply's `feedback` word says which happened
+  (`ai/contracts/athena-judgments.md` → *Receiver feedback*).
+- **A notice in the owner's thread** (DND-1536, not yet shipped). The router
+  writes one `slack_route_flags` obligation row per event, in the transaction
+  that stores the line, and a supervised worker posts ONE threaded reply as
+  the event's own app, in its channel, under the owner's root. It names the
+  requested session, how it was requested, where the message went and why,
+  and the fix, and never quotes the owner's text. It posts only in an `im`,
+  the owner's DM with the bot. In an `mpim` or a channel other people would
+  see it (`~/.claude/CLAUDE.md` → *Owner approval policy*, item 3), so there
+  the row is recorded `skipped` with `skip_reason: not_dm`, and the record
+  and the line still apply. No Slack call runs on the webhook path (gen_saas
+  ADR 21); a post that keeps failing gives up loudly with a `Fix:`, and an
+  event gets at most one notice.
+
+Until DND-1522 deploys, a miss is the `topic_routing` outcome and the line's
+`topic` alone: no `route_flagged`, no warning. Until DND-1536 deploys, a flag
+reaches the owner only through the record.
 
 **The record.** The Slack receiver's per-event outcome log records the router's
 path, as for a stale claim (*Thread replies route to the thread's claimant*).
