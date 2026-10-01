@@ -40,6 +40,13 @@
 #      (fails, exit 1) -- exactly the pre-DND-743 failure, keyed on what landed.
 #   4. PENDING: a pair only this branch adds, not wired yet. Named, never a
 #      failure: it is wired after it lands, from the main checkout.
+#   5. RETIRED, STILL WIRED (DND-1517): a row of the LANDED registry's
+#      `retired` list (an exact event, matcher, script) the live settings still
+#      wire (fails, exit 1, like a stale matcher: a wiring the landed registry
+#      says must go, and `setup-hooks --install` removes it). A retirement only
+#      this branch adds is pending; one the branch drops still counts. A row
+#      the landed union still requires wins over its retirement. A branch row
+#      both declared and retired is an inconsistent branch registry (exit 1).
 # A bar that cannot be read (origin unreachable, local origin/main disagreeing
 # with origin, a malformed registry or settings file) is COULD NOT MEASURE,
 # exit 3, never a pass. An offline machine with a settings file is exit 3. When
@@ -168,6 +175,26 @@ rescue JSON::ParserError => e
   raise RegistryError, "#{where}: not valid JSON (#{e.message.lines.first.to_s.strip})"
 end
 
+# The registry's `retired` rows (DND-1517): wirings a hook leaves the machine
+# by, each an exact {event, matcher, script}. `setup-hooks --install` unwires
+# them. Absent means none. Raises RegistryError, naming where, on a malformed
+# list: a retirement that cannot be read is a failed measurement, not an empty
+# one.
+def parse_retired(text, where)
+  data = JSON.parse(text)
+  rows = data.is_a?(Hash) ? data.fetch("retired", []) : nil
+  raise RegistryError, "#{where}: \"retired\" is not an array" unless rows.is_a?(Array)
+
+  rows.each_with_index do |e, i|
+    good = e.is_a?(Hash) && %w[event script].all? { |k| e[k].is_a?(String) && !e[k].empty? } &&
+           e.fetch("matcher", "").is_a?(String)
+    raise RegistryError, "#{where}: retired entry #{i} is not {event, matcher, script} strings: #{e.inspect}" unless good
+  end
+  rows
+rescue JSON::ParserError => e
+  raise RegistryError, "#{where}: not valid JSON (#{e.message.lines.first.to_s.strip})"
+end
+
 # This checkout's registry (the branch's copy). Raises RegistryError.
 def load_registry(file = REGISTRY)
   parse_registry(File.read(file), file)
@@ -175,17 +202,26 @@ rescue SystemCallError => e
   raise RegistryError, "#{file}: cannot be read (#{e.message})"
 end
 
+# This checkout's retired rows. Raises RegistryError.
+def load_retired(file = REGISTRY)
+  parse_retired(File.read(file), file)
+rescue SystemCallError => e
+  raise RegistryError, "#{file}: cannot be read (#{e.message})"
+end
+
 # The registry entries that LANDED: the union over every landed point (the
-# strictest bar). Returns [points, entries]. Raises Landed::Unreadable (a
-# malformed landed registry included) or Landed::Mismatch. Empty entries when
-# no landed point has the file (the registry is being introduced by this diff).
+# strictest bar). Returns [points, entries, retired]: the retired rows are the
+# union too (DND-1517). Raises Landed::Unreadable (a malformed landed registry
+# included) or Landed::Mismatch. Empty entries when no landed point has the
+# file (the registry is being introduced by this diff).
 def landed_registry(root = REPO_DIR)
   pts, bars = Landed.read_bar(root, REGISTRY_REL) do |text, label, sha|
-    parse_registry(text, "#{REGISTRY_REL} @ #{label} #{sha[0, 12]}")
+    where = "#{REGISTRY_REL} @ #{label} #{sha[0, 12]}"
+    [parse_registry(text, where), parse_retired(text, where)]
   rescue RegistryError => e
     raise Landed::Unreadable.new([[label, e.message]])
   end
-  [pts, bars.flatten(1).uniq { |e| row_key(e) }]
+  [pts, bars.flat_map(&:first).uniq { |e| row_key(e) }, bars.flat_map(&:last).uniq { |e| row_key(e) }]
 end
 
 # A registry row's identity (DND-887): (event, normalized matcher, script).
@@ -270,10 +306,14 @@ end
 # matcher the registry does not declare for that pair: a row whose matcher
 # changed, or two rows that were once one combined matcher. The declared rows
 # may all be present too, so drift_for alone reports these as healthy.
-def stale_for(settings, registry, dirs = checkout_dirs)
+def stale_for(settings, registry, dirs = checkout_dirs, except: [])
   declared = Hash.new { |h, k| h[k] = [] }
   registry.each { |e| declared[[e["event"], e["script"]]] << mnorm(e["matcher"]) }
+  # A wiring a landed retirement names is reported once, as retired (DND-1517).
+  skip = except.flat_map { |e| dirs.map { |d| [e["event"], mnorm(e["matcher"]), norm(abs_script(e["script"], d))] } }
   registered_wirings(settings).filter_map do |w|
+    next if skip.include?(w[:key])
+
     event, matcher, cmd = w[:key]
     script = declared.keys.find do |ev, s|
       ev == event && dirs.any? { |d| norm(abs_script(s, d)) == cmd }
@@ -282,6 +322,26 @@ def stale_for(settings, registry, dirs = checkout_dirs)
     next if declared[[event, script]].include?(matcher)
 
     "#{describe(event, w[:matcher], script)} (stale: that matcher is not declared for this script)"
+  end
+end
+
+# The live wirings of retired rows (DND-1517): each row matches exactly its
+# (event, matcher, script), the wiring `setup-hooks --install` unwires. The same
+# script under another matcher is not this row's. Returns [row, line] pairs.
+def retired_wired(settings, rows, dirs = checkout_dirs)
+  have = registered_wirings(settings).map { |w| w[:key] }
+  rows.filter_map do |e|
+    hit = dirs.any? { |d| have.include?([e["event"], mnorm(e["matcher"]), norm(abs_script(e["script"], d))]) }
+    [e, describe(e["event"], e["matcher"], e["script"])] if hit
+  end
+end
+
+# Branch rows that both declare and retire one (event, matcher, script): a
+# contradiction setup-hooks refuses to apply. Returns strings.
+def declared_and_retired(registry, retired)
+  keys = registry.map { |e| row_key(e) }
+  retired.select { |e| keys.include?(row_key(e)) }.map do |e|
+    "#{describe(e['event'], e['matcher'], e['script'])}: both declared in \"hooks\" and retired"
   end
 end
 
@@ -321,8 +381,8 @@ end
 # The landed bar as [description, entries], or [nil, lines] when it could not
 # be measured (lines explain why).
 def measure_landed(landed, root)
-  pts, entries = landed.call(root)
-  ["landed #{REGISTRY_REL} (#{Landed.describe(pts)})", entries]
+  pts, entries, retired = landed.call(root)
+  ["landed #{REGISTRY_REL} (#{Landed.describe(pts)})", entries, retired || []]
 rescue Landed::Unreadable => e
   [nil, Landed.unreadable_lines("hook registry", e.probes)]
 rescue Landed::Mismatch => e
@@ -335,13 +395,15 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
         landed: ->(r) { landed_registry(r) }, dirs: checkout_dirs)
   begin
     registry = load_registry(registry_file)
+    branch_retired = load_retired(registry_file)
   rescue RegistryError => e
     return unmeasured(["  this checkout's hook registry cannot be read: #{e.message}",
                        "  Fix: repair #{REGISTRY_REL} on this branch (a JSON object whose \"hooks\" is an " \
-                       "array of {event, matcher, script} strings) and re-run."])
+                       "array of {event, matcher, script} strings, and whose optional \"retired\" is too) " \
+                       "and re-run."])
   end
 
-  broken = inconsistent(registry, root)
+  broken = inconsistent(registry, root) + declared_and_retired(registry, branch_retired)
   unless File.exist?(path)
     if broken.empty?
       puts "check-hooks-registered: no settings file at #{path} — nothing to assert (not this environment). OK."
@@ -360,7 +422,7 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
   end
 
   dangle = dangling(settings, dirs)
-  bar, landed_entries = measure_landed(landed, root)
+  bar, landed_entries, landed_retired = measure_landed(landed, root)
   if bar.nil?
     # A failure the check can SEE is broken whatever landed (a script that
     # cannot run exits 127/126 on every event), so it is exit 1, with the
@@ -382,16 +444,37 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
   drift   = drift_for(settings, landed_entries, dirs)
   keys    = landed_entries.map { |e| row_key(e) }
   pending = drift_for(settings, registry.reject { |e| keys.include?(row_key(e)) }, dirs)
-  stale   = stale_for(settings, landed_entries + registry, dirs)
-  if broken.empty? && dangle.empty? && drift.empty? && stale.empty?
+  # Retired rows (DND-1517), also on the landed bar. A landed retirement still
+  # wired fails, like a stale matcher: a wiring the landed registry says must
+  # go, which `setup-hooks --install` removes. A landed row that is still
+  # REQUIRED wins over a retirement of the same row (the union holds both when
+  # main retired it after this branch's merge-base; drift then says rebase).
+  # A retirement only this branch adds is pending, and one the branch drops
+  # still counts: a branch can neither unwire nor excuse a landed hook.
+  retiring = landed_retired.reject { |e| keys.include?(row_key(e)) }
+  retired  = retired_wired(settings, retiring, dirs)
+  rkeys    = landed_retired.map { |e| row_key(e) }
+  pending_retired = retired_wired(settings, branch_retired.reject { |e| rkeys.include?(row_key(e)) }, dirs)
+  stale   = stale_for(settings, landed_entries + registry, dirs, except: retiring)
+  if broken.empty? && dangle.empty? && drift.empty? && stale.empty? && retired.empty?
     puts "check-hooks-registered: all #{landed_entries.size} landed registry rows are wired in #{path}, " \
-         "each on its declared (event, matcher) (bar: #{bar}). OK."
+         "each on its declared (event, matcher), and none of the #{retiring.size} landed retired row(s) is still wired " \
+         "(bar: #{bar}). OK."
     report_pending(pending)
+    report_pending_retired(pending_retired)
     return EXIT_OK
   end
 
-  report_failures(path, broken, dangle, drift, pending, stale)
+  report_failures(path, broken, dangle, drift, pending, stale, retired.map(&:last), pending_retired)
   EXIT_FAIL
+end
+
+def report_pending_retired(pending_retired, out = $stdout)
+  return if pending_retired.empty?
+
+  out.puts "  #{pending_retired.size} retirement(s) this branch adds are still wired (pending, not a failure):"
+  pending_retired.each { |_e, d| out.puts "  ~ #{d} (pending retirement: still wired)" }
+  out.puts "  After the branch lands, `scripts/setup-hooks --install` in the MAIN checkout unwires them."
 end
 
 def report_pending(pending, out = $stdout)
@@ -404,12 +487,13 @@ def report_pending(pending, out = $stdout)
            "event it matches would fail with exit 127."
 end
 
-def report_failures(path, broken, dangle, drift, pending, stale = [])
+def report_failures(path, broken, dangle, drift, pending, stale = [], retired = [], pending_retired = [])
   warn "check-hooks-registered: FAIL"
   unless broken.empty?
-    warn "  #{broken.size} registry entr(ies) on this branch name a script that cannot run:"
+    warn "  #{broken.size} registry entr(ies) on this branch cannot be applied:"
     broken.each { |m| warn "  - #{m}" }
-    warn "  Fix: add the script (chmod +x) or correct its path in #{REGISTRY_REL}."
+    warn "  Fix: add the script (chmod +x) or correct its path in #{REGISTRY_REL}; for a row both " \
+         "declared and retired, keep only the one you mean."
   end
   unless dangle.empty?
     warn "  #{dangle.size} wired hook(s) in #{path} point at a script that cannot run (dangling):"
@@ -423,8 +507,9 @@ def report_failures(path, broken, dangle, drift, pending, stale = [])
     drift.each { |m| warn "  - #{m}" }
     warn "  Fix: re-wire them by running `scripts/setup-hooks --install` from the MAIN checkout " \
          "(it MERGES into settings.json, backing it up first — it never clobbers the existing block; " \
-         "it adds each missing (event, matcher, script) row). If a hook was intentionally retired or " \
-         "its matcher changed, change #{REGISTRY_REL} and land that; if main already did so after " \
+         "it adds each missing (event, matcher, script) row). If a hook was intentionally retired, move " \
+         "its row to the \"retired\" list of #{REGISTRY_REL} and land that; if its matcher changed, " \
+         "change #{REGISTRY_REL} and land that; if main already did either after " \
          "your merge-base, rebase onto origin/main."
     warn INSTALLER_WHO
   end
@@ -437,7 +522,15 @@ def report_failures(path, broken, dangle, drift, pending, stale = [])
          "intended, declare it in #{REGISTRY_REL} and land that."
     warn INSTALLER_WHO
   end
+  unless retired.empty?
+    warn "  #{retired.size} wiring(s) in #{path} are retired by the landed #{REGISTRY_REL} but still wired:"
+    retired.each { |m| warn "  - #{m} (retired, still wired)" }
+    warn "  Fix: run `scripts/setup-hooks --install` from the MAIN checkout; it unwires exactly each " \
+         "retired (event, matcher, script), backing settings.json up first and touching nothing else."
+    warn INSTALLER_WHO
+  end
   report_pending(pending, $stderr)
+  report_pending_retired(pending_retired, $stderr)
 end
 
 # ---------------------------------------------------------------------------
@@ -571,6 +664,65 @@ def matcher_key_cases(check)
     rc, out = probe.call(broad + narrow, narrow, ["Bash|mcp__notion-work__API-post-page"])
     check.call("landed union holds old + new matcher, branch and live new -> drift naming rebase",
                rc == EXIT_FAIL && out.include?('"Bash|mcp__notion.*"') && out.include?("rebase onto origin/main"))
+  end
+end
+
+# ---------------------------------------------------------------------------
+# DND-1517: retired rows, through `run` with the landed bar injected (rows and
+# retirements). The black-box suite covers the origin-backed read; these pin
+# the two rules it cannot reach cheaply: a still-required landed row wins over
+# a landed retirement of the same row, and a retired wiring is reported once.
+def retired_cases(check)
+  require "tmpdir"
+  Dir.mktmpdir do |dir|
+    script = "ai/hooks/dnd-1517-r.sh"
+    FileUtils.mkdir_p(File.join(dir, "ai", "hooks"))
+    File.write(File.join(dir, script), "#!/bin/sh\nexit 0\n")
+    File.chmod(0o755, File.join(dir, script))
+    cmd = File.join(dir, script)
+    row = ->(matcher) { { "event" => "PostToolUse", "matcher" => matcher, "script" => script } }
+    probe = lambda do |landed, landed_retired, branch, wired|
+      reg = File.join(dir, "registry.json")
+      File.write(reg, JSON.generate(branch))
+      groups = wired.map { |m| { "matcher" => m, "hooks" => [{ "type" => "command", "command" => cmd }] } }
+      f = File.join(dir, "settings.json")
+      File.write(f, JSON.generate({ "hooks" => { "PostToolUse" => groups } }))
+      o, e = $stdout, $stderr
+      buf = StringIO.new
+      $stdout = $stderr = buf
+      begin
+        rc = run(path: f, registry_file: reg, root: dir, dirs: [dir],
+                 landed: ->(_r) { [[["fixture landed", "0" * 40]], landed, landed_retired] })
+      ensure
+        $stdout, $stderr = o, e
+      end
+      [rc, buf.string]
+    end
+
+    rc, out = probe.call([], [row.call("")], { "hooks" => [] }, [""])
+    check.call("retired: landed retirement still wired -> exit 1, named, Fix: setup-hooks --install",
+               rc == EXIT_FAIL && out.include?("retired, still wired") && out.include?("setup-hooks --install"))
+    rc, = probe.call([], [row.call("")], { "hooks" => [] }, [])
+    check.call("retired: landed retirement unwired -> exit 0", rc == EXIT_OK)
+    rc, = probe.call([], [row.call("")], { "hooks" => [] }, ["Bash"])
+    check.call("retired: the script under a matcher the retirement does not name is not that row -> exit 0",
+               rc == EXIT_OK)
+    # The landed union holds the row as required (merge-base) AND retired (tip):
+    # required wins, so a machine wired from either side is not failed for it.
+    rc, out = probe.call([row.call("")], [row.call("")], { "hooks" => [row.call("")] }, [""])
+    check.call("retired: a row both required and retired on the landed union -> required wins, exit 0",
+               rc == EXIT_OK && !out.include?("retired, still wired"))
+    # The script still declared under another matcher: its retired matcher row
+    # would also read as stale. It is reported once, as retired.
+    rc, out = probe.call([row.call("Bash")], [row.call("")], { "hooks" => [row.call("Bash")] }, ["Bash", ""])
+    check.call("retired: a retired wiring of a still-declared script is reported as retired, not also stale",
+               rc == EXIT_FAIL && out.include?("retired, still wired") && !out.include?("stale"))
+    rc, out = probe.call([], [], { "hooks" => [], "retired" => [row.call("")] }, [""])
+    check.call("retired: a branch-only retirement still wired -> exit 0, pending",
+               rc == EXIT_OK && out.include?("pending retirement"))
+    rc, out = probe.call([], [], { "hooks" => [], "retired" => [{ "event" => "PostToolUse" }] }, [])
+    check.call("retired: a malformed branch retired entry -> could not measure (exit 3)",
+               rc == EXIT_UNMEASURED && out.include?("retired entry 0"))
   end
 end
 
@@ -1188,6 +1340,8 @@ def self_test
   # `check` closes over `ok`, so a failing case here reddens the suite.
   matcher_key_cases(check)
 
+  retired_cases(check)
+
   agent_stash_env_self_test(check)
 
   puts(ok ? "ALL CASES PASS" : "SELF-TEST FAILED")
@@ -1207,7 +1361,10 @@ if ARGV.include?("--help") || ARGV.include?("-h")
                                                  Claude Code settings; a hook only
                                                  this branch adds is named as pending
                                                  (not a failure); a wired hook whose
-                                                 script cannot run fails (dangling).
+                                                 script cannot run fails (dangling);
+                                                 a landed "retired" row still wired
+                                                 fails (setup-hooks --install
+                                                 unwires it).
                                                  Exit 0 ok, 1 fail, 3 could not measure
       ai/bin/check-hooks-registered --norm PATH  print this tool's normalized form
                                                  of PATH (used by setup-hooks'

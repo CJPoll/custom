@@ -254,6 +254,48 @@ OUT="$(env -u ATHENA_LANDED_PIN_SHA -u ATHENA_LANDED_PIN_REPO HOOKS_SETTINGS_FIL
   "${D}/wt/ai/bin/check-hooks-registered" 2>&1)"; RC=$?
 expect "...and unpinned, the stale local origin/main -> could not measure, exit 3" 3 "disagrees with origin"
 
+# 14b. RETIRED HOOKS (DND-1517). The registry's `retired` list names a wiring
+#      (event, matcher, script) that must leave the machine. Before the fix the
+#      checker ignored it: a retired hook still wired passed, and nothing said
+#      `setup-hooks --install` would unwire it. The retirement that counts is the
+#      LANDED one, like every other bar here (DND-743): a branch that adds one
+#      is pending, and a branch that drops a landed one cannot lower the bar.
+retire() { # retire <root> <event=script-basename>...: add a `retired` list to the registry
+  local root="$1"; shift
+  REG="${root}/ai/hooks/registry.json" /usr/bin/ruby -rjson -e '
+    reg = JSON.parse(File.read(ENV["REG"]))
+    reg["retired"] = ARGV.map { |kv| ev, s = kv.split("=", 2); { "event" => ev, "matcher" => "", "script" => "ai/hooks/#{s}" } }
+    File.write(ENV["REG"], JSON.pretty_generate(reg) + "\n")' "$@"
+}
+D="$(new_fixture r1517-a)"
+hook "${D}/main" r.sh; retire "${D}/main" "PostToolUse=r.sh"; commit "${D}/main" retire-r
+git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+git -C "${D}/wt" "${GITC[@]}" rebase -q origin/main >/dev/null 2>&1
+wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh" "PostToolUse=${D}/main/ai/hooks/r.sh"
+check "${D}"; expect "landed retired hook still wired -> FAIL naming it and the installer" 1 \
+  "PostToolUse.*r\.sh.*retired, still wired"
+expect "...and its Fix: is setup-hooks --install from the main checkout" 1 "Fix: run .scripts/setup-hooks --install. from the MAIN checkout"
+wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh"
+check "${D}"; expect "landed retired hook unwired -> pass" 0 "" "retired, still wired"
+# A branch that drops the landed retirement cannot make a still-wired hook pass.
+registry "${D}/wt" "SessionStart=a.sh"; commit "${D}/wt" drop-retirement
+wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh" "PostToolUse=${D}/main/ai/hooks/r.sh"
+check "${D}"; expect "branch drops a landed retirement, hook still wired -> still FAIL" 1 "r\.sh.*retired, still wired"
+
+D="$(new_fixture r1517-b)"
+hook "${D}/main" r.sh; registry "${D}/main" "SessionStart=a.sh" "PostToolUse=r.sh"; commit "${D}/main" add-r
+git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+git -C "${D}/wt" "${GITC[@]}" rebase -q origin/main >/dev/null 2>&1
+registry "${D}/wt" "SessionStart=a.sh"; retire "${D}/wt" "PostToolUse=r.sh"; commit "${D}/wt" retire-r
+wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh" "PostToolUse=${D}/main/ai/hooks/r.sh"
+check "${D}"; expect "a retirement only this branch adds, still wired -> pass, named as pending" 0 \
+  "r\.sh.*pending retirement" "retired, still wired"
+
+D="$(new_fixture r1517-c)"
+retire "${D}/wt" "SessionStart=a.sh"; commit "${D}/wt" both
+wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh"
+check "${D}"; expect "branch registry both declares and retires one row -> FAIL naming it" 1 "a\.sh.*(both|declared and retired)"
+
 # 15. THE AGENT-STASH ENV AND A SESSION STARTED BEFORE ITS INSTALL (DND-1036).
 #     Claude Code hot-reloads the settings env into a running session, so after
 #     `setup-hooks --install-env` an old session carries ATHENA_AGENT_BIN while

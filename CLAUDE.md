@@ -711,6 +711,20 @@ and pronoun-guard; nothing detected it. The durable fix:
   `--check`
   delegates to the gate check, `--dry-run` previews, `--remove` unwires,
   `--self-test` verifies install/idempotency/merge-safety on a temp file.
+- **Retiring a hook (DND-1517):** deleting a row does not unwire it, because
+  the live settings outlive the registry. Move the row to `registry.json`'s
+  `retired` list instead: one exact (event, matcher, script) per entry, never
+  also a `hooks` row. After it lands, `scripts/setup-hooks --install` from the
+  main checkout unwires exactly that wiring and nothing else: the same script
+  under another matcher, other tools' hooks and the owner's own entries stay.
+  From anywhere else it keeps the wiring and names it, like a stale matcher.
+  `check-hooks-registered` fails while a **landed** retired row is still wired
+  (*retired, still wired*, with that `--install` as its `Fix:`), the same exit
+  as *stale*. A retirement only the branch adds is *pending*, and a branch that
+  drops a landed one cannot excuse a wiring it still names. Keep the script on
+  disk (a no-op is enough) until no machine wires it, then delete the script
+  and its `retired` row together. Who runs the installer is the same as under
+  *Editing hooks* below.
 - **Worktrees:** hooks are always wired at the MAIN checkout's path, never a
   worktree's — a worktree path vanishes on cleanup and silently disables the
   guard. Both tools resolve the main checkout through `git rev-parse

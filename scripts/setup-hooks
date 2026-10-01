@@ -11,6 +11,13 @@
 # settings.json (timestamped) before any change, so there is always an undo path
 # for a file that is not in git.
 #
+# A hook leaves the machine through the registry's `retired` list (DND-1517):
+# each entry names the exact (event, matcher, script) wiring to remove, and
+# --install unwires that and nothing else. Like replacing a stale matcher, it
+# removes a live wiring, so it runs only when the registry being installed is
+# the main checkout's own (the retirement has landed); from a worktree's copy
+# it is named and kept. A row both declared in "hooks" and retired is refused.
+#
 # Idempotent: re-running adds only what is missing and reports "already wired"
 # otherwise. `--check` delegates to ai/bin/check-hooks-registered (the single
 # source of the compare logic, also run by the shipwright gate).
@@ -46,7 +53,8 @@
 # check-hooks-registered can tell a session started before the install
 # (PENDING RESTART) from drift (DND-1036); --remove-env removes it too.
 #
-# Exit codes: 0 ok · 1 usage/arg error · 2 missing prerequisite (no python3/registry)
+# Exit codes: 0 ok · 1 usage/arg error · 2 missing prerequisite (no python3/registry),
+# or a registry whose "retired" list cannot be applied
 # · 3 an unreadable settings file or env · 4 an unquotable main-checkout path
 # · 5 the settings env already holds part of the agent-stash env with other values
 
@@ -163,7 +171,11 @@ if os.environ.get("NORM_ONLY"):
     sys.exit(0)
 
 repo   = os.environ["REPO_DIR"]
-reg    = json.load(open(os.environ["REGISTRY"]))["hooks"]
+_doc   = json.load(open(os.environ["REGISTRY"]))
+reg    = _doc["hooks"]
+# DND-1517: the wirings a hook leaves the machine by. Each row names the exact
+# (event, matcher, script) to unwire; --install removes that and nothing else.
+retired = _doc.get("retired", [])
 path   = os.environ["SETTINGS"]
 mode   = os.environ["MODE"]
 dry    = os.environ["DRY"] == "1"
@@ -377,6 +389,31 @@ declared = {}
 for e in reg:
     declared.setdefault((e["event"], e["script"]), set()).add(mnorm(e["matcher"]))
 
+# The retired rows (DND-1517), validated before anything is written. A row that
+# is not {event, matcher, script} strings, or one the registry also declares as
+# a live hook, is refused: unwiring a declared hook is never what a retirement
+# means, so a contradiction is an error, never a guess.
+def retired_rows():
+    if not isinstance(retired, list):
+        bad = ['"retired" is not an array']
+    else:
+        bad = [f"entry {i} is not {{event, matcher, script}} strings: {r!r}"
+               for i, r in enumerate(retired)
+               if not (isinstance(r, dict) and all(isinstance(r.get(k), str) and r.get(k) for k in ("event", "script"))
+                       and isinstance(r.get("matcher", ""), str))]
+    if not bad:
+        bad = [f'{r["event"]} {r.get("matcher", "")!r} -> {r["script"]} is both declared in "hooks" and retired'
+               for r in retired if mnorm(r.get("matcher")) in declared.get((r["event"], r["script"]), set())]
+    if bad:
+        print(f'error: {os.environ["REGISTRY"]}: its "retired" list cannot be applied:', file=sys.stderr)
+        for b in bad:
+            print(f"  - {b}", file=sys.stderr)
+        print('Fix: make each "retired" entry an {event, matcher, script} object naming a wiring the "hooks" '
+              'list no longer declares (drop the "hooks" row, or the "retired" one), then re-run.', file=sys.stderr)
+        sys.exit(2)
+    return [(r["event"], mnorm(r.get("matcher")), r["script"], r.get("matcher", "")) for r in retired]
+retire_rows = retired_rows()
+
 changes = []
 if mode == "install":
     # Stale wiring first: a registry script wired on its event under a matcher
@@ -406,6 +443,21 @@ if mode == "install":
             continue
         for gone in drop(event, target, lambda mm, ms=matchers: mm in ms):
             changes.append(f'~ {event:13} {gone!r} -> {script} (stale matcher, replaced)')
+    # Retired wirings (DND-1517): unwire exactly each declared (event, matcher,
+    # script), under the same main-checkout rule as a stale matcher -- it
+    # REMOVES a live wiring, so a branch copy of the registry only names it.
+    # The same script under any other matcher, and every other command, is left
+    # exactly as found.
+    for event, want, script, spelled in retire_rows:
+        target = norm(absscript(script))
+        if not from_main:
+            if any(mnorm(m.get("matcher")) == want and any(norm(h.get("command")) == target for h in m.get("hooks", []))
+                   for m in hooks.get(event, [])):
+                print(f'~ {event:13} {spelled!r} -> {script}: retired, still wired; kept. Only an install from '
+                      f'the main checkout\'s own registry ({repo}) unwires it, after the retirement lands there.')
+            continue
+        for gone in drop(event, target, lambda mm, w=want: mm != w):
+            changes.append(f'- {event:13} {gone!r} -> {script} (retired, unwired)')
     for e in reg:
         cmd = absscript(e["script"])
         if has(e["event"], e["matcher"], cmd):
@@ -435,6 +487,10 @@ else:  # remove: every wiring of a registry script on its event, whatever the ma
     for (event, script) in declared:
         for gone in drop(event, norm(absscript(script)), lambda mm: False):
             changes.append(f'- {event:13} {gone!r} -> {script}')
+    # ...and each retired wiring, exactly as declared (DND-1517).
+    for event, want, script, _ in retire_rows:
+        for gone in drop(event, norm(absscript(script)), lambda mm, w=want: mm != w):
+            changes.append(f'- {event:13} {gone!r} -> {script} (retired)')
 
 for c in changes:
     print(c)
@@ -740,6 +796,110 @@ import json, os, sys
 s = json.load(open(os.environ["SETTINGS"]))
 sys.exit(0 if any(m.get("matcher") == "Unrelated" for m in s["hooks"]["PreToolUse"]) else 1)
 PY3
+    HOOKS_REPO_DIR="$main_fix_repo"; CHECKER="$main_fix_checker"
+
+    # DND-1517: a hook RETIRED in the registry leaves the machine through
+    # --install. The registry's `retired` list names the exact (event, matcher,
+    # script) wiring; --install from the main checkout's own registry unwires
+    # exactly that, and nothing else. Before the fix nothing read `retired`, so
+    # a hook that left the registry stayed wired forever (DND-1487 had to keep
+    # harness-event.sh as a no-op stub for that reason).
+    fixret="${tmp}/fixture-retire"
+    landed_fixture "$REPO_DIR" "$fixret" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
+      || { echo "  FAIL could not build the DND-1517 fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
+    fixret="$(cd -- "$fixret" && pwd -P)"
+    for s in dnd-1517-kept.sh dnd-1517-retired.sh; do
+      printf '#!/bin/sh\nexit 0\n' > "${fixret}/ai/hooks/${s}"; chmod +x "${fixret}/ai/hooks/${s}"
+    done
+    printf '%s\n' '{ "hooks": [ { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/dnd-1517-kept.sh" } ],
+      "retired": [ { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/dnd-1517-retired.sh", "ticket": "DND-1517" } ] }' \
+      > "${fixret}/ai/hooks/registry.json"
+    landed_fixture_land "$fixret" || { echo "  FAIL could not land the retire registry in the DND-1517 fixture"; echo "SELF-TEST FAILED"; exit 1; }
+    retreg="${fixret}/ai/hooks/registry.json"
+    HOOKS_REPO_DIR="$fixret"; CHECKER="${fixret}/ai/bin/check-hooks-registered"
+    kept_cmd="${fixret}/ai/hooks/dnd-1517-kept.sh"; ret_cmd="${fixret}/ai/hooks/dnd-1517-retired.sh"
+    # The live shape DND-1487 left: the retired script wired alone in its own
+    # group, beside the kept hook's group, an owner's own hook on the same
+    # event, and the retired script under a matcher the retirement does not name.
+    ret_settings() {
+      printf '%s\n' "{ \"model\": \"x\", \"hooks\": { \"PostToolUse\": [
+        { \"matcher\": \"\", \"hooks\": [ { \"type\": \"command\", \"command\": \"${kept_cmd}\" } ] },
+        { \"matcher\": \"\", \"hooks\": [ { \"type\": \"command\", \"command\": \"${ret_cmd}\" } ] },
+        { \"matcher\": \"\", \"hooks\": [ { \"type\": \"command\", \"command\": \"/owner/own-hook.sh\" } ] },
+        { \"matcher\": \"Bash\", \"hooks\": [ { \"type\": \"command\", \"command\": \"${ret_cmd}\" } ] } ] } }" > "$1"
+    }
+    # wired_of <settings>: every "matcher=command-basename" on PostToolUse, sorted.
+    wired_of() {
+      SETTINGS="$1" python3 - <<'PY6'
+import json, os
+s = json.load(open(os.environ["SETTINGS"]))
+print(",".join(sorted(f'{m.get("matcher", "")}={os.path.basename(h.get("command", ""))}'
+                      for m in s.get("hooks", {}).get("PostToolUse", []) for h in m.get("hooks", []))))
+PY6
+    }
+    want_after="=dnd-1517-kept.sh,=own-hook.sh,Bash=dnd-1517-retired.sh"
+    rset="${tmp}/settings-retire.json"
+    ret_settings "$rset"
+    rd="$(REGISTRY="$retreg" apply install "$rset" 1)"
+    if grep -q "MARKER:wouldchange" <<<"$rd" && grep -q "dnd-1517-retired.sh (retired, unwired)" <<<"$rd" \
+       && [ "$(grep -c '^[-+~]' <<<"$rd")" = 1 ] && [ "$(wired_of "$rset")" != "$want_after" ]; then
+      echo "  ok   --install --dry-run names exactly the retired wiring it would remove, and writes nothing"
+    else
+      echo "  FAIL --install --dry-run must name exactly the retired wiring and change nothing: $rd"; ok=0
+    fi
+    rr="$(REGISTRY="$retreg" apply install "$rset" 0)"
+    if grep -q "MARKER:changed" <<<"$rr" && [ "$(wired_of "$rset")" = "$want_after" ] \
+       && python3 -c "import json,sys; sys.exit(0 if json.load(open('$rset')).get('model')=='x' else 1)"; then
+      echo "  ok   --install unwires exactly the retired (event, matcher, script); kept, owner and other-matcher entries stay"
+    else
+      echo "  FAIL --install must unwire exactly the retired wiring, got [$(wired_of "$rset")]: $rr"; ok=0
+    fi
+    rr2="$(REGISTRY="$retreg" apply install "$rset" 0)"
+    grep -q "MARKER:nochange" <<<"$rr2" \
+      && echo "  ok   a second --install after a retirement changes nothing (idempotent)" \
+      || { echo "  FAIL a second --install must be a no-op: $rr2"; ok=0; }
+    # Unwiring REMOVES a live wiring, so like a stale matcher it waits for the
+    # retirement to land in the main checkout: from any other registry (a
+    # worktree's branch copy) the wiring is kept and named.
+    offret="${tmp}/off-main-retire-registry.json"; cp "$retreg" "$offret"
+    rkept="${tmp}/settings-retire-off-main.json"; ret_settings "$rkept"
+    before="$(wired_of "$rkept")"
+    ro="$(REGISTRY="$offret" apply install "$rkept" 0)"
+    if [ "$(wired_of "$rkept")" = "$before" ] && grep -q "dnd-1517-retired.sh: retired, still wired; kept" <<<"$ro"; then
+      echo "  ok   --install from a registry that is not the main checkout's keeps a retired wiring and names it"
+    else
+      echo "  FAIL --install from a non-main registry must keep the retired wiring and name it, got [$(wired_of "$rkept")]: $ro"; ok=0
+    fi
+    # A row both declared and retired contradicts itself: refused, file untouched.
+    bothreg="${tmp}/both-registry.json"
+    printf '%s\n' '{ "hooks": [ { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/dnd-1517-kept.sh" } ],
+      "retired": [ { "event": "PostToolUse", "matcher": "*", "script": "ai/hooks/dnd-1517-kept.sh" } ] }' > "$bothreg"
+    rboth="${tmp}/settings-retire-both.json"; ret_settings "$rboth"; cp "$rboth" "${rboth}.before"
+    if berr="$(REGISTRY="$bothreg" apply install "$rboth" 0 2>&1)"; then
+      echo "  FAIL a registry that both declares and retires one row must be refused: $berr"; ok=0
+    elif cmp -s "$rboth" "${rboth}.before" && grep -q "Fix:" <<<"$berr"; then
+      echo "  ok   a row both declared and retired is refused with a Fix:, settings untouched"
+    else
+      echo "  FAIL the refusal must leave settings untouched and carry a Fix: $berr"; ok=0
+    fi
+    # --remove (the uninstall) takes retired wirings too, exactly as declared.
+    rrm="${tmp}/settings-retire-remove.json"; ret_settings "$rrm"
+    REGISTRY="$retreg" apply remove "$rrm" 0 >/dev/null
+    [ "$(wired_of "$rrm")" = "=own-hook.sh,Bash=dnd-1517-retired.sh" ] \
+      && echo "  ok   --remove unwires the registry's hooks and its retired rows, nothing else" \
+      || { echo "  FAIL --remove must unwire exactly the declared and retired rows, got [$(wired_of "$rrm")]"; ok=0; }
+    # The checker agrees: still wired is red and names the installer; unwired is green.
+    ret_settings "$rkept"
+    if rc_out="$(HOOKS_SETTINGS_FILE="$rkept" "$CHECKER" 2>&1)"; then
+      echo "  FAIL the checker must fail a retired hook that is still wired: $rc_out"; ok=0
+    elif grep -q "retired, still wired" <<<"$rc_out" && grep -q "setup-hooks --install" <<<"$rc_out"; then
+      echo "  ok   the checker names a retired hook still wired, and the installer that unwires it"
+    else
+      echo "  FAIL the checker must name the retired, still-wired hook and setup-hooks --install: $rc_out"; ok=0
+    fi
+    HOOKS_SETTINGS_FILE="$rset" "$CHECKER" >/dev/null 2>&1 \
+      && echo "  ok   the checker passes once --install has unwired the retired hook" \
+      || { echo "  FAIL the checker must pass after --install unwired the retired hook: $(HOOKS_SETTINGS_FILE="$rset" "$CHECKER" 2>&1)"; ok=0; }
     HOOKS_REPO_DIR="$main_fix_repo"; CHECKER="$main_fix_checker"
 
     # Worktree safety: the wired commands must point at the MAIN checkout, so

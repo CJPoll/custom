@@ -10,8 +10,9 @@
 # every tool call's PostToolUse and turn check-hooks-registered red (dangling)
 # on the machine.
 #
-# Delete this file once no machine's settings.json wires it. scripts/setup-hooks
-# cannot unwire a hook that left the registry; that gap is ticketed separately.
+# ai/hooks/registry.json lists it under "retired" (DND-1517), so
+# `scripts/setup-hooks --install` from the main checkout unwires it. Delete this
+# file, and its "retired" row, once no machine's settings.json wires it.
 #
 # It drains stdin so the writer never sees a broken pipe, and always exits 0.
 cat >/dev/null 2>&1
