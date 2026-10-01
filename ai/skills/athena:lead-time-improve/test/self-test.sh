@@ -352,6 +352,9 @@ printf 'echo tool\n' >"${REPO}/ai/bin/x"
 TBIN="$(commit_files 2026-09-30T11:01:00Z "fixture: a tool-only change")"
 printf 'echo one\n' >"${REPO}/ai/x/test/foo.sh"
 TDEL="$(commit_files 2026-09-30T11:02:00Z "fixture: a change that only deletes a test line")"
+mkdir -p "${REPO}/ai/y/test"
+"${G[@]}" mv ai/x/test/foo.sh ai/y/test/foo.sh
+TREN="$(commit_files 2026-09-30T11:03:00Z "fixture: a test moved to a new path")"
 STATE7="${TMP}/state7"
 mkdir -p "${STATE7}"
 # after-set verify 700 s, windows on the 30th, no revert in either: median-only
@@ -365,6 +368,8 @@ eq "record a tool-only change: exit 0" "$(s7 rec implement phase "${TBIN}" chang
 has "... lists no test" "$(recrow "${STATE7}/experiments.jsonl" "custom:implement:${TBIN:0:12}")" '"revert_deletes_tests":[]'
 eq "record a change that only deletes test lines: exit 0" "$(s7 rec queue phase "${TDEL}" change)" "0"
 has "... lists no test (reverting it adds them back)" "$(recrow "${STATE7}/experiments.jsonl" "custom:queue:${TDEL:0:12}")" '"revert_deletes_tests":[]'
+eq "record a change that moves a test: exit 0" "$(s7 rec integrate phase "${TREN}" change)" "0"
+has "... lists the test under its new path (a revert would delete it there)" "$(recrow "${STATE7}/experiments.jsonl" "custom:integrate:${TREN:0:12}")" '"revert_deletes_tests":["ai/y/test/foo.sh"]'
 eq "judge: exit 0" "$(s7 run judge --repo custom)" "0"
 has "regression: a revert of a test-adding commit reads REVERT HELD" "$(out)" "${HID} REVERT HELD kind=change"
 has "... naming the test additions" "$(out)" "reverting ${TADD:0:12} deletes test additions in ai/x/test/foo.sh"
@@ -380,6 +385,14 @@ eq "re-judge: exit 0" "$(s7 run judge --repo custom)" "0"
 has "the owed revert still reads REVERT HELD" "$(out)" "${HID} REVERT HELD kind=change"
 lacks "... never a plain REVERT OWED" "$(out)" "REVERT OWED"
 has "... and is still owed" "$(out)" "main has no revert of it yet"
+has "... the Fix keeps git's full-SHA revert line" "$(out)" "\"This reverts commit ${TADD}.\""
+# The Fix's partial revert: the fix undone, the test kept, git's line kept.
+rm "${REPO}/ai/x/fix.sh"
+PARTIAL="$(GIT_COMMITTER_DATE=2026-10-01T11:00:00Z GIT_AUTHOR_DATE=2026-10-01T11:00:00Z "${G[@]}" commit -q -a \
+  -m "Revert \"fixture: a fix with its regression test\" (partial: keeps the test)" -m "This reverts commit ${TADD}." && "${G[@]}" rev-parse HEAD)"
+eq "... the partial revert landed" "${#PARTIAL}" "40"
+eq "judge after the partial revert lands: exit 0" "$(s7 run judge --repo custom)" "0"
+has "the held revert settles as REVERTED" "$(out)" "${HID} REVERTED"
 
 echo "== revert held: a record with no field"
 STATE8="${TMP}/state8"
@@ -392,6 +405,16 @@ eq "judge: exit 0" "$(s8 run judge --repo custom)" "0"
 has "the field is computed on the fly: REVERT HELD" "$(out)" "${HID} REVERT HELD kind=change"
 has "... naming the test additions" "$(out)" "deletes test additions in ai/x/test/foo.sh"
 lacks "... and the record is not rewritten" "$(recrow "${STATE8}/experiments.jsonl" "${HID}")" "revert_deletes_tests"
+
+echo "== revert held: a record-time could-not-look is looked at again"
+STATE10="${TMP}/state10"
+mkdir -p "${STATE10}"
+cp "${STATE8}/ledger.jsonl" "${STATE10}/"
+recrow "${STATE8}/experiments.jsonl" "${HID}" | sed 's/"type":"record",/"type":"record","revert_deletes_tests_na":"git show failed once",/' >"${STATE10}/experiments.jsonl"
+has "the fixture record carries _na" "$(cat "${STATE10}/experiments.jsonl")" '"revert_deletes_tests_na":"git show failed once"'
+eq "judge: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE10}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z run judge --repo custom)" "0"
+has "git answers now: held on the test, not on could not look" "$(out)" "deletes test additions in ai/x/test/foo.sh"
+lacks "... the stale reason is not printed" "$(out)" "git show failed once"
 
 echo "== revert held: git could not look"
 STATE9="${TMP}/state9"

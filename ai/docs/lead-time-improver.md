@@ -304,10 +304,12 @@ p90 over the last K comparable landings), and a status.
   or `revert_deletes_tests_na` with the reason, never `[]` for unknown. A
   revert verdict (fresh or owed) whose record lists a test, or carries
   `_na`, prints `REVERT HELD` with the paths and a Fix: a partial revert
-  that keeps the tests, or `decline --constraint safety-checks` when decline
-  would admit it. A record written earlier has no field, so judge computes
-  it with the same adapter. The status stays `revert`, the status row gains
-  a `held` field, and judge's tally counts held on its own. No threshold or
+  that keeps the tests and git's `This reverts commit <sha>.` line (judge
+  records `reverted` only from it), or `decline --constraint safety-checks`
+  when decline would admit it. A record written earlier has no field, and a
+  record-time `_na` may have been a one-off, so judge computes either with
+  the same adapter. The status stays `revert`, a fresh revert's status row
+  gains a `held` field, and judge's tally counts held on its own. No threshold or
   guard moved, and nothing becomes keep.
 - **Pending** while either side has fewer than K. A pending row is never
   reported as a gain. Still pending after 7 days: journaled as inconclusive,

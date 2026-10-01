@@ -603,8 +603,14 @@ check("hold_text: tests, the Fix and decline when decline would be admitted") do
   s = X.hold_text("custom", "custom:verify:abc", LANDING, { "tests" => ["a/test/t.sh", "b/test/u.sh"] }, nil)
   s.include?("reverting #{LANDING[0, 12]} deletes test additions in a/test/t.sh, b/test/u.sh") &&
     s.include?("the hard constraint rules out a plain git revert") &&
-    s.include?("Fix: land a partial revert that keeps every test addition and its fixture fix, or run " \
-               "experiment decline --repo custom --id custom:verify:abc --constraint safety-checks --reason-file <F>")
+    s.include?("Fix: land a partial revert that keeps every test addition and its fixture fix") &&
+    s.include?("), or run experiment decline --repo custom --id custom:verify:abc --constraint safety-checks --reason-file <F>")
+end
+
+check("hold_text: the partial-revert Fix keeps git's full-SHA revert line, so judge can record reverted") do
+  s = X.hold_text("custom", "i", LANDING, { "tests" => ["a/test/t.sh"] }, nil)
+  s.include?("git revert --no-commit #{LANDING}") && s.include?("\"This reverts commit #{LANDING}.\"") &&
+    X.revert_refs("This reverts commit #{LANDING}.") == [LANDING]
 end
 
 check("hold_text: could not look names the reason") do

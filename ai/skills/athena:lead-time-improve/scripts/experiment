@@ -61,8 +61,9 @@ HELP = <<~TXT
   record   Record one LANDED change. --commit is the 40-hex SHA as it landed
            on main (after any rebase); it is refused when git does not show
            it on the repo's main. It also stores the test paths the commit
-           added lines to (revert_deletes_tests), or why git could not tell. The baseline is the last K=10 comparable
-           landings before that landing. Refused (exit 2, naming the
+           added lines to (revert_deletes_tests), or why git could not
+           tell. The baseline is the last K=10 comparable landings before
+           that landing. Refused (exit 2, naming the
            blocking experiment) while a `change` on the same phase is
            pending or owes a revert; `instrumentation` is exempt.
   judge    Judge every pending experiment of the repo and print one line
@@ -73,8 +74,10 @@ HELP = <<~TXT
            A revert of a commit that added test lines (a test/ path or a
            *.self-test.sh), or one where git could not tell, prints
            REVERT HELD instead (DND-1549): a plain git revert would delete
-           the tests, so the Fix names a partial revert or decline. The
-           status stays revert; the tally counts held on its own.
+           the tests, so the Fix names a partial revert (which keeps git's
+           "This reverts commit <sha>." line, so judge still records
+           `reverted`) or decline. The status stays revert; a fresh revert's
+           status row carries `held`; the tally counts held on its own.
            Appends a status row only when the verdict changed, so a re-run
            with the same inputs writes nothing.
   list     Every experiment and its latest status (DECLINED with its
@@ -439,10 +442,10 @@ module Judge
     judged = results.map { |_, v| v["status"] }
     tally = X::JUDGED.map { |s| "#{judged.count(s)} #{s}" }.join(", ")
     declined = mine.count { |e| e["status"] == "declined" }
-    held = results.count { |_, v| v["held"] }
+    held_count = results.count { |_, v| v["held"] }
     puts "experiment judge: #{repo.name}: #{results.size} judged (#{tally}); #{appended.size} status row(s) appended; " \
          "#{rows.size} landing(s) in the ledger; #{declined} declined (a revert the hard constraint forbids; not judged); " \
-         "#{held} held (a revert whose plain git revert would delete test additions, or could not tell)"
+         "#{held_count} held (a revert whose plain git revert would delete test additions, or could not tell)"
     0
   end
 
@@ -459,10 +462,13 @@ module Judge
     [exp, v.merge("held" => hold), ctx, X.hold_text(repo.name, exp["id"], exp["commit"], hold, refusal)]
   end
 
-  # The record's revert_deletes_tests(_na), or, for a record written before
-  # DND-1549, the same answer computed now with the same adapter.
+  # The record's revert_deletes_tests list, else the same answer computed
+  # now with the same adapter: for a record written before DND-1549 (no
+  # field), and for one whose git could not look at record time (_na), so a
+  # one-off git failure does not hold the revert for good. Still unknown
+  # stays _na, which X.hold holds.
   def tests_fields(exp, repo)
-    return exp if exp.key?("revert_deletes_tests") || exp.key?("revert_deletes_tests_na")
+    return exp if exp["revert_deletes_tests"].is_a?(Array)
 
     X.deletes_tests_fields(XG.numstat(repo.path, exp["commit"]))
   end

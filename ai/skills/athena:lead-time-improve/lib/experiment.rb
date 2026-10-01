@@ -533,7 +533,11 @@ module LeadTimeExperiment
            else
              "reverting #{sha} deletes test additions in #{hold['tests'].join(', ')}"
            end
-    partial = "land a partial revert that keeps every test addition and its fixture fix"
+    # Judge records `reverted` only from git's own "This reverts commit
+    # <sha>" line (reverted?), so a partial revert must keep it.
+    partial = "land a partial revert that keeps every test addition and its fixture fix " \
+              "(git revert --no-commit #{commit}, restore the test paths, commit keeping git's " \
+              "\"This reverts commit #{commit}.\" line so judge records reverted)"
     fix = if decline_refusal
             "#{partial}; decline does not cover this revert (#{decline_refusal})"
           else

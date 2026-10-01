@@ -98,13 +98,18 @@ before and after numbers, and records the verdict.
   path or a `*.self-test.sh`, the `FirstParty.test_path?` rule), or could
   not look. A plain `git revert` would delete them, so it is never the
   action. The status is still `revert`. Either land a partial revert that
-  keeps every test addition and its fixture fix (a change like any other:
-  harness-gate, critic PASS, integration-gate), or decline it as above
+  keeps every test addition and its fixture fix, or decline it as above
   (`--constraint safety-checks`) and journal it under *Decisions /
-  Won't-change*. A bug-fix commit carries its regression test
-  (`~/.claude/CLAUDE.md` → *TDD Workflow*), so this rule covers it with no
-  commit-message parsing. If the line says decline does not cover it (a
-  worse or unmeasured guard), the partial revert is the only path.
+  Won't-change*. Build the partial revert with `git revert --no-commit
+  <sha>`, restore the test paths, and commit keeping git's `This reverts
+  commit <sha>.` line: judge records `reverted` only from that line. It is
+  a change like any other: harness-gate, critic PASS, integration-gate. If
+  the line says decline does not cover it (a worse or unmeasured guard),
+  the partial revert is the only path. A bug-fix commit whose regression
+  test (`~/.claude/CLAUDE.md` → *TDD Workflow*) is on a test path is held
+  with no commit-message parsing. A test the rule cannot see, such as an
+  inline `--self-test` inside a tool or a new check, is still judged by the
+  hard-constraint test in the **revert** bullet above.
 - **declined** is never a gain. It no longer blocks its phase. Judge never
   writes it; only the `decline` verb does.
 - **keep, inconclusive:** journal them. An inconclusive experiment no longer
@@ -235,6 +240,7 @@ Append to `<state>/journal.md`, in the shipwright's journal shape (its
 - <id> <verdict>: before n/median/p90 -> after n/median/p90; guards; reason
 - recorded <id>: <phase> <metric>, baseline <numbers>
 - <id> declined (<constraint>): <reason>
+- <id> revert held (<test paths | could not look>): <partial revert landed | declined | owed>
 
 ### Watched, not actioned
 - <finding> (biggest phase, n/a reasons, why no action)
@@ -337,7 +343,7 @@ Write one summary line per repo to the summary file your brief names; else
 `<state>/runs/<UTC %Y%m%dT%H%M%SZ>.summary`:
 
 ```
-repo=<R> mode=improve biggest=<phase|none> action=<change|instrumentation|architect|revert|no-action> experiments=keep:<n>,revert:<n>,pending:<n>,inconclusive:<n>,declined:<n> reason="<one line>"
+repo=<R> mode=improve biggest=<phase|none> action=<change|instrumentation|architect|revert|no-action> experiments=keep:<n>,revert:<n>,pending:<n>,inconclusive:<n>,declined:<n>,held:<n> reason="<one line>"
 repo=<R> mode=watch outliers=<n> qualified=<n> handed_off=<n> ready_and_idle=<n|unavailable>
 repo=<R> skipped="<reason>"
 ```
