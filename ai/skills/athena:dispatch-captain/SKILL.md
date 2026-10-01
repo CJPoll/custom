@@ -190,8 +190,11 @@ Give the captain, in the brief:
   3/3 slots held and the gate never run. Bound the wait with
   `--wait-timeout` instead.
 - **The one-command final check.** Every brief carries this line, unless the
-  branch is published (*The published-branch variant* below): *"Your
-  final check is ONE command on your final commit: `cd <worktree> &&
+  branch is published (*The published-branch variant* below): *"Open your
+  PR (your step 8) before the final check, never after it, so the forge's CI
+  runs beside the gate instead of after it. Before you report, the PR's head
+  must be the SHA your INTEGRATION OK line names; push it as Athena if it
+  is not. Your final check is ONE command on your final commit: `cd <worktree> &&
   ~/dev/custom/ai/bin/test-slot -- timeout 1500
   ~/dev/custom/ai/bin/integration-gate --with-critic --rebase`. It runs the
   standing judge beside the gate, so it costs the slower of the two, not their
@@ -202,7 +205,13 @@ Give the captain, in the brief:
   INTEGRATION OK line. On a RED gate or a BLOCK, fix every finding from both
   in one round, commit, and run it again."* It replaces a separate
   `critic-review` then gate on the final commit (`athena:merge-boarding` →
-  *Landing onto a moving main*).
+  *Landing onto a moving main*). The PR-first order is the captain
+  template's own (open the MR at step 8, before review and this check). It
+  moves no check: the merge still needs green CI on the pinned head, the
+  receipt and a critic PASS. Measured on gen_saas, 2026-10-01: 11 of 14
+  captain PRs were opened only after this check, so their CI started after
+  the gate. Their gate-to-merge wait had a median of 907 s (487-1958 s). The 3
+  PRs opened earlier had a median of 261 s (78-685 s).
 
   **A repo that declares no gate needs `--gate` in the brief.** When the
   target's landed main has neither `bin/prep-commit.sh` nor
