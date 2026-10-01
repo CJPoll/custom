@@ -371,7 +371,8 @@ module LeadTimePhases
     module_function
 
     # -> {"counters"=>{..}, "counters_na"=>{name=>reason}, "top_checks"=>[..]|nil,
-    #     "top_checks_source"=>.., "top_checks_na"=>..}
+    #     "top_checks_source"=>.., "top_checks_na"=>.., "check_walls"=>{label=>wall_s}
+    #     | "check_walls_na"=>..}
     def compute(landing:, events:, timings:)
       out = {}
       na = {}
@@ -385,7 +386,7 @@ module LeadTimePhases
         [evs.size, evs.count { |e| Match.attr(e, "verdict").to_s.downcase == "block" }, wall(evs)]
       end
       family(landing, events, "merge.lock_wait", %w[lock_wait_s], out, na) { |evs| [wall(evs)] }
-      top = top_checks(landing, events, timings)
+      top = check_fields(landing, events, timings)
       { "counters" => out, "counters_na" => na }.merge(top)
     end
 
@@ -412,28 +413,44 @@ module LeadTimePhases
       end
     end
 
-    def top_checks(landing, events, timings)
+    # -> {"check_walls"=>{label=>wall_s}, "top_checks"=>top(check_walls), "top_checks_source"=>..}
+    #    or, with no source, {"top_checks"=>nil, "top_checks_na"=>why, "check_walls_na"=>why}
+    #    (check_walls absent). One reader feeds both (DND-1548).
+    def check_fields(landing, events, timings)
+      walls, source = check_walls(landing, events, timings)
+      return { "check_walls" => walls, "top_checks" => top(walls), "top_checks_source" => source } if walls
+
+      sha = Landing.head_desc(landing)
+      tel = Anchors.telemetry_miss(events, "no harness_gate.check on #{sha}")
+      tim = timings.could_not_look? ? "timings: could not look (#{timings.reason})" : "no timings rows for #{sha}"
+      why = "#{tel}; #{tim}"
+      { "top_checks" => nil, "top_checks_na" => why, "check_walls_na" => why }
+    end
+
+    # [{label => wall_s}, source] for every check of the gated head's last
+    # gate run (telemetry harness_gate.check, else the latest timings row per
+    # label), or nil when neither source has a row. A check with no numeric
+    # wall is left out, never read as 0.
+    def check_walls(landing, events, timings)
       checks = Match.for_gated(events.items, landing, "harness_gate.check")
       unless checks.empty?
         runs = checks.group_by { |e| Match.attr(e, "run_id").to_s }
         last = runs.values.max_by { |evs| evs.map { |e| Match.at(e) }.max }
-        list = last.map { |e| { "label" => Match.attr(e, "label"), "wall_s" => e["duration_s"] } }
-        return { "top_checks" => top(list), "top_checks_source" => "telemetry harness_gate.check" }
+        return [walls(last.map { |e| [Match.attr(e, "label"), e["duration_s"]] }), "telemetry harness_gate.check"]
       end
       rows = timings.items
-      unless rows.empty?
-        latest = rows.group_by { |r| r["label"] }.map { |_, rs| rs.max_by { |r| r["at"].to_s } }
-        list = latest.map { |r| { "label" => r["label"], "wall_s" => r["wall_s"] } }
-        return { "top_checks" => top(list), "top_checks_source" => "harness-gate timings.jsonl" }
-      end
-      sha = Landing.head_desc(landing)
-      tel = Anchors.telemetry_miss(events, "no harness_gate.check on #{sha}")
-      tim = timings.could_not_look? ? "timings: could not look (#{timings.reason})" : "no timings rows for #{sha}"
-      { "top_checks" => nil, "top_checks_na" => "#{tel}; #{tim}" }
+      return nil if rows.empty?
+
+      latest = rows.group_by { |r| r["label"] }.map { |_, rs| rs.max_by { |r| r["at"].to_s } }
+      [walls(latest.map { |r| [r["label"], r["wall_s"]] }), "harness-gate timings.jsonl"]
     end
 
-    def top(list)
-      list.select { |c| c["wall_s"].is_a?(Numeric) }.sort_by { |c| [-c["wall_s"], c["label"].to_s] }.first(TOP_CHECKS)
+    def walls(pairs) = pairs.select { |label, wall| label.is_a?(String) && wall.is_a?(Numeric) }.to_h
+
+    # The TOP_CHECKS slowest of a check_walls map, as [{label, wall_s}].
+    def top(walls)
+      walls.map { |label, wall| { "label" => label, "wall_s" => wall } }
+           .sort_by { |c| [-c["wall_s"], c["label"]] }.first(TOP_CHECKS)
     end
   end
 

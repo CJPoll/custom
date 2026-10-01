@@ -214,6 +214,23 @@ c4 = L::Counters.compute(landing: l, events: S.ok([]), timings: S.could_not_look
 check("C2 both empty: null with a reason naming both sources") do
   c4["top_checks"].nil? && c4["top_checks_na"].include?("no harness_gate.check") && c4["top_checks_na"].include?("timings: could not look")
 end
+# check_walls (DND-1548): every check of the head's last gate run, by label.
+# top_checks is read from it, so the two can never disagree.
+check("C4 check_walls holds every label of the head's last gate run (telemetry)") do
+  c2["check_walls"] == (1..7).to_h { |i| ["c#{i}", i * 1.0] } && !c2.key?("check_walls_na")
+end
+check("C4 top_checks equals top(check_walls) on the same fixture") do
+  c2["top_checks"] == L::Counters.top(c2["check_walls"]) && c3["top_checks"] == L::Counters.top(c3["check_walls"])
+end
+check("C4 check_walls from timings rows, latest per label") { c3["check_walls"] == { "x" => 9.0, "y" => 5.0 } }
+check("C4 no source: no check_walls, and check_walls_na carries top_checks_na's reason") do
+  !c4.key?("check_walls") && c4["check_walls_na"] == c4["top_checks_na"] && !c4["check_walls_na"].to_s.empty?
+end
+check("C4 a check with no numeric wall is left out of check_walls, never 0") do
+  odd = [ev("harness_gate.check", "2026-10-01T03:00:01Z", duration_s: nil, attrs: { "run_id" => "r3", "label" => "nowall" }),
+         ev("harness_gate.check", "2026-10-01T03:00:02Z", duration_s: 4.0, attrs: { "run_id" => "r3", "label" => "w" })]
+  L::Counters.compute(landing: l, events: S.ok(odd), timings: S.empty("none"))["check_walls"] == { "w" => 4.0 }
+end
 check("C3 a counter with no source events is null with a reason, never 0") do
   c4["counters"]["gate_runs"].nil? && c4["counters_na"]["gate_runs"] == "no harness_gate.run or gate.run for DND-9001"
 end
