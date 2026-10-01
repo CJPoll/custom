@@ -17,7 +17,10 @@ a Mission is unblocked and has a free slot (worktree already created via
    do the captain's work in-line. Then run the drain protocol:
    [[athena:fleet-drain]].
    Exit 0 then passes the **machine-capacity gate** (*Machine capacity gates
-   every dispatch*, below) before the spawn.
+   every dispatch*, below) before step 1. A held Mission stays `QUEUED` and is
+   never moved to `In Progress`: step 1 stamps the lead-time start, and a
+   stamp taken during a hold counts the hold as captain time. Creating the
+   worktree early is fine; stamping is not.
 1. **Move the Mission's Notion status to `In Progress`** and set its `Assignee`
    to **Athena** (the active connection's bot — see [[athena:ticket-management]]).
    For a DND ticket or a work-tracker (walt_ui) ticket, the status move is
@@ -386,7 +389,7 @@ failure lowers the whole cap, because load is the machine's.
 Captain capacity belongs to the machine. The resident cap of 5 is your ceiling;
 below it, these rules decide.
 
-- **Hold while the machine is loaded.** Immediately before each spawn (initial,
+- **Hold while the machine is loaded.** Before each dispatch's step 1 (initial,
   refill, resume re-dispatch), after `fleet-control check` exits 0, read the
   1-min load: `cut -d' ' -f1 /proc/loadavg`. Over **12** (owner, 2026-09-26):
   do not dispatch. Keep the Mission `QUEUED`, log `Load <value> -> holding`, and
