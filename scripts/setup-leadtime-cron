@@ -13,6 +13,7 @@
 # Usage:
 #   setup-leadtime-cron [--install] [--schedule "<cron expr>"] [--dry-run]
 #   setup-leadtime-cron --check          read-only: exit 0 if exactly one live entry runs the runner
+#                                        and the repo list resolves; prints that list
 #   setup-leadtime-cron --remove [--dry-run]
 #   setup-leadtime-cron --backup <file>  snapshot the current crontab to <file> (mode 600)
 #   setup-leadtime-cron --help
@@ -26,10 +27,18 @@
 # .../scripts/athena-leadtime-run.sh (a removed worktree's copy) is STALE: it
 # is kept, named in a warning, and keeps --check red until deleted by hand.
 #
+# The repo list. --install and --check read it only through the main
+# checkout's ai/bin/lead-time-repos (DND-1526), the one resolver and the one
+# schema: the tracked ai/config/lead-time-repos.json, or this machine's
+# override (see its --help). Both print the resolved list, its source, and
+# each skipped repo by name. A list that does not resolve (any non-zero
+# resolver exit, zero repos included) is exit 2 and leaves the crontab and
+# every cursor unchanged.
+#
 # Cursor seeding (--install only; --dry-run prints the plan). Before the entry
-# is written, each repo in ai/config/lead-time-repos.json gets its first
-# cursor in <main checkout>/ai-artifacts/lead-time, unless one is already
-# there (an existing cursor is never overwritten):
+# is written, each RESOLVED repo gets its first cursor in <main
+# checkout>/ai-artifacts/lead-time, unless one is already there (an existing
+# cursor is never overwritten); a skipped repo gets none:
 #   watch repos    watch-cursor.<repo>.txt, copied from the shipwright's own
 #                  ai-artifacts/shipwright/lead-cursor.<repo>.txt, so the first
 #                  watch run resumes where the shipwright stopped. No shipwright
@@ -42,10 +51,11 @@
 # Environment (test seams):
 #   LEADTIME_CRONTAB  the crontab program (default: crontab on PATH)
 #   LEADTIME_NOW      epoch seconds to treat as now, for the improve cursor
+#   ATHENA_LEADTIME_CONFIG, XDG_CONFIG_HOME  read by ai/bin/lead-time-repos
 #
 # Exit codes: 0 ok · 1 entry missing, duplicated or stale (--check), or a usage
-# error · 2 a prerequisite is missing, the crontab could not be read or
-# written, or a cursor could not be written · 3 refused: --install or --remove
+# error · 2 a prerequisite is missing, the repo list does not resolve, the
+# crontab could not be read or written, or a cursor could not be written · 3 refused: --install or --remove
 # run from a linked worktree
 
 set -euo pipefail
@@ -106,8 +116,50 @@ IN_WORKTREE=0
 RUNNER="${MAIN_CHECKOUT}/scripts/athena-leadtime-run.sh"
 LT_STATE="${MAIN_CHECKOUT}/ai-artifacts/lead-time"
 SW_STATE="${MAIN_CHECKOUT}/ai-artifacts/shipwright"
-CONFIG="${MAIN_CHECKOUT}/ai/config/lead-time-repos.json"
+RESOLVER="${MAIN_CHECKOUT}/ai/bin/lead-time-repos"
 SKILL_FILE="${MAIN_CHECKOUT}/ai/skills/athena:lead-time-improve/SKILL.md"
+
+# resolve_repos — this machine's repo list, through the one resolver
+# (ai/bin/lead-time-repos, DND-1526); never a second parse of the config.
+# Sets RES_RC (0 ok; the resolver's exit, or 127 when it or jq is missing),
+# RES_ERR (its stderr, Fix: included), RES_TSV ("<name>\t<mode>" per repo) and
+# RES_TEXT (the printable list: source, each repo, each skip by name, counts).
+RES_RC=0; RES_ERR=""; RES_TSV=""; RES_TEXT=""
+resolve_repos() {
+  local out err_file
+  if [ ! -x "${RESOLVER}" ]; then
+    RES_RC=127; RES_ERR="${RESOLVER} is absent or not executable in the main checkout"; return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    RES_RC=127; RES_ERR="jq is not installed, so the resolver's --json cannot be read"; return 0
+  fi
+  err_file="$(mktemp)"
+  out="$("${RESOLVER}" --json 2>"${err_file}" </dev/null)" || RES_RC=$?
+  RES_ERR="$(cat -- "${err_file}")"; rm -f -- "${err_file}"
+  [ "${RES_RC}" -eq 0 ] || return 0
+  local bad
+  if ! RES_TSV="$(jq -r '
+        if (.repos | type) != "array" or (.repos | length) == 0 then error("no resolved repos") else . end
+        | .repos[] | "\(.name)\t\(.mode)"' <<<"${out}" 2>&1)" \
+     || ! RES_TEXT="$(jq -r '
+        def one: tostring | gsub("[\n\r]"; " ");
+        "Repos (ai/bin/lead-time-repos: source=\(.source | one) \(.path | one)):",
+        (.repos[] | "  \(.name | one | . + (" " * ([10 - length, 1] | max)))\(.mode | one | . + (" " * ([8 - length, 1] | max)))\(.path | one)"),
+        ((.skipped // [])[] | "  skipped \(.name | one): \(.reason | one)"),
+        "  \(.considered) considered, \(.repos | length) resolved, \((.skipped // []) | length) skipped"' <<<"${out}" 2>&1)"; then
+    bad="${RES_TSV}${RES_TEXT}"
+    RES_RC=1; RES_ERR="the resolver exited 0 but its --json is unreadable or lists no repo (${bad})"; RES_TSV=""; RES_TEXT=""
+  fi
+  return 0
+}
+# res_fail <exit> — the list did not resolve: say why with the resolver's own Fix:.
+res_fail() {
+  local fix why
+  fix="$(printf '%s\n' "${RES_ERR}" | sed -n 's/^Fix: //p' | head -n1)"
+  why="$(printf '%s\n' "${RES_ERR}" | grep -v '^Fix: ' | grep -v '^[[:space:]]*$' | head -n1 || true)"
+  die "$1" "the repo list does not resolve on this machine (ai/bin/lead-time-repos exit ${RES_RC}): ${why}; every tick would exit 78" \
+    "${fix:-run ${RESOLVER} by hand to see why.} Nothing was written."
+}
 
 # read_crontab — the current crontab on stdout. "no crontab for <user>" is an
 # empty crontab. Any other failure exits 2: writing after a failed read would
@@ -159,10 +211,20 @@ if [ "${MODE}" = "check" ]; then
   live="$(printf '%s\n' "${current}" | lines_of ours)"
   stale="$(printf '%s\n' "${current}" | lines_of stale)"
   n="$(count_lines "${live}")"
+  # The resolved list is printed either way; one that does not resolve is red
+  # even with a healthy entry, because every tick would then exit 78.
+  resolve_repos
   if [ "${n}" -eq 1 ] && [ -z "${stale}" ] && [ -x "${RUNNER}" ]; then
+    [ "${RES_RC}" -eq 0 ] || res_fail 2
     echo "OK: the lead-time improver cron entry is installed:"
     printf '%s\n' "${live}" | sed 's/^/  /'
+    printf '%s\n' "${RES_TEXT}"
     exit 0
+  fi
+  if [ "${RES_RC}" -eq 0 ]; then
+    printf '%s\n' "${RES_TEXT}" >&2
+  else
+    echo "${ME}: the repo list does not resolve either (ai/bin/lead-time-repos exit ${RES_RC}); run ${RESOLVER} to see why." >&2
   fi
   if [ -n "${stale}" ]; then
     echo "STALE: the crontab runs a lead-time runner that is not ${RUNNER}:" >&2
@@ -225,39 +287,18 @@ fi
   "land DND-1479 on main and fast-forward ${MAIN_CHECKOUT} first. An entry pointing at a missing runner fails every tick."
 [ -r "${SKILL_FILE}" ] || die 2 "the athena:lead-time-improve skill is not in the main checkout (${SKILL_FILE})" \
   "land DND-1478 on main and fast-forward ${MAIN_CHECKOUT} first. Without it every tick exits 78."
-[ -r "${CONFIG}" ] || die 2 "the repo config is not in the main checkout (${CONFIG})" \
-  "land DND-1478 on main and fast-forward ${MAIN_CHECKOUT} first. Without it every tick exits 78."
-command -v jq >/dev/null 2>&1 || die 2 "jq is not installed; the repo config cannot be read" "install jq, then re-run."
-
 NOW="${LEADTIME_NOW:-$(date -u +%s)}"
 case "${NOW}" in
   ''|*[!0-9]*) die 1 "LEADTIME_NOW='${NOW}' is not epoch seconds" "unset it, or set it to a whole number of seconds." ;;
 esac
 
-# The config's repos as "<name><TAB><mode>". A name becomes a file name, so it
-# must be a plain label; a missing or non-string field is an error (jq would
-# otherwise render it as the label "null"). Refused before any write.
-jq_err="$(mktemp)"
-repos="$(jq -r '
-  if (.repos | type) != "array" then error("no .repos list") else . end
-  | .repos[]
-  | if (.name | type) != "string" or (.mode | type) != "string"
-    then error("a repo entry has no string name or mode") else "\(.name)\t\(.mode)" end
-' "${CONFIG}" 2>"${jq_err}")" || {
-  why="$(tr '\n' ' ' <"${jq_err}")"; rm -f "${jq_err}"
-  die 2 "${CONFIG} is not a valid repo config (${why})" "fix the config on main (athena:lead-time-improve -> Setup), then re-run. Nothing was written."
-}
-rm -f "${jq_err}"
-[ -n "${repos}" ] || die 2 "${CONFIG} lists no repos" "fix the config on main, then re-run. Nothing was written."
-LABEL_RE='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
-while IFS="$(printf '\t')" read -r name mode; do
-  [[ "${name}" =~ ${LABEL_RE} ]] \
-    || die 2 "${CONFIG} has a repo name '${name}' that is not a plain file-name label" "fix the config on main, then re-run. Nothing was written."
-  case "${mode}" in
-    improve|watch) ;;
-    *) die 2 "${CONFIG} gives repo '${name}' the mode '${mode}' (expected improve or watch)" "fix the config on main, then re-run. Nothing was written." ;;
-  esac
-done <<<"${repos}"
+# This machine's resolved repos as "<name><TAB><mode>". The resolver owns the
+# schema (a name is a plain label, a mode is improve or watch) and skips a repo
+# not checked out here, by name; any refusal is reported before any write.
+resolve_repos
+[ "${RES_RC}" -eq 0 ] || res_fail 2
+printf '%s\n' "${RES_TEXT}"
+repos="${RES_TSV}"
 
 RFC3339_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
 is_rfc3339() { # <text>: an RFC 3339 time GNU date can read

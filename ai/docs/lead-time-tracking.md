@@ -363,8 +363,8 @@ after them, every could-not-measure row. Both
 phases appear in the human table and in `--json` (`code_seconds`/`tail_seconds`).
 
 The **lead-time improver cron** (`~/dev/custom/CLAUDE.md` → *Lead-time
-improver cron*) runs this at `--slow 90` over each `watch` repo in
-`ai/config/lead-time-repos.json`, newer than that repo's own
+improver cron*) runs this at `--slow 90` over each `watch` repo that
+`ai/bin/lead-time-repos` resolves for the machine, newer than that repo's own
 `watch-cursor.<repo>.txt`. The `improve` repo (custom) is measured per phase
 instead, by `ai/bin/lead-time-phases`. When a slow shape recurs (≥2 tickets
 sharing a cause) or one pipeline stage dominates the `tail`, it spawns an
@@ -412,9 +412,15 @@ and harness-gate timings. `--ingest` keeps a ledger in
 `ai-artifacts/lead-time/` with one cursor per repo, advanced to `lead-time
 --meta`'s `scanned_through` and never on `SCAN INCOMPLETE`. `--summary` gives
 the rolling-window median, p90 and sum per phase. The repos and their modes
-are `ai/config/lead-time-repos.json`. A phase it cannot measure is null with a
+are what `ai/bin/lead-time-repos` resolves for the machine (its `--help` says
+from where). A phase it cannot measure is null with a
 reason, never 0. Its `--help` is the reference for the anchors and outputs;
 the design is `ai/docs/lead-time-improver.md` (Decisions 3-6).
+
+**Later (2026-10-01, DND-1527):** this section named
+`ai/config/lead-time-repos.json` as the repo list. Superseded: that file is
+only the default, and a machine-local override replaces it, so the list is
+the resolver's.
 
 ## Worked backfill — 2026-09-19 fleet run (dated snapshot)
 

@@ -1,6 +1,6 @@
 ---
 name: athena:lead-time-improve
-description: The procedure an athena-shipwright runs when its brief says `MODE: lead-time` (a lead-time improver run) — for each `improve` repo in ai/config/lead-time-repos.json, ingest the phase ledger, judge pending before/after experiments (keep, revert, pending, inconclusive; decline a revert the hard constraint forbids) with scripts/experiment, pick the biggest phase, act exactly once (one safety-preserving change, one instrumentation change, one architect, or no action), and journal; for each `watch` repo, the outlier scan and architect hand-off the shipwright ran before. Use whenever a brief or prompt says "MODE: lead-time" or "lead-time improver run".
+description: The procedure an athena-shipwright runs when its brief says `MODE: lead-time` (a lead-time improver run) — for each `improve` repo ai/bin/lead-time-repos resolves for this machine, ingest the phase ledger, judge pending before/after experiments (keep, revert, pending, inconclusive; decline a revert the hard constraint forbids) with scripts/experiment, pick the biggest phase, act exactly once (one safety-preserving change, one instrumentation change, one architect, or no action), and journal; for each `watch` repo, the outlier scan and architect hand-off the shipwright ran before. Use whenever a brief or prompt says "MODE: lead-time" or "lead-time improver run".
 ---
 
 # athena:lead-time-improve
@@ -35,8 +35,12 @@ reason. It is never landed, and it is never your run's action.
   Every commit goes through its commit wrapper.
 - **Read the journal first.** Its *Decisions / Won't-change* entries bind
   this run.
-- **Repos and modes:** `ai/config/lead-time-repos.json`. Its
-  `improvement_epic` is the epic an architect files tickets on.
+- **Repos and modes:** the ones your brief names, which
+  `ai/bin/lead-time-repos` resolved for this machine. Never your lane copy of
+  `ai/config/lead-time-repos.json`: it cannot see a machine override. For each
+  repo the brief says was skipped, write one summary line
+  `repo=<R> skipped="<reason>"`. `improvement_epic` (`--json`) is the epic an
+  architect files tickets on.
 
 Tools, from your lane (`<skill>` is `ai/skills/athena:lead-time-improve`):
 

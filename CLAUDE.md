@@ -588,10 +588,26 @@ every hour. Each tick spawns one athena-shipwright in `MODE: lead-time`, which
 runs `athena:lead-time-improve` once. It is the only loop that acts on lead
 time. The design record is `ai/docs/lead-time-improver.md`.
 
-- **Scope:** `ai/config/lead-time-repos.json`. An `improve` repo (custom only)
-  gets the phase ledger, before/after experiments, and at most one landed
-  change per run. A `watch` repo (gen_saas, walt_ui) gets the outlier scan,
-  the `ready-and-idle` sweep and an architect hand-off, and is read-only to it.
+- **Scope:** per machine. `ai/bin/lead-time-repos` resolves this machine's
+  repos and their modes; its `--help` says where the list comes from. The
+  runner, the installer and the skill read only its result. The tracked
+  default has custom `improve` and gen_saas, walt_ui `watch`. An `improve`
+  repo gets the phase ledger, before/after experiments, and at most one
+  landed change per run. A `watch` repo gets the outlier scan, the
+  `ready-and-idle` sweep and an architect hand-off, and is read-only to it. A
+  repo not checked out on the machine is skipped by name in the run's `.run`.
+  A list that does not resolve, zero repos included, is a failed tick (exit
+  78) with the resolver's `Fix:`.
+
+  **Later (2026-10-01, DND-1527):** this bullet read "**Scope:**
+  `ai/config/lead-time-repos.json`". Superseded: a machine-local override
+  (DND-1526) can replace that file, and a session's lane copy of it cannot
+  see the override, so every reader goes through the resolver.
+- **One machine per repo** (coordinator, 2026-10-01): a repo appears in at
+  most one machine's list, in either mode. Two journals on one repo split its
+  history and double-count its landings. An overlap is a config error.
+  Nothing locks or detects it across machines: each resolver sees only its
+  own machine's config, so whoever writes an override checks the others.
 - **The hard constraint** is `ai/blocks/ops/safety-checks.md`, carried
   verbatim by the shipwright, architect, admiral and captain: **make a safety
   check faster, never weaker**. Never drop, skip, downgrade, or path-exclude

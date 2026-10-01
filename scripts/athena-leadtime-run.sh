@@ -53,8 +53,10 @@
 #   runs/<ts>.receipt   the session reached the model runs/<ts>.failed   an unsuccessful outcome
 #   runs/<ts>.blocked   the session never started     runs/<ts>.wedged   a wedged tick
 #   runs/<ts>.locked    skipped: a run was in flight  runs/<ts>.git.log  the runner's own git output
-#   runs/<ts>.run       every tick that spawned a session: outcome, exit, lane,
-#                       main_moved= (origin/main's motion during the run, any
+#   runs/<ts>.run       every tick that spawned a session: outcome, exit,
+#                       config=<default|override> repos=<names>
+#                       skipped=<name(reason),...|none> and config_file= (the
+#                       list ai/bin/lead-time-repos resolved), lane, main_moved= (origin/main's motion during the run, any
 #                       author), own_landed= (the run's own commits on
 #                       origin/main: <n> <sha>..., or UNKNOWN), ff= (the
 #                       main-checkout fast-forward), the prune result and the
@@ -77,6 +79,8 @@
 #   LEADTIME_LANES_DIR        where lanes live (default <git common dir>/leadtime-lanes)
 #   LEADTIME_TELEMETRY_EMIT   telemetry-emit to prune with (default the main checkout's)
 #   ATHENA_INBOX_ROOT         where the wedge and blocked alerts are delivered
+#   ATHENA_LEADTIME_CONFIG, XDG_CONFIG_HOME  read by ai/bin/lead-time-repos, which
+#                             resolves this machine's repo list (see its --help)
 #
 # Exit codes:
 #   0   the run reported, or the tick was skipped (lock held)
@@ -97,8 +101,11 @@
 #   75  WEDGED: LEADTIME_FAIL_ESCALATE unsuccessful outcomes in a row. No
 #       session runs. The tick writes runs/<ts>.wedged, and the first wedged
 #       tick of an episode sends ONE harness-alert (leadtime-wedged)
-#   78  the athena:lead-time-improve skill or ai/config/lead-time-repos.json is
-#       not in the main checkout, or notion-personal is not registered: counted
+#   78  the athena:lead-time-improve skill is not in the main checkout, the
+#       repo list does not resolve (ai/bin/lead-time-repos is missing or exits
+#       non-zero, zero repos included; its line and Fix: go in the .failed
+#       record), or notion-personal is not registered: counted. --dry-run
+#       exits 78 too when the list does not resolve, touching nothing
 #   *   the session's own non-zero exit (124 on timeout): counted
 
 set -euo pipefail
@@ -179,7 +186,7 @@ WEDGE_STATE="${STATE_DIR}/wedged"
 BLOCK_COUNT="${STATE_DIR}/consecutive-blocked"
 BLOCK_STATE="${STATE_DIR}/blocked"
 SKILL_FILE="${MAIN_CHECKOUT}/ai/skills/athena:lead-time-improve/SKILL.md"
-CONFIG_FILE="${MAIN_CHECKOUT}/ai/config/lead-time-repos.json"
+RESOLVER="${MAIN_CHECKOUT}/ai/bin/lead-time-repos"
 TELEMETRY_EMIT="${LEADTIME_TELEMETRY_EMIT:-${MAIN_CHECKOUT}/ai/bin/telemetry-emit}"
 
 ts="$(date -u -d "@${NOW}" +%Y%m%dT%H%M%SZ)-$$"
@@ -195,6 +202,55 @@ GIT_LOG="${LOG_DIR}/${ts}.git.log"
 RECEIPT="${LOG_DIR}/${ts}.receipt"
 SUMMARY="${LOG_DIR}/${ts}.summary"
 
+# --- the repo list ------------------------------------------------------------
+# This machine's repos come from ai/bin/lead-time-repos (DND-1526), the one
+# resolver: the tracked ai/config/lead-time-repos.json, or this machine's
+# override, which the session's lane copy of the tracked file cannot see. It is
+# read-only, so it runs here, before the brief that names its result; a list
+# that does not resolve is acted on at the preconditions (6), or by --dry-run.
+# Any non-zero exit (2 refused, 3 could not look, 4 no repo checked out here,
+# 1 internal) and a missing resolver are all faults: never an empty run.
+RES_RC=0; RES_ERR=""; RES_SOURCE=""; RES_PATH=""; RES_NAMES=""; RES_DESC=""; RES_SKIPPED=""
+resolve_repos() {
+  local out err_file
+  if [ ! -x "${RESOLVER}" ]; then
+    RES_RC=127; RES_ERR="${RESOLVER} is absent or not executable in the main checkout"; return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    RES_RC=127; RES_ERR="jq is not on PATH, so the resolver's --json cannot be read"; return 0
+  fi
+  err_file="$(mktemp)" || { RES_RC=73; RES_ERR="mktemp failed, so the resolver could not be run"; return 0; }
+  out="$("${RESOLVER}" --json 2>"${err_file}" </dev/null)" || RES_RC=$?
+  RES_ERR="$(cat -- "${err_file}" 2>/dev/null || true)"
+  rm -f -- "${err_file}"
+  [ "${RES_RC}" -eq 0 ] || return 0
+  # One jq call, so a list it cannot read is one fault, never a half-read list.
+  # Six lines, each one field; a newline inside a value is flattened so the
+  # fields cannot shift. The skips come in the brief's form and .run's form
+  # (<name>(<reason>),..., or "none").
+  local fields
+  if ! fields="$(jq -r '
+        def one: tostring | gsub("[\n\r]"; " ");
+        if (.repos | type) != "array" or (.repos | length) == 0 then error("no resolved repos") else . end
+        | (.source | one), (.path | one),
+          ([.repos[].name | one] | join(",")),
+          ([.repos[] | "\(.name) (\(.mode))" | one] | join(", ")),
+          ([(.skipped // [])[] | "\(.name) (\(.reason))" | one] | join("; ")),
+          ([(.skipped // [])[] | "\(.name)(\(.reason))" | one] | if length == 0 then "none" else join(",") end)' \
+        <<<"${out}" 2>&1)"; then
+    RES_RC=1; RES_ERR="the resolver exited 0 but its --json is unreadable or lists no repo (${fields})"; return 0
+  fi
+  { IFS= read -r RES_SOURCE; IFS= read -r RES_PATH; IFS= read -r RES_NAMES; IFS= read -r RES_DESC
+    IFS= read -r RES_SKIPPED; IFS= read -r RES_SKIPPED_RUN; } <<<"${fields}"
+}
+RES_SKIPPED_RUN=""
+resolve_repos
+SKIP_BRIEF=""
+if [ -n "${RES_SKIPPED}" ]; then
+  SKIP_BRIEF="Skipped on this machine, so not run: ${RES_SKIPPED}. Write one summary line \
+repo=<R> skipped=\"<reason>\" for each. "
+fi
+
 # --- the brief ----------------------------------------------------------------
 # The outer session only delegates. The shipwright writes the summary file
 # itself (the skill's *Reporting*); the outer session never writes it, so a
@@ -205,8 +261,11 @@ coordinating; do the work by delegating. Spawn exactly one athena-shipwright \
 agent (Agent tool, subagent_type: athena-shipwright) with this brief, and do \
 nothing else yourself: 'MODE: lead-time. This is the scheduled lead-time \
 improver run from the cron runner scripts/athena-leadtime-run.sh, with no human \
-present. Run the athena:lead-time-improve skill and nothing else, for every repo \
-in your lane copy of ai/config/lead-time-repos.json. Your lane is the cron lane \
+present. Run the athena:lead-time-improve skill and nothing else, for exactly \
+these repos, which ai/bin/lead-time-repos resolved for this machine \
+(config=${RES_SOURCE} ${RES_PATH}): ${RES_DESC}. ${SKIP_BRIEF}Never take the repo \
+list from your lane copy of ai/config/lead-time-repos.json: it cannot see this \
+machine's override. Your lane is the cron lane \
 the runner made for you: the worktree ${LANE} on branch ${BRANCH}, cut from \
 origin/main. Work only there, starting every Bash command with cd ${LANE}; never \
 edit the main checkout ${MAIN_CHECKOUT}. You are on the cron path: land only \
@@ -223,7 +282,23 @@ is your block Speed a safety check up; never weaken it (ai/blocks/ops/safety-che
 End with your summary lines.' When it finishes, print the contents of ${SUMMARY} \
 and stop. Never write to that file yourself."
 
+# res_fix — the resolver's own Fix: text, else how to see why.
+res_fix() {
+  local f
+  f="$(printf '%s\n' "${RES_ERR}" | sed -n 's/^Fix: //p' | head -n1)"
+  printf '%s' "${f:-run ${RESOLVER} by hand to see why the repo list does not resolve.}"
+}
+res_why() {
+  printf 'the repo list did not resolve (ai/bin/lead-time-repos exit %s): %s' "${RES_RC}" \
+    "$(printf '%s\n' "${RES_ERR}" | grep -v '^Fix: ' | grep -v '^[[:space:]]*$' | head -n1)"
+}
+
 if [ "${DRY}" -eq 1 ]; then
+  if [ "${RES_RC}" -ne 0 ]; then
+    echo "${ME}: $(res_why); a tick would exit 78 and spawn no session." >&2
+    echo "  Fix: $(res_fix)" >&2
+    exit 78
+  fi
   printf '%s\n' "${BRIEF}"
   exit 0
 fi
@@ -549,22 +624,26 @@ if [ "${failures}" -ge "${FAIL_ESCALATE}" ]; then
 fi
 
 # --- 6. preconditions: the skill, the config, the MCP server ----------------------
-# precondition_fail <why> <fix> — the run cannot happen without these.
+# precondition_fail <why> <fix> [<detail-line>...] — the run cannot happen
+# without these.
 precondition_fail() {
-  record_failure "$1" "fix=$2"
-  echo "${ME}: $1" >&2
-  echo "  Fix: $2" >&2
+  local why="$1" fix="$2"; shift 2
+  record_failure "${why}" "fix=${fix}" "$@"
+  echo "${ME}: ${why}" >&2
+  echo "  Fix: ${fix}" >&2
   exit 78
 }
-# Without the skill or the config the shipwright can only report that it did
-# nothing, and that summary would read as a green run.
+# Without the skill or a resolved repo list the shipwright can only report that
+# it did nothing, and that summary would read as a green run.
 if [ ! -r "${SKILL_FILE}" ]; then
   precondition_fail "the athena:lead-time-improve skill is not in the main checkout (${SKILL_FILE}), so there is no run to do; counted as an unsuccessful outcome." \
     "land the skill (DND-1478) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs."
 fi
-if [ ! -r "${CONFIG_FILE}" ]; then
-  precondition_fail "the repo config ${CONFIG_FILE} is not in the main checkout, so no repo has a mode; counted as an unsuccessful outcome." \
-    "land ai/config/lead-time-repos.json (DND-1477) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs."
+if [ "${RES_RC}" -ne 0 ]; then
+  # The resolver's own lines go into the .failed record, its Fix: included.
+  mapfile -t res_lines < <(printf '%s\n' "${RES_ERR}" | grep -v '^[[:space:]]*$' | sed 's/^/resolver: /' || true)
+  precondition_fail "$(res_why); no repo has a mode, so no session; counted as an unsuccessful outcome." \
+    "$(res_fix)" "${res_lines[@]}"
 fi
 if ! command -v jq >/dev/null 2>&1; then
   precondition_fail "jq is not on PATH, so the MCP servers in ${CLAUDE_JSON} cannot be read." \
@@ -811,6 +890,8 @@ finish() {
   if ! {
     printf '%s: run %s outcome=%s exit=%s\n' "${ME}" "${ts}" "${outcome}" "${rc}"
     printf 'lane=%s branch=%s (%s)\n' "${LANE}" "${BRANCH}" "${LANE_RESULT}"
+    printf 'config=%s repos=%s skipped=%s\n' "${RES_SOURCE}" "${RES_NAMES}" "${RES_SKIPPED_RUN}"
+    printf 'config_file=%s\n' "${RES_PATH}"
     printf 'base=%s (%s)\n' "${BASE}" "${FETCH_NOTE}"
     printf 'main_moved=%s\n' "${MAIN_MOVED}"
     printf 'own_landed=%s\n' "${OWN_LANDED}"

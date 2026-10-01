@@ -212,8 +212,8 @@ outside test-slot, one whose wait timed out, or one test-slot holds as
 way, so its run counts as a `harness_gate.run` in custom and as nothing in
 gen_saas. Readers that anchor on the first gate run read both events for the
 unit (`ai/lib/lead_time_phases.rb`). They are measured where that repo is in
-`improve` mode on the machine that does its work (`ai/config/lead-time-repos.json`
-and the machine override); a `watch` repo's phases stay n/a by design.
+`improve` mode on the machine that does its work (the list
+`ai/bin/lead-time-repos` resolves); a `watch` repo's phases stay n/a by design.
 
 `telemetry.probe` is the writer's own probe (attr `note`). Use it to check the
 writer by hand. It is never a phase anchor.

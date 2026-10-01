@@ -72,6 +72,12 @@ Lead time is the owner's definition: captain dispatch (the ticket's
 3. **One loop owns lead time for every repo; only custom is improved.** A
    committed config, `ai/config/lead-time-repos.json`, lists each repo with a
    `mode`:
+
+   **Later (2026-10-01):** that file is now only the default. The list is per
+   machine, resolved by `ai/bin/lead-time-repos` (DND-1526), and the runner,
+   installer and skill read only its result (DND-1527). Where the list comes
+   from: `ai/bin/lead-time-repos --help`.
+
    - `improve`: full phase measurement, ledger, experiments, landed changes.
      custom only.
    - `watch`: today's shipwright behaviour moved verbatim (outlier scan,
