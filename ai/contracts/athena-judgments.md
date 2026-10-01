@@ -383,8 +383,9 @@ by the three rows above (DND-1522). Why: a label with no route read the same
 as the owner's opt-out, so a broken route looked deliberate. All three are
 state reasons and never move health. Whether a miss is a route flag is the
 Slack router's rule (`ai/contracts/athena-events.md` → *New conversations
-may route by an advisory topic judgment* → *Route flags*). Until DND-1522
-deploys, the router records every miss as `label_disabled`.
+may route by an advisory topic judgment* → *Route flags*). DND-1522 deployed
+on 2026-10-01 (gen_saas PR #655); before that, the router recorded every miss
+as `label_disabled`.
 
 **The credential latch.** An `unauthorized` port error (HTTP 401 or 403) sets a
 latch keyed on the key's stored-at time. While it holds, every call falls back

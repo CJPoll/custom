@@ -4174,7 +4174,12 @@ above: the harness names only its own inbox, and the server stamps the machine
 from the authenticated token. Implementing tickets: DND-487 (claims and the MCP
 tool), DND-490 (the router), DND-491 (the harness claims on post), DND-1451
 (the router's claim), DND-1521 (a harness reply claims an unclaimed thread),
-DND-1027 (`slack_post` claims the thread it posts in, gen_saas PR #653). Until the router ships, every reply routes by the channel route, as before.
+DND-1027 (`slack_post` claims the thread it posts in, gen_saas PR #653).
+
+**Later (2026-10-01, DND-1558):** this paragraph ended "Until the router
+ships, every reply routes by the channel route, as before." Superseded: the
+router (DND-490) shipped long since, and a thread reply follows its live
+claim (*Routing*, below).
 
 **The claim.** A claim maps `(slack_app, team_id, channel, thread_ts)` to one
 AgentInstance. It has three writers. The harness
@@ -4426,11 +4431,17 @@ event classified (not ignored), dedupe pre-check passed
 3. anything else          -> the channel route (unchanged)                         [webhook]
 ```
 
-Steps 2b' and 2c are written to the decided design of 2026-10-01, and part of
-it has not shipped. Grammar v2 is DND-1535; until it deploys the router reads
-v1 (*The session mention (step 2b')*). The three miss reasons and the route
-flag are DND-1522; until it deploys every miss reads `label_disabled` and
-nothing is flagged (*Topic routes*, *Route flags*).
+Steps 2b' and 2c are the decided design of 2026-10-01, and all of it is
+shipped and deployed: grammar v2 (DND-1535, gen_saas PR #652; *The session
+mention (step 2b')*), the three miss reasons and the route flag (DND-1522,
+PR #655; *Topic routes*, *Route flags*), and the owner's notice of a flag
+(DND-1536, PR #657).
+
+**Later (2026-10-01, DND-1558):** this paragraph said "part of it has not
+shipped": until DND-1535 deployed the router read grammar v1, and until
+DND-1522 deployed every miss read `label_disabled` and nothing was flagged.
+Superseded: all three gen_saas PRs deployed on 2026-10-01 (post-merge
+deploy runs 36877991286, 36885957586 and 36892607645, each `success`).
 
 **Later (2026-10-01):** this block ran every step inside the webhook, so step
 2c's context read and judgment sat inside Slack's HTTP ack, and Slack routing
@@ -4705,7 +4716,7 @@ other. `live` in the list means the same thing.
 
 **A miss names its cause.** The router looks up the route for
 `(slack_app, label)` and, when it cannot deliver by it, falls back with one of
-three reasons, decided in this order (DND-1522, not yet shipped):
+three reasons, decided in this order (DND-1522, gen_saas PR #655):
 
 1. `label_unconfigured`: no route row for the label. The owner has not routed
    that label by topic.
@@ -4718,8 +4729,7 @@ three reasons, decided in this order (DND-1522, not yet shipped):
 
 Each is a state reason (`ai/contracts/athena-judgments.md` → *The closed
 reason list*): it never moves the use case's health. The outcome record names
-the app and the label it looked up. Until DND-1522 deploys, all three causes
-read `label_disabled`.
+the app and the label it looked up.
 
 **Later (2026-10-01, DND-1539):** this said "a label with no enabled, live
 topic route falls back as `label_disabled`", one reason for every miss.
@@ -4734,7 +4744,7 @@ broke, and only that one is a fault.
 
 **Route flags.** A route flag says the router could not honour what the owner
 asked for. It is decided per new conversation, in mode `on` only (DND-1522,
-not yet shipped), first match wins:
+gen_saas PR #655), first match wins:
 
 1. Delivered by its topic route: no flag.
 2. A reason other than the three miss reasons above (`below_threshold`,
@@ -4769,7 +4779,7 @@ A flag surfaces in three places:
   has no judgment call to record against (`not_found`). The message is sent
   either way, and the reply's `feedback` word says which happened
   (`ai/contracts/athena-judgments.md` → *Receiver feedback*).
-- **A notice in the owner's thread** (DND-1536, not yet shipped). The router
+- **A notice in the owner's thread** (DND-1536, gen_saas PR #657). The router
   writes one `slack_route_flags` obligation row per event, in the transaction
   that stores the line, and a supervised worker posts ONE threaded reply as
   the event's own app, in its channel, under the owner's root. It names the
@@ -4782,9 +4792,15 @@ A flag surfaces in three places:
   ADR 21); a post that keeps failing gives up loudly with a `Fix:`, and an
   event gets at most one notice.
 
-Until DND-1522 deploys, a miss is the `topic_routing` outcome and the line's
-`topic` alone: no `route_flagged`, no warning. Until DND-1536 deploys, a flag
-reaches the owner only through the record.
+**Later (2026-10-01, DND-1558):** *A miss names its cause*, *Route flags* and
+the notice bullet each said "not yet shipped", and this paragraph read "Until
+DND-1522 deploys, a miss is the `topic_routing` outcome and the line's `topic`
+alone: no `route_flagged`, no warning. Until DND-1536 deploys, a flag reaches
+the owner only through the record." *A miss names its cause* also said "Until
+DND-1522 deploys, all three causes read `label_disabled`." Superseded: DND-1522
+(gen_saas PR #655) and DND-1536 (PR #657) deployed on 2026-10-01, and the
+rules above match gen_saas `origin/main` (`TopicRouteRules.lookup/1`,
+`RouteFlag.decide/2`, `RouteFlagNotice`).
 
 **The record.** The Slack receiver's per-event outcome log records the router's
 path, as for a stale claim (*Thread replies route to the thread's claimant*).
