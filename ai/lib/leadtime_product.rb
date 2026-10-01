@@ -15,6 +15,7 @@
 # Every refusal raises LeadTimeProduct::Error carrying the Fix: the caller prints.
 
 require "json"
+require "time"
 
 module LeadTimeProduct
   # A refusal, with the instruction that makes the next attempt pass.
@@ -288,21 +289,37 @@ module LeadTimeProduct
 
   # ── deploy: the merge commit's post-merge runs ─────────────────────────────
 
-  # runs: gh run list --commit <sha> rows (name, status, conclusion, headSha).
-  # deploy_re: ai/bin/lead-time's deploy rule (LEAD_TIME_DEPLOY_RE, default
-  # "deploy"). -> :pending, :success, :failed or :none (CI finished, no deploy).
-  def deploy_state(runs, merge_sha, deploy_re)
+  # A deploy workflow may be triggered by CI's completion (workflow_run), so
+  # "CI finished and no deploy" is believed only this long after the last run.
+  DEPLOY_SETTLE_S = 1800
+
+  # runs: gh run list --commit <sha> rows (name, status, conclusion, headSha,
+  # updatedAt). deploy_re: ai/bin/lead-time's deploy rule (LEAD_TIME_DEPLOY_RE,
+  # default "deploy"). -> :pending, :success, :failed or :none (CI finished
+  # DEPLOY_SETTLE_S ago with no deploy run).
+  def deploy_state(runs, merge_sha, deploy_re, now:)
     mine = Array(runs).select { |r| r["headSha"] == merge_sha }
     return :pending if mine.empty?
 
     deploys = mine.select { |r| r["name"].to_s.match?(deploy_re) }
     if deploys.empty?
-      return mine.all? { |r| r["status"] == "completed" } ? :none : :pending
+      return :pending unless mine.all? { |r| r["status"] == "completed" }
+
+      last = mine.map { |r| parse_time(r["updatedAt"]) }
+      return :pending if last.include?(nil) || now - last.max < DEPLOY_SETTLE_S
+
+      return :none
     end
     return :pending unless deploys.all? { |r| r["status"] == "completed" }
     return :failed unless deploys.all? { |r| r["conclusion"] == "success" }
 
     :success
+  end
+
+  def parse_time(text)
+    Time.iso8601(text.to_s)
+  rescue ArgumentError
+    nil
   end
 
   # ── a lane's branch at teardown ─────────────────────────────────────────────

@@ -208,6 +208,14 @@ if [ "$rc" = 0 ] && [ "$(git -C "$ORIGIN" rev-parse leadtime/prod-verify-2026100
   ok "pr: pushed as Athena (gh-athena git push), opened with gh-athena pr create, recorded (repo, pr, phase, head) in product-prs.jsonl"
 else bad "pr" "rc=$rc err=$(cat "${TMP}/err") rec=$rec calls=$(cat "$FAKE/calls")"; fi
 
+lane_commit more.txt
+tip2="$(git -C "$LANES/$RUN_ID" rev-parse HEAD)"
+rc="$(lp pr --repo prod --title "speed up verify" --body-file "$TMP/evidence.md")"
+if [ "$rc" = 0 ] && grep -qx 'https://github.com/example/prod/pull/7' "${TMP}/out" && [ "$(grep -c '^gh-athena pr create' "$FAKE/calls")" = 1 ] \
+   && [ "$(jq -r 'select(.event=="head") | .head' "$S/product-prs.jsonl")" = "$tip2" ] && [ "$(git -C "$ORIGIN" rev-parse leadtime/prod-verify-20261001T123000Z)" = "$tip2" ]; then
+  ok "a second pr in the same lane pushes to the same PR and records its new head (never a duplicate PR)"
+else bad "second pr" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+
 echo "== teardown"
 rc="$(lp teardown)"
 if [ "$rc" = 0 ] && grep -q 'awaiting landing on PR #7' "${TMP}/out" && [ ! -e "$LANES/$RUN_ID" ] \
@@ -280,8 +288,8 @@ if [ "$rc" = 0 ] && [ "$order" = "integration-gate locked-merge confirm-merged "
    && head -1 "${TMP}/out" | grep -qx 'product_prs=0 landed=prod#7' \
    && [ "$(jq -r 'select(.event=="merged") | .merge_sha' "$S/product-prs.jsonl")" = "$(printf 'd%.0s' {1..40})" ] \
    && [ ! -e "$LANES/$RUN_ID-land" ] && [ ! -e "$LANES/$RUN_ID-land.lock" ] \
-   && ! git -C "$R" show-ref --verify --quiet "refs/heads/$BR7"; then
-  ok "CI green: integration-gate --with-critic, then locked-merge, then confirm-merged; landed=prod#7; landing lane removed"
+   && ! git -C "$R" show-ref --verify --quiet "refs/heads/$BR7" && [ "$(called teardown-stack)" = 0 ]; then
+  ok "CI green: integration-gate --with-critic, then locked-merge, then confirm-merged; landed=prod#7; landing lane removed (its stack is locked-merge's to tear down)"
 else bad "sweep land" "rc=$rc order=$order out=$(cat "${TMP}/out") calls=$(cat "$FAKE/calls")"; fi
 
 # The merge's deploy, a run later: still running -> recorded as pending, checked next tick.
@@ -351,7 +359,8 @@ pr_json 7 OPEN "$HEAD7" "$GREEN"
 echo 6 >"$FAKE/gate-rc"
 lp sweep >/dev/null
 [ "$(called locked-merge)" = 0 ] && ! grep -q 'pr close' "$FAKE/calls" && grep -q 'pr=#7 open: integration-gate exit 6' "${TMP}/out" \
-  && ok "integration-gate exit 6 (gate not run): left open for the next run, nothing closed" || bad "gate 6" "out=$(cat "${TMP}/out")"
+  && grep -q "^teardown-stack --worktree $LANES/$RUN_ID-land --parked" "$FAKE/calls" && [ ! -e "$LANES/$RUN_ID-land" ] \
+  && ok "integration-gate exit 6 (gate not run): left open for the next run, nothing closed; the landing lane's stack torn down" || bad "gate 6" "out=$(cat "${TMP}/out") calls=$(cat "$FAKE/calls")"
 
 new_repo; open_one
 pr_json 7 OPEN "$HEAD7" "$GREEN"

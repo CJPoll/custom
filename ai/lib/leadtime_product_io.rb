@@ -252,7 +252,7 @@ module LeadTimeProductIO
     end
 
     def runs_for(dir, sha)
-      json([Cmd.gh, "run", "list", "--commit", sha, "--limit", "100", "--json", "name,status,conclusion,headSha"], dir,
+      json([Cmd.gh, "run", "list", "--commit", sha, "--limit", "100", "--json", "name,status,conclusion,headSha,updatedAt"], dir,
            "gh run list --commit #{sha[0, 12]}")
     end
 
@@ -297,6 +297,10 @@ module LeadTimeProductIO
                        "a revert is owed (athena:lead-time-improve's revert path); open no new #{rl.name} change. " \
                        "The owner re-arms with: rm #{Store.stop_path(m.state_dir, rl.name)}")
   end
+
+  # A bootstrap that ran, or failed part way, may have left a stack up: either
+  # way the lane's stack is torn down with it (teardown-stack --parked).
+  STACK_STATES = %w[ran failed pending].freeze
 
   # The bootstrap command for a lane: LEADTIME_PRODUCT_BOOTSTRAP when set (empty
   # = none), else R's own bin/dev-setup when it has one, else none.
@@ -385,6 +389,13 @@ module LeadTimeProductIO
     unless code.zero?
       raise P::Error.new("the push of #{branch} as Athena failed (exit #{code}): #{out.lines.last.to_s.strip}",
                          "read the push's reason (athena:github -> When a forge write can't be done as Athena). Unpushed, the lane reads STRANDED at teardown.")
+    end
+    # A second `pr` in the same lane updates its open PR: one PR per branch.
+    existing = Store.states(m.state_dir).find { |st| st.repo == rl.name && st.branch == branch && st.status == "open" }
+    if existing
+      Store.append(m.state_dir, P.event("head", at: now.iso8601, repo: rl.name, pr: existing.pr, head: tip))
+      Store.journal(m.state_dir, now, "repo=#{rl.name} pr=##{existing.pr} updated (head #{tip[0, 12]}); awaiting landing by a later run")
+      return existing.url
     end
     FileUtils.mkdir_p(runs_dir(m))
     bf = File.join(runs_dir(m), "#{m.run_id}.#{rl.name}.pr-body.md")
@@ -479,7 +490,7 @@ module LeadTimeProductIO
     return "merged; its merge commit is not readable yet, deploy unknown" unless sha.match?(P::SHA_RE)
 
     re = Regexp.new(ENV.fetch("LEAD_TIME_DEPLOY_RE", "deploy"), Regexp::IGNORECASE)
-    case P.deploy_state(Forge.runs_for(rl.path, sha), sha, re)
+    case P.deploy_state(Forge.runs_for(rl.path, sha), sha, re, now: now)
     when :pending then "merged #{sha[0, 12]}; deploy pending (deployed is not working until it concludes success)"
     when :none
       Store.append(m.state_dir, P.event("no-deploy", at: now.iso8601, repo: s.repo, pr: s.pr))
@@ -507,10 +518,12 @@ module LeadTimeProductIO
     held = Locks.with(lock) do
       result = land_in(m, rl, s, dir, gate_timeout)
     ensure
-      retire_land_lane(m, rl, dir, merged: result&.last == true, keep_branch: result && result[2])
+      retire_land_lane(m, rl, dir, merged: result ? result[1] == true : false, keep_branch: result ? result[2] == true : false)
     end
-    File.delete(lock) if File.exist?(lock)
+    # Never delete a lock a live process holds.
     return ["open: the landing lane lock #{lock} is held by a live process; the next run retries", false] if held == :held
+
+    FileUtils.rm_f(lock)
 
     result.first(2)
   end
@@ -589,7 +602,7 @@ module LeadTimeProductIO
 
   def retire_land_lane(m, rl, dir, merged:, keep_branch:)
     meta = Meta.read("#{dir}.meta")
-    if meta["bootstrap"] == "ran" && !merged
+    if STACK_STATES.include?(meta["bootstrap"]) && !merged
       Run.call([Cmd.teardown_stack, "--worktree", dir, "--parked", "lead-time landing lane #{m.run_id}"], chdir: "/", timeout: 600)
     end
     Git.remove_worktree(rl.path, dir) if File.exist?(dir)
@@ -603,7 +616,7 @@ module LeadTimeProductIO
   # -> [:none|:delete|:awaiting|:stranded, branch, detail]
   def retire_lane(m, rl, dir, why)
     meta = Meta.read("#{dir}.meta")
-    if meta["bootstrap"] == "ran"
+    if STACK_STATES.include?(meta["bootstrap"])
       Run.call([Cmd.teardown_stack, "--worktree", dir, "--parked", why], chdir: "/", timeout: 600)
     end
     Git.remove_worktree(rl.path, dir) if File.exist?(dir)

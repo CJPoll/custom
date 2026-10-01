@@ -200,18 +200,26 @@ end
 # ── deploy ───────────────────────────────────────────────────────────────────
 
 RE = /deploy/i
-def wf(name, status, conclusion, sha = M1) = { "name" => name, "status" => status, "conclusion" => conclusion, "headSha" => sha }
-
-check("P1 nothing reported for the merge yet: pending") { P.deploy_state([], M1, RE) == :pending }
-check("P2 a deploy run in progress: pending") { P.deploy_state([wf("Post-Merge Deploy", "in_progress", "")], M1, RE) == :pending }
-check("P3 the deploy concluded success: success") do
-  P.deploy_state([wf("CI", "completed", "success"), wf("Post-Merge Deploy", "completed", "success")], M1, RE) == :success
+NOW_T = Time.utc(2026, 10, 1, 12, 30, 0)
+def wf(name, status, conclusion, sha = M1, at: "2026-10-01T11:00:00Z")
+  { "name" => name, "status" => status, "conclusion" => conclusion, "headSha" => sha, "updatedAt" => at }
 end
-check("P4 the deploy concluded failure: failed") { P.deploy_state([wf("Post-Merge Deploy", "completed", "failure")], M1, RE) == :failed }
-check("P5 a cancelled deploy is failed, not success") { P.deploy_state([wf("Deploy", "completed", "cancelled")], M1, RE) == :failed }
-check("P6 every run completed and none is a deploy: none") { P.deploy_state([wf("CI", "completed", "success")], M1, RE) == :none }
-check("P7 a non-deploy run still running: pending") { P.deploy_state([wf("CI", "in_progress", "")], M1, RE) == :pending }
-check("P8 runs for other SHAs are ignored") { P.deploy_state([wf("Deploy", "completed", "failure", H1)], M1, RE) == :pending }
+def ds(runs) = P.deploy_state(runs, M1, RE, now: NOW_T)
+
+check("P1 nothing reported for the merge yet: pending") { ds([]) == :pending }
+check("P2 a deploy run in progress: pending") { ds([wf("Post-Merge Deploy", "in_progress", "")]) == :pending }
+check("P3 the deploy concluded success: success") do
+  ds([wf("CI", "completed", "success"), wf("Post-Merge Deploy", "completed", "success")]) == :success
+end
+check("P4 the deploy concluded failure: failed") { ds([wf("Post-Merge Deploy", "completed", "failure")]) == :failed }
+check("P5 a cancelled deploy is failed, not success") { ds([wf("Deploy", "completed", "cancelled")]) == :failed }
+check("P6 every run completed long ago and none is a deploy: none") { ds([wf("CI", "completed", "success")]) == :none }
+check("P6b CI just finished and no deploy yet (it may follow on CI): pending, not none") do
+  ds([wf("CI", "completed", "success", at: "2026-10-01T12:20:00Z")]) == :pending
+end
+check("P6c an unreadable completion time is pending, never none") { ds([wf("CI", "completed", "success", at: "soon")]) == :pending }
+check("P7 a non-deploy run still running: pending") { ds([wf("CI", "in_progress", "")]) == :pending }
+check("P8 runs for other SHAs are ignored") { ds([wf("Deploy", "completed", "failure", H1)]) == :pending }
 
 # ── retire a lane ────────────────────────────────────────────────────────────
 
