@@ -56,6 +56,16 @@ class EpicClusteringFixture
     @tickets.select { |t| EpicClustering.open?(t) }.map { |t| t.dup.tap { |x| x.body = nil } }
   end
 
+  # ["DND-12", ...] -> {"DND-12" => page id}; a missing id raises, as Notion's does.
+  def page_ids(ids)
+    ids.to_h do |id|
+      t = @tickets.find { |x| x.id == id }
+      raise NextMissionNotion::ReadError, "no ticket page for #{id} in the fixture" if t.nil?
+
+      [id, t.page_id]
+    end
+  end
+
   def body(page_id)
     t = @tickets.find { |x| x.page_id == page_id }
     raise NextMissionNotion::ReadError, "no ticket page #{page_id} in the fixture" if t.nil?

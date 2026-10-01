@@ -526,6 +526,16 @@ harness script*):
    **"Jev advisory (not a decision)"**. That includes an unavailable line.
 3. **The filer decides.** A `duplicate` or `related` line is advice to check the
    named ticket, never a verdict. The advisory never blocks filing.
+   **When the advice is wrong, record it** (DND-1468), per athena:judgment-feedback
+   → *Recording a wrong judgment*. The `call:` line names the call; `cand_<i>`
+   beside a candidate is its question. One command per filing, with every
+   correction in it, since a second report from this machine replaces the first:
+   - you file anyway after a `duplicate` advisory:
+     `--signal filed_despite_advice --correct cand_<i>=<related|unrelated>`;
+   - an advised `related` candidate is not: `--correct cand_<i>=unrelated`.
+
+   A duplicate found later is recorded by athena:epic-clustering's C3 step,
+   from this machine too, so its report replaces yours for that call.
 4. **Never auto-close, auto-merge or auto-cancel** anything on the strength of it,
    the new ticket or the candidate. The script writes nothing to Notion.
 5. **When it is unavailable, file as today.** Exit 3 prints one line ending

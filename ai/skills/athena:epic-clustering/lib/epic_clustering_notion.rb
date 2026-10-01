@@ -42,6 +42,12 @@ class EpicClusteringNotion < NextMissionNotion
     query_all("filter" => filter).map { |p| parse_ticket(p) }
   end
 
+  # ["DND-12", ...] -> {"DND-12" => page id}. A ticket the tracker does not
+  # hold is a ReadError naming it, never a smaller map (c3-feedback, DND-1468).
+  def page_ids(ids)
+    query_ids(ids).to_h { |p| [parse_page(p).id, p.fetch("id")] }
+  end
+
   # The page body as markdown. A truncated or absent body is an error: a short
   # body would read as a thin ticket.
   #

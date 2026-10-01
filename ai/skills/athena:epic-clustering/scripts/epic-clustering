@@ -18,10 +18,12 @@
 # and the tier-4 order are next-mission's (ai/lib/next_mission.rb).
 #
 # Exit codes -- a failed lookup must never look like an empty one:
-#   0  done (read / proof printed or holding / digest or notice drafted)
+#   0  done (read / proof printed or holding / digest or notice drafted /
+#      c3-feedback read every merged duplicate)
 #   2  usage error
 #   3  could not read or could not measure (Notion/HTTP failure, missing
-#      token, unreadable fixture or snapshot, data outside the vocabulary)
+#      token, unreadable fixture or snapshot, data outside the vocabulary, a
+#      merged duplicate's body c3-feedback could not read)
 #   4  proof MISMATCH: a never-movable ticket left its epic, or an epic in the
 #      snapshot could not be read again
 require "json"
@@ -31,6 +33,8 @@ require_relative "../lib/epic_clustering"
 require_relative "../lib/epic_clustering_notion"
 require_relative "../lib/epic_clustering_view"
 require_relative "../lib/epic_clustering_fixture"
+require_relative "../lib/epic_clustering_c3_feedback"
+require_relative "../../athena:ticket-management/lib/triage_advisory"
 
 PROG = "epic-clustering"
 TOKEN_FILE = File.join(Dir.home, ".claude", "notion-personal-token")
@@ -53,6 +57,10 @@ USAGE = <<~TXT
               never-movable ticket left its epic)
     digest    draft the daily digest (text, and Block Kit with --blocks-out)
     notice    draft one won't-fix notice (a close already made, with a veto) as Block Kit
+    c3-feedback  for each C3 merge, read the cancelled duplicate's pasted Jev
+              advisory and print the judgment-feedback command that records
+              it wrong (filed_despite_advice) when Jev did not advise the kept
+              ticket as a duplicate. It runs nothing (DND-1468).
 
   Scope (read, proof --save):
     --epic KEY          one epic: page id or exact title
@@ -78,16 +86,28 @@ USAGE = <<~TXT
   notice:
     --ticket DND-N  --title TEXT  --background TEXT  --why TEXT
 
+  c3-feedback (one of):
+    --merged PAIRS      DUPLICATE=KEEP[,DUPLICATE=KEEP...], e.g. DND-9=DND-5
+    --pass-summary FILE its "merged" list ({keep, duplicate} each)
+    Every pair is counted once by reason: record, agreed (advised as a
+    duplicate), ambiguous (not advised while a duplicate threshold was in
+    force: Jev may have said duplicate), unlinked (no call line), no_call
+    (call: unavailable), malformed, not_on (mode not on), not_a_candidate,
+    unread. Then one command per call, with every correction, to run as is.
+    An empty "merged" list is a pass that merged nothing (0 pairs, exit 0).
+    Run it BEFORE replacing the duplicate's body: it reads the pasted advisory.
+
   Output (digest, notice):
     --session NAME      the sending session named on the first line
                         (default "harness session -> architect (epic-clustering)")
     --blocks-out FILE   write the Block Kit blocks as a JSON array
-    --json              read/proof/digest: print the result as JSON
+    --json              read/proof/digest/c3-feedback: print the result as JSON
 
     --self-test         run the deterministic suite (no network)
     --help              this text
 
-  Exit: 0 done; 2 usage; 3 could not read or measure; 4 proof mismatch.
+  Exit: 0 done; 2 usage; 3 could not read or measure (c3-feedback: a body
+  unread; the commands it did print stand); 4 proof mismatch.
 TXT
 
 SPEC = {
@@ -96,6 +116,7 @@ SPEC = {
   "--no-bodies" => :switch, "--now" => :value, "--ticket" => :value, "--title" => :value,
   "--background" => :value, "--why" => :value,
   "--session" => :value, "--blocks-out" => :value, "--json" => :switch, "--self-test" => :switch,
+  "--merged" => :value,
   "--help" => :switch
 }.freeze
 
@@ -103,14 +124,15 @@ ALLOWED = {
   "read" => %w[--epic --epics --all-open-epics --from-json --json],
   "proof" => %w[--epic --epics --all-open-epics --from-json --save --against --json],
   "digest" => %w[--from-json --started --pass-summary --no-bodies --now --session --blocks-out --json],
-  "notice" => %w[--ticket --title --background --why --session --blocks-out]
+  "notice" => %w[--ticket --title --background --why --session --blocks-out],
+  "c3-feedback" => %w[--merged --pass-summary --from-json --json]
 }.freeze
 
 DEFAULT_SESSION = "harness session -> architect (epic-clustering)"
 
 def usage_error(msg)
   warn "#{PROG}: #{msg}"
-  warn "Fix: run `#{PROG} --help`; give one command (read, proof, digest, notice) and only its flags."
+  warn "Fix: run `#{PROG} --help`; give one command (read, proof, digest, notice, c3-feedback) and only its flags."
   exit 2
 end
 
@@ -365,6 +387,60 @@ rescue EC::DataError => e
   exit 2
 end
 
+C3 = EpicClusteringC3Feedback
+
+def c3_pairs(opts)
+  usage_error("c3-feedback takes --merged or --pass-summary, not both") if opts["--merged"] && opts["--pass-summary"]
+  return C3.pairs(opts["--merged"]) if opts["--merged"]
+  usage_error("c3-feedback needs --merged DUPLICATE=KEEP or --pass-summary FILE") unless opts["--pass-summary"]
+
+  summary = begin
+    JSON.parse(File.read(opts["--pass-summary"]))
+  rescue SystemCallError, JSON::ParserError => e
+    read_error("pass summary #{opts['--pass-summary']}: #{e.message}", "write the summary JSON shaped as in --help.")
+  end
+  C3.summary_pairs(summary)
+rescue ArgumentError => e
+  usage_error("c3-feedback: #{e.message}")
+end
+
+# c3-feedback: one outcome per merged pair, from the duplicate's own body.
+# An unreadable body is counted unread and makes the run exit 3; the other
+# pairs' commands still print (each names its own call, so they stand).
+def cmd_c3_feedback(opts)
+  pairs = c3_pairs(opts)
+  src = source(opts)
+  pages = src.page_ids(pairs.map(&:duplicate).uniq)
+  unread_why = {}
+  advisories = {}
+  results = pairs.map do |pair|
+    advisories[pair.duplicate] ||= TriageAdvisory.parse(src.body(pages.fetch(pair.duplicate)))
+    C3.decide(pair, advisories[pair.duplicate])
+  rescue NextMissionNotion::ReadError => e
+    unread_why[pair.duplicate] = e.message.sub(/ on GET .*/, "")
+    C3.unread(pair)
+  end
+  counts = C3.counts(results)
+  commands = C3.commands(results)
+  if opts["--json"]
+    puts JSON.generate({ "pairs" => pairs.size, "counts" => counts, "results" => results, "commands" => commands,
+                         "unread" => unread_why, "complete" => unread_why.empty? })
+  else
+    puts "c3-feedback: #{pairs.size} merged pair(s); " + counts.map { |r, n| "#{r} #{n}" }.join(", ")
+    results.reject { |x| %i[record agreed].include?(x[:reason]) }.each do |x|
+      puts "  #{x[:reason]}: #{x[:duplicate]} (merged into #{x[:keep]})#{unread_why[x[:duplicate]] ? " -- #{unread_why[x[:duplicate]]}" : ''}"
+    end
+    puts(commands.empty? ? "nothing to record." : "record (one per call; run each as is; athena:judgment-feedback):")
+    commands.each { |c| puts c }
+  end
+  return if unread_why.empty?
+
+  warn "#{PROG}: INCOMPLETE: #{unread_why.size} merged duplicate body(ies) could not be read: #{unread_why.keys.join(', ')}"
+  warn "Fix: re-run c3-feedback for those pairs (--merged DUPLICATE=KEEP); on HTTP 401/403 the notion-personal " \
+       "integration lost access (owner-gated). Never read an unread body as no feedback."
+  exit 3
+end
+
 def main(argv)
   if argv.include?("--help")
     puts USAGE
@@ -383,7 +459,7 @@ def main(argv)
   stray = opts.keys - ALLOWED.fetch(cmd)
   usage_error("#{cmd} does not take #{stray.join(', ')}") unless stray.empty?
 
-  send("cmd_#{cmd}", opts)
+  send("cmd_#{cmd.tr('-', '_')}", opts)
   exit 0
 rescue NextMissionNotion::ReadError => e
   read_error(e.message, "check the epic id/title against DND Epics; on HTTP 401/403 the notion-personal " \

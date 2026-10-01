@@ -96,32 +96,85 @@ ruby_eq "candidates file: a ref that is text is refused, never echoed" \
   "ArgumentError: entry 0 has a ref that is not an opaque id (e.g. DND-123)" \
   'Triage.parse_candidates_file(%([{"ref":"SECRET words here","title":"a"}]))'
 ruby_eq "advisory: only duplicate/related AT OR ABOVE threshold, then the severity" \
-  "3|  DND-5: duplicate (confidence 0.93) -- Five|  severity suggestion: HIGH (confidence 0.55; a suggestion, not calibrated)" \
-  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"question_set_version"=>"v1","model"=>"m","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.93,"above_threshold"=>true},{"ref"=>"DND-6","relation"=>"related","confidence"=>0.4,"above_threshold"=>false},{"ref"=>"DND-7","relation"=>"unrelated","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"HIGH","confidence"=>0.55}}, {"DND-5"=>"Five"}); [l.size, l[1], l[2]].join("|")'
+  "4|  questions: cand_0 DND-5, cand_1 DND-6, cand_2 DND-7|  DND-5 (cand_0): duplicate (confidence 0.93) -- Five|  severity suggestion: HIGH (confidence 0.55; a suggestion, not calibrated)" \
+  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"question_set_version"=>"v1","model"=>"m","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.93,"above_threshold"=>true},{"ref"=>"DND-6","relation"=>"related","confidence"=>0.4,"above_threshold"=>false},{"ref"=>"DND-7","relation"=>"unrelated","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"HIGH","confidence"=>0.55}}, {"DND-5"=>"Five","DND-6"=>"Six","DND-7"=>"Seven"}); [l.size, l[1], l[2], l[3]].join("|")'
 ruby_eq "advisory: none above threshold is said" \
   "  no candidate is a duplicate or related at or above its threshold." \
-  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[1]'
+  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[2]'
 ruby_eq "advisory: an n/a relation is uncalibrated and its above-threshold hit is advised, marked [DND-1450]" \
-  "4|  duplicate: uncalibrated (n/a: the eval could not calibrate it); the model's answer is advised.|  DND-5: duplicate (confidence 0.40) [uncalibrated] -- Five|  DND-6: related (confidence 0.97) -- Six" \
-  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.4,"above_threshold"=>true,"basis"=>"no_threshold"},{"ref"=>"DND-6","relation"=>"related","confidence"=>0.97,"above_threshold"=>true,"basis"=>"threshold_met"}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-5"=>"Five","DND-6"=>"Six"}); [l.size - 1, l[1], l[2], l[3]].join("|")'
+  "5|  duplicate: uncalibrated (n/a: the eval could not calibrate it); the model's answer is advised.|  DND-5 (cand_0): duplicate (confidence 0.40) [uncalibrated] -- Five|  DND-6 (cand_1): related (confidence 0.97) -- Six" \
+  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.4,"above_threshold"=>true,"basis"=>"no_threshold"},{"ref"=>"DND-6","relation"=>"related","confidence"=>0.97,"above_threshold"=>true,"basis"=>"threshold_met"}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-5"=>"Five","DND-6"=>"Six"}); [l.size - 1, l[2], l[3], l[4]].join("|")'
 ruby_eq "advisory: the server's basis decides the mark, over the relation state [DND-1450]" \
-  "  DND-7: related (confidence 0.30) [uncalibrated] -- Seven|  DND-8: related (confidence 0.95) -- Eight" \
-  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-7","relation"=>"related","confidence"=>0.3,"above_threshold"=>true,"basis"=>"no_threshold"},{"ref"=>"DND-8","relation"=>"related","confidence"=>0.95,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-7"=>"Seven","DND-8"=>"Eight"}); l.select { |x| x.include?("DND-") }.join("|")'
+  "  DND-7 (cand_0): related (confidence 0.30) [uncalibrated] -- Seven|  DND-8 (cand_1): related (confidence 0.95) -- Eight" \
+  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-7","relation"=>"related","confidence"=>0.3,"above_threshold"=>true,"basis"=>"no_threshold"},{"ref"=>"DND-8","relation"=>"related","confidence"=>0.95,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-7"=>"Seven","DND-8"=>"Eight"}); l.select { |x| x.include?(": related") }.join("|")'
 ruby_eq "advisory: no hit with an uncalibrated relation says none is advised [DND-1450]" \
   "  no candidate is advised as a duplicate or related." \
-  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[2]'
+  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[3]'
 ruby_eq "advisory: an unset relation is uncalibrated, and the model's answer is advised [DND-1450]" \
   "  related: uncalibrated (no threshold); the model's answer is advised." \
-  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"unset"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[1]'
+  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"unset"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[2]'
 ruby_eq "advisory: no threshold state from the server is said, never read as enabled, and nothing is advised [DND-714 review d]" \
-  "  duplicate: threshold state not reported by the server; treat as insufficient evidence.|  related: threshold state not reported by the server; treat as insufficient evidence.|3|false" \
-  'l = Triage.advisory_lines({"mode"=>"on","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l[1], l[2], l.size - 1, l.any? { |x| x.include?("DND-5") }].join("|")'
+  "  duplicate: threshold state not reported by the server; treat as insufficient evidence.|  related: threshold state not reported by the server; treat as insufficient evidence.|4|false" \
+  'l = Triage.advisory_lines({"mode"=>"on","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l[2], l[3], l.size - 1, l.any? { |x| x.include?("DND-5") }].join("|")'
 ruby_eq "advisory: a candidate the server did not accept is never printed, whatever its relation's state [DND-1450]" \
   "false" \
   'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"unset","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>false}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); l.any? { |x| x.include?("DND-5") }.to_s'
 ruby_eq "advisory: shadow mode advises nothing" \
-  "2|  mode shadow: judged and recorded; nothing is advised until the mode is on." \
-  'l = Triage.advisory_lines({"mode"=>"shadow","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>1,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l.size, l[1]].join("|")'
+  "3|  questions: cand_0 DND-5|  mode shadow: judged and recorded; nothing is advised until the mode is on." \
+  'l = Triage.advisory_lines({"mode"=>"shadow","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>1,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-5"=>"Five"}); [l.size, l[1], l[2]].join("|")'
+ruby_eq "advisory: a hit the request did not send names no question, never a guessed one [DND-1468]" \
+  "  DND-9 (question not known): duplicate (confidence 0.90) -- (title not retrieved)" \
+  'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-9","relation"=>"duplicate","confidence"=>0.9,"above_threshold"=>true,"basis"=>"threshold_met"}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-5"=>"Five"})[2]'
+
+echo "== the call line and its reader [DND-1468]"
+
+ruby_eq "call_line: a lowercase uuid is printed as is" \
+  "call: 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b" \
+  'TriageAdvisory.call_line("5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b")'
+ruby_eq "call_line: no call id, or one that is not a uuid, is unavailable, never omitted" \
+  "call: unavailable|call: unavailable|call: unavailable" \
+  '[TriageAdvisory.call_line(nil), TriageAdvisory.call_line("not-a-uuid; rm"), TriageAdvisory.call_line("5B0F6A3C-2D47-4E1A-9C8B-7F3E2A1D0C9B")].join("|")'
+ruby_eq "questions_line: every candidate sent, in request order; none when there were none" \
+  "  questions: cand_0 DND-5, cand_1 DND-6|  questions: none" \
+  '[TriageAdvisory.questions_line(%w[DND-5 DND-6]), TriageAdvisory.questions_line([])].join("|")'
+ADV_BODY='Body text.\n## Jev advisory (not a decision)\n```\n2 candidates considered (x)\ncall: 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b\nJev advisory (not a decision): question set finding-triage-v1, model jev-1.13.0, mode on\n  questions: cand\\_0 DND-5, cand\\_1 DND-6\n  DND-5 (cand\\_0): duplicate (confidence 0.91) -- Gate\n  severity suggestion: HIGH\n```'
+ruby_eq "parse: a pasted advisory, Notion escapes and all, names the call, mode, questions and advice" \
+  'linked|5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b|on|DND-5=cand_0,DND-6=cand_1|DND-5=duplicate' \
+  "a = TriageAdvisory.parse(\"${ADV_BODY}\"); [a[:status], a[:call], a[:mode], a[:questions].map { |k, v| k + '=' + v }.join(','), a[:advised].map { |k, v| k + '=' + v }.join(',')].join('|')"
+ruby_eq "parse: the LAST advisory wins (a re-run pasted below an earlier one)" \
+  "11111111-2222-4333-8444-555555555555" \
+  "TriageAdvisory.parse(\"${ADV_BODY}\" + \"\\ncall: 11111111-2222-4333-8444-555555555555\\nJev advisory (not a decision): question set v, model m, mode on\\n  questions: none\")[:call]"
+ruby_eq "parse: <br> separates lines" \
+  "linked|on" \
+  'a = TriageAdvisory.parse("call: 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b<br>Jev advisory (not a decision): question set v, model m, mode on<br>  questions: none"); [a[:status], a[:mode]].join("|")'
+ruby_eq "parse: no call line is unlinked; call: unavailable and a garbled id are their own answers" \
+  "unlinked|call_unavailable|malformed|unlinked" \
+  'h = "\nJev advisory (not a decision): question set v, model m, mode on\n  questions: none"; [TriageAdvisory.parse("Jev advisory (not a decision): question set v, model m, mode on")[:status], TriageAdvisory.parse("call: unavailable" + h)[:status], TriageAdvisory.parse("call: 1234" + h)[:status], TriageAdvisory.parse(nil)[:status]].join("|")'
+ruby_eq "parse: prose that merely mentions a call is not a call line" \
+  "unlinked" \
+  'TriageAdvisory.parse("The call: it fails when the token is missing.")[:status].to_s'
+ruby_eq "parse: a quoted call line in later evidence (no advisory header after it) never hides the real advisory" \
+  "linked|5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b" \
+  "a = TriageAdvisory.parse(\"${ADV_BODY}\" + \"\\nEvidence from the run:\\n\\ncall: 11111111-2222-4333-8444-555555555555\\nexit 0\"); [a[:status], a[:call]].join('|')"
+ruby_eq "parse: the advisory block ends at its last line; a later questions line never remaps it" \
+  "DND-5=cand_0,DND-6=cand_1" \
+  "a = TriageAdvisory.parse(\"${ADV_BODY}\" + \"\\nLater notes:\\n  questions: cand_0 DND-9\"); a[:questions].map { |k, v| k + '=' + v }.join(',')"
+ruby_eq "parse: an advisory with no questions line, or no mode, is malformed, never not_on or no candidates" \
+  "malformed|malformed" \
+  '[TriageAdvisory.parse("call: 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b\nJev advisory (not a decision): question set v, model m, mode on\n  severity suggestion: LOW")[:status], TriageAdvisory.parse("call: 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b\nJev advisory (not a decision): question set v\n  questions: none")[:status]].join("|")'
+ruby_eq "parse: an advised line whose question disagrees with the questions line is malformed" \
+  "malformed" \
+  'TriageAdvisory.parse("call: 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b\nJev advisory (not a decision): question set v, model m, mode on\n  questions: cand_0 DND-5\n  DND-5 (cand_3): duplicate (confidence 0.9) -- t")[:status].to_s'
+ruby_eq "parse: a bold or numbered call label pasted from Notion still reads" \
+  "linked|linked" \
+  'h = "\nJev advisory (not a decision): question set v, model m, mode on\n  questions: none"; [TriageAdvisory.parse("**call:** 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b" + h)[:status], TriageAdvisory.parse("1. call: 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b" + h)[:status]].join("|")'
+ruby_eq "parse: duplicate uncalibrated is read from its evidence line" \
+  "true|false" \
+  'h = "call: 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b\nJev advisory (not a decision): question set v, model m, mode on\n  questions: none\n"; [TriageAdvisory.parse(h + "  duplicate: uncalibrated (no threshold); the model\u0027s answer is advised.")[:duplicate_uncalibrated], TriageAdvisory.parse(h + "  related: uncalibrated (no threshold)")[:duplicate_uncalibrated]].join("|")'
+ruby_eq "parse: a body that is not valid UTF-8 is read, never raised on" \
+  "unlinked" \
+  'TriageAdvisory.parse("abc \xff def".b)[:status].to_s'
+
 ruby_eq "security hint: a security word in the title or body" \
   "true|false" \
   '[Triage.security_hint?("HIGH: token printed in argv", ""), Triage.security_hint?("LOW: stale docs", "typo")].join("|")'
@@ -214,6 +267,7 @@ eq "no usage failure sent any request" "$(requests)" "${n}"
 run "${FINDING[@]}" --project harness
 eq "not_configured exits 3 [qa]" "${RC}" "3"
 has "not_configured prints the pinned line with Fix: [qa] [ticket]" "${OUT}" "${PINNED}"
+lacks "an unavailable answer prints no call line: a fallback cannot be reported [DND-1468]" "${OUT}" "call:"
 has "the candidate count comes first" "$(printf '%s\n' "${OUT}" | head -n 1)" "2 candidates considered (DND, project harness"
 has "the scope names the title keywords" "${OUT}" "title keywords: cannot, passes, check, gate"
 lacks "not_configured is not read as no duplicates" "${OUT}" "no candidate is"
@@ -260,9 +314,20 @@ spec "query-${TICKETS_DS}.json" "${TICKETS_TWO}"
 spec triage.json '{"status":200,"body":{"status":"judged","mode":"on","question_set_version":"finding-triage-v1","model":"jev-1.13.0","thresholds":{"duplicate":"enabled","related":"enabled"},"candidates":[{"ref":"DND-5","relation":"duplicate","confidence":0.91,"above_threshold":true},{"ref":"DND-6","relation":"related","confidence":0.4,"above_threshold":false}],"severity":{"level":"HIGH","score":2.0,"confidence":0.7}}}'
 run "${FINDING[@]}" --project harness
 eq "judged exits 0" "${RC}" "0"
-has "the duplicate above threshold is printed with its title" "${OUT}" "DND-5: duplicate (confidence 0.91) -- Gate passes when its check cannot run"
-lacks "the related one below threshold is not printed" "${OUT}" "DND-6:"
+has "the duplicate above threshold is printed with its question and title" "${OUT}" "DND-5 (cand_0): duplicate (confidence 0.91) -- Gate passes when its check cannot run"
+has "a judged answer with no call_id prints call: unavailable, never omits it [DND-1468]" "$(printf '%s\n' "${OUT}" | sed -n 2p)" "call: unavailable"
+has "the questions line names every candidate sent [DND-1468]" "${OUT}" "  questions: cand_0 DND-5, cand_1 DND-6"
+lacks "the related one below threshold is not printed" "${OUT}" "DND-6 (cand_1):"
 has "the advisory is labelled not a decision" "${OUT}" "Jev advisory (not a decision)"
+spec triage.json "$(jq -c '.body.call_id = "5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b"' "${TMP}/spec/triage.json")"
+run "${FINDING[@]}" --project harness
+eq "the call id is the line just before the advisory [DND-1468]" "$(printf '%s\n' "${OUT}" | sed -n 2,3p | tr '\n' '|')" "call: 5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b|Jev advisory (not a decision): question set finding-triage-v1, model jev-1.13.0, mode on|"
+eq "the pasted output reads back as the call, its questions and the advice [DND-1468]" \
+  "$(/usr/bin/ruby -r "${SKILL}/lib/triage_advisory.rb" -e 'a = TriageAdvisory.parse($stdin.read); puts [a[:status], a[:call], a[:questions]["DND-6"], a[:advised]["DND-5"]].join("|")' <<<"${OUT}")" \
+  "linked|5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b|cand_1|duplicate"
+spec triage.json "$(jq -c '.body.call_id = "NOT A UUID"' "${TMP}/spec/triage.json")"
+run "${FINDING[@]}" --project harness
+has "a call_id that is not a uuid prints call: unavailable" "$(printf '%s\n' "${OUT}" | sed -n 2p)" "call: unavailable"
 
 # The personal project (D2 permits it; inert, so not_configured).
 spec triage.json '{"status":200,"body":{"status":"unavailable","reason":"not_configured"}}'

@@ -574,6 +574,149 @@ check("view: an overlong digest section is clipped under Slack's limit and says 
   c.length <= 3000 && c.match?(/more lines in the run log\z/)
 end
 
+# ------------------------------------------------------------ C3 feedback (DND-1468)
+
+require_relative "../lib/epic_clustering_c3_feedback"
+require_relative "../../athena:ticket-management/lib/triage_advisory"
+
+C3F = EpicClusteringC3Feedback
+CALL_A = "5b0f6a3c-2d47-4e1a-9c8b-7f3e2a1d0c9b"
+
+# advisory_body(call, mode, questions, advised) -> a ticket body with the
+# advisory pasted as Notion's markdown returns it (underscores escaped).
+def advisory_body(call:, mode: "on", questions: %w[DND-5 DND-6], advised: {}, uncalibrated: true)
+  lines = ["Problem text.", "## Jev advisory (not a decision)", "```", "2 candidates considered (x)", "call: #{call}",
+           "Jev advisory (not a decision): question set finding-triage-v1, model jev-1.13.0, mode #{mode}",
+           TriageAdvisory.questions_line(questions)]
+  lines << "  duplicate: uncalibrated (no threshold); the model's answer is advised." if uncalibrated
+  advised.each { |ref, rel| lines << "  #{ref} (cand_#{questions.index(ref)}): #{rel} (confidence 0.90) -- t" }
+  lines << "  severity suggestion: LOW" << "```"
+  lines.join("\n").gsub("_", "\\_")
+end
+
+def c3(dup, keep, body) = C3F.decide(C3F::Pair.new(duplicate: dup, keep: keep), TriageAdvisory.parse(body))
+
+check("c3: a merge into a candidate Jev did not advise (duplicate uncalibrated) records cand_<i>=duplicate, filed_despite_advice") do
+  r = c3("DND-20", "DND-6", advisory_body(call: CALL_A))
+  r[:reason] == :record && r[:question] == "cand_1" && r[:call] == CALL_A &&
+    C3F.commands([r]) == ["~/dev/custom/ai/bin/judgment-feedback record --call #{CALL_A} --correct cand_1=duplicate " \
+                          "--signal filed_despite_advice --session-label harness"]
+end
+
+check("c3: not advised while a duplicate threshold was in force is ambiguous, never recorded (Jev may have said duplicate)") do
+  r = c3("DND-20", "DND-6", advisory_body(call: CALL_A, uncalibrated: false))
+  r[:reason] == :ambiguous && C3F.commands([r]).empty?
+end
+
+check("c3: one duplicate merged into two kept tickets is ONE command with both corrections (one report per call)") do
+  body = advisory_body(call: CALL_A)
+  cmds = C3F.commands([c3("DND-20", "DND-5", body), c3("DND-20", "DND-6", body)])
+  cmds.size == 1 && cmds.first.include?("--correct cand_0=duplicate --correct cand_1=duplicate")
+end
+
+check("c3: a candidate Jev advised as related is still wrong: record duplicate") do
+  c3("DND-20", "DND-5", advisory_body(call: CALL_A, advised: { "DND-5" => "related" }))[:reason] == :record
+end
+
+check("c3: Jev advised the kept ticket as a duplicate: agreed, no command") do
+  r = c3("DND-20", "DND-5", advisory_body(call: CALL_A, advised: { "DND-5" => "duplicate" }))
+  r[:reason] == :agreed && C3F.commands([r]).empty?
+end
+
+check("c3: every non-record outcome is its own reason, never silence") do
+  [
+    c3("DND-21", "DND-5", "A finding filed before DND-1468.\nJev advisory (not a decision): question set v, model m, mode on")[:reason] == :unlinked,
+    c3("DND-21", "DND-5", "call: unavailable\nJev advisory (not a decision): question set v, model m, mode on")[:reason] == :no_call,
+    c3("DND-21", "DND-5", "call: 1234\nJev advisory (not a decision): question set v, model m, mode on")[:reason] == :malformed,
+    c3("DND-21", "DND-5", advisory_body(call: CALL_A, mode: "shadow"))[:reason] == :not_on,
+    c3("DND-21", "DND-9", advisory_body(call: CALL_A))[:reason] == :not_a_candidate
+  ].all?
+end
+
+check("c3: counts name every reason, zeros included") do
+  counts = C3F.counts([c3("DND-20", "DND-6", advisory_body(call: CALL_A)), C3F.unread(C3F::Pair.new(duplicate: "DND-1", keep: "DND-2"))])
+  counts.keys == C3F::REASONS && counts[:record] == 1 && counts[:unread] == 1 && counts[:agreed].zero?
+end
+
+check("c3: pairs parse DUPLICATE=KEEP and refuse a malformed or self pair by position") do
+  ok = C3F.pairs("DND-9=DND-5, DND-12=DND-7").map { |p| [p.duplicate, p.keep] } == [%w[DND-9 DND-5], %w[DND-12 DND-7]]
+  ok && raises?(ArgumentError, /DND-9 is not DUPLICATE=KEEP/) { C3F.pairs("DND-9") } &&
+    raises?(ArgumentError, /both duplicate and keep/) { C3F.pairs("DND-9=DND-9") } &&
+    raises?(ArgumentError, /DND ticket ids/) { C3F.pairs("ABC-9=DND-5") } &&
+    raises?(ArgumentError, /no pair given/) { C3F.pairs(" , ") } &&
+    raises?(ArgumentError, /merged\[1\] is not DUPLICATE=KEEP/) { C3F.summary_pairs("merged" => [{ "keep" => "DND-1", "duplicate" => "DND-2" }, { "keep" => "x" }]) } &&
+    raises?(ArgumentError, /no "merged" list/) { C3F.summary_pairs({}) }
+end
+
+check("c3: the Notion adapter maps ticket ids to page ids, and a missing ticket is a ReadError, never a smaller map") do
+  page = lambda do |n|
+    { "id" => "pg-#{n}", "created_time" => "2026-09-01T00:00:00Z",
+      "properties" => { "ID" => { "type" => "unique_id", "unique_id" => { "prefix" => "DND", "number" => n } },
+                        "Name" => { "type" => "title", "title" => [{ "plain_text" => "t" }] },
+                        "Status" => { "type" => "status", "status" => { "name" => "Cancelled" } },
+                        "Kind" => { "type" => "select", "select" => nil }, "Severity" => { "type" => "select", "select" => nil },
+                        "Path" => { "type" => "select", "select" => nil }, "Area" => { "type" => "select", "select" => nil } } }
+  end
+  hit = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [page.call(20)], "has_more" => false })
+  miss = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [], "has_more" => false })
+  EpicClusteringNotion.new(hit).page_ids(["DND-20"]) == { "DND-20" => "pg-20" } &&
+    raises?(NextMissionNotion::ReadError, /no ticket page for DND-21/) { EpicClusteringNotion.new(miss).page_ids(["DND-21"]) }
+end
+
+def c3_fixture(dir)
+  data = JSON.parse(File.read(File.join(FIX, "pass.json")))
+  base = data["tickets"].first
+  add = lambda do |id, body|
+    data["tickets"] << base.merge("id" => id, "page_id" => "page-#{id}", "status" => "Cancelled", "kind" => "Bug",
+                                  "severity" => "LOW", "path" => "Off", "body" => body)
+  end
+  add.call("DND-20", advisory_body(call: CALL_A))                                          # unrelated: record
+  add.call("DND-21", "Filed before DND-1468; no advisory call line.")                       # unlinked
+  add.call("DND-22", advisory_body(call: CALL_A, advised: { "DND-5" => "duplicate" }))      # agreed
+  add.call("DND-23", "__unreadable__")                                                      # unread
+  path = File.join(dir, "DND-1468-c3.json")
+  File.write(path, JSON.generate(data))
+  path
+end
+
+check("cli c3-feedback: a merged pair the advisory judged unrelated gives exactly one record command; a ticket with no call line is unlinked") do
+  Dir.mktmpdir do |d|
+    out, err, code = run("c3-feedback", "--from-json", c3_fixture(d), "--merged", "DND-20=DND-6,DND-21=DND-5,DND-22=DND-5")
+    cmds = out.lines.select { |l| l.include?("judgment-feedback record") }
+    code.zero? && err.empty? && cmds.size == 1 && cmds.first.include?("--correct cand_1=duplicate") &&
+      cmds.first.include?("--signal filed_despite_advice") &&
+      out.include?("3 merged pair(s); record 1, agreed 1, ambiguous 0, unlinked 1,") && out.include?("unlinked: DND-21 (merged into DND-5)")
+  end
+end
+
+check("cli c3-feedback: an unreadable duplicate body is unread and exits 3 with Fix:, and the other commands still print") do
+  Dir.mktmpdir do |d|
+    out, err, code = run("c3-feedback", "--from-json", c3_fixture(d), "--merged", "DND-20=DND-6,DND-23=DND-5")
+    code == 3 && out.include?("unread 1") && out.include?("unread: DND-23") && err.include?("INCOMPLETE") &&
+      err.include?("Fix:") && out.lines.count { |l| l.include?("judgment-feedback record") } == 1
+  end
+end
+
+check("cli c3-feedback: reads a pass summary's merged list, and --json carries the counts") do
+  Dir.mktmpdir do |d|
+    s = File.join(d, "DND-1468-summary.json")
+    File.write(s, JSON.generate("merged" => [{ "keep" => "DND-6", "duplicate" => "DND-20" }]))
+    out, _, code = run("c3-feedback", "--from-json", c3_fixture(d), "--pass-summary", s, "--json")
+    doc = JSON.parse(out)
+    code.zero? && doc["counts"]["record"] == 1 && doc["complete"] == true && doc["results"][0]["question"] == "cand_1"
+  end
+end
+
+check("cli c3-feedback: a missing ticket is exit 3 (never zero pairs); bad input is usage (2) with Fix:") do
+  Dir.mktmpdir do |d|
+    f = c3_fixture(d)
+    _, err3, code3 = run("c3-feedback", "--from-json", f, "--merged", "DND-99=DND-5")
+    _, err2, code2 = run("c3-feedback", "--from-json", f, "--merged", "DND-20")
+    _, _, code_none = run("c3-feedback", "--from-json", f)
+    code3 == 3 && err3.include?("DND-99") && err3.include?("Fix:") && code2 == 2 && err2.include?("Fix:") && code_none == 2
+  end
+end
+
 if $failures.empty?
   puts "epic-clustering self-test: #{$checks} checks passed"
   exit 0

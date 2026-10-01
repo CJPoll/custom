@@ -912,7 +912,7 @@ records the feedback too.
 | --- | --- | --- | --- | --- |
 | `slack_routing` | the session whose Slack inbox got the new conversation | it forwards the conversation with `session_send` and `reroute_of_event_id`: signal `reroute`, correction the destination's label | the `judgment_feedback` MCP tool, or `judgment-feedback record --use-case slack_routing --subject <event_id>`; the owner saying "wrong session" in the thread is recorded this way by that session | DND-1467 |
 | `priority_scoring` | the owner, on `/priorities` | the owner pins, scores or dismisses an item whose judged level was accepted: signal `owner_override`, **weak** | a "Jev was wrong" control on the item's row, with optional right levels | DND-1465 |
-| `finding_triage` | the filer, and the epic-clustering C3 merge | the filer files anyway after a `duplicate` advisory, or C3 merges a pair Jev judged `unrelated`: signal `filed_despite_advice` | `judgment-feedback record --call <id>` with the call id the advisory prints | DND-1468 |
+| `finding_triage` | the filer, and the epic-clustering C3 merge | the filer files anyway after a `duplicate` advisory, or C3 merges a pair Jev did not judge `duplicate` (advised `related`, or not advised while `duplicate` was uncalibrated; under an enabled threshold it is counted `ambiguous`, never recorded): signal `filed_despite_advice` | `judgment-feedback record --call <id>` with the call id the advisory prints | DND-1468 |
 | `ticket_kind`, `ticket_severity`, `ticket_security` | the filer, and anyone who later edits the property | a property whose last `Jev classification:` line says source `jev` is edited away from that value: signal `field_changed`, found by `judgment-feedback scan-tickets` | `judgment-feedback record --call <id>`, with the id from the line's `calls` | DND-1469 |
 | `ticket_blocking` | the filer, and anyone who later changes the finding's Path or `Blocks` edge | Path or the edge changed away from a `jev`-sourced `Jev path:` line: signal `field_changed`, a `cand_<i>` correction per candidate the change contradicts (from the line's `candidate_refs`), found by `judgment-feedback scan-tickets`; a later `Critical` or `Promoted` is authored and never recorded | `judgment-feedback record --call <id>`, with the line's `call` | DND-1470 |
 
@@ -1039,6 +1039,13 @@ athena:ticket-management → *Before filing a finding*.
   not `enabled` printed "insufficient evidence" and was never advised.
   Replaced by the two bullets above. Why: the owner's threshold waiver,
   quoted in *Modes*.
+- **The advisory names its call** (DND-1468). The judged answer carries
+  `call_id`, and the script prints `call: <uuid>` just before the advisory,
+  or `call: unavailable` when the server named none, never omitting it. A
+  `questions:` line names every candidate sent with its question
+  (`cand_<i>`), and each advised line carries its own. That is what *Receiver
+  feedback* records against. The reader for a pasted advisory is
+  `lib/triage_advisory.rb`; athena:epic-clustering's `c3-feedback` uses it.
 - **Setting the mode** follows *Modes*: `on` needs only the registered
   question set.
 - **A server that answered and refused** (any 4xx, a rejected machine token

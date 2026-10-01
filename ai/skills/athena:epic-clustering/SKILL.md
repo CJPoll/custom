@@ -54,6 +54,7 @@ re-run until it measures, and never report a pass without one.
 | `proof … --save FILE` / `proof --against FILE` | the never-movable count and ids per epic, before and after the moves |
 | `digest [--started IDS] [--pass-summary FILE] --blocks-out FILE` | the daily digest as text, and as Block Kit |
 | `notice --ticket DND-N … --blocks-out FILE` | one won't-fix notice as Block Kit: the close already made, and a veto |
+| `c3-feedback --merged DUP=KEEP,…` (or `--pass-summary FILE`) | per C3 merge, the reason counts and the `judgment-feedback record` command for each wrong advisory (it runs nothing) |
 
 Namespace every file you pass it with the pass's date and your name
 (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
@@ -100,10 +101,17 @@ admiral working them.
      feature epic is worked by nobody.
    - Other leftovers stay put.
 5. **C3: merge near-duplicates.** `read` lists candidate pairs by title. A
-   candidate is not a duplicate until you confirm one root cause. Then keep
-   the older ticket, copy the other's evidence into it, and cancel the newer
-   one with a link: `Status` = `Cancelled`, body "Duplicate of DND-N" plus
-   the copied evidence.
+   candidate is not a duplicate until you confirm one root cause. First run
+   `c3-feedback --merged <newer>=<older>` for the confirmed pairs
+   (comma-separated), BEFORE any body edit: it reads the newer ticket's
+   pasted Jev advisory. Run each `judgment-feedback record` command it
+   prints: that advisory did not call the kept ticket a duplicate
+   (athena:judgment-feedback). Put its counts in the summary. `unlinked` (no
+   `call:` line), `ambiguous` and the other non-record reasons are counted,
+   never guessed; exit 3 means a body was not read: re-run those pairs. Then
+   keep the older ticket, copy the other's evidence into it, and cancel the
+   newer one with a link: `Status` = `Cancelled`, body "Duplicate of DND-N"
+   plus the copied evidence, keeping its advisory section.
 6. **C4: close what a later landing fixed.** Re-run the ticket's own repro.
    If it no longer fails, move the ticket to `Done` with the command and its
    output in the body. If it still fails, or there is no repro to run, leave

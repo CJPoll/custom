@@ -29,6 +29,7 @@ require "json"
 require "time"
 require_relative "../../../lib/strict_argv"
 require_relative "../lib/athena_server"
+require_relative "../lib/triage_advisory"
 
 PROG = "finding-triage"
 UNAVAILABLE_FIX = "Fix: file the ticket as today; this is advisory."
@@ -61,12 +62,17 @@ USAGE = <<~EOF
   Output (stdout), always in this order:
     "<N> candidates considered (...)" -- printed even when N is 0
     then either the advisory:
-      "Jev advisory (not a decision) ..."; in mode on, a line saying
+      "call: <uuid>" -- the recorded call, to report the advice wrong with
+      ai/bin/judgment-feedback record --call <uuid> --correct cand_<i>=<label>
+      ("call: unavailable" when the server named none);
+      "Jev advisory (not a decision) ..."; "questions: cand_0 <ref>, ..."
+      naming every candidate's question; in mode on, a line saying
       "uncalibrated" for each relation whose threshold is n/a or unset (the
       server accepts the model's answer for it, DND-1450), and "insufficient
       evidence" for one whose state the server did not report (never
       advised); one line per candidate the server ACCEPTED as duplicate or
-      related, marked "[uncalibrated]" when no threshold gated it (or a line
+      related, as "<ref> (cand_<i>): <relation> ...", marked
+      "[uncalibrated]" when no threshold gated it (or a line
       saying none is); then "severity suggestion: <LEVEL> ..."
     or one unavailable line, ending "#{UNAVAILABLE_FIX}"
       "JUDGMENTS UNAVAILABLE: <reason>. #{UNAVAILABLE_FIX}"
@@ -271,9 +277,12 @@ module Triage
     "#{count} #{noun} considered (#{scope})"
   end
 
-  # advisory_lines(result, titles) -> the judged output, after the count line.
+  # advisory_lines(result, titles) -> the judged output, after the count and
+  # call lines. `titles` maps each candidate SENT to its title, in request
+  # order, so its position is the candidate's question (cand_<i>, DND-1468).
   def advisory_lines(result, titles)
     lines = ["Jev advisory (not a decision): question set #{result['question_set_version']}, model #{result['model']}, mode #{result['mode']}"]
+    lines << TriageAdvisory.questions_line(titles.keys)
     if result["mode"] != "on"
       lines << "  mode #{result['mode']}: judged and recorded; nothing is advised until the mode is on."
       return lines
@@ -297,14 +306,17 @@ module Triage
     lines
   end
 
-  # hit_line(c, states, titles) -> one advised candidate, marked when no
-  # threshold gated it (DND-1450). The server's per-candidate basis decides;
-  # a response without one falls back on the relation's state.
+  # hit_line(cand, states, titles) -> one advised candidate with its
+  # question (DND-1468), marked when no threshold gated it (DND-1450). The
+  # server's per-candidate basis decides; a response without one falls back
+  # on the relation's state.
   def hit_line(cand, states, titles)
     calibrated = cand.key?("basis") ? cand["basis"] == "threshold_met" : states[cand["relation"]] == "enabled"
     mark = calibrated ? "" : " [uncalibrated]"
-    format("  %s: %s (confidence %.2f)%s -- %s", cand["ref"], cand["relation"], cand["confidence"].to_f, mark,
-           titles.fetch(cand["ref"], "(title not retrieved)"))
+    index = titles.keys.index(cand["ref"])
+    question = index ? TriageAdvisory.question_id(index) : "question not known"
+    format("  %s (%s): %s (confidence %.2f)%s -- %s", cand["ref"], question, cand["relation"], cand["confidence"].to_f,
+           mark, titles.fetch(cand["ref"], "(title not retrieved)"))
   end
 
   # none_line(states) -> the "no hit" line naming the relations that could be
@@ -513,6 +525,7 @@ module Manager
     token = nil
     result = classify(reply)
     titles = candidates.to_h { |c| [c[:ref], c[:title]] }
+    out.puts TriageAdvisory.call_line(result["call_id"])
     Triage.advisory_lines(result, titles).each { |line| out.puts line }
     out.puts Triage::SECURITY_HINT if Triage.security_hint?(opts[:title], body)
     0
