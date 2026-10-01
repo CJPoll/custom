@@ -57,7 +57,7 @@ expect "wrapper preloads the shim for the server process" "2025-09-03" "${out}"
 
 # DND-1543: the package spec npx receives carries an exact x.y.z version.
 spec="$(grep '^@notionhq/notion-mcp-server' "${TMP}/npx-args" 2>/dev/null || true)"
-if printf '%s' "${spec}" | grep -Eq '^@notionhq/notion-mcp-server@[0-9]+\.[0-9]+\.[0-9]+$'; then
+if [[ "${spec}" =~ ^@notionhq/notion-mcp-server@[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   ok "npx package spec is pinned to an exact version"
 else
   bad "npx package spec is pinned to an exact version" "got '${spec}'; Fix: set NOTION_MCP_SERVER_VERSION in ai/bin/notion-athena-mcp to an exact x.y.z"
