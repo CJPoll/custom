@@ -972,6 +972,67 @@ else
   bad "unpushed run stranded" "rc=$rc head-moved=$([ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && echo no || echo yes) err=$(cat "$a/runner.err")"
 fi
 
+# A run that commits nothing still publishes what ANOTHER actor landed. The
+# lane's base is origin/main, so it is landed by definition (DND-1008 holds).
+# Measured 2026-10-01 on the laptop: no-commit ticks never fast-forwarded, so
+# the main checkout sat 31 commits behind origin/main and the live runner had
+# no main-health backstop (DND-1482) at all.
+land_elsewhere() { # <repo> <subject> ; another machine pushes to origin main
+  local o; o="$(aux "$1")/other-clone"
+  [ -d "$o" ] || git clone -q "$(aux "$1")/origin.git" "$o" >&2
+  git -C "$o" pull -q --ff-only origin main >&2
+  git -C "$o" -c user.email=t@example.invalid -c user.name=Other -c commit.gpgsign=false \
+    commit --allow-empty -qm "$2" >&2
+  git -C "$o" push -q origin HEAD:main >&2
+}
+r="$(new_repo)"; a="$(aux "$r")"; with_origin "$r"
+land_elsewhere "$r" "landed elsewhere"
+stub_claude_probe "$a/stub-claude" 0 'printf "no harness changes warranted.\n"'
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ "$(git -C "$r" rev-parse HEAD)" = "$(git -C "$a/origin.git" rev-parse main)" ]; then
+  ok "a no-commit run fast-forwards the main checkout to what another actor landed on origin/main"
+else
+  bad "no-commit run catches the main checkout up" "rc=$rc head=$(git -C "$r" log -1 --format=%s) err=$(cat "$a/runner.err")"
+fi
+if [ "$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null || echo 0)" = "0" ] && [ -z "$(run_branches "$r")" ]; then
+  ok "and that catch-up is not a stranded failure (no lane branch kept, counter 0)"
+else
+  bad "catch-up is not stranded" "branches=$(run_branches "$r") counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null)"
+fi
+
+# The catch-up only ever moves `main`: a main checkout a human left on another
+# branch is not fast-forwarded to origin/main.
+r="$(new_repo)"; a="$(aux "$r")"; with_origin "$r"
+git -C "$r" checkout -q -b side >&2
+land_elsewhere "$r" "landed elsewhere"
+stub_claude_probe "$a/stub-claude" 0 'printf "no harness changes warranted.\n"'
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && [ "$(git -C "$r" symbolic-ref --short HEAD)" = "side" ]; then
+  ok "a main checkout on a branch other than main is left where it is"
+else
+  bad "catch-up moves only main" "rc=$rc branch=$(git -C "$r" symbolic-ref --short HEAD) err=$(cat "$a/runner.err")"
+fi
+
+# ff-only still protects a live edit: the landed commit touches a file the main
+# checkout has modified, so git refuses, the edit survives, and a Fix: says so.
+r="$(new_repo)"; a="$(aux "$r")"; with_origin "$r"
+land_elsewhere "$r" "landed elsewhere"
+o="$a/other-clone"
+printf 'landed\n' >"$o/bystander.conf"
+git -C "$o" -c user.email=t@example.invalid -c user.name=Other -c commit.gpgsign=false commit -qam "touch bystander" >&2
+git -C "$o" push -q origin HEAD:main >&2
+printf 'HUMAN MID-EDIT\n' >"$r/bystander.conf"
+stub_claude_probe "$a/stub-claude" 0 'printf "no harness changes warranted.\n"'
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r" SHIPWRIGHT_ALLOW_DIRTY=1)"
+if [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && [ "$(cat "$r/bystander.conf")" = "HUMAN MID-EDIT" ] \
+   && grep -q 'could not be fast-forwarded' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "a catch-up that would overwrite a live edit is refused, the edit survives, and a Fix: is printed"
+else
+  bad "catch-up protects live work" "rc=$rc file=$(cat "$r/bystander.conf") err=$(cat "$a/runner.err")"
+fi
+
 # ---------------------------------------------------------------------------
 case_ 'athena-shipwright-run.sh — the wedge counter escalates on FAILURES (what the old skip counter missed)'
 

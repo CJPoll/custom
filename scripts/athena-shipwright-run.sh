@@ -1094,6 +1094,21 @@ if [ "${status}" -eq 0 ] && [ -n "${tip}" ] && [ "${tip}" != "${BASE_COMMIT}" ];
     fi
   fi
 fi
+# A run that committed nothing still publishes its base. The base is the
+# origin/main fetched at tick start, so it is landed by definition and DND-1008
+# holds. Without this, work another actor landed (an admiral on another
+# machine, a hand-spawned PR) reached this machine only when a shipwright run
+# happened to commit. Measured 2026-10-01 on the laptop: the main checkout sat
+# 31 commits behind origin/main, so its live runner had no main-health backstop
+# (DND-1482) at all. Only `main` is moved: a main checkout a human left on
+# another branch is not this tick's to touch. Already current: nothing to do.
+if [ "${publish_tip}" -eq 0 ] && [ -n "${tip}" ] && [ "${tip}" = "${BASE_COMMIT}" ] \
+   && [ "${base_desc}" = "origin/main" ] && has_origin \
+   && [ "$(git -C "${MAIN_CHECKOUT}" symbolic-ref --short HEAD 2>/dev/null)" = "main" ] \
+   && [ "$(git -C "${MAIN_CHECKOUT}" rev-parse HEAD 2>/dev/null)" != "${BASE_COMMIT}" ] \
+   && commit_reachable "${BASE_COMMIT}"; then
+  publish_tip=1
+fi
 if [ "${publish_tip}" -eq 1 ]; then
   if ! git -C "${MAIN_CHECKOUT}" merge --ff-only "${tip}" >>"${log}" 2>&1; then
     echo "athena-shipwright: run ${ts} landed, but ${MAIN_CHECKOUT} could not be fast-forwarded to ${tip}." >&2
