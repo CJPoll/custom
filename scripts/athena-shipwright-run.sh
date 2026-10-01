@@ -724,6 +724,34 @@ fi
 # --- 2. reap dead predecessors ----------------------------------------------
 reap_dead_lanes
 
+# --- 2b. post-landing main check: the backstop (DND-1482) --------------------
+#
+# ~/dev/custom has no CI, and a clean-rebase landing pushes with no re-gate
+# (owner decision D5), so two landings can combine into a red origin/main.
+# The admiral runs ai/bin/main-health check after each landing; this tick runs
+# it too, for landings made by anyone else. It gates origin/main only when the
+# tip has no verdict yet and no integration-gate receipt covers it, queued in
+# test-slot, so most ticks cost one fetch. It runs before the yield and wedge
+# guards on purpose: a dirty main checkout or a wedged lane must not leave main
+# unwatched. Its outcome is logged and NEVER changes this tick's exit code: it
+# alerts on its own (harness-alerts, slug main-red), and a check that could not
+# measure retries next tick. SHIPWRIGHT_MAIN_HEALTH is the self-test's seam.
+MAIN_HEALTH="${SHIPWRIGHT_MAIN_HEALTH:-${__wrapper_dir%/scripts}/ai/bin/main-health}"
+mh_log="${LOG_DIR}/${ts}.main-health.log"
+if [ -x "${MAIN_HEALTH}" ]; then
+  mh_rc=0
+  "${MAIN_HEALTH}" check --repo "${MAIN_CHECKOUT}" >"${mh_log}" 2>&1 </dev/null || mh_rc=$?
+  case "${mh_rc}" in
+    0) echo "athena-shipwright: main-health: origin/main GREEN (${mh_log})" >&2 ;;
+    1) echo "athena-shipwright: main-health: origin/main is RED; the check alerted on harness-alerts (${mh_log})" >&2 ;;
+    *) echo "athena-shipwright: main-health could not measure origin/main (exit ${mh_rc}); the next tick retries. See ${mh_log}." >&2
+       echo "  Fix: read ${mh_log}; its Fix: line names the cause." >&2 ;;
+  esac
+else
+  echo "athena-shipwright: main-health is missing or not executable: ${MAIN_HEALTH}; origin/main was NOT checked this tick." >&2
+  echo "  Fix: run the runner from a full ~/dev/custom checkout (scripts/ and ai/bin/ side by side)." >&2
+fi
+
 # --- 3. wedge escalation: refuse to spawn if too many failures in a row ------
 #
 # A WEDGED LANE MUST NOT LOOK LIKE A QUIET ONE. One bad outcome is routine; N in

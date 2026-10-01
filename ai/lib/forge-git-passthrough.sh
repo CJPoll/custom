@@ -23,6 +23,9 @@
 #     (ssh://, git://, http://, a pushurl override, an insteadOf that forces
 #     SSH). A shell alias (`!...`) and a push that recurses into submodules are
 #     refused outright. A refusal is exit 3 with a Fix: line.
+#   * fg_refuse_red_main (DND-1482): a push to main is refused while
+#     ai/bin/main-health has recorded origin/main RED, unless it lands a gated
+#     fix. Also exit 3 with a Fix: line. See "Red-main refusal" below.
 #
 # Residual (NOT checked; each still runs): an ~/.ssh/config Host alias for the
 # forge host (`myalias:owner/repo`); ext:: transports; `clone
@@ -429,6 +432,45 @@ fg_record_landing() {
   return 0
 }
 
+# ---- Red-main refusal (DND-1482) ---------------------------------------------
+# A push whose destination is main is REFUSED (exit 3) while ai/bin/main-health
+# has recorded origin/main RED in the pushed repo's git common dir, unless the
+# pushed commit is a gated fix: it contains the red SHA and integration-gate
+# passed exactly it. That is "stop the line" for ~/dev/custom, which has no CI
+# and lands by this push (athena:merge-boarding, the no-CI landing). The
+# decision and the push-argv parse live in ai/lib/main-health.sh. No marker
+# means no red is known, and the push proceeds; a repo main-health never checked
+# (gen_saas, walt_ui) has none. A marker that cannot be read refuses (COULD NOT
+# LOOK). It runs before the dry-run print, so FG_DRY_RUN=1 exercises it.
+fg_refuse_red_main() {
+  local common src sha rc
+  [ -n "$FG_PUSH_URL" ] || return 0
+  common="$(git "${FG_PUSH_GLOB[@]}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+  [ -n "$common" ] || return 0
+  # shellcheck source=main-health.sh
+  if ! . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/main-health.sh" 2>/dev/null; then
+    printf '%s: REFUSING `git push`: cannot load ai/lib/main-health.sh, so whether main is red is unknown.\n  Fix: run %s from a full ~/dev/custom checkout (ai/bin and ai/lib side by side).\n' "$FG_TOOL" "$FG_TOOL" >&2
+    exit 3
+  fi
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    sha="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q "${src}^{commit}" 2>/dev/null || true)"
+    # An unresolvable source fails in git itself; nothing lands.
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
+    rc=0; mh_may_land "$common" "$sha" || rc=$?
+    case "$rc" in
+      0) [ -n "$MH_NOTE" ] && printf '%s: note: %s\n' "$FG_TOOL" "$MH_NOTE" >&2 ;;
+      1) printf '%s: REFUSING `git push` of %s to main: RED MAIN. %s.\n  Stop the line: while main is red, only a gated fix lands.\n  Fix: land the fix first. Rebase the fix branch onto origin/main (it must contain %s), run `integration-gate --with-critic` on it, and push exactly the head its INTEGRATION OK line names. If main was fixed by another landing since, refresh the verdict with `~/dev/custom/ai/bin/main-health check --repo <this checkout>` and retry.\n' \
+           "$FG_TOOL" "$sha" "$MH_WHY" "$MH_RED_SHA" >&2
+         exit 3 ;;
+      *) printf '%s: REFUSING `git push` of %s to main: COULD NOT LOOK whether main is red. %s.\n  Fix: inspect the marker (`~/dev/custom/ai/bin/main-health status --repo <this checkout>`), repair what it names, then refresh it with `~/dev/custom/ai/bin/main-health check --repo <this checkout>` and retry.\n' \
+           "$FG_TOOL" "$sha" "$MH_WHY" >&2
+         exit 3 ;;
+    esac
+  done < <(mh_push_main_sources main "$@")
+  return 0
+}
+
 # fg_git_exec <basic-user> <token> <git args...> : run (or, under FG_DRY_RUN=1,
 # print) git with the bot's HTTPS basic-auth header for FG_HOST and every owner
 # credential source removed. The header reaches git through the environment
@@ -439,6 +481,7 @@ fg_record_landing() {
 fg_git_exec() {
   local user="$1" token="$2" header auth_key a n
   shift 2
+  fg_refuse_red_main "$@"
   auth_key="http.https://$FG_HOST/.extraheader"
   header="AUTHORIZATION: basic $(printf '%s:%s' "$user" "$token" | openssl base64 -A)"
   n="${GIT_CONFIG_COUNT:-0}"

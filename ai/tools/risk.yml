@@ -215,6 +215,11 @@ tools:
   # CMD still writes its --work and --out dirs, and --prepare-clone writes a
   # clone. Classed by worst-case capability, like test-slot: it runs a command.
   tool-sandbox:            { class: destructive, reason: executes }
+  # main-health (DND-1482) runs the landed tree's harness gate in a lane under
+  # test-slot, writes its own state under the git common dir, and on a RED main
+  # sends a harness-alerts message through send-mail (destructive, send). Classed
+  # by that worst case.
+  main-health:             { class: destructive, reason: send }
 
   # --- skill executables (DND-508), keyed by their path under ai/ ---
   # readOnly

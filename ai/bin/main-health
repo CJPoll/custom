@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# main-health -- gate origin/main after a landing, and keep the red-main marker.
+#
+# Why this exists (DND-1482): ~/dev/custom has no CI. A landing is a clean
+# rebase plus a fast-forward push with no re-gate (owner decision D5 on the Jev
+# epic; DND-1463), so two clean but incompatible landings can leave origin/main
+# red, and nothing re-checked it until the next branch gate tripped over it.
+# This is the detector. It is NOT a merge gate: it runs after the push, so D5's
+# "no re-gate before the push" stands.
+#
+#   check   fetch origin; if the origin/main tip has no verdict yet, gate it in
+#           a short-lived detached lane at that SHA (the landed tree's own
+#           ai/bin/harness-gate, under test-slot), record the verdict, and keep
+#           the red marker in step: RED writes it (and sends ONE harness-alerts
+#           message per red episode), GREEN clears it. A tip that
+#           integration-gate passed for exactly itself (the landing pushed the
+#           gated head unchanged) is green with no gate run, so only a tip that
+#           two landings combined costs a gate.
+#   status  read-only: the marker, and the verdict for the local origin/main.
+#
+# While the marker says RED, `gh-athena git push` (and glab-athena's) REFUSES a
+# push to main unless the pushed commit is a gated fix: it contains the red SHA
+# and integration-gate passed exactly it (ai/lib/forge-git-passthrough.sh ->
+# "Red-main refusal"; the reader is ai/lib/main-health.sh).
+#
+# Who runs check: the admiral, right after each ~/dev/custom landing
+# (athena:merge-boarding -> the no-CI landing), and the hourly shipwright cron
+# as the backstop for landings made by anyone else.
+#
+# Test seams (the self-test's stubs; ai/test/main-health/self-test.sh):
+#   MAIN_HEALTH_TEST_SLOT  the test-slot to queue the gate in (default: this
+#                          checkout's ai/bin/test-slot)
+#   MAIN_HEALTH_SEND_MAIL  the send-mail for the alert (default: this
+#                          checkout's athena:inbox send-mail)
+# Neither can make a red read green on its own: the verdict is the gate's exit
+# code. A slot stub that runs nothing is the residual, said out loud.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+AI_DIR="$(dirname "${HERE}")"
+TOOL_REPO="$(dirname "${AI_DIR}")"
+
+usage() {
+  cat <<'EOF'
+main-health -- gate origin/main after a landing; keep the red-main marker (DND-1482).
+
+Usage:
+  main-health check  [--repo DIR] [--recheck] [--wait SECS]
+  main-health status [--repo DIR]
+  main-health --help
+
+check   Fetch origin. If the origin/main tip has no verdict, gate it: a pass
+        receipt from integration-gate for exactly that SHA is green with no
+        run; otherwise the landed tree's own ai/bin/harness-gate runs in a
+        short-lived detached lane under <git common dir>/main-health-lanes/,
+        queued in test-slot (do NOT wrap main-health itself in test-slot).
+        RED writes the marker <git common dir>/main-health/red and sends ONE
+        harness-alerts message (slug main-red) per red episode; GREEN clears
+        the marker. A tip already checked is not re-gated.
+          --recheck   re-gate a tip that already has a verdict (a red you
+                      believe was environmental)
+          --wait S    how long to wait for another check's lock (default 1800)
+status  Read-only. Prints the marker (RED <sha> ...), else the verdict for the
+        local refs/remotes/origin/main (green / red / unchecked).
+--repo  any checkout or worktree of the repo (default: the current directory).
+
+While main is RED, gh-athena / glab-athena refuse a push to main unless the
+pushed commit contains the red SHA and integration-gate passed exactly it.
+Run `main-health check` after landing a fix: it clears the marker.
+
+Exit:
+  0  check: the tip is GREEN.          status: no red is known
+  1  check: the tip is RED.            status: the marker says RED
+  2  usage, not a git repo, or origin/main declares no ai/bin/harness-gate
+  3  COULD NOT MEASURE / COULD NOT LOOK: fetch failed, lock wait timed out,
+     the lane could not be made, the slot never came free, the gate exited
+     neither 0 nor 1, or the marker cannot be read. No verdict is recorded.
+Every non-zero exit prints a Fix: line.
+
+The hermetic suite is ai/test/main-health/self-test.sh (the harness gate
+discovers it).
+EOF
+}
+
+die() { # <exit> <message> <fix>
+  printf 'main-health: %s\nFix: %s\n' "$2" "$3" >&2
+  exit "$1"
+}
+
+# shellcheck source=../lib/main-health.sh
+. "${AI_DIR}/lib/main-health.sh" \
+  || die 2 "cannot load ${AI_DIR}/lib/main-health.sh" "run main-health from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
+
+CMD=""; REPO="."; RECHECK=0; WAIT=1800
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    check|status)
+      [ -z "${CMD}" ] || die 2 "two subcommands given ('${CMD}' and '$1')" "pass exactly one of: check, status."
+      CMD="$1"; shift ;;
+    --repo) [ $# -ge 2 ] || die 2 "--repo needs a value" "pass --repo <a checkout of the repo>."; REPO="$2"; shift 2 ;;
+    --wait) [ $# -ge 2 ] || die 2 "--wait needs a value" "pass --wait <seconds>."; WAIT="$2"; shift 2 ;;
+    --recheck) RECHECK=1; shift ;;
+    *) die 2 "unknown argument: $1" "see main-health --help; subcommands are check and status, flags --repo, --recheck, --wait." ;;
+  esac
+done
+[ -n "${CMD}" ] || die 2 "no subcommand" "pass check or status (main-health --help)."
+case "${WAIT}" in ''|*[!0-9]*) die 2 "--wait must be whole seconds (got '${WAIT}')" "pass --wait <seconds>." ;; esac
+
+# ---- resolve the repo; a key that cannot be computed is an error ------------
+REPO="$(cd "${REPO}" 2>/dev/null && pwd -P)" || die 2 "--repo is not a directory" "pass --repo <a checkout of the repo>."
+COMMON="$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+  || die 2 "${REPO} is not inside a git repository" "pass --repo <a checkout or worktree of the repo>."
+case "${COMMON}" in
+  /*) ;;
+  *) die 2 "git common dir '${COMMON}' is not absolute" "run from a normal checkout or worktree of the repo." ;;
+esac
+STORE="$(mh_store "${COMMON}")"
+LANES="${COMMON}/main-health-lanes"
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# ---- status -----------------------------------------------------------------
+if [ "${CMD}" = status ]; then
+  rc=0; mh_read_red "${COMMON}" || rc=$?
+  case "${rc}" in
+    0) printf 'RED %s since %s (first red %s); record %s; alert %s\n' \
+         "${MH_RED_SHA}" "${MH_RED_SINCE:-?}" "${MH_RED_FIRST:-?}" "${MH_RED_RECORD:-?}" "${MH_RED_ALERT:-none}"
+       exit 1 ;;
+    2) printf 'COULD NOT LOOK: %s\n' "${MH_WHY}"
+       die 3 "COULD NOT LOOK whether main is red: ${MH_WHY}" "inspect ${STORE}; remove a corrupt marker only after re-running main-health check --repo ${REPO}, which rewrites it from a real gate run." ;;
+  esac
+  tip="$(git -C "${REPO}" rev-parse --verify -q 'refs/remotes/origin/main^{commit}' 2>/dev/null || true)"
+  if [ -z "${tip}" ]; then
+    printf 'no red known; refs/remotes/origin/main does not resolve here: unchecked\n'
+    exit 0
+  fi
+  v="$(mh_kv "$(mh_verdict_path "${COMMON}" "${tip}")" verdict)"
+  printf 'no red known; origin/main %s: %s\n' "${tip}" "${v:-unchecked}"
+  exit 0
+fi
+
+# ---- check ------------------------------------------------------------------
+mkdir -p "${STORE}/verdicts" "${STORE}/logs" "${LANES}" \
+  || die 3 "cannot create ${STORE} or ${LANES}" "check that ${COMMON} is writable and the disk is not full."
+
+exec 8>>"${STORE}/check.lock" || die 3 "cannot open ${STORE}/check.lock" "check that ${STORE} is writable."
+flock -w "${WAIT}" 8 \
+  || die 3 "another main-health check held the lock for ${WAIT}s; nothing was checked" "re-run later, or pass a larger --wait. The holder's gate is queued in test-slot (~/dev/custom/ai/bin/test-slot --status)."
+
+# Under the lock, any lane left in LANES is a crashed run's corpse.
+for d in "${LANES}"/*; do
+  [ -e "${d}" ] || continue
+  git -C "${REPO}" worktree remove --force "${d}" >/dev/null 2>&1 || rm -rf -- "${d}"
+done
+git -C "${REPO}" worktree prune >/dev/null 2>&1 || true
+
+timeout 120 git -C "${REPO}" fetch -q origin 2>"${STORE}/.fetch-err.$$"; frc=$?
+ferr="$(head -n 3 "${STORE}/.fetch-err.$$" 2>/dev/null | tr '\n' ' ')"; rm -f "${STORE}/.fetch-err.$$"
+[ "${frc}" -eq 0 ] \
+  || die 3 "COULD NOT MEASURE: git fetch origin failed (exit ${frc}: ${ferr}); no verdict on a possibly stale ref" "fix the remote or the network (git -C ${REPO} fetch origin), then re-run main-health check."
+TIP="$(git -C "${REPO}" rev-parse --verify -q 'refs/remotes/origin/main^{commit}' 2>/dev/null)" \
+  || die 3 "COULD NOT MEASURE: refs/remotes/origin/main does not resolve after the fetch" "check that origin has a main branch (git -C ${REPO} ls-remote origin main)."
+
+grc=0; gate="$(ir_declared_gate_on "${REPO}" "${TIP}")" || grc=$?
+if [ "${grc}" -eq 2 ]; then
+  die 3 "COULD NOT MEASURE: ${TIP} is not in the object store" "git -C ${REPO} fetch origin, then re-run."
+fi
+if [ "${grc}" -ne 0 ] || [ "${gate}" != ai/bin/harness-gate ]; then
+  die 2 "origin/main ${TIP} declares no ai/bin/harness-gate (declared: '${gate:-none}'); main-health covers the no-CI harness repo only" "run it on ~/dev/custom. A repo with CI (bin/prep-commit.sh, gen_saas) is checked by its own post-merge CI."
+fi
+
+REC="$(mh_verdict_path "${COMMON}" "${TIP}")"
+LOG="${STORE}/logs/${TIP}.log"
+
+# write_kv <file> <key=value...> : atomic.
+write_kv() {
+  local f="$1" tmp; shift
+  tmp="${f}.tmp.$$"
+  printf '%s\n' "$@" > "${tmp}" && mv -f "${tmp}" "${f}"
+}
+
+# send_alert : one harness-alerts message for the red episode. Prints the
+# delivered message name; non-zero when the send failed.
+send_alert() {
+  local body out rc name sm="${MAIN_HEALTH_SEND_MAIL:-${AI_DIR}/skills/athena:inbox/bin/send-mail}"
+  body="${STORE}/.alert-body.$$"
+  {
+    printf 'main-red: origin/main of %s is RED\n' "$(basename "$(dirname "${COMMON}")")"
+    printf 'sha: %s\n' "${TIP}"
+    printf 'first_red: %s\n' "${first}"
+    printf 'since: %s\n' "${since}"
+    printf 'record: %s\n' "${REC}"
+    printf 'log: %s\n' "${LOG}"
+    printf '\nai/bin/main-health gated origin/main after a landing and the harness gate FAILED.\n'
+    printf 'Pushes to main are refused until a gated fix lands (stop the line).\n'
+    printf 'Fix: read the log, land a fix gated by integration-gate --with-critic on a branch that contains %s, then run main-health check to clear the marker.\n' "${TIP}"
+  } > "${body}" || { rm -f "${body}"; return 4; }
+  [ -x "${sm}" ] || { echo "send-mail is missing: ${sm}" >&2; rm -f "${body}"; return 4; }
+  out="$(cd -- "${TOOL_REPO}" && timeout 20 "${sm}" --local harness-alerts-detector main-red \
+          --to custom --re "${REC}" --body-file "${body}" 2>&1)"; rc=$?
+  rm -f "${body}"
+  if [ "${rc}" -ne 0 ]; then printf '%s\n' "${out}" | head -n 3 >&2; return "${rc}"; fi
+  name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
+  printf '%s\n' "${name:-?}"
+}
+
+# apply <green|red> : keep the marker in step with the tip's verdict; exit.
+apply() {
+  local v="$1" mrc=0 alert first since
+  mh_read_red "${COMMON}" || mrc=$?
+  if [ "${v}" = green ]; then
+    if [ "${mrc}" -ne 1 ]; then
+      rm -f -- "$(mh_red_path "${COMMON}")" \
+        || die 3 "cannot remove the red marker $(mh_red_path "${COMMON}")" "check that ${STORE} is writable."
+      printf 'main-health: origin/main %s is GREEN; red marker (was %s) cleared.\n' "${TIP}" "${MH_RED_SHA:-unreadable}"
+    else
+      printf 'main-health: origin/main %s is GREEN.\n' "${TIP}"
+    fi
+    exit 0
+  fi
+  if [ "${mrc}" -eq 0 ]; then
+    first="${MH_RED_FIRST:-${MH_RED_SHA}}"; since="${MH_RED_SINCE}"; alert="${MH_RED_ALERT}"
+  else
+    first="${TIP}"; since="$(now)"; alert=""
+  fi
+  if [ -z "${alert}" ] || [ "${alert}" = FAILED ]; then
+    if alert="$(send_alert)"; then :; else
+      alert=FAILED
+      echo "main-health: the main-red harness-alert could NOT be sent. Nothing was recorded as sent, so the next check retries." >&2
+    fi
+  fi
+  write_kv "$(mh_red_path "${COMMON}")" "schema=${MH_SCHEMA_RED}" "sha=${TIP}" "first_red=${first}" \
+    "since=${since}" "record=${REC}" "alert=${alert}" \
+    || die 3 "RED, but the red marker could not be written" "check that ${STORE} is writable, then re-run main-health check --repo ${REPO}."
+  printf 'main-health: origin/main %s is RED (red since %s, first red %s). Marker %s; alert %s.\n' \
+    "${TIP}" "${since}" "${first}" "$(mh_red_path "${COMMON}")" "${alert}"
+  printf 'main-health: origin/main %s is RED; pushes to main are refused until a gated fix lands.\nFix: read %s, land a fix gated by integration-gate --with-critic on a branch containing %s, then run main-health check --repo %s.\n' \
+    "${TIP}" "$(mh_kv "${REC}" log)" "${TIP}" "${REPO}" >&2
+  exit 1
+}
+
+# 1. A tip that already has a verdict is not re-gated.
+if [ "${RECHECK}" -eq 0 ] && [ -f "${REC}" ]; then
+  v="$(mh_kv "${REC}" verdict)"
+  case "${v}" in
+    green|red) printf 'main-health: origin/main %s already checked (%s, %s).\n' "${TIP}" "${v}" "$(mh_kv "${REC}" checked_at)"
+               apply "${v}" ;;
+  esac
+fi
+
+# 2. integration-gate passed exactly this SHA: the landing pushed the gated
+#    head unchanged, so the tree on main is the tree that was gated.
+if [ "${RECHECK}" -eq 0 ] && ir_read_receipt "${COMMON}" "${TIP}" "${TIP}"; then
+  write_kv "${REC}" "schema=${MH_SCHEMA_VERDICT}" "sha=${TIP}" "verdict=green" "source=receipt" \
+    "checked_at=$(now)" "receipt=${IR_RECEIPT}" "log=" \
+    || die 3 "cannot write the verdict record ${REC}" "check that ${STORE} is writable."
+  apply green
+fi
+
+# 3. Gate the landed tree in a short-lived detached lane.
+LANE="${LANES}/${TIP:0:12}-$$"
+cleanup() {
+  git -C "${REPO}" worktree remove --force "${LANE}" >/dev/null 2>&1 || rm -rf -- "${LANE}"
+  git -C "${REPO}" worktree prune >/dev/null 2>&1 || true
+  rm -f "${STORE}/.slot-outcome.$$"
+}
+trap cleanup EXIT
+git -C "${REPO}" worktree add -q --detach "${LANE}" "${TIP}" >/dev/null 2>&1 \
+  || die 3 "COULD NOT MEASURE: cannot create the lane ${LANE} at ${TIP}" "check disk space and git -C ${REPO} worktree list, then re-run."
+
+SLOT="${MAIN_HEALTH_TEST_SLOT:-${HERE}/test-slot}"
+rm -f "${STORE}/.slot-outcome.$$"
+( cd "${LANE}" && "${SLOT}" --label "main-health ${TIP:0:12}" --wait-timeout 3600 \
+    --outcome-file "${STORE}/.slot-outcome.$$" -- timeout 1500 ./ai/bin/harness-gate ) >"${LOG}" 2>&1 8>&-
+rc=$?
+outcome="$(cat "${STORE}/.slot-outcome.$$" 2>/dev/null || true)"
+case "${outcome}" in
+  "ran exit="*) ;;
+  timeout) die 3 "COULD NOT MEASURE: test-slot never came free, so the gate never ran on ${TIP} (log ${LOG})" \
+             "re-run main-health check later; test-slot --status shows the queue." ;;
+  *) die 3 "COULD NOT MEASURE: test-slot exited ${rc} and recorded no outcome, so whether the gate ran on ${TIP} is unknown (log ${LOG})" \
+       "read ${LOG}, fix what test-slot reports, and re-run main-health check." ;;
+esac
+case "${rc}" in
+  0) v=green ;;
+  1) v=red ;;
+  *) die 3 "COULD NOT MEASURE: the gate on ${TIP} exited ${rc}, neither pass (0) nor fail (1); no verdict recorded (log ${LOG})" \
+       "read ${LOG}: exit 6 is a stale origin ref, 124 the 1500 s timeout, 128+n a signal. Fix the cause and re-run main-health check." ;;
+esac
+write_kv "${REC}" "schema=${MH_SCHEMA_VERDICT}" "sha=${TIP}" "verdict=${v}" "source=gate" \
+  "checked_at=$(now)" "gate_rc=${rc}" "log=${LOG}" \
+  || die 3 "cannot write the verdict record ${REC}" "check that ${STORE} is writable."
+# Keep 30 days of gate logs.
+find "${STORE}/logs" -maxdepth 1 -type f -name '*.log' -mtime +30 -delete 2>/dev/null || true
+apply "${v}"

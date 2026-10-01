@@ -388,6 +388,87 @@ chmod 700 "${TMP}/ro"
   || bad "26. fail-open push" "rc=${R1}/${R2} out1='${O1}' out2='${O2}' err='${ERR}'"
 
 echo
+echo "--- DND-1482: a push to main is REFUSED while main-health records main RED ---"
+# red_marker <work dir> <red sha> : write main-health's red marker into the
+# repo's git common dir, as ai/bin/main-health does on a RED verdict.
+red_marker() {
+  local c; c="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)"
+  mkdir -p "${c}/main-health"
+  printf 'schema=main-health-red/1\nsha=%s\nfirst_red=%s\nsince=2026-10-01T00:00:00Z\nrecord=%s/main-health/verdicts/%s\nalert=\n' \
+    "$2" "$2" "${c}" "$2" > "${c}/main-health/red"
+}
+# pass_receipt <work dir> <head> <base> : integration-gate's pass receipt for <head>.
+pass_receipt() {
+  local c; c="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)"
+  mkdir -p "${c}/integration-receipts"
+  jq -n --arg h "$2" --arg b "$3" '{schema:"integration-receipt/1", verdict:"pass", head:$h, base:$b,
+    target_ref:"origin/main", recorded_at:"2026-10-01T00:00:00Z"}' > "${c}/integration-receipts/$2.json"
+}
+is_red_refusal() { [ "${RC}" = 3 ] && [[ "${ERR}" == *"RED MAIN"* ]] && [[ "${ERR}" == *"Fix:"* ]]; }
+
+# 27. No marker: a push to main proceeds (no red is known).
+origin_with_main r1
+ghpush "${W}" "${TMP}/r1-store" push -q origin HEAD:main
+[ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${AFTER}" ] \
+  && ok "27. no red-main marker: a push to main lands" \
+  || bad "27. no marker blocks nothing" "rc=${RC} err='${ERR}'"
+
+# 28. Marker RED at origin's main; an ungated commit on top: REFUSED, origin
+# untouched, and the refusal names the red SHA.
+origin_with_main r2; red_marker "${W}" "${BEFORE}"
+ghpush "${W}" "${TMP}/r2-store" push -q origin HEAD:main
+is_red_refusal && [ "$(git --git-dir="${O}" rev-parse main)" = "${BEFORE}" ] && [[ "${ERR}" == *"${BEFORE}"* ]] \
+  && ok "28. main RED, ungated head: push refused (exit 3, RED MAIN, Fix:), origin main unmoved" \
+  || bad "28. red main refuses an ungated push" "rc=${RC} err='${ERR}' main=$(git --git-dir="${O}" rev-parse main)"
+
+# 29. Same, explicit <sha>:refs/heads/main spelling, and the dry-run seam.
+gha "${W}" push origin "${AFTER}:refs/heads/main"
+is_red_refusal && ok "29. <sha>:refs/heads/main is refused too, before the dry-run print" \
+  || bad "29. explicit refspec refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# 30. The fix: the head contains the red SHA and integration-gate passed
+# exactly it. It lands, with a note.
+pass_receipt "${W}" "${AFTER}" "${BEFORE}"
+ghpush "${W}" "${TMP}/r2-store" push -q origin HEAD:main
+[ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${AFTER}" ] && [[ "${ERR}" == *"lands as the fix"* ]] \
+  && ok "30. main RED, gated head containing the red SHA: lands as the fix" \
+  || bad "30. gated fix lands" "rc=${RC} err='${ERR}'"
+
+# 31. A gated head that does NOT contain the red SHA is not a fix.
+origin_with_main r3
+SIDE="$(git -C "${W}" commit-tree "$(git -C "${W}" rev-parse HEAD^{tree})" -m side)"
+red_marker "${W}" "${BEFORE}"; pass_receipt "${W}" "${SIDE}" "${SIDE}"
+gha "${W}" push origin "${SIDE}:main"
+is_red_refusal && [[ "${ERR}" == *"does not contain"* ]] \
+  && ok "31. a gated head that does not contain the red SHA is refused" \
+  || bad "31. unrelated gated head refused" "rc=${RC} err='${ERR}'"
+
+# 32. A push to another branch, and a --dry-run push to main, are not landings.
+gha "${W}" push origin HEAD:refs/heads/topic
+[ "${RC}" = 0 ] && ok "32. main RED: a push to another branch proceeds" \
+  || bad "32. topic push blocked" "rc=${RC} err='${ERR}'"
+gha "${W}" push --dry-run origin HEAD:main
+[ "${RC}" = 0 ] && ok "32b. main RED: a --dry-run push to main proceeds (it lands nothing)" \
+  || bad "32b. dry-run push blocked" "rc=${RC} err='${ERR}'"
+
+# 33. A bare `push` and `push origin HEAD` from main name main implicitly.
+gha "${W}" push
+is_red_refusal && ok "33. main RED: a bare push from the main branch is refused" \
+  || bad "33. bare push refused" "rc=${RC} err='${ERR}'"
+gha "${W}" push origin HEAD
+is_red_refusal && ok "33b. main RED: push origin HEAD from the main branch is refused" \
+  || bad "33b. HEAD push refused" "rc=${RC} err='${ERR}'"
+
+# 34. A marker that cannot be read is COULD NOT LOOK, never "no red".
+origin_with_main r4
+C4="$(git -C "${W}" rev-parse --path-format=absolute --git-common-dir)"
+mkdir -p "${C4}/main-health"; printf 'garbage\n' > "${C4}/main-health/red"
+gha "${W}" push origin HEAD:main
+[ "${RC}" = 3 ] && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && ok "34. a malformed marker refuses as COULD NOT LOOK (not read as no red)" \
+  || bad "34. malformed marker" "rc=${RC} err='${ERR}'"
+
+echo
 echo "==================================================="
 printf 'RESULT: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 echo "==================================================="

@@ -86,11 +86,29 @@ The landing, as Cody confirmed it (2026-10-01):
 4. A **conflicted** rebase is the one case that needs a full re-gate: release
    the lock, resolve the conflict, run `integration-gate --with-critic` on the
    new head, and start again.
-5. **Stop the line** on a red main or a failed deploy: land nothing more until
-   it is fixed, and fix it first. In `~/dev/custom` nothing gates `main` after
-   a landing, so the next `integration-gate` is the detector: a RED stage in
-   files the branch did not touch means `main` is red. When in doubt, run
-   `harness-gate` in a worktree at `origin/main`.
+5. **Check `main` after the push**, outside the lock:
+   `~/dev/custom/ai/bin/main-health check --repo ~/dev/custom` (it queues its
+   own gate in test-slot; never wrap it in test-slot). A landing that pushed
+   the gated head unchanged is green from its receipt with no gate run; only a
+   clean rebase onto a moved `main` costs one `harness-gate` of the new tip.
+   Run it in the background if you have more to land; it is detection, not a
+   merge gate, so it never holds the next push. The hourly shipwright cron
+   runs the same check as the backstop for landings made by anyone else.
+6. **Stop the line** on a red main or a failed deploy: land nothing more until
+   it is fixed, and fix it first. In `~/dev/custom`, `main-health` exit 1 (or
+   a `main-red` message on harness-alerts) means `main` is red. While it is,
+   `gh-athena git push` refuses any push to `main` (exit 3, `RED MAIN`) except
+   a gated fix: a head that contains the red SHA and has its own
+   `INTEGRATION OK` receipt. Land the fix, then run `main-health check` again;
+   GREEN clears the marker and unblocks the queue. A red you believe was
+   environmental: `main-health check --recheck` re-gates the tip.
+
+**Later (2026-10-01, DND-1482):** step 5 said "In `~/dev/custom` nothing gates
+`main` after a landing, so the next `integration-gate` is the detector … When
+in doubt, run `harness-gate` in a worktree at `origin/main`." Superseded by
+`ai/bin/main-health`: the post-landing check above, the red-main marker, and
+the push refusal that reads it. The no-re-gate-before-push rule (step 3) is
+unchanged.
 
 Nothing in `gh-athena` checks the lock on this path (DND-1370). Measured
 2026-09-30 ~10:38Z: an admiral pushed DND-1048/717 unlocked while another held

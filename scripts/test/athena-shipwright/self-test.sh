@@ -65,6 +65,14 @@ trap cleanup EXIT INT TERM
 # (send-mail resolves a channel from the entry of its cwd's repo). The suite
 # refuses to go on if the pin did not take.
 export ATHENA_INBOX_ROOT="${TMP}/inbox-root"
+# THE POST-LANDING MAIN CHECK IS STUBBED FOR THE WHOLE SUITE (DND-1482). Every
+# tick runs ai/bin/main-health check, which fetches and may run a harness gate;
+# against a fixture repo that is never wanted. The stub records its argv in
+# MH_STUB_LOG and exits MH_STUB_RC (default 0).
+MH_STUB="${TMP}/stub-main-health"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "${MH_STUB_LOG:-/dev/null}"\nexit "${MH_STUB_RC:-0}"\n' > "$MH_STUB"
+chmod +x "$MH_STUB"
+export SHIPWRIGHT_MAIN_HEALTH="$MH_STUB"
 unset CLAUDE_AGENT_ID CLAUDE_AGENT_TYPE
 REPO_ROOT="$(cd -- "${SCRIPTS}/.." && pwd -P)"
 # The git-stub fixtures below delegate to the REAL git, never the agent PATH
@@ -2061,6 +2069,48 @@ else
   fi
 fi
 chmod 755 "$(sd "$r")/runs"
+
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — the post-landing main check backstop (DND-1482)'
+
+# Every tick checks origin/main, even one that yields to a dirty main checkout:
+# the check runs in its own lane and must not depend on the main checkout.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+rc="$(run_runner "$r" MH_STUB_LOG="$a/mh.log")"
+if [ "$rc" -eq 0 ] && [ "$(cat "$a/mh.log" 2>/dev/null)" = "check --repo $(real "$r")" ]; then
+  ok "a yielding tick still runs main-health check --repo <main checkout>"
+else
+  bad "main-health runs every tick" "rc=$rc mh='$(cat "$a/mh.log" 2>&1)' err=$(cat "$a/runner.err")"
+fi
+
+# A RED main or a check that could not measure never changes the tick's exit
+# code, and each is named on stderr with where its log is.
+for mrc in 1 3; do
+  r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+  printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+  rc="$(run_runner "$r" MH_STUB_LOG="$a/mh.log" MH_STUB_RC="$mrc")"
+  if [ "$rc" -eq 0 ] && grep -q 'main-health' "$a/runner.err" && grep -q '\.main-health\.log' "$a/runner.err"; then
+    ok "main-health exit ${mrc}: the tick's exit code is unchanged (0) and the outcome is logged with its log path"
+  else
+    bad "main-health exit ${mrc} is isolated" "rc=$rc err=$(cat "$a/runner.err")"
+  fi
+done
+if grep -q 'Fix:' "$a/runner.err"; then
+  ok "a check that could not measure carries a Fix: line"
+else
+  bad "could-not-measure Fix:" "err=$(cat "$a/runner.err")"
+fi
+
+# A missing main-health is loud: origin/main was NOT checked, never silently.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+rc="$(run_runner "$r" SHIPWRIGHT_MAIN_HEALTH="$a/no-such-main-health")"
+if [ "$rc" -eq 0 ] && grep -q 'NOT checked' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "a missing main-health says origin/main was NOT checked, with a Fix:"
+else
+  bad "missing main-health is loud" "rc=$rc err=$(cat "$a/runner.err")"
+fi
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

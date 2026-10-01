@@ -902,10 +902,22 @@ it per `athena:merge-boarding` (the no-CI rule there names the steps):
    then release the lock; a conflicted rebase: release the lock, resolve,
    re-gate (`integration-gate --with-critic`), and start again;
 3. confirm it landed (`ai/bin/confirm-merged`);
-4. fast-forward the main checkout (`git merge --ff-only`).
+4. fast-forward the main checkout (`git merge --ff-only`);
+5. check the new `main`: `ai/bin/main-health check` (outside the lock; it is
+   detection, not a merge gate).
 
 A red `main` or a failed deploy stops the line: nothing more lands until it is
-fixed.
+fixed. Here that is enforced: `ai/bin/main-health` gates `origin/main` after a
+landing (the admiral's step 5, and the hourly shipwright tick as the
+backstop), keeps a red marker under the git common dir while the tip is RED,
+and alerts once per red episode on harness-alerts. While it is red,
+`gh-athena git push` refuses a push to `main` except a gated fix: a head that
+contains the red SHA and has its own `INTEGRATION OK` receipt.
+`athena:merge-boarding` → the no-CI landing has the steps.
+
+**Later (2026-10-01, DND-1482):** this paragraph ended at "nothing more lands
+until it is fixed", and nothing checked `origin/main` after a landing.
+Superseded by `ai/bin/main-health` and the push refusal above.
 
 **Later (2026-10-01, DND-1463):** steps 1-3 read "rebase onto
 `origin/main`; re-gate the integrated head (`integration-gate`); merge, then
