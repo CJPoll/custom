@@ -133,21 +133,26 @@ done
 
 # 2e. DND-1489: a malformed argument and a legitimate not-found must not share
 #     an exit code, or a caller cannot tell them apart. A requested PR the
-#     forge cannot find is exit 2; a malformed --since is not.
-PATH="${FAKEBIN}:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" --pr 424242 >"${TMP}/pr-out" 2>"${TMP}/pr-err" </dev/null
+#     forge reports does not exist is exit 2; a malformed --since is exit 1.
+#     The stub answers as the real gh does for a nonexistent PR number.
+NFBIN="${TMP}/notfoundbin"
+mkdir -p "${NFBIN}"
+printf '#!/bin/sh\necho "GraphQL: Could not resolve to a PullRequest with the number of 424242. (repository.pullRequest)" >&2\nexit 1\n' >"${NFBIN}/gh"
+chmod +x "${NFBIN}/gh"
+PATH="${NFBIN}:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" --pr 424242 >"${TMP}/pr-out" 2>"${TMP}/pr-err" </dev/null
 PR_CODE=$?
 run --repo "${GHREPO}" --since nonsense
 SINCE_CODE="${CODE}"
-if [ "${PR_CODE}" -eq 2 ] && grep -q 'not found' "${TMP}/pr-err" && grep -q 'Fix:' "${TMP}/pr-err" \
-   && [ ! -s "${TMP}/pr-out" ]; then
-  ok "a missing PR exits 2 (not found), with a Fix:"
+if [ "${PR_CODE}" -eq 2 ] && grep -q 'Could not resolve to a PullRequest' "${TMP}/pr-err" \
+   && grep -q 'Fix:' "${TMP}/pr-err" && [ ! -s "${TMP}/pr-out" ]; then
+  ok "a PR the forge reports does not exist exits 2, with a Fix:"
 else
-  bad "a missing PR exits 2" "code=${PR_CODE} err=$(head -c 240 "${TMP}/pr-err")"
+  bad "a PR the forge reports does not exist exits 2" "code=${PR_CODE} err=$(head -c 240 "${TMP}/pr-err")"
 fi
-if [ "${SINCE_CODE}" -ne "${PR_CODE}" ]; then
+if [ "${SINCE_CODE}" -eq 1 ] && [ "${PR_CODE}" -eq 2 ]; then
   ok "a malformed --since (exit ${SINCE_CODE}) and a missing PR (exit ${PR_CODE}) have distinct codes"
 else
-  bad "a malformed --since and a missing PR have distinct codes" "both exit ${PR_CODE}"
+  bad "a malformed --since exits 1 and a missing PR exits 2" "since=${SINCE_CODE} pr=${PR_CODE}"
 fi
 
 run --help --bogus

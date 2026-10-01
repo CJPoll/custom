@@ -54,8 +54,10 @@
 # subjects name.
 #
 # Exit: 0 ok, 1 usage/tool error (an unreadable --since included), 2 a
-# requested PR/MR is missing, 3 SCAN INCOMPLETE. 2 means not-found and nothing
-# else, so a caller can tell a malformed argument from a miss (DND-1489).
+# requested PR/MR is not found or the forge could not read it, 3 SCAN
+# INCOMPLETE. 2 is never a usage error, so a caller can tell a malformed
+# argument from a failed lookup (DND-1489). 2 does not yet tell a missing PR
+# from an unreadable forge: both reach run_scan as a nil from facts.
 
 require "time"
 require "json"
@@ -1539,8 +1541,9 @@ def main(argv)
     unless since
       warn "lead-time: usage error — #{why}."
       warn "Fix: pass --since as #{LeadTime::SINCE_FORMS}."
-      # 1, like every other usage error: 2 means a requested PR/MR is
-      # missing, and a malformed argument must not read as a miss (DND-1489).
+      # 1, like every other usage error: 2 means a requested PR/MR was not
+      # found or not readable, and a malformed argument must not read as a
+      # failed lookup (DND-1489).
       return 1
     end
   end
@@ -1600,8 +1603,8 @@ if $PROGRAM_NAME == __FILE__
         --help         this text
 
       Exit: 0 ok; 1 usage or tool error (a --since that is not a date or
-      zoned time included); 2 a requested PR/MR is missing, and nothing else;
-      3 SCAN INCOMPLETE.
+      zoned time included); 2 a requested PR/MR is not found or the forge
+      could not read it (never a usage error); 3 SCAN INCOMPLETE.
     TXT
     exit 0
   end

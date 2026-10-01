@@ -148,11 +148,13 @@ on a `SCAN INCOMPLETE`.
 
 `--since` takes `YYYY-MM-DD` (00:00:00Z that day) or RFC 3339 with a zone.
 Anything else exits 1, like every other usage error, with a `Fix:` before
-the repo is read. Exit 2 means only that a requested PR/MR is missing.
+the repo is read. Exit 2 is never a usage error: it means a requested PR/MR
+was not found or the forge could not read it. It does not yet tell those two
+apart (both reach `run_scan` as a nil from the forge's `facts`).
 
 **Later (2026-10-01, DND-1489):** a malformed `--since` exited 2. Superseded
-by exit 1: 2 already meant a requested PR/MR is missing, so a caller could not
-tell a malformed argument from a legitimate not-found by its code. The callers
+by exit 1: 2 already meant a requested PR/MR is not found or unreadable, so a
+caller could not tell a malformed argument from a failed lookup by its code. The callers
 were swept: `lead-time-phases --ingest` reads only 0 and 3 as distinct and any
 other code as a fault, and the improver's watch scan reads its meta only on 0.
 
