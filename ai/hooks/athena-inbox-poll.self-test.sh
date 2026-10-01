@@ -163,9 +163,17 @@ REAL_SETTINGS_BACKUPS_BEFORE="$(real_settings_backups)"
 # this suite's OWN setup-hooks calls, each recorded in SH_WINDOWS as
 # "<start> <end>" by suite_setup_hooks. A name whose time cannot be read, or a
 # windows file that cannot be read, counts as the suite's: never assumed
-# external. Residual, said out loud: an external install inside the same
-# second as a suite call still reads as the suite's (a false red, never a
-# false green).
+# external. Residuals, said out loud:
+#   - an external install inside the same second as a suite call, or inside a
+#     suite window repeated by the DST fall-back hour (the names are local
+#     time), still reads as the suite's: a false red, never a false green;
+#   - the attribution assumes every suite call goes through suite_setup_hooks.
+#     F-11b counts the lines that run setup-hooks and requires exactly one;
+#   - while an external install DID run, check (4) accepts a hook-set change
+#     that wires no path under ${TMP}. A suite leak that only DROPS a hook in
+#     that same window would pass. Every setup-hooks call here runs from a
+#     fixture under ${TMP}, so a leaked install adds ${TMP} paths, and its
+#     backup lands inside a suite window and fails on its own.
 SH_WINDOWS="${TMP}/setup-hooks-windows"
 : > "${SH_WINDOWS}"
 sh_now() { date +%Y%m%d-%H%M%S; }
@@ -1577,10 +1585,13 @@ assert_eq "F-11b an unreadable windows file makes every new backup the suite's" 
 assert_eq "F-11b a backup that existed before the suite is not new" "" \
   "$(backup_trail_verdict "${BT_B}" "${BT_B}" "${BT_W}")"
 # The attribution holds only while every setup-hooks call records its window,
-# so the suite runs setup-hooks in exactly one place: suite_setup_hooks. Every
-# call here sets HOOKS_SETTINGS_FILE on the same line as the command.
+# so the suite runs setup-hooks in exactly one place: suite_setup_hooks. This
+# counts every line that RUNS it, with or without HOOKS_SETTINGS_FILE (a leak
+# is precisely the call without it): the path followed by an argument (-- or
+# "$..."), or by a closing quote. A message quoting the command (preceded by a
+# single quote) or a comment is not a call.
 assert_eq "F-11b setup-hooks is invoked only inside suite_setup_hooks" "1" \
-  "$(grep -cE '^[^#]*HOOKS_SETTINGS_FILE=[^ ]+ +scripts/setup-hooks' "${HERE}/athena-inbox-poll.self-test.sh")"
+  "$(grep -cE "^[^#']*scripts/setup-hooks\"? *(\"|\\\$|--)" "${HERE}/athena-inbox-poll.self-test.sh")"
 
 # HOME is restored for the ruby checks: `ruby` here is an asdf shim that
 # resolves its version data under $HOME, so running it with the fake HOME makes

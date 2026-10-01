@@ -133,3 +133,14 @@ SessionStart "" -> ai/hooks/a.sh`, 42 passed, 1 failed. After the fix: 44 passed
 | `ahead-skips-newer-drift`: the newer bar's drift rule is dropped | `live wiring matches neither the pinned nor the newer bar -> still FAIL` |
 | `ahead-skips-stale`: the newer bar's stale-matcher rule is dropped | `newer rows wired plus a stale matcher -> still FAIL` (added after this mutation first survived) |
 | `newer-tip-disabled`: `Landed.newer_tip` always returns nil | `live wiring equals a NEWER origin/main -> pass ...` |
+
+Review round (DND-1552). Two cases added for the reviewer's must-fixes, each
+RED against the first-round checker (commit d3d06680), 44 passed, 2 failed:
+- `branch cut before the pin, merge-base row the newer main retired -> still FAIL`:
+  `exit 0, want 1` (the newer bar was the newer tip alone, so a row the branch's
+  merge-base still requires was excused). Fixed: the newer bar keeps every
+  landed point older than the pin.
+- `newer origin/main has no registry -> pinned drift stands, says it could not judge`:
+  `exit 0, want 1` (a missing newer registry read as an empty bar). Fixed: it is
+  Unreadable, and the pinned drift stands.
+After the fix: 46 passed, 0 failed.

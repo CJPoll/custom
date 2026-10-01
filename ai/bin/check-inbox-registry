@@ -201,7 +201,8 @@ end
 # declaration for the same file. Returns [effective, ahead, note]: effective is
 # the bar with each ahead entry replaced by its newer declaration (so drift()
 # still checks its mode, file type and repo identity), ahead the file names,
-# note a line for the output (nil when there is nothing to say). Any failure to
+# note the newer bar described when something is ahead, else a note saying
+# what was checked (nil only when there is no newer origin/main). Any failure to
 # read the newer declaration leaves the pinned bar as it is, and says so.
 def ahead_of_pin(entries, newer)
   got = newer.call
@@ -214,7 +215,11 @@ def ahead_of_pin(entries, newer)
     p["file"] if want && want != p["entry"] && InboxRegistry.live_entry(p["file"]) == want
   end
   effective = entries.map { |p| ahead.include?(p["file"]) ? p.merge("entry" => by_file[p["file"]]) : p }
-  [effective, ahead, ahead.empty? ? nil : desc]
+  return [effective, ahead, desc] unless ahead.empty?
+
+  # Looked and found nothing is said, so it never reads like "did not look".
+  [entries, [], "checked #{desc}: no drifting live entry equals its declaration there, so none is " \
+                "ahead of the pinned bar"]
 rescue Landed::Unreadable, Landed::Mismatch, InboxRegistry::Error => e
   [entries, [], "could not read a newer origin/main to tell whether the live registry is ahead of the " \
                 "pinned bar (#{e.message}); it is measured against the pinned bar alone"]

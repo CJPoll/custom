@@ -722,9 +722,12 @@ and pronoun-guard; nothing detected it. The durable fix:
   required until the change lands, and the new one is pending.
   Under harness-gate the bar is origin/main as pinned at gate start. When it
   fails and origin/main has since moved past the pin, live wiring that passes
-  the NEWER origin/main's registry in full is named *ahead of the pinned bar*
-  and passes (DND-1552). So a main-checkout install after a landing no longer
-  reddens every concurrent gate. Wiring that passes neither bar still fails.
+  the NEWER bar in full is named *ahead of the pinned bar* and passes
+  (DND-1552). The newer bar is the newer origin/main's registry plus any
+  landed point older than the pin (a merge-base before it), so only the pin
+  is superseded and a branch that needs a rebase still fails. So a
+  main-checkout install after a landing no longer reddens every concurrent
+  gate. Wiring that passes neither bar still fails.
 - **Recover:** `scripts/setup-hooks --install` MERGES the registry into
   `settings.json` (backing it up first, idempotent) — it never rewrites the whole
   block, because a full rewrite is exactly what caused the outage. Run from the

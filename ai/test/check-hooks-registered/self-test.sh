@@ -496,6 +496,32 @@ ahead_fixture ahead-stale
   "${D}/main/ai/hooks/b.sh" "${D}/settings.json"
 pinned_check; expect "newer rows wired plus a stale matcher -> still FAIL" 1 "a\.sh" ": ahead of the pinned bar"
 
+# Only the pin is superseded. A branch cut BEFORE the pin keeps its merge-base
+# in the bar: a row the merge-base requires and the newer main retired still
+# fails, and says rebase, exactly as it does with no newer main.
+D="$(new_fixture ahead-old-base)"
+hook "${D}/main" b.sh; registry "${D}/main" "SessionStart=a.sh" "SessionStart=b.sh"; commit "${D}/main" pin
+git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+PIN="$(git -C "${D}/main" rev-parse HEAD)"
+KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+registry "${D}/main" "SessionStart=b.sh"; retire "${D}/main" "SessionStart=a.sh"; commit "${D}/main" newer
+git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+printf '{}\n' > "${D}/settings.json"
+( cd "${D}/main" && HOOKS_SETTINGS_FILE="${D}/settings.json" scripts/setup-hooks --install >/dev/null 2>&1 )
+pinned_check; expect "branch cut before the pin, merge-base row the newer main retired -> still FAIL" 1 "a\.sh" \
+  ": ahead of the pinned bar"
+
+# A newer origin/main with no registry cannot say what the wiring should be:
+# could not judge, never an empty bar that excuses everything.
+D="$(new_fixture ahead-no-registry)"
+PIN="$(git -C "${D}/main" rev-parse HEAD)"
+KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+git -C "${D}/main" rm -q ai/hooks/registry.json >/dev/null 2>&1; commit "${D}/main" drop-registry
+git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+printf '{"hooks": {}}\n' > "${D}/settings.json"
+pinned_check; expect "newer origin/main has no registry -> pinned drift stands, says it could not judge" 1 \
+  "could not read a newer origin/main" ": ahead of the pinned bar"
+
 # Unpinned, there is no newer origin/main to be ahead of.
 D="$(new_fixture unpinned-unwired)"
 printf '{"hooks": {}}\n' > "${D}/settings.json"
