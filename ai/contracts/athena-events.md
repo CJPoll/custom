@@ -4407,7 +4407,7 @@ event classified (not ignored), dedupe pre-check passed
    2a. mode off           -> the channel route, UNCHANGED: no call, no request row,
                              no judgment_calls row, no topic, no topic outcome     [webhook]
    2b. sender != owner    -> the channel route (topic reason: sender_rule)         [webhook]
-   2b'. the owner's text addresses a session (owner rule 2, session-mention-v2)
+   2b'. the owner's text addresses a session (owner rule 2, session-mention-v3)
                           -> that label's topic route, usable: its Slack inbox (route: session_mention)
                              no usable route: the channel route (topic reason: label_disabled,
                              label_unconfigured or label_stale; flagged per Route flags)
@@ -4626,24 +4626,34 @@ request** and answers Slack; the route worker finishes it.
   DND-1455's and were read from `slack_route_requests` until it shipped.
   Replaced by the text above, now that the tile shows them.
 
-**The session mention (step 2b').** Grammar `session-mention-v2`, in code and
-versioned (gen_saas `Athena.SlackEvents.SessionMention`; DND-1535, gen_saas
-#652). Only the
+**The session mention (step 2b').** Grammar `session-mention-v3`, in code and
+versioned (gen_saas `Athena.SlackEvents.SessionMention`; DND-1596, gen_saas
+#664). Only the
 first 400 characters of the owner's text are read, and only an ADDRESS
 counts. Unicode space separators read as a space, and leading Slack
 user-mention tokens (`<@U…>`, as a channel mention of the bot begins) are
-skipped. Then one of three forms, first match wins:
+skipped. Then one of four forms, tried in this order, first match wins:
 
 - the tag form ending in a colon (`harness session:`,
   `*gen_saas session (laptop):*`, as routing agreement R1 tags posts);
 - the tag form ending in a comma, with no leading `the` (`Harness session,
   give me a report`);
+- the label form: one bare session label as the first token, then a colon
+  that ends the token, so whitespace, `*`, `_` or the end of the text follows
+  it (`GenSaas: …`, `Gen_saas: …`, `*harness:* …`). Only the three labels
+  and their spellings count (`walt_ui`, `harness`, `gen_saas`); there is no
+  leading `the`, no `/` list and no comma variant. `walt_ui:17` and
+  `harness://…` are no mention;
 - a single-line lead-in of at most 80 characters ending `for the <names>
   session:`.
 
-The word `session` is required. A dash is no terminator: `Walt UI session -
-no colon` is no mention, as in v1. A comma after `the <name> session` is no
-mention either: "the harness session, I think, is down" talks ABOUT a session.
+Every form but the label form requires the word `session`. Bare `custom:`
+and `laptop:` leads are no mention and go to Jev's judgment, deliberately:
+the label form reads only the three session labels. A dash is no terminator:
+`Walt UI session - no colon` and `GenSaas - deploy it` are no mention. A
+comma after `the <name> session` is no mention either: "the harness session,
+I think, is down" talks ABOUT a session; nor is a comma after a bare label
+(`harness, status?`).
 Names: `walt_ui` (`walt ui`, `waltui`) is walt_ui; `harness` and `custom` are
 harness; `gen_saas` (`gen saas`, `gensaas`) and `laptop` are gen_saas;
 `desktop` names none. Names joined by `/` must name one label, or there is no
@@ -4652,8 +4662,24 @@ character to one character, as PCRE's `iu` does: `seſsion` (long s) is
 `session`, but `seßion` and `cuﬆom` are not, because `ß` and `ﬆ` fold only
 to two letters (DND-1554). A message that talks ABOUT a session
 ("ask the harness session to …") is not one and is judged as before. The
-router has read v2 since DND-1535 deployed (gen_saas Post-Merge Deploy run
-36877991286, 2026-10-01).
+router has read v3 since DND-1596 deployed (gen_saas `2ab943b9`, Post-Merge
+Deploy run 36902886854, 2026-10-01).
+
+**Accepted risk (v3).** A pasted heading or log line that starts with a label
+and a colon now routes as a mention, with no judgment: `Harness: the inbox is
+dark` goes to harness, `gen_saas: ** (CompileError) …` to gen_saas. That is a
+recoverable misroute between the owner's own sessions
+(`ai/contracts/athena-judgments.md` → *Trust posture*), accepted so that the
+owner's own `GenSaas: …` never depends on a model.
+
+**Later (2026-10-01, DND-1601):** the grammar was `session-mention-v2`, with
+three forms, each requiring the word `session`. Superseded by
+`session-mention-v3` (gen_saas DND-1596, #664), which adds the label form,
+tried after the comma form and before the address form. Why: the owner wrote
+`GenSaas: what is left on the slack routing epic?` and `Gen_saas: please
+merge the green PRs` on 2026-10-01; v2 read no mention, so both went to the
+judgment, and the second was misrouted to harness. The router read v2 from
+DND-1535's deploy (run 36877991286) until v3's.
 
 **Later (2026-10-01, DND-1539):** the grammar was `session-mention-v1`, an
 address "ending in a colon" in the tag form or the lead-in. Superseded by
@@ -4683,10 +4709,15 @@ vector `Walt UI session - no colon` stays no mention.
   a run (`ai/contracts/athena-judgments.md` → *Threshold provenance, n/a and
   the pinned model*). Both test suites carry the same vector list, as two
   copies kept in step by hand (nothing compares them); a change to either is
-  a new grammar version in both. Both copies are on `session-mention-v2`
-  and try the forms in the same order. The harness list also carries
-  DND-1554's 13 case-fold vectors; the gen_saas copy gains them in a
-  follow-up, and the router already answers all 13 as the list says.
+  a new grammar version in both. Both copies are on `session-mention-v3`,
+  try the forms in the same order, and carry the same 93 vectors in the same
+  order, DND-1554's 13 case-fold vectors included.
+
+  **Later (2026-10-01, DND-1601):** this bullet said both copies were on
+  `session-mention-v2` and that only the harness list carried DND-1554's
+  case-fold vectors. Superseded: gen_saas #664 added them with v3, and
+  DND-1601 moved the labeller to v3 with the full list, so `judgment-eval`
+  leaves label-form roots out of a run as the router routes them.
 
   **Later (2026-10-01, DND-1537):** this bullet said the harness copy was
   still `session-mention-v1` until DND-1537, so a comma-form root was routed

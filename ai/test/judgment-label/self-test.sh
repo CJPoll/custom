@@ -671,10 +671,9 @@ has "the tally names the rows that can never be shown context" "${OUT}" "(1 no l
 echo "== domain: the owner's routing rule as rule_confirmed labels (DND-717, D-R2)"
 
 # The parity vectors: gen_saas apps/athena/test/athena/slack_events/
-# session_mention_test.exs runs this same list against the router's
-# SessionMention.address/1 (grammar session-mention-v2). Keep them in step.
-# The last 13 (DND-1554, case folds) are not in the gen_saas copy yet; the
-# router answers each of them as listed here.
+# session_mention_test.exs runs this same list, in this order, against the
+# router's SessionMention.address/1 (grammar session-mention-v3, gen_saas
+# DND-1596). Keep them in step: all 93 are in both copies.
 VECTORS='[
   ["Gen_saas session (laptop): turn the wifi back on", "gen_saas"],
   ["harness session: status?", "harness"],
@@ -689,7 +688,7 @@ VECTORS='[
   ["The harness session asked me for 7 things: see above", nil],
   ["this is why we need the harness session to build routing", nil],
   ["ask the walt_ui session: it knows", nil],
-  ["harness: judgment routing smoke", nil],
+  ["harness: judgment routing smoke", "harness"],
   ["harness / walt_ui session: both of you", nil],
   [("x" * 81) + " for the harness session: late", nil],
   ["hello\nfor the harness session: second line", nil],
@@ -732,11 +731,49 @@ VECTORS='[
   ["HARNESS SESSION: x", "harness"],
   ["THE LAPTOP SESSION, x", nil],
   ["NOTE FOR THE GEN SAAS SESSION: x", "gen_saas"],
-  ["Walt_UI Session, x", "walt_ui"]
+  ["Walt_UI Session, x", "walt_ui"],
+  ["GenSaas: what is left on the slack routing epic?", "gen_saas"],
+  ["Gen_saas: please merge the green PRs", "gen_saas"],
+  ["gen_saas: x", "gen_saas"],
+  ["gen saas: x", "gen_saas"],
+  ["GENSAAS: x", "gen_saas"],
+  ["Harness: x", "harness"],
+  ["walt_ui: x", "walt_ui"],
+  ["WaltUI: x", "walt_ui"],
+  ["walt ui: x", "walt_ui"],
+  ["harness : x", "harness"],
+  ["GenSaas:", "gen_saas"],
+  ["GenSaas:\nplease deploy", "gen_saas"],
+  ["   GenSaas: x", "gen_saas"],
+  ["*GenSaas:* x", "gen_saas"],
+  ["*GenSaas*: x", "gen_saas"],
+  ["_harness_: x", "harness"],
+  ["<@U0BOT> GenSaas: x", "gen_saas"],
+  ["GenSaas - deploy it", nil],
+  ["GenSaas — deploy it", nil],
+  ["harness, status?", nil],
+  ["the harness: it broke", nil],
+  ["harness is down: help", nil],
+  ["Ask harness: it knows", nil],
+  ["hello\nGenSaas: x", nil],
+  ["<@U0BOT> hi GenSaas: x", nil],
+  ["walt_ui:17 is broken", nil],
+  ["harness://inbox is dark", nil],
+  ["custom: x", nil],
+  ["laptop: x", nil],
+  ["desktop: x", nil],
+  ["harness / custom: x", nil],
+  ["harness / walt_ui: x", nil],
+  ["GenSaasy: x", nil],
+  ["my harness: x", nil],
+  ["harneſs: x", nil],
+  ["harneß: x", nil]
 ]'
-ruby_eq "mention: the parity vectors all read as the router reads them [DND-717]" \
-  "57 ok" \
+ruby_eq "mention: the parity vectors all read as the router reads them [DND-717, DND-1601]" \
+  "93 ok" \
   "v = ${VECTORS}; bad = v.reject { |t, want| JudgmentLabel.session_mention(t) == want }; bad.empty? ? \"#{v.size} ok\" : bad.inspect"
+ruby_eq "mention: the grammar is versioned, as the router's SessionMention.version/0 [DND-1601]" \
+  "session-mention-v3" 'JudgmentLabel::MENTION_GRAMMAR'
 ruby_eq "mention: nil text is no mention" "nil" 'JudgmentLabel.session_mention(nil).inspect'
 ruby_eq "mention: only the lead of a long message is read" "harness" \
   'JudgmentLabel.session_mention("harness session: " + "y" * 10_000)'
@@ -792,6 +829,7 @@ mkdir -p "${RROOT}/agent-mail/walt_ui/to-custom"
   line EvN1 im "${OWNER}" "1790100002.000200" "" "a plain question with no address"
   line EvA1 im "${OWNER}" "1790100003.000300" "" "ask the harness session: about it"
   line EvC1 im "${OWNER}" "1790100004.000400" "" "Harness session, SECRET-MENTION-TEXT"
+  line EvL1 im "${OWNER}" "1790100005.000500" "" "GenSaas: SECRET-MENTION-TEXT"
 } >"${RROOT}/walt_ui-slack.jsonl"
 run "${BIN}" --propose --inbox-root "${RROOT}" --labels "${RLABELS}"
 eq "propose on the rule fixture exits 0" "${RC}" "0"
@@ -799,10 +837,12 @@ eq "a session-addressed root is rule_confirmed session_mention [DND-717]" \
   "$(jq -r 'select(.id=="EvM1") | .label + " " + .provenance + " " + .rule' "${RLABELS}")" "gen_saas rule_confirmed session_mention"
 eq "a comma-form root is rule_confirmed session_mention too (session-mention-v2) [DND-1537]" \
   "$(jq -r 'select(.id=="EvC1") | .label + " " + .provenance + " " + .rule' "${RLABELS}")" "harness rule_confirmed session_mention"
+eq "a label-form root is rule_confirmed session_mention too (session-mention-v3) [DND-1601]" \
+  "$(jq -r 'select(.id=="EvL1") | .label + " " + .provenance + " " + .rule' "${RLABELS}")" "gen_saas rule_confirmed session_mention"
 eq "without --rule-default a no-evidence root stays proposed" "$(jq -r 'select(.id=="EvN1") | .provenance' "${RLABELS}")" "proposed"
 eq "talking about a session is not addressing it" "$(jq -r 'select(.id=="EvA1") | .label + " " + .provenance' "${RLABELS}")" "walt_ui proposed"
 lacks "the labels file never carries the text" "$(cat "${RLABELS}")" "SECRET-MENTION"
-has "the report counts the mentions" "${OUT}" "session mentions (rule 2, session-mention-v2): 2 rule_confirmed"
+has "the report counts the mentions" "${OUT}" "session mentions (rule 2, session-mention-v3): 3 rule_confirmed"
 run "${BIN}" --propose --rule-default --inbox-root "${RROOT}" --labels "${RLABELS}"
 eq "--propose --rule-default exits 0" "${RC}" "0"
 eq "--rule-default labels the no-evidence roots walt_ui default_walt_ui [DND-717]" \
@@ -811,7 +851,7 @@ has "the report prints the rule_confirmed count" "${OUT}" "walt_ui rule_confirme
 run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${RLABELS}" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
 eq "judgment-eval joins rule_confirmed rows (exit 0)" "${RC}" "0"
 has "rule_confirmed default_walt_ui rows are usable eval cases [DND-717]" "${OUT}" "cases: 2 (walt_ui 2)"
-has "a session-mention root is not an eval case: the router never judges it [DND-717]" "${OUT}" "session-mention excluded: 2"
+has "a session-mention root is not an eval case: the router never judges it [DND-717]" "${OUT}" "session-mention excluded: 3"
 jq -c 'select(.id=="EvM1")' "${RLABELS}" >"${TMP}/mention-only.jsonl"
 run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${TMP}/mention-only.jsonl" --corpus "${RROOT}/walt_ui-slack.jsonl" --content-domain work
 eq "a run whose every label is a session-mention root is refused (exit 1) [DND-717]" "${RC}" "1"

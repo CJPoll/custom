@@ -133,7 +133,7 @@ module JudgmentEval
   # without_rule_routed(cases, use_case) -> [cases, excluded_count]
   # slack_routing only: a root whose text addresses a session is routed by
   # the router's rule (athena-events.md -> The session mention;
-  # session-mention-v2), never
+  # session-mention-v3), never
   # judged, so scoring it would measure the judge on input it never gets
   # (DND-717). Such a case leaves the run, whatever its provenance, and is
   # counted.

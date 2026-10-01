@@ -91,7 +91,8 @@ USAGE = <<~EOF
               field (epic decision D-R2, DND-717); never owner_confirmed:
                 - rule 2, session_mention: a root whose text ADDRESSES a
                   session ("harness session: ...", "harness session,
-                  ..." with no leading "the", or a short lead-in
+                  ..." with no leading "the", a bare label and a colon
+                  as the first token, "GenSaas: ...", or a short lead-in
                   ending "for the harness session:"; grammar
                   #{JudgmentLabel::MENTION_GRAMMAR}, the server router's own) is labelled that
                   session, over a forward record that disagrees (counted);

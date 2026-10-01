@@ -40,7 +40,7 @@ module JudgmentLabel
   #                    applied only with --rule-default, to a root no other
   #                    evidence labels
   RULES = %w[session_mention default_walt_ui].freeze
-  # Grammar session-mention-v2, the SAME grammar the server's router applies
+  # Grammar session-mention-v3, the SAME grammar the server's router applies
   # (gen_saas Athena.SlackEvents.SessionMention; both suites carry the same
   # vector list, two copies kept in step by hand). Only a LEADING address
   # counts. The forms are tried in this order, as the router tries them:
@@ -50,10 +50,17 @@ module JudgmentLabel
   #      no leading "the": "Harness session, give me a report". With "the",
   #      a comma talks ABOUT a session ("The harness session, I think, is
   #      down"). A dash is still no mention;
-  #   3. the address form, colon only: a single-line lead-in of at most 80
+  #   3. the label form (v3, gen_saas DND-1596; DND-1601 here): one bare
+  #      session label as the first token, then a colon that ends the token
+  #      (whitespace, emphasis or the end follows it): "GenSaas: ...",
+  #      "*harness:* ...". Only walt_ui, harness and gen_saas and their
+  #      spellings; custom, laptop and desktop still need "session". No
+  #      leading "the", no slash list, no comma;
+  #   4. the address form, colon only: a single-line lead-in of at most 80
   #      characters ending "for the harness session:".
-  # "session" is required. Names that disagree are no mention.
-  MENTION_GRAMMAR = "session-mention-v2"
+  # Every form but the label form requires "session". Names that disagree
+  # are no mention.
+  MENTION_GRAMMAR = "session-mention-v3"
   # Case-insensitivity is spelled out per letter, never Regexp::IGNORECASE
   # (DND-1554). The router's PCRE "iu" folds one character to one character;
   # Ruby's /i also folds one character to several, so "seßion" (U+00DF,
@@ -75,9 +82,13 @@ module JudgmentLabel
   MENTION_THE = MENTION_CI["the"]
   MENTION_TAIL = "\\s+#{MENTION_SESSION}#{MENTION_QUALIFIER}[*_]*\\s*:".freeze
   MENTION_COMMA_TAIL = "\\s+#{MENTION_SESSION}#{MENTION_QUALIFIER}[*_]*\\s*,".freeze
+  # The label form's names (v3): the three session labels only.
+  MENTION_LABEL_NAME = "(#{MENTION_CI['walt']}[_ ]?#{MENTION_CI['ui']}|#{MENTION_CI['harness']}|" \
+                       "#{MENTION_CI['gen']}[_ ]?#{MENTION_CI['saas']})".freeze
   MENTION_FORMS = [
     Regexp.new("\\A\\s*[*_]*\\s*(?:#{MENTION_THE}\\s+)?#{MENTION_NAMES}#{MENTION_TAIL}"),
     Regexp.new("\\A\\s*[*_]*\\s*#{MENTION_NAMES}#{MENTION_COMMA_TAIL}"),
+    Regexp.new("\\A\\s*[*_]*\\s*#{MENTION_LABEL_NAME}[*_]*\\s*:(?=[\\s*_]|\\z)"),
     Regexp.new("\\A[^\\n:]{0,80}?(?<![\\p{L}\\p{N}_])#{MENTION_CI['for']}\\s+#{MENTION_THE}\\s+" \
                "#{MENTION_NAMES}#{MENTION_TAIL}")
   ].freeze
@@ -129,7 +140,7 @@ module JudgmentLabel
   end
 
   # session_mention(text) -> the label the text addresses, or nil (grammar
-  # session-mention-v2, above). Untrusted text: invalid UTF-8 is scrubbed.
+  # session-mention-v3, above). Untrusted text: invalid UTF-8 is scrubbed.
   def session_mention(text)
     return nil unless text.is_a?(String)
 
