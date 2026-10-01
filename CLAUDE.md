@@ -503,26 +503,26 @@ across sessions — it is not a one-shot queue drain.
   ends when the counter is cleared (`rm ai-artifacts/shipwright/consecutive-failures`,
   the re-arm); a later wedge alerts again. The exit stays 75 whatever the
   record or the send does.
-- **Lead-time feedback loop.** The same cron also drives fleet **lead time**
-  (captain dispatch → fully deployed) down over time. `ai/bin/lead-time`
+- **Lead time is not this cron's.** The lead-time improver cron owns it
+  (*Lead-time improver cron* below); this cron does no lead-time work. Fleet
+  **lead time** is captain dispatch → landed. `ai/bin/lead-time`
   reads the start from the ticket's dispatch date, which `mark-in-progress`
   stamps at dispatch, and derives the end from git + the forge's CI (GitHub
   `gh` / GitLab `glab`, auto-detected). A DND ticket's date is `In Progress
   at`; a work (walt_ui) ticket's tracker and property come from the private
   overlay (DND-1341). A row with no stamp reads could-not-measure, and so does
   a walt_ui row on a machine with no overlay. The design and the rejected
-  markers are in `ai/docs/lead-time-tracking.md`. Each
-  run scans `--slow 90` outliers newer than a per-repo cursor
-  (`lead-cursor.<repo>.txt`, never advanced on a `SCAN INCOMPLETE`),
-  splits each into `code` (start→landing, a harness/process lever) and `tail`
-  (landing→deploy, a pipeline-efficiency lever), and when a slow shape qualifies
-  spawns an **athena-architect** for a **safety-preserving** improvement. The
-  **hard constraint** is `ai/blocks/ops/safety-checks.md`, carried verbatim by
-  the shipwright/architect/admiral/captain: **make a safety check faster, never
-  weaker** — never drop, skip, downgrade, or path-exclude tests, linters, type
-  checks, scanners, coverage/mutation gates, deploy watchers, or review gates.
-  The shipwright applies harness changes to `~/dev/custom` and files product-repo
-  changes as Notion tickets for the fleet (it never touches a product repo).
+  markers are in `ai/docs/lead-time-tracking.md`.
+
+  **Later (2026-10-01, DND-1480):** this bullet was *Lead-time feedback
+  loop*: each shipwright run scanned `--slow 90` outliers newer than a
+  per-repo `lead-cursor.<repo>.txt` in this state dir, and spawned an
+  athena-architect when a slow shape qualified. Superseded by the improver
+  cron, its own runner at `:30`, because a lead-time run (measure, judge an
+  experiment, land one change) does not fit inside the shipwright's run
+  (`ai/docs/lead-time-improver.md`, Decisions 1 to 3). Its watch scan is that
+  scan moved verbatim, and `setup-leadtime-cron` seeded its cursors from those
+  files.
 
   **Later (2026-09-30, DND-1318):** the start was the earliest branch commit,
   "capturing nothing". Superseded by the owner's definition, lead time =
@@ -565,6 +565,45 @@ shipwright cron never writes Notion, so this is its own runner.
   `athena:inbox-attend` → *A fourth writer* routes to the harness lane
   (`ai/docs/ticket-lane-action-brief.md` → *On a drain request*). The run's
   `.run` record says `drain: sent <name>` or `drain: FAILED to send`.
+
+## Lead-time improver cron (hourly, DND-1480)
+
+Another USER crontab entry runs `scripts/athena-leadtime-run.sh` at `:30`
+every hour. Each tick spawns one athena-shipwright in `MODE: lead-time`, which
+runs `athena:lead-time-improve` once. It is the only loop that acts on lead
+time. The design record is `ai/docs/lead-time-improver.md`.
+
+- **Scope:** `ai/config/lead-time-repos.json`. An `improve` repo (custom only)
+  gets the phase ledger, before/after experiments, and at most one landed
+  change per run. A `watch` repo (gen_saas, walt_ui) gets the outlier scan,
+  the `ready-and-idle` sweep and an architect hand-off, and is read-only to it.
+- **The hard constraint** is `ai/blocks/ops/safety-checks.md`, carried
+  verbatim by the shipwright, architect, admiral and captain: **make a safety
+  check faster, never weaker**. Never drop, skip, downgrade, or path-exclude
+  tests, linters, type checks, scanners, coverage/mutation gates, deploy
+  watchers, or review gates.
+- **Schedule:** `30 * * * *`, half an hour off the shipwright's `:00`, so the
+  two hourly loops never start together.
+- **Fragility:** the same as the shipwright's. It is a per-user crontab line,
+  so a crontab reset stops it silently.
+- **Install / restore / verify:** `scripts/setup-leadtime-cron` (`--install`,
+  `--dry-run`, `--check`, `--remove`, `--backup <file>`). It runs from the
+  main checkout only, and refuses `--install` and `--remove` from a linked
+  worktree. `--check` is red on a missing, duplicated or stale entry.
+  `--install` seeds each missing cursor and never overwrites one: a watch
+  repo's `watch-cursor.<repo>.txt` from the shipwright's old cursor file, and
+  an improve repo's `cursor.<repo>.txt` at 14 days back. Who may run it:
+  `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify after*.
+- **State** (gitignored) is in `ai-artifacts/lead-time/`: `ledger.jsonl`,
+  `experiments.jsonl`, `journal.md`, the cursors and `runs/`. Each run's lane
+  is `.git/leadtime-lanes/run-<utc>-<pid>`, cut from `origin/main`.
+- **Failures:** the runner's `--help` is the normative list. Three
+  unsuccessful outcomes in a row wedge it: exit 75, a `runs/<ts>.wedged`
+  record, and ONE `leadtime-wedged` alert per episode. Re-arm:
+  `rm ai-artifacts/lead-time/consecutive-failures`. Two blocked ticks in a row
+  send ONE `leadtime-blocked` alert. A lane commit not on origin/main is
+  STRANDED (exit 72) and its branch is kept. Unlike the shipwright runner, it
+  has no dirty-main-checkout yield.
 
 ## Cron D-Bus autolaunch leak (orphaned `dbus-daemon`, inotify exhaustion)
 

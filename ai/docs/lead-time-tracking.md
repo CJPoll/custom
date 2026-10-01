@@ -142,8 +142,9 @@ caller's cursor. `scanned_through` is the newest landing's window time
 (`closed_at`) **before** `--slow`, so a window with no slow row still moves the
 cursor. On `SCAN INCOMPLETE` it is the newest landing before the first one a
 probe failed on, and `null` when a failure belongs to no single landing (no
-token, a broken overlay). The shipwright does not use that partial value: it
-never moves its cursor on a `SCAN INCOMPLETE`.
+token, a broken overlay). Neither caller uses that partial value (the
+improver's watch scan, `lead-time-phases --ingest`): neither moves its cursor
+on a `SCAN INCOMPLETE`.
 
 `--since` takes `YYYY-MM-DD` (00:00:00Z that day) or RFC 3339 with a zone.
 Anything else exits 2 with a `Fix:` before the repo is read.
@@ -219,8 +220,8 @@ What reads could-not-measure instead of a guess:
 
 **A walt_ui row is measured only on a machine with the overlay.** Without it,
 a walt_ui row reads could-not-measure for its start. Its `tail` is still
-measured, and `--slow` keeps those rows, so the shipwright still reads
-walt_ui's `tail` (its lever). A walt_ui ticket dispatched before DND-1341 has
+measured, and `--slow` keeps those rows, so the improver's watch scan still
+reads walt_ui's `tail` (its lever). A walt_ui ticket dispatched before DND-1341 has
 no stamp, like a DND ticket dispatched before DND-1318.
 
 **Later (2026-09-30, DND-1341):** this said "The start is DND-only": only DND
@@ -313,9 +314,19 @@ slowest-first, each tagged `slow_threshold_min`) — the outlier filter — and,
 after them, every could-not-measure row. Both
 phases appear in the human table and in `--json` (`code_seconds`/`tail_seconds`).
 
-The **athena-shipwright cron** runs this at `--slow 90` over every repo the fleet
-ships from, newer than that repo's own `lead-cursor.<repo>.txt`, and drives lead
-time down over time.
+The **lead-time improver cron** (`~/dev/custom/CLAUDE.md` → *Lead-time
+improver cron*) runs this at `--slow 90` over each `watch` repo in
+`ai/config/lead-time-repos.json`, newer than that repo's own
+`watch-cursor.<repo>.txt`. The `improve` repo (custom) is measured per phase
+instead, by `ai/bin/lead-time-phases`. Details live in `athena:lead-time-improve`
+(*For each `watch` repo*).
+
+**Later (2026-10-01, DND-1480):** the athena-shipwright cron ran this scan,
+over every repo the fleet ships from, from `lead-cursor.<repo>.txt`, with its
+details in the shipwright agent definition (*The lead-time feedback loop*).
+Superseded: that section moved into the improver's skill, and the installer
+seeded each `watch-cursor.<repo>.txt` from the old file. The paragraph below
+describes the scan, whichever loop runs it.
 
 **Later (2026-09-21):** the cursor was a single `lead-cursor.txt` shared by every
 repo, advanced to the newest merge scanned anywhere. Superseded by one cursor per
@@ -331,8 +342,7 @@ needed to measure later. When a slow shape recurs (≥2 tickets sharing a cause)
 dominates the `tail`, it spawns an **athena-architect** to design a
 **safety-preserving** improvement, then: applies harness changes to `~/dev/custom`
 itself, and files product-repo pipeline/harness changes as Notion tickets for the
-fleet (the shipwright never touches a product repo). Details live in the
-athena-shipwright agent definition (*The lead-time feedback loop*).
+fleet (it never touches a product repo).
 
 **The hard constraint on all of this: never remove or weaken a safety check**
 (tests, linters, type checks, scanners, coverage/mutation gates, deployment
