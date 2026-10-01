@@ -160,4 +160,45 @@ check("the first call waits nothing; the next waits out the interval") do
   R.pace_delay(nil, 100.0, 3.0).zero? && R.pace_delay(100.0, 101.0, 3.0) == 2.0 && R.pace_delay(100.0, 104.0, 3.0).zero?
 end
 
+section "the calls key (DND-1469)"
+
+CALL_A = "11111111-1111-4111-8111-111111111111"
+CALLS = { "kind" => CALL_A, "severity" => nil, "security" => nil }.freeze
+
+def with_calls(calls)
+  doc = JSON.parse(line(VALUES, "on").delete_prefix(R::PREFIX))
+  R::PREFIX + JSON.generate(doc.merge("calls" => calls))
+end
+
+check("a line with calls parses, and its calls are read [ticket test 2]") do
+  doc = R.parse_line(with_calls(CALLS))
+  doc && TicketCorpus.calls(doc) == CALLS
+end
+check("a line without calls (filed before DND-1469) parses, with calls absent [ticket test 2]") do
+  doc = R.parse_line(line(VALUES, "on"))
+  doc && TicketCorpus.calls(doc).nil?
+end
+check("a garbled calls is unparseable: not an object, a key missing or extra, a value not a uuid") do
+  [
+    "kind",
+    CALLS.except("security"),
+    CALLS.merge("path" => nil),
+    CALLS.merge("kind" => "DND-7"),
+    CALLS.merge("kind" => 7)
+  ].all? { |calls| R.parse_line(with_calls(calls)).nil? } &&
+    R.eligibility(ticket(lines: [with_calls("kind")]), NOW_ON) == [:skip, :unparseable_provenance]
+end
+check("everything refused before calls is still refused with calls (a broken property) [ticket test 2]") do
+  doc = JSON.parse(with_calls(CALLS).delete_prefix(R::PREFIX))
+  doc["kind"]["accepted"] = "yes"
+  R.parse_line(R::PREFIX + JSON.generate(doc)).nil?
+end
+check("an unknown top-level key is read as it was before calls: accepted (the parser never refused one)") do
+  doc = JSON.parse(with_calls(CALLS).delete_prefix(R::PREFIX))
+  !R.parse_line(R::PREFIX + JSON.generate(doc.merge("later" => 1))).nil?
+end
+check("the lock reads a line with calls as it reads one without") do
+  R.eligibility(ticket(severity: "LOW", lines: [with_calls(CALLS)]), NOW_ON) == [:skip, :locked]
+end
+
 finish("ticket-reclassify domain")

@@ -6,9 +6,11 @@
 # *Receiver feedback*; the procedure is the athena:judgment-feedback skill.
 # The server is gen_saas POST/GET /api/v1/judgments/feedback (DND-1462).
 #
-# Buckets: DOMAIN (pure: ai/lib/judgment_feedback.rb), EFFECTS (the note and
-# seen files; the Athena server through athena_server.rb), MANAGER (record,
-# list) and FRAMEWORK (argv, exit codes).
+# Buckets: DOMAIN (pure: ai/lib/judgment_feedback.rb and, for scan-tickets
+# (DND-1469), ai/lib/judgment_feedback_scan.rb), EFFECTS (the note, seen and
+# recorded files; the Athena server through athena_server.rb; the DND tracker,
+# read only, through ai/lib/notion_read.rb), MANAGER (record, list, scan) and
+# FRAMEWORK (argv, exit codes).
 #
 # NO TOKEN TOUCHES ARGV OR THE ENVIRONMENT: athena_server.rb writes it into a
 # curl config that curl reads on STDIN. No token, note or payload is printed
@@ -20,11 +22,17 @@ require "json"
 require "uri"
 require_relative "../lib/strict_argv"
 require_relative "../lib/judgment_feedback"
+require_relative "../lib/judgment_feedback_scan"
+require_relative "../lib/notion_read"
+require_relative "../lib/triage_corpus"
 require_relative "../skills/athena:ticket-management/lib/athena_server"
 
 PROG = "judgment-feedback"
 ROUTE = "/api/v1/judgments/feedback"
 JF = JudgmentFeedback
+JFS = JudgmentFeedbackScan
+# The DND Tickets data source (as ticket-reclassify reads it).
+TICKETS_DATA_SOURCE = "219349da-87fb-8063-8f36-000b362fbd60"
 
 USAGE = <<~EOF
   Usage: judgment-feedback record --call <uuid> [--correct <question>=<label>]...
@@ -32,6 +40,7 @@ USAGE = <<~EOF
          judgment-feedback record --use-case slack_routing --subject <event_id> [same options]
          judgment-feedback list [--after <cursor or time>] [--limit N] [--json]
                                 [--overlap-s N] [--seen-file <f>] [--with-payloads]
+         judgment-feedback scan-tickets --since <time> [--recorded-file <f>] [--json]
          judgment-feedback --help
 
   Receiver feedback on Jev judgments (ai/contracts/athena-judgments.md ->
@@ -85,11 +94,50 @@ USAGE = <<~EOF
              {"next_cursor":null,"complete":false,"rows":N,"deduped":D,"reason":"<class>"}
            and exits 3 or 4. It is never an empty list: keep the old cursor.
 
+  scan-tickets  Find hand edits of Jev's ticket classifications and record
+           each as feedback (DND-1469). Reads the DND tickets edited at or
+           after --since (read only, through ai/lib/notion_read.rb) and, per
+           ticket, its LAST "Jev classification:" line. A Kind, Severity or
+           Security whose line says source jev, accepted, and whose current
+           value differs is recorded against the line's calls.<property> with
+           signal field_changed, session label harness, and the correction
+           {<question>: <the current value as the question's label>}. It
+           writes nothing but that feedback (and --recorded-file).
+             --since T          an ISO 8601 time with a zone (the previous
+                        run's next_since). Required: never a whole-tracker scan.
+             --recorded-file f  "<call> <question>=<label>" per line: what
+                        earlier scans recorded. Such an edit is counted
+                        already_recorded and not sent again (a second report
+                        moves the row past the feedback reader's cursor, so it
+                        would be read twice). Each new record is appended.
+             --json     one final JSON line instead of the lines below
+           Every ticket is counted once by reason:
+             lines, no_provenance, unparseable, provenance_unread (its body
+             could not be read)
+           and every property of a ticket with a line once:
+             edited (then recorded, replaced, already_recorded or refused),
+             unchanged, filer_sourced, policy_sourced, unlinked (a line
+             filed before calls existed), no_call, not_accepted, no_label,
+             same_label
+           The tickets behind unlinked, no_call, not_accepted, no_label,
+           unparseable, provenance_unread and refused are named. The last
+           line is
+             complete: next_since <time>
+           Save that as the next --since. A body that could not be read, or
+           a server that could not be reached, ends with
+             INCOMPLETE (<reason>): keep the old --since
+           and exit 3; the records it sent stand (the server keeps one per
+           call and reporter).
+           Environment (optional, tests): JUDGMENT_FEEDBACK_NOTION_API (a
+           loopback URL), JUDGMENT_FEEDBACK_NOTION_PACE_S (seconds between
+           Notion reads, default 0.4).
+
   Exit codes, each with its own first line on stderr carrying Fix::
     0  ok
     2  usage (nothing was sent): "judgment-feedback: <what>. Fix: ..."
-    3  "COULD NOT REACH SERVER: ...", "SERVER FAILED: HTTP <status> ..." or
-       "UNREADABLE SERVER ANSWER: ..."
+    3  "COULD NOT REACH SERVER: ...", "SERVER FAILED: HTTP <status> ...",
+       "UNREADABLE SERVER ANSWER: ..." or (scan-tickets) "COULD NOT READ
+       NOTION: ..."
     4  "SERVER REFUSED: HTTP <status> <error>[ (field <f>)]. Fix: <server's fix>"
        (not_found, not_judged, eval_call, invalid). A refusal is a fact to
        report, not something to work around.
@@ -158,6 +206,50 @@ module Effects
   rescue AthenaServer::Unreachable, AthenaServer::UnsafeValue => e
     raise Failure.new(3, JF.unreachable_line(e.message))
   end
+
+  def now = Time.now.utc
+
+  def append_line(path, line)
+    File.open(path, "a", 0o600) { |f| f.puts(line) }
+  rescue SystemCallError => e
+    raise Failure.new(3, "#{PROG}: could not append to --recorded-file #{path}: #{e.class}. Fix: check that file is writable; the record itself was sent")
+  end
+
+  def notion_line(error)
+    "COULD NOT READ NOTION: #{error.message}. Fix: #{error.fix}"
+  end
+
+  # The DND tracker, read only, through NotionRead (its allowlist refuses
+  # anything but a read before it is sent).
+  class Notion
+    def initialize
+      @origin, @token = NotionRead.credentials(ENV["JUDGMENT_FEEDBACK_NOTION_API"])
+    rescue NotionRead::Error => e
+      usage!(e.message.sub("the Notion API override", "JUDGMENT_FEEDBACK_NOTION_API"), e.fix) if e.message.start_with?("the Notion API override")
+      raise Failure.new(3, Effects.notion_line(e))
+    end
+
+    def pace
+      value = ENV["JUDGMENT_FEEDBACK_NOTION_PACE_S"].to_s
+      /\A\d{1,2}(\.\d{1,3})?\z/.match?(value) ? value.to_f : 0.4
+    end
+
+    # edited_since(since) -> the tracker rows edited at or after `since`, or
+    # Failure (a failed read is never an empty one).
+    def edited_since(since)
+      NotionRead.query_all(@origin, @token, TICKETS_DATA_SOURCE, pace: pace, filter: JFS.filter(since))
+    rescue NotionRead::Error => e
+      raise Failure.new(3, Effects.notion_line(e))
+    end
+
+    # body(page_id) -> the page's block texts, or nil when they could not be
+    # read (the ticket is then counted provenance_unread).
+    def body(page_id)
+      NotionRead.children_all(@origin, @token, page_id, pace: pace).filter_map { |b| TriageCorpus.block_text(b) }
+    rescue NotionRead::Error
+      nil
+    end
+  end
 end
 
 # ── MANAGER ──────────────────────────────────────────────────────────────────
@@ -207,6 +299,133 @@ module Manager
       out.puts "complete: #{kept.size} rows, #{deduped} deduped, next_cursor #{cursor || 'none'}"
     end
     0
+  end
+
+  # scan(opts, out, err) -> exit code (DND-1469; --help scan-tickets). Reads
+  # the tracker first, then sends one record per new edit. Counts are printed
+  # whatever happened; only a complete scan prints a next_since.
+  def scan(opts, out, err)
+    usage!("scan-tickets needs --since", "pass the previous run's next_since; on a first run, a time with a zone such as a day ago") unless opts["--since"]
+    since = JFS.parse_since(opts["--since"])
+    file = opts["--recorded-file"]
+    recorded = file && File.exist?(file) ? JFS.recorded_keys(Effects.read_file("--recorded-file", file)) : Set.new
+    started = Effects.now
+    notion = Effects::Notion.new
+    rows = notion.edited_since(since)
+    tickets = Scan.tickets(rows)
+    verdicts = tickets.map { |t| [t["ref"], JFS.ticket_verdict(Scan.with_body(t, notion.body(t["page_id"])))] }
+    tally = JFS.tally(verdicts)
+    sent = Scan.new(recorded, file).send_all(tally[:edits])
+    view = Scan.view(since, rows.size, tickets.size, tally, sent, started)
+    Scan.print(view, opts["--json"], out)
+    return Scan.incomplete(view, sent[:failure], out, err) unless view["complete"]
+
+    0
+  end
+
+  # The scan's tracker reading, its records and its printed view.
+  class Scan
+    def self.tickets(rows)
+      tickets = rows.filter_map { |r| TriageCorpus.ticket_from_row(r) }
+      missing = tickets.flat_map { |t| t["schema_missing"] }.uniq.sort
+      unless missing.empty?
+        raise Failure.new(3, "COULD NOT READ NOTION: the tracker rows carry no select property #{missing.join(', ')}. " \
+                             "Fix: the DND Tickets schema changed; update TriageCorpus.ticket_from_row and #{PROG}")
+      end
+      tickets.sort_by { |t| TriageCorpus.number(t["ref"]) }
+    end
+
+    def self.with_body(ticket, blocks)
+      ticket.merge("body_read" => !blocks.nil?, "blocks_text" => blocks || [])
+    end
+
+    def initialize(recorded, file)
+      @recorded = recorded
+      @file = file
+      @counts = JFS::RECORD_OUTCOMES.to_h { |r| [r, 0] }.merge("not_sent" => 0)
+      @refused = []
+    end
+
+    # send_all(edits) -> {counts:, refused:, failure:}. A refusal is the
+    # server's answer for that call (counted, named); anything else that is
+    # not a stored record stops the sending, and the rest count not_sent.
+    def send_all(edits)
+      failure = nil
+      edits.each do |ref, property, call, correction|
+        if failure
+          @counts["not_sent"] += 1
+          next
+        end
+        failure = send_one(ref, property, call, correction)
+        @counts["not_sent"] += 1 if failure
+      end
+      { counts: @counts, refused: @refused, failure: failure }
+    end
+
+    def send_one(ref, property, call, correction)
+      key = JFS.record_key(call, correction)
+      if @recorded.include?(key)
+        @counts["already_recorded"] += 1
+        return nil
+      end
+
+      origin, token = (@endpoint ||= Effects.endpoint)
+      body = JF.record_body(call: call, corrections: correction, signal: JFS::SIGNAL, session_label: JFS::SESSION_LABEL)
+      resp = Effects.post(origin, token, body)
+      failure = JF.http_failure(resp)
+      return refuse(ref, property, failure[1]) if failure && failure[0] == 4
+      return failure if failure
+
+      @counts[JF.recorded_line(resp[:body]).start_with?("replaced") ? "replaced" : "recorded"] += 1
+      @recorded << key
+      Effects.append_line(@file, key) if @file
+      nil
+    rescue Failure => e
+      [e.code, e.message]
+    rescue JF::UnreadableAnswer => e
+      [3, JF.unreadable_line(e.message)]
+    end
+
+    def refuse(ref, property, line)
+      @counts["refused"] += 1
+      @refused << "#{ref} #{property} #{line[/\ASERVER REFUSED: HTTP \d+ ([a-z_]+)/, 1] || 'refused'}"
+      nil
+    end
+
+    NAMED = %w[provenance_unread unparseable unlinked no_call not_accepted no_label].freeze
+
+    def self.view(since, rows, tickets, tally, sent, started)
+      complete = sent[:failure].nil? && tally[:tickets]["provenance_unread"].zero?
+      { "complete" => complete, "since" => JFS.iso(since), "next_since" => complete ? JFS.iso(JFS.next_since(started)) : nil,
+        "rows" => rows, "not_a_ticket" => rows - tickets, "tickets" => tally[:tickets], "properties" => tally[:properties],
+        "records" => sent[:counts], "named" => NAMED.to_h { |r| [r, tally[:refs].fetch(r, [])] }.reject { |_, v| v.empty? },
+        "refused" => sent[:refused] }
+    end
+
+    def self.print(view, json, out)
+      if json
+        out.puts JSON.generate(view)
+        return
+      end
+      line = ->(h) { h.map { |k, v| "#{k} #{v}" }.join(", ") }
+      out.puts "scan-tickets: since #{view['since']}: #{view['rows']} rows edited (#{view['not_a_ticket']} without a DND id)"
+      out.puts "tickets: #{line.call(view['tickets'])}"
+      out.puts "properties: #{line.call(view['properties'])}"
+      out.puts "records: #{line.call(view['records'])}"
+      view["named"].each { |reason, refs| out.puts "  #{reason}: #{refs.join(', ')}" }
+      view["refused"].each { |r| out.puts "  refused: #{r}" }
+      out.puts "complete: next_since #{view['next_since']}" if view["complete"]
+    end
+
+    # incomplete -> the exit code, after saying why on stderr (with its Fix:)
+    # and on stdout (never a next_since).
+    def self.incomplete(view, failure, out, err)
+      unread = view["tickets"]["provenance_unread"]
+      code, why = failure || [3, "COULD NOT READ NOTION: #{unread} ticket bodies could not be read. Fix: re-run with the same --since; a body that keeps failing is named under provenance_unread"]
+      err.puts why
+      out.puts "INCOMPLETE (#{reason_of(why)}): keep the old --since" unless view["complete"]
+      code
+    end
   end
 
   # The read's inputs and its paging loop.
@@ -263,6 +482,7 @@ LIST_SPEC = { "--after" => :value, "--limit" => :integer, "--json" => :switch, "
               "--seen-file" => :value, "--with-payloads" => :switch }.freeze
 RECORD_SPEC = { "--call" => :value, "--use-case" => :value, "--subject" => :value, "--signal" => :value,
                 "--note-file" => :value, "--session-label" => :value }.freeze
+SCAN_SPEC = { "--since" => :value, "--recorded-file" => :value, "--json" => :switch }.freeze
 
 # split_corrections(argv) -> [the --correct values, the rest]. --correct is
 # the one repeatable flag, so it is taken out before the strict parse.
@@ -296,12 +516,14 @@ def main(argv, out, err)
     Manager.record(StrictArgv.parse(rest, RECORD_SPEC), JF.corrections(pairs), out)
   when "list"
     Manager.list(StrictArgv.parse(rest, LIST_SPEC), out, err)
+  when "scan-tickets"
+    Manager.scan(StrictArgv.parse(rest, SCAN_SPEC), out, err)
   when nil
-    usage!("no subcommand", "run `judgment-feedback record ...` or `judgment-feedback list ...`")
+    usage!("no subcommand", "run `judgment-feedback record ...`, `list ...` or `scan-tickets ...`")
   else
-    usage!("unknown subcommand #{command.start_with?('-') ? command : command.inspect}", "the subcommands are record and list")
+    usage!("unknown subcommand #{command.start_with?('-') ? command : command.inspect}", "the subcommands are record, list and scan-tickets")
   end
-rescue StrictArgv::UsageError, JF::UsageError => e
+rescue StrictArgv::UsageError, JF::UsageError, JFS::UsageError => e
   err.puts "#{PROG}: #{e.message}. Fix: #{USAGE_FIX}"
   2
 rescue Failure => e

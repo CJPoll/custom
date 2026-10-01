@@ -63,13 +63,35 @@ its `Fix:`. A refusal is a fact to report, not something to work around.
 Run once per shipwright cron run, after the lead-time loop. The state lives in
 `$SHIPWRIGHT_STATE_DIR` beside `cursor.txt`.
 
-1. **Scan tickets for hand edits** (DND-1469):
-   `ai/bin/judgment-feedback scan-tickets --since "$(cat "$SHIPWRIGHT_STATE_DIR/judgment-ticket-scan-cursor.txt")"`.
-   It records `field_changed` feedback itself. Record its counts by reason
-   (`recorded`, `unlinked`, `filer_sourced`, `provenance_unread`, …).
-   Advance that cursor only on exit 0. Until DND-1469 ships, `scan-tickets`
-   is an unknown subcommand (exit 2): journal `scan-tickets: not built
-   (DND-1469)` and go on to step 2.
+1. **Scan tickets for hand edits** (DND-1469). It runs before step 2, so
+   the feedback it records is read in this run:
+
+   ```
+   S="$SHIPWRIGHT_STATE_DIR"
+   ai/bin/judgment-feedback scan-tickets --json \
+     --since "$(cat "$S/judgment-ticket-scan-cursor.txt")" \
+     --recorded-file "$S/judgment-ticket-scan-recorded.txt"
+   ```
+
+   On a first run (no cursor file), pass
+   `--since "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)"`. It reads the
+   DND tickets edited since then (read only) and records `field_changed`
+   feedback itself, for each Kind, Severity or Security edited away from a
+   `jev` value on the ticket's last `Jev classification:` line. It prints
+   counts only, and names tickets by id. Journal them in the step 8
+   section:
+
+   ```
+   - scan-tickets: tickets <lines> lines (no_provenance <n>, unparseable <n>, provenance_unread <n>); edited <e> (recorded <r>, replaced <p>, already_recorded <a>, refused <f>); unlinked <u>, filer_sourced <s>; since <since>
+   - scan-tickets: COULD NOT MEASURE (<first stderr line's class>, exit <n>); since kept
+   ```
+
+   On exit 0 with `"complete": true`, write its `next_since` to
+   `judgment-ticket-scan-cursor.txt`. On any other exit keep the old cursor:
+   the next run reads the same window again, and the recorded file stops a
+   second send. A `refused` edit is the server's answer (`not_found` for a
+   call that is not the owner's or was pruned); name it in the journal,
+   never retry it. Never create or edit the recorded file by hand.
 2. **Read new feedback** into a run-local file, never into the journal:
 
    ```

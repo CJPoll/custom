@@ -152,14 +152,33 @@ module TicketCorpus
 
   # An accepted judgment must name a label of its property: an accepted
   # judgment with no answer, or an answer outside the set, is a garbled line.
+  # A `calls` key (DND-1469) is optional, since a line written before it has
+  # none; when present it must be exactly {kind, severity, security}, each a
+  # uuid or null, or the line is garbled.
   def valid_provenance?(doc)
-    doc.is_a?(Hash) && PROPERTY.values.all? do |key|
+    doc.is_a?(Hash) && valid_calls?(doc) && PROPERTY.values.all? do |key|
       p = doc[key]
       next false unless p.is_a?(Hash) && [true, false].include?(p["accepted"]) && SOURCES.include?(p["source"])
       next false unless p["judged"].nil? || p["judged"].is_a?(String)
 
       p["accepted"] == false || JUDGED.fetch(key).include?(p["judged"])
     end
+  end
+
+  CALL_ID = /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
+
+  def valid_calls?(doc)
+    return true unless doc.key?("calls")
+
+    calls = doc["calls"]
+    calls.is_a?(Hash) && calls.keys.sort == PROPERTY.values.sort &&
+      calls.values.all? { |id| id.nil? || (id.is_a?(String) && CALL_ID.match?(id)) }
+  end
+
+  # calls(doc) -> the line's {property => call id or nil}, or nil when the
+  # line predates DND-1469 and carries no calls key (never read as "no call").
+  def calls(doc)
+    doc["calls"]
   end
 
   # ── labels ───────────────────────────────────────────────────────────────

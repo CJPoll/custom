@@ -5,7 +5,8 @@
 # (DND-714) by DND-1056 so ticket-reclassify reads the tracker through the
 # same allowlist instead of a copy.
 #
-# Callers: ai/bin/triage-corpus, scripts/ticket-classify --epic (DND-1057) and
+# Callers: ai/bin/triage-corpus, scripts/ticket-classify --epic (DND-1057),
+# ai/bin/judgment-feedback scan-tickets (DND-1469) and
 # ai/skills/athena:ticket-management/scripts/ticket-reclassify. Each maps
 # NotionRead::Error to its own failure line, which carries the Fix:.
 #
