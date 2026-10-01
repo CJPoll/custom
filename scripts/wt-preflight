@@ -88,20 +88,27 @@ echo "== 1. refresh local main ($PROJECT) =="
 # DND-1509: a failed pull is classified before it is named. Before this, every
 # failure read "local main diverged?", so a lock held by a cron's fetch sent the
 # agent to reconcile a divergence that did not exist.
+# LC_ALL=C: the classifier reads git's English messages; a translated locale
+# would drop every lock into the generic branch.
 pull_main() {
-  PULL_OUT=$(git -C "$REPO" pull --ff-only 2>&1); PULL_RC=$?
+  PULL_OUT=$(LC_ALL=C git -C "$REPO" pull --ff-only 2>&1); PULL_RC=$?
   printf '%s\n' "$PULL_OUT"
 }
-# The lock file git names in its error, or "" when it names none.
+# The lock file git names in its error, or "" when it names none. git prints
+# lock paths absolute, so the -e test below does not depend on our cwd.
 pull_lock() {
   printf '%s\n' "$PULL_OUT" | sed -n "s/.*Unable to create '\(.*\.lock\)': File exists.*/\1/p" | head -n 1
 }
+# A named lock file, or a ref update that raced another git ("cannot lock ref
+# ...: is at X but expected Y"), which names no file.
 pull_is_lock() { [ -n "$(pull_lock)" ] || grep -q "cannot lock ref" <<<"$PULL_OUT"; }
 # Diverged means both sides hold commits the other lacks, read from the refs,
-# not guessed from the failure.
+# not guessed from the failure. Exit 0 diverged, 1 not diverged, 2 could not
+# check (no main or no origin/main to count), kept apart so "not diverged" is
+# never claimed for a check that did not run.
 main_diverged() {
   local counts ahead behind
-  counts=$(git -C "$REPO" rev-list --left-right --count main...origin/main 2>/dev/null) || return 1
+  counts=$(git -C "$REPO" rev-list --left-right --count main...origin/main 2>/dev/null) || return 2
   read -r ahead behind <<<"$counts"
   [ "${ahead:-0}" -gt 0 ] && [ "${behind:-0}" -gt 0 ]
 }
@@ -118,17 +125,26 @@ while [ "$PULL_RC" -ne 0 ] && pull_is_lock && [ "$TRIES" -lt "$LOCK_RETRIES" ]; 
   pull_main
 done
 if [ "$PULL_RC" -ne 0 ]; then
-  if pull_is_lock; then
+  [ "$TRIES" = 1 ] && RETRY_WORD="retry" || RETRY_WORD="retries"
+  ON_BRANCH=$(git -C "$REPO" symbolic-ref --short -q HEAD)
+  main_diverged; DIVERGED=$?
+  if pull_is_lock && [ -n "$(pull_lock)" ]; then
     LOCK=$(pull_lock)
-    [ "$TRIES" = 1 ] && RETRY_WORD="retry" || RETRY_WORD="retries"
-    echo "FAIL: pull --ff-only blocked: ${LOCK:-a ref lock} is held by another git process (still held after $TRIES $RETRY_WORD)"
-    echo "Fix: this is lock contention, not a divergence; do not reconcile main. Another git is writing $REPO (often a cron fetching the main checkout): re-run wt-preflight once it finishes. If no git runs there (pgrep -ax git), the lock is stale from a crashed git: remove ${LOCK:-the .lock file git named above}, then re-run."
-  elif main_diverged || grep -q "Not possible to fast-forward" <<<"$PULL_OUT"; then
+    echo "FAIL: pull --ff-only blocked: $LOCK is held by another git process (still held after $TRIES $RETRY_WORD)"
+    echo "Fix: this is lock contention, not a divergence; do not reconcile main. Another git is writing $REPO (often a cron fetching the main checkout): re-run wt-preflight once it finishes. If no git process is working in $REPO (pgrep -a git, and look for $REPO in what it lists), the lock is stale from a crashed git: remove $LOCK, then re-run."
+  elif pull_is_lock; then
+    echo "FAIL: pull --ff-only blocked: a ref update in $REPO raced another git process (still racing after $TRIES $RETRY_WORD)"
+    echo "Fix: this is contention, not a divergence; do not reconcile main. Re-run wt-preflight once the other git writing $REPO (often a cron fetching the main checkout) finishes."
+  elif [ "$ON_BRANCH" != main ]; then
+    echo "FAIL: pull --ff-only failed in $REPO, which is on '${ON_BRANCH:-a detached HEAD}', not main, so the pull was not main's; git's error is above"
+    echo "Fix: git -C $REPO switch main (commit or move any work on the current branch first), then re-run"
+  elif [ "$DIVERGED" = 0 ] || grep -q "Not possible to fast-forward" <<<"$PULL_OUT"; then
     echo "FAIL: pull --ff-only refused (local main diverged?) — resolve before dispatching"
     echo "Fix: inspect git -C $REPO log origin/main..main; reconcile local main with origin/main (never force), then re-run"
   else
-    echo "FAIL: pull --ff-only failed (exit $PULL_RC), not on a lock and not on a divergence; git's error is above"
-    echo "Fix: fix the cause git names above in $REPO (an unreachable remote, a branch other than main checked out, local changes in the way), then re-run"
+    [ "$DIVERGED" = 2 ] && DIV_NOTE="divergence could not be checked (main or origin/main unreadable)" || DIV_NOTE="no divergence between main and origin/main"
+    echo "FAIL: pull --ff-only failed (exit $PULL_RC), not on a lock; $DIV_NOTE; git's error is above"
+    echo "Fix: fix the cause git names above in $REPO (an unreachable remote, local changes in the way), then re-run"
   fi
   exit 1
 fi

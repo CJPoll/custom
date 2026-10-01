@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Self-test for scripts/wt-preflight's address-pool gate (DND-864).
+# Self-test for scripts/wt-preflight: the address-pool gate (DND-864, p1-p4)
+# and the step-1 pull-failure classification (DND-1509, p5-p11).
 #
 # The gate runs BEFORE any git work: a repo that runs compose stacks must get no
 # worktree while pool-headroom refuses, and an unreadable docker refuses too. A
-# compose-less repo passes the gate untouched (it then fails later at the pull,
-# since the fixture has no origin; reaching step 1 is what this asserts).
+# compose-less repo passes the gate untouched (p3's fixture has no origin, so it
+# then fails at the pull; reaching step 1 is what p3 asserts).
+#
+# Step 1 cases build a local bare origin each: a held lock, a real divergence,
+# an unreachable origin and a non-main branch must each be named as what it is.
 #
 # Hermetic: a stub docker via ATHENA_DOCKER_BIN; throwaway repos; no network.
 set -uo pipefail
@@ -12,7 +16,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL="$(cd "${HERE}/../.." && pwd)/wt-preflight"
 PASS=0; FAIL=0
-TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+p7pid=""
+TMP="$(mktemp -d)"; trap '[ -n "${p7pid}" ] && kill "${p7pid}" 2>/dev/null; rm -rf "${TMP}"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 # The fixture Ruby resolves BEFORE HOME moves: asdf's `ruby` shim needs the real
@@ -114,7 +119,8 @@ grep -q "after 1 retry" <<<"${out}" && ok "p6 names the retries" || bad "p6 retr
 # it is waiting on it. The retry cap only bounds a hang; the case passes on the
 # first retry that finds the lock gone.
 FIFO="${TMP}/p7.fifo"; mkfifo "${FIFO}"
-"${TOOL}" --repo "${F}/r" --lock-retries 60 p7-branch > "${FIFO}" 2>&1 &
+# The timeout and the kill below only cap a hang; neither decides a verdict.
+timeout 180 "${TOOL}" --repo "${F}/r" --lock-retries 60 p7-branch > "${FIFO}" 2>&1 &
 p7pid=$!
 out=""; released=0
 while IFS= read -r -t 120 line; do
@@ -123,7 +129,7 @@ while IFS= read -r -t 120 line; do
     rm -f "${F}/r/.git/index.lock"; released=1
   fi
 done < "${FIFO}"
-wait "${p7pid}" 2>/dev/null
+kill "${p7pid}" 2>/dev/null; wait "${p7pid}" 2>/dev/null; p7pid=""
 [ "${released}" = 1 ] && ok "p7 tool waited on the held lock" || bad "p7 never waited on the lock" "${out}"
 grep -q "== 2\." <<<"${out}" && ok "p7 released lock: step 1 passes" || bad "p7 retry did not pass step 1" "${out}"
 [ "$(git -C "${F}/r" rev-parse main)" = "$(git -C "${F}/o.git" rev-parse main)" ] && ok "p7 local main fast-forwarded" || bad "p7 main not fast-forwarded" "${out}"
@@ -155,8 +161,21 @@ grep -q "diverged" <<<"${out}" && bad "p10 reported divergence" "${out}" || ok "
 grep -q "held by another git process" <<<"${out}" && bad "p10 reported a lock" "${out}" || ok "p10 not called a lock"
 grep -q "^Fix: " <<<"${out}" && ok "p10 prints Fix:" || bad "p10 Fix:" "${out}"
 
+# p11 a branch other than main that cannot fast-forward is named as being off
+# main, never as main diverging (main itself is in step with origin/main).
+F="${TMP}/branchfix"; mkdir -p "${F}"; mkorigin "${F}"
+git clone -q "${F}/o.git" "${F}/r"
+git -C "${F}/r" checkout -q -b feature --track origin/main
+git -C "${F}/r" commit -q --allow-empty -m feature-only
+advance "${F}" two
+run --repo "${F}/r" p11-branch
+[ "${rc}" -ne 0 ] && ok "p11 off-main failure refuses" || bad "p11 off-main passed" "${out}"
+grep -q "on 'feature', not main" <<<"${out}" && ok "p11 names the branch" || bad "p11 branch message" "${out}"
+grep -q "diverged" <<<"${out}" && bad "p11 reported main diverged" "${out}" || ok "p11 not called divergence"
+grep -q "^Fix: " <<<"${out}" && ok "p11 prints Fix:" || bad "p11 Fix:" "${out}"
+
 echo "wt-preflight self-test: ${PASS} passed, ${FAIL} failed"
 if [ "${FAIL}" -ne 0 ]; then
-  echo "Fix: repair scripts/wt-preflight so each case above holds: the address-pool gate (step 0, p1-p4) or the pull-failure classification (step 1, p5-p10)." >&2
+  echo "Fix: repair scripts/wt-preflight so each case above holds: the address-pool gate (step 0, p1-p4) or the pull-failure classification (step 1, p5-p11)." >&2
   exit 1
 fi
