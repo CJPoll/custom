@@ -1463,9 +1463,8 @@ assert_eq "F-11 the hook is registered on SessionStart with the \"\" matcher" "S
 assert_eq "F-11 no UserPromptSubmit entry is registered for any hook" "0" \
   "$(jq -r '[.hooks[] | select(.event == "UserPromptSubmit")] | length' "${REG}" 2>/dev/null)"
 # The hooks that predate this ticket must all still be registered (a fifth,
-# harness-event, was retired by DND-1487). The
-# 2026-09-17 outage was exactly this: entries silently disappearing from a file
-# with no diff and no undo.
+# harness-event, was retired by DND-1487). The 2026-09-17 outage was exactly
+# this: entries silently disappearing from a file with no diff and no undo.
 for s in safe-wait-guard pronoun-guard notify-idle main-session-policy; do
   assert_eq "F-11 pre-existing hook [${s}] is still in the registry" "1" \
     "$(jq -r --arg s "ai/hooks/${s}.sh" '[.hooks[] | select(.script == $s)] | length' "${REG}" 2>/dev/null)"

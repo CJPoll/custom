@@ -23,13 +23,8 @@
 # Thresholds (tunable): a tool with failure_rate >= 0.20 over >= 5 results;
 # >= 2 agent-session idle/stall gaps INSIDE THE RECENT WINDOW (interactive-session
 # gaps are human idle, not shipwright-actionable, so they are excluded upstream).
-#
-# There is no runtime-error-events signal (DND-1487). It read the retired
-# harness-event.sh sink, whose `ok:false` could not occur: PostToolUse never
-# fires for a failed tool call (that is PostToolUseFailure). 0 of 164,288 sink
-# lines were errors. Tool errors are caught by tool_failure_rate above, from the
-# transcripts' tool_result is_error. A metrics file older than DND-1487 may still
-# carry a runtime_events key; it is ignored.
+# No runtime_events signal (DND-1487): the retired hook sink could not record a
+# failure; tool errors are tool_failure_rate's. An old runtime_events key is ignored.
 
 require "json"
 require "time"

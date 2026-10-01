@@ -343,7 +343,7 @@ so the list was stale from that moment and nothing could have caught it.
 - Every hook self-test — each dedicated `ai/hooks/*.self-test.sh` script, run
   with stdin closed (`ai/hooks/<name>.self-test.sh </dev/null`). The runner runs
   every one of them; its `--self-test` fails if a `*.self-test.sh` on disk is not
-  declared, which is how one hook's self-test was once found unrun. NOTE: the
+  declared, which is how `harness-event`'s (since retired) was found unrun. NOTE: the
   hooks read their input from stdin, so `ai/hooks/<hook>.sh --self-test` is NOT a
   self-test — the flag is ignored and it blocks on (or empties) stdin, a false
   green. Always invoke the `.self-test.sh` files.
