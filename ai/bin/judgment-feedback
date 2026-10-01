@@ -1,0 +1,314 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# judgment-feedback -- the harness client for receiver feedback on Jev
+# judgments (DND-1466). Normative home: ai/contracts/athena-judgments.md ->
+# *Receiver feedback*; the procedure is the athena:judgment-feedback skill.
+# The server is gen_saas POST/GET /api/v1/judgments/feedback (DND-1462).
+#
+# Buckets: DOMAIN (pure: ai/lib/judgment_feedback.rb), EFFECTS (the note and
+# seen files; the Athena server through athena_server.rb), MANAGER (record,
+# list) and FRAMEWORK (argv, exit codes).
+#
+# NO TOKEN TOUCHES ARGV OR THE ENVIRONMENT: athena_server.rb writes it into a
+# curl config that curl reads on STDIN. No token, note or payload is printed
+# unless --with-payloads asks for the payload and note.
+#
+# Deliberately gem-free (stdlib only).
+
+require "json"
+require "uri"
+require_relative "../lib/strict_argv"
+require_relative "../lib/judgment_feedback"
+require_relative "../skills/athena:ticket-management/lib/athena_server"
+
+PROG = "judgment-feedback"
+ROUTE = "/api/v1/judgments/feedback"
+JF = JudgmentFeedback
+
+USAGE = <<~EOF
+  Usage: judgment-feedback record --call <uuid> [--correct <question>=<label>]...
+                                  [--signal <s>] [--note-file <f>] [--session-label <l>]
+         judgment-feedback record --use-case slack_routing --subject <event_id> [same options]
+         judgment-feedback list [--after <cursor or time>] [--limit N] [--json]
+                                [--overlap-s N] [--seen-file <f>] [--with-payloads]
+         judgment-feedback --help
+
+  Receiver feedback on Jev judgments (ai/contracts/athena-judgments.md ->
+  *Receiver feedback*; procedure: the athena:judgment-feedback skill). The
+  server derives the owner and the reporter from this machine's token; there
+  is no flag for either.
+
+  record   Say an answered judgment was wrong. Name the call by the id its
+           result printed (--call), or a topic-routed Slack conversation by its
+           event id (--use-case slack_routing --subject <event_id>).
+             --correct q=label  the right label for question q; repeat per
+                        question. A choice's label is its option key, a
+                        score's its level index ("0" lowest to "n-1"), a
+                        noul's "true" or "false". Leave it out when you do not
+                        know the right answer.
+             --signal s         the signal (the server defaults to explicit)
+             --note-file f      a file holding a short note (at most 500
+                        characters). Never paste the judged text, a secret or
+                        someone else's message into it. It is never printed.
+             --session-label l  the reporting session's label
+           Prints, exit 0:  recorded <feedback_id> call <call_id>
+                            (or "replaced ..." for a second report of yours)
+
+  list     Read the owner's feedback, oldest first, paging until the end.
+             --after X     a cursor (<ISO 8601 time>,<uuid>, as next_cursor
+                        prints it) or an ISO 8601 time with a zone, e.g.
+                        2026-10-01T07:00:00Z. Absent: from the oldest kept row.
+             --limit N     rows per page, 1 to 200 (default 100)
+             --overlap-s N re-read N seconds behind --after (0 to 3600). Rows
+                        commit with the time their transaction began, so a row
+                        can land behind a cursor already passed; the overlap
+                        finds it. Pair it with --seen-file.
+             --seen-file f ids already handled, one per line (the previous
+                        run's seen_tail). A row with one of them is dropped and
+                        counted as deduped.
+             --json        each row as one JSON line, then a final line
+             --with-payloads  include each row's note and request (the text
+                        Jev was sent). Read them in session only; never quote
+                        them in a ticket, commit or journal.
+           Without --with-payloads a row carries ids, names, answers and
+           counts, and has_note instead of the note.
+           The final line, always printed (with --json):
+             {"next_cursor":"<cursor>","complete":true,"rows":N,"deduped":D,"seen_tail":[ids]}
+           next_cursor never moves behind --after. seen_tail lists the ids
+           read within --overlap-s of next_cursor: save it as the next run's
+           --seen-file. Without --json, one line per row (ids only) and
+             complete: N rows, D deduped, next_cursor <cursor>
+           A read that stops part way prints the rows it read, then
+             {"next_cursor":null,"complete":false,"rows":N,"deduped":D,"reason":"<class>"}
+           and exits 3 or 4. It is never an empty list: keep the old cursor.
+
+  Exit codes, each with its own first line on stderr carrying Fix::
+    0  ok
+    2  usage (nothing was sent): "judgment-feedback: <what>. Fix: ..."
+    3  "COULD NOT REACH SERVER: ...", "SERVER FAILED: HTTP <status> ..." or
+       "UNREADABLE SERVER ANSWER: ..."
+    4  "SERVER REFUSED: HTTP <status> <error>[ (field <f>)]. Fix: <server's fix>"
+       (not_found, not_judged, eval_call, invalid). A refusal is a fact to
+       report, not something to work around.
+
+  The Athena server URL is the origin of the `athena` MCP entry in
+  ~/.claude.json and its token is read from
+  ~/.config/athena-inbox-client/config.json, fed to curl on stdin, never argv.
+  Environment (optional): ATHENA_INBOX_CLIENT_CONFIG, FLEET_CLAUDE_JSON,
+  JUDGMENT_FEEDBACK_MAX_TIME_S (per request, default 60).
+EOF
+
+USAGE_FIX = "run `judgment-feedback --help` for the forms"
+
+# A failure that ends the run: exit `code`, printing `line` on stderr.
+class Failure < StandardError
+  attr_reader :code
+
+  def initialize(code, line)
+    super(line)
+    @code = code
+  end
+end
+
+def unexpected_line(error)
+  "#{PROG}: UNEXPECTED ERROR: #{error.class}. Fix: this is a bug in #{PROG}; report it with the command you ran (never the note)."
+end
+
+# The failure's class: the capitalised words its line starts with.
+def reason_of(line)
+  line[/\A[A-Z][A-Z ]+[A-Z]/] || "UNEXPECTED ERROR"
+end
+
+def usage!(what, fix = USAGE_FIX)
+  raise Failure.new(2, "#{PROG}: #{what}. Fix: #{fix}")
+end
+
+# ── EFFECTS ──────────────────────────────────────────────────────────────────
+
+module Effects
+  module_function
+
+  def read_file(flag, path)
+    usage!("#{flag} #{path} does not exist", "pass the path of an existing file") unless File.exist?(path)
+    usage!("#{flag} #{path} is not a readable file", "check its permissions") unless File.file?(path) && File.readable?(path)
+    File.read(path, encoding: "UTF-8").scrub
+  end
+
+  def endpoint
+    AthenaServer.endpoint
+  rescue AthenaServer::Unreachable => e
+    raise Failure.new(3, JF.unreachable_line(e.message))
+  end
+
+  def max_time
+    AthenaServer.max_time("JUDGMENT_FEEDBACK_MAX_TIME_S")
+  end
+
+  def post(origin, token, body)
+    AthenaServer.post_json(origin, token, ROUTE, body, max_time: max_time)
+  rescue AthenaServer::Unreachable, AthenaServer::UnsafeValue => e
+    raise Failure.new(3, JF.unreachable_line(e.message))
+  end
+
+  def get(origin, token, query)
+    AthenaServer.get_json(origin, token, "#{ROUTE}?#{URI.encode_www_form(query)}", max_time: max_time)
+  rescue AthenaServer::Unreachable, AthenaServer::UnsafeValue => e
+    raise Failure.new(3, JF.unreachable_line(e.message))
+  end
+end
+
+# ── MANAGER ──────────────────────────────────────────────────────────────────
+
+module Manager
+  module_function
+
+  def record(opts, corrections, out)
+    note = nil
+    if opts["--note-file"]
+      note = Effects.read_file("--note-file", opts["--note-file"]).sub(/\s+\z/, "")
+      usage!("--note-file #{opts['--note-file']} is empty", "write the note into it, or leave --note-file out") if note.empty?
+    end
+    body = JF.record_body(call: opts["--call"], use_case: opts["--use-case"], subject: opts["--subject"],
+                          corrections: corrections, signal: opts["--signal"], note: note,
+                          session_label: opts["--session-label"])
+    origin, token = Effects.endpoint
+    resp = Effects.post(origin, token, body)
+    failure = JF.http_failure(resp)
+    raise Failure.new(*failure) if failure
+
+    out.puts JF.recorded_line(resp[:body])
+    0
+  rescue JF::UnreadableAnswer => e
+    raise Failure.new(3, JF.unreadable_line(e.message))
+  end
+
+  # list -> exit code. Rows read before a failure are still printed, then a
+  # final line saying complete:false; the failure line goes to stderr.
+  def list(opts, out, err)
+    view = List.new(opts)
+    rows, failure = view.read
+    kept = rows.reject { |r| view.seen.include?(r["id"].downcase) }
+    kept.each { |r| out.puts(opts["--json"] ? JSON.generate(JF.redact(r, opts["--with-payloads"])) : JF.row_line(r)) }
+    deduped = rows.size - kept.size
+    if failure
+      err.puts failure[1]
+      out.puts(opts["--json"] ? JSON.generate("next_cursor" => nil, "complete" => false, "rows" => kept.size, "deduped" => deduped, "reason" => reason_of(failure[1])) : "INCOMPLETE: #{kept.size} rows read before the failure; keep the old cursor.")
+      return failure[0]
+    end
+    final = JF.final_cursor(view.start, rows)
+    cursor = final && JF.encode(final)
+    if opts["--json"]
+      out.puts JSON.generate("next_cursor" => cursor, "complete" => true, "rows" => kept.size, "deduped" => deduped,
+                             "seen_tail" => JF.seen_tail(rows, final, view.overlap))
+    else
+      out.puts "complete: #{kept.size} rows, #{deduped} deduped, next_cursor #{cursor || 'none'}"
+    end
+    0
+  end
+
+  # The read's inputs and its paging loop.
+  class List
+    attr_reader :start, :overlap, :seen
+
+    def initialize(opts)
+      @limit = opts.fetch("--limit", JF::DEFAULT_LIMIT)
+      usage!("--limit must be 1 to #{JF::MAX_LIMIT}", "ask for 1 to #{JF::MAX_LIMIT} rows per page") unless (1..JF::MAX_LIMIT).cover?(@limit)
+      @overlap = opts.fetch("--overlap-s", 0)
+      usage!("--overlap-s must be 0 to #{JF::MAX_OVERLAP_S}", "a minute (60) is ample") unless (0..JF::MAX_OVERLAP_S).cover?(@overlap)
+      usage!("--overlap-s needs --after", "pass the cursor to re-read behind") if opts["--overlap-s"] && !opts["--after"]
+      @start = opts["--after"] && JF.parse_after(opts["--after"])
+      @seen = opts["--seen-file"] ? JF.seen_ids(Effects.read_file("--seen-file", opts["--seen-file"])) : Set.new
+    end
+
+    # read -> [rows, nil] for a complete read, or [rows read so far, [exit, line]].
+    def read
+      rows = []
+      origin, token = Effects.endpoint
+      cur = @start && (@overlap.positive? ? JF.step_back(@start, @overlap) : @start)
+      loop do
+        page = fetch(origin, token, cur)
+        rows.concat(page[:rows])
+        return [rows, nil] unless page[:has_more]
+
+        nxt = page[:next_cursor]
+        raise JF::UnreadableAnswer, "has_more with no next_cursor" if nxt.nil?
+        raise JF::UnreadableAnswer, "next_cursor did not advance past #{JF.encode(cur)}" if cur && !JF.after?(nxt, cur)
+
+        cur = nxt
+      end
+    rescue Failure => e
+      [rows, [e.code, e.message]]
+    rescue JF::UnreadableAnswer => e
+      [rows, [3, JF.unreadable_line(e.message)]]
+    rescue StandardError => e
+      [rows, [3, unexpected_line(e)]]
+    end
+
+    def fetch(origin, token, cur)
+      query = cur ? [["after", JF.encode(cur)]] : []
+      resp = Effects.get(origin, token, query + [["limit", @limit.to_s]])
+      failure = JF.http_failure(resp)
+      raise Failure.new(*failure) if failure
+
+      JF.page(resp[:body])
+    end
+  end
+end
+
+# ── FRAMEWORK ────────────────────────────────────────────────────────────────
+
+LIST_SPEC = { "--after" => :value, "--limit" => :integer, "--json" => :switch, "--overlap-s" => :integer,
+              "--seen-file" => :value, "--with-payloads" => :switch }.freeze
+RECORD_SPEC = { "--call" => :value, "--use-case" => :value, "--subject" => :value, "--signal" => :value,
+                "--note-file" => :value, "--session-label" => :value }.freeze
+
+# split_corrections(argv) -> [the --correct values, the rest]. --correct is
+# the one repeatable flag, so it is taken out before the strict parse.
+def split_corrections(argv)
+  values = []
+  rest = []
+  i = 0
+  while i < argv.length
+    if argv[i] == "--correct"
+      value = argv[i + 1]
+      usage!("--correct needs a value", "pass --correct <question>=<label>") if value.nil? || value.empty? || value.start_with?("-")
+      values << value
+      i += 2
+    else
+      rest << argv[i]
+      i += 1
+    end
+  end
+  [values, rest]
+end
+
+def main(argv, out, err)
+  if argv.include?("--help")
+    out.print USAGE
+    return 0
+  end
+  command, *rest = argv
+  case command
+  when "record"
+    pairs, rest = split_corrections(rest)
+    Manager.record(StrictArgv.parse(rest, RECORD_SPEC), JF.corrections(pairs), out)
+  when "list"
+    Manager.list(StrictArgv.parse(rest, LIST_SPEC), out, err)
+  when nil
+    usage!("no subcommand", "run `judgment-feedback record ...` or `judgment-feedback list ...`")
+  else
+    usage!("unknown subcommand #{command.start_with?('-') ? command : command.inspect}", "the subcommands are record and list")
+  end
+rescue StrictArgv::UsageError, JF::UsageError => e
+  err.puts "#{PROG}: #{e.message}. Fix: #{USAGE_FIX}"
+  2
+rescue Failure => e
+  err.puts e.message
+  e.code
+rescue StandardError => e
+  err.puts unexpected_line(e)
+  3
+end
+
+exit(main(ARGV, $stdout, $stderr)) if $PROGRAM_NAME == __FILE__

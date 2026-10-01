@@ -4,8 +4,9 @@
 # (DND-1054). Extracted from finding-triage (DND-713) so ticket-classify does
 # not copy it. Side Effects only: files, the MCP registry, and curl.
 #
-# Callers: scripts/finding-triage, scripts/ticket-classify and
-# scripts/ticket-reclassify (DND-1056). Each maps the
+# Callers: scripts/finding-triage, scripts/ticket-classify,
+# scripts/ticket-reclassify (DND-1056) and ai/bin/judgment-feedback
+# (DND-1466). Each maps the
 # two exceptions below to its own unavailable line, which carries the `Fix:`.
 #
 # TOKENS NEVER TOUCH ARGV OR THE ENVIRONMENT. Every header value, the token
@@ -140,5 +141,13 @@ module AthenaServer
   def post_json(origin, token, path, body, max_time:)
     headers = ["Authorization: Bearer #{token}", "Accept: application/json", "Content-Type: application/json"]
     request("POST", "#{origin}#{path}", headers, body, max_time: max_time)
+  end
+
+  # get_json(origin, token, path, max_time:) -> request's result, for a GET
+  # to the Athena server with the machine token (ai/bin/judgment-feedback list,
+  # DND-1466). `path` carries its own encoded query string.
+  def get_json(origin, token, path, max_time:)
+    headers = ["Authorization: Bearer #{token}", "Accept: application/json"]
+    request("GET", "#{origin}#{path}", headers, nil, max_time: max_time)
   end
 end

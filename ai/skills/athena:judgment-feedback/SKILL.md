@@ -12,12 +12,10 @@ into new question-set versions. The normative home is
 `ai/contracts/athena-judgments.md` → *Receiver feedback*; this skill is the
 procedure.
 
-**Not built yet.** The client is `ai/bin/judgment-feedback` (DND-1466), over
-gen_saas's feedback API (DND-1461, DND-1462). Each use case's signal is its own
-ticket (DND-1464 to DND-1470). Until the tool exists, the steps below that call
-it cannot run: say so (`judgment feedback: not built (DND-1466)`) and do
-nothing else. Never record feedback another way, and never read its absence as
-"no feedback".
+The client is `ai/bin/judgment-feedback` (DND-1466), over gen_saas's feedback
+API (DND-1461, DND-1462); `--help` gives every form and exit code. Each use
+case's implicit signal is its own ticket (DND-1464 to DND-1470). Never record
+feedback another way, and never read a failed read as "no feedback".
 
 ## Recording a wrong judgment
 
@@ -42,8 +40,10 @@ You are the receiver when a judged result reaches you and you act on it.
 
    Agents with the athena MCP may use the `judgment_feedback` tool instead.
    The question names and labels are the request's own (the advisory prints
-   `cand_<i>` beside each candidate). Leave `--correct` out when you do not
-   know the right answer.
+   `cand_<i>` beside each candidate). A choice's label is its option key, a
+   score's its level index (`"0"` lowest to `"n-1"`), a noul's `true` or
+   `false`. Repeat `--correct` once per question. Leave it out when you do
+   not know the right answer. The note goes in a file (`--note-file`).
 4. **Forwarding a topic-routed Slack conversation** to the session that owns
    it is itself the report: pass `reroute_of_event_id` to `session_send`. The
    owner telling you "wrong session" in the thread is recorded by you, with the
@@ -63,16 +63,32 @@ its `Fix:`. A refusal is a fact to report, not something to work around.
 Run once per shipwright cron run, after the lead-time loop. The state lives in
 `$SHIPWRIGHT_STATE_DIR` beside `cursor.txt`.
 
-1. **Scan tickets for hand edits** (once DND-1469 ships):
+1. **Scan tickets for hand edits** (DND-1469):
    `ai/bin/judgment-feedback scan-tickets --since "$(cat "$SHIPWRIGHT_STATE_DIR/judgment-ticket-scan-cursor.txt")"`.
    It records `field_changed` feedback itself. Record its counts by reason
    (`recorded`, `unlinked`, `filer_sourced`, `provenance_unread`, …).
-   Advance that cursor only on exit 0.
-2. **Read new feedback:**
-   `ai/bin/judgment-feedback list --after "$(cat "$SHIPWRIGHT_STATE_DIR/judgment-feedback-cursor.txt")" --json`.
-   Missing cursor on a first run: read everything kept. Exit 3, or a last line
-   with `"complete": false`, is **could not measure**: report it, keep the old
-   cursor, and act on nothing from this run's partial read.
+   Advance that cursor only on exit 0. Until DND-1469 ships, `scan-tickets`
+   is an unknown subcommand (exit 2): journal `scan-tickets: not built
+   (DND-1469)` and go on to step 2.
+2. **Read new feedback** into a run-local file, never into the journal:
+
+   ```
+   S="$SHIPWRIGHT_STATE_DIR"
+   ai/bin/judgment-feedback list --json \
+     --after "$(cat "$S/judgment-feedback-cursor.txt")" \
+     --overlap-s 60 --seen-file "$S/judgment-feedback-seen.txt" > "$S/runs/<run>-feedback.jsonl"
+   ```
+
+   On a first run (no cursor file) leave out `--after`, `--overlap-s` and
+   `--seen-file`: it reads everything kept. A cursor file with no seen file
+   is exit 2: create an empty seen file once, and say so in the journal.
+   The overlap re-reads a minute behind the cursor, because a row is stamped
+   when its transaction began and can commit behind a cursor already passed;
+   the seen file drops the rows the last run handled, by id. Exit 3 or 4, or
+   a last line with `"complete": false`, is **could not measure**: report
+   it, keep the old cursor and seen file, and act on nothing from this run's
+   partial read. The rows carry ids, answers and counts; the note and the
+   request are left out (`has_note` says whether there is a note).
 3. **Cluster** strong rows by (use case, question-set version, Jev's label →
    the corrected label). Weak rows (`owner_override`) are context for a
    cluster, never a cluster on their own. A row with no correction joins its
@@ -81,7 +97,9 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
    distinct subjects. One report is watched, not actioned, as for any
    shipwright pattern.
 5. **Diagnose from the payloads, in session only.** Read the qualifying rows'
-   `request` (what Jev was sent) and answers. Ask what in the request misled
+   `request` (what Jev was sent) and answers: rerun the same `list` with
+   `--with-payloads` and read its output in session, never into a file the
+   journal or a commit carries. Ask what in the request misled
    it: a criterion that does not separate the two labels, missing context, a
    field cut by its cap, an option the owner does not use, a label leak in the
    input. Brief an `athena-architect` when the change carries design weight
@@ -104,11 +122,22 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
    **Never quote a payload or a note** in the ticket, the journal or a
    commit. Cite feedback ids; the implementer reads the payloads through
    the same read.
-7. **Advance the cursor** to the last row read, only after steps 3–6 handled
-   every row of a complete read.
+7. **Advance the cursor**, only after steps 3–6 handled every row of a
+   complete read: write the final line's `next_cursor` to
+   `judgment-feedback-cursor.txt` and its `seen_tail` ids, one per line, to
+   `judgment-feedback-seen.txt` (an empty file when it is empty). A `null`
+   next_cursor (nothing kept, no cursor yet) writes neither file.
 8. **Journal and report** counts per use case and version (rows, strong,
    weak, clusters, qualified), the tickets filed or appended, and any
-   could-not-measure. When one use case's strong reports dominate the run,
+   could-not-measure. The journal entry carries a `### Judgment feedback`
+   section, always, with one line:
+
+   ```
+   - judgment feedback: rows <N> (deduped <D>; strong <S>, weak <W>), clusters <C>, qualified <Q>, tickets <ids or none>; cursor <next_cursor>
+   - judgment feedback: COULD NOT MEASURE (<reason from the final line>, exit <n>); cursor kept
+   ```
+
+   then one line per (use case, version) that had rows. When one use case's strong reports dominate the run,
    say so in the run report for the owner. Whether a use case stays `on` is
    the owner's call, never this pass's.
 
