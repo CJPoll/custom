@@ -65,11 +65,39 @@ module Classify
     length(text) > max ? text.grapheme_clusters.first(max).join : text
   end
 
+  # A provenance label: where a finding came from, not what it does (DND-1590).
+  PROVENANCE_LABEL = /(?:Source|Context):/
+  # What may precede a label for it to start a clause: the start of a line,
+  # or the end of a sentence and a space.
+  CLAUSE_START = /(?:\n|[.!?)\]"'`][ \t]+)[ \t]*\z/
+  SENTENCE_END = /(?<=[.!?])\s+/
+
+  # sent_body(body) -> the body with its trailing provenance block dropped
+  # (DND-1590), else the body unchanged. The block is the run of `Source:`
+  # and `Context:` clauses that ends the body: from a label that starts a
+  # line or a sentence, every sentence to the end starts with a label.
+  # ticket-severity-v1 rated the incident a finding was found during, not
+  # the finding's own impact, so that background is not sent. A label
+  # inside a sentence, one followed by any other sentence, and a body that
+  # is nothing but provenance are all kept as they are.
+  def sent_body(body)
+    text = body.to_s
+    text.to_enum(:scan, PROVENANCE_LABEL).map { Regexp.last_match.begin(0) }.each do |at|
+      head = text[0, at]
+      next unless blank?(head) || head.match?(CLAUSE_START)
+      next unless text[at..].strip.split(SENTENCE_END).all? { |s| s.start_with?("Source:", "Context:") }
+
+      return blank?(head) ? text : head.rstrip
+    end
+    text
+  end
+
   # request_body(...) -> the closed body the server's schema accepts: the
-  # ticket (ref only when given) and the filer's values (`none` severity is
-  # null). Nothing else, and no identity field: the owner is the token's.
+  # ticket (ref only when given; the body as sent_body leaves it) and the
+  # filer's values (`none` severity is null). Nothing else, and no identity
+  # field: the owner is the token's.
   def request_body(title, body, project, ref, filer)
-    ticket = { "title" => truncate(title, MAX_TITLE), "body" => truncate(body, MAX_BODY), "project" => project }
+    ticket = { "title" => truncate(title, MAX_TITLE), "body" => truncate(sent_body(body), MAX_BODY), "project" => project }
     ticket["ref"] = ref if ref
     severity = filer[:severity] == "none" ? nil : filer[:severity]
     { "ticket" => ticket, "filer" => { "kind" => filer[:kind], "severity" => severity, "security" => filer[:security] } }

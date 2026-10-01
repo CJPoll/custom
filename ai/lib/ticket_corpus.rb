@@ -29,6 +29,7 @@ require "json"
 require "time"
 require_relative "triage_corpus"
 require_relative "judgment_eval"
+require_relative "../skills/athena:ticket-management/lib/classify"
 
 module TicketCorpus
   USE_CASES = %w[ticket_kind ticket_severity ticket_security].freeze
@@ -385,10 +386,13 @@ module TicketCorpus
     out
   end
 
+  # input(ticket, project) -> the case as the product sends it: the body
+  # redacted, then its trailing provenance block dropped by the same
+  # Classify.sent_body ticket-classify applies (DND-1590).
   def input(ticket, project)
     {
       "title" => sent_title(ticket["title"]),
-      "body" => truncate(redact_body(lines(ticket).join("\n")), MAX_BODY),
+      "body" => truncate(Classify.sent_body(redact_body(lines(ticket).join("\n"))), MAX_BODY),
       "project" => project
     }
   end

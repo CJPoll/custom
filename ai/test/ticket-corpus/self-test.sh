@@ -96,6 +96,9 @@ eq "9 an unknown project is excluded, never guessed [ticket]" \
 eq "10 corpus rows carry the domain and a capped body [ticket]" \
   "blend 2000 harness" \
   "$(rb 'c = TicketCorpus.labels(snap.([t.(12, POST, "blocks_text"=>["x" * 3000])]))[:corpus]["ticket_kind"].first; puts [c["content_domain"], c["input"]["body"].size, c["input"]["project"]].join(" ")')"
+eq "10a the corpus body drops a trailing Source:/Context: block, as the product sends it [DND-1590]" \
+  "Pool is 3. Fix: size it." \
+  "$(rb 'puts TicketCorpus.labels(snap.([t.(13, POST, "blocks_text"=>["Pool is 3. Fix: size it. Source: DND-9 report. Context: the prod outage (DND-9)."])]))[:corpus]["ticket_severity"].first["input"]["body"]')"
 eq "10b a walt_ui ticket is work" \
   "work" \
   "$(rb 'puts TicketCorpus.labels(snap.([t.(13, POST, "epic_ids"=>["EW"], "area"=>"Product")]))[:corpus]["ticket_kind"].first["content_domain"]')"

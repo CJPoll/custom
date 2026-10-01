@@ -171,7 +171,7 @@ the request's `state`.
 | `finding_triage` | the finding's title, body (at most 2,000 characters) and project; up to 20 candidate tickets as ref, title and summary (at most 500 characters each) |
 | `slack_routing` | the owner's own message text and its line `kind` (`im`, `mpim` or `mention`); and the conversation before it: of the six most recent top-level messages in the same channel within the 60 minutes before it (whoever sent them, oldest first), the owner's own text (each at most 500 characters), and Athena's own posts as the posting session's label only (`walt_ui`, `harness`, `gen_saas` or `other`), never their text. Anyone else's message holds its place among the six and is sent in no form: nobody else's text is ever sent. The window, the cap and the text cap are part of the question-set version (`slack-routing-v2`) |
 | `priority_scoring` | the item's `title`, `source` and `status`, plus `message_text` for a `slack_ask`; never a date and never the asker |
-| `ticket_kind`, `ticket_severity`, `ticket_security` | the ticket's title, body (at most 2,000 characters) and project; never its status, dates, assignee or author |
+| `ticket_kind`, `ticket_severity`, `ticket_security` | the ticket's title, body (at most 2,000 characters, its trailing `Source:`/`Context:` provenance block dropped) and project; never its status, dates, assignee or author |
 | `ticket_blocking` | the finding's title, body (at most 2,000 characters) and project; up to 10 candidate tickets as ref, title and summary (at most 800 characters of the candidate's body, its requirements); never a status, date, assignee, author or the filer's claim |
 | `eval:<use_case>` | the same request the product use case builds, for a labelled case |
 
@@ -184,6 +184,13 @@ posts go as a session label, not text, because their text can quote a third
 party. The context is read from gen_saas's own `slack_events` and
 `slack_thread_claims`, never from the Slack API; it is built in memory for the
 request and stored nowhere.
+
+**Later (2026-10-01, DND-1590):** the ticket classification row read "body
+(at most 2,000 characters)", the body as filed. Superseded by the dropped
+provenance block (*Ticket classification: the harness script* → *A trailing
+provenance block is not sent*). Why: `ticket-severity-v1` rated 8 of 9
+findings CRITICAL because each body ended by citing the prod outage it was
+found during, and the filer overrode all 8.
 
 **What is stored: no text on the call record; the request, for a bounded
 time, beside it.** The call record (`judgment_calls`) holds no state text. It
@@ -1201,6 +1208,21 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   Vulnerability filed with Security `none` is decided `pre-existing`, source
   `policy`, reason `vulnerability_floor`; and an unknown project reads
   `domain_not_permitted`, because the domain is checked before the mode.
+- **A trailing provenance block is not sent** (DND-1590). The body sent is
+  `Classify.sent_body` of the filed body: the run of `Source:` and
+  `Context:` clauses that ends it is dropped. The block starts at a label
+  that begins a line or a sentence, and every sentence from there to the end
+  starts with a label. Anything else is sent as filed: a label inside a
+  sentence, a block followed by any other sentence, and a body that is
+  nothing but provenance. Where a finding was found is background, not its
+  impact, so a filer states the defect's current impact in the body proper.
+  `ticket-classify` and `ticket-reclassify` send through it, and
+  `ticket-corpus` builds its eval cases with it, so an eval sends what the
+  product sends. `ticket_blocking`'s body is unchanged. The redaction is the
+  caller's, like `ticket-reclassify`'s dropped provenance lines, so it
+  changes no question set and no version: `ticket-severity-v1` calls before
+  and after it share one wrong-rate. Measured before it landed, on the
+  committed fixtures in `ai/eval/judgment-fixtures/ticket-severity-provenance/`.
 - **Unavailable is exit 3 with the filer's values.** Each cause prints its
   own first line: an unreachable server (`COULD NOT REACH SERVER`), a server
   that answered and refused (any 4xx, a 404 while the endpoint is not

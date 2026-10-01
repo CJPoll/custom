@@ -126,6 +126,37 @@ ruby_eq "truncate: by grapheme cluster, as the server counts" \
 ruby_eq "request body: severity none is null, ref only when given, only the contract's keys" \
   "filer,ticket|body,project,title|kind,security,severity|nil|DND-7" \
   'a = Classify.request_body("T", "B", "harness", nil, {kind: "Feature", severity: "none", security: "none"}); b = Classify.request_body("T", "B", "harness", "DND-7", {kind: "Bug", severity: "LOW", security: "none"}); [a.keys.sort.join(","), a["ticket"].keys.sort.join(","), a["filer"].keys.sort.join(","), a["filer"]["severity"].inspect, b["ticket"]["ref"]].join("|")'
+# DND-1590: a trailing Source:/Context: provenance block is background, not
+# the defect's impact. ticket-severity-v1 rated the incident a finding came
+# from, so the block is dropped from the body sent; anything else is kept.
+ruby_eq "sent body: a trailing Source:/Context: block on the last sentence is dropped [DND-1590]" \
+  "The pool is 3. Fix: size it." \
+  'Classify.sent_body("The pool is 3. Fix: size it. Source: DND-9 captain report, a/b/r.md. Context: the 16:00Z prod outage (DND-9).\n")'
+ruby_eq "sent body: a block on its own lines, Context first, is dropped [DND-1590]" \
+  "The pool is 3." \
+  'Classify.sent_body("The pool is 3.\n\nContext: the prod outage.\nSource: a report.\n")'
+ruby_eq "sent body: the request body carries the dropped form [DND-1590]" \
+  "The pool is 3." \
+  'Classify.request_body("T", "The pool is 3. Source: a report.", "athena", nil, {kind: "Bug", severity: "LOW", security: "none"})["ticket"]["body"]'
+ruby_eq "sent body: a Source: followed by a sentence that is not provenance is kept whole [DND-1590]" \
+  "true" \
+  'b = "The pool is 3. Source: the logs. Prod is down now.\n"; Classify.sent_body(b) == b'
+ruby_eq "sent body: a label inside a sentence is not a block [DND-1590]" \
+  "true" \
+  'b = "Read the Source: header of each event.\n"; Classify.sent_body(b) == b'
+ruby_eq "sent body: a body that is only provenance is kept, never sent blank [DND-1590]" \
+  "true" \
+  'b = "Source: a report. Context: an outage.\n"; Classify.sent_body(b) == b'
+ruby_eq "sent body: a body with no block is byte-identical [DND-1590]" \
+  "true" \
+  'b = "Gate exits 0 when its tool is missing.\n"; Classify.sent_body(b) == b'
+ruby_eq "sent body: only the trailing block goes; an earlier labelled sentence followed by content stays [DND-1590]" \
+  "Context: seen twice. The fix is X." \
+  'Classify.sent_body("Context: seen twice. The fix is X. Source: r.md.")'
+ruby_eq_args "sent body: on the DND-1590 fixtures, exactly the 15 bodies with a block change, and none keeps a label [DND-1590]" \
+  "15|0|6" \
+  'rows = File.readlines(ARGV[0]).map { |l| JSON.parse(l)["input"]["body"] }; sent = rows.map { |b| Classify.sent_body(b) }; changed = rows.zip(sent).reject { |a, b| a == b }; [changed.size, changed.count { |_, b| b.match?(/(?:Source|Context):/) }, rows.zip(sent).count { |a, b| a == b }].join("|")' \
+  "${SKILL}/../../eval/judgment-fixtures/ticket-severity-provenance/corpus.jsonl"
 ruby_eq "fallback: the filer's values under a heading that is not a decision" \
   "Decided (filer; classification unavailable):|Kind: Feature|Severity: (none: Feature)|Security: none" \
   'Classify.fallback_lines({kind: "Feature", severity: "none", security: "none"}).join("|")'
@@ -247,6 +278,13 @@ eq "no file was written under HOME [qa manager 8]" "$(find "${TMP}/home" -mindep
 
 run "${TICKET[@]}" "${FILER[@]}" --ref DND-42
 eq "--ref is sent as ticket.ref" "$(sent | jq -r '.ticket.ref')" "DND-42"
+
+printf 'The gate exits 0. Source: DND-9 captain report, r.md. Context: the 16:00Z prod outage (DND-9).\n' > "${TMP}/prov-body.txt"
+run --title "T" --body-file "${TMP}/prov-body.txt" --project harness "${FILER[@]}"
+eq "a trailing Source:/Context: block is not sent [DND-1590]" "$(sent | jq -r '.ticket.body')" "The gate exits 0."
+/usr/bin/ruby -e 'print "z" * 1990, ". Source: ", "r" * 40, "."' > "${TMP}/prov-long.txt"
+run --title "T" --body-file "${TMP}/prov-long.txt" --project harness "${FILER[@]}"
+lacks "a body under the cap once its block is dropped is not reported truncated [DND-1590]" "${ERR}" "[truncated]"
 
 run "${TICKET[@]}" "${FILER[@]}" --json
 eq "--json exits 0" "${RC}" "0"

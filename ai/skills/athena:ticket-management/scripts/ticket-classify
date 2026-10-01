@@ -61,6 +61,9 @@ USAGE = <<~EOF
     --title T        the ticket's title (at most 300 characters are sent)
     --body-file F    a file holding the ticket's body. Only this path is read;
                      at most 2,000 characters are sent (stderr says when cut).
+                     A trailing Source:/Context: provenance block is not sent
+                     to the classification (DND-1590): state the defect's
+                     current impact in the body proper.
     --project P      athena | harness | walt_ui | dnd | lms | admiral. The
                      server derives the content domain from it; an unknown
                      project is judged as domain_not_permitted per property.
@@ -270,7 +273,7 @@ module Manager
   def run(opts, out, err)
     body = Effects.read_body_file(opts[:body_file])
     note_truncation(err, "--title", opts[:title], Classify::MAX_TITLE)
-    note_truncation(err, "--body-file", body, Classify::MAX_BODY)
+    note_truncation(err, "--body-file", Classify.sent_body(body), Classify::MAX_BODY)
     path_part = opts[:epic] && Blocking.judged?(opts[:filer][:kind])
     err.puts "#{PROG}: note: --epic is ignored for a Feature; its Path is authored, never judged" if opts[:epic] && !path_part
     # Candidates are read BEFORE anything is sent, so a --blocks outside

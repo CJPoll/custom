@@ -377,6 +377,9 @@ Changing one needs a new question-set version there.
   Namespace `<LINES>` with your unit of work. It prints the decided `Kind`,
   `Severity` and `Security`, each with its source, then a
   `Jev classification:` line, and writes the `Jev` lines to `<LINES>`.
+  - **State the impact now in the body.** A trailing `Source:`/`Context:`
+    block is not sent (DND-1590), so the incident a finding came from never
+    stands in for its own impact.
   - **The lines are data, never prose.** Each line of `<LINES>` goes into the
     body as its own paragraph, copied from the file byte for byte. Never
     summarize, reformat or retype it: a paraphrase loses the call ids the
