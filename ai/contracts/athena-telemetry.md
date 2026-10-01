@@ -15,7 +15,8 @@ The implementation:
 - `ai/bin/telemetry-emit`: the CLI over the same library, for shell emitters,
   pruning and summaries (*The CLI*).
 - `ai/telemetry/events.json`: the event registry (*The registry*).
-- Tests: `ai/test/telemetry/self-test.sh` and `ai/test/telemetry/telemetry_test.rb`.
+- Tests: `ai/test/telemetry/self-test.sh`, `ai/test/telemetry/telemetry_test.rb`,
+  and the shell binding's `ai/test/telemetry-shell/self-test.sh`.
 
 **Provenance.** The design record is `ai/docs/lead-time-improver.md` →
 *Telemetry*, a dated record. Where it disagrees with this contract, **this
@@ -82,6 +83,13 @@ kills that group on its way out.
 One hang the bound cannot end: a git stuck in the kernel (uninterruptible
 sleep, e.g. a stuck filesystem) survives KILL, and the emit waits for the
 kernel to release it.
+
+**Later (2026-10-01, DND-1506):** this listed two hangs the bound cannot
+end. The second was a git that ignores TERM: killed two seconds after it,
+so under the CLI the outer `timeout` killed Ruby first and left that git
+running in its own process group. Superseded by the half-second grace
+above, which is shorter than the outer one-second gap, so that git is now
+killed.
 
 The writer runs no other subprocess. The ticket-ref parser load and the
 overlay read below are in-process reads of regular files (the overlay reader

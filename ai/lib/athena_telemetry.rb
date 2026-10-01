@@ -459,7 +459,10 @@ module AthenaTelemetry
   # (ai/lib/telemetry-emit.sh), so a git that ignores TERM never outlives a CLI
   # emit (DND-1506):
   # - timeout + grace (1.5 s) is under the outer TERM (2 s), so a CLI emit
-  #   normally kills git and counts the timeout instead of being killed;
+  #   behind a hung git normally kills it and counts the timeout instead of
+  #   being killed. "Normally": Ruby's boot, and BoundedCommand's reader grace
+  #   when something outside the group holds git's pipes, come on top, and
+  #   then the outer TERM wins and the emit is lost uncounted;
   # - the grace alone (0.5 s) is under the outer TERM-to-KILL gap (1 s). The
   #   outer TERM raises in Ruby, BoundedCommand's cleanup sends the group TERM
   #   then KILL a grace later, and Ruby is still alive to send that KILL.

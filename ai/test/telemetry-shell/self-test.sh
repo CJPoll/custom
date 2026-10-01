@@ -105,7 +105,10 @@ echo "== a TERM-ignoring git under the CLI (DND-1506)"
 # check covers its whole process group. Once the binding returns, neither may
 # survive: the writer's KILL must land before the binding's outer KILL ends
 # Ruby. The wait for each pid is a cap on a hang, not a verdict on speed: a
-# killed process is gone at once, an orphan never goes.
+# killed process is gone at once, an orphan never goes. The fix does rest on
+# one margin: the writer's 0.5 s grace against the outer 1 s TERM-to-KILL gap
+# (pinned arithmetically in ai/test/telemetry/telemetry_test.rb). A failure
+# here on a loaded machine is that margin, not a flake to retry.
 FG="${TMP}/fake-git"; mkdir -p "${FG}/bin"
 mkfifo "${FG}/never-written"
 printf '#!/bin/bash\ntrap "" TERM\nprintf "%%s\\n" "$$" >> "%s"\ncat "%s" &\nprintf "%%s\\n" "$!" >> "%s"\nwait\n' \
@@ -122,6 +125,9 @@ for p in "${FGPIDS[@]}"; do
   gone "${p}" || SURVIVORS="${SURVIVORS} ${p}"
 done
 eq "9 no process of the fake git's group survives the emit" "${SURVIVORS}" ""
+# Clean up a regression: the fake git leads its own process group, so KILL
+# the group (a member whose pid was never written included), then each pid.
+[[ "${FGPIDS[0]:-}" =~ ^[0-9]+$ ]] && kill -KILL -- "-${FGPIDS[0]}" 2>/dev/null
 for p in ${SURVIVORS}; do kill -KILL "${p}" 2>/dev/null; done
 
 echo "== the clock helpers"
