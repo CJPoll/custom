@@ -456,27 +456,30 @@ the domain or the budget. The owner's writer is gen_saas
 `Athena.Judgments.Settings.set_mode/3` (DND-714); every refusal carries
 `Fix:`.
 
-**Slack routing's latency is watched, not gated** (DND-717, DND-1334,
-DND-1398). The health tile reads the owner's own `slack_routing` rows of the
-last 30 days that reached the port, are of the registered question set's
-version, and carry a `wait_ms`. It shows their discrete p95 against a target:
-at least 20 such calls, the first at least 3 days old (else `unmeasured`),
-with a p95 of at most 1,000 ms (`within_target`, else `over_target`). The
-reading never refuses a mode. No judgment runs inside Slack's ack: the route
-worker judges after it, under a 5,000 ms deadline, and a request not routed
-within 60 s goes by the channel route as `route_overdue`
-(`ai/contracts/athena-events.md` → *Routing runs after the ack*). `wait_ms` is
-what the route worker waited: from its topic step's start, read before the
-mode read and the context reads (`judge/4`'s `:wait_started_ms`), to the end
-of the TypeSafe call. It leaves out the time the request was queued before
-the worker took it, which the request's `route_delay_ms` records, and the
-decision and topic-route lookup after the call. A start that is not a
-past `System.monotonic_time(:millisecond)` raises; it is never read as no
-wait. `latency_ms` is the call task alone (the custody read and the call,
-capped at the deadline), and the reading never uses it. A row with no
-`wait_ms` is not measured and does not count. `judgment_calls` rows carry no
-mode, so `shadow` and `on` calls both count. Replacing this tile with the
-queue's figures (gen_saas ADR 21 rule 6) is DND-1455.
+**Slack routing watches its queue, not a latency** (DND-1455, gen_saas ADR
+21 rule 6). No judgment runs inside Slack's ack: the route worker judges
+after it, under a 5,000 ms deadline, and a request not routed within 60 s
+goes by the channel route as `route_overdue`, whose health transition is the
+alert (`ai/contracts/athena-events.md` → *Routing runs after the ack*). The
+judgments tile's `slack_routing` row shows, for the owner's own Slack apps
+only: the pending route requests and the oldest one's age, and the median
+and max `route_delay_ms` of the requests delivered in the last 24 hours. An
+empty queue reads `0 pending`; no delivered request reads "no routed
+requests in 24 h", never a 0 ms delay. No latency figure is read for a mode
+or shown. `judge/4` still records `wait_ms` (from the caller's
+`:wait_started_ms` to the end of the TypeSafe call) beside `latency_ms` (the
+call task alone); nothing reads it.
+
+**Later (2026-10-01, DND-1455):** the health tile read the owner's own
+`slack_routing` rows of the last 30 days that reached the port, were of the
+registered question set's version and carried a `wait_ms`, and showed their
+discrete p95 against an advisory target: at least 20 such calls, the first at
+least 3 days old (else `unmeasured`), with a p95 of at most 1,000 ms
+(`within_target`, else `over_target`), gen_saas `CallStore.on_bar_latency/4`
+and `ModePolicy.latency_reading/1` (DND-1398). Replaced by the queue figures
+above; the reading and its helpers are removed. Why: since DND-1454 the
+judgment runs after the ack, so the wait guarded nothing, and ADR 21 rule 6
+says to measure the queue, not the request.
 
 **Later (2026-10-01, DND-1456):** this said what kept a slow judgment inside
 Slack's 3 s ack was the router's 1,500 ms call deadline, and that `wait_ms`

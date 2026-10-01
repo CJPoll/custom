@@ -4476,10 +4476,16 @@ request** and answers Slack; the route worker finishes it.
   was routed minus `received_at`, as `route_delay_ms` in its `queued`
   outcome, and in its `topic_routing` outcome when the topic step ran. The
   webhook's `received_at` is whole seconds, so the delay can read up to 1 s
-  high. The backlog's depth and the oldest request's age on the owner's
-  judgments view are DND-1455; until it ships they are read from
-  `slack_route_requests`. Slack routing has no latency bar for `on`
-  (`ai/contracts/athena-judgments.md` → *Modes*).
+  high. The owner's judgments view shows, for the owner's own apps, the
+  backlog's depth and the oldest request's age (`slack_route_requests`), and
+  the median and max `route_delay_ms` of the last 24 hours' `queued`
+  outcomes (DND-1455). Every request the worker or the sweeper finishes,
+  delivered or not, also emits `[:athena, :slack_events, :route_request,
+  :stop]` with its `route_delay_ms` and outcome. Slack routing has no latency
+  bar (`ai/contracts/athena-judgments.md` → *Modes*).
+  **Later (2026-10-01, DND-1455):** this said the backlog figures were
+  DND-1455's and were read from `slack_route_requests` until it shipped.
+  Replaced by the text above, now that the tile shows them.
 
 **The session mention (step 2b').** Grammar `session-mention-v1`, in code and
 versioned. Only the first 400 characters of the owner's text are read, and
