@@ -323,8 +323,75 @@ check("changed?: the same verdict again is not a change (judge is idempotent); a
   !X.changed?(st1.merge(v), v) && X.changed?(st1.merge(v), v.merge("status" => "keep")) && X.changed?(nil, v)
 end
 
-check("terminal?: keep, inconclusive and reverted are terminal; pending and an owed revert are not") do
-  %w[keep inconclusive reverted].all? { |s| X.terminal?(s) } && !X.terminal?("pending") && !X.terminal?("revert")
+check("terminal?: keep, inconclusive, reverted and declined are terminal; pending and an owed revert are not") do
+  %w[keep inconclusive reverted declined].all? { |s| X.terminal?(s) } && !X.terminal?("pending") && !X.terminal?("revert")
+end
+
+# ── decline (DND-1547) ──────────────────────────────────────────────────────
+
+ok_guards = { "critic_block_rate" => { "before" => 0.154, "after" => 0.083, "state" => "ok" },
+              "gate_red_rate" => { "before" => 0.1, "after" => 0.0, "state" => "ok" },
+              "reverts" => { "before" => 0, "after" => 0, "state" => "ok" } }
+median_revert = { "type" => "status", "id" => rec["id"], "status" => "revert", "reason" => "median rose 247s -> 292s",
+                  "before" => { "n" => 10, "median" => 247, "p90" => 309 },
+                  "after" => { "n" => 10, "median" => 292, "p90" => 345 }, "guards" => ok_guards, "judged_at" => "z" }
+declined_row = { "type" => "status", "id" => rec["id"], "status" => "declined", "constraint" => "safety-checks",
+                 "reason" => "the revert deletes a test", "declined_at" => "w" }
+
+check("fold: a declined status row folds, and is terminal") do
+  r = X.fold_all([rec, median_revert, declined_row])
+  r[:bad_status].empty? && r[:experiments][0]["status"] == "declined" && X.terminal?(r[:experiments][0]["status"])
+end
+
+check("blocker: a declined change on the phase blocks nothing; a revert still blocks (unchanged)") do
+  X.blocker([exp.merge("status" => "declined")], phase: "verify", kind: "change").nil? &&
+    X.blocker([exp.merge("status" => "revert")], phase: "verify", kind: "change")&.dig("id") == exp["id"]
+end
+
+check("decline_error: a revert verdict with no worse guard is admitted") do
+  X.decline_error(X.fold([rec, median_revert])[0]).nil?
+end
+
+check("decline_error: pending, keep, inconclusive, reverted and declined are each refused with their own reason") do
+  whys = { "pending" => "not judged yet", "keep" => "keep", "inconclusive" => "inconclusive",
+           "reverted" => "reverted", "declined" => "already declined" }
+  reasons = whys.keys.map { |s| X.decline_error(exp.merge("status" => s))&.first }
+  whys.values.zip(reasons).all? { |want, got| got.to_s.include?(want) } && reasons.uniq.size == whys.size
+end
+
+check("decline_error: a revert from a worse guard is refused, naming the guard and the Fix") do
+  worse = ok_guards.merge("gate_red_rate" => { "before" => 0.0, "after" => 0.2, "state" => "worse" })
+  why, fix = X.decline_error(X.fold([rec, median_revert.merge("guards" => worse)])[0])
+  why.to_s.include?("gate_red_rate") && fix.to_s.include?("decline does not cover a quality regression") &&
+    fix.to_s.include?("a guard worsened (gate_red_rate)")
+end
+
+check("decline_error: a revert row whose guards are missing is refused (cannot tell it was median-only)") do
+  why, = X.decline_error(X.fold([rec, median_revert.reject { |k, _| k == "guards" }])[0])
+  why.to_s.include?("guards")
+end
+
+check("decline_row: copies before/after/guards and the revert's reason; status declined") do
+  e = X.fold([rec, median_revert])[0]
+  r = X.decline_row(e, constraint: "bug-fix", reason: "it reinstates a leak", now: t("2026-10-02T00:00:00Z"))
+  r["type"] == "status" && r["status"] == "declined" && r["constraint"] == "bug-fix" &&
+    r["reason"] == "it reinstates a leak" && r["declined_at"] == "2026-10-02T00:00:00Z" &&
+    r["prior_reason"] == "median rose 247s -> 292s" && r["before"] == median_revert["before"] &&
+    r["after"] == median_revert["after"] && r["guards"] == ok_guards
+end
+
+check("decline_row: an unknown constraint raises (the CLI refuses it first)") do
+  X.decline_row(X.fold([rec, median_revert])[0], constraint: "speed", reason: "x", now: NOW)
+  false
+rescue X::UsageError => e
+  e.message.include?("safety-checks")
+end
+
+check("status_row: judge can never write declined; only decline_row does") do
+  X.status_row(exp, { "status" => "declined", "reason" => "x" }, NOW)
+  false
+rescue X::UsageError => e
+  e.message.include?("declined")
 end
 
 # ── store ───────────────────────────────────────────────────────────────────

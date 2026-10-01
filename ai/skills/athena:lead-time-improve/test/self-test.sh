@@ -208,6 +208,83 @@ eq "judge after the revert lands: exit 0" "$(s3 run judge --repo custom)" "0"
 has "it is REVERTED" "$(out)" "custom:verify:${OTHER:0:12} REVERTED"
 eq "the phase is free again" "$(s3 rec verify phase "${NEWSHA}" change)" "0"
 
+# ── decline: a revert the hard constraint forbids (DND-1547) ────────────────
+echo "== decline"
+# A median-only revert: after-set verify 700 s, windows on the 24th, no revert
+# of anything in either window, so every guard is ok.
+DECL="$(commit 2026-09-24T11:00:00Z "fixture: a fixture fix a revert would delete")"
+STATE4="${TMP}/state4"
+mkdir -p "${STATE4}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE4}/ledger.jsonl" "${DECL}" 700 2026-09-24T00:00:00Z
+s4() { LEAD_TIME_STATE_DIR="${STATE4}" LEAD_TIME_EXPERIMENT_NOW=2026-09-25T12:00:00Z "$@"; }
+DID="custom:verify:${DECL:0:12}"
+REASON="${TMP}/reason.txt"
+printf 'The revert would delete the assertion that killing the holder frees the lock.\n' >"${REASON}"
+dec() { s4 run decline --repo custom --id "$1" --constraint "$2" --reason-file "$3"; }
+rows4() { grep -c . "${STATE4}/experiments.jsonl"; }
+eq "record the change" "$(s4 rec verify phase "${DECL}" change)" "0"
+eq "decline before it is judged: exit 2" "$(dec "${DID}" safety-checks "${REASON}")" "2"
+has "... not judged yet" "$(err)" "not judged yet"
+eq "judge: exit 0" "$(s4 run judge --repo custom)" "0"
+has "a median-only REVERT" "$(out)" "${DID} REVERT"
+has "... every guard ok" "$(out)" "reverts 0->0 ok"
+eq "regression: record on the phase is refused while the revert is owed" "$(s4 rec verify phase "${OTHER}" change)" "2"
+has "... naming the blocker" "$(err)" "${DID}"
+N4="$(rows4)"
+: >"${TMP}/empty.txt"
+eq "an empty reason file: exit 2" "$(dec "${DID}" safety-checks "${TMP}/empty.txt")" "2"
+has "... saying it is empty" "$(err)" "is empty"
+eq "a missing reason file: exit 2" "$(dec "${DID}" safety-checks "${TMP}/no-such-reason.txt")" "2"
+has "... saying it cannot be read" "$(err)" "cannot read the reason file"
+eq "a reason file that is not UTF-8: exit 2" "$(dec "${DID}" safety-checks "${TMP}/latin.txt")" "2"
+has "... saying so" "$(err)" "not valid UTF-8"
+eq "an unknown --constraint: exit 2" "$(dec "${DID}" speed "${REASON}")" "2"
+has "... naming the known constraints" "$(err)" "safety-checks, bug-fix"
+eq "an unknown id: exit 2" "$(dec custom:verify:000000000000 safety-checks "${REASON}")" "2"
+has "... listing the repo's ids" "$(err)" "${DID}"
+eq "no refused decline wrote a row" "$(rows4)" "${N4}"
+cp "${STATE4}/experiments.jsonl" "${TMP}/store4.before"
+eq "decline --help: exit 0" "$(s4 run decline --repo custom --id "${DID}" --constraint safety-checks --reason-file "${REASON}" --help)" "0"
+has "... documents the verb on stdout" "$(out)" "experiment decline --repo R --id ID --constraint"
+eq "... and the store is byte-identical" "$(cmp -s "${TMP}/store4.before" "${STATE4}/experiments.jsonl" && echo same || echo changed)" "same"
+eq "decline the median-only revert: exit 0" "$(dec "${DID}" safety-checks "${REASON}")" "0"
+has "... saying it is declined" "$(out)" "declined ${DID}"
+eq "decline wrote exactly one row" "$(rows4)" "$((N4 + 1))"
+LAST="$(tail -1 "${STATE4}/experiments.jsonl")"
+has "... a declined status row" "${LAST}" '"status":"declined"'
+has "... with the constraint" "${LAST}" '"constraint":"safety-checks"'
+has "... keeping the revert's reason" "${LAST}" '"prior_reason":"median rose 600s -> 700s"'
+has "... and its numbers" "${LAST}" '"after":{"n":10,"median":700'
+eq "judge after the decline: exit 0" "$(s4 run judge --repo custom)" "0"
+lacks "no REVERT OWED line for it" "$(out)" "REVERT OWED"
+has "the tally counts it as declined, not keep" "$(out)" "0 keep"
+has "... on its own" "$(out)" "1 declined"
+eq "judge appended nothing" "$(rows4)" "$((N4 + 1))"
+eq "list: exit 0" "$(s4 run list --repo custom)" "0"
+has "list shows DECLINED with the constraint and reason" "$(out)" "${DID} DECLINED constraint=safety-checks"
+has "... and the reason" "$(out)" "killing the holder frees the lock"
+eq "decline twice: exit 2" "$(dec "${DID}" safety-checks "${REASON}")" "2"
+has "... already declined" "$(err)" "already declined"
+eq "... still one declined row" "$(grep -c '"status":"declined"' "${STATE4}/experiments.jsonl")" "1"
+eq "the phase now admits a new change" "$(s4 rec verify phase "${OTHER}" change)" "0"
+
+echo "== decline refuses a guard-worse revert"
+WORSE="$(commit 2026-09-26T11:00:00Z "fixture: a change whose window saw a revert")"
+commit 2026-09-26T15:00:00Z "Revert \"something else\"" "This reverts commit $(printf '3%.0s' $(seq 40))." >/dev/null
+STATE5="${TMP}/state5"
+mkdir -p "${STATE5}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE5}/ledger.jsonl" "${WORSE}" 500 2026-09-26T00:00:00Z
+s5() { LEAD_TIME_STATE_DIR="${STATE5}" LEAD_TIME_EXPERIMENT_NOW=2026-09-27T12:00:00Z "$@"; }
+WID="custom:verify:${WORSE:0:12}"
+eq "record" "$(s5 rec verify phase "${WORSE}" change)" "0"
+eq "judge" "$(s5 run judge --repo custom)" "0"
+has "a guard-worse REVERT" "$(out)" "${WID} REVERT"
+N5="$(grep -c . "${STATE5}/experiments.jsonl")"
+eq "decline it: exit 2" "$(s5 run decline --repo custom --id "${WID}" --constraint bug-fix --reason-file "${REASON}")" "2"
+has "... naming the guard" "$(err)" "a guard worsened (reverts)"
+has "... with Fix:" "$(err)" "Fix:"
+eq "... nothing written" "$(grep -c . "${STATE5}/experiments.jsonl")" "${N5}"
+
 # ── reverts guard: could not look is unmeasured, never 0 ────────────────────
 echo "== reverts could not look"
 # A checkout that is present but has no main (DND-1526: a missing path is

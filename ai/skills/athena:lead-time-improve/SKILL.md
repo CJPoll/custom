@@ -72,11 +72,22 @@ experiment it prints `keep`, `revert`, `pending` or `inconclusive`, with the
 before and after numbers, and records the verdict.
 
 - **revert** (or a `REVERT OWED` line, repeated each run until main carries
-  the revert): this run's one action is a `git revert` of that experiment's
+  the revert): first test the revert against the hard constraint
+  (`ai/blocks/ops/safety-checks.md`). If it would delete, skip or weaken a
+  test or check, or reinstate a defect the commit fixed, do not land it. Run
+  `experiment decline --repo R --id <id> --constraint <safety-checks|bug-fix>
+  --reason-file <F>` and journal the decision under *Decisions /
+  Won't-change* with the reason. Decline is bookkeeping, not the run's one
+  action, so steps 3-5 proceed. `decline` refuses a revert that a worse guard
+  drove (critic BLOCK rate, gate red rate, reverts): that one is a quality
+  regression, so land the revert or hand a fix-forward to an architect.
+  Otherwise this run's one action is a `git revert` of that experiment's
   commit, landed through *Landing* below. Skip steps 4 and 5. Judge records
   `reverted` once main carries it, and until then no new change starts on
   that phase. If two reverts are owed, land the first; the second is still
   owed next run.
+- **declined** is never a gain. It no longer blocks its phase. Judge never
+  writes it; only the `decline` verb does.
 - **keep, inconclusive:** journal them. An inconclusive experiment no longer
   blocks its phase.
 - **pending** is never a gain. Never report it as one.

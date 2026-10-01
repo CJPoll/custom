@@ -251,6 +251,19 @@ p90 over the last K comparable landings), and a status.
   rate, and reverts on main.
 - **Revert** when the median rises or a guard worsens. The revert lands
   through the same path.
+
+  **Later (2026-10-01, DND-1547):** a revert can conflict with the hard
+  constraint. custom:integrate:25c8114295af was judged revert on its median
+  alone (every guard improved), but reverting it would delete a self-test
+  assertion and bring back an orphaned-process leak. The tool could not record
+  the shipwright's refusal, so `REVERT OWED` repeated every run and integrate
+  admitted no new change. `experiment decline --constraint
+  <safety-checks|bug-fix> --reason-file F` now records a `declined` status:
+  terminal, never a gain, and not blocking its phase. It is admitted only on
+  a latest status of `revert` whose guards are all not worse. A revert a worse
+  guard drove is never declined: land it, or a fix-forward an architect
+  tickets. Judge never writes `declined`; only the verb does. Keep's
+  thresholds are unchanged.
 - **Pending** while either side has fewer than K. A pending row is never
   reported as a gain. Still pending after 7 days: journaled as inconclusive,
   and it no longer blocks its phase.

@@ -23,7 +23,9 @@
 #     not compared, and it is never reverted for a share that did not fall.
 #   * one pending `change` per phase; instrumentation is exempt. A `revert`
 #     verdict also blocks its phase until the revert is seen on main, when
-#     judge records `reverted`.
+#     judge records `reverted`, or until the decline verb records `declined`
+#     (DND-1547): a median-only revert the hard constraint forbids landing.
+#     Judge never writes `declined`, and a worse guard is never declined.
 #   * only `improve`-mode rows count, one row per landing (batch tickets
 #     sharing a landed commit are one landing).
 #
@@ -40,11 +42,19 @@ module LeadTimeExperiment
   MIN_DROP = 0.10
   PENDING_DAYS = 7
   KINDS = %w[change instrumentation].freeze
-  STATUSES = %w[pending keep revert inconclusive reverted].freeze
+  STATUSES = %w[pending keep revert inconclusive reverted declined].freeze
   # A revert verdict is settled as a judgement but OWED as an action until
-  # the revert lands, so it is not terminal.
-  TERMINAL = %w[keep inconclusive reverted].freeze
+  # the revert lands, so it is not terminal. `declined` (DND-1547) is a
+  # revert the hard constraint forbids landing: terminal, and not blocking.
+  TERMINAL = %w[keep inconclusive reverted declined].freeze
   BLOCKING = %w[pending revert].freeze
+  # The statuses judge may write. `declined` is written only by the decline
+  # verb (decline_row), so the loop never declines on its own.
+  JUDGED = (STATUSES - %w[declined]).freeze
+  # Why a revert may be declined. `safety-checks`: the revert would delete,
+  # skip or weaken a check or test (ai/blocks/ops/safety-checks.md).
+  # `bug-fix`: the revert would reinstate a defect the commit fixed.
+  CONSTRAINTS = %w[safety-checks bug-fix].freeze
   SHA_RE = /\A[0-9a-f]{40}\z/.freeze
   REVERT_RE = /This reverts commit ([0-9a-f]{40})/.freeze
   PHASES = LeadTimePhases::PHASES
@@ -297,7 +307,52 @@ module LeadTimeExperiment
   end
 
   def status_row(exp, verdict, now)
+    unless JUDGED.include?(verdict["status"])
+      raise UsageError, "judge cannot write status #{verdict['status'].inspect} (judged: #{JUDGED.join(', ')}); " \
+                        "only the decline verb writes declined"
+    end
+
     { "type" => "status", "schema" => SCHEMA, "id" => exp["id"], "judged_at" => now.utc.iso8601 }.merge(verdict)
+  end
+
+  # nil when the experiment's revert may be declined, else [why, fix].
+  # Only a revert verdict qualifies, and only one no guard drove: a worse
+  # critic BLOCK rate, gate red rate or revert count is a quality signal, so
+  # it is never declined. A revert row with no guards cannot show it was
+  # median-only, so it is refused too.
+  def decline_error(exp)
+    judge_fix = "decline applies only to an experiment judged revert; experiment list shows each status"
+    case exp["status"]
+    when "revert" then nil
+    when "pending" then return ["#{exp['id']} is pending: not judged yet", judge_fix]
+    when "declined" then return ["#{exp['id']} is already declined", "nothing to do; experiment list shows it"]
+    else return ["#{exp['id']} is #{exp['status']}, not an owed revert", judge_fix]
+    end
+
+    guards = exp.dig("last", "guards")
+    unless guards.is_a?(Hash) && !guards.empty?
+      return ["#{exp['id']}'s revert verdict carries no guards, so it cannot show it was median-only",
+              "land the revert, or re-judge it; decline covers only a median-only revert"]
+    end
+
+    worse = guards.select { |_, d| d.is_a?(Hash) && d["state"] == "worse" }.keys
+    return nil if worse.empty?
+
+    names = worse.join(", ")
+    ["#{exp['id']}'s revert verdict came from a worse guard: #{names}",
+     "a guard worsened (#{names}): land the revert, or a fix-forward ticketed by an architect; " \
+     "decline does not cover a quality regression"]
+  end
+
+  # The status row the decline verb appends: the revert row's numbers and
+  # reason kept beside the constraint and why it was declined.
+  def decline_row(exp, constraint:, reason:, now:)
+    raise UsageError, "unknown constraint #{constraint.inspect} (known: #{CONSTRAINTS.join(', ')})" unless CONSTRAINTS.include?(constraint)
+
+    last = exp["last"] || {}
+    { "type" => "status", "schema" => SCHEMA, "id" => exp["id"], "status" => "declined", "constraint" => constraint,
+      "reason" => reason, "declined_at" => now.utc.iso8601, "prior_reason" => last["reason"],
+      "before" => last["before"], "after" => last["after"], "guards" => last["guards"] }
   end
 
   def id_for(repo, phase, commit) = "#{repo}:#{phase}:#{commit.to_s[0, 12]}"

@@ -11,11 +11,13 @@
 #           row only when the verdict changed (re-running is idempotent);
 #           and every owed revert: `reverted` once main carries it
 #   list    every experiment and its latest status
+#   decline record that an owed revert will not land because the hard
+#           constraint forbids it (DND-1547); only this verb writes `declined`
 #
 # It reads the lead-time-phases ledger (DND-1477) and git (read-only: is a
 # commit on main, reverts on main), and writes only <state>/experiments.jsonl.
 #
-# Buckets: FRAMEWORK (argv, output) and MANAGER (Record, Judge, List) here;
+# Buckets: FRAMEWORK (argv, output) and MANAGER (Record, Judge, List, Decline) here;
 # DOMAIN in ../lib/experiment.rb; SIDE EFFECTS in ../lib/experiment_store.rb,
 # ../lib/experiment_git.rb and ai/lib/lead_time_phases_io.rb (the ledger).
 #
@@ -43,13 +45,14 @@ require_relative "../lib/experiment_git"
 AI_DIR = File.expand_path("../../..", __dir__)
 X = LeadTimeExperiment
 XG = LeadTimeExperimentGit
-HYPOTHESIS_MAX = 2000
+TEXT_MAX = 2000
 
 HELP = <<~TXT
   Usage:
     experiment record --repo R --phase P --metric M --commit SHA --kind K --hypothesis-file F
     experiment judge --repo R
     experiment list [--repo R]
+    experiment decline --repo R --id ID --constraint <safety-checks|bug-fix> --reason-file F
 
   Before/after experiments for athena:lead-time-improve (DND-1478), judged
   on the lead-time-phases ledger (ai/bin/lead-time-phases, DND-1477).
@@ -67,7 +70,25 @@ HELP = <<~TXT
            until main carries the revert; judge then records `reverted`.
            Appends a status row only when the verdict changed, so a re-run
            with the same inputs writes nothing.
-  list     Every experiment and its latest status.
+  list     Every experiment and its latest status (DECLINED with its
+           constraint and reason).
+  decline  Record that an owed revert will not land because the hard
+           constraint (ai/blocks/ops/safety-checks.md) outranks the
+           experiment rule. Appends one `declined` status row, which is
+           terminal and no longer blocks the phase. Judge never writes
+           `declined`: only this verb does. Refused (exit 2, nothing
+           written) when:
+             - the experiment's latest status is not `revert` (pending: not
+               judged yet; keep, inconclusive, reverted; or already declined);
+             - the revert verdict came from a worse guard (critic BLOCK rate,
+               gate red rate, reverts): land the revert, or a fix-forward
+               ticketed by an architect. Decline covers a median-only
+               revert, never a quality regression;
+             - the revert row carries no guards to show it was median-only;
+             - the id is unknown (the refusal lists the repo's ids);
+             - --constraint is not one of the two below, or the reason file
+               is missing, empty or not UTF-8.
+           A declined experiment is never reported as a gain.
 
   Rules (ai/docs/lead-time-improver.md, Decision 8):
     comparable  same repo, improve-mode rows, one row per landing; the
@@ -94,6 +115,13 @@ HELP = <<~TXT
     --commit SHA         the experiment's commit as landed on main (40 hex)
     --kind K             change | instrumentation
     --hypothesis-file F  a UTF-8 text file: what the change should move, and why
+    --id ID              an experiment id, as experiment list prints it
+    --constraint C       safety-checks: the revert would delete, skip or
+                         weaken a check or test; bug-fix: the revert would
+                         reinstate a defect the commit fixed
+    --reason-file F      a UTF-8 text file: why the revert is declined (the
+                         hypothesis file's rules: non-empty, first 2000
+                         characters kept)
     --help               this text
 
   State: <main checkout>/ai-artifacts/lead-time/experiments.jsonl
@@ -111,11 +139,13 @@ SPECS = {
                 "--kind" => :value, "--hypothesis-file" => :value },
   "judge" => { "--repo" => :value },
   "list" => { "--repo" => :value },
+  "decline" => { "--repo" => :value, "--id" => :value, "--constraint" => :value, "--reason-file" => :value },
 }.freeze
 REQUIRED = {
   "record" => %w[--repo --phase --metric --commit --kind --hypothesis-file],
   "judge" => %w[--repo],
   "list" => [],
+  "decline" => %w[--repo --id --constraint --reason-file],
 }.freeze
 
 class Refusal < StandardError
@@ -221,6 +251,20 @@ module Setup
   end
 
   def landing_row(rows, commit) = rows.find { |r| r["landed_commit"] == commit }
+
+  # A --<what>-file's text: UTF-8, non-empty after strip, the first TEXT_MAX
+  # characters kept. Missing, unreadable, empty or not UTF-8 is exit 2.
+  def read_text(path, what, empty_fix)
+    text = File.read(path, encoding: "UTF-8")
+    refuse(2, "the #{what} file #{path} is not valid UTF-8", "save it as UTF-8 text") unless text.valid_encoding?
+    text = text.strip
+    refuse(2, "the #{what} file #{path} is empty", empty_fix) if text.empty?
+    warn "experiment: the #{what} is #{text.size} characters; kept the first #{TEXT_MAX}" if text.size > TEXT_MAX
+    text[0, TEXT_MAX]
+  rescue SystemCallError => e
+    refuse(2, "cannot read the #{what} file #{path} (#{e.class.name.split('::').last})",
+           "write the #{what} to a file and pass its path")
+  end
 end
 
 # ── MANAGER: record ──────────────────────────────────────────────────────────
@@ -254,17 +298,7 @@ module Record
     refuse(2, e.message, "see experiment --help for the phases and metrics")
   end
 
-  def read_hypothesis(path)
-    text = File.read(path, encoding: "UTF-8")
-    refuse(2, "the hypothesis file #{path} is not valid UTF-8", "save it as UTF-8 text") unless text.valid_encoding?
-    text = text.strip
-    refuse(2, "the hypothesis file #{path} is empty", "write what the change should move, and why") if text.empty?
-    warn "experiment: the hypothesis is #{text.size} characters; kept the first #{HYPOTHESIS_MAX}" if text.size > HYPOTHESIS_MAX
-    text[0, HYPOTHESIS_MAX]
-  rescue SystemCallError => e
-    refuse(2, "cannot read the hypothesis file #{path} (#{e.class.name.split('::').last})",
-           "write the hypothesis to a file and pass its path")
-  end
+  def read_hypothesis(path) = Setup.read_text(path, "hypothesis", "write what the change should move, and why")
 
   # A SHA that is not on main would never appear in the ledger and would
   # block its phase for 7 days as "not ingested yet": refuse it here.
@@ -346,9 +380,10 @@ module Judge
     appended = Setup.append(store) { |existing| fresh_rows(existing, results, now) }
     results.each { |e, v| puts line(e, v) }
     judged = results.map { |_, v| v["status"] }
-    tally = X::STATUSES.map { |s| "#{judged.count(s)} #{s}" }.join(", ")
+    tally = X::JUDGED.map { |s| "#{judged.count(s)} #{s}" }.join(", ")
+    declined = mine.count { |e| e["status"] == "declined" }
     puts "experiment judge: #{repo.name}: #{results.size} judged (#{tally}); #{appended.size} status row(s) appended; " \
-         "#{rows.size} landing(s) in the ledger"
+         "#{rows.size} landing(s) in the ledger; #{declined} declined (a revert the hard constraint forbids; not judged)"
     0
   end
 
@@ -447,8 +482,52 @@ module List
   def line(e)
     b = e["baseline"].is_a?(Hash) ? e["baseline"] : {}
     base = b["na_reason"] ? "n/a (#{b['na_reason']})" : Judge.side(b)
-    "experiment: #{e['id']} #{e['status'].upcase} kind=#{e['kind']} metric=#{e['metric']} " \
+    declined = e["status"] == "declined" ? " constraint=#{e.dig('last', 'constraint')}" : ""
+    "experiment: #{e['id']} #{e['status'].upcase}#{declined} kind=#{e['kind']} metric=#{e['metric']} " \
       "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}" : ''}"
+  end
+end
+
+# ── MANAGER: decline ─────────────────────────────────────────────────────────
+
+module Decline
+  module_function
+
+  def run(opts, env)
+    now = Setup.now(env)
+    constraint = opts["--constraint"]
+    unless X::CONSTRAINTS.include?(constraint)
+      refuse(2, "unknown --constraint #{constraint.inspect} (known: #{X::CONSTRAINTS.join(', ')})",
+             "safety-checks when the revert would delete, skip or weaken a check or test; " \
+             "bug-fix when it would reinstate a defect the commit fixed")
+    end
+    reason = Setup.read_text(opts["--reason-file"], "reason", "write why the revert is declined")
+    repo = Setup.improve_repo(env, opts["--repo"])
+    store = Setup.store(Setup.state_dir(env))
+    unless store.exist?
+      refuse(2, "no experiments file at #{store.path}: nothing to decline", "experiment list shows what is recorded")
+    end
+
+    row = Setup.append(store) { |existing| [admit!(existing, repo, opts["--id"], constraint, reason, now)] }.first
+    puts "experiment: declined #{row['id']} (constraint #{constraint}); its phase admits a new change. " \
+         "Revert verdict kept as prior_reason: #{row['prior_reason']}"
+    0
+  end
+
+  # Under the store's lock: the experiment's latest status is re-read here,
+  # so a judge or another decline that settled it meanwhile is seen.
+  def admit!(existing, repo, id, constraint, reason, now)
+    mine = X.fold(existing).select { |e| e["repo"] == repo.name }
+    exp = mine.find { |e| e["id"] == id }
+    unless exp
+      ids = mine.map { |e| e["id"] }
+      refuse(2, "no experiment #{id.inspect} for #{repo.name} (its ids: #{ids.empty? ? 'none' : ids.join(', ')})",
+             "pass an id as experiment list --repo #{repo.name} prints it")
+    end
+    why, fix = X.decline_error(exp)
+    refuse(2, "cannot decline: #{why}", fix) if why
+
+    X.decline_row(exp, constraint: constraint, reason: reason, now: now)
   end
 end
 
@@ -462,13 +541,13 @@ def main(argv, env)
   sub = argv.first
   unless SPECS.key?(sub)
     warn "experiment: usage error: #{sub.nil? ? 'no subcommand' : "unknown subcommand #{sub.inspect}"}"
-    warn "Fix: run experiment record|judge|list (experiment --help)"
+    warn "Fix: run experiment record|judge|list|decline (experiment --help)"
     return 2
   end
   opts = StrictArgv.parse(argv.drop(1), SPECS[sub])
   missing = REQUIRED[sub] - opts.keys
   refuse(2, "usage error: #{sub} needs #{missing.join(', ')}", "experiment --help lists each flag") unless missing.empty?
-  { "record" => Record, "judge" => Judge, "list" => List }.fetch(sub).run(opts, env)
+  { "record" => Record, "judge" => Judge, "list" => List, "decline" => Decline }.fetch(sub).run(opts, env)
 rescue StrictArgv::UsageError => e
   warn "experiment: usage error: #{e.message}"
   warn "Fix: experiment --help lists each subcommand's flags"
