@@ -178,6 +178,11 @@ end
 mixed = S.ok([ev("harness_gate.run", "2026-10-01T02:00:00Z").merge("repo" => "custom"),
               ev("harness_gate.run", "2026-10-01T01:30:00Z").merge("repo" => "gen_saas")])
 check("R8 events are scoped to the repo they were written in") { L.scope_events(mixed, "custom").items.size == 1 }
+stopped = FULL + [ev("harness_gate.run", "2026-10-01T03:10:00Z", duration_s: 5.0, attrs: { "ok" => false, "interrupted" => true })]
+check("R10 an interrupted gate run is counted but never red") do
+  c = L::Counters.compute(landing: l, events: S.ok(stopped), timings: S.empty("none"))["counters"]
+  c["gate_runs"] == 4 && c["gate_red"] == 1
+end
 check("R9 an empty window's reverts are null with a reason") { L::Guards.compute([], reverts: nil)["reverts"]["value"].nil? }
 
 # ── Counters.compute ───────────────────────────────────────────────────────

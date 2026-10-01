@@ -386,7 +386,8 @@ module LeadTimePhases
       out = {}
       na = {}
       family(landing, events, "harness_gate.run", %w[gate_runs gate_wall_s gate_red], out, na) do |evs|
-        [evs.size, wall(evs), evs.count { |e| Match.attr(e, "ok") == false }]
+        # An interrupted run (ok=false, interrupted=true) was stopped, not red.
+        [evs.size, wall(evs), evs.count { |e| Match.attr(e, "ok") == false && Match.attr(e, "interrupted") != true }]
       end
       family(landing, events, "test_slot.wait", %w[slot_wait_s], out, na) { |evs| [wall(evs)] }
       family(landing, events, "critic.round", %w[critic_rounds critic_blocks critic_wall_s], out, na) do |evs|
