@@ -15,7 +15,7 @@
 # A phase it cannot measure is null with a reason, never 0. The repo list and
 # modes live in ai/config/lead-time-repos.json.
 #
-# Buckets: FRAMEWORK (argv, output) and MANAGER (Ingest, Summary) here; DOMAIN
+# Buckets: FRAMEWORK (argv, output) and MANAGER (Setup, Ingest, Summary) here; DOMAIN
 # in ai/lib/lead_time_phases.rb; SIDE EFFECTS in ai/lib/lead_time_phases_io.rb.
 #
 # Test seams (tests only):
@@ -75,7 +75,8 @@ HELP = <<~TXT
   Options:
     --repo NAME    a repo in ai/config/lead-time-repos.json
     --since WHEN   with --ingest: scan from WHEN instead of the cursor
-                   (YYYY-MM-DD or RFC 3339 with a zone)
+                   (YYYY-MM-DD or RFC 3339 with a zone). An explicit --since
+                   run never moves the cursor.
     --window N     with --summary: the last N landings (default: the config's)
     --json         with --summary: JSON instead of the table
     --help         this text
@@ -102,22 +103,48 @@ def env_now(env)
   raw.empty? ? Time.now.utc : Time.iso8601(raw).utc
 end
 
-def state_dir(env)
-  dir = env["LEAD_TIME_STATE_DIR"].to_s
-  return [dir, nil] unless dir.empty?
+# ── MANAGER: setup ──────────────────────────────────────────────────────────
 
-  common, why = LeadTimePhasesIO::Git.common_dir(AI_DIR)
-  return [nil, why] unless common
+# Resolves what both modes need: the config and the repo, --since, and the
+# state dir. -> [Context, nil] or [nil, exit code] (having said why).
+module Setup
+  Context = Struct.new(:config, :repo, :since, :state, keyword_init: true)
 
-  [File.join(File.dirname(common), "ai-artifacts", "lead-time"), nil]
-end
+  module_function
 
-def load_config(env)
-  path = env["LEAD_TIME_PHASES_CONFIG"].to_s
-  path = File.join(AI_DIR, "config", "lead-time-repos.json") if path.empty?
-  LeadTimePhases::Config.parse(File.read(path), home: env["HOME"].to_s)
-rescue SystemCallError => e
-  raise LeadTimePhases::ConfigError, "cannot read #{path} (#{e.class.name.split('::').last})"
+  def resolve(opts, env)
+    config = load_config(env)
+    repo = LeadTimePhases::Config.find(config, opts["--repo"])
+    since = nil
+    if opts["--since"]
+      since, why = LeadTimePhasesIO::LeadTimeLib.parse_since(opts["--since"])
+      return [nil, fail_with(2, "usage error: #{why}", "pass --since as YYYY-MM-DD or RFC 3339 with a zone")] unless since
+    end
+    state, why = state_dir(env)
+    return [nil, fail_with(1, "cannot resolve the state dir: #{why}", "set LEAD_TIME_STATE_DIR, or run from a checkout of ~/dev/custom")] unless state
+
+    [Context.new(config: config, repo: repo, since: since, state: state), nil]
+  end
+
+  # <main checkout>/ai-artifacts/lead-time, from this tool's own git common
+  # dir, so a worktree's copy writes the one machine-wide state dir.
+  def state_dir(env)
+    dir = env["LEAD_TIME_STATE_DIR"].to_s
+    return [dir, nil] unless dir.empty?
+
+    common, why = LeadTimePhasesIO::Git.common_dir(AI_DIR)
+    return [nil, why] unless common
+
+    [File.join(File.dirname(common), "ai-artifacts", "lead-time"), nil]
+  end
+
+  def load_config(env)
+    path = env["LEAD_TIME_PHASES_CONFIG"].to_s
+    path = File.join(AI_DIR, "config", "lead-time-repos.json") if path.empty?
+    LeadTimePhases::Config.parse(File.read(path), home: env["HOME"].to_s)
+  rescue SystemCallError => e
+    raise LeadTimePhases::ConfigError, "cannot read #{path} (#{e.class.name.split('::').last})"
+  end
 end
 
 # ── MANAGER: ingest ─────────────────────────────────────────────────────────
@@ -127,7 +154,7 @@ module Ingest
 
   def run(repo, since_opt, state, env)
     io = LeadTimePhasesIO
-    unless File.directory?(repo.path)
+    unless io::Paths.dir?(repo.path)
       puts "lead-time-phases: #{repo.name}: not on this machine (#{repo.path}); nothing ingested, cursor unchanged"
       return 0
     end
@@ -147,9 +174,11 @@ module Ingest
     scan = check_scan(res, repo, since)
     return scan if scan
 
-    rows = build_rows(repo, res.rows, env)
-    added, present = io::LedgerStore.new(File.join(state, "ledger.jsonl")).append(rows)
-    moved = move_cursor(cursor, res.meta)
+    ledger = io::LedgerStore.new(File.join(state, "ledger.jsonl"))
+    prior, = ledger.read
+    rows = build_rows(repo, res.rows, prior.select { |r| r["repo"] == repo.name }, env)
+    added, present = ledger.append(rows)
+    moved = since_opt ? "cursor unchanged (an explicit --since run never moves it)" : move_cursor(cursor, res.meta)
     puts "lead-time-phases: #{repo.name}: scanned since #{since}: #{res.rows.size} landing row(s), " \
          "#{added} new in the ledger, #{present} already there; #{moved}"
     0
@@ -158,6 +187,11 @@ module Ingest
   # -> nil when the scan is usable, else the exit code (having said why).
   def check_scan(res, repo, since)
     return fail_with(1, res.error, "check that ai/bin/lead-time is present and executable") if res.error
+    if res.code.nil?
+      $stderr.write(res.stderr)
+      return fail_with(1, "ai/bin/lead-time was killed by signal #{res.signal} for #{repo.name}; nothing ingested",
+                       "re-run; if a timeout killed it, scan a later --since in slices")
+    end
 
     incomplete = res.code == 3 || (res.meta.is_a?(Hash) && res.meta["incomplete"] == true)
     if incomplete
@@ -175,14 +209,17 @@ module Ingest
     nil
   end
 
-  def build_rows(repo, raw_rows, env)
+  def build_rows(repo, raw_rows, prior, env)
     io = LeadTimePhasesIO
     now = env_now(env)
     landings = raw_rows.filter_map do |row|
-      landing, why = LeadTimePhases::Landing.from_row(row, ticket: io::TicketFor.call(row))
+      ticket, ticket_na = io::TicketFor.call(row)
+      warn "lead-time-phases: #{repo.name}: ticket could not be read: #{ticket_na}" if ticket_na
+      landing, why = LeadTimePhases::Landing.from_row(row, ticket: ticket, ticket_na: ticket_na)
       warn "lead-time-phases: #{repo.name}: not ledgered: #{why}" unless landing
       landing
     end
+    landings = LeadTimePhases::Landing.with_bounds(landings, prior)
     if repo.mode == "watch"
       return landings.map { |l| LeadTimePhases::Ledger.watch_row(repo: repo.name, landing: l, ingested_at: now) }
     end
@@ -195,17 +232,38 @@ module Ingest
     events, = io::TelemetryReader.read(env)
     common, common_why = io::Git.common_dir(repo.path)
     no_common = LeadTimePhases::Source.could_not_look(common_why.to_s)
+    events = LeadTimePhases.scope_events(events, common ? io::Git.repo_label(common) : repo.name)
     heads = landings.map { |l| l["landed_commit"] }.uniq
-    timings = io::TimingsReader.read(io::TimingsReader.path(env), heads)
+    timings, bad = io::TimingsReader.read(io::TimingsReader.path(env), heads)
+    warn "lead-time-phases: #{bad} malformed harness-gate timings line(s) skipped" if bad.positive?
     landings.map do |l|
       head = l["landed_commit"]
-      receipt = common ? io::ReceiptReader.read(common, head) : no_common
-      verdicts = common ? io::VerdictReader.read(common, head) : no_common
+      receipt, verdicts = head_sources(l, common, no_common)
       anchors = LeadTimePhases::Anchors.from(landing: l, events: events, receipt: receipt, verdicts: verdicts)
-      counters = LeadTimePhases::Counters.compute(landing: l, events: events, timings: timings[head])
+      counters = LeadTimePhases::Counters.compute(landing: l, events: events, timings: timing_source(l, timings[head]))
       LeadTimePhases::Ledger.improve_row(repo: repo.name, landing: l, anchors: anchors, counters: counters,
                                          telemetry_status: events.status, ingested_at: now)
     end
+  end
+
+  # A merge landing's commit is the forge's, not the gated head: receipts,
+  # verdicts and timings keyed by it could only miss, so say why instead.
+  def head_sources(landing, common, no_common)
+    io = LeadTimePhasesIO
+    unless LeadTimePhases::Landing.gated_head?(landing)
+      why = LeadTimePhases::Source.could_not_look("merge landing: #{landing['landed_commit'][0, 8]} is the forge's " \
+                                                  "commit, not the gated head")
+      return [why, why]
+    end
+    return [no_common, no_common] unless common
+
+    [io::ReceiptReader.read(common, landing["landed_commit"]), io::VerdictReader.read(common, landing["landed_commit"])]
+  end
+
+  def timing_source(landing, source)
+    return source if LeadTimePhases::Landing.gated_head?(landing)
+
+    LeadTimePhases::Source.could_not_look("merge landing: timings are keyed by the gated head")
   end
 
   def move_cursor(cursor, meta)
@@ -231,8 +289,8 @@ module Summary
     rows = LeadTimePhases::Window.select(deduped, window)
     report = LeadTimePhases::Stats.summarize(rows).merge(
       "repo" => repo.name, "mode" => repo.mode, "window" => window, "ledger" => ledger.path,
-      "ledger_exists" => File.exist?(ledger.path), "ledger_rows" => mine.size, "batch_folded" => folded, "malformed_lines" => malformed,
-      "on_machine" => File.directory?(repo.path)
+      "ledger_exists" => ledger.exist?, "ledger_rows" => mine.size, "batch_folded" => folded, "malformed_lines" => malformed,
+      "on_machine" => io::Paths.dir?(repo.path)
     )
     report.merge!(improve_extras(repo, rows, env)) if repo.mode == "improve"
     report["phases_note"] = "phases are n/a by design in watch mode" if repo.mode == "watch"
@@ -244,13 +302,15 @@ module Summary
     io = LeadTimePhasesIO
     times = rows.map { |r| LeadTimePhases::Util.time(r["landed_at"]) }.compact
     reverts = if times.empty?
-                LeadTimePhases::Source.ok([])
-              elsif !File.directory?(repo.path)
+                nil
+              elsif !io::Paths.dir?(repo.path)
                 LeadTimePhases::Source.could_not_look("#{repo.path} is not on this machine")
               else
                 io::RevertCounter.count(repo.path, times.min.iso8601, times.max.iso8601)
               end
     src, res = io::TelemetryReader.read(env)
+    common, = io::Paths.dir?(repo.path) ? io::Git.common_dir(repo.path) : [nil]
+    src = LeadTimePhases.scope_events(src, common ? io::Git.repo_label(common) : repo.name)
     { "guards" => LeadTimePhases::Guards.compute(rows, reverts: reverts),
       "telemetry" => telemetry_status(src, res, rows) }
   end
@@ -259,11 +319,19 @@ module Summary
   # last landing.
   def telemetry_status(src, res, rows)
     looked = !(src.could_not_look? && src.items.empty?)
-    # With no store there is no counter to read: unknown, never 0.
-    failures = res && res.status != :no_store ? res.failures.values.sum : nil
+    # With no store, or a counter it could not read, the count is unknown,
+    # never 0.
+    counter = res && res.status != :no_store ? res.failures : nil
+    why = res&.failures_reason
+    if counter&.key?("counter_corrupt")
+      counter = nil
+      why = "the write-failures counter is not a JSON object of counts"
+    end
     out = { "status" => looked ? src.status.to_s : "could not look",
-            "reason" => src.reason, "write_failures" => failures,
-            "write_failures_scope" => "cumulative since the counter was created" }
+            "reason" => src.reason, "write_failures" => counter&.values&.sum,
+            "write_failures_reason" => why,
+            "write_failures_scope" => "cumulative since the counter was created",
+            "malformed_lines" => res&.malformed }
     bounds = rows.flat_map { |r| [r["start"], r["landed_at"]] }.filter_map { |x| LeadTimePhases::Util.time(x) }
     if looked && !bounds.empty?
       lo, hi = bounds.minmax
@@ -318,8 +386,13 @@ module Summary
   def print_telemetry(t)
     status = t["status"] == "could not look" ? "could not look (#{t['reason']})" : t["status"]
     events = t.key?("events_in_window") ? "; #{t['events_in_window']} phase event(s) in the window" : ""
-    wf = t["write_failures"].nil? ? "unknown" : t["write_failures"]
-    puts "  telemetry: #{status}#{events}; write-failures #{wf} (#{t['write_failures_scope']})"
+    wf = if t["write_failures"]
+           "#{t['write_failures']} (#{t['write_failures_scope']})"
+         else
+           "unknown#{t['write_failures_reason'] ? " (#{t['write_failures_reason']})" : ''}"
+         end
+    bad = t["malformed_lines"].to_i.positive? ? "; #{t['malformed_lines']} malformed line(s) skipped" : ""
+    puts "  telemetry: #{status}#{events}; write-failures #{wf}#{bad}"
   end
 end
 
@@ -348,17 +421,14 @@ def main(argv, env)
     return fail_with(2, "usage error: --window must be a positive integer", "pass --window N with N >= 1")
   end
 
-  config = load_config(env)
-  repo = LeadTimePhases::Config.find(config, opts["--repo"])
-  since = nil
-  if opts["--since"]
-    since, why = LeadTimePhasesIO::LeadTimeLib.parse_since(opts["--since"])
-    return fail_with(2, "usage error: #{why}", "pass --since as YYYY-MM-DD or RFC 3339 with a zone") unless since
-  end
-  state, why = state_dir(env)
-  return fail_with(1, "cannot resolve the state dir: #{why}", "set LEAD_TIME_STATE_DIR, or run from a checkout of ~/dev/custom") unless state
+  ctx, code = Setup.resolve(opts, env)
+  return code unless ctx
 
-  opts["--ingest"] ? Ingest.run(repo, since, state, env) : Summary.run(repo, opts["--window"] || config.window, opts["--json"], state, env)
+  if opts["--ingest"]
+    Ingest.run(ctx.repo, ctx.since, ctx.state, env)
+  else
+    Summary.run(ctx.repo, opts["--window"] || ctx.config.window, opts["--json"], ctx.state, env)
+  end
 rescue StrictArgv::UsageError => e
   fail_with(2, "usage error: #{e.message}", "see --help")
 rescue LeadTimePhases::ConfigError => e
@@ -367,6 +437,9 @@ rescue ArgumentError => e
   fail_with(2, "a time is malformed (#{e.message})", "LEAD_TIME_PHASES_NOW must be RFC 3339 with a zone")
 rescue SystemCallError => e
   fail_with(1, "state I/O failed (#{e.message})", "make the state dir (#{env['LEAD_TIME_STATE_DIR'] || 'ai-artifacts/lead-time'}) a writable directory and re-run")
+rescue StandardError => e
+  fail_with(1, "internal error #{e.class}: #{e.message} (#{e.backtrace&.first})",
+            "this is a lead-time-phases bug: file a DND ticket with this line; nothing past the failing step was written")
 end
 
 if $PROGRAM_NAME == __FILE__

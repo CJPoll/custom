@@ -29,6 +29,8 @@ module LeadTimePhasesIO
       @path = path
     end
 
+    def exist? = File.exist?(path)
+
     # -> [rows, malformed count]; raises SystemCallError when it cannot read.
     def read
       return [[], 0] unless File.exist?(path)
@@ -100,6 +102,16 @@ module LeadTimePhasesIO
     rescue SystemCallError => e
       [nil, "git could not run (#{e.message})"]
     end
+
+    # The repo label the telemetry writer stamps on every event
+    # (AthenaTelemetry::GitContext): the basename of the main checkout.
+    def repo_label(common) = File.basename(File.dirname(common))
+  end
+
+  module Paths
+    module_function
+
+    def dir?(path) = File.directory?(path)
   end
 
   # <common>/integration-receipts/<head>.json (integration-gate, DND-965).
@@ -150,18 +162,21 @@ module LeadTimePhasesIO
       File.join(base, "athena", "harness-gate", "timings.jsonl")
     end
 
-    # -> {head => [rows]} for the heads asked about, as a Source per head.
+    # -> [{head => Source}, malformed line count] for the heads asked about.
     def read(file, heads)
-      return heads.to_h { |h| [h, Source.could_not_look("no timings file at #{file}")] } unless File.exist?(file)
+      return [heads.to_h { |h| [h, Source.could_not_look("no timings file at #{file}")] }, 0] unless File.exist?(file)
 
       want = heads.to_h { |h| [h, []] }
+      bad = 0
       File.foreach(file) do |line|
         r = JSON.parse(line) rescue nil
-        want[r["head"]] << r if r.is_a?(Hash) && want.key?(r["head"])
+        next bad += 1 unless r.is_a?(Hash)
+
+        want[r["head"]] << r if want.key?(r["head"])
       end
-      want.transform_values { |rows| rows.empty? ? Source.empty("no rows") : Source.ok(rows) }
+      [want.transform_values { |rows| rows.empty? ? Source.empty("no rows") : Source.ok(rows) }, bad]
     rescue SystemCallError => e
-      heads.to_h { |h| [h, Source.could_not_look("could not read #{file} (#{e.class.name.split('::').last})")] }
+      [heads.to_h { |h| [h, Source.could_not_look("could not read #{file} (#{e.class.name.split('::').last})")] }, 0]
     end
   end
 
@@ -169,12 +184,14 @@ module LeadTimePhasesIO
   module TelemetryReader
     module_function
 
-    # -> [Source, AthenaTelemetry::ReadResult or nil]
+    # -> [Source, AthenaTelemetry::ReadResult or nil]. An :incomplete read
+    # (a day file it could not read) keeps NO events: a partial set would
+    # undercount counters and move anchors, so every telemetry anchor reads
+    # "could not look" (ai/contracts/athena-telemetry.md -> The reader).
     def read(env)
       res = AthenaTelemetry.read(events: LeadTimePhases::EVENTS, env: env)
       src = case res.status
-            when :no_store then Source.could_not_look(res.reason)
-            when :incomplete then Source.could_not_look(res.reason, res.events)
+            when :no_store, :incomplete then Source.could_not_look(res.reason)
             else Source.ok(res.events)
             end
       [src, res]
@@ -189,20 +206,25 @@ module LeadTimePhasesIO
   module TicketFor
     module_function
 
-    # -> ticket or nil
+    # -> [ticket or nil, nil] or [nil, why it could not be read]. A parser
+    # that cannot load, or an overlay fault, is "could not look", never
+    # "unticketed".
     def call(row)
-      return row["ticket"] if row.key?("ticket")
+      return [row["ticket"], nil] if row.key?("ticket")
 
       parser = AthenaTelemetry::TicketRefs.parser
-      return nil unless parser
+      return [nil, "the ticket-ref parser (ai/bin/lead-time) did not load"] unless parser
 
+      fault = false
       [row["branch"], row["title"]].each do |text|
         next if text.to_s.empty?
 
         ref = parser.call(text.to_s)
-        return ref if ref.is_a?(String)
+        return [ref, nil] if ref.is_a?(String)
+
+        fault ||= AthenaTelemetry::TicketRefs.last_overlay_fault?
       end
-      nil
+      fault ? [nil, "the private overlay could not give the work-ticket prefix"] : [nil, nil]
     end
   end
 
@@ -227,7 +249,7 @@ module LeadTimePhasesIO
 
   # ai/bin/lead-time --since --json --meta (DND-1009), as a subprocess.
   module LeadTimeRunner
-    Result = Struct.new(:code, :rows, :meta, :stderr, :error, keyword_init: true)
+    Result = Struct.new(:code, :signal, :rows, :meta, :stderr, :error, keyword_init: true)
 
     module_function
 
@@ -237,7 +259,7 @@ module LeadTimePhasesIO
         out, err, st = Open3.capture3(env, bin, "--repo", repo, "--since", since, "--json", "--meta", meta_file)
         meta = File.exist?(meta_file) ? (JSON.parse(File.read(meta_file)) rescue :malformed) : nil
         rows = out.strip.empty? ? nil : (JSON.parse(out) rescue :malformed)
-        Result.new(code: st.exitstatus, rows: rows, meta: meta, stderr: err)
+        Result.new(code: st.exitstatus, signal: st.termsig, rows: rows, meta: meta, stderr: err)
       end
     rescue SystemCallError => e
       Result.new(code: nil, error: "#{bin} could not run (#{e.message})", stderr: "")

@@ -127,6 +127,59 @@ after = FULL + [ev("harness_gate.run", "2026-10-01T06:00:00Z", duration_s: 5.0)]
 ph10 = L::Phases.compute(anchors(l, S.ok(after)))
 check("P10 events after the landing are ignored") { ph10 == ph }
 
+# Review round (code-reviewer + adr-reviewer), DND-1477.
+second = landing(start: "2026-10-01T01:00:00Z", landed: "2026-10-01T09:00:00Z", commit: OTHER)
+late = [ev("harness_gate.run", "2026-10-01T07:00:00Z", head: OTHER, duration_s: 50.0, attrs: { "ok" => true })]
+bounded = L::Landing.with_bounds([second], [{ "ticket" => "DND-9001", "landed_at" => "2026-10-01T05:00:00Z" }])
+check("R1 a second landing of a ticket is bounded by the first") { bounded[0]["after"] == t("2026-10-01T05:00:00Z") }
+c_two = L::Counters.compute(landing: bounded[0], events: S.ok(FULL + late), timings: S.empty("none"))
+check("R1 the second landing never re-counts the first landing's gate runs") { c_two["counters"]["gate_runs"] == 1 }
+a_two = anchors(bounded[0], S.ok(FULL + late))
+check("R1 its first gate is its own") { a_two["gate_first"].at == t("2026-10-01T07:00:00Z") }
+check("R1 an unticketed landing gets no bound") { L::Landing.with_bounds([unt], [])[0]["after"].nil? }
+both = L::Landing.with_bounds([landing, second], [])
+check("R1 bounds also come from the same batch") { both[1]["after"] == t("2026-10-01T05:00:00Z") && both[0]["after"].nil? }
+
+dirty = FULL.reject { |e| e["event"] == "critic.round" } +
+        [ev("critic.round", "2026-10-01T03:20:00Z", duration_s: 45.0, attrs: { "verdict" => "pass", "dirty" => true })]
+check("R2 a dirty PASS is never a verify anchor") { anchors(l, S.ok(dirty))["critic_pass"].at.nil? }
+dirty_receipt = S.ok([{ "verdict" => "pass", "at" => "2026-10-01T03:40:00Z", "dirty" => true }])
+check("R2 a dirty verdict receipt is never one either") { anchors(l, S.ok(dirty), verdicts: dirty_receipt)["critic_pass"].at.nil? }
+
+merged = landing(commit: OTHER).merge("landed_via" => "merge")
+ph_m = L::Phases.compute(anchors(merged, S.ok(FULL)))
+check("R3 a merge landing joins integration by unit, not the squash sha") { ph_m["integrate"]["s"] == 300 }
+
+nodur = FULL.map { |e| e["event"] == "test_slot.wait" ? e.merge("duration_s" => nil) : e }
+c_nd = L::Counters.compute(landing: l, events: S.ok(nodur), timings: S.empty("none"))
+check("R4 a wait with no duration is null with a reason, never 0") do
+  c_nd["counters"]["slot_wait_s"].nil? && c_nd["counters_na"]["slot_wait_s"].include?("no duration_s")
+end
+
+inv = [1, 2].map do |i|
+  { "ticket" => "DND-#{i}", "landed_commit" => "c#{i}" * 8,
+    "phases" => { "implement" => { "s" => nil, "invalid" => true,
+                                   "na_reason" => "invalid: gate_first (2026-10-0#{i}T00:00:00Z) is before dispatch (2026-10-0#{i}T01:00:00Z)" } } }
+end
+check("R5 invalid reasons group across rows") { L::Stats.summarize(inv)["phases"]["implement"]["na_reasons"].first["count"] == 2 }
+
+rec_only = S.ok([{ "recorded_at" => "2026-10-01T04:10:00Z" }])
+inside_rec = FULL.reject { |e| %w[critic.round integration_gate.run].include?(e["event"]) } +
+             [ev("critic.round", "2026-10-01T04:20:00Z", duration_s: 30.0, attrs: { "verdict" => "pass" })]
+check("R6 with only the receipt end known, a PASS after it is not chosen") do
+  anchors(l, S.ok(inside_rec), receipt: rec_only)["critic_pass"].at.nil?
+end
+
+faulty = landing(ticket: nil, start: nil).merge("ticket_na" => "the ticket-ref parser did not load")
+check("R7 a ticket that could not be read never reads as unticketed") do
+  anchors(faulty, S.ok([]))["gate_first"].reason == "ticket: could not look (the ticket-ref parser did not load)"
+end
+
+mixed = S.ok([ev("harness_gate.run", "2026-10-01T02:00:00Z").merge("repo" => "custom"),
+              ev("harness_gate.run", "2026-10-01T01:30:00Z").merge("repo" => "gen_saas")])
+check("R8 events are scoped to the repo they were written in") { L.scope_events(mixed, "custom").items.size == 1 }
+check("R9 an empty window's reverts are null with a reason") { L::Guards.compute([], reverts: nil)["reverts"]["value"].nil? }
+
 # ── Counters.compute ───────────────────────────────────────────────────────
 
 c = L::Counters.compute(landing: l, events: S.ok(FULL), timings: S.empty("none"))

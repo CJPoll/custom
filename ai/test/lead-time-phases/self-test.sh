@@ -217,6 +217,48 @@ eq "--json carries the telemetry status" "${JSON_STATUS}" "could not look"
 JSON_N="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); puts [j["rows"], j.dig("phases", "merge", "n"), j.dig("phases", "implement", "n_na")].join(",")')"
 eq "--json: 3 rows, merge measured once, implement n/a on all" "${JSON_N}" "3,1,3"
 
+echo "== summary: an unreadable or corrupt write-failures counter reads unknown"
+printf '{"x":' >"${TEL_EMPTY}/write-failures"
+run "${TEL_EMPTY}" --summary --repo custom
+eq "a corrupt counter: summary exits 0" "${CODE}" "0"
+has "a corrupt counter reads unknown, never a count" "${OUT}" "write-failures unknown (the write-failures counter is not a JSON object"
+printf '{"x":1}' >"${TEL_EMPTY}/write-failures"; chmod 000 "${TEL_EMPTY}/write-failures"
+run "${TEL_EMPTY}" --summary --repo custom
+eq "an unreadable counter: summary exits 0, no crash" "${CODE}" "0"
+has "an unreadable counter reads unknown with its reason" "${OUT}" "write-failures unknown (could not read"
+chmod 600 "${TEL_EMPTY}/write-failures"; rm -f "${TEL_EMPTY}/write-failures"
+
+echo "== ingest: an explicit --since never moves the cursor"
+cp "${STATE}/cursor.custom.txt" "${TMP}/cursor.before"
+run "${TEL_EMPTY}" --ingest --repo custom --since 2026-10-05
+eq "a --since run exits 0" "${CODE}" "0"
+eq "the cursor is unchanged by --since" "$(cat "${STATE}/cursor.custom.txt")" "$(cat "${TMP}/cursor.before")"
+has "it says so" "${OUT}" "an explicit --since run never moves it"
+
+echo "== ingest: a signal-killed lead-time"
+SIGFAKE="${TMP}/sig-lead-time"
+printf '#!/bin/sh\nkill -TERM $$\n' >"${SIGFAKE}"; chmod +x "${SIGFAKE}"
+OUT="$(LEAD_TIME_STATE_DIR="${STATE}" LEAD_TIME_PHASES_CONFIG="${CONFIG}" LEAD_TIME_PHASES_LEAD_TIME="${SIGFAKE}" \
+      ATHENA_TELEMETRY_DIR="${TEL_EMPTY}" /usr/bin/ruby "${BIN}" --ingest --repo custom 2>&1)"; CODE=$?
+eq "a killed lead-time exits 1" "${CODE}" "1"
+has "it names the signal and carries Fix:" "${OUT}" "killed by signal 15"
+lacks "no backtrace" "${OUT}" "NoMethodError"
+eq "the cursor is unchanged after a kill" "$(cat "${STATE}/cursor.custom.txt")" "$(cat "${TMP}/cursor.before")"
+
+echo "== ingest: telemetry is scoped to the repo it was written in"
+TEL_SCOPED="${TMP}/telemetry-scoped"
+mkdir -p "${TEL_SCOPED}" && chmod 700 "${TEL_SCOPED}"
+{
+  printf '{"v":1,"event":"harness_gate.run","at":"2026-10-01T02:00:00.000Z","duration_s":60,"unit":"DND-9001","unit_source":"branch","repo":"other_repo","head":null,"host":"h","pid":1,"attrs":{"ok":true}}\n'
+  printf '{"v":1,"event":"harness_gate.run","at":"2026-10-01T03:00:00.000Z","duration_s":60,"unit":"DND-9001","unit_source":"branch","repo":"repo","head":null,"host":"h","pid":1,"attrs":{"ok":true}}\n'
+} >"${TEL_SCOPED}/2026-10-01.jsonl"
+STATE="${TMP}/state-scoped" run "${TEL_SCOPED}" --ingest --repo custom
+eq "a scoped ingest exits 0" "${CODE}" "0"
+STATE_SAVE="${STATE}"; STATE="${TMP}/state-scoped"
+eq "implement ends at this repo's gate run, not another repo's" "$(row_field "${HEAD_PUSH}" phases.implement.s)" "7200"
+eq "gate_runs counts this repo's run only" "$(row_field "${HEAD_PUSH}" counters.gate_runs)" "1"
+STATE="${STATE_SAVE}"
+
 echo "== summary: a watch repo"
 run "${TEL_EMPTY}" --ingest --repo gen_saas
 eq "a watch repo ingests" "${CODE}" "0"

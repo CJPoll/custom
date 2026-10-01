@@ -161,15 +161,16 @@ module LeadTimePhases
     module_function
 
     # -> [landing Hash, nil] or [nil, reason]. ticket is resolved by the caller
-    # (a push row carries one; a PR row's comes from its branch or title).
-    def from_row(row, ticket:)
+    # (a push row carries one; a PR row's comes from its branch or title);
+    # ticket_na says why it could not be resolved (a fault, not "unticketed").
+    def from_row(row, ticket:, ticket_na: nil)
       commit = row["landed_commit"] || row["merge_commit"]
       landed = Util.time(row["merged"])
       return [nil, "no landed commit (#{row['pr'] ? "PR ##{row['pr']}" : 'a push'})"] if commit.to_s.empty?
       return [nil, "no landing time for #{Util.short(commit)}"] unless landed
 
       start = Util.time(row["start"])
-      [{ "ticket" => ticket, "landed_commit" => commit, "landed_at" => landed,
+      [{ "ticket" => ticket, "ticket_na" => ticket ? nil : ticket_na, "landed_commit" => commit, "landed_at" => landed,
          "landed_via" => row["landed_via"], "pr" => row["pr"], "start" => start,
          "start_na" => start ? nil : row["unmeasured_reason"],
          "lead_s" => row["lead_seconds"], "code_s" => row["code_seconds"], "tail_s" => row["tail_seconds"],
@@ -177,28 +178,63 @@ module LeadTimePhases
     end
 
     def unit_desc(landing) = landing["ticket"] || "head #{Util.short(landing['landed_commit'])}"
+
+    # Set each ticketed landing's "after": the previous landing of the same
+    # ticket (from the ledger's prior rows or this batch), so a ticket that
+    # lands twice never counts the first landing's events again.
+    # prior: ledger rows of this repo. -> the landings, each with "after".
+    def with_bounds(landings, prior)
+      seen = Hash.new { |h, k| h[k] = [] }
+      prior.each { |r| (t = Util.time(r["landed_at"])) && r["ticket"] && seen[r["ticket"]] << t }
+      landings.each { |l| seen[l["ticket"]] << l["landed_at"] if l["ticket"] }
+      landings.map do |l|
+        earlier = l["ticket"] ? seen[l["ticket"]].select { |t| t < l["landed_at"] } : []
+        l.merge("after" => earlier.max)
+      end
+    end
+
+    # A merge (squash) landing's commit is made by the forge: it is not the
+    # head integration-gate, the critic or harness-gate saw.
+    def gated_head?(landing) = landing["landed_via"] != "merge"
+  end
+
+  # Telemetry events written in this repo only (`repo` is the writer's label,
+  # the basename of the repo's main checkout). A ticket can span repos.
+  def self.scope_events(source, repo_label)
+    Source.new(status: source.status, reason: source.reason,
+               items: source.items.select { |e| e["repo"] == repo_label })
   end
 
   # Which telemetry events belong to a landing: by unit for a ticketed one,
-  # by head for an unticketed one (P5), at or before the landing.
+  # by head for an unticketed one (P5), after the ticket's previous landing
+  # and at or before this one.
   module Match
     module_function
 
     def at(event) = Util.time(event["at"])
 
-    def before_landing(events, landing)
-      events.select { |e| (t = at(e)) && t <= landing["landed_at"] }
+    def in_span(events, landing)
+      after = landing["after"]
+      events.select { |e| (t = at(e)) && t <= landing["landed_at"] && (after.nil? || t > after) }
     end
 
     def for_unit(events, landing, name)
       key = landing["ticket"]
-      before_landing(events, landing).select do |e|
+      in_span(events, landing).select do |e|
         e["event"] == name && (key ? e["unit"] == key : e["head"] == landing["landed_commit"])
       end
     end
 
-    def for_head(events, landing, name)
-      before_landing(events, landing).select { |e| e["event"] == name && e["head"] == landing["landed_commit"] }
+    # Events about the gated head: by head when the landed commit IS that
+    # head, else (a merge landing) by unit.
+    def for_gated(events, landing, name)
+      return for_unit(events, landing, name) unless Landing.gated_head?(landing)
+
+      in_span(events, landing).select { |e| e["event"] == name && e["head"] == landing["landed_commit"] }
+    end
+
+    def dirty?(event_or_receipt)
+      event_or_receipt["dirty"] == true || attr(event_or_receipt, "dirty") == true
     end
 
     def end_of(event)
@@ -207,7 +243,7 @@ module LeadTimePhases
       d.is_a?(Numeric) ? t + d : t
     end
 
-    def attr(event, key) = (event["attrs"] || {})[key]
+    def attr(event, key) = (event["attrs"].is_a?(Hash) ? event["attrs"] : {})[key]
   end
 
   module Anchors
@@ -226,7 +262,7 @@ module LeadTimePhases
       {
         "dispatch" => dispatch(landing),
         "gate_first" => gate_first(landing, events),
-        "critic_pass" => critic_pass(landing, events, verdicts, integ[0].at),
+        "critic_pass" => critic_pass(landing, events, verdicts, integ),
         "integrate_start" => integ[0],
         "integrate_end" => integ[1],
         "landed" => found(landing["landed_at"], "lead-time"),
@@ -235,9 +271,14 @@ module LeadTimePhases
 
     def dispatch(landing)
       return found(landing["start"], "dispatch stamp") if landing["start"]
-      return missing("unticketed landing: no dispatch stamp") unless landing["ticket"]
+      return missing(no_unit(landing, "unticketed landing: no dispatch stamp")) unless landing["ticket"]
 
       missing("dispatch stamp: #{landing['start_na'] || "no stamp for #{landing['ticket']}"}")
+    end
+
+    # A landing with no ticket: unticketed, or its ticket could not be read.
+    def no_unit(landing, unticketed)
+      landing["ticket_na"] ? "ticket: could not look (#{landing['ticket_na']})" : unticketed
     end
 
     def telemetry_miss(events, what)
@@ -245,7 +286,7 @@ module LeadTimePhases
     end
 
     def gate_first(landing, events)
-      return missing("unticketed landing: no unit to join gate runs on") unless landing["ticket"]
+      return missing(no_unit(landing, "unticketed landing: no unit to join gate runs on")) unless landing["ticket"]
 
       runs = Match.for_unit(events.items, landing, "harness_gate.run")
       return missing(telemetry_miss(events, "no harness_gate.run for #{landing['ticket']}")) if runs.empty?
@@ -253,23 +294,25 @@ module LeadTimePhases
       found(runs.map { |e| Match.at(e) }.min, "telemetry harness_gate.run")
     end
 
-    # The last critic PASS before the integration run started (or, with no
-    # integration start, before the landing). Telemetry critic.round for the
-    # unit and the head's verdict receipts are both candidates.
-    def critic_pass(landing, events, verdicts, integrate_start)
+    # The last clean critic PASS before the integration run started (with
+    # only its end known, before it ended; with neither, before the landing).
+    # Telemetry critic.round for the unit and the head's verdict receipts are
+    # both candidates. A dirty PASS judged an uncommitted tree: never one.
+    def critic_pass(landing, events, verdicts, integ)
       cands = Match.for_unit(events.items, landing, "critic.round")
-                   .select { |e| Match.attr(e, "verdict").to_s.downcase == "pass" }
+                   .select { |e| Match.attr(e, "verdict").to_s.downcase == "pass" && !Match.dirty?(e) }
                    .map { |e| [Match.end_of(e), "telemetry critic.round"] }
-      cands += verdicts.items.select { |v| v["verdict"].to_s.downcase == "pass" }
+      cands += verdicts.items.select { |v| v["verdict"].to_s.downcase == "pass" && !Match.dirty?(v) }
                        .filter_map { |v| (t = Util.time(v["at"])) && [t, "critic verdict receipt"] }
-      cands.select! { |t, _| t <= landing["landed_at"] }
+      cands.select! { |t, _| t <= landing["landed_at"] && (landing["after"].nil? || t > landing["after"]) }
       return missing(critic_miss(landing, events, verdicts)) if cands.empty?
 
-      if integrate_start
-        before = cands.select { |t, _| Util.floor(t) <= integrate_start }
+      bound, what = integ[0].at ? [integ[0].at, "started"] : [integ[1].at, "ended"]
+      if bound
+        before = cands.select { |t, _| Util.floor(t) <= bound }
         if before.empty?
           return missing("every critic PASS for #{Landing.unit_desc(landing)} ended after integration-gate " \
-                         "started (a --with-critic round); none stood before it")
+                         "#{what} (a --with-critic round); none stood before it")
         end
         cands = before
       end
@@ -290,7 +333,7 @@ module LeadTimePhases
     # -> [start Anchor, end Anchor]: the last successful integration_gate.run
     # on the landed head, else the receipt's recorded_at as the end only.
     def integrate(landing, events, receipt)
-      runs = Match.for_head(events.items, landing, "integration_gate.run")
+      runs = Match.for_gated(events.items, landing, "integration_gate.run")
                   .select { |e| Match.attr(e, "exit_code") == 0 }
       run = runs.max_by { |e| Match.at(e) }
       sha = Util.short(landing["landed_commit"])
@@ -354,20 +397,29 @@ module LeadTimePhases
       { "counters" => out, "counters_na" => na }.merge(top)
     end
 
-    def wall(evs) = evs.sum { |e| e["duration_s"].is_a?(Numeric) ? e["duration_s"] : 0 }.round(3)
+    # The summed duration_s, or nil when no event carries one (a missing
+    # duration is never summed as 0).
+    def wall(evs)
+      ds = evs.map { |e| e["duration_s"] }.grep(Numeric)
+      ds.empty? ? nil : ds.sum.round(3)
+    end
 
     def family(landing, events, name, keys, out, na)
       evs = Match.for_unit(events.items, landing, name)
+      unit = Landing.unit_desc(landing)
       if evs.empty?
-        why = Anchors.telemetry_miss(events, "no #{name} for #{Landing.unit_desc(landing)}")
+        why = Anchors.telemetry_miss(events, "no #{name} for #{unit}")
         keys.each { |k| out[k] = nil; na[k] = why }
       else
-        keys.zip(yield(evs)).each { |k, v| out[k] = v }
+        keys.zip(yield(evs)).each do |k, v|
+          out[k] = v
+          na[k] = "no duration_s on any #{name} for #{unit}" if v.nil?
+        end
       end
     end
 
     def top_checks(landing, events, timings)
-      checks = Match.for_head(events.items, landing, "harness_gate.check")
+      checks = Match.for_gated(events.items, landing, "harness_gate.check")
       unless checks.empty?
         runs = checks.group_by { |e| Match.attr(e, "run_id").to_s }
         last = runs.values.max_by { |evs| evs.map { |e| Match.at(e) }.max }
@@ -459,6 +511,7 @@ module LeadTimePhases
 
   module Stats
     TOP_REASONS = 3
+    ISO_RE = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/.freeze
 
     module_function
 
@@ -469,7 +522,7 @@ module LeadTimePhases
       out = out.gsub(row["ticket"], "<unit>") if row["ticket"].is_a?(String) && !row["ticket"].empty?
       sha = row["landed_commit"].to_s
       out = out.gsub(sha, "<sha>").gsub(sha[0, 8], "<sha>") if sha.size >= 8
-      out
+      out.gsub(ISO_RE, "<time>")
     end
 
     # One series of values (nil = n/a) with their reasons.
@@ -517,7 +570,8 @@ module LeadTimePhases
   module Guards
     module_function
 
-    # reverts: a Source whose items are revert subjects in the window.
+    # reverts: a Source whose items are revert subjects in the window, or nil
+    # when the window is empty (nothing to look over).
     def compute(rows, reverts:)
       {
         "critic_block_rate" => rate(rows, "critic_blocks", "critic_rounds", "no critic rounds measured in the window"),
@@ -535,6 +589,7 @@ module LeadTimePhases
     end
 
     def reverts_value(reverts)
+      return { "value" => nil, "reason" => "no landings in the window" } if reverts.nil?
       return { "value" => nil, "reason" => "could not look (#{reverts.reason})" } if reverts.could_not_look?
 
       { "value" => reverts.items.size }

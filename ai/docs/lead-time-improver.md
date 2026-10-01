@@ -103,6 +103,14 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    the landed head. A missing anchor makes its two adjacent phases n/a with a
    reason. An anchor out of order (a gate before the dispatch stamp, from a
    re-dispatch) makes the phase `invalid` with a reason, never negative.
+
+   **Later (2026-10-01, DND-1477):** as built, `verify` ends at the last clean
+   critic PASS before the `integration_gate.run` start (before its end when
+   only the receipt is known), not "before landing". A `--with-critic` PASS
+   runs inside integration-gate, so ending there would make `queue` negative.
+   A dirty PASS never counts. A ticket's events are bounded below by its
+   previous landing, and telemetry is scoped to the repo it was written in.
+   The normative description is `ai/bin/lead-time-phases --help`.
 6. **Rolling window, typical and slow.** The ledger keeps every measured
    landing. The summary reports, per phase, over the last 20 landings: n
    measured, n n/a, median, p90, and the summed time. The biggest contributor

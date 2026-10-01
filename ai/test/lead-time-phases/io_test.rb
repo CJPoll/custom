@@ -74,9 +74,10 @@ Dir.mktmpdir("ltp-io-") do |tmp|
 
   # ── TimingsReader ──
   tfile = File.join(tmp, "timings.jsonl")
-  check("I5 no timings file: could not look") { IO_::TimingsReader.read(tfile, [HEAD])[HEAD].status == :could_not_look }
-  File.write(tfile, "#{JSON.generate('head' => HEAD, 'label' => 'x', 'wall_s' => 1.0)}\n#{JSON.generate('head' => other, 'label' => 'y', 'wall_s' => 2.0)}\n")
-  got = IO_::TimingsReader.read(tfile, [HEAD, "f" * 40])
+  check("I5 no timings file: could not look") { IO_::TimingsReader.read(tfile, [HEAD])[0][HEAD].status == :could_not_look }
+  File.write(tfile, "#{JSON.generate('head' => HEAD, 'label' => 'x', 'wall_s' => 1.0)}\n#{JSON.generate('head' => other, 'label' => 'y', 'wall_s' => 2.0)}\nnot json\n")
+  got, bad = IO_::TimingsReader.read(tfile, [HEAD, "f" * 40])
+  check("I5 a malformed timings line is counted") { bad == 1 }
   check("I5 rows are filtered by head") { got[HEAD].items.map { |r| r["label"] } == ["x"] }
   check("I5 a head with no rows: empty") { got["f" * 40].status == :empty }
   check("I5 the default path honours XDG_STATE_HOME") do
@@ -95,12 +96,31 @@ Dir.mktmpdir("ltp-io-") do |tmp|
              "#{JSON.generate('event' => 'harness_gate.run', 'at' => '2026-10-01T01:00:00Z', 'unit' => 'DND-9001')}\n")
   src, = IO_::TelemetryReader.read("ATHENA_TELEMETRY_DIR" => store, "HOME" => tmp)
   check("I6 telemetry.probe is never read as a phase event") { src.items.map { |e| e["event"] } == ["harness_gate.run"] }
+  locked = File.join(store, "2026-10-02.jsonl")
+  File.write(locked, "#{JSON.generate('event' => 'harness_gate.run', 'at' => '2026-10-02T01:00:00Z')}\n")
+  File.chmod(0o000, locked)
+  src, = IO_::TelemetryReader.read("ATHENA_TELEMETRY_DIR" => store, "HOME" => tmp)
+  check("I6 a partial read keeps no events: could not look, never a partial count") do
+    src.status == :could_not_look && src.items.empty? && src.reason.include?("could not read")
+  end
+  File.chmod(0o600, locked)
 
   # ── TicketFor ──
-  check("I7 a push row's own ticket wins, even nil") { IO_::TicketFor.call("ticket" => nil, "branch" => "dnd-9001-x").nil? }
-  check("I7 a PR row's ticket comes from its branch") { IO_::TicketFor.call("branch" => "dnd-9001-some-change", "title" => "x") == "DND-9001" }
-  check("I7 then from its title") { IO_::TicketFor.call("branch" => "fix-things", "title" => "DND-9002: a title") == "DND-9002" }
-  check("I7 none named: nil") { IO_::TicketFor.call("branch" => "fix-things", "title" => "a title") .nil? }
+  check("I7 a push row's own ticket wins, even nil") { IO_::TicketFor.call("ticket" => nil, "branch" => "dnd-9001-x") == [nil, nil] }
+  check("I7 a PR row's ticket comes from its branch") { IO_::TicketFor.call("branch" => "dnd-9001-some-change", "title" => "x") == ["DND-9001", nil] }
+  check("I7 then from its title") { IO_::TicketFor.call("branch" => "fix-things", "title" => "DND-9002: a title") == ["DND-9002", nil] }
+  check("I7 none named: nil, and no fault") { IO_::TicketFor.call("branch" => "fix-things", "title" => "a title") == [nil, nil] }
+  refs = AthenaTelemetry::TicketRefs.singleton_class
+  refs.alias_method(:real_parser, :parser)
+  refs.define_method(:parser) { nil }
+  begin
+    check("I7 a parser that cannot load is could-not-look, never unticketed") do
+      t, why = IO_::TicketFor.call("branch" => "dnd-9001-x", "title" => "x")
+      t.nil? && why.include?("did not load")
+    end
+  ensure
+    refs.alias_method(:parser, :real_parser)
+  end
 
   # ── LeadTimeLib ──
   check("I8 --since uses lead-time's own rule") { IO_::LeadTimeLib.parse_since("2026-10-01") == ["2026-10-01T00:00:00Z", nil] }
