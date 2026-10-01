@@ -317,6 +317,18 @@ run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/co
 eq "--dry-run with a token and a live server exits 0" "${RC}" "0"
 eq "--dry-run with a token and a live server still sends nothing [ticket]" "$(requests)" "${n}"
 
+# The committed ticket_blocking measurement fixture (DND-1579): the four owner
+# overrides of ticket-blocking-v1, paraphrased, plus five controls. It is the
+# before/after set for a ticket_blocking question-set version, so it must
+# keep joining: 9 cases, 4 blocks and 5 does_not_block, nothing excluded.
+TBF="${HERE}/fixtures/ticket-blocking-dnd-1579"
+run --use-case ticket_blocking --labels "${TBF}/labels.jsonl" --corpus "${TBF}/corpus.jsonl" --dry-run
+eq "the DND-1579 ticket_blocking fixture dry-runs clean" "${RC}" "0"
+has "the DND-1579 fixture joins all 9 cases, 4 blocks and 5 does_not_block" "${OUT}" "cases: 9 (blocks 4, does_not_block 5)"
+has "the DND-1579 fixture excludes no proposed label" "${OUT}" "proposed excluded: 0"
+eq "the DND-1579 fixture dry run reports no join miss" "${ERR}" ""
+eq "the DND-1579 fixture dry run sends nothing" "$(requests)" "${n}"
+
 printf '{"id":"zz","label":"x","provenance":"owner_confirmed"}\n' > "${TMP}/labels-none.jsonl"
 run --use-case finding_triage --labels "${TMP}/labels-none.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --dry-run
 eq "no label joining the corpus is exit 1, never an empty run" "${RC}" "1"

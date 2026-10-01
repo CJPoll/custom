@@ -1,0 +1,9 @@
+{"id": "override-1-race-residual", "label": "does_not_block", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T18:00:00Z"}
+{"id": "override-2-ordering-residual", "label": "does_not_block", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T18:00:00Z"}
+{"id": "override-3-sibling-eval", "label": "does_not_block", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T18:00:00Z"}
+{"id": "override-4-ci-red-every-pr", "label": "blocks", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T18:00:00Z"}
+{"id": "control-1-required-gate-red", "label": "blocks", "provenance": "rule_confirmed", "labeler": "dnd-1579-synthetic-control", "labeled_at": "2026-10-01T18:00:00Z"}
+{"id": "control-2-missing-dependency", "label": "blocks", "provenance": "rule_confirmed", "labeler": "dnd-1579-synthetic-control", "labeled_at": "2026-10-01T18:00:00Z"}
+{"id": "control-3-dropped-column", "label": "blocks", "provenance": "rule_confirmed", "labeler": "dnd-1579-synthetic-control", "labeled_at": "2026-10-01T18:00:00Z"}
+{"id": "control-4-severe-unrelated", "label": "does_not_block", "provenance": "rule_confirmed", "labeler": "dnd-1579-synthetic-control", "labeled_at": "2026-10-01T18:00:00Z"}
+{"id": "control-5-same-area-cosmetic", "label": "does_not_block", "provenance": "rule_confirmed", "labeler": "dnd-1579-synthetic-control", "labeled_at": "2026-10-01T18:00:00Z"}
