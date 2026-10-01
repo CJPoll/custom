@@ -170,6 +170,7 @@ scripts/athena-inbox-client-run.sh	guard
 scripts/athena-shipwright-commit.sh	guard	
 scripts/athena-shipwright-run.sh	guard	
 scripts/athena-clustering-run.sh	guard	
+scripts/athena-leadtime-run.sh	guard	
 scripts/check	guard	
 scripts/check-stack	guard	
 scripts/inbox-client-alert	guard	
