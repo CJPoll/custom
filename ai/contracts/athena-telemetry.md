@@ -206,9 +206,14 @@ is a blob on the caller's HEAD; test-slot reads that list, never a copy.
 test-slot writes the event through the shell binding after the command exits,
 when the command (wrappers and interpreter skipped) is that file in the
 caller's work tree. Attrs: `gate` (the declared path, never argv), `ok`,
-`exit` and `slot_wait_s`. A gate run outside test-slot, or one whose wait
-timed out, writes none. Readers that anchor on the first gate run read both
-events for the unit (`ai/lib/lead_time_phases.rb`).
+`exit`, `interrupted` and `slot_wait_s`. None is written for a gate run
+outside test-slot, one whose wait timed out, or one test-slot holds as
+`bash -c` rather than as the gate file: integration-gate runs its gate that
+way, so its run counts as a `harness_gate.run` in custom and as nothing in
+gen_saas. Readers that anchor on the first gate run read both events for the
+unit (`ai/lib/lead_time_phases.rb`). They are measured where that repo is in
+`improve` mode on the machine that does its work (`ai/config/lead-time-repos.json`
+and the machine override); a `watch` repo's phases stay n/a by design.
 
 `telemetry.probe` is the writer's own probe (attr `note`). Use it to check the
 writer by hand. It is never a phase anchor.

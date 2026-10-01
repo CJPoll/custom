@@ -12,7 +12,8 @@
 #
 # gate_first is the unit's first run of its repo's declared gate: a
 # harness_gate.run (custom) or a gate.run that test-slot writes for any other
-# declared gate (DND-1530; gen_saas's bin/prep-commit.sh).
+# declared gate run under it (DND-1530; gen_saas's bin/prep-commit.sh). Only
+# an improve-mode repo gets phases (watch rows are n/a by design).
 #
 # Each phase is whole seconds, or null with `na_reason` when an anchor is
 # missing, or null with `invalid: true` when its anchors are out of order.
@@ -376,7 +377,7 @@ module LeadTimePhases
       na = {}
       family(landing, events, GATE_RUN_EVENTS, %w[gate_runs gate_wall_s gate_red], out, na) do |evs|
         # An interrupted run (ok=false, interrupted=true) was stopped, not red.
-        # gate.run carries no interrupted attr: a signalled run is red.
+        # Both events carry the attr.
         [evs.size, wall(evs), evs.count { |e| Match.attr(e, "ok") == false && Match.attr(e, "interrupted") != true }]
       end
       family(landing, events, "test_slot.wait", %w[slot_wait_s], out, na) { |evs| [wall(evs)] }

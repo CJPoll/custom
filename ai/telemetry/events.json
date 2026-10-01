@@ -22,11 +22,12 @@
       }
     },
     "gate.run": {
-      "description": "One run of a repo's declared gate other than ai/bin/harness-gate (which writes harness_gate.run itself), written by test-slot after the command it held exits. A declared gate is the first ai/lib/integration-receipt.sh IR_DECLARED_GATES path that is a blob on the caller's HEAD, and the command (wrappers and interpreter skipped) is that file in the caller's work tree. at = the command's start, duration_s = its wall, head = the caller's HEAD when it started. gate = the IR_DECLARED_GATES entry (never argv); exit = the command's exit code; ok = exit was 0; slot_wait_s = the queue wait before it (0 for a nested run inside a held slot). None when the command never ran (a wait timeout, an orphaned or signalled waiter), or outside test-slot. Emitter: DND-1530.",
+      "description": "One run of a repo's declared gate other than ai/bin/harness-gate (which writes harness_gate.run itself), written by test-slot after the command it held exits. A declared gate is the first ai/lib/integration-receipt.sh IR_DECLARED_GATES path that is a blob on the caller's HEAD, and the command (wrappers and interpreter skipped) must be that file in the caller's work tree: a gate run through `bash -c` (integration-gate's own gate run) or outside test-slot writes none. at = the command's start, duration_s = its wall, head = the caller's HEAD when it started. gate = the IR_DECLARED_GATES entry (never argv); exit = the command's exit code; ok = exit was 0; interrupted = INT/TERM/HUP reached test-slot while the command ran; slot_wait_s = the queue wait before it (0 for a nested run inside a held slot). None when the command never ran (a wait timeout, an orphaned or signalled waiter). Emitter: DND-1530.",
       "attrs": {
         "gate": "label",
         "ok": "bool",
         "exit": "int",
+        "interrupted": "bool",
         "slot_wait_s": "float"
       }
     },

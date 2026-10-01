@@ -71,9 +71,10 @@
 # declared gate (ai/lib/integration-receipt.sh IR_DECLARED_GATES, the one
 # HEAD declares) other than ai/bin/harness-gate writes one gate.run after CMD
 # exits (DND-1530): gen_saas's bin/prep-commit.sh has no event of its own, and
-# lead time's implement/verify anchor on the first gate run. harness-gate
-# writes harness_gate.run itself, so it gets none here. Both are fail-open:
-# neither changes CMD's exit code or output.
+# lead time's implement/verify anchor on the first gate run (for a repo in
+# improve mode). harness-gate writes harness_gate.run itself, so it gets none
+# here; nor does a gate this run holds as `bash -c` (integration-gate's). Both
+# are fail-open: neither changes CMD's exit code or output.
 #
 # LIVENESS IS THE FLOCK, NEVER A PID. A slot is held exactly while some process
 # holds flock(2) on slot-<i>.lock. The wrapped command inherits that lock's fd,
@@ -1436,12 +1437,14 @@ emit_wait() {
 # ARGV (wrappers and interpreter skipped, unwrap_index) is that file in TREE,
 # and it is not ai/bin/harness-gate, which writes harness_gate.run itself
 # (DND-1530). The gate is the one SHA declares, read out of git, as
-# integration-gate resolves it. A relative COMMAND resolves against $PWD, a
-# bare one through PATH; both sides are realpath'd. Returns 1, printing
-# nothing, for any other command, outside a work tree or with no HEAD; 3 when
-# the declaration library is not loaded (could not look, never "no gate").
+# integration-gate resolves it. A COMMAND with a slash resolves against $PWD;
+# a bare one through PATH, except a SCRIPT an interpreter runs, which (as the
+# interpreter does) is tried in $PWD first. Both sides are realpath'd. Returns
+# 1, printing nothing, for any other command, outside a work tree or with no
+# HEAD; 3 when it could not look (the declaration library is not loaded, or
+# git cannot read SHA), which is never "no gate".
 gate_label_of() {
-  local tree=$1 sha=$2 i word path g want
+  local tree=$1 sha=$2 i j word path="" g want rc=0
   shift 2
   [ -n "$tree" ] && [ -n "$sha" ] || return 1
   declare -F ir_declared_gate_on >/dev/null || return 3
@@ -1451,10 +1454,19 @@ gate_label_of() {
   word=${v[i]}
   case $word in
     */*) path=$word ;;
-    *) path=$(type -P -- "$word") || return 1 ;;
+    *)
+      for ((j = 0; j < i; j++)); do
+        case ${v[j]##*/} in
+          ruby | ruby[0-9]* | bash | sh | dash | zsh) [ -f "$PWD/$word" ] && path=$PWD/$word ;;
+        esac
+      done
+      [ -n "$path" ] || path=$(type -P -- "$word") || return 1
+      ;;
   esac
   path=$(realpath -e -- "$path" 2>/dev/null) || return 1
-  g=$(ir_declared_gate_on "$tree" "$sha") || return 1
+  g=$(ir_declared_gate_on "$tree" "$sha") || rc=$?
+  ((rc == 2)) && return 3
+  ((rc == 0)) || return 1
   [ "$g" = ai/bin/harness-gate ] && return 1
   want=$(realpath -e -- "$tree/$g" 2>/dev/null) || return 1
   [ "$path" = "$want" ] || return 1
@@ -1471,7 +1483,7 @@ resolve_gate_run() {
   GATE_RUN_HEAD=""
   g=$(gate_label_of "$GATE_TREE" "$GATE_SHA" "${CMD[@]}") || rc=$?
   if ((rc == 3)); then
-    say "WARN could not load the declared-gate list (ai/lib/integration-receipt.sh beside $PROG); no gate.run telemetry for this run. Fix: restore ai/lib/integration-receipt.sh in the checkout this test-slot runs from."
+    say "WARN could not look up this repo's declared gate (ai/lib/integration-receipt.sh beside $PROG not loaded, or git cannot read HEAD ${GATE_SHA:0:12} in $GATE_TREE); no gate.run telemetry for this run. Fix: restore ai/lib/integration-receipt.sh in the checkout this test-slot runs from, or repair the repository at $GATE_TREE."
     return 0
   fi
   ((rc == 0)) || return 0
@@ -1490,22 +1502,29 @@ mark_gate_start() {
 
 # emit_gate_run RC WAITED_MS — one gate.run event (DND-1530) once a declared
 # gate has run: at = its start, duration_s = its wall, head = the HEAD it
-# started on; attrs gate (the declared path, never argv), ok, exit and
-# slot_wait_s (WAITED_MS; 0 for a nested run, which waits for nothing). Through
-# the shell binding ai/lib/telemetry-emit.sh, which is bounded and fail-open,
-# drops stdout and returns 0, so CMD's exit code and output are unchanged. A
-# binding that is not loaded writes nothing.
+# started on; attrs gate (the declared path, never argv), ok, exit,
+# interrupted (a signal reached the run while it ran) and slot_wait_s
+# (WAITED_MS; 0 for a nested run, which waits for nothing). Through the shell
+# binding ai/lib/telemetry-emit.sh, which is bounded and fail-open, drops
+# stdout and returns 0. The caller has already written --outcome-file, and
+# INT/TERM/HUP are ignored for the emit's few seconds, so a signal then
+# cannot replace CMD's exit code. A binding that is not loaded writes nothing.
 emit_gate_run() {
   [ -n "$GATE_RUN_LABEL" ] || return 0
-  declare -F athena_telemetry_emit >/dev/null || return 0
-  local ok=false dur=""
+  if ! declare -F athena_telemetry_emit >/dev/null; then
+    say "WARN the telemetry binding (ai/lib/telemetry-emit.sh beside $PROG) is not loaded; this $GATE_RUN_LABEL run wrote no gate.run. Fix: restore ai/lib/telemetry-emit.sh in the checkout this test-slot runs from."
+    return 0
+  fi
+  local ok=false interrupted=false dur=""
   (($1 == 0)) && ok=true
+  ((SIGNALLED)) && interrupted=true
   dur=$(athena_telemetry_seconds_since "$GATE_RUN_CLOCK")
   local -a opt=()
   [ -n "$GATE_RUN_AT" ] && opt+=(--at "$GATE_RUN_AT")
   [ -n "$dur" ] && opt+=(--duration "$dur")
   [ -n "$GATE_RUN_HEAD" ] && opt+=(--head "$GATE_RUN_HEAD")
-  athena_telemetry_emit --event gate.run "${opt[@]}" --attr "gate=$GATE_RUN_LABEL" --attr "ok=$ok" --attr "exit=$1" --attr "slot_wait_s=$(fmt_ms "$2")"
+  trap '' INT TERM HUP
+  athena_telemetry_emit --event gate.run "${opt[@]}" --attr "gate=$GATE_RUN_LABEL" --attr "ok=$ok" --attr "exit=$1" --attr "interrupted=$interrupted" --attr "slot_wait_s=$(fmt_ms "$2")"
   return 0
 }
 
@@ -1669,8 +1688,11 @@ in_tty_foreground() {
 }
 
 CHILD=""
-forward() { [ -n "$CHILD" ] && kill -s "$1" "$CHILD" 2>/dev/null; }
-forward_int() { in_tty_foreground || forward INT; }
+# SIGNALLED: 1 once INT/TERM/HUP reached this run while CMD ran (forwarded or,
+# for a terminal ^C, already delivered to CMD); gate.run's `interrupted`.
+SIGNALLED=0
+forward() { SIGNALLED=1; [ -n "$CHILD" ] && kill -s "$1" "$CHILD" 2>/dev/null; }
+forward_int() { SIGNALLED=1; in_tty_foreground || forward INT; }
 
 # entry_sigign — the SigIgn mask test-slot inherited, or "" when /proc cannot
 # say. Read by a CHILD process (sed reads its own /proc/self/status): bash
@@ -2054,8 +2076,8 @@ main() {
     mark_gate_start
     run_cmd
     rc=$?
-    emit_gate_run "$rc" 0
     write_outcome ran "$rc"
+    emit_gate_run "$rc" 0
     exit "$rc"
   fi
 
@@ -2087,8 +2109,8 @@ main() {
   # Read again: a rebase inside the slot (integration-gate --rebase) moved HEAD.
   read_gate_ref
   append_event released "$SLOT" "" "$(($(now_ms) - ran_start))" "$rc"
-  emit_gate_run "$rc" "$waited_ms"
   write_outcome ran "$rc"
+  emit_gate_run "$rc" "$waited_ms"
   exit "$rc"
 }
 

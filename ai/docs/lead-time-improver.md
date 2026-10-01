@@ -107,8 +107,10 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    **Later (2026-10-01, DND-1530):** the `implement` end is the first
    `harness_gate.run` **or `gate.run`** for the unit, and the gate counters
    read both. `gate.run` is written by test-slot for a declared gate other
-   than harness-gate (gen_saas's `bin/prep-commit.sh`), which emitted
-   nothing, so a gen_saas landing's `implement` and `verify` read n/a.
+   than harness-gate run under it (gen_saas's `bin/prep-commit.sh`). Before
+   it, such a gate wrote nothing, so a repo whose gate it is could never get
+   `implement` or `verify` measured, even in `improve` mode. A repo in
+   `watch` mode still gets no phases, by design.
 
    **Later (2026-10-01, DND-1477):** as built, `verify` ends at the last clean
    critic PASS before the `integration_gate.run` start (before its end when

@@ -1633,6 +1633,21 @@ check T4-no-drops eq "$(tel_drops "$W/tel-t4")" '{}'
 # FAKE gate (it prints its argv and exits FAKE_GATE_EXIT); never a real gate.
 gate_events() { cat "$1"/*.jsonl 2>/dev/null | jq -c 'select(.event == "gate.run")'; }
 
+# The fake gate: prints its argv, exits FAKE_GATE_EXIT. With FAKE_GATE_FIFO
+# set it records its parent (test-slot) pid, marks itself started and blocks
+# opening that FIFO until a case signals or releases it.
+cat >"$W/fake-gate.sh" <<'EOF'
+#!/bin/sh
+echo "gate-out $*"
+if [ -n "${FAKE_GATE_FIFO:-}" ]; then
+  echo "$PPID" >"$FAKE_GATE_FIFO.wrapper"
+  : >"$FAKE_GATE_FIFO.started"
+  read -r _x <"$FAKE_GATE_FIFO"
+fi
+exit "${FAKE_GATE_EXIT:-0}"
+EOF
+chmod +x "$W/fake-gate.sh"
+
 # gate_repo DIR TRACKED... — a git repo on a synthetic ticket branch whose
 # HEAD commits each TRACKED path as an executable fake gate.
 gate_repo() {
@@ -1641,7 +1656,7 @@ gate_repo() {
   git init -q -b dnd-9999-gate-fixture "$d" || return 1
   for g in "$@"; do
     mkdir -p "$d/$(dirname "$g")"
-    printf '#!/bin/sh\necho "gate-out $*"\nexit "${FAKE_GATE_EXIT:-0}"\n' >"$d/$g"
+    cp "$W/fake-gate.sh" "$d/$g"
     chmod +x "$d/$g"
   done
   : >"$d/README"
@@ -1667,7 +1682,7 @@ newpool pG1 2
 check G1-rc eq "$?" 5
 check G1-stdout eq "$(cat "$W/G1.out")" "gate-out --flag secret-arg"
 check G1-one-event eq "$(gate_events "$W/tel-g1" | wc -l)" 1
-check G1-attrs eq "$(gate_events "$W/tel-g1" | jq -c '[.attrs.gate, .attrs.ok, .attrs.exit]')" '["bin/prep-commit.sh",false,5]'
+check G1-attrs eq "$(gate_events "$W/tel-g1" | jq -c '[.attrs.gate, .attrs.ok, .attrs.exit, .attrs.interrupted]')" '["bin/prep-commit.sh",false,5,false]'
 check G1-slot-wait eq "$(gate_events "$W/tel-g1" | jq '(.attrs.slot_wait_s | type) == "number" and .attrs.slot_wait_s >= 0')" true
 check G1-duration eq "$(gate_events "$W/tel-g1" | jq '(.duration_s | type) == "number" and .duration_s >= 0')" true
 check G1-head eq "$(gate_events "$W/tel-g1" | jq -r '.head')" "$HEAD_GA"
@@ -1683,7 +1698,8 @@ check G2-rc eq "$?" 0
 check G2-attrs eq "$(gate_events "$W/tel-g2" | jq -c '[.attrs.gate, .attrs.ok, .attrs.exit]')" '["bin/prep-commit.sh",true,0]'
 
 # G3: harness-gate writes its own event, so test-slot writes no gate.run for
-# it: neither where it is the declared gate (gH) nor where it is not (gB).
+# it where it is the declared gate (gH). In gB the declared gate is
+# bin/prep-commit.sh, so harness-gate there is simply not the declared gate.
 newpool pG3 2
 (cd "$W/gH" && ATHENA_TELEMETRY_DIR="$W/tel-g3" "$BIN" --weight 1 -- ai/bin/harness-gate) >/dev/null 2>"$W/G3.err"
 check G3-rc eq "$?" 0
@@ -1717,7 +1733,8 @@ check G5-nested-wait eq "$(gate_events "$W/tel-g5" | jq -c '[(.attrs.slot_wait_s
 check G5-reentrant eq "$(event_count reentrant)" 1
 
 # G6: fail-open. An unwritable store changes neither the gate's exit code
-# nor its stdout, and stderr differs by at most the writer's one line.
+# nor its stdout, and stderr differs by at most the writer's one line per
+# emitting process (test_slot.wait's and gate.run's: two).
 newpool pG6 2
 mkdir -p "$W/ro-g6"; chmod 500 "$W/ro-g6"
 (cd "$W/gA" && FAKE_GATE_EXIT=4 ATHENA_TELEMETRY_DIR="$W/ro-g6/store" "$BIN" -- bin/prep-commit.sh x) >"$W/G6u.out" 2>"$W/G6u.err"
@@ -1742,6 +1759,43 @@ reap BG7; check G7-rc eq "$RC" 75
 check G7-none eq "$(gate_events "$W/tel-g7" | wc -l)" 0
 check G7-wait-timeout eq "$(tel_events "$W/tel-g7" | jq -r '.attrs.outcome')" timeout
 release AG7; reap AG7; check G7-A-rc eq "$RC" 0
+
+# G8: the COMMAND resolves as the shell would run it: a bare script an
+# interpreter runs from the gate's own directory, and a bare word on PATH.
+newpool pG8 2
+(cd "$W/gA/bin" && ATHENA_TELEMETRY_DIR="$W/tel-g8" "$BIN" -- bash prep-commit.sh) >/dev/null 2>"$W/G8.err"
+check G8-rc-interp eq "$?" 0
+(cd "$W/gA" && PATH="$W/gA/bin:$PATH" ATHENA_TELEMETRY_DIR="$W/tel-g8" "$BIN" -- prep-commit.sh) >/dev/null 2>>"$W/G8.err"
+check G8-rc-path eq "$?" 0
+check G8-both eq "$(gate_events "$W/tel-g8" | jq -r '.attrs.gate' | sort -u)" "bin/prep-commit.sh"
+check G8-two eq "$(gate_events "$W/tel-g8" | wc -l)" 2
+
+# G9: a gate stopped by a signal test-slot forwards: exit 143 and the
+# outcome file as before, and its gate.run says interrupted (not red).
+newpool pG9 2
+mkfifo "$W/G9.fifo"
+BG_PRE=("${SIG_DEFAULT[@]}")
+cd "$W/gA" || exit 1
+FAKE_GATE_FIFO="$W/G9.fifo" ATHENA_TELEMETRY_DIR="$W/tel-g9" bg BG9 --label BG9 --outcome-file "$W/G9.outcome" -- bin/prep-commit.sh
+cd - >/dev/null || exit 1
+BG_PRE=()
+await_file "$W/G9.fifo.started" 20 || bad G9-started "the fake gate never started: $(cat "$W/BG9.err" 2>/dev/null)"
+kill -TERM "$(cat "$W/G9.fifo.wrapper")" 2>/dev/null
+reap BG9; check G9-rc eq "$RC" 143
+check G9-outcome eq "$(cat "$W/G9.outcome" 2>/dev/null)" "ran exit=143"
+check G9-attrs eq "$(gate_events "$W/tel-g9" | jq -c '[.attrs.ok, .attrs.exit, .attrs.interrupted]')" '[false,143,true]'
+
+# G10: a test-slot whose declared-gate library is missing still runs the
+# gate with its exit code and stdout, says it could not look (with Fix:),
+# and writes no gate.run.
+mkdir -p "$W/nolib/ai/bin" && cp "$BIN" "$W/nolib/ai/bin/test-slot"
+newpool pG10 2
+(cd "$W/gA" && FAKE_GATE_EXIT=6 ATHENA_TELEMETRY_DIR="$W/tel-g10" "$W/nolib/ai/bin/test-slot" -- bin/prep-commit.sh y) >"$W/G10.out" 2>"$W/G10.err"
+check G10-rc eq "$?" 6
+check G10-stdout eq "$(cat "$W/G10.out")" "gate-out y"
+check G10-warn has "$W/G10.err" "WARN could not look up this repo's declared gate"
+check G10-fix has "$W/G10.err" "Fix: restore ai/lib/integration-receipt.sh"
+check G10-none eq "$(gate_events "$W/tel-g10" | wc -l)" 0
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then

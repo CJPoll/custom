@@ -3,7 +3,7 @@
 # integration-receipt.sh -- the ONE implementation of integration-gate's
 # receipt and gate-declaration rules (DND-969). Sourced, never run.
 #
-# Three callers share it so they cannot drift:
+# Its callers share it so they cannot drift:
 #   * integration-gate (ai/skills/athena:merge-boarding/scripts/) resolves the
 #     repo's declared gate with ir_declared_gate_on and writes the receipt at
 #     ir_receipt_path with schema $IR_SCHEMA.
@@ -14,6 +14,10 @@
 #     and if so reads the receipt with ir_read_receipt before any merge call.
 #     Both readers accept a recorded base that is the tip or an ancestor of it
 #     (DND-1463).
+#   * main-health.sh (ai/lib/) reads a landed tip's receipt with
+#     ir_read_receipt.
+#   * test-slot (ai/bin/) asks ir_declared_gate_on whether the command it runs
+#     is the caller's declared gate, for its gate.run telemetry (DND-1530).
 #
 # The receipt: <git common dir>/integration-receipts/<head-sha>.json, written by
 # integration-gate only on INTEGRATION OK (DND-965). The git common dir is the

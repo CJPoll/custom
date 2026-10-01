@@ -249,6 +249,11 @@ check("G5 the red-rate guard's reason names both events") do
   L::Guards.compute([{ "counters" => {} }], reverts: nil)["gate_red_rate"]["reason"] == "no harness_gate.run or gate.run measured in the window"
 end
 check("G6 gate.run is read from the store") { L::EVENTS.include?("gate.run") }
+stopped_g = product + [ev("gate.run", "2026-10-01T03:10:00Z", duration_s: 5.0, attrs: { "ok" => false, "exit" => 143, "interrupted" => true })]
+check("G7 an interrupted gate.run is counted but never red") do
+  c = L::Counters.compute(landing: l, events: S.ok(stopped_g), timings: S.empty("none"))["counters"]
+  c["gate_runs"] == 3 && c["gate_red"] == 1
+end
 
 # ── Stats.summarize, Batch, Window ─────────────────────────────────────────
 
