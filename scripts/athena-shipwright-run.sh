@@ -295,9 +295,9 @@ esac
 #   * classify_block reads the SESSION's output only, measured before teardown
 #     appends git's own chatter to the same log (see section 6).
 BLOCK_PATTERNS='usage limit|session limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
-classify_block() { # <log> <bytes> -> the matched signature in the first <bytes> of <log>, or nothing
+classify_block() { # <log> <bytes> <skip> -> the matched signature in <bytes> of <log> after the first <skip>, or nothing
   [ -r "$1" ] || return 0
-  head -c "${2:-0}" -- "$1" 2>/dev/null | grep -m1 -i -E -o "${BLOCK_PATTERNS}" 2>/dev/null || true
+  tail -c "+$(( ${3:-0} + 1 ))" -- "$1" 2>/dev/null | head -c "${2:-0}" 2>/dev/null | grep -m1 -i -E -o "${BLOCK_PATTERNS}" 2>/dev/null || true
 }
 
 mkdir -p "${LOG_DIR}"
@@ -1031,7 +1031,16 @@ cd "${RUN_TREE}"
 # so a hung session is killed and the flock is released before the next run,
 # rather than wedging the lane forever. `timeout` exits 124 on expiry; capture
 # the status either way instead of letting `set -e` abort before we log it.
-if timeout 55m "${CLAUDE}" --dangerously-skip-permissions -p "${BRIEF}" >"${log}" 2>&1; then
+#
+# The session APPENDS to ${log} (DND-1514). Truncating here (`>`) destroyed every
+# line the runner wrote earlier in the tick (the fetch, the lane creation), so
+# the one record of why a run went wrong was gone before the session began.
+# One line marks the launch, and pre_bytes is where the session's own output
+# starts: classification and the "empty" test below read only past it.
+echo "athena-shipwright: run ${ts} launching the session from base ${BASE_COMMIT}" >>"${log}" 2>/dev/null || true
+pre_bytes="$( { wc -c <"${log}"; } 2>/dev/null | tr -d ' ' || true)"
+case "${pre_bytes}" in ''|*[!0-9]*) pre_bytes=0 ;; esac
+if timeout 55m "${CLAUDE}" --dangerously-skip-permissions -p "${BRIEF}" >>"${log}" 2>&1; then
   status=0
 else
   status=$?
@@ -1059,6 +1068,13 @@ else
 fi
 session_bytes="$( { wc -c <"${log}"; } 2>/dev/null | tr -d ' ' || true)"
 case "${session_bytes}" in ''|*[!0-9]*) session_bytes=0 ;; esac
+# The session's share of the log is what follows the runner's own lines. A log
+# that shrank below pre_bytes (the session deleted or truncated it) has none.
+if [ "${session_bytes}" -gt "${pre_bytes}" ]; then
+  session_bytes="$(( session_bytes - pre_bytes ))"
+else
+  session_bytes=0
+fi
 if [ -z "${session_output}" ]; then
   if [ "${session_bytes}" -eq 0 ]; then
     session_output="empty"
@@ -1179,7 +1195,7 @@ unreported=0
 block_sig=""
 if [ ! -e "${RECEIPT}" ] && [ "${tip}" = "${BASE_COMMIT}" ]; then
   unreported=1
-  block_sig="$(classify_block "${log}" "${session_bytes}")"
+  block_sig="$(classify_block "${log}" "${session_bytes}" "${pre_bytes}")"
   if [ "${status}" -eq 0 ] || [ -n "${block_sig}" ]; then
     blocked=1
   fi

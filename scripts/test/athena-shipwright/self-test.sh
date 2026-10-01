@@ -1510,6 +1510,34 @@ else
   bad "teardown text does not classify exit-0" "rc=$rc marker=$m"
 fi
 
+# --- the session does not truncate the tick's log (DND-1514) -----------------
+#
+# `>"${log}"` at session launch destroyed every line the runner had written
+# earlier in the tick. The session now appends. A line the runner wrote BEFORE
+# the session must survive ahead of the session's output, and the "empty
+# session" verdict must still read only the session's share of the log.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked_rc "$a/stub-claude" "session said hello" 0
+rc="$(run_runner "$r")"
+tl="$(cat "$(sd "$r")"/runs/*.log 2>/dev/null || true)"
+launch_ln="$(grep -n 'launching the session' <<<"$tl" | head -1 | cut -d: -f1)"
+sess_ln="$(grep -n 'session said hello' <<<"$tl" | head -1 | cut -d: -f1)"
+if [ -n "$launch_ln" ] && [ -n "$sess_ln" ] && [ "$launch_ln" -lt "$sess_ln" ]; then
+  ok "a line the runner wrote before the session survives, ahead of the session's output"
+else
+  bad "pre-session log line survives" "rc=$rc log=$tl"
+fi
+r="$(new_repo)"; a="$(aux "$r")"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$a/stub-claude"
+chmod +x "$a/stub-claude"
+rc="$(run_runner "$r")"
+f="$(cat "$(sd "$r")/runs/"*.failed 2>/dev/null || true)"
+if grep -q 'session_output=empty' <<<"$f"; then
+  ok "a silent session still reads empty with the runner's own launch line in the log"
+else
+  bad "empty verdict ignores runner lines" "rc=$rc record=$f"
+fi
+
 # `429` means an HTTP status. As a bare substring it matches pids, paths and
 # SHAs the session prints. Fail-first case from DND-739.
 r="$(new_repo)"; a="$(aux "$r")"
