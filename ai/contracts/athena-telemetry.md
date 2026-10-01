@@ -217,9 +217,17 @@ directory or remove a file, naming what it removed first. No store is not a
 failure: it prints `pruned 0: no telemetry store at …` and exits 0. Per-day
 files are the rotation.
 
-Who prunes: the lead-time improver's runner (DND-1479) is to run `--prune`
-each tick. Until that runner lands, nothing prunes automatically: retention
-is `--prune` by hand, and only *Size cap* bounds growth.
+Who prunes: the lead-time improver's runner, `scripts/athena-leadtime-run.sh`.
+It runs `--prune` first on every tick that takes its single-run lock, wedged
+ticks included. A tick skipped because a run is in flight does not prune. A
+prune failure is recorded on the tick's record (`prune=`) and never fails the
+tick. The runner runs only on its cron, which DND-1480 installs. Until then,
+retention is `--prune` by hand, and only *Size cap* bounds growth.
+
+**Later (2026-10-01, DND-1479):** this paragraph said the runner "is to run
+`--prune` each tick" and "until that runner lands, nothing prunes". The runner
+has landed. What prunes is the installed cron, and only ticks that take the
+lock prune.
 
 ## Size cap
 

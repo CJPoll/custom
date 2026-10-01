@@ -2808,6 +2808,13 @@ also reports:
   also sends ONE `harness-lane-drain` request at the end of every run that
   spawned a session, re: that run's `.run` record. Its reader is
   `athena:inbox-attend` → *A fourth writer* (DND-987).
+  A fourth program, `scripts/athena-leadtime-run.sh` (the lead-time improver
+  cron, DND-1479), sends ONE `leadtime-wedged` message per wedge episode and
+  ONE `leadtime-blocked` message per BLOCKED episode, on the clustering
+  runner's terms. Their `re:` is the tick's `.wedged` or `.blocked` record in
+  `ai-artifacts/lead-time/runs/`; they name no capture, so retention ignores
+  them. It sends no drain request. Its reader is `athena:inbox-attend` → *The
+  lead-time cron writer*.
 - **`watchdog`** — the watchdog's three tools (the liveness library,
   `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
   Missing any, the supervisor keeps the client running, but a wedge is then

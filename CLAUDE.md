@@ -593,7 +593,8 @@ The durable fix, defense in depth:
   notifications; a client just fails fast). Never overrides a value the caller
   set.
 - **The cron wrappers** (`athena-shipwright-run.sh`,
-  `athena-inbox-client-run.sh`, `athena-clustering-run.sh`) source it after their early-exit arg parsing and
+  `athena-inbox-client-run.sh`, `athena-clustering-run.sh`,
+  `athena-leadtime-run.sh`) source it after their early-exit arg parsing and
   single-run lock, so `--help`/`--dry-run` and the `*/5` lock-held relaunch
   never trigger it. `notify-idle.sh` sources it too, so the Stop hook is guarded
   in every session regardless of how launched.

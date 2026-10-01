@@ -24,12 +24,18 @@
 # MCP. Claude Code resolves local-scope MCP servers from the launch directory,
 # and they are registered on the main checkout. The runner copies the one
 # server the run needs, notion-personal (an architect files DND tickets
-# through it), into a 0600 --mcp-config file beside the lane. A missing one is
-# a hard failure, never a session without it.
+# through it), into a 0600 --mcp-config file beside the lane, and launches with
+# --strict-mcp-config, so no other configured server or connector loads. A
+# missing notion-personal is a hard failure, never a session without it.
 #
-# Telemetry. The runner prunes the telemetry store (telemetry-emit --prune)
-# before every session; the skill does not. A prune failure is recorded on the
-# .run record and never fails the tick by itself.
+# Telemetry. The runner prunes the telemetry store (telemetry-emit --prune) on
+# every tick that takes the single-run lock, wedged or not, before anything
+# else; the skill does not prune. A prune failure is recorded on the tick's
+# record and never fails the tick by itself.
+#
+# Thresholds. The wedge fires after 3 unsuccessful outcomes: three hourly
+# ticks, between the clustering runner's 2 (twice a day) and the shipwright's
+# 6. The blocked alert fires after 2 blocked ticks, as clustering's does.
 #
 # Single-run: an flock on <state>/run.lock. A tick that finds it held exits 0
 # and leaves a .locked record.
@@ -72,14 +78,15 @@
 #   1   origin/main could not be resolved, so there is no base for a lane: counted
 #   2   the repo is not a git checkout
 #   64  usage error
-#   69  BLOCKED: the session never reached the model (usage limit, auth).
-#       Never counted toward the wedge and never gates a spawn. After
+#   69  BLOCKED: the session never reached the model (usage limit, auth): no
+#       receipt, no summary and no lane commit, with exit 0 or a known limit
+#       or auth message. Never counted toward the wedge and never gates a spawn. After
 #       LEADTIME_BLOCK_ESCALATE blocked ticks in a row, ONE harness-alert
 #       (leadtime-blocked) per episode, since an auth fault never clears
 #   70  the session exited 0 but wrote no summary: counted
 #   71  flock failed for a reason other than "held" (a fault, never a skip)
-#   72  STRANDED: the session exited 0 but its lane holds commits that are not
-#       on origin/main. The branch is kept: counted
+#   72  STRANDED: the lane holds commits that are not on origin/main, whatever
+#       the session's exit. The branch is kept: counted
 #   73  the state directory, lock, lane or MCP config could not be created
 #       (a lane or config failure is counted)
 #   75  WEDGED: LEADTIME_FAIL_ESCALATE unsuccessful outcomes in a row. No
@@ -194,17 +201,22 @@ agent (Agent tool, subagent_type: athena-shipwright) with this brief, and do \
 nothing else yourself: 'MODE: lead-time. This is the scheduled lead-time \
 improver run from the cron runner scripts/athena-leadtime-run.sh, with no human \
 present. Run the athena:lead-time-improve skill and nothing else, for every repo \
-in ${CONFIG_FILE}. Your lane is the cron lane the runner made for you: the \
-worktree ${LANE} on branch ${BRANCH}, cut from origin/main. Work only there, \
-starting every Bash command with cd ${LANE}; never edit the main checkout \
-${MAIN_CHECKOUT}. This is the cron path of athena:shipwright-lane: a landing \
-follows the skill (Landing) and lands by that skill (Sync up) refspec push; open \
-no PR. The runner fast-forwards the main checkout after you exit. State dir: \
-${STATE_DIR} (LEAD_TIME_STATE_DIR is already exported with it). The runner has \
-already pruned telemetry; do not prune. Write your summary lines to exactly \
-this file: ${SUMMARY}. Never drop, skip, downgrade or path-exclude a check, and \
-never move a bar. End with your summary lines.' When it finishes, print the \
-contents of ${SUMMARY} and stop. Never write to that file yourself."
+in your lane copy of ai/config/lead-time-repos.json. Your lane is the cron lane \
+the runner made for you: the worktree ${LANE} on branch ${BRANCH}, cut from \
+origin/main. Work only there, starting every Bash command with cd ${LANE}; never \
+edit the main checkout ${MAIN_CHECKOUT}. You are on the cron path: land only \
+as athena:lead-time-improve (Landing) directs, the full bar and the push it \
+cites, with your lane HEAD pushed to main by refspec (athena:shipwright-lane, \
+Sync up). Open no PR. If a gate or the critic \
+refuses your change, journal it, then reset your lane to origin/main (git reset \
+--hard origin/main, in your lane only) so it holds no unlanded commits; leave \
+commits in the lane only when the push itself failed. The runner fast-forwards \
+the main checkout after you exit. State dir: ${STATE_DIR} (LEAD_TIME_STATE_DIR \
+is already exported with it). The runner does the telemetry prune; do not prune. \
+Write your summary lines to exactly this file: ${SUMMARY}. Your hard constraint \
+is your block Speed a safety check up; never weaken it (ai/blocks/ops/safety-checks.md). \
+End with your summary lines.' When it finishes, print the contents of ${SUMMARY} \
+and stop. Never write to that file yourself."
 
 if [ "${DRY}" -eq 1 ]; then
   printf '%s\n' "${BRIEF}"
@@ -269,6 +281,7 @@ record_failure() {
   {
     printf '%s: run %s was an unsuccessful outcome: %s\n' "${ME}" "${ts}" "${why}"
     printf '%s\n' "$@"
+    printf 'prune=%s\n' "${PRUNE_RESULT:-not run}"
     printf 'log=%s\n' "${log}"
   } >"${LOG_DIR}/${ts}.failed" || true
   bump_fail
@@ -370,6 +383,7 @@ wedge_track() {
     printf 'counter=%s\n' "${FAIL_COUNT}"
     printf 'last_output_log=%s\n' "$(last_output_log)"
     printf 'rearm: rm %s\n' "${FAIL_COUNT}"
+    printf 'prune=%s\n' "${PRUNE_RESULT:-not run}"
     printf 'Fix: read why the runs failed (the .failed and .run records and logs in %s), fix the cause, then re-arm with: rm %s\n' "${LOG_DIR}" "${FAIL_COUNT}"
     printf 'wedged: consecutive_failures=%s threshold=%s first_wedged=%s episode=%s\n' \
       "${failures}" "${FAIL_ESCALATE}" "${ep_first}" "${ep_id}"
@@ -491,6 +505,32 @@ reap_dead_lanes() {
   return 0
 }
 
+# --- 2. prune telemetry (the runner's job, not the skill's) ----------------------
+# Every tick that holds the lock prunes, wedged or not, so retention holds while
+# the lane is down. Recorded on the tick's record; a failure is loud and never
+# fails the tick.
+prune_rc=0
+prune_out="$(timeout 120 "${TELEMETRY_EMIT}" --prune 2>&1 </dev/null)" || prune_rc=$?
+if [ "${prune_rc}" -eq 0 ]; then
+  PRUNE_RESULT="ok: $(printf '%s\n' "${prune_out}" | tail -n1)"
+else
+  PRUNE_RESULT="FAILED exit=${prune_rc}: $(printf '%s\n' "${prune_out}" | grep -v '^[[:space:]]*$' | tail -n1 || true)"
+  echo "${ME}: telemetry-emit --prune failed (exit ${prune_rc}); the tick goes ahead and its record says so." >&2
+  echo "  Fix: run '${TELEMETRY_EMIT} --prune' by hand from ${MAIN_CHECKOUT} and follow its own Fix: line. Old day files stay until a prune succeeds." >&2
+fi
+
+# --- 3. fetch origin/main -----------------------------------------------------------
+# Before the reaper, so it judges a dead lane's work against a current
+# origin/main. A failed fetch (no network, or no ssh-agent under cron) falls
+# back to the origin/main this checkout last fetched: the session syncs down
+# first anyway (athena:shipwright-lane).
+FETCH_NOTE="fetched"
+if ! timeout 120 git -C "${MAIN_CHECKOUT}" fetch --quiet origin main </dev/null >>"${GIT_LOG}" 2>&1; then
+  FETCH_NOTE="fetch FAILED; based on the last-fetched origin/main"
+  echo "${ME}: could not fetch origin/main; using the last-fetched origin/main. The session syncs down itself." >&2
+  echo "  Fix: nothing needed for this tick. If every tick says so, read ${GIT_LOG} for git's reason." >&2
+fi
+
 # An episode ends once its counter clears: the wedge below the threshold (the
 # owner's re-arm), checked before the reaper can bump it, so a re-arm then a
 # corpse opens a new episode.
@@ -498,10 +538,10 @@ if [ "$(read_fail)" -lt "${FAIL_ESCALATE}" ] && [ -e "${WEDGE_STATE}" ]; then
   rm -f "${WEDGE_STATE}"
 fi
 
-# --- 2. reap dead lanes ---------------------------------------------------------
+# --- 4. reap dead lanes ---------------------------------------------------------
 reap_dead_lanes
 
-# --- 3. the wedge ----------------------------------------------------------------
+# --- 5. the wedge ----------------------------------------------------------------
 failures="$(read_fail)"
 if [ "${failures}" -ge "${FAIL_ESCALATE}" ]; then
   echo "${ME}: WEDGED — ${failures} consecutive unsuccessful outcomes. Refusing to spawn a session." >&2
@@ -510,7 +550,7 @@ if [ "${failures}" -ge "${FAIL_ESCALATE}" ]; then
   exit 75
 fi
 
-# --- 4. preconditions: the skill, the config, the MCP server ----------------------
+# --- 6. preconditions: the skill, the config, the MCP server ----------------------
 # precondition_fail <why> <fix> — the run cannot happen without these.
 precondition_fail() {
   record_failure "$1" "fix=$2"
@@ -555,34 +595,15 @@ if [ -n "${missing}" ]; then
   precondition_fail "the MCP server(s)${missing} are not registered for ${MAIN_CHECKOUT} in ${CLAUDE_JSON}; an architect the run spawns files DND tickets through notion-personal." \
     "from ${MAIN_CHECKOUT}, run scripts/add-notion --personal."
 fi
-# Only the servers the run needs: no other connector reaches the session.
+# Only the servers the run needs; --strict-mcp-config below keeps every other
+# configured server and connector out of the session.
 mcp_config="$(jq -c --arg names "${REQUIRED_MCP}" \
   '($names | split(" ")) as $want | {mcpServers: with_entries(select(.key as $k | $want | index($k)))}' \
   <<<"${servers}")"
 
-# --- 5. prune telemetry (the runner's job, not the skill's) ----------------------
-# Recorded on the .run record. A failure is loud and never fails the tick.
-prune_rc=0
-prune_out="$(timeout 120 "${TELEMETRY_EMIT}" --prune 2>&1 </dev/null)" || prune_rc=$?
-if [ "${prune_rc}" -eq 0 ]; then
-  PRUNE_RESULT="ok: $(printf '%s\n' "${prune_out}" | tail -n1)"
-else
-  PRUNE_RESULT="FAILED exit=${prune_rc}: $(printf '%s\n' "${prune_out}" | grep -v '^[[:space:]]*$' | tail -n1)"
-  echo "${ME}: telemetry-emit --prune failed (exit ${prune_rc}); the run goes ahead and the .run record says so." >&2
-  echo "  Fix: run '${TELEMETRY_EMIT} --prune' by hand from ${MAIN_CHECKOUT} and follow its own Fix: line. Old day files stay until a prune succeeds." >&2
-fi
-
-# --- 6. the lane ------------------------------------------------------------------
-# Base it on origin/main. A failed fetch (no network, or no ssh-agent under
-# cron) falls back to the origin/main this checkout last fetched: the session
-# syncs down first anyway (athena:shipwright-lane). No origin/main at all is a
-# counted failure, never a lane cut from something else.
-FETCH_NOTE="fetched"
-if ! timeout 120 git -C "${MAIN_CHECKOUT}" fetch --quiet origin main </dev/null >>"${GIT_LOG}" 2>&1; then
-  FETCH_NOTE="fetch FAILED; based on the last-fetched origin/main"
-  echo "${ME}: could not fetch origin/main; basing lane ${RUN_ID} on the last-fetched origin/main. The session syncs down itself." >&2
-  echo "  Fix: nothing needed for this tick. If every tick says so, read ${GIT_LOG} for git's reason." >&2
-fi
+# --- 7. the lane ------------------------------------------------------------------
+# Cut from origin/main. No origin/main at all is a counted failure, never a
+# lane cut from something else.
 BASE="$(git -C "${MAIN_CHECKOUT}" rev-parse --verify --quiet refs/remotes/origin/main 2>/dev/null || true)"
 if [ -z "${BASE}" ]; then
   record_failure "there is no origin/main in ${MAIN_CHECKOUT}, so there is no base for a lane" "fetch=${FETCH_NOTE}" "git_log=${GIT_LOG}"
@@ -597,11 +618,16 @@ if ! { mkdir -p "${LANES_DIR}" && chmod 700 "${LANES_DIR}"; } 2>/dev/null \
   echo "  Fix: read ${GIT_LOG} for git's reason. A branch-name collision is fatal by design (never reused or forced); clear a stale registration with 'git -C ${MAIN_CHECKOUT} worktree prune'." >&2
   exit 73
 fi
-# The lane's liveness lock. Held on fd 8 for the whole run; the session does
-# not inherit it (8>&- below), so a surviving child can never pin a dead lane.
+# The lane's liveness lock, held on fd 8 for the whole run and inherited by the
+# session (as the shipwright runner does): a runner killed mid-session leaves
+# the lock held by the live session, so the next tick never reaps a lane in use.
+# Teardown removes the lock file, so a child that outlives teardown pins nothing.
 printf 'origin=cron\npid=%s\nrun_id=%s\n' "$$" "${RUN_ID}" >"${LANE_META}"
 exec 8>>"${LANE_LOCK}"
 if ! flock -n 8; then
+  retire_lane "${RUN_ID}" "lane lock already held" >/dev/null || true
+  { exec 8>&-; } 2>/dev/null || true
+  rm -f -- "${LANE_META}"
   record_failure "the fresh lane lock ${LANE_LOCK} was already held" "lane=${LANE}"
   echo "${ME}: the fresh lane lock ${LANE_LOCK} is already held; refusing to run. Counted as an unsuccessful outcome." >&2
   echo "  Fix: this should be impossible for a unique run id. Check for a process holding it ('fuser -v ${LANE_LOCK}')." >&2
@@ -618,12 +644,13 @@ if ! ( umask 077; printf '%s\n' "${mcp_config}" >"${MCP_FILE}" ) 2>/dev/null; th
   exit 73
 fi
 
-# --- 7. run the session -------------------------------------------------------------
+# --- 8. run the session -------------------------------------------------------------
 # A headless session kills background tasks after 600s by default; the
 # shipwright runs as one. Bound the ceiling three minutes under the hard
 # timeout so a hung run still releases the lock before the next tick. `-k`
-# kills a session that ignores SIGTERM. `8>&- 9>&-`: nothing the session starts
-# may inherit the run lock or the lane lock.
+# kills a session that ignores SIGTERM. `9>&-`: nothing the session starts may
+# inherit the run lock, or a surviving child would make every later tick skip
+# as "in flight".
 timeout_min="${TIMEOUT%m}"
 if [ "${timeout_min}" -gt 3 ]; then
   export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="$(( (timeout_min - 3) * 60000 ))"
@@ -633,9 +660,9 @@ fi
 rm -f "${RECEIPT}" "${SUMMARY}"
 status=0
 ( cd -- "${LANE}" && exec timeout -k 60s "${TIMEOUT}" "${CLAUDE}" --dangerously-skip-permissions \
-    --mcp-config "${MCP_FILE}" -p "${BRIEF}" 8>&- 9>&- ) </dev/null >"${log}" 2>&1 || status=$?
+    --mcp-config "${MCP_FILE}" --strict-mcp-config -p "${BRIEF}" 9>&- ) </dev/null >"${log}" 2>&1 || status=$?
 
-# --- 8. teardown: what landed, the fast-forward, the lane ---------------------------
+# --- 9. teardown: what landed, the fast-forward, the lane ---------------------------
 timeout 120 git -C "${MAIN_CHECKOUT}" fetch --quiet origin main </dev/null >>"${GIT_LOG}" 2>&1 || true
 AFTER="$(git -C "${MAIN_CHECKOUT}" rev-parse --verify --quiet refs/remotes/origin/main 2>/dev/null || true)"
 LANDED="origin/main ${BASE}..${AFTER:-unknown}"
@@ -654,13 +681,13 @@ if [ -n "${tip}" ] && [ "${tip}" != "${BASE}" ]; then
     FF="none (lane tip ${tip} is not on origin/main)"
   elif [ "${main_ref}" != "refs/heads/main" ]; then
     FF="REFUSED (the main checkout is on ${main_ref:-a detached HEAD}, not main)"
-    echo "${ME}: run ${ts} landed ${tip}, but ${MAIN_CHECKOUT} is not on main, so it was not fast-forwarded." >&2
+    echo "${ME}: run ${ts}: the lane tip ${tip} is on origin/main, but ${MAIN_CHECKOUT} is not on main, so it was not fast-forwarded." >&2
     echo "  Fix: switch ${MAIN_CHECKOUT} back to main when its owner is done, then 'git -C ${MAIN_CHECKOUT} merge --ff-only origin/main'." >&2
   elif git -C "${MAIN_CHECKOUT}" merge --ff-only "${tip}" >>"${GIT_LOG}" 2>&1; then
     FF="${tip}"
   else
     FF="REFUSED (see ${GIT_LOG})"
-    echo "${ME}: run ${ts} landed ${tip}, but ${MAIN_CHECKOUT} could not be fast-forwarded to it." >&2
+    echo "${ME}: run ${ts}: the lane tip ${tip} is on origin/main, but ${MAIN_CHECKOUT} could not be fast-forwarded to it." >&2
     echo "  Fix: nothing is lost; the work is on origin/main. Clear what blocks it (usually a locally-modified file, or local commits on main; never force either), then run 'git -C ${MAIN_CHECKOUT} merge --ff-only ${tip}'. git's reason is at the end of ${GIT_LOG}." >&2
   fi
 fi
@@ -674,7 +701,7 @@ fi
 { exec 8>&-; } 2>/dev/null || true
 rm -f -- "${LANE_LOCK}" "${LANE_META}" "${MCP_FILE}"
 
-# --- 9. classify, then finish ------------------------------------------------------
+# --- 10. classify, then finish -----------------------------------------------------
 # finish <exit> <outcome> — every tick that spawned a session ends here and
 # writes runs/<ts>.run.
 finish() {
@@ -699,37 +726,47 @@ finish() {
   exit "${rc}"
 }
 
-# A session with no receipt never reached the model. Exit 0, or a known block
+# Did the session reach the model? The receipt says so, but it rests on the
+# outer session obeying the brief's first line. A summary (only the shipwright
+# writes it) or a lane that moved off its base proves it too, so a working run
+# that skipped the touch is never read as BLOCKED.
+REACHED=0
+if [ -e "${RECEIPT}" ] || [ -s "${SUMMARY}" ] || { [ -n "${tip}" ] && [ "${tip}" != "${BASE}" ]; }; then
+  REACHED=1
+fi
+# A session that never reached the model, with exit 0 or a known block
 # signature on a non-zero exit, is BLOCKED: never counted toward the wedge (a
 # usage limit clears on its own), but BLOCK_ESCALATE in a row send one alert
-# (an auth or account fault does not clear). Anything else with no receipt is a
-# failure (a missing binary or a crash must still wedge). The same rule as the
-# clustering runner; the log holds only the session's output.
+# (an auth or account fault does not clear). Anything else is a failure (a
+# missing binary or a crash must still wedge). The clustering runner's rule;
+# the log holds only the session's output.
 BLOCK_PATTERNS='usage limit|session limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
-if [ ! -e "${RECEIPT}" ]; then
+if [ "${REACHED}" -eq 0 ]; then
   sig="$(grep -m1 -i -E -o "${BLOCK_PATTERNS}" -- "${log}" 2>/dev/null || true)"
-  if [ "${STRANDED}" -eq 0 ] && { [ "${status}" -eq 0 ] || [ -n "${sig}" ]; }; then
+  if [ "${status}" -eq 0 ] || [ -n "${sig}" ]; then
     blocked_track "${status}" "${sig}"
     finish 69 blocked
   fi
-  record_failure "the session exited ${status} and never reported for duty (no receipt)" "session_exit=${status}" "lane=${LANE_RESULT}"
+  record_failure "the session exited ${status} and never reported for duty (no receipt, no summary, no lane commit)" "session_exit=${status}"
   echo "${ME}: run ${ts} exited ${status} and never reported for duty. Record: ${LOG_DIR}/${ts}.failed" >&2
   echo "  Fix: read ${log}; check that ${CLAUDE} runs by hand ('${CLAUDE} --version'). If the log shows a provider limit, add its wording to BLOCK_PATTERNS in $0." >&2
   finish "${status}" failed
 fi
 # The session reached the model: any blocked streak and its episode end here.
 rm -f "${BLOCK_COUNT}" "${BLOCK_STATE}"
+# Stranded first, whatever the session's exit: the kept branch is the thing
+# the owner has to act on.
+if [ "${STRANDED}" -eq 1 ]; then
+  record_failure "the lane holds commits that are not on origin/main" "branch=${BRANCH} (kept)" "tip=${tip}" "session_exit=${status}"
+  echo "${ME}: run ${ts} is STRANDED: ${BRANCH} holds commits not on origin/main (session exit ${status}). Counted as unsuccessful. Record: ${LOG_DIR}/${ts}.failed" >&2
+  echo "  Fix: inspect with 'git -C ${MAIN_CHECKOUT} log origin/main..${BRANCH}'; land it through the custom landing or drop it, then 'git -C ${MAIN_CHECKOUT} branch -D ${BRANCH}'. The journal (${STATE_DIR}/journal.md) says why it did not land." >&2
+  finish 72 stranded
+fi
 if [ "${status}" -ne 0 ]; then
-  record_failure "the session exited ${status}" "session_exit=${status}" "lane=${LANE_RESULT}"
+  record_failure "the session exited ${status}" "session_exit=${status}"
   echo "${ME}: run ${ts} exited ${status}. Record: ${LOG_DIR}/${ts}.failed" >&2
   echo "  Fix: read ${log} for why the run failed (124 is the ${TIMEOUT} timeout). ${FAIL_ESCALATE} in a row wedge the lane." >&2
   finish "${status}" failed
-fi
-if [ "${STRANDED}" -eq 1 ]; then
-  record_failure "the session exited 0 but its lane holds commits that are not on origin/main" "branch=${BRANCH} (kept)" "tip=${tip}"
-  echo "${ME}: run ${ts} is STRANDED: ${BRANCH} holds commits not on origin/main. Counted as unsuccessful. Record: ${LOG_DIR}/${ts}.failed" >&2
-  echo "  Fix: inspect with 'git -C ${MAIN_CHECKOUT} log origin/main..${BRANCH}'; land it through the custom landing or drop it, then 'git -C ${MAIN_CHECKOUT} branch -D ${BRANCH}'. The journal (${STATE_DIR}/journal.md) says why it did not land." >&2
-  finish 72 stranded
 fi
 if [ ! -s "${SUMMARY}" ]; then
   record_failure "the session exited 0 but wrote no summary, so the run cannot be shown to have happened" "session_exit=0" "summary=${SUMMARY} (absent or empty)"

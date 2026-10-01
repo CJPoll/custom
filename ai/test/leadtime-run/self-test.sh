@@ -42,6 +42,24 @@ bad()   { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "${2:-}"; FAIL=$((FA
 case_() { printf '\n%s\n' "$1"; }
 
 export ATHENA_INBOX_ROOT="${TMP}/inbox-root"
+# A registry entry for this checkout under the pinned root, so the one case
+# that uses the REAL send-mail delivers into the temp inbox and nowhere else.
+install_inbox_registry() { # <root>
+  local common
+  common="$(cd -- "${REPO_ROOT}" && realpath -- "$(git rev-parse --git-common-dir)")"
+  mkdir -p "$1/projects"; chmod 700 "$1" "$1/projects"
+  jq --arg r "${common}" '.projects[] | select(.file == "custom.json") | .entry | .repo = $r' \
+    "${REPO_ROOT}/ai/inbox/registry.json" >"$1/projects/custom.json"
+  chmod 600 "$1/projects/custom.json"
+}
+install_inbox_registry "${ATHENA_INBOX_ROOT}"
+case "${ATHENA_INBOX_ROOT}" in
+  "${TMP}"/*) ;;
+  *) echo "self-test: ATHENA_INBOX_ROOT is not under ${TMP}; refusing to run." >&2
+     echo "  Fix: this is a bug in the suite's setup; the pin must run before any case." >&2
+     exit 2 ;;
+esac
+ALERTS="${ATHENA_INBOX_ROOT}/harness-alerts/to-custom"
 NOW_FIXED="$(date -d '2026-10-01 12:30 UTC' +%s)"
 G=(-c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false -c init.defaultBranch=main)
 
@@ -94,12 +112,15 @@ g() { git -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false
 summary() { echo 'repo=custom mode=improve biggest=verify action=no-action reason="fixture"' >"$LEADTIME_SUMMARY"; }
 case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   ok)        : >"$LEADTIME_RECEIPT"; summary; exit 0 ;;
+  noreceipt) summary; exit 0 ;;
   fail)      : >"$LEADTIME_RECEIPT"; echo "the run fell over"; exit 7 ;;
+  timeout)   : >"$LEADTIME_RECEIPT"; exit 124 ;;
   nosummary) : >"$LEADTIME_RECEIPT"; exit 0 ;;
   blocked0)  exit 0 ;;
   limit)     echo "You've hit your weekly limit"; exit 1 ;;
   crash)     echo "segmentation fault"; exit 3 ;;
   strand)    : >"$LEADTIME_RECEIPT"; echo change >strand.txt; g add strand.txt >/dev/null; g commit -q -m "unlanded change"; summary; exit 0 ;;
+  strand-noreceipt) echo change >strand.txt; g add strand.txt >/dev/null; g commit -q -m "unlanded change"; exit 0 ;;
   land)      : >"$LEADTIME_RECEIPT"; echo change >landed.txt; g add landed.txt >/dev/null; g commit -q -m "landed change"
              g push -q origin HEAD:main 2>/dev/null || exit 9; summary; exit 0 ;;
 esac
@@ -201,9 +222,10 @@ else
 fi
 
 c="$(new_case)"
-rc="$(run_runner "$c" LEADTIME_REPO="$c/seed/../not-a-repo")"
-if [ "$rc" = 2 ] && grep -q 'Fix:' "$c/runner.err"; then
-  ok "a repo that is not a git checkout exits 2 with Fix:"
+mkdir -p "$c/plain-dir"
+rc="$(run_runner "$c" LEADTIME_REPO="$c/plain-dir")"
+if [ "$rc" = 2 ] && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$c/plain-dir/ai-artifacts" ]; then
+  ok "an existing directory that is not a git checkout exits 2 with Fix: and no state"
 else
   bad "not a checkout" "rc=$rc err=$(cat "$c/runner.err")"
 fi
@@ -291,15 +313,16 @@ case "$lane_cwd" in
   "$c/repo/.git/leadtime-lanes/run-"*) ok "the session ran in its own lane under the git common dir ($lane_cwd)" ;;
   *) bad "session cwd" "cwd=$lane_cwd" ;;
 esac
-if [ "$(cat "$c/claude-fd8")" = closed ] && [ "$(cat "$c/claude-fd9")" = closed ]; then
-  ok "the session inherits neither the run lock (fd 9) nor the lane lock (fd 8)"
+if [ "$(cat "$c/claude-fd8")" = open ] && [ "$(cat "$c/claude-fd9")" = closed ]; then
+  ok "the session keeps the lane lock (fd 8) held and never inherits the run lock (fd 9)"
 else
   bad "lock fds" "fd8=$(cat "$c/claude-fd8") fd9=$(cat "$c/claude-fd9")"
 fi
 if [ "$(cat "$c/claude-mcp.mode")" = 600 ] \
    && [ "$(jq -c '.mcpServers | keys' "$c/claude-mcp.json")" = '["notion-personal"]' ] \
+   && grep -qx -- '--strict-mcp-config' "$c/claude-args" \
    && [ -z "$(find "$(lanes "$c")" -name '*.mcp.json' 2>/dev/null)" ]; then
-  ok "the --mcp-config is 0600, carries notion-personal only, and is removed after the run"
+  ok "the --mcp-config is 0600, carries notion-personal only, is strict, and is removed after the run"
 else
   bad "mcp config" "mode=$(cat "$c/claude-mcp.mode") keys=$(jq -c '.mcpServers | keys' "$c/claude-mcp.json")"
 fi
@@ -332,6 +355,25 @@ else
   bad "crash" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
 fi
 
+c="$(new_case)"; echo timeout >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 124 ] && [ "$(fails "$c")" = 1 ] && grep -q 'outcome=failed exit=124' "$(newest "$c" run)" \
+   && grep -q 'timeout' "$c/runner.err"; then
+  ok "a session timeout (124) is a counted failure and the Fix: names the timeout"
+else
+  bad "timeout" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"; echo noreceipt >"$c/mode"
+echo 1 >"$(mkdir -p "$(sd "$c")" && printf '%s' "$(sd "$c")")/consecutive-failures"
+rc="$(run_runner "$c")"
+if [ "$rc" = 0 ] && [ ! -e "$(sd "$c")/consecutive-failures" ] && [ ! -e "$(sd "$c")/consecutive-blocked" ] \
+   && [ -z "$(newest "$c" blocked)" ]; then
+  ok "a run that wrote its summary but skipped the receipt is ok, never BLOCKED (the summary proves the model ran)"
+else
+  bad "summary without receipt" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+
 # ---------------------------------------------------------------------------------
 case_ '9. failures, the wedge, and ONE alert per episode'
 
@@ -352,8 +394,9 @@ else
   bad "wedge" "rc=$r4 wedged=$(cat "$wedged" 2>/dev/null) sends=$(cat "$c/send.log")"
 fi
 r5="$(run_runner "$c")"
-if [ "$r5" = 75 ] && [ "$(sends "$c" leadtime-wedged)" = 1 ] && grep -q 'already sent' "$(newest "$c" wedged)"; then
-  ok "a later wedged tick in the same episode sends nothing more"
+if [ "$r5" = 75 ] && [ "$(sends "$c" leadtime-wedged)" = 1 ] && grep -q 'already sent' "$(newest "$c" wedged)" \
+   && [ "$(grep -c . "$c/telemetry-calls")" = 5 ] && grep -q '^prune=ok: pruned 2' "$(newest "$c" wedged)"; then
+  ok "a later wedged tick in the same episode sends nothing more; wedged ticks still prune and record it"
 else
   bad "wedge repeat" "rc=$r5 sends=$(sends "$c" leadtime-wedged)"
 fi
@@ -364,6 +407,19 @@ if [ "$r6" = 75 ] && [ "$(sends "$c" leadtime-wedged)" = 2 ]; then
   ok "after the re-arm (rm consecutive-failures), a new wedge alerts again"
 else
   bad "new episode" "rc=$r6 sends=$(sends "$c" leadtime-wedged)"
+fi
+
+# The alert must be deliverable by the real sender, not only the fake: the
+# real send-mail, into the pinned temp inbox.
+c="$(new_case)"; echo fail >"$c/mode"
+run_runner "$c" LEADTIME_FAIL_ESCALATE=1 LEADTIME_SEND_MAIL= >/dev/null
+rc="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=1 LEADTIME_SEND_MAIL=)"
+msg="$(find "$ALERTS" -maxdepth 1 -type f -name '*-leadtime-wedged.md' 2>/dev/null | head -n1)"
+if [ "$rc" = 75 ] && [ -n "$msg" ] && grep -q "$(newest "$c" wedged)" "$msg" \
+   && grep -q 'alert: harness-alerts ' "$(newest "$c" wedged)" && ! grep -q 'FAILED to send' "$(newest "$c" wedged)"; then
+  ok "the real send-mail delivers ONE -leadtime-wedged.md on harness-alerts, re: the .wedged record"
+else
+  bad "real send-mail" "rc=$rc msg=$msg err=$(cat "$c/runner.err")"
 fi
 
 # ---------------------------------------------------------------------------------
@@ -417,6 +473,13 @@ if [ "$rc" = 72 ] && [ "$(fails "$c")" = 1 ] && [ "$(lane_branches "$c")" = 1 ] 
 else
   bad "stranded" "rc=$rc fails=$(fails "$c") branches=$(lane_branches "$c") run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
+c="$(new_case)"; echo strand-noreceipt >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 72 ] && [ "$(fails "$c")" = 1 ] && [ "$(lane_branches "$c")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
+  ok "stranded commits with no receipt still exit 72 and count; never exit 0, never BLOCKED"
+else
+  bad "stranded no receipt" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
 
 # ---------------------------------------------------------------------------------
 case_ '12. dead lanes are reaped by their lock, never a live one'
@@ -453,6 +516,37 @@ else
   bad "corpse counted" "rc=$rc fails=$(fails "$c")"
 fi
 
+c="$(new_case)"; echo nosummary >"$c/mode"
+mkdir -p "$(lanes "$c")"
+git -C "$c/repo" worktree add -q -b leadtime/run-lockless "$(lanes "$c")/run-lockless" origin/main
+git -C "$c/repo" worktree add -q -b leadtime/run-workdead "$(lanes "$c")/run-workdead" origin/main
+echo work >"$(lanes "$c")/run-workdead/w.txt"
+git -C "$(lanes "$c")/run-workdead" add w.txt
+git "${G[@]}" -C "$(lanes "$c")/run-workdead" commit -q -m "dead run's work"
+: >"$(lanes "$c")/run-workdead.lock"
+rc="$(run_runner "$c")"
+if [ ! -e "$(lanes "$c")/run-lockless" ] && grep -q 'reaped lockless lane run-lockless' "$c/runner.err" \
+   && ! git -C "$c/repo" show-ref --verify --quiet refs/heads/leadtime/run-lockless; then
+  ok "a lane dir with no lock file is reaped (a crash between worktree add and the lock)"
+else
+  bad "lockless reap" "err=$(cat "$c/runner.err")"
+fi
+if [ ! -e "$(lanes "$c")/run-workdead" ] && git -C "$c/repo" show-ref --verify --quiet refs/heads/leadtime/run-workdead \
+   && grep -q 'kept STRANDED branch leadtime/run-workdead' "$c/runner.err" && [ "$rc" = 70 ] && [ "$(fails "$c")" = 3 ]; then
+  ok "a dead lane's unlanded commits keep their branch; both corpses and the tick are counted (3)"
+else
+  bad "dead lane with work" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"
+: >"$c/not-a-dir"
+rc="$(run_runner "$c" LEADTIME_LANES_DIR="$c/not-a-dir/lanes")"
+if [ "$rc" = 73 ] && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ] && grep -q 'Fix:' "$c/runner.err"; then
+  ok "a lane that cannot be created: exit 73, counted, no session"
+else
+  bad "lane create failure" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+
 # ---------------------------------------------------------------------------------
 case_ '13. the main checkout is fast-forwarded only to work on origin/main'
 
@@ -475,6 +569,16 @@ if [ "$rc" = 0 ] && grep -q '^ff=REFUSED (the main checkout is on refs/heads/els
   ok "a main checkout that is not on main is never moved; the .run and Fix: say so"
 else
   bad "ff off main" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"; echo land >"$c/mode"
+echo "someone's local file" >"$c/repo/landed.txt"
+rc="$(run_runner "$c")"
+if [ "$rc" = 0 ] && grep -q '^ff=REFUSED (see ' "$(newest "$c" run)" \
+   && [ "$(cat "$c/repo/landed.txt")" = "someone's local file" ] && grep -q 'Fix:.*never force' "$c/runner.err"; then
+  ok "a fast-forward git refuses (it would overwrite a local file) is reported, never forced; the file is untouched"
+else
+  bad "ff refused" "rc=$rc run=$(cat "$(newest "$c" run)" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 c="$(new_case)"

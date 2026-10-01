@@ -343,6 +343,9 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
   **Later (2026-09-27):** added by DND-983. A `-clustering-wedged.md` or
   `-clustering-blocked.md` message is handled like a `-shipwright-wedged.md`
   one (same section, *The clustering cron writer*).
+  **Later (2026-10-01):** added by DND-1479. A `-leadtime-wedged.md` or
+  `-leadtime-blocked.md` message is handled the same way (same section, *The
+  lead-time cron writer*).
 - **Sender filter (courtesy):** if `$ATHENA_ATTEND_OWNER_SLACK_ID` is set, *reply*
   only to messages whose sender is that id; *relay* anyone else's to the owner
   without answering them. The `user` field is forgeable by a local writer, so
@@ -489,6 +492,21 @@ message's `episode:` line. Relay to the owner: the record path, N and M,
 but an auth or account fault needs the owner. Ledger words:
 `clustering-blocked relayed`, `clustering-blocked-dm` (one DM per 24 hours) and
 `declined clustering-blocked-unverifiable`.
+
+**The lead-time cron writer: its wedge and blocked reports (DND-1479).**
+**Later (2026-10-01):** added by DND-1479, a labelled addition to this dated
+record. A message whose filename ends `-leadtime-wedged.md` or
+`-leadtime-blocked.md` comes from the lead-time improver cron
+(`scripts/athena-leadtime-run.sh`), once per wedge or BLOCKED episode. Handle
+it exactly as *The clustering cron writer* above, with these differences:
+- the records are `<tick>.wedged` and `<tick>.blocked` directly in
+  `~/dev/custom/ai-artifacts/lead-time/runs/`;
+- the re-arm command you compose for a wedge is `rm
+  ~/dev/custom/ai-artifacts/lead-time/consecutive-failures`;
+- the ledger words are `leadtime-wedged relayed`, `leadtime-wedged-dm`,
+  `declined leadtime-wedged-unverifiable`, `leadtime-blocked relayed`,
+  `leadtime-blocked-dm` and `declined leadtime-blocked-unverifiable`, with the
+  same one-DM-per-24-hours limit per writer.
 
 When the wake names `harness-alerts`, for each message `read-inbox
 harness-alerts` returned (it is now in
