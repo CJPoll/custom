@@ -186,14 +186,19 @@ Dir.mktmpdir do |tmp|
   check("b11 exit 137 is not a signal", r.termsig.nil? && r.exitstatus == 137, r.inspect)
 
   # b5 the hang: a leader that waits on a TERM-ignoring child holding stdout.
+  # The child names itself with $BASHPID: inside a ( ) subshell $$ is still
+  # the leader's pid, so the gone checks never looked at the child (DND-1594).
   pids = File.join(tmp, "pids")
-  script = "echo $$ > #{pids}; (trap '' TERM; echo $$ >> #{pids}; exec sleep 300) & wait"
+  script = "echo $$ > #{pids}; (trap '' TERM; echo $BASHPID >> #{pids}; exec sleep 300) & wait"
   r, secs = elapsed { BoundedCommand.run(["bash", "-c", script], timeout: 1) }
   check("b5 hang returns timed_out", r.timed_out && r.exitstatus.nil? && !r.success?, r.inspect)
   bound = 1 + BoundedCommand::KILL_GRACE_S + BoundedCommand::READER_GRACE_S + 2
   check("b5 returns within the bound plus grace (#{secs.round(1)}s <= #{bound}s)", secs <= bound)
   recorded = File.exist?(pids) ? File.read(pids).split.map(&:to_i) : []
   check("b5 recorded the leader and the child", recorded.size == 2, recorded.inspect)
+  # DND-1594: two copies of the leader's pid would make the gone checks below
+  # pass without ever looking at the TERM-ignoring child.
+  check("b5 the recorded child is not the leader", recorded.uniq.size == 2, recorded.inspect)
   survivors = recorded.reject { |p| check_gone("b5 no process of the group survives (TERM-ignoring child included): pid #{p}", p) }
   survivors.each { |p| Process.kill("KILL", p) rescue nil } # rubocop:disable Style/RescueModifier
 
