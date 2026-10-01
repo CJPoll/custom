@@ -74,7 +74,8 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
    ```
 
    On a first run (no cursor file), pass
-   `--since "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)"`. It reads the
+   `--since "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:00Z)"` (Notion stamps
+   edits to the minute). It reads the
    DND tickets edited since then (read only) and records `field_changed`
    feedback itself, for each Kind, Severity or Security edited away from a
    `jev` value on the ticket's last `Jev classification:` line. It prints
@@ -82,8 +83,8 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
    section:
 
    ```
-   - scan-tickets: tickets <lines> lines (no_provenance <n>, unparseable <n>, provenance_unread <n>); edited <e> (recorded <r>, replaced <p>, already_recorded <a>, refused <f>); unlinked <u>, filer_sourced <s>; since <since>
-   - scan-tickets: COULD NOT MEASURE (<first stderr line's class>, exit <n>); since kept
+   - scan-tickets: tickets <lines> lines (no_provenance <n>, unparseable <n>, provenance_unread <n>); edited <e> (recorded <r>, replaced <p>, already_recorded <a>, refused <f>, not_sent <s>); unlinked <u>, filer_sourced <s>; since <since>
+   - scan-tickets: COULD NOT MEASURE (<the JSON's reason>, exit <n>); since kept
    ```
 
    On exit 0 with `"complete": true`, write its `next_since` to
@@ -91,7 +92,13 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
    the next run reads the same window again, and the recorded file stops a
    second send. A `refused` edit is the server's answer (`not_found` for a
    call that is not the owner's or was pruned); name it in the journal,
-   never retry it. Never create or edit the recorded file by hand.
+   never retry it. A refusal as `invalid` is exit 4: the scan's labels no
+   longer match the question set, so file a ticket for the scan. Never
+   create or edit the recorded file by hand.
+
+   A filer who disagrees with a `jev` classification files its own value
+   and leaves the line as it is. This scan is what records that report
+   (athena:ticket-management → *Filing a ticket*).
 2. **Read new feedback** into a run-local file, never into the journal:
 
    ```

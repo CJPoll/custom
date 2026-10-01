@@ -204,6 +204,28 @@ check("a server that fails stops the sending: exit 3, the rest not_sent, no next
     out.include?("INCOMPLETE (SERVER FAILED)") && !out.include?("next_since")
 end
 
+rc, out, err = run(env3, "scan-tickets", "--since", SINCE, "--json")
+view = JSON.parse(out.lines.last.to_s)
+check("--json on an incomplete scan is still one line: complete false, the reason, no next_since", "rc #{rc}; out: #{out}") do
+  rc == 3 && out.lines.size == 1 && view["complete"] == false && view["next_since"].nil? && view["reason"] == "SERVER FAILED" &&
+    !view.key?("failure") && err.start_with?("SERVER FAILED")
+end
+
+invalid = REFUSE.merge(call(63) => { "status" => 422, "body" => { "error" => "invalid", "field" => "correction", "fix" => "Fix: use a label of the question" } })
+_log5, env5 = fake("invalid", "refuse" => invalid)
+rc, out, err = run(env5, "scan-tickets", "--since", SINCE)
+check("a correction refused as invalid (our labels are wrong) is exit 4 and incomplete; not_found stays a named answer", "rc #{rc}; out: #{out}; err: #{err}") do
+  rc == 4 && out.include?("recorded 1, replaced 0, already_recorded 0, refused 2, not_sent 0") && out.include?("  refused: DND-6 security invalid") &&
+    out.include?("INCOMPLETE (SERVER REFUSED)") && !out.include?("next_since") && err.include?("as invalid. Fix:")
+end
+
+_log6, env6 = fake("append")
+rc, out, err = run(env6, "scan-tickets", "--since", SINCE, "--recorded-file", File.join(DIR, "no-such-dir", "recorded.txt"))
+check("a record stored but not appended counts once (recorded), and the rest not_sent", "rc #{rc}; out: #{out}; err: #{err}") do
+  rc == 3 && out.include?("recorded 1, replaced 0, already_recorded 0, refused 0, not_sent 2") && err.include?("could not append to --recorded-file") &&
+    err.include?("Fix:")
+end
+
 env4 = env.merge("JUDGMENT_FEEDBACK_NOTION_API" => "http://127.0.0.1:1")
 rc, out, err = run(env4, "scan-tickets", "--since", SINCE)
 check("Notion unreachable is exit 3 COULD NOT READ NOTION with a Fix:, never an empty scan", "rc #{rc}; out: #{out}; err: #{err}") do

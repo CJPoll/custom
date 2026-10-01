@@ -110,24 +110,33 @@ USAGE = <<~EOF
                         already_recorded and not sent again (a second report
                         moves the row past the feedback reader's cursor, so it
                         would be read twice). Each new record is appended.
-             --json     one final JSON line instead of the lines below
-           Every ticket is counted once by reason:
+             --json     one JSON line instead of the lines below, with the
+                        same counts, "complete", "next_since" (null unless
+                        complete) and, when incomplete, "reason"
+           Rows with no DND id are counted (not_a_ticket). Every ticket is
+           counted once by reason:
              lines, no_provenance, unparseable, provenance_unread (its body
              could not be read)
            and every property of a ticket with a line once:
-             edited (then recorded, replaced, already_recorded or refused),
-             unchanged, filer_sourced, policy_sourced, unlinked (a line
-             filed before calls existed), no_call, not_accepted, no_label,
-             same_label
+             edited, unchanged, filer_sourced, policy_sourced, unlinked (a
+             line filed before calls existed), no_call, not_accepted,
+             no_label, same_label
+           and every edited one once by what sending it came to:
+             recorded, replaced, already_recorded, refused, not_sent (not
+             tried after the sending stopped)
            The tickets behind unlinked, no_call, not_accepted, no_label,
            unparseable, provenance_unread and refused are named. The last
            line is
              complete: next_since <time>
-           Save that as the next --since. A body that could not be read, or
-           a server that could not be reached, ends with
+           Save that as the next --since. A body that could not be read, a
+           server that could not be reached (exit 3), or a correction the
+           server refused as invalid (exit 4: the scan's labels are wrong)
+           ends with
              INCOMPLETE (<reason>): keep the old --since
-           and exit 3; the records it sent stand (the server keeps one per
-           call and reporter).
+           and the failure line on stderr. The records it sent stand (the
+           server keeps one per call and reporter). Any other refusal
+           (not_found, not_judged, eval_call) is the server's answer for
+           that call: named, and the scan is still complete.
            Environment (optional, tests): JUDGMENT_FEEDBACK_NOTION_API (a
            loopback URL), JUDGMENT_FEEDBACK_NOTION_PACE_S (seconds between
            Notion reads, default 0.4).
@@ -139,8 +148,9 @@ USAGE = <<~EOF
        "UNREADABLE SERVER ANSWER: ..." or (scan-tickets) "COULD NOT READ
        NOTION: ..."
     4  "SERVER REFUSED: HTTP <status> <error>[ (field <f>)]. Fix: <server's fix>"
-       (not_found, not_judged, eval_call, invalid). A refusal is a fact to
-       report, not something to work around.
+       (not_found, not_judged, eval_call, invalid), or (scan-tickets)
+       "SERVER REFUSED: <n> correction(s) as invalid. Fix: ...". A refusal
+       is a fact to report, not something to work around.
 
   The Athena server URL is the origin of the `athena` MCP entry in
   ~/.claude.json and its token is read from
@@ -318,7 +328,7 @@ module Manager
     sent = Scan.new(recorded, file).send_all(tally[:edits])
     view = Scan.view(since, rows.size, tickets.size, tally, sent, started)
     Scan.print(view, opts["--json"], out)
-    return Scan.incomplete(view, sent[:failure], out, err) unless view["complete"]
+    return Scan.incomplete(view, opts["--json"], out, err) unless view["complete"]
 
     0
   end
@@ -344,11 +354,15 @@ module Manager
       @file = file
       @counts = JFS::RECORD_OUTCOMES.to_h { |r| [r, 0] }.merge("not_sent" => 0)
       @refused = []
+      @invalid = 0
     end
 
     # send_all(edits) -> {counts:, refused:, failure:}. A refusal is the
     # server's answer for that call (counted, named); anything else that is
     # not a stored record stops the sending, and the rest count not_sent.
+    # A refusal as `invalid` means this scan's correction label is not one
+    # the question offers (our mapping is wrong), so it is a failure too,
+    # after the sending: the cursor must not move past those edits.
     def send_all(edits)
       failure = nil
       edits.each do |ref, property, call, correction|
@@ -356,10 +370,11 @@ module Manager
           @counts["not_sent"] += 1
           next
         end
+        @stored = false
         failure = send_one(ref, property, call, correction)
-        @counts["not_sent"] += 1 if failure
+        @counts["not_sent"] += 1 if failure && !@stored
       end
-      { counts: @counts, refused: @refused, failure: failure }
+      { counts: @counts, refused: @refused, failure: failure || invalid_failure }
     end
 
     def send_one(ref, property, call, correction)
@@ -377,6 +392,7 @@ module Manager
       return failure if failure
 
       @counts[JF.recorded_line(resp[:body]).start_with?("replaced") ? "replaced" : "recorded"] += 1
+      @stored = true
       @recorded << key
       Effects.append_line(@file, key) if @file
       nil
@@ -387,24 +403,39 @@ module Manager
     end
 
     def refuse(ref, property, line)
+      error = line[/\ASERVER REFUSED: HTTP \d+ ([a-z_]+)/, 1] || "refused"
       @counts["refused"] += 1
-      @refused << "#{ref} #{property} #{line[/\ASERVER REFUSED: HTTP \d+ ([a-z_]+)/, 1] || 'refused'}"
+      @invalid += 1 if error == "invalid"
+      @refused << "#{ref} #{property} #{error}"
       nil
+    end
+
+    def invalid_failure
+      return nil if @invalid.zero?
+
+      [4, "SERVER REFUSED: #{@invalid} correction(s) as invalid. Fix: the scan's labels (JudgmentFeedbackScan.label) no longer match " \
+          "the question set the call used (a new version?); update them, then re-run with the same --since"]
     end
 
     NAMED = %w[provenance_unread unparseable unlinked no_call not_accepted no_label].freeze
 
     def self.view(since, rows, tickets, tally, sent, started)
-      complete = sent[:failure].nil? && tally[:tickets]["provenance_unread"].zero?
-      { "complete" => complete, "since" => JFS.iso(since), "next_since" => complete ? JFS.iso(JFS.next_since(started)) : nil,
+      failure = sent[:failure] || unread_failure(tally[:tickets]["provenance_unread"])
+      { "complete" => failure.nil?, "since" => JFS.iso(since), "next_since" => failure ? nil : JFS.iso(JFS.next_since(started)),
         "rows" => rows, "not_a_ticket" => rows - tickets, "tickets" => tally[:tickets], "properties" => tally[:properties],
         "records" => sent[:counts], "named" => NAMED.to_h { |r| [r, tally[:refs].fetch(r, [])] }.reject { |_, v| v.empty? },
-        "refused" => sent[:refused] }
+        "refused" => sent[:refused], "failure" => failure }.tap { |v| v["reason"] = reason_of(failure[1]) if failure }
+    end
+
+    def self.unread_failure(unread)
+      return nil if unread.zero?
+
+      [3, "COULD NOT READ NOTION: #{unread} ticket bodies could not be read. Fix: re-run with the same --since; a body that keeps failing is named under provenance_unread"]
     end
 
     def self.print(view, json, out)
       if json
-        out.puts JSON.generate(view)
+        out.puts JSON.generate(view.except("failure"))
         return
       end
       line = ->(h) { h.map { |k, v| "#{k} #{v}" }.join(", ") }
@@ -418,12 +449,12 @@ module Manager
     end
 
     # incomplete -> the exit code, after saying why on stderr (with its Fix:)
-    # and on stdout (never a next_since).
-    def self.incomplete(view, failure, out, err)
-      unread = view["tickets"]["provenance_unread"]
-      code, why = failure || [3, "COULD NOT READ NOTION: #{unread} ticket bodies could not be read. Fix: re-run with the same --since; a body that keeps failing is named under provenance_unread"]
+    # and, without --json, on stdout (never a next_since). With --json the
+    # one line already says complete:false and the reason.
+    def self.incomplete(view, json, out, err)
+      code, why = view["failure"]
       err.puts why
-      out.puts "INCOMPLETE (#{reason_of(why)}): keep the old --since" unless view["complete"]
+      out.puts "INCOMPLETE (#{view['reason']}): keep the old --since" unless json
       code
     end
   end

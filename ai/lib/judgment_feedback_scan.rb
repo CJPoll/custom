@@ -136,8 +136,10 @@ module JudgmentFeedbackScan
   end
 
   # record_key(call, correction) -> the recorded-file line for one record.
+  # Lower case, as recorded_keys reads the file back: a call id written in
+  # upper case must still match its own entry, or it is re-sent every scan.
   def record_key(call, correction)
-    "#{call} #{correction.map { |q, l| "#{q}=#{l}" }.sort.join(',')}"
+    "#{call} #{correction.map { |q, l| "#{q}=#{l}" }.sort.join(',')}".downcase
   end
 
   # recorded_keys(text) -> Set of record keys; blank lines allowed, anything

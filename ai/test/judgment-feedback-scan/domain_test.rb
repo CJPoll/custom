@@ -162,6 +162,11 @@ check("the Notion filter is last_edited_time on or after since") do
   S.filter(Time.utc(2026, 10, 1, 7)) == { "timestamp" => "last_edited_time", "last_edited_time" => { "on_or_after" => "2026-10-01T07:00:00Z" } }
 end
 check("a record key is the call and its sorted correction") { S.record_key(CALL_K, { "kind" => "docs" }) == "#{CALL_K} kind=docs" }
+check("an upper-case call id matches its own recorded entry after the file round trip (never re-sent)") do
+  upper = "ABCDEF01-1111-4111-8111-11111111ABCD"
+  key = S.record_key(upper, { "kind" => "docs" })
+  key != "#{upper} kind=docs" && S.recorded_keys("#{key}\n").include?(key)
+end
 check("the recorded file reads its keys, blank lines allowed") do
   S.recorded_keys("#{CALL_K} kind=docs\n\n#{CALL_S} severity=2\n") == Set["#{CALL_K} kind=docs", "#{CALL_S} severity=2"]
 end

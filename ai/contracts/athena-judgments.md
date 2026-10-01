@@ -1095,8 +1095,8 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   source, then the server's provenance line verbatim, which the filer pastes
   into the ticket body. Since DND-1469 the line ends with `calls`, each
   property's answering call id or null (*Receiver feedback*); a line without
-  it was filed before, and every reader accepts both. A source is `jev` (an accepted judgment set, raised or
-  confirmed it), `filer`, or `policy` (the policy changed the filer's value
+  it was filed before, and every reader accepts both. A source is `jev` (an
+  accepted judgment set, raised or confirmed it), `filer`, or `policy` (the policy changed the filer's value
   with no judgment). A `filer` or `policy` value carries a reason: a reason
   from *The closed reason list*, or one of four that are not fallbacks
   (`shadow`, `policy_guard`, `vulnerability_floor`, `feature`). A `jev`

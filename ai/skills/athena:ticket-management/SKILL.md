@@ -378,9 +378,11 @@ Changing one needs a new question-set version there.
   then a `Jev classification:` line.
   - **Exit 0:** set the three properties exactly as printed, and paste the
     `Jev classification:` line into the body. The one exception: a value
-    with source `jev` that you judge wrong. File your own value instead, and
-    record the call from the line's `calls` per athena:judgment-feedback →
-    *Recording a wrong judgment*.
+    with source `jev` that you judge wrong. File your own value instead,
+    with the line unchanged. That is the report: the shipwright's
+    `scan-tickets` records it against the line's `calls`
+    (athena:judgment-feedback). Do not also record it by hand, because the
+    scan's record would replace yours.
   - **Exit 3:** the classification is unavailable. File with your own values,
     and write the first line (it ends
     `Fix: file the ticket as today; this is advisory.`) into the body instead.
