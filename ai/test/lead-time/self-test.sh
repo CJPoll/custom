@@ -81,7 +81,7 @@ accepted() { # accepted <label> <args...>
     bad "${label}" "code=${CODE} err=$(head -c 240 <<<"${ERR}")"
   fi
 }
-accepted "the shipwright's --since --slow --json shape still parses" --repo "${NOREPO}" --since "${SINCE}" --slow 90 --json
+accepted "the watch scan's --since --slow --json shape still parses" --repo "${NOREPO}" --since "${SINCE}" --slow 90 --json
 accepted "--repo --mr still parses" --repo "${NOREPO}" --mr 1188
 accepted "--repo --pr --json still parses" --repo "${NOREPO}" --pr 14 --json
 accepted "flag order does not matter" --json --slow 90 --since "${SINCE}" --repo "${NOREPO}"

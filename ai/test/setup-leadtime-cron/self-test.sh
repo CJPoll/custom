@@ -43,7 +43,8 @@ case "$1" in
   -l) if [ -n "${FAKE_CRONTAB_FAIL:-}" ]; then echo "${FAKE_CRONTAB_FAIL}" >&2; exit 1; fi
       [ -e "$FAKE_CRONTAB" ] || { echo "no crontab for $(id -un)" >&2; exit 1; }
       cat "$FAKE_CRONTAB" ;;
-  -)  cat >"$FAKE_CRONTAB" ;;
+  -)  if [ -n "${FAKE_CRONTAB_WRITE_FAIL:-}" ]; then cat >/dev/null; echo "${FAKE_CRONTAB_WRITE_FAIL}" >&2; exit 1; fi
+      cat >"$FAKE_CRONTAB" ;;
   *)  echo "fake crontab: unsupported $*" >&2; exit 9 ;;
 esac
 EOF
@@ -382,6 +383,123 @@ if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * 
   ok "a repo name that is not a plain file-name label is refused before any write"
 else
   bad "bad repo name" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — which lines are ours (review round)'
+
+ct="${TMP}/ct-ours"
+printf '#30 * * * * %s\n0 * * * * %s.bak\n' "$IRUN" "$IRUN" >"$ct"
+cp "$ct" "${TMP}/ct-ours.orig"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && [ "$(head -n 2 "$ct")" = "$(cat "${TMP}/ct-ours.orig")" ] && [ "$(tail -n 1 "$ct")" = "${ENTRY}" ] \
+   && [ "$(wc -l <"$ct")" = 3 ]; then
+  ok "--install keeps a commented-out entry and a longer runner path (<runner>.bak) byte for byte"
+else
+  bad "install keeps not-ours" "rc=$rc ct=$(cat -A "$ct")"
+fi
+rc="$(inst "$ct" -- --remove)"
+if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "$(cat "${TMP}/ct-ours.orig")" ]; then
+  ok "--remove keeps them too, and drops only the live entry"
+else
+  bad "remove keeps not-ours" "rc=$rc ct=$(cat -A "$ct")"
+fi
+rc="$(inst "$ct" -- --remove)"
+if [ "$rc" = 0 ] && grep -q 'nothing removed' "${TMP}/inst.out" && [ "$(cat "$ct")" = "$(cat "${TMP}/ct-ours.orig")" ]; then
+  ok "--remove with no entry says 'nothing removed'"
+else
+  bad "remove nothing" "rc=$rc $(out)"
+fi
+
+printf '30\t*\t*\t*\t*\t%s\n' "$IRUN" >"$ct"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 0 ]; then
+  ok "--check reads a tab-separated entry as installed"
+else
+  bad "tab check" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "${ENTRY}" ]; then
+  ok "--install replaces a tab-separated entry instead of adding a duplicate"
+else
+  bad "tab install" "rc=$rc ct=$(cat -A "$ct")"
+fi
+
+printf '0 * * * * /opt/other-job\n30 * * * * /gone/wt/scripts/athena-leadtime-run.sh\n' >"$ct"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && grep -qxF '30 * * * * /gone/wt/scripts/athena-leadtime-run.sh' "$ct" && grep -qxF "${ENTRY}" "$ct" \
+   && grep -q 'WARNING' "${TMP}/inst.err" && grep -qF '/gone/wt/' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "--install keeps a stale runner line but names it (WARNING, Fix:), never silently"
+else
+  bad "stale on install" "rc=$rc ct=$(cat "$ct") $(out)"
+fi
+
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" FAKE_CRONTAB_WRITE_FAIL='crontab: write refused' -- --install)"
+if [ "$rc" = 2 ] && grep -q 'could not write the crontab' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
+  ok "a failed crontab write is exit 2 with Fix:, never a silent exit"
+else
+  bad "write fail install" "rc=$rc $(out)"
+fi
+printf '%s\n' "${ENTRY}" >"$ct"
+rc="$(inst "$ct" FAKE_CRONTAB_WRITE_FAIL='crontab: write refused' -- --remove)"
+if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && [ "$(cat "$ct")" = "${ENTRY}" ]; then
+  ok "a failed crontab write on --remove is exit 2 with Fix:"
+else
+  bad "write fail remove" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" -- --check --install)"
+if [ "$rc" = 1 ] && grep -q 'cannot be combined' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "two different mode flags are refused, never 'last one wins'"
+else
+  bad "mode conflict" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — config and state faults (review round)'
+
+cp "$IR/ai/config/lead-time-repos.json" "${TMP}/config.aside"
+config_case() { # <label> <json>
+  shipwright_cursors
+  printf '0 * * * * /opt/other-job\n' >"$ct"
+  printf '%s\n' "$2" >"$IR/ai/config/lead-time-repos.json"
+  rc="$(inst "$ct" -- --install)"
+  if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] \
+     && [ ! -e "$LT" ] && ! grep -q 'null' "${TMP}/inst.out"; then
+    ok "config $1: refused (exit 2, Fix:) before any write; never a repo called 'null'"
+  else
+    bad "config $1" "rc=$rc $(out) files=$(find "$LT" -type f -printf '%f ' 2>/dev/null)"
+  fi
+}
+config_case 'repo with no name'  '{"repos":[{"mode":"watch"}]}'
+config_case 'repo with no mode'  '{"repos":[{"name":"gen_saas"}]}'
+config_case 'numeric name'       '{"repos":[{"name":5,"mode":"watch"}]}'
+config_case 'invalid JSON'       '{"repos":['
+config_case 'no .repos'          '{"window":20}'
+config_case 'empty .repos'       '{"repos":[]}'
+cp "${TMP}/config.aside" "$IR/ai/config/lead-time-repos.json"
+
+shipwright_cursors
+mkdir -p "$IR/ai-artifacts" && chmod 555 "$IR/ai-artifacts"
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" -- --install)"
+chmod 755 "$IR/ai-artifacts"
+if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && grep -q 'crontab was not changed' "${TMP}/inst.err" \
+   && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
+  ok "an unwritable state dir: exit 2, Fix:, and the crontab is not changed"
+else
+  bad "unwritable state" "rc=$rc $(out)"
+fi
+
+shipwright_cursors
+mkdir -p "$LT"; printf 'garbage\n' >"$LT/watch-cursor.gen_saas.txt"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && [ "$(cat "$LT/watch-cursor.gen_saas.txt")" = 'garbage' ] \
+   && grep -q 'WARNING' "${TMP}/inst.err" && grep -q 'watch-cursor.gen_saas.txt' "${TMP}/inst.err"; then
+  ok "a malformed existing cursor is kept (never overwritten) but named, never read as healthy"
+else
+  bad "malformed existing" "rc=$rc $(out)"
 fi
 
 if poisoned; then

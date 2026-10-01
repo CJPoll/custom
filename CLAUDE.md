@@ -520,9 +520,10 @@ across sessions — it is not a one-shot queue drain.
   athena-architect when a slow shape qualified. Superseded by the improver
   cron, its own runner at `:30`, because a lead-time run (measure, judge an
   experiment, land one change) does not fit inside the shipwright's run
-  (`ai/docs/lead-time-improver.md`, Decisions 1 to 3). Its watch scan is that
-  scan moved verbatim, and `setup-leadtime-cron` seeded its cursors from those
-  files.
+  (`ai/docs/lead-time-improver.md` → *Decisions*: *A second cron*, *The
+  session is an `athena-shipwright`*, *One loop owns lead time*). Its watch
+  scan is that scan moved verbatim, and `setup-leadtime-cron` seeded its
+  cursors from those files.
 
   **Later (2026-09-30, DND-1318):** the start was the earliest branch commit,
   "capturing nothing". Superseded by the owner's definition, lead time =
@@ -587,9 +588,12 @@ time. The design record is `ai/docs/lead-time-improver.md`.
 - **Fragility:** the same as the shipwright's. It is a per-user crontab line,
   so a crontab reset stops it silently.
 - **Install / restore / verify:** `scripts/setup-leadtime-cron` (`--install`,
-  `--dry-run`, `--check`, `--remove`, `--backup <file>`). It runs from the
-  main checkout only, and refuses `--install` and `--remove` from a linked
-  worktree. `--check` is red on a missing, duplicated or stale entry.
+  `--dry-run`, `--check`, `--remove`, `--backup <file>`). The entry always
+  names the main checkout's runner, and `--install` and `--remove` refuse to
+  run from a linked worktree. `--check` is red on a missing, duplicated or
+  stale entry. The admiral that lands a change to it runs `--backup`,
+  `--install` and `--check` in the main checkout right after the
+  fast-forward, so there is no hour with no lead-time loop.
   `--install` seeds each missing cursor and never overwrites one: a watch
   repo's `watch-cursor.<repo>.txt` from the shipwright's old cursor file, and
   an improve repo's `cursor.<repo>.txt` at 14 days back. Who may run it:

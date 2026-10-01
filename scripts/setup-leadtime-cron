@@ -20,6 +20,12 @@
 # Schedule: default "30 * * * *", hourly at :30, half an hour off the
 # shipwright's ":00" so the two hourly loops never start together.
 #
+# Which lines are ours: an uncommented line with a whitespace-separated field
+# that IS the main checkout's runner path. A commented line, or a longer path
+# such as <runner>.bak, is not ours and is kept. A line running some OTHER
+# .../scripts/athena-leadtime-run.sh (a removed worktree's copy) is STALE: it
+# is kept, named in a warning, and keeps --check red until deleted by hand.
+#
 # Cursor seeding (--install only; --dry-run prints the plan). Before the entry
 # is written, each repo in ai/config/lead-time-repos.json gets its first
 # cursor in <main checkout>/ai-artifacts/lead-time, unless one is already
@@ -38,16 +44,16 @@
 #   LEADTIME_NOW      epoch seconds to treat as now, for the improve cursor
 #
 # Exit codes: 0 ok · 1 entry missing, duplicated or stale (--check), or a usage
-# error · 2 a prerequisite is missing, the crontab could not be read, or a
-# cursor could not be written · 3 refused: --install or --remove run from a
-# linked worktree
+# error · 2 a prerequisite is missing, the crontab could not be read or
+# written, or a cursor could not be written · 3 refused: --install or --remove
+# run from a linked worktree
 
 set -euo pipefail
 
 ME="setup-leadtime-cron"
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 SCHEDULE="30 * * * *"
-MODE="install"; DRY_RUN=0; BACKUP_FILE=""
+MODE="install"; MODE_FLAG=""; DRY_RUN=0; BACKUP_FILE=""
 CRONTAB="${LEADTIME_CRONTAB:-crontab}"
 BACKFILL_DAYS=14
 
@@ -57,16 +63,22 @@ die() { # <exit> <message> <fix>
   echo "  Fix: $3" >&2
   exit "$1"
 }
+set_mode() { # <mode> <flag>: one mode per run; a second, different one is refused
+  if [ -n "${MODE_FLAG}" ] && [ "${MODE}" != "$1" ]; then
+    die 1 "${MODE_FLAG} and $2 cannot be combined" "pass one of --install, --check, --remove or --backup."
+  fi
+  MODE="$1"; MODE_FLAG="$2"
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --install) MODE="install" ;;
+    --install) set_mode install --install ;;
     --schedule) shift; [ $# -gt 0 ] || die 1 "--schedule needs a value" 'pass five cron fields, e.g. --schedule "30 * * * *"'; SCHEDULE="$1" ;;
     --schedule=*) SCHEDULE="${1#*=}" ;;
-    --remove)  MODE="remove" ;;
-    --check)   MODE="check" ;;
-    --backup)  shift; [ $# -gt 0 ] || die 1 "--backup needs a file path" "pass a path outside git, e.g. --backup ai-artifacts/lead-time/crontab.before"; MODE="backup"; BACKUP_FILE="$1" ;;
-    --backup=*) MODE="backup"; BACKUP_FILE="${1#*=}" ;;
+    --remove)  set_mode remove --remove ;;
+    --check)   set_mode check --check ;;
+    --backup)  shift; [ $# -gt 0 ] || die 1 "--backup needs a file path" "pass a path outside git, e.g. --backup ai-artifacts/lead-time/crontab.before"; set_mode backup --backup; BACKUP_FILE="$1" ;;
+    --backup=*) set_mode backup --backup; BACKUP_FILE="${1#*=}" ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die 1 "unknown argument: $1" "run with --help for the accepted flags." ;;
@@ -114,36 +126,39 @@ read_crontab() {
   printf '%s\n' "${out}"
 }
 
-# runner_lines <path> — uncommented lines whose command is exactly <path>
-# (followed by the end of the line or whitespace, so a longer path never
-# matches).
-runner_lines() {
-  grep -vE '^[[:space:]]*#' | awk -v r=" $1" '{
-    i = index($0, r); if (!i) next
-    c = substr($0, i + length(r), 1)
-    if (c == "" || c == " " || c == "\t") print
-  }' || true
+# lines_of <class> — the crontab lines on stdin of one class, printed byte for
+# byte (see "Which lines are ours" above). ONE classifier serves --check,
+# --install and --remove, so what is counted as ours is exactly what is
+# replaced or removed. Classes: ours, stale, notours (stale + everything else).
+lines_of() {
+  awk -v r="${RUNNER}" -v want="$1" '{
+    cls = "other"
+    if ($0 !~ /^[[:space:]]*#/) {
+      for (i = 1; i <= NF; i++) {
+        if ($i == r) { cls = "ours"; break }
+        if ($i ~ /\/scripts\/athena-leadtime-run\.sh$/) cls = "stale"
+      }
+    }
+    if (cls == want || (want == "notours" && cls != "ours")) print
+  }'
 }
-# stale_lines — uncommented lines that run SOME athena-leadtime-run.sh other
-# than ours (a removed worktree's copy, another checkout).
-stale_lines() {
-  grep -vE '^[[:space:]]*#' | grep -E '/scripts/athena-leadtime-run\.sh([[:space:]]|$)' \
-    | grep -vF -- " ${RUNNER}" || true
-}
+count_lines() { if [ -z "$1" ]; then echo 0; else printf '%s\n' "$1" | wc -l | tr -d ' '; fi; }
 
 put_crontab() {
   if [ "${DRY_RUN}" -eq 1 ]; then
     echo "  [dry-run] the crontab would become:"; printf '%s\n' "$1" | sed 's/^/    /'
     return 0
   fi
-  printf '%s\n' "$1" | "${CRONTAB}" -
+  printf '%s\n' "$1" | "${CRONTAB}" - \
+    || die 2 "could not write the crontab (${CRONTAB} - failed)" \
+      "fix the crontab spool (scripts/setup-shipwright-cron repairs it), then re-run; it is idempotent, and any cursor it seeded is kept."
 }
 
 if [ "${MODE}" = "check" ]; then
   current="$(read_crontab)"
-  live="$(printf '%s\n' "${current}" | runner_lines "${RUNNER}")"
-  stale="$(printf '%s\n' "${current}" | stale_lines)"
-  n=0; [ -z "${live}" ] || n="$(printf '%s\n' "${live}" | grep -c .)"
+  live="$(printf '%s\n' "${current}" | lines_of ours)"
+  stale="$(printf '%s\n' "${current}" | lines_of stale)"
+  n="$(count_lines "${live}")"
   if [ "${n}" -eq 1 ] && [ -z "${stale}" ] && [ -x "${RUNNER}" ]; then
     echo "OK: the lead-time improver cron entry is installed:"
     printf '%s\n' "${live}" | sed 's/^/  /'
@@ -170,7 +185,7 @@ fi
 
 if [ "${MODE}" = "backup" ]; then
   current="$(read_crontab)"
-  ( umask 077; printf '%s\n' "${current}" >"${BACKUP_FILE}" ) \
+  ( umask 077; printf '%s\n' "${current}" >"${BACKUP_FILE}" && chmod 600 -- "${BACKUP_FILE}" ) \
     || die 2 "could not write ${BACKUP_FILE}" "pick a writable path outside git."
   echo "Backed up the current crontab to ${BACKUP_FILE}"
   exit 0
@@ -182,13 +197,26 @@ if [ "${IN_WORKTREE}" -eq 1 ] && [ "${DRY_RUN}" -eq 0 ]; then
 fi
 
 current="$(read_crontab)"
-kept="$(printf '%s\n' "${current}" | grep -vF -- " ${RUNNER}" || true)"
+kept="$(printf '%s\n' "${current}" | lines_of notours)"
+ours="$(printf '%s\n' "${current}" | lines_of ours)"
+stale="$(printf '%s\n' "${current}" | lines_of stale)"
+warn_stale() { # stale lines are kept (not this checkout's), but never silently
+  [ -n "${stale}" ] || return 0
+  echo "${ME}: WARNING: the crontab also runs a lead-time runner that is not ${RUNNER}; left as is:" >&2
+  printf '%s\n' "${stale}" | sed 's/^/  /' >&2
+  echo "  Fix: delete those lines by hand (crontab -e), or each tick starts a second run; --check stays red (STALE) until then." >&2
+}
 
 # --remove works whether or not the runner exists: a missing runner is when
 # its entry most needs removing.
 if [ "${MODE}" = "remove" ]; then
-  put_crontab "${kept}"
-  echo "Removed the lead-time improver cron entry."
+  if [ -z "${ours}" ]; then
+    echo "No lead-time improver cron entry runs ${RUNNER}; nothing removed."
+  else
+    put_crontab "${kept}"
+    echo "Removed the lead-time improver cron entry ($(count_lines "${ours}") line(s))."
+  fi
+  warn_stale
   exit 0
 fi
 
@@ -207,12 +235,23 @@ case "${NOW}" in
 esac
 
 # The config's repos as "<name><TAB><mode>". A name becomes a file name, so it
-# must be a plain label; anything else is refused before any write.
-repos="$(jq -r '.repos[] | "\(.name)\t\(.mode)"' "${CONFIG}" 2>/dev/null)" \
-  || die 2 "${CONFIG} is not valid JSON with a .repos list" "fix the config on main (athena:lead-time-improve -> Setup), then re-run."
-[ -n "${repos}" ] || die 2 "${CONFIG} lists no repos" "fix the config on main, then re-run."
+# must be a plain label; a missing or non-string field is an error (jq would
+# otherwise render it as the label "null"). Refused before any write.
+jq_err="$(mktemp)"
+repos="$(jq -r '
+  if (.repos | type) != "array" then error("no .repos list") else . end
+  | .repos[]
+  | if (.name | type) != "string" or (.mode | type) != "string"
+    then error("a repo entry has no string name or mode") else "\(.name)\t\(.mode)" end
+' "${CONFIG}" 2>"${jq_err}")" || {
+  why="$(tr '\n' ' ' <"${jq_err}")"; rm -f "${jq_err}"
+  die 2 "${CONFIG} is not a valid repo config (${why})" "fix the config on main (athena:lead-time-improve -> Setup), then re-run. Nothing was written."
+}
+rm -f "${jq_err}"
+[ -n "${repos}" ] || die 2 "${CONFIG} lists no repos" "fix the config on main, then re-run. Nothing was written."
+LABEL_RE='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
 while IFS="$(printf '\t')" read -r name mode; do
-  printf '%s' "${name}" | grep -qE '^[A-Za-z0-9_][A-Za-z0-9_.-]*$' \
+  [[ "${name}" =~ ${LABEL_RE} ]] \
     || die 2 "${CONFIG} has a repo name '${name}' that is not a plain file-name label" "fix the config on main, then re-run. Nothing was written."
   case "${mode}" in
     improve|watch) ;;
@@ -220,16 +259,22 @@ while IFS="$(printf '\t')" read -r name mode; do
   esac
 done <<<"${repos}"
 
-is_rfc3339() { # <text> — an RFC 3339 time GNU date can read
-  printf '%s' "$1" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$' \
-    && date -u -d "$1" +%s >/dev/null 2>&1
+RFC3339_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+is_rfc3339() { # <text>: an RFC 3339 time GNU date can read
+  [[ "$1" =~ ${RFC3339_RE} ]] && date -u -d "$1" +%s >/dev/null 2>&1
+}
+keep_cursor() { # <file>: an existing cursor is never overwritten, but a bad one is named
+  local v; v="$(head -n1 -- "$1" | tr -d '[:space:]')"
+  if is_rfc3339 "${v}"; then echo "  kept $(basename -- "$1") = ${v}"; return 0; fi
+  echo "${ME}: WARNING: kept $1, but it holds '${v}', not an RFC 3339 time; its reader will refuse it." >&2
+  echo "  Fix: write an RFC 3339 time to it by hand, or delete it and re-run --install to seed it." >&2
 }
 write_cursor() { # <file> <value>
   if [ "${DRY_RUN}" -eq 1 ]; then echo "  [dry-run] would seed $(basename -- "$1") = $2"; return 0; fi
-  mkdir -p -- "${LT_STATE}" \
+  mkdir -p -- "${LT_STATE}" 2>/dev/null \
     || die 2 "could not create ${LT_STATE}" "make ${LT_STATE} writable, then re-run. The crontab was not changed."
   local tmp="$1.tmp.$$"
-  { printf '%s\n' "$2" >"${tmp}" && mv -f -- "${tmp}" "$1"; } \
+  { printf '%s\n' "$2" >"${tmp}" && mv -f -- "${tmp}" "$1"; } 2>/dev/null \
     || { rm -f -- "${tmp}"; die 2 "could not write $1" "make ${LT_STATE} writable, then re-run. The crontab was not changed."; }
   echo "  seeded $(basename -- "$1") = $2"
 }
@@ -239,12 +284,12 @@ improve_since="$(date -u -d "@$((NOW - BACKFILL_DAYS * 86400))" +%Y-%m-%dT%H:%M:
 while IFS="$(printf '\t')" read -r name mode; do
   if [ "${mode}" = "improve" ]; then
     dst="${LT_STATE}/cursor.${name}.txt"
-    if [ -e "${dst}" ]; then echo "  kept $(basename -- "${dst}") = $(head -n1 "${dst}")"; continue; fi
+    if [ -e "${dst}" ]; then keep_cursor "${dst}"; continue; fi
     write_cursor "${dst}" "${improve_since}"
     continue
   fi
   dst="${LT_STATE}/watch-cursor.${name}.txt"
-  if [ -e "${dst}" ]; then echo "  kept $(basename -- "${dst}") = $(head -n1 "${dst}")"; continue; fi
+  if [ -e "${dst}" ]; then keep_cursor "${dst}"; continue; fi
   src="${SW_STATE}/lead-cursor.${name}.txt"
   if [ ! -e "${src}" ]; then
     echo "  ${name}: no shipwright cursor (${src}); watch-cursor.${name}.txt left absent, so the first watch run scans its default 48h window."
@@ -263,6 +308,7 @@ line="${SCHEDULE} ${RUNNER}"
 if [ -n "${kept}" ]; then new="$(printf '%s\n%s' "${kept}" "${line}")"; else new="${line}"; fi
 put_crontab "${new}"
 if [ "${DRY_RUN}" -eq 1 ]; then echo "[dry-run] would install: ${line}"; else echo "Installed: ${line}"; fi
+warn_stale
 echo "Times are cron's local time: machine local time is $(date +%Z) (UTC$(date +%z))."
 echo "Verify: scripts/setup-leadtime-cron --check"
 echo "Smoke:  ${RUNNER} --dry-run"

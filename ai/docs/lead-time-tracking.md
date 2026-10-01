@@ -318,15 +318,21 @@ The **lead-time improver cron** (`~/dev/custom/CLAUDE.md` → *Lead-time
 improver cron*) runs this at `--slow 90` over each `watch` repo in
 `ai/config/lead-time-repos.json`, newer than that repo's own
 `watch-cursor.<repo>.txt`. The `improve` repo (custom) is measured per phase
-instead, by `ai/bin/lead-time-phases`. Details live in `athena:lead-time-improve`
-(*For each `watch` repo*).
+instead, by `ai/bin/lead-time-phases`. When a slow shape recurs (≥2 tickets
+sharing a cause) or one pipeline stage dominates the `tail`, it spawns an
+**athena-architect** to design a **safety-preserving** improvement. A harness
+change to `~/dev/custom` lands only as that run's one action; otherwise it is
+filed as a DND ticket on the improvement epic. Product-repo changes are filed
+as Notion tickets for the fleet (it never touches a product repo). Details
+live in `athena:lead-time-improve` (*For each `watch` repo*).
 
 **Later (2026-10-01, DND-1480):** the athena-shipwright cron ran this scan,
 over every repo the fleet ships from, from `lead-cursor.<repo>.txt`, with its
 details in the shipwright agent definition (*The lead-time feedback loop*).
 Superseded: that section moved into the improver's skill, and the installer
-seeded each `watch-cursor.<repo>.txt` from the old file. The paragraph below
-describes the scan, whichever loop runs it.
+seeded each `watch-cursor.<repo>.txt` from the old file. The shipwright also
+applied every harness change its architect proposed; the improver lands at
+most one per run.
 
 **Later (2026-09-21):** the cursor was a single `lead-cursor.txt` shared by every
 repo, advanced to the newest merge scanned anywhere. Superseded by one cursor per
@@ -338,11 +344,7 @@ journal entries advanced the shared cursor past windows those two repos were
 never measured over. Making the probe failure *loud* (the `SCAN INCOMPLETE`
 refusal, added 2026-09-21) fixed the reporting half but not this one — the loop
 still announced it had not measured while discarding the window it would have
-needed to measure later. When a slow shape recurs (≥2 tickets sharing a cause) or one pipeline stage
-dominates the `tail`, it spawns an **athena-architect** to design a
-**safety-preserving** improvement, then: applies harness changes to `~/dev/custom`
-itself, and files product-repo pipeline/harness changes as Notion tickets for the
-fleet (it never touches a product repo).
+needed to measure later.
 
 **The hard constraint on all of this: never remove or weaken a safety check**
 (tests, linters, type checks, scanners, coverage/mutation gates, deployment
