@@ -117,10 +117,23 @@ Renaming or removing an event that has landed changes what readers find. Do it
 in the same change as every reader of it.
 
 The registry is seeded with the events DND-1474, DND-1475 and DND-1476 name,
-with the attrs their requirements list. Owed by those tickets, not done here:
-- a check that every emitter's events are registered (the design record's
-  *Telemetry* asks for one); until it exists, an emitter's own tests are the
-  only guard, and an unregistered event shows only as `event_unregistered`;
+with the attrs their requirements list.
+
+`ai/bin/check-telemetry-registry` (a harness-gate check) fails any
+first-party emitter whose event is not registered, or whose `telemetry-emit`
+call passes an unregistered `--attr`. It reads an event only when it is
+written as a literal: `AthenaTelemetry.emit("<event>", …)`, or
+`…/telemetry-emit --event <event>` on one logical line (backslash
+continuations are joined). An emitter it cannot read fails too. Its header
+names what it does not see: the attrs of an in-process Ruby call, which each
+emitter's own tests cover (*Adding an event* step 4), and a second CLI call
+made through a variable in a file that also has a readable one.
+
+**Later (2026-10-01, DND-1474):** the paragraph above replaces a bullet that
+listed the registration check as owed by the emitter tickets, with an
+emitter's own tests the only guard until then. DND-1474 built the check.
+
+Still owed, not done here:
 - the design record's `slot_wait_s` on `harness_gate.run` and slot wait on
   `critic.round`, which their requirements dropped. An emitter ticket that
   wants them adds them here.

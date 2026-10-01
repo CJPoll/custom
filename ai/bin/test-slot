@@ -1379,6 +1379,29 @@ check_parent() {
   orphan_exit "its parent pid can no longer be read (/proc/self/stat), so its caller cannot be confirmed alive"
 }
 
+# emit_wait OUTCOME WAITED_MS — one test_slot.wait telemetry event (DND-1474):
+# at = the wait start, duration_s = the queue wait, through the one writer's
+# CLI (ai/contracts/athena-telemetry.md -> The CLI). It runs after the slot is
+# acquired or the wait timed out and BEFORE CMD, so CMD's own time is never
+# counted. Fails open and bounded: `timeout 2`, stdin from /dev/null, stdout
+# dropped, its status ignored; of its stderr only the writer's one
+# `athena-telemetry:` line reaches ours, so test-slot's exit code and output
+# are what they were without it. A nested (re-entrant) run waits for nothing
+# and emits nothing: the outer run's wait is the one recorded. The run's
+# --label is NOT emitted: it is caller free text (a work ticket id, or
+# pick_label's tree and command names), which the contract's Privacy keeps out
+# of attrs. The event's unit already names the work.
+emit_wait() {
+  local bin at err
+  bin=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")" 2>/dev/null) || return 0
+  at=$(date -u -d "@$((START_MS / 1000)).$(printf '%03d' $((START_MS % 1000)))" '+%Y-%m-%dT%H:%M:%S.%3NZ' 2>/dev/null) || return 0
+  err=$(timeout 2 "$bin/telemetry-emit" --event test_slot.wait --at "$at" \
+    --duration "$(($2 / 1000)).$(printf '%03d' $(($2 % 1000)))" --attr "pool=$POOL_KIND" \
+    --attr "weight=$WEIGHT" --attr "outcome=$1" 2>&1 >/dev/null </dev/null)
+  [[ $err == athena-telemetry:* ]] && printf '%s\n' "${err%%$'\n'*}" >&2
+  return 0
+}
+
 timeout_exit() {
   local waited_ms=$(($(now_ms) - START_MS)) lines
   lines=$(holder_lines)
@@ -1390,6 +1413,7 @@ timeout_exit() {
     printf '  If a holder above is wedged, stop that process; otherwise re-run later or pass a longer --wait-timeout. Never bypass the pool.\n'
   } >&2
   append_event timeout "" "$waited_ms" "" ""
+  emit_wait timeout "$waited_ms"
   write_outcome timeout
   unregister_waiter
   exit "$EXIT_TIMEOUT"
@@ -1931,6 +1955,7 @@ main() {
 
   local waited_ms=$(($(now_ms) - START_MS)) ran_start
   append_event acquired "$SLOT" "$waited_ms" "" ""
+  emit_wait ran "$waited_ms"
   if ((ANNOUNCED)); then
     if ((EXCLUSIVE)); then
       say "all $N units acquired (exclusive) after $(fmt_ms "$waited_ms")s"

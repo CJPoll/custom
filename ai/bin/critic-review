@@ -69,6 +69,13 @@ require "time"
 AI_DIR = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "critic_prompt")
 require File.join(AI_DIR, "lib", "critic_carry")
+# The telemetry writer (DND-1474, see emit_critic_round). It fails open, and so
+# does loading it: a writer that cannot load leaves the critic as it was.
+begin
+  require File.join(AI_DIR, "lib", "athena_telemetry")
+rescue ScriptError, StandardError
+  nil
+end
 
 CRITIC = "athena-diff-critic"
 
@@ -313,16 +320,16 @@ def write_verdict(sha, base, action, findings, dirty, keys: nil, carried: nil, e
   path = File.join(dir, "#{sha}.json")
   key_fields = CriticCarry::HEAD_KEYS.to_h { |k| [k, keys && CriticCarry.key_ok?(keys[k]) ? keys[k] : nil] }
   now = Time.now.utc
-  body = JSON.generate(
+  receipt =
     { "schema" => VERDICT_SCHEMA, "tool" => "critic-review", "sha" => sha,
       "base" => base.to_s, "verdict" => action, "findings" => findings,
       "dirty" => dirty, "at" => now.iso8601,
       "started_at" => started_at&.utc&.iso8601,
       "duration_s" => started_at && (now - started_at).round(3) }
-      .merge(key_fields)
-      .merge("carried_from" => carried&.fetch(:root), "carried_receipt" => carried&.fetch(:receipt))
-      .merge("upstream_range" => interaction&.fetch(:range), "interaction" => interaction&.fetch(:verdict))
-  )
+    .merge(key_fields)
+    .merge("carried_from" => carried&.fetch(:root), "carried_receipt" => carried&.fetch(:receipt))
+    .merge("upstream_range" => interaction&.fetch(:range), "interaction" => interaction&.fetch(:verdict))
+  body = JSON.generate(receipt)
   if exclusive
     tmp = File.join(dir, ".#{sha}.json.tmp.#{Process.pid}")
     begin
@@ -336,12 +343,37 @@ def write_verdict(sha, base, action, findings, dirty, keys: nil, carried: nil, e
       FileUtils.rm_f(tmp)
     end
     retire_report(dir, sha)
+    emit_critic_round(receipt)
     return path
   end
   File.write(path, body)
   FileUtils.rm_f(File.join(dir, "#{sha}.running"))
   retire_report(dir, sha)
+  emit_critic_round(receipt)
   path
+end
+
+# One critic.round telemetry event per receipt written (DND-1474), so a
+# round's timing outlives the worktree whose $GIT_DIR holds the receipt.
+# Every value comes from the receipt itself, never recomputed: at =
+# started_at, duration_s = duration_s, head = the judged sha. A receipt with no
+# judge run (a carried PASS with nothing upstream) has no started_at: the event
+# is then a point event at the receipt's `at`. Called only after the receipt
+# write succeeded. Fails open: the writer never raises, and anything else here
+# is swallowed, so the verdict, the exit code and the output never change.
+def emit_critic_round(receipt)
+  return unless defined?(AthenaTelemetry)
+
+  started = receipt["started_at"] && (Time.iso8601(receipt["started_at"]) rescue nil)
+  AthenaTelemetry.emit("critic.round", at: started || Time.iso8601(receipt["at"]),
+                                       duration_s: started ? receipt["duration_s"] : nil, head: receipt["sha"],
+                                       attrs: { "verdict" => receipt["verdict"].to_s,
+                                                "findings" => Array(receipt["findings"]).size,
+                                                "carried" => !receipt["carried_from"].nil?,
+                                                "dirty" => receipt["dirty"] == true })
+  nil
+rescue StandardError
+  nil
 end
 
 # A new receipt retires the previous run's report for the same SHA (DND-907).
@@ -2591,11 +2623,22 @@ end
 
 def run_self_test
   SELF_TEST_FAILED_CASES.clear
-  ok = with_hermetic_git_config do
-    # Every sub-suite runs, so one failing suite never hides another's failures.
-    %w[stub carry_domain carry cross_checkout core receipt].map do |suite|
-      st_suite(suite) { send("run_#{suite}_self_test") }
-    end.all?
+  # DND-1474: every receipt the suite writes emits a critic.round. Those go to
+  # a temp store, never the machine's.
+  require "tmpdir"
+  prev_tel = ENV["ATHENA_TELEMETRY_DIR"]
+  tel_dir = Dir.mktmpdir("critic-review-selftest-telemetry-")
+  ENV["ATHENA_TELEMETRY_DIR"] = File.join(tel_dir, "store")
+  ok = begin
+    with_hermetic_git_config do
+      # Every sub-suite runs, so one failing suite never hides another's failures.
+      %w[stub carry_domain carry cross_checkout core receipt telemetry].map do |suite|
+        st_suite(suite) { send("run_#{suite}_self_test") }
+      end.all?
+    end
+  ensure
+    prev_tel.nil? ? ENV.delete("ATHENA_TELEMETRY_DIR") : ENV["ATHENA_TELEMETRY_DIR"] = prev_tel
+    FileUtils.rm_rf(tel_dir)
   end
   if ok && SELF_TEST_FAILED_CASES.empty?
     puts "critic-review: self-test OK"
@@ -2607,6 +2650,128 @@ def run_self_test
     warn "  Fix: a case that fails in only one environment (tool-sandbox, CI, a fresh HOME) relies on host state: build that state in the case's own fixture. The self-test already runs with no global or system git config; never add a skip for the environment."
     1
   end
+end
+
+# The critic.round telemetry (DND-1474), in a throwaway repo on branch
+# dnd-9002-x with the stub judge, each case against its own temp store:
+#   T1 a PASS emits one critic.round: verdict pass, findings 0, carried false,
+#      dirty false; at = the receipt's started_at, duration_s = its
+#      duration_s, head = the judged sha, unit DND-9002; no write failure;
+#   T2 a BLOCK emits verdict block and findings = the receipt's count;
+#   T3 a carried PASS emits carried true, a point event at the receipt's `at`;
+#      a refused carried write (the receipt exists) emits nothing;
+#   T4 an unwritable store: the receipt is still written, and the exit code,
+#      stdout and stderr (apart from the writer's one line) equal a run with a
+#      writable store.
+def run_telemetry_self_test
+  require "tmpdir"
+  return st_check("telemetry (T0) ai/lib/athena_telemetry.rb loads", false) unless defined?(AthenaTelemetry)
+
+  ok = true
+  c = ->(name, cond) { ok = st_check("telemetry #{name}", cond) && ok }
+  prev = %w[ATHENA_TELEMETRY_DIR CRITIC_REVIEW_STUB].to_h { |k| [k, ENV[k]] }
+  Dir.mktmpdir("critic-review-telemetry-") do |d|
+    clean = File.join(d, "clean")
+    File.write(clean, "looks good\nFINDINGS: none\n")
+    two = File.join(d, "two")
+    File.write(two, "- [correctness] a.rb:1 — x\n- [convention] b.rb:2 — y\nFINDINGS: correctness, convention\n")
+    repo = File.join(d, "repo")
+    FileUtils.mkdir_p(repo)
+    Dir.chdir(repo) do
+      sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
+      sh.call("git", "init", "-q", "-b", "main", ".")
+      sh.call("git", "config", "user.email", "t@example.invalid")
+      sh.call("git", "config", "user.name", "t")
+      File.write("a.txt", "one\n")
+      sh.call("git", "add", "-A")
+      sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qm", "one")
+      sh.call("git", "checkout", "-qb", "dnd-9002-x")
+      File.write("a.txt", "two\n")
+      sh.call("git", "add", "-A")
+      sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qm", "two")
+      sha = head_sha
+      receipt_path = File.join(verdict_dir, "#{sha}.json")
+      rounds = lambda do |store|
+        r = AthenaTelemetry.read(env: { "ATHENA_TELEMETRY_DIR" => store })
+        [r.events.select { |e| e["event"] == "critic.round" }, r.failures]
+      end
+      judge = lambda do |stub, store|
+        FileUtils.rm_f(receipt_path)
+        AthenaTelemetry.reset_process_state!
+        ENV["ATHENA_TELEMETRY_DIR"] = store
+        ENV["CRITIC_REVIEW_STUB"] = stub
+        (rc, out), err = capture_err { capture_out { run(["--base", "main"]) } }
+        [rc, out, err]
+      end
+      same_time = ->(a, b) { (Time.iso8601(a.to_s) rescue nil) == (Time.iso8601(b.to_s) rescue false) }
+
+      # T1
+      store = File.join(d, "t1")
+      rc, = judge.call(clean, store)
+      evs, fails = rounds.call(store)
+      ev = evs.first || {}
+      rec = (JSON.parse(File.read(receipt_path)) rescue {})
+      c.call("(T1) a PASS exits 0 and writes one critic.round", rc == 0 && evs.size == 1)
+      c.call("(T1) its attrs are pass/0/not carried/clean (#{ev['attrs'].inspect})",
+             ev["attrs"] == { "verdict" => "pass", "findings" => 0, "carried" => false, "dirty" => false })
+      c.call("(T1) duration_s is the receipt's (#{ev['duration_s'].inspect} vs #{rec['duration_s'].inspect})",
+             rec["duration_s"].is_a?(Numeric) && ev["duration_s"] == rec["duration_s"].to_f)
+      c.call("(T1) at is the receipt's started_at", same_time.call(ev["at"], rec["started_at"]))
+      c.call("(T1) head is the judged sha and unit the branch's ticket",
+             ev["head"] == sha && ev["unit"] == "DND-9002" && ev["unit_source"] == "branch")
+      c.call("(T1) no write failure (every attr registered): #{fails.inspect}", fails == {})
+
+      # T2
+      store = File.join(d, "t2")
+      rc, = judge.call(two, store)
+      evs, fails = rounds.call(store)
+      c.call("(T2) a BLOCK exits 2 and emits verdict block, findings 2 (#{evs.map { |e| e['attrs'] }.inspect})",
+             rc == 2 && evs.size == 1 && evs.first["attrs"]["verdict"] == "block" && evs.first["attrs"]["findings"] == 2)
+      c.call("(T2) no write failure: #{fails.inspect}", fails == {})
+
+      # T3
+      store = File.join(d, "t3")
+      FileUtils.rm_f(receipt_path)
+      ENV["ATHENA_TELEMETRY_DIR"] = store
+      wrote, = capture_err do
+        write_verdict(sha, "main", "pass", [], false, carried: { root: "a" * 40, receipt: "/elsewhere.json" }, exclusive: true)
+      end
+      evs, fails = rounds.call(store)
+      rec = (JSON.parse(File.read(receipt_path)) rescue {})
+      ev = evs.first || {}
+      c.call("(T3) a carried PASS emits carried true (#{ev['attrs'].inspect})",
+             wrote && evs.size == 1 && ev.dig("attrs", "carried") == true && ev.dig("attrs", "verdict") == "pass")
+      c.call("(T3) with no judge run it is a point event at the receipt's at",
+             ev["duration_s"].nil? && same_time.call(ev["at"], rec["at"]))
+      c.call("(T3) no write failure: #{fails.inspect}", fails == {})
+      # T3b a refused carried write (a receipt already exists) emits nothing.
+      refused, = capture_err do
+        write_verdict(sha, "main", "pass", [], false, carried: { root: "b" * 40, receipt: "/elsewhere.json" }, exclusive: true)
+      end
+      c.call("(T3b) a refused carried write emits no critic.round", refused == false && rounds.call(store)[0].size == 1)
+
+      # T4
+      blocked = File.join(d, "blocked")
+      FileUtils.mkdir_p(blocked)
+      FileUtils.chmod(0o500, blocked)
+      u_rc, u_out, u_err = judge.call(clean, File.join(blocked, "store"))
+      u_receipt = File.file?(receipt_path)
+      FileUtils.chmod(0o700, blocked)
+      w_rc, w_out, w_err = judge.call(clean, File.join(d, "t4"))
+      c.call("(T4) an unwritable store still writes the receipt", u_receipt)
+      c.call("(T4) an unwritable store leaves the exit code (#{u_rc} vs #{w_rc}) and stdout unchanged",
+             u_rc == w_rc && u_out == w_out)
+      c.call("(T4) stderr differs by at most the writer's one line",
+             u_err.lines.reject { |l| l.start_with?("athena-telemetry:") } == w_err.lines &&
+             u_err.lines.count { |l| l.start_with?("athena-telemetry:") } <= 1)
+      c.call("(T4) nothing was written under the unwritable store", !Dir.exist?(File.join(blocked, "store")))
+    end
+  ensure
+    FileUtils.chmod(0o700, File.join(d, "blocked")) if Dir.exist?(File.join(d, "blocked"))
+  end
+  ok
+ensure
+  prev&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
 
 # The parser, prompt, decision, argument and end-to-end cases.

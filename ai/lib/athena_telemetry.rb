@@ -180,6 +180,12 @@ module AthenaTelemetry
       @events.keys
     end
 
+    # -> the registered {attr => type} of an event, or nil when it is not
+    # registered. Read-only (DND-1474: check-telemetry-registry).
+    def attrs_for(name)
+      @events[name]
+    end
+
     # -> [kept_attrs, drops]; [nil, ["event_unregistered"]] for an unknown event.
     def filter(name, attrs)
       spec = @events[name]

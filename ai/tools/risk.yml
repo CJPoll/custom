@@ -63,6 +63,7 @@ tools:
   # It never honours the push waiver, so it never writes outbound-scan's
   # waiver log; it writes nothing.
   check-outbound-tree:     { class: readOnly, reason: check }
+  check-telemetry-registry: { class: readOnly, reason: check }
   check-tool-risk:         { class: readOnly, reason: check }
   confirm-merged:          { class: readOnly, reason: query }
   critic-eval:             { class: readOnly, reason: eval }

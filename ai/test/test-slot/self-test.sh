@@ -33,6 +33,9 @@ unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HELD_MODEL ATHENA_TEST_SLOT_DIR ATH
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/test-slot-selftest.XXXXXX")"
 BG_PIDS=()
+# DND-1474: every test-slot run writes a test_slot.wait telemetry event. The
+# suite's runs write to its own store, never the machine's.
+export ATHENA_TELEMETRY_DIR="$W/telemetry"
 
 cleanup() {
   local f p
@@ -1566,6 +1569,61 @@ check 48-names-release-cap eval '[[ "$rep48" == *"FIXTURE CAP [release N48]"* &&
 if [ -z "$(fixture_caps "$W")" ]; then ok; else
   bad no-fixture-cap "a fixture hang cap fired (named above). Fix: every holder is released and every background run exits inside its case."
 fi
+
+# ----------------------------------------------------------- telemetry (DND-1474)
+# test-slot writes one test_slot.wait (at = the wait start, duration_s = the
+# wait) after the slot is acquired or the wait times out, before CMD runs,
+# through ai/bin/telemetry-emit. Each case has its own store. No case depends
+# on speed: the timeout case's holder is released by an event.
+tel_events() { cat "$1"/*.jsonl 2>/dev/null | jq -c 'select(.event == "test_slot.wait")'; }
+tel_drops() { if [ -e "$1/write-failures" ]; then jq -c . "$1/write-failures"; else echo '{}'; fi; }
+
+# T1: one event, outcome ran, pool cpu, its weight; the exit code and stdout
+# are CMD's; every attr registered (no write failure). The --label is caller
+# free text and is never an attr (contract Privacy).
+newpool pT1 2
+ATHENA_TELEMETRY_DIR="$W/tel-t1" "$BIN" --label t1-label -- sh -c 'echo t1-out; exit 7' >"$W/T1.out" 2>"$W/T1.err"
+check T1-rc eq "$?" 7
+check T1-stdout eq "$(cat "$W/T1.out")" "t1-out"
+check T1-one-event eq "$(tel_events "$W/tel-t1" | wc -l)" 1
+check T1-attrs eq "$(tel_events "$W/tel-t1" | jq -c '.attrs')" '{"pool":"cpu","weight":1,"outcome":"ran"}'
+check T1-duration eq "$(tel_events "$W/tel-t1" | jq '(.duration_s | type) == "number" and .duration_s >= 0')" true
+check T1-no-drops eq "$(tel_drops "$W/tel-t1")" '{}'
+
+# T2: a wait that times out (the holder is released only after) writes
+# outcome timeout; exit 75 and CMD never ran, as before.
+newpool pT2 1
+hold AT2 holder-AT2
+ATHENA_TELEMETRY_DIR="$W/tel-t2" bg BT2 --label BT2 --wait-timeout 1 -- sh -c ': > "$1"' _ "$W/BT2.ran"
+reap BT2; check T2-rc eq "$RC" 75
+check T2-not-run absent "$W/BT2.ran"
+check T2-event eq "$(tel_events "$W/tel-t2" | jq -c '[.attrs.outcome, .attrs.pool]')" '["timeout","cpu"]'
+check T2-waited eq "$(tel_events "$W/tel-t2" | jq '.duration_s >= 1')" true
+check T2-no-drops eq "$(tel_drops "$W/tel-t2")" '{}'
+release AT2; reap AT2; check T2-A-rc eq "$RC" 0
+
+# T3: an unwritable store. CMD runs; the exit code and stdout equal a run with
+# a writable store; stderr differs by at most the writer's one line.
+newpool pT3 2
+mkdir -p "$W/ro-t3"; chmod 500 "$W/ro-t3"
+ATHENA_TELEMETRY_DIR="$W/ro-t3/store" "$BIN" --label t3 -- sh -c 'echo t3-out; exit 3' >"$W/T3u.out" 2>"$W/T3u.err"
+rc_u=$?
+ATHENA_TELEMETRY_DIR="$W/tel-t3" "$BIN" --label t3 -- sh -c 'echo t3-out; exit 3' >"$W/T3w.out" 2>"$W/T3w.err"
+rc_w=$?
+chmod 700 "$W/ro-t3"
+check T3-rc eq "$rc_u/$rc_w" "3/3"
+check T3-stdout eq "$(cat "$W/T3u.out")" "$(cat "$W/T3w.out")"
+check T3-stderr eq "$(grep -v '^athena-telemetry:' "$W/T3u.err")" "$(cat "$W/T3w.err")"
+check T3-at-most-one-line eval '[ "$(grep -c "^athena-telemetry:" "$W/T3u.err")" -le 1 ]'
+check T3-not-written absent "$W/ro-t3/store"
+
+# T4: the event is written BEFORE CMD runs, so CMD's own time is never in it:
+# CMD itself reads the store and finds the line already there.
+newpool pT4 2
+ATHENA_TELEMETRY_DIR="$W/tel-t4" "$BIN" --label t4 -- sh -c 'cat "$ATHENA_TELEMETRY_DIR"/*.jsonl' >"$W/T4.out" 2>/dev/null
+check T4-rc eq "$?" 0
+check T4-before-cmd eq "$(jq -r 'select(.event == "test_slot.wait") | .attrs.outcome' "$W/T4.out" 2>/dev/null)" ran
+check T4-no-drops eq "$(tel_drops "$W/tel-t4")" '{}'
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then

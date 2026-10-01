@@ -116,6 +116,10 @@ check("registry: an event without a description is named") do
   registry_error('{"v":1,"events":{"a.b":{"attrs":{}}}}')&.include?("a.b")
 end
 
+check("registry: attrs_for gives an event's registered attrs, nil for an unknown event") do
+  REG.attrs_for("fixture.run")&.fetch("jobs", nil) == "int" && REG.attrs_for("fixture.nope").nil?
+end
+
 check("filter: registered attrs of the right type are kept") do
   REG.filter("fixture.run", { "jobs" => 8, "wall" => 1.5, "ok" => true, "base" => SHA, "name" => "lbl" }) ==
     [{ "jobs" => 8, "wall" => 1.5, "ok" => true, "base" => SHA, "name" => "lbl" }, []]

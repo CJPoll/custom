@@ -81,6 +81,15 @@ require_relative "../lib/first_party"
 require_relative "../lib/landed"
 require_relative "../lib/reap_tags"
 require_relative "../lib/scratch_home_sentinel"
+require "securerandom"
+# The telemetry writer (DND-1474). It fails open, and so does loading it: a
+# writer that cannot load leaves the gate exactly as it was (see GATE
+# TELEMETRY below).
+begin
+  require_relative "../lib/athena_telemetry"
+rescue ScriptError, StandardError
+  nil
+end
 
 CUSTOM_DIR = File.expand_path("../..", __dir__)
 
@@ -199,6 +208,11 @@ STATIC_CHECKS = [
   # marked machine without one fails. Its suite is the discovered
   # ai/test/check-outbound-tree/self-test.sh.
   ["check-outbound-tree",       %w[ai/bin/check-outbound-tree]],
+  # DND-1474: every telemetry event a first-party emitter writes is registered
+  # in ai/telemetry/events.json, so a renamed event fails here, not as a
+  # silent event_unregistered drop. Read-only; its --self-test is hermetic.
+  ["check-telemetry-registry",  %w[ai/bin/check-telemetry-registry]],
+  ["check-telemetry-registry self-test", %w[ai/bin/check-telemetry-registry --self-test]],
   ["check-tool-risk",           %w[ai/bin/check-tool-risk]],
   ["check-tool-risk self-test", %w[ai/bin/check-tool-risk --self-test]],
   # Live per-user inotify INSTANCE headroom. When orphaned autolaunched
@@ -1475,7 +1489,8 @@ def check_env(pin_env, opt)
 end
 
 # Runs units on `jobs` threads, longest-first by `durations` (unknown first).
-# Yields each finished check as [label, argv, ok, out, wall_s, cpu_s].
+# Yields each finished check as [label, argv, ok, out, wall_s, cpu_s,
+# started_at], started_at being the check's wall-clock start (a Time).
 # `running` (RunningChecks) sees every check while it runs; once it is
 # aborted, no worker starts another check.
 def run_pool(units, jobs:, durations:, chdir:, env:, running: RunningChecks.new)
@@ -1490,10 +1505,11 @@ def run_pool(units, jobs:, durations:, chdir:, env:, running: RunningChecks.new)
         unit.each do |(label, argv, opt)|
           break if running.aborted?
 
+          started_at = Time.now
           t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           ok, out, cpu = run_one(argv, chdir: chdir, env: check_env(env, opt), label: label, running: running)
           wall = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
-          lock.synchronize { yield [label, argv, ok, out, wall, cpu] }
+          lock.synchronize { yield [label, argv, ok, out, wall, cpu, started_at] }
         end
         break if running.aborted?
       end
@@ -1569,22 +1585,29 @@ def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: g
   pin_env, pin_probes = pin || landed_pin_env(root)
   io.puts landed_pin_line(pin_env, pin_probes)
 
+  # GATE TELEMETRY: the checks write their own telemetry into a scratch store,
+  # never the machine's (see gate_check_telemetry_dir).
+  tel_scratch = gate_check_telemetry_dir
+  run_env = tel_scratch ? pin_env.merge("ATHENA_TELEMETRY_DIR" => File.join(tel_scratch, "store")) : pin_env
+  run_id = SecureRandom.hex(6)
+  started_at = Time.now
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   results = {}
   running = RunningChecks.new
   run_serial = lambda do |list|
     list.each do |(label, argv, opt)|
+      at = Time.now
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      ok, out, cpu = run_one(argv, chdir: chdir, env: check_env(pin_env, opt), label: label, running: running)
-      results[label] = [argv, ok, out, Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0, cpu]
+      ok, out, cpu = run_one(argv, chdir: chdir, env: check_env(run_env, opt), label: label, running: running)
+      results[label] = [argv, ok, out, Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0, cpu, at]
     end
   end
   pre, units, final = gate_units(checks)
   begin
     run_serial.call(pre)
-    run_pool(units, jobs: jobs, durations: last_durations(timings), chdir: chdir, env: pin_env,
-                    running: running) do |label, argv, ok, out, wall, cpu|
-      results[label] = [argv, ok, out, wall, cpu]
+    run_pool(units, jobs: jobs, durations: last_durations(timings), chdir: chdir, env: run_env,
+                    running: running) do |label, argv, ok, out, wall, cpu, at|
+      results[label] = [argv, ok, out, wall, cpu, at]
     end
     run_serial.call(final)
   rescue SignalException => e
@@ -1593,12 +1616,16 @@ def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: g
     # why it says "not started or not yet recorded" and never "never ran".
     # The signal is re-raised whatever the report does: a report that fails
     # must never turn "died by SIGTERM" into exit 1.
+    finished = results.dup
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
     begin
       report_interrupted("SIG#{Signal.signame(e.signo) || e.signo}", running,
-                         results.dup, checks.size, Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, err)
+                         finished, checks.size, elapsed, err)
     rescue StandardError
       nil
     end
+    emit_gate_telemetry(run_id: run_id, started_at: started_at, elapsed: elapsed, jobs: jobs, total: checks.size,
+                        results: finished, failed: finished.count { |_, r| !r[1] }, chdir: chdir, interrupted: true)
     raise e
   end
   elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
@@ -1627,7 +1654,59 @@ def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout, jobs: g
     { "at" => at, "tree" => chdir, "head" => head, "label" => label, "wall_s" => wall.round(2),
       "cpu_s" => cpu&.round(3), "ok" => ok, "jobs" => jobs }
   end)
+  emit_gate_telemetry(run_id: run_id, started_at: started_at, elapsed: elapsed, jobs: jobs, total: checks.size,
+                      results: results, failed: failures.size, chdir: chdir, interrupted: false)
   [pin_env, failures]
+ensure
+  FileUtils.rm_rf(tel_scratch) if tel_scratch
+end
+
+# ---------------------------------------------------------------------------
+# GATE TELEMETRY (DND-1474)
+#
+# Each run writes, through the one telemetry writer (ai/lib/athena_telemetry.rb,
+# contract ai/contracts/athena-telemetry.md), one `harness_gate.check` per
+# finished check (at = its start, duration_s = its wall_s) and then one
+# `harness_gate.run` (at = the run start, duration_s = the run wall, head = the
+# gated HEAD, unit = the gated tree's branch). Both share a random run_id. They
+# are written after the checks finish, so telemetry is never on a check's
+# critical path, and on the interrupted path too (interrupted: true, the
+# checks that finished). timings.jsonl is unchanged: it is the scheduler's
+# input, this is the lead-time ledger's.
+#
+# Fails open: the writer never raises, and anything else that goes wrong here
+# is swallowed, so the gate's verdict, exit code and stdout never change.
+#
+# The CHECKS write into a per-run scratch store (ATHENA_TELEMETRY_DIR, removed
+# after the run), not the machine's: a check is a test, and the events its
+# fixtures emit (a fixture harness-gate run, a test-slot wait in a throwaway
+# pool, a stub critic round) are not lead-time evidence. Only the gate's own
+# events reach the real store. One exception: if the scratch directory cannot
+# be created, the checks run with the environment the gate was given, so their
+# events land wherever that points (the machine's store, by default). The
+# three emitters' own suites also point their fixtures at a temp store, so
+# this matters only for a suite that does not.
+def gate_check_telemetry_dir
+  Dir.mktmpdir("harness-gate-telemetry-")
+rescue SystemCallError
+  nil
+end
+
+def emit_gate_telemetry(run_id:, started_at:, elapsed:, jobs:, total:, results:, failed:, chdir:, interrupted:)
+  return unless defined?(AthenaTelemetry)
+
+  results.each do |label, (_argv, ok, _out, wall, cpu, at)|
+    attrs = { "run_id" => run_id, "label" => label.to_s[0, 120], "ok" => ok ? true : false }
+    attrs["cpu_s"] = cpu.to_f if cpu
+    AthenaTelemetry.emit("harness_gate.check", at: at, duration_s: wall, attrs: attrs, repo_dir: chdir)
+  end
+  AthenaTelemetry.emit("harness_gate.run", at: started_at, duration_s: elapsed, repo_dir: chdir,
+                                           attrs: { "run_id" => run_id, "jobs" => jobs, "checks" => total,
+                                                    "failed" => failed, "ok" => !interrupted && failed.zero?,
+                                                    "interrupted" => interrupted })
+  nil
+rescue StandardError
+  nil
 end
 
 # STASH FIXTURE OPT-OUT (DND-775). Agent sessions carry the agent-stash
@@ -2321,7 +2400,9 @@ def self_test_hang_named
     # O_RDWR: opening never blocks, and a reader that is also a writer never
     # sees EOF, so each announcement is one line to wait for.
     reader = File.open(started, File::RDWR)
+    tel_store = File.join(dir, "telemetry")
     pid = fork do
+      ENV["ATHENA_TELEMETRY_DIR"] = tel_store
       $stdout.reopen(out_path, "w")
       $stderr.reopen($stdout)
       $stdout.sync = true
@@ -2361,6 +2442,21 @@ def self_test_hang_named
       fail_with.call("the still-running list is #{running.inspect}, want exactly [hang-one, hang-two]") unless
         running == %w[hang-one hang-two]
       fail_with.call("the report carries no Fix: (#{out.inspect})") unless out.include?("Fix:")
+      # DND-1474: the interrupted run still writes its telemetry: one run
+      # event with interrupted: true, and the check that finished.
+      if defined?(AthenaTelemetry)
+        evs = AthenaTelemetry.read(env: { "ATHENA_TELEMETRY_DIR" => tel_store }).events
+        run = evs.find { |e| e["event"] == "harness_gate.run" }
+        a = run ? run["attrs"] : {}
+        fail_with.call("the interrupted run wrote no harness_gate.run with interrupted: true, ok: false, " \
+                       "checks: 3 (#{evs.inspect})") unless a["interrupted"] == true && a["ok"] == false && a["checks"] == 3
+        done = evs.select { |e| e["event"] == "harness_gate.check" }
+        fail_with.call("the interrupted run's check events are #{done.map { |e| e.dig('attrs', 'label') }.inspect}, " \
+                       "want [quick-one] under the run's run_id") unless
+          done.map { |e| e.dig("attrs", "label") } == ["quick-one"] && done.first&.dig("attrs", "run_id") == a["run_id"]
+      else
+        fail_with.call("ai/lib/athena_telemetry.rb did not load, so the interrupted run's telemetry cannot be read")
+      end
       %w[hang-one hang-two].each do |n|
         hp = File.read(File.join(dir, "#{n}.pid")).to_i rescue 0
         # Only the fixture's own `cat` counts, never a recycled pid.
@@ -4409,8 +4505,132 @@ def self_test_core
   ok = false unless self_test_jobs_flag
   ok = false unless self_test_cpu_attribution
   ok = false unless self_test_hang_named
+  # 17 (DND-1474): the gate's telemetry. Its own method, documented there.
+  ok = false unless self_test_telemetry
 
   ok
+end
+
+# 17 (DND-1474). GATE TELEMETRY, against a fixture repo and temp stores only
+# (never the machine's store). The QA Plan's harness-gate rows:
+#   17a two passing checks -> one harness_gate.run (checks=2, failed=0,
+#       ok=true) and two harness_gate.check sharing its run_id, with no write
+#       failure (every event and attr registered);
+#   17b one failing check -> ok=false, failed=1; run_checks' result unchanged;
+#   17c the fixture's branch dnd-9001-x -> unit DND-9001, head = its HEAD;
+#   17d an unwritable store -> the same failures and the same stdout (timing
+#       digits aside) as a writable one; stderr has at most the writer's line;
+#   17e the checks see a scratch ATHENA_TELEMETRY_DIR, never the caller's, and
+#       it is gone after the run.
+# The interrupted path (interrupted: true) is asserted in case 16.
+def self_test_telemetry
+  good = true
+  fail_with = lambda do |msg|
+    warn "self-test: FAIL — case 17 (telemetry, DND-1474): #{msg}. Fix: keep run_checks calling " \
+         "emit_gate_telemetry after the checks, with the per-check start, run_id and counts (GATE TELEMETRY)."
+    good = false
+  end
+  unless defined?(AthenaTelemetry)
+    fail_with.call("ai/lib/athena_telemetry.rb did not load")
+    return good
+  end
+  Dir.mktmpdir("harness-gate-telemetry-test") do |dir|
+    repo = File.join(dir, "repo")
+    git_env = { "GIT_AUTHOR_NAME" => "t", "GIT_AUTHOR_EMAIL" => "t@t", "GIT_COMMITTER_NAME" => "t",
+                "GIT_COMMITTER_EMAIL" => "t@t", "GIT_CONFIG_GLOBAL" => File::NULL, "GIT_CONFIG_NOSYSTEM" => "1" }
+    Open3.capture3(git_env, "git", "init", "-q", "-b", "dnd-9001-x", repo)
+    Open3.capture3(git_env, "git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "fixture")
+    head = Open3.capture3("git", "-C", repo, "rev-parse", "HEAD")[0].strip
+    mk = lambda do |name, body|
+      path = File.join(dir, "#{name}.sh")
+      File.write(path, "#!/bin/sh\n#{body}\n")
+      FileUtils.chmod(0o755, path)
+      [path]
+    end
+    pass_a = ["pass-a", mk.call("pass-a", "echo a")]
+    pass_b = ["pass-b", mk.call("pass-b", "echo b")]
+    fail_c = ["fail-c", mk.call("fail-c", "echo 'FAIL: c'; exit 1")]
+    seen = File.join(dir, "seen-dir")
+    peek = ["peek", mk.call("peek", "printf '%s' \"$ATHENA_TELEMETRY_DIR\" > #{seen.shellescape}")]
+    gate = lambda do |checks, store|
+      io = StringIO.new
+      errio = StringIO.new
+      prev_err = $stderr
+      $stderr = errio
+      AthenaTelemetry.reset_process_state!
+      _env, failures = with_env("ATHENA_TELEMETRY_DIR" => store) do
+        run_checks(checks, root: repo, chdir: repo, io: io, jobs: 2, timings: File.join(dir, "timings.jsonl"))
+      end
+      [failures, io.string, errio.string]
+    ensure
+      $stderr = prev_err
+    end
+    read = lambda do |store|
+      r = AthenaTelemetry.read(env: { "ATHENA_TELEMETRY_DIR" => store })
+      [r.events.select { |e| e["event"] == "harness_gate.run" }, r.events.select { |e| e["event"] == "harness_gate.check" },
+       r.failures]
+    end
+
+    # 17a + 17c
+    store = File.join(dir, "store-a")
+    gate.call([pass_a, pass_b], store)
+    runs, chks, drops = read.call(store)
+    run = runs.first || {}
+    a = run["attrs"] || {}
+    fail_with.call("17a want one run event, got #{runs.size}") unless runs.size == 1
+    fail_with.call("17a run attrs #{a.inspect}") unless a["checks"] == 2 && a["failed"] == 0 && a["ok"] == true &&
+                                                        a["interrupted"] == false && a["jobs"] == 2 &&
+                                                        a["run_id"].to_s.match?(/\A\h{12}\z/)
+    fail_with.call("17a run duration_s #{run['duration_s'].inspect}") unless run["duration_s"].is_a?(Numeric)
+    fail_with.call("17a check events #{chks.map { |e| e['attrs'] }.inspect}") unless
+      chks.map { |e| e.dig("attrs", "label") }.sort == %w[pass-a pass-b] &&
+      chks.all? { |e| e.dig("attrs", "run_id") == a["run_id"] && e.dig("attrs", "ok") == true && e["duration_s"].is_a?(Numeric) }
+    fail_with.call("17a a check starts before its run (#{chks.map { |e| e['at'] }.inspect} vs #{run['at']})") unless
+      chks.all? { |e| e["at"].to_s >= run["at"].to_s }
+    fail_with.call("17a write failures #{drops.inspect}: an event or attr is not registered") unless drops == {}
+    fail_with.call("17c unit #{run['unit'].inspect} (#{run['unit_source']}), want DND-9001 from the branch") unless
+      run["unit"] == "DND-9001" && run["unit_source"] == "branch"
+    fail_with.call("17c head #{run['head'].inspect}, want the gated HEAD #{head}") unless run["head"] == head
+
+    # 17b
+    store = File.join(dir, "store-b")
+    failures, = gate.call([pass_a, fail_c], store)
+    runs, chks, drops = read.call(store)
+    a = runs.first&.fetch("attrs", {}) || {}
+    fail_with.call("17b run attrs #{a.inspect}, want ok=false failed=1") unless runs.size == 1 && a["ok"] == false && a["failed"] == 1
+    fail_with.call("17b fail-c's check event #{chks.inspect}") unless
+      chks.find { |e| e.dig("attrs", "label") == "fail-c" }&.dig("attrs", "ok") == false
+    fail_with.call("17b run_checks' failures changed (#{failures.map(&:first).inspect})") unless failures.map(&:first) == ["fail-c"]
+    fail_with.call("17b write failures #{drops.inspect}") unless drops == {}
+
+    # 17d
+    blocked = File.join(dir, "blocked")
+    FileUtils.mkdir_p(blocked)
+    FileUtils.chmod(0o500, blocked)
+    # Timing digits, and the slowest-first list (two millisecond checks tie in
+    # any order), are not output the store can change.
+    strip = ->(s) { s.gsub(/slowest: [^;]*;/, "slowest: ;").gsub(/\d/, "#") }
+    w_fail, w_out, = gate.call([pass_a, fail_c], File.join(dir, "store-d"))
+    u_fail, u_out, u_err = gate.call([pass_a, fail_c], File.join(blocked, "store"))
+    FileUtils.chmod(0o700, blocked)
+    fail_with.call("17d an unwritable store changed the failures") unless u_fail.map(&:first) == w_fail.map(&:first)
+    fail_with.call("17d an unwritable store changed stdout:\n#{u_out}\n--- vs ---\n#{w_out}") unless
+      strip.call(u_out).sub(/timings: \S+/, "") == strip.call(w_out).sub(/timings: \S+/, "")
+    fail_with.call("17d stderr carries more than the writer's one line: #{u_err.inspect}") unless
+      u_err.lines.reject { |l| l.start_with?("athena-telemetry:") }.empty? && u_err.lines.size <= 1
+    fail_with.call("17d the unwritable store was written") if Dir.exist?(File.join(blocked, "store"))
+
+    # 17e
+    store = File.join(dir, "store-e")
+    gate.call([peek], store)
+    scratch = File.exist?(seen) ? File.read(seen) : ""
+    fail_with.call("17e a check saw ATHENA_TELEMETRY_DIR=#{scratch.inspect}, want a scratch store, never #{store}") if
+      scratch.empty? || scratch == store
+    fail_with.call("17e the scratch store #{scratch} outlived the run") if !scratch.empty? && File.exist?(File.dirname(scratch))
+  ensure
+    FileUtils.chmod(0o700, File.join(dir, "blocked")) if Dir.exist?(File.join(dir, "blocked"))
+  end
+  good
 end
 
 # Runs one --self-test group, or every group in HARNESS_GATE_SELF_TEST_GROUPS
@@ -4418,7 +4638,16 @@ end
 def run_self_test(group = nil)
   groups = group ? [group] : HARNESS_GATE_SELF_TEST_GROUPS
   ok = true
-  groups.each { |g| ok = false unless self_test_group(g) }
+  # DND-1474: the suite drives run_checks against fixtures, and run_checks
+  # emits telemetry. Those events go to a temp store, never the machine's.
+  tel_dir = Dir.mktmpdir("harness-gate-selftest-telemetry-")
+  begin
+    with_env("ATHENA_TELEMETRY_DIR" => File.join(tel_dir, "store")) do
+      groups.each { |g| ok = false unless self_test_group(g) }
+    end
+  ensure
+    FileUtils.rm_rf(tel_dir)
+  end
   scope = group ? "group #{group}" : "all #{groups.size} groups"
 
   if ok

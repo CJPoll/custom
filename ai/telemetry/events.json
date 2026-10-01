@@ -2,7 +2,7 @@
   "v": 1,
   "events": {
     "harness_gate.run": {
-      "description": "One harness-gate run, at the end of every exit path that ran checks. at = run start, duration_s = run wall, head = the gated HEAD. Emitter: DND-1474.",
+      "description": "One harness-gate run, at the end of every exit path that ran checks, interrupted runs included (interrupted=true, ok=false). at = run start, duration_s = run wall, head = the gated HEAD. checks = the run's declared checks; failed = the failed ones among those that finished. Emitter: DND-1474.",
       "attrs": {
         "run_id": "label",
         "jobs": "int",
@@ -22,16 +22,15 @@
       }
     },
     "test_slot.wait": {
-      "description": "test-slot's queue wait, after the slot is acquired or the wait times out and before CMD runs. at = wait start, duration_s = the wait. Emitter: DND-1474.",
+      "description": "test-slot's queue wait, after the slot is acquired (outcome=ran) or the wait times out (outcome=timeout) and before CMD runs. at = wait start, duration_s = the wait. A nested run already inside a slot waits for nothing and emits none. The run's --label is not an attr: it is caller free text (a work ticket id, a tree or command name), which Privacy keeps out. Emitter: DND-1474.",
       "attrs": {
         "pool": "label",
         "weight": "int",
-        "outcome": "label",
-        "slot_label": "label"
+        "outcome": "label"
       }
     },
     "critic.round": {
-      "description": "One critic-review round, when its verdict receipt is written. at = started_at, duration_s = the receipt's duration_s, head = the judged sha. Emitter: DND-1474.",
+      "description": "One critic-review round, when its verdict receipt is written. at = started_at, duration_s = the receipt's duration_s, head = the judged sha. A carried PASS with no judge run has no started_at: a point event at the receipt's at. Emitter: DND-1474.",
       "attrs": {
         "verdict": "label",
         "findings": "int",

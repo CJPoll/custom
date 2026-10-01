@@ -1,0 +1,367 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+#
+# check-telemetry-registry -- every telemetry event a first-party emitter
+# writes is registered in ai/telemetry/events.json (DND-1474).
+#
+# WHY THIS EXISTS
+#
+# The telemetry writer (ai/lib/athena_telemetry.rb, contract
+# ai/contracts/athena-telemetry.md) drops an unregistered event and counts it
+# as `event_unregistered`. That is the right runtime behaviour: an emitter
+# never fails its tool. It is also a silent loss: a renamed or misspelled
+# event never reaches the lead-time ledger, and the only trace is a counter
+# nobody reads until a phase reads n/a. This check moves that loss to commit
+# time. The contract's *The registry* describes it.
+#
+# WHICH FILES
+#
+#   The first-party candidates of ai/lib/first_party.rb (tracked or new
+#   untracked executables, lib/ code and hooks), minus test suites
+#   (FirstParty.test_path?, whose fixtures emit synthetic and unregistered
+#   events on purpose) and minus NOT_EMITTERS: the writer and its CLI, whose usage
+#   text and definitions are not calls, and this check, whose fixtures are
+#   strings.
+#
+# WHAT IS AN EMITTER AND WHAT IS A CALL SITE (comment lines, `#` first, are
+# never read)
+#
+#   Ruby, in process:  every `AthenaTelemetry.emit(` is a call site. Its first
+#     argument must be a string literal naming the event.
+#   The CLI:  a file is a CLI emitter when it names `telemetry-emit` and has
+#     `--event` somewhere. A call site is a logical line (backslash
+#     continuations joined) that names `telemetry-emit` AND has `--event NAME`.
+#     NAME must be a literal. Each `--attr KEY=` on that line must be a
+#     registered attr of NAME. A `--event` on a line that does not name
+#     telemetry-emit (`gh run list --event push`) is another tool's flag.
+#
+#   An emitter file with no call site this check can read is a FAILURE, never
+#   a pass: a file that calls the CLI through a variable (`"$TEL" --event x`)
+#   would otherwise read as "nothing to check". So is a run that finds no
+#   emitter at all (the discovery is broken, or every emitter vanished).
+#
+# NOT CHECKED, said out loud: the attrs of an in-process Ruby call (a Hash
+# built in code; each emitter's own tests assert zero `attr_*` drops, contract
+# *Adding an event* step 4), and a file that makes one readable CLI call and
+# another through a variable (the readable one makes it an emitter with a
+# call site, so the other is not seen).
+#
+# EXIT: 0 every call site registered; 1 a finding (each with Fix:); 2 usage;
+# 3 COULD NOT LOOK (git cannot list the tree, or the registry cannot be read).
+
+require "open3"
+require "json"
+require "tmpdir"
+require "fileutils"
+require_relative "../lib/first_party"
+require_relative "../lib/athena_telemetry"
+
+PROG = "check-telemetry-registry"
+REGISTRY_REL = "ai/telemetry/events.json"
+# Files that name the writer without being emitters: the writer and its CLI
+# (definitions and usage text), and this check (its fixtures are strings).
+NOT_EMITTERS = %w[ai/lib/athena_telemetry.rb ai/bin/telemetry-emit ai/bin/check-telemetry-registry].freeze
+
+USAGE = <<~TXT
+  Usage: check-telemetry-registry [--self-test | --help]
+
+  Asserts that every telemetry event a first-party emitter writes, through
+  AthenaTelemetry.emit or ai/bin/telemetry-emit --event, is registered in
+  #{REGISTRY_REL}, and that each --attr on a CLI call is registered for its
+  event. Read-only; writes nothing.
+
+  Exit codes: 0 all registered; 1 a finding (unregistered event or attr, a
+  non-literal event name, an emitter with no readable call site, or no emitter
+  found at all); 2 usage; 3 COULD NOT LOOK (git or the registry unreadable).
+
+  --self-test   run the fixture suite (hermetic: throwaway repos only)
+  --help        this text
+TXT
+
+# ── DOMAIN (pure) ───────────────────────────────────────────────────────────
+module TelemetryCallSites
+  RUBY_CALL = /AthenaTelemetry\.emit\(/.freeze
+  RUBY_LITERAL = /\AAthenaTelemetry\.emit\(\s*(["'])([^"'\s]+)\1/.freeze
+  CLI_NAME = /telemetry-emit\b/.freeze
+  EVENT_FLAG = /(?<![\w-])--event(?![\w-])/.freeze
+  EVENT_VALUE = /(?<![\w-])--event(?:\s+|=|["']\s*,\s*)["']?([^\s"',)]*)/.freeze
+  ATTR_VALUE = /(?<![\w-])--attr(?:\s+|["']\s*,\s*)["']?([^=\s"',]*)=/.freeze
+  LITERAL_NAME = AthenaTelemetry::Registry::EVENT_RE
+
+  Site = Struct.new(:line, :kind, :event, :attrs, :problem, keyword_init: true)
+
+  module_function
+
+  def comment?(line)
+    line.lstrip.start_with?("#")
+  end
+
+  # [[line_no, text]] for the non-comment lines, backslash continuations
+  # joined onto their first line.
+  def logical_lines(text)
+    out = []
+    pending = nil
+    text.each_line.with_index(1) do |raw, no|
+      line = raw.chomp
+      if pending
+        pending[1] << " " << line.sub(/\\\z/, "")
+      else
+        next if comment?(line)
+
+        pending = [no, line.sub(/\\\z/, "").dup]
+      end
+      next if line.end_with?("\\")
+
+      out << pending
+      pending = nil
+    end
+    out << pending if pending
+    out
+  end
+
+  # -> [ruby_emitter?, cli_emitter?]
+  def emitter_kinds(text)
+    code = text.each_line.reject { |l| comment?(l) }.join
+    [code.match?(RUBY_CALL), code.match?(CLI_NAME) && code.match?(EVENT_FLAG)]
+  end
+
+  # Every call site in one file's text. -> [Site]
+  def sites(text)
+    found = []
+    logical_lines(text).each do |no, line|
+      line.to_enum(:scan, RUBY_CALL).each do
+        rest = line[Regexp.last_match.begin(0)..]
+        m = RUBY_LITERAL.match(rest)
+        found << if m && LITERAL_NAME.match?(m[2])
+                   Site.new(line: no, kind: :ruby, event: m[2], attrs: [])
+                 else
+                   Site.new(line: no, kind: :ruby, event: nil, attrs: [],
+                            problem: "AthenaTelemetry.emit's event is not a string literal")
+                 end
+      end
+      next unless line.match?(CLI_NAME) && line.match?(EVENT_FLAG)
+
+      line.to_enum(:scan, EVENT_VALUE).each do
+        name = Regexp.last_match(1).to_s
+        attrs = line.scan(ATTR_VALUE).flatten
+        found << if LITERAL_NAME.match?(name)
+                   Site.new(line: no, kind: :cli, event: name, attrs: attrs)
+                 else
+                   Site.new(line: no, kind: :cli, event: nil, attrs: attrs,
+                            problem: "telemetry-emit --event #{name.empty? ? '(nothing)' : name} is not a literal event name")
+                 end
+      end
+    end
+    found
+  end
+
+  # Findings for one file against the registry spec ({event => {attr => type}}).
+  # -> [String]
+  def findings(rel, text, spec)
+    ruby, cli = emitter_kinds(text)
+    return [] unless ruby || cli
+
+    list = sites(text)
+    if list.empty?
+      return ["#{rel}: it references the telemetry writer but no call site could be read. " \
+              "Fix: call `AthenaTelemetry.emit(\"<event>\", ...)` with the event as a string literal, or the CLI " \
+              "as `.../telemetry-emit --event <event>` on one line (not through a variable), so the event can be checked."]
+    end
+    list.flat_map do |s|
+      next ["#{rel}:#{s.line}: #{s.problem}. Fix: name the event as a literal, so this check and a reader can see it."] if s.problem
+
+      attrs = spec[s.event]
+      unless attrs
+        next ["#{rel}:#{s.line}: event #{s.event} is not registered in #{REGISTRY_REL}; the writer would drop every " \
+              "line as event_unregistered. Fix: register it (ai/contracts/athena-telemetry.md -> Adding an event), " \
+              "or correct the name to a registered one."]
+      end
+      (s.attrs - attrs.keys).map do |a|
+        "#{rel}:#{s.line}: attr #{a} is not registered for #{s.event}; the writer would drop it as attr_unregistered. " \
+          "Fix: add it to #{s.event}'s attrs in #{REGISTRY_REL} (narrowest type, checked against Privacy), or remove it."
+      end
+    end
+  end
+end
+
+# ── SIDE EFFECTS + MANAGER ──────────────────────────────────────────────────
+
+# -> [exit_code, stdout_lines, stderr_lines]
+def check(root)
+  spec = begin
+    reg = AthenaTelemetry::Registry.parse(File.read(File.join(root, REGISTRY_REL)))
+    reg.event_names.to_h { |n| [n, reg.attrs_for(n)] }
+  rescue SystemCallError, AthenaTelemetry::RegistryError => e
+    return [3, [], ["#{PROG}: COULD NOT LOOK: #{REGISTRY_REL} cannot be read (#{e.message}). This is not a pass. " \
+                    "Fix: restore #{REGISTRY_REL} from git, or correct the key the message names."]]
+  end
+  found, = begin
+    FirstParty.discover(root)
+  rescue FirstParty::MeasureError => e
+    return [3, [], ["#{PROG}: COULD NOT LOOK: #{e.message}. This is not a pass. " \
+                    "Fix: run it inside a git checkout of this repo, with git on PATH."]]
+  end
+  files = found.reject { |rel| FirstParty.test_path?(rel) || NOT_EMITTERS.include?(rel) }
+  emitters = {}
+  errors = []
+  files.each do |rel|
+    text = File.read(File.join(root, rel), encoding: "UTF-8", invalid: :replace, undef: :replace)
+    text = text.scrub
+    ruby, cli = TelemetryCallSites.emitter_kinds(text)
+    next unless ruby || cli
+
+    errors.concat(TelemetryCallSites.findings(rel, text, spec))
+    emitters[rel] = TelemetryCallSites.sites(text).map(&:event).compact.uniq
+  rescue SystemCallError => e
+    errors << "#{rel}: could not be read (#{e.class.name.split('::').last}). Fix: make it readable; an unread " \
+              "emitter is not a checked one."
+  end
+  if emitters.empty?
+    return [1, [], ["#{PROG}: FOUND NOTHING: no first-party file calls the telemetry writer (#{files.size} file(s) " \
+                    "read). The emitters (harness-gate, test-slot, critic-review) are expected. Fix: if the " \
+                    "discovery broke, repair it (ai/lib/first_party.rb); if a call moved, keep it in a form this " \
+                    "check reads (its header, WHAT IS A CALL SITE)."]]
+  end
+  unless errors.empty?
+    return [1, [], errors.map { |e| "#{PROG}: #{e}" } +
+                   ["#{PROG}: FAILED -- #{errors.size} finding(s) in #{emitters.size} emitter file(s)."]]
+  end
+  used = emitters.values.flatten.uniq
+  idle = spec.keys - used
+  out = ["#{PROG}: OK -- #{emitters.values.sum(&:size)} event(s) in #{emitters.size} emitter file(s), all registered: " +
+         emitters.map { |rel, evs| "#{rel} (#{evs.join(', ')})" }.join("; ")]
+  out << "#{PROG}: note -- registered with no emitter in this tree: #{idle.sort.join(', ')}" unless idle.empty?
+  [0, out, []]
+end
+
+def run_check(root = File.expand_path("../..", __dir__))
+  code, out, err = check(root)
+  out.each { |l| puts l }
+  err.each { |l| warn l }
+  code
+end
+
+# ── SELF-TEST ───────────────────────────────────────────────────────────────
+
+FIXTURE_REGISTRY = {
+  "v" => 1,
+  "events" => {
+    "demo.run" => { "description" => "fixture", "attrs" => { "ok" => "bool", "run_id" => "label" } },
+    "demo.idle" => { "description" => "fixture", "attrs" => {} },
+  },
+}.freeze
+
+def fixture_repo(dir, files, registry: JSON.generate(FIXTURE_REGISTRY))
+  sh = ->(*a) { system("git", "-C", dir, *a, out: File::NULL, err: File::NULL) }
+  sh.call("init", "-q")
+  FileUtils.mkdir_p(File.join(dir, "ai/telemetry"))
+  File.write(File.join(dir, REGISTRY_REL), registry) if registry
+  files.each do |rel, body|
+    path = File.join(dir, rel)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, body)
+    File.chmod(0o755, path)
+  end
+  sh.call("add", "-A")
+  dir
+end
+
+def run_self_test
+  fails = []
+  cases = 0
+  expect = lambda do |name, cond|
+    cases += 1
+    fails << name unless cond
+  end
+  spec = FIXTURE_REGISTRY["events"].transform_values { |v| v["attrs"] }
+  find = ->(text) { TelemetryCallSites.findings("x", text, spec) }
+
+  # Domain cases.
+  expect.call("D1 a registered Ruby literal passes", find.call("AthenaTelemetry.emit(\"demo.run\", attrs: {})\n").empty?)
+  expect.call("D2 an unregistered Ruby literal is named",
+              find.call("AthenaTelemetry.emit('demo.nope')\n").first.to_s.include?("demo.nope is not registered"))
+  expect.call("D3 a non-literal Ruby event is a finding",
+              find.call("AthenaTelemetry.emit(name, attrs: {})\n").first.to_s.include?("not a string literal"))
+  expect.call("D4 a registered CLI call with registered attrs passes",
+              find.call("timeout 2 \"$AI/telemetry-emit\" --event demo.run --attr ok=true --attr \"run_id=$r\" || true\n").empty?)
+  expect.call("D5 an unregistered CLI attr is named",
+              find.call("telemetry-emit --event demo.run --attr nope=1\n").first.to_s.include?("attr nope is not registered"))
+  expect.call("D6 a CLI call through a variable is no readable call site",
+              find.call("TEL=ai/bin/telemetry-emit\n\"$TEL\" --event demo.run\n").first.to_s.include?("no call site could be read"))
+  expect.call("D7 a non-literal CLI event is a finding",
+              find.call("telemetry-emit --event \"$ev\"\n").first.to_s.include?("not a literal event name"))
+  expect.call("D8 a --stats reader is not an emitter", find.call("ai/bin/telemetry-emit --stats\n").empty?)
+  expect.call("D9 a comment that mentions the writer is not an emitter",
+              find.call("# AthenaTelemetry.emit(\"demo.nope\")\n# telemetry-emit --event demo.nope\n").empty?)
+  expect.call("D10 another tool's --event in an emitter file is not a call site",
+              find.call("gh run list --event push\ntelemetry-emit --event demo.run\n").empty?)
+  expect.call("D11 a continuation line joins the call",
+              find.call("timeout 2 telemetry-emit \\\n  --event demo.nope \\\n  --attr ok=true\n").first.to_s.include?("demo.nope"))
+  expect.call("D12 a Ruby argv call to the CLI is read",
+              find.call("system(\"ai/bin/telemetry-emit\", \"--event\", \"demo.nope\")\n").first.to_s.include?("demo.nope"))
+  expect.call("D13 the finding names the line",
+              find.call("x = 1\nAthenaTelemetry.emit(\"demo.nope\")\n").first.to_s.start_with?("x:2:"))
+
+  # Whole-check cases against throwaway repos.
+  Dir.mktmpdir("check-telemetry-registry-") do |tmp|
+    mk = ->(name) { FileUtils.mkdir_p(File.join(tmp, name)).first }
+
+    good = fixture_repo(mk.call("good"), { "ai/bin/tool" => "#!/usr/bin/ruby\nAthenaTelemetry.emit(\"demo.run\")\n",
+                                           "ai/test/x/self-test.sh" => "#!/bin/sh\ntelemetry-emit --event demo.unreg\n" })
+    code, out, = check(good)
+    expect.call("C1 a registered emitter passes, tests excluded (#{code})", code == 0)
+    expect.call("C1 the OK line names the emitter", out.first.to_s.include?("ai/bin/tool (demo.run)"))
+    expect.call("C1 an idle registered event is noted", out.join.include?("no emitter in this tree: demo.idle"))
+
+    bad = fixture_repo(mk.call("bad"), { "ai/bin/tool" => "#!/bin/sh\ntimeout 2 ai/bin/telemetry-emit --event demo.typo || true\n" })
+    code, _o, err = check(bad)
+    expect.call("C2 an unregistered event fails with Fix (#{code})", code == 1 && err.join.include?("ai/bin/tool:2") && err.join.include?("Fix:"))
+
+    none = fixture_repo(mk.call("none"), { "ai/bin/tool" => "#!/bin/sh\necho hi\n" })
+    code, _o, err = check(none)
+    expect.call("C3 no emitter at all is FOUND NOTHING, exit 1", code == 1 && err.join.include?("FOUND NOTHING") && err.join.include?("Fix:"))
+
+    noreg = fixture_repo(mk.call("noreg"), { "ai/bin/tool" => "#!/usr/bin/ruby\nAthenaTelemetry.emit(\"demo.run\")\n" },
+                         registry: nil)
+    code, _o, err = check(noreg)
+    expect.call("C4 a missing registry is COULD NOT LOOK, exit 3", code == 3 && err.join.include?("COULD NOT LOOK") && err.join.include?("Fix:"))
+
+    notgit = mk.call("notgit")
+    FileUtils.mkdir_p(File.join(notgit, "ai/telemetry"))
+    File.write(File.join(notgit, REGISTRY_REL), JSON.generate(FIXTURE_REGISTRY))
+    code, _o, err = check(notgit)
+    expect.call("C5 a tree git cannot list is exit 3, never a pass (#{code})", code == 3 && err.join.include?("Fix:"))
+
+    writer = fixture_repo(mk.call("writer"),
+                          { "ai/bin/telemetry-emit" => "#!/usr/bin/ruby\n# usage: --event NAME\nputs \"telemetry-emit --event NAME\"\n",
+                            "ai/bin/tool" => "#!/usr/bin/ruby\nAthenaTelemetry.emit(\"demo.run\")\n" })
+    code, = check(writer)
+    expect.call("C6 the writer's own usage text is not a call site (#{code})", code == 0)
+  end
+
+  if fails.empty?
+    puts "#{PROG}: self-test OK (#{cases} cases)"
+    0
+  else
+    fails.each { |f| warn "#{PROG}: self-test FAIL -- #{f}" }
+    warn "#{PROG}: self-test FAILED (#{fails.size}). Fix: repair TelemetryCallSites or check() so each named case holds."
+    1
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.include?("--help") || ARGV.include?("-h")
+    puts USAGE
+    exit 0
+  end
+  require_relative "../lib/strict_argv"
+  begin
+    cli = StrictArgv.parse(ARGV, { "--self-test" => :switch })
+  rescue StrictArgv::UsageError => e
+    warn "#{PROG}: usage error -- #{e.message}."
+    warn "  Fix: run it with no argument (the live check), --self-test or --help. An unrecognised argument is " \
+         "refused, not ignored, so it never reports the live check as the answer to something else."
+    exit 2
+  end
+  exit(cli["--self-test"] ? run_self_test : run_check)
+end
