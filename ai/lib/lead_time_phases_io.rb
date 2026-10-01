@@ -1,0 +1,267 @@
+# frozen_string_literal: true
+
+# lead_time_phases_io -- the SIDE EFFECTS of ai/bin/lead-time-phases
+# (DND-1477): every file, git and process read, and the two stores it writes.
+# Each reader returns a LeadTimePhases::Source, so "could not look" (a missing
+# store, an unreadable file) never reads as "looked, found nothing".
+#
+# It writes only the state dir: ledger.jsonl and cursor.<repo>.txt. Everything
+# else (git, integration receipts, critic verdicts, harness-gate timings,
+# telemetry) is read-only.
+
+require "json"
+require "time"
+require "fileutils"
+require "open3"
+require "tmpdir"
+require_relative "lead_time_phases"
+require_relative "critic_verdict_stores"
+require_relative "athena_telemetry"
+
+module LeadTimePhasesIO
+  Source = LeadTimePhases::Source
+
+  # ledger.jsonl: one JSON row per (repo, landed commit, ticket), append-only.
+  class LedgerStore
+    attr_reader :path
+
+    def initialize(path)
+      @path = path
+    end
+
+    # -> [rows, malformed count]; raises SystemCallError when it cannot read.
+    def read
+      return [[], 0] unless File.exist?(path)
+
+      rows = []
+      bad = 0
+      File.foreach(path) do |line|
+        next if line.strip.empty?
+
+        r = JSON.parse(line) rescue nil
+        r.is_a?(Hash) ? rows << r : bad += 1
+      end
+      [rows, bad]
+    end
+
+    # Append the rows whose key is not in the ledger yet, under an exclusive
+    # lock so two ingests cannot both add one key. -> [added, already present]
+    def append(rows)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.open(path, File::RDWR | File::CREAT | File::APPEND, 0o644) do |f|
+        f.flock(File::LOCK_EX)
+        existing, = read
+        fresh = LeadTimePhases::Ledger.fresh(rows, existing)
+        fresh.each { |r| f.write("#{JSON.generate(r)}\n") }
+        f.flush
+        [fresh.size, rows.size - fresh.size]
+      end
+    end
+  end
+
+  # cursor.<repo>.txt: the RFC 3339 time the next scan starts from.
+  class CursorStore
+    attr_reader :path
+
+    def initialize(dir, repo)
+      @path = File.join(dir, "cursor.#{repo}.txt")
+    end
+
+    # -> [iso or nil, nil] or [nil, reason]. A missing cursor is nil; a
+    # malformed one is an error, never "no cursor" (that would re-backfill).
+    def read
+      return [nil, nil] unless File.exist?(path)
+
+      text = File.read(path).strip
+      [Time.iso8601(text).utc.iso8601, nil]
+    rescue ArgumentError
+      [nil, "#{path} holds #{text.inspect}, not an RFC 3339 time"]
+    rescue SystemCallError => e
+      [nil, "could not read #{path} (#{e.class.name.split('::').last})"]
+    end
+
+    def write(iso)
+      FileUtils.mkdir_p(File.dirname(path))
+      tmp = "#{path}.tmp.#{Process.pid}"
+      File.write(tmp, "#{iso}\n")
+      File.rename(tmp, path)
+    end
+  end
+
+  module Git
+    module_function
+
+    # The repo's git common dir, absolute. -> [path, nil] or [nil, reason]
+    def common_dir(repo)
+      out, err, st = Open3.capture3("git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+      return [out.strip, nil] if st.success? && out.strip.start_with?("/")
+
+      [nil, "git rev-parse --git-common-dir in #{repo} failed (#{err.strip.lines.first.to_s.strip})"]
+    rescue SystemCallError => e
+      [nil, "git could not run (#{e.message})"]
+    end
+  end
+
+  # <common>/integration-receipts/<head>.json (integration-gate, DND-965).
+  module ReceiptReader
+    module_function
+
+    def read(common, head)
+      return Source.could_not_look("no git common dir") unless common
+
+      dir = File.join(common, "integration-receipts")
+      return Source.could_not_look("no integration-receipts store at #{dir}") unless File.directory?(dir)
+
+      file = File.join(dir, "#{head}.json")
+      return Source.empty("no receipt for #{head[0, 8]} in #{dir}") unless File.exist?(file)
+
+      Source.ok([JSON.parse(File.read(file))])
+    rescue JSON::ParserError, SystemCallError => e
+      Source.could_not_look("#{file} is unreadable (#{e.class.name.split('::').last})")
+    end
+  end
+
+  # Every critic-verdicts store of the repo, for one sha.
+  module VerdictReader
+    module_function
+
+    def read(common, sha)
+      return Source.could_not_look("no git common dir") unless common
+
+      stores, why = CriticVerdictStores.stores(common)
+      return Source.could_not_look(why) unless stores
+
+      found = stores.map { |s| File.join(s, "#{sha}.json") }.select { |f| File.exist?(f) }
+      return Source.empty("no verdict receipt for #{sha[0, 8]} in #{stores.size} store(s)") if found.empty?
+
+      Source.ok(found.map { |f| JSON.parse(File.read(f)) })
+    rescue JSON::ParserError, SystemCallError => e
+      Source.could_not_look("a verdict receipt for #{sha[0, 8]} is unreadable (#{e.class.name.split('::').last})")
+    end
+  end
+
+  # harness-gate's per-check timings, $XDG_STATE_HOME/athena/harness-gate/timings.jsonl.
+  module TimingsReader
+    module_function
+
+    def path(env)
+      base = env["XDG_STATE_HOME"].to_s
+      base = File.join(env["HOME"].to_s, ".local", "state") if base.empty?
+      File.join(base, "athena", "harness-gate", "timings.jsonl")
+    end
+
+    # -> {head => [rows]} for the heads asked about, as a Source per head.
+    def read(file, heads)
+      return heads.to_h { |h| [h, Source.could_not_look("no timings file at #{file}")] } unless File.exist?(file)
+
+      want = heads.to_h { |h| [h, []] }
+      File.foreach(file) do |line|
+        r = JSON.parse(line) rescue nil
+        want[r["head"]] << r if r.is_a?(Hash) && want.key?(r["head"])
+      end
+      want.transform_values { |rows| rows.empty? ? Source.empty("no rows") : Source.ok(rows) }
+    rescue SystemCallError => e
+      heads.to_h { |h| [h, Source.could_not_look("could not read #{file} (#{e.class.name.split('::').last})")] }
+    end
+  end
+
+  # The phase events, through the DND-1473 reader only.
+  module TelemetryReader
+    module_function
+
+    # -> [Source, AthenaTelemetry::ReadResult or nil]
+    def read(env)
+      res = AthenaTelemetry.read(events: LeadTimePhases::EVENTS, env: env)
+      src = case res.status
+            when :no_store then Source.could_not_look(res.reason)
+            when :incomplete then Source.could_not_look(res.reason, res.events)
+            else Source.ok(res.events)
+            end
+      [src, res]
+    rescue AthenaTelemetry::ConfigError => e
+      [Source.could_not_look("the telemetry store path is unusable (#{e.message})"), nil]
+    end
+  end
+
+  # The ticket a PR row names: the SAME parser the telemetry writer resolves
+  # `unit` with (AthenaTelemetry::TicketRefs, which loads ai/bin/lead-time's
+  # ticket-ref parser wrapped), so the join key matches by construction.
+  module TicketFor
+    module_function
+
+    # -> ticket or nil
+    def call(row)
+      return row["ticket"] if row.key?("ticket")
+
+      parser = AthenaTelemetry::TicketRefs.parser
+      return nil unless parser
+
+      [row["branch"], row["title"]].each do |text|
+        next if text.to_s.empty?
+
+        ref = parser.call(text.to_s)
+        return ref if ref.is_a?(String)
+      end
+      nil
+    end
+  end
+
+  # ai/bin/lead-time's own --since rule, loaded WRAPPED (as the telemetry
+  # writer loads it) so the two tools accept exactly the same WHEN.
+  module LeadTimeLib
+    PATH = File.expand_path("../bin/lead-time", __dir__)
+
+    module_function
+
+    def lead_time
+      @lead_time ||= begin
+        wrap = Module.new
+        load(PATH, wrap)
+        wrap::LeadTime
+      end
+    end
+
+    # -> [utc iso, nil] or [nil, reason]
+    def parse_since(text) = lead_time.parse_since(text)
+  end
+
+  # ai/bin/lead-time --since --json --meta (DND-1009), as a subprocess.
+  module LeadTimeRunner
+    Result = Struct.new(:code, :rows, :meta, :stderr, :error, keyword_init: true)
+
+    module_function
+
+    def run(bin, repo, since, env)
+      Dir.mktmpdir("lead-time-phases-") do |tmp|
+        meta_file = File.join(tmp, "meta.json")
+        out, err, st = Open3.capture3(env, bin, "--repo", repo, "--since", since, "--json", "--meta", meta_file)
+        meta = File.exist?(meta_file) ? (JSON.parse(File.read(meta_file)) rescue :malformed) : nil
+        rows = out.strip.empty? ? nil : (JSON.parse(out) rescue :malformed)
+        Result.new(code: st.exitstatus, rows: rows, meta: meta, stderr: err)
+      end
+    rescue SystemCallError => e
+      Result.new(code: nil, error: "#{bin} could not run (#{e.message})", stderr: "")
+    end
+  end
+
+  # Commits on main whose subject starts with "Revert", in a time window.
+  module RevertCounter
+    module_function
+
+    def count(repo, since, until_t)
+      ref = %w[origin/main main].find do |r|
+        _, _, st = Open3.capture3("git", "-C", repo, "rev-parse", "--verify", "-q", "#{r}^{commit}")
+        st.success?
+      end
+      return Source.could_not_look("neither origin/main nor main resolves in #{repo}") unless ref
+
+      out, err, st = Open3.capture3("git", "-C", repo, "log", "--first-parent", "--format=%s",
+                                    "--since=#{since}", "--until=#{until_t}", ref)
+      return Source.could_not_look("git log in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
+
+      Source.ok(out.lines.map(&:strip).select { |s| s.start_with?("Revert") })
+    rescue SystemCallError => e
+      Source.could_not_look("git could not run (#{e.message})")
+    end
+  end
+end

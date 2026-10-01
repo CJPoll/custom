@@ -69,6 +69,7 @@ require "time"
 AI_DIR = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "critic_prompt")
 require File.join(AI_DIR, "lib", "critic_carry")
+require File.join(AI_DIR, "lib", "critic_verdict_stores")
 # The telemetry writer (DND-1474, see emit_critic_round). It fails open, and so
 # does loading it: a writer that cannot load leaves the critic as it was.
 begin
@@ -439,25 +440,11 @@ def git_common_dir
   [out.strip, nil]
 end
 
-# Every CANDIDATE store under a common dir, realpath'd. The key is validated
-# for its TYPE first: a relative, empty, or non-directory common dir is an
-# ERROR here, never an empty candidate list -- a wrongly computed key and a key
-# that correctly matches nothing must not read the same.
+# Every CANDIDATE store under a common dir: ai/lib/critic_verdict_stores.rb is
+# the one enumeration (extracted for ai/bin/lead-time-phases, DND-1477).
 # -> [candidates, nil] or [nil, reason]
 def verdict_stores(common)
-  c = common.to_s
-  return [nil, "the git common dir is empty"] if c.strip.empty?
-  return [nil, "the git common dir #{c.inspect} is not absolute (a cwd-relative key matches nothing from any other directory)"] unless c.start_with?("/")
-  return [nil, "the git common dir #{c} is not a directory"] unless File.directory?(c)
-  real = File.realpath(c)
-  wt = File.join(real, "worktrees")
-  if File.directory?(wt) && !(File.readable?(wt) && File.executable?(wt))
-    return [nil, "#{wt} exists but cannot be listed"]
-  end
-  # One candidate per checkout's $GIT_DIR, whether or not its store exists
-  # yet: a checkout that has never run the judge is still a place we looked.
-  gitdirs = Dir.glob(File.join(wt, "*")).select { |d| File.directory?(d) }.sort
-  [[File.join(real, "critic-verdicts")] + gitdirs.map { |d| File.join(d, "critic-verdicts") }, nil]
+  CriticVerdictStores.stores(common)
 end
 
 # The writer's store for THIS checkout, normalised exactly as verdict_stores

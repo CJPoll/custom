@@ -143,6 +143,10 @@ tools:
   # telemetry store under $XDG_STATE_HOME/athena/telemetry. Local state only: no
   # repo, forge, tracker or remote; --prune removes only its own expired day files.
   telemetry-emit:          { class: idempotent, reason: telemetry }
+  # lead-time-phases (DND-1477) reads git, receipts, critic verdicts, timings and
+  # telemetry, runs ai/bin/lead-time (read-only), and writes only its own state
+  # dir (ai-artifacts/lead-time: an idempotent ledger and per-repo cursors).
+  lead-time-phases:        { class: idempotent, reason: ledger }
 
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }

@@ -343,6 +343,19 @@ admiral, and captain. A large `tail` (e.g. gen_saas PR 244 below: `code 1h 46m +
 tail 48m 40s`) is a pipeline-efficiency target; a `code`-dominated ticket (PR
 242: `code 1h 59m + tail 5m 25s`) is a harness/process target.
 
+### Finer phases: the phase ledger (DND-1477)
+
+`ai/bin/lead-time-phases` splits `code` further, per landing, into
+`implement`, `verify`, `queue`, `integrate` and `merge`, from telemetry
+(`ai/contracts/athena-telemetry.md`), integration receipts, critic verdicts
+and harness-gate timings. `--ingest` keeps a ledger in
+`ai-artifacts/lead-time/` with one cursor per repo, advanced to `lead-time
+--meta`'s `scanned_through` and never on `SCAN INCOMPLETE`. `--summary` gives
+the rolling-window median, p90 and sum per phase. The repos and their modes
+are `ai/config/lead-time-repos.json`. A phase it cannot measure is null with a
+reason, never 0. Its `--help` is the reference for the anchors and outputs;
+the design is `ai/docs/lead-time-improver.md` (Decisions 3-6).
+
 ## Worked backfill — 2026-09-19 fleet run (dated snapshot)
 
 **Later (2026-09-30):** this snapshot used the old first-commit START. The

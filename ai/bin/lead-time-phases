@@ -1,0 +1,378 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# lead-time-phases -- the per-landing phase ledger and its rolling-window
+# summary (DND-1477; design: ai/docs/lead-time-improver.md, Decisions 3-6).
+#
+#   --ingest   lists every landing since the repo's cursor (ai/bin/lead-time,
+#              DND-1009), splits each into implement / verify / queue /
+#              integrate / merge plus counters, appends new rows to the ledger
+#              (idempotent on repo + landed commit + ticket), and moves the
+#              cursor to the scan's scanned_through. Never on SCAN INCOMPLETE.
+#   --summary  median, p90 and sum per phase over the last N landings, the
+#              biggest contributor, and the quality guards.
+#
+# A phase it cannot measure is null with a reason, never 0. The repo list and
+# modes live in ai/config/lead-time-repos.json.
+#
+# Buckets: FRAMEWORK (argv, output) and MANAGER (Ingest, Summary) here; DOMAIN
+# in ai/lib/lead_time_phases.rb; SIDE EFFECTS in ai/lib/lead_time_phases_io.rb.
+#
+# Test seams (tests only):
+#   LEAD_TIME_STATE_DIR          the state dir (default: <main checkout>/ai-artifacts/lead-time)
+#   LEAD_TIME_PHASES_LEAD_TIME   the lead-time executable (default ai/bin/lead-time)
+#   LEAD_TIME_PHASES_CONFIG      the config file (default ai/config/lead-time-repos.json)
+#   LEAD_TIME_PHASES_NOW         "now", RFC 3339 (the 14-day backfill start)
+#   ATHENA_TELEMETRY_DIR         the telemetry store (DND-1473's own seam)
+#   XDG_STATE_HOME               where harness-gate's timings.jsonl lives
+#
+# Exit: 0 ok; 1 a tool or state error; 2 a usage or config refusal;
+# 3 SCAN INCOMPLETE (nothing ingested, the cursor unchanged).
+
+require "json"
+require "time"
+require "open3"
+require_relative "../lib/strict_argv"
+require_relative "../lib/lead_time_phases"
+require_relative "../lib/lead_time_phases_io"
+
+AI_DIR = File.expand_path("..", __dir__)
+BACKFILL_DAYS = 14
+
+HELP = <<~TXT
+  Usage:
+    ai/bin/lead-time-phases --ingest --repo NAME [--since WHEN]
+    ai/bin/lead-time-phases --summary --repo NAME [--window N] [--json]
+    ai/bin/lead-time-phases --self-test
+
+  Split every landing on a repo's main into phases and summarize them
+  (DND-1477; ai/docs/lead-time-improver.md, Decisions 3-6).
+
+    implement  dispatch stamp -> first harness_gate.run for the ticket
+    verify     first gate run -> last critic PASS before integration-gate
+    queue      that PASS -> the integration_gate.run start
+    integrate  the integration_gate.run's duration
+    merge      integration end (receipt recorded_at as fallback) -> landing
+
+  A phase whose anchor is missing is null with a reason; one whose anchors
+  are out of order is "invalid" with a reason. Never 0, never negative.
+
+  Modes:
+    --ingest       read the repo's cursor (none: a 14-day backfill), run
+                   ai/bin/lead-time --since CURSOR --json --meta, join each
+                   landing with telemetry, integration receipts, critic
+                   verdicts and harness-gate timings, append new rows to
+                   <state>/ledger.jsonl, and move the cursor to the scan's
+                   scanned_through. On SCAN INCOMPLETE: nothing is ingested,
+                   the cursor stays, exit 3.
+    --summary      per phase over the last N landings (batches counted
+                   once): n, n/a with the top reasons, median and p90
+                   (nearest rank), summed time; the biggest contributor; the
+                   critic BLOCK rate, gate red rate and reverts on main;
+                   telemetry status and write-failures.
+    --self-test    run the domain and IO suites.
+
+  Options:
+    --repo NAME    a repo in ai/config/lead-time-repos.json
+    --since WHEN   with --ingest: scan from WHEN instead of the cursor
+                   (YYYY-MM-DD or RFC 3339 with a zone)
+    --window N     with --summary: the last N landings (default: the config's)
+    --json         with --summary: JSON instead of the table
+    --help         this text
+
+  State: <main checkout>/ai-artifacts/lead-time/ (gitignored), or
+  LEAD_TIME_STATE_DIR. A repo in `watch` mode gets lead/code/tail only; its
+  phases are n/a by design.
+
+  Exit: 0 ok; 1 tool or state error; 2 usage or config refusal; 3 SCAN
+  INCOMPLETE.
+TXT
+
+SPEC = { "--ingest" => :switch, "--summary" => :switch, "--self-test" => :switch, "--repo" => :value,
+         "--since" => :value, "--window" => :integer, "--json" => :switch }.freeze
+
+def fail_with(code, what, fix)
+  warn "lead-time-phases: #{what}"
+  warn "Fix: #{fix}"
+  code
+end
+
+def env_now(env)
+  raw = env["LEAD_TIME_PHASES_NOW"].to_s
+  raw.empty? ? Time.now.utc : Time.iso8601(raw).utc
+end
+
+def state_dir(env)
+  dir = env["LEAD_TIME_STATE_DIR"].to_s
+  return [dir, nil] unless dir.empty?
+
+  common, why = LeadTimePhasesIO::Git.common_dir(AI_DIR)
+  return [nil, why] unless common
+
+  [File.join(File.dirname(common), "ai-artifacts", "lead-time"), nil]
+end
+
+def load_config(env)
+  path = env["LEAD_TIME_PHASES_CONFIG"].to_s
+  path = File.join(AI_DIR, "config", "lead-time-repos.json") if path.empty?
+  LeadTimePhases::Config.parse(File.read(path), home: env["HOME"].to_s)
+rescue SystemCallError => e
+  raise LeadTimePhases::ConfigError, "cannot read #{path} (#{e.class.name.split('::').last})"
+end
+
+# ── MANAGER: ingest ─────────────────────────────────────────────────────────
+
+module Ingest
+  module_function
+
+  def run(repo, since_opt, state, env)
+    io = LeadTimePhasesIO
+    unless File.directory?(repo.path)
+      puts "lead-time-phases: #{repo.name}: not on this machine (#{repo.path}); nothing ingested, cursor unchanged"
+      return 0
+    end
+
+    cursor = io::CursorStore.new(state, repo.name)
+    since = since_opt
+    unless since
+      since, why = cursor.read
+      return fail_with(1, "the cursor is unreadable: #{why}", "fix or remove #{cursor.path} (a removed cursor backfills #{BACKFILL_DAYS} days)") if why
+
+      since ||= (env_now(env) - (BACKFILL_DAYS * 86_400)).utc.iso8601
+    end
+
+    bin = env["LEAD_TIME_PHASES_LEAD_TIME"].to_s
+    bin = File.join(AI_DIR, "bin", "lead-time") if bin.empty?
+    res = io::LeadTimeRunner.run(bin, repo.path, since, env.to_h)
+    scan = check_scan(res, repo, since)
+    return scan if scan
+
+    rows = build_rows(repo, res.rows, env)
+    added, present = io::LedgerStore.new(File.join(state, "ledger.jsonl")).append(rows)
+    moved = move_cursor(cursor, res.meta)
+    puts "lead-time-phases: #{repo.name}: scanned since #{since}: #{res.rows.size} landing row(s), " \
+         "#{added} new in the ledger, #{present} already there; #{moved}"
+    0
+  end
+
+  # -> nil when the scan is usable, else the exit code (having said why).
+  def check_scan(res, repo, since)
+    return fail_with(1, res.error, "check that ai/bin/lead-time is present and executable") if res.error
+
+    incomplete = res.code == 3 || (res.meta.is_a?(Hash) && res.meta["incomplete"] == true)
+    if incomplete
+      $stderr.write(res.stderr)
+      return fail_with(3, "SCAN INCOMPLETE for #{repo.name} since #{since}: nothing ingested, the cursor is unchanged",
+                       "restore the probe lead-time names above and re-run; never read this as an empty window")
+    end
+    unless res.code.zero?
+      $stderr.write(res.stderr)
+      return fail_with(1, "ai/bin/lead-time exited #{res.code} for #{repo.name}", "read its error above and re-run")
+    end
+    return fail_with(1, "ai/bin/lead-time wrote no readable --meta", "re-run; lead-time writes --meta on every window scan") unless res.meta.is_a?(Hash)
+    return fail_with(1, "ai/bin/lead-time printed no JSON rows", "re-run; an empty window prints []") unless res.rows.is_a?(Array)
+
+    nil
+  end
+
+  def build_rows(repo, raw_rows, env)
+    io = LeadTimePhasesIO
+    now = env_now(env)
+    landings = raw_rows.filter_map do |row|
+      landing, why = LeadTimePhases::Landing.from_row(row, ticket: io::TicketFor.call(row))
+      warn "lead-time-phases: #{repo.name}: not ledgered: #{why}" unless landing
+      landing
+    end
+    if repo.mode == "watch"
+      return landings.map { |l| LeadTimePhases::Ledger.watch_row(repo: repo.name, landing: l, ingested_at: now) }
+    end
+
+    improve_rows(repo, landings, now, env)
+  end
+
+  def improve_rows(repo, landings, now, env)
+    io = LeadTimePhasesIO
+    events, = io::TelemetryReader.read(env)
+    common, common_why = io::Git.common_dir(repo.path)
+    no_common = LeadTimePhases::Source.could_not_look(common_why.to_s)
+    heads = landings.map { |l| l["landed_commit"] }.uniq
+    timings = io::TimingsReader.read(io::TimingsReader.path(env), heads)
+    landings.map do |l|
+      head = l["landed_commit"]
+      receipt = common ? io::ReceiptReader.read(common, head) : no_common
+      verdicts = common ? io::VerdictReader.read(common, head) : no_common
+      anchors = LeadTimePhases::Anchors.from(landing: l, events: events, receipt: receipt, verdicts: verdicts)
+      counters = LeadTimePhases::Counters.compute(landing: l, events: events, timings: timings[head])
+      LeadTimePhases::Ledger.improve_row(repo: repo.name, landing: l, anchors: anchors, counters: counters,
+                                         telemetry_status: events.status, ingested_at: now)
+    end
+  end
+
+  def move_cursor(cursor, meta)
+    through = meta["scanned_through"]
+    return "cursor unchanged (the window held no landing)" if through.nil?
+
+    cursor.write(through)
+    "cursor -> #{through}"
+  end
+end
+
+# ── MANAGER: summary ────────────────────────────────────────────────────────
+
+module Summary
+  module_function
+
+  def run(repo, window, as_json, state, env)
+    io = LeadTimePhasesIO
+    ledger = io::LedgerStore.new(File.join(state, "ledger.jsonl"))
+    all, malformed = ledger.read
+    mine = all.select { |r| r["repo"] == repo.name }
+    deduped, folded = LeadTimePhases::Batch.dedupe(mine)
+    rows = LeadTimePhases::Window.select(deduped, window)
+    report = LeadTimePhases::Stats.summarize(rows).merge(
+      "repo" => repo.name, "mode" => repo.mode, "window" => window, "ledger" => ledger.path,
+      "ledger_exists" => File.exist?(ledger.path), "ledger_rows" => mine.size, "batch_folded" => folded, "malformed_lines" => malformed,
+      "on_machine" => File.directory?(repo.path)
+    )
+    report.merge!(improve_extras(repo, rows, env)) if repo.mode == "improve"
+    report["phases_note"] = "phases are n/a by design in watch mode" if repo.mode == "watch"
+    as_json ? puts(JSON.pretty_generate(report)) : print_report(report)
+    0
+  end
+
+  def improve_extras(repo, rows, env)
+    io = LeadTimePhasesIO
+    times = rows.map { |r| LeadTimePhases::Util.time(r["landed_at"]) }.compact
+    reverts = if times.empty?
+                LeadTimePhases::Source.ok([])
+              elsif !File.directory?(repo.path)
+                LeadTimePhases::Source.could_not_look("#{repo.path} is not on this machine")
+              else
+                io::RevertCounter.count(repo.path, times.min.iso8601, times.max.iso8601)
+              end
+    src, res = io::TelemetryReader.read(env)
+    { "guards" => LeadTimePhases::Guards.compute(rows, reverts: reverts),
+      "telemetry" => telemetry_status(src, res, rows) }
+  end
+
+  # Phase events between the window's earliest dispatch (or landing) and its
+  # last landing.
+  def telemetry_status(src, res, rows)
+    looked = !(src.could_not_look? && src.items.empty?)
+    # With no store there is no counter to read: unknown, never 0.
+    failures = res && res.status != :no_store ? res.failures.values.sum : nil
+    out = { "status" => looked ? src.status.to_s : "could not look",
+            "reason" => src.reason, "write_failures" => failures,
+            "write_failures_scope" => "cumulative since the counter was created" }
+    bounds = rows.flat_map { |r| [r["start"], r["landed_at"]] }.filter_map { |x| LeadTimePhases::Util.time(x) }
+    if looked && !bounds.empty?
+      lo, hi = bounds.minmax
+      out["events_in_window"] = src.items.count { |e| (t = LeadTimePhases::Util.time(e["at"])) && t >= lo && t <= hi }
+    end
+    out
+  end
+
+  def fmt(s) = LeadTimePhases::Util.human(s)
+
+  def print_report(r)
+    puts "lead-time-phases summary: repo=#{r['repo']} mode=#{r['mode']} window=#{r['window']} " \
+         "(#{r['rows']} row(s) of #{r['ledger_rows']} in the ledger; #{r['batch_folded']} batch duplicate(s) folded)"
+    puts "  not on this machine: the ledger is all this summary reads" unless r["on_machine"]
+    puts "  #{r['malformed_lines']} malformed ledger line(s) skipped" if r["malformed_lines"].positive?
+    unless r["ledger_exists"]
+      puts "  no ledger at #{r['ledger']}: nothing has been ingested here (run --ingest --repo #{r['repo']})"
+      return
+    end
+    if r["rows"].zero?
+      puts "  the ledger has no landings for #{r['repo']} (run --ingest --repo #{r['repo']})"
+      return
+    end
+    puts format("  %-10s %4s %4s %10s %10s %10s  %s", "", "n", "n/a", "median", "p90", "sum", "top n/a reasons")
+    r["totals"].each { |name, s| puts line(name, s) }
+    if r["mode"] == "watch"
+      puts "  phases: n/a by design (watch mode)"
+    else
+      r["phases"].each { |name, s| puts line(name, s) }
+      b = r["biggest"]
+      puts b["phase"] ? "  biggest contributor: #{b['phase']} (sum #{fmt(b['sum_s'])})" : "  biggest contributor: none (#{b['reason']})"
+      print_guards(r["guards"])
+      print_telemetry(r["telemetry"])
+    end
+  end
+
+  def line(name, s)
+    reasons = s["na_reasons"].map { |x| "#{x['reason']} (#{x['count']})" }.join("; ")
+    format("  %-10s %4d %4d %10s %10s %10s  %s", name, s["n"], s["n_na"], fmt(s["median"]), fmt(s["p90"]), fmt(s["sum_s"]), reasons)
+  end
+
+  def print_guards(g)
+    show = lambda do |x|
+      next "n/a (#{x['reason']})" if x["value"].nil?
+
+      x["of"] ? "#{(x['value'] * 100).round(1)}% of #{x['of']}" : x["value"].to_s
+    end
+    puts "  guards: critic BLOCK rate #{show.call(g['critic_block_rate'])}; gate red rate " \
+         "#{show.call(g['gate_red_rate'])}; reverts on main #{show.call(g['reverts'])}"
+  end
+
+  def print_telemetry(t)
+    status = t["status"] == "could not look" ? "could not look (#{t['reason']})" : t["status"]
+    events = t.key?("events_in_window") ? "; #{t['events_in_window']} phase event(s) in the window" : ""
+    wf = t["write_failures"].nil? ? "unknown" : t["write_failures"]
+    puts "  telemetry: #{status}#{events}; write-failures #{wf} (#{t['write_failures_scope']})"
+  end
+end
+
+# ── FRAMEWORK ───────────────────────────────────────────────────────────────
+
+def self_test
+  suites = %w[phases_test.rb io_test.rb].map { |f| File.join(AI_DIR, "test", "lead-time-phases", f) }
+  missing = suites.reject { |f| File.exist?(f) }
+  return fail_with(1, "self-test suite missing: #{missing.join(', ')}", "restore ai/test/lead-time-phases/") unless missing.empty?
+
+  suites.all? { |f| system("/usr/bin/ruby", f) } ? 0 : 1
+end
+
+def main(argv, env)
+  opts = StrictArgv.parse(argv, SPEC)
+  return self_test if opts["--self-test"]
+
+  modes = %w[--ingest --summary].select { |m| opts[m] }
+  return fail_with(2, "usage error: pass exactly one of --ingest or --summary", "see --help") unless modes.size == 1
+  return fail_with(2, "usage error: --repo NAME is required", "pass --repo with a repo from ai/config/lead-time-repos.json") unless opts["--repo"]
+  return fail_with(2, "usage error: --since goes with --ingest", "drop --since, or use --ingest") if opts["--since"] && !opts["--ingest"]
+  if (opts["--window"] || opts["--json"]) && !opts["--summary"]
+    return fail_with(2, "usage error: --window and --json go with --summary", "drop them, or use --summary")
+  end
+  if opts["--window"] && !opts["--window"].positive?
+    return fail_with(2, "usage error: --window must be a positive integer", "pass --window N with N >= 1")
+  end
+
+  config = load_config(env)
+  repo = LeadTimePhases::Config.find(config, opts["--repo"])
+  since = nil
+  if opts["--since"]
+    since, why = LeadTimePhasesIO::LeadTimeLib.parse_since(opts["--since"])
+    return fail_with(2, "usage error: #{why}", "pass --since as YYYY-MM-DD or RFC 3339 with a zone") unless since
+  end
+  state, why = state_dir(env)
+  return fail_with(1, "cannot resolve the state dir: #{why}", "set LEAD_TIME_STATE_DIR, or run from a checkout of ~/dev/custom") unless state
+
+  opts["--ingest"] ? Ingest.run(repo, since, state, env) : Summary.run(repo, opts["--window"] || config.window, opts["--json"], state, env)
+rescue StrictArgv::UsageError => e
+  fail_with(2, "usage error: #{e.message}", "see --help")
+rescue LeadTimePhases::ConfigError => e
+  fail_with(2, "config refused: #{e.message}", "correct ai/config/lead-time-repos.json (repos: name, path, mode improve|watch; window; improvement_epic), or pass a configured --repo")
+rescue ArgumentError => e
+  fail_with(2, "a time is malformed (#{e.message})", "LEAD_TIME_PHASES_NOW must be RFC 3339 with a zone")
+rescue SystemCallError => e
+  fail_with(1, "state I/O failed (#{e.message})", "make the state dir (#{env['LEAD_TIME_STATE_DIR'] || 'ai-artifacts/lead-time'}) a writable directory and re-run")
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.include?("--help") || ARGV.include?("-h")
+    puts HELP
+    exit 0
+  end
+  exit main(ARGV, ENV)
+end
