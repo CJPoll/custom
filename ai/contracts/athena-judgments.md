@@ -194,7 +194,7 @@ holds the call's latency (`latency_ms`) and, when the caller declared when it
 began waiting, its wait (`wait_ms`, *Modes*). It MUST refuse a `state`, `text`
 or `body` key in the stored answers. Rows are pruned after 30 days.
 
-Text is stored in exactly two places, both for *Receiver feedback*:
+The judgment stores text in exactly two places, both for *Receiver feedback*:
 
 - **`judgment_payloads`**: the request sent to TypeSafe (`state`, `questions`,
   `model`; never the key) of every **answered product** call. An `eval:*`
@@ -424,7 +424,10 @@ Each (owner, use case) has one mode:
   caller MAY instead read the mode first and, in `off`, not ask at all. Then
   there is no judgment and so no outcome: no `judgment_calls` row, no caller
   record, no fallback telemetry, and the caller's output is today's, byte for
-  byte. `mode_off` is a `state` reason, which never alerts or moves health, so
+  byte. One fault is still recorded in `off`: a Slack route request owed from
+  before the switch that is delivered late records `route_overdue`, though
+  its line is the pre-epic line (`ai/contracts/athena-events.md` → *Routing
+  runs after the ack*). `mode_off` is a `state` reason, which never alerts or moves health, so
   skipping its record hides no fault. The Slack router reads the mode first
   (`ai/contracts/athena-events.md` → *New conversations may route by an
   advisory topic judgment*).

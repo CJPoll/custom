@@ -4176,9 +4176,20 @@ tool), DND-490 (the router), DND-491 (the harness claims on post). Until the
 router ships, every reply routes by the channel route, as before.
 
 **The claim.** A claim maps `(slack_app, team_id, channel, thread_ts)` to one
-AgentInstance. It is written by the `athena` MCP tool **`slack_thread_claim`**,
-which takes five arguments: `bot_id` (selects the app), `team_id`, `channel`,
-`thread_ts` (the parent `ts`), and `inbox_name`.
+AgentInstance. It has two writers. The harness writes one through the `athena`
+MCP tool **`slack_thread_claim`**, which takes five arguments: `bot_id`
+(selects the app), `team_id`, `channel`, `thread_ts` (the parent `ts`), and
+`inbox_name`. The Slack router writes one for a root it routed by topic (*The
+router claims a root it routed by topic*, below).
+
+**Later (2026-10-01):** a claim was written only by the `slack_thread_claim`
+MCP tool, so a reply to a root the router had sent to a topic route followed
+the channel route until the receiving session claimed the thread. Superseded by
+the router's claim (DND-1451, gen_saas PR #634, under gen_saas ADR 21). Why:
+the owner's rule is that a reply goes to the session that has the conversation
+(Cody, 2026-09-28 ~04:25Z), and with routing now asynchronous the reply is held
+until its root's route is decided, which only helps if the reply can then
+follow it.
 
 - **The machine is stamped, never supplied.** The caller's machine comes from
   its machine token (the dual above). The derived-identity arguments
@@ -4212,20 +4223,11 @@ which takes five arguments: `bot_id` (selects the app), `team_id`, `channel`,
   instance, in the transaction that stores the root's line. So the owner's
   replies in that thread follow the root to the session it went to, by the
   routing below. First claim wins here too: the router's claim never replaces
-  an existing one, and a later harness claim of that thread answers
-  `already_claimed`. The router claims nothing in `shadow`, in `off`, or for a
+  an existing one, and a later harness claim of that thread by another instance
+  answers `already_claimed` (by the same instance, `already_yours`). The router claims nothing in `shadow`, in `off`, or for a
   root that fell back to the channel route, where replies already follow the
   channel route. The claim records which writer made it (`harness` or
   `router`), so the outcome log can say why a reply went where it did.
-
-**Later (2026-10-01):** a claim was written only by the `slack_thread_claim`
-MCP tool, so a reply to a root the router had sent to a topic route followed
-the channel route until the receiving session claimed the thread. Superseded by
-the router's claim above (DND-1451, gen_saas PR #634, under gen_saas ADR 21).
-Why: the owner's rule is that a reply goes to the session that has
-the conversation (Cody, 2026-09-28 ~04:25Z), and with routing now asynchronous
-the reply is held until its root's route is decided, which only helps if the
-reply can then follow it.
 
 **Routing.** For a **thread reply only** (`thread_ts` present and not equal to
 `ts`), a live claim is the destination. Anything else follows the channel route,
@@ -4390,7 +4392,8 @@ session.
   Slack (*Domain and owner-only items*).
 
 **Routing runs after the ack.** No judgment and no other external call runs
-inside the Slack webhook (gen_saas ADR 21). Step 2c instead writes a **route
+inside the Slack webhook (gen_saas ADR 21), beyond the custody unwrap of the
+signing secret that verifying the signature needs (ADR 21 rule 2). Step 2c instead writes a **route
 request** and answers Slack; the route worker finishes it.
 
 - **The request.** One row per `event_id`, written in the same transaction as
