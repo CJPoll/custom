@@ -138,9 +138,13 @@ landing. A cron run lands that way; a directly-spawned run opens a PR, per
 `athena:shipwright-lane`.
 
 A gate or the judge refusing the change (a RED, a BLOCK) is journaled, and
-the run's action ends there. Never retry around a gate. A rejected push
-follows `athena:shipwright-lane` → *Sync up*; if that fails too, journal it
-and stop.
+the run's action ends there. Never retry around a gate. On the cron path,
+then reset your lane to origin/main (`git reset --hard origin/main`, in your
+lane only), so it holds no unlanded commit: the runner reads any lane commit
+not on origin/main as STRANDED (exit 72), keeps the branch, and counts the
+tick toward its wedge. A rejected push follows `athena:shipwright-lane` →
+*Sync up*; if that fails too, journal it and stop. A failed push is the one
+case that leaves commits in the lane.
 
 #### Recording the experiment
 

@@ -97,9 +97,14 @@ state. A run that abandons finished work is precisely a run that never reaches
 terminal state, so gating this on terminal state means the check cannot fire in
 the one case it exists for. [[athena:admiral-resume]] is the resume half of a
 pair; this is the suspend half. (A HARD kill executes nothing, so this cannot
-cover that case — the athena-shipwright cron's hourly `ready-and-idle` sweep is
+cover that case — the lead-time improver cron's hourly `ready-and-idle` sweep
+of its `watch` repos (`athena:lead-time-improve` → *For each `watch` repo*) is
 what covers a hard kill. Do not read this paragraph as making that sweep
 redundant.)
+
+**Later (2026-10-01, DND-1480):** this credited the athena-shipwright cron
+with that sweep. Superseded: the sweep moved with the shipwright's lead-time
+section into the improver cron.
 
 ---
 

@@ -12,10 +12,15 @@ work and runs in its OWN short-lived lane, created from `origin/main` and torn
 down after the run — there is no standing shared lane. Uniform however you
 were started:
 
-- a **cron** invocation is dropped by the runner into a fresh lane
-  `<repo>/.git/shipwright-lanes/run-<utc>-<pid>` on branch
-  `shipwright/run-<utc>-<pid>`, and lands on main by pushing plus a
-  main-checkout fast-forward the runner does for you;
+- a **cron** invocation is dropped by its runner into a fresh lane, and
+  lands on main by pushing plus a main-checkout fast-forward the runner does
+  for you. Two cron runners start a shipwright, and your brief names the lane:
+  - the shipwright cron (`scripts/athena-shipwright-run.sh`):
+    `<repo>/.git/shipwright-lanes/run-<utc>-<pid>` on branch
+    `shipwright/run-<utc>-<pid>`;
+  - the lead-time improver cron (`scripts/athena-leadtime-run.sh`, brief
+    `MODE: lead-time`): `<repo>/.git/leadtime-lanes/run-<utc>-<pid>` on
+    branch `leadtime/run-<utc>-<pid>`;
 - a shipwright **spawned directly** (by hand or by another agent) creates its
   OWN named branch and worktree under `~/.local/worktrees/custom/<branch>`
   (named for this unit of work) and **opens a PR** for an admiral to merge
@@ -36,13 +41,19 @@ recycle); reaping another run's lane by hand is not a thing anyone does.
 Two consequences to carry:
 
 - **Your memory does not move with your tree.** `$SHIPWRIGHT_STATE_DIR`
-  (`cursor.txt`, `journal.md`, lead-time cursors) is always the **main
+  (`cursor.txt`, `journal.md`) is always the **main
   checkout's** state, resolved via `dirname "$(git rev-parse
   --git-common-dir)"` if the env var is unset — never derived from your cwd.
+  In `MODE: lead-time` your state dir is the one your brief names
+  (`LEAD_TIME_STATE_DIR`, the main checkout's `ai-artifacts/lead-time`).
   Everything else — the code you edit, the commits you make — is your
   worktree's.
+
+  **Later (2026-10-01, DND-1480):** this skill named only the shipwright
+  cron's lane, and `$SHIPWRIGHT_STATE_DIR` held the lead-time cursors.
+  Superseded: lead time moved to its own cron runner and state dir.
 - **On the cron path, you land on main by refspec, not by branch name.** Your
-  HEAD is a per-invocation `shipwright/run-<utc>-<pid>` branch, so a bare
+  HEAD is a per-invocation `shipwright/run-*` or `leadtime/run-*` branch, so a bare
   `git pull`/`git push` does the wrong thing — spell both ends out (below). A
   **directly-spawned** run does the opposite: it commits on its own named
   branch and opens a PR, never pushing to main and never fast-forwarding the
@@ -109,10 +120,11 @@ commit. It is also how an unrelated in-flight change gets *attributed* to you
 in `git log` — the audit trail the "commit only what you changed" invariant
 relies on. If the helper reports paths dirty outside your commit, that is
 someone else's work: leave it exactly as it is — do not `git add` it, do not
-`git restore` it, and do not mention it in your message. When cron starts you,
+`git restore` it, and do not mention it in your message. When the shipwright cron starts you,
 the runner has already yielded the tick rather than begin on a dirty MAIN
-CHECKOUT — dirt there means a person is live in the repository, so your own
-lane is freshly created from `origin/main` and always clean. Started by hand
+CHECKOUT — dirt there means a person is live in the repository. The
+lead-time runner has no such yield. Either way your cron lane is freshly
+created from `origin/main` and always clean. Started by hand
 you get no such check, so in a dirty tree the rule applies harder, not less.
 
 Append a journal entry (format in the agent template). Advance `cursor.txt`
@@ -136,7 +148,7 @@ GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= \
 ```
 
 The refspec matters because your HEAD is a per-invocation `shipwright/run-*`
-branch: a bare push would advance that branch on the remote instead of
+or `leadtime/run-*` branch: a bare push would advance that branch on the remote instead of
 landing on main, and the remote rejects a non-fast-forward. If the push is
 rejected because the remote moved under you, re-run *Sync down first* and
 push again (bounded: at most a couple of attempts); if it still fails,

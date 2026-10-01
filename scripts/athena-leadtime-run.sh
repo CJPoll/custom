@@ -208,9 +208,9 @@ edit the main checkout ${MAIN_CHECKOUT}. You are on the cron path: land only \
 as athena:lead-time-improve (Landing) directs, the full bar and the push it \
 cites, with your lane HEAD pushed to main by refspec (athena:shipwright-lane, \
 Sync up). Open no PR. If a gate or the critic \
-refuses your change, journal it, then reset your lane to origin/main (git reset \
---hard origin/main, in your lane only) so it holds no unlanded commits; leave \
-commits in the lane only when the push itself failed. The runner fast-forwards \
+refuses your change, do what athena:lead-time-improve (Landing) says for a \
+refusal on the cron path: journal it and reset your lane, so it holds no \
+unlanded commit. The runner fast-forwards \
 the main checkout after you exit. State dir: ${STATE_DIR} (LEAD_TIME_STATE_DIR \
 is already exported with it). The runner does the telemetry prune; do not prune. \
 Write your summary lines to exactly this file: ${SUMMARY}. Your hard constraint \

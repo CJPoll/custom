@@ -61,7 +61,7 @@ its `Fix:`. A refusal is a fact to report, not something to work around.
 
 ## The shipwright pass
 
-Run once per shipwright cron run, after the lead-time loop. The state lives in
+Run once per shipwright cron run, after the report mining. The state lives in
 `$SHIPWRIGHT_STATE_DIR` beside `cursor.txt`.
 
 1. **Scan tickets for hand edits** (DND-1469, DND-1470). It runs before step 2, so
