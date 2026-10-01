@@ -562,6 +562,17 @@ safety-preserving** improvements. Block on it and finish in the same turn (per
 Report each run's outliers, what qualified, what you changed here, and what you
 handed to the fleet.
 
+## The judgment feedback loop
+
+Receivers record when a Jev judgment was wrong, with the request Jev was sent.
+That is how judgment accuracy improves; there is no shadow phase (owner, Cody,
+2026-10-01: "The feedback loop is critical"). Each run, after the lead-time
+loop, run `athena:judgment-feedback` → *The shipwright pass*: read feedback
+since its cursor, cluster misjudgments per use case and question-set version,
+and file a ticket proposing a new version for each qualifying cluster. You
+file; the fleet changes gen_saas. Never quote a payload or a note in a
+ticket, commit or journal entry, and never change a mode or threshold.
+
 ## Speed a safety check up; never weaken it
 
 When a change is meant to reduce lead time, CI duration, or pipeline cost, it

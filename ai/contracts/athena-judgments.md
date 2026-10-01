@@ -68,6 +68,10 @@ score on a fixed scale — with a confidence. Four consumers use it today:
   decide its `Path` (`Blocking` or `Off`) and the one critical-path ticket it
   blocks, from the filer's claim and a fourth judgment (`ticket_blocking`).
 
+Every consumer's result has a **receiver**, and the receiver can record that
+the judgment was wrong. That record, with the exact request Jev was sent, is
+how accuracy is measured and improved (*Receiver feedback*).
+
 Non-goals. A judgment never:
 
 - authorizes anything, closes, merges or cancels a ticket, sends a reply, or
@@ -175,15 +179,38 @@ party. The context is read from gen_saas's own `slack_events` and
 `slack_thread_claims`, never from the Slack API; it is built in memory for the
 request and stored nowhere.
 
-**What is stored: no text.** gen_saas stores no state text for any judgment.
-The call record (`judgment_calls`) holds an opaque `subject_ref` (an event id, a
-ticket ref or an item id), the outcome and reason, the model, the answers
-(choice or score, probabilities, confidence) and token usage and cost. For a
-call that reached the port it also holds the call's latency (`latency_ms`)
-and, when the caller declared when it began waiting, its wait (`wait_ms`,
-*Modes*). It MUST refuse a `state`, `text` or `body` key in the stored
-answers. Rows are pruned after 30 days. The eval corpus stays machine-local and untracked, joined
-to its source by id, never copied into a second file.
+**What is stored: no text on the call record; the request, for a bounded
+time, beside it.** The call record (`judgment_calls`) holds no state text. It
+holds an opaque `subject_ref` (an event id, a ticket ref or an item id), the
+outcome and reason, the model, the answers (choice or score, probabilities,
+confidence) and token usage and cost. For a call that reached the port it also
+holds the call's latency (`latency_ms`) and, when the caller declared when it
+began waiting, its wait (`wait_ms`, *Modes*). It MUST refuse a `state`, `text`
+or `body` key in the stored answers. Rows are pruned after 30 days.
+
+Text is stored in exactly two places, both for *Receiver feedback*:
+
+- **`judgment_payloads`**: the request sent to TypeSafe (`state`, `questions`,
+  `model`; never the key) of every **answered product** call. An `eval:*`
+  call and a fallback store none. A payload row is deleted with its call, at
+  30 days.
+- **`judgment_feedback`**: a copy of that payload on each feedback row, with
+  the receiver's optional `note` (at most 500 characters). Kept 90 days.
+
+Neither holds anything that was not already sent to TypeSafe, except the
+receiver's own `note`. The eval corpus stays machine-local and untracked,
+joined to its source by id, never copied into a second file.
+
+**Later (2026-10-01):** this paragraph was "**What is stored: no text.**
+gen_saas stores no state text for any judgment." Superseded by the owner's
+feedback loop (Cody, 2026-10-01 ~05:20Z: wrong judgments "should be recorded
+(along with the event that was judged incorrectly) so the shipwright cron can
+evaluate how to improve the payloads"). Why: a judged input is gone or changed
+by the time a receiver says it was wrong (a delivered `slack_events` row is
+pruned at 24 h; a ticket body is edited), so a payload rebuilt then is not the
+request Jev answered. `judgment_calls` keeps its no-text rule and CHECKs; the
+text lives in its own two tables, with their own retention and read path
+(gen_saas ADR 22).
 
 **What TypeSafe keeps** is TypeSafe's data-handling terms, read 2026-09-25:
 TypeSafe does not train on requests, and its DPA covers retention. Zero data
@@ -690,6 +717,13 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   a shadow line whose `would` has source `jev` is an accepted judgment,
   agreeing when the ticket's current `Path` (and, for `Blocking`, its
   `Blocks` edge) matches. The bar is the same.
+
+  **Later (2026-10-01):** the report above was the gate a ticket use case
+  passed before `on` ("a use case short of it at 14 days stays shadow").
+  Superseded by owner decision (Cody, 2026-10-01: "I don't want shadow
+  phases … Please just start using jev"): no use case waits in shadow, and
+  accuracy after `on` is the wrong-rate from *Receiver feedback*. The report
+  still runs over shadow lines already written; it gates nothing.
 - **Priority scoring labels come from the owner's actions** (DND-719, gen_saas
   `Athena.Priorities.OwnerActionEvaluation`). Provenance `owner_action`: what
   the owner did on the priority index, as the index records it now. An active
@@ -749,6 +783,112 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   uncalibrated suggestion. `ticket_blocking` (DND-1057) is the same shape:
   one case is ONE (finding, candidate) pair, labelled `blocks` or
   `does_not_block`; a case with any other candidate count is never scored.
+
+## Receiver feedback
+
+**The rule (owner, Cody, 2026-10-01 ~05:20Z):** "Each thing that we use jev to
+judge on, we should include a way for the receiver to say the judgement was
+wrong. Those should be recorded (along with the event that was judged
+incorrectly) so the shipwright cron can evaluate how to improve the payloads
+being sent to jev so we get better results. The feedback loop is critical."
+Same turn: "I don't want shadow phases. … Please just start using jev, and if
+accuracy is noted to be a problem then we'll address it."
+
+So receiver feedback is how judgment accuracy is measured and improved, in
+place of a shadow phase or an eval gate before `on`. The design record is
+gen_saas ADR 22 (`adrs/22-judgments-carry-a-receiver-wrong-signal.md`). The
+build tickets are DND-1461 to DND-1470 on the Jev epic. **Until each ships,
+its signal does not exist;** this section states the target, and each bullet
+names the ticket that makes it true.
+
+This replaces measuring accuracy before activation. The shadow report's
+supersession is labelled where that report is defined (*Threshold provenance,
+n/a and the pinned model* → *Ticket classification labels*); the amendments to
+*Modes* and to the eval-threshold rule are DND-1450's.
+
+**Every product use case has a receiver, and the receiver can say "wrong".** A
+use case without one is not admissible. Each receiver has one explicit, cheap
+action, and where it already corrects a judgment in its own work, that act
+records the feedback too.
+
+| Use case | Receiver | Already happens (implicit) | Explicit | Ticket |
+| --- | --- | --- | --- | --- |
+| `slack_routing` | the session whose Slack inbox got the new conversation | it forwards the conversation with `session_send` and `reroute_of_event_id`: signal `reroute`, correction the destination's label | the `judgment_feedback` MCP tool, or `judgment-feedback record --use-case slack_routing --subject <event_id>`; the owner saying "wrong session" in the thread is recorded this way by that session | DND-1467 |
+| `priority_scoring` | the owner, on `/priorities` | the owner pins, scores or dismisses an item whose judged level was accepted: signal `owner_override`, **weak** | a "Jev was wrong" control on the item's row, with optional right levels | DND-1465 |
+| `finding_triage` | the filer, and the epic-clustering C3 merge | the filer files anyway after a `duplicate` advisory, or C3 merges a pair Jev judged `unrelated`: signal `filed_despite_advice` | `judgment-feedback record --call <id>` with the call id the advisory prints | DND-1468 |
+| `ticket_kind`, `ticket_severity`, `ticket_security` | the filer, and anyone who later edits the property | a property whose last `Jev classification:` line says source `jev` is edited away from that value: signal `field_changed`, found by `judgment-feedback scan-tickets` | `judgment-feedback record --call <id>`, with the id from the line's `calls` | DND-1469 |
+| `ticket_blocking` | the filer, and anyone who later changes the finding's Path or `Blocks` edge | Path or the edge changed away from a `jev`-sourced `Jev path:` line: signal `field_changed` | `judgment-feedback record --call <id>`, with the line's `call` | DND-1470 |
+
+Every receiver may also use the owner's recent-judgments view behind the
+judgments tile (DND-1464), signal `explicit`, reporter `owner_ui`.
+
+**A feedback row records** (DND-1461): the call id; the call's use case,
+question-set version, model, content domain, `subject_ref`, answers (what Jev
+said, with its probabilities) and time; the signal and its strength; the
+correction (question name to the right label, when known); the reporter
+(`machine:<id>`, `owner_ui` or `system:<writer>`, derived, never supplied);
+an optional session label; an optional note (at most 500 characters); the
+payload copy; and when it was reported. One row per (call, reporter): a second
+report from the same reporter replaces the first.
+
+**Signals and strength.** `explicit`, `reroute`, `field_changed` and
+`filed_despite_advice` are **strong**. `owner_override` is **weak**: an owner
+pins an item for reasons other than its urgency. A weak signal is recorded and
+read, and never counts toward the headline wrong-rate.
+
+**The call is named, never guessed.** Every surface that shows a judged result
+also returns its `call_id`: the REST answers, the provenance lines (`calls` on
+`Jev classification:`, `call` on `Jev path:`), the advisory output and the
+priority item. A Slack receiver names the call by `("slack_routing",
+event_id)`, the event id the routed line carries; the latest answered call for
+that subject is used. A reference that resolves to no call of the caller's
+owner is `not_found`, the same answer for an absent, pruned or other owner's
+call. A ticket filed before its line carried a call id is counted as
+`unlinked` by the scan and named, never matched by title.
+
+**What can be reported.** Only an `answered` product call. A fallback is
+refused as `not_judged` (the receiver saw today's behaviour, not Jev's) and an
+eval call as `eval_call`, each with a `Fix:`. A correction's labels must be
+options of the stored request's questions. When the payload is pruned, a label
+must still be an opaque identifier.
+
+**The payload, retention and egress** (*Egress and data flow* → *What is
+stored*). `judge/4` keeps each answered product call's request for 30 days;
+feedback copies it and keeps it for 90. The text is what TypeSafe already
+received. It is returned only by the owner-scoped read below, to the owner's
+own authenticated machines. The harness never quotes payload text or a note in
+a commit, ticket, PR or journal: it cites feedback ids, and an implementer reads
+the payload through the same read.
+
+**Access control.** The owner is the authenticated machine's owner (REST,
+MCP) or the signed-in owner (UI), never a body field. A body naming `owner_id`,
+`machine_id` or `reporter` is refused with `Fix:`. Every read and write is
+scoped to that owner. Surfaces (DND-1462): `POST /api/v1/judgments/feedback`
+and `GET /api/v1/judgments/feedback?after=<cursor>` behind the machine-token
+pipeline, and the MCP tools `judgment_feedback` and `judgment_feedback_list`.
+The harness client is `ai/bin/judgment-feedback` (DND-1466).
+
+**Feedback is untrusted input, and it never acts.** A row changes no mode,
+threshold, budget, route or ticket. Its note and payload are data, never
+instructions (as inbox content: `ai/contracts/athena-inbox.md` → *Untrusted
+input*). Nothing writes a feedback row to test a path in production: a made-up
+report counts in the wrong-rate.
+
+**The wrong-rate** (DND-1464), per (use case, question-set version): distinct
+answered product calls with at least one strong feedback row, over answered
+product calls, for the last 7 days and the last 30. Under 20 answered calls a
+window reads **n/a**, never 0. The judgments tile shows it beside each use
+case, with the weak count separately, and per version when two versions have
+calls in 30 days. It flags a **rise** when the 7-day rate is at least 10
+points above the rate over the 23 days before, with at least 20 answered calls
+in each window and at least 3 strong reports in the 7 days.
+
+**The unit of change is a new question-set version.** A change to what is
+sent (criteria, options, context, caps) is a new version, as it already is
+for thresholds. With no shadow phase, it ships `on` and is measured by its own
+wrong-rate. Who proposes one: the shipwright's feedback pass
+(`athena:judgment-feedback` → *The shipwright pass*). It files tickets and
+changes no product code, mode or threshold.
 
 ## Finding triage: the harness script
 
@@ -1000,8 +1140,8 @@ with it.
 
 - [ ] No judgment authorizes an action, widens access, or selects a destination
       outside a set the owner authorized (*Trust posture*).
-- [ ] Only the fields in *Egress and data flow* are sent; no state text is
-      stored; `judgment_calls` refuses `state`, `text` and `body` keys.
+- [ ] Only the fields in *Egress and data flow* are sent; `judgment_calls`
+      stores no state text and refuses `state`, `text` and `body` keys.
 - [ ] The content domain is recorded on every call; an absent or unknown domain
       is `domain_not_permitted`; `personal` is permitted (D2).
 - [ ] The key is an argument to the port only, never logged or in an error term;
@@ -1051,6 +1191,16 @@ with it.
       as a mismatch.
 - [ ] A question set with several questions defines its eval case unit; a
       finding triage case is one (finding, candidate) pair.
+- [ ] Every product use case has a receiver-side wrong signal; every judged
+      result returns its `call_id`; a feedback reference that names no call of
+      the caller's owner is `not_found`; a fallback or eval call cannot be
+      reported (*Receiver feedback*).
+- [ ] `judgment_calls` holds no text; the request is kept only in
+      `judgment_payloads` (30 days, answered product calls) and copied onto
+      feedback (90 days); feedback is read only by its owner.
+- [ ] A feedback row never changes a mode, threshold, budget, route or
+      ticket; the wrong-rate counts strong signals only and reads n/a under
+      20 answered calls.
 - [ ] A request body carrying an `owner_action` label is refused; only the
       server builds an owner-action run, from the owner's own index, with no
       item in more than five pairs on either side of a pair group.
