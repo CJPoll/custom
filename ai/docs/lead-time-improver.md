@@ -89,6 +89,16 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    coverage, which nobody asked for. Moving them in `watch` mode keeps
    coverage, keeps one loop acting, and makes "expand to gen_saas" a one-line
    config change.
+
+   **Later (2026-10-01, DND-1533):** `improve` is no longer custom only. Each
+   machine chooses its modes, and its list may name a product repo in
+   `improve`. Such a repo is measured like custom (ingest, judge, summary,
+   biggest) and acts in custom only: a harness change lands in custom and is
+   recorded with `experiment record --repo R --change-repo custom`; a change
+   that belongs in the product repo goes to an architect, filed on that
+   repo's `product_epic`. Design: the epic's Architecture & Engineering page,
+   *Multi-project, per-machine config (2026-10-01)*. Procedure:
+   `athena:lead-time-improve` → *An improve repo other than custom*.
 4. **Measure every landing, not every PR.** A landing is a push to
    `refs/heads/main`, read from the GitHub activity log. It may come from a PR
    merge, an ff-landed PR, or a direct push. A landing's tickets come from

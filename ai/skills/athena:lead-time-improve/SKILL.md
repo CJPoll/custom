@@ -1,6 +1,6 @@
 ---
 name: athena:lead-time-improve
-description: The procedure an athena-shipwright runs when its brief says `MODE: lead-time` (a lead-time improver run) — for each `improve` repo ai/bin/lead-time-repos resolves for this machine, ingest the phase ledger, judge pending before/after experiments (keep, revert, pending, inconclusive; decline a revert the hard constraint forbids) with scripts/experiment, pick the biggest contributor, act exactly once (one safety-preserving change, one instrumentation change, one architect, or no action), and journal; for each `watch` repo, the outlier scan and architect hand-off the shipwright ran before. Use whenever a brief or prompt says "MODE: lead-time" or "lead-time improver run".
+description: The procedure an athena-shipwright runs when its brief says `MODE: lead-time` (a lead-time improver run) — for each `improve` repo ai/bin/lead-time-repos resolves for this machine, ingest the phase ledger, judge pending before/after experiments (keep, revert, pending, inconclusive, confounded; decline a revert the hard constraint forbids) with scripts/experiment, pick the biggest contributor, act exactly once (one safety-preserving change, one instrumentation change, one architect, or no action), and journal; for each `watch` repo, the outlier scan and architect hand-off the shipwright ran before. Use whenever a brief or prompt says "MODE: lead-time" or "lead-time improver run".
 ---
 
 # athena:lead-time-improve
@@ -76,8 +76,8 @@ Telemetry pruning is the runner's, not yours.
 ### 2. Judge pending experiments
 
 `experiment judge --repo R`, before anything new starts. Per pending
-experiment it prints `keep`, `revert`, `pending` or `inconclusive`, with the
-before and after numbers, and records the verdict.
+experiment it prints `keep`, `revert`, `pending`, `inconclusive` or
+`confounded`, with the before and after numbers, and records the verdict.
 
 - **revert** (or a `REVERT OWED` line, repeated each run until main carries
   the revert): first test the revert against the hard constraint
@@ -117,6 +117,10 @@ before and after numbers, and records the verdict.
   writes it; only the `decline` verb does.
 - **keep, inconclusive:** journal them. An inconclusive experiment no longer
   blocks its phase.
+- **confounded** (DND-1529, *Landing*): another commit's trailer on the
+  same phase landed inside the window. Journal it with the commits it names.
+  It is treated as inconclusive: never keep, never revert, and it no longer
+  blocks its phase.
 - **pending** is never a gain. Never report it as one.
 
 ### 3. Summarize
@@ -146,11 +150,17 @@ now a candidate too, so a repo's post-merge CI and deploy time can be picked.
 tail, `tail` is never a candidate; `biggest.tail_reason` says why
 (`ai/bin/lead-time-phases --help`). For `tail`, its `n`, `n_na` and
 `na_reasons` are in `totals.tail`, not `phases`. `experiment` records phases
-only and refuses `tail`. The product-side action for a `product` lever is not
-set by this step (DND-1533, DND-1542). Until it is, the harness work goes on:
-journal the finding "tail dominant: <sum>, lever product", then run the
-choice rule below on the largest phase by `phases.<p>.sum_s`, as if it were
-`biggest`. With no phase measured, the action is instrumentation as above.
+only and refuses `tail`. In an improve repo other than custom, a `product`
+lever is handed off: *An improve repo other than custom* below. In custom,
+the harness work goes on: journal the finding "tail dominant: <sum>, lever
+product", then run the choice rule below on the largest phase by
+`phases.<p>.sum_s`, as if it were `biggest`. With no phase measured, the
+action is instrumentation as above.
+
+**Later (2026-10-01, DND-1533):** this read "The product-side action for a
+`product` lever is not set by this step (DND-1533, DND-1542). Until it is,
+the harness work goes on", for every repo. Superseded for an improve repo
+other than custom: its product lever is now the architect hand-off below.
 
 **The choice rule:** if the biggest phase has `n_na > n` in the window, the
 finding is "cannot measure <phase>" and the action is **instrumentation** for
@@ -192,7 +202,9 @@ Exactly one of these per improve repo per run:
 3. **Spawn ONE `athena-architect`** when the improvement needs design. Brief
    it with the summary JSON, the biggest phase and its n/a reasons, the
    experiments' state, and the constraint (it carries the same block). It
-   files DND tickets on `improvement_epic`, through `notion-personal`. Block
+   files DND tickets on `improvement_epic`, through `notion-personal`; a
+   product-lever finding in a repo other than custom goes on that repo's
+   `product_epic` instead (*An improve repo other than custom*). Block
    on it and finish in the same turn; never end the turn parked on it.
 4. **`no action`, with the reason.**
 
@@ -273,8 +285,8 @@ experiment record --repo R --phase P --kind change --metric phase \
   either side of it are the before- and after-sets. `ai/bin/lead-time-repos --repo-path C` shows which
   checkout C resolves to; custom resolves even where it is not configured.
   An unresolvable change repo is refused (exit 2).
-- A refusal (exit 2) names the pending experiment that blocks it. Do not work
-  around it.
+- A refusal (exit 2) names the pending experiment that blocks it, or the
+  trailer the commit lacks (*Landing*). Do not work around it.
 - A directly-spawned run whose PR has not landed yet journals "awaiting
   landing: PR #n" under `### Experiments`. The next run records it once the
   commit is on the main it landed in.
@@ -307,6 +319,51 @@ Append to `<state>/journal.md`, in the shipwright's journal shape (its
 
 Every candidate the hard constraint rules out goes under *Decisions /
 Won't-change*, with the reason.
+
+## An improve repo other than custom
+
+An improve repo R other than custom (gen_saas, on a machine whose list has
+it in `improve`) runs steps 1 to 6 above. Only where its action lands
+differs.
+
+- **Measured like custom.** Ingest, judge, summarize and pick the biggest
+  contributor as above, with `--repo R`. The ledger rows, cursor and
+  experiments are R's.
+- **A harness change lands in custom.** An action under step 5.1 or 5.2
+  changes custom (a skill, a gate check, test-slot, an emitter), in your
+  custom lane, through *Landing*. Record it on R, attributed to the custom
+  commit, once that commit is on custom's main:
+
+  ```
+  experiment record --repo R --change-repo custom --phase P --metric M \
+    --commit <sha on custom's main> --kind change --hypothesis-file <file>
+  ```
+
+  The commit carries the `Lead-time-experiment` trailer naming R, as
+  *Landing* says (DND-1529). The split is `live_at` (*Recording the experiment*).
+- **On a machine that measures R but not custom**, custom's landings are
+  never ingested there, so no custom ledger row ever carries the commit.
+  `live_at` stays on its committer-time fallback (`live_at_source:
+  committer`) for good: record warns, and judge and list print "(committer
+  time …)". A fast-forward push lands after that time, often by a whole gate
+  and critic round, so R's landings in that gap count in the after-set.
+  Journal each such record as "live_at committer time: custom not measured
+  on this machine".
+- **A change that belongs in R itself is never yours.** Its CI workflow,
+  its own gate, its deploy: any `biggest.lever` of `product`. Do not land
+  it. First read the journal: if an earlier run already handed off this
+  finding for R (the same phase, its ticket not closed), journal "already
+  handed off: <ticket>" and run step 4's choice rule on the largest phase
+  by `phases.<p>.sum_s` instead, as custom does. Otherwise the run spawns
+  ONE `athena-architect` (step 5.3), briefed as there plus the repo's name.
+  It files the change on R's `product_epic` (`ai/bin/lead-time-repos
+  --json`, which falls back to `improvement_epic` when R names none), with
+  Area Product. The journal records the hand-off and its ticket under
+  *Changed*. That is the run's one action for R.
+- **R is never committed to.** Your lane is a custom worktree. R is read for
+  measurement only, as a `watch` repo is (*For each `watch` repo* →
+  *Applying what comes back*; `ai/docs/lead-time-improver.md` → *Who may do
+  what*).
 
 ## For each `watch` repo
 
@@ -399,7 +456,7 @@ Write one summary line per repo to the summary file your brief names; else
 `<state>/runs/<UTC %Y%m%dT%H%M%SZ>.summary`:
 
 ```
-repo=<R> mode=improve biggest=<phase|none> action=<change|instrumentation|architect|revert|no-action> experiments=keep:<n>,revert:<n>,pending:<n>,inconclusive:<n>,declined:<n>,held:<n> reason="<one line>"
+repo=<R> mode=improve biggest=<phase|none> action=<change|instrumentation|architect|revert|no-action> experiments=keep:<n>,revert:<n>,pending:<n>,inconclusive:<n>,confounded:<n>,declined:<n>,held:<n> reason="<one line>"
 repo=<R> mode=watch outliers=<n> qualified=<n> handed_off=<n> ready_and_idle=<n|unavailable>
 repo=<R> skipped="<reason>"
 ```
