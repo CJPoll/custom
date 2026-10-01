@@ -222,7 +222,7 @@ module LeadTimeExperiment
   def ledger_live_candidates(rows, committed_at:)
     from = committed_at - LIVE_SKEW_S
     rows.select { |r| SHA_RE.match?(r["landed_commit"].to_s) && (t = at(r)) && t >= from }
-        .sort_by { |r| [r["landed_at"].to_s, r["landed_commit"].to_s] }
+        .sort_by { |r| [at(r), r["landed_commit"].to_s] }
         .uniq { |r| r["landed_commit"] }
   end
 

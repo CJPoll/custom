@@ -712,6 +712,11 @@ check("ledger_live_candidates: a landing more than the skew before the commit wa
   cands.none? { |r| r["landed_commit"] == "a" * 40 }
 end
 check("ledger_live_candidates: a row with no landed commit is never a candidate") { cands.none? { |r| r["landed_commit"].nil? } }
+check("ledger_live_candidates: ordered by time, not by the timestamp's text (a non-Z offset)") do
+  mixed = X.ledger_live_candidates([crow.call("2026-10-01T13:00:00Z", "b" * 40), crow.call("2026-10-01T06:50:00-06:00", "d" * 40)],
+                                   committed_at: t("2026-10-01T12:30:00Z"))
+  mixed.map { |r| r["landed_commit"][0] } == %w[d b]
+end
 check("cross_text: a same-repo experiment prints nothing new") { X.cross_text(exp).nil? }
 
 check("hold_text: a cross-repo revert names the change repo it lands in") do

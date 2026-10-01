@@ -497,6 +497,17 @@ has "... from the ledger" "${UROW}" '"live_at_source":"ledger"'
 has "... so gen_saas's 12:00 landing is in the before-set" "${UROW}" '"to":"2026-10-02T12:00:00Z"'
 lacks "... and record warns of no fallback" "$(err)" "committer time"
 
+echo "== cross-repo: a ledger landing git cannot check is could not look, never 'does not carry it'"
+STATET="${TMP}/statet"
+mkdir -p "${STATET}"
+gs_ledger "${STATET}/ledger.jsonl" "$(printf 'd%.0s' $(seq 40))" 500 2026-10-02T00:00:00Z
+UNSEEN="$(printf 'f%.0s' $(seq 40))"
+printf '%s\n' "{\"schema\":1,\"repo\":\"custom\",\"mode\":\"improve\",\"ticket\":\"DND-9903\",\"landed_commit\":\"${UNSEEN}\",\"landed_at\":\"2026-10-02T12:00:00Z\",\"landed_via\":\"push\",\"phases\":{}}" >>"${STATET}/ledger.jsonl"
+custom_rows "${STATET}/ledger.jsonl"
+eq "record with an unknown landed commit before the carrier: exit 0" "$(LEAD_TIME_STATE_DIR="${STATET}" ATHENA_LEADTIME_CONFIG="${XCONF}" LEAD_TIME_EXPERIMENT_NOW=2026-10-03T12:00:00Z run record --repo gen_saas --change-repo custom --phase verify --metric phase --commit "${XC}" --kind change --hypothesis-file "${HYP}")" "0"
+has "... the scan stops there: the committer fallback, never the later 12:15 row" "$(recrow "${STATET}/experiments.jsonl" "${XID}")" '"live_at":"2026-10-02T11:30:00Z","live_at_source":"committer"'
+has "... and says it could not look" "$(err)" "could not look whether ${UNSEEN:0:12} carries it: ${UNSEEN:0:12} is not in"
+
 echo "== cross-repo: judge moves a committer-time live_at to the ledger landing once ingested"
 STATEV="${TMP}/statev"
 mkdir -p "${STATEV}"
