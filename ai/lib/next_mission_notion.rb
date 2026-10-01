@@ -43,8 +43,23 @@ class NextMissionNotion
     BASE = URI("https://api.notion.com")
     ATTEMPTS = 3
 
-    def initialize(token)
+    LOOPBACK_HOSTS = %w[127.0.0.1 localhost].freeze
+
+    # base: the API origin. Only the real one, or a loopback http origin for a
+    # test's fake server. wait: called with the seconds to wait before a retry;
+    # a test injects a recorder so no test waits on the wall clock (DND-1222).
+    def initialize(token, base: BASE, wait: ->(seconds) { sleep(seconds) })
       @token = token
+      @base = self.class.checked_base(base)
+      @wait = wait
+    end
+
+    def self.checked_base(base)
+      uri = base.is_a?(URI::Generic) ? base : URI(base.to_s)
+      return uri if uri == BASE
+      return uri if uri.scheme == "http" && LOOPBACK_HOSTS.include?(uri.host) && uri.path.to_s.empty?
+
+      raise ArgumentError, "Notion base #{uri} is neither #{BASE} nor a loopback http origin"
     end
 
     def call(method, path, body = nil)
@@ -56,7 +71,7 @@ class NextMissionNotion
         return parse(res.body, method, path) if code.between?(200, 299)
 
         if (code == 429 || code >= 500) && attempt < ATTEMPTS
-          sleep([[res["Retry-After"].to_f, 1.0].max, 10.0].min)
+          @wait.call([[res["Retry-After"].to_f, 1.0].max, 10.0].min)
           next
         end
         raise ReadError, "HTTP #{code} on #{method.upcase} #{path}: #{error_message(res.body)}"
@@ -76,7 +91,8 @@ class NextMissionNotion
         req["Content-Type"] = "application/json"
         req.body = JSON.generate(body)
       end
-      Net::HTTP.start(BASE.host, BASE.port, use_ssl: true, open_timeout: 15, read_timeout: 30) { |h| h.request(req) }
+      Net::HTTP.start(@base.host, @base.port, use_ssl: @base.scheme == "https",
+                                              open_timeout: 15, read_timeout: 30) { |h| h.request(req) }
     end
 
     def parse(raw, method, path)
