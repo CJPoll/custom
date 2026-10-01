@@ -14,21 +14,21 @@ Decisions 2, 3 and 8).
 
 Faster, never weaker: `ai/blocks/ops/safety-checks.md`, which you carry
 verbatim as *Speed a safety check up; never weaken it*. It outranks every
-speedup. Out of bounds, by citation and never by your own reading:
+speedup. Out of bounds:
 
-- anything that block forbids: dropping, skipping, downgrading or
-  path-excluding a check;
-- moving a bar (`~/.claude/CLAUDE.md` → *Owner approval policy*, item 5);
-  that stays with Cody.
+- everything that block forbids;
+- moving a bar: `~/.claude/CLAUDE.md` → *Owner approval policy*, item 5.
 
 A candidate that needs either goes under *Decisions / Won't-change* with the
 reason. It is never landed, and it is never your run's action.
 
 ## Setup
 
-- **State dir:** the one your brief names; else
-  `<main checkout>/ai-artifacts/lead-time` (gitignored), where
-  `<main checkout>` is `dirname "$(git rev-parse --git-common-dir)"`. It holds
+- **State dir:** `<main checkout>/ai-artifacts/lead-time` (gitignored), where
+  `<main checkout>` is `dirname "$(git rev-parse --path-format=absolute
+  --git-common-dir)"`. Both tools resolve it the same way. When your brief
+  names another state dir, `export LEAD_TIME_STATE_DIR=<that dir>` before
+  running any tool, so the tools and your journal agree. It holds
   `ledger.jsonl`, `cursor.<repo>.txt`, `experiments.jsonl`, `journal.md`,
   `watch-cursor.<repo>.txt` and `runs/`. Never derive it from your cwd.
 - **Lane:** `athena:shipwright-lane` (*Where you run*, *Sync down first*).
@@ -57,9 +57,11 @@ not look" (no ledger). Neither is "nothing to do".
 ### 1. Ingest
 
 `lead-time-phases --ingest --repo R`. Exit 3: nothing was ingested and the
-cursor stayed. Journal it and take **no action** on R this run ("cannot
-measure: SCAN INCOMPLETE"). Never act on a stale window as if it were
-current. Telemetry pruning is the runner's, not yours.
+cursor stayed. Exit 1 or 2: a tool, state or config fault. Either way,
+journal it with the error line and take **no action** on R this run
+("cannot measure: <why>"). Never act on a stale window as if it were
+current. The same holds for an `experiment` exit 1, 2 or 3 in step 2.
+Telemetry pruning is the runner's, not yours.
 
 ### 2. Judge pending experiments
 
@@ -67,9 +69,12 @@ current. Telemetry pruning is the runner's, not yours.
 experiment it prints `keep`, `revert`, `pending` or `inconclusive`, with the
 before and after numbers, and records the verdict.
 
-- **revert:** this run's one action is a `git revert` of that experiment's
-  commit, landed through *Landing* below. Skip steps 4 and 5. If two reverts
-  are due, revert the first and journal the second for the next run.
+- **revert** (or a `REVERT OWED` line, repeated each run until main carries
+  the revert): this run's one action is a `git revert` of that experiment's
+  commit, landed through *Landing* below. Skip steps 4 and 5. Judge records
+  `reverted` once main carries it, and until then no new change starts on
+  that phase. If two reverts are owed, land the first; the second is still
+  owed next run.
 - **keep, inconclusive:** journal them. An inconclusive experiment no longer
   blocks its phase.
 - **pending** is never a gain. Never report it as one.
@@ -98,8 +103,9 @@ it. Read its top `na_reasons` first:
   "measurement maturing: <phase> n/a on <n_na> pre-emitter landings".
 
 Otherwise the biggest phase is the target of a **change**, unless
-`experiment list --repo R` shows a pending `change` on it. Then the action is
-`no action` ("<phase> has a pending experiment <id>"), or instrumentation on
+`experiment list --repo R` shows a `change` on it that is PENDING or owes a
+REVERT. Then the action is `no action` ("<phase> has experiment <id>
+open"), or instrumentation on
 another phase if one qualifies by the rule above. Never start a second change
 on a phase with one pending: two changes confound each other.
 
@@ -126,17 +132,15 @@ then the fix, then `ai/bin/harness-gate` green in your lane.
 
 #### Landing
 
-Follow `athena:shipwright-lane` for the lane and the commit wrapper, and
-`athena:merge-boarding` → *The merge bar* for the no-CI `~/dev/custom`
-landing (the ff push under `custom-merge.lock`). The bar for every landing:
+The lane and the commit wrapper are `athena:shipwright-lane`. The bar and the
+push are `athena:merge-boarding` → *The merge bar*, its no-CI `~/dev/custom`
+landing. A cron run lands that way; a directly-spawned run opens a PR, per
+`athena:shipwright-lane`.
 
-- a critic PASS recorded on the head (`ai/bin/critic-review`);
-- `integration-gate` OK on the head you push.
-
-A refused landing (red gate, a BLOCK, a rejected push) is journaled, and the
-run's action ends there. Never retry around a gate, never `--no-verify`,
-never force. A directly-spawned run opens a PR instead of pushing
-(`athena:shipwright-lane`); it records the experiment once the PR has landed.
+A gate or the judge refusing the change (a RED, a BLOCK) is journaled, and
+the run's action ends there. Never retry around a gate. A rejected push
+follows `athena:shipwright-lane` → *Sync up*; if that fails too, journal it
+and stop.
 
 #### Recording the experiment
 
@@ -221,12 +225,16 @@ as findings.
 Their `tail_seconds` is still measured, so they still count toward a `tail`
 outlier or a stage dominating the `tail`, which is walt_ui's lever.
 
+The watch tools take the repo's checkout PATH (the config's `path`), not its
+name: `--repo ~/dev/gen_saas`, not `--repo gen_saas`.
+
 **Also sweep for finished work nobody is merging** — `ai/bin/ready-and-idle
 --repo <R>` lists open MRs that are green, unblocked and idle; `lead-time` sees
 landed requests only, never open ones. Report them; the admiral merges, not you. Read the exit code: **3 =
 UNAVAILABLE**, no list; **4 = the list is COMPLETE, act on it** — only `drift`
 went soft, routine from a cron lane. Reading a 4 as a failure reinstates the outage.
-Run this sweep for the `improve` repos too: the ledger sees landed work only.
+Do not run it on `~/dev/custom`: with no CI, every request there is NOT
+JUDGED (`ready-and-idle --help`), so the sweep cannot find anything.
 
 **Count only the fleet's own rows.** Neither tool filters by author, and
 `walt_ui` is shared with human coworkers. A row is fleet work only if Athena
@@ -249,12 +257,14 @@ the safety-check constraint (it carries the same block). Ask for **concrete,
 safety-preserving** improvements. Block on it and finish in the same turn (per
 *Never end your turn waiting…*); never end the turn parked on it.
 
-**Applying what comes back — stay in scope (invariants 7 and 9).**
+**Applying what comes back — stay in scope (the shipwright invariants *Stay in
+scope, never force* and *Never edit … in the main checkout*).**
 
 - **Harness improvements to THIS repo** (`~/dev/custom` — a skill, block, agent
-  definition, hook, a faster gate check) are ordinary shipwright work: run them
-  through your Method (evidence → gate → commit by path → journal), like a mined
-  pattern. The architect's proposal is the evidence.
+  definition, hook, a faster gate check) land only as custom's one action of
+  the run (*5. Act once*, *Landing*, and an experiment record), so the ledger
+  can attribute their effect. If custom's action is already spent, the
+  architect files them as a DND ticket on `improvement_epic`.
 - **Project-specific improvements** (a `gen_saas` workflow, a `walt_ui`
   `.gitlab-ci.yml`, a project's own harness) are **NOT yours to commit** — you
   touch only `~/dev/custom`, never a product repo or MR. The architect files them

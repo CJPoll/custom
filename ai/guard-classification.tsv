@@ -103,6 +103,7 @@ ai/skills/athena:epic-clustering/lib/epic_clustering_view.rb	library	rendering r
 ai/skills/athena:epic-clustering/lib/epic_clustering_c3_feedback.rb	library	pure C3 feedback rules required by scripts/epic-clustering c3-feedback (DND-1468); raises ArgumentError naming the pair at fault, and the script prints the usage refusal that carries Fix:
 ai/skills/athena:ticket-management/lib/triage_advisory.rb	library	pure advisory call-line printer and reader required by scripts/finding-triage and scripts/epic-clustering c3-feedback (DND-1468); returns a status for every body, never raises or exits
 ai/skills/athena:lead-time-improve/lib/experiment.rb	library	pure experiment verdict, comparable-set and admit rules required by scripts/experiment (DND-1478); no I/O; a bad metric or phase raises LeadTimeExperiment::UsageError, which the script prints with Fix:
+ai/skills/athena:lead-time-improve/lib/experiment_git.rb	library	read-only git readers required by scripts/experiment (DND-1478); each returns a Source whose could_not_look reason the script reports, with Fix: on every refusal
 ai/skills/athena:lead-time-improve/lib/experiment_store.rb	library	the experiments.jsonl store required by scripts/experiment (DND-1478); an unreadable file raises SystemCallError, which the script reports with Fix:
 ai/skills/athena:inbox/lib/fence.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
 ai/skills/athena:inbox/lib/fs.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
@@ -130,8 +131,8 @@ scripts/wt-lib/worktree.sh	library	sourced by scripts/wt; worktree/stack operati
 
 # --- Skill executables.
 ai/skills/athena:epic-clustering/scripts/epic-clustering	guard	
-ai/skills/athena:inbox-attend/bin/wedge-ticket-decide	guard
-ai/skills/athena:lead-time-improve/scripts/experiment	guard
+ai/skills/athena:inbox-attend/bin/wedge-ticket-decide	guard	
+ai/skills/athena:lead-time-improve/scripts/experiment	guard	
 ai/skills/athena:inbox/bin/inbox-doctor	guard	
 ai/skills/athena:inbox/bin/inbox-status	guard	
 ai/skills/athena:inbox/bin/inbox-wait	guard	

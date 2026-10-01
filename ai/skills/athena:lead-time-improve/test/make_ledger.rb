@@ -2,19 +2,22 @@
 
 # make_ledger.rb -- writes the fixture ledger self-test.sh judges (DND-1478).
 #
-#   ruby make_ledger.rb OUT LANDING_SHA
+#   ruby make_ledger.rb OUT LANDING_SHA [AFTER_VERIFY_S [BASE_TIME]]
 #
 # Ten landings before LANDING_SHA (verify 600 s, implement n/a: before its
-# emitter), the landing itself, then ten after (verify 500 s, implement
-# measured). Every landing carries one critic round and one gate run, none
+# emitter), the landing itself, then ten after (verify AFTER_VERIFY_S,
+# default 500 s; implement measured). Landings are hourly from BASE_TIME
+# (default 2026-09-20T00:00:00Z): before at +1h..+10h, the landing at +11h,
+# after at +12h..+21h. Every landing carries one critic round and one gate run, none
 # red, so the guards are measured and equal on both sides. Synthetic ids
 # only (DND-9xxx).
 
 require "json"
 require "time"
 
-out, landing = ARGV
-base = Time.iso8601("2026-09-20T00:00:00Z")
+out, landing, after_verify, base_time = ARGV
+after_verify = Integer(after_verify || "500")
+base = Time.iso8601(base_time || "2026-09-20T00:00:00Z")
 
 def row(at, sha, verify, implement)
   { "schema" => 1, "repo" => "custom", "mode" => "improve", "ticket" => "DND-9#{sha[0, 3]}",
@@ -32,5 +35,5 @@ end
 
 rows = (1..10).map { |i| row(base + (i * 3600), format("%040x", 0xa000 + i), 600, nil) }
 rows << row(base + (11 * 3600), landing, 550, nil)
-rows += (12..21).map { |i| row(base + (i * 3600), format("%040x", 0xb000 + i), 500, 300) }
+rows += (12..21).map { |i| row(base + (i * 3600), format("%040x", 0xb000 + i), after_verify, 300) }
 File.write(out, rows.map { |r| "#{JSON.generate(r)}\n" }.join)

@@ -8,23 +8,25 @@
 #   record  one landed change or instrumentation change, with its baseline
 #   judge   every pending experiment of a repo: keep | revert | pending |
 #           inconclusive, with the before/after numbers; appends a status
-#           row only when the verdict changed (re-running is idempotent)
+#           row only when the verdict changed (re-running is idempotent);
+#           and every owed revert: `reverted` once main carries it
 #   list    every experiment and its latest status
 #
-# It reads the lead-time-phases ledger (DND-1477) and git (reverts on main,
-# read-only), and writes only <state>/experiments.jsonl.
+# It reads the lead-time-phases ledger (DND-1477) and git (read-only: is a
+# commit on main, reverts on main), and writes only <state>/experiments.jsonl.
 #
 # Buckets: FRAMEWORK (argv, output) and MANAGER (Record, Judge, List) here;
-# DOMAIN in ../lib/experiment.rb; SIDE EFFECTS in ../lib/experiment_store.rb
-# and ai/lib/lead_time_phases_io.rb (ledger, reverts).
+# DOMAIN in ../lib/experiment.rb; SIDE EFFECTS in ../lib/experiment_store.rb,
+# ../lib/experiment_git.rb and ai/lib/lead_time_phases_io.rb (the ledger).
 #
-# Test seams (tests only):
-#   LEAD_TIME_STATE_DIR        the state dir (default: <main checkout>/ai-artifacts/lead-time)
-#   LEAD_TIME_PHASES_CONFIG    the config file (default ai/config/lead-time-repos.json)
-#   LEAD_TIME_EXPERIMENT_NOW   "now", RFC 3339
+# Environment:
+#   LEAD_TIME_STATE_DIR        the state dir (default: <main checkout>/ai-artifacts/lead-time);
+#                              a run whose brief names another state dir sets it
+#   LEAD_TIME_PHASES_CONFIG    the config file (default ai/config/lead-time-repos.json; tests)
+#   LEAD_TIME_EXPERIMENT_NOW   "now", RFC 3339 (tests)
 #
 # Exit: 0 ok; 1 a tool or state error; 2 a usage error or a refusal;
-# 3 could not look (no ledger).
+# 3 could not look (no ledger; git could not say whether a commit is on main).
 
 require "json"
 require "time"
@@ -33,9 +35,11 @@ require_relative "../../../lib/lead_time_phases"
 require_relative "../../../lib/lead_time_phases_io"
 require_relative "../lib/experiment"
 require_relative "../lib/experiment_store"
+require_relative "../lib/experiment_git"
 
 AI_DIR = File.expand_path("../../..", __dir__)
 X = LeadTimeExperiment
+XG = LeadTimeExperimentGit
 HYPOTHESIS_MAX = 2000
 
 HELP = <<~TXT
@@ -48,26 +52,29 @@ HELP = <<~TXT
   on the lead-time-phases ledger (ai/bin/lead-time-phases, DND-1477).
 
   record   Record one LANDED change. --commit is the 40-hex SHA as it landed
-           on main (after any rebase). The baseline is the last K=10
-           comparable landings before that landing. Refused (exit 2, with
-           the blocking experiment named) when a `change` on the same phase
-           is still pending; `instrumentation` is exempt.
+           on main (after any rebase); it is refused when git does not show
+           it on the repo's main. The baseline is the last K=10 comparable
+           landings before that landing. Refused (exit 2, naming the
+           blocking experiment) while a `change` on the same phase is
+           pending or owes a revert; `instrumentation` is exempt.
   judge    Judge every pending experiment of the repo and print one line
            per experiment: keep | revert | pending | inconclusive, with the
            before and after n, median and p90 (n/a share for
-           instrumentation) and the guards. Appends a status row only when
-           the verdict changed, so a re-run with the same inputs writes
-           nothing.
+           instrumentation) and the guards. A REVERT line repeats each run
+           until main carries the revert; judge then records `reverted`.
+           Appends a status row only when the verdict changed, so a re-run
+           with the same inputs writes nothing.
   list     Every experiment and its latest status.
 
   Rules (ai/docs/lead-time-improver.md, Decision 8):
-    comparable  same repo; the metric measured (null rows, e.g. landings
-                before a phase's emitter, never count); the experiment's
-                own landing excluded. A metric with no measured landing
-                before the experiment has NO before-set: pending, never a
-                gain.
-    keep        median down >= 10%, p90 not up, every guard (critic BLOCK
-                rate, gate red rate, reverts on main) measured on both
+    comparable  same repo, improve-mode rows, one row per landing; the
+                metric measured (null rows, e.g. landings before a phase's
+                emitter, never count); the experiment's own landing
+                excluded. A metric with no measured landing before the
+                experiment has NO before-set: pending, never a gain.
+    keep        median down >= 10% (a 0s baseline never qualifies), p90 not
+                up, every guard (critic BLOCK rate, gate red rate, reverts on
+                main other than reverts of experiments) measured on both
                 sides and none worse
     revert      median up, or any guard worse
     pending     a side short of K=10, or neither keep nor revert
@@ -82,14 +89,15 @@ HELP = <<~TXT
                          (instrumentation measures na_share; a change does not)
     --commit SHA         the experiment's commit as landed on main (40 hex)
     --kind K             change | instrumentation
-    --hypothesis-file F  a text file: what the change should move, and why
+    --hypothesis-file F  a UTF-8 text file: what the change should move, and why
     --help               this text
 
   State: <main checkout>/ai-artifacts/lead-time/experiments.jsonl
   (gitignored), or LEAD_TIME_STATE_DIR.
 
   Exit: 0 ok; 1 tool or state error; 2 usage error or refusal; 3 could not
-  look (no ledger: run ai/bin/lead-time-phases --ingest first).
+  look (no ledger: run ai/bin/lead-time-phases --ingest first; or git could
+  not say whether the commit is on main).
 TXT
 
 SPECS = {
@@ -118,6 +126,8 @@ def refuse(code, what, fix) = raise(Refusal.new(code, what, fix))
 
 def fmt(sec) = sec.nil? ? "n/a" : "#{sec}s"
 
+def short(sha) = sha.to_s[0, 12]
+
 # ── MANAGER: shared setup ────────────────────────────────────────────────────
 
 module Setup
@@ -127,7 +137,7 @@ module Setup
     raw = env["LEAD_TIME_EXPERIMENT_NOW"].to_s
     raw.empty? ? Time.now.utc : Time.iso8601(raw).utc
   rescue ArgumentError
-    refuse(2, "LEAD_TIME_EXPERIMENT_NOW=#{raw.inspect} is not RFC 3339", "unset it, or give an RFC 3339 time with a zone")
+    refuse(2, "LEAD_TIME_EXPERIMENT_NOW=#{raw.inspect} is not RFC 3339", "unset it, or give an RFC 3339 time")
   end
 
   def config(env)
@@ -140,18 +150,22 @@ module Setup
     refuse(2, "config: #{e.message}", "fix ai/config/lead-time-repos.json")
   end
 
-  def improve_repo(env, name)
-    repo = LeadTimePhases::Config.find(config(env), name)
-    return repo if repo.mode == "improve"
-
-    refuse(2, "repo #{name} is in #{repo.mode} mode; experiments run on improve repos only",
-           "pass an improve repo, or move #{name} to improve in ai/config/lead-time-repos.json")
+  def repo(env, name)
+    LeadTimePhases::Config.find(config(env), name)
   rescue LeadTimePhases::ConfigError => e
     refuse(2, e.message, "pass --repo as one of the configured repos")
   end
 
+  def improve_repo(env, name)
+    r = repo(env, name)
+    return r if r.mode == "improve"
+
+    refuse(2, "repo #{name} is in #{r.mode} mode; experiments run on improve repos only",
+           "pass an improve repo, or move #{name} to improve in ai/config/lead-time-repos.json")
+  end
+
   # <main checkout>/ai-artifacts/lead-time, resolved from this tool's own git
-  # common dir, so a worktree's copy reads the one machine-wide state dir.
+  # common dir (absolute), so a worktree's copy reads the one state dir.
   def state_dir(env)
     dir = env["LEAD_TIME_STATE_DIR"].to_s
     return dir unless dir.empty?
@@ -163,8 +177,8 @@ module Setup
 
   def store(state) = LeadTimeExperimentStore.new(File.join(state, "experiments.jsonl"))
 
-  # -> [the repo's ledger rows, batches folded once]. A missing ledger is
-  # "could not look" (exit 3), never "0 landings".
+  # The repo's ledger rows, batches folded once. A missing ledger is "could
+  # not look" (exit 3), never "0 landings".
   def ledger_rows(state, repo)
     ledger = LeadTimePhasesIO::LedgerStore.new(File.join(state, "ledger.jsonl"))
     unless ledger.exist?
@@ -178,14 +192,31 @@ module Setup
     refuse(1, "cannot read #{ledger.path} (#{e.class.name.split('::').last})", "check the state dir's permissions")
   end
 
-  def experiments(store)
+  # The folded experiments; every row it could not fold is reported.
+  def experiments(rows)
+    f = X.fold_all(rows)
+    f[:malformed].each do |id, why|
+      warn "experiment: record #{id.inspect} is malformed and was not judged: #{why}"
+      warn "Fix: correct or remove that line in experiments.jsonl by hand; experiment list shows the rest"
+    end
+    f[:bad_status].each { |id, st| warn "experiment: #{id}: unknown status #{st.inspect} ignored (known: #{X::STATUSES.join(', ')})" }
+    warn "experiment: status row(s) for unknown experiment(s) ignored: #{f[:orphans].join(', ')}" unless f[:orphans].empty?
+    f[:experiments]
+  end
+
+  def read_store(store)
     rows, bad = store.read
     warn "experiment: #{bad} malformed experiments line(s) skipped" if bad.positive?
-    folded, orphans = X.fold_with_orphans(rows)
-    warn "experiment: status row(s) for unknown experiment(s) ignored: #{orphans.join(', ')}" unless orphans.empty?
-    folded
+    rows
   rescue SystemCallError => e
     refuse(1, "cannot read #{store.path} (#{e.class.name.split('::').last})", "check the state dir's permissions")
+  end
+
+  def append(store, &block)
+    store.append(&block)
+  rescue SystemCallError => e
+    refuse(1, "cannot write #{store.path} (#{e.class.name.split('::').last})",
+           "check that the state dir exists and is writable; nothing was recorded")
   end
 
   def landing_row(rows, commit) = rows.find { |r| r["landed_commit"] == commit }
@@ -194,8 +225,6 @@ end
 # ── MANAGER: record ──────────────────────────────────────────────────────────
 
 module Record
-  SHA_RE = /\A[0-9a-f]{40}\z/.freeze
-
   module_function
 
   def run(opts, env)
@@ -203,12 +232,13 @@ module Record
     repo = Setup.improve_repo(env, opts["--repo"])
     metric = parse_metric(opts)
     commit = opts["--commit"]
-    refuse(2, "--commit #{commit.inspect} is not a 40-hex SHA", "pass the full SHA as landed on main (git rev-parse)") unless SHA_RE.match?(commit)
+    refuse(2, "--commit #{commit.inspect} is not a 40-hex SHA", "pass the full SHA as landed on main (git rev-parse)") unless X::SHA_RE.match?(commit)
     hypothesis = read_hypothesis(opts["--hypothesis-file"])
     state = Setup.state_dir(env)
     rows = Setup.ledger_rows(state, repo)
+    on_main!(repo, commit)
     row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows)
-    Setup.store(state).append { |existing| admit!(X.fold(existing), row) }
+    Setup.append(Setup.store(state)) { |existing| admit!(X.fold(existing), row) }
     puts "experiment: recorded #{row['id']} kind=#{row['kind']} metric=#{row['metric']} phase=#{row['phase']} " \
          "baseline #{describe_baseline(row['baseline'])}"
     0
@@ -224,21 +254,39 @@ module Record
   end
 
   def read_hypothesis(path)
-    text = File.read(path).strip
+    text = File.read(path, encoding: "UTF-8")
+    refuse(2, "the hypothesis file #{path} is not valid UTF-8", "save it as UTF-8 text") unless text.valid_encoding?
+    text = text.strip
     refuse(2, "the hypothesis file #{path} is empty", "write what the change should move, and why") if text.empty?
+    warn "experiment: the hypothesis is #{text.size} characters; kept the first #{HYPOTHESIS_MAX}" if text.size > HYPOTHESIS_MAX
     text[0, HYPOTHESIS_MAX]
   rescue SystemCallError => e
     refuse(2, "cannot read the hypothesis file #{path} (#{e.class.name.split('::').last})",
            "write the hypothesis to a file and pass its path")
   end
 
+  # A SHA that is not on main would never appear in the ledger and would
+  # block its phase for 7 days as "not ingested yet": refuse it here.
+  def on_main!(repo, commit)
+    src = XG.on_main(repo.path, commit)
+    if src.could_not_look?
+      refuse(3, "could not look whether #{short(commit)} is on #{repo.name}'s main: #{src.reason}",
+             "run from a machine where #{repo.path} is checked out with main fetched")
+    end
+    return if src.items.first
+
+    refuse(2, "#{short(commit)} is not on #{repo.name}'s main (a pre-rebase SHA, or not landed yet)",
+           "record the experiment after it lands, with the SHA as it is on main (git log origin/main)")
+  end
+
   def build(repo, metric, kind, commit, hypothesis, now, rows)
     landing = Setup.landing_row(rows, commit)
     boundary = landing ? X.at(landing) : now
+    baseline = baseline(rows, metric, commit, boundary, repo)
+    baseline["provisional"] = "landing not in the ledger yet: judge recomputes it from the landing time" unless landing
     { "type" => "record", "schema" => X::SCHEMA, "id" => X.id_for(repo.name, metric.phase, commit),
       "repo" => repo.name, "phase" => metric.phase, "metric" => metric.name, "kind" => kind, "commit" => commit,
-      "hypothesis" => hypothesis, "recorded_at" => now.iso8601,
-      "baseline" => baseline(rows, metric, commit, boundary, repo) }
+      "hypothesis" => hypothesis, "recorded_at" => now.iso8601, "baseline" => baseline }
   end
 
   def baseline(rows, metric, commit, boundary, repo)
@@ -251,25 +299,25 @@ module Record
   end
 
   def describe_baseline(b)
-    return "n/a (#{b['na_reason']})" if b["na_reason"]
-    return "n=#{b['n']} n/a share=#{b['na_share']}" if b.key?("na_share")
-
-    "n=#{b['n']} median=#{fmt(b['median'])} p90=#{fmt(b['p90'])}"
+    out = if b["na_reason"] then "n/a (#{b['na_reason']})"
+          elsif b.key?("na_share") then "n=#{b['n']} n/a share=#{b['na_share']}"
+          else "n=#{b['n']} median=#{fmt(b['median'])} p90=#{fmt(b['p90'])}"
+          end
+    b["provisional"] ? "#{out} (provisional: #{b['provisional']})" : out
   end
 
-  # Runs under the store's lock: refuse a duplicate or a second pending change.
+  # Runs under the store's lock: refuse a duplicate or a blocked phase.
   def admit!(existing, row)
     dup = existing.find { |e| e["id"] == row["id"] }
     refuse(2, "experiment #{row['id']} is already recorded (status #{dup['status']})", "experiment list shows it; record a different commit") if dup
-    mine = existing.select { |e| e["repo"] == row["repo"] }
-    blocker = X.blocker(mine, phase: row["phase"], kind: row["kind"])
-    if blocker
-      refuse(2, "a change on #{row['phase']} is already pending: #{blocker['id']} (commit #{blocker['commit'][0, 12]}, " \
-                "recorded #{blocker['recorded_at']}); two changes on one phase confound each other",
-             "wait for experiment judge to settle #{blocker['id']} (keep, revert or inconclusive), " \
-             "or pick another phase, or make this an instrumentation change")
-    end
-    [row]
+    blocker = X.blocker(existing.select { |e| e["repo"] == row["repo"] }, phase: row["phase"], kind: row["kind"])
+    return [row] unless blocker
+
+    state = blocker["status"] == "revert" ? "owes a revert that has not landed" : "is still pending"
+    refuse(2, "a change on #{row['phase']} #{state}: #{blocker['id']} (commit #{short(blocker['commit'])}, " \
+              "recorded #{blocker['recorded_at']}); two changes on one phase confound each other",
+           "let experiment judge settle #{blocker['id']} (land its revert if it owes one), " \
+           "or pick another phase, or make this an instrumentation change")
   end
 end
 
@@ -289,38 +337,74 @@ module Judge
       return 0
     end
 
-    pending = Setup.experiments(store).select { |e| e["repo"] == repo.name && e["status"] == "pending" }
-    verdicts = pending.map { |e| [e, verdict(e, rows, repo, now)] }
-    appended = store.append do |existing|
-      latest = X.fold(existing).to_h { |e| [e["id"], e["last"]] }
-      verdicts.select { |e, v| X.changed?(latest[e["id"]], v) }.map { |e, v| X.status_row(e, v, now) }
-    end
-    verdicts.each { |e, v| puts line(e, v) }
-    tally = X::STATUSES.map { |s| "#{verdicts.count { |_, v| v['status'] == s }} #{s}" }.join(", ")
-    puts "experiment judge: #{repo.name}: #{pending.size} pending judged (#{tally}); #{appended.size} status row(s) appended; " \
+    all = Setup.experiments(Setup.read_store(store))
+    mine = all.select { |e| e["repo"] == repo.name }
+    shas = all.map { |e| e["commit"] }
+    results = mine.select { |e| e["status"] == "pending" }.map { |e| [e, verdict(e, rows, repo, shas, now)] }
+    results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo)] }
+    appended = Setup.append(store) { |existing| fresh_rows(existing, results, now) }
+    results.each { |e, v| puts line(e, v) }
+    judged = results.map { |_, v| v["status"] }
+    tally = X::STATUSES.map { |s| "#{judged.count(s)} #{s}" }.join(", ")
+    puts "experiment judge: #{repo.name}: #{results.size} judged (#{tally}); #{appended.size} status row(s) appended; " \
          "#{rows.size} landing(s) in the ledger"
     0
   end
 
-  def verdict(exp, rows, repo, now)
+  # Under the lock: only experiments whose status is still the one judged
+  # from (another judge may have settled one meanwhile), and only a changed
+  # verdict.
+  def fresh_rows(existing, results, now)
+    latest = X.fold(existing).to_h { |e| [e["id"], e] }
+    results.filter_map do |e, v|
+      cur = latest[e["id"]]
+      next unless cur && cur["status"] == e["status"]
+      next if e["status"] == "revert" && v["status"] == "revert" # still owed: nothing new to record
+      next unless X.changed?(cur["last"], v)
+
+      X.status_row(e, v, now)
+    end
+  end
+
+  def verdict(exp, rows, repo, shas, now)
     landing = Setup.landing_row(rows, exp["commit"])
-    return X.unlanded(exp, now: now) unless landing
+    return unlanded(exp, repo, now) unless landing
 
     metric = X::Metric.parse(exp["metric"], phase: exp["phase"])
     s = X.sides(rows, metric: metric, exclude: [exp["commit"]], boundary: X.at(landing))
-    X.judge(exp, before: s[:before], after: s[:after], guards_before: guards(s[:before], repo),
-                 guards_after: guards(s[:after], repo), now: now)
+    X.judge(exp, before: s[:before], after: s[:after], guards_before: guards(s[:before], repo, shas),
+                 guards_after: guards(s[:after], repo, shas), now: now)
   end
 
-  def guards(side, repo)
+  # Not in the ledger: say whether it is on main (ingest lag) or not.
+  def unlanded(exp, repo, now)
+    v = X.unlanded(exp, now: now)
+    src = XG.on_main(repo.path, exp["commit"])
+    why = if src.could_not_look? then "could not look whether it is on main: #{src.reason}"
+          elsif src.items.first then "it is on main: run lead-time-phases --ingest"
+          else "it is NOT on main: recorded with a SHA that never landed (a pre-rebase SHA?)"
+          end
+    v.merge("reason" => "#{v['reason']}; #{why}")
+  end
+
+  # A revert verdict owes a revert until main carries one.
+  def owed(exp, repo)
+    src = XG.reverted?(repo.path, exp["commit"])
+    last = exp["last"] || {}
+    keep = { "before" => last["before"], "after" => last["after"], "guards" => last["guards"] }
+    if !src.could_not_look? && src.items.first
+      return { "status" => "reverted", "reason" => "main carries a revert of #{short(exp['commit'])}" }.merge(keep)
+    end
+
+    seen = src.could_not_look? ? "could not look for it: #{src.reason}" : "main has no revert of it yet"
+    { "status" => "revert", "reason" => "REVERT OWED: #{last['reason']}; #{seen}" }.merge(keep)
+  end
+
+  def guards(side, repo, shas)
     return nil if side.nil? || side.empty?
 
     times = side.map { |r| X.at(r) }
-    reverts = if LeadTimePhasesIO::Paths.dir?(repo.path)
-                LeadTimePhasesIO::RevertCounter.count(repo.path, times.min.iso8601, times.max.iso8601)
-              else
-                LeadTimePhases::Source.could_not_look("#{repo.path} is not on this machine")
-              end
+    reverts = XG.reverts(repo.path, times.min.iso8601, times.max.iso8601, shas)
     LeadTimePhases::Guards.compute(side, reverts: reverts)
   end
 
@@ -344,24 +428,26 @@ module List
   module_function
 
   def run(opts, env)
-    state = Setup.state_dir(env)
-    store = Setup.store(state)
+    Setup.repo(env, opts["--repo"]) if opts["--repo"]
+    store = Setup.store(Setup.state_dir(env))
     unless store.exist?
       puts "experiment list: no experiments file at #{store.path} (none recorded yet)"
       return 0
     end
 
-    all = Setup.experiments(store)
+    all = Setup.experiments(Setup.read_store(store))
     mine = opts["--repo"] ? all.select { |e| e["repo"] == opts["--repo"] } : all
-    mine.each do |e|
-      b = e["baseline"] || {}
-      base = b["na_reason"] ? "n/a (#{b['na_reason']})" : Judge.side(b)
-      puts "experiment: #{e['id']} #{e['status'].upcase} kind=#{e['kind']} metric=#{e['metric']} " \
-           "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}" : ''}"
-    end
+    mine.each { |e| puts line(e) }
     scope = opts["--repo"] ? " for #{opts['--repo']}" : ""
     puts "experiment list: #{mine.size} experiment(s)#{scope} of #{all.size} recorded"
     0
+  end
+
+  def line(e)
+    b = e["baseline"].is_a?(Hash) ? e["baseline"] : {}
+    base = b["na_reason"] ? "n/a (#{b['na_reason']})" : Judge.side(b)
+    "experiment: #{e['id']} #{e['status'].upcase} kind=#{e['kind']} metric=#{e['metric']} " \
+      "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}" : ''}"
   end
 end
 
@@ -390,6 +476,10 @@ rescue Refusal => e
   warn "experiment: #{e.message}"
   warn "Fix: #{e.fix}"
   e.code
+rescue SystemCallError, JSON::GeneratorError => e
+  warn "experiment: #{e.class}: #{e.message}"
+  warn "Fix: check the state dir and its files are readable and writable, then re-run"
+  1
 end
 
 exit(main(ARGV, ENV)) if $PROGRAM_NAME == __FILE__

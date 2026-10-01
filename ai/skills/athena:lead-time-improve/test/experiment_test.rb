@@ -108,6 +108,20 @@ check("judge 5b: median -20% but the p90 rose: not a keep (pending)") do
   v["status"] == "pending" && v["reason"].include?("p90 rose")
 end
 
+check("judge 5f: a zero baseline median is never a keep (0 -> 0 is no reduction)") do
+  e = exp(metric: "counter:gate_red")
+  zero = ->(hs) { hs.map { |h| row(h, verify: 1).tap { |r| r["counters"]["gate_red"] = 0 } } }
+  v = X.judge(e, before: zero.((1..10).map { |i| -i }), after: zero.((1..10).to_a), guards_before: guards,
+                 guards_after: guards, now: NOW)
+  v["status"] == "pending" && v["reason"].include?("baseline median is 0s")
+end
+
+check("judge 5g: a before-set short of K says it can never grow") do
+  v = X.judge(exp, before: before_rows([600] * 4), after: after_rows([500] * 10), guards_before: guards,
+                   guards_after: guards, now: NOW)
+  v["status"] == "pending" && v["reason"].include?("can never grow")
+end
+
 check("judge 5c: the median falls 10% exactly: keep (the bar is at least 10%)") do
   v = X.judge(exp, before: ten600, after: after_rows([540] * 10), guards_before: guards, guards_after: guards, now: NOW)
   v["status"] == "keep"
@@ -166,6 +180,19 @@ check("comparable 1: excludes the experiment's own landing commit and rows whose
   rows = [row(-2, verify: 100), row(-1, verify: nil), row(0, verify: 50, sha: LANDING), row(1, verify: 70)]
   out = X.comparable(rows, metric: metric, exclude: [LANDING])
   out.map { |r| r.dig("phases", "verify", "s") } == [100, 70]
+end
+
+check("comparable 1c: watch-mode rows (no phases) never count, even for na_share") do
+  m = X::Metric.parse("na_share", phase: "verify")
+  rows = [row(-2, verify: nil).merge("mode" => "watch"), row(-1, verify: nil).merge("mode" => "improve"), row(1, verify: 4)]
+  X.comparable(rows, metric: m, exclude: []).size == 2
+end
+
+check("comparable 1d: batch tickets sharing a landed commit are ONE landing") do
+  sha = "d" * 40
+  rows = [row(-1, verify: 10, sha: sha, ticket: "DND-9001"), row(-1, verify: 10, sha: sha, ticket: "DND-9002"),
+          row(-1, verify: 10, sha: sha, ticket: "DND-9003"), row(-2, verify: 20)]
+  X.comparable(rows, metric: metric, exclude: []).size == 2
 end
 
 check("comparable 1b: rows come back in landing order whatever the input order") do
@@ -239,6 +266,12 @@ check("admit?: blocker names the pending experiment") do
   X.blocker(pending, phase: "verify", kind: "change")["id"] == pending[0]["id"]
 end
 
+check("admit?: a change judged revert blocks its phase until the revert lands (reverted)") do
+  owed = [exp.merge("status" => "revert")]
+  done = [exp.merge("status" => "reverted")]
+  !X.admit?(owed, phase: "verify", kind: "change") && X.admit?(done, phase: "verify", kind: "change")
+end
+
 check("admit?: a pending INSTRUMENTATION experiment never blocks a change") do
   ins = [exp(kind: "instrumentation", metric: "na_share").merge("status" => "pending")]
   X.admit?(ins, phase: "verify", kind: "change")
@@ -262,8 +295,27 @@ end
 
 check("fold: a status row for an unknown id is reported, not folded in") do
   orphan = st1.merge("id" => "custom:merge:000000000000")
-  f, orphans = X.fold_with_orphans([rec, orphan])
-  f.size == 1 && orphans == ["custom:merge:000000000000"]
+  r = X.fold_all([rec, orphan])
+  r[:experiments].size == 1 && r[:orphans] == ["custom:merge:000000000000"]
+end
+
+check("fold: a malformed record is reported with why, never folded in") do
+  bad = [rec.merge("id" => "a", "commit" => "abc"), rec.merge("id" => "b", "metric" => "speed"),
+         rec.merge("id" => "c", "recorded_at" => "soon"), rec.merge("id" => "d", "kind" => "instrumentation")]
+  r = X.fold_all(bad)
+  why = r[:malformed].to_h
+  r[:experiments].empty? && why["a"].include?("40-hex") && why["b"].include?("speed") &&
+    why["c"].include?("RFC 3339") && why["d"].include?("na_share")
+end
+
+check("fold: an unknown status value is reported and ignored, so the experiment stays pending") do
+  r = X.fold_all([rec, st1.merge("status" => "kept")])
+  r[:bad_status] == [[rec["id"], "kept"]] && r[:experiments][0]["status"] == "pending"
+end
+
+check("revert_refs: reads git revert's own line, 40 hex only") do
+  body = "Revert x\n\nThis reverts commit #{LANDING}.\nThis reverts commit abc."
+  X.revert_refs(body) == [LANDING] && X.revert_refs(nil) == []
 end
 
 check("changed?: the same verdict again is not a change (judge is idempotent); a new status is") do
@@ -271,8 +323,8 @@ check("changed?: the same verdict again is not a change (judge is idempotent); a
   !X.changed?(st1.merge(v), v) && X.changed?(st1.merge(v), v.merge("status" => "keep")) && X.changed?(nil, v)
 end
 
-check("terminal?: keep, revert and inconclusive are terminal; pending is not") do
-  %w[keep revert inconclusive].all? { |s| X.terminal?(s) } && !X.terminal?("pending")
+check("terminal?: keep, inconclusive and reverted are terminal; pending and an owed revert are not") do
+  %w[keep inconclusive reverted].all? { |s| X.terminal?(s) } && !X.terminal?("pending") && !X.terminal?("revert")
 end
 
 # ── store ───────────────────────────────────────────────────────────────────

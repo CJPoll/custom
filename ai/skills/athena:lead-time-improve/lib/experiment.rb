@@ -21,7 +21,11 @@
 #     days, inconclusive (it then no longer blocks its phase).
 #   * instrumentation: success is the phase's n/a share falling. Duration is
 #     not compared, and it is never reverted for a share that did not fall.
-#   * one pending `change` per phase; instrumentation is exempt.
+#   * one pending `change` per phase; instrumentation is exempt. A `revert`
+#     verdict also blocks its phase until the revert is seen on main, when
+#     judge records `reverted`.
+#   * only `improve`-mode rows count, one row per landing (batch tickets
+#     sharing a landed commit are one landing).
 #
 # The store (experiments.jsonl) is rows of two types, latest status wins:
 #   {"type":"record", "id", "repo", "phase", "metric", "kind", "commit", ...}
@@ -36,8 +40,13 @@ module LeadTimeExperiment
   MIN_DROP = 0.10
   PENDING_DAYS = 7
   KINDS = %w[change instrumentation].freeze
-  STATUSES = %w[pending keep revert inconclusive].freeze
-  TERMINAL = %w[keep revert inconclusive].freeze
+  STATUSES = %w[pending keep revert inconclusive reverted].freeze
+  # A revert verdict is settled as a judgement but OWED as an action until
+  # the revert lands, so it is not terminal.
+  TERMINAL = %w[keep inconclusive reverted].freeze
+  BLOCKING = %w[pending revert].freeze
+  SHA_RE = /\A[0-9a-f]{40}\z/.freeze
+  REVERT_RE = /This reverts commit ([0-9a-f]{40})/.freeze
   PHASES = LeadTimePhases::PHASES
   TOTALS = { "lead" => "lead_s", "code" => "code_s" }.freeze
   COUNTERS = %w[gate_runs gate_wall_s gate_red slot_wait_s critic_rounds critic_blocks critic_wall_s lock_wait_s].freeze
@@ -96,11 +105,15 @@ module LeadTimeExperiment
   # The rows a metric can compare, in landing order: the excluded landings
   # dropped, and (except for na_share, where n/a IS the measurement) every
   # row whose metric is null.
+  # Rows ingested while the repo was in `watch` mode carry no phases, so
+  # they are not comparable (they would read as n/a). Batch tickets sharing
+  # one landed commit are one landing: the first by ticket counts.
   def comparable(rows, metric:, exclude:)
     skip = exclude.map(&:to_s)
-    rows.reject { |r| skip.include?(r["landed_commit"].to_s) }
+    rows.reject { |r| skip.include?(r["landed_commit"].to_s) || (r.key?("mode") && r["mode"] != "improve") }
         .select { |r| at(r) && (metric.na_share? || !metric.value(r).nil?) }
         .sort_by { |r| [r["landed_at"].to_s, r["ticket"].to_s] }
+        .uniq { |r| r["landed_commit"] }
   end
 
   # -> {before: rows | nil, after: rows, before_na: reason | nil}
@@ -145,10 +158,8 @@ module LeadTimeExperiment
     end
   end
 
-  def expired?(exp, now)
-    rec = LeadTimePhases::Util.time(exp["recorded_at"])
-    rec.nil? || (now - rec) >= PENDING_DAYS * 86_400
-  end
+  # recorded_at is validated when the record is folded (record_error).
+  def expired?(exp, now) = (now - LeadTimePhases::Util.time(exp["recorded_at"])) >= PENDING_DAYS * 86_400
 
   def verdict(status, reason, before, after, guards, extra = {})
     { "status" => status, "reason" => reason, "before" => before, "after" => after, "guards" => guards }.merge(extra)
@@ -180,9 +191,11 @@ module LeadTimeExperiment
     if before.nil?
       return waiting(exp, now, "no before-set: #{label(metric)} was not measured before the experiment landed", nil, a, nil)
     end
-    if before.size < K || after.size < K
-      return waiting(exp, now, "before-set n=#{before.size}, after-set n=#{after.size} of K=#{K}", b, a, nil)
+    if before.size < K
+      return waiting(exp, now, "before-set n=#{before.size} of K=#{K}: it can never grow (history is fixed), " \
+                               "so this settles as inconclusive", b, a, nil)
     end
+    return waiting(exp, now, "after-set n=#{after.size} of K=#{K}", b, a, nil) if after.size < K
 
     g = guard_diff(guards_before, guards_after)
     worse = g.select { |_, d| d["state"] == "worse" }
@@ -210,6 +223,7 @@ module LeadTimeExperiment
     return verdict("revert", "median rose #{b['median']}s -> #{a['median']}s", b, a, g, extra) if a["median"] > b["median"]
 
     misses = []
+    misses << "baseline median is 0s: nothing to reduce" if b["median"].zero?
     misses << "median #{b['median']}s -> #{a['median']}s is under the 10% bar" if a["median"] > b["median"] * (1 - MIN_DROP)
     misses << "p90 rose #{b['p90']}s -> #{a['p90']}s" if a["p90"] > b["p90"]
     misses.concat(unmeasured(g).map { |x| "#{x} unmeasured" })
@@ -218,35 +232,59 @@ module LeadTimeExperiment
     verdict("keep", "median #{b['median']}s -> #{a['median']}s (#{pct}%), p90 not up, guards not worse", b, a, g, extra)
   end
 
-  # The pending `change` experiment that blocks a new one, or nil.
-  def blocker(pending, phase:, kind:)
+  # The `change` experiment that blocks a new one on its phase, or nil: one
+  # still pending, or one judged `revert` whose revert has not landed.
+  def blocker(experiments, phase:, kind:)
     return nil if kind == "instrumentation"
 
-    pending.find { |e| e["status"] == "pending" && e["kind"] == "change" && e["phase"] == phase }
+    experiments.find { |e| BLOCKING.include?(e["status"]) && e["kind"] == "change" && e["phase"] == phase }
   end
 
   def admit?(pending, phase:, kind:) = blocker(pending, phase: phase, kind: kind).nil?
 
-  # -> [experiments, orphan status ids]. Each experiment is its record plus
-  # "status" (latest wins; pending without a status row) and "last" (that row).
-  def fold_with_orphans(rows)
-    records = {}
-    orphans = []
-    rows.each do |r|
-      case r["type"]
-      when "record" then records[r["id"]] ||= r.merge("status" => "pending", "last" => nil)
-      when "status"
-        if records.key?(r["id"])
-          records[r["id"]] = records[r["id"]].merge("status" => r["status"], "last" => r)
-        else
-          orphans << r["id"]
-        end
-      end
-    end
-    [records.values, orphans.uniq]
+  # nil, or why a record row cannot be judged (a hand edit, a corrupt line).
+  def record_error(r)
+    return "no id" unless r["id"].is_a?(String) && !r["id"].empty?
+    return "repo is not a name" unless r["repo"].is_a?(String) && !r["repo"].empty?
+    return "commit #{r['commit'].inspect} is not a 40-hex SHA" unless SHA_RE.match?(r["commit"].to_s)
+    return "recorded_at #{r['recorded_at'].inspect} is not RFC 3339" unless LeadTimePhases::Util.time(r["recorded_at"])
+
+    Metric.parse(r["metric"], phase: r["phase"])
+    kind_error(r["kind"], r["metric"])
+  rescue UsageError => e
+    e.message
   end
 
-  def fold(rows) = fold_with_orphans(rows).first
+  # -> {experiments:, orphans: [id], malformed: [[id, why]], bad_status: [[id, status]]}
+  # Each experiment is its record plus "status" (latest wins; pending
+  # without a status row) and "last" (that row). A malformed record, a
+  # status row for an unknown id, and an unknown status are reported, never
+  # folded in silently.
+  def fold_all(rows)
+    records = {}
+    out = { orphans: [], malformed: [], bad_status: [] }
+    rows.each do |r|
+      case r["type"]
+      when "record"
+        why = record_error(r)
+        next out[:malformed] << [r["id"].to_s, why] if why
+
+        records[r["id"]] ||= r.merge("status" => "pending", "last" => nil)
+      when "status"
+        next out[:bad_status] << [r["id"].to_s, r["status"]] unless STATUSES.include?(r["status"])
+        next out[:orphans] << r["id"] unless records.key?(r["id"])
+
+        records[r["id"]] = records[r["id"]].merge("status" => r["status"], "last" => r)
+      end
+    end
+    out.transform_values!(&:uniq)
+    out.merge(experiments: records.values)
+  end
+
+  def fold(rows) = fold_all(rows)[:experiments]
+
+  # The SHAs a commit body says it reverts (git revert's own line).
+  def revert_refs(body) = body.to_s.scan(REVERT_RE).flatten.uniq
 
   COMPARED = %w[status reason before after guards].freeze
 
