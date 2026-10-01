@@ -8,9 +8,11 @@
 # registered for the MAIN checkout into the session's --mcp-config. A server
 # that is not registered there is a tick that exits 78.
 #
-# Every caller sources this file and calls mcp_preflight, so the rules live
-# once: the runner's preconditions, its --dry-run, and its installer's --check,
-# --install and --dry-run. An installer that said OK while its runner's first
+# Every caller sources this file and calls its loop's wrapper below
+# (leadtime_mcp_preflight, clustering_mcp_preflight), which calls
+# mcp_preflight, so the rules live once: the runner's preconditions, its
+# --dry-run, and its installer's --check, --install and --dry-run. An
+# installer sources the MAIN checkout's copy, the one the cron runner loads. An installer that said OK while its runner's first
 # tick failed this check is the defect this closes (a check that could not
 # fire for the state it vouched for).
 #
@@ -29,7 +31,8 @@
 #   MCP_PF_MISSING  on not-registered: the required servers not found
 # Returns 0 on ok, 1 otherwise.
 #
-# "could-not-look" (no jq, the config missing, unreadable or not valid JSON)
+# "could-not-look" (no jq, the config missing, unreadable, not valid JSON, or
+# valid JSON whose .projects cannot be read)
 # and "not-registered" (the config was read; the servers are not under the
 # key) are distinct results with distinct text: a config the preflight cannot
 # read is never reported as a missing server, and never as an empty one.
@@ -91,9 +94,16 @@ mcp_preflight() {
     MCP_PF_FIX="run 'jq empty ${cj}' to see the parse error. If it was a mid-write read, the next tick succeeds; do NOT re-register the servers."
     return 1
   fi
+  # Valid JSON of the wrong shape (.projects not an object, say) makes this jq
+  # fail: that is a config the preflight could not read, never "not registered".
+  if ! MCP_PF_SERVERS="$(jq -c --arg p "${m}" '.projects[$p].mcpServers // empty | select(type == "object")' \
+         "${cj}" 2>/dev/null)"; then
+    MCP_PF_SERVERS=""
+    MCP_PF_WHY="${cj} is valid JSON but not the shape Claude Code writes (no readable .projects object), so its MCP servers cannot be read."
+    MCP_PF_FIX="run 'jq .projects ${cj}' to see what is there. Do NOT re-register the servers until it is a Claude Code config again."
+    return 1
+  fi
   MCP_PF_RESULT="not-registered"
-  MCP_PF_SERVERS="$(jq -c --arg p "${m}" '.projects[$p].mcpServers // empty | select(type == "object")' \
-    "${cj}" 2>/dev/null || true)"
   if [ -z "${MCP_PF_SERVERS}" ]; then
     n="$(jq '[.projects[]? | select(.mcpServers? | type == "object" and length > 0)] | length' "${cj}" 2>/dev/null || echo '?')"
     MCP_PF_MISSING="$*"

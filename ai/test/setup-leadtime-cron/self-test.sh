@@ -653,6 +653,47 @@ if [ "$rc" = 0 ] && grep -q '^OK' "${TMP}/inst.out" && grep -q 'MCP.*notion-pers
 else
   bad "check mcp ok" "rc=$rc $(out)"
 fi
+# A wrongly computed key: servers registered under the linked worktree's path
+# only. Run from that worktree, --check must look under the MAIN checkout's
+# key (the one the cron tick uses) and say NOT REGISTERED, never OK.
+CJ_WT_ONLY="${TMP}/wt-only.json"
+jq -n --arg p "$WT" '{projects: {($p): {mcpServers: {"notion-personal": {type: "stdio", command: "/x/n"}}}}}' >"${CJ_WT_ONLY}"
+rc="$(INST="$WT/scripts/setup-leadtime-cron" inst "$ct" LEADTIME_CLAUDE_JSON="${CJ_WT_ONLY}" -- --check)"
+if [ "$rc" = 2 ] && grep -q 'NOT REGISTERED' "${TMP}/inst.err" && grep -qF "'$IR'" "${TMP}/inst.err" \
+   && grep -q '(1 project(s) have any)' "${TMP}/inst.err" && ! grep -q '^OK' "${TMP}/inst.out"; then
+  ok "--check from a worktree with servers registered only under the worktree's key: NOT REGISTERED, names the main checkout's key"
+else
+  bad "check wrong key" "rc=$rc $(out)"
+fi
+# The installer runs the MAIN checkout's preflight, the copy the cron runner
+# loads, never the copy beside it in a worktree.
+cp "$WT/scripts/lib/mcp-preflight.sh" "${TMP}/wt-lib.aside"
+printf '\nLEADTIME_MCP_REQUIRED="notion-personal bogus-server"\n' >>"$WT/scripts/lib/mcp-preflight.sh"
+rc="$(INST="$WT/scripts/setup-leadtime-cron" inst "$ct" -- --check)"
+cp "${TMP}/wt-lib.aside" "$WT/scripts/lib/mcp-preflight.sh"
+if [ "$rc" = 0 ] && grep -q '^OK' "${TMP}/inst.out" && ! grep -q 'bogus-server' "${TMP}/inst.out" "${TMP}/inst.err"; then
+  ok "--check from a worktree uses the main checkout's preflight, not the worktree's copy"
+else
+  bad "check main lib" "rc=$rc $(out)"
+fi
+mv "$IR/scripts/lib/mcp-preflight.sh" "${TMP}/main-lib.aside"
+rc="$(inst "$ct" -- --check)"
+mv "${TMP}/main-lib.aside" "$IR/scripts/lib/mcp-preflight.sh"
+if [ "$rc" = 4 ] && grep -q 'COULD NOT LOOK' "${TMP}/inst.err" && grep -q 'missing from the main checkout' "${TMP}/inst.err" \
+   && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "--check with the preflight library missing from the main checkout: exit 4, COULD NOT LOOK, Fix:"
+else
+  bad "check lib missing" "rc=$rc $(out)"
+fi
+printf '{"projects": "not an object"}\n' >"${TMP}/shape.json"
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${TMP}/shape.json" -- --check)"
+if [ "$rc" = 4 ] && grep -q 'COULD NOT LOOK' "${TMP}/inst.err" && grep -q 'not the shape' "${TMP}/inst.err" \
+   && ! grep -q 'NOT REGISTERED' "${TMP}/inst.err"; then
+  ok "--check with valid JSON of the wrong shape: COULD NOT LOOK, never 'not registered'"
+else
+  bad "check config shape" "rc=$rc $(out)"
+fi
+
 mv "$IR/ai/skills/athena:lead-time-improve/SKILL.md" "${TMP}/skill.aside"
 rc="$(inst "$ct" -- --check)"
 mv "${TMP}/skill.aside" "$IR/ai/skills/athena:lead-time-improve/SKILL.md"
