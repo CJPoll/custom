@@ -67,8 +67,9 @@ aliases do not apply; use the real command name. Examples:
 ~/dev/custom/ai/bin/gh-athena --check          # verify auth + print the reachable installation
 ```
 
-Pushes have their own form — see *Pushing as Athena* below. Merges have one
-path, `integration-gate` then `locked-merge` — see *Merging* below.
+Pushes have their own form — see *Pushing as Athena* below. A PR merges by
+`integration-gate` then `locked-merge`; a repo with no CI (`~/dev/custom`)
+lands by a fast-forward push instead — see *Merging* below.
 
 ## Pushing as Athena
 
@@ -291,6 +292,19 @@ pinned `gh-athena pr merge <n> --squash --match-head-commit <sha>` call itself
 (`athena:merge-boarding` → *Landing onto a moving main*). Never call that line
 yourself.
 
+**A repo with no CI cannot take that path.** With no check reported on the
+head, the wrapper refuses the pinned merge, so `locked-merge` exits 4 however
+good the report is. `~/dev/custom` is such a repo: it lands by a fast-forward
+`gh-athena git push` of the gated head under the same merge lock, then
+`ai/bin/main-health check`. The steps are `athena:merge-boarding` → *In a
+no-CI GitHub repo the pinned merge cannot run*; this skill does not restate
+them.
+
+**Later (2026-10-01):** this section, and the pointer to it above, said merges
+"have one path, `integration-gate` then `locked-merge`". Superseded: that was
+never true of `~/dev/custom`, where the merge guard refuses an unchecked head.
+A captain landing there found the gap (DND-1482 report, finding 1).
+
 **Later (2026-09-27, DND-969):** this block ended with a direct
 `gh-athena pr merge <n> --squash --match-head-commit <sha>`, and a 2026-09-26
 note said to run it through `locked-merge`. Superseded: the direct call skipped
@@ -319,8 +333,8 @@ declares a gate, and the only documented path is `integration-gate` then
   read. A `gh api` merge (REST `PUT …/pulls/<n>/merge`, `…/merges`,
   `…/merge-upstream`, or a GraphQL merge / auto-merge / merge-queue mutation) is
   refused outright by `gh-athena` (DND-728); a bare `gh api` merge is denied by
-  the forge-identity hook. `pr merge`, made by `locked-merge`, is the one merge
-  path.
+  the forge-identity hook. `pr merge`, made by `locked-merge`, is the one PR
+  merge path (a no-CI repo lands by push; see the start of *Merging*).
 
   **Later (2026-09-28, DND-1140):** this said "every check reported on it
   concluded green", and the wrapper judged every check-run on the head. A
