@@ -653,8 +653,24 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   with the root's own fields and text and the context `judgment-eval` would
   build for it then (anyone else's text emptied, D7), marked
   `window_complete` when every inbox file reached back over the window. The
-  labels are built over the snapshot's roots and the live inbox's, so a
-  root that rotated out of `walt_ui-slack.jsonl` keeps its row. Forward
+  inbox is a channel's live file and its rotated generation (`<file>.1`,
+  `athena-inbox.md` → *Retention*), read together as one stream, oldest
+  first (DND-1497). `judgment-label` and `judgment-eval` read it through one
+  reader, `ai/lib/slack_inbox_files.rb`. The labels are built over the
+  snapshot's roots and the inbox's, so a root that rotated out of
+  `walt_ui-slack.jsonl` keeps its row, and a root still in
+  `walt_ui-slack.jsonl.1` is snapshotted until the next rotation deletes
+  the generation. "Reached back" is judged per stream: its earliest line is
+  at or before the window's start, or the stream never rotated, so it lost
+  nothing however late it began. Never rotated means no `.1` and a
+  `rotated_at` in its state file within the 14-day sweep (`athena-inbox.md`
+  → *Lifetimes*: every rotation leaves a `.1` until the next rotation or that
+  sweep). A missing or unreadable `rotated_at` is "could not tell", so the
+  earliest-line rule applies. A `.1` deleted by hand would read as never
+  rotated; that is the residual. A label whose root is in no corpus row is `n/a`, never
+  scored: `judgment-eval` names it with how many such labels are
+  `owner_confirmed`, and its `Fix:` says how a root reaches the snapshot.
+  Forward
   records rotate too, so what a row recorded is one more vote beside the
   current records: a `forward_record` label with no current record is kept,
   a recorded conflict stays a conflict, and a current record that disagrees
@@ -711,6 +727,13 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   back over. Superseded by the exclusion above. A case judged on partial
   context reads as a router miss when the context is what was missing, so
   recall and precision mixed partial-context cases with complete ones.
+
+  **Later (2026-10-01, DND-1497):** this read "built over the snapshot's
+  roots and the live inbox's", and the inbox reader read `*-slack.jsonl`
+  only. Superseded by the stream above. The owner confirmed ten roots on
+  2026-09-28; the inbox rotated on 09-29 and moved them to
+  `walt_ui-slack.jsonl.1`; the snapshot started on 10-01 from the live file,
+  so none of the ten joined and the eval scored nothing.
 
   **Later (2026-09-28):** this said "the owner confirms the rest one message
   at a time at a terminal": every root without a forward record waited for

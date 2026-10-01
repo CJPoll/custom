@@ -141,6 +141,30 @@ module JudgmentLabel
     { lines: lines, without_id: without_id }
   end
 
+  # parse_slack_sources(sources) -> parse_slack's shape over SOURCES, [[path,
+  # text]] oldest first: the inbox's rotated generation (<inbox>.1,
+  # athena-inbox.md -> Retention), then the live file (DND-1497). One empty
+  # source is normal (a live file just after a rotation); every source empty,
+  # or none at all, is the empty-inbox error naming each, never "no roots".
+  def parse_slack_sources(sources)
+    where = sources.empty? ? "(no file)" : sources.map(&:first).join(" + ")
+    parsed = sources.map { |path, text| jsonl(text, path, "slack").empty? ? nil : parse_slack(text, path) }.compact
+    raise InputError.new("slack inbox #{where} is empty (0 lines)", "point --inbox-root at the root holding walt_ui-slack.jsonl; an empty inbox has nothing to label") if parsed.empty?
+
+    { lines: parsed.flat_map { |p| p[:lines] }, without_id: parsed.sum { |p| p[:without_id] } }
+  end
+
+  # raw_rows_in(sources, ids) / messages_in(sources, ids) -> raw_rows / messages
+  # over SOURCES oldest first; an id in two sources keeps its OLDER line, as
+  # select_roots keeps the first of a redelivery (DND-1497).
+  def raw_rows_in(sources, ids)
+    sources.reverse.map { |path, text| raw_rows(text, path, ids) }.reduce({}, :merge)
+  end
+
+  def messages_in(sources, ids)
+    sources.reverse.map { |path, text| messages(text, path, ids) }.reduce({}, :merge)
+  end
+
   # root?(line, owner) -- a new conversation from the owner: a dm/im/mpim or
   # mention that is not inside a thread (thread_ts absent or its own ts).
   def root?(line, owner)

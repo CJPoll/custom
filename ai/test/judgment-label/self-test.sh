@@ -936,6 +936,155 @@ run "${BIN}" --propose --dry-run --inbox-root "${SROOT}" --labels "${SLABELS}"
 eq "a malformed snapshot line is an error (exit 1), never a shorter corpus" "${RC}" "1"
 has "it names the line, with Fix:" "${ERR}" "slack-routing-roots.jsonl:5 is not a JSON object"
 
+echo "== domain: the inbox's rotated generation is part of the inbox (DND-1497)"
+
+# The inbox keeps one rotated generation, <channel>.jsonl.1 (athena-inbox.md
+# -> Retention). Read oldest first: the generation, then the live file.
+GEN_TEXT='{"event_id":"EvG1","kind":"im","user":"U1","channel":"D1","ts":"1.000001","text":"g"}'
+LIVE_TEXT='{"event_id":"EvL1","kind":"im","user":"U1","channel":"D1","ts":"2.000001","text":"l"}'
+GEN_DUP='{"event_id":"EvG1","kind":"im","user":"U1","channel":"D1","ts":"1.000001","text":"dup"}'
+ruby_eq "parse_slack_sources: the generation's lines come first, then the live file's [DND-1497]" \
+  "EvG1 EvL1" \
+  "JudgmentLabel.parse_slack_sources([['G', %(${GEN_TEXT}\n)], ['L', %(${LIVE_TEXT}\n)]])[:lines].map { |l| l[:event_id] }.join(' ')"
+ruby_eq "parse_slack_sources: an empty live file after a rotation is not an empty inbox [DND-1497]" \
+  "EvG1" \
+  "JudgmentLabel.parse_slack_sources([['G', %(${GEN_TEXT}\n)], ['L', '']])[:lines].map { |l| l[:event_id] }.join(' ')"
+ruby_eq "parse_slack_sources: every source empty is its own error, naming each [DND-1497]" \
+  "InputError: slack inbox G + L is empty (0 lines)" \
+  "JudgmentLabel.parse_slack_sources([['G', ''], ['L', %(\n)]])"
+ruby_eq "parse_slack_sources: no source at all is an error, never an empty inbox [DND-1497]" \
+  "InputError: slack inbox (no file) is empty (0 lines)" \
+  "JudgmentLabel.parse_slack_sources([])"
+ruby_eq "parse_slack_sources: a bad line names its own file and line [DND-1497]" \
+  "InputError: L:1 is not a JSON object" \
+  "JudgmentLabel.parse_slack_sources([['G', %(${GEN_TEXT}\n)], ['L', %(nope\n)]])"
+ruby_eq "raw_rows_in / messages_in: a line is found in either file, the older copy first [DND-1497]" \
+  "g l|g" \
+  "s = [['G', %(${GEN_TEXT}\n)], ['L', %(${LIVE_TEXT}\n${GEN_DUP}\n)]]; r = JudgmentLabel.raw_rows_in(s, %w[EvG1 EvL1]); [r.keys.sort.map { |k| r[k]['text'] }.join(' '), JudgmentLabel.messages_in(s, %w[EvG1])['EvG1'][:text]].join('|')"
+
+FILESRB="${AI}/lib/slack_inbox_files.rb"
+GROOT="${TMP}/gen-files"
+mkdir -p "${GROOT}"
+printf '{"channel":"D1","ts":"1790196000.000000"}\n' >"${GROOT}/walt_ui-slack.jsonl.1"
+printf '{"channel":"D1","ts":"1790199500.000000"}\n' >"${GROOT}/walt_ui-slack.jsonl"
+printf '{"channel":"D9","ts":"1790199000.000000"}\n' >"${GROOT}/custom-slack.jsonl"
+files_eq() { # files_eq NAME EXPECTED RUBY-EXPR (r = SlackInboxFiles.read(ROOT))
+  local got
+  got="$(/usr/bin/ruby -r "${FILESRB}" -r "${EVALRB}" -e "puts(begin; $3; rescue SlackInboxFiles::Error => e; 'Error: ' + e.message; end)" 2>&1)"
+  eq "$1" "${got}" "$2"
+}
+files_eq "slack inbox files: a channel's generation and live file are ONE stream, generation first [DND-1497]" \
+  "custom-slack.jsonl=custom-slack.jsonl:1|walt_ui-slack.jsonl=walt_ui-slack.jsonl.1,walt_ui-slack.jsonl:2" \
+  "r = SlackInboxFiles.read('${GROOT}'); r[:files].map { |f| f[:name] + '=' + f[:sources].join(',') + ':' + f[:rows].size.to_s }.join('|')"
+files_eq "slack inbox files: the window is covered when the generation reaches back, though the live file does not [DND-1497]" \
+  "true" \
+  "JudgmentEval.window_covered?({'ts' => '1790200000.000000', 'channel' => 'D1'}, SlackInboxFiles.read('${GROOT}')[:files])"
+files_eq "slack inbox files: each stream says whether it has a generation and when its state says it last rotated [DND-1497]" \
+  "custom-slack.jsonl false nil|walt_ui-slack.jsonl true nil" \
+  "SlackInboxFiles.read('${GROOT}')[:files].map { |f| [f[:name], f[:generation], f[:rotated_at].inspect].join(' ') }.join('|')"
+printf '{"v":1,"offset":0,"rotated_at":"2026-09-27T11:02:36Z"}\n' >"${GROOT}/custom-slack.state.json"
+printf 'not json\n' >"${GROOT}/walt_ui-slack.state.json"
+files_eq "slack inbox files: rotated_at is read from the state file; an unreadable one is nil, never guessed [DND-1497]" \
+  "2026-09-27T11:02:36Z|nil" \
+  "f = SlackInboxFiles.read('${GROOT}')[:files]; [f[0][:rotated_at], f[1][:rotated_at].inspect].join('|')"
+rm -f "${GROOT}/custom-slack.state.json" "${GROOT}/walt_ui-slack.state.json"
+
+# A stream that never rotated lost nothing, however late it began: no .1, and
+# a rotated_at under the 14-day sweep (a rotation leaves a .1 until the next
+# rotation or the sweep). Anything else is "could not tell": not covered.
+COVR="{'ts' => '1790200000.000000', 'channel' => 'D1'}"
+NOW="Time.utc(2026, 10, 1)"
+late() { printf "{name: 'c', rows: [{'channel' => 'D1', 'ts' => '1790199000.000000'}], %s}" "$1"; }
+files_eq "window_covered?: a later-starting stream that never rotated covers the window [DND-1497]" \
+  "true" \
+  "JudgmentEval.window_covered?(${COVR}, [$(late "generation: false, rotated_at: '2026-09-27T11:02:36Z'")], now: ${NOW})"
+files_eq "window_covered?: one with a generation may have lost an older one: not covered [DND-1497]" \
+  "false" \
+  "JudgmentEval.window_covered?(${COVR}, [$(late "generation: true, rotated_at: '2026-09-27T11:02:36Z'")], now: ${NOW})"
+files_eq "window_covered?: a rotated_at past the 14-day sweep may hide a swept generation: not covered [DND-1497]" \
+  "false" \
+  "JudgmentEval.window_covered?(${COVR}, [$(late "generation: false, rotated_at: '2026-09-10T00:00:00Z'")], now: ${NOW})"
+for extra_now in "generation: false, rotated_at: nil|${NOW}" "generation: false, rotated_at: 'x'|${NOW}" \
+                 "generation: false, rotated_at: '2026-10-02T00:00:00Z'|${NOW}" "rotated_at: '2026-09-27T11:02:36Z'|${NOW}" \
+                 "generation: false, rotated_at: '2026-09-27T11:02:36Z'|nil"; do
+  files_eq "window_covered?: could not tell (${extra_now}) is not covered [DND-1497]" \
+    "false" \
+    "JudgmentEval.window_covered?(${COVR}, [$(late "${extra_now%|*}")], now: ${extra_now#*|})"
+done
+files_eq "window_covered?: the old call (no clock) is as strict as before [DND-1497]" \
+  "false" \
+  "JudgmentEval.window_covered?(${COVR}, [$(late "generation: false, rotated_at: '2026-09-27T11:02:36Z'")])"
+mkdir -p "${TMP}/gen-only"
+printf '{"channel":"D1","ts":"1790196000.000000"}\n' >"${TMP}/gen-only/walt_ui-slack.jsonl.1"
+files_eq "slack inbox files: a rotated, quiet channel (generation only) is read, not 'no inbox' [DND-1497]" \
+  "walt_ui-slack.jsonl=walt_ui-slack.jsonl.1" \
+  "SlackInboxFiles.read('${TMP}/gen-only')[:files].map { |f| f[:name] + '=' + f[:sources].join(',') }.join('|')"
+mkdir -p "${TMP}/gen-none"
+files_eq "slack inbox files: no live file and no generation is still an error [DND-1497]" \
+  "Error: no *-slack.jsonl or *-slack.jsonl.1 file directly under ${TMP}/gen-none (0 files)" \
+  "SlackInboxFiles.read('${TMP}/gen-none')"
+
+echo "== end to end: a labelled root only in the rotated generation joins the eval (DND-1497)"
+
+# The live failure, 2026-10-01: the owner confirmed ten roots on 09-28; the
+# inbox rotated on 09-29, moving them to walt_ui-slack.jsonl.1; the root
+# snapshot started on 10-01 from the live file alone, so all ten were "in
+# neither this inbox nor the snapshot" and judgment-eval joined none of them.
+RROOT="${TMP}/gen-root"
+RLAB="${TMP}/evals/gen-labels.jsonl"
+RSNAP="${RROOT}/evals/slack-routing-roots.jsonl"
+mkdir -p "${RROOT}/agent-mail/walt_ui/to-custom"
+: >"${RROOT}/gen_saas-session.jsonl"
+: >"${RROOT}/custom-session.jsonl"
+{
+  line EvX0 im "${OTHER}" "1790390000.000000" "" "SOMEONE-ELSE-EARLIER"
+  line EvP0 im "${OWNER}" "1790400000.000000" "" "PRIOR-OWNER-LINE"
+  line EvG1 im "${OWNER}" "1790401000.000100" "" "GENERATION-ROOT-TEXT"
+} >"${RROOT}/walt_ui-slack.jsonl.1"
+line EvL1 im "${OWNER}" "1790500000.000100" "" "LIVE-ROOT-TEXT" >"${RROOT}/walt_ui-slack.jsonl"
+# As on the live machine: a second inbox (custom-slack.jsonl) holds the same
+# channel, began after the root, and has never rotated (no .1, a recent
+# rotated_at). It lost nothing, so it must not make the root's window
+# incomplete.
+line EvCS1 im "${OTHER}" "1790450000.000000" "" "CUSTOM-INBOX-LATER" >"${RROOT}/custom-slack.jsonl"
+printf '{"v":1,"offset":0,"rotated_at":"%s"}\n' "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)" >"${RROOT}/custom-slack.state.json"
+# The snapshot as the live machine had it: started after the rotation, from
+# the live file only.
+mkdir -p "${RROOT}/evals"
+jq -c '{event_id, kind, user, channel, ts, thread_ts, text, received_at, snapshot: {at: "2026-10-01T06:39:37Z", window_complete: false, context_candidates: []}}' \
+  "${RROOT}/walt_ui-slack.jsonl" >"${RSNAP}"
+chmod 600 "${RSNAP}"
+{
+  printf '{"id":"EvG1","label":"walt_ui","provenance":"owner_confirmed","labeler":"%s","labeled_at":"2026-09-28T07:15:41Z"}\n' "${OWNER}"
+  printf '{"id":"EvGone","label":"harness","provenance":"owner_confirmed","labeler":"%s","labeled_at":"2026-09-28T07:15:43Z"}\n' "${OWNER}"
+} >"${RLAB}"
+
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${RLAB}" --corpus "${RSNAP}" --content-domain work
+eq "before --propose the generation root is not in the corpus: nothing joins (exit 1)" "${RC}" "1"
+has "the eval names each owner label that did not join, as n/a with its reason [DND-1497]" "${ERR}" \
+  "join: 2 of 2 labels have no corpus row with that event_id (n/a, not scored; 2 owner_confirmed): EvG1, EvGone"
+has "... and how a root gets into the snapshot [DND-1497]" "${ERR}" "the root snapshot keeps a root only if judgment-label --propose ran while it was in the inbox or its rotated generation"
+
+run "${BIN}" --propose --inbox-root "${RROOT}" --labels "${RLAB}"
+eq "propose with a rotated generation exits 0 [DND-1497]" "${RC}" "0"
+has "the report names both inbox files it read [DND-1497]" "${OUT}" "slack: ${RROOT}/walt_ui-slack.jsonl.1 + ${RROOT}/walt_ui-slack.jsonl: 4 lines"
+eq "the generation's owner roots are appended to the snapshot [DND-1497]" \
+  "$(jq -r .event_id "${RSNAP}" 2>/dev/null | tr '\n' ' ')" "EvL1 EvP0 EvG1 "
+eq "a generation root keeps its text in the snapshot [DND-1497]" \
+  "$(jq -r 'select(.event_id=="EvG1") | .text' "${RSNAP}" 2>/dev/null)" "GENERATION-ROOT-TEXT"
+eq "its window is complete: the generation reaches back over the hour, a later never-rotated inbox lost nothing, and its context is the earlier line [DND-1497]" \
+  "$(jq -c 'select(.event_id=="EvG1") | .snapshot | {complete: .window_complete, c: [.context_candidates[] | .ts]}' "${RSNAP}" 2>/dev/null)" \
+  '{"complete":true,"c":["1790400000.000000"]}'
+has "the owner label whose root is in neither file is still counted, never dropped [DND-1497]" "${OUT}" "owner_confirmed kept: 2 (1 in neither this inbox nor the snapshot)"
+eq "the owner's answers are unchanged [DND-1497]" "$(jq -r 'select(.provenance=="owner_confirmed") | .id + " " + .label' "${RLAB}" | sort | tr '\n' ' ')" "EvG1 walt_ui EvGone harness "
+
+run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${RROOT}" --labels "${RLAB}" --corpus "${RSNAP}" --content-domain work
+eq "the eval joins the generation root (exit 0) [DND-1497]" "${RC}" "0"
+has "it is a case [DND-1497]" "${OUT}" "cases: 1 (walt_ui 1)"
+lacks "it is not excluded for its window [DND-1497]" "${OUT}" "window-incomplete excluded"
+has "the eval names only the root that is in neither file [DND-1497]" "${ERR}" \
+  "join: 1 of 2 labels have no corpus row with that event_id (n/a, not scored; 1 owner_confirmed): EvGone"
+
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then

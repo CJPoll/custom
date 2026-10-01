@@ -447,6 +447,13 @@ has "--dry-run prints the candidate counts [DND-1048]" "${OUT}" "context candida
 has "the run names the inbox files it read [DND-1048]" "${OUT}" "inbox files: 2 read (custom-slack.jsonl, walt_ui-slack.jsonl)"
 eq "--dry-run makes no call at all [DND-1048]" "$(requests)" "${n}"
 lacks "--dry-run never prints a context's text [DND-1048]" "${OUT}" "OWNER-EARLIER"
+# The inbox's rotated generation holds the channel's earlier lines
+# (athena-inbox.md -> Retention): it is read with its live file (DND-1497).
+printf '{"channel":"D2","user":"%s","ts":"1790570500.000100","thread_ts":null,"text":"OWNER-IN-GENERATION","kind":"im","event_id":"Ev-g"}\n' "${OWNER_ID}" > "${INBOX}/walt_ui-slack.jsonl.1"
+slr --dry-run
+has "the run names the rotated generation it read [DND-1497]" "${OUT}" "inbox files: 3 read (custom-slack.jsonl, walt_ui-slack.jsonl.1, walt_ui-slack.jsonl)"
+has "a line only in the generation is a context candidate [DND-1497]" "${OUT}" "context candidates: 3 line(s), 2 the owner's, for 2 of 2 case(s)"
+rm -f "${INBOX}/walt_ui-slack.jsonl.1"
 
 respond '{"auto":"not_configured"}'
 rm -f "${TMP}/context.json"

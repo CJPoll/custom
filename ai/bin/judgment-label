@@ -62,8 +62,12 @@ USAGE = <<~EOF
               the counts and writes nothing.
               The inbox rotates, so every owner root once seen is appended
               to the root snapshot (--snapshot), and the labels are built
-              over the snapshot's roots and the live inbox's: a root that
-              rotated out keeps its row (DND-1448). Forward records rotate
+              over the snapshot's roots and the inbox's: a root that
+              rotated out keeps its row (DND-1448). The inbox is
+              walt_ui-slack.jsonl and its rotated generation
+              walt_ui-slack.jsonl.1, read together, oldest first
+              (DND-1497): a root that has left the live file is still
+              snapshotted until the next rotation deletes the generation. Forward records rotate
               too, so what a row recorded is one more vote: a forward_record
               label with no current record is kept, a recorded conflict
               stays one, and a current record that disagrees with a
@@ -126,7 +130,8 @@ USAGE = <<~EOF
   --counts    Print the labels file's rows per label and provenance.
 
   --inbox-root DIR  default $ATHENA_INBOX_ROOT, else ~/.local/share/athena;
-                    holds walt_ui-slack.jsonl and the forward sources above
+                    holds walt_ui-slack.jsonl (and walt_ui-slack.jsonl.1)
+                    and the forward sources above
   --labels FILE     default ${XDG_DATA_HOME:-~/.local/share}/athena/evals/
                     slack-routing-labels.jsonl (machine-local, 0600, never
                     committed)
@@ -138,7 +143,9 @@ USAGE = <<~EOF
                     D7) and the context judgment-eval would build for it then
                     (anyone else's text emptied), marked window_complete
                     when every inbox file holding the root's channel
-                    reached back over the window. judgment-eval leaves a
+                    reached back over the window, or never rotated (no .1
+                    and a rotated_at within the 14-day sweep, so it lost
+                    nothing; DND-1497). judgment-eval leaves a
                     root whose window is not complete out of the run, n/a,
                     and names it (DND-1483).
                     --confirm reads a rotated root's text from it. An
@@ -327,10 +334,27 @@ module Manager
     File.join(opts[:inbox_root], "walt_ui-slack.jsonl")
   end
 
+  # read_slack(opts) -> [[path, text]] oldest first: the inbox's rotated
+  # generation walt_ui-slack.jsonl.1 (athena-inbox.md -> Retention), then the
+  # live file (DND-1497). The generation holds the roots that rotated out of
+  # the live file and are not yet deleted; reading it is what lets --propose
+  # snapshot them. Either may be absent (no rotation yet; a quiet channel
+  # after one); both absent is the missing-inbox error.
   def read_slack(opts)
     path = slack_path(opts)
-    text = Effects.read_input(path, "slack inbox", "point --inbox-root at the root holding walt_ui-slack.jsonl (default ~/.local/share/athena)")
-    [path, text]
+    gen = "#{path}#{SlackInboxFiles::GENERATION}"
+    unless File.exist?(path) || File.exist?(gen)
+      fail!(1, "slack inbox #{path} does not exist (nor its rotated generation #{File.basename(gen)})",
+            "point --inbox-root at the root holding walt_ui-slack.jsonl (default ~/.local/share/athena)")
+    end
+    [gen, path].select { |p| File.exist?(p) }.map do |p|
+      [p, Effects.read_input(p, "slack inbox", "point --inbox-root at the root holding walt_ui-slack.jsonl (default ~/.local/share/athena)")]
+    end
+  end
+
+  # inbox_name(sources) -> the inbox files as one name, for the report.
+  def inbox_name(sources, base: false)
+    sources.map { |p, _| base ? File.basename(p) : p }.join(" + ")
   end
 
   def forward_records(opts)
@@ -354,11 +378,11 @@ module Manager
 
   def run_propose(opts, out, err)
     opts = opts.merge(owner: Effects.owner_id)
-    path, text = read_slack(opts)
-    slack = JudgmentLabel.parse_slack(text, path)
+    sources = read_slack(opts)
+    slack = JudgmentLabel.parse_slack_sources(sources)
     sel = JudgmentLabel.select_roots(slack[:lines], opts[:owner])
     records, by_source = forward_records(opts)
-    input = { path: path, text: text, slack: slack, sel: sel, records: records, by_source: by_source }
+    input = { sources: sources, slack: slack, sel: sel, records: records, by_source: by_source }
     if opts[:dry_run]
       propose(opts, input, out, err, write: false)
       out.puts "dry run: nothing written"
@@ -420,12 +444,15 @@ module Manager
     files = read[:files]
     lines = files.flat_map { |f| f[:rows] }
     out.puts "snapshot context: #{files.size} inbox file(s) read" + (read[:unreadable].positive? ? ", #{read[:unreadable]} unreadable line(s) skipped" : "")
-    raw = JudgmentLabel.raw_rows(input[:text], input[:path], roots.map { |r| r[:event_id] })
+    raw = JudgmentLabel.raw_rows_in(input[:sources], roots.map { |r| r[:event_id] })
     now = Effects.now
     roots.map do |root|
       row = raw.fetch(root[:event_id])
       candidates = JudgmentEval.context_candidates(row, lines, opts[:owner])
-      JudgmentLabel.snapshot_row(row, candidates, JudgmentEval.window_covered?(row, files), now)
+      # The snapshot's own clock decides whether a stream could have rotated
+      # (DND-1497): one reading for the row's "at" and the coverage.
+      covered = JudgmentEval.window_covered?(row, files, now: Time.iso8601(now))
+      JudgmentLabel.snapshot_row(row, candidates, covered, now)
     end
   end
 
@@ -440,18 +467,19 @@ module Manager
   end
 
   def report_inputs(input, snap, matched, write, out, err)
-    path, slack, sel, records, by_source = input.values_at(:path, :slack, :sel, :records, :by_source)
+    sources, slack, sel, records, by_source = input.values_at(:sources, :slack, :sel, :records, :by_source)
+    path = inbox_name(sources)
     out.puts "slack: #{path}: #{slack[:lines].size + slack[:without_id]} lines" + (slack[:without_id].positive? ? " (#{slack[:without_id]} without event_id, ignored)" : "")
     out.puts "roots: #{sel[:roots].size} owner new-conversation roots " \
              "(excluded: #{sel[:duplicates]} duplicate, #{sel[:non_owner]} not from the owner, #{sel[:replies]} thread replies, #{sel[:other]} other kinds)"
-    out.puts snapshot_line(snap, File.basename(path), write)
+    out.puts snapshot_line(snap, inbox_name(sources, base: true), write)
     if snap[:roots].empty?
       fail!(1, "no owner new-conversation root in #{path} (#{slack[:lines].size} lines considered) or in the root snapshot", "check the owner id (private overlay #{JudgmentLabel::OWNER_KEY.join(' ')}) and that this is the walt_ui slack inbox; nothing was written")
     end
     out.puts "forward records: #{records.size} (#{by_source.map { |k, v| "#{k} #{v}" }.join(', ')}): " \
              "matched #{matched[:matched]}, thread only #{matched[:thread_only]}, unmatched #{matched[:unmatched].size}, conflicts #{matched[:conflicts].size}"
     matched[:unmatched].each do |source, ts|
-      err.puts "#{PROG}: unmatched forward record (#{source}): ts #{ts.join(', ')} matches no line in #{File.basename(path)}. " \
+      err.puts "#{PROG}: unmatched forward record (#{source}): ts #{ts.join(', ')} matches no line in #{inbox_name(sources, base: true)}. " \
                "Fix: none needed to proceed; it labels nothing (a forward of a message this inbox never received, or an older inbox)."
     end
     unless matched[:ambiguous].empty?
@@ -482,9 +510,9 @@ module Manager
       out.puts "nothing to #{mode == :recheck ? 'recheck' : 'confirm'}: no #{MODE_ROWS[mode]} in #{opts[:labels]}"
       return 0
     end
-    path, text = read_slack(opts)
-    msgs = messages_for(opts, text, path, pending.map { |r| r["id"] })
-    where = "#{File.basename(path)} or the root snapshot"
+    sources = read_slack(opts)
+    msgs = messages_for(opts, sources, pending.map { |r| r["id"] })
+    where = "#{inbox_name(sources, base: true)} or the root snapshot"
     reader = Effects.context_reader(opts[:slack_bin])
     done = 0
     skipped = 0
@@ -502,7 +530,7 @@ module Manager
       end
     end
     left = JudgmentLabel.pending(existing_rows(opts, must_exist: true), mode)
-    gone = left.size - messages_for(opts, text, path, left.map { |r| r["id"] }).size
+    gone = left.size - messages_for(opts, sources, left.map { |r| r["id"] }).size
     out.puts "#{mode == :recheck ? 'rechecked' : 'confirmed'} #{done}, skipped #{skipped}; #{left.size} #{MODE_ROWS[mode]} remain" +
              (gone.positive? ? " (#{gone} no longer in #{where}, so no context can be shown for them)" : "")
     0
@@ -510,10 +538,11 @@ module Manager
     fail!(1, e.message, e.fix)
   end
 
-  # messages_for(opts, text, path, ids) -> the live inbox's messages for ids,
-  # and the root snapshot's for those that rotated out (DND-1448).
-  def messages_for(opts, text, path, ids)
-    live = JudgmentLabel.messages(text, path, ids)
+  # messages_for(opts, sources, ids) -> the inbox's messages for ids (its
+  # rotated generation and live file, DND-1497), and the root snapshot's for
+  # those that rotated out of both (DND-1448).
+  def messages_for(opts, sources, ids)
+    live = JudgmentLabel.messages_in(sources, ids)
     missing = ids.reject { |id| live.key?(id) }
     snap = missing.empty? ? nil : Effects.snapshot_text(opts[:snapshot])
     return live if snap.nil?

@@ -15,6 +15,7 @@
 # Deliberately gem-free (stdlib only).
 
 require "json"
+require "time"
 require_relative "judgment_context"
 require_relative "judgment_label"
 
@@ -108,6 +109,25 @@ module JudgmentEval
       end
     end
     { cases: cases, proposed: proposed.size, missing: missing }
+  end
+
+  # missing_line(missing, labels, usable, id_key, use_case) -> [what, fix] for
+  # the labels whose id the corpus lacks: n/a, not scored, counted by how
+  # many the owner confirmed, and named (DND-1497). For slack_routing the
+  # reason is where a root comes from: judgment-label's snapshot holds a root
+  # only if --propose ran while the root was in the inbox or its rotated
+  # generation.
+  def missing_line(missing, labels, usable, id_key, use_case)
+    wanted = missing.to_h { |id| [id, true] }
+    owner = labels.count { |l| wanted.key?(l[:id]) && l[:provenance] == "owner_confirmed" }
+    what = "join: #{missing.size} of #{usable} labels have no corpus row with that #{id_key} (n/a, not scored; #{owner} owner_confirmed): #{missing.join(', ')}"
+    fix = if use_case == "slack_routing"
+            "the root snapshot keeps a root only if judgment-label --propose ran while it was in the inbox or its rotated generation " \
+              "(walt_ui-slack.jsonl, walt_ui-slack.jsonl.1); run judgment-label --propose and re-run. A root gone from both before that is lost and stays n/a"
+          else
+            "point --corpus at the file these labels were made from, or drop the stale labels; they are not in this run"
+          end
+    [what, fix]
   end
 
   # without_rule_routed(cases, use_case) -> [cases, excluded_count]
@@ -320,13 +340,40 @@ module JudgmentEval
   # window away; a file with no line in the channel cannot hold its context.
   # FILES is [{name:, rows:}]. No such file, or an unreadable ts, is false:
   # "could not tell" never reads as covered.
-  def window_covered?(root, files)
+  #
+  # NOW given (DND-1497): a stream that NEVER ROTATED lost nothing, however
+  # late it began (a second inbox created after the root), so it covers. By
+  # the inbox's retention rules (athena-inbox.md -> Retention) every
+  # rotation leaves <name>.1 until the next rotation (which leaves a new one)
+  # or the sweep, 14 days after rotated_at. So no generation (generation:
+  # false, stated, never assumed) and a rotated_at no older than the sweep
+  # window means the channel never rotated. A missing, malformed or future
+  # rotated_at, or no clock, is "could not tell": the earliest-line rule
+  # above. Residual: a .1 deleted by hand reads as never rotated.
+  def window_covered?(root, files, now: nil)
     root_us = slack_ts_us(root["ts"])
     holding = files.select { |f| f[:rows].any? { |line| line.is_a?(Hash) && line["channel"] == root["channel"] } }
     return false if root_us.nil? || holding.empty?
 
     from_us = root_us - CONTEXT_WINDOW_S * 1_000_000
-    holding.all? { |f| (us = earliest_us(f[:rows])) && us <= from_us }
+    holding.all? { |f| never_rotated?(f, now) || ((us = earliest_us(f[:rows])) && us <= from_us) }
+  end
+
+  # The inbox's sweep window for a rotated generation (athena-inbox.md ->
+  # Lifetimes): 14 days after rotated_at.
+  GENERATION_SWEEP_S = 14 * 86_400
+
+  # never_rotated?(stream, now) -> true only when the stream states it has no
+  # rotated generation and its rotated_at is a time in [now - 14 days, now].
+  def never_rotated?(stream, now)
+    return false unless now.is_a?(Time) && stream[:generation] == false
+
+    at = begin
+      Time.iso8601(stream[:rotated_at].to_s)
+    rescue ArgumentError
+      nil
+    end
+    !at.nil? && at <= now && now - at < GENERATION_SWEEP_S
   end
 
   # earliest_us(lines) -> the smallest Slack ts (microseconds) among lines,

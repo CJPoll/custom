@@ -90,9 +90,11 @@ USAGE = <<~EOF
                         60 judged calls per minute)
     --inbox-root DIR    slack_routing only: where the Slack inbox lines live
                         (default $ATHENA_INBOX_ROOT, else ~/.local/share/athena).
-                        Every *-slack.jsonl directly under it is read, and the
-                        run names each file. Lines only on another machine are
-                        not seen.
+                        Every *-slack.jsonl directly under it is read, each
+                        with its rotated generation *-slack.jsonl.1 (one
+                        stream, oldest first; DND-1497), and the run names
+                        each file. Lines only on another machine are not
+                        seen.
     --bot-id B          slack_routing only: the Slack app's bot id, needed when
                         the owner has more than one Slack app (the server
                         refuses to guess)
@@ -314,10 +316,11 @@ module Effects
   # A root that is missing, or holds no *-slack.jsonl, is an ERROR: zero
   # files must never read as "no context before any root".
   # The reader is ai/lib/slack_inbox_files.rb, shared with judgment-label's
-  # root snapshot (DND-1448).
+  # root snapshot (DND-1448). A channel's rotated generation (<name>.1) is
+  # read with its live file, and named among the files (DND-1497).
   def read_slack_inboxes(root)
     read = SlackInboxFiles.read(root)
-    { files: read[:files].map { |f| f[:name] }, lines: read[:files].flat_map { |f| f[:rows] }, unreadable: read[:unreadable] }
+    { files: read[:files].flat_map { |f| f[:sources] }, lines: read[:files].flat_map { |f| f[:rows] }, unreadable: read[:unreadable] }
   rescue SlackInboxFiles::Error => e
     fail!(1, e.message, e.fix)
   end
@@ -360,7 +363,7 @@ module Manager
     cases, lacking = JudgmentEval.with_domain(measurable, opts[:content_domain])
     {
       labels: labels, corpus: corpus, joined: joined, cases: cases, lacking_domain: lacking, rule_routed: rule_routed,
-      window_incomplete: window_incomplete,
+      window_incomplete: window_incomplete, use_case: opts[:use_case],
       labels_sha256: Effects.sha256(labels_text), corpus_sha256: Effects.sha256(corpus_text)
     }
   rescue JudgmentEval::InputError => e
@@ -378,8 +381,8 @@ module Manager
     out.puts "corpus: #{corpus[:rows].size} rows with #{corpus[:id_key]}" + (corpus[:without_id].positive? ? ", #{corpus[:without_id]} without #{corpus[:id_key]} (ignored)" : "")
     unless joined[:missing].empty?
       usable = loaded[:labels].size - joined[:proposed]
-      err.puts "#{PROG}: join: #{joined[:missing].size} of #{usable} labels have no corpus row with that #{corpus[:id_key]}: " \
-               "#{joined[:missing].join(', ')}. Fix: point --corpus at the file these labels were made from, or drop the stale labels; they are not in this run."
+      what, fix = JudgmentEval.missing_line(joined[:missing], loaded[:labels], usable, corpus[:id_key], loaded[:use_case])
+      err.puts "#{PROG}: #{what}. Fix: #{fix}."
     end
     incomplete = JudgmentEval.window_incomplete_line(loaded[:window_incomplete])
     out.puts incomplete if incomplete

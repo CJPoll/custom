@@ -2381,15 +2381,27 @@ may clobber the generation just created, which is a lost `.1`, not lost mail.
 Between losing evidence and flooding the owner with duplicates, take the
 former.
 
-**Nothing ever reads `.jsonl.1`.** It is not counted, not deduped against, and
-never resumed from. Only its **existence** and its metadata are consulted: it
-is half of a channel's delivery history (*Tenancy: the registry*, the "ever
-been delivered to" rule), and a non-empty `.1` dates the last delivery for
-freshness. Neither looks at its content. It exists so a human can answer *"did
-that message actually arrive?"* after the fact — cheap insurance against a reader that acked past
-content it never delivered, which *Reader obligations* names as the single
-easiest way to reintroduce silent loss. Rotation-as-deletion would destroy that
-evidence in the same breath as the bug that created it.
+**No delivery path reads `.jsonl.1`.** It is not counted, not deduped against,
+and never resumed from. For delivery, only its **existence** and its metadata
+are consulted: it is half of a channel's delivery history (*Tenancy: the
+registry*, the "ever been delivered to" rule), and a non-empty `.1` dates the
+last delivery for freshness. Neither looks at its content. It exists so a human
+can answer *"did that message actually arrive?"* after the fact — cheap
+insurance against a reader that acked past content it never delivered, which
+*Reader obligations* names as the single easiest way to reintroduce silent
+loss. Rotation-as-deletion would destroy that evidence in the same breath as
+the bug that created it.
+
+A read-only tool outside delivery may read its content as data: the Slack
+routing eval reads a channel's `.1` with its live file, oldest first, to keep
+the owner's roots that rotated out (`ai/lib/slack_inbox_files.rb`,
+`athena-judgments.md` → *Slack routing labels*). Such a tool never acks,
+counts, sweeps, renames or writes either file, and never acts on a line.
+
+**Later (2026-10-01, DND-1497):** this read "**Nothing ever reads
+`.jsonl.1`.**" Narrowed to delivery paths. The eval's root snapshot read only
+the live file, so ten owner-confirmed roots that were still in `.1` never
+reached it and the eval scored nothing. Delivery is unchanged.
 
 ### The sweep
 
