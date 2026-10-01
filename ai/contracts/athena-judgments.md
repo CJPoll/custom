@@ -751,7 +751,11 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   which runs the router's own selection over the local inbox lines (anyone
   but the owner with the text emptied) and the app's claims. The rule is the
   router's; the data is this machine's inbox, which can differ from the
-  server's `slack_events`. `judgment-eval` refuses a reply whose question-set
+  server's `slack_events`. A root received before HG-22 carries the legacy
+  kind `dm` (`athena-inbox.md` → *Channel kind: `log`*), which the endpoint
+  and the state refuse. `judgment-eval` maps it before it sends, in one place
+  (`JudgmentEval.contract_kind`): a `dm` in a `D` channel is `im`, any other
+  `dm` is `mpim` (DND-1567). `judgment-eval` refuses a reply whose question-set
   version, rules or owner id differ from its own, so a mismatch fails loudly
   instead of starving the context. Its owner id is the private overlay's
   `slack .people.owner.user_id` (`athena-private-overlay.md`); one that does

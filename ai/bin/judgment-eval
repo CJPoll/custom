@@ -69,7 +69,8 @@ USAGE = <<~EOF
                         ("event_id" for slack_routing); its "input" member is
                         sent, or the whole row if it has none (slack_routing
                         sends only the line's text and kind, with its
-                        context: see below). A row's
+                        context: see below; a legacy kind "dm" is sent
+                        as "im" in a D channel, else "mpim"). A row's
                         "content_domain" (work|blend|personal) wins over
                         --content-domain. For slack_routing the corpus is
                         judgment-label's root snapshot,

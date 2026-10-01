@@ -24,7 +24,10 @@ CONTEXT_RESPONSES file (optional fifth argument), the same spec shapes, plus
                                     the owner's as owner entries, with the
                                     version, rules and owner id the real
                                     server returns (a stand-in for its
-                                    selection).
+                                    selection). Like the real server's
+                                    closed schema (RoutingContextRequest),
+                                    it answers 422 to a kind that is not
+                                    im, mpim or mention.
 
 Its default, when the file is absent, is {"auto": "context"}.
 
@@ -79,6 +82,9 @@ def next_spec(path, default):
             os.rename(path + ".tmp", path)
         return head
     return spec
+
+
+CONTEXT_KINDS = ("im", "mpim", "mention")
 
 
 def auto_context(body):
@@ -143,6 +149,8 @@ class Handler(BaseHTTPRequestHandler):
             spec = next_spec(RESPONSES_FILE, {"auto": "not_configured"})
         if spec.get("auto") == "not_configured":
             status, payload = 200, not_configured(body or {})
+        elif spec.get("auto") == "context" and (body or {}).get("kind") not in CONTEXT_KINDS:
+            status, payload = 422, {"error": "invalid_request", "fix": "kind must be im, mpim or mention. Fix: send the root line's kind."}
         elif spec.get("auto") == "context":
             status, payload = 200, auto_context(body or {})
         else:

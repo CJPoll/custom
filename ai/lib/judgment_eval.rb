@@ -405,9 +405,25 @@ module JudgmentEval
     { "channel" => line["channel"], "user" => line["user"], "ts" => line["ts"], "text" => text, "thread_ts" => nil }
   end
 
+  # contract_kind(root) -> the root's kind in the vocabulary the context
+  # endpoint and the slack-routing-v2 state take: im, mpim or mention
+  # (athena-judgments.md -> the slack_routing row). A root received before
+  # HG-22 carries the legacy "dm", which covered both a 1:1 and a group DM
+  # (athena-inbox.md -> Line format). A Slack 1:1 lives in a D channel, so a
+  # dm in a D channel is im and a dm in any other channel is mpim (DND-1567).
+  # A dm with no channel string, and any other kind, passes unchanged: it is
+  # never guessed, and the server's 422 names it.
+  def contract_kind(root)
+    kind = root["kind"]
+    channel = root["channel"]
+    return kind unless kind == "dm" && channel.is_a?(String) && !channel.empty?
+
+    channel.start_with?("D") ? "im" : "mpim"
+  end
+
   # context_request(root, candidates, bot_id) -> the endpoint's body for one root.
   def context_request(root, candidates, bot_id = nil)
-    body = { "channel" => root["channel"], "ts" => root["ts"], "kind" => root["kind"], "candidates" => candidates }
+    body = { "channel" => root["channel"], "ts" => root["ts"], "kind" => contract_kind(root), "candidates" => candidates }
     bot_id ? body.merge("bot_id" => bot_id) : body
   end
 
@@ -428,7 +444,7 @@ module JudgmentEval
   # context_input(root, context) -> the v2 case input: the root's text and
   # kind, and the context the server built. Nothing else from the line.
   def context_input(root, context)
-    { "text" => root["text"], "kind" => root["kind"], "context" => context }
+    { "text" => root["text"], "kind" => contract_kind(root), "context" => context }
   end
 
   # context_lines(built, unavailable) -> lines. A case whose context could not

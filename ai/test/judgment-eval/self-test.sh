@@ -175,6 +175,32 @@ ruby_eq "context: an owner mismatch names neither owner id (a work value) [DND-1
 ruby_eq "context: the case input is the root's text and kind with the context, nothing else [DND-1048]" \
   '{"text":"ROOT","kind":"im","context":[]}' \
   "${CTX_ROOT}"'; JSON.generate(JudgmentEval.context_input(r, []))'
+# DND-1567: a root written before HG-22 carries the legacy kind "dm", which
+# covered both im and mpim (athena-inbox.md -> Line format). The server's
+# context endpoint and the slack-routing-v2 state take only im, mpim or
+# mention, so the harness maps it: a D channel is a 1:1 (im), any other
+# channel a group DM (mpim).
+ruby_eq "kind: a legacy dm root in a D channel is sent as im [DND-1567]" \
+  "im" \
+  "${CTX_ROOT}"'; JudgmentEval.contract_kind(r.merge("kind"=>"dm"))'
+ruby_eq "kind: a legacy dm root in a non-D channel is sent as mpim [DND-1567]" \
+  "mpim mpim" \
+  "${CTX_ROOT}"'; [JudgmentEval.contract_kind(r.merge("kind"=>"dm","channel"=>"GFAKE0001")), JudgmentEval.contract_kind(r.merge("kind"=>"dm","channel"=>"CFAKE0001"))].join(" ")'
+ruby_eq "kind: im, mpim and mention pass unchanged [DND-1567]" \
+  "im mpim mention" \
+  "${CTX_ROOT}"'; %w[im mpim mention].map { |k| JudgmentEval.contract_kind(r.merge("kind"=>k)) }.join(" ")'
+ruby_eq "kind: any other kind passes unchanged, so the server's refusal names it [DND-1567]" \
+  '["thread_reply","channel",null]' \
+  "${CTX_ROOT}"'; JSON.generate(["thread_reply", "channel", nil].map { |k| JudgmentEval.contract_kind(r.merge("kind"=>k)) })'
+ruby_eq "kind: a legacy dm with no channel is not guessed [DND-1567]" \
+  '"dm"' \
+  "${CTX_ROOT}"'; JudgmentEval.contract_kind(r.merge("kind"=>"dm").reject { |k, _| k == "channel" }).inspect'
+ruby_eq "kind: the context request of a legacy dm root carries im [DND-1567]" \
+  "im" \
+  "${CTX_ROOT}"'; JudgmentEval.context_request(r.merge("kind"=>"dm"), [])["kind"]'
+ruby_eq "kind: the case input of a legacy dm root carries im [DND-1567]" \
+  '{"text":"ROOT","kind":"im","context":[]}' \
+  "${CTX_ROOT}"'; JSON.generate(JudgmentEval.context_input(r.merge("kind"=>"dm"), []))'
 ruby_eq "context: an unavailable case is counted and named [DND-1048]" \
   "context: built 1 of 2|unscored 1 (context_unavailable, not sent): Ev2" \
   'JudgmentEval.context_lines(1, [{case_id: "Ev2"}]).join("|")'
@@ -626,6 +652,29 @@ eq "session-mention plus window-incomplete, nothing left: exit 3, not 1 [DND-148
 has "the session-mention root is counted [DND-1483]" "${OUT}" "session-mention excluded: 1"
 has "the window-incomplete root is named [DND-1483]" "${OUT}" "window-incomplete excluded: 1 (n/a, not scored: the root's context window had partly rotated out of the inbox when it was snapshotted): Ev-r2"
 eq "the mixed run makes no request [DND-1483]" "$(requests)" "0"
+
+echo "== slack_routing: a legacy kind=dm root gets a context (DND-1567)"
+
+# Roots received before HG-22 carry kind "dm". The fake server refuses any
+# kind but im, mpim or mention with the real server's 422; the harness must
+# map dm before it sends, or the case is unscored context_unavailable.
+DMCORPUS="${TMP}/dm-roots.jsonl"
+{
+  printf '{"channel":"D1","user":"%s","ts":"1790570000.000100","thread_ts":null,"text":"ROOT-ONE","kind":"dm","event_id":"Ev-r1"}\n' "${OWNER_ID}"
+  printf '{"channel":"GFAKE0002","user":"%s","ts":"1790571000.000100","thread_ts":null,"text":"ROOT-TWO","kind":"dm","event_id":"Ev-r2"}\n' "${OWNER_ID}"
+} > "${DMCORPUS}"
+rm -f "${TMP}/context.json"
+respond '{"auto":"not_configured"}'
+: > "${TMP}/server.log"
+rm -rf "${XDG_DATA_HOME}/athena/evals/runs"
+run --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${DMCORPUS}" --content-domain work --pause 0 --inbox-root "${INBOX}"
+eq "a run of legacy dm roots still exits 3 with no key: both were sent [DND-1567]" "${RC}" "3"
+has "both legacy dm roots get a context [DND-1567]" "${OUT}" "context: built 2 of 2"
+lacks "no legacy dm root is context_unavailable [DND-1567]" "${ERR}" "context_unavailable"
+eq "the context requests carry im for the D channel and mpim for the other [DND-1567]" \
+  "$(ctx_requests | jq -r .body.kind | tr '\n' ' ')" "im mpim "
+eq "the eval cases carry the mapped kinds, never dm [DND-1567]" \
+  "$(eval_requests | jq -c '[.body.cases[].input.kind]')" '["im","mpim"]'
 
 echo "== slack_routing: the owner id comes from the private overlay (DND-1048 x DND-704)"
 
