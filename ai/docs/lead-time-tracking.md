@@ -187,9 +187,20 @@ on a `SCAN INCOMPLETE`.
 
 `--since` takes `YYYY-MM-DD` (00:00:00Z that day) or RFC 3339 with a zone.
 Anything else exits 1, like every other usage error, with a `Fix:` before
-the repo is read. Exit 2 is never a usage error: it means a requested PR/MR
-was not found or the forge could not read it. It does not yet tell those two
-apart (both reach `run_scan` as a nil from the forge's `facts`).
+the repo is read. Exit 2 is never a usage error: it means the forge says a
+requested PR/MR does not exist (gh's `Could not resolve to a PullRequest`,
+glab's `404 Not found`). A forge that could not be read for it is exit 3,
+could not measure, with a `Fix:` naming the forge's error: offline, no auth,
+a rate limit, output that is not JSON, or a missing repository or project
+(gh's `Could not resolve to a Repository`, glab's `404 Project Not Found`).
+
+**Later (2026-10-01, DND-1510):** exit 2 meant "not found or the forge could
+not read it", because both reached `run_scan` as a nil from the forge's
+`facts`. Superseded by the split above: an offline or unauthenticated forge
+read as a missing PR, the failed-lookup class one level below DND-1489. The
+callers were swept: no caller runs `--pr`/`--mr`, and both window callers
+(`lead-time-phases --ingest`, the improver's watch scan) already read 3 as
+`SCAN INCOMPLETE` and every other non-zero code as a fault.
 
 **Later (2026-10-01, DND-1489):** a malformed `--since` exited 2. Superseded
 by exit 1: 2 already meant a requested PR/MR is not found or unreadable, so a

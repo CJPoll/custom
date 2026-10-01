@@ -155,6 +155,71 @@ else
   bad "a malformed --since exits 1 and a missing PR exits 2" "since=${SINCE_CODE} pr=${PR_CODE}"
 fi
 
+# 2f. DND-1510: exit 2 is a request the forge says does not exist; a forge it
+#     could not read is exit 3 (could not measure), with a Fix: naming the
+#     forge's own error. Before this, every failed facts probe exited 2, so an
+#     offline or unauthenticated forge read as a missing PR. Each stub answers
+#     as the real CLI does (stderr shapes measured 2026-10-01 with gh 2.x and
+#     glab: a nonexistent PR, a nonexistent MR, a nonexistent project).
+stub() { # stub <dir> <tool> <stdout> <stderr>: exits 1, printing both
+  mkdir -p "$1"
+  printf '%s' "$3" >"$1/$2.out"
+  printf '%s\n' "$4" >"$1/$2.err"
+  printf '#!/bin/sh\ncat "%s"\ncat "%s" >&2\nexit 1\n' "$1/$2.out" "$1/$2.err" >"$1/$2"
+  chmod +x "$1/$2"
+}
+GLREPO="${TMP}/gl-origin-repo"
+git init -q "${GLREPO}" && git -C "${GLREPO}" remote add origin https://gitlab.com/example-group/example-repo.git
+
+pr_case() { # pr_case <label> <want-code> <needle> <repo> <bindir> <flag>
+  local label="$1" want="$2" needle="$3" repo="$4" bindir="$5" flag="$6"
+  OUT="$(PATH="${bindir}:${PATH}" /usr/bin/ruby "$bin" --repo "${repo}" "${flag}" 424242 2>"${TMP}/err" </dev/null)"
+  CODE=$?; ERR="$(cat "${TMP}/err")"
+  if [ "${CODE}" -eq "${want}" ] && grep -qF -- "${needle}" <<<"${ERR}" && grep -q 'Fix:' <<<"${ERR}" \
+     && ! grep -qiE '\.rb:[0-9]+:in' <<<"${ERR}" && [ -z "${OUT}" ]; then
+    ok "${label}"
+  else
+    bad "${label}" "want=${want} code=${CODE} err=$(head -c 300 <<<"${ERR}")"
+  fi
+}
+
+stub "${TMP}/gh-offline" gh "" "error connecting to api.github.com"
+stub "${TMP}/gh-401" gh "" "HTTP 401: Bad credentials (https://api.github.com/graphql)"
+stub "${TMP}/gh-norepo" gh "" "GraphQL: Could not resolve to a Repository with the name 'example-org/example-repo'. (repository)"
+stub "${TMP}/gh-garbage" gh "" ""
+printf '#!/bin/sh\necho "not json"\nexit 0\n' >"${TMP}/gh-garbage/gh"
+stub "${TMP}/gl-nomr" glab '{"message":"404 Not found"}' "glab: 404 Not found (HTTP 404)"
+stub "${TMP}/gl-noproj" glab '{"message":"404 Project Not Found"}' "glab: 404 Project Not Found (HTTP 404)"
+stub "${TMP}/gl-401" glab '{"message":"401 Unauthorized"}' "glab: 401 Unauthorized (HTTP 401)"
+
+pr_case "gh offline on --pr is exit 3 naming the forge error (was 2, read as not found)" 3 \
+  "error connecting to api.github.com" "${GHREPO}" "${TMP}/gh-offline" --pr
+pr_case "gh unauthenticated on --pr is exit 3 naming the forge error" 3 \
+  "HTTP 401: Bad credentials" "${GHREPO}" "${TMP}/gh-401" --pr
+pr_case "gh repository not found is exit 3, not a missing PR" 3 \
+  "Could not resolve to a Repository" "${GHREPO}" "${TMP}/gh-norepo" --pr
+pr_case "gh output that is not JSON is exit 3" 3 \
+  "unparseable output" "${GHREPO}" "${TMP}/gh-garbage" --pr
+pr_case "gh PR not found stays exit 2" 2 \
+  "Could not resolve to a PullRequest" "${GHREPO}" "${NFBIN}" --pr
+pr_case "glab MR not found (404 Not found) is exit 2" 2 \
+  "404 Not found" "${GLREPO}" "${TMP}/gl-nomr" --mr
+pr_case "glab project not found is exit 3, not a missing MR" 3 \
+  "404 Project Not Found" "${GLREPO}" "${TMP}/gl-noproj" --mr
+pr_case "glab unauthenticated on --mr is exit 3 naming the forge error" 3 \
+  "401 Unauthorized" "${GLREPO}" "${TMP}/gl-401" --mr
+
+# The two outcomes must differ, and the tool error must say it measured
+# nothing rather than that the request is missing.
+PATH="${TMP}/gh-offline:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" --pr 424242 >/dev/null 2>"${TMP}/off-err" </dev/null
+OFF_CODE=$?
+if [ "${OFF_CODE}" -ne "${PR_CODE}" ] && grep -q 'could not measure' "${TMP}/off-err" \
+   && ! grep -q 'not found' "${TMP}/off-err"; then
+  ok "an offline forge (exit ${OFF_CODE}) and a missing PR (exit ${PR_CODE}) have distinct codes and words"
+else
+  bad "an offline forge and a missing PR are told apart" "offline=${OFF_CODE} missing=${PR_CODE} err=$(head -c 240 "${TMP}/off-err")"
+fi
+
 run --help --bogus
 [ "${CODE}" -eq 0 ] && grep -q 'Usage:' <<<"${OUT}" \
   && ok "--help is still answered first (stdout, exit 0)" \
@@ -162,7 +227,7 @@ run --help --bogus
 
 printf '\nlead-time self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then
-  echo "Fix: make ai/bin/lead-time parse argv with ai/lib/strict_argv.rb before it touches the repo: an unknown flag, a value flag with no value (or a non-integer --slow), --flag=VALUE, a repeated flag, --pr with --mr or --since, or --self-test beside another flag must exit 1 (usage) naming the flag with a Fix: line; keep the pure-logic --self-test green." >&2
+  echo "Fix: make ai/bin/lead-time parse argv with ai/lib/strict_argv.rb before it touches the repo: an unknown flag, a value flag with no value (or a non-integer --slow), --flag=VALUE, a repeated flag, --pr with --mr or --since, or --self-test beside another flag must exit 1 (usage) naming the flag with a Fix: line; a requested PR/MR the forge says does not exist must exit 2, and one the forge could not be read for (offline, auth, a missing repository or project, unparseable output) must exit 3 with a Fix: naming the forge error (LeadTime.lookup_miss, report_lookup_miss); keep the pure-logic --self-test green." >&2
   exit 1
 fi
 exit 0

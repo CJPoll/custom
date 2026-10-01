@@ -53,11 +53,12 @@
 # PR, read from the branch's activity log, one row per ticket its commit
 # subjects name.
 #
-# Exit: 0 ok, 1 usage/tool error (an unreadable --since included), 2 a
-# requested PR/MR is not found or the forge could not read it, 3 SCAN
-# INCOMPLETE. 2 is never a usage error, so a caller can tell a malformed
-# argument from a failed lookup (DND-1489). 2 does not yet tell a missing PR
-# from an unreadable forge: both reach run_scan as a nil from facts.
+# Exit: 0 ok, 1 usage/tool error (an unreadable --since included), 2 the
+# forge says a requested PR/MR does not exist, 3 could not measure: SCAN
+# INCOMPLETE, or a requested PR/MR the forge could not be read for (offline,
+# no auth, a missing repository or project). 2 is never a usage error
+# (DND-1489) and never a forge that could not be read (DND-1510), so a caller
+# can tell a malformed argument, a real miss and a tool failure apart.
 
 require "time"
 require "json"
@@ -464,6 +465,35 @@ module LeadTime
               end
     { scanned_through: through && Time.iso8601(through).utc.iso8601, landings: landings, kept: kept,
       incomplete: !failures.empty? }
+  end
+
+  # A requested PR/MR the forge could not give facts for (DND-1510). Only the
+  # forge saying the request does not exist is a miss; anything else is a tool
+  # error: offline, no auth, a rate limit, a missing repository or project,
+  # output that is not JSON. The shapes were measured 2026-10-01 against the
+  # real CLIs: gh prints "GraphQL: Could not resolve to a PullRequest ..." for
+  # a missing PR and "... to a Repository ..." for a missing repo; glab prints
+  # "glab: 404 Not found (HTTP 404)" for a missing MR and "glab: 404 Project
+  # Not Found (HTTP 404)" for a missing or unreadable project.
+  REQUEST_NOT_FOUND = {
+    "gh" => /Could not resolve to a PullRequest\b/,
+    "glab" => /\b404 Not found \(HTTP 404\)/i,
+  }.freeze
+
+  # cmd: the probe's printable command; detail: what the forge said.
+  def request_not_found?(cmd, detail)
+    re = REQUEST_NOT_FOUND[cmd.to_s.split.first]
+    re ? detail.to_s.match?(re) : false
+  end
+
+  # failures: the probes that failed while reading one request's facts.
+  # -> :not_found when every one is the forge saying the request does not
+  # exist, else :tool_error. No recorded failure is a tool error too: a lookup
+  # that returned nothing and said nothing cannot be read as a miss.
+  def lookup_miss(failures)
+    return :tool_error if failures.empty?
+
+    failures.all? { |f| request_not_found?(f[:cmd], f[:detail]) } ? :not_found : :tool_error
   end
 end
 
@@ -1381,6 +1411,31 @@ def self_test
   ProbeFailures.reset!
   check.call("reset clears", ProbeFailures.any?, false)
 
+  # lookup_miss (DND-1510): only the forge saying "no such request" is a miss.
+  gh_pr = "gh pr view 7 --json number"
+  gl_mr = "glab api projects/g%2Fr/merge_requests/7"
+  nf = ->(cmd, detail) { { cmd: cmd, detail: detail } }
+  check.call("miss: gh missing PR",
+             LeadTime.lookup_miss([nf.call(gh_pr, "GraphQL: Could not resolve to a PullRequest with the number of 7.")]),
+             :not_found)
+  check.call("miss: glab missing MR",
+             LeadTime.lookup_miss([nf.call(gl_mr, "glab: 404 Not found (HTTP 404)")]), :not_found)
+  check.call("tool error: gh offline",
+             LeadTime.lookup_miss([nf.call(gh_pr, "error connecting to api.github.com")]), :tool_error)
+  check.call("tool error: gh missing repository",
+             LeadTime.lookup_miss([nf.call(gh_pr, "GraphQL: Could not resolve to a Repository with the name 'o/r'.")]),
+             :tool_error)
+  check.call("tool error: glab missing project",
+             LeadTime.lookup_miss([nf.call(gl_mr, "glab: 404 Project Not Found (HTTP 404)")]), :tool_error)
+  check.call("tool error: a gh shape from glab is not a glab miss",
+             LeadTime.lookup_miss([nf.call(gl_mr, "Could not resolve to a PullRequest")]), :tool_error)
+  check.call("tool error: an unknown tool",
+             LeadTime.lookup_miss([nf.call("hub pr show 7", "Could not resolve to a PullRequest")]), :tool_error)
+  check.call("tool error: no recorded failure at all", LeadTime.lookup_miss([]), :tool_error)
+  check.call("tool error: one miss beside one tool error",
+             LeadTime.lookup_miss([nf.call(gl_mr, "glab: 404 Not found (HTTP 404)"),
+                                   nf.call(gl_mr, "glab: 401 Unauthorized (HTTP 401)")]), :tool_error)
+
   # GitHubForge#ci_ends must ask for the runs OF THE MERGE SHA, not scan a
   # repo-wide `gh run list --limit 300` once per PR. The repo-wide list (a) cost
   # ~7.8s per PR on gen_saas, so a 100-PR window took ~840s and the shipwright's
@@ -1556,17 +1611,36 @@ rescue StrictArgv::UsageError => e
   [nil, e.message]
 end
 
+# A requested PR/MR with no facts (DND-1510). failures: the probes that failed
+# reading it. -> 2 when the forge says it does not exist, else 3: the forge
+# could not be read, so nothing was measured. The two used to share exit 2.
+def report_lookup_miss(id, repo, failures)
+  said = failures.map { |f| "#{f[:cmd]}: #{f[:detail].lines.first.to_s.strip}" }
+  if LeadTime.lookup_miss(failures) == :not_found
+    warn "lead-time: #{id} does not exist in #{repo}; the forge says: #{said.first}"
+    warn "Fix: check the PR/MR number, and that --repo is the repo it was opened in."
+    return 2
+  end
+
+  said = ["the forge's facts lookup returned nothing and recorded no failed probe"] if said.empty?
+  warn "lead-time: could not measure #{id} in #{repo}: the forge could not be read. " \
+       "This is a tool error, not a missing PR/MR. The forge said:"
+  said.each { |s| warn "  - #{s}" }
+  warn "Fix: resolve the forge error above and re-run (`gh auth status` / `glab auth status`; a cron " \
+       "or other headless session often has no token; check the network, and that --repo's origin " \
+       "names a repository or project the forge can read). Until it re-runs, report #{id} as " \
+       "unmeasured, never as missing."
+  3
+end
+
 # The scan (the manager). forge and starts are injected so a test drives it
 # with fixtures; the CLI passes the real ones. -> the exit code.
 def run_scan(repo:, since:, slow_min:, as_json:, meta_file:, forge:, starts:, id: nil)
   rows = []
   if id
+    mark = ProbeFailures.mark
     rows = [analyze(forge, id, starts)].compact
-    if rows.empty?
-      warn "lead-time: #{id} not found or unreadable in #{repo}"
-      warn "Fix: check the PR/MR number and that the forge CLI can read this repo."
-      return 2
-    end
+    return report_lookup_miss(id, repo, ProbeFailures.list[mark..]) if rows.empty?
   else
     rows, closed_n = scan_window(forge, since, starts)
     warn "lead-time: #{closed_n} closed request(s) in the window never landed; not counted" if closed_n.positive?
@@ -1712,8 +1786,11 @@ if $PROGRAM_NAME == __FILE__
         --help         this text
 
       Exit: 0 ok; 1 usage or tool error (a --since that is not a date or
-      zoned time included); 2 a requested PR/MR is not found or the forge
-      could not read it (never a usage error); 3 SCAN INCOMPLETE.
+      zoned time included); 2 the forge says a requested PR/MR does not
+      exist (never a usage error, never an unreadable forge); 3 could not
+      measure: SCAN INCOMPLETE, or the forge could not be read for a
+      requested PR/MR (offline, no auth, a rate limit, a missing repository
+      or project), with a Fix: naming the forge's error.
     TXT
     exit 0
   end
