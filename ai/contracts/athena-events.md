@@ -4921,8 +4921,14 @@ Its `spawn_denied` report is live wherever the drain guard is already wired. A
 machine sends the other lifecycle reports only once `scripts/setup-hooks
 --install` has wired `ai/hooks/fleet-lifecycle.sh` there, an owner-gated step;
 until then that machine keeps the DND-433 rule (*Who sends what*). DND-561 has
-not shipped, so every sentence about the admiral's reports as enrichment is its
+not shipped (Todo, read 2026-10-01; no admiral skill sends `admiral_state`
+`parked`), so every sentence about the admiral's reports as enrichment is its
 obligation, not a description of shipped behaviour.
+
+**Later (2026-10-01):** DND-558 is merged (gen_saas #363, `8a117def`) and
+DND-560 is merged (custom `a3e8f1a6`). The server accepts `admiral_state`
+`parked`, and `ai/bin/fleet-report admiral-state --state parked` sends it. Only
+DND-561 is open: it still has to make the admiral skills send `parked`.
 
 ### Fleet reports are state upserts, not events
 
@@ -5106,8 +5112,15 @@ at every agent depth). The kinds and the other fields each may carry:
     that machine keep the DND-433 rule:** `admiral_started` at run start,
     `admiral_scope` after each mission status change in `state.md` (with
     `--notion-project-id` when the scope has a Project), and `admiral_state`.
-    The server refuses `parked` until DND-558 ships, and `ai/bin/fleet-report`
-    refuses it until DND-560 ships, so no admiral sends it before then.
+    No admiral skill sends `parked` yet; DND-561 adds that.
+
+    **Later (2026-10-01):** this clause said the server refuses `parked` until
+    DND-558 ships and `ai/bin/fleet-report` refuses it until DND-560 ships, so
+    no admiral sends it. Both have shipped: the server accepts `parked`
+    (gen_saas `Athena.Fleet.Report` validates `admiral_state` against
+    `draining`, `drained`, `finished`, `parked`) and the tool sends it. What
+    keeps admirals from sending it now is DND-561, which has not moved the
+    skills.
 
   **Later (2026-09-25):** DND-541: this bullet said the admiral calls
   `ai/bin/fleet-report` for `admiral_started`, for `admiral_scope` on each
