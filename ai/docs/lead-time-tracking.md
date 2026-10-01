@@ -126,16 +126,24 @@ uses) and adds:
 - **A force push**: could not measure, "force push to base".
 - **A PR merge no listed PR claims**: could not measure, never dropped.
 
-A push or PR merge that carries a PR row's landed commit or merge commit IS
-that PR's landing and adds no row. A range that cannot be read is a failed
-probe tied to that push. GitLab MRs are read; GitLab direct pushes are not,
-and the scan says so on stderr.
+A PR merge whose merge commit is a PR row's IS that PR's landing and adds no
+row. A push's commits up to a PR row's landed commit are that PR's; only the
+commits pushed on top of it give rows. Any other activity type in the window
+(a merge queue, say) reads could not measure, never dropped. A range that
+cannot be read is a failed probe tied to that push. GitLab MRs are read;
+GitLab direct pushes are not, and the scan says so on stderr.
+
+Delivery is at least once. A PR's change pushed before the PR closes is a
+push row in a scan that runs between the two, and a PR row in the next. And
+`--since` is inclusive, so the landing a cursor ends on is listed again.
 
 `--meta FILE` writes `{scanned_through, landings, kept, incomplete}` for a
 caller's cursor. `scanned_through` is the newest landing's window time
 (`closed_at`) **before** `--slow`, so a window with no slow row still moves the
 cursor. On `SCAN INCOMPLETE` it is the newest landing before the first one a
-probe failed on, and `null` when a failure belongs to no landing.
+probe failed on, and `null` when a failure belongs to no single landing (no
+token, a broken overlay). The shipwright does not use that partial value: it
+never moves its cursor on a `SCAN INCOMPLETE`.
 
 `--since` takes `YYYY-MM-DD` (00:00:00Z that day) or RFC 3339 with a zone.
 Anything else exits 2 with a `Fix:` before the repo is read.

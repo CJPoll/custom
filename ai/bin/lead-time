@@ -323,29 +323,39 @@ module LeadTime
   #    ticket:, title:, first_commit_times:, unmeasured:, start_unmeasured:}.
   #    unmeasured says why the landing itself cannot be measured;
   #    start_unmeasured says why it has no start (no ticket named).
+  # The activity types whose commits are read as a push. branch_creation is
+  # the push that created the branch; its range is the after commit alone.
+  PUSH_TYPES = %w[push branch_creation].freeze
+
   def build_push_rows(pushes:, covered:, prefixes:)
     cov = covered.compact.to_h { |s| [s, true] }
-    pushes.sort_by { |p| p[:at] }.flat_map do |p|
+    pushes.sort_by { |p| Time.iso8601(p[:at]) }.flat_map do |p|
       base = { at: p[:at], landed_commit: p[:after], commits: [], ticket: nil, title: nil,
                first_commit_times: [], unmeasured: nil, start_unmeasured: nil }
       case p[:type]
+      when *PUSH_TYPES then push_skeletons(p, base, cov, prefixes)
       when "force_push" then [base.merge(unmeasured: "force push to base")]
       when "pr_merge"
         cov[p[:after]] ? [] : [base.merge(unmeasured: "a PR merge (#{p[:after].to_s[0, 12]}) that no listed PR claims")]
-      else push_skeletons(p, base, cov, prefixes)
+      # Any other entry that moved the branch is a landing this tool cannot
+      # read; it says so rather than vanishing (a merge queue, a new type).
+      else [base.merge(unmeasured: "activity type #{p[:type].inspect} on the base branch is not read")]
       end
     end
   end
 
+  # A push's commits newer than any PR row's landed commit are its own: a
+  # push that carries a PR's landing plus direct commits on top keeps those.
   def push_skeletons(push, base, cov, prefixes)
     commits = push[:commits]
     return [base.merge(unmeasured: "the pushed commits could not be read (see SCAN INCOMPLETE)")] if commits.nil?
-
-    shas = commits.map { |c| c[:sha] }
-    return [] if cov[push[:after]] || shas.any? { |s| cov[s] }
     return [base.merge(unmeasured: "the push carried no commit")] if commits.empty?
 
-    base = base.merge(commits: shas)
+    covered_at = commits.index { |c| cov[c[:sha]] }
+    commits = commits.first(covered_at) if covered_at
+    return [] if commits.empty?
+
+    base = base.merge(commits: commits.map { |c| c[:sha] })
     oldest_first = commits.reverse
     named = oldest_first.flat_map do |c|
       refs_in(c[:subject]).select { |r| prefixes.include?(r.split("-", 2).first) }.map { |r| [r, c] }
@@ -411,9 +421,11 @@ module ProbeFailures
     end
 
     # at: the landing (its window time) the failed probe belongs to, when one
-    # is known; nil means the failure puts the whole window in doubt.
-    def record(cmd, detail, at: nil)
-      list << { cmd: cmd, detail: detail.to_s.strip, at: at }
+    # is known; nil means the failure puts the whole window in doubt. window:
+    # true marks a failure no single landing owns (no token, a broken
+    # overlay), so tag_from never ties it to one.
+    def record(cmd, detail, at: nil, window: false)
+      list << { cmd: cmd, detail: detail.to_s.strip, at: at, window: window }
       nil
     end
 
@@ -428,7 +440,7 @@ module ProbeFailures
     def tag_from(mark, at)
       return unless at
 
-      list[mark..].each { |f| f[:at] ||= at }
+      list[mark..].each { |f| f[:at] ||= at unless f[:window] }
     end
 
     def any?
@@ -587,7 +599,8 @@ class GitHubForge
   # after:, commits:}] oldest first, or nil when the branch or its log cannot
   # be read (a window-wide failed probe). A push whose commits cannot be read
   # carries commits: nil, and its failed probe is tied to that push's time.
-  LANDING_TYPES = %w[push force_push pr_merge].freeze
+  # A branch deletion carries no commit (base_pushes already drops its zero
+  # after sha); every other type in the window is a landing to account for.
   ZERO_SHA_RE = /\A0+\z/.freeze
 
   def landing_pushes_since(since_iso)
@@ -598,9 +611,9 @@ class GitHubForge
     end
 
     since = Time.iso8601(since_iso)
-    window = entries.select { |p| LANDING_TYPES.include?(p[:type]) && Time.iso8601(p[:at]) >= since }
+    window = entries.select { |p| Time.iso8601(p[:at]) >= since }
     fetch_base(base, window)
-    window.map { |p| p.merge(commits: p[:type] == "push" ? pushed_commits(p) : nil) }
+    window.map { |p| p.merge(commits: LeadTime::PUSH_TYPES.include?(p[:type]) ? pushed_commits(p) : nil) }
   end
 
   def default_branch
@@ -619,7 +632,7 @@ class GitHubForge
   # One fetch of the base when a pushed commit is not in this checkout yet. A
   # commit still missing after it is a per-push failed probe (pushed_commits).
   def fetch_base(base, window)
-    shas = window.select { |p| p[:type] == "push" }
+    shas = window.select { |p| LeadTime::PUSH_TYPES.include?(p[:type]) }
                  .flat_map { |p| [p[:before], p[:after]] }.compact.reject { |s| s.match?(ZERO_SHA_RE) }.uniq
     return if shas.empty? || have_commits?(shas)
 
@@ -859,6 +872,7 @@ class NotionStart
     @missing_reason = missing_reason
     @tracker = tracker
     @cache = {}
+    @failed = {}
   end
 
   def source(ref)
@@ -875,8 +889,16 @@ class NotionStart
     [@tracker.prefix]
   end
 
+  # One read per ticket per run. A read that FAILED is recorded again on each
+  # later lookup, so the failure is tied to every landing it leaves without a
+  # start, not only the first one that asked (DND-1009, --meta's cursor).
   def lookup(ref)
-    @cache[ref] ||= read(ref)
+    if @cache.key?(ref)
+      failed = @failed[ref]
+      ProbeFailures.record(failed[:cmd], "#{failed[:detail]} (cached failure)") if failed
+      return @cache[ref]
+    end
+    @cache[ref] = read(ref)
   end
 
   private
@@ -888,7 +910,9 @@ class NotionStart
                    "only #{@tracker.label} records '#{@tracker.property}' here"]
     end
     unless @transport
-      ProbeFailures.record("notion #{@tracker.label} query #{ref}", @missing_reason)
+      # No token is this machine's state: every landing in the window lacks
+      # its start, so no one landing owns the failure.
+      ProbeFailures.record("notion #{@tracker.label} query #{ref}", @missing_reason, window: true)
       return [nil, "#{ref}: Notion could not be read (see SCAN INCOMPLETE)"]
     end
 
@@ -897,7 +921,8 @@ class NotionStart
 
     stamp(ref, page)
   rescue NextMissionNotion::ReadError => e
-    ProbeFailures.record("notion #{@tracker.label} query #{ref}", e.message)
+    @failed[ref] = { cmd: "notion #{@tracker.label} query #{ref}", detail: e.message }
+    ProbeFailures.record(@failed[ref][:cmd], e.message)
     [nil, "#{ref}: Notion could not be read (see SCAN INCOMPLETE)"]
   end
 
@@ -965,7 +990,7 @@ class TicketStarts
     return [ref, why] if ref
 
     if res.fault && !@fault_recorded
-      ProbeFailures.record("private-overlay work tracker", res.reason)
+      ProbeFailures.record("private-overlay work tracker", res.reason, window: true)
       @fault_recorded = true
     end
     [nil, "#{why}; the work tracker is unavailable: #{res.reason}"]
@@ -984,7 +1009,7 @@ class TicketStarts
     return [dnd, work_start.tracker.prefix] if work_start
 
     if res.fault && !@fault_recorded
-      ProbeFailures.record("private-overlay work tracker", res.reason)
+      ProbeFailures.record("private-overlay work tracker", res.reason, window: true)
       @fault_recorded = true
     end
     [dnd]
@@ -1066,14 +1091,15 @@ end
 # ticket's start, the CI on its pushed commit, and the landing time. A row
 # carrying a reason the landing cannot be measured (a force push, an
 # unreadable range) reads no start and no CI.
-def push_row(forge, sk, starts)
+def push_row(forge, sk, starts, ci = {})
   start_at = source = nil
   why = sk[:start_unmeasured]
   if sk[:ticket] && !sk[:unmeasured]
     start_at, why = starts.lookup(sk[:ticket])
     source = starts.source(sk[:ticket])
   end
-  deploy_at, pipeline_at = sk[:unmeasured] ? [nil, nil] : forge.ci_ends(sk[:landed_commit])
+  # Tickets on one push share its commit, so its CI is read once.
+  deploy_at, pipeline_at = sk[:unmeasured] ? [nil, nil] : (ci[sk[:landed_commit]] ||= forge.ci_ends(sk[:landed_commit]))
   LeadTime.compute(start_at: start_at, start_source: source, start_unmeasured: why,
                    first_commit_times: sk[:first_commit_times], deploy_at: deploy_at,
                    pipeline_at: pipeline_at, merged_at: sk[:at], unmeasured: sk[:unmeasured])
@@ -1092,9 +1118,10 @@ def push_rows(forge, since, pr_rows, starts)
 
   covered = pr_rows.flat_map { |r| [r[:landed_commit], r[:merge_commit]] }
   subjects = pushes.flat_map { |p| (p[:commits] || []).map { |c| c[:subject] } }
+  ci = {}
   LeadTime.build_push_rows(pushes: pushes, covered: covered, prefixes: starts.ref_prefixes(subjects)).map do |sk|
     mark = ProbeFailures.mark
-    row = push_row(forge, sk, starts)
+    row = push_row(forge, sk, starts, ci)
     ProbeFailures.tag_from(mark, sk[:at])
     row
   end
@@ -1112,7 +1139,9 @@ def scan_window(forge, since, starts)
   end
   rows, closed_n = select_window(pr_rows, since)
   rows += push_rows(forge, since, pr_rows, starts)
-  [rows.sort_by { |r| Time.iso8601(r[:closed_at]) }, closed_n]
+  # A row with no window time (none expected) sorts at the window's start
+  # rather than raising.
+  [rows.sort_by { |r| Time.iso8601(r[:closed_at] || since) }, closed_n]
 end
 
 def write_meta(file, meta)
@@ -1448,9 +1477,11 @@ def run_scan(repo:, since:, slow_min:, as_json:, meta_file:, forge:, starts:, id
 
   # --meta: the caller's cursor, from every landing BEFORE --slow (DND-1009),
   # written on an incomplete scan too, marked incomplete. It carries no rows.
+  # A failed write does not hide a SCAN INCOMPLETE: exit 3 still wins.
+  meta_ok = true
   if meta_file
     meta = LeadTime.scan_meta(rows: landings, kept: rows.size, failures: ProbeFailures.list)
-    return 1 unless write_meta(meta_file, meta)
+    meta_ok = write_meta(meta_file, meta)
   end
 
   # A scan that could not read the forge is NOT a scan. Refuse to emit a result
@@ -1472,6 +1503,7 @@ def run_scan(repo:, since:, slow_min:, as_json:, meta_file:, forge:, starts:, id
          "re-runs clean, report the scan as UNAVAILABLE, not as zero outliers."
     return 3
   end
+  return 1 unless meta_ok
 
   if as_json
     puts JSON.pretty_generate(rows)
@@ -1558,8 +1590,10 @@ if $PROGRAM_NAME == __FILE__
         --meta FILE    with --since: write {scanned_through, landings, kept,
                        incomplete} to FILE. scanned_through is the newest
                        landing scanned, before --slow, so a cursor moves even
-                       when no row is slow; on SCAN INCOMPLETE it stops before
-                       the first landing a probe failed on (null if none).
+                       when no row is slow. On SCAN INCOMPLETE it is the newest
+                       landing before the first one a probe failed on; null
+                       when a failure belongs to no single landing, when no
+                       landing precedes it, or when the window is empty.
         --help         this text
 
       Exit: 0 ok; 1 usage or tool error; 2 a requested PR/MR is missing, or

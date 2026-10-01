@@ -637,10 +637,23 @@ check("a push whose after sha is a listed PR's landed commit adds no row") do
   LeadTime.build_push_rows(pushes: [push_of("2026-09-30T04:00:30Z", sha_of("e"), [cmt(sha_of("e"), "DND-9003: y")])],
                            covered: [sha_of("e")], prefixes: ["DND"]).empty?
 end
-check("a push carrying a listed PR's landed commit below its tip adds no row") do
-  commits = [cmt(sha_of("f"), "DND-9004: tip"), cmt(sha_of("e"), "DND-9003: y")]
-  LeadTime.build_push_rows(pushes: [push_of("2026-09-30T04:00:30Z", sha_of("f"), commits)],
-                           covered: [sha_of("e")], prefixes: ["DND"]).empty?
+check("a push carrying a PR's landing plus a direct commit on top keeps the direct commit's ticket") do
+  commits = [cmt(sha_of("f"), "DND-9004: tip"), cmt(sha_of("e"), "DND-9003: y"), cmt(sha_of("1"), "DND-9003: x")]
+  rows = LeadTime.build_push_rows(pushes: [push_of("2026-09-30T04:00:30Z", sha_of("f"), commits)],
+                                  covered: [sha_of("e")], prefixes: ["DND"])
+  rows.map { |r| r[:ticket] } == ["DND-9004"] && rows[0][:commits] == [sha_of("f")]
+end
+check("an activity type it does not read is could-not-measure, never dropped") do
+  rows = LeadTime.build_push_rows(pushes: [push_of("2026-09-30T06:30:30Z", sha_of("9"), nil, type: "merge_queue_merge")],
+                                  covered: [], prefixes: ["DND"])
+  rows.size == 1 && rows[0][:unmeasured].include?("merge_queue_merge")
+end
+check("a branch creation in the window is read as a push of its after commit") do
+  rows = LeadTime.build_push_rows(
+    pushes: [push_of("2026-09-30T00:10:00Z", sha_of("a"), [cmt(sha_of("a"), "DND-9001: x")], type: "branch_creation")],
+    covered: [], prefixes: ["DND"],
+  )
+  rows.map { |r| r[:ticket] } == ["DND-9001"]
 end
 check("a push naming no ticket gives one row whose start says no ticket was named") do
   rows = LeadTime.build_push_rows(pushes: [push_of("2026-09-30T03:00:30Z", sha_of("5"), [cmt(sha_of("5"), "tidy docs")])],
@@ -749,8 +762,8 @@ def push_activity(o)
     e.call("2026-09-29T23:00:30Z", "branch_creation", sha_of("0"), o[:a0])]]
 end
 
-def push_forge(o, fail_activity: false)
-  view = { "number" => 31, "title" => "DND-9003: landed through its PR", "headRefName" => "dnd-9003-b",
+def push_forge(o, fail_activity: false, pr_ticket: "9003")
+  view = { "number" => 31, "title" => "DND-#{pr_ticket}: landed through its PR", "headRefName" => "dnd-#{pr_ticket}-b",
            "state" => "CLOSED", "mergedAt" => nil, "closedAt" => "2026-09-30T04:01:00Z", "baseRefName" => "main",
            "headRefOid" => o[:d6], "mergeCommit" => nil,
            "commits" => [{ "authoredDate" => "2026-09-30T04:00:00Z", "committedDate" => "2026-09-30T04:00:00Z" }] }
@@ -837,11 +850,63 @@ Dir.mktmpdir("lead-time-push") do |root|
   end
   check("the human table prints a direct push as via=push") do
     ProbeFailures.reset!
-    _c, _o, e = run_scan_captured(repo: po[:work], since: "2026-09-30T00:00:00Z", slow_min: nil, as_json: false,
-                                  meta_file: nil, forge: push_forge(po), starts: push_starts)
-    tbl = capture_row(rows.find { |x| x["landed_commit"] == po[:d1] }.transform_keys(&:to_sym)
-                          .merge(end_kind: :merge))
-    tbl.include?("via=push") && tbl.include?("DND-9001: x") && e.include?("forge=github")
+    _c, o_tbl, e = run_scan_captured(repo: po[:work], since: "2026-09-30T00:00:00Z", slow_min: nil, as_json: false,
+                                     meta_file: nil, forge: push_forge(po), starts: push_starts)
+    line = o_tbl.lines.find { |l| l.include?("DND-9001: x") }
+    line&.start_with?("push ") && line.include?("via=push") && e.include?("forge=github")
+  end
+
+  # --- a push whose range cannot be read is a failed probe tied to that push:
+  #     the cursor stops at the landing before it.
+  ProbeFailures.reset!
+  cut_meta = File.join(root, "cut-meta.json")
+  cut = push_forge(po)
+  act_cut = push_activity(po).map { |page| page.map(&:dup) }
+  act_cut[1][0]["before"] = "dead" * 10
+  base_run = cut.method(:run_json)
+  cut.define_singleton_method(:run_json) do |cmd, dir|
+    cmd[1] == "api" && cmd.any? { |c| c.include?("/activity") } ? act_cut : base_run.call(cmd, dir)
+  end
+  code_c, = run_scan_captured(repo: po[:work], since: "2026-09-30T00:00:00Z", slow_min: nil, as_json: true,
+                              meta_file: cut_meta, forge: cut, starts: push_starts)
+  check("an unreadable push range ends SCAN INCOMPLETE, and the cursor stops before that push") do
+    m = JSON.parse(File.read(cut_meta))
+    code_c == 3 && m["incomplete"] == true && m["scanned_through"] == "2026-09-30T01:00:30Z"
+  end
+
+  # --- a Notion failure cached by one landing is tied to every landing it
+  #     leaves without a start. PR 31 (closed 04:01) is analysed first and
+  #     names DND-9001; the 01:00:30 push names it too and reads the cached
+  #     failure. Tied to PR 31 only, the cursor would pass the 01:00:30 push.
+  ProbeFailures.reset!
+  flaky_meta = File.join(root, "flaky-meta.json")
+  down_9001 = Class.new(FakeNotion) do
+    def call(method, path, body = nil)
+      raise NextMissionNotion::ReadError, "HTTP 502" if body.dig("filter", "unique_id", "equals") == 9001
+
+      super
+    end
+  end
+  stalled = NotionStart.new(down_9001.new(9002 => at_prop("2026-09-30T01:30:00.000Z"),
+                                          9003 => at_prop("2026-09-30T03:30:00.000Z")))
+  run_scan_captured(repo: po[:work], since: "2026-09-30T00:00:00Z", slow_min: nil, as_json: true,
+                    meta_file: flaky_meta, forge: push_forge(po, pr_ticket: "9001"), starts: stalled)
+  check("a cached ticket failure stops the cursor before the EARLIEST landing that read it") do
+    m = JSON.parse(File.read(flaky_meta))
+    m["incomplete"] == true && m["scanned_through"].nil?
+  end
+  check("the cached failure is recorded for each landing it touched") do
+    ProbeFailures.list.count { |f| f[:cmd].include?("DND-9001") } == 3
+  end
+
+  ProbeFailures.reset!
+  notoken_meta = File.join(root, "notoken-meta.json")
+  run_scan_captured(repo: po[:work], since: "2026-09-30T00:00:00Z", slow_min: nil, as_json: true,
+                    meta_file: notoken_meta, forge: push_forge(po),
+                    starts: NotionStart.new(nil, missing_reason: "no token at /nowhere"))
+  check("no Notion token is window-wide: no scanned_through, never a partial cursor") do
+    m = JSON.parse(File.read(notoken_meta))
+    m["incomplete"] == true && m["scanned_through"].nil? && ProbeFailures.list.all? { |f| f[:at].nil? }
   end
 
   ProbeFailures.reset!
@@ -877,5 +942,8 @@ warn "lead_time_test: FAIL (#{$failures.size} of #{$checks})"
 $failures.each { |f| warn "  - #{f}" }
 warn "Fix: make ai/bin/lead-time judge a CLOSED GitHub PR's landing by its change " \
      "(patch-id) on the base branch, timed by the push that carried it; a PR it cannot " \
-     "place must read 'could not measure', and a closed-unlanded one 'closed', never 'open'."
+     "place must read 'could not measure', and a closed-unlanded one 'closed', never 'open'. " \
+     "A window scan must also list every direct push to the base branch (one row per ticket its " \
+     "commit subjects name, deduped against PR rows), write --meta's scanned_through before --slow, " \
+     "and parse --since as YYYY-MM-DD or zoned RFC 3339 (DND-1009)."
 exit 1

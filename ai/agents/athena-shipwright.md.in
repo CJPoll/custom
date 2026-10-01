@@ -450,14 +450,14 @@ Each run, for every repo the fleet ships from (currently `~/dev/custom`,
 than your **lead-time cursor**:
 
 ```
-ai/bin/lead-time --repo <R> --since "$(cat "$SHIPWRIGHT_STATE_DIR/lead-cursor.<repo>.txt")" --slow 90 --json --meta <M>
+ai/bin/lead-time --repo <R> --since "$(cat "$SHIPWRIGHT_STATE_DIR/lead-cursor.<repo>.txt")" --slow 90 --json --meta "$SHIPWRIGHT_STATE_DIR/lead-meta.<repo>.json"
 ```
 
 `lead-cursor.<repo>.txt` lives beside `cursor.txt` in `$SHIPWRIGHT_STATE_DIR`
 (main checkout) — **one cursor per repo**, set to `scanned_through` from that
-repo's `--meta` file once its scan is handled (never the newest printed row:
-`--slow` hides rows). A null `scanned_through`, or **any `SCAN INCOMPLETE`**,
-leaves the cursor where it is. Missing on first run → a bounded 48h window.
+repo's meta file (delete it before the scan; read it only on exit 0), never
+the newest printed row: `--slow` hides rows. A null value or **any `SCAN
+INCOMPLETE`** leaves the cursor. Missing on first run → a bounded 48h window.
 A row with `unmeasured_reason` could not be measured: report it as unmeasured,
 never as fast or as an outlier. The start is the ticket's dispatch stamp (DND
 `In Progress at`, or the work tracker's property from the private overlay), so
