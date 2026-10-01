@@ -4421,10 +4421,10 @@ request** and answers Slack; the route worker finishes it.
   request the worker routes after the owner set `off` takes step 2a: the
   channel route and no `topic`, the pre-epic line byte for byte. Mode `off`
   never writes a request.
-- **Shadow takes the same path as `on`.** A shadow request is judged and then
-  delivered by the channel route with its `topic`, so shadow and `on` differ
-  only in the destination. Shadow's line therefore arrives after the judgment,
-  not at the ack.
+- **`shadow`, if set, takes the same path as `on`.** It is a rollback lever, not
+  a phase this routing passes through (`ai/contracts/athena-judgments.md` →
+  *Modes*). A shadow request is judged and then delivered by the channel route
+  with its `topic`, so the two modes differ only in the destination.
 - **The routing deadline is 60 s from `received_at`.** A request still owed
   past it, or after its third failed attempt, is delivered by the channel route
   with topic reason `route_overdue`, by whichever of the route worker or the
