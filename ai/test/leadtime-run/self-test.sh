@@ -62,6 +62,7 @@ esac
 ALERTS="${ATHENA_INBOX_ROOT}/harness-alerts/to-custom"
 NOW_FIXED="$(date -d '2026-10-01 12:30 UTC' +%s)"
 G=(-c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false -c init.defaultBranch=main)
+RESOLVER_LIBS="strict_argv.rb lead_time_config.rb lead_time_config_io.rb"
 
 # --- shared fakes ----------------------------------------------------------------
 cat >"$TMP/fake-send-mail" <<'EOF'
@@ -80,10 +81,15 @@ new_case() {
   c="$(mktemp -d -p "$TMP" case.XXXXXX)"; c="$(cd -- "$c" && pwd -P)"
   seed="$c/seed"
   git "${G[@]}" init -q "$seed"
-  mkdir -p "$seed/ai/skills/athena:lead-time-improve" "$seed/ai/config"
+  mkdir -p "$seed/ai/skills/athena:lead-time-improve" "$seed/ai/config" "$seed/ai/bin" "$seed/ai/lib"
   printf -- '---\nname: athena:lead-time-improve\n---\n' >"$seed/ai/skills/athena:lead-time-improve/SKILL.md"
-  printf '{"repos":[{"name":"custom","path":"~/dev/custom","mode":"improve"}],"window":20}\n' \
-    >"$seed/ai/config/lead-time-repos.json"
+  # The real resolver (DND-1526), so every case resolves the list as the cron does.
+  cp -- "${REPO_ROOT}/ai/bin/lead-time-repos" "$seed/ai/bin/"
+  for f in ${RESOLVER_LIBS}; do cp -- "${REPO_ROOT}/ai/lib/$f" "$seed/ai/lib/"; done
+  # The checkouts the configs point at: temp repos named as the repos are.
+  for r in custom gen_saas walt_ui; do git "${G[@]}" init -q "$c/checkouts/$r"; done
+  printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"epic-fixture"}\n' \
+    "$c/checkouts/custom" >"$seed/ai/config/lead-time-repos.json"
   printf 'ai-artifacts/\n' >"$seed/.gitignore"
   git -C "$seed" add -A
   git "${G[@]}" -C "$seed" commit -q -m seed
@@ -188,7 +194,10 @@ run_runner() {
     if [ "$1" = "--" ]; then shift; args=("$@"); break; fi
     envs+=("$1"); shift
   done
-  env LEADTIME_REPO="$c/repo" LEADTIME_CLAUDE="$c/stub-claude" LEADTIME_CLAUDE_JSON="$c/claude.json" \
+  # XDG_CONFIG_HOME is an empty temp dir and ATHENA_LEADTIME_CONFIG is unset
+  # unless a case passes it, so no case reads this machine's real override.
+  env -u ATHENA_LEADTIME_CONFIG XDG_CONFIG_HOME="$c/xdg" \
+      LEADTIME_REPO="$c/repo" LEADTIME_CLAUDE="$c/stub-claude" LEADTIME_CLAUDE_JSON="$c/claude.json" \
       LEADTIME_NOW="$NOW_FIXED" LEADTIME_SEND_MAIL="$TMP/fake-send-mail" FAKE_SEND_LOG="$c/send.log" \
       LEADTIME_TELEMETRY_EMIT="$c/fake-telemetry-emit" \
       "${envs[@]}" "$RUNNER" "${args[@]}" >"$c/runner.out" 2>"$c/runner.err"
@@ -299,10 +308,116 @@ fi
 c="$(new_case)"
 rm -f "$c/repo/ai/config/lead-time-repos.json"
 rc="$(run_runner "$c")"
-if [ "$rc" = 78 ] && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ] && grep -q 'lead-time-repos.json' "$c/runner.err"; then
-  ok "the repo config missing: exit 78, counted, no session"
+if [ "$rc" = 78 ] && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ] && grep -q 'lead-time-repos.json' "$c/runner.err" \
+   && grep -q 'lead-time-repos exit 3' "$c/runner.err" && [ "$(lane_dirs "$c")" = 0 ]; then
+  ok "the tracked repo config missing: the resolver cannot look (exit 3), so exit 78, counted, no session"
 else
   bad "config missing" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"
+rm -f "$c/repo/ai/bin/lead-time-repos"
+rc="$(run_runner "$c")"
+if [ "$rc" = 78 ] && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ] && grep -q 'ai/bin/lead-time-repos' "$c/runner.err" \
+   && grep -q 'Fix:' "$c/runner.err"; then
+  ok "the resolver missing from the main checkout: exit 78, counted, no session (never the tracked file read directly)"
+else
+  bad "resolver missing" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+
+# ---------------------------------------------------------------------------------
+case_ '5b. the repo list comes from ai/bin/lead-time-repos (DND-1527)'
+
+# override <case> <json> — a machine-local override for the case (mode 600).
+override() { ( umask 077; printf '%s\n' "$2" >"$1/override.json" ); }
+
+# No override: the desktop's runs are unchanged. The tracked list's names and
+# modes (the REAL ai/config/lead-time-repos.json, its paths moved to temp
+# checkouts) are exactly the repos the brief names, plus config=default.
+c="$(new_case)"
+jq --arg d "$c/checkouts" '.repos |= map(.path = ($d + "/" + .name))' "${REPO_ROOT}/ai/config/lead-time-repos.json" \
+  >"$c/repo/ai/config/lead-time-repos.json"
+want="$(jq -r '[.repos[] | "\(.name) (\(.mode))"] | join(", ")' "${REPO_ROOT}/ai/config/lead-time-repos.json")"
+want_names="$(jq -r '[.repos[].name] | join(",")' "${REPO_ROOT}/ai/config/lead-time-repos.json")"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && [ -n "$want" ] && grep -qF "these repos, which ai/bin/lead-time-repos resolved for this machine (config=default" "$c/claude-args" \
+   && grep -qF ": ${want}." "$c/claude-args" \
+   && grep -qxF "config=default repos=${want_names} skipped=none" "$run" \
+   && grep -qxF "config_file=$c/repo/ai/config/lead-time-repos.json" "$run" \
+   && grep -q 'outcome=ok exit=0' "$run" && ! grep -q 'Skipped on this machine' "$c/claude-args"; then
+  ok "no override: the brief names the tracked list ($want); .run says config=default repos=${want_names} skipped=none"
+else
+  bad "no override" "rc=$rc run=$(cat "$run" 2>/dev/null) args=$(cat "$c/claude-args" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"
+override "$c" "{\"repos\":[{\"name\":\"gen_saas\",\"path\":\"$c/checkouts/gen_saas\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
+rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -qF "(config=override $c/override.json): gen_saas (improve)." "$c/claude-args" \
+   && ! grep -q 'custom (improve)' "$c/claude-args" \
+   && grep -qxF "config=override repos=gen_saas skipped=none" "$run" \
+   && grep -qxF "config_file=$c/override.json" "$run"; then
+  ok "an override naming gen_saas only: the brief and .run name gen_saas; custom is absent"
+else
+  bad "override gen_saas" "rc=$rc run=$(cat "$run" 2>/dev/null) args=$(cat "$c/claude-args" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"
+mkdir -p "$c/xdg/athena"
+( umask 077; printf '{"repos":[{"name":"walt_ui","path":"%s","mode":"watch"}],"window":20,"improvement_epic":"epic-fixture"}\n' \
+    "$c/checkouts/walt_ui" >"$c/xdg/athena/lead-time-repos.json" )
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -qxF "config=override repos=walt_ui skipped=none" "$run" && grep -qF 'walt_ui (watch).' "$c/claude-args"; then
+  ok "the XDG override file is found the same way (the runner passes no path of its own)"
+else
+  bad "xdg override" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"
+override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/checkouts/custom\",\"mode\":\"improve\"},{\"name\":\"walt_ui\",\"path\":\"$c/absent/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
+rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -qxF "config=override repos=custom skipped=walt_ui(no such path $c/absent/walt_ui)" "$run" \
+   && grep -qF "Skipped on this machine, so not run: walt_ui (no such path $c/absent/walt_ui)" "$c/claude-args" \
+   && grep -qF 'repo=<R> skipped=' "$c/claude-args" && grep -qF ': custom (improve).' "$c/claude-args"; then
+  ok "a repo not checked out here is skipped by name: in .run (skipped=<name>(<reason>)) and in the brief, never silently"
+else
+  bad "skipped repo" "rc=$rc run=$(cat "$run" 2>/dev/null) args=$(cat "$c/claude-args" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"
+override "$c" '{"repos":['
+rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json")"
+failed="$(newest "$c" failed)"
+if [ "$rc" = 78 ] && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ] && [ "$(lane_dirs "$c")" = 0 ] \
+   && grep -q 'lead-time-repos exit 2' "$c/runner.err" && grep -q '^resolver: lead-time-repos: ' "$failed" \
+   && grep -q '^resolver: Fix: ' "$failed" && grep -q 'Fix:' "$c/runner.err"; then
+  ok "a malformed override: exit 78, counted, no session; the resolver's line and Fix: are in the .failed record"
+else
+  bad "malformed override" "rc=$rc fails=$(fails "$c") failed=$(cat "$failed" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"
+override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/absent/custom\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
+rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json")"
+if [ "$rc" = 78 ] && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ] && grep -q 'lead-time-repos exit 4' "$c/runner.err" \
+   && grep -q 'no configured repo is checked out' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err"; then
+  ok "zero resolved repos: a counted failure (exit 78) with Fix:, never an empty success"
+else
+  bad "zero repos" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"
+override "$c" '{"repos":['
+rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json" -- --dry-run)"
+if [ "$rc" = 78 ] && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")" ] && [ ! -e "$(lanes "$c")" ] \
+   && [ "$(invoked "$c")" = 0 ] && ! grep -q 'MODE: lead-time' "$c/runner.out"; then
+  ok "--dry-run with a list that does not resolve: exit 78 with Fix:, prints no brief, touches nothing"
+else
+  bad "dry-run unresolved" "rc=$rc out=$(cat "$c/runner.out") err=$(cat "$c/runner.err")"
 fi
 
 c="$(new_case)"

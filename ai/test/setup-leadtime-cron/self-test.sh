@@ -59,14 +59,20 @@ chmod +x "$BIN/fake-crontab" "$BIN/crontab"
 
 # --- a throwaway main checkout --------------------------------------------------
 IR="${TMP}/inst/repo"
-mkdir -p "$IR/scripts" "$IR/ai/skills/athena:lead-time-improve" "$IR/ai/config"
+mkdir -p "$IR/scripts" "$IR/ai/skills/athena:lead-time-improve" "$IR/ai/config" "$IR/ai/bin" "$IR/ai/lib"
 cp "$INSTALLER" "$IR/scripts/"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$IR/scripts/athena-leadtime-run.sh"
 chmod +x "$IR/scripts/athena-leadtime-run.sh"
 printf -- '---\nname: athena:lead-time-improve\n---\n' >"$IR/ai/skills/athena:lead-time-improve/SKILL.md"
-cat >"$IR/ai/config/lead-time-repos.json" <<'EOF'
-{"repos":[{"name":"custom","path":"/x/custom","mode":"improve"},{"name":"gen_saas","path":"/x/g","mode":"watch"},{"name":"walt_ui","path":"/x/w","mode":"watch"}],"window":20,"improvement_epic":"epic-id"}
-EOF
+# The real resolver (DND-1526): the installer reads the repo list only through it.
+cp "${REPO_ROOT}/ai/bin/lead-time-repos" "$IR/ai/bin/"
+for f in strict_argv.rb lead_time_config.rb lead_time_config_io.rb; do cp "${REPO_ROOT}/ai/lib/$f" "$IR/ai/lib/"; done
+# The checkouts the config points at: temp repos named as the repos are.
+CO="${TMP}/checkouts"
+for r in custom gen_saas walt_ui; do git init -q "$CO/$r" >&2; done
+CO="$(cd -- "$CO" && pwd -P)"
+TRACKED_JSON="{\"repos\":[{\"name\":\"custom\",\"path\":\"$CO/custom\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"$CO/gen_saas\",\"mode\":\"watch\"},{\"name\":\"walt_ui\",\"path\":\"$CO/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}"
+printf '%s\n' "${TRACKED_JSON}" >"$IR/ai/config/lead-time-repos.json"
 git -C "$IR" init -q -b main >&2
 git -C "$IR" add -A >&2
 git -C "$IR" -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false commit -qm seed >&2
@@ -90,7 +96,9 @@ inst() { # <crontab-file> [VAR=val ...] [-- args...]  (runs the MAIN checkout's 
   local f="$1"; shift; local envs=()
   while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
   [ "${1:-}" = "--" ] && shift
-  env PATH="$BIN:$PATH" LEADTIME_CRONTAB="$BIN/fake-crontab" FAKE_CRONTAB="$f" LEADTIME_NOW="$NOW" \
+  # XDG_CONFIG_HOME is an empty temp dir and ATHENA_LEADTIME_CONFIG is unset
+  # unless a case passes it, so no case reads this machine's real override.
+  env -u ATHENA_LEADTIME_CONFIG XDG_CONFIG_HOME="${TMP}/xdg" PATH="$BIN:$PATH" LEADTIME_CRONTAB="$BIN/fake-crontab" FAKE_CRONTAB="$f" LEADTIME_NOW="$NOW" \
     "${envs[@]}" "${INST:-$IR/scripts/setup-leadtime-cron}" "$@" >"${TMP}/inst.out" 2>"${TMP}/inst.err"
   printf '%s' "$?"
 }
@@ -500,6 +508,92 @@ if [ "$rc" = 0 ] && [ "$(cat "$LT/watch-cursor.gen_saas.txt")" = 'garbage' ] \
   ok "a malformed existing cursor is kept (never overwritten) but named, never read as healthy"
 else
   bad "malformed existing" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — the repo list comes from ai/bin/lead-time-repos (DND-1527)'
+
+shipwright_cursors
+ct="${TMP}/ct-resolved"
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 0 ] && grep -qF "Repos (ai/bin/lead-time-repos: source=default $IR/ai/config/lead-time-repos.json):" "${TMP}/inst.out" \
+   && grep -qE '^  custom +improve ' "${TMP}/inst.out" && grep -qE '^  gen_saas +watch ' "${TMP}/inst.out" \
+   && grep -q '0 skipped' "${TMP}/inst.out"; then
+  ok "--install prints the resolved list, its source and its skip count"
+else
+  bad "install prints list" "rc=$rc $(out)"
+fi
+
+rm -f "$ct"; printf '%s\n' "${ENTRY}" >"$ct"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 0 ] && grep -q '^OK' "${TMP}/inst.out" && grep -qF 'source=default' "${TMP}/inst.out" \
+   && grep -qE '^  custom +improve ' "${TMP}/inst.out" && grep -qE '^  walt_ui +watch ' "${TMP}/inst.out"; then
+  ok "--check prints the resolved list (read-only)"
+else
+  bad "check prints list" "rc=$rc $(out)"
+fi
+
+# A repo not checked out on this machine: skipped by name, no cursor seeded.
+shipwright_cursors
+( umask 077; printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"},{"name":"walt_ui","path":"%s","mode":"watch"}],"window":20,"improvement_epic":"epic-id"}\n' \
+    "$CO/custom" "${TMP}/absent/walt_ui" >"${TMP}/override-skip.json" )
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" ATHENA_LEADTIME_CONFIG="${TMP}/override-skip.json" -- --install)"
+if [ "$rc" = 0 ] && [ ! -e "$LT/watch-cursor.walt_ui.txt" ] && [ -e "$LT/cursor.custom.txt" ] \
+   && [ ! -e "$LT/watch-cursor.gen_saas.txt" ] \
+   && grep -qF "skipped walt_ui: no such path ${TMP}/absent/walt_ui" "${TMP}/inst.out" \
+   && grep -qF 'source=override' "${TMP}/inst.out" && grep -qxF "${ENTRY}" "$ct"; then
+  ok "a skipped repo gets no cursor and is printed by name; an override replaces the tracked list whole"
+else
+  bad "skipped repo" "rc=$rc $(out) files=$(find "$LT" -type f -printf '%f ' 2>/dev/null)"
+fi
+
+# A malformed override: exit 2, nothing written.
+shipwright_cursors
+( umask 077; printf '{"repos":[' >"${TMP}/override-bad.json" )
+printf '0 * * * * /opt/other-job\n' >"$ct"; rm -f "$ct.calls"
+rc="$(inst "$ct" ATHENA_LEADTIME_CONFIG="${TMP}/override-bad.json" -- --install)"
+if [ "$rc" = 2 ] && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ] \
+   && grep -q 'lead-time-repos exit 2' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && ! grep -qx -- '-' "$ct.calls"; then
+  ok "a malformed override: exit 2 with the resolver's Fix:, the crontab unchanged and nothing seeded"
+else
+  bad "malformed override" "rc=$rc $(out)"
+fi
+printf '%s\n' "${ENTRY}" >"$ct"
+rc="$(inst "$ct" ATHENA_LEADTIME_CONFIG="${TMP}/override-bad.json" -- --check)"
+if [ "$rc" = 2 ] && grep -q 'does not resolve' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && [ "$(cat "$ct")" = "${ENTRY}" ]; then
+  ok "--check with the entry but a list that does not resolve is red (exit 2), never OK"
+else
+  bad "check unresolved" "rc=$rc $(out)"
+fi
+
+# Zero repos checked out: the resolver's exit 4 is refused, not an empty install.
+shipwright_cursors
+( umask 077; printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"epic-id"}\n' \
+    "${TMP}/absent/custom" >"${TMP}/override-none.json" )
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" ATHENA_LEADTIME_CONFIG="${TMP}/override-none.json" -- --install)"
+if [ "$rc" = 2 ] && grep -q 'lead-time-repos exit 4' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] \
+   && [ ! -e "$LT" ]; then
+  ok "zero resolved repos: install refused (exit 2), nothing written"
+else
+  bad "zero repos" "rc=$rc $(out)"
+fi
+
+# The resolver missing from the main checkout: refused, never a jq read of the file.
+shipwright_cursors
+mv "$IR/ai/bin/lead-time-repos" "${TMP}/resolver.aside"
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" -- --install)"
+mv "${TMP}/resolver.aside" "$IR/ai/bin/lead-time-repos"
+if [ "$rc" = 2 ] && grep -qF "$IR/ai/bin/lead-time-repos" "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
+  ok "the resolver missing from the main checkout: install refused (exit 2), nothing written"
+else
+  bad "resolver missing" "rc=$rc $(out)"
 fi
 
 if poisoned; then
