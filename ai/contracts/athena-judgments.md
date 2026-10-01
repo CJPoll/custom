@@ -84,7 +84,13 @@ Non-goals. A judgment never:
   `ai/contracts/athena-events.md` → *Thread replies route to the thread's
   claimant*);
 - depends on a fine-tuned model (the domain goes into the state and the
-  criteria).
+  criteria);
+- runs on an inbound webhook's response path. A caller that needs a judgment
+  for a webhook's delivery writes an obligation row in the delivery's
+  transaction, acks, and judges in a supervised worker (gen_saas ADR 21,
+  *Webhooks Verify, Persist and Ack*). The Slack router's form of this is
+  `ai/contracts/athena-events.md` → *Routing runs after the ack*. So no use
+  case needs a latency bar to protect a sender's ack.
 
 This contract changes nothing in walt_ui. walt_ui may adopt the triage script
 later, as its own change.
@@ -340,6 +346,7 @@ one is an amendment to this table.
 | `label_disabled` | state | caller | the accepted label has no live destination: the Slack router's topic route is missing, disabled or not live (also its session mention, DND-717) |
 | `sender_rule` | state | Slack router | the conversation is not the owner's own, so no judgment is asked |
 | `context_unavailable` | fault | Slack router | reading the conversation context failed (or the root's `ts` is malformed), so no judgment was asked; the caller-side record is the router's outcome log, with no `judgment_calls` row |
+| `route_overdue` | fault | Slack router | the route request was not routed within its routing deadline or its attempt budget (the route worker is down, stuck or behind), so it was delivered by the channel route; the caller-side record is the router's outcome log, and a `judgment_calls` row exists only if a call was made (`ai/contracts/athena-events.md` → *Routing runs after the ack*) |
 
 A successful call records outcome `answered` with no reason.
 
