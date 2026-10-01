@@ -17,6 +17,9 @@ synthetic; refs are `TKT-93xx` placeholders.
 - `control-7`: a finding that truly blocks that same activation ticket: the
   feature it switches on loses every routed conversation. It guards against a
   version that learns "never block an activation ticket".
+- `control-8`: live-1's finding against a ticket whose only deliverable is
+  running that eval. It truly blocks. It guards against a version that
+  learns "an eval-tool defect never blocks".
 
 Controls are labelled `rule_confirmed` by `dnd-1607-synthetic-control`.
 
@@ -38,8 +41,24 @@ Accept v3 only if all of these hold:
 1. DND-1579 set: `override-2` and `override-4` match their labels.
 2. DND-1579 set: `override-1` and `override-3` still match.
 3. DND-1579 set: all six controls still match (10 of 10 overall).
-4. This set: `control-7` matches.
-5. This set: at least 2 of `live-1..3` match, and no live case v2 got right
-   is lost.
+4. This set: `control-7` and `control-8` match.
+5. This set: at least 2 of `live-1..3` match.
 
 Otherwise revert to ticket-blocking-v2.
+
+The review round, before any v3 run, added `control-8` and replaced item
+5's second half ("no live case v2 got right is lost"): v2 got only live-2
+right, and that at confidence 0.02 (see below), so the clause measured
+nothing.
+
+## v2 baselines (ticket-blocking-v2, jev-1.13.0)
+
+| case | label | c7a0e5c0 (4 cases) | 076b2ebe (5 cases) |
+|---|---|---|---|
+| live-1 | does_not_block | blocks 0.60 | blocks 0.64 |
+| live-2 | does_not_block | blocks 0.09 | does_not_block 0.02 |
+| live-3 | does_not_block | blocks 0.57 | blocks 0.59 |
+| control-7 | blocks | blocks 0.98 | blocks 0.98 |
+| control-8 | blocks | n/a (not yet added) | blocks 0.78 |
+
+live-2 sits at the decision boundary and flips between runs.
