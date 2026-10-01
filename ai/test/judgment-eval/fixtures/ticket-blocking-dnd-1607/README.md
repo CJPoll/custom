@@ -23,7 +23,7 @@ synthetic; refs are `TKT-93xx` placeholders.
 
 Controls are labelled `rule_confirmed` by `dnd-1607-synthetic-control`.
 
-Measurement only. Never `--apply` a run of this set: four cases cannot
+Measurement only. Never `--apply` a run of this set: five cases cannot
 calibrate a threshold, and the labels are not the owner's.
 
 ```
