@@ -22,8 +22,14 @@
 #
 # Thresholds (tunable): a tool with failure_rate >= 0.20 over >= 5 results;
 # >= 2 agent-session idle/stall gaps INSIDE THE RECENT WINDOW (interactive-session
-# gaps are human idle, not shipwright-actionable, so they are excluded upstream);
-# any runtime error events.
+# gaps are human idle, not shipwright-actionable, so they are excluded upstream).
+#
+# There is no runtime-error-events signal (DND-1487). It read the retired
+# harness-event.sh sink, whose `ok:false` could not occur: PostToolUse never
+# fires for a failed tool call (that is PostToolUseFailure). 0 of 164,288 sink
+# lines were errors. Tool errors are caught by tool_failure_rate above, from the
+# transcripts' tool_result is_error. A metrics file older than DND-1487 may still
+# carry a runtime_events key; it is ignored.
 
 require "json"
 require "time"
@@ -49,11 +55,6 @@ def signals_from(m)
   end
   out << stall_signal(m)
   out << staleness_signal(m)
-  ev = m["runtime_events"]
-  if ev.is_a?(Hash) && ev["present"] && ev["error_events"].to_i.positive?
-    out << { "kind" => "runtime_error_events", "metric" => ev["error_events"],
-             "detail" => "#{ev['error_events']} runtime error event(s) from the hook sink" }
-  end
   out.compact
 end
 
@@ -181,13 +182,14 @@ def run_self_test
     { "generated" => Time.now.utc.iso8601, "recent_window_s" => 21_600,
       "recent_window_start" => (Time.now.utc - 21_600).iso8601, "recent_records" => 5000,
       "records" => 800_000, "tool_failure_rate" => 0.0, "tool_results" => 100,
-      "stall_gaps" => 0, "agent_stall_gaps" => 0, "recent_agent_stall_gaps" => 0,
-      "runtime_events" => { "present" => false } }.merge(extra)
+      "stall_gaps" => 0, "agent_stall_gaps" => 0, "recent_agent_stall_gaps" => 0 }.merge(extra)
   }
   hot = fresh.call("tool_failure_rate" => 0.5, "tool_results" => 20, "stall_gaps" => 3,
-                   "agent_stall_gaps" => 3, "recent_agent_stall_gaps" => 3,
-                   "runtime_events" => { "present" => true, "error_events" => 2 })
-  cold = fresh.call("runtime_events" => { "present" => true, "error_events" => 0 })
+                   "agent_stall_gaps" => 3, "recent_agent_stall_gaps" => 3)
+  cold = fresh.call({})
+  # A metrics file written before DND-1487 still carries the retired sink's
+  # rollup. It must raise nothing: the sink is gone and its count is stale.
+  pre_1487 = fresh.call("runtime_events" => { "present" => true, "events" => 9, "error_events" => 2 })
   below = fresh.call("tool_failure_rate" => 0.5, "tool_results" => 2)
   # interactive-only idle: total gaps present, but none in agent sessions -> no signal
   idle_only = fresh.call("stall_gaps" => 98)
@@ -203,7 +205,7 @@ def run_self_test
   # Recency unavailable (metrics from an older harness-metrics): must NOT read as
   # healthy — it degrades to the old all-time shape under a distinct kind.
   legacy = { "tool_failure_rate" => 0.0, "tool_results" => 100, "stall_gaps" => 4,
-             "generated" => Time.now.utc.iso8601, "runtime_events" => { "present" => false } }
+             "generated" => Time.now.utc.iso8601 }
   legacy_attributed = legacy.merge("agent_stall_gaps" => 49)
   # A stale snapshot and an unread corpus each produce a zero that is not health.
   stale = fresh.call("generated" => (Time.now.utc - 3 * 86_400).iso8601)
@@ -211,8 +213,9 @@ def run_self_test
 
   kinds = ->(m) { signals_from(m).map { |s| s["kind"] } }
   checks = {
-    "hot surfaces 3 signals"       => (signals_from(hot).size == 3),
+    "hot surfaces 2 signals"       => (kinds.call(hot).sort == %w[stall_gaps tool_failure_rate]),
     "cold surfaces none"           => (signals_from(cold).empty?),
+    "a pre-DND-1487 runtime_events rollup surfaces none" => signals_from(pre_1487).empty?,
     "below min_results suppressed" => (signals_from(below).none? { |s| s["kind"] == "tool_failure_rate" }),
     "interactive idle suppressed"  => (signals_from(idle_only).none? { |s| s["kind"] == "stall_gaps" }),
     "NEGATIVE: old gaps only, none recent -> no stall signal at all" =>

@@ -147,7 +147,6 @@ STATIC_CHECKS = [
   # false-green `<hook>.sh --self-test` form the gate's own self-test forbids);
   # the hook's inline --self-test just execs this file.
   ["workflow-phase-guard self-test", %w[ai/hooks/workflow-phase-guard.self-test.sh]],
-  ["harness-event self-test",   %w[ai/hooks/harness-event.self-test.sh]],
   # fleet-report hook (DND-433): SessionStart/SessionEnd/PostToolUse reporter to
   # the fleet registry. Loopback fake server only (never prod); asserts the
   # 60 s throttle, zero added latency, and surfaced failures. The CLI's own

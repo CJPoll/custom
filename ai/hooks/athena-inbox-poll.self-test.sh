@@ -1462,10 +1462,11 @@ assert_eq "F-11 the hook is registered on SessionStart with the \"\" matcher" "S
   "$(jq -r '.hooks[] | select(.script == "ai/hooks/athena-inbox-poll.sh") | "\(.event)|\(.matcher)"' "${REG}" 2>/dev/null)"
 assert_eq "F-11 no UserPromptSubmit entry is registered for any hook" "0" \
   "$(jq -r '[.hooks[] | select(.event == "UserPromptSubmit")] | length' "${REG}" 2>/dev/null)"
-# The five hooks that predate this ticket must all still be registered. The
+# The hooks that predate this ticket must all still be registered (a fifth,
+# harness-event, was retired by DND-1487). The
 # 2026-09-17 outage was exactly this: entries silently disappearing from a file
 # with no diff and no undo.
-for s in safe-wait-guard pronoun-guard harness-event notify-idle main-session-policy; do
+for s in safe-wait-guard pronoun-guard notify-idle main-session-policy; do
   assert_eq "F-11 pre-existing hook [${s}] is still in the registry" "1" \
     "$(jq -r --arg s "ai/hooks/${s}.sh" '[.hooks[] | select(.script == $s)] | length' "${REG}" 2>/dev/null)"
 done
@@ -1499,7 +1500,7 @@ assert_eq "F-11 the merge preserves an unrelated nested key" "Bash(ls:*)" \
   "$(jq -r '.permissions.allow[0]' "${SET}" 2>/dev/null)"
 assert_eq "F-11 the new hook is wired on SessionStart" "1" \
   "$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | endswith("athena-inbox-poll.sh"))] | length' "${SET}" 2>/dev/null)"
-for s in safe-wait-guard pronoun-guard harness-event notify-idle main-session-policy; do
+for s in safe-wait-guard pronoun-guard notify-idle main-session-policy; do
   assert_eq "F-11 the merge leaves pre-existing hook [${s}] wired" "1" \
     "$(jq --arg s "${s}.sh" '[.hooks[]?[]?.hooks[]? | select(.command | endswith($s))] | length' "${SET}" 2>/dev/null)"
 done

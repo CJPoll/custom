@@ -17,7 +17,6 @@
     { "event": "SubagentStop", "matcher": "", "script": "ai/hooks/fleet-lifecycle.sh" },
     { "event": "StopFailure", "matcher": "", "script": "ai/hooks/fleet-lifecycle.sh" },
     { "event": "PostToolUse", "matcher": "Bash", "script": "ai/hooks/inbox-untrusted-guard.sh" },
-    { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/harness-event.sh" },
     { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/fleet-report.sh" },
     { "event": "Stop", "matcher": "", "script": "ai/hooks/notify-idle.sh" },
     { "event": "SessionStart", "matcher": "", "script": "ai/hooks/main-session-policy.sh" },

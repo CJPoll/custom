@@ -26,6 +26,14 @@ contract wins**.
 instrumentation/telemetry (on-system only)"). Telemetry feeds the lead-time
 improver's phase ledger. It is never sent anywhere (*No network*).
 
+**One schema.** This is the only on-system telemetry schema. The ad-hoc
+`{ts,tool,ok}` sink at `ai-artifacts/telemetry/events.jsonl`, written by the
+PostToolUse hook `ai/hooks/harness-event.sh`, was retired by DND-1487 with its
+one reader (`harness-metrics`' `runtime_events`, which fed a `harness-signals`
+signal that could not fire). A leftover file at that path is stale and has no
+writer. A new emitter registers an event here (*Adding an event*); it never
+writes a store of its own.
+
 ## The event line
 
 Each line is one JSON object, keys in this order:
