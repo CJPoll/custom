@@ -84,7 +84,7 @@ module LeadTimeExperiment
       if n.start_with?(CHECK_PREFIX)
         label = n.delete_prefix(CHECK_PREFIX)
         raise UsageError, "#{CHECK_PREFIX} needs a check label (#{CHECK_PREFIX}<label>, as harness-gate prints it)" if label.empty?
-        raise UsageError, "#{CHECK_PREFIX}<label> cannot contain a newline: #{n.inspect}" if label.include?("\n")
+        raise UsageError, "#{CHECK_PREFIX}<label> cannot contain a control character: #{n.inspect}" if label.match?(/[[:cntrl:]]/)
 
         return new(name: n, phase: phase)
       end
@@ -140,6 +140,9 @@ module LeadTimeExperiment
       return "row predates check_walls" unless row.key?("check_walls")
 
       head = (row["gated_head"] || row["landed_commit"]).to_s[0, 8]
+      walls = row["check_walls"]
+      return "check #{check_label} has no numeric wall on #{head}" if walls.is_a?(Hash) && walls.key?(check_label)
+
       "check #{check_label} did not run on #{head}"
     end
   end
@@ -166,9 +169,16 @@ module LeadTimeExperiment
   # they are not comparable (they would read as n/a). Batch tickets sharing
   # one landed commit are one landing: the first by ticket counts.
   def comparable(rows, metric:, exclude:)
+    improve_landings(rows, exclude: exclude) { |r| metric.na_share? || !metric.value(r).nil? }
+  end
+
+  # The improve-mode rows with a landing time, the excluded landings
+  # dropped, those the block selects kept, in landing order, one row per
+  # landed commit (the first selected by ticket).
+  def improve_landings(rows, exclude: [], &keep)
     skip = exclude.map(&:to_s)
     rows.reject { |r| skip.include?(r["landed_commit"].to_s) || (r.key?("mode") && r["mode"] != "improve") }
-        .select { |r| at(r) && (metric.na_share? || !metric.value(r).nil?) }
+        .select { |r| at(r) && keep.call(r) }
         .sort_by { |r| [r["landed_at"].to_s, r["ticket"].to_s] }
         .uniq { |r| r["landed_commit"] }
   end
@@ -194,10 +204,7 @@ module LeadTimeExperiment
   # an empty before-set names why (e.g. "row predates check_walls"); nil
   # when there is no such landing.
   def latest_unmeasured(rows, metric, exclude, boundary)
-    skip = exclude.map(&:to_s)
-    last = rows.reject { |r| skip.include?(r["landed_commit"].to_s) }
-               .select { |r| at(r) && at(r) < boundary && metric.value(r).nil? }
-               .max_by { |r| [r["landed_at"].to_s, r["ticket"].to_s] }
+    last = improve_landings(rows, exclude: exclude) { |r| at(r) < boundary && metric.value(r).nil? }.last
     last && metric.na_reason(last)
   end
 
@@ -212,12 +219,12 @@ module LeadTimeExperiment
 
   # nil when `label` names a check on at least one of the last `window`
   # landings that carry check_walls; else why it matches nothing:
-  #   {state: :could_not_look, n: 0}  no landing carries check_walls
+  #   {state: :could_not_look, n: 0}  no landing carries a non-empty
+  #     check_walls
   #   {state: :unknown, n:, closest: [label]}  a failed lookup, with the
   #     CLOSEST labels seen, nearest first
   def check_label_error(rows, label, window:)
-    with = rows.select { |r| r["check_walls"].is_a?(Hash) }
-               .sort_by { |r| [r["landed_at"].to_s, r["ticket"].to_s] }.last(window)
+    with = improve_landings(rows) { |r| r["check_walls"].is_a?(Hash) && !r["check_walls"].empty? }.last(window)
     return { state: :could_not_look, n: 0 } if with.empty?
 
     seen = with.flat_map { |r| r["check_walls"].keys }.uniq

@@ -300,11 +300,12 @@ end
 check("Metric: a measured row has no n/a reason") { check_metric.na_reason(crow(1, { WAIT => 5.0 })).nil? }
 
 check("judge: the check falls 120 -> 5 s while the phase rises: keep (the regression case)") do
-  e = exp(metric: "check:#{WAIT}", phase: "integrate")
+  # The experiment's own phase (verify) is the one that rises, as Judge#context reads it.
+  e = exp(metric: "check:#{WAIT}", phase: "verify")
   rows = (1..10).map { |i| crow(-i, { WAIT => 120.0 }, verify: 600) } + (1..10).map { |i| crow(i, { WAIT => 5.0 }, verify: 900) }
-  s = X.sides(rows, metric: check_metric, exclude: [], boundary: t(RECORDED))
+  s = X.sides(rows, metric: X::Metric.parse(e["metric"], phase: e["phase"]), exclude: [], boundary: t(RECORDED))
   v = X.judge(e, before: s[:before], after: s[:after], guards_before: guards, guards_after: guards, now: NOW)
-  ctx = X.phase_context(s[:before], s[:after], phase: "verify")
+  ctx = X.phase_context(s[:before], s[:after], phase: e["phase"])
   v["status"] == "keep" && v["before"]["median"] == 120.0 && v["after"]["median"] == 5.0 &&
     ctx["before"]["median"] == 600 && ctx["after"]["median"] == 900
 end
@@ -350,13 +351,48 @@ check("check_label_error: only the last `window` landings with check_walls are s
   err[:state] == :unknown && err[:n] == 2
 end
 
+check("check_label_error: batch rows sharing a landed commit are ONE landing of the window") do
+  batch = %w[DND-9001 DND-9002].map { |tk| crow(-1, { "b" => 1.0 }).merge("landed_commit" => "d" * 40, "ticket" => tk) }
+  rows = [crow(-3, { WAIT => 1.0 }), crow(-2, { "a" => 1.0 })] + batch
+  err = X.check_label_error(rows, WAIT, window: 2)
+  err[:state] == :unknown && err[:n] == 2 && X.check_label_error(rows, WAIT, window: 3).nil?
+end
+
+check("check_label_error: watch-mode rows never count") do
+  watch = crow(-1, { WAIT => 1.0 }).merge("mode" => "watch")
+  X.check_label_error([watch], WAIT, window: 20)[:state] == :could_not_look
+end
+
 check("check_label_error: no landing carries check_walls: could not look, never unknown") do
   err = X.check_label_error([crow(-1, nil), crow(-2, nil, na: "no source")], WAIT, window: 20)
   err[:state] == :could_not_look && err[:n].zero?
 end
 
-check("record_error: a check metric record folds; kind_error lets a change take it") do
-  X.kind_error("change", "check:#{WAIT}").nil? && X.kind_error("instrumentation", "check:#{WAIT}").include?("na_share")
+check("check_label_error: only empty check_walls maps (no numeric wall anywhere): could not look, never an empty closest list") do
+  X.check_label_error([crow(-1, {}), crow(-2, {})], WAIT, window: 20)[:state] == :could_not_look
+end
+
+check("Metric.parse: a label with any control character raises (a carriage return too)") do
+  X::Metric.parse("check:a\rb", phase: "integrate")
+  false
+rescue X::UsageError => e
+  e.message.include?("control character")
+end
+
+check("Metric: a label present with no numeric wall says so, not that it did not run") do
+  check_metric.na_reason(crow(1, { WAIT => nil }).merge("gated_head" => "c" * 40)) == "check #{WAIT} has no numeric wall on cccccccc"
+end
+
+check("sides: an empty before-set names the latest unmeasured improve landing, never a watch row") do
+  rows = [crow(-2, nil), crow(-1, { WAIT => 1.0 }).merge("mode" => "watch", "check_walls" => {})] +
+         (1..10).map { |i| crow(i, { WAIT => 5.0 }) }
+  s = X.sides(rows, metric: check_metric, exclude: [], boundary: t(RECORDED))
+  s[:before_na].end_with?("the latest landing before it: row predates check_walls")
+end
+
+check("kind_error: a change may take check:<label>; instrumentation may not") do
+  X.kind_error("change", "check:#{WAIT}").nil? && X.kind_error("instrumentation", "check:#{WAIT}").include?("na_share") &&
+    X.record_error(exp(metric: "check:#{WAIT}", phase: "integrate").merge("recorded_at" => RECORDED)).nil?
 end
 
 # ── admit? ──────────────────────────────────────────────────────────────────

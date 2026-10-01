@@ -283,8 +283,9 @@ p90 over the last K comparable landings), and a status.
   `top_checks`, which is now its top 5), or `check_walls_na` with the reason.
   Rows ingested earlier have no key, so a check metric has no before-set on
   them: pending, never a gain. Record refuses a label that matches no check
-  on the window's landings (exit 2, the closest labels named) and reads no
-  landing with `check_walls` as could not look (exit 3). Judge prints the
+  on the last `window` landings that carry `check_walls` (exit 2, the
+  closest labels named) and reads no landing with `check_walls` as could not
+  look (exit 3). Judge prints the
   phase median beside the verdict, labelled context; it never feeds it. The
   verdict rules, thresholds and guards are unchanged, `--phase` still admits
   the experiment, and no recorded experiment changes its metric.

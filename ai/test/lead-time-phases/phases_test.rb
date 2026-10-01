@@ -206,7 +206,7 @@ timings = S.ok([{ "label" => "x", "wall_s" => 3.0, "at" => "2026-10-01T01:00:00Z
                 { "label" => "x", "wall_s" => 9.0, "at" => "2026-10-01T02:00:00Z" },
                 { "label" => "y", "wall_s" => 5.0, "at" => "2026-10-01T02:00:00Z" }])
 c3 = L::Counters.compute(landing: l, events: S.ok([]), timings: timings)
-check("C2 empty telemetry: from timings rows, latest per label") do
+check("C2 empty telemetry: from the timings rows of the newest run") do
   c3["top_checks"] == [{ "label" => "x", "wall_s" => 9.0 }, { "label" => "y", "wall_s" => 5.0 }] &&
     c3["top_checks_source"] == "harness-gate timings.jsonl"
 end
@@ -222,7 +222,14 @@ end
 check("C4 top_checks equals top(check_walls) on the same fixture") do
   c2["top_checks"] == L::Counters.top(c2["check_walls"]) && c3["top_checks"] == L::Counters.top(c3["check_walls"])
 end
-check("C4 check_walls from timings rows, latest per label") { c3["check_walls"] == { "x" => 9.0, "y" => 5.0 } }
+check("C4 check_walls from the timings rows of the newest run") { c3["check_walls"] == { "x" => 9.0, "y" => 5.0 } }
+check("C4 timings: only the head's LAST gate run counts; a label from an older run is absent, never stale") do
+  runs = S.ok([{ "label" => "x", "wall_s" => 3.0, "at" => "2026-10-01T01:00:00Z", "tree" => "/w" },
+               { "label" => "z", "wall_s" => 7.0, "at" => "2026-10-01T01:00:00Z", "tree" => "/w" },
+               { "label" => "x", "wall_s" => 9.0, "at" => "2026-10-01T02:00:00Z", "tree" => "/w" }])
+  got = L::Counters.compute(landing: l, events: S.ok([]), timings: runs)
+  got["check_walls"] == { "x" => 9.0 } && got["top_checks"] == [{ "label" => "x", "wall_s" => 9.0 }]
+end
 check("C4 no source: no check_walls, and check_walls_na carries top_checks_na's reason") do
   !c4.key?("check_walls") && c4["check_walls_na"] == c4["top_checks_na"] && !c4["check_walls_na"].to_s.empty?
 end

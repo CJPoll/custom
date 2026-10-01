@@ -185,12 +185,11 @@ module Setup
     refuse(2, "LEAD_TIME_EXPERIMENT_NOW=#{raw.inspect} is not RFC 3339", "unset it, or give an RFC 3339 time")
   end
 
-  # The repo, resolved through the one lead-time repo resolver (DND-1526).
-  def repo(env, name) = config { LeadTimeConfigIO.resolve(env).find(name) }
+  # The one lead-time repo resolution (DND-1526). A caller that also needs
+  # its window (DND-1548) resolves once and passes it to repo/improve_repo.
+  def resolution(env) = config { LeadTimeConfigIO.resolve(env) }
 
-  # The config's window: how many recent landings a check label is looked
-  # for in (DND-1548).
-  def window(env) = config { LeadTimeConfigIO.resolve(env).window }
+  def repo(env, name, res = nil) = config { (res || resolution(env)).find(name) }
 
   def config
     yield
@@ -202,8 +201,8 @@ module Setup
     refuse(2, "config: #{e.message}", e.fix)
   end
 
-  def improve_repo(env, name)
-    r = repo(env, name)
+  def improve_repo(env, name, res = nil)
+    r = repo(env, name, res)
     return r if r.mode == "improve"
 
     refuse(2, "repo #{name} is in #{r.mode} mode; experiments run on improve repos only",
@@ -289,14 +288,15 @@ module Record
 
   def run(opts, env)
     now = Setup.now(env)
-    repo = Setup.improve_repo(env, opts["--repo"])
+    res = Setup.resolution(env)
+    repo = Setup.improve_repo(env, opts["--repo"], res)
     metric = parse_metric(opts)
     commit = opts["--commit"]
     refuse(2, "--commit #{commit.inspect} is not a 40-hex SHA", "pass the full SHA as landed on main (git rev-parse)") unless X::SHA_RE.match?(commit)
     hypothesis = read_hypothesis(opts["--hypothesis-file"])
     state = Setup.state_dir(env)
     rows = Setup.ledger_rows(state, repo)
-    check_label!(rows, metric, repo, env) if metric.check?
+    check_label!(rows, metric, repo, res.window) if metric.check?
     on_main!(repo, commit)
     row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows)
     Setup.append(Setup.store(state)) { |existing| admit!(X.fold(existing), row) }
@@ -317,20 +317,20 @@ module Record
   # A check:<label> that matches no check is the failed-lookup class: it
   # would judge nothing for 7 days. Refuse it unless the label ran on at
   # least one of the window's landings that carry check_walls.
-  def check_label!(rows, metric, repo, env)
-    window = Setup.window(env)
+  def check_label!(rows, metric, repo, window)
     err = X.check_label_error(rows, metric.check_label, window: window)
     return unless err
 
     if err[:state] == :could_not_look
-      refuse(3, "could not look: none of #{repo.name}'s #{rows.size} ledgered landing(s) carries check_walls " \
+      refuse(3, "could not look: none of #{repo.name}'s #{rows.size} ledgered landing(s) carries a non-empty check_walls " \
                 "(rows ingested before DND-1548 have none), so check #{metric.check_label.inspect} cannot be looked up",
              "run ai/bin/lead-time-phases --ingest --repo #{repo.name} after a landing whose gate ran; " \
              "this is not an unknown label")
     end
     refuse(2, "check #{metric.check_label.inspect} appears on none of #{err[:n]} landings with check_walls " \
               "(the last #{window}); closest: #{err[:closest].map(&:inspect).join(', ')}",
-           "copy the label exactly from harness-gate's timings.jsonl (~/.local/state/athena/harness-gate/, " \
+           "copy the label exactly from harness-gate's timings.jsonl ($XDG_STATE_HOME/athena/harness-gate/, " \
+           "default ~/.local/state/athena/harness-gate/; " \
            "its \"label\" field) or the gate's output, then re-run record")
   end
 
@@ -411,10 +411,11 @@ module Judge
     all = Setup.experiments(Setup.read_store(store))
     mine = all.select { |e| e["repo"] == repo.name }
     shas = all.map { |e| e["commit"] }
-    results = mine.select { |e| e["status"] == "pending" }.map { |e| [e, verdict(e, rows, repo, shas, now)] }
-    results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo)] }
+    # [experiment, verdict, phase context (check metrics only; printed, never judged)]
+    results = mine.select { |e| e["status"] == "pending" }.map { |e| [e, *verdict(e, rows, repo, shas, now)] }
+    results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo), nil] }
     appended = Setup.append(store) { |existing| fresh_rows(existing, results, now) }
-    results.each { |e, v| puts line(e, v, context(e, rows)) }
+    results.each { |e, v, ctx| puts line(e, v, ctx) }
     judged = results.map { |_, v| v["status"] }
     tally = X::JUDGED.map { |s| "#{judged.count(s)} #{s}" }.join(", ")
     declined = mine.count { |e| e["status"] == "declined" }
@@ -438,27 +439,17 @@ module Judge
     end
   end
 
+  # -> [verdict, context]. context: for a check metric, the phase's own
+  # stats over the same two sides, else nil. It is printed, never judged.
   def verdict(exp, rows, repo, shas, now)
     landing = Setup.landing_row(rows, exp["commit"])
-    return unlanded(exp, repo, now) unless landing
+    return [unlanded(exp, repo, now), nil] unless landing
 
     metric = X::Metric.parse(exp["metric"], phase: exp["phase"])
     s = X.sides(rows, metric: metric, exclude: [exp["commit"]], boundary: X.at(landing))
-    X.judge(exp, before: s[:before], after: s[:after], guards_before: guards(s[:before], repo, shas),
-                 guards_after: guards(s[:after], repo, shas), now: now)
-  end
-
-  # A check metric's phase stats over the same two sides, or nil (another
-  # metric, or the landing is not ledgered). Printed, never judged.
-  def context(exp, rows)
-    return nil unless exp["status"] == "pending"
-
-    metric = X::Metric.parse(exp["metric"], phase: exp["phase"])
-    landing = Setup.landing_row(rows, exp["commit"])
-    return nil unless metric.check? && landing
-
-    s = X.sides(rows, metric: metric, exclude: [exp["commit"]], boundary: X.at(landing))
-    X.phase_context(s[:before], s[:after], phase: exp["phase"])
+    v = X.judge(exp, before: s[:before], after: s[:after], guards_before: guards(s[:before], repo, shas),
+                     guards_after: guards(s[:after], repo, shas), now: now)
+    [v, metric.check? ? X.phase_context(s[:before], s[:after], phase: exp["phase"]) : nil]
   end
 
   # Not in the ledger: say whether it is on main (ingest lag) or not.

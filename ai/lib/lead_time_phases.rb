@@ -386,8 +386,7 @@ module LeadTimePhases
         [evs.size, evs.count { |e| Match.attr(e, "verdict").to_s.downcase == "block" }, wall(evs)]
       end
       family(landing, events, "merge.lock_wait", %w[lock_wait_s], out, na) { |evs| [wall(evs)] }
-      top = check_fields(landing, events, timings)
-      { "counters" => out, "counters_na" => na }.merge(top)
+      { "counters" => out, "counters_na" => na }.merge(check_fields(landing, events, timings))
     end
 
     # The summed duration_s, or nil when no event carries one (a missing
@@ -428,9 +427,11 @@ module LeadTimePhases
     end
 
     # [{label => wall_s}, source] for every check of the gated head's last
-    # gate run (telemetry harness_gate.check, else the latest timings row per
-    # label), or nil when neither source has a row. A check with no numeric
-    # wall is left out, never read as 0.
+    # gate run (telemetry harness_gate.check by run_id, else the timings rows
+    # of the newest run: harness-gate writes one `at` and `tree` per run), or
+    # nil when neither source has a row. A label from an older run is never
+    # carried over, and a check with no numeric wall is left out, never read
+    # as 0.
     def check_walls(landing, events, timings)
       checks = Match.for_gated(events.items, landing, "harness_gate.check")
       unless checks.empty?
@@ -441,10 +442,12 @@ module LeadTimePhases
       rows = timings.items
       return nil if rows.empty?
 
-      latest = rows.group_by { |r| r["label"] }.map { |_, rs| rs.max_by { |r| r["at"].to_s } }
-      [walls(latest.map { |r| [r["label"], r["wall_s"]] }), "harness-gate timings.jsonl"]
+      last = rows.group_by { |r| [r["at"].to_s, r["tree"].to_s] }.max_by(&:first).last
+      [walls(last.map { |r| [r["label"], r["wall_s"]] }), "harness-gate timings.jsonl"]
     end
 
+    # A label reported twice in one run keeps its last wall (harness-gate
+    # labels are unique per run).
     def walls(pairs) = pairs.select { |label, wall| label.is_a?(String) && wall.is_a?(Numeric) }.to_h
 
     # The TOP_CHECKS slowest of a check_walls map, as [{label, wall_s}].
