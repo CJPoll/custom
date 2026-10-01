@@ -195,6 +195,33 @@ lacks "... and never 'no such path'" "${ERR}" "no such path"
 run GIT_DIR="${TMP}/other/.git" ATHENA_LEADTIME_CONFIG="${PART}" -- --json
 eq "a leaked GIT_DIR does not redirect the probes" "$(jq_r 'j["repos"].map { |r| r["name"] }.join(",")')" "custom"
 
+echo "== --repo-path: a change repo's path (DND-1528)"
+# The runner's own repo is this checkout's main checkout, read from git here
+# the same way the tool must, so the suite never hardcodes ~/dev/custom.
+OWN_COMMON="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR git -C "${ROOT}" rev-parse --path-format=absolute --git-common-dir)"
+OWN="$(dirname "${OWN_COMMON}")"
+OWN_NAME="$(basename "${OWN}")"
+run ATHENA_LEADTIME_CONFIG="${PART}" -- --repo-path custom
+eq "a configured, present repo: exit 0" "${CODE}" "0"
+eq "... prints its configured path, and only that" "${OUT}" "${H}/dev/custom"
+run ATHENA_LEADTIME_CONFIG="${GOOD}" -- --repo-path "${OWN_NAME}"
+eq "the runner's own repo, not configured here: exit 0" "${CODE}" "0"
+eq "... prints the runner's main checkout (git rev-parse --git-common-dir)" "${OUT}" "${OWN}"
+run ATHENA_LEADTIME_CONFIG="${ALLGONE}" -- --repo-path "${OWN_NAME}"
+eq "a machine whose every configured checkout is missing still resolves the runner's own repo" "${OUT}" "${OWN}"
+run GIT_DIR="${TMP}/other/.git" ATHENA_LEADTIME_CONFIG="${GOOD}" -- --repo-path "${OWN_NAME}"
+eq "a leaked GIT_DIR does not redirect the own-repo lookup" "${OUT}" "${OWN}"
+run ATHENA_LEADTIME_CONFIG="${PART}" -- --repo-path gen_saas
+refused "a configured repo skipped on this machine" "gen_saas: skipped on this machine"
+eq "... and nothing on stdout" "${OUT}" ""
+run ATHENA_LEADTIME_CONFIG="${GOOD}" -- --repo-path nope
+refused "a repo neither configured nor the runner's own" "not the runner's own repo"
+eq "... and nothing on stdout" "${OUT}" ""
+run ATHENA_LEADTIME_CONFIG="${GOOD}" -- --repo-path "${OWN_NAME}" --json
+refused "--repo-path with --json" "--repo-path prints one path"
+run ATHENA_LEADTIME_CONFIG="${NOTGIT}" -- --repo-path "${OWN_NAME}"
+refused "a refused config refuses --repo-path too (one resolver)" "is not a git repository"
+
 echo "== usage"
 run -- --bogus
 eq "an unknown flag: exit 2" "${CODE}" "2"

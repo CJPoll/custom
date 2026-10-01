@@ -241,6 +241,54 @@ check("R5 to_h carries the --json shape") do
     h["skipped"].first.keys == %w[name path reason] && h["considered"] == 3
 end
 
+# ── a change repo's path (DND-1528) ─────────────────────────────────────────
+
+own = C.own_repo("/home/u/dev/custom/.git")
+check("O1 own_repo: the main checkout above an absolute <checkout>/.git, labelled by its basename") do
+  own.path == "/home/u/dev/custom" && own.label == "custom" && own.error.nil?
+end
+check("O1 own_repo from a linked worktree's common dir is still the main checkout") do
+  C.own_repo("/home/u/dev/custom/.git").path == "/home/u/dev/custom"
+end
+check("O2 own_repo: a relative common dir is an error value, never a path") do
+  o = C.own_repo(".git")
+  o.path.nil? && o.error.include?("not absolute")
+end
+check("O2 own_repo: a bare common dir (no /.git) is an error value") do
+  o = C.own_repo("/srv/custom.git")
+  o.path.nil? && o.error.include?("not <checkout>/.git")
+end
+check("O2 own_repo: no common dir (git failed) carries the reason") do
+  o = C.own_repo(nil, why: "git rev-parse failed")
+  o.path.nil? && o.error == "git rev-parse failed"
+end
+
+laptop = C.resolve(LOC, parse(doc([repo("gen_saas", "improve")])), { "gen_saas" => probe("/src/gen_saas", "gen_saas") })
+check("C1 a configured, present repo resolves to its configured path") { res.path_for("gen_saas", own) == "/src/gen_saas" }
+check("C2 the runner's own repo resolves on a machine that does not configure it") do
+  laptop.path_for("custom", own) == "/home/u/dev/custom"
+end
+check("C2 a configured repo wins over the own-repo rule (the config path is validated as that checkout)") do
+  res.path_for("custom", own) == "/src/custom"
+end
+check("C3 a name neither configured nor the runner's own is refused (Unresolved), naming both") do
+  e = raised { laptop.path_for("walt_ui", own) }
+  e.is_a?(C::Unresolved) && e.message.include?("walt_ui") && e.message.include?("gen_saas") &&
+    e.message.include?("custom") && e.fix.include?("walt_ui")
+end
+check("C3 a configured repo skipped on this machine is refused (Unresolved), never a path") do
+  e = raised { res.path_for("walt_ui", own) }
+  e.is_a?(C::Unresolved) && e.message.include?("skipped on this machine") && e.message.include?("no such path")
+end
+check("C4 the own repo could not be looked at: CouldNotLook for an unconfigured name, never 'not configured'") do
+  e = raised { laptop.path_for("custom", C.own_repo(nil, why: "git rev-parse failed")) }
+  e.is_a?(C::CouldNotLook) && e.message.include?("git rev-parse failed")
+end
+check("C4 ... and a configured name still resolves without it") do
+  laptop.path_for("gen_saas", C.own_repo(nil, why: "git rev-parse failed")) == "/src/gen_saas"
+end
+check("C5 an empty name is refused, never matched") { raised { laptop.path_for("", own) }.is_a?(C::Unresolved) }
+
 if $failures.empty?
   puts "lead-time-repos: #{$checks} checks passed"
   exit 0

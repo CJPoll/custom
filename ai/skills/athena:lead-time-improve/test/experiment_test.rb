@@ -629,6 +629,74 @@ check("hold never changes the verdict: status_row of a held revert stays revert"
   r["status"] == "revert" && r["held"] == { "tests" => ["a/test/t.sh"] }
 end
 
+# ── cross-repo experiments (DND-1528) ───────────────────────────────────────
+
+CUSTOM_SHA = "c" * 40
+LIVE = "2026-10-01T12:30:00Z"
+
+def xexp(**over)
+  exp.merge("id" => "gen_saas:verify:#{CUSTOM_SHA[0, 12]}", "repo" => "gen_saas", "commit" => CUSTOM_SHA,
+            "change_repo" => "custom", "live_at" => LIVE).merge(over.transform_keys(&:to_s))
+end
+
+check("cross_repo?: a change_repo other than the repo") { X.cross_repo?(xexp) }
+check("cross_repo?: no change_repo (every record before DND-1528) is same-repo") { !X.cross_repo?(exp) }
+check("cross_repo?: change_repo equal to the repo is same-repo") { !X.cross_repo?(xexp("change_repo" => "gen_saas")) }
+
+FP = [["f3" + "0" * 38, t("2026-10-01T14:00:00Z")], ["f2" + "0" * 38, t("2026-10-01T12:30:00Z")],
+      ["f1" + "0" * 38, t("2026-10-01T10:00:00Z")]].freeze
+check("landing_point: a commit on main's first-parent line landed as itself, at its own time") do
+  X.landing_point(FP, [], FP[1][0]) == FP[1]
+end
+check("landing_point: a merged side commit landed with the OLDEST first-parent commit that contains it") do
+  X.landing_point(FP, [FP[0][0], FP[1][0], "a" * 40], "b" * 40) == FP[1]
+end
+check("landing_point: a commit no first-parent commit contains has no landing (nil, never a guess)") do
+  X.landing_point(FP, ["a" * 40], "b" * 40).nil?
+end
+
+ledger = before_rows([600] * 10) + [row(0, verify: 550, sha: LANDING)] + after_rows([500] * 10)
+check("split: same-repo splits at its own ledgered landing, excluding it") do
+  s = X.split(exp, ledger)
+  s[:boundary] == t(RECORDED) && s[:exclude] == [LANDING]
+end
+check("split: same-repo with no ledgered landing yet is nil (unlanded)") { X.split(exp, ledger - [ledger[10]]).nil? }
+check("split: cross-repo splits at live_at, with no own landing to exclude") do
+  s = X.split(xexp, ledger)
+  s[:boundary] == t(LIVE) && s[:exclude] == []
+end
+check("split: cross-repo ignores a measured-repo landing that happens to carry the commit's SHA") do
+  X.split(xexp("commit" => LANDING), ledger)[:exclude] == []
+end
+check("sides at a cross-repo live_at: the landing at +0h is BEFORE a live_at of +0h30m, so it joins the before-set") do
+  s = X.split(xexp, ledger)
+  sd = X.sides(ledger, metric: X::Metric.parse("phase", phase: "verify"), exclude: s[:exclude], boundary: s[:boundary])
+  sd[:before].last["landed_commit"] == LANDING && sd[:after].size == 10 && sd[:before].size == 10
+end
+
+check("record_error: a cross-repo record folds") { X.record_error(xexp).nil? }
+check("record_error: a change_repo that is not a plain name is malformed") do
+  X.record_error(xexp("change_repo" => "../x")).to_s.include?("change_repo")
+end
+check("record_error: a cross-repo record without an RFC 3339 live_at is malformed, never split at nil") do
+  X.record_error(xexp("live_at" => "yesterday")).to_s.include?("live_at") && X.record_error(xexp("live_at" => nil)).to_s.include?("live_at")
+end
+check("record_error: a same-repo record needs no live_at (unchanged)") { X.record_error(exp).nil? }
+
+check("cross_text: a cross-repo experiment names change_repo, commit and live_at") do
+  X.cross_text(xexp) == "change_repo=custom commit=#{CUSTOM_SHA[0, 12]} live_at=#{LIVE}"
+end
+check("cross_text: a same-repo experiment prints nothing new") { X.cross_text(exp).nil? }
+
+check("hold_text: a cross-repo revert names the change repo it lands in") do
+  s = X.hold_text("gen_saas", "gen_saas:verify:c", CUSTOM_SHA, { "tests" => ["a/test/t.sh"] }, nil, change_repo: "custom")
+  s.include?("in custom: git revert --no-commit #{CUSTOM_SHA}") && s.include?("experiment decline --repo gen_saas")
+end
+check("hold_text: same-repo text is unchanged when no change_repo is given") do
+  X.hold_text("custom", "i", LANDING, { "tests" => ["a/test/t.sh"] }, nil) ==
+    X.hold_text("custom", "i", LANDING, { "tests" => ["a/test/t.sh"] }, nil, change_repo: nil)
+end
+
 # ── store ───────────────────────────────────────────────────────────────────
 
 Dir.mktmpdir("experiment-store-") do |dir|

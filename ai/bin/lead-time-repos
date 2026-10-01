@@ -20,6 +20,7 @@ AI_DIR = File.expand_path("..", __dir__)
 HELP = <<~TXT
   Usage:
     ai/bin/lead-time-repos [--json]
+    ai/bin/lead-time-repos --repo-path NAME
     ai/bin/lead-time-repos --self-test
 
   Resolve the lead-time repo list for THIS machine (DND-1526). Every reader
@@ -52,17 +53,32 @@ HELP = <<~TXT
   product_epic,product_epic_source,idle_workflow}],"skipped":[{name,path,reason}],
   "considered"}.
 
-  Options:
-    --json       JSON instead of the table
-    --self-test  run the domain suite (ai/test/lead-time-repos/config_test.rb)
-    --help       this text
+  --repo-path NAME prints one CHANGE repo's path (DND-1528): the repo a
+  change landed in, which need not be a measured repo (experiment record
+  --change-repo). In order:
+    1. NAME configured and present: its configured path;
+    2. NAME is the runner's own repo (the repo this tool runs from): its
+       main checkout, from `git rev-parse --git-common-dir`, so the harness
+       repo resolves on a machine that does not configure it. Never a
+       hardcoded path;
+    3. otherwise refused, exit 2 with Fix: (configured but skipped here, or
+       neither configured nor the runner's own). Exit 3 when the runner's
+       own repo could not be looked at and NAME is not configured.
+  It needs no measured repo checked out, but a refused config refuses it.
 
-  Exit: 0 ok; 1 internal error; 2 the config or a repo path is refused;
-  3 could not look (a file it could not read, git that could not run);
-  4 no configured repo is checked out on this machine.
+  Options:
+    --json            JSON instead of the table
+    --repo-path NAME  print NAME's path as a change repo (above), and nothing else
+    --self-test       run the domain suite (ai/test/lead-time-repos/config_test.rb)
+    --help            this text
+
+  Exit: 0 ok; 1 internal error; 2 the config or a repo path is refused, or
+  --repo-path NAME cannot be resolved; 3 could not look (a file it could not
+  read, git that could not run); 4 no configured repo is checked out on this
+  machine (never for --repo-path).
 TXT
 
-SPEC = { "--json" => :switch, "--self-test" => :switch }.freeze
+SPEC = { "--json" => :switch, "--repo-path" => :value, "--self-test" => :switch }.freeze
 
 def fail_with(code, what, fix)
   warn "lead-time-repos: #{what}"
@@ -89,15 +105,27 @@ def self_test
   system("/usr/bin/ruby", suite) ? 0 : 1
 end
 
+# --repo-path NAME: one line, the path. The config is resolved in full (a
+# refused config refuses this too), but no measured repo need be present.
+def repo_path(env, opts)
+  return fail_with(2, "usage error: --repo-path prints one path; it takes no --json", "drop --json") if opts["--json"]
+
+  puts LeadTimeConfigIO.repo_path(LeadTimeConfigIO.resolve(env), opts["--repo-path"])
+  0
+end
+
 def main(argv, env)
   opts = StrictArgv.parse(argv, SPEC)
   return self_test if opts["--self-test"]
+  return repo_path(env, opts) if opts.key?("--repo-path")
 
   res = LeadTimeConfigIO.resolve(env).require_any!
   puts(opts["--json"] ? JSON.generate(res.to_h) : table(res))
   0
 rescue StrictArgv::UsageError => e
   fail_with(2, "usage error: #{e.message}", "see --help")
+rescue LeadTimeConfig::Unresolved => e
+  fail_with(2, "cannot resolve the repo: #{e.message}", e.fix)
 rescue LeadTimeConfig::NoRepos => e
   fail_with(4, e.message, e.fix)
 rescue LeadTimeConfig::CouldNotLook => e

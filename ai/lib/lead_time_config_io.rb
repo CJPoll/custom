@@ -9,6 +9,9 @@
 #   Git.probe    one configured repo path -> Probe (exists, git top, common dir)
 #   resolve      the one resolution every reader uses: candidate -> locate ->
 #                read -> parse -> probe each repo -> Resolution
+#   own_repo     the runner's own repo (this file's checkout) -> OwnRepo
+#                (DND-1528)
+#   repo_path    a change repo's path: Resolution#path_for with own_repo
 #
 # Read-only: it writes nothing anywhere. Every failure raises a
 # LeadTimeConfig::Error (or CouldNotLook) carrying the Fix: the caller prints;
@@ -89,7 +92,31 @@ module LeadTimeConfigIO
     end
   end
 
+  # The runner's own repo (DND-1528): this file's checkout. Its main checkout
+  # is the harness repo's, wherever it is cloned; never a hardcoded path.
+  OWN_DIR = File.expand_path("..", __dir__)
+
   module_function
+
+  # SIDE EFFECT: -> LeadTimeConfig::OwnRepo for the repo `dir` belongs to,
+  # from `git rev-parse --git-common-dir` (absolute, so a worktree and its
+  # main checkout give the same answer). A git that cannot answer is an
+  # OwnRepo carrying the reason, never a guessed path.
+  def own_repo(dir = OWN_DIR)
+    out, err, st = Open3.capture3(GIT_ENV_UNSET, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return C.own_repo(out.strip) if st.success?
+
+    why = err.strip.lines.first.to_s.strip
+    C.own_repo(nil, why: "git rev-parse --git-common-dir in #{dir} failed (#{why.empty? ? "exit #{st.exitstatus}" : why})")
+  rescue SystemCallError => e
+    C.own_repo(nil, why: "git could not run (#{e.message})")
+  end
+
+  # MANAGER: a change repo's path (DND-1528). res: a Resolution. Raises
+  # LeadTimeConfig::Unresolved or CouldNotLook (see Resolution#path_for).
+  def repo_path(res, name, own: own_repo)
+    res.path_for(name, own)
+  end
 
   # MANAGER: the one resolution. -> LeadTimeConfig::Resolution, or raises
   # LeadTimeConfig::Error. A Resolution may hold zero repos; callers that need

@@ -427,6 +427,92 @@ has "the git adapter reads a bad repo path as could not look, never as no tests"
   "$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.numstat(ARGV[1], ARGV[2]); puts s.could_not_look? ? "could_not_look: #{s.reason}" : "ok: #{s.items.inspect}"' \
      "${HERE}/../lib/experiment_git.rb" "${TMP}/no-such-repo" "${TADD}")" "could_not_look:"
 
+# ── cross-repo: a custom change measured on gen_saas (DND-1528) ─────────────
+echo "== cross-repo"
+XGS="${TMP}/xr/gen_saas"
+mkdir -p "${XGS}"
+GX=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid
+    GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid git -C "${XGS}")
+"${GX[@]}" init -q -b main
+GS_ONLY="$(GIT_COMMITTER_DATE=2026-09-01T00:00:00Z GIT_AUTHOR_DATE=2026-09-01T00:00:00Z "${GX[@]}" commit -q --allow-empty -m "fixture: gen_saas root" && "${GX[@]}" rev-parse HEAD)"
+XCONF="${TMP}/xrepo.json"
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${XGS}\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${XCONF}"
+# The custom change: written at 02:00 (author date), landed at 11:30 (committer).
+XC="$(GIT_AUTHOR_DATE=2026-10-02T02:00:00Z GIT_COMMITTER_DATE=2026-10-02T11:30:00Z "${G[@]}" commit -q --allow-empty -m "fixture: a harness change for gen_saas" && "${G[@]}" rev-parse HEAD)"
+XID="gen_saas:verify:${XC:0:12}"
+# gen_saas's own landings, hourly from 2026-10-02T00:00Z: 600 s before, 500 s after.
+STATEX="${TMP}/statex"
+mkdir -p "${STATEX}"
+gs_ledger() { # OUT LANDING AFTER BASE: make_ledger.rb's rows, as gen_saas's
+  /usr/bin/ruby "${HERE}/make_ledger.rb" "$1.custom" "$2" "$3" "$4" && sed 's/"repo":"custom"/"repo":"gen_saas"/' "$1.custom" >"$1" && rm -f "$1.custom"
+}
+gs_ledger "${STATEX}/ledger.jsonl" "$(printf 'd%.0s' $(seq 40))" 500 2026-10-02T00:00:00Z
+sx() { LEAD_TIME_STATE_DIR="${STATEX}" ATHENA_LEADTIME_CONFIG="${XCONF}" LEAD_TIME_EXPERIMENT_NOW=2026-10-03T12:00:00Z "$@"; }
+xrec() { sx run record --repo gen_saas --change-repo "$1" --phase verify --metric phase --commit "$2" --kind change --hypothesis-file "${HYP}"; }
+eq "a commit NOT on custom's main: refused, exit 2" "$(xrec custom "${NEVER}")" "2"
+has "... naming the commit and the change repo" "$(err)" "${NEVER:0:12} is not on custom's main"
+eq "a gen_saas commit as a custom change: refused (the on-main check reads the CHANGE repo)" "$(xrec custom "${GS_ONLY}")" "2"
+has "... naming it" "$(err)" "${GS_ONLY:0:12} is not on custom's main"
+eq "a change repo that cannot be resolved: refused, exit 2" "$(xrec nope "${XC}")" "2"
+has "... naming it, with Fix:" "$(err)" "no repo \"nope\""
+has "... and a Fix:" "$(err)" "Fix:"
+eq "... nothing written by any refusal" "$(test -e "${STATEX}/experiments.jsonl" && echo yes || echo no)" "no"
+eq "a commit on custom's main: accepted, exit 0" "$(xrec custom "${XC}")" "0"
+has "record prints the change repo and live_at" "$(out)" "change_repo=custom commit=${XC:0:12} live_at=2026-10-02T11:30:00Z"
+XROW="$(recrow "${STATEX}/experiments.jsonl" "${XID}")"
+has "the row records change_repo" "${XROW}" '"change_repo":"custom"'
+has "... live_at, the landing (committer) time, never the author date" "${XROW}" '"live_at":"2026-10-02T11:30:00Z"'
+has "... the commit" "${XROW}" "\"commit\":\"${XC}\""
+has "the baseline splits at live_at: gen_saas's 11:00 landing is in it (no own landing excluded)" "${XROW}" '"to":"2026-10-02T11:00:00Z"'
+has "... ten landings back from live_at, not from the 02:00 author date" "${XROW}" '"from":"2026-10-02T02:00:00Z"'
+lacks "... and it is not provisional" "${XROW}" "provisional"
+eq "list: exit 0" "$(sx run list --repo gen_saas)" "0"
+has "list prints change_repo, commit and live_at" "$(out)" "${XID} PENDING change_repo=custom commit=${XC:0:12} live_at=2026-10-02T11:30:00Z"
+eq "judge: exit 0" "$(sx run judge --repo gen_saas)" "0"
+has "judge: before/after from gen_saas's rows around live_at: KEEP 600 -> 500" "$(out)" "${XID} KEEP kind=change metric=phase change_repo=custom commit=${XC:0:12} live_at=2026-10-02T11:30:00Z"
+has "... before = the ten up to 11:00, after = the ten from 12:00" "$(out)" "before n=10 median=600s p90=600s | after n=10 median=500s p90=500s"
+has "... the guards read gen_saas's main" "$(out)" "reverts 0->0 ok"
+
+echo "== cross-repo: same-repo is unchanged"
+STATEY="${TMP}/statey"
+STATEZ="${TMP}/statez"
+mkdir -p "${STATEY}" "${STATEZ}"
+cp "${STATE7}/ledger.jsonl" "${STATEY}/"
+cp "${STATE7}/ledger.jsonl" "${STATEZ}/"
+eq "custom on custom, no --change-repo: exit 0" "$(LEAD_TIME_STATE_DIR="${STATEY}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z rec verify phase "${TBIN}" change)" "0"
+eq "custom on custom, --change-repo custom: exit 0" "$(LEAD_TIME_STATE_DIR="${STATEZ}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z run record --repo custom --change-repo custom --phase verify --metric phase --commit "${TBIN}" --kind change --hypothesis-file "${HYP}")" "0"
+eq "... the two rows are byte-identical" "$(cmp -s "${STATEY}/experiments.jsonl" "${STATEZ}/experiments.jsonl" && echo same || echo differ)" "same"
+lacks "... and carry no change_repo or live_at" "$(cat "${STATEY}/experiments.jsonl")" "live_at"
+
+echo "== cross-repo: a revert lands in the change repo"
+STATEW="${TMP}/statew"
+mkdir -p "${STATEW}"
+# TADD (a custom commit adding a test) landed 2026-09-30T11:00Z; gen_saas got slower after it.
+gs_ledger "${STATEW}/ledger.jsonl" "$(printf 'e%.0s' $(seq 40))" 700 2026-09-30T00:00:00Z
+sw() { LEAD_TIME_STATE_DIR="${STATEW}" ATHENA_LEADTIME_CONFIG="${XCONF}" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z "$@"; }
+WID="gen_saas:verify:${TADD:0:12}"
+eq "record TADD as a gen_saas experiment: exit 0" "$(sw run record --repo gen_saas --change-repo custom --phase verify --metric phase --commit "${TADD}" --kind change --hypothesis-file "${HYP}")" "0"
+has "the test additions are read from the CHANGE repo's git" "$(recrow "${STATEW}/experiments.jsonl" "${WID}")" '"revert_deletes_tests":["ai/x/test/foo.sh"]'
+eq "judge: exit 0" "$(sw run judge --repo gen_saas)" "0"
+has "gen_saas rose 600 -> 700 after it went live: REVERT HELD" "$(out)" "${WID} REVERT HELD"
+has "... the Fix reverts it in custom" "$(out)" "in custom: git revert --no-commit ${TADD}"
+has "... decline is on the measured repo" "$(out)" "experiment decline --repo gen_saas --id ${WID}"
+eq "re-judge: exit 0" "$(sw run judge --repo gen_saas)" "0"
+has "custom's main carries the (partial) revert: REVERTED (read from the change repo, not gen_saas)" "$(out)" "${WID} REVERTED"
+
+echo "== cross-repo: live_at is the first-parent landing"
+"${G[@]}" checkout -q -b side
+SIDE="$(GIT_AUTHOR_DATE=2026-10-04T01:00:00Z GIT_COMMITTER_DATE=2026-10-04T01:00:00Z "${G[@]}" commit -q --allow-empty -m "fixture: side work" && "${G[@]}" rev-parse HEAD)"
+"${G[@]}" checkout -q main
+GIT_AUTHOR_DATE=2026-10-04T09:00:00Z GIT_COMMITTER_DATE=2026-10-04T09:00:00Z "${G[@]}" merge -q --no-ff -m "fixture: merge side" side
+MERGE="$("${G[@]}" rev-parse HEAD)"
+LAND="$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.landed_at(ARGV[1], ARGV[2]); puts(s.could_not_look? ? "could_not_look: #{s.reason}" : s.items.map { |c, t| "#{c} #{t.iso8601}" }.join(","))' \
+  "${HERE}/../lib/experiment_git.rb" "${REPO}" "${SIDE}")"
+eq "a merged side commit went live with its merge, at the merge's time" "${LAND}" "${MERGE} 2026-10-04T09:00:00Z"
+LAND="$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.landed_at(ARGV[1], ARGV[2]); puts(s.could_not_look? ? "could_not_look: #{s.reason}" : s.items.size.to_s)' \
+  "${HERE}/../lib/experiment_git.rb" "${NOMAIN}" "${SIDE}")"
+has "a repo with no main: could not look, never 'no landing'" "${LAND}" "could_not_look:"
+
 # ── a configured repo not on this machine (DND-1526) ────────────────────────
 echo "== skipped on this machine"
 printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gone/gen_saas\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/gone.json"

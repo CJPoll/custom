@@ -50,7 +50,7 @@ Tools, from your lane (`<skill>` is `ai/skills/athena:lead-time-improve`):
 ai/bin/lead-time-phases --ingest --repo R
 ai/bin/lead-time-phases --summary --repo R --json
 <skill>/scripts/experiment judge --repo R
-<skill>/scripts/experiment record --repo R --phase P --metric M --commit SHA --kind change|instrumentation --hypothesis-file F
+<skill>/scripts/experiment record --repo R [--change-repo C] --phase P --metric M --commit SHA --kind change|instrumentation --hypothesis-file F
 <skill>/scripts/experiment list --repo R
 <skill>/scripts/experiment decline --repo R --id ID --constraint safety-checks|bug-fix --reason-file F
 ```
@@ -93,7 +93,9 @@ before and after numbers, and records the verdict.
   commit, landed through *Landing* below. Skip steps 4 and 5. Judge records
   `reverted` once main carries it, and until then no new change starts on
   that phase. If two reverts are owed, land the first; the second is still
-  owed next run.
+  owed next run. A cross-repo experiment's line names `change_repo=C`
+  (DND-1528): its revert is of that commit in repo C, landed through C's
+  path, and judge reads C's main for it.
 - **REVERT HELD**: judge found that the commit added test lines (a `test/`
   path or a `*.self-test.sh`, the `FirstParty.test_path?` rule), or could
   not look. A plain `git revert` would delete them, so it is never the
@@ -217,6 +219,14 @@ experiment record --repo R --phase P --kind change --metric phase \
   seeing its result.
 - Other metrics: `lead`, `code`, `counter:<name>` (`--help` lists them), when
   the change targets one directly.
+- When the change landed in another repo than R (a harness change in
+  custom, measured on R's landings), add `--change-repo <that repo>`
+  (DND-1528). The SHA must be on that repo's main. The split point is
+  `live_at`, when the commit landed there (first-parent, committer time,
+  never the author date), and R's landings either side of it are the
+  before- and after-sets. `ai/bin/lead-time-repos --repo-path C` shows which
+  checkout C resolves to; custom resolves even where it is not configured.
+  An unresolvable change repo is refused (exit 2).
 - A refusal (exit 2) names the pending experiment that blocks it. Do not work
   around it.
 - A directly-spawned run whose PR has not landed yet journals "awaiting

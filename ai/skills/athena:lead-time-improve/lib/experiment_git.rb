@@ -72,6 +72,28 @@ module LeadTimeExperimentGit
                        .map(&:first))
   end
 
+  # When sha went live on the repo's main (DND-1528): Source.ok([[landing
+  # sha, Time]]) from its first-parent landing's COMMITTER time (the author
+  # date is when it was written, not when it landed), Source.ok([]) when no
+  # first-parent commit contains it, could_not_look when git cannot say.
+  # Choosing the landing is the domain's (LeadTimeExperiment.landing_point).
+  def landed_at(repo, sha)
+    ref, why = main_ref(repo)
+    return Source.could_not_look(why) unless ref
+
+    line, err, st = Open3.capture3("git", "-C", repo, "log", "--first-parent", "--format=%H %ct", ref)
+    return Source.could_not_look("git log --first-parent in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
+
+    first_parent = line.lines.map(&:split).select { |c, t| c && t&.match?(/\A\d+\z/) }.map { |c, t| [c, Time.at(Integer(t, 10)).utc] }
+    desc, err, st = Open3.capture3("git", "-C", repo, "rev-list", "--ancestry-path", "#{sha}..#{ref}")
+    return Source.could_not_look("git rev-list --ancestry-path in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
+
+    hit = LeadTimeExperiment.landing_point(first_parent, desc.split, sha)
+    Source.ok(hit ? [hit] : [])
+  rescue SystemCallError => e
+    Source.could_not_look("git could not run (#{e.message})")
+  end
+
   # A commit's line counts against its first parent (DND-1549):
   # Source.ok([[added | nil, deleted | nil, path], ...]), nil for a binary
   # file. Renames are split into a delete and an add, so an added test is

@@ -5,7 +5,8 @@
 # experiments (DND-1478; design: ai/docs/lead-time-improver.md ->
 # *The improvement procedure*). A skill-local helper: only that skill uses it.
 #
-#   record  one landed change or instrumentation change, with its baseline
+#   record  one landed change or instrumentation change, with its baseline;
+#           --change-repo for a change that landed in another repo (DND-1528)
 #   judge   every pending experiment of a repo: keep | revert | pending |
 #           inconclusive, with the before/after numbers; appends a status
 #           row only when the verdict changed (re-running is idempotent);
@@ -50,7 +51,7 @@ TEXT_MAX = 2000
 
 HELP = <<~TXT
   Usage:
-    experiment record --repo R --phase P --metric M --commit SHA --kind K --hypothesis-file F
+    experiment record --repo R [--change-repo C] --phase P --metric M --commit SHA --kind K --hypothesis-file F
     experiment judge --repo R
     experiment list [--repo R]
     experiment decline --repo R --id ID --constraint <safety-checks|bug-fix> --reason-file F
@@ -66,6 +67,16 @@ HELP = <<~TXT
            that landing. Refused (exit 2, naming the
            blocking experiment) while a `change` on the same phase is
            pending or owes a revert; `instrumentation` is exempt.
+           --change-repo C (DND-1528): the commit landed in repo C, not in
+           R (a harness change in custom measured on gen_saas). It must be
+           on C's main; the split point is live_at, its first-parent
+           landing time on C's main (the committer time of the commit, or
+           of the merge that brought it in; never the author date). R's
+           landings before live_at are the before-set, those after it the
+           after-set; no landing is excluded. The row records change_repo,
+           commit and live_at; judge and list print them. The test-additions
+           read and the owed revert use C's git: a revert is of that commit
+           in C. Default: R (same-repo, unchanged).
   judge    Judge every pending experiment of the repo and print one line
            per experiment: keep | revert | pending | inconclusive, with the
            before and after n, median and p90 (n/a share for
@@ -121,6 +132,10 @@ HELP = <<~TXT
   Options:
     --repo R             an `improve` repo in this machine's lead-time repo
                          list (ai/bin/lead-time-repos)
+    --change-repo C      the repo the commit landed in (default: R). Resolved
+                         as ai/bin/lead-time-repos --repo-path C does: a
+                         configured repo, or the runner's own repo (custom)
+                         even where it is not configured. Unresolvable: exit 2
     --phase P            implement | verify | queue | integrate | merge
     --metric M           phase | lead | code | counter:<name> | check:<label> | na_share
                          (instrumentation measures na_share; a change does not).
@@ -154,7 +169,7 @@ HELP = <<~TXT
 TXT
 
 SPECS = {
-  "record" => { "--repo" => :value, "--phase" => :value, "--metric" => :value, "--commit" => :value,
+  "record" => { "--repo" => :value, "--change-repo" => :value, "--phase" => :value, "--metric" => :value, "--commit" => :value,
                 "--kind" => :value, "--hypothesis-file" => :value },
   "judge" => { "--repo" => :value },
   "list" => { "--repo" => :value },
@@ -209,6 +224,16 @@ module Setup
     refuse(3, "could not look: #{e.message}", e.fix)
   rescue LeadTimeConfig::Error => e
     refuse(2, "config: #{e.message}", e.fix)
+  end
+
+  # A change repo's path (DND-1528), as lead-time-repos --repo-path prints
+  # it. Unresolvable is exit 2; could not look is exit 3.
+  def change_repo_path(res, name)
+    LeadTimeConfigIO.repo_path(res, name)
+  rescue LeadTimeConfig::CouldNotLook => e
+    refuse(3, "could not look: change repo: #{e.message}", e.fix)
+  rescue LeadTimeConfig::Error => e
+    refuse(2, "change repo: #{e.message}", e.fix)
   end
 
   def improve_repo(env, name, res = nil)
@@ -274,8 +299,6 @@ module Setup
            "check that the state dir exists and is writable; nothing was recorded")
   end
 
-  def landing_row(rows, commit) = rows.find { |r| r["landed_commit"] == commit }
-
   # A --<what>-file's text: UTF-8, non-empty after strip, the first TEXT_MAX
   # characters kept. Missing, unreadable, empty or not UTF-8 is exit 2.
   def read_text(path, what, empty_fix)
@@ -305,14 +328,18 @@ module Record
     refuse(2, "--commit #{commit.inspect} is not a 40-hex SHA", "pass the full SHA as landed on main (git rev-parse)") unless X::SHA_RE.match?(commit)
     hypothesis = read_hypothesis(opts["--hypothesis-file"])
     state = Setup.state_dir(env)
+    change = opts["--change-repo"] || repo.name
+    change_path = change == repo.name ? repo.path : Setup.change_repo_path(res, change)
     rows = Setup.ledger_rows(state, repo)
     check_label!(rows, metric, repo, res.window) if metric.check?
-    on_main!(repo, commit)
-    tests = X.deletes_tests_fields(XG.numstat(repo.path, commit))
-    row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows).merge(tests)
+    on_main!(change, change_path, commit)
+    cross = change == repo.name ? {} : { "change_repo" => change, "live_at" => live_at!(change, change_path, commit) }
+    tests = X.deletes_tests_fields(XG.numstat(change_path, commit))
+    row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows, cross).merge(tests)
     Setup.append(Setup.store(state)) { |existing| admit!(X.fold(existing), row) }
+    xtext = X.cross_text(row)
     puts "experiment: recorded #{row['id']} kind=#{row['kind']} metric=#{row['metric']} phase=#{row['phase']} " \
-         "baseline #{describe_baseline(row['baseline'])}#{describe_tests(tests)}"
+         "#{xtext ? "#{xtext} " : ''}baseline #{describe_baseline(row['baseline'])}#{describe_tests(tests)}"
     0
   end
 
@@ -349,32 +376,53 @@ module Record
 
   # A SHA that is not on main would never appear in the ledger and would
   # block its phase for 7 days as "not ingested yet": refuse it here.
-  def on_main!(repo, commit)
-    src = XG.on_main(repo.path, commit)
+  # name/path: the repo the commit landed in (the change repo; --repo when
+  # it is same-repo).
+  def on_main!(name, path, commit)
+    src = XG.on_main(path, commit)
     if src.could_not_look?
-      refuse(3, "could not look whether #{short(commit)} is on #{repo.name}'s main: #{src.reason}",
-             "run from a machine where #{repo.path} is checked out with main fetched")
+      refuse(3, "could not look whether #{short(commit)} is on #{name}'s main: #{src.reason}",
+             "run from a machine where #{path} is checked out with main fetched")
     end
     return if src.items.first
 
-    refuse(2, "#{short(commit)} is not on #{repo.name}'s main (a pre-rebase SHA, or not landed yet)",
+    refuse(2, "#{short(commit)} is not on #{name}'s main (a pre-rebase SHA, or not landed yet)",
            "record the experiment after it lands, with the SHA as it is on main (git log origin/main)")
   end
 
-  def build(repo, metric, kind, commit, hypothesis, now, rows)
-    landing = Setup.landing_row(rows, commit)
-    boundary = landing ? X.at(landing) : now
-    baseline = baseline(rows, metric, commit, boundary, repo)
-    baseline["provisional"] = "landing not in the ledger yet: judge recomputes it from the landing time" unless landing
-    { "type" => "record", "schema" => X::SCHEMA, "id" => X.id_for(repo.name, metric.phase, commit),
-      "repo" => repo.name, "phase" => metric.phase, "metric" => metric.name, "kind" => kind, "commit" => commit,
-      "hypothesis" => hypothesis, "recorded_at" => now.iso8601, "baseline" => baseline }
+  # When the commit went live on the change repo's main (DND-1528): its
+  # first-parent landing's committer time, RFC 3339. Never the author date.
+  def live_at!(name, path, commit)
+    src = XG.landed_at(path, commit)
+    if src.could_not_look?
+      refuse(3, "could not look when #{short(commit)} landed on #{name}'s main: #{src.reason}",
+             "run from a machine where #{path} is checked out with main fetched")
+    end
+    landing = src.items.first
+    unless landing
+      refuse(2, "#{short(commit)} has no first-parent landing on #{name}'s main",
+             "record the experiment with the SHA as it landed on #{name}'s main (git log --first-parent origin/main)")
+    end
+    landing.last.utc.iso8601
   end
 
-  def baseline(rows, metric, commit, boundary, repo)
+  # cross: {} (same-repo), or change_repo and live_at (DND-1528), which the
+  # split reads; a same-repo row gains no key.
+  def build(repo, metric, kind, commit, hypothesis, now, rows, cross = {})
+    split = X.split({ "repo" => repo.name, "commit" => commit }.merge(cross), rows)
+    boundary = split ? split[:boundary] : now
+    baseline = baseline(rows, metric, split ? split[:exclude] : [commit], boundary, repo)
+    baseline["provisional"] = "landing not in the ledger yet: judge recomputes it from the landing time" unless split
+    { "type" => "record", "schema" => X::SCHEMA, "id" => X.id_for(repo.name, metric.phase, commit),
+      "repo" => repo.name, "phase" => metric.phase, "metric" => metric.name, "kind" => kind, "commit" => commit }
+      .merge(cross)
+      .merge("hypothesis" => hypothesis, "recorded_at" => now.iso8601, "baseline" => baseline)
+  end
+
+  def baseline(rows, metric, exclude, boundary, repo)
     return { "n" => 0, "na_reason" => "0 landings in the ledger for #{repo.name}" } if rows.empty?
 
-    s = X.sides(rows, metric: metric, exclude: [commit], boundary: boundary)
+    s = X.sides(rows, metric: metric, exclude: exclude, boundary: boundary)
     return { "n" => 0, "na_reason" => s[:before_na] } if s[:before].nil?
 
     X.stats(s[:before], metric).merge("from" => s[:before].first["landed_at"], "to" => s[:before].last["landed_at"])
@@ -420,7 +468,8 @@ module Judge
 
   def run(opts, env)
     now = Setup.now(env)
-    repo = Setup.improve_repo(env, opts["--repo"])
+    res = Setup.resolution(env)
+    repo = Setup.improve_repo(env, opts["--repo"], res)
     state = Setup.state_dir(env)
     rows = Setup.ledger_rows(state, repo)
     store = Setup.store(state)
@@ -434,9 +483,9 @@ module Judge
     shas = all.map { |e| e["commit"] }
     # [experiment, verdict, phase context (check metrics only; printed, never judged)]
     results = mine.select { |e| e["status"] == "pending" }.map { |e| [e, *verdict(e, rows, repo, shas, now)] }
-    results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo), nil] }
+    results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo, res), nil] }
     # + the HELD explanation (DND-1549), nil unless a revert verdict is held
-    results = results.map { |e, v, ctx| held(e, v, ctx, repo) }
+    results = results.map { |e, v, ctx| held(e, v, ctx, repo, res) }
     appended = Setup.append(store) { |existing| fresh_rows(existing, results, now) }
     results.each { |e, v, ctx, why| puts line(e, v, ctx, why) }
     judged = results.map { |_, v| v["status"] }
@@ -452,14 +501,30 @@ module Judge
   # -> [exp, verdict, ctx, why]. A revert verdict (fresh or owed) whose
   # commit added test lines, or whose answer is unknown, is held: the
   # verdict gains a `held` field and stays revert; why is the line's text.
-  def held(exp, v, ctx, repo)
+  def held(exp, v, ctx, repo, res)
     return [exp, v, ctx, nil] unless v["status"] == "revert"
 
-    hold = X.hold(v["status"], tests_fields(exp, repo))
+    hold = X.hold(v["status"], tests_fields(exp, repo, res))
     return [exp, v, ctx, nil] unless hold
 
     refusal, = X.decline_error(exp.merge("status" => "revert", "last" => v))
-    [exp, v.merge("held" => hold), ctx, X.hold_text(repo.name, exp["id"], exp["commit"], hold, refusal)]
+    change = X.cross_repo?(exp) ? exp["change_repo"] : nil
+    [exp, v.merge("held" => hold), ctx, X.hold_text(repo.name, exp["id"], exp["commit"], hold, refusal, change_repo: change)]
+  end
+
+  # Runs a git reader against the repo the experiment's commit landed in:
+  # the change repo for a cross-repo experiment (DND-1528), else the repo.
+  # A change repo that cannot be resolved now is could not look, never
+  # "no revert" or "no tests".
+  def in_change_repo(exp, repo, res)
+    return yield(repo.path) unless X.cross_repo?(exp)
+
+    path = begin
+      LeadTimeConfigIO.repo_path(res, exp["change_repo"])
+    rescue LeadTimeConfig::Error => e
+      return LeadTimePhases::Source.could_not_look("change repo #{exp['change_repo']} cannot be resolved: #{e.message}")
+    end
+    yield path
   end
 
   # The record's revert_deletes_tests list, else the same answer computed
@@ -467,10 +532,10 @@ module Judge
   # field), and for one whose git could not look at record time (_na), so a
   # one-off git failure does not hold the revert for good. Still unknown
   # stays _na, which X.hold holds.
-  def tests_fields(exp, repo)
+  def tests_fields(exp, repo, res)
     return exp if exp["revert_deletes_tests"].is_a?(Array)
 
-    X.deletes_tests_fields(XG.numstat(repo.path, exp["commit"]))
+    X.deletes_tests_fields(in_change_repo(exp, repo, res) { |path| XG.numstat(path, exp["commit"]) })
   end
 
   # Under the lock: only experiments whose status is still the one judged
@@ -491,11 +556,11 @@ module Judge
   # -> [verdict, context]. context: for a check metric, the phase's own
   # stats over the same two sides, else nil. It is printed, never judged.
   def verdict(exp, rows, repo, shas, now)
-    landing = Setup.landing_row(rows, exp["commit"])
-    return [unlanded(exp, repo, now), nil] unless landing
+    split = X.split(exp, rows)
+    return [unlanded(exp, repo, now), nil] unless split
 
     metric = X::Metric.parse(exp["metric"], phase: exp["phase"])
-    s = X.sides(rows, metric: metric, exclude: [exp["commit"]], boundary: X.at(landing))
+    s = X.sides(rows, metric: metric, exclude: split[:exclude], boundary: split[:boundary])
     v = X.judge(exp, before: s[:before], after: s[:after], guards_before: guards(s[:before], repo, shas),
                      guards_after: guards(s[:after], repo, shas), now: now)
     [v, metric.check? ? X.phase_context(s[:before], s[:after], phase: exp["phase"]) : nil]
@@ -512,16 +577,18 @@ module Judge
     v.merge("reason" => "#{v['reason']}; #{why}")
   end
 
-  # A revert verdict owes a revert until main carries one.
-  def owed(exp, repo)
-    src = XG.reverted?(repo.path, exp["commit"])
+  # A revert verdict owes a revert until main carries one: the change
+  # repo's main for a cross-repo experiment (DND-1528).
+  def owed(exp, repo, res)
+    src = in_change_repo(exp, repo, res) { |path| XG.reverted?(path, exp["commit"]) }
+    main = X.cross_repo?(exp) ? "#{exp['change_repo']}'s main" : "main"
     last = exp["last"] || {}
     keep = { "before" => last["before"], "after" => last["after"], "guards" => last["guards"] }
     if !src.could_not_look? && src.items.first
-      return { "status" => "reverted", "reason" => "main carries a revert of #{short(exp['commit'])}" }.merge(keep)
+      return { "status" => "reverted", "reason" => "#{main} carries a revert of #{short(exp['commit'])}" }.merge(keep)
     end
 
-    seen = src.could_not_look? ? "could not look for it: #{src.reason}" : "main has no revert of it yet"
+    seen = src.could_not_look? ? "could not look for it: #{src.reason}" : "#{main} has no revert of it yet"
     { "status" => "revert", "reason" => "REVERT OWED: #{last['reason']}; #{seen}" }.merge(keep)
   end
 
@@ -546,7 +613,8 @@ module Judge
     phase = ctx ? " | phase (context, not judged): before #{side(ctx['before'])} | after #{side(ctx['after'])}" : ""
     status = held_why ? "REVERT HELD" : v["status"].upcase
     reason = held_why ? "#{v['reason'].to_s.sub(/\AREVERT OWED: /, 'owed: ')} | #{held_why}" : v["reason"]
-    "experiment: #{exp['id']} #{status} kind=#{exp['kind']} metric=#{exp['metric']} | " \
+    xtext = X.cross_text(exp)
+    "experiment: #{exp['id']} #{status} kind=#{exp['kind']} metric=#{exp['metric']}#{xtext ? " #{xtext}" : ''} | " \
       "before #{side(v['before'])} | after #{side(v['after'])} | guards #{g ? g.join(', ') : 'n/a'} | #{reason}#{phase}"
   end
 end
@@ -578,7 +646,8 @@ module List
     declined = e["status"] == "declined"
     tag = declined ? " constraint=#{e.dig('last', 'constraint')}" : ""
     was = declined ? " (revert verdict was: #{e.dig('last', 'prior_reason')})" : ""
-    "experiment: #{e['id']} #{e['status'].upcase}#{tag} kind=#{e['kind']} metric=#{e['metric']} " \
+    xtext = X.cross_text(e)
+    "experiment: #{e['id']} #{e['status'].upcase}#{tag}#{xtext ? " #{xtext}" : ''} kind=#{e['kind']} metric=#{e['metric']} " \
       "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}#{was}" : ''}"
   end
 end

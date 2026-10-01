@@ -311,6 +311,23 @@ p90 over the last K comparable landings), and a status.
   the same adapter. The status stays `revert`, a fresh revert's status row
   gains a `held` field, and judge's tally counts held on its own. No threshold or
   guard moved, and nothing becomes keep.
+
+  **Later (2026-10-01, DND-1528):** an experiment's commit had to be on the
+  measured repo's main, and the split was that commit's own landing row. A
+  harness change for gen_saas lands in custom, so a gen_saas improve run
+  could never record one. `record --change-repo C` (default: `--repo`) now
+  takes a commit on C's main. The split is `live_at`: the commit's
+  first-parent landing time on C's main (the committer time of the commit,
+  or of the merge that brought it in; never the author date). The measured
+  repo's landings before it are the before-set, those after it the
+  after-set, and none is excluded. The row records `change_repo`, `commit`
+  and `live_at`; judge and list print them. The test-additions read
+  (DND-1549) and the owed revert use C's git: a revert is of that commit in
+  C. C resolves as `ai/bin/lead-time-repos --repo-path C` prints: its
+  configured path, or, for the runner's own repo (custom), its main checkout
+  from `git rev-parse --git-common-dir`, even on a machine that does not
+  measure it. An unresolvable C is refused (exit 2, Fix:). A same-repo
+  record is byte-identical to before.
 - **Pending** while either side has fewer than K. A pending row is never
   reported as a gain. Still pending after 7 days: journaled as inconclusive,
   and it no longer blocks its phase.

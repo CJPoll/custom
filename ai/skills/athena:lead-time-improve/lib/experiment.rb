@@ -32,6 +32,12 @@
 #     ai/lib/first_party.rb; its git readers are not called here.
 #   * only `improve`-mode rows count, one row per landing (batch tickets
 #     sharing a landed commit are one landing).
+#   * cross-repo (DND-1528): a change that landed in another repo (the
+#     change repo, e.g. a harness change in custom) measured on this repo's
+#     landings. It splits at live_at, the change's first-parent landing time
+#     on the change repo's main (never its author date), and excludes no
+#     landing: the measured repo has none of its own. A record with no
+#     change_repo, or one equal to its repo, is same-repo, unchanged.
 #
 # The store (experiments.jsonl) is rows of two types, latest status wins:
 #   {"type":"record", "id", "repo", "phase", "metric", "kind", "commit", ...}
@@ -40,6 +46,7 @@
 require "time"
 require_relative "../../../lib/lead_time_phases"
 require_relative "../../../lib/first_party"
+require_relative "../../../lib/lead_time_config"
 
 module LeadTimeExperiment
   SCHEMA = 1
@@ -166,6 +173,43 @@ module LeadTimeExperiment
   end
 
   def at(row) = LeadTimePhases::Util.time(row["landed_at"])
+
+  # ── cross-repo (DND-1528) ──────────────────────────────────────────────
+
+  # Whether the experiment's commit landed in a repo other than the one it
+  # is measured on. A record written before DND-1528 has no change_repo.
+  def cross_repo?(exp) = !exp["change_repo"].nil? && exp["change_repo"] != exp["repo"]
+
+  # -> {boundary: Time, exclude: [sha]} or nil (same-repo, not ledgered yet).
+  # Same-repo: the experiment's own landing row, which it excludes. Cross-repo:
+  # live_at, excluding nothing (the measured repo has no landing of its own).
+  def split(exp, rows)
+    return { boundary: LeadTimePhases::Util.time(exp["live_at"]), exclude: [] } if cross_repo?(exp)
+
+    landing = rows.find { |r| r["landed_commit"] == exp["commit"] }
+    landing && { boundary: at(landing), exclude: [exp["commit"]] }
+  end
+
+  # The first-parent landing of `sha` on a main: [landing_sha, Time] or nil.
+  # first_parent: [[sha, committer Time]] of main's first-parent line, newest
+  # first. descendants: the SHAs that contain `sha` (any path). A commit on
+  # the line landed as itself; a merged side commit landed with the OLDEST
+  # first-parent commit that contains it (its merge). Its author date never
+  # enters.
+  def landing_point(first_parent, descendants, sha)
+    own = first_parent.find { |c, _| c == sha }
+    return own if own
+
+    contains = descendants.to_h { |d| [d, true] }
+    first_parent.select { |c, _| contains.key?(c) }.last
+  end
+
+  # The judge/list text for a cross-repo experiment, nil for same-repo.
+  def cross_text(exp)
+    return nil unless cross_repo?(exp)
+
+    "change_repo=#{exp['change_repo']} commit=#{exp['commit'].to_s[0, 12]} live_at=#{exp['live_at']}"
+  end
 
   # The rows a metric can compare, in landing order: the excluded landings
   # dropped, and (except for na_share, where n/a IS the measurement) every
@@ -370,6 +414,12 @@ module LeadTimeExperiment
     return "repo is not a name" unless r["repo"].is_a?(String) && !r["repo"].empty?
     return "commit #{r['commit'].inspect} is not a 40-hex SHA" unless SHA_RE.match?(r["commit"].to_s)
     return "recorded_at #{r['recorded_at'].inspect} is not RFC 3339" unless LeadTimePhases::Util.time(r["recorded_at"])
+    if r.key?("change_repo")
+      return "change_repo #{r['change_repo'].inspect} is not a repo name" unless LeadTimeConfig::NAME_RE.match?(r["change_repo"].to_s)
+      if cross_repo?(r) && !LeadTimePhases::Util.time(r["live_at"])
+        return "live_at #{r['live_at'].inspect} is not RFC 3339 (a cross-repo record splits at it)"
+      end
+    end
 
     Metric.parse(r["metric"], phase: r["phase"])
     kind_error(r["kind"], r["metric"])
@@ -526,8 +576,11 @@ module LeadTimeExperiment
 
   # The HELD line's explanation and Fix. decline_refusal: nil when the
   # decline verb would admit this revert, else why it would refuse it.
-  def hold_text(repo, id, commit, hold, decline_refusal)
+  # change_repo: the repo the commit landed in when it is not `repo`
+  # (DND-1528); the revert lands there.
+  def hold_text(repo, id, commit, hold, decline_refusal, change_repo: nil)
     sha = commit.to_s[0, 12]
+    where = change_repo ? "in #{change_repo}: " : ""
     what = if hold["could_not_look"]
              "could not look whether reverting #{sha} deletes test additions: #{hold['could_not_look']}"
            else
@@ -536,7 +589,7 @@ module LeadTimeExperiment
     # Judge records `reverted` only from git's own "This reverts commit
     # <sha>" line (reverted?), so a partial revert must keep it.
     partial = "land a partial revert that keeps every test addition and its fixture fix " \
-              "(git revert --no-commit #{commit}, restore the test paths, commit keeping git's " \
+              "(#{where}git revert --no-commit #{commit}, restore the test paths, commit keeping git's " \
               "\"This reverts commit #{commit}.\" line so judge records reverted)"
     fix = if decline_refusal
             "#{partial}; decline does not cover this revert (#{decline_refusal})"

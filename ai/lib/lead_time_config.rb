@@ -60,6 +60,14 @@ module LeadTimeConfig
   # The IO side could not look (a file it could not read, git that could not
   # run): never "absent", never "not on this machine".
   class CouldNotLook < Error; end
+  # A change repo (DND-1528) whose path cannot be resolved: not configured and
+  # not the runner's own repo, or configured but skipped on this machine.
+  class Unresolved < Error; end
+
+  # The runner's own repo (DND-1528): the main checkout of the repo this code
+  # runs from, found from its git common dir. path and label are nil when it
+  # could not be found; error then says why.
+  OwnRepo = Struct.new(:path, :label, :error, keyword_init: true)
 
   Repo = Struct.new(:name, :path, :mode, :product_epic, :product_epic_source, :idle_workflow, keyword_init: true) do
     def to_h = { "name" => name, "path" => path, "mode" => mode, "product_epic" => product_epic,
@@ -95,6 +103,40 @@ module LeadTimeConfig
 
       raise NotConfigured.new("no repo #{name.inspect} in #{path} (configured: #{(repos + skipped).map(&:name).join(', ')})",
                               "pass one of the configured repos, or add #{name} to #{path}")
+    end
+
+    # -> the path of a CHANGE repo (DND-1528): the repo a change landed in,
+    # which need not be a measured repo. own: an OwnRepo.
+    #   1. configured and present: its configured path (validated as that
+    #      checkout by presence);
+    #   2. the runner's own repo (own.label == name): its main checkout, so the
+    #      harness repo resolves on a machine that does not configure it;
+    #   3. otherwise refused: Unresolved (skipped here, or neither configured
+    #      nor own), or CouldNotLook when own could not be looked at, since
+    #      then the name may well be the runner's own repo.
+    def path_for(name, own)
+      raise Unresolved.new("an empty repo name resolves to nothing", "pass a repo name") if name.to_s.empty?
+
+      hit = repos.find { |r| r.name == name }
+      return hit.path if hit
+      return own.path if own.path && own.label == name
+
+      skip = skipped.find { |s| s.name == name }
+      if skip
+        raise Unresolved.new("#{name}: skipped on this machine: #{skip.reason}",
+                             "check out #{name} at #{skip.path}, or drop it from #{path}")
+      end
+      unless own.path
+        raise CouldNotLook.new("#{name} is not configured in #{path}, and the runner's own repo could not be " \
+                               "resolved (#{own.error}), so #{name} cannot be checked against it",
+                               "run from a checkout of the harness repo (git rev-parse --git-common-dir must work there), " \
+                               "or add #{name} to #{path}")
+      end
+
+      configured = (repos + skipped).map(&:name).join(", ")
+      raise Unresolved.new("no repo #{name.inspect}: not in #{path} (configured: #{configured}) and not the runner's " \
+                           "own repo (#{own.label} at #{own.path})",
+                           "pass #{own.label} or a configured repo, or add #{name} to #{path}")
     end
 
     def require_any!
@@ -257,6 +299,22 @@ module LeadTimeConfig
   # The repo label the telemetry writer stamps on every event
   # (AthenaTelemetry::GitContext): the basename of the main checkout.
   def repo_label(common_dir) = File.basename(File.dirname(common_dir))
+
+  # -> OwnRepo from the runner's git common dir (nil when git could not say,
+  # with `why`). The key is validated where it is produced: a relative path,
+  # or a common dir that is not <checkout>/.git (a bare repo), is an error
+  # value, never a path that would match the wrong checkout.
+  def own_repo(common_dir, why: nil)
+    return OwnRepo.new(error: why || "no git common dir") if common_dir.nil? || common_dir.to_s.empty?
+
+    dir = common_dir.to_s
+    return OwnRepo.new(error: "the runner's git common dir #{dir.inspect} is not absolute") unless dir.start_with?("/")
+    unless File.basename(dir) == ".git"
+      return OwnRepo.new(error: "the runner's git common dir #{dir} is not <checkout>/.git (a bare repo has no main checkout)")
+    end
+
+    OwnRepo.new(path: File.dirname(dir), label: repo_label(dir))
+  end
 
   # -> nil (present), a Skip (not on this machine), or raises Error.
   def presence(repo, probe)
