@@ -66,11 +66,19 @@ The branch, `repo` and `head` come from one `git rev-parse`. Outside a repo
 they are `null` with nothing counted. Any other git failure (no git, a git
 older than 2.31, an unborn branch) leaves them `null` too, and counts
 `git_context_unavailable`, so it never reads the same as "not in a repo".
-The call is bounded at one second, under the CLI's `timeout 2` (DND-1494). A
-git that has not answered by then (an index lock, a stuck filesystem) has its
-process group killed; the three are `null` and `git_context_timeout` is
-counted, so the unit reads `none` unless an explicit or `ATHENA_UNIT` unit
-applies. The emit still writes its line and returns.
+The call is bounded at one second (DND-1494), under the shell binding's
+`timeout -k 1 2`. A git that has not answered by then (an index lock, a git
+blocked on a pipe or the network) has its process group sent TERM, then KILL;
+the three are `null` and `git_context_timeout` is counted, so the unit reads
+`none` unless an explicit or `ATHENA_UNIT` unit applies. The emit still
+writes its line and returns.
+
+Two hangs the bound cannot end:
+- A git stuck in the kernel (uninterruptible sleep, e.g. a stuck filesystem)
+  survives KILL, and the emit waits for the kernel to release it.
+- A git that ignores TERM is killed two seconds after it. Under the CLI the
+  outer `timeout` kills Ruby first, uncounted, and that git, in its own
+  process group, is left running.
 
 The writer runs no other subprocess. The ticket-ref parser load and the
 overlay read below are in-process reads of regular files (the overlay reader

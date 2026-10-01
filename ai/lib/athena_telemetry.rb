@@ -450,13 +450,14 @@ module AthenaTelemetry
   # (no git, an old git, an unborn branch) is all nil too, with the drop
   # git_context_unavailable, so it never reads the same as "not a repo".
   #
-  # The call is bounded (DND-1494): a git that hangs (an index lock, a stuck
-  # filesystem) would stall every in-process emitter. Past GIT_TIMEOUT_S its
-  # process group gets TERM, then KILL (BoundedCommand), and the context is
-  # all nil with the drop git_context_timeout. The bound sits under the CLI's
-  # `timeout 2`, so a CLI emit counts the timeout instead of being killed. A
-  # git that ignores TERM gets KILL two seconds later (BoundedCommand::
-  # KILL_GRACE_S); a CLI emit is then killed by its own bound first, uncounted.
+  # The call is bounded (DND-1494): a git that hangs (an index lock, a pipe or
+  # network wait) would stall every in-process emitter. Past GIT_TIMEOUT_S its
+  # process group gets TERM, then KILL (BoundedCommand), and the context is all
+  # nil with the drop git_context_timeout. The bound sits under the CLI's
+  # `timeout -k 1 2`, so a CLI emit normally counts the timeout instead of being
+  # killed. Residuals (contract -> Unit of work): a git in uninterruptible sleep
+  # survives KILL and the emit waits for it; a git that ignores TERM outlives a
+  # CLI emit killed by its outer timeout, uncounted.
   module GitContext
     Context = Struct.new(:branch, :repo, :head, keyword_init: true)
     NONE = Context.new.freeze
