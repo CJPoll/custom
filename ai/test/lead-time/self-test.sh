@@ -46,6 +46,14 @@ else
   bad "lead_time_test.rb: landing rules" "$(cat "${TMP}/lt")"
 fi
 
+# 1c. The Notion start lookup's retry policy (DND-1519) over a fake Notion on
+#     loopback. LC_ALL=C pins the read of a raw UTF-8 body (DND-1054).
+if LC_ALL=C /usr/bin/ruby "$here/notion_retry_test.rb" >"${TMP}/nr" 2>&1; then
+  ok "notion_retry_test.rb: Notion retry ($(tail -1 "${TMP}/nr"))"
+else
+  bad "notion_retry_test.rb: Notion retry" "$(cat "${TMP}/nr")"
+fi
+
 # 2a. Refused: exit 1 (lead-time's documented usage code; 2 already means "PR
 #     not found"), names the flag, carries Fix:, stdout empty, and the repo
 #     was never consulted.

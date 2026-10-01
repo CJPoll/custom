@@ -59,9 +59,13 @@ class FakeNotionServer
   def serve
     loop do
       client = @server.accept
-      handle(client)
-    ensure
-      client&.close
+      begin
+        handle(client)
+      rescue IOError, SystemCallError
+        nil # one dropped connection must not stop the server
+      ensure
+        client.close
+      end
     end
   rescue IOError, SystemCallError
     nil # the server was closed
@@ -117,10 +121,12 @@ MEMCACHED = "Cross-cell memcached access is not allowed"
 server = FakeNotionServer.new
 begin
   waits = []
-  transport = NextMissionNotion::HttpTransport.new(TOKEN, base: server.base, wait: ->(s) { waits << s })
+  transport = nil
+  # A new scan: a new transport and start source, as one lead-time run builds.
   fresh = lambda do
     waits.clear
     ProbeFailures.reset!
+    transport = NextMissionNotion::HttpTransport.new(TOKEN, base: server.base, wait: ->(s) { waits << s })
     NotionStart.new(transport)
   end
 
@@ -147,8 +153,18 @@ begin
   server.script(err(429, "rate limited", "Retry-After" => "120"), ok)
   fresh.call.lookup("DND-1203")
   check("an over-long Retry-After is capped (waits #{waits.inspect})") do
-    waits.size == 1 && waits.first <= NextMissionNotion::HttpTransport::RETRY_AFTER_CAP
+    waits == [NextMissionNotion::HttpTransport::RETRY_AFTER_CAP]
   end
+
+  # A Retry-After that is not a number of seconds (an HTTP date) falls back to
+  # the backoff step. A 5xx's Retry-After is honoured like a 429's.
+  server.script(err(429, "rate limited", "Retry-After" => "Wed, 01 Oct 2026 12:09:00 GMT"), ok)
+  fresh.call.lookup("DND-1203")
+  check("a date-form Retry-After falls back to the backoff (waits #{waits.inspect})") { waits == [1.0] }
+
+  server.script(err(503, MEMCACHED, "Retry-After" => "5"), ok)
+  fresh.call.lookup("DND-1203")
+  check("a 5xx's Retry-After is honoured too (waits #{waits.inspect})") { waits == [5.0] }
 
   # --- a 4xx other than 429 is never retried ----------------------------------
   server.script(err(400, "body failed validation"))
@@ -163,7 +179,8 @@ begin
 
   # --- exhausted retries still end the scan SCAN INCOMPLETE -------------------
   server.script(err(503, MEMCACHED))
-  _at, why = fresh.call.lookup("DND-1203")
+  outage = fresh.call
+  _at, why = outage.lookup("DND-1203")
   attempts = NextMissionNotion::HttpTransport::ATTEMPTS
   check("a 5xx that never clears is asked ATTEMPTS (#{attempts}) times (#{server.requests.size})") do
     server.requests.size == attempts
@@ -178,11 +195,31 @@ begin
       f[:detail].include?(MEMCACHED)
   end
 
+  # A sustained outage costs one budget per scan, not one per ticket.
+  server.script(err(503, MEMCACHED))
+  waits.clear
+  _at, why = outage.lookup("DND-1204")
+  check("after an exhausted call, the next ticket is asked once (#{server.requests.size} request(s))") do
+    server.requests.size == 1 && waits.empty?
+  end
+  check("and its failed probe says it was not retried, naming the ticket") do
+    f = ProbeFailures.list.find { |x| x[:cmd].include?("DND-1204") }
+    why.include?("Notion could not be read") && f && f[:detail].include?("HTTP 503") &&
+      f[:detail].include?("not retried")
+  end
+  server.script(ok, err(500, MEMCACHED), ok)
+  outage.lookup("DND-1205")
+  waits.clear
+  at, = outage.lookup("DND-1206")
+  check("a success ends the outage: later calls retry again (waits #{waits.inspect})") do
+    at == "2026-09-30T02:41:00Z" && waits == [1.0]
+  end
+
   # Retry-After waits that would overrun the budget stop early, not late.
   server.script(err(429, "rate limited", "Retry-After" => "30"))
   fresh.call.lookup("DND-1203")
   check("Retry-After waits stop at the wait budget (waits #{waits.inspect})") do
-    waits.sum <= NextMissionNotion::HttpTransport::WAIT_BUDGET && server.requests.size == waits.size + 1 &&
+    waits == [30.0, 30.0] && server.requests.size == 3 &&
       ProbeFailures.list.first[:detail].include?("HTTP 429")
   end
 
