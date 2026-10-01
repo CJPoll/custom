@@ -108,6 +108,16 @@ eq "8c nothing accepted prints n/a, never 0" \
   "$(rb "r = BlockingCorpus.shadow_report(snap.([F.(50, \"Off\")]), \"2026-09-28T00:00:00Z\"); puts BlockingCorpus.shadow_lines(r).grep(/n\\/a/).first.to_s[/\\A[^-]*\\)/]")" \
   "ticket_blocking: n/a (0 accepted)"
 
+echo "== domain: path_line/1 reads the call and candidate refs (DND-1470)"
+
+LINK='l = ->(extra) { "Jev path: " + JSON.generate({"path"=>{"value"=>"Blocking","blocks"=>"DND-10","source"=>"jev","reason"=>nil,"mode"=>"on","confidence"=>0.95},"would"=>nil,"candidates"=>2,"model"=>"jev-1.13.0","version"=>"ticket-blocking-v1"}.merge(extra)) }; st = ->(line) { BlockingCorpus.path_line(F.(50, "Off", "blocks_text"=>[line])).first }; CALL = "44444444-4444-4444-8444-444444444444"'
+eq "9 a line with candidate_refs and call parses; so does an older line with neither, and a null call" \
+  "$(rb "${LINK}; puts [st.(l.({\"candidate_refs\"=>[\"DND-10\",\"DND-11\"],\"call\"=>CALL})), st.(l.({})), st.(l.({\"candidate_refs\"=>[\"DND-10\",\"DND-11\"],\"call\"=>nil}))].join(\" \")")" \
+  "ok ok ok"
+eq "9b a garbled link is unparseable: one key without the other, a non-uuid call, a ref count or form off, a jev target outside the refs" \
+  "$(rb "${LINK}; puts [st.(l.({\"call\"=>CALL})), st.(l.({\"candidate_refs\"=>[\"DND-10\",\"DND-11\"]})), st.(l.({\"candidate_refs\"=>[\"DND-10\",\"DND-11\"],\"call\"=>\"DND-1\"})), st.(l.({\"candidate_refs\"=>[\"DND-10\"],\"call\"=>CALL})), st.(l.({\"candidate_refs\"=>[\"DND-10\",\"x\"],\"call\"=>CALL})), st.(l.({\"candidate_refs\"=>[\"DND-11\",\"DND-12\"],\"call\"=>CALL}))].join(\" \")")" \
+  "unparseable unparseable unparseable unparseable unparseable unparseable"
+
 echo "== bin"
 
 mkdir -p "${TMP}/evals"

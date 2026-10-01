@@ -914,7 +914,7 @@ records the feedback too.
 | `priority_scoring` | the owner, on `/priorities` | the owner pins, scores or dismisses an item whose judged level was accepted: signal `owner_override`, **weak** | a "Jev was wrong" control on the item's row, with optional right levels | DND-1465 |
 | `finding_triage` | the filer, and the epic-clustering C3 merge | the filer files anyway after a `duplicate` advisory, or C3 merges a pair Jev judged `unrelated`: signal `filed_despite_advice` | `judgment-feedback record --call <id>` with the call id the advisory prints | DND-1468 |
 | `ticket_kind`, `ticket_severity`, `ticket_security` | the filer, and anyone who later edits the property | a property whose last `Jev classification:` line says source `jev` is edited away from that value: signal `field_changed`, found by `judgment-feedback scan-tickets` | `judgment-feedback record --call <id>`, with the id from the line's `calls` | DND-1469 |
-| `ticket_blocking` | the filer, and anyone who later changes the finding's Path or `Blocks` edge | Path or the edge changed away from a `jev`-sourced `Jev path:` line: signal `field_changed` | `judgment-feedback record --call <id>`, with the line's `call` | DND-1470 |
+| `ticket_blocking` | the filer, and anyone who later changes the finding's Path or `Blocks` edge | Path or the edge changed away from a `jev`-sourced `Jev path:` line: signal `field_changed`, a `cand_<i>` correction per candidate the change contradicts (from the line's `candidate_refs`), found by `judgment-feedback scan-tickets`; a later `Critical` or `Promoted` is authored and never recorded | `judgment-feedback record --call <id>`, with the line's `call` | DND-1470 |
 
 Every receiver may also use the owner's recent-judgments view behind the
 judgments tile (DND-1464), signal `explicit`, reporter `owner_ui`.
@@ -1154,7 +1154,10 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
     Superseded by the gate on the filed Kind above.
   - The output is `Path: <value> (<source>)`, then `Blocks: DND-N` or
     `Blocks: none`, then the server's second provenance line verbatim, which
-    starts `Jev path: `. The source is `jev` (an accepted judgment), `filer`
+    starts `Jev path: `. Since DND-1470 the line ends with `candidate_refs`
+    (the candidates' refs, so `cand_<i>` is `candidate_refs[i]`) and `call`
+    (the answering call id, or null), after every older key; a line without
+    them was filed before, and every reader accepts both. The source is `jev` (an accepted judgment), `filer`
     (the claim stands) or `rule` (introduced security, no call). A `filer`
     or `rule` value carries a reason: one from *The closed reason list*, or
     one that is not a fallback (`shadow`, `policy_guard`,

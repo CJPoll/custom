@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# End-to-end suite for `judgment-feedback scan-tickets` (DND-1469): the bin as
+# End-to-end suite for `judgment-feedback scan-tickets` (DND-1469, DND-1470): the bin as
 # a process against one loopback fake (fake-scan-server.py) standing in for
 # Notion's reads and the Athena feedback POST. Never prod: every URL is
 # 127.0.0.1, and both tokens, the MCP registry and the inbox client config are
@@ -67,13 +67,14 @@ def calls(n) = { "kind" => call(n * 10 + 1), "severity" => call(n * 10 + 2), "se
 
 def block(text) = { "type" => "paragraph", "paragraph" => { "rich_text" => [{ "plain_text" => text }] } }
 
-def row(n, kind:, severity:, security:)
+def row(n, kind:, severity:, security:, path: "Off", blocks: [])
   sel = ->(v) { { "select" => v && { "name" => v } } }
   { "id" => page(n), "created_time" => "2026-10-01T01:00:00.000Z", "last_edited_time" => "2026-10-01T02:00:00.000Z",
     "properties" => { "ID" => { "unique_id" => { "prefix" => "DND", "number" => n } },
                       "Name" => { "title" => [{ "plain_text" => "Synthetic ticket #{n}" }] },
                       "Status" => { "status" => { "name" => "Todo" } }, "Area" => { "select" => { "name" => "Harness" } },
                       "Kind" => sel.call(kind), "Severity" => sel.call(severity), "Security" => sel.call(security),
+                      "Path" => sel.call(path), "Blocks" => { "relation" => blocks.map { |id| { "id" => id } }, "has_more" => false },
                       "Epic" => { "relation" => [] }, "Depends On" => { "relation" => [] } } }
 end
 
@@ -147,6 +148,10 @@ check("records: 2 recorded, 1 refused, named by ticket, property and error", out
 end
 check("the unlinked ticket is named", out) { out.include?("  unlinked: DND-3") }
 check("a row with no DND id is counted, not dropped", out) { out.include?("7 rows edited (1 without a DND id)") }
+check("the ticket_blocking line counts every ticket once: none has a Jev path line here", out) do
+  out.include?("ticket_blocking: provenance_unread 0, no_path_line 6, unparseable 0, filer_sourced 0, rule_sourced 0, path_unset 0, " \
+               "authored_override 0, edges_unread 0, unchanged 0, unlinked 0, no_call 0, no_candidate_named 0, edited 0")
+end
 sent = posts(log)
 check("the bodies carry call, correction, field_changed and harness; no identity key", sent.map { |r| r["body"] }.inspect) do
   sent.map { |r| r["body"] } == [
@@ -230,6 +235,74 @@ env4 = env.merge("JUDGMENT_FEEDBACK_NOTION_API" => "http://127.0.0.1:1")
 rc, out, err = run(env4, "scan-tickets", "--since", SINCE)
 check("Notion unreachable is exit 3 COULD NOT READ NOTION with a Fix:, never an empty scan", "rc #{rc}; out: #{out}; err: #{err}") do
   rc == 3 && err.start_with?("COULD NOT READ NOTION: could not reach Notion") && err.include?("Fix:") && out.empty?
+end
+
+puts "== ticket_blocking: a Path or Blocks change away from a jev Jev path line (DND-1470)"
+# Candidates DND-101 (page 101, in the scan) and DND-102 (page 102, outside
+# the scan: its ref is read from its page).
+#   DND-21 jev Blocking DND-101, now Off: cand_0=does_not_block
+#   DND-22 jev Blocking DND-101, now Blocking onto DND-102: cand_0=does_not_block, cand_1=blocks
+#   DND-23 jev Blocking DND-101, now Promoted: authored_override, no record
+#   DND-24 jev Blocking DND-101 on a line with no call, now Off: unlinked
+#   DND-25 jev Blocking DND-101, still Blocking onto it: unchanged
+#   DND-26 filer Off, now Blocking onto DND-101: filer_sourced
+#   DND-101 a candidate with no line: no_path_line
+P_CALL = { 21 => call(210), 22 => call(220), 23 => call(230), 25 => call(250) }.freeze
+def pline(n, value: "Blocking", blocks: "DND-101", source: "jev", linked: true)
+  d = { "path" => { "value" => value, "blocks" => blocks, "source" => source, "reason" => source == "jev" ? nil : "mode_off", "mode" => "on",
+                    "confidence" => source == "jev" ? 0.95 : nil }, "would" => nil, "candidates" => 2, "model" => "jev-1.13.0", "version" => "ticket-blocking-v1" }
+  d.merge!("candidate_refs" => %w[DND-101 DND-102], "call" => P_CALL[n]) if linked
+  "Jev path: #{JSON.generate(d)}"
+end
+BROWS = [row(21, kind: "Bug", severity: "MEDIUM", security: "none", path: "Off"),
+         row(22, kind: "Bug", severity: "MEDIUM", security: "none", path: "Blocking", blocks: [page(102)]),
+         row(23, kind: "Bug", severity: "MEDIUM", security: "none", path: "Promoted", blocks: [page(101)]),
+         row(24, kind: "Bug", severity: "MEDIUM", security: "none", path: "Off"),
+         row(25, kind: "Bug", severity: "MEDIUM", security: "none", path: "Blocking", blocks: [page(101)]),
+         row(26, kind: "Bug", severity: "MEDIUM", security: "none", path: "Blocking", blocks: [page(101)]),
+         row(101, kind: "Feature", severity: nil, security: "none", path: "Critical")].freeze
+BBLOCKS = {
+  page(21) => [[block(pline(21))]], page(22) => [[block("Body."), block(pline(22))]], page(23) => [[block(pline(23))]],
+  page(24) => [[block(pline(24, linked: false))]], page(25) => [[block(pline(25))]],
+  page(26) => [[block(pline(26, value: "Off", blocks: nil, source: "filer"))]], page(101) => [[block("Requirement.")]]
+}.freeze
+blog, benv = fake("blocking", "rows" => BROWS, "blocks" => BBLOCKS, "pages" => { page(102) => 102 })
+rc, out, err = run(benv, "scan-tickets", "--since", SINCE)
+check("exit 0, complete, the ticket_blocking counts by reason [ticket 4]", "rc #{rc}; out: #{out}; err: #{err}") do
+  rc.zero? && out =~ /^complete: next_since / &&
+    out.include?("ticket_blocking: provenance_unread 0, no_path_line 1, unparseable 0, filer_sourced 1, rule_sourced 0, path_unset 0, " \
+                 "authored_override 1, edges_unread 0, unchanged 1, unlinked 1, no_call 0, no_candidate_named 0, edited 2")
+end
+check("the unlinked finding is named on the ticket_blocking line", out) { out.include?("  ticket_blocking unlinked: DND-24") }
+check("two records, one per call, each with every contradicted candidate", posts(blog).map { |r| r["body"] }.inspect) do
+  posts(blog).map { |r| r["body"] } == [
+    { "call_id" => call(210), "correction" => { "cand_0" => "does_not_block" }, "signal" => "field_changed", "session_label" => "harness" },
+    { "call_id" => call(220), "correction" => { "cand_0" => "does_not_block", "cand_1" => "blocks" }, "signal" => "field_changed", "session_label" => "harness" }
+  ] && out.include?("records: recorded 2, replaced 0, already_recorded 0, refused 0, not_sent 0")
+end
+check("only the edge onto a ticket outside the scan cost a page read") do
+  requests(blog).select { |r| r["path"].start_with?("/v1/pages/") }.map { |r| r["path"] } == ["/v1/pages/#{page(102)}"]
+end
+brec = File.join(DIR, "blocking-recorded.txt")
+run(benv, "scan-tickets", "--since", SINCE, "--recorded-file", brec)
+rc, out, = run(benv, "scan-tickets", "--since", SINCE, "--recorded-file", brec)
+check("a re-run with the recorded file sends neither again [ticket 4]", out) do
+  rc.zero? && out.include?("records: recorded 0, replaced 0, already_recorded 2, refused 0, not_sent 0") &&
+    File.readlines(brec).map(&:strip).sort == ["#{call(210)} cand_0=does_not_block", "#{call(220)} cand_0=does_not_block,cand_1=blocks"]
+end
+
+_ulog, uenv = fake("edges-unread", "rows" => BROWS, "blocks" => BBLOCKS, "pages" => { page(102) => 102 }, "fail_pages" => [page(102)])
+rc, out, err = run(uenv, "scan-tickets", "--since", SINCE)
+check("a Blocks target that cannot be read is edges_unread: named, exit 3, no next_since", "rc #{rc}; out: #{out}; err: #{err}") do
+  rc == 3 && out.include?("edges_unread 1") && out.include?("  ticket_blocking edges_unread: DND-22") && !out.include?("next_since") &&
+    err.include?("Blocks edges could not be read") && err.include?("Fix:")
+end
+
+no_path = ROWS.map { |r| r.merge("properties" => r["properties"].except("Path")) }
+_nlog, nenv = fake("no-path", "rows" => no_path)
+rc, out, err = run(nenv, "scan-tickets", "--since", SINCE)
+check("rows with no Path select are a schema fault (exit 3, Fix:), never 'Path unset'", "rc #{rc}; out: #{out}; err: #{err}") do
+  rc == 3 && err.include?("no select property Path") && err.include?("Fix:")
 end
 
 puts "== usage"

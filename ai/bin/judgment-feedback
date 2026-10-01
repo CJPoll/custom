@@ -94,8 +94,8 @@ USAGE = <<~EOF
              {"next_cursor":null,"complete":false,"rows":N,"deduped":D,"reason":"<class>"}
            and exits 3 or 4. It is never an empty list: keep the old cursor.
 
-  scan-tickets  Find hand edits of Jev's ticket classifications and record
-           each as feedback (DND-1469). Reads the DND tickets edited at or
+  scan-tickets  Find hand edits of Jev's ticket classifications and Paths,
+           and record each as feedback (DND-1469, DND-1470). Reads the DND tickets edited at or
            after --since (read only, through ai/lib/notion_read.rb) and, per
            ticket, its LAST "Jev classification:" line. A Kind, Severity or
            Security whose line says source jev, accepted, and whose current
@@ -124,12 +124,26 @@ USAGE = <<~EOF
            and every edited one once by what sending it came to:
              recorded, replaced, already_recorded, refused, not_sent (not
              tried after the sending stopped)
+           Since DND-1470 it also reads each ticket's LAST "Jev path:" line.
+           When its source is jev and the Path or Blocks edge was changed away
+           from that decision, it records against the line's call, with a
+           correction cand_<i>=blocks|does_not_block (i from the line's
+           candidate_refs) per candidate the change contradicts. A Critical or
+           Promoted Path is authored: counted, never recorded. Every ticket is
+           counted once on the ticket_blocking line:
+             edited, unchanged, no_path_line, unparseable, filer_sourced,
+             rule_sourced, path_unset, authored_override, edges_unread (its
+             Blocks edges could not be read), unlinked (a line filed before
+             call existed), no_call, no_candidate_named, provenance_unread
            The tickets behind unlinked, no_call, not_accepted, no_label,
-           unparseable, provenance_unread and refused are named. The last
-           line is
+           unparseable, provenance_unread and refused are named, and on the
+           ticket_blocking line those behind its unparseable, path_unset,
+           edges_unread, unlinked, no_call, no_candidate_named and
+           provenance_unread. The last line is
              complete: next_since <time>
-           Save that as the next --since. A body that could not be read, a
-           server that could not be reached (exit 3), or a correction the
+           Save that as the next --since. A body or a Blocks edge that could
+           not be read, a server that could not be reached (exit 3), or a
+           correction the
            server refused as invalid (exit 4: the scan's labels are wrong)
            ends with
              INCOMPLETE (<reason>): keep the old --since
@@ -259,6 +273,15 @@ module Effects
     rescue NotionRead::Error
       nil
     end
+
+    # ref(page_id) -> the DND ref of a page (a Blocks target), or nil when
+    # it could not be read or has no DND id (DND-1470: the finding is then
+    # counted edges_unread, never read as "no edge").
+    def ref(page_id)
+      TriageCorpus.ticket_from_row(NotionRead.page(@origin, @token, page_id, pace: pace))&.fetch("ref")
+    rescue NotionRead::Error
+      nil
+    end
   end
 end
 
@@ -322,11 +345,12 @@ module Manager
     started = Effects.now
     notion = Effects::Notion.new
     rows = notion.edited_since(since)
-    tickets = Scan.tickets(rows)
-    verdicts = tickets.map { |t| [t["ref"], JFS.ticket_verdict(Scan.with_body(t, notion.body(t["page_id"])))] }
-    tally = JFS.tally(verdicts)
-    sent = Scan.new(recorded, file).send_all(tally[:edits])
-    view = Scan.view(since, rows.size, tickets.size, tally, sent, started)
+    tickets = Scan.tickets(rows).map { |t| Scan.with_body(t, notion.body(t["page_id"])) }
+    tally = JFS.tally(tickets.map { |t| [t["ref"], JFS.ticket_verdict(t)] })
+    refs = tickets.to_h { |t| [t["page_id"], t["ref"]] }
+    paths = JFS.blocking_tally(tickets.map { |t| [t["ref"], JFS.blocking_verdict(t, Scan.edge_refs(t, notion, refs))] })
+    sent = Scan.new(recorded, file).send_all(tally[:edits] + paths[:edits])
+    view = Scan.view(since, rows.size, tickets.size, tally.merge(paths: paths), sent, started)
     Scan.print(view, opts["--json"], out)
     return Scan.incomplete(view, opts["--json"], out, err) unless view["complete"]
 
@@ -337,7 +361,7 @@ module Manager
   class Scan
     def self.tickets(rows)
       tickets = rows.filter_map { |r| TriageCorpus.ticket_from_row(r) }
-      missing = tickets.flat_map { |t| t["schema_missing"] }.uniq.sort
+      missing = tickets.flat_map { |t| t["schema_missing"] + (t["path_select"] ? [] : ["Path"]) }.uniq.sort
       unless missing.empty?
         raise Failure.new(3, "COULD NOT READ NOTION: the tracker rows carry no select property #{missing.join(', ')}. " \
                              "Fix: the DND Tickets schema changed; update TriageCorpus.ticket_from_row and #{PROG}")
@@ -347,6 +371,20 @@ module Manager
 
     def self.with_body(ticket, blocks)
       ticket.merge("body_read" => !blocks.nil?, "blocks_text" => blocks || [])
+    end
+
+    # edge_refs(ticket, notion, refs) -> the DND refs of the ticket's Blocks
+    # edges when its Path verdict needs them (DND-1470), [] when it does
+    # not, or nil when any could not be read: a truncated relation or an
+    # unreadable target is never read as "no edge". `refs` maps the scan's
+    # own rows by page id, so only an edge onto a ticket outside the scan
+    # costs a read.
+    def self.edge_refs(ticket, notion, refs)
+      return [] unless JFS.edges_needed?(ticket)
+      return nil if ticket["relations_truncated"]
+
+      found = ticket["blocks"].map { |id| refs.fetch(id) { refs[id] = notion.ref(id) } }
+      found.include?(nil) ? nil : found
     end
 
     def initialize(recorded, file)
@@ -420,9 +458,10 @@ module Manager
     NAMED = %w[provenance_unread unparseable unlinked no_call not_accepted no_label].freeze
 
     def self.view(since, rows, tickets, tally, sent, started)
-      failure = sent[:failure] || unread_failure(tally[:tickets]["provenance_unread"])
+      failure = sent[:failure] || unread_failure(tally[:tickets]["provenance_unread"]) || edges_failure(tally[:paths][:counts]["edges_unread"])
       { "complete" => failure.nil?, "since" => JFS.iso(since), "next_since" => failure ? nil : JFS.iso(JFS.next_since(started)),
         "rows" => rows, "not_a_ticket" => rows - tickets, "tickets" => tally[:tickets], "properties" => tally[:properties],
+        "ticket_blocking" => tally[:paths][:counts], "ticket_blocking_named" => tally[:paths][:refs],
         "records" => sent[:counts], "named" => NAMED.to_h { |r| [r, tally[:refs].fetch(r, [])] }.reject { |_, v| v.empty? },
         "refused" => sent[:refused], "failure" => failure }.tap { |v| v["reason"] = reason_of(failure[1]) if failure }
     end
@@ -431,6 +470,12 @@ module Manager
       return nil if unread.zero?
 
       [3, "COULD NOT READ NOTION: #{unread} ticket bodies could not be read. Fix: re-run with the same --since; a body that keeps failing is named under provenance_unread"]
+    end
+
+    def self.edges_failure(unread)
+      return nil if unread.zero?
+
+      [3, "COULD NOT READ NOTION: #{unread} findings' Blocks edges could not be read. Fix: re-run with the same --since; a finding that keeps failing is named under ticket_blocking edges_unread"]
     end
 
     def self.print(view, json, out)
@@ -442,8 +487,10 @@ module Manager
       out.puts "scan-tickets: since #{view['since']}: #{view['rows']} rows edited (#{view['not_a_ticket']} without a DND id)"
       out.puts "tickets: #{line.call(view['tickets'])}"
       out.puts "properties: #{line.call(view['properties'])}"
+      out.puts "ticket_blocking: #{line.call(view['ticket_blocking'])}"
       out.puts "records: #{line.call(view['records'])}"
       view["named"].each { |reason, refs| out.puts "  #{reason}: #{refs.join(', ')}" }
+      view["ticket_blocking_named"].each { |reason, refs| out.puts "  ticket_blocking #{reason}: #{refs.join(', ')}" }
       view["refused"].each { |r| out.puts "  refused: #{r}" }
       out.puts "complete: next_since #{view['next_since']}" if view["complete"]
     end

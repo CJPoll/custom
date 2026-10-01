@@ -395,6 +395,11 @@ Changing one needs a new question-set version there.
     `Blocks: DND-N` or `Blocks: none`, and a `Jev path:` line. Set `Path`,
     wire `Depends On`↔`Blocks` onto exactly the printed ticket (no edge on
     `none`), and paste the `Jev path:` line under the classification line.
+    If you judge a `jev` Path or edge wrong, set your own and leave the line
+    as it is: `scan-tickets` records it against the line's `call`. Record by
+    hand (`judgment-feedback record --call <call> --correct
+    cand_<i>=<blocks|does_not_block>`, `i` from the line's `candidate_refs`)
+    only a wrong judgment your Path and edge do not show.
     On `PATH UNAVAILABLE` or `CANDIDATES UNAVAILABLE`, file the Path it
     prints under `Decided (filer; path unavailable):` and write that first
     line into the body. The exit is 3 if either part was unavailable.

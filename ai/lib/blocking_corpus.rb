@@ -80,7 +80,9 @@ module BlockingCorpus
   def number(ref) = TriageCorpus.number(ref) || 0
 
   # path_line(ticket) -> [:none] | [:ok, Hash] | [:unparseable]: the LAST
-  # "Jev path:" line of the body (a later filing appends a newer one).
+  # "Jev path:" line of the body (a later filing appends a newer one). Also
+  # read by `judgment-feedback scan-tickets` (DND-1470), so the two readers
+  # agree on what a line is.
   def path_line(ticket)
     line = TicketCorpus.lines(ticket).reverse.find { |l| l.lstrip.start_with?(PREFIX) }
     return [:none] if line.nil?
@@ -90,7 +92,27 @@ module BlockingCorpus
     rescue JSON::ParserError
       nil
     end
-    doc.is_a?(Hash) && doc["path"].is_a?(Hash) && %w[jev filer rule].include?(doc.dig("path", "source")) ? [:ok, doc] : [:unparseable]
+    doc.is_a?(Hash) && doc["path"].is_a?(Hash) && %w[jev filer rule].include?(doc.dig("path", "source")) && valid_link?(doc) ? [:ok, doc] : [:unparseable]
+  end
+
+  CANDIDATE_REF = /\ADND-\d+\z/
+
+  # valid_link?(doc) -> whether the line's `candidate_refs` and `call`
+  # (DND-1470, appended together) are absent together or well formed: refs
+  # in cand_<i> order, as many as `candidates`, no repeat; a call that is a
+  # uuid or null; and a jev Blocking target that is one of the refs. A line
+  # written before DND-1470 has neither and still parses. A garbled one is
+  # unparseable, never read as "no call".
+  def valid_link?(doc)
+    return true unless doc.key?("call") || doc.key?("candidate_refs")
+    return false unless doc.key?("call") && doc.key?("candidate_refs")
+
+    refs = doc["candidate_refs"]
+    call = doc["call"]
+    path = doc["path"]
+    refs.is_a?(Array) && refs.all? { |r| r.is_a?(String) && CANDIDATE_REF.match?(r) } && refs.uniq.size == refs.size &&
+      doc["candidates"] == refs.size && (call.nil? || (call.is_a?(String) && TicketCorpus::CALL_ID.match?(call))) &&
+      !(path["source"] == "jev" && path["value"] == "Blocking" && !refs.include?(path["blocks"]))
   end
 
   # redact_finding(text) -> the finding's body as sent: provenance lines

@@ -27,7 +27,8 @@ You are the receiver when a judged result reaches you and you act on it.
    Jev's answer and cannot be reported (`not_judged`).
 2. **Find the call id.** It is printed where the result is: the advisory's
    `call:` line (finding triage), `calls` in the `Jev classification:` line,
-   `call` in the `Jev path:` line. For a Slack conversation, use the event id
+   `call` in the `Jev path:` line (its `candidate_refs` give each
+   candidate's `cand_<i>`). For a Slack conversation, use the event id
    from the routed line instead. Those are the only two ways to name a call:
    `--subject` works only with `--use-case slack_routing`, and anything else
    is refused as `invalid`.
@@ -63,7 +64,7 @@ its `Fix:`. A refusal is a fact to report, not something to work around.
 Run once per shipwright cron run, after the lead-time loop. The state lives in
 `$SHIPWRIGHT_STATE_DIR` beside `cursor.txt`.
 
-1. **Scan tickets for hand edits** (DND-1469). It runs before step 2, so
+1. **Scan tickets for hand edits** (DND-1469, DND-1470). It runs before step 2, so
    the feedback it records is read in this run:
 
    ```
@@ -78,12 +79,16 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
    edits to the minute). It reads the
    DND tickets edited since then (read only) and records `field_changed`
    feedback itself, for each Kind, Severity or Security edited away from a
-   `jev` value on the ticket's last `Jev classification:` line. It prints
-   counts only, and names tickets by id. Journal them in the step 8
-   section:
+   `jev` value on the ticket's last `Jev classification:` line, and for each
+   Path or `Blocks` edge changed away from a `jev` decision on its last
+   `Jev path:` line (correction `cand_<i>` = `blocks` or `does_not_block`;
+   a `Critical` or `Promoted` Path is authored and counted
+   `authored_override`, never recorded). It prints counts only, and names
+   tickets by id. Journal them in the step 8 section:
 
    ```
    - scan-tickets: tickets <lines> lines (no_provenance <n>, unparseable <n>, provenance_unread <n>); edited <e> (recorded <r>, replaced <p>, already_recorded <a>, refused <f>, not_sent <s>); unlinked <u>, filer_sourced <s>; since <since>
+   - scan-tickets ticket_blocking: edited <e>, unchanged <u>, authored_override <a>, unlinked <l>, no_path_line <n>, edges_unread <r>
    - scan-tickets: COULD NOT MEASURE (<the JSON's reason>, exit <n>); since kept
    ```
 
@@ -96,8 +101,8 @@ Run once per shipwright cron run, after the lead-time loop. The state lives in
    longer match the question set, so file a ticket for the scan. Never
    create or edit the recorded file by hand.
 
-   A filer who disagrees with a `jev` classification files its own value
-   and leaves the line as it is. This scan is what records that report
+   A filer who disagrees with a `jev` classification or Path files its own
+   value and leaves the line as it is. This scan is what records that report
    (athena:ticket-management → *Filing a ticket*).
 2. **Read new feedback** into a run-local file, never into the journal:
 

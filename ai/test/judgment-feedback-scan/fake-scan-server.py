@@ -7,6 +7,10 @@ Athena server's feedback POST, for `judgment-feedback scan-tickets`'s suite
   GET  /v1/blocks/<page>/children[?..]  FIXTURE.blocks[page]: a list of block
                                         pages joined by cursors; a page id in
                                         FIXTURE.fail_blocks answers 500
+  GET  /v1/pages/<page>                 a page whose DND id is
+                                        FIXTURE.pages[page] (DND-1470: a
+                                        Blocks target); a page id in
+                                        FIXTURE.fail_pages answers 500
   POST /api/v1/judgments/feedback       an upsert per call_id, as the server
                                         keeps one row per (call, reporter):
                                         the first report is recorded, a later
@@ -106,6 +110,12 @@ class Handler(BaseHTTPRequestHandler):
             more = idx + 1 < len(pages)
             return self._send(200, {"results": pages[idx], "has_more": more,
                                     "next_cursor": cursor(idx + 1) if more else None}, entry)
+        if len(parts) == 4 and parts[2] == "pages" and parts[3] in FX.get("pages", {}):
+            if parts[3] in FX.get("fail_pages", []):
+                return self._send(500, {"object": "error"}, entry)
+            number = FX["pages"][parts[3]]
+            return self._send(200, {"object": "page", "id": parts[3], "properties": {
+                "ID": {"unique_id": {"prefix": "DND", "number": number}}}}, entry)
         entry["unexpected"] = True
         return self._send(404, {"object": "error"}, entry)
 

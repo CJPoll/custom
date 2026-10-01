@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Domain suite for `judgment-feedback scan-tickets` (DND-1469):
+# Domain suite for `judgment-feedback scan-tickets` (DND-1469, DND-1470):
 # ai/lib/judgment_feedback_scan.rb, pure. The ticket's test 3 cases are
 # marked [ticket 3]. Run by self-test.sh beside this file. Synthetic ids and
 # text only (this repo is public).
@@ -175,6 +175,113 @@ check("a corrupt recorded-file line is usage, never silently ignored") do
   false
 rescue S::UsageError => e
   e.message.include?("line 1")
+end
+
+# ── ticket_blocking (DND-1470) ─────────────────────────────────────────────
+# A finding's LAST `Jev path:` line against its current Path and Blocks edge.
+# The ticket's test 3 cases are marked [ticket 3].
+
+CALL_P = "44444444-4444-4444-8444-444444444444"
+REFS = %w[DND-101 DND-102 DND-103].freeze
+
+def pline(value: "Blocking", blocks: "DND-101", source: "jev", reason: nil, mode: "on", refs: REFS, call: CALL_P)
+  d = { "path" => { "value" => value, "blocks" => blocks, "source" => source, "reason" => reason, "mode" => mode, "confidence" => source == "jev" ? 0.95 : nil },
+        "would" => nil, "candidates" => refs == :absent ? 3 : refs.size, "model" => "jev-1.13.0", "version" => "ticket-blocking-v1" }
+  d["candidate_refs"] = refs unless refs == :absent
+  d["call"] = call unless call == :absent
+  "Jev path: #{JSON.generate(d)}"
+end
+
+def finding(path: "Blocking", lines: [pline], body_read: true)
+  { "ref" => "DND-9002", "kind" => "Bug", "severity" => "MEDIUM", "security" => "none", "path" => path,
+    "body_read" => body_read, "blocks_text" => ["Synthetic finding."] + lines }
+end
+
+def bv(t, edges = []) = S.blocking_verdict(t, edges)
+
+puts "== ticket_blocking verdicts"
+check("jev Blocking -> current Off: does_not_block for the judged-blocks candidate [ticket 3]") do
+  bv(finding(path: "Off")) == ["edited", CALL_P, { "cand_0" => "does_not_block" }]
+end
+check("Blocks edge moved to another candidate: two corrections, one record [ticket 3]") do
+  bv(finding, ["DND-103"]) == ["edited", CALL_P, { "cand_0" => "does_not_block", "cand_2" => "blocks" }]
+end
+check("Path changed to Promoted: authored_override, no record [ticket 3]") do
+  bv(finding(path: "Promoted")) == ["authored_override"]
+end
+check("Path changed to Critical: authored_override, no record") do
+  bv(finding(path: "Critical")) == ["authored_override"]
+end
+check("no call key (a line filed before DND-1470): unlinked [ticket 3]") do
+  bv(finding(path: "Off", lines: [pline(refs: :absent, call: :absent)])) == ["unlinked"]
+end
+check("a null call: no_call") do
+  bv(finding(path: "Off", lines: [pline(call: nil)])) == ["no_call"]
+end
+check("jev Blocking, still Blocking onto the same candidate: unchanged") do
+  bv(finding, ["DND-101"]) == ["unchanged"]
+end
+check("an unlinked line that was not changed is unchanged, not unlinked (nothing to report)") do
+  bv(finding(lines: [pline(refs: :absent, call: :absent)]), ["DND-101"]) == ["unchanged"]
+end
+check("jev Blocking, an extra edge onto another candidate: blocks for it only") do
+  bv(finding, %w[DND-101 DND-102]) == ["edited", CALL_P, { "cand_1" => "blocks" }]
+end
+check("jev Off (Jev removed the claim), now Blocking onto a candidate: blocks for it") do
+  bv(finding(lines: [pline(value: "Off", blocks: nil)]), ["DND-102"]) == ["edited", CALL_P, { "cand_1" => "blocks" }]
+end
+check("jev Off, still Off: unchanged; a stale edge under Off is not a Blocks claim") do
+  bv(finding(path: "Off", lines: [pline(value: "Off", blocks: nil)]), ["DND-102"]) == ["unchanged"]
+end
+check("jev Off, now Blocking onto a ticket that was not a candidate: no_candidate_named") do
+  bv(finding(lines: [pline(value: "Off", blocks: nil)]), ["DND-555"]) == ["no_candidate_named"]
+end
+check("jev Blocking, edge moved to a non-candidate: does_not_block for the judged one only") do
+  bv(finding, ["DND-555"]) == ["edited", CALL_P, { "cand_0" => "does_not_block" }]
+end
+check("filer- and rule-sourced lines are never Jev's: filer_sourced, rule_sourced") do
+  bv(finding(path: "Off", lines: [pline(source: "filer", reason: "mode_off")])) == ["filer_sourced"] &&
+    bv(finding(path: "Off", lines: [pline(source: "rule", reason: "introduced_security")])) == ["rule_sourced"]
+end
+check("an unset Path is path_unset, never read as Off") do
+  bv(finding(path: nil)) == ["path_unset"]
+end
+check("Blocking with edges that could not be resolved is edges_unread, never read as no edge") do
+  bv(finding, nil) == ["edges_unread"]
+end
+check("Off needs no edges: an unresolved edge list does not matter") do
+  bv(finding(path: "Off"), nil) == ["edited", CALL_P, { "cand_0" => "does_not_block" }]
+end
+check("no Jev path line: no_path_line; an unread body: provenance_unread") do
+  bv(finding(lines: [])) == ["no_path_line"] && bv(finding(body_read: false, lines: [])) == ["provenance_unread"]
+end
+check("a broken last path line is unparseable, even after a good one") do
+  bv(finding(lines: [pline, pline[0, 40]])) == ["unparseable"]
+end
+check("a garbled call or candidate_refs is unparseable") do
+  [pline(call: "DND-1"), pline(refs: ["x"]), pline(refs: %w[DND-101 DND-101 DND-102]), pline.sub(%q("candidates":3), %q("candidates":2)), pline(refs: :absent), pline(call: :absent),
+   pline(blocks: "DND-999")].all? { |l| bv(finding(path: "Off", lines: [l])) == ["unparseable"] }
+end
+check("the LAST path line decides") do
+  bv(finding(path: "Off", lines: [pline, pline(value: "Off", blocks: nil)])) == ["unchanged"]
+end
+check("edges_needed? only for a Jev-sourced line on a ticket now Blocking") do
+  S.edges_needed?(finding) && !S.edges_needed?(finding(path: "Off")) &&
+    !S.edges_needed?(finding(lines: [pline(source: "filer", reason: "mode_off")])) && !S.edges_needed?(finding(lines: []))
+end
+check("a blocking correction's record key holds every question, sorted, and reads back") do
+  key = S.record_key(CALL_P, { "cand_2" => "blocks", "cand_0" => "does_not_block" })
+  key == "#{CALL_P} cand_0=does_not_block,cand_2=blocks" && S.recorded_keys("#{key}\n").include?(key)
+end
+
+puts "== ticket_blocking tally"
+check("every ticket counts once by reason; actionable reasons are named; edits carry the path property") do
+  rows = [["DND-1", bv(finding(path: "Off"))], ["DND-2", bv(finding(lines: []))],
+          ["DND-3", bv(finding(path: "Promoted"))], ["DND-4", bv(finding(path: "Off", lines: [pline(refs: :absent, call: :absent)]))]]
+  t = S.blocking_tally(rows)
+  t[:counts].values.sum == 4 && t[:counts]["edited"] == 1 && t[:counts]["no_path_line"] == 1 &&
+    t[:counts]["authored_override"] == 1 && t[:counts]["unlinked"] == 1 && t[:counts].keys == S::BLOCKING_REASONS &&
+    t[:refs] == { "unlinked" => ["DND-4"] } && t[:edits] == [["DND-1", "path", CALL_P, { "cand_0" => "does_not_block" }]]
 end
 
 puts

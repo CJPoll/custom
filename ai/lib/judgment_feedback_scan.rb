@@ -3,7 +3,9 @@
 # judgment_feedback_scan.rb -- the pure rules of `judgment-feedback
 # scan-tickets` (DND-1469): which hand edits of a DND ticket's Kind, Severity
 # or Security are a "wrong" signal for the Jev call that decided the value,
-# and the correction each one records. Domain only: no I/O, no process, no
+# and the correction each one records. Since DND-1470 also its Path and
+# Blocks edge against the `Jev path:` line (the ticket_blocking section
+# below). Domain only: no I/O, no process, no
 # clock. The normative home is ai/contracts/athena-judgments.md -> *Receiver
 # feedback* (the ticket rows); the server is gen_saas ADR 22.
 #
@@ -25,6 +27,7 @@ require "json"
 require "set"
 require "time"
 require_relative "ticket_corpus"
+require_relative "blocking_corpus"
 
 module JudgmentFeedbackScan
   # A command-line value the scan cannot use. Nothing is read or sent.
@@ -142,6 +145,11 @@ module JudgmentFeedbackScan
     "#{call} #{correction.map { |q, l| "#{q}=#{l}" }.sort.join(',')}".downcase
   end
 
+  # One recorded-file line: the call, then each question=label, sorted and
+  # comma-joined (a ticket_blocking record can correct several cand_<i>).
+  PAIR = "[a-z0-9_]+=[A-Za-z0-9_:.-]+"
+  RECORD_KEY = /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12} #{PAIR}(?:,#{PAIR})*\z/
+
   # recorded_keys(text) -> Set of record keys; blank lines allowed, anything
   # else that is not a key is usage (a corrupt file must not silently resend
   # or silently suppress).
@@ -149,7 +157,7 @@ module JudgmentFeedbackScan
     text.to_s.each_line.with_index(1).each_with_object(Set.new) do |(line, n), set|
       key = line.strip
       next if key.empty?
-      raise UsageError, "--recorded-file line #{n} is not '<call uuid> <question>=<label>'" unless /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12} [a-z_]+=[A-Za-z0-9_:.-]+\z/.match?(key)
+      raise UsageError, "--recorded-file line #{n} is not '<call uuid> <question>=<label>[,...]'" unless RECORD_KEY.match?(key)
 
       set << key.downcase
     end
@@ -201,5 +209,111 @@ module JudgmentFeedbackScan
       end
     end
     { tickets: tickets, properties: props, refs: refs.transform_values(&:uniq), edits: edits }
+  end
+  # ── ticket_blocking (DND-1470) ─────────────────────────────────────────
+  #
+  # A finding's LAST `Jev path:` line (BlockingCorpus.path_line, the shadow
+  # report's own reader) against its current Path and Blocks edge. When the
+  # line's source is jev, Jev's accepted judgment decided the Path: Blocking
+  # onto `path.blocks` (an accepted `blocks` for that candidate), or Off (an
+  # accepted `does_not_block` removed the claim). A later change away from it
+  # is feedback on that call: signal field_changed, a correction per
+  # candidate the change contradicts, keyed `cand_<i>` by the line's
+  # `candidate_refs`:
+  #   * the judged-blocks candidate no longer blocked: does_not_block;
+  #   * a candidate now blocked that Jev's decision did not block: blocks.
+  # Only Blocking carries a Blocks claim: a stale edge under Off is not one.
+  # Critical and Promoted are authored (J-991-2), never a contradiction of
+  # the judgment by themselves.
+
+  # Why a ticket's Path was not recorded, or that it is to be (`edited`), in
+  # the order they are checked. Every ticket of the scan counts once.
+  #   provenance_unread   its body could not be read (the scan is incomplete)
+  #   no_path_line        no `Jev path:` line: its Path was never judged
+  #   unparseable         the LAST path line is broken: never read as absent
+  #   filer_sourced       the line's source is filer: not Jev's decision
+  #   rule_sourced        the line's source is rule: no judgment was made
+  #   path_unset          the Path is empty: never read as Off
+  #   authored_override   the Path is now Critical or Promoted (authored)
+  #   edges_unread        the ticket is Blocking but its Blocks edges could
+  #                       not be read (the scan is incomplete)
+  #   unchanged           the Path and edge still match Jev's decision
+  #   unlinked            the line predates DND-1470 and names no call
+  #   no_call             the line names no call (its row was not written)
+  #   no_candidate_named  changed, but onto no candidate Jev was asked about
+  #   edited              changed away from Jev's decision: record it
+  BLOCKING_REASONS = %w[provenance_unread no_path_line unparseable filer_sourced rule_sourced path_unset
+                        authored_override edges_unread unchanged unlinked no_call no_candidate_named edited].freeze
+  # The reasons whose tickets are named: each needs a person or a re-run.
+  BLOCKING_NAMED = %w[provenance_unread unparseable path_unset edges_unread unlinked no_call no_candidate_named].freeze
+  # The pseudo-property a Path edit is recorded under (the bin's refusals).
+  PATH_PROPERTY = "path"
+  AUTHORED_PATHS = %w[Critical Promoted].freeze
+  BLOCKS_LABEL = "blocks"
+  DOES_NOT_BLOCK_LABEL = "does_not_block"
+
+  # jev_path_line(ticket) -> the parsed LAST path line when its source is
+  # jev, else nil.
+  def jev_path_line(ticket)
+    return nil unless ticket["body_read"] == true
+
+    state, doc = BlockingCorpus.path_line(ticket)
+    state == :ok && doc.dig("path", "source") == "jev" ? doc : nil
+  end
+
+  # edges_needed?(ticket) -> whether blocking_verdict needs the refs of the
+  # ticket's Blocks edges: a jev line on a ticket that is Blocking now.
+  def edges_needed?(ticket)
+    ticket["path"] == "Blocking" && !jev_path_line(ticket).nil?
+  end
+
+  # blocking_verdict(ticket, edge_refs) -> [reason] or ["edited", call,
+  # {"cand_<i>" => label}]. `edge_refs` are the DND refs of the ticket's
+  # Blocks edges, or nil when they could not be read.
+  def blocking_verdict(ticket, edge_refs)
+    return ["provenance_unread"] unless ticket["body_read"] == true
+
+    state, doc = BlockingCorpus.path_line(ticket)
+    return ["no_path_line"] if state == :none
+    return ["unparseable"] if state == :unparseable
+
+    source = doc.dig("path", "source")
+    return ["#{source}_sourced"] unless source == "jev"
+    return ["path_unset"] if ticket["path"].nil?
+    return ["authored_override"] if AUTHORED_PATHS.include?(ticket["path"])
+
+    blocked_now = ticket["path"] == "Blocking" ? edge_refs : []
+    return ["edges_unread"] if blocked_now.nil?
+
+    judged = doc.dig("path", "value") == "Blocking" ? [doc.dig("path", "blocks")] : []
+    unblocked = judged - blocked_now
+    newly = blocked_now.uniq - judged
+    return ["unchanged"] if unblocked.empty? && newly.empty?
+    return ["unlinked"] unless doc.key?("call")
+    return ["no_call"] if doc["call"].nil?
+
+    correction = path_correction(doc["candidate_refs"], unblocked, newly)
+    correction.empty? ? ["no_candidate_named"] : ["edited", doc["call"], correction]
+  end
+
+  # path_correction(refs, unblocked, newly) -> {"cand_<i>" => label}, by
+  # candidate index. A ticket that was not a candidate has no question.
+  def path_correction(refs, unblocked, newly)
+    pairs = unblocked.map { |r| [refs.index(r), DOES_NOT_BLOCK_LABEL] } + newly.map { |r| [refs.index(r), BLOCKS_LABEL] }
+    pairs.reject { |i, _| i.nil? }.sort_by(&:first).to_h { |i, label| ["cand_#{i}", label] }
+  end
+
+  # blocking_tally(verdicts) -> {counts: {reason => n}, refs: {reason =>
+  # [DND refs]}, edits: [[ref, "path", call, correction]]}.
+  def blocking_tally(verdicts)
+    counts = BLOCKING_REASONS.to_h { |r| [r, 0] }
+    refs = Hash.new { |h, k| h[k] = [] }
+    edits = []
+    verdicts.each do |ref, verdict|
+      counts[verdict.first] += 1
+      refs[verdict.first] << ref if BLOCKING_NAMED.include?(verdict.first)
+      edits << [ref, PATH_PROPERTY, verdict[1], verdict[2]] if verdict.first == "edited"
+    end
+    { counts: counts, refs: refs.to_h, edits: edits }
   end
 end
