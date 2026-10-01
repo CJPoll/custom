@@ -16,6 +16,7 @@ require "fileutils"
 require "open3"
 require "tmpdir"
 require_relative "lead_time_phases"
+require_relative "lead_time_config"
 require_relative "critic_verdict_stores"
 require_relative "athena_telemetry"
 
@@ -181,9 +182,9 @@ module LeadTimePhasesIO
       [nil, "git could not run (#{e.message})"]
     end
 
-    # The repo label the telemetry writer stamps on every event
-    # (AthenaTelemetry::GitContext): the basename of the main checkout.
-    def repo_label(common) = File.basename(File.dirname(common))
+    # The repo label the telemetry writer stamps on every event: one rule,
+    # shared with the resolver's name/basename check (DND-1526).
+    def repo_label(common) = LeadTimeConfig.repo_label(common)
   end
 
   module Paths

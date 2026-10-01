@@ -50,7 +50,9 @@ ai/bin/lead-time-phases --summary --repo R --json
 
 Each answers `--help`. Read an exit code before its output:
 `lead-time-phases` exit 3 is SCAN INCOMPLETE; `experiment` exit 3 is "could
-not look" (no ledger). Neither is "nothing to do".
+not look" (no ledger). Neither is "nothing to do". Exit 4 from either is
+"configured, but its checkout is not on this machine"
+(`ai/bin/lead-time-repos`): skip that repo this run and journal the skip.
 
 ## For each `improve` repo, in order
 

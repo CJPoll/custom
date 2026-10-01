@@ -6,7 +6,7 @@
 #   1. the domain and IO suites (phases_test.rb, io_test.rb), run through
 #      `lead-time-phases --self-test` so its self-test path is exercised;
 #   2. the CLI end to end, against a temp state dir (LEAD_TIME_STATE_DIR), a
-#      temp config (LEAD_TIME_PHASES_CONFIG), a temp telemetry store, a temp
+#      temp config (ATHENA_LEADTIME_CONFIG), a temp telemetry store, a temp
 #      git repo, and a FAKE ai/bin/lead-time (LEAD_TIME_PHASES_LEAD_TIME) that
 #      prints canned rows and meta. No network, no Notion, no real state.
 # Functional only (DND-1222): no sleeps, no timing, no load. Ids are synthetic.
@@ -47,15 +47,17 @@ HEAD_BARE="$(printf 'c%.0s' $(seq 40))"
 # on. Its landing is the forge's squash commit HEAD_PR (DND-1490).
 HEAD_PRHEAD="$(printf 'd%.0s' $(seq 40))"
 
-REPO="${TMP}/repo"
+REPO="${TMP}/custom"
 GENV=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1)
 "${GENV[@]}" git init -q -b main "${REPO}" || { echo "FAIL git init"; echo "  Fix: install git"; exit 1; }
 mkdir -p "${REPO}/.git/integration-receipts"
 printf '{"recorded_at":"2026-10-01T04:30:00Z","head":"%s"}\n' "${HEAD_PUSH}" >"${REPO}/.git/integration-receipts/${HEAD_PUSH}.json"
 printf '{"recorded_at":"2026-10-01T05:30:00Z","head":"%s"}\n' "${HEAD_PRHEAD}" >"${REPO}/.git/integration-receipts/${HEAD_PRHEAD}.json"
 
-WATCH="${TMP}/watchrepo"
-mkdir -p "${WATCH}"
+# The resolver (DND-1526) requires each configured path that exists to be a
+# git checkout whose basename is the repo's name (the telemetry label).
+WATCH="${TMP}/gen_saas"
+"${GENV[@]}" git init -q -b main "${WATCH}" || { echo "FAIL git init"; echo "  Fix: install git"; exit 1; }
 
 CONFIG="${TMP}/repos.json"
 cat >"${CONFIG}" <<JSON
@@ -117,7 +119,7 @@ OUT=""; ERR=""; CODE=0
 # run TELEMETRY_DIR ARGS... -- the CLI against the fixtures.
 run() {
   local tel="$1"; shift
-  OUT="$(cd "${TMP}" && LEAD_TIME_STATE_DIR="${STATE}" LEAD_TIME_PHASES_CONFIG="${CONFIG}" \
+  OUT="$(cd "${TMP}" && LEAD_TIME_STATE_DIR="${STATE}" ATHENA_LEADTIME_CONFIG="${CONFIG}" \
         LEAD_TIME_PHASES_LEAD_TIME="${FAKE}" LEAD_TIME_PHASES_NOW="2026-10-15T00:00:00Z" \
         ATHENA_TELEMETRY_DIR="${tel}" XDG_STATE_HOME="${TMP}/xdg" \
         FAKE_ROWS="${ROWS:-${TMP}/rows.json}" FAKE_META="${META:-${TMP}/meta-ok.json}" \
@@ -147,7 +149,7 @@ eq "--since without --ingest is refused" "${CODE}" "2"
 run "${TEL_NONE}" --ingest --repo custom --bogus
 eq "an unknown flag is refused" "${CODE}" "2"
 printf '{"repos":[{"name":"x","path":"/x","mode":"fix"}],"window":20,"improvement_epic":"e"}\n' >"${TMP}/bad.json"
-OUT="$(LEAD_TIME_STATE_DIR="${STATE}" LEAD_TIME_PHASES_CONFIG="${TMP}/bad.json" /usr/bin/ruby "${BIN}" --summary --repo x 2>&1)"; CODE=$?
+OUT="$(LEAD_TIME_STATE_DIR="${STATE}" ATHENA_LEADTIME_CONFIG="${TMP}/bad.json" /usr/bin/ruby "${BIN}" --summary --repo x 2>&1)"; CODE=$?
 eq "an unknown mode in the config exits 2" "${CODE}" "2"
 has "the refusal names the repo and carries Fix:" "${OUT}" '"x" has unknown mode'
 [ -e "${STATE}" ] && bad "a refusal writes no state" "${STATE} exists" || ok "a refusal writes no state"
@@ -207,10 +209,24 @@ eq "a malformed cursor exits 1" "${CODE}" "1"
 has "it names the cursor and carries Fix:" "${ERR}" "Fix:"
 cp "${TMP}/cursor.bak" "${STATE}/cursor.custom.txt"
 
-echo "== ingest: a repo not on this machine"
+echo "== a configured repo not on this machine: skipped, exit 4 (DND-1526)"
+LINES_BEFORE_SKIP="$(ledger_lines)"
 run "${TEL_EMPTY}" --ingest --repo walt_ui
-eq "not on this machine exits 0" "${CODE}" "0"
-has "it says so, never a silent skip" "${OUT}" "not on this machine"
+eq "ingest of a skipped repo exits 4" "${CODE}" "4"
+has "it says skipped on this machine, with the reason" "${ERR}" "walt_ui: skipped on this machine: no such path ${TMP}/not-here"
+has "... and carries Fix:" "${ERR}" "Fix:"
+eq "... and ingests nothing" "$(ledger_lines)" "${LINES_BEFORE_SKIP}"
+[ -e "${STATE}/cursor.walt_ui.txt" ] && bad "... and writes no cursor" "cursor.walt_ui.txt exists" || ok "... and writes no cursor"
+run "${TEL_EMPTY}" --summary --repo walt_ui
+eq "summary of a skipped repo exits 4" "${CODE}" "4"
+run "${TEL_EMPTY}" --summary --repo nope
+lacks "an unconfigured repo is not called skipped" "${ERR}" "skipped on this machine"
+has "... it is named not configured" "${ERR}" 'no repo "nope"'
+mkdir -p "${TMP}/notgit/custom"
+printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"e"}\n' "${TMP}/notgit/custom" >"${TMP}/notgit.json"
+OUT="$(LEAD_TIME_STATE_DIR="${STATE}" ATHENA_LEADTIME_CONFIG="${TMP}/notgit.json" /usr/bin/ruby "${BIN}" --summary --repo custom 2>&1)"; CODE=$?
+eq "a configured path that is not a git repository is refused: exit 2" "${CODE}" "2"
+has "... naming it, with Fix:" "${OUT}" "is not a git repository"
 
 echo "== summary: telemetry could not look vs looked and found nothing"
 run "${TEL_NONE}" --summary --repo custom
@@ -249,7 +265,7 @@ has "it says so" "${OUT}" "an explicit --since run never moves it"
 echo "== ingest: a signal-killed lead-time"
 SIGFAKE="${TMP}/sig-lead-time"
 printf '#!/bin/sh\nkill -TERM $$\n' >"${SIGFAKE}"; chmod +x "${SIGFAKE}"
-OUT="$(LEAD_TIME_STATE_DIR="${STATE}" LEAD_TIME_PHASES_CONFIG="${CONFIG}" LEAD_TIME_PHASES_LEAD_TIME="${SIGFAKE}" \
+OUT="$(LEAD_TIME_STATE_DIR="${STATE}" ATHENA_LEADTIME_CONFIG="${CONFIG}" LEAD_TIME_PHASES_LEAD_TIME="${SIGFAKE}" \
       ATHENA_TELEMETRY_DIR="${TEL_EMPTY}" /usr/bin/ruby "${BIN}" --ingest --repo custom 2>&1)"; CODE=$?
 eq "a killed lead-time exits 1" "${CODE}" "1"
 has "it names the signal and carries Fix:" "${OUT}" "killed by signal 15"
@@ -261,7 +277,7 @@ TEL_SCOPED="${TMP}/telemetry-scoped"
 mkdir -p "${TEL_SCOPED}" && chmod 700 "${TEL_SCOPED}"
 {
   printf '{"v":1,"event":"harness_gate.run","at":"2026-10-01T02:00:00.000Z","duration_s":60,"unit":"DND-9001","unit_source":"branch","repo":"other_repo","head":null,"host":"h","pid":1,"attrs":{"ok":true}}\n'
-  printf '{"v":1,"event":"harness_gate.run","at":"2026-10-01T03:00:00.000Z","duration_s":60,"unit":"DND-9001","unit_source":"branch","repo":"repo","head":null,"host":"h","pid":1,"attrs":{"ok":true}}\n'
+  printf '{"v":1,"event":"harness_gate.run","at":"2026-10-01T03:00:00.000Z","duration_s":60,"unit":"DND-9001","unit_source":"branch","repo":"custom","head":null,"host":"h","pid":1,"attrs":{"ok":true}}\n'
 } >"${TEL_SCOPED}/2026-10-01.jsonl"
 STATE="${TMP}/state-scoped" run "${TEL_SCOPED}" --ingest --repo custom
 eq "a scoped ingest exits 0" "${CODE}" "0"

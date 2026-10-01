@@ -5,7 +5,7 @@
 # Layers, in TDD order:
 #   1. the domain and store suite (experiment_test.rb);
 #   2. scripts/experiment end to end, against temp state dirs
-#      (LEAD_TIME_STATE_DIR), a temp config (LEAD_TIME_PHASES_CONFIG), fixture
+#      (LEAD_TIME_STATE_DIR), a temp config (ATHENA_LEADTIME_CONFIG), fixture
 #      ledgers (make_ledger.rb), a temp git repo whose commits are the landings
 #      and reverts (committer dates pinned), and an injected now
 #      (LEAD_TIME_EXPERIMENT_NOW). No network, no real state.
@@ -39,7 +39,7 @@ else
 fi
 
 # ── fixtures: a git repo whose commits are the experiments' landings ───────
-REPO="${TMP}/repo"
+REPO="${TMP}/custom"
 G=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid
    GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid git -C "${REPO}")
 mkdir -p "${REPO}"
@@ -56,14 +56,18 @@ NEVER="$(printf '1%.0s' $(seq 40))"
 [ ${#LANDING} -eq 40 ] && [ ${#OTHER} -eq 40 ] && [ ${#NEWSHA} -eq 40 ] || { echo "FAIL fixture commits"; echo "  Fix: install git"; exit 1; }
 
 CONFIG="${TMP}/repos.json"
-printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/w\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${CONFIG}"
+# Each configured path that exists must be a checkout named for its repo
+# (DND-1526), so the watch repo is a real (empty) checkout named gen_saas.
+mkdir -p "${TMP}/gen_saas"
+env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "${TMP}/gen_saas" init -q -b main
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gen_saas\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${CONFIG}"
 
 STATE="${TMP}/state"
 mkdir -p "${STATE}"
 HYP="${TMP}/hypothesis.txt"
 printf 'Caching the gate fixture should cut verify by a fifth.\n' >"${HYP}"
 
-export LEAD_TIME_STATE_DIR="${STATE}" LEAD_TIME_PHASES_CONFIG="${CONFIG}" LEAD_TIME_EXPERIMENT_NOW="2026-09-21T12:00:00Z"
+export LEAD_TIME_STATE_DIR="${STATE}" ATHENA_LEADTIME_CONFIG="${CONFIG}" LEAD_TIME_EXPERIMENT_NOW="2026-09-21T12:00:00Z"
 
 run() { "${BIN}" "$@" >"${TMP}/out" 2>"${TMP}/err"; echo $?; }
 out() { cat "${TMP}/out"; }
@@ -206,16 +210,34 @@ eq "the phase is free again" "$(s3 rec verify phase "${NEWSHA}" change)" "0"
 
 # ── reverts guard: could not look is unmeasured, never 0 ────────────────────
 echo "== reverts could not look"
-printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${TMP}/gone\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/gone.json"
+# A checkout that is present but has no main (DND-1526: a missing path is
+# skipped by the resolver, so git's could-not-look is reached this way).
+NOMAIN="${TMP}/nomain/custom"
+mkdir -p "${NOMAIN}"
+env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "${NOMAIN}" init -q -b main
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${NOMAIN}\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/nomain.json"
 STATE2="${TMP}/state2"
 mkdir -p "${STATE2}"
 /usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE2}/ledger.jsonl" "${LANDING}"
-eq "record with the repo absent: could not look (exit 3)" "$(LEAD_TIME_STATE_DIR="${STATE2}" LEAD_TIME_PHASES_CONFIG="${TMP}/gone.json" rec verify phase "${LANDING}" change)" "3"
+eq "record with no main to read: could not look (exit 3)" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/nomain.json" rec verify phase "${LANDING}" change)" "3"
 has "... saying it could not look whether it is on main" "$(err)" "could not look whether"
 eq "record with the repo present" "$(LEAD_TIME_STATE_DIR="${STATE2}" rec verify phase "${LANDING}" change)" "0"
-eq "judge with the repo gone: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE2}" LEAD_TIME_PHASES_CONFIG="${TMP}/gone.json" run judge --repo custom)" "0"
+eq "judge with no main to read: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/nomain.json" run judge --repo custom)" "0"
 has "no keep while reverts could not be read" "$(out)" "custom:verify:${SHORT} PENDING"
 has "... and it says the guard is unmeasured" "$(out)" "reverts unmeasured"
+
+# ── a configured repo not on this machine (DND-1526) ────────────────────────
+echo "== skipped on this machine"
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gone/gen_saas\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/gone.json"
+eq "judge on a skipped repo: exit 4" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/gone.json" run judge --repo gen_saas)" "4"
+has "... saying skipped on this machine, with the reason" "$(err)" "gen_saas: skipped on this machine: no such path"
+has "... with Fix:" "$(err)" "Fix:"
+eq "record on a skipped repo: exit 4, nothing written" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/gone.json" run record --repo gen_saas --phase verify --metric phase --commit "${NEWSHA}" --kind change --hypothesis-file "${HYP}")" "4"
+lacks "... no experiment recorded for it" "$(cat "${STATE2}/experiments.jsonl")" '"repo":"gen_saas"'
+eq "an unconfigured repo is a refusal (exit 2), not a skip" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/gone.json" run judge --repo nope)" "2"
+lacks "... and is not called skipped" "$(err)" "skipped on this machine"
+eq "the retired LEAD_TIME_PHASES_CONFIG seam is refused, never ignored" "$(LEAD_TIME_PHASES_CONFIG="${TMP}/gone.json" run judge --repo custom)" "2"
+has "... naming it" "$(err)" "LEAD_TIME_PHASES_CONFIG is retired"
 
 echo
 echo "lead-time-improve self-test: ${PASS} passed, ${FAIL} failed"

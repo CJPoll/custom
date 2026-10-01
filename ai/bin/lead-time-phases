@@ -17,7 +17,9 @@
 #              biggest contributor, and the quality guards.
 #
 # A phase it cannot measure is null with a reason, never 0. The repo list and
-# modes live in ai/config/lead-time-repos.json.
+# modes resolve through ai/lib/lead_time_config_io.rb (ai/bin/lead-time-repos,
+# DND-1526): the tracked ai/config/lead-time-repos.json, or this machine's
+# override.
 #
 # Buckets: FRAMEWORK (argv, output) and MANAGER (Setup, Ingest, Summary) here; DOMAIN
 # in ai/lib/lead_time_phases.rb; SIDE EFFECTS in ai/lib/lead_time_phases_io.rb.
@@ -25,13 +27,15 @@
 # Test seams (tests only):
 #   LEAD_TIME_STATE_DIR          the state dir (default: <main checkout>/ai-artifacts/lead-time)
 #   LEAD_TIME_PHASES_LEAD_TIME   the lead-time executable (default ai/bin/lead-time)
-#   LEAD_TIME_PHASES_CONFIG      the config file (default ai/config/lead-time-repos.json)
+#   ATHENA_LEADTIME_CONFIG       the config file (see ai/bin/lead-time-repos --help)
 #   LEAD_TIME_PHASES_NOW         "now", RFC 3339 (the 14-day backfill start)
 #   ATHENA_TELEMETRY_DIR         the telemetry store (DND-1473's own seam)
 #   XDG_STATE_HOME               where harness-gate's timings.jsonl lives
 #
-# Exit: 0 ok; 1 a tool or state error; 2 a usage or config refusal;
-# 3 SCAN INCOMPLETE (nothing ingested, the cursor unchanged).
+# Exit: 0 ok; 1 a tool or state error (a config that could not be read
+# included); 2 a usage or config refusal; 3 SCAN INCOMPLETE (nothing
+# ingested, the cursor unchanged); 4 the --repo is configured but skipped on
+# this machine.
 
 require "json"
 require "time"
@@ -39,6 +43,7 @@ require "open3"
 require_relative "../lib/strict_argv"
 require_relative "../lib/lead_time_phases"
 require_relative "../lib/lead_time_phases_io"
+require_relative "../lib/lead_time_config_io"
 
 AI_DIR = File.expand_path("..", __dir__)
 BACKFILL_DAYS = 14
@@ -77,7 +82,8 @@ HELP = <<~TXT
     --self-test    run the domain and IO suites.
 
   Options:
-    --repo NAME    a repo in ai/config/lead-time-repos.json
+    --repo NAME    a repo in this machine's lead-time repo list
+                   (ai/bin/lead-time-repos)
     --since WHEN   with --ingest: scan from WHEN instead of the cursor
                    (YYYY-MM-DD or RFC 3339 with a zone). An explicit --since
                    run never moves the cursor.
@@ -101,8 +107,10 @@ HELP = <<~TXT
   LEAD_TIME_STATE_DIR. A repo in `watch` mode gets lead/code/tail only; its
   phases are n/a by design.
 
-  Exit: 0 ok; 1 tool or state error; 2 usage or config refusal; 3 SCAN
-  INCOMPLETE.
+  Exit: 0 ok; 1 tool or state error (a config that could not be read
+  included); 2 usage or config refusal; 3 SCAN INCOMPLETE; 4 the --repo is
+  configured but skipped on this machine (its checkout is missing; nothing
+  is read or written).
 TXT
 
 SPEC = { "--ingest" => :switch, "--summary" => :switch, "--self-test" => :switch, "--repo" => :value,
@@ -129,8 +137,8 @@ module Setup
   module_function
 
   def resolve(opts, env)
-    config = load_config(env)
-    repo = LeadTimePhases::Config.find(config, opts["--repo"])
+    config = LeadTimeConfigIO.resolve(env)
+    repo = config.find(opts["--repo"])
     since = nil
     if opts["--since"]
       since, why = LeadTimePhasesIO::LeadTimeLib.parse_since(opts["--since"])
@@ -152,14 +160,6 @@ module Setup
     return [nil, why] unless common
 
     [File.join(File.dirname(common), "ai-artifacts", "lead-time"), nil]
-  end
-
-  def load_config(env)
-    path = env["LEAD_TIME_PHASES_CONFIG"].to_s
-    path = File.join(AI_DIR, "config", "lead-time-repos.json") if path.empty?
-    LeadTimePhases::Config.parse(File.read(path), home: env["HOME"].to_s)
-  rescue SystemCallError => e
-    raise LeadTimePhases::ConfigError, "cannot read #{path} (#{e.class.name.split('::').last})"
   end
 end
 
@@ -453,7 +453,7 @@ def main(argv, env)
 
   modes = %w[--ingest --summary].select { |m| opts[m] }
   return fail_with(2, "usage error: pass exactly one of --ingest or --summary", "see --help") unless modes.size == 1
-  return fail_with(2, "usage error: --repo NAME is required", "pass --repo with a repo from ai/config/lead-time-repos.json") unless opts["--repo"]
+  return fail_with(2, "usage error: --repo NAME is required", "pass --repo with a repo from ai/bin/lead-time-repos") unless opts["--repo"]
   return fail_with(2, "usage error: --since goes with --ingest", "drop --since, or use --ingest") if opts["--since"] && !opts["--ingest"]
   if opts["--rejoin"] && !(opts["--ingest"] && opts["--since"])
     return fail_with(2, "usage error: --rejoin goes with --ingest and an explicit --since",
@@ -476,8 +476,12 @@ def main(argv, env)
   end
 rescue StrictArgv::UsageError => e
   fail_with(2, "usage error: #{e.message}", "see --help")
-rescue LeadTimePhases::ConfigError => e
-  fail_with(2, "config refused: #{e.message}", "correct ai/config/lead-time-repos.json (repos: name, path, mode improve|watch; window; improvement_epic), or pass a configured --repo")
+rescue LeadTimeConfig::Skipped => e
+  fail_with(4, "#{e.message}; nothing read or written", e.fix)
+rescue LeadTimeConfig::CouldNotLook => e
+  fail_with(1, "could not look: #{e.message}", e.fix)
+rescue LeadTimeConfig::Error => e
+  fail_with(2, "config refused: #{e.message}", e.fix)
 rescue ArgumentError => e
   fail_with(2, "a time is malformed (#{e.message})", "LEAD_TIME_PHASES_NOW must be RFC 3339 with a zone")
 rescue SystemCallError => e

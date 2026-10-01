@@ -22,17 +22,20 @@
 # Environment:
 #   LEAD_TIME_STATE_DIR        the state dir (default: <main checkout>/ai-artifacts/lead-time);
 #                              a run whose brief names another state dir sets it
-#   LEAD_TIME_PHASES_CONFIG    the config file (default ai/config/lead-time-repos.json; tests)
+#   ATHENA_LEADTIME_CONFIG     the repo list (see ai/bin/lead-time-repos --help)
 #   LEAD_TIME_EXPERIMENT_NOW   "now", RFC 3339 (tests)
 #
 # Exit: 0 ok; 1 a tool or state error; 2 a usage error or a refusal;
-# 3 could not look (no ledger; git could not say whether a commit is on main).
+# 3 could not look (no ledger; git could not say whether a commit is on main;
+# the config could not be read); 4 the --repo is configured but skipped on
+# this machine.
 
 require "json"
 require "time"
 require_relative "../../../lib/strict_argv"
 require_relative "../../../lib/lead_time_phases"
 require_relative "../../../lib/lead_time_phases_io"
+require_relative "../../../lib/lead_time_config_io"
 require_relative "../lib/experiment"
 require_relative "../lib/experiment_store"
 require_relative "../lib/experiment_git"
@@ -83,7 +86,8 @@ HELP = <<~TXT
                 for a share that did not fall
 
   Options:
-    --repo R             an `improve` repo in ai/config/lead-time-repos.json
+    --repo R             an `improve` repo in this machine's lead-time repo
+                         list (ai/bin/lead-time-repos)
     --phase P            implement | verify | queue | integrate | merge
     --metric M           phase | lead | code | counter:<name> | na_share
                          (instrumentation measures na_share; a change does not)
@@ -96,8 +100,10 @@ HELP = <<~TXT
   (gitignored), or LEAD_TIME_STATE_DIR.
 
   Exit: 0 ok; 1 tool or state error; 2 usage error or refusal; 3 could not
-  look (no ledger: run ai/bin/lead-time-phases --ingest first; or git could
-  not say whether the commit is on main).
+  look (no ledger: run ai/bin/lead-time-phases --ingest first; git could
+  not say whether the commit is on main; or the config could not be read);
+  4 the --repo is configured but skipped on this machine (its checkout is
+  missing).
 TXT
 
 SPECS = {
@@ -140,20 +146,15 @@ module Setup
     refuse(2, "LEAD_TIME_EXPERIMENT_NOW=#{raw.inspect} is not RFC 3339", "unset it, or give an RFC 3339 time")
   end
 
-  def config(env)
-    path = env["LEAD_TIME_PHASES_CONFIG"].to_s
-    path = File.join(AI_DIR, "config", "lead-time-repos.json") if path.empty?
-    LeadTimePhases::Config.parse(File.read(path), home: env["HOME"].to_s)
-  rescue SystemCallError => e
-    refuse(1, "cannot read the config #{path} (#{e.class.name.split('::').last})", "restore ai/config/lead-time-repos.json")
-  rescue LeadTimePhases::ConfigError => e
-    refuse(2, "config: #{e.message}", "fix ai/config/lead-time-repos.json")
-  end
-
+  # The repo, resolved through the one lead-time repo resolver (DND-1526).
   def repo(env, name)
-    LeadTimePhases::Config.find(config(env), name)
-  rescue LeadTimePhases::ConfigError => e
-    refuse(2, e.message, "pass --repo as one of the configured repos")
+    LeadTimeConfigIO.resolve(env).find(name)
+  rescue LeadTimeConfig::Skipped => e
+    refuse(4, e.message, e.fix)
+  rescue LeadTimeConfig::CouldNotLook => e
+    refuse(3, "could not look: #{e.message}", e.fix)
+  rescue LeadTimeConfig::Error => e
+    refuse(2, "config: #{e.message}", e.fix)
   end
 
   def improve_repo(env, name)
@@ -161,7 +162,7 @@ module Setup
     return r if r.mode == "improve"
 
     refuse(2, "repo #{name} is in #{r.mode} mode; experiments run on improve repos only",
-           "pass an improve repo, or move #{name} to improve in ai/config/lead-time-repos.json")
+           "pass an improve repo, or move #{name} to improve in this machine's repo list (ai/bin/lead-time-repos names the file)")
   end
 
   # <main checkout>/ai-artifacts/lead-time, resolved from this tool's own git

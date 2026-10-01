@@ -35,7 +35,6 @@ module LeadTimePhases
     "integrate" => %w[integrate_start integrate_end],
     "merge" => %w[integrate_end landed],
   }.freeze
-  MODES = %w[improve watch].freeze
   TOTALS = { "lead" => "lead_s", "code" => "code_s", "tail" => "tail_s" }.freeze
   # The telemetry events a phase or counter reads. telemetry.probe is never an
   # anchor (ai/telemetry/events.json).
@@ -45,8 +44,6 @@ module LeadTimePhases
   # A full git object name (SHA-1 or SHA-256), lowercase as git writes it and
   # as receipts and verdicts are keyed: an uppercase one would join nothing.
   SHA_RE = /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/.freeze
-
-  class ConfigError < StandardError; end
 
   # status: :ok | :empty | :could_not_look. items: what was found (a partial
   # read may carry items AND :could_not_look). reason: why, for a miss.
@@ -87,75 +84,6 @@ module LeadTimePhases
       s = seconds.round
       parts = [[s / 86_400, "d"], [(s % 86_400) / 3600, "h"], [(s % 3600) / 60, "m"], [s % 60, "s"]]
       parts.reject { |n, _| n.zero? }.first(2).map { |n, u| "#{n}#{u}" }.join(" ")
-    end
-  end
-
-  # ai/config/lead-time-repos.json
-  module Config
-    Repo = Struct.new(:name, :path, :mode, keyword_init: true)
-    Parsed = Struct.new(:repos, :window, :improvement_epic, keyword_init: true)
-    TOP_KEYS = %w[repos window improvement_epic].freeze
-    REPO_KEYS = %w[name path mode].freeze
-    NAME_RE = /\A[A-Za-z0-9][A-Za-z0-9_.-]*\z/.freeze
-
-    module_function
-
-    # -> Parsed, or raises ConfigError naming what is wrong.
-    def parse(text, home:)
-      doc = JSON.parse(text)
-      raise ConfigError, "the config is not a JSON object" unless doc.is_a?(Hash)
-
-      keys!(doc, TOP_KEYS, "the config")
-      window = doc["window"]
-      raise ConfigError, "window must be a positive integer, got #{window.inspect}" unless window.is_a?(Integer) && window.positive?
-
-      epic = doc["improvement_epic"]
-      raise ConfigError, "improvement_epic must be a non-empty string" unless epic.is_a?(String) && !epic.strip.empty?
-
-      repos = doc["repos"]
-      raise ConfigError, "repos must be a non-empty list" unless repos.is_a?(Array) && !repos.empty?
-
-      parsed = repos.each_with_index.map { |r, i| repo(r, i, home) }
-      dup = parsed.map(&:name).tally.find { |_, n| n > 1 }
-      raise ConfigError, "repo #{dup[0].inspect} is listed #{dup[1]} times" if dup
-
-      Parsed.new(repos: parsed, window: window, improvement_epic: epic)
-    rescue JSON::ParserError => e
-      raise ConfigError, "the config is not valid JSON (#{e.message.lines.first.to_s.strip})"
-    end
-
-    def repo(entry, index, home)
-      raise ConfigError, "repos[#{index}] is not an object" unless entry.is_a?(Hash)
-
-      name = entry["name"]
-      keys!(entry, REPO_KEYS, "repos[#{index}] (#{name.inspect})")
-      raise ConfigError, "repos[#{index}] name #{name.inspect} is not a plain name" unless name.is_a?(String) && NAME_RE.match?(name)
-
-      mode = entry["mode"]
-      raise ConfigError, "repo #{name.inspect} has unknown mode #{mode.inspect} (known: #{MODES.join(', ')})" unless MODES.include?(mode)
-
-      Repo.new(name: name, path: expand(entry["path"], name, home), mode: mode)
-    end
-
-    def keys!(hash, wanted, what)
-      missing = wanted - hash.keys
-      extra = hash.keys - wanted
-      raise ConfigError, "#{what} is missing #{missing.join(', ')}" unless missing.empty?
-      raise ConfigError, "#{what} has unknown key(s) #{extra.join(', ')}" unless extra.empty?
-    end
-
-    def expand(path, name, home)
-      p = path.to_s
-      p = File.join(home, p[2..]) if p.start_with?("~/")
-      raise ConfigError, "repo #{name.inspect} path #{path.inspect} is not absolute or ~/-relative" unless p.start_with?("/")
-
-      p
-    end
-
-    # -> the Repo, or raises ConfigError naming the configured repos.
-    def find(parsed, name)
-      parsed.repos.find { |r| r.name == name } or
-        raise ConfigError, "no repo #{name.inspect} in the config (configured: #{parsed.repos.map(&:name).join(', ')})"
     end
   end
 

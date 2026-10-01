@@ -147,6 +147,9 @@ tools:
   # telemetry, runs ai/bin/lead-time (read-only), and writes only its own state
   # dir (ai-artifacts/lead-time: an idempotent ledger and per-repo cursors).
   lead-time-phases:        { class: idempotent, reason: ledger }
+  # lead-time-repos (DND-1526) resolves the lead-time repo list: it stats and
+  # reads the config, runs read-only `git rev-parse` per repo, and writes nothing.
+  lead-time-repos:         { class: readOnly, reason: config }
 
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }

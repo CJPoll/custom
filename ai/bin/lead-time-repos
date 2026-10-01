@@ -1,0 +1,115 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# lead-time-repos -- the one resolver for the lead-time repo list (DND-1526).
+# Prints which repos this machine's lead-time loop works, in which mode, from
+# which file, and which configured repos it skipped because their checkout is
+# not on this machine.
+#
+# Buckets: FRAMEWORK (argv, output) here; MANAGER and SIDE EFFECTS in
+# ai/lib/lead_time_config_io.rb; DOMAIN in ai/lib/lead_time_config.rb.
+# Read-only: it writes nothing.
+
+require "json"
+require_relative "../lib/strict_argv"
+require_relative "../lib/lead_time_config"
+require_relative "../lib/lead_time_config_io"
+
+AI_DIR = File.expand_path("..", __dir__)
+
+HELP = <<~TXT
+  Usage:
+    ai/bin/lead-time-repos [--json]
+    ai/bin/lead-time-repos --self-test
+
+  Resolve the lead-time repo list for THIS machine (DND-1526). Every reader
+  of the list (lead-time-phases, the skill's experiment script) resolves
+  through the same rules.
+
+  Where the list comes from:
+    1. ATHENA_LEADTIME_CONFIG, when set (even empty): authoritative. It must
+       be an absolute path to a valid file; anything else is an error.
+    2. Else ${XDG_CONFIG_HOME:-$HOME/.config}/athena/lead-time-repos.json,
+       the machine-local override. Absent: the tracked
+       ai/config/lead-time-repos.json (source=default). Present: it replaces
+       the tracked file whole (source=override); there is no merge. It must
+       be a regular file owned by you and not group/other-writable.
+
+  Schema: {"repos":[{"name","path","mode":"improve|watch",
+  "product_epic"?}], "window":N, "improvement_epic":"..."}. A repo with no
+  product_epic files product tickets on improvement_epic.
+
+  Presence: a configured path that does not exist is SKIPPED, named with its
+  reason, and counted. A path that exists but is not the top of a git
+  checkout, or whose main checkout's basename is not the repo's name (the
+  telemetry label), is an error. Zero repos left is an error.
+
+  Output: one line per repo and one per skip; --json prints
+  {"source","path","window","improvement_epic","repos":[{name,path,mode,
+  product_epic,product_epic_source}],"skipped":[{name,path,reason}],
+  "considered"}.
+
+  Options:
+    --json       JSON instead of the table
+    --self-test  run the domain suite (ai/test/lead-time-repos/config_test.rb)
+    --help       this text
+
+  Exit: 0 ok; 1 internal error; 2 the config or a repo path is refused;
+  3 could not look (a file it could not read, git that could not run);
+  4 no configured repo is checked out on this machine.
+TXT
+
+SPEC = { "--json" => :switch, "--self-test" => :switch }.freeze
+
+def fail_with(code, what, fix)
+  warn "lead-time-repos: #{what}"
+  warn "Fix: #{fix}"
+  code
+end
+
+def table(res)
+  lines = ["lead-time-repos: source=#{res.source} path=#{res.path} window=#{res.window} improvement_epic=#{res.improvement_epic}"]
+  width = (res.repos.map(&:name) + res.skipped.map(&:name)).map(&:size).max
+  res.repos.each do |r|
+    epic = r.product_epic_source == "repo" ? r.product_epic : "#{r.product_epic} (improvement_epic)"
+    lines << "  repo     #{r.name.ljust(width)}  #{r.mode.ljust(7)}  #{r.path}  product_epic=#{epic}"
+  end
+  res.skipped.each { |s| lines << "  skipped  #{s.name.ljust(width)}  #{s.reason}" }
+  lines << "lead-time-repos: #{res.considered} considered, #{res.repos.size} resolved, #{res.skipped.size} skipped"
+  lines.join("\n")
+end
+
+def self_test
+  suite = File.join(AI_DIR, "test", "lead-time-repos", "config_test.rb")
+  return fail_with(1, "self-test suite missing: #{suite}", "restore ai/test/lead-time-repos/") unless File.exist?(suite)
+
+  system("/usr/bin/ruby", suite) ? 0 : 1
+end
+
+def main(argv, env)
+  opts = StrictArgv.parse(argv, SPEC)
+  return self_test if opts["--self-test"]
+
+  res = LeadTimeConfigIO.resolve(env).require_any!
+  puts(opts["--json"] ? JSON.generate(res.to_h) : table(res))
+  0
+rescue StrictArgv::UsageError => e
+  fail_with(2, "usage error: #{e.message}", "see --help")
+rescue LeadTimeConfig::NoRepos => e
+  fail_with(4, e.message, e.fix)
+rescue LeadTimeConfig::CouldNotLook => e
+  fail_with(3, "could not look: #{e.message}", e.fix)
+rescue LeadTimeConfig::Error => e
+  fail_with(2, "config refused: #{e.message}", e.fix)
+rescue StandardError => e
+  fail_with(1, "internal error #{e.class}: #{e.message} (#{e.backtrace&.first})",
+            "this is a lead-time-repos bug: file a DND ticket with this line")
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.include?("--help") || ARGV.include?("-h")
+    puts HELP
+    exit 0
+  end
+  exit main(ARGV, ENV)
+end

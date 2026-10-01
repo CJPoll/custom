@@ -1,0 +1,294 @@
+# frozen_string_literal: true
+
+# lead_time_config -- the DOMAIN of the lead-time repo list (DND-1526): where
+# the list is read from, its schema, whether each configured repo is checked
+# out on this machine, and the resolved result. Pure: every input arrives as a
+# value (an env hash, FileFacts, a Probe per repo). The IO that gathers those
+# values is ai/lib/lead_time_config_io.rb; the one CLI is ai/bin/lead-time-repos.
+#
+# Discovery (the private-overlay contract's *Discovery* shape):
+#   1. ATHENA_LEADTIME_CONFIG set, even empty: authoritative. An absolute path
+#      to a valid file, or an error. Never a fall-through.
+#   2. Else ${XDG_CONFIG_HOME:-$HOME/.config}/athena/lead-time-repos.json.
+#      Absent: the tracked ai/config/lead-time-repos.json (source=default).
+#      Present: it REPLACES the tracked file whole (source=override).
+#   3. An override that cannot be stat'd, is not a regular file, is not owned
+#      by this user, or is group/other-writable is an error, never "no
+#      override".
+#   4. HOME unset, empty or relative with no env path is an error.
+#
+# Presence (~/.claude/CLAUDE.md -> *A failed lookup must never look like an
+# empty one*): a configured path that does not exist is SKIPPED, by name, and
+# counted. A path that exists but is not a git repository's top, or whose main
+# checkout's basename (the telemetry repo label) is not the repo's name, is an
+# error. Zero repos left is NoRepos.
+#
+# Every error carries the message and a Fix: the caller prints.
+
+require "json"
+
+module LeadTimeConfig
+  MODES = %w[improve watch].freeze
+  ENV_PATH = "ATHENA_LEADTIME_CONFIG"
+  RETIRED_ENV = "LEAD_TIME_PHASES_CONFIG"
+  OVERRIDE_REL = "athena/lead-time-repos.json"
+  TOP_KEYS = %w[repos window improvement_epic].freeze
+  REPO_KEYS = %w[name path mode].freeze
+  REPO_OPTIONAL = %w[product_epic].freeze
+  NAME_RE = /\A[A-Za-z0-9][A-Za-z0-9_.-]*\z/.freeze
+  SCHEMA_HINT = "repos: [{name, path, mode improve|watch, optional product_epic}], window, improvement_epic"
+
+  # A refusal: message plus the Fix: line the caller prints.
+  class Error < StandardError
+    attr_reader :fix
+
+    def initialize(message, fix)
+      super(message)
+      @fix = fix
+    end
+  end
+
+  # A --repo that is not in the resolved config at all.
+  class NotConfigured < Error; end
+  # A --repo that is configured but not checked out on this machine.
+  class Skipped < Error; end
+  # Every configured repo was skipped.
+  class NoRepos < Error; end
+  # The IO side could not look (a file it could not read, git that could not
+  # run): never "absent", never "not on this machine".
+  class CouldNotLook < Error; end
+
+  Repo = Struct.new(:name, :path, :mode, :product_epic, :product_epic_source, keyword_init: true) do
+    def to_h = { "name" => name, "path" => path, "mode" => mode, "product_epic" => product_epic,
+                 "product_epic_source" => product_epic_source }
+  end
+  Parsed = Struct.new(:repos, :window, :improvement_epic, keyword_init: true)
+  # kind: :env (ATHENA_LEADTIME_CONFIG) | :xdg (the per-user override path)
+  Candidate = Struct.new(:kind, :path, keyword_init: true)
+  # What the IO side saw at a candidate path. present: lstat found an entry.
+  # stat_error: set when it is present but stat (following links) failed.
+  FileFacts = Struct.new(:present, :regular, :uid, :mode, :stat_error, keyword_init: true)
+  Location = Struct.new(:path, :source, keyword_init: true)
+  # What the IO side saw at a repo's path. exists follows symlinks; symlink is
+  # lstat's answer. git_error is set when `git rev-parse` refused.
+  Probe = Struct.new(:path, :exists, :symlink, :directory, :realpath, :git_error, :toplevel, :common_dir,
+                     keyword_init: true)
+  Skip = Struct.new(:name, :path, :reason, keyword_init: true) do
+    def to_h = { "name" => name, "path" => path, "reason" => reason }
+  end
+
+  Resolution = Struct.new(:source, :path, :window, :improvement_epic, :repos, :skipped, :considered,
+                          keyword_init: true) do
+    # -> the Repo; raises Skipped (configured, not here) or NotConfigured.
+    def find(name)
+      hit = repos.find { |r| r.name == name }
+      return hit if hit
+
+      skip = skipped.find { |s| s.name == name }
+      if skip
+        raise Skipped.new("#{name}: skipped on this machine: #{skip.reason}",
+                          "check out #{name} at #{skip.path}, or drop it from #{path}")
+      end
+
+      raise NotConfigured.new("no repo #{name.inspect} in #{path} (configured: #{(repos + skipped).map(&:name).join(', ')})",
+                              "pass one of the configured repos, or add #{name} to #{path}")
+    end
+
+    def require_any!
+      return self unless repos.empty?
+
+      raise NoRepos.new("no configured repo is checked out on this machine (#{considered} considered, " \
+                        "#{skipped.size} skipped: #{skipped.map(&:name).join(', ')}; config #{path})",
+                        "check out a configured repo, or write an override at " \
+                        "${XDG_CONFIG_HOME:-~/.config}/#{OVERRIDE_REL} listing the repos this machine has")
+    end
+
+    def to_h
+      { "source" => source, "path" => path, "window" => window, "improvement_epic" => improvement_epic,
+        "repos" => repos.map(&:to_h), "skipped" => skipped.map(&:to_h), "considered" => considered }
+    end
+  end
+
+  module_function
+
+  # ── discovery ─────────────────────────────────────────────────────────────
+
+  # -> Candidate, or raises Error. env: a Hash of the process environment.
+  def candidate(env)
+    if env.key?(RETIRED_ENV)
+      raise Error.new("#{RETIRED_ENV} is retired (DND-1526) and is not read",
+                      "set #{ENV_PATH} to the config file instead, and unset #{RETIRED_ENV}")
+    end
+    return env_candidate(env[ENV_PATH].to_s) if env.key?(ENV_PATH)
+
+    base = env["XDG_CONFIG_HOME"].to_s
+    if base.empty?
+      home = env["HOME"].to_s
+      unless home.start_with?("/")
+        raise Error.new("HOME is #{home.empty? ? 'unset or empty' : "relative (#{home.inspect})"}, so the override path cannot be computed",
+                        "set HOME to an absolute path, or set #{ENV_PATH} to the config file")
+      end
+      base = File.join(home, ".config")
+    elsif !base.start_with?("/")
+      raise Error.new("XDG_CONFIG_HOME is relative (#{base.inspect}), so the override path cannot be computed",
+                      "set XDG_CONFIG_HOME to an absolute path, or unset it")
+    end
+    Candidate.new(kind: :xdg, path: File.join(base, OVERRIDE_REL))
+  end
+
+  def env_candidate(path)
+    if path.empty?
+      raise Error.new("#{ENV_PATH} is set but empty", "unset #{ENV_PATH}, or set it to the absolute path of a config file")
+    end
+    unless path.start_with?("/")
+      raise Error.new("#{ENV_PATH}=#{path.inspect} is not an absolute path", "set #{ENV_PATH} to an absolute path, or unset it")
+    end
+
+    Candidate.new(kind: :env, path: path)
+  end
+
+  # -> Location, or raises Error. facts: FileFacts at candidate.path.
+  def locate(candidate, facts, tracked:, euid:)
+    unless facts.present
+      return Location.new(path: tracked, source: "default") if candidate.kind == :xdg
+
+      raise Error.new("#{ENV_PATH}=#{candidate.path} does not exist", "point #{ENV_PATH} at an existing config file, or unset it")
+    end
+
+    where = candidate.kind == :env ? "#{ENV_PATH}=#{candidate.path}" : "the override #{candidate.path}"
+    remedy = candidate.kind == :env ? "or unset #{ENV_PATH}" : "or remove it to use the tracked default"
+    if facts.stat_error
+      raise Error.new("#{where} exists but cannot be read (#{facts.stat_error}; a dangling link?)",
+                      "repair or remove #{candidate.path}; an unreadable override is never read as 'no override'")
+    end
+    raise Error.new("#{where} is not a regular file", "replace #{candidate.path} with a regular file, #{remedy}") unless facts.regular
+    unless facts.uid == euid
+      raise Error.new("#{where} is owned by uid #{facts.uid}, not this user (uid #{euid})",
+                      "chown it to this user, #{remedy}")
+    end
+    if facts.mode.to_i.anybits?(0o022)
+      raise Error.new(format("%<w>s is group/other-writable (mode %<m>04o)", w: where, m: facts.mode & 0o7777),
+                      "chmod go-w #{candidate.path}")
+    end
+
+    Location.new(path: candidate.path, source: "override")
+  end
+
+  # ── schema ────────────────────────────────────────────────────────────────
+
+  # -> Parsed, or raises Error naming the file and what is wrong.
+  def parse(text, home:, path:)
+    doc = JSON.parse(text)
+    bad!(path, "the config is not a JSON object") unless doc.is_a?(Hash)
+
+    keys!(path, doc, TOP_KEYS, [], "the config")
+    window = doc["window"]
+    bad!(path, "window must be a positive integer, got #{window.inspect}") unless window.is_a?(Integer) && window.positive?
+
+    epic = doc["improvement_epic"]
+    bad!(path, "improvement_epic must be a non-empty string") unless nonblank?(epic)
+
+    repos = doc["repos"]
+    bad!(path, "repos must be a non-empty list") unless repos.is_a?(Array) && !repos.empty?
+
+    parsed = repos.each_with_index.map { |r, i| repo(path, r, i, home, epic) }
+    dup = parsed.map(&:name).tally.find { |_, n| n > 1 }
+    bad!(path, "repo #{dup[0].inspect} is listed #{dup[1]} times") if dup
+
+    Parsed.new(repos: parsed, window: window, improvement_epic: epic)
+  rescue JSON::ParserError => e
+    bad!(path, "the config is not valid JSON (#{e.message.lines.first.to_s.strip})")
+  end
+
+  def repo(path, entry, index, home, improvement_epic)
+    bad!(path, "repos[#{index}] is not an object") unless entry.is_a?(Hash)
+
+    name = entry["name"]
+    keys!(path, entry, REPO_KEYS, REPO_OPTIONAL, "repos[#{index}] (#{name.inspect})")
+    bad!(path, "repos[#{index}] name #{name.inspect} is not a plain name") unless name.is_a?(String) && NAME_RE.match?(name)
+
+    mode = entry["mode"]
+    bad!(path, "repo #{name.inspect} has unknown mode #{mode.inspect} (known: #{MODES.join(', ')})") unless MODES.include?(mode)
+
+    product = improvement_epic
+    source = "improvement_epic"
+    if entry.key?("product_epic")
+      bad!(path, "repo #{name.inspect} product_epic must be a non-empty string, or absent") unless nonblank?(entry["product_epic"])
+      product = entry["product_epic"]
+      source = "repo"
+    end
+    Repo.new(name: name, path: expand(path, entry["path"], name, home), mode: mode,
+             product_epic: product, product_epic_source: source)
+  end
+
+  def nonblank?(value) = value.is_a?(String) && !value.strip.empty?
+
+  def keys!(path, hash, wanted, optional, what)
+    missing = wanted - hash.keys
+    extra = hash.keys - wanted - optional
+    bad!(path, "#{what} is missing #{missing.join(', ')}") unless missing.empty?
+    bad!(path, "#{what} has unknown key(s) #{extra.join(', ')}") unless extra.empty?
+  end
+
+  def expand(path, raw, name, home)
+    p = raw.to_s
+    if p.start_with?("~/")
+      bad!(path, "repo #{name.inspect} path #{raw.inspect} needs HOME, which is unset or not absolute") unless home.to_s.start_with?("/")
+      p = File.join(home, p[2..])
+    end
+    bad!(path, "repo #{name.inspect} path #{raw.inspect} is not absolute or ~/-relative") unless p.start_with?("/")
+
+    p
+  end
+
+  def bad!(path, what)
+    raise Error.new("#{path}: #{what}", "correct #{path} (#{SCHEMA_HINT})")
+  end
+
+  # ── presence ──────────────────────────────────────────────────────────────
+
+  # The repo label the telemetry writer stamps on every event
+  # (AthenaTelemetry::GitContext): the basename of the main checkout.
+  def repo_label(common_dir) = File.basename(File.dirname(common_dir))
+
+  # -> nil (present), a Skip (not on this machine), or raises Error.
+  def presence(repo, probe)
+    unless probe.exists
+      why = probe.symlink ? "#{repo.path} is a dangling symlink" : "no such path #{repo.path}"
+      return Skip.new(name: repo.name, path: repo.path, reason: why)
+    end
+
+    fix = "point #{repo.name}'s path at the top of its git checkout, or drop #{repo.name} from the config"
+    raise Error.new("repo #{repo.name}: #{repo.path} exists but is not a directory", fix) unless probe.directory
+    raise Error.new("repo #{repo.name}: #{repo.path} is not a git repository (#{probe.git_error})", fix) if probe.git_error
+    unless probe.toplevel == probe.realpath
+      raise Error.new("repo #{repo.name}: #{repo.path} is not the top of its git checkout (that is #{probe.toplevel})", fix)
+    end
+
+    label = repo_label(probe.common_dir)
+    unless label == repo.name
+      raise Error.new("repo #{repo.name}: #{repo.path}'s main checkout is named #{label.inspect}; telemetry labels its " \
+                      "events #{label.inspect}, so #{repo.name} would join zero events",
+                      "rename the entry to #{label.inspect}, or point it at the checkout named #{repo.name}")
+    end
+    nil
+  end
+
+  # ── resolve ───────────────────────────────────────────────────────────────
+
+  # -> Resolution. probes: { repo name => Probe }. A repo with no probe is an
+  # error: the IO side failed to look, which is never "not on this machine".
+  def resolve(location, parsed, probes)
+    repos = []
+    skipped = []
+    parsed.repos.each do |r|
+      probe = probes[r.name] or
+        raise Error.new("repo #{r.name}: no probe was taken (an internal fault)", "file a DND ticket with this line")
+      skip = presence(r, probe)
+      skip ? skipped << skip : repos << r
+    end
+    Resolution.new(source: location.source, path: location.path, window: parsed.window,
+                   improvement_epic: parsed.improvement_epic, repos: repos, skipped: skipped,
+                   considered: parsed.repos.size)
+  end
+end

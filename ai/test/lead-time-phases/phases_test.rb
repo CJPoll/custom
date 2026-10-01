@@ -259,38 +259,6 @@ check("S5 no counters: rates n/a with a reason, reverts could not look") do
   g2["critic_block_rate"]["value"].nil? && g2["critic_block_rate"]["reason"] && g2["reverts"]["reason"].include?("could not look")
 end
 
-# ── Config.parse ───────────────────────────────────────────────────────────
-
-def cfg(repos, window: 20) = JSON.generate("repos" => repos, "window" => window, "improvement_epic" => "epic-id")
-
-def raises(text)
-  L::Config.parse(text, home: "/home/u")
-  nil
-rescue L::ConfigError => e
-  e.message
-end
-
-check("K1 an unknown mode raises naming the repo") { raises(cfg([{ "name" => "custom", "path" => "~/dev/custom", "mode" => "fix" }])).to_s.include?('"custom" has unknown mode') }
-check("K2 a duplicate name raises") do
-  r = { "name" => "custom", "path" => "~/dev/custom", "mode" => "improve" }
-  raises(cfg([r, r])).to_s.include?("listed 2 times")
-end
-check("K4 a missing key raises") { raises(cfg([{ "name" => "custom", "path" => "~/dev/custom" }])).to_s.include?("missing mode") }
-check("K4 an unknown key raises") { raises(cfg([{ "name" => "c", "path" => "/p", "mode" => "watch", "x" => 1 }])).to_s.include?("unknown key") }
-check("K4 a zero window raises") { raises(cfg([{ "name" => "c", "path" => "/p", "mode" => "watch" }], window: 0)).to_s.include?("window") }
-check("K4 a relative path raises") { raises(cfg([{ "name" => "c", "path" => "dev/c", "mode" => "watch" }])).to_s.include?("not absolute") }
-seed_path = File.expand_path("../../config/lead-time-repos.json", __dir__)
-seed = L::Config.parse(File.read(seed_path), home: "/home/u")
-check("K3 the committed seed parses") { seed.repos.map { |r| [r.name, r.mode] } == [%w[custom improve], %w[gen_saas watch], %w[walt_ui watch]] }
-check("K3 seed paths expand ~/dev/<name>") { seed.repos.map(&:path) == %w[/home/u/dev/custom /home/u/dev/gen_saas /home/u/dev/walt_ui] }
-check("K3 seed window is 20") { seed.window == 20 }
-check("K5 find names the configured repos on a miss") do
-  L::Config.find(seed, "nope")
-  false
-rescue L::ConfigError => e
-  e.message.include?("custom, gen_saas, walt_ui")
-end
-
 # ── Landing.from_row, Ledger ───────────────────────────────────────────────
 
 pr_row = { "pr" => 7, "landed_via" => "merge", "merge_commit" => OTHER, "landed_commit" => nil, "merged" => "2026-10-01T05:00:00Z",
