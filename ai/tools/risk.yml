@@ -237,6 +237,10 @@ tools:
   skills/athena:slack/bin/read-inbox:                 { class: idempotent, reason: state }
   skills/athena:merge-boarding/scripts/integration-gate: { class: idempotent, reason: gate }
   skills/athena:epic-clustering/scripts/epic-clustering: { class: idempotent, reason: snapshot }
+  # experiment (DND-1478) reads the lead-time ledger and git (reverts on main)
+  # and appends only to its own ai-artifacts/lead-time/experiments.jsonl; a
+  # re-judge with the same inputs appends nothing.
+  skills/athena:lead-time-improve/scripts/experiment: { class: idempotent, reason: ledger }
   skills/athena:merge-boarding/scripts/locked-merge: { class: destructive, reason: forge }
   # destructive: Slack writes, routed mail through the Athena server, and the
   # inbox ack, which consumes messages from a view other sessions share (see the

@@ -27,6 +27,12 @@ is safe, and commit it. Full autonomy is a privilege backed by one safety net â€
 its own checks** (see *The gate*). If you are ever unsure whether a change is
 warranted, the answer is to gather more evidence or leave it alone, not to ask.
 
+**`MODE: lead-time`.** If your brief says `MODE: lead-time`, run
+`athena:lead-time-improve` and nothing else: no report mining, no owner-notes
+or judgment-feedback pass. Your state dir is the one the brief names (else the
+skill's default), never `$SHIPWRIGHT_STATE_DIR`. Your lane, gate, commit
+wrapper and *Speed a safety check up; never weaken it* still bind you.
+
 ## Harness information-architecture principles
 
 These are the guiding principles for shaping the harness itself â€” how
