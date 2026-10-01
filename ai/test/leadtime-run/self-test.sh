@@ -937,6 +937,8 @@ product_case() {
   git "${G[@]}" init -q "$s"; echo one >"$s/a.txt"; git -C "$s" add -A; git "${G[@]}" -C "$s" commit -q -m seed
   git clone -q --bare "$s" "$c/gen-origin.git"; git clone -q "$c/gen-origin.git" "$c/checkouts/gen_saas"
   override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/checkouts/custom\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"$c/checkouts/gen_saas\",\"mode\":\"improve\"},{\"name\":\"walt_ui\",\"path\":\"$c/checkouts/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
+  # The skill opts into the product lane by naming its command (DND-1533).
+  printf 'Product repos: leadtime-product cut, then leadtime-product pr.\n' >>"$c/repo/ai/skills/athena:lead-time-improve/SKILL.md"
 }
 glanes() { printf '%s/checkouts/gen_saas/.git/leadtime-lanes' "$1"; }
 prun() { # <case> [VAR=val ...] — run_runner with the product fakes and the override
@@ -964,6 +966,21 @@ if [ "$rc" = 0 ] && ! grep -q 'leadtime-product' "$c/runner.out" && ! grep -q 'p
   ok "--dry-run with no product repo: the brief has no product text"
 else
   bad "dry-run no product" "rc=$rc out=$(cat "$c/runner.out")"
+fi
+
+# An improve repo R listed while the skill has no product-lane procedure yet
+# (DND-1533 not landed): the lane is OFF. No lane, no manifest, no product
+# text in the brief; .run names the repo and why.
+c="$(new_case)"; product_case "$c"
+printf -- '---\nname: athena:lead-time-improve\n---\n' >"$c/repo/ai/skills/athena:lead-time-improve/SKILL.md"
+rc="$(prun "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -q '^product_lane=OFF repos=gen_saas: .*no product-lane procedure yet (DND-1533)' "$run" \
+   && grep -qx 'product_prs=0 landed=none' "$run" && ! grep -q 'leadtime-product' "$c/claude-args" \
+   && [ -z "$(find "$(sd "$c")/runs" -name '*.product.json')" ] && [ ! -e "$(glanes "$c")" ] && [ ! -s "$c/pfake.log" ]; then
+  ok "an improve repo R with no product procedure in the skill: lane OFF, no product text in the brief, .run says product_lane=OFF"
+else
+  bad "product lane off" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 # One improve repo R: a lane reserved in R's common dir, held through the

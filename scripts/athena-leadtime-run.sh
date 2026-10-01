@@ -295,7 +295,8 @@ resolve_repos
 # PRODUCT repo: the run may change it through a per-run lane in its own git
 # common dir, a PR opened as Athena, and a landing by a LATER run
 # (ai/bin/leadtime-product). With none, nothing below runs and the brief, the
-# lane and the exits are what they were before DND-1540.
+# lane and the exits are what they were before DND-1540. The lane is also off
+# until the skill names "leadtime-product pr" (DND-1533; see below).
 PRODUCT_NAMES=(); PRODUCT_PATHS=(); PRODUCT_IDLE=()
 if [ "${RES_RC}" -eq 0 ]; then
   while IFS=$'\t' read -r pn pp pw; do
@@ -316,6 +317,16 @@ export LEADTIME_PRODUCT_SWEEP_TIMEOUT="${SWEEP_TIMEOUT}"
 PRODUCT_TOOL="${MAIN_CHECKOUT}/ai/bin/leadtime-product"
 PRODUCT_LINE="product_prs=0 landed=none"
 PRODUCT_DETAIL=""
+# The product lane stays OFF until the skill the session runs carries its
+# procedure (DND-1533). Until then the skill says a product repo is never the
+# session's to commit, and a brief saying the opposite would give the session
+# two contradictory orders. The skill opts in by naming the command
+# "leadtime-product pr" in the main checkout's SKILL.md. While OFF, a listed
+# repo gets no lane and no product text in the brief, and .run says so.
+if [ "${#PRODUCT_NAMES[@]}" -gt 0 ] && ! grep -qF 'leadtime-product pr' -- "${SKILL_FILE}" 2>/dev/null; then
+  PRODUCT_DETAIL="product_lane=OFF repos=${PRODUCT_NAMES[*]}: ${SKILL_FILE} has no product-lane procedure yet (DND-1533), so these improve repos get no lane, no PR and no product text in the brief"
+  PRODUCT_NAMES=(); PRODUCT_PATHS=(); PRODUCT_IDLE=()
+fi
 PRODUCT_SWEEP_TEXT="not run (dry run)"
 SKIP_BRIEF=""
 if [ -n "${RES_SKIPPED}" ]; then
