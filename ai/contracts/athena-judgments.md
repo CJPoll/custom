@@ -212,6 +212,12 @@ text and the owner's earlier text in its context window. Anyone else's line
 keeps only its user id and ts, with its text emptied. It is 0600 under the
 inbox root, never in a repo.
 
+Those are the judgment's own stores. The Slack router's stores hold message
+text for delivery, not for a judgment: a `slack_events` line, pruned 24 h
+after it arrives once delivered, and a `slack_route_requests` row, which holds
+the parsed event until it is routed and is then deleted
+(`ai/contracts/athena-events.md` → *Routing runs after the ack*).
+
 **Later (2026-10-01, DND-1448):** this read "joined to its source by id,
 never copied into a second file". Superseded by the root snapshot: joined
 to the rotating inbox, the `slack_routing` corpus shrank instead of
@@ -453,20 +459,30 @@ last 30 days that reached the port, are of the registered question set's
 version, and carry a `wait_ms`. It shows their discrete p95 against a target:
 at least 20 such calls, the first at least 3 days old (else `unmeasured`),
 with a p95 of at most 1,000 ms (`within_target`, else `over_target`). The
-reading never refuses a mode. What keeps a slow judgment inside Slack's 3 s
-ack is the router's 1,500 ms call deadline and its fallback to the channel
-route (`ai/contracts/athena-events.md` → *New conversations may route by an
-advisory topic judgment*). `wait_ms` is what the router waited: from its
-topic step's start, read before the mode read and the context reads
-(`judge/4`'s `:wait_started_ms`), to the end of the TypeSafe call. It is the
-topic step's share of Slack's 3 s ack, not the whole: the webhook work before
-the step (signature check, classify, dedupe, thread claim) and the decision
-and topic-route lookup after the call are outside it. A start that is not a
+reading never refuses a mode. No judgment runs inside Slack's ack: the route
+worker judges after it, under a 5,000 ms deadline, and a request not routed
+within 60 s goes by the channel route as `route_overdue`
+(`ai/contracts/athena-events.md` → *Routing runs after the ack*). `wait_ms` is
+what the route worker waited: from its topic step's start, read before the
+mode read and the context reads (`judge/4`'s `:wait_started_ms`), to the end
+of the TypeSafe call. It leaves out the time the request was queued before
+the worker took it, which the request's `route_delay_ms` records, and the
+decision and topic-route lookup after the call. A start that is not a
 past `System.monotonic_time(:millisecond)` raises; it is never read as no
 wait. `latency_ms` is the call task alone (the custody read and the call,
 capped at the deadline), and the reading never uses it. A row with no
 `wait_ms` is not measured and does not count. `judgment_calls` rows carry no
-mode, so `shadow` and `on` calls both count.
+mode, so `shadow` and `on` calls both count. Replacing this tile with the
+queue's figures (gen_saas ADR 21 rule 6) is DND-1455.
+
+**Later (2026-10-01, DND-1456):** this said what kept a slow judgment inside
+Slack's 3 s ack was the router's 1,500 ms call deadline, and that `wait_ms`
+was the topic step's share of that ack. Superseded by DND-1454 (gen_saas PR
+#644, ADR 21): the webhook writes a route request and acks, and the route
+worker reads the context and judges after the ack, under a 5,000 ms deadline.
+So `wait_ms` now measures the worker's topic step, and the 1,000 ms target no
+longer guards an ack. Why: the owner asked why Jev was on the ack path at all
+(Cody, 2026-10-01).
 
 **An eval apply re-checks an existing `on`** (DND-1380). Applying a run
 (*Eval runs*) is the one other mode write, and it only lowers a mode. In the
