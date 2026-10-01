@@ -11,7 +11,7 @@
 #
 # Buckets:
 #   DOMAIN (pure)   Label, Event, Registry, Unit, Retention
-#   SIDE EFFECTS    Store (the files), GitContext (one `git rev-parse`),
+#   SIDE EFFECTS    Store (every file read and write), GitContext (one `git rev-parse`),
 #                   TicketRefs (loads the ticket-ref parser ai/bin/lead-time
 #                   uses), Clock, Host
 #   MANAGER         AthenaTelemetry.emit, .read, .prune
@@ -46,6 +46,9 @@ module AthenaTelemetry
   UNIT_SOURCES = %w[explicit env branch branch-name none].freeze
 
   class RegistryError < StandardError; end
+  # A seam or environment value the writer cannot use: a relative store path,
+  # a malformed clock or cap. emit counts it as config_invalid.
+  class ConfigError < StandardError; end
 
   # ── DOMAIN ────────────────────────────────────────────────────────────────
 
@@ -237,7 +240,8 @@ module AthenaTelemetry
     module_function
 
     # ticket_ref: a callable branch -> ticket ref or nil (the parser
-    # ai/bin/lead-time uses), or :unavailable / nil when it could not load.
+    # ai/bin/lead-time uses). nil, a :unavailable answer, or a raise means the
+    # parser is unavailable: the branch name is the unit, and it is counted.
     # -> [unit, unit_source, drops].
     def parse(branch:, env_unit:, ticket_ref:, explicit: nil)
       drops = []
@@ -249,7 +253,11 @@ module AthenaTelemetry
       end
       return [nil, "none", drops] if branch.nil? || branch.empty? || branch == "HEAD"
 
-      ref = ticket_ref ? ticket_ref.call(branch) : :unavailable
+      ref = begin
+        ticket_ref ? ticket_ref.call(branch) : :unavailable
+      rescue StandardError
+        :unavailable
+      end
       if ref == :unavailable
         drops << "unit_parser_unavailable"
         ref = nil
@@ -281,40 +289,50 @@ module AthenaTelemetry
   module Clock
     module_function
 
-    # -> Time (UTC). Raises ArgumentError on a malformed ATHENA_TELEMETRY_NOW.
+    # -> Time (UTC). Raises ConfigError on a malformed ATHENA_TELEMETRY_NOW.
     def now(env)
       seam = env["ATHENA_TELEMETRY_NOW"]
       return Time.now.utc if seam.nil? || seam.empty?
 
-      Time.iso8601(seam).utc
+      begin
+        Time.iso8601(seam).utc
+      rescue ArgumentError
+        raise ConfigError, "ATHENA_TELEMETRY_NOW is not an ISO 8601 time"
+      end
     end
   end
 
   module Host
     module_function
 
+    # -> the short hostname, or nil when there is none.
     def short
-      Socket.gethostname.to_s.split(".").first
+      name = Socket.gethostname.to_s.split(".").first
+      name.nil? || name.empty? ? nil : name
     end
   end
 
   # The store: ${XDG_STATE_HOME:-$HOME/.local/state}/athena/telemetry, 0700,
   # one <UTC date>.jsonl per day (0600) and the write-failures counter.
   module Store
+    LOCK_ATTEMPTS = 50
+    LOCK_PAUSE_S = 0.01
+    COUNTER_LOCK = "#{COUNTER_FILE}.lock".freeze
+
     module_function
 
-    # -> the store directory. Raises ArgumentError when it cannot be resolved.
+    # -> the store directory. Raises ConfigError when it cannot be resolved.
     def dir(env)
       seam = env["ATHENA_TELEMETRY_DIR"]
       if seam && !seam.empty?
-        raise ArgumentError, "ATHENA_TELEMETRY_DIR is not an absolute path" unless seam.start_with?("/")
+        raise ConfigError, "ATHENA_TELEMETRY_DIR is not an absolute path" unless seam.start_with?("/")
 
         return seam
       end
       state = env["XDG_STATE_HOME"]
-      unless state && state.start_with?("/")
+      unless state&.start_with?("/")
         home = env["HOME"]
-        raise ArgumentError, "neither XDG_STATE_HOME nor HOME is an absolute path" unless home && home.start_with?("/")
+        raise ConfigError, "neither XDG_STATE_HOME nor HOME is an absolute path" unless home&.start_with?("/")
 
         state = File.join(home, ".local", "state")
       end
@@ -324,7 +342,7 @@ module AthenaTelemetry
     def day_cap(env)
       raw = env["ATHENA_TELEMETRY_DAY_CAP_BYTES"]
       return DEFAULT_DAY_CAP_BYTES if raw.nil? || raw.empty?
-      raise ArgumentError, "ATHENA_TELEMETRY_DAY_CAP_BYTES is not a positive integer" unless raw.match?(/\A[1-9]\d*\z/)
+      raise ConfigError, "ATHENA_TELEMETRY_DAY_CAP_BYTES is not a positive integer" unless raw.match?(/\A[1-9]\d*\z/)
 
       Integer(raw, 10)
     end
@@ -336,31 +354,48 @@ module AthenaTelemetry
       nil
     end
 
-    # One write(2) with O_APPEND. -> :ok, :day_cap or :short_write.
-    # Raises SystemCallError on an I/O failure; the manager counts it.
+    # One write(2) with O_APPEND. -> :ok, :day_cap or :short_write. The cap
+    # is checked before the write, so concurrent writers can pass it by about
+    # one line each. Raises SystemCallError on an I/O failure.
     def append(dir, day, line, cap)
       ensure_dir(dir)
       path = File.join(dir, "#{day}.jsonl")
       return :day_cap if (File.size?(path) || 0) >= cap
 
       File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW, 0o600) do |f|
-        return f.syswrite(line) == line.bytesize ? :ok : :short_write
+        return :ok if f.syswrite(line) == line.bytesize
+
+        f.syswrite("\n") rescue nil # end the partial line, so the next one stays parseable
+        :short_write
       end
     end
 
-    # Adds reasons (reason => n) to the counter under an exclusive flock.
-    # Raises SystemCallError when it cannot.
+    # Adds reasons (reason => n) to the counter. It holds an exclusive flock
+    # on write-failures.lock and replaces the counter by rename, so a reader
+    # or a crash never sees a half-written counter. Raises SystemCallError
+    # when it cannot, including a lock still held after a bounded wait.
     def count(dir, reasons)
       ensure_dir(dir)
-      File.open(File.join(dir, COUNTER_FILE), File::RDWR | File::CREAT | File::NOFOLLOW, 0o600) do |f|
-        f.flock(File::LOCK_EX)
-        data = parse_counter(f.read)
+      File.open(File.join(dir, COUNTER_LOCK), File::RDWR | File::CREAT | File::NOFOLLOW, 0o600) do |lock|
+        take(lock)
+        path = File.join(dir, COUNTER_FILE)
+        data = File.exist?(path) ? parse_counter(File.read(path)) : {}
         reasons.each { |reason, n| data[reason] = data.fetch(reason, 0) + n }
-        f.rewind
-        f.truncate(0)
-        f.write(JSON.generate(data))
-        f.flush
+        tmp = "#{path}.tmp.#{Process.pid}"
+        File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC | File::NOFOLLOW, 0o600) { |f| f.write(JSON.generate(data)) }
+        File.rename(tmp, path)
       end
+    end
+
+    # A bounded wait: an emitter is never stalled behind a stuck holder. The
+    # lock is held for one read and one rename.
+    def take(file)
+      LOCK_ATTEMPTS.times do
+        return if file.flock(File::LOCK_EX | File::LOCK_NB)
+
+        sleep LOCK_PAUSE_S
+      end
+      raise Errno::EWOULDBLOCK, "#{COUNTER_LOCK} stayed locked"
     end
 
     def parse_counter(text)
@@ -383,28 +418,52 @@ module AthenaTelemetry
     rescue SystemCallError => e
       [nil, "could not read #{path} (#{e.class.name.split('::').last})"]
     end
+
+    # -> the store's file names. Raises SystemCallError.
+    def list(dir)
+      Dir.children(dir)
+    end
+
+    # Yields each line of a day file. Raises SystemCallError.
+    def each_line(dir, name, &block)
+      File.foreach(File.join(dir, name), &block)
+    end
+
+    # -> true when removed, false when it was already gone. Raises
+    # SystemCallError otherwise.
+    def unlink(dir, name)
+      File.unlink(File.join(dir, name))
+      true
+    rescue Errno::ENOENT
+      false
+    end
   end
 
-  # The git context of a directory, from ONE `git rev-parse`. Any failure
-  # (not a repo, an unborn branch, no git) gives nils, never a raise.
+  # The git context of a directory, from ONE `git rev-parse`. -> [Context,
+  # drop]. Outside a repo it is all nil with no drop. Any other git failure
+  # (no git, an old git, an unborn branch) is all nil too, with the drop
+  # git_context_unavailable, so it never reads the same as "not a repo".
   module GitContext
     Context = Struct.new(:branch, :repo, :head, keyword_init: true)
     NONE = Context.new.freeze
+    NOT_A_REPO = /not a git repository/i.freeze
 
     module_function
 
-    def read(dir)
-      out, status = Open3.capture2("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir",
-                                   "HEAD", "--abbrev-ref", "HEAD", err: File::NULL, stdin_data: "")
-      return NONE unless status.success?
+    def read(dir, git: "git")
+      out, err, status = Open3.capture3(git, "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                                        "HEAD", "--abbrev-ref", "HEAD", stdin_data: "")
+      unless status.success?
+        return [NONE, nil] if NOT_A_REPO.match?(err)
 
+        return [NONE, "git_context_unavailable"]
+      end
       common, head, branch = out.lines.map(&:strip)
-      return NONE unless common && head && branch
+      return [NONE, "git_context_unavailable"] unless common && head && branch
 
-      Context.new(branch: branch == "HEAD" ? nil : branch,
-                  repo: File.basename(File.dirname(common)), head: head)
+      [Context.new(branch: branch == "HEAD" ? nil : branch, repo: File.basename(File.dirname(common)), head: head), nil]
     rescue SystemCallError, IOError
-      NONE
+      [NONE, "git_context_unavailable"]
     end
   end
 
@@ -427,7 +486,7 @@ module AthenaTelemetry
         load(LEAD_TIME, wrap)
         @lead_time = wrap::LeadTime
         method(:ref_for)
-      rescue ScriptError, StandardError
+      rescue ScriptError, StandardError, SystemExit
         nil
       end
     end
@@ -437,22 +496,37 @@ module AthenaTelemetry
       prefixes = [dnd]
       others = @lead_time.refs_in(branch).reject { |r| r.start_with?("#{dnd}-") }
       prefixes << work_prefix if !others.empty? && work_prefix
+      @last_overlay_fault = !others.empty? && @overlay_fault == true
       @lead_time.ticket_ref(branch: branch, title: nil, prefixes: prefixes).first
     end
 
+    # The work tracker's prefix from the private overlay, or nil. An ABSENT
+    # overlay is this machine's state; a PRESENT one that cannot give the
+    # prefix is a fault, which last_overlay_fault? reports for the last
+    # ref_for call that needed the overlay.
     def work_prefix
       return @work_prefix if defined?(@work_prefix)
 
+      @overlay_fault = false
       @work_prefix = begin
         require_relative "dispatch_trackers_overlay"
-        ::DispatchTrackers::Overlay.work.tracker&.prefix
+        res = ::DispatchTrackers::Overlay.work
+        @overlay_fault = res.fault ? true : false
+        res.tracker&.prefix
       rescue ScriptError, StandardError
+        @overlay_fault = true
         nil
       end
     end
 
+    def last_overlay_fault?
+      @last_overlay_fault == true
+    end
+
     def reset!
-      %i[@parser @lead_time @work_prefix].each { |v| remove_instance_variable(v) if instance_variable_defined?(v) }
+      %i[@parser @lead_time @work_prefix @overlay_fault @last_overlay_fault].each do |v|
+        remove_instance_variable(v) if instance_variable_defined?(v)
+      end
     end
   end
 
@@ -480,7 +554,7 @@ module AthenaTelemetry
       written = emit_into(dir, drops, name.to_s, at, duration_s, unit, head, attrs || {}, repo_dir, env)
       record(dir, drops)
       written
-    rescue ArgumentError => e
+    rescue ConfigError => e
       drops["config_invalid"] += 1
       record(dir, drops, e)
       nil
@@ -508,10 +582,20 @@ module AthenaTelemetry
 
     now = Clock.now(env)
     cap = Store.day_cap(env)
-    ctx = GitContext.read(repo_dir || Dir.pwd)
-    lazy_parser = ->(branch) { (p = TicketRefs.parser) ? p.call(branch) : :unavailable }
+    ctx, git_drop = GitContext.read(repo_dir || Dir.pwd)
+    drops[git_drop] += 1 if git_drop
+    overlay_fault = false
+    lazy_parser = lambda do |branch|
+      p = TicketRefs.parser
+      next :unavailable unless p
+
+      ref = p.call(branch)
+      overlay_fault = TicketRefs.last_overlay_fault?
+      ref
+    end
     unit, source, d = Unit.parse(branch: ctx.branch, env_unit: env["ATHENA_UNIT"], explicit: unit, ticket_ref: lazy_parser)
     d.each { |r| drops[r] += 1 }
+    drops["unit_overlay_unavailable"] += 1 if source == "branch-name" && overlay_fault
     line, d = Event.build(name: name, at: at || now, duration_s: duration_s, unit: unit, unit_source: source,
                           repo: ctx.repo, head: head || ctx.head, host: Host.short, pid: Process.pid, attrs: kept)
     d.each { |r| drops[r] += 1 }
@@ -534,7 +618,7 @@ module AthenaTelemetry
   # Count drops; if that fails too, say so once per process on stderr.
   def record(dir, drops, error = nil)
     return if drops.empty?
-    raise ArgumentError, "the store directory could not be resolved" if dir.nil?
+    raise ConfigError, "the store directory could not be resolved" if dir.nil?
 
     Store.count(dir, drops)
   rescue StandardError => e
@@ -548,8 +632,8 @@ module AthenaTelemetry
     where = dir ? "#{dir}/#{COUNTER_FILE}" : "the telemetry store"
     $stderr.puts "athena-telemetry: could not record #{drops.keys.join(',')} in #{where} " \
                  "(#{error.class}: #{error.message.to_s.lines.first.to_s.strip}); the caller is unaffected. " \
-                 "Fix: make the store a writable 0700 directory of this user " \
-                 "(ai/contracts/athena-telemetry.md -> Store)."
+                 "Fix: make the store a writable 0700 directory of this user, with HOME or XDG_STATE_HOME " \
+                 "absolute (ai/contracts/athena-telemetry.md -> Store)."
   rescue StandardError
     nil
   end
@@ -559,10 +643,12 @@ module AthenaTelemetry
   end
 
   # Read events. since/until bound `at` (until exclusive); events and unit
-  # filter. Status keeps three cases apart: :no_store (could not look),
-  # :ok_empty (looked, nothing matched) and :ok. The failures counter comes
-  # back every time.
+  # filter. Status keeps the cases apart: :no_store (could not look),
+  # :incomplete (some day file could not be read), :ok_empty (looked,
+  # nothing matched) and :ok. The failures counter comes back every time.
+  # Raises ConfigError when the store path cannot be resolved.
   def read(since: nil, until: nil, events: nil, unit: nil, env: ENV)
+    until_t = binding.local_variable_get(:until)
     dir = Store.dir(env)
     failures, failures_reason = File.directory?(dir) ? Store.read_counter(dir) : [{}, nil]
     base = { events: [], failures: failures, failures_reason: failures_reason, malformed: 0, unreadable: [],
@@ -570,63 +656,64 @@ module AthenaTelemetry
     return ReadResult.new(**base, status: :no_store, reason: "no telemetry store at #{dir}") unless File.directory?(dir)
 
     names = begin
-      Dir.children(dir)
+      Store.list(dir)
     rescue SystemCallError => e
       return ReadResult.new(**base, status: :no_store, reason: "could not list #{dir} (#{e.class.name.split('::').last})")
     end
-    found, malformed, unreadable = scan(dir, names, since, binding.local_variable_get(:until), events, unit)
-    ReadResult.new(**base, events: found, malformed: malformed, unreadable: unreadable,
-                           status: found.empty? ? :ok_empty : :ok)
+    found, malformed, unreadable = scan(dir, names, since, until_t, events, unit)
+    status = if !unreadable.empty? then :incomplete
+             elsif found.empty? then :ok_empty
+             else :ok
+             end
+    reason = unreadable.empty? ? nil : "could not read #{unreadable.join(', ')} in #{dir}"
+    ReadResult.new(**base, events: found, malformed: malformed, unreadable: unreadable, status: status, reason: reason)
   end
 
+  # Every day file is read: a file is the WRITE day, and an `at` may lie
+  # before or after it, so skipping files by name could miss an event.
   def scan(dir, names, since, until_t, events, unit)
     found = []
     malformed = 0
     unreadable = []
-    first_day = since&.getutc&.to_date
     names.select { |n| DAY_FILE_RE.match?(n) }.sort.each do |name|
-      day = Date.strptime(name[0, 10], "%Y-%m-%d") rescue next
-      next if first_day && day < first_day # a line is written on or after its `at` day
-
-      begin
-        File.foreach(File.join(dir, name)) do |raw|
-          ev = JSON.parse(raw) rescue nil
-          at = ev.is_a?(Hash) && ev["at"].is_a?(String) ? (Time.iso8601(ev["at"]) rescue nil) : nil
-          unless at
-            malformed += 1
-            next
-          end
-          next if events && !events.include?(ev["event"])
-          next if unit && ev["unit"] != unit
-          next if since && at < since
-          next if until_t && at >= until_t
-
-          found << ev
+      Store.each_line(dir, name) do |raw|
+        ev = JSON.parse(raw) rescue nil
+        at = ev.is_a?(Hash) && ev["at"].is_a?(String) ? (Time.iso8601(ev["at"]) rescue nil) : nil
+        unless at
+          malformed += 1
+          next
         end
-      rescue SystemCallError
-        unreadable << name
+        next if events && !events.include?(ev["event"])
+        next if unit && ev["unit"] != unit
+        next if since && at < since
+        next if until_t && at >= until_t
+
+        found << ev
       end
+    rescue SystemCallError
+      unreadable << name
     end
     [found.sort_by { |e| e["at"] }, malformed, unreadable]
   end
 
   # Remove day files older than `days`. -> PruneResult with status :ok,
-  # :no_store (nothing to prune) or :error (with reason).
+  # :no_store (nothing to prune) or :error (with reason, and what it removed
+  # before the error). Raises ConfigError on a malformed store path or clock.
   def prune(days:, env: ENV)
     dir = Store.dir(env)
+    now = Clock.now(env)
     return PruneResult.new(status: :no_store, removed: [], dir: dir) unless File.exist?(dir)
 
-    names = Dir.children(dir)
-    expired = Retention.expired(names, now: Clock.now(env), days: days)
     removed = []
-    expired.each do |name|
-      File.unlink(File.join(dir, name))
-      removed << name
+    begin
+      Retention.expired(Store.list(dir), now: now, days: days).each do |name|
+        removed << name if Store.unlink(dir, name)
+      end
+    rescue SystemCallError => e
+      return PruneResult.new(status: :error, removed: removed, dir: dir,
+                             reason: "#{e.class.name.split('::').last} on #{dir}")
     end
     PruneResult.new(status: :ok, removed: removed, dir: dir)
-  rescue SystemCallError => e
-    PruneResult.new(status: :error, removed: removed || [], dir: dir,
-                    reason: "#{e.class.name.split('::').last} on #{dir}")
   end
 
   # Tests only: forget the per-process caches and the stderr-once flag.

@@ -401,6 +401,130 @@ with_store do |dir, _tmp|
   check("prune: no store is its own status, not a failure") { r.status == :no_store && r.removed.empty? }
 end
 
+# ---------------------------------------------------------------------------
+# The misses (review round): a wrong or missing input must never read as a
+# clean result.
+# ---------------------------------------------------------------------------
+
+def with_stub(mod, name, impl)
+  orig = mod.method(name)
+  mod.define_singleton_method(name, &impl)
+  yield
+ensure
+  mod.define_singleton_method(name, orig)
+end
+
+with_store do |dir, tmp|
+  T.emit("telemetry.probe", at: Time.utc(2026, 10, 3), repo_dir: tmp, env: env_for(dir, now: "2026-10-01T05:00:00.000Z"))
+  r = T.read(env: env_for(dir), since: Time.utc(2026, 10, 2))
+  check("miss: an at later than the write day is still found by a since read") { r.status == :ok && r.events.size == 1 }
+end
+
+with_store do |dir, tmp|
+  T.emit("telemetry.probe", repo_dir: tmp, env: env_for(dir))
+  File.chmod(0o000, File.join(dir, "2026-10-01.jsonl"))
+  r = T.read(env: env_for(dir))
+  check("miss: an unreadable day file is :incomplete, never ok_empty") do
+    r.status == :incomplete && r.unreadable == ["2026-10-01.jsonl"] && r.reason.include?("2026-10-01.jsonl")
+  end
+end
+
+Dir.mktmpdir("telemetry-git") do |tmp|
+  check("miss: git that cannot run is git_context_unavailable, not 'no repo'") do
+    T::GitContext.read(tmp, git: File.join(tmp, "no-such-git")) == [T::GitContext::NONE, "git_context_unavailable"]
+  end
+  check("hit: a directory outside any repo is no repo, with no drop") do
+    T::GitContext.read(tmp) == [T::GitContext::NONE, nil]
+  end
+end
+
+check("miss: a ticket parser that raises falls back to the branch name, counted") do
+  boom = ->(_b) { raise "parser bug" }
+  T::Unit.parse(branch: "dnd-1-x", env_unit: nil, ticket_ref: boom) == ["dnd-1-x", "branch-name", ["unit_parser_unavailable"]]
+end
+
+with_store do |dir, tmp|
+  r = T.emit("telemetry.probe", repo_dir: tmp, env: env_for(dir, now: "yesterday"))
+  check("miss: a malformed clock seam is config_invalid, counted") do
+    r.nil? && JSON.parse(File.read(File.join(dir, "write-failures"))) == { "config_invalid" => 1 }
+  end
+end
+
+with_store do |_dir, tmp|
+  err = capture_stderr do
+    check("miss: a relative store path returns nil") do
+      T.emit("telemetry.probe", repo_dir: tmp, env: { "ATHENA_TELEMETRY_DIR" => "relative/telemetry" }).nil?
+    end
+  end
+  check("miss: a relative store path says so once on stderr, with Fix:") do
+    err.lines.size == 1 && err.start_with?("athena-telemetry:") && err.include?("Fix:") && !File.exist?(File.join(tmp, "relative"))
+  end
+end
+
+with_store do |dir, tmp|
+  with_stub(T, :registry, -> { raise T::RegistryError, "broken" }) do
+    T.emit("telemetry.probe", repo_dir: tmp, env: env_for(dir))
+  end
+  check("miss: an unreadable registry is registry_unreadable, counted") do
+    JSON.parse(File.read(File.join(dir, "write-failures"))) == { "registry_unreadable" => 1 }
+  end
+end
+
+with_store do |dir, tmp|
+  with_stub(T::Host, :short, -> { raise "writer bug" }) do
+    check("miss: a writer bug returns nil") { T.emit("telemetry.probe", repo_dir: tmp, env: env_for(dir)).nil? }
+  end
+  check("miss: a writer bug is internal_error, not config_invalid") do
+    JSON.parse(File.read(File.join(dir, "write-failures"))) == { "internal_error" => 1 }
+  end
+end
+
+with_store do |dir, tmp|
+  FileUtils.mkdir_p(dir, mode: 0o700)
+  File.write(File.join(dir, "write-failures"), "[1]")
+  T.emit("nope.event", repo_dir: tmp, env: env_for(dir))
+  check("miss: a corrupt counter restarts with counter_corrupt, and keeps counting") do
+    JSON.parse(File.read(File.join(dir, "write-failures"))) == { "counter_corrupt" => 1, "event_unregistered" => 1 }
+  end
+end
+
+with_store do |dir, _tmp|
+  FileUtils.mkdir_p(File.join(dir, "write-failures"))
+  r = T.read(env: env_for(dir))
+  check("miss: an unreadable counter is nil with a reason, never {}") do
+    r.failures.nil? && r.failures_reason.include?("write-failures")
+  end
+end
+
+with_store do |dir, tmp|
+  env = env_for(dir)
+  pids = 2.times.map do
+    fork do
+      20.times { T.emit("nope.event", repo_dir: tmp, env: env) }
+      exit!(0)
+    end
+  end
+  statuses = pids.map { |p| Process.wait2(p)[1] }
+  check("two forked writers' drops are all counted") do
+    statuses.all?(&:success?) && JSON.parse(File.read(File.join(dir, "write-failures"))) == { "event_unregistered" => 40 }
+  end
+end
+
+with_store do |dir, _tmp|
+  FileUtils.mkdir_p(dir, mode: 0o700)
+  File.write(File.join(dir, "2026-09-01.jsonl"), "x\n")
+  File.chmod(0o500, dir)
+  r = T.prune(env: env_for(dir, now: "2026-10-31T00:00:00Z"), days: 30)
+  check("miss: a prune that cannot remove a file is :error with a reason") do
+    r.status == :error && r.removed.empty? && r.reason.include?(dir)
+  end
+end
+
+with_store do |dir, _tmp|
+  FileUtils.mkdir_p(dir, mode: 0o700)
+  check("prune: a file already gone is skipped, not an error") { T::Store.unlink(dir, "2026-01-01.jsonl") == false }
+end
+
 if $failures.empty?
   puts "telemetry_test: #{$checks} checks passed"
   exit 0

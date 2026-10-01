@@ -37,7 +37,7 @@ Each line is one JSON object, keys in this order:
 | `duration_s` | seconds as a number, or `null` for a point event |
 | `unit` | the unit of work (*Unit of work*), or `null` |
 | `unit_source` | `explicit`, `env`, `branch`, `branch-name` or `none` |
-| `repo` | the basename of the git common dir's parent (`custom` for every checkout and worktree of `~/dev/custom`), or `null` outside a repo |
+| `repo` | the basename of the git common dir's parent (`custom` in every checkout of `~/dev/custom`), or `null` |
 | `head` | 40 lower-case hex, or `null` |
 | `host` | the short hostname |
 | `pid` | the writing process's pid (for the CLI, the `telemetry-emit` process) |
@@ -56,6 +56,11 @@ The writer resolves the unit once, in this order:
 4. the branch name itself. Source `branch-name`.
 5. `null`, with source `none`: a detached HEAD, or not in a repo.
 
+The branch, `repo` and `head` come from one `git rev-parse`. Outside a repo
+they are `null` with nothing counted. Any other git failure (no git, a git
+older than 2.31, an unborn branch) leaves them `null` too, and counts
+`git_context_unavailable`, so it never reads the same as "not in a repo".
+
 Step 3 uses the ticket-ref parser `ai/bin/lead-time` uses
 (`LeadTime.ticket_ref`): one parser, not two. The writer loads that file
 wrapped in its own module, so its top-level helpers never reach the caller's
@@ -66,8 +71,10 @@ work branch resolves on a machine with the overlay. A word shaped like a ticket
 
 A unit is a label (*The registry* → label). One that is not is dropped,
 counted as `unit_invalid`, and the next step applies. If the parser cannot
-load, the branch name is the unit and `unit_parser_unavailable` is counted, so
-the fallback is visible.
+load, or raises, the branch name is the unit and `unit_parser_unavailable` is
+counted, so the fallback is visible. If a present overlay cannot give the work
+prefix, a work branch's name is the unit and `unit_overlay_unavailable` is
+counted. An absent overlay is that machine's state and is not counted.
 
 ## The registry
 
@@ -109,23 +116,39 @@ attr nobody declared.
 Renaming or removing an event that has landed changes what readers find. Do it
 in the same change as every reader of it.
 
+The registry is seeded with the events DND-1474, DND-1475 and DND-1476 name,
+with the attrs their requirements list. Owed by those tickets, not done here:
+- a check that every emitter's events are registered (the design record's
+  *Telemetry* asks for one); until it exists, an emitter's own tests are the
+  only guard, and an unregistered event shows only as `event_unregistered`;
+- the design record's `slot_wait_s` on `harness_gate.run` and slot wait on
+  `critic.round`, which their requirements dropped. An emitter ticket that
+  wants them adds them here.
+
 `telemetry.probe` is the writer's own probe (attr `note`). Use it to check the
 writer by hand. It is never a phase anchor.
 
 ## Store
 
-- **Path:** `${XDG_STATE_HOME:-$HOME/.local/state}/athena/telemetry/<YYYY-MM-DD UTC>.jsonl`.
-  An `XDG_STATE_HOME` that is not absolute is ignored.
+- **Path:** `${XDG_STATE_HOME:-$HOME/.local/state}/athena/telemetry/`,
+  one `<YYYY-MM-DD UTC>.jsonl` per day. An `XDG_STATE_HOME` that is not
+  absolute is ignored.
 - **Modes:** directory 0700, files 0600, created on first write.
-- **Day file:** chosen by the UTC date at WRITE time. A line is therefore in
-  the file of its `at` day or a later one, never an earlier one.
+- **Day file:** chosen by the UTC date at WRITE time. A caller's `at` may lie
+  before or after that day, so a reader reads every day file and filters on
+  `at`; it never skips a file by its name.
 - **`write-failures`:** a JSON object counting failures and drops by reason
-  (*Fails open*). It is cumulative; pruning never resets it.
+  (*Fails open*). It is cumulative; pruning never resets it. Writers hold an
+  exclusive `flock` on `write-failures.lock` and replace the counter by
+  rename, so a reader or a crash never sees it half written. The lock wait is
+  bounded (about half a second); past it, the drop goes to the stderr line
+  (*Fails open*), so an emitter never stalls behind a stuck holder.
 
 ## Append
 
 - One `write(2)` per line, opened `O_APPEND | O_CREAT | O_NOFOLLOW`, so lines
-  from concurrent writers never interleave.
+  from concurrent writers never interleave. A short write is ended with a
+  newline, best effort, so the next line stays parseable.
 - A line is at most 4096 bytes. If the attrs push it over, attrs are dropped
   from the last one back until it fits, `attrs_truncated: true` is set, and
   `attrs_truncated` is counted. The core fields are never cut.
@@ -133,9 +156,8 @@ writer by hand. It is never a phase anchor.
 ## Fails open
 
 - A write never raises to the caller, never changes its exit code, and never
-  retries.
-- Every failure or drop increments its reason in `write-failures`, under an
-  exclusive `flock`.
+  retries. The CLI's `--event` exits 0 even when the writer cannot load.
+- Every failure or drop increments its reason in `write-failures` (*Store*).
 - If even that write fails, the process prints ONE stderr line, prefixed
   `athena-telemetry:` and carrying `Fix:`, once per process.
 
@@ -146,62 +168,78 @@ The reasons:
 | `event_unregistered` | the event is not in the registry | no |
 | `attr_unregistered`, `attr_type`, `label_too_long`, `label_newline` | an attr was dropped | yes |
 | `unit_invalid`, `label_invalid` | a unit, repo or host was not a label; it reads `null` or the next unit source | yes |
-| `unit_parser_unavailable` | the ticket-ref parser did not load | yes |
+| `unit_parser_unavailable` | the ticket-ref parser did not load, or raised | yes |
+| `unit_overlay_unavailable` | a present overlay could not give the work prefix | yes |
+| `git_context_unavailable` | git failed for a reason other than "not a repo" | yes |
 | `head_invalid` | a head that is not 40 hex; it reads `null` | yes |
 | `at_invalid`, `duration_invalid` | a start that is not a time, or a negative or non-numeric duration | no |
 | `attrs_truncated` | attrs were cut to fit 4096 bytes | yes |
 | `line_too_long` | the core alone exceeds 4096 bytes | no |
 | `day_cap` | the day file is at its cap (*Size cap*) | no |
 | `short_write`, `write_error` | the append failed | no |
-| `config_invalid` | a malformed seam, or no absolute `HOME`/`XDG_STATE_HOME` | no |
+| `config_invalid` | a malformed seam (*Test seams*) | no |
 | `registry_unreadable` | `events.json` cannot be read or parsed | no |
 | `internal_error` | a bug in the writer | no |
+
+A store path that cannot be resolved at all (a relative `ATHENA_TELEMETRY_DIR`,
+no absolute `HOME` or `XDG_STATE_HOME`) has no counter to write. It goes to
+the stderr line.
 | `counter_corrupt` | the counter itself was unreadable JSON and was restarted | n/a |
 
 ## Retention
 
 `telemetry-emit --prune [--retain-days N]` removes day files whose date is
-more than N days before today (UTC). N defaults to `ATHENA_TELEMETRY_RETAIN_DAYS`,
-else 30. It touches no other file. It exits non-zero with `Fix:` if it cannot
-read the directory or remove a file. No store is not a failure: it prints
-`pruned 0: no telemetry store at …` and exits 0. The lead-time improver's
-runner prunes each tick. Per-day files are the rotation.
+more than N days before today (UTC). N defaults to
+`ATHENA_TELEMETRY_RETAIN_DAYS`, else 30. It touches no other file. A file
+already gone is skipped. It exits 1 with `Fix:` if it cannot read the
+directory or remove a file, naming what it removed first. No store is not a
+failure: it prints `pruned 0: no telemetry store at …` and exits 0. Per-day
+files are the rotation.
+
+Who prunes: the lead-time improver's runner (DND-1479) is to run `--prune`
+each tick. Until that runner lands, nothing prunes automatically: retention
+is `--prune` by hand, and only *Size cap* bounds growth.
 
 ## Size cap
 
 A day file at or over 64 MiB (`ATHENA_TELEMETRY_DAY_CAP_BYTES`) takes no more
 appends that day. Each refused line is counted as `day_cap`, so a runaway
-emitter cannot fill the disk and cannot hide.
+emitter cannot fill the disk and cannot hide. The size is checked before the
+write, so concurrent writers can pass the cap by about one line each.
 
 ## The reader
 
 `AthenaTelemetry.read(since:, until:, events:, unit:)` returns the matching
-events, oldest first, with a status that keeps three cases apart:
+events, oldest first, with a status that keeps the cases apart:
 
 | Status | Meaning |
 |---|---|
 | `no_store` | could not look: the store does not exist or cannot be listed. `reason` says which. |
-| `ok_empty` | looked, and nothing matched. `unit` names the unit searched for. |
+| `incomplete` | some day file could not be read. `unreadable` and `reason` name it; the events are from the rest. |
+| `ok_empty` | looked at everything, and nothing matched. `unit` names the unit searched for. |
 | `ok` | events found. |
 
 Every result carries the `write-failures` counter (`nil` with
 `failures_reason` when it cannot be read), the count of malformed lines, and
 any day file it could not read. A malformed line is counted, never silently
 skipped. `since` and `until` bound `at` (`until` exclusive). A reader that
-turns events into phases reports `no_store` as "could not measure", never as
-zero.
+turns events into phases reports `no_store` and `incomplete` as "could not
+measure", never as zero. A store path that cannot be resolved raises
+`AthenaTelemetry::ConfigError`.
 
 ## The CLI
 
 `ai/bin/telemetry-emit` (`--help` for the full text):
 
-- `--event NAME [--at ISO|now] [--duration S] [--head SHA] [--unit U] [--attr K=V]...`
-  emits one event. `--attr` values are converted to the registered type. Once
-  the command line parses it always exits 0.
+- `--event NAME [--at ISO|now] [--duration S] [--head SHA] [--unit U]
+  [--attr K=V]...` emits one event. `--attr` values are converted to the
+  registered type; a key given twice is a usage error. Once the command line
+  parses it always exits 0.
 - `--prune [--retain-days N]` (*Retention*).
 - `--stats [--since ISO] [--until ISO]`: events per day and per event, the
   latest line, the failures counter and the malformed count. Exit 3,
-  `COULD NOT LOOK`, on `no_store` or an unreadable day file; never "0 events".
+  `COULD NOT LOOK`, on `no_store`, `incomplete` or an unresolvable store path;
+  never "0 events".
 - `--self-test` runs the library suite. `--help` prints on stdout, exits 0 and
   writes nothing.
 - Exit codes: 0 ok, 1 prune failed, 2 usage (with `Fix:`), 3 could not look.
@@ -224,8 +262,15 @@ The writer, the reader and the CLI never open a socket, ever.
 
 ## Test seams
 
-`ATHENA_TELEMETRY_DIR` (an absolute store path), `ATHENA_TELEMETRY_NOW` (ISO
-8601 "now") and `ATHENA_TELEMETRY_DAY_CAP_BYTES`. They exist for tests. A
-malformed value is `config_invalid` for an emit, and a failure with `Fix:`
-for `--prune` (exit 1) and `--stats` (exit 3). There is no switch that turns telemetry off: nothing needs
-one, because it fails open.
+They exist for tests. Which mode reads which:
+
+| Seam | emit | `--prune` | `--stats` / `read` |
+|---|---|---|---|
+| `ATHENA_TELEMETRY_DIR` (an absolute store path) | yes | yes | yes |
+| `ATHENA_TELEMETRY_NOW` (ISO 8601 "now") | yes | yes | no |
+| `ATHENA_TELEMETRY_DAY_CAP_BYTES` | yes | no | no |
+
+A malformed value is `config_invalid` for an emit (a relative store path goes
+to the stderr line), and a failure with `Fix:` naming the seam for `--prune`
+(exit 1) and `--stats` (exit 3). There is no switch that turns telemetry off:
+nothing needs one, because it fails open.

@@ -174,7 +174,23 @@ has "--stats reports the failures counter" "${OUT}" "write-failures: attr_type=1
 run "${S2}" --stats --since 2026-10-02T00:00:00Z
 has "--stats --since filters" "${OUT}" "ok_empty -- 0 events"
 
+# 6b. --stats misses: an unreadable day file and a relative store path.
+S6B="${TMP}/s6b"
+run "${S6B}" --event telemetry.probe
+chmod 0000 "${S6B}/2026-10-01.jsonl"
+run "${S6B}" --stats
+chmod 0600 "${S6B}/2026-10-01.jsonl"
+eq "--stats with an unreadable day file exits 3" "${CODE}" "3"
+has "--stats with an unreadable day file says incomplete" "${OUT}" "status: incomplete"
+has "--stats with an unreadable day file names it, with Fix:" "${ERR}" "2026-10-01.jsonl"
+run relative/telemetry --stats
+eq "--stats with a relative store path exits 3" "${CODE}" "3"
+has "--stats with a relative store path names the seam" "${ERR}" "ATHENA_TELEMETRY_DIR is not an absolute path"
+has "--stats with a relative store path carries Fix:" "${ERR}" "Fix:"
+
 # 7. Usage errors: exit 2, Fix:.
+run "${S1}" --event telemetry.probe --attr note=a --attr note=b
+eq "a repeated --attr key exits 2" "${CODE}" "2"
 run "${S1}" --bogus
 eq "an unknown flag exits 2" "${CODE}" "2"
 has "an unknown flag carries Fix:" "${ERR}" "Fix:"

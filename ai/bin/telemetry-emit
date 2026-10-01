@@ -58,6 +58,8 @@ USAGE = <<~EOF
 EOF
 
 USAGE_FIX = "run `telemetry-emit --help` for the forms"
+CONFIG_FIX = "correct the value named: ATHENA_TELEMETRY_DIR must be absolute, ATHENA_TELEMETRY_NOW an ISO 8601 " \
+             "time, and HOME or XDG_STATE_HOME absolute (ai/contracts/athena-telemetry.md -> Test seams)"
 
 def usage_error(what, fix = USAGE_FIX)
   warn "#{PROG}: #{what}. Fix: #{fix}"
@@ -90,6 +92,7 @@ def parse_argv(argv)
       usage_error("--attr needs KEY=VALUE") if pair.nil? || pair.start_with?("-")
       key, eq, value = pair.partition("=")
       usage_error("--attr #{pair.inspect} is not KEY=VALUE", "pass --attr key=value, e.g. --attr jobs=8") if eq.empty? || key.empty?
+      usage_error("--attr #{key} given more than once", "pass each attr once") if attrs.key?(key)
       attrs[key] = value
       i += 2
     else
@@ -148,8 +151,8 @@ def prune(opts)
   days = retain_days(opts)
   result = begin
     AthenaTelemetry.prune(days: days)
-  rescue ArgumentError => e
-    warn "#{PROG}: PRUNE FAILED: #{e.message}. Fix: set HOME (or XDG_STATE_HOME) to an absolute path; seams must be well-formed (ai/contracts/athena-telemetry.md -> Store)."
+  rescue AthenaTelemetry::ConfigError => e
+    warn "#{PROG}: PRUNE FAILED: #{e.message}. Fix: #{CONFIG_FIX}"
     return 1
   end
   case result.status
@@ -178,8 +181,8 @@ def stats(opts)
   until_t = opts["--until"] && time_arg("--until", opts["--until"])
   result = begin
     AthenaTelemetry.read(since: since, until: until_t)
-  rescue ArgumentError => e
-    warn "#{PROG}: COULD NOT LOOK: #{e.message}. Fix: set HOME (or XDG_STATE_HOME) to an absolute path."
+  rescue AthenaTelemetry::ConfigError => e
+    warn "#{PROG}: COULD NOT LOOK: #{e.message}. Fix: #{CONFIG_FIX}"
     return 3
   end
   if result.status == :no_store
@@ -188,15 +191,16 @@ def stats(opts)
          "`telemetry-emit --event telemetry.probe` to create the store."
     return 3
   end
-  range = [since && "since #{since.utc.iso8601}", until_t && "until #{until_t.utc.iso8601}"].compact.join(" ")
+  range = [since && "since #{since.getutc.iso8601}", until_t && "until #{until_t.getutc.iso8601}"].compact.join(" ")
+  range = " #{range}" unless range.empty?
   puts "telemetry store: #{result.dir}"
   if result.status == :ok_empty
-    puts "status: ok_empty -- 0 events#{range.empty? ? '' : " #{range}"} (the store exists; nothing is recorded there)"
+    puts "status: ok_empty -- 0 events#{range} (the store exists; nothing is recorded there)"
   else
-    puts "status: ok -- #{result.events.size} event(s)#{range.empty? ? '' : " #{range}"}"
+    puts "status: #{result.status} -- #{result.events.size} event(s)#{range}"
     result.events.group_by { |e| e["at"][0, 10] }.sort.each { |day, evs| puts "  day #{day}: #{evs.size}" }
     result.events.group_by { |e| e["event"] }.sort.each { |name, evs| puts "  event #{name}: #{evs.size}" }
-    puts "latest: #{JSON.generate(result.events.last)}"
+    puts "latest: #{JSON.generate(result.events.last)}" unless result.events.empty?
   end
   puts failures_line(result)
   puts "malformed lines: #{result.malformed}"
@@ -225,9 +229,16 @@ if $PROGRAM_NAME == __FILE__
   end
   opts, attrs = parse_argv(ARGV)
   mode = mode_of(opts, attrs)
-  require "json"
-  require "time"
-  require_relative "../lib/athena_telemetry"
+  begin
+    require "json"
+    require "time"
+    require_relative "../lib/athena_telemetry"
+  rescue ScriptError, StandardError => e
+    raise unless mode == "--event"
+
+    warn "athena-telemetry: could not load the writer (#{e.class}). Fix: restore ai/lib/athena_telemetry.rb from git."
+    exit 0 # --event fails open, even when the writer cannot load
+  end
   code = case mode
          when "--event" then begin
            emit(opts, attrs)

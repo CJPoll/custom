@@ -326,6 +326,7 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/bin/fleet-resume"          => "ai/lib/fleet/test/resume/self-test.sh",
   "ai/bin/next-mission"          => "ai/lib/test/next-mission/self-test.sh",
   "ai/bin/test-slot"             => "ai/test/test-slot/self-test.sh",
+  "ai/bin/telemetry-emit"        => "ai/test/telemetry/self-test.sh",
   "ai/hooks/fleet-drain-guard.sh"     => "ai/hooks/fleet-drain-guard.self-test.sh",
   "ai/hooks/fleet-lifecycle.sh"       => "ai/hooks/fleet-lifecycle.self-test.sh",
   "ai/hooks/fleet-report.sh"          => "ai/hooks/fleet-report.self-test.sh",
