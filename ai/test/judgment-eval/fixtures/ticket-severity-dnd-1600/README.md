@@ -102,3 +102,8 @@ set's labels match DND-1590's two after runs case for case.
 - U exactly right: 0/11.
 - Both sets: accuracy 16/29, HIGH precision 5/11, CRITICAL 5/5 kept,
   CRITICAL precision 5/6.
+- H (runs `c57665f6`, 150 cases before a deploy's HTTP 502 stopped it, and
+  `a5fb13dc`, the other 131): accuracy 118/281, 146 judged above their
+  label, 17 below, 6 of 19 HIGH judged below HIGH. LOW recall 48/172,
+  MEDIUM precision 57/165, HIGH precision 13/55. So item 7 needs at most
+  116 above and at least 118/281 right, and item 8 at most 8 HIGH below.
