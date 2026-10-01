@@ -91,8 +91,124 @@ module DockerStacks
       configs = (n.dig("IPAM", "Config") || [])
       subnets = configs.map { |c| c["Subnet"] }.compact.select { |s| ip(s).ipv4? }
       labels = n["Labels"] || {}
-      { name: n["Name"], subnets: subnets, project: labels[PROJECT_LABEL], containers: (n["Containers"] || {}).size }
+      { id: n["Id"], name: n["Name"], subnets: subnets, project: labels[PROJECT_LABEL], containers: (n["Containers"] || {}).size }
     end
+  end
+
+  # raw: the JSON of `docker volume inspect <names>`. -> [{ name:, created_at: }]
+  def volumes_from_inspect(raw)
+    parsed = parse_json(raw, "docker volume inspect")
+    raise Unreadable, "docker volume inspect returned #{parsed.class}, not a list" unless parsed.is_a?(Array)
+
+    parsed.map do |v|
+      ok = v.is_a?(Hash) && v["Name"].is_a?(String) && v["CreatedAt"].is_a?(String) && !v["CreatedAt"].empty?
+      raise Unreadable, "volume entry without a Name and CreatedAt: #{v.inspect[0, 120]}" unless ok
+
+      { name: v["Name"], created_at: v["CreatedAt"] }
+    end
+  end
+
+  # ---- the stack marker (DND-1576) -------------------------------------------
+  # A captain's `docker compose down` (no -v) removes the containers and keeps
+  # the volumes. Volume labels carry the project but no working dir, so with the
+  # containers gone nothing on the docker side ties the volumes to a worktree,
+  # and the project name (the worktree basename) is shared by any checkout with
+  # that basename. The marker is that tie. It is recorded while the containers
+  # still prove attribution (attribute -> :ok) and kept in the worktree's OWN
+  # git dir (<common>/worktrees/<id>/), which git gives to exactly one worktree
+  # and deletes with it. It pins each volume by name AND creation time and each
+  # network by id, so a same-named resource re-created by another checkout
+  # after ours was removed does not match.
+  MARKER_FILE = "athena-stack-marker.json"
+  MARKER_SCHEMA = 1
+
+  # -> the marker document. A prior marker for the same worktree and project is
+  # merged in: a later record never forgets what an earlier one proved. A prior
+  # for anything else is dropped.
+  def build_marker(worktree:, project:, volumes:, networks:, prior:, at:)
+    raise Refused, "marker worktree #{worktree.inspect} is not absolute" unless worktree.to_s.start_with?("/")
+    raise Refused, "marker project is empty" if project.to_s.empty?
+
+    same = prior && prior[:worktree] == worktree && prior[:project] == project
+    vols = ((same ? prior[:volumes] : []) + volumes).uniq
+    nets = ((same ? prior[:networks] : []) + networks).uniq
+    { schema: MARKER_SCHEMA, worktree: worktree, project: project, recorded_at: at, volumes: vols, networks: nets }
+  end
+
+  # raw: the marker file's text. A marker that cannot be read is Unreadable,
+  # never "no marker": a corrupt file must not read as a missing one.
+  def parse_marker(raw, path)
+    d = parse_json(raw, "stack marker #{path}")
+    raise Unreadable, "stack marker #{path}: not a schema-#{MARKER_SCHEMA} object" unless d.is_a?(Hash) && d["schema"] == MARKER_SCHEMA
+
+    wt = d["worktree"]
+    project = d["project"]
+    raise Unreadable, "stack marker #{path}: worktree is not an absolute path" unless wt.is_a?(String) && wt.start_with?("/")
+    raise Unreadable, "stack marker #{path}: project is empty" unless project.is_a?(String) && !project.empty?
+
+    vols = marker_list(d, "volumes", %w[name created_at], path)
+    nets = marker_list(d, "networks", %w[id name], path)
+    { worktree: wt, project: project, recorded_at: d["recorded_at"],
+      volumes: vols.map { |v| { name: v["name"], created_at: v["created_at"] } },
+      networks: nets.map { |n| { id: n["id"], name: n["name"] } } }
+  end
+
+  def marker_list(doc, key, fields, path)
+    list = doc[key]
+    raise Unreadable, "stack marker #{path}: #{key} is not a list" unless list.is_a?(Array)
+
+    list.each do |e|
+      good = e.is_a?(Hash) && fields.all? { |f| e[f].is_a?(String) && !e[f].empty? }
+      raise Unreadable, "stack marker #{path}: a #{key} entry lacks #{fields.join('/')}: #{e.inspect[0, 120]}" unless good
+    end
+    list
+  end
+
+  # May the container-less resources of <project> be removed for worktree <wt>?
+  # marker: parse_marker's hash, or nil when none exists. volumes/networks: what
+  # docker lists for the project now. containers: how many the project still has.
+  #   { verdict: :ok }
+  #   { verdict: :refused, reason:, resources: [{ kind:, name:, why: }] }
+  # A refusal names EVERY resource, matched or not: the person removing them by
+  # hand needs the whole list. One unmatched resource refuses the whole stack.
+  def match_marker(marker, wt, project, volumes, networks, containers)
+    whole = ->(reason, why) { refuse_all(reason, volumes, networks, why) }
+    return whole.call("#{containers} container(s) of #{project} still exist", "not removed: a container holds the project") if containers.positive?
+    return whole.call("no stack marker", "no marker records it") if marker.nil?
+    if marker[:worktree] != wt
+      return whole.call("the stack marker names worktree #{marker[:worktree]}, not #{wt}", "the marker is another worktree's")
+    end
+    if marker[:project] != project
+      return whole.call("the stack marker names project #{marker[:project]}, not #{project}", "the marker is another project's")
+    end
+
+    resources = volumes.map { |v| { kind: "volume", name: v[:name], why: volume_mismatch(marker, v) } } +
+                networks.map { |n| { kind: "network", name: n[:name], why: network_mismatch(marker, n) } }
+    bad = resources.reject { |r| r[:why].nil? }
+    return { verdict: :ok } if bad.empty?
+
+    resources.each { |r| r[:why] ||= "recorded" }
+    { verdict: :refused, reason: "#{bad.size} resource(s) do not match the stack marker", resources: resources }
+  end
+
+  def refuse_all(reason, volumes, networks, why)
+    { verdict: :refused, reason: reason,
+      resources: volumes.map { |v| { kind: "volume", name: v[:name], why: why } } +
+                 networks.map { |n| { kind: "network", name: n[:name], why: why } } }
+  end
+
+  def volume_mismatch(marker, vol)
+    rec = marker[:volumes].find { |v| v[:name] == vol[:name] }
+    return "not recorded" if rec.nil?
+    return nil if rec[:created_at] == vol[:created_at]
+
+    "created #{vol[:created_at]}, the marker recorded #{rec[:created_at]} (re-created since)"
+  end
+
+  def network_mismatch(marker, net)
+    return nil if marker[:networks].any? { |n| n[:id] == net[:id] }
+
+    "id #{net[:id].to_s[0, 12]} not recorded"
   end
 
   # -> { capacity:, used:, free:, holders: [networks holding a pool subnet] }

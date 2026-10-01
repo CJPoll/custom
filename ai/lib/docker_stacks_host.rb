@@ -115,6 +115,36 @@ module DockerStacks
       }
     end
 
+    # The project's volumes, each with its creation time: [{ name:, created_at: }].
+    def project_volumes(project)
+      names = run!([@docker, "volume", "ls", "-q", "--filter", "label=#{PROJECT_LABEL}=#{project}"]).split
+      return [] if names.empty?
+
+      DockerStacks.volumes_from_inspect(run!([@docker, "volume", "inspect", *names]))
+    end
+
+    # The project's networks: [{ id:, name: }]. A network without an id is
+    # unreadable: a marker pins a network by its id.
+    def project_networks(project)
+      ids = run!([@docker, "network", "ls", "-q", "--no-trunc", "--filter", "label=#{PROJECT_LABEL}=#{project}"]).split
+      return [] if ids.empty?
+
+      DockerStacks.networks_from_inspect(run!([@docker, "network", "inspect", *ids])).map do |n|
+        raise Unreadable, "docker network inspect: network #{n[:name]} has no Id" if n[:id].to_s.empty?
+
+        { id: n[:id], name: n[:name] }
+      end
+    end
+
+    # Remove exactly these volumes / networks. -> [stdout, stderr, success?]
+    def remove_volumes(names)
+      run([@docker, "volume", "rm", *names])
+    end
+
+    def remove_networks(ids)
+      run([@docker, "network", "rm", *ids])
+    end
+
     def compose_down(project, dir)
       run([@docker, "compose", "-p", project, "down", "-v", "--remove-orphans"], chdir: dir, timeout: COMPOSE_DOWN_TIMEOUT_S)
     end
@@ -128,6 +158,35 @@ module DockerStacks
     def stack_repo?(repo)
       Dir.children(repo).any? { |f| DockerStacks.compose_file?(f) } ||
         REPO_SCRIPTS.any? { |s| File.file?(File.join(repo, s)) && File.executable?(File.join(repo, s)) }
+    end
+
+    # The stack marker's path: the worktree's own git dir (DND-1576). A git
+    # that cannot answer is Unreadable, never "no marker".
+    def marker_path(wt)
+      dir = git(wt, "rev-parse", "--path-format=absolute", "--git-dir")
+      raise Unreadable, "git rev-parse --git-dir failed in #{wt}" if dir.nil? || !dir.start_with?("/")
+
+      File.join(dir, MARKER_FILE)
+    end
+
+    # -> the marker's text, or nil when no file is there. Only ENOENT is
+    # "absent": EACCES or an unreadable directory raises (Unreadable).
+    def read_marker(path)
+      File.read(path)
+    rescue Errno::ENOENT
+      nil
+    rescue SystemCallError => e
+      raise Unreadable, "cannot read stack marker #{path}: #{e.message}"
+    end
+
+    # Atomic: a temp file in the same directory, then rename.
+    def write_marker(path, text)
+      tmp = "#{path}.#{Process.pid}.tmp"
+      File.write(tmp, text)
+      File.rename(tmp, path)
+    rescue SystemCallError => e
+      File.unlink(tmp) if tmp && File.exist?(tmp)
+      raise Unreadable, "cannot write stack marker #{path}: #{e.message}"
     end
 
     # ---- git ------------------------------------------------------------------

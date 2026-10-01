@@ -1528,6 +1528,50 @@ fail_open_pair t7ok "$R" --target main --no-fetch --gate "${R}/g.sh"
 R="${TMP}/t3"
 fail_open_pair t7refused "$R" --target main --no-fetch --gate "${R}/g.sh"
 
+# ---------------------------------------------------------------- DND-1576
+# sm1: after the gate runs in a linked worktree whose compose stack is up, the
+# worktree's stack marker is recorded (teardown-stack --record), so a later
+# `compose down` that keeps volumes still leaves them attributable at merge.
+# sm2: docker unreadable: the marker is not recorded, said so, and the gate
+# verdict and exit are unchanged. A stub docker on ATHENA_DOCKER_BIN; no daemon.
+sm_docker() { # <file> <worktree> <fail?>
+  cat > "$1" <<EOF
+#!/usr/bin/env bash
+[ "$3" = fail ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+case "\$1 \$2" in
+  "info "*) echo 29.0.0 ;;
+  "ps "*) case "\$*" in *"project=sm1-wt"*) echo c1 ;; *) echo c1 ;; esac ;;
+  "inspect "*) echo '[{"Config":{"Labels":{"com.docker.compose.project":"sm1-wt","com.docker.compose.project.working_dir":"$2"}}}]' ;;
+  "volume ls") echo sm1-wt_pg ;;
+  "volume inspect") echo '[{"Name":"sm1-wt_pg","CreatedAt":"2026-10-01T00:00:00Z"}]' ;;
+  "network ls") : ;;
+  *) echo "sm docker stub: unexpected \$*" >&2; exit 99 ;;
+esac
+EOF
+  chmod +x "$1"
+}
+for sm in sm1 sm2; do
+  R="${TMP}/${sm}"; new_repo "$R"
+  W="${TMP}/${sm}-x/sm1-wt"
+  ( cd "$R" && : > docker-compose.yml && git add docker-compose.yml && git commit -qm compose \
+    && git worktree add -q -b feature "$W" && cd "$W" && echo f > f.txt && git add f.txt && git commit -qm f )
+  W="$(cd "$W" && pwd -P)"
+  stub_gate_green "${W}/GATE_RAN" "${W}/g.sh"; record_pass "$W"
+  mode=ok; [ "$sm" = sm2 ] && mode=fail
+  sm_docker "${TMP}/${sm}-docker" "$W" "$mode"
+  out="$( cd "$W" && ATHENA_DOCKER_BIN="${TMP}/${sm}-docker" "$GATE" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
+  marker="$(git -C "$W" rev-parse --path-format=absolute --git-dir)/athena-stack-marker.json"
+  [ "$rc" -eq 0 ] && grep -q 'INTEGRATION OK' <<<"$out" && ok "${sm} gate OK" || bad "${sm} expected INTEGRATION OK, got $rc" "$out"
+  if [ "$sm" = sm1 ]; then
+    grep -qF "integration-gate: teardown-stack: RECORDED stack marker ${marker}" <<<"$out" && ok "sm1 says it recorded the marker" || bad "sm1 no RECORDED line" "$out"
+    grep -qF '"name":"sm1-wt_pg"' "$marker" 2>/dev/null && ok "sm1 marker records the volume" || bad "sm1 marker missing or wrong" "$(cat "$marker" 2>&1)"
+  else
+    grep -q 'stack marker not recorded (teardown-stack --record exit 3)' <<<"$out" && ok "sm2 says the marker was not recorded" || bad "sm2 no not-recorded line" "$out"
+    grep -q '^Fix: fix the unreachable' <<<"$out" && bad "sm2 printed teardown-stack's Fix: bare on an OK run" "$out" || ok "sm2 teardown-stack's Fix: is prefixed"
+    [ -f "$marker" ] && bad "sm2 wrote a marker" || ok "sm2 no marker"
+  fi
+done
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

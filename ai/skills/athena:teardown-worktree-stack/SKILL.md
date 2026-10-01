@@ -53,6 +53,24 @@ a script (tier 1 below).
   exits 0, run `teardown-stack --mr <n> --repo <repo>`.
 - **Parked Missions:** `teardown-stack --worktree <wt> --parked <reason>`. The
   tree stays (*Tear down the STACK; keep the TREE*, below).
+- **A stack with no containers left** (a captain's `docker compose down`
+  without `-v` keeps the volumes) is removed by its **stack marker**. A
+  volume's labels name the compose project but not the worktree, and the
+  project name is the worktree basename, which another checkout can share. So
+  `teardown-stack --record --worktree <wt>` writes
+  `<the worktree's git dir>/athena-stack-marker.json` while the containers
+  still prove the stack is that worktree's: the worktree, the project, each
+  volume by name and creation time, each network by id. `integration-gate`
+  runs it after every gate, so every gated worktree has one. The git dir
+  belongs to that one worktree and goes with it. At teardown, exactly the
+  matched volumes and networks are removed (`docker volume rm`, `docker
+  network rm`), never `down -v`. A missing marker, one naming another
+  worktree or project, or any resource it does not match (a volume
+  re-created since) is refused with exit 2. The refusal names every
+  resource and why, and its `Fix:` gives the exact removal command for you to
+  run once you have checked them by hand. Measured 2026-10-01: gen_saas PRs
+  #658 and #661 each left 3 volumes and 0 containers, `locked-merge` exited
+  10, and the admiral removed them by hand (DND-1576).
 - **Then the worktree:** after a merged change's teardown, remove its worktree
   per *Removing the WORKTREE*, below. That half stays with you.
 - **What still leaks** is named at the next dispatch by `pool-headroom`

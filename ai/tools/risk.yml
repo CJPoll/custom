@@ -215,6 +215,9 @@ tools:
   test-slot:               { class: destructive, reason: wrapper }
   # teardown-stack (DND-864) runs `docker compose down -v` or the repo's
   # teardown script: containers, networks and volumes (data) are destroyed.
+  # A container-less stack goes by `docker volume rm`/`network rm` of exactly
+  # the resources its stack marker matches; --record writes that marker into
+  # the worktree's git dir (DND-1576).
   teardown-stack:          { class: destructive, reason: docker }
   # tool-sandbox (DND-1426) executes a caller-supplied CMD (model-written code
   # is its purpose) under bubblewrap. The sandbox narrows what CMD reaches, but

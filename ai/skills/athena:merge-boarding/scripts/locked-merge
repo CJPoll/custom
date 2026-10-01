@@ -404,8 +404,10 @@ echo "MERGED ${PR} ${M} ON ${B} TREE-MATCH"
 # The landing is confirmed, so the merged branch's worktree stack goes now,
 # per PR: a multi-part Mission reclaims each part's stack as that part lands.
 # teardown-stack re-confirms the merge, finds the ONE worktree with the PR's
-# head branch, and refuses anything it cannot attribute. Release the merge
-# lock first: a teardown is not part of the critical section.
+# head branch, and refuses anything it cannot attribute. A stack whose
+# containers are already gone is attributed by the stack marker integration-gate
+# recorded in the worktree's git dir (DND-1576). Release the merge lock first:
+# a teardown is not part of the critical section.
 exec 9>&-
 if ! "${AI_BIN}/teardown-stack" --pr "${PR}" --repo "${REPO}"; then
   die 10 "PR ${PR} LANDED, but teardown-stack could not tear down its worktree stack" \

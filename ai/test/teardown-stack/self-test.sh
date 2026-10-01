@@ -39,8 +39,32 @@ case "$1" in
   ps)
     p="$(proj_of "$@")"
     if [ -n "$p" ]; then list "$p" containers; else cat "${ST}/ps_ids"; fi ;;
-  volume)  list "$(proj_of "$@")" volumes ;;
-  network) list "$(proj_of "$@")" networks ;;
+  # A volumes line is `<name> [<created_at>]`, a networks line `<id> [<name>]`
+  # (DND-1576: a marker pins a volume by name + creation time, a network by id).
+  volume|network)
+    kind="$1s"; sub="$2"; shift 2
+    case "${sub}" in
+      ls) list "$(proj_of "$@")" "${kind}" | cut -d' ' -f1 ;;
+      inspect)
+        /usr/bin/ruby -rjson -e '
+          kind, root, *want = ARGV
+          lines = Dir.glob(File.join(root, "res", "*", kind)).flat_map { |f| File.readlines(f, chomp: true) }
+          puts JSON.dump(want.map { |w| l = lines.find { |x| x.split(" ").first == w } or abort("no such #{kind} #{w}")
+            a, b = l.split(" ")
+            kind == "volumes" ? { "Name" => a, "CreatedAt" => b || "2026-01-01T00:00:00Z" } : { "Id" => a, "Name" => b || a } })
+        ' "${kind}" "${ST}" "$@" ;;
+      rm)
+        [ -f "${ST}/rm_fail" ] && { echo "Error response from daemon: remove: volume is in use" >&2; exit 1; }
+        for x in "$@"; do
+          echo "RM ${kind} ${x}" >> "${ST}/rm.log"
+          [ -f "${ST}/linger" ] && continue
+          for f in "${ST}"/res/*/"${kind}"; do
+            [ -f "$f" ] && { grep -v -e "^${x}\$" -e "^${x} " "$f" > "$f.new"; mv "$f.new" "$f"; }
+          done
+          echo "${x}"
+        done ;;
+      *) echo "docker stub: unexpected ${kind} ${sub} $*" >&2; exit 99 ;;
+    esac ;;
   compose)
     echo "CWD $(pwd -P) PROJECT $3" >> "${ST}/compose.log"
     [ -f "${ST}/linger" ] || rm -rf "${ST}/res/$3" ;;
@@ -101,7 +125,14 @@ fixture() {
   printf 'n1\n' > "${ST}/res/dnd-1-x/networks"
   printf 'c1\nc2\n' > "${ST}/ps_ids"
   containers "dnd-1-x=${WT}/dnd-1-x" "dnd-1-x=${WT}/dnd-1-x"
+  rm -f "${MARKER}" # a marker lives in the worktree's own git dir, which outlives a fixture
 }
+# The DND-1576 stack marker of worktree dnd-1-x: in its private git dir.
+MARKER="$(git -C "${WT}/dnd-1-x" rev-parse --path-format=absolute --git-dir)/athena-stack-marker.json"
+# captain_down: what a captain's `docker compose down` (no -v) leaves behind:
+# containers and networks gone, volumes kept.
+captain_down() { rm -f "${ST}/res/dnd-1-x/containers" "${ST}/res/dnd-1-x/networks"; containers; : > "${ST}/ps_ids"; }
+no_rm() { [ -s "${ST}/rm.log" ] && bad "$1 removed resources" "$(cat "${ST}/rm.log")" || ok "$1 removed nothing"; }
 containers() { # project=dir ...
   /usr/bin/ruby -rjson -e 'puts JSON.dump(ARGV.map { |a| p, d = a.split("=", 2)
     { "Config" => { "Labels" => { "com.docker.compose.project" => p, "com.docker.compose.project.working_dir" => d } } } })' "$@" \
@@ -143,9 +174,78 @@ run --pr 5; expect "t6 foreign project" 2; no_down t6
 # t7 nothing up at all: 0, said so.
 fixture t7 dnd-1-x; rm -rf "${ST}/res/dnd-1-x"; containers; : > "${ST}/ps_ids"
 run --pr 5; expect t7 0; has "t7 says nothing up" "nothing up for project dnd-1-x"; no_down t7
-# t8 labelled resources but no container ties them to the worktree: refuse.
+# DND-1576 (3): the 0-candidates case names the key it searched for.
+has "t7 names the label key it searched" "label com.docker.compose.project=dnd-1-x"
+# t8 labelled resources, no container, no marker: refuse, naming each one.
 fixture t8 dnd-1-x; rm "${ST}/res/dnd-1-x/containers"; containers; : > "${ST}/ps_ids"
-run --pr 5; expect "t8 unattributable volumes" 2; no_down t8
+run --pr 5; expect "t8 unattributable volumes" 2; no_down t8; no_rm t8
+for r in "volume v1" "volume v2" "volume v3" "network n1"; do has "t8 names ${r}" "${r}"; done
+has "t8 names the marker it looked for" "no stack marker at ${MARKER}"
+
+# ---- DND-1576: a container-less stack, attributed by its stack marker ------
+# m1 the captain's normal end state: the marker was recorded while the stack
+# ran (--record, as integration-gate does), then `compose down` kept the
+# volumes. The merge removes exactly those volumes, never by `down -v`.
+fixture m1 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; expect "m1 record" 0
+has "m1 record says what it recorded" "RECORDED stack marker ${MARKER}: project dnd-1-x, 3 volume(s), 1 network(s)"
+[ -f "${MARKER}" ] && ok "m1 marker written in the worktree's git dir" || bad "m1 no marker at ${MARKER}" "${out}"
+grep -qF "\"worktree\":\"${WT}/dnd-1-x\"" "${MARKER}" 2>/dev/null && ok "m1 marker names the worktree" || bad "m1 marker lacks the worktree" "$(cat "${MARKER}" 2>/dev/null)"
+captain_down; run --pr 5; expect "m1 volumes only, marker matches" 0
+has "m1 torn down by its marker" "TORN DOWN project dnd-1-x in ${WT}/dnd-1-x by its stack marker"
+no_down m1
+[ "$(sort "${ST}/rm.log" 2>/dev/null | tr '\n' ' ')" = "RM volumes v1 RM volumes v2 RM volumes v3 " ] && ok "m1 removed exactly v1 v2 v3" \
+  || bad "m1 removed the wrong set" "$(cat "${ST}/rm.log" 2>/dev/null)"
+[ -s "${ST}/res/dnd-1-x/volumes" ] && bad "m1 volumes linger" || ok "m1 nothing labelled is left"
+# m2 marker recorded for ANOTHER worktree: refuse, name every resource.
+fixture m2 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; captain_down
+/usr/bin/ruby -rjson -e 'p = ARGV[0]; d = JSON.parse(File.read(p)); d["worktree"] = "/elsewhere/dnd-1-x"; File.write(p, JSON.dump(d))' "${MARKER}"
+run --pr 5; expect "m2 marker for another worktree" 2; no_down m2; no_rm m2
+has "m2 names the other worktree" "/elsewhere/dnd-1-x"
+for r in "volume v1" "volume v2" "volume v3"; do has "m2 names ${r}" "${r}"; done
+# m3 a volume re-created since the record (another checkout, same name): refuse.
+fixture m3 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; captain_down
+printf 'v1\nv2 2026-10-02T00:00:00Z\nv3\n' > "${ST}/res/dnd-1-x/volumes"
+run --pr 5; expect "m3 re-created volume" 2; no_down m3; no_rm m3
+has "m3 says why v2 does not match" "volume v2: created 2026-10-02T00:00:00Z"
+# m4 a volume the marker never saw: the whole stack is refused.
+fixture m4 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; captain_down
+printf 'v1\nv2\nv3\nv4\n' > "${ST}/res/dnd-1-x/volumes"
+run --pr 5; expect "m4 unrecorded volume" 2; no_rm m4; has "m4 names v4" "volume v4"
+# m5 removal leaves resources behind: 4, never TORN DOWN.
+fixture m5 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; captain_down; touch "${ST}/linger"
+run --pr 5; expect "m5 linger after rm" 4
+grep -q "TORN DOWN" <<<"${out}" && bad "m5 claimed TORN DOWN" "${out}" || ok "m5 no false TORN DOWN"
+# m6 dry run: the plan, nothing removed.
+fixture m6 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; captain_down
+run --pr 5 --dry-run; expect "m6 dry run" 0; has "m6 plan" "DRY RUN would remove"; no_rm m6
+# m7 a marker that is not JSON: 3 (could not read), never "no marker".
+fixture m7 dnd-1-x; captain_down; echo garbage > "${MARKER}"
+run --pr 5; expect "m7 unreadable marker" 3; no_rm m7; rm -f "${MARKER}"
+
+# ---- --record ----------------------------------------------------------------
+# r1 no stack declared: nothing recorded, docker never asked.
+fixture r1 unused; touch "${ST}/down"; run --record --worktree "${WT}/no-compose"; expect "r1 record, no stack" 0
+has "r1 says nothing recorded" "nothing recorded"
+[ -s "${ST}/docker.log" ] && bad "r1 called docker" "$(cat "${ST}/docker.log")" || ok "r1 docker not called"
+# r2 no container proves the stack: NOT RECORDED, the key named, no marker.
+fixture r2 unused; captain_down; run --record --worktree "${WT}/dnd-1-x"; expect "r2 record, no container" 0
+has "r2 says NOT RECORDED with the key" "NOT RECORDED: no container labelled com.docker.compose.project=dnd-1-x"
+[ -f "${MARKER}" ] && bad "r2 wrote a marker without proof" || ok "r2 no marker"
+# r3 a project-name collision: refuse, no marker.
+fixture r3 unused; containers "dnd-1-x=${WT}/dnd-1-x" "dnd-1-x=${TMP}/elsewhere/dnd-1-x"
+run --record --worktree "${WT}/dnd-1-x"; expect "r3 record on collision" 2
+[ -f "${MARKER}" ] && bad "r3 wrote a marker on a collision" || ok "r3 no marker"
+# r4 a later record keeps what an earlier one proved (a volume removed in between).
+fixture r4 unused; run --record --worktree "${WT}/dnd-1-x"; printf 'v1\nv4\n' > "${ST}/res/dnd-1-x/volumes"
+run --record --worktree "${WT}/dnd-1-x"; expect "r4 second record" 0
+for v in v1 v2 v3 v4; do grep -qF "\"name\":\"${v}\"" "${MARKER}" && ok "r4 marker keeps ${v}" || bad "r4 marker lost ${v}" "$(cat "${MARKER}")"; done
+# r5 the main checkout runs no fleet stack: nothing recorded.
+fixture r5 unused; run --record --worktree "${REPO}"; expect "r5 record, main checkout" 0; has "r5 says main checkout" "main checkout"
+# r6 docker unreachable: 3, no marker.
+fixture r6 unused; touch "${ST}/down"; run --record --worktree "${WT}/dnd-1-x"; expect "r6 record, docker down" 3
+[ -f "${MARKER}" ] && bad "r6 wrote a marker" || ok "r6 no marker"
+# r7 --record is a mode of its own.
+fixture r7 unused; run --record --pr 5; expect "r7 record with --pr" 2; run --record --worktree "${WT}/dnd-1-x" --parked x; expect "r7 record with --parked" 2
 # t9 docker down: 3, not "nothing up".
 fixture t9 dnd-1-x; touch "${ST}/down"; run --pr 5; expect "t9 docker unreachable" 3; no_down t9
 

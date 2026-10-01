@@ -28,7 +28,9 @@
 # word (gen_saas #468 merged past a RED gate because a prep script printed
 # READY without reading the exit code). Every run that does not end in
 # INTEGRATION OK removes any receipt for its head, so a stale pass cannot
-# outlive a later RED.
+# outlive a later RED. After the gate runs, in a linked worktree that runs a
+# compose stack, it also has teardown-stack record that worktree's stack
+# marker in the worktree's own git dir (DND-1576), outside every working tree.
 #
 # Run: ai/skills/athena:merge-boarding/scripts/integration-gate [--target <ref>]
 # Self-test: ai/skills/athena:merge-boarding/test/self-test.sh
@@ -83,6 +85,12 @@ OK line then says CRITIC CARRIED + INTERACTION), the
 blast-radius verdict, the INTEGRATION OK line, and a UTC timestamp.
 locked-merge requires it. Any other
 outcome removes a receipt for that head. There is no flag that skips it.
+
+Once the gate has run (green or RED), it runs `teardown-stack --record
+--worktree <root>`: in a linked worktree with a compose stack up, that
+records the stack marker teardown-stack needs to remove the stack's volumes
+after a merge if the containers are gone by then (DND-1576). Its lines are
+prefixed `integration-gate: `; it never changes the verdict or exit code.
 
   --target <ref>   integration target (default: origin/main). It sets the
                    containment check and the critic base ONLY. The declared
@@ -319,6 +327,28 @@ cd "$ROOT" || exit 2
 short() { git rev-parse --short "$1"; }
 tree_dirt() { git -C "$ROOT" status --porcelain 2>&1; }
 CRITIC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/critic-review"
+TEARDOWN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/teardown-stack"
+
+# DND-1576: record the worktree's stack marker right after the gate ran, while
+# the stack the gate used is still up. A captain's later `docker compose down`
+# (no -v) leaves volumes and no container, and teardown-stack can attribute
+# those at merge time only through this marker. Advisory: the gate verdict
+# never depends on it, and its lines are prefixed so a Fix: of teardown-stack's
+# is not read as this gate's own. teardown-stack decides when there is nothing
+# to record (a main checkout, no stack, a repo script) without asking docker.
+record_stack_marker() {
+  local out rc
+  if [ ! -x "$TEARDOWN" ]; then
+    echo "${PROG}: stack marker not recorded: ${TEARDOWN} is missing or not executable."
+    return 0
+  fi
+  out="$("$TEARDOWN" --record --worktree "$ROOT" 2>&1)"; rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out" | sed "s/^/${PROG}: /"
+  if [ "$rc" -ne 0 ]; then
+    echo "${PROG}: stack marker not recorded (teardown-stack --record exit ${rc}); the gate verdict does not depend on it, but if this worktree's containers are gone by its merge, teardown-stack will refuse its volumes and name each one."
+  fi
+  return 0
+}
 
 fetch_target() {
   [ "$DO_FETCH" -eq 1 ] || return 0
@@ -1030,6 +1060,7 @@ case "$OUTCOME_LINE" in
       exit 6
     fi ;;
 esac
+record_stack_marker
 if [ "$GATE_RC" -ne 0 ]; then
   join_critic
   echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA") (gate exit ${GATE_RC})." >&2

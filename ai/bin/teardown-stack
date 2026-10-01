@@ -17,6 +17,8 @@
 #   teardown-stack --worktree DIR --parked REASON [--dry-run]
 #                                                      a Mission that ends
 #                                                      without merging
+#   teardown-stack --record --worktree DIR [--dry-run] record the stack marker
+#                                                      (integration-gate runs it)
 #   teardown-stack --help
 #
 # Attribution. It only tears down what it can prove belongs to that change:
@@ -36,8 +38,20 @@
 # no stack (pool-headroom's same predicate): exit 0 without asking docker.
 # Afterwards it verifies no container, volume or network carries the label.
 #
+# The stack marker (DND-1576). A `docker compose down` without -v leaves the
+# project's volumes and no container, and a volume's labels name the project
+# but not the worktree, so tier 2 cannot attribute them. --record writes
+# <the worktree's git dir>/athena-stack-marker.json while the containers still
+# prove the stack is this worktree's: the worktree, the project, each volume
+# by name and creation time, each network by id. integration-gate records it
+# on every run in a linked worktree. At teardown, a project with no container
+# left is removed only when the marker names this worktree and project and
+# matches every remaining resource; then exactly those volumes and networks
+# are removed (`docker volume rm`, `docker network rm`), never `down -v`.
+# A missing or mismatched marker is refused, naming every resource.
+#
 # Exit (every non-zero prints a Fix: line):
-#   0 torn down, or nothing to tear down (the reason is printed)
+#   0 torn down, recorded, or nothing to do (the reason is printed)
 #   1 not merged: nothing touched
 #   2 usage error, or attribution refused: nothing touched
 #   3 could not determine (forge, git or docker unreadable): nothing touched
@@ -45,13 +59,15 @@
 #
 # Suite: ai/test/teardown-stack/self-test.sh (stub docker/gh/glab).
 
+require "json"
+require "time"
 require_relative "../lib/strict_argv"
 require_relative "../lib/docker_stacks"
 require_relative "../lib/docker_stacks_host"
 
 SPEC = {
   "--pr" => :integer, "--mr" => :integer, "--repo" => :value, "--worktree" => :value,
-  "--parked" => :value, "--dry-run" => :switch, "--help" => :switch, "-h" => :switch,
+  "--parked" => :value, "--record" => :switch, "--dry-run" => :switch, "--help" => :switch, "-h" => :switch,
 }.freeze
 REPO_SCRIPTS = DockerStacks::REPO_SCRIPTS
 
@@ -202,11 +218,11 @@ def teardown(host, wt, anchor, dry_run)
   when :none
     left = host.project_resources(project)
     if left.values.sum.zero?
-      return puts("teardown-stack: nothing up for project #{project} (#{containers.size} compose container(s) scanned)")
+      return puts("teardown-stack: nothing up for project #{project}: no container, volume or network carries " \
+                  "label #{DockerStacks::PROJECT_LABEL}=#{project} (#{containers.size} compose container(s) scanned)")
     end
 
-    stop(2, "resources labelled #{project} exist (#{fmt(left)}) but no container ties them to #{wt}",
-         "confirm by hand that they are this worktree's, then remove them; teardown-stack will not run down -v on a stack it cannot attribute.")
+    return teardown_by_marker(host, wt, project, left, dry_run)
   end
 
   before = host.project_resources(project)
@@ -224,6 +240,104 @@ def teardown(host, wt, anchor, dry_run)
   puts "teardown-stack: TORN DOWN project #{project} in #{wt} (removed #{fmt(before)})"
 end
 
+# No container of <project> is left, but labelled volumes/networks are (a
+# captain's `compose down` without -v). Remove them only by the stack marker
+# (DND-1576): exactly the matched resources, by name, never `down -v`.
+def teardown_by_marker(host, wt, project, left, dry_run)
+  path = host.marker_path(wt)
+  raw = host.read_marker(path)
+  marker = raw.nil? ? nil : DockerStacks.parse_marker(raw, path)
+  vols = host.project_volumes(project)
+  nets = host.project_networks(project)
+  m = DockerStacks.match_marker(marker, wt, project, vols, nets, left[:containers])
+  unless m[:verdict] == :ok
+    reason = marker.nil? ? "no stack marker at #{path}" : "#{m[:reason]} (#{path})"
+    listing = m[:resources].map { |r| "#{r[:kind]} #{r[:name]}: #{r[:why]}" }.join("; ")
+    by_hand = [("docker volume rm #{vols.map { |v| v[:name] }.join(' ')}" unless vols.empty?),
+               ("docker network rm #{nets.map { |n| n[:name] }.join(' ')}" unless nets.empty?)].compact.join(" and ")
+    stop(2, "resources labelled #{project} exist (#{fmt(left)}) but no container ties them to #{wt}, and #{reason}. " \
+            "Resources: #{listing}",
+         "confirm by hand that each resource named above is this worktree's, then remove them (#{by_hand}); " \
+         "teardown-stack removes a container-less stack only by a stack marker that names this worktree and matches every resource, " \
+         "and never runs down -v on one it cannot attribute. A stack keeps its marker when integration-gate (teardown-stack --record) " \
+         "runs while its containers are up.")
+  end
+
+  names = vols.map { |v| v[:name] }
+  ids = nets.map { |n| n[:id] }
+  what = "#{names.size} volume(s) [#{names.join(' ')}], #{ids.size} network(s) [#{nets.map { |n| n[:name] }.join(' ')}]"
+  return puts("teardown-stack: DRY RUN would remove #{what} of project #{project} by its stack marker #{path}") if dry_run
+
+  $destroying = true
+  failed = []
+  [[names, :remove_volumes], [ids, :remove_networks]].each do |list, op|
+    next if list.empty?
+
+    _out, err, ok = host.public_send(op, list)
+    failed << err.lines.first.to_s.strip unless ok
+  end
+  after = host.project_resources(project)
+  unless after.values.sum.zero?
+    stop(4, "project #{project} still has #{fmt(after)} after removing #{what} by its stack marker" \
+            "#{failed.empty? ? '' : " (docker said: #{failed.join('; ')})"}",
+         "inspect with `docker volume ls` and `docker network ls` filtered by label #{DockerStacks::PROJECT_LABEL}=#{project}, " \
+         "remove the leftovers, then re-run.")
+  end
+  puts "teardown-stack: TORN DOWN project #{project} in #{wt} by its stack marker #{path} (removed #{what})"
+end
+
+# --record: write the stack marker while the containers prove the stack is
+# this worktree's (DND-1576). Never destructive. Exit 0 also when there is
+# nothing to record, with the reason; 2 when attribution is refused; 3 when
+# docker, git or the marker file cannot be read or written.
+def record(host, wt, dry_run)
+  git_dir = host.git(wt, "rev-parse", "--path-format=absolute", "--git-dir")
+  common = host.git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")
+  raise DockerStacks::Unreadable, "git rev-parse --git-dir failed in #{wt}" if git_dir.nil? || common.nil?
+  return puts("teardown-stack: #{wt} is a main checkout, which runs no fleet stack; nothing recorded") if git_dir == common
+
+  top = host.git(wt, "rev-parse", "--show-toplevel")
+  stop(2, "#{wt} is not a worktree's top level (that is #{top})", "pass --worktree #{top}.") unless top && File.realpath(top) == wt
+  if (script = repo_script(host, wt, wt))
+    return puts("teardown-stack: #{wt} is torn down by its repo script #{script}, which needs no stack marker; nothing recorded")
+  end
+  unless host.stack_repo?(wt)
+    return puts("teardown-stack: #{wt} declares no per-worktree stack (no root compose file, no teardown-worktree-stack.sh); nothing recorded")
+  end
+
+  host.docker_reachable!
+  containers = compose_containers(host)
+  project = DockerStacks.normalize_project(File.basename(wt))
+  verdict = DockerStacks.attribute(wt, project, containers)
+  case verdict[:verdict]
+  when :foreign
+    stop(2, "#{wt} runs compose project(s) #{verdict[:projects].join(', ')}, not the default #{project}; no marker recorded",
+         "the repo names its stacks its own way: give it a bin/teardown-worktree-stack.sh (athena:teardown-worktree-stack, tier 1).")
+  when :collision
+    stop(2, "project #{project} also has containers outside #{wt}: #{verdict[:dirs].join(', ')}; no marker recorded",
+         "another checkout shares this project name, so its volumes cannot be attributed to #{wt}; find whose they are before recording.")
+  when :none
+    return puts("teardown-stack: NOT RECORDED: no container labelled #{DockerStacks::PROJECT_LABEL}=#{project} runs under #{wt} " \
+                "(#{containers.size} compose container(s) scanned), so nothing proves which resources are this worktree's")
+  end
+
+  path = host.marker_path(wt)
+  raw = host.read_marker(path)
+  prior = begin
+    raw.nil? ? nil : DockerStacks.parse_marker(raw, path)
+  rescue DockerStacks::Unreadable => e
+    warn "teardown-stack: replacing an unreadable stack marker: #{e.message}"
+    nil
+  end
+  doc = DockerStacks.build_marker(worktree: wt, project: project, volumes: host.project_volumes(project),
+                                  networks: host.project_networks(project), prior: prior, at: Time.now.utc.iso8601)
+  summary = "project #{project}, #{doc[:volumes].size} volume(s), #{doc[:networks].size} network(s)"
+  return puts("teardown-stack: DRY RUN would record stack marker #{path}: #{summary}") if dry_run
+
+  host.write_marker(path, "#{JSON.generate(doc)}\n")
+  puts "teardown-stack: RECORDED stack marker #{path}: #{summary}"
+end
+
 def fmt(counts)
   "#{counts[:containers]} container(s), #{counts[:volumes]} volume(s), #{counts[:networks]} network(s)"
 end
@@ -239,7 +353,12 @@ def main(argv)
   merged = %w[--pr --mr].select { |f| opts.key?(f) }
   parked = opts.key?("--parked") || opts.key?("--worktree")
 
-  if merged.size == 1 && !parked
+  if opts["--record"]
+    unless merged.empty? && opts.key?("--worktree") && !opts.key?("--parked") && !opts.key?("--repo")
+      stop(2, "--record takes only --worktree DIR (and --dry-run)", "run teardown-stack --record --worktree <the worktree's top level>.")
+    end
+    record(host, realdir(opts["--worktree"], "--worktree"), dry)
+  elsif merged.size == 1 && !parked
     kind = merged.first.delete("-")
     number = opts[merged.first]
     repo = realdir(opts.fetch("--repo", Dir.pwd), "--repo")

@@ -46,7 +46,7 @@ inspect_json = <<~JSON
   [
     {"Name":"bridge","IPAM":{"Config":[{"Subnet":"172.17.0.0/16"}]},"Labels":{},"Containers":{}},
     {"Name":"host","IPAM":{"Config":[]},"Labels":null,"Containers":{}},
-    {"Name":"gen_saas-dnd-1","IPAM":{"Config":[{"Subnet":"192.168.16.0/20"},{"Subnet":"fd00::/64"}]},
+    {"Name":"gen_saas-dnd-1","Id":"n1id","IPAM":{"Config":[{"Subnet":"192.168.16.0/20"},{"Subnet":"fd00::/64"}]},
      "Labels":{"com.docker.compose.project":"dnd-1"},"Containers":{"a":{},"b":{}}},
     {"Name":"custom","IPAM":{"Config":[{"Subnet":"10.99.0.0/24"}]},"Labels":{},"Containers":null}
   ]
@@ -55,6 +55,7 @@ nets = DS.networks_from_inspect(inspect_json)
 check("inspect parses every network") { nets.map { |n| n[:name] } == %w[bridge host gen_saas-dnd-1 custom] }
 check("inspect keeps only IPv4 subnets") { nets[2][:subnets] == ["192.168.16.0/20"] }
 check("inspect reads the compose project label") { nets[2][:project] == "dnd-1" && nets[0][:project].nil? }
+check("inspect reads the network id (a marker pins a network by it)") { nets[2][:id] == "n1id" && nets[0][:id].nil? }
 check("inspect counts attached containers") { nets[2][:containers] == 2 && nets[3][:containers].zero? }
 check("inspect of nothing is unreadable (a daemon always has networks)") do
   raises?(DS::Unreadable) { DS.networks_from_inspect("[]") }
@@ -137,6 +138,72 @@ a = DS.attribute(wt, "dnd-1-x", cont + [{ project: "walt-ui-dnd-1-x", working_di
 check("attribute: a non-default project under the worktree -> foreign") do
   a[:verdict] == :foreign && a[:projects] == ["walt-ui-dnd-1-x"]
 end
+
+# ---- stack marker (DND-1576) --------------------------------------------------
+# A container-less stack is attributed only by the marker recorded while its
+# containers proved it: same worktree, same project, and every resource matched
+# exactly (a volume by name AND creation time, a network by id).
+vols = [{ name: "dnd-1-x_build", created_at: "2026-10-01T10:00:00Z" },
+        { name: "dnd-1-x_pg", created_at: "2026-10-01T10:00:01Z" }]
+nets = [{ id: "a" * 64, name: "dnd-1-x_default" }]
+doc = DS.build_marker(worktree: wt, project: "dnd-1-x", volumes: vols, networks: nets, prior: nil, at: "2026-10-01T11:00:00Z")
+round = DS.parse_marker(JSON.dump(doc), "/g/marker.json")
+check("marker: round-trips through JSON") do
+  round[:worktree] == wt && round[:project] == "dnd-1-x" && round[:volumes] == vols && round[:networks] == nets
+end
+check("marker: a relative worktree is refused where it is built") do
+  raises?(DS::Refused) { DS.build_marker(worktree: "rel/wt", project: "p", volumes: [], networks: [], prior: nil, at: "t") }
+end
+later = DS.build_marker(worktree: wt, project: "dnd-1-x", volumes: [{ name: "dnd-1-x_deps", created_at: "2026-10-01T12:00:00Z" }],
+                       networks: [], prior: round, at: "2026-10-01T12:00:00Z")
+check("marker: a later record keeps what an earlier one proved") do
+  later[:volumes].map { |v| v[:name] }.sort == %w[dnd-1-x_build dnd-1-x_deps dnd-1-x_pg] && later[:networks] == nets
+end
+foreign_prior = round.merge(worktree: "/w/other/dnd-1-x")
+fresh = DS.build_marker(worktree: wt, project: "dnd-1-x", volumes: [], networks: [], prior: foreign_prior, at: "t")
+check("marker: a prior record for another worktree is dropped, never merged") { fresh[:volumes].empty? && fresh[:networks].empty? }
+
+check("marker: empty text is unreadable") { raises?(DS::Unreadable) { DS.parse_marker("", "/g/m.json") } }
+check("marker: wrong schema is unreadable") { raises?(DS::Unreadable) { DS.parse_marker('{"schema":9}', "/g/m.json") } }
+check("marker: a volume without created_at is unreadable") do
+  raises?(DS::Unreadable) do
+    DS.parse_marker(JSON.dump(doc.merge(volumes: [{ name: "v" }])), "/g/m.json")
+  end
+end
+
+m = DS.match_marker(round, wt, "dnd-1-x", vols, nets, 0)
+check("match: every resource recorded for this worktree -> ok") { m[:verdict] == :ok }
+m = DS.match_marker(nil, wt, "dnd-1-x", vols, [], 0)
+check("match: no marker -> refused, every resource named") do
+  m[:verdict] == :refused && m[:reason].include?("no stack marker") &&
+    m[:resources].map { |r| r[:name] } == %w[dnd-1-x_build dnd-1-x_pg]
+end
+m = DS.match_marker(round.merge(worktree: "/w/other/dnd-1-x"), wt, "dnd-1-x", vols, nets, 0)
+check("match: marker for another worktree -> refused, names it") do
+  m[:verdict] == :refused && m[:reason].include?("/w/other/dnd-1-x") && m[:resources].size == 3
+end
+m = DS.match_marker(round.merge(project: "dnd-9-z"), wt, "dnd-1-x", vols, nets, 0)
+check("match: marker for another project -> refused") { m[:verdict] == :refused && m[:reason].include?("dnd-9-z") }
+recreated = [vols[0], { name: "dnd-1-x_pg", created_at: "2026-10-02T00:00:00Z" }]
+m = DS.match_marker(round, wt, "dnd-1-x", recreated, nets, 0)
+check("match: a volume re-created since the record -> refused, that one says why") do
+  m[:verdict] == :refused && m[:resources].find { |r| r[:name] == "dnd-1-x_pg" }[:why].include?("2026-10-02T00:00:00Z")
+end
+m = DS.match_marker(round, wt, "dnd-1-x", vols + [{ name: "dnd-1-x_new", created_at: "t" }], nets, 0)
+check("match: one unrecorded volume -> the whole stack is refused") do
+  m[:verdict] == :refused && m[:resources].map { |r| r[:name] }.include?("dnd-1-x_new") && m[:resources].size == 4
+end
+m = DS.match_marker(round, wt, "dnd-1-x", vols, [{ id: "b" * 64, name: "dnd-1-x_default" }], 0)
+check("match: a network re-created under the same name -> refused") { m[:verdict] == :refused }
+m = DS.match_marker(round, wt, "dnd-1-x", vols, nets, 1)
+check("match: a container of the project still exists -> refused") { m[:verdict] == :refused }
+
+ins = DS.volumes_from_inspect('[{"Name":"v1","CreatedAt":"2026-10-01T10:00:00-06:00","Labels":{}}]')
+check("volume inspect: name and creation time") { ins == [{ name: "v1", created_at: "2026-10-01T10:00:00-06:00" }] }
+check("volume inspect: an entry without CreatedAt is unreadable") do
+  raises?(DS::Unreadable) { DS.volumes_from_inspect('[{"Name":"v1"}]') }
+end
+check("volume inspect: empty output is unreadable") { raises?(DS::Unreadable) { DS.volumes_from_inspect("") } }
 
 # ---- forge_of ---------------------------------------------------------------
 check("forge_of github ssh") { DS.forge_of("git@github.com:CJPoll/custom.git") == :github }
