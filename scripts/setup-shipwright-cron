@@ -18,22 +18,30 @@
 #
 # Usage:
 #   setup-shipwright-cron [--schedule "<cron expr>"] [--dry-run]
+#   setup-shipwright-cron --check
 #   setup-shipwright-cron --remove [--dry-run]
+#   setup-shipwright-cron --backup <file>
 #   setup-shipwright-cron --help
 #
 # Options:
 #   --schedule "<expr>"  Five-field cron schedule (default: "0 * * * *" = hourly)
+#   --check              Read-only: exit 0 if the entry is live, 1 if it is not
 #   --remove             Remove the shipwright crontab entry and exit
+#   --backup <file>      Snapshot the current crontab to <file> (mode 600)
 #   --dry-run            Print what would happen; change nothing
 #   --help               Show this help
 #
-# A crontab that cannot be read is never written: only "no crontab for <user>"
-# reads as empty. Any other `crontab -l` failure (a permission error, a broken
-# spool) is exit 2 with a Fix: and nothing written, in every mode (DND-1638).
+# A crontab that cannot be read is never written, and never read as empty:
+# only "no crontab for <user>" is an empty crontab. Any other `crontab -l`
+# failure (a permission error, a broken spool) is exit 2 with a Fix: in every
+# mode (DND-1638); the crontab and any --backup file are not written. The one
+# write that can come first is the root spool repair --install runs (below).
+# --dry-run skips that repair, so on a broken spool it exits 2 on the read
+# rather than previewing a crontab it could not read.
 #
 # Exit codes: 0 ok · 1 usage/arg error, or --check found the entry missing
 #             · 2 missing prerequisite, or the current crontab could not be
-#               read · 3 need root
+#               read, or the --backup file could not be written · 3 need root
 
 set -euo pipefail
 
@@ -117,13 +125,14 @@ fi
 # live state (which may hold other personal entries) for the operator, so keep
 # the target OUT of git (a local/gitignored path).
 if [ -n "${BACKUP_FILE:-}" ]; then
-  if crontab -l >"$BACKUP_FILE" 2>/dev/null; then
-    say "Backed up current crontab to $BACKUP_FILE"
-    exit 0
-  fi
-  echo "error: could not read the current crontab to back up." >&2
-  echo "  Fix: ensure a crontab exists (crontab -l) and the target dir is writable." >&2
-  exit 1
+  current="$(cron_read_crontab setup-shipwright-cron)" || exit 2
+  ( umask 077; printf '%s\n' "$current" >"$BACKUP_FILE" && chmod 600 -- "$BACKUP_FILE" ) || {
+    echo "error: could not write the backup file $BACKUP_FILE." >&2
+    echo "  Fix: pick a writable path outside git, e.g. --backup ai-artifacts/shipwright/crontab.before." >&2
+    exit 2
+  }
+  say "Backed up current crontab to $BACKUP_FILE"
+  exit 0
 fi
 
 [ -x "$RUNNER" ] || { echo "error: runner not found or not executable: $RUNNER" >&2; exit 2; }

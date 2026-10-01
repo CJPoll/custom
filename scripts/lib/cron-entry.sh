@@ -57,15 +57,16 @@ cron_read_crontab() {
   local who="${1:-cron_read_crontab}" cmd="${2:-crontab}" out err rc=0 msg
   err="$(mktemp)" || {
     echo "${who}: could not read the current crontab (mktemp failed, so crontab -l's error could not be captured)" >&2
-    echo "  Fix: make \${TMPDIR:-/tmp} writable, then re-run. Nothing was written." >&2
+    echo "  Fix: make \${TMPDIR:-/tmp} writable, then re-run. The crontab was not written." >&2
     return 2
   }
-  out="$("${cmd}" -l 2>"${err}")" || rc=$?
+  # LC_ALL=C: "no crontab for" is matched in crontab's untranslated text.
+  out="$(LC_ALL=C "${cmd}" -l 2>"${err}")" || rc=$?
   if [ "${rc}" -ne 0 ]; then
     if grep -q 'no crontab for' "${err}"; then rm -f "${err}"; return 0; fi
     msg="$(tr '\n' ' ' <"${err}")"; rm -f "${err}"
     echo "${who}: could not read the current crontab (${cmd} -l exit ${rc}: ${msg})" >&2
-    echo "  Fix: make 'crontab -l' succeed for this user first (scripts/setup-shipwright-cron repairs a broken spool dir, with sudo), then re-run. Nothing was written." >&2
+    echo "  Fix: make 'crontab -l' succeed for this user first (a broken spool dir: scripts/setup-shipwright-cron --install repairs it, with sudo; a permission error: check the spool dir's owner and mode against the crontab binary's group), then re-run. The crontab was not written." >&2
     return 2
   fi
   rm -f "${err}"

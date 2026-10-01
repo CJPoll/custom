@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Self-test for scripts/lib/cron-entry.sh (DND-1503): which crontab lines are
-# ours. Pure text in, text out; no crontab is read or written.
+# Self-test for scripts/lib/cron-entry.sh: which crontab lines are ours
+# (DND-1503) and the crontab reader (DND-1638). The reader runs fake crontab
+# commands; the real crontab is never read or written.
 #
 # Run: bash scripts/test/cron-entry/self-test.sh
 

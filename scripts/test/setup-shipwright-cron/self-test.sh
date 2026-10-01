@@ -196,8 +196,27 @@ if [ "$rc" = 2 ] && grep -q 'could not read the current crontab' "${TMP}/inst.er
 else
   bad "unreadable --check" "rc=$rc $(out)"
 fi
+rc="$(FAKE_CRONTAB_FAIL="$DENIED" inst "$ct" --backup "${TMP}/bak-denied")"
+if [ "$rc" = 2 ] && grep -q 'could not read the current crontab' "${TMP}/inst.err" \
+   && grep -q 'Fix:' "${TMP}/inst.err" && [ ! -e "${TMP}/bak-denied" ]; then
+  ok "unreadable crontab: --backup is exit 2 with Fix:, and no backup file is written"
+else
+  bad "unreadable --backup" "rc=$rc $(out) bak=$(ls -l "${TMP}/bak-denied" 2>&1)"
+fi
+rc="$(inst "$ct" --backup "${TMP}/bak-ok")"
+if [ "$rc" = 0 ] && cmp -s "${TMP}/bak-ok" "${TMP}/ct-denied.orig" && [ "$(stat -c %a "${TMP}/bak-ok")" = 600 ]; then
+  ok "--backup snapshots a readable crontab byte for byte, mode 600"
+else
+  bad "--backup readable" "rc=$rc $(out) bak=$(cat "${TMP}/bak-ok" 2>&1)"
+fi
 ct="${TMP}/ct-none"
 rm -f "$ct"
+rc="$(inst "$ct" --backup "${TMP}/bak-none")"
+if [ "$rc" = 0 ] && [ -e "${TMP}/bak-none" ] && [ -z "$(tr -d '\n' <"${TMP}/bak-none")" ]; then
+  ok "'no crontab for <user>': --backup writes an empty snapshot, exit 0"
+else
+  bad "--backup no crontab" "rc=$rc $(out)"
+fi
 rc="$(inst "$ct")"
 if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "$ENTRY" ]; then
   ok "'no crontab for <user>' is still an empty crontab: install writes the one entry"
