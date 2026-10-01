@@ -84,6 +84,7 @@ can thread onto it.
 | `reply <channel> <thread_ts> [text] [--broadcast] [--no-claim]` | Threaded reply. `thread_ts` is the **parent** ts. Then claims the thread **if it is unclaimed** (`claim=...` line); every claim outcome exits 0, because the reply is posted. |
 | `dm <user_id> [text] [--thread_ts TS] [--no-claim]` | `conversations.open` then post. User **id**, not name. A new DM claims its thread like `post` (exit 3 = posted, not claimed); `--thread_ts` replies into an existing thread and claims it only if unclaimed, like `reply` (exit 0). |
 | `claim-thread <channel_id> <thread_ts> [--already-claimed-ok]` | Claims a thread for this session's project Slack inbox, so its replies route here. `post`/`dm`/`reply` run it; run it by hand to retry a failed claim without re-posting. Exit 0 claimed / already yours, 3 failed (`claim=FAILED reason=...` + `Fix:`), 2 a malformed channel or ts or an unknown flag. `--already-claimed-ok` makes another inbox's thread `claim=already_claimed`, exit 0. |
+| `topic-route list [--bot-id B...]`, `topic-route put <label> <agent_instance_id> [--disabled] [--bot-id B...]` | Reads or sets the owner's Slack **topic routes**: which `<project>-slack.jsonl` inbox gets the conversations the topic judgment labels `walt_ui`, `harness`, `gen_saas` or `other`. Calls the athena MCP `slack_topic_route_list` / `slack_topic_route_put`. `list` prints one `label= inbox= machine= enabled= live= instance=` line per route, then `count=<n> app=<A...>` (always, even at 0). `put` prints `put label= inbox= enabled=`. A server refusal exits 3 with its words and its `Fix:` on a `server:` line; a usage error exits 2 and makes no call. **A put changes where the owner's Slack conversations go: list it in the owner digest** (`~/.claude/CLAUDE.md` → *Owner approval policy*, a judgement call). There is no delete; `--disabled` reverses a put. `agent_instance_id` comes from `list`'s `instance=` or the MCP `list_my_machines`. |
 | `update <channel> <ts> [text]` | Edit — bot's own messages only. |
 | `delete <channel> <ts>` | Delete — bot's own messages only. No undo. |
 | `react <channel> <ts> <emoji> [--remove]` | Add/remove a reaction. Bare name (`eyes`, not `:eyes:`). |
@@ -782,7 +783,7 @@ recover after the file path has been down.
 
 ## Tests
 
-`bash test/self-test.sh` — 180 cases, no network (curl is a PATH shim). Covers
+`bash test/self-test.sh` — 266 cases, no network (curl is a PATH shim). Covers
 the ok:false convention, the token never reaching argv or a URL, request shapes,
 pagination, 429 backoff, the users cache, unreadable conversations, every branch
 of the hook and the inbox scan, the cross-source `seen_keys` dedupe (drop + add),
@@ -799,7 +800,10 @@ four negative tests added in a fix round: a registry with an unparseable OTHER
 entry (`registry-error`, never folded into `no-registry-entry`),
 `mcp_registered_url`'s internal-error status for a computed-wrong key, a
 cached identity missing `team_id` (not just `bot_id`), and claim-thread
-crashing or exiting a code it never documents. Seven
+crashing or exiting a code it never documents; and `topic-route` (DND-1538):
+its exact tool arguments, both server error shapes, the always-printed count
+line, refusals with the server's Fix, usage errors with no call, and the
+machine token staying off argv. Seven
 text-presence cases keep the owner's decision-question rules in this file and
 the "your call" button in the worked example; they cannot check a sent message. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
 each of them.

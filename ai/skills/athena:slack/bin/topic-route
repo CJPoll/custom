@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# topic-route list [--bot-id B...]
+# topic-route put <label> <agent_instance_id> [--disabled] [--bot-id B...]
+#
+# Reads or sets the owner's Slack topic routes (DND-1538): which
+# <project>-slack.jsonl inbox receives the Slack conversations the topic
+# judgment labels walt_ui, harness, gen_saas or other. It calls the athena MCP
+# tools slack_topic_route_list and slack_topic_route_put (DND-1523), so a
+# session needs no UI. The server derives the owner from this machine's token
+# and does all the access control; this bin adds none and bypasses none.
+#
+# A put is an owner-visible routing change: list it in the owner digest
+# (~/.claude/CLAUDE.md -> Owner approval policy, a judgement call). There is no
+# delete: put the route again with --disabled to stop it routing.
+#
+# --bot-id (or --bot_id) picks the Slack app; it is needed only when the owner
+# has more than one. Flags may come in any position; --bot-id=B... works too.
+# agent_instance_id comes from the athena MCP list_my_machines, or from the
+# instance= field of `topic-route list`.
+#
+# Output:
+#   list: one line per route, then the count line (always, even when 0):
+#     label=<l> inbox=<inbox|none> machine=<name|none> enabled=<b> live=<b> instance=<id>
+#     count=<n> app=<A...>                                     (stdout) exit 0
+#   put:
+#     put label=<l> inbox=<inbox|none> enabled=<b>             (stdout) exit 0
+#   failure (stderr), nothing on stdout:
+#     topic-route=FAILED reason=<token> op=<list|put>
+#     server: <the server's own words, with its Fix>   (refusals only)
+#     Fix: <what to do>                                        exit 3
+#   A usage error is reason=usage, exit 2, and makes no call.
+# Reasons, each distinct: usage, no-token, mcp-unregistered, mcp-error:<words>,
+# not-found, refused, invalid, project-unresolved. `live=` says whether the
+# router would use the route right now; `enabled=true live=false` usually
+# means the destination inbox's machine is not connected.
+#
+# The athena MCP registration is the SESSION's project's (DND-1163):
+# $CLAUDE_PROJECT_DIR, else the Claude Code process's cwd, else the shell cwd.
+# The machine token is read from the inbox client config and reaches curl only
+# on stdin; it is never in argv, the environment, a file, or a log.
+set -uo pipefail
+
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+SELF_DIR="$(dirname "${SELF}")"
+for arg in "$@"; do
+  case "${arg}" in -h|--help)
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${SELF}"; exit 0 ;;
+  esac
+done
+
+OP="${1:-?}"
+case "${OP}" in list|put) ;; *) OP="?" ;; esac
+
+fail() { # fail <reason> [server-words]
+  local reason="$1" words="${2:-}" code=3
+  printf 'topic-route=FAILED reason=%s op=%s\n' "${reason}" "${OP}" >&2
+  [ -z "${words}" ] || printf 'server: %s\n' "${words}" >&2
+  printf 'Fix: %s\n' "$(topic_route_fix "${reason}")" >&2
+  [ "${reason}" != "usage" ] || code=2
+  exit "${code}"
+}
+
+SLACK_LIB="${SELF_DIR}/../lib"
+INBOX_LIB="${SELF_DIR}/../../athena:inbox/lib"
+for f in err.sh names.sh descriptor.sh logchan.sh maildir.sh fence.sh session.sh fs.sh lock.sh inbox.sh mcp.sh; do
+  if [ ! -f "${INBOX_LIB}/${f}" ]; then
+    printf 'topic-route=FAILED reason=mcp-error:missing-library op=%s\n' "${OP}" >&2
+    printf 'Fix: athena:inbox is not beside athena:slack (%s/%s is missing); both skills ship together from ~/dev/custom/ai/skills.\n' "${INBOX_LIB}" "${f}" >&2
+    exit 3
+  fi
+  # shellcheck source=/dev/null
+  . "${INBOX_LIB}/${f}"
+done
+# shellcheck source=/dev/null
+. "${SLACK_LIB}/topic_route.sh"
+
+# --- argv: flags in any position ---------------------------------------------
+ENABLED=true
+SAW_DISABLED=false
+BOT_ID=""
+POSITIONAL=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --disabled) ENABLED=false; SAW_DISABLED=true ;;
+    --bot-id|--bot_id)
+      [ "$#" -ge 2 ] || fail usage
+      BOT_ID="$2"; shift ;;
+    --bot-id=*|--bot_id=*) BOT_ID="${1#*=}" ;;
+    -*) fail usage ;;
+    *) POSITIONAL+=("$1") ;;
+  esac
+  shift
+done
+OP="${POSITIONAL[0]:-?}"
+case "${OP}" in list|put) ;; *) OP="?"; fail usage ;; esac
+[ -z "${BOT_ID}" ] || [[ "${BOT_ID}" =~ ^B[A-Z0-9]+$ ]] || fail usage
+
+case "${OP}" in
+  list)
+    [ "${#POSITIONAL[@]}" -eq 1 ] || fail usage
+    [ "${SAW_DISABLED}" = false ] || fail usage
+    ARGS="$(topic_route_list_args "${BOT_ID}")" || fail "mcp-error:could-not-build-arguments"
+    TOOL=slack_topic_route_list ;;
+  put)
+    [ "${#POSITIONAL[@]}" -eq 3 ] || fail usage
+    LABEL="${POSITIONAL[1]}"; INSTANCE="${POSITIONAL[2]}"
+    [ -n "${LABEL}" ] && [ -n "${INSTANCE}" ] || fail usage
+    case "${LABEL}${INSTANCE}" in *[[:space:][:cntrl:]]*) fail usage ;; esac
+    ARGS="$(topic_route_put_args "${LABEL}" "${INSTANCE}" "${ENABLED}" "${BOT_ID}")" \
+      || fail "mcp-error:could-not-build-arguments"
+    TOOL=slack_topic_route_put ;;
+esac
+
+# --- the session's project, its MCP registration, the machine token ----------
+PROJECT_LINE="$(session_project_dir)" || fail project-unresolved
+PROJECT_DIR="${PROJECT_LINE#*$'\t'}"
+
+[ "$(mcp_token_state)" = "present" ] || fail no-token
+
+URL="$(inbox_mcp_registration "${PROJECT_DIR}" 2>/dev/null)"; RC=$?
+case "${RC}" in
+  0) ;;
+  1) fail mcp-unregistered ;;
+  2) fail "mcp-error:registration-key" ;;
+  *) fail "mcp-error:registration-unreadable" ;;
+esac
+
+# --- the call ------------------------------------------------------------------
+MSG="$(mcp_call_tool "${URL}" "${TOOL}" "${ARGS}")"; RC=$?
+[ "${RC}" -eq 0 ] || fail "mcp-error:$(topic_route_words "${MSG}" | cut -c1-80)"
+
+if REASON="$(topic_route_error "${MSG}")"; then
+  case "${REASON}" in
+    mcp-error*) fail "${REASON}" ;;
+    *) fail "${REASON}" "$(topic_route_server_words "${MSG}")" ;;
+  esac
+fi
+
+case "${OP}" in
+  list) OUTPUT="$(topic_route_render_list "${MSG}")" || fail "${OUTPUT}" ;;
+  put)  OUTPUT="$(topic_route_render_put "${MSG}")" || fail "${OUTPUT}" ;;
+esac
+printf '%s\n' "${OUTPUT}"
+exit 0

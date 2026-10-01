@@ -492,3 +492,24 @@ the thread_ts). Baseline `VERDICT: PASS (219 cases)`.
 |---|---|---|---|
 | S89 | `reply` claims the argument, ignoring `message.thread_ts` | 1 | `FAIL reply: claims the response's message.thread_ts (1790.1), not the argument (1790.5)` |
 | S90 | `reply`'s `--` branch drops its "two positionals first" check | 0 | survived: the post-loop `[ "$NPOS" -ge 2 ] \|\| usage` already refuses `reply C -- text`, so the in-branch check was redundant and was removed |
+
+---
+
+## 2026-10-01 — DND-1538: `topic-route` (slack_topic_route_list / _put)
+
+- **Domain:** athena:slack
+- **Code under test:** `bin/topic-route`, `lib/topic_route.sh`
+- **Suite run:** `bash test/self-test.sh` (athena:slack).
+- **Baseline:** `VERDICT: PASS (266 cases)`.
+- **Runner:** the three mutations below applied together (each `sed` anchor
+  checked to land on exactly one line), one full suite, then both files
+  restored with `cp` from a byte-for-byte backup.
+- **Red:** `VERDICT: FAIL (6 of 266 cases)`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S91 | `--disabled` no longer sets `enabled=false` | 1 | `FAIL topic-route put --disabled: the request carries enabled:false (flags in any position)` |
+| S92 | `topic_route_render_list` prints no count line when the count is 0 | 2 | `FAIL topic_route_render_list: an empty list -> 'count=0 app=<A...>', never nothing` / `FAIL topic-route list: no routes -> 'count=0 app=<A...>', exit 0` |
+| S93 | the server's `not found` is read as an `mcp-error` | 3 | `FAIL topic_route_error: JSON-RPC 'not found' -> not-found` / `... isError 'not found' + newline ...` / `FAIL topic-route list: 'not found' -> reason=not-found, exit 3, no count line` |
+
+After the restore the suite returned to `VERDICT: PASS (266 cases)`.

@@ -261,6 +261,7 @@ tools:
   skills/athena:inbox/bin/read-inbox:                 { class: destructive, reason: ack }
   skills/athena:inbox/bin/send-mail:                  { class: destructive, reason: send }
   skills/athena:slack/bin/claim-thread:               { class: destructive, reason: claim }
+  skills/athena:slack/bin/topic-route:                { class: destructive, reason: route }
   skills/athena:slack/bin/delete:                     { class: destructive, reason: slack }
   skills/athena:slack/bin/dm:                         { class: destructive, reason: slack }
   skills/athena:slack/bin/post:                       { class: destructive, reason: slack }

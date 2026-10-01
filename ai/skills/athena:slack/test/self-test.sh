@@ -2035,6 +2035,250 @@ if [[ "${RC}" == 0 ]] && [[ "$(head -n1 <<<"${OUT}")" == "ts=1.2 channel=${ENG_C
 else bad "reply: claim-thread exiting an undocumented code (1) -> claim=FAILED + Fix:, exit 0" \
   "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
+echo
+echo "-- DND-1538: topic-route (slack_topic_route_list / slack_topic_route_put) ----"
+
+# The fixture is claim_setup's: a project with the athena MCP registered, a
+# machine token, cwd = the project. The bin needs no Slack inbox and no bot
+# identity: the server derives the owner and the app from the machine token.
+TR_LIB="${ROOT}/lib/topic_route.sh"
+# tr_fn <fn> [args...] -- one topic_route.sh function in a fresh bash.
+tr_fn() {
+  set +e
+  OUT="$(env TR_LIB="${TR_LIB}" bash -c '. "${TR_LIB}"; "$@"' tr_fn "$@" 2>"${TMP}/trerr${CASE_N}")"
+  RC=$?
+  set -e
+  ERR="$(cat "${TMP}/trerr${CASE_N}")"
+}
+tr_text_answer() { # tr_text_answer <tool> <reply-json>  (a Response.json-style text content)
+  mcp_answer "$1" "$(jq -n -c --argjson r "$2" '{jsonrpc:"2.0", id:2, result:{isError:false, content:[{type:"text", text:($r|tojson)}]}}')"
+}
+tr_rpc_error() { # tr_rpc_error <tool> <message>  (Hermes Error.execution: a JSON-RPC error)
+  mcp_answer "$1" "$(jq -n -c --arg m "$2" '{jsonrpc:"2.0", id:2, error:{code:-32000, message:$m, data:{}}}')"
+}
+tr_tool_error() { # tr_tool_error <tool> <text>  (an isError tool result)
+  mcp_answer "$1" "$(jq -n -c --arg t "$2" '{jsonrpc:"2.0", id:2, result:{isError:true, content:[{type:"text", text:$t}]}}')"
+}
+tr_args() { cat "${SHIM_DIR}/mcp.args.$1.json" 2>/dev/null || true; }
+TR_APP="AFAKEAPP01"
+TR_TWO_ROUTES="$(jq -n -c --arg a "${TR_APP}" '{app_id:$a, count:2, routes:[
+  {label:"harness", agent_instance_id:"inst-1", inbox_name:"custom-slack.jsonl", machine_id:"m-1", machine_name:"desktop", enabled:true, live:true},
+  {label:"walt_ui", agent_instance_id:"inst-2", inbox_name:"walt_ui-slack.jsonl", machine_id:"m-2", machine_name:"laptop", enabled:false, live:false}]}')"
+TR_PUT_OK="$(jq -n -c --arg a "${TR_APP}" '{status:"put", app_id:$a, label:"harness", agent_instance_id:"inst-1", inbox_name:"custom-slack.jsonl", machine_id:"m-1", enabled:true}')"
+TR_REFUSED='refused: inst-9 is not a <project>-slack.jsonl instance on your machines. Fix: pick an agent_instance_id from list_my_machines.'
+
+# t-u1. Domain: the arguments are exactly the fields the server takes. No
+#       owner, machine_id or slack_app_id ever (the server refuses them).
+setup_case
+tr_fn topic_route_put_args harness inst-1 true ""
+if [[ "${OUT}" == '{"label":"harness","agent_instance_id":"inst-1","enabled":true}' ]]; then
+  ok "topic_route_put_args: label/agent_instance_id/enabled, no bot_id when none given"
+else bad "topic_route_put_args: label/agent_instance_id/enabled, no bot_id when none given" "got '${OUT}' rc=${RC}"; fi
+tr_fn topic_route_put_args harness inst-1 false B0BOTFIX01
+if [[ "${OUT}" == '{"label":"harness","agent_instance_id":"inst-1","enabled":false,"bot_id":"B0BOTFIX01"}' ]]; then
+  ok "topic_route_put_args: enabled false is a JSON boolean, bot_id passed when given"
+else bad "topic_route_put_args: enabled false is a JSON boolean, bot_id passed when given" "got '${OUT}' rc=${RC}"; fi
+tr_fn topic_route_list_args ""
+if [[ "${OUT}" == '{}' ]]; then ok "topic_route_list_args: no bot_id -> {}"
+else bad "topic_route_list_args: no bot_id -> {}" "got '${OUT}'"; fi
+
+# t-u2. Domain: the answer's error, by kind, from BOTH shapes the server can
+#       send (a JSON-RPC error, Hermes' Error.execution; or an isError result).
+#       A protocol error is never read as a refusal.
+tr_err_case() { # tr_err_case <label> <message> <want>
+  tr_fn topic_route_error "$2"
+  if [[ "${OUT}" == "$3" ]]; then ok "topic_route_error: $1 -> $3"
+  else bad "topic_route_error: $1 -> $3" "got '${OUT}' rc=${RC}"; fi
+}
+rpc_err() { jq -n -c --arg m "$1" --argjson c "${2:--32000}" '{jsonrpc:"2.0", id:2, error:{code:$c, message:$m}}'; }
+tool_err() { jq -n -c --arg t "$1" '{jsonrpc:"2.0", id:2, result:{isError:true, content:[{type:"text", text:$t}]}}'; }
+setup_case
+tr_err_case "JSON-RPC 'not found'" "$(rpc_err 'not found')" "not-found"
+tr_err_case "JSON-RPC refused: ... Fix:" "$(rpc_err "${TR_REFUSED}")" "refused"
+tr_err_case "JSON-RPC invalid: ... Fix:" "$(rpc_err 'invalid: label is required. Fix: pass label.')" "invalid"
+tr_err_case "isError refused: ... Fix:" "$(tool_err "${TR_REFUSED}")" "refused"
+tr_err_case "isError 'not found' + newline" "$(tool_err $'not found\n')" "not-found"
+tr_err_case "a protocol error (-32601)" "$(rpc_err 'Method not found' -32601)" "mcp-error:Method not found"
+tr_err_case "an empty answer" "" "mcp-error:no-answer"
+tr_err_case "a non-JSON answer" "<html>502</html>" "mcp-error:no-answer"
+tr_fn topic_route_error "$(jq -n -c --argjson r "${TR_PUT_OK}" '{jsonrpc:"2.0", id:2, result:{isError:false, content:[{type:"text", text:($r|tojson)}]}}')"
+if [[ "${RC}" == 1 && -z "${OUT}" ]]; then ok "topic_route_error: a success answer is no error (status 1, nothing printed)"
+else bad "topic_route_error: a success answer is no error (status 1, nothing printed)" "got '${OUT}' rc=${RC}"; fi
+
+# t-u3. Domain: rendering. An empty list still prints the count line; a
+#       route whose machine is gone prints none, never an empty field; a
+#       malformed reply is an mcp-error, never zero routes.
+setup_case
+tr_fn topic_route_render_list "$(jq -n -c --arg a "${TR_APP}" '{jsonrpc:"2.0", id:2, result:{structuredContent:{app_id:$a, count:0, routes:[]}}}')"
+if [[ "${RC}" == 0 && "${OUT}" == "count=0 app=${TR_APP}" ]]; then
+  ok "topic_route_render_list: an empty list -> 'count=0 app=<A...>', never nothing"
+else bad "topic_route_render_list: an empty list -> 'count=0 app=<A...>', never nothing" "got '${OUT}' rc=${RC}"; fi
+tr_fn topic_route_render_list "$(jq -n -c --arg a "${TR_APP}" '{jsonrpc:"2.0", id:2, result:{structuredContent:{app_id:$a, count:1, routes:[
+  {label:"other", agent_instance_id:"inst-3", inbox_name:null, machine_id:null, machine_name:null, enabled:true, live:false}]}}}')"
+if [[ "${RC}" == 0 && "$(head -n1 <<<"${OUT}")" == "label=other inbox=none machine=none enabled=true live=false instance=inst-3" ]]; then
+  ok "topic_route_render_list: a route with no machine -> inbox=none machine=none"
+else bad "topic_route_render_list: a route with no machine -> inbox=none machine=none" "got '${OUT}' rc=${RC}"; fi
+for bad_reply in '{"count":0,"routes":[]}' "{\"app_id\":\"${TR_APP}\",\"count\":2,\"routes\":[]}" \
+                 "{\"app_id\":\"${TR_APP}\",\"count\":1,\"routes\":[{\"label\":\"x\"}]}" '"just a string"'; do
+  tr_fn topic_route_render_list "$(jq -n -c --argjson r "${bad_reply}" '{jsonrpc:"2.0", id:2, result:{isError:false, content:[{type:"text", text:($r|tojson)}]}}')"
+  if [[ "${RC}" == 1 && "${OUT}" == mcp-error:* ]]; then
+    ok "topic_route_render_list: malformed reply ${bad_reply:0:40} -> mcp-error, never a route count"
+  else bad "topic_route_render_list: malformed reply ${bad_reply:0:40} -> mcp-error, never a route count" "got '${OUT}' rc=${RC}"; fi
+done
+tr_fn topic_route_render_list "$(jq -n -c --arg a "${TR_APP}" '{jsonrpc:"2.0", id:2, result:{structuredContent:{app_id:$a, count:1, routes:[
+  {label:"harness\nlabel=forged", agent_instance_id:"inst 1", inbox_name:"x.jsonl", machine_id:"m", machine_name:"my desk", enabled:true, live:true}]}}}')"
+if [[ "${RC}" == 0 && "$(wc -l <<<"${OUT}")" -eq 2 && "$(head -n1 <<<"${OUT}")" == "label=harness_label=forged inbox=x.jsonl machine=my_desk enabled=true live=true instance=inst_1" ]]; then
+  ok "topic_route_render_list: server whitespace and newlines cannot forge a field or a line"
+else bad "topic_route_render_list: server whitespace and newlines cannot forge a field or a line" "got '${OUT}' rc=${RC}"; fi
+
+# t-u4. Domain: every reason has its own Fix text.
+setup_case
+FIXES=""
+for r in usage no-token mcp-unregistered mcp-error:x not-found refused invalid project-unresolved; do
+  tr_fn topic_route_fix "${r}"
+  if [[ -z "${OUT}" ]]; then bad "topic_route_fix: ${r} has a Fix text" "empty"; continue; fi
+  FIXES="${FIXES}${OUT}"$'\n'
+done
+if [[ "$(printf '%s' "${FIXES}" | sort | uniq -d | wc -l)" -eq 0 && "$(printf '%s' "${FIXES}" | grep -c .)" -eq 8 ]]; then
+  ok "topic_route_fix: all 8 reasons have a non-empty, distinct Fix text"
+else bad "topic_route_fix: all 8 reasons have a non-empty, distinct Fix text" "$(printf '%s' "${FIXES}" | sort | uniq -c | sort -rn | head -3)"; fi
+
+# Q1. list, two routes: one line each, then the count line; one tools/call.
+setup_case; claim_setup; tr_text_answer slack_topic_route_list "${TR_TWO_ROUTES}"
+run_bin topic-route list
+WANT="label=harness inbox=custom-slack.jsonl machine=desktop enabled=true live=true instance=inst-1
+label=walt_ui inbox=walt_ui-slack.jsonl machine=laptop enabled=false live=false instance=inst-2
+count=2 app=${TR_APP}"
+if [[ "${RC}" == 0 && "${OUT}" == "${WANT}" && "$(tr_args slack_topic_route_list)" == '{}' ]] \
+   && [[ "$(mcp_calls | tr '\n' '|')" == "initialize|initialized|tools/call slack_topic_route_list|" ]]; then
+  ok "topic-route list: two routes -> two label= lines and count=2 app=..., exit 0, arguments {}"
+else bad "topic-route list: two routes -> two label= lines and count=2 app=..., exit 0, arguments {}" \
+  "rc=${RC} out='${OUT}' err='${ERR}' args=$(tr_args slack_topic_route_list) calls=$(mcp_calls | tr '\n' '|')"; fi
+
+# Q1b. list --bot-id passes the bot id and nothing else.
+setup_case; claim_setup; tr_text_answer slack_topic_route_list "${TR_TWO_ROUTES}"
+run_bin topic-route --bot-id B0BOTFIX01 list
+if [[ "${RC}" == 0 && "$(tr_args slack_topic_route_list)" == '{"bot_id":"B0BOTFIX01"}' ]]; then
+  ok "topic-route list --bot-id (flag first): arguments are exactly {bot_id}"
+else bad "topic-route list --bot-id (flag first): arguments are exactly {bot_id}" "rc=${RC} err='${ERR}' args=$(tr_args slack_topic_route_list)"; fi
+
+# Q1c. An empty list prints the count line, exit 0.
+setup_case; claim_setup; tr_text_answer slack_topic_route_list "{\"app_id\":\"${TR_APP}\",\"count\":0,\"routes\":[]}"
+run_bin topic-route list
+if [[ "${RC}" == 0 && "${OUT}" == "count=0 app=${TR_APP}" ]]; then
+  ok "topic-route list: no routes -> 'count=0 app=<A...>', exit 0"
+else bad "topic-route list: no routes -> 'count=0 app=<A...>', exit 0" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# Q2. put ok.
+setup_case; claim_setup; tr_text_answer slack_topic_route_put "${TR_PUT_OK}"
+run_bin topic-route put harness inst-1
+if [[ "${RC}" == 0 && "${OUT}" == "put label=harness inbox=custom-slack.jsonl enabled=true" ]] \
+   && [[ "$(tr_args slack_topic_route_put)" == '{"label":"harness","agent_instance_id":"inst-1","enabled":true}' ]]; then
+  ok "topic-route put: ok -> 'put label=harness inbox=custom-slack.jsonl enabled=true', exit 0, exact arguments"
+else bad "topic-route put: ok -> 'put label=harness inbox=custom-slack.jsonl enabled=true', exit 0, exact arguments" \
+  "rc=${RC} out='${OUT}' err='${ERR}' args=$(tr_args slack_topic_route_put)"; fi
+
+# Q3. --disabled (in any position) sends enabled:false; --bot-id=B... form.
+setup_case; claim_setup
+tr_text_answer slack_topic_route_put "$(jq -c '.enabled = false' <<<"${TR_PUT_OK}")"
+run_bin topic-route put --disabled harness --bot-id=B0BOTFIX01 inst-1
+if [[ "${RC}" == 0 && "${OUT}" == "put label=harness inbox=custom-slack.jsonl enabled=false" ]] \
+   && [[ "$(jq -c '.enabled, .bot_id' <<<"$(tr_args slack_topic_route_put)" | tr '\n' ' ')" == 'false "B0BOTFIX01" ' ]]; then
+  ok "topic-route put --disabled: the request carries enabled:false (flags in any position)"
+else bad "topic-route put --disabled: the request carries enabled:false (flags in any position)" \
+  "rc=${RC} out='${OUT}' err='${ERR}' args=$(tr_args slack_topic_route_put)"; fi
+
+# Q4. The server's refusal: its words (with their Fix:) on stderr, exit 3,
+#     nothing on stdout. Both error shapes.
+for shape in tr_rpc_error tr_tool_error; do
+  setup_case; claim_setup; "${shape}" slack_topic_route_put "${TR_REFUSED}"
+  run_bin topic-route put harness inst-9
+  if [[ "${RC}" == 3 && -z "${OUT}" && "${ERR}" == *"topic-route=FAILED reason=refused op=put"* ]] \
+     && [[ "${ERR}" == *"server: ${TR_REFUSED}"* && "$(grep -c '^Fix: ' <<<"${ERR}")" == 1 ]]; then
+    ok "topic-route put: server refused (${shape}) -> the server's Fix on stderr, our Fix:, exit 3"
+  else bad "topic-route put: server refused (${shape}) -> the server's Fix on stderr, our Fix:, exit 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+done
+setup_case; claim_setup; tr_rpc_error slack_topic_route_list "not found"
+run_bin topic-route list --bot-id B0NOPE0001
+if [[ "${RC}" == 3 && -z "${OUT}" && "${ERR}" == *"reason=not-found op=list"* && "${ERR}" == *"Fix:"* ]]; then
+  ok "topic-route list: 'not found' -> reason=not-found, exit 3, no count line"
+else bad "topic-route list: 'not found' -> reason=not-found, exit 3, no count line" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# Q5. Usage errors: exit 2, Fix:, and NO call at all.
+tr_usage() { # tr_usage <label> <args...>
+  local label="$1"; shift
+  setup_case; claim_setup
+  run_bin topic-route "$@"
+  if [[ "${RC}" == 2 && -z "${OUT}" && "${ERR}" == *"reason=usage"* && "${ERR}" == *"Fix:"* && -z "$(mcp_calls)" ]]; then
+    ok "topic-route: ${label} -> exit 2, Fix:, no call"
+  else bad "topic-route: ${label} -> exit 2, Fix:, no call" "rc=${RC} out='${OUT}' err='${ERR}' calls=$(mcp_calls)"; fi
+}
+tr_usage "no subcommand"
+tr_usage "an unknown subcommand" route harness inst-1
+tr_usage "put with a missing label" put
+tr_usage "put with a missing agent_instance_id" put harness
+tr_usage "put with an empty label" put "" inst-1
+tr_usage "put with a third positional" put harness inst-1 extra
+tr_usage "list with a positional" list harness
+tr_usage "list --disabled" list --disabled
+tr_usage "--bot-id with no value" list --bot-id
+tr_usage "a bot id that is not B..." list --bot-id U0NOTABOT
+tr_usage "an unknown flag" put harness inst-1 --loud
+
+# Q6. The machine token reaches curl only on stdin: never in any child's
+#     argv, and no file left behind.
+setup_case; claim_setup; tr_text_answer slack_topic_route_put "${TR_PUT_OK}"
+run_bin topic-route put harness inst-1
+LEFT="$(grep -rl "${MCP_BEARER}" "${TMP}" 2>/dev/null | grep -v "/client.json$" | grep -v "/shim${CASE_N}/" || true)"
+if [[ "${RC}" == 0 ]] && [[ -s "${SHIM_DIR}/argv" ]] && ! grep -q "${MCP_BEARER}" "${SHIM_DIR}/argv" \
+   && [[ "$(sort -u "${SHIM_DIR}/mcp.bearer" 2>/dev/null)" == "ok" ]] && [[ -z "${LEFT}" ]]; then
+  ok "topic-route: the machine token is sent as a Bearer header via stdin only (not argv, no file left)"
+else bad "topic-route: the machine token is sent as a Bearer header via stdin only (not argv, no file left)" \
+  "rc=${RC} argv=$(grep -c "${MCP_BEARER}" "${SHIM_DIR}/argv" 2>/dev/null) bearer=$(cat "${SHIM_DIR}/mcp.bearer" 2>/dev/null) left='${LEFT}'"; fi
+
+# t-b1. No machine token, or no MCP registration: their own reasons, no call.
+setup_case; claim_setup; rm -f "${CHOME}/client.json"
+run_bin topic-route list
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=no-token op=list"* && "${ERR}" == *"Fix:"* && -z "$(mcp_calls)" ]]; then
+  ok "topic-route: no machine token -> reason=no-token, exit 3, no call"
+else bad "topic-route: no machine token -> reason=no-token, exit 3, no call" "rc=${RC} err='${ERR}' calls=$(mcp_calls)"; fi
+setup_case; claim_setup; printf '{}' > "${CHOME}/.claude.json"
+run_bin topic-route list
+if [[ "${RC}" == 3 && "${ERR}" == *"reason=mcp-unregistered op=list"* && "${ERR}" == *"Fix:"* && -z "$(mcp_calls)" ]]; then
+  ok "topic-route: athena MCP not registered -> reason=mcp-unregistered, exit 3, no call"
+else bad "topic-route: athena MCP not registered -> reason=mcp-unregistered, exit 3, no call" "rc=${RC} err='${ERR}' calls=$(mcp_calls)"; fi
+
+# t-b2. A transport failure, or a success-shaped reply that is malformed, is
+#       an mcp-error: never a put line, never an empty list.
+setup_case; claim_setup; mcp_answer slack_topic_route_put ""
+printf 500 > "${SHIM_DIR}/mcp/slack_topic_route_put.code"
+run_bin topic-route put harness inst-1
+if [[ "${RC}" == 3 && -z "${OUT}" && "${ERR}" == *"reason=mcp-error:"*"HTTP 500"* ]]; then
+  ok "topic-route put: HTTP 500 -> reason=mcp-error:..., exit 3, no put line"
+else bad "topic-route put: HTTP 500 -> reason=mcp-error:..., exit 3, no put line" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+setup_case; claim_setup; tr_text_answer slack_topic_route_put '{"status":"queued"}'
+run_bin topic-route put harness inst-1
+if [[ "${RC}" == 3 && -z "${OUT}" && "${ERR}" == *"reason=mcp-error:"* ]]; then
+  ok "topic-route put: a reply whose status is not 'put' -> mcp-error, exit 3"
+else bad "topic-route put: a reply whose status is not 'put' -> mcp-error, exit 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# t-b3. The MCP registration follows the SESSION's project (DND-1163), like
+#       claim-thread: a shell cwd outside any repo still finds it.
+setup_case; claim_setup; tr_text_answer slack_topic_route_list "${TR_TWO_ROUTES}"
+RUN_CWD="${TMP}"
+set +e
+OUT="$(cd "${TMP}" && env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" SHIM_DIR="${SHIM_DIR}" \
+  ATHENA_INBOX_ROOT="${CHOME}/inbox-root" ATHENA_INBOX_CLIENT_CONFIG="${CHOME}/client.json" \
+  SHIM_MCP_BEARER="${MCP_BEARER}" CLAUDE_PROJECT_DIR="${PROJ}" \
+  "${BIN}/topic-route" list 2>"${TMP}/trerr${CASE_N}")"
+RC=$?
+set -e
+ERR="$(cat "${TMP}/trerr${CASE_N}")"
+if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "count=2 app=${TR_APP}" ]]; then
+  ok "topic-route: CLAUDE_PROJECT_DIR names the project whose MCP registration is used"
+else bad "topic-route: CLAUDE_PROJECT_DIR names the project whose MCP registration is used" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+RUN_CWD=""
+
 # 84. The owner's decision-question rules (2026-09-25) stay in the doctrine,
 #     and the worked example obeys them. A text-presence check only: it
 #     proves the rules were not dropped, not that a sent message follows them.

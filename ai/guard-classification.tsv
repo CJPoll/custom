@@ -124,6 +124,7 @@ ai/skills/athena:inbox/lib/mcp.sh	library	sourced by the athena:inbox bins; retu
 ai/skills/athena:inbox/lib/session.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
 ai/skills/athena:inbox/lib/wedge.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
 ai/skills/athena:slack/lib/claim.sh	library	sourced by athena:slack bin/claim-thread; it returns reason tokens and Fix texts that claim-thread prints, and has no failure path of its own
+ai/skills/athena:slack/lib/topic_route.sh	library	sourced by athena:slack bin/topic-route; pure functions returning reason tokens and Fix texts that topic-route prints; no failure path of its own
 ai/skills/athena:slack/lib/inbox.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
 ai/skills/athena:slack/lib/slack.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
 scripts/lib/dbus-env.sh	library	sourced by the cron wrappers; always exports a bus address (real or sentinel) and never fails
@@ -153,6 +154,7 @@ ai/skills/athena:merge-boarding/scripts/locked-merge	guard
 ai/skills/athena:memory-maintenance/scripts/index-budget	guard	
 ai/skills/athena:slack/bin/read-inbox	guard	
 ai/skills/athena:slack/bin/claim-thread	guard	
+ai/skills/athena:slack/bin/topic-route	guard	
 ai/skills/athena:slack/bin/channels	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/delete	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/dm	guard	
