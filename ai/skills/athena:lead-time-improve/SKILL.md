@@ -141,8 +141,11 @@ now a candidate too, so a repo's post-merge CI and deploy time can be picked.
 tail, `tail` is never a candidate; `biggest.tail_reason` says why
 (`ai/bin/lead-time-phases --help`). For `tail`, its `n`, `n_na` and
 `na_reasons` are in `totals.tail`, not `phases`. `experiment` records phases
-only and refuses `tail`. What a run does with a `product` lever is not set by
-this step (DND-1533, DND-1542).
+only and refuses `tail`. The product-side action for a `product` lever is not
+set by this step (DND-1533, DND-1542). Until it is, the harness work goes on:
+journal the finding "tail dominant: <sum>, lever product", then run the
+choice rule below on the largest phase by `phases.<p>.sum_s`, as if it were
+`biggest`. With no phase measured, the action is instrumentation as above.
 
 **The choice rule:** if the biggest phase has `n_na > n` in the window, the
 finding is "cannot measure <phase>" and the action is **instrumentation** for
