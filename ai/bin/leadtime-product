@@ -1,0 +1,130 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# leadtime-product -- the lead-time product-repo lane (DND-1540). An improve
+# run may change an improve repo R other than custom: it works R in a per-run
+# lane, opens a PR as Athena, and a LATER run lands it through R's own bar.
+#
+# Buckets: FRAMEWORK (argv, output) here; MANAGER and SIDE EFFECTS in
+# ai/lib/leadtime_product_io.rb; DOMAIN in ai/lib/leadtime_product.rb.
+
+require_relative "../lib/strict_argv"
+require_relative "../lib/leadtime_product"
+require_relative "../lib/leadtime_product_io"
+
+HELP = <<~TXT
+  Usage:
+    leadtime-product cut --repo R --phase P [--manifest FILE]
+    leadtime-product pr --repo R --title T --body-file FILE [--manifest FILE]
+    leadtime-product sweep [--manifest FILE]
+    leadtime-product reap [--manifest FILE]
+    leadtime-product teardown [--manifest FILE]
+    leadtime-product --self-test | --help
+
+  The product-repo lane of the lead-time improver loop (DND-1540). It acts
+  only on the improve repos other than custom that this run's manifest names
+  (scripts/athena-leadtime-run.sh writes it and exports
+  LEADTIME_PRODUCT_MANIFEST). With no such repo there is nothing to do.
+
+  The session (athena:lead-time-improve) uses:
+    cut       cut this run's lane for R at <R common dir>/leadtime-lanes/<run-id>
+              from R's origin/main, on branch leadtime/<R>-<phase>-<utc>, and run
+              R's worktree bootstrap there (its bin/dev-setup, when it has one).
+              A failed bootstrap is journaled "cannot act on R" and not retried
+              (exit 5). Prints the lane.
+    pr        push the lane's branch as Athena (gh-athena git push) and open the
+              PR (gh-athena pr create) with --body-file as its evidence. Records
+              it in <state>/product-prs.jsonl. The PR is "awaiting landing";
+              the run never merges it.
+  The runner uses:
+    reap      reap a dead run's product lanes, by their lock (never a pid)
+    sweep     for every open improver PR: CI green and a critic PASS ->
+              integration-gate --with-critic --rebase (R's declared gate), then
+              locked-merge, then confirm-merged (at most one landing per run);
+              CI red, critic BLOCK, gate RED, a rebase conflict or exit 4 ->
+              close the PR and journal it (exit 4 is a Cody-only step, never
+              cleared or retried). After a merge it watches R's post-merge
+              deploy: a failed deploy stops R's line and records a revert owed
+              (<state>/product-line-stopped.<R>; the owner re-arms with rm).
+              Prints "product_prs=<open n> landed=<R#n,...|none>", then one line
+              per PR.
+    teardown  retire this run's lanes: work on origin/main -> removed; the tip
+              pushed on a recorded improver PR -> awaiting landing; anything
+              else -> STRANDED, branch kept (exit 72).
+
+  Forge: GitHub only (locked-merge is GitHub-only); a GitLab R is refused.
+
+  Exit: 0 ok; 1 internal error; 2 refused (usage, or a rule: the line is
+  stopped, no lane cut, nothing to propose, a non-GitHub forge); 3 could not
+  look (a store, manifest or forge read that failed); 5 cannot act on R (the
+  lane bootstrap failed); 72 teardown found a STRANDED lane.
+TXT
+
+def fail_with(code, msg, fix)
+  warn "leadtime-product: #{msg}"
+  warn "  Fix: #{fix}"
+  exit code
+end
+
+SPECS = {
+  "cut" => { "--repo" => :value, "--phase" => :value, "--manifest" => :value },
+  "pr" => { "--repo" => :value, "--title" => :value, "--body-file" => :value, "--manifest" => :value },
+  "sweep" => { "--manifest" => :value },
+  "reap" => { "--manifest" => :value },
+  "teardown" => { "--manifest" => :value }
+}.freeze
+REQUIRED = { "cut" => %w[--repo --phase], "pr" => %w[--repo --title --body-file] }.freeze
+
+sub = ARGV.first
+case sub
+when "--help", "-h"
+  puts HELP
+  exit 0
+when "--self-test"
+  exec("/usr/bin/ruby", File.expand_path("../test/leadtime-product/product_test.rb", __dir__))
+when nil
+  fail_with(2, "no subcommand", "run leadtime-product --help.")
+end
+spec = SPECS[sub] or fail_with(2, "unknown subcommand #{sub.inspect}", "use one of #{SPECS.keys.join(', ')} (leadtime-product --help).")
+
+begin
+  opts = StrictArgv.parse(ARGV.drop(1), spec)
+rescue StrictArgv::UsageError => e
+  fail_with(2, e.message, "run leadtime-product --help.")
+end
+missing = REQUIRED.fetch(sub, []).reject { |f| opts.key?(f) }
+fail_with(2, "#{sub} needs #{missing.join(', ')}", "run leadtime-product --help.") unless missing.empty?
+
+IO_ = LeadTimeProductIO
+begin
+  m = IO_.load_manifest(opts["--manifest"] || ENV["LEADTIME_PRODUCT_MANIFEST"])
+  case sub
+  when "cut"
+    r = IO_.cut(m, opts["--repo"], opts["--phase"])
+    puts "lane=#{r[:lane]}"
+    puts "branch=#{r[:branch]}"
+    puts "base=#{r[:base]} (#{r[:fetch]})"
+  when "pr"
+    puts IO_.open_pr(m, opts["--repo"], title: opts["--title"], body_file: opts["--body-file"])
+  when "sweep"
+    gate_timeout = Integer(ENV.fetch("LEADTIME_PRODUCT_GATE_TIMEOUT", "1500"), exception: false)
+    fail_with(2, "LEADTIME_PRODUCT_GATE_TIMEOUT is not whole seconds", "unset it or give seconds.") unless gate_timeout&.positive?
+    summary, lines = IO_.sweep(m, gate_timeout: gate_timeout)
+    puts summary
+    lines.each { |l| puts l }
+  when "reap"
+    IO_.reap(m).each { |l| puts l }
+  when "teardown"
+    lines, stranded = IO_.teardown(m)
+    lines.each { |l| puts l }
+    exit 72 if stranded
+  end
+rescue IO_::CannotAct => e
+  fail_with(5, e.message, e.fix)
+rescue IO_::CouldNotLook => e
+  fail_with(3, e.message, e.fix)
+rescue LeadTimeProduct::Error => e
+  fail_with(2, e.message, e.fix)
+rescue StandardError => e
+  fail_with(1, "internal error: #{e.class}: #{e.message}", "this is a bug in leadtime-product; read the backtrace with --self-test and the IO layer.")
+end
