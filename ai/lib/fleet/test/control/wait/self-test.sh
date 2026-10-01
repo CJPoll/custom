@@ -30,7 +30,11 @@ SCH="${ATHENA_INBOX_ROOT}/custom-session.jsonl"
 jq -n -c --arg b "${SID_B}" '{producer: "platform", kind: "fleet.session.control_changed", entity_id: "fleet_session:9", payload: {claude_session_id: $b, desired: "run", reason: "default"}}' > "${SCH}"
 jq -n -c --argjson o "$(stat -c %s "${SCH}")" '{offset: $o}' > "${ATHENA_INBOX_ROOT}/custom-session.state.json"
 : > "${ATHENA_INBOX_ROOT}/custom-session.consumer.lock"
-flock "${ATHENA_INBOX_ROOT}/custom-session.consumer.lock" sleep 120 &
+# The holder is the process that holds the lock: `exec sleep` keeps fd 9, so
+# HOLDER_PID owns the lock and killing it releases it. `flock FILE sleep` forks
+# the sleep, and killing flock left the sleep holding both the lock and the
+# gate's output pipe for the full 120 s.
+( exec 9>>"${ATHENA_INBOX_ROOT}/custom-session.consumer.lock"; flock 9 && exec sleep 120 ) >/dev/null 2>&1 &
 HOLDER_PID=$!
 held=""
 # A hang cap, not a budget (DND-1007: it was 5 s); the holder keeps the lock 120 s.
@@ -58,6 +62,12 @@ eq "[DND-484 test 1] no inbox root at all: wait still exits 0" "${RC}" 0
 eq "[DND-484 test 1] ... on poll 3" "${HITS}" 3
 check "[DND-484 test 1] ... and creates no inbox root" test ! -e "${TMP}/no-such-inbox-root"
 kill "${HOLDER_PID}" 2>/dev/null; wait "${HOLDER_PID}" 2>/dev/null
+# Killing the holder must release the lock. A holder whose lock outlives it
+# leaves a process behind that keeps the gate's output pipe open, and the gate
+# waits for it (it read 120 s wall on a 5 s part).
+check "[DND-484 test 1] fixture: killing the holder releases the consumer lock" \
+  flock -n "${ATHENA_INBOX_ROOT}/custom-session.consumer.lock" true
+HOLDER_PID=""
 
 kill "${SERVER_PID}" 2>/dev/null; wait "${SERVER_PID}" 2>/dev/null; SERVER_PID=""
 
