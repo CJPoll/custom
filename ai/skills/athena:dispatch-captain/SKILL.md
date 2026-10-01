@@ -204,15 +204,15 @@ Give the captain, in the brief:
   branch is published (*The published-branch variant* below): *"Your gate bar
   is ONE green gate on a head that contained `origin/main` when the gate
   started. If main moves after that, do not rebase and re-gate to catch it:
-  report the gated SHA and the main it contained. I forward and re-gate the
-  integrated head when it lands. The final check's `--rebase` absorbs a main
+  report the gated SHA and the main it contained. I land it on the moved main
+  and re-gate only on a conflict. The final check's `--rebase` absorbs a main
   that moved while you queued. If it refuses with REBASE CONFLICT, rebase onto
   `origin/main` yourself, resolve the named paths, commit, and run it once
   more; if it refuses again, stop and report. Rebase earlier only on a real
   conflict or when I ask."* This is the
-  captain half of `athena:merge-boarding` → *Landing onto a moving main*; the
-  merge bar is unchanged, since you still re-gate the integrated head under
-  the lock. Measured 2026-09-26/27 (harness-epics-ab): DND-838 re-gated three
+  captain half of `athena:merge-boarding` → *Landing onto a moving main*.
+  Since DND-1463 the admiral lands a head whose gated main is an ancestor of
+  the current one without a re-gate; only a conflict sends it back. Measured 2026-09-26/27 (harness-epics-ab): DND-838 re-gated three
   times ("Main moved under each of them"), DND-785 ran `integration-gate`
   three times and never got a clean run, and DND-887 hit the same cycle. Two
   admirals then issued this rule by hand, mid-run (15:23Z to DND-497, 02:32Z

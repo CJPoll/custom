@@ -849,11 +849,24 @@ to main inside one window, serialized only by luck.
 **An admiral merges that PR; nobody waits for the owner.** Once the PR meets
 the bar (`athena:merge-boarding` → *The merge bar*: the author's DONE and
 report, a recorded critic PASS on the head, the gate green), an admiral lands
-it per `athena:merge-boarding`:
-1. rebase onto `origin/main`;
-2. re-gate the integrated head (`integration-gate`);
-3. merge, then confirm it landed (`ai/bin/confirm-merged`);
+it per `athena:merge-boarding` (the no-CI rule there names the steps):
+1. under `~/.local/state/athena/custom-merge.lock`, held around the fetch,
+   rebase and push only, rebase onto `origin/main`;
+2. a clean rebase: push the rebased head fast-forward to `main` as Athena,
+   then release the lock; a conflicted rebase: release the lock, resolve,
+   re-gate (`integration-gate --with-critic`), and start again;
+3. confirm it landed (`ai/bin/confirm-merged`);
 4. fast-forward the main checkout (`git merge --ff-only`).
+
+A red `main` or a failed deploy stops the line: nothing more lands until it is
+fixed.
+
+**Later (2026-10-01, DND-1463):** step 2 read "re-gate the integrated head
+(`integration-gate`)" after every rebase. Superseded by owner decision (Cody):
+"I'm comfortable with the risk of multiple merges at the same time; sometimes
+that will cause issues and we'll fix those asap. The velocity increase is
+worth the risk of incompatible concurrent merges." "That is true for both
+custom and gen_saas." A full re-gate is needed only after a conflicted rebase.
 
 The author still never pushes to main and never merges its own PR. An
 `integration-gate` exit 4 is held for the owner; it fires only for what
@@ -884,8 +897,8 @@ reserved name a hand-spawned run had to remember to avoid.
 
 **Two fleets in one repo is normal, and it resolves at `origin/main`, not
 between them.** Concurrent admirals never coordinate their *work* — each
-rebases onto current `origin/main`, re-runs the gate on the **integrated** head,
-and merges one MR at a time. The merge itself runs under a lock
+gates its head, lands onto current `origin/main` (re-gating only after a
+conflict, DND-1463), and merges one MR at a time. The merge itself runs under a lock
 (`athena:merge-boarding` → *Landing onto a moving main*), because a GitHub
 squash onto a moved base lands an ungated tree. Detecting the other fleet is the wrong question
 (a liveness marker is indistinguishable from a corpse, as above); "did

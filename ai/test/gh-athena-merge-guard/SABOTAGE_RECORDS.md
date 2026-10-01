@@ -229,3 +229,41 @@ FAIL  L11. same-suite runs are never superseded
 | M33 a newer SKIPPED/NEUTRAL run supersedes (`green`, not `success`) | L12, L12b |
 | M34 the app slug not required for an identity | L13 |
 | M35 the check suite id not required for an identity | L13b |
+
+---
+
+## 2026-10-01 — DND-1463: a receipt on an ancestor of the base tip is accepted
+
+- **Code under test:** `ai/lib/integration-receipt.sh` (`ir_read_receipt`),
+  `ai/lib/gh-merge-guard.sh` (`gmg_receipt_gate`), and
+  `ai/skills/athena:merge-boarding/scripts/locked-merge` (the receipt step,
+  the merge-tree preview, step 7)
+- **Suites:** `bash ai/test/gh-athena-merge-guard/self-test.sh` (D3–D3d);
+  `bash ai/skills/athena:merge-boarding/test/locked-merge/self-test.sh` (c2,
+  r3, m1–m7)
+- **Baseline (fixed code):** guard `RESULT: 187 passed, 0 failed`;
+  locked-merge `194 passed, 0 failed`
+
+### Fail-first: the new suites against the unfixed sources (1a34230d)
+
+Guard: `RESULT: 184 passed, 3 failed` (D3, D3c, D3d). D3 is the regression:
+a receipt on GATED_BASE's parent was refused with
+`RECEIPT FOR ANOTHER BASE: … but the base is now 38a464f4…`.
+
+locked-merge: `174 passed, 20 failed`. c2 and m1–m7 hit the old step 2
+(`origin/main moved to …, which the gated head … does not contain`, exit 3).
+r3 hit the old exact-base receipt rule (exit 9, `RECEIPT FOR ANOTHER BASE`).
+
+### Mutations on the fixed code (applied to a copy of `ai/`)
+
+r2 and r7 fail in every copy, mutated or not: the copied integration-gate
+cannot run outside a full checkout. They are not signal for these rows.
+
+| Mutation | Cases that fail |
+| --- | --- |
+| M36 `ir_read_receipt` accepts any recorded base (no ancestry or object check) | guard D3b, D3c; locked-merge m4 (still exit 9, through the head-contains check, but not named RECEIPT FOR ANOTHER BASE) |
+| M37 a recorded base missing from the object store reads as RECEIPT FOR ANOTHER BASE | D3c, D3d |
+| M38 step 7 compares against the gated head's tree (the pre-DND-1463 check) | m1 (exit 7 on a correct merge), m2 (exit 0 on a landing that dropped main's change) |
+| M39 step 7's tree check removed | c9, m2 |
+| M40 the merge-tree conflict preflight never refuses | m3 (merge called, exit 8) |
+| M41 the head-contains-receipt-base check removed | m7 |

@@ -1,6 +1,6 @@
 ---
 name: athena:merge-boarding
-description: How the athena-admiral protects the latency between a green MR and a landed deploy — the merge bar (incl. the no-CI-repo rule), merge-train boarding on GitLab, the GitHub squash-merge path, batching one deploy per batch with the Auto-Deploy label, the label-assertion before a batch tail, confirming a merge actually landed with confirm-merged, the Oban worker-rename gate, and landing onto a main that other fleets are moving under you (rebase, re-gate the integration head, merge one at a time). Use when a captain reports DONE and you are boarding/merging its MR. Merging is the admiral's alone.
+description: How the athena-admiral protects the latency between a green MR and a landed deploy — the merge bar (incl. the no-CI-repo rule), merge-train boarding on GitLab, the GitHub squash-merge path, batching one deploy per batch with the Auto-Deploy label, the label-assertion before a batch tail, confirming a merge actually landed with confirm-merged, the Oban worker-rename gate, and landing onto a main that other fleets are moving under you (gate the head, merge one at a time under the lock; a main that moved past the gated base needs a re-gate only on a conflict). Use when a captain reports DONE and you are boarding/merging its MR. Merging is the admiral's alone.
 ---
 
 # athena:merge-boarding
@@ -65,11 +65,33 @@ ref writes too. `~/dev/custom` lands by a fast-forward `gh-athena git push` of
 the gated head (the guard's header names that path). That push is the merge
 step, so it takes the same lock `locked-merge` does
 (`~/.local/state/athena/custom-merge.lock`, *Landing onto a moving main*).
-Hold `flock` on it across `integration-gate --rebase` AND the push, and push
-exactly the SHA `INTEGRATION OK` names. Nothing in `gh-athena` checks the lock
-on this path (DND-1370). Measured 2026-09-30 ~10:38Z: an admiral pushed
-DND-1048/717 unlocked while another held the lock gating DND-1359, whose push
-then failed NOT-FF and cost a re-gate. For any other no-CI repo,
+The landing, as Cody confirmed it (2026-10-01):
+
+1. The branch has `INTEGRATION OK` and a critic PASS on its own head.
+2. Under the lock, `git fetch origin`, then rebase the branch onto
+   `origin/main` if main moved.
+3. A **clean** rebase lands with no re-gate: push the rebased head
+   fast-forward (`gh-athena git push origin <sha>:main`), still under the
+   lock, then release it. Hold the lock around the fetch, rebase and push
+   only, never around a gate.
+4. A **conflicted** rebase is the one case that needs a full re-gate: release
+   the lock, resolve the conflict, run `integration-gate --with-critic` on the
+   new head, and start again.
+5. **Stop the line** on a red main (`harness-gate` red on `origin/main`) or a
+   failed deploy: land nothing more until it is fixed, and fix it first.
+
+Nothing in `gh-athena` checks the lock on this path (DND-1370).
+
+**Later (2026-10-01, DND-1463):** this said to hold `flock` across
+`integration-gate --rebase` AND the push, and to push exactly the SHA
+`INTEGRATION OK` names. Superseded by owner decision (Cody): "I'm comfortable
+with the risk of multiple merges at the same time; sometimes that will cause
+issues and we'll fix those asap. The velocity increase is worth the risk of
+incompatible concurrent merges." "That is true for both custom and gen_saas."
+A clean rebase onto a moved main is accepted without a re-gate. The lock
+still serialises the push itself. Measured 2026-09-30 ~10:38Z: an admiral
+pushed DND-1048/717 unlocked while another held the lock gating DND-1359, whose
+push then failed NOT-FF and cost a re-gate. For any other no-CI repo,
 land CI first, or escalate the merge to Cody as a step only Cody can run.
 Measured 2026-09-29 (`2026-09-25-dnd-671-650-644`, 22:02Z): anchor#28 was
 DONE, gated and critic-PASSed, and the merge was refused. It waited on Cody,
@@ -479,11 +501,25 @@ gate after a rebase — so the only thing standing between that defect and `main
 is you running the gate on the integration result. This **adds** a check at a
 moment where none ran; it skips none.
 
-**Merge one at a time, re-running `integration-gate` between merges.** This is
-the one place the batching rule below is subordinate: batch the *deploy label*,
-never the integration check. Merging car N moves `origin/main`, which
-invalidates the check for car N+1. Sequential here costs minutes, and it is not
-the fan-out parallelism — that already happened during the work.
+**Merge one at a time; a main that moved on does not force a re-gate.** The
+merge call itself stays serial under the lock. But a receipt whose recorded
+base is an **ancestor** of current `origin/<base>` is accepted: car N landing
+does not invalidate car N+1's gate. Car N+1 lands if its head merges into the
+new tip with no conflict. A conflict is refused (by `locked-merge` before the
+call, and by GitHub), and only then do you rebase, resolve, and re-gate. Stop
+the line on a red main or a failed deploy: land nothing more until it is fixed.
+
+**Later (2026-10-01, DND-1463):** this said "re-running `integration-gate`
+between merges", because merging car N invalidated the check for car N+1:
+the receipt's base had to EQUAL `origin/<base>`, and the head had to contain
+it. Superseded by owner decision (Cody, 2026-10-01): "I'm comfortable with
+the risk of multiple merges at the same time; sometimes that will cause issues
+and we'll fix those asap. The velocity increase is worth the risk of
+incompatible concurrent merges." "That is true for both custom and gen_saas."
+"Let's soften that merge guard requirement." The accepted risk is the one
+*Green-alone is not green-merged* names: two cars with disjoint files can each
+pass and fail together, and no gate runs on that combination before it lands.
+It is found by the next gate on `main`, and fixed first.
 
 **Pass `--since` once you have rebased.** After a rebase the original branch
 point is unrecoverable, so the incoming delta is empty *by construction* and
@@ -525,19 +561,36 @@ So the merge step is a critical section on every GitHub-merged repo:
   never a bare `gh-athena pr merge`. `<sha>` is the one `INTEGRATION OK` names.
   (The wrapper refuses that bare call anyway in a repo that declares a gate: it
   requires the same receipt, DND-969.) It takes the repo's merge lock (`~/.local/state/athena/<repo>-merge.lock`,
-  the path fleets already share), re-checks under it that `origin/<base>` is
-  contained in the gated head, merges pinned to that head, runs
-  `confirm-merged`, and asserts the landed commit's parent is the checked base
-  and its tree is the gated tree. Then it releases the lock and runs
-  `ai/bin/teardown-stack` for the PR's worktree stack (DND-864). Its exit code
-  names the next step (`--help`).
-  It adds checks under the lock and replaces none: still run `integration-gate`
-  first, still merge one at a time. Under the lock it also requires
-  `integration-gate`'s receipt for exactly `--head`, recorded against exactly
-  the base it re-checked (DND-965). With none it refuses before merging, exit 9,
-  and says which: `NO RECEIPT`, `RECEIPT UNREADABLE (COULD NOT LOOK)`,
-  `RECEIPT INVALID`, or `RECEIPT FOR ANOTHER BASE`. The fix is always to run
+  the path fleets already share), fetches, and requires under it
+  `integration-gate`'s receipt for exactly `--head`, recorded against
+  `origin/<base>` or an **ancestor** of it, and contained in the head
+  (DND-965, DND-1463). When main moved past the receipt's base it prints
+  `BASE MOVED`. It then computes the expected squash tree, `git merge-tree`
+  of the head into `origin/<base>` (the head's own tree when the base did not
+  move), and refuses a conflict there (exit 3) before any merge call. It
+  merges pinned to that head, runs `confirm-merged`, and asserts the landed
+  commit's parent is the checked base and its tree is that expected tree, so a
+  forge that lands anything else is still `LANDED UNGATED` (exit 7). Then it
+  releases the lock and runs `ai/bin/teardown-stack` for the PR's worktree
+  stack (DND-864). Its exit code names the next step (`--help`).
+  Still run `integration-gate` first, still merge one at a time. With no
+  usable receipt it refuses before merging, exit 9, and says which:
+  `NO RECEIPT`, `RECEIPT UNREADABLE (COULD NOT LOOK)`, `RECEIPT INVALID`,
+  `RECEIPT FOR ANOTHER BASE` (the recorded base is not an ancestor of
+  `origin/<base>`), or `RECEIPT BASE UNKNOWN (COULD NOT LOOK)` (an object is
+  missing, so ancestry cannot be read). The fix is to run
   `integration-gate` on that head and merge the SHA its `INTEGRATION OK` names.
+  The gh-athena merge guard applies the same receipt rule to a bare
+  `gh-athena pr merge` (DND-969); it has no tree check.
+
+  **Later (2026-10-01, DND-1463):** `locked-merge` asserted `origin/<base>`
+  was contained in the gated head (exit 3, "re-gate"), required the receipt's
+  base to EQUAL it, and compared the landed tree with the gated head's tree.
+  Superseded by the owner decision quoted under *Merge one at a time*. What
+  is no longer checked: the head combined with the commits between the
+  receipt's base and the tip was never gated. The tree check still fires: it
+  now compares against the computed merge, which equals the old check when the
+  base did not move.
   No flag or env var skips the receipt; an owner-approved HOT merge goes through
   `integration-gate --owner-approval`, which the receipt records. On gen_saas pass
   `--require-idle-workflow post-merge.yml`. The workflow's `prod-deploy`
@@ -570,9 +623,10 @@ So the merge step is a critical section on every GitHub-merged repo:
 - **GitLab merge trains need none of this.** The train re-tests the integrated
   result and is its own arbiter; board per *Boarding* below.
 
-The cost of losing differs: in `~/dev/custom` (no CI) it is one local re-gate;
-in gen_saas (~50 min CI on one runner) it is a CI cycle and can reorder
-deploys. The lock is required in both.
+Losing the race now costs nothing unless the rebase or merge conflicts
+(DND-1463). A conflict costs, in `~/dev/custom` (no CI), one local re-gate; in
+gen_saas (~50 min CI on one runner), a CI cycle, and it can reorder deploys.
+The lock is required in both.
 
 **Later (2026-09-27):** a PR waiting its turn for the token, the lock or a
 coordinator train moves its ticket to `In Merge Queue`
@@ -584,9 +638,11 @@ Main moves again when the PR ahead of you lands, so a forward made at position
 2 or 3 always gets redone. On a single-runner repo it also queues a full CI run
 ahead of every deploy. Keep your place on your last green head. Merge forward,
 re-gate and re-run CI only when you hold the token, or when you are next and
-the holder is merging. The bar is unchanged: the head you merge still needs a
-critic PASS, `INTEGRATION OK` and all-green CI, and it must contain current
-main. If the coordinator's protocol asks for something else (for example a
+the holder is merging. Since DND-1463 the head need not contain current main:
+a receipt on an ancestor of it is accepted, so merge forward only when the
+merge would conflict (`locked-merge` exit 3 names it). The head you merge
+still needs a critic PASS, `INTEGRATION OK` and all-green CI. If the
+coordinator's protocol asks for something else (for example a
 head that contains main at request time), the protocol wins. Tell the
 coordinator what the extra forward costs. Measured 2026-09-26 on gen_saas:
 - DND-549 (#365) was merged forward 4 times in about 2h (slack-interactive
@@ -690,8 +746,9 @@ names (*Landing onto a moving main*). `locked-merge` makes the pinned
 yourself. The wrapper is the floor that fires (DND-609): it REFUSES a merge
 whose pinned head is not all green, and REFUSES `--auto` wherever it cannot read
 a non-empty required-checks set. In a repo that declares a gate it also
-REFUSES a merge with no `integration-gate` receipt for the pinned head and the
-base branch's current tip, and refuses `--auto` outright (DND-969). Athena's repos have no branch protection (free private
+REFUSES a merge with no `integration-gate` receipt for the pinned head,
+recorded against the base branch's current tip or an ancestor of it
+(DND-1463), and refuses `--auto` outright (DND-969). Athena's repos have no branch protection (free private
 plan), so `--auto` there would merge immediately; it is refused, and branch
 protection is NOT the gate. A refusal is expected, not an auth error: follow its
 `Fix:`. The deploy is the repo's own post-merge Actions workflow — no `Auto-Deploy`

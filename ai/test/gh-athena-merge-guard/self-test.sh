@@ -833,9 +833,25 @@ if [ "${RC}" = 0 ] && grep -qx "pr merge 362 --squash --match-head-commit ${HEAD
   ok "D2. a valid receipt for this head and this base -> the merge runs, argv unchanged"
 else bad "D2. valid receipt merges" "$(detail)"; fi
 
+# DND-1463: the receipt's base may be an ANCESTOR of the base tip (main moved
+# on since the gate ran). NOGATE_BASE is GATED_BASE's parent. Before DND-1463
+# this was refused as RECEIPT FOR ANOTHER BASE.
 reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${NOGATE_BASE}"
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-receipt_refused "D3. a receipt recorded against another base (main moved since the gate) -> refused" "RECEIPT FOR ANOTHER BASE"
+if [ "${RC}" = 0 ] && grep -qx "pr merge 362 --squash --match-head-commit ${HEAD_SHA}" "${STUB_LOG}" \
+   && [[ "${ERR}" == *"ancestor of"* ]]; then
+  ok "D3. a receipt on an older base that is an ANCESTOR of the tip -> merges, and says the base moved (DND-1463)"
+else bad "D3. ancestor-base receipt merges" "$(detail)"; fi
+
+# HGATE_BASE is on a sibling branch: not an ancestor of GATED_BASE.
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${HGATE_BASE}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D3b. a receipt whose base is NOT an ancestor of the tip -> refused" "RECEIPT FOR ANOTHER BASE"
+
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "0123456789abcdef0123456789abcdef01234567"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D3c. a receipt base not in the local object store -> COULD NOT LOOK, never read as not-an-ancestor" "COULD NOT LOOK"
+[[ "${ERR}" != *"RECEIPT FOR ANOTHER BASE"* ]] && ok "D3d. an unknown receipt base is not reported as another base" || bad "D3d. unknown vs another base" "$(detail)"
 
 reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; mkdir -p "${STORE_FX}"; echo '{not json' > "${STORE_FX}/${HEAD_SHA}.json"
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"

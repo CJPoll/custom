@@ -7,6 +7,12 @@
 # landed on DND-347's merge a minute later, integrated head ungated). Six fleets
 # then hand-rolled the same flock recipe from prose. This is that recipe.
 #
+# DND-1463 (owner, 2026-10-01): a base that moved on past the gated base is now
+# accepted, a deliberate velocity trade ("The velocity increase is worth the
+# risk of incompatible concurrent merges."). The lock still serialises merges;
+# a conflict is still refused; and the landed tree must still equal the merge
+# this script computed under the lock, so the forge cannot land anything else.
+#
 # It ADDS refusals in front of an existing pinned merge and replaces none:
 # integration-gate still runs first, merges stay one at a time, gh-athena's
 # all-green refusal stays the green check, confirm-merged still runs.
@@ -14,8 +20,9 @@
 # "integration-gate runs first" is ENFORCED, not trusted (DND-965). gen_saas
 # #468 merged past a RED gate because a prep script printed READY without
 # reading the exit code, and nothing here asked. Now the merge requires the
-# gate's own receipt for exactly --head, recorded against exactly the base
-# re-checked under the lock. There is deliberately no flag or env var that
+# gate's own receipt for exactly --head, recorded against the base re-checked
+# under the lock or an ancestor of it (DND-1463: owner, 2026-10-01, "Let's
+# soften that merge guard requirement."). There is deliberately no flag or env var that
 # skips it (~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the
 # diff it is checking"); the only owner override is integration-gate's own
 # --owner-approval, which the receipt records.
@@ -49,13 +56,16 @@ Run integration-gate first; pass the SHA its INTEGRATION OK line names as
 --head. Under an flock (default ~/.local/state/athena/<repo>-merge.lock, the
 path fleets already share) it:
   1. fetches origin and reads the PR (must be OPEN, head == --head);
-  2. asserts origin/<base> is an ancestor of --head (else: re-gate);
-  3. requires integration-gate's RECEIPT for --head, at
+  2. requires integration-gate's RECEIPT for --head, at
      <git common dir>/integration-receipts/<head>.json: verdict pass, head ==
-     --head, and recorded base == the origin/<base> SHA checked in step 2.
-     No flag skips this; integration-gate writes it only on INTEGRATION OK;
-  4. with --require-idle-workflow <workflow-file>, keyed on the base SHA from
-     step 2 (DND-1378): the base commit's own push run, looked up by SHA and
+     --head, and a recorded base R that is the current origin/<base> SHA B or
+     an ANCESTOR of it (DND-1463), and that --head contains. No flag skips
+     this; integration-gate writes it only on INTEGRATION OK. When R != B it
+     prints BASE MOVED: the head merged with R..B was never gated;
+  3. computes the expected squash tree, git merge-tree B --head (the head's
+     own tree when R == B). A conflict is refused here (exit 3);
+  4. with --require-idle-workflow <workflow-file>, keyed on the base SHA B
+     (DND-1378): the base commit's own push run, looked up by SHA and
      re-read by id, must be completed, and the <base> run list must show no
      queued/running run. No run for the base SHA is NOT SEEN YET (under 600s)
      or NO RUN FOR BASE (exit 5), never idle, unless the commit carries a skip
@@ -64,15 +74,16 @@ path fleets already share) it:
   5. merges via gh-athena pr merge --squash --match-head-commit <head> (no --auto);
   6. confirm-merged --pr <n> --fetch (bounded retry), also after a failed
      merge call, which can still have landed (DND-1324);
-  7. asserts the merge commit's parent == the checked base and its tree ==
-     the gated head's tree;
+  7. asserts the merge commit's parent == B and its tree == the expected
+     tree from step 3;
   8. releases the lock and runs teardown-stack --pr <n> --repo DIR, which
      tears down the PR's worktree stack (DND-864).
 
 Exit (every non-zero prints a Fix: line):
   0 merged, confirmed, tree matches          (landed)
   2 usage / prerequisite / non-GitHub remote (nothing landed)
-  3 stale: PR not open, head moved, or base not contained -- re-gate (nothing landed)
+  3 stale: PR not open, head moved, or CONFLICT with origin/<base> -- rebase,
+    re-gate (nothing landed)
   4 forge refused the merge, and confirm-merged does not show it landed
     (a failed call that DID land is verified and reported as a merge)
   5 required-idle workflow busy, NOT SEEN YET or NO RUN FOR BASE -- retry later (nothing landed)
@@ -80,8 +91,9 @@ Exit (every non-zero prints a Fix: line):
   7 LANDED UNGATED: parent or tree mismatch -- re-gate origin/main now, report it
   8 merge ran but landing not confirmed -- investigate, do not retry blind
   9 no usable integration-gate receipt for --head: NO RECEIPT, RECEIPT
-    UNREADABLE (COULD NOT LOOK), RECEIPT INVALID, or RECEIPT FOR ANOTHER
-    BASE -- run integration-gate on this head (nothing landed)
+    UNREADABLE (COULD NOT LOOK), RECEIPT INVALID, RECEIPT FOR ANOTHER BASE
+    (recorded base not an ancestor of origin/<base>), or RECEIPT BASE
+    UNKNOWN (COULD NOT LOOK) -- run integration-gate on this head (nothing landed)
   10 LANDED and confirmed, but the worktree stack teardown failed -- do not re-merge
 EOF
 }
@@ -178,21 +190,49 @@ B="$(git -C "${REPO}" rev-parse --verify -q "refs/remotes/origin/${base}^{commit
   || die 2 "origin/${base} does not resolve after fetch" "check the PR's base branch exists on origin."
 git -C "${REPO}" cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null \
   || die 3 "gated head ${HEAD_SHA} is not in the local object store" "fetch the PR branch in this worktree and re-run integration-gate."
-git -C "${REPO}" merge-base --is-ancestor "${B}" "${HEAD_SHA}" \
-  || die 3 "origin/${base} moved to ${B}, which the gated head ${HEAD_SHA} does not contain" \
-       "merge origin/${base} forward, push, re-run integration-gate --since <old base>, wait for CI green on the new head, then re-run locked-merge."
-echo "BASE origin/${base} ${B} contained in ${HEAD_SHA}"
 
-# ---- the gate's receipt for exactly this head and base (DND-965) ----
-# Four outcomes, kept textually distinct, because "the gate never passed" and
-# "I could not read whether it did" call for different next steps and must
-# never read the same (~/dev/custom/ai/CLAUDE.md -> "A failed lookup must never
-# look like an empty one"). All four refuse before the merge call.
+# ---- the gate's receipt for exactly this head, on the tip or an ancestor ----
+# DND-965 made the receipt required; DND-1463 (owner, 2026-10-01) accepts one
+# recorded against an ANCESTOR of the tip, so a merge that landed while this PR
+# waited no longer forces a full re-gate. The outcomes stay textually distinct,
+# because "the gate never passed" and "I could not read whether it did" call
+# for different next steps (~/dev/custom/ai/CLAUDE.md -> "A failed lookup must
+# never look like an empty one"). Every one refuses before the merge call.
 REGATE="run integration-gate on this head (from any checkout of this repo, with origin/${base} at ${B}), then re-run locked-merge with the SHA its INTEGRATION OK line names."
 if ! ir_read_receipt "${COMMON}" "${HEAD_SHA}" "${B}"; then
   die 9 "${IR_KIND}: ${IR_WHY}" "${IR_HOW:+${IR_HOW} }${REGATE}"
 fi
-echo "RECEIPT ${IR_RECEIPT} base ${B} recorded ${IR_RECORDED_AT}"
+R="${IR_BASE}"
+# integration-gate records only a base the head contains. A receipt whose base
+# the head does not contain describes a run that never happened on this head.
+git -C "${REPO}" merge-base --is-ancestor "${R}" "${HEAD_SHA}" \
+  || die 9 "RECEIPT INVALID: ${IR_RECEIPT} records base ${R}, which the head ${HEAD_SHA} does not contain; integration-gate never records such a base" \
+       "${REGATE}"
+echo "RECEIPT ${IR_RECEIPT} base ${R} recorded ${IR_RECORDED_AT}"
+if [ "${R}" = "${B}" ]; then
+  echo "BASE origin/${base} ${B} is the gated base"
+else
+  echo "BASE MOVED origin/${base} ${B}: the receipt's base ${R} is an ancestor; the head merged with ${R}..${B} was never gated (DND-1463, owner-accepted)"
+fi
+
+# ---- the expected squash tree, computed before the merge call (DND-1463) ----
+# GitHub's squash tree is the head merged into the base tip (merge-ort). When
+# R == B the head contains B and this is the head's own tree, the pre-DND-1463
+# check. When main moved, it is the head merged with R..B. Step 7 compares the
+# landed tree against it, so a forge that lands something else still reads as
+# LANDED UNGATED. A conflict here is refused now, before anything lands.
+mt_out="$(git -C "${REPO}" merge-tree --write-tree --name-only "${B}" "${HEAD_SHA}" 2>&1)"; mt_rc=$?
+case "${mt_rc}" in
+  0) EXPECTED_TREE="$(head -1 <<<"${mt_out}")" ;;
+  1) die 3 "CONFLICT: the head ${HEAD_SHA} conflicts with origin/${base} at ${B} in: $(sed -n '2,/^$/p' <<<"${mt_out}" | grep -v '^$' | sort -u | tr '\n' ' ')" \
+       "rebase the branch onto origin/${base}, resolve the conflict, push, re-run integration-gate on the new head, wait for CI green, then re-run locked-merge. Nothing was merged." ;;
+  *) die 2 "COULD NOT LOOK: git merge-tree ${B} ${HEAD_SHA} failed (exit ${mt_rc}): $(head -3 <<<"${mt_out}" | tr '\n' ' ')" \
+       "check git >= 2.38 (merge-tree --write-tree) and that both commits are local; nothing was merged." ;;
+esac
+[[ "${EXPECTED_TREE}" =~ ^[0-9a-f]{40}$ ]] \
+  || die 2 "COULD NOT LOOK: git merge-tree printed no tree id (got '${EXPECTED_TREE}')" \
+       "check git >= 2.38 (merge-tree --write-tree); nothing was merged."
+echo "EXPECTED-TREE ${EXPECTED_TREE} (${HEAD_SHA} merged into ${B})"
 
 # ---- required-idle workflow, keyed on the base SHA (DND-1378) ----
 # A single base-branch list read can miss the run for the commit that just
@@ -286,12 +326,12 @@ M="$(cd "${REPO}" && gh pr view "${PR}" --json mergeCommit -q '.mergeCommit.oid 
 [ -n "${M}" ] || die 8 "PR ${PR} reports no merge commit" "check the PR on the forge by hand; do not retry the merge blind."
 git -C "${REPO}" fetch -q origin 2>/dev/null
 git -C "${REPO}" cat-file -e "${M}^{commit}" 2>/dev/null \
-  || die 8 "merge commit ${M} not fetchable" "fetch origin and compare ${M}^{tree} with ${HEAD_SHA}^{tree} by hand."
+  || die 8 "merge commit ${M} not fetchable" "fetch origin and compare ${M}^{tree} with the expected tree ${EXPECTED_TREE} by hand."
 parent="$(git -C "${REPO}" rev-parse "${M}^1")"
 [ "${parent}" = "${B}" ] || die 7 "LANDED UNGATED: merge ${M} sits on ${parent}, not the checked base ${B}" \
   "re-run the gate on origin/${base} now and report the ungated landing to the coordinator."
-[ "$(git -C "${REPO}" rev-parse "${M}^{tree}")" = "$(git -C "${REPO}" rev-parse "${HEAD_SHA}^{tree}")" ] \
-  || die 7 "LANDED UNGATED: merge ${M}'s tree differs from the gated head ${HEAD_SHA}" \
+[ "$(git -C "${REPO}" rev-parse "${M}^{tree}")" = "${EXPECTED_TREE}" ] \
+  || die 7 "LANDED UNGATED: merge ${M}'s tree differs from the expected tree ${EXPECTED_TREE} (${HEAD_SHA} merged into ${B})" \
        "re-run the gate on origin/${base} now and report the ungated landing to the coordinator."
 
 echo "MERGED ${PR} ${M} ON ${B} TREE-MATCH"

@@ -333,9 +333,13 @@ declares a gate, and the only documented path is `integration-gate` then
   uses, shared through `ai/lib/integration-receipt.sh`). The wrapper reads that
   tip from the forge, asks the local checkout, and then requires the receipt at
   `<git common dir>/integration-receipts/<head>.json` for exactly the pinned
-  head and exactly that tip. It refuses before any merge call, with one of
-  `NO RECEIPT`, `RECEIPT UNREADABLE (COULD NOT LOOK)`, `RECEIPT INVALID` or
-  `RECEIPT FOR ANOTHER BASE`. So a merge must run from a checkout of the PR's
+  head, recorded against that tip or an ancestor of it (DND-1463: a main that
+  moved on since the gate is accepted, and the line says `BASE MOVED`). It
+  refuses before any merge call, with one of `NO RECEIPT`,
+  `RECEIPT UNREADABLE (COULD NOT LOOK)`, `RECEIPT INVALID`,
+  `RECEIPT FOR ANOTHER BASE` (the recorded base is not an ancestor of the tip)
+  or `RECEIPT BASE UNKNOWN (COULD NOT LOOK)`. A conflict with the moved tip is
+  refused by GitHub's squash. So a merge must run from a checkout of the PR's
   repo: a cwd that is not one, or a base tip missing from the local object
   store, is refused as COULD NOT LOOK, never read as "no gate". A repo whose base
   declares no gate merges as before. No flag skips the check.

@@ -3,9 +3,11 @@
 #
 # The defect this tool exists to catch: a GitHub squash-merge onto a base that
 # moved after integration-gate ran lands a tree nobody gated, and nothing
-# refuses it. The cases that matter are the misses -- base moved before the
-# lock (c2: exit 3, NO merge call) and a landing on a different base or tree
-# (c8/c9: exit 7) -- because each of those reads as a clean merge otherwise.
+# refuses it. The cases that matter are the misses -- a landing on a different
+# base or tree (c8/c9/m2: exit 7) and a conflict with a moved base (m3: exit 3,
+# NO merge call) -- because each of those reads as a clean merge otherwise.
+# DND-1463: a base that moved on past the receipt's base (an ancestor) merges
+# now (c2, r3, m1); one that is not an ancestor is still refused (m4).
 #
 # DND-965: the second defect is a merge of a head integration-gate never
 # passed. locked-merge used to take the caller's word that the gate ran (gen_saas
@@ -65,8 +67,15 @@ if [ "${mode}" = moved ]; then   # someone else lands first, forge does not refu
   x="$(${G} commit-tree "$(${G} rev-parse main^{tree})" -p "$(${G} rev-parse main)" -m other)"
   ${G} update-ref refs/heads/main "${x}"
 fi
-tree="$(${G} rev-parse "${sha}^{tree}")"
+# The squash tree is GitHub's: the head merged into the current main
+# (merge-ort). A conflict refuses, as the forge does. DND-1463: main may have
+# moved past the receipt's base, so this is not always the head's own tree.
+tree="$(${G} merge-tree --write-tree "$(${G} rev-parse main)" "${sha}" 2>/dev/null)" \
+  || { echo "refused: merge conflict" >&2; exit 1; }
+tree="$(head -1 <<<"${tree}")"
 [ "${mode}" = badtree ] && tree="$(${G} rev-parse main^{tree})"
+# headtree: the forge lands exactly the gated head's tree, dropping main's move.
+[ "${mode}" = headtree ] && tree="$(${G} rev-parse "${sha}^{tree}")"
 m="$(${G} commit-tree "${tree}" -p "$(${G} rev-parse main)" -m squash)"
 ${G} update-ref refs/heads/main "${m}"
 jq --arg m "${m}" '.state="MERGED" | .mergeCommit={oid:$m}' "${ST}/pr.json" > "${ST}/pr.tmp" && mv "${ST}/pr.tmp" "${ST}/pr.json"
@@ -146,10 +155,12 @@ grep -q -- '--auto' "${ST}/merge.log" && bad "c1 merge used --auto" || ok "c1 no
 grep -qxF -- "--pr 7 --repo ${WT}" "${ST}/teardown.log" && ok "c1 the merge drove teardown-stack for PR 7" \
   || bad "c1 teardown-stack not run for the landed PR" "$(cat "${ST}/teardown.log")"
 
-# c2 THE MISS: base moved after the gate -> refuse before merging.
+# c2 DND-1463: base moved after the gate, and the receipt's base is an
+# ancestor of the new tip. Owner decision 2026-10-01: merge it (it used to be
+# exit 3, "re-gate"). The move is named, never silent.
 fixture c2; advance_main
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c2.lock"; expect c2 3; no_merge c2
-grep -q 'does not contain' <<<"${out}" && ok "c2 names the uncontained base" || bad "c2 message" "${out}"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c2.lock"; expect c2 0
+grep -q 'BASE MOVED' <<<"${out}" && ok "c2 names the moved base" || bad "c2 does not name the moved base" "${out}"
 
 # c3 PR head moved; c4 PR not open.
 fixture c3; jq '.headRefOid="'"$(printf 'a%.0s' {1..40})"'"' "${ST}/pr.json" > "${ST}/x" && mv "${ST}/x" "${ST}/pr.json"
@@ -301,16 +312,64 @@ igate="$(cd "${HERE}/../.." && pwd)/scripts/integration-gate"
 if [ -e "$(receipt_path "${H}")" ]; then bad "r2 a passing receipt survived a RED gate"; else ok "r2 RED gate left no receipt"; fi
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r2.lock"; expect_receipt_refusal r2 "NO RECEIPT"
 
-# r3 receipt recorded against an OLDER base: origin/main fast-forwarded into
-# the branch after the gate ran, so the base is still contained but is not the
-# base the gate judged.
+# r3 DND-1463 THE REGRESSION: a receipt recorded against an OLDER base that is
+# an ancestor of the current tip (origin/main moved on after the gate ran).
+# Before DND-1463 this was exit 9 RECEIPT FOR ANOTHER BASE; the owner softened
+# the bar, so it merges now.
 fixture r3; old_base="$(git --git-dir="${BARE}" rev-parse main)"
 ( cd "${WT}" && echo g > g.txt && git add g.txt && git commit -qm g && git push -q origin feature )
 H1="${H}"; H="$(git -C "${WT}" rev-parse HEAD)"
 set_main "${H1}"
 jq --arg h "${H}" '.headRefOid=$h' "${ST}/pr.json" > "${ST}/x" && mv "${ST}/x" "${ST}/pr.json"
 plant_receipt "${H}" "${old_base}"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r3.lock"; expect_receipt_refusal r3 "RECEIPT FOR ANOTHER BASE"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r3.lock"; expect r3-ancestor-base 0
+grep -q '^MERGED 7 ' <<<"${out}" && ok "r3 merged on the ancestor-base receipt" || bad "r3 no MERGED line" "${out}"
+
+# ---- DND-1463: the receipt's base may be an ANCESTOR of the tip ----
+# commit_on_main <file> <content> -- main moves on with a real change.
+commit_on_main() {
+  local G="git --git-dir=${BARE}" blob tree
+  blob="$(printf '%s\n' "$2" | ${G} hash-object -w --stdin)"
+  tree="$( { ${G} ls-tree main | awk -F'\t' -v f="$1" '$2 != f'; printf '100644 blob %s\t%s\n' "${blob}" "$1"; } | ${G} mktree)"
+  ${G} update-ref refs/heads/main "$(${G} commit-tree "${tree}" -p "$(${G} rev-parse main)" -m "main: $1")"
+}
+# m1 main moved with a real, non-conflicting change. The landed tree must be
+# the head merged into the new tip: both the branch's f.txt and main's m.txt.
+fixture m1; commit_on_main m.txt m
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m1.lock"; expect m1 0
+M1="$(git --git-dir="${BARE}" rev-parse main)"
+[ "$(git --git-dir="${BARE}" show "${M1}:m.txt" 2>/dev/null)" = m ] && [ "$(git --git-dir="${BARE}" show "${M1}:f.txt" 2>/dev/null)" = f ] \
+  && ok "m1 landed tree carries main's change and the branch's" || bad "m1 landed tree" "$(git --git-dir="${BARE}" ls-tree "${M1}")"
+names m1 "BASE MOVED"
+# m2 STEP 7 STILL FIRES when main moved: the forge lands exactly the gated
+# head's tree, silently dropping main's m.txt. That is not the expected merge.
+fixture m2; commit_on_main m.txt m; echo headtree > "${ST}/merge_mode"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m2.lock"; expect m2 7; no_teardown m2
+names m2 "LANDED UNGATED"
+# m3 a real conflict with the moved base is refused before the merge call.
+fixture m3; commit_on_main f.txt main-side
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m3.lock"; expect m3 3; no_merge m3
+names m3 "CONFLICT"
+# m4 a receipt whose base is NOT an ancestor of the tip (a sibling of main,
+# as after a force-push past it) is still refused.
+fixture m4; G4="git --git-dir=${BARE}"
+side="$(${G4} commit-tree "$(${G4} rev-parse main^{tree})" -p "$(${G4} rev-parse main)" -m side)"
+${G4} update-ref refs/heads/side "${side}"   # on a ref, so the fetch brings it
+commit_on_main m.txt m; plant_receipt "${H}" "${side}"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m4.lock"; expect_receipt_refusal m4 "RECEIPT FOR ANOTHER BASE"
+# m5 main moved; the only receipt is for a DIFFERENT head -> still refused.
+fixture m5; base5="$(git --git-dir="${BARE}" rev-parse main)"; commit_on_main m.txt m
+mv "$(receipt_path "${H}")" "$(receipt_path "$(printf 'd%.0s' {1..40})")"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m5.lock"; expect_receipt_refusal m5-other-head-file "NO RECEIPT"
+plant_receipt "${H}" "${base5}" pass "$(printf 'd%.0s' {1..40})"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m5.lock"; expect_receipt_refusal m5-recorded-other-head "RECEIPT INVALID"
+# m6 main moved; no receipt at all -> still refused.
+fixture m6; commit_on_main m.txt m; rm -f "$(receipt_path "${H}")"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m6.lock"; expect_receipt_refusal m6 "NO RECEIPT"
+# m7 a receipt whose base is the tip but is NOT in the head: integration-gate
+# records only a base the head contains, so this receipt is not believed.
+fixture m7; commit_on_main m.txt m; plant_receipt "${H}" "$(git --git-dir="${BARE}" rev-parse main)"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m7.lock"; expect_receipt_refusal m7 "RECEIPT INVALID"
 
 # r4 unreadable receipt (malformed JSON) is not "no receipt".
 fixture r4; echo '{not json' > "$(receipt_path "${H}")"

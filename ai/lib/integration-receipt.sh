@@ -12,6 +12,8 @@
 #   * gh-merge-guard.sh (ai/lib/, behind every `gh-athena pr merge`) asks
 #     ir_declared_gate_on whether the PR's repo declares a gate on the base tip,
 #     and if so reads the receipt with ir_read_receipt before any merge call.
+#     Both readers accept a recorded base that is the tip or an ancestor of it
+#     (DND-1463).
 #
 # The receipt: <git common dir>/integration-receipts/<head-sha>.json, written by
 # integration-gate only on INTEGRATION OK (DND-965). The git common dir is the
@@ -49,25 +51,36 @@ ir_declared_gate_on() {
 ir_store() { printf '%s/integration-receipts' "$1"; }
 ir_receipt_path() { printf '%s/%s.json' "$(ir_store "$1")" "$2"; }
 
-# ir_read_receipt <git-common-dir> <head-sha> <base-sha> : is there a usable
-# pass for exactly <head-sha>, recorded against exactly <base-sha>?
+# ir_read_receipt <git-common-dir> <head-sha> <tip-sha> : is there a usable
+# pass for exactly <head-sha>, recorded against <tip-sha> or an ANCESTOR of it?
 #
-# Returns 0 when there is, and sets IR_RECEIPT, IR_RECORDED_AT, IR_TARGET.
+# DND-1463 (owner, 2026-10-01: "Let's soften that merge guard requirement."):
+# the recorded base used to have to EQUAL the tip, so every merge that landed
+# while a PR waited forced a full re-gate. Now a recorded base the tip descends
+# from is accepted: the base moved on, nothing rewrote it. The head is still
+# exact. A merge conflict between the head and the moved tip is refused by the
+# forge (and by locked-merge before its merge call). What no gate ran is the
+# head combined with the commits between the recorded base and the tip.
+#
+# Returns 0 when there is, and sets IR_RECEIPT, IR_RECORDED_AT, IR_TARGET,
+# IR_BASE (the recorded base) and IR_BASE_MOVED (1 when IR_BASE != <tip-sha>).
 # Otherwise returns 1 and sets:
-#   IR_KIND  one of four textually distinct outcomes:
+#   IR_KIND  one of five textually distinct outcomes:
 #              NO RECEIPT
 #              RECEIPT UNREADABLE (COULD NOT LOOK)
 #              RECEIPT INVALID
-#              RECEIPT FOR ANOTHER BASE
+#              RECEIPT FOR ANOTHER BASE  (the recorded base is not an ancestor)
+#              RECEIPT BASE UNKNOWN (COULD NOT LOOK)  (ancestry not computable)
 #   IR_WHY   what was found, naming the path searched
 #   IR_HOW   a step to take BEFORE re-gating, or empty. The caller composes
 #            the Fix: from it plus its own re-gate text.
 # "The gate never passed" and "whether it passed could not be read" call for
-# different next steps, so they never share a kind.
+# different next steps, so they never share a kind. Ancestry is read from the
+# object store under <git-common-dir>, shared by every checkout of the repo.
 ir_read_receipt() {
-  local common="$1" head="$2" base="$3" store fields where
+  local common="$1" head="$2" base="$3" store fields where o rc
   local r_schema r_verdict r_head r_base r_target r_at
-  IR_KIND="" IR_WHY="" IR_HOW="" IR_RECORDED_AT="" IR_TARGET=""
+  IR_KIND="" IR_WHY="" IR_HOW="" IR_RECORDED_AT="" IR_TARGET="" IR_BASE="" IR_BASE_MOVED=0
   store="$(ir_store "$common")"
   IR_RECEIPT="$(ir_receipt_path "$common" "$head")"
   if [ -e "$store" ] && { [ ! -d "$store" ] || [ ! -r "$store" ] || [ ! -x "$store" ]; }; then
@@ -100,11 +113,31 @@ ir_read_receipt() {
     IR_WHY="${IR_RECEIPT} is not a pass for ${head} (schema '${r_schema}', verdict '${r_verdict}', head '${r_head}')"
     return 1
   fi
-  if [ "$r_base" != "$base" ]; then
-    IR_KIND="RECEIPT FOR ANOTHER BASE"
-    IR_WHY="integration-gate passed ${head} against ${r_base} (${r_target}, ${r_at}), but the base is now ${base}"
+  if ! [[ "$r_base" =~ ^[0-9a-f]{40}$ ]]; then
+    IR_KIND="RECEIPT INVALID"
+    IR_WHY="${IR_RECEIPT} records base '${r_base}', which is not a full commit SHA"
     return 1
   fi
-  IR_RECORDED_AT="$r_at" IR_TARGET="$r_target"
+  if [ "$r_base" != "$base" ]; then
+    for o in "$r_base" "$base"; do
+      if ! git --git-dir="$common" cat-file -e "${o}^{commit}" 2>/dev/null; then
+        IR_KIND="RECEIPT BASE UNKNOWN (COULD NOT LOOK)"
+        IR_WHY="integration-gate passed ${head} against ${r_base} (${r_target}, ${r_at}) and the base tip is ${base}, but ${o} is not a commit in the object store under ${common}, so whether the tip descends from the recorded base is unknown -- not the same as another base"
+        IR_HOW="fetch origin in this repo (git fetch origin) and re-run; if it is still refused,"
+        return 1
+      fi
+    done
+    git --git-dir="$common" merge-base --is-ancestor "$r_base" "$base" 2>/dev/null; rc=$?
+    case "$rc" in
+      0) IR_BASE_MOVED=1 ;;
+      1) IR_KIND="RECEIPT FOR ANOTHER BASE"
+         IR_WHY="integration-gate passed ${head} against ${r_base} (${r_target}, ${r_at}), which is not an ancestor of the base tip ${base} (the base was rewritten, or the receipt is for another branch)"
+         return 1 ;;
+      *) IR_KIND="RECEIPT BASE UNKNOWN (COULD NOT LOOK)"
+         IR_WHY="git merge-base --is-ancestor ${r_base} ${base} failed (exit ${rc}) under ${common}, so whether the tip descends from the recorded base is unknown"
+         return 1 ;;
+    esac
+  fi
+  IR_RECORDED_AT="$r_at" IR_TARGET="$r_target" IR_BASE="$r_base"
   return 0
 }

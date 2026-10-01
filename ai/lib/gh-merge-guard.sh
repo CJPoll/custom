@@ -32,8 +32,9 @@
 #   * In a repo whose base-branch tip DECLARES an integration gate
 #     (bin/prep-commit.sh or ai/bin/harness-gate, the rule integration-gate
 #     uses), a merge is also REFUSED unless integration-gate's receipt exists
-#     for exactly the pinned head and exactly that tip, and `--auto` is refused
-#     outright (DND-969; see gmg_receipt_gate). The one recommended merge path
+#     for exactly the pinned head, recorded against that tip or an ancestor of
+#     it (DND-1463), and `--auto` is refused outright (DND-969; see
+#     gmg_receipt_gate). The one recommended merge path
 #     is integration-gate, then locked-merge, which makes this call.
 #   * A gh ALIAS is expanded the way gh expands it (see gmg_expand_alias) and
 #     the EXPANDED argv is what the guard judges, so `gh alias set p pr` then
@@ -106,7 +107,11 @@
 #
 # Residual of the receipt check (DND-969): the receipt is a local file, so any
 # local actor can write one (the same trust level as critic-verdicts), and a
-# repo that declares no gate on its base tip is not checked at all.
+# repo that declares no gate on its base tip is not checked at all. Since
+# DND-1463 a receipt on an older base the tip descends from is accepted, so the
+# head combined with the base's newer commits was never gated; GitHub's squash
+# refuses only a textual conflict. The owner accepted that risk for velocity
+# (2026-10-01). locked-merge also checks the landed tree; this guard cannot.
 #
 # Usage: set GMG_TOOL, then `gmg_guard "$@"`. It returns 0 when the command may
 # run, and exits 3 with a REFUSING line and a Fix: line otherwise. It calls
@@ -444,7 +449,14 @@ gmg_api_guard() {
 # `pr merge --match-head-commit <sha>` only asked whether CI was green, so it
 # merged heads integration-gate never passed. Now every merge of a repo that
 # DECLARES a gate needs the receipt for exactly the pinned head, recorded
-# against exactly the base branch's current tip. The declaration rule and the
+# against the base branch's current tip or an ancestor of it.
+#
+# **Later (2026-10-01, DND-1463):** the recorded base had to EQUAL the tip, so
+# any merge that landed while a PR waited forced a full re-gate. Superseded by
+# owner decision ("Let's soften that merge guard requirement."): an ancestor
+# is accepted, because the base moved on and nothing rewrote it. A recorded
+# base that is not an ancestor is still RECEIPT FOR ANOTHER BASE. The
+# declaration rule and the
 # receipt reader are ai/lib/integration-receipt.sh, the ones integration-gate
 # and locked-merge use.
 #
@@ -516,7 +528,12 @@ gmg_receipt_gate() {
     gmg_refuse "$shown" "$IR_KIND: $owner/$repo declares an integration gate ($gate on $base at $tip), and $IR_WHY" \
       "${IR_HOW:+$IR_HOW }$GMG_LAND"
   fi
-  printf '%s: RECEIPT %s base %s recorded %s\n' "$GMG_TOOL" "$IR_RECEIPT" "$tip" "$IR_RECORDED_AT" >&2
+  if [ "$IR_BASE_MOVED" = 1 ]; then
+    printf '%s: RECEIPT %s base %s recorded %s; BASE MOVED: %s is an ancestor of the tip %s, so the head with the newer %s commits was never gated (DND-1463)\n' \
+      "$GMG_TOOL" "$IR_RECEIPT" "$IR_BASE" "$IR_RECORDED_AT" "$IR_BASE" "$tip" "$base" >&2
+  else
+    printf '%s: RECEIPT %s base %s recorded %s\n' "$GMG_TOOL" "$IR_RECEIPT" "$tip" "$IR_RECORDED_AT" >&2
+  fi
   return 0
 }
 

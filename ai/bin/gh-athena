@@ -148,7 +148,8 @@ fi
 # with --match-head-commit <sha> and every check on that head is green (a run
 # superseded by a newer SUCCESS run of the same check is not judged; DND-1140), and,
 # in a repo that declares an integration gate, integration-gate's receipt exists
-# for that head and the base tip (DND-969; merge via integration-gate, then
+# for that head, recorded against the base tip or an ancestor of it (DND-969,
+# DND-1463; merge via integration-gate, then
 # locked-merge, which makes this call). A
 # `gh api` call that merges (REST …/pulls/<n>/merge, …/merges, …/merge-upstream;
 # GraphQL mergePullRequest / enablePullRequestAutoMerge / enqueuePullRequest /
