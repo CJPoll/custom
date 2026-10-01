@@ -277,7 +277,9 @@
 #   model pool is its model/); ATHENA_TEST_SLOTS (cpu budget),
 #   ATHENA_TEST_SLOT_DEFAULT_WEIGHT (cpu default weight), ATHENA_TEST_MODEL_SLOTS
 #   (model budget), ATHENA_TEST_SLOT_HEARTBEAT and ATHENA_TEST_SLOT_PARENT_CHECK
-#   (seconds) are honored ONLY
+#   (seconds), and ATHENA_TEST_SLOT_ADOPTER_PID_NS (a `pid:[N]` namespace
+#   whose PID 1 counts as an adopter like host init, DND-1438; it only adds
+#   refusals) are honored ONLY
 #   when ATHENA_TEST_SLOT_DIR is set to a non-default path, so no override can
 #   change the real pool. An honored-but-invalid value is exit 2, never a
 #   fallback.
@@ -334,6 +336,9 @@
 #     container, whose init is a legitimate parent there), the adopter is
 #     indistinguishable from a live caller at startup, so the run proceeds.
 #     A caller that dies LATER is caught in both, since the parent changes.
+#     The self-test proves the pid-namespace start end to end by declaring
+#     its own namespace's PID 1 an adopter (ATHENA_TEST_SLOT_ADOPTER_PID_NS,
+#     a test-pool seam, DND-1438); the real pools never read it.
 #   * A caller that deliberately detaches a QUEUED run (`nohup test-slot ...
 #     &` and then exits) now loses it. Give the run a parent that waits, e.g.
 #     `setsid bash -c 'test-slot -- CMD; exit $?' &`.
@@ -396,6 +401,9 @@ DEFAULT_PARENT_CHECK_S=5
 # PROC_PID_INIT_INO: the kernel's fixed inode for the initial (host) pid
 # namespace, so "parent is PID 1" means init only when this matches.
 HOST_PID_NS='pid:[4026531836]'
+# DND-1438: one more pid namespace whose PID 1 only adopts (the
+# ATHENA_TEST_SLOT_ADOPTER_PID_NS seam; resolve_pool sets it). Empty: none.
+ADOPTER_PID_NS=""
 EVENTS_MAX_BYTES=1048576
 # DND-1530: the declared gate this run's COMMAND is (empty: none), the HEAD
 # it started on, and when it started. main sets them.
@@ -939,20 +947,22 @@ default_signals() {
   printf '%s\n' "$out"
 }
 
-# parent_state ORIG CUR NS: is the caller that started test-slot still its
-# parent? ORIG is the parent pid at start ($PPID), CUR the parent pid now
-# (/proc/self/stat), NS this process's pid namespace link. The kernel changes a
-# process's parent only by reparenting it when the parent dies, so CUR != ORIG
-# means the caller is gone. ORIG == 1 in the host namespace means the caller
-# was gone before test-slot started (only init's own children start there).
-# NS is consulted only then. Prints alive | gone | unknown (an unreadable
-# input it needs is never "alive").
+# parent_state ORIG CUR NS [ADOPTER_NS]: is the caller that started test-slot
+# still its parent? ORIG is the parent pid at start ($PPID), CUR the parent
+# pid now (/proc/self/stat), NS this process's pid namespace link. The kernel
+# changes a process's parent only by reparenting it when the parent dies, so
+# CUR != ORIG means the caller is gone. ORIG == 1 in the host namespace means
+# the caller was gone before test-slot started (only init's own children
+# start there); so does ORIG == 1 in ADOPTER_NS, a namespace declared to
+# have the same kind of PID 1 (DND-1438). NS is consulted only then. Prints
+# alive | gone | unknown (an unreadable input it needs is never "alive").
 parent_state() {
   [[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ ]] || { printf 'unknown\n'; return; }
   if [ "$1" != "$2" ]; then printf 'gone\n'; return; fi
   if [ "$1" = 1 ]; then
     [ -n "$3" ] || { printf 'unknown\n'; return; }
     [ "$3" = "$HOST_PID_NS" ] && { printf 'gone\n'; return; }
+    [ -n "${4:-}" ] && [ "$3" = "$4" ] && { printf 'gone\n'; return; }
   fi
   printf 'alive\n'
 }
@@ -1040,8 +1050,16 @@ resolve_pool() {
         "set it to whole seconds, or unset it (it is a self-test seam)."
       PARENT_CHECK_S=$ATHENA_TEST_SLOT_PARENT_CHECK
     fi
+    # DND-1438: a sandboxed self-test declares its own namespace's PID 1 an
+    # adopter. Additive: it can only turn "alive" into "gone", never back.
+    if [ -n "${ATHENA_TEST_SLOT_ADOPTER_PID_NS+x}" ]; then
+      [[ $ATHENA_TEST_SLOT_ADOPTER_PID_NS =~ ^pid:\[[0-9]+\]$ ]] || die_usage \
+        "ATHENA_TEST_SLOT_ADOPTER_PID_NS='$ATHENA_TEST_SLOT_ADOPTER_PID_NS' is not a pid namespace link (pid:[N])." \
+        "set it to what readlink /proc/self/ns/pid prints in the namespace whose PID 1 only adopts, or unset it (it is a self-test seam)."
+      ADOPTER_PID_NS=$ATHENA_TEST_SLOT_ADOPTER_PID_NS
+    fi
   else
-    for v in ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK; do
+    for v in ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK ATHENA_TEST_SLOT_ADOPTER_PID_NS; do
       [ -n "${!v+x}" ] || continue
       say "WARN ignoring $v: the test seams apply only with ATHENA_TEST_SLOT_DIR set to a non-default pool; the real pools use their measured budgets."
     done
@@ -1462,7 +1480,7 @@ check_parent() {
   local cur st
   read_ppid
   cur=$CUR_PPID
-  st=$(parent_state "$ORIG_PPID" "$cur" "$PID_NS")
+  st=$(parent_state "$ORIG_PPID" "$cur" "$PID_NS" "$ADOPTER_PID_NS")
   case $st in
     alive) return 0 ;;
     gone)

@@ -30,6 +30,7 @@ done
 # A suite launched from inside a slot (DND-486 wraps the gate) must not carry
 # that slot into its fixtures: every case here decides re-entrancy itself.
 unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HELD_MODEL ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK \
+  ATHENA_TEST_SLOT_ADOPTER_PID_NS \
   ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS HARNESS_GATE_JOBS ATHENA_EVAL_CONCURRENCY \
   ATHENA_TEST_SLOT_GATE_RUN ATHENA_TEST_SLOT_OUT_IDS
 
@@ -512,6 +513,17 @@ d	e"
   t eq "$(parent_state 100 x "$host")" unknown
   t eq "$(parent_state 1 1 '')" unknown
   t eq "$(parent_state 100 100 '')" alive
+  # DND-1438: parent_state ORIG CUR NS ADOPTER_NS. ADOPTER_NS (the
+  # ATHENA_TEST_SLOT_ADOPTER_PID_NS seam) names one more pid namespace whose
+  # PID 1 only adopts: a start under it is gone too. It only adds refusals.
+  sbx='pid:[4026532999]'
+  t eq "$(parent_state 1 1 "$sbx" "$sbx")" gone
+  t eq "$(parent_state 1 1 "$sbx" 'pid:[4026532111]')" alive
+  t eq "$(parent_state 1 1 "$sbx" '')" alive
+  t eq "$(parent_state 1 1 "$host" "$sbx")" gone
+  t eq "$(parent_state 100 100 "$sbx" "$sbx")" alive
+  t eq "$(parent_state 100 1 "$sbx" "$sbx")" gone
+  t eq "$(parent_state 1 1 '' "$sbx")" unknown
   # DND-1658: scan_unslotted over a fixture /proc. A heavy run whose environ
   # cannot be told (mid-exec: bounds 0 0, or equal bounds with start_code 0)
   # is unknown, never unslotted; a settled one is told by its bytes.
@@ -942,7 +954,7 @@ exits_within() { timeout "$2" tail --pid="$1" -f /dev/null; }
 # signal (30), or the parent check (35/36), with the other bounds raised to
 # an hour through the seams (WAIT_SEAMS). A wait that ignored the event
 # would then block for that hour; EXIT_CAP_S only caps that hang, far below
-# it, so a slow host cannot flip the verdict. Cases 31 and 37 need no seam:
+# it, so a slow host cannot flip the verdict. Cases 31 and 37 need no WAIT seam:
 # 31's queue head re-polls every POLL_S (2 s) and its slot never frees while
 # A31 is held, and 37 exits on its first check, before it ever waits.
 EXIT_CAP_S=120
@@ -1177,6 +1189,18 @@ check 30b-invalid-rc eq "$rc" 2
 check 30b-invalid-names has "$W/30b.err" "ATHENA_TEST_SLOT_PARENT_CHECK='0'"
 check 30b-invalid-fix has "$W/30b.err" "Fix:"
 
+# 30c (DND-1438): the adopter pid-namespace seam is validated the same way,
+# and a value that is not a readlink /proc/self/ns/pid form never falls back.
+newpool p30c 1
+ATHENA_TEST_SLOT_ADOPTER_PID_NS='pid:4026532999' timeout "$EXIT_CAP_S" "$BIN" --label P30c -- true 2>"$W/30c.err"; rc=$?
+check 30c-invalid-rc eq "$rc" 2
+check 30c-invalid-names has "$W/30c.err" "ATHENA_TEST_SLOT_ADOPTER_PID_NS='pid:4026532999'"
+check 30c-invalid-fix has "$W/30c.err" "Fix:"
+# Without a test pool it is ignored, and says so: no env var changes whom
+# the real pools refuse.
+out="$(env -u ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOT_ADOPTER_PID_NS='pid:[4026532999]' XDG_STATE_HOME="$W/xdg30c" "$BIN" --status 2>&1)"
+check 30c-real-pool-warns eval '[[ "$out" == *"WARN ignoring ATHENA_TEST_SLOT_ADOPTER_PID_NS"* ]]'
+
 # ------------------------------------------------- parent death (DND-925)
 # A queued test-slot whose caller died used to keep its queue place (the
 # kernel reparents it and sends it no signal), later take a slot and run a
@@ -1259,7 +1283,21 @@ unset ATHENA_TEST_SLOT_HEARTBEAT
 # first check). C blocks on a FIFO under parent P; P is killed, so C is
 # reparented to PID 1; then C execs test-slot on a FREE pool. It must refuse
 # to run, before it ever queues.
+# DND-1438: that PID 1 is this suite's pid namespace's. On a host it is init,
+# which test-slot refuses by itself. In a sandbox (tool-sandbox: bwrap is PID
+# 1 of its own namespace) test-slot cannot tell an adopter from a launcher, so
+# the case declares this namespace's PID 1 an adopter through the seam, and
+# every assertion below runs unchanged. On the host no seam is set, so the
+# real host-namespace path is what runs there.
 newpool p37 1
+ns37=$(readlink /proc/self/ns/pid 2>/dev/null)
+# The host namespace as test-slot itself defines it (sourced: functions only).
+HOST_PID_NS37=$(bash -c 'source "$1" && printf %s "$HOST_PID_NS"' _ "$BIN")
+if [ -z "$ns37" ] || [ -z "$HOST_PID_NS37" ]; then
+  bad 37-own-ns "this suite's pid namespace ('$ns37', readlink /proc/self/ns/pid) or test-slot's HOST_PID_NS ('$HOST_PID_NS37', sourced from $BIN) is empty. Fix: run the suite on Linux with /proc mounted, and keep HOST_PID_NS defined at the top level of ai/bin/test-slot."
+elif [ "$ns37" != "$HOST_PID_NS37" ]; then
+  export ATHENA_TEST_SLOT_ADOPTER_PID_NS="$ns37"
+fi
 mkfifo "$W/C37.fifo" "$W/P37.fifo"
 cat >"$W/c37.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -1294,7 +1332,7 @@ if read -r s37 <"/proc/${c37:-0}/stat" 2>/dev/null; then
   read -r _ c37_ppid _ <<<"$r37"
 fi
 if [ "$c37_ppid" != 1 ]; then
-  bad 37-born-orphan "C (pid '${c37:-}') has parent '$c37_ppid', not PID 1. Fix: this case needs a host where an orphan is reparented to PID 1 of the host pid namespace; here a child subreaper (e.g. systemd --user) or a container adopted it, which test-slot cannot tell from a live caller at startup (a named RESIDUAL in ai/bin/test-slot). Run the gate from a login shell outside any subreaper or container."
+  bad 37-born-orphan "C (pid '${c37:-}') has parent '$c37_ppid', not PID 1 of its pid namespace ('$ns37'). Fix: this case needs an orphan reparented to its namespace's PID 1; here a child subreaper (e.g. systemd --user) adopted it, which test-slot cannot tell from a live caller at startup (a named RESIDUAL in ai/bin/test-slot). Run the gate from a login shell outside any subreaper."
 fi
 await_file "$W/C37.ready" || bad 37-ready "c37.sh never opened its FIFO: $(cat "$W/O37.err" 2>/dev/null)"
 release C37
@@ -1303,6 +1341,7 @@ check 37-never-ran absent "$W/O37.ran"
 check 37-says-orphaned has "$W/O37.err" "ORPHANED"
 check 37-fix has "$W/O37.err" "Fix:"
 check 37-never-queued eq "$(event_count waiting O37)$(event_count acquired O37)" 00
+unset ATHENA_TEST_SLOT_ADOPTER_PID_NS
 
 # 38 (DND-925): check_parent end to end, with the script sourced in a
 # subshell whose parent is this suite ($$). A live parent returns 0; a start
