@@ -30,7 +30,9 @@ You are the receiver when a judged result reaches you and you act on it.
 2. **Find the call id.** It is printed where the result is: the advisory's
    `call:` line (finding triage), `calls` in the `Jev classification:` line,
    `call` in the `Jev path:` line. For a Slack conversation, use the event id
-   from the routed line instead.
+   from the routed line instead. Those are the only two ways to name a call:
+   `--subject` works only with `--use-case slack_routing`, and anything else
+   is refused as `invalid`.
 3. **Record it, with the right answer when you know it.**
 
    ```

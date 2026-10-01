@@ -841,9 +841,11 @@ also returns its `call_id`: the REST answers, the provenance lines (`calls` on
 `Jev classification:`, `call` on `Jev path:`), the advisory output and the
 priority item. A Slack receiver names the call by `("slack_routing",
 event_id)`, the event id the routed line carries; the latest answered call for
-that subject is used. A reference that resolves to no call of the caller's
-owner is `not_found`, the same answer for an absent, pruned or other owner's
-call. A ticket filed before its line carried a call id is counted as
+that subject is used. Those are the only two keys. A reference carrying
+neither, or a `subject_ref` with any other use case, is refused as `invalid`
+with a `Fix:`, never a crash: a crash report would print the receiver's note.
+A reference that resolves to no call of the caller's owner is `not_found`,
+the same answer for an absent, pruned or other owner's call. A ticket filed before its line carried a call id is counted as
 `unlinked` by the scan and named, never matched by title.
 
 **What can be reported.** Only an `answered` product call. A fallback is
