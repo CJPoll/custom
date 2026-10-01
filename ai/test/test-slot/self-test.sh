@@ -31,7 +31,7 @@ done
 # that slot into its fixtures: every case here decides re-entrancy itself.
 unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HELD_MODEL ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOTS ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK \
   ATHENA_TEST_SLOT_DEFAULT_WEIGHT ATHENA_TEST_MODEL_SLOTS HARNESS_GATE_JOBS ATHENA_EVAL_CONCURRENCY \
-  ATHENA_TEST_SLOT_GATE_RUN
+  ATHENA_TEST_SLOT_GATE_RUN ATHENA_TEST_SLOT_OUT_IDS
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/test-slot-selftest.XXXXXX")"
 BG_PIDS=()
@@ -1953,6 +1953,7 @@ check L1-fix has "$W/L1/gate.log" "Fix: "
 check L1-exit-last eq "$(tail -n 1 "$W/L1/gate.log")" "exit=0"
 check L1-order eq "$(grep -c -e before-rm -e after-rm "$W/L1/gate.log")" 2
 check L1-one-file eq "$(find "$W/L1" -type f | wc -l)" 1
+check L1-no-lost-dir absent "$POOL/lost-output"
 
 # L2: CMD's own exit code is never changed by the restore.
 newpool pL2 2
@@ -2013,6 +2014,44 @@ check L7-rc eq "$?" 0
 check L7-restored has "$W/L7/gate.log" "nested-out"
 check L7-once eq "$(grep -c 'test-slot: OUTPUT FILE DELETED' "$W/L7/gate.log")" 1
 check L7-no-sibling eq "$(find "$W/L7" -type f | wc -l)" 1
+
+# The notice says which streams the file carried.
+check L1-wording has "$W/L1/gate.log" "CMD's stdout and stderr file"
+check L4-wording-out has "$W/L4/out.log" "CMD's stdout file"
+check L4-wording-err has "$W/L4/err.log" "CMD's stderr file"
+
+# L8: the path came back as a FIFO. Opening it for the copy would block for
+# ever (noclobber refuses only a regular file), so it is never opened: the
+# output goes to the sibling and test-slot exits with CMD's code.
+newpool pL8 2
+mkdir -p "$W/L8"
+fg_capped "$BIN" -- bash -c 'printf "fifo-case\n"; rm -f "$1"; mkfifo "$1"' _ "$W/L8/gate.log" >"$W/L8/gate.log" 2>&1
+check L8-rc eq "$?" 0
+check L8-still-fifo eval '[ -p "$W/L8/gate.log" ]'
+L8_SIB=$(find "$W/L8" -name 'gate.log.test-slot-restored.*' -type f | head -n 1)
+check L8-sibling-whole has "${L8_SIB:-$W/L8/none}" "fifo-case"
+
+# L9: a nested test-slot that writes its OWN log (not the outer run's) has
+# that log restored by the nested run; the outer run's untouched log gets
+# no notice.
+newpool pL9 2
+mkdir -p "$W/L9"
+fg_capped "$BIN" -- bash -c '"$1" -- bash -c "printf \"inner-out\\n\"; rm -f \"\$1\"" _ "$2" >"$2" 2>&1' _ "$BIN" "$W/L9/inner.log" \
+  >"$W/L9/outer.log" 2>&1
+check L9-rc eq "$?" 0
+check L9-inner has "$W/L9/inner.log" "inner-out"
+check L9-inner-named has "$W/L9/inner.log" "test-slot: OUTPUT FILE DELETED"
+check L9-outer-quiet lacks "$W/L9/outer.log" "OUTPUT FILE DELETED"
+
+# L10: an output file that was ALREADY deleted when test-slot started (an
+# anonymous temp file, say) was not deleted while CMD ran: nothing is
+# re-created and nothing is said.
+newpool pL10 2
+mkdir -p "$W/L10"
+(exec 3>"$W/L10/pre.log"; rm -f "$W/L10/pre.log"; fg_capped "$BIN" -- bash -c 'printf "pre-out\n"' >&3 2>&3; echo "rc=$?" >"$W/L10.rc")
+check L10-rc eq "$(cat "$W/L10.rc")" "rc=0"
+check L10-not-recreated eq "$(find "$W/L10" -type f | wc -l)" 0
+check L10-no-lost-dir absent "$POOL/lost-output"
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then

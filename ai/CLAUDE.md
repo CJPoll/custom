@@ -634,7 +634,8 @@ it. **Delete only files you created, by exact path, never by glob.** Measured
 2026-10-01 (DND-1621): a captain's read-only reviewer cleaned up its probes with
 `rm -f <scratchpad>/dnd-1601-*` mid-gate. That took the captain's gate log too,
 and the log read `exit=0` with no gate output. `ai/bin/test-slot` now restores
-a deleted output file and names it, but only for a run inside test-slot.
+a deleted stdout/stderr file and names it, but only the file test-slot's own
+stdout or stderr is redirected to, and only once CMD has run.
 
 The standing question to ask of any such code, in review or while writing it,
 is **"what does this do when the input is MISSING rather than wrong?"** — the

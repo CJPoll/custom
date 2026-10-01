@@ -61,8 +61,9 @@
 #
 # FASTER, NEVER WEAKER (ai/blocks/ops/safety-checks.md). test-slot changes only
 # WHEN the command runs. It never edits the command's argv, stdin, stdout,
-# stderr, or exit status, and adds exactly one environment variable
-# (ATHENA_TEST_SLOT_HELD, or ATHENA_TEST_SLOT_HELD_MODEL in the model pool).
+# stderr, or exit status, and adds two environment variables
+# (ATHENA_TEST_SLOT_HELD, or ATHENA_TEST_SLOT_HELD_MODEL in the model pool;
+# and ATHENA_TEST_SLOT_OUT_IDS, DND-1621).
 # Nothing is skipped, filtered, or loosened. Its own
 # messages go to stderr, prefixed `test-slot:`.
 #
@@ -70,15 +71,21 @@
 # captain ran `test-slot -- integration-gate ... > LOG 2>&1; echo exit=$? >>
 # LOG`, and its own reviewer subagent ran `rm -f <scratchpad>/dnd-1601-*`
 # mid-gate. The gate wrote on into the unlinked inode, the `>>` made a new
-# file, and the log read `exit=0` with no gate output. So after CMD exits, the
-# outermost run checks its own stdout and stderr: a regular file with no links
-# left is copied back to its path, else PATH.test-slot-restored.<pid> (another
-# writer's file is never overwritten), else <pool>/lost-output/, and the copy
-# ends with a `test-slot: OUTPUT FILE DELETED` line naming where it went, with
-# a Fix:. The same line goes to stderr. CMD's exit code is unchanged.
+# file, and the log read `exit=0` with no gate output. So at start each run
+# notes which of its stdout and stderr are regular files that still have a
+# name (watch_output), and after CMD exits copies back each one that has no
+# name left: to its path, else PATH.test-slot-restored.<pid>, else
+# <pool>/lost-output/. A path that exists in any form (another writer's file,
+# a FIFO, a symlink) is never opened. The copy ends with a `test-slot: OUTPUT
+# FILE DELETED` line naming where it went, with a Fix:; the same line goes to
+# stderr. CMD's exit code is unchanged. A file an enclosing test-slot already
+# watches (ATHENA_TEST_SLOT_OUT_IDS) is left to it, so a nested run sharing
+# the outer log restores it once; a nested run's own log is its own to
+# restore. A file already deleted when test-slot started is left alone.
 # Residuals: a log overwritten or truncated in place (not deleted) is not
 # detected; output CMD's daemonized descendants write after CMD exits is not
-# in the copy; a run outside test-slot gets none of this.
+# in the copy; a run that never reaches CMD (TIMEOUT, ORPHANED, a signal
+# while WAITING) does not restore; a run outside test-slot gets none of this.
 #
 # TELEMETRY (ai/contracts/athena-telemetry.md). Every run that waited writes
 # one test_slot.wait before CMD (DND-1474). A run whose COMMAND is the repo's
@@ -208,7 +215,10 @@
 #   for a model run (DND-1006: one marker per pool, so nesting across pools
 #   never hides the outer marker). A nested test-slot in the same pool that
 #   sees it (and finds that unit's lock still held) runs its CMD directly
-#   without taking more units, so nesting cannot self-deadlock.
+#   without taking more units, so nesting cannot self-deadlock. Also
+#   ATHENA_TEST_SLOT_OUT_IDS (DND-1621): the space-separated dev:ino of every
+#   regular file that this run or an enclosing one writes stdout/stderr to,
+#   so a nested test-slot leaves those to the run that watches them.
 #
 #   ATHENA_TEST_SLOT_GATE_RUN=<path> (read, then removed from CMD's
 #   environment): the caller's claim that CMD runs the repo's declared gate at
@@ -1780,41 +1790,81 @@ run_cmd() {
   return "$rc"
 }
 
+# try_restore SRC DEST — copy SRC to DEST, which must not exist yet. A DEST
+# that exists in any form (a FIFO would block the open for ever; a symlink
+# could point anywhere) is never opened. noclobber (O_EXCL) is the backstop
+# for a DEST created between the check and the open. A copy that fails after
+# DEST was created removes DEST, the file this call made, by exact path.
+# 0 copied, 1 not.
+try_restore() {
+  local src=$1 dest=$2
+  [ -e "$dest" ] || [ -L "$dest" ] && return 1
+  (
+    set -C
+    exec 3>"$dest" || exit 1
+    cat -- "$src" >&3 || { rm -f -- "$dest"; exit 1; }
+  ) 2>/dev/null
+}
+
 # restore_copy SRC PATH — copy SRC (a deleted file, read through its
 # /proc/<pid>/fd link) to the first of PATH, PATH.test-slot-restored.<pid>, or
-# <pool>/lost-output/<utc>-<pid>-<name> that does not exist yet, never
-# overwriting a file (noclobber). Prints where it went; 1 when nowhere.
+# <pool>/lost-output/<utc>-<pid>-<name>.log that try_restore can write.
+# Prints where it went; 1 when nowhere.
 restore_copy() {
   local src=$1 path=$2 lost="$POOL/lost-output" dest
-  local -a tries=("$path" "$path.test-slot-restored.$$")
-  [ -d "$lost" ] || mkdir -m 0700 -- "$lost" 2>/dev/null
-  [ -d "$lost" ] && tries+=("$lost/$(date -u +%Y%m%dT%H%M%SZ)-$$-${path##*/}.log")
-  for dest in "${tries[@]}"; do
-    if (set -C && cat -- "$src" >"$dest") 2>/dev/null; then
+  for dest in "$path" "$path.test-slot-restored.$$"; do
+    if try_restore "$src" "$dest"; then
       printf '%s\n' "$dest"
       return 0
     fi
   done
-  return 1
+  [ -d "$lost" ] || mkdir -m 0700 -- "$lost" 2>/dev/null || return 1
+  dest="$lost/$(date -u +%Y%m%dT%H%M%SZ)-$$-${path##*/}.log"
+  try_restore "$src" "$dest" || return 1
+  printf '%s\n' "$dest"
 }
 
-# restore_deleted_output — DND-1621. When CMD's stdout or stderr is a regular
-# file that was deleted while CMD ran, the output lives only in the unlinked
-# inode this process still holds, and the caller's next `>> log` creates a new
-# file without it: a gate log that reads as `exit=0` and nothing else. Copy
-# each such file back (restore_copy) and append a named notice to the copy.
-# Only the outermost run does this (a re-entrant run shares its fds).
-restore_deleted_output() {
-  local fd link path id id1="" id2="" seen=" " which dest bytes note
-  id1=$(stat -L -c %d:%i "/proc/$$/fd/1" 2>/dev/null)
-  id2=$(stat -L -c %d:%i "/proc/$$/fd/2" 2>/dev/null)
+# watch_output — DND-1621. Before anything else runs, note which of fd 1 and
+# fd 2 are regular files that still have a name (OUT_WATCH, "fd=dev:ino").
+# One already deleted (an anonymous temp file) was not deleted during this
+# run and is left alone. One an enclosing test-slot already watches (its
+# dev:ino is in ATHENA_TEST_SLOT_OUT_IDS) is that run's to restore, so it is
+# restored once, not once per level. Every regular output file of this run
+# is added to ATHENA_TEST_SLOT_OUT_IDS for the runs nested inside CMD.
+OUT_WATCH=()
+watch_output() {
+  local fd id links ids=" ${ATHENA_TEST_SLOT_OUT_IDS:-} "
+  OUT_WATCH=()
   for fd in 1 2; do
     [ -f "/proc/$$/fd/$fd" ] || continue
-    [ "$(stat -L -c %h "/proc/$$/fd/$fd" 2>/dev/null)" = 0 ] || continue
-    link=$(readlink "/proc/$$/fd/$fd" 2>/dev/null) || continue
     id=$(stat -L -c %d:%i "/proc/$$/fd/$fd" 2>/dev/null) || continue
+    links=$(stat -L -c %h "/proc/$$/fd/$fd" 2>/dev/null) || continue
+    case $ids in *" $id "*) continue ;; esac
+    ((links > 0)) && OUT_WATCH+=("$fd=$id")
+    ids+="$id "
+  done
+  ids=${ids# }
+  export ATHENA_TEST_SLOT_OUT_IDS="${ids% }"
+}
+
+# restore_deleted_output — DND-1621. A watched output file (watch_output)
+# that was deleted while this run lasted holds CMD's output only in the
+# unlinked inode this process still has open, and the caller's next `>> log`
+# creates a new file without it: a gate log that reads `exit=0` and nothing
+# else. Copy each one back (restore_copy) and append a named notice to the
+# copy; the same notice goes to stderr.
+restore_deleted_output() {
+  local w fd id link path seen=" " which dest bytes note id1 id2
+  id1=$(stat -L -c %d:%i "/proc/$$/fd/1" 2>/dev/null)
+  id2=$(stat -L -c %d:%i "/proc/$$/fd/2" 2>/dev/null)
+  for w in "${OUT_WATCH[@]}"; do
+    fd=${w%%=*}
+    id=${w#*=}
     case $seen in *" $id "*) continue ;; esac
     seen+="$id "
+    [ "$(stat -L -c %d:%i "/proc/$$/fd/$fd" 2>/dev/null)" = "$id" ] || continue
+    [ "$(stat -L -c %h "/proc/$$/fd/$fd" 2>/dev/null)" = 0 ] || continue
+    link=$(readlink "/proc/$$/fd/$fd" 2>/dev/null) || continue
     path=${link% (deleted)}
     which=stdout
     [ "$fd" = 2 ] && which=stderr
@@ -2145,6 +2195,8 @@ main() {
   fi
 
   ensure_pool
+  # DND-1621: which output files this run must restore if they are deleted.
+  watch_output
   # DND-1530: is CMD the repo's declared gate (not harness-gate)? Decided on
   # the HEAD it starts from, before any wait.
   resolve_gate_run
@@ -2162,6 +2214,7 @@ main() {
     mark_gate_start
     run_cmd
     rc=$?
+    restore_deleted_output
     write_outcome ran "$rc"
     emit_gate_run "$rc" 0
     exit "$rc"
