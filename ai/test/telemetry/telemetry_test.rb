@@ -460,6 +460,73 @@ Dir.mktmpdir("telemetry-git") do |tmp|
   end
 end
 
+# DND-1494: a git that never answers. The fake blocks opening a fifo nobody
+# writes (an event, never a sleep). The test's own wait is bounded: on a
+# regression the join gives up, the test writes the fifo to free the fake, and
+# the check FAILS instead of hanging the suite.
+HUNG_GIT_WAIT_S = 30
+
+def with_hung_git
+  Dir.mktmpdir("telemetry-hung-git") do |tmp|
+    fifo = File.join(tmp, "never-written")
+    File.mkfifo(fifo)
+    bin = File.join(tmp, "bin")
+    Dir.mkdir(bin)
+    git = File.join(bin, "git")
+    File.write(git, "#!/bin/sh\nread -r _line < '#{fifo}'\n")
+    File.chmod(0o755, git)
+    yield tmp, git, bin, fifo
+  ensure
+    free_hung_git(fifo) if fifo
+  end
+end
+
+# Opening the fifo for writing frees a fake still blocked on it. With no
+# reader left it is a no-op (ENXIO).
+def free_hung_git(fifo)
+  File.open(fifo, File::WRONLY | File::NONBLOCK, &:close)
+rescue SystemCallError
+  nil
+end
+
+# -> [finished?, value]. Never waits past HUNG_GIT_WAIT_S for the answer. On a
+# regression it frees the fake and joins the late caller before returning, so
+# that caller never races the temp dirs' removal.
+def bounded(fifo, &block)
+  t = Thread.new(&block)
+  t.report_on_exception = false
+  return [true, t.value] if t.join(HUNG_GIT_WAIT_S)
+
+  free_hung_git(fifo)
+  t.join(HUNG_GIT_WAIT_S)
+  [false, nil]
+end
+
+with_hung_git do |tmp, git, _bin, fifo|
+  done, got = bounded(fifo) { T::GitContext.read(tmp, git: git) }
+  check("miss: a git that never answers returns, as git_context_timeout (not a hang)") do
+    done && got == [T::GitContext::NONE, "git_context_timeout"]
+  end
+end
+
+with_store do |dir, _tmp|
+  with_hung_git do |tmp, _git, bin, fifo|
+    old_path = ENV["PATH"]
+    begin
+      ENV["PATH"] = "#{bin}:#{old_path}"
+      done, line = bounded(fifo) { T.emit("telemetry.probe", repo_dir: tmp, env: env_for(dir)) }
+    ensure
+      ENV["PATH"] = old_path
+    end
+    check("miss: an emit behind a hung git returns its line, the unit unresolved") do
+      done && line.is_a?(Hash) && line["unit"].nil? && line["unit_source"] == "none" && line["repo"].nil?
+    end
+    check("miss: a hung git is counted as git_context_timeout, a named reason") do
+      done && JSON.parse(File.read(File.join(dir, "write-failures"))) == { "git_context_timeout" => 1 }
+    end
+  end
+end
+
 check("miss: a ticket parser that raises falls back to the branch name, counted") do
   boom = ->(_b) { raise "parser bug" }
   T::Unit.parse(branch: "dnd-1-x", env_unit: nil, ticket_ref: boom) == ["dnd-1-x", "branch-name", ["unit_parser_unavailable"]]

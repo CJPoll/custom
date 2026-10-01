@@ -11,7 +11,7 @@
 #
 # Buckets:
 #   DOMAIN (pure)   Label, Event, Registry, Unit, Retention
-#   SIDE EFFECTS    Store (every file read and write), GitContext (one `git rev-parse`),
+#   SIDE EFFECTS    Store (every file read and write), GitContext (one bounded `git rev-parse`),
 #                   TicketRefs (loads the ticket-ref parser ai/bin/lead-time
 #                   uses), Clock, Host
 #   MANAGER         AthenaTelemetry.emit, .read, .prune
@@ -32,7 +32,7 @@ require "json"
 require "time"
 require "date"
 require "fileutils"
-require "open3"
+require_relative "bounded_command"
 require "socket"
 
 module AthenaTelemetry
@@ -449,22 +449,33 @@ module AthenaTelemetry
   # drop]. Outside a repo it is all nil with no drop. Any other git failure
   # (no git, an old git, an unborn branch) is all nil too, with the drop
   # git_context_unavailable, so it never reads the same as "not a repo".
+  #
+  # The call is bounded (DND-1494): a git that hangs (an index lock, a stuck
+  # filesystem) would stall every in-process emitter. Past GIT_TIMEOUT_S its
+  # process group gets TERM, then KILL (BoundedCommand), and the context is
+  # all nil with the drop git_context_timeout. The bound sits under the CLI's
+  # `timeout 2`, so a CLI emit counts the timeout instead of being killed. A
+  # git that ignores TERM gets KILL two seconds later (BoundedCommand::
+  # KILL_GRACE_S); a CLI emit is then killed by its own bound first, uncounted.
   module GitContext
     Context = Struct.new(:branch, :repo, :head, keyword_init: true)
     NONE = Context.new.freeze
     NOT_A_REPO = /not a git repository/i.freeze
+    GIT_TIMEOUT_S = 1
 
     module_function
 
-    def read(dir, git: "git")
-      out, err, status = Open3.capture3(git, "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir",
-                                        "HEAD", "--abbrev-ref", "HEAD", stdin_data: "")
-      unless status.success?
-        return [NONE, nil] if NOT_A_REPO.match?(err)
+    def read(dir, git: "git", timeout: GIT_TIMEOUT_S)
+      res = BoundedCommand.run([git, "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                                "HEAD", "--abbrev-ref", "HEAD"], timeout: timeout)
+      return [NONE, "git_context_timeout"] if res.timed_out
+
+      unless res.success?
+        return [NONE, nil] if NOT_A_REPO.match?(res.err)
 
         return [NONE, "git_context_unavailable"]
       end
-      common, head, branch = out.lines.map(&:strip)
+      common, head, branch = res.out.lines.map(&:strip)
       return [NONE, "git_context_unavailable"] unless common && head && branch
 
       [Context.new(branch: branch == "HEAD" ? nil : branch, repo: File.basename(File.dirname(common)), head: head), nil]

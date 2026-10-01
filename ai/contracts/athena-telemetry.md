@@ -66,6 +66,17 @@ The branch, `repo` and `head` come from one `git rev-parse`. Outside a repo
 they are `null` with nothing counted. Any other git failure (no git, a git
 older than 2.31, an unborn branch) leaves them `null` too, and counts
 `git_context_unavailable`, so it never reads the same as "not in a repo".
+The call is bounded at one second, under the CLI's `timeout 2` (DND-1494). A
+git that has not answered by then (an index lock, a stuck filesystem) has its
+process group killed; the three are `null` and `git_context_timeout` is
+counted, so the unit reads `none` unless an explicit or `ATHENA_UNIT` unit
+applies. The emit still writes its line and returns.
+
+The writer runs no other subprocess. The ticket-ref parser load and the
+overlay read below are in-process reads of regular files (the overlay reader
+refuses anything that is not a regular file), so neither can block on another
+process. A filesystem stuck in the kernel can still stall them, as it stalls
+the store's own append; in-process I/O has no bound that kills it.
 
 Step 3 uses the ticket-ref parser `ai/bin/lead-time` uses
 (`LeadTime.ticket_ref`): one parser, not two. The writer loads that file
@@ -192,6 +203,7 @@ The reasons:
 | `unit_parser_unavailable` | the ticket-ref parser did not load, or raised | yes |
 | `unit_overlay_unavailable` | a present overlay could not give the work prefix | yes |
 | `git_context_unavailable` | git failed for a reason other than "not a repo" | yes |
+| `git_context_timeout` | git did not answer within its bound; its process group was killed | yes |
 | `head_invalid` | a head that is not 40 hex; it reads `null` | yes |
 | `at_invalid`, `duration_invalid` | a start that is not a time, or a negative or non-numeric duration | no |
 | `attrs_truncated` | attrs were cut to fit 4096 bytes | yes |
