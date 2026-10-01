@@ -53,6 +53,37 @@
 #   --remove write back nothing, deleting every other entry. That was
 #   `crontab -l 2>/dev/null || true` in two installers.
 
+# cron_main_checkout <script-dir>
+#   Where the managed runner lives: the MAIN checkout of the git repo holding
+#   <script-dir>, never a linked worktree, whose path vanishes on cleanup and
+#   leaves cron firing a missing file (DND-1639). Run it in the caller's shell,
+#   not in $(...): it sets two globals.
+#     CRON_MAIN_CHECKOUT  the main checkout, absolute, symlinks resolved
+#     CRON_IN_WORKTREE    1 when <script-dir> is in a linked worktree, else 0
+#   Returns 0; 2 with a Fix: on stderr, and CRON_MAIN_CHECKOUT empty, when
+#   <script-dir> is not inside a git checkout.
+
+cron_main_checkout() {
+  local dir="${1:-}" common gitdir
+  CRON_MAIN_CHECKOUT=""; CRON_IN_WORKTREE=0
+  common="$(git -C "${dir}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  gitdir="$(git -C "${dir}" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
+  case "${common}" in
+    /*) ;;
+    *) echo "cron_main_checkout: '${dir}' is not inside a git checkout (git common dir '${common}')" >&2
+       echo "  Fix: run the copy in ~/dev/custom/scripts/." >&2
+       return 2 ;;
+  esac
+  common="$(cd -- "${common}" && pwd -P)" || {
+    echo "cron_main_checkout: cannot enter the git common dir of '${dir}'" >&2
+    echo "  Fix: run the copy in ~/dev/custom/scripts/." >&2
+    return 2
+  }
+  CRON_MAIN_CHECKOUT="$(dirname -- "${common}")"
+  [ "$(cd -- "${gitdir}" && pwd -P)" = "${common}" ] || CRON_IN_WORKTREE=1
+  return 0
+}
+
 cron_read_crontab() {
   local who="${1:-cron_read_crontab}" cmd="${2:-crontab}" out err rc=0 msg
   err="$(mktemp)" || {

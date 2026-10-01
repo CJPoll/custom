@@ -11,6 +11,11 @@
 # line). The only root-needing step is creating the spool dir the first time;
 # once it exists, no root is needed again.
 #
+# The entry always names the MAIN checkout's runner, resolved through git's
+# common dir, and --install and --remove refuse to run from a linked worktree
+# (exit 4): a worktree's runner vanishes on cleanup, and the hourly shipwright
+# would silently stop (DND-1639). --check, --backup and --dry-run run anywhere.
+#
 # Which lines are ours: an uncommented line with a whitespace-separated field
 # that IS the runner path (scripts/lib/cron-entry.sh, DND-1503). A commented
 # line, or a longer path such as <runner>.bak, is not ours: --install and
@@ -40,13 +45,16 @@
 # rather than previewing a crontab it could not read.
 #
 # Exit codes: 0 ok · 1 usage/arg error, or --check found the entry missing
-#             · 2 missing prerequisite, or the current crontab could not be
-#               read, or the --backup file could not be written · 3 need root
+#             · 2 missing prerequisite (outside a git checkout included), or
+#               the current crontab could not be read, or the --backup file
+#               could not be written · 3 need root
+#             · 4 refused: --install or --remove run from a linked worktree
+#               (setup-leadtime-cron uses 3 for that refusal; here 3 already
+#               means "need root")
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-RUNNER="${SCRIPT_DIR}/athena-shipwright-run.sh"
 CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
 SPOOL_DIR="${CRON_SPOOL_DIR:-/var/spool/cron/crontabs}"
 SCHEDULE="0 * * * *"   # hourly
@@ -103,6 +111,12 @@ command -v crontab >/dev/null 2>&1 || { echo "error: crontab not installed (need
 # shellcheck source=scripts/lib/cron-entry.sh
 . "$CRON_ENTRY_LIB"
 
+# The runner is the MAIN checkout's, never this copy's when it runs from a
+# linked worktree (DND-1639). The resolver is shared: scripts/lib/cron-entry.sh.
+cron_main_checkout "$SCRIPT_DIR" || exit 2
+MAIN_CHECKOUT="$CRON_MAIN_CHECKOUT"
+RUNNER="${MAIN_CHECKOUT}/scripts/athena-shipwright-run.sh"
+
 # ---- check path (read-only): is the shipwright entry live? ------------------
 # Read-only; safe for an agent/CI to run. Exit 0 if the entry is present, 1 if
 # missing, with an actionable Fix.
@@ -115,7 +129,7 @@ if [ "${CHECK:-0}" -eq 1 ]; then
     exit 0
   fi
   echo "MISSING — no live crontab entry runs $RUNNER; the hourly cross-session loop is not scheduled." >&2
-  echo "  Fix: run 'scripts/setup-shipwright-cron' (or restore from your --backup file) to reinstall it." >&2
+  echo "  Fix: from ${MAIN_CHECKOUT}, run 'scripts/setup-shipwright-cron' (or restore from your --backup file) to reinstall it." >&2
   exit 1
 fi
 
@@ -135,7 +149,20 @@ if [ -n "${BACKUP_FILE:-}" ]; then
   exit 0
 fi
 
-[ -x "$RUNNER" ] || { echo "error: runner not found or not executable: $RUNNER" >&2; exit 2; }
+# Writes run from the main checkout only. Nothing has been written yet: not
+# the crontab, and not the spool repair below.
+if [ "$CRON_IN_WORKTREE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+  mode="install"; [ "$REMOVE" -eq 1 ] && mode="remove"
+  echo "error: ${mode} refused: this copy runs from a linked worktree (${SCRIPT_DIR}), not the main checkout." >&2
+  echo "  Fix: run it from the main checkout: cd ${MAIN_CHECKOUT} && scripts/setup-shipwright-cron$([ "$REMOVE" -eq 1 ] && printf ' --remove'). Nothing was written." >&2
+  exit 4
+fi
+
+[ -x "$RUNNER" ] || {
+  echo "error: runner not found or not executable in the main checkout: $RUNNER" >&2
+  echo "  Fix: fast-forward ${MAIN_CHECKOUT} to a main that carries scripts/athena-shipwright-run.sh, then re-run." >&2
+  exit 2
+}
 
 # ---- remove path -----------------------------------------------------------
 if [ "$REMOVE" -eq 1 ]; then

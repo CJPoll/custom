@@ -4,8 +4,9 @@
 # Run: bash scripts/test/setup-shipwright-cron/self-test.sh
 #
 # Nothing real is touched:
-#   * the installer runs from a throwaway copy of scripts/ (the installer, its
-#     libs and a stub runner), so RUNNER is a temp path;
+#   * the installer runs from a throwaway git repo carrying a copy of scripts/
+#     (the installer, its libs and a stub runner), plus a linked worktree of
+#     that repo, so RUNNER is a temp path;
 #   * `crontab` first on PATH is a fake backed by a file, so the real crontab is
 #     never read or written;
 #   * `sudo` first on PATH records and refuses, so no case can reach root.
@@ -13,6 +14,9 @@
 # The DND-1503 cases: only the exact managed entry is ours. A commented-out
 # entry, a <runner>.bak line, and a longer path that contains the runner path
 # are kept by --install and --remove, and none of them makes --check green.
+#
+# The DND-1639 cases: the entry names the MAIN checkout's runner, and --install
+# and --remove refuse to run from a linked worktree.
 
 set -uo pipefail
 
@@ -50,19 +54,26 @@ exit 1
 EOF
 chmod +x "$BIN/crontab" "$BIN/sudo"
 
-# A throwaway scripts/ dir: the installer, the libs it sources, a stub runner.
-IS="${TMP}/inst/scripts"; mkdir -p "$IS"
-cp "$INSTALLER" "$IS/"
-cp -r "${SCRIPTS}/lib" "$IS/"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$IS/athena-shipwright-run.sh"
-chmod +x "$IS/athena-shipwright-run.sh"
-IS="$(cd -- "$IS" && pwd -P)"
+# A throwaway git repo: the installer, the libs it sources, a stub runner; and
+# a linked worktree of it, so the installer resolves ITS main checkout.
+IR="${TMP}/inst/repo"; mkdir -p "$IR/scripts"
+cp "$INSTALLER" "$IR/scripts/"
+cp -r "${SCRIPTS}/lib" "$IR/scripts/"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$IR/scripts/athena-shipwright-run.sh"
+chmod +x "$IR/scripts/athena-shipwright-run.sh"
+git -C "$IR" init -q -b main >&2
+git -C "$IR" add -A >&2
+git -C "$IR" -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false commit -qm seed >&2
+IR="$(cd -- "$IR" && pwd -P)"
+git -C "$IR" worktree add -q "${TMP}/inst/wt" >&2
+WT="$(cd -- "${TMP}/inst/wt" && pwd -P)"
+IS="$IR/scripts"
 RUN="$IS/athena-shipwright-run.sh"
 ENTRY="0 * * * * ${RUN}"
 
 inst() { # <crontab-file> [args...]   (FAKE_CRONTAB_FAIL from the caller's env)
   local f="$1"; shift
-  env PATH="$BIN:$PATH" FAKE_CRONTAB="$f" FAKE_CRONTAB_FAIL="${FAKE_CRONTAB_FAIL:-}" "$IS/setup-shipwright-cron" "$@" \
+  env PATH="$BIN:$PATH" FAKE_CRONTAB="$f" FAKE_CRONTAB_FAIL="${FAKE_CRONTAB_FAIL:-}" "${INST:-$IS/setup-shipwright-cron}" "$@" \
     >"${TMP}/inst.out" 2>"${TMP}/inst.err"
   printf '%s' "$?"
 }
@@ -151,7 +162,7 @@ fi
 case_ 'setup-shipwright-cron — a missing matcher is refused, never read as empty'
 
 NL="${TMP}/nolib/scripts"; mkdir -p "$NL"
-cp "$INSTALLER" "$IS/athena-shipwright-run.sh" "$NL/"
+cp "$INSTALLER" "$RUN" "$NL/"
 ct="${TMP}/ct-nolib"
 printf '%s\n%s\n' "$NOT_OURS" "$ENTRY" >"$ct"
 cp "$ct" "${TMP}/ct-nolib.orig"
@@ -229,6 +240,65 @@ if [ "$rc" = 1 ] && grep -q 'MISSING' "${TMP}/inst.err"; then
   ok "'no crontab for <user>': --check is MISSING (exit 1), not a read failure"
 else
   bad "no crontab check" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
+case_ "setup-shipwright-cron — the MAIN checkout's runner, never a worktree's (DND-1639)"
+
+# Run from a linked worktree, the installer used to schedule that worktree's
+# runner: the path vanishes on cleanup and the hourly shipwright silently stops.
+WRUN="$WT/scripts/athena-shipwright-run.sh"
+ct="${TMP}/ct-wt"
+printf '0 7 * * * /opt/other-job\n' >"$ct"
+cp "$ct" "${TMP}/ct-wt.orig"
+for args in "" "--remove"; do
+  # shellcheck disable=SC2086
+  rc="$(INST="$WT/scripts/setup-shipwright-cron" inst "$ct" $args)"
+  if [ "$rc" = 4 ] && grep -q 'linked worktree' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+     && grep -qF "cd $IR" "${TMP}/inst.err" && cmp -s "$ct" "${TMP}/ct-wt.orig" \
+     && ! grep -qx -- '-' "${ct}.calls" 2>/dev/null; then
+    ok "from a linked worktree, '${args:-install}' is refused (exit 4), Fix: names the main checkout, nothing written"
+  else
+    bad "worktree ${args:-install}" "rc=$rc $(out) ct=$(cat "$ct")"
+  fi
+done
+rc="$(INST="$WT/scripts/setup-shipwright-cron" inst "$ct" --dry-run)"
+if [ "$rc" = 0 ] && grep -qF "would install: 0 * * * * ${RUN}" "${TMP}/inst.out" \
+   && ! grep -qF "$WRUN" "${TMP}/inst.out" && cmp -s "$ct" "${TMP}/ct-wt.orig"; then
+  ok "from a linked worktree, --dry-run previews the MAIN checkout's runner and writes nothing"
+else
+  bad "worktree dry-run" "rc=$rc $(out)"
+fi
+printf '0 7 * * * /opt/other-job\n%s\n' "$ENTRY" >"$ct"
+rc="$(INST="$WT/scripts/setup-shipwright-cron" inst "$ct" --check)"
+if [ "$rc" = 0 ] && grep -qF "$ENTRY" "${TMP}/inst.out"; then
+  ok "from a linked worktree, --check reads the MAIN checkout's entry"
+else
+  bad "worktree check" "rc=$rc $(out)"
+fi
+printf '0 7 * * * /opt/other-job\n0 * * * * %s\n' "$WRUN" >"$ct"
+rc="$(INST="$WT/scripts/setup-shipwright-cron" inst "$ct" --check)"
+if [ "$rc" = 1 ] && grep -q 'MISSING' "${TMP}/inst.err"; then
+  ok "from a linked worktree, an entry naming the WORKTREE's runner is not counted as live"
+else
+  bad "worktree check of worktree entry" "rc=$rc $(out)"
+fi
+printf '0 7 * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct")"
+if [ "$rc" = 0 ] && [ "$(tail -n 1 "$ct")" = "$ENTRY" ] && ! grep -qF "$WT" "$ct"; then
+  ok "from the main checkout, the entry names the main checkout's runner"
+else
+  bad "main install" "rc=$rc ct=$(cat "$ct") $(out)"
+fi
+NG="${TMP}/nogit/scripts"; mkdir -p "$NG"
+cp -r "$INSTALLER" "$RUN" "${SCRIPTS}/lib" "$NG/"
+printf '0 7 * * * /opt/other-job\n' >"$ct"
+env PATH="$BIN:$PATH" FAKE_CRONTAB="$ct" "$NG/setup-shipwright-cron" >"${TMP}/inst.out" 2>"${TMP}/inst.err"; rc=$?
+if [ "$rc" = 2 ] && grep -q 'not inside a git checkout' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && cmp -s "$ct" "${TMP}/ct-wt.orig"; then
+  ok "a copy outside any git checkout is refused (exit 2, Fix:), nothing written"
+else
+  bad "no git" "rc=$rc $(out) ct=$(cat "$ct")"
 fi
 
 # ===========================================================================

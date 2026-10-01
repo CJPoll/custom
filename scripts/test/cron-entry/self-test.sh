@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Self-test for scripts/lib/cron-entry.sh: which crontab lines are ours
-# (DND-1503) and the crontab reader (DND-1638). The reader runs fake crontab
-# commands; the real crontab is never read or written.
+# (DND-1503), the crontab reader (DND-1638) and the main-checkout resolver
+# (DND-1639). The reader runs fake crontab commands and the resolver a temp git
+# repo with a linked worktree; the real crontab is never read or written.
 #
 # Run: bash scripts/test/cron-entry/self-test.sh
 
@@ -108,6 +109,26 @@ if [ "$rc" = 2 ] && [ -z "$out" ] && grep -q 'Fix:' "${FT}/err"; then
   ok "a crontab command that cannot run is exit 2 with Fix:, never an empty crontab"
 else
   bad "a crontab command that cannot run is exit 2 with Fix:, never an empty crontab" "rc=$rc out=$out err=$(cat "${FT}/err")"
+fi
+
+printf '\ncron_main_checkout — the main checkout, never a linked worktree (DND-1639)\n'
+GR="${FT}/repo"; mkdir -p "${GR}/scripts"
+git -C "$GR" init -q -b main >&2
+git -C "$GR" -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m seed >&2
+GR="$(cd -- "$GR" && pwd -P)"
+git -C "$GR" worktree add -q "${FT}/wt" >&2
+mkdir -p "${FT}/wt/scripts"
+cron_main_checkout "${GR}/scripts" 2>"${FT}/err"; rc=$?
+expect "from the main checkout: the main checkout, not in a worktree" "0|${GR}|0" "${rc}|${CRON_MAIN_CHECKOUT}|${CRON_IN_WORKTREE}"
+cron_main_checkout "${FT}/wt/scripts" 2>"${FT}/err"; rc=$?
+expect "from a linked worktree: still the MAIN checkout, and in a worktree" "0|${GR}|1" "${rc}|${CRON_MAIN_CHECKOUT}|${CRON_IN_WORKTREE}"
+mkdir -p "${FT}/nogit"
+CRON_MAIN_CHECKOUT=stale
+GIT_CEILING_DIRECTORIES="${FT}" cron_main_checkout "${FT}/nogit" 2>"${FT}/err"; rc=$?
+if [ "$rc" = 2 ] && [ -z "${CRON_MAIN_CHECKOUT}" ] && grep -q 'not inside a git checkout' "${FT}/err" && grep -q 'Fix:' "${FT}/err"; then
+  ok "outside any git checkout: exit 2 with Fix:, and no main checkout (never a stale or empty one used)"
+else
+  bad "outside any git checkout: exit 2 with Fix:, and no main checkout" "rc=$rc main=${CRON_MAIN_CHECKOUT} err=$(cat "${FT}/err")"
 fi
 
 printf '\n'

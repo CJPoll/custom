@@ -117,17 +117,20 @@ set -f; set -- ${SCHEDULE}; set +f
 
 command -v "${CRONTAB}" >/dev/null 2>&1 || die 2 "crontab (${CRONTAB}) is not installed" "install cronie (the shipwright cron uses it too)."
 
+# The classifier, the reader and the main-checkout resolver are shared with
+# the other cron installers: scripts/lib/cron-entry.sh (DND-1503, DND-1638,
+# DND-1639), this installer's own copy.
+CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
+[ -r "${CRON_ENTRY_LIB}" ] || die 2 "${CRON_ENTRY_LIB} is missing; without it no crontab line can be told apart as ours" \
+  "restore scripts/lib/cron-entry.sh (fast-forward this checkout to a main that has it), then re-run. Nothing was written."
+# shellcheck source=scripts/lib/cron-entry.sh
+. "${CRON_ENTRY_LIB}"
+
 # The main checkout, resolved through git's common dir; and whether THIS copy
 # runs from a linked worktree (its git dir differs from the common dir).
-common="$(git -C "${SCRIPT_DIR}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-gitdir="$(git -C "${SCRIPT_DIR}" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
-case "${common}" in
-  /*) ;;
-  *) die 2 "${SCRIPT_DIR} is not inside a git checkout (git common dir '${common}')" "run the copy in ~/dev/custom/scripts/." ;;
-esac
-MAIN_CHECKOUT="$(dirname -- "$(cd -- "${common}" && pwd -P)")"
-IN_WORKTREE=0
-[ "$(cd -- "${gitdir}" && pwd -P)" = "$(cd -- "${common}" && pwd -P)" ] || IN_WORKTREE=1
+cron_main_checkout "${SCRIPT_DIR}" || exit 2
+MAIN_CHECKOUT="${CRON_MAIN_CHECKOUT}"
+IN_WORKTREE="${CRON_IN_WORKTREE}"
 RUNNER="${MAIN_CHECKOUT}/scripts/athena-leadtime-run.sh"
 LT_STATE="${MAIN_CHECKOUT}/ai-artifacts/lead-time"
 SW_STATE="${MAIN_CHECKOUT}/ai-artifacts/shipwright"
@@ -235,12 +238,7 @@ read_crontab() { cron_read_crontab "${ME}" "${CRONTAB}" || exit 2; }
 # --install and --remove, so what is counted as ours is exactly what is
 # replaced or removed. Classes: ours, stale, notours (stale + everything else).
 # The classifier is shared with the other cron installers:
-# scripts/lib/cron-entry.sh (DND-1503), this installer's own copy.
-CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
-[ -r "${CRON_ENTRY_LIB}" ] || die 2 "${CRON_ENTRY_LIB} is missing; without it no crontab line can be told apart as ours" \
-  "restore scripts/lib/cron-entry.sh (fast-forward this checkout to a main that has it), then re-run. Nothing was written."
-# shellcheck source=scripts/lib/cron-entry.sh
-. "${CRON_ENTRY_LIB}"
+# scripts/lib/cron-entry.sh (DND-1503), sourced above.
 lines_of() { cron_entry_lines "${RUNNER}" "$1" /scripts/athena-leadtime-run.sh; }
 count_lines() { if [ -z "$1" ]; then echo 0; else printf '%s\n' "$1" | wc -l | tr -d ' '; fi; }
 

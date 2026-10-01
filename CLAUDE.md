@@ -479,7 +479,9 @@ across sessions — it is not a one-shot queue drain.
   reset (`--dry-run` to preview, `--remove` to uninstall). `--check` asserts the
   entry is live (read-only); `--backup <file>` snapshots the current crontab to a
   local (gitignored) file. The committed installer is the canonical source, so
-  the loop is always restorable even without the snapshot.
+  the loop is always restorable even without the snapshot. The entry names the
+  main checkout's runner; `--install` and `--remove` refuse from a linked
+  worktree (exit 4), whose runner vanishes on cleanup (DND-1639).
 - **A dirty main checkout yields the tick; STALE dirt escalates once
   (DND-692).** The yield is exit 0 and never feeds the wedge counter, so on
   2026-09-22..25 one machine skipped 84 consecutive ticks on days-old leftovers
