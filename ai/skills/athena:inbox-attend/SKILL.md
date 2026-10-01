@@ -215,8 +215,11 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
     (`athena:slack` → *Forwarding a misroute*). A plain `reply` claims an
     unclaimed thread, and the owner's follow-ups then come to you instead of
     the session you forwarded to. A line with `route: topic_judgment` in
-    mode `on` already has its thread claimed for you: forward each follow-up
-    as it arrives (that section says why).
+    mode `on` already has its thread claimed for you: the `session_send`
+    moves that claim to the session you forwarded to, and its reply's
+    `claim_transfer` word says whether it moved (DND-1617; that section
+    says what each word means). Only when nothing moved, forward each
+    follow-up as it arrives.
   - **The owner says "wrong session" in the thread.** Record it with the
     `judgment_feedback` tool (`use_case: slack_routing`, `subject_ref:
     <event_id>`), the session Cody named as `correction: {"session": <label>}`

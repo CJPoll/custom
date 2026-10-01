@@ -15,7 +15,8 @@
 # registry -> its one Slack `log` channel (no producer, or producer "slack") ->
 # that channel's path, e.g. custom-slack.jsonl. A shell cwd inside a DIFFERENT
 # registered project is refused (cwd-project-mismatch) rather than claimed for
-# either one: a claim cannot be taken back (see SKILL.md -> Thread replies come back to the session that started the thread).
+# either one: only the holder's session_send forward moves a claim (see
+# SKILL.md -> Forwarding a misroute).
 # The bot_id and team_id come from auth.test (cached). The call is the athena
 # MCP tool `slack_thread_claim`; the machine token is read from the inbox
 # client config and reaches curl only on stdin.

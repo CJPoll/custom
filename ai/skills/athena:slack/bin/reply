@@ -14,8 +14,9 @@
 #
 # Then it CLAIMS the thread for this session's project inbox IF the thread is
 # unclaimed (DND-1521), so the next reply in it comes back to the session that
-# answered rather than to the channel route. A claim cannot be taken back, and
-# the server's first claim wins, so a thread another inbox holds stays theirs.
+# answered rather than to the channel route. The server's first claim wins, so
+# a thread another inbox holds stays theirs; only the holder's session_send
+# forward moves a claim (SKILL.md -> Forwarding a misroute, DND-1617).
 # One more line follows the ts/permalink lines:
 #   claim=claimed|already_yours inbox=<inbox> source=<source>      (stdout)
 #   claim=already_claimed holder=another-inbox inbox=<inbox> ...    (stdout)

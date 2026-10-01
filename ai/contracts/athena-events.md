@@ -4239,8 +4239,15 @@ follow it.
   conversation (DND-1605, `athena:slack` → *Forwarding a misroute*): a
   forwarder that claimed the thread would hear the owner's follow-ups, and
   the session it forwarded to would not. It keeps an unclaimed thread
-  unclaimed and cannot free one the router already claimed (*The router
-  claims a root it routed by topic*, below).
+  unclaimed. A claim the forwarder's own inbox holds moves with the forward
+  itself (*The holder's forward moves its claim*, below).
+
+  **Later (2026-10-01, DND-1617):** this bullet ended "and cannot free one
+  the router already claimed". Superseded: a `session_send` forward with
+  `reroute_of_event_id` now moves the claim its sender holds. Measured
+  2026-10-01: the router claimed the owner's /fleet DM thread for the
+  desktop's custom inbox, and every follow-up there had to be forwarded by
+  hand to gen_saas, because no release or transfer existed.
 
   **Later (2026-10-01, DND-1521, DND-1539):** this read "The harness claims
   only threads it starts … It never claims a thread it merely replies in", and
@@ -4330,6 +4337,39 @@ follow it.
   root that fell back to the channel route, where replies already follow the
   channel route. The claim records which writer made it (`harness` or
   `router`), so the outcome log can say why a reply went where it did.
+
+- **The holder's forward moves its claim** (DND-1617, gen_saas
+  `ThreadClaims.transfer_on_reroute/5`). A session that forwards a
+  conversation with the `athena` MCP tool `session_send` and
+  `reroute_of_event_id` also moves the claim on that event's thread, when its
+  own inbox holds it, to the forward's destination: the `to` session's
+  project Slack inbox (`gen_saas-session.jsonl` moves it to
+  `gen_saas-slack.jsonl` on the `to` machine). The owner's follow-ups in that
+  thread then go to the session that has the conversation. The access rule is
+  the holder's alone:
+  - the event was delivered to the caller's machine (another machine's
+    event, an unknown id and a pruned one answer the same `not_found`);
+  - the claim's instance and machine are the ones the event was delivered
+    to, and the sender's `from_inbox` belongs to the holder's project. A
+    claim of any writer (router or harness) moves when its holder forwards;
+    nobody moves a claim they do not hold (`not_holder`, never naming the
+    holder);
+  - the destination is a live machine of the caller's owner with a live
+    `<project>-slack.jsonl` instance for the `to` inbox's project;
+  - the owner holds `:add_slack_route` on the event's app (the claim's own
+    check);
+  - the move is a compare-and-set on the holder, so a claim that changed
+    hands since it was read stays where it is. The claim keeps its writer.
+
+  The reply gains `claim_transfer`: `transferred`, `already_there` (the
+  destination holds it), `unclaimed` (nothing to move; the receiver claims it
+  on its first reply), `not_holder`, `not_found`, or `refused:<reason>`
+  (`no_destination` for a broadcast, `destination`, `no_slack_inbox`,
+  `invalid_event_id`, `unreadable_event`, `ambiguous_thread`, `error`). It
+  never fails the send. Any event of the thread works, a follow-up reply's
+  included, while its row is kept (24 hours after delivery). A server
+  without DND-1617 sends no `claim_transfer`: nothing moved, and the
+  forwarder keeps forwarding follow-ups by hand.
 
 **Routing.** For a **thread reply only** (`thread_ts` present and not equal to
 `ts`), a live claim is the destination. Anything else follows the channel route,

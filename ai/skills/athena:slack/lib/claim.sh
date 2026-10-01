@@ -122,11 +122,11 @@ claim_reason_fix() {
     refused)
       printf 'the server refused the claim; its own words are on the server: line above. The usual cause is an inbox that is not one of this machine'"'"'s live Slack inboxes (check it with the athena MCP lookup_inbox).' ;;
     already-claimed)
-      printf 'another inbox already holds this thread, so its replies go there. A thread belongs to whoever claimed it first, and the server has no release or transfer yet (athena:slack SKILL.md -> Thread replies come back to the session that started the thread); start a new thread with bin/post or bin/dm if this session needs the replies, and ask the holding session to forward any reply meanwhile.' ;;
+      printf 'another inbox already holds this thread, so its replies go there. A thread belongs to whoever claimed it first, and only the holding session can move it, by forwarding the conversation to this session with session_send and reroute_of_event_id (athena:slack SKILL.md -> Forwarding a misroute); ask it to, or start a new thread with bin/post or bin/dm if this session needs the replies.' ;;
     invalid)
       printf 'the channel must be a Slack conversation id ([CDG] followed by capitals and digits) and the ts a Slack ts (digits.digits) -- the ts of the thread'"'"'s PARENT message, as bin/post and bin/dm print it.' ;;
     cwd-project-mismatch)
-      printf 'the shell cwd is inside a different inbox project from this session'"'"'s own (the athena:inbox refusal above names both), so nothing was claimed: a claim cannot be taken back. cd into the session'"'"'s project (project= above) or a worktree of it and re-run bin/claim-thread <channel> <ts>; or, to claim for the cwd'"'"'s project on purpose (a subagent dispatched into another repo), re-run as CLAUDE_PROJECT_DIR=<that project'"'"'s dir> bin/claim-thread <channel> <ts>. The post is not undone.' ;;
+      printf 'the shell cwd is inside a different inbox project from this session'"'"'s own (the athena:inbox refusal above names both), so nothing was claimed: a claim moves only when its holder forwards the conversation. cd into the session'"'"'s project (project= above) or a worktree of it and re-run bin/claim-thread <channel> <ts>; or, to claim for the cwd'"'"'s project on purpose (a subagent dispatched into another repo), re-run as CLAUDE_PROJECT_DIR=<that project'"'"'s dir> bin/claim-thread <channel> <ts>. The post is not undone.' ;;
     project-unresolved)
       printf 'this session'"'"'s project could not be named: CLAUDE_PROJECT_DIR or CLAUDE_PID is set but unusable (the athena:inbox refusal above names the value). Fix or unset it, then re-run bin/claim-thread <channel> <ts>; with neither set the shell cwd is used and the output says source=cwd.' ;;
     *)

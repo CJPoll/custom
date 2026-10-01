@@ -117,7 +117,8 @@ on stdin, as `send-mail --routed` sends it.
 (`/proc/$CLAUDE_PID/cwd`, which a `cd` in the Bash tool never moves), else the
 cwd (ai/contracts/athena-inbox.md → *Repo identity: the git common dir*). A
 shell cwd inside a **different** registered project is refused as
-`cwd-project-mismatch`, because a claim cannot be taken back.
+`cwd-project-mismatch`, because a claim moves only when its holder forwards
+the conversation (*Forwarding a misroute*).
 
 **Later (2026-09-28, DND-1163):** this read "cwd → realpath of the git common
 dir". Superseded: a walt_ui session whose shell had `cd`'d into `~/dev/custom`
@@ -141,10 +142,16 @@ After the `ts=... channel=...` line, exactly one of:
   `cwd-project-mismatch`, `project-unresolved` (a `CLAUDE_PROJECT_DIR` or
   `CLAUDE_PID` that is set but unusable).
 
-**A claim cannot be released or transferred yet.** The athena server has no
-release path (`slack_thread_claim` is claim-only; first claim wins). A thread
-claimed by the wrong inbox keeps routing there: the holding session forwards
-its replies, or a new thread is started from the right project.
+**A claim moves only with its holder's forward.** `slack_thread_claim` is
+claim-only and first claim wins. A thread claimed by the wrong inbox moves
+when the holding session forwards the conversation with `session_send` and
+`reroute_of_event_id` (*Forwarding a misroute*, DND-1617). No other release
+exists.
+
+**Later (2026-10-01, DND-1617):** this read "A claim cannot be released or
+transferred yet … the holding session forwards its replies". Superseded: the
+holder's forward now moves the claim (`ai/contracts/athena-events.md` →
+*The holder's forward moves its claim*).
 
 **A reply claims an unclaimed thread** (DND-1521). `reply`, and `dm
 --thread_ts`, claim the thread they reply into (the parent `thread_ts`) for
@@ -207,9 +214,9 @@ messages (Block Kit)* below).
 ### Forwarding a misroute
 
 A session that forwards a conversation that is not its own never claims the
-thread (DND-1605). A claim cannot be released, so the forwarder would hear
-every follow-up the owner writes there, and the session it forwarded to would
-hear none of them. A thread reply follows a live claim, and is not judged
+thread (DND-1605). A forwarder that claimed it would hear every follow-up
+the owner writes there until it forwarded again, and the session it forwarded
+to would hear none of them. A thread reply follows a live claim, and is not judged
 again (`ai/contracts/athena-events.md` → *Thread replies route to the
 thread's claimant* → *Routing*; the owner kept it so on DND-1605), so nothing
 downstream corrects it.
@@ -231,16 +238,30 @@ The session that receives the forward claims the thread when it first replies
 there (*A reply claims an unclaimed thread* above). Never post the note with a
 plain `reply` or `dm --thread_ts`: each claims an unclaimed thread.
 
-**This keeps an unclaimed thread unclaimed; it cannot free a claimed one.** A
-root the router delivered by topic in mode `on` (the line's `topic.route` is
-`topic_judgment` or `session_mention`) arrives with its thread already claimed
-for your inbox (`ai/contracts/athena-events.md` → *The router claims a root it
-routed by topic*). There the note changes nothing: the owner's follow-ups
-still come to you, and the receiver's first reply reads
-`claim=already_claimed`. Forward each follow-up with `session_send` as it
-arrives, and say in the note that the thread stays with you. The fix applies
-in full to a root that came by the channel route (`channel_route`, or a line
-with no `topic`), which is the measured case.
+**The forward moves a claim your inbox holds** (DND-1617). A root the router
+delivered by topic in mode `on` (the line's `topic.route` is `topic_judgment`
+or `session_mention`) arrives with its thread already claimed for your inbox
+(`ai/contracts/athena-events.md` → *The router claims a root it routed by
+topic*). The `session_send` of step 1 moves that claim to the `to` session's
+project Slack inbox, so the owner's follow-ups go there. Read the reply's
+`claim_transfer` word:
+
+- `transferred` or `already_there`: the thread is the destination's. Say so
+  in the note.
+- `unclaimed`: nothing to move. The receiver claims it on its first reply.
+- `not_holder`, `not_found` or `refused:<reason>`: nothing moved. Name it in
+  your turn output, forward each follow-up by hand as it arrives, and say in
+  the note that the thread stays with you. Never resend to retry.
+- No `claim_transfer` field at all: a server without DND-1617. Treat it as
+  nothing moved.
+
+Any event of the thread moves it, a follow-up reply's included, while the
+server still keeps that event (24 hours after delivery).
+
+**Later (2026-10-01, DND-1617):** this paragraph read "This keeps an
+unclaimed thread unclaimed; it cannot free a claimed one", and told the
+holder to forward each follow-up by hand. Superseded: the forward now moves
+the claim its sender holds.
 
 ## The thinking status
 
