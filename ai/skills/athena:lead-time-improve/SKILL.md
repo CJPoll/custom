@@ -100,7 +100,9 @@ experiment it prints `keep`, `revert`, `pending`, `inconclusive` or
   than custom goes through its product lane like any change there (*The
   product lane*).
 - **REVERT HELD**: judge found that the commit added test lines (a `test/`
-  path or a `*.self-test.sh`, the `FirstParty.test_path?` rule), or could
+  path or a `*.self-test.sh`, or any common layout: `tests/`, `spec/`,
+  `__tests__/`, `*_test.*`, `*.spec.*`; the `FirstParty.test_file_any_layout?`
+  rule, DND-1630), or could
   not look. A plain `git revert` would delete them, so it is never the
   action. The status is still `revert`. Either land a partial revert that
   keeps every test addition and its fixture fix, or decline it as above

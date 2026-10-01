@@ -725,6 +725,22 @@ has "judge: the foreign landings are left out of both sides, counted, never an n
   "left out 11 landing(s) worked on another machine (origin foreign), as lead-time-phases --summary does"
 lacks "... not tallied as an excluded n/a reason" "$(out)" "worked on another machine (no local events"
 
+# A product repo's own test layouts (DND-1630): spec/, __tests__/ and a *.test.ts
+# are test additions a plain revert would delete; the source change is not.
+mkdir -p "${PGS}/spec" "${PGS}/web/__tests__"
+printf 'x\n' >"${PGS}/spec/deploy_spec.rb"
+printf 'x\n' >"${PGS}/web/__tests__/page.js"
+printf 'x\n' >"${PGS}/web/button.test.ts"
+printf 'jobs: {build: {}, smoke: {}, lint: {}}\n' >"${PGS}/.github/workflows/deploy.yml"
+TL="$(pcommit 2026-10-22T14:00:00Z "fixture: a change with spec, __tests__ and .test.ts files" "$(tr "gen_saas tail phase")")"
+STATETL="${TMP}/statetl"
+mkdir -p "${STATETL}"
+/usr/bin/ruby "${HERE}/make_tail_ledger.rb" "${STATETL}/ledger.jsonl" gen_saas "${TL}" 4000 2026-10-22T00:00:00Z
+eq "record a change that added spec/, __tests__/ and *.test.ts files: exit 0" "$(tl "${STATETL}" 2026-10-23T12:00:00Z trec phase "${TL}")" "0"
+has "... the record names all three test paths, not the workflow" "$(out)" \
+  "a plain revert would delete test additions in spec/deploy_spec.rb, web/__tests__/page.js, web/button.test.ts"
+lacks "... a source file is not a test" "$(out)" "deploy.yml"
+
 STATETN="${TMP}/statetn"
 mkdir -p "${STATETN}"
 /usr/bin/ruby "${HERE}/make_tail_ledger.rb" "${STATETN}/ledger.jsonl" gen_saas "${TNR}" 2400 2026-10-18T00:00:00Z no-runs

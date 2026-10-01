@@ -10,8 +10,10 @@
 # rendered agents through `files` (DND-508). Two checks that each keep their
 # own idea of the scope drift apart silently: one of them stops reading a
 # directory, and prints OK anyway.
-# athena:lead-time-improve's experiment (DND-1549) reuses only `test_path?`,
-# to tell which of a commit's additions a plain revert would delete.
+# athena:lead-time-improve's experiment (DND-1549) reuses only
+# `test_file_any_layout?` (DND-1630), to tell which of a commit's additions a
+# plain revert would delete, in any repo's layout. The narrower `test_path?`
+# stays this repo's own rule.
 # ai/bin/check-pipefail-grep (DND-509) reuses only `git_ls`: it scans every
 # TRACKED shell file, and its shell test is by content, not by this rule.
 #
@@ -61,6 +63,28 @@ module FirstParty
   def test_path?(rel)
     segs = segments(rel)
     segs[0..-2].include?("test") || segs.last.end_with?(".self-test.sh")
+  end
+
+  # Words that name a test file or directory in the layouts product repos
+  # use: test/ tests/ __tests__/ spec/ specs/ e2e/ testdata/, foo_test.go,
+  # foo_spec.rb, foo.test.ts, foo.spec.tsx, test_foo.py, FooTest.java.
+  TEST_WORDS = %w[test tests spec specs e2e testdata].freeze
+
+  # A test file in ANY repo's layout (DND-1630), for a repo whose layout is
+  # not this one's. A path is a test when a directory name or the file name
+  # holds a test word as a whole word: names split at every non-alphanumeric
+  # and at camelCase, so `latest.rb` and `contest.go` are not tests. It is a
+  # superset of `test_path?`. Over-reading only holds a revert (the safe
+  # direction); `test_path?` stays narrow because discovery of this repo's
+  # executables needs it (`ai/bin/test-slot` is a tool here and stays one).
+  # Residual: a layout with none of these words (a `features/` directory) is
+  # not seen.
+  def test_file_any_layout?(rel)
+    return true if test_path?(rel)
+
+    segments(rel).any? do |seg|
+      seg.gsub(/([a-z0-9])([A-Z])/, '\1 \2').downcase.split(/[^a-z0-9]+/).any? { |w| TEST_WORDS.include?(w) }
+    end
   end
 
   def lib_path?(rel)

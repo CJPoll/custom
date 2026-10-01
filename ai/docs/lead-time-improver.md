@@ -334,7 +334,10 @@ p90 over the last K comparable landings), and a status.
   the shipwright's judgement caught that reverting
   custom:integrate:25c8114295af would delete a self-test assertion. `record`
   now stores `revert_deletes_tests`: the commit's paths where
-  `FirstParty.test_path?` holds and lines were added (`git show --numstat`),
+  `FirstParty.test_file_any_layout?` holds (DND-1630: it first read only
+  `test_path?`, a `test/` segment or `*.self-test.sh`, which missed `spec/`,
+  `__tests__/` and `*.test.ts` in a product repo) and lines were added
+  (`git show --numstat`),
   or `revert_deletes_tests_na` with the reason, never `[]` for unknown. A
   revert verdict (fresh or owed) whose record lists a test, or carries
   `_na`, prints `REVERT HELD` with the paths and a Fix: a partial revert

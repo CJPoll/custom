@@ -556,7 +556,7 @@ check("test_additions: a test/ path with additions counts; a non-test path does 
   X.test_additions([[3, 0, "ai/x/test/foo.sh"], [5, 1, "ai/bin/x"], [1, 0, "ai/x/fix.sh"]]) == ["ai/x/test/foo.sh"]
 end
 
-check("test_additions: a *.self-test.sh counts (FirstParty.test_path?, the one rule)") do
+check("test_additions: a *.self-test.sh counts (FirstParty.test_file_any_layout?, the one rule)") do
   X.test_additions([[1, 0, "scripts/lib/thing.self-test.sh"]]) == ["scripts/lib/thing.self-test.sh"]
 end
 
@@ -566,6 +566,30 @@ end
 
 check("test_additions: a binary test file (no line counts) counts: unknown is held") do
   X.test_additions([[nil, nil, "ai/x/test/fixture.bin"]]) == ["ai/x/test/fixture.bin"]
+end
+
+# DND-1630: a product repo's tests live in its own layout. Every common one is
+# a test; a plain source file is not; a name that only contains the letters is not.
+TEST_LAYOUTS = %w[
+  spec/models/user_spec.rb __tests__/button.js app/__tests__/button.js tests/test_api.py src/tests/api.rs
+  src/user_test.go lib/user_spec.rb web/button.test.ts web/button.spec.tsx
+  src/main/FooTest.java src/main/FooSpec.kt test_api.py e2e/login.ts
+].freeze
+PLAIN_SOURCE = %w[
+  src/latest.rb lib/contest.go app/attestation.ts src/protest/main.rs lib/inspector.rb apps/x/lib/deploy.ex
+].freeze
+
+check("test_additions: spec/, __tests__/, tests/, *_test.*, *_spec.*, *.test.*, *.spec.* and CamelCase Test/Spec files are tests") do
+  X.test_additions(TEST_LAYOUTS.map { |p| [2, 0, p] }) == TEST_LAYOUTS.sort
+end
+
+check("test_additions: a plain source change is not a test, even where a name holds the letters") do
+  X.test_additions(PLAIN_SOURCE.map { |p| [2, 0, p] }) == []
+end
+
+check("deletes_tests_fields: a commit adding spec/, __tests__/ and *.test.ts names all three") do
+  f = X.deletes_tests_fields(Source.ok([[1, 0, "spec/a_spec.rb"], [1, 0, "web/__tests__/b.js"], [1, 0, "web/c.test.ts"], [4, 1, "lib/d.rb"]]))
+  f == { "revert_deletes_tests" => %w[spec/a_spec.rb web/__tests__/b.js web/c.test.ts] }
 end
 
 check("deletes_tests_fields: an answer lists the paths, [] when there are none") do

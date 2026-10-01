@@ -28,7 +28,7 @@
 #     Judge never writes `declined`, and a worse guard is never declined.
 #   * a revert whose commit added test lines, or where git could not tell,
 #     is HELD (DND-1549): still `revert`, but a plain git revert is ruled
-#     out. Only FirstParty.test_path? (a pure function) is used from
+#     out. Only FirstParty.test_file_any_layout? (a pure function) is used from
 #     ai/lib/first_party.rb; its git readers are not called here.
 #   * a change on the same phase from ANOTHER experiment (any machine), seen
 #     as a `Lead-time-experiment:` commit trailer (ai/lib/lead_time_trailer.rb)
@@ -732,9 +732,10 @@ module LeadTimeExperiment
   # The test paths a commit added lines to, from its numstat entries
   # [[added | nil, deleted | nil, path]] (nil: a binary file, whose change
   # git does not count in lines: held, since unknown fails closed). The
-  # test-path rule is FirstParty.test_path?, the guard classification's own.
+  # test-path rule is FirstParty.test_file_any_layout? (DND-1630): the commit
+  # may be in any repo, so every common test layout counts.
   def test_additions(entries)
-    entries.select { |added, _, path| FirstParty.test_path?(path) && (added.nil? || added.positive?) }
+    entries.select { |added, _, path| FirstParty.test_file_any_layout?(path) && (added.nil? || added.positive?) }
            .map(&:last).uniq.sort
   end
 
