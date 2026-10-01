@@ -42,8 +42,9 @@ module LeadTimePhases
   EVENTS = %w[harness_gate.run harness_gate.check test_slot.wait critic.round
               integration_gate.run merge.lock_wait merge.landed].freeze
   TOP_CHECKS = 5
-  # A full git object name (SHA-1 or SHA-256).
-  SHA_RE = /\A(?:\h{40}|\h{64})\z/.freeze
+  # A full git object name (SHA-1 or SHA-256), lowercase as git writes it and
+  # as receipts and verdicts are keyed: an uppercase one would join nothing.
+  SHA_RE = /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/.freeze
 
   class ConfigError < StandardError; end
 
@@ -201,9 +202,10 @@ module LeadTimePhases
       end
     end
 
-    # A merge (squash) landing's commit is made by the forge: it is not the
-    # head integration-gate, the critic or harness-gate saw.
-    def gated_head?(landing) = landing["landed_via"] != "merge"
+    # Whether the landed commit IS the gated head. A merge (squash) landing's
+    # commit is made by the forge, so it is not; its gated head (when known)
+    # is the PR head, in landing["gated_head"].
+    def landed_is_gated_head?(landing) = landing["landed_via"] != "merge"
 
     # The head integration-gate, the critic and harness-gate saw, which their
     # receipts, verdicts and timings are keyed on (DND-1490). A push landing's
@@ -258,7 +260,7 @@ module LeadTimePhases
     # Events about the gated head: by head when the landed commit IS that
     # head, else (a merge landing) by unit.
     def for_gated(events, landing, name)
-      return for_unit(events, landing, name) unless Landing.gated_head?(landing)
+      return for_unit(events, landing, name) unless Landing.landed_is_gated_head?(landing)
 
       in_span(events, landing).select { |e| e["event"] == name && on_gated_head?(e, landing) }
     end
@@ -502,11 +504,36 @@ module LeadTimePhases
       row["mode"] == "improve" && row["landed_via"] == "merge" && row["gated_head"].nil?
     end
 
-    # The fresh rows that can replace a rejoinable one: improve-mode merge
-    # landings that found their gated head. -> {key => row}
+    # This scan's improve-mode merge rows, by key: the candidates to replace
+    # a rejoinable row. -> {key => row}
     def rejoins(rows)
-      rows.select { |r| r["mode"] == "improve" && r["landed_via"] == "merge" && r["gated_head"] }
-          .to_h { |r| [key(r), r] }
+      rows.select { |r| r["mode"] == "improve" && r["landed_via"] == "merge" }.to_h { |r| [key(r), r] }
+    end
+
+    REJOIN_VERDICTS = %i[replace not_in_scan no_head would_lose].freeze
+
+    # What --rejoin does with one rejoinable ledger row, given this scan's row
+    # for its key (nil when the scan did not list it):
+    #   :not_in_scan  the scan did not list it (--since after its landing)
+    #   :no_head      the scan's row still has no gated head
+    #   :would_lose   the scan's row lost a measurement the original has
+    #                 (telemetry pruned since): the original stays
+    #   :replace      otherwise
+    def rejoin_verdict(old, fresh)
+      return :not_in_scan unless fresh
+      return :no_head unless fresh["gated_head"]
+      return :would_lose if loses_measurement?(old, fresh)
+
+      :replace
+    end
+
+    # True when a phase, counter or top_checks the original measured is null
+    # in the fresh row.
+    def loses_measurement?(old, fresh)
+      lost = ->(a, b) { !a.nil? && b.nil? }
+      PHASES.any? { |p| lost.call(old.dig("phases", p, "s"), fresh.dig("phases", p, "s")) } ||
+        (old["counters"] || {}).any? { |k, v| lost.call(v, (fresh["counters"] || {})[k]) } ||
+        lost.call(old["top_checks"], fresh["top_checks"])
     end
 
     def improve_row(repo:, landing:, anchors:, counters:, telemetry_status:, ingested_at:)

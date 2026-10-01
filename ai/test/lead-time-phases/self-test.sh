@@ -296,15 +296,20 @@ has "the refusal carries Fix:" "${ERR}" "Fix:"
 run "${TEL_EMPTY}" --summary --repo custom --rejoin
 eq "--rejoin with --summary is refused" "${CODE}" "2"
 LINES_BEFORE="$(ledger_lines)"
+META="${TMP}/meta-kept0.json" ROWS="${TMP}/rows-empty.json" run "${TEL_EMPTY}" --ingest --repo custom --since 2026-10-02 --rejoin
+eq "a --rejoin whose --since is after the row exits 0" "${CODE}" "0"
+has "it names the row it could not reach, never a bare 0" "${OUT}" "1 merge landing row(s) had no gated head; 0 rejoined"
+has "and why" "${OUT}" "1 not in this scan: they landed before --since"
+eq "nothing is replaced" "$(row_field "${HEAD_PR}" phases.merge.s)" "null"
 run "${TEL_EMPTY}" --ingest --repo custom --since 2026-10-01 --rejoin
 eq "--rejoin exits 0" "${CODE}" "0"
-has "it says how many rows it rejoined" "${OUT}" "1 merge landing row(s) rejoined on their PR head"
+has "it says how many rows it rejoined" "${OUT}" "1 merge landing row(s) had no gated head; 1 rejoined on their PR head"
 eq "the rejoined row joins its receipt" "$(row_field "${HEAD_PR}" phases.merge.s)" "1800"
 eq "the ledger gains no line" "$(ledger_lines)" "${LINES_BEFORE}"
 eq "the original row is kept in ledger-replaced.jsonl" "$(wc -l <"${RSTATE}/ledger-replaced.jsonl" | tr -d ' ')" "1"
 has "the kept original is the legacy row" "$(cat "${RSTATE}/ledger-replaced.jsonl")" "predates DND-1490"
 run "${TEL_EMPTY}" --ingest --repo custom --since 2026-10-01 --rejoin
-has "a second --rejoin replaces nothing" "${OUT}" "0 merge landing row(s) rejoined"
+has "a second --rejoin finds nothing left to rejoin" "${OUT}" "0 merge landing row(s) had no gated head; 0 rejoined"
 eq "and archives nothing more" "$(wc -l <"${RSTATE}/ledger-replaced.jsonl" | tr -d ' ')" "1"
 STATE="${STATE_SAVE}"
 

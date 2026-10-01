@@ -103,8 +103,9 @@ module LeadTime
     v && !v.to_s.empty?
   end
 
-  # A full git object name (SHA-1 or SHA-256).
-  SHA_RE = /\A(?:\h{40}|\h{64})\z/.freeze
+  # A full git object name (SHA-1 or SHA-256), lowercase as git writes it and
+  # as receipts and verdicts are keyed: an uppercase one would join nothing.
+  SHA_RE = /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/.freeze
 
   # A PR's own head, the commit integration-gate, the critic and harness-gate
   # saw (DND-1490). A squash merge lands a commit the forge made, so the gated

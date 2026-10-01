@@ -323,6 +323,8 @@ end
 check("G4 the reason still names the forge's commit") { legacy["gated_head_na"].include?("is the forge's commit") }
 bad_head, = L::Landing.from_row(pr_row.merge("head_commit" => "h129"), ticket: "DND-9001")
 check("G5 a malformed head is refused, never joined on") { bad_head["gated_head"].nil? && bad_head["gated_head_na"].include?("not a commit sha") }
+upper, = L::Landing.from_row(pr_row.merge("head_commit" => "A" * 40), ticket: "DND-9001")
+check("G5 an uppercase head is refused (receipts are keyed lowercase)") { upper["gated_head"].nil? }
 empty_head, = L::Landing.from_row(pr_row.merge("head_commit" => ""), ticket: "DND-9001")
 check("G5 an empty head is refused too") { empty_head["gated_head"].nil? && !empty_head["gated_head_na"].to_s.empty? }
 
@@ -358,9 +360,25 @@ check("J1 one already joined is not") { !L::Ledger.rejoinable?(old_sq.merge("gat
 check("J1 a push row is not") { !L::Ledger.rejoinable?(old_sq.merge("landed_via" => "push")) }
 check("J1 a watch row is not") { !L::Ledger.rejoinable?(old_sq.merge("mode" => "watch")) }
 new_sq = old_sq.merge("gated_head" => HEAD, "x" => 1)
-plan = L::Ledger.rejoins([new_sq, old_sq.merge("ticket" => "DND-9002", "gated_head" => nil),
-                          new_sq.merge("landed_via" => "push", "ticket" => "DND-9003")])
-check("J2 only fresh squash rows that found their head can replace") { plan.keys == [L::Ledger.key(new_sq)] }
+nohead_sq = old_sq.merge("ticket" => "DND-9002", "gated_head" => nil, "gated_head_na" => "no head")
+plan = L::Ledger.rejoins([new_sq, nohead_sq, new_sq.merge("landed_via" => "push", "ticket" => "DND-9003"),
+                          new_sq.merge("mode" => "watch", "ticket" => "DND-9004")])
+check("J2 the candidates are this scan's improve merge rows") { plan.keys == [L::Ledger.key(new_sq), L::Ledger.key(nohead_sq)] }
+check("J2 a row the scan did not list is not_in_scan") { L::Ledger.rejoin_verdict(old_sq, nil) == :not_in_scan }
+check("J2 a fresh row with no head is no_head") { L::Ledger.rejoin_verdict(old_sq, nohead_sq) == :no_head }
+check("J2 a fresh row with its head replaces") { L::Ledger.rejoin_verdict(old_sq, new_sq) == :replace }
+measured = old_sq.merge("phases" => { "implement" => { "s" => 60 }, "merge" => { "s" => nil } }, "counters" => { "gate_runs" => 2 })
+check("J5 a fresh row that lost a measured phase would_lose") do
+  L::Ledger.rejoin_verdict(measured, new_sq.merge("phases" => { "implement" => { "s" => nil }, "merge" => { "s" => 9 } },
+                                                  "counters" => { "gate_runs" => 2 })) == :would_lose
+end
+check("J5 a fresh row that lost a counter would_lose") do
+  L::Ledger.rejoin_verdict(measured, new_sq.merge("phases" => { "implement" => { "s" => 60 } }, "counters" => { "gate_runs" => nil })) == :would_lose
+end
+check("J5 a fresh row that keeps every measurement and adds one replaces") do
+  L::Ledger.rejoin_verdict(measured, new_sq.merge("phases" => { "implement" => { "s" => 61 }, "merge" => { "s" => 9 } },
+                                                  "counters" => { "gate_runs" => 2 })) == :replace
+end
 
 r1 = { "repo" => "custom", "landed_commit" => HEAD, "ticket" => "DND-1" }
 r2 = r1.merge("ticket" => "DND-2")

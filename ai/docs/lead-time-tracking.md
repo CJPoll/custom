@@ -82,14 +82,6 @@ A PR that is CLOSED with no `mergedAt` is judged by its **change**, not its stat
   repository activity log (`gh api repos/{owner}/{repo}/activity`). The row
   carries `landed_via: "push"` and `landed_commit`; a forge merge carries
   `landed_via: "merge"`.
-- **Every PR/MR row carries its own head** as `head_commit` (GitHub
-  `headRefOid`, GitLab `sha`), whichever way it landed (DND-1490). A squash
-  merge's `merge_commit` is a commit the forge made, so it is never the head
-  integration-gate, the critic or harness-gate saw; `head_commit` is, and
-  `lead-time-phases` joins receipts, verdicts and timings on it. A head the
-  forge did not give, or gave malformed, is `head_commit: null` with
-  `head_commit_unmeasured` naming why, never an empty string. A direct-push
-  row has no PR and no `head_commit`: its `landed_commit` is the head.
 - **Closed** (`via=closed`, no lead) when none of it is on the base.
 - **Could not measure** (`via=unmeasured`, with the reason on the row and on
   stderr) when only some of its commits are on the base, or a base commit shares
@@ -105,6 +97,15 @@ A PR that is CLOSED with no `mergedAt` is judged by its **change**, not its stat
   lands a PR seconds to minutes before its close, so a scan between the two
   cannot list it, and the next scan keeps it though it landed before `--since`.
   The JSON key `merged` holds the landing time, whichever way it landed.
+
+**Every PR/MR row carries its own head** as `head_commit` (GitHub
+`headRefOid`, GitLab `sha`), whichever way it landed (DND-1490). A squash
+merge's `merge_commit` is a commit the forge made, so it is never the head
+integration-gate, the critic or harness-gate saw; `head_commit` is, and
+`lead-time-phases` joins receipts, verdicts and timings on it. A head the forge
+did not give, or gave malformed (not a full lowercase sha), is `head_commit:
+null` with `head_commit_unmeasured` naming why, never an empty string. A
+direct-push row has no PR and no `head_commit`: its `landed_commit` is the head.
 
 The window scan lists every PR **updated** since `--since` (`updated:>=`) and
 filters on `closedAt` locally. GitHub's `closed:>=` qualifier omitted five

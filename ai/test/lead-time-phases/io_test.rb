@@ -43,36 +43,61 @@ Dir.mktmpdir("ltp-io-") do |tmp|
   sq = { "repo" => "custom", "mode" => "improve", "landed_via" => "merge", "landed_commit" => HEAD, "ticket" => "DND-9001" }
   done = sq.merge("ticket" => "DND-9002", "gated_head" => "d" * 40)
   push = sq.merge("ticket" => "DND-9003", "landed_via" => "push", "gated_head" => HEAD)
-  rj.append([sq, done, push])
+  unlisted = sq.merge("ticket" => "DND-9005")
+  headless = sq.merge("ticket" => "DND-9006")
+  measured = sq.merge("ticket" => "DND-9007", "phases" => { "implement" => { "s" => 60 } })
+  other_repo = sq.merge("repo" => "gen_saas")
+  rj.append([sq, done, push, unlisted, headless, measured, other_repo])
   File.write(rj.path, "not json\n", mode: "a")
   joined = sq.merge("gated_head" => "d" * 40, "phases" => { "merge" => { "s" => 1 } })
   replacements = { %w[custom] + [HEAD, "DND-9001"] => joined,
                    %w[custom] + [HEAD, "DND-9002"] => done.merge("x" => 2),
-                   %w[custom] + [HEAD, "DND-9003"] => push.merge("landed_via" => "merge", "x" => 3) }
-  check("J3 replace swaps only the rejoinable row") { rj.replace(replacements, archive) == 1 }
+                   %w[custom] + [HEAD, "DND-9003"] => push.merge("landed_via" => "merge", "x" => 3),
+                   %w[custom] + [HEAD, "DND-9006"] => headless.merge("gated_head" => nil, "gated_head_na" => "no head"),
+                   %w[custom] + [HEAD, "DND-9007"] => measured.merge("gated_head" => "d" * 40,
+                                                                     "phases" => { "implement" => { "s" => nil } }) }
+  outcomes = rj.replace(replacements, archive, repo: "custom")
+  by = outcomes.to_h { |v, row, _| [row["ticket"], v] }
+  check("J3 every rejoinable row of the repo gets a verdict") do
+    by == { "DND-9001" => :replace, "DND-9005" => :not_in_scan, "DND-9006" => :no_head, "DND-9007" => :would_lose }
+  end
   lines = File.readlines(rj.path)
-  check("J3 the ledger keeps every line, in order") { lines.size == 4 && lines[3] == "not json\n" }
-  check("J3 the rejoinable row now carries its head") { JSON.parse(lines[0]) == joined }
-  check("J3 a joined row and a push row are untouched") { JSON.parse(lines[1]) == done && JSON.parse(lines[2]) == push }
+  check("J3 the ledger keeps every line, in order") { lines.size == 8 && lines[7] == "not json\n" }
+  check("J3 the replaced row now carries its head") { JSON.parse(lines[0]) == joined }
+  check("J3 every other row is untouched") do
+    lines[1..6].map { |l| JSON.parse(l) } == [done, push, unlisted, headless, measured, other_repo]
+  end
   check("J3 the replaced original is archived, never dropped") do
     File.readlines(archive).map { |l| JSON.parse(l) } == [sq]
   end
-  check("J3 a second rejoin replaces nothing (idempotent)") { rj.replace(replacements, archive) == 0 }
+  again = rj.replace(replacements, archive, repo: "custom")
+  check("J3 a second rejoin replaces nothing (idempotent)") { again.none? { |v, _, _| v == :replace } }
   check("J3 and archives nothing more") { File.readlines(archive).size == 1 }
-  check("J3 an empty plan writes nothing") { rj.replace({}, archive) == 0 && File.readlines(rj.path).size == 4 }
-  check("J3 the ledger keeps its mode") { (File.stat(rj.path).mode & 0o777) == 0o644 }
+  check("J3 an empty plan writes nothing") do
+    rj.replace({}, archive, repo: "custom").all? { |v, _, _| v == :not_in_scan } && File.readlines(rj.path).size == 8
+  end
+  check("J3 the ledger keeps its mode, and no temp file is left") do
+    (File.stat(rj.path).mode & 0o777) == 0o644 && Dir.children(File.dirname(rj.path)).none? { |n| n.include?(".tmp.") }
+  end
+
   # A writer that opened the ledger before a rename locks the unlinked old
   # file: it must see that and reopen, or its append is lost.
   rl = IO_::LedgerStore.new(File.join(tmp, "race", "ledger.jsonl"))
   rl.append([sq])
   stale = File.open(rl.path, File::RDWR | File::APPEND)
   check("J4 an open ledger is live before a rename") { rl.live?(stale) }
-  rl.replace({ %w[custom] + [HEAD, "DND-9001"] => joined }, File.join(tmp, "race", "ledger-replaced.jsonl"))
+  rl.replace({ %w[custom] + [HEAD, "DND-9001"] => joined }, File.join(tmp, "race", "ledger-replaced.jsonl"), repo: "custom")
   check("J4 after replace renames, the old handle is not live") { !rl.live?(stale) }
-  stale.close
-  check("J4 an append after the rename lands in the live ledger") do
-    rl.append([sq.merge("ticket" => "DND-9004")]) == [1, 0] && File.readlines(rl.path).size == 2
+  opens = 0
+  rl.define_singleton_method(:open_ledger) do
+    opens += 1
+    opens == 1 ? stale : super()
   end
+  check("J4 an append holding the stale handle reopens and lands in the live ledger") do
+    rl.append([sq.merge("ticket" => "DND-9004")]) == [1, 0] && opens == 2 &&
+      File.readlines(rl.path).any? { |l| l.include?("DND-9004") }
+  end
+  check("J4 the stale handle was closed") { stale.closed? }
 
   # ── CursorStore ──
   cur = IO_::CursorStore.new(File.join(tmp, "state"), "custom")

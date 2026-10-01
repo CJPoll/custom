@@ -85,8 +85,14 @@ HELP = <<~TXT
                    so a plain re-ingest never rewrites a row. This replaces
                    each merge landing ledgered with no gated head (before
                    DND-1490, or its PR head unread) with this scan's row, if
-                   that row found the head. Every original is appended to
-                   <state>/ledger-replaced.jsonl first; nothing else changes.
+                   that row found the head and lost no measurement the
+                   original has. The new row is a full recompute (phases,
+                   counters, ingested_at). Every original is appended to
+                   <state>/ledger-replaced.jsonl first; no other row changes.
+                   It prints each rejoinable row it did not replace, by
+                   cause. A rejoin moves past summaries: run it when no
+                   experiment is pending, or judge that experiment
+                   inconclusive.
     --window N     with --summary: the last N landings (default: the config's)
     --json         with --summary: JSON instead of the table
     --help         this text
@@ -191,19 +197,31 @@ module Ingest
     moved = since_opt ? "cursor unchanged (an explicit --since run never moves it)" : move_cursor(cursor, res.meta)
     puts "lead-time-phases: #{repo.name}: scanned since #{since}: #{res.rows.size} landing row(s), " \
          "#{added} new in the ledger, #{present} already there; #{moved}"
-    puts rejoin_rows(ledger, rows, state) if rejoin
+    puts rejoin_rows(ledger, rows, state, repo.name) if rejoin
     0
   end
 
   # --rejoin (DND-1490): the ledger is first-write-wins, so a plain re-ingest
   # never rewrites a row. This explicit mode replaces only the merge landings
   # ledgered with no gated head, with this scan's row that found it; each
-  # original moves to ledger-replaced.jsonl.
-  def rejoin_rows(ledger, rows, state)
+  # original moves to ledger-replaced.jsonl. Every rejoinable row it did NOT
+  # replace is counted by cause, so "nothing to do" never reads like a miss.
+  def rejoin_rows(ledger, rows, state, repo)
     archive = File.join(state, "ledger-replaced.jsonl")
-    n = ledger.replace(LeadTimePhases::Ledger.rejoins(rows), archive)
-    kept = n.positive? ? " (the originals are in #{archive})" : ""
-    "lead-time-phases: #{n} merge landing row(s) rejoined on their PR head#{kept}"
+    outcomes = ledger.replace(LeadTimePhases::Ledger.rejoins(rows), archive, repo: repo)
+    n = LeadTimePhases::Ledger::REJOIN_VERDICTS.to_h { |v| [v, outcomes.count { |o| o[0] == v }] }
+    kept = n[:replace].positive? ? " (the originals are in #{archive})" : ""
+    out = ["lead-time-phases: --rejoin: #{outcomes.size} merge landing row(s) had no gated head; " \
+           "#{n[:replace]} rejoined on their PR head#{kept}"]
+    out << "  #{n[:not_in_scan]} not in this scan: they landed before --since; pass an earlier --since" if n[:not_in_scan].positive?
+    if n[:no_head].positive?
+      why = outcomes.select { |o| o[0] == :no_head }.map { |o| o[2]["gated_head_na"] }.tally.max_by { |_, c| c }&.first
+      out << "  #{n[:no_head]} scanned but still without a PR head (most often: #{why})"
+    end
+    if n[:would_lose].positive?
+      out << "  #{n[:would_lose]} kept as ledgered: the fresh row lost a measurement the original has (telemetry pruned since)"
+    end
+    out.join("\n")
   end
 
   # -> nil when the scan is usable, else the exit code (having said why).

@@ -391,6 +391,9 @@ check("an empty head reads the same as none, never an empty sha") do
 end
 check("a full sha is the head, with no reason") { LeadTime.head_commit("ab" * 20, "sha") == ["ab" * 20, nil] }
 check("a SHA-256 object name is a head too") { LeadTime.head_commit("cd" * 32, "sha") == ["cd" * 32, nil] }
+check("an uppercase sha is refused: receipts are keyed lowercase, it would join nothing") do
+  LeadTime.head_commit("AB" * 20, "sha")[0].nil?
+end
 
 gl = GitLabForge.allocate
 gl.instance_variable_set(:@dir, ".")

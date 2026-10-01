@@ -22,7 +22,8 @@ require_relative "athena_telemetry"
 module LeadTimePhasesIO
   Source = LeadTimePhases::Source
 
-  # ledger.jsonl: one JSON row per (repo, landed commit, ticket), append-only.
+  # ledger.jsonl: one JSON row per (repo, landed commit, ticket). First write
+  # wins on append; a row is rewritten only by an explicit --rejoin (replace).
   class LedgerStore
     attr_reader :path
 
@@ -59,32 +60,34 @@ module LeadTimePhasesIO
       end
     end
 
-    # DND-1490 --rejoin: replace each rejoinable row (Ledger.rejoinable?)
-    # whose key `replacements` holds, under the same lock as append. Every
-    # other line, malformed ones included, is kept verbatim and in order. The
-    # replaced originals are appended to `archive` before the new ledger is
-    # renamed into place, so history is moved aside, never dropped.
-    # -> the number of rows replaced (0 writes nothing).
-    def replace(replacements, archive)
+    # DND-1490 --rejoin: for each of `repo`'s rejoinable rows
+    # (Ledger.rejoinable?), Ledger.rejoin_verdict against `replacements`
+    # decides; a :replace row is swapped for its fresh row, under the same lock
+    # as append. Every other line, malformed ones included, is kept verbatim
+    # and in order. The replaced originals are appended to `archive` before
+    # the new ledger is renamed into place, so history is moved aside, never
+    # dropped. A crash between the two leaves an original archived but not yet
+    # replaced; the next --rejoin archives it again (a duplicate, never a loss).
+    # -> [[verdict, ledger row, fresh row or nil], ...] for every rejoinable
+    # row of `repo`. No :replace writes nothing.
+    def replace(replacements, archive, repo:)
       with_lock do |f|
-        lines = File.readlines(path)
+        outcomes = []
         old = []
-        out = lines.map do |line|
+        out = File.readlines(path).map do |line|
           row = JSON.parse(line) rescue nil
-          new_row = row.is_a?(Hash) && LeadTimePhases::Ledger.rejoinable?(row) &&
-                    replacements[LeadTimePhases::Ledger.key(row)]
-          next line unless new_row
+          next line unless row.is_a?(Hash) && row["repo"] == repo && LeadTimePhases::Ledger.rejoinable?(row)
+
+          fresh = replacements[LeadTimePhases::Ledger.key(row)]
+          verdict = LeadTimePhases::Ledger.rejoin_verdict(row, fresh)
+          outcomes << [verdict, row, fresh]
+          next line unless verdict == :replace
 
           old << line
-          "#{JSON.generate(new_row)}\n"
+          "#{JSON.generate(fresh)}\n"
         end
-        next 0 if old.empty?
-
-        File.open(archive, File::WRONLY | File::CREAT | File::APPEND, 0o644) { |a| a.write(old.join) }
-        tmp = "#{path}.tmp.#{Process.pid}"
-        File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, f.stat.mode & 0o777) { |t| t.write(out.join) }
-        File.rename(tmp, path)
-        old.size
+        write_replaced(f, out, old, archive) unless old.empty?
+        outcomes
       end
     end
 
@@ -100,14 +103,37 @@ module LeadTimePhasesIO
 
     private
 
+    def write_replaced(locked, lines, old, archive)
+      File.open(archive, File::WRONLY | File::CREAT | File::APPEND, 0o644) do |a|
+        a.write(old.join)
+        a.fsync
+      end
+      tmp = "#{path}.tmp.#{Process.pid}"
+      begin
+        File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, locked.stat.mode & 0o777) do |t|
+          t.write(lines.join)
+          t.fsync
+        end
+        File.rename(tmp, path)
+      ensure
+        FileUtils.rm_f(tmp)
+      end
+    end
+
+    # The ledger opened for append (the test seam for a stale handle).
+    def open_ledger = File.open(path, File::RDWR | File::CREAT | File::APPEND, 0o644)
+
     # Yields the ledger opened for append and exclusively locked, reopening
     # when a replace moved the file while this waited on the lock.
     def with_lock
       FileUtils.mkdir_p(File.dirname(path))
       loop do
-        File.open(path, File::RDWR | File::CREAT | File::APPEND, 0o644) do |f|
+        f = open_ledger
+        begin
           f.flock(File::LOCK_EX)
           return yield(f) if live?(f)
+        ensure
+          f.close
         end
       end
     end

@@ -94,12 +94,19 @@ whose n/a reasons are the most tractable, or `no action` with the reason.
 finding is "cannot measure <phase>" and the action is **instrumentation** for
 it. Read its top `na_reasons` first:
 
-- a reason no landed emitter addresses ("unticketed landing", "merge landing:
-  not the gated head", an anchor nobody emits) is an instrumentation gap: fix
-  it;
+- a reason no landed emitter addresses ("unticketed landing", an anchor nobody
+  emits) is an instrumentation gap: fix it;
+- "merge landing: ... the row has no head_commit (it predates DND-1490 ...)"
+  is not a gap: those squash rows are backfillable. The action is one
+  `ai/bin/lead-time-phases --ingest --repo <repo> --since <oldest such
+  landed_at> --rejoin`, run only when no experiment is pending (a rejoin moves
+  past summaries). Journal the counts it prints. A row it reports "not in this
+  scan" needs an earlier `--since`; one "still without a PR head" is a
+  forge-side gap to ticket;
 - a reason that only says the event is missing on landings that predate its
   emitter is not a gap. Those rows stay n/a forever (the ledger is
-  first-write-wins), and time fixes it. The action is then `no action`:
+  first-write-wins; `--rejoin` only re-joins a missing gated head, it cannot
+  supply a missing event), and time fixes it. The action is then `no action`:
   "measurement maturing: <phase> n/a on <n_na> pre-emitter landings".
 
 Otherwise the biggest phase is the target of a **change**, unless

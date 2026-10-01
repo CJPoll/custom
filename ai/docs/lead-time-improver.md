@@ -198,13 +198,16 @@ Each `improve`-mode run does these steps in order:
 
    **Later (2026-10-01, DND-1490):** a squash landing's sha is the forge's
    commit, so receipts, verdicts and timings keyed on the gated head never
-   joined it: 154 of the first 535 custom ledger rows read "merge landing:
-   ... is the forge's commit, not the gated head". `lead-time` now emits each
+   joined it. On the live ledger at 2026-10-01T12:30Z, 154 of 535 custom rows
+   (of 160 merge rows) had a phase reading "merge landing: ... is the forge's
+   commit, not the gated head"; in the other 6, no phase fell back to a
+   head-keyed source (telemetry matched by unit). `lead-time` now emits each
    PR row's head as `head_commit`, and ingest joins on it (the row's
    `gated_head`). The ledger stays first-write-wins: a plain re-ingest never
    rewrites a row. The backfill is explicit, `lead-time-phases --ingest
    --since WHEN --rejoin`: it replaces only merge rows ledgered with no gated
-   head, and appends each original to `ledger-replaced.jsonl` first.
+   head, keeps any row whose fresh copy lost a measurement, and appends each
+   original to `ledger-replaced.jsonl` first.
 2. **Judge pending experiments first.** An experiment whose comparable
    after-set has reached K is judged before anything new starts.
 3. **Pick the biggest contributor** from the window summary. If that phase is
