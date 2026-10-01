@@ -24,10 +24,17 @@
 #                     notours  every line that is not ours (stale included):
 #                              what --install and --remove keep
 #   <stale-suffix>  optional, e.g. /scripts/athena-leadtime-run.sh
-#   Returns 0, or 2 with a Fix: on stderr when <runner> is not an absolute
-#   path or <class> is unknown. A wrong runner must never read as "no lines
+#   Returns 0; 2 with a Fix: on stderr when <runner> is not an absolute path,
+#   contains whitespace, or <class> is unknown; and awk's own non-zero exit if
+#   awk fails. Every non-zero return prints no lines, so a caller MUST check
+#   the status before writing: an unchecked empty "notours" result would
+#   replace the whole crontab. A wrong runner must never read as "no lines
 #   are ours": an installer would then append a duplicate, and --check would
 #   report MISSING for the wrong reason.
+#
+#   A line ending in a carriage return (<runner>\r) is not ours: it is kept,
+#   and --install adds the canonical entry beside it. setup-leadtime-cron did
+#   the same before this lib.
 #
 # ONE classifier serves each installer's --check, --install and --remove, so
 # what is counted as ours is exactly what is replaced or removed.
@@ -35,6 +42,10 @@
 cron_entry_lines() {
   local runner="${1:-}" class="${2:-}" suffix="${3:-}"
   case "${runner}" in
+    *[[:space:]]*)
+       echo "cron_entry_lines: runner '${runner}' contains whitespace, so it can never equal one crontab field" >&2
+       echo "  Fix: install the runner under a path with no spaces or tabs." >&2
+       return 2 ;;
     /*) ;;
     *) echo "cron_entry_lines: runner '${runner}' is not an absolute path" >&2
        echo "  Fix: pass the managed runner's absolute path (resolve it with pwd -P first)." >&2

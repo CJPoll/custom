@@ -395,6 +395,45 @@ else
       "rc=$rc crontab now: ${after}"
 fi
 
+# 9c. A runner the classifier refuses (here a RELATIVE runner dir) is exit 2
+#     with nothing written. This script runs without -e, so an unchecked empty
+#     "not ours" result would replace the whole crontab (DND-1503 review).
+setup_case badrunner
+make_stub 0 0
+printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
+snapshot="$(cat "${FAKE_CRONTAB}")"
+for mode in --remove --install; do
+  err="$(cd -- "${CASE_DIR}" && PATH="${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+         ATHENA_INBOX_CLIENT_RUNNER_DIR=bin bash "${INSTALLER}" "$mode" 2>&1 >/dev/null)"; rc=$?
+  if [ "$rc" -eq 2 ] && grep -q 'nothing was written' <<<"$err" && grep -q 'Fix:' <<<"$err" \
+     && [ "$(cat "${FAKE_CRONTAB}")" = "$snapshot" ]; then
+    ok "$mode with a relative runner dir is exit 2 with Fix:, the crontab unchanged"
+  else
+    bad "$mode with a relative runner dir is exit 2 with Fix:, the crontab unchanged" \
+        "rc=$rc stderr=${err} crontab=$(cat "${FAKE_CRONTAB}")"
+  fi
+done
+
+# 9d. A checkout without scripts/lib/cron-entry.sh refuses before any write.
+setup_case nolib
+make_stub 0 0
+printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
+snapshot="$(cat "${FAKE_CRONTAB}")"
+mkdir -p "${CASE_DIR}/nolib"
+cp "${INSTALLER}" "${CASE_DIR}/nolib/"
+for mode in --remove --install; do
+  err="$(PATH="${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+         ATHENA_INBOX_CLIENT_RUNNER_DIR="${EXP_RUNNER_DIR}" \
+         bash "${CASE_DIR}/nolib/setup-athena-inbox-client" "$mode" 2>&1 >/dev/null)"; rc=$?
+  if [ "$rc" -eq 2 ] && grep -q 'cron-entry.sh' <<<"$err" && grep -q 'Fix:' <<<"$err" \
+     && [ "$(cat "${FAKE_CRONTAB}")" = "$snapshot" ]; then
+    ok "$mode without scripts/lib/cron-entry.sh is exit 2 with Fix:, the crontab unchanged"
+  else
+    bad "$mode without scripts/lib/cron-entry.sh is exit 2 with Fix:, the crontab unchanged" \
+        "rc=$rc stderr=${err}"
+  fi
+done
+
 # 10. --check on a machine with NO crontab at all must report missing, not
 #     crash on crontab(1)'s "no crontab for user" exit 1.
 setup_case nocrontab

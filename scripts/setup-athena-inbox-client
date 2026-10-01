@@ -33,10 +33,10 @@
 # Idempotent. The crontab is edited read-modify-write: every live line that
 # runs the runner's absolute path (a field equal to it) is filtered out and the
 # two canonical entries are re-appended. A commented-out entry or a longer path
-# such as <runner>.bak is not ours and is kept (DND-1503). Unrelated entries — notably the shipwright's hourly line — are
-# preserved verbatim, with one documented exception: blank lines are dropped,
-# because the filter normalises whitespace-only lines away. Comments and every
-# real entry survive unchanged.
+# such as <runner>.bak is not ours and is kept (DND-1503). Unrelated entries —
+# notably the shipwright's hourly line — are preserved verbatim, with one
+# documented exception: blank lines are dropped, because the filter normalises
+# whitespace-only lines away. Comments and every real entry survive unchanged.
 #
 # Usage:
 #   setup-athena-inbox-client [--install] [--dry-run]
@@ -204,8 +204,20 @@ CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
 . "$CRON_ENTRY_LIB"
 
 # Everything in the crontab that is NOT one of our entries, blank lines dropped.
+# Non-zero (with the lib's Fix: already on stderr) when the lines could not be
+# classified. This script runs without -e, so every caller checks it.
 without_our_entries() {
   printf '%s\n' "$1" | cron_entry_lines "$RUNNER" notours | sed '/^[[:space:]]*$/d'
+}
+
+# classify_failed — exit 2 before any write. Called in the main shell as
+# `kept="$(without_our_entries "$current")" || classify_failed`: an empty
+# result from a failed classification would replace every other entry.
+classify_failed() {
+  echo "error: could not tell this installer's crontab lines apart (runner: $RUNNER); nothing was written." >&2
+  echo "  Fix: act on the cron_entry_lines Fix: above (an ATHENA_INBOX_CLIENT_RUNNER_DIR override must be" \
+       "an absolute path with no whitespace), then re-run." >&2
+  exit 2
 }
 
 REBOOT_LINE="${REBOOT_SCHEDULE} ${RUNNER}"
@@ -237,7 +249,8 @@ fi
 if [ "$MODE" = "remove" ]; then
   step "Removing the Athena inbox client crontab entries"
   current="$(read_crontab)"
-  put_crontab "$(without_our_entries "$current")"
+  kept="$(without_our_entries "$current")" || classify_failed
+  put_crontab "$kept"
   say "Done. Any client already running is left alone; it simply will not be relaunched."
   say "Stop a running supervisor by killing the pid in ~/.local/state/athena-inbox-client.pid."
   exit 0
@@ -268,7 +281,7 @@ fi
 
 step "Crontab entries"
 current="$(read_crontab)"
-kept="$(without_our_entries "$current")"
+kept="$(without_our_entries "$current")" || classify_failed
 if [ -n "$kept" ]; then
   new_crontab="$(printf '%s\n%s\n%s' "$kept" "$REBOOT_LINE" "$RELAUNCH_LINE")"
 else

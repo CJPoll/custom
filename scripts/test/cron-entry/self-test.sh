@@ -29,13 +29,13 @@ LONGER="0 * * * * /backup${R}"
 STALE="0 * * * * /home/u/.local/worktrees/custom/b${SUF}"
 OTHER="0 7 * * * /opt/other-job"
 BLANK=""
-CT="$(printf '%s\n' "$LIVE" "$LIVE_TAB" "$LIVE_ARGS" "$COMMENTED" "$INDENTED_COMMENT" "$BAK" "$LONGER" "$STALE" "$OTHER" "$BLANK")"
+CT="$(printf '%s\n' "$LIVE" "$LIVE_TAB" "$LIVE_ARGS" "$COMMENTED" "$INDENTED_COMMENT" "$BAK" "$BLANK" "$LONGER" "$STALE" "$OTHER")"
 
 printf '\ncron_entry_lines — classes\n'
 expect "ours: the exact path as a field, with spaces, tabs or arguments" \
   "$(printf '%s\n' "$LIVE" "$LIVE_TAB" "$LIVE_ARGS")" "$(printf '%s\n' "$CT" | cron_entry_lines "$R" ours)"
 expect "notours: comments, <runner>.bak, a longer path, another copy, other jobs and blanks, byte for byte" \
-  "$(printf '%s\n' "$COMMENTED" "$INDENTED_COMMENT" "$BAK" "$LONGER" "$STALE" "$OTHER" "$BLANK")" \
+  "$(printf '%s\n' "$COMMENTED" "$INDENTED_COMMENT" "$BAK" "$BLANK" "$LONGER" "$STALE" "$OTHER")" \
   "$(printf '%s\n' "$CT" | cron_entry_lines "$R" notours)"
 expect "stale: any other copy of the runner (a longer path included), only when a suffix is given" \
   "$(printf '%s\n' "$LONGER" "$STALE")" "$(printf '%s\n' "$CT" | cron_entry_lines "$R" stale "$SUF")"
@@ -58,6 +58,12 @@ if [ "$rc" = 2 ] && grep -q 'not an absolute path' <<<"$out" && ! grep -qF "$OTH
   ok "a relative runner is exit 2 with Fix:, and prints no lines"
 else
   bad "a relative runner is exit 2 with Fix:, and prints no lines" "rc=$rc out=$out"
+fi
+out="$(printf '%s\n' "$CT" | cron_entry_lines "/opt/my runner.sh" notours 2>&1)"; rc=$?
+if [ "$rc" = 2 ] && grep -q 'contains whitespace' <<<"$out" && grep -q 'Fix:' <<<"$out" && ! grep -qF "$OTHER" <<<"$out"; then
+  ok "a runner with whitespace (it can never equal one field) is exit 2 with Fix:, and prints no lines"
+else
+  bad "a runner with whitespace (it can never equal one field) is exit 2 with Fix:, and prints no lines" "rc=$rc out=$out"
 fi
 out="$(printf '%s\n' "$CT" | cron_entry_lines "$R" mine 2>&1)"; rc=$?
 if [ "$rc" = 2 ] && grep -q 'Fix:' <<<"$out"; then

@@ -189,3 +189,11 @@ by this suite; the cases and rows exist because of those findings.
 - **Mutation that reddens it:** put the substring filter back in
   `without_our_entries`. That is the before state above, so the same two
   claims fail with the same strings.
+- **Review round, case 9c.** The shared classifier returns 2 with no lines on
+  a runner it refuses, and this script runs without `-e`. Before
+  `classify_failed` existed, `ATHENA_INBOX_CLIENT_RUNNER_DIR=bin` (relative)
+  gave `VERDICT: FAIL (2 of 72 cases)`:
+  `FAIL  --remove with a relative runner dir is exit 2 with Fix:, the crontab unchanged`
+  and the same for `--install`, each with `rc=0`: the crontab was replaced.
+  After: `VERDICT: PASS (72 cases)`. Mutation: drop `|| classify_failed`
+  from either call site; that call site's claim fails.
