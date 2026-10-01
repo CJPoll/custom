@@ -406,7 +406,7 @@ module Manager
     opts = opts.merge(owner: Effects.owner_id) if opts[:use_case] == "slack_routing"
     loaded = load_cases(opts)
     report_join(loaded, out, err)
-    inbox = opts[:use_case] == "slack_routing" ? gather_candidates(opts, loaded[:cases], loaded[:window_incomplete].size, out) : nil
+    inbox = opts[:use_case] == "slack_routing" ? gather_candidates(opts, loaded[:cases], out) : nil
     if opts[:dry_run]
       out.puts "context: not built (dry run)" if inbox
       batches = JudgmentEval.batches(loaded[:cases], opts[:batch_size])
@@ -504,16 +504,15 @@ module Manager
     return {} unless context
 
     # snapshot: how many judged cases carried a root-snapshot context
-    # (DND-1448), and how many snapshot cases were left out, n/a, because
-    # their window was incomplete (DND-1483; named in
-    # window_incomplete_excluded).
+    # (DND-1448). The cases left out, n/a, for an incomplete window are
+    # named once, in window_incomplete_excluded (DND-1483).
     { "context" => { "inbox_files" => context[:files], "built" => context[:built], "context_unavailable" => context[:unavailable].map { |u| u[:case_id] },
                      "snapshot" => context[:snapshot] } }
   end
 
-  # gather_candidates(opts, cases, window_incomplete, out) -> {files:, candidates: {case_id => [candidate]}, snapshot:}.
+  # gather_candidates(opts, cases, out) -> {files:, candidates: {case_id => [candidate]}, snapshot:}.
   # In memory only: the inbox lines are never copied to a second file.
-  def gather_candidates(opts, cases, window_incomplete, out)
+  def gather_candidates(opts, cases, out)
     owned = cases.count { |c| c["input"].is_a?(Hash) && c["input"]["user"] == opts[:owner] }
     if owned.zero?
       # The labels are the owner's roots (D7), so an overlay id that matches
@@ -533,7 +532,7 @@ module Manager
     out.puts "snapshot context: #{snap[:cases]} of #{cases.size} case(s)" if snap[:cases].positive?
     owner_lines = by_case.values.sum { |cands| cands.count { |cand| cand["user"] == opts[:owner] } }
     out.puts "context candidates: #{by_case.values.sum(&:size)} line(s), #{owner_lines} the owner's, for #{with_any} of #{cases.size} case(s)"
-    { files: inbox[:files], candidates: by_case, snapshot: { "cases" => snap[:cases], "window_incomplete" => window_incomplete } }
+    { files: inbox[:files], candidates: by_case, snapshot: { "cases" => snap[:cases] } }
   end
 
   # build_contexts(cases, inbox, origin, token, opts, out, err) -> {cases:, built:, unavailable:, files:}.

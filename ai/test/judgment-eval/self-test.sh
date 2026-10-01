@@ -493,7 +493,7 @@ eq "exactly one file is written: the run file, no second corpus [DND-1048]" \
 eq "the run file records the case as unscored context_unavailable [DND-1048]" \
   "$(jq -c '[.results[] | select(.reason == "context_unavailable") | .case_id]' "${run_file}")" '["Ev-r1"]'
 eq "the run file names the inbox files [DND-1048]" "$(jq -c .context.inbox_files "${run_file}")" '["custom-slack.jsonl","walt_ui-slack.jsonl"]'
-eq "the run file counts the root-snapshot contexts, 0 for a live-inbox corpus [DND-1448]" "$(jq -c .context.snapshot "${run_file}")" '{"cases":0,"window_incomplete":0}'
+eq "the run file counts the root-snapshot contexts, 0 for a live-inbox corpus [DND-1448]" "$(jq -c .context.snapshot "${run_file}")" '{"cases":0}'
 for text in ROOT-ONE ROOT-TWO OWNER-EARLIER OTHER-SECRET; do
   if grep -q "${text}" "${run_file}"; then bad "the run file holds no text (${text}) [DND-1048]"; else ok "the run file holds no text (${text}) [DND-1048]"; fi
 done
@@ -577,6 +577,7 @@ SNAPCORPUS="${TMP}/snap-roots.jsonl"
 {
   printf '{"channel":"D1","user":"%s","ts":"1790570000.000100","thread_ts":null,"text":"ROOT-ONE","kind":"im","event_id":"Ev-r1","snapshot":{"at":"2026-10-01T00:00:00Z","window_complete":true,"context_candidates":[]}}\n' "${OWNER_ID}"
   printf '{"channel":"D2","user":"%s","ts":"1790571000.000100","thread_ts":null,"text":"ROOT-TWO","kind":"mpim","event_id":"Ev-r2","snapshot":{"at":"2026-10-01T00:00:00Z","window_complete":false,"context_candidates":[]}}\n' "${OWNER_ID}"
+  printf '{"channel":"D4","user":"%s","ts":"1790572000.000100","thread_ts":null,"text":"harness session: hi","kind":"im","event_id":"Ev-sm","snapshot":{"at":"2026-10-01T00:00:00Z","window_complete":true,"context_candidates":[]}}\n' "${OWNER_ID}"
 } > "${SNAPCORPUS}"
 snapr() { run --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${SNAPCORPUS}" --content-domain work --pause 0 --inbox-root "${INBOX}" "$@"; }
 rm -f "${TMP}/context.json"
@@ -596,7 +597,7 @@ eq "only the complete-window case is sent to the eval [DND-1483]" "$(eval_reques
 run_file="$(find "${XDG_DATA_HOME}/athena/evals/runs" -maxdepth 1 -type f | head -n 1)"
 eq "the run file names the excluded case [DND-1483]" "$(jq -c .window_incomplete_excluded "${run_file}")" '["Ev-r2"]'
 eq "the run file never records the excluded case as a result [DND-1483]" "$(jq -c '[.results[] | select(.case_id == "Ev-r2")] | length' "${run_file}")" "0"
-eq "the run file counts the snapshot cases kept and the windows excluded [DND-1483]" "$(jq -c .context.snapshot "${run_file}")" '{"cases":1,"window_incomplete":1}'
+eq "the run file counts only the snapshot cases kept; the excluded are named once [DND-1483]" "$(jq -c .context.snapshot "${run_file}")" '{"cases":1}'
 
 # Every case incomplete: nothing is a measurement, nothing is sent.
 printf '{"id":"Ev-r2","label":"walt_ui","provenance":"owner_confirmed"}\n' > "${TMP}/labels-incomplete.jsonl"
@@ -605,6 +606,19 @@ run --use-case slack_routing --labels "${TMP}/labels-incomplete.jsonl" --corpus 
 eq "every case window-incomplete exits 3: nothing scored [DND-1483]" "${RC}" "3"
 has "it says why nothing is a measurement, with a Fix [DND-1483]" "${ERR}" "every joined case the router would judge (1) had an incomplete context window, so none is a measurement and nothing was sent. Fix: "
 eq "it makes no request [DND-1483]" "$(requests)" "0"
+run --use-case slack_routing --labels "${TMP}/labels-incomplete.jsonl" --corpus "${SNAPCORPUS}" --content-domain work --inbox-root "${INBOX}" --dry-run
+eq "every case window-incomplete exits 3 under --dry-run too [DND-1483]" "${RC}" "3"
+eq "the dry run makes no request either [DND-1483]" "$(requests)" "0"
+
+# A session-mention root beside a window-incomplete one: nothing is left to
+# measure, which is exit 3 (nothing scored), not exit 1 (every joined label
+# a session mention). Both exclusions are counted.
+printf '{"id":"Ev-sm","label":"harness","provenance":"rule_confirmed"}\n{"id":"Ev-r2","label":"walt_ui","provenance":"owner_confirmed"}\n' > "${TMP}/labels-mixed.jsonl"
+run --use-case slack_routing --labels "${TMP}/labels-mixed.jsonl" --corpus "${SNAPCORPUS}" --content-domain work --pause 0 --inbox-root "${INBOX}"
+eq "session-mention plus window-incomplete, nothing left: exit 3, not 1 [DND-1483]" "${RC}" "3"
+has "the session-mention root is counted [DND-1483]" "${OUT}" "session-mention excluded: 1"
+has "the window-incomplete root is named [DND-1483]" "${OUT}" "window-incomplete excluded: 1 (n/a, not scored: the root's context window had partly rotated out of the inbox when it was snapshotted): Ev-r2"
+eq "the mixed run makes no request [DND-1483]" "$(requests)" "0"
 
 echo "== slack_routing: the owner id comes from the private overlay (DND-1048 x DND-704)"
 
