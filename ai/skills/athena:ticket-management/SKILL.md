@@ -666,6 +666,13 @@ authoritative.
   epic and its design sub-docs, and tickets link to it via the `Epic` relation
   and carry `Depends On`↔`Blocks` edges for sequencing. A finding gets such an
   edge onto a planned ticket only per *Priority: critical path first*.
+- **A ticket has exactly one `Epic`.** Moving a ticket to another epic
+  REPLACES its `Epic` relation; never append a second epic. A relation naming
+  more than one page resolves the ticket's project as `failed`
+  (`ai/contracts/athena-events.md` → *A ticket's project*), so gen_saas's
+  resync logs `ambiguous_epic` for it every hour and its project is unknown.
+  Measured 2026-10-01: an admiral added a second epic to DND-1027 at 16:02Z;
+  the coordinator found it by the resync failures at 17:01Z.
 - Put the *why* on the ticket, not just in chat — a `Needs Attention` ticket must carry
   the context Cody needs to decide, in its body.
 - **Put a finding's evidence IN the ticket body, not only a path to it.** Copy the
