@@ -58,8 +58,9 @@ wait_file() {
 # stat_state <pid> -- the kernel's one-letter state, read directly (the
 # fixture's own premise check; never the helper under test).
 stat_state() {
-  local s
-  { IFS= read -r s <"/proc/$1/stat"; } 2>/dev/null || return 1
+  local s=""
+  { IFS= read -r -d '' s <"/proc/$1/stat"; } 2>/dev/null
+  [ -n "${s}" ] || return 1
   s="${s##*) }"; printf '%s\n' "${s%% *}"
 }
 
@@ -75,11 +76,13 @@ await_state() {
 # process group and never waits on it. Sets HOLDER and TARGET (the sleep's
 # pid, which is also its process-group id).
 HOLDER=""; TARGET=""
+# An optional second argument is the program to spawn instead of `sleep 600`.
 start_holder() {
-  local ready="${TMP}/$1.ready"
-  "${RUBY}" -e 'pid = Process.spawn("sleep", "600", pgroup: true)
+  local ready="${TMP}/$1.ready" prog="${2:-}"
+  "${RUBY}" -e 'cmd = ARGV[1].empty? ? ["sleep", "600"] : [ARGV[1]]
+                pid = Process.spawn(*cmd, pgroup: true)
                 File.write(ARGV[0] + ".tmp", pid.to_s); File.rename(ARGV[0] + ".tmp", ARGV[0])
-                sleep' "${ready}" >/dev/null 2>&1 &
+                sleep' "${ready}" "${prog}" >/dev/null 2>&1 &
   HOLDER=$!; PIDS+=("${HOLDER}")
   TARGET=""
   wait_file "${ready}" 300 || return 1
@@ -175,6 +178,30 @@ if [ -n "${TARGET}" ]; then
   err="$(proc_group_running "x" 2>&1 >/dev/null)"; rc=$?
   [ "${rc}" -eq 2 ] && grep -q 'Fix:' <<<"${err}" && ok "P-5 a malformed pgid -> rc 2 with a Fix:" || bad "P-5 a malformed pgid -> rc 2" "rc=${rc} err=${err}"
 fi
+
+# ---------------------------------------------------------------------------
+printf '\nP-6  a process name holding ") Z (" and a newline is parsed after the LAST ") "\n'
+# The kernel names a script's process after the script file, so this name is
+# the process name. A first-line or first-") " parse would read state "Z".
+WEIRD="${TMP}/x) Z ("$'\n'"y"
+printf '#!/bin/bash\nwhile :; do sleep 600; done\n' >"${WEIRD}"; chmod +x "${WEIRD}"
+start_holder p6 "${WEIRD}" || bad "P-6 fixture" "the holder never reported its child"
+if [ -n "${TARGET}" ]; then
+  START="$(proc_starttime "${TARGET}")"; rc=$?
+  [ "${rc}" -eq 0 ] && _proc_state_posint "${START}" && ok "P-6 its start time parses (${START})" || bad "P-6 its start time parses" "rc=${rc} start=${START:-none}"
+  proc_running "${TARGET}" "${START}"; rc=$?
+  [ "${rc}" -eq 0 ] && ok "P-6 it reads running (rc 0), not a zombie" || bad "P-6 it reads running" "rc=${rc}"
+  kill -9 -- "-${TARGET}"    # the group: the script and its sleep
+  if await_state "${TARGET}" Z; then
+    proc_running "${TARGET}"; rc=$?
+    [ "${rc}" -eq 1 ] && ok "P-6 killed, it reads not running (rc 1)" || bad "P-6 killed, it reads not running" "rc=${rc}"
+  else
+    bad "P-6 fixture: the killed target becomes a zombie" "state=$(stat_state "${TARGET}" || echo gone)"
+  fi
+fi
+sleep 0 & GONE=$!; wait "${GONE}"
+proc_starttime "${GONE}" >/dev/null 2>&1; rc=$?
+[ "${rc}" -eq 1 ] && ok "P-6 proc_starttime of a reaped pid -> rc 1" || bad "P-6 proc_starttime of a reaped pid -> rc 1" "rc=${rc}"
 
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi

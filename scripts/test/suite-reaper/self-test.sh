@@ -317,18 +317,20 @@ fi
 printf '#!%s\n%q & printf "%%s\\n" "$!" >"$1"\n' "${BASH}" "${TMP}/spin.sh" >"${TMP}/s13-launcher.sh"
 run_fixture s13 '. "${LIB}"; . "${LIB%/*}/proc-state.bash"; suite_reaper_begin "$@"
 trap suite_reap_tagged EXIT
-left=0
+left=0; blind=0
 for i in $(seq 1 30); do
   bash '"${TMP}"'/s13-launcher.sh '"${TMP}"'/s13.pid
   c="$(cat '"${TMP}"'/s13.pid)"
   suite_reap_tagged 2>/dev/null
   # proc_running, never kill -0 (DND-1550): the reap leaves the orphan a
   # ZOMBIE until PID 1 reaps it, and kill -0 succeeds on a zombie.
-  if proc_running "$c"; then left=$((left+1)); kill -9 "$c"; fi
+  # rc 2/3 (an unread or malformed pid) is never "reaped".
+  proc_running "$c"; prc=$?
+  case "${prc}" in 0) left=$((left+1)); kill -9 "$c" ;; 1) ;; *) blind=$((blind+1)) ;; esac
 done
-echo "survived=${left}"'
+echo "survived=${left} unread=${blind}"'
 S13="$(cat "${TMP}/s13.out")"
-if [ "${S13}" = "survived=0" ] && gone "${MARK}"; then
+if [ "${S13}" = "survived=0 unread=0" ] && gone "${MARK}"; then
   ok "S13 an orphaned exec-spinner never survives suite_reap_tagged (30 of 30 rounds)"
 else
   bad "S13 an orphaned exec-spinner never survives suite_reap_tagged" "${S13:-no output} (of 30 rounds) survivors=$(survivors "${MARK}")"

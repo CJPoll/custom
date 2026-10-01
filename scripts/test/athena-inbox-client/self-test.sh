@@ -49,6 +49,9 @@ unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$(cd -- "${HERE}/../.." && pwd -P)"
+# DND-1550: "is it gone" is read from the kernel state, never `kill -0`.
+# shellcheck source=scripts/test/lib/proc-state.bash
+. "${SCRIPTS}/test/lib/proc-state.bash"
 
 # DND-818: tag this run so cleanup reaps EVERY process it started, including
 # one whose pid it never learned (a signal between `&` and the pid append;
@@ -904,6 +907,7 @@ SUPERVISOR_PID=$!
 
 if wait_for_nonempty "${STUB_PID}" 100; then
   orphan="$(tr -d '[:space:]' < "${STUB_PID}")"
+  orphan_start="$(proc_starttime "$orphan" 2>/dev/null)"
   kill -9 "$SUPERVISOR_PID" 2>/dev/null
   wait "$SUPERVISOR_PID" 2>/dev/null
   SUPERVISOR_PID=""
@@ -933,7 +937,11 @@ if wait_for_nonempty "${STUB_PID}" 100; then
     ok "an orphaned client does not lock out the next supervisor forever"
   fi
 
-  if ! kill -0 "$orphan" 2>/dev/null; then
+  # Judged on the kernel state, never `kill -0` (DND-1550): on its SIGKILL
+  # fallback the runner does not wait, and the orphan (init's child) stays a
+  # ZOMBIE until PID 1 reaps it, which kill -0 reads as alive. The bound only
+  # caps a hang; an orphan nobody signalled runs its 30 s stub and still fails.
+  if proc_wait_gone "$orphan" 300 ${orphan_start:+"$orphan_start"}; then
     ok "the orphaned client is terminated, never left running beside a new one"
   else
     bad "the orphaned client is terminated, never left running beside a new one" \

@@ -5,6 +5,7 @@
 # killed it stays a zombie until the suite reaps it. No load, no repeated runs;
 # each bounded wait only caps a hang.
 
+require "tmpdir"
 require_relative "../../lib/proc_state"
 
 $pass = 0
@@ -21,7 +22,8 @@ end
 
 def state(pid)
   raw = File.read("/proc/#{pid}/stat")
-  raw[(raw.rindex(") ") + 2)..].split.first
+  cut = raw.rindex(") ")
+  cut && raw[(cut + 2)..].split.first
 rescue SystemCallError
   nil
 end
@@ -66,6 +68,26 @@ begin
   r = Process.spawn("true")
   Process.wait(r)
   check("R-3 a reaped pid is not running", !ProcState.running?(r))
+
+  # R-5: a process name holding ") Z (" and a newline. The kernel names a
+  # script's process after the script file; a first-line or first-") " parse
+  # would read state "Z".
+  Dir.mktmpdir("proc-state-r5") do |dir|
+    weird = File.join(dir, "x) Z (\ny")
+    File.write(weird, "#!/bin/bash\nwhile :; do sleep 600; done\n")
+    File.chmod(0o755, weird)
+    w = Process.spawn(weird, pgroup: true, out: File::NULL, err: File::NULL)
+    pids << w
+    ws = ProcState.starttime(w)
+    check("R-5 its start time parses", ws.to_s.match?(/\A[0-9]+\z/), ws.inspect)
+    check("R-5 it is running, not a zombie", ProcState.running?(w, start: ws))
+    Process.kill("KILL", -w) # the group: the script and its sleep
+    if await_state(w, "Z")
+      check("R-5 killed, it is not running", !ProcState.running?(w))
+    else
+      check("R-5 fixture: the killed target becomes a zombie", false, "state=#{state(w).inspect}")
+    end
+  end
 
   # R-4: malformed input is an error, never "gone".
   ["", nil, "abc", "0", "-5", "12x"].each do |bad|

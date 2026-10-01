@@ -9,8 +9,10 @@
 # gone" is an event to wait on (bounded, to cap a hang), judged on the
 # kernel's state letter in /proc/<pid>/stat.
 #
-# A malformed pid is an ArgumentError, never "gone". /proc/<pid> present but
-# its stat unreadable is ProcState::Unreadable, never "gone" either.
+# A malformed pid is an ArgumentError, never "gone". Could-not-look (no /proc,
+# or a stat that is unreadable, empty or short) is ProcState::Unreadable,
+# never "gone" either. The name may hold ") " or a newline, so the fields are
+# taken after the LAST ") ".
 module ProcState
   class Unreadable < StandardError; end
 
@@ -20,17 +22,23 @@ module ProcState
   # nil when the process does not exist.
   def fields(pid)
     pid = check_pid(pid)
+    blind("/proc") unless File.readable?("/proc/self/stat")
     raw = begin
       File.read("/proc/#{pid}/stat")
     rescue Errno::ENOENT, Errno::ESRCH
       return nil
     rescue SystemCallError => e
-      raise Unreadable, "/proc/#{pid}/stat exists but could not be read (#{e.class}). " \
-                        "Fix: run as the user that owns the process, with /proc mounted."
+      blind("/proc/#{pid}/stat (#{e.class})")
     end
-    return nil if raw.empty?
+    cut = raw.rindex(") ")
+    f = cut ? raw[(cut + 2)..].split : []
+    blind("/proc/#{pid}/stat (empty or short)") if f.size < 20
+    f
+  end
 
-    raw[(raw.rindex(") ") + 2)..].split
+  def blind(what)
+    raise Unreadable, "#{what} could not be read, so whether the process is running is unknown " \
+                      "(never read as gone). Fix: run on Linux with /proc mounted, as the user that owns the process."
   end
 
   def starttime(pid)

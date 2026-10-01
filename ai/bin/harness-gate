@@ -2721,6 +2721,7 @@ def self_test_reap
     # real tagged sleep plus an unknown.
     part_tag = ReapTags.new_tag("selftest-partial")
     part = Process.spawn(ReapTags.env_with(part_tag), "sleep", "311", out: File::NULL, err: File::NULL)
+    part_start = ProcState.starttime(part)
     real_tp = ReapTags.method(:tagged_pids)
     ReapTags.define_singleton_method(:tagged_pids) do |*_a, **_k|
       found = begin
@@ -2742,7 +2743,7 @@ def self_test_reap
     # The KILL lands asynchronously, so dead is an event to wait on, judged on
     # the kernel state (a zombie is dead), never an instant WNOHANG/kill(0)
     # (DND-1550). The bound only caps a hang. Then reap our own child.
-    part_dead = ProcState.wait_gone(part, timeout: 30)
+    part_dead = ProcState.wait_gone(part, timeout: 30, start: part_start)
     Process.wait(part) rescue nil if part_dead
     expect.call(part_err && part_err.killed.any? { |(p, _)| p == part } && part_dead,
                 "a partial scan did not kill the tagged process it confirmed before failing " \
