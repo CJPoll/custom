@@ -167,7 +167,7 @@ end
 # ---------------------------------------------------------------------------
 
 PARSER = T::TicketRefs.parser
-check("unit: the lead-time ticket-ref parser loads") { PARSER.respond_to?(:call) }
+check("unit: the shared ticket-ref parser (ai/lib/ticket_ref.rb) loads") { PARSER.respond_to?(:call) }
 check("unit: env_unit wins: source env") do
   T::Unit.parse(branch: "dnd-1463-receipt-base", env_unit: "DND-7", ticket_ref: PARSER)[0, 2] == ["DND-7", "env"]
 end
@@ -204,7 +204,11 @@ NAMESPACE_PROBE = File.expand_path("caller_namespace_probe.rb", __dir__)
 namespace_out, namespace_err, namespace_st = Open3.capture3(
   "/usr/bin/ruby", NAMESPACE_PROBE, File.expand_path("../../lib/athena_telemetry.rb", __dir__),
 )
-NAMESPACE = (namespace_st.success? && JSON.parse(namespace_out)) || { "error" => namespace_err }
+NAMESPACE = begin
+  (namespace_st.success? && JSON.parse(namespace_out)) || { "error" => namespace_err }
+rescue JSON::ParserError => e
+  { "error" => "#{e.message}: #{namespace_out[0, 200]}" }
+end
 check("unit: the parser loads beside a CLI's own top-level helpers (#{NAMESPACE['error']})") do
   NAMESPACE["parser"] == true && NAMESPACE["ref"] == "DND-1463"
 end

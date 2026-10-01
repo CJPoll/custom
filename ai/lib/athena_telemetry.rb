@@ -246,8 +246,9 @@ module AthenaTelemetry
     module_function
 
     # ticket_ref: a callable branch -> ticket ref or nil (the shared parser
-    # in ai/lib/ticket_ref.rb, which ai/bin/lead-time uses too). nil, a :unavailable answer, or a raise means the
-    # parser is unavailable: the branch name is the unit, and it is counted.
+    # in ai/lib/ticket_ref.rb, which ai/bin/lead-time uses too). nil, a
+    # :unavailable answer, or a raise means the parser is unavailable: the
+    # branch name is the unit, and it is counted.
     # -> [unit, unit_source, drops].
     def parse(branch:, env_unit:, ticket_ref:, explicit: nil)
       drops = []

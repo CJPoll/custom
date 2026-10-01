@@ -15,6 +15,8 @@ The implementation:
 - `ai/bin/telemetry-emit`: the CLI over the same library, for shell emitters,
   pruning and summaries (*The CLI*).
 - `ai/telemetry/events.json`: the event registry (*The registry*).
+- `ai/lib/ticket_ref.rb`: the shared ticket-ref parser (*Unit of work*),
+  which `ai/bin/lead-time` requires too.
 - Tests: `ai/test/telemetry/self-test.sh`, `ai/test/telemetry/telemetry_test.rb`,
   and the shell binding's `ai/test/telemetry-shell/self-test.sh`.
 
@@ -110,12 +112,14 @@ the store's own append; in-process I/O has no bound that kills it.
 Step 3 uses the ticket-ref parser `ai/bin/lead-time` uses,
 `ai/lib/ticket_ref.rb` (`TicketRef.ticket_ref`): one parser, not two. That
 library defines only the `TicketRef` module, so loading it never reaches the
-caller's namespace.
+caller's namespace. (The writer also requires `ai/lib/dispatch_trackers.rb`
+for the DND prefix, which defines its own top-level modules.)
 
 **Later (2026-10-01, DND-1488):** the writer loaded `ai/bin/lead-time`
 itself, wrapped with `load(path, Module.new)`. Superseded by the shared
-library: every emitting process also loaded lead-time's Notion and forge
-classes, and a CLI file is the wrong home for a shared parser.
+library: every emitting process also loaded lead-time's own Notion-start and
+forge classes (`NotionStart`, `GitHubForge`, `GitLabForge`), and a CLI file
+is the wrong home for a shared parser.
 
 A DND ref always counts. A branch naming any other ticket-shaped ref
 also reads the private overlay's work-ticket prefix, as `lead-time` does, so a

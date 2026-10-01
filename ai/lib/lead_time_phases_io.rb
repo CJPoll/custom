@@ -279,8 +279,9 @@ module LeadTimePhasesIO
   end
 
   # The ticket a PR row names: the SAME parser the telemetry writer resolves
-  # `unit` with (AthenaTelemetry::TicketRefs, which loads ai/bin/lead-time's
-  # ticket-ref parser wrapped), so the join key matches by construction.
+  # `unit` with (AthenaTelemetry::TicketRefs, which requires the shared parser
+  # ai/lib/ticket_ref.rb that ai/bin/lead-time uses too), so the join key
+  # matches by construction.
   module TicketFor
     module_function
 
@@ -291,7 +292,7 @@ module LeadTimePhasesIO
       return [row["ticket"], nil] if row.key?("ticket")
 
       parser = AthenaTelemetry::TicketRefs.parser
-      return [nil, "the ticket-ref parser (ai/bin/lead-time) did not load"] unless parser
+      return [nil, "the ticket-ref parser (ai/lib/ticket_ref.rb) did not load"] unless parser
 
       fault = false
       [row["branch"], row["title"]].each do |text|
