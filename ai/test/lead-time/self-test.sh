@@ -186,8 +186,9 @@ pr_case() { # pr_case <label> <want-code> <needle> <repo> <bindir> <flag>
 stub "${TMP}/gh-offline" gh "" "error connecting to api.github.com"
 stub "${TMP}/gh-401" gh "" "HTTP 401: Bad credentials (https://api.github.com/graphql)"
 stub "${TMP}/gh-norepo" gh "" "GraphQL: Could not resolve to a Repository with the name 'example-org/example-repo'. (repository)"
-stub "${TMP}/gh-garbage" gh "" ""
+mkdir -p "${TMP}/gh-garbage"
 printf '#!/bin/sh\necho "not json"\nexit 0\n' >"${TMP}/gh-garbage/gh"
+chmod +x "${TMP}/gh-garbage/gh" # a non-executable stub falls through to the real gh
 stub "${TMP}/gl-nomr" glab '{"message":"404 Not found"}' "glab: 404 Not found (HTTP 404)"
 stub "${TMP}/gl-noproj" glab '{"message":"404 Project Not Found"}' "glab: 404 Project Not Found (HTTP 404)"
 stub "${TMP}/gl-401" glab '{"message":"401 Unauthorized"}' "glab: 401 Unauthorized (HTTP 401)"
@@ -218,6 +219,17 @@ if [ "${OFF_CODE}" -ne "${PR_CODE}" ] && grep -q 'could not measure' "${TMP}/off
   ok "an offline forge (exit ${OFF_CODE}) and a missing PR (exit ${PR_CODE}) have distinct codes and words"
 else
   bad "an offline forge and a missing PR are told apart" "offline=${OFF_CODE} missing=${PR_CODE} err=$(head -c 240 "${TMP}/off-err")"
+fi
+
+# A missing PR gets exactly one Fix:, the one about the number. A generic auth
+# Fix: printed first (run_json's, before DND-1510) sent that reader to auth.
+PATH="${NFBIN}:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" --pr 424242 >/dev/null 2>"${TMP}/nf-err" </dev/null
+NF_FIXES="$(grep -c 'Fix:' "${TMP}/nf-err")"
+if [ "${NF_FIXES}" -eq 1 ] && grep -q 'Fix: check the PR/MR number' "${TMP}/nf-err" \
+   && ! grep -q 'auth status' "${TMP}/nf-err"; then
+  ok "a missing PR prints one Fix:, about the number, not about auth"
+else
+  bad "a missing PR prints one Fix:, about the number" "fixes=${NF_FIXES} err=$(head -c 300 "${TMP}/nf-err")"
 fi
 
 run --help --bogus

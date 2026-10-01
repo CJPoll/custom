@@ -474,10 +474,12 @@ module LeadTime
   # real CLIs: gh prints "GraphQL: Could not resolve to a PullRequest ..." for
   # a missing PR and "... to a Repository ..." for a missing repo; glab prints
   # "glab: 404 Not found (HTTP 404)" for a missing MR and "glab: 404 Project
-  # Not Found (HTTP 404)" for a missing or unreadable project.
+  # Not Found (HTTP 404)" for a missing or unreadable project. The glab match
+  # is case-sensitive: GitLab's unknown-route 404 and a proxy's 404 read
+  # "404 Not Found", and either means the forge was not reached as asked.
   REQUEST_NOT_FOUND = {
     "gh" => /Could not resolve to a PullRequest\b/,
-    "glab" => /\b404 Not found \(HTTP 404\)/i,
+    "glab" => /\b404 Not found \(HTTP 404\)/,
   }.freeze
 
   # cmd: the probe's printable command; detail: what the forge said.
@@ -552,8 +554,10 @@ def run_json(cmd, dir)
   printable = "#{cmd.first} #{cmd[1..].join(' ')}"
   out, err, st = Open3.capture3(*cmd, chdir: dir)
   unless st.success?
+    # No Fix: here. Every recorded failure ends in a path that classifies it
+    # and prints the Fix: (SCAN INCOMPLETE, or report_lookup_miss); a generic
+    # auth hint printed first misdirects a reader whose PR is missing.
     warn "lead-time: #{printable} failed: #{err.strip}"
-    warn "Fix: run against a repo whose forge you can read (`gh auth status` / `glab auth status`)."
     return ProbeFailures.record(printable, err)
   end
   JSON.parse(out)
@@ -1427,6 +1431,8 @@ def self_test
              :tool_error)
   check.call("tool error: glab missing project",
              LeadTime.lookup_miss([nf.call(gl_mr, "glab: 404 Project Not Found (HTTP 404)")]), :tool_error)
+  check.call("tool error: glab unknown-route or proxy 404 (capital F)",
+             LeadTime.lookup_miss([nf.call(gl_mr, "glab: 404 Not Found (HTTP 404)")]), :tool_error)
   check.call("tool error: a gh shape from glab is not a glab miss",
              LeadTime.lookup_miss([nf.call(gl_mr, "Could not resolve to a PullRequest")]), :tool_error)
   check.call("tool error: an unknown tool",
@@ -1724,8 +1730,8 @@ def main(argv)
     unless since
       warn "lead-time: usage error — #{why}."
       warn "Fix: pass --since as #{LeadTime::SINCE_FORMS}."
-      # 1, like every other usage error: 2 means a requested PR/MR was not
-      # found or not readable, and a malformed argument must not read as a
+      # 1, like every other usage error: 2 means the forge says a requested
+      # PR/MR does not exist, and a malformed argument must not read as a
       # failed lookup (DND-1489).
       return 1
     end
