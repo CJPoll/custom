@@ -11,6 +11,7 @@
 # Fixture ids are synthetic.
 
 require "json"
+require "open3"
 require "tmpdir"
 require "fileutils"
 require "stringio"
@@ -162,7 +163,7 @@ check("registry: it holds the events the emitter tickets need") do
 end
 
 # ---------------------------------------------------------------------------
-# Domain: Unit.parse (with the ticket-ref parser lead-time uses)
+# Domain: Unit.parse (with the shared ticket-ref parser, ai/lib/ticket_ref.rb)
 # ---------------------------------------------------------------------------
 
 PARSER = T::TicketRefs.parser
@@ -193,6 +194,25 @@ check("unit: an env unit with a newline is ignored and counted") do
 end
 check("unit: no parser (it failed to load) counts and falls back to the branch name") do
   T::Unit.parse(branch: "dnd-1463-x", env_unit: nil, ticket_ref: nil) == ["dnd-1463-x", "branch-name", ["unit_parser_unavailable"]]
+end
+
+# DND-1488: the parser is the shared library, so loading it leaves an
+# emitting CLI's own top-level helpers alone and brings in none of
+# lead-time's Notion or forge classes. A fresh process, so this suite's own
+# requires cannot mask either.
+NAMESPACE_PROBE = File.expand_path("caller_namespace_probe.rb", __dir__)
+namespace_out, namespace_err, namespace_st = Open3.capture3(
+  "/usr/bin/ruby", NAMESPACE_PROBE, File.expand_path("../../lib/athena_telemetry.rb", __dir__),
+)
+NAMESPACE = (namespace_st.success? && JSON.parse(namespace_out)) || { "error" => namespace_err }
+check("unit: the parser loads beside a CLI's own top-level helpers (#{NAMESPACE['error']})") do
+  NAMESPACE["parser"] == true && NAMESPACE["ref"] == "DND-1463"
+end
+check("unit: loading the parser does not clobber a CLI's main, usage or parse_cli") do
+  NAMESPACE.values_at("main", "usage", "parse_cli") == %w[caller-main caller-usage caller-parse_cli]
+end
+check("unit: loading the parser brings in none of lead-time's classes (#{NAMESPACE['lead_time_loaded']})") do
+  NAMESPACE["lead_time_loaded"] == []
 end
 
 # ---------------------------------------------------------------------------

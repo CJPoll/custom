@@ -306,8 +306,8 @@ module LeadTimePhasesIO
     end
   end
 
-  # ai/bin/lead-time's own --since rule, loaded WRAPPED (as the telemetry
-  # writer loads it) so the two tools accept exactly the same WHEN.
+  # ai/bin/lead-time's own --since rule, loaded WRAPPED in its own module so
+  # the two tools accept exactly the same WHEN.
   module LeadTimeLib
     PATH = File.expand_path("../bin/lead-time", __dir__)
 

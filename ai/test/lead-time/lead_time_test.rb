@@ -582,6 +582,12 @@ end
 check("a cron lane branch names no ticket") do
   LeadTime.ticket_ref(branch: "shipwright/run-20260930-1234", title: "shipwright: x")[0].nil?
 end
+check("lead-time holds no parser of its own: it is ai/lib/ticket_ref.rb (DND-1488)") do
+  !LeadTime.const_defined?(:TICKET_REF_RE, false) &&
+    LeadTime.refs_in("dnd-1-zq-22") == TicketRef.refs_in("dnd-1-zq-22") &&
+    LeadTime.ticket_ref(branch: "zq-9-x", title: nil, prefixes: ["ZQ"]) ==
+      TicketRef.ticket_ref(branch: "zq-9-x", title: nil, prefixes: ["ZQ"])
+end
 check("the start query goes to DND Tickets by ID") do
   fake = FakeNotion.new(1203 => at_prop("2026-09-30T02:41:00.000Z"))
   NotionStart.new(fake).lookup("DND-1203")

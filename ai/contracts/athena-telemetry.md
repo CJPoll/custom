@@ -107,10 +107,17 @@ refuses anything that is not a regular file), so neither can block on another
 process. A filesystem stuck in the kernel can still stall them, as it stalls
 the store's own append; in-process I/O has no bound that kills it.
 
-Step 3 uses the ticket-ref parser `ai/bin/lead-time` uses
-(`LeadTime.ticket_ref`): one parser, not two. The writer loads that file
-wrapped in its own module, so its top-level helpers never reach the caller's
-namespace. A DND ref always counts. A branch naming any other ticket-shaped ref
+Step 3 uses the ticket-ref parser `ai/bin/lead-time` uses,
+`ai/lib/ticket_ref.rb` (`TicketRef.ticket_ref`): one parser, not two. That
+library defines only the `TicketRef` module, so loading it never reaches the
+caller's namespace.
+
+**Later (2026-10-01, DND-1488):** the writer loaded `ai/bin/lead-time`
+itself, wrapped with `load(path, Module.new)`. Superseded by the shared
+library: every emitting process also loaded lead-time's Notion and forge
+classes, and a CLI file is the wrong home for a shared parser.
+
+A DND ref always counts. A branch naming any other ticket-shaped ref
 also reads the private overlay's work-ticket prefix, as `lead-time` does, so a
 work branch resolves on a machine with the overlay. A word shaped like a ticket
 (`fix-utf-8`) is not one, and the branch name is the unit.

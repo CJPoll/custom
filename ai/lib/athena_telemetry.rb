@@ -12,8 +12,8 @@
 # Buckets:
 #   DOMAIN (pure)   Label, Event, Registry, Unit, Retention
 #   SIDE EFFECTS    Store (every file read and write), GitContext (one bounded `git rev-parse`),
-#                   TicketRefs (loads the ticket-ref parser ai/bin/lead-time
-#                   uses), Clock, Host
+#                   TicketRefs (loads the shared ticket-ref parser
+#                   ai/lib/ticket_ref.rb and reads the overlay), Clock, Host
 #   MANAGER         AthenaTelemetry.emit, .read, .prune
 #
 # FAILS OPEN, OBSERVABLY. emit never raises, never retries, and never changes
@@ -245,8 +245,8 @@ module AthenaTelemetry
   module Unit
     module_function
 
-    # ticket_ref: a callable branch -> ticket ref or nil (the parser
-    # ai/bin/lead-time uses). nil, a :unavailable answer, or a raise means the
+    # ticket_ref: a callable branch -> ticket ref or nil (the shared parser
+    # in ai/lib/ticket_ref.rb, which ai/bin/lead-time uses too). nil, a :unavailable answer, or a raise means the
     # parser is unavailable: the branch name is the unit, and it is counted.
     # -> [unit, unit_source, drops].
     def parse(branch:, env_unit:, ticket_ref:, explicit: nil)
@@ -497,14 +497,13 @@ module AthenaTelemetry
     end
   end
 
-  # The ticket-ref parser ai/bin/lead-time uses (LeadTime.ticket_ref): one
-  # parser, not two. lead-time is a CLI with top-level helpers (main, usage),
-  # so it is loaded WRAPPED in its own module and never touches the caller's
-  # namespace. A branch naming a non-DND ref also reads the private overlay's
-  # work-ticket prefix, as lead-time does, so a work branch resolves locally.
+  # The ticket-ref parser ai/bin/lead-time uses: ai/lib/ticket_ref.rb
+  # (DND-1488), one parser, not two. It is a library that defines only the
+  # TicketRef module, so requiring it never touches the caller's namespace.
+  # It loads lazily, on the first emit that needs a unit from the branch. A
+  # branch naming a non-DND ref also reads the private overlay's work-ticket
+  # prefix, as lead-time does, so a work branch resolves locally.
   module TicketRefs
-    LEAD_TIME = File.expand_path("../bin/lead-time", __dir__)
-
     module_function
 
     # -> a callable branch -> ref or nil, or nil when the parser cannot load.
@@ -512,9 +511,8 @@ module AthenaTelemetry
       return @parser if defined?(@parser)
 
       @parser = begin
-        wrap = Module.new
-        load(LEAD_TIME, wrap)
-        @lead_time = wrap::LeadTime
+        require_relative "ticket_ref"
+        require_relative "dispatch_trackers"
         method(:ref_for)
       rescue ScriptError, StandardError, SystemExit
         nil
@@ -524,10 +522,10 @@ module AthenaTelemetry
     def ref_for(branch)
       dnd = ::DispatchTrackers::DND.prefix
       prefixes = [dnd]
-      others = @lead_time.refs_in(branch).reject { |r| r.start_with?("#{dnd}-") }
+      others = ::TicketRef.refs_in(branch).reject { |r| r.start_with?("#{dnd}-") }
       prefixes << work_prefix if !others.empty? && work_prefix
       @last_overlay_fault = !others.empty? && @overlay_fault == true
-      @lead_time.ticket_ref(branch: branch, title: nil, prefixes: prefixes).first
+      ::TicketRef.ticket_ref(branch: branch, title: nil, prefixes: prefixes).first
     end
 
     # The work tracker's prefix from the private overlay, or nil. An ABSENT
@@ -554,7 +552,7 @@ module AthenaTelemetry
     end
 
     def reset!
-      %i[@parser @lead_time @work_prefix @overlay_fault @last_overlay_fault].each do |v|
+      %i[@parser @work_prefix @overlay_fault @last_overlay_fault].each do |v|
         remove_instance_variable(v) if instance_variable_defined?(v)
       end
     end

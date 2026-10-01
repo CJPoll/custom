@@ -66,6 +66,7 @@ require "uri"
 require_relative "../lib/next_mission_notion"
 require_relative "../lib/dispatch_trackers"
 require_relative "../lib/dispatch_trackers_overlay"
+require_relative "../lib/ticket_ref"
 
 # Which workflow/stage counts as "the deploy" (overridable, not hardcoded to a
 # repo). GitHub: workflow name matches this regex. GitLab: job stage equals the
@@ -338,33 +339,14 @@ module LeadTime
     [nil, "no push in the base branch's activity log carried #{sha[0, 12]}"]
   end
 
-  # A ticket reference: 2-10 letters, a hyphen, a number (DND-1318, dnd-1318).
-  TICKET_REF_RE = /(?<![A-Za-z0-9])([A-Za-z]{2,10})-(\d{1,7})(?![0-9])/.freeze
-
-  # Which ticket a request works: the ticket its branch names, else the one
-  # its title names, counting only `prefixes` (the trackers that record a
-  # start: DND, and the work tracker's prefix when the overlay gives it,
-  # DND-1341). -> ["DND-1318", nil] or [nil, reason]. Ordinary words shaped
-  # like a ticket (resync-404, utf-8, ruby-34) are not one. Two different
-  # tickets in one place are not a guess. With no such ticket anywhere, the
-  # reason names any other ref it saw, and it is never a silent fallback to
-  # some other start.
+  # Which ticket a request works: the shared parser in ai/lib/ticket_ref.rb
+  # (DND-1488), which the telemetry writer requires too. One parser, not two.
   def ticket_ref(branch:, title:, prefixes: ["DND"])
-    names = prefixes.join(" or ")
-    places = [["branch", branch], ["title", title]]
-    places.each do |where, text|
-      refs = refs_in(text).select { |r| prefixes.include?(r.split("-", 2).first) }
-      return [refs.first, nil] if refs.size == 1
-      return [nil, "its #{where} names several #{names} tickets (#{refs.join(', ')})"] if refs.size > 1
-    end
-    others = places.flat_map { |_w, t| refs_in(t) }.uniq
-    return [nil, "it names no #{names} ticket (only #{others.join(', ')})"] unless others.empty?
-
-    [nil, "neither its branch nor its title names a ticket, so no In Progress time can be read"]
+    TicketRef.ticket_ref(branch: branch, title: title, prefixes: prefixes)
   end
 
   def refs_in(text)
-    text.to_s.scan(TICKET_REF_RE).map { |p, n| "#{p.upcase}-#{n}" }.uniq
+    TicketRef.refs_in(text)
   end
 
   # An In Progress stamp must carry its zone: Notion returns a start with no
