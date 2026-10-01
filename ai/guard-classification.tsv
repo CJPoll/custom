@@ -1,5 +1,9 @@
 # ai/guard-classification.tsv -- the classification ai/bin/check-guard-messages
 # enforces (DND-218). One line per first-party file: path<TAB>class<TAB>reason.
+# A guard needs no reason, so `path<TAB>guard` and `path<TAB>guard<TAB>` parse
+# the same. An editor that strips a guard row's trailing tab changes nothing;
+# do not repair it. (Measured 2026-10-01: DND-1354 and DND-1479 each re-inserted
+# such a row by script after the Edit tool dropped the tab.)
 #
 # Classes: guard (must carry Fix:) | tool | no-fail-path | library.
 # Every class but guard states the real reason the file has no guard failure
