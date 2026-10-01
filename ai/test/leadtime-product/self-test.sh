@@ -65,6 +65,7 @@ printf 'gh %s\n' "$*" >>"$FAKE/calls"
 if [ "$1 $2" = "pr view" ]; then
   f="$FAKE/pr-$3.json"; [ -r "$f" ] || { echo "no such PR $3" >&2; exit 1; }; cat "$f"; exit 0
 fi
+if [ "$1 $2 $3" = "run list --workflow" ]; then f="$FAKE/base-runs.json"; [ -r "$f" ] && cat "$f" || echo '[]'; exit 0; fi
 if [ "$1 $2" = "run list" ]; then f="$FAKE/runs-$4.json"; [ -r "$f" ] && cat "$f" || echo '[]'; exit 0; fi
 echo "fake gh: unexpected $*" >&2; exit 64
 EOF
@@ -94,6 +95,7 @@ for t in locked-merge confirm-merged teardown-stack; do
   cat >"$FAKE/$t" <<EOF
 #!/usr/bin/env bash
 printf '$t %s\n' "\$*" >>"\$FAKE/calls"
+cat "\$FAKE/$t-out" 2>/dev/null
 exit "\$(cat "\$FAKE/$t-rc" 2>/dev/null || echo 0)"
 EOF
 done
@@ -107,15 +109,16 @@ export LEADTIME_PRODUCT_BOOTSTRAP="echo bootstrapped >>\"$FAKE/calls\""
 # and the manifest for RUN_ID. Sets R, S, MAN, LANES; clears the fakes' state.
 new_repo() {
   local d; d="$(mktemp -d -p "$TMP" case.XXXXXX)"
-  rm -f "$FAKE"/calls "$FAKE"/pr-*.json "$FAKE"/runs-*.json "$FAKE"/*-rc "$FAKE"/gate-* "$FAKE"/pr-counter "$FAKE"/body-*
+  rm -f "$FAKE"/calls "$FAKE"/pr-*.json "$FAKE"/runs-*.json "$FAKE"/base-runs.json "$FAKE"/*-rc "$FAKE"/*-out "$FAKE"/gate-* \
+        "$FAKE"/pr-counter "$FAKE"/body-*
   git "${G[@]}" init -q "$d/seed"; echo one >"$d/seed/a.txt"; git -C "$d/seed" add -A; git "${G[@]}" -C "$d/seed" commit -q -m seed
   git clone -q --bare "$d/seed" "$d/origin.git"
   mkdir -p "$d/checkouts"; git clone -q "$d/origin.git" "$d/checkouts/prod"
   ORIGIN="$d/origin.git"; R="$d/checkouts/prod"; S="$d/state"; LANES="$R/.git/leadtime-lanes"; MAN="$d/manifest.json"
   mkdir -p "$S" "$LANES"
-  jq -n --arg r "$R" --arg l "$LANES" --arg id "$RUN_ID" --arg s "$S" \
+  jq -n --arg r "$R" --arg l "$LANES" --arg id "$RUN_ID" --arg s "$S" --arg idle "${IDLE-post-merge.yml}" \
     '{run_id: $id, state_dir: $s, repos: [{name: "prod", path: $r, common: ($r + "/.git"), lanes_dir: $l,
-      lane: ($l + "/" + $id), lock: ($l + "/" + $id + ".lock")}]}' >"$MAN"
+      lane: ($l + "/" + $id), lock: ($l + "/" + $id + ".lock")} + (if $idle == "" then {} else {idle_workflow: $idle} end)]}' >"$MAN"
 }
 hold_lock() { # <file> -- a fixture process holds an flock on <file> until released
   local fifo; fifo="$(mktemp -u -p "$TMP" held.XXXXXX)"; mkfifo "$fifo"
@@ -249,6 +252,23 @@ new_repo
 rc="$(lp teardown)"
 [ "$rc" = 0 ] && grep -q 'none (no lane cut)' "${TMP}/out" && ok "no lane cut: teardown says so, exit 0" || bad "teardown none" "rc=$rc"
 
+# A lane cut before its meta was written (a run that died between the two).
+new_repo
+git -C "$R" worktree add -q -b leadtime/prod-verify-nometa "$LANES/$RUN_ID" origin/main
+lane_commit nometa.txt
+rc="$(lp teardown)"
+[ "$rc" = 72 ] && grep -q 'STRANDED: branch leadtime/prod-verify-nometa KEPT' "${TMP}/out" \
+  && git -C "$R" show-ref --verify --quiet refs/heads/leadtime/prod-verify-nometa \
+  && ok "a lane with no meta: its branch is read from the worktree, never 'no lane cut'; unpushed -> STRANDED" \
+  || bad "no meta" "rc=$rc out=$(cat "${TMP}/out")"
+new_repo
+git -C "$R" worktree add -q --detach "$LANES/$RUN_ID" origin/main
+rc="$(lp teardown)"
+[ "$rc" = 72 ] && grep -q 'COULD NOT TELL' "${TMP}/out" && [ -d "$LANES/$RUN_ID" ] \
+  && ok "a lane with no meta and no branch checked out: COULD NOT TELL, kept, counted (exit 72)" \
+  || bad "no meta detached" "rc=$rc out=$(cat "${TMP}/out")"
+git -C "$R" worktree remove --force "$LANES/$RUN_ID"
+
 echo "== reap"
 new_repo
 DEAD="run-20260930T113000Z-11"; LIVE="run-20260930T123000Z-12"
@@ -284,7 +304,7 @@ rc="$(lp sweep)"
 order="$(grep -E '^(integration-gate|locked-merge|confirm-merged)' "$FAKE/calls" | cut -d' ' -f1 | tr '\n' ' ')"
 if [ "$rc" = 0 ] && [ "$order" = "integration-gate locked-merge confirm-merged " ] \
    && grep -q '^integration-gate --with-critic --rebase' "$FAKE/calls" \
-   && grep -q "^locked-merge --pr 7 --head $HEAD7 --repo $LANES/$RUN_ID-land" "$FAKE/calls" \
+   && grep -qx "locked-merge --pr 7 --head $HEAD7 --repo $LANES/$RUN_ID-land --wait 600 --require-idle-workflow post-merge.yml" "$FAKE/calls" \
    && head -1 "${TMP}/out" | grep -qx 'product_prs=0 landed=prod#7' \
    && [ "$(jq -r 'select(.event=="merged") | .merge_sha' "$S/product-prs.jsonl")" = "$(printf 'd%.0s' {1..40})" ] \
    && [ ! -e "$LANES/$RUN_ID-land" ] && [ ! -e "$LANES/$RUN_ID-land.lock" ] \
@@ -349,10 +369,47 @@ else bad "exit 4" "rc=$rc rc2=$rc2 calls=$(cat "$FAKE/calls") journal=$(cat "$S/
 
 new_repo; open_one
 pr_json 7 OPEN "$HEAD7" "$GREEN"
-echo 3 >"$FAKE/gate-rc"
+echo 3 >"$FAKE/gate-rc"; echo "critic-review: VERDICT BLOCK for $HEAD7 — findings: correctness" >"$FAKE/gate-out"
 lp sweep >/dev/null
 [ "$(called locked-merge)" = 0 ] && grep -q 'critic BLOCK' "$S/journal.md" && grep -q '^gh-athena pr close 7' "$FAKE/calls" \
-  && ok "critic BLOCK (integration-gate exit 3): closed, journaled, no merge" || bad "critic block" "calls=$(cat "$FAKE/calls")"
+  && ok "a recorded critic BLOCK (integration-gate exit 3): closed, journaled, no merge" || bad "critic block" "calls=$(cat "$FAKE/calls")"
+
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN"
+echo 3 >"$FAKE/gate-rc"; echo "critic-review: judge FAILED OPEN (model error)" >"$FAKE/gate-out"
+lp sweep >/dev/null
+[ "$(called locked-merge)" = 0 ] && ! grep -q 'pr close' "$FAKE/calls" && grep -q 'pr=#7 open: integration-gate exit 3 with no recorded critic BLOCK' "${TMP}/out" \
+  && ok "exit 3 with no recorded BLOCK (the judge failed open): left open, never closed" || bad "exit 3 no block" "out=$(cat "${TMP}/out")"
+
+# The repo's merge bar: its idle post-merge workflow.
+IDLE="" new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN"
+lp sweep >/dev/null
+[ "$(called integration-gate)" = 0 ] && [ "$(called locked-merge)" = 0 ] && grep -q 'declares no idle_workflow' "${TMP}/out" \
+  && grep -q 'not landed: the repo declares no idle_workflow' "$S/journal.md" \
+  && ok "a repo that declares no idle_workflow lands nothing (deny by default), journaled with its Fix" || bad "idle undeclared" "out=$(cat "${TMP}/out")"
+
+IDLE=none new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN"
+lp sweep >/dev/null
+grep -qx "locked-merge --pr 7 --head $HEAD7 --repo $LANES/$RUN_ID-land --wait 600" "$FAKE/calls" && ! grep -q 'run list --workflow' "$FAKE/calls" \
+  && ok "idle_workflow none: locked-merge without the idle flag, and no base-deploy read" || bad "idle none" "calls=$(cat "$FAKE/calls")"
+
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN"
+echo '[{"status":"completed","conclusion":"failure","headSha":"0123456789abcdef0123456789abcdef01234567"}]' >"$FAKE/base-runs.json"
+lp sweep >/dev/null
+[ "$(called integration-gate)" = 0 ] && [ "$(called locked-merge)" = 0 ] && grep -q 'concluded failure' "$S/product-line-stopped.prod" \
+  && grep -q '^product_line=STOPPED prod: ' "${TMP}/out" \
+  && ok "the base's post-merge deploy failed: the line stops before any gate or merge, and the sweep prints product_line=STOPPED" \
+  || bad "base deploy failed" "out=$(cat "${TMP}/out") calls=$(cat "$FAKE/calls")"
+
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN" "$(printf 'd%.0s' {1..40})"
+echo "WARN base deploy 99 for abc concluded failure; merging anyway: no ratified rule holds a merge on a failed deploy" >"$FAKE/locked-merge-out"
+lp sweep >/dev/null
+head -1 "${TMP}/out" | grep -qx 'product_prs=0 landed=prod#7' && grep -q 'WARN base deploy' "$S/product-line-stopped.prod" \
+  && ok "locked-merge's WARN base deploy: the landing is recorded and the line stops" || bad "merge warn" "out=$(cat "${TMP}/out")"
 
 new_repo; open_one
 pr_json 7 OPEN "$HEAD7" "$GREEN"
@@ -389,7 +446,7 @@ lp sweep >/dev/null
 new_repo
 printf '{"event":"opened","at":"x","repo":"prod","pr":3,"url":"u","phase":"p","branch":"b","head":"h","run_id":"r"}\nnot json\n' >"$S/product-prs.jsonl"
 rc="$(lp sweep)"
-[ "$rc" = 2 ] && grep -q 'line 2 is not JSON' "${TMP}/err" && ok "an unreadable store line is an error naming the line, never an empty sweep" || bad "bad store" "rc=$rc $(cat "${TMP}/err")"
+[ "$rc" = 3 ] && grep -q 'line 2 is not JSON' "${TMP}/err" && ok "an unreadable store line is could-not-look (exit 3) naming the line, never an empty sweep" || bad "bad store" "rc=$rc $(cat "${TMP}/err")"
 
 echo "== classification"
 if grep -q $'^ai/lib/leadtime_product.rb\tlibrary' "${ROOT}/ai/guard-classification.tsv" \

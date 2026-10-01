@@ -161,6 +161,9 @@ tools:
   # priority-next (DND-445) takes, releases and completes leases on the Athena
   # server's priority index: external state.
   priority-next:           { class: destructive, reason: lease }
+  # leadtime-product (DND-1540) pushes branches, opens, closes and (through
+  # locked-merge) merges PRs in a product repo as Athena: external state.
+  leadtime-product:        { class: destructive, reason: forge }
   # mark-in-progress (DND-1318, DND-1341) writes a DND or work-tracker
   # ticket's Status and its dispatch stamp in Notion: tracker state.
   skills/athena:ticket-management/scripts/mark-in-progress: { class: destructive, reason: tracker }

@@ -38,21 +38,38 @@ HELP = <<~TXT
               the run never merges it.
   The runner uses:
     reap      reap a dead run's product lanes, by their lock (never a pid)
-    sweep     for every open improver PR: CI green and a critic PASS ->
-              integration-gate --with-critic --rebase (R's declared gate), then
-              locked-merge, then confirm-merged (at most one landing per run);
-              CI red, critic BLOCK, gate RED, a rebase conflict or exit 4 ->
-              close the PR and journal it (exit 4 is a Cody-only step, never
-              cleared or retried). After a merge it watches R's post-merge
-              deploy: a failed deploy stops R's line and records a revert owed
-              (<state>/product-line-stopped.<R>; the owner re-arms with rm).
-              Prints "product_prs=<open n> landed=<R#n,...|none>", then one line
+    sweep     read every open improver PR ONCE, as it is now (nothing waits on
+              CI or a deploy; a PR still running is left for the next tick).
+              CI green -> integration-gate --with-critic --rebase (R's declared
+              gate and the standing judge), then locked-merge with R's
+              idle_workflow (--require-idle-workflow; an undeclared one lands
+              nothing), then confirm-merged; at most one landing per run, and a
+              step is not started without its time in the sweep budget.
+              CI red, a recorded critic BLOCK, gate RED, a rebase conflict or
+              exit 4 -> close the PR and journal it (exit 4 is a Cody-only step,
+              never cleared or retried). After a merge it watches R's
+              post-merge deploy: a failed one (failure, timed_out,
+              startup_failure) stops R's line and records a revert owed
+              (<state>/product-line-stopped.<R>; the owner re-arms with rm), as
+              does a failed base deploy or locked-merge's WARN base deploy.
+              Prints "product_prs=<open n> landed=<R#n,...|none>", then one
+              "product_line=STOPPED <R>: <why>" per stopped line, then one line
               per PR.
     teardown  retire this run's lanes: work on origin/main -> removed; the tip
               pushed on a recorded improver PR -> awaiting landing; anything
               else -> STRANDED, branch kept (exit 72).
 
   Forge: GitHub only (locked-merge is GitHub-only); a GitLab R is refused.
+
+  Environment: LEADTIME_PRODUCT_MANIFEST (the manifest, set by the runner);
+  LEADTIME_PRODUCT_SWEEP_TIMEOUT (the sweep's budget in seconds, default
+  3600; the runner's outer cap is this plus 300); LEADTIME_PRODUCT_GATE_TIMEOUT
+  (integration-gate's slot wait, default 1500); LEAD_TIME_DEPLOY_RE (the
+  deploy-workflow rule ai/bin/lead-time uses, default "deploy"); LEADTIME_NOW
+  (epoch seconds; a test seam). Test seams for each tool: LEADTIME_GH,
+  LEADTIME_GH_ATHENA, LEADTIME_INTEGRATION_GATE, LEADTIME_LOCKED_MERGE,
+  LEADTIME_CONFIRM_MERGED, LEADTIME_TEARDOWN_STACK, LEADTIME_PRODUCT_BOOTSTRAP,
+  LEADTIME_PRODUCT_FORGE.
 
   Exit: 0 ok; 1 internal error; 2 refused (usage, or a rule: the line is
   stopped, no lane cut, nothing to propose, a non-GitHub forge); 3 could not
@@ -109,8 +126,11 @@ begin
   when "sweep"
     gate_timeout = Integer(ENV.fetch("LEADTIME_PRODUCT_GATE_TIMEOUT", "1500"), exception: false)
     fail_with(2, "LEADTIME_PRODUCT_GATE_TIMEOUT is not whole seconds", "unset it or give seconds.") unless gate_timeout&.positive?
-    summary, lines = IO_.sweep(m, gate_timeout: gate_timeout)
+    budget = Integer(ENV.fetch("LEADTIME_PRODUCT_SWEEP_TIMEOUT", "3600"), exception: false)
+    fail_with(2, "LEADTIME_PRODUCT_SWEEP_TIMEOUT is not whole seconds above 300", "unset it or give seconds.") unless budget && budget > 300
+    summary, lines, stopped = IO_.sweep(m, gate_timeout: gate_timeout, budget_s: budget - 120)
     puts summary
+    stopped.each { |repo, why| puts "product_line=STOPPED #{repo}: #{why.tr("\n", ' ')}" }
     lines.each { |l| puts l }
   when "reap"
     IO_.reap(m).each { |l| puts l }

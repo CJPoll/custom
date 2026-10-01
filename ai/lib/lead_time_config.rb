@@ -34,9 +34,12 @@ module LeadTimeConfig
   OVERRIDE_REL = "athena/lead-time-repos.json"
   TOP_KEYS = %w[repos window improvement_epic].freeze
   REPO_KEYS = %w[name path mode].freeze
-  REPO_OPTIONAL = %w[product_epic].freeze
+  REPO_OPTIONAL = %w[product_epic idle_workflow].freeze
   NAME_RE = /\A[A-Za-z0-9][A-Za-z0-9_.-]*\z/.freeze
-  SCHEMA_HINT = "repos: [{name, path, mode improve|watch, optional product_epic}], window, improvement_epic"
+  # idle_workflow (DND-1540): the post-merge workflow FILE a product-repo
+  # landing passes to locked-merge --require-idle-workflow, or "none".
+  IDLE_WORKFLOW_RE = /\A(none|[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml)\z/.freeze
+  SCHEMA_HINT = "repos: [{name, path, mode improve|watch, optional product_epic, optional idle_workflow}], window, improvement_epic"
 
   # A refusal: message plus the Fix: line the caller prints.
   class Error < StandardError
@@ -58,9 +61,9 @@ module LeadTimeConfig
   # run): never "absent", never "not on this machine".
   class CouldNotLook < Error; end
 
-  Repo = Struct.new(:name, :path, :mode, :product_epic, :product_epic_source, keyword_init: true) do
+  Repo = Struct.new(:name, :path, :mode, :product_epic, :product_epic_source, :idle_workflow, keyword_init: true) do
     def to_h = { "name" => name, "path" => path, "mode" => mode, "product_epic" => product_epic,
-                 "product_epic_source" => product_epic_source }
+                 "product_epic_source" => product_epic_source, "idle_workflow" => idle_workflow }
   end
   Parsed = Struct.new(:repos, :window, :improvement_epic, keyword_init: true)
   # kind: :env (ATHENA_LEADTIME_CONFIG) | :xdg (the per-user override path)
@@ -217,8 +220,12 @@ module LeadTimeConfig
       product = entry["product_epic"]
       source = "repo"
     end
+    idle = entry["idle_workflow"]
+    if entry.key?("idle_workflow") && !(idle.is_a?(String) && IDLE_WORKFLOW_RE.match?(idle))
+      bad!(path, "repo #{name.inspect} idle_workflow #{idle.inspect} must be a workflow file name (post-merge.yml) or \"none\", or absent")
+    end
     Repo.new(name: name, path: expand(path, entry["path"], name, home), mode: mode,
-             product_epic: product, product_epic_source: source)
+             product_epic: product, product_epic_source: source, idle_workflow: idle)
   end
 
   def nonblank?(value) = value.is_a?(String) && !value.strip.empty?

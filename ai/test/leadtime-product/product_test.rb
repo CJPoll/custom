@@ -85,6 +85,41 @@ check("M6 a repo the manifest does not name is an error naming it and the names 
   e && e.message.include?("other") && e.message.include?("prod")
 end
 check("M7 a bad run id is refused") { raised { P.parse_manifest(manifest_doc(run_id: "../x")) } }
+check("M8 idle_workflow is carried: absent is nil, a file or none as given") do
+  base = JSON.parse(manifest_doc)["repos"][0]
+  [nil, "post-merge.yml", "none"].all? do |v|
+    r = v ? base.merge("idle_workflow" => v) : base
+    P.parse_manifest(manifest_doc(repos: [r])).repo("prod").idle_workflow == v
+  end
+end
+check("M9 an idle_workflow with a path in it is refused") do
+  r = JSON.parse(manifest_doc)["repos"][0].merge("idle_workflow" => "../x.yml")
+  raised { P.parse_manifest(manifest_doc(repos: [r])) }
+end
+
+# ── the landing bar: the repo's idle post-merge workflow ─────────────────────
+
+check("I1 a declared workflow file becomes --require-idle-workflow <file>") do
+  P.idle_args("post-merge.yml") == ["--require-idle-workflow", "post-merge.yml"]
+end
+check("I2 none (declared: no post-merge workflow) passes no flag") { P.idle_args("none") == [] }
+check("I3 undeclared refuses the landing with a Fix naming idle_workflow") do
+  e = raised { P.idle_args(nil) }
+  e && e.message.include?("idle_workflow") && e.fix.include?("idle_workflow")
+end
+check("I4 base deploy: the latest completed run failed holds the line") do
+  r = P.base_deploy_hold([{ "status" => "completed", "conclusion" => "failure", "headSha" => H1 }])
+  r && r.include?("failure")
+end
+check("I5 base deploy: success or still running does not hold (locked-merge waits for idle itself)") do
+  P.base_deploy_hold([{ "status" => "completed", "conclusion" => "success", "headSha" => H1 }]).nil? &&
+    P.base_deploy_hold([{ "status" => "in_progress", "conclusion" => "", "headSha" => H1 }]).nil? &&
+    P.base_deploy_hold([]).nil?
+end
+check("I6 locked-merge's WARN base deploy line is seen") do
+  P.merge_warning("x\nWARN base deploy 12 for abc concluded failure; merging anyway: ...\n").to_s.include?("concluded failure") &&
+    P.merge_warning("all fine").nil?
+end
 
 # ── the store: events and their fold ──────────────────────────────────────────
 
@@ -175,7 +210,13 @@ check("G3 exit 4 closes, names exit 4 and that it is Cody's") do
   o = P.gate_outcome(4, "", head_before: H1, head_after: H1)
   o.action == :close && o.reason.include?("exit 4") && o.reason.include?("Cody")
 end
-check("G4 exit 3 (no green critic verdict) closes") { P.gate_outcome(3, "", head_before: H1, head_after: H1).action == :close }
+check("G4 exit 3 with a recorded critic BLOCK closes (the reader's line or the judge's)") do
+  P.gate_outcome(3, "critic-review: VERDICT BLOCK for #{H1} — findings: x", head_before: H1, head_after: H1).action == :close &&
+    P.gate_outcome(3, "critic-review: BLOCKED — athena-diff-critic found: x", head_before: H1, head_after: H1).action == :close
+end
+check("G4b exit 3 without a BLOCK (judge failed open, could not look) retries, never closes") do
+  P.gate_outcome(3, "critic-review: FAIL-OPEN model error", head_before: H1, head_after: H1).action == :retry
+end
 check("G5 exit 1 (gate RED) closes") { P.gate_outcome(1, "", head_before: H1, head_after: H1).action == :close }
 check("G6 exit 2 with REBASE CONFLICT closes") do
   P.gate_outcome(2, "integration-gate: REBASE CONFLICT in a.rb", head_before: H1, head_after: H1).action == :close
@@ -204,15 +245,33 @@ NOW_T = Time.utc(2026, 10, 1, 12, 30, 0)
 def wf(name, status, conclusion, sha = M1, at: "2026-10-01T11:00:00Z")
   { "name" => name, "status" => status, "conclusion" => conclusion, "headSha" => sha, "updatedAt" => at }
 end
-def ds(runs) = P.deploy_state(runs, M1, RE, now: NOW_T)
+def ds(runs, merged_at: nil) = P.deploy_state(runs, M1, RE, now: NOW_T, merged_at: merged_at)
 
 check("P1 nothing reported for the merge yet: pending") { ds([]) == :pending }
+check("P1b no run at all, long after the merge: none (the repo runs nothing on main)") do
+  ds([], merged_at: Time.utc(2026, 10, 1, 11, 0, 0)) == :none
+end
+check("P1c no run at all, just merged: pending") { ds([], merged_at: Time.utc(2026, 10, 1, 12, 20, 0)) == :pending }
 check("P2 a deploy run in progress: pending") { ds([wf("Post-Merge Deploy", "in_progress", "")]) == :pending }
 check("P3 the deploy concluded success: success") do
   ds([wf("CI", "completed", "success"), wf("Post-Merge Deploy", "completed", "success")]) == :success
 end
 check("P4 the deploy concluded failure: failed") { ds([wf("Post-Merge Deploy", "completed", "failure")]) == :failed }
-check("P5 a cancelled deploy is failed, not success") { ds([wf("Deploy", "completed", "cancelled")]) == :failed }
+check("P5 a cancelled deploy is never success, and never a failure that owes a revert") do
+  ![:success, :failed].include?(ds([wf("Deploy", "completed", "cancelled")]))
+end
+check("P5b a superseded (cancelled) run then a success of the same workflow: success") do
+  ds([wf("Deploy", "completed", "cancelled", at: "2026-10-01T11:00:00Z"),
+      wf("Deploy", "completed", "success", at: "2026-10-01T11:10:00Z")]) == :success
+end
+check("P5c a skipped deploy job is not a failure") { ds([wf("Deploy", "completed", "skipped")]) != :failed }
+check("P5d timed_out and startup_failure are failures") do
+  ds([wf("Deploy", "completed", "timed_out")]) == :failed && ds([wf("Deploy", "completed", "startup_failure")]) == :failed
+end
+check("P5e a failure then a later success of the same workflow (a re-run): success") do
+  ds([wf("Deploy", "completed", "failure", at: "2026-10-01T11:00:00Z"),
+      wf("Deploy", "completed", "success", at: "2026-10-01T11:10:00Z")]) == :success
+end
 check("P6 every run completed long ago and none is a deploy: none") { ds([wf("CI", "completed", "success")]) == :none }
 check("P6b CI just finished and no deploy yet (it may follow on CI): pending, not none") do
   ds([wf("CI", "completed", "success", at: "2026-10-01T12:20:00Z")]) == :pending

@@ -1026,6 +1026,51 @@ else
   bad "product sweep" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
+# A sweep that fails with NO stderr: the session still runs, the failure is in
+# .run, and no product-lane command inherits a runner lock descriptor (the run
+# lock, the custom lane's, a product lane's), so a child that outlives the
+# tick cannot pin one.
+c="$(new_case)"; product_case "$c"
+cat >"$c/repo/ai/bin/leadtime-product" <<'EOF'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/../../.." && pwd)"
+for f in /proc/$$/fd/*; do readlink "$f"; done | grep -F "$d/" | grep '\.lock$' >>"$d/inherited-locks" || true
+[ "$1" = sweep ] && exit 9
+exit 0
+EOF
+chmod +x "$c/repo/ai/bin/leadtime-product"
+rc="$(prun "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && [ "$(invoked "$c")" = 1 ] && grep -q 'outcome=ok exit=0' "$run" \
+   && grep -q '^product_prs=UNKNOWN landed=UNKNOWN (sweep exit 9)' "$run" && grep -q '^product_sweep=FAILED exit=9' "$run" \
+   && grep -q 'the sweep failed (exit 9)' "$c/claude-args" && grep -q 'Fix:' "$c/runner.err" \
+   && [ ! -s "$c/inherited-locks" ]; then
+  ok "a sweep failing with empty stderr: the session still runs; .run says product_prs=UNKNOWN; no product command inherits a lock fd"
+else
+  bad "silent sweep failure" "rc=$rc inherited=$(cat "$c/inherited-locks" 2>/dev/null) run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# A stopped product line alerts ONCE per episode on harness-alerts, re: its
+# marker; the next tick does not repeat it; the owner's rm ends the episode.
+c="$(new_case)"; product_case "$c"
+mkdir -p "$(sd "$c")"
+printf 'deploy failed on gen_saas#40 (merge abc): a revert is owed\n' >"$(sd "$c")/product-line-stopped.gen_saas"
+rc1="$(prun "$c")"; run1="$(newest "$c" run)"
+n1="$(sends "$c" leadtime-product-line-stopped)"; cp "$c/claude-args" "$c/claude-args.1"
+rc2="$(prun "$c")"
+n2="$(sends "$c" leadtime-product-line-stopped)"
+rm -f -- "$(sd "$c")/product-line-stopped.gen_saas"
+rc3="$(prun "$c")"
+if [ "$rc1" = 0 ] && [ "$rc2" = 0 ] && [ "$rc3" = 0 ] && [ "$n1" = 1 ] && [ "$n2" = 1 ] \
+   && grep -q -- "--re $(sd "$c")/product-line-stopped.gen_saas" "$c/send.log" \
+   && grep -q '^product_line_alert=gen_saas sent msg-1.md' "$run1" \
+   && grep -q 'product_line=STOPPED gen_saas' "$c/claude-args.1" \
+   && [ ! -e "$(sd "$c")/product-line-stopped-alerted.gen_saas" ]; then
+  ok "a stopped product line: one harness-alert re: its marker, no repeat on the next tick, the episode ends on rm"
+else
+  bad "stopped-line alert" "rc=$rc1/$rc2/$rc3 n=$n1/$n2 send=$(cat "$c/send.log") run=$(cat "$run1" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
 # ---------------------------------------------------------------------------------
 case_ '15. classification'
 

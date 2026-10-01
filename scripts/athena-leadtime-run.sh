@@ -85,6 +85,8 @@
 #   consecutive-blocked   the blocked streak; clears when a session reaches the model
 #   ledger.jsonl, experiments.jsonl, journal.md, cursor.<repo>.txt  the skill's own
 #   product-prs.jsonl, product-line-stopped.<R>  ai/bin/leadtime-product's (DND-1540)
+#   product-line-stopped-alerted.<R>  the stopped-line episode already alerted
+#                       (slug leadtime-product-line-stopped; removed with the marker)
 #
 # Environment (test seams and overrides):
 #   LEADTIME_REPO             a checkout of the harness repo (default: this script's)
@@ -121,7 +123,8 @@
 #       the session's exit. The branch is kept: counted
 #   73  the state directory, lock, lane, product lane or manifest, or MCP
 #       config could not be created, or ai/bin/leadtime-product is missing
-#       while a product repo is listed (a lane or config failure is counted)
+#       while a product repo is listed or a product-PR store exists (a lane
+#       or config failure is counted)
 #   75  WEDGED: LEADTIME_FAIL_ESCALATE unsuccessful outcomes in a row. No
 #       session runs. The tick writes runs/<ts>.wedged, and the first wedged
 #       tick of an episode sends ONE harness-alert (leadtime-wedged)
@@ -293,13 +296,23 @@ resolve_repos
 # common dir, a PR opened as Athena, and a landing by a LATER run
 # (ai/bin/leadtime-product). With none, nothing below runs and the brief, the
 # lane and the exits are what they were before DND-1540.
-PRODUCT_NAMES=(); PRODUCT_PATHS=()
+PRODUCT_NAMES=(); PRODUCT_PATHS=(); PRODUCT_IDLE=()
 if [ "${RES_RC}" -eq 0 ]; then
-  while IFS=$'\t' read -r pn pp; do
+  while IFS=$'\t' read -r pn pp pw; do
     [ -n "${pn}" ] || continue
-    PRODUCT_NAMES+=("${pn}"); PRODUCT_PATHS+=("${pp}")
-  done < <(jq -r '.repos[] | select(.mode == "improve" and .name != "custom") | [.name, .path] | @tsv' <<<"${RES_JSON}")
+    PRODUCT_NAMES+=("${pn}"); PRODUCT_PATHS+=("${pp}"); PRODUCT_IDLE+=("${pw}")
+  done < <(jq -r '.repos[] | select(.mode == "improve" and .name != "custom") | [.name, .path, (.idle_workflow // "")] | @tsv' <<<"${RES_JSON}")
 fi
+SWEEP_TIMEOUT="${LEADTIME_PRODUCT_SWEEP_TIMEOUT:-3600}"
+case "${SWEEP_TIMEOUT}" in
+  ''|*[!0-9]*) SWEEP_TIMEOUT=bad ;;
+esac
+if [ "${SWEEP_TIMEOUT}" = bad ] || [ "${SWEEP_TIMEOUT}" -le 300 ]; then
+  echo "${ME}: LEADTIME_PRODUCT_SWEEP_TIMEOUT='${LEADTIME_PRODUCT_SWEEP_TIMEOUT:-}' is not whole seconds above 300; using 3600." >&2
+  echo "  Fix: set it to the product sweep's budget in seconds (above 300), or unset it." >&2
+  SWEEP_TIMEOUT=3600
+fi
+export LEADTIME_PRODUCT_SWEEP_TIMEOUT="${SWEEP_TIMEOUT}"
 PRODUCT_TOOL="${MAIN_CHECKOUT}/ai/bin/leadtime-product"
 PRODUCT_LINE="product_prs=0 landed=none"
 PRODUCT_DETAIL=""
@@ -325,6 +338,8 @@ product_brief() {
   for i in "${!PRODUCT_NAMES[@]}"; do
     list="${list:+${list}; }${PRODUCT_NAMES[$i]} (${PRODUCT_PATHS[$i]})"
   done
+  # Only the runner's own summary and the stopped lines reach the prompt; the
+  # per-PR lines (which quote forge and tool output) stay in .run and the journal.
   sweep="${PRODUCT_LINE}${PRODUCT_SWEEP_TEXT:+ (${PRODUCT_SWEEP_TEXT})}"
   PRODUCT_BRIEF="Product repos (improve, other than custom) on this machine: ${list}. Unlike your \
 custom lane, a change to a product repo goes in that repo's own product lane and a PR: run \
@@ -835,22 +850,68 @@ product_abort() { # <why> <fix> — before the session: undo the lanes, count it
   exit 73
 }
 product_note() { PRODUCT_DETAIL="${PRODUCT_DETAIL:+${PRODUCT_DETAIL}$'\n'}$1"; }
+# product_run <argv> — run a product-lane command with none of the runner's
+# lock descriptors: not the run lock (9), not the custom lane's (8), not a
+# product lane's. A child it starts that outlives the tick (a gate, a
+# bootstrap) must never pin a lock, or every later tick skips or never reaps.
+product_run() {
+  (
+    for f in "${PRODUCT_FDS[@]}"; do { exec {f}>&-; } 2>/dev/null || true; done
+    { exec 8>&- 9>&-; } 2>/dev/null || true
+    exec "$@"
+  )
+}
+# product_alert_stopped — ONE harness-alert per stopped-line episode of a
+# product repo (the marker's content names the episode; rm of the marker is
+# the owner's re-arm). A failed send is not recorded, so the next tick retries.
+product_alert_stopped() {
+  local f repo sent cur seen body name
+  for f in "${STATE_DIR}"/product-line-stopped-alerted.*; do
+    [ -e "${f}" ] || continue
+    [ -e "${STATE_DIR}/product-line-stopped.${f##*/product-line-stopped-alerted.}" ] || rm -f -- "${f}"
+  done
+  for f in "${STATE_DIR}"/product-line-stopped.*; do
+    [ -e "${f}" ] || continue
+    repo="${f##*/product-line-stopped.}"
+    sent="${STATE_DIR}/product-line-stopped-alerted.${repo}"
+    cur="$(cat -- "${f}" 2>/dev/null || true)"
+    seen="$(cat -- "${sent}" 2>/dev/null || true)"
+    [ "${cur}" != "${seen}" ] || continue
+    body="$(new_body)" || continue
+    {
+      printf 'The lead-time improver STOPPED THE LINE in the product repo %s: nothing more lands there until the owner re-arms it (DND-1540).\n' "${repo}"
+      printf 'This is a report. The marker named in re: is the authority.\n\nwhy: %s\n' "${cur}"
+      printf '\nFix: land the fix or the revert it names (a revert is owed when a deploy failed), then re-arm with: rm %s\n' "${f}"
+    } >"${body}"
+    if name="$(harness_alert_send "${f}" leadtime-product-line-stopped "${body}" 2>/dev/null)"; then
+      printf '%s\n' "${cur}" >"${sent}" 2>/dev/null || true
+      product_note "product_line_alert=${repo} sent ${name}"
+    else
+      product_note "product_line_alert=${repo} FAILED to send (the next tick retries)"
+      echo "${ME}: the stopped-line alert for ${repo} could NOT be sent; the next tick retries." >&2
+      echo "  Fix: run inbox-doctor from ${MAIN_CHECKOUT} (is the custom registry entry installed with its harness-alerts channels? scripts/setup-inbox-registry --install)." >&2
+    fi
+    rm -f -- "${body}"
+  done
+}
 if [ "${#PRODUCT_NAMES[@]}" -gt 0 ] || [ -e "${STATE_DIR}/product-prs.jsonl" ]; then
   if [ ! -x "${PRODUCT_TOOL}" ]; then
-    product_abort "the product-lane tool ${PRODUCT_TOOL} is absent or not executable in the main checkout" \
+    product_abort "the product-lane tool ${PRODUCT_TOOL} is absent or not executable in the main checkout (a product repo is listed, or a product-PR store exists)" \
       "land ai/bin/leadtime-product (DND-1540) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs."
   fi
   pm_entries="[]"
   for i in "${!PRODUCT_NAMES[@]}"; do
-    pn="${PRODUCT_NAMES[$i]}"; pp="${PRODUCT_PATHS[$i]}"
+    pn="${PRODUCT_NAMES[$i]}"; pp="${PRODUCT_PATHS[$i]}"; pw="${PRODUCT_IDLE[$i]}"
     pc="$(git -C "${pp}" rev-parse --git-common-dir 2>/dev/null || true)"
     case "${pc}" in ''|/*) ;; *) pc="${pp}/${pc}" ;; esac
     [ -n "${pc}" ] && pc="$(cd -- "${pc}" 2>/dev/null && pwd -P || true)"
     [ -n "${pc}" ] || product_abort "cannot resolve the git common dir of the product repo ${pn} (${pp})" \
       "check that ${pp} is a git checkout ('git -C ${pp} rev-parse --git-common-dir')."
-    pm_entries="$(jq -c --arg n "${pn}" --arg p "${pp}" --arg c "${pc}" --arg id "${RUN_ID}" \
+    pm_entries="$(jq -c --arg n "${pn}" --arg p "${pp}" --arg c "${pc}" --arg id "${RUN_ID}" --arg w "${pw}" \
       '. + [{name: $n, path: $p, common: $c, lanes_dir: ($c + "/leadtime-lanes"),
-             lane: ($c + "/leadtime-lanes/" + $id), lock: ($c + "/leadtime-lanes/" + $id + ".lock")}]' <<<"${pm_entries}")"
+             lane: ($c + "/leadtime-lanes/" + $id), lock: ($c + "/leadtime-lanes/" + $id + ".lock")}
+            + (if $w == "" then {} else {idle_workflow: $w} end)]' <<<"${pm_entries}")" \
+      || product_abort "could not build the product manifest entry for ${pn}" "run jq by hand; this is a runner bug."
   done
   if ! ( umask 077; jq -n --arg id "${RUN_ID}" --arg s "${STATE_DIR}" --argjson r "${pm_entries}" \
            '{run_id: $id, state_dir: $s, repos: $r}' >"${PRODUCT_MANIFEST}" ) 2>/dev/null; then
@@ -859,7 +920,7 @@ if [ "${#PRODUCT_NAMES[@]}" -gt 0 ] || [ -e "${STATE_DIR}/product-prs.jsonl" ]; 
   export LEADTIME_PRODUCT_MANIFEST="${PRODUCT_MANIFEST}"
   if [ "${#PRODUCT_NAMES[@]}" -gt 0 ]; then
     reap_rc=0
-    reap_out="$("${PRODUCT_TOOL}" reap 2>&1 </dev/null)" || reap_rc=$?
+    reap_out="$(product_run "${PRODUCT_TOOL}" reap 2>&1 </dev/null)" || reap_rc=$?
     [ -z "${reap_out}" ] || product_note "${reap_out}"
     [ "${reap_rc}" -eq 0 ] || product_note "product_reap=FAILED exit=${reap_rc}"
   fi
@@ -868,7 +929,8 @@ if [ "${#PRODUCT_NAMES[@]}" -gt 0 ] || [ -e "${STATE_DIR}/product-prs.jsonl" ]; 
     pdir="$(dirname -- "${plock}")"
     { mkdir -p "${pdir}" && chmod 700 "${pdir}"; } 2>/dev/null \
       || product_abort "could not create the product lanes dir ${pdir}" "check that ${pdir} can be created."
-    printf 'origin=cron\npid=%s\nrun_id=%s\n' "$$" "${RUN_ID}" >"${plock%.lock}.meta"
+    { printf 'origin=cron\npid=%s\nrun_id=%s\n' "$$" "${RUN_ID}" >"${plock%.lock}.meta"; } 2>/dev/null \
+      || product_abort "could not write ${plock%.lock}.meta" "check that ${pdir} is writable and the disk is not full."
     if ! { exec {pfd}>>"${plock}"; } 2>/dev/null; then
       product_abort "could not open the product lane lock ${plock}" "check that ${pdir} is writable and the disk is not full."
     fi
@@ -876,20 +938,23 @@ if [ "${#PRODUCT_NAMES[@]}" -gt 0 ] || [ -e "${STATE_DIR}/product-prs.jsonl" ]; 
     flock -n "${pfd}" || product_abort "the fresh product lane lock ${plock} was already held" \
       "this should be impossible for a unique run id. Check for a process holding it ('fuser -v ${plock}')."
   done < <(jq -r '.repos[].lock' "${PRODUCT_MANIFEST}")
+  # The tool keeps its own budget 120s under SWEEP_TIMEOUT and never starts a
+  # step it has no time for; this outer cap is only the backstop.
   sweep_rc=0; sweep_err="$(mktemp)" || sweep_err=/dev/null
-  sweep_out="$(timeout -k 60 "${LEADTIME_PRODUCT_SWEEP_TIMEOUT:-3600}" "${PRODUCT_TOOL}" sweep 2>"${sweep_err}" </dev/null)" || sweep_rc=$?
+  sweep_out="$(product_run timeout -k 60 "$(( SWEEP_TIMEOUT + 300 ))" "${PRODUCT_TOOL}" sweep 2>"${sweep_err}" </dev/null)" || sweep_rc=$?
   if [ "${sweep_rc}" -eq 0 ] && [ -n "${sweep_out}" ]; then
     PRODUCT_LINE="$(head -n1 <<<"${sweep_out}")"
-    PRODUCT_SWEEP_TEXT="$(tail -n +2 <<<"${sweep_out}" | paste -sd ';' - | sed 's/;/; /g')"
+    PRODUCT_SWEEP_TEXT="$(grep '^product_line=STOPPED ' <<<"${sweep_out}" | paste -sd ';' - | sed 's/;/; /g' || true)"
     [ "$(wc -l <<<"${sweep_out}")" -le 1 ] || product_note "$(tail -n +2 <<<"${sweep_out}")"
   else
     PRODUCT_LINE="product_prs=UNKNOWN landed=UNKNOWN (sweep exit ${sweep_rc})"
-    PRODUCT_SWEEP_TEXT="the sweep failed: $(grep -v '^[[:space:]]*$' "${sweep_err}" 2>/dev/null | head -n1)"
-    product_note "product_sweep=FAILED exit=${sweep_rc}: $(tr '\n' ' ' <"${sweep_err}" 2>/dev/null)"
+    PRODUCT_SWEEP_TEXT="the sweep failed (exit ${sweep_rc}); open product PRs were not checked this tick"
+    product_note "product_sweep=FAILED exit=${sweep_rc}: $(tr '\n' ' ' <"${sweep_err}" 2>/dev/null || true)"
     echo "${ME}: leadtime-product sweep exited ${sweep_rc}; open product PRs were not checked this tick. The session still runs." >&2
     echo "  Fix: run '${PRODUCT_TOOL} sweep --manifest ${PRODUCT_MANIFEST}' by hand and follow its own Fix: line." >&2
   fi
   [ "${sweep_err}" = /dev/null ] || rm -f -- "${sweep_err}"
+  product_alert_stopped
 fi
 
 # --- 8. run the session -------------------------------------------------------------
@@ -1060,11 +1125,11 @@ rm -f -- "${LANE_LOCK}" "${LANE_META}" "${MCP_FILE}"
 # teardown that cannot tell keeps the branch and counts as stranded too.
 if [ "${#PRODUCT_LOCKS[@]}" -gt 0 ]; then
   td_rc=0
-  td_out="$("${PRODUCT_TOOL}" teardown 2>&1 </dev/null)" || td_rc=$?
+  td_out="$(product_run "${PRODUCT_TOOL}" teardown 2>&1 </dev/null)" || td_rc=$?
   [ -z "${td_out}" ] || product_note "${td_out}"
   if [ "${td_rc}" -ne 0 ]; then
     PRODUCT_STRANDED=1; STRANDED=1
-    [ "${td_rc}" -eq 72 ] || product_note "product_teardown=FAILED exit=${td_rc} (branches kept)"
+    [ "${td_rc}" -eq 72 ] || product_note "product_teardown=FAILED exit=${td_rc}: the teardown could not finish, so every product branch is kept and counted STRANDED"
   fi
   while IFS= read -r plock; do rm -f -- "${plock%.lock}.meta"; done < <(printf '%s\n' "${PRODUCT_LOCKS[@]}")
   product_release

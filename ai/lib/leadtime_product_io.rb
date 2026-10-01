@@ -61,10 +61,13 @@ module LeadTimeProductIO
     module_function
 
     # -> [combined output, exit code]. A command that cannot start is 127; a
-    # signal is 128+n. `timeout` bounds it when given (seconds).
+    # signal is 128+n. `timeout` bounds it when given (seconds). close_others:
+    # no child inherits a descriptor this process got from the runner (its run
+    # lock, a lane lock): a child that outlived the tick would otherwise hold
+    # them, and every later tick would skip as "in flight" or never reap.
     def call(argv, chdir:, env: {}, timeout: nil)
       argv = ["timeout", "-k", "30", "#{timeout}s", *argv] if timeout
-      out, st = Open3.capture2e(GIT_ENV_UNSET.merge(env), *argv, chdir: chdir, stdin_data: "")
+      out, st = Open3.capture2e(GIT_ENV_UNSET.merge(env), *argv, chdir: chdir, stdin_data: "", close_others: true)
       [out, st.exitstatus || (128 + st.termsig.to_i)]
     rescue SystemCallError => e
       ["#{argv.first}: #{e.message}", 127]
@@ -125,9 +128,19 @@ module LeadTimeProductIO
         raise CouldNotLook.new("cannot read #{path(state)} (#{e.class.name.split('::').last})", "make it readable; never delete it to clear the error.")
       end
       text.each_line.with_index(1).reject { |l, _| l.strip.empty? }.map { |l, n| P.parse_line(l, n) }
+    rescue CouldNotLook
+      raise
+    rescue P::Error => e
+      raise CouldNotLook.new(e.message, e.fix) # a store that cannot be read is exit 3
     end
 
-    def states(state) = P.fold(events(state))
+    def states(state)
+      P.fold(events(state))
+    rescue CouldNotLook
+      raise
+    rescue P::Error => e
+      raise CouldNotLook.new(e.message, e.fix)
+    end
 
     # One write(2) of one line, O_APPEND, 0600.
     def append(state, event)
@@ -314,11 +327,13 @@ module LeadTimeProductIO
   end
 
   # -> "ran" or "none"; raises CannotAct (journaled) when it fails.
-  def bootstrap(m, rl, lane, label)
+  BOOTSTRAP_CAP = 1200
+
+  def bootstrap(m, rl, lane, label, timeout: BOOTSTRAP_CAP)
     argv = bootstrap_argv(lane)
     return "none" unless argv
 
-    out, code = Run.call(argv, chdir: lane, timeout: 1200)
+    out, code = Run.call(argv, chdir: lane, timeout: timeout)
     log = File.join(runs_dir(m), "#{m.run_id}.#{rl.name}.#{label}.bootstrap.log")
     FileUtils.mkdir_p(runs_dir(m))
     File.write(log, out, perm: 0o600)
@@ -415,9 +430,36 @@ module LeadTimeProductIO
   end
 
   # ── sweep: every open improver PR, and every merge awaiting its deploy ──
+  #
+  # Each PR is read ONCE, as it is now. Nothing here waits on CI or a deploy:
+  # a PR or a deploy still running is left for the next tick.
 
-  # -> [summary line, detail lines]. At most ONE landing per sweep.
-  def sweep(m, gate_timeout:)
+  # Bounds of the landing steps. Each step's own timeout is its cap, cut to
+  # what is left of the sweep's budget; a step that cannot get its floor is not
+  # started (the PR stays open for the next run). locked-merge is never cut
+  # short: a merge killed part way is an unknown outcome.
+  GATE_EXTRA = 900       # integration-gate beyond its --slot-wait-timeout
+  MERGE_CAP = 1200       # locked-merge (lock wait 600, merge, confirm, teardown)
+  MERGE_LOCK_WAIT = 600
+  CONFIRM_CAP = 300
+  TEARDOWN_CAP = 600
+  MIN_GATE = 600
+  MIN_BOOTSTRAP = 300
+
+  # A budget clock: monotonic, never the wall clock.
+  class Budget
+    def initialize(seconds)
+      @deadline = mono + seconds
+    end
+
+    def left = (@deadline - mono).floor
+
+    def mono = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  # -> [summary line, detail lines, stopped repos]. At most ONE landing per sweep.
+  def sweep(m, gate_timeout:, budget_s:)
+    budget = Budget.new(budget_s)
     lines = []
     landed = []
     attempted = false
@@ -456,7 +498,7 @@ module LeadTimeProductIO
             lines << "#{tag} open: CI green; waits (one landing per run)"
           else
             attempted = true
-            line, ok = land(m, rl, s, gate_timeout: gate_timeout)
+            line, ok = land(m, rl, s, gate_timeout: gate_timeout, budget: budget)
             landed << "#{s.repo}##{s.pr}" if ok
             lines << "#{tag} #{line}"
           end
@@ -465,7 +507,8 @@ module LeadTimeProductIO
         lines << "#{tag} could not act: #{e.message} Fix: #{e.fix}"
       end
     end
-    [P.summary(P.open_count(Store.states(m.state_dir)), landed), lines]
+    stopped = m.repos.filter_map { |rl| (why = Store.stopped(m.state_dir, rl.name)) && [rl.name, why] }
+    [P.summary(P.open_count(Store.states(m.state_dir)), landed), lines, stopped]
   end
 
   def close_pr(m, rl, s, reason)
@@ -490,11 +533,12 @@ module LeadTimeProductIO
     return "merged; its merge commit is not readable yet, deploy unknown" unless sha.match?(P::SHA_RE)
 
     re = Regexp.new(ENV.fetch("LEAD_TIME_DEPLOY_RE", "deploy"), Regexp::IGNORECASE)
-    case P.deploy_state(Forge.runs_for(rl.path, sha), sha, re, now: now)
+    case P.deploy_state(Forge.runs_for(rl.path, sha), sha, re, now: now, merged_at: P.parse_time(s.merged_at))
     when :pending then "merged #{sha[0, 12]}; deploy pending (deployed is not working until it concludes success)"
     when :none
       Store.append(m.state_dir, P.event("no-deploy", at: now.iso8601, repo: s.repo, pr: s.pr))
-      "merged #{sha[0, 12]}; CI finished with no deploy run: landed"
+      Store.journal(m.state_dir, now, "repo=#{s.repo} pr=##{s.pr} merged (#{sha[0, 12]}); no deploy verdict for it (none ran, or cancelled/skipped)")
+      "merged #{sha[0, 12]}; no deploy verdict for this merge (CI finished with no deploy run, or it was cancelled/skipped): landed"
     when :success
       Store.append(m.state_dir, P.event("deployed", at: now.iso8601, repo: s.repo, pr: s.pr))
       Store.journal(m.state_dir, now, "repo=#{s.repo} pr=##{s.pr} deployed (#{sha[0, 12]})")
@@ -508,28 +552,46 @@ module LeadTimeProductIO
   end
 
   # Land one green PR in a landing lane: integration-gate --with-critic (R's
-  # declared gate and the standing judge), then locked-merge, then
-  # confirm-merged. -> [detail, landed?].
-  def land(m, rl, s, gate_timeout:)
+  # declared gate and the standing judge), then locked-merge (with R's idle
+  # post-merge workflow), then confirm-merged. -> [detail, landed?].
+  def land(m, rl, s, gate_timeout:, budget:)
+    idle = begin
+      P.idle_args(rl.idle_workflow)
+    rescue P::Error => e
+      Store.journal(m.state_dir, now, "repo=#{s.repo} pr=##{s.pr} not landed: #{e.message}")
+      return ["open: #{e.message} Fix: #{e.fix}", false]
+    end
+    need = MIN_BOOTSTRAP + MIN_GATE + MERGE_CAP + CONFIRM_CAP + TEARDOWN_CAP
+    return ["open: CI green, but #{budget.left}s of the sweep budget is left (a landing needs #{need}s); the next run lands it", false] if budget.left < need
+
     FileUtils.mkdir_p(rl.lanes_dir, mode: 0o700)
     dir = File.join(rl.lanes_dir, "#{m.run_id}-land")
     lock = "#{dir}.lock"
     result = nil
     held = Locks.with(lock) do
-      result = land_in(m, rl, s, dir, gate_timeout)
+      result = land_in(m, rl, s, dir, gate_timeout, budget, idle)
     ensure
       retire_land_lane(m, rl, dir, merged: result ? result[1] == true : false, keep_branch: result ? result[2] == true : false)
     end
-    # Never delete a lock a live process holds.
+    # Never delete a lock a live process holds. Removing it after the unlock
+    # is safe here only because the runner's single-run lock serialises every
+    # tick: no other process can be waiting on this file.
     return ["open: the landing lane lock #{lock} is held by a live process; the next run retries", false] if held == :held
 
     FileUtils.rm_f(lock)
-
     result.first(2)
   end
 
   # -> [detail, landed?, keep_branch?]
-  def land_in(m, rl, s, dir, gate_timeout)
+  def land_in(m, rl, s, dir, gate_timeout, budget, idle)
+    if idle.any?
+      hold = P.base_deploy_hold(Forge.json([Cmd.gh, "run", "list", "--workflow", idle.last, "--branch", "main", "--limit", "5",
+                                            "--json", "status,conclusion,headSha"], rl.path, "gh run list --workflow #{idle.last}"))
+      if hold
+        stop(m, s, "#{hold}; merge nothing but the fix or the revert until a deploy succeeds")
+        return ["LINE STOPPED: #{hold}", false, false]
+      end
+    end
     Git.fetch_main(rl.path)
     _, code = Git.call(rl.path, "fetch", "--quiet", "origin", "+refs/heads/#{s.branch}:refs/remotes/origin/#{s.branch}")
     return ["open: could not fetch #{s.branch}; the next run retries", false, false] unless code.zero?
@@ -547,10 +609,14 @@ module LeadTimeProductIO
     return ["open: could not cut the landing lane (#{out.strip}); the next run retries", false, true] unless code.zero?
 
     Meta.add("#{dir}.meta", "repo" => rl.name, "branch" => s.branch, "bootstrap" => "pending")
-    Meta.add("#{dir}.meta", "bootstrap" => bootstrap(m, rl, dir, "land"))
+    after_bootstrap = MIN_GATE + MERGE_CAP + CONFIRM_CAP + TEARDOWN_CAP
+    Meta.add("#{dir}.meta", "bootstrap" => bootstrap(m, rl, dir, "land", timeout: [BOOTSTRAP_CAP, budget.left - after_bootstrap].min))
 
-    out, code = Run.call([Cmd.integration_gate, "--with-critic", "--rebase", "--slot-wait-timeout", gate_timeout.to_s],
-                         chdir: dir, timeout: gate_timeout + 900)
+    gate_cap = [gate_timeout + GATE_EXTRA, budget.left - (MERGE_CAP + CONFIRM_CAP + TEARDOWN_CAP)].min
+    return ["open: CI green, but only #{gate_cap}s is left for the gate; the next run lands it", false, false] if gate_cap < MIN_GATE
+
+    out, code = Run.call([Cmd.integration_gate, "--with-critic", "--rebase", "--slot-wait-timeout", [gate_timeout, gate_cap - 60].min.to_s],
+                         chdir: dir, timeout: gate_cap)
     FileUtils.mkdir_p(runs_dir(m))
     File.write(File.join(runs_dir(m), "#{m.run_id}.#{rl.name}-pr#{s.pr}.gate.log"), out, perm: 0o600)
     after = Git.rev(dir, "HEAD").to_s
@@ -559,7 +625,10 @@ module LeadTimeProductIO
     when :close then [close_pr(m, rl, s, g.reason), false, false]
     when :retry then ["open: #{g.reason}; the next run retries", false, false]
     when :rebased then push_rebased(m, rl, s, dir, after, g.reason)
-    when :merge then merge(m, rl, s, dir)
+    when :merge
+      return ["open: INTEGRATION OK, but #{budget.left}s is left, under locked-merge's #{MERGE_CAP}s; the next run lands it", false, false] if budget.left < MERGE_CAP + CONFIRM_CAP
+
+      merge(m, rl, s, dir, idle)
     end
   rescue CannotAct => e
     ["open: #{e.message}", false, false]
@@ -574,8 +643,11 @@ module LeadTimeProductIO
     ["open: #{reason}; pushed", false, false]
   end
 
-  def merge(m, rl, s, dir)
-    _, code = Run.call([Cmd.locked_merge, "--pr", s.pr.to_s, "--head", s.head, "--repo", dir], chdir: dir, timeout: 3600)
+  def merge(m, rl, s, dir, idle)
+    out, code = Run.call([Cmd.locked_merge, "--pr", s.pr.to_s, "--head", s.head, "--repo", dir, "--wait", MERGE_LOCK_WAIT.to_s, *idle],
+                         chdir: dir, timeout: MERGE_CAP)
+    FileUtils.mkdir_p(runs_dir(m))
+    File.write(File.join(runs_dir(m), "#{m.run_id}.#{rl.name}-pr#{s.pr}.merge.log"), out, perm: 0o600)
     mo = P.merge_outcome(code)
     return ["open: #{mo.reason}; the next run retries", false, false] if mo.action == :retry
 
@@ -583,7 +655,9 @@ module LeadTimeProductIO
       stop(m, s, mo.reason)
       return ["LINE STOPPED: #{mo.reason}", false, false]
     end
-    _, code = Run.call([Cmd.confirm_merged, "--pr", s.pr.to_s, "--repo", dir, "--fetch"], chdir: dir, timeout: 300)
+    # locked-merge confirms the landing itself (its step 6); this is the
+    # ticket's own explicit confirm, from the run's side, before it records it.
+    _, code = Run.call([Cmd.confirm_merged, "--pr", s.pr.to_s, "--repo", dir, "--fetch"], chdir: dir, timeout: CONFIRM_CAP)
     co = P.confirm_outcome(code)
     if co.action == :stop_line
       stop(m, s, co.reason)
@@ -597,13 +671,18 @@ module LeadTimeProductIO
     sha = "unknown" unless sha.match?(P::SHA_RE)
     Store.append(m.state_dir, P.event("merged", at: now.iso8601, repo: s.repo, pr: s.pr, merge_sha: sha))
     Store.journal(m.state_dir, now, "repo=#{s.repo} pr=##{s.pr} LANDED (#{sha[0, 12]}); watching its deploy")
+    warning = P.merge_warning(out)
+    if warning
+      stop(m, s, "#{warning} (merged onto a base whose deploy had not succeeded)")
+      return ["landed #{sha[0, 12]}, but LINE STOPPED: #{warning}", true, false]
+    end
     ["landed #{sha[0, 12]}; deploy pending", true, false]
   end
 
   def retire_land_lane(m, rl, dir, merged:, keep_branch:)
     meta = Meta.read("#{dir}.meta")
     if STACK_STATES.include?(meta["bootstrap"]) && !merged
-      Run.call([Cmd.teardown_stack, "--worktree", dir, "--parked", "lead-time landing lane #{m.run_id}"], chdir: "/", timeout: 600)
+      Run.call([Cmd.teardown_stack, "--worktree", dir, "--parked", "lead-time landing lane #{m.run_id}"], chdir: "/", timeout: TEARDOWN_CAP)
     end
     Git.remove_worktree(rl.path, dir) if File.exist?(dir)
     branch = meta["branch"]
@@ -616,11 +695,19 @@ module LeadTimeProductIO
   # -> [:none|:delete|:awaiting|:stranded, branch, detail]
   def retire_lane(m, rl, dir, why)
     meta = Meta.read("#{dir}.meta")
+    branch = meta["branch"]
+    if branch.nil? && File.directory?(dir)
+      # A lane cut before its meta was written (a run that died between the
+      # two): its branch is whatever it has checked out. One it cannot read is
+      # KEPT, never read as "no lane cut".
+      out, code = Git.call(dir, "symbolic-ref", "-q", "--short", "HEAD")
+      branch = out.strip if code.zero? && !out.strip.empty?
+      return [:stranded, nil, "COULD NOT TELL: #{dir} records no branch and has none checked out; the lane is KEPT"] unless branch
+    end
     if STACK_STATES.include?(meta["bootstrap"])
-      Run.call([Cmd.teardown_stack, "--worktree", dir, "--parked", why], chdir: "/", timeout: 600)
+      Run.call([Cmd.teardown_stack, "--worktree", dir, "--parked", why], chdir: "/", timeout: TEARDOWN_CAP)
     end
     Git.remove_worktree(rl.path, dir) if File.exist?(dir)
-    branch = meta["branch"]
     return [:none, nil, "no lane cut"] unless branch && Git.rev(rl.path, "refs/heads/#{branch}")
 
     tip = Git.rev(rl.path, "refs/heads/#{branch}")
@@ -632,7 +719,7 @@ module LeadTimeProductIO
                       [verdict, branch, "removed (work on origin/main)"]
     when :awaiting then Git.call(rl.path, "branch", "-D", branch)
                         [verdict, branch, "awaiting landing on PR ##{rec.pr} (#{tip[0, 12]} pushed)"]
-    else [verdict, branch, "STRANDED: branch #{branch} KEPT (#{tip[0, 12]} was never pushed to an improver PR)"]
+    else [verdict, branch, "STRANDED: branch #{branch} KEPT (#{tip[0, 12]} is not the head of a recorded improver PR: unpushed, or pushed with no PR opened)"]
     end
   end
 

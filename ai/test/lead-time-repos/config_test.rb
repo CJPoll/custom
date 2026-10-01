@@ -157,6 +157,18 @@ check("S3 product_epic present is carried") do
 end
 check("S3 an empty product_epic is an error, never a silent fallback") { raised { parse(doc([repo("a", product_epic: " ")])) }&.message.to_s.include?("product_epic") }
 check("S3 a non-string product_epic is an error") { raised { parse(doc([repo("a", product_epic: 7)])) } }
+# idle_workflow (DND-1540): the post-merge workflow a product-repo landing
+# must find idle (locked-merge --require-idle-workflow), or "none".
+check("S5 idle_workflow absent is nil (undeclared), never a default") { parse(doc([repo("a")])).repos.first.idle_workflow.nil? }
+check("S5 an idle_workflow file name is carried") do
+  parse(doc([repo("a", "improve", idle_workflow: "post-merge.yml")])).repos.first.idle_workflow == "post-merge.yml"
+end
+check("S5 idle_workflow none is carried (declared: no post-merge workflow)") do
+  parse(doc([repo("a", "improve", idle_workflow: "none")])).repos.first.idle_workflow == "none"
+end
+check("S5 an idle_workflow with a path, or blank, or not .yml, is an error") do
+  ["../x.yml", " ", "deploy", 7].all? { |v| raised { parse(doc([repo("a", idle_workflow: v)])) }&.message.to_s.include?("idle_workflow") }
+end
 
 seed = C.parse(File.read(File.expand_path("../../config/lead-time-repos.json", __dir__)), home: "/home/u", path: "seed")
 check("S4 the tracked default parses unchanged") { seed.repos.map { |r| [r.name, r.mode] } == [%w[custom improve], %w[gen_saas watch], %w[walt_ui watch]] }
@@ -225,7 +237,7 @@ check("R4 a missing probe is an error, never a silent skip") { raised { C.resolv
 check("R5 to_h carries the --json shape") do
   h = res.to_h
   h.keys == %w[source path window improvement_epic repos skipped considered] &&
-    h["repos"].first.keys == %w[name path mode product_epic product_epic_source] &&
+    h["repos"].first.keys == %w[name path mode product_epic product_epic_source idle_workflow] &&
     h["skipped"].first.keys == %w[name path reason] && h["considered"] == 3
 end
 

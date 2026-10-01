@@ -59,7 +59,8 @@ module LeadTimeProduct
 
   # ── the run's manifest (written by scripts/athena-leadtime-run.sh) ─────────
 
-  RepoLane = Struct.new(:name, :path, :common, :lanes_dir, :lane, :lock, keyword_init: true)
+  RepoLane = Struct.new(:name, :path, :common, :lanes_dir, :lane, :lock, :idle_workflow, keyword_init: true)
+  IDLE_WORKFLOW_RE = /\A(none|[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml)\z/.freeze
 
   Manifest = Struct.new(:run_id, :state_dir, :repos, keyword_init: true) do
     def repo(name)
@@ -99,8 +100,41 @@ module LeadTimeProduct
     unless r["lane"] == File.join(r["lanes_dir"], run_id) && r["lock"] == "#{r['lane']}.lock"
       bad_manifest("#{r['name']}: lane and lock must be <lanes_dir>/#{run_id} and its .lock")
     end
+    idle = r["idle_workflow"]
+    unless idle.nil? || (idle.is_a?(String) && idle.match?(IDLE_WORKFLOW_RE))
+      bad_manifest("#{r['name']}: idle_workflow #{idle.inspect} is not a workflow file name or none")
+    end
     RepoLane.new(name: r["name"], path: r["path"], common: r["common"], lanes_dir: r["lanes_dir"],
-                 lane: r["lane"], lock: r["lock"])
+                 lane: r["lane"], lock: r["lock"], idle_workflow: idle)
+  end
+
+  # ── the landing bar: R's post-merge workflow ────────────────────────────────
+
+  # locked-merge's idle flag for R (athena:merge-boarding -> The merge bar: on
+  # gen_saas pass --require-idle-workflow post-merge.yml). Undeclared refuses
+  # the landing: deny by default, never a merge without the repo's own bar.
+  def idle_args(idle)
+    return [] if idle == "none"
+    return ["--require-idle-workflow", idle] if idle.is_a?(String) && idle.match?(IDLE_WORKFLOW_RE)
+
+    raise Error.new("the repo declares no idle_workflow, so its merge bar (locked-merge --require-idle-workflow) is unknown; nothing lands",
+                    "add \"idle_workflow\": \"<its post-merge workflow file>\" (or \"none\" when it has none) to the repo's entry in this machine's lead-time config (ai/bin/lead-time-repos --help).")
+  end
+
+  # The latest run of R's post-merge workflow on main: a failed deploy stops
+  # the line (merge-boarding: on a failed deploy, merge nothing but the fix or
+  # the revert). -> a reason to hold, or nil. Busy is locked-merge's to wait on.
+  def base_deploy_hold(runs)
+    latest = Array(runs).find { |r| r["status"] == "completed" }
+    return nil unless latest && DEPLOY_FAILED.include?(latest["conclusion"].to_s)
+
+    "the latest post-merge run on main (#{latest['headSha'].to_s[0, 12]}) concluded #{latest['conclusion']}"
+  end
+
+  # locked-merge prints "WARN base deploy ... concluded <x>; merging anyway" when
+  # the base's deploy did not succeed. -> that line, or nil.
+  def merge_warning(output)
+    output.to_s.lines.find { |l| l.start_with?("WARN base deploy") }&.strip
   end
 
   def abs!(value, what)
@@ -159,7 +193,7 @@ module LeadTimeProduct
 
   def fix_store = "read the named line of <state>/product-prs.jsonl; it is append-only, so repair or remove only that line."
 
-  PrState = Struct.new(:repo, :pr, :url, :phase, :branch, :head, :status, :merge_sha, :opened_at, :reason,
+  PrState = Struct.new(:repo, :pr, :url, :phase, :branch, :head, :status, :merge_sha, :merged_at, :opened_at, :reason,
                        keyword_init: true)
 
   # Events (oldest first) -> one PrState per (repo, pr), in first-seen order.
@@ -176,7 +210,10 @@ module LeadTimeProduct
                                      fix_store)
       s.status = STATUS_OF.fetch(e["event"])
       s.head = e["head"] if e["event"] == "head"
-      s.merge_sha = e["merge_sha"] if e["event"] == "merged"
+      if e["event"] == "merged"
+        s.merge_sha = e["merge_sha"]
+        s.merged_at = e["at"]
+      end
       s.reason = e["reason"] if e["reason"]
     end
     by.values
@@ -251,6 +288,10 @@ module LeadTimeProduct
 
   # ── integration-gate (R's declared gate plus the standing judge) ───────────
 
+  # A recorded BLOCK: the verdict reader's line (critic-review --verdict-for,
+  # which integration-gate prints) or the judge's own.
+  CRITIC_BLOCK_RE = /critic-review: (VERDICT BLOCK for|BLOCKED)/.freeze
+
   def gate_outcome(exit_code, output, head_before:, head_after:)
     case exit_code
     when 0
@@ -258,7 +299,12 @@ module LeadTimeProduct
 
       Decision.new(:rebased, "INTEGRATION OK on the rebased head #{head_after[0, 12]}; its CI must go green before it lands")
     when 4 then Decision.new(:close, "integration-gate exit 4 (blast-radius): merging causes a real-world action, a Cody-only step the cron never clears")
-    when 3 then Decision.new(:close, "integration-gate exit 3: no green critic verdict (critic BLOCK) on the head")
+    when 3
+      # Exit 3 is also a judge that failed open or could not look: only a
+      # recorded BLOCK is a verdict on the change.
+      return Decision.new(:close, "integration-gate exit 3: critic BLOCK on the head") if output.to_s.match?(CRITIC_BLOCK_RE)
+
+      Decision.new(:retry, "integration-gate exit 3 with no recorded critic BLOCK (the judge did not deliver a verdict)")
     when 1 then Decision.new(:close, "integration-gate exit 1: the declared gate is RED on the integrated head")
     when 2
       return Decision.new(:close, "integration-gate exit 2: REBASE CONFLICT with main") if output.to_s.include?("REBASE CONFLICT")
@@ -290,30 +336,39 @@ module LeadTimeProduct
   # ── deploy: the merge commit's post-merge runs ─────────────────────────────
 
   # A deploy workflow may be triggered by CI's completion (workflow_run), so
-  # "CI finished and no deploy" is believed only this long after the last run.
+  # "CI finished and no deploy" is believed only this long after the last run
+  # (or after the merge, when nothing ran at all).
   DEPLOY_SETTLE_S = 1800
+  # Only these conclusions owe a revert. cancelled (a superseded run in a
+  # concurrency group), skipped and neutral are not a verdict on the change.
+  DEPLOY_FAILED = %w[failure timed_out startup_failure].freeze
+  DEPLOY_NO_VERDICT = %w[cancelled skipped neutral stale].freeze
 
   # runs: gh run list --commit <sha> rows (name, status, conclusion, headSha,
   # updatedAt). deploy_re: ai/bin/lead-time's deploy rule (LEAD_TIME_DEPLOY_RE,
-  # default "deploy"). -> :pending, :success, :failed or :none (CI finished
-  # DEPLOY_SETTLE_S ago with no deploy run).
-  def deploy_state(runs, merge_sha, deploy_re, now:)
+  # default "deploy"). Each workflow is judged on its LATEST run, so a re-run
+  # or a superseding run decides. -> :pending, :success, :failed or :none (no
+  # deploy verdict DEPLOY_SETTLE_S after CI finished, or after the merge).
+  def deploy_state(runs, merge_sha, deploy_re, now:, merged_at: nil)
     mine = Array(runs).select { |r| r["headSha"] == merge_sha }
-    return :pending if mine.empty?
+    return settled?([merged_at], now) ? :none : :pending if mine.empty?
 
-    deploys = mine.select { |r| r["name"].to_s.match?(deploy_re) }
-    if deploys.empty?
-      return :pending unless mine.all? { |r| r["status"] == "completed" }
+    latest = mine.group_by { |r| r["name"].to_s }.values.map { |rs| rs.max_by { |r| parse_time(r["updatedAt"]) || Time.at(0) } }
+    deploys = latest.select { |r| r["name"].to_s.match?(deploy_re) }
+    return :pending if deploys.any? { |r| r["status"] != "completed" }
+    return :failed if deploys.any? { |r| DEPLOY_FAILED.include?(r["conclusion"].to_s) }
 
-      last = mine.map { |r| parse_time(r["updatedAt"]) }
-      return :pending if last.include?(nil) || now - last.max < DEPLOY_SETTLE_S
+    verdicts = deploys.reject { |r| DEPLOY_NO_VERDICT.include?(r["conclusion"].to_s) }
+    return :success if !verdicts.empty? && verdicts.all? { |r| r["conclusion"] == "success" }
+    return :pending unless verdicts.empty? # a conclusion this rule does not know
+    return :pending unless latest.all? { |r| r["status"] == "completed" }
 
-      return :none
-    end
-    return :pending unless deploys.all? { |r| r["status"] == "completed" }
-    return :failed unless deploys.all? { |r| r["conclusion"] == "success" }
+    settled?(mine.map { |r| parse_time(r["updatedAt"]) }, now) ? :none : :pending
+  end
 
-    :success
+  # Every time is known and the newest is DEPLOY_SETTLE_S old.
+  def settled?(times, now)
+    !times.empty? && !times.include?(nil) && now - times.max >= DEPLOY_SETTLE_S
   end
 
   def parse_time(text)

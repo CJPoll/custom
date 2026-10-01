@@ -36,8 +36,11 @@ HELP = <<~TXT
        be a regular file owned by you and not group/other-writable.
 
   Schema: {"repos":[{"name","path","mode":"improve|watch",
-  "product_epic"?}], "window":N, "improvement_epic":"..."}. A repo with no
-  product_epic files product tickets on improvement_epic.
+  "product_epic"?,"idle_workflow"?}], "window":N, "improvement_epic":"..."}.
+  A repo with no product_epic files product tickets on improvement_epic.
+  idle_workflow (DND-1540) is the post-merge workflow file a product-repo
+  landing must find idle (locked-merge --require-idle-workflow), or "none";
+  ai/bin/leadtime-product lands nothing in a repo that does not declare it.
 
   Presence: a configured path that does not exist is SKIPPED, named with its
   reason, and counted. A path that exists but is not the top of a git
@@ -46,7 +49,7 @@ HELP = <<~TXT
 
   Output: one line per repo and one per skip; --json prints
   {"source","path","window","improvement_epic","repos":[{name,path,mode,
-  product_epic,product_epic_source}],"skipped":[{name,path,reason}],
+  product_epic,product_epic_source,idle_workflow}],"skipped":[{name,path,reason}],
   "considered"}.
 
   Options:
