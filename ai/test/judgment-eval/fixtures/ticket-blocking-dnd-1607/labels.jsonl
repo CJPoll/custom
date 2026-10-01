@@ -1,0 +1,4 @@
+{"id": "live-1-eval-grammar-lag", "label": "does_not_block", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "live-2-eval-undeployed-version", "label": "does_not_block", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "live-3-router-claim-not-freed", "label": "does_not_block", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-01T20:00:00Z"}
+{"id": "control-7-activation-path-broken", "label": "blocks", "provenance": "rule_confirmed", "labeler": "dnd-1607-synthetic-control", "labeled_at": "2026-10-01T20:00:00Z"}

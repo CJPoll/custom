@@ -329,6 +329,16 @@ has "the DND-1579 fixture excludes no proposed label" "${OUT}" "proposed exclude
 eq "the DND-1579 fixture dry run reports no join miss" "${ERR}" ""
 eq "the DND-1579 fixture dry run sends nothing" "$(requests)" "${n}"
 
+# The second ticket_blocking fixture (DND-1607): three live filer overrides
+# after the DND-1579 set was cut, plus one control that truly blocks.
+TBL="${HERE}/fixtures/ticket-blocking-dnd-1607"
+run --use-case ticket_blocking --labels "${TBL}/labels.jsonl" --corpus "${TBL}/corpus.jsonl" --dry-run
+eq "the DND-1607 ticket_blocking fixture dry-runs clean" "${RC}" "0"
+has "the DND-1607 fixture joins all 4 cases, 1 blocks and 3 does_not_block" "${OUT}" "cases: 4 (blocks 1, does_not_block 3)"
+has "the DND-1607 fixture excludes no proposed label" "${OUT}" "proposed excluded: 0"
+eq "the DND-1607 fixture dry run reports no join miss" "${ERR}" ""
+eq "the DND-1607 fixture dry run sends nothing" "$(requests)" "${n}"
+
 printf '{"id":"zz","label":"x","provenance":"owner_confirmed"}\n' > "${TMP}/labels-none.jsonl"
 run --use-case finding_triage --labels "${TMP}/labels-none.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --dry-run
 eq "no label joining the corpus is exit 1, never an empty run" "${RC}" "1"
