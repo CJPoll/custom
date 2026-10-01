@@ -1,6 +1,15 @@
 #!/bin/sh
 # Launch Notion's official MCP server as the "Athena" integration.
 # Reads the token at launch so it never sits in ~/.claude.json or argv.
+#
+# The server version is PINNED (DND-1543): an unpinned `npx -y` takes whatever
+# is newest, and the 2.5.x line once dropped the Notion-Version header (DND-1449)
+# with no diff here and no test run. To bump on purpose:
+#   1. Edit NOTION_MCP_SERVER_VERSION below to the new exact x.y.z.
+#   2. Run: bash ai/test/notion-athena-mcp/self-test.sh  (must pass).
+#   3. Check the new server still sends Notion-Version on create-a-comment, or
+#      that the DND-1449 shim still covers it. Commit the bump on its own.
+NOTION_MCP_SERVER_VERSION="2.5.2"
 set -eu
 TOKEN_FILE="${NOTION_ATHENA_TOKEN_FILE:-$HOME/.claude/notion-api-token}"
 [ -r "$TOKEN_FILE" ] || {
@@ -36,4 +45,4 @@ SHIM="$(cd "$(dirname "$0")" && pwd)/../lib/notion-version-shim.cjs"
 }
 export NODE_OPTIONS="--require $SHIM${NODE_OPTIONS:+ $NODE_OPTIONS}"
 
-exec npx -y @notionhq/notion-mcp-server
+exec npx -y "@notionhq/notion-mcp-server@${NOTION_MCP_SERVER_VERSION}"

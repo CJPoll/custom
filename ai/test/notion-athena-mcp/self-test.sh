@@ -47,12 +47,21 @@ mkdir -p "${TMP}/stubbin"
 cat > "${TMP}/stubbin/npx" <<STUB
 #!/bin/sh
 [ "\$1" = "-v" ] && { echo 10.0.0; exit 0; }
+printf '%s\\n' "\$@" > "${TMP}/npx-args"
 exec node "${PROBE}" 127.0.0.1
 STUB
 chmod +x "${TMP}/stubbin/npx"
 echo "placeholder" > "${TMP}/token"
 out="$(NOTION_ATHENA_TOKEN_FILE="${TMP}/token" PATH="${TMP}/stubbin:${PATH}" "${WRAPPER}" 2>&1)"
 expect "wrapper preloads the shim for the server process" "2025-09-03" "${out}"
+
+# DND-1543: the package spec npx receives carries an exact x.y.z version.
+spec="$(grep '^@notionhq/notion-mcp-server' "${TMP}/npx-args" 2>/dev/null || true)"
+if printf '%s' "${spec}" | grep -Eq '^@notionhq/notion-mcp-server@[0-9]+\.[0-9]+\.[0-9]+$'; then
+  ok "npx package spec is pinned to an exact version"
+else
+  bad "npx package spec is pinned to an exact version" "got '${spec}'; Fix: set NOTION_MCP_SERVER_VERSION in ai/bin/notion-athena-mcp to an exact x.y.z"
+fi
 
 # A wrapper copy with no shim beside it refuses, with a Fix:.
 mkdir -p "${TMP}/copy/bin"; cp "${WRAPPER}" "${TMP}/copy/bin/notion-athena-mcp"
