@@ -1951,7 +1951,9 @@ lenient about what I receive.
   its wedge report (DND-834) through the same `send-mail` path, and the
   epic-clustering runner's wedge and blocked reports and its per-run
   harness-lane drain request (DND-983), sent the same way, and the lead-time
-  improver runner's wedge and blocked reports (DND-1479), sent the same way.
+  improver runner's wedge and blocked reports (DND-1479), sent the same way,
+  and the Slack roots tick's failure-episode report (DND-1502) and
+  `main-health`'s red-episode report (DND-1482), sent the same way.
 
   **Later (2026-09-27):** DND-987 adds a third kind of sender on that side:
   the harness lane's drain request (`-harness-lane-drain.md`). An
@@ -2834,6 +2836,13 @@ also reports:
   `re:` is that tick's `.propose` record in `ai-artifacts/slack-roots/runs/`,
   which is the message's authority; it names no capture, so retention ignores
   it. Its reader is `athena:inbox-attend` → *The Slack roots tick writer*.
+  Another program, `ai/bin/main-health` (run by an admiral after a
+  `~/dev/custom` landing and by the hourly shipwright tick, DND-1482), sends
+  ONE `main-red` message per red EPISODE: the harness gate failed on the
+  `origin/main` tip. Its `re:` is the tip's verdict record in
+  `<git common dir>/main-health/verdicts/`, which is the message's authority;
+  it names no capture, so retention ignores it. Its reader is
+  `athena:inbox-attend` → *The post-landing main check: a red main*.
 - **`watchdog`** — the watchdog's three tools (the liveness library,
   `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
   Missing any, the supervisor keeps the client running, but a wedge is then

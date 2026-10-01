@@ -360,12 +360,14 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
 
 ## harness-alerts: file or increment the wedge ticket (DND-334)
 
-`harness-alerts` is a LOCAL maildir in the `custom` registry entry. Its one
-writer is the inbox client's supervisor watchdog (identity
-`inbox-client-detector`, declared as the mirror channel
-`harness-alerts-detector`). After it captures a wedged client and restarts it,
-it drops ONE message: the capture summary, with `re:` naming the capture
-directory. This is the harness-side twin of the flaky lane (epic D37): the
+`harness-alerts` is a LOCAL maildir in the `custom` registry entry. Its
+writers all send as identity `inbox-client-detector`, declared as the mirror
+channel `harness-alerts-detector`: the inbox client's supervisor watchdog and
+the harness's own tools (the shipwright, clustering and lead-time runners,
+`ai/bin/slack-roots-tick`, `ai/bin/main-health`), each with its own section
+below. This section is the watchdog's. After it captures a wedged client and
+restarts it, it drops ONE message: the capture summary, with `re:` naming the
+capture directory. This is the harness-side twin of the flaky lane (epic D37): the
 restart is the mitigation, the ticket is what stops it being a mask. Never
 read or send on `harness-alerts-detector` — that is the detector's side.
 
@@ -638,9 +640,10 @@ nothing. Name it in your turn output and put it in the ledger as `declined
 - `manual` (DND-362: the capture's `trigger: manual` — a healthy-client capture,
   never a wedge, however the message came to name it): the ledger and the turn
   output only, same as `unverifiable`. This should not happen through the real
-  pipeline (harness-alerts messages come only from the watchdog's own
-  captures), so seeing it names a mismatch worth a second look, but it is not
-  itself evidence of tampering and needs no DM.
+  pipeline (a wedge message, one with no `-<slug>.md` suffix of another
+  writer, comes only from the watchdog's own captures), so seeing it names a
+  mismatch worth a second look, but it is not itself evidence of tampering and
+  needs no DM.
 - `pruned` (capture retention removed the capture before you processed the
   alert, and its prune ledger says so; DND-367): the occurrence is LOST, not
   tampered. Retention keeps a capture an unread alert references and drops one
