@@ -38,21 +38,47 @@ ai/bin/judgment-eval --use-case ticket_severity \
 Space the two runs more than 60 s apart (the server judges 60 calls a
 minute). A case left unscored is n/a, never wrong: re-run that set.
 
-## The bar for `ticket-severity-v2` (registered before any run)
+## The held-out set
+
+v2's criteria were written from the cases in the two sets above, so a pass
+there is in-sample: necessary, not sufficient. The held-out set H is the
+tracker corpus `ai/bin/ticket-corpus` wrote on 2026-09-30, before any of
+tonight's overrides, sent through `Classify.sent_body`. It keeps only
+`tracker_record` labels (281 cases: LOW 172, MEDIUM 90, HIGH 19, no
+CRITICAL); the weak `title_prefix` labels are left out. It holds real
+ticket text, so it is machine-local and never committed:
+`~/.local/share/athena/evals/dnd-1600-held-out-{corpus,labels}.jsonl`
+(sha256 `bdb9e4a1…` and `0bc10bee…`). Some later tickets' filer values may
+already follow v1's advice, which biases H toward v1.
+
+## The bar for `ticket-severity-v2` (registered before any v2 run)
 
 The one-level-up cluster U is 11 cases: `over-1..6` here and `OVR-3`,
-`OVR-5..8` in the second set. Keep v2 only if all five hold, comparing the
-post-deploy v2 runs with the v1 runs below on the same files:
+`OVR-5..8` in the second set. Keep v2 only if all eight hold, comparing
+the post-deploy v2 runs with the v1 runs below on the same files:
 
-1. U exactly right: at least 6 of 11, and at least v1's count plus 3.
+1. U exactly right: at least 6 of 11.
 2. All 5 CRITICAL controls stay CRITICAL, and no case labelled below
    CRITICAL is judged CRITICAL.
 3. Of the cases v1 got exactly right, at most 1 moves, and none moves two
    levels.
-4. `under-1` and `under-2` are not judged lower than v1 judged them.
-5. HIGH precision and accuracy, over both sets, are strictly above v1's.
+4. `under-2` is not judged lower than v1's MEDIUM. (`under-1` was LOW under
+   v1, so it cannot go lower; it is reported, not gated.)
+5. No case labelled HIGH or CRITICAL, in either set, is judged lower than v1
+   judged it.
+6. HIGH precision and accuracy, over both sets, are strictly above v1's. No
+   HIGH prediction at all is a fail, not n/a.
+7. On H, the cases judged above their label drop by at least a fifth from
+   v1's count, and accuracy is not lower than v1's.
+8. On H, HIGH-labelled cases judged below HIGH are at most v1's count
+   plus 2.
 
 If any fails, revert v2 in gen_saas (back to `ticket-severity-v1`).
+
+Items 4 to 8 were added in the review round (2026-10-01, about 19:55Z),
+after the v1 runs on the two small sets and before the v1 run on H and
+any v2 run. Item 1 lost "and v1's count plus 3", which v1's 0/11 made
+redundant.
 
 ## v1 baseline (`ticket-severity-v1`, `jev-1.13.0`, 2026-10-01)
 

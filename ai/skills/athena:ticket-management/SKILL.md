@@ -346,23 +346,24 @@ The DND Tickets data source carries these. The values are stated here once.
     (or Vulnerability). "It could be better" is Hardening, Refactor, Test,
     Docs or Ops.
 - **`Severity`** (empty on a Feature). Rate the harm the ticket shows now,
-  not its worst case. A risk read from code rates below the same defect
-  seen causing harm. When two levels fit, take the lower.
+  not its worst case. The levels already place a risk that has not
+  happened, so never lower a level again for it. Rate a security exposure
+  with a real path by that path, used or not. Otherwise, when two levels
+  fit, take the lower.
   - **CRITICAL:** prod down now, data loss, or an actively exploitable
-    exposure. A risk of an outage, or the outage a finding was found in, is
-    not CRITICAL on its own.
+    exposure. A risk of an outage, or a past outage cited as context, is
+    not CRITICAL on its own; an outage still happening is.
   - **HIGH:** a wrong result or a security exposure with a real path and no
     workaround, or it stops the fleet (a red main, or a red gate every
     change needs). Also a prod capacity or availability defect shown to
-    starve shared paths, even while prod is up.
+    exhaust a shared resource prod depends on, even while prod is up.
   - **MEDIUM:** a wrong result with a workaround, or a silent-failure class.
-    Also a failure the code can already produce but has not yet (tests that
-    can already collide).
+    Also a failure the code can already produce but has not yet.
   - **LOW:** hygiene, dead code, docs drift, cosmetic (a misleading message
     with a correct exit code), or defence in depth with no shown path: a
-    check gap nothing has slipped through, an unmeasured inefficiency, a
-    tool gap a manual step covers, an edge case no real input has hit, an
-    exposure limited to a local dev machine.
+    check gap when nothing it misses is wrong today, an inefficiency whose
+    cost is not shown, a tool gap a manual step covers, an edge case no
+    real input has hit, an exposure limited to a local dev machine.
 
   **Later (2026-10-01, DND-1600):** these levels had no "now" rule, no
   tie-break, and none of the examples above. Superseded with gen_saas
