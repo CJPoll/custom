@@ -261,11 +261,14 @@ release_holders
 echo "== sweep"
 new_repo; open_one
 pr_json 7 OPEN "$HEAD7" "$PENDING"
+before="$(cat "$S/product-prs.jsonl")"
 rc="$(lp sweep)"
+# One read of the PR, nothing else: no checks watch, no rerun, no gate, no new event.
 if [ "$rc" = 0 ] && head -1 "${TMP}/out" | grep -qx 'product_prs=1 landed=none' && grep -q 'pr=#7 open: CI pending' "${TMP}/out" \
-   && [ "$(called integration-gate)" = 0 ]; then
-  ok "CI pending: left open, product_prs=1 landed=none, no gate"
-else bad "sweep pending" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+   && [ "$(called integration-gate)" = 0 ] && [ "$(grep -c . "$FAKE/calls")" = 1 ] && grep -qx 'gh pr view 7 --json state,headRefOid,statusCheckRollup,mergeCommit' "$FAKE/calls" \
+   && [ "$(cat "$S/product-prs.jsonl")" = "$before" ]; then
+  ok "CI pending: the PR is read once and left open in product-prs.jsonl (no new event, no gate, no wait), product_prs=1 landed=none"
+else bad "sweep pending" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err") calls=$(cat "$FAKE/calls")"; fi
 
 new_repo; open_one
 pr_json 7 OPEN "$HEAD7" "$GREEN" "$(printf 'd%.0s' {1..40})"
@@ -281,6 +284,15 @@ if [ "$rc" = 0 ] && [ "$order" = "integration-gate locked-merge confirm-merged "
   ok "CI green: integration-gate --with-critic, then locked-merge, then confirm-merged; landed=prod#7; landing lane removed"
 else bad "sweep land" "rc=$rc order=$order out=$(cat "${TMP}/out") calls=$(cat "$FAKE/calls")"; fi
 
+# The merge's deploy, a run later: still running -> recorded as pending, checked next tick.
+printf '[{"name":"Post-Merge Deploy","status":"in_progress","conclusion":"","headSha":"%s"}]' "$(printf 'd%.0s' {1..40})" \
+  >"$FAKE/runs-$(printf 'd%.0s' {1..40}).json"
+before="$(cat "$S/product-prs.jsonl")"
+rc="$(lp sweep)"
+if [ "$rc" = 0 ] && grep -q 'deploy pending' "${TMP}/out" && [ "$(cat "$S/product-prs.jsonl")" = "$before" ] \
+   && [ ! -e "$S/product-line-stopped.prod" ]; then
+  ok "merged, deploy still running: reported pending, nothing recorded, the next tick checks again (no wait)"
+else bad "deploy pending" "rc=$rc out=$(cat "${TMP}/out")"; fi
 # The merge's deploy, a run later: failed -> stop the line, revert owed.
 printf '[{"name":"Post-Merge Deploy","status":"completed","conclusion":"failure","headSha":"%s"}]' "$(printf 'd%.0s' {1..40})" \
   >"$FAKE/runs-$(printf 'd%.0s' {1..40}).json"

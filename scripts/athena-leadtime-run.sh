@@ -23,6 +23,22 @@
 # lane's HEAD reflog records it making, never every commit its lane holds: a
 # sync down moves the lane onto other fleets' commits too (DND-1507).
 #
+# Product repos (DND-1540). An improve repo other than custom on this machine's
+# list is a product repo R. For each, the runner reaps a dead run's lanes in
+# <R common dir>/leadtime-lanes by their lock, reserves this run's lane there
+# (<run-id>, its lock held for the whole session, like the custom lane's) and
+# writes the manifest runs/<ts>.product.json (exported as
+# LEADTIME_PRODUCT_MANIFEST). The session cuts the lane on demand and opens a PR
+# as Athena (ai/bin/leadtime-product cut / pr); it never merges one. Before the
+# session, ONE sweep reads every open improver PR as it is now and lands at most
+# one green PR through R's bar (integration-gate --with-critic, locked-merge,
+# confirm-merged); nothing waits on CI or a deploy, so a PR or a deploy still
+# running is left for the next tick. After the session the product lanes are
+# retired: a tip pushed on a recorded improver PR is "awaiting landing", never
+# STRANDED; an unpushed commit is STRANDED (exit 72, branch kept). With no
+# product repo and no product-PR store, none of this runs and the brief is
+# unchanged.
+#
 # MCP. Claude Code resolves local-scope MCP servers from the launch directory,
 # and they are registered on the main checkout. The runner copies the one
 # server the run needs, notion-personal (an architect files DND tickets
@@ -60,11 +76,15 @@
 #                       main_moved= (origin/main's motion during the run, any
 #                       author), own_landed= (the run's own commits on
 #                       origin/main: <n> <sha>..., or UNKNOWN), ff= (the
-#                       main-checkout fast-forward), the prune result and the
-#                       summary
+#                       main-checkout fast-forward), product_prs=<open n>
+#                       landed=<R#n,...|none> (DND-1540; 0 and none with no
+#                       product repo) and its product_*: lines, the prune
+#                       result and the summary
+#   runs/<ts>.product.json  the product manifest (only with a product repo or store)
 #   consecutive-failures  the wedge counter; `rm` it to re-arm a wedged lane
 #   consecutive-blocked   the blocked streak; clears when a session reaches the model
 #   ledger.jsonl, experiments.jsonl, journal.md, cursor.<repo>.txt  the skill's own
+#   product-prs.jsonl, product-line-stopped.<R>  ai/bin/leadtime-product's (DND-1540)
 #
 # Environment (test seams and overrides):
 #   LEADTIME_REPO             a checkout of the harness repo (default: this script's)
@@ -80,6 +100,7 @@
 #   LEADTIME_LANES_DIR        where lanes live (default <git common dir>/leadtime-lanes)
 #   LEADTIME_TELEMETRY_EMIT   telemetry-emit to prune with (default the main checkout's)
 #   ATHENA_INBOX_ROOT         where the wedge and blocked alerts are delivered
+#   LEADTIME_PRODUCT_SWEEP_TIMEOUT  cap on the product-PR sweep, seconds (default 3600)
 #   ATHENA_LEADTIME_CONFIG, XDG_CONFIG_HOME  read by ai/bin/lead-time-repos, which
 #                             resolves this machine's repo list (see its --help)
 #
@@ -95,10 +116,12 @@
 #       (leadtime-blocked) per episode, since an auth fault never clears
 #   70  the session exited 0 but wrote no summary: counted
 #   71  flock failed for a reason other than "held" (a fault, never a skip)
-#   72  STRANDED: the lane holds commits that are not on origin/main, whatever
+#   72  STRANDED: the lane holds commits that are not on origin/main, or a
+#       product lane holds a commit never pushed to an improver PR, whatever
 #       the session's exit. The branch is kept: counted
-#   73  the state directory, lock, lane or MCP config could not be created
-#       (a lane or config failure is counted)
+#   73  the state directory, lock, lane, product lane or manifest, or MCP
+#       config could not be created, or ai/bin/leadtime-product is missing
+#       while a product repo is listed (a lane or config failure is counted)
 #   75  WEDGED: LEADTIME_FAIL_ESCALATE unsuccessful outcomes in a row. No
 #       session runs. The tick writes runs/<ts>.wedged, and the first wedged
 #       tick of an episode sends ONE harness-alert (leadtime-wedged)
@@ -259,8 +282,28 @@ resolve_repos() {
   fi
   { IFS= read -r RES_SOURCE; IFS= read -r RES_PATH; IFS= read -r RES_NAMES; IFS= read -r RES_DESC
     IFS= read -r RES_SKIPPED; IFS= read -r RES_SKIPPED_RUN; } <<<"${fields}"
+  RES_JSON="${out}"
 }
+RES_JSON=""
 resolve_repos
+
+# --- product repos (DND-1540) ---------------------------------------------------
+# An improve repo other than custom (the harness, by its name in the list) is a
+# PRODUCT repo: the run may change it through a per-run lane in its own git
+# common dir, a PR opened as Athena, and a landing by a LATER run
+# (ai/bin/leadtime-product). With none, nothing below runs and the brief, the
+# lane and the exits are what they were before DND-1540.
+PRODUCT_NAMES=(); PRODUCT_PATHS=()
+if [ "${RES_RC}" -eq 0 ]; then
+  while IFS=$'\t' read -r pn pp; do
+    [ -n "${pn}" ] || continue
+    PRODUCT_NAMES+=("${pn}"); PRODUCT_PATHS+=("${pp}")
+  done < <(jq -r '.repos[] | select(.mode == "improve" and .name != "custom") | [.name, .path] | @tsv' <<<"${RES_JSON}")
+fi
+PRODUCT_TOOL="${MAIN_CHECKOUT}/ai/bin/leadtime-product"
+PRODUCT_LINE="product_prs=0 landed=none"
+PRODUCT_DETAIL=""
+PRODUCT_SWEEP_TEXT="not run (dry run)"
 SKIP_BRIEF=""
 if [ -n "${RES_SKIPPED}" ]; then
   SKIP_BRIEF="Skipped on this machine, so not run: ${RES_SKIPPED}. Write one summary line \
@@ -271,6 +314,29 @@ fi
 # The outer session only delegates. The shipwright writes the summary file
 # itself (the skill's *Reporting*); the outer session never writes it, so a
 # shipwright that did not finish reads as exit 70, never as a green run.
+# PRODUCT_BRIEF is empty unless this machine has a product repo (DND-1540), so
+# with none the brief is byte-for-byte what it was before.
+# product_brief — the product repos, the tool that works them, and this tick's
+# sweep result. Single quotes are dropped: the shipwright brief is quoted.
+product_brief() {
+  PRODUCT_BRIEF=""
+  [ "${#PRODUCT_NAMES[@]}" -gt 0 ] || return 0
+  local i list="" sweep
+  for i in "${!PRODUCT_NAMES[@]}"; do
+    list="${list:+${list}; }${PRODUCT_NAMES[$i]} (${PRODUCT_PATHS[$i]})"
+  done
+  sweep="${PRODUCT_LINE}${PRODUCT_SWEEP_TEXT:+ (${PRODUCT_SWEEP_TEXT})}"
+  PRODUCT_BRIEF="Product repos (improve, other than custom) on this machine: ${list}. Unlike your \
+custom lane, a change to a product repo goes in that repo's own product lane and a PR: run \
+${PRODUCT_TOOL} cut --repo <name> --phase <phase> (it prints the lane; work only there), commit \
+there, then ${PRODUCT_TOOL} pr --repo <name> --title <title> --body-file <your evidence file>, which \
+pushes as Athena and opens the PR (LEADTIME_PRODUCT_MANIFEST is already exported). Never merge, land \
+or wait on a product PR or its CI: a later run lands it through that repo's own bar. An unpushed \
+commit left in a product lane is STRANDED. Product PRs this tick: ${sweep}. "
+  PRODUCT_BRIEF="${PRODUCT_BRIEF//\'/}"
+}
+build_brief() {
+product_brief
 BRIEF="First, before anything else, run exactly this one Bash command: \
 touch \"\$LEADTIME_RECEIPT\" — it is the runner's liveness receipt. Then you are \
 coordinating; do the work by delegating. Spawn exactly one athena-shipwright \
@@ -291,12 +357,13 @@ Sync up). Open no PR. If a gate or the critic \
 refuses your change, do what athena:lead-time-improve (Landing) says for a \
 refusal on the cron path: journal it and reset your lane, so it holds no \
 unlanded commit. The runner fast-forwards \
-the main checkout after you exit. State dir: ${STATE_DIR} (LEAD_TIME_STATE_DIR \
+the main checkout after you exit. ${PRODUCT_BRIEF}State dir: ${STATE_DIR} (LEAD_TIME_STATE_DIR \
 is already exported with it). The runner does the telemetry prune; do not prune. \
 Write your summary lines to exactly this file: ${SUMMARY}. Your hard constraint \
 is your block Speed a safety check up; never weaken it (ai/blocks/ops/safety-checks.md). \
 End with your summary lines.' When it finishes, print the contents of ${SUMMARY} \
 and stop. Never write to that file yourself."
+}
 
 # res_fix — the runner's own Fix: for its own fault, else the resolver's, else
 # how to see why.
@@ -316,6 +383,7 @@ if [ "${DRY}" -eq 1 ]; then
     echo "  Fix: $(res_fix)" >&2
     exit 78
   fi
+  build_brief
   printf '%s\n' "${BRIEF}"
   exit 0
 fi
@@ -738,6 +806,92 @@ if ! ( umask 077; printf '%s\n' "${mcp_config}" >"${MCP_FILE}" ) 2>/dev/null; th
   exit 73
 fi
 
+# --- 7b. product lanes (DND-1540) ----------------------------------------------------
+# Only with a product repo, or a product-PR store from an earlier run (its PRs
+# are still swept, or reported as not swept, never forgotten). For each product
+# repo R: reap a dead run's lanes in R by their lock, then RESERVE this run's
+# lane, <R common dir>/leadtime-lanes/<run-id>: its lock is taken here and held
+# on its own descriptor for the whole session, as fd 8 is for the custom lane;
+# the session cuts the worktree on demand (leadtime-product cut). Then one
+# sweep of every open improver PR, read ONCE as it is now: nothing here waits
+# on CI or a deploy, so a PR whose CI is still running is left for the next tick.
+PRODUCT_MANIFEST="${LOG_DIR}/${ts}.product.json"
+PRODUCT_FDS=(); PRODUCT_LOCKS=(); PRODUCT_STRANDED=0
+product_release() { # close every reserved lane lock and remove the lock files
+  local f
+  for f in "${PRODUCT_FDS[@]}"; do { exec {f}>&-; } 2>/dev/null || true; done
+  PRODUCT_FDS=()
+  [ "${#PRODUCT_LOCKS[@]}" -eq 0 ] || rm -f -- "${PRODUCT_LOCKS[@]}"
+  PRODUCT_LOCKS=()
+}
+product_abort() { # <why> <fix> — before the session: undo the lanes, count it, exit 73
+  product_release
+  retire_lane "${RUN_ID}" "product lane setup failed" >/dev/null || true
+  { exec 8>&-; } 2>/dev/null || true
+  rm -f -- "${LANE_LOCK}" "${LANE_META}" "${MCP_FILE}"
+  record_failure "$1" "lane=${LANE}" "fix=$2"
+  echo "${ME}: $1; no session spawned. Counted as an unsuccessful outcome." >&2
+  echo "  Fix: $2" >&2
+  exit 73
+}
+product_note() { PRODUCT_DETAIL="${PRODUCT_DETAIL:+${PRODUCT_DETAIL}$'\n'}$1"; }
+if [ "${#PRODUCT_NAMES[@]}" -gt 0 ] || [ -e "${STATE_DIR}/product-prs.jsonl" ]; then
+  if [ ! -x "${PRODUCT_TOOL}" ]; then
+    product_abort "the product-lane tool ${PRODUCT_TOOL} is absent or not executable in the main checkout" \
+      "land ai/bin/leadtime-product (DND-1540) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs."
+  fi
+  pm_entries="[]"
+  for i in "${!PRODUCT_NAMES[@]}"; do
+    pn="${PRODUCT_NAMES[$i]}"; pp="${PRODUCT_PATHS[$i]}"
+    pc="$(git -C "${pp}" rev-parse --git-common-dir 2>/dev/null || true)"
+    case "${pc}" in ''|/*) ;; *) pc="${pp}/${pc}" ;; esac
+    [ -n "${pc}" ] && pc="$(cd -- "${pc}" 2>/dev/null && pwd -P || true)"
+    [ -n "${pc}" ] || product_abort "cannot resolve the git common dir of the product repo ${pn} (${pp})" \
+      "check that ${pp} is a git checkout ('git -C ${pp} rev-parse --git-common-dir')."
+    pm_entries="$(jq -c --arg n "${pn}" --arg p "${pp}" --arg c "${pc}" --arg id "${RUN_ID}" \
+      '. + [{name: $n, path: $p, common: $c, lanes_dir: ($c + "/leadtime-lanes"),
+             lane: ($c + "/leadtime-lanes/" + $id), lock: ($c + "/leadtime-lanes/" + $id + ".lock")}]' <<<"${pm_entries}")"
+  done
+  if ! ( umask 077; jq -n --arg id "${RUN_ID}" --arg s "${STATE_DIR}" --argjson r "${pm_entries}" \
+           '{run_id: $id, state_dir: $s, repos: $r}' >"${PRODUCT_MANIFEST}" ) 2>/dev/null; then
+    product_abort "could not write the product manifest ${PRODUCT_MANIFEST}" "check that ${LOG_DIR} is writable and the disk is not full."
+  fi
+  export LEADTIME_PRODUCT_MANIFEST="${PRODUCT_MANIFEST}"
+  if [ "${#PRODUCT_NAMES[@]}" -gt 0 ]; then
+    reap_rc=0
+    reap_out="$("${PRODUCT_TOOL}" reap 2>&1 </dev/null)" || reap_rc=$?
+    [ -z "${reap_out}" ] || product_note "${reap_out}"
+    [ "${reap_rc}" -eq 0 ] || product_note "product_reap=FAILED exit=${reap_rc}"
+  fi
+  while IFS= read -r plock; do
+    [ -n "${plock}" ] || continue
+    pdir="$(dirname -- "${plock}")"
+    { mkdir -p "${pdir}" && chmod 700 "${pdir}"; } 2>/dev/null \
+      || product_abort "could not create the product lanes dir ${pdir}" "check that ${pdir} can be created."
+    printf 'origin=cron\npid=%s\nrun_id=%s\n' "$$" "${RUN_ID}" >"${plock%.lock}.meta"
+    if ! { exec {pfd}>>"${plock}"; } 2>/dev/null; then
+      product_abort "could not open the product lane lock ${plock}" "check that ${pdir} is writable and the disk is not full."
+    fi
+    PRODUCT_FDS+=("${pfd}"); PRODUCT_LOCKS+=("${plock}")
+    flock -n "${pfd}" || product_abort "the fresh product lane lock ${plock} was already held" \
+      "this should be impossible for a unique run id. Check for a process holding it ('fuser -v ${plock}')."
+  done < <(jq -r '.repos[].lock' "${PRODUCT_MANIFEST}")
+  sweep_rc=0; sweep_err="$(mktemp)" || sweep_err=/dev/null
+  sweep_out="$(timeout -k 60 "${LEADTIME_PRODUCT_SWEEP_TIMEOUT:-3600}" "${PRODUCT_TOOL}" sweep 2>"${sweep_err}" </dev/null)" || sweep_rc=$?
+  if [ "${sweep_rc}" -eq 0 ] && [ -n "${sweep_out}" ]; then
+    PRODUCT_LINE="$(head -n1 <<<"${sweep_out}")"
+    PRODUCT_SWEEP_TEXT="$(tail -n +2 <<<"${sweep_out}" | paste -sd ';' - | sed 's/;/; /g')"
+    [ "$(wc -l <<<"${sweep_out}")" -le 1 ] || product_note "$(tail -n +2 <<<"${sweep_out}")"
+  else
+    PRODUCT_LINE="product_prs=UNKNOWN landed=UNKNOWN (sweep exit ${sweep_rc})"
+    PRODUCT_SWEEP_TEXT="the sweep failed: $(grep -v '^[[:space:]]*$' "${sweep_err}" 2>/dev/null | head -n1)"
+    product_note "product_sweep=FAILED exit=${sweep_rc}: $(tr '\n' ' ' <"${sweep_err}" 2>/dev/null)"
+    echo "${ME}: leadtime-product sweep exited ${sweep_rc}; open product PRs were not checked this tick. The session still runs." >&2
+    echo "  Fix: run '${PRODUCT_TOOL} sweep --manifest ${PRODUCT_MANIFEST}' by hand and follow its own Fix: line." >&2
+  fi
+  [ "${sweep_err}" = /dev/null ] || rm -f -- "${sweep_err}"
+fi
+
 # --- 8. run the session -------------------------------------------------------------
 # A headless session kills background tasks after 600s by default; the
 # shipwright runs as one. Bound the ceiling three minutes under the hard
@@ -752,6 +906,7 @@ else
   export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="$(( timeout_min * 30000 ))"
 fi
 rm -f "${RECEIPT}" "${SUMMARY}"
+build_brief
 status=0
 ( cd -- "${LANE}" && exec timeout -k 60s "${TIMEOUT}" "${CLAUDE}" --dangerously-skip-permissions \
     --mcp-config "${MCP_FILE}" --strict-mcp-config -p "${BRIEF}" 9>&- ) </dev/null >"${log}" 2>&1 || status=$?
@@ -899,6 +1054,22 @@ fi
 { exec 8>&-; } 2>/dev/null || true
 rm -f -- "${LANE_LOCK}" "${LANE_META}" "${MCP_FILE}"
 
+# The product lanes (DND-1540), with their locks still held: work on R's
+# origin/main is removed; a tip pushed on a recorded improver PR is awaiting
+# landing, never STRANDED; anything else is STRANDED and its branch kept. A
+# teardown that cannot tell keeps the branch and counts as stranded too.
+if [ "${#PRODUCT_LOCKS[@]}" -gt 0 ]; then
+  td_rc=0
+  td_out="$("${PRODUCT_TOOL}" teardown 2>&1 </dev/null)" || td_rc=$?
+  [ -z "${td_out}" ] || product_note "${td_out}"
+  if [ "${td_rc}" -ne 0 ]; then
+    PRODUCT_STRANDED=1; STRANDED=1
+    [ "${td_rc}" -eq 72 ] || product_note "product_teardown=FAILED exit=${td_rc} (branches kept)"
+  fi
+  while IFS= read -r plock; do rm -f -- "${plock%.lock}.meta"; done < <(printf '%s\n' "${PRODUCT_LOCKS[@]}")
+  product_release
+fi
+
 # --- 10. classify, then finish -----------------------------------------------------
 # finish <exit> <outcome> — every tick that spawned a session ends here and
 # writes runs/<ts>.run.
@@ -913,6 +1084,8 @@ finish() {
     printf 'main_moved=%s\n' "${MAIN_MOVED}"
     printf 'own_landed=%s\n' "${OWN_LANDED}"
     printf 'ff=%s\n' "${FF}"
+    printf '%s\n' "${PRODUCT_LINE}"
+    [ -z "${PRODUCT_DETAIL}" ] || printf '%s\n' "${PRODUCT_DETAIL}"
     printf 'prune=%s\n' "${PRUNE_RESULT}"
     if [ -s "${SUMMARY}" ]; then
       sed 's/^/summary: /' -- "${SUMMARY}"
@@ -957,6 +1130,15 @@ fi
 rm -f "${BLOCK_COUNT}" "${BLOCK_STATE}"
 # Stranded first, whatever the session's exit: the kept branch is the thing
 # the owner has to act on.
+if [ "${STRANDED}" -eq 1 ] && [ "${PRODUCT_STRANDED}" -eq 1 ] && [ "${LANE_RESULT}" = removed ]; then
+  # Only a product lane is stranded (DND-1540): a commit never pushed to an
+  # improver PR. A pushed one is awaiting landing and never reaches here.
+  mapfile -t pd_lines < <(printf '%s\n' "${PRODUCT_DETAIL}" | grep -E '^product_(lane|teardown)' || true)
+  record_failure "a product lane holds a commit that was never pushed to an improver PR" "${pd_lines[@]}" "session_exit=${status}"
+  echo "${ME}: run ${ts} is STRANDED in a product repo (session exit ${status}); its branch is kept. Counted as unsuccessful. Record: ${LOG_DIR}/${ts}.failed" >&2
+  echo "  Fix: the product_lane line in the record names the repo and branch. Push it and open its PR (leadtime-product pr), or drop it with 'git -C <repo> branch -D <branch>'. It is never auto-deleted." >&2
+  finish 72 stranded
+fi
 if [ "${STRANDED}" -eq 1 ]; then
   record_failure "the lane holds commits that are not on origin/main" "branch=${BRANCH} (kept)" "tip=${tip}" "session_exit=${status}"
   echo "${ME}: run ${ts} is STRANDED: ${BRANCH} holds commits not on origin/main (session exit ${status}). Counted as unsuccessful. Record: ${LOG_DIR}/${ts}.failed" >&2

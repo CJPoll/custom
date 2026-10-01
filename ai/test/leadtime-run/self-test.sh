@@ -62,7 +62,7 @@ esac
 ALERTS="${ATHENA_INBOX_ROOT}/harness-alerts/to-custom"
 NOW_FIXED="$(date -d '2026-10-01 12:30 UTC' +%s)"
 G=(-c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false -c init.defaultBranch=main)
-RESOLVER_LIBS="strict_argv.rb lead_time_config.rb lead_time_config_io.rb"
+RESOLVER_LIBS="strict_argv.rb lead_time_config.rb lead_time_config_io.rb leadtime_product.rb leadtime_product_io.rb"
 
 # --- shared fakes ----------------------------------------------------------------
 cat >"$TMP/fake-send-mail" <<'EOF'
@@ -85,6 +85,8 @@ new_case() {
   printf -- '---\nname: athena:lead-time-improve\n---\n' >"$seed/ai/skills/athena:lead-time-improve/SKILL.md"
   # The real resolver (DND-1526), so every case resolves the list as the cron does.
   cp -- "${REPO_ROOT}/ai/bin/lead-time-repos" "$seed/ai/bin/"
+  # The real product-lane tool (DND-1540), so a product repo is worked as the cron works it.
+  cp -- "${REPO_ROOT}/ai/bin/leadtime-product" "$seed/ai/bin/"
   for f in ${RESOLVER_LIBS}; do cp -- "${REPO_ROOT}/ai/lib/$f" "$seed/ai/lib/"; done
   # The checkouts the configs point at: temp repos named as the repos are.
   for r in custom gen_saas walt_ui; do git "${G[@]}" init -q "$c/checkouts/$r"; done
@@ -161,6 +163,23 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
              f="$(git rev-parse --git-path logs/HEAD)"; awk -v b="$b" '$2 != b' "$f" >"$f.t" && mv "$f.t" "$f"
              summary; exit 0 ;;
   noreflog-land) : >"$LEADTIME_RECEIPT"; own_land own.txt; rm -f "$(git rev-parse --git-path logs/HEAD)"; summary; exit 0 ;;
+  product-*)
+    # A product repo's lane (DND-1540), through the real tool the brief names.
+    : >"$LEADTIME_RECEIPT"
+    printf '%s\n' "${LEADTIME_PRODUCT_MANIFEST:-}" >"$d/claude-product-manifest"
+    tool="$d/repo/ai/bin/leadtime-product"
+    "$tool" cut --repo gen_saas --phase verify >"$d/cut.out" 2>&1 || echo "cut-rc=$?" >>"$d/cut.out"
+    lock="$(jq -r '.repos[] | select(.name == "gen_saas") | .lock' "$LEADTIME_PRODUCT_MANIFEST")"
+    if flock -n "$lock" true; then echo free >"$d/product-lock"; else echo held >"$d/product-lock"; fi
+    lane="$(sed -n 's/^lane=//p' "$d/cut.out")"
+    if [ "$(cat "$d/mode")" != product-cut ] && [ -n "$lane" ]; then
+      echo change >"$lane/fix.txt"; g -C "$lane" add fix.txt >/dev/null; g -C "$lane" commit -q -m "product change"
+      if [ "$(cat "$d/mode")" = product-pr ]; then
+        echo "before/after evidence" >"$d/evidence.md"
+        "$tool" pr --repo gen_saas --title "speed up verify" --body-file "$d/evidence.md" >"$d/pr.out" 2>&1 || echo "pr-rc=$?" >>"$d/pr.out"
+      fi
+    fi
+    summary; exit 0 ;;
 esac
 EOF
   chmod +x "$c/stub-claude"
@@ -885,6 +904,126 @@ if [ "$rc" = 0 ] && grep -q '^prune=FAILED exit=127' "$(newest "$c" run)"; then
   ok "a missing telemetry-emit reads as a FAILED prune (exit 127), never as a quiet one"
 else
   bad "missing telemetry-emit" "rc=$rc run=$(cat "$(newest "$c" run)" 2>/dev/null)"
+fi
+
+# ---------------------------------------------------------------------------------
+case_ '16. product repos: an improve repo other than custom (DND-1540)'
+
+# Fakes for the forge the product lane talks to; nothing real is pushed or read.
+mkdir -p "$TMP/pfake"
+cat >"$TMP/pfake/gh" <<'EOF'
+#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >>"$PFAKE_LOG"
+if [ "$1 $2" = "pr view" ]; then
+  jq -n --arg h "$(cat "$PFAKE_HEAD" 2>/dev/null)" '{state: "OPEN", headRefOid: $h,
+    statusCheckRollup: [{__typename: "CheckRun", status: "IN_PROGRESS", conclusion: null}], mergeCommit: null}'; exit 0
+fi
+echo '[]'
+EOF
+cat >"$TMP/pfake/gh-athena" <<'EOF'
+#!/usr/bin/env bash
+printf 'gh-athena %s\n' "$*" >>"$PFAKE_LOG"
+if [ "$1" = git ]; then shift; exec git "$@"; fi
+if [ "$1 $2" = "pr create" ]; then echo "https://github.com/example/gen_saas/pull/41"; exit 0; fi
+exit 64
+EOF
+chmod +x "$TMP/pfake/gh" "$TMP/pfake/gh-athena"
+
+# product_case — a case whose override lists custom (improve) and gen_saas
+# (improve), with gen_saas a clone of its own temp origin.
+product_case() {
+  local c="$1" s="$1/gen-seed"
+  rm -rf "$c/checkouts/gen_saas"
+  git "${G[@]}" init -q "$s"; echo one >"$s/a.txt"; git -C "$s" add -A; git "${G[@]}" -C "$s" commit -q -m seed
+  git clone -q --bare "$s" "$c/gen-origin.git"; git clone -q "$c/gen-origin.git" "$c/checkouts/gen_saas"
+  override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/checkouts/custom\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"$c/checkouts/gen_saas\",\"mode\":\"improve\"},{\"name\":\"walt_ui\",\"path\":\"$c/checkouts/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
+}
+glanes() { printf '%s/checkouts/gen_saas/.git/leadtime-lanes' "$1"; }
+prun() { # <case> [VAR=val ...] — run_runner with the product fakes and the override
+  local c="$1"; shift
+  run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json" LEADTIME_GH="$TMP/pfake/gh" LEADTIME_GH_ATHENA="$TMP/pfake/gh-athena" \
+    LEADTIME_PRODUCT_FORGE=github LEADTIME_PRODUCT_BOOTSTRAP= PFAKE_LOG="$c/pfake.log" PFAKE_HEAD="$c/pfake.head" "$@"
+}
+
+# No improve repo other than custom: behaviour identical to today. The whole
+# suite above runs unchanged; here the product machinery is shown inert.
+c="$(new_case)"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -qx 'product_prs=0 landed=none' "$run" && ! grep -q '^product' <(grep -v '^product_prs=' "$run") \
+   && ! grep -q 'leadtime-product' "$c/claude-args" && [ -z "$(find "$(sd "$c")/runs" -name '*.product.json')" ] \
+   && [ ! -e "$(sd "$c")/product-prs.jsonl" ] && [ ! -s "$c/claude-product-manifest" ] \
+   && [ ! -e "$c/checkouts/custom/.git/leadtime-lanes" ]; then
+  ok "no improve repo other than custom: no manifest, no product lane, no product text in the brief; .run says product_prs=0 landed=none"
+else
+  bad "no product repo" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"
+rc="$(run_runner "$c" -- --dry-run)"
+if [ "$rc" = 0 ] && ! grep -q 'leadtime-product' "$c/runner.out" && ! grep -q 'product' "$c/runner.out"; then
+  ok "--dry-run with no product repo: the brief has no product text"
+else
+  bad "dry-run no product" "rc=$rc out=$(cat "$c/runner.out")"
+fi
+
+# One improve repo R: a lane reserved in R's common dir, held through the
+# session, cut on demand from R's origin/main, removed after; a dead run's
+# lane in R reaped by its lock.
+c="$(new_case)"; product_case "$c"; echo product-cut >"$c/mode"
+mkdir -p "$(glanes "$c")"
+git -C "$c/checkouts/gen_saas" worktree add -q -b leadtime/gen_saas-tail-old "$(glanes "$c")/run-20260930T113000Z-7" origin/main
+printf 'branch=leadtime/gen_saas-tail-old\n' >"$(glanes "$c")/run-20260930T113000Z-7.meta"
+: >"$(glanes "$c")/run-20260930T113000Z-7.lock"
+rc="$(prun "$c")"
+run="$(newest "$c" run)"
+gbase="$(git -C "$c/checkouts/gen_saas" rev-parse refs/remotes/origin/main)"
+if [ "$rc" = 0 ] && grep -q "^lane=$(glanes "$c")/run-" "$c/cut.out" && grep -qx 'branch=leadtime/gen_saas-verify-20261001T123000Z' "$c/cut.out" \
+   && grep -q "^base=$gbase" "$c/cut.out" && [ "$(cat "$c/product-lock")" = held ] \
+   && [ -z "$(find "$(glanes "$c")" -mindepth 1 -maxdepth 1 -name 'run-*')" ] \
+   && ! git -C "$c/checkouts/gen_saas" show-ref --quiet refs/heads/leadtime/gen_saas-tail-old \
+   && grep -q 'product_reaped: repo=gen_saas lane=run-20260930T113000Z-7' "$run" \
+   && grep -q '^product_lane: repo=gen_saas removed' "$run" && grep -qx 'product_prs=0 landed=none' "$run" \
+   && grep -q 'leadtime-product cut --repo' "$c/claude-args" && grep -q 'gen_saas (improve' "$c/claude-args"; then
+  ok "one improve repo R: lane cut in R's common dir from R's origin/main, its lock held through the session, removed after; a dead lane reaped by its lock"
+else
+  bad "product lane" "rc=$rc run=$(cat "$run" 2>/dev/null) cut=$(cat "$c/cut.out" 2>/dev/null) lock=$(cat "$c/product-lock" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"; product_case "$c"; echo product-pr >"$c/mode"
+rc="$(prun "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -q 'outcome=ok exit=0' "$run" && grep -q '^product_lane: repo=gen_saas awaiting landing on PR #41' "$run" \
+   && [ "$(jq -r 'select(.event=="opened") | .pr' "$(sd "$c")/product-prs.jsonl")" = 41 ] \
+   && [ ! -e "$(sd "$c")/consecutive-failures" ] && grep -q 'push -u origin HEAD' "$c/pfake.log"; then
+  ok "a pushed commit on an open PR: not STRANDED, exit 0, recorded in product-prs.jsonl, not counted"
+else
+  bad "product pr" "rc=$rc run=$(cat "$run" 2>/dev/null) pr=$(cat "$c/pr.out" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"; product_case "$c"; echo product-strand >"$c/mode"
+rc="$(prun "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 72 ] && grep -q 'outcome=stranded exit=72' "$run" && grep -q '^product_lane: repo=gen_saas STRANDED' "$run" \
+   && git -C "$c/checkouts/gen_saas" show-ref --quiet refs/heads/leadtime/gen_saas-verify-20261001T123000Z \
+   && [ "$(fails "$c")" = 1 ] && grep -q 'Fix:' "$c/runner.err"; then
+  ok "an unpushed commit in a product lane: STRANDED, exit 72, branch kept, counted"
+else
+  bad "product strand" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# The sweep runs before the session and its result reaches the brief and .run.
+c="$(new_case)"; product_case "$c"
+mkdir -p "$(sd "$c")"
+printf '%s\n' "$(printf 'a%.0s' {1..40})" >"$c/pfake.head"
+printf '{"event":"opened","at":"2026-10-01T11:00:00Z","repo":"gen_saas","pr":40,"url":"https://github.com/example/gen_saas/pull/40","phase":"verify","branch":"leadtime/gen_saas-verify-x","head":"%s","run_id":"run-20261001T113000Z-1"}\n' \
+  "$(printf 'a%.0s' {1..40})" >"$(sd "$c")/product-prs.jsonl"
+rc="$(prun "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -qx 'product_prs=1 landed=none' "$run" && grep -q '^product: repo=gen_saas pr=#40 open: CI pending' "$run" \
+   && grep -q 'product_prs=1 landed=none' "$c/claude-args" && grep -q '^gh pr view 40' "$c/pfake.log"; then
+  ok "the sweep checks every open improver PR before the session; .run and the brief carry product_prs=<open n>"
+else
+  bad "product sweep" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 # ---------------------------------------------------------------------------------

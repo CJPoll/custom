@@ -366,6 +366,7 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/bin/lead-time"          => "ai/test/lead-time/self-test.sh",
   "ai/bin/lead-time-phases"   => "ai/test/lead-time-phases/self-test.sh",
   "ai/bin/lead-time-repos"    => "ai/test/lead-time-repos/self-test.sh",
+  "ai/bin/leadtime-product"   => "ai/test/leadtime-product/self-test.sh",
   "ai/bin/ready-and-idle"     => "ai/test/ready-and-idle/self-test.sh",
   "scripts/reap-orphan-dbus"  => "scripts/test/reap-orphan-dbus/self-test.sh",
 }.freeze
