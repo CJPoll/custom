@@ -159,3 +159,11 @@ After the fix: 49 passed, 0 failed.
 |---|---|
 | `env-ahead-accepts-any`: `env_ahead_of_pin` passes without the exact-match test | `live env matches neither the pinned nor the newer env -> still DRIFT` |
 | `env-newer-reader-nil`: `newer_env_section` reads as no newer main | `live env equals a NEWER origin/main's env -> ACTIVE ...` |
+
+Critic round (DND-1570): the path where the pin predates the env had no test. Added
+inline cases (injected newer env: equal passes ahead, newer declares no env fails,
+equal to neither fails, unreadable fails with the could-not-judge note) and black-box
+cases (`pin predates the env ...`). The inline `keys present but the env has not
+landed -> FAIL` case had gone RED once `run_agent_stash_env` read the live origin
+(`FAIL env: keys present but the env has not landed`); the inline harness now injects
+`newer_env`, hermetic by default.

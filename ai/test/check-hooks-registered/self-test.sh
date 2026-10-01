@@ -566,6 +566,20 @@ pinned_session "${D}" "${SNAP_OLD}" wrapper
 expect "newer origin/main has no registry -> pinned DRIFT stands, says it could not judge" 1 \
   "could not read a newer origin/main" "agent-stash env: ahead of the pinned bar"
 
+# The pin predates the env altogether: the env lands after the gate pinned, and
+# the owner installs it. Pinned bar has no env; live env equals the newer main's.
+D="$(env_fixture env-ahead-landed-later)"
+PIN="$(git -C "${D}/main" rev-parse HEAD~1)"
+KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+env_settings "${D}" "${INSTALL_AFTER}"
+pinned_session "${D}" "${SNAP_OLD}" wrapper
+expect "pin predates the env, live env equals the newer origin/main's -> named ahead, exit 0" 0 \
+  "agent-stash env: ahead of the pinned bar" "agent-stash env: FAIL"
+env_settings "${D}" "${INSTALL_AFTER}" ATHENA_AGENT_BIN
+pinned_session "${D}" "${SNAP_OLD}" stale
+expect "pin predates the env, live env equals neither -> still FAIL" 1 "agent-stash env: FAIL" \
+  "agent-stash env: ahead of the pinned bar"
+
 # Unpinned, there is no newer origin/main to be ahead of.
 D="$(new_fixture unpinned-unwired)"
 printf '{"hooks": {}}\n' > "${D}/settings.json"
