@@ -4205,6 +4205,27 @@ which takes five arguments: `bot_id` (selects the app), `team_id`, `channel`,
   the bot.
 - **The harness claims only threads it starts**: a `post`, or a `dm` without
   `--thread_ts` (`athena:slack`). It never claims a thread it merely replies in.
+- **The router claims a root it routed by topic.** When the Slack router
+  delivers a new conversation's root by its topic route in mode `on` (`route:
+  topic_judgment` or `route: session_mention`, *New conversations may route by
+  an advisory topic judgment*), it claims that root's thread for the same
+  instance, in the transaction that stores the root's line. So the owner's
+  replies in that thread follow the root to the session it went to, by the
+  routing below. First claim wins here too: the router's claim never replaces
+  an existing one, and a later harness claim of that thread answers
+  `already_claimed`. The router claims nothing in `shadow`, in `off`, or for a
+  root that fell back to the channel route, where replies already follow the
+  channel route. The claim records which writer made it (`harness` or
+  `router`), so the outcome log can say why a reply went where it did.
+
+**Later (2026-10-01):** a claim was written only by the `slack_thread_claim`
+MCP tool, so a reply to a root the router had sent to a topic route followed
+the channel route until the receiving session claimed the thread. Superseded by
+the router's claim above (gen_saas ADR 21 and its Slack-routing tickets on the
+Jev epic). Why: the owner's rule is that a reply goes to the session that has
+the conversation (Cody, 2026-09-28 ~04:25Z), and with routing now asynchronous
+the reply is held until its root's route is decided, which only helps if the
+reply can then follow it.
 
 **Routing.** For a **thread reply only** (`thread_ts` present and not equal to
 `ts`), a live claim is the destination. Anything else follows the channel route,
@@ -4264,30 +4285,48 @@ a judgment. Implementing tickets: DND-716 (the router, after DND-490), DND-717
 every new conversation follows the channel route, as today.**
 
 **The router order.** It runs after the event classifier and the dedupe
-pre-check, so a Slack retry of the same `event_id` is never judged twice:
+pre-check, so a Slack retry of the same `event_id` is never judged twice. The
+webhook decides every step marked `[webhook]` before it answers Slack. A step
+marked `[worker]` runs after the ack, behind a route request (*Routing runs
+after the ack* below):
 
 ```text
 event classified (not ignored), dedupe pre-check passed
+0. a route request is pending for the event's conversation key?
+                          -> queue behind it, unjudged; the worker routes it by
+                             steps 1-3 once every earlier request on the key is done  [webhook]
 1. thread reply?          -> live claim: the claimant (route: thread_claim)
-                             stale or no claim: the channel route (unchanged)
+                             stale or no claim: the channel route (unchanged)       [webhook]
 2. new conversation? (im, mpim or mention root)
-   2a. mode off           -> the channel route, UNCHANGED: no call, no
-                             judgment_calls row, no topic, no topic outcome  [no call]
-   2b. sender != owner    -> the channel route (topic reason: sender_rule)   [no judgment]
+   2a. mode off           -> the channel route, UNCHANGED: no call, no request row,
+                             no judgment_calls row, no topic, no topic outcome     [webhook]
+   2b. sender != owner    -> the channel route (topic reason: sender_rule)         [webhook]
    2b'. the owner's text addresses a session (owner rule 2, session-mention-v1)
                           -> that label's topic route, live: its Slack inbox (route: session_mention)
                              no enabled live route: the channel route (topic reason: label_disabled)
-                             no context read                              [no judgment]
-   2c. read the conversation context (ai/contracts/athena-judgments.md ->
+                             no context read                                      [webhook]
+   2c. write a route request and answer Slack                                     [webhook]
+       then read the conversation context (ai/contracts/athena-judgments.md ->
        Egress and data flow, the slack_routing row)
-         read failed      -> the channel route (topic reason: context_unavailable)  [no judgment]
+         read failed      -> the channel route (topic reason: context_unavailable) [worker]
        judge slack_routing with the root and its context -> the caller's decision:
          accepted, label enabled, topic route live
-                          -> that instance's Slack inbox (route: topic_judgment)
-         anything else    -> the channel route (topic reason: the fallback reason)
+                          -> that instance's Slack inbox (route: topic_judgment)   [worker]
+         anything else    -> the channel route (topic reason: the fallback reason) [worker]
        mode shadow: always the channel route; topic records what would have happened
-3. anything else          -> the channel route (unchanged)
+       not routed by the routing deadline
+                          -> the channel route (topic reason: route_overdue)       [worker or sweeper]
+3. anything else          -> the channel route (unchanged)                         [webhook]
 ```
+
+**Later (2026-10-01):** this block ran every step inside the webhook, so step
+2c's context read and judgment sat inside Slack's HTTP ack, and Slack routing
+could not be set `on` until a latency bar measured that wait. Superseded by
+gen_saas ADR 21 (*Webhooks Verify, Persist and Ack*): step 2c now writes a route
+request and acks, and the route worker reads, judges and delivers. Step 0 is new:
+it holds a reply behind its root's pending request. The routing deadline
+(`route_overdue`) is new and replaces the latency bar. Why: the owner asked why
+Jev was on the ack path at all (Cody, 2026-10-01), and nothing needs it there.
 
 **Later (2026-09-28):** step 2 previously checked sender (2a) before mode (2b),
 and mode off stamped `topic reason: mode_off` on the line. Superseded by DND-716
@@ -4329,10 +4368,69 @@ session.
 - **Exactly one destination per event**, as for a claim. A topic route replaces
   the channel route for that event; it never adds a second copy, so the
   designated-consumer rule holds unchanged.
-- **The deadline is 1,500 ms.** Slack needs its HTTP ack within 3 s. A judgment
-  that overruns falls back as `timeout`.
+- **The judgment's deadline is 5,000 ms,** and it runs in the route worker,
+  never inside Slack's ack. A judgment that overruns falls back as `timeout`.
+
+  **Later (2026-10-01):** this read "The deadline is 1,500 ms. Slack needs its
+  HTTP ack within 3 s." Superseded by *Routing runs after the ack* below
+  (gen_saas ADR 21). Why: the deadline was sized to fit inside the ack, and the
+  judgment no longer runs there. A longer deadline turns fewer slow answers
+  into `timeout` fallbacks; the routing deadline bounds the whole wait instead.
 - **The content domain is `work`**, because the connected Slack is the work
   Slack (*Domain and owner-only items*).
+
+**Routing runs after the ack.** No judgment and no other external call runs
+inside the Slack webhook (gen_saas ADR 21). Step 2c instead writes a **route
+request** and answers Slack; the route worker finishes it.
+
+- **The request.** One row per `event_id`, written in the same transaction as
+  the event's thread participation, so a reply in that thread is classified
+  exactly as it would be after the root's line is stored. It is keyed
+  uniquely by `event_id`, and the dedupe pre-check reads both stored events and
+  pending requests, so a Slack retry of a queued event stops at `duplicate`. It
+  holds what the line needs (the parsed event and its `received_at`) and is
+  deleted when the event is routed, so it lives no longer than the event's own
+  stored line would.
+- **The conversation key** is `(slack_app, channel, thread_ts or ts)`: a root
+  and every reply in its thread share it. An event whose key has a pending
+  request is queued behind it (step 0), whatever it is, and is never judged:
+  the worker routes it by steps 1 to 3 once every earlier request on the key is
+  done. So a reply is never delivered before its root's route is decided, and
+  with the router's claim (*Thread replies route to the thread's claimant*) it
+  follows the root to the same session. Order is promised within a key only.
+  Two different conversations may be delivered in either order.
+- **At least once, one line.** The worker stamps an attempt on a request before
+  it judges, and finishes it in ONE transaction, guarded on the request still
+  being owed: the stored line, the router's claim when the root was routed by
+  topic, and the request's deletion. Of two processes finishing one request,
+  only the first commits. A crash before that commit leaves the request owed and
+  spends an attempt; the next pass routes it again, and may judge it again (a
+  second `judgment_calls` row for the same `subject_ref`), but it can never
+  store a second line, because the line's `event_id` is unique. A crash after the commit leaves a stored, unpushed line,
+  which the existing push path delivers (*One push per connection* in gen_saas
+  `Athena.SlackEvents`).
+- **The mode is read when the request is routed**, not when it was written. A
+  request the worker routes after the owner set `off` takes step 2a: the
+  channel route and no `topic`, the pre-epic line byte for byte. Mode `off`
+  never writes a request.
+- **Shadow takes the same path as `on`.** A shadow request is judged and then
+  delivered by the channel route with its `topic`, so shadow and `on` differ
+  only in the destination. Shadow's line therefore arrives after the judgment,
+  not at the ack.
+- **The routing deadline is 60 s from `received_at`.** A request still owed
+  past it, or after its third failed attempt, is delivered by the channel route
+  with topic reason `route_overdue`, by whichever of the route worker or the
+  Slack sweeper finishes it first. The sweeper is a separate process, so a route
+  worker that is down or stuck still cannot hold a message: it is late, never
+  lost. `route_overdue` is a fault (`ai/contracts/athena-judgments.md` →
+  *Fallback: every error equals today's behaviour, loudly*): a warning with a
+  `Fix:`, the use case's health moves to `unavailable(route_overdue)`, and the
+  owner alert follows that section's rules.
+- **What the owner watches** is the queue, not a request's latency. Every routed
+  request records its route delay (the stored line's time minus `received_at`)
+  in its `topic_routing` outcome. The owner's judgments view shows the pending
+  requests' count and the oldest one's age. Slack routing has no latency bar for
+  `on` (`ai/contracts/athena-judgments.md` → *Modes*).
 
 **The session mention (step 2b').** Grammar `session-mention-v1`, in code and
 versioned. Only the first 400 characters of the owner's text are read, and
