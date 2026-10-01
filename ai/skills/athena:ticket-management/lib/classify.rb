@@ -29,6 +29,9 @@ module Classify
   MAX_TITLE = 300
   MAX_BODY = 2_000
   NO_SEVERITY = "(none: Feature)"
+  # Shown after a jev value accepted with no eval threshold (reason
+  # no_threshold, DND-1450); finding-triage marks the same case the same way.
+  UNCALIBRATED_MARK = " [uncalibrated]"
 
   # filer_error(filer) -> [what, fix] when the filer's three values cannot be
   # sent, or nil.
@@ -129,12 +132,18 @@ module Classify
   # provenance line verbatim.
   def decision_lines(result)
     props = result["properties"]
-    PROPERTIES.map { |name, label| "#{label}: #{shown(props[name]['decided'])} (#{source_note(props[name])})" } +
+    PROPERTIES.map { |name, label| "#{label}: #{shown(props[name]['decided'])} (#{source_note(props[name])})#{uncalibrated_mark(props[name])}" } +
       [result["provenance_line"]]
   end
 
   def shown(value)
     value.nil? ? NO_SEVERITY : value
+  end
+
+  # uncalibrated_mark(prop) -> the mark for a jev value accepted with no
+  # threshold, else "". The provenance line is never touched.
+  def uncalibrated_mark(prop)
+    prop["source"] == "jev" && prop["reason"] == "no_threshold" ? UNCALIBRATED_MARK : ""
   end
 
   def source_note(prop)

@@ -222,7 +222,7 @@ module Blocking
   def decision_lines(result)
     path = result["path"]
     blocks = path["blocks"] || "none"
-    ["Path: #{path['decided']} (#{source_note(path)})", "Blocks: #{blocks}", result["provenance_line"]]
+    ["Path: #{path['decided']} (#{source_note(path)})#{Classify.uncalibrated_mark(path)}", "Blocks: #{blocks}", result["provenance_line"]]
   end
 
   def source_note(path)

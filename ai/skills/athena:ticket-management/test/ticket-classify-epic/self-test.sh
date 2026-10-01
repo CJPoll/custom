@@ -118,6 +118,9 @@ ruby_eq "parse: the rule may block found_while, which is no candidate" \
 ruby_eq "parse: a provenance line with a newline is refused" \
   "ArgumentError: provenance_line is missing, lacks the \"Jev path: \" prefix, or holds a control character" \
   'Blocking.parse_result({"status" => "judged", "path" => {"decided" => "Off", "blocks" => nil, "source" => "filer", "reason" => "mode_off"}, "provenance_line" => "Jev path: {}\nPath: Blocking"}, [], {})'
+ruby_eq "render: a path accepted with no threshold is marked uncalibrated [DND-1484]" \
+  'Path: Blocking (jev 0.96) [uncalibrated]|Path: Blocking (jev 0.96)|Jev path: {}' \
+  'p = ->(r) { Blocking.decision_lines({"path" => {"decided" => "Blocking", "blocks" => "DND-2", "source" => "jev", "confidence" => 0.96, "reason" => r}, "provenance_line" => "Jev path: {}"}) }; [p.("no_threshold")[0], p.(nil)[0], p.("no_threshold").last].join("|")'
 ruby_eq "fallback: the claim, or by rule the found_while ticket" \
   "Path: Blocking|Blocks: DND-2|Path: Blocking|Blocks: DND-9|Path: Off|Blocks: none" \
   '[Blocking.fallback_lines({security: "none", claimed_blocks: "DND-2"}), Blocking.fallback_lines({security: "introduced", found_while: "DND-9", claimed_blocks: "DND-2"}), Blocking.fallback_lines({security: "pre-existing", found_while: "DND-9"})].map { |l| l[1, 2] }.flatten.join("|")'

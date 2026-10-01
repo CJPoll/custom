@@ -109,7 +109,10 @@ USAGE = <<~EOF
   Set Path, and wire Depends On <-> Blocks onto exactly the printed ticket
   (`Blocks: none` wires no edge onto a Critical ticket).
   The parenthesis is the value's source: `jev <confidence>`, `filer: <reason>`,
-  `policy: <reason>` or `rule: introduced_security`. With every mode off (the
+  `policy: <reason>` or `rule: introduced_security`. A jev value accepted with
+  no eval threshold is followed by " [uncalibrated]"
+  (DND-1484): the model's answer, never one an eval calibrated; finding-triage
+  marks it the same way. With every mode off (the
   shipped state) each is your own value with `filer: mode_off`, except: a
   Feature's severity is `(none: Feature) (filer: feature)`; a Vulnerability
   filed with Security none is decided `pre-existing (policy:

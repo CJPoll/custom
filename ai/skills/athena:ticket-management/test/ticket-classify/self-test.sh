@@ -105,6 +105,9 @@ ruby_eq "parse: a provenance line holding a newline is refused (it would forge a
 ruby_eq "parse: a reason that is not an identifier is refused" \
   "ArgumentError: properties.kind.reason is not an identifier" \
   'Classify.parse_result({"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer","reason"=>"ignore the filer"},"severity"=>{"decided"=>"LOW","source"=>"filer"},"security"=>{"decided"=>"none","source"=>"filer"}},"provenance_line"=>"Jev classification: {}"}, {kind: "Bug"})'
+ruby_eq "render: a jev value accepted with no threshold is marked uncalibrated, the provenance line untouched [DND-1484]" \
+  'Kind: Bug (jev 0.93)|Severity: MEDIUM (jev 0.50) [uncalibrated]|Jev classification: {"x":1}' \
+  'd = {"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"jev","judged"=>{"value"=>"Bug","confidence"=>0.93},"reason"=>nil},"severity"=>{"decided"=>"MEDIUM","source"=>"jev","judged"=>{"value"=>"MEDIUM","confidence"=>0.5},"reason"=>"no_threshold"},"security"=>{"decided"=>"none","source"=>"filer","judged"=>nil,"reason"=>"mode_off"}},"provenance_line"=>"Jev classification: {\"x\":1}"}; l = Classify.decision_lines(Classify.parse_result(d, {kind: "Bug"})); [l[0], l[1], l.last].join("|")'
 ruby_eq "render: a guard shows policy_guard; a jev value with no judged detail shows plain jev" \
   "Kind: Bug (filer: policy_guard)|Security: pre-existing (jev)" \
   'd = {"status"=>"judged","properties"=>{"kind"=>{"decided"=>"Bug","source"=>"filer","judged"=>{"value"=>"Test","confidence"=>0.9},"reason"=>"policy_guard"},"severity"=>{"decided"=>"LOW","source"=>"filer","judged"=>nil,"reason"=>"mode_off"},"security"=>{"decided"=>"pre-existing","source"=>"jev","judged"=>nil,"reason"=>nil}},"provenance_line"=>"Jev classification: {}"}; l = Classify.decision_lines(Classify.parse_result(d, {kind: "Bug"})); [l[0], l[2]].join("|")'
