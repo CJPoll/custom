@@ -1540,7 +1540,7 @@ sm_docker() { # <file> <worktree> <fail?>
 [ "$3" = fail ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
 case "\$1 \$2" in
   "info "*) echo 29.0.0 ;;
-  "ps "*) case "\$*" in *"project=sm1-wt"*) echo c1 ;; *) echo c1 ;; esac ;;
+  "ps "*) echo c1 ;;
   "inspect "*) echo '[{"Config":{"Labels":{"com.docker.compose.project":"sm1-wt","com.docker.compose.project.working_dir":"$2"}}}]' ;;
   "volume ls") echo sm1-wt_pg ;;
   "volume inspect") echo '[{"Name":"sm1-wt_pg","CreatedAt":"2026-10-01T00:00:00Z","Labels":{"com.docker.compose.volume":"pg"}}]' ;;

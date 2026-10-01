@@ -46,11 +46,16 @@ case "$1" in
     case "${sub}" in
       ls) list "$(proj_of "$@")" "${kind}" | cut -d' ' -f1 ;;
       inspect)
+        # recreate_at K: from the K-th `volume inspect` on, every volume reads as
+        # re-created (a stack re-upped between teardown's match and its removal).
+        n=0; [ "${kind}" = volumes ] && { n=$(( $(cat "${ST}/vi.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "${ST}/vi.count"; }
+        [ -f "${ST}/recreate_at" ] && [ "${n}" -ge "$(cat "${ST}/recreate_at")" ] && export STUB_RECREATED=1
         /usr/bin/ruby -rjson -e '
           kind, root, *want = ARGV
           lines = Dir.glob(File.join(root, "res", "*", kind)).flat_map { |f| File.readlines(f, chomp: true) }
           puts JSON.dump(want.map { |w| l = lines.find { |x| x.split(" ").first == w } or abort("no such #{kind} #{w}")
             a, b = l.split(" ")
+            b = "2026-12-31T00:00:00Z" if ENV["STUB_RECREATED"]
             kind == "volumes" ? { "Name" => a, "CreatedAt" => b || "2026-01-01T00:00:00Z", "Labels" => { "com.docker.compose.volume" => a } }
                               : { "Id" => a, "Name" => b || a, "Labels" => { "com.docker.compose.network" => b || a } } })
         ' "${kind}" "${ST}" "$@" ;;
@@ -70,6 +75,7 @@ case "$1" in
     # `compose -p P config --volumes|--networks`: the keys the compose file
     # declares; $ST/declared_<kind> overrides (default: every resource of P).
     if [ "$4" = config ]; then
+      [ -f "${ST}/config_fail" ] && { echo "invalid compose project" >&2; exit 15; }
       k="${5#--}"
       if [ -f "${ST}/declared_${k}" ]; then cat "${ST}/declared_${k}"
       elif [ "${k}" = volumes ]; then list "$3" volumes | cut -d' ' -f1
@@ -281,6 +287,23 @@ if [ "$(id -u)" -ne 0 ]; then
   fixture m10 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; captain_down; chmod 000 "${MARKER}"
   run --pr 5; expect "m10 unreadable marker file" 3; no_rm m10; chmod 600 "${MARKER}"
 fi
+# m11 the stack is re-created between the marker match and the removal: 2,
+# nothing removed (the re-read right before `docker volume rm`).
+fixture m11 dnd-1-x; run --record --worktree "${WT}/dnd-1-x"; captain_down
+rm -f "${ST}/vi.count"; echo 2 > "${ST}/recreate_at"
+run --pr 5; expect "m11 changed between match and removal" 2; no_rm m11
+has "m11 says what changed" "changed between the stack-marker match and the removal"
+# r11 --record --dry-run: the plan, no marker.
+fixture r11 dnd-1-x; run --record --dry-run --worktree "${WT}/dnd-1-x"; expect "r11 record dry run" 0
+has "r11 plan" "DRY RUN would record stack marker ${MARKER}"; [ -f "${MARKER}" ] && bad "r11 wrote a marker" || ok "r11 no marker"
+# r12 a non-default project under the worktree: refuse, no marker.
+fixture r12 dnd-1-x; containers "dnd-1-x=${WT}/dnd-1-x" "walt-ui-dnd-1-x=${WT}/dnd-1-x/backend"
+run --record --worktree "${WT}/dnd-1-x"; expect "r12 record, foreign project" 2; [ -f "${MARKER}" ] && bad "r12 wrote a marker" || ok "r12 no marker"
+# r13 the compose config cannot be read: 3, never "declares nothing".
+fixture r13 dnd-1-x; touch "${ST}/config_fail"; run --record --worktree "${WT}/dnd-1-x"; expect "r13 compose config unreadable" 3
+[ -f "${MARKER}" ] && bad "r13 wrote a marker" || ok "r13 no marker"
+# r14 not a worktree's top level: refuse.
+fixture r14 dnd-1-x; mkdir -p "${WT}/dnd-1-x/deep"; run --record --worktree "${WT}/dnd-1-x/deep"; expect "r14 record, not a top level" 2
 # r7 --record is a mode of its own.
 fixture r7 unused; run --record --pr 5; expect "r7 record with --pr" 2; run --record --worktree "${WT}/dnd-1-x" --parked x; expect "r7 record with --parked" 2
 # t9 docker down: 3, not "nothing up".
