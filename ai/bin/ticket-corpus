@@ -83,8 +83,9 @@ USAGE = <<~EOF
              filings, lines, no_provenance / unparseable / unread by ref,
              per use case accepted, agreed and the Wilson 95% lower bound (n/a
              when nothing was accepted, never 0), per judged label, and the
-             bar: at least #{TicketCorpus::MIN_WINDOW_DAYS} days, #{TicketCorpus::MIN_ACCEPTED} accepted and lb >= #{TicketCorpus::MIN_LB}
-             (a use case short of it at #{TicketCorpus::MAX_WINDOW_DAYS} days stays shadow).
+             accuracy bar: at least #{TicketCorpus::MIN_WINDOW_DAYS} days, #{TicketCorpus::MIN_ACCEPTED} accepted and lb >= #{TicketCorpus::MIN_LB}
+             (short of it at #{TicketCorpus::MAX_WINDOW_DAYS} days is insufficient evidence). A
+             measurement only: it never gates a use case's on (DND-1450).
              ticket_blocking reads each finding's LAST "Jev path:" line: a
              shadow line whose "would" decision has source jev is an
              accepted judgment, agreeing when the ticket's CURRENT Path (and,

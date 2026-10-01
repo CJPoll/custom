@@ -56,8 +56,9 @@ module TicketCorpus
   PROVENANCE_PREFIX = "Jev classification: "
   SOURCES = %w[jev filer policy].freeze
 
-  # The shadow bar (R1055-3): the smallest n at which a perfect record reaches
-  # a Wilson lower bound of 0.90; the bound; the window; the cap.
+  # The accuracy bar (R1055-3): the smallest n at which a perfect record
+  # reaches a Wilson lower bound of 0.90; the bound; the window; the cap. A
+  # measurement only: since DND-1450 it never gates a use case's `on`.
   MIN_ACCEPTED = 35
   MIN_LB = 0.90
   MIN_WINDOW_DAYS = 3
@@ -343,7 +344,7 @@ module TicketCorpus
   end
 
   # bar(report, use_case) -> "met (...)" or "not met (each failing clause)".
-  # The offline-threshold clause is Settings.set_mode/3's own refusal.
+  # Advisory: nothing reads it as a precondition for `on` (DND-1450).
   def bar(report, use_case)
     u = report[:use_cases].fetch(use_case)
     fails = []
@@ -352,7 +353,7 @@ module TicketCorpus
     fails << (u[:lb].nil? ? "lb n/a" : format("lb %.3f < %.2f", u[:lb], MIN_LB)) if u[:lb].nil? || u[:lb] < MIN_LB
     return format("met (accepted %d, agreed %d, lb %.3f, window %.1f days)", u[:accepted], u[:agreed], u[:lb], report[:window_days]) if fails.empty?
 
-    capped = report[:window_days] >= MAX_WINDOW_DAYS ? "; #{MAX_WINDOW_DAYS}-day cap reached: stays shadow, insufficient evidence" : ""
+    capped = report[:window_days] >= MAX_WINDOW_DAYS ? "; #{MAX_WINDOW_DAYS}-day cap reached: insufficient evidence" : ""
     "not met (#{fails.join('; ')})#{capped}"
   end
 

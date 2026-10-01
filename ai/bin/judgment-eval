@@ -120,7 +120,8 @@ USAGE = <<~EOF
 
   Output: "scored S / unscored U (reasons)", then per label either
   "threshold T (precision, lb, coverage, n)" or "n/a (n=K, needs 10) --
-  insufficient evidence" (the label stays disabled). With
+  insufficient evidence" (the row is written disabled; in mode on the
+  label's answer is still accepted, uncalibrated, DND-1450). With
   nothing scored no label line is printed: a run with no key never shows a
   precision. The run file is ${XDG_DATA_HOME:-~/.local/share}/athena/evals/
   runs/<utc>-<U>.json (0600): ids, labels, outcomes and the report, never an

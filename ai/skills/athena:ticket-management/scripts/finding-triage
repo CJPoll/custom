@@ -62,11 +62,12 @@ USAGE = <<~EOF
     "<N> candidates considered (...)" -- printed even when N is 0
     then either the advisory:
       "Jev advisory (not a decision) ..."; in mode on, a line saying
-      "insufficient evidence" for each relation whose threshold is n/a or
-      unset (it is never advised, and its silence is not "no duplicate");
-      one line per candidate the server judged duplicate or related AT OR
-      ABOVE its threshold (or a line saying none is, naming the enabled
-      relations); then "severity suggestion: <LEVEL> ..."
+      "uncalibrated" for each relation whose threshold is n/a or unset (the
+      server accepts the model's answer for it, DND-1450), and "insufficient
+      evidence" for one whose state the server did not report (never
+      advised); one line per candidate the server ACCEPTED as duplicate or
+      related, marked "[uncalibrated]" when no threshold gated it (or a line
+      saying none is); then "severity suggestion: <LEVEL> ..."
     or one unavailable line, ending "#{UNAVAILABLE_FIX}"
       "JUDGMENTS UNAVAILABLE: <reason>. #{UNAVAILABLE_FIX}"
       "CANDIDATES UNAVAILABLE: <why>. #{UNAVAILABLE_FIX}"
@@ -280,20 +281,42 @@ module Triage
 
     states = ADVISORY.to_h { |rel| [rel, threshold_state(result, rel)] }
     states.each { |rel, state| lines << evidence_line(rel, state) unless state == "enabled" }
-    # A hit needs its relation enabled too: above_threshold on an n/a, unset
-    # or unreported relation is never advice (DND-714 review).
-    hits = Array(result["candidates"]).select { |c| c["above_threshold"] == true && states[c["relation"]] == "enabled" }
+    # A hit is a candidate the server accepted (above_threshold) on a
+    # relation whose threshold state it reported. Since DND-1450 an n/a or
+    # unset relation is accepted on the model's answer; an unreported state
+    # is never advice (DND-714 review).
+    hits = Array(result["candidates"]).select { |c| c["above_threshold"] == true && states[c["relation"]] }
     if hits.empty?
-      enabled = ADVISORY.select { |rel| states[rel] == "enabled" }
-      lines << "  no candidate is #{enabled.map { |rel| RELATION_NOUN[rel] }.join(' or ')} at or above its threshold." unless enabled.empty?
+      none = none_line(states)
+      lines << none if none
     else
-      hits.each do |c|
-        lines << format("  %s: %s (confidence %.2f) -- %s", c["ref"], c["relation"], c["confidence"].to_f, titles.fetch(c["ref"], "(title not retrieved)"))
-      end
+      hits.each { |c| lines << hit_line(c, states, titles) }
     end
     sev = result["severity"] || {}
     lines << format("  severity suggestion: %s (confidence %.2f; a suggestion, not calibrated)", sev["level"], sev["confidence"].to_f)
     lines
+  end
+
+  # hit_line(c, states, titles) -> one advised candidate, marked when no
+  # threshold gated it (DND-1450). The server's per-candidate basis decides;
+  # a response without one falls back on the relation's state.
+  def hit_line(cand, states, titles)
+    calibrated = cand.key?("basis") ? cand["basis"] == "threshold_met" : states[cand["relation"]] == "enabled"
+    mark = calibrated ? "" : " [uncalibrated]"
+    format("  %s: %s (confidence %.2f)%s -- %s", cand["ref"], cand["relation"], cand["confidence"].to_f, mark,
+           titles.fetch(cand["ref"], "(title not retrieved)"))
+  end
+
+  # none_line(states) -> the "no hit" line naming the relations that could be
+  # advised, or nil when none could (every state unreported).
+  def none_line(states)
+    known = ADVISORY.select { |rel| states[rel] }
+    return nil if known.empty?
+
+    nouns = known.map { |rel| RELATION_NOUN[rel] }.join(" or ")
+    return "  no candidate is #{nouns} at or above its threshold." if known.all? { |rel| states[rel] == "enabled" }
+
+    "  no candidate is advised as #{nouns}."
   end
 
   # The relations the advisory may name, and how a "none" line names them.
@@ -308,12 +331,13 @@ module Triage
     %w[enabled n_a unset].include?(state) ? state : nil
   end
 
-  # evidence_line(rel, state) -> the line for a relation that cannot be
-  # advised: its silence must never read as "no duplicate".
+  # evidence_line(rel, state) -> the line for a relation with no enabled
+  # threshold: uncalibrated (advised on the model's answer, DND-1450), or
+  # unreported (never advised). Its silence must never read as "no duplicate".
   def evidence_line(rel, state)
     case state
-    when "n_a" then "  #{rel}: insufficient evidence (n/a: the eval could not calibrate it); not advised."
-    when "unset" then "  #{rel}: insufficient evidence (no threshold); not advised."
+    when "n_a" then "  #{rel}: uncalibrated (n/a: the eval could not calibrate it); the model's answer is advised."
+    when "unset" then "  #{rel}: uncalibrated (no threshold); the model's answer is advised."
     else "  #{rel}: threshold state not reported by the server; treat as insufficient evidence."
     end
   end

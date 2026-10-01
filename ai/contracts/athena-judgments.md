@@ -282,8 +282,8 @@ retry storm, or silently succeeded. Every non-accepted outcome leaves
    its class.
 
 **Each reason has a class.** A **`state`** reason is the system working as
-configured: the mode is off, the sender is not the owner, a label has no
-accepted threshold. There is nothing to fix, so it logs at debug level with no
+configured: the mode is off, the sender is not the owner, an answer is under
+its label's enabled threshold. There is nothing to fix, so it logs at debug level with no
 `Fix:` clause, and it never changes a use case's health. A **`fault`** reason
 means something is wrong: a missing key, a rejected credential, a spent budget,
 a service error, our own bug. A fault is loud: it also logs a warning (an error
@@ -336,12 +336,31 @@ one is an amendment to this table.
 | `malformed_answer` | fault | judge | the answer does not match the request; recorded as `malformed_answer:<detail>` |
 | `model_mismatch` | fault | judge | the answering model is not the pinned model |
 | `below_threshold` | state | caller | the confidence is under the accepted threshold, or the answer is `unclear` |
-| `threshold_unset` | state | caller | no threshold exists for the key; never accepts, whatever the confidence |
-| `label_disabled` | state | caller | the answer's label is disabled, or has no live destination (also the Slack router's session mention, DND-717, whose label has no live topic route) |
+| `threshold_unset` | state | caller | the label's threshold row is malformed (our bug); never accepts, whatever the confidence |
+| `label_disabled` | state | caller | the accepted label has no live destination: the Slack router's topic route is missing, disabled or not live (also its session mention, DND-717) |
 | `sender_rule` | state | Slack router | the conversation is not the owner's own, so no judgment is asked |
 | `context_unavailable` | fault | Slack router | reading the conversation context failed (or the root's `ts` is malformed), so no judgment was asked; the caller-side record is the router's outcome log, with no `judgment_calls` row |
 
 A successful call records outcome `answered` with no reason.
+
+**Later (2026-10-01, DND-1450):** `threshold_unset` meant "no threshold
+exists for the key; never accepts". Replaced by the row above: a label with
+no row is accepted on the model's answer (*Threshold provenance, n/a and the
+pinned model* → *What `on` accepts*), so only a malformed row still falls
+back. Why: the owner's threshold waiver, quoted in *Modes*.
+
+`threshold_unset` stays class `state`, though it now names our bug. A class
+says who decides, not how bad it is: a `fault` is the judge failing to
+answer, and a `state` is the caller declining an answer it got. The caller
+reads the row and declines it. Rows are written only by the eval apply,
+through a changeset that validates the threshold, so a malformed row is not
+expected to come from the store at all; the reason exists so that one never
+reads as an accept.
+
+**Later (2026-10-01, DND-1450):** `label_disabled` also meant "the answer's
+label is disabled" (an `n/a` threshold row). Replaced by the row above: an
+`n/a` row accepts the model's answer, so `label_disabled` names only a
+missing destination. Why: the same waiver.
 
 **The credential latch.** An `unauthorized` port error (HTTP 401 or 403) sets a
 latch keyed on the key's stored-at time. While it holds, every call falls back
@@ -402,70 +421,87 @@ Each (owner, use case) has one mode:
   #479), whose Slack router reads the mode before the sender rule and records
   nothing in `off`, so the pre-epic line stays byte-identical.
 - **`shadow`** — judge and record, but act exactly as today. The record shows
-  what would have happened.
-- **`on`** — act on accepted judgments.
+  what would have happened. `shadow` is an operator tool: the lever to stop
+  acting while still judging, for example to roll back a harm. It is never a
+  step a use case must pass through.
+- **`on`** — act on accepted judgments (*Threshold provenance, n/a and the
+  pinned model* → *What `on` accepts*).
 
-**`on` is refused** unless the owner's thresholds for (use case, question-set
-version, pinned model) hold at least one ENABLED row, produced by an eval run,
-for an **advisory label**: a label the use case may act on. A run where every
-label is n/a, or where only a non-advisory label is enabled, cannot turn a use
-case on. Finding triage's advisory labels are `duplicate` and `related`;
-`unrelated` is never advice, so an enabled `unrelated` alone does not count.
-Every option of `ticket_kind`, `ticket_severity` and `ticket_security` is an
-advisory label, since the policy may act on each. `ticket_blocking`'s one
-advisory label is `blocks`: an enabled `does_not_block` alone cannot turn it
-on. `priority_scoring`'s advisory labels are the urgency and importance levels
-above the lowest (DND-1097). `urgency:none` and `importance:nice_to_have` add
-nothing to the rank (`athena-events.md` → *Ranking*), so an enabled lowest
-level alone cannot turn it on. In `on` the policy also acts on an accepted
-`does_not_block` (it may remove a non-security claim), and a `does_not_block`
-is accepted only when its OWN threshold row is enabled and met (gen_saas
-`Decision.decide_reading` reads the answered label's row; a disabled or absent row is
-`label_disabled` or `threshold_unset`, a fallback). So an `on` set on
-`blocks` alone never removes a claim. A
-use case whose question set declares no advisory label cannot be turned on.
-**`shadow` is refused** unless the use case has a registered question set,
-because shadow makes real calls. **`off` is never refused.** A use case MAY
-add a refusal of its own. Slack routing's advisory labels are its routable
-ones (`walt_ui`, `harness`, `gen_saas`; never `unclear`), and it refuses `on`
-unless its live latency is measured and fast enough (DND-717, DND-1334).
-The bar reads the owner's own `slack_routing` rows of the last 30 days that
-reached the port, are of the registered question set's version, and carry a
-`wait_ms`. It needs at least 20 such calls, the first at least 3 days old
-(else `latency_unmeasured`), with a discrete p95 `wait_ms` of at most
-1,000 ms (else `latency_too_high`). `wait_ms` is what the router waited: from
-its topic step's start, read before the mode read and the context reads
+**Activation.** A use case goes from wired straight to `on`. An eval is
+optional and for measurement only. Where a run's threshold is enabled it
+gates its label in `on`; nothing requires a run, a threshold or a period in
+`shadow` before `on`.
+
+**`on` and `shadow` are refused** only when the use case has no registered
+question set, because both make real calls. **`off` is never refused.** No
+threshold row, eval run or latency figure gates `on`. A use case MAY add a
+refusal of its own; none does. `eval:*` ignores the mode, but not the key,
+the domain or the budget. The owner's writer is gen_saas
+`Athena.Judgments.Settings.set_mode/3` (DND-714); every refusal carries
+`Fix:`.
+
+**Slack routing's latency is watched, not gated** (DND-717, DND-1334,
+DND-1398). The health tile reads the owner's own `slack_routing` rows of the
+last 30 days that reached the port, are of the registered question set's
+version, and carry a `wait_ms`. It shows their discrete p95 against a target:
+at least 20 such calls, the first at least 3 days old (else `unmeasured`),
+with a p95 of at most 1,000 ms (`within_target`, else `over_target`). The
+reading never refuses a mode. What keeps a slow judgment inside Slack's 3 s
+ack is the router's 1,500 ms call deadline and its fallback to the channel
+route (`ai/contracts/athena-events.md` → *New conversations may route by an
+advisory topic judgment*). `wait_ms` is what the router waited: from its
+topic step's start, read before the mode read and the context reads
 (`judge/4`'s `:wait_started_ms`), to the end of the TypeSafe call. It is the
 topic step's share of Slack's 3 s ack, not the whole: the webhook work before
 the step (signature check, classify, dedupe, thread claim) and the decision
 and topic-route lookup after the call are outside it. A start that is not a
 past `System.monotonic_time(:millisecond)` raises; it is never read as no
 wait. `latency_ms` is the call task alone (the custody read and the call,
-capped at the deadline), and the bar never reads it. A row with no `wait_ms`
-is not measured and does not count: a caller that declares no start records
-none, and neither does any row written before DND-1334 deployed. So `on`
-refuses as `latency_unmeasured` until at least 20 fresh calls of the
-registered version exist, the first at least 3 days old. `judgment_calls` rows carry no mode, so shadow
-and `on` calls both count; before `on` is first set, every such call is a
-shadow call. `eval:*` ignores the mode, but not the key, the domain or
-the budget. The owner's writer is gen_saas
-`Athena.Judgments.Settings.set_mode/3` (DND-714); every refusal carries
-`Fix:`.
+capped at the deadline), and the reading never uses it. A row with no
+`wait_ms` is not measured and does not count. `judgment_calls` rows carry no
+mode, so `shadow` and `on` calls both count.
 
 **An eval apply re-checks an existing `on`** (DND-1380). Applying a run
 (*Eval runs*) is the one other mode write, and it only lowers a mode. In the
 apply's transaction, after the new threshold rows are written, it reads the
-run owner's mode for that use case. An `on` whose thresholds for the
-registered question set's version and the pinned model no longer hold an
-enabled advisory label drops to `shadow`, or to `off` when no question set
-is registered (`shadow` needs one). The apply's answer names the change in
-`mode_change` (`nil` when none), and a warning is logged. A downgrade that
-fails to write rolls the whole apply back. The recheck judges the threshold
-rule only, never Slack routing's latency bar: an apply cannot change
-latency. Both writers take one transaction-scoped advisory lock per (owner,
-use case) before they read. So a `set_mode` racing an apply either reads the
-new thresholds or is re-checked by it, and an `on` never stands on a label
-the apply disabled.
+run owner's mode for that use case. Thresholds never gate `on`, so a run
+that disables or drops a label leaves it `on`. Only an `on` whose use case
+has no registered question set drops to `off`. The apply's answer names the
+change in `mode_change` (`nil` when none), and a warning is logged. A
+downgrade that fails to write rolls the whole apply back. Both writers take
+one transaction-scoped advisory lock per (owner, use case) before they read,
+so they never interleave.
+
+**Later (2026-10-01, DND-1450):** `on` was refused unless the owner's
+thresholds for (use case, question-set version, pinned model) held an
+ENABLED, eval-produced row for an **advisory label** (finding triage
+`duplicate` or `related`; every ticket classification option; ticket
+blocking `blocks`; priority scoring's levels above the lowest; Slack
+routing's routable labels), so a use case went off, then `shadow`, then an
+eval and its thresholds, then `on`. Replaced by *Activation* and the refusal
+rule above: only a registered question set is needed. The consequence the
+owner accepted: an uncalibrated answer now acts wherever its label is
+accepted, including a non-advisory one. Ticket blocking's `does_not_block`
+with no threshold removes a filer's non-security `Blocks` claim (a security
+claim is kept by `policy_guard`). Why: the owner's
+decisions, Cody, coordinator terminal turn, 2026-10-01, session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`: ~04:40Z "No, please don't do
+that. Just enable jev. If we find issues, surface them and we can address
+them."; ~05:10Z "Waive the threshold for jev - at worst, the sessions can
+reroute to the correct session if needed. I don't want a "shadow period";
+I want us to get it done."; ~05:20Z "OK, I don't want shadow phases.
+Please stop shadow phases in the lifecycle. Please just start using jev,
+and if accuracy is noted to be a problem then we'll address it."
+
+**Later (2026-10-01, DND-1450):** Slack routing's `on` was refused until
+that latency was measured (`latency_unmeasured`) and its p95 `wait_ms` was
+at most 1,000 ms (`latency_too_high`). Replaced by the advisory reading
+above. Why: the same owner decisions. The call's deadline and the fallback
+to the channel route are the safety net until an asynchronous router lands.
+
+**Later (2026-10-01, DND-1450):** an apply moved an `on` whose thresholds no
+longer held an enabled advisory label to `shadow`. Replaced by the recheck
+above. Why: thresholds no longer gate `on`, so that downgrade would undo the
+owner's `on` at the next eval apply.
 
 **Later (2026-10-01, DND-1380):** this said `set_mode/3` is the owner's only
 mode writer. Replaced by the text above (gen_saas PR #624:
@@ -523,9 +559,32 @@ on precision is at least 0.90, with at least 10 routed cases. The bound is the
 binding rule: even with every case correct, it reaches 0.90 only at 35 routed
 cases, so a label needs at least that many before it can be enabled.
 
-**n/a.** A label with no qualifying threshold is **`n/a`**: disabled, and it
-falls back. `n/a` is not 0 and not a failure. No threshold row reads as
-`threshold_unset`, which also falls back. Neither ever accepts.
+**n/a.** A label with no qualifying threshold is **`n/a`**: its row is
+written disabled. `n/a` is not 0 and not a failure.
+
+**What `on` accepts** (gen_saas `Athena.Judgments.Decision`):
+
+- an answer named `unclear` falls back as `below_threshold`, whatever its row;
+- a label with an ENABLED row is accepted at or over its threshold, and
+  otherwise falls back as `below_threshold`;
+- a label with no row, or a disabled (`n/a`) one, is accepted on the model's
+  answer, whatever its confidence;
+- a malformed row is our bug: `threshold_unset`, never accepted.
+
+Every accepted decision records its **basis**, `threshold_met` or
+`no_threshold`, where the caller stores the decision: the Slack router's
+outcome record (`basis=`), the `reason` of a `jev` decision in a ticket
+provenance line (`no_threshold`; null when a threshold was met), finding
+triage's per-candidate `basis`, and `priority_items.judged_basis`. Every
+call's answers and probabilities stay on its `judgment_calls` row, in every
+mode. That makes accuracy measurable by provenance; *Receiver feedback*
+reads it. The verdict does not
+depend on the mode: `shadow` records what `on` would have done.
+
+**Later (2026-10-01, DND-1450):** this said an `n/a` label falls back
+(`label_disabled`) and a label with no row reads `threshold_unset`, and that
+neither ever accepts. Replaced by *What `on` accepts* above. Why: the owner's
+threshold waiver, quoted in *Modes*.
 
 **Unscored is not wrong.** An eval case that fell back (a service error, a
 missing key) is excluded from precision and counted as `unscored`, by reason. A
@@ -736,11 +795,11 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
     epic, or one closed since, which the live script would not offer; and
     the negatives are the lowest (oldest) ids.
 
-  `ticket-corpus --shadow-report --since` measures DND-1055's shadow bar
-  (Product Requirements R1055-3: at least 3 days, at least 35 accepted
-  judgments, and a Wilson 95% lower bound of at least 0.90 on their
-  agreement; a use case short of it at 14 days stays shadow) from ticket
-  bodies alone: each ticket's LAST provenance line, every ACCEPTED judgment
+  `ticket-corpus --shadow-report --since` measures judgments against
+  DND-1055's accuracy bar (Product Requirements R1055-3: at least 3 days, at
+  least 35 accepted judgments, and a Wilson 95% lower bound of at least 0.90
+  on their agreement; short of it at 14 days reads insufficient evidence).
+  It is a measurement, never a gate on `on`. It reads ticket bodies alone: each ticket's LAST provenance line, every ACCEPTED judgment
   made in mode `shadow` compared with the value the ticket ended up with.
   A judgment in mode `on` is excluded (`mode_on`: the value may be Jev's
   own), as are a Feature's Kind and Severity (`feature`) and an unset value
@@ -748,7 +807,8 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   `ticket_blocking`'s section reads each finding's last `Jev path:` line:
   a shadow line whose `would` has source `jev` is an accepted judgment,
   agreeing when the ticket's current `Path` (and, for `Blocking`, its
-  `Blocks` edge) matches. The bar is the same.
+  `Blocks` edge) matches. The bar is the same. It counts only judgments made
+  in mode `shadow`, so a use case that goes straight to `on` reads n/a here.
 
   **Later (2026-10-01):** the report above was the gate a ticket use case
   passed before `on` ("a use case short of it at 14 days stays shadow").
@@ -804,7 +864,12 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   - **Paced.** Eval calls count toward the local rate limit (*Budget*), so
     the run pauses a minute between batches of at most 50 cases.
 - **n/a reads "insufficient evidence"** in `judgment-eval`'s run and apply
-  lines: the label stays disabled.
+  lines: the label's row is written disabled. In `on` its answer is still
+  accepted, uncalibrated (*What `on` accepts*).
+
+  **Later (2026-10-01, DND-1450):** "the label stays disabled" meant the
+  label never accepts. Replaced by the text above. Why: the owner's
+  threshold waiver, quoted in *Modes*.
 - **One case, one label.** A question set's eval reading names exactly one
   answer as the label, so a set that asks several questions defines its eval
   case unit. `finding_triage` (DND-713): one case is ONE (finding, candidate)
@@ -956,19 +1021,26 @@ athena:ticket-management → *Before filing a finding*.
   of the finding's title, at most 20. The script prints how many it
   considered, including `0 candidates considered`, before any advice. A
   search that could not run is its own unavailable line, never 0 candidates.
-- **An advisory line is printed only above threshold**: for a candidate judged
-  `duplicate` or `related`, in mode `on`, whose confidence the owner's
-  eval-produced threshold for that label accepts. In mode `on` the severity is
-  printed as an uncalibrated suggestion. Shadow mode prints no advice at all,
-  severity included.
+- **An advisory line is printed only for an accepted candidate**: one judged
+  `duplicate` or `related`, in mode `on`, that the server accepted
+  (`above_threshold`, per *What `on` accepts*). One accepted with no
+  threshold is marked `[uncalibrated]`; the response's per-candidate `basis`
+  says which. In mode `on` the severity is printed as an uncalibrated
+  suggestion. Shadow mode prints no advice at all, severity included.
 - **An uncalibrated relation says so.** The judged response names each
   advisory relation's threshold state (`thresholds`: `enabled`, `n_a` or
-  `unset`, DND-714). In mode `on`, a relation that is not `enabled` prints
-  "insufficient evidence" and is never advised, so its silence never reads as
-  "no duplicate". A state the server did not report is said as such and is
-  never read as `enabled`.
-- **Setting the mode** follows *Modes*: `on` needs an enabled advisory label
-  (`duplicate` or `related`).
+  `unset`, DND-714). In mode `on`, a relation that is `n_a` or `unset` prints
+  that it is uncalibrated and that the model's answer is advised. A state the
+  server did not report prints "insufficient evidence" and is never advised
+  or read as `enabled`, so its silence never reads as "no duplicate".
+
+  **Later (2026-10-01, DND-1450):** an advisory line needed the owner's
+  eval-produced threshold to accept the candidate, and a relation that was
+  not `enabled` printed "insufficient evidence" and was never advised.
+  Replaced by the two bullets above. Why: the owner's threshold waiver,
+  quoted in *Modes*.
+- **Setting the mode** follows *Modes*: `on` needs only the registered
+  question set.
 - **A server that answered and refused** (any 4xx, a rejected machine token
   included) prints its own line with the server's `Fix:`, distinct from a
   server that could not be reached. A 200 outside this shape is its own
@@ -1025,7 +1097,13 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   confirmed it), `filer`, or `policy` (the policy changed the filer's value
   with no judgment). A `filer` or `policy` value carries a reason: a reason
   from *The closed reason list*, or one of four that are not fallbacks
-  (`shadow`, `policy_guard`, `vulnerability_floor`, `feature`). While the
+  (`shadow`, `policy_guard`, `vulnerability_floor`, `feature`). A `jev`
+  value accepted with no threshold carries reason `no_threshold` (*What `on`
+  accepts*); one that met a threshold carries none.
+
+  **Later (2026-10-01, DND-1450):** only a `filer` or `policy` value carried
+  a reason. Replaced by the sentence above. Why: the basis of every accepted
+  decision is stored (the owner's threshold waiver, quoted in *Modes*). While the
   feature is inert (every mode `off`) the script exits 0 and each property is
   the filer's with reason `mode_off`, with three exceptions: a Feature's
   Severity is empty with reason `feature` (it is never asked); a
@@ -1078,7 +1156,13 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
     (the claim stands) or `rule` (introduced security, no call). A `filer`
     or `rule` value carries a reason: one from *The closed reason list*, or
     one that is not a fallback (`shadow`, `policy_guard`,
-    `introduced_security`, `no_candidates`, `no_blocks_judged`). The script
+    `introduced_security`, `no_candidates`, `no_blocks_judged`). A `jev`
+    value accepted with no threshold carries reason `no_threshold`; one
+    that met a threshold carries none.
+
+    **Later (2026-10-01, DND-1450):** only a `filer` or `rule` value
+    carried a reason. Replaced by the sentence above. Why: the basis of
+    every accepted decision is stored (*What `on` accepts*). The script
     refuses, as an unreadable answer, a target outside the candidates, a
     `rule` answer for anything but an introduced security issue's Found while
     ticket, and a `jev` `Off` over a security finding's claim. It is a separate line, so the classification line
@@ -1197,12 +1281,17 @@ with it.
       does neither; `key_missing` names the searched key.
 - [ ] Every check before the call makes no call to TypeSafe; a latched
       `unauthorized` makes no call.
-- [ ] Mode defaults to `off`; `on` is refused without an eval-produced threshold.
-- [ ] An eval apply that leaves an `on` with no enabled advisory label drops it
-      to `shadow` in the apply's transaction, under the (owner, use case) lock
-      `set_mode` also takes, and names it in `mode_change`.
-- [ ] `threshold_unset` and `n/a` never accept; unscored eval cases are never
-      scored as wrong.
+- [ ] Mode defaults to `off`; `on` and `shadow` need only a registered
+      question set; no threshold, eval run or latency figure gates `on`, and
+      no lifecycle step requires `shadow`.
+- [ ] An eval apply never moves an `on` for what its thresholds disable; only
+      an `on` with no registered question set drops to `off`, in the apply's
+      transaction, under the (owner, use case) lock `set_mode` also takes,
+      named in `mode_change`.
+- [ ] In `on` an enabled threshold gates its label; no row or an `n/a` row
+      accepts the model's answer and records basis `no_threshold`; a
+      malformed row never accepts; unscored eval cases are never scored as
+      wrong.
 - [ ] A threshold is computed by the server from the owner's own stored eval
       run, never supplied by a caller; a run stores no input.
 - [ ] Requests pin `jev-1.13.0`; a different answering model is `model_mismatch`.

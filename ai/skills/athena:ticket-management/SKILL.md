@@ -521,8 +521,8 @@ harness script*):
 5. **When it is unavailable, file as today.** Exit 3 prints one line ending
    `Fix: file the ticket as today; this is advisory.` While `finding_triage`'s
    mode is `off` every call prints `JUDGMENTS UNAVAILABLE: not_configured`. The
-   owner's key exists (DND-711), but the contract refuses mode `on` without an
-   eval-produced threshold (post-key verification is DND-714). An unknown `--project` prints `domain_not_permitted`.
+   owner's key exists (DND-711); the owner sets the mode, and `on` needs no
+   eval or threshold (DND-1450). An unknown `--project` prints `domain_not_permitted`.
    `COULD NOT REACH SERVER` and
    `CANDIDATES UNAVAILABLE` mean the same for filing: file it.
 

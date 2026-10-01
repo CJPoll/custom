@@ -178,7 +178,8 @@ module JudgmentEval
   end
 
   # n_a(n_a) -> the n/a text. Every n/a reads "insufficient evidence"
-  # (DND-714): the label stays disabled, and that is not a precision of 0.
+  # (DND-714): the row is written disabled, and that is not a precision of 0.
+  # In mode on the label's answer is still accepted, uncalibrated (DND-1450).
   def n_a(n_a)
     why = case n_a && n_a["reason"]
           when "too_few_routed" then "n/a (n=#{n_a['n']}, needs #{n_a['needs']})"

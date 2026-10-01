@@ -101,21 +101,24 @@ ruby_eq "advisory: only duplicate/related AT OR ABOVE threshold, then the severi
 ruby_eq "advisory: none above threshold is said" \
   "  no candidate is a duplicate or related at or above its threshold." \
   'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[1]'
-ruby_eq "advisory: an n/a relation says insufficient evidence, and only enabled ones are advised [DND-714]" \
-  "4|  duplicate: insufficient evidence (n/a: the eval could not calibrate it); not advised.|  DND-6: related (confidence 0.97) -- Six" \
-  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>false},{"ref"=>"DND-6","relation"=>"related","confidence"=>0.97,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-6"=>"Six"}); [l.size, l[1], l[2]].join("|")'
-ruby_eq "advisory: no hit names only the enabled relations [DND-714]" \
-  "  no candidate is related at or above its threshold." \
+ruby_eq "advisory: an n/a relation is uncalibrated and its above-threshold hit is advised, marked [DND-1450]" \
+  "4|  duplicate: uncalibrated (n/a: the eval could not calibrate it); the model's answer is advised.|  DND-5: duplicate (confidence 0.40) [uncalibrated] -- Five|  DND-6: related (confidence 0.97) -- Six" \
+  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.4,"above_threshold"=>true,"basis"=>"no_threshold"},{"ref"=>"DND-6","relation"=>"related","confidence"=>0.97,"above_threshold"=>true,"basis"=>"threshold_met"}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-5"=>"Five","DND-6"=>"Six"}); [l.size - 1, l[1], l[2], l[3]].join("|")'
+ruby_eq "advisory: the server's basis decides the mark, over the relation state [DND-1450]" \
+  "  DND-7: related (confidence 0.30) [uncalibrated] -- Seven|  DND-8: related (confidence 0.95) -- Eight" \
+  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-7","relation"=>"related","confidence"=>0.3,"above_threshold"=>true,"basis"=>"no_threshold"},{"ref"=>"DND-8","relation"=>"related","confidence"=>0.95,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {"DND-7"=>"Seven","DND-8"=>"Eight"}); l.select { |x| x.include?("DND-") }.join("|")'
+ruby_eq "advisory: no hit with an uncalibrated relation says none is advised [DND-1450]" \
+  "  no candidate is advised as a duplicate or related." \
   'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[2]'
-ruby_eq "advisory: an unset relation says insufficient evidence (no threshold) [DND-714]" \
-  "  related: insufficient evidence (no threshold); not advised." \
+ruby_eq "advisory: an unset relation is uncalibrated, and the model's answer is advised [DND-1450]" \
+  "  related: uncalibrated (no threshold); the model's answer is advised." \
   'Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"enabled","related"=>"unset"},"candidates"=>[],"severity"=>{"level"=>"LOW","confidence"=>1}}, {})[1]'
 ruby_eq "advisory: no threshold state from the server is said, never read as enabled, and nothing is advised [DND-714 review d]" \
   "  duplicate: threshold state not reported by the server; treat as insufficient evidence.|  related: threshold state not reported by the server; treat as insufficient evidence.|3|false" \
   'l = Triage.advisory_lines({"mode"=>"on","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l[1], l[2], l.size - 1, l.any? { |x| x.include?("DND-5") }].join("|")'
-ruby_eq "advisory: a hit on a relation that is not enabled is never printed, whatever above_threshold says [DND-714 review d]" \
-  "false|  no candidate is related at or above its threshold." \
-  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"n_a","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l.any? { |x| x.include?("DND-5") }, l[2]].join("|")'
+ruby_eq "advisory: a candidate the server did not accept is never printed, whatever its relation's state [DND-1450]" \
+  "false" \
+  'l = Triage.advisory_lines({"mode"=>"on","thresholds"=>{"duplicate"=>"unset","related"=>"enabled"},"candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>0.99,"above_threshold"=>false}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); l.any? { |x| x.include?("DND-5") }.to_s'
 ruby_eq "advisory: shadow mode advises nothing" \
   "2|  mode shadow: judged and recorded; nothing is advised until the mode is on." \
   'l = Triage.advisory_lines({"mode"=>"shadow","candidates"=>[{"ref"=>"DND-5","relation"=>"duplicate","confidence"=>1,"above_threshold"=>true}],"severity"=>{"level"=>"LOW","confidence"=>1}}, {}); [l.size, l[1]].join("|")'

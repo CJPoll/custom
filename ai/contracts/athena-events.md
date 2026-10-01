@@ -4260,8 +4260,15 @@ posture, the fallback and its closed reason list, the modes, the thresholds, the
 pinned model and the budget are `ai/contracts/athena-judgments.md`, the
 normative home for them; this section states only how the Slack router consumes
 a judgment. Implementing tickets: DND-716 (the router, after DND-490), DND-717
-(shadow, then on). **Until DND-716 ships and the owner sets the mode to `on`,
-every new conversation follows the channel route, as today.**
+(the owner's mode), DND-1450 (no shadow phase: the mode goes straight to
+`on`). **Until the owner sets the mode to `on`, every new conversation
+follows the channel route, as today.**
+
+**Later (2026-10-01, DND-1450):** DND-717's step was "shadow, then on": the
+router judged in `shadow` until a latency bar and an enabled threshold let
+the owner set `on`. Replaced by the text above. Why: the owner's decisions of
+2026-10-01 (quoted in `ai/contracts/athena-judgments.md` → *Modes*): no
+shadow phase, no threshold or latency gate on `on`.
 
 **The router order.** It runs after the event classifier and the dedupe
 pre-check, so a Slack retry of the same `event_id` is never judged twice:
@@ -4281,8 +4288,9 @@ event classified (not ignored), dedupe pre-check passed
    2c. read the conversation context (ai/contracts/athena-judgments.md ->
        Egress and data flow, the slack_routing row)
          read failed      -> the channel route (topic reason: context_unavailable)  [no judgment]
-       judge slack_routing with the root and its context -> the caller's decision:
-         accepted, label enabled, topic route live
+       judge slack_routing with the root and its context -> the caller's decision
+       (ai/contracts/athena-judgments.md -> What `on` accepts):
+         accepted, topic route enabled and live
                           -> that instance's Slack inbox (route: topic_judgment)
          anything else    -> the channel route (topic reason: the fallback reason)
        mode shadow: always the channel route; topic records what would have happened
@@ -4378,6 +4386,10 @@ the outcome record names the label it looked up.
 
 **The record.** The Slack receiver's per-event outcome log records the router's
 path, as for a stale claim (*Thread replies route to the thread's claimant*).
+For an accepted judgment it also records the basis, `basis=threshold_met` or
+`basis=no_threshold` (DND-1450). That makes routing accuracy measurable by
+provenance; `ai/contracts/athena-judgments.md` → *Receiver feedback* reads
+it.
 Every judge call also records its own row, per
 `ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
 behaviour, loudly*.
@@ -5814,10 +5826,12 @@ closed list. The list has three parts:
    `owner_only`, `state`, `closed_by`, `score`, `reasons`, `scored_at`,
    `override`, `lease_session_id`, `leased_at`, the judgment fields
    `judged_urgency`, `judged_importance`, `judged_confidence` (the lower of
-   the two confidences), `judged_model`, `judged_revision`, `judged_at` and
+   the two confidences), `judged_model`, `judged_revision`, `judged_at`,
    `judged_reason` (null, or the fallback reason from
    `ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
-   behaviour, loudly*), and timestamps.
+   behaviour, loudly*) and `judged_basis` (null, or each stored level's
+   basis, `<dimension>:<threshold_met|no_threshold>` comma-joined,
+   DND-1450), and timestamps.
 3. **Permissive fields**, allowed by the owner's decision on OQ-5 (2026-09-24:
    "Let's default to more permissive here and pull back if something bothers
    me"). Each is named here, stored in its own column, and removable on its
@@ -6262,9 +6276,16 @@ or a digest can render them:
 | `overdue` | `due_on` is before `now` |
 | `age` | the owner's age curve gives the item's age a weight |
 | `domain_hours` | the owner weights the item's domain for the current time (work hours or not, per the owner's policy) |
-| `judged_urgency` | the item's urgency judgment was accepted against the `priority_scoring` threshold; the delta is `round(weight × (level - 1))` |
-| `judged_importance` | the item's importance judgment was accepted against the `priority_scoring` threshold; the delta is `round(weight × (level - 1))` |
+| `judged_urgency` | the item's urgency judgment was accepted (`ai/contracts/athena-judgments.md` → *What `on` accepts*); the delta is `round(weight × (level - 1))` |
+| `judged_importance` | the item's importance judgment was accepted (`ai/contracts/athena-judgments.md` → *What `on` accepts*); the delta is `round(weight × (level - 1))` |
 | `judgment_unavailable` | no judgment was accepted for the item; delta 0, display only; `judged_reason` names why |
+
+**Later (2026-10-01, DND-1450):** the two judged rows said a level was
+accepted "against the `priority_scoring` threshold". Replaced by the rows
+above: in `on` a level whose label has no enabled threshold is accepted on
+the model's answer, and `judged_basis` records which. Why: the owner's
+threshold waiver of 2026-10-01 (quoted in `ai/contracts/athena-judgments.md`
+→ *Modes*).
 
 - **Judged reasons are advisory** (`ai/contracts/athena-judgments.md` → *Trust
   posture*). When a judgment is not accepted, `judged_urgency` and

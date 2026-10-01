@@ -272,7 +272,7 @@ module BlockingCorpus
     fails << (report[:lb].nil? ? "lb n/a" : format("lb %.3f < %.2f", report[:lb], TicketCorpus::MIN_LB)) if report[:lb].nil? || report[:lb] < TicketCorpus::MIN_LB
     return format("met (accepted %d, agreed %d, lb %.3f, window %.1f days)", report[:accepted], report[:agreed], report[:lb], report[:window_days]) if fails.empty?
 
-    capped = report[:window_days] >= TicketCorpus::MAX_WINDOW_DAYS ? "; #{TicketCorpus::MAX_WINDOW_DAYS}-day cap reached: stays shadow, insufficient evidence" : ""
+    capped = report[:window_days] >= TicketCorpus::MAX_WINDOW_DAYS ? "; #{TicketCorpus::MAX_WINDOW_DAYS}-day cap reached: insufficient evidence" : ""
     "not met (#{fails.join('; ')})#{capped}"
   end
 end
