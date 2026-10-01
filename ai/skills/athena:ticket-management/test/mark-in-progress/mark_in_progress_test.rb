@@ -332,6 +332,21 @@ code, = run(["--ref", "DND-9001", "--backfill", "--at", "2026-09-30T02:41:00Z"],
             FakeNotion.new(page("2026-09-30T01:00:00.000Z")))
 check("T4e a backfill that writes nothing writes no event") { code == 0 && dispatched.status == :no_store }
 
+# T6 fail-open: a writer that raises, even a ScriptError (a broken lib reads as
+# SyntaxError/NotImplementedError, not LoadError), changes nothing.
+fresh_store
+raising = FakeNotion.new(page(nil))
+real_emit = AthenaTelemetry.method(:emit)
+AthenaTelemetry.define_singleton_method(:emit) { |*_a, **_k| raise NotImplementedError, "broken writer" }
+begin
+  c6, o6, = run(["--ref", "DND-9001"], raising)
+ensure
+  AthenaTelemetry.define_singleton_method(:emit, real_emit)
+end
+check("T6 a writer that raises a ScriptError: the write happens, exit 0, stdout unchanged") do
+  c6 == 0 && raising.patches.size == 1 && o6.include?("stamped")
+end
+
 # T5 fail-open: an unwritable store changes neither the write, the exit code
 # nor stdout. The store's parent is read-only, so the writer cannot create it.
 fresh_store

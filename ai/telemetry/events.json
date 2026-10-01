@@ -73,7 +73,7 @@
       }
     },
     "mission.status": {
-      "description": "One per mission of a fleet-report admiral-scope report, written locally after the missions file is accepted and before the POST (not on --dry-run). at = the write time, a point event; head = the caller cwd HEAD, not the work. unit = the mission ticket_ref (explicit). Emitter: DND-1476.",
+      "description": "One per mission of a fleet-report admiral-scope report, written locally after the missions file is accepted and before the POST (not on --dry-run). Each report lists the whole scope, so an unchanged mission repeats: a reader takes the first event per (unit, status). A ticket_ref outside the ref grammar gets none. at = the write time, a point event; head = the caller cwd HEAD, not the work. unit = the mission ticket_ref (explicit). Emitter: DND-1476.",
       "attrs": {
         "status": "label",
         "captain_state": "label",

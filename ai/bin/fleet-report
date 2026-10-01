@@ -27,7 +27,10 @@ Subcommands (flags may come in any order):
                                                     captain_state; ID: the scope's
                                                     Notion Project page id, from which
                                                     the server classifies the run's
-                                                    domain)
+                                                    domain). Before the POST it
+                                                    records one local mission.status
+                                                    telemetry event per mission
+                                                    (DND-1476); --dry-run records none
   admiral-seen   --agent-id ID [--agent-type T]     admiral_seen
   admiral-state  --run-id R --state draining|drained|finished|parked   admiral_state
                                                     (parked: stopped at a usage ceiling

@@ -116,13 +116,20 @@ fleet_load_missions() {
 # still leaves the local record. Fails open: it prints nothing on stdout and
 # returns 0 whatever happens, so the report's exit code and output are what
 # they were. Needs athena_telemetry_emit (ai/lib/telemetry-emit.sh); without
-# it, nothing is written.
+# it, nothing is written. A ticket_ref outside the contract's ref grammar gets
+# no event: the writer would drop it as a unit and file the event under the
+# caller's branch instead. Fields travel base64-framed, one mission per line,
+# so a value's own newline or tab cannot split it, on any jq.
 fleet_record_mission_status() {
-  local run_id="$1" ref status cstate
+  local run_id="$1" b_ref b_status b_cstate ref status cstate
   declare -F athena_telemetry_emit >/dev/null 2>&1 || return 0
-  while IFS= read -r -d '' ref && IFS= read -r -d '' status && IFS= read -r -d '' cstate; do
+  while read -r b_ref b_status b_cstate; do
+    ref="$(base64 -d <<<"${b_ref}" 2>/dev/null)" || continue
+    status="$(base64 -d <<<"${b_status}" 2>/dev/null)" || continue
+    cstate="$(base64 -d <<<"${b_cstate}" 2>/dev/null)" || continue
+    fleet_valid_ticket_ref "${ref}" || continue
     athena_telemetry_emit --event mission.status --unit "${ref}" --attr "status=${status}" --attr "captain_state=${cstate}" --attr "run_id=${run_id}"
-  done < <(jq -j '.[] | .ticket_ref, "\u0000", .status, "\u0000", .captain_state, "\u0000"' <<<"$2" 2>/dev/null)
+  done < <(jq -r '.[] | [.ticket_ref, .status, .captain_state] | map(@base64) | join(" ")' <<<"$2" 2>/dev/null)
   return 0
 }
 

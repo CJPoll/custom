@@ -78,6 +78,10 @@ module MarkInProgress
       --dry-run     print what would be written; write nothing
       --help        this text
 
+    After a Notion write it also records one local ticket.dispatched
+    telemetry event (ai/contracts/athena-telemetry.md); that never changes
+    the exit code or this output.
+
     Exit: 0 written (or dry run), 2 usage, 3 Notion or the overlay could not be
     read or written, or the ticket or its property is missing.
   TXT
@@ -182,7 +186,7 @@ module MarkInProgress
   # DOMAIN. The ticket.dispatched attrs for a write that happened. tracker is
   # dnd or work; first_dispatch is true when this write set the stamp.
   def dispatched_attrs(tracker, plan, backfill)
-    { "tracker" => tracker.prefix == DispatchTrackers::DND.prefix ? "dnd" : "work",
+    { "tracker" => tracker.equal?(DispatchTrackers::DND) ? "dnd" : "work",
       "first_dispatch" => plan[:properties].key?(tracker.property),
       "backfill" => backfill }
   end
@@ -194,7 +198,7 @@ module MarkInProgress
     require_relative "../../../lib/athena_telemetry"
     AthenaTelemetry.emit("ticket.dispatched", at: Time.iso8601(at), unit: ref,
                                               attrs: dispatched_attrs(tracker, plan, backfill))
-  rescue StandardError, LoadError
+  rescue ScriptError, StandardError # ScriptError: a broken or missing writer (LoadError, SyntaxError)
     nil
   end
 

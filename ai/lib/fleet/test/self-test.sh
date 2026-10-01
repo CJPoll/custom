@@ -506,6 +506,20 @@ eq "M2b an unreachable server keeps exit 4" "${RC}" "4"
 eq "M2b both events were still written" "$(tel_events "${ATHENA_TELEMETRY_DIR}")" "${WANT_EV}"
 fleet_point_at "http://127.0.0.1:${SERVER_PORT}/mcp"
 
+export ATHENA_TELEMETRY_DIR="${TMP}/tel-2c"
+fleet_respond '{"status":422,"body":{"error":"unprocessable_entity","fix":"x"}}'
+run admiral-scope --run-id r9 --missions "${TMP}/two-missions.json"
+eq "M2c a server refusal keeps exit 3" "${RC}" "3"
+eq "M2c the events written before the POST stay" "$(tel_events "${ATHENA_TELEMETRY_DIR}")" "${WANT_EV}"
+fleet_respond '{"status":202,"body":{"ok":true}}'
+
+export ATHENA_TELEMETRY_DIR="${TMP}/tel-6"
+printf '%s' "${TWO_M}" | jq -c '. + [{"tracker":"notion-personal","ticket_ref":"not a ref","url":"https://notion.so/c","title":"C","status":"Todo","captain_state":"queued"}]' > "${TMP}/three-missions.json"
+run admiral-scope --run-id r9 --missions "${TMP}/three-missions.json"
+eq "M6 a ref outside the ref grammar sends (0)" "${RC}" "0"
+eq "M6 and gets no event (never filed under the caller's branch)" "$(tel_events "${ATHENA_TELEMETRY_DIR}")" "${WANT_EV}"
+eq "M6 zero drops" "$(tel_drops "${ATHENA_TELEMETRY_DIR}")" "{}"
+
 export ATHENA_TELEMETRY_DIR="${TMP}/tel-3"
 n="$(fleet_log_count)"
 run admiral-scope --run-id r9 --missions "${TMP}/bad-missions.json"
