@@ -1,6 +1,6 @@
 #!/bin/bash
 # Worktree-from-fresh-main preflight for a fleet lane.
-#   usage: wt-preflight [--repo <path-or-name>] [--dry-run] <branch-name>
+#   usage: wt-preflight [--repo <path-or-name>] [--dry-run] [--lock-retries N] <branch-name>
 #          wt-preflight <branch-name> [<repo-path-or-name>]
 # Refuses to leave a worktree branched off a STALE local main.
 # Fleet rule (Vanta-lane incident, 2026-08-27): `wt create` branches from the LOCAL
@@ -12,6 +12,12 @@
 #   - override with `--repo <val>`, a 2nd positional, or $WT_PREFLIGHT_REPO.
 #   - a value with no `/` is treated as a project name under $HOME/dev/<name>.
 #   - the worktree lands at $HOME/.local/worktrees/<basename REPO>/<branch>.
+#
+# Step 1's pull failure is classified before it is named (DND-1509): a lock held
+# by another git (a cron fetching the same main checkout) is retried up to
+# --lock-retries times (default 10), one second apart, re-running the pull only
+# once the named lock is gone; a real divergence keeps its own message; anything
+# else prints git's error with a generic Fix:.
 set -uo pipefail
 
 usage() {
@@ -21,14 +27,19 @@ usage() {
 DRYRUN=0
 BRANCH=""
 REPO_ARG="${WT_PREFLIGHT_REPO:-}"
+LOCK_RETRIES=10
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO_ARG="${2:?--repo needs a value}"; shift 2 ;;
     --repo=*) REPO_ARG="${1#--repo=}"; shift ;;
+    --lock-retries)
+      [ $# -ge 2 ] || { echo "FAIL: --lock-retries needs a value"; echo "Fix: pass a whole number of retries, e.g. --lock-retries 10"; exit 1; }
+      LOCK_RETRIES="$2"; shift 2 ;;
+    --lock-retries=*) LOCK_RETRIES="${1#--lock-retries=}"; shift ;;
     --dry-run) DRYRUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    -*) echo "FAIL: unknown flag $1"; echo "Fix: use only --repo <path-or-name> or --dry-run (see usage)"; usage; exit 1 ;;
+    -*) echo "FAIL: unknown flag $1"; echo "Fix: use only --repo <path-or-name>, --dry-run or --lock-retries N (see usage)"; usage; exit 1 ;;
     *)
       if [ -z "$BRANCH" ]; then BRANCH="$1"
       elif [ -z "$REPO_ARG" ]; then REPO_ARG="$1"
@@ -39,6 +50,9 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$BRANCH" ] || { echo "FAIL: missing <branch-name>"; echo "Fix: pass the branch to create, e.g. wt-preflight dnd-123-thing"; usage; exit 1; }
+case "$LOCK_RETRIES" in
+  ''|*[!0-9]*) echo "FAIL: --lock-retries must be a whole number, got '$LOCK_RETRIES'"; echo "Fix: pass a whole number of retries, e.g. --lock-retries 10 (0 reports a held lock at once)"; exit 1 ;;
+esac
 
 # Resolve the repo: bare name -> $HOME/dev/<name>; path -> as given; default walt_ui.
 if [ -z "$REPO_ARG" ]; then
@@ -71,7 +85,53 @@ POOL_HEADROOM="$(cd "$(dirname "$0")/.." && pwd)/ai/bin/pool-headroom"
 "$POOL_HEADROOM" --repo "$REPO" || { echo "FAIL: pool-headroom refused (exit $?) — a new $PROJECT stack may not get a subnet"; echo "Fix: follow pool-headroom's Fix: above (tear down your fleet's MERGED-BUT-UP stacks it names, ask other fleets' admirals about theirs, prune idle networks), then re-run wt-preflight"; exit 1; }
 
 echo "== 1. refresh local main ($PROJECT) =="
-git -C "$REPO" pull --ff-only || { echo "FAIL: pull --ff-only refused (local main diverged?) — resolve before dispatching"; echo "Fix: inspect git -C $REPO log origin/main..main; reconcile local main with origin/main (never force), then re-run"; exit 1; }
+# DND-1509: a failed pull is classified before it is named. Before this, every
+# failure read "local main diverged?", so a lock held by a cron's fetch sent the
+# agent to reconcile a divergence that did not exist.
+pull_main() {
+  PULL_OUT=$(git -C "$REPO" pull --ff-only 2>&1); PULL_RC=$?
+  printf '%s\n' "$PULL_OUT"
+}
+# The lock file git names in its error, or "" when it names none.
+pull_lock() {
+  printf '%s\n' "$PULL_OUT" | sed -n "s/.*Unable to create '\(.*\.lock\)': File exists.*/\1/p" | head -n 1
+}
+pull_is_lock() { [ -n "$(pull_lock)" ] || grep -q "cannot lock ref" <<<"$PULL_OUT"; }
+# Diverged means both sides hold commits the other lacks, read from the refs,
+# not guessed from the failure.
+main_diverged() {
+  local counts ahead behind
+  counts=$(git -C "$REPO" rev-list --left-right --count main...origin/main 2>/dev/null) || return 1
+  read -r ahead behind <<<"$counts"
+  [ "${ahead:-0}" -gt 0 ] && [ "${behind:-0}" -gt 0 ]
+}
+
+pull_main
+TRIES=0
+while [ "$PULL_RC" -ne 0 ] && pull_is_lock && [ "$TRIES" -lt "$LOCK_RETRIES" ]; do
+  TRIES=$((TRIES + 1))
+  LOCK=$(pull_lock)
+  echo "   lock held: ${LOCK:-a ref lock}; waiting for it to clear (retry $TRIES/$LOCK_RETRIES)"
+  sleep 1
+  # Still held: spend the retry without re-running the pull.
+  [ -n "$LOCK" ] && [ -e "$LOCK" ] && continue
+  pull_main
+done
+if [ "$PULL_RC" -ne 0 ]; then
+  if pull_is_lock; then
+    LOCK=$(pull_lock)
+    [ "$TRIES" = 1 ] && RETRY_WORD="retry" || RETRY_WORD="retries"
+    echo "FAIL: pull --ff-only blocked: ${LOCK:-a ref lock} is held by another git process (still held after $TRIES $RETRY_WORD)"
+    echo "Fix: this is lock contention, not a divergence; do not reconcile main. Another git is writing $REPO (often a cron fetching the main checkout): re-run wt-preflight once it finishes. If no git runs there (pgrep -ax git), the lock is stale from a crashed git: remove ${LOCK:-the .lock file git named above}, then re-run."
+  elif main_diverged || grep -q "Not possible to fast-forward" <<<"$PULL_OUT"; then
+    echo "FAIL: pull --ff-only refused (local main diverged?) — resolve before dispatching"
+    echo "Fix: inspect git -C $REPO log origin/main..main; reconcile local main with origin/main (never force), then re-run"
+  else
+    echo "FAIL: pull --ff-only failed (exit $PULL_RC), not on a lock and not on a divergence; git's error is above"
+    echo "Fix: fix the cause git names above in $REPO (an unreachable remote, a branch other than main checked out, local changes in the way), then re-run"
+  fi
+  exit 1
+fi
 git -C "$REPO" fetch origin --quiet
 ORIGIN=$(git -C "$REPO" rev-parse origin/main)
 LOCAL=$(git -C "$REPO" rev-parse main)

@@ -77,8 +77,86 @@ rm -f "${DOWN}"; head -n 20 "${IDS}" > "${IDS}.20"; mv "${IDS}.20" "${IDS}"
 run --repo "${TMP}/stacky" p4-branch
 grep -q "pool-headroom OK" <<<"${out}" && grep -q "== 1\." <<<"${out}" && ok "p4 headroom passes the gate" || bad "p4 gate" "${out}"
 
+# --- Step 1: a failed `pull --ff-only` is classified before it is named (DND-1509).
+# Before the fix, every failure read "local main diverged?", including a lock
+# held by another git (the lead-time cron fetching the same checkout).
+# Fixtures: a bare origin, a seeding clone, and a clone origin has moved past.
+# Each case holds its condition for the whole run, so no case races a timer.
+mkorigin() { # mkorigin <dir> -> <dir>/o.git with one commit, <dir>/s a pushing clone
+  git init -q --bare -b main "$1/o.git"
+  git clone -q "$1/o.git" "$1/s" 2>/dev/null
+  git -C "$1/s" commit -q --allow-empty -m seed
+  git -C "$1/s" push -q origin main
+}
+advance() { git -C "$1/s" commit -q --allow-empty -m "$2"; git -C "$1/s" push -q origin main; }
+
+# p5 a lock held by another git: named as a lock, never as divergence.
+F="${TMP}/lockfix"; mkdir -p "${F}"; mkorigin "${F}"
+git clone -q "${F}/o.git" "${F}/r"; advance "${F}" two
+: > "${F}/r/.git/index.lock"
+run --repo "${F}/r" --lock-retries 0 p5-branch
+[ "${rc}" -ne 0 ] && ok "p5 held lock refuses" || bad "p5 held lock passed" "${out}"
+grep -q "held by another git process" <<<"${out}" && ok "p5 names the lock" || bad "p5 lock message" "${out}"
+grep -qF "${F}/r/.git/index.lock" <<<"${out}" && ok "p5 names the lock path" || bad "p5 lock path" "${out}"
+grep -q "diverged" <<<"${out}" && bad "p5 reported divergence" "${out}" || ok "p5 not called divergence"
+grep -q "^Fix: " <<<"${out}" && ok "p5 prints Fix:" || bad "p5 Fix:" "${out}"
+grep -q "== 2\." <<<"${out}" && bad "p5 went on to create a worktree" "${out}" || ok "p5 stops at step 1"
+
+# p6 the bounded retry: a lock still held after the retries is still the lock
+# message, and it says how many retries it made. The lock never clears, so the
+# outcome does not depend on how fast the machine is.
+run --repo "${F}/r" --lock-retries 1 p6-branch
+grep -q "held by another git process" <<<"${out}" && ok "p6 lock message after retry" || bad "p6 lock message" "${out}"
+grep -q "after 1 retry" <<<"${out}" && ok "p6 names the retries" || bad "p6 retry count" "${out}"
+
+# p7 a lock that clears during the retry: the pull re-runs and step 1 passes.
+# Event-ordered, not timed: the test releases the lock only when the tool says
+# it is waiting on it. The retry cap only bounds a hang; the case passes on the
+# first retry that finds the lock gone.
+FIFO="${TMP}/p7.fifo"; mkfifo "${FIFO}"
+"${TOOL}" --repo "${F}/r" --lock-retries 60 p7-branch > "${FIFO}" 2>&1 &
+p7pid=$!
+out=""; released=0
+while IFS= read -r -t 120 line; do
+  out+="${line}"$'\n'
+  if [ "${released}" = 0 ] && grep -q "waiting for it to clear" <<<"${line}"; then
+    rm -f "${F}/r/.git/index.lock"; released=1
+  fi
+done < "${FIFO}"
+wait "${p7pid}" 2>/dev/null
+[ "${released}" = 1 ] && ok "p7 tool waited on the held lock" || bad "p7 never waited on the lock" "${out}"
+grep -q "== 2\." <<<"${out}" && ok "p7 released lock: step 1 passes" || bad "p7 retry did not pass step 1" "${out}"
+[ "$(git -C "${F}/r" rev-parse main)" = "$(git -C "${F}/o.git" rev-parse main)" ] && ok "p7 local main fast-forwarded" || bad "p7 main not fast-forwarded" "${out}"
+# The worktree step then fails (no wt under the fake HOME); p7 asserts only
+# that step 1 got through.
+
+# p8 a bad --lock-retries value refuses with a Fix:.
+run --repo "${F}/r" --lock-retries soon p8-branch
+[ "${rc}" -ne 0 ] && grep -q "^Fix: " <<<"${out}" && ok "p8 bad --lock-retries refuses with Fix:" || bad "p8 bad --lock-retries" "${out}"
+
+# p9 a real divergence keeps today's message.
+F="${TMP}/divfix"; mkdir -p "${F}"; mkorigin "${F}"
+git clone -q "${F}/o.git" "${F}/r"; advance "${F}" two
+git -C "${F}/r" commit -q --allow-empty -m local-only
+run --repo "${F}/r" p9-branch
+[ "${rc}" -ne 0 ] && ok "p9 divergence refuses" || bad "p9 divergence passed" "${out}"
+grep -q "local main diverged" <<<"${out}" && ok "p9 names divergence" || bad "p9 divergence message" "${out}"
+grep -q "held by another git process" <<<"${out}" && bad "p9 reported a lock" "${out}" || ok "p9 not called a lock"
+grep -q "^Fix: " <<<"${out}" && ok "p9 prints Fix:" || bad "p9 Fix:" "${out}"
+
+# p10 any other failure prints git's own error, not a guess.
+F="${TMP}/othfix"; mkdir -p "${F}"; mkorigin "${F}"
+git clone -q "${F}/o.git" "${F}/r"
+git -C "${F}/r" remote set-url origin "${F}/no-such-origin"
+run --repo "${F}/r" p10-branch
+[ "${rc}" -ne 0 ] && ok "p10 other failure refuses" || bad "p10 other failure passed" "${out}"
+grep -q "does not appear to be a git repository" <<<"${out}" && ok "p10 shows git's stderr" || bad "p10 git stderr" "${out}"
+grep -q "diverged" <<<"${out}" && bad "p10 reported divergence" "${out}" || ok "p10 not called divergence"
+grep -q "held by another git process" <<<"${out}" && bad "p10 reported a lock" "${out}" || ok "p10 not called a lock"
+grep -q "^Fix: " <<<"${out}" && ok "p10 prints Fix:" || bad "p10 Fix:" "${out}"
+
 echo "wt-preflight self-test: ${PASS} passed, ${FAIL} failed"
 if [ "${FAIL}" -ne 0 ]; then
-  echo "Fix: repair the address-pool gate in scripts/wt-preflight (step 0) so each case above holds." >&2
+  echo "Fix: repair scripts/wt-preflight so each case above holds: the address-pool gate (step 0, p1-p4) or the pull-failure classification (step 1, p5-p10)." >&2
   exit 1
 fi
