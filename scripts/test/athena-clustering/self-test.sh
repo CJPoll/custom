@@ -157,6 +157,26 @@ else
   bad "dry-run evening" "rc=$rc out=$(cat "$c/runner.out") err=$(cat "$c/runner.err")"
 fi
 
+# DND-1571: --dry-run runs the tick's preconditions, so a printed brief means
+# a tick can start. Each failure: exit 78, the tick's Fix:, no brief, no state.
+dry_refused() { # <case> <label> <grep pattern on stderr>
+  local c="$1" rc
+  rc="$(run_runner "$c" -- --dry-run)"
+  if [ "$rc" = 78 ] && grep -q -- "$3" "$c/runner.err" && grep -q 'Fix:' "$c/runner.err" \
+     && grep -q 'a tick would exit 78' "$c/runner.err" && ! grep -q 'athena-architect' "$c/runner.out" \
+     && [ ! -e "$(sd "$c")" ] && [ "$(invoked "$c")" = 0 ]; then
+    ok "--dry-run with $2: exit 78 with Fix:, prints no brief, touches nothing"
+  else
+    bad "dry-run $2" "rc=$rc out=$(head -3 "$c/runner.out") err=$(cat "$c/runner.err")"
+  fi
+}
+c2="$(new_case)"; jq '(.projects[] .mcpServers) |= del(.athena)' "$c2/claude.json" >"$c2/cj" && mv "$c2/cj" "$c2/claude.json"
+dry_refused "$c2" "athena not registered" 'Fix:.*scripts/add-athena-mcp (registers athena)'
+c2="$(new_case)"; printf '{"projects": {' >"$c2/claude.json"
+dry_refused "$c2" "an invalid Claude config (could not look)" 'not valid JSON'
+c2="$(new_case)"; rm -r "$(repo_of "$c2")/ai/skills/athena:epic-clustering"
+dry_refused "$c2" "the skill not in the main checkout" 'epic-clustering'
+
 rc="$(run_runner "$c" -- --bogus)"
 if [ "$rc" = 64 ] && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")" ]; then
   ok "an unknown argument exits 64 with a Fix: and does nothing"
@@ -563,18 +583,26 @@ chmod +x "$BIN/crontab"
 IR="${TMP}/inst/repo"; mkdir -p "$IR/scripts" "$IR/ai/skills/athena:epic-clustering"
 printf -- '---\nname: athena:epic-clustering\n---\n' >"$IR/ai/skills/athena:epic-clustering/SKILL.md"
 cp "$INSTALLER" "$RUNNER" "$IR/scripts/"
+# The shared libs they source (the MCP preflight, DND-1571).
+cp -r "${SCRIPTS}/lib" "$IR/scripts/"
 git -C "$IR" init -q -b main >&2
 git -C "$IR" add -A >&2
 git -C "$IR" -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false commit -qm seed >&2
 IR="$(cd -- "$IR" && pwd -P)"
 git -C "$IR" worktree add -q "${TMP}/inst/wt" >&2
 IRUN="$IR/scripts/athena-clustering-run.sh"
+# A fake Claude config (CLUSTERING_CLAUDE_JSON) with both servers registered
+# for the main checkout: no case reads ~/.claude.json. Synthetic values only.
+ICJ="${TMP}/inst-claude.json"
+jq -n --arg p "$IR" '{projects: {($p): {mcpServers: {
+    "notion-personal": {type: "stdio", command: "/x/notion-athena-mcp", args: []},
+    "athena": {type: "http", url: "https://example.invalid/mcp"}}}}}' >"$ICJ"
 
 inst() { # <crontab-file> [VAR=val ...] -- args...  (runs the MAIN checkout's installer)
   local f="$1"; shift; local envs=()
   while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
   [ "${1:-}" = "--" ] && shift
-  env PATH="$BIN:$PATH" FAKE_CRONTAB="$f" "${envs[@]}" "${INST:-$IR/scripts/setup-clustering-cron}" "$@" \
+  env PATH="$BIN:$PATH" FAKE_CRONTAB="$f" CLUSTERING_CLAUDE_JSON="$ICJ" "${envs[@]}" "${INST:-$IR/scripts/setup-clustering-cron}" "$@" \
     >"${TMP}/inst.out" 2>"${TMP}/inst.err"
   printf '%s' "$?"
 }
@@ -682,8 +710,65 @@ if [ "$rc" = 2 ] && grep -q 'Fix:' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * 
 else
   bad "unlanded runner" "rc=$rc err=$(cat "${TMP}/inst.err")"
 fi
+git -C "$IR" checkout -q HEAD -- scripts/athena-clustering-run.sh >&2
+
+case_ 'setup-clustering-cron — the runner MCP preflight (DND-1571)'
+
+ICJ_NO_ATHENA="${TMP}/inst-no-athena.json"
+jq --arg p "$IR" 'del(.projects[$p].mcpServers.athena)' "$ICJ" >"${ICJ_NO_ATHENA}"
+printf '{not json' >"${TMP}/inst-corrupt.json"
+printf '0 * * * * /opt/other-job\n0 7,19 * * * %s\n' "$IRUN" >"$ct"
+rc="$(inst "$ct" CLUSTERING_CLAUDE_JSON="${ICJ_NO_ATHENA}" -- --check)"
+if [ "$rc" = 2 ] && grep -q 'NOT REGISTERED' "${TMP}/inst.err" && grep -q 'Fix:.*scripts/add-athena-mcp (registers athena)' "${TMP}/inst.err" \
+   && ! grep -q 'OK' "${TMP}/inst.out" && ! grep -q 'COULD NOT LOOK' "${TMP}/inst.err"; then
+  ok "--check with athena not registered: exit 2, NOT REGISTERED, Fix: names the server and its command"
+else
+  bad "check athena missing" "rc=$rc out=$(cat "${TMP}/inst.out") err=$(cat "${TMP}/inst.err")"
+fi
+rc="$(inst "$ct" CLUSTERING_CLAUDE_JSON="${TMP}/inst-absent.json" -- --check)"
+if [ "$rc" = 4 ] && grep -q 'COULD NOT LOOK' "${TMP}/inst.err" && grep -qF "${TMP}/inst-absent.json" "${TMP}/inst.err" \
+   && ! grep -q 'NOT REGISTERED' "${TMP}/inst.err"; then
+  ok "--check with the Claude config missing: exit 4, COULD NOT LOOK"
+else
+  bad "check config missing" "rc=$rc err=$(cat "${TMP}/inst.err")"
+fi
+rc="$(inst "$ct" CLUSTERING_CLAUDE_JSON="${TMP}/inst-corrupt.json" -- --check)"
+if [ "$rc" = 4 ] && grep -q 'COULD NOT LOOK' "${TMP}/inst.err" && grep -q 'not valid JSON' "${TMP}/inst.err"; then
+  ok "--check with an invalid Claude config: exit 4, COULD NOT LOOK"
+else
+  bad "check config corrupt" "rc=$rc err=$(cat "${TMP}/inst.err")"
+fi
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 0 ] && grep -q '^OK' "${TMP}/inst.out" && grep -q 'MCP: notion-personal athena registered' "${TMP}/inst.out"; then
+  ok "--check with both servers registered: exit 0, and says the MCP preflight passed"
+else
+  bad "check mcp ok" "rc=$rc out=$(cat "${TMP}/inst.out") err=$(cat "${TMP}/inst.err")"
+fi
+mv "$IR/ai/skills/athena:epic-clustering/SKILL.md" "${TMP}/skill.aside"
+rc="$(inst "$ct" -- --check)"
+mv "${TMP}/skill.aside" "$IR/ai/skills/athena:epic-clustering/SKILL.md"
+if [ "$rc" = 2 ] && grep -q 'epic-clustering skill is not in the main checkout' "${TMP}/inst.err" && ! grep -q '^OK' "${TMP}/inst.out"; then
+  ok "--check with the skill not in the main checkout: exit 2, never OK"
+else
+  bad "check skill missing" "rc=$rc err=$(cat "${TMP}/inst.err")"
+fi
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" CLUSTERING_CLAUDE_JSON="${ICJ_NO_ATHENA}")"
+if [ "$rc" = 2 ] && grep -q 'NOT REGISTERED' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
+  ok "install with athena not registered: refused (exit 2), the crontab untouched"
+else
+  bad "install athena missing" "rc=$rc ct=$(cat "$ct") err=$(cat "${TMP}/inst.err")"
+fi
+rc="$(inst "$ct" CLUSTERING_CLAUDE_JSON="${TMP}/inst-corrupt.json" -- --dry-run)"
+if [ "$rc" = 4 ] && grep -q 'COULD NOT LOOK' "${TMP}/inst.err" && ! grep -q 'would install' "${TMP}/inst.out"; then
+  ok "--dry-run with an invalid Claude config: exit 4, no plan printed"
+else
+  bad "dry-run config corrupt" "rc=$rc out=$(cat "${TMP}/inst.out") err=$(cat "${TMP}/inst.err")"
+fi
+
+git -C "$IR" rm -q scripts/athena-clustering-run.sh >&2
 printf '0 * * * * /opt/other-job\n\n0 7,19 * * * %s\n5 * * * * /opt/third\n' "$IRUN" >"$ct"
-rc="$(inst "$ct" -- --remove)"
+rc="$(inst "$ct" CLUSTERING_CLAUDE_JSON="${TMP}/inst-corrupt.json" -- --remove)"
 if [ "$rc" = 0 ] && ! grep -qF "$IRUN" "$ct" \
    && [ "$(cat "$ct")" = "$(printf '0 * * * * /opt/other-job\n\n5 * * * * /opt/third')" ]; then
   ok "--remove still works when the runner is gone, and keeps the owner's blank lines"

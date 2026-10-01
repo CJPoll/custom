@@ -61,6 +61,8 @@ chmod +x "$BIN/fake-crontab" "$BIN/crontab"
 IR="${TMP}/inst/repo"
 mkdir -p "$IR/scripts" "$IR/ai/skills/athena:lead-time-improve" "$IR/ai/config" "$IR/ai/bin" "$IR/ai/lib"
 cp "$INSTALLER" "$IR/scripts/"
+# The shared libs the installer sources (the MCP preflight, DND-1571).
+cp -r "${REPO_ROOT}/scripts/lib" "$IR/scripts/"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$IR/scripts/athena-leadtime-run.sh"
 chmod +x "$IR/scripts/athena-leadtime-run.sh"
 printf -- '---\nname: athena:lead-time-improve\n---\n' >"$IR/ai/skills/athena:lead-time-improve/SKILL.md"
@@ -83,6 +85,12 @@ IRUN="$IR/scripts/athena-leadtime-run.sh"
 LT="$IR/ai-artifacts/lead-time"
 SW="$IR/ai-artifacts/shipwright"
 ENTRY="30 * * * * ${IRUN}"
+# A fake Claude config (LEADTIME_CLAUDE_JSON) with notion-personal registered
+# for the main checkout: every case reads this, never ~/.claude.json. Synthetic
+# values only.
+CJ="${TMP}/claude.json"
+jq -n --arg p "$IR" '{projects: {($p): {mcpServers: {
+    "notion-personal": {type: "stdio", command: "/x/notion-athena-mcp", args: []}}}}}' >"$CJ"
 
 # Shipwright fixture cursors: gen_saas and walt_ui. Reset per seeding case.
 shipwright_cursors() {
@@ -99,6 +107,7 @@ inst() { # <crontab-file> [VAR=val ...] [-- args...]  (runs the MAIN checkout's 
   # XDG_CONFIG_HOME is an empty temp dir and ATHENA_LEADTIME_CONFIG is unset
   # unless a case passes it, so no case reads this machine's real override.
   env -u ATHENA_LEADTIME_CONFIG XDG_CONFIG_HOME="${TMP}/xdg" PATH="$BIN:$PATH" LEADTIME_CRONTAB="$BIN/fake-crontab" FAKE_CRONTAB="$f" LEADTIME_NOW="$NOW" \
+    LEADTIME_CLAUDE_JSON="$CJ" \
     "${envs[@]}" "${INST:-$IR/scripts/setup-leadtime-cron}" "$@" >"${TMP}/inst.out" 2>"${TMP}/inst.err"
   printf '%s' "$?"
 }
@@ -598,6 +607,95 @@ if [ "$rc" = 2 ] && grep -qF "lead-time-repos not run): $IR/ai/bin/lead-time-rep
   ok "the resolver missing from the main checkout: install refused (exit 2), nothing written"
 else
   bad "resolver missing" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
+case_ 'setup-leadtime-cron — the runner MCP preflight (DND-1571)'
+
+# cj_variant <name> <jq filter> — a copy of the fake config, edited.
+cj_variant() { jq --arg p "$IR" "$2" "$CJ" >"${TMP}/$1.json"; printf '%s' "${TMP}/$1.json"; }
+CJ_NO_NOTION="$(cj_variant no-notion 'del(.projects[$p].mcpServers["notion-personal"]) | .projects[$p].mcpServers.other = {type: "stdio", command: "/x/other"}')"
+CJ_NO_KEY="$(cj_variant no-key 'del(.projects[$p])')"
+printf '{not json' >"${TMP}/corrupt.json"
+
+ct="${TMP}/ct-mcp"
+printf '0 * * * * /opt/other-job\n%s\n' "${ENTRY}" >"$ct"
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${CJ_NO_NOTION}" -- --check)"
+if [ "$rc" = 2 ] && grep -q 'NOT REGISTERED' "${TMP}/inst.err" && grep -q 'Fix:.*scripts/add-notion --personal.*notion-personal' "${TMP}/inst.err" \
+   && ! grep -q '^OK' "${TMP}/inst.out" && ! grep -q 'COULD NOT LOOK' "${TMP}/inst.err"; then
+  ok "--check with notion-personal not registered: exit 2, NOT REGISTERED, Fix: names the server and how to register it"
+else
+  bad "check mcp missing" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${CJ_NO_KEY}" -- --check)"
+if [ "$rc" = 2 ] && grep -q 'NOT REGISTERED' "${TMP}/inst.err" && grep -qF "'$IR'" "${TMP}/inst.err" && grep -q 'Fix:.*notion-personal' "${TMP}/inst.err"; then
+  ok "--check with no servers under the main checkout's key: NOT REGISTERED, names the key it searched"
+else
+  bad "check mcp no key" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${TMP}/absent.json" -- --check)"
+if [ "$rc" = 4 ] && grep -q 'COULD NOT LOOK' "${TMP}/inst.err" && grep -qF "${TMP}/absent.json" "${TMP}/inst.err" \
+   && grep -q 'Fix:' "${TMP}/inst.err" && ! grep -q 'NOT REGISTERED' "${TMP}/inst.err"; then
+  ok "--check with the Claude config missing: exit 4, COULD NOT LOOK, never 'not registered'"
+else
+  bad "check config missing" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${TMP}/corrupt.json" -- --check)"
+if [ "$rc" = 4 ] && grep -q 'COULD NOT LOOK' "${TMP}/inst.err" && grep -q 'not valid JSON' "${TMP}/inst.err" \
+   && ! grep -q 'NOT REGISTERED' "${TMP}/inst.err"; then
+  ok "--check with an invalid Claude config: exit 4, COULD NOT LOOK"
+else
+  bad "check config corrupt" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 0 ] && grep -q '^OK' "${TMP}/inst.out" && grep -q 'MCP.*notion-personal' "${TMP}/inst.out"; then
+  ok "--check with notion-personal registered: exit 0, and says the MCP preflight passed"
+else
+  bad "check mcp ok" "rc=$rc $(out)"
+fi
+mv "$IR/ai/skills/athena:lead-time-improve/SKILL.md" "${TMP}/skill.aside"
+rc="$(inst "$ct" -- --check)"
+mv "${TMP}/skill.aside" "$IR/ai/skills/athena:lead-time-improve/SKILL.md"
+if [ "$rc" = 2 ] && grep -q 'lead-time-improve skill is not in the main checkout' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && ! grep -q '^OK' "${TMP}/inst.out"; then
+  ok "--check with the skill not in the main checkout: exit 2 (every tick would exit 78), never OK"
+else
+  bad "check skill missing" "rc=$rc $(out)"
+fi
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${TMP}/absent.json" -- --check)"
+if [ "$rc" = 1 ] && grep -q 'MISSING' "${TMP}/inst.err" && grep -q 'COULD NOT LOOK' "${TMP}/inst.err"; then
+  ok "--check with no entry AND no config: exit 1 (MISSING), and the preflight fault is named too"
+else
+  bad "check missing + no config" "rc=$rc $(out)"
+fi
+
+shipwright_cursors
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${CJ_NO_NOTION}" -- --install)"
+if [ "$rc" = 2 ] && grep -q 'NOT REGISTERED' "${TMP}/inst.err" && grep -q 'Fix:.*notion-personal' "${TMP}/inst.err" \
+   && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
+  ok "--install with notion-personal not registered: refused (exit 2), no entry, no cursor"
+else
+  bad "install mcp missing" "rc=$rc ct=$(cat "$ct") $(out)"
+fi
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${TMP}/corrupt.json" -- --install)"
+if [ "$rc" = 4 ] && grep -q 'COULD NOT LOOK' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
+  ok "--install with an invalid Claude config: refused (exit 4), nothing written"
+else
+  bad "install config corrupt" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${CJ_NO_NOTION}" -- --dry-run)"
+if [ "$rc" = 2 ] && grep -q 'Fix:.*notion-personal' "${TMP}/inst.err" && ! grep -q 'would install' "${TMP}/inst.out"; then
+  ok "--dry-run with notion-personal not registered: exit 2 with the same Fix:, no plan printed"
+else
+  bad "dry-run mcp missing" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct" LEADTIME_CLAUDE_JSON="${CJ_NO_NOTION}" -- --remove)"
+if [ "$rc" = 0 ]; then
+  ok "--remove never runs the preflight (removing must work on a broken machine)"
+else
+  bad "remove mcp missing" "rc=$rc $(out)"
 fi
 
 if poisoned; then

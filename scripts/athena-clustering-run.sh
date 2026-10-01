@@ -23,7 +23,7 @@
 #
 # Usage:
 #   scripts/athena-clustering-run.sh             # the cron invocation
-#   scripts/athena-clustering-run.sh --dry-run   # print this tick's brief; touch nothing
+#   scripts/athena-clustering-run.sh --dry-run   # check the tick's preconditions, then print its brief; touch nothing
 #   scripts/athena-clustering-run.sh --help      # this text
 #   (DRY_RUN=1 is the same as --dry-run.)
 #
@@ -63,7 +63,11 @@
 #       session runs. The tick writes runs/<ts>.wedged, and the first wedged
 #       tick of an episode sends ONE harness-alert (clustering-wedged)
 #   78  the athena:epic-clustering skill is not in the main checkout, or the
-#       MCP servers the pass needs are not registered: counted
+#       MCP servers the pass needs are not registered or cannot be looked
+#       up (scripts/lib/mcp-preflight.sh, the check setup-clustering-cron
+#       shares): counted. --dry-run runs the same checks and exits 78 on
+#       the first that fails, touching nothing (DND-1571). The preflight
+#       library itself missing is 78 too, before any record
 #   71  flock failed for a reason other than "held" (a fault, never a skip)
 #   73  the state directory, lock or lane could not be created
 #   2   the repo is not a git checkout
@@ -97,7 +101,15 @@ CLAUDE="${CLUSTERING_CLAUDE:-${HOME}/.local/bin/claude}"
 CLAUDE_JSON="${CLUSTERING_CLAUDE_JSON:-${HOME}/.claude.json}"
 TIMEOUT="${CLUSTERING_TIMEOUT:-120m}"
 OWNER_TZ="America/Denver"
-REQUIRED_MCP="notion-personal athena"
+# The one MCP preflight (DND-1571), shared with --dry-run and the installer.
+# It also holds the servers this pass needs.
+if [ ! -r "${SCRIPT_DIR}/lib/mcp-preflight.sh" ]; then
+  echo "${ME}: ${SCRIPT_DIR}/lib/mcp-preflight.sh is missing, so the MCP servers cannot be checked; no session." >&2
+  echo "  Fix: restore scripts/lib/mcp-preflight.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main." >&2
+  exit 78
+fi
+# shellcheck source=scripts/lib/mcp-preflight.sh
+. "${SCRIPT_DIR}/lib/mcp-preflight.sh"
 
 FAIL_ESCALATE="${CLUSTERING_FAIL_ESCALATE:-2}"
 case "${FAIL_ESCALATE}" in
@@ -172,7 +184,23 @@ any repository. Finish with ONE line: what moved, merged, and closed, and \
 whether the digest was sent.' When it finishes, write its one line verbatim to \
 the file named by \$CLUSTERING_SUMMARY with one Bash command, print it, and stop."
 
+# The skill the architect runs. Without it the architect can only report that
+# it did nothing, and that summary would read as a green run.
+SKILL_FILE="${MAIN_CHECKOUT}/ai/skills/athena:epic-clustering/SKILL.md"
+
+# --dry-run checks what the tick's preconditions (4) check, in the same order,
+# so a printed brief means a tick can start (DND-1571).
 if [ "${DRY}" -eq 1 ]; then
+  if [ ! -r "${SKILL_FILE}" ]; then
+    echo "${ME}: ${SKILL_FILE} is missing; a tick would exit 78 and spawn no session." >&2
+    echo "  Fix: land the athena:epic-clustering skill (DND-982) on main and fast-forward ${MAIN_CHECKOUT}." >&2
+    exit 78
+  fi
+  if ! clustering_mcp_preflight "${CLAUDE_JSON}" "${MAIN_CHECKOUT}"; then
+    echo "${ME}: ${MCP_PF_WHY%.}; a tick would exit 78 and spawn no session." >&2
+    echo "  Fix: ${MCP_PF_FIX}" >&2
+    exit 78
+  fi
   printf '%s\n' "${BRIEF}"
   exit 0
 fi
@@ -434,42 +462,18 @@ mcp_fail() {
   echo "  Fix: $2" >&2
   exit 78
 }
-# The skill the architect runs. Without it the architect can only report that
-# it did nothing, and that summary would read as a green run.
-SKILL_FILE="${MAIN_CHECKOUT}/ai/skills/athena:epic-clustering/SKILL.md"
 if [ ! -r "${SKILL_FILE}" ]; then
   record_failure "the athena:epic-clustering skill is not in the main checkout (${SKILL_FILE}), so there is no pass to run" "skill=${SKILL_FILE} (absent)"
   echo "${ME}: ${SKILL_FILE} is missing; no session spawned. Counted as an unsuccessful outcome." >&2
   echo "  Fix: land the athena:epic-clustering skill (DND-982) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs." >&2
   exit 78
 fi
-if ! command -v jq >/dev/null 2>&1; then
-  mcp_fail "jq is not on PATH, so the MCP servers in ${CLAUDE_JSON} cannot be read." \
-    "install jq (the athena MCP headersHelper needs it too)."
+# The MCP servers, through the one preflight --dry-run and the installer share
+# (scripts/lib/mcp-preflight.sh, DND-1571).
+if ! clustering_mcp_preflight "${CLAUDE_JSON}" "${MAIN_CHECKOUT}"; then
+  mcp_fail "${MCP_PF_WHY}" "${MCP_PF_FIX}"
 fi
-if [ ! -r "${CLAUDE_JSON}" ]; then
-  mcp_fail "cannot read ${CLAUDE_JSON}, where Claude Code keeps the MCP servers registered for ${MAIN_CHECKOUT}." \
-    "confirm Claude Code has run on this machine and ${CLAUDE_JSON} is readable, or set CLUSTERING_CLAUDE_JSON."
-fi
-# A file jq cannot parse is its own fault, never "no servers registered".
-if ! jq empty "${CLAUDE_JSON}" >/dev/null 2>&1; then
-  mcp_fail "${CLAUDE_JSON} is not valid JSON (corrupt, or read mid-write), so its MCP servers cannot be read." \
-    "run 'jq empty ${CLAUDE_JSON}' to see the parse error. If it was a mid-write read, the next tick succeeds; do NOT re-register the servers."
-fi
-servers="$(jq -c --arg p "${MAIN_CHECKOUT}" '.projects[$p].mcpServers // empty | select(type == "object")' \
-  "${CLAUDE_JSON}" 2>/dev/null || true)"
-if [ -z "${servers}" ]; then
-  mcp_fail "no local-scope MCP servers are registered under the key '${MAIN_CHECKOUT}' in ${CLAUDE_JSON} ($(jq '[.projects[]? | select(.mcpServers? | type == "object" and length > 0)] | length' "${CLAUDE_JSON}" 2>/dev/null || echo '?') project(s) have any)." \
-    "from ${MAIN_CHECKOUT}, run scripts/add-notion --personal and scripts/add-athena-mcp, then re-run this script by hand."
-fi
-missing=""
-for s in ${REQUIRED_MCP}; do
-  jq -e --arg s "${s}" 'has($s)' <<<"${servers}" >/dev/null 2>&1 || missing="${missing} ${s}"
-done
-if [ -n "${missing}" ]; then
-  mcp_fail "the MCP server(s)${missing} are not registered for ${MAIN_CHECKOUT} in ${CLAUDE_JSON}; the pass needs Notion (notion-personal) and Slack (athena)." \
-    "from ${MAIN_CHECKOUT}, run scripts/add-notion --personal (notion-personal) and/or scripts/add-athena-mcp (athena)."
-fi
+servers="${MCP_PF_SERVERS}"
 if ! ( umask 077; jq -n --argjson s "${servers}" '{mcpServers: $s}' >"${LANE}/mcp.json" ) 2>/dev/null; then
   mcp_fail "could not write the session's MCP config ${LANE}/mcp.json." \
     "check that ${LANES_DIR} is writable and the disk is not full."

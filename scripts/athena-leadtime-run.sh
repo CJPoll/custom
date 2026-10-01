@@ -60,7 +60,7 @@
 #
 # Usage:
 #   scripts/athena-leadtime-run.sh             # the cron invocation
-#   scripts/athena-leadtime-run.sh --dry-run   # print this tick's brief; touch nothing
+#   scripts/athena-leadtime-run.sh --dry-run   # check the tick's preconditions, then print its brief; touch nothing
 #   scripts/athena-leadtime-run.sh --help      # this text
 #   (DRY_RUN=1 is the same as --dry-run.)
 #
@@ -131,8 +131,11 @@
 #   78  the athena:lead-time-improve skill is not in the main checkout, the
 #       repo list does not resolve (ai/bin/lead-time-repos is missing or exits
 #       non-zero, zero repos included; its line and Fix: go in the .failed
-#       record), or notion-personal is not registered: counted. --dry-run
-#       exits 78 too when the list does not resolve, touching nothing
+#       record), or notion-personal is not registered or cannot be looked
+#       up (scripts/lib/mcp-preflight.sh, the check setup-leadtime-cron
+#       shares): counted. --dry-run runs the same checks in the same order
+#       and exits 78 on the first that fails, touching nothing (DND-1571).
+#       The preflight library itself missing is 78 too, before any record
 #   *   the session's own non-zero exit (124 on timeout): counted
 
 set -euo pipefail
@@ -161,7 +164,17 @@ done
 REPO="${LEADTIME_REPO:-${SCRIPT_DIR}/..}"
 CLAUDE="${LEADTIME_CLAUDE:-${HOME}/.local/bin/claude}"
 CLAUDE_JSON="${LEADTIME_CLAUDE_JSON:-${HOME}/.claude.json}"
-REQUIRED_MCP="notion-personal"
+# The one MCP preflight (DND-1571), shared with --dry-run and the installer.
+# It also holds the servers this loop needs, so the list checked and the list
+# copied into the session's --mcp-config are one variable.
+if [ ! -r "${SCRIPT_DIR}/lib/mcp-preflight.sh" ]; then
+  echo "${ME}: ${SCRIPT_DIR}/lib/mcp-preflight.sh is missing, so the MCP servers cannot be checked; no session." >&2
+  echo "  Fix: restore scripts/lib/mcp-preflight.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main." >&2
+  exit 78
+fi
+# shellcheck source=scripts/lib/mcp-preflight.sh
+. "${SCRIPT_DIR}/lib/mcp-preflight.sh"
+REQUIRED_MCP="${LEADTIME_MCP_REQUIRED}"
 
 TIMEOUT="${LEADTIME_TIMEOUT:-50m}"
 case "${TIMEOUT}" in
@@ -403,12 +416,24 @@ res_why() {
     "$(printf '%s\n' "${RES_ERR}" | grep -v '^Fix: ' | grep -v '^[[:space:]]*$' | head -n1)"
 }
 
+# The skill's absence, said once for --dry-run and the preconditions (6).
+SKILL_WHY="the athena:lead-time-improve skill is not in the main checkout (${SKILL_FILE}), so there is no run to do"
+SKILL_FIX="land the skill (DND-1478) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs."
+# run_mcp_preflight — this runner's call of the one MCP preflight
+# (scripts/lib/mcp-preflight.sh, DND-1571); sets MCP_PF_*.
+run_mcp_preflight() { leadtime_mcp_preflight "${CLAUDE_JSON}" "${MAIN_CHECKOUT}"; }
+
+# --dry-run checks what the tick's preconditions (6) check, in the same order,
+# so a rendered brief means a tick can start (DND-1571).
 if [ "${DRY}" -eq 1 ]; then
-  if [ "${RES_RC}" -ne 0 ]; then
-    echo "${ME}: $(res_why); a tick would exit 78 and spawn no session." >&2
-    echo "  Fix: $(res_fix)" >&2
+  dry_refuse() { # <why> <fix>
+    echo "${ME}: $1; a tick would exit 78 and spawn no session." >&2
+    echo "  Fix: $2" >&2
     exit 78
-  fi
+  }
+  [ -r "${SKILL_FILE}" ] || dry_refuse "${SKILL_WHY}" "${SKILL_FIX}"
+  [ "${RES_RC}" -eq 0 ] || dry_refuse "$(res_why)" "$(res_fix)"
+  run_mcp_preflight || dry_refuse "${MCP_PF_WHY%.}" "${MCP_PF_FIX}"
   build_brief
   printf '%s\n' "${BRIEF}"
   exit 0
@@ -747,8 +772,7 @@ precondition_fail() {
 # Without the skill or a resolved repo list the shipwright can only report that
 # it did nothing, and that summary would read as a green run.
 if [ ! -r "${SKILL_FILE}" ]; then
-  precondition_fail "the athena:lead-time-improve skill is not in the main checkout (${SKILL_FILE}), so there is no run to do; counted as an unsuccessful outcome." \
-    "land the skill (DND-1478) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs."
+  precondition_fail "${SKILL_WHY}; counted as an unsuccessful outcome." "${SKILL_FIX}"
 fi
 if [ "${RES_RC}" -ne 0 ]; then
   # The resolver's own lines go into the .failed record, its Fix: included.
@@ -756,33 +780,12 @@ if [ "${RES_RC}" -ne 0 ]; then
   precondition_fail "$(res_why); no repo has a mode, so no session; counted as an unsuccessful outcome." \
     "$(res_fix)" "${res_lines[@]}"
 fi
-if ! command -v jq >/dev/null 2>&1; then
-  precondition_fail "jq is not on PATH, so the MCP servers in ${CLAUDE_JSON} cannot be read." \
-    "install jq."
+# The MCP servers, through the one preflight --dry-run and the installer share
+# (scripts/lib/mcp-preflight.sh, DND-1571).
+if ! run_mcp_preflight; then
+  precondition_fail "${MCP_PF_WHY}" "${MCP_PF_FIX}"
 fi
-if [ ! -r "${CLAUDE_JSON}" ]; then
-  precondition_fail "cannot read ${CLAUDE_JSON}, where Claude Code keeps the MCP servers registered for ${MAIN_CHECKOUT}." \
-    "confirm Claude Code has run on this machine and ${CLAUDE_JSON} is readable, or set LEADTIME_CLAUDE_JSON."
-fi
-# A file jq cannot parse is its own fault, never "no servers registered".
-if ! jq empty "${CLAUDE_JSON}" >/dev/null 2>&1; then
-  precondition_fail "${CLAUDE_JSON} is not valid JSON (corrupt, or read mid-write), so its MCP servers cannot be read." \
-    "run 'jq empty ${CLAUDE_JSON}' to see the parse error. If it was a mid-write read, the next tick succeeds; do NOT re-register the servers."
-fi
-servers="$(jq -c --arg p "${MAIN_CHECKOUT}" '.projects[$p].mcpServers // empty | select(type == "object")' \
-  "${CLAUDE_JSON}" 2>/dev/null || true)"
-if [ -z "${servers}" ]; then
-  precondition_fail "no local-scope MCP servers are registered under the key '${MAIN_CHECKOUT}' in ${CLAUDE_JSON} ($(jq '[.projects[]? | select(.mcpServers? | type == "object" and length > 0)] | length' "${CLAUDE_JSON}" 2>/dev/null || echo '?') project(s) have any)." \
-    "from ${MAIN_CHECKOUT}, run scripts/add-notion --personal, then re-run this script by hand."
-fi
-missing=""
-for s in ${REQUIRED_MCP}; do
-  jq -e --arg s "${s}" 'has($s)' <<<"${servers}" >/dev/null 2>&1 || missing="${missing} ${s}"
-done
-if [ -n "${missing}" ]; then
-  precondition_fail "the MCP server(s)${missing} are not registered for ${MAIN_CHECKOUT} in ${CLAUDE_JSON}; an architect the run spawns files DND tickets through notion-personal." \
-    "from ${MAIN_CHECKOUT}, run scripts/add-notion --personal."
-fi
+servers="${MCP_PF_SERVERS}"
 # Only the servers the run needs; --strict-mcp-config below keeps every other
 # configured server and connector out of the session.
 mcp_config="$(jq -c --arg names "${REQUIRED_MCP}" \

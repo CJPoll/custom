@@ -13,7 +13,9 @@
 # Usage:
 #   setup-leadtime-cron [--install] [--schedule "<cron expr>"] [--dry-run]
 #   setup-leadtime-cron --check          read-only: exit 0 if exactly one live entry runs the runner
-#                                        and the repo list resolves; prints that list
+#                                        and a tick could start: the skill is in the main checkout,
+#                                        the repo list resolves, and the MCP preflight passes;
+#                                        prints that list and the MCP line
 #   setup-leadtime-cron --remove [--dry-run]
 #   setup-leadtime-cron --backup <file>  snapshot the current crontab to <file> (mode 600)
 #   setup-leadtime-cron --help
@@ -35,6 +37,16 @@
 # resolver exit, zero repos included) is exit 2 and leaves the crontab and
 # every cursor unchanged.
 #
+# The MCP preflight (DND-1571). --check, --install and --dry-run run the
+# runner's own MCP preflight, scripts/lib/mcp-preflight.sh, the function its
+# preconditions call: notion-personal registered for the main checkout in
+# Claude Code's config (LEADTIME_CLAUDE_JSON, default ~/.claude.json). Two
+# failures, with distinct words and exits: NOT REGISTERED (exit 2: the config
+# was read and the server is not there; the Fix: names the server and the
+# command that registers it) and COULD NOT LOOK (exit 4: jq missing, or the
+# config missing, unreadable or not valid JSON). --install refuses before any
+# write. --remove and --backup never run it.
+#
 # Cursor seeding (--install only; --dry-run prints the plan). Before the entry
 # is written, each RESOLVED repo gets its first cursor in <main
 # checkout>/ai-artifacts/lead-time, unless one is already there (an existing
@@ -51,12 +63,15 @@
 # Environment (test seams):
 #   LEADTIME_CRONTAB  the crontab program (default: crontab on PATH)
 #   LEADTIME_NOW      epoch seconds to treat as now, for the improve cursor
+#   LEADTIME_CLAUDE_JSON  Claude Code's config holding the MCP servers (the runner's seam)
 #   ATHENA_LEADTIME_CONFIG, XDG_CONFIG_HOME  read by ai/bin/lead-time-repos
 #
 # Exit codes: 0 ok · 1 entry missing, duplicated or stale (--check), or a usage
-# error · 2 a prerequisite is missing, the repo list does not resolve, the
-# crontab could not be read or written, or a cursor could not be written · 3 refused: --install or --remove
-# run from a linked worktree
+# error · 2 a prerequisite is missing, the repo list does not resolve, an MCP
+# server is NOT REGISTERED, the crontab could not be read or written, or a
+# cursor could not be written · 3 refused: --install or --remove run from a
+# linked worktree · 4 COULD NOT LOOK: the MCP preflight could not read Claude
+# Code's config (or jq, or the preflight library, is missing)
 
 set -euo pipefail
 
@@ -118,6 +133,39 @@ LT_STATE="${MAIN_CHECKOUT}/ai-artifacts/lead-time"
 SW_STATE="${MAIN_CHECKOUT}/ai-artifacts/shipwright"
 RESOLVER="${MAIN_CHECKOUT}/ai/bin/lead-time-repos"
 SKILL_FILE="${MAIN_CHECKOUT}/ai/skills/athena:lead-time-improve/SKILL.md"
+CLAUDE_JSON="${LEADTIME_CLAUDE_JSON:-${HOME}/.claude.json}"
+PREFLIGHT_LIB="${SCRIPT_DIR}/lib/mcp-preflight.sh"
+
+# mcp_check — the runner's own MCP preflight (scripts/lib/mcp-preflight.sh,
+# DND-1571): the function its preconditions and its --dry-run call, never a
+# copy of its rules. Sets MCP_PF_* and returns non-zero when a tick would exit
+# 78 on it. Sourced here, not at the top, so --remove and --backup work on a
+# checkout that lost the library.
+mcp_check() {
+  if [ ! -r "${PREFLIGHT_LIB}" ]; then
+    MCP_PF_RESULT="could-not-look"
+    MCP_PF_WHY="${PREFLIGHT_LIB} is missing, so the runner's MCP preflight cannot run."
+    MCP_PF_FIX="restore scripts/lib/mcp-preflight.sh (git checkout -- scripts/lib), or fast-forward this checkout to main."
+    return 1
+  fi
+  # shellcheck source=scripts/lib/mcp-preflight.sh
+  . "${PREFLIGHT_LIB}"
+  leadtime_mcp_preflight "${CLAUDE_JSON}" "${MAIN_CHECKOUT}"
+}
+# mcp_label — the result's word for a reader: NOT REGISTERED (the config was
+# read and the server is not there) or COULD NOT LOOK (it could not be read).
+mcp_label() { if [ "${MCP_PF_RESULT}" = "not-registered" ]; then echo "NOT REGISTERED"; else echo "COULD NOT LOOK"; fi; }
+# mcp_fail — exit 2 (not registered) or 4 (could not look), naming both lines.
+mcp_fail() {
+  local rc=4
+  [ "${MCP_PF_RESULT}" = "not-registered" ] && rc=2
+  die "${rc}" "$(mcp_label): ${MCP_PF_WHY%.}; every tick would exit 78." "${MCP_PF_FIX} Nothing was written."
+}
+mcp_ok_line() {
+  echo "MCP: ${LEADTIME_MCP_REQUIRED} registered for ${MAIN_CHECKOUT} in ${CLAUDE_JSON} (the runner's preflight passes)."
+}
+SKILL_MISSING_WHY="the athena:lead-time-improve skill is not in the main checkout (${SKILL_FILE})"
+SKILL_MISSING_FIX="land DND-1478 on main and fast-forward ${MAIN_CHECKOUT} first. Without it every tick exits 78."
 
 # resolve_repos — this machine's repo list, through the one resolver
 # (ai/bin/lead-time-repos, DND-1526); never a second parse of the config.
@@ -227,11 +275,17 @@ if [ "${MODE}" = "check" ]; then
   # The resolved list is printed either way; one that does not resolve is red
   # even with a healthy entry, because every tick would then exit 78.
   resolve_repos
+  # A healthy entry is not enough: --check is green only when a tick could
+  # start, so it runs the runner's own preconditions too (DND-1571).
+  mcp_rc=0; mcp_check || mcp_rc=1
   if [ "${n}" -eq 1 ] && [ -z "${stale}" ] && [ -x "${RUNNER}" ]; then
+    [ -r "${SKILL_FILE}" ] || die 2 "${SKILL_MISSING_WHY}; every tick would exit 78" "${SKILL_MISSING_FIX}"
     [ "${RES_RC}" -eq 0 ] || res_fail 2
+    [ "${mcp_rc}" -eq 0 ] || mcp_fail
     echo "OK: the lead-time improver cron entry is installed:"
     printf '%s\n' "${live}" | sed 's/^/  /'
     printf '%s\n' "${RES_TEXT}"
+    mcp_ok_line
     exit 0
   fi
   if [ "${RES_RC}" -eq 0 ]; then
@@ -239,6 +293,14 @@ if [ "${MODE}" = "check" ]; then
   else
     echo "${ME}: the repo list does not resolve either (ai/bin/lead-time-repos ${RES_RAN})." >&2
     echo "  Fix: ${RES_FIX:-run ${RESOLVER} by hand to see why.}" >&2
+  fi
+  if [ ! -r "${SKILL_FILE}" ]; then
+    echo "${ME}: ${SKILL_MISSING_WHY} either." >&2
+    echo "  Fix: ${SKILL_MISSING_FIX}" >&2
+  fi
+  if [ "${mcp_rc}" -ne 0 ]; then
+    echo "$(mcp_label): ${MCP_PF_WHY}" >&2
+    echo "  Fix: ${MCP_PF_FIX}" >&2
   fi
   if [ -n "${stale}" ]; then
     echo "STALE: the crontab runs a lead-time runner that is not ${RUNNER}:" >&2
@@ -299,8 +361,7 @@ fi
 # --- install ---------------------------------------------------------------
 [ -x "${RUNNER}" ] || die 2 "the runner ${RUNNER} is absent or not executable in the main checkout" \
   "land DND-1479 on main and fast-forward ${MAIN_CHECKOUT} first. An entry pointing at a missing runner fails every tick."
-[ -r "${SKILL_FILE}" ] || die 2 "the athena:lead-time-improve skill is not in the main checkout (${SKILL_FILE})" \
-  "land DND-1478 on main and fast-forward ${MAIN_CHECKOUT} first. Without it every tick exits 78."
+[ -r "${SKILL_FILE}" ] || die 2 "${SKILL_MISSING_WHY}" "${SKILL_MISSING_FIX}"
 NOW="${LEADTIME_NOW:-$(date -u +%s)}"
 case "${NOW}" in
   ''|*[!0-9]*) die 1 "LEADTIME_NOW='${NOW}' is not epoch seconds" "unset it, or set it to a whole number of seconds." ;;
@@ -311,7 +372,11 @@ esac
 # not checked out here, by name; any refusal is reported before any write.
 resolve_repos
 [ "${RES_RC}" -eq 0 ] || res_fail 2
+# The runner's MCP preflight, before any write: an entry whose every tick
+# exits 78 is not an install (DND-1571).
+mcp_check || mcp_fail
 printf '%s\n' "${RES_TEXT}"
+mcp_ok_line
 repos="${RES_TSV}"
 
 RFC3339_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'

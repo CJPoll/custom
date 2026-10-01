@@ -451,6 +451,32 @@ else
   bad "mcp missing" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
 fi
 
+# DND-1571: --dry-run runs the same preflight, so a rendered brief means a
+# tick can start. Each failure: exit 78, the tick's Fix:, no brief, no state.
+dry_refused() { # <case> <label> <grep pattern on stderr>
+  local c="$1" rc
+  rc="$(run_runner "$c" -- --dry-run)"
+  if [ "$rc" = 78 ] && grep -q -- "$3" "$c/runner.err" && grep -q 'Fix:' "$c/runner.err" \
+     && grep -q 'a tick would exit 78' "$c/runner.err" && ! grep -q 'MODE: lead-time' "$c/runner.out" \
+     && [ ! -e "$(sd "$c")" ] && [ ! -e "$(lanes "$c")" ] && [ "$(invoked "$c")" = 0 ]; then
+    ok "--dry-run with $2: exit 78 with Fix:, prints no brief, touches nothing"
+  else
+    bad "dry-run $2" "rc=$rc out=$(head -3 "$c/runner.out") err=$(cat "$c/runner.err")"
+  fi
+}
+c="$(new_case)"
+jq --arg p "$c/repo" 'del(.projects[$p].mcpServers["notion-personal"])' "$c/claude.json" >"$c/cj" && mv "$c/cj" "$c/claude.json"
+dry_refused "$c" "notion-personal not registered" 'Fix:.*scripts/add-notion --personal.*notion-personal'
+c="$(new_case)"
+rm -f -- "$c/claude.json"
+dry_refused "$c" "the Claude config missing (could not look)" "cannot read $c/claude.json"
+c="$(new_case)"
+printf '{not json' >"$c/claude.json"
+dry_refused "$c" "an invalid Claude config (could not look)" 'not valid JSON'
+c="$(new_case)"
+git -C "$c/repo" rm -q -- 'ai/skills/athena:lead-time-improve/SKILL.md'
+dry_refused "$c" "the skill not in the main checkout" 'athena:lead-time-improve skill is not in the main checkout'
+
 c="$(new_case)"
 printf '{not json' >"$c/claude.json"
 rc="$(run_runner "$c")"

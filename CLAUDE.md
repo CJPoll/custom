@@ -565,7 +565,10 @@ shipwright cron never writes Notion, so this is its own runner.
   so the runner copies them into a `--mcp-config`. A missing server, or the
   skill not landed in the main checkout, is exit 78 and counts as a failure.
 - **Install / restore / verify:** `scripts/setup-clustering-cron`
-  (`--dry-run`, `--check`, `--remove`, `--backup <file>`). The admiral that
+  (`--dry-run`, `--check`, `--remove`, `--backup <file>`). `--check`, the
+  install and both `--dry-run`s run the runner's own skill and MCP preflight
+  (`scripts/lib/mcp-preflight.sh`, DND-1571), so a green check means a tick
+  can start. The admiral that
   lands a change to it runs it in the main checkout and notifies the owner
   (`ai/CLAUDE.md` → *Owner approval policy*). State and per-run
   records are in `ai-artifacts/clustering/`. The wedge follows the shipwright's
@@ -622,7 +625,11 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   `--dry-run`, `--check`, `--remove`, `--backup <file>`). The entry always
   names the main checkout's runner, and `--install` and `--remove` refuse to
   run from a linked worktree. `--check` is red on a missing, duplicated or
-  stale entry. The admiral that lands a change to it runs `--backup`,
+  stale entry, and on any precondition that would make a tick exit 78: the
+  skill, the repo list, or the runner's own MCP preflight
+  (`scripts/lib/mcp-preflight.sh`, DND-1571), which `--install`, `--dry-run`
+  and the runner's `--dry-run` run too. NOT REGISTERED (exit 2) and COULD NOT
+  LOOK (exit 4) are told apart. The admiral that lands a change to it runs `--backup`,
   `--install` and `--check` in the main checkout right after the
   fast-forward, so there is no hour with no lead-time loop.
   `--install` seeds each missing cursor and never overwrites one: a watch
