@@ -86,6 +86,50 @@ accepted "--repo --mr still parses" --repo "${NOREPO}" --mr 1188
 accepted "--repo --pr --json still parses" --repo "${NOREPO}" --pr 14 --json
 accepted "flag order does not matter" --json --slow 90 --since "${SINCE}" --repo "${NOREPO}"
 
+refused "a valueless --meta is refused, naming the flag" "--meta" --repo "${NOREPO}" --since "${SINCE}" --meta
+refused "--meta without --since is refused (it reports a window scan)" "--meta" --repo "${NOREPO}" --pr 1 --meta "${TMP}/m.json"
+accepted "--since --slow --json --meta parses" --repo "${NOREPO}" --since "${SINCE}" --slow 90 --json --meta "${TMP}/m.json"
+
+# 2c. DND-1009: a date-only --since is a date. It reaches the repo check with
+#     no backtrace (it used to raise Time.xmlschema from the forge scan).
+run --repo "${NOREPO}" --since 2026-09-30
+if [ "${CODE}" -eq 1 ] && grep -q 'not a git worktree' <<<"${ERR}" && ! grep -qiE 'xmlschema|\.rb:[0-9]+:in' <<<"${ERR}"; then
+  ok "a date-only --since parses and stops at the repo check, no backtrace"
+else
+  bad "a date-only --since parses" "code=${CODE} err=$(head -c 240 <<<"${ERR}")"
+fi
+
+# 2c'. The same date-only --since against a GitHub-origin repo, with a `gh` on
+#      PATH that fails, so the scan reaches the forge offline. It used to raise
+#      a raw Time.xmlschema backtrace there; now the failed probe is SCAN
+#      INCOMPLETE (exit 3) with a Fix:, never a crash.
+GHREPO="${TMP}/gh-origin-repo"
+FAKEBIN="${TMP}/fakebin"
+mkdir -p "${FAKEBIN}"
+printf '#!/bin/sh\necho "fake gh: offline" >&2\nexit 1\n' >"${FAKEBIN}/gh"
+chmod +x "${FAKEBIN}/gh"
+git init -q "${GHREPO}" && git -C "${GHREPO}" remote add origin https://github.com/example-org/example-repo.git
+OUT="$(PATH="${FAKEBIN}:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" --since 2026-09-30 2>"${TMP}/err" </dev/null)"; CODE=$?
+ERR="$(cat "${TMP}/err")"
+if [ "${CODE}" -eq 3 ] && grep -q 'SCAN INCOMPLETE' <<<"${ERR}" && grep -q 'Fix:' <<<"${ERR}" \
+   && ! grep -qiE 'xmlschema|\.rb:[0-9]+:in' <<<"${ERR}" && [ -z "${OUT}" ]; then
+  ok "a date-only --since reaches the forge scan without a backtrace (SCAN INCOMPLETE on an offline gh)"
+else
+  bad "a date-only --since reaches the forge scan without a backtrace" "code=${CODE} err=$(head -c 300 <<<"${ERR}")"
+fi
+
+# 2d. Anything else unparseable is a usage error: exit 2, Fix:, the accepted
+#     forms named, and the repo never reached.
+for bad_since in yesterday 2026-09-30T22:00:00 2026-02-31; do
+  run --repo "${NOREPO}" --since "${bad_since}"
+  if [ "${CODE}" -eq 2 ] && grep -q 'Fix:' <<<"${ERR}" && grep -q 'YYYY-MM-DD' <<<"${ERR}" \
+     && ! grep -q 'not a git worktree' <<<"${ERR}" && [ -z "${OUT}" ]; then
+    ok "--since ${bad_since} is refused (exit 2, Fix:), repo never reached"
+  else
+    bad "--since ${bad_since} is refused" "code=${CODE} err=$(head -c 240 <<<"${ERR}")"
+  fi
+done
+
 run --help --bogus
 [ "${CODE}" -eq 0 ] && grep -q 'Usage:' <<<"${OUT}" \
   && ok "--help is still answered first (stdout, exit 0)" \

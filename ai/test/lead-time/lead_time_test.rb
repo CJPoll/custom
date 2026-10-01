@@ -600,6 +600,275 @@ check("no work token is a failed probe naming the work tracker") do
 end
 ProbeFailures.reset!
 
+# ---------------------------------------------------------------------------
+# DND-1009: every landing on the base branch is measured, including a direct
+# push with no PR; --meta reports the cursor independent of --slow; a
+# date-only --since is a date, and anything else unparseable is refused.
+# ---------------------------------------------------------------------------
+
+def sha_of(c) = c * 40
+
+def push_of(at, after, commits, type: "push", before: sha_of("0"))
+  { at: at, type: type, before: before, after: after, commits: commits }
+end
+
+def cmt(sha, subject, authored = "2026-09-30T00:00:00Z")
+  { sha: sha, subject: subject, authored: authored }
+end
+
+# --- build_push_rows (pure) -----------------------------------------------
+check("REGRESSION: a direct push with no PR gives a landing row for its ticket") do
+  rows = LeadTime.build_push_rows(
+    pushes: [push_of("2026-09-30T01:00:30Z", sha_of("a"), [cmt(sha_of("a"), "DND-9001: x")])],
+    covered: [], prefixes: ["DND"],
+  )
+  rows.size == 1 && rows[0][:ticket] == "DND-9001" && rows[0][:landed_commit] == sha_of("a") &&
+    rows[0][:at] == "2026-09-30T01:00:30Z" && rows[0][:unmeasured].nil?
+end
+check("a push of three commits naming two tickets gives two rows sharing the landing") do
+  commits = [cmt(sha_of("d"), "chore: tidy"), cmt(sha_of("c"), "DND-9002: b"), cmt(sha_of("b"), "DND-9001: a")]
+  rows = LeadTime.build_push_rows(pushes: [push_of("2026-09-30T02:10:30Z", sha_of("d"), commits)],
+                                  covered: [], prefixes: ["DND"])
+  rows.map { |r| r[:ticket] }.sort == %w[DND-9001 DND-9002] &&
+    rows.map { |r| [r[:at], r[:landed_commit]] }.uniq == [["2026-09-30T02:10:30Z", sha_of("d")]] &&
+    rows.all? { |r| r[:commits] == [sha_of("d"), sha_of("c"), sha_of("b")] }
+end
+check("a push whose after sha is a listed PR's landed commit adds no row") do
+  LeadTime.build_push_rows(pushes: [push_of("2026-09-30T04:00:30Z", sha_of("e"), [cmt(sha_of("e"), "DND-9003: y")])],
+                           covered: [sha_of("e")], prefixes: ["DND"]).empty?
+end
+check("a push carrying a listed PR's landed commit below its tip adds no row") do
+  commits = [cmt(sha_of("f"), "DND-9004: tip"), cmt(sha_of("e"), "DND-9003: y")]
+  LeadTime.build_push_rows(pushes: [push_of("2026-09-30T04:00:30Z", sha_of("f"), commits)],
+                           covered: [sha_of("e")], prefixes: ["DND"]).empty?
+end
+check("a push naming no ticket gives one row whose start says no ticket was named") do
+  rows = LeadTime.build_push_rows(pushes: [push_of("2026-09-30T03:00:30Z", sha_of("5"), [cmt(sha_of("5"), "tidy docs")])],
+                                  covered: [], prefixes: ["DND"])
+  rows.size == 1 && rows[0][:ticket].nil? &&
+    rows[0][:start_unmeasured] == "no ticket in the pushed commits' subjects"
+end
+check("a push naming only another tracker's ticket says which ref it saw") do
+  rows = LeadTime.build_push_rows(pushes: [push_of("2026-09-30T03:00:30Z", sha_of("5"), [cmt(sha_of("5"), "ZQ-12: w")])],
+                                  covered: [], prefixes: ["DND"])
+  rows.size == 1 && rows[0][:ticket].nil? && rows[0][:start_unmeasured].include?("ZQ-12")
+end
+check("a force push gives a could-not-measure row: force push to base") do
+  rows = LeadTime.build_push_rows(pushes: [push_of("2026-09-30T05:00:30Z", sha_of("6"), nil, type: "force_push")],
+                                  covered: [], prefixes: ["DND"])
+  rows.size == 1 && rows[0][:unmeasured] == "force push to base" && rows[0][:landed_commit] == sha_of("6")
+end
+check("a push whose commits could not be read is could-not-measure, never no-ticket") do
+  rows = LeadTime.build_push_rows(pushes: [push_of("2026-09-30T05:00:30Z", sha_of("7"), nil)],
+                                  covered: [], prefixes: ["DND"])
+  rows.size == 1 && rows[0][:unmeasured].to_s.include?("could not be read")
+end
+check("a PR merge no listed PR claims is could-not-measure, never silently dropped") do
+  rows = LeadTime.build_push_rows(pushes: [push_of("2026-09-30T06:00:30Z", sha_of("8"), nil, type: "pr_merge")],
+                                  covered: [], prefixes: ["DND"])
+  rows.size == 1 && rows[0][:unmeasured].to_s.include?("no listed PR")
+end
+check("a PR merge a listed PR claims adds no row") do
+  LeadTime.build_push_rows(pushes: [push_of("2026-09-30T06:00:30Z", sha_of("8"), nil, type: "pr_merge")],
+                           covered: [sha_of("8")], prefixes: ["DND"]).empty?
+end
+
+# --- scan_meta (pure) -------------------------------------------------------
+six = (1..6).map do |h|
+  { pr: nil, landed_commit: sha_of(h.to_s), closed_at: "2026-09-30T0#{h}:00:00Z", lead_seconds: 600 }
+end
+check("STUCK-CURSOR regression: no row over --slow still advances scanned_through to the newest landing") do
+  m = LeadTime.scan_meta(rows: six, kept: 0, failures: [])
+  m == { scanned_through: "2026-09-30T06:00:00Z", landings: 6, kept: 0, incomplete: false }
+end
+check("an incomplete scan stops scanned_through before the first failed probe") do
+  m = LeadTime.scan_meta(rows: six, kept: 0, failures: [{ cmd: "git log", detail: "x", at: "2026-09-30T04:00:00Z" }])
+  m[:incomplete] == true && m[:scanned_through] == "2026-09-30T03:00:00Z"
+end
+check("a failed probe tied to no landing gives no scanned_through at all") do
+  m = LeadTime.scan_meta(rows: six, kept: 0, failures: [{ cmd: "gh pr list", detail: "401", at: nil }])
+  m[:incomplete] == true && m[:scanned_through].nil?
+end
+check("two tickets on one push are one landing") do
+  rows = [{ pr: nil, landed_commit: sha_of("d"), closed_at: "2026-09-30T02:10:30Z" },
+          { pr: nil, landed_commit: sha_of("d"), closed_at: "2026-09-30T02:10:30Z" }]
+  LeadTime.scan_meta(rows: rows, kept: 2, failures: [])[:landings] == 1
+end
+check("an empty window has no scanned_through, not a fabricated one") do
+  LeadTime.scan_meta(rows: [], kept: 0, failures: []) ==
+    { scanned_through: nil, landings: 0, kept: 0, incomplete: false }
+end
+
+# --- parse_since (pure) -----------------------------------------------------
+check("a date-only --since is 00:00:00Z that day") { LeadTime.parse_since("2026-09-30") == ["2026-09-30T00:00:00Z", nil] }
+check("an RFC 3339 --since with an offset reads as UTC") do
+  LeadTime.parse_since("2026-09-30T22:00:00+02:00") == ["2026-09-30T20:00:00Z", nil]
+end
+check("an RFC 3339 --since in Z is kept") { LeadTime.parse_since("2026-09-30T22:00:00Z") == ["2026-09-30T22:00:00Z", nil] }
+check("'yesterday' is refused, naming the accepted forms") do
+  at, why = LeadTime.parse_since("yesterday")
+  at.nil? && why.include?("YYYY-MM-DD") && why.include?("RFC 3339")
+end
+check("a time with no zone is refused, not read as local time") { LeadTime.parse_since("2026-09-30T22:00:00")[0].nil? }
+check("an impossible date is refused, not rolled over") { LeadTime.parse_since("2026-02-31")[0].nil? }
+
+# --- the window scan over a real fixture repo (the manager) ----------------
+#   main: a0 -> d1 (push 1) -> d2 d3 d4 (push 2) -> d5 (push 3) -> d6 (PR 31, push 6)
+#   plus a force push and an unclaimed PR merge between pushes 3 and 6.
+def build_push_fixture(root)
+  origin = File.join(root, "push-origin.git")
+  work = File.join(root, "push-work")
+  FileUtils.mkdir_p(origin)
+  sh_git(origin, "init", "-q", "--bare")
+  sh_git(root, "clone", "-q", origin, work)
+  o = { origin: origin }
+  o[:a0] = commit_file(work, "a.txt", "a\n", "init", "2026-09-29T23:00:00Z")
+  sh_git(work, "push", "-q", "origin", "HEAD:refs/heads/start")
+  o[:d1] = commit_file(work, "b.txt", "1\n", "DND-9001: x", "2026-09-30T01:00:00Z")
+  o[:d2] = commit_file(work, "c.txt", "2\n", "DND-9001: part a", "2026-09-30T02:00:00Z")
+  o[:d3] = commit_file(work, "d.txt", "3\n", "DND-9002: part b", "2026-09-30T02:05:00Z")
+  o[:d4] = commit_file(work, "e.txt", "4\n", "chore: tidy", "2026-09-30T02:10:00Z")
+  o[:d5] = commit_file(work, "f.txt", "5\n", "tidy the docs", "2026-09-30T03:00:00Z")
+  o[:d6] = commit_file(work, "g.txt", "6\n", "DND-9003: landed through its PR", "2026-09-30T04:00:00Z")
+  sh_git(work, "push", "-q", "origin", "HEAD:refs/heads/main")
+  sh_git(work, "push", "-q", "origin", "#{o[:d6]}:refs/pull/31/head")
+  o[:work] = File.join(root, "push-checkout")
+  sh_git(root, "clone", "-q", "--no-local", "--single-branch", "--branch", "start", origin, o[:work])
+  o
+end
+
+def push_activity(o)
+  e = ->(at, type, before, after) { { "timestamp" => at, "activity_type" => type, "ref" => "refs/heads/main",
+                                      "before" => before, "after" => after } }
+  [[e.call("2026-09-30T04:00:30Z", "push", o[:d5], o[:d6]),
+    e.call("2026-09-30T03:40:30Z", "pr_merge", o[:d5], o[:d5]),
+    e.call("2026-09-30T03:20:30Z", "force_push", o[:d4], o[:d5]),
+    e.call("2026-09-30T03:00:30Z", "push", o[:d4], o[:d5])],
+   [e.call("2026-09-30T02:10:30Z", "push", o[:d1], o[:d4]),
+    e.call("2026-09-30T01:00:30Z", "push", o[:a0], o[:d1]),
+    e.call("2026-09-29T23:00:30Z", "branch_creation", sha_of("0"), o[:a0])]]
+end
+
+def push_forge(o, fail_activity: false)
+  view = { "number" => 31, "title" => "DND-9003: landed through its PR", "headRefName" => "dnd-9003-b",
+           "state" => "CLOSED", "mergedAt" => nil, "closedAt" => "2026-09-30T04:01:00Z", "baseRefName" => "main",
+           "headRefOid" => o[:d6], "mergeCommit" => nil,
+           "commits" => [{ "authoredDate" => "2026-09-30T04:00:00Z", "committedDate" => "2026-09-30T04:00:00Z" }] }
+  listed = [{ "number" => 31, "mergedAt" => nil, "closedAt" => "2026-09-30T04:01:00Z", "state" => "CLOSED" }]
+  act = push_activity(o)
+  f = GitHubForge.new(o[:work])
+  f.define_singleton_method(:run_json) do |cmd, _dir|
+    next [] if cmd[1] == "run"
+    next listed if cmd[1] == "pr" && cmd[2] == "list"
+    next view if cmd[1] == "pr" && cmd[2] == "view"
+    next({ "defaultBranchRef" => { "name" => "main" } }) if cmd[1] == "repo" && cmd[2] == "view"
+    if cmd[1] == "api" && cmd.any? { |c| c.include?("/activity") }
+      next ProbeFailures.record("gh api activity", "HTTP 502") if fail_activity
+
+      next act
+    end
+    raise "unexpected gh call: #{cmd.inspect}"
+  end
+  f
+end
+
+def push_starts
+  NotionStart.new(FakeNotion.new(9001 => at_prop("2026-09-30T00:30:00.000Z"),
+                                 9002 => at_prop("2026-09-30T01:30:00.000Z"),
+                                 9003 => at_prop("2026-09-30T03:30:00.000Z")))
+end
+
+def run_scan_captured(**kw)
+  out = StringIO.new
+  err = StringIO.new
+  code = nil
+  old_out = $stdout
+  old_err = $stderr
+  $stdout = out
+  $stderr = err
+  begin
+    code = run_scan(**kw)
+  rescue StandardError => e
+    $failures << "the window scan ran (raised #{e.class}: #{e.message.lines.first.to_s.strip})"
+  ensure
+    $stdout = old_out
+    $stderr = old_err
+  end
+  [code, out.string, err.string]
+end
+
+Dir.mktmpdir("lead-time-push") do |root|
+  po = build_push_fixture(root)
+  ProbeFailures.reset!
+  meta_path = File.join(root, "meta.json")
+  code, out, = run_scan_captured(repo: po[:work], since: "2026-09-30T00:00:00Z", slow_min: nil, as_json: true,
+                                 meta_file: meta_path, forge: push_forge(po), starts: push_starts)
+  rows = code&.zero? ? JSON.parse(out) : []
+  by = ->(sha) { rows.select { |r| r["landed_commit"] == sha && r["pr"].nil? } }
+
+  check("REGRESSION (manager): a direct push with no PR is a landing row (DND-1009)") do
+    r = by.call(po[:d1]).first
+    r && r["landed_via"] == "push" && r["pr"].nil? && r["merged"] == "2026-09-30T01:00:30Z" &&
+      r["ticket"] == "DND-9001" && r["lead_seconds"] == (30 * 60) + 30 && r["commits"] == [po[:d1]]
+  end
+  check("the scan exits 0 on a readable fixture") { code&.zero? && !ProbeFailures.any? }
+  check("a two-ticket push gives two rows, each timed from its own start") do
+    rs = by.call(po[:d4]).sort_by { |r| r["ticket"] }
+    rs.map { |r| r["ticket"] } == %w[DND-9001 DND-9002] &&
+      rs.map { |r| r["lead_seconds"] } == [(100 * 60) + 30, (40 * 60) + 30] &&
+      rs.all? { |r| r["commits"] == [po[:d4], po[:d3], po[:d2]] }
+  end
+  check("an unticketed push reads could-not-measure, naming the missing ticket") do
+    r = rows.find { |x| x["landed_commit"] == po[:d5] && x["merged"] == "2026-09-30T03:00:30Z" }
+    r && r["lead_seconds"].nil? && r["unmeasured_reason"].include?("no ticket in the pushed commits' subjects")
+  end
+  check("a force push reads could-not-measure: force push to base") do
+    rows.any? { |x| x["unmeasured_reason"] == "force push to base" && x["merged"] == "2026-09-30T03:20:30Z" }
+  end
+  check("an unclaimed PR merge reads could-not-measure") do
+    rows.any? { |x| x["merged"] == "2026-09-30T03:40:30Z" && x["unmeasured_reason"].to_s.include?("no listed PR") }
+  end
+  check("the PR-landed push is the PR's row only, never counted twice") do
+    rows.count { |x| x["landed_commit"] == po[:d6] } == 1 && rows.find { |x| x["pr"] == 31 }
+  end
+  check("the meta file names the newest landing, the landing count and kept") do
+    m = JSON.parse(File.read(meta_path))
+    m == { "scanned_through" => "2026-09-30T04:01:00Z", "landings" => 6, "kept" => 7, "incomplete" => false }
+  end
+  check("the human table prints a direct push as via=push") do
+    ProbeFailures.reset!
+    _c, _o, e = run_scan_captured(repo: po[:work], since: "2026-09-30T00:00:00Z", slow_min: nil, as_json: false,
+                                  meta_file: nil, forge: push_forge(po), starts: push_starts)
+    tbl = capture_row(rows.find { |x| x["landed_commit"] == po[:d1] }.transform_keys(&:to_sym)
+                          .merge(end_kind: :merge))
+    tbl.include?("via=push") && tbl.include?("DND-9001: x") && e.include?("forge=github")
+  end
+
+  ProbeFailures.reset!
+  slow_meta = File.join(root, "slow-meta.json")
+  run_scan_captured(repo: po[:work], since: "2026-09-30T00:00:00Z", slow_min: 90, as_json: true,
+                    meta_file: slow_meta, forge: push_forge(po), starts: push_starts)
+  check("--slow filters rows but not the meta cursor") do
+    m = JSON.parse(File.read(slow_meta))
+    m["scanned_through"] == "2026-09-30T04:01:00Z" && m["kept"] < 7
+  end
+
+  # --- an activity log that cannot be read is SCAN INCOMPLETE, never empty.
+  ProbeFailures.reset!
+  bad_meta = File.join(root, "bad-meta.json")
+  code_b, out_b, err_b = run_scan_captured(repo: po[:work], since: "2026-09-30T00:00:00Z", slow_min: nil,
+                                           as_json: true, meta_file: bad_meta,
+                                           forge: push_forge(po, fail_activity: true), starts: push_starts)
+  check("an unreadable activity log ends SCAN INCOMPLETE (exit 3), no rows on stdout") do
+    code_b == 3 && out_b.empty? && err_b.include?("SCAN INCOMPLETE")
+  end
+  check("and the meta file says incomplete, with no fabricated row list or cursor") do
+    m = JSON.parse(File.read(bad_meta))
+    m["incomplete"] == true && m["scanned_through"].nil? && !m.key?("rows")
+  end
+  ProbeFailures.reset!
+end
+
 if $failures.empty?
   puts "lead_time_test: PASS (#{$checks} checks)"
   exit 0

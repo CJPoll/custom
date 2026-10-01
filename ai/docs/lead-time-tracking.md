@@ -109,6 +109,37 @@ consistently-available, trustworthy end for every ticket on every forge. It is
 "slightly late" only in the benign sense that a deploy tail is included when a
 deploy ran — which is exactly what "fully deployed" means.
 
+### A direct push's landing (GitHub)
+
+A landing is a push to the default branch, not a PR (DND-1009). `~/dev/custom`
+lands most work by a fast-forward push, often with no PR at all, so a scan that
+listed PRs only saw about one landing in ten. A `--since` scan on GitHub also
+reads the default branch's activity log (the same reader the closed-PR rule
+uses) and adds:
+
+- **A push no PR row claims.** Its commits are the first-parent range
+  `before..after`. It gives one row per ticket its commit subjects name, with
+  the ticket parser the PR path uses: `pr: null`, `ticket`, `landed_via:
+  "push"`, `landed_commit` = the push's after sha, `commits`, and `merged` =
+  the push time. A push naming no ticket gives one row with lead `null` and
+  "no ticket in the pushed commits' subjects".
+- **A force push**: could not measure, "force push to base".
+- **A PR merge no listed PR claims**: could not measure, never dropped.
+
+A push or PR merge that carries a PR row's landed commit or merge commit IS
+that PR's landing and adds no row. A range that cannot be read is a failed
+probe tied to that push. GitLab MRs are read; GitLab direct pushes are not,
+and the scan says so on stderr.
+
+`--meta FILE` writes `{scanned_through, landings, kept, incomplete}` for a
+caller's cursor. `scanned_through` is the newest landing's window time
+(`closed_at`) **before** `--slow`, so a window with no slow row still moves the
+cursor. On `SCAN INCOMPLETE` it is the newest landing before the first one a
+probe failed on, and `null` when a failure belongs to no landing.
+
+`--since` takes `YYYY-MM-DD` (00:00:00Z that day) or RFC 3339 with a zone.
+Anything else exits 2 with a `Fix:` before the repo is read.
+
 ### Why GitLab reads the deploy *job*, not the whole pipeline
 
 walt_ui's post-merge pipeline can sit at `status=manual` (it has manual jobs like
