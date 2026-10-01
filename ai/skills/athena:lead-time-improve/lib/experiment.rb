@@ -37,6 +37,13 @@
 #     terminal, treated as inconclusive. It never becomes keep or revert. The
 #     store is machine-local; the trailer is what another machine can see.
 #     Instrumentation is exempt both ways, as it is from the blocker rule.
+#   * foreign rows (DND-1628): a landing worked on another machine (origin
+#     foreign, DND-1531) has its five phases null by construction, so a
+#     `phase` or `na_share` comparison leaves it out of both sides, by
+#     LeadTimePhases::Origin.foreign? (the predicate --summary uses), and
+#     counts it (foreign_excluded). An undecided origin counts as before.
+#     Totals, counters and check walls are measured on it and keep it; tail
+#     keeps it too (below).
 #   * only `improve`-mode rows count, one row per landing (batch tickets
 #     sharing a landed commit are one landing).
 #   * cross-repo (DND-1528): a change that landed in another repo (the
@@ -158,6 +165,14 @@ module LeadTimeExperiment
     def check_label = check? ? name.delete_prefix(CHECK_PREFIX) : nil
 
     def tail? = phase == TAIL
+
+    # Whether a landing worked on another machine (origin foreign, DND-1531)
+    # is left out of this metric's sides (DND-1628). Its five phases are null
+    # by construction, so a phase or n/a-share comparison would read it as
+    # n/a on a phase the local change never touched. The summary leaves it out
+    # the same way. Totals, counters and check walls are measured on it, and
+    # tail is read from the forge (DND-1613), so those keep it.
+    def foreign_out? = !tail? && (name == "phase" || na_share?)
 
     # The row's value, or nil when it is n/a there.
     def value(row)
@@ -311,15 +326,19 @@ module LeadTimeExperiment
   # they are not comparable (they would read as n/a). Batch tickets sharing
   # one landed commit are one landing: the first by ticket counts.
   def comparable(rows, metric:, exclude:)
-    improve_landings(rows, exclude: exclude) { |r| metric.na_share? || !metric.value(r).nil? }
+    improve_landings(rows, exclude: exclude, metric: metric) { |r| metric.na_share? || !metric.value(r).nil? }
   end
 
   # The improve-mode rows with a landing time, the excluded landings
   # dropped, those the block selects kept, in landing order, one row per
-  # landed commit (the first selected by ticket).
-  def improve_landings(rows, exclude: [], &keep)
+  # landed commit (the first selected by ticket). With a metric that leaves
+  # foreign landings out (Metric#foreign_out?), those are dropped too, by
+  # lead-time-phases' own predicate; an undecided origin stays.
+  def improve_landings(rows, exclude: [], metric: nil, &keep)
     skip = exclude.map(&:to_s)
+    drop_foreign = metric&.foreign_out?
     rows.reject { |r| skip.include?(r["landed_commit"].to_s) || (r.key?("mode") && r["mode"] != "improve") }
+        .reject { |r| drop_foreign && LeadTimePhases::Origin.foreign?(r) }
         .select { |r| at(r) && keep.call(r) }
         .sort_by { |r| [r["landed_at"].to_s, r["ticket"].to_s] }
         .uniq { |r| r["landed_commit"] }
@@ -346,7 +365,7 @@ module LeadTimeExperiment
   # an empty before-set names why (e.g. "row predates check_walls"); nil
   # when there is no such landing.
   def latest_unmeasured(rows, metric, exclude, boundary)
-    last = improve_landings(rows, exclude: exclude) { |r| at(r) < boundary && metric.value(r).nil? }.last
+    last = improve_landings(rows, exclude: exclude, metric: metric) { |r| at(r) < boundary && metric.value(r).nil? }.last
     last && metric.na_reason(last)
   end
 
@@ -361,10 +380,29 @@ module LeadTimeExperiment
     return [] if metric.na_share?
 
     kept = comparable(rows, metric: metric, exclude: exclude).to_h { |r| [r["landed_commit"], true] }
-    out = improve_landings(rows, exclude: exclude) do |r|
+    out = improve_landings(rows, exclude: exclude, metric: metric) do |r|
       (t = at(r)) >= from && t <= to && metric.value(r).nil? && !kept.key?(r["landed_commit"])
     end
     tally(out.map { |r| LeadTimePhases::Stats.generic(metric.na_reason(r), r) })
+  end
+
+  # How many landings from `from` to `to` the metric left out because they
+  # were worked on another machine (DND-1628): 0 when the metric keeps them
+  # (tail, totals, counters, checks) or the window has none. One per landed
+  # commit, as the sides count them.
+  def foreign_excluded(rows, metric:, exclude:, from:, to:)
+    return 0 unless metric.foreign_out?
+
+    improve_landings(rows, exclude: exclude) do |r|
+      (t = at(r)) >= from && t <= to && LeadTimePhases::Origin.foreign?(r)
+    end.size
+  end
+
+  # The judge/record text for the foreign count, nil when it is 0.
+  def foreign_text(count)
+    return nil if count.nil? || count.zero?
+
+    "left out #{count} landing(s) worked on another machine (origin foreign), as lead-time-phases --summary does"
   end
 
   def tally(reasons) = reasons.tally.sort_by { |r, n| [-n, r] }.map { |r, n| { "reason" => r, "count" => n } }

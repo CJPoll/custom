@@ -1014,6 +1014,71 @@ check("tail foreign: a landing worked on another machine keeps its measured tail
   s[:before].size == 10 && s[:after].size == 10
 end
 
+# ── foreign rows (DND-1628) ─────────────────────────────────────────────────
+# A landing worked on another machine has its five phases null with a reason.
+# Phase and n/a-share comparisons leave it out, as lead-time-phases --summary
+# does, and name the count.
+FOREIGN_FROM = t(RECORDED) - (11 * 3600)
+FOREIGN_TO = t(RECORDED) + (11 * 3600)
+
+def frow(hours)
+  sha = format("%040x", 7 * 10**9 + (hours * 100).to_i.abs + (hours.negative? ? 1 : 2))
+  row(hours, ticket: "DND-F#{hours}", sha: sha).merge("origin" => "foreign")
+end
+
+def lrow(hours, verify) = row(hours, verify: verify, ticket: "DND-L#{hours}").merge("origin" => "local")
+
+FOREIGN_LOCAL = (1..10).map { |i| lrow(-i, i < 6 ? nil : 600) } + (1..10).map { |i| lrow(i, i < 3 ? nil : 600) }
+FOREIGN_MIXED = FOREIGN_LOCAL + (1..8).map { |i| frow(i + 0.5) } + (1..8).map { |i| frow(-i - 0.5) }
+
+def share_sides(rows)
+  m = X::Metric.parse(X::NA_SHARE, phase: "verify")
+  [m, X.sides(rows, metric: m, exclude: [LANDING], boundary: t(RECORDED))]
+end
+
+check("foreign na_share: sides and stats match the local-only window") do
+  m, local = share_sides(FOREIGN_LOCAL)
+  _, mixed = share_sides(FOREIGN_MIXED)
+  X.stats(mixed[:before], m) == X.stats(local[:before], m) && X.stats(mixed[:after], m) == X.stats(local[:after], m)
+end
+
+check("foreign na_share: the verdict matches the local-only window") do
+  _, local = share_sides(FOREIGN_LOCAL)
+  _, mixed = share_sides(FOREIGN_MIXED)
+  ex = exp(metric: X::NA_SHARE, kind: "instrumentation")
+  j = ->(s) { X.judge(ex, before: s[:before], after: s[:after], guards_before: guards, guards_after: guards, now: NOW) }
+  j.call(mixed) == j.call(local) && j.call(mixed)["status"] == "keep"
+end
+
+check("foreign phase: foreign rows are not tallied as n/a reasons; the count is named apart") do
+  m = X::Metric.parse("phase", phase: "verify")
+  ex = X.excluded(FOREIGN_MIXED, metric: m, exclude: [LANDING], from: FOREIGN_FROM, to: FOREIGN_TO)
+  n = X.foreign_excluded(FOREIGN_MIXED, metric: m, exclude: [LANDING], from: FOREIGN_FROM, to: FOREIGN_TO)
+  ex.none? { |e| e["reason"].include?("another machine") } && n == 16
+end
+
+check("foreign count: na_share names it too, and a window with none reports 0") do
+  m = X::Metric.parse(X::NA_SHARE, phase: "verify")
+  X.foreign_excluded(FOREIGN_MIXED, metric: m, exclude: [], from: FOREIGN_FROM, to: FOREIGN_TO) == 16 &&
+    X.foreign_excluded(FOREIGN_LOCAL, metric: m, exclude: [], from: FOREIGN_FROM, to: FOREIGN_TO).zero?
+end
+
+check("foreign count: only phase and na_share leave foreign rows out; lead and tail keep them") do
+  lead = X::Metric.parse("lead", phase: "verify")
+  X.foreign_excluded(FOREIGN_MIXED, metric: lead, exclude: [], from: FOREIGN_FROM, to: FOREIGN_TO).zero? &&
+    X.foreign_excluded(FOREIGN_MIXED, metric: tail_metric, exclude: [], from: FOREIGN_FROM, to: FOREIGN_TO).zero?
+end
+
+check("foreign: a row with an undecided origin counts as before") do
+  m, s = share_sides((1..10).map { |i| row(-i, verify: nil) } + (1..10).map { |i| row(i, verify: 600) })
+  X.stats(s[:before], m)["n"] == 10 &&
+    X.foreign_excluded([row(1)], metric: m, exclude: [], from: FOREIGN_FROM, to: FOREIGN_TO).zero?
+end
+
+check("foreign text: the count is named beside the excluded reasons") do
+  X.foreign_text(16).include?("16") && X.foreign_text(16).include?("another machine") && X.foreign_text(0).nil?
+end
+
 check("tail_error: a measured tail on one of the window's landings passes") do
   X.tail_error([trow(-2, 0, "merge"), trow(-1, 3600)], window: 20).nil?
 end

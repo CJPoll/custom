@@ -710,6 +710,21 @@ has "REVERT HELD applies to the product repo's tests" "$(out)" "${HTID} REVERT H
 has "... the partial revert lands as a revert PR in gen_saas through its bar" "$(out)" \
   "and the trailer line \`Lead-time-experiment: gen_saas tail phase\` (DND-1529), landed as a revert PR in gen_saas through its own bar (the product lane, DND-1540))"
 
+# Foreign landings on a phase experiment (DND-1628): the same ledger shape,
+# judged on verify. Every other landing is foreign with its verify null; the
+# judge leaves them out of the sides and names the count.
+TF="$(pcommit 2026-10-20T14:00:00Z "fixture: a verify change" "$(tr "gen_saas verify phase")")"
+STATETF="${TMP}/statetf"
+mkdir -p "${STATETF}"
+/usr/bin/ruby "${HERE}/make_tail_ledger.rb" "${STATETF}/ledger.jsonl" gen_saas "${TF}" 2400 2026-10-20T00:00:00Z
+eq "record a phase change on a ledger with foreign landings: exit 0" \
+  "$(tl "${STATETF}" 2026-10-21T12:00:00Z run record --repo gen_saas --phase verify --metric phase --commit "${TF}" --kind change --hypothesis-file "${HYP}")" "0"
+has "record: the baseline names the foreign landings it left out" "$(out)" "left out 6 landing(s) worked on another machine (origin foreign)"
+eq "judge: exit 0" "$(tl "${STATETF}" 2026-10-21T12:00:00Z run judge --repo gen_saas)" "0"
+has "judge: the foreign landings are left out of both sides, counted, never an n/a reason" "$(out)" \
+  "left out 11 landing(s) worked on another machine (origin foreign), as lead-time-phases --summary does"
+lacks "... not tallied as an excluded n/a reason" "$(out)" "worked on another machine (no local events"
+
 STATETN="${TMP}/statetn"
 mkdir -p "${STATETN}"
 /usr/bin/ruby "${HERE}/make_tail_ledger.rb" "${STATETN}/ledger.jsonl" gen_saas "${TNR}" 2400 2026-10-18T00:00:00Z no-runs

@@ -140,6 +140,11 @@ HELP = <<~TXT
            Landings inside the window whose metric is n/a are named with
            their reasons and counts ("excluded N landing(s) ..."), never
            read as 0; record prints the same for its baseline (DND-1613).
+           On --metric phase and n/a share (not tail), landings worked on
+           another machine (origin foreign, DND-1531) are left out of both
+           sides, as lead-time-phases --summary leaves them out, and
+           counted ("left out N landing(s) worked on another machine"; one
+           with an undecided origin counts as before) (DND-1628).
            Appends a status row only when the verdict changed, so a re-run
            with the same inputs writes nothing.
   list     Every experiment and its latest status (DECLINED with its
@@ -583,7 +588,9 @@ module Record
 
     out = X.stats(s[:before], metric).merge("from" => s[:before].first["landed_at"], "to" => s[:before].last["landed_at"])
     ex = X.excluded(rows, metric: metric, exclude: exclude, from: X.at(s[:before].first), to: boundary)
-    ex.empty? ? out : out.merge("excluded" => ex)
+    out = out.merge("excluded" => ex) unless ex.empty?
+    fx = X.foreign_excluded(rows, metric: metric, exclude: exclude, from: X.at(s[:before].first), to: boundary)
+    fx.zero? ? out : out.merge("foreign_excluded" => fx)
   end
 
   # What a plain revert of the commit would delete (DND-1549).
@@ -603,6 +610,8 @@ module Record
           end
     ex = X.excluded_text(b["excluded"])
     out = "#{out}; #{ex}" if ex
+    fx = X.foreign_text(b["foreign_excluded"])
+    out = "#{out}; #{fx}" if fx
     b["provisional"] ? "#{out} (provisional: #{b['provisional']})" : out
   end
 
@@ -804,6 +813,9 @@ module Judge
     # appends no row.
     ex = X.excluded(rows, metric: metric, exclude: split[:exclude], from: from, to: to)
     v = v.merge("excluded" => ex) unless ex.empty?
+    # Foreign landings the metric left out (DND-1628): counted, named, never judged.
+    fx = X.foreign_excluded(rows, metric: metric, exclude: split[:exclude], from: from, to: to)
+    v = v.merge("foreign_excluded" => fx) unless fx.zero?
     # Instrumentation is never confounded (X.confounders), so its logs are not read.
     v = X.confound(v, Confound.find(exp, repo, res, from, to), phase: exp["phase"]) unless exp["kind"] == "instrumentation"
     [v, metric.check? ? X.phase_context(s[:before], s[:after], phase: exp["phase"]) : nil]
@@ -865,6 +877,8 @@ module Judge
     end
     ex = X.excluded_text(v["excluded"])
     reason = "#{reason} | #{ex}" if ex
+    fx = X.foreign_text(v["foreign_excluded"])
+    reason = "#{reason} | #{fx}" if fx
     xtext = X.cross_text(exp)
     "experiment: #{exp['id']} #{status} kind=#{exp['kind']} metric=#{exp['metric']}#{xtext ? " #{xtext}" : ''} | " \
       "before #{side(v['before'])} | after #{side(v['after'])} | guards #{g ? g.join(', ') : 'n/a'} | #{reason}#{phase}"
