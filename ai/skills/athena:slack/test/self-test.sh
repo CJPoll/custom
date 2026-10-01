@@ -1881,6 +1881,34 @@ for args in "--no-claim ${ENG_CHANNEL} 1790.5 threaded" "${ENG_CHANNEL} 1790.5 t
   else bad "reply '${args}': claim=skipped, no MCP call, exit 0" "rc=${RC} out='${OUT}' err='${ERR}' calls=$(mcp_calls)"; fi
 done
 
+# p5l. DND-1605: the note a forwarder posts when it forwards a misrouted
+#      conversation never claims the thread. `--reroute-of <event_id>` (the
+#      event_id it passed to session_send as reroute_of_event_id) implies no
+#      claim, in either position: claim=skipped, no MCP call, posted once.
+#      Claiming it would route the owner's follow-ups to the forwarder.
+for args in "--reroute-of EVFAKE00001 ${ENG_CHANNEL} 1790.5 forwarded" "${ENG_CHANNEL} 1790.5 forwarded --reroute-of EVFAKE00001"; do
+  setup_case; claim_setup
+  fixture chat.postMessage "{\"ok\":true,\"ts\":\"1790.17\",\"channel\":\"${ENG_CHANNEL}\"}"
+  # shellcheck disable=SC2086
+  run_bin reply ${args}
+  if [[ "${RC}" == 0 && "$(tail -n1 <<<"${OUT}")" == "claim=skipped" && -z "$(mcp_calls)" && "$(calls_of chat.postMessage)" == 1 ]]; then
+    ok "reply '${args}' (a forward note): claim=skipped, no MCP call, exit 0"
+  else bad "reply '${args}' (a forward note): claim=skipped, no MCP call, exit 0" "rc=${RC} out='${OUT}' err='${ERR}' calls=$(mcp_calls)"; fi
+done
+# p5m. --reroute-of with no event_id (or an empty one) is a usage error, exit 2,
+#      nothing posted or claimed: a forward note must name what it forwarded.
+for form in "missing" "empty" "flag"; do
+  setup_case; claim_setup
+  case "${form}" in
+    missing) run_bin reply "${ENG_CHANNEL}" 1790.5 forwarded --reroute-of ;;
+    empty) run_bin reply "${ENG_CHANNEL}" 1790.5 forwarded --reroute-of "" ;;
+    flag) run_bin reply "${ENG_CHANNEL}" 1790.5 forwarded --reroute-of --no-claim ;;
+  esac
+  if [[ "${RC}" == 2 && "${ERR}" == *"--reroute-of"* && "${ERR}" == *"Fix:"* && "$(calls_of chat.postMessage)" == 0 && -z "$(mcp_calls)" ]]; then
+    ok "reply --reroute-of (${form} event_id): usage with Fix:, exit 2, nothing posted or claimed"
+  else bad "reply --reroute-of (${form} event_id): usage with Fix:, exit 2, nothing posted or claimed" "rc=${RC} err='${ERR}' posts=$(calls_of chat.postMessage)"; fi
+done
+
 # p5i. Slack's own message.thread_ts wins over the argument: a reply's ts
 #      passed by mistake never gets a different thread claimed for good.
 setup_case; claim_setup

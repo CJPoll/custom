@@ -1,5 +1,6 @@
 #!/bin/sh
 # reply <channel_id|#name> <thread_ts> [text] [--broadcast] [--no-claim]
+#       [--reroute-of <event_id>]
 #
 # thread_ts MUST be the ts of the thread's PARENT message. Slack does not
 # accept a reply's ts there; passing one either starts a second thread or is
@@ -25,6 +26,13 @@
 # --already-claimed-ok` once the cause is fixed). A non-zero exit is a failed
 # post, as before.
 #
+# --reroute-of <event_id> marks the reply as the note a session posts when it
+# FORWARDS a misrouted conversation to the session that owns it (DND-1605).
+# <event_id> is the one it passed to session_send as reroute_of_event_id. It
+# implies --no-claim and prints claim=skipped: a forwarder that claimed the
+# thread would get the owner's follow-ups instead of the session it forwarded
+# to. A missing or empty <event_id> is a usage error, and nothing is sent.
+#
 # The thread claimed is the one Slack actually threaded the reply into (the
 # response's message.thread_ts), falling back to the thread_ts argument when
 # the response carries none: a caller that passed a reply's ts by mistake
@@ -36,7 +44,13 @@ case "${1:-}" in -h|--help) slack_help "$0"; exit 0 ;; esac
 slack_need_tools
 
 usage() {
-  printf 'usage: reply <channel_id|#name> <thread_ts> [text] [--broadcast] [--no-claim]\n' >&2
+  printf 'usage: reply <channel_id|#name> <thread_ts> [text] [--broadcast] [--no-claim] [--reroute-of <event_id>]\n' >&2
+  exit 2
+}
+
+reroute_usage() {
+  printf 'reply: --reroute-of needs the event_id of the forwarded conversation (nothing was sent)\n' >&2
+  printf 'Fix: pass the event_id you gave session_send as reroute_of_event_id: reply <channel> <thread_ts> <text> --reroute-of <event_id>\n' >&2
   exit 2
 }
 
@@ -52,6 +66,11 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --broadcast) BROADCAST=true; shift ;;
     --no-claim) CLAIM=false; shift ;;
+    --reroute-of)
+      # A forward note never claims the thread (DND-1605).
+      [ "$#" -ge 2 ] || reroute_usage
+      case "$2" in ''|-*) reroute_usage ;; esac
+      CLAIM=false; shift 2 ;;
     --) shift; TEXT="${1:-}"; break ;;
     -*) usage ;;
     *)

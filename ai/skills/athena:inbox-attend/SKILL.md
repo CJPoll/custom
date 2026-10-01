@@ -189,7 +189,8 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
     thread root before deciding what the message means, whose it is, or where
     to answer. If the root was posted by another session (its session-name
     prefix), the reply is that session's: forward it there rather than
-    answering it yourself. Measured: Cody's "OK, done. Let's test that
+    answering it yourself. A note you post in the thread about the forward
+    never claims it (`athena:slack` → *Forwarding a misroute*). Measured: Cody's "OK, done. Let's test that
     here" under the harness session's DND-299 post read as a plain walt_ui DM.
   - **Read the whole thread fresh, right before composing.** `read-thread` the
     conversation immediately before you write the reply, not only on the wake.
@@ -207,7 +208,12 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
     `send-mail --routed` does not pass that argument yet. The reply's
     `feedback:` field says `recorded`, `not_found` or `refused:<reason>`; the
     message is delivered whatever it says, so name a refusal in your turn
-    output and never resend.
+    output and never resend. If you tell the owner in the thread where it
+    went, post that note with `athena:slack/bin/reply <channel> <thread_ts>
+    <text> --reroute-of <event_id>`, which never claims the thread
+    (`athena:slack` → *Forwarding a misroute*). A plain `reply` claims it, and
+    the owner's follow-ups then come to you instead of the session you
+    forwarded to.
   - **The owner says "wrong session" in the thread.** Record it with the
     `judgment_feedback` tool (`use_case: slack_routing`, `subject_ref:
     <event_id>`), the session Cody named as `correction: {"session": <label>}`

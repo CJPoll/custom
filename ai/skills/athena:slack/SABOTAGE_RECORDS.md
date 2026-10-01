@@ -534,3 +534,11 @@ DND-1568: `topic-route list` printed the machine's display name through the bare
 | # | Mutation | Cases reddened | Failure string(s) |
 |---|---|---|---|
 | S96 | `topic_route_render_list` prints `machine_name` (not `machine_id`) as `machine=`, with no `name=` | 4 | `FAIL topic_route_render_list: machine=<id> name="<real name>" both resolve through send-mail's routed_pick_machine` (`none of your machines matching "Fake_Desktop" declares custom-session.jsonl`) / `... a name with a quote, backslash, newline cannot forge a field` / `... a route with no machine -> inbox=none machine=none` / `FAIL topic-route list: two routes -> two label= lines and count=2 app=...` |
+
+DND-1605: a session that forwarded a misrouted owner DM posted its note with a plain `reply`, which claimed the thread, so the owner's follow-ups came back to the forwarder. `reply --reroute-of <event_id>` marks the forward note and implies `--no-claim`. Red before the fix: `VERDICT: FAIL (5 of 282 cases)` (each new case: `rc=2 ... usage: reply ... [--no-claim]`, the flag did not exist).
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S97 | `--reroute-of` parses its event_id but no longer sets `CLAIM=false` | 2 | `FAIL reply '--reroute-of EVFAKE00001 CFAKE00001 1790.5 forwarded' (a forward note): claim=skipped, no MCP call, exit 0` / `FAIL reply 'CFAKE00001 1790.5 forwarded --reroute-of EVFAKE00001' (a forward note): ...` |
+
+After the restore the suite returned to `VERDICT: PASS (282 cases)`.
