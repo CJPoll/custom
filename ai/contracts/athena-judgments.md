@@ -411,8 +411,31 @@ refuses as `latency_unmeasured` until at least 20 fresh calls of the
 registered version exist, the first at least 3 days old. `judgment_calls` rows carry no mode, so shadow
 and `on` calls both count; before `on` is first set, every such call is a
 shadow call. `eval:*` ignores the mode, but not the key, the domain or
-the budget. The writer is gen_saas `Athena.Judgments.Settings.set_mode/3`
-(DND-714), the owner's only one; every refusal carries `Fix:`.
+the budget. The owner's writer is gen_saas
+`Athena.Judgments.Settings.set_mode/3` (DND-714); every refusal carries
+`Fix:`.
+
+**An eval apply re-checks an existing `on`** (DND-1380). Applying a run
+(*Eval runs*) is the one other mode write, and it only lowers a mode. In the
+apply's transaction, after the new threshold rows are written, it reads the
+run owner's mode for that use case. An `on` whose thresholds for the
+registered question set's version and the pinned model no longer hold an
+enabled advisory label drops to `shadow`, or to `off` when no question set
+is registered (`shadow` needs one). The apply's answer names the change in
+`mode_change` (`nil` when none), and a warning is logged. A downgrade that
+fails to write rolls the whole apply back. The recheck judges the threshold
+rule only, never Slack routing's latency bar: an apply cannot change
+latency. Both writers take one transaction-scoped advisory lock per (owner,
+use case) before they read. So a `set_mode` racing an apply either reads the
+new thresholds or is re-checked by it, and an `on` never stands on a label
+the apply disabled.
+
+**Later (2026-10-01, DND-1380):** this said `set_mode/3` is the owner's only
+mode writer. Replaced by the text above (gen_saas PR #624:
+`ModePolicy.recheck/3`, `Evals.apply_thresholds/3`,
+`SettingsStore.lock_mode/2`). Why: `on` was judged only when set. A later
+apply that disabled its advisory label left the mode `on` with no enabled
+label behind it, a state `set_mode` refuses.
 
 **Later (2026-09-28):** this read "`on` is refused unless a threshold row
 exists for (owner, use case, question-set version, pinned model) that an eval
@@ -502,7 +525,7 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   case, question-set version, model), each stamped with the run. An n/a label
   is written disabled, so an earlier run's enabled label cannot survive. A run
   that scored nothing cannot be applied, and an applied run takes no more
-  cases.
+  cases. The apply then re-checks the owner's `on` (*Modes*).
 - **Proposed labels** (confirmed by no owner, record or rule) never enter a
   run, so they never select a threshold. A label whose id the corpus lacks is
   reported by count and id. A run's provenances are `forward_record`,
@@ -990,6 +1013,9 @@ with it.
 - [ ] Every check before the call makes no call to TypeSafe; a latched
       `unauthorized` makes no call.
 - [ ] Mode defaults to `off`; `on` is refused without an eval-produced threshold.
+- [ ] An eval apply that leaves an `on` with no enabled advisory label drops it
+      to `shadow` in the apply's transaction, under the (owner, use case) lock
+      `set_mode` also takes, and names it in `mode_change`.
 - [ ] `threshold_unset` and `n/a` never accept; unscored eval cases are never
       scored as wrong.
 - [ ] A threshold is computed by the server from the owner's own stored eval
