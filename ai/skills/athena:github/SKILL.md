@@ -343,6 +343,10 @@ declares a gate, and the only documented path is `integration-gate` then
   repo: a cwd that is not one, or a base tip missing from the local object
   store, is refused as COULD NOT LOOK, never read as "no gate". A repo whose base
   declares no gate merges as before. No flag skips the check.
+
+  **Later (2026-10-01, DND-1463):** the receipt had to be recorded against
+  "exactly that tip". Superseded by owner decision (Cody, 2026-10-01: "Let's
+  soften that merge guard requirement."): an ancestor of the tip is accepted.
 - **No branch moves by API (DND-741).** `gh-athena` refuses every `gh api`
   write that creates or moves a ref, on ANY branch, not only the default one:
   REST writes to `…/git/refs`, any write to `…/contents/…`,

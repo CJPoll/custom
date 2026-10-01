@@ -55,7 +55,14 @@ EXCEPT an access-control fix.) In such a repo the bar is **the captain's explici
 **an actively-committing captain is positive evidence of NOT-ready in either kind
 of repo** — before merging, confirm the head SHA you are landing is the one the
 report names, and never infer readiness from forge state alone while the
-captain's worktree is still moving.
+captain's worktree is still moving. The one exception is a clean rebase of
+that head onto a moved main in `~/dev/custom` (the no-CI landing below): the
+report's head is what you confirm, and the rebased SHA you push carries it.
+
+**Later (2026-10-01, DND-1463):** this rule and the verdict rule below had no
+exception: the SHA landed had to be the one the report names and the judge
+passed. Superseded for a clean rebase in `~/dev/custom` by the owner decision
+quoted under the no-CI landing below.
 
 **In a no-CI GitHub repo the pinned merge cannot run.** `gh-athena` refuses a
 merge when no check has reported on the head (`ai/lib/gh-merge-guard.sh`, the
@@ -67,20 +74,27 @@ step, so it takes the same lock `locked-merge` does
 (`~/.local/state/athena/custom-merge.lock`, *Landing onto a moving main*).
 The landing, as Cody confirmed it (2026-10-01):
 
-1. The branch has `INTEGRATION OK` and a critic PASS on its own head.
-2. Under the lock, `git fetch origin`, then rebase the branch onto
+1. The report names a head with `INTEGRATION OK` and a critic PASS on it.
+   That is the head the merge bar checks.
+2. Under the lock, `git fetch origin`, then rebase that head onto
    `origin/main` if main moved.
 3. A **clean** rebase lands with no re-gate: push the rebased head
    fast-forward (`gh-athena git push origin <sha>:main`), still under the
-   lock, then release it. Hold the lock around the fetch, rebase and push
-   only, never around a gate.
+   lock, then release it. The pushed SHA is not the reported one; the clean
+   rebase carries the reported head's gate and verdict. Hold the lock around
+   the fetch, rebase and push only, never around a gate.
 4. A **conflicted** rebase is the one case that needs a full re-gate: release
    the lock, resolve the conflict, run `integration-gate --with-critic` on the
    new head, and start again.
-5. **Stop the line** on a red main (`harness-gate` red on `origin/main`) or a
-   failed deploy: land nothing more until it is fixed, and fix it first.
+5. **Stop the line** on a red main or a failed deploy: land nothing more until
+   it is fixed, and fix it first. In `~/dev/custom` nothing gates `main` after
+   a landing, so the next `integration-gate` is the detector: a RED stage in
+   files the branch did not touch means `main` is red. When in doubt, run
+   `harness-gate` in a worktree at `origin/main`.
 
-Nothing in `gh-athena` checks the lock on this path (DND-1370).
+Nothing in `gh-athena` checks the lock on this path (DND-1370). Measured
+2026-09-30 ~10:38Z: an admiral pushed DND-1048/717 unlocked while another held
+the lock gating DND-1359, whose push then failed NOT-FF and cost a re-gate.
 
 **Later (2026-10-01, DND-1463):** this said to hold `flock` across
 `integration-gate --rebase` AND the push, and to push exactly the SHA
@@ -89,14 +103,13 @@ with the risk of multiple merges at the same time; sometimes that will cause
 issues and we'll fix those asap. The velocity increase is worth the risk of
 incompatible concurrent merges." "That is true for both custom and gen_saas."
 A clean rebase onto a moved main is accepted without a re-gate. The lock
-still serialises the push itself. Measured 2026-09-30 ~10:38Z: an admiral
-pushed DND-1048/717 unlocked while another held the lock gating DND-1359, whose
-push then failed NOT-FF and cost a re-gate. For any other no-CI repo,
-land CI first, or escalate the merge to Cody as a step only Cody can run.
-Measured 2026-09-29 (`2026-09-25-dnd-671-650-644`, 22:02Z): anchor#28 was
-DONE, gated and critic-PASSed, and the merge was refused. It waited on Cody,
-whose click chose "CI first"; DND-1279's workflow took one captain and a 24 s
-run.
+still serialises the push itself.
+
+For any other no-CI repo, land CI first, or escalate the merge to Cody as a
+step only Cody can run. Measured 2026-09-29 (`2026-09-25-dnd-671-650-644`,
+22:02Z): anchor#28 was DONE, gated and critic-PASSed, and the merge was
+refused. It waited on Cody, whose click chose "CI first"; DND-1279's workflow
+took one captain and a 24 s run.
 
 - **A standing-judge verdict on the SHA you are landing — "no verdict" is not a
   pass.** `athena-diff-critic` was blocking for the *captain*, but this bar never
@@ -496,18 +509,28 @@ of gate start. The admiral's workaround was the machine-local
 can each pass the gate and fail together: the admiral's rendered-line budget is
 a single global number (496/500 today — four lines of headroom), and
 `ai/hooks/registry.json` / `ai/inbox/registry.json` are single documents. Git
-sees no conflict, and in a repo with no CI (`~/dev/custom`) nothing re-runs the
-gate after a rebase — so the only thing standing between that defect and `main`
-is you running the gate on the integration result. This **adds** a check at a
-moment where none ran; it skips none.
+sees no conflict. Since DND-1463 that combination is **not gated before it
+lands**: each car's gate ran on its own base, and a car whose base main has
+moved past lands without a re-gate. The defect is caught after landing, by the
+next gate that runs on a `main` containing both (gen_saas: its post-merge CI;
+`~/dev/custom`: the next `integration-gate`, see the no-CI landing above), and
+the line stops until it is fixed. This is the risk the owner accepted.
+
+**Later (2026-10-01, DND-1463):** this said "the only thing standing between
+that defect and `main` is you running the gate on the integration result",
+which "**adds** a check at a moment where none ran". Superseded by the owner
+decision quoted under *Merge one at a time* below: the gate on the
+integration result runs only after a conflict.
 
 **Merge one at a time; a main that moved on does not force a re-gate.** The
 merge call itself stays serial under the lock. But a receipt whose recorded
 base is an **ancestor** of current `origin/<base>` is accepted: car N landing
 does not invalidate car N+1's gate. Car N+1 lands if its head merges into the
 new tip with no conflict. A conflict is refused (by `locked-merge` before the
-call, and by GitHub), and only then do you rebase, resolve, and re-gate. Stop
-the line on a red main or a failed deploy: land nothing more until it is fixed.
+call, and by GitHub). Only then do you bring main in and re-gate: merge
+`origin/<base>` into a published PR branch (never rebase it), or rebase an
+unpublished one, resolve, and re-gate. Stop the line on a red main or a failed
+deploy: land nothing more until it is fixed.
 
 **Later (2026-10-01, DND-1463):** this said "re-running `integration-gate`
 between merges", because merging car N invalidated the check for car N+1:
@@ -604,8 +627,14 @@ So the merge step is a critical section on every GitHub-merged repo:
   - the base-branch run list must show nothing live.
 
   The base run's conclusion is printed. A non-success is a `WARN`, not a
-  refusal: no ratified rule holds merges on a failed deploy. Do not hand-roll a
-  deploy waiter around it; retry on exit 5.
+  refusal, so the fix or revert can still merge. But a failed deploy stops the
+  line (owner, 2026-10-01): on that `WARN`, merge nothing but the fix or the
+  revert until a deploy succeeds. Do not hand-roll a deploy waiter around it;
+  retry on exit 5.
+
+  **Later (2026-10-01, DND-1463):** this said "no ratified rule holds merges
+  on a failed deploy". Superseded: Cody's landing doctrine stops the line on a
+  failed deploy. `locked-merge` still only warns, and you hold the line.
 
   **Later (2026-09-30, DND-1378):** this said to pass the flag "until that
   workflow has a `concurrency` group (two interleaved deploys: the last one
@@ -623,10 +652,14 @@ So the merge step is a critical section on every GitHub-merged repo:
 - **GitLab merge trains need none of this.** The train re-tests the integrated
   result and is its own arbiter; board per *Boarding* below.
 
-Losing the race now costs nothing unless the rebase or merge conflicts
-(DND-1463). A conflict costs, in `~/dev/custom` (no CI), one local re-gate; in
-gen_saas (~50 min CI on one runner), a CI cycle, and it can reorder deploys.
-The lock is required in both.
+Losing the race now costs nothing unless the rebase or merge conflicts. A
+conflict costs, in `~/dev/custom` (no CI), one local re-gate; in gen_saas
+(~50 min CI on one runner), a CI cycle, and it can reorder deploys. The lock
+is required in both.
+
+**Later (2026-10-01, DND-1463):** this said losing the race always costs a
+re-gate (custom) or a CI cycle (gen_saas). Superseded: a receipt on an
+ancestor of the moved main is accepted, so only a conflict costs one.
 
 **Later (2026-09-27):** a PR waiting its turn for the token, the lock or a
 coordinator train moves its ticket to `In Merge Queue`
@@ -638,10 +671,10 @@ Main moves again when the PR ahead of you lands, so a forward made at position
 2 or 3 always gets redone. On a single-runner repo it also queues a full CI run
 ahead of every deploy. Keep your place on your last green head. Merge forward,
 re-gate and re-run CI only when you hold the token, or when you are next and
-the holder is merging. Since DND-1463 the head need not contain current main:
-a receipt on an ancestor of it is accepted, so merge forward only when the
-merge would conflict (`locked-merge` exit 3 names it). The head you merge
-still needs a critic PASS, `INTEGRATION OK` and all-green CI. If the
+the holder is merging. The head need not contain current main: a receipt on
+an ancestor of it is accepted, so merge forward only when the merge would
+conflict (`locked-merge` exit 3 names it). The head you merge still needs a
+critic PASS, `INTEGRATION OK` and all-green CI. If the
 coordinator's protocol asks for something else (for example a
 head that contains main at request time), the protocol wins. Tell the
 coordinator what the extra forward costs. Measured 2026-09-26 on gen_saas:
@@ -653,6 +686,11 @@ coordinator what the extra forward costs. Measured 2026-09-26 on gen_saas:
   wasted CI run on the single runner" (harness-epics-ab state log, 10:43Z).
 - Deploy tails of 1h14m and 1h20m (#363, #395) were mostly queue wait behind
   those runs (DND-608).
+
+**Later (2026-10-01, DND-1463):** the paragraph above said the head you merge
+"must contain current main", so every queued PR merged forward once it was
+next. Superseded: it must contain only the base its receipt records, an
+ancestor of current main.
 
 ## Boarding (GitLab merge train — walt_ui, the default)
 

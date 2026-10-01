@@ -8,6 +8,10 @@
 # NO merge call) -- because each of those reads as a clean merge otherwise.
 # DND-1463: a base that moved on past the receipt's base (an ancestor) merges
 # now (c2, r3, m1); one that is not an ancestor is still refused (m4).
+# Limit: the gh-athena stub builds its squash tree with the same `git
+# merge-tree` the code under test uses, so m1 checks file contents, not a
+# second algorithm. A real divergence from GitHub's merge (rename handling)
+# would read as exit 7 in production; no case here can show it.
 #
 # DND-965: the second defect is a merge of a head integration-gate never
 # passed. locked-merge used to take the caller's word that the gate ran (gen_saas
@@ -349,7 +353,19 @@ names m2 "LANDED UNGATED"
 # m3 a real conflict with the moved base is refused before the merge call.
 fixture m3; commit_on_main f.txt main-side
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m3.lock"; expect m3 3; no_merge m3
-names m3 "CONFLICT"
+names m3 "CONFLICT"; names m3 "in: f.txt"
+names m3 "never rebase a published branch"
+# m8 git merge-tree itself fails: COULD NOT LOOK (exit 2), never a clean merge.
+fixture m8; commit_on_main m.txt m; mkdir -p "${TMP}/m8/shim"
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = merge-tree ] && { echo "fatal: shim merge-tree failure" >&2; exit 128; }; done\nexec %s "$@"\n' "$(command -v git)" > "${TMP}/m8/shim/git"
+chmod +x "${TMP}/m8/shim/git"
+out="$(PATH="${TMP}/m8/shim:${PATH}" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m8.lock" 2>&1)"; rc=$?
+expect m8 2; no_merge m8; names m8 "COULD NOT LOOK"; names m8 "shim merge-tree failure"
+# m9 a receipt base that is not in the object store: RECEIPT BASE UNKNOWN,
+# never RECEIPT FOR ANOTHER BASE.
+fixture m9; plant_receipt "${H}" "$(printf 'e%.0s' {1..40})"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m9.lock"; expect_receipt_refusal m9 "RECEIPT BASE UNKNOWN"
+grep -qF "RECEIPT FOR ANOTHER BASE" <<<"${out}" && bad "m9 misread an unknown base as another base" "${out}" || ok "m9 not reported as another base"
 # m4 a receipt whose base is NOT an ancestor of the tip (a sibling of main,
 # as after a force-push past it) is still refused.
 fixture m4; G4="git --git-dir=${BARE}"

@@ -120,13 +120,21 @@ ir_read_receipt() {
   fi
   if [ "$r_base" != "$base" ]; then
     for o in "$r_base" "$base"; do
+      if git --git-dir="$common" cat-file -e "$o" 2>/dev/null \
+         && [ "$(git --git-dir="$common" cat-file -t "$o" 2>/dev/null)" != "commit" ]; then
+        IR_KIND="RECEIPT INVALID"
+        IR_WHY="${o} (the recorded base ${r_base}, or the tip ${base}) is a $(git --git-dir="$common" cat-file -t "$o" 2>/dev/null), not a commit"
+        return 1
+      fi
       if ! git --git-dir="$common" cat-file -e "${o}^{commit}" 2>/dev/null; then
         IR_KIND="RECEIPT BASE UNKNOWN (COULD NOT LOOK)"
-        IR_WHY="integration-gate passed ${head} against ${r_base} (${r_target}, ${r_at}) and the base tip is ${base}, but ${o} is not a commit in the object store under ${common}, so whether the tip descends from the recorded base is unknown -- not the same as another base"
-        IR_HOW="fetch origin in this repo (git fetch origin) and re-run; if it is still refused,"
+        IR_WHY="integration-gate passed ${head} against ${r_base} (${r_target}, ${r_at}) and the base tip is ${base}, but ${o} is not in the object store under ${common}, so whether the tip descends from the recorded base is unknown -- not the same as another base"
+        IR_HOW="fetch origin in this repo (git fetch origin); if ${o} is still missing, the base was rewritten past it, so"
         return 1
       fi
     done
+    # A shallow clone can cut the history between the two and answer 1 here.
+    # That still refuses (as another base); it never reads as a pass.
     git --git-dir="$common" merge-base --is-ancestor "$r_base" "$base" 2>/dev/null; rc=$?
     case "$rc" in
       0) IR_BASE_MOVED=1 ;;

@@ -211,12 +211,18 @@ Give the captain, in the brief:
   more; if it refuses again, stop and report. Rebase earlier only on a real
   conflict or when I ask."* This is the
   captain half of `athena:merge-boarding` → *Landing onto a moving main*.
-  Since DND-1463 the admiral lands a head whose gated main is an ancestor of
-  the current one without a re-gate; only a conflict sends it back. Measured 2026-09-26/27 (harness-epics-ab): DND-838 re-gated three
-  times ("Main moved under each of them"), DND-785 ran `integration-gate`
-  three times and never got a clean run, and DND-887 hit the same cycle. Two
-  admirals then issued this rule by hand, mid-run (15:23Z to DND-497, 02:32Z
-  to DND-785).
+  The admiral lands a head whose gated main is an ancestor of the current one
+  without a re-gate; only a conflict sends it back. Measured 2026-09-26/27
+  (harness-epics-ab): DND-838 re-gated three times ("Main moved under each of
+  them"), DND-785 ran `integration-gate` three times and never got a clean
+  run, and DND-887 hit the same cycle. Two admirals then issued this rule by
+  hand, mid-run (15:23Z to DND-497, 02:32Z to DND-785).
+
+  **Later (2026-10-01, DND-1463):** the brief line said "I forward and
+  re-gate the integrated head when it lands", and this paragraph said "you
+  still re-gate the integrated head under the lock". Superseded by owner
+  decision (Cody, 2026-10-01: "Let's soften that merge guard requirement."):
+  a receipt on an ancestor of the moved main lands without a re-gate.
 
   **Later (2026-09-28, DND-1064):** the final check had no `--rebase`, and
   this line said "If the gate refuses because main moved while you queued,
@@ -246,8 +252,10 @@ Give the captain, in the brief:
   green gate, do not chase it: report the gated SHA and the main it contained.
   Merge main in earlier only on a real conflict or when I ask."* The bar is
   unchanged: a green gate and a critic PASS on a head that contains
-  `origin/main`. Merging forward is the move `locked-merge` names on a moved
-  base, and the one *No replay churn* assumes ([[athena:merge-boarding]]).
+  `origin/main` when the gate started. Merging forward is the move
+  `locked-merge` names on a CONFLICT with a moved base (DND-1463; a clean
+  moved base merges as is), and the one *No replay churn* assumes
+  ([[athena:merge-boarding]]).
   The one rebase a published branch takes is a stacked child's `--onto` after
   its parent squash-lands ([[athena:captain-return]]); you brief that by hand.
 

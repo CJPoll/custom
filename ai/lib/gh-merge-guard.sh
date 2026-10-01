@@ -111,7 +111,10 @@
 # DND-1463 a receipt on an older base the tip descends from is accepted, so the
 # head combined with the base's newer commits was never gated; GitHub's squash
 # refuses only a textual conflict. The owner accepted that risk for velocity
-# (2026-10-01). locked-merge also checks the landed tree; this guard cannot.
+# (2026-10-01). locked-merge also checks the landed tree and that the head
+# contains the receipt's base; this guard does neither, because the pinned head
+# need not be in the local object store. integration-gate records only a base
+# the head contains, so only a hand-written receipt meets that gap.
 #
 # Usage: set GMG_TOOL, then `gmg_guard "$@"`. It returns 0 when the command may
 # run, and exits 3 with a REFUSING line and a Fix: line otherwise. It calls

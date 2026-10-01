@@ -241,8 +241,9 @@ FAIL  L11. same-suite runs are never superseded
 - **Suites:** `bash ai/test/gh-athena-merge-guard/self-test.sh` (D3–D3d);
   `bash ai/skills/athena:merge-boarding/test/locked-merge/self-test.sh` (c2,
   r3, m1–m7)
-- **Baseline (fixed code):** guard `RESULT: 187 passed, 0 failed`;
-  locked-merge `194 passed, 0 failed`
+- **Baseline (fixed code):** guard `RESULT: 188 passed, 0 failed`;
+  locked-merge `208 passed, 0 failed` (after the review round added D3e, m8,
+  m9; the mutation rows below were measured on the first cut, 187 / 194)
 
 ### Fail-first: the new suites against the unfixed sources (1a34230d)
 

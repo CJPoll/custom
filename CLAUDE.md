@@ -861,8 +861,9 @@ it per `athena:merge-boarding` (the no-CI rule there names the steps):
 A red `main` or a failed deploy stops the line: nothing more lands until it is
 fixed.
 
-**Later (2026-10-01, DND-1463):** step 2 read "re-gate the integrated head
-(`integration-gate`)" after every rebase. Superseded by owner decision (Cody):
+**Later (2026-10-01, DND-1463):** steps 1-3 read "rebase onto
+`origin/main`; re-gate the integrated head (`integration-gate`); merge, then
+confirm it landed", with a re-gate after every rebase and no lock scope. Superseded by owner decision (Cody):
 "I'm comfortable with the risk of multiple merges at the same time; sometimes
 that will cause issues and we'll fix those asap. The velocity increase is
 worth the risk of incompatible concurrent merges." "That is true for both
@@ -898,9 +899,11 @@ reserved name a hand-spawned run had to remember to avoid.
 **Two fleets in one repo is normal, and it resolves at `origin/main`, not
 between them.** Concurrent admirals never coordinate their *work* — each
 gates its head, lands onto current `origin/main` (re-gating only after a
-conflict, DND-1463), and merges one MR at a time. The merge itself runs under a lock
-(`athena:merge-boarding` → *Landing onto a moving main*), because a GitHub
-squash onto a moved base lands an ungated tree. Detecting the other fleet is the wrong question
+conflict), and merges one MR at a time. The merge itself runs under a lock
+(`athena:merge-boarding` → *Landing onto a moving main*), so the base
+`locked-merge` checks is the base the merge lands on, and the landed tree can
+be compared with the merge it computed. Detecting the other fleet is the wrong
+question
 (a liveness marker is indistinguishable from a corpse, as above); "did
 `origin/main` move since my branch point" is two SHAs, and it covers the
 shipwright cron and the human too. Gate-green-alone is not gate-green-merged:
@@ -915,6 +918,14 @@ each other". Superseded for the merge step: a GitHub squash-merge does not
 refuse a moved base, so check-then-merge is a TOCTOU (gen_saas 2026-09-23).
 Merges go through `locked-merge`, plus the coordinator's cross-machine protocol
 where fleets span machines.
+
+**Later (2026-10-01, DND-1463):** this paragraph said each admiral "rebases
+onto current `origin/main`, re-runs the gate on the **integrated** head", and
+that the lock exists "because a GitHub squash onto a moved base lands an
+ungated tree". Superseded by owner decision (Cody: "The velocity increase is
+worth the risk of incompatible concurrent merges."): a head gated on an
+ancestor of the moved main lands without a re-gate, so that tree is now
+accepted. The lock keeps the merge serial and the landed tree checkable.
 
 **This is a rule about writes, and specifically about git work.** Reading the
 main checkout is normal and often necessary. Four things are genuine exceptions,

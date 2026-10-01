@@ -853,6 +853,10 @@ run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
 receipt_refused "D3c. a receipt base not in the local object store -> COULD NOT LOOK, never read as not-an-ancestor" "COULD NOT LOOK"
 [[ "${ERR}" != *"RECEIPT FOR ANOTHER BASE"* ]] && ok "D3d. an unknown receipt base is not reported as another base" || bad "D3d. unknown vs another base" "$(detail)"
 
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "$(gfx rev-parse "${NOGATE_BASE}^{tree}")"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D3e. a receipt base that is a tree, not a commit -> RECEIPT INVALID" "RECEIPT INVALID"
+
 reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; mkdir -p "${STORE_FX}"; echo '{not json' > "${STORE_FX}/${HEAD_SHA}.json"
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
 receipt_refused "D4. a malformed receipt -> RECEIPT UNREADABLE (COULD NOT LOOK)" "RECEIPT UNREADABLE"

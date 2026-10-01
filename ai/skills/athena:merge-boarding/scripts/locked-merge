@@ -82,8 +82,8 @@ path fleets already share) it:
 Exit (every non-zero prints a Fix: line):
   0 merged, confirmed, tree matches          (landed)
   2 usage / prerequisite / non-GitHub remote (nothing landed)
-  3 stale: PR not open, head moved, or CONFLICT with origin/<base> -- rebase,
-    re-gate (nothing landed)
+  3 stale: PR not open, head moved, or CONFLICT with origin/<base> -- merge
+    origin/<base> in, resolve, re-gate (nothing landed)
   4 forge refused the merge, and confirm-merged does not show it landed
     (a failed call that DID land is verified and reported as a merge)
   5 required-idle workflow busy, NOT SEEN YET or NO RUN FOR BASE -- retry later (nothing landed)
@@ -205,9 +205,14 @@ fi
 R="${IR_BASE}"
 # integration-gate records only a base the head contains. A receipt whose base
 # the head does not contain describes a run that never happened on this head.
-git -C "${REPO}" merge-base --is-ancestor "${R}" "${HEAD_SHA}" \
-  || die 9 "RECEIPT INVALID: ${IR_RECEIPT} records base ${R}, which the head ${HEAD_SHA} does not contain; integration-gate never records such a base" \
-       "${REGATE}"
+git -C "${REPO}" merge-base --is-ancestor "${R}" "${HEAD_SHA}" 2>/dev/null; anc_rc=$?
+case "${anc_rc}" in
+  0) ;;
+  1) die 9 "RECEIPT INVALID: ${IR_RECEIPT} records base ${R}, which the head ${HEAD_SHA} does not contain; integration-gate never records such a base" \
+       "${REGATE}" ;;
+  *) die 9 "RECEIPT BASE UNKNOWN (COULD NOT LOOK): git merge-base --is-ancestor ${R} ${HEAD_SHA} failed (exit ${anc_rc}), so whether the head contains the receipt's base is unknown" \
+       "check that ${R} and ${HEAD_SHA} are commits in this repo (git -C ${REPO} cat-file -t <sha>); if the receipt's base is gone, ${REGATE}" ;;
+esac
 echo "RECEIPT ${IR_RECEIPT} base ${R} recorded ${IR_RECORDED_AT}"
 if [ "${R}" = "${B}" ]; then
   echo "BASE origin/${base} ${B} is the gated base"
@@ -221,12 +226,16 @@ fi
 # check. When main moved, it is the head merged with R..B. Step 7 compares the
 # landed tree against it, so a forge that lands something else still reads as
 # LANDED UNGATED. A conflict here is refused now, before anything lands.
-mt_out="$(git -C "${REPO}" merge-tree --write-tree --name-only "${B}" "${HEAD_SHA}" 2>&1)"; mt_rc=$?
+# stdout and stderr are read apart: a warning on stderr (a rename-limit notice)
+# must never be taken for the tree id or a conflicted path.
+mt_err="$(mktemp)" || die 2 "COULD NOT LOOK: mktemp failed" "check that \$TMPDIR is writable; nothing was merged."
+mt_out="$(git -C "${REPO}" merge-tree --write-tree --name-only "${B}" "${HEAD_SHA}" 2>"${mt_err}")"; mt_rc=$?
+mt_why="$(head -3 "${mt_err}" | tr '\n' ' ')"; rm -f "${mt_err}"
 case "${mt_rc}" in
   0) EXPECTED_TREE="$(head -1 <<<"${mt_out}")" ;;
   1) die 3 "CONFLICT: the head ${HEAD_SHA} conflicts with origin/${base} at ${B} in: $(sed -n '2,/^$/p' <<<"${mt_out}" | grep -v '^$' | sort -u | tr '\n' ' ')" \
-       "rebase the branch onto origin/${base}, resolve the conflict, push, re-run integration-gate on the new head, wait for CI green, then re-run locked-merge. Nothing was merged." ;;
-  *) die 2 "COULD NOT LOOK: git merge-tree ${B} ${HEAD_SHA} failed (exit ${mt_rc}): $(head -3 <<<"${mt_out}" | tr '\n' ' ')" \
+       "merge origin/${base} into the PR branch (never rebase a published branch), resolve the conflict, push as Athena, re-run integration-gate on the new head, wait for CI green, then re-run locked-merge. Nothing was merged." ;;
+  *) die 2 "COULD NOT LOOK: git merge-tree ${B} ${HEAD_SHA} failed (exit ${mt_rc}): ${mt_why}" \
        "check git >= 2.38 (merge-tree --write-tree) and that both commits are local; nothing was merged." ;;
 esac
 [[ "${EXPECTED_TREE}" =~ ^[0-9a-f]{40}$ ]] \
