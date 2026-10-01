@@ -87,10 +87,15 @@ HELP = <<~TXT
                    larger (a tie goes to the phase). `lever` says where the
                    fix lands: `harness` for a phase, `product` (the repo's
                    own CI and deploy) for tail. With post-merge CI in the
-                   window, a 0 tail with no post-merge run found is n/a
-                   with its reason, never a measured 0. A tail that is all
-                   0 (no post-merge CI, as in custom) or all n/a is never
-                   a candidate; --json says why in biggest.tail_reason.
+                   window (a landing with a measured nonzero tail), a 0
+                   tail with no post-merge run found is n/a with its
+                   reason, never a measured 0. `lead` is not adjusted: it
+                   ends at the landing when no run was found. With no
+                   measured nonzero tail in the window (no post-merge CI,
+                   as in custom; or none succeeded) tail is never a
+                   candidate; --json says why in biggest.tail_reason. A
+                   forge lead-time could not read is SCAN INCOMPLETE, so
+                   it never reaches the ledger as a 0.
     --self-test    run the domain and IO suites.
 
   Options:

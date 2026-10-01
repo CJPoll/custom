@@ -613,8 +613,11 @@ module LeadTimePhases
       end
     end
 
-    # A window has post-merge CI when one of its landings has a measured
-    # nonzero tail (landing -> deploy or pipeline end, ai/bin/lead-time).
+    # A window shows post-merge CI when one of its landings has a measured
+    # nonzero tail (landing -> deploy or pipeline end, ai/bin/lead-time). An
+    # inference from the window, not a per-repo fact: a window in which no
+    # post-merge run succeeded reads like a repo with none. A forge it could
+    # not read never gets here (lead-time: SCAN INCOMPLETE, nothing ingested).
     def post_merge_ci?(rows) = rows.any? { |r| r["tail_s"].is_a?(Numeric) && r["tail_s"].positive? }
 
     # The end kinds at which lead-time found a post-merge run (ai/bin/lead-time
@@ -623,8 +626,8 @@ module LeadTimePhases
 
     # -> [seconds or nil, reason or nil]. In a window with post-merge CI, a 0
     # tail with no post-merge run found (end kind "merge", or a row ingested
-    # before tail_end was kept) is not a measured 0: it is n/a with why. With
-    # no post-merge CI (custom) a 0 tail is a measured 0, as before.
+    # before tail_end was kept) is not a measured 0: it is n/a with why. In a
+    # window that shows none (custom) a 0 tail is a measured 0, as before.
     def tail_cell(row, ci)
       s = row["tail_s"]
       return [nil, generic(row["lead_na_reason"] || "tail: not measured", row)] if s.nil?
@@ -634,8 +637,8 @@ module LeadTimePhases
               "tail: 0 with no end kind in the ledger row (ingested before DND-1532), so a 0 cannot be told " \
                 "from a missing post-merge run"
             else
-              "tail: no successful post-merge CI run found for the landing (end kind #{row['tail_end']}), " \
-                "where other landings in the window have one"
+              "tail: lead-time found no successful post-merge CI run for the landing (end kind " \
+                "#{row['tail_end']}), where other landings in the window have one"
             end
       [nil, why]
     end
@@ -646,7 +649,8 @@ module LeadTimePhases
     LEVERS = PHASES.to_h { |p| [p, "harness"] }.merge("tail" => "product").freeze
 
     # Whether tail competes: only with a measured nonzero tail in the window.
-    # A tail all 0 (no post-merge CI) or all n/a never does.
+    # A tail with no measured nonzero value (all 0, all n/a, or a mix) never
+    # does.
     # -> {"tail_candidate"=>bool[, "tail_reason"=>why]}
     def tail_candidacy(tail_stats)
       sum = tail_stats["sum_s"]
@@ -655,7 +659,8 @@ module LeadTimePhases
       why = if sum.nil?
               "tail not measured in the window (#{tail_stats['n_na']} n/a)"
             else
-              "no measured nonzero tail in the window (no post-merge CI)"
+              "no measured nonzero tail in the window: lead-time found no successful post-merge run for any " \
+                "of its #{tail_stats['n']} measured landing(s) (expected with no post-merge CI, as in custom)"
             end
       { "tail_candidate" => false, "tail_reason" => why }
     end

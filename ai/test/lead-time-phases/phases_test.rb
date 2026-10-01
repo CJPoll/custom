@@ -484,7 +484,7 @@ ndt = L::Stats.summarize(no_deploy)["totals"]["tail"]
 check("T5 in a post-merge-CI window, a landing with no CI run found is n/a, never 0") do
   ndt["n"] == 4 && ndt["n_na"] == 1 && ndt["median"] == 3600
 end
-check("T5 its reason says no post-merge run was found") { ndt["na_reasons"].first["reason"].include?("no successful post-merge CI run") }
+check("T5 its reason says no post-merge run was found") { ndt["na_reasons"].first["reason"].include?("found no successful post-merge CI run") }
 pre = gs_rows.first(4) + [row(5).merge("tail_s" => 0)]
 pret = L::Stats.summarize(pre)["totals"]["tail"]
 check("T5 a 0 tail ingested before tail_end, in a post-merge-CI window, is n/a with why") do

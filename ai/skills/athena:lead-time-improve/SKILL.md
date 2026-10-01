@@ -1,6 +1,6 @@
 ---
 name: athena:lead-time-improve
-description: The procedure an athena-shipwright runs when its brief says `MODE: lead-time` (a lead-time improver run) — for each `improve` repo ai/bin/lead-time-repos resolves for this machine, ingest the phase ledger, judge pending before/after experiments (keep, revert, pending, inconclusive; decline a revert the hard constraint forbids) with scripts/experiment, pick the biggest phase, act exactly once (one safety-preserving change, one instrumentation change, one architect, or no action), and journal; for each `watch` repo, the outlier scan and architect hand-off the shipwright ran before. Use whenever a brief or prompt says "MODE: lead-time" or "lead-time improver run".
+description: The procedure an athena-shipwright runs when its brief says `MODE: lead-time` (a lead-time improver run) — for each `improve` repo ai/bin/lead-time-repos resolves for this machine, ingest the phase ledger, judge pending before/after experiments (keep, revert, pending, inconclusive; decline a revert the hard constraint forbids) with scripts/experiment, pick the biggest contributor, act exactly once (one safety-preserving change, one instrumentation change, one architect, or no action), and journal; for each `watch` repo, the outlier scan and architect hand-off the shipwright ran before. Use whenever a brief or prompt says "MODE: lead-time" or "lead-time improver run".
 ---
 
 # athena:lead-time-improve
@@ -125,15 +125,24 @@ and for an architect's brief.
 
 ### 4. Pick the biggest contributor
 
-`biggest.phase` is the phase with the largest summed time in the window. When
-it is null, no phase is measured: the action is instrumentation for the phase
-whose n/a reasons are the most tractable, or `no action` with the reason.
+`biggest.phase` is the candidate with the largest summed time in the window:
+one of the five phases, or `tail` (landing to deploy) when the window has a
+measured nonzero tail, as in a repo with post-merge CI. A tie goes to the
+phase. When it is null, nothing is measured: the action is instrumentation
+for the phase whose n/a reasons are the most tractable, or `no action` with
+the reason.
 
-`biggest.phase` can also be `tail` (landing to deploy), in a repo with
-post-merge CI. `biggest.lever` says where the fix lands: `harness` for the
-five phases, `product` for `tail`, the repo's own CI and deploy. A tail that
-is all 0 or n/a is never a candidate; `biggest.tail_reason` says why
-(`ai/bin/lead-time-phases --help`).
+**Later (2026-10-01, DND-1532):** this read "`biggest.phase` is the phase with
+the largest summed time", over the five phases only. Superseded: `tail` is
+now a candidate too, so a repo's post-merge CI and deploy time can be picked.
+
+`biggest.lever` says where the fix lands: `harness` for the five phases,
+`product` for `tail`, the repo's own CI and deploy. With no measured nonzero
+tail, `tail` is never a candidate; `biggest.tail_reason` says why
+(`ai/bin/lead-time-phases --help`). For `tail`, its `n`, `n_na` and
+`na_reasons` are in `totals.tail`, not `phases`. `experiment` records phases
+only and refuses `tail`. What a run does with a `product` lever is not set by
+this step (DND-1533, DND-1542).
 
 **The choice rule:** if the biggest phase has `n_na > n` in the window, the
 finding is "cannot measure <phase>" and the action is **instrumentation** for
