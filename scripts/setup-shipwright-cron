@@ -15,6 +15,10 @@
 # common dir, and --install and --remove refuse to run from a linked worktree
 # (exit 4): a worktree's runner vanishes on cleanup, and the hourly shipwright
 # would silently stop (DND-1639). --check, --backup and --dry-run run anywhere.
+# A line running some OTHER .../scripts/athena-shipwright-run.sh (a worktree's
+# copy, as installed before DND-1639) is STALE: --install and --remove keep it
+# and name it in a warning, and --check is red (STALE) until it is deleted by
+# hand.
 #
 # Which lines are ours: an uncommented line with a whitespace-separated field
 # that IS the runner path (scripts/lib/cron-entry.sh, DND-1503). A commented
@@ -44,7 +48,8 @@
 # --dry-run skips that repair, so on a broken spool it exits 2 on the read
 # rather than previewing a crontab it could not read.
 #
-# Exit codes: 0 ok · 1 usage/arg error, or --check found the entry missing
+# Exit codes: 0 ok · 1 usage/arg error, or --check found the entry missing or
+#               a STALE line
 #             · 2 missing prerequisite (outside a git checkout included), or
 #               the current crontab could not be read, or the --backup file
 #               could not be written · 3 need root
@@ -113,9 +118,24 @@ command -v crontab >/dev/null 2>&1 || { echo "error: crontab not installed (need
 
 # The runner is the MAIN checkout's, never this copy's when it runs from a
 # linked worktree (DND-1639). The resolver is shared: scripts/lib/cron-entry.sh.
-cron_main_checkout "$SCRIPT_DIR" || exit 2
+cron_main_checkout "$SCRIPT_DIR" setup-shipwright-cron || exit 2
 MAIN_CHECKOUT="$CRON_MAIN_CHECKOUT"
 RUNNER="${MAIN_CHECKOUT}/scripts/athena-shipwright-run.sh"
+STALE_SUFFIX="/scripts/athena-shipwright-run.sh"
+
+# stale_lines — the crontab lines on stdin that run another copy of the runner.
+stale_lines() { cron_entry_lines "$RUNNER" stale "$STALE_SUFFIX"; }
+
+# warn_stale <crontab> — stale lines are kept (not this checkout's), never
+# silently.
+warn_stale() {
+  local stale
+  stale="$(printf '%s\n' "$1" | stale_lines)"
+  [ -n "$stale" ] || return 0
+  echo "WARNING: the crontab also runs a shipwright runner that is not $RUNNER; left as is:" >&2
+  printf '%s\n' "$stale" | sed 's/^/  /' >&2
+  echo "  Fix: delete those lines by hand (crontab -e); a removed worktree's runner fails every tick. --check stays red (STALE) until then." >&2
+}
 
 # ---- check path (read-only): is the shipwright entry live? ------------------
 # Read-only; safe for an agent/CI to run. Exit 0 if the entry is present, 1 if
@@ -123,10 +143,17 @@ RUNNER="${MAIN_CHECKOUT}/scripts/athena-shipwright-run.sh"
 if [ "${CHECK:-0}" -eq 1 ]; then
   current="$(cron_read_crontab setup-shipwright-cron)" || exit 2
   live="$(printf '%s\n' "$current" | cron_entry_lines "$RUNNER" ours)"
-  if [ -n "$live" ]; then
+  stale="$(printf '%s\n' "$current" | stale_lines)"
+  if [ -n "$live" ] && [ -z "$stale" ]; then
     say "OK — the athena-shipwright cron entry is installed:"
     printf '%s\n' "$live" | sed 's/^/  /'
     exit 0
+  fi
+  if [ -n "$stale" ]; then
+    echo "STALE — the crontab runs a shipwright runner that is not $RUNNER:" >&2
+    printf '%s\n' "$stale" | sed 's/^/  /' >&2
+    echo "  Fix: delete those lines by hand (crontab -e); then, from ${MAIN_CHECKOUT}, run 'scripts/setup-shipwright-cron' if the entry is missing." >&2
+    [ -z "$live" ] || exit 1
   fi
   echo "MISSING — no live crontab entry runs $RUNNER; the hourly cross-session loop is not scheduled." >&2
   echo "  Fix: from ${MAIN_CHECKOUT}, run 'scripts/setup-shipwright-cron' (or restore from your --backup file) to reinstall it." >&2
@@ -170,6 +197,7 @@ if [ "$REMOVE" -eq 1 ]; then
   current="$(cron_read_crontab setup-shipwright-cron)" || exit 2
   kept="$(printf '%s\n' "$current" | cron_entry_lines "$RUNNER" notours | sed '/^[[:space:]]*$/d')"
   put_crontab "$kept"
+  warn_stale "$current"
   say "Done. (Any spool dir and the cron daemon are left as-is.)"
   exit 0
 fi
@@ -220,6 +248,7 @@ else
 fi
 put_crontab "$new_crontab"
 if [ "$DRY_RUN" -eq 1 ]; then say "  [dry-run] would install: $line"; else say "  installed: $line"; fi
+warn_stale "$current"
 
 # ---- next steps ------------------------------------------------------------
 step "Done"

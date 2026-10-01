@@ -278,10 +278,33 @@ else
 fi
 printf '0 7 * * * /opt/other-job\n0 * * * * %s\n' "$WRUN" >"$ct"
 rc="$(INST="$WT/scripts/setup-shipwright-cron" inst "$ct" --check)"
-if [ "$rc" = 1 ] && grep -q 'MISSING' "${TMP}/inst.err"; then
-  ok "from a linked worktree, an entry naming the WORKTREE's runner is not counted as live"
+if [ "$rc" = 1 ] && grep -q 'STALE' "${TMP}/inst.err" && grep -qF "$WRUN" "${TMP}/inst.err" \
+   && grep -q 'MISSING' "${TMP}/inst.err"; then
+  ok "from a linked worktree, an entry naming the WORKTREE's runner is STALE (named), not live"
 else
   bad "worktree check of worktree entry" "rc=$rc $(out)"
+fi
+# The leftover the old installer made: a worktree's runner beside the live entry.
+printf '0 7 * * * /opt/other-job\n0 * * * * %s\n%s\n' "$WRUN" "$ENTRY" >"$ct"
+rc="$(inst "$ct" --check)"
+if [ "$rc" = 1 ] && grep -q 'STALE' "${TMP}/inst.err" && grep -qF "$WRUN" "${TMP}/inst.err" \
+   && ! grep -q '^OK' "${TMP}/inst.out"; then
+  ok "--check is red (STALE, names it) when a worktree's runner sits beside the live entry"
+else
+  bad "stale beside live" "rc=$rc $(out)"
+fi
+rc="$(inst "$ct")"
+if [ "$rc" = 0 ] && grep -q 'WARNING' "${TMP}/inst.err" && grep -qF "$WRUN" "${TMP}/inst.err" \
+   && grep -qxF "0 * * * * $WRUN" "$ct" && [ "$(grep -cxF "$ENTRY" "$ct")" = 1 ]; then
+  ok "install keeps a stale worktree line and names it in a WARNING with Fix:"
+else
+  bad "install stale warning" "rc=$rc $(out) ct=$(cat "$ct")"
+fi
+rc="$(inst "$ct" --remove)"
+if [ "$rc" = 0 ] && grep -q 'WARNING' "${TMP}/inst.err" && grep -qxF "0 * * * * $WRUN" "$ct" && ! grep -qxF "$ENTRY" "$ct"; then
+  ok "--remove drops the live entry, keeps the stale line and names it"
+else
+  bad "remove stale warning" "rc=$rc $(out) ct=$(cat "$ct")"
 fi
 printf '0 7 * * * /opt/other-job\n' >"$ct"
 rc="$(inst "$ct")"
@@ -293,8 +316,8 @@ fi
 NG="${TMP}/nogit/scripts"; mkdir -p "$NG"
 cp -r "$INSTALLER" "$RUN" "${SCRIPTS}/lib" "$NG/"
 printf '0 7 * * * /opt/other-job\n' >"$ct"
-env PATH="$BIN:$PATH" FAKE_CRONTAB="$ct" "$NG/setup-shipwright-cron" >"${TMP}/inst.out" 2>"${TMP}/inst.err"; rc=$?
-if [ "$rc" = 2 ] && grep -q 'not inside a git checkout' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+env GIT_CEILING_DIRECTORIES="$TMP" PATH="$BIN:$PATH" FAKE_CRONTAB="$ct" "$NG/setup-shipwright-cron" >"${TMP}/inst.out" 2>"${TMP}/inst.err"; rc=$?
+if [ "$rc" = 2 ] && grep -q '^setup-shipwright-cron: .*not inside a git checkout' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
    && cmp -s "$ct" "${TMP}/ct-wt.orig"; then
   ok "a copy outside any git checkout is refused (exit 2, Fix:), nothing written"
 else

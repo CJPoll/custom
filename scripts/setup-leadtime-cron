@@ -128,7 +128,7 @@ CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
 
 # The main checkout, resolved through git's common dir; and whether THIS copy
 # runs from a linked worktree (its git dir differs from the common dir).
-cron_main_checkout "${SCRIPT_DIR}" || exit 2
+cron_main_checkout "${SCRIPT_DIR}" "${ME}" || exit 2
 MAIN_CHECKOUT="${CRON_MAIN_CHECKOUT}"
 IN_WORKTREE="${CRON_IN_WORKTREE}"
 RUNNER="${MAIN_CHECKOUT}/scripts/athena-leadtime-run.sh"

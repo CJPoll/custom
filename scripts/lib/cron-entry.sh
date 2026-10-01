@@ -53,34 +53,35 @@
 #   --remove write back nothing, deleting every other entry. That was
 #   `crontab -l 2>/dev/null || true` in two installers.
 
-# cron_main_checkout <script-dir>
+# cron_main_checkout <script-dir> [<who>]
 #   Where the managed runner lives: the MAIN checkout of the git repo holding
 #   <script-dir>, never a linked worktree, whose path vanishes on cleanup and
 #   leaves cron firing a missing file (DND-1639). Run it in the caller's shell,
 #   not in $(...): it sets two globals.
 #     CRON_MAIN_CHECKOUT  the main checkout, absolute, symlinks resolved
 #     CRON_IN_WORKTREE    1 when <script-dir> is in a linked worktree, else 0
+#   <who> prefixes the error line (default cron_main_checkout).
 #   Returns 0; 2 with a Fix: on stderr, and CRON_MAIN_CHECKOUT empty, when
-#   <script-dir> is not inside a git checkout.
+#   <script-dir> is not inside a git checkout or its git dirs cannot be entered.
 
 cron_main_checkout() {
-  local dir="${1:-}" common gitdir
+  local dir="${1:-}" who="${2:-cron_main_checkout}" common gitdir
   CRON_MAIN_CHECKOUT=""; CRON_IN_WORKTREE=0
   common="$(git -C "${dir}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
   gitdir="$(git -C "${dir}" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
-  case "${common}" in
-    /*) ;;
-    *) echo "cron_main_checkout: '${dir}' is not inside a git checkout (git common dir '${common}')" >&2
-       echo "  Fix: run the copy in ~/dev/custom/scripts/." >&2
+  case "${common}|${gitdir}" in
+    /*\|/*) ;;
+    *) echo "${who}: '${dir}' is not inside a git checkout (git common dir '${common}', git dir '${gitdir}')" >&2
+       echo "  Fix: run the copy in the main checkout's scripts/ (e.g. ~/dev/custom/scripts/)." >&2
        return 2 ;;
   esac
-  common="$(cd -- "${common}" && pwd -P)" || {
-    echo "cron_main_checkout: cannot enter the git common dir of '${dir}'" >&2
-    echo "  Fix: run the copy in ~/dev/custom/scripts/." >&2
+  common="$(cd -- "${common}" && pwd -P)" && gitdir="$(cd -- "${gitdir}" && pwd -P)" || {
+    echo "${who}: cannot enter the git dirs of '${dir}' (common '${common}', git dir '${gitdir}')" >&2
+    echo "  Fix: run the copy in the main checkout's scripts/ (e.g. ~/dev/custom/scripts/)." >&2
     return 2
   }
   CRON_MAIN_CHECKOUT="$(dirname -- "${common}")"
-  [ "$(cd -- "${gitdir}" && pwd -P)" = "${common}" ] || CRON_IN_WORKTREE=1
+  [ "${gitdir}" = "${common}" ] || CRON_IN_WORKTREE=1
   return 0
 }
 
