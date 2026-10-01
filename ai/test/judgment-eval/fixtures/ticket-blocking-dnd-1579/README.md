@@ -22,7 +22,7 @@ never mentions CI, as in the original.
 
 Controls are labelled `rule_confirmed` by `dnd-1579-synthetic-control`.
 
-Measurement only. Never `--apply` a run of this set: nine cases cannot
+Measurement only. Never `--apply` a run of this set: ten cases cannot
 calibrate a threshold, and the labels are not the owner's.
 
 ```
