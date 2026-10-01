@@ -408,8 +408,11 @@ target when the base it was judged against is the target or an ancestor of it;
 one judged against a stacked parent covers only that branch's commits, so the
 gate re-judges (and without the flag, refuses it, exit 3). It joins the judge even on a RED gate, so
 one round returns both sets of findings, then reads the verdict exactly as
-without the flag. Use it for a captain's final check and after every rebase:
-a new SHA needs both a new gate and a new verdict. It changes the wall time,
+without the flag. Use it for a captain's final check and after every rebase
+the captain makes: a new SHA needs both a new gate and a new verdict. The one
+exception is the admiral's clean rebase at landing in `~/dev/custom` (*The
+merge bar* → the no-CI landing), which carries the reported head's gate and
+verdict. It changes the wall time,
 max(gate, critic) instead of the sum, and nothing else. The judge runs in its
 own process group, and the script stops that group if it leaves early.
 
@@ -417,16 +420,26 @@ Exit 0 means: your HEAD contains current `origin/main`, **and** the local gate
 is green on that integrated head. It prints `INTEGRATION OK <sha> (GATE: <cmd>
 -- <source>)` — merge *that* SHA, and copy the line whole so the record says
 which gate ran (the same SHA-match discipline as the merge bar's "confirm the head
-you are landing is the one the report names"). Any other exit tells you what to
-do next. Without `--rebase` it never rebases or touches the working tree or a
-ref; with it, it rebases only a clean branch and refuses on a conflict (below).
-Its one other write is its **receipt**: on exit 0,
+you are landing is the one the report names"). On GitHub, `locked-merge` merges
+that SHA even after main moved, if the move does not conflict. In
+`~/dev/custom` you push the clean rebase of it (the no-CI landing). Any other
+exit tells you what to do next. Without `--rebase` it never rebases or touches
+the working tree or a ref; with it, it rebases only a clean branch and refuses
+on a conflict (below). Its one other write is its **receipt**: on exit 0,
 and only then, it records the pass at
 `<git common dir>/integration-receipts/<head-sha>.json` (head, the target SHA it
 contained, gate and source, any override or owner approval, blast radius, the OK
 line, UTC time). Every other exit removes the receipt for that head, and a
 receipt it cannot write is exit 5 with no OK line. `locked-merge` requires the
 receipt (*Landing onto a moving main*).
+
+**Later (2026-10-01, DND-1463):** this paragraph and the `--with-critic` one
+above had no exception: a rebase always needed a new gate and verdict, and the
+SHA landed was always the one `INTEGRATION OK` names. Superseded by the
+owner's landing doctrine as the DND-1463 ticket records it: custom lands by a
+clean rebase plus ff push, with `custom-merge.lock` around the push only, and
+re-gates only after a conflicted rebase. Cody's words behind it are quoted
+under the no-CI landing in *The merge bar*.
 
 **Later (2026-09-27, DND-965):** this paragraph said the gate "never rebases or
 writes anything". Superseded: it now writes the receipt above. Without it, "the
