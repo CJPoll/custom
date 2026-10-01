@@ -4551,7 +4551,10 @@ mention either: "the harness session, I think, is down" talks ABOUT a session.
 Names: `walt_ui` (`walt ui`, `waltui`) is walt_ui; `harness` and `custom` are
 harness; `gen_saas` (`gen saas`, `gensaas`) and `laptop` are gen_saas;
 `desktop` names none. Names joined by `/` must name one label, or there is no
-mention; so is a name the table lacks. A message that talks ABOUT a session
+mention; so is a name the table lacks. Case-insensitivity folds one
+character to one character, as PCRE's `iu` does: `seſsion` (long s) is
+`session`, but `seßion` and `cuﬆom` are not, because `ß` and `ﬆ` fold only
+to two letters (DND-1554). A message that talks ABOUT a session
 ("ask the harness session to …") is not one and is judged as before. The
 router has read v2 since DND-1535 deployed (gen_saas Post-Merge Deploy run
 36877991286, 2026-10-01).
@@ -4585,7 +4588,9 @@ vector `Walt UI session - no colon` stays no mention.
   the pinned model*). Both test suites carry the same vector list, as two
   copies kept in step by hand (nothing compares them); a change to either is
   a new grammar version in both. Both copies are on `session-mention-v2`
-  and try the forms in the same order.
+  and try the forms in the same order. The harness list also carries
+  DND-1554's 13 case-fold vectors; the gen_saas copy gains them in a
+  follow-up, and the router already answers all 13 as the list says.
 
   **Later (2026-10-01, DND-1537):** this bullet said the harness copy was
   still `session-mention-v1` until DND-1537, so a comma-form root was routed

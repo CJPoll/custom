@@ -673,6 +673,8 @@ echo "== domain: the owner's routing rule as rule_confirmed labels (DND-717, D-R
 # The parity vectors: gen_saas apps/athena/test/athena/slack_events/
 # session_mention_test.exs runs this same list against the router's
 # SessionMention.address/1 (grammar session-mention-v2). Keep them in step.
+# The last 13 (DND-1554, case folds) are not in the gen_saas copy yet; the
+# router answers each of them as listed here.
 VECTORS='[
   ["Gen_saas session (laptop): turn the wifi back on", "gen_saas"],
   ["harness session: status?", "harness"],
@@ -717,10 +719,23 @@ VECTORS='[
   ["harness sessions, all of you", nil],
   ["Note for the harness session, dnd deploy", nil],
   ["harness / walt_ui session, both of you", nil],
-  ["desktop session, hi", nil]
+  ["desktop session, hi", nil],
+  ["harness seßion: x", nil],
+  ["harness seẞion: x", nil],
+  ["harness seßion, x", nil],
+  ["note for the harness seßion: x", nil],
+  ["harneß session: x", nil],
+  ["cuﬆom session: x", nil],
+  ["cuﬅom session: x", nil],
+  ["harness seſsion: x", "harness"],
+  ["walt ui ſession: x", "walt_ui"],
+  ["HARNESS SESSION: x", "harness"],
+  ["THE LAPTOP SESSION, x", nil],
+  ["NOTE FOR THE GEN SAAS SESSION: x", "gen_saas"],
+  ["Walt_UI Session, x", "walt_ui"]
 ]'
 ruby_eq "mention: the parity vectors all read as the router reads them [DND-717]" \
-  "44 ok" \
+  "57 ok" \
   "v = ${VECTORS}; bad = v.reject { |t, want| JudgmentLabel.session_mention(t) == want }; bad.empty? ? \"#{v.size} ok\" : bad.inspect"
 ruby_eq "mention: nil text is no mention" "nil" 'JudgmentLabel.session_mention(nil).inspect'
 ruby_eq "mention: only the lead of a long message is read" "harness" \

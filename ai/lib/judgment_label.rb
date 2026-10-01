@@ -54,15 +54,32 @@ module JudgmentLabel
   #      characters ending "for the harness session:".
   # "session" is required. Names that disagree are no mention.
   MENTION_GRAMMAR = "session-mention-v2"
-  MENTION_NAME = "(?:walt[_ ]?ui|harness|custom|gen[_ ]?saas|laptop)"
+  # Case-insensitivity is spelled out per letter, never Regexp::IGNORECASE
+  # (DND-1554). The router's PCRE "iu" folds one character to one character;
+  # Ruby's /i also folds one character to several, so "seßion" (U+00DF,
+  # U+1E9E -> "ss") and "cuﬆom" (U+FB05, U+FB06 -> "st") matched here and not
+  # there. Measured over every non-ASCII codepoint, PCRE's one-to-one folds
+  # onto a-z are exactly U+212A (Kelvin sign) -> k and U+017F (long s) -> s,
+  # the same set Ruby's /i has; both are kept, so a letter matches here what
+  # it matches in the router, and nothing more.
+  MENTION_FOLDS = { "k" => "K", "s" => "ſ" }.freeze
+  MENTION_CI = lambda do |word|
+    word.chars.map { |c| "[#{c}#{c.upcase}#{MENTION_FOLDS[c]}]" }.join
+  end
+  MENTION_NAME = "(?:#{MENTION_CI['walt']}[_ ]?#{MENTION_CI['ui']}|#{MENTION_CI['harness']}|" \
+                 "#{MENTION_CI['custom']}|#{MENTION_CI['gen']}[_ ]?#{MENTION_CI['saas']}|" \
+                 "#{MENTION_CI['laptop']})".freeze
   MENTION_NAMES = "(#{MENTION_NAME}(?:\\s*/\\s*#{MENTION_NAME})*)".freeze
   MENTION_QUALIFIER = "(?:\\s*\\([^)\\n]{0,60}\\))?"
-  MENTION_TAIL = "\\s+session#{MENTION_QUALIFIER}[*_]*\\s*:".freeze
-  MENTION_COMMA_TAIL = "\\s+session#{MENTION_QUALIFIER}[*_]*\\s*,".freeze
+  MENTION_SESSION = MENTION_CI["session"]
+  MENTION_THE = MENTION_CI["the"]
+  MENTION_TAIL = "\\s+#{MENTION_SESSION}#{MENTION_QUALIFIER}[*_]*\\s*:".freeze
+  MENTION_COMMA_TAIL = "\\s+#{MENTION_SESSION}#{MENTION_QUALIFIER}[*_]*\\s*,".freeze
   MENTION_FORMS = [
-    Regexp.new("\\A\\s*[*_]*\\s*(?:the\\s+)?#{MENTION_NAMES}#{MENTION_TAIL}", Regexp::IGNORECASE),
-    Regexp.new("\\A\\s*[*_]*\\s*#{MENTION_NAMES}#{MENTION_COMMA_TAIL}", Regexp::IGNORECASE),
-    Regexp.new("\\A[^\\n:]{0,80}?(?<![\\p{L}\\p{N}_])for\\s+the\\s+#{MENTION_NAMES}#{MENTION_TAIL}", Regexp::IGNORECASE)
+    Regexp.new("\\A\\s*[*_]*\\s*(?:#{MENTION_THE}\\s+)?#{MENTION_NAMES}#{MENTION_TAIL}"),
+    Regexp.new("\\A\\s*[*_]*\\s*#{MENTION_NAMES}#{MENTION_COMMA_TAIL}"),
+    Regexp.new("\\A[^\\n:]{0,80}?(?<![\\p{L}\\p{N}_])#{MENTION_CI['for']}\\s+#{MENTION_THE}\\s+" \
+               "#{MENTION_NAMES}#{MENTION_TAIL}")
   ].freeze
   # Leading Slack user-mention tokens (<@U0BOT>, <@U0BOT|name>) are skipped:
   # a channel mention carries the bot's token, usually first.
