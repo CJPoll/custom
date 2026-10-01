@@ -200,6 +200,15 @@ Give the captain, in the brief:
   in one round, commit, and run it again."* It replaces a separate
   `critic-review` then gate on the final commit (`athena:merge-boarding` →
   *Landing onto a moving main*).
+
+  **A repo that declares no gate needs `--gate` in the brief.** When the
+  target's landed main has neither `bin/prep-commit.sh` nor
+  `ai/bin/harness-gate` at its root, append `--gate '<the repo's gate
+  command>'` to this line and to the published-branch variant's. Without it
+  `integration-gate` refuses with exit 2 (`integration-gate --help` →
+  `--gate`). Take the command from the repo's own CLAUDE.md. Measured
+  2026-09-29 and 2026-10-01: two walt_ui captains got the bare line and had
+  to add `--gate` themselves.
 - **The don't-chase-main rule.** Every brief carries this line, unless the
   branch is published (*The published-branch variant* below): *"Your gate bar
   is ONE green gate on a head that contained `origin/main` when the gate
