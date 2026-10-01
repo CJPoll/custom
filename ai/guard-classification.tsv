@@ -131,6 +131,7 @@ ai/skills/athena:slack/lib/claim.sh	library	sourced by athena:slack bin/claim-th
 ai/skills/athena:slack/lib/topic_route.sh	library	sourced by athena:slack bin/topic-route; pure functions returning reason tokens and Fix texts that topic-route prints; no failure path of its own
 ai/skills/athena:slack/lib/inbox.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
 ai/skills/athena:slack/lib/slack.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
+scripts/lib/cron-entry.sh	guard	
 scripts/lib/dbus-env.sh	library	sourced by the cron wrappers; always exports a bus address (real or sentinel) and never fails
 scripts/lib/mcp-preflight.sh	library	sourced by the lead-time and clustering runners and installers; prints nothing and returns the why and Fix texts (MCP_PF_WHY, MCP_PF_FIX) that each caller prints with Fix:
 scripts/lib/proc-env-scan.awk	guard	

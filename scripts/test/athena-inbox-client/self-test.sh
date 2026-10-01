@@ -367,6 +367,34 @@ else
       "rc=$rc stderr=${err}"
 fi
 
+# 9b. Only the exact managed entries are ours (DND-1503). A commented-out
+#     entry, a <runner>.bak line, and a longer path that contains the runner
+#     path are kept byte for byte by --install and --remove.
+setup_case notours
+make_stub 0 0
+NOT_OURS="$(printf '#@reboot %s\n*/5 * * * * %s.bak\n@reboot /backup%s\n' "$EXP_RUNNER" "$EXP_RUNNER" "$EXP_RUNNER")"
+printf '%s\n' "$NOT_OURS" > "${FAKE_CRONTAB}"
+run_installer --install >/dev/null 2>&1
+rc=$?
+after="$(cat "${FAKE_CRONTAB}" 2>/dev/null)"
+if [ "$rc" -eq 0 ] \
+   && [ "$(head -n 3 <<<"$after")" = "$NOT_OURS" ] \
+   && [ "$(tail -n 2 <<<"$after")" = "$(printf '@reboot %s\n*/5 * * * * %s' "$EXP_RUNNER" "$EXP_RUNNER")" ]; then
+  ok "install keeps a commented-out entry, <runner>.bak and a longer path byte for byte"
+else
+  bad "install keeps a commented-out entry, <runner>.bak and a longer path byte for byte" \
+      "rc=$rc crontab now: ${after}"
+fi
+run_installer --remove >/dev/null 2>&1
+rc=$?
+after="$(cat "${FAKE_CRONTAB}" 2>/dev/null)"
+if [ "$rc" -eq 0 ] && [ "$after" = "$NOT_OURS" ]; then
+  ok "--remove keeps them too, and drops only the two live entries"
+else
+  bad "--remove keeps them too, and drops only the two live entries" \
+      "rc=$rc crontab now: ${after}"
+fi
+
 # 10. --check on a machine with NO crontab at all must report missing, not
 #     crash on crontab(1)'s "no crontab for user" exit 1.
 setup_case nocrontab
@@ -442,6 +470,9 @@ printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
 MAIN="${CASE_DIR}/main"
 mkdir -p "${MAIN}/scripts"
 cp "${RUNNER}" "${INSTALLER}" "${MAIN}/scripts/"
+# The lib the installer sources to tell its own lines apart (DND-1503).
+mkdir -p "${MAIN}/scripts/lib"
+cp "${SCRIPTS}/lib/cron-entry.sh" "${MAIN}/scripts/lib/"
 git -C "${MAIN}" init -q 2>/dev/null
 git -C "${MAIN}" -c user.email=t@t -c user.name=t add -A >/dev/null 2>&1
 git -C "${MAIN}" -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1

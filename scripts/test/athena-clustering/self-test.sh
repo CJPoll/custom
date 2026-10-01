@@ -664,6 +664,7 @@ if [ "$rc" = 0 ] && cmp -s "$ct" "${TMP}/ct-backup"; then
 else
   bad "backup" "rc=$rc err=$(cat "${TMP}/inst.err")"
 fi
+sed -i "s|^#30 6,18|30 6,18|" "$ct"
 rc="$(inst "$ct" -- --remove)"
 if [ "$rc" = 0 ] && ! grep -qF "$IRUN" "$ct" && grep -qx '0 \* \* \* \* /opt/other-job' "$ct"; then
   ok "--remove drops only the clustering entry"
@@ -711,6 +712,47 @@ else
   bad "unlanded runner" "rc=$rc err=$(cat "${TMP}/inst.err")"
 fi
 git -C "$IR" checkout -q HEAD -- scripts/athena-clustering-run.sh >&2
+
+case_ 'setup-clustering-cron — which lines are ours (DND-1503)'
+
+# Not ours, each kept byte for byte: a commented-out entry, a longer runner
+# path (<runner>.bak), and a longer path that contains the runner path.
+NOT_OURS="$(printf '#0 7,19 * * * %s\n0 7,19 * * * %s.bak\n0 7,19 * * * /backup%s\n' "$IRUN" "$IRUN" "$IRUN")"
+ct="${TMP}/ct-ours"
+printf '%s\n' "$NOT_OURS" >"$ct"
+rc="$(inst "$ct")"
+if [ "$rc" = 0 ] && [ "$(head -n 3 "$ct")" = "$NOT_OURS" ] && [ "$(tail -n 1 "$ct")" = "0 7,19 * * * ${IRUN}" ] \
+   && [ "$(wc -l <"$ct")" = 4 ]; then
+  ok "install keeps a commented-out entry, <runner>.bak and a longer path byte for byte"
+else
+  bad "install keeps not-ours" "rc=$rc ct=$(cat -A "$ct")"
+fi
+rc="$(inst "$ct" -- --remove)"
+if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "$NOT_OURS" ]; then
+  ok "--remove keeps them too, and drops only the live entry"
+else
+  bad "remove keeps not-ours" "rc=$rc ct=$(cat -A "$ct")"
+fi
+printf '0 7,19 * * * %s.bak\n0 7,19 * * * /backup%s\n' "$IRUN" "$IRUN" >"$ct"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 1 ] && grep -q 'MISSING' "${TMP}/inst.err"; then
+  ok "--check is red when only longer runner paths are live"
+else
+  bad "check not-ours" "rc=$rc out=$(cat "${TMP}/inst.out" "${TMP}/inst.err")"
+fi
+printf '0\t7,19\t*\t*\t*\t%s\n' "$IRUN" >"$ct"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 0 ]; then
+  ok "--check reads a tab-separated entry as installed"
+else
+  bad "tab check" "rc=$rc err=$(cat "${TMP}/inst.err")"
+fi
+rc="$(inst "$ct")"
+if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "0 7,19 * * * ${IRUN}" ]; then
+  ok "install rewrites a tab-separated entry as the one canonical entry"
+else
+  bad "tab install" "rc=$rc ct=$(cat -A "$ct")"
+fi
 
 case_ 'setup-clustering-cron — the runner MCP preflight (DND-1571)'
 

@@ -170,3 +170,22 @@ main checkout now, the same way `scripts/setup-hooks` does after the
 
 S24 and S25 were found by the standing `athena-diff-critic` judge rather than
 by this suite; the cases and rows exist because of those findings.
+
+---
+
+## 2026-10-01 — only the exact managed entries are ours (DND-1503)
+
+- **Code under test:** `scripts/setup-athena-inbox-client`'s
+  `without_our_entries`, now built on `scripts/lib/cron-entry.sh`'s
+  `cron_entry_lines` (shared by the four cron installers).
+- **Suite run:** `bash scripts/test/athena-inbox-client/self-test.sh`.
+- **Before the fix** (the old `grep -vF -- "$RUNNER"` filter), case 9b gave
+  `VERDICT: FAIL (2 of 68 cases)`:
+  `FAIL  install keeps a commented-out entry, <runner>.bak and a longer path byte for byte`
+  (the crontab held only the two new entries), and
+  `FAIL  --remove keeps them too, and drops only the two live entries`
+  (the crontab was left empty).
+- **After the fix:** `VERDICT: PASS (68 cases)`.
+- **Mutation that reddens it:** put the substring filter back in
+  `without_our_entries`. That is the before state above, so the same two
+  claims fail with the same strings.

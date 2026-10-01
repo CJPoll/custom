@@ -30,9 +30,10 @@
 # starting anything. It is a paced, bounded external poll — not a spin loop,
 # and nothing it starts can be orphaned (the orphaned-spin-loop class).
 #
-# Idempotent. The crontab is edited read-modify-write: every line mentioning the
-# runner's absolute path is filtered out and the two canonical entries are
-# re-appended. Unrelated entries — notably the shipwright's hourly line — are
+# Idempotent. The crontab is edited read-modify-write: every live line that
+# runs the runner's absolute path (a field equal to it) is filtered out and the
+# two canonical entries are re-appended. A commented-out entry or a longer path
+# such as <runner>.bak is not ours and is kept (DND-1503). Unrelated entries — notably the shipwright's hourly line — are
 # preserved verbatim, with one documented exception: blank lines are dropped,
 # because the filter normalises whitespace-only lines away. Comments and every
 # real entry survive unchanged.
@@ -190,11 +191,21 @@ put_crontab() {
   exit 2
 }
 
+# Which lines are ours: scripts/lib/cron-entry.sh (DND-1503). An uncommented
+# line with a field that IS the runner's absolute path. A commented-out entry,
+# or a longer path such as <runner>.bak, is not ours and is kept.
+CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
+[ -r "$CRON_ENTRY_LIB" ] || {
+  echo "error: $CRON_ENTRY_LIB is missing; without it no crontab line can be told apart as ours." >&2
+  echo "  Fix: restore scripts/lib/cron-entry.sh (fast-forward this checkout to a main that has it), then re-run." >&2
+  exit 2
+}
+# shellcheck source=scripts/lib/cron-entry.sh
+. "$CRON_ENTRY_LIB"
+
 # Everything in the crontab that is NOT one of our entries, blank lines dropped.
-# Matching is on the runner's ABSOLUTE PATH, which is what makes install
-# idempotent and remove exact: no other job can mention it.
 without_our_entries() {
-  printf '%s\n' "$1" | grep -vF -- "$RUNNER" | sed '/^[[:space:]]*$/d'
+  printf '%s\n' "$1" | cron_entry_lines "$RUNNER" notours | sed '/^[[:space:]]*$/d'
 }
 
 REBOOT_LINE="${REBOOT_SCHEDULE} ${RUNNER}"
@@ -209,7 +220,7 @@ if [ "$MODE" = "check" ]; then
 
   if [ "$have_reboot" -eq 1 ] && [ "$have_relaunch" -eq 1 ]; then
     say "OK — both Athena inbox client crontab entries are installed:"
-    printf '%s\n' "$current" | grep -F -- "$RUNNER" | sed 's/^/  /'
+    printf '%s\n' "$current" | cron_entry_lines "$RUNNER" ours | sed 's/^/  /'
     exit 0
   fi
 

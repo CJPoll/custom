@@ -245,18 +245,14 @@ read_crontab() {
 # byte (see "Which lines are ours" above). ONE classifier serves --check,
 # --install and --remove, so what is counted as ours is exactly what is
 # replaced or removed. Classes: ours, stale, notours (stale + everything else).
-lines_of() {
-  awk -v r="${RUNNER}" -v want="$1" '{
-    cls = "other"
-    if ($0 !~ /^[[:space:]]*#/) {
-      for (i = 1; i <= NF; i++) {
-        if ($i == r) { cls = "ours"; break }
-        if ($i ~ /\/scripts\/athena-leadtime-run\.sh$/) cls = "stale"
-      }
-    }
-    if (cls == want || (want == "notours" && cls != "ours")) print
-  }'
-}
+# The classifier is shared with the other cron installers:
+# scripts/lib/cron-entry.sh (DND-1503), this installer's own copy.
+CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
+[ -r "${CRON_ENTRY_LIB}" ] || die 2 "${CRON_ENTRY_LIB} is missing; without it no crontab line can be told apart as ours" \
+  "restore scripts/lib/cron-entry.sh (fast-forward this checkout to a main that has it), then re-run. Nothing was written."
+# shellcheck source=scripts/lib/cron-entry.sh
+. "${CRON_ENTRY_LIB}"
+lines_of() { cron_entry_lines "${RUNNER}" "$1" /scripts/athena-leadtime-run.sh; }
 count_lines() { if [ -z "$1" ]; then echo 0; else printf '%s\n' "$1" | wc -l | tr -d ' '; fi; }
 
 put_crontab() {
