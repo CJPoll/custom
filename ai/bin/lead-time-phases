@@ -170,11 +170,8 @@ module Ingest
 
   def run(repo, since_opt, state, env, rejoin: false)
     io = LeadTimePhasesIO
-    unless io::Paths.dir?(repo.path)
-      puts "lead-time-phases: #{repo.name}: not on this machine (#{repo.path}); nothing ingested, cursor unchanged"
-      return 0
-    end
-
+    # A repo whose checkout is not on this machine never gets here: the
+    # resolver skips it and Setup exits 4 (DND-1526).
     cursor = io::CursorStore.new(state, repo.name)
     since = since_opt
     unless since
@@ -330,8 +327,7 @@ module Summary
     rows = LeadTimePhases::Window.select(deduped, window)
     report = LeadTimePhases::Stats.summarize(rows).merge(
       "repo" => repo.name, "mode" => repo.mode, "window" => window, "ledger" => ledger.path,
-      "ledger_exists" => ledger.exist?, "ledger_rows" => mine.size, "batch_folded" => folded, "malformed_lines" => malformed,
-      "on_machine" => io::Paths.dir?(repo.path)
+      "ledger_exists" => ledger.exist?, "ledger_rows" => mine.size, "batch_folded" => folded, "malformed_lines" => malformed
     )
     report.merge!(improve_extras(repo, rows, env)) if repo.mode == "improve"
     report["phases_note"] = "phases are n/a by design in watch mode" if repo.mode == "watch"
@@ -342,15 +338,9 @@ module Summary
   def improve_extras(repo, rows, env)
     io = LeadTimePhasesIO
     times = rows.map { |r| LeadTimePhases::Util.time(r["landed_at"]) }.compact
-    reverts = if times.empty?
-                nil
-              elsif !io::Paths.dir?(repo.path)
-                LeadTimePhases::Source.could_not_look("#{repo.path} is not on this machine")
-              else
-                io::RevertCounter.count(repo.path, times.min.iso8601, times.max.iso8601)
-              end
+    reverts = times.empty? ? nil : io::RevertCounter.count(repo.path, times.min.iso8601, times.max.iso8601)
     src, res = io::TelemetryReader.read(env)
-    common, = io::Paths.dir?(repo.path) ? io::Git.common_dir(repo.path) : [nil]
+    common, = io::Git.common_dir(repo.path)
     src = LeadTimePhases.scope_events(src, common ? io::Git.repo_label(common) : repo.name)
     { "guards" => LeadTimePhases::Guards.compute(rows, reverts: reverts),
       "telemetry" => telemetry_status(src, res, rows) }
@@ -386,7 +376,6 @@ module Summary
   def print_report(r)
     puts "lead-time-phases summary: repo=#{r['repo']} mode=#{r['mode']} window=#{r['window']} " \
          "(#{r['rows']} row(s) of #{r['ledger_rows']} in the ledger; #{r['batch_folded']} batch duplicate(s) folded)"
-    puts "  not on this machine: the ledger is all this summary reads" unless r["on_machine"]
     puts "  #{r['malformed_lines']} malformed ledger line(s) skipped" if r["malformed_lines"].positive?
     unless r["ledger_exists"]
       puts "  no ledger at #{r['ledger']}: nothing has been ingested here (run --ingest --repo #{r['repo']})"

@@ -187,12 +187,6 @@ module LeadTimePhasesIO
     def repo_label(common) = LeadTimeConfig.repo_label(common)
   end
 
-  module Paths
-    module_function
-
-    def dir?(path) = File.directory?(path)
-  end
-
   # <common>/integration-receipts/<head>.json (integration-gate, DND-965).
   module ReceiptReader
     module_function
