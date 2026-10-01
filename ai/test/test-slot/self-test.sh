@@ -4,10 +4,11 @@
 # Every case runs in a throwaway pool (ATHENA_TEST_SLOT_DIR + ATHENA_TEST_SLOTS
 # seams under a mktemp dir), never the real machine pool. No sleep stands in
 # for a timing assumption: a held command blocks on a FIFO until the suite
-# releases it, and every "wait until X" is a bounded condition poll. The
-# fixtures' own bounds (HOLD_CAP_S, BG_CAP_S) only cap a hang: none decides a
-# verdict, and one that fires is named as a FIXTURE CAP (DND-1357). Case
-# numbers are the QA Plan's rows.
+# releases it, and every "wait until X" waits on the event its case asserts
+# (await_until). The fixtures' own bounds (HOLD_CAP_S, BG_CAP_S, AWAIT_CAP_S,
+# FG_CAP_S, RELEASE_CAP_S) only cap a hang: none decides a verdict, and one
+# that fires is named as a FIXTURE CAP (DND-1357, DND-1551). Case numbers are
+# the QA Plan's rows.
 set -u -o pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -65,18 +66,69 @@ absent() { [ ! -e "$1" ]; }
 present() { [ -e "$1" ]; }
 eq() { [ "$1" = "$2" ]; }
 
-# await_file PATH [SECONDS] — bounded poll for a file to appear.
-await_file() {
-  local i n=$(( ${2:-20} * 20 ))
-  for ((i = 0; i < n; i++)); do [ -e "$1" ] && return 0; sleep 0.05; done
-  return 1
+# Waiting (DND-1551). Every wait below waits on the event its case asserts,
+# through await_until. Two things end a wait with a verdict: the event (0), or
+# the process that would write it exiting without it (1, a functional
+# failure: the event can no longer come). AWAIT_CAP_S is only a hang cap. One
+# that fires returns 1 and leaves an .awaitcap marker in AWAIT_DIR, which
+# fixture_caps names as a HANG: a stuck fixture, or a wrong answer from
+# test-slot that blocks instead of exiting, never a slow host. Before this each wait had its own 10-60 s bound, and
+# running out of it failed the case as if test-slot had answered wrongly.
+AWAIT_CAP_S=300
+AWAIT_DIR=""
+AWAIT_SEQ=0
+
+# bg_alive BGFILE — 0 while the process whose pid BGFILE holds is running.
+# Our own children stay zombies until reaped, so a zombie counts as gone.
+bg_alive() {
+  local p s
+  p="$(cat "$1" 2>/dev/null)" || return 1
+  [ -n "$p" ] || return 1
+  s="$(cat "/proc/$p/stat" 2>/dev/null)" || return 1
+  s=${s##*) }
+  [ "${s%% *}" != Z ]
 }
-# await_grep FILE STRING [SECONDS] — bounded poll for STRING in FILE.
-await_grep() {
-  local i n=$(( ${3:-20} * 20 ))
-  for ((i = 0; i < n; i++)); do has "$1" "$2" && return 0; sleep 0.05; done
-  return 1
+# writer_of PATH — the .bg file of the background run that writes PATH
+# ($W/NAME.err, .out, .started and the like belong to bg NAME), or "" when no
+# background run of ours writes it.
+writer_of() {
+  local b="${1%.*}.bg"
+  [ -e "$b" ] && printf '%s\n' "$b"
+  return 0
 }
+# await_until DESC WRITER POLL CMD... — run CMD every POLL seconds until it
+# succeeds. WRITER (a .bg file, or "") ends the wait once that run has exited
+# and CMD still fails. Past AWAIT_CAP_S the cap marker is left (see above).
+await_until() {
+  local desc=$1 writer=$2 poll=$3 start=$SECONDS
+  shift 3
+  while :; do
+    "$@" && return 0
+    if [ -n "$writer" ] && ! bg_alive "$writer"; then
+      "$@"
+      return
+    fi
+    if ((SECONDS - start >= AWAIT_CAP_S)); then
+      AWAIT_SEQ=$((AWAIT_SEQ + 1))
+      printf '%s\t%s\n' "$AWAIT_CAP_S" "${desc//$'\n'/ }" >"${AWAIT_DIR:-$W}/await-$BASHPID-$AWAIT_SEQ.awaitcap"
+      return 1
+    fi
+    sleep "$poll"
+  done
+}
+# await_file PATH / await_grep FILE STRING — wait for a file, or for STRING in
+# FILE. The _s forms poll once a second (the parent-death and weighted-budget
+# cases below never poll faster).
+await_file() { await_until "file $1" "$(writer_of "$1")" 0.05 present "$1"; }
+await_grep() { await_until "'$2' in $1" "$(writer_of "$1")" 0.05 has "$1" "$2"; }
+await_file_s() { await_until "file $1" "$(writer_of "$1")" 1 present "$1"; }
+await_grep_s() { await_until "'$2' in $1" "$(writer_of "$1")" 1 has "$1" "$2"; }
+# waiting_block FILE LABEL — wait until FILE holds LABEL's whole WAITING
+# block. test-slot writes the header line first and the holder lines after
+# it, in separate writes, and ends the block with the "N waiting (this run:
+# LABEL" line. A check on a holder line (EXCLUSIVE, a label) waits for that
+# last line: waiting for the header alone raced the holder lines (DND-1551).
+waiting_block() { await_grep "$1" "waiting (this run: $2"; }
 
 newpool() { # newpool NAME N — fresh (not yet created) pool for one case
   POOL="$W/pools/$1"
@@ -97,10 +149,11 @@ HOLD_CAP_S=600
 BG_CAP_S=660
 
 # fixture_caps DIR — one FIXTURE CAP line per hang cap that fired in DIR: a
-# holder that ended itself (NAME.capped) or a background run its bound killed
-# (timeout's --verbose line in NAME.err). Empty when none fired.
+# holder that ended itself (NAME.capped), a wait that ran out (.awaitcap), a
+# foreground run its bound killed (.fgcap), or a background run its bound
+# killed (timeout's --verbose line in NAME.err). Empty when none fired.
 fixture_caps() {
-  local f n
+  local f n cap what
   for f in "$1"/*.capped; do
     [ -e "$f" ] || continue
     n=${f##*/}; n=${n%.capped}
@@ -112,6 +165,18 @@ fixture_caps() {
     n=${f##*/}; n=${n%.releasecap}
     printf 'FIXTURE CAP [release %s]: the release write never reached the holder within RELEASE_CAP_S=%s s, so it was never released. A check that failed beside it failed on this fixture cap, not test-slot. Fix: make the case wait until the holder has its FIFO open before releasing it.\n' \
       "$n" "$(cat "$f" 2>/dev/null)"
+  done
+  for f in "$1"/*.awaitcap; do
+    [ -e "$f" ] || continue
+    IFS=$'\t' read -r cap what <"$f"
+    printf 'FIXTURE CAP [await]: HANG, waited AWAIT_CAP_S=%s s for %s, and it never came while its writer (if any) still ran. Either a fixture hung, or test-slot answered wrongly in a way that blocks instead of exiting (a run that should have waited, holding its FIFO). It is not a slow host: the cap is far past any case. Fix: read the case'"'"'s .err files and find what it is blocked on.\n' \
+      "$cap" "$what"
+  done
+  for f in "$1"/*.fgcap; do
+    [ -e "$f" ] || continue
+    IFS=$'\t' read -r cap what <"$f"
+    printf 'FIXTURE CAP [run]: HANG, a foreground run was killed by its FG_CAP_S=%s s bound: %s. A check on its exit code failed on this hang cap, not on a wrong answer from test-slot. Fix: find what kept that run going.\n' \
+      "$cap" "$what"
   done
   for f in "$1"/*.err; do
     grep -qF 'timeout: sending signal' "$f" 2>/dev/null || continue
@@ -145,6 +210,27 @@ bounded() {
   env LC_ALL=C timeout --verbose "$BG_CAP_S" env "${restore[@]}" "$@" >"$W/$name.out" 2>"$W/$name.err" &
   echo $! >"$W/$name.bg"
   BG_PIDS+=("$!")
+}
+
+# fg_capped CMD... — run CMD in the foreground under the FG_CAP_S hang cap and
+# return its exit code. Every run it wraps ends in about a second; the cap
+# only stops a hang. One that fires (timeout's exit 124) leaves an .fgcap
+# marker that fixture_caps names, so the exit-code check beside it is read as
+# a hang, not as test-slot's answer (DND-1551). No CMD here exits 124 itself:
+# a `timeout` inside a CMD (cases 41, 42, 47, G1) is a wrapper the label and
+# weight rules must skip, set to an hour so it never ends a run. -k: a run
+# that defers TERM is still ended.
+FG_CAP_S=120
+FG_SEQ=0
+fg_capped() {
+  local rc
+  timeout -k 10 "$FG_CAP_S" "$@"
+  rc=$?
+  if [ "$rc" = 124 ]; then
+    FG_SEQ=$((FG_SEQ + 1))
+    printf '%s\t%s\n' "$FG_CAP_S" "$(printf '%s ' "$@" | tr '\n\t' '  ')" >"$W/fg-$BASHPID-$FG_SEQ.fgcap"
+  fi
+  return "$rc"
 }
 
 # bg NAME ARGS... — run test-slot ARGS in the background via bounded.
@@ -182,7 +268,7 @@ hold() {
   local name=$1 label=$2; shift 2
   mkfifo "$W/$name.fifo"
   bg "$name" --label "$label" "$@" -- bash -c "$HOLD_CMD" _ "$W/$name"
-  await_file "$W/$name.started" 20 || bad "hold:$name" "holder never started: $(cat "$W/$name.err" 2>/dev/null)"
+  await_file "$W/$name.started" || bad "hold:$name" "holder never started: $(cat "$W/$name.err" 2>/dev/null)"
 }
 # release NAME — write NAME's FIFO. The write blocks until the holder has the
 # FIFO open, so it is capped (RELEASE_CAP_S, a hang cap). A cap that fires
@@ -487,7 +573,7 @@ release A9; reap A9; check 9-A-rc eq "$RC" 0
 newpool p10 1
 hold A10 holder-A10
 bg B10 --label B10 -- sh -c ': > "$1"' _ "$W/B10.ran"
-check 10-waiting await_grep "$W/B10.err" "WAITING" 20
+check 10-waiting await_grep "$W/B10.err" "WAITING"
 check 10-pool has "$W/B10.err" "$POOL"
 check 10-N has "$W/B10.err" "budget=1"
 check 10-held has "$W/B10.err" "1 held"
@@ -518,16 +604,19 @@ release A12; reap A12; check 12-A-rc eq "$RC" 0
 # 18: a waiter prints heartbeats while it waits (seam 1 s). DND-1007: this
 # used to count B12's heartbeats inside its 3 s --wait-timeout, so a slow host
 # could print fewer than two before the timeout: a verdict that flipped with
-# machine speed. B18 keeps a --wait-timeout (20 s, like B12 it is a waiter
-# that CAN time out), but A18 is released as soon as two heartbeats are seen,
-# so the timer only has to outlast two 1 s heartbeats; the poll below caps at
-# 15 s, under both the 20 s timeout and the holder's own 30 s bound. The
-# verdict is the event: two heartbeats were printed while B18 waited.
+# machine speed. B18 is still a timed waiter (--wait-timeout), but its
+# deadline is an hour, as the WAIT_SEAMS cases do (DND-1356): only A18's
+# release, an event, ends its wait. DND-1551: it was 20 s, with a 15 s poll,
+# so a slow host could still time B18 out (B-rc 75) or stop polling before the
+# second heartbeat. The verdict is the event: two heartbeats were printed
+# while B18 waited; the wait for them ends early only if B18 exits.
+# heartbeats FILE — how many heartbeat lines a waiter has printed so far.
+heartbeats() { grep -c "still waiting" "$1" 2>/dev/null; }
+heartbeats_at_least() { local n; n="$(heartbeats "$1")"; [ "${n:-0}" -ge "$2" ]; }
 newpool p18 1
 hold A18 holder-A18
-ATHENA_TEST_SLOT_HEARTBEAT=1 bg B18 --label B18 --wait-timeout 20 -- sh -c ': > "$1"' _ "$W/B18.ran"
-for ((i = 0; i < 300; i++)); do [ "$(grep -c "still waiting" "$W/B18.err" 2>/dev/null)" -ge 2 ] && break; sleep 0.05; done
-check 18-heartbeats eval '[ "$(grep -c "still waiting" "$W/B18.err")" -ge 2 ]'
+ATHENA_TEST_SLOT_HEARTBEAT=1 bg B18 --label B18 --wait-timeout 3600 -- sh -c ': > "$1"' _ "$W/B18.ran"
+check 18-heartbeats await_until "two B18 heartbeats" "$W/B18.bg" 0.05 heartbeats_at_least "$W/B18.err" 2
 check 18-not-run-while-waiting absent "$W/B18.ran"
 release A18
 reap B18; check 18-B-rc eq "$RC" 0
@@ -553,7 +642,7 @@ wrapper="$(cat "$W/A14.wrapper")"
 kill -9 "$wrapper"
 reap A14 2>/dev/null; check 14-wrapper-dead eval '[ "$RC" -ne 0 ]'
 bg B14 --label B14 -- sh -c ': > "$1"' _ "$W/B14.ran"
-check 14-waits await_grep "$W/B14.err" "WAITING" 20
+check 14-waits await_grep "$W/B14.err" "WAITING"
 check 14-not-run absent "$W/B14.ran"
 release A14
 reap B14; check 14-B-rc eq "$RC" 0
@@ -563,7 +652,7 @@ check 14-B-ran present "$W/B14.ran"
 newpool p15 1
 mkdir -m 0700 "$POOL"
 printf '{"label":"STALE15","cwd":"/","pid":%s,"started_at":"2026-01-01T00:00:00Z","exclusive":false}\n' "$$" >"$POOL/slot-1.holder"
-timeout 10 "$BIN" -- true 2>"$W/15.err"; rc=$?
+fg_capped "$BIN" -- true 2>"$W/15.err"; rc=$?
 check 15-rc eq "$rc" 0
 check 15-no-wait lacks "$W/15.err" "WAITING"
 
@@ -573,8 +662,8 @@ mkdir -p "$W/c16"
 hold A16 holder-A16
 bg B16 --label B16 -- "$W/conc.sh" "$W/c16" 2 30
 bg C16 --label C16 -- "$W/conc.sh" "$W/c16" 2 30
-await_grep "$W/B16.err" "WAITING" 20
-await_grep "$W/C16.err" "WAITING" 20
+await_grep "$W/B16.err" "WAITING"
+await_grep "$W/C16.err" "WAITING"
 release A16
 reap B16; check 16-B-rc eq "$RC" 0
 reap C16; check 16-C-rc eq "$RC" 0
@@ -595,7 +684,7 @@ check 17-all-ran eq "$(wc -l <"$W/c17/ran" 2>/dev/null)" 6
 # ---------------------------------------------------------------- re-entrancy
 # 19: nested test-slot at N=1 runs directly (no self-deadlock).
 newpool p19 1
-timeout 30 "$BIN" --label outer19 -- "$BIN" --label inner19 -- true 2>"$W/19.err"; rc=$?
+fg_capped "$BIN" --label outer19 -- "$BIN" --label inner19 -- true 2>"$W/19.err"; rc=$?
 check 19-rc eq "$rc" 0
 check 19-reentrant eq "$(event_count reentrant inner19)" 1
 
@@ -603,7 +692,7 @@ check 19-reentrant eq "$(event_count reentrant inner19)" 1
 # stale, then a normal acquisition.
 newpool p20 1
 mkdir -m 0700 "$POOL"
-ATHENA_TEST_SLOT_HELD="$POOL:1" timeout 10 "$BIN" --label L20 -- true 2>"$W/20.err"; rc=$?
+ATHENA_TEST_SLOT_HELD="$POOL:1" fg_capped "$BIN" --label L20 -- true 2>"$W/20.err"; rc=$?
 check 20-rc eq "$rc" 0
 check 20-warn has "$W/20.err" "WARN stale"
 check 20-acquired eq "$(event_count acquired L20)" 1
@@ -615,7 +704,7 @@ newpool p21other 1
 other="$POOL"
 hold A21 holder-A21
 newpool p21 1
-ATHENA_TEST_SLOT_HELD="$other:1" timeout 10 "$BIN" --label L21 -- true 2>"$W/21.err"; rc=$?
+ATHENA_TEST_SLOT_HELD="$other:1" fg_capped "$BIN" --label L21 -- true 2>"$W/21.err"; rc=$?
 check 21-rc eq "$rc" 0
 check 21-acquired eq "$(event_count acquired L21)" 1
 check 21-not-reentrant eq "$(event_count reentrant L21)" 0
@@ -629,13 +718,14 @@ newpool p22 3
 hold A22 holder-A22
 mkfifo "$W/X22.fifo"
 bg X22 --label X22 --exclusive -- bash -c "$HOLD_CMD" _ "$W/X22"
-check 22-X-waits await_grep "$W/X22.err" "WAITING" 20
+check 22-X-waits await_grep "$W/X22.err" "WAITING"
 check 22-X-not-run absent "$W/X22.started"
 bg D22 --label D22 -- sh -c ': > "$1"' _ "$W/D22.ran"
-check 22-D-waits await_grep "$W/D22.err" "WAITING" 20
+check 22-D-waits await_grep "$W/D22.err" "WAITING"
+check 22-D-block-written waiting_block "$W/D22.err" D22
 check 22-D-sees-exclusive has "$W/D22.err" "EXCLUSIVE"
 release A22
-check 22-X-runs await_file "$W/X22.started" 20
+check 22-X-runs await_file "$W/X22.started"
 st="$("$BIN" --status --json 2>/dev/null)"
 check 22-all-3-exclusive eq "$(jq -c '[.holders[] | select(.exclusive == true and .label == "X22") | .units]' <<<"$st")" '[[1,2,3]]'
 check 22-D-not-run absent "$W/D22.ran"
@@ -644,6 +734,44 @@ reap X22; check 22-X-rc eq "$RC" 0
 reap D22; check 22-D-rc eq "$RC" 0
 check 22-D-ran present "$W/D22.ran"
 reap A22
+
+# 22b (DND-1551, fail-first): a holder line is read only once the whole
+# WAITING block is written. test-slot writes the block's header first and its
+# holder lines in later writes; case 22 read EXCLUSIVE right after the header
+# appeared, and on a busy host it read the file between the two (FAIL
+# [22-D-sees-exclusive], 2026-10-01). F22 is a stand-in writer that writes the
+# header, then blocks on its FIFO until the case releases it, so the holder
+# lines come late by construction, never by host speed.
+mkdir -p "$W/r22"
+mkfifo "$W/r22/F22.fifo"
+F22_CMD='printf "test-slot: WAITING for 1 unit(s) -- cpu pool p, budget=3, 3 held:\n" >&2
+exec 3<>"$1"; read -t "$2" -u 3 _ || exit 0
+printf "  units 1-3 (3 of weight 3): X22 in / since t (pid 1, diagnostic) EXCLUSIVE\n  1 waiting (this run: F22, weight 1)\n" >&2'
+bounded r22/F22 bash -c "$F22_CMD" _ "$W/r22/F22.fifo" "$HOLD_CAP_S"
+check 22b-header-written await_grep "$W/r22/F22.err" "WAITING"
+# The header alone carries no holder line: a reader that stopped here failed.
+check 22b-header-has-no-holders lacks "$W/r22/F22.err" "EXCLUSIVE"
+# While the writer runs and the block is open, waiting_block gives no verdict:
+# only its hang cap ends it, and that cap is named as a HANG.
+AWAIT_CAP_S=1 AWAIT_DIR="$W/r22" waiting_block "$W/r22/F22.err" F22
+check 22b-open-block-no-verdict eq "$?" 1
+rep22="$(fixture_caps "$W/r22" 2>&1)"
+check 22b-open-block-is-a-hang eval '[[ "$rep22" == *"FIXTURE CAP [await]: HANG"* && "$rep22" == *"waiting (this run: F22"* ]]'
+release r22/F22
+check 22b-late-block-read waiting_block "$W/r22/F22.err" F22
+check 22b-late-block-has-exclusive has "$W/r22/F22.err" "EXCLUSIVE"
+reap r22/F22; check 22b-writer-rc eq "$RC" 0
+# A writer that exits with the block unfinished is a verdict, at once: the
+# block can no longer come, so no hang cap is involved.
+# The F22 open-block marker above is cleared, so the check below sees only
+# what this wait leaves. G22 is reaped after the wait: unreaped it stays a
+# zombie, which bg_alive reads as gone, and its pid cannot be reused.
+bounded r22/G22 bash -c 'printf "test-slot: WAITING for 1 unit(s)\n" >&2'
+rm -f "$W"/r22/*.awaitcap
+AWAIT_DIR="$W/r22" waiting_block "$W/r22/G22.err" G22
+check 22b-dead-writer-fails eq "$?" 1
+check 22b-dead-writer-not-a-hang eq "$(fixture_caps "$W/r22" 2>&1)" ""
+reap r22/G22
 
 # -------------------------------------------------------------------- --status
 # 23: pool absent → `pool not initialised at <dir>`, not `held=0`; nothing created.
@@ -659,7 +787,7 @@ newpool p24 2
 hold A24 holder-A24
 hold B24 holder-B24
 bg C24 --label waiter-C24 -- true
-await_grep "$W/C24.err" "WAITING" 20
+await_grep "$W/C24.err" "WAITING"
 st="$("$BIN" --status --json 2>/dev/null)"
 check 24-held eq "$(jq .held <<<"$st")" 2
 check 24-waiting eq "$(jq .waiting <<<"$st")" 1
@@ -687,7 +815,7 @@ mkfifo "$W/U25.fifo" "$W/S25.fifo"
 (cd "$W/fake25" && timeout "$BG_CAP_S" ./prep-commit.sh "$W/U25" "$HOLD_CAP_S" >/dev/null 2>&1) &
 BG_PIDS+=("$!"); u25_bg=$!
 bg S25 --label S25 -- "$W/fake25/prep-commit.sh" "$W/S25" "$HOLD_CAP_S"
-await_file "$W/U25.started" 20; await_file "$W/S25.started" 20
+await_file "$W/U25.started"; await_file "$W/S25.started"
 st="$("$BIN" --status 2>/dev/null)"
 u_pid="$(cat "$W/U25.pid")"; s_pid="$(cat "$W/S25.pid")"
 check 25-unslotted-listed eval '[[ "$st" == *"UNSLOTTED: $u_pid "* ]]'
@@ -732,7 +860,7 @@ for sig in INT TERM; do
   BG_PRE=("${SIG_DEFAULT[@]}")
   bg "S28$sig" --label "S28$sig" --outcome-file "$W/28$sig.outcome" -- bash -c "$HOLD_CMD" _ "$W/S28$sig"
   BG_PRE=()
-  await_file "$W/S28$sig.started" 20 || bad "28-$sig-start" "holder never started"
+  await_file "$W/S28$sig.started" || bad "28-$sig-start" "holder never started"
   kill -s "$sig" "$(cat "$W/S28$sig.wrapper")"
   reap "S28$sig"
   check "28-$sig-rc" eq "$RC" "$want"
@@ -762,29 +890,17 @@ exits_within() { timeout "$2" tail --pid="$1" -f /dev/null; }
 # A31 is held, and 37 exits on its first check, before it ever waits.
 EXIT_CAP_S=120
 WAIT_SEAMS=(ATHENA_TEST_SLOT_HEARTBEAT=3600 ATHENA_TEST_SLOT_PARENT_CHECK=3600)
-# await_kids PID — bounded poll until PID has a child (its wait helper);
-# prints the child pids. Never empty on success, so a no-orphan check below
-# can not pass vacuously.
-await_kids() {
-  local i k
-  for ((i = 0; i < 200; i++)); do
-    k="$(pgrep -P "$1" | tr '\n' ' ')"
-    [ -n "$k" ] && { printf '%s\n' "$k"; return 0; }
-    sleep 0.05
-  done
-  return 1
-}
+# await_kids PID — wait until PID has a child (its wait helper); prints the
+# child pids. Never empty on success, so a no-orphan check below can not pass
+# vacuously.
+AK=""
+has_kids() { AK="$(pgrep -P "$1" | tr '\n' ' ')"; [ -n "$AK" ]; }
+await_kids() { await_until "a child of pid $1" "" 0.05 has_kids "$1" && printf '%s\n' "$AK"; }
 # no_orphans PIDS... — 0 when none of PIDS is still alive.
 no_orphans() { local k; for k in "$@"; do kill -0 "$k" 2>/dev/null && return 1; done; return 0; }
-# await_waiters N — bounded poll until --status --json reports N waiters.
-await_waiters() {
-  local i
-  for ((i = 0; i < 400; i++)); do
-    [ "$("$BIN" --status --json 2>/dev/null | jq .waiting)" = "$1" ] && return 0
-    sleep 0.05
-  done
-  return 1
-}
+# await_waiters N — wait until --status --json reports N waiters.
+waiters_are() { [ "$("$BIN" --status --json 2>/dev/null | jq .waiting)" = "$1" ]; }
+await_waiters() { await_until "$1 waiter(s) in $POOL" "" 0.05 waiters_are "$1"; }
 # The fixture itself: launched the way bg launches, from a caller that
 # ignores INT, QUIT, TERM and HUP (nohup ignores HUP), SIG_DEFAULT leaves none
 # of them ignored. SigIgn bits: HUP 0x1, INT 0x2, QUIT 0x4, TERM 0x4000.
@@ -799,13 +915,13 @@ for sig in TERM INT HUP; do
   # B: the queue head, polling the slots. C: behind B, blocked on B's queue
   # file (queue.lock before DND-823).
   bg "B30$sig" --label "B30$sig" -- sh -c ': > "$1"' _ "$W/B30$sig.ran"
-  await_grep "$W/B30$sig.err" "WAITING" 20 || bad "30-$sig-B-wait" "B never waited"
+  await_grep "$W/B30$sig.err" "WAITING" || bad "30-$sig-B-wait" "B never waited"
   # C's blocking wait has no bound but the signal (WAIT_SEAMS): before
   # DND-815 a foreground wait deferred the trap until that wait returned.
   BG_PRE=("${SIG_DEFAULT[@]}" "${WAIT_SEAMS[@]}")
   bg "C30$sig" --label "C30$sig" --outcome-file "$W/30$sig.outcome" -- sh -c ': > "$1"' _ "$W/C30$sig.ran"
   BG_PRE=()
-  await_grep "$W/C30$sig.err" "WAITING" 20 || bad "30-$sig-C-wait" "C never waited"
+  await_grep "$W/C30$sig.err" "WAITING" || bad "30-$sig-C-wait" "C never waited"
   check "30-$sig-two-waiting" await_waiters 2
   cpid="$(pid_of_bg "C30$sig")"
   kids="$(await_kids "$cpid")"
@@ -826,7 +942,7 @@ for sig in TERM INT HUP; do
   reap "B30$sig"; check "30-$sig-B-rc" eq "$RC" 0
   check "30-$sig-B-ran" present "$W/B30$sig.ran"
   reap "A30$sig"
-  timeout 10 "$BIN" --label "E30$sig" -- true 2>"$W/E30$sig.err"; rc=$?
+  fg_capped "$BIN" --label "E30$sig" -- true 2>"$W/E30$sig.err"; rc=$?
   check "30-$sig-queue-free" eq "$rc" 0
   check "30-$sig-no-wait" lacks "$W/E30$sig.err" "WAITING"
 done
@@ -840,7 +956,7 @@ hold A31 holder-A31
 BG_PRE=("${SIG_DEFAULT[@]}")
 bg X31 --label X31 --exclusive -- sh -c ': > "$1"' _ "$W/X31.ran"
 BG_PRE=()
-await_grep "$W/X31.err" "WAITING" 20 || bad "31-X-wait" "X never waited"
+await_grep "$W/X31.err" "WAITING" || bad "31-X-wait" "X never waited"
 st="$("$BIN" --status --json 2>/dev/null)"
 check 31-X-holds-partial eq "$(jq '[.holders[] | select(.label == "X31")] | length' <<<"$st")" 1
 xpid="$(pid_of_bg X31)"
@@ -866,8 +982,6 @@ release A31; reap A31; check 31-A-rc eq "$RC" 0
 # back each time that timed out, so the grant order was the order of each
 # waiter's LAST renewal, not of arrival: W3 overtook W2 here, and in the fleet
 # a gate starved for 55 min while later arrivals ran. After the fix: W1 W2 W3.
-# heartbeats FILE — how many heartbeat lines a waiter has printed so far.
-heartbeats() { grep -c "still waiting" "$1" 2>/dev/null; }
 newpool p32 1
 hold A32 holder-A32
 bg W321 --label W321 -- sh -c 'echo W1 >> "$1"' _ "$W/32.order"
@@ -877,10 +991,9 @@ check 32-W2-queued await_waiters 2
 bg W323 --label W323 -- sh -c 'echo W3 >> "$1"' _ "$W/32.order"
 check 32-W3-queued await_waiters 3
 # W2 renews its wait twice more AFTER W3 queued. W2 has no --wait-timeout, so
-# the poll is a hang cap only (DND-1007).
+# only W2's exit or the hang cap ends the wait (DND-1007, DND-1551).
 hb0="$(heartbeats "$W/W322.err")"
-for ((i = 0; i < 1200; i++)); do [ "$(heartbeats "$W/W322.err")" -ge $((hb0 + 2)) ] && break; sleep 0.05; done
-check 32-W2-renewed eval '[ "$(heartbeats "$W/W322.err")" -ge $((hb0 + 2)) ]'
+check 32-W2-renewed await_until "two more W322 heartbeats" "$W/W322.bg" 0.05 heartbeats_at_least "$W/W322.err" $((hb0 + 2))
 release A32
 for k in 1 2 3; do reap "W32$k"; check "32-W$k-rc" eq "$RC" 0; done
 reap A32
@@ -895,10 +1008,13 @@ check 32-fifo eq "$(tr '\n' ' ' <"$W/32.order" 2>/dev/null)" "W1 W2 W3 "
 # flipped with machine speed. W1-W4 now wait with no timeout. W5 joins after
 # the position checks, with --wait-timeout 10, and W2 is killed while W5
 # waits: W5 must time out ACROSS that queue change (the closed-up queue shows
-# it still waiting, at 4). Its 10 s only has to outlast one kill and a status
-# read, so it caps a stall rather than racing the position checks. A33 is
-# released only by the case; its HOLD_CAP_S is a hang cap, named as a FIXTURE
-# CAP if it ever fires (DND-1357).
+# it still waiting, at 4). A33 is released only by the case; its HOLD_CAP_S is
+# a hang cap, named as a FIXTURE CAP if it ever fires (DND-1357).
+# DND-1551: the closed-up check used to require W5 still queued, so it failed
+# if the kill and the status reads outlasted W5's 10 s on a slow host. Now W1,
+# W3 and W4 must hold places 1-3 whatever the timing, and W5 must be at 4 if it
+# is still queued; if it has already left, its own exit (75, TIMEOUT, below)
+# is the verdict. Both orders are correct answers from test-slot.
 newpool p33 1
 hold A33 holder-A33
 for k in 1 2 3 4; do
@@ -911,24 +1027,23 @@ check 33-json-positions eq "$(jq -c '[.waiters[] | [.position, .label]]' <<<"$st
 check 33-json-tickets-rise eq "$(jq '[.waiters[].ticket] | . == sort' <<<"$st")" true
 txt="$("$BIN" --status 2>/dev/null)"
 check 33-text-positions eval '[[ "$txt" == *"WAITING #1: W331 "*"WAITING #2: W332 "*"WAITING #3: W333 "*"WAITING #4: W334 "* ]]'
-check 33-W4-told-position await_grep "$W/W334.err" "queue position 4 of 4" 20
+check 33-W4-told-position await_grep "$W/W334.err" "queue position 4 of 4"
 bg W335 --label W335 --wait-timeout 10 --outcome-file "$W/33.outcome" -- sh -c 'echo W5 >> "$1"' _ "$W/33.order"
 check 33-W5-queued await_waiters 5
 kill -9 "$(pid_of_bg W332)"
-reap W332; check 33-W2-killed eq "$RC" 137
-# await_gone LABEL — bounded poll until no live waiter carries LABEL.
-await_gone() {
-  local i
-  for ((i = 0; i < 400; i++)); do
-    [ "$("$BIN" --status --json 2>/dev/null | jq --arg l "$1" '[.waiters[] | select(.label == $l)] | length')" = 0 ] && return 0
-    sleep 0.05
-  done
-  return 1
-}
+# reap's stderr is dropped: bash reports the SIGKILL this case sent as a
+# "line N: <pid> Killed ... timeout --verbose" line, which reads like a fixture
+# cap firing (it misled DND-1551's first diagnosis). RC carries the verdict.
+reap W332 2>/dev/null; check 33-W2-killed eq "$RC" 137
+# await_gone LABEL — wait until no live waiter carries LABEL.
+no_waiter() { [ "$("$BIN" --status --json 2>/dev/null | jq --arg l "$1" '[.waiters[] | select(.label == $l)] | length')" = 0 ]; }
+await_gone() { await_until "waiter $1 to leave $POOL" "" 0.05 no_waiter "$1"; }
 check 33-W2-left-queue await_gone W332
 st="$("$BIN" --status --json 2>/dev/null)"
-check 33-closed-up eq "$(jq -c '[.waiters[] | [.position, .label]]' <<<"$st")" \
-  '[[1,"W331"],[2,"W333"],[3,"W334"],[4,"W335"]]'
+check 33-closed-up eq "$(jq -c '[.waiters[] | select(.label != "W335") | [.position, .label]]' <<<"$st")" \
+  '[[1,"W331"],[2,"W333"],[3,"W334"]]'
+w5pos="$(jq -c '[.waiters[] | select(.label == "W335") | .position]' <<<"$st")"
+check 33-W5-at-4-if-queued eval '[ "$w5pos" = "[4]" ] || [ "$w5pos" = "[]" ]'
 # A33 holds until released, so W5's timeout is the only way it can end.
 reap W335; check 33-W5-timeout-rc eq "$RC" 75
 check 33-W5-timeout-msg has "$W/W335.err" "TIMEOUT"
@@ -965,15 +1080,15 @@ if git -C "$here" show "$OLD_REV:ai/bin/test-slot" >"$OLD" 2>"$W/34.git.err" && 
     hold "A34$first" "holder-A34$first"
     if [ "$first" = old ]; then
       oldbg "O34$first" --label "O34$first" -- sh -c "$ORDER_CONC" _ old "$W/34$first.order" "$W/conc.sh" "$W/c34$first"
-      check "34-$first-O-waits" await_grep "$W/O34$first.err" "WAITING" 20
+      check "34-$first-O-waits" await_grep "$W/O34$first.err" "WAITING"
       bg "N34$first" --label "N34$first" -- sh -c "$ORDER_CONC" _ new "$W/34$first.order" "$W/conc.sh" "$W/c34$first"
-      check "34-$first-N-waits" await_grep "$W/N34$first.err" "WAITING" 20
+      check "34-$first-N-waits" await_grep "$W/N34$first.err" "WAITING"
       want="old new "
     else
       bg "N34$first" --label "N34$first" -- sh -c "$ORDER_CONC" _ new "$W/34$first.order" "$W/conc.sh" "$W/c34$first"
-      check "34-$first-N-waits" await_grep "$W/N34$first.err" "WAITING" 20
+      check "34-$first-N-waits" await_grep "$W/N34$first.err" "WAITING"
       oldbg "O34$first" --label "O34$first" -- sh -c "$ORDER_CONC" _ old "$W/34$first.order" "$W/conc.sh" "$W/c34$first"
-      check "34-$first-O-waits" await_grep "$W/O34$first.err" "WAITING" 20
+      check "34-$first-O-waits" await_grep "$W/O34$first.err" "WAITING"
       want="new old "
     fi
     check "34-$first-both-waiting" await_waiters 2
@@ -987,10 +1102,10 @@ if git -C "$here" show "$OLD_REV:ai/bin/test-slot" >"$OLD" 2>"$W/34.git.err" && 
     reap "A34$first"
     check "34-$first-order" eq "$(tr '\n' ' ' <"$W/34$first.order" 2>/dev/null)" "$want"
     check "34-$first-max1" eq "$(cat "$W/c34$first/max" 2>/dev/null)" 1
-    timeout 10 "$BIN" --label "E34$first" -- true 2>"$W/E34$first.err"; rc=$?
+    fg_capped "$BIN" --label "E34$first" -- true 2>"$W/E34$first.err"; rc=$?
     check "34-$first-pool-usable" eq "$rc" 0
     check "34-$first-no-wait" lacks "$W/E34$first.err" "WAITING"
-    timeout 10 "$OLD" --label "F34$first" -- true 2>"$W/F34$first.err"; rc=$?
+    fg_capped "$OLD" --label "F34$first" -- true 2>"$W/F34$first.err"; rc=$?
     check "34-$first-pool-usable-old" eq "$rc" 0
   done
 else
@@ -1000,7 +1115,7 @@ fi
 # 30b (DND-1356): the parent-check seam is honored only on a test pool and
 # an invalid value is refused (exit 2, with a Fix), never a fallback.
 newpool p30b 1
-ATHENA_TEST_SLOT_PARENT_CHECK=0 timeout "$EXIT_CAP_S" "$BIN" --label P30b -- true 2>"$W/30b.err"; rc=$?
+ATHENA_TEST_SLOT_PARENT_CHECK=0 fg_capped "$BIN" --label P30b -- true 2>"$W/30b.err"; rc=$?
 check 30b-invalid-rc eq "$rc" 2
 check 30b-invalid-names has "$W/30b.err" "ATHENA_TEST_SLOT_PARENT_CHECK='0'"
 check 30b-invalid-fix has "$W/30b.err" "Fix:"
@@ -1012,20 +1127,8 @@ check 30b-invalid-fix has "$W/30b.err" "Fix:"
 # a queued harness-gate waiter under PID 1. Now it leaves the queue within a
 # bound and never runs CMD. These cases wait with blocking pid waits or 1 s
 # polls, never sub-second ones (DND-875 tracks the older 0.05 s polls above).
-# await_grep_s FILE STRING SECONDS / await_waiters_s N SECONDS: 1 s polls.
-await_grep_s() {
-  local i
-  for ((i = 0; i < $3; i++)); do has "$1" "$2" && return 0; sleep 1; done
-  has "$1" "$2"
-}
-await_waiters_s() {
-  local i
-  for ((i = 0; i < $2; i++)); do
-    [ "$("$BIN" --status --json 2>/dev/null | jq .waiting)" = "$1" ] && return 0
-    sleep 1
-  done
-  return 1
-}
+# await_grep_s (defined with await_grep above) and await_waiters_s N: 1 s polls.
+await_waiters_s() { await_until "$1 waiter(s) in $POOL" "" 1 waiters_are "$1"; }
 # parent.sh BIN W NAME: a caller that WAITS on test-slot (bash does not exec
 # a command that is followed by another), so killing it orphans the waiter.
 cat >"$W/parent.sh" <<'EOF'
@@ -1041,7 +1144,7 @@ orphan_start() {
   "$W/parent.sh" "$BIN" "$W" "$1" &
   PARENT_PID=$!
   BG_PIDS+=("$PARENT_PID")
-  await_grep_s "$W/$1.err" "WAITING" 20 || bad "$1-wait" "never waited: $(cat "$W/$1.err" 2>/dev/null)"
+  await_grep_s "$W/$1.err" "WAITING" || bad "$1-wait" "never waited: $(cat "$W/$1.err" 2>/dev/null)"
   ORPHAN_PID="$(pgrep -P "$PARENT_PID" | head -n 1)"
   # Recorded as a .pid so cleanup kills it even if the fix regresses.
   [ -n "$ORPHAN_PID" ] && echo "$ORPHAN_PID" >"$W/$1.orphan.pid"
@@ -1059,7 +1162,7 @@ check 35-orphan-pid eval '[ -n "$ORPHAN_PID" ]'
 kill -9 "$PARENT_PID"
 wait "$PARENT_PID" 2>/dev/null
 check 35-exits-promptly exits_within "${ORPHAN_PID:-0}" "$EXIT_CAP_S"
-check 35-left-queue await_waiters_s 0 5
+check 35-left-queue await_waiters_s 0
 check 35-says-orphaned has "$W/O35.err" "ORPHANED"
 check 35-fix has "$W/O35.err" "Fix:"
 check 35-event eq "$(event_count orphaned O35)" 1
@@ -1075,11 +1178,11 @@ check 35-no-acquire eq "$(event_count acquired O35)" 0
 newpool p36 1
 hold A36 holder-A36
 bg W361 --label W361 -- sh -c 'echo W1 >> "$1"' _ "$W/36.order"
-check 36-W1-queued await_waiters_s 1 20
+check 36-W1-queued await_waiters_s 1
 orphan_start O36
-check 36-O-queued await_waiters_s 2 20
+check 36-O-queued await_waiters_s 2
 bg W363 --label W363 -- sh -c 'echo W3 >> "$1"' _ "$W/36.order"
-check 36-W3-queued await_waiters_s 3 20
+check 36-W3-queued await_waiters_s 3
 kill -9 "$PARENT_PID"
 wait "$PARENT_PID" 2>/dev/null
 check 36-exits-promptly exits_within "${ORPHAN_PID:-0}" "$EXIT_CAP_S"
@@ -1124,7 +1227,7 @@ chmod +x "$W/c37.sh" "$W/p37.sh"
 "$W/p37.sh" "$W/C37.orphan.pid" "$W/P37.fifo" "$W/c37.sh" "$W/C37.fifo" "$BIN" "$W/O37.ran" "$W/O37.err" "$HOLD_CAP_S" &
 p37=$!
 BG_PIDS+=("$p37")
-await_grep_s "$W/C37.orphan.pid" "" 20
+await_grep_s "$W/C37.orphan.pid" ""
 c37="$(cat "$W/C37.orphan.pid" 2>/dev/null)"
 kill -9 "$p37"
 wait "$p37" 2>/dev/null
@@ -1136,7 +1239,7 @@ fi
 if [ "$c37_ppid" != 1 ]; then
   bad 37-born-orphan "C (pid '${c37:-}') has parent '$c37_ppid', not PID 1. Fix: this case needs a host where an orphan is reparented to PID 1 of the host pid namespace; here a child subreaper (e.g. systemd --user) or a container adopted it, which test-slot cannot tell from a live caller at startup (a named RESIDUAL in ai/bin/test-slot). Run the gate from a login shell outside any subreaper or container."
 fi
-await_file "$W/C37.ready" 120 || bad 37-ready "c37.sh never opened its FIFO: $(cat "$W/O37.err" 2>/dev/null)"
+await_file "$W/C37.ready" || bad 37-ready "c37.sh never opened its FIFO: $(cat "$W/O37.err" 2>/dev/null)"
 release C37
 check 37-exits-promptly exits_within "${c37:-0}" "$EXIT_CAP_S"
 check 37-never-ran absent "$W/O37.ran"
@@ -1193,7 +1296,7 @@ st="$("$BIN" --status --json 2>/dev/null)"
 check 39-A-units eq "$(jq -c '.holders[] | select(.label == "holder-A39") | [.units, .weight, .slot]' <<<"$st")" '[[2,3,4],3,2]'
 check 39-A-held eq "$(jq .held <<<"$st")" 3
 bg B39 --label B39 --weight 2 -- sh -c ': > "$1"' _ "$W/B39.ran"
-check 39-B-waits await_grep_s "$W/B39.err" "WAITING for 2 unit(s)" 20
+check 39-B-waits await_grep_s "$W/B39.err" "WAITING for 2 unit(s)"
 check 39-B-not-run absent "$W/B39.ran"
 check 39-B-head-keeps-free-unit eq "$("$BIN" --status --json 2>/dev/null | jq .held)" 4
 release A39; reap A39
@@ -1207,7 +1310,7 @@ newpool p39b 4
 hold A39b holder-A39b --weight 2
 hold B39b holder-B39b --weight 2
 bg C39b --label C39b --weight 2 -- sh -c ': > "$1"' _ "$W/C39b.ran"
-check 39b-C-waits await_grep_s "$W/C39b.err" "WAITING for 2 unit(s)" 20
+check 39b-C-waits await_grep_s "$W/C39b.err" "WAITING for 2 unit(s)"
 check 39b-C-not-run absent "$W/C39b.ran"
 release A39b; reap A39b
 reap C39b; check 39b-C-rc eq "$RC" 0
@@ -1224,7 +1327,7 @@ hold B40 holder-B40
 hold C40 holder-C40
 check 40-three-held eq "$("$BIN" --status --json 2>/dev/null | jq -c '[.held, ([.holders[].weight] | unique)]')" '[6,[2]]'
 bg D40 --label D40 -- sh -c ': > "$1"' _ "$W/D40.ran"
-check 40-fourth-waits await_grep_s "$W/D40.err" "WAITING for 2 unit(s)" 20
+check 40-fourth-waits await_grep_s "$W/D40.err" "WAITING for 2 unit(s)"
 check 40-fourth-not-run absent "$W/D40.ran"
 release A40; reap A40
 reap D40; check 40-fourth-rc eq "$RC" 0
@@ -1239,7 +1342,7 @@ mkdir -p "$W/fake41"
 printf '#!/bin/sh\nexit 0\n' >"$W/fake41/harness-gate"
 chmod +x "$W/fake41/harness-gate"
 w41() { events | jq -rs --arg l "$1" '[.[] | select(.event == "acquired" and .label == $l) | .weight] | last'; }
-"$BIN" --label L41a -- timeout 10 "$W/fake41/harness-gate" --jobs 3 2>/dev/null
+"$BIN" --label L41a -- timeout 3600 "$W/fake41/harness-gate" --jobs 3 2>/dev/null
 check 41-jobs-flag eq "$(w41 L41a | tail -n 1)" 3
 "$BIN" --label L41b -- env HARNESS_GATE_JOBS=2 "$W/fake41/harness-gate" 2>/dev/null
 check 41-jobs-env eq "$(w41 L41b | tail -n 1)" 2
@@ -1262,7 +1365,7 @@ if grep -qF 'return [[cores / 2, 1].max, 8].min if raw.nil? || raw.empty?' "$HG4
 else
   bad 41-default-pinned "harness-gate's worker default at $HG41 no longer reads min(max(nproc/2, 1), 8). Fix: update gate_jobs and HARNESS_GATE_MAX_JOBS in ai/bin/test-slot to match it, then this pin."
 fi
-"$BIN" -- timeout 10 "$W/fake41/harness-gate" 2>/dev/null
+"$BIN" -- timeout 3600 "$W/fake41/harness-gate" 2>/dev/null
 check 41-label-skips-wrapper eq "$(events | jq -rs '[.[] | select(.event == "acquired")] | last | .label' | sed 's/.* //')" harness-gate
 for bad_w in 0 x 7; do
   "$BIN" --weight "$bad_w" -- touch "$W/41w$bad_w.ran" 2>"$W/41w$bad_w.err"
@@ -1283,18 +1386,18 @@ mkdir -p "$W/fake42"
 printf '#!/bin/sh\n: > "$1"\n' >"$W/fake42/critic-review"
 chmod +x "$W/fake42/critic-review"
 hold A42 holder-A42 --weight 2
-timeout 20 "$BIN" --label C42 -- timeout 10 "$W/fake42/critic-review" "$W/C42.ran" 2>"$W/C42.err"; rc=$?
+fg_capped "$BIN" --label C42 -- timeout 3600 "$W/fake42/critic-review" "$W/C42.ran" 2>"$W/C42.err"; rc=$?
 check 42-critic-rc eq "$rc" 0
 check 42-critic-ran present "$W/C42.ran"
 check 42-critic-no-wait lacks "$W/C42.err" "WAITING"
 check 42-critic-in-model eq "$(jq -s '[.[] | select(.event == "acquired" and .label == "C42" and .pool == "model" and .weight == 1)] | length' "$POOL/model/events.jsonl" 2>/dev/null)" 1
 check 42-critic-not-in-cpu eq "$(event_count acquired C42)" 0
 check 42-model-dir-mode eq "$(stat -c %a "$POOL/model" 2>/dev/null)" 700
-timeout 20 "$BIN" --label P42 --pool model -- sh -c ': > "$1"' _ "$W/P42.ran" 2>"$W/P42.err"; rc=$?
+fg_capped "$BIN" --label P42 --pool model -- sh -c ': > "$1"' _ "$W/P42.ran" 2>"$W/P42.err"; rc=$?
 check 42-pool-model-rc eq "$rc" 0
 check 42-pool-model-no-wait lacks "$W/P42.err" "WAITING"
 bg Q42 --label Q42 --pool cpu -- "$W/fake42/critic-review" "$W/Q42.ran"
-check 42-pool-cpu-waits await_grep_s "$W/Q42.err" "WAITING" 20
+check 42-pool-cpu-waits await_grep_s "$W/Q42.err" "WAITING"
 check 42-pool-cpu-not-run absent "$W/Q42.ran"
 release A42; reap A42
 reap Q42; check 42-pool-cpu-rc eq "$RC" 0
@@ -1308,9 +1411,9 @@ check 42-bad-pool-rc eq "$?" 2
 export ATHENA_TEST_MODEL_SLOTS=1
 hold M42 holder-M42 --pool model
 bg N42 --label N42 --pool model -- sh -c ': > "$1"' _ "$W/N42.ran"
-check 42-model-budget-waits await_grep_s "$W/N42.err" "WAITING" 20
+check 42-model-budget-waits await_grep_s "$W/N42.err" "WAITING"
 check 42-model-budget-names-pool has "$W/N42.err" "model pool"
-timeout 20 "$BIN" --label K42 -- true 2>"$W/K42.err"; rc=$?
+fg_capped "$BIN" --label K42 -- true 2>"$W/K42.err"; rc=$?
 check 42-cpu-free-while-model-full eq "$rc" 0
 check 42-cpu-no-wait lacks "$W/K42.err" "WAITING"
 st="$("$BIN" --status --pool model --json 2>/dev/null)"
@@ -1387,18 +1490,16 @@ if git -C "$here" show "$OLD6_REV:ai/bin/test-slot" >"$OLD6" 2>"$W/45.git.err" &
   chmod +x "$OLD6"
   newpool p45 6
   hold N45 holder-N45 --weight 3
-  ATHENA_TEST_SLOTS=3 timeout 20 "$OLD6" --label O45a --wait-timeout 5 -- true 2>"$W/O45a.err"; rc=$?
+  ATHENA_TEST_SLOTS=3 fg_capped "$OLD6" --label O45a --wait-timeout 5 -- true 2>"$W/O45a.err"; rc=$?
   check 45-old-runs eq "$rc" 0
   check 45-old-no-wait lacks "$W/O45a.err" "WAITING"
   mkfifo "$W/O45.fifo"
   ATHENA_TEST_SLOTS=3 bounded O45 "$OLD6" --label holder-O45 -- bash -c "$HOLD_CMD" _ "$W/O45"
-  started45=0
-  for ((i = 0; i < 20; i++)); do [ -e "$W/O45.started" ] && { started45=1; break; }; sleep 1; done
-  [ "$started45" = 1 ] || bad 45-old-hold "old holder never started: $(cat "$W/O45.err" 2>/dev/null)"
+  await_file_s "$W/O45.started" || bad 45-old-hold "old holder never started: $(cat "$W/O45.err" 2>/dev/null)"
   st="$("$BIN" --status --json 2>/dev/null)"
   check 45-old-holder-one-unit eq "$(jq -c '.holders[] | select(.label == "holder-O45") | [.units, .weight]' <<<"$st")" '[[1],1]'
   bg X45 --label X45 --weight 3 -- sh -c ': > "$1"' _ "$W/X45.ran"
-  check 45-new-waits await_grep_s "$W/X45.err" "WAITING" 20
+  check 45-new-waits await_grep_s "$W/X45.err" "WAITING"
   release N45; reap N45
   reap X45; check 45-new-rc eq "$RC" 0
   check 45-new-ran present "$W/X45.ran"
@@ -1413,7 +1514,7 @@ fi
 # one shared marker the model run overwrote it, and the innermost queued
 # behind its own ancestor until its wait timed out.
 newpool p46 1
-timeout 30 "$BIN" --label outer46 -- "$BIN" --label mid46 --pool model -- \
+fg_capped "$BIN" --label outer46 -- "$BIN" --label mid46 --pool model -- \
   "$BIN" --label inner46 --wait-timeout 5 -- true 2>"$W/46.err"; rc=$?
 check 46-rc eq "$rc" 0
 check 46-inner-reentrant eq "$(event_count reentrant inner46)" 1
@@ -1432,19 +1533,19 @@ for m in admiral-eval critic-eval variant-eval; do
   chmod +x "$W/fake47/$m"
 done
 w47() { jq -s --arg l "$1" '[.[] | select(.event == "acquired" and .label == $l) | .weight] | first' "$POOL/model/events.jsonl" 2>/dev/null; }
-timeout 20 "$BIN" --label A47 -- timeout 10 "$W/fake47/admiral-eval" --run --concurrency 4 2>/dev/null
+fg_capped "$BIN" --label A47 -- timeout 3600 "$W/fake47/admiral-eval" --run --concurrency 4 2>/dev/null
 check 47-k4-holds-4 eq "$(w47 A47)" 4
-timeout 20 "$BIN" --label B47 -- "$W/fake47/admiral-eval" --run 2>/dev/null
+fg_capped "$BIN" --label B47 -- "$W/fake47/admiral-eval" --run 2>/dev/null
 check 47-default-k-holds-4 eq "$(w47 B47)" 4
-timeout 20 "$BIN" --label E47 -- env ATHENA_EVAL_CONCURRENCY=2 "$W/fake47/critic-eval" --run 2>/dev/null
+fg_capped "$BIN" --label E47 -- env ATHENA_EVAL_CONCURRENCY=2 "$W/fake47/critic-eval" --run 2>/dev/null
 check 47-env-k eq "$(w47 E47)" 2
-timeout 20 "$BIN" --label V47 -- "$W/fake47/variant-eval" --variant v --corpus full --concurrency 3 2>/dev/null
+fg_capped "$BIN" --label V47 -- "$W/fake47/variant-eval" --variant v --corpus full --concurrency 3 2>/dev/null
 check 47-variant-2k eq "$(w47 V47)" 6
-timeout 20 "$BIN" --label L47 -- "$W/fake47/admiral-eval" 2>/dev/null
+fg_capped "$BIN" --label L47 -- "$W/fake47/admiral-eval" 2>/dev/null
 check 47-list-holds-1 eq "$(w47 L47)" 1
-timeout 20 "$BIN" --label X47 --weight 1 -- "$W/fake47/admiral-eval" --run --concurrency 4 2>/dev/null
+fg_capped "$BIN" --label X47 --weight 1 -- "$W/fake47/admiral-eval" --run --concurrency 4 2>/dev/null
 check 47-explicit-wins eq "$(w47 X47)" 1
-timeout 20 "$BIN" --label O47 -- "$W/fake47/variant-eval" --variant v --corpus full --concurrency 8 2>"$W/O47.err"
+fg_capped "$BIN" --label O47 -- "$W/fake47/variant-eval" --variant v --corpus full --concurrency 8 2>"$W/O47.err"
 check 47-clamped eq "$(w47 O47)" 8
 check 47-clamp-note has "$W/O47.err" "holds the whole budget"
 unset ATHENA_TEST_MODEL_SLOTS
@@ -1477,17 +1578,17 @@ RUBY49=/usr/bin/ruby
 w49() { jq -s --arg l "$2" '[.[] | select(.event == "acquired" and .label == $l) | .weight] | first' "$1" 2>/dev/null; }
 # The syntax check runs first, so the cpu pool's events exist before the
 # absence check below reads them (a missing file must not pass it).
-timeout 20 "$BIN" --label C49 -- "$RUBY49" -c "$W/fake49/admiral-eval" >/dev/null 2>&1
+fg_capped "$BIN" --label C49 -- "$RUBY49" -c "$W/fake49/admiral-eval" >/dev/null 2>&1
 check 49-syntax-check-cpu eq "$(w49 "$POOL/events.jsonl" C49)" 1
-timeout 20 "$BIN" --label R49 -- "$RUBY49" "$W/fake49/admiral-eval" --run --concurrency 4 2>"$W/R49.err"; rc=$?
+fg_capped "$BIN" --label R49 -- "$RUBY49" "$W/fake49/admiral-eval" --run --concurrency 4 2>"$W/R49.err"; rc=$?
 check 49-ruby-eval-ran eq "$rc" 0
 check 49-ruby-eval-model-weight eq "$(w49 "$POOL/model/events.jsonl" R49)" 4
 check 49-cpu-events-exist present "$POOL/events.jsonl"
 check 49-ruby-eval-not-cpu eq "$(w49 "$POOL/events.jsonl" R49)" null
-timeout 20 "$BIN" --label S49 -- bash "$W/fake49/critic-review" --base main 2>/dev/null
+fg_capped "$BIN" --label S49 -- bash "$W/fake49/critic-review" --base main 2>/dev/null
 check 49-bash-critic-model eq "$(w49 "$POOL/model/events.jsonl" S49)" 1
 # With no --label, the default label names the script, not `ruby`.
-timeout 20 "$BIN" -- "$RUBY49" "$W/fake49/admiral-eval" --run 2>/dev/null
+fg_capped "$BIN" -- "$RUBY49" "$W/fake49/admiral-eval" --run 2>/dev/null
 l49="$(jq -rs '[.[] | select(.event == "acquired") | .label] | last' "$POOL/model/events.jsonl" 2>/dev/null)"
 check 49-default-label eval '[[ "$l49" == *" admiral-eval" ]]'
 unset ATHENA_TEST_MODEL_SLOTS
@@ -1531,7 +1632,7 @@ mkdir -p "$W/r48"
 newpool p48 1
 mkfifo "$W/r48/H48.fifo"
 bg r48/H48 --label holder-H48 -- bash -c "$HOLD_CMD" _ "$W/r48/H48" 1
-check 48-holder-started await_file "$W/r48/H48.started" 20
+check 48-holder-started await_file "$W/r48/H48.started"
 bg r48/Q48 --label Q48 -- sh -c ': > "$1"' _ "$W/r48/Q48.ran"
 # H48 is never released, so only its cap can free the slot Q48 needs.
 reap r48/Q48; check 48-queued-ran eq "$RC" 0
@@ -1545,7 +1646,7 @@ check 48-not-a-queue-verdict eval '[[ "$rep48" == *"not test-slot"* ]]'
 newpool p48r 1
 mkfifo "$W/r48/R48.fifo"
 bg r48/R48 --label holder-R48 -- bash -c "$HOLD_CMD" _ "$W/r48/R48"
-check 48-released-started await_file "$W/r48/R48.started" 20
+check 48-released-started await_file "$W/r48/R48.started"
 release r48/R48; reap r48/R48; check 48-released-rc eq "$RC" 0
 check 48-released-done present "$W/r48/R48.done"
 check 48-released-not-capped absent "$W/r48/R48.capped"
@@ -1677,7 +1778,7 @@ HEAD_GA=$(git -C "$W/gA" rev-parse HEAD)
 # exit 5, a slot wait and a duration; head and unit from the caller's tree;
 # no write failure; the queue wait is still its own event.
 newpool pG1 2
-(cd "$W/gA" && FAKE_GATE_EXIT=5 ATHENA_TELEMETRY_DIR="$W/tel-g1" "$BIN" -- timeout 60 bin/prep-commit.sh --flag secret-arg) \
+(cd "$W/gA" && FAKE_GATE_EXIT=5 ATHENA_TELEMETRY_DIR="$W/tel-g1" "$BIN" -- timeout 3600 bin/prep-commit.sh --flag secret-arg) \
   >"$W/G1.out" 2>"$W/G1.err"
 check G1-rc eq "$?" 5
 check G1-stdout eq "$(cat "$W/G1.out")" "gate-out --flag secret-arg"
@@ -1779,7 +1880,7 @@ cd "$W/gA" || exit 1
 FAKE_GATE_FIFO="$W/G9.fifo" ATHENA_TELEMETRY_DIR="$W/tel-g9" bg BG9 --label BG9 --outcome-file "$W/G9.outcome" -- bin/prep-commit.sh
 cd - >/dev/null || exit 1
 BG_PRE=()
-await_file "$W/G9.fifo.started" 20 || bad G9-started "the fake gate never started: $(cat "$W/BG9.err" 2>/dev/null)"
+await_file "$W/G9.fifo.started" || bad G9-started "the fake gate never started: $(cat "$W/BG9.err" 2>/dev/null)"
 kill -TERM "$(cat "$W/G9.fifo.wrapper")" 2>/dev/null
 reap BG9; check G9-rc eq "$RC" 143
 check G9-outcome eq "$(cat "$W/G9.outcome" 2>/dev/null)" "ran exit=143"
