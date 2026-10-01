@@ -2828,6 +2828,12 @@ also reports:
   `ai-artifacts/lead-time/runs/`; they name no capture, so retention ignores
   them. It sends no drain request. Its reader is `athena:inbox-attend` → *The
   lead-time cron writer*.
+  Another program, `ai/bin/slack-roots-tick` (run by every shipwright tick,
+  DND-1502), sends ONE `slack-roots-failing` message per failure episode: the
+  scheduled `judgment-label --propose` failed on N consecutive ticks. Its
+  `re:` is that tick's `.propose` record in `ai-artifacts/slack-roots/runs/`,
+  which is the message's authority; it names no capture, so retention ignores
+  it. Its reader is `athena:inbox-attend` → *The Slack roots tick writer*.
 - **`watchdog`** — the watchdog's three tools (the liveness library,
   `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
   Missing any, the supervisor keeps the client running, but a wedge is then

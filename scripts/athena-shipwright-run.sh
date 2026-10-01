@@ -62,6 +62,9 @@
 #   SHIPWRIGHT_LANES_DIR      dir the per-run lanes live in
 #                             (default <repo>/.git/shipwright-lanes)
 #   SHIPWRIGHT_RUN_ID         force this run's lane id (default run-<utc>-<pid>)
+#   SHIPWRIGHT_MAIN_HEALTH    the main-health to run each tick (self-test seam)
+#   SHIPWRIGHT_SLACK_ROOTS    the slack-roots-tick to run each tick (self-test
+#                             seam; DND-1502)
 #
 # Exported to the session:
 #   SHIPWRIGHT_STATE_DIR      the ONE canonical state directory (cursor.txt,
@@ -723,6 +726,36 @@ fi
 
 # --- 2. reap dead predecessors ----------------------------------------------
 reap_dead_lanes
+
+# --- 2a. snapshot the Slack roots before the inbox rotates them out (DND-1502)
+#
+# The slack_routing eval's root snapshot grows only when `judgment-label
+# --propose` runs, and an inbox generation is deleted at its second rotation.
+# Nothing ran it on a schedule, so a root that rotated out between two manual
+# runs was lost for good. ai/bin/slack-roots-tick runs it every tick: it is
+# idempotent (the snapshot is append-only, a re-run appends nothing new),
+# bounded (--timeout 600), and leaves runs/<tick>.propose under its own state
+# dir. It alerts on its own, ONE harness-alerts message (slug
+# slack-roots-failing) per failure episode, so its outcome is logged here and
+# NEVER changes this tick's exit code. Like main-health it runs before the
+# yield and wedge guards: a dirty main checkout or a wedged lane must not stop
+# the snapshot. SHIPWRIGHT_SLACK_ROOTS is the self-test's seam.
+SLACK_ROOTS="${SHIPWRIGHT_SLACK_ROOTS:-${__wrapper_dir%/scripts}/ai/bin/slack-roots-tick}"
+SLACK_ROOTS_STATE="${MAIN_CHECKOUT}/ai-artifacts/slack-roots"
+if [ -x "${SLACK_ROOTS}" ]; then
+  sr_rc=0
+  "${SLACK_ROOTS}" --state-dir "${SLACK_ROOTS_STATE}" --tick "${ts}" --timeout 600 \
+    >>"${log}" 2>&1 </dev/null 9>&- || sr_rc=$?
+  case "${sr_rc}" in
+    0) echo "athena-shipwright: slack roots: judgment-label --propose ran (${SLACK_ROOTS_STATE}/runs/${ts}.propose)" >&2 ;;
+    1) echo "athena-shipwright: slack roots: judgment-label --propose FAILED; the tool alerts once per episode (${SLACK_ROOTS_STATE}/runs/${ts}.propose)" >&2 ;;
+    *) echo "athena-shipwright: slack roots: slack-roots-tick could not run (exit ${sr_rc}); the next tick retries. See ${log}." >&2
+       echo "  Fix: read the slack-roots-tick lines in ${log}; their Fix: line names the cause." >&2 ;;
+  esac
+else
+  echo "athena-shipwright: slack-roots-tick is missing or not executable: ${SLACK_ROOTS}; the Slack roots were NOT snapshotted this tick." >&2
+  echo "  Fix: run the runner from a full ~/dev/custom checkout (scripts/ and ai/bin/ side by side)." >&2
+fi
 
 # --- 2b. post-landing main check: the backstop (DND-1482) --------------------
 #

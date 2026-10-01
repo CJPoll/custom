@@ -220,6 +220,11 @@ tools:
   # sends a harness-alerts message through send-mail (destructive, send). Classed
   # by that worst case.
   main-health:             { class: destructive, reason: send }
+  # slack-roots-tick (DND-1502) runs judgment-label --propose (idempotent,
+  # machine-local labels and root snapshot), writes its own run records, and
+  # after N failed ticks sends ONE harness-alerts message per failure episode
+  # through send-mail (destructive, send). Classed by that worst case.
+  slack-roots-tick:        { class: destructive, reason: send }
 
   # --- skill executables (DND-508), keyed by their path under ai/ ---
   # readOnly

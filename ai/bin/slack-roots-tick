@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# slack-roots-tick -- run `judgment-label --propose` on a schedule, record the
+# outcome, and alert once per failure episode (DND-1502).
+#
+# Why this exists: the slack_routing root snapshot
+# (~/.local/share/athena/evals/slack-routing-roots.jsonl) grows only when
+# `judgment-label --propose` runs, and a Slack inbox generation is deleted at
+# its second rotation. Before this, nothing ran --propose on a schedule, so a
+# root that arrived and rotated out between two manual runs was lost for good:
+# its label became permanently n/a and slack_routing's measurement shrank with
+# no signal. The hourly shipwright tick (scripts/athena-shipwright-run.sh) runs
+# this tool, so the snapshot is at most an hour behind the inbox.
+#
+# What it never does: pass --rule-default or --new-snapshot. It records no
+# label of its own; --propose keeps owner_confirmed rows and the snapshot is
+# append-only, so a re-run with nothing new appends nothing.
+#
+# Test seams (ai/test/slack-roots-tick/self-test.sh):
+#   SLACK_ROOTS_JUDGMENT_LABEL  the judgment-label to run (default: this
+#                               checkout's ai/bin/judgment-label)
+#   SLACK_ROOTS_SEND_MAIL       the send-mail for the alert (default: this
+#                               checkout's athena:inbox send-mail)
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+AI_DIR="$(dirname "${HERE}")"
+TOOL_REPO="$(dirname "${AI_DIR}")"
+
+usage() {
+  cat <<'EOF'
+slack-roots-tick -- scheduled judgment-label --propose, with a run record and
+one alert per failure episode (DND-1502).
+
+Usage:
+  slack-roots-tick [--state-dir DIR] [--tick ID] [--timeout SECS] [--alert-after N]
+  slack-roots-tick --help
+
+Runs `judgment-label --propose` (no other flag), so every owner root still in
+the Slack inbox or its rotated generation is appended to the root snapshot
+before the next rotation deletes it. Idempotent: a re-run with nothing new
+appends nothing. The hourly shipwright tick runs it.
+
+--state-dir DIR  where its state lives (default: <main checkout of this
+                 repo>/ai-artifacts/slack-roots, machine-local, gitignored):
+                   runs/<tick>.propose   one record per tick: judgment-label's
+                                         output, then ok: or failed:, then alert:
+                   runs/<tick>.skipped   a tick that found another one running
+                   consecutive-failures  the failure counter
+                   failing               the open failure episode
+                                         (episode=, first_failed=, alerted=)
+--tick ID        this tick's id, used in file names (default: UTC
+                 YYYY-MM-DDTHHMMSSZ). No '/' and no leading '.'.
+--timeout SECS   cap on one --propose run (default 600). judgment-label waits
+                 on the labels lock, which an interactive --confirm can hold.
+--alert-after N  consecutive failed ticks before the episode's ONE alert
+                 (default 3, so about 3 hours on the hourly tick: one tick
+                 that waited out an owner's --confirm does not alert, and the
+                 next rotation is days away).
+
+A failure is a non-zero exit, a timeout, or an exit 0 with no `snapshot:`
+summary line (the outcome could not be read). At the N-th consecutive failure
+an episode opens and ONE harness-alerts message (slug slack-roots-failing)
+goes out, re: that tick's record. A later failure in the episode sends
+nothing. A failed send is recorded as FAILED and retried on the next failure.
+A healthy tick clears the counter and ends the episode.
+
+Exit:
+  0  propose ran and its summary was read; or the tick was skipped because
+     another tick holds the run lock
+  1  propose failed (recorded, counted, alerted when due)
+  2  usage
+  3  the state dir or the record could not be written; propose was not run
+     without a record
+Every non-zero exit prints a Fix: line.
+
+The hermetic suite is ai/test/slack-roots-tick/self-test.sh.
+EOF
+}
+
+die() { # <exit> <message> <fix>
+  printf 'slack-roots-tick: %s\nFix: %s\n' "$2" "$3" >&2
+  exit "$1"
+}
+
+STATE=""; TICK=""; TIMEOUT=600; ALERT_AFTER=3
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --state-dir) [ $# -ge 2 ] || die 2 "--state-dir needs a value" "pass --state-dir <dir>."; STATE="$2"; shift 2 ;;
+    --tick) [ $# -ge 2 ] || die 2 "--tick needs a value" "pass --tick <id>."; TICK="$2"; shift 2 ;;
+    --timeout) [ $# -ge 2 ] || die 2 "--timeout needs a value" "pass --timeout <seconds>."; TIMEOUT="$2"; shift 2 ;;
+    --alert-after) [ $# -ge 2 ] || die 2 "--alert-after needs a value" "pass --alert-after <N>."; ALERT_AFTER="$2"; shift 2 ;;
+    *) die 2 "unknown argument: $1" "see slack-roots-tick --help; flags are --state-dir, --tick, --timeout, --alert-after." ;;
+  esac
+done
+case "${TIMEOUT}" in ''|*[!0-9]*|0) die 2 "--timeout must be a positive whole number of seconds (got '${TIMEOUT}')" "pass --timeout <seconds>." ;; esac
+case "${ALERT_AFTER}" in ''|*[!0-9]*|0) die 2 "--alert-after must be a positive integer (got '${ALERT_AFTER}')" "pass --alert-after <N>, or omit it for 3." ;; esac
+
+# ---- resolve the keys; a key that cannot be computed is an error ------------
+if [ -z "${STATE}" ]; then
+  common="$(git -C "${TOOL_REPO}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+    || die 3 "cannot resolve the main checkout of ${TOOL_REPO} for the default state dir" "pass --state-dir <dir>, or run the tool from a git checkout of ~/dev/custom."
+  case "${common}" in
+    /*/.git) STATE="$(dirname "${common}")/ai-artifacts/slack-roots" ;;
+    *) die 3 "the git common dir '${common}' is not <checkout>/.git, so the default state dir is unknown" "pass --state-dir <dir>." ;;
+  esac
+fi
+[ -n "${TICK}" ] || TICK="$(date -u +%Y-%m-%dT%H%M%SZ)"
+case "${TICK}" in
+  */*|.*) die 2 "--tick '${TICK}' contains '/' or starts with '.'; it names files" "pass --tick <id> with no '/' and no leading '.'." ;;
+esac
+
+umask 077
+RUNS="${STATE}/runs"
+mkdir -p "${RUNS}" 2>/dev/null \
+  || die 3 "cannot create ${RUNS}; propose was not run" "check that $(dirname "${STATE}") is writable and the disk is not full. The next tick retries."
+FAIL_COUNT="${STATE}/consecutive-failures"
+EPISODE="${STATE}/failing"
+REC="${RUNS}/${TICK}.propose"
+
+# ---- single run ---------------------------------------------------------------
+# A skip is not a failure: the tick in flight records its own outcome.
+exec 9>>"${STATE}/run.lock" || die 3 "cannot open ${STATE}/run.lock" "check that ${STATE} is writable."
+if ! flock -n 9; then
+  printf 'skipped: another slack-roots-tick holds %s; this tick ran nothing.\n' "${STATE}/run.lock" > "${RUNS}/${TICK}.skipped" 2>/dev/null || true
+  echo "slack-roots-tick: another tick is running; skipped (${RUNS}/${TICK}.skipped)." >&2
+  exit 0
+fi
+
+# ---- small state helpers ------------------------------------------------------
+read_count() { local n=0; [ -r "${FAIL_COUNT}" ] && n="$(cat "${FAIL_COUNT}" 2>/dev/null)"; case "${n}" in ''|*[!0-9]*) n=0 ;; esac; printf '%s' "${n}"; }
+kv() { [ -r "$1" ] && sed -n "s/^$2=//p" "$1" | tail -n 1; return 0; }
+note() { printf '%s\n' "$1" >> "${REC}" || echo "slack-roots-tick: could not append to ${REC}: $1" >&2; return 0; }
+
+# ---- run propose, recorded ------------------------------------------------------
+JL="${SLACK_ROOTS_JUDGMENT_LABEL:-${AI_DIR}/bin/judgment-label}"
+if ! { printf 'slack-roots-tick: tick %s\n' "${TICK}"
+       printf 'command: %s --propose (timeout %ss)\n' "${JL}" "${TIMEOUT}"
+       printf -- '--- judgment-label output ---\n'; } > "${REC}" 2>/dev/null; then
+  die 3 "cannot write the run record ${REC}; propose was not run" "check that ${RUNS} is writable and the disk is not full. The next tick retries."
+fi
+
+why=""
+if [ -x "${JL}" ]; then
+  # Children never inherit the run lock (9>&-).
+  timeout --kill-after=10 "${TIMEOUT}" "${JL}" --propose >> "${REC}" 2>&1 </dev/null 9>&-; rc=$?
+  [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ] && why="timed out after ${TIMEOUT}s"
+else
+  rc=127; why="judgment-label is missing or not executable: ${JL}"
+fi
+note '--- end output ---'
+
+summary="$(sed -n '/^--- judgment-label output ---$/,/^--- end output ---$/p' "${REC}" | grep -m1 '^snapshot: ' || true)"
+appended=""
+if [ "${rc}" -eq 0 ]; then
+  appended="$(printf '%s\n' "${summary}" | sed -n 's/.*, \([0-9][0-9]*\) appended\( (.*)\)\{0,1\}$/\1/p')"
+  [ -n "${appended}" ] || why="no snapshot summary line (could not read what propose appended)"
+fi
+
+# ---- healthy ----------------------------------------------------------------------
+if [ "${rc}" -eq 0 ] && [ -n "${appended}" ]; then
+  note "ok: appended=${appended} exit=0"
+  if [ -e "${EPISODE}" ]; then
+    note "episode: ended the failure episode $(kv "${EPISODE}" episode) (alerted: $(kv "${EPISODE}" alerted))"
+  fi
+  rm -f "${FAIL_COUNT}" "${EPISODE}" \
+    || echo "slack-roots-tick: could not clear ${FAIL_COUNT} / ${EPISODE}. Fix: check that ${STATE} is writable." >&2
+  echo "slack-roots-tick: propose ok, appended=${appended} (${REC})" >&2
+  exit 0
+fi
+
+# ---- failed ---------------------------------------------------------------------
+n=$(( $(read_count) + 1 ))
+printf '%s\n' "${n}" > "${FAIL_COUNT}" \
+  || echo "slack-roots-tick: could not save the failure counter ${FAIL_COUNT}. Fix: check that ${STATE} is writable; until then every failure counts as the first." >&2
+[ -n "${why}" ] || why="judgment-label exited ${rc}; its Fix: line is in the output above"
+
+episode="$(kv "${EPISODE}" episode)"; first="$(kv "${EPISODE}" first_failed)"; alerted="$(kv "${EPISODE}" alerted)"
+if [ "${n}" -ge "${ALERT_AFTER}" ] && [ -z "${episode}" ]; then
+  episode="${TICK}"; first="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; alerted=""
+fi
+note "failed: exit=${rc} consecutive_failures=${n} threshold=${ALERT_AFTER} episode=${episode:-none} why=${why}"
+
+send_alert() { # prints the delivered message name; non-zero on a failed send
+  local body out src name sm="${SLACK_ROOTS_SEND_MAIL:-${AI_DIR}/skills/athena:inbox/bin/send-mail}"
+  [ -x "${sm}" ] || { echo "send-mail is missing: ${sm}" >&2; return 4; }
+  body="${STATE}/.alert-body.$$"
+  {
+    printf 'slack-roots-failing: the scheduled judgment-label --propose has failed %s ticks in a row\n' "${n}"
+    printf 'This is a report. The run record named in re: is the authority.\n\n'
+    printf 'episode: %s\n' "${episode}"
+    printf 'first_failed: %s\n' "${first}"
+    printf 'consecutive_failures: %s\n' "${n}"
+    printf 'threshold: %s\n' "${ALERT_AFTER}"
+    printf 'record: %s\n' "${REC}"
+    printf '\nWhile it fails, Slack roots are not copied into the slack_routing snapshot, and a root still only in walt_ui-slack.jsonl.1 is lost at the next inbox rotation.\n'
+    printf 'Fix: read the record (its judgment-label output carries the Fix:), fix the cause, then run ~/dev/custom/ai/bin/judgment-label --propose by hand. The next healthy tick ends the episode.\n'
+  } > "${body}" || { rm -f "${body}"; return 4; }
+  out="$(cd -- "${TOOL_REPO}" && timeout 20 "${sm}" --local harness-alerts-detector slack-roots-failing \
+          --to custom --re "${REC}" --body-file "${body}" 2>&1 9>&-)"; src=$?
+  rm -f "${body}"
+  if [ "${src}" -ne 0 ]; then printf '%s\n' "${out}" | head -n 3 >&2; return "${src}"; fi
+  name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
+  printf '%s\n' "${name:-?}"
+}
+
+if [ -z "${episode}" ]; then
+  note "alert: not yet (${n} of ${ALERT_AFTER})"
+elif [ -n "${alerted}" ]; then
+  note "alert: already sent for this episode (${alerted})"
+else
+  err="${STATE}/.alert-err.$$"
+  if name="$(send_alert 2>"${err}")"; then
+    alerted="${name}"; note "alert: harness-alerts ${name}"
+  else
+    note 'alert: FAILED to send'
+    echo "slack-roots-tick: the slack-roots-failing harness-alert could NOT be sent: $(tr '\n' ' ' < "${err}" 2>/dev/null)" >&2
+    echo "Fix: run inbox-doctor from ${TOOL_REPO} (is the custom registry entry installed with its harness-alerts channels? scripts/setup-inbox-registry --install). Nothing was recorded as sent, so the next failing tick retries." >&2
+  fi
+  rm -f "${err}"
+fi
+if [ -n "${episode}" ]; then
+  printf 'episode=%s\nfirst_failed=%s\nalerted=%s\n' "${episode}" "${first}" "${alerted}" > "${EPISODE}.tmp.$$" \
+    && mv -f "${EPISODE}.tmp.$$" "${EPISODE}" \
+    || echo "slack-roots-tick: could not save the episode state ${EPISODE}. Fix: check that ${STATE} is writable; the next failure treats this as a new episode and alerts again." >&2
+fi
+note "Fix: read the judgment-label output above, fix the cause, then run judgment-label --propose by hand; the next healthy tick ends the episode."
+
+echo "slack-roots-tick: propose FAILED (exit ${rc}: ${why}); ${n} in a row, alert threshold ${ALERT_AFTER}. Record: ${REC}" >&2
+echo "Fix: read ${REC}; the judgment-label output in it carries the cause." >&2
+exit 1

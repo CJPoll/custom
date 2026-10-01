@@ -73,6 +73,14 @@ MH_STUB="${TMP}/stub-main-health"
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "${MH_STUB_LOG:-/dev/null}"\nexit "${MH_STUB_RC:-0}"\n' > "$MH_STUB"
 chmod +x "$MH_STUB"
 export SHIPWRIGHT_MAIN_HEALTH="$MH_STUB"
+# THE SLACK ROOTS SNAPSHOT IS STUBBED FOR THE WHOLE SUITE TOO (DND-1502). Every
+# tick runs ai/bin/slack-roots-tick, which runs judgment-label --propose against
+# the machine's real inbox and labels. The stub records its argv in
+# SR_STUB_LOG and exits SR_STUB_RC (default 0).
+SR_STUB="${TMP}/stub-slack-roots-tick"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "${SR_STUB_LOG:-/dev/null}"\nexit "${SR_STUB_RC:-0}"\n' > "$SR_STUB"
+chmod +x "$SR_STUB"
+export SHIPWRIGHT_SLACK_ROOTS="$SR_STUB"
 unset CLAUDE_AGENT_ID CLAUDE_AGENT_TYPE
 REPO_ROOT="$(cd -- "${SCRIPTS}/.." && pwd -P)"
 # The git-stub fixtures below delegate to the REAL git, never the agent PATH
@@ -2110,6 +2118,62 @@ if [ "$rc" -eq 0 ] && grep -q 'NOT checked' "$a/runner.err" && grep -q 'Fix:' "$
   ok "a missing main-health says origin/main was NOT checked, with a Fix:"
 else
   bad "missing main-health is loud" "rc=$rc err=$(cat "$a/runner.err")"
+fi
+
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — the scheduled Slack roots snapshot (DND-1502)'
+
+# Every tick runs slack-roots-tick, even one that yields to a dirty main
+# checkout: a root that rotates out between two runs is lost for good.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+rc="$(run_runner "$r" SR_STUB_LOG="$a/sr.log")"
+sr="$(cat "$a/sr.log" 2>/dev/null)"
+sr_want_head="--state-dir $(real "$r")/ai-artifacts/slack-roots --tick "
+sr_want_tail=" --timeout 600"
+if [ "$rc" -eq 0 ] && [ "$(grep -c . "$a/sr.log" 2>/dev/null)" = 1 ] \
+   && [ "${sr#"$sr_want_head"}" != "$sr" ] && [ "${sr%"$sr_want_tail"}" != "$sr" ]; then
+  ok "a yielding tick still runs slack-roots-tick once, with the main checkout's ai-artifacts/slack-roots state dir"
+else
+  bad "slack-roots-tick runs every tick" "rc=$rc sr='$sr' err=$(cat "$a/runner.err")"
+fi
+
+# A wedged lane still snapshots the roots (the step is before the wedge guard).
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+arm_wedge "$r" 2
+rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2 SR_STUB_LOG="$a/sr.log")"
+if [ "$rc" -eq 75 ] && [ "$(grep -c . "$a/sr.log" 2>/dev/null)" = 1 ]; then
+  ok "a wedged tick (exit 75) still runs slack-roots-tick"
+else
+  bad "wedged tick snapshots" "rc=$rc sr='$(cat "$a/sr.log" 2>&1)'"
+fi
+
+# A failed propose or a tool that could not run never changes the tick's exit
+# code, and each is named on stderr.
+for src in 1 3; do
+  r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+  printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+  rc="$(run_runner "$r" SR_STUB_LOG="$a/sr.log" SR_STUB_RC="$src")"
+  if [ "$rc" -eq 0 ] && grep -q 'slack roots' "$a/runner.err"; then
+    ok "slack-roots-tick exit ${src}: the tick's exit code is unchanged (0) and the outcome is logged"
+  else
+    bad "slack-roots-tick exit ${src} is isolated" "rc=$rc err=$(cat "$a/runner.err")"
+  fi
+done
+if grep -q 'Fix:' "$a/runner.err"; then
+  ok "a slack-roots-tick that could not run carries a Fix: line"
+else
+  bad "slack-roots could-not-run Fix:" "err=$(cat "$a/runner.err")"
+fi
+
+# A missing tool is loud: the roots were NOT snapshotted, never silently.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+rc="$(run_runner "$r" SHIPWRIGHT_SLACK_ROOTS="$a/no-such-slack-roots-tick")"
+if [ "$rc" -eq 0 ] && grep -q 'NOT snapshotted' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "a missing slack-roots-tick says the roots were NOT snapshotted, with a Fix:"
+else
+  bad "missing slack-roots-tick is loud" "rc=$rc err=$(cat "$a/runner.err")"
 fi
 
 # ---------------------------------------------------------------------------
