@@ -76,7 +76,13 @@ USAGE = <<~EOF
                         DIR/evals/slack-routing-roots.jsonl (DND-1448): a
                         root that rotated out of the inbox is still there,
                         and its row's snapshot context lines join the
-                        inbox's for the context below.
+                        inbox's for the context below. A snapshot row
+                        whose window_complete is not true was snapshotted
+                        after part of its context window rotated out: it
+                        is n/a, left out of the run, never scored, and
+                        named ("window-incomplete excluded", and
+                        window_incomplete_excluded in the run file)
+                        (DND-1483).
     --content-domain D  the domain of cases whose row names none. Required if
                         any case lacks one (deny by default: never guessed).
     --batch-size N      cases per request, 1..50 (default 50)
@@ -138,7 +144,8 @@ USAGE = <<~EOF
     2  usage
     3  nothing scored: no key ("no key; see DND-711"), every case unscored, the
        use case's question set is not on the server yet, or (slack_routing)
-       no case's context could be built, so nothing was sent
+       no case's context could be built, or every case's snapshot window
+       was incomplete (DND-1483), so nothing was sent
     4  the server was unreachable
     5  the server refused (4xx) or faulted (5xx); its Fix: is printed
 
@@ -349,9 +356,11 @@ module Manager
     corpus = JudgmentEval.parse_corpus(corpus_text, opts[:corpus], opts[:use_case])
     joined = JudgmentEval.join(labels, corpus)
     judged, rule_routed = JudgmentEval.without_rule_routed(joined[:cases], opts[:use_case])
-    cases, lacking = JudgmentEval.with_domain(judged, opts[:content_domain])
+    measurable, window_incomplete = JudgmentEval.without_incomplete_window(judged, opts[:use_case])
+    cases, lacking = JudgmentEval.with_domain(measurable, opts[:content_domain])
     {
       labels: labels, corpus: corpus, joined: joined, cases: cases, lacking_domain: lacking, rule_routed: rule_routed,
+      window_incomplete: window_incomplete,
       labels_sha256: Effects.sha256(labels_text), corpus_sha256: Effects.sha256(corpus_text)
     }
   rescue JudgmentEval::InputError => e
@@ -372,6 +381,16 @@ module Manager
       err.puts "#{PROG}: join: #{joined[:missing].size} of #{usable} labels have no corpus row with that #{corpus[:id_key]}: " \
                "#{joined[:missing].join(', ')}. Fix: point --corpus at the file these labels were made from, or drop the stale labels; they are not in this run."
     end
+    incomplete = JudgmentEval.window_incomplete_line(loaded[:window_incomplete])
+    out.puts incomplete if incomplete
+    # Before the session-mention check: the remaining cases are all
+    # window-incomplete, and that is "nothing to measure" (exit 3), not a
+    # bad input (exit 1).
+    if loaded[:cases].empty? && loaded[:window_incomplete].any?
+      fail!(3, "every joined case the router would judge (#{loaded[:window_incomplete].size}) had an incomplete context window, so none is a measurement and nothing was sent",
+            "a window-incomplete root cannot be re-measured (its context has left the inbox); run judgment-label --propose more often than the Slack inbox rotates, " \
+            "so new roots are snapshotted with a complete window, and label those")
+    end
     if loaded[:cases].empty? && loaded[:rule_routed].positive?
       fail!(1, "every joined label is a session-mention root (#{loaded[:rule_routed]}), which the router never judges", "label roots that name no session; there is nothing to score")
     end
@@ -387,7 +406,7 @@ module Manager
     opts = opts.merge(owner: Effects.owner_id) if opts[:use_case] == "slack_routing"
     loaded = load_cases(opts)
     report_join(loaded, out, err)
-    inbox = opts[:use_case] == "slack_routing" ? gather_candidates(opts, loaded[:cases], out) : nil
+    inbox = opts[:use_case] == "slack_routing" ? gather_candidates(opts, loaded[:cases], loaded[:window_incomplete].size, out) : nil
     if opts[:dry_run]
       out.puts "context: not built (dry run)" if inbox
       batches = JudgmentEval.batches(loaded[:cases], opts[:batch_size])
@@ -464,6 +483,7 @@ module Manager
       "labels_file" => File.expand_path(opts[:labels]), "labels_sha256" => loaded[:labels_sha256],
       "corpus_file" => File.expand_path(opts[:corpus]), "corpus_sha256" => loaded[:corpus_sha256],
       "proposed_excluded" => loaded[:joined][:proposed], "session_mention_excluded" => loaded[:rule_routed],
+      "window_incomplete_excluded" => loaded[:window_incomplete],
       "join_missing" => loaded[:joined][:missing],
       "batches" => { "planned" => batch_count, "sent" => state[:sent], "stopped" => state[:stopped] && state[:stopped][:line] },
       "labels" => loaded[:cases].to_h { |c| [c["case_id"], c["label"]] },
@@ -483,16 +503,17 @@ module Manager
   def context_doc(context)
     return {} unless context
 
-    # snapshot: how many cases carried a root-snapshot context (DND-1448) and
-    # how many of those windows the inbox did not reach back over; they are
-    # scored on the context known.
+    # snapshot: how many judged cases carried a root-snapshot context
+    # (DND-1448), and how many snapshot cases were left out, n/a, because
+    # their window was incomplete (DND-1483; named in
+    # window_incomplete_excluded).
     { "context" => { "inbox_files" => context[:files], "built" => context[:built], "context_unavailable" => context[:unavailable].map { |u| u[:case_id] },
                      "snapshot" => context[:snapshot] } }
   end
 
-  # gather_candidates(opts, cases, out) -> {files:, candidates: {case_id => [candidate]}}.
+  # gather_candidates(opts, cases, window_incomplete, out) -> {files:, candidates: {case_id => [candidate]}, snapshot:}.
   # In memory only: the inbox lines are never copied to a second file.
-  def gather_candidates(opts, cases, out)
+  def gather_candidates(opts, cases, window_incomplete, out)
     owned = cases.count { |c| c["input"].is_a?(Hash) && c["input"]["user"] == opts[:owner] }
     if owned.zero?
       # The labels are the owner's roots (D7), so an overlay id that matches
@@ -509,12 +530,10 @@ module Manager
     by_case = cases.to_h { |c| [c["case_id"], JudgmentEval.context_candidates(c["input"], lines, opts[:owner])] }
     with_any = by_case.count { |_id, candidates| candidates.any? }
     out.puts "inbox files: #{inbox[:files].size} read (#{inbox[:files].join(', ')})" + (inbox[:unreadable].positive? ? ", #{inbox[:unreadable]} unreadable line(s) skipped" : "")
-    if snap[:cases].positive?
-      out.puts "snapshot context: #{snap[:cases]} of #{cases.size} case(s), #{snap[:uncovered]} with a window the inbox did not reach back over"
-    end
+    out.puts "snapshot context: #{snap[:cases]} of #{cases.size} case(s)" if snap[:cases].positive?
     owner_lines = by_case.values.sum { |cands| cands.count { |cand| cand["user"] == opts[:owner] } }
     out.puts "context candidates: #{by_case.values.sum(&:size)} line(s), #{owner_lines} the owner's, for #{with_any} of #{cases.size} case(s)"
-    { files: inbox[:files], candidates: by_case, snapshot: { "cases" => snap[:cases], "window_incomplete" => snap[:uncovered] } }
+    { files: inbox[:files], candidates: by_case, snapshot: { "cases" => snap[:cases], "window_incomplete" => window_incomplete } }
   end
 
   # build_contexts(cases, inbox, origin, token, opts, out, err) -> {cases:, built:, unavailable:, files:}.

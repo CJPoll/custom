@@ -127,6 +127,33 @@ module JudgmentEval
     [kept, routed.size]
   end
 
+  # without_incomplete_window(cases, use_case) -> [cases, excluded_ids]
+  # slack_routing only: a root snapshot row (judgment-label, DND-1448) whose
+  # window_complete is not exactly true was snapshotted after part of its
+  # context window had rotated out of the inbox. Judged, it would be judged on
+  # partial context, and a miss would read as the router's when it is the
+  # context's. So it is not a measurement: it leaves the run, n/a, and is
+  # named (DND-1483). "Could not tell" (no flag, a flag that is not a boolean,
+  # a snapshot that is not an object) is not complete either. A case with no
+  # snapshot member (a live-inbox corpus) is unchanged.
+  def without_incomplete_window(cases, use_case)
+    return [cases, []] unless use_case == "slack_routing"
+
+    kept, incomplete = cases.partition do |c|
+      input = c["input"]
+      !(input.is_a?(Hash) && input.key?("snapshot")) || (input["snapshot"].is_a?(Hash) && input["snapshot"]["window_complete"] == true)
+    end
+    [kept, incomplete.map { |c| c["case_id"] }]
+  end
+
+  # window_incomplete_line(ids) -> the run's line for the excluded cases, or
+  # nil when there are none.
+  def window_incomplete_line(ids)
+    return nil if ids.empty?
+
+    "window-incomplete excluded: #{ids.size} (n/a, not scored: the root's context window had partly rotated out of the inbox when it was snapshotted): #{ids.join(', ')}"
+  end
+
   # with_domain(cases, default) -> [cases, count_without_domain]
   def with_domain(cases, default)
     lacking = 0
@@ -309,12 +336,13 @@ module JudgmentEval
   end
 
   # snapshot_candidates(cases) -> the context lines the root snapshot kept
-  # for these cases (DND-1448), and the counts the run reports. A case whose
-  # input is no snapshot row contributes nothing.
+  # for these cases (DND-1448), and how many cases carried one. A case whose
+  # input is no snapshot row contributes nothing. A window-incomplete case
+  # never reaches here: without_incomplete_window/2 took it out (DND-1483).
   def snapshot_candidates(cases)
     snaps = cases.filter_map { |c| c["input"].is_a?(Hash) && c["input"]["snapshot"].is_a?(Hash) ? c["input"]["snapshot"] : nil }
     lines = snaps.flat_map { |s| s["context_candidates"].is_a?(Array) ? s["context_candidates"].select { |l| l.is_a?(Hash) } : [] }
-    { lines: lines, cases: snaps.size, uncovered: snaps.count { |s| s["window_complete"] != true } }
+    { lines: lines, cases: snaps.size }
   end
 
   def top_level?(line)

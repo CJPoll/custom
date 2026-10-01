@@ -819,9 +819,9 @@ EVALRB="${AI}/lib/judgment_eval.rb"
 ruby_eq "window_covered?: every file holding the root's channel must reach back over the hour; none, or an unreadable ts, is not covered" \
   "true|false|true|false|false" \
   "require '${EVALRB}'; r = {'ts' => '1790200000.000000', 'channel' => 'D1'}; f = ->(name, ch, ts) { {name: name, rows: [{'channel' => ch, 'ts' => ts}]} }; old = f.('a', 'D1', '1790196400.000000'); late = f.('b', 'D1', '1790199000.000000'); other = f.('c', 'D9', '1790199000.000000'); [JudgmentEval.window_covered?(r, [old]), JudgmentEval.window_covered?(r, [old, late]), JudgmentEval.window_covered?(r, [old, other]), JudgmentEval.window_covered?(r, [other]), JudgmentEval.window_covered?(r, [f.('a', 'D1', 'x')])].join('|')"
-ruby_eq "snapshot_candidates: only snapshot rows count; an incomplete window is counted" \
-  "2|2|1" \
-  "require '${EVALRB}'; s = JudgmentEval.snapshot_candidates([{'input' => {'snapshot' => {'window_complete' => true, 'context_candidates' => [{'ts' => '1'}]}}}, {'input' => {'snapshot' => {'window_complete' => false, 'context_candidates' => [{'ts' => '2'}, 'junk']}}}, {'input' => {'text' => 'live'}}]); [s[:lines].size, s[:cases], s[:uncovered]].join('|')"
+ruby_eq "snapshot_candidates: only snapshot rows count [DND-1483: an incomplete window is excluded before, not counted here]" \
+  "2|2|false" \
+  "require '${EVALRB}'; s = JudgmentEval.snapshot_candidates([{'input' => {'snapshot' => {'window_complete' => true, 'context_candidates' => [{'ts' => '1'}]}}}, {'input' => {'snapshot' => {'window_complete' => false, 'context_candidates' => [{'ts' => '2'}, 'junk']}}}, {'input' => {'text' => 'live'}}]); [s[:lines].size, s[:cases], s.key?(:uncovered)].join('|')"
 
 echo "== end to end: a root that rotated out keeps its row and its text (DND-1448)"
 
@@ -886,7 +886,7 @@ eq "judgment-eval joins the snapshot (exit 0) [DND-1448]" "${RC}" "0"
 has "the rotated forward_record root is an eval case [DND-1448]" "${OUT}" "cases: 1 (harness 1)"
 lacks "no label missed the join" "${ERR}" "have no corpus row"
 has "its context comes from the snapshot, not an empty window [DND-1448]" "${OUT}" "context candidates: 2 line(s), 1 the owner's, for 1 of 1 case(s)"
-has "the eval says how many cases carry a snapshot context" "${OUT}" "snapshot context: 1 of 1 case(s), 0 with a window the inbox did not reach back over"
+has "the eval says how many cases carry a snapshot context" "${OUT}" "snapshot context: 1 of 1 case(s)"
 cp "${SROOT}/walt_ui-slack.jsonl" "${TMP}/rotated-inbox.jsonl"
 line EvC0 im "${OWNER}" "1790200000.000000" "" "CONTEXT-BEFORE-TEXT" >>"${SROOT}/walt_ui-slack.jsonl"
 run "${EVAL}" --dry-run --use-case slack_routing --inbox-root "${SROOT}" --labels "${SLABELS}" --corpus "${SNAP}" --content-domain work

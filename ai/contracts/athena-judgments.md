@@ -661,10 +661,15 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   with a recorded label makes a conflict. An absent snapshot while label
   rows would be dropped is refused, exit 1, unless `--new-snapshot` starts
   one. `judgment-eval` adds a snapshot row's context lines to the inbox's,
-  and prints and records in the run file how many cases carry one and how
-  many of their windows the inbox did not reach back over (a file holding
-  the root's channel began after the window opened). Those cases are scored
-  on the context known. The labels file still holds no text. The owner's
+  and prints and records in the run file how many cases carry one. A
+  snapshot row whose `window_complete` is not `true` (a file holding the
+  root's channel began after the window opened, or the flag is absent or
+  malformed) is not a measurement: `judgment-eval` leaves it out of the run,
+  `n/a`, never scored as a hit or a miss, and names it
+  (`window-incomplete excluded: N (n/a, ...): <ids>`, and
+  `window_incomplete_excluded` in the run file). A run in which every case
+  is window-incomplete sends nothing and exits 3. A live-inbox row (no
+  snapshot) is unchanged. The labels file still holds no text. The owner's
   answer at a terminal (`--confirm`, one message at a time) is
   `owner_confirmed` and always wins. Otherwise a root whose text addresses a
   session is `rule_confirmed` with `"rule": "session_mention"`, by the
@@ -700,6 +705,12 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
   the root snapshot above. The inbox rotates, and `--propose` dropped every
   non-owner-confirmed row whose root had left it, so the corpus could never
   reach the bar's n.
+
+  **Later (2026-10-01, DND-1483):** this read "Those cases are scored on the
+  context known", of the snapshot cases whose window the inbox did not reach
+  back over. Superseded by the exclusion above. A case judged on partial
+  context reads as a router miss when the context is what was missing, so
+  recall and precision mixed partial-context cases with complete ones.
 
   **Later (2026-09-28):** this said "the owner confirms the rest one message
   at a time at a terminal": every root without a forward record waited for

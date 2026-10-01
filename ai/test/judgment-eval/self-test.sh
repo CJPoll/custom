@@ -100,6 +100,21 @@ ruby_eq "slack_routing: a session-addressed root leaves the run, whatever its pr
 ruby_eq "other use cases never apply the Slack router's rule [DND-717]" \
   "2 0" \
   'cs = [{"case_id" => "a", "input" => {"text" => "x"}}, {"case_id" => "m", "input" => {"text" => "harness session: hi"}}]; k, n = JudgmentEval.without_rule_routed(cs, "finding_triage"); [k.size, n].join(" ")'
+# DND-1483: a snapshot row whose window was not complete is n/a, not a case.
+# "Could not tell" (no flag, a non-boolean flag, a snapshot that is not an
+# object) is not complete either. A live-inbox row (no snapshot) is unchanged.
+ruby_eq "slack_routing: a snapshot case whose window was incomplete leaves the run and is named [DND-1483]" \
+  "c,live|i,nokey,str,notobj" \
+  'snap = ->(id, s) { {"case_id" => id, "input" => {"text" => "q", "snapshot" => s}} }; cs = [snap.("c", {"window_complete" => true}), snap.("i", {"window_complete" => false}), snap.("nokey", {}), snap.("str", {"window_complete" => "true"}), snap.("notobj", "x"), {"case_id" => "live", "input" => {"text" => "q"}}]; k, ex = JudgmentEval.without_incomplete_window(cs, "slack_routing"); [k.map { |c| c["case_id"] }.join(","), ex.join(",")].join("|")'
+ruby_eq "other use cases never apply the snapshot window rule [DND-1483]" \
+  "1 0" \
+  'cs = [{"case_id" => "i", "input" => {"snapshot" => {"window_complete" => false}}}]; k, ex = JudgmentEval.without_incomplete_window(cs, "finding_triage"); [k.size, ex.size].join(" ")'
+ruby_eq "the window-incomplete line counts, names, and says n/a, never a score [DND-1483]" \
+  "window-incomplete excluded: 2 (n/a, not scored: the root's context window had partly rotated out of the inbox when it was snapshotted): i1, i2" \
+  'JudgmentEval.window_incomplete_line(["i1", "i2"])'
+ruby_eq "no line when nothing was excluded [DND-1483]" \
+  "nil" \
+  'JudgmentEval.window_incomplete_line([]).inspect'
 ruby_eq "labels: a repeated id is refused" \
   "InputError: L:2 repeats id of line 1" \
   'JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"proposed"}\n{"id":"a","label":"y","provenance":"proposed"}\n), "L")'
@@ -551,6 +566,45 @@ run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/co
 eq "--inbox-root with another use case is usage (2) [DND-1048]" "${RC}" "2"
 run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --bot-id B0X --dry-run
 eq "--bot-id with another use case is usage (2) [DND-1048]" "${RC}" "2"
+
+echo "== slack_routing: an incomplete snapshot window is n/a, never scored (DND-1483)"
+
+# A root snapshot corpus (judgment-label, DND-1448): Ev-r1's window was
+# complete when snapshotted; Ev-r2's had partly rotated out of the inbox
+# (window_complete false). Scoring Ev-r2 would read missing context as a
+# router miss, so it is excluded, counted and named, and never sent.
+SNAPCORPUS="${TMP}/snap-roots.jsonl"
+{
+  printf '{"channel":"D1","user":"%s","ts":"1790570000.000100","thread_ts":null,"text":"ROOT-ONE","kind":"im","event_id":"Ev-r1","snapshot":{"at":"2026-10-01T00:00:00Z","window_complete":true,"context_candidates":[]}}\n' "${OWNER_ID}"
+  printf '{"channel":"D2","user":"%s","ts":"1790571000.000100","thread_ts":null,"text":"ROOT-TWO","kind":"mpim","event_id":"Ev-r2","snapshot":{"at":"2026-10-01T00:00:00Z","window_complete":false,"context_candidates":[]}}\n' "${OWNER_ID}"
+} > "${SNAPCORPUS}"
+snapr() { run --use-case slack_routing --labels "${TMP}/labels-slr.jsonl" --corpus "${SNAPCORPUS}" --content-domain work --pause 0 --inbox-root "${INBOX}" "$@"; }
+rm -f "${TMP}/context.json"
+respond '{"auto":"not_configured"}'
+: > "${TMP}/server.log"
+snapr --dry-run
+eq "a dry run over an incomplete-window case exits 0 [DND-1483]" "${RC}" "0"
+has "the dry run names the window-incomplete case as n/a [DND-1483]" "${OUT}" "window-incomplete excluded: 1 (n/a, not scored: the root's context window had partly rotated out of the inbox when it was snapshotted): Ev-r2"
+has "the excluded case is not among the cases [DND-1483]" "${OUT}" "cases: 1 (harness 1)"
+eq "the dry run makes no call [DND-1483]" "$(requests)" "0"
+
+rm -rf "${XDG_DATA_HOME}/athena/evals/runs"
+snapr
+eq "the run still exits 3 with no key: the complete case was sent [DND-1483]" "${RC}" "3"
+eq "no context is built for the excluded case [DND-1483]" "$(ctx_requests | jq -r .body.ts | tr '\n' ' ')" "1790570000.000100 "
+eq "only the complete-window case is sent to the eval [DND-1483]" "$(eval_requests | jq -c '[.body.cases[].case_id]')" '["Ev-r1"]'
+run_file="$(find "${XDG_DATA_HOME}/athena/evals/runs" -maxdepth 1 -type f | head -n 1)"
+eq "the run file names the excluded case [DND-1483]" "$(jq -c .window_incomplete_excluded "${run_file}")" '["Ev-r2"]'
+eq "the run file never records the excluded case as a result [DND-1483]" "$(jq -c '[.results[] | select(.case_id == "Ev-r2")] | length' "${run_file}")" "0"
+eq "the run file counts the snapshot cases kept and the windows excluded [DND-1483]" "$(jq -c .context.snapshot "${run_file}")" '{"cases":1,"window_incomplete":1}'
+
+# Every case incomplete: nothing is a measurement, nothing is sent.
+printf '{"id":"Ev-r2","label":"walt_ui","provenance":"owner_confirmed"}\n' > "${TMP}/labels-incomplete.jsonl"
+: > "${TMP}/server.log"
+run --use-case slack_routing --labels "${TMP}/labels-incomplete.jsonl" --corpus "${SNAPCORPUS}" --content-domain work --pause 0 --inbox-root "${INBOX}"
+eq "every case window-incomplete exits 3: nothing scored [DND-1483]" "${RC}" "3"
+has "it says why nothing is a measurement, with a Fix [DND-1483]" "${ERR}" "every joined case the router would judge (1) had an incomplete context window, so none is a measurement and nothing was sent. Fix: "
+eq "it makes no request [DND-1483]" "$(requests)" "0"
 
 echo "== slack_routing: the owner id comes from the private overlay (DND-1048 x DND-704)"
 

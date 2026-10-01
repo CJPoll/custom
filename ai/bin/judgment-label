@@ -138,7 +138,9 @@ USAGE = <<~EOF
                     D7) and the context judgment-eval would build for it then
                     (anyone else's text emptied), marked window_complete
                     when every inbox file holding the root's channel
-                    reached back over the window.
+                    reached back over the window. judgment-eval leaves a
+                    root whose window is not complete out of the run, n/a,
+                    and names it (DND-1483).
                     --confirm reads a rotated root's text from it. An
                     ABSENT snapshot while the labels file has rows whose
                     roots are not in the inbox is refused, exit 1: a wrong
