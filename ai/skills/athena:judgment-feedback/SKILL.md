@@ -140,6 +140,12 @@ Run once per shipwright cron run, after the report mining. The state lives in
 4. **Qualify.** A cluster qualifies at 3 or more strong rows from at least 2
    distinct subjects. One report is watched, not actioned, as for any
    shipwright pattern.
+
+   **Later (2026-10-01):** count distinct calls with a strong row, not rows.
+   A row is per (call, reporter), and every machine's `scan-tickets` records
+   the same ticket edit under its own reporter. Measured: call `c7755a30…`
+   had two identical `field_changed` rows, from two machines' scans three
+   minutes apart.
 5. **Diagnose from the payloads, in session only.** Read the qualifying rows'
    `request` (what Jev was sent) and answers: rerun `list` with the same
    `--after`, no `--seen-file`, and `--with-payloads`, and read only the
