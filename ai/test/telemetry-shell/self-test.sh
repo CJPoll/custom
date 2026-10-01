@@ -98,6 +98,32 @@ OUT="$(cd "${TMP}" && ATHENA_UNIT= ATHENA_TELEMETRY_DIR="${S5B}" bash -c '. "$1"
 eq "5b --unit-branch gives the ticket that branch names, source branch" \
   "$(events "${S5B}" merge.landed | jq -r '[.unit, .unit_source] | join(" ")')" "DND-42 branch"
 
+echo "== a TERM-ignoring git under the CLI (DND-1506)"
+
+# 9. The git the writer runs ignores TERM and blocks on a fifo nobody writes
+# (an event, never a sleep). It starts a child that also ignores TERM, so the
+# check covers its whole process group. Once the binding returns, neither may
+# survive: the writer's KILL must land before the binding's outer KILL ends
+# Ruby. The wait for each pid is a cap on a hang, not a verdict on speed: a
+# killed process is gone at once, an orphan never goes.
+FG="${TMP}/fake-git"; mkdir -p "${FG}/bin"
+mkfifo "${FG}/never-written"
+printf '#!/bin/bash\ntrap "" TERM\nprintf "%%s\\n" "$$" >> "%s"\ncat "%s" &\nprintf "%%s\\n" "$!" >> "%s"\nwait\n' \
+  "${FG}/pids" "${FG}/never-written" "${FG}/pids" > "${FG}/bin/git"
+chmod +x "${FG}/bin/git"
+gone() { timeout 5 tail -s 0.1 --pid="$1" -f /dev/null; }
+PATH="${FG}/bin:${PATH}" caller "${LIB}" "${TMP}/s9" "athena_telemetry_emit --event merge.landed --attr via=push"
+eq "9 TERM-ignoring git: the caller exits 0, stdout its own" "${CODE}:${OUT}" "0:after"
+mapfile -t FGPIDS < <(cat "${FG}/pids" 2>/dev/null)
+eq "9 the fake git and its child both started" "${#FGPIDS[@]}" "2"
+SURVIVORS=""
+for p in "${FGPIDS[@]}"; do
+  [[ "${p}" =~ ^[0-9]+$ ]] || continue
+  gone "${p}" || SURVIVORS="${SURVIVORS} ${p}"
+done
+eq "9 no process of the fake git's group survives the emit" "${SURVIVORS}" ""
+for p in ${SURVIVORS}; do kill -KILL "${p}" 2>/dev/null; done
+
 echo "== the clock helpers"
 caller "${LIB}" "${TMP}/s6" 't0=$(athena_telemetry_clock_us); [[ $t0 =~ ^[0-9]{16,}$ ]] && echo clock-ok; d=$(athena_telemetry_seconds_since "$t0"); [[ $d =~ ^[0-9]+\.[0-9]{3}$ ]] && echo dur-ok'
 eq "6 clock_us is microseconds and seconds_since is S.mmm" "${OUT}" $'clock-ok\ndur-ok\nafter'

@@ -452,23 +452,32 @@ module AthenaTelemetry
   #
   # The call is bounded (DND-1494): a git that hangs (an index lock, a pipe or
   # network wait) would stall every in-process emitter. Past GIT_TIMEOUT_S its
-  # process group gets TERM, then KILL (BoundedCommand), and the context is all
-  # nil with the drop git_context_timeout. The bound sits under the CLI's
-  # `timeout -k 1 2`, so a CLI emit normally counts the timeout instead of being
-  # killed. Residuals (contract -> Unit of work): a git in uninterruptible sleep
-  # survives KILL and the emit waits for it; a git that ignores TERM outlives a
-  # CLI emit killed by its outer timeout, uncounted.
+  # process group gets TERM, then KILL GIT_KILL_GRACE_S later (BoundedCommand),
+  # and the context is all nil with the drop git_context_timeout.
+  #
+  # Both numbers fit inside the shell binding's `timeout -k 1 2`
+  # (ai/lib/telemetry-emit.sh), so a git that ignores TERM never outlives a CLI
+  # emit (DND-1506):
+  # - timeout + grace (1.5 s) is under the outer TERM (2 s), so a CLI emit
+  #   normally kills git and counts the timeout instead of being killed;
+  # - the grace alone (0.5 s) is under the outer TERM-to-KILL gap (1 s). The
+  #   outer TERM raises in Ruby, BoundedCommand's cleanup sends the group TERM
+  #   then KILL a grace later, and Ruby is still alive to send that KILL.
+  # The test suite pins both inequalities against the binding's numbers.
+  # Residual (contract -> Unit of work): a git in uninterruptible sleep
+  # survives KILL and the emit waits for it.
   module GitContext
     Context = Struct.new(:branch, :repo, :head, keyword_init: true)
     NONE = Context.new.freeze
     NOT_A_REPO = /not a git repository/i.freeze
     GIT_TIMEOUT_S = 1
+    GIT_KILL_GRACE_S = 0.5
 
     module_function
 
     def read(dir, git: "git", timeout: GIT_TIMEOUT_S)
       res = BoundedCommand.run([git, "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir",
-                                "HEAD", "--abbrev-ref", "HEAD"], timeout: timeout)
+                                "HEAD", "--abbrev-ref", "HEAD"], timeout: timeout, kill_grace: GIT_KILL_GRACE_S)
       return [NONE, "git_context_timeout"] if res.timed_out
 
       unless res.success?

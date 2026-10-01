@@ -32,8 +32,10 @@ module BoundedCommand
     end
   end
 
-  # How long TERM gets before KILL, and how long the pipe readers get once the
-  # group is dead (a grandchild that left the group may still hold a pipe).
+  # How long TERM gets before KILL (the default; a caller that runs under an
+  # outer bound passes a shorter kill_grace:), and how long the pipe readers
+  # get once the group is dead (a grandchild that left the group may still
+  # hold a pipe).
   KILL_GRACE_S = 2
   READER_GRACE_S = 2
 
@@ -47,7 +49,10 @@ module BoundedCommand
 
   # -> Result. argv is an Array of Strings; chdir is optional. stdin is a file
   # path the child reads as its stdin (default /dev/null: a child that reads
-  # stdin sees EOF, never the caller's terminal).
+  # stdin sees EOF, never the caller's terminal). kill_grace is how long TERM
+  # gets before KILL, on a timeout and on an interrupt alike; a caller whose
+  # own process can be killed by an outer bound passes one shorter than that
+  # bound's TERM-to-KILL gap, so the group is dead before the caller is.
   #
   # The bound covers the reads too. A command that exits in time while a
   # helper it started still holds stdout/stderr open is timed_out (its output
@@ -60,8 +65,9 @@ module BoundedCommand
   # (the call still returns); a process in uninterruptible sleep (D state)
   # survives KILL, and run's cleanup then waits for the kernel to
   # release it.
-  def self.run(argv, timeout:, chdir: nil, env: {}, stdin: File::NULL)
+  def self.run(argv, timeout:, chdir: nil, env: {}, stdin: File::NULL, kill_grace: KILL_GRACE_S)
     check_bound!(timeout)
+    check_bound!(kill_grace, "kill_grace")
     opts = { pgroup: true, in: stdin }
     opts[:chdir] = chdir if chdir
     deadline = now + timeout
@@ -82,12 +88,12 @@ module BoundedCommand
       wait = Process.detach(pid)
       out_w.close
       err_w.close
-      settled, result = wait_bounded(out_r, err_r, wait, readers, timeout, deadline)
+      settled, result = wait_bounded(out_r, err_r, wait, readers, timeout, deadline, kill_grace)
       result
     ensure
       if pid && !settled
         wait ||= Process.detach(pid)
-        kill_group(wait)
+        kill_group(wait, kill_grace)
       end
       readers.each { |t| t.kill if t.alive? }
       [out_r, out_w, err_r, err_w].each { |io| io.close unless io.closed? }
@@ -99,7 +105,7 @@ module BoundedCommand
 
   # -> [settled, Result]. `readers` is filled in place so run's cleanup can
   # kill them whatever raises here.
-  def self.wait_bounded(out, err, wait, readers, timeout, deadline)
+  def self.wait_bounded(out, err, wait, readers, timeout, deadline, kill_grace)
     readers.push(Thread.new { read_all(out) }, Thread.new { read_all(err) })
     status = wait.join(timeout)&.value
     drained = status && readers.all? { |t| t.join([deadline - now, 0].max + READER_GRACE_S) }
@@ -109,7 +115,7 @@ module BoundedCommand
                                termsig: status.termsig, timed_out: false, seconds: timeout)]
     end
 
-    kill_group(wait)
+    kill_group(wait, kill_grace)
     texts = readers.map { |t| t.join(READER_GRACE_S) ? t.value.to_s : "" }
     [true, Result.new(out: texts[0], err: texts[1], exitstatus: nil, timed_out: true, seconds: timeout)]
   end
@@ -127,11 +133,11 @@ module BoundedCommand
 
   # KILL follows TERM whether or not the leader died: a group member that
   # ignores TERM would otherwise outlive a leader that honoured it.
-  def self.kill_group(wait)
+  def self.kill_group(wait, grace)
     signal_group("TERM", wait.pid)
-    wait.join(KILL_GRACE_S)
+    wait.join(grace)
     signal_group("KILL", wait.pid)
-    wait.join(KILL_GRACE_S)
+    wait.join(grace)
   end
 
   def self.signal_group(sig, pid)

@@ -73,12 +73,15 @@ the three are `null` and `git_context_timeout` is counted, so the unit reads
 `none` unless an explicit or `ATHENA_UNIT` unit applies. The emit still
 writes its line and returns.
 
-Two hangs the bound cannot end:
-- A git stuck in the kernel (uninterruptible sleep, e.g. a stuck filesystem)
-  survives KILL, and the emit waits for the kernel to release it.
-- A git that ignores TERM is killed two seconds after it. Under the CLI the
-  outer `timeout` kills Ruby first, uncounted, and that git, in its own
-  process group, is left running.
+A git that ignores TERM is sent KILL half a second after it. That grace is
+shorter than the outer timeout's one second from TERM to KILL, so under the
+CLI the git's process group is dead before Ruby can be (DND-1506). If the
+outer TERM reaches Ruby first, the emit is lost uncounted, but Ruby still
+kills that group on its way out.
+
+One hang the bound cannot end: a git stuck in the kernel (uninterruptible
+sleep, e.g. a stuck filesystem) survives KILL, and the emit waits for the
+kernel to release it.
 
 The writer runs no other subprocess. The ticket-ref parser load and the
 overlay read below are in-process reads of regular files (the overlay reader

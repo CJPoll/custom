@@ -185,6 +185,20 @@ Dir.mktmpdir do |tmp|
     end
     check("b6 bound #{bad.inspect} refused, never read as no bound", raised)
   end
+
+  # b12 kill_grace (DND-1506) is a bound too: anything but a positive number
+  # is a caller error, never "no grace".
+  [0, -1, nil, "0.5"].each do |bad|
+    raised = begin
+      BoundedCommand.run(["true"], timeout: 10, kill_grace: bad)
+      false
+    rescue ArgumentError
+      true
+    end
+    check("b12 kill_grace #{bad.inspect} refused", raised)
+  end
+  r = BoundedCommand.run(["true"], timeout: 10, kill_grace: 0.5)
+  check("b12 a fractional kill_grace is accepted", r.success?, r.inspect)
 end
 
 puts "bounded_command: #{$pass}/#{$pass + $fail} checks passed"

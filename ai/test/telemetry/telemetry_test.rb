@@ -502,6 +502,24 @@ def bounded(fifo, &block)
   [false, nil]
 end
 
+# DND-1506: the git bound must fit inside the shell binding's outer bound, or a
+# git that ignores TERM outlives a CLI emit. Read the binding's own numbers so
+# a change to either side fails here, not as an orphan in the field.
+binding_src = File.read(File.expand_path("../../lib/telemetry-emit.sh", __dir__))
+outer = binding_src.match(/timeout -k ([0-9.]+) ([0-9.]+) "\$\{_ATHENA_TELEMETRY_CLI\}"/)
+check("hit: the shell binding's outer bound is readable (timeout -k KILL_AFTER TERM_AT)") { !outer.nil? }
+if outer
+  kill_after = Float(outer[1])
+  term_at = Float(outer[2])
+  git = T::GitContext
+  check("hit: git timeout + grace (#{git::GIT_TIMEOUT_S + git::GIT_KILL_GRACE_S}s) is under the outer TERM (#{term_at}s)") do
+    git::GIT_TIMEOUT_S + git::GIT_KILL_GRACE_S < term_at
+  end
+  check("hit: the git grace (#{git::GIT_KILL_GRACE_S}s) is under the outer TERM-to-KILL gap (#{kill_after}s)") do
+    git::GIT_KILL_GRACE_S < kill_after
+  end
+end
+
 with_hung_git do |tmp, git, _bin, fifo|
   done, got = bounded(fifo) { T::GitContext.read(tmp, git: git) }
   check("miss: a git that never answers returns, as git_context_timeout (not a hang)") do
