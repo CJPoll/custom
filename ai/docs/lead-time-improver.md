@@ -272,6 +272,22 @@ p90 over the last K comparable landings), and a status.
   revert a worse or unmeasured guard drove is never declined: land it, or a fix-forward an architect
   tickets. Judge never writes `declined`; only the verb does. Keep's
   thresholds are unchanged.
+
+  **Later (2026-10-01, DND-1548):** an experiment was judged only on a phase,
+  a total or a counter. custom:integrate:25c8114295af's check fell
+  120 s -> 5 s, yet the integrate median rose: the other checks grew +180 s
+  and the gate run rate rose 57%. The phase measured the fleet's load, not
+  the change. A change may now be recorded on `--metric check:<label>`, the
+  wall of one harness-gate check on each landing's gated head. Ingest writes
+  it as `check_walls` (`{label => wall_s}`, from the same reader as
+  `top_checks`, which is now its top 5), or `check_walls_na` with the reason.
+  Rows ingested earlier have no key, so a check metric has no before-set on
+  them: pending, never a gain. Record refuses a label that matches no check
+  on the window's landings (exit 2, the closest labels named) and reads no
+  landing with `check_walls` as could not look (exit 3). Judge prints the
+  phase median beside the verdict, labelled context; it never feeds it. The
+  verdict rules, thresholds and guards are unchanged, `--phase` still admits
+  the experiment, and no recorded experiment changes its metric.
 - **Pending** while either side has fewer than K. A pending row is never
   reported as a gain. Still pending after 7 days: journaled as inconclusive,
   and it no longer blocks its phase.

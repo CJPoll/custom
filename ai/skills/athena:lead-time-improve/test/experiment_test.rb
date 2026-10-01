@@ -252,6 +252,113 @@ check("Metric.check_kind: instrumentation must measure na_share, a change must n
     X.kind_error("change", "phase").nil? && X.kind_error("instrumentation", "na_share").nil?
 end
 
+# ── check:<label> (DND-1548): one check's wall on each landing's gated head ──
+
+WAIT = "self-test: ai/lib/fleet/test/control/wait"
+# Parsed per case, so an unfixed parser fails each case rather than the file.
+def check_metric = X::Metric.parse("check:#{WAIT}", phase: "integrate")
+
+# A row with check_walls (or none: walls nil leaves the key out).
+def crow(hours, walls, verify: 600, na: nil)
+  r = row(hours, verify: verify)
+  r["check_walls"] = walls unless walls.nil?
+  r["check_walls_na"] = na if na
+  r
+end
+
+check("Metric.parse: check:<label> parses for any non-empty label, colons and spaces included") do
+  m = X::Metric.parse("check:self-test: x", phase: "integrate")
+  m.check? && m.check_label == "self-test: x" && m.name == "check:self-test: x"
+end
+
+check("Metric.parse: check: alone raises, and so does a label with a newline") do
+  raises = lambda do |name|
+    X::Metric.parse(name, phase: "integrate")
+    false
+  rescue X::UsageError => e
+    e.message.include?("check:")
+  end
+  raises.call("check:") && raises.call("check:a\nb")
+end
+
+check("Metric: a check metric reads its label's wall from check_walls") do
+  check_metric.value(crow(1, { WAIT => 120.3, "other" => 9.0 })) == 120.3
+end
+
+check("Metric: key absent, check_walls_na set and label missing are three distinct n/a reasons, never 0") do
+  absent = crow(1, nil)
+  na = crow(1, nil, na: "no harness_gate.check on aaaaaaaa; no timings rows for aaaaaaaa")
+  missing = crow(1, { "other" => 9.0 }).merge("gated_head" => "c" * 40)
+  vals = [absent, na, missing].map { |r| check_metric.value(r) }
+  reasons = [absent, na, missing].map { |r| check_metric.na_reason(r) }
+  vals.all?(&:nil?) && reasons.uniq.size == 3 &&
+    reasons[0].include?("row predates check_walls") &&
+    reasons[1].include?("no harness_gate.check on aaaaaaaa") &&
+    reasons[2].include?("check #{WAIT} did not run on cccccccc")
+end
+
+check("Metric: a measured row has no n/a reason") { check_metric.na_reason(crow(1, { WAIT => 5.0 })).nil? }
+
+check("judge: the check falls 120 -> 5 s while the phase rises: keep (the regression case)") do
+  e = exp(metric: "check:#{WAIT}", phase: "integrate")
+  rows = (1..10).map { |i| crow(-i, { WAIT => 120.0 }, verify: 600) } + (1..10).map { |i| crow(i, { WAIT => 5.0 }, verify: 900) }
+  s = X.sides(rows, metric: check_metric, exclude: [], boundary: t(RECORDED))
+  v = X.judge(e, before: s[:before], after: s[:after], guards_before: guards, guards_after: guards, now: NOW)
+  ctx = X.phase_context(s[:before], s[:after], phase: "verify")
+  v["status"] == "keep" && v["before"]["median"] == 120.0 && v["after"]["median"] == 5.0 &&
+    ctx["before"]["median"] == 600 && ctx["after"]["median"] == 900
+end
+
+check("judge: the check rises: revert") do
+  e = exp(metric: "check:#{WAIT}", phase: "integrate")
+  v = X.judge(e, before: (1..10).map { |i| crow(-i, { WAIT => 5.0 }) }, after: (1..10).map { |i| crow(i, { WAIT => 6.0 }) },
+                 guards_before: guards, guards_after: guards, now: NOW)
+  v["status"] == "revert" && v["reason"].include?("median rose")
+end
+
+check("judge: the check falls but a guard is worse: revert") do
+  e = exp(metric: "check:#{WAIT}", phase: "integrate")
+  v = X.judge(e, before: (1..10).map { |i| crow(-i, { WAIT => 120.0 }) }, after: (1..10).map { |i| crow(i, { WAIT => 5.0 }) },
+                 guards_before: guards(red: 0.1), guards_after: guards(red: 0.3), now: NOW)
+  v["status"] == "revert" && v["reason"].include?("gate_red_rate")
+end
+
+check("sides: rows without check_walls give no before-set, so judge says pending (never a gain)") do
+  e = exp(metric: "check:#{WAIT}", phase: "integrate")
+  rows = (1..10).map { |i| crow(-i, nil) } + (1..10).map { |i| crow(i, { WAIT => 5.0 }) }
+  s = X.sides(rows, metric: check_metric, exclude: [], boundary: t(RECORDED))
+  v = X.judge(e, before: s[:before], after: s[:after], guards_before: nil, guards_after: guards, now: NOW)
+  s[:before].nil? && s[:before_na].include?("row predates check_walls") && v["status"] == "pending"
+end
+
+check("check_label_error: a label on any of the window's landings passes") do
+  rows = [crow(-2, { "a" => 1.0 }), crow(-1, { WAIT => 2.0 })]
+  X.check_label_error(rows, WAIT, window: 20).nil?
+end
+
+check("check_label_error: a misspelled label is unknown, naming the 5 closest labels, closest first") do
+  labels = { WAIT => 1.0, "self-test: ai/lib/fleet/test/control/drain" => 1.0, "blast-radius self-test" => 1.0,
+             "a" => 1.0, "b" => 1.0, "c" => 1.0, "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" => 1.0 }
+  err = X.check_label_error([crow(-1, labels), crow(-2, nil)], "self-test: ai/lib/fleet/test/control/wiat", window: 20)
+  err[:state] == :unknown && err[:n] == 1 && err[:closest].size == 5 && err[:closest].first == WAIT &&
+    !err[:closest].include?("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
+end
+
+check("check_label_error: only the last `window` landings with check_walls are searched") do
+  rows = [crow(-3, { WAIT => 1.0 }), crow(-2, { "a" => 1.0 }), crow(-1, { "b" => 1.0 })]
+  err = X.check_label_error(rows, WAIT, window: 2)
+  err[:state] == :unknown && err[:n] == 2
+end
+
+check("check_label_error: no landing carries check_walls: could not look, never unknown") do
+  err = X.check_label_error([crow(-1, nil), crow(-2, nil, na: "no source")], WAIT, window: 20)
+  err[:state] == :could_not_look && err[:n].zero?
+end
+
+check("record_error: a check metric record folds; kind_error lets a change take it") do
+  X.kind_error("change", "check:#{WAIT}").nil? && X.kind_error("instrumentation", "check:#{WAIT}").include?("na_share")
+end
+
 # ── admit? ──────────────────────────────────────────────────────────────────
 
 pending = [exp(kind: "change", phase: "verify").merge("status" => "pending")]

@@ -112,8 +112,15 @@ HELP = <<~TXT
     --repo R             an `improve` repo in this machine's lead-time repo
                          list (ai/bin/lead-time-repos)
     --phase P            implement | verify | queue | integrate | merge
-    --metric M           phase | lead | code | counter:<name> | na_share
-                         (instrumentation measures na_share; a change does not)
+    --metric M           phase | lead | code | counter:<name> | check:<label> | na_share
+                         (instrumentation measures na_share; a change does not).
+                         check:<label> is one harness-gate check's wall on each
+                         landing's gated head, as the gate labels it (DND-1548):
+                         record a change whose mechanism is one check on it. A
+                         label on none of the config window's landings with
+                         check_walls is refused (exit 2, naming the closest
+                         labels); no landing with check_walls is exit 3. Judge
+                         prints the phase median beside it as context only.
     --commit SHA         the experiment's commit as landed on main (40 hex)
     --kind K             change | instrumentation
     --hypothesis-file F  a UTF-8 text file: what the change should move, and why
@@ -179,8 +186,14 @@ module Setup
   end
 
   # The repo, resolved through the one lead-time repo resolver (DND-1526).
-  def repo(env, name)
-    LeadTimeConfigIO.resolve(env).find(name)
+  def repo(env, name) = config { LeadTimeConfigIO.resolve(env).find(name) }
+
+  # The config's window: how many recent landings a check label is looked
+  # for in (DND-1548).
+  def window(env) = config { LeadTimeConfigIO.resolve(env).window }
+
+  def config
+    yield
   rescue LeadTimeConfig::Skipped => e
     refuse(4, e.message, e.fix)
   rescue LeadTimeConfig::CouldNotLook => e
@@ -283,6 +296,7 @@ module Record
     hypothesis = read_hypothesis(opts["--hypothesis-file"])
     state = Setup.state_dir(env)
     rows = Setup.ledger_rows(state, repo)
+    check_label!(rows, metric, repo, env) if metric.check?
     on_main!(repo, commit)
     row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows)
     Setup.append(Setup.store(state)) { |existing| admit!(X.fold(existing), row) }
@@ -298,6 +312,26 @@ module Record
     metric
   rescue X::UsageError => e
     refuse(2, e.message, "see experiment --help for the phases and metrics")
+  end
+
+  # A check:<label> that matches no check is the failed-lookup class: it
+  # would judge nothing for 7 days. Refuse it unless the label ran on at
+  # least one of the window's landings that carry check_walls.
+  def check_label!(rows, metric, repo, env)
+    window = Setup.window(env)
+    err = X.check_label_error(rows, metric.check_label, window: window)
+    return unless err
+
+    if err[:state] == :could_not_look
+      refuse(3, "could not look: none of #{repo.name}'s #{rows.size} ledgered landing(s) carries check_walls " \
+                "(rows ingested before DND-1548 have none), so check #{metric.check_label.inspect} cannot be looked up",
+             "run ai/bin/lead-time-phases --ingest --repo #{repo.name} after a landing whose gate ran; " \
+             "this is not an unknown label")
+    end
+    refuse(2, "check #{metric.check_label.inspect} appears on none of #{err[:n]} landings with check_walls " \
+              "(the last #{window}); closest: #{err[:closest].map(&:inspect).join(', ')}",
+           "copy the label exactly from harness-gate's timings.jsonl (~/.local/state/athena/harness-gate/, " \
+           "its \"label\" field) or the gate's output, then re-run record")
   end
 
   def read_hypothesis(path) = Setup.read_text(path, "hypothesis", "write what the change should move, and why")
@@ -380,7 +414,7 @@ module Judge
     results = mine.select { |e| e["status"] == "pending" }.map { |e| [e, verdict(e, rows, repo, shas, now)] }
     results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo)] }
     appended = Setup.append(store) { |existing| fresh_rows(existing, results, now) }
-    results.each { |e, v| puts line(e, v) }
+    results.each { |e, v| puts line(e, v, context(e, rows)) }
     judged = results.map { |_, v| v["status"] }
     tally = X::JUDGED.map { |s| "#{judged.count(s)} #{s}" }.join(", ")
     declined = mine.count { |e| e["status"] == "declined" }
@@ -412,6 +446,19 @@ module Judge
     s = X.sides(rows, metric: metric, exclude: [exp["commit"]], boundary: X.at(landing))
     X.judge(exp, before: s[:before], after: s[:after], guards_before: guards(s[:before], repo, shas),
                  guards_after: guards(s[:after], repo, shas), now: now)
+  end
+
+  # A check metric's phase stats over the same two sides, or nil (another
+  # metric, or the landing is not ledgered). Printed, never judged.
+  def context(exp, rows)
+    return nil unless exp["status"] == "pending"
+
+    metric = X::Metric.parse(exp["metric"], phase: exp["phase"])
+    landing = Setup.landing_row(rows, exp["commit"])
+    return nil unless metric.check? && landing
+
+    s = X.sides(rows, metric: metric, exclude: [exp["commit"]], boundary: X.at(landing))
+    X.phase_context(s[:before], s[:after], phase: exp["phase"])
   end
 
   # Not in the ledger: say whether it is on main (ingest lag) or not.
@@ -453,10 +500,11 @@ module Judge
     "n=#{s['n']} median=#{fmt(s['median'])} p90=#{fmt(s['p90'])}"
   end
 
-  def line(exp, v)
+  def line(exp, v, ctx = nil)
     g = v["guards"]&.map { |name, d| "#{name} #{d['before'].nil? ? 'n/a' : d['before']}->#{d['after'].nil? ? 'n/a' : d['after']} #{d['state']}" }
+    phase = ctx ? " | phase (context, not judged): before #{side(ctx['before'])} | after #{side(ctx['after'])}" : ""
     "experiment: #{exp['id']} #{v['status'].upcase} kind=#{exp['kind']} metric=#{exp['metric']} | " \
-      "before #{side(v['before'])} | after #{side(v['after'])} | guards #{g ? g.join(', ') : 'n/a'} | #{v['reason']}"
+      "before #{side(v['before'])} | after #{side(v['after'])} | guards #{g ? g.join(', ') : 'n/a'} | #{v['reason']}#{phase}"
   end
 end
 

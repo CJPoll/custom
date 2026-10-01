@@ -290,6 +290,35 @@ has "... naming the guard" "$(err)" "a guard worsened (reverts)"
 has "... with Fix:" "$(err)" "Fix:"
 eq "... nothing written" "$(grep -c . "${STATE5}/experiments.jsonl")" "${N5}"
 
+# ── check:<label>: a change judged on its own check's wall (DND-1548) ───────
+echo "== check metric"
+CHK="$(commit 2026-09-28T11:00:00Z "fixture: a one-check fix")"
+CID="custom:verify:${CHK:0:12}"
+WAITL="self-test: fixture/control/wait"
+STATE6="${TMP}/state6"
+mkdir -p "${STATE6}"
+s6() { LEAD_TIME_STATE_DIR="${STATE6}" LEAD_TIME_EXPERIMENT_NOW=2026-09-29T12:00:00Z "$@"; }
+has "--help lists the check metric" "$(run --help >/dev/null; out)" "check:<label>"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE6}/ledger.jsonl" "${CHK}" 700 2026-09-28T00:00:00Z
+eq "record a check metric when no landing carries check_walls: exit 3" "$(s6 rec verify "check:${WAITL}" "${CHK}" change)" "3"
+has "... could not look, never an unknown label" "$(err)" "could not look"
+lacks "... and it does not call the label unknown" "$(err)" "appears on none"
+eq "... nothing written" "$(test -e "${STATE6}/experiments.jsonl" && echo yes || echo no)" "no"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE6}/ledger.jsonl" "${CHK}" 700 2026-09-28T00:00:00Z checks
+eq "check: with no label: exit 2" "$(s6 rec verify "check:" "${CHK}" change)" "2"
+has "... saying it needs a label" "$(err)" "needs a check label"
+eq "regression: record with a misspelled label: exit 2" "$(s6 rec verify "check:self-test: fixture/control/wiat" "${CHK}" change)" "2"
+has "... saying it appears on none of the window's landings" "$(err)" "appears on none of 20 landings with check_walls"
+has "... naming the closest label" "$(err)" "${WAITL}"
+has "... with a Fix: naming timings.jsonl" "$(err)" "timings.jsonl"
+eq "... nothing written" "$(test -e "${STATE6}/experiments.jsonl" && echo yes || echo no)" "no"
+eq "record on the check: exit 0" "$(s6 rec verify "check:${WAITL}" "${CHK}" change)" "0"
+has "... its baseline is the check's wall" "$(out)" "metric=check:${WAITL} phase=verify baseline n=10 median=120.0s"
+eq "judge: exit 0" "$(s6 run judge --repo custom)" "0"
+has "the check fell 120 -> 5 s while the phase rose: KEEP" "$(out)" "${CID} KEEP"
+has "... judged on the check's numbers" "$(out)" "before n=10 median=120.0s p90=120.0s | after n=10 median=5.0s p90=5.0s"
+has "... with the phase median beside it as context" "$(out)" "phase (context, not judged): before n=10 median=600s p90=600s | after n=10 median=700s p90=700s"
+
 # ── reverts guard: could not look is unmeasured, never 0 ────────────────────
 echo "== reverts could not look"
 # A checkout that is present but has no main (DND-1526: a missing path is

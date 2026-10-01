@@ -62,6 +62,9 @@ module LeadTimeExperiment
   COUNTERS = %w[gate_runs gate_wall_s gate_red slot_wait_s critic_rounds critic_blocks critic_wall_s lock_wait_s].freeze
   GUARDS = %w[critic_block_rate gate_red_rate reverts].freeze
   NA_SHARE = "na_share"
+  CHECK_PREFIX = "check:"
+  # How many near labels a refused check:<label> names.
+  CLOSEST = 5
 
   class UsageError < StandardError; end
 
@@ -69,17 +72,27 @@ module LeadTimeExperiment
   #   phase              the experiment's phase duration (phases.<phase>.s)
   #   lead | code        the landing's total (lead_s / code_s)
   #   counter:<name>     a ledger counter (counters.<name>)
+  #   check:<label>      one harness-gate check's wall on the landing's gated
+  #                      head (check_walls.<label>, DND-1548): a change whose
+  #                      mechanism is one check is judged on that check
   #   na_share           instrumentation: whether the phase is n/a at all
   Metric = Struct.new(:name, :phase, keyword_init: true) do
     def self.parse(name, phase:)
       raise UsageError, "unknown phase #{phase.inspect} (known: #{PHASES.join(', ')})" unless PHASES.include?(phase)
 
       n = name.to_s
+      if n.start_with?(CHECK_PREFIX)
+        label = n.delete_prefix(CHECK_PREFIX)
+        raise UsageError, "#{CHECK_PREFIX} needs a check label (#{CHECK_PREFIX}<label>, as harness-gate prints it)" if label.empty?
+        raise UsageError, "#{CHECK_PREFIX}<label> cannot contain a newline: #{n.inspect}" if label.include?("\n")
+
+        return new(name: n, phase: phase)
+      end
       known = n == "phase" || n == NA_SHARE || TOTALS.key?(n) ||
               (n.start_with?("counter:") && COUNTERS.include?(n.delete_prefix("counter:")))
       unless known
         raise UsageError, "unknown metric #{n.inspect} (known: phase, lead, code, #{NA_SHARE}, " \
-                          "counter:<#{COUNTERS.join('|')}>)"
+                          "counter:<#{COUNTERS.join('|')}>, #{CHECK_PREFIX}<label>)"
       end
 
       new(name: n, phase: phase)
@@ -87,13 +100,47 @@ module LeadTimeExperiment
 
     def na_share? = name == NA_SHARE
 
+    def check? = name.start_with?(CHECK_PREFIX)
+
+    def check_label = check? ? name.delete_prefix(CHECK_PREFIX) : nil
+
     # The row's value, or nil when it is n/a there.
     def value(row)
       case name
       when "phase", NA_SHARE then row.dig("phases", phase, "s")
       when "lead", "code" then row[TOTALS[name]]
-      else row.dig("counters", name.delete_prefix("counter:"))
+      else check? ? check_wall(row) : row.dig("counters", name.delete_prefix("counter:"))
       end
+    end
+
+    # Why the row's value is n/a, or nil when it is measured. A check metric
+    # has three distinct reasons; none of them is ever read as 0.
+    def na_reason(row)
+      return nil unless value(row).nil?
+      return check_na_reason(row) if check?
+
+      why = case name
+            when "phase", NA_SHARE then row.dig("phases", phase, "na_reason")
+            when "lead", "code" then row["lead_na_reason"]
+            else row.dig("counters_na", name.delete_prefix("counter:"))
+            end
+      why || "#{name} is null on this row"
+    end
+
+    private
+
+    def check_wall(row)
+      walls = row["check_walls"]
+      wall = walls.is_a?(Hash) ? walls[check_label] : nil
+      wall.is_a?(Numeric) ? wall : nil
+    end
+
+    def check_na_reason(row)
+      return "check_walls n/a: #{row['check_walls_na']}" if row["check_walls_na"]
+      return "row predates check_walls" unless row.key?("check_walls")
+
+      head = (row["gated_head"] || row["landed_commit"]).to_s[0, 8]
+      "check #{check_label} did not run on #{head}"
     end
   end
 
@@ -135,10 +182,63 @@ module LeadTimeExperiment
     if before.empty?
       why = "no before-set: #{label(metric)} has no measured landing before #{boundary.utc.iso8601} " \
             "(its telemetry began after the baseline, or the ledger holds nothing earlier)"
+      latest = latest_unmeasured(rows, metric, exclude, boundary)
+      why += "; the latest landing before it: #{latest}" if latest
       return { before: nil, after: after, before_na: why }
     end
 
     { before: before, after: after, before_na: nil }
+  end
+
+  # The n/a reason of the newest unmeasured landing before the boundary, so
+  # an empty before-set names why (e.g. "row predates check_walls"); nil
+  # when there is no such landing.
+  def latest_unmeasured(rows, metric, exclude, boundary)
+    skip = exclude.map(&:to_s)
+    last = rows.reject { |r| skip.include?(r["landed_commit"].to_s) }
+               .select { |r| at(r) && at(r) < boundary && metric.value(r).nil? }
+               .max_by { |r| [r["landed_at"].to_s, r["ticket"].to_s] }
+    last && metric.na_reason(last)
+  end
+
+  # The phase's own before/after stats over a check metric's two sides:
+  # printed beside the verdict as context, never judged (DND-1548). A check
+  # metric's phase median also moves with every other landing's load.
+  def phase_context(before, after, phase:)
+    m = Metric.parse("phase", phase: phase)
+    { "before" => before && stats(before.reject { |r| m.value(r).nil? }, m),
+      "after" => after && stats(after.reject { |r| m.value(r).nil? }, m) }
+  end
+
+  # nil when `label` names a check on at least one of the last `window`
+  # landings that carry check_walls; else why it matches nothing:
+  #   {state: :could_not_look, n: 0}  no landing carries check_walls
+  #   {state: :unknown, n:, closest: [label]}  a failed lookup, with the
+  #     CLOSEST labels seen, nearest first
+  def check_label_error(rows, label, window:)
+    with = rows.select { |r| r["check_walls"].is_a?(Hash) }
+               .sort_by { |r| [r["landed_at"].to_s, r["ticket"].to_s] }.last(window)
+    return { state: :could_not_look, n: 0 } if with.empty?
+
+    seen = with.flat_map { |r| r["check_walls"].keys }.uniq
+    return nil if seen.include?(label)
+
+    { state: :unknown, n: with.size, closest: closest(label, seen) }
+  end
+
+  def closest(label, labels, n = CLOSEST) = labels.sort_by { |l| [distance(label, l), l] }.first(n)
+
+  # Levenshtein edit distance.
+  def distance(a, b)
+    prev = (0..b.size).to_a
+    a.each_char.with_index(1) do |ca, i|
+      cur = [i]
+      b.each_char.with_index(1) do |cb, j|
+        cur << [prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca == cb ? 0 : 1)].min
+      end
+      prev = cur
+    end
+    prev.last
   end
 
   def label(metric) = metric.name == "phase" ? "phase #{metric.phase}" : "#{metric.name} on #{metric.phase}"

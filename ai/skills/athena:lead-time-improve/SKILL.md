@@ -180,6 +180,16 @@ experiment record --repo R --phase P --kind change --metric phase \
 
 - `--kind instrumentation --metric na_share` for an instrumentation change.
   It is never refused for a pending change on its phase.
+- When the change's mechanism is one harness-gate check, record it on
+  `--metric check:<label>`, the label exactly as the gate prints it (copy it
+  from harness-gate's `timings.jsonl`). The phase median moves with every
+  other landing's load and suite growth; the check's wall moves with this
+  change. The hypothesis states the expected check wall and why the phase
+  should follow. `--phase` is still required, and one pending change per
+  phase still holds. A label on none of the window's landings is refused
+  (exit 2, naming the closest labels); exit 3 means no landing carries
+  `check_walls` yet. Never re-record an experiment on another metric after
+  seeing its result.
 - Other metrics: `lead`, `code`, `counter:<name>` (`--help` lists them), when
   the change targets one directly.
 - A refusal (exit 2) names the pending experiment that blocks it. Do not work
