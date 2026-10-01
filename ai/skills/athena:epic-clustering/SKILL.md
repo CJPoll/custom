@@ -183,7 +183,9 @@ It's ok for there not to be any."
    [[athena:slack]] → *Sending one: the athena MCP, never `bin/*`*. It carries
    no buttons. The post claims its own thread for that inbox, so Cody's
    replies route to this project's Slack inbox. Check the reply's `claim`:
-   `claimed` or `already_yours` is done; on `skipped`, follow its `fix`
+   `claimed` or `already_yours` is done; `already_claimed` means another
+   inbox holds the DM thread, so note it in the pass summary; on `skipped`,
+   follow its `fix`
    (usually `mcp__athena__slack_thread_claim` with `thread_ts` = the returned
    `ts`), never re-post. The statuses: `ai/contracts/athena-events.md` →
    *`slack_post` claims the thread it posts in*.

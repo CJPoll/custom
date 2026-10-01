@@ -187,8 +187,8 @@ not by this path. Pass `inbox_name` (any inbox of this project; it names the
 project) and the post claims the thread it started or joined for this
 project's Slack inbox. Pass `claim: false` when no reply is expected, or when
 you answer in a thread that should stay free for another project's session.
-Read the reply's `claim` object; on `skipped` with a reason, follow its `fix`,
-and never re-post. What each status and reason means, and how they map to this
+Read the reply's `claim` object; on `skipped` for any reason but `opted_out`,
+follow its `fix`, and never re-post. What each status and reason means, and how they map to this
 section's `claim=` lines: `ai/contracts/athena-events.md` → *Thread replies
 route to the thread's claimant* → *`slack_post` claims the thread it posts in*.
 

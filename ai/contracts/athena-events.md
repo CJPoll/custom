@@ -4185,6 +4185,11 @@ router claims a root it routed by topic*, below). The `athena` MCP tool
 `slack_post` writes one for the thread it posts in (*`slack_post` claims
 the thread it posts in*, below; DND-1027).
 
+**Later (2026-10-01, DND-1558):** this paragraph read "It has two writers
+today and a third to come", and said `slack_post` "will write one". Superseded
+by DND-1027 (gen_saas PR #653, deployed 2026-10-01): `slack_post` now writes
+the third.
+
 **Later (2026-10-01):** a claim was written only by the `slack_thread_claim`
 MCP tool, so a reply to a root the router had sent to a topic route followed
 the channel route until the receiving session claimed the thread. Superseded by
@@ -4283,8 +4288,11 @@ follow it.
     `--no-claim`, and a failed claim as `claim=FAILED reason=<token>` with a
     `Fix:`. So server `skipped`/`opted_out` is harness `claim=skipped`;
     server `skipped` with any other reason is harness `claim=FAILED`; and
-    `claimed`, `already_yours` and `already_claimed` mean the same on both
-    sides. The reason tokens are two separate vocabularies (the server's
+    `claimed` and `already_yours` mean the same on both sides.
+    `already_claimed` depends on the harness caller: `reply` and
+    `dm --thread_ts` print `claim=already_claimed` (exit 0), while `post`
+    and a new `dm` print `claim=FAILED reason=already-claimed` (exit 3),
+    because the thread they started should have been theirs. The reason tokens are two separate vocabularies (the server's
     snake_case, the harness's dashed tokens), not one list.
 
   Why the server can do this for `slack_post` and not for the harness's own
@@ -4294,8 +4302,7 @@ follow it.
 
   **Later (2026-10-01, DND-1558):** this bullet read "DND-1027, not yet
   shipped … How the tool's reply reports the claim is DND-1027's to define …
-  Until then, an MCP post claims nothing", and the claim had "two writers
-  today and a third to come". Superseded: gen_saas PR #653 shipped and
+  Until then, an MCP post claims nothing". Superseded: gen_saas PR #653 shipped and
   deployed on 2026-10-01, so every `slack_post` with an `inbox_name` now
   claims its thread unless it passes `claim: false`. The reply's `claim`
   object and its reasons above are quoted from gen_saas `origin/main`
@@ -4522,14 +4529,14 @@ request** and answers Slack; the route worker finishes it.
   in its own webhook by step 1 (the thread's claim, or the channel route),
   ahead of its root, and does not follow a root the worker later routes by
   topic.
-- **A database fault under the lock fails the delivery.** A Postgres error
-  or a lost connection anywhere in the locked phase rolls the whole phase
+- **A database fault under the lock fails the delivery.** A raised Postgres
+  error or a lost connection anywhere in the locked phase rolls the whole phase
   back and answers `:storage_failed` (outcome step `conversation_lock`), so
   Slack retries (gen_saas ADR 21 rule 2). This includes a fault the topic
   step's own guard rescued, because that leaves the transaction aborted.
   Any other topic-step failure (a bug, an exit) still falls back to the
-  channel route with no topic, and so does any failure in the route worker,
-  which takes no lock.
+  channel route with no topic, and so does a topic-step failure in the
+  route worker, which takes no lock.
 
   **Later (2026-10-01, DND-1558):** this read "Step 0 is a read before a
   write, not a lock … No lock is taken on the key; an advisory lock on it
@@ -4537,8 +4544,11 @@ request** and answers Slack; the route worker finishes it.
   silently to the channel route inside the webhook. Superseded by DND-1516
   (gen_saas PR #656, deployed 2026-10-01): the lock closes the overlap
   window, and a database fault in the locked phase is now `:storage_failed`,
-  which Slack retries. Quoted from gen_saas `origin/main`'s
-  `Athena.SlackEvents` moduledoc (*Route requests*) and `locked/4`.
+  which Slack retries. The lock, its scope and the first residual follow
+  gen_saas `origin/main`'s `Athena.SlackEvents` moduledoc (*Route
+  requests*) and `locked/4`. The second residual (a reply between the
+  root's failed delivery and Slack's retry) is carried over from the old
+  text; the moduledoc does not name it, and the lock does not close it.
 - **Two conversations are independent, including two in one channel.** The
   worker routes up to four requests at once, so two new conversations may be
   delivered in either order. Two top-level DMs seconds apart are two keys: the
