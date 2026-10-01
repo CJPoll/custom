@@ -90,3 +90,33 @@ SELF-TEST FAILED
 | M3: lines besides `ENV_LINE` tolerated | script running a line besides the PATH line (1 failed) |
 | M4: `CLAUDE_ENV_FILE` dropped from `SHARED_VARS` | the owner's own CLAUDE_ENV_FILE beside the guard -> DRIFT whose Fix: says remove it by hand (1 failed). "CLAUDE_ENV_FILE alone -> INACTIVE" still passes: `any_guard_key?`'s fixed rule decides INACTIVE first, and it never counted CLAUDE_ENV_FILE |
 | M5: no shared-key `Fix:` on DRIFT | the owner's own CLAUDE_ENV_FILE beside the guard (1 failed) |
+
+## 2026-10-01 — DND-1517 (a hook that left the registry could not be unwired)
+
+- **Defect:** `scripts/setup-hooks` had no way to unwire a hook whose row left
+  `ai/hooks/registry.json`, and this checker had no notion of a retired hook.
+  DND-1487 had to keep `ai/hooks/harness-event.sh` as a no-op stub. The fix adds
+  the registry's `retired` list, read from what LANDED.
+- **Fail-first:** this suite with the new 14b cases, run against the unfixed
+  checker (origin/main `e0f6c03f`):
+
+```
+  FAIL  landed retired hook still wired -> FAIL naming it and the installer
+        exit 0, want 1
+  FAIL  branch drops a landed retirement, hook still wired -> still FAIL
+  FAIL  a retirement only this branch adds, still wired -> pass, named as pending
+  FAIL  branch registry both declares and retires one row -> FAIL naming it
+check-hooks-registered landed-bar suite: 34 passed, 4 failed
+```
+
+  The malformed-landed-list case was added in the review round, after the fix.
+  M4 below is its fail-first.
+
+- **After the fix:** `check-hooks-registered landed-bar suite: 39 passed, 0 failed`.
+
+| Mutation (on a copy of the fixed code) | Caught by |
+| --- | --- |
+| M1: `still_wired = []` (retirements ignored) | landed retired hook still wired; ...its Fix:; branch drops a landed retirement (3 failed) |
+| M2: retirements read from the branch registry, not the landed one | branch drops a landed retirement, hook still wired (1 failed) |
+| M3: no declared-and-retired consistency check | branch registry both declares and retires one row (1 failed) |
+| M4: a non-array `retired` read as empty | landed retired list malformed -> could not measure (1 failed) |

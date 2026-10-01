@@ -291,6 +291,18 @@ wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh" "PostToolUse=${
 check "${D}"; expect "a retirement only this branch adds, still wired -> pass, named as pending" 0 \
   "r\.sh.*pending retirement" "retired, still wired"
 
+D="$(new_fixture r1517-d)"
+REG="${D}/main/ai/hooks/registry.json" /usr/bin/ruby -rjson -e '
+  reg = JSON.parse(File.read(ENV["REG"])); reg["retired"] = {}
+  File.write(ENV["REG"], JSON.generate(reg))'
+commit "${D}/main" bad-retired
+git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+git -C "${D}/wt" "${GITC[@]}" rebase -q origin/main >/dev/null 2>&1
+registry "${D}/wt" "SessionStart=a.sh"; commit "${D}/wt" fix-on-branch
+wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh"
+check "${D}"; expect "landed retired list malformed -> could not measure, exit 3 (never read as none retired)" 3 \
+  "could not measure"
+
 D="$(new_fixture r1517-c)"
 retire "${D}/wt" "SessionStart=a.sh"; commit "${D}/wt" both
 wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh"

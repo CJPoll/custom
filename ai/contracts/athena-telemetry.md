@@ -34,7 +34,9 @@ telemetry. The ad-hoc `{ts,tool,ok}` sink at
 `ai-artifacts/telemetry/events.jsonl` was retired by DND-1487 with its one
 reader (`harness-metrics`' `runtime_events`, which fed a `harness-signals`
 signal that could not fire). Its writer, `ai/hooks/harness-event.sh`, is now a
-no-op kept only while a live settings file still wires it. A leftover file at
+no-op kept only while a live settings file still wires it. It is a `retired`
+row of `ai/hooks/registry.json`, so `scripts/setup-hooks --install` from the
+main checkout unwires it (DND-1517). A leftover file at
 that path is stale. A new emitter registers an event here (*Adding an event*);
 it never writes a store of its own.
 

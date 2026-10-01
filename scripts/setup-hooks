@@ -393,7 +393,7 @@ for e in reg:
 # is not {event, matcher, script} strings, or one the registry also declares as
 # a live hook, is refused: unwiring a declared hook is never what a retirement
 # means, so a contradiction is an error, never a guess.
-def retired_rows():
+def validated_retired_rows():
     if not isinstance(retired, list):
         bad = ['"retired" is not an array']
     else:
@@ -412,7 +412,7 @@ def retired_rows():
               'list no longer declares (drop the "hooks" row, or the "retired" one), then re-run.', file=sys.stderr)
         sys.exit(2)
     return [(r["event"], mnorm(r.get("matcher")), r["script"], r.get("matcher", "")) for r in retired]
-retire_rows = retired_rows()
+retire_rows = validated_retired_rows()
 
 changes = []
 if mode == "install":
@@ -431,17 +431,21 @@ if mode == "install":
     # critic). There the stale wiring is kept and named, and the checker still
     # reports it.
     from_main = os.environ.get("FROM_MAIN") == "1"
+    # A wiring a retired row names is handled once, below, as retired: the
+    # stale pass leaves it alone (check-hooks-registered reports it the same way).
+    retired_keys = {(ev, w, s) for ev, w, s, _ in retire_rows}
     for (event, script), matchers in declared.items():
         target = norm(absscript(script))
+        keep = lambda mm, ev=event, s=script, ms=matchers: mm in ms or (ev, mm, s) in retired_keys
         if not from_main:
             for m in hooks.get(event, []):
-                if mnorm(m.get("matcher")) not in matchers and any(
+                if not keep(mnorm(m.get("matcher"))) and any(
                         norm(h.get("command")) == target for h in m.get("hooks", [])):
                     print(f'~ {event:13} {m.get("matcher")!r} -> {script}: stale matcher kept; only an '
                           f'install from the main checkout\'s own registry ({repo}) replaces it, after '
                           f'the change lands there.')
             continue
-        for gone in drop(event, target, lambda mm, ms=matchers: mm in ms):
+        for gone in drop(event, target, keep):
             changes.append(f'~ {event:13} {gone!r} -> {script} (stale matcher, replaced)')
     # Retired wirings (DND-1517): unwire exactly each declared (event, matcher,
     # script), under the same main-checkout rule as a stale matcher -- it
@@ -839,10 +843,10 @@ PY6
     }
     want_after="=dnd-1517-kept.sh,=own-hook.sh,Bash=dnd-1517-retired.sh"
     rset="${tmp}/settings-retire.json"
-    ret_settings "$rset"
+    ret_settings "$rset"; cp "$rset" "${rset}.before"
     rd="$(REGISTRY="$retreg" apply install "$rset" 1)"
     if grep -q "MARKER:wouldchange" <<<"$rd" && grep -q "dnd-1517-retired.sh (retired, unwired)" <<<"$rd" \
-       && [ "$(grep -c '^[-+~]' <<<"$rd")" = 1 ] && [ "$(wired_of "$rset")" != "$want_after" ]; then
+       && [ "$(grep -c '^[-+~]' <<<"$rd")" = 1 ] && cmp -s "$rset" "${rset}.before"; then
       echo "  ok   --install --dry-run names exactly the retired wiring it would remove, and writes nothing"
     else
       echo "  FAIL --install --dry-run must name exactly the retired wiring and change nothing: $rd"; ok=0
@@ -882,6 +886,45 @@ PY6
     else
       echo "  FAIL the refusal must leave settings untouched and carry a Fix: $berr"; ok=0
     fi
+    # A malformed "retired" list is refused, never read as "nothing retired".
+    badok=1
+    for badret in '"retired": {}' '"retired": null' '"retired": [ { "event": "PostToolUse", "matcher": "" } ]'; do
+      badreg="${tmp}/bad-retired-registry.json"
+      printf '%s\n' "{ \"hooks\": [ { \"event\": \"PostToolUse\", \"matcher\": \"\", \"script\": \"ai/hooks/dnd-1517-kept.sh\" } ], ${badret} }" > "$badreg"
+      ret_settings "$rboth"; cp "$rboth" "${rboth}.before"
+      if berr="$(REGISTRY="$badreg" apply install "$rboth" 0 2>&1)"; then
+        echo "  FAIL a malformed retired list [${badret}] must be refused: $berr"; ok=0; badok=0
+      elif ! cmp -s "$rboth" "${rboth}.before" || ! grep -q "Fix:" <<<"$berr"; then
+        echo "  FAIL a refused malformed retired list [${badret}] must leave settings untouched and carry a Fix: $berr"; ok=0; badok=0
+      fi
+    done
+    [ "$badok" -eq 1 ] && echo "  ok   a malformed retired list ({}, null, an entry with no script) is refused with a Fix:, settings untouched"
+    # Matcher equivalence on the unwire path: a retired "*" (or omitted) matcher
+    # names the "" wiring, as everywhere else (mnorm).
+    eqreg="${fixret}/ai/hooks/registry.json"; cp "$retreg" "${tmp}/retire-registry.orig"
+    eqok=1
+    for spelling in '"matcher": "*", ' ''; do
+      printf '%s\n' "{ \"hooks\": [ { \"event\": \"PostToolUse\", \"matcher\": \"\", \"script\": \"ai/hooks/dnd-1517-kept.sh\" } ],
+        \"retired\": [ { \"event\": \"PostToolUse\", ${spelling}\"script\": \"ai/hooks/dnd-1517-retired.sh\" } ] }" > "$eqreg"
+      req="${tmp}/settings-retire-eq.json"; ret_settings "$req"
+      REGISTRY="$eqreg" apply install "$req" 0 >/dev/null
+      [ "$(wired_of "$req")" = "$want_after" ] \
+        || { echo "  FAIL a retired [${spelling:-omitted}] matcher must unwire the \"\" wiring, got [$(wired_of "$req")]"; ok=0; eqok=0; }
+    done
+    [ "$eqok" -eq 1 ] && echo "  ok   a retired \"*\" or omitted matcher unwires the \"\" wiring"
+    # A retired script still declared under another matcher: its retired wiring
+    # is removed once, labelled retired (not "stale matcher, replaced").
+    printf '%s\n' '{ "hooks": [ { "event": "PostToolUse", "matcher": "Bash", "script": "ai/hooks/dnd-1517-retired.sh" } ],
+      "retired": [ { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/dnd-1517-retired.sh" } ] }' > "$eqreg"
+    rsr="${tmp}/settings-retire-stale.json"; ret_settings "$rsr"
+    rsro="$(REGISTRY="$eqreg" apply install "$rsr" 0)"
+    if grep -q "dnd-1517-retired.sh (retired, unwired)" <<<"$rsro" && ! grep -q "stale" <<<"$rsro" \
+       && [ "$(wired_of "$rsr")" = "=dnd-1517-kept.sh,=own-hook.sh,Bash=dnd-1517-retired.sh" ]; then
+      echo "  ok   a retired wiring of a script still declared under another matcher is unwired once, as retired"
+    else
+      echo "  FAIL a retired wiring of a still-declared script must be unwired as retired, not stale: $rsro"; ok=0
+    fi
+    cp "${tmp}/retire-registry.orig" "$retreg"
     # --remove (the uninstall) takes retired wirings too, exactly as declared.
     rrm="${tmp}/settings-retire-remove.json"; ret_settings "$rrm"
     REGISTRY="$retreg" apply remove "$rrm" 0 >/dev/null

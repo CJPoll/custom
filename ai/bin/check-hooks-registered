@@ -378,11 +378,11 @@ rescue SystemCallError => e
   raise RegistryError, "#{path}: cannot be read (#{e.message})"
 end
 
-# The landed bar as [description, entries], or [nil, lines] when it could not
+# The landed bar as [description, entries, retired], or [nil, lines] when it could not
 # be measured (lines explain why).
 def measure_landed(landed, root)
   pts, entries, retired = landed.call(root)
-  ["landed #{REGISTRY_REL} (#{Landed.describe(pts)})", entries, retired || []]
+  ["landed #{REGISTRY_REL} (#{Landed.describe(pts)})", entries, retired]
 rescue Landed::Unreadable => e
   [nil, Landed.unreadable_lines("hook registry", e.probes)]
 rescue Landed::Mismatch => e
@@ -452,11 +452,11 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
   # A retirement only this branch adds is pending, and one the branch drops
   # still counts: a branch can neither unwire nor excuse a landed hook.
   retiring = landed_retired.reject { |e| keys.include?(row_key(e)) }
-  retired  = retired_wired(settings, retiring, dirs)
+  still_wired = retired_wired(settings, retiring, dirs)
   rkeys    = landed_retired.map { |e| row_key(e) }
   pending_retired = retired_wired(settings, branch_retired.reject { |e| rkeys.include?(row_key(e)) }, dirs)
   stale   = stale_for(settings, landed_entries + registry, dirs, except: retiring)
-  if broken.empty? && dangle.empty? && drift.empty? && stale.empty? && retired.empty?
+  if broken.empty? && dangle.empty? && drift.empty? && stale.empty? && still_wired.empty?
     puts "check-hooks-registered: all #{landed_entries.size} landed registry rows are wired in #{path}, " \
          "each on its declared (event, matcher), and none of the #{retiring.size} landed retired row(s) is still wired " \
          "(bar: #{bar}). OK."
@@ -465,7 +465,8 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
     return EXIT_OK
   end
 
-  report_failures(path, broken, dangle, drift, pending, stale, retired.map(&:last), pending_retired)
+  report_failures(path, broken, dangle, drift, pending, stale: stale, retired: still_wired.map(&:last),
+                                                        pending_retired: pending_retired)
   EXIT_FAIL
 end
 
@@ -487,7 +488,7 @@ def report_pending(pending, out = $stdout)
            "event it matches would fail with exit 127."
 end
 
-def report_failures(path, broken, dangle, drift, pending, stale = [], retired = [], pending_retired = [])
+def report_failures(path, broken, dangle, drift, pending, stale: [], retired: [], pending_retired: [])
   warn "check-hooks-registered: FAIL"
   unless broken.empty?
     warn "  #{broken.size} registry entr(ies) on this branch cannot be applied:"
@@ -574,7 +575,7 @@ def matcher_key_cases(check)
       $stdout = $stderr = buf
       begin
         rc = run(path: f, registry_file: reg, root: dir, dirs: [dir],
-                 landed: ->(_r) { [[["fixture landed", "0" * 40]], landed] })
+                 landed: ->(_r) { [[["fixture landed", "0" * 40]], landed, []] })
       ensure
         $stdout, $stderr = o, e
       end
@@ -1269,7 +1270,7 @@ def self_test
   # origin, by ai/test/check-hooks-registered/self-test.sh. Settings here are
   # wired at THIS checkout, where every branch script exists, so a hook this
   # branch adds (absent from the main checkout until it lands) is not dangling.
-  as_landed = ->(entries) { ->(_root) { [[["fixture landed", "0" * 40]], entries] } }
+  as_landed = ->(entries) { ->(_root) { [[["fixture landed", "0" * 40]], entries, []] } }
   never = ->(_root) { raise "the landed bar must not be read here" }
   here = [REPO_DIR]
   wire_here = lambda do |entries|
