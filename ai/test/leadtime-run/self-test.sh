@@ -110,6 +110,23 @@ for a in "$@"; do
 done
 g() { git -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false "$@"; }
 summary() { echo 'repo=custom mode=improve biggest=verify action=no-action reason="fixture"' >"$LEADTIME_SUMMARY"; }
+# other_fleet — another fleet lands a commit on origin/main while this run is
+# in flight (from its own clone, never this lane).
+other_fleet() {
+  local o; o="$(mktemp -d -p "$d" other.XXXXXX)"
+  git clone -q "$(git remote get-url origin)" "$o/c" 2>/dev/null
+  echo "$RANDOM" >"$o/c/other-$(basename "$o").txt"
+  g -C "$o/c" add -A >/dev/null; g -C "$o/c" commit -q -m "another fleet's change"
+  g -C "$o/c" push -q origin HEAD:main 2>/dev/null || exit 9
+  g -C "$o/c" rev-parse HEAD >>"$d/other-shas"
+}
+# sync_down — the lane's sync down (athena:shipwright-lane -> Sync down first).
+sync_down() { git fetch -q origin main && g rebase -q FETCH_HEAD; }
+own_land() { # <file> — commit one change in the lane and push it to main
+  echo change >"$1"; g add "$1" >/dev/null; g commit -q -m "own change $1"
+  g rev-parse HEAD >>"$d/own-shas"
+  g push -q origin HEAD:main 2>/dev/null || exit 9
+}
 case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   ok)        : >"$LEADTIME_RECEIPT"; summary; exit 0 ;;
   noreceipt) summary; exit 0 ;;
@@ -123,6 +140,13 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   strand-noreceipt) echo change >strand.txt; g add strand.txt >/dev/null; g commit -q -m "unlanded change"; exit 0 ;;
   land)      : >"$LEADTIME_RECEIPT"; echo change >landed.txt; g add landed.txt >/dev/null; g commit -q -m "landed change"
              g push -q origin HEAD:main 2>/dev/null || exit 9; summary; exit 0 ;;
+  moved)     : >"$LEADTIME_RECEIPT"; other_fleet; sync_down; summary; exit 0 ;;
+  moved-land) : >"$LEADTIME_RECEIPT"; other_fleet; sync_down; own_land own.txt; summary; exit 0 ;;
+  land-moved) : >"$LEADTIME_RECEIPT"; own_land own.txt; other_fleet; sync_down; summary; exit 0 ;;
+  rebase-land) : >"$LEADTIME_RECEIPT"; echo change >own.txt; g add own.txt >/dev/null; g commit -q -m "own change"
+             other_fleet; git fetch -q origin main && g pull -q --rebase origin main
+             g rev-parse HEAD >>"$d/own-shas"; g push -q origin HEAD:main 2>/dev/null || exit 9; summary; exit 0 ;;
+  noreflog-land): >"$LEADTIME_RECEIPT"; own_land own.txt; rm -f "$(git rev-parse --git-path logs/HEAD)"; summary; exit 0 ;;
 esac
 EOF
   chmod +x "$c/stub-claude"
@@ -555,7 +579,8 @@ rc="$(run_runner "$c")"
 run="$(newest "$c" run)"
 origin_tip="$(git -C "$c/origin.git" rev-parse main)"
 if [ "$rc" = 0 ] && [ "$(git -C "$c/repo" rev-parse main)" = "$origin_tip" ] && [ -e "$c/repo/landed.txt" ] \
-   && grep -q "^ff=$origin_tip" "$run" && grep -q 'commits=1' "$run" && [ "$(lane_branches "$c")" = 0 ]; then
+   && grep -q "^ff=$origin_tip" "$run" && grep -q "^own_landed=1 $origin_tip\$" "$run" \
+   && grep -q '^main_moved=.* commits=1$' "$run" && [ "$(lane_branches "$c")" = 0 ]; then
   ok "a pushed lane commit lands in the main checkout by fast-forward; .run names the landing; branch deleted"
 else
   bad "landed ff" "rc=$rc main=$(git -C "$c/repo" rev-parse main) origin=$origin_tip run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
@@ -579,6 +604,76 @@ if [ "$rc" = 0 ] && grep -q '^ff=REFUSED (see ' "$(newest "$c" run)" \
   ok "a fast-forward git refuses (it would overwrite a local file) is reported, never forced; the file is untouched"
 else
   bad "ff refused" "rc=$rc run=$(cat "$(newest "$c" run)" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# ---------------------------------------------------------------------------------
+case_ '13b. the .run credits the run with its own commits only (DND-1507)'
+
+# Another fleet lands on origin/main mid-run and the lane syncs down to it: the
+# lane moved off BASE with no commit of its own.
+c="$(new_case)"; echo moved >"$c/mode"
+main_before="$(git -C "$c/repo" rev-parse main)"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -q 'outcome=ok exit=0' "$run" && grep -q '^own_landed=0$' "$run" \
+   && grep -q '^ff=none' "$run" && ! grep -q "^ff=$(cat "$c/other-shas" 2>/dev/null)" "$run" \
+   && grep -q '^main_moved=origin/main .* commits=1$' "$run" && ! grep -q '^landed=' "$run" \
+   && [ "$(git -C "$c/repo" rev-parse main)" = "$main_before" ] && [ "$(lane_branches "$c")" = 0 ]; then
+  ok "a lane synced to a newer origin/main with no own commit: own_landed=0, no ff, the motion is main_moved=, main untouched"
+else
+  bad "moved, no own commit" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# Another fleet lands, the lane syncs, then the run lands one commit of its own.
+c="$(new_case)"; echo moved-land >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+own="$(cat "$c/own-shas" 2>/dev/null)"
+if [ "$rc" = 0 ] && [ -n "$own" ] && grep -q "^own_landed=1 $own\$" "$run" && grep -q "^ff=$own\$" "$run" \
+   && grep -q '^main_moved=origin/main .* commits=2$' "$run" && [ "$(git -C "$c/repo" rev-parse main)" = "$own" ]; then
+  ok "one own commit landed after another fleet's: own_landed names exactly it; ff is it; main_moved counts both"
+else
+  bad "moved then own landing" "rc=$rc own=$own run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# The run lands its commit, then another fleet lands and the lane syncs past
+# it: the ff stops at the run's own commit, never the other fleet's.
+c="$(new_case)"; echo land-moved >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+own="$(cat "$c/own-shas" 2>/dev/null)"
+if [ "$rc" = 0 ] && [ -n "$own" ] && grep -q "^own_landed=1 $own\$" "$run" && grep -q "^ff=$own\$" "$run" \
+   && [ "$(git -C "$c/repo" rev-parse main)" = "$own" ] \
+   && [ "$(git -C "$c/origin.git" rev-parse main)" = "$(cat "$c/other-shas")" ]; then
+  ok "a lane synced past its own landed commit: the main checkout is fast-forwarded to the run's own commit only"
+else
+  bad "own landing then moved" "rc=$rc own=$own main=$(git -C "$c/repo" rev-parse main) run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# The run commits, another fleet lands, and `pull --rebase` replays the run's
+# commit onto it: the replayed commit is the run's own, the other fleet's not.
+c="$(new_case)"; echo rebase-land >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+own="$(cat "$c/own-shas" 2>/dev/null)"
+if [ "$rc" = 0 ] && [ -n "$own" ] && grep -q "^own_landed=1 $own\$" "$run" && grep -q "^ff=$own\$" "$run" \
+   && grep -q '^main_moved=origin/main .* commits=2$' "$run"; then
+  ok "an own commit replayed by pull --rebase onto another fleet's: own_landed names the replayed commit only"
+else
+  bad "rebased own landing" "rc=$rc own=$own run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# The lane's HEAD reflog is gone, so the run's own commits cannot be told from
+# a sync: that is UNKNOWN and no ff, never "none" and never the lane tip.
+c="$(new_case)"; echo noreflog-land >"$c/mode"
+main_before="$(git -C "$c/repo" rev-parse main)"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -q '^own_landed=UNKNOWN' "$run" && grep -q '^ff=none (own commits UNKNOWN' "$run" \
+   && [ "$(git -C "$c/repo" rev-parse main)" = "$main_before" ] && grep -q 'Fix:' "$c/runner.err"; then
+  ok "an unreadable lane reflog reads own_landed=UNKNOWN with a Fix:, and the main checkout is not moved"
+else
+  bad "no reflog" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 c="$(new_case)"

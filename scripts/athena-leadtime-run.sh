@@ -18,8 +18,10 @@
 # reaped at the start of a tick by that lock, never by a pid. A lane whose
 # commits are not on origin/main is STRANDED: its branch is kept, never
 # deleted, and the tick counts as unsuccessful. After the session the main
-# checkout is fast-forwarded only to lane work that landed on origin/main
-# (DND-1008), never forced.
+# checkout is fast-forwarded only to the run's OWN newest commit, once it is on
+# origin/main (DND-1008), never forced. The run's own commits are the ones its
+# lane's HEAD reflog records it making, never every commit its lane holds: a
+# sync down moves the lane onto other fleets' commits too (DND-1507).
 #
 # MCP. Claude Code resolves local-scope MCP servers from the launch directory,
 # and they are registered on the main checkout. The runner copies the one
@@ -52,8 +54,11 @@
 #   runs/<ts>.blocked   the session never started     runs/<ts>.wedged   a wedged tick
 #   runs/<ts>.locked    skipped: a run was in flight  runs/<ts>.git.log  the runner's own git output
 #   runs/<ts>.run       every tick that spawned a session: outcome, exit, lane,
-#                       landed commits, the main-checkout fast-forward, the
-#                       prune result and the summary
+#                       main_moved= (origin/main's motion during the run, any
+#                       author), own_landed= (the run's own commits on
+#                       origin/main: <n> <sha>..., or UNKNOWN), ff= (the
+#                       main-checkout fast-forward), the prune result and the
+#                       summary
 #   consecutive-failures  the wedge counter; `rm` it to re-arm a wedged lane
 #   consecutive-blocked   the blocked streak; clears when a session reaches the model
 #   ledger.jsonl, experiments.jsonl, journal.md, cursor.<repo>.txt  the skill's own
@@ -665,30 +670,79 @@ status=0
 # --- 9. teardown: what landed, the fast-forward, the lane ---------------------------
 timeout 120 git -C "${MAIN_CHECKOUT}" fetch --quiet origin main </dev/null >>"${GIT_LOG}" 2>&1 || true
 AFTER="$(git -C "${MAIN_CHECKOUT}" rev-parse --verify --quiet refs/remotes/origin/main 2>/dev/null || true)"
-LANDED="origin/main ${BASE}..${AFTER:-unknown}"
+# How far origin/main moved during the run, whoever moved it: other fleets'
+# merges count here too, so this is never the run's own landings (DND-1507).
+MAIN_MOVED="origin/main ${BASE}..${AFTER:-unknown}"
 if [ -n "${AFTER}" ]; then
-  LANDED="${LANDED} commits=$(git -C "${MAIN_CHECKOUT}" rev-list --count "${BASE}..${AFTER}" 2>/dev/null || echo '?')"
+  MAIN_MOVED="${MAIN_MOVED} commits=$(git -C "${MAIN_CHECKOUT}" rev-list --count "${BASE}..${AFTER}" 2>/dev/null || echo '?')"
 fi
 tip="$(git -C "${LANE}" rev-parse HEAD 2>/dev/null || true)"
 
-# Fast-forward the main checkout to the lane's tip only once that tip is on
-# origin/main, so the live harness advances to landed work and never to
-# unreviewed work. Only when the main checkout is on main; never forced.
-FF="none (the lane made no commits)"
-if [ -n "${tip}" ] && [ "${tip}" != "${BASE}" ]; then
+# own_commits — print the run's own commits still on the lane, newest first.
+# A lane that moved off BASE is not evidence of its own work: a sync down
+# (athena:shipwright-lane) fast-forwards or rebases it onto other fleets'
+# commits. A commit is the run's own when the lane's HEAD reflog records it
+# being MADE there (a commit, cherry-pick, revert, rebase pick, am, or a merge
+# that made a commit) and it is still in BASE..tip. A sync, reset or checkout
+# only moves HEAD, so it never credits a commit. Returns 1 when the reflog is
+# unreadable or does not start at BASE: then nothing can be credited, and that
+# must not read as "no own commits" (a failed lookup is not an empty one).
+# The sequencer's step label is the stable part of a rebase entry; the action
+# before it is the caller's argv ("rebase", "pull -q --rebase origin main").
+OWN_MADE='^(commit|cherry-pick|revert|am)( \([a-z]+\))?: |^[^:]* \((pick|reword|edit|squash|fixup|continue)\): |: Merge made by '
+own_commits() {
+  local reflog first made log_path
+  # With no HEAD reflog git silently shows the branch's reflog instead, which
+  # records a rebase only as its finish and so would under-credit: require the
+  # file itself.
+  log_path="$(git -C "${LANE}" rev-parse --git-path logs/HEAD 2>/dev/null)" || return 1
+  case "${log_path}" in /*) ;; *) log_path="${LANE}/${log_path}" ;; esac
+  [ -s "${log_path}" ] || return 1
+  reflog="$(git -C "${LANE}" reflog show --format='%H %gs' HEAD -- 2>/dev/null)" || return 1
+  [ -n "${reflog}" ] || return 1
+  first="$(printf '%s\n' "${reflog}" | tail -n1 | cut -d' ' -f1)"
+  [ "${first}" = "${BASE}" ] || return 1
+  made="$(printf '%s\n' "${reflog}" | while read -r sha gs; do
+            if grep -q -E -- "${OWN_MADE}" <<<"${gs}"; then printf '%s\n' "${sha}"; fi
+          done | sort -u)"
+  [ -n "${made}" ] || return 0
+  git -C "${LANE}" rev-list "${BASE}..${tip}" 2>/dev/null | grep -F -x -f <(printf '%s\n' "${made}") || true
+}
+
+# Fast-forward the main checkout only to the run's newest own commit, and only
+# once that commit is on origin/main, so the live harness advances to landed
+# work and never to unreviewed work, and the run never ff's to (or claims)
+# another fleet's commit. Only when the main checkout is on main; never forced.
+OWN_LANDED="0"
+FF="none (the run made no commits of its own)"
+own=""
+own_rc=0
+if [ -n "${tip}" ]; then own="$(own_commits)" || own_rc=$?; else own_rc=1; fi
+if [ "${own_rc}" -ne 0 ]; then
+  OWN_LANDED="UNKNOWN (the lane's HEAD reflog is unreadable or does not start at ${BASE})"
+  FF="none (own commits UNKNOWN: the lane's HEAD reflog could not be read)"
+  echo "${ME}: run ${ts}: the lane's HEAD reflog could not be read, so its own commits cannot be told from a sync; the main checkout was not fast-forwarded." >&2
+  echo "  Fix: check core.logAllRefUpdates is not false for ${MAIN_CHECKOUT} ('git -C ${MAIN_CHECKOUT} config core.logAllRefUpdates'). Any work the run landed is on origin/main: 'git -C ${MAIN_CHECKOUT} merge --ff-only origin/main' picks it up." >&2
+elif [ -n "${own}" ]; then
+  landed_own=""
+  for oc in ${own}; do
+    if commit_landed "${oc}"; then landed_own="${landed_own} ${oc}"; fi
+  done
+  OWN_LANDED="$(printf '%s\n' ${landed_own} | grep -c . || true)${landed_own}"
+  own_tip="$(printf '%s\n' "${own}" | head -n1)"
   main_ref="$(git -C "${MAIN_CHECKOUT}" symbolic-ref -q HEAD 2>/dev/null || true)"
-  if ! commit_landed "${tip}"; then
-    FF="none (lane tip ${tip} is not on origin/main)"
+  if ! commit_landed "${own_tip}"; then
+    FF="none (the run's own commit ${own_tip} is not on origin/main)"
   elif [ "${main_ref}" != "refs/heads/main" ]; then
     FF="REFUSED (the main checkout is on ${main_ref:-a detached HEAD}, not main)"
-    echo "${ME}: run ${ts}: the lane tip ${tip} is on origin/main, but ${MAIN_CHECKOUT} is not on main, so it was not fast-forwarded." >&2
+    echo "${ME}: run ${ts}: the run's own commit ${own_tip} is on origin/main, but ${MAIN_CHECKOUT} is not on main, so it was not fast-forwarded." >&2
     echo "  Fix: switch ${MAIN_CHECKOUT} back to main when its owner is done, then 'git -C ${MAIN_CHECKOUT} merge --ff-only origin/main'." >&2
-  elif git -C "${MAIN_CHECKOUT}" merge --ff-only "${tip}" >>"${GIT_LOG}" 2>&1; then
-    FF="${tip}"
+  elif git -C "${MAIN_CHECKOUT}" merge --ff-only "${own_tip}" >>"${GIT_LOG}" 2>&1; then
+    FF="${own_tip}"
   else
     FF="REFUSED (see ${GIT_LOG})"
-    echo "${ME}: run ${ts}: the lane tip ${tip} is on origin/main, but ${MAIN_CHECKOUT} could not be fast-forwarded to it." >&2
-    echo "  Fix: nothing is lost; the work is on origin/main. Clear what blocks it (usually a locally-modified file, or local commits on main; never force either), then run 'git -C ${MAIN_CHECKOUT} merge --ff-only ${tip}'. git's reason is at the end of ${GIT_LOG}." >&2
+    echo "${ME}: run ${ts}: the run's own commit ${own_tip} is on origin/main, but ${MAIN_CHECKOUT} could not be fast-forwarded to it." >&2
+    echo "  Fix: nothing is lost; the work is on origin/main. Clear what blocks it (usually a locally-modified file, or local commits on main; never force either), then run 'git -C ${MAIN_CHECKOUT} merge --ff-only ${own_tip}'. git's reason is at the end of ${GIT_LOG}." >&2
   fi
 fi
 
@@ -710,7 +764,8 @@ finish() {
     printf '%s: run %s outcome=%s exit=%s\n' "${ME}" "${ts}" "${outcome}" "${rc}"
     printf 'lane=%s branch=%s (%s)\n' "${LANE}" "${BRANCH}" "${LANE_RESULT}"
     printf 'base=%s (%s)\n' "${BASE}" "${FETCH_NOTE}"
-    printf 'landed=%s\n' "${LANDED}"
+    printf 'main_moved=%s\n' "${MAIN_MOVED}"
+    printf 'own_landed=%s\n' "${OWN_LANDED}"
     printf 'ff=%s\n' "${FF}"
     printf 'prune=%s\n' "${PRUNE_RESULT}"
     if [ -s "${SUMMARY}" ]; then
