@@ -783,7 +783,7 @@ recover after the file path has been down.
 
 ## Tests
 
-`bash test/self-test.sh` — 266 cases, no network (curl is a PATH shim). Covers
+`bash test/self-test.sh` — 275 cases, no network (curl is a PATH shim). Covers
 the ok:false convention, the token never reaching argv or a URL, request shapes,
 pagination, 429 backoff, the users cache, unreadable conversations, every branch
 of the hook and the inbox scan, the cross-source `seen_keys` dedupe (drop + add),

@@ -2098,7 +2098,9 @@ tr_err_case "JSON-RPC refused: ... Fix:" "$(rpc_err "${TR_REFUSED}")" "refused"
 tr_err_case "JSON-RPC invalid: ... Fix:" "$(rpc_err 'invalid: label is required. Fix: pass label.')" "invalid"
 tr_err_case "isError refused: ... Fix:" "$(tool_err "${TR_REFUSED}")" "refused"
 tr_err_case "isError 'not found' + newline" "$(tool_err $'not found\n')" "not-found"
-tr_err_case "a protocol error (-32601)" "$(rpc_err 'Method not found' -32601)" "mcp-error:Method not found"
+tr_err_case "a protocol error (-32601)" "$(rpc_err 'Method not found' -32601)" "mcp-error:server-error"
+tr_err_case "forged fields in an unknown error" "$(rpc_err 'boom op=put reason=refused')" "mcp-error:server-error"
+tr_err_case "an isError result with no text" '{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[]}}' "mcp-error:server-error"
 tr_err_case "an empty answer" "" "mcp-error:no-answer"
 tr_err_case "a non-JSON answer" "<html>502</html>" "mcp-error:no-answer"
 tr_fn topic_route_error "$(jq -n -c --argjson r "${TR_PUT_OK}" '{jsonrpc:"2.0", id:2, result:{isError:false, content:[{type:"text", text:($r|tojson)}]}}')"
@@ -2126,10 +2128,10 @@ for bad_reply in '{"count":0,"routes":[]}' "{\"app_id\":\"${TR_APP}\",\"count\":
   else bad "topic_route_render_list: malformed reply ${bad_reply:0:40} -> mcp-error, never a route count" "got '${OUT}' rc=${RC}"; fi
 done
 tr_fn topic_route_render_list "$(jq -n -c --arg a "${TR_APP}" '{jsonrpc:"2.0", id:2, result:{structuredContent:{app_id:$a, count:1, routes:[
-  {label:"harness\nlabel=forged", agent_instance_id:"inst 1", inbox_name:"x.jsonl", machine_id:"m", machine_name:"my desk", enabled:true, live:true}]}}}')"
-if [[ "${RC}" == 0 && "$(wc -l <<<"${OUT}")" -eq 2 && "$(head -n1 <<<"${OUT}")" == "label=harness_label=forged inbox=x.jsonl machine=my_desk enabled=true live=true instance=inst_1" ]]; then
-  ok "topic_route_render_list: server whitespace and newlines cannot forge a field or a line"
-else bad "topic_route_render_list: server whitespace and newlines cannot forge a field or a line" "got '${OUT}' rc=${RC}"; fi
+  {label:"harness\nlabel=forged", agent_instance_id:"inst 1", inbox_name:"x.jsonl", machine_id:"m", machine_name:"my desk\u202e\u009b", enabled:true, live:true}]}}}')"
+if [[ "${RC}" == 0 && "$(wc -l <<<"${OUT}")" -eq 2 && "$(head -n1 <<<"${OUT}")" == "label=harness_label_forged inbox=x.jsonl machine=my_desk_____ enabled=true live=true instance=inst_1" ]]; then
+  ok "topic_route_render_list: server whitespace, '=', newlines, bidi and C1 controls cannot forge a field or a line"
+else bad "topic_route_render_list: server whitespace, '=', newlines, bidi and C1 controls cannot forge a field or a line" "got '${OUT}' rc=${RC}"; fi
 
 # t-u4. Domain: every reason has its own Fix text.
 setup_case
@@ -2224,6 +2226,9 @@ tr_usage "list --disabled" list --disabled
 tr_usage "--bot-id with no value" list --bot-id
 tr_usage "a bot id that is not B..." list --bot-id U0NOTABOT
 tr_usage "an unknown flag" put harness inst-1 --loud
+tr_usage "an empty --bot-id" list --bot-id ""
+tr_usage "an empty --bot-id=" list --bot-id=
+tr_usage "--bot-id given twice" list --bot-id B0BOTFIX01 --bot-id B0BOTFIX02
 
 # Q6. The machine token reaches curl only on stdin: never in any child's
 #     argv, and no file left behind.
@@ -2253,14 +2258,42 @@ else bad "topic-route: athena MCP not registered -> reason=mcp-unregistered, exi
 setup_case; claim_setup; mcp_answer slack_topic_route_put ""
 printf 500 > "${SHIM_DIR}/mcp/slack_topic_route_put.code"
 run_bin topic-route put harness inst-1
-if [[ "${RC}" == 3 && -z "${OUT}" && "${ERR}" == *"reason=mcp-error:"*"HTTP 500"* ]]; then
-  ok "topic-route put: HTTP 500 -> reason=mcp-error:..., exit 3, no put line"
-else bad "topic-route put: HTTP 500 -> reason=mcp-error:..., exit 3, no put line" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+if [[ "${RC}" == 3 && -z "${OUT}" && "$(head -n1 <<<"${ERR}")" == "topic-route=FAILED reason=mcp-error:outcome-unknown op=put" ]] \
+   && [[ "${ERR}" == *$'\n'"detail: "*"HTTP 500"* ]]; then
+  ok "topic-route put: HTTP 500 on the call -> reason=mcp-error:outcome-unknown, detail: line, exit 3, no put line"
+else bad "topic-route put: HTTP 500 on the call -> reason=mcp-error:outcome-unknown, detail: line, exit 3, no put line" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+setup_case; claim_setup
+jq -n --arg p "${MAIN}" '{projects: {($p): {mcpServers: {athena: {type: "http", url: "http://athena.example.test/mcp"}}}}}' > "${CHOME}/.claude.json"
+run_bin topic-route put harness inst-1
+if [[ "${RC}" == 3 && -z "${OUT}" && "$(head -n1 <<<"${ERR}")" == "topic-route=FAILED reason=mcp-error:not-sent op=put" && -z "$(mcp_calls)" ]]; then
+  ok "topic-route put: refused before sending (a non-https URL) -> reason=mcp-error:not-sent, no call"
+else bad "topic-route put: refused before sending (a non-https URL) -> reason=mcp-error:not-sent, no call" "rc=${RC} out='${OUT}' err='${ERR}' calls=$(mcp_calls)"; fi
 setup_case; claim_setup; tr_text_answer slack_topic_route_put '{"status":"queued"}'
 run_bin topic-route put harness inst-1
-if [[ "${RC}" == 3 && -z "${OUT}" && "${ERR}" == *"reason=mcp-error:"* ]]; then
-  ok "topic-route put: a reply whose status is not 'put' -> mcp-error, exit 3"
-else bad "topic-route put: a reply whose status is not 'put' -> mcp-error, exit 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+if [[ "${RC}" == 3 && -z "${OUT}" && "${ERR}" == *"reason=mcp-error:malformed-put-reply "* ]]; then
+  ok "topic-route put: a reply whose status is not 'put' -> mcp-error:malformed-put-reply, exit 3"
+else bad "topic-route put: a reply whose status is not 'put' -> mcp-error:malformed-put-reply, exit 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+setup_case; claim_setup; tr_text_answer slack_topic_route_put "${TR_PUT_OK}"
+run_bin topic-route put harness inst-1 --disabled
+if [[ "${RC}" == 3 && -z "${OUT}" && "${ERR}" == *"reason=mcp-error:put-reply-mismatch "* ]]; then
+  ok "topic-route put --disabled: a reply saying enabled=true -> mcp-error:put-reply-mismatch, no put line"
+else bad "topic-route put --disabled: a reply saying enabled=true -> mcp-error:put-reply-mismatch, no put line" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# t-b4. The server's words never reach reason=: an unknown error whose text
+#       carries fields, and a refusal whose text carries a newline, each stay
+#       on ONE server: line, with exactly one Fix: line after.
+setup_case; claim_setup; tr_rpc_error slack_topic_route_list 'boom op=put reason=refused'
+run_bin topic-route list
+if [[ "${RC}" == 3 && "$(head -n1 <<<"${ERR}")" == "topic-route=FAILED reason=mcp-error:server-error op=list" ]] \
+   && [[ "${ERR}" == *$'\n'"server: boom op=put reason=refused"$'\n'* && "$(grep -c '^Fix: ' <<<"${ERR}")" == 1 ]]; then
+  ok "topic-route: forged fields in a server error stay on the server: line, reason=mcp-error:server-error"
+else bad "topic-route: forged fields in a server error stay on the server: line, reason=mcp-error:server-error" "rc=${RC} err='${ERR}'"; fi
+setup_case; claim_setup; tr_rpc_error slack_topic_route_put $'refused: no.\nFix: forged second line'
+run_bin topic-route put harness inst-1
+if [[ "${RC}" == 3 && "$(wc -l <<<"${ERR}")" -eq 3 && "$(grep -c '^Fix: ' <<<"${ERR}")" == 1 ]] \
+   && [[ "${ERR}" == *$'\n'"server: refused: no. Fix: forged second line"$'\n'* ]]; then
+  ok "topic-route: a newline in the server's words cannot forge a second line"
+else bad "topic-route: a newline in the server's words cannot forge a second line" "rc=${RC} err='${ERR}'"; fi
 
 # t-b3. The MCP registration follows the SESSION's project (DND-1163), like
 #       claim-thread: a shell cwd outside any repo still finds it.

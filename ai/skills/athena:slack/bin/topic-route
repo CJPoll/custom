@@ -29,10 +29,16 @@
 #     server: <the server's own words, with its Fix>   (refusals only)
 #     Fix: <what to do>                                        exit 3
 #   A usage error is reason=usage, exit 2, and makes no call.
-# Reasons, each distinct: usage, no-token, mcp-unregistered, mcp-error:<words>,
-# not-found, refused, invalid, project-unresolved. `live=` says whether the
-# router would use the route right now; `enabled=true live=false` usually
-# means the destination inbox's machine is not connected.
+#   A call that failed before sending is reason=mcp-error:not-sent; one whose
+#   outcome is unknown (a put may have landed) is mcp-error:outcome-unknown;
+#   either adds a `detail:` line. Any other server error is
+#   mcp-error:server-error, its words on the `server:` line.
+# Reasons, each distinct: usage, no-token, mcp-unregistered, mcp-error:<what>,
+# not-found, refused, invalid, project-unresolved. `live=` is the router's own
+# "usable" (ai/contracts/athena-events.md -> *Topic routes*): enabled, and not
+# stale. `enabled=true live=false` is a stale route (its instance or machine
+# deleted, owned by someone else, or no longer a <project>-slack.jsonl inbox):
+# put the label again with a live instance.
 #
 # The athena MCP registration is the SESSION's project's (DND-1163):
 # $CLAUDE_PROJECT_DIR, else the Claude Code process's cwd, else the shell cwd.
@@ -51,10 +57,11 @@ done
 OP="${1:-?}"
 case "${OP}" in list|put) ;; *) OP="?" ;; esac
 
-fail() { # fail <reason> [server-words]
-  local reason="$1" words="${2:-}" code=3
+fail() { # fail <reason> [server-words] [client-detail]
+  local reason="$1" words="${2:-}" detail="${3:-}" code=3
   printf 'topic-route=FAILED reason=%s op=%s\n' "${reason}" "${OP}" >&2
   [ -z "${words}" ] || printf 'server: %s\n' "${words}" >&2
+  [ -z "${detail}" ] || printf 'detail: %s\n' "${detail}" >&2
   printf 'Fix: %s\n' "$(topic_route_fix "${reason}")" >&2
   [ "${reason}" != "usage" ] || code=2
   exit "${code}"
@@ -78,14 +85,20 @@ done
 ENABLED=true
 SAW_DISABLED=false
 BOT_ID=""
+SAW_BOT_ID=false
 POSITIONAL=()
+set_bot_id() { # one --bot-id only, never empty: an empty one would silently pick the default app
+  [ "${SAW_BOT_ID}" = false ] || fail usage
+  SAW_BOT_ID=true; BOT_ID="$1"
+  [[ "${BOT_ID}" =~ ^B[A-Z0-9]+$ ]] || fail usage
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --disabled) ENABLED=false; SAW_DISABLED=true ;;
     --bot-id|--bot_id)
       [ "$#" -ge 2 ] || fail usage
-      BOT_ID="$2"; shift ;;
-    --bot-id=*|--bot_id=*) BOT_ID="${1#*=}" ;;
+      set_bot_id "$2"; shift ;;
+    --bot-id=*|--bot_id=*) set_bot_id "${1#*=}" ;;
     -*) fail usage ;;
     *) POSITIONAL+=("$1") ;;
   esac
@@ -93,7 +106,6 @@ while [ "$#" -gt 0 ]; do
 done
 OP="${POSITIONAL[0]:-?}"
 case "${OP}" in list|put) ;; *) OP="?"; fail usage ;; esac
-[ -z "${BOT_ID}" ] || [[ "${BOT_ID}" =~ ^B[A-Z0-9]+$ ]] || fail usage
 
 case "${OP}" in
   list)
@@ -126,19 +138,23 @@ case "${RC}" in
 esac
 
 # --- the call ------------------------------------------------------------------
+# mcp_call_tool: 3 = refused before anything was sent; 4 = the tools/call
+# failed in transport or answered non-2xx, so a put's outcome is unknown.
 MSG="$(mcp_call_tool "${URL}" "${TOOL}" "${ARGS}")"; RC=$?
-[ "${RC}" -eq 0 ] || fail "mcp-error:$(topic_route_words "${MSG}" | cut -c1-80)"
+case "${RC}" in
+  0) ;;
+  3) fail "mcp-error:not-sent" "" "$(topic_route_words "${MSG}")" ;;
+  *) fail "mcp-error:outcome-unknown" "" "$(topic_route_words "${MSG}")" ;;
+esac
 
+# The server's words go only on the server: line, never into reason=.
 if REASON="$(topic_route_error "${MSG}")"; then
-  case "${REASON}" in
-    mcp-error*) fail "${REASON}" ;;
-    *) fail "${REASON}" "$(topic_route_server_words "${MSG}")" ;;
-  esac
+  fail "${REASON}" "$(topic_route_server_words "${MSG}")"
 fi
 
 case "${OP}" in
   list) OUTPUT="$(topic_route_render_list "${MSG}")" || fail "${OUTPUT}" ;;
-  put)  OUTPUT="$(topic_route_render_put "${MSG}")" || fail "${OUTPUT}" ;;
+  put)  OUTPUT="$(topic_route_render_put "${MSG}" "${LABEL}" "${ENABLED}")" || fail "${OUTPUT}" ;;
 esac
 printf '%s\n' "${OUTPUT}"
 exit 0

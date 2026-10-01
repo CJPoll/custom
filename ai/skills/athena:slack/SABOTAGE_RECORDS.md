@@ -513,3 +513,18 @@ the thread_ts). Baseline `VERDICT: PASS (219 cases)`.
 | S93 | the server's `not found` is read as an `mcp-error` | 3 | `FAIL topic_route_error: JSON-RPC 'not found' -> not-found` / `... isError 'not found' + newline ...` / `FAIL topic-route list: 'not found' -> reason=not-found, exit 3, no count line` |
 
 After the restore the suite returned to `VERDICT: PASS (266 cases)`.
+
+Review round (code-reviewer MUST-FIX: server words reached `reason=`; nits:
+an empty or repeated `--bot-id`, not-sent vs outcome-unknown, a put reply
+that differs from the request, non-ASCII controls in fields; critic: the
+`live=false` gloss). Baseline `VERDICT: PASS (275 cases)`. The two mutations
+below were applied together with an exact-anchor Python replace (each anchor
+asserted to occur once), one suite run, then restored with `cp`:
+`VERDICT: FAIL (5 of 275 cases)`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S94 | `topic_route_error` puts the server's words into the `mcp-error:` token again | 4 | `FAIL topic_route_error: a protocol error (-32601) -> mcp-error:server-error` / `... forged fields in an unknown error ...` / `... an isError result with no text ...` / `FAIL topic-route: forged fields in a server error stay on the server: line, reason=mcp-error:server-error` |
+| S95 | `topic_route_render_put` drops the label/enabled match | 1 | `FAIL topic-route put --disabled: a reply saying enabled=true -> mcp-error:put-reply-mismatch, no put line` |
+
+After the restore the suite returned to `VERDICT: PASS (275 cases)`.

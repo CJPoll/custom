@@ -22,21 +22,22 @@
 # The reason tokens. `mcp-error:<text>` is the one open-ended token.
 TOPIC_ROUTE_REASONS="usage no-token mcp-unregistered mcp-error not-found refused invalid project-unresolved"
 
-# topic_route_field <text> -- one key=value-safe field: control characters and
-# whitespace become `_`, at most 120 characters, and an empty value is `none`.
-# Server values are printed outside any fence, so they can never forge a
-# second field or a second line.
+# topic_route_field <text> -- one key=value-safe field, by allowlist: every
+# byte outside `A-Za-z0-9._:@/+-` becomes `_` (so whitespace, `=`, control
+# characters and every non-ASCII byte, a C1 or bidi control included), at most
+# 120 bytes, and an empty value is `none`. Server values are printed outside
+# any fence, so they can never forge a second field or a second line.
 topic_route_field() {
   local v
-  v="$(printf '%s' "$1" | LC_ALL=C tr '\000-\040\177' '_' | cut -c1-120)"
+  v="$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._:@/+-' '_' | cut -c1-120)"
   printf '%s' "${v:-none}"
 }
 
-# topic_route_words <text> -- the server's words as one line (control
-# characters become spaces), at most 600 characters: long enough to keep the
-# server's own `Fix:` clause, which is the point of printing them.
+# topic_route_words <text> -- the server's words as one line of printable
+# ASCII (every other byte becomes a space), at most 600 bytes: long enough to
+# keep the server's own `Fix:` clause, which is the point of printing them.
 topic_route_words() {
-  printf '%s' "$1" | LC_ALL=C tr '\000-\037\177' ' ' | sed -e 's/^ *//' -e 's/ *$//' | cut -c1-600
+  printf '%s' "$1" | LC_ALL=C tr -c '[:print:]' ' ' | sed -e 's/^ *//' -e 's/ *$//' | cut -c1-600
 }
 
 # topic_route_put_args <label> <agent_instance_id> <true|false> <bot_id-or-empty>
@@ -65,9 +66,12 @@ _topic_route_error_text() {
 # topic_route_error <json-rpc-message>
 # Status 0 and a reason token on stdout when the answer is NOT a success:
 #   not-found | refused | invalid   -- the server's refusal, by kind
-#   mcp-error:<words>               -- no answer, not JSON, or any other error
-# Status 1 and nothing printed when the answer carries no error (the render
-# functions then judge its shape).
+#   mcp-error:no-answer             -- no answer, or not JSON
+#   mcp-error:server-error          -- any other error (a protocol error)
+# The token is fixed text: the server's words are never part of it (they go
+# on the server: line, topic_route_server_words), so they cannot forge a
+# reason= or op= field. Status 1 and nothing printed when the answer carries
+# no error (the render functions then judge its shape).
 topic_route_error() {
   local msg="$1" err
   if [ -z "${msg}" ] || ! printf '%s' "${msg}" | jq -e 'type == "object"' >/dev/null 2>&1; then
@@ -80,7 +84,7 @@ topic_route_error() {
     "not found") printf 'not-found\n' ;;
     refused:*)   printf 'refused\n' ;;
     invalid:*)   printf 'invalid\n' ;;
-    *)           printf 'mcp-error:%s\n' "$(topic_route_words "${err}" | cut -c1-80)" ;;
+    *)           printf 'mcp-error:server-error\n' ;;
   esac
   return 0
 }
@@ -140,10 +144,11 @@ topic_route_render_list() {
   printf 'count=%s app=%s\n' "${count}" "$(topic_route_field "${app}")"
 }
 
-# topic_route_render_put <json-rpc-message>
+# topic_route_render_put <json-rpc-message> <requested-label> <requested-enabled>
 # Status 0: `put label=<l> inbox=<inbox|none> enabled=<b>`.
 # Status 1: `mcp-error:<what>` when the reply is not `status: "put"` with a
-# label and a boolean enabled.
+# label and a boolean enabled, or when its label or enabled is not what was
+# asked (mcp-error:put-reply-mismatch): the line printed is the one written.
 topic_route_render_put() {
   local reply
   reply="$(_topic_route_reply "$1")"
@@ -151,6 +156,9 @@ topic_route_render_put() {
   printf '%s' "${reply}" | jq -e '.status == "put" and (.label | type) == "string"
       and (.enabled | type) == "boolean"' >/dev/null 2>&1 \
     || { printf 'mcp-error:malformed-put-reply\n'; return 1; }
+  printf '%s' "${reply}" | jq -e --arg l "$2" --arg e "$3" \
+      '.label == $l and (.enabled | tostring) == $e' >/dev/null 2>&1 \
+    || { printf 'mcp-error:put-reply-mismatch\n'; return 1; }
   printf 'put label=%s inbox=%s enabled=%s\n' \
     "$(topic_route_field "$(printf '%s' "${reply}" | jq -r '.label')")" \
     "$(topic_route_field "$(printf '%s' "${reply}" | jq -r '.inbox_name // ""')")" \
@@ -168,7 +176,7 @@ topic_route_fix() {
     mcp-unregistered)
       printf 'the athena MCP server is not registered for this session'"'"'s project. Run scripts/add-athena-mcp from the main checkout of ~/dev/custom, or run topic-route from a project that has it.' ;;
     mcp-error*)
-      printf 'the call did not complete, or answered something that is not a topic-route reply; the words after mcp-error: are the cause. Check the MCP registration and reachability with athena:inbox bin/inbox-doctor, then re-run. A put is safe to repeat: it writes the same route again.' ;;
+      printf 'the call did not complete, or answered something that is not a topic-route reply; the token after mcp-error: and the detail: or server: line above name the cause (not-sent: nothing reached the server; outcome-unknown: a put may have landed, so list before you retry). Check the MCP registration and reachability with athena:inbox bin/inbox-doctor, then re-run. A put is safe to repeat: it writes the same route again.' ;;
     not-found)
       printf 'the server found no Slack app of yours for that bot id (or you have none). Run topic-route list with no --bot-id, or check bin/whoami for the bot id.' ;;
     refused)
