@@ -155,7 +155,11 @@ setup_case() {
 set -u
 f='${FAKE_CRONTAB}'
 case "\${1:-}" in
-  -l) if [ -s "\$f" ]; then cat "\$f"; else echo "no crontab for user" >&2; exit 1; fi ;;
+  -l) if [ -n "\${CRONTAB_SHIM_READ_FAIL:-}" ]; then
+        echo "\${CRONTAB_SHIM_READ_FAIL}" >&2
+        exit 1
+      fi
+      if [ -s "\$f" ]; then cat "\$f"; else echo "no crontab for user" >&2; exit 1; fi ;;
   -)  if [ -n "\${CRONTAB_SHIM_FAIL:-}" ]; then
         echo "crontab: installing new crontab: Permission denied" >&2
         exit 1
@@ -433,6 +437,52 @@ for mode in --remove --install; do
         "rc=$rc stderr=${err}"
   fi
 done
+
+# 9e. A crontab that cannot be READ is never written (DND-1638). crontab -l
+#     failing for any reason but "no crontab for <user>" used to read as an
+#     empty crontab: --install then wrote back only its own two lines and
+#     --remove wrote back nothing, deleting every other entry (the shipwright,
+#     lead-time and clustering lines included). The message is cronie's
+#     perror() shape, with a synthetic path.
+setup_case read_fails
+make_stub 0 0
+printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
+snapshot="$(cat "${FAKE_CRONTAB}")"
+for mode in --install --remove "--install --dry-run"; do
+  # shellcheck disable=SC2086
+  err="$(CRONTAB_SHIM_READ_FAIL='/var/spool/cron/crontabs/u: Permission denied' \
+         run_installer $mode 2>&1 >/dev/null)"; rc=$?
+  if [ "$rc" -eq 2 ] && grep -q 'could not read the current crontab' <<<"$err" \
+     && grep -q 'Permission denied' <<<"$err" && grep -q 'Fix:' <<<"$err" \
+     && [ "$(cat "${FAKE_CRONTAB}")" = "$snapshot" ]; then
+    ok "$mode on an unreadable crontab is exit 2 with Fix:, the crontab unchanged"
+  else
+    bad "$mode on an unreadable crontab is exit 2 with Fix:, the crontab unchanged" \
+        "rc=$rc stderr=${err} crontab=$(cat "${FAKE_CRONTAB}")"
+  fi
+done
+err="$(CRONTAB_SHIM_READ_FAIL='/var/spool/cron/crontabs/u: Permission denied' \
+       run_installer --check 2>&1 >/dev/null)"; rc=$?
+if [ "$rc" -eq 2 ] && grep -q 'could not read the current crontab' <<<"$err" \
+   && ! grep -q 'MISSING' <<<"$err" && grep -q 'Fix:' <<<"$err"; then
+  ok "--check on an unreadable crontab is exit 2 'could not read', never MISSING"
+else
+  bad "--check on an unreadable crontab is exit 2 'could not read', never MISSING" \
+      "rc=$rc stderr=${err}"
+fi
+
+# 9f. "no crontab for <user>" is still an empty crontab: install writes both
+#     entries and nothing else.
+setup_case nocrontab_install
+make_stub 0 0
+rm -f "${FAKE_CRONTAB}"
+err="$(run_installer --install 2>&1 >/dev/null)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(cat "${FAKE_CRONTAB}" 2>/dev/null)" = "$(printf '@reboot %s\n*/5 * * * * %s' "${EXP_RUNNER}" "${EXP_RUNNER}")" ]; then
+  ok "install on 'no crontab for <user>' writes exactly the two entries"
+else
+  bad "install on 'no crontab for <user>' writes exactly the two entries" \
+      "rc=$rc stderr=${err} crontab=$(cat "${FAKE_CRONTAB}" 2>&1)"
+fi
 
 # 10. --check on a machine with NO crontab at all must report missing, not
 #     crash on crontab(1)'s "no crontab for user" exit 1.

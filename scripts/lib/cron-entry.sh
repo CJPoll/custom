@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # scripts/lib/cron-entry.sh — the ONE answer to "which crontab lines are ours"
-# for the cron installers (DND-1503): setup-shipwright-cron,
-# setup-clustering-cron, setup-leadtime-cron and setup-athena-inbox-client.
+# (DND-1503) and the ONE crontab reader (DND-1638) for the cron installers:
+# setup-shipwright-cron, setup-clustering-cron, setup-leadtime-cron and
+# setup-athena-inbox-client.
 #
 # A line is OURS when it is not a comment and one of its whitespace-separated
 # fields IS the runner's absolute path. Nothing else is ours:
@@ -38,6 +39,38 @@
 #
 # ONE classifier serves each installer's --check, --install and --remove, so
 # what is counted as ours is exactly what is replaced or removed.
+#
+# cron_read_crontab <who> [<crontab-cmd>]
+#   The current crontab on stdout, read with `<crontab-cmd> -l` (default
+#   crontab). The ONE reader every installer uses (DND-1638).
+#   <who>           the installer's name; it prefixes the error line
+#   Returns 0 with the crontab; 0 with nothing printed when crontab -l fails
+#   with "no crontab for <user>" (an empty crontab); 2 on ANY other failure
+#   (a permission error, a broken spool, a crontab that cannot run), with
+#   "<who>: could not read the current crontab (...)" and a Fix: on stderr and
+#   nothing on stdout. A caller MUST stop on 2 before any write: a failed read
+#   that reads as empty makes --install write back only its own line and
+#   --remove write back nothing, deleting every other entry. That was
+#   `crontab -l 2>/dev/null || true` in two installers.
+
+cron_read_crontab() {
+  local who="${1:-cron_read_crontab}" cmd="${2:-crontab}" out err rc=0 msg
+  err="$(mktemp)" || {
+    echo "${who}: could not read the current crontab (mktemp failed, so crontab -l's error could not be captured)" >&2
+    echo "  Fix: make \${TMPDIR:-/tmp} writable, then re-run. Nothing was written." >&2
+    return 2
+  }
+  out="$("${cmd}" -l 2>"${err}")" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    if grep -q 'no crontab for' "${err}"; then rm -f "${err}"; return 0; fi
+    msg="$(tr '\n' ' ' <"${err}")"; rm -f "${err}"
+    echo "${who}: could not read the current crontab (${cmd} -l exit ${rc}: ${msg})" >&2
+    echo "  Fix: make 'crontab -l' succeed for this user first (scripts/setup-shipwright-cron repairs a broken spool dir, with sudo), then re-run. Nothing was written." >&2
+    return 2
+  fi
+  rm -f "${err}"
+  [ -z "${out}" ] || printf '%s\n' "${out}"
+}
 
 cron_entry_lines() {
   local runner="${1:-}" class="${2:-}" suffix="${3:-}"

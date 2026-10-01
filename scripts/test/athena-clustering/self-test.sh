@@ -681,6 +681,28 @@ if [ "$rc" = 2 ] && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && grep -q '
 else
   bad "unreadable crontab" "rc=$rc ct=$(cat "$ct") err=$(cat "${TMP}/inst.err")"
 fi
+# DND-1638: every mode that reads the crontab treats only "no crontab for
+# <user>" as empty. --remove on an unreadable crontab used to be the same class.
+rc="$(inst "$ct" FAKE_CRONTAB_FAIL='/var/spool/cron/crontabs/u: Permission denied' -- --remove)"
+if [ "$rc" = 2 ] && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && grep -q 'could not read' "${TMP}/inst.err" \
+   && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "--remove on a crontab that cannot be read writes nothing (exit 2, Fix:)"
+else
+  bad "unreadable crontab --remove" "rc=$rc ct=$(cat "$ct") err=$(cat "${TMP}/inst.err")"
+fi
+rc="$(inst "$ct" FAKE_CRONTAB_FAIL='/var/spool/cron/crontabs/u: Permission denied' -- --check)"
+if [ "$rc" = 2 ] && grep -q 'could not read' "${TMP}/inst.err" && ! grep -q 'MISSING' "${TMP}/inst.err"; then
+  ok "--check on a crontab that cannot be read is exit 2 'could not read', never MISSING"
+else
+  bad "unreadable crontab --check" "rc=$rc err=$(cat "${TMP}/inst.err")"
+fi
+ctn="${TMP}/ct-none"; rm -f "$ctn"
+rc="$(inst "$ctn")"
+if [ "$rc" = 0 ] && [ "$(cat "$ctn")" = "0 7,19 * * * ${IRUN}" ]; then
+  ok "'no crontab for <user>' is an empty crontab: install writes the one entry"
+else
+  bad "no crontab install" "rc=$rc ct=$(cat "$ctn" 2>&1) err=$(cat "${TMP}/inst.err")"
+fi
 rc="$(inst "$ct" -- --schedule '0 7 * *')"
 if [ "$rc" = 1 ] && grep -q 'Fix:' "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
   ok "a malformed --schedule is refused"

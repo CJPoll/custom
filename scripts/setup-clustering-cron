@@ -123,20 +123,9 @@ mcp_ok_line() {
 
 # read_crontab — the current crontab on stdout. "no crontab for <user>" is an
 # empty crontab. Any other failure exits 2: writing after a failed read would
-# replace every other entry with ours.
-read_crontab() {
-  local out err rc=0
-  err="$(mktemp)"
-  out="$(crontab -l 2>"${err}")" || rc=$?
-  if [ "${rc}" -ne 0 ]; then
-    if grep -q 'no crontab for' "${err}"; then rm -f "${err}"; return 0; fi
-    local msg; msg="$(tr '\n' ' ' <"${err}")"; rm -f "${err}"
-    die 2 "could not read the current crontab (crontab -l exit ${rc}: ${msg})" \
-      "fix the crontab spool first (scripts/setup-shipwright-cron repairs it), then re-run. Nothing was written."
-  fi
-  rm -f "${err}"
-  printf '%s\n' "${out}"
-}
+# replace every other entry with ours. The reader is scripts/lib/cron-entry.sh's
+# cron_read_crontab (DND-1638), shared by every cron installer.
+read_crontab() { cron_read_crontab setup-clustering-cron || exit 2; }
 
 # Which lines are ours: scripts/lib/cron-entry.sh (DND-1503), this installer's
 # own copy. An uncommented line with a field that IS the runner path; a

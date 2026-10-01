@@ -27,7 +27,13 @@
 #   --dry-run            Print what would happen; change nothing
 #   --help               Show this help
 #
-# Exit codes: 0 ok · 1 usage/arg error · 2 missing prerequisite · 3 need root
+# A crontab that cannot be read is never written: only "no crontab for <user>"
+# reads as empty. Any other `crontab -l` failure (a permission error, a broken
+# spool) is exit 2 with a Fix: and nothing written, in every mode (DND-1638).
+#
+# Exit codes: 0 ok · 1 usage/arg error, or --check found the entry missing
+#             · 2 missing prerequisite, or the current crontab could not be
+#               read · 3 need root
 
 set -euo pipefail
 
@@ -93,7 +99,7 @@ command -v crontab >/dev/null 2>&1 || { echo "error: crontab not installed (need
 # Read-only; safe for an agent/CI to run. Exit 0 if the entry is present, 1 if
 # missing, with an actionable Fix.
 if [ "${CHECK:-0}" -eq 1 ]; then
-  current="$(crontab -l 2>/dev/null || true)"
+  current="$(cron_read_crontab setup-shipwright-cron)" || exit 2
   live="$(printf '%s\n' "$current" | cron_entry_lines "$RUNNER" ours)"
   if [ -n "$live" ]; then
     say "OK — the athena-shipwright cron entry is installed:"
@@ -125,7 +131,7 @@ fi
 # ---- remove path -----------------------------------------------------------
 if [ "$REMOVE" -eq 1 ]; then
   step "Removing the athena-shipwright crontab entry"
-  current="$(crontab -l 2>/dev/null || true)"
+  current="$(cron_read_crontab setup-shipwright-cron)" || exit 2
   kept="$(printf '%s\n' "$current" | cron_entry_lines "$RUNNER" notours | sed '/^[[:space:]]*$/d')"
   put_crontab "$kept"
   say "Done. (Any spool dir and the cron daemon are left as-is.)"
@@ -169,7 +175,7 @@ fi
 # ---- 3. install the crontab entry (idempotent) -----------------------------
 step "Crontab entry ($SCHEDULE)"
 line="${SCHEDULE} ${RUNNER}"
-current="$(crontab -l 2>/dev/null || true)"
+current="$(cron_read_crontab setup-shipwright-cron)" || exit 2
 kept="$(printf '%s\n' "$current" | cron_entry_lines "$RUNNER" notours | sed '/^[[:space:]]*$/d')"
 if [ -n "$kept" ]; then
   new_crontab="$(printf '%s\n%s' "$kept" "$line")"

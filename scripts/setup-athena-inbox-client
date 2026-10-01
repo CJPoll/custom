@@ -70,7 +70,9 @@
 #                                   reintroduces the vanishing-path bug.
 #
 # Exit codes: 0 ok · 1 usage/arg error, or --check found the entries missing
-#             · 2 missing prerequisite
+#             · 2 missing prerequisite, or the current crontab could not be
+#               read ("no crontab for <user>" is an empty crontab, not a
+#               failure); nothing is written
 
 set -uo pipefail
 
@@ -160,9 +162,14 @@ command -v crontab >/dev/null 2>&1 || {
   exit 2
 }
 
-# The current crontab, or empty when the user has none. "no crontab for user"
-# goes to stderr and is not an error here.
-read_crontab() { crontab -l 2>/dev/null || true; }
+# The current crontab, or empty when the user has none ("no crontab for
+# <user>"). Any other read failure exits 2 with a Fix: and nothing written:
+# reading it as empty made --install write back only our two lines and
+# --remove write back nothing, deleting every other entry (DND-1638). This
+# script runs without -e, so every caller writes
+# `current="$(read_crontab)" || exit 2`. The reader is scripts/lib/cron-entry.sh's
+# cron_read_crontab, shared by every cron installer.
+read_crontab() { cron_read_crontab setup-athena-inbox-client; }
 
 # Replace the crontab with $1 (or preview it under --dry-run).
 put_crontab() {
@@ -225,7 +232,7 @@ RELAUNCH_LINE="${RELAUNCH_SCHEDULE} ${RUNNER}"
 
 # ---- check path (read-only) ------------------------------------------------
 if [ "$MODE" = "check" ]; then
-  current="$(read_crontab)"
+  current="$(read_crontab)" || exit 2
   have_reboot=0; have_relaunch=0
   grep -qxF -- "$REBOOT_LINE" <<<"$current"   && have_reboot=1
   grep -qxF -- "$RELAUNCH_LINE" <<<"$current" && have_relaunch=1
@@ -248,7 +255,7 @@ fi
 # ---- remove path -----------------------------------------------------------
 if [ "$MODE" = "remove" ]; then
   step "Removing the Athena inbox client crontab entries"
-  current="$(read_crontab)"
+  current="$(read_crontab)" || exit 2
   kept="$(without_our_entries "$current")" || classify_failed
   put_crontab "$kept"
   say "Done. Any client already running is left alone; it simply will not be relaunched."
@@ -280,7 +287,7 @@ else
 fi
 
 step "Crontab entries"
-current="$(read_crontab)"
+current="$(read_crontab)" || exit 2
 kept="$(without_our_entries "$current")" || classify_failed
 if [ -n "$kept" ]; then
   new_crontab="$(printf '%s\n%s\n%s' "$kept" "$REBOOT_LINE" "$RELAUNCH_LINE")"

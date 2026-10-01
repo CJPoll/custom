@@ -72,6 +72,43 @@ else
   bad "an unknown class is exit 2 with Fix:" "rc=$rc out=$out"
 fi
 
+printf '\ncron_read_crontab — only "no crontab for" is empty (DND-1638)\n'
+# A fake crontab command per case, in a temp dir. The real crontab is never run.
+FT="$(mktemp -d)"
+trap 'rm -rf -- "$FT"' EXIT
+fake() { # <name> <stdout> <stderr> <exit>
+  printf '#!/usr/bin/env bash\n[ "$1" = -l ] || exit 9\nprintf %%s %q\nprintf %%s %q >&2\nexit %s\n' "$2" "$3" "$4" >"${FT}/$1"
+  chmod +x "${FT}/$1"
+}
+fake ok-ct "$(printf '%s\n' "$LIVE" "$OTHER")" "" 0
+fake none "" "no crontab for u" 1
+fake denied "" "/var/spool/cron/crontabs/u: Permission denied" 1
+fake denied-out "$OTHER" "crontab: spool fault" 2
+
+out="$(cron_read_crontab who "${FT}/ok-ct" 2>"${FT}/err")"; rc=$?
+expect "a readable crontab prints its lines, exit 0" "0|$(printf '%s\n' "$LIVE" "$OTHER")" "${rc}|${out}"
+out="$(cron_read_crontab who "${FT}/none" 2>"${FT}/err")"; rc=$?
+expect "'no crontab for <user>' is an empty crontab, exit 0, nothing on stderr" "0||" "${rc}|${out}|$(cat "${FT}/err")"
+out="$(cron_read_crontab who "${FT}/denied" 2>"${FT}/err")"; rc=$?
+if [ "$rc" = 2 ] && [ -z "$out" ] && grep -q '^who: could not read the current crontab' "${FT}/err" \
+   && grep -q 'Permission denied' "${FT}/err" && grep -q 'Fix:' "${FT}/err"; then
+  ok "a permission error is exit 2, names the error, carries Fix:, and prints no lines"
+else
+  bad "a permission error is exit 2, names the error, carries Fix:, and prints no lines" "rc=$rc out=$out err=$(cat "${FT}/err")"
+fi
+out="$(cron_read_crontab who "${FT}/denied-out" 2>"${FT}/err")"; rc=$?
+if [ "$rc" = 2 ] && [ -z "$out" ] && grep -q 'exit 2' "${FT}/err" && grep -q 'Fix:' "${FT}/err"; then
+  ok "a failed read that printed partial lines prints none of them (exit 2)"
+else
+  bad "a failed read that printed partial lines prints none of them (exit 2)" "rc=$rc out=$out err=$(cat "${FT}/err")"
+fi
+out="$(cron_read_crontab who "${FT}/absent-crontab" 2>"${FT}/err")"; rc=$?
+if [ "$rc" = 2 ] && [ -z "$out" ] && grep -q 'Fix:' "${FT}/err"; then
+  ok "a crontab command that cannot run is exit 2 with Fix:, never an empty crontab"
+else
+  bad "a crontab command that cannot run is exit 2 with Fix:, never an empty crontab" "rc=$rc out=$out err=$(cat "${FT}/err")"
+fi
+
 printf '\n'
 TOTAL=$((PASS+FAIL))
 if [ "$FAIL" -eq 0 ]; then

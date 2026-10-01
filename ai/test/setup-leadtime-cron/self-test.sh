@@ -310,6 +310,21 @@ if [ "$rc" = 2 ] && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && grep -q '
 else
   bad "unreadable crontab" "rc=$rc $(out)"
 fi
+# DND-1638: --remove on a crontab that cannot be read writes nothing either.
+rc="$(inst "$ct" FAKE_CRONTAB_FAIL='/var/spool/cron/crontabs/u: Permission denied' -- --remove)"
+if [ "$rc" = 2 ] && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && grep -q 'could not read' "${TMP}/inst.err" \
+   && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "--remove on a crontab that cannot be read writes nothing (exit 2, Fix:)"
+else
+  bad "unreadable crontab --remove" "rc=$rc $(out)"
+fi
+ctn="${TMP}/ct-none"; rm -f "$ctn"
+rc="$(inst "$ctn" -- --install)"
+if [ "$rc" = 0 ] && [ "$(cat "$ctn")" = "${ENTRY}" ]; then
+  ok "'no crontab for <user>' is an empty crontab: --install writes the one entry"
+else
+  bad "no crontab install" "rc=$rc ct=$(cat "$ctn" 2>&1) $(out)"
+fi
 mv "$IR/ai/skills/athena:lead-time-improve/SKILL.md" "${TMP}/skill.aside"
 rc="$(inst "$ct" -- --install)"
 mv "${TMP}/skill.aside" "$IR/ai/skills/athena:lead-time-improve/SKILL.md"

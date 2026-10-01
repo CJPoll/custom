@@ -35,7 +35,8 @@ cat >"$BIN/crontab" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >>"${FAKE_CRONTAB}.calls"
 case "$1" in
-  -l) [ -e "$FAKE_CRONTAB" ] || { echo "no crontab for $(id -un)" >&2; exit 1; }
+  -l) if [ -n "${FAKE_CRONTAB_FAIL:-}" ]; then echo "${FAKE_CRONTAB_FAIL}" >&2; exit 1; fi
+      [ -e "$FAKE_CRONTAB" ] || { echo "no crontab for $(id -un)" >&2; exit 1; }
       cat "$FAKE_CRONTAB" ;;
   -)  cat >"$FAKE_CRONTAB" ;;
   *)  echo "fake crontab: unsupported $*" >&2; exit 9 ;;
@@ -59,9 +60,9 @@ IS="$(cd -- "$IS" && pwd -P)"
 RUN="$IS/athena-shipwright-run.sh"
 ENTRY="0 * * * * ${RUN}"
 
-inst() { # <crontab-file> [args...]
+inst() { # <crontab-file> [args...]   (FAKE_CRONTAB_FAIL from the caller's env)
   local f="$1"; shift
-  env PATH="$BIN:$PATH" FAKE_CRONTAB="$f" "$IS/setup-shipwright-cron" "$@" \
+  env PATH="$BIN:$PATH" FAKE_CRONTAB="$f" FAKE_CRONTAB_FAIL="${FAKE_CRONTAB_FAIL:-}" "$IS/setup-shipwright-cron" "$@" \
     >"${TMP}/inst.out" 2>"${TMP}/inst.err"
   printf '%s' "$?"
 }
@@ -167,8 +168,53 @@ for args in "" "--remove" "--check"; do
 done
 
 # ===========================================================================
+case_ 'setup-shipwright-cron — a crontab that cannot be read is never written (DND-1638)'
+
+# crontab -l failing for any reason but "no crontab for <user>" used to read as
+# an empty crontab, so --install wrote back only its own line and --remove
+# wrote back nothing: every other entry was deleted. The message is cronie's
+# perror() shape, with a synthetic path.
+DENIED='/var/spool/cron/crontabs/u: Permission denied'
+ct="${TMP}/ct-denied"
+printf '0 7 * * * /opt/other-job\n30 * * * * /opt/leadtime-job\n' >"$ct"
+cp "$ct" "${TMP}/ct-denied.orig"
+for args in "" "--remove" "--dry-run"; do
+  # shellcheck disable=SC2086
+  rc="$(FAKE_CRONTAB_FAIL="$DENIED" inst "$ct" $args)"
+  if [ "$rc" = 2 ] && grep -q 'could not read the current crontab' "${TMP}/inst.err" \
+     && grep -q 'Permission denied' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+     && cmp -s "$ct" "${TMP}/ct-denied.orig" && ! grep -qx -- '-' "${ct}.calls"; then
+    ok "unreadable crontab: '${args:-install}' is exit 2 with Fix:, nothing written"
+  else
+    bad "unreadable ${args:-install}" "rc=$rc $(out) ct=$(cat "$ct") calls=$(cat "${ct}.calls" 2>&1)"
+  fi
+done
+rc="$(FAKE_CRONTAB_FAIL="$DENIED" inst "$ct" --check)"
+if [ "$rc" = 2 ] && grep -q 'could not read the current crontab' "${TMP}/inst.err" \
+   && ! grep -q 'MISSING' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err"; then
+  ok "unreadable crontab: --check is exit 2 'could not read', never MISSING"
+else
+  bad "unreadable --check" "rc=$rc $(out)"
+fi
+ct="${TMP}/ct-none"
+rm -f "$ct"
+rc="$(inst "$ct")"
+if [ "$rc" = 0 ] && [ "$(cat "$ct")" = "$ENTRY" ]; then
+  ok "'no crontab for <user>' is still an empty crontab: install writes the one entry"
+else
+  bad "no crontab install" "rc=$rc $(out) ct=$(cat "$ct" 2>&1)"
+fi
+rm -f "$ct"
+rc="$(inst "$ct" --check)"
+if [ "$rc" = 1 ] && grep -q 'MISSING' "${TMP}/inst.err"; then
+  ok "'no crontab for <user>': --check is MISSING (exit 1), not a read failure"
+else
+  bad "no crontab check" "rc=$rc $(out)"
+fi
+
+# ===========================================================================
 case_ 'no case reached root'
-if [ -e "${TMP}/ct-basic.sudo" ] || [ -e "${TMP}/ct-ours.sudo" ]; then
+if compgen -G "${TMP}/*.sudo" >/dev/null; then
   bad "no case ran sudo" "calls: $(cat "${TMP}"/*.sudo 2>&1)"
 else
   ok "no case ran sudo"
