@@ -342,6 +342,13 @@ if [ "$rc" = 2 ] && ! grep -q 'usable\.' "${TMP}/inst.out" && ! grep -q 'repairi
 else
   bad "probe EACCES" "rc=$rc $(out)"
 fi
+rc="$(FAKE_CRONTAB_FAIL='crontab: Cannot open the spool' inst "$ct")"
+if [ "$rc" = 2 ] && ! grep -q 'repairing' "${TMP}/inst.out" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && ! compgen -G "${TMP}/*.sudo" >/dev/null; then
+  ok "a vague 'Cannot ...' failure is unreadable, not a root repair"
+else
+  bad "probe Cannot" "rc=$rc $(out)"
+fi
 rm -f "$ct"
 rc="$(inst "$ct")"
 if [ "$rc" = 0 ] && grep -q 'usable\.' "${TMP}/inst.out" && grep -qxF "$ENTRY" "$ct"; then

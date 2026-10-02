@@ -221,10 +221,11 @@ if [ "$spool_rc" -ne 0 ]; then
 fi
 case "$spool_state" in
   unreadable)
-    # Not a spool shape we repair. The shared reader names the failure (exit,
-    # stderr) with its Fix:, so the wording lives in one place.
-    echo "  crontab -l failed (exit ${spool_rc}); not a recognised broken-spool shape, so no repair is attempted." >&2
-    cron_read_crontab setup-shipwright-cron >/dev/null || exit 2
+    # Not a spool shape we repair (the old "cannot" match is gone: it sent
+    # unrelated failures to a root repair). Name the failure from the capture
+    # already in hand; no second read.
+    echo "setup-shipwright-cron: could not read the current crontab (crontab -l exit ${spool_rc}: $(printf '%s' "$spool_err" | tr '\n' ' ')); not a recognised broken-spool shape, so no repair is attempted." >&2
+    echo "  Fix: make 'crontab -l' succeed for this user (a permission error: check the owner and mode of ${SPOOL_DIR} against the crontab binary's group), then re-run. Nothing was repaired or written." >&2
     exit 2
     ;;
   broken)
