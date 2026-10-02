@@ -278,6 +278,9 @@ tools:
   # and appends only to its own ai-artifacts/lead-time/experiments.jsonl; a
   # re-judge with the same inputs appends nothing.
   skills/athena:lead-time-improve/scripts/experiment: { class: idempotent, reason: ledger }
+  # unmeasurable (DND-1806) sets a DND ticket's Path to Promoted, appends a
+  # note to it, and sends a harness-alerts message: tracker state and mail.
+  skills/athena:lead-time-improve/scripts/unmeasurable: { class: destructive, reason: tracker }
   skills/athena:merge-boarding/scripts/locked-merge: { class: destructive, reason: forge }
   # destructive: Slack writes, routed mail through the Athena server, and the
   # inbox ack, which consumes messages from a view other sessions share (see the

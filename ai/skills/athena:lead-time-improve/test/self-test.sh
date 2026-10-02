@@ -3,7 +3,9 @@
 # harness-gate (every committed `self-test.sh` runs).
 #
 # Layers, in TDD order:
-#   1. the domain and store suite (experiment_test.rb);
+#   1. the domain and store suite (experiment_test.rb), and the
+#      unmeasurable-phase escalation's suites (unmeasurable_test.rb, then
+#      unmeasurable_e2e_test.rb against a fake Notion and send-mail, DND-1806);
 #   2. scripts/experiment end to end, against temp state dirs
 #      (LEAD_TIME_STATE_DIR), a temp config (ATHENA_LEADTIME_CONFIG), fixture
 #      ledgers (make_ledger.rb), a temp git repo whose commits are the landings
@@ -36,6 +38,25 @@ if /usr/bin/ruby "${HERE}/experiment_test.rb" >"${TMP}/lib.out" 2>&1; then
   ok "experiment_test.rb: $(tail -1 "${TMP}/lib.out")"
 else
   bad "experiment_test.rb" "$(cat "${TMP}/lib.out")"
+fi
+
+# ── the unmeasurable-phase escalation (DND-1806) ────────────────────────────
+# Domain, store and manager against fake ports; then scripts/unmeasurable end
+# to end against a fake Notion and a fake send-mail (never a live one).
+echo "== unmeasurable"
+if /usr/bin/ruby "${HERE}/unmeasurable_test.rb" >"${TMP}/unm.out" 2>&1; then
+  ok "unmeasurable_test.rb: $(tail -1 "${TMP}/unm.out")"
+else
+  bad "unmeasurable_test.rb" "$(cat "${TMP}/unm.out")"
+fi
+if command -v python3 >/dev/null 2>&1; then
+  if /usr/bin/ruby "${HERE}/unmeasurable_e2e_test.rb" >"${TMP}/unm-e2e.out" 2>&1; then
+    ok "unmeasurable_e2e_test.rb: $(tail -1 "${TMP}/unm-e2e.out")"
+  else
+    bad "unmeasurable_e2e_test.rb" "$(grep -v '^ok' "${TMP}/unm-e2e.out")"
+  fi
+else
+  bad "unmeasurable_e2e_test.rb" "python3 is missing, so the fake Notion cannot run. Fix: install python3; this suite does not skip."
 fi
 
 # ── fixtures: a git repo whose commits are the experiments' landings ───────

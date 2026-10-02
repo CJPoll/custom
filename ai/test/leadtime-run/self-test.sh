@@ -266,9 +266,10 @@ for form in flag env; do
      && grep -q 'subagent_type: athena-shipwright' "$c/runner.out" \
      && grep -q "$c/repo/.git/leadtime-lanes/run-" "$c/runner.out" \
      && grep -q "$c/repo/ai-artifacts/lead-time/runs/.*\.summary" "$c/runner.out" \
+     && grep -q 'Your run id is run-[0-9TZ]*-[0-9]* (unmeasurable observe --run)' "$c/runner.out" \
      && [ ! -e "$(sd "$c")" ] && [ ! -e "$(lanes "$c")" ] && [ "$(invoked "$c")" = 0 ] \
      && [ ! -e "$c/telemetry-calls" ]; then
-    ok "--dry-run ($form) prints a brief naming MODE: lead-time, the skill, the lane and the summary file; touches nothing"
+    ok "--dry-run ($form) prints a brief naming MODE: lead-time, the skill, the lane, the summary file and the run id (DND-1806); touches nothing"
   else
     bad "--dry-run ($form)" "rc=$rc out=$(cat "$c/runner.out") err=$(cat "$c/runner.err")"
   fi

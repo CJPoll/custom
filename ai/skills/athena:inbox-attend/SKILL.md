@@ -392,6 +392,9 @@ A top-level message with no thread takes the status on its own ts.
   **Later (2026-10-01):** added by DND-1479. A `-leadtime-wedged.md` or
   `-leadtime-blocked.md` message is handled the same way (same section, *The
   lead-time cron writer*).
+  **Later (2026-10-02):** added by DND-1806. A `-leadtime-unmeasurable.md`
+  message is a report from a lead-time run's session: verify it against its
+  record and relay it (same section, *The lead-time cron writer*).
   **Later (2026-10-01):** added by DND-1482. A `-main-red.md` message is a
   red origin/main: verify it against its verdict record and file the
   stop-the-line ticket (same section, *The post-landing main check*).
@@ -562,6 +565,20 @@ it exactly as *The clustering cron writer* above, with these differences:
   `declined leadtime-wedged-unverifiable`, `leadtime-blocked relayed`,
   `leadtime-blocked-dm` and `declined leadtime-blocked-unverifiable`, with the
   same one-DM-per-24-hours limit per writer.
+
+**Later (2026-10-02):** added by DND-1806. A message whose filename ends
+`-leadtime-unmeasurable.md` comes from a lead-time run's session
+(`athena:lead-time-improve` → `scripts/unmeasurable`), once per episode in
+which a repo's biggest phase stayed unmeasurable for 3 runs while its
+hand-off ticket was open. It is a report, not a wedge: there is no re-arm.
+Verify it against its `re:`, which must be a regular file directly in
+`~/dev/custom/ai-artifacts/lead-time/runs/` whose name contains
+`.unmeasurable.`. Its `unmeasurable: ` line must carry `runs=N threshold=M`
+with N >= M, and a `ticket=` equal to the message's `ticket:` line. Relay to
+the owner: the repo, phase, ticket, N, and the record's `promoted=` value
+(`yes`, `already`, or `no`: a promotion the next run retries). Ledger words:
+`leadtime-unmeasurable relayed`, `leadtime-unmeasurable-dm` (one DM per 24
+hours) and `declined leadtime-unmeasurable-unverifiable`.
 
 **The post-landing main check: a red main (DND-1482).**
 **Later (2026-10-01):** added by DND-1482, a labelled addition to this dated

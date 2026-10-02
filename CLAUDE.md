@@ -736,6 +736,14 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   post-merge deploy stops that repo's line until the owner re-arms it (`rm`
   its `product-line-stopped.<R>`). Unlike the shipwright runner, it
   has no dirty-main-checkout yield.
+- **A phase it cannot measure escalates (DND-1806).** When an improve repo's
+  biggest phase is unmeasurable on 3 runs in a row and its hand-off ticket
+  is open, the run promotes that ticket (Path Promoted, with a note on it)
+  and sends ONE `leadtime-unmeasurable` alert per episode. The episode ends
+  when the ticket lands or the phase becomes measurable. The run's session
+  does this through `athena:lead-time-improve`'s `unmeasurable` tool, not
+  the runner; the count is `unmeasurable.json` in the state dir. A ticket it
+  cannot read is "could not look", never "already handed off".
 
 ## Cron D-Bus autolaunch leak (orphaned `dbus-daemon`, inotify exhaustion)
 

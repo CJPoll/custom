@@ -30,7 +30,11 @@ reason. It is never landed, and it is never your run's action.
   names another state dir, `export LEAD_TIME_STATE_DIR=<that dir>` before
   running any tool, so the tools and your journal agree. It holds
   `ledger.jsonl`, `cursor.<repo>.txt`, `experiments.jsonl`, `journal.md`,
-  `watch-cursor.<repo>.txt` and `runs/`. Never derive it from your cwd.
+  `unmeasurable.json`, `watch-cursor.<repo>.txt` and `runs/`. Never derive
+  it from your cwd.
+- **Run id:** the one your brief names (the cron lane's `run-<utc>-<pid>`).
+  A directly-spawned run with none uses `direct-<UTC %Y%m%dT%H%M%SZ>`, fixed
+  once at its start. `unmeasurable observe` counts each id once.
 - **Lane:** `athena:shipwright-lane` (*Where you run*, *Sync down first*).
   Every commit goes through its commit wrapper.
 - **Read the journal first.** Its *Decisions / Won't-change* entries bind
@@ -54,6 +58,9 @@ ai/bin/lead-time-phases --summary --repo R --json
 <skill>/scripts/experiment list --repo R
 <skill>/scripts/experiment decline --repo R --id ID --constraint safety-checks|bug-fix --reason-file F
 <skill>/scripts/experiment settling --repo R --phase P [--metric M] [--json]    # read-only: CLEAN | SETTLING | SHORT
+<skill>/scripts/unmeasurable observe --repo R --run ID --summary-file F    # every run; escalates at 3 (DND-1806)
+<skill>/scripts/unmeasurable handoff --repo R --phase P --ticket DND-N
+<skill>/scripts/unmeasurable status [--repo R]    # read-only
 ```
 
 Each answers `--help`. Read an exit code before its output:
@@ -214,6 +221,40 @@ it. Read its top `na_reasons` first:
   first-write-wins; `--rejoin` only re-joins a missing gated head, it cannot
   supply a missing event), and time fixes it. The action is then `no action`:
   "measurement maturing: <phase> n/a on <n_na> pre-emitter landings".
+
+**Escalate what stays unmeasurable (DND-1806).** Every run, on every improve
+repo whose summary you read in step 3, save that JSON (exit 0 only) to a file
+named for this run and repo, and run `unmeasurable observe --repo R --run
+<run id> --summary-file <file>`. It counts the consecutive runs on which the
+biggest phase is unmeasurable (`n_na > n`), per repo and phase, in
+`unmeasurable.json`. A measurable phase resets its count. With a hand-off
+ticket recorded, it reads that ticket's Status from DND Tickets each run. At
+3 runs with the ticket open, once per episode, it notes the escalation on
+the ticket, sets Path = Promoted, and sends ONE `leadtime-unmeasurable`
+harness-alert naming the repo, phase, ticket and run count. The episode ends
+when the ticket lands (Done or Ready for Release) or the phase becomes
+measurable. Put each `journal:` line it prints in this run's journal as
+written. Then act on its outcome:
+
+- **COUNTING** (with a ticket), **ESCALATED**, **ESCALATED-EARLIER**: the
+  gap is handed off and the ticket was read open this run. Journal the line;
+  this phase needs no second hand-off. Pick the run's action as usual.
+- **NO-HANDOFF** or **HANDOFF-CLOSED**: 3 runs unmeasurable and nothing open
+  fixes it. `no action` is not allowed: this run's action is the
+  instrumentation change, or ONE architect (step 5.3) to file the hand-off.
+- **HANDOFF-LANDED**: its fix landed. If the top n/a reason predates the
+  fix's emitter, "measurement maturing" as above. If it does not, the fix
+  did not fire: that is a new finding, handed off as in NO-HANDOFF.
+- **COULD-NOT-LOOK** (exit 3): the ticket could not be read or promoted, or
+  the alert was not delivered. Journal it as "could not look: <its reason>",
+  never as "already handed off". The next run retries the step that failed.
+- Exit 2 (a summary for another repo, a missing phase, a bad ticket): a
+  refusal, journaled with its Fix:. Nothing was counted.
+
+Whenever a run hands an unmeasurable phase off to a ticket (an architect
+files it), record it the same run: `unmeasurable handoff --repo R --phase P
+--ticket DND-N`. A hand-off the journal names that `unmeasurable status`
+does not hold is recorded the same way before `observe`.
 
 Otherwise the biggest phase is the target of a **change**, unless
 `experiment list --repo R` shows a `change` on it that is PENDING or owes a
@@ -435,9 +476,21 @@ differs.
   **Later (2026-10-01, DND-1613):** this read "`tail` is not a target while
   DND-1613 is open", and step 4 worked the largest measurable phase instead.
   Superseded: `experiment` records and judges `tail`.
-- **Too large for one run:** first read the journal: if an earlier run
-  already handed off this finding for R (the same phase, its ticket not
-  closed), journal "already handed off: <ticket>" and pick another action.
+- **Too large for one run:** first check whether an earlier run already
+  handed off this finding for R (the same phase), and read that ticket's
+  Status this run. For an unmeasurable phase, this run's `unmeasurable
+  observe` line is that read (step 4). For any other, read it through
+  notion-personal. Only a ticket read open this run is "already handed off:
+  <ticket> (Status <s>)": journal that and pick another action. A read that
+  fails is "could not look: <why>", never "already handed off". The journal's
+  own prose is never the evidence.
+
+  **Later (2026-10-02, DND-1806):** this read "first read the journal: if an
+  earlier run already handed off this finding … journal "already handed off:
+  <ticket>"". Superseded: the journal's word stood in for the ticket's state,
+  and DND-1501 was re-noted "already handed off" for a day and a half while
+  nothing escalated.
+
   Otherwise the run spawns ONE `athena-architect` (step 5.3), briefed as
   there plus the repo's name. It files the change on R's `product_epic`
   (`ai/bin/lead-time-repos --json`, which falls back to `improvement_epic`

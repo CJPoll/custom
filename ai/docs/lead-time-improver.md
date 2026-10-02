@@ -320,6 +320,21 @@ Each `improve`-mode run does these steps in order:
 3. **Pick the biggest contributor** from the window summary. If that phase is
    n/a on more than half its rows, the finding is "cannot measure X", and the
    action is instrumentation.
+
+   **Later (2026-10-02, DND-1806):** a "cannot measure X" handed off once was
+   then re-noted "already handed off" every hour, on the journal's word. The
+   journal mentioned DND-1501 47 times between 2026-10-01 and the 2026-10-02
+   20:30Z run, and nothing escalated until the owner promoted it by hand.
+   Owner, Cody, 2026-10-02 20:35Z: "Lead time is our highest priority epic.
+   The fact that something is not measurable that could meaningfully help us
+   improve lead time is a red flag." Each run now calls
+   `athena:lead-time-improve`'s `scripts/unmeasurable observe` with the
+   summary. It counts consecutive unmeasurable runs per repo and phase in
+   `unmeasurable.json` and reads the hand-off ticket's Status each run. At 3
+   runs with the ticket open it promotes the ticket (Path Promoted, with a
+   note) and sends ONE `leadtime-unmeasurable` harness-alert per episode. The
+   episode ends when the ticket lands or the phase becomes measurable. A
+   ticket it cannot read is "could not look", never "already handed off".
 4. **Act once:**
    - land one small, safety-preserving harness change; or
    - land one instrumentation change; or

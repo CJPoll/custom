@@ -425,7 +425,8 @@ refuses your change, do what athena:lead-time-improve (Landing) says for a \
 refusal on the cron path: journal it and reset your lane, so it holds no \
 unlanded commit. The runner fast-forwards \
 the main checkout after you exit. ${PRODUCT_BRIEF}State dir: ${STATE_DIR} (LEAD_TIME_STATE_DIR \
-is already exported with it). The runner does the telemetry prune; do not prune. \
+is already exported with it). Your run id is ${RUN_ID} (unmeasurable observe --run). \
+The runner does the telemetry prune; do not prune. \
 Write your summary lines to exactly this file: ${SUMMARY}. Your hard constraint \
 is your block Speed a safety check up; never weaken it (ai/blocks/ops/safety-checks.md). \
 End with your summary lines.' When it finishes, print the contents of ${SUMMARY} \

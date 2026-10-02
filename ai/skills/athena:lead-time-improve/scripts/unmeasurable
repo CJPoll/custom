@@ -1,0 +1,213 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# unmeasurable -- count the improver runs on which a repo's biggest
+# lead-time phase cannot be measured, and escalate its hand-off ticket once
+# per episode (DND-1806). A skill-local helper: athena:lead-time-improve
+# step 4 calls it on every improve repo.
+#
+# Buckets: FRAMEWORK (argv, output) and the real alert port here; MANAGER in
+# ../lib/unmeasurable_manager.rb; DOMAIN in ../lib/unmeasurable.rb; SIDE
+# EFFECTS in ../lib/unmeasurable_store.rb, ../lib/unmeasurable_notion.rb and
+# ai/lib/harness-alert-send.sh.
+#
+# Deliberately gem-free (stdlib only).
+
+require "json"
+require "open3"
+require "tempfile"
+require_relative "../../../lib/strict_argv"
+require_relative "../lib/unmeasurable"
+require_relative "../lib/unmeasurable_store"
+require_relative "../lib/unmeasurable_manager"
+require_relative "../lib/unmeasurable_notion"
+
+CHECKOUT = File.expand_path("../../../..", __dir__)
+U = LeadTimeUnmeasurable
+M = LeadTimeUnmeasurableManager
+
+HELP = <<~TXT
+  Usage:
+    unmeasurable observe --repo R --run ID --summary-file F
+    unmeasurable handoff --repo R --phase P --ticket DND-N
+    unmeasurable status [--repo R]
+    unmeasurable --help
+
+  The lead-time improver's escalation for a phase it cannot measure
+  (DND-1806). State: <state>/unmeasurable.json, the consecutive-run count
+  per repo and phase.
+
+  observe   one run's look at R. F is `ai/bin/lead-time-phases --summary
+            --repo R --json`, saved to a file. ID is this run's id (the cron
+            lane's run-<utc>-<pid>, from your brief); the same ID twice
+            counts once. A phase is unmeasurable when n_na > n. On a run
+            where the biggest phase is unmeasurable the count goes up; a
+            measurable phase resets it. With a hand-off ticket recorded, the
+            run reads it from DND Tickets. At #{U::THRESHOLD} runs with the ticket
+            open, ONCE per episode: a note on the ticket, Path = Promoted,
+            and ONE harness-alerts message (slug #{U::SLUG}, re: a record in
+            <state>/runs/). The episode ends when the ticket lands (Done or
+            Ready for Release) or the phase becomes measurable.
+  handoff   record the ticket a run handed R's phase off to (P is one of
+            #{U::PHASES.join(', ')}). A new ticket opens a new episode.
+  status    print the state, as JSON. Read-only.
+
+  observe prints, per phase it judged:
+    unmeasurable: repo=R phase=P runs=N ticket=T status="S" outcome=O
+      journal: <the line to put in the run's journal>
+  Outcomes: COUNTING, NO-HANDOFF, ESCALATED, ESCALATED-EARLIER,
+  HANDOFF-LANDED, HANDOFF-CLOSED, COULD-NOT-LOOK, MEASURABLE, MEASURED,
+  NO-PHASE.
+
+  Environment:
+    LEAD_TIME_STATE_DIR               the state dir (default <main checkout>/ai-artifacts/lead-time)
+    LEADTIME_UNMEASURABLE_NOTION_API  a loopback Notion for tests
+    LEADTIME_SEND_MAIL                the send-mail to alert with (tests)
+    FLEET_CLAUDE_JSON                 where the notion-personal MCP entry is (tests)
+
+  Exit: 0 ok; 1 a tool or state write error; 2 a usage error or a refused
+  input (a summary for another repo, a missing phase, a non-DND ticket);
+  3 could not look (a ticket Notion could not read or promote, an alert not
+  delivered, or a state file that cannot be read). Exit 3 is never "already
+  handed off": journal its line as could not look.
+TXT
+
+SPECS = {
+  "observe" => { "--repo" => :value, "--run" => :value, "--summary-file" => :value },
+  "handoff" => { "--repo" => :value, "--phase" => :value, "--ticket" => :value },
+  "status" => { "--repo" => :value }
+}.freeze
+REQUIRED = { "observe" => %w[--repo --run --summary-file], "handoff" => %w[--repo --phase --ticket], "status" => [] }.freeze
+
+class Refusal < StandardError
+  attr_reader :code, :fix
+
+  def initialize(code, message, fix)
+    super(message)
+    @code = code
+    @fix = fix
+  end
+end
+
+# SIDE EFFECTS: one harness-alerts message through the shared helper
+# (ai/lib/harness-alert-send.sh), on the detector side like every other
+# harness-alerts sender. -> the delivered name, or raises PortError.
+class AlertPort
+  def initialize(env)
+    @send_mail = env["LEADTIME_SEND_MAIL"].to_s.empty? ? File.join(CHECKOUT, "ai/skills/athena:inbox/bin/send-mail") : env["LEADTIME_SEND_MAIL"]
+    @helper = File.join(CHECKOUT, "ai/lib/harness-alert-send.sh")
+  end
+
+  def send_alert(slug, record, body)
+    Tempfile.create("leadtime-unmeasurable-") do |f|
+      File.chmod(0o600, f.path)
+      f.write(body)
+      f.flush
+      script = 'set -u; . "$1" || exit 4; shift; harness_alert_deliver "$@"'
+      out, err, st = Open3.capture3("bash", "-c", script, "unmeasurable-alert", @helper, @send_mail, CHECKOUT, "20", "3",
+                                    "--local", "harness-alerts-detector", slug, "--to", "custom", "--re", record,
+                                    "--body-file", f.path, stdin_data: "")
+      unless st.success?
+        raise M::PortError, "harness-alerts send exited #{st.exitstatus}: #{err.lines.first(2).join(' ').strip}"
+      end
+
+      name = out.lines.last.to_s.strip
+      raise M::PortError, "harness-alerts send printed no delivered name" if name.empty?
+
+      name
+    end
+  end
+end
+
+def state_dir(env)
+  dir = env["LEAD_TIME_STATE_DIR"].to_s
+  return dir unless dir.empty?
+
+  out, st = Open3.capture2e("git", "-C", CHECKOUT, "rev-parse", "--path-format=absolute", "--git-common-dir")
+  raise Refusal.new(1, "cannot resolve the state dir: git rev-parse failed in #{CHECKOUT}", "set LEAD_TIME_STATE_DIR, or run from a checkout of ~/dev/custom") unless st.success?
+
+  File.join(File.dirname(out.strip), "ai-artifacts", "lead-time")
+end
+
+def manager(env)
+  state = state_dir(env)
+  raise Refusal.new(1, "the state dir #{state} does not exist", "run from a machine whose lead-time state dir exists, or set LEAD_TIME_STATE_DIR") unless Dir.exist?(state)
+
+  M.new(store: LeadTimeUnmeasurableStore.new(File.join(state, "unmeasurable.json")), runs_dir: File.join(state, "runs"),
+        notion: LeadTimeUnmeasurableNotion.new(env: env), alert: AlertPort.new(env))
+end
+
+def read_summary(path)
+  JSON.parse(File.read(path))
+rescue SystemCallError => e
+  raise Refusal.new(2, "cannot read the summary file #{path}: #{e.message}", "save `ai/bin/lead-time-phases --summary --repo R --json` to a file and pass it")
+rescue JSON::ParserError
+  raise Refusal.new(2, "the summary file #{path} is not JSON", "pass the output of `ai/bin/lead-time-phases --summary --repo R --json`, read only on its exit 0")
+end
+
+def print_line(l)
+  status = l[:status] ? %( status="#{l[:status]}") : ""
+  puts "unmeasurable: repo=#{l[:repo]} phase=#{l[:phase]} runs=#{l[:runs]} ticket=#{l[:ticket] || 'none'}#{status} outcome=#{l[:outcome]}"
+  puts "  journal: #{l[:journal]}"
+end
+
+def run(sub, opts, env)
+  mgr = manager(env)
+  case sub
+  when "observe"
+    result = mgr.observe(repo: opts["--repo"], run: opts["--run"], summary: read_summary(opts["--summary-file"]))
+    result[:lines].each { |l| print_line(l) }
+    if result[:code] == 3
+      warn "unmeasurable: could not look; journal the COULD-NOT-LOOK line as written, never as already handed off"
+      warn "Fix: read the line's reason (a Notion read or write, or the harness-alerts send); the next run retries the step that failed"
+    end
+    result[:code]
+  when "handoff"
+    what = mgr.handoff(repo: opts["--repo"], phase: opts["--phase"], ticket: opts["--ticket"])
+    puts "unmeasurable: handoff repo=#{opts['--repo']} phase=#{opts['--phase']} ticket=#{opts['--ticket']} #{what}"
+    0
+  when "status"
+    puts JSON.pretty_generate(mgr.status(repo: opts["--repo"]))
+    0
+  end
+end
+
+def main(argv, env)
+  if argv.include?("--help") || argv.include?("-h")
+    puts HELP
+    return 0
+  end
+  sub = argv.first
+  unless SPECS.key?(sub)
+    warn "unmeasurable: usage error: #{sub.nil? ? 'no subcommand' : "unknown subcommand #{sub.inspect}"}"
+    warn "Fix: run unmeasurable observe|handoff|status (unmeasurable --help)"
+    return 2
+  end
+  opts = StrictArgv.parse(argv.drop(1), SPECS[sub])
+  missing = REQUIRED[sub] - opts.keys
+  raise Refusal.new(2, "usage error: #{sub} needs #{missing.join(', ')}", "unmeasurable --help lists each flag") unless missing.empty?
+
+  run(sub, opts, env)
+rescue StrictArgv::UsageError => e
+  warn "unmeasurable: usage error: #{e.message}"
+  warn "Fix: unmeasurable --help lists each subcommand's flags"
+  2
+rescue Refusal => e
+  warn "unmeasurable: #{e.message}"
+  warn "Fix: #{e.fix}"
+  e.code
+rescue U::Invalid => e
+  warn "unmeasurable: refused: #{e.message}"
+  warn "Fix: pass the summary for this repo (lead-time-phases --summary --repo R --json, on its exit 0), a DND ticket, and a phase from unmeasurable --help; nothing was counted"
+  2
+rescue LeadTimeUnmeasurableStore::Unreadable => e
+  warn "unmeasurable: could not look: #{e.message}"
+  warn "Fix: repair or move that file aside by hand (it holds the run counts); this tool never reads it as empty"
+  3
+rescue SystemCallError, JSON::GeneratorError => e
+  warn "unmeasurable: #{e.class}: #{e.message}"
+  warn "Fix: check the state dir and its files are readable and writable, then re-run"
+  1
+end
+
+exit(main(ARGV, ENV)) if $PROGRAM_NAME == __FILE__

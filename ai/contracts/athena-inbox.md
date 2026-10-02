@@ -1993,7 +1993,8 @@ lenient about what I receive.
   harness-lane drain request (DND-983), sent the same way, and the lead-time
   improver runner's wedge and blocked reports (DND-1479), sent the same way,
   and the Slack roots tick's failure-episode report (DND-1502) and
-  `main-health`'s red-episode report (DND-1482), sent the same way.
+  `main-health`'s red-episode report (DND-1482), sent the same way, and the
+  lead-time run's unmeasurable-phase report (DND-1806), sent the same way.
 
   **Later (2026-09-27):** DND-987 adds a third kind of sender on that side:
   the harness lane's drain request (`-harness-lane-drain.md`). An
@@ -2910,6 +2911,14 @@ also reports:
   `ai-artifacts/lead-time/runs/`; they name no capture, so retention ignores
   them. It sends no drain request. Its reader is `athena:inbox-attend` → *The
   lead-time cron writer*.
+  The lead-time run's own session is a fifth sender on that side
+  (DND-1806): `athena:lead-time-improve`'s `unmeasurable` tool sends ONE
+  `leadtime-unmeasurable` message per episode in which a repo's biggest
+  phase stays unmeasurable for 3 runs with its hand-off ticket open. It sends
+  through `ai/lib/harness-alert-send.sh`, like the runner. Its `re:` is the
+  episode's `<run>.unmeasurable.<repo>.<phase>` record in
+  `ai-artifacts/lead-time/runs/`; it names no capture, so retention ignores
+  it. Its reader is `athena:inbox-attend` → *The lead-time cron writer*.
   Another program, `ai/bin/slack-roots-tick` (run by every shipwright tick,
   DND-1502), sends ONE `slack-roots-failing` message per failure episode: the
   scheduled `judgment-label --propose` failed on N consecutive ticks. Its
