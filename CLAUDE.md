@@ -734,15 +734,29 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   STRANDED (exit 72) and its branch is kept; in a product lane, a commit
   pushed on a recorded improver PR is awaiting landing instead. A failed
   post-merge deploy stops that repo's line until the owner re-arms it (`rm`
-  its `product-line-stopped.<R>`). Unlike the shipwright runner, it
-  has no dirty-main-checkout yield.
+  its `product-line-stopped.<R>`). An improve repo with no observe record
+  for the run, an unreadable one, or a failed ingest is a counted failure
+  too (exits 76, 77, 79; DND-1820, the next bullet). Unlike the shipwright
+  runner, it has no dirty-main-checkout yield.
 - **A phase it cannot measure escalates (DND-1806).** A phase that stays
   unmeasurable while its hand-off ticket is open gets that ticket promoted
   and ONE `leadtime-unmeasurable` alert per episode. The rule and its
   outcomes: `athena:lead-time-improve` → *Escalate what stays unmeasurable*.
-  The run's session does it through that skill's `unmeasurable` tool, not
-  the runner, so it fires only on a run that calls the tool; nothing checks
-  that it did. The count is `unmeasurable.json` in the state dir.
+  The run's session does it through that skill's `unmeasurable` tool, and
+  the runner checks that it did (DND-1820). After a session that reached the
+  model, `unmeasurable check` reads this run's record for every improve
+  repo the tick covered. No record is `observe-missing` (exit 76), a record
+  it cannot read is `observe-could-not-look` (77), and a repo whose ingest
+  failed, so it had no summary to observe, is `ingest-failed` (79). Each is
+  named in the `.run` record and counted, so three in a row wedge the lane
+  and send the `leadtime-wedged` alert. The count is `unmeasurable.json` in
+  the state dir; the per-run record is `runs/<run id>.observe.<repo>.json`.
+
+  **Later (2026-10-02, DND-1820):** this bullet ended "so it fires only on a
+  run that calls the tool; nothing checks that it did". Superseded by the
+  runner's observe check above. A session that skipped `observe` read as an
+  ok tick, which silently re-created the re-noting DND-1806 was filed to
+  end.
 
 ## Cron D-Bus autolaunch leak (orphaned `dbus-daemon`, inotify exhaustion)
 

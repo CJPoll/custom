@@ -3,7 +3,8 @@
 # Deterministic suite for the unmeasurable-phase escalation (DND-1806):
 # lib/unmeasurable.rb (domain), lib/unmeasurable_store.rb (the state file) and
 # lib/unmeasurable_manager.rb (the manager, against fake Notion and alert
-# ports). Run by test/self-test.sh, which harness-gate discovers.
+# ports), and the per-run observe record the runner checks (DND-1820:
+# lib/unmeasurable_marker.rb). Run by test/self-test.sh, which harness-gate discovers.
 #
 # TDD order: the domain first, then the store against a temp dir, then the
 # manager with fakes. Functional only (DND-1222): no sleeps, no timing, no
@@ -11,9 +12,11 @@
 
 require "json"
 require "tmpdir"
+require "fileutils"
 require_relative "../lib/unmeasurable"
 require_relative "../lib/unmeasurable_store"
 require_relative "../lib/unmeasurable_manager"
+require_relative "../lib/unmeasurable_marker"
 
 U = LeadTimeUnmeasurable
 
@@ -460,6 +463,146 @@ Dir.mktmpdir("unmeasurable-mgr-") do |dir|
     j = outcome(r)[:journal]
     outcome(r)[:outcome] == "COULD-NOT-LOOK" && r[:code] == 3 && alert.sent.size == 1 &&
       j.include?("alert done, but the state was not saved") && !j.include?("alert failed")
+  end
+end
+
+# ── DND-1820: the per-run observe record the runner checks ──────────────────
+# domain: the record's shape, built and read back. Both sides of the lookup
+# are checked: a record for another run or repo is never this one's.
+ob = U.observed_marker(repo: "custom", run: "run-a", code: 0, outcomes: %w[MEASURED MEASURED COUNTING])
+check("marker: observe builds an observed record naming repo, run, exit and outcomes once each") do
+  ob["kind"] == "observed" && ob["repo"] == "custom" && ob["run"] == "run-a" && ob["exit"].zero? && ob["outcomes"] == %w[MEASURED COUNTING]
+end
+ig = U.ingest_failed_marker(repo: "custom", run: "run-a", step: "ingest", exit_code: "3", reason: "SCAN INCOMPLETE:\nno ledger")
+check("marker: ingest-failed builds its own kind, with the step, the exit and a one-line reason") do
+  ig["kind"] == "ingest-failed" && ig["step"] == "ingest" && ig["exit"] == 3 && ig["reason"] == "SCAN INCOMPLETE: no ledger"
+end
+check("marker: a failed summary read is an ingest-failed step too") { U.ingest_failed_marker(repo: "custom", run: "r", step: "summary", exit_code: "1", reason: "x")["step"] == "summary" }
+check("marker: an ingest-failed step other than ingest or summary is refused") { raises?(U::Invalid) { U.ingest_failed_marker(repo: "custom", run: "r", step: "judge", exit_code: "3", reason: "x") } }
+check("marker: an ingest that exited 0 did not fail, so it is refused") { raises?(U::Invalid) { U.ingest_failed_marker(repo: "custom", run: "r", step: "ingest", exit_code: "0", reason: "x") } }
+check("marker: an exit that is not a whole number 1..255 is refused") do
+  %w[abc -1 256 3x].all? { |e| raises?(U::Invalid) { U.ingest_failed_marker(repo: "custom", run: "r", step: "ingest", exit_code: e, reason: "x") } }
+end
+check("marker: an empty reason is refused (the record must say why)") { raises?(U::Invalid) { U.ingest_failed_marker(repo: "custom", run: "r", step: "ingest", exit_code: "3", reason: " \n ") } }
+check("marker: a long reason is capped") { U.ingest_failed_marker(repo: "custom", run: "r", step: "ingest", exit_code: "3", reason: "y" * 900)["reason"].length <= U::REASON_MAX }
+check("marker: a bad repo or run id is refused") do
+  raises?(U::Invalid) { U.ingest_failed_marker(repo: "../x", run: "r", step: "ingest", exit_code: "3", reason: "x") } &&
+    raises?(U::Invalid) { U.ingest_failed_marker(repo: "custom", run: "a/b", step: "ingest", exit_code: "3", reason: "x") }
+end
+check("read_marker: an observed record reads observed") do
+  r = U.read_marker(ob, repo: "custom", run: "run-a")
+  r[:result] == :observed && r[:exit].zero? && r[:outcomes] == %w[MEASURED COUNTING]
+end
+check("read_marker: an ingest-failed record reads ingest_failed with its step and reason") do
+  r = U.read_marker(ig, repo: "custom", run: "run-a")
+  r[:result] == :ingest_failed && r[:step] == "ingest" && r[:exit] == 3 && r[:reason] == "SCAN INCOMPLETE: no ledger"
+end
+check("read_marker: a record for another run is refused, never read as this run's") { raises?(U::Invalid) { U.read_marker(ob, repo: "custom", run: "run-b") } }
+check("read_marker: a record for another repo is refused") { raises?(U::Invalid) { U.read_marker(ob, repo: "gen_saas", run: "run-a") } }
+check("read_marker: an unknown kind, a wrong version or a non-object is refused") do
+  raises?(U::Invalid) { U.read_marker(ob.merge("kind" => "skipped"), repo: "custom", run: "run-a") } &&
+    raises?(U::Invalid) { U.read_marker(ob.merge("version" => 9), repo: "custom", run: "run-a") } &&
+    raises?(U::Invalid) { U.read_marker([1], repo: "custom", run: "run-a") } &&
+    raises?(U::Invalid) { U.read_marker(ob.merge("exit" => "0"), repo: "custom", run: "run-a") }
+end
+
+# side effects: one file per run and repo under runs/. No file is "not
+# recorded"; a file that cannot be read or parsed is Unreadable, never absent.
+Dir.mktmpdir("unmeasurable-marker-") do |dir|
+  runs = File.join(dir, "runs")
+  mk = LeadTimeObserveMarkers.new(runs)
+  check("markers: no runs dir and no file read nil (not recorded)") { mk.read("run-a", "custom").nil? }
+  mk.write("run-a", "custom", ob)
+  path = File.join(runs, "run-a.observe.custom.json")
+  check("markers: write creates runs/<run>.observe.<repo>.json, mode 0600") { File.file?(path) && (File.stat(path).mode & 0o777) == 0o600 }
+  check("markers: what was written reads back") { mk.read("run-a", "custom") == ob }
+  check("markers: another repo's record is a different file") { mk.read("run-a", "gen_saas").nil? }
+  File.write(path, "{not json")
+  check("markers: an unparseable record is Unreadable, never not-recorded") { raises?(LeadTimeObserveMarkers::Unreadable) { mk.read("run-a", "custom") } }
+  if Process.uid.zero?
+    check("markers: an unreadable record is Unreadable (skipped as root: root reads mode 000)") { true }
+  else
+    mk.write("run-a", "custom", ob)
+    File.chmod(0o000, path)
+    check("markers: a record that cannot be opened is Unreadable, never not-recorded") { raises?(LeadTimeObserveMarkers::Unreadable) { mk.read("run-a", "custom") } }
+    File.chmod(0o600, path)
+    File.chmod(0o000, runs)
+    check("markers: a runs dir that cannot be searched is Unreadable, never not-recorded") { raises?(LeadTimeObserveMarkers::Unreadable) { mk.read("run-z", "custom") } }
+    File.chmod(0o700, runs)
+  end
+end
+
+# manager: observe writes the record; ingest-failed writes its own; check
+# reads one back as observed, ingest_failed, not_recorded or could_not_look.
+class FailingMarkers < LeadTimeObserveMarkers
+  def write(*) = raise(Errno::ENOSPC, "simulated full disk")
+end
+
+def marker_manager(dir, markers: nil, notion: FakeNotion.new)
+  runs = File.join(dir, "runs")
+  LeadTimeUnmeasurableManager.new(store: LeadTimeUnmeasurableStore.new(File.join(dir, "unmeasurable.json")), runs_dir: runs,
+                                  notion: notion, alert: FakeAlert.new, markers: markers || LeadTimeObserveMarkers.new(runs))
+end
+
+measurable = summary(biggest: "implement", counts: { "verify" => [12, 2], "queue" => [12, 2] })
+Dir.mktmpdir("unmeasurable-mgr-") do |dir|
+  mgr = marker_manager(dir)
+  check("manager check: a run that never observed reads not_recorded") { mgr.check(repo: "custom", run: "run-1")[:result] == :not_recorded }
+  r = mgr.observe(repo: "custom", run: "run-1", summary: measurable)
+  check("manager: observe records that this run observed the repo") do
+    c = mgr.check(repo: "custom", run: "run-1")
+    r[:marker_error].nil? && c[:result] == :observed && c[:exit].zero? && c[:outcomes] == ["MEASURED"]
+  end
+  check("manager check: the record is per run: another run of the same repo is not_recorded") { mgr.check(repo: "custom", run: "run-2")[:result] == :not_recorded }
+  check("manager check: the record is per repo") { mgr.check(repo: "gen_saas", run: "run-1")[:result] == :not_recorded }
+  check("manager: a refused observe (another repo's summary) records nothing") do
+    raises?(U::Invalid) { mgr.observe(repo: "custom", run: "run-3", summary: summary(repo: "gen_saas")) } &&
+      mgr.check(repo: "custom", run: "run-3")[:result] == :not_recorded
+  end
+  mgr.ingest_failed(repo: "custom", run: "run-4", step: "ingest", exit_code: "3", reason: "SCAN INCOMPLETE")
+  check("manager: ingest-failed records its own outcome, with the step and reason") do
+    c = mgr.check(repo: "custom", run: "run-4")
+    c[:result] == :ingest_failed && c[:step] == "ingest" && c[:reason] == "SCAN INCOMPLETE"
+  end
+  check("manager: ingest-failed after this run observed the repo is refused, and the observed record stays") do
+    raises?(U::Invalid) { mgr.ingest_failed(repo: "custom", run: "run-1", step: "ingest", exit_code: "3", reason: "x") } &&
+      mgr.check(repo: "custom", run: "run-1")[:result] == :observed
+  end
+  r5 = mgr.observe(repo: "custom", run: "run-4", summary: measurable)
+  check("manager: an observe after an ingest-failed record of the same run replaces it (the summary was read after all)") do
+    r5[:marker_error].nil? && mgr.check(repo: "custom", run: "run-4")[:result] == :observed
+  end
+  File.write(File.join(dir, "runs", "run-5.observe.custom.json"), "garbage")
+  check("manager check: an unparseable record is could_not_look with a reason, never not_recorded") do
+    c = mgr.check(repo: "custom", run: "run-5")
+    c[:result] == :could_not_look && c[:reason].include?("run-5.observe.custom.json")
+  end
+  FileUtils.cp(File.join(dir, "runs", "run-1.observe.custom.json"), File.join(dir, "runs", "run-6.observe.custom.json"))
+  check("manager check: a record whose run is not the one asked for is could_not_look") do
+    c = mgr.check(repo: "custom", run: "run-6")
+    c[:result] == :could_not_look && c[:reason].include?("run-1")
+  end
+  check("manager check: a bad run id is refused") { raises?(U::Invalid) { mgr.check(repo: "custom", run: "../x") } }
+end
+
+Dir.mktmpdir("unmeasurable-mgr-") do |dir|
+  notion = FakeNotion.new
+  notion.fail_read = true
+  mgr = marker_manager(dir, notion: notion)
+  mgr.handoff(repo: "custom", phase: "queue", ticket: "DND-9001")
+  r = mgr.observe(repo: "custom", run: "run-1", summary: summary)
+  check("manager: an observe that could not look (exit 3) still records that it observed, with exit 3") do
+    c = mgr.check(repo: "custom", run: "run-1")
+    r[:code] == 3 && c[:result] == :observed && c[:exit] == 3 && c[:outcomes].include?("COULD-NOT-LOOK")
+  end
+end
+
+Dir.mktmpdir("unmeasurable-mgr-") do |dir|
+  mgr = marker_manager(dir, markers: FailingMarkers.new(File.join(dir, "runs")))
+  r = mgr.observe(repo: "custom", run: "run-1", summary: summary)
+  check("manager: a record that cannot be written is reported, and the count it made is still saved and printed") do
+    r[:marker_error].to_s.include?("simulated full disk") && !r[:lines].empty? &&
+      LeadTimeUnmeasurableStore.new(File.join(dir, "unmeasurable.json")).load.dig("custom/queue", "runs") == 1
   end
 end
 

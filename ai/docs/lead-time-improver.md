@@ -378,6 +378,19 @@ Each `improve`-mode run does these steps in order:
    handed off". The rule's home is `athena:lead-time-improve` → *Escalate
    what stays unmeasurable*. Residual: it fires only on a run whose session
    calls the tool.
+
+   **Later (2026-10-02, DND-1820):** that residual is closed by the runner.
+   `observe` now writes a per-run record, `runs/<run id>.observe.<repo>.json`,
+   and a repo whose ingest or summary read failed gets `unmeasurable
+   ingest-failed` instead, since it has no summary to observe. After the
+   session, `scripts/athena-leadtime-run.sh` runs `unmeasurable check` for
+   every improve repo the tick covered. A repo with no record fails the tick
+   as `observe-missing` (exit 76); a record it cannot read is
+   `observe-could-not-look` (77), never "not recorded"; a recorded ingest
+   failure is `ingest-failed` (79), neither a pass nor a skipped observe.
+   All three are counted, so the existing wedge and its one
+   `leadtime-wedged` alert per episode reach the owner. The exit list's home
+   is the runner's `--help`.
 4. **Act once:**
    - land one small, safety-preserving harness change; or
    - land one instrumentation change; or

@@ -9,6 +9,8 @@
 #   notion.promote(page_id)     -> Path = Promoted          (raises PortError)
 #   notion.note(page_id, text)  -> appends one paragraph    (raises PortError)
 #   alert.send_alert(slug, record, body) -> delivered name  (raises PortError)
+#   markers: the per-run observe record (lib/unmeasurable_marker.rb,
+#   DND-1820); by default the file store under runs_dir
 #
 # scripts/unmeasurable wires the real ports (lib/unmeasurable_notion.rb and
 # ai/lib/harness-alert-send.sh); test/unmeasurable_test.rb wires fakes.
@@ -23,6 +25,7 @@
 
 require_relative "unmeasurable"
 require_relative "unmeasurable_store"
+require_relative "unmeasurable_marker"
 
 class LeadTimeUnmeasurableManager
   # A Notion or alert call that failed. The message names the call, never a
@@ -31,11 +34,12 @@ class LeadTimeUnmeasurableManager
 
   U = LeadTimeUnmeasurable
 
-  def initialize(store:, runs_dir:, notion:, alert:)
+  def initialize(store:, runs_dir:, notion:, alert:, markers: nil)
     @store = store
     @runs_dir = runs_dir
     @notion = notion
     @alert = alert
+    @markers = markers || LeadTimeObserveMarkers.new(runs_dir)
   end
 
   # Record the ticket a run handed this repo's phase off to. A different
@@ -55,8 +59,13 @@ class LeadTimeUnmeasurableManager
     end
   end
 
-  # One run's observation of repo's summary. -> {code:, lines: [line...]}
+  # One run's observation of repo's summary.
+  # -> {code:, lines: [line...], marker_error: nil | message}
   # line: {repo:, phase:, runs:, ticket:, status:, outcome:, journal:}
+  # After the count is saved, it records that this run observed repo
+  # (DND-1820). A record that cannot be written is marker_error: the count
+  # stands, and the caller says the runner will read this repo as not
+  # observed. A refused summary (Invalid) records nothing: nothing counted.
   def observe(repo:, run:, summary:)
     U.repo_name(repo)
     U.run_id(run)
@@ -79,7 +88,44 @@ class LeadTimeUnmeasurableManager
       end
     end
     lines.concat(biggest_lines(repo, m, lines))
-    { code: lines.any? { |l| l[:outcome] == "COULD-NOT-LOOK" } ? 3 : 0, lines: lines }
+    code = lines.any? { |l| l[:outcome] == "COULD-NOT-LOOK" } ? 3 : 0
+    { code: code, lines: lines, marker_error: record_observed(repo, run, code, lines) }
+  end
+
+  # The repo had no summary to observe this run: its ingest or its summary
+  # read failed (DND-1820). Recorded as its own outcome, never as observed.
+  # Refused (Invalid) once this run has observed repo: a later failure does
+  # not unsay an observation. An observe after it replaces it. -> :recorded
+  def ingest_failed(repo:, run:, step:, exit_code:, reason:)
+    doc = U.ingest_failed_marker(repo: repo, run: run, step: step, exit_code: exit_code, reason: reason)
+    if observed?(@markers.read(run, repo), repo, run)
+      raise U::Invalid, "run #{run} already observed #{repo}; an observed run is not an ingest failure"
+    end
+
+    @markers.write(run, repo, doc)
+    :recorded
+  end
+
+  # What this run recorded for repo. Read-only. -> {result: :observed |
+  # :ingest_failed | :not_recorded | :could_not_look, path:, ...}. A record
+  # that cannot be read, or reads as another run's, is :could_not_look with
+  # a reason, never :not_recorded.
+  def check(repo:, run:)
+    U.repo_name(repo)
+    U.run_id(run)
+    path = @markers.path(run, repo)
+    begin
+      doc = @markers.read(run, repo)
+    rescue LeadTimeObserveMarkers::Unreadable => e
+      return { result: :could_not_look, reason: e.message, path: path }
+    end
+    return { result: :not_recorded, path: path } if doc.nil?
+
+    begin
+      U.read_marker(doc, repo: repo, run: run).merge(path: path)
+    rescue U::Invalid => e
+      { result: :could_not_look, reason: "#{path}: #{e.message}", path: path }
+    end
   end
 
   # -> entries for repo (or all). Read-only: no lock taken, nothing written.
@@ -92,6 +138,19 @@ class LeadTimeUnmeasurableManager
   end
 
   private
+
+  def record_observed(repo, run, code, lines)
+    @markers.write(run, repo, U.observed_marker(repo: repo, run: run, code: code, outcomes: lines.map { |l| l[:outcome] }))
+    nil
+  rescue SystemCallError => e
+    "cannot write #{@markers.path(run, repo)}: #{e.message}"
+  end
+
+  def observed?(doc, repo, run)
+    U.read_marker(doc, repo: repo, run: run)[:result] == :observed
+  rescue U::Invalid
+    false
+  end
 
   def biggest_lines(repo, m, lines)
     big = m[:biggest]

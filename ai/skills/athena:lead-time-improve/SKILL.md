@@ -61,6 +61,8 @@ ai/bin/lead-time-phases --summary --repo R --json
 <skill>/scripts/unmeasurable observe --repo R --run ID --summary-file F    # every run; escalates at 3 (DND-1806)
 <skill>/scripts/unmeasurable handoff --repo R --phase P --ticket DND-N
 <skill>/scripts/unmeasurable status [--repo R]    # read-only
+<skill>/scripts/unmeasurable ingest-failed --repo R --run ID --step ingest|summary --exit N --reason TEXT    # no summary to observe (DND-1820)
+<skill>/scripts/unmeasurable check --repo R --run ID    # read-only; the runner's check after you exit
 ```
 
 Each answers `--help`. Read an exit code before its output:
@@ -80,6 +82,13 @@ journal it with the error line and take **no action** on R this run
 ("cannot measure: <why>"). Never act on a stale window as if it were
 current. The same holds for an `experiment` exit 1, 2 or 3 in step 2.
 Telemetry pruning is the runner's, not yours.
+
+A failed ingest leaves R with no summary to observe, so record that instead
+(DND-1820): `unmeasurable ingest-failed --repo R --run <run id> --step
+ingest --exit <its exit> --reason "<its error line>"`. A `--summary` that
+exits non-zero in step 3 is recorded the same way, with `--step summary`.
+The runner reads it as its own outcome, `ingest-failed`, never as a pass
+(*Escalate what stays unmeasurable*).
 
 ### 2. Judge pending experiments
 
@@ -303,8 +312,20 @@ files it), record it the same run: `unmeasurable handoff --repo R --phase P
 --ticket DND-N`. A hand-off the journal names that `unmeasurable status`
 does not hold is recorded the same way before `observe`.
 
-The residual: this escalation fires only on a run that calls `observe`.
-Nothing outside this skill checks that the call happened.
+**The runner checks that you did (DND-1820).** `observe` writes this run's
+record, `runs/<run id>.observe.<repo>.json`, and `ingest-failed` (step 1)
+writes it for a repo with no summary. After you exit, the cron runner runs
+`unmeasurable check` for every improve repo it covered. A repo with
+neither record fails the tick as `observe-missing`; a record it cannot read
+is `observe-could-not-look`; a recorded ingest failure is `ingest-failed`.
+Each is counted toward the wedge (the runner's `--help` has the exits). So
+every run observes every improve repo, or records `ingest-failed` for it.
+An `observe` that exits 1 after saving its count printed that its record
+was not written: run it again with the same run id, which counts once.
+
+**Later (2026-10-02, DND-1820):** this read "The residual: this escalation
+fires only on a run that calls `observe`. Nothing outside this skill checks
+that the call happened." Superseded by the runner's check above.
 
 ### 5. Act once
 

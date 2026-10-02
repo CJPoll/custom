@@ -210,6 +210,60 @@ module LeadTimeUnmeasurable
       "run=#{run} promoted=#{promoted || 'no'} noted=#{noted ? 'yes' : 'no'}\n"
   end
 
+  # ── the per-run observe record (DND-1820) ───────────────────────────────
+  # The escalation fires only on a run that calls observe. The record says,
+  # per run and repo, that it did, or that the repo had no summary to
+  # observe (its ingest or its summary read failed). The cron runner reads
+  # it back after the session (unmeasurable check): a repo with no record is
+  # a failed tick, never a pass.
+  MARKER_VERSION = 1
+  MARKER_KINDS = %w[observed ingest-failed].freeze
+  INGEST_STEPS = %w[ingest summary].freeze
+  REASON_MAX = 200
+
+  def observed_marker(repo:, run:, code:, outcomes:)
+    { "version" => MARKER_VERSION, "kind" => "observed", "repo" => repo_name(repo), "run" => run_id(run),
+      "exit" => code, "outcomes" => outcomes.uniq }
+  end
+
+  # exit_code is the failed tool's exit as given on argv: 1..255. An ingest
+  # that exited 0 did not fail, and says nothing about why there is no
+  # summary. The reason is one line, capped.
+  def ingest_failed_marker(repo:, run:, step:, exit_code:, reason:)
+    raise Invalid, "step #{step.inspect} is not one of #{INGEST_STEPS.join(', ')}" unless INGEST_STEPS.include?(step)
+
+    code = /\A[0-9]{1,3}\z/.match?(exit_code.to_s) ? exit_code.to_i : nil
+    raise Invalid, "exit #{exit_code.inspect} is not the failed tool's exit (a whole number 1..255)" unless code&.between?(1, 255)
+
+    text = reason.to_s.gsub(/[[:cntrl:]\s]+/, " ").strip
+    raise Invalid, "the reason is empty: say why there is no summary (the tool's error line)" if text.empty?
+
+    { "version" => MARKER_VERSION, "kind" => "ingest-failed", "repo" => repo_name(repo), "run" => run_id(run),
+      "step" => step, "exit" => code, "reason" => text[0, REASON_MAX] }
+  end
+
+  # read_marker(doc, repo:, run:) -> {result: :observed, exit:, outcomes:} |
+  # {result: :ingest_failed, step:, exit:, reason:}. A record of the wrong
+  # shape, or for another run or repo, is Invalid: never this run's.
+  def read_marker(doc, repo:, run:)
+    raise Invalid, "the record is not a JSON object" unless doc.is_a?(Hash)
+    raise Invalid, "the record is version #{doc['version'].inspect}, not #{MARKER_VERSION}" unless doc["version"] == MARKER_VERSION
+    raise Invalid, "the record's kind #{doc['kind'].inspect} is not one of #{MARKER_KINDS.join(', ')}" unless MARKER_KINDS.include?(doc["kind"])
+    raise Invalid, "the record is for run #{doc['run'].inspect}, not #{run}" unless doc["run"] == run
+    raise Invalid, "the record is for repo #{doc['repo'].inspect}, not #{repo}" unless doc["repo"] == repo
+    raise Invalid, "the record's exit #{doc['exit'].inspect} is not a whole number" unless doc["exit"].is_a?(Integer)
+
+    if doc["kind"] == "observed"
+      raise Invalid, "the record's outcomes are not a list of names" unless doc["outcomes"].is_a?(Array) && doc["outcomes"].all?(String)
+
+      return { result: :observed, exit: doc["exit"], outcomes: doc["outcomes"] }
+    end
+    raise Invalid, "the record's step #{doc['step'].inspect} is not one of #{INGEST_STEPS.join(', ')}" unless INGEST_STEPS.include?(doc["step"])
+    raise Invalid, "the record has no reason" unless doc["reason"].is_a?(String) && !doc["reason"].empty?
+
+    { result: :ingest_failed, step: doc["step"], exit: doc["exit"], reason: doc["reason"] }
+  end
+
   def deep_copy(obj)
     case obj
     when Hash then obj.to_h { |k, v| [k, deep_copy(v)] }

@@ -63,6 +63,7 @@ ALERTS="${ATHENA_INBOX_ROOT}/harness-alerts/to-custom"
 NOW_FIXED="$(date -d '2026-10-01 12:30 UTC' +%s)"
 G=(-c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false -c init.defaultBranch=main)
 RESOLVER_LIBS="strict_argv.rb lead_time_config.rb lead_time_config_io.rb leadtime_product.rb leadtime_product_io.rb lead_time_trailer.rb"
+UNMEASURABLE_LIBS="notion_read.rb notion_write.rb notion_retry.rb next_mission_notion.rb next_mission.rb"
 
 # --- shared fakes ----------------------------------------------------------------
 cat >"$TMP/fake-send-mail" <<'EOF'
@@ -88,6 +89,13 @@ new_case() {
   # The real product-lane tool (DND-1540), so a product repo is worked as the cron works it.
   cp -- "${REPO_ROOT}/ai/bin/leadtime-product" "$seed/ai/bin/"
   for f in ${RESOLVER_LIBS}; do cp -- "${REPO_ROOT}/ai/lib/$f" "$seed/ai/lib/"; done
+  # The real unmeasurable tool (DND-1806) and its libraries: the session's
+  # observe writes the per-run record, and the runner's check (DND-1820)
+  # reads it back through the main checkout's copy, as the cron does.
+  mkdir -p "$seed/ai/skills/athena:lead-time-improve/scripts" "$seed/ai/skills/athena:lead-time-improve/lib"
+  cp -- "${REPO_ROOT}/ai/skills/athena:lead-time-improve/scripts/unmeasurable" "$seed/ai/skills/athena:lead-time-improve/scripts/"
+  cp -- "${REPO_ROOT}"/ai/skills/athena:lead-time-improve/lib/unmeasurable*.rb "$seed/ai/skills/athena:lead-time-improve/lib/"
+  for f in ${UNMEASURABLE_LIBS}; do cp -- "${REPO_ROOT}/ai/lib/$f" "$seed/ai/lib/"; done
   # The checkouts the configs point at: temp repos named as the repos are.
   for r in custom gen_saas walt_ui; do git "${G[@]}" init -q "$c/checkouts/$r"; done
   printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"epic-fixture"}\n' \
@@ -117,7 +125,23 @@ for a in "$@"; do
   prev="$a"
 done
 g() { git -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false "$@"; }
-summary() { echo 'repo=custom mode=improve biggest=verify action=no-action reason="fixture"' >"$LEADTIME_SUMMARY"; }
+# The run id and the improve repos, read from the brief as the session reads
+# them, and the main checkout's unmeasurable tool (DND-1806, DND-1820).
+brief="$*"
+rid="$(printf '%s\n' "$brief" | grep -o 'Your run id is [^ ]*' | head -n1 | sed 's/^Your run id is //')"
+improve="$(printf '%s\n' "$brief" | grep -o '[A-Za-z0-9_.-]* (improve, ' | sed 's/ (improve, $//' | sort -u)"
+unm="$d/repo/ai/skills/athena:lead-time-improve/scripts/unmeasurable"
+# observe_all — the skill's step 4 on every improve repo: a measurable summary,
+# so observe counts nothing and reaches no Notion.
+observe_all() {
+  local r
+  for r in $improve; do
+    printf '{"repo":"%s","biggest":{"phase":"implement"},"phases":{"implement":{"n":14,"n_na":2},"verify":{"n":9,"n_na":1},"queue":{"n":5,"n_na":1},"integrate":{"n":15,"n_na":5},"merge":{"n":13,"n_na":7}}}\n' "$r" >"$d/sum-$r.json"
+    "$unm" observe --repo "$r" --run "$rid" --summary-file "$d/sum-$r.json" >>"$d/observe.out" 2>&1 || echo "observe-rc=$? repo=$r" >>"$d/observe.out"
+  done
+}
+summary_only() { echo 'repo=custom mode=improve biggest=verify action=no-action reason="fixture"' >"$LEADTIME_SUMMARY"; }
+summary() { summary_only; observe_all; }
 # other_fleet — another fleet lands a commit on origin/main while this run is
 # in flight (from its own clone, never this lane).
 other_fleet() {
@@ -141,6 +165,13 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   fail)      : >"$LEADTIME_RECEIPT"; echo "the run fell over"; exit 7 ;;
   timeout)   : >"$LEADTIME_RECEIPT"; exit 124 ;;
   nosummary) : >"$LEADTIME_RECEIPT"; exit 0 ;;
+  noobserve) : >"$LEADTIME_RECEIPT"; summary_only; exit 0 ;;
+  ingestfail) : >"$LEADTIME_RECEIPT"
+             "$unm" ingest-failed --repo custom --run "$rid" --step ingest --exit 3 \
+               --reason 'lead-time-phases: SCAN INCOMPLETE: git log failed' >>"$d/observe.out" 2>&1 || echo "ingest-rc=$?" >>"$d/observe.out"
+             summary_only; exit 0 ;;
+  observe-corrupt) : >"$LEADTIME_RECEIPT"; summary
+             echo garbage >"$LEAD_TIME_STATE_DIR/runs/$rid.observe.custom.json"; exit 0 ;;
   blocked0)  exit 0 ;;
   limit)     echo "You've hit your weekly limit"; exit 1 ;;
   crash)     echo "segmentation fault"; exit 3 ;;
@@ -576,6 +607,107 @@ if [ "$rc" = 0 ] && [ ! -e "$(sd "$c")/consecutive-failures" ] && [ ! -e "$(sd "
   ok "a run that wrote its summary but skipped the receipt is ok, never BLOCKED (the summary proves the model ran)"
 else
   bad "summary without receipt" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+
+# ---------------------------------------------------------------------------------
+case_ '8b. every improve repo the tick covered has an observe record (DND-1820)'
+
+# run_id_of <case> — the run id the brief named.
+run_id_of() { grep -o 'Your run id is [^ ]*' "$1/claude-args" | head -n1 | sed 's/^Your run id is //'; }
+
+c="$(new_case)"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"; rid="$(run_id_of "$c")"
+if [ "$rc" = 0 ] && [ -n "$rid" ] && grep -q 'outcome=ok exit=0' "$run" \
+   && grep -qx "observe: repo=custom run=${rid} result=observed exit=0 outcomes=MEASURED" "$run" \
+   && [ -f "$(sd "$c")/runs/${rid}.observe.custom.json" ] && [ ! -e "$(sd "$c")/consecutive-failures" ]; then
+  ok "a session that ran unmeasurable observe: exit 0, outcome ok, and the .run names the observe record"
+else
+  bad "observed run" "rc=$rc rid=$rid run=$(cat "$run" 2>/dev/null) observe=$(cat "$c/observe.out" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"; echo noobserve >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"; failed="$(newest "$c" failed)"; rid="$(run_id_of "$c")"
+if [ "$rc" = 76 ] && grep -q 'outcome=observe-missing exit=76' "$run" \
+   && grep -q "^observe: repo=custom run=${rid} result=not-recorded record=" "$run" \
+   && [ "$(fails "$c")" = 1 ] && [ -n "$failed" ] && grep -q 'never ran unmeasurable observe' "$failed" \
+   && grep -q '^repos=custom$' "$failed" && grep -q 'Fix:' "$c/runner.err" && ! grep -q 'outcome=ok' "$run"; then
+  ok "a session that skipped observe (summary written, exit 0): exit 76 observe-missing, counted, the .failed names the repo"
+else
+  bad "skipped observe" "rc=$rc fails=$(fails "$c") run=$(cat "$run" 2>/dev/null) failed=$(cat "$failed" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+r2="$(run_runner "$c")"; r3="$(run_runner "$c")"; r4="$(run_runner "$c")"
+wedged="$(newest "$c" wedged)"
+if [ "$r2$r3" = 7676 ] && [ "$r4" = 75 ] && [ -n "$wedged" ] && [ "$(sends "$c" leadtime-wedged)" = 1 ] \
+   && grep -q -- "--re $wedged" "$c/send.log"; then
+  ok "three ticks that skip observe wedge the lane: the fourth exits 75 and sends ONE leadtime-wedged alert"
+else
+  bad "skipped observe wedge" "rcs=$r2$r3$r4 sends=$(cat "$c/send.log")"
+fi
+
+c="$(new_case)"; echo ingestfail >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"; failed="$(newest "$c" failed)"; rid="$(run_id_of "$c")"
+if [ "$rc" = 79 ] && grep -q 'outcome=ingest-failed exit=79' "$run" \
+   && grep -qx "observe: repo=custom run=${rid} result=ingest-failed step=ingest exit=3 reason=\"lead-time-phases: SCAN INCOMPLETE: git log failed\"" "$run" \
+   && [ "$(fails "$c")" = 1 ] && grep -q 'had no summary to observe' "$failed" && ! grep -q 'observe-missing' "$run" \
+   && ! grep -q 'result=not-recorded' "$run"; then
+  ok "a repo whose ingest failed: its own outcome (exit 79 ingest-failed), neither ok nor observe-missing, and the .run says which"
+else
+  bad "ingest failed" "rc=$rc run=$(cat "$run" 2>/dev/null) failed=$(cat "$failed" 2>/dev/null) observe=$(cat "$c/observe.out" 2>/dev/null)"
+fi
+
+c="$(new_case)"; echo observe-corrupt >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"; failed="$(newest "$c" failed)"
+if [ "$rc" = 77 ] && grep -q 'outcome=observe-could-not-look exit=77' "$run" \
+   && grep -q 'result=could-not-look reason=".*is not JSON' "$run" && [ "$(fails "$c")" = 1 ] \
+   && grep -q 'COULD NOT LOOK' "$failed" && ! grep -q 'result=not-recorded' "$run"; then
+  ok "an observe record the runner cannot read: exit 77 observe-could-not-look, counted, never read as not recorded"
+else
+  bad "unreadable record" "rc=$rc run=$(cat "$run" 2>/dev/null) failed=$(cat "$failed" 2>/dev/null)"
+fi
+
+c="$(new_case)"
+rm -f -- "$c/repo/ai/skills/athena:lead-time-improve/scripts/unmeasurable"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 77 ] && grep -q 'outcome=observe-could-not-look exit=77' "$run" \
+   && grep -q "result=could-not-look reason=\".*scripts/unmeasurable is absent or not executable" "$run" && [ "$(fails "$c")" = 1 ]; then
+  ok "no unmeasurable tool in the main checkout to check with: could not look (exit 77), never ok and never not-recorded"
+else
+  bad "tool missing" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"; echo noobserve >"$c/mode"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$c/repo/ai/skills/athena:lead-time-improve/scripts/unmeasurable"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 77 ] && grep -q "result=could-not-look reason=\"unmeasurable check exited 0 but printed '', not observe: repo=custom run=.* result=observed\"" "$run" \
+   && ! grep -q 'outcome=ok' "$run"; then
+  ok "a check that exits 0 but prints no observed line is could not look, never read as observed"
+else
+  bad "exit/line disagree" "rc=$rc run=$(cat "$run" 2>/dev/null)"
+fi
+
+c="$(new_case)"
+printf '{"repos":[{"name":"custom","path":"%s","mode":"watch"}],"window":20,"improvement_epic":"epic-fixture"}\n' \
+  "$c/checkouts/custom" >"$c/repo/ai/config/lead-time-repos.json"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -qx 'observe=none (no improve repo this tick)' "$run" && grep -q 'outcome=ok exit=0' "$run"; then
+  ok "a tick with no improve repo has nothing to observe: ok, and the .run says observe=none"
+else
+  bad "watch only" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"; echo nosummary >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 70 ] && grep -q '^observe: repo=custom .* result=not-recorded' "$(newest "$c" run)"; then
+  ok "a run that failed for another reason still lists what it observed in the .run, under its own outcome"
+else
+  bad "observe lines on another failure" "rc=$rc run=$(cat "$(newest "$c" run)" 2>/dev/null)"
 fi
 
 # ---------------------------------------------------------------------------------
