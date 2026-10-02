@@ -317,6 +317,8 @@ run "${TICKET[@]}" "${FILER[@]}"
 lacks "without --control stdout is unchanged: no Control line [DND-1747]" "${OUT}" "Control:"
 has "without --control stderr names the gap [DND-1747]" "${ERR}" "--control not given"
 has "the unset note carries a Fix: [DND-1747]" "${ERR}" "Fix: "
+run "${TICKET[@]}" --kind Feature --severity none --security none
+lacks "a Feature gets no unset-Control note: it has no Control [DND-1747]" "${ERR}" "--control not given"
 : > "${TMP}/server.log"
 run "${TICKET[@]}" "${FILER[@]}" --control fails-open
 eq "--control fails-open on a Bug is usage (2) [DND-1747]" "${RC}" "2"
@@ -324,6 +326,10 @@ has "it says fail-open is a Vulnerability, with Fix: [DND-1747]" "${ERR}" "--con
 run "${TICKET[@]}" "${FILER[@]}" --control maybe
 eq "an unknown --control is usage (2) [DND-1747]" "${RC}" "2"
 eq "no --control refusal sent a request [DND-1747]" "$(requests)" "0"
+spec classify.json "$(jq -cn --argjson b "${MIXED_BODY}" '{status: 200, body: $b}')"
+run "${TICKET[@]}" "${FILER[@]}" --control fails-closed
+eq "a decided Kind that does not fit --control still exits 0 [DND-1747]" "${RC}" "0"
+has "the mismatch is named on stderr with a Fix: [DND-1747]" "${ERR}" "the decided Kind is Vulnerability, but --control fails-closed is a Bug (it blocks legitimate work), not Vulnerability. Fix: "
 spec classify.json "$(jq -cn '{status: 503, body: {error: "unavailable"}}')"
 run "${TICKET[@]}" "${FILER[@]}" --control fails-closed
 eq "an unavailable classification still exits 3 with --control [DND-1747]" "${RC}" "3"

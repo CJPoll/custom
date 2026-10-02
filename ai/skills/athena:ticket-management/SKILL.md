@@ -213,7 +213,7 @@ other documents cite it by name.
   | Tier | Selector (*Ticket properties*) | Order within the tier |
   |---|---|---|
   | 0 | `Path` = `Promoted`: the owner's explicit order, or an admiral's promotion (*Promote and won't-fix*) | the owner's order first, then admiral promotions, oldest first |
-  | 1 | `Severity` ∈ {`CRITICAL`, `HIGH`}, and either `Kind` = `Vulnerability`, `Security` = `pre-existing` (exploitable), or `Control` ∈ {`fails-open`, `fails-closed`} (a security control that misreports, whatever its Kind) | Severity, then age |
+  | 1 | `Severity` ∈ {`CRITICAL`, `HIGH`} and one of: (a) `Kind` = `Vulnerability` with `Security` = `pre-existing` (exploitable); (b) `Control` ∈ {`fails-open`, `fails-closed`} (a security control that misreports, whatever its Kind) | Severity, then age |
   | 2 | `Kind` = `Bug` and `Path` = `Blocking` | just ahead of the ticket it blocks |
   | 3 | `Path` = `Critical` | the epic's dependency order |
   | 4 | everything else, once its epic's critical path is met | Severity (empty last), then the Kind order, then age (oldest first) |
@@ -279,8 +279,10 @@ other documents cite it by name.
     urgent, it promotes it itself (*Promote and won't-fix* below) and keeps
     working.
   - **A control that fails closed follows the same split** at the same
-    severities, though it is a `Bug` (*A security control that misreports*
-    above). One the ticket's own change introduces blocks that ticket.
+    severities, though it is a `Bug` with `Security` = `none` (*A security
+    control that misreports* above). One the ticket's own change introduces
+    is fixed inside that ticket's work, like any defect the change brings;
+    a pre-existing one is queued by its `Control` and `Severity`.
   - `~/.claude/CLAUDE.md` → *Owner approval policy* governs **approval**, not
     **scheduling**. A security fix ships without waiting for the owner; when it
     is worked is decided here.
@@ -354,7 +356,10 @@ The DND Tickets data source carries these. The values are stated here once.
     control that misreports* above): a control that fails closed is a Bug,
     prioritized as security through `Control`, not Kind. The
     ticket-classification question sets still restate the old criterion
-    until their next version.
+    until their next version, the follow-up DND-1747 hands to the Jev epic.
+    Until then a decided `Vulnerability` can come back for a fail-closed
+    control; `ticket-classify --control fails-closed` names that mismatch
+    on stderr, and the filer files `Bug`.
   - **Hardening:** makes an attack or a failure harder or less damaging, with
     no concrete defect shown.
   - **Refactor:** structure, not behaviour: architecture drift, dead code,
@@ -408,9 +413,10 @@ The DND Tickets data source carries these. The values are stated here once.
   positive or a misleading denial that grants no access (Kind `Bug`).
   `none`: anything else. It is the tier selector's security signal apart
   from Kind (*A security control that misreports*). `ai/bin/next-mission`
-  names each open `CRITICAL`/`HIGH` ticket that is not a `Vulnerability`
-  and has `Control` unset, since its tier may be wrong; set it rather than
-  leave it empty.
+  names each open `CRITICAL`/`HIGH` ticket that is not a `Vulnerability`,
+  `Feature` or `Flake` and has `Control` unset, since its tier may be wrong;
+  set it rather than leave it empty. `ticket-file` refuses a non-Feature
+  filing without it.
 
 These definitions are the criteria the ticket-classification question sets
 restate (gen_saas `TicketKind`, `TicketSeverity`, `TicketSecurity`, DND-991).

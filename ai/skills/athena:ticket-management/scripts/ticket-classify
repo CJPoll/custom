@@ -309,6 +309,10 @@ module Manager
   # not fit is named too: the filer files one or the other.
   def control(opts, decided, out, err)
     value = opts[:control]
+    # A Feature is authored, with no Control to set (ticket-file does not
+    # require one), so its omission is no gap.
+    return if value.nil? && opts[:filer][:kind] == "Feature"
+
     if value.nil?
       err.puts "#{PROG}: note: --control not given; this run did not record whether a security control " \
                "misreports. Fix: set Control on the ticket anyway: fails-open (Vulnerability), fails-closed " \

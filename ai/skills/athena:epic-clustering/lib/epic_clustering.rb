@@ -374,11 +374,12 @@ module EpicClustering
   end
 
   # Old LOW tier-4 tickets whose cost may exceed their value. Never a
-  # Vulnerability (security is fixed, not declined, by default) and never a
-  # ticket another ticket depends on.
+  # Vulnerability or a security control that misreports (security is fixed,
+  # not declined, by default; a fail-closed control keeps that priority,
+  # DND-1747) and never a ticket another ticket depends on.
   def wont_fix(queue, now_t)
     queue.filter_map do |t|
-      next unless t.severity == "LOW" && t.kind != "Vulnerability" && t.blocks.empty?
+      next unless t.severity == "LOW" && !NextMission.security_ranked?(nm_ticket(t)) && t.blocks.empty?
 
       days = ((now_t - Time.parse(t.created)) / 86_400).floor
       next if days < WONT_FIX_AGE_DAYS

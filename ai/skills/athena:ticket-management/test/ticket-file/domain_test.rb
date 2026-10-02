@@ -113,6 +113,10 @@ check("Severity is not required on a Feature") do
 end
 r = refusal(properties: PROPS.reject { |k, _| k == "Control" })
 check("DND-1747: Control is required on a Bug, so a missing one never reads as none") { r && r.message.include?("Control") }
+r = refusal(properties: PROPS.merge("Control" => { "select" => nil }))
+check("DND-1747: a required select set to null is refused as missing, never filed unset") { r && r.message.include?("Control") }
+r = refusal(properties: PROPS.merge("Severity" => { "select" => nil }))
+check("DND-1747: the same holds for Severity (the class, not the site)") { r && r.message.include?("Severity") }
 check("DND-1747: Control is not required on a Feature (a planned requirement is no control misreport)") do
   TF.plan(**DEFAULTS.merge(properties: PROPS.reject { |k, _| %w[Severity Control].include?(k) }
                                             .merge("Kind" => { "select" => { "name" => "Feature" } })))

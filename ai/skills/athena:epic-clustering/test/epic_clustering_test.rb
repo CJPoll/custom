@@ -285,7 +285,11 @@ check("digest with won't-fix candidates lists old LOW tier-4 tickets, one line a
   old = [t("DND-8", kind: "Docs", severity: "LOW", epics: ["E2"], created: "2026-09-01T00:00:00Z"),
          t("DND-9", kind: "Refactor", severity: "LOW", epics: ["E2"], created: "2026-08-30T00:00:00Z"),
          t("DND-10", kind: "Vulnerability", severity: "LOW", epics: ["E2"], created: "2026-08-01T00:00:00Z"),
-         t("DND-11", kind: "Test", severity: "LOW", epics: ["E2"], created: "2026-08-01T00:00:00Z", blocks: ["DND-9"])]
+         t("DND-11", kind: "Test", severity: "LOW", epics: ["E2"], created: "2026-08-01T00:00:00Z", blocks: ["DND-9"]),
+         # DND-1747: a fail-closed control Bug keeps security's priority, so
+         # it is never a won't-fix candidate, as a LOW Vulnerability is not.
+         t("DND-12", kind: "Bug", severity: "LOW", epics: ["E2"], created: "2026-08-01T00:00:00Z",
+                     control: "fails-closed")]
   epics, ts = digest_fixture(old)
   d = EC.build_digest(tickets: ts, epics: epics, now: NOW)
   text = ECV.digest_text(d)

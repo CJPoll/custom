@@ -1,6 +1,6 @@
 ---
 name: athena:epic-clustering
-description: The 12-hourly cross-epic clustering pass an athena-architect runs over open epics — move cohesive clusters of movable tickets (never Features, the critical path, blockers, promoted or tier-1 security tickets, or anything wired to them) into a matching or new epic with before/after proof, merge near-duplicates (C3), close already-fixed tickets by their own repro (C4), flag stale In Progress and thin ticket bodies, write the daily tier-4 digest to the run record (never to the owner), and send won't-fix notices (notify-only, with a veto) by Block Kit. Use when an admiral requests a clustering pass, when the 12h cron spawns one, or when an epic's open Path=Off count exceeds its open on-path count.
+description: The 12-hourly cross-epic clustering pass an athena-architect runs over open epics — move cohesive clusters of movable tickets (never Features, the critical path, blockers, promoted or tier-1 tickets, or anything wired to them) into a matching or new epic with before/after proof, merge near-duplicates (C3), close already-fixed tickets by their own repro (C4), flag stale In Progress and thin ticket bodies, write the daily tier-4 digest to the run record (never to the owner), and send won't-fix notices (notify-only, with a veto) by Block Kit. Use when an admiral requests a clustering pass, when the 12h cron spawns one, or when an epic's open Path=Off count exceeds its open on-path count.
 ---
 
 # athena:epic-clustering

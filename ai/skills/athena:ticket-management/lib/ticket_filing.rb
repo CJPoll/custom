@@ -87,7 +87,8 @@ module TicketFiling
 
     kind = props.dig("Kind", "select", "name")
     required = kind == "Feature" ? REQUIRED : REQUIRED + REQUIRED_UNLESS_FEATURE
-    missing = required.reject { |k| props[k].is_a?(Hash) }
+    # A select written as null files the property unset: missing, not set.
+    missing = required.reject { |k| props[k].is_a?(Hash) && !(props[k].key?("select") && props[k]["select"].nil?) }
     unless missing.empty?
       raise Refused.new("the properties file has no #{missing.join(', ')} (athena:ticket-management -> Filing a ticket: set every property)",
                         "add each as a Notion property value, e.g. \"#{missing.first}\": {\"select\": {\"name\": \"...\"}}")
