@@ -177,3 +177,22 @@ ruby ai/test/judgment-eval/fixtures/ticket-security-dnd-1697/score-v3.rb \
 
 Item 3's override part and item 4 read from the 18-case run's per-case
 verdicts.
+
+## v1 held-out baseline at `--repeat 3` (before any v3 run)
+
+`ticket-security-v1`, `jev-1.13.0`, runs `a0575333`, `0df5a519`,
+`999072da` (10:12Z to 10:33Z, after the v3 bar commit; run file
+`20261002T101211Z-ticket_security.json`). Scored 324 of 324 in every
+sample. Verdicts: match 280, miss 41, unstable 3, n/a 0.
+
+- `security` cases matched: 26/27. The one miss is DND-1124. Two matches
+  sit near the boundary: DND-1063 (0.30 to 0.38) and DND-1125 (0.19 to
+  0.33).
+- `none` cases not matched (false security calls): 43/297, 40 misses and
+  3 unstable (DND-1205, DND-1256, DND-1374).
+- So item 2 requires v3 to match all 280 of v1's matches, including 254
+  `none` cases. Several of those sit near confidence 0 under v1 (DND-1036,
+  DND-1157, DND-1404, DND-1220).
+
+The v1 baseline for the 18-case set is the `--repeat 3` one above (runs
+`cdadd151`, `a08b2685`, `149ec8d2`).
