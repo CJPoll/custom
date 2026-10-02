@@ -295,8 +295,8 @@ yourself.
 **A repo with no CI cannot take that path.** With no check reported on the
 head, the wrapper refuses the pinned merge, so `locked-merge` exits 4 however
 good the report is. `~/dev/custom` is such a repo: it lands by a fast-forward
-`gh-athena git push` of the gated head under the same merge lock, then
-`ai/bin/main-health check`. The steps are `athena:merge-boarding` → *In a
+`gh-athena git push` of the gated head under the same merge lock, then the
+landing's installers and `ai/bin/main-health check`. The steps are `athena:merge-boarding` → *In a
 no-CI GitHub repo the pinned merge cannot run*; this skill does not restate
 them.
 

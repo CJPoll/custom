@@ -86,9 +86,26 @@ The landing, as Cody confirmed it (2026-10-01):
 4. A **conflicted** rebase is the one case that needs a full re-gate: release
    the lock, resolve the conflict, run `integration-gate --with-critic` on the
    new head, and start again.
-5. **Check `main` after the push**, outside the lock:
-   `~/dev/custom/ai/bin/main-health check --repo ~/dev/custom` (it queues its
-   own gate in test-slot; never wrap it in test-slot). A landing that pushed
+5. **Fast-forward, install, then check `main` after the push**, outside the
+   lock, in this order:
+   - Fast-forward the main checkout: `git -C ~/dev/custom merge --ff-only
+     origin/main` (after `git fetch origin`). A refusal is reported, never
+     forced (`~/dev/custom/CLAUDE.md` → *Agents work in worktrees, not the
+     main checkout* → *Publishing by fast-forward*).
+   - Run the landing's installers from that main checkout:
+     `~/dev/custom/ai/bin/landing-installers --repo ~/dev/custom --from <the
+     origin/main step 2 rebased onto> --to <the SHA step 3 pushed>`. It
+     installs what the landed range needs, keyed on the diff touching a
+     landed-bar registry; its `--help` is the one list of which. Skip it and
+     a landed hook or inbox row reads as drift, so the tip gates RED
+     (DND-1664). Exit 4 names an owner step (`setup-hooks --install-env`):
+     ask Cody for it per *Only Cody can run*. Running an installer is an
+     owner-notify item, and that item says which session may run it:
+     `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify after*. A
+     session it does not authorize hands the install to the one it does,
+     and runs `main-health check` only after that install.
+   - Then `~/dev/custom/ai/bin/main-health check --repo ~/dev/custom` (it
+   queues its own gate in test-slot; never wrap it in test-slot). A landing that pushed
    the gated head unchanged is green from its receipt with no gate run; only a
    clean rebase onto a moved `main` costs one `harness-gate` of the new tip.
    Run it in the background if you have more to land; it is detection, not a
@@ -101,7 +118,17 @@ The landing, as Cody confirmed it (2026-10-01):
    a gated fix: a head that contains the red SHA and has its own
    `INTEGRATION OK` receipt. Land the fix, then run `main-health check` again;
    GREEN clears the marker and unblocks the queue. A red you believe was
-   environmental: `main-health check --recheck` re-gates the tip.
+   environmental: `main-health check --recheck` re-gates the tip. A red whose
+   only failure is `check-hooks-registered` or `check-inbox-registry` drift on
+   a row the landing added is a skipped install, not a bad landing: run step
+   5's `landing-installers` for that landing, then `main-health check
+   --recheck`.
+
+**Later (2026-10-02, DND-1664):** step 5 was "Check `main` after the push"
+and ran `main-health check` first, with no fast-forward or installer before
+it. A landing that added a hook or inbox registry row then gated RED, because
+both checks read the bar as landed (DND-1653's landing e4eed785, 01:17Z).
+Superseded by the fast-forward and `landing-installers` sub-steps above.
 
 **Later (2026-10-01, DND-1482):** step 5 said "In `~/dev/custom` nothing gates
 `main` after a landing, so the next `integration-gate` is the detector … When

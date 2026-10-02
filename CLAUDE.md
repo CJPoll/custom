@@ -1001,17 +1001,26 @@ it per `athena:merge-boarding` (the no-CI rule there names the steps):
    re-gate (`integration-gate --with-critic`), and start again;
 3. confirm it landed (`ai/bin/confirm-merged`);
 4. fast-forward the main checkout (`git merge --ff-only`);
-5. check the new `main`: `ai/bin/main-health check` (outside the lock; it is
+5. run the landing's installers from the main checkout
+   (`ai/bin/landing-installers`; its `--help` says which, and the
+   merge-boarding step says who may run them);
+6. check the new `main`: `ai/bin/main-health check` (outside the lock; it is
    detection, not a merge gate).
 
 A red `main` or a failed deploy stops the line: nothing more lands until it is
 fixed. Here that is enforced: `ai/bin/main-health` gates `origin/main` after a
-landing (the admiral's step 5, and the hourly shipwright tick as the
+landing (the admiral's step 6, and the hourly shipwright tick as the
 backstop), keeps a red marker under the git common dir while the tip is RED,
 and alerts once per red episode on harness-alerts. While it is red,
 `gh-athena git push` refuses a push to `main` except a gated fix: a head that
 contains the red SHA and has its own `INTEGRATION OK` receipt.
 `athena:merge-boarding` → the no-CI landing has the steps.
+
+**Later (2026-10-02, DND-1664):** the steps above went from the fast-forward
+straight to `main-health check`, with no installer step. A landing that added
+a hook or inbox registry row then gated RED: both checks read the bar as
+landed, and nothing had wired the row (DND-1653's landing, 01:17Z). Step 5
+now runs `ai/bin/landing-installers` first.
 
 **Later (2026-10-01, DND-1482):** this paragraph ended at "nothing more lands
 until it is fixed", and nothing checked `origin/main` after a landing.

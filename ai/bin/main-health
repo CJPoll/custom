@@ -23,8 +23,10 @@
 # and integration-gate passed exactly it (ai/lib/forge-git-passthrough.sh ->
 # "Red-main refusal"; the reader is ai/lib/main-health.sh).
 #
-# Who runs check: the admiral, right after each ~/dev/custom landing
-# (athena:merge-boarding -> the no-CI landing), and the hourly shipwright cron
+# Who runs check: the admiral, right after each ~/dev/custom landing and its
+# installers (ai/bin/landing-installers, DND-1664: a landed hook or inbox
+# registry row reads as drift until installed; athena:merge-boarding -> the
+# no-CI landing), and the hourly shipwright cron
 # as the backstop for landings made by anyone else.
 #
 # Test seams (the self-test's stubs; ai/test/main-health/self-test.sh):

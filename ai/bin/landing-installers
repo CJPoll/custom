@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# landing-installers -- run the installers a ~/dev/custom landing needs, from
+# the main checkout, after the fast-forward and before main-health (DND-1664).
+#
+# Why this exists: check-hooks-registered and check-inbox-registry read their
+# bar AS LANDED on origin/main (DND-743, DND-792). A landing that adds a row
+# to ai/hooks/registry.json or ai/inbox/registry.json makes that row required
+# the moment the push lands, but nothing wires it until its installer runs.
+# The no-CI landing ran `main-health check` straight after the fast-forward,
+# so the tip gated RED and the red marker refused every push to main.
+# Measured 2026-10-02 01:17Z: DND-1653 landed e4eed785 with a new PreToolUse
+# row; check-hooks-registered failed 1 of 169 until `scripts/setup-hooks
+# --install` plus `main-health check --recheck`.
+#
+# This file is the ONE home of "which installer a landing needs". The landing
+# steps (athena:merge-boarding -> the no-CI landing; ~/dev/custom/CLAUDE.md ->
+# *An admiral merges that PR*) cite it by name and do not restate the list.
+#
+#   registry changed in FROM..TO   installer run from the main checkout
+#   ai/hooks/registry.json         scripts/setup-hooks --install, then --check
+#   ai/inbox/registry.json         scripts/setup-inbox-registry --install, then --check
+#   ai/hooks/registry.json .env    scripts/setup-hooks --install-env: the OWNER's
+#                                  activation step; named (exit 4), never run
+#
+# Who may run it: running a committed installer after its change lands is an
+# owner-notify item (~/.claude/CLAUDE.md -> *Owner approval policy* -> *Notify
+# after*), which also says which session may run it. List each run in the
+# digest. --dry-run only reads, so anyone may run it anywhere.
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+landing-installers -- run the installers a ~/dev/custom landing needs (DND-1664).
+
+Usage:
+  landing-installers --from SHA --to SHA [--repo DIR] [--dry-run]
+  landing-installers --help
+
+The landed range FROM..TO is the base the landing rebased onto (origin/main
+at the fetch) and the SHA it pushed. For each landed-bar registry the range
+changes, it runs that registry's installer from the MAIN checkout, then the
+installer's --check:
+  ai/hooks/registry.json   scripts/setup-hooks --install; --check
+  ai/inbox/registry.json   scripts/setup-inbox-registry --install; --check
+A change to ai/hooks/registry.json's "env" section also needs
+scripts/setup-hooks --install-env, the OWNER's activation step: it is named
+(exit 4) and never run here.
+
+Run it after the fast-forward of the main checkout and BEFORE
+`main-health check`: both checks read the bar as landed, so an uninstalled
+landed row turns the tip RED. Running an installer is an owner-notify item
+(~/.claude/CLAUDE.md -> Owner approval policy -> Notify after): list it in
+the digest.
+
+  --repo DIR   the repo's MAIN checkout (default: the current directory).
+               A linked worktree is refused unless --dry-run.
+  --dry-run    print the plan; run nothing. Any checkout or worktree.
+
+Exit:
+  0  every needed installer and its --check passed (or none was needed;
+     with --dry-run, the plan was printed)
+  1  an installer or its --check failed
+  2  usage, or a key that does not resolve: an unknown SHA, FROM not an
+     ancestor of TO, --repo not a git checkout
+  3  COULD NOT LOOK or not runnable here: --repo is not the main checkout,
+     its HEAD does not contain TO yet, a registry could not be read, or an
+     installer is missing
+  4  the range changed the hooks registry's env section: the owner must run
+     scripts/setup-hooks --install-env (the agent installers still ran)
+Every non-zero exit prints a Fix: line.
+
+The hermetic suite is ai/test/landing-installers/self-test.sh.
+EOF
+}
+
+die() { # <exit> <message> <fix>
+  printf 'landing-installers: %s\nFix: %s\n' "$2" "$3" >&2
+  exit "$1"
+}
+
+# The table. Order is run order. Each row: <registry path>|<installer>.
+REGISTRIES=(
+  "ai/hooks/registry.json|scripts/setup-hooks"
+  "ai/inbox/registry.json|scripts/setup-inbox-registry"
+)
+HOOKS_REGISTRY="ai/hooks/registry.json"
+
+REPO="."; FROM=""; TO=""; DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --repo) [ $# -ge 2 ] || die 2 "--repo needs a value" "pass --repo <the main checkout>."; REPO="$2"; shift 2 ;;
+    --from) [ $# -ge 2 ] || die 2 "--from needs a value" "pass --from <the origin/main SHA the landing rebased onto>."; FROM="$2"; shift 2 ;;
+    --to)   [ $# -ge 2 ] || die 2 "--to needs a value" "pass --to <the SHA the landing pushed>."; TO="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    *) die 2 "unknown argument: $1" "see landing-installers --help; flags are --from, --to, --repo, --dry-run." ;;
+  esac
+done
+[ -n "${FROM}" ] || die 2 "no --from" "pass --from <the origin/main SHA the landing rebased onto>."
+[ -n "${TO}" ]   || die 2 "no --to" "pass --to <the SHA the landing pushed>."
+
+# ---- resolve every key; a key that does not resolve is an error, never "none"
+REPO="$(cd "${REPO}" 2>/dev/null && pwd -P)" || die 2 "--repo is not a directory" "pass --repo <the main checkout, e.g. ~/dev/custom>."
+COMMON="$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+  || die 2 "${REPO} is not inside a git repository" "pass --repo <the main checkout, e.g. ~/dev/custom>."
+resolve() { # <name> <rev>
+  git -C "${REPO}" rev-parse --verify -q "$2^{commit}" 2>/dev/null \
+    || die 2 "$1 '$2' is not a commit in ${REPO}" "pass the full SHA; git -C ${REPO} fetch origin if it landed from elsewhere."
+}
+FROM_SHA="$(resolve --from "${FROM}")" || exit $?
+TO_SHA="$(resolve --to "${TO}")" || exit $?
+git -C "${REPO}" merge-base --is-ancestor "${FROM_SHA}" "${TO_SHA}" 2>/dev/null \
+  || die 2 "--from ${FROM_SHA} is not an ancestor of --to ${TO_SHA}; that is not a landed range" "pass --from the origin/main the landing rebased onto and --to the SHA it pushed (FROM first)."
+
+# ---- where installers may run ----------------------------------------------
+if [ "${DRY}" -eq 0 ]; then
+  GITDIR="$(git -C "${REPO}" rev-parse --path-format=absolute --git-dir 2>/dev/null)"
+  [ "${GITDIR}" = "${COMMON}" ] \
+    || die 3 "${REPO} is a linked worktree, not the main checkout; installers wire main-checkout paths and replace stale wiring only from there" "run it with --repo <the main checkout> (git -C ${REPO} worktree list names it), or pass --dry-run to only read the plan."
+  [ "$(git -C "${REPO}" rev-parse --is-bare-repository 2>/dev/null)" = false ] \
+    || die 3 "${REPO} is a bare repository" "run it with --repo <the main checkout>."
+  git -C "${REPO}" merge-base --is-ancestor "${TO_SHA}" HEAD 2>/dev/null \
+    || die 3 "the main checkout's HEAD does not contain ${TO_SHA}; its installers would install the pre-landing registry" "fast-forward it first: git -C ${REPO} merge --ff-only origin/main (after git fetch origin), then re-run."
+fi
+
+# ---- which registries the range changed ------------------------------------
+changed=(); considered=0
+for row in "${REGISTRIES[@]}"; do
+  path="${row%%|*}"; considered=$((considered+1))
+  git -C "${REPO}" diff --quiet "${FROM_SHA}" "${TO_SHA}" -- "${path}" 2>/dev/null; drc=$?
+  case "${drc}" in
+    0) ;;
+    1) changed+=("${row}") ;;
+    *) die 3 "COULD NOT LOOK: git diff ${FROM_SHA}..${TO_SHA} -- ${path} exited ${drc}" "check the repo (git -C ${REPO} fsck), then re-run." ;;
+  esac
+done
+
+# env_of <sha> : the hooks registry's .env, canonical; "null" when the file is
+# absent at that SHA. A file that exists but does not parse is an error.
+env_of() {
+  if ! git -C "${REPO}" cat-file -e "$1:${HOOKS_REGISTRY}" 2>/dev/null; then
+    printf 'null\n'; return 0
+  fi
+  git -C "${REPO}" show "$1:${HOOKS_REGISTRY}" 2>/dev/null | jq -S -c '.env' 2>/dev/null
+}
+env_changed=0
+for row in "${changed[@]+"${changed[@]}"}"; do
+  [ "${row%%|*}" = "${HOOKS_REGISTRY}" ] || continue
+  command -v jq >/dev/null 2>&1 \
+    || die 3 "COULD NOT LOOK whether the env section changed: jq is not installed" "install jq, then re-run."
+  e_from="$(env_of "${FROM_SHA}")" && [ -n "${e_from}" ] \
+    || die 3 "COULD NOT LOOK: ${HOOKS_REGISTRY} at ${FROM_SHA} does not parse" "fix the registry on main; check-hooks-registered names the parse error."
+  e_to="$(env_of "${TO_SHA}")" && [ -n "${e_to}" ] \
+    || die 3 "COULD NOT LOOK: ${HOOKS_REGISTRY} at ${TO_SHA} does not parse" "fix the registry on main; check-hooks-registered names the parse error."
+  [ "${e_from}" = "${e_to}" ] || env_changed=1
+done
+
+names=""
+for row in "${changed[@]+"${changed[@]}"}"; do names="${names}${names:+, }${row%%|*}"; done
+printf 'landing-installers: %s..%s: %d registries considered, %d changed%s\n' \
+  "${FROM_SHA:0:12}" "${TO_SHA:0:12}" "${considered}" "${#changed[@]}" "${names:+: ${names}}"
+
+owner_step() {
+  printf 'OWNER STEP: scripts/setup-hooks --install-env (the hooks registry env section changed)\n'
+  die 4 "the landed range changed ${HOOKS_REGISTRY}'s env section; only the owner activates it" "ask Cody to run ${REPO}/scripts/setup-hooks --install-env and restart sessions (it is the owner's activation step, CLAUDE.md -> Hook registration -> The agent-stash env); until then check-hooks-registered may read DRIFT."
+}
+
+if [ "${DRY}" -eq 1 ]; then
+  for row in "${changed[@]+"${changed[@]}"}"; do
+    printf 'would run: %s --install; %s --check  (%s changed)\n' "${row#*|}" "${row#*|}" "${row%%|*}"
+  done
+  [ "${env_changed}" -eq 0 ] || owner_step
+  exit 0
+fi
+
+for row in "${changed[@]+"${changed[@]}"}"; do
+  inst="${row#*|}"
+  [ -x "${REPO}/${inst}" ] \
+    || die 3 "${REPO}/${inst} is missing or not executable" "check that ${REPO} is a full ~/dev/custom checkout at ${TO_SHA}."
+  printf 'run: %s --install  (%s changed)\n' "${inst}" "${row%%|*}"
+  "${REPO}/${inst}" --install \
+    || die 1 "${inst} --install failed (exit $?); the landed row is not wired, so main-health will read RED" "read the installer's output above, fix the cause, and re-run landing-installers before main-health check."
+  printf 'run: %s --check\n' "${inst}"
+  "${REPO}/${inst}" --check \
+    || die 1 "${inst} --check failed (exit $?) after its install" "read the check's output above; re-run ${inst} --install from ${REPO}, then this tool, before main-health check."
+done
+[ "${#changed[@]}" -eq 0 ] \
+  || printf 'installed: %s. List it in the digest (~/.claude/CLAUDE.md -> Owner approval policy -> Notify after).\n' "${names}"
+[ "${env_changed}" -eq 0 ] || owner_step
+exit 0

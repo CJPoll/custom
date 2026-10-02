@@ -229,6 +229,12 @@ tools:
   # sends a harness-alerts message through send-mail (destructive, send). Classed
   # by that worst case.
   main-health:             { class: destructive, reason: send }
+  # landing-installers (DND-1664) runs the main checkout's committed installers
+  # (setup-hooks --install, setup-inbox-registry --install) after a landing.
+  # They rewrite ~/.claude/settings.json and the inbox tenancy registry, the
+  # live config of every session on the machine; --dry-run only reads. Classed
+  # by that worst case, like main-health beside it.
+  landing-installers:      { class: destructive, reason: install }
   # slack-roots-tick (DND-1502) runs judgment-label --propose (idempotent,
   # machine-local labels and root snapshot), writes its own run records, and
   # after N failed ticks sends ONE harness-alerts message per failure episode
