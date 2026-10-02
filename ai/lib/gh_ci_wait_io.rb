@@ -41,21 +41,32 @@ module GhCiWait
       @last_ok_at = nil
 
       loop do
-        # A read never runs past the deadline by more than READ_FLOOR_S, so a
-        # hung final read cannot push the wait past one foreground tool call.
-        left = (deadline - @clock.call).ceil
-        read = @reader.call(GhCiWait.path_for(target), left.clamp(READ_FLOOR_S, READ_TIMEOUT_S))
-        @reads[read.kind] += 1
+        read = read_once(GhCiWait.path_for(target), deadline)
+        state = nil
+        if read.kind == :ok
+          begin
+            # Runs from more than one check suite: only the sha's runs list
+            # says which run is current (DND-1727). A failed runs read is
+            # handled as the poll's read, the same as a failed first read.
+            runs_body = nil
+            if GhCiWait.needs_runs?(target, read.body)
+              runs_read = read_once(GhCiWait.runs_path_for(target), deadline)
+              if runs_read.kind == :ok
+                runs_body = runs_read.body
+              else
+                read = runs_read
+              end
+            end
+            state = GhCiWait.judge(target, read.body, runs_body) if read.kind == :ok
+          rescue Unreadable => e
+            return could_not_look("unreadable response: #{e.message}", unreadable_fix(e))
+          end
+        end
         case read.kind
         when :ok
           errors_in_row = 0
           last_error = nil
           @last_ok_at = @clock.call
-          state = begin
-            GhCiWait.judge(target, read.body)
-          rescue Unreadable => e
-            return could_not_look("unreadable response: #{e.message}", unreadable_fix(e))
-          end
           final = finish(state)
           return final if final
 
@@ -83,6 +94,16 @@ module GhCiWait
     end
 
     private
+
+    # One bounded read, counted. A read never runs past the deadline by more
+    # than READ_FLOOR_S, so a hung final read cannot push the wait past one
+    # foreground tool call.
+    def read_once(path, deadline)
+      left = (deadline - @clock.call).ceil
+      read = @reader.call(path, left.clamp(READ_FLOOR_S, READ_TIMEOUT_S))
+      @reads[read.kind] += 1
+      read
+    end
 
     def finish(state)
       case state.state

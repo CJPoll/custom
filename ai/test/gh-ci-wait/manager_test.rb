@@ -167,6 +167,45 @@ check("M17 a state change is logged once, not every poll") do
   rig.log.count { |l| l.include?("not completed") } == 1
 end
 
+# ---- MS: a superseded run needs the runs list (DND-1727) ------------------------
+ACT = { "id" => 15_368, "slug" => "github-actions" }.freeze
+def sr(name, suite, conclusion) = { "name" => name, "status" => "completed", "conclusion" => conclusion,
+                                    "check_suite" => { "id" => suite }, "app" => ACT }
+def wr(id, suite, conclusion, created) = { "id" => id, "name" => "CI", "event" => "pull_request", "head_sha" => SHA,
+                                           "status" => "completed", "conclusion" => conclusion,
+                                           "created_at" => created, "check_suite_id" => suite, "workflow_id" => 5 }
+TWO_SUITES = checks(sr("Test", 2, "success"), sr("Test", 1, "cancelled"))
+WF_RUNS = ok("total_count" => 2, "workflow_runs" => [wr(20, 2, "success", "2026-10-02T11:01:25Z"),
+                                                       wr(10, 1, "cancelled", "2026-10-02T11:01:24Z")])
+
+check("MS1 runs from two suites: the reader is asked for the runs list next, and the newer success is DONE") do
+  rig = Rig.new([TWO_SUITES, WF_RUNS])
+  o = run(rig)
+  o.verdict == :done && rig.paths == [W.path_for(TC), W.runs_path_for(TC)] && o.line.include?("superseded") &&
+    o.line.include?("run 10") && rig.sleeps.empty? && o.reads[:ok] == 2
+end
+check("MS2 a rate-limited runs read is a rate-limited read: wait, then read both again") do
+  rl = W::Read.new(kind: :rate_limited, status: 403, resource: "core", reset_at: T0 + 200, secondary: false, detail: "x")
+  rig = Rig.new([TWO_SUITES, rl, TWO_SUITES, WF_RUNS])
+  o = run(rig)
+  o.verdict == :done && rig.sleeps == [200] && rig.paths.size == 4 && o.reads[:rate_limited] == 1
+end
+check("MS3 a runs read that matches nothing is COULD-NOT-LOOK, never the 10-of-20 failure") do
+  rig = Rig.new([TWO_SUITES, W::Read.new(kind: :not_found, status: 404, detail: "HTTP 404: Not Found")])
+  o = run(rig)
+  o.verdict == :could_not_look && !o.line.include?("did not succeed")
+end
+check("MS4 an unreadable runs body is COULD-NOT-LOOK naming the runs list") do
+  rig = Rig.new([TWO_SUITES, ok("message" => "x")])
+  o = run(rig)
+  o.verdict == :could_not_look && o.line.include?("workflow_runs")
+end
+check("MS5 a lone cancelled run (one suite) is FAILED on one read") do
+  rig = Rig.new([checks(sr("Test", 1, "cancelled"))])
+  o = run(rig)
+  o.verdict == :failed && rig.paths == [W.path_for(TC)]
+end
+
 if $failures.empty?
   puts "gh-ci-wait manager: #{$checks} checks passed"
   exit 0

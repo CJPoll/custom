@@ -30,10 +30,18 @@ HELP = <<~TXT
                          --min-checks N (default 1): fewer completed
                          check-runs than N is still pending, so a workflow
                          that has not queued yet is not read as green.
+                         Runs of one check from more than one check suite
+                         (a force-push's cancelled duplicate run) also read
+                         the sha's runs list: the newest workflow run per
+                         check is judged, and an older run is superseded,
+                         and named, only when every newer run of that check
+                         succeeded (the merge guard's rule, DND-1140,
+                         DND-1727). Until then it is pending, then judged.
+    --workflow NAME      the newest run of that workflow per event (its
+                         name, or its file name such as ci.yml) on --sha. A
+                         deploy watch. Older runs are named as superseded.
     --run-id ID          that workflow run, read by id (DND-1378). With
                          --sha, a run for another commit is WRONG-HEAD.
-    --workflow NAME      the newest run of that workflow (its name, or its
-                         file name such as ci.yml) on --sha. A deploy watch.
 
   Options:
     --interval S         seconds between reads; default #{GhCiWait::DEFAULT_INTERVAL}, floor #{GhCiWait::MIN_INTERVAL}.

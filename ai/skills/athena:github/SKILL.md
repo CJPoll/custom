@@ -232,9 +232,12 @@ It blocks (60 s reads, `--max 570` by default, so it fits one foreground tool
 call), prints one `VERDICT:` line and exits 0 DONE, 1 TIMEOUT (still pending,
 re-run it), 3 COULD-NOT-LOOK, 4 FAILED or 5 WRONG-HEAD; `--help` has the rest.
 "CI is done" = every check-run has concluded **on the head you pushed**.
-`gh-ci-wait --sha` judges every check-run, required or not (a red optional one
-reads FAILED), and reads check-runs only, not legacy commit statuses; the
-merge guard re-reads the full rollup before any merge. Pass `--min-checks N`
+`gh-ci-wait --sha` judges every current check-run, required or not (a red
+optional one reads FAILED), and reads check-runs only, not legacy commit
+statuses; the merge guard re-reads the full rollup before any merge. A run
+superseded by a newer, all-success run of the same check (a force-push's
+cancelled duplicate) is named, not judged: the merge guard's rule
+(DND-1140, DND-1727). Pass `--min-checks N`
 (the repo's usual check count) so a workflow that has not queued yet is not
 read as green.
 
