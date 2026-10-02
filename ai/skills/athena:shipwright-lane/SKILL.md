@@ -162,7 +162,9 @@ session may run an installer (`~/.claude/CLAUDE.md` → *Owner approval
 policy* → *Notify after*), and a landed hook or inbox row reads as drift
 until one runs, so `main` would go RED (DND-1664). Journal it and leave the
 commits local; the runner keeps the stranded branch, and an admiral lands it
-by `athena:merge-boarding`'s no-CI landing.
+by `athena:merge-boarding`'s no-CI landing. Any other non-zero exit (HEAD
+not yet on `origin/main`: re-run *Sync down first*) means the plan is
+unknown, so do not push on it either.
 **Never `git push --force`** on this repo. Push only `~/dev/custom` — never a
 product repo through this skill. (A lead-time run's product-repo change is
 pushed by `ai/bin/leadtime-product`, not here: `athena:lead-time-improve` →

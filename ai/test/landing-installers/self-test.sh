@@ -18,7 +18,7 @@
 #   4  a changed `env` section: where the env is active (the hooks --check
 #      fails) the owner's --install-env is named, exit 4, never run; where it
 #      is inactive nothing is owed (exit 0); a failed check with no env change
-#      is exit 1
+#      is exit 1; an owner step never skips a later installer (4d)
 #   5  --dry-run names the installers and runs none
 #   6  a wrongly computed key (unknown SHA, reversed range) is exit 2, not "none"
 #   7  a main checkout that has not fast-forwarded to --to is exit 3, ran none
@@ -274,6 +274,22 @@ if [ "${RC}" -eq 0 ] \
   ok "12 --repo inside the main checkout resolves to its top level"
 else
   bad "12 subdirectory --repo" "rc=${RC} ran=[${RAN}] err=[${ERR}]"
+fi
+
+# --- 4d -----------------------------------------------------------------------
+# One range changes the hooks env AND the inbox registry, on a machine where
+# the env is active: the owner step must not skip the inbox installer, or
+# main-health still reads RED on the unwired inbox row.
+printf '{"_meta":{},"env":{"A":"3"},"hooks":[{"event":"PreToolUse","script":"x.sh"}],"retired":[]}\n' > "${R}/ai/hooks/registry.json"
+printf '{"_meta":{},"v":1,"projects":[{"file":"p.json"},{"file":"r.json"}]}\n' > "${R}/ai/inbox/registry.json"
+BOTH="$(commit 'env and inbox in one range')"
+LI_FAIL="setup-hooks:--check" run --repo "${R}" --from "${ENV}" --to "${BOTH}"
+if [ "${RC}" -eq 4 ] \
+   && [ "${RAN}" = "$(printf 'setup-hooks --install\nsetup-hooks --check\nsetup-inbox-registry --install\nsetup-inbox-registry --check')" ] \
+   && has 'OWNER STEP' "${OUT}"; then
+  ok "4d env + inbox in one range, env active: every installer runs, then exit 4"
+else
+  bad "4d env + inbox" "rc=${RC} ran=[${RAN}] out=[${OUT}] err=[${ERR}]"
 fi
 
 # --- 13 -----------------------------------------------------------------------

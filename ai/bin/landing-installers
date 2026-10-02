@@ -74,7 +74,8 @@ Exit:
      installer is missing
   4  the range changed the hooks registry's env section and the hooks
      --check failed after the install: the owner runs
-     scripts/setup-hooks --install-env (the agent installers still ran)
+     scripts/setup-hooks --install-env (every other installer still ran,
+     and passed its --check)
 Every non-zero exit prints a Fix: line.
 
 The hermetic suite is ai/test/landing-installers/self-test.sh.
@@ -200,13 +201,19 @@ for row in "${changed[@]+"${changed[@]}"}"; do
   "${REPO}/${inst}" --check; crc=$?
   [ "${crc}" -eq 0 ] && continue
   if [ "${row%%|*}" = "${HOOKS_REGISTRY}" ] && [ "${env_changed}" -eq 1 ]; then
-    printf 'OWNER STEP: scripts/setup-hooks --install-env (%s)\n' "${ENV_NOTE}"
-    die 4 "${inst} --check failed (exit ${crc}) after its install, and ${ENV_NOTE}" "if the check's agent-stash line above reads DRIFT, ask Cody to run ${REPO}/scripts/setup-hooks --install-env and restart sessions (the owner's activation step: ~/dev/custom/CLAUDE.md -> Hook registration -> The agent-stash env); run main-health check after it. Any other drift the check names is fixed as for exit 1."
+    # Record it and finish the other rows: an owner step must never leave a
+    # later registry's landed row uninstalled.
+    owner_crc="${crc}"
+    continue
   fi
   die 1 "${inst} --check failed (exit ${crc}) after its install" "read the check's output above; re-run ${inst} --install from ${REPO}, then this tool, before main-health check."
 done
 [ "${#changed[@]}" -eq 0 ] \
   || printf 'installed: %s. List it in the digest (~/.claude/CLAUDE.md -> Owner approval policy -> Notify after).\n' "${names}"
+if [ -n "${owner_crc:-}" ]; then
+  printf 'OWNER STEP: scripts/setup-hooks --install-env (%s)\n' "${ENV_NOTE}"
+  die 4 "scripts/setup-hooks --check failed (exit ${owner_crc}) after its install, and ${ENV_NOTE}; every other installer ran and passed" "if the check's agent-stash line above reads DRIFT, ask Cody to run ${REPO}/scripts/setup-hooks --install-env and restart sessions (the owner's activation step: ~/dev/custom/CLAUDE.md -> Hook registration -> The agent-stash env); run main-health check after it. Any other drift the check names is fixed as for exit 1."
+fi
 [ "${env_changed}" -eq 0 ] \
   || printf 'note: %s. The hooks check passed, so no owner step is owed here.\n' "${ENV_NOTE}"
 exit 0
