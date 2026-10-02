@@ -377,6 +377,19 @@ has "the DND-1600 fixture excludes no proposed label" "${OUT}" "proposed exclude
 eq "the DND-1600 fixture dry run reports no join miss" "${ERR}" ""
 eq "the DND-1600 fixture dry run sends nothing" "$(requests)" "${n}"
 
+# The committed ticket_security measurement fixture (DND-1697): the four
+# owner overrides of ticket-security-v1 (quality gates read as security
+# controls), paraphrased, plus nine kept security controls. It is the
+# before/after set for ticket-security-v2, judged on the bar its README
+# registered before any v2 run, so it must keep joining: 13 cases.
+TSS="${HERE}/fixtures/ticket-security-dnd-1697"
+run --use-case ticket_security --labels "${TSS}/labels.jsonl" --corpus "${TSS}/corpus.jsonl" --dry-run
+eq "the DND-1697 ticket_security fixture dry-runs clean" "${RC}" "0"
+has "the DND-1697 fixture joins all 13 cases, none 4 and security 9" "${OUT}" "cases: 13 (none 4, security 9)"
+has "the DND-1697 fixture excludes no proposed label" "${OUT}" "proposed excluded: 0"
+eq "the DND-1697 fixture dry run reports no join miss" "${ERR}" ""
+eq "the DND-1697 fixture dry run sends nothing" "$(requests)" "${n}"
+
 printf '{"id":"zz","label":"x","provenance":"owner_confirmed"}\n' > "${TMP}/labels-none.jsonl"
 run --use-case finding_triage --labels "${TMP}/labels-none.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --dry-run
 eq "no label joining the corpus is exit 1, never an empty run" "${RC}" "1"
