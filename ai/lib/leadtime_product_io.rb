@@ -667,7 +667,7 @@ module LeadTimeProductIO
       if kept
         begin
           journal_kept(m, s, kept)
-        rescue SystemCallError
+        rescue StandardError
           nil
         end
       end
