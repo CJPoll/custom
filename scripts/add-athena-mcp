@@ -115,19 +115,21 @@ fi
 
 # ---- resolve the helper: the MAIN checkout's copy, never a worktree's ----
 # A worktree path vanishes on cleanup and would silently break the MCP (the
-# same reason hooks are wired at the main checkout's path).
-main_checkout_helper() {
-    local common
-    common="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
-    case "$common" in
-        */.git) printf '%s/scripts/athena-mcp-headers\n' "${common%/.git}" ;;
-        *) return 1 ;;
-    esac
-}
+# same reason hooks are wired at the main checkout's path). The resolver is the
+# shared scripts/lib/main-checkout.sh (DND-1720). A copy whose main checkout
+# cannot be resolved is refused with its cause and a Fix:: it used to fall back
+# silently to its own directory, which in a worktree is the vanishing path.
 if [ -n "${ATHENA_MCP_HEADERS_HELPER:-}" ]; then
     HELPER="$ATHENA_MCP_HEADERS_HELPER"
 else
-    HELPER="$(main_checkout_helper)" || HELPER="$SCRIPT_DIR/athena-mcp-headers"
+    MAIN_CHECKOUT_LIB="$SCRIPT_DIR/lib/main-checkout.sh"
+    [ -r "$MAIN_CHECKOUT_LIB" ] || die "$MAIN_CHECKOUT_LIB is missing, so the main checkout cannot be resolved" \
+        "restore scripts/lib/main-checkout.sh (fast-forward this checkout to a main that has it), or set ATHENA_MCP_HEADERS_HELPER to an absolute path."
+    # shellcheck source=scripts/lib/main-checkout.sh
+    . "$MAIN_CHECKOUT_LIB"
+    # main_checkout prints its own cause and Fix: on stderr.
+    main_checkout "$SCRIPT_DIR" add-athena-mcp || exit 1
+    HELPER="$MAIN_CHECKOUT/scripts/athena-mcp-headers"
 fi
 case "$HELPER" in
     /*) ;;

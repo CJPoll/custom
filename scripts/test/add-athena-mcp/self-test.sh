@@ -292,6 +292,30 @@ assert_eq "apply with an unsafe helper path exits non-zero" "1" "${rc}"
 assert_contains "apply with an unsafe helper path prints a Fix:" "${out}" "Fix:"
 assert_eq "apply with an unsafe helper path never calls mcp add" "" "$(grep ' add' "${argslog3}" || true)"
 
+# ── DND-1720: no resolvable main checkout is refused, never a fallback ──────
+# A copy outside any git checkout used to register its OWN directory's helper
+# (in a worktree, the path that vanishes on cleanup), with exit 0.
+nogit="${tmproot}/nogit"
+mkdir -p "${nogit}/scripts/lib"
+cp "${add_mcp}" "${nogit}/scripts/add-athena-mcp"
+cp "${here}/../../lib/main-checkout.sh" "${nogit}/scripts/lib/"
+h1720="$(make_home)"; write_config "${h1720}" "tok-1720" "wss://nogit.test/ws"
+set +e
+ngout="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u ATHENA_MCP_HEADERS_HELPER GIT_CEILING_DIRECTORIES="${tmproot}" \
+           HOME="${h1720}" bash "${nogit}/scripts/add-athena-mcp" --dry-run 2>"${tmproot}/nogit.err")"
+rc=$?
+ngerr="$(cat "${tmproot}/nogit.err")"
+nghelp="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR GIT_CEILING_DIRECTORIES="${tmproot}" \
+            HOME="${h1720}" bash "${nogit}/scripts/add-athena-mcp" --help 2>/dev/null)"
+hrc=$?
+set -e
+assert_eq "no resolvable main checkout: --dry-run exits 1 (DND-1720)" "1" "${rc}"
+assert_contains "no resolvable main checkout: names the cause" "${ngerr}" "not inside a git checkout"
+assert_contains "no resolvable main checkout: prints a Fix:" "${ngerr}" "Fix:"
+assert_not_contains "no resolvable main checkout: no entry is printed, so none can be registered" "${ngout}" "headersHelper"
+assert_eq "no resolvable main checkout: --help still exits 0" "0" "${hrc}"
+assert_contains "no resolvable main checkout: --help still prints usage" "${nghelp}" "Usage:"
+
 # DND-1667: no claude call may have fallen through past its stub.
 if fsg_verify; then pass "no claude call fell through past its stub (DND-1667)"
 else fail "no claude call fell through past its stub (DND-1667)"; fi

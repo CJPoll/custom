@@ -53,7 +53,8 @@
 # check-hooks-registered can tell a session started before the install
 # (PENDING RESTART) from drift (DND-1036); --remove-env removes it too.
 #
-# Exit codes: 0 ok · 1 usage/arg error · 2 missing prerequisite (no python3/registry),
+# Exit codes: 0 ok · 1 usage/arg error · 2 missing prerequisite (no python3/registry,
+# or no main checkout: a copy outside git or with unenterable git dirs, DND-1720),
 # or a registry whose "retired" list cannot be applied
 # · 3 an unreadable settings file or env · 4 an unquotable main-checkout path
 # · 5 the settings env already holds part of the agent-stash env with other values
@@ -74,16 +75,25 @@ CHECKER="${REPO_DIR}/ai/bin/check-hooks-registered"
 # that no longer exists — silently disabling the guard, the 2026-09-17 outage
 # class. Captains run from worktrees (observed 2026-09-18, DND-182), so resolve
 # the main checkout through git's common dir (a worktree's --git-common-dir IS
-# the main checkout's .git) and wire THAT. Falls back to REPO_DIR outside git.
-main_checkout_dir() {
-  local common parent
-  common="$(git -C "$REPO_DIR" rev-parse --git-common-dir 2>/dev/null)" || { printf '%s\n' "$REPO_DIR"; return 0; }
-  [ -n "$common" ] || { printf '%s\n' "$REPO_DIR"; return 0; }
-  case "$common" in /*) ;; *) common="${REPO_DIR}/${common}" ;; esac
-  parent="$(dirname -- "$common")"
-  if [ -d "$parent" ]; then (cd -- "$parent" && pwd -P); else printf '%s\n' "$REPO_DIR"; fi
+# the main checkout's .git) and wire THAT. The resolver is the shared
+# scripts/lib/main-checkout.sh (DND-1720). A copy outside git, or one whose git
+# dirs cannot be entered, is exit 2 with a Fix: before any read or write: it
+# used to fall back silently to REPO_DIR, which in a worktree is the vanishing
+# path. It runs after argument parsing, so --help answers anywhere, and only
+# for the actions that write or judge paths (not --check or --norm).
+MAIN_CHECKOUT_LIB="${SCRIPT_DIR}/lib/main-checkout.sh"
+HOOKS_REPO_DIR=""
+resolve_hooks_repo_dir() {
+  if [ ! -r "$MAIN_CHECKOUT_LIB" ]; then
+    echo "setup-hooks: $MAIN_CHECKOUT_LIB is missing, so the main checkout cannot be resolved. Nothing was written." >&2
+    echo "  Fix: restore scripts/lib/main-checkout.sh (fast-forward this checkout to a main that has it), then re-run." >&2
+    exit 2
+  fi
+  # shellcheck source=scripts/lib/main-checkout.sh
+  . "$MAIN_CHECKOUT_LIB"
+  main_checkout "$SCRIPT_DIR" setup-hooks || { echo "setup-hooks: nothing was written." >&2; exit 2; }
+  HOOKS_REPO_DIR="$MAIN_CHECKOUT"
 }
-HOOKS_REPO_DIR="$(main_checkout_dir)"
 SETTINGS="${HOOKS_SETTINGS_FILE:-${HOME}/.claude/settings.json}"
 
 ACTION="install"
@@ -115,6 +125,10 @@ done
 
 command -v python3 >/dev/null 2>&1 || { echo "error: python3 required. Fix: install python3 or wire hooks by hand from ai/hooks/registry.json." >&2; exit 2; }
 [ -f "$REGISTRY" ] || { echo "error: registry not found at $REGISTRY. Fix: restore ai/hooks/registry.json from git." >&2; exit 2; }
+case "$ACTION" in
+  check|norm) ;;  # the checker resolves its own; norm() reads no checkout
+  *) resolve_hooks_repo_dir ;;
+esac
 
 # The path normalizer AND the merge/remove logic, as ONE python program with a
 # SINGLE norm(). `apply` runs the whole program; `norm_path` runs it with
@@ -956,6 +970,48 @@ PY6
       */.local/worktrees/*) echo "  FAIL would wire hooks at a worktree path: ${REAL_HOOKS_REPO_DIR}"; ok=0 ;;
       *) echo "  ok   wiring target is not a worktree path" ;;
     esac
+
+    # DND-1720: a copy whose main checkout cannot be resolved refuses, exit 2
+    # with a Fix:, and writes nothing. It used to fall back silently to its own
+    # directory and wire (or unwire) hooks there. --help still answers there.
+    nogit="${tmp}/nogit"
+    mkdir -p "${nogit}/scripts/lib" "${nogit}/ai/hooks"
+    cp "${SCRIPT_DIR}/setup-hooks" "${nogit}/scripts/"
+    cp "$MAIN_CHECKOUT_LIB" "${nogit}/scripts/lib/"
+    cp "${REPO_DIR}/ai/hooks/registry.json" "${nogit}/ai/hooks/"
+    ngset="${tmp}/settings-nogit.json"
+    printf '{\n    "model": "x"\n}\n' > "$ngset"
+    cp "$ngset" "${ngset}.orig"
+    for mode in --install --remove --install-env --remove-env; do
+      # `|| ngrc=$?`: this script runs under set -e, and the refusal is non-zero.
+      ngrc=0
+      ngerr="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u HOOKS_REGISTRY_FILE \
+                 GIT_CEILING_DIRECTORIES="$tmp" HOOKS_SETTINGS_FILE="$ngset" \
+                 bash "${nogit}/scripts/setup-hooks" "$mode" 2>&1 >/dev/null)" || ngrc=$?
+      if [ "$ngrc" = 2 ] && grep -q 'not inside a git checkout' <<<"$ngerr" && grep -q 'Fix:' <<<"$ngerr" \
+         && cmp -s "$ngset" "${ngset}.orig"; then
+        echo "  ok   ${mode} with no resolvable main checkout is exit 2 with Fix:, settings unchanged (DND-1720)"
+      else
+        echo "  FAIL ${mode} with no resolvable main checkout must be exit 2 with Fix: and write nothing: rc=${ngrc} err=${ngerr}"; ok=0
+      fi
+    done
+    ngrc=0
+    nghelp="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR GIT_CEILING_DIRECTORIES="$tmp" \
+                bash "${nogit}/scripts/setup-hooks" --help 2>/dev/null)" || ngrc=$?
+    if [ "$ngrc" = 0 ] && grep -q -- '--install-env' <<<"$nghelp"; then
+      echo "  ok   --help answers (exit 0) with no resolvable main checkout"
+    else
+      echo "  FAIL --help must answer with exit 0 with no resolvable main checkout: rc=${ngrc}"; ok=0
+    fi
+    rm -f "${nogit}/scripts/lib/main-checkout.sh"
+    ngrc=0
+    ngerr="$(env -u HOOKS_REGISTRY_FILE HOOKS_SETTINGS_FILE="$ngset" bash "${nogit}/scripts/setup-hooks" --install 2>&1 >/dev/null)" || ngrc=$?
+    if [ "$ngrc" = 2 ] && grep -q 'main-checkout.sh' <<<"$ngerr" && grep -q 'Fix:' <<<"$ngerr" && cmp -s "$ngset" "${ngset}.orig"; then
+      echo "  ok   a copy without scripts/lib/main-checkout.sh is exit 2 with Fix:, settings unchanged"
+    else
+      echo "  FAIL a copy without scripts/lib/main-checkout.sh must be exit 2 with Fix:: rc=${ngrc} err=${ngerr}"; ok=0
+    fi
+
     HOOKS_REPO_DIR="$HOOKS_REPO_DIR" SETTINGS="$HOOKS_SETTINGS_FILE" python3 - <<'PY2' \
       && echo "  ok   every installed command lives under the main checkout" \
       || { echo "  FAIL an installed command points outside the main checkout"; ok=0; }

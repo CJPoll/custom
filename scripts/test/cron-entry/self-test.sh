@@ -130,6 +130,16 @@ if [ "$rc" = 2 ] && [ -z "${CRON_MAIN_CHECKOUT}" ] && grep -q 'not inside a git 
 else
   bad "outside any git checkout: exit 2 with Fix:, and no main checkout" "rc=$rc main=${CRON_MAIN_CHECKOUT} err=$(cat "${FT}/err")"
 fi
+# The resolver lives in main-checkout.sh beside this lib (DND-1720). A copy of
+# cron-entry.sh without it must refuse, never resolve to nothing quietly.
+mkdir -p "${FT}/lonelib"
+cp "${HERE}/../../lib/cron-entry.sh" "${FT}/lonelib/"
+out="$(bash -c '. "$1/cron-entry.sh"; cron_main_checkout "$2" who; echo "rc=$? main=[${CRON_MAIN_CHECKOUT}]"' _ "${FT}/lonelib" "${GR}/scripts" 2>"${FT}/err")"
+if [ "$out" = "rc=2 main=[]" ] && grep -q 'main-checkout.sh' "${FT}/err" && grep -q 'Fix:' "${FT}/err"; then
+  ok "without scripts/lib/main-checkout.sh beside it: exit 2 with Fix:, and no main checkout"
+else
+  bad "without scripts/lib/main-checkout.sh beside it: exit 2 with Fix:" "out=$out err=$(cat "${FT}/err")"
+fi
 
 printf '\n'
 TOTAL=$((PASS+FAIL))

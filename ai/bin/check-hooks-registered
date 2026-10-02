@@ -81,7 +81,8 @@
 #
 # Exit codes: 0 ok / not-this-env · 1 drift, dangling, or an inconsistent
 # branch registry · 3 could not measure (the landed bar, the branch registry, or
-# the settings file could not be read)
+# the settings file could not be read, or the main checkout could not be
+# resolved, DND-1720)
 
 require "json"
 require "shellwords"
@@ -114,21 +115,36 @@ class RegistryError < StandardError; end
 # rewire the live settings to a path that disappears — the 2026-09-17 outage
 # class. Resolve the main checkout through git's common dir (a worktree's
 # --git-common-dir IS the main checkout's .git) and accept either spelling.
-def main_checkout_dir(dir = REPO_DIR)
-  common = `git -C #{dir.shellescape} rev-parse --git-common-dir 2>/dev/null`.strip
-  return dir if common.empty?
+#
+# A main checkout that cannot be resolved raises MainCheckoutError (DND-1720),
+# the same rule as scripts/lib/main-checkout.sh. It used to return `dir`
+# itself, so a copy outside git, or one whose git dirs cannot be entered,
+# judged the live wiring against its own (possibly worktree) paths with no
+# word that the main checkout was never found.
+class MainCheckoutError < StandardError; end
 
-  common = File.expand_path(common, dir) unless common.start_with?("/")
-  parent = File.dirname(common)
-  File.directory?(parent) ? parent : dir
-rescue StandardError
-  dir
+def main_checkout_dir(dir = REPO_DIR)
+  common = `git -C #{dir.shellescape} rev-parse --path-format=absolute --git-common-dir 2>/dev/null`.strip
+  unless $?.success? && common.start_with?("/")
+    raise MainCheckoutError, "'#{dir}' is not inside a git checkout (git common dir #{common.inspect})"
+  end
+
+  File.dirname(File.realpath(common))
+rescue SystemCallError => e
+  raise MainCheckoutError, "cannot resolve the git common dir of '#{dir}' (#{common.inspect}): #{e.message}"
+end
+
+# The COULD NOT MEASURE lines for a MainCheckoutError.
+def main_checkout_lines(err)
+  ["  the main checkout cannot be resolved: #{err.message}",
+   "  Fix: run the copy in the main checkout's ai/bin/ (e.g. ~/dev/custom/ai/bin/check-hooks-registered), " \
+   "or repair that checkout's git dir."]
 end
 
 # Every checkout whose hook paths count as "this repo's hooks", most-canonical
-# first. In the main checkout this is a single entry.
-def checkout_dirs
-  [main_checkout_dir, REPO_DIR].uniq
+# first. In the main checkout this is a single entry. Raises MainCheckoutError.
+def checkout_dirs(root = REPO_DIR)
+  [main_checkout_dir(root), root].uniq
 end
 
 def settings_path
@@ -466,7 +482,7 @@ end
 # The check. Keyword arguments exist for the inline self-test; the CLI passes
 # none. `landed` is how the landed registry is read (Landed, from origin).
 def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
-        landed: ->(r) { landed_registry(r) }, newer: ->(r, older) { newer_registry(r, older) }, dirs: checkout_dirs)
+        landed: ->(r) { landed_registry(r) }, newer: ->(r, older) { newer_registry(r, older) }, dirs: nil)
   begin
     registry = load_registry(registry_file)
     branch_retired = load_retired(registry_file)
@@ -493,6 +509,19 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
     return unmeasured(["  the live settings cannot be read: #{e.message}",
                        "  Fix: this is the owner's machine state; report it to the owner. Do not " \
                        "rewrite the file (the clobber path of the 2026-09-17 outage)."])
+  end
+
+  # Resolved only once there is a settings file to judge, so a machine with
+  # none still passes as "not this environment". An unresolvable main
+  # checkout is COULD NOT MEASURE, or exit 1 beside a failure already seen.
+  begin
+    dirs ||= checkout_dirs(root)
+  rescue MainCheckoutError => e
+    return unmeasured(main_checkout_lines(e)) if broken.empty?
+
+    report_failures(path, broken, [], [], [])
+    unmeasured(main_checkout_lines(e))
+    return EXIT_FAIL
   end
 
   dangle = dangling(settings, dirs)
@@ -908,7 +937,7 @@ end
 # The branch's own registry is never read here: neither the INACTIVE decision
 # (a fixed key rule, AgentStashEnv.any_guard_key?) nor the expected values (the
 # landed env) comes from the diff under check (critic round 4).
-def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO_DIR,
+def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
                         landed_env: ->(r) { landed_env_section(r) },
                         newer_env: ->(r) { newer_env_section(r) },
                         proc_env: ENV,
@@ -918,6 +947,13 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
   unless File.exist?(path)
     out.puts "#{tag}: no settings file at #{path} — nothing to assert (not this environment). OK."
     return EXIT_OK
+  end
+  begin
+    main ||= main_checkout_dir(root)
+  rescue MainCheckoutError => e
+    err.puts "#{tag}: COULD NOT MEASURE — this is not a pass."
+    main_checkout_lines(e).each { |l| err.puts l }
+    return EXIT_UNMEASURED
   end
   settings = JSON.parse(File.read(path))
   env = settings.is_a?(Hash) ? settings["env"] : nil
@@ -1453,7 +1489,43 @@ def self_test
                  real.call(main_checkout_dir(wt)) == real.call(repo))
     end
   end
-  Dir.mktmpdir { |d| check.call("main_checkout_dir(non-git) == arg", main_checkout_dir(d) == d) }
+  # DND-1720: outside git there is no main checkout, and that is an error,
+  # never the argument handed back. The live check then reads COULD NOT
+  # MEASURE (exit 3) with a Fix:, from both verdicts.
+  Dir.mktmpdir do |d|
+    raised = begin
+      main_checkout_dir(d)
+      nil
+    rescue MainCheckoutError => e
+      e.message
+    end
+    check.call("main_checkout_dir(non-git) raises MainCheckoutError naming the dir",
+               raised.to_s.include?("not inside a git checkout") && raised.to_s.include?(d))
+    require "fileutils"
+    FileUtils.mkdir_p(File.join(d, "ai"))
+    FileUtils.cp_r(File.join(REPO_DIR, "ai", "hooks"), File.join(d, "ai", "hooks"))
+    f = File.join(d, "settings.json")
+    File.write(f, JSON.generate({ "hooks" => {} }))
+    never_read = ->(_root) { raise "the landed bar must not be read without a main checkout" }
+    e = StringIO.new
+    saved = $stderr
+    begin
+      $stderr = e
+      code = run(path: f, root: d, landed: never_read, newer: ->(_r, _o) {})
+    ensure
+      $stderr = saved
+    end
+    check.call("run: no resolvable main checkout -> exit 3 with a Fix:, never a judgement against the copy's own dir",
+               code == EXIT_UNMEASURED && e.string.include?("main checkout cannot be resolved") && e.string.include?("Fix:"))
+    o = StringIO.new
+    code = run_agent_stash_env(path: f, root: d, out: o, err: o)
+    check.call("agent-stash env: no resolvable main checkout -> exit 3 with a Fix:",
+               code == EXIT_UNMEASURED && o.string.include?("main checkout cannot be resolved") && o.string.include?("Fix:"))
+    o = StringIO.new
+    code = run_agent_stash_env(path: File.join(d, "absent.json"), root: d, out: o, err: o)
+    check.call("agent-stash env: no settings file -> still exit 0 with no main checkout (not this environment)",
+               code == EXIT_OK)
+  end
 
   # Run the real entry point but silence its (expected) diagnostic output so the
   # gate log stays clean — we assert on the exit code only.

@@ -561,7 +561,7 @@ mkdir -p "${MAIN}/scripts"
 cp "${RUNNER}" "${INSTALLER}" "${MAIN}/scripts/"
 # The lib the installer sources to tell its own lines apart (DND-1503).
 mkdir -p "${MAIN}/scripts/lib"
-cp "${SCRIPTS}/lib/cron-entry.sh" "${MAIN}/scripts/lib/"
+cp "${SCRIPTS}/lib/cron-entry.sh" "${SCRIPTS}/lib/main-checkout.sh" "${MAIN}/scripts/lib/"
 git -C "${MAIN}" init -q 2>/dev/null
 git -C "${MAIN}" -c user.email=t@t -c user.name=t add -A >/dev/null 2>&1
 git -C "${MAIN}" -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
