@@ -155,13 +155,20 @@ reads the default branch's activity log (the same reader the closed-PR rule
 uses) and adds:
 
 - **A push no PR row claims.** Its commits are the first-parent range
-  `before..after`. It gives one row per ticket its commit subjects name, with
-  the ticket parser the PR path uses: `pr: null`, `ticket`, `landed_via:
+  `before..after`. It gives one row per ticket its commit subjects work, with
+  the ticket parser the PR path uses (`TicketRef.subject_refs`): the refs in
+  a subject's lead, before its first `": "`, else every ref in it. A ref
+  after the lead is a mention. The row has `pr: null`, `ticket`, `landed_via:
   "push"`, `landed_commit` = the push's after sha, `commits`, and `merged` =
   the push time. A malformed after sha is `landed_commit: null` with
   `landing_commit_unmeasured` naming it (*Every row carries its landed commit
   or says why not*). A push naming no ticket gives one row with lead `null` and
   "no ticket in the pushed commits' subjects".
+
+  **Later (2026-10-02):** this gave one row per ticket a subject *names*.
+  Superseded: "DND-1812: … follows gen_saas DND-1768" landed as two custom
+  rows, the second timed from DND-1768's dispatch with no critic PASS, so
+  queue read n/a on a ticket the landing never worked.
 - **A force push**: could not measure, "force push to base".
 - **A PR merge no listed PR claims**: could not measure, never dropped.
 

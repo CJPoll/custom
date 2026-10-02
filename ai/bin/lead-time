@@ -51,7 +51,8 @@
 # A window scan lists every LANDING on the base branch (DND-1009): forge
 # merges, CLOSED PRs landed by a push, and on GitHub every direct push with no
 # PR, read from the branch's activity log, one row per ticket its commit
-# subjects name.
+# subjects work: the refs leading a subject (before its first ": "), else
+# every ref in it. A ref after the lead is a mention, not a row.
 #
 # Exit: 0 ok, 1 usage/tool error (an unreadable --since included), 2 the
 # forge says a requested PR/MR does not exist, 3 could not measure: SCAN
@@ -428,10 +429,10 @@ module LeadTime
     base = base.merge(commits: commits.map { |c| c[:sha] })
     oldest_first = commits.reverse
     named = oldest_first.flat_map do |c|
-      refs_in(c[:subject]).select { |r| prefixes.include?(r.split("-", 2).first) }.map { |r| [r, c] }
+      TicketRef.subject_refs(c[:subject]).select { |r| prefixes.include?(r.split("-", 2).first) }.map { |r| [r, c] }
     end
     if named.empty?
-      others = oldest_first.flat_map { |c| refs_in(c[:subject]) }.uniq
+      others = oldest_first.flat_map { |c| TicketRef.subject_refs(c[:subject]) }.uniq
       why = others.empty? ? NO_TICKET : "#{NO_TICKET} (it names only #{others.join(', ')})"
       return [base.merge(title: commits.first[:subject], start_unmeasured: why,
                          first_commit_times: commits.map { |c| c[:authored] })]
@@ -1788,7 +1789,9 @@ if $PROGRAM_NAME == __FILE__
                        then that landed (merged, or on GitHub closed and
                        landed by a push), and on GitHub every direct push to
                        the default branch with no PR, one row per ticket its
-                       commit subjects name. WHEN is YYYY-MM-DD (00:00:00Z that
+                       commit subjects work (the refs before a subject's
+                       first ": ", else all its refs; a later ref is a
+                       mention). WHEN is YYYY-MM-DD (00:00:00Z that
                        day) or RFC 3339 with a zone; anything else exits 1.
         --slow MIN     only report tickets slower than MIN minutes
         --json         emit JSON instead of the human table

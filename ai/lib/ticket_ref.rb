@@ -25,7 +25,7 @@ module TicketRef
     names = prefixes.join(" or ")
     places = [["branch", branch], ["title", title]]
     places.each do |where, text|
-      refs = refs_in(text).select { |r| prefixes.include?(r.split("-", 2).first) }
+      refs = (where == "title" ? subject_refs(text) : refs_in(text)).select { |r| prefixes.include?(r.split("-", 2).first) }
       return [refs.first, nil] if refs.size == 1
       return [nil, "its #{where} names several #{names} tickets (#{refs.join(', ')})"] if refs.size > 1
     end
@@ -33,6 +33,19 @@ module TicketRef
     return [nil, "it names no #{names} ticket (only #{others.join(', ')})"] unless others.empty?
 
     [nil, "neither its branch nor its title names a ticket, so no In Progress time can be read"]
+  end
+
+  # The tickets a commit subject or PR title works: the refs in its lead (the
+  # text before the first ": "), when the lead names any; else every ref it
+  # names. A ref after the lead is a mention ("DND-1812: x follows gen_saas
+  # DND-1768" works DND-1812 only). A lead naming only another tracker's ref
+  # is that ticket's, so the caller's prefix filter then finds none.
+  def subject_refs(text)
+    lead, rest = text.to_s.split(": ", 2)
+    lead_refs = rest.nil? ? [] : refs_in(lead)
+    return refs_in(text) if lead_refs.empty?
+
+    lead_refs
   end
 
   # Every distinct ticket-shaped ref in `text`, upcased, in order of first

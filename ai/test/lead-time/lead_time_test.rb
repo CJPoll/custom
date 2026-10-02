@@ -861,6 +861,49 @@ check("a PR merge a listed PR claims adds no row") do
                            covered: [sha_of("8")], prefixes: ["DND"]).empty?
 end
 
+# --- a subject's ticket is the ref that leads it; a later ref is a mention.
+# Measured 2026-10-02: "DND-1812: ... follows gen_saas DND-1768" landed as
+# two custom rows, the second with DND-1768's own dispatch stamp and no
+# critic PASS, so queue read n/a on a ticket this landing never worked.
+check("REGRESSION: a ref cited after the subject's lead is a mention, not a second row") do
+  rows = LeadTime.build_push_rows(
+    pushes: [push_of("2026-10-02T22:18:22Z", sha_of("a"),
+                     [cmt(sha_of("a"), "DND-9812: contract follows gen_saas DND-9768")])],
+    covered: [], prefixes: ["DND"],
+  )
+  rows.map { |r| r[:ticket] } == ["DND-9812"]
+end
+check("a lead naming two tickets still gives a row for each") do
+  rows = LeadTime.build_push_rows(
+    pushes: [push_of("2026-10-02T22:00:00Z", sha_of("b"), [cmt(sha_of("b"), "DND-9708 + DND-9706: one waiter (DND-9700)")])],
+    covered: [], prefixes: ["DND"],
+  )
+  rows.map { |r| r[:ticket] }.sort == %w[DND-9706 DND-9708]
+end
+check("a subject whose lead names no ref keeps every ref it names") do
+  rows = LeadTime.build_push_rows(
+    pushes: [push_of("2026-10-02T22:00:00Z", sha_of("c"), [cmt(sha_of("c"), "fix the waiter (DND-9701)")]),
+             push_of("2026-10-02T22:10:00Z", sha_of("d"), [cmt(sha_of("d"), "athena-events: parked waits on DND-9702")])],
+    covered: [], prefixes: ["DND"],
+  )
+  rows.map { |r| r[:ticket] } == %w[DND-9701 DND-9702]
+end
+check("a lead naming only another tracker's ref is that ticket's, never the mention's") do
+  rows = LeadTime.build_push_rows(pushes: [push_of("2026-10-02T22:00:00Z", sha_of("e"), [cmt(sha_of("e"), "ZQ-12: port DND-9703")])],
+                                  covered: [], prefixes: ["DND"])
+  rows.size == 1 && rows[0][:ticket].nil? && rows[0][:start_unmeasured].include?("ZQ-12") &&
+    !rows[0][:start_unmeasured].include?("DND-9703")
+end
+check("a PR title's ticket is the ref that leads it") do
+  LeadTime.ticket_ref(branch: "shipwright-docs", title: "DND-77: y follows DND-78") == ["DND-77", nil]
+end
+check("TicketRef.subject_refs: the lead's refs, else every ref") do
+  TicketRef.subject_refs("DND-1: a DND-2") == ["DND-1"] &&
+    TicketRef.subject_refs("DND-931/DND-958: x DND-1") == %w[DND-931 DND-958] &&
+    TicketRef.subject_refs("tidy (DND-3)") == ["DND-3"] &&
+    TicketRef.subject_refs("x: y DND-4") == ["DND-4"] && TicketRef.subject_refs(nil) == []
+end
+
 # --- scan_meta (pure) -------------------------------------------------------
 six = (1..6).map do |h|
   { pr: nil, landed_commit: sha_of(h.to_s), closed_at: "2026-09-30T0#{h}:00:00Z", lead_seconds: 600 }
