@@ -977,6 +977,8 @@ module LeadTimeExperiment
     before = sides[:before]
     confs = found[:confounders]
     n = before ? before.size : 0
+    # confounders returns them sorted by [at, commit], whatever order the
+    # logs gave (newest-first git log, harness repo then measured repo).
     latest = confs.last
     after_latest = latest ? (before || []).count { |r| at(r) > Time.iso8601(latest["at"]) } : n
     verdict = if n < K then "SHORT"

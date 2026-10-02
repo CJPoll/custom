@@ -1281,6 +1281,14 @@ check("settling: the window is [first before-set landing, now], as judge's for a
   s["window"] == [(SET_NOW - (10 * 3600)).utc.iso8601, SET_NOW.utc.iso8601]
 end
 
+check("settling: two confounders from two repos' logs, newest first (git log order): latest is the newest") do
+  # harness repo's log, then the measured repo's, each newest first
+  s = settle(ten600, [tc(OTHER_SHA, -2, REVERT_MSG), tc(THIRD_SHA, -8, "Lead-time-experiment: custom verify phase\n"),
+                      tc("c" * 40, -5, "Lead-time-experiment: gen_saas verify phase\n")])
+  s["verdict"] == "SETTLING" && s["confounders"].map { |c| c["commit"] } == [THIRD_SHA, "c" * 40, OTHER_SHA] &&
+    s["latest"]["commit"] == OTHER_SHA && s["after_latest"] == 1 && s["needed"] == 9
+end
+
 check("settling: a confounder exactly at the first before-set landing is inside; that landing does not count after it") do
   s = settle(ten600, [tc(OTHER_SHA, -10, REVERT_MSG)])
   s["verdict"] == "SETTLING" && s["after_latest"] == 9 && s["needed"] == 1
