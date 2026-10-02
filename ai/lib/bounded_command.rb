@@ -39,6 +39,22 @@ module BoundedCommand
   KILL_GRACE_S = 2
   READER_GRACE_S = 2
 
+  # The production clock and wait primitive (run's clock: and join:).
+  MONOTONIC = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+  JOIN = ->(thread, seconds) { thread.join(seconds) }
+
+  # One run's clock and wait primitive, carried to its helpers.
+  Waits = Struct.new(:clock, :joiner) do
+    def now
+      clock.call
+    end
+
+    def join(thread, seconds)
+      joiner.call(thread, seconds)
+    end
+  end
+  private_constant :Waits
+
   # A bound must be a positive number of seconds. Anything else is a caller
   # error, never "no bound".
   def self.check_bound!(seconds, name = "timeout")
@@ -65,12 +81,19 @@ module BoundedCommand
   # (the call still returns); a process in uninterruptible sleep (D state)
   # survives KILL, and run's cleanup then waits for the kernel to
   # release it.
-  def self.run(argv, timeout:, chdir: nil, env: {}, stdin: File::NULL, kill_grace: KILL_GRACE_S)
+  #
+  # clock: and join: are test seams (DND-1648), so a suite can read the SIZE
+  # of every bounded wait instead of timing it. clock -> monotonic seconds;
+  # join(thread, seconds) -> the thread, or nil when the wait lapsed. Every
+  # bounded wait in run goes through join. Callers pass neither.
+  def self.run(argv, timeout:, chdir: nil, env: {}, stdin: File::NULL, kill_grace: KILL_GRACE_S,
+               clock: MONOTONIC, join: JOIN)
     check_bound!(timeout)
     check_bound!(kill_grace, "kill_grace")
     opts = { pgroup: true, in: stdin }
     opts[:chdir] = chdir if chdir
-    deadline = now + timeout
+    waits = Waits.new(clock, join)
+    deadline = waits.now + timeout
     out_r, out_w = IO.pipe
     err_r, err_w = IO.pipe
     pid = nil
@@ -88,12 +111,12 @@ module BoundedCommand
       wait = Process.detach(pid)
       out_w.close
       err_w.close
-      settled, result = wait_bounded(out_r, err_r, wait, readers, timeout, deadline, kill_grace)
+      settled, result = wait_bounded(out_r, err_r, wait, readers, timeout, deadline, kill_grace, waits)
       result
     ensure
       if pid && !settled
         wait ||= Process.detach(pid)
-        kill_group(wait, kill_grace)
+        kill_group(wait, kill_grace, waits)
       end
       readers.each { |t| t.kill if t.alive? }
       [out_r, out_w, err_r, err_w].each { |io| io.close unless io.closed? }
@@ -105,23 +128,19 @@ module BoundedCommand
 
   # -> [settled, Result]. `readers` is filled in place so run's cleanup can
   # kill them whatever raises here.
-  def self.wait_bounded(out, err, wait, readers, timeout, deadline, kill_grace)
+  def self.wait_bounded(out, err, wait, readers, timeout, deadline, kill_grace, waits)
     readers.push(Thread.new { read_all(out) }, Thread.new { read_all(err) })
-    status = wait.join(timeout)&.value
-    drained = status && readers.all? { |t| t.join([deadline - now, 0].max + READER_GRACE_S) }
+    status = waits.join(wait, timeout)&.value
+    drained = status && readers.all? { |t| waits.join(t, [deadline - waits.now, 0].max + READER_GRACE_S) }
     if drained
       return [true, Result.new(out: readers[0].value, err: readers[1].value,
                                exitstatus: status.exitstatus || (128 + status.termsig.to_i),
                                termsig: status.termsig, timed_out: false, seconds: timeout)]
     end
 
-    kill_group(wait, kill_grace)
-    texts = readers.map { |t| t.join(READER_GRACE_S) ? t.value.to_s : "" }
+    kill_group(wait, kill_grace, waits)
+    texts = readers.map { |t| waits.join(t, READER_GRACE_S) ? t.value.to_s : "" }
     [true, Result.new(out: texts[0], err: texts[1], exitstatus: nil, timed_out: true, seconds: timeout)]
-  end
-
-  def self.now
-    Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 
   # A pipe closed under a reader (run's cleanup) ends the read quietly.
@@ -133,11 +152,11 @@ module BoundedCommand
 
   # KILL follows TERM whether or not the leader died: a group member that
   # ignores TERM would otherwise outlive a leader that honoured it.
-  def self.kill_group(wait, grace)
+  def self.kill_group(wait, grace, waits)
     signal_group("TERM", wait.pid)
-    wait.join(grace)
+    waits.join(wait, grace)
     signal_group("KILL", wait.pid)
-    wait.join(grace)
+    waits.join(wait, grace)
   end
 
   def self.signal_group(sig, pid)
@@ -145,5 +164,5 @@ module BoundedCommand
   rescue Errno::ESRCH, Errno::EPERM
     nil
   end
-  private_class_method :now, :read_all, :kill_group, :signal_group, :wait_bounded
+  private_class_method :read_all, :kill_group, :signal_group, :wait_bounded
 end

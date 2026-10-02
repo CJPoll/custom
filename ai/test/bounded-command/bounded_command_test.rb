@@ -6,6 +6,8 @@
 # alive, including one that ignores TERM and one that holds the pipes open.
 # Every verdict is an event (a return, an exit, a file, the kernel's process
 # state); the clock only caps a hang, reported as HANG (DND-1569, DND-1595).
+# The SIZE of the bound is read through run's injected join and clock (the
+# t-cases, DND-1648), never timed: b5 and b7 prove only that a hang returns.
 
 require "tmpdir"
 require "rbconfig"
@@ -357,6 +359,84 @@ Dir.mktmpdir do |tmp|
                 "def detach(pid); held = @bc_held; @bc_held = true; t = bc_detach(pid); sleep unless held || $!; t; end; end; end; "
   interrupted_caller.call("b9", "interrupted before cleanup is armed", slow_detach, File.join(tmp, "caller-child-9"))
   Signal.trap("INT", prior_int)
+
+  # t-cases (DND-1648): the SIZE of the bound. b5 and b7 prove a hang returns,
+  # but any return inside the hang cap passes them, so a run that ignored
+  # timeout: and killed the group within 2 minutes would pass too. Here run's
+  # waits go through an injected join and clock, so the size is read, never
+  # timed. The bound is 4242 s: the call can only return promptly because the
+  # injected wait lapsed, and a run that waited any other length fails.
+  bound_of = lambda do |label, &blk|
+    blk.call
+  rescue ArgumentError => e
+    check("#{label} (run takes an injected join: and clock:)", false, "#{e.class}: #{e.message}")
+    nil
+  end
+
+  # t1 the leader still runs when the injected deadline lapses. Its first wait
+  # must be exactly the timeout, and TERM must follow that lapse: the leader
+  # traps TERM and writes a marker before it exits. The first wait returns
+  # only once the leader has armed its trap (an event, under the hang cap).
+  ready = File.join(tmp, "t1-ready")
+  termed = File.join(tmp, "t1-term")
+  script = "trap 'echo TERM > #{termed}; exit 0' TERM; echo $$ > #{ready}; sleep #{CHILD_LIFE_S} & wait"
+  waits = []
+  term_after_grace = nil
+  join = lambda do |thread, seconds|
+    waits << seconds
+    case waits.size
+    when 1
+      await_event { File.size?(ready) }
+      nil
+    when 2
+      ended = thread.join(seconds)
+      term_after_grace = File.exist?(termed)
+      ended
+    else
+      thread.join(seconds)
+    end
+  end
+  state, r = await_return do
+    bound_of.call("t1") { BoundedCommand.run(["bash", "-c", script], timeout: 4242, kill_grace: 0.25, join: join) }
+  end
+  if state == :hang
+    hang("t1 the injected deadline ends the wait", "BoundedCommand.run still blocked at the #{HANG_CAP_S}s hang cap; #{r}")
+  elsif r
+    check("t1 the first wait is the timeout itself (4242 s)", waits.first == 4242, waits.inspect)
+    check("t1 a lapsed deadline is timed_out", r.timed_out && r.exitstatus.nil? && !r.success?, r.inspect)
+    check("t1 TERM reaches the group after the deadline, then the grace (0.25 s) is waited",
+          waits[1] == 0.25 && term_after_grace == true, [waits, term_after_grace].inspect)
+  end
+  if r
+    leader = File.size?(ready) ? File.read(ready).to_i : 0
+    check_gone("t1 the leader is gone", leader)
+  end
+
+  # t2 the success path: the reads are bounded by what is left of the same
+  # deadline, read off the injected clock. The clock reads 1000 when run sets
+  # the deadline and 1030 afterwards, so with timeout 100 each reader gets the
+  # 70 s left plus READER_GRACE_S.
+  clock_reads = 0
+  clock = lambda do
+    clock_reads += 1
+    clock_reads == 1 ? 1000.0 : 1030.0
+  end
+  waits = []
+  join = lambda do |thread, seconds|
+    waits << seconds
+    thread.join(seconds)
+  end
+  state, r = await_return do
+    bound_of.call("t2") { BoundedCommand.run(["sh", "-c", "echo out"], timeout: 100, clock: clock, join: join) }
+  end
+  if state == :hang
+    hang("t2 a quick command returns", "BoundedCommand.run still blocked at the #{HANG_CAP_S}s hang cap; #{r}")
+  elsif r
+    check("t2 a quick command succeeds through the injected waits", r.success? && r.out == "out\n", r.inspect)
+    reader = 70 + BoundedCommand::READER_GRACE_S
+    check("t2 the leader wait is the timeout, each read gets the deadline's remainder plus grace",
+          waits == [100, reader, reader], waits.inspect)
+  end
 
   [0, -1, nil, "5"].each do |bad|
     raised = begin
