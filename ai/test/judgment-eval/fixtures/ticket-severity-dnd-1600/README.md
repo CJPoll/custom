@@ -163,3 +163,28 @@ Plus bar item 3: H MEDIUM recall at least 57/90. L's accuracy, per-label
 recall and over/under counts are reported for both versions. v3 is
 measured as a candidate (`--question-set-version ticket-severity-v3`,
 DND-1608) before it is registered.
+
+## v2 baseline at `--repeat 3` (2026-10-02, before any v3 run)
+
+`ticket-severity-v2`, `jev-1.13.0`. Runs `e84417cf` (A), `56f3509d` (B),
+`b4a7446b` (L) and `bcbab906` (H). The v1 readings for items 3 and 5 are
+the v1 runs of record above (`a16c9454`, `b8729379`).
+
+| item | v2 |
+|---|---|
+| 1 | U 4/11; U plus L-up 7/37 |
+| 2 | CRITICAL kept 5/5; read CRITICAL below that label 0 |
+| 3 | 1 of 16 moved (`OVR-4`, one level); none two levels |
+| 4 | `under-2` HIGH (`under-1` MEDIUM) |
+| 5 | 0 |
+| 6 | HIGH precision 7/13; accuracy 21/29 |
+| 7 | 133 above; 125/281 right |
+| 8 | 5 |
+| bar 3 | H MEDIUM recall 48/90 |
+
+- Verdicts (match / miss / unstable / n/a): A 6/2/0/0, B 15/5/1/0, L
+  3/24/0/0, H 117/152/11/1. One H case (`DND-1399`) has no 2-of-3 reading.
+- L: 3/27 right, 23 above, 1 below. LOW recall 2/15, MEDIUM 1/12; 10 read
+  HIGH.
+- H per label: LOW recall 63/172, precision 63/82; MEDIUM 48/90, 48/137;
+  HIGH 14/19, 14/61.
