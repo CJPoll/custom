@@ -298,9 +298,12 @@ approval link.
   propose it again). Then it PATCHes or inserts with `sendUpdates=all` and
   marks the row `applied`. A Google failure marks it `failed` with the closed
   cause. A token is spent once: the second Approve finds no live `proposed`
-  row. A row left `applying` (the node died mid-call) reads `failed
-  (interrupted)` and is never retried by itself, because the write may have
-  reached Google.
+  row. A row still `applying` 5 minutes after it was set (past the adapter's
+  request timeout; the node died mid-call) reads `failed (interrupted)` and
+  is never retried by itself, because the write may have reached Google.
+- **Approving a create** has no event to re-read and no etag. It inserts the
+  event from the token's fields with `sendUpdates=all`; the organizer check
+  is moot, since the owner's credentials create it.
 - **Reject** marks a live row `rejected`. **Expiry** is read, not
   scheduled: a row stored as `proposed` past `proposed_at + 24h` reads
   `expired`. Its stored state stays `proposed`.
@@ -312,10 +315,13 @@ approval link.
   and the digest show the `expired` state.
 - **Retention.** Each new `calendar_changes` row, proposed or applied, first
   deletes the same owner's rows matching
-  `decided_at < now - 30 days OR (state = 'proposed' AND proposed_at < now - 24 hours - 30 days)`.
-  The second clause is the expired proposals, which never get a
-  `decided_at`. No new periodic worker. An owner who makes no calendar change
-  for a long time keeps their last rows; they are small and metadata only.
+  `coalesce(decided_at, proposed_at + interval '24 hours') < now - interval '30 days'`.
+  One predicate covers every stored state: a stored terminal state has
+  `decided_at`, and a row with none (stored `proposed` or `applying`) is
+  past every read-only state (`expired`, `failed (interrupted)`) 24 hours
+  after `proposed_at`. No new periodic worker. An owner who makes no calendar
+  change for a long time keeps their last rows; they are small and metadata
+  only.
 
 The token carries the change's content; it lives in the calling session's
 transcript and in the URL, on the owner's own machines. Phoenix's request log
