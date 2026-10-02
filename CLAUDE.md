@@ -574,6 +574,12 @@ shipwright cron never writes Notion, so this is its own runner.
   the pass reaches the owner. What needs the owner still does: a won't-fix
   notice is its own DM, and a `Needs Attention` move sends its usual one-line
   DM (`athena:epic-clustering` → *Who runs it, and when*).
+  The cron's headless session is the pass's top-level session, so it posts
+  each won't-fix notice (DND-1749). The `.run` record has one `notice:` line
+  per won't-fix closure: `notice: posted <channel>/<ts> DND-N`, `notice: NOT
+  POSTED DND-N <why>`, or `notice: none`. A veto click on a cron-posted notice
+  is relayed to the owner, not acted on (`athena:epic-clustering` →
+  *Won't-fix notices*).
 
   **Later (2026-10-02, DND-1738):** the morning run also sent the daily
   digest to the owner's DM. Superseded by the owner: "I guess I found the

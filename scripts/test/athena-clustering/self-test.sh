@@ -91,6 +91,10 @@ echo x >>"$d/claude-invoked"
 printf '%s\n' "$@" >"$d/claude-args"
 pwd -P >"$d/claude-cwd"
 printf '%s\n%s\n' "${CLUSTERING_DIGEST-unset}" "${CLUSTERING_DIGEST_BLOCKS-unset}" >"$d/claude-digest-env"
+printf '%s\n' "${CLUSTERING_NOTICES-unset}" >"$d/claude-notices-env"
+# DND-1749: the architect records each won't-fix closure and the top-level
+# session each notice it posted, in the file the runner names.
+notices="${CLUSTERING_NOTICES:-/dev/null}"
 if [ -e /proc/self/fd/9 ]; then echo open >"$d/claude-fd9"; else echo closed >"$d/claude-fd9"; fi
 prev=""
 for a in "$@"; do
@@ -105,6 +109,14 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
              fi
              exit 0 ;;
   nodigest)  : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0" >"$CLUSTERING_SUMMARY"; exit 0 ;;
+  wontfix)   : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 3" >"$CLUSTERING_SUMMARY"
+             printf 'closed DND-901\nclosed DND-902\nclosed DND-903\n' >>"$notices"
+             printf 'posted DND-901 D0FAKE0001/1700000000.000100\n' >>"$notices"
+             printf 'failed DND-902 slack_post refused the blocks\n' >>"$notices"
+             exit 0 ;;
+  badnotice) : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 1" >"$CLUSTERING_SUMMARY"
+             printf 'closed DND-904\nposted nonsense\n' >>"$notices"
+             exit 0 ;;
   fail)      : >"$CLUSTERING_RECEIPT"; echo "the pass fell over"; exit 7 ;;
   nosummary) : >"$CLUSTERING_RECEIPT"; exit 0 ;;
   blocked0)  exit 0 ;;
@@ -156,8 +168,11 @@ else
   bad "--dry-run morning" "rc=$rc out=$(cat "$c/runner.out") err=$(cat "$c/runner.err")"
 fi
 # DND-1738: the morning digest goes to the run record, never to the owner's DM.
+# DND-1749: the brief now posts won't-fix notices with slack_post, so the check
+# is that no sentence about the digest names slack_post.
+digest_posted() { tr '.' '\n' <"$1" | grep -i 'digest' | grep -qi 'slack_post'; }
 if grep -qF '$CLUSTERING_DIGEST' "$c/runner.out" && grep -qF "$(sd "$c")/runs/<ts>.digest.md" "$c/runner.out" \
-   && ! grep -qi 'slack_post' "$c/runner.out" && grep -q 'Do not post the digest' "$c/runner.out"; then
+   && ! digest_posted "$c/runner.out" && grep -q 'Do not post the digest' "$c/runner.out"; then
   ok "the morning brief names the digest's run-record path and gives no slack_post instruction (DND-1738)"
 else
   bad "dry-run morning digest record" "out=$(cat "$c/runner.out")"
@@ -165,12 +180,31 @@ fi
 
 rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING" DRY_RUN=1)"
 if [ "$rc" = 0 ] && grep -q 'NOT the morning run' "$c/runner.out" && grep -q 'Do NOT write the daily digest' "$c/runner.out" \
-   && ! grep -qF '$CLUSTERING_DIGEST' "$c/runner.out" && ! grep -qi 'slack_post' "$c/runner.out" \
+   && ! grep -qF '$CLUSTERING_DIGEST' "$c/runner.out" && ! digest_posted "$c/runner.out" \
    && [ ! -e "$(sd "$c")" ]; then
   ok "DRY_RUN=1 at 19:00 Denver prints the evening brief (no digest, no run-record path)"
 else
   bad "dry-run evening" "rc=$rc out=$(cat "$c/runner.out") err=$(cat "$c/runner.err")"
 fi
+
+# DND-1749: on the cron, the top-level session is this headless session. Every
+# brief, morning or evening, tells it to post the won't-fix notices the
+# architect hands it and to record each closure and post in $CLUSTERING_NOTICES.
+notice_brief() { # <file>
+  grep -qF 'mcp__athena__slack_post' "$1" && grep -qF '$CLUSTERING_NOTICES' "$1" \
+    && grep -qF 'closed DND-N' "$1" && grep -qF 'posted DND-N <channel>/<ts>' "$1" \
+    && grep -qF 'failed DND-N <why>' "$1" && grep -qF 'inbox_name' "$1" \
+    && ! grep -qF 'do nothing else yourself:' "$1"
+}
+for when in MORNING EVENING; do
+  rc="$(run_runner "$c" CLUSTERING_NOW="${!when}" -- --dry-run)"
+  if [ "$rc" = 0 ] && notice_brief "$c/runner.out" && grep -qF "$(sd "$c")/runs/<ts>.notices" "$c/runner.out" \
+     && [ ! -e "$(sd "$c")" ]; then
+    ok "the ${when,,} dry-run brief has the session post each won't-fix notice and record it (DND-1749)"
+  else
+    bad "dry-run ${when,,} notice instruction" "rc=$rc out=$(cat "$c/runner.out")"
+  fi
+done
 
 # DND-1571: --dry-run runs the tick's preconditions, so a printed brief means
 # a tick can start. Each failure: exit 78, the tick's Fix:, no brief, no state.
@@ -278,6 +312,43 @@ if [ "$rc" = 0 ] && [ "$(sed -n 1p "$c/claude-digest-env")" = unset ] && grep -q
   ok "an evening run asks for no digest and its .run record says not due"
 else
   bad "evening digest" "rc=$rc run=$(cat "$run_rec" 2>&1) env=$(cat "$c/claude-digest-env" 2>&1)"
+fi
+
+# DND-1749: every won't-fix closure gets one notice: line in the .run record,
+# so a notice that was never posted is observable after the session exits.
+run_rec="$(newest "$c" run)"; nf="$(cat "$c/claude-notices-env")"
+if [ "$nf" = "${run_rec%.run}.notices" ] && grep -qx "notice: none (no won't-fix closure recorded in ${nf})" "$run_rec"; then
+  ok "a session gets runs/<ts>.notices; a pass that closed nothing says notice: none in .run, naming the file"
+else
+  bad "notices path / none" "nf=$nf run=$(cat "$run_rec" 2>&1)"
+fi
+
+c="$(new_case)"; echo wontfix >"$c/mode"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
+run_rec="$(newest "$c" run)"; nf="${run_rec%.run}.notices"
+if [ "$rc" = 0 ] && grep -qx 'notice: posted D0FAKE0001/1700000000.000100 DND-901' "$run_rec" \
+   && grep -qx 'notice: NOT POSTED DND-902 slack_post refused the blocks' "$run_rec" \
+   && grep -qx "notice: NOT POSTED DND-903 (no post recorded in ${nf})" "$run_rec" \
+   && [ "$(grep -c '^notice: ' "$run_rec")" = 3 ]; then
+  ok "a pass with three won't-fix closures writes one notice: line each: posted, NOT POSTED with its why, NOT POSTED unrecorded"
+else
+  bad "notice lines" "rc=$rc run=$(cat "$run_rec" 2>&1) notices=$(cat "$nf" 2>&1)"
+fi
+if grep -q 'DND-902' "$c/runner.err" && grep -q 'DND-903' "$c/runner.err" && grep -q 'NOT POSTED' "$c/runner.err" \
+   && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")/consecutive-failures" ] && grep -q 'outcome=ok exit=0' "$run_rec"; then
+  ok "an unposted notice is loud on stderr with a Fix:, and changes neither the exit code nor the counter"
+else
+  bad "notice not posted loud" "err=$(cat "$c/runner.err") run=$(cat "$run_rec" 2>&1)"
+fi
+
+c="$(new_case)"; echo badnotice >"$c/mode"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
+run_rec="$(newest "$c" run)"; nf="${run_rec%.run}.notices"
+if [ "$rc" = 0 ] && grep -qx "notice: UNREADABLE ${nf} line 2: posted nonsense" "$run_rec" \
+   && grep -qx "notice: NOT POSTED DND-904 (no post recorded in ${nf})" "$run_rec"; then
+  ok "a malformed notices line is named UNREADABLE in .run, never dropped, and its closure still reads NOT POSTED"
+else
+  bad "malformed notice line" "rc=$rc run=$(cat "$run_rec" 2>&1)"
 fi
 
 drain_count() { find "${ALERTS}" -maxdepth 1 -type f -name '*-harness-lane-drain.md' 2>/dev/null | grep -c . || true; }

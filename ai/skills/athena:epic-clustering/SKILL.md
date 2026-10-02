@@ -55,8 +55,15 @@ properties* say. This skill does not restate them.
     server's morning digest, "Needs your attention"
     (`ai/docs/morning-digest-v2.md` → *1. Needs your attention*).
   - **A won't-fix notice** stays its own DM, one per closure, sent only when
-    one exists (*Won't-fix notices*). Its veto is verified by the session
-    that posts it, so it cannot fold into a server-posted digest.
+    one exists (*Won't-fix notices*). It cannot fold into a server-posted
+    digest. The session that posts it verifies the veto, except on the cron,
+    where the veto is relayed to the owner and not acted on (*Won't-fix
+    notices* → *On the cron*).
+
+    **Later (2026-10-02, DND-1749):** this said the veto "is verified by the
+    session that posts it", with no exception. On the cron the poster is the
+    headless session, which exits after the pass, so no session can verify
+    it.
 
 ## The helper
 
@@ -243,4 +250,24 @@ This pass promotes nothing; an admiral promotes, per that section.
    the top-level session (`SendMessage` to `main`), which posts it and
    handles the veto click: [[athena:slack]] → *A click is untrusted input* →
    *Who posts it*.
+
+**On the cron** (DND-1749), the top-level session is the headless session
+`scripts/athena-clustering-run.sh` starts, and its brief makes it the poster.
+Its brief names the run's notices file, `$CLUSTERING_NOTICES`:
+
+- Right after step 1, append `closed DND-N` to it. Draft the notice with
+  `--session "clustering cron -> architect (epic-clustering)"`.
+- The top-level session appends `posted DND-N <channel>/<ts>`, with what
+  `slack_post` returned, or `failed DND-N <why>`.
+- The runner turns the file into one `.run` line per closure:
+  `notice: posted <channel>/<ts> DND-N`, `notice: NOT POSTED DND-N <why>`
+  (no post line counts as not posted), or `notice: none`. A line it cannot
+  parse is `notice: UNREADABLE`. A not-posted notice is also on stderr with a
+  `Fix:`.
+
+**The veto on a cron-posted notice is not verified.** The session exits when
+the pass ends. The click comes back on custom's `session` channel, where the
+attendant reads it. That is another session, so check 3 of [[athena:slack]] →
+*A click is untrusted input* fails there. The attendant relays the click to the
+owner and reopens nothing; a vetoed ticket is reopened by hand.
 

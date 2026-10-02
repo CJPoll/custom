@@ -9,7 +9,9 @@
 # cron is harness-only and never writes Notion, so this is a separate runner.
 # The morning run (owner timezone America/Denver) also writes the daily digest
 # to its run record, runs/<ts>.digest.md. It is never sent to the owner
-# (DND-1738).
+# (DND-1738). The headless session is the pass's top-level session, so it
+# posts each won't-fix notice the architect hands it, and the .run record says
+# whether each one was posted (DND-1749).
 #
 # Where the run happens. The pass writes Notion, its won't-fix notices, and its
 # run-record files. It does no git
@@ -36,8 +38,13 @@
 #   runs/<ts>.blocked   the session never started     runs/<ts>.wedged   a wedged tick
 #   runs/<ts>.locked    skipped: a run was in flight
 #   runs/<ts>.run       every tick that spawned a session: its outcome, the
-#                       digest's (written, MISSING, or not due and why), and
-#                       whether its harness-lane drain request (DND-987) was sent
+#                       digest's (written, MISSING, or not due and why), one
+#                       notice: line per won't-fix closure (posted <channel>/<ts>,
+#                       NOT POSTED and why, or none; DND-1749), and whether its
+#                       harness-lane drain request (DND-987) was sent
+#   runs/<ts>.notices   what the session wrote about won't-fix notices: the
+#                       architect's "closed DND-N", the poster's "posted DND-N
+#                       <channel>/<ts>" or "failed DND-N <why>" (DND-1749)
 #   runs/<ts>.digest.md the morning run's daily digest text (DND-1738)
 #   runs/<ts>.digest.blocks.json  the same digest as Block Kit
 #   consecutive-failures  the wedge counter; `rm` it to re-arm a wedged lane
@@ -55,6 +62,8 @@
 #   CLUSTERING_TIMEOUT        hard cap on the session (default 120m)
 #   CLUSTERING_NOW            epoch seconds to treat as now (tests)
 #   CLUSTERING_SEND_MAIL      send-mail to use for alerts and drain requests (tests)
+#   (The session itself is given CLUSTERING_RECEIPT, CLUSTERING_SUMMARY and
+#   CLUSTERING_NOTICES, and CLUSTERING_DIGEST(_BLOCKS) when the digest is due.)
 #   ATHENA_INBOX_ROOT         where the wedge alert is delivered
 #
 # Exit codes:
@@ -245,17 +254,35 @@ elif [ "${owner_hour#0}" -lt 12 ]; then
 else
   digest_clause="This is NOT the morning run (${OWNER_TZ}, ${owner_day}). Do NOT write the daily digest."
 fi
+# DND-1749: on the cron, the "top-level session" the skill hands each won't-fix
+# notice to is THIS headless session. So the brief makes it the poster, and
+# both it and the architect write one line per notice to the run's notices
+# file, which finish() turns into the .run record's notice: lines.
+NOTICES_REC_HINT="${LOG_DIR}/<ts>.notices"
 BRIEF="First, before anything else, run exactly this one Bash command: \
 touch \"\$CLUSTERING_RECEIPT\" — it is the runner's liveness receipt. Then you \
 are coordinating; do the work by delegating. Spawn exactly one athena-architect \
-agent (Agent tool, subagent_type: athena-architect) with this brief, and do \
-nothing else yourself: 'Run one clustering pass now: load the \
+agent (Agent tool, subagent_type: athena-architect) with this brief: 'Run one \
+clustering pass now: load the \
 athena:epic-clustering skill and follow it. This is the scheduled 12h pass from \
 the clustering cron, with no human present. ${digest_clause} Your writes are \
 Notion, the won't-fix notices the skill sends, and the run-record files this \
 brief names: make no commits, pushes or edits to tracked files in any \
-repository. Finish with ONE line: what moved, merged, and closed, and \
-whether the digest was written.' When it finishes, write its one line verbatim to \
+repository. For each ticket you close Won't Fix, right after the status change \
+append the line closed DND-N to the file named by \$CLUSTERING_NOTICES with one \
+Bash command, draft its notice with --session \"clustering cron -> architect \
+(epic-clustering)\", and send the notice to the top-level session as the skill \
+says. Finish with ONE line: what moved, merged, and closed, and \
+whether the digest was written.' While it runs, you post the won't-fix notices \
+it sends you, and do nothing else yourself. For each notice: resolve the \
+owner's Slack id with ${MAIN_CHECKOUT}/ai/bin/private-overlay get slack \
+.people.owner.user_id, open the DM with mcp__athena__slack_open_dm, and post \
+the notice's text and blocks with mcp__athena__slack_post, inbox_name \
+custom-session.jsonl (athena:slack -> Sending one). Then append ONE line to the \
+file named by \$CLUSTERING_NOTICES (${NOTICES_REC_HINT}) with one Bash command: \
+posted DND-N <channel>/<ts>, with the channel and ts slack_post returned, or \
+failed DND-N <why> when any step failed. Never skip that line. When the \
+architect finishes, write its one line verbatim to \
 the file named by \$CLUSTERING_SUMMARY with one Bash command, print it, and stop."
 
 # The skill the architect runs. Without it the architect can only report that
@@ -334,7 +361,8 @@ unset ATHENA_MCP_BEARER
 log="${LOG_DIR}/${ts}.log"
 RECEIPT="${LOG_DIR}/${ts}.receipt"
 SUMMARY="${LOG_DIR}/${ts}.summary"
-export CLUSTERING_RECEIPT="${RECEIPT}" CLUSTERING_SUMMARY="${SUMMARY}"
+NOTICES="${LOG_DIR}/${ts}.notices"
+export CLUSTERING_RECEIPT="${RECEIPT}" CLUSTERING_SUMMARY="${SUMMARY}" CLUSTERING_NOTICES="${NOTICES}"
 # The digest's run record (DND-1738). Only a session asked for the digest gets
 # its paths; any other session sees neither variable.
 DIGEST_REC="${LOG_DIR}/${ts}.digest.md"
@@ -620,6 +648,48 @@ else
   echo "${ME}: run ${ts}: the daily digest was due but is MISSING (${DIGEST_REC} absent or empty); ${DIGEST_DAY} not stamped." >&2
   echo "  Fix: read ${log}. If the session failed or was blocked, that is the cause; otherwise the architect should write the digest to \$CLUSTERING_DIGEST (athena:epic-clustering -> The daily digest). A re-run before noon ${OWNER_TZ} writes it." >&2
 fi
+# notice_lines <notices-file> — the .run record's notice: lines (DND-1749).
+# The architect writes "closed DND-N" per won't-fix closure; the top-level
+# session writes "posted DND-N <channel>/<ts>" or "failed DND-N <why>" per
+# notice. Each closure gets ONE line: posted, or NOT POSTED with the session's
+# why, or NOT POSTED because nothing was recorded. A line that parses as none
+# of these is UNREADABLE, never dropped. No closure at all is "none", naming
+# the file, so an empty result says which file it read.
+notice_lines() {
+  local f="$1" none
+  none="notice: none (no won't-fix closure recorded in ${f})"
+  if [ ! -s "${f}" ]; then
+    printf '%s\n' "${none}"
+    return 0
+  fi
+  awk -v f="${f}" -v none="${none}" '
+    function add(id) { if (!(id in seen)) { seen[id] = 1; order[++n] = id } }
+    function okid(s) { return s ~ /^DND-[0-9]+$/ }
+    NF == 0 { next }
+    $1 == "closed" && NF == 2 && okid($2) { add($2); next }
+    $1 == "posted" && NF == 3 && okid($2) && $3 ~ /^[A-Z0-9]+\/[0-9]+\.[0-9]+$/ { post[$2] = $3; add($2); next }
+    $1 == "failed" && NF >= 3 && okid($2) {
+      why = $0; sub(/^[ \t]*failed[ \t]+[^ \t]+[ \t]+/, "", why); fail[$2] = why; add($2); next
+    }
+    { bad[++nb] = sprintf("notice: UNREADABLE %s line %d: %s", f, NR, $0) }
+    END {
+      for (i = 1; i <= n; i++) {
+        id = order[i]
+        if (id in post)      printf "notice: posted %s %s\n", post[id], id
+        else if (id in fail) printf "notice: NOT POSTED %s %s\n", id, fail[id]
+        else                 printf "notice: NOT POSTED %s (no post recorded in %s)\n", id, f
+      }
+      for (i = 1; i <= nb; i++) print bad[i]
+      if (n == 0 && nb == 0) print none
+    }' "${f}"
+}
+NOTICE_LINES="$(notice_lines "${NOTICES}")" \
+  || NOTICE_LINES="notice: UNREADABLE ${NOTICES} (could not be read; see this run's log)"
+if printf '%s\n' "${NOTICE_LINES}" | grep -q -e '^notice: NOT POSTED ' -e '^notice: UNREADABLE '; then
+  echo "${ME}: run ${ts}: a won't-fix notice was NOT POSTED or its record is unreadable; the owner has no veto on it:" >&2
+  printf '%s\n' "${NOTICE_LINES}" | grep -e '^notice: NOT POSTED ' -e '^notice: UNREADABLE ' | sed 's/^/  /' >&2
+  echo "  Fix: read ${log} and ${NOTICES}; post each unposted notice to the owner by hand (athena:epic-clustering -> Won't-fix notices) and reopen the ticket if it cannot be posted." >&2
+fi
 # finish <exit> <outcome> — every tick that spawned a session ends here. It
 # writes runs/<ts>.run and sends ONE harness-lane drain request re: it
 # (DND-987, the W10 harness lane: a clustering pass may have reordered its
@@ -631,6 +701,7 @@ finish() {
     printf '%s: run %s outcome=%s exit=%s\n' "${ME}" "${ts}" "${outcome}" "${rc}"
     printf 'log=%s\n' "${log}"
     printf '%s\n' "${DIGEST_LINES}"
+    printf '%s\n' "${NOTICE_LINES}"
   } >"${run}" 2>/dev/null || true
   body="$(new_body)" && {
     printf 'The epic-clustering cron finished a run (outcome %s, exit %s). This is a drain request for the harness lane (DND-987).\n' "${outcome}" "${rc}"
