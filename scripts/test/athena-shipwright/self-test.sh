@@ -137,8 +137,9 @@ new_repo() {
   git -C "$d" config user.name 'Self Test'
   git -C "$d" config commit.gpgsign false
   # Neutralize the user's MACHINE-LOCAL core.excludesFile
-  # (~/.config/git/gitignore, which carries `ai-artifacts/`). It is not part of
-  # this repository, and leaving it in play would silently make the
+  # (~/.config/git/gitignore, which carries `ai-artifacts/`). The fixture has
+  # no copy of the repo .gitignore either (which also carries it since
+  # DND-1693), and leaving either in play would silently make the
   # "shipwright's own state does not trip its successor" case pass for the wrong
   # reason — testing that machine's config rather than the runner's own explicit
   # exclusion, and passing on this box while the runner wedges on any checkout
@@ -265,9 +266,9 @@ else
 fi
 
 # The commit helper must treat ai-artifacts/ the way the runner does. It holds
-# the runner's own logs, run.lock and skip records, and is gitignored only by a
-# machine-local rule that is not in this repository — so on a checkout without
-# that rule the foreign-dirt notice would list the shipwright's own output
+# the runner's own logs, run.lock and skip records. The repo .gitignore ignores
+# it (DND-1693), but the helper must not lean on that — so on a checkout without
+# the rule the foreign-dirt notice would list the shipwright's own output
 # forever, which is how a real notice gets learned-past. (core.excludesFile is
 # neutralised in every fixture, so this case is not vacuous.)
 r="$(new_repo)"

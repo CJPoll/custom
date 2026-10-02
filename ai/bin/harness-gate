@@ -3328,15 +3328,24 @@ def self_test_core
   #     and fleet coordination reports); a new in-checkout writer adds a row.
   Dir.mktmpdir("harness-gate-selftest-runtime-ignore") do |fixture_root|
     git = ->(*args) { Open3.capture3("git", "-C", fixture_root, *args) }
-    git.call("init", "-q")
-    git.call("config", "user.email", "a@b.c")
-    git.call("config", "user.name", "test")
-    # The host's global excludes must not supply the rule under test.
-    git.call("config", "core.excludesFile", File::NULL)
+    # Nothing but the repo .gitignore may supply the rule under test: an empty
+    # --template= keeps a host init.templateDir's info/exclude out, and the
+    # local core.excludesFile overrides the global and XDG excludes files. A
+    # setup step that failed would let the host's rule pass 6h for the wrong
+    # reason, so each one is checked.
     repo_gitignore = File.join(CUSTOM_DIR, ".gitignore")
     File.write(File.join(fixture_root, ".gitignore"), File.read(repo_gitignore))
-    git.call("add", ".gitignore")
-    git.call("commit", "-q", "-m", "repo .gitignore")
+    setup = [
+      ["init", "-q", "--template="],
+      ["config", "core.excludesFile", File::NULL],
+      ["add", ".gitignore"]
+    ]
+    setup_failed = setup.find { |args| !git.call(*args)[2].success? }
+    if setup_failed
+      warn "self-test: FAIL — 6h: fixture setup `git #{setup_failed.join(' ')}` " \
+           "failed, so the case cannot tell the repo rule from a host rule"
+      ok = false
+    end
 
     runtime_samples = %w[
       ai-artifacts/shipwright/cursor.txt

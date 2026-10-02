@@ -212,6 +212,11 @@ somebody else's work, and **neither may be weakened**:
   ignore rule — it holds the runner's own logs, `run.lock` and records, and is
   gitignored only by the user's machine-local `~/.config/git/gitignore`, which is
   not in this repository.
+  **Later (2026-10-02, DND-1693):** the repo `.gitignore` now ignores
+  `ai-artifacts/` itself, so "gitignored only by the user's machine-local"
+  file no longer holds. The explicit exclusion stays: it still guards a
+  checkout or a fixture that lacks the repo rule (the shipwright self-test
+  fixtures set `core.excludesFile=/dev/null` and carry no `.gitignore`).
   **A wedged lane does not look like a quiet one**: the runner keeps a
   `consecutive-failures` counter of UNSUCCESSFUL cron OUTCOMES — a non-zero
   session exit, a timeout, a stranded (un-landed) push, plus dead cron-origin

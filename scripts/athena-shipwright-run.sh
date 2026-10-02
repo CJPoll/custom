@@ -832,9 +832,9 @@ fi
 #
 # ai-artifacts/ is excluded EXPLICITLY rather than trusted to an ignore rule: it
 # holds this machine's runtime artifacts (the runner's own logs, run.lock, the
-# skip records) and is gitignored only by the user's MACHINE-LOCAL
-# ~/.config/git/gitignore, which is not in this repository. Leaning on that would
-# make the runner's own output count as dirt on any checkout without that rule.
+# skip records). The repo .gitignore ignores it (DND-1693), but leaning on any
+# ignore rule would make the runner's own output count as dirt on a checkout
+# or fixture without that rule.
 #
 # STALE DIRT ESCALATES (DND-692). A yield is exit 0 and never feeds the wedge,
 # so a yield that never ends is invisible: measured 2026-09-22..25, 84 hourly
