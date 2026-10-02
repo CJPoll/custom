@@ -566,11 +566,20 @@ check("D5 the mismatch counts the landings with a post-merge run") do
   mis["tail_ci"] == { "source" => "declared", "value" => false, "mismatch" => 1 }
 end
 
-check("D6 absent: the same numbers, n/a counts and candidacy as before") do
-  [custom_rows, gs_rows, no_deploy, pre, na_tail].all? do |rs|
+# The tail numbers and candidacy before DND-1614, pinned: [n, n_na, sum_s, candidate].
+{ "custom-shaped" => [custom_rows, [5, 0, 0, false]], "gen_saas-shaped" => [gs_rows, [5, 0, 18_000, true]],
+  "one no-run landing" => [no_deploy, [4, 1, 14_400, true]], "one pre-DND-1532 row" => [pre, [4, 1, 14_400, true]],
+  "all n/a" => [na_tail, [0, 5, nil, false]] }.each do |name, (rs, want)|
+  check("D6 absent, #{name}: the same tail numbers, n/a count and candidacy as before DND-1614") do
+    s = L::Stats.summarize(rs)
+    s["totals"]["tail"].values_at("n", "n_na", "sum_s") + [s["biggest"]["tail_candidate"]] == want
+  end
+end
+check("D6 an explicit nil declaration is absent (AC 5: any caller with no declaration)") do
+  [custom_rows, gs_rows, no_deploy].all? do |rs|
     a = L::Stats.summarize(rs)
     b = L::Stats.summarize(rs, idle_workflow: nil, repo: "custom")
-    a["totals"] == b["totals"] && a["biggest"] == b["biggest"]
+    a["totals"] == b["totals"] && a["biggest"] == b["biggest"] && a["tail_ci"] == b["tail_ci"]
   end
 end
 check("D6 absent, no nonzero tail: the reason says the fact was inferred") do
@@ -590,8 +599,18 @@ end
     L::Stats.summarize(custom_rows, idle_workflow: bad, repo: "custom")
     false
   rescue L::DeclarationError => e
-    e.message.include?("idle_workflow") && e.message.include?(bad.inspect)
+    e.message.include?("idle_workflow") && e.message.include?(bad.inspect) && e.fix.to_s.include?("lead-time-repos")
   end
+end
+
+check("D8 declared none, every tail n/a: tail_reason still names the declaration") do
+  why = L::Stats.summarize(na_tail, idle_workflow: "none", repo: "custom")["biggest"]["tail_reason"]
+  why.include?("not measured") && why.include?("custom declares no post-merge CI (idle_workflow none)")
+end
+check("D8 declared CI, measured zeros at a run end plus n/a ones: the reason counts the n/a") do
+  zr = [row(1).merge("tail_s" => 0, "tail_end" => "deploy"), row(2).merge("tail_s" => 0, "tail_end" => "merge")]
+  why = L::Stats.summarize(zr, idle_workflow: WF, repo: "prod")["biggest"]["tail_reason"]
+  why.include?("each of its 1 measured landing(s)") && why.include?("1 are n/a") && why.include?("idle_workflow #{WF}")
 end
 
 # ── origin: a landing worked on another machine is foreign (DND-1531) ──────
@@ -710,6 +729,10 @@ check("F1 a foreign landing's tail never enters the biggest pick") do
   ft["biggest"].values_at("phase", "sum_s", "lever") == ["verify", 50, "harness"] && ft["biggest"]["tail_candidate"] == false
 end
 check("F1 but its tail is still in the totals") { ft["totals"]["tail"]["sum_s"] == 18_000 }
+check("F1 declared CI (DND-1614): totals keep the foreign tails, the local 0s with no run are n/a, tail no candidate") do
+  d = L::Stats.summarize(loc + tailing, idle_workflow: "post-merge.yml", repo: "prod")
+  d["totals"]["tail"].values_at("n", "n_na", "sum_s") == [2, 2, 18_000] && d["biggest"]["tail_candidate"] == false
+end
 check("F2 every landing foreign, with nonzero tails: still no biggest, the foreign reason") do
   b = L::Stats.summarize(tailing)["biggest"]
   b["phase"].nil? && b["reason"].include?("worked on another machine")

@@ -173,6 +173,12 @@ landing whose post-merge run never concluded, which no emitter fixes. When
 and run the choice rule on the largest phase by `phases.<p>.sum_s` instead. In custom,
 with no post-merge CI, `tail` is never a candidate.
 
+Whether a repo has post-merge CI comes from its `idle_workflow`, else the
+window (`tail_ci`, DND-1614; `ai/bin/lead-time-phases --help`). A
+`tail_ci.mismatch` means a repo declaring `"none"` has landings with a
+post-merge run: its tails stay measured, and the run files a ticket to fix
+that repo's lead-time config entry.
+
 **Later (2026-10-01, DND-1533):** this read "The product-side action for a
 `product` lever is not set by this step (DND-1533, DND-1542). Until it is,
 the harness work goes on", for every repo. Superseded for an improve repo

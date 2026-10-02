@@ -396,6 +396,7 @@ run "${TEL_EMPTY}" --summary --repo gen_saas --json
 eq "--json: a declared none with post-merge runs carries the mismatch" "$(tail_ci)" "declared,false,2"
 run "${TEL_EMPTY}" --summary --repo gen_saas
 has "the table prints the mismatch warning" "${OUT}" "idle_workflow none, but 2 landing(s) in the window have a post-merge run: fix the repo's entry"
+has "... with its Fix:" "${OUT}" "Fix: set the repo's idle_workflow to its post-merge workflow file"
 CONFIG="${GS_CONFIG}"
 run "${TEL_EMPTY}" --summary --repo gen_saas
 lacks "no declaration: no mismatch warning" "${OUT}" "idle_workflow none, but"

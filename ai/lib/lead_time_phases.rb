@@ -668,8 +668,16 @@ module LeadTimePhases
     end
   end
 
-  # A post-merge CI declaration that is not one: never read as absent.
-  class DeclarationError < StandardError; end
+  # A post-merge CI declaration that is not one: never read as absent. It
+  # carries the Fix: line the caller prints.
+  class DeclarationError < StandardError
+    attr_reader :fix
+
+    def initialize(message, fix)
+      super(message)
+      @fix = fix
+    end
+  end
 
   # Whether a repo has post-merge CI (DND-1614). The repo's idle_workflow
   # (DND-1540, validated by ai/lib/lead_time_config.rb) is the one home of
@@ -688,16 +696,23 @@ module LeadTimePhases
     # fault, and reading it as absent would hide it.
     def declare(idle_workflow, repo)
       return nil if idle_workflow.nil?
+      # IDLE_WORKFLOW_RE matches "none" too: test it first, or "none" would
+      # read as a workflow file.
       return Declared.new(value: false, workflow: "none", repo: repo) if idle_workflow == "none"
       if idle_workflow.is_a?(String) && LeadTimeConfig::IDLE_WORKFLOW_RE.match?(idle_workflow)
         return Declared.new(value: true, workflow: idle_workflow, repo: repo)
       end
 
-      raise DeclarationError, "idle_workflow #{idle_workflow.inspect} for #{repo} is not a workflow file name, " \
-                              "\"none\" or absent, so whether #{repo} has post-merge CI is unknown"
+      raise DeclarationError.new(
+        "idle_workflow #{idle_workflow.inspect} for #{repo} is not a workflow file name, \"none\" or absent, " \
+        "so whether #{repo} has post-merge CI is unknown",
+        "pass the repo's idle_workflow as ai/bin/lead-time-repos resolves it (LeadTimeConfig refuses any other " \
+        "value, so this is a caller bug: file a DND ticket with this line)"
+      )
     end
 
-    def declared?(decl) = !decl.nil? && decl.value == true
+    # CI declared yes. declared_value: true, false, or nil (absent).
+    def ci_declared?(decl) = !decl.nil? && decl.value == true
     # true, false, or nil (absent).
     def declared_value(decl) = decl&.value
 
@@ -807,7 +822,7 @@ module LeadTimePhases
       s = row["tail_s"]
       return [nil, generic(row["lead_na_reason"] || "tail: not measured", row)] if s.nil?
       return [s, nil] unless ci && s.zero? && !TAIL_RUN_ENDS.include?(row["tail_end"])
-      return [nil, TailCI.declared_na(decl, row["tail_end"])] if TailCI.declared?(decl)
+      return [nil, TailCI.declared_na(decl, row["tail_end"])] if TailCI.ci_declared?(decl)
 
       why = if row["tail_end"].nil?
               "tail: 0 with no end kind in the ledger row (ingested before DND-1532), so a 0 cannot be told " \
@@ -841,14 +856,14 @@ module LeadTimePhases
       declared = TailCI.declared_value(decl)
       if tail_stats["sum_s"].nil?
         why = "tail not measured in the window (#{tail_stats['n_na']} n/a)"
-        return declared ? "#{why}: #{TailCI.declared_desc(decl)}" : why
+        return decl ? "#{why}: #{TailCI.declared_desc(decl)}" : why
       end
 
       n = tail_stats["n"]
       case declared
       when true
         "no measured nonzero tail in the window: each of its #{n} measured landing(s) had a post-merge run " \
-          "that ended at the landing (#{TailCI.declared_desc(decl)})"
+          "that ended at the landing, and #{tail_stats['n_na']} are n/a (#{TailCI.declared_desc(decl)})"
       when false
         "no measured nonzero tail in the window: #{TailCI.declared_desc(decl)}"
       else

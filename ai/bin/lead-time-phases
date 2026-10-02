@@ -123,8 +123,9 @@ HELP = <<~TXT
                      absent           inferred from the window: CI when
                                       a landing has a measured nonzero
                                       tail, then as for a workflow file;
-                                      else as for "none". The reason
-                                      says it was inferred.
+                                      else as for "none", without the
+                                      warning. The reason says it was
+                                      inferred.
                    `lead` is not adjusted: it ends at the landing when no
                    run was found. --json carries tail_ci: {"source":
                    "declared"|"inferred", "value": true|false, and
@@ -478,6 +479,8 @@ module Summary
     return unless n
 
     puts "  warning: idle_workflow none, but #{n} landing(s) in the window have a post-merge run: fix the repo's entry"
+    puts "  Fix: set the repo's idle_workflow to its post-merge workflow file in this machine's lead-time config " \
+         "(ai/bin/lead-time-repos says which file)"
   end
 
   def line(name, s)
@@ -553,6 +556,8 @@ rescue LeadTimeConfig::CouldNotLook => e
   fail_with(1, "could not look: #{e.message}", e.fix)
 rescue LeadTimeConfig::Error => e
   fail_with(2, "config refused: #{e.message}", e.fix)
+rescue LeadTimePhases::DeclarationError => e
+  fail_with(1, "post-merge CI declaration refused: #{e.message}", e.fix)
 rescue ArgumentError => e
   fail_with(2, "a time is malformed (#{e.message})", "LEAD_TIME_PHASES_NOW must be RFC 3339 with a zone")
 rescue SystemCallError => e

@@ -136,8 +136,8 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    previous landing, and telemetry is scoped to the repo it was written in.
    The normative description is `ai/bin/lead-time-phases --help`.
 
-   **Later (2026-10-01, DND-1614):** the same rule now holds for `tail` in a
-   repo that has post-merge CI. Whether it has CI was inferred from the window
+   **Later (2026-10-01, DND-1614):** item 5's n/a-never-0 rule now holds for
+   `tail` in a repo that has post-merge CI. Whether it has CI was inferred from the window
    (a landing with a measured nonzero tail), so a CI repo whose post-merge
    runs all failed for a whole window read as measured zeros, "as in custom".
    The repo's `idle_workflow` (DND-1540) now declares it: a workflow file
