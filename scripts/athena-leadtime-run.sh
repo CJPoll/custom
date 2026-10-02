@@ -147,10 +147,10 @@
 #       up (scripts/lib/mcp-preflight.sh, the check setup-leadtime-cron
 #       shares): counted. --dry-run runs the same checks in the same order
 #       and exits 78 on the first that fails, touching nothing (DND-1571).
-#       A scripts/lib file the tick needs (mcp-preflight.sh, dbus-env.sh)
-#       missing, unreadable, unloadable, or lacking a function the tick
-#       calls is 78 too, with a .failed record, counted like the rest
-#       (DND-1603). --dry-run runs the tick's own lib check, so it refuses
+#       A scripts/lib file the tick needs (mcp-preflight.sh, dbus-env.sh,
+#       lead-time-repos.sh) missing, unreadable, unloadable, or lacking a
+#       function the tick calls is 78 too, with a .failed record, counted
+#       like the rest (DND-1603, DND-1604). --dry-run runs the tick's own lib check, so it refuses
 #       on the same faults (DND-1728)
 #   *   the session's own non-zero exit (124 on timeout): counted
 
@@ -262,57 +262,72 @@ SUMMARY="${LOG_DIR}/${ts}.summary"
 # that does not resolve is acted on at the preconditions (6), or by --dry-run.
 # Any non-zero exit (2 refused, 3 could not look, 4 no repo checked out here,
 # 1 internal) and a missing resolver are all faults: never an empty run.
-# RES_RAN is "exit <n>" once the resolver ran, else "not run"; RES_FIX is the
-# runner's own Fix: for a fault of its own (the resolver or jq missing),
-# preferred over the resolver's.
-RES_RC=0; RES_RAN="not run"; RES_FIX=""; RES_ERR=""; RES_SOURCE=""; RES_PATH=""
-RES_NAMES=""; RES_DESC=""; RES_SKIPPED=""; RES_SKIPPED_RUN=""
-resolve_repos() {
-  local out err_file
-  if [ ! -x "${RESOLVER}" ]; then
-    RES_RC=127; RES_ERR="${RESOLVER} is absent or not executable in the main checkout"
-    RES_FIX="land ai/bin/lead-time-repos (DND-1526) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs."
-    return 0
+# Its --json is read by scripts/lib/lead-time-repos.sh, the one reader this
+# runner and setup-leadtime-cron share (DND-1604); this runner keeps only its
+# own wording. RES_RAN is "exit <n>" once the resolver ran, else "not run";
+# RES_FIX is the runner's own Fix: for a fault of its own (the reader lib, the
+# resolver or jq missing), preferred over the resolver's.
+
+# check_lib <lib> <fn>... — the ONE check of a scripts/lib file the tick needs,
+# shared by the tick and --dry-run (DND-1603, DND-1728). Sets LIB_REASON to the
+# fault ("is missing", "is unreadable", "could not be loaded", "loaded but does
+# not define <fn>"), or to "" when the lib is usable. Loading only defines
+# functions while the lib stays definition-only at top level, so --dry-run
+# stays read-only. The caller decides what a fault means.
+LIB_REASON=""
+check_lib() {
+  local lib="$1" fn absent=""; shift
+  LIB_REASON=""
+  if [ ! -e "${lib}" ]; then
+    LIB_REASON="is missing"
+  elif [ ! -r "${lib}" ]; then
+    LIB_REASON="is unreadable"
+  # shellcheck disable=SC1090 # the lib named by the caller
+  elif ! . "${lib}"; then
+    LIB_REASON="could not be loaded"
+  else
+    for fn in "$@"; do
+      declare -F "${fn}" >/dev/null || absent="${absent:+${absent} }${fn}"
+    done
+    [ -z "${absent}" ] || LIB_REASON="loaded but does not define ${absent}"
   fi
-  if ! command -v jq >/dev/null 2>&1; then
-    RES_RC=127; RES_ERR="jq is not on PATH, so the resolver's --json cannot be read"
-    RES_FIX="install jq."
-    return 0
-  fi
-  err_file="$(mktemp)" || {
-    RES_RC=73; RES_ERR="mktemp failed, so the resolver could not be run"
-    RES_FIX="check that \${TMPDIR:-/tmp} is writable and the disk is not full."
-    return 0
-  }
-  RES_RAN="exit 0"
-  out="$("${RESOLVER}" --json 2>"${err_file}" </dev/null)" || RES_RC=$?
-  RES_RAN="exit ${RES_RC}"
-  RES_ERR="$(cat -- "${err_file}" 2>/dev/null || true)"
-  rm -f -- "${err_file}"
-  [ "${RES_RC}" -eq 0 ] || return 0
-  # One jq call, so a list it cannot read is one fault, never a half-read list.
-  # Six lines, each one field; a newline inside a value is flattened so the
-  # fields cannot shift. The skips come in the brief's form and .run's form
-  # (<name>(<reason>),..., or "none").
-  local fields
-  if ! fields="$(jq -r '
-        def one: tostring | gsub("[\n\r]"; " ");
-        if (.repos | type) != "array" or (.repos | length) == 0 then error("no resolved repos") else . end
-        | (.source | one), (.path | one),
-          ([.repos[].name | one] | join(",")),
-          ([.repos[] | "\(.name) (\(.mode), \(.path))" | one] | join("; ")),
-          ([(.skipped // [])[] | "\(.name) (\(.reason))" | one] | join("; ")),
-          ([(.skipped // [])[] | "\(.name)(\(.reason))" | one] | if length == 0 then "none" else join(",") end)' \
-        <<<"${out}" 2>&1)"; then
-    RES_RC=1; RES_ERR="the resolver exited 0 but its --json is unreadable or lists no repo (${fields})"
-    RES_FIX="run ${RESOLVER} --json by hand and compare it with its --help; this is a resolver or runner bug."
-    return 0
-  fi
-  { IFS= read -r RES_SOURCE; IFS= read -r RES_PATH; IFS= read -r RES_NAMES; IFS= read -r RES_DESC
-    IFS= read -r RES_SKIPPED; IFS= read -r RES_SKIPPED_RUN; } <<<"${fields}"
-  RES_JSON="${out}"
 }
-RES_JSON=""
+# lib_fix <lib> — the Fix: for a faulty scripts/lib file.
+lib_fix() {
+  printf '%s' "see what changed first (git -C ${SCRIPT_DIR%/scripts} status -- scripts/lib), then restore it (git checkout -- scripts/lib discards uncommitted edits there), restore read permission on an unreadable one (chmod u+r $1), or fast-forward this checkout to main when the runner is newer than its libs."
+}
+
+REPOS_LIB="${SCRIPT_DIR}/lib/lead-time-repos.sh"
+RES_RC=0; RES_RAN="not run"; RES_FIX=""; RES_ERR=""; RES_SOURCE=""; RES_PATH=""
+RES_NAMES=""; RES_DESC=""; RES_SKIPPED=""; RES_SKIPPED_RUN=""; RES_REPOS=""
+resolve_repos() {
+  check_lib "${REPOS_LIB}" lt_repos_resolve
+  if [ -n "${LIB_REASON}" ]; then
+    RES_RC=127; RES_ERR="${REPOS_LIB} ${LIB_REASON}, so the resolver's --json cannot be read"
+    RES_FIX="$(lib_fix "${REPOS_LIB}")"
+    return 0
+  fi
+  lt_repos_resolve "${RESOLVER}"
+  RES_RC="${LT_RES_RC}"; RES_RAN="${LT_RES_RAN}"; RES_ERR="${LT_RES_ERR}"
+  case "${LT_RES_FAULT}" in
+    resolver-missing)
+      RES_ERR="${RESOLVER} is absent or not executable in the main checkout"
+      RES_FIX="land ai/bin/lead-time-repos (DND-1526) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs." ;;
+    jq-missing)
+      RES_ERR="jq is not on PATH, so the resolver's --json cannot be read"
+      RES_FIX="install jq." ;;
+    mktemp)
+      RES_ERR="mktemp failed, so the resolver could not be run"
+      RES_FIX="check that \${TMPDIR:-/tmp} is writable and the disk is not full." ;;
+    unreadable)
+      RES_ERR="the resolver exited 0 but its --json is unreadable or lists no repo (${LT_RES_DETAIL})"
+      RES_FIX="run ${RESOLVER} --json by hand and compare it with its --help; this is a resolver or runner bug." ;;
+  esac
+  [ "${RES_RC}" -eq 0 ] || return 0
+  RES_SOURCE="${LT_RES_SOURCE}"; RES_PATH="${LT_RES_PATH}"; RES_NAMES="${LT_RES_NAMES}"
+  RES_DESC="${LT_RES_DESC}"; RES_SKIPPED="${LT_RES_SKIPPED}"; RES_SKIPPED_RUN="${LT_RES_SKIPPED_RUN}"
+  RES_REPOS="${LT_RES_REPOS}"
+}
 resolve_repos
 
 # --- product repos (DND-1540) ---------------------------------------------------
@@ -324,10 +339,10 @@ resolve_repos
 # unless the skill names "leadtime-product pr" (DND-1542; see below).
 PRODUCT_NAMES=(); PRODUCT_PATHS=(); PRODUCT_IDLE=()
 if [ "${RES_RC}" -eq 0 ]; then
-  while IFS=$'\t' read -r pn pp pw; do
-    [ -n "${pn}" ] || continue
+  while IFS=$'\x1f' read -r pn pm pp pw; do
+    [ -n "${pn}" ] && [ "${pm}" = improve ] && [ "${pn}" != custom ] || continue
     PRODUCT_NAMES+=("${pn}"); PRODUCT_PATHS+=("${pp}"); PRODUCT_IDLE+=("${pw}")
-  done < <(jq -r '.repos[] | select(.mode == "improve" and .name != "custom") | [.name, .path, (.idle_workflow // "")] | @tsv' <<<"${RES_JSON}")
+  done <<<"${RES_REPOS}"
 fi
 SWEEP_TIMEOUT="${LEADTIME_PRODUCT_SWEEP_TIMEOUT:-3600}"
 case "${SWEEP_TIMEOUT}" in
@@ -465,36 +480,22 @@ run_mcp_preflight() {
   leadtime_mcp_preflight "${CLAUDE_JSON}" "${MAIN_CHECKOUT}"
 }
 
-# load_dbus_lib — the ONE check of scripts/lib/dbus-env.sh, shared by the tick
-# and --dry-run, so a green dry run means the tick can load it (DND-1603,
-# DND-1728). A fault is a lib that is missing, unreadable, fails to load, or
-# loads without defining every function in DBUS_LIB_FNS (each one the tick
-# calls). Sets DBUS_LIB_WHY to the fault, or to "" when the lib is usable. It
-# never calls the lib: loading only defines functions while dbus-env.sh stays
-# definition-only at top level, so --dry-run stays read-only. The caller
-# decides what a fault means (the tick records and counts it; --dry-run
+# load_dbus_lib — the check of scripts/lib/dbus-env.sh, shared by the tick and
+# --dry-run, so a green dry run means the tick can load it (DND-1603,
+# DND-1728). It is check_lib (above, shared with the repo-list reader lib) over
+# every function in DBUS_LIB_FNS (each one the tick calls). Sets DBUS_LIB_WHY
+# to the fault, or to "" when the lib is usable. It never calls the lib. The
+# caller decides what a fault means (the tick records and counts it; --dry-run
 # refuses).
 DBUS_LIB="${SCRIPT_DIR}/lib/dbus-env.sh"
 DBUS_LIB_FNS="athena_dbus_env_setup"
-DBUS_LIB_FIX="see what changed first (git -C ${SCRIPT_DIR%/scripts} status -- scripts/lib), then restore it (git checkout -- scripts/lib discards uncommitted edits there), restore read permission on an unreadable one (chmod u+r ${DBUS_LIB}), or fast-forward this checkout to main when the runner is newer than its libs."
+DBUS_LIB_FIX="$(lib_fix "${DBUS_LIB}")"
 DBUS_LIB_WHY=""
 load_dbus_lib() {
-  local fn absent="" reason=""
-  if [ ! -e "${DBUS_LIB}" ]; then
-    reason="is missing"
-  elif [ ! -r "${DBUS_LIB}" ]; then
-    reason="is unreadable"
-  # shellcheck source=scripts/lib/dbus-env.sh
-  elif ! . "${DBUS_LIB}"; then
-    reason="could not be loaded"
-  else
-    for fn in ${DBUS_LIB_FNS}; do
-      declare -F "${fn}" >/dev/null || absent="${absent:+${absent} }${fn}"
-    done
-    [ -z "${absent}" ] || reason="loaded but does not define ${absent}"
-  fi
+  # shellcheck disable=SC2086 # one word per function name
+  check_lib "${DBUS_LIB}" ${DBUS_LIB_FNS}
   DBUS_LIB_WHY=""
-  [ -z "${reason}" ] || DBUS_LIB_WHY="${DBUS_LIB} ${reason}, so D-Bus autolaunch cannot be suppressed"
+  [ -z "${LIB_REASON}" ] || DBUS_LIB_WHY="${DBUS_LIB} ${LIB_REASON}, so D-Bus autolaunch cannot be suppressed"
 }
 
 # --dry-run checks what the tick's preconditions (6) check, in the same order,

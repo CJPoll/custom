@@ -624,6 +624,30 @@ else
   bad "resolver missing" "rc=$rc $(out)"
 fi
 
+# The --json reader lib (DND-1604) missing from the main checkout: --install
+# refuses before any write, and --check is red with an installed entry, each
+# naming the lib with a Fix:. It is the MAIN checkout's copy, the runner's.
+shipwright_cursors
+mv "$IR/scripts/lib/lead-time-repos.sh" "${TMP}/repos-lib.aside"
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 2 ] && grep -qF "lead-time-repos not run): $IR/scripts/lib/lead-time-repos.sh is missing from the main checkout" "${TMP}/inst.err" \
+   && grep -qF 'Fix: land scripts/lib/lead-time-repos.sh (DND-1604) on main' "${TMP}/inst.err" \
+   && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
+  ok "the --json reader lib missing from the main checkout: install refused (exit 2), nothing written"
+else
+  bad "reader lib missing (install)" "rc=$rc $(out)"
+fi
+printf '0 * * * * /opt/other-job\n%s\n' "${ENTRY}" >"$ct"
+rc="$(inst "$ct" -- --check)"
+mv "${TMP}/repos-lib.aside" "$IR/scripts/lib/lead-time-repos.sh"
+if [ "$rc" = 2 ] && grep -qF "$IR/scripts/lib/lead-time-repos.sh is missing from the main checkout" "${TMP}/inst.err" \
+   && grep -q 'every tick would exit 78' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" && ! grep -q '^OK' "${TMP}/inst.out"; then
+  ok "--check with the --json reader lib missing from the main checkout: exit 2 naming it, Fix:, never OK"
+else
+  bad "reader lib missing (check)" "rc=$rc $(out)"
+fi
+
 # ===========================================================================
 case_ 'setup-leadtime-cron — the runner MCP preflight (DND-1571)'
 

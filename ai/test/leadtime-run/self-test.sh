@@ -1268,7 +1268,7 @@ else
   bad "control copy" "rc=$rc err=$(cat "$c/runner.err")"
 fi
 
-for lib in mcp-preflight.sh dbus-env.sh; do
+for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh; do
   c="$(new_case)"
   RUNNER="$(sx_runner "$c" "$lib")"
   r1="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=2)"
@@ -1291,7 +1291,7 @@ for lib in mcp-preflight.sh dbus-env.sh; do
   fi
 done
 
-for lib in mcp-preflight.sh dbus-env.sh; do
+for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh; do
   c="$(new_case)"
   RUNNER="$(sx_runner "$c" "$lib")"
   rc="$(run_runner "$c" -- --dry-run)"
@@ -1355,9 +1355,26 @@ lib_dry_case dbus-env.sh 'that does not load' 'could not be loaded' return1
 lib_dry_case dbus-env.sh 'with a merge-conflict marker' 'could not be loaded' conflict
 lib_dry_case dbus-env.sh 'that defines nothing' 'loaded but does not define athena_dbus_env_setup' empty
 lib_dry_case mcp-preflight.sh 'that defines nothing' 'loaded but does not define leadtime_mcp_preflight' empty
+lib_dry_case lead-time-repos.sh 'that does not load' 'could not be loaded' return1
+lib_dry_case lead-time-repos.sh 'that defines nothing' 'loaded but does not define lt_repos_resolve' empty
 if [ "$(id -u)" != 0 ]; then
   lib_dry_case dbus-env.sh 'unreadable' 'is unreadable' unreadable
   lib_dry_case mcp-preflight.sh 'unreadable' 'is unreadable' unreadable
+  lib_dry_case lead-time-repos.sh 'unreadable' 'is unreadable' unreadable
+fi
+
+# The --json reader lib (DND-1604): a tick with it present but defining
+# nothing is a recorded, counted precondition failure naming the function.
+c="$(new_case)"
+RUNNER="$(sx_runner "$c")"
+: >"$c/sx/scripts/lib/lead-time-repos.sh"
+rc="$(run_runner "$c")"
+rec="$(newest "$c" failed)"
+if [ "$rc" = 78 ] && [ -n "$rec" ] && grep -q 'lead-time-repos.sh loaded but does not define lt_repos_resolve' "$rec" \
+   && grep -q '^fix=.*scripts/lib' "$rec" && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ]; then
+  ok "an empty lead-time-repos.sh: the tick exits 78 with a .failed record naming the function and a Fix:, counted"
+else
+  bad "empty repos lib tick" "rc=$rc rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 # The tick names the same reason the dry run does: one check serves both.

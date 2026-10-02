@@ -185,48 +185,51 @@ SKILL_MISSING_WHY="the athena:lead-time-improve skill is not in the main checkou
 SKILL_MISSING_FIX="land DND-1478 on main and fast-forward ${MAIN_CHECKOUT} first. Without it every tick exits 78."
 
 # resolve_repos — this machine's repo list, through the one resolver
-# (ai/bin/lead-time-repos, DND-1526); never a second parse of the config.
-# Sets RES_RC (0 ok; the resolver's exit, or 127 when it or jq is missing),
-# RES_ERR (its stderr, Fix: included), RES_TSV ("<name>\t<mode>" per repo) and
-# RES_TEXT (the printable list: source, each repo, each skip by name, counts).
-# RES_RAN is "exit <n>" once the resolver ran, else "not run"; RES_FIX is this
-# script's own Fix: for its own fault, preferred over the resolver's.
+# (ai/bin/lead-time-repos, DND-1526); never a second parse of the config. Its
+# --json is read by scripts/lib/lead-time-repos.sh, the one reader this
+# installer and the runner share (DND-1604): the MAIN checkout's copy, the one
+# the cron runner loads. It is sourced here, not at the top, so --remove and
+# --backup work on a checkout that lost it.
+# Sets RES_RC (0 ok; the resolver's exit, 127 when it, jq or the reader lib is
+# missing, 1 when its --json is unreadable), RES_ERR (its stderr, Fix:
+# included), RES_TSV ("<name>\t<mode>" per repo) and RES_TEXT (the printable
+# list: source, each repo, each skip by name, counts). RES_RAN is "exit <n>"
+# once the resolver ran, else "not run"; RES_FIX is this script's own Fix: for
+# its own fault, preferred over the resolver's.
+REPOS_LIB="${MAIN_CHECKOUT}/scripts/lib/lead-time-repos.sh"
 RES_RC=0; RES_RAN="not run"; RES_FIX=""; RES_ERR=""; RES_TSV=""; RES_TEXT=""
 resolve_repos() {
-  local out err_file
-  if [ ! -x "${RESOLVER}" ]; then
-    RES_RC=127; RES_ERR="${RESOLVER} is absent or not executable in the main checkout"
-    RES_FIX="land ai/bin/lead-time-repos (DND-1526) on main and fast-forward ${MAIN_CHECKOUT} first."
-    return 0
+  if ! declare -F lt_repos_resolve >/dev/null 2>&1; then
+    if [ ! -r "${REPOS_LIB}" ]; then
+      RES_RC=127; RES_ERR="${REPOS_LIB} is missing from the main checkout, so the resolver's --json cannot be read (the runner exits 78 on it)"
+      RES_FIX="land scripts/lib/lead-time-repos.sh (DND-1604) on main and fast-forward ${MAIN_CHECKOUT} first."
+      return 0
+    fi
+    # shellcheck source=scripts/lib/lead-time-repos.sh
+    if ! . "${REPOS_LIB}" || ! declare -F lt_repos_resolve >/dev/null 2>&1; then
+      RES_RC=127; RES_ERR="${REPOS_LIB} could not be loaded or does not define lt_repos_resolve, so the resolver's --json cannot be read (the runner exits 78 on it)"
+      RES_FIX="restore scripts/lib/lead-time-repos.sh in ${MAIN_CHECKOUT} (git -C ${MAIN_CHECKOUT} status -- scripts/lib shows what changed), or fast-forward it to main."
+      return 0
+    fi
   fi
-  if ! command -v jq >/dev/null 2>&1; then
-    RES_RC=127; RES_ERR="jq is not installed, so the resolver's --json cannot be read"
-    RES_FIX="install jq, then re-run."
-    return 0
-  fi
-  err_file="$(mktemp)" || {
-    RES_RC=73; RES_ERR="mktemp failed, so the resolver could not be run"
-    RES_FIX="check that \${TMPDIR:-/tmp} is writable and the disk is not full, then re-run."
-    return 0
-  }
-  out="$("${RESOLVER}" --json 2>"${err_file}" </dev/null)" || RES_RC=$?
-  RES_RAN="exit ${RES_RC}"
-  RES_ERR="$(cat -- "${err_file}")"; rm -f -- "${err_file}"
+  lt_repos_resolve "${RESOLVER}"
+  RES_RC="${LT_RES_RC}"; RES_RAN="${LT_RES_RAN}"; RES_ERR="${LT_RES_ERR}"
+  case "${LT_RES_FAULT}" in
+    resolver-missing)
+      RES_ERR="${RESOLVER} is absent or not executable in the main checkout"
+      RES_FIX="land ai/bin/lead-time-repos (DND-1526) on main and fast-forward ${MAIN_CHECKOUT} first." ;;
+    jq-missing)
+      RES_ERR="jq is not installed, so the resolver's --json cannot be read"
+      RES_FIX="install jq, then re-run." ;;
+    mktemp)
+      RES_ERR="mktemp failed, so the resolver could not be run"
+      RES_FIX="check that \${TMPDIR:-/tmp} is writable and the disk is not full, then re-run." ;;
+    unreadable)
+      RES_ERR="the resolver exited 0 but its --json is unreadable or lists no repo (${LT_RES_DETAIL})"
+      RES_FIX="run ${RESOLVER} --json by hand and compare it with its --help; this is a resolver or installer bug." ;;
+  esac
   [ "${RES_RC}" -eq 0 ] || return 0
-  local bad
-  if ! RES_TSV="$(jq -r '
-        if (.repos | type) != "array" or (.repos | length) == 0 then error("no resolved repos") else . end
-        | .repos[] | "\(.name)\t\(.mode)"' <<<"${out}" 2>&1)" \
-     || ! RES_TEXT="$(jq -r '
-        def one: tostring | gsub("[\n\r]"; " ");
-        "Repos (ai/bin/lead-time-repos: source=\(.source | one) \(.path | one)):",
-        (.repos[] | "  \(.name | one | . + (" " * ([10 - length, 1] | max)))\(.mode | one | . + (" " * ([8 - length, 1] | max)))\(.path | one)"),
-        ((.skipped // [])[] | "  skipped \(.name | one): \(.reason | one)"),
-        "  \(.considered) considered, \(.repos | length) resolved, \((.skipped // []) | length) skipped"' <<<"${out}" 2>&1)"; then
-    bad="${RES_TSV}${RES_TEXT}"
-    RES_RC=1; RES_ERR="the resolver exited 0 but its --json is unreadable or lists no repo (${bad})"; RES_TSV=""; RES_TEXT=""
-    RES_FIX="run ${RESOLVER} --json by hand and compare it with its --help; this is a resolver or installer bug."
-  fi
+  RES_TSV="${LT_RES_TSV}"; RES_TEXT="${LT_RES_TEXT}"
   return 0
 }
 # res_fail <exit> — the list did not resolve: say why, with this script's own
