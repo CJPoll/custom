@@ -13,7 +13,7 @@
 #
 # The entry always names the MAIN checkout's runner, resolved through git's
 # common dir, and --install and --remove refuse to run from a linked worktree
-# (exit 4): a worktree's runner vanishes on cleanup, and the hourly shipwright
+# (exit 5): a worktree's runner vanishes on cleanup, and the hourly shipwright
 # would silently stop (DND-1639). --check, --backup and --dry-run run anywhere.
 # A line running some OTHER .../scripts/athena-shipwright-run.sh (a worktree's
 # copy, as installed before DND-1639) is STALE: --install and --remove keep it
@@ -53,9 +53,9 @@
 #             · 2 missing prerequisite (outside a git checkout included), or
 #               the current crontab could not be read, or the --backup file
 #               could not be written · 3 need root
-#             · 4 refused: --install or --remove run from a linked worktree
-#               (setup-leadtime-cron uses 3 for that refusal; here 3 already
-#               means "need root")
+#             · 5 refused: --install or --remove run from a linked worktree
+#               (the one code for that refusal in every cron installer,
+#               DND-1643; 3 here means "need root", 4 is unused)
 
 set -euo pipefail
 
@@ -182,7 +182,7 @@ if [ "$CRON_IN_WORKTREE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
   mode="install"; [ "$REMOVE" -eq 1 ] && mode="remove"
   echo "error: ${mode} refused: this copy runs from a linked worktree (${SCRIPT_DIR}), not the main checkout." >&2
   echo "  Fix: run it from the main checkout: cd ${MAIN_CHECKOUT} && scripts/setup-shipwright-cron$([ "$REMOVE" -eq 1 ] && printf ' --remove'). Nothing was written." >&2
-  exit 4
+  exit 5
 fi
 
 [ -x "$RUNNER" ] || {

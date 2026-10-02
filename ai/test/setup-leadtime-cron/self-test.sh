@@ -285,7 +285,7 @@ printf '0 * * * * /opt/other-job\n' >"$ct"
 rc="$(INST="$WT/scripts/setup-leadtime-cron" inst "$ct" -- --install)"
 if [ "$rc" = 3 ] && grep -q 'Fix:' "${TMP}/inst.err" && grep -qF "$IR" "${TMP}/inst.err" \
    && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
-  ok "QA8: --install from a linked worktree is refused (exit 3), Fix: names the main checkout, nothing written"
+  ok "QA8: --install from a linked worktree is refused (exit 5), Fix: names the main checkout, nothing written"
 else
   bad "QA8 worktree install" "rc=$rc ct=$(cat "$ct") $(out)"
 fi

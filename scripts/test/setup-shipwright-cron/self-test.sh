@@ -254,10 +254,10 @@ cp "$ct" "${TMP}/ct-wt.orig"
 for args in "" "--remove"; do
   # shellcheck disable=SC2086
   rc="$(INST="$WT/scripts/setup-shipwright-cron" inst "$ct" $args)"
-  if [ "$rc" = 4 ] && grep -q 'linked worktree' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+  if [ "$rc" = 5 ] && grep -q 'linked worktree' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
      && grep -qF "cd $IR" "${TMP}/inst.err" && cmp -s "$ct" "${TMP}/ct-wt.orig" \
      && ! grep -qx -- '-' "${ct}.calls" 2>/dev/null; then
-    ok "from a linked worktree, '${args:-install}' is refused (exit 4), Fix: names the main checkout, nothing written"
+    ok "from a linked worktree, '${args:-install}' is refused (exit 5), Fix: names the main checkout, nothing written"
   else
     bad "worktree ${args:-install}" "rc=$rc $(out) ct=$(cat "$ct")"
   fi

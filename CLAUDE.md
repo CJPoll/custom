@@ -653,7 +653,8 @@ time. The design record is `ai/docs/lead-time-improver.md`.
 - **Install / restore / verify:** `scripts/setup-leadtime-cron` (`--install`,
   `--dry-run`, `--check`, `--remove`, `--backup <file>`). The entry always
   names the main checkout's runner, and `--install` and `--remove` refuse to
-  run from a linked worktree. `--check` is red on a missing, duplicated or
+  run from a linked worktree (exit 5, the same code in every cron installer
+  that refuses it). `--check` is red on a missing, duplicated or
   stale entry, and on any precondition that would make a tick exit 78: the
   skill, the repo list, or the runner's own MCP preflight
   (`scripts/lib/mcp-preflight.sh` in the main checkout, DND-1571), which

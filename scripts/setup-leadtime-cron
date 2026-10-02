@@ -69,9 +69,10 @@
 # Exit codes: 0 ok · 1 entry missing, duplicated or stale (--check), or a usage
 # error · 2 a prerequisite is missing, the repo list does not resolve, an MCP
 # server is NOT REGISTERED, the crontab could not be read or written, or a
-# cursor could not be written · 3 refused: --install or --remove run from a
-# linked worktree · 4 COULD NOT LOOK: the MCP preflight could not read Claude
-# Code's config (or jq, or the preflight library, is missing)
+# cursor could not be written · 4 COULD NOT LOOK: the MCP preflight could not
+# read Claude Code's config (or jq, or the preflight library, is missing) · 5
+# refused: --install or --remove run from a linked worktree (DND-1643: 5 is the
+# one code for that refusal in every cron installer; 3 is unused here)
 
 set -euo pipefail
 
@@ -315,7 +316,7 @@ if [ "${MODE}" = "backup" ]; then
 fi
 
 if [ "${IN_WORKTREE}" -eq 1 ] && [ "${DRY_RUN}" -eq 0 ]; then
-  die 3 "--${MODE} refused: this copy runs from a linked worktree (${SCRIPT_DIR}), not the main checkout" \
+  die 5 "--${MODE} refused: this copy runs from a linked worktree (${SCRIPT_DIR}), not the main checkout" \
     "run it from the main checkout: cd ${MAIN_CHECKOUT} && scripts/setup-leadtime-cron --${MODE}. Nothing was written."
 fi
 
