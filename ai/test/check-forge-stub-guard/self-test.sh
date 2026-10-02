@@ -329,9 +329,10 @@ else bad "R10a. a landed guarded suite that drops the helper fails" "rc=${RC} ou
 R="$(mk_landed_repo r10b ai/test/guarded/self-test.sh=write_guarded ai/test/kept/self-test.sh=write_guarded)"
 write_unmodeled_guarded "${R}/ai/test/kept/self-test.sh"; git -C "${R}" add -A
 run_check "${R}"
-if [ "${RC}" = 0 ] && has "ai/test/kept/self-test.sh" && has "no longer reads as stubbing"; then
-  ok "R10b. rewritten unmodeled but the helper kept: passes, and is named"
-else bad "R10b. an unmodeled rewrite that keeps the helper passes, named" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 600)"; fi
+if [ "${RC}" = 1 ] && has "ai/test/kept/self-test.sh" && has "no longer reads as stubbing" \
+   && ! has "kept/self-test.sh: landed guarded, but no longer sources"; then
+  ok "R10b. rewritten unmodeled, helper kept: fails (its guard order can no longer be seen), named"
+else bad "R10b. an unmodeled rewrite that keeps the helper fails, named" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 600)"; fi
 
 R="$(mk_landed_repo r10c ai/test/guarded/self-test.sh=write_guarded ai/test/old/self-test.sh=write_guarded)"
 git -C "${R}" rm -q ai/test/old/self-test.sh

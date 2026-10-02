@@ -126,16 +126,18 @@
 # PATH is also read from what LANDED: ai/lib/landed.rb's points (the tip of
 # origin/main, proven against origin, and merge-base(HEAD, origin/main)), each
 # point's tree scanned with this same analyzer, the union taken so the stricter
-# point wins. Every suite in that set must still, in the working tree:
+# point wins. Every suite in that set must, in the working tree:
+#   * read as stubbing a tool on PATH, in a shape the scanner models, so the
+#     guard rules above are still checked. A suite rewritten into an unmodeled
+#     shape fails even when it keeps the helper: the guard ORDER (stub, guard,
+#     real tool) can no longer be seen;
 #   * source the helper, call fsg_arm or fsg_make naming every tool it stubbed
-#     on PATH when it landed, and call fsg_verify -- whatever shape its stubs
-#     now take. One that does all three but no longer reads as stubbing on PATH
-#     passes and is NAMED in the OK line.
-#   * a suite whose path is gone is traced with git's rename detection
-#     (Landed.rename_pairs, 50%) to a file the diff added; a moved suite keeps
-#     its bar at the new path. One no file carries is NAMED as removed and
-#     passes: deleting a suite deletes its stubs. A suite stubbing on PATH that
-#     has not landed is NAMED as new.
+#     on PATH when it landed, and call fsg_verify.
+# A landed suite whose path is gone is traced with git's rename detection
+# (Landed.rename_pairs, 50%) to a file the diff added, and keeps its bar at the
+# new path. One no file carries is NAMED as removed and passes: deleting a
+# suite deletes its stubs. A suite stubbing on PATH that has not landed is
+# NAMED as new.
 # A landed bar that cannot be read (no origin/main, origin unreachable, a
 # local ref that is not origin's, a landed suite the analyzer cannot finish) is
 # a FAILURE, "could not measure", naming every probe; never a pass.
@@ -698,13 +700,18 @@ def landed_set(root, points)
   [set, paths]
 end
 
-# What a landed suite must still do, whatever shape its stubs now take: source
-# the helper, arm it naming every tool it stubbed when it landed, verify it.
+# What a landed suite must still do: read as stubbing on PATH in a shape the
+# scanner models (so the guard order above is still checked), source the
+# helper, arm it naming every tool it stubbed when it landed, and verify it.
 def ratchet_problems(r, landed_tools)
   use = r[:use]
-  return ["no longer sources #{HELPER_REL}"] unless use[:sourced]
-
   problems = []
+  if r[:on_path].empty?
+    problems << "no longer reads as stubbing #{landed_tools.join('/')} on PATH, so its guard " \
+                "can no longer be checked (a stub rewritten into a shape this scanner does not model?)"
+  end
+  return problems + ["no longer sources #{HELPER_REL}"] unless use[:sourced]
+
   problems << "no longer calls fsg_arm or fsg_make" unless use[:armed]
   missing = use[:armed] ? landed_tools - use[:arm_tools] : []
   unless missing.empty?
@@ -727,13 +734,12 @@ rescue StandardError
   nil
 end
 
-# => { points:, findings: [[rel, problem]], kept: [rel], moved: [[old, new, score]],
+# => { points:, findings: [[rel, problem]], moved: [[old, new, score]],
 #      removed: [rel], added: [rel], landed: Integer }
 # Raises Landed::Unreadable / Landed::Mismatch when the bar cannot be measured.
 def ratchet(root, r, points)
   set, landed_paths = landed_set(root, points)
   findings = []
-  kept = []
   moved = []
   removed = []
   tracked = r[:tracked].to_h { |rel| [rel, true] }
@@ -768,12 +774,11 @@ def ratchet(root, r, points)
     label = cur == rel ? rel : "#{cur} (moved from #{rel})"
     problems = ratchet_problems(info, set[rel][:tools])
     problems.each { |p| findings << [label, p] }
-    kept << label if problems.empty? && info[:on_path].empty?
   end
 
   targets = moved.to_h { |(_old, now, _s)| [now, true] }
   added = r[:files].select { |rel, info| !info[:on_path].empty? && !set.key?(rel) && !targets[rel] }.keys.sort
-  { points: points, findings: findings, kept: kept, moved: moved, removed: removed,
+  { points: points, findings: findings, moved: moved, removed: removed,
     added: added, landed: set.size }
 end
 
@@ -784,22 +789,22 @@ end
 # One clause per named case, for the OK line and the failure output alike.
 def ratchet_note(rr)
   parts = ["landed bar: #{rr[:landed]} suite(s) stubbing on PATH at #{Landed.describe(rr[:points])}"]
-  parts << "#{rr[:kept].size} no longer reads as stubbing on PATH but keeps the helper: #{names(rr[:kept])}" unless rr[:kept].empty?
   parts << "moved: #{names(rr[:moved].map { |(o, n, s)| "#{o} -> #{n} (#{s}%)" })}" unless rr[:moved].empty?
   parts << "removed (no working-tree file carries its content): #{names(rr[:removed])}" unless rr[:removed].empty?
   parts << "new since the landed bar: #{names(rr[:added])}" unless rr[:added].empty?
   parts.join("; ")
 end
 
-RATCHET_FIX = "Fix: restore the helper in each suite named: source #{HELPER_REL}, " \
-              "fsg_arm or fsg_make naming every tool it stubbed on PATH when it landed, " \
-              "and fsg_verify. Rewriting a stub into a shape this scanner does not model " \
-              "(a stub written through a helper function, to a relative path, ...) does " \
-              "not take the stub off PATH, so it does not take away the guard's job. If " \
-              "a suite truly no longer stubs any tool on PATH, keeping the three helper " \
-              "calls costs nothing. Deleting the suite is allowed and named. The bar is " \
-              "read from origin/main, so there is no in-repo marker: it moves when the " \
-              "owner lands the change on main."
+RATCHET_FIX = "Fix: in each suite named, write its stubs in a shape this scanner " \
+              "models (a direct write into the stub directory: `cat > \"$D/gh\"`, cp, " \
+              "ln, install, tee, or a `for NAME in gh ...` loop), and keep " \
+              "#{HELPER_REL} sourced, fsg_arm or fsg_make naming every tool it stubbed " \
+              "when it landed, and fsg_verify. A stub rewritten into an unmodeled shape " \
+              "(through a helper function, to a relative path) is still on PATH, so the " \
+              "guard still has a job, and only a modeled shape lets this check see it. " \
+              "Deleting a suite is allowed and named. The bar is read from origin/main, " \
+              "so there is no in-repo marker: a suite that truly stops stubbing moves " \
+              "the bar when the owner lands that change on main."
 
 def skipped_note(r)
   return "0 tracked test path(s) skipped" if r[:skipped].empty?
@@ -1157,13 +1162,23 @@ def ratchet_self_test(fail_case)
     end
 
     count += 1
-    write.call(dir, "ai/test/a/self-test.sh" => "#{unmodeled}#{guard}fsg_arm \"$T/g\"\nfsg_verify\n",
-                    "ai/test/b/self-test.sh" => nil,
-                    "ai/test/c/self-test.sh" => "#{unmodeled}#{guard}fsg_arm \"$T/g\"\nfsg_verify\n")
+    write.call(dir, "ai/test/a/self-test.sh" => "#{unmodeled}#{guard}fsg_arm \"$T/g\" gh glab\nfsg_verify\n")
+    stage_fixture(dir)
+    code, err = run_check_captured(dir, landed: -> { [["landed (older)", older]] })
+    unless code == 1 && err.include?("ai/test/a/self-test.sh: landed guarded, but no longer reads as stubbing gh") &&
+           !err.include?("ai/test/a/self-test.sh: landed guarded, but no longer sources")
+      fail_case.call("ratchet: helper kept through an unmodeled rewrite still fails (guard order unseen)",
+                     "exit #{code} #{err}")
+    end
+
+    count += 1
+    guarded = "#{modeled}#{guard}fsg_arm \"$T/g\"\nfsg_verify\n"
+    write.call(dir, "ai/test/a/self-test.sh" => guarded, "ai/test/b/self-test.sh" => nil,
+                    "ai/test/c/self-test.sh" => guarded)
     stage_fixture(dir)
     code, err = run_check_captured(dir, landed: -> { [["tip", older], ["merge-base", newer]] })
     unless code.zero?
-      fail_case.call("ratchet: helper kept through an unmodeled rewrite, a suite removed: passes", "exit #{code} #{err}")
+      fail_case.call("ratchet: every landed suite still guarded, one removed: passes", "exit #{code} #{err}")
     end
   ensure
     FileUtils.rm_rf(dir)
