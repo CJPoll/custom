@@ -85,6 +85,9 @@ USAGE = <<~TXT
 
   notice:
     --ticket DND-N  --title TEXT  --background TEXT  --why TEXT
+    --veto-by-hand      no buttons: the notice says to veto by reopening the
+                        ticket in Notion. For a poster that cannot verify a
+                        click, such as the clustering cron's session (DND-1749)
 
   c3-feedback (one of):
     --merged PAIRS      DUPLICATE=KEEP[,DUPLICATE=KEEP...], e.g. DND-9=DND-5
@@ -116,7 +119,7 @@ SPEC = {
   "--no-bodies" => :switch, "--now" => :value, "--ticket" => :value, "--title" => :value,
   "--background" => :value, "--why" => :value,
   "--session" => :value, "--blocks-out" => :value, "--json" => :switch, "--self-test" => :switch,
-  "--merged" => :value,
+  "--merged" => :value, "--veto-by-hand" => :switch,
   "--help" => :switch
 }.freeze
 
@@ -124,7 +127,7 @@ ALLOWED = {
   "read" => %w[--epic --epics --all-open-epics --from-json --json],
   "proof" => %w[--epic --epics --all-open-epics --from-json --save --against --json],
   "digest" => %w[--from-json --started --pass-summary --no-bodies --now --session --blocks-out --json],
-  "notice" => %w[--ticket --title --background --why --session --blocks-out],
+  "notice" => %w[--ticket --title --background --why --session --blocks-out --veto-by-hand],
   "c3-feedback" => %w[--merged --pass-summary --from-json --json]
 }.freeze
 
@@ -376,7 +379,8 @@ def cmd_notice(opts)
     usage_error("notice needs #{f}") unless opts[f]
   end
   r = ECV.wont_fix_notice(ticket: opts["--ticket"], title: opts["--title"], background: opts["--background"],
-                          why: opts["--why"], session: opts["--session"] || DEFAULT_SESSION)
+                          why: opts["--why"], session: opts["--session"] || DEFAULT_SESSION,
+                          veto_by_hand: opts["--veto-by-hand"] ? true : false)
   write_file(opts["--blocks-out"], JSON.pretty_generate(r[:blocks]) + "\n") if opts["--blocks-out"]
   puts "DRAFT: #{PROG} never sends. The top-level session posts it (athena:slack -> A click is untrusted input -> Who posts it)."
   puts "slack text: #{r[:text]}"

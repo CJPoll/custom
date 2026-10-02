@@ -162,21 +162,36 @@ module EpicClusteringView
     ["Reopen", "reopen", false]
   ].freeze
 
-  def wont_fix_notice(ticket:, title:, background:, why:, session:)
+  # veto_by_hand: the poster cannot verify a click (the clustering cron's
+  # headless session exits after the pass, DND-1749), so the notice offers no
+  # buttons and says how to veto: reopen the ticket in Notion.
+  def wont_fix_notice(ticket:, title:, background:, why:, session:, veto_by_hand: false)
     { "background" => background, "why" => why, "title" => title }.each do |k, v|
       raise DataError, "#{k} is empty; a won't-fix notice needs background, why and title" if v.to_s.strip.empty?
     end
     raise DataError, "ticket #{ticket.inspect} is not an id like DND-12" unless ticket.to_s.match?(NextMission::ID_RE)
 
+    reopen = if veto_by_hand
+               "• Reopen: set #{ticket} back to Todo, or Parked if work exists, in Notion. " \
+                 "This notice has no buttons: the session that posted it has ended, so no click could be verified."
+             else
+               "• Reopen: Status goes back to Todo, or Parked if work exists."
+             end
     body = [
       "*#{esc(session)}:*\n*Closed #{ticket} as Won't Fix.*\n#{ticket}: #{esc(title)}",
       "*Background*\n#{esc(background)}",
       "*Why it matters*\n#{esc(why)}",
-      "*Options*\n• Keep closed: nothing changes.\n• Reopen: Status goes back to Todo, or Parked if work exists.",
+      "*Options*\n• Keep closed: nothing changes.\n#{reopen}",
       "*Recommendation*\nKeep closed. Silence keeps it closed."
     ]
     long = body.find { |t| t.length > SECTION_TEXT_MAX }
     raise DataError, "a notice section is #{long.length} characters; Slack allows #{SECTION_TEXT_MAX}" if long
+
+    head = "#{esc(session)}: Closed #{ticket} #{esc(title)} as Won't Fix."
+    if veto_by_hand
+      return { text: "#{head} To veto, reopen it in Notion; silence keeps it closed.",
+               blocks: body.map { |t| section(t) } }
+    end
 
     buttons = NOTICE_BUTTONS.map do |label, choice, primary|
       b = { "type" => "button", "text" => { "type" => "plain_text", "text" => label },
@@ -184,7 +199,7 @@ module EpicClusteringView
       b["style"] = "primary" if primary
       b
     end
-    { text: "#{esc(session)}: Closed #{ticket} #{esc(title)} as Won't Fix. Reopen to veto; silence keeps it closed.",
+    { text: "#{head} Reopen to veto; silence keeps it closed.",
       blocks: body.map { |t| section(t) } + [{ "type" => "actions", "elements" => buttons }] }
   end
 end

@@ -40,7 +40,8 @@
 #   runs/<ts>.run       every tick that spawned a session: its outcome, the
 #                       digest's (written, MISSING, or not due and why), one
 #                       notice: line per won't-fix closure (posted <channel>/<ts>,
-#                       NOT POSTED and why, or none; DND-1749), and whether its
+#                       NOT POSTED and why, UNREADABLE, UNKNOWN when the session
+#                       ended early, or none; DND-1749), and whether its
 #                       harness-lane drain request (DND-987) was sent
 #   runs/<ts>.notices   what the session wrote about won't-fix notices: the
 #                       architect's "closed DND-N", the poster's "posted DND-N
@@ -268,11 +269,11 @@ athena:epic-clustering skill and follow it. This is the scheduled 12h pass from 
 the clustering cron, with no human present. ${digest_clause} Your writes are \
 Notion, the won't-fix notices the skill sends, and the run-record files this \
 brief names: make no commits, pushes or edits to tracked files in any \
-repository. For each ticket you close Won't Fix, right after the status change \
+repository. For each ticket you close Won't Fix, right BEFORE the status change \
 append the line closed DND-N to the file named by \$CLUSTERING_NOTICES with one \
-Bash command, draft its notice with --session \"clustering cron -> architect \
-(epic-clustering)\", and send the notice to the top-level session as the skill \
-says. Finish with ONE line: what moved, merged, and closed, and \
+Bash command, draft its notice with --veto-by-hand --session \"clustering cron \
+-> architect (epic-clustering)\", and send the notice to the top-level session as \
+the skill says. Finish with ONE line: what moved, merged, and closed, and \
 whether the digest was written.' While it runs, you post the won't-fix notices \
 it sends you, and do nothing else yourself. For each notice: resolve the \
 owner's Slack id with ${MAIN_CHECKOUT}/ai/bin/private-overlay get slack \
@@ -282,7 +283,8 @@ custom-session.jsonl (athena:slack -> Sending one). Then append ONE line to the 
 file named by \$CLUSTERING_NOTICES (${NOTICES_REC_HINT}) with one Bash command: \
 posted DND-N <channel>/<ts>, with the channel and ts slack_post returned, or \
 failed DND-N <why> when any step failed. Never skip that line. When the \
-architect finishes, write its one line verbatim to \
+architect finishes, first make sure every notice it sent you has its posted or \
+failed line, then write its one line verbatim to \
 the file named by \$CLUSTERING_SUMMARY with one Bash command, print it, and stop."
 
 # The skill the architect runs. Without it the architect can only report that
@@ -616,7 +618,7 @@ fi
 # servers, shells) must not inherit the lock descriptor, or a surviving child
 # would hold the lock and every later tick would skip as "in flight".
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=6600000
-rm -f "${RECEIPT}" "${SUMMARY}"
+rm -f "${RECEIPT}" "${SUMMARY}" "${NOTICES}"
 status=0
 ( cd -- "${LANE}" && exec timeout -k 60s "${TIMEOUT}" "${CLAUDE}" --dangerously-skip-permissions \
     --mcp-config "${LANE}/mcp.json" -p "${BRIEF}" 9>&- ) >"${log}" 2>&1 || status=$?
@@ -665,6 +667,7 @@ notice_lines() {
   awk -v f="${f}" -v none="${none}" '
     function add(id) { if (!(id in seen)) { seen[id] = 1; order[++n] = id } }
     function okid(s) { return s ~ /^DND-[0-9]+$/ }
+    { sub(/\r$/, "") }
     NF == 0 { next }
     $1 == "closed" && NF == 2 && okid($2) { add($2); next }
     $1 == "posted" && NF == 3 && okid($2) && $3 ~ /^[A-Z0-9]+\/[0-9]+\.[0-9]+$/ { post[$2] = $3; add($2); next }
@@ -683,13 +686,23 @@ notice_lines() {
       if (n == 0 && nb == 0) print none
     }' "${f}"
 }
-NOTICE_LINES="$(notice_lines "${NOTICES}")" \
-  || NOTICE_LINES="notice: UNREADABLE ${NOTICES} (could not be read; see this run's log)"
-if printf '%s\n' "${NOTICE_LINES}" | grep -q -e '^notice: NOT POSTED ' -e '^notice: UNREADABLE '; then
-  echo "${ME}: run ${ts}: a won't-fix notice was NOT POSTED or its record is unreadable; the owner has no veto on it:" >&2
-  printf '%s\n' "${NOTICE_LINES}" | grep -e '^notice: NOT POSTED ' -e '^notice: UNREADABLE ' | sed 's/^/  /' >&2
-  echo "  Fix: read ${log} and ${NOTICES}; post each unposted notice to the owner by hand (athena:epic-clustering -> Won't-fix notices) and reopen the ticket if it cannot be posted." >&2
-fi
+# notice_summary <outcome> — sets NOTICE_LINES for the .run record and says on
+# stderr, with a Fix:, when a notice is not shown posted. A session that
+# reached the model but did not finish ok may have closed a ticket before it
+# recorded the closure, so its empty file is UNKNOWN, never "none".
+notice_summary() {
+  local outcome="$1" problems
+  NOTICE_LINES="$(notice_lines "${NOTICES}")" \
+    || NOTICE_LINES="notice: UNREADABLE ${NOTICES} (could not be read; see this run's log)"
+  if [ "${outcome}" != ok ] && [ -e "${RECEIPT}" ] && [ ! -s "${NOTICES}" ]; then
+    NOTICE_LINES="notice: UNKNOWN (the session reached the model and ended ${outcome}; a won't-fix closure may be unrecorded in ${NOTICES})"
+  fi
+  problems="$(grep -e '^notice: NOT POSTED ' -e '^notice: UNREADABLE ' -e '^notice: UNKNOWN ' <<<"${NOTICE_LINES}" || true)"
+  [ -n "${problems}" ] || return 0
+  echo "${ME}: run ${ts}: a won't-fix notice is not shown posted, so the owner may not know of the closure:" >&2
+  sed 's/^/  /' <<<"${problems}" >&2
+  echo "  Fix: read ${log} and ${NOTICES}; check Notion for tickets this run set to Won't Fix, and post each one's notice to the owner by hand (athena:epic-clustering -> Won't-fix notices), or reopen the ticket." >&2
+}
 # finish <exit> <outcome> — every tick that spawned a session ends here. It
 # writes runs/<ts>.run and sends ONE harness-lane drain request re: it
 # (DND-987, the W10 harness lane: a clustering pass may have reordered its
@@ -697,6 +710,7 @@ fi
 # the exit code and never counts toward the wedge or the blocked streak.
 finish() {
   local rc="$1" outcome="$2" run="${LOG_DIR}/${ts}.run" body name err
+  notice_summary "${outcome}"
   {
     printf '%s: run %s outcome=%s exit=%s\n' "${ME}" "${ts}" "${outcome}" "${rc}"
     printf 'log=%s\n' "${log}"

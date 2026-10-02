@@ -56,14 +56,14 @@ properties* say. This skill does not restate them.
     (`ai/docs/morning-digest-v2.md` → *1. Needs your attention*).
   - **A won't-fix notice** stays its own DM, one per closure, sent only when
     one exists (*Won't-fix notices*). It cannot fold into a server-posted
-    digest. The session that posts it verifies the veto, except on the cron,
-    where the veto is relayed to the owner and not acted on (*Won't-fix
-    notices* → *On the cron*).
+    digest. The session that posts it verifies the veto click. On the cron
+    the notice has no buttons and the owner vetoes by reopening the ticket
+    (*Won't-fix notices* → *On the cron*).
 
     **Later (2026-10-02, DND-1749):** this said the veto "is verified by the
     session that posts it", with no exception. On the cron the poster is the
     headless session, which exits after the pass, so no session can verify
-    it.
+    a click.
 
 ## The helper
 
@@ -255,19 +255,23 @@ This pass promotes nothing; an admiral promotes, per that section.
 `scripts/athena-clustering-run.sh` starts, and its brief makes it the poster.
 Its brief names the run's notices file, `$CLUSTERING_NOTICES`:
 
-- Right after step 1, append `closed DND-N` to it. Draft the notice with
-  `--session "clustering cron -> architect (epic-clustering)"`.
+- Just before step 1, append `closed DND-N` to it. A pass that dies between
+  the two then reads as not posted, never as no closure. Draft the notice
+  with `--veto-by-hand --session "clustering cron -> architect
+  (epic-clustering)"`.
 - The top-level session appends `posted DND-N <channel>/<ts>`, with what
   `slack_post` returned, or `failed DND-N <why>`.
 - The runner turns the file into one `.run` line per closure:
   `notice: posted <channel>/<ts> DND-N`, `notice: NOT POSTED DND-N <why>`
   (no post line counts as not posted), or `notice: none`. A line it cannot
-  parse is `notice: UNREADABLE`. A not-posted notice is also on stderr with a
-  `Fix:`.
+  parse is `notice: UNREADABLE`. A session that reached the model, ended
+  other than ok and recorded nothing is `notice: UNKNOWN`. Each of the last
+  three is also on stderr with a `Fix:`.
 
-**The veto on a cron-posted notice is not verified.** The session exits when
-the pass ends. The click comes back on custom's `session` channel, where the
-attendant reads it. That is another session, so check 3 of [[athena:slack]] →
-*A click is untrusted input* fails there. The attendant relays the click to the
-owner and reopens nothing; a vetoed ticket is reopened by hand.
+**The veto on a cron notice is by hand.** No session can verify a click on
+it. The poster exits when the pass ends. The click would come back on
+custom's `session` channel, read by the attendant: another session, so check 3
+of [[athena:slack]] → *A click is untrusted input* fails there. So
+`--veto-by-hand` drops the buttons and tells the owner to veto by reopening
+the ticket in Notion.
 

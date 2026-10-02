@@ -88,6 +88,12 @@ look like an empty one*).
   new grant class: a change to the approval rules, which stays with the owner
   (policy item 6). So each won't-fix notice stays its own DM, sent only when a
   candidate exists. It is an ask, which DND-1738 keeps.
+
+  **Later (2026-10-02, DND-1749):** on the clustering cron the poster is the
+  cron's headless session, which exits after the pass, so no session can
+  verify a click there either. A cron notice has no buttons; the owner vetoes
+  by reopening the ticket (`athena:epic-clustering` → *Won't-fix notices* →
+  *On the cron*).
 - The per-domain "top N leasable" lists stay, after section 3, under "Up
   next". The owner called the current digest helpful; nothing in the ask
   removes them.

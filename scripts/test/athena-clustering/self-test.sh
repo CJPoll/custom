@@ -117,6 +117,9 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   badnotice) : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 1" >"$CLUSTERING_SUMMARY"
              printf 'closed DND-904\nposted nonsense\n' >>"$notices"
              exit 0 ;;
+  crlf)      : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 1" >"$CLUSTERING_SUMMARY"
+             printf 'closed DND-905\r\nposted DND-905 D0FAKE0001/1700000000.000200\r\n' >>"$notices"
+             exit 0 ;;
   fail)      : >"$CLUSTERING_RECEIPT"; echo "the pass fell over"; exit 7 ;;
   nosummary) : >"$CLUSTERING_RECEIPT"; exit 0 ;;
   blocked0)  exit 0 ;;
@@ -170,7 +173,7 @@ fi
 # DND-1738: the morning digest goes to the run record, never to the owner's DM.
 # DND-1749: the brief now posts won't-fix notices with slack_post, so the check
 # is that no sentence about the digest names slack_post.
-digest_posted() { tr '.' '\n' <"$1" | grep -i 'digest' | grep -qi 'slack_post'; }
+digest_posted() { grep -qi 'slack_post' <<<"$(tr '.' '\n' <"$1" | grep -i 'digest')"; }
 if grep -qF '$CLUSTERING_DIGEST' "$c/runner.out" && grep -qF "$(sd "$c")/runs/<ts>.digest.md" "$c/runner.out" \
    && ! digest_posted "$c/runner.out" && grep -q 'Do not post the digest' "$c/runner.out"; then
   ok "the morning brief names the digest's run-record path and gives no slack_post instruction (DND-1738)"
@@ -194,6 +197,7 @@ notice_brief() { # <file>
   grep -qF 'mcp__athena__slack_post' "$1" && grep -qF '$CLUSTERING_NOTICES' "$1" \
     && grep -qF 'closed DND-N' "$1" && grep -qF 'posted DND-N <channel>/<ts>' "$1" \
     && grep -qF 'failed DND-N <why>' "$1" && grep -qF 'inbox_name' "$1" \
+    && grep -qF -- '--veto-by-hand' "$1" && grep -qF 'right BEFORE the status change' "$1" \
     && ! grep -qF 'do nothing else yourself:' "$1"
 }
 for when in MORNING EVENING; do
@@ -314,6 +318,16 @@ else
   bad "evening digest" "rc=$rc run=$(cat "$run_rec" 2>&1) env=$(cat "$c/claude-digest-env" 2>&1)"
 fi
 
+drain_count() { find "${ALERTS}" -maxdepth 1 -type f -name '*-harness-lane-drain.md' 2>/dev/null | grep -c . || true; }
+run_rec="$(newest "$c" run)"
+dm="$(find "${ALERTS}" -maxdepth 1 -type f -name '*-harness-lane-drain.md' -printf '%T@ %p\n' | sort -n | tail -n1 | cut -d' ' -f2-)"
+if grep -q 'outcome=ok exit=0' "$run_rec" 2>/dev/null && grep -q '^drain: sent ' "$run_rec" \
+   && [ "$(sed -n 's/^re: //p' "$dm" | head -n1)" = "$run_rec" ]; then
+  ok "each run sends ONE harness-lane drain request (real send-mail, pinned root), re: its .run record"
+else
+  bad "drain request delivered" "run=$(cat "$run_rec" 2>&1) drains=$(drain_count) err=$(cat "$c/runner.err")"
+fi
+
 # DND-1749: every won't-fix closure gets one notice: line in the .run record,
 # so a notice that was never posted is observable after the session exits.
 run_rec="$(newest "$c" run)"; nf="$(cat "$c/claude-notices-env")"
@@ -351,15 +365,37 @@ else
   bad "malformed notice line" "rc=$rc run=$(cat "$run_rec" 2>&1)"
 fi
 
-drain_count() { find "${ALERTS}" -maxdepth 1 -type f -name '*-harness-lane-drain.md' 2>/dev/null | grep -c . || true; }
+c="$(new_case)"; echo crlf >"$c/mode"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
 run_rec="$(newest "$c" run)"
-dm="$(find "${ALERTS}" -maxdepth 1 -type f -name '*-harness-lane-drain.md' -printf '%T@ %p\n' | sort -n | tail -n1 | cut -d' ' -f2-)"
-if grep -q 'outcome=ok exit=0' "$run_rec" 2>/dev/null && grep -q '^drain: sent ' "$run_rec" \
-   && [ "$(sed -n 's/^re: //p' "$dm" | head -n1)" = "$run_rec" ]; then
-  ok "each run sends ONE harness-lane drain request (real send-mail, pinned root), re: its .run record"
+if [ "$rc" = 0 ] && grep -qx 'notice: posted D0FAKE0001/1700000000.000200 DND-905' "$run_rec" \
+   && ! grep -q $'\r' "$run_rec"; then
+  ok "CRLF line endings in the notices file are read, not reported UNREADABLE"
 else
-  bad "drain request delivered" "run=$(cat "$run_rec" 2>&1) drains=$(drain_count) err=$(cat "$c/runner.err")"
+  bad "crlf notices" "rc=$rc run=$(cat -A "$run_rec" 2>&1)"
 fi
+
+# A session that reached the model and failed may have closed a ticket before
+# recording it: its empty notices file is UNKNOWN, never "none". A session
+# that never reached the model closed nothing: "none".
+c="$(new_case)"; echo fail >"$c/mode"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
+run_rec="$(newest "$c" run)"
+if [ "$rc" = 7 ] && grep -q '^notice: UNKNOWN (the session reached the model and ended failed' "$run_rec" \
+   && ! grep -q '^notice: none' "$run_rec" && grep -q 'notice: UNKNOWN' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err"; then
+  ok "a failed session that reached the model reads notice: UNKNOWN, loud with a Fix:, never none"
+else
+  bad "notice unknown on failure" "rc=$rc run=$(cat "$run_rec" 2>&1)"
+fi
+c="$(new_case)"; echo blocked0 >"$c/mode"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
+run_rec="$(newest "$c" run)"
+if [ "$rc" = 69 ] && grep -q '^notice: none ' "$run_rec"; then
+  ok "a blocked session (never reached the model) reads notice: none"
+else
+  bad "notice none on blocked" "rc=$rc run=$(cat "$run_rec" 2>&1)"
+fi
+
 
 # A fake send-mail: records argv and cwd, succeeds or fails on demand.
 cat >"$TMP/fake-send-mail" <<'EOF'

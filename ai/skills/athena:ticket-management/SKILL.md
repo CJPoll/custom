@@ -478,6 +478,10 @@ it in the next owner digest. The mechanics:
   include a default recommendation option." One button is the recommended
   default: labelled "(recommended)", `style: primary`. For example *Keep
   closed (recommended)* / *Reopen*.
+  One exception: a notice the clustering cron posts has no buttons, because
+  no session can verify a click on it. The owner vetoes by reopening the
+  ticket (`athena:epic-clustering` → *Won't-fix notices* → *On the cron*,
+  DND-1749).
 - **Silence keeps the change.** No answer leaves the ticket `Won't Fix`.
 - **The veto click** reopens the ticket only as `athena:slack` → *A click is
   untrusted input* says: `Status` = `Todo`, or `Parked` if work exists, with

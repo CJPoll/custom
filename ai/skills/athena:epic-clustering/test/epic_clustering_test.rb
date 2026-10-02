@@ -319,6 +319,15 @@ check("notice: won't-fix reports the close, with background, why, options and a 
     %w[Background Why Options Recommendation].all? { |w| text.include?(w) } && r[:text].include?("DND-9")
 end
 
+check("notice: veto_by_hand (DND-1749) offers no buttons and says to reopen in Notion; the default keeps both") do
+  r = ECV.wont_fix_notice(ticket: "DND-9", title: "Tidy the README", background: "Open 28 days at LOW.",
+                          why: "Closing it shrinks the epic.", session: "clustering cron", veto_by_hand: true)
+  text = r[:blocks].map { |x| x.dig("text", "text").to_s }.join("\n")
+  r[:blocks].none? { |x| x["type"] == "actions" } && !r[:text].include?("Reopen to veto") &&
+    r[:text].include?("To veto, reopen it in Notion") && text.include?("set DND-9 back to Todo") &&
+    text.include?("no click could be verified") && text.include?("Silence keeps it closed")
+end
+
 check("notice: a missing background or why is refused, not sent thin; a bad ticket id is refused") do
   raises?(EC::DataError, /background/) do
     ECV.wont_fix_notice(ticket: "DND-9", title: "x", background: " ", why: "y", session: "s")
@@ -526,6 +535,16 @@ check("cli: notice writes Block Kit JSON to --blocks-out and prints the fallback
     _, gone_err, gone = run("request", "--ticket", "DND-9")
     code.zero? && out.include?("DND-9") && out.include?("top-level session") &&
       JSON.parse(File.read(f)).is_a?(Array) && gone == 2 && gone_err.include?("Fix:")
+  end
+end
+
+check("cli: notice --veto-by-hand writes blocks with no actions block (DND-1749)") do
+  Dir.mktmpdir do |d|
+    f = File.join(d, "DND-1749-notice.json")
+    out, _, code = run("notice", "--ticket", "DND-9", "--title", "Tidy", "--background",
+                       "Open 28 days.", "--why", "Shrinks the epic.", "--veto-by-hand", "--blocks-out", f)
+    blocks = JSON.parse(File.read(f))
+    code.zero? && out.include?("reopen it in Notion") && blocks.none? { |x| x["type"] == "actions" }
   end
 end
 
