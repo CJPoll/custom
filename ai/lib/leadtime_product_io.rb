@@ -37,6 +37,10 @@ module LeadTimeProductIO
   # A read that could not be made: exit 3, never an empty result.
   class CouldNotLook < P::Error; end
 
+  # A branch delete git refused (DND-1702). It never fails the tick: the
+  # branch is KEPT and named.
+  class CouldNotDelete < CouldNotLook; end
+
   # The lane's bootstrap failed: "cannot act on R", journaled, not retried.
   class CannotAct < P::Error; end
 
@@ -118,9 +122,9 @@ module LeadTimeProductIO
       out, code = call(dir, "branch", "-D", branch)
       return if code.zero? || branch_tip(dir, branch).nil?
 
-      raise CouldNotLook.new("cannot delete branch #{branch} in #{dir} (git branch -D exit #{code}: #{out.lines.last.to_s.strip})",
+      raise CouldNotDelete.new("cannot delete branch #{branch} in #{dir} (git branch -D exit #{code}: #{out.lines.last.to_s.strip})",
                              "see why git refused ('git -C #{dir} branch -D #{branch}'; a stale '<ref>.lock' file under refs/heads, or the branch " \
-                             "checked out in another worktree); then delete it by hand. The branch is kept, and the next run retries it.")
+                             "checked out in another worktree); then delete it by hand.")
     end
 
     # true / false; nil when git could not tell (never read as "not landed").
@@ -857,6 +861,10 @@ module LeadTimeProductIO
       FileUtils.rm_f("#{rl.lane}.meta")
       stranded ||= verdict == :stranded
       "product_lane: repo=#{rl.name} #{detail}"
+    rescue CouldNotDelete => e
+      # Reported, never counted: a failed delete must not fail or wedge the tick.
+      FileUtils.rm_f("#{rl.lane}.meta")
+      "product_lane: repo=#{rl.name} COULD NOT DELETE branch, KEPT (#{e.message}). Fix: #{e.fix}"
     rescue P::Error => e
       stranded = true
       "product_lane: repo=#{rl.name} COULD NOT TELL (#{e.message}); branch kept. Fix: #{e.fix}"

@@ -61,7 +61,9 @@ HELP = <<~TXT
               A landing branch git cannot read is never deleted and never
               skipped in silence: it is KEPT, COULD NOT TELL with a Fix: in its
               PR's line, and counted; the sweep still exits 0 (one bad ref
-              never fails the tick).
+              never fails the tick). One git cannot DELETE (DND-1702) is
+              handled the same way: KEPT, named with a Fix:, journaled and
+              counted in unreadable_branches.
               Prints "product_prs=<open n> landed=<R#n,...|none>" (plus
               " unreadable_branches=<n>" when any was kept), then one
               "product_line=STOPPED <R>: <why>" per stopped line, then one line
@@ -75,6 +77,9 @@ HELP = <<~TXT
               cannot read is COULD NOT TELL, kept (exit 72). reap prints the
               same details; there an unreadable lane is COULD NOT TELL with
               its lock and meta kept, and the reap goes on to the next lane.
+              A branch git cannot delete is kept and named with a Fix:
+              (teardown: COULD NOT DELETE, exit 0, never counted as a
+              failure; reap: its lock and meta stay, so the next tick retries).
 
   Forge: GitHub only (locked-merge is GitHub-only); a GitLab R is refused.
 

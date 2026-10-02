@@ -279,7 +279,8 @@ rc="$(lp teardown)"
 release_holders
 
 # The end-of-run teardown's :awaiting arm (DND-1702): a branch git cannot delete
-# is COULD NOT TELL, kept, exit 72 (counted), with a Fix:; never "removed".
+# is named COULD NOT DELETE, kept, with a Fix:, and exits 0: a failed delete
+# never fails or wedges the tick (the runner counts exit 72 as a failure).
 new_repo
 hold_lock "$LANES/$RUN_ID.lock"
 lp cut --repo prod --phase verify >/dev/null
@@ -290,9 +291,9 @@ BRD="$(git -C "$LANES/$RUN_ID" rev-parse --abbrev-ref HEAD)"
 REFD="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/refs/heads/$BRD"
 : >"$REFD.lock"
 rc="$(lp teardown)"
-if [ "$rc" = 72 ] && grep -q "COULD NOT TELL (cannot delete branch $BRD" "${TMP}/out" && grep -q "branch kept. Fix: .*branch -D $BRD" "${TMP}/out" \
-   && ! grep -q 'awaiting landing' "${TMP}/out" && [ -e "$REFD" ]; then
-  ok "teardown, a pushed branch git cannot delete: COULD NOT TELL with a Fix:, exit 72, branch kept; never reported as awaiting landing"
+if [ "$rc" = 0 ] && grep -q "COULD NOT DELETE branch, KEPT (cannot delete branch $BRD" "${TMP}/out" && grep -q "Fix: .*branch -D $BRD" "${TMP}/out" \
+   && ! grep -q 'awaiting landing' "${TMP}/out" && ! grep -q 'STRANDED' "${TMP}/out" && [ -e "$REFD" ]; then
+  ok "teardown, a pushed branch git cannot delete: COULD NOT DELETE, KEPT, with a Fix:, exit 0 (never a counted failure); never reported as awaiting landing"
 else bad "teardown delete fails" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 rm -f "$REFD.lock"
 release_holders
