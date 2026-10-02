@@ -16,6 +16,14 @@ duplicate of a gate-enforced list must drift, and it had: DND-277 declared
 `flaky-marker-sweep.self-test.sh` in `STATIC_CHECKS` and left the template
 alone, so that list was stale from then on and nothing could catch it.
 
+Before any check, the runner refuses a tree with untracked, un-ignored files
+(DND-1689). Discovery and the checks that scan `git ls-files --cached` never
+read such a file, so a green gate would not describe the commit. It prints
+the count on every run, names each file on a refusal, and its `Fix:` is
+`git add -N` (or ignore or delete the file). Gitignored paths and untracked
+`node_modules`/`.venv`/`vendor/bundle` trees stay out of scope; the second
+are counted.
+
 - `ai/bin/build-agents --check`: agent templates rebuild clean and the
   rendered `.md` files are current. After editing a template or block, run
   `ai/bin/build-agents` first so the render is regenerated, then `--check`.
