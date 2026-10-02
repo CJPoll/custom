@@ -50,7 +50,7 @@
 #   * its sha IS the head (a branch or detached MR pipeline); or
 #   * its ref is refs/merge-requests/<iid>/merge (a merged-results pipeline) and
 #     its commit has exactly two parents, the second being the head. Measured on
-#     walt_ui !4242 / !4243: the open MR's head pipeline is this kind, its sha is
+#     work-repo MRs (ids not recorded here): the open MR's head pipeline is this kind, its sha is
 #     the merge commit, and parent_ids = [target, head].
 # A merge-train pipeline (refs/merge-requests/<iid>/train) is not tied: its
 # second parent is a squash commit, not the head. It is refused, with a Fix to

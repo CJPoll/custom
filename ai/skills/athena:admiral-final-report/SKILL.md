@@ -81,13 +81,13 @@ state log holds both lists without ever comparing them.
 it as Running/`In Progress`; and DND-203's remediation was recorded done while
 the ticket stayed `Needs Attention`, assigned to Cody, still asking for it.*
 
-*Measured 2026-09-19/21, walt_ui !1187 / !1189 / !1190: all three were open,
+*Measured 2026-09-19/21, three work-repo MRs: all three were open,
 non-draft, green, approved and unblocked within ~8 minutes of their last commit,
 then sat untouched for ~2.4 days each — **610,039s (7.06 days) of ready-and-idle,
 91.8% of their combined start→merge time**. A run opened them, merged its other
 MRs, and ended still holding these three; nothing noticed. The idle is not free
 waiting: when a later run drained them, `origin/main` had moved 19 commits under
-!1187 alone, costing 4 full pipeline runs and 2 extra reviews to absorb the
+one of them alone, costing 4 full pipeline runs and 2 extra reviews to absorb the
 drift. `lead-time` could not have caught it — it never lists open requests, so
 an orphaned open MR is invisible to it until it merges, which is 2.5 days after the
 damage stops being recoverable.*

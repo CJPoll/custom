@@ -1,5 +1,9 @@
 # glab-athena merge guard: sabotage records (DND-742)
 
+**Later (2026-10-02, DND-1668):** the MR iid in the shapes below (4242) is a
+synthetic stand-in. The records first carried a real work-repo MR iid; the
+public repo no longer holds it. The measurements are unchanged.
+
 The suite is `ai/test/glab-athena-merge-guard/self-test.sh` (a stub `glab` on
 PATH, no network). The hook cases live in
 `ai/hooks/forge-identity-guard.self-test.sh` (2c2, 2q–2z4).
