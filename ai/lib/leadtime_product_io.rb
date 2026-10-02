@@ -107,8 +107,9 @@ module LeadTimeProductIO
 
       why = code.zero? ? "it exists but does not resolve to a commit" : "git show-ref --exists exit #{code}: #{out.lines.last.to_s.strip}"
       raise CouldNotLook.new("cannot read branch #{branch} in #{dir} (#{why})",
-                             "check the ref ('git -C #{dir} show-ref --exists refs/heads/#{branch}'; git >= 2.43) and repair or delete it by hand; " \
-                             "the lane and its branch are kept.")
+                             "check the ref ('git -C #{dir} show-ref --exists refs/heads/#{branch}'; exit 129 means git predates --exists: " \
+                             "upgrade to git >= 2.43); its last tip is in its reflog ('git -C #{dir} rev-parse --git-path logs/refs/heads/#{branch}'). " \
+                             "Recover it, then repair or delete the ref by hand; the lane and its branch are kept.")
     end
 
     # true / false; nil when git could not tell (never read as "not landed").
@@ -802,7 +803,7 @@ module LeadTimeProductIO
       "product_lane: repo=#{rl.name} #{detail}"
     rescue P::Error => e
       stranded = true
-      "product_lane: repo=#{rl.name} COULD NOT TELL (#{e.message}); branch kept"
+      "product_lane: repo=#{rl.name} COULD NOT TELL (#{e.message}); branch kept. Fix: #{e.fix}"
     end
     [lines, stranded]
   end
@@ -848,6 +849,6 @@ module LeadTimeProductIO
     _, _, detail = retire_lane(m, rl, dir, why)
     [detail, true]
   rescue P::Error => e
-    ["COULD NOT TELL (#{e.message}); branch kept", false]
+    ["COULD NOT TELL (#{e.message}); branch kept. Fix: #{e.fix}", false]
   end
 end

@@ -351,8 +351,9 @@ for corrupt in garbage empty unreadable; do
   after_ref="$(stat -c '%a %s' "$REF" 2>/dev/null)"
   [ "$corrupt" = unreadable ] && chmod 600 "$REF"
   if [ "$rc" = 72 ] && grep -q "COULD NOT TELL (cannot read branch $BRG" "${TMP}/out" && ! grep -q 'already gone' "${TMP}/out" \
+     && grep -q "branch kept. Fix: .*show-ref --exists refs/heads/$BRG.*logs/refs/heads/$BRG" "${TMP}/out" \
      && [ -d "$LANES/$RUN_ID" ] && [ -e "$LANES/$RUN_ID.meta" ] && [ "$after_ref" = "$before_ref" ]; then
-    ok "corrupt ref ($corrupt): COULD NOT TELL, exit 72, lane and meta kept, ref file untouched; never 'already gone'"
+    ok "corrupt ref ($corrupt): COULD NOT TELL with a Fix: (the ref, its reflog), exit 72, lane and meta kept, ref file untouched; never 'already gone'"
   else bad "corrupt ref ($corrupt)" "rc=$rc ref=$before_ref->$after_ref out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
   release_holders
   git -C "$R" worktree remove --force "$LANES/$RUN_ID" 2>/dev/null

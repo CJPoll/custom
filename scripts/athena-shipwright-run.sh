@@ -101,7 +101,8 @@
 #       ticks reported for duty?" directly — do not infer it from a log's size.
 #   *   whatever the headless session exited with (124 if the 55m timeout fired);
 #       a session that exits non-zero, or one whose commits could not be landed
-#       on main (a "stranded" branch), counts as an unsuccessful outcome
+#       on main (a "stranded" branch), or one whose lane branch ref git cannot
+#       read (COULD NOT TELL, kept as found), counts as an unsuccessful outcome
 
 set -euo pipefail
 
@@ -465,8 +466,8 @@ commit_published() { # commit-ish
 
 # Remove one lane's worktree, and delete its branch unless the branch is
 # stranded (then keep it and say how to recover). Used by both the reaper (for a
-# dead predecessor) and normal teardown. A branch ref git cannot read is COULD
-# NOT TELL: kept as found, named, and counted like a stranded one (return 1).
+# dead predecessor) and normal teardown. Returns 1 for a stranded branch. A
+# branch ref git cannot read is COULD NOT TELL: kept as found, named, return 2.
 retire_lane() { # run-id worktree-path context-label
   local rid="$1" wt="$2" ctx="$3" br="shipwright/$1" tip=""
   if [ -e "${wt}/.git" ]; then
@@ -482,8 +483,8 @@ retire_lane() { # run-id worktree-path context-label
   [ "${exists}" = 2 ] && return 0
   if [ "${exists}" != 0 ]; then
     echo "athena-shipwright: COULD NOT TELL whether branch ${br} exists (${ctx}): git show-ref --exists exit ${exists}; the branch is KEPT as found." >&2
-    echo "  Fix: inspect the ref with 'git -C ${MAIN_CHECKOUT} show-ref --exists refs/heads/${br}' (git >= 2.43; git's reason is in ${log}). A corrupt ref file may still name recoverable commits ('git -C ${MAIN_CHECKOUT} fsck --lost-found'); repair or delete it by hand. It is never auto-deleted." >&2
-    return 1
+    echo "  Fix: inspect the ref with 'git -C ${MAIN_CHECKOUT} show-ref --exists refs/heads/${br}' (git's reason is in ${log}; exit 129 means this git predates --exists: upgrade to git >= 2.43). The branch's last tip is in its reflog ('git -C ${MAIN_CHECKOUT} rev-parse --git-path logs/refs/heads/${br}'); recover it, then repair or delete the ref by hand. It is never auto-deleted." >&2
+    return 2
   fi
   if commit_reachable "${br}" || commit_published "${br}"; then
     git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${log}" 2>&1 || true
@@ -523,7 +524,7 @@ reap_dead_lanes() {
     if got="$(
       exec 7>>"${lock}"
       if flock -n 7; then
-        retire_lane "${rid}" "${wt}" "reaped dead ${origin} run" >/dev/null 2>&1 || true
+        retire_lane "${rid}" "${wt}" "reaped dead ${origin} run" >/dev/null || true
         printf 'reaped'
       fi
     )"; [ "${got}" = "reaped" ]; then
@@ -540,7 +541,7 @@ reap_dead_lanes() {
     [ -d "${wt}" ] || continue
     rid="$(basename "${wt}")"
     [ -e "${LANES_DIR}/${rid}.lock" ] && continue
-    retire_lane "${rid}" "${wt}" "reaped lockless lane" >/dev/null 2>&1 || true
+    retire_lane "${rid}" "${wt}" "reaped lockless lane" >/dev/null || true
     echo "athena-shipwright: reaped lockless lane ${rid}." >&2
   done
   git -C "${MAIN_CHECKOUT}" worktree prune >>"${log}" 2>&1 || true
@@ -1148,12 +1149,17 @@ if [ -n "${tip}" ] && [ "${tip}" != "${BASE_COMMIT}" ] && ! commit_reachable "${
   stranded=1
 fi
 
-# Always remove the worktree; retire_lane keeps the branch iff it is stranded.
-if retire_lane "${RUN_ID}" "${WORKTREE}" "run ${ts}"; then
-  : # branch deleted (landed) or never had commits
-else
-  stranded=1  # retire_lane kept a stranded branch and already printed the Fix
-fi
+# Always remove the worktree; retire_lane keeps the branch iff it is stranded,
+# or iff git cannot read its ref (COULD NOT TELL, DND-1662). Either way it has
+# already printed the Fix.
+unreadable=0
+lane_rc=0
+retire_lane "${RUN_ID}" "${WORKTREE}" "run ${ts}" || lane_rc=$?
+case "${lane_rc}" in
+  0) ;;            # branch deleted (landed) or never had commits
+  2) stranded=1; unreadable=1 ;;
+  *) stranded=1 ;;
+esac
 
 # Release + remove this lane's liveness lock and meta.
 # NOTE the braces. `exec 8>&- 2>/dev/null` would apply the 2>/dev/null to the
@@ -1297,7 +1303,9 @@ else
   bump_fail
 fi
 
-if [ "${stranded}" -eq 1 ] && [ "${status}" -eq 0 ]; then
+if [ "${unreadable}" -eq 1 ]; then
+  echo "athena-shipwright: run ${ts}: COULD NOT TELL whether its lane branch holds unlanded work (git cannot read its ref); kept as found, counted as an unsuccessful outcome." >&2
+elif [ "${stranded}" -eq 1 ] && [ "${status}" -eq 0 ]; then
   echo "athena-shipwright: run ${ts} ran clean but its commits did not land on main; counted as an unsuccessful outcome." >&2
 fi
 echo "athena-shipwright: run ${ts} exited ${status} (stranded=${stranded}); log: ${log}" >&2

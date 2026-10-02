@@ -145,6 +145,8 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   limit)     echo "You've hit your weekly limit"; exit 1 ;;
   crash)     echo "segmentation fault"; exit 3 ;;
   strand)    : >"$LEADTIME_RECEIPT"; echo change >strand.txt; g add strand.txt >/dev/null; g commit -q -m "unlanded change"; summary; exit 0 ;;
+  corrupt-ref) : >"$LEADTIME_RECEIPT"; b="$(git symbolic-ref --short HEAD)"; echo "$b" >"$d/corrupt-branch"
+             printf 'not-a-sha\n' >"$(git rev-parse --path-format=absolute --git-common-dir)/refs/heads/$b"; summary; exit 0 ;;
   strand-noreceipt) echo change >strand.txt; g add strand.txt >/dev/null; g commit -q -m "unlanded change"; exit 0 ;;
   land)      : >"$LEADTIME_RECEIPT"; echo change >landed.txt; g add landed.txt >/dev/null; g commit -q -m "landed change"
              g push -q origin HEAD:main 2>/dev/null || exit 9; summary; exit 0 ;;
@@ -703,6 +705,21 @@ if [ "$rc" = 72 ] && [ "$(fails "$c")" = 1 ] && [ "$(lane_branches "$c")" = 1 ] 
   ok "stranded commits with no receipt still exit 72 and count; never exit 0, never BLOCKED"
 else
   bad "stranded no receipt" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+# The run's own lane branch ref is corrupt (DND-1662): COULD NOT TELL, never a
+# clean run and never mislabelled "commits not on origin/main"; the record and
+# the Fix: name the unreadable ref, and the ref file is left as found.
+c="$(new_case)"; echo corrupt-ref >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"; failed="$(newest "$c" failed)"
+cb="$(cat "$c/corrupt-branch" 2>/dev/null)"; cref="$c/repo/.git/refs/heads/$cb"
+if [ "$rc" = 72 ] && [ "$(fails "$c")" = 1 ] && [ -n "$cb" ] && [ "$(cat "$cref" 2>/dev/null)" = "not-a-sha" ] \
+   && grep -q 'COULD NOT TELL: git cannot read its ref' "$run" && ! grep -q 'commits not on origin/main' "$run" \
+   && grep -q 'COULD NOT TELL: git cannot read the lane branch' "$failed" \
+   && grep -q "Fix:.*show-ref --exists refs/heads/$cb.*logs/refs/heads/$cb" "$c/runner.err"; then
+  ok "own lane branch ref corrupt: COULD NOT TELL, exit 72, counted, the record and Fix: name the unreadable ref, the ref left as found"
+else
+  bad "own lane corrupt ref" "rc=$rc fails=$(fails "$c") ref=$(cat "$cref" 2>&1) run=$(cat "$run" 2>/dev/null) failed=$(cat "$failed" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 # ---------------------------------------------------------------------------------

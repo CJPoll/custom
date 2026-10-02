@@ -17,7 +17,8 @@
 # Liveness of a lane is a held flock on <lanes>/<run-id>.lock; a dead lane is
 # reaped at the start of a tick by that lock, never by a pid. A lane whose
 # commits are not on origin/main is STRANDED: its branch is kept, never
-# deleted, and the tick counts as unsuccessful. After the session the main
+# deleted, and the tick counts as unsuccessful. So is one whose branch ref git
+# cannot read (COULD NOT TELL), which is never read as "no branch". After the session the main
 # checkout is fast-forwarded only to the run's OWN newest commit, once it is on
 # origin/main (DND-1008), never forced. The run's own commits are the ones its
 # lane's HEAD reflog records it making, never every commit its lane holds: a
@@ -119,7 +120,8 @@
 #   70  the session exited 0 but wrote no summary: counted
 #   71  flock failed for a reason other than "held" (a fault, never a skip)
 #   72  STRANDED: the lane holds commits that are not on origin/main, or a
-#       product lane holds a commit never pushed to an improver PR, whatever
+#       product lane holds a commit never pushed to an improver PR, or git
+#       cannot read a lane branch's ref (COULD NOT TELL, DND-1662), whatever
 #       the session's exit. The branch is kept: counted
 #   73  the state directory, lock, lane, product lane or manifest, or MCP
 #       config could not be created, or ai/bin/leadtime-product is missing
@@ -659,7 +661,7 @@ commit_landed() { # commit-ish
 # retire_lane <run-id> <context> — remove one lane's worktree, and delete its
 # branch unless its commits are not on origin/main (then keep it, say how to
 # recover, and return 1). The branch is never deleted while it holds work. A
-# branch ref git cannot read is COULD NOT TELL: kept as found, named, return 1.
+# branch ref git cannot read is COULD NOT TELL: kept as found, named, return 2.
 retire_lane() {
   local rid="$1" ctx="$2" wt="${LANES_DIR}/$1" br="leadtime/$1"
   git -C "${MAIN_CHECKOUT}" worktree remove --force "${wt}" >>"${GIT_LOG}" 2>&1 || rm -rf -- "${wt}"
@@ -672,8 +674,8 @@ retire_lane() {
   [ "${exists}" = 2 ] && return 0
   if [ "${exists}" != 0 ]; then
     echo "${ME}: COULD NOT TELL whether branch ${br} exists (${ctx}): git show-ref --exists exit ${exists}; the branch is KEPT as found." >&2
-    echo "  Fix: inspect the ref with 'git -C ${MAIN_CHECKOUT} show-ref --exists refs/heads/${br}' (git >= 2.43; git's reason is in ${GIT_LOG}). A corrupt ref file may still name recoverable commits ('git -C ${MAIN_CHECKOUT} fsck --lost-found'); repair or delete it by hand. It is never auto-deleted." >&2
-    return 1
+    echo "  Fix: inspect the ref with 'git -C ${MAIN_CHECKOUT} show-ref --exists refs/heads/${br}' (git's reason is in ${GIT_LOG}; exit 129 means this git predates --exists: upgrade to git >= 2.43). The branch's last tip is in its reflog ('git -C ${MAIN_CHECKOUT} rev-parse --git-path logs/refs/heads/${br}'); recover it, then repair or delete the ref by hand. It is never auto-deleted." >&2
+    return 2
   fi
   if commit_landed "${br}"; then
     git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${GIT_LOG}" 2>&1 || true
@@ -1135,11 +1137,17 @@ elif [ -n "${own}" ]; then
 fi
 
 STRANDED=0
+LANE_UNREADABLE=0
 LANE_RESULT="removed"
-if ! retire_lane "${RUN_ID}" "run ${ts}"; then
-  STRANDED=1
-  LANE_RESULT="branch ${BRANCH} KEPT (stranded: commits not on origin/main)"
-fi
+lane_rc=0
+retire_lane "${RUN_ID}" "run ${ts}" || lane_rc=$?
+case "${lane_rc}" in
+  0) ;;
+  2) STRANDED=1; LANE_UNREADABLE=1
+     LANE_RESULT="branch ${BRANCH} KEPT (COULD NOT TELL: git cannot read its ref)" ;;
+  *) STRANDED=1
+     LANE_RESULT="branch ${BRANCH} KEPT (stranded: commits not on origin/main)" ;;
+esac
 { exec 8>&-; } 2>/dev/null || true
 rm -f -- "${LANE_LOCK}" "${LANE_META}" "${MCP_FILE}"
 
@@ -1226,6 +1234,12 @@ if [ "${STRANDED}" -eq 1 ] && [ "${PRODUCT_STRANDED}" -eq 1 ] && [ "${LANE_RESUL
   record_failure "a product lane holds a commit that was never pushed to an improver PR" "${pd_lines[@]}" "session_exit=${status}"
   echo "${ME}: run ${ts} is STRANDED in a product repo (session exit ${status}); its branch is kept. Counted as unsuccessful. Record: ${LOG_DIR}/${ts}.failed" >&2
   echo "  Fix: the product_lane line in the record names the repo and branch. Push it and open its PR (leadtime-product pr), or drop it with 'git -C <repo> branch -D <branch>'. It is never auto-deleted." >&2
+  finish 72 stranded
+fi
+if [ "${LANE_UNREADABLE}" -eq 1 ]; then
+  record_failure "COULD NOT TELL: git cannot read the lane branch's ref, so whether it holds unlanded commits is unknown" "branch=${BRANCH} (kept as found)" "session_exit=${status}"
+  echo "${ME}: run ${ts} COULD NOT TELL whether ${BRANCH} holds unlanded work: git cannot read its ref (session exit ${status}). The branch is kept as found. Counted as unsuccessful. Record: ${LOG_DIR}/${ts}.failed" >&2
+  echo "  Fix: inspect it with 'git -C ${MAIN_CHECKOUT} show-ref --exists refs/heads/${BRANCH}' (git's reason is in ${GIT_LOG}); its last tip is in its reflog ('git -C ${MAIN_CHECKOUT} rev-parse --git-path logs/refs/heads/${BRANCH}'). Recover it, then repair or delete the ref by hand." >&2
   finish 72 stranded
 fi
 if [ "${STRANDED}" -eq 1 ]; then

@@ -924,11 +924,28 @@ cb="$(cat "$a/corrupt-branch" 2>/dev/null)"
 cref="$r/.git/refs/heads/$cb"
 if [ -n "$cb" ] && [ "$(cat "$cref" 2>/dev/null)" = "not-a-sha" ] \
    && grep -q "COULD NOT TELL whether branch $cb exists" "$a/runner.err" \
-   && grep -q "Fix:.*show-ref --exists refs/heads/$cb" "$a/runner.err" \
+   && grep -q "Fix:.*show-ref --exists refs/heads/$cb.*logs/refs/heads/$cb" "$a/runner.err" \
+   && grep -q "COULD NOT TELL whether its lane branch holds unlanded work" "$a/runner.err" \
+   && ! grep -q "ran clean but its commits did not land" "$a/runner.err" \
    && [ "$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null)" = "1" ]; then
-  ok "a corrupt lane branch ref: COULD NOT TELL with a Fix:, the ref file left as found, counted"
+  ok "a corrupt lane branch ref: COULD NOT TELL with a Fix:, the ref file left as found, counted, never called an unlanded push"
 else
   bad "corrupt lane branch ref" "rc=$rc branch=$cb ref=$(cat "$cref" 2>&1) counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null) err=$(cat "$a/runner.err")"
+fi
+
+# The reaper names a dead lane's unreadable branch too: its COULD NOT TELL line
+# and Fix: reach the runner's stderr, never /dev/null.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+make_corpse "$r" "run-corrupt" "spawned"
+cref="$r/.git/refs/heads/shipwright/run-corrupt"
+printf 'not-a-sha\n' >"$cref"
+rc="$(run_runner "$r")"
+if [ "$(cat "$cref" 2>/dev/null)" = "not-a-sha" ] && [ ! -e "$(lanes_dir "$r")/run-corrupt/.git" ] \
+   && grep -q "COULD NOT TELL whether branch shipwright/run-corrupt exists (reaped dead spawned run)" "$a/runner.err" \
+   && grep -q "Fix:.*show-ref --exists refs/heads/shipwright/run-corrupt" "$a/runner.err"; then
+  ok "reap: a dead lane whose branch ref is corrupt is named COULD NOT TELL with a Fix:, the ref left as found"
+else
+  bad "reap corrupt ref" "rc=$rc ref=$(cat "$cref" 2>&1) err=$(cat "$a/runner.err")"
 fi
 
 # ---------------------------------------------------------------------------
