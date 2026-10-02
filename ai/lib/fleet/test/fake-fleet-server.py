@@ -83,12 +83,27 @@ def hold(path):
         time.sleep(0.05)
 
 
-# With "answered_file": PATH in the spec, PATH is created once the answer has
-# been written or abandoned (DND-1719). A test that must see what the server
-# did with an answer waits on PATH, never on a clock.
-def answered(path):
-    if path:
-        open(path, "w").close()
+# With "answered_file": PATH in the spec, PATH is written once the request's
+# handling is over, error handling included, and holds what became of the
+# answer (DND-1719): "sent", "gone" (the client was gone before it), or
+# "error" (anything else; its traceback is already on stderr by then). A test
+# that must see what the server did with an answer waits on PATH, never on a
+# clock. Keyed by the request's socket, so concurrent requests do not mix.
+OUTCOMES = {}
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            path, outcome = OUTCOMES.pop(request, (None, None))
+            if path:
+                with open(path + ".tmp", "w") as fh:
+                    fh.write(outcome + "\n")
+                os.rename(path + ".tmp", path)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -132,6 +147,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             ctype = "text/html"
         data = payload.encode()
+        path = spec.get("answered_file")
+        OUTCOMES[self.request] = (path, "error")
         try:
             self.send_response(status)
             self.send_header("Content-Type", ctype)
@@ -142,12 +159,12 @@ class Handler(BaseHTTPRequestHandler):
             # The client is gone (a killed waiter's curl): nobody is left to
             # answer, and that is not a server error (DND-1719).
             self.close_connection = True
-        finally:
-            answered(spec.get("answered_file"))
+            OUTCOMES[self.request] = (path, "gone")
+            return
+        OUTCOMES[self.request] = (path, "sent")
 
 
-server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-server.daemon_threads = True
+server = Server(("127.0.0.1", 0), Handler)
 with open(PORT_FILE + ".tmp", "w") as fh:
     fh.write(str(server.server_address[1]))
 os.rename(PORT_FILE + ".tmp", PORT_FILE)

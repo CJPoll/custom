@@ -74,6 +74,7 @@ has "[DND-484 test 5] ... with Fix:" "$(cat "${TMP}/uerr")" "Fix:"
 # DND-1719: the poll below must not take that refusal (it says "--budget 600s")
 # for the waiter's budget line. When it did, it killed the waiter before the
 # line was written, and the verdict turned on scheduling.
+has "[DND-1719] fixture: the refusal names --budget, as the stale file did" "$(cat "${TMP}/uerr")" "--budget 600s"
 if fw_budget_line_seen "${TMP}/uerr"; then
   bad "[DND-1719] the 600s refusal is not read as the waiter's budget line" "$(cat "${TMP}/uerr")"
 else
@@ -115,14 +116,16 @@ fleet_respond "{\"status\":200,\"body\":${DRAIN_B}}"
 # the real FAIL detail. Made deterministic: a second fake server, its stderr
 # kept apart; the client resets the connection (SO_LINGER 0) while the answer
 # is held, the answer is released only after that, and the test waits on the
-# server's own "answered" marker.
+# server's "answered" marker, which it writes after its own error handling and
+# which says what became of the answer.
 GONE="${TMP}/gone"
 mkdir -p "${GONE}"
 printf '{"status":200,"hold_file":"%s/release","answered_file":"%s/answered","body":{}}\n' "${GONE}" "${GONE}" > "${GONE}/responses.json"
 python3 "${FAKE}" "${GONE}/port" "${GONE}/server.log" "${GONE}/responses.json" "${TMP}/token" 2>"${GONE}/server.err" &
-GONE_PID=$!
+SPARE_SERVER_PID=$!
 for i in $(seq 1 1200); do [ -s "${GONE}/port" ] && break; sleep 0.05; done
-timeout 60 python3 - "$(cat "${GONE}/port")" "${GONE}/server.log" <<'PY'
+check "[DND-1719] fixture: the second fake server started" test -s "${GONE}/port"
+timeout 60 python3 - "$(cat "${GONE}/port" 2>/dev/null)" "${GONE}/server.log" <<'PY'
 import os, socket, struct, sys, time
 port, log = int(sys.argv[1]), sys.argv[2]
 s = socket.create_connection(("127.0.0.1", port))
@@ -135,8 +138,8 @@ s.close()
 PY
 touch "${GONE}/release"
 for i in $(seq 1 1200); do [ -e "${GONE}/answered" ] && break; sleep 0.05; done
-check "[DND-1719] fixture: the server tried to answer a client that was gone" test -e "${GONE}/answered"
-kill "${GONE_PID}" 2>/dev/null; wait "${GONE_PID}" 2>/dev/null
+eq "[DND-1719] fixture: the server found the client gone when it answered" "$(cat "${GONE}/answered" 2>/dev/null)" "gone"
+kill "${SPARE_SERVER_PID}" 2>/dev/null; wait "${SPARE_SERVER_PID}" 2>/dev/null; SPARE_SERVER_PID=""
 eq "[DND-1719] a client gone before its answer is not a fake-server error" "$(cat "${GONE}/server.err")" ""
 
 # Without pgrep the trap cannot list the poll's tree: wait refuses to start

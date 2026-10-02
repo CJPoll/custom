@@ -19,8 +19,9 @@ fw() {
 
 # fw_budget_line_seen <file> -- 0 if <file> holds the waiter's own budget line
 # (bin/fleet-control prints it first, as "fleet-control: wait: budget ...").
-# The bare word "budget" also matched a --budget refusal (DND-1719).
-fw_budget_line_seen() { grep -q '^fleet-control: wait: budget [0-9]' "$1" 2>/dev/null; }
+# The bare word "budget" also matched a --budget refusal (DND-1719). Anchored
+# at both ends, so only a whole line matches.
+fw_budget_line_seen() { grep -qE '^fleet-control: wait: budget [0-9]+s, .* every [0-9]+s\.$' "$1" 2>/dev/null; }
 
 # fw_until_budget_line <file> <args...> -- start the waiter for session B with
 # its stderr in <file>, kill it once it has printed its budget line, and wait
@@ -31,7 +32,7 @@ fw_budget_line_seen() { grep -q '^fleet-control: wait: budget [0-9]' "$1" 2>/dev
 fw_until_budget_line() {
   local f="$1" p i; shift
   : > "${f}"
-  timeout 60 "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" "$@" >/dev/null 2>"${f}" & p=$!
+  timeout -k 5 60 "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" "$@" >/dev/null 2>"${f}" & p=$!
   for i in $(seq 1 1200); do
     fw_budget_line_seen "${f}" && break
     kill -0 "${p}" 2>/dev/null || break

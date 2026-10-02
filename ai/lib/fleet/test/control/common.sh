@@ -59,9 +59,11 @@ done
 TMP="$(mktemp -d)" || { echo "FAIL mktemp"; exit 1; }
 SERVER_PID=""
 HOLDER_PID=""
+SPARE_SERVER_PID=""   # a suite's second fake server (DND-1719)
 cleanup() {
   [ -n "${SERVER_PID}" ] && kill "${SERVER_PID}" 2>/dev/null
   [ -n "${HOLDER_PID}" ] && kill "${HOLDER_PID}" 2>/dev/null
+  [ -n "${SPARE_SERVER_PID}" ] && kill "${SPARE_SERVER_PID}" 2>/dev/null
   rm -rf "${TMP}"
 }
 trap cleanup EXIT INT TERM
