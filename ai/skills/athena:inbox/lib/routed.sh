@@ -401,18 +401,20 @@ routed_pick_machine() {
   return 1
 }
 
-# routed_session_args <to_machine> <to_inbox> <from_inbox> <subject> <re> <thread>
+# routed_session_args <to_machine> <to_inbox> <from_inbox> <subject> <re> <thread> [reroute-of]
 # The session_send tool arguments as one JSON object; the BODY IS ON STDIN.
 # `from_inbox` is a TOP-LEVEL argument of the tool (and a top-level field of the
 # harness-emit request it becomes), never a payload field -- the server's
-# payload schema is closed and refuses it there. An empty `re`/`thread` is
-# omitted, not sent as "".
+# payload schema is closed and refuses it there. `reroute_of_event_id`
+# (DND-1620) is top-level too. An empty `re`/`thread`/reroute is omitted, not
+# sent as "".
 routed_session_args() {
   jq -n -c --rawfile body /dev/stdin \
-    --arg tm "$1" --arg ti "$2" --arg fi "$3" --arg s "$4" --arg re "$5" --arg th "$6" '
+    --arg tm "$1" --arg ti "$2" --arg fi "$3" --arg s "$4" --arg re "$5" --arg th "$6" --arg rr "${7:-}" '
     {to: {machine_id: $tm, inbox_name: $ti}, from_inbox: $fi, subject: $s, body: $body}
     + (if $re == "" then {} else {re: $re} end)
-    + (if $th == "" then {} else {thread: $th} end)'
+    + (if $th == "" then {} else {thread: $th} end)
+    + (if $rr == "" then {} else {reroute_of_event_id: $rr} end)'
 }
 
 # The JSON-RPC error codes that mean the server REFUSED the call before doing
@@ -453,15 +455,21 @@ routed_tool_result() {
   printf '%s\n' "${res}"
 }
 
-# routed_send_receipt <result-json> <to_machine> <to_inbox> <from_inbox>
+# routed_send_receipt <result-json> <to_machine> <to_inbox> <from_inbox> [reroute-of]
 # What send-mail --routed prints: {path, event_id, delivery_id, status, to,
 # from_inbox}. A result with no event_id is not a receipt (status 1).
+# For a forward (a non-empty reroute-of, DND-1620) it also carries the
+# server's `feedback` and `claim_transfer` words, each null when the server
+# sent none: a missing word is never read as "recorded" or "moved".
 routed_send_receipt() {
   local res="$1"
   printf '%s' "${res}" | jq -e '(.event_id // "") | type == "string" and length > 0' >/dev/null 2>&1 || return 1
-  printf '%s' "${res}" | jq -c --arg tm "$2" --arg ti "$3" --arg fi "$4" \
+  printf '%s' "${res}" | jq -c --arg tm "$2" --arg ti "$3" --arg fi "$4" --arg rr "${5:-}" \
     '{path: "routed", event_id, delivery_id: (.delivery_id // null), status: (.status // "pending"),
-      to: {machine_id: $tm, inbox_name: $ti}, from_inbox: $fi}'
+      to: {machine_id: $tm, inbox_name: $ti}, from_inbox: $fi}
+     + (if $rr == "" then {} else
+          {feedback: (.feedback // null | if type == "string" then . else null end),
+           claim_transfer: (.claim_transfer // null | if type == "string" then . else null end)} end)'
 }
 
 # --- the sender's machine NAME (DND-376) ------------------------------------

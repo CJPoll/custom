@@ -221,6 +221,65 @@ shim_reset
 assert_eq "worktree: exit 0" 0 "${RC}"
 assert_eq "worktree: from_inbox is the parent project's" "cproj-session.jsonl" "$(jq -r .from_inbox "${SHIM}/args.session_send.json" 2>/dev/null)"
 
+echo "== DND-1620: --reroute-of forwards a topic-routed conversation, and never claims =="
+# The forward names the routed event, so the server records the reroute and
+# moves a claim the sender holds; the forwarder itself claims nothing.
+reroute_answer() { # reroute_answer <result-json-escaped>
+  printf 'event: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"%s"}],"isError":false}}\n\n' "$1" \
+    > "${SHIM}/session_send.answer"
+}
+shim_reset
+reroute_answer '{\"event_id\":\"ev-111\",\"delivery_id\":\"dl-222\",\"status\":\"pending\",\"feedback\":\"recorded\",\"claim_transfer\":\"transferred\"}'
+send --routed --to m-walt/walt_ui-session.jsonl --subject "forwarded: a walt_ui ask" --re https://example.test/archives/CFAKE00001/p1790 --reroute-of EVFAKE00001
+assert_eq "reroute: exit 0" 0 "${RC}"
+assert_eq "reroute: reroute_of_event_id is a TOP-LEVEL session_send argument" "EVFAKE00001" \
+  "$(jq -r '.reroute_of_event_id // "absent"' "${SHIM}/args.session_send.json" 2>/dev/null)"
+assert_eq "reroute: no claim tool is ever called; session_send is the only tools/call" "tools/call session_send" \
+  "$(calls | grep '^tools/call' | paste -sd'|')"
+assert_eq "reroute: the receipt carries the server's feedback word" "recorded" "$(printf '%s' "${RECEIPT}" | jq -r .feedback)"
+assert_eq "reroute: the receipt carries the server's claim_transfer word" "transferred" "$(printf '%s' "${RECEIPT}" | jq -r .claim_transfer)"
+assert_eq "reroute: the receipt still names the event" "ev-111" "$(printf '%s' "${RECEIPT}" | jq -r .event_id)"
+
+shim_reset
+reroute_answer '{\"event_id\":\"ev-111\",\"delivery_id\":\"dl-222\",\"status\":\"pending\",\"feedback\":\"refused:not_owner\",\"claim_transfer\":\"not_holder\"}'
+send --reroute-of EVFAKE00002 --routed --subject s --re /x --to m-walt/walt_ui-session.jsonl
+assert_eq "reroute, flag first: exit 0 (flags in any order)" 0 "${RC}"
+assert_eq "reroute, flag first: the event id is passed" "EVFAKE00002" "$(jq -r .reroute_of_event_id "${SHIM}/args.session_send.json" 2>/dev/null)"
+assert_eq "reroute: a refused feedback word is relayed as the server said it" "refused:not_owner|not_holder" \
+  "$(printf '%s' "${RECEIPT}" | jq -r '"\(.feedback)|\(.claim_transfer)"')"
+
+# A server that answers without the words (one older than DND-1467/1617) is
+# NOT read as "recorded" or "moved": the receipt says null, which the skill
+# reads as nothing recorded, nothing moved.
+shim_reset
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x --reroute-of EVFAKE00003
+assert_eq "reroute, an answer without the words: exit 0 (the message was sent)" 0 "${RC}"
+assert_eq "reroute, an answer without the words: both are null in the receipt, never absent" "true|true|null|null" \
+  "$(printf '%s' "${RECEIPT}" | jq -r '"\(has("feedback"))|\(has("claim_transfer"))|\(.feedback)|\(.claim_transfer)"')"
+
+shim_reset
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+assert_eq "no --reroute-of: no reroute_of_event_id argument is sent" "false" "$(jq 'has("reroute_of_event_id")' "${SHIM}/args.session_send.json" 2>/dev/null)"
+assert_eq "no --reroute-of: the receipt has no feedback or claim_transfer key" "false" \
+  "$(printf '%s' "${RECEIPT}" | jq 'has("feedback") or has("claim_transfer")')"
+
+for bad_id in "" "--subject" "-x"; do
+  shim_reset
+  send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x --reroute-of "${bad_id}"
+  refused_before_network "--reroute-of [${bad_id}]" "--reroute-of"
+done
+shim_reset
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x --reroute-of
+refused_before_network "--reroute-of with no value at all" "--reroute-of"
+
+shim_reset
+send peer-mail a-forward --to peer --reroute-of EVFAKE00004
+refused_before_network "--reroute-of on a maildir send" "--reroute-of"
+assert_contains "--reroute-of on a maildir send: the Fix names the routed form" "send-mail --routed" "${ERR}"
+shim_reset
+send --local peer-mail a-forward --to peer --reroute-of EVFAKE00004
+refused_before_network "--reroute-of with --local" "--reroute-of"
+
 echo "== refusals: every one BEFORE the network, each with its own Fix =="
 shim_reset
 send --routed --to m-walt/walt_ui-session.jsonl --re /x

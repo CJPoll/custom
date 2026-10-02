@@ -4287,12 +4287,21 @@ follow it.
     holder's.
   - **`claim: false` opts out.** The post claims nothing and answers
     `skipped`, reason `opted_out`. The default is `true`.
+  - **`reroute_of_event_id` marks a forward note** (DND-1620). A session that
+    forwarded a topic-routed conversation posts its note in the owner's
+    thread with the routed event's `event_id`. The post claims nothing and
+    answers `skipped`, reason `reroute`, whatever `inbox_name` it carries.
+    The id is a marker only: it is not sent to Slack and records no
+    feedback (`session_send` records the reroute). A blank or non-string
+    value is refused, and so is `claim: true` beside it; nothing is posted.
+    A server older than DND-1620 refuses the argument as unknown and posts
+    nothing (`athena:slack` → *Forwarding a misroute* says what to do then).
   - **The reply's `claim` object** says what happened, and a claim never
     fails the post (the message is already sent):
     `{"status": "claimed" | "already_yours", "inbox_name"}` (the Slack inbox
     that holds it); `{"status": "already_claimed"}` (another inbox holds the
     thread, never named); or `{"status": "skipped", "reason", "fix"}`. The
-    reasons are `opted_out` (no `fix`), `no_inbox_name`, `no_slack_inbox`
+    reasons are `reroute` and `opted_out` (neither has a `fix`), `no_inbox_name`, `no_slack_inbox`
     (also a claim target that is not a live Slack inbox on this machine),
     `team_unknown` (Slack's answer carried no team id), `not_permitted` (the
     owner may not route this app), `invalid_key`, and `claim_failed`.
@@ -4304,7 +4313,8 @@ follow it.
     The harness bins (`athena:slack` → *Thread replies come back to the
     session that started the thread*) print `claim=skipped` only for
     `--no-claim` (or `reply --reroute-of`, which implies it), and a failed
-    claim as `claim=FAILED reason=<token>` with a `Fix:`. So server `skipped`/`opted_out` is harness `claim=skipped`;
+    claim as `claim=FAILED reason=<token>` with a `Fix:`. So server `skipped`
+    with reason `opted_out` or `reroute` is harness `claim=skipped`;
     server `skipped` with any other reason is harness `claim=FAILED`; and
     `claimed` and `already_yours` mean the same on both sides.
     `already_claimed` depends on the harness caller: `reply` and
@@ -4341,7 +4351,8 @@ follow it.
 - **The holder's forward moves its claim** (DND-1617, gen_saas
   `ThreadClaims.transfer_on_reroute/5`). A session that forwards a
   conversation with the `athena` MCP tool `session_send` and
-  `reroute_of_event_id` also moves the claim on that event's thread, when its
+  `reroute_of_event_id` (`athena:inbox` `send-mail --routed --reroute-of
+  <event_id>` passes it, DND-1620) also moves the claim on that event's thread, when its
   own inbox holds it, to the forward's destination: the `to` session's
   project Slack inbox (`gen_saas-session.jsonl` moves it to
   `gen_saas-slack.jsonl` on the `to` machine). The owner's follow-ups in that
@@ -4873,8 +4884,9 @@ A flag surfaces in three places:
   `label` and the precise `reason` (`ai/contracts/athena-inbox.md` → *Line
   format*), flag or not, so the receiving session can see the message was
   meant for another session. It forwards with `session_send` and
-  `reroute_of_event_id`, and a note it posts in the owner's thread claims
-  nothing (`reply --reroute-of`, or `slack_post` with `claim: false`). That
+  `reroute_of_event_id` (`send-mail --routed --reroute-of`), and a note it
+  posts in the owner's thread claims nothing (`reply --reroute-of`, or
+  `slack_post` with `reroute_of_event_id`). That
   argument is safe to pass even on a forward to
   the session Jev chose: the server records no "wrong" feedback for it,
   because a correction equal to Jev's answer is refused (`refused:invalid:correction`,

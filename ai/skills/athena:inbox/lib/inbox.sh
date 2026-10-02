@@ -1677,12 +1677,14 @@ inbox_doorbell_channel() {
 # --- routed session messages (HG-17 / DND-312) ------------------------------
 
 # inbox_send_routed <to-spec> <to-project-spec> <subject> <re> <thread> [cwd]
-#                                                              (body on stdin)
+#                   [reroute-of]                               (body on stdin)
 #
 # `send-mail --routed`: hand one message to the `athena` MCP `session_send`
 # tool and print its receipt, {path, event_id, delivery_id, status, to,
 # from_inbox}. Exactly one of <to-spec> / <to-project-spec> is non-empty (the
-# Framework checks).
+# Framework checks). A non-empty <reroute-of> (DND-1620) is sent as
+# reroute_of_event_id, and the receipt then also carries `feedback` and
+# `claim_transfer` (null when the server sent none).
 #
 # THE ORDER IS CHEAPEST-REFUSAL FIRST, AND NOTHING LOCAL IS EVER WRITTEN:
 #
@@ -1950,7 +1952,7 @@ inbox_default_path() {
 }
 
 inbox_send_routed() {
-  local to_spec="$1" project_spec="$2" subject="$3" re="$4" thread="$5" cwd="${6:-.}"
+  local to_spec="$1" project_spec="$2" subject="$3" re="$4" thread="$5" cwd="${6:-.}" reroute="${7:-}"
   local to_machine="" to_inbox="" project="" sel="" parsed body entry rc from_inbox
   local main url out machines res args receipt
 
@@ -2023,7 +2025,7 @@ inbox_send_routed() {
     to_machine="$(routed_pick_machine "${machines}" "${to_inbox}" "${sel}")" || return 1
   fi
 
-  args="$(printf '%s' "${body}" | routed_session_args "${to_machine}" "${to_inbox}" "${from_inbox}" "${subject}" "${re}" "${thread}")" || {
+  args="$(printf '%s' "${body}" | routed_session_args "${to_machine}" "${to_inbox}" "${from_inbox}" "${subject}" "${re}" "${thread}" "${reroute}")" || {
     inbox_fail "could not build the session_send arguments (nothing was sent)" "re-run; if it persists, report it with the flags you passed."
     return 1
   }
@@ -2058,7 +2060,7 @@ inbox_send_routed() {
     return 1
   fi
   receipt=""
-  [ "${rc}" -ne 0 ] || receipt="$(routed_send_receipt "${res}" "${to_machine}" "${to_inbox}" "${from_inbox}")"
+  [ "${rc}" -ne 0 ] || receipt="$(routed_send_receipt "${res}" "${to_machine}" "${to_inbox}" "${from_inbox}" "${reroute}")"
   if [ -z "${receipt}" ]; then
     inbox_fail "session_send answered without an event_id, so whether the message was recorded is UNKNOWN" \
       "do not blindly re-send (no idempotency key yet, DND-354); ask the recipient or check the server's delivery status first."

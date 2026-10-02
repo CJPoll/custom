@@ -6,7 +6,7 @@
 #                              [--body-file <path> | --edit]
 #   send-mail [--routed] (--to <machine_id>/<inbox_name> | --to-project <project>[@<machine>])
 #             --subject <line> (--re <path-or-url> | --thread <event_id>)...
-#             [--body-file <path> | --edit]
+#             [--reroute-of <event_id>] [--body-file <path> | --edit]
 #   send-mail -h                 this header
 #
 # The body comes from stdin, from --body-file, or from $EDITOR (--edit, or by
@@ -50,6 +50,17 @@
 # machine token (it is read from that 0600 file at send time, never from the
 # environment -- DND-839), or when this project declares no <project>-session.jsonl
 # channel. In this mode --thread is the event_id of the message you answer.
+#
+# --reroute-of <event_id> (DND-1620) marks a routed send as the FORWARD of a
+# topic-routed Slack conversation to the session that owns it. <event_id> is
+# the routed line's event_id, passed to session_send as reroute_of_event_id:
+# the server records the routing as wrong and moves a thread claim YOUR inbox
+# holds to the recipient's project (athena:slack -> Forwarding a misroute).
+# The forwarder never claims the thread. The receipt then also carries
+# `feedback` and `claim_transfer`, the server's words, or null when the server
+# sent none (read null as nothing recorded, nothing moved). Routed sends only:
+# on a maildir send it is refused. A missing, empty or flag-shaped <event_id>
+# is refused and nothing is sent.
 #
 # ============================ WHAT A SEND IS ===============================
 #
@@ -120,6 +131,8 @@ TO_PROJECT=""
 SUBJECT=""
 RE=""
 THREAD=""
+REROUTE_OF=""
+REROUTE_GIVEN=0
 BODY_FILE=""
 EDIT=0
 
@@ -147,6 +160,14 @@ while [ "$#" -gt 0 ]; do
     --subject)   need_value --subject "${2:-}";   SUBJECT="$2";   shift 2 ;;
     --re)        need_value --re "${2:-}";        RE="$2";        shift 2 ;;
     --thread)    need_value --thread "${2:-}";    THREAD="$2";    shift 2 ;;
+    --reroute-of)
+      # A forward note's event id (DND-1620): refused when missing or
+      # flag-shaped, like every other value, so it is never read as absent.
+      need_value --reroute-of "${2:-}"; case "$2" in -*)
+        inbox_fail "option \"--reroute-of\" needs the event_id of the forwarded conversation, got \"$2\" (nothing was sent)" \
+          "pass the routed line's event_id: send-mail --routed --to <machine_id>/<inbox> --subject <line> --re <slack-permalink> --reroute-of <event_id>."
+        exit 2 ;; esac
+      REROUTE_OF="$2"; REROUTE_GIVEN=1; shift 2 ;;
     --body-file) need_value --body-file "${2:-}"; BODY_FILE="$2"; shift 2 ;;
     --edit)      EDIT=1; shift ;;
     -h|--help)   usage; exit 0 ;;
@@ -215,6 +236,12 @@ if [ "${ADDRESS}" = "server" ]; then
   fi
   inbox_routed_precheck "${TO}" "${TO_PROJECT}" "${SUBJECT}" "${RE}" "${THREAD}" || exit 2
   [ "${ROUTED}" -eq 0 ] || PATH_REASON="--routed was given"
+elif [ "${REROUTE_GIVEN}" -eq 1 ]; then
+  # DND-1620: a forward names a routed event to the server; a maildir send
+  # has no server to name it to, so the flag would be text that goes nowhere.
+  inbox_fail "--reroute-of belongs to a routed send, and this is a maildir send (nothing was sent)" \
+    "forward through the server: send-mail --routed --to <machine_id>/<project>-session.jsonl --subject <line> --re <slack-permalink> --reroute-of <event_id>."
+  exit 2
 elif [ -n "${TO_PROJECT}" ] || [ -n "${SUBJECT}" ]; then
   if [ "${LOCAL}" -eq 1 ]; then
     inbox_fail "--to-project and --subject belong to a routed send, and --local sends on a maildir channel" \
@@ -396,7 +423,7 @@ if [ "${ROUTED}" -eq 1 ]; then
   # body is never echoed back. `event_id` is what a reply's --thread names;
   # `delivery_id` is the handle for the server's delivery status. "pending"
   # is literal: a platform delivery is delivered only on the recipient's ack.
-  printf '%s' "${BODY}" | inbox_send_routed "${TO}" "${TO_PROJECT}" "${SUBJECT}" "${RE}" "${THREAD}" "${PROJECT_DIR}" || exit 1
+  printf '%s' "${BODY}" | inbox_send_routed "${TO}" "${TO_PROJECT}" "${SUBJECT}" "${RE}" "${THREAD}" "${PROJECT_DIR}" "${REROUTE_OF}" || exit 1
   exit 0
 fi
 

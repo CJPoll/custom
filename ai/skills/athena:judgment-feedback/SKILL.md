@@ -46,7 +46,8 @@ You are the receiver when a judged result reaches you and you act on it.
    `false`. Repeat `--correct` once per question. Leave it out when you do
    not know the right answer. The note goes in a file (`--note-file`).
 4. **Forwarding a topic-routed Slack conversation** to the session that owns
-   it is itself the report: pass `reroute_of_event_id` to `session_send`. A
+   it is itself the report: forward with `send-mail --routed --reroute-of
+   <event_id>`, which passes `reroute_of_event_id` to `session_send`. A
    note in the owner's thread about the forward never claims it
    (`athena:slack` → *Forwarding a misroute*). The
    owner telling you "wrong session" in the thread is recorded by you, with the

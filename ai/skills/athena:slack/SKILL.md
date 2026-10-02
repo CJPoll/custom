@@ -194,8 +194,9 @@ not by this path. Pass `inbox_name` (any inbox of this project; it names the
 project) and the post claims the thread it started or joined for this
 project's Slack inbox. Pass `claim: false` when no reply is expected, or when
 you answer in a thread that should stay free for another project's session.
-Read the reply's `claim` object; on `skipped` for any reason but `opted_out`,
-follow its `fix`, and never re-post. What each status and reason means, and how they map to this
+Read the reply's `claim` object; on `skipped` for any reason but `opted_out`
+or `reroute` (a forward note, *Forwarding a misroute*), follow its `fix`, and
+never re-post. What each status and reason means, and how they map to this
 section's `claim=` lines: `ai/contracts/athena-events.md` → *Thread replies
 route to the thread's claimant* → *`slack_post` claims the thread it posts in*.
 
@@ -221,18 +222,33 @@ again (`ai/contracts/athena-events.md` → *Thread replies route to the
 thread's claimant* → *Routing*; the owner kept it so on DND-1605), so nothing
 downstream corrects it.
 
-1. Forward the conversation with the athena MCP `session_send`, passing
-   `reroute_of_event_id: <event_id>` (`athena:inbox-attend` → *A
-   topic-routed conversation that is not yours*).
+Every step names the forward with the routed line's `event_id`, so no step
+depends on remembering a no-claim flag (DND-1620).
+
+1. Forward the conversation with `athena:inbox/bin/send-mail --routed --to
+   <machine_id>/<project>-session.jsonl --subject <line> --re <permalink>
+   --reroute-of <event_id>` (`athena:inbox-attend` → *A topic-routed
+   conversation that is not yours*). It passes `reroute_of_event_id` to
+   `session_send`, and its receipt carries the server's `feedback` and
+   `claim_transfer` words, or `null` for a word the server did not send:
+   read `null` as nothing recorded and nothing moved. A missing, empty or
+   flag-shaped `event_id` is exit 2, and nothing is sent. Calling the athena
+   MCP `session_send` with `reroute_of_event_id: <event_id>` is the same
+   forward.
 2. If you post a note in the owner's thread to say where it went, post it
    with `reply <channel> <thread_ts> <text> --reroute-of <event_id>`, the same
    `event_id`. `--reroute-of` implies `--no-claim` and prints
    `claim=skipped`. The `event_id` is required but not sent: it makes the
    command say it is a forward note. A missing, empty or flag-shaped
-   `event_id` is exit 2, and nothing is sent. A forward with no
-   `reroute_of_event_id` (a reply under another session's root, say) posts
-   its note with `--no-claim`. Through the MCP instead, pass `claim: false`
-   to `mcp__athena__slack_post`; it has no forward marker of its own.
+   `event_id` is exit 2, and nothing is sent. Through the MCP instead, pass
+   `reroute_of_event_id: <event_id>` to `mcp__athena__slack_post`: the post
+   never claims, and its `claim` answers `skipped`, reason `reroute`. Never
+   pass `claim: true` beside it; the server refuses the pair. A server older
+   than DND-1620 refuses `reroute_of_event_id` as an unknown argument and
+   posts nothing; then post the note once with `claim: false` instead.
+3. A forward with no `reroute_of_event_id` (a reply under another session's
+   root, say) posts its note with `reply --no-claim`, or `slack_post` with
+   `claim: false`.
 
 The session that receives the forward claims the thread when it first replies
 there (*A reply claims an unclaimed thread* above). Never post the note with a
