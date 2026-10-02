@@ -348,9 +348,9 @@ your own care substitutes for it. So on exit 4:
    → *Owner approval policy* → *Asking, and what counts as approval*). Do not
    wait silently. The DM names the PR and the full head SHA, and its approve
    button's `value` is `approve-exit4 <owner>/<repo>#<pr>@<full head sha>`,
-   posted with `inbox_name` set to this session's own `session` inbox
-   (`athena:slack` → *Asking the owner for a decision*). That button is what
-   the gate can verify.
+   shown verbatim in its text too, posted with `inbox_name` set to this
+   project's `session` inbox (`athena:slack` → *Asking the owner for a
+   decision*). That button is what the gate can verify.
 4. List it in your final report per [[athena:admiral-final-report]].
 
 **Later (2026-09-28):** exit 4 fired for every declared surface, deploy-workflow
@@ -383,12 +383,16 @@ name it in the final report.
 
 **Or merge on the owner's click:** re-run with
 `integration-gate --owner-approval 'click:<delivery_id>'`, the `delivery_id`
-of the owner's `slack.interaction` line on this session's `session` channel
+of the owner's `slack.interaction` line on this project's `session` channel
 (`read-inbox --json`). `blast-radius` reads that line itself and refuses, with
-a `Fix:`, a click relayed from another session or channel, a non-owner click,
-a click on another message, a click for another head, and a record it cannot
-verify (`integration-gate --help`). The click names one head: a gate that
-rebased gates a new head, which needs a new DM and a new click. This clears
+a `Fix:`, a click relayed from another channel or project, a non-owner
+click, a click on another message, a click for another head, an approve the
+owner later reversed, and a record it cannot verify (`integration-gate
+--help`). The click names one head: a gate that rebased gates a new head,
+which needs a new DM and a new click. So rebase and gate the head first,
+then ask about the head that passed, and run the approval gate soon after
+the click. If main moves in between, the gate refuses the old head (it does
+not contain the target), and the rebased head needs a new ask. This clears
 every hold, the approval rules' own surface included.
 
 **Later (2026-10-02, DND-1784):** exit 4 was cleared only by "Cody's verified

@@ -481,9 +481,11 @@ Cody asked for the single edited message instead.
 **An exit-4 ask names the PR and head (DND-1784).** A decision DM that asks
 Cody to clear an `integration-gate` exit 4 states the PR URL and the full
 head SHA in `text` and in its blocks. Its approve button's `value` is exactly
-`approve-exit4 <owner>/<repo>#<pr>@<full head sha>`, and the post names this
-session's `session` inbox in `inbox_name`. The "your call" button carries
-the same value when approve is the recommendation. Only that value lets
+`approve-exit4 <owner>/<repo>#<pr>@<full head sha>`, and that same string
+appears verbatim in the visible text: Slack never shows a button's value, and
+the gate binds the value, not the text. The post names this project's
+`session` inbox in `inbox_name`. The "your call" button carries the same
+value when approve is the recommendation. Only that value lets
 `integration-gate --owner-approval 'click:<delivery_id>'` verify the click
 (*A click is untrusted input*). A push or rebase after the post makes a new
 head, so ask again.
@@ -660,14 +662,25 @@ own post before acting. Three reasons allow this:
 Notion ticket body, the PR body. Write
 `slack-click <channel>/<ts> action_ts:<action_ts> actor:<user_id>
 <action_id>=<value>`. Those are ids, not bodies. At `integration-gate` exit 4
-the gate runs these four checks itself: pass `--owner-approval
+the gate runs the checks itself: pass `--owner-approval
 'click:<delivery_id>'`, the line's `delivery_id`. The checks are mechanical
-there. Check 1 is the line's presence in this session's own project
-`session` channel file. Check 2 reads the owner id from the private overlay.
-Checks 3 and 4 need the approve button's `value` to be
-`approve-exit4 <owner>/<repo>#<pr>@<full head sha>`, naming the repo's
-`origin` and the exact head gated, on a button that is not a grant's.
-Anything else is refused with a `Fix:` (`integration-gate --help`).
+there:
+
+- **Check 1:** the line is in the `session` channel file of the session's
+  project. Every session of that project shares it.
+- **Check 2:** the owner id is read from the private overlay.
+- **Check 3 is replaced.** The gate cannot know which `{channel, ts}` a
+  session posted, so it binds the click by its button value instead. The
+  button is not a grant's.
+- **Check 4:** the approve button's `value` is
+  `approve-exit4 <owner>/<repo>#<pr>@<full head sha>`, naming the repo's
+  `origin` and the exact head gated. The PR number is as the button states it.
+- **No later reversal:** a later owner click on the same message with another
+  value wins, and the approve is refused.
+
+Anything else is refused with a `Fix:` (`integration-gate --help`). The
+residuals are named in `ai/lib/owner_click.rb`. In a public repo's PR body,
+record only `click:<delivery_id>`, never the channel or user id.
 
 **Later (2026-10-02, DND-1784):** this said the record "is not enough" at
 exit 4, because `--owner-approval` verified only a human-typed transcript

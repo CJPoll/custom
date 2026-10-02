@@ -35,10 +35,12 @@ export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 # DND-1475): never into the machine's real store from a fixture.
 export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
 
-# --owner-approval takes a VERIFIABLE record of the owner's own words (owner
+# --owner-approval takes a VERIFIABLE record of the owner's decision (owner
 # approval policy, 2026-09-28): session:<session-uuid>/<message-uuid>
 # quote:<words>, checked against a Claude Code transcript under
-# $HOME/.claude/projects. This fixture HOME holds one human-typed owner turn.
+# $HOME/.claude/projects, or the owner's click, click:<delivery_id>
+# (DND-1784; blast-radius --self-test covers that form). This fixture HOME
+# holds one human-typed owner turn.
 FIXTURE_HOME="${TMP}/home"
 FX_SID=11111111-2222-3333-4444-555555555555
 FX_MID=aaaaaaaa-0000-0000-0000-000000000001

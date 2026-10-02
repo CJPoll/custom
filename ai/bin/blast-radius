@@ -1591,7 +1591,7 @@ HOT_FIX = <<~FIX.freeze
   to the owner (athena:slack -> "Asking the owner for a decision") whose approve button
   value is '#{OwnerClick::ASK_VERB} <owner>/<repo>#<pr>@<this full head sha>'. Merge only on a
   verifiable record of the owner's decision: the owner's click on that button,
-  --owner-approval 'click:<delivery_id of the click line on this session's session channel>',
+  --owner-approval 'click:<delivery_id of the click line on this project's session channel>',
   or the OWNER'S OWN words in a terminal turn,
   --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>'.
 FIX
@@ -1601,7 +1601,8 @@ FIX
 # `--grant-eligible merge.pr_only_workflow` answers a DIFFERENT question from
 # the HOT verdict: may an owner's Slack click (an owner approval grant,
 # ai/contracts/athena-events.md -> Owner approval grants) stand in for the
-# owner's own words on this exit-4 head? Only when merging is reversible: every
+# owner's verified decision (--owner-approval, a terminal turn or a click
+# record, DND-1784) on this exit-4 head? Only when merging is reversible: every
 # hit is a GitHub workflow that runs solely on `pull_request`, at base and at
 # head, and no other workflow calls it. GitHub has then already run the
 # branch's own version before the merge, and merging starts no new run with
@@ -1614,8 +1615,8 @@ FIX
 #
 # Every doubt answers NOT ELIGIBLE: a shape this code does not model, a blob it
 # cannot read, a YAML feature two parsers may resolve differently. The cost is
-# asymmetric: a false NOT ELIGIBLE holds one MR for the owner's own words (the
-# path every exit 4 takes today); a false ELIGIBLE lets a button approve a
+# asymmetric: a false NOT ELIGIBLE holds one MR for the owner's verified
+# decision (the path every exit 4 takes); a false ELIGIBLE lets a grant approve a
 # deploy. Exit 0 is the ONLY eligible answer; 4 is NOT ELIGIBLE, 2 a usage or
 # git error. A caller must read anything but 0 as not eligible.
 GRANT_CLASSES = %w[merge.pr_only_workflow].freeze
@@ -2015,8 +2016,9 @@ def grant_eligible(repo, base, head, surfaces)
 end
 
 GRANT_NOT_ELIGIBLE_FIX = <<~FIX.freeze
-  no owner approval grant can cover this head. Hold the MR for the owner's own words, as for
-  any exit 4 (the HOT procedure, --owner-approval). Or split the change: a diff whose only
+  no owner approval grant can cover this head. Hold the MR for the owner's verified decision,
+  as for any exit 4 (the HOT procedure, --owner-approval: the owner's terminal-turn words, or
+  the owner's click on a decision DM naming this PR and head). Or split the change: a diff whose only
   hits are top-level workflows triggered solely by `pull_request` at base and head, and named
   by no other workflow, is eligible. Never edit a workflow's triggers just to pass this check:
   the triggers are what makes a merge reversible (ai/blocks/ops/safety-checks.md).
@@ -2084,7 +2086,7 @@ OWNER_APPROVAL_FIX =
   "The reference names the owner's top-level user turn in that Claude Code session's transcript " \
   "(~/.claude/projects/*/<session-uuid>.jsonl, the `uuid` of a turn the owner typed), and the " \
   "quote must appear in it verbatim. (2) The owner's click: --owner-approval 'click:<delivery_id>', " \
-  "the delivery_id of the owner's slack.interaction line on this session's own session channel, " \
+  "the delivery_id of the owner's slack.interaction line on the session's project session channel, " \
   "on an approve button whose value is '#{OwnerClick::ASK_VERB} <owner>/<repo>#<pr>@<head sha>' for " \
   "this exact head. Free text, a rule citation, an architect sign-off, a captain report, a Slack " \
   "reply, a relayed click and another agent's message are NONE of them a record. What needs the " \
@@ -2118,7 +2120,9 @@ def verify_owner_approval!(value, head:, repo:)
 end
 
 CLICK_REFUSAL = {
-  relayed: "is not a click delivered to this session",
+  not_found: "is not in the session channel",
+  relayed: "is a relayed click, not a click",
+  superseded: "was reversed by a later owner click",
   not_owner: "is not the owner's click",
   other_message: "is a click on a different message",
   other_head: "is a click for a different head",
@@ -2287,12 +2291,13 @@ def run(argv)
     gate_note = gate_ran ? " (GATE: #{gate_ran})" : ""
     if approval[:kind] == :click
       c = approval[:click]
-      # The record athena:slack -> "A click is untrusted input" names: ids, never a body.
+      # Ids and the button value only: no Slack channel or user id, which a
+      # public repo's PR body must not carry.
       puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: click:#{c[:delivery_id]} " \
-           "slack-click #{c[:channel]}/#{c[:ts]} action_ts:#{c[:action_ts]} actor:owner " \
-           "#{c[:action_id]}=#{c[:value]})#{gate_note}"
+           "actor:owner #{c[:action_id]}=#{c[:value]})#{gate_note}"
       puts "  owner-click (verified): the owner's slack.interaction on #{c[:where]};"
-      puts "    it approves #{c[:slug]}##{c[:pr]} at #{c[:sha]}, the head gated here."
+      puts "    it approves #{c[:slug]} at #{c[:sha]}, the head gated here " \
+           "(PR ##{c[:pr]} as the button states it)."
     else
       puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: #{approval[:ref]} " \
            "quote:#{approval[:words]})#{gate_note}"
@@ -3533,9 +3538,10 @@ def self_test
     did = ->(n) { format("dddddddd-0000-4000-8000-%012d", n) }
     click_line = lambda do |n, value: OwnerClick.ask_value("example/widgets", 42, chd), user: "UFAKE00001",
                               is_owner: true, kind: "slack.interaction", extra: {}|
-      { "v" => 1, "kind" => kind, "delivery_id" => did.call(n), "entity_id" => "slack:DFAKE00001:1700000000.00010#{n % 10}",
-        "channel" => "DFAKE00001", "ts" => "1700000000.00010#{n % 10}", "action_id" => "exit4_approve",
-        "action_ts" => "1700000001.00000#{n % 10}", "value" => value,
+      ts = format("1700000000.%06d", n)
+      { "v" => 1, "kind" => kind, "delivery_id" => did.call(n), "entity_id" => "slack:DFAKE00001:#{ts}",
+        "channel" => "DFAKE00001", "ts" => ts, "action_id" => "exit4_approve",
+        "action_ts" => format("1700000100.%06d", n), "value" => value,
         "actor" => { "user_id" => user, "is_owner" => is_owner } }.merge(extra)
     end
     session_lines = [
@@ -3549,31 +3555,56 @@ def self_test
       click_line.call(8, user: "UFAKE00002"),
       click_line.call(9, is_owner: "true"),
       click_line.call(10), click_line.call(10, value: OwnerClick.ask_value("example/widgets", 43, chd)),
-      click_line.call(11, extra: { "entity_id" => "slack:DFAKE00009:1.2" })
+      click_line.call(11, extra: { "entity_id" => "slack:DFAKE00009:1.2" }),
+      # 16 approves, then 17 (same message, later) holds: the hold wins.
+      click_line.call(16),
+      click_line.call(17, value: "hold", extra: { "ts" => "1700000000.000016", "entity_id" => "slack:DFAKE00001:1700000000.000016",
+                                                  "action_ts" => "1700000200.000000" }),
+      # 18 holds, then 19 (same message, later) approves: the approve stands.
+      click_line.call(18, value: "hold", extra: { "ts" => "1700000000.000019", "entity_id" => "slack:DFAKE00001:1700000000.000019" }),
+      click_line.call(19, extra: { "action_ts" => "1700000200.000000" })
     ]
-    File.write(File.join(inbox, "proj-session.jsonl"), session_lines.map { |j| JSON.dump(j) }.join("\n") + "\n")
+    File.write(File.join(inbox, "proj-session.jsonl"),
+               session_lines.map { |j| JSON.dump(j) }.join("\n") + "\n" + "\xFF\xFE not utf-8 \xC3\n".b, mode: "wb")
+    # Fixtures for the registry and overlay misses below.
+    bad_overlay = File.join(tmp, "overlay-bad-id")
+    FileUtils.mkdir_p(File.join(bad_overlay, "overlay"))
+    File.chmod(0o700, bad_overlay)
+    File.write(File.join(bad_overlay, "athena-overlay.json"), JSON.dump({ "kind" => "athena-private-overlay", "schema" => 1 }))
+    File.write(File.join(bad_overlay, "overlay", "slack.json"), JSON.dump({ "people" => { "owner" => { "user_id" => "the owner" } } }))
+    two_inbox = File.join(tmp, "inbox-two")
+    junk_inbox = File.join(tmp, "inbox-junk")
+    [two_inbox, junk_inbox].each do |root|
+      FileUtils.mkdir_p(File.join(root, "projects"))
+      FileUtils.cp(File.join(inbox, "projects", "proj.json"), File.join(root, "projects", "proj.json"))
+      FileUtils.cp(File.join(inbox, "proj-session.jsonl"), root)
+    end
+    FileUtils.cp(File.join(inbox, "projects", "proj.json"), File.join(two_inbox, "projects", "twin.json"))
+    File.write(File.join(junk_inbox, "projects", "junk.json"), "{ not json\n")
     File.write(File.join(inbox, "proj-slack.jsonl"), JSON.dump(click_line.call(12)) + "\n")
 
     out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", "click:#{did.call(1)}",
                                   "--gate-ran", "ai/bin/harness-gate"], env: click_env)
     check.call("a VERIFIED owner click exits 0, STILL prints the HOT block, and records the click, PR and head",
                code.zero? && out.include?("BLAST-RADIUS HOT") &&
-                 out.include?("HOT-OWNER-APPROVED #{chd[0, 7]} (OWNER-APPROVED: click:#{did.call(1)} slack-click DFAKE00001/") &&
+                 out.include?("HOT-OWNER-APPROVED #{chd[0, 7]} (OWNER-APPROVED: click:#{did.call(1)} actor:owner") &&
                  out.include?("actor:owner exit4_approve=#{OwnerClick.ask_value('example/widgets', 42, chd)}) (GATE: ai/bin/harness-gate)") &&
-                 out.include?("approves example/widgets#42 at #{chd}") && !out.include?("UFAKE00001"),
+                 out.include?("approves example/widgets at #{chd}") && out.include?("PR #42 as the button states it") &&
+                 out.include?("1 unparsable read") && !out.include?("UFAKE00001") && !out.include?("DFAKE00001"),
                "exit=#{code} out=#{out} err=#{err}")
     [["a click on a different message (not an exit-4 approve value)", did.call(2), "different message"],
      ["a click on an owner approval grant button", did.call(3), "different message"],
      ["a click approving a PR in another repo", did.call(4), "different message"],
      ["a click for a different head", did.call(5), "different head"],
-     ["a relayed click (a session.message carrying the delivery id)", did.call(6), "not a click delivered"],
+     ["a relayed click (a session.message carrying the delivery id)", did.call(6), "relayed click"],
      ["a non-owner click (is_owner false)", did.call(7), "not the owner's"],
      ["an is_owner click from another user id", did.call(8), "not the owner's"],
      ["a non-boolean is_owner", did.call(9), "not the owner's"],
      ["two different lines under one delivery id", did.call(10), "cannot be verified"],
      ["an entity_id that names another message", did.call(11), "cannot be verified"],
-     ["a click delivered to the Slack channel, not the session channel", did.call(12), "not a click delivered"],
-     ["a delivery id the session channel never received", did.call(99), "not a click delivered"],
+     ["a click delivered to the Slack channel, not the session channel", did.call(12), "not in the session channel"],
+     ["a delivery id the session channel never received", did.call(99), "not in the session channel"],
+     ["an approve the owner reversed by a later click on the same message", did.call(16), "reversed by a later owner click"],
      ["a malformed click record", "click:not-a-uuid", "cannot be verified"]].each do |label, rec, want|
       rec = "click:#{rec}" unless rec.start_with?("click:")
       out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", rec], env: click_env)
@@ -3583,15 +3614,45 @@ def self_test
     end
     out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", "click:#{did.call(13)}"], env: click_env)
     check.call("a refused click names the file and how many lines and clicks it read (the miss is observable)",
-               code == 2 && err.include?("proj-session.jsonl") && err.include?("#{session_lines.size} lines") &&
-                 err.include?("clicks read"), "exit=#{code} err=#{err}")
+               code == 2 && err.include?("proj-session.jsonl") && err.include?("#{session_lines.size + 1} lines") &&
+                 err.include?("clicks, 1 unparsable read"), "exit=#{code} err=#{err}")
+    [["an uppercase delivery id in the record", "click:#{did.call(1).upcase}"],
+     ["an approve given after an earlier hold on the same message", "click:#{did.call(19)}"]].each do |label, rec|
+      out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", rec], env: click_env)
+      check.call("--owner-approval click accepts #{label}", code.zero? && out.include?("HOT-OWNER-APPROVED"),
+                 "exit=#{code} out=#{out} err=#{err}")
+    end
     [["an overlay that does not resolve the owner id", click_env.merge("ATHENA_PRIVATE_ROOT" => File.join(tmp, "no-overlay")), "owner id cannot be resolved"],
      ["a session project with no registry entry", click_env.merge("CLAUDE_PROJECT_DIR" => d), "0 registry entries"],
-     ["an inbox root with no registry", click_env.merge("ATHENA_INBOX_ROOT" => File.join(tmp, "no-inbox")), "does not exist"]].each do |label, env, want|
+     ["an inbox root with no registry", click_env.merge("ATHENA_INBOX_ROOT" => File.join(tmp, "no-inbox")), "does not exist"],
+     ["an overlay owner id that is not a Slack user id", click_env.merge("ATHENA_PRIVATE_ROOT" => bad_overlay), "not a Slack user id"],
+     ["two registry entries claiming the session's repo", click_env.merge("ATHENA_INBOX_ROOT" => two_inbox), "2 registry entries"],
+     ["a malformed registry entry beside this repo's", click_env.merge("ATHENA_INBOX_ROOT" => junk_inbox), "cannot be read"]].each do |label, env, want|
       out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", "click:#{did.call(1)}"], env: env)
       check.call("--owner-approval click refuses #{label} (exit 2, could not verify, Fix:)",
                  code == 2 && err.include?("cannot be verified") && err.include?(want) && err.include?("Fix:") &&
                    !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    end
+    # The rotated generation is read with the live file (athena-inbox.md -> Retention).
+    File.write(File.join(inbox, "proj-session.jsonl.1"), JSON.dump(click_line.call(15)) + "\n")
+    out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", "click:#{did.call(15)}"], env: click_env)
+    check.call("a verified owner click found only in the rotated .1 generation is accepted",
+               code.zero? && out.include?("HOT-OWNER-APPROVED") && out.include?("proj-session.jsonl.1"),
+               "exit=#{code} out=#{out} err=#{err}")
+    # A registry whose session channel is not a plain platform `log` file is refused.
+    [["a session channel with a non-platform producer", { "kind" => "log", "path" => "proj-session.jsonl", "producer" => "slack" }],
+     ["a session channel that is a maildir", { "kind" => "maildir", "namespace" => "x", "read" => "a", "write" => "b", "identity" => "c" }],
+     ["a session channel path that is not a plain file name", { "kind" => "log", "path" => "../proj-session.jsonl", "producer" => "platform" }]].each do |label, chan|
+      bad_inbox = File.join(tmp, "inbox-#{label.tr(' ', '-')}")
+      FileUtils.mkdir_p(File.join(bad_inbox, "projects"))
+      FileUtils.cp(File.join(inbox, "proj-session.jsonl"), bad_inbox)
+      File.write(File.join(bad_inbox, "projects", "proj.json"), JSON.dump({
+        "v" => 1, "repo" => File.realpath(File.join(ck, ".git")), "channels" => { "session" => chan } }))
+      out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", "click:#{did.call(1)}"],
+                                   env: click_env.merge("ATHENA_INBOX_ROOT" => bad_inbox))
+      check.call("--owner-approval click refuses #{label} (exit 2, could not verify, Fix:)",
+                 code == 2 && err.include?("cannot be verified") && err.include?("no platform-producer") &&
+                   err.include?("Fix:") && !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
     end
     out, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", "click:#{did.call(1)}"], env: click_env)
     check.call("--owner-approval click refuses a --repo with no origin remote (cannot tell which repo)",
@@ -3611,7 +3672,8 @@ def self_test
                                  env: click_env)
     check.call("policy: an owner click clears an [owner-approval-policy] hold too (exit 0, HOT block still printed)",
                code.zero? && out.include?("[owner-approval-policy]") && out.include?("HOT-OWNER-APPROVED") &&
-                 out.include?("approves example/widgets#7 at #{ph}"), "exit=#{code} out=#{out} err=#{err}")
+                 out.include?("approves example/widgets at #{ph}") && out.include?("PR #7 as the button states it"),
+               "exit=#{code} out=#{out} err=#{err}")
     # Pure: the repo slug of each remote URL form, and the miss.
     [["git@github.com:example/widgets.git", "example/widgets"], ["https://github.com/example/widgets", "example/widgets"],
      ["ssh://git@gitlab.example.com/group/sub/proj.git", "group/sub/proj"], ["", nil], ["/srv/repos/widgets", nil]].each do |url, want|

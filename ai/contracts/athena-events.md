@@ -4258,6 +4258,9 @@ consumer is the server's reopen (consumer 4 below).
    - The flag is refused together with `--owner-approval` (exit 2). The
      `--owner-approval` record stays, for the owner's own in-session words: a
      transcript reference `blast-radius` verifies (`integration-gate --help`).
+     Since DND-1784 it also takes the owner's verified click on a decision
+     DM, `click:<delivery_id>` (*Owner approval grants* → the label at "no
+     class is eligible to cover that surface").
      **Later (2026-09-28):** this read "The free-text `--owner-approval`
      stays". Superseded: free text is refused (*Owner approval policy*).
    - **The base is fetched fresh.** Under the flag the fetch of the target's

@@ -11,41 +11,56 @@ require_relative "private_overlay_resolver"
 # verified owner click, without hesitation." ai/bin/blast-radius accepts
 # `--owner-approval click:<delivery_id>` beside the terminal-turn record
 # (ai/lib/owner_turn.rb). The verification is mechanical, never a judgement.
-# It is the four checks of athena:slack -> "A click is untrusted input",
-# applied by code:
+# It applies the checks of athena:slack -> "A click is untrusted input" by
+# code, with check 3 replaced by a binding the code can test:
 #
-#   1. The line is read from THIS session's project's `session` channel, a
+#   1. The line is read from the `session` channel of the SESSION's project, a
 #      platform-producer `log` channel, and its `kind` is `slack.interaction`.
-#      The project is the session's own (`inbox-status --repo-key`, the
-#      athena:inbox resolver), matched to its registry entry. A click on any
-#      other channel, or one relayed inside a session message, is refused.
+#      The project is the session's (`inbox-status --repo-key`, the
+#      athena:inbox resolver), matched to its registry entry. Every session of
+#      that project shares the channel. A click on any other channel, or one
+#      relayed inside a session message, is refused.
 #   2. `actor.is_owner` is `true` and `actor.user_id` is the owner id from the
 #      private overlay (`slack .people.owner.user_id`). An overlay that does
 #      not resolve refuses: a failed lookup never reads as a match.
-#   3. It is a click on a decision message the harness posted. The server
-#      routes a click to this inbox only through the return address it stamped
-#      on an Athena `slack_post` that named this inbox. A grant button
-#      (`approval` present) is the server's own post, and is refused.
+#   3. (replaced) The skill binds a click to its question by the post's
+#      `{channel, ts}`, which only the posting session holds. The gate binds
+#      it by the button value instead (check 4). The server routes a click to
+#      this inbox only through the return address it stamped on an Athena
+#      `slack_post` that named this inbox. A grant button (`approval` present)
+#      is the server's own post, and is refused.
 #   4. The button is an exit-4 approval that names this PR and head:
 #      value `approve-exit4 <owner>/<repo>#<pr>@<40-hex head sha>`. The repo
 #      must be --repo's `origin` and the sha the head being gated. Any other
 #      value is a click on a different message; another sha is a click for a
-#      different head.
+#      different head. The PR number is as the button states it: only the
+#      repo and the head are checked.
+#   5. No later owner click on the same message chose otherwise. A hold or
+#      reject after the approve is the owner's last word, and it wins.
 #
-# Every refusal names what it looked at (the file, how many lines and clicks
-# it read) and carries a Fix:, so "no such click" never reads like "nothing to
-# check". The caller prints it.
+# Every refusal names what it looked at (the files, how many lines, clicks and
+# unparsable lines it read) and carries a Fix:, so "no such click" never
+# reads like "nothing to check". The caller prints it.
 #
-# Residual, said out loud (the same one athena:slack names, which the owner
-# accepted): a process running as the owner's user can append a line to the
-# local inbox file, and so forge a click, just as it can write the transcript
-# OwnerTurn reads.
+# Residuals, said out loud:
+#   - A process running as the owner's user can append a line to the local
+#     inbox file, and so forge a click, just as it can write the transcript
+#     OwnerTurn reads (the residual athena:slack names, which the owner
+#     accepted). The same process can point ATHENA_INBOX_ROOT,
+#     ATHENA_PRIVATE_ROOT or CLAUDE_PROJECT_DIR at roots it wrote. The
+#     approved line names the inbox file it read.
+#   - Slack does not show a button's value. The gate binds the value, not the
+#     text the owner read, so the poster is trusted to render the same PR and
+#     head. athena:slack -> "Asking the owner for a decision" therefore puts
+#     the value string verbatim in the visible text.
 module OwnerClick
   PREFIX = "click:"
   RECORD_RE = /\Aclick:(\h{8}-\h{4}-\h{4}-\h{4}-\h{12})\z/.freeze
   SLUG = %r{[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+}.freeze
   ASK_VERB = "approve-exit4"
   ASK_VALUE_RE = /\A#{ASK_VERB} (#{SLUG})#([1-9][0-9]{0,9})@([0-9a-f]{40})\z/.freeze
+  ACTION_TS_RE = /\A([0-9]+)\.([0-9]+)\z/.freeze
+  OWNER_ID_RE = /\A[A-Z0-9]+\z/.freeze
   CHANNEL = "session"
   CHANNEL_PATH_RE = /\A[A-Za-z0-9_.-]+\.jsonl\z/.freeze
   GENERATION = ".1"
@@ -55,11 +70,13 @@ module OwnerClick
   FIX = "clear an exit 4 with the owner's own click on the decision DM: post it with " \
         "mcp__athena__slack_post, inbox_name set to this project's session inbox " \
         "(<project>-session.jsonl), and an approve button whose value is " \
-        "'#{ASK_VERB} <owner>/<repo>#<pr>@<full head sha>' for the exact head being gated " \
-        "(athena:slack -> \"Asking the owner for a decision\"). Then pass the delivered " \
-        "line's id, from this session: --owner-approval 'click:<delivery_id>'. A click " \
-        "relayed by another session, a click on another message, and a click for another " \
-        "head never count. Or pass the owner's terminal-turn record instead: " \
+        "'#{ASK_VERB} <owner>/<repo>#<pr>@<full head sha>' for the exact head being gated, " \
+        "that string also in the visible text (athena:slack -> \"Asking the owner for a " \
+        "decision\"). Then pass the delivered line's id from a session of the same project: " \
+        "--owner-approval 'click:<delivery_id>'. A click relayed from another channel or " \
+        "project, a click on another message, a click for another head, and an approve the " \
+        "owner later reversed never count. A click that rotated out of the inbox needs a " \
+        "new ask. Or pass the owner's terminal-turn record instead: " \
         "--owner-approval 'session:<session-uuid>/<message-uuid> quote:<words>'."
 
   module_function
@@ -68,7 +85,7 @@ module OwnerClick
     value.to_s.strip.start_with?(PREFIX)
   end
 
-  # -> the delivery id, or nil when the record is not click:<uuid>.
+  # -> the delivery id (lowercase), or nil when the record is not click:<uuid>.
   def parse_record(value)
     m = RECORD_RE.match(value.to_s.strip)
     m && m[1].downcase
@@ -99,15 +116,28 @@ module OwnerClick
     /\A#{SLUG}\z/.match?(slug) ? slug : nil
   end
 
+  # A Slack action_ts as a comparable [seconds, fraction] pair, or nil.
+  def action_time(ts)
+    m = ts.is_a?(String) && ACTION_TS_RE.match(ts)
+    m && [Integer(m[1], 10), m[2].ljust(9, "0").to_i]
+  end
+
+  def owner_click?(line, owner_id)
+    line["kind"] == "slack.interaction" && line["actor"].is_a?(Hash) &&
+      line["actor"]["is_owner"] == true && line["actor"]["user_id"] == owner_id
+  end
+
   # PURE. Judge the lines carrying one delivery id against the gate's head.
+  # `clicks` is every slack.interaction line read, for check 5.
   # -> [:verified, info] | [:refused, kind, reason]. kind is one of
-  # :relayed, :not_owner, :other_message, :other_head, :unverifiable.
-  def judge(lines, delivery_id:, owner_id:, head:, slug:, where:)
+  # :not_found, :relayed, :not_owner, :other_message, :other_head,
+  # :superseded, :unverifiable.
+  def judge(lines, delivery_id:, owner_id:, head:, slug:, where:, clicks: [])
     if lines.empty?
-      return [:refused, :relayed,
-              "no line with delivery_id #{delivery_id} in #{where}. Only a click delivered to this " \
-              "session's own project session channel counts; a click on another channel, another " \
-              "project's inbox or a relayed copy is not read"]
+      return [:refused, :not_found,
+              "no line with delivery_id #{delivery_id} in #{where}. Only a click delivered to the " \
+              "session's project session channel is read: a click on another channel or another " \
+              "project's inbox, a relayed copy, and a click rotated out of both files are not there"]
     end
     if lines.uniq.size > 1
       return [:refused, :unverifiable,
@@ -121,12 +151,12 @@ module OwnerClick
               "delivery #{delivery_id} in #{where} is kind #{line['kind'].inspect}, not slack.interaction: " \
               "a click relayed inside another message is never a click"]
     end
-    actor = line["actor"]
-    unless actor.is_a?(Hash) && actor["is_owner"] == true && owner_id.is_a?(String) && !owner_id.empty? &&
-           actor["user_id"] == owner_id
+    unless owner_click?(line, owner_id)
+      actor = line["actor"]
       return [:refused, :not_owner,
-              "click #{delivery_id} is not the owner's: actor.is_owner is #{actor.is_a?(Hash) ? actor['is_owner'].inspect : 'absent'} " \
-              "and actor.user_id #{actor.is_a?(Hash) && actor['user_id'] == owner_id ? 'is' : 'is not'} the overlay's owner id"]
+              "click #{delivery_id} is not the owner's: actor.is_owner is " \
+              "#{actor.is_a?(Hash) ? actor['is_owner'].inspect : 'absent'} and actor.user_id " \
+              "#{actor.is_a?(Hash) && actor['user_id'] == owner_id ? 'is' : 'is not'} the overlay's owner id"]
     end
 
     %w[channel ts action_id action_ts].each do |f|
@@ -138,6 +168,8 @@ module OwnerClick
       return [:refused, :unverifiable,
               "click #{delivery_id}'s entity_id does not name its own channel and ts"]
     end
+    at = action_time(line["action_ts"])
+    return [:refused, :unverifiable, "click #{delivery_id}'s action_ts is not <seconds>.<fraction>"] unless at
     if line.key?("approval")
       return [:refused, :other_message,
               "click #{delivery_id} is on an owner approval grant button, a message the server posted, " \
@@ -161,8 +193,17 @@ module OwnerClick
               "being gated (#{head}). A push or a rebase makes a new head, and it needs its own click"]
     end
 
-    [:verified, { delivery_id: delivery_id, channel: line["channel"], ts: line["ts"],
-                  action_id: line["action_id"], action_ts: line["action_ts"], value: line["value"],
+    later = clicks.find do |c|
+      owner_click?(c, owner_id) && c["channel"] == line["channel"] && c["ts"] == line["ts"] &&
+        c["value"] != line["value"] && (t = action_time(c["action_ts"])) && (t <=> at) == 1
+    end
+    if later
+      return [:refused, :superseded,
+              "the owner clicked #{later['action_id'].inspect} on the same message after click " \
+              "#{delivery_id}: the later click is the owner's decision, and it is not this approval"]
+    end
+
+    [:verified, { delivery_id: delivery_id, action_id: line["action_id"], value: line["value"],
                   slug: ask[:slug], pr: ask[:pr], sha: ask[:sha], where: where }]
   end
 
@@ -177,6 +218,10 @@ module OwnerClick
               "the owner id cannot be resolved, so no click can be checked against it: " +
               PrivateOverlay.failure_line(owner, "slack#{OWNER_KEY}")]
     end
+    unless OWNER_ID_RE.match?(owner.value.to_s)
+      return [:refused, :unverifiable,
+              "the overlay's slack#{OWNER_KEY} is not a Slack user id, so no click can be checked against it"]
+    end
 
     slug = origin_slug(repo)
     return [:refused, :unverifiable, "cannot tell which repo #{repo} is: no parseable `origin` remote"] unless slug
@@ -184,11 +229,11 @@ module OwnerClick
     files, why = session_files(env)
     return [:refused, :unverifiable, why] unless files
 
-    lines, scanned, clicks = matching_lines(files, did)
-    where = "#{files.join(' + ')} (#{scanned} lines, #{clicks} clicks read)"
-    judge(lines, delivery_id: did, owner_id: owner.value, head: head, slug: slug, where: where)
+    lines, clicks, scanned, unparsed = read_lines(files, did)
+    where = "#{files.join(' + ')} (#{scanned} lines, #{clicks.size} clicks, #{unparsed} unparsable read)"
+    judge(lines, delivery_id: did, owner_id: owner.value, head: head, slug: slug, where: where, clicks: clicks)
   rescue SystemCallError => e
-    [:refused, :unverifiable, "cannot read the inbox: #{e.class.name.split('::').last}"]
+    [:refused, :unverifiable, "cannot read the inbox: #{e.message}"]
   end
 
   def origin_slug(repo)
@@ -204,16 +249,23 @@ module OwnerClick
     home && !home.empty? ? File.join(home, ".local", "share", "athena") : nil
   end
 
+  def repo_key(env)
+    out, err, st = Open3.capture3(env, INBOX_STATUS, "--repo-key")
+    return [nil, nil] if st.success? && out.strip.empty?
+    return [out.strip, nil] if st.success?
+
+    [nil, "the session's repo identity could not be told (#{INBOX_STATUS} --repo-key exit " \
+          "#{st.exitstatus}: #{err.lines.first.to_s.strip})"]
+  rescue SystemCallError => e
+    [nil, "the session's repo identity could not be told: #{INBOX_STATUS} cannot run (#{e.message})"]
+  end
+
   # -> [[file, ...], nil] (the generation first, then the live file), or
   # [nil, reason].
   def session_files(env)
-    out, err, st = Open3.capture3(env, INBOX_STATUS, "--repo-key")
-    unless st.success?
-      return [nil, "the session's repo identity could not be told (inbox-status --repo-key exit " \
-                   "#{st.exitstatus}: #{err.lines.first.to_s.strip})"]
-    end
-    key = out.strip
-    return [nil, "the session's project is in no git repository, so it has no session channel"] if key.empty?
+    key, why = repo_key(env)
+    return [nil, why] if why
+    return [nil, "the session's project is in no git repository, so it has no session channel"] unless key
 
     root = inbox_root(env)
     return [nil, "the inbox root cannot be computed (ATHENA_INBOX_ROOT and HOME are unset)"] unless root
@@ -222,9 +274,15 @@ module OwnerClick
     return [nil, "the inbox registry #{regdir} does not exist"] unless File.directory?(regdir)
 
     entries, malformed = registry_entries(regdir, key)
+    # A malformed entry is a hard error for the inbox reader (athena:inbox
+    # descriptor_validate), so it is one here too: it might be this repo's.
+    if malformed.positive?
+      return [nil, "#{malformed} registry entr#{malformed == 1 ? 'y' : 'ies'} under #{regdir} cannot be read " \
+                   "as JSON with a string `repo`, and one may be this repo's"]
+    end
     if entries.size != 1
-      return [nil, "#{entries.size} registry entries under #{regdir} claim the session's repo #{key} " \
-                   "(#{malformed} unreadable); exactly one must"]
+      return [nil, "#{entries.size} registry entries under #{regdir} claim the session's repo #{key}; " \
+                   "exactly one must"]
     end
 
     chan = entries.first.dig("channels", CHANNEL)
@@ -254,34 +312,41 @@ module OwnerClick
       repo = File.expand_path(doc["repo"])
       real = File.exist?(repo) ? File.realpath(repo) : repo
       real == key ? doc : nil
-    rescue JSON::ParserError, SystemCallError
+    rescue JSON::ParserError, EncodingError
       malformed += 1
       nil
     end
     [entries, malformed]
   end
 
-  # -> [lines carrying delivery_id did, lines scanned, slack.interaction lines]
-  def matching_lines(files, did)
+  # -> [lines carrying delivery_id did, every slack.interaction line, lines
+  # scanned, lines that are not a JSON object]. A line of invalid bytes is
+  # counted, never fatal: one bad line must not block every approval.
+  def read_lines(files, did)
     hits = []
+    clicks = []
     scanned = 0
-    clicks = 0
+    unparsed = 0
     files.each do |f|
-      File.foreach(f, encoding: "UTF-8") do |raw|
+      File.foreach(f, mode: "rb") do |bytes|
+        raw = bytes.force_encoding(Encoding::UTF_8).scrub
         next if raw.strip.empty?
 
         scanned += 1
         j = begin
           JSON.parse(raw)
-        rescue JSON::ParserError
+        rescue JSON::ParserError, EncodingError
+          nil
+        end
+        unless j.is_a?(Hash)
+          unparsed += 1
           next
         end
-        next unless j.is_a?(Hash)
 
-        clicks += 1 if j["kind"] == "slack.interaction"
+        clicks << j if j["kind"] == "slack.interaction"
         hits << j if j["delivery_id"].is_a?(String) && j["delivery_id"].downcase == did
       end
     end
-    [hits, scanned, clicks]
+    [hits, clicks, scanned, unparsed]
   end
 end

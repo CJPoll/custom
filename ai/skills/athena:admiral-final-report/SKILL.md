@@ -128,8 +128,15 @@ goes nowhere unless the owner acts. Per Mission:
   spend, but the owner wants to know it exists);
 - the decision you need, in one sentence;
 - **the exact command that lands it once the owner says yes** —
+  `integration-gate --owner-approval 'click:<delivery_id>'` (the owner's click
+  on the decision DM's `approve-exit4` button), or
   `integration-gate --owner-approval 'session:<sid>/<mid> quote:<their
   words>'` (the reference to the turn they type), run from the named worktree.
+
+  **Later (2026-10-02, DND-1784):** this named only the terminal-turn record.
+  Superseded by owner decision, Cody, 2026-10-02: "Gate accepts a verified
+  owner click, without hesitation." (`athena:merge-boarding` → *Merging is
+  not always landing code*.)
 
 Only what `~/.claude/CLAUDE.md` → *Owner approval policy* → *Asking, and
 what counts as approval* names is held here, with the Block Kit request you sent.
