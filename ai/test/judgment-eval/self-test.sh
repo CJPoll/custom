@@ -400,7 +400,7 @@ V3D="${TMP}/dnd1697v3"
 mkdir -p "${V3D}"
 # mkrun FILE VERSION REPEAT "case:label:verdict ..." [SHA] -- a synthetic run file.
 mkrun() {
-  ruby -rjson -e '
+  /usr/bin/ruby -rjson -e '
     file, version, repeat, spec, sha = ARGV
     verdicts = spec.split.map { |s| id, label, v = s.split(":"); { "case_id" => id, "label" => label, "verdict" => v } }
     run = { "eval_run_id" => "00000000-0000-4000-8000-000000000000", "question_set_version" => version,
@@ -409,7 +409,7 @@ mkrun() {
     run["verdicts"] = verdicts if repeat.to_i >= 2
     File.write(file, JSON.generate(run))' "$@"
 }
-sv3() { OUT="$(ruby "${SV3}" "$@" 2>&1)"; RC=$?; }
+sv3() { OUT="$(/usr/bin/ruby "${SV3}" "$@" 2>&1)"; RC=$?; }
 printf '%s\n' '{"id":"a","label":"security"}' '{"id":"b","label":"none"}' '{"id":"c","label":"none"}' '{"id":"d","label":"security"}' > "${V3D}/labels.jsonl"
 mkrun "${V3D}/v1.json" ticket-security-v1 3 "a:security:match b:none:match c:none:miss d:security:unstable"
 mkrun "${V3D}/v3.json" ticket-security-v3 3 "a:security:match b:none:match c:none:match d:security:miss"
@@ -462,18 +462,18 @@ has "score-v3: the missing-file refusal carries Fix:" "${OUT}" "Fix: pass a run 
 
 # Item 3 is a count and a rate: at most 31 false security calls, and at most
 # 31/291 of the none cases measured in both runs.
-ruby -e 'puts (1..300).map { |i| %({"id":"n#{i}","label":"none"}) }' > "${V3D}/labels-300.jsonl"
-mkrun "${V3D}/v1-300.json" ticket-security-v1 3 "$(ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 40 ? "miss" : "match"}" }.join(" ")')"
-mkrun "${V3D}/v3-31.json" ticket-security-v3 3 "$(ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 31 ? "unstable" : "match"}" }.join(" ")')"
-mkrun "${V3D}/v3-32.json" ticket-security-v3 3 "$(ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 32 ? "miss" : "match"}" }.join(" ")')"
+/usr/bin/ruby -e 'puts (1..300).map { |i| %({"id":"n#{i}","label":"none"}) }' > "${V3D}/labels-300.jsonl"
+mkrun "${V3D}/v1-300.json" ticket-security-v1 3 "$(/usr/bin/ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 40 ? "miss" : "match"}" }.join(" ")')"
+mkrun "${V3D}/v3-31.json" ticket-security-v3 3 "$(/usr/bin/ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 31 ? "unstable" : "match"}" }.join(" ")')"
+mkrun "${V3D}/v3-32.json" ticket-security-v3 3 "$(/usr/bin/ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 32 ? "miss" : "match"}" }.join(" ")')"
 sv3 "${V3D}/v1-300.json" "${V3D}/v3-31.json" "${V3D}/labels-300.jsonl"
 has "score-v3: 31 false security calls of 300 is within item 3" "${OUT}" "item 3 (held-out): none cases not matched: v1 40/300, v3 31/300 -> PASS"
 sv3 "${V3D}/v1-300.json" "${V3D}/v3-32.json" "${V3D}/labels-300.jsonl"
 has "score-v3: 32 false security calls fails item 3 on the count" "${OUT}" "item 3 (held-out): none cases not matched: v1 40/300, v3 32/300 -> FAIL"
-ruby -e 'puts (1..200).map { |i| %({"id":"m#{i}","label":"none"}) }' > "${V3D}/labels-200.jsonl"
-mkrun "${V3D}/v1-200.json" ticket-security-v1 3 "$(ruby -e 'puts (1..200).map { |i| "m#{i}:none:#{i <= 30 ? "miss" : "match"}" }.join(" ")')"
-mkrun "${V3D}/v3-200-21.json" ticket-security-v3 3 "$(ruby -e 'puts (1..200).map { |i| "m#{i}:none:#{i <= 21 ? "miss" : "match"}" }.join(" ")')"
-mkrun "${V3D}/v3-200-22.json" ticket-security-v3 3 "$(ruby -e 'puts (1..200).map { |i| "m#{i}:none:#{i <= 22 ? "miss" : "match"}" }.join(" ")')"
+/usr/bin/ruby -e 'puts (1..200).map { |i| %({"id":"m#{i}","label":"none"}) }' > "${V3D}/labels-200.jsonl"
+mkrun "${V3D}/v1-200.json" ticket-security-v1 3 "$(/usr/bin/ruby -e 'puts (1..200).map { |i| "m#{i}:none:#{i <= 30 ? "miss" : "match"}" }.join(" ")')"
+mkrun "${V3D}/v3-200-21.json" ticket-security-v3 3 "$(/usr/bin/ruby -e 'puts (1..200).map { |i| "m#{i}:none:#{i <= 21 ? "miss" : "match"}" }.join(" ")')"
+mkrun "${V3D}/v3-200-22.json" ticket-security-v3 3 "$(/usr/bin/ruby -e 'puts (1..200).map { |i| "m#{i}:none:#{i <= 22 ? "miss" : "match"}" }.join(" ")')"
 sv3 "${V3D}/v1-200.json" "${V3D}/v3-200-21.json" "${V3D}/labels-200.jsonl"
 has "score-v3: 21 of 200 is within the 31/291 rate" "${OUT}" "item 3 (held-out): none cases not matched: v1 30/200, v3 21/200 -> PASS"
 sv3 "${V3D}/v1-200.json" "${V3D}/v3-200-22.json" "${V3D}/labels-200.jsonl"
