@@ -140,7 +140,11 @@ rc, _out, err = run("--ref", "DND1354", "--lines-file", LINES)
 check("an id that is not DND-N is usage (2)") { rc == 2 && err.include?("is not a DND ticket id") }
 rc, _out, err = run("--lines-file", LINES)
 check("--ref is required") { rc == 2 && err.include?("--ref is required") }
-spec("query-#{DS}.json", { "status" => 500, "body" => {} })
+# A permanent Notion failure (a 4xx other than 429 is never retried), so no
+# real retry wait runs here. The transient path (429/5xx, retried, then the
+# same failure) is proven with an injected wait in ai/lib/test/notion-read
+# (DND-1649).
+spec("query-#{DS}.json", { "status" => 400, "body" => {} })
 rc, out, err = run("--ref", "DND-1354", "--lines-file", LINES)
 check("a Notion failure is exit 3 with Fix:, nothing compared", "rc #{rc} out #{out} err #{err}") do
   rc == 3 && err.include?("COULD NOT READ NOTION") && err.include?("Fix:") && out.empty?

@@ -3,15 +3,19 @@
 Athena server's feedback POST, for `judgment-feedback scan-tickets`'s suite
 (DND-1469). Test fixture only: never Notion, never the Athena server.
 
+A failed read answers 400, a permanent failure NotionRead never retries, so
+no real retry wait runs in this suite. The retried 429/5xx path is proven with
+an injected wait in ai/lib/test/notion-read (DND-1649).
+
   POST /v1/data_sources/<id>/query      FIXTURE.rows (one page)
   GET  /v1/blocks/<page>/children[?..]  FIXTURE.blocks[page]: a list of block
                                         pages joined by cursors; a page id in
-                                        FIXTURE.fail_blocks answers 500
+                                        FIXTURE.fail_blocks answers 400
   GET  /v1/pages/<page>                 a page whose DND id is
                                         FIXTURE.pages[page], or none when
                                         that is null (DND-1470: a
                                         Blocks target); a page id in
-                                        FIXTURE.fail_pages answers 500
+                                        FIXTURE.fail_pages answers 400
   POST /api/v1/judgments/feedback       an upsert per call_id, as the server
                                         keeps one row per (call, reporter):
                                         the first report is recorded, a later
@@ -104,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) >= 5 and parts[2] == "blocks" and parts[4] == "children":
             page = parts[3]
             if page in FX.get("fail_blocks", []):
-                return self._send(500, {"object": "error"}, entry)
+                return self._send(400, {"object": "error"}, entry)
             pages = FX["blocks"].get(page, [[]])
             start = parse_qs(url.query).get("start_cursor", [None])[0]
             idx = int(start[-12:]) if start else 0
@@ -113,7 +117,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "next_cursor": cursor(idx + 1) if more else None}, entry)
         if len(parts) == 4 and parts[2] == "pages" and parts[3] in FX.get("pages", {}):
             if parts[3] in FX.get("fail_pages", []):
-                return self._send(500, {"object": "error"}, entry)
+                return self._send(400, {"object": "error"}, entry)
             number = FX["pages"][parts[3]]
             props = {"ID": {"unique_id": {"prefix": "DND", "number": number}}} if number is not None else {}
             return self._send(200, {"object": "page", "id": parts[3], "properties": props}, entry)

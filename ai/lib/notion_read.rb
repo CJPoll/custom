@@ -15,6 +15,10 @@
 # optional cursor) and a page retrieve, and refuses any other request BEFORE
 # it is sent. There is no write path here.
 #
+# TRANSIENT ERRORS: every request runs through NotionRetry
+# (ai/lib/notion_retry.rb), the one retry policy NextMissionNotion's
+# HttpTransport shares (DND-1649). A 429 or 5xx is retried; nothing else is.
+#
 # THE TOKEN NEVER TOUCHES ARGV OR THE ENVIRONMENT: it is read from the file
 # the notion-personal MCP entry names and fed to curl on STDIN (`--config -`).
 #
@@ -23,6 +27,7 @@
 require "json"
 require "open3"
 require "tmpdir"
+require_relative "notion_retry"
 
 module NotionRead
   # A read that could not be made or answered. `fix` is the action; the
@@ -45,7 +50,6 @@ module NotionRead
     ["GET", %r{\A/v1/blocks/#{UUID}/children\?page_size=\d{1,3}(&start_cursor=#{UUID})?\z}],
     ["GET", %r{\A/v1/pages/#{UUID}\z}]
   ].freeze
-  TRIES = 3
   # The harness repo root: this file is ai/lib/notion_read.rb.
   HARNESS = File.expand_path("../..", __dir__)
 
@@ -98,28 +102,41 @@ module NotionRead
     "http://#{m[1]}#{m[2]}"
   end
 
-  # read(origin, token, method, path, body = nil, pace:) -> parsed JSON, or
-  # raises Error. Anything but an allow-listed READ is refused before it is
-  # sent. A 429 is retried (TRIES in all), honouring Retry-After up to 10 s.
-  def read(origin, token, method, path, body = nil, pace:)
+  # The retry policy a caller gets when it passes none: one per process, so
+  # one run shares one outage budget (NotionRetry). Its wait is a real sleep.
+  def default_retrier
+    @default_retrier ||= NotionRetry.new
+  end
+
+  # read(origin, token, method, path, body = nil, pace:, retrier:) -> parsed
+  # JSON, or raises Error. Anything but an allow-listed READ is refused before
+  # it is sent. Each request runs through the shared policy (NotionRetry,
+  # DND-1649): a 429 or 5xx is retried with Retry-After or backoff inside a
+  # wait budget; nothing else is. An exhausted retry raises, naming the status
+  # and the tries. `retrier` is injected by a test, so no test waits on the
+  # wall clock.
+  def read(origin, token, method, path, body = nil, pace:, retrier: default_retrier)
     raise Error.new("refused a Notion #{method} #{path}: this client only reads", "this is a bug in the caller: it asked for a write") unless read?(method, path)
 
-    reply = nil
-    TRIES.times do |i|
+    result = retrier.run do
       sleep(pace) if pace.positive?
       reply = request(method, "#{origin}#{path}", token, body)
-      break unless reply[:status] == 429 && i < TRIES - 1
-
-      sleep([reply[:retry_after], 10].min)
+      [reply[:status], reply[:retry_after], reply]
     end
+    reply = result.reply
     raise Error.new("could not reach Notion (curl exit #{reply[:curl_rc]})", "check the network, then re-run") if reply[:curl_rc] != 0
     unless reply[:status] == 200
-      raise Error.new("Notion answered HTTP #{reply[:status]} to #{method} #{path.sub(/\?.*/, '')}",
+      raise Error.new("Notion answered HTTP #{reply[:status]} to #{method} #{path.sub(/\?.*/, '')} #{tries(result)}",
                       "re-run; on 401/403 the token or the page share is the owner's to fix", status: reply[:status])
     end
     JSON.parse(reply[:body])
   rescue JSON::ParserError
     raise Error.new("Notion answered a body that is not JSON", "re-run")
+  end
+
+  def tries(result)
+    count = result.attempts == 1 ? "after 1 attempt" : "after #{result.attempts} attempts"
+    result.retryable && result.degraded ? "#{count} (not retried: an earlier read exhausted its retries)" : count
   end
 
   def request(method, url, token, body)
@@ -142,9 +159,11 @@ module NotionRead
       config << "connect-timeout = 10\nmax-time = 60\nsilent\n"
       out, _err, status = Open3.capture3("curl", "--config", "-", stdin_data: config)
       config.clear
-      retry_after = File.exist?(hdrs) ? File.read(hdrs)[/^retry-after:\s*(\d+)/i, 1].to_i : 0
+      # The raw value; NotionRetry.wait_for reads it. The last one wins when
+      # curl dumped more than one header block.
+      retry_after = File.exist?(hdrs) ? File.read(hdrs).scan(/^retry-after:[ \t]*([^\r\n]*)/i).flatten.last : nil
       text = File.exist?(resp) ? File.binread(resp).force_encoding(Encoding::UTF_8) : +""
-      { curl_rc: status.exitstatus, status: out.strip.to_i, body: text, retry_after: [retry_after, 1].max }
+      { curl_rc: status.exitstatus, status: out.strip.to_i, body: text, retry_after: retry_after }
     end
   rescue Errno::ENOENT
     raise Error.new("curl is not on PATH", "install curl")
@@ -153,14 +172,14 @@ module NotionRead
   # query_all(origin, token, data_source, pace:, filter: nil) -> every row
   # (matching `filter`, a Notion data source filter, when given), following
   # the cursor.
-  def query_all(origin, token, data_source, pace:, filter: nil)
+  def query_all(origin, token, data_source, pace:, filter: nil, retrier: default_retrier)
     rows = []
     cursor = nil
     loop do
       body = { "page_size" => 100 }
       body["filter"] = filter if filter
       body["start_cursor"] = cursor if cursor
-      page = read(origin, token, "POST", "/v1/data_sources/#{data_source}/query", body, pace: pace)
+      page = read(origin, token, "POST", "/v1/data_sources/#{data_source}/query", body, pace: pace, retrier: retrier)
       rows.concat(Array(page["results"]))
       break unless page["has_more"] == true
 
@@ -174,13 +193,13 @@ module NotionRead
   # children_all(origin, token, page_id, pace:) -> every top-level block of
   # the page, following the cursor to the LAST block (a line appended to a
   # long body is on its last page).
-  def children_all(origin, token, page_id, pace:)
+  def children_all(origin, token, page_id, pace:, retrier: default_retrier)
     blocks = []
     cursor = nil
     loop do
       path = "/v1/blocks/#{page_id}/children?page_size=100"
       path += "&start_cursor=#{cursor}" if cursor
-      page = read(origin, token, "GET", path, pace: pace)
+      page = read(origin, token, "GET", path, pace: pace, retrier: retrier)
       blocks.concat(Array(page["results"]))
       break unless page["has_more"] == true
 
@@ -191,7 +210,7 @@ module NotionRead
   end
 
   # page(origin, token, page_id, pace:) -> the page object (its properties).
-  def page(origin, token, page_id, pace:)
-    read(origin, token, "GET", "/v1/pages/#{page_id}", pace: pace)
+  def page(origin, token, page_id, pace:, retrier: default_retrier)
+    read(origin, token, "GET", "/v1/pages/#{page_id}", pace: pace, retrier: retrier)
   end
 end

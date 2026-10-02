@@ -18,6 +18,7 @@ require "json"
 require "net/http"
 require "uri"
 require_relative "next_mission"
+require_relative "notion_retry"
 
 class NextMissionNotion
   class ReadError < StandardError; end
@@ -39,27 +40,20 @@ class NextMissionNotion
 
   # Real transport: Notion REST over Net::HTTP.
   #
-  # Retry policy (DND-1519). A 429 or a 5xx is transient: Notion answered
-  # bursts of 500 "Cross-cell memcached access is not allowed" on 2026-10-01
-  # that outlasted three tries a second apart, and each cost lead-time a whole
-  # scan window. So a call is tried up to ATTEMPTS times. Before each retry it
-  # waits the Retry-After Notion sent (capped at RETRY_AFTER_CAP), else the
-  # next BACKOFF step. It stops early rather than let its waits pass
-  # WAIT_BUDGET. Any other 4xx is never retried. An exhausted call raises a
-  # ReadError naming the status and the tries.
-  #
-  # A sustained outage must not multiply that budget by every call a run
-  # makes. After a call exhausts its retries, later calls on this transport
-  # are tried once each, until one succeeds. The trade-off is deliberate: one
-  # page that keeps failing makes a transient error on another page in the
-  # same run fail untried. Either way the failure raises; it never reads as
-  # an empty answer.
+  # Retry policy (DND-1519): NotionRetry (ai/lib/notion_retry.rb), the one
+  # policy NotionRead shares (DND-1649). A 429 or a 5xx is retried with
+  # Retry-After or backoff inside a wait budget; any other 4xx is never
+  # retried. An exhausted call raises a ReadError naming the status and the
+  # tries. A transport holds one policy object, so after a call exhausts its
+  # retries, later calls on this transport are tried once each until one
+  # succeeds: a sustained outage costs one budget per run, not one per call.
+  # Either way the failure raises; it never reads as an empty answer.
   class HttpTransport
     BASE = URI("https://api.notion.com")
-    ATTEMPTS = 6
-    BACKOFF = [1.0, 2.0, 4.0, 8.0, 16.0].freeze
-    RETRY_AFTER_CAP = 30.0
-    WAIT_BUDGET = 60.0
+    ATTEMPTS = NotionRetry::ATTEMPTS
+    BACKOFF = NotionRetry::BACKOFF
+    RETRY_AFTER_CAP = NotionRetry::RETRY_AFTER_CAP
+    WAIT_BUDGET = NotionRetry::WAIT_BUDGET
 
     LOOPBACK_HOSTS = %w[127.0.0.1 localhost].freeze
 
@@ -69,7 +63,7 @@ class NextMissionNotion
     def initialize(token, base: BASE, wait: ->(seconds) { sleep(seconds) })
       @token = token
       @base = self.class.checked_base(base)
-      @wait = wait
+      @retry = NotionRetry.new(wait: wait)
     end
 
     def self.checked_base(base)
@@ -82,28 +76,13 @@ class NextMissionNotion
     end
 
     def call(method, path, body = nil)
-      degraded = @degraded
-      attempts = degraded ? 1 : ATTEMPTS
-      waited = 0.0
-      attempt = 0
-      loop do
-        attempt += 1
+      result = @retry.run do
         res = request(method, path, body)
-        code = res.code.to_i
-        if code.between?(200, 299)
-          @degraded = false
-          return parse(res.body, method, path)
-        end
-
-        retryable = code == 429 || code >= 500
-        pause = retry_wait(res, attempt)
-        if retryable && attempt < attempts && waited + pause <= WAIT_BUDGET
-          waited += pause
-          @wait.call(pause)
-          next
-        end
-        raise ReadError, failure(code, method, path, res.body, attempt, retryable, degraded)
+        [res.code.to_i, res["Retry-After"], res]
       end
+      return parse(result.reply.body, method, path) if result.ok?
+
+      raise ReadError, failure(result, method, path)
     rescue SocketError, SystemCallError, Timeout::Error, OpenSSL::SSL::SSLError, Net::HTTPBadResponse,
            IOError => e # IOError covers EOFError: a connection dropped mid-response
       raise ReadError, "#{e.class} on #{method.upcase} #{path}: #{e.message}"
@@ -111,20 +90,10 @@ class NextMissionNotion
 
     private
 
-    # Retry-After is read as seconds (a fraction is kept). An absent, zero,
-    # negative or HTTP-date value falls back to the backoff step.
-    def retry_wait(res, attempt)
-      given = res["Retry-After"].to_f
-      return [given, RETRY_AFTER_CAP].min if given.positive?
-
-      BACKOFF.fetch(attempt - 1, BACKOFF.last)
-    end
-
-    def failure(code, method, path, raw, attempt, retryable, degraded)
-      @degraded = true if retryable
-      tries = attempt == 1 ? "1 attempt" : "#{attempt} attempts"
-      note = retryable && degraded ? " (not retried: an earlier call exhausted its retries)" : ""
-      "HTTP #{code} on #{method.upcase} #{path} after #{tries}#{note}: #{error_message(raw)}"
+    def failure(result, method, path)
+      tries = result.attempts == 1 ? "1 attempt" : "#{result.attempts} attempts"
+      note = result.retryable && result.degraded ? " (not retried: an earlier call exhausted its retries)" : ""
+      "HTTP #{result.status} on #{method.upcase} #{path} after #{tries}#{note}: #{error_message(result.reply.body)}"
     end
 
     def request(method, path, body)

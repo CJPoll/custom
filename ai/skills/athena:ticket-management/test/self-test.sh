@@ -354,13 +354,17 @@ eq "an unknown project makes no Notion request" "$(count_of notion)" "0"
 eq "an unknown project is still sent, so the server records the refusal" "$(count_of athena)" "1"
 
 # Notion fails: the candidate search is unavailable, never an empty result.
+# A permanent Notion failure (a 4xx other than 429 is never retried), so no
+# real retry wait runs here. The transient path (429/5xx, retried, then the
+# same failure) is proven with an injected wait in ai/lib/test/notion-read
+# (DND-1649).
 spec "query-${PROJECTS_DS}.json" '{"status":200,"body":{"results":[{"properties":{"Repo / App":{"select":{"name":"~/dev/custom"}},"Epics":{"relation":[{"id":"e0000000-0000-0000-0000-000000000001"}],"has_more":false}}}]}}'
-spec "query-${TICKETS_DS}.json" '{"status":500,"body":{"object":"error"}}'
+spec "query-${TICKETS_DS}.json" '{"status":400,"body":{"object":"error"}}'
 spec triage.json '{"status":200,"body":{"status":"unavailable","reason":"not_configured"}}'
 : > "${TMP}/server.log"
 run "${FINDING[@]}" --project harness
 eq "a Notion failure exits 3" "${RC}" "3"
-has "it says the candidate search is unavailable, with Fix:" "${OUT}" "CANDIDATES UNAVAILABLE: Notion answered HTTP 500"
+has "it says the candidate search is unavailable, with Fix:" "${OUT}" "CANDIDATES UNAVAILABLE: Notion answered HTTP 400"
 lacks "a Notion failure is never 0 candidates considered" "${OUT}" "0 candidates considered"
 eq "a Notion failure asks the server nothing" "$(count_of athena)" "0"
 

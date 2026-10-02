@@ -44,8 +44,9 @@ USAGE = <<~EOF
               Projects rows (to scope each ticket to a project through its
               epic) and each ticket's first 100 blocks, pacing Notion calls
               (0.4 s). Writes DIR/finding-triage-snapshot.json. READS only.
-              A body that could not be read (after 3 tries on HTTP 429) is
-              recorded UNREAD and its pairs are excluded, never passed.
+              A body that could not be read (a 429 or 5xx is retried
+              first, ai/lib/notion_retry.rb) is recorded UNREAD and its
+              pairs are excluded, never passed.
               The snapshot also records each ticket's created_time, Kind,
               Severity and Security: ai/bin/ticket-corpus reads it too.
   --build     From the snapshot, write:

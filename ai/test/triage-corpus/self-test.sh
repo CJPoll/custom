@@ -272,17 +272,17 @@ OUT="$(cd "${TMP}" && FLEET_CLAUDE_JSON="${TMP}/claude.json" TRIAGE_CORPUS_NOTIO
 RC=$?
 eq "--fetch exits 0" "${RC}" "0"
 has "--fetch follows the cursor and skips a non-DND row" "${OUT}" "4 tickets (5 rows)"
-has "--fetch names an UNREAD body, never passes it [ticket]" "${OUT}" "1 bodies UNREAD (DND-429 answered HTTP 429)"
+has "--fetch names an UNREAD body, never passes it [ticket]" "${OUT}" "1 bodies UNREAD (DND-403 answered HTTP 403)"
 SNAP="${TMP}/fetched/finding-triage-snapshot.json"
 eq "the snapshot records the unread body as body_read false" \
-  "$(jq -r '.tickets[] | select(.ref=="DND-429") | .body_read' "${SNAP}" 2>/dev/null)" "false"
+  "$(jq -r '.tickets[] | select(.ref=="DND-403") | .body_read' "${SNAP}" 2>/dev/null)" "false"
 eq "the snapshot maps the epic to its project" "$(jq -r '.epic_projects["e0000000-0000-0000-0000-000000000001"]' "${SNAP}" 2>/dev/null)" "harness"
 eq "the snapshot is 0600" "$(stat -c '%a' "${SNAP}" 2>/dev/null)" "600"
 LOG="$(cat "${TMP}/notion.log")"
 lacks "every Notion request carried the token" "${LOG}" "AUTH_BAD"
 eq "only reads were made (POST query, GET children)" \
   "$(grep -v -E '^(POST /v1/data_sources/[0-9a-f-]{36}/query|GET /v1/blocks/[0-9a-f-]{36}/children\?page_size=100) AUTH_OK$' "${TMP}/notion.log" | wc -l | tr -d ' ')" "0"
-eq "a 429 body read was tried 3 times" "$(grep -c '0429/children' "${TMP}/notion.log")" "3"
+eq "a 403 body read is tried once, never retried" "$(grep -c '0403/children' "${TMP}/notion.log")" "1"
 OUT="$("${BIN}" --build --unrelated 1 --dir "${TMP}/fetched" 2>&1)"
 has "a fetched snapshot builds: the duplicate from the fake bodies" "${OUT}" "duplicate/tracker_record 1"
 eq "the snapshot records created_time, Kind and Security [DND-1055]" \

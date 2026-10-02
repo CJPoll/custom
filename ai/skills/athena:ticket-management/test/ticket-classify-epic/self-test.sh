@@ -318,14 +318,18 @@ eq "the first 10 by ID are sent [qa 2]" "$(blocking_sent | jq -c '[.candidates[]
 
 echo "== unavailable"
 
-spec "query-${TICKETS_DS}.json" '{"status":500,"body":{"object":"error"}}'
+# A permanent Notion failure (a 4xx other than 429 is never retried), so no
+# real retry wait runs here. The transient path (429/5xx, retried, then the
+# same failure) is proven with an injected wait in ai/lib/test/notion-read
+# (DND-1649).
+spec "query-${TICKETS_DS}.json" '{"status":400,"body":{"object":"error"}}'
 run "${TICKET[@]}" "${FILER[@]}" --epic "${EPIC}" --blocks DND-717
 eq "a failed Notion read exits 3 [qa 4]" "${RC}" "3"
 has "Kind, Severity and Security still print [qa 4]" "${OUT}" "Kind: Bug (filer: mode_off)
 Severity: MEDIUM (filer: mode_off)
 Security: none (filer: mode_off)
 ${PROV_CLASSIFY}"
-has "the read failure is CANDIDATES UNAVAILABLE with Fix:, never 0 [qa 4]" "${OUT}" "CANDIDATES UNAVAILABLE: Notion answered HTTP 500"
+has "the read failure is CANDIDATES UNAVAILABLE with Fix:, never 0 [qa 4]" "${OUT}" "CANDIDATES UNAVAILABLE: Notion answered HTTP 400"
 has "the line ends with the unavailable Fix:" "$(printf '%s\n' "${OUT}" | grep '^CANDIDATES UNAVAILABLE')" "${UNAVAILABLE_FIX}"
 lacks "no candidate count is printed" "${OUT}" "candidates considered"
 has "the filer's own Path follows" "${OUT}" "Decided (filer; path unavailable):

@@ -5,7 +5,7 @@ ai/bin/triage-corpus makes (DND-714). Test fixture only, never Notion.
   POST /v1/data_sources/<projects>/query   the DND Projects rows
   POST /v1/data_sources/<tickets>/query    two pages, joined by a cursor
   GET  /v1/blocks/<page>/children          a page's blocks; the page id
-                                           ending "0429" always answers 429;
+                                           ending "0403" always answers 403;
                                            page 3 says has_more (truncated);
                                            LOG_FILE.all_401 present: every
                                            block read answers 401
@@ -73,7 +73,7 @@ def project_rows():
 
 
 PAGE1 = [ticket(1, E_HARNESS, "Harness"), ticket(2, E_HARNESS, "Harness")]
-PAGE2 = [ticket(3, E_HARNESS, "Product", {"depends": [1]}), ticket(429, E_HARNESS, "Harness"),
+PAGE2 = [ticket(3, E_HARNESS, "Product", {"depends": [1]}), ticket(403, E_HARNESS, "Harness"),
          {"id": page(9999), "properties": {"ID": {"unique_id": {"prefix": "X", "number": 1}}}}]
 BLOCKS = {
     page(1): ["Base defect in the widget."],
@@ -118,8 +118,11 @@ class Handler(BaseHTTPRequestHandler):
         pid = self.path.split("/")[3] if self.path.startswith("/v1/blocks/") else ""
         if os.path.exists(LOG_FILE + ".all_401"):
             return self._send(401, {"object": "error"})
-        if pid.endswith("0429"):
-            return self._send(429, {"object": "error"}, {"Retry-After": "1"})
+        # A permanent failure, never retried, so no real retry wait runs in the
+        # suite. The retried 429/5xx path is proven with an injected wait in
+        # ai/lib/test/notion-read (DND-1649).
+        if pid.endswith("0403"):
+            return self._send(403, {"object": "error"})
         texts = BLOCKS.get(pid, [])
         results = [{"type": "paragraph", "paragraph": {"rich_text": [{"plain_text": t}]}} for t in texts]
         # page 3's body has a second page of blocks (the fetch reads only one).
