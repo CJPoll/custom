@@ -135,6 +135,10 @@ worse on any case, revert to ticket-blocking-v2.
 Item 1 stays 8 even if a v2 repeat-3 baseline reads below 8 of 10. Never
 lower an item. Here the baseline read exactly 8.
 
+The ordering is read strictly. live-2 read `unstable` in the baseline (and
+`miss` in the earlier, non-compliant run), so a v4 `miss` on live-2 is
+"worse" by the ordering, even though v2 never matched it.
+
 ### Scoring a v4 run
 
 After ticket-blocking-v4 deploys, run the two sets more than 60 s apart:
