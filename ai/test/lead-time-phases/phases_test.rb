@@ -1035,9 +1035,20 @@ end
 # X3: no gated head names the keys it searched.
 x3 = fixture { rb_resolve(rb_landing, [RB_PUSH], S.empty("no gated head covers it as a clean rebase")) }
 check("X3 nothing found: the landed commit stays the key") { x3["gated_head"] == RB_LANDED && x3["gated_head_source"].nil? }
-check("X3 the miss names the landed commit, the pre-push main and the ticket it searched") do
+check("X3 the miss names the landed commit and the pre-push main it searched") do
   m = x3["gated_head_miss"].to_s
-  m.include?(RB_LANDED[0, 8]) && m.include?(RB_BEFORE[0, 8]) && m.include?("DND-9001")
+  m.include?(RB_LANDED[0, 8]) && m.include?(RB_BEFORE[0, 8])
+end
+x3t = fixture { rb_resolve(rb_landing, [], S.empty("no landed main is known")) }
+check("X3 with no pre-push main, the miss also names the ticket it searched") do
+  m = x3t["gated_head_miss"].to_s
+  m.include?(RB_LANDED[0, 8]) && m.include?("no single merge.landed") &&
+    m.include?("no successful integration_gate.run for DND-9001")
+end
+check("X3 a red run on the landed commit does not make it the gated head") do
+  red = [ev("integration_gate.run", "2026-10-01T04:20:00Z", head: RB_LANDED, duration_s: 9.0,
+            attrs: { "exit_code" => 1 })]
+  rb_resolve(rb_landing, RB_RUNS + [RB_PUSH] + red, rb_cover("rebase", [RB_GATED]))["gated_head"] == RB_GATED
 end
 check("X3 the cover's own reason is kept in full") do
   x3["gated_head_search"].to_s.include?("no gated head covers it as a clean rebase")
@@ -1050,7 +1061,7 @@ end
 x3u = fixture { rb_resolve(rb_landing(ticket: nil), [], S.empty("x")) }
 check("X3 unticketed, no merge.landed: the miss says both") do
   m = x3u["gated_head_miss"].to_s
-  m.include?("unticketed") && m.include?("no merge.landed")
+  m.include?("unticketed") && m.include?("no single merge.landed")
 end
 x3c = fixture { rb_resolve(rb_landing, [RB_PUSH], S.could_not_look("jq is not on PATH")) }
 check("X3 a cover that could not be read says so, never 'none'") do
@@ -1071,9 +1082,35 @@ x4n = fixture { rb_resolve(rb_landing, on_landed + RB_RUNS, S.empty("x")) }
 check("X4 a run on the landed commit itself joins it, before the ticket fallback") do
   x4n["gated_head"] == RB_LANDED && x4n["gated_head_source"].to_s.include?("integration_gate.run")
 end
-x4t = fixture { rb_resolve(rb_landing, RB_RUNS + [RB_PUSH], S.empty("no cover")) }
-check("X4 the ticket fallback: the ticket's one gated head joins") do
-  x4t["gated_head"] == RB_GATED && x4t["gated_head_source"].to_s.include?("DND-9001")
+# No merge.landed: the cover had no pre-push main to judge against.
+x4t = fixture { rb_resolve(rb_landing, RB_RUNS, S.empty("no landed main is known")) }
+check("X4 the ticket fallback: the ticket's one gated head joins, said to be not tree-checked") do
+  x4t["gated_head"] == RB_GATED && x4t["gated_head_source"].to_s.include?("DND-9001") &&
+    x4t["gated_head_source"].include?("not tree-checked")
+end
+
+# X6: the rule judged (a pre-push main was known) and rejected every receipt
+# head. The ticket's head is one it disproved: it never joins.
+x6 = fixture { rb_resolve(rb_landing, RB_RUNS + [RB_PUSH], S.empty("1 candidate(s) checked, 1 conflicting")) }
+check("X6 a cover the rule judged and found none: the ticket is not tried") do
+  x6["gated_head"] == RB_LANDED && x6["gated_head_source"].nil? &&
+    x6["gated_head_miss"].to_s.include?("the ticket is not tried") &&
+    x6["gated_head_search"].to_s.include?("1 conflicting")
+end
+
+# X7: a lookup that could not run never reads as one that found nothing,
+# on the join path too.
+x7 = fixture { rb_resolve(rb_landing, RB_RUNS + [RB_PUSH], S.could_not_look("jq is not on PATH")) }
+check("X7 a cover that could not run: the ticket joins, and its source says the cover was not judged") do
+  x7["gated_head"] == RB_GATED && x7["gated_head_source"].to_s.include?("could not be judged (jq is not on PATH)")
+end
+x7r = fixture do
+  rb_resolve(rb_landing, RB_RUNS, S.empty("no landed main is known"),
+             receipt: S.could_not_look("eeeeeeee.json is unreadable"))
+end
+check("X7 an unreadable receipt for the landed commit is named, never 'no receipt'") do
+  s = x7r["gated_head_source"].to_s
+  s.include?("its receipt could not be read (eeeeeeee.json is unreadable)") && !s.include?("no receipt or")
 end
 check("X4 a red run's head is no candidate") do
   red = [ev("integration_gate.run", "2026-10-01T03:59:00Z", head: RB_GATED2, duration_s: 1.0,

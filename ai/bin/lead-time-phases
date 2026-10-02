@@ -11,7 +11,8 @@
 #              cursor to the scan's scanned_through. Never on SCAN INCOMPLETE.
 #              Receipts, verdicts and timings join on the GATED head: the
 #              landed commit for a push (or the head a clean rebase came
-#              from, DND-1809), the PR head (lead-time's
+#              from, else the ticket's one gated head: DND-1809), the PR
+#              head (lead-time's
 #              head_commit) for a squash merge (DND-1490). --rejoin backfills
 #              merge rows ledgered without one; see --help.
 #   --summary  median, p90 and sum per phase over the last N landings, the
@@ -97,11 +98,14 @@ HELP = <<~TXT
   Push landings (DND-1809). A push's commit is the gated head only when
   the admiral pushed that head unchanged. After a clean rebase onto a
   moved main it is not, so ingest finds the head that was gated, in this
-  order: the landed commit itself (its integration receipt, or an
-  integration_gate.run on it); the receipts' clean-rebase cover
+  order: the landed commit itself (its integration receipt, or a
+  successful integration_gate.run on it); the receipts' clean-rebase cover
   (ir_push_covered in ai/lib/integration-receipt.sh, onto the `before` of
-  the push's merge.landed); the ticket's one successful run head. Only one
-  candidate joins. Two candidates, or none, keeps the landed commit as the
+  the push's merge.landed); the ticket's one successful run head, only when
+  the cover could not judge (no pre-push main recorded, or the rule could
+  not run), and named as not tree-checked. The first step that finds
+  anything decides, and it must find exactly one head. Two candidates, or
+  none, keeps the landed commit as the
   key: the row's gated_head_miss says what was searched (gated_head_search
   in full), and the n/a reasons carry it. A joined row records
   gated_head_source. Rows ingested before this are not re-derived.

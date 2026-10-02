@@ -325,6 +325,9 @@ ir_push_covered() {
   # still wins over a candidate that could not be read, as it did when the
   # loop stopped at the first cover. The re-read restores IR_RECEIPT and the
   # other receipt fields to the first cover's, which later reads overwrote.
+  # It is best-effort: that receipt already passed in this call, so a read
+  # that now fails (the file removed meanwhile) leaves only the note's
+  # receipt fields stale, never the answer.
   if [ "${#covers[@]}" -gt 0 ]; then
     ir_read_receipt "$common" "${covers[0]}" "$m" || true
     IR_COVER=rebase IR_COVER_HEAD="${covers[0]}" IR_COVER_HEADS=( "${covers[@]}" ); return 0

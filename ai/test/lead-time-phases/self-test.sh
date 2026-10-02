@@ -507,7 +507,7 @@ eq "queue = run end -> the push start" "$(row_field "${RB_L}" phases.queue.s)" "
 eq "merge = the push start -> the landing" "$(row_field "${RB_L}" phases.merge.s)" "5"
 eq "MISS: a landing with no gated head keeps its own commit as the key" "$(row_field "${RB_N}" gated_head)" "${RB_N}"
 has "MISS: and names what it searched" "$(row_field "${RB_N}" gated_head_miss)" \
-  "no receipt or integration_gate.run on ${RB_N:0:8}, no clean-rebase cover (no merge.landed before for ${RB_N:0:8})"
+  "no receipt or integration_gate.run on ${RB_N:0:8}, no clean-rebase cover (no single merge.landed before for ${RB_N:0:8})"
 has "MISS: the cover's own reason is kept" "$(row_field "${RB_N}" gated_head_search)" "clean-rebase cover: NO RECEIPT:"
 has "MISS: integrate's n/a carries the search" "$(row_field "${RB_N}" phases.integrate.na_reason)" \
   "no integration_gate.run on ${RB_N:0:8} (no gated head:"
