@@ -45,3 +45,29 @@ prints the pin line from `run_checks`, so a bypass shows as a missing
 A first M2 attempt was vacuous: its `sed` pattern assumed 4-space indent, so
 nothing changed and the suite stayed green. The mutation script now aborts
 when the mutated text is absent.
+
+---
+
+## 2026-10-02 — DND-1689: the gate refuses untracked, un-ignored files
+
+- **Code under test:** `untracked_preflight` and `untracked_files` in
+  `ai/bin/harness-gate`, called by `run_gate` before discovery.
+- **Suite run:** `ruby ai/bin/harness-gate --self-test --group core`
+- **Baseline:** `harness-gate: self-test OK (group core; 177 checks declared,
+  114 of them discovered self-test suites)`
+- **Regression (before the fix):** case 6f on the unfixed `run_gate`:
+  `6f: run_gate returned 0 on a tree with 2 untracked, un-ignored files its
+  discovery never read; expected 1 (refused)`, with `self-tests discovered: 1`.
+
+| # | Mutation | Case | Failure string |
+|---|---|---|---|
+| M1 | `run_gate`: `return 1 unless untracked_preflight(root)` → `nil` | 6f (three assertions) | `6f: run_gate returned 0 on a tree with 2 untracked, un-ignored files its discovery never read; expected 1 (refused)` |
+| M2 | `untracked_files`: a failed `ls-files --others` returns `[[], []]` instead of raising | 6g | `6g: untracked_files did not raise GitTrackingError carrying git's error when` (the listing failed) |
+
+Each mutation took the group from `self-test OK` to `harness-gate: self-test
+FAILED (group core)` (rc 1). Both were confirmed applied (`grep -c` = 1)
+before the run and restored by `cp` after.
+
+**Not protected by a behavioural test:** the wrong-tree refusal running
+before the untracked preflight on a real run. The suite drives `run_gate` on
+a fixture only as a dry run, which reaches neither ordering.

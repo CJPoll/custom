@@ -1881,6 +1881,25 @@ def run_gate(root: CUSTOM_DIR, dry_run: false, jobs: nil)
   unless dry_run
     pre = gate_start_snapshot(root)
     return 1 unless pre
+
+    # WRONG-TREE REFUSAL. Only on a real run (a fixture dry_run never gets
+    # here), and only for same-repo-different-worktree — see "WHICH TREE AM
+    # I GATING?" above for what is deliberately allowed. It reads only cwd
+    # and this script's path, so it runs before the untracked preflight
+    # below, which would otherwise name the OTHER tree's files with a Fix:
+    # to stage them there (DND-1689).
+    if (mismatch = foreign_gate_tree)
+      cwd_root, gate_root = mismatch
+      warn "harness-gate: REFUSED — you are in #{cwd_root} but this binary gates #{gate_root}."
+      warn "  Fix: run the gate belonging to the tree you are about to commit in — " \
+           "`cd #{cwd_root} && ./ai/bin/harness-gate`. Every check resolves its " \
+           "inputs beside THIS script (check-inbox-registry reads the " \
+           "registry.json next to it, discovery globs that tree), so the result " \
+           "you just asked for would describe #{gate_root}, not your work. Do " \
+           "not work around this by copying the result across — gate the tree " \
+           "you are committing."
+      return 1
+    end
   end
 
   # Before discovery reads the tree, and on a dry run too, so --self-test
@@ -1916,22 +1935,6 @@ def run_gate(root: CUSTOM_DIR, dry_run: false, jobs: nil)
   end
 
   return 0 if dry_run
-
-  # WRONG-TREE REFUSAL. Only reached on a real run (a fixture dry_run never
-  # gets here), and only fires for same-repo-different-worktree — see
-  # "WHICH TREE AM I GATING?" above for what is deliberately allowed.
-  if (mismatch = foreign_gate_tree)
-    cwd_root, gate_root = mismatch
-    warn "harness-gate: REFUSED — you are in #{cwd_root} but this binary gates #{gate_root}."
-    warn "  Fix: run the gate belonging to the tree you are about to commit in — " \
-         "`cd #{cwd_root} && ./ai/bin/harness-gate`. Every check resolves its " \
-         "inputs beside THIS script (check-inbox-registry reads the " \
-         "registry.json next to it, discovery globs that tree), so the result " \
-         "you just asked for would describe #{gate_root}, not your work. Do " \
-         "not work around this by copying the result across — gate the tree " \
-         "you are committing."
-    return 1
-  end
 
   # ORIGIN FRESHNESS (DND-945). Before any check runs — see "ORIGIN FRESHNESS,
   # CHECKED BEFORE ANY CHECK RUNS" above. Reads the pin ONCE here; the same
@@ -3264,6 +3267,9 @@ def self_test_core
     git.call("init", "-q")
     git.call("config", "user.email", "a@b.c")
     git.call("config", "user.name", "test")
+    # Local config wins over the host's global excludes, so a machine whose
+    # global ignore lists node_modules/ or *.sh cannot change what is untracked.
+    git.call("config", "core.excludesFile", File::NULL)
     plant = lambda do |rel, body, mode = 0o755|
       path = File.join(fixture_root, rel)
       FileUtils.mkdir_p(File.dirname(path))
@@ -4965,6 +4971,8 @@ rescue GitTrackingError => e
        "worktree (try `git -C #{CUSTOM_DIR} status`), then re-run " \
        "ai/bin/harness-gate. Discovery refuses to silently skip its " \
        "tracked-file filter here, since that could promote an " \
-       "untracked/vendored self-test.sh into the blocking gate."
+       "untracked/vendored self-test.sh into the blocking gate; and an " \
+       "untracked-file listing that failed must not read as \"none\" " \
+       "(DND-1689)."
   exit 1
 end
