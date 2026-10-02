@@ -369,6 +369,8 @@ Dir.mktmpdir do |tmp|
   bound_of = lambda do |label, &blk|
     blk.call
   rescue ArgumentError => e
+    raise unless e.message.include?("unknown keyword")
+
     check("#{label} (run takes an injected join: and clock:)", false, "#{e.class}: #{e.message}")
     nil
   end
@@ -376,22 +378,26 @@ Dir.mktmpdir do |tmp|
   # t1 the leader still runs when the injected deadline lapses. Its first wait
   # must be exactly the timeout, and TERM must follow that lapse: the leader
   # traps TERM and writes a marker before it exits. The first wait returns
-  # only once the leader has armed its trap (an event, under the hang cap).
+  # only once the leader has armed its trap, and the TERM marker is waited on
+  # as an event before the real grace wait: both under the hang cap, so a
+  # slow machine moves neither verdict, and a run that sends no TERM is a FAIL
+  # (at the cap), never a pass.
   ready = File.join(tmp, "t1-ready")
   termed = File.join(tmp, "t1-term")
   script = "trap 'echo TERM > #{termed}; exit 0' TERM; echo $$ > #{ready}; sleep #{CHILD_LIFE_S} & wait"
-  waits = []
-  term_after_grace = nil
+  wait_sizes = []
+  term_seen = nil
   join = lambda do |thread, seconds|
-    waits << seconds
-    case waits.size
+    wait_sizes << seconds
+    case wait_sizes.size
     when 1
-      await_event { File.size?(ready) }
+      if await_event { File.size?(ready) } == :hang
+        hang("t1 the leader armed its TERM trap", "no ready file at the #{HANG_CAP_S}s hang cap")
+      end
       nil
     when 2
-      ended = thread.join(seconds)
-      term_after_grace = File.exist?(termed)
-      ended
+      term_seen = await_event { File.size?(termed) } == :done
+      thread.join(seconds)
     else
       thread.join(seconds)
     end
@@ -402,10 +408,10 @@ Dir.mktmpdir do |tmp|
   if state == :hang
     hang("t1 the injected deadline ends the wait", "BoundedCommand.run still blocked at the #{HANG_CAP_S}s hang cap; #{r}")
   elsif r
-    check("t1 the first wait is the timeout itself (4242 s)", waits.first == 4242, waits.inspect)
+    check("t1 the first wait is the timeout itself (4242 s)", wait_sizes.first == 4242, wait_sizes.inspect)
     check("t1 a lapsed deadline is timed_out", r.timed_out && r.exitstatus.nil? && !r.success?, r.inspect)
     check("t1 TERM reaches the group after the deadline, then the grace (0.25 s) is waited",
-          waits[1] == 0.25 && term_after_grace == true, [waits, term_after_grace].inspect)
+          wait_sizes[1] == 0.25 && term_seen == true, [wait_sizes, term_seen].inspect)
   end
   if r
     leader = File.size?(ready) ? File.read(ready).to_i : 0
@@ -415,15 +421,16 @@ Dir.mktmpdir do |tmp|
   # t2 the success path: the reads are bounded by what is left of the same
   # deadline, read off the injected clock. The clock reads 1000 when run sets
   # the deadline and 1030 afterwards, so with timeout 100 each reader gets the
-  # 70 s left plus READER_GRACE_S.
+  # 70 s left plus READER_GRACE_S. This leans on run reading the clock first
+  # for the deadline; a run that read it earlier must change this clock too.
   clock_reads = 0
   clock = lambda do
     clock_reads += 1
     clock_reads == 1 ? 1000.0 : 1030.0
   end
-  waits = []
+  wait_sizes = []
   join = lambda do |thread, seconds|
-    waits << seconds
+    wait_sizes << seconds
     thread.join(seconds)
   end
   state, r = await_return do
@@ -435,7 +442,7 @@ Dir.mktmpdir do |tmp|
     check("t2 a quick command succeeds through the injected waits", r.success? && r.out == "out\n", r.inspect)
     reader = 70 + BoundedCommand::READER_GRACE_S
     check("t2 the leader wait is the timeout, each read gets the deadline's remainder plus grace",
-          waits == [100, reader, reader], waits.inspect)
+          wait_sizes == [100, reader, reader], wait_sizes.inspect)
   end
 
   [0, -1, nil, "5"].each do |bad|

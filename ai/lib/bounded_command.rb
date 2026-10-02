@@ -44,16 +44,16 @@ module BoundedCommand
   JOIN = ->(thread, seconds) { thread.join(seconds) }
 
   # One run's clock and wait primitive, carried to its helpers.
-  Waits = Struct.new(:clock, :joiner) do
+  Timing = Struct.new(:clock, :join_fn) do
     def now
       clock.call
     end
 
     def join(thread, seconds)
-      joiner.call(thread, seconds)
+      join_fn.call(thread, seconds)
     end
   end
-  private_constant :Waits
+  private_constant :Timing
 
   # A bound must be a positive number of seconds. Anything else is a caller
   # error, never "no bound".
@@ -85,15 +85,16 @@ module BoundedCommand
   # clock: and join: are test seams (DND-1648), so a suite can read the SIZE
   # of every bounded wait instead of timing it. clock -> monotonic seconds;
   # join(thread, seconds) -> the thread, or nil when the wait lapsed. Every
-  # bounded wait in run goes through join. Callers pass neither.
+  # bounded wait in run goes through join; the one unbounded wait, the final
+  # reap in run's cleanup, is that D-state residual. Callers pass neither.
   def self.run(argv, timeout:, chdir: nil, env: {}, stdin: File::NULL, kill_grace: KILL_GRACE_S,
                clock: MONOTONIC, join: JOIN)
     check_bound!(timeout)
     check_bound!(kill_grace, "kill_grace")
     opts = { pgroup: true, in: stdin }
     opts[:chdir] = chdir if chdir
-    waits = Waits.new(clock, join)
-    deadline = waits.now + timeout
+    timing = Timing.new(clock, join)
+    deadline = timing.now + timeout
     out_r, out_w = IO.pipe
     err_r, err_w = IO.pipe
     pid = nil
@@ -111,12 +112,12 @@ module BoundedCommand
       wait = Process.detach(pid)
       out_w.close
       err_w.close
-      settled, result = wait_bounded(out_r, err_r, wait, readers, timeout, deadline, kill_grace, waits)
+      settled, result = wait_bounded(out_r, err_r, wait, readers, timeout, deadline, kill_grace, timing)
       result
     ensure
       if pid && !settled
         wait ||= Process.detach(pid)
-        kill_group(wait, kill_grace, waits)
+        kill_group(wait, kill_grace, timing)
       end
       readers.each { |t| t.kill if t.alive? }
       [out_r, out_w, err_r, err_w].each { |io| io.close unless io.closed? }
@@ -128,18 +129,18 @@ module BoundedCommand
 
   # -> [settled, Result]. `readers` is filled in place so run's cleanup can
   # kill them whatever raises here.
-  def self.wait_bounded(out, err, wait, readers, timeout, deadline, kill_grace, waits)
+  def self.wait_bounded(out, err, wait, readers, timeout, deadline, kill_grace, timing)
     readers.push(Thread.new { read_all(out) }, Thread.new { read_all(err) })
-    status = waits.join(wait, timeout)&.value
-    drained = status && readers.all? { |t| waits.join(t, [deadline - waits.now, 0].max + READER_GRACE_S) }
+    status = timing.join(wait, timeout)&.value
+    drained = status && readers.all? { |t| timing.join(t, [deadline - timing.now, 0].max + READER_GRACE_S) }
     if drained
       return [true, Result.new(out: readers[0].value, err: readers[1].value,
                                exitstatus: status.exitstatus || (128 + status.termsig.to_i),
                                termsig: status.termsig, timed_out: false, seconds: timeout)]
     end
 
-    kill_group(wait, kill_grace, waits)
-    texts = readers.map { |t| waits.join(t, READER_GRACE_S) ? t.value.to_s : "" }
+    kill_group(wait, kill_grace, timing)
+    texts = readers.map { |t| timing.join(t, READER_GRACE_S) ? t.value.to_s : "" }
     [true, Result.new(out: texts[0], err: texts[1], exitstatus: nil, timed_out: true, seconds: timeout)]
   end
 
@@ -152,11 +153,11 @@ module BoundedCommand
 
   # KILL follows TERM whether or not the leader died: a group member that
   # ignores TERM would otherwise outlive a leader that honoured it.
-  def self.kill_group(wait, grace, waits)
+  def self.kill_group(wait, grace, timing)
     signal_group("TERM", wait.pid)
-    waits.join(wait, grace)
+    timing.join(wait, grace)
     signal_group("KILL", wait.pid)
-    waits.join(wait, grace)
+    timing.join(wait, grace)
   end
 
   def self.signal_group(sig, pid)
