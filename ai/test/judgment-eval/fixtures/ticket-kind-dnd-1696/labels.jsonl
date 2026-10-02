@@ -1,0 +1,13 @@
+{"id": "hard-1-eval-undeployed-candidate", "label": "Hardening", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "hard-2-credo-bound-phrase", "label": "Hardening", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "hard-3-forge-stub-helper", "label": "Hardening", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "hard-4-unique-index-audit-one-way", "label": "Hardening", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "other-1-installer-exit-codes", "label": "Refactor", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "other-2-duplicated-regex", "label": "Refactor", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "other-3-selftest-helper-order", "label": "Test", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "other-4-main-red-pipefail-grep", "label": "Bug", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "other-5-changeset-missing-unique", "label": "Bug", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "ctl-1-wrong-total", "label": "Bug", "provenance": "rule_confirmed", "labeler": "dnd-1696-synthetic-control", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "ctl-2-crash-on-empty", "label": "Bug", "provenance": "rule_confirmed", "labeler": "dnd-1696-synthetic-control", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "ctl-3-check-misses-specified-case", "label": "Bug", "provenance": "rule_confirmed", "labeler": "dnd-1696-synthetic-control", "labeled_at": "2026-10-02T07:00:00Z"}
+{"id": "ctl-4-lost-webhook-event", "label": "Bug", "provenance": "rule_confirmed", "labeler": "dnd-1696-synthetic-control", "labeled_at": "2026-10-02T07:00:00Z"}
