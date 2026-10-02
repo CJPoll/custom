@@ -46,6 +46,12 @@ export GITLAB_ATHENA_TOKEN_FILE="${TMP}/token"
 mkdir -p "${TMP}/stubbin"
 printf '#!/bin/sh\necho "STUB-GLAB-REACHED $*"\nexit 97\n' > "${TMP}/stubbin/glab"
 chmod +x "${TMP}/stubbin/glab"
+# DND-1647: a guard stands behind every gh/glab stub on PATH, so a stub
+# that is missing or not executable fails the suite instead of reaching the
+# real CLI (ai/lib/forge-stub-guard.sh).
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/forge-guard"
+fsg_require_stubs "${TMP}/stubbin" glab
 export PATH="${TMP}/stubbin:${PATH}"
 
 # new_repo <name> <origin-url> -> a repo with one commit, origin set, echoes path.
@@ -199,6 +205,10 @@ else bad "18. git sees the PAT header" "rc=${RC} out='$(cat "${TMP}/out")' err='
 if [ "${RC}" = 0 ] && [ "$(cat "${TMP}/out")" = kept ] && [ "$(cat "${TMP}/out2")" = "AUTHORIZATION: basic ${B64}" ]; then
   ok "19. a caller's GIT_CONFIG_COUNT entry is kept and the header is appended"
 else bad "19. GIT_CONFIG_COUNT append" "out='$(cat "${TMP}/out")' out2='$(cat "${TMP}/out2")' err='$(cat "${TMP}/err")'"; fi
+
+# DND-1647: no gh/glab call may have fallen through past its stub.
+if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
+else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 echo "==================================================="

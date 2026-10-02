@@ -26,6 +26,11 @@ bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
+# DND-1647: a guard stands behind every gh/glab stub below, so a stub that is
+# missing or not executable fails the suite instead of reaching the real CLI.
+# shellcheck source=../../lib/forge-stub-guard.sh
+. "$here/../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/forge-guard"
 NOREPO="${TMP}/no-such-repo"
 SINCE="2026-09-19T00:00:00Z"
 
@@ -116,6 +121,7 @@ FAKEBIN="${TMP}/fakebin"
 mkdir -p "${FAKEBIN}"
 printf '#!/bin/sh\necho "fake gh: offline" >&2\nexit 1\n' >"${FAKEBIN}/gh"
 chmod +x "${FAKEBIN}/gh"
+fsg_require_stubs "${FAKEBIN}" gh
 git init -q "${GHREPO}" && git -C "${GHREPO}" remote add origin https://github.com/example-org/example-repo.git
 OUT="$(PATH="${FAKEBIN}:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" --since 2026-09-30 2>"${TMP}/err" </dev/null)"; CODE=$?
 ERR="$(cat "${TMP}/err")"
@@ -147,6 +153,7 @@ NFBIN="${TMP}/notfoundbin"
 mkdir -p "${NFBIN}"
 printf '#!/bin/sh\necho "GraphQL: Could not resolve to a PullRequest with the number of 424242. (repository.pullRequest)" >&2\nexit 1\n' >"${NFBIN}/gh"
 chmod +x "${NFBIN}/gh"
+fsg_require_stubs "${NFBIN}" gh
 PATH="${NFBIN}:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" --pr 424242 >"${TMP}/pr-out" 2>"${TMP}/pr-err" </dev/null
 PR_CODE=$?
 run --repo "${GHREPO}" --since nonsense
@@ -175,6 +182,7 @@ stub() { # stub <dir> <tool> <stdout> <stderr>: exits 1, printing both
   printf '%s\n' "$4" >"$1/$2.err"
   printf '#!/bin/sh\ncat "%s"\ncat "%s" >&2\nexit 1\n' "$1/$2.out" "$1/$2.err" >"$1/$2"
   chmod +x "$1/$2"
+  fsg_require_stubs "$1" "$2"
 }
 GLREPO="${TMP}/gl-origin-repo"
 git init -q "${GLREPO}" && git -C "${GLREPO}" remote add origin https://gitlab.com/example-group/example-repo.git
@@ -196,7 +204,8 @@ stub "${TMP}/gh-401" gh "" "HTTP 401: Bad credentials (https://api.github.com/gr
 stub "${TMP}/gh-norepo" gh "" "GraphQL: Could not resolve to a Repository with the name 'example-org/example-repo'. (repository)"
 mkdir -p "${TMP}/gh-garbage"
 printf '#!/bin/sh\necho "not json"\nexit 0\n' >"${TMP}/gh-garbage/gh"
-chmod +x "${TMP}/gh-garbage/gh" # a non-executable stub falls through to the real gh
+chmod +x "${TMP}/gh-garbage/gh"
+fsg_require_stubs "${TMP}/gh-garbage" gh
 stub "${TMP}/gl-nomr" glab '{"message":"404 Not found"}' "glab: 404 Not found (HTTP 404)"
 stub "${TMP}/gl-noproj" glab '{"message":"404 Project Not Found"}' "glab: 404 Project Not Found (HTTP 404)"
 stub "${TMP}/gl-401" glab '{"message":"401 Unauthorized"}' "glab: 401 Unauthorized (HTTP 401)"
@@ -244,6 +253,9 @@ run --help --bogus
 [ "${CODE}" -eq 0 ] && grep -q 'Usage:' <<<"${OUT}" \
   && ok "--help is still answered first (stdout, exit 0)" \
   || bad "--help is answered first" "code=${CODE} out=$(head -c 160 <<<"${OUT}")"
+
+if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
+else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
 
 printf '\nlead-time self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then

@@ -44,6 +44,11 @@ ok()  { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [ -n "${2-}" ] && printf '       %s\n' "$2"; }
 
 # ---- stubs ----
+# DND-1647: a guard stands behind every gh/glab stub on PATH, so a stub
+# that is missing or not executable fails the suite instead of reaching the
+# real CLI (ai/lib/forge-stub-guard.sh).
+. "${HERE}/../../../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/forge-guard"
 STUBS="${TMP}/stubs"; mkdir -p "${STUBS}"
 cat > "${STUBS}/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -106,6 +111,7 @@ rc="$(cat "${ST}/teardown_rc")"
 exit "${rc}"
 EOF
 chmod +x "${STUBS}"/*
+fsg_require_stubs "${STUBS}" gh
 export PATH="${STUBS}:${PATH}" LOCKED_MERGE_AI_BIN="${STUBS}"
 
 # fixture <name> -- fresh bare origin + clone "wt" on a feature head H.
@@ -514,6 +520,10 @@ exec 8>&-
   || bad "t6 timeout: the unwritable store changed the run (exit ${c1} vs ${c2})" "$(diff <(printf '%s\n' "${o1}") <(printf '%s\n' "${o2}"))"
 chmod 700 "${TMP}/t6-ro"
 [ ! -e "${TMP}/t6-ro/telemetry" ] && ok "t6 nothing was written to the unwritable store" || bad "t6 unwritable store written"
+
+# DND-1647: no gh/glab call may have fallen through past its stub.
+if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
+else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
 
 echo "locked-merge self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]

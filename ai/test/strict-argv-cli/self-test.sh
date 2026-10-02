@@ -70,7 +70,13 @@ exit 1
 EOF
   chmod +x "${TMP}/stubs/${s}"
 done
-export PATH="${TMP}/stubs:${REAL_RUBY_DIR}:${PATH}"
+# DND-1647: a guard stands behind every gh/glab stub on PATH, so a stub
+# that is missing or not executable fails the suite instead of reaching the
+# real CLI (ai/lib/forge-stub-guard.sh).
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/forge-guard" gh glab gh-athena glab-athena
+fsg_require_stubs "${TMP}/stubs" gh glab gh-athena glab-athena
+export PATH="${TMP}/stubs:${FSG_DIR}:${REAL_RUBY_DIR}:${PATH}"
 export GH_ATHENA_BIN="${TMP}/stubs/gh-athena"
 export GLAB_ATHENA_BIN="${TMP}/stubs/glab-athena"
 export PUSH_ACTOR_CHECK_GH="${TMP}/stubs/gh"
@@ -204,6 +210,10 @@ refused "test-slot: --label twice (either spelling) is refused" "--label given m
 refused "test-slot: --wait-timeout does not swallow --json" "--wait-timeout needs a value" test-slot --wait-timeout --json -- true
 refused "test-slot: --self-test with --status is refused (was last-wins)" "two modes" test-slot --self-test --status
 accepted "test-slot: a labelled run still runs its command" 0 test-slot --label dnd-813 -- true
+
+# DND-1647: no gh/glab call may have fallen through past its stub.
+if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
+else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
 
 echo "strict-argv CLI suite: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]

@@ -299,13 +299,19 @@ TB="${TMP}/tracebin"; mkdir -p "${TB}"
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/git.log"\nexit 0\n' "${TMP}" > "${TB}/git"
 printf '#!/bin/sh\nexit 0\n' > "${TB}/gh"; printf '#!/bin/sh\nexit 0\n' > "${TB}/docker"
 chmod +x "${TB}/git" "${TB}/gh" "${TB}/docker"
+# DND-1647: a guard stands behind every gh/glab stub on PATH, so a stub
+# that is missing or not executable fails the suite instead of reaching the
+# real CLI (ai/lib/forge-stub-guard.sh).
+. "${ROOT}/ai/lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/forge-guard" gh
+fsg_require_stubs "${TB}" gh
 FP="${TMP}/fp"; mkdir -p "${FP}/dir"
 printf 'FAIL one\npassed two\nstash word\n12\n' > "${FP}/f"; cp "${FP}/f" "${FP}/g"; cp "${FP}/f" "${FP}/dir/h"
 printf '[1,2]\n' > "${FP}/f.json"
 while IFS= read -r c; do
   [ -n "${c}" ] || continue
   : > "${TMP}/git.log"
-  ( cd "${FP}" && PATH="${TB}:${BASEPATH}" bash -c "${c}" ) >/dev/null 2>&1
+  ( cd "${FP}" && PATH="${TB}:${FSG_DIR}:${BASEPATH}" bash -c "${c}" ) >/dev/null 2>&1
   if [ ! -s "${TMP}/git.log" ]; then ok "FP. never reaches git: ${c}"
   else bad "FP. ${c}" "git was exec'd: $(cat "${TMP}/git.log")"; fi
 done <<'CORPUS'
@@ -335,7 +341,7 @@ printf 'cat > s.sh <<'"'"'EOF'"'"'\ngit stash pop\nEOF\n' > "${TMP}/hd2.sh"
 printf '/usr/bin/ruby - <<'"'"'EOF'"'"'\nfix = 1\nputs "#{fix}"\nEOF\n' > "${TMP}/hd3.sh"
 for h in hd1 hd2 hd3; do
   : > "${TMP}/git.log"
-  ( cd "${FP}" && PATH="${TB}:${BASEPATH}" bash "${TMP}/${h}.sh" ) >/dev/null 2>&1
+  ( cd "${FP}" && PATH="${TB}:${FSG_DIR}:${BASEPATH}" bash "${TMP}/${h}.sh" ) >/dev/null 2>&1
   if [ ! -s "${TMP}/git.log" ]; then ok "FP. never reaches git: heredoc ${h} ($(sed -n 2p "${TMP}/${h}.sh"))"
   else bad "FP. heredoc ${h}" "git was exec'd: $(cat "${TMP}/git.log")"; fi
 done
@@ -343,6 +349,10 @@ done
 fresh
 allowed "FP-git. git -C \"\$D\" log" sh -c 'D="$1"; git -C "$D" log -1 --oneline' _ "${WT}"
 allowed "FP-git. ls of \$(git --exec-path)/git-stash" sh -c 'ls -la "$(git --exec-path)/git-stash" >/dev/null 2>&1; true'
+
+# DND-1647: no gh/glab call may have fallen through past its stub.
+if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
+else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 echo "==================================================="

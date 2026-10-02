@@ -84,6 +84,12 @@ case "$*" in
 esac
 STUB
 chmod +x "${TMP}/bin/gh"
+# DND-1647: a guard stands behind every gh/glab stub on PATH, so a stub
+# that is missing or not executable fails the suite instead of reaching the
+# real CLI (ai/lib/forge-stub-guard.sh).
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/forge-guard"
+fsg_require_stubs "${TMP}/bin" gh
 export PATH="${TMP}/bin:${PATH}"
 
 HEAD_SHA="b712de1d0000000000000000000000000000beef"
@@ -940,6 +946,10 @@ else bad "D14. linked worktree reads the common store" "$(detail)"; fi
 reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"
 OUT="$(GH_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" pr merge 362 --squash --match-head-commit "${HEAD_SHA}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
 receipt_refused "D15. the dry-run seam on a gated merge with no receipt -> the same refusal" "NO RECEIPT"
+
+# DND-1647: no gh/glab call may have fallen through past its stub.
+if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
+else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 echo "==================================================="

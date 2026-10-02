@@ -70,6 +70,12 @@ echo "stub: ran $all"
 exit 0
 STUB
 chmod +x "${TMP}/bin/glab"
+# DND-1647: a guard stands behind every gh/glab stub on PATH, so a stub
+# that is missing or not executable fails the suite instead of reaching the
+# real CLI (ai/lib/forge-stub-guard.sh).
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/forge-guard"
+fsg_require_stubs "${TMP}/bin" glab
 export PATH="${TMP}/bin:${PATH}"
 
 # Shapes measured on amby_ai/walt_ui !1473 (2026-09-26): the open MR's head
@@ -420,6 +426,10 @@ else bad "D1. dry-run seam" "$(detail)"; fi
 reset_fx; green_fx
 OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 1473 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
 if refused; then ok "D2. dry-run still refuses"; else bad "D2. dry-run refusal" "$(detail)"; fi
+
+# DND-1647: no gh/glab call may have fallen through past its stub.
+if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
+else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 echo "==================================================="

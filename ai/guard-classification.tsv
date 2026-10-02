@@ -44,6 +44,7 @@ ai/lib/fleet/effects.sh	guard
 ai/lib/fleet/manager.sh	guard	
 ai/lib/fleet/resume-manager.sh	guard	
 ai/lib/forge-cli-isolation.sh	guard	
+ai/lib/forge-stub-guard.sh	guard	
 ai/lib/forge-git-passthrough.sh	guard	
 ai/lib/gh-merge-guard.sh	guard	
 ai/lib/glab-merge-guard.sh	guard	

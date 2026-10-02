@@ -109,6 +109,12 @@ fi
 cat "${FIX}/prs.json"
 STUBEOF
 chmod +x "${STUB}/glab" "${STUB}/gh"
+# DND-1647: a guard stands behind every gh/glab stub on PATH, so a stub
+# that is missing or not executable fails the suite instead of reaching the
+# real CLI (ai/lib/forge-stub-guard.sh).
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/forge-guard"
+fsg_require_stubs "${STUB}" glab gh
 export PATH="${STUB}:${PATH}"
 
 ago() { date -u -d "-$1" +%Y-%m-%dT%H:%M:%SZ; }
@@ -677,6 +683,10 @@ run --no-fetch --json --idle-hours 2 --repo "${WORK}"
   || bad "flag order does not matter" "code=${CODE} err=$(head -c 240 <<<"${ERR}")"
 
 # ---------------------------------------------------------------------------
+# DND-1647: no gh/glab call may have fallen through past its stub.
+if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
+else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
+
 printf '\nready-and-idle self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then
   echo "Fix: reconcile ai/bin/ready-and-idle with the cases above — above all: a MEMBERSHIP probe that failed must exit 3 and never print the zero-orphans text; a genuinely empty result must exit 0 and stay textually distinct from it; and a drift priced off un-refreshed refs must render \`>=N\` (exit 4, rows still emitted), never a bare integer and never a suppressed list." >&2
