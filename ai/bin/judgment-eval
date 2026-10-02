@@ -105,7 +105,7 @@ USAGE = <<~EOF
                         and one flipped sample of 3 can never read as a
                         match or a miss. Calibration runs (--apply) need
                         none; apply sample 1's run.
-    --inbox-root DIR   slack_routing only: where the Slack inbox lines live
+    --inbox-root DIR    slack_routing only: where the Slack inbox lines live
                         (default $ATHENA_INBOX_ROOT, else ~/.local/share/athena).
                         Every *-slack.jsonl directly under it is read, each
                         with its rotated generation *-slack.jsonl.1 (one
@@ -427,7 +427,8 @@ module Manager
     loaded = load_cases(opts)
     report_join(loaded, out, err)
     # Every sample is a paid judge call per case: print the cost up front.
-    out.puts "samples: #{opts[:repeat]} per case (#{opts[:repeat] * loaded[:cases].size} judged calls)"
+    bound = opts[:use_case] == "slack_routing" ? "at most " : ""
+    out.puts "samples: #{opts[:repeat]} per case (#{bound}#{opts[:repeat] * loaded[:cases].size} judged calls)"
     inbox = opts[:use_case] == "slack_routing" ? gather_candidates(opts, loaded[:cases], out) : nil
     if opts[:dry_run]
       out.puts "context: not built (dry run)" if inbox
@@ -523,9 +524,7 @@ module Manager
     end
     halted = samples.index { |s| s[:stopped] }
     if halted
-      if opts[:repeat] > 1
-        err.puts "#{PROG}: stopped in sample #{halted + 1} of #{opts[:repeat]}; a verdict needs every sample, so the cases it left unanswered are n/a."
-      end
+      stopped_sample_line(opts[:repeat], halted, data, err)
       return stopped(samples[halted][:stopped], samples[halted][:sent], batch_count, err)
     end
 
@@ -538,8 +537,33 @@ module Manager
       err.puts "#{PROG}: nothing was scored (every case fell back; reasons above). Fix: resolve the named reasons, then re-run; no threshold can be chosen from this run."
       return 3
     end
-    out.puts "apply with: #{PROG} --apply #{data['eval_run_id']}#{opts[:repeat] > 1 ? ' (sample 1)' : ''}"
+    later_unscored_lines(samples, opts[:repeat], err)
+    out.puts "apply with#{opts[:repeat] > 1 ? " (sample 1's run)" : ''}: #{PROG} --apply #{data['eval_run_id']}"
     0
+  end
+
+  # stopped_sample_line -- with --repeat, which sample stopped and what that
+  # leaves. Nothing when no sample was answered: no verdict was written.
+  def stopped_sample_line(repeat, halted, data, err)
+    return if repeat < 2 || data.nil?
+
+    leaves = if halted + 1 < repeat
+               "samples #{halted + 2}..#{repeat} were not taken, so every case is n/a"
+             else
+               "a verdict needs every sample, so the cases it left unanswered are n/a"
+             end
+    err.puts "#{PROG}: stopped in sample #{halted + 1} of #{repeat}; #{leaves}."
+  end
+
+  # later_unscored_lines -- a later sample that scored nothing leaves every
+  # case n/a; say so (sample 1's own empty run already exits 3).
+  def later_unscored_lines(samples, repeat, err)
+    samples.each_with_index do |s, k|
+      next if k.zero? || s[:response].nil? || s[:response]["report"]["scored"].positive?
+
+      err.puts "#{PROG}: sample #{k + 1} of #{repeat} scored nothing (reasons above), so every case is n/a. " \
+               "Fix: resolve the named reasons, then re-run the whole --repeat run."
+    end
   end
 
   # The top level is sample 1, in the shape it had before --repeat, so an old

@@ -289,7 +289,7 @@ module JudgmentEval
 
   def answer_text(result)
     return "absent" unless result.is_a?(Hash)
-    return "unscored #{safe(result['reason'])}" unless scored?(result)
+    return "unscored #{result['reason'].nil? ? '(no reason)' : safe(result['reason'])}" unless scored?(result)
 
     conf = result["confidence"]
     answer = safe(result["predicted"])

@@ -447,7 +447,7 @@ has "an agreeing correct case is a match [DND-1637]" "${OUT}" "  c1 (duplicate):
 has "an agreeing wrong case is a miss [DND-1637]" "${OUT}" "  c3 (unrelated): miss [duplicate 0.70, duplicate 0.70]"
 has "the verdict count line counts the unstable case apart [DND-1637]" "${OUT}" "per-case verdicts over 2 samples: match 1, miss 1, unstable 1, n/a 0"
 has "the run names each sample's run id [DND-1637]" "${OUT}" "sample 2 of 2: finding_triage run ${R2}"
-has "the apply line names sample 1's run [DND-1637]" "${OUT}" "apply with: judgment-eval --apply ${R1} (sample 1)"
+has "the apply line names sample 1's run, pasteable [DND-1637]" "${OUT}" "apply with (sample 1's run): judgment-eval --apply ${R1}"
 run_file="$(find "${XDG_DATA_HOME}/athena/evals/runs" -maxdepth 1 -type f -name '*-finding_triage.json' | head -n 1)"
 eq "the run file keeps sample 1 at the top level (old readers unchanged) [DND-1637]" "$(jq -r '.eval_run_id + " " + (.results | length | tostring)' "${run_file}")" "${R1} 3"
 eq "the run file records every sample's run id [DND-1637]" "$(jq -c '[.samples[].eval_run_id]' "${run_file}")" "[\"${R1}\",\"${R2}\"]"
@@ -460,6 +460,28 @@ run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/co
 eq "a stopped later sample exits with the stop code [DND-1637]" "${RC}" "5"
 has "a stopped later sample leaves every case n/a [DND-1637]" "${OUT}" "per-case verdicts over 2 samples: match 0, miss 0, unstable 0, n/a 3"
 has "a stopped later sample says which sample stopped [DND-1637]" "${ERR}" "stopped in sample 2 of 2"
+
+# Stopped in sample 2 of 3: sample 3 is never taken, so EVERY case is n/a.
+respond "[$(sample "${R1}" related 0.02),{\"status\":500,\"body\":{\"error\":\"internal_error\"}}]"
+n="$(requests)"
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --repeat 3
+eq "a stop in sample 2 of 3 takes no third sample [DND-1637]" "$(requests)" "$((n + 2))"
+has "a stop in sample 2 of 3 says sample 3 was not taken and every case is n/a [DND-1637]" "${ERR}" "stopped in sample 2 of 3; samples 3..3 were not taken, so every case is n/a."
+has "a stop in sample 2 of 3 counts every case n/a [DND-1637]" "${OUT}" "per-case verdicts over 3 samples: match 0, miss 0, unstable 0, n/a 3"
+
+# Sample 1 stops at its first batch: no verdict, no run file, no n/a claim.
+respond '{"status":500,"body":{"error":"internal_error"}}'
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --repeat 2
+eq "sample 1 stopping at once exits 5 [DND-1637]" "${RC}" "5"
+lacks "sample 1 stopping at once claims no n/a verdicts [DND-1637]" "${ERR}" "n/a"
+lacks "sample 1 stopping at once prints no verdict line [DND-1637]" "${OUT}" "per-case verdicts"
+
+# A later sample that scored nothing is called out with Fix:, never silent.
+respond "[$(sample "${R1}" related 0.02),{\"auto\":\"not_configured\"}]"
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --repeat 2
+eq "a later sample that scored nothing still exits 0 (sample 1 is a run) [DND-1637]" "${RC}" "0"
+has "a later sample that scored nothing is named, with Fix: [DND-1637]" "${ERR}" "sample 2 of 2 scored nothing (reasons above), so every case is n/a. Fix: "
+has "a later unscored sample reads every case n/a [DND-1637]" "${OUT}" "  c1 (duplicate): n/a [duplicate 0.95, unscored not_configured]"
 
 run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --repeat 6
 eq "--repeat above 5 is usage (2) [DND-1637]" "${RC}" "2"
