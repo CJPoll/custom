@@ -248,31 +248,126 @@ fi
 # shell's argv. pkill excludes only itself, so a `pkill -f <pattern>` whose
 # pattern matches the command text kills the agent's own tool shell (measured:
 # DND-541 architect, 2026-09-24; the jev admiral killing its own re-armed
-# watcher, 2026-10-02). The test is exact, not a keyword: the pattern is run
-# against the command text, so `pkill -f "[x]yz"` (which cannot match its own
-# text) passes. A pattern built from `$VAR` or a backtick is unknown here and
-# passes. pkill must be in command position, so a mention in a quoted message
-# is text. A pattern grep rejects passes (fail-open).
+# watcher, 2026-10-02 07:45Z). The test is the pattern itself, not a keyword:
+# it is run against the command text, so `pkill -f "[x]yz"` (which cannot
+# match its own text) passes.
+#
+# How the pattern is found. split_commands splits the text into simple
+# commands the way a shell would for this purpose: quotes are removed and
+# respected, and an unquoted `;`, `&`, `|`, `(`, `)`, backtick or newline ends a
+# command. So a pkill on line 2 is seen, and `git commit -m "a; pkill -f x"`
+# is one command whose first word is git. Each command is one output line,
+# its words joined by \037; a word holding a `$` or backtick expansion is
+# prefixed \036 (its value is unknown here). An unquoted `#` at a word start
+# begins a comment. pkill_pattern then drops wrapper words (then, do, sudo,
+# nohup, env VAR=x, timeout N, …), and when the command is pkill with -f or
+# --full, takes its pattern: the first non-option word (procps reorders
+# options, so one may follow it), skipping the argument of an option that
+# takes one and any redirection. An unknown pattern, or one grep rejects,
+# passes (fail-open).
+split_commands() {
+  printf '%s' "$1" | awk -v sq="'" '
+    function flushw() {
+      if (inw) w[n++] = (ex ? "\036" : "") cur
+      cur = ""; inw = 0; ex = 0
+    }
+    function flushc(   i, s) {
+      flushw()
+      if (n > 0) { s = w[0]; for (i = 1; i < n; i++) s = s "\037" w[i]; print s }
+      n = 0
+    }
+    BEGIN { RS = "\001" }
+    {
+      s = $0; L = length(s); q = ""
+      for (i = 1; i <= L; i++) {
+        c = substr(s, i, 1)
+        if (q == sq) { if (c == sq) q = ""; else cur = cur c; continue }
+        if (q == "\"") {
+          if (c == "\"") { q = ""; continue }
+          if (c == "\\" && i < L) {
+            d = substr(s, i + 1, 1)
+            if (d == "$" || d == "`" || d == "\"" || d == "\\") { cur = cur d; i++; continue }
+          }
+          if (c == "$" || c == "`") ex = 1
+          cur = cur c; continue
+        }
+        if (c == "\\" && i < L) { cur = cur substr(s, i + 1, 1); inw = 1; i++; continue }
+        if (c == sq || c == "\"") { q = c; inw = 1; continue }
+        if (c == "#" && !inw) {
+          while (i < L && substr(s, i + 1, 1) != "\n") i++
+          continue
+        }
+        if (c == " " || c == "\t") { flushw(); continue }
+        if (c == ";" || c == "&" || c == "|" || c == "(" || c == ")" || c == "`" || c == "\n") {
+          if (c == "`") ex = 1
+          flushc(); continue
+        }
+        if (c == "$") ex = 1
+        cur = cur c; inw = 1
+      }
+      flushc()
+    }
+  ' 2>/dev/null
+}
+
+# pkill_pattern <words…> : print the pattern of a `pkill -f`, else nothing.
+pkill_pattern() {
+  while [ $# -gt 0 ]; do
+    case $1 in
+      then|do|else|elif|if|while|until|'!'|'{'|exec|command|sudo|nohup|setsid|time|xargs) shift ;;
+      nice) shift; case ${1-} in -n) shift 2 ;; -[0-9]*) shift ;; esac ;;
+      env) shift; while [ $# -gt 0 ]; do case $1 in -*|*=*) shift ;; *) break ;; esac; done ;;
+      timeout) shift; while [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done; shift ;;
+      [A-Za-z_]*=*) shift ;;
+      *) break ;;
+    esac
+  done
+  case ${1-} in pkill|*/pkill) shift ;; *) return 0 ;; esac
+  _full=false; _pat=''; _skip=false
+  for _w in "$@"; do
+    if [ "$_skip" = true ]; then _skip=false; continue; fi
+    case $_w in
+      "$(printf '\036')"*) [ -z "$_pat" ] && _pat=UNKNOWN ;;
+      --full) _full=true ;;
+      --signal|--ns|--nslist|--pidfile|--parent|--group|--pgroup|--session|--terminal|--euid|--uid|--cgroup|--env|--runstates) _skip=true ;;
+      --*) ;;
+      '>'|'>>'|'<'|[0-9]'>'|[0-9]'>>'|[0-9]'<'|'&>') _skip=true ;;
+      '>'*|'<'*|[0-9]'>'*|[0-9]'<'*|'&>'*) ;;
+      -*)
+        _c=${_w#-}
+        case $_c in
+          [GPUF]) _skip=true ;;
+          [A-Z0-9][A-Z0-9+]*) ;;
+          *)
+            case $_c in *f*) _full=true ;; esac
+            case $_c in *[gstuGPUF]) _skip=true ;; esac
+            ;;
+        esac
+        ;;
+      *) [ -z "$_pat" ] && _pat=$_w ;;
+    esac
+  done
+  [ "$_full" = true ] && [ -n "$_pat" ] && [ "$_pat" != UNKNOWN ] && printf '%s\n' "$_pat"
+  return 0
+}
+
 pkill_self_match() {
-  printf '%s' "$FLAT" \
-    | grep -oE '(^|[;&|(`]|(^|[[:space:]])(then|do|else|exec|command|sudo|xargs|timeout[[:space:]]+[0-9.]+[smhd]?))[[:space:]]*pkill[[:space:]][^;&|()`]*' 2>/dev/null \
-    | while IFS= read -r _seg; do
-        printf '%s' "$_seg" | grep -Eq '[[:space:]](-[[:alnum:]]*f[[:alnum:]]*|--full)([[:space:]]|$)' || continue
-        _tok=$(printf '%s' "$_seg" | sed -E 's/[[:space:]]+$//')
-        case $_tok in
-          *\") _tok=${_tok%\"}; _tok=${_tok##*\"} ;;
-          *\') _tok=${_tok%\'}; _tok=${_tok##*\'} ;;
-          *) _tok=${_tok##* } ;;
-        esac
-        case $_tok in
-          ''|-*) continue ;;
-          *'$'[A-Za-z_\{\(]*|*'`'*) continue ;;
-        esac
-        if printf '%s\n' "$CMD" | grep -Eq -e "$_tok" 2>/dev/null; then
-          printf '%s\n' "$_tok"
-          break
-        fi
-      done
+  case $SCAN in *pkill*) ;; *) return 0 ;; esac
+  _us=$(printf '\037')
+  split_commands "$SCAN" | while IFS= read -r _line; do
+    case $_line in *pkill*) ;; *) continue ;; esac
+    _tok=$(
+      IFS=$_us; set -f
+      # shellcheck disable=SC2086
+      set -- $_line
+      pkill_pattern "$@"
+    )
+    [ -n "$_tok" ] || continue
+    if printf '%s\n' "$CMD" | grep -Eq -e "$_tok" 2>/dev/null; then
+      printf '%s\n' "$_tok"
+      break
+    fi
+  done
 }
 PKILL_HIT=$(pkill_self_match)
 if [ -n "$PKILL_HIT" ]; then

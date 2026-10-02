@@ -183,6 +183,29 @@ check "5c. pkill --full after timeout N, in a && list" deny
 run "$(bash_json 'echo x; pkill -f -u cjpoll '"'"'jev-wait.*run'"'"'')"
 check "5d. pkill -f single-quoted regex that matches its text" deny
 
+run "$(bash_json 'cd /tmp
+pkill -f inbox-wait')"
+check "5e. pkill -f on line 2 of a multi-line command" deny
+
+run "$(bash_json 'pkill -f inbox-wait -n')"
+check "5f. option after the pattern (procps reorders options)" deny
+
+run "$(bash_json 'pkill -f jev-wait -u me')"
+check "5g. pkill -f pattern before -u ARG" deny
+case $OUT in
+  *'`jev-wait`'*) PASS=$((PASS + 1)); echo "  PASS  5g'. the deny names the pattern, not the -u argument" ;;
+  *) FAIL=$((FAIL + 1)); echo "  FAIL  5g'. the deny names the pattern, not the -u argument: [$OUT]" ;;
+esac
+
+run "$(bash_json 'nohup env A=1 pkill -HUP -f inbox-wait >/dev/null 2>&1')"
+check "5h. nohup + env VAR=x wrappers, a signal option and redirects" deny
+
+run "$(bash_json 'git commit -m "then pkill -f foo"; echo "a; pkill -f x"')"
+check "M21. separators and keywords inside quoted text are text" allow
+
+run "$(bash_json 'pkill -f "$X" >/dev/null')"
+check "M22. a redirect after an unknown pattern is not the pattern" allow
+
 run "$(bash_json 'pkill -f "[i]nbox-wait"')"
 check "M16. pkill -f bracket class (cannot match its own text)" allow
 
