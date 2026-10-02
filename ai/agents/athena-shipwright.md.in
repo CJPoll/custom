@@ -256,6 +256,10 @@ it); each check's rationale is in `ai/docs/harness-gate-checks.md`. A new check
 is declared in the runner, never in prose. Rules for you as its runner:
 
 - After editing a template or block, run `ai/bin/build-agents`, then the gate.
+- The gate sees only files git knows. `git add -N` each new file first, so
+  it gates the tree you commit. Measured 2026-10-02: a run gated its new
+  suite untracked (176 checks, green); `bcfd66b6` landed red at 177
+  (DND-1685).
 - Ratchet a `check-agent-size` budget down as its agent shrinks; never raise
   one (item 5, *Owner approval policy*).
 - `ai/bin/harness-eval --update-baseline` records an intended change only,
