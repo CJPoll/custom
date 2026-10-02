@@ -28,7 +28,9 @@
 #   A suite STUBS A FORGE CLI ON PATH when, in code (see WHAT IS CODE), it
 #     1. writes a file whose name is one of STUBBED_TOOLS (gh, glab) into a
 #        directory D: a `>` / `>>` redirection target, or the destination
-#        (last operand) of cp, ln, install or mv, or a tee target; and
+#        (last operand) of cp, ln, install or mv, or a tee target. The name
+#        may be `$NAME` when a `for NAME in ...` loop in the file lists the
+#        tool; and
 #     2. puts D on PATH: D is an element of a `PATH=` value (`export PATH=`,
 #        `env -i PATH=`, `PATH=... cmd` all included), or of any `NAME=`
 #        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`).
@@ -57,8 +59,10 @@
 #
 # WHAT IT DOES NOT MODEL (a lexical scan; named, not hidden)
 #
-#   * A stub whose NAME is computed: `printf ... > "$dir/$name"`, a loop
-#     `for t in gh glab; do ... > "$D/$t"`, a helper function taking the name.
+#   * A stub whose NAME is computed other than by a `for NAME in ...` loop
+#     that lists the tool (`for s in gh glab; do cat > "$D/$s"` IS modeled):
+#     a helper function taking the name (`stub "$D" gh`), a name read from a
+#     variable or a file.
 #   * A stub written to a relative path (`cd "$D"; cat > gh`), or copied into a
 #     directory operand (`cp "$SRC/gh" "$D/"`).
 #   * D put on PATH through a variable whose value does not itself hold
@@ -281,8 +285,37 @@ FILE_CMDS = %w[cp ln install mv].freeze
 SEP_RE = /(?:&&|\|\||[;&|()]|\s)/.freeze
 
 # [[lineno, tool, dir]] for every stub of a STUBBED_TOOLS name the file writes.
+# { "s" => ["gh", "glab", ...] } for every `for NAME in WORDS` loop in code.
+# Scope is ignored: any loop over NAME counts, which can only over-read.
+def loop_values(lexed)
+  vals = Hash.new { |h, k| h[k] = [] }
+  lexed[:lines].each do |(_n, line, flags)|
+    code_matches(line, flags, /(?<![\w-])for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in(?=[ \t])/).each do |m|
+      i = m.end(0)
+      loop do
+        w = word_at(line, i)
+        break if w.empty? || w == "do"
+
+        vals[m[1]] << norm(w)
+        i = line.index(w, i) + w.size
+      end
+    end
+  end
+  vals
+end
+
+# The STUBBED_TOOLS a written file name stands for: the name itself, or, for
+# `$NAME` where a `for NAME in ...` loop lists tools, each tool listed.
+def stubbed_names(base, loops)
+  return [base] if STUBBED_TOOLS.include?(base)
+
+  var = base[/\A\$([A-Za-z_][A-Za-z0-9_]*)\z/, 1]
+  var && loops.key?(var) ? loops[var] & STUBBED_TOOLS : []
+end
+
 def stub_writes(lexed)
   writes = []
+  loops = loop_values(lexed)
   lexed[:lines].each do |(n, line, flags)|
     # Redirections: `>`, `>>`, `>|`, `N>` -- never `>&`.
     code_matches(line, flags, />>?\|?/).each do |m|
@@ -290,7 +323,7 @@ def stub_writes(lexed)
       next if line[m.end(0)] == "&"
 
       dir, base = split_path(word_at(line, m.end(0)))
-      writes << [n, base, dir] if STUBBED_TOOLS.include?(base)
+      stubbed_names(base, loops).each { |t| writes << [n, t, dir] }
     end
     # cp/ln/install/mv: the last operand of the command. tee: every operand.
     code_matches(line, flags, /(?<![\w.\/-])(cp|ln|install|mv|tee)(?=[ \t])/).each do |m|
@@ -306,7 +339,7 @@ def stub_writes(lexed)
       dests = m[1] == "tee" ? ops : [ops.last].compact
       dests.each do |w|
         dir, base = split_path(w)
-        writes << [n, base, dir] if STUBBED_TOOLS.include?(base)
+        stubbed_names(base, loops).each { |t| writes << [n, t, dir] }
       end
     end
   end
@@ -509,6 +542,11 @@ def run_self_test
      "echo x > \"$F/gh\"\nout=\"$(PATH=\"$F:$PATH\" cmd)\"\n", %w[gh], 1],
     ["stub write inside $( ) in double quotes",
      "v=\"$(echo x > \"$F/gh\")\"\nPATH=\"$F:$PATH\"\n", %w[gh], 1],
+    ["for-loop over tool names writes each stub",
+     "for s in gh glab gh-athena; do\n  cat > \"${T}/stubs/${s}\" <<EOF\nx\nEOF\ndone\nexport PATH=\"${T}/stubs:${PATH}\"\n",
+     %w[gh glab], 1],
+    ["for-loop over non-forge names is not a forge stub",
+     "for s in git docker; do echo x > \"$B/$s\"; done\nPATH=\"$B:$PATH\"\n", [], 0],
     ["guarded: sourced, armed, verified", "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n#{guarded_tail}", %w[gh], 0],
     ["sourced through a variable", "L=\"$H/ai/lib/forge-stub-guard.sh\"\n. \"${L}\"\nfsg_arm \"$T/g\"\n" \
                                    "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\nfsg_verify\n", %w[gh], 0],
