@@ -14,9 +14,10 @@
 # makes the correct form the only form, and its --self-test asserts the trap
 # cannot creep back into the declared list.
 #
-# This runner is a convenience + a guard, NOT a new source of authority: the
-# canonical, human-readable gate spec stays in the shipwright template. Keep the
-# two in sync — add a check here AND there.
+# CHECKS / STATIC_CHECKS below are the AUTHORITATIVE gate list. Each check's
+# rationale is in ai/docs/harness-gate-checks.md, which is not a second list:
+# declare a new check here only. (Until 2026-10-02 this said to add a check here
+# AND in the shipwright template; that duplicate had already drifted, DND-277.)
 #
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
@@ -1882,7 +1883,7 @@ def run_gate(root: CUSTOM_DIR, dry_run: false, jobs: nil)
     missing.each { |(label, argv)| warn "  - #{label} (#{argv.first})" }
     warn "  Fix: restore the script and `chmod +x` it. For a STATIC_CHECKS " \
          "entry you can also remove it from CHECKS in ai/bin/harness-gate (and " \
-         "from the gate list in ai/agents/athena-shipwright.md.in) instead, if " \
+         "its line in ai/docs/harness-gate-checks.md) instead, if " \
          "the check no longer applies. A discovered **/self-test.sh " \
          "entry is NOT removable from CHECKS by hand (it is derived from " \
          "disk) — `chmod +x` it. Do NOT delete it to make this pass: with " \

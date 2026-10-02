@@ -55,8 +55,13 @@ From the exemplar (`ai/bin/check-generic-skills`):
 
 ## Step 4 — Wire it into the gate and the eval corpus
 
-- Add the guard to the **shipwright gate** (the gate list in
-  `athena-shipwright.md.in`), and run it in the gate loop.
+- Add the guard to the **shipwright gate**: declare it in `CHECKS` in
+  `ai/bin/harness-gate` (the authoritative list), give it a rationale line in
+  `ai/docs/harness-gate-checks.md`, and run the gate.
+
+  **Later (2026-10-02):** this said to add the guard to "the gate list in
+  `athena-shipwright.md.in`". Superseded: that list moved out of the template
+  (owner note N2), and `harness-gate`'s `CHECKS` was already authoritative.
 - Add a **regression case to the eval corpus** (`ai/eval/fixtures/<NN-name>/`,
   per `A1`/`harness-eval`) whose fixture is the lesson's own incident, naming this
   guard and its expected verdict. Then `ai/bin/harness-eval --update-baseline`

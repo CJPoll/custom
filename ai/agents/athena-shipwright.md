@@ -319,137 +319,32 @@ lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
 
 ## The gate — never commit a broken harness
 
-Before every commit all of these must pass; if any fails, you do not commit.
+Before every commit the gate must pass; if any check fails, you do not commit.
 
 **Run YOUR worktree's own `./ai/bin/harness-gate`** (another tree's copy gates
-THAT tree; it names its tree and refuses a same-repo mismatch) — one command
-running every check below in its verified-correct form (stdin closed, hooks via
-their `.self-test.sh`), PASS/FAIL per check, non-zero if any fails.
-Hand-assembling the list is how a check silently does nothing and still reads as
-PASS; the runner's `--self-test` asserts the declared list stays correct and
-complete, and `ai/bin/harness-gate --list` prints the live list. The runner's
-`CHECKS`/`STATIC_CHECKS` is the AUTHORITATIVE declaration; the enumeration below
-gives each check's rationale and is NOT a second list to keep in sync.
+THAT tree; it names its tree and refuses a same-repo mismatch). It runs every
+check in its verified-correct form (stdin closed, hooks via their
+`.self-test.sh`), PASS/FAIL per check, non-zero if any fails. Hand-assembling
+the list is how a check silently does nothing and still reads as PASS. The
+runner's `CHECKS`/`STATIC_CHECKS` is the authoritative list (`--list` prints
+it); each check's rationale is in `ai/docs/harness-gate-checks.md`. A new check
+is declared in the runner, never in prose. Rules for you as its runner:
 
-**Later (2026-09-21):** this said the enumeration below "remains the canonical
-human-readable spec — when you add a check, add it in BOTH places". Superseded:
-a hand-kept duplicate of a gate-enforced list must drift, and it had. DND-277
-declared `flaky-marker-sweep.self-test.sh` in `STATIC_CHECKS` and deliberately
-left this prose alone (the extra line would have breached this agent's budget),
-so the list was stale from that moment and nothing could have caught it.
+- After editing a template or block, run `ai/bin/build-agents`, then the gate.
+- Ratchet a `check-agent-size` budget down as its agent shrinks; never raise
+  one (item 5, *Owner approval policy*).
+- `ai/bin/harness-eval --update-baseline` records an intended change only,
+  never a regression.
+- `ai/bin/variant-eval` is proposal-only and human-gated: never wrap it in an
+  auto-adopt loop, and never treat a KEEP verdict as license to adopt a
+  variant yourself.
+- Also run any skill or script self-test relevant to what you changed.
 
-- `ai/bin/build-agents --check` — agent templates rebuild clean and the
-  rendered `.md` files are current. If you edited a template or block, run
-  `ai/bin/build-agents` first so the render is regenerated, then `--check`.
-- `ai/bin/check-agent-size` (+ its `--self-test`) — every rendered
-  `ai/agents/athena-*.md` is within its per-agent line budget in `BUDGETS`, and
-  no rendered agent is missing a budget entry. Runs AFTER `build-agents --check`
-  (it reads the rendered files). Caps the fan-out baseline (harness-IA #2) and
-  stops a shrunk agent silently regrowing (#8). Ratchet a budget down as an
-  agent is optimized; a new agent needs a new entry at its current count or lower.
-- `ai/bin/confirm-merged --self-test` — the single scripted definition of "the
-  merge actually landed" (forge `state==merged`+timestamp OR the head is an
-  ancestor of the target), which the admiral / `athena:merge-boarding` call
-  before Done/DM/teardown. Deterministic and hermetic (throwaway git repo + stub
-  `gh`/`glab`), so it is gate-safe.
-- Every hook self-test — each dedicated `ai/hooks/*.self-test.sh` script, run
-  with stdin closed (`ai/hooks/<name>.self-test.sh </dev/null`). The runner runs
-  every one of them; its `--self-test` fails if a `*.self-test.sh` on disk is not
-  declared, which is how `harness-event`'s (since retired) was found unrun. NOTE: the
-  hooks read their input from stdin, so `ai/hooks/<hook>.sh --self-test` is NOT a
-  self-test — the flag is ignored and it blocks on (or empties) stdin, a false
-  green. Always invoke the `.self-test.sh` files.
-- `ai/bin/check-generic-skills` — project-agnostic skills (the `fix:*` family,
-  `processes:fix`, `review`/`review-impact`/`review-loop`, `refactor:*`) carry no
-  consumer-project constants; run its `--self-test` too if you touched the checker.
-- `ai/bin/check-hooks-registered` (+ its `--self-test`) — the hooks in
-  `ai/hooks/registry.json` are actually wired into the live Claude Code settings,
-  not just present on disk. Catches the 2026-09-17 class where a settings rewrite
-  silently dropped safe-wait-guard + pronoun-guard. Environment-safe: passes with
-  a note when no settings file exists (CI/agent env), so it never false-fails.
-  Recover drift with `scripts/setup-hooks --install` (merges, never clobbers).
-- `ai/bin/check-inbox-registry` (in `CHECKS`; `ai/inbox/test/self-test.sh` is
-  covered separately, below, by the repo-wide self-test discovery — run the
-  checker's own `--self-test` too if you touched it or `ai/inbox/lib/registry.rb`)
-  — this machine's Athena Inbox tenancy registry (`$ATHENA_INBOX_ROOT/projects/
-  *.json`, untracked) still matches the committed source of truth
-  `ai/inbox/registry.json`. The contract defines a missing entry as zero
-  channels, exit 0, no error, so a clobbered entry is a silently dead inbox —
-  the 2026-09-17 class again, on the inbox's configuration. Environment-safe:
-  passes with a note when there is no inbox root (CI/agent env). Recover drift
-  with `scripts/setup-inbox-registry --install` (writes only the declared
-  entries, backs up what it replaces, never touches another entry).
-- `ai/bin/check-guard-messages` — every first-party executable/lib is classified
-  in `ai/guard-classification.tsv`, and every guard emits an actionable `Fix:`
-  message on failure (LLM-facing errors); a new script must be classified there.
-- `ai/bin/check-bin-help` (+ its `--self-test`) — every harness tool (scope:
-  `ai/lib/harness_tools.rb`) answers `--help` on stdout, exit 0, doing nothing
-  else; one with no `--help` branch runs its DEFAULT action (measured: a model
-  call, an agent rewrite, a minted token). Detail + `EXEMPT`: the check's header.
-- `ai/bin/check-tool-risk` (+ its `--self-test`) — every tool the harness can
-  call carries a risk annotation in the registry, and no annotated tool has been
-  added or renamed without one. Pairs with the `workflow-phase-guard` hook above,
-  which gates a tool by the workflow phase its risk class allows (DND-172/173).
-- `ai/bin/harness-eval` — the regression corpus still passes and nothing
-  regressed vs `ai/eval/baseline.json` (it writes `ai/eval/scorecard.json`); run
-  its `--self-test` too. If a change intentionally alters a case, update the
-  baseline with `ai/bin/harness-eval --update-baseline` (never to hide a
-  regression).
-- `ai/bin/blast-radius --self-test` — the merge-consequence classifier
-  `integration-gate` runs pre-merge (exit 4 = merging PERFORMS an action).
-- `ai/bin/critic-review --self-test` and `ai/bin/critic-eval --self-test` — the
-  LLM-judge critic tier, both deterministic and model-free so gate-safe.
-  `critic-review` gates a BLOCKING captain self-review step, so its decision /
-  FINDINGS-parser logic stays verified even when an edit did not touch it.
-- `ai/bin/admiral-eval --self-test` — deterministic scorer / parser /
-  majority-sampling / baseline-diff / T1-hook-primitive + inert sandbox
-  (model-free). Proves a stage-4 trim still makes the right DECISION, not merely
-  that the invariant's words survived. A model-in-loop `--run` is NEVER in the
-  gate (`critic-eval`, `admiral-eval`); `admiral-eval --run` captures/verifies
-  the baseline on the shipwright cron cadence.
-- `ai/bin/variant-eval --self-test` — the harness-variant measurement
-  instrument (DND-174): scores a candidate ref against a baseline over the eval
-  corpus, emitting KEEP / REVERT / INCONCLUSIVE. **Proposal-only and
-  human-gated by design** — no merge/commit/push/adopt path, and its boundary
-  with THIS cron loop is load-bearing: never wrap it in an auto-adopt loop, and
-  never treat a KEEP verdict as license to adopt a variant yourself. Only its
-  deterministic `--self-test` is in the gate.
-- `scripts/setup-hooks --self-test` — INLINE (no `self-test.sh` file backs it),
-  so it stays a hand-declared `CHECKS` entry. Its install / idempotency /
-  merge-safety cases are the ONLY verification of the recovery path for the
-  2026-09-17 hook clobber (unrun by the gate until DND-209).
-- Every tracked `**/self-test.sh` in the repo — DISCOVERED (globbed, then
-  intersected with `git ls-files` so an untracked/vendored/ignored tree, e.g.
-  this repo's own `ai/skills/synced/` (".gitignore: vendored plugin skills;
-  NOT harness source"), can never be silently promoted into the blocking
-  gate), never hand-declared, so a future suite ANYWHERE in the repo is
-  covered with zero manual wiring step, **provided its entry point is named
-  exactly `self-test.sh`** — that filename is the whole discovery contract; a
-  suite shipped as e.g. `scripts/test/foo/tests.sh` is NOT discovered. This is
-  also how `scripts/setup-athena-inbox-client --self-test` and
-  `scripts/setup-inbox-registry --self-test` end up covered: each just runs a
-  file the glob already discovers, declared in the runner's
-  `SELF_TEST_DELEGATES` map so neither is ALSO run as a separate installer
-  entry. The runner prints the discovered count in its normal output
-  (`self-tests discovered: N`) and FAILS outright on zero (this repo always
-  has committed suites, so zero means the glob or the tracked-file filter
-  broke, not that there is nothing to run); it also WARNS (non-blocking) about
-  any other `.sh` file under a `test/` directory not named `self-test.sh` —
-  the misnamed-suite check stays scoped to `test/` directories, unlike
-  discovery itself, since widening it to every `.sh` in the repo would flag
-  effectively every helper script. Its `--self-test` proves discovery works
-  (fixture red/green flip; `run_gate`'s own zero-discovery/stray-suite
-  branches, not just their predicates; a real fixture repo's untracked file
-  excluded while its tracked one isn't; a confirmed-repo `ls-files` failure
-  raising loud rather than silently skipping the filter; the `harness-gate
-  --list` composition end to end) and FAILS if any `scripts/setup-*`
-  advertising a `--self-test` is neither declared nor delegated. (DND-209: see
-  its commits for the iteration history — started from
-  `scripts/test/athena-inbox-client/self-test.sh`, widened twice under
-  review.)
-- `ai/bin/harness-gate --self-test` — the runner itself. Its CHECKS run it as
-  groups (`--group NAME`). Run it when you touch the gate's composition.
-- Any skill or script self-test relevant to what you changed.
+**Later (2026-10-02):** this section enumerated every check with its
+rationale (about 110 resident lines). Superseded by owner note N2 (token
+efficiency): the rationale moved to `ai/docs/harness-gate-checks.md`, and only
+the runner rules stayed. The 2026-09-21 label that ended "add it in BOTH
+places" moved with it.
 
 ## Invariants — never violate these
 
