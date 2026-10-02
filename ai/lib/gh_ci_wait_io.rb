@@ -16,9 +16,12 @@ module GhCiWait
              "budget; never fall back to a faster poll or to plain gh."
 
   # MANAGER: read, judge, sleep, until a verdict or the --max bound.
-  # reader: ->(path) { Read }; clock: -> { Time }; sleeper: ->(seconds) {};
+  # reader: ->(path, timeout_s) { Read }; clock: -> { Time }; sleeper: ->(seconds) {};
   # log: ->(line) {} for progress (stderr in the CLI).
   class Waiter
+    READ_TIMEOUT_S = 60
+    READ_FLOOR_S = 10
+
     def initialize(reader:, clock:, sleeper:, log:)
       @reader = reader
       @clock = clock
@@ -35,18 +38,23 @@ module GhCiWait
       errors_in_row = 0
       last_state = nil
       last_error = nil
+      @last_ok_at = nil
 
       loop do
-        read = @reader.call(GhCiWait.path_for(target))
+        # A read never runs past the deadline by more than READ_FLOOR_S, so a
+        # hung final read cannot push the wait past one foreground tool call.
+        left = (deadline - @clock.call).ceil
+        read = @reader.call(GhCiWait.path_for(target), left.clamp(READ_FLOOR_S, READ_TIMEOUT_S))
         @reads[read.kind] += 1
         case read.kind
         when :ok
           errors_in_row = 0
+          last_error = nil
+          @last_ok_at = @clock.call
           state = begin
             GhCiWait.judge(target, read.body)
           rescue Unreadable => e
-            return could_not_look("unreadable response: #{e.message}",
-                                  "the API answered with a body this mode cannot judge; check --repo/--sha/--id")
+            return could_not_look("unreadable response: #{e.message}", unreadable_fix(e))
           end
           final = finish(state)
           return final if final
@@ -56,6 +64,7 @@ module GhCiWait
         when :auth, :not_found
           return could_not_look(read.detail, key_fix(read.kind))
         when :rate_limited
+          last_error = read.detail
           note("RATE-LIMITED #{limit_words(read)} until #{read.reset_at.utc.iso8601}")
         else
           errors_in_row += 1
@@ -97,6 +106,13 @@ module GhCiWait
         return could_not_look("no read succeeded in #{@max}s; last error: #{last_error}",
                               "check the network and gh-athena --check; this is not idle and not pending")
       end
+      # The last read failed: the newest state seen is old, so it is not "still
+      # pending at --max". Say when it was seen and what failed since.
+      if last_error
+        return could_not_look("the reads after #{@last_ok_at.utc.iso8601} failed (last: #{last_error}); " \
+                              "the newest state seen then was: #{last_state}",
+                              "re-run gh-ci-wait once the API answers; this is not idle, not pending and not green")
+      end
       Outcome.new(verdict: :timeout,
                   line: "VERDICT: TIMEOUT #{@desc} after #{@max}s: #{last_state} #{reads_words}",
                   fix: "still pending and nothing failed yet: re-run gh-ci-wait (it reads the live state) " \
@@ -112,6 +128,14 @@ module GhCiWait
     def could_not_look(why, fix)
       Outcome.new(verdict: :could_not_look, line: "VERDICT: COULD-NOT-LOOK #{@desc}: #{why} #{reads_words}",
                   fix: fix, reads: @reads)
+    end
+
+    def unreadable_fix(error)
+      if error.message.include?("total_count")
+        return "more than one page of results: wait by --run-id <id> on the run you need, or by --workflow NAME"
+      end
+
+      "the API answered with a body this mode cannot judge; check --repo, --sha and --run-id"
     end
 
     def key_fix(kind)
@@ -135,15 +159,14 @@ module GhCiWait
 
   # SIDE EFFECTS: one bounded `<gh> api -i <path>` GET.
   class GhApiReader
-    def initialize(gh:, clock:, timeout_s: 60)
+    def initialize(gh:, clock:)
       @gh = gh
       @clock = clock
-      @timeout_s = timeout_s
     end
 
-    def call(path)
-      out, err, st = Open3.capture3("timeout", @timeout_s.to_s, *@gh, "api", "-i", path)
-      err = "#{err}gh api timed out after #{@timeout_s}s\n" if st.exitstatus == 124
+    def call(path, timeout_s)
+      out, err, st = Open3.capture3("timeout", timeout_s.to_s, *@gh, "api", "-i", path)
+      err = "#{err}gh api timed out after #{timeout_s}s\n" if st.exitstatus == 124
       GhCiWait.parse(stdout: out, stderr: err, now: @clock.call)
     rescue SystemCallError => e
       Read.new(kind: :error, detail: "could not run #{@gh.first}: #{e.message}")

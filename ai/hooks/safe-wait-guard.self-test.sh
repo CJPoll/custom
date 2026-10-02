@@ -240,6 +240,15 @@ check "6c. gh-athena run watch (the App budget is finite too)" deny
 run "$(bash_json 'gh pr checks 711 --repo CJPoll/gen_saas --watch')"
 check "6d. --watch after --repo" deny
 
+run "$(bash_json 'timeout -k 5 590 gh pr checks 711 --watch')"
+check "6e. timeout -k N before the duration" deny
+
+run "$(bash_json 'timeout --signal KILL 590 gh run watch 5')"
+check "6f. timeout --signal SIG before the duration" deny
+
+run "$(bash_json 'timeout -k 5 590 pkill -f inbox-wait')"
+check "5i. pkill -f behind timeout -k N (shared wrapper parse)" deny
+
 run "$(bash_json 'gh pr checks 711; gh pr view 711 --json headRefOid')"
 check "M23. gh pr checks without --watch (one read)" allow
 

@@ -23,6 +23,8 @@ module GhCiWait
   # GitHub's documented wait for a secondary limit that sends no Retry-After.
   SECONDARY_FALLBACK_S = 60
   SUCCESS_CONCLUSIONS = %w[success skipped neutral].freeze
+  # gh-athena's refusals that no re-read can fix (its `die` texts).
+  GH_ATHENA_PERMANENT = /missing App ID|missing private key|has no installation|not found\. Fix: install|cannot load|JWT signing failed/.freeze
 
   # A usage error: a key that is malformed for its type. Carries its Fix.
   class Usage < StandardError
@@ -57,7 +59,7 @@ module GhCiWait
         return Read.new(kind: :error, status: status, detail: "HTTP #{status} body is not JSON")
       end
     end
-    if [403, 429].include?(status) && rate_limited?(headers, message)
+    if status == 429 || (status == 403 && rate_limited?(headers, message))
       return rate_limited_read(status, headers, message, now)
     end
 
@@ -118,9 +120,12 @@ module GhCiWait
       return Read.new(kind: :rate_limited, resource: "unknown", reset_at: now + SECONDARY_FALLBACK_S,
                       secondary: err.match?(/secondary/i), detail: err.lines.first.to_s.strip)
     end
-    # The wrapper refused before any request (no App config, a failed token
-    # mint): a re-read cannot fix that, so it is auth, not a transient error.
-    return Read.new(kind: :auth, detail: err.lines.first.to_s.strip) if err.start_with?("gh-athena: ")
+    # The wrapper refused before any request for a reason a re-read cannot fix
+    # (no App config, no installation): auth. Its other refusals (could not
+    # reach the API, a token mint that failed) can be transient: :error.
+    if err.start_with?("gh-athena: ") && err.match?(GH_ATHENA_PERMANENT)
+      return Read.new(kind: :auth, detail: err.lines.first.to_s.strip)
+    end
 
     Read.new(kind: :error, detail: "no HTTP response: #{err.empty? ? '(no output)' : err.lines.first.strip}")
   end
@@ -181,6 +186,10 @@ module GhCiWait
   def pick_run(body, workflow:, sha:)
     runs = body.is_a?(Hash) ? body["workflow_runs"] : nil
     raise Unreadable, "runs body has no workflow_runs array" unless runs.is_a?(Array)
+    if body["total_count"].to_i > runs.size
+      raise Unreadable, "runs total_count #{body['total_count']} exceeds the #{runs.size} rows read (one page of 100); " \
+                        "the newest run may be on another page"
+    end
 
     runs.select { |r| r["head_sha"] == sha && workflow_match?(r, workflow) }
         .max_by { |r| [r["created_at"].to_s, r["id"].to_i] }
@@ -195,9 +204,13 @@ module GhCiWait
   # the budget, and the caller must say COULD-NOT-LOOK with the reset time).
   def next_wait(read:, now:, deadline:, interval:, errors_in_row:)
     if read.kind == :rate_limited
-      return [:give_up] if read.reset_at > deadline
+      # Never re-read a limit sooner than MIN_INTERVAL: a Retry-After of 0, or
+      # a reset our clock already passed, would otherwise poll into the limit
+      # once a second, the failure this tool exists to stop.
+      wait = [(read.reset_at - now).ceil, MIN_INTERVAL].max
+      return [:give_up] if now + wait > deadline
 
-      return [:sleep, [(read.reset_at - now).ceil, 1].max]
+      return [:sleep, wait]
     end
     left = (deadline - now).floor
     return [:stop] if left <= 0
@@ -227,7 +240,7 @@ module GhCiWait
     v = value.to_s
     return v if v.match?(/\A\d+\z/)
 
-    raise Usage.new("--id must be a numeric run id, got #{v.inspect}", "pass the run's databaseId")
+    raise Usage.new("--run-id must be a numeric run id, got #{v.inspect}", "pass the run's databaseId")
   end
 
   def interval!(value)
@@ -275,11 +288,20 @@ module GhCiWait
     when :run_id then run_state(body, sha: target.sha)
     when :run_workflow
       run = pick_run(body, workflow: target.workflow, sha: target.sha)
-      return State.new(state: :pending, summary: "no '#{target.workflow}' run on #{target.sha[0, 12]} listed yet") unless run
+      return State.new(state: :pending, summary: no_run_summary(body, target)) unless run
 
       run_state(run, sha: target.sha)
     else raise ArgumentError, "unknown mode #{target.mode.inspect}"
     end
+  end
+
+  # Names the workflows that DO have runs on the sha, so a mistyped --workflow
+  # reads as "matches none of these", not as an endless "not listed yet".
+  def no_run_summary(body, target)
+    seen = body["workflow_runs"].select { |r| r["head_sha"] == target.sha }
+                                .map { |r| "#{r['name']} (#{File.basename(r['path'].to_s)})" }.uniq.sort
+    saw = seen.empty? ? "no runs of any workflow yet" : "runs seen on it: #{seen.join(', ')}"
+    "no '#{target.workflow}' run on #{target.sha[0, 12]} listed yet; #{saw}"
   end
 
   def describe(target)

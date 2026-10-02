@@ -323,7 +323,7 @@ wrapper_len() {
       then|do|else|elif|if|while|until|'!'|'{'|exec|command|sudo|nohup|setsid|time|xargs) shift ;;
       nice) shift; case ${1-} in -n) shift 2 ;; -[0-9]*) shift ;; esac ;;
       env) shift; while [ $# -gt 0 ]; do case $1 in -*|*=*) shift ;; *) break ;; esac; done ;;
-      timeout) shift; while [ $# -gt 0 ]; do case $1 in -*) shift ;; *) break ;; esac; done; shift ;;
+      timeout) shift; while [ $# -gt 0 ]; do case $1 in -k|-s|--kill-after|--signal) shift 2 ;; -*) shift ;; *) break ;; esac; done; shift ;;
       [A-Za-z_]*=*) shift ;;
       *) break ;;
     esac

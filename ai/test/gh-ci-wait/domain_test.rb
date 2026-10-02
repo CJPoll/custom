@@ -111,6 +111,23 @@ check("P14 header names are matched case-insensitively") do
   r.kind == :rate_limited && r.reset_at == NOW + 30
 end
 
+check("P16 a bare 429 (no headers, no message) is still rate_limited, never a generic error") do
+  r = W.parse(stdout: http(429, {}, "{}"), stderr: "", now: NOW)
+  r.kind == :rate_limited && r.reset_at == NOW + 60
+end
+check("P17 an HTTP/1.1 status line parses") do
+  r = W.parse(stdout: http(200, {}, '{"x":2}').sub("HTTP/2.0", "HTTP/1.1"), stderr: "", now: NOW)
+  r.kind == :ok && r.body == { "x" => 2 }
+end
+check("P18 gh-athena failing to reach the API is a transient error, not auth") do
+  r = W.parse(stdout: "", stderr: "gh-athena: could not reach the GitHub API to list installations.\n", now: NOW)
+  r.kind == :error
+end
+check("P19 a 403 saying rate limit with remaining non-zero waits the fallback, never the window reset") do
+  r = W.parse(stdout: http(403, { "X-Ratelimit-Remaining" => "4000", "X-Ratelimit-Reset" => (NOW + 3000).to_i.to_s },
+                          '{"message":"API rate limit exceeded for user ID 1."}'), stderr: "", now: NOW)
+  r.kind == :rate_limited && r.reset_at == NOW + 60
+end
 check("P15 gh-athena refusing before any request (no App config) is auth, not a retryable error") do
   r = W.parse(stdout: "", stderr: "gh-athena: missing App ID at /x. Fix: echo <app-id> > /x\n", now: NOW)
   r.kind == :auth && r.detail.include?("missing App ID")
@@ -194,6 +211,9 @@ end
 check("K4 a run of the workflow on another sha is never picked") do
   W.pick_run(runs, workflow: "CI", sha: OTHER).nil?
 end
+check("K6 a runs page short of total_count is unreadable (the newest run may be on page 2)") do
+  (W.pick_run(runs.merge("total_count" => 250), workflow: "CI", sha: SHA) rescue $!).is_a?(W::Unreadable)
+end
 check("K5 a body with no workflow_runs array is unreadable") do
   (W.pick_run({}, workflow: "CI", sha: SHA) rescue $!).is_a?(W::Unreadable)
 end
@@ -214,6 +234,14 @@ end
 check("N5 rate limited with the reset inside the bound: sleep until the reset, not before") do
   rl = W::Read.new(kind: :rate_limited, reset_at: NOW + 200)
   W.next_wait(read: rl, now: NOW, deadline: deadline, interval: 60, errors_in_row: 0) == [:sleep, 200]
+end
+check("N7 Retry-After 0 or a passed reset never re-reads sooner than the floor") do
+  rl = W::Read.new(kind: :rate_limited, reset_at: NOW + 1)
+  W.next_wait(read: rl, now: NOW, deadline: deadline, interval: 60, errors_in_row: 0) == [:sleep, W::MIN_INTERVAL]
+end
+check("N8 rate limited with less than the floor left: give up, not a short re-read") do
+  rl = W::Read.new(kind: :rate_limited, reset_at: NOW + 1)
+  W.next_wait(read: rl, now: NOW, deadline: NOW + 10, interval: 60, errors_in_row: 0) == [:give_up]
 end
 check("N6 rate limited past the bound: give up (COULD-NOT-LOOK), never poll into the limit") do
   rl = W::Read.new(kind: :rate_limited, reset_at: deadline + 1)
@@ -250,7 +278,11 @@ check("T5 judge on a workflow with no run listed is pending, naming the workflow
   s = W.judge(tw, { "workflow_runs" => [] })
   s.state == :pending && s.summary.include?("Post-Merge Deploy")
 end
-check("T6 judge on a workflow's completed run is that run's state") { W.judge(tw, runs).state == :pending }
+check("T6 judge on a workflow is its newest run's state (id 9, in progress)") { W.judge(tw, runs).state == :pending }
+check("T7 a mistyped workflow names the workflows that do have runs on the sha") do
+  s = W.judge(W::Target.new(mode: :run_workflow, repo: "acme/app", sha: SHA, workflow: "Deploy"), runs)
+  s.state == :pending && s.summary.include?("Post-Merge Deploy (post-merge-deploy.yml)") && s.summary.include?("CI (ci.yml)")
+end
 
 if $failures.empty?
   puts "gh-ci-wait domain: #{$checks} checks passed"

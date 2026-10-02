@@ -26,7 +26,7 @@ end
 # Builds a Waiter over a scripted list of reads. Each entry is a Read, or a
 # lambda(now) -> Read. The last entry repeats.
 class Rig
-  attr_reader :now, :sleeps, :paths, :log
+  attr_reader :now, :sleeps, :paths, :log, :timeouts
 
   def initialize(script)
     @script = script
@@ -34,11 +34,13 @@ class Rig
     @sleeps = []
     @paths = []
     @log = []
+    @timeouts = []
   end
 
   def waiter
-    reader = lambda do |path|
+    reader = lambda do |path, timeout_s|
       @paths << path
+      @timeouts << timeout_s
       entry = @script.length > 1 ? @script.shift : @script.first
       entry.respond_to?(:call) ? entry.call(@now) : entry
     end
@@ -113,10 +115,25 @@ check("M10 an ok read resets the backoff") do
   run(rig, max: 5000)
   rig.sleeps == [60, 120, 60]
 end
-check("M11 an ok read then errors to the deadline is TIMEOUT that counts the errors") do
-  rig = Rig.new([checks(cr("a", "queued")), W::Read.new(kind: :error, detail: "e")])
+check("M11 an ok read then errors to the deadline is COULD-NOT-LOOK naming the stale state, never TIMEOUT") do
+  rig = Rig.new([checks(cr("a", "queued")), W::Read.new(kind: :error, detail: "HTTP 502: bad gateway")])
   o = run(rig, max: 300)
-  o.verdict == :timeout && o.line.include?("error:")
+  o.verdict == :could_not_look && o.line.include?("2026-10-02T08:00:00Z") && o.line.include?("502") &&
+    o.line.include?("not completed")
+end
+check("M11b errors then an ok pending read to the deadline is TIMEOUT (the last read was fine)") do
+  rig = Rig.new([W::Read.new(kind: :error, detail: "e"), checks(cr("a", "queued"))])
+  run(rig, max: 300).verdict == :timeout
+end
+check("M18 each read is bounded: 60 s, cut near the deadline, never under 10 s") do
+  rig = Rig.new([checks(cr("a", "queued"))])
+  run(rig, max: 100)
+  rig.timeouts.first == 60 && rig.timeouts.last == 10 && rig.timeouts.all? { |t| t.between?(10, 60) }
+end
+check("M19 a Retry-After of 0 waits the 30 s floor, never a 1 s re-read loop") do
+  rl = W::Read.new(kind: :rate_limited, status: 403, resource: "core", reset_at: T0, secondary: true, detail: "x")
+  rig = Rig.new([rl, checks(cr("a", "completed", "success"))])
+  run(rig).verdict == :done && rig.sleeps == [W::MIN_INTERVAL]
 end
 check("M12 auth failure: COULD-NOT-LOOK at once (a re-read cannot help)") do
   rig = Rig.new([W::Read.new(kind: :auth, status: 401, detail: "HTTP 401: Bad credentials")])

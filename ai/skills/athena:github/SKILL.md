@@ -231,9 +231,12 @@ $W --repo <owner>/<repo> --workflow <name> --sha <head>  # a deploy run on a mer
 It blocks (60 s reads, `--max 570` by default, so it fits one foreground tool
 call), prints one `VERDICT:` line and exits 0 DONE, 1 TIMEOUT (still pending,
 re-run it), 3 COULD-NOT-LOOK, 4 FAILED or 5 WRONG-HEAD; `--help` has the rest.
-"CI is done" = every **required** check-run has concluded **on the head you
-pushed**; pass `--min-checks N` (the repo's usual check count) so a workflow
-that has not queued yet is not read as green.
+"CI is done" = every check-run has concluded **on the head you pushed**.
+`gh-ci-wait --sha` judges every check-run, required or not (a red optional one
+reads FAILED), and reads check-runs only, not legacy commit statuses; the
+merge guard re-reads the full rollup before any merge. Pass `--min-checks N`
+(the repo's usual check count) so a workflow that has not queued yet is not
+read as green.
 
 **Why not `gh run watch` / `gh pr checks --watch`.** They poll every 3 s and
 10 s on the owner's token. On 2026-10-02 a few at once exhausted the owner's
