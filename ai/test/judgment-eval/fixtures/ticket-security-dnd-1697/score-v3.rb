@@ -45,7 +45,7 @@ def load_run(path, want_version, labels)
   end
   verdicts = run["verdicts"]
   unless run["repeat"].to_i >= 3 && verdicts.is_a?(Array)
-    refuse("#{path}: run #{run['eval_run_id']} has repeat #{run['repeat'].inspect} and no per-case verdicts. " \
+    refuse("#{path}: run #{run['eval_run_id']} has repeat #{run['repeat'].inspect}#{verdicts.is_a?(Array) ? '' : ' and no per-case verdicts'}; the bar needs 3 samples per case. " \
            "Fix: measure with judgment-eval --repeat 3; the bar counts a case right only when all 3 samples give its label")
   end
   ids = verdicts.map { |v| v["case_id"] }
