@@ -4445,8 +4445,9 @@ after the ack* below):
 ```text
 event classified (not ignored), dedupe pre-check passed
 0. a route request is pending for the event's conversation key?
-                          -> queue behind it, unjudged; the worker routes it by
-                             steps 1-3 once every earlier request on the key is done  [webhook]
+                          -> queue behind it, not judged by the webhook; the worker
+                             routes it by steps 1-3 (2c judges a new conversation)
+                             once every earlier request on the key is done  [webhook]
 1. thread reply?          -> live claim: the claimant (route: thread_claim)
                              stale or no claim: the channel route (unchanged)       [webhook]
 2. new conversation? (im, mpim or mention root)
@@ -4563,14 +4564,32 @@ request** and answers Slack; the route worker finishes it.
   holds what the line needs (the parsed event and its `received_at`) and is
   deleted when the event is routed, so it lives no longer than the event's own
   stored line would.
-- **The conversation key** is `(slack_app, channel, thread_ts or ts)`: a root
-  and every reply in its thread share it. An event whose key has a pending
-  request is queued behind it (step 0), whatever it is, and is never judged:
-  the worker routes it by steps 1 to 3 once every earlier request on the key is
-  done. So a reply that arrives once its root's request is committed is never
+- **The conversation key** is `(slack_app, channel, thread_ts or ts)` for a
+  channel or a group DM: a root and every reply in its thread share it. In the
+  owner's DM it is `(slack_app, channel, dm)`: the whole DM is one key, so
+  every message in it shares one queue, thread or not. `RouteQueue.queue_key/1`
+  decides, from the event's classified `kind` (`im`), never from the channel
+  id's first letter: Slack's `channel_type` is the only authority for a DM
+  (`Classifier`). An event whose key has a pending
+  request is queued behind it (step 0), whatever it is, and the webhook does
+  not judge it: the worker routes it by steps 1 to 3 once every earlier request
+  on the key is done. Behind a thread's root that is a reply, which step 1
+  routes by the claim and never judges. In the owner's DM it can be a new
+  conversation, which step 2 judges then, with the earlier message stored. So a reply that arrives once its root's request is committed is never
   delivered before the root's route is decided, and with the router's claim
   (*Thread replies route to the thread's claimant*) it follows the root to the
   same session. Order is promised within a key only.
+
+  **Later (2026-10-01, DND-1580):** this said the key is `(slack_app, channel,
+  thread_ts or ts)` for every event, so two top-level DMs were two keys.
+  Superseded by DND-1496 (gen_saas PR #659, deployed 2026-10-01): an `im`
+  message keys on the whole DM, so a message that arrives while any request is
+  owed in that DM waits behind it, is judged with the earlier message in its
+  context, and is delivered after it. The lock below, step 0's read and the
+  store's head query all use `RouteQueue.queue_key/1`, so none can key
+  differently. A channel and a group DM keep one queue per thread. Follows
+  gen_saas `origin/main`: `RouteQueue.queue_key/1`, test
+  `dm_queue_integration_test.exs`.
 - **Step 0 runs under a lock on the conversation key** (DND-1516, gen_saas
   PR #656; `ConversationLock`, `ConversationLockStore`). The webhook takes a
   transaction-scoped advisory lock on the key, and holds it from step 0's
@@ -4607,13 +4626,18 @@ request** and answers Slack; the route worker finishes it.
   root's failed delivery and Slack's retry) is carried over from the old
   text; the moduledoc does not name it, and the lock does not close it.
 - **Two conversations are independent, including two in one channel.** The
-  worker routes up to four requests at once, so two new conversations may be
-  delivered in either order. Two top-level DMs seconds apart are two keys: the
-  second's context read (`ai/contracts/athena-judgments.md` → *Egress and data
-  flow*) reads stored lines and thread claims, never owed requests, so it
-  misses the first while the first is still owed, and the second is judged
-  without it. This is a known residual; queueing a new conversation behind a
-  request owed in the same channel is follow-up DND-1496.
+  worker routes up to four requests at once, so two conversations on different
+  keys may be delivered in either order. The owner's DM is the exception: it
+  is one key, so its messages are routed and delivered in arrival order, and
+  each is judged after the earlier one is stored, so its context read
+  (`ai/contracts/athena-judgments.md` → *Egress and data flow*) sees it.
+
+  **Later (2026-10-01, DND-1580):** this said two top-level DMs seconds apart
+  are two keys, so the second's context read missed the first while it was
+  still owed and the two could be delivered in either order, "a known
+  residual" with queueing as follow-up DND-1496. Superseded by DND-1496
+  (gen_saas PR #659, deployed 2026-10-01): the DM is one key, which closes that
+  residual. Messages in different channels or threads remain independent.
 - **At least once, one line.** The worker stamps an attempt on a request before
   it judges, and finishes it in ONE transaction, guarded on the request still
   being owed: the stored line, the router's claim when the root was routed by
