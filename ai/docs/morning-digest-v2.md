@@ -220,7 +220,11 @@ Test lists are on the tickets. DND-1737 depends on all eight. Every test is func
    **Later (2026-10-02):** done. The owner ratified the class at about
    14:09Z by a verified click (DND-1744 holds the record). The row and its
    rules are in `ai/contracts/athena-events.md` → *Action classes* and *The
-   `calendar.rsvp` class*.
+   `calendar.rsvp` class*. Where this design's Phase B text differs (a
+   refused click leaves the buttons "unchanged"; it waits on the
+   ratification), the contract is current: a refused RSVP updates that
+   meeting to say it failed, and the buttons now wait only on the grant
+   click path and DND-1745.
 4. **Unpark the grant click path** (DND-563 T3, and the epic) if Phase B is
    wanted soon. T3 is Parked, so DND-1745 cannot start.
 

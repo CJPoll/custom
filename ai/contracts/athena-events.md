@@ -3589,7 +3589,7 @@ closed: these three rows are the whole allowlist.
 | --- | --- | --- | --- |
 | `merge.pr_only_workflow` | `{repo, base_ref, head_sha}` | `integration-gate --owner-approval-grant`, the requesting machine | `integration-gate` passes its exit 4 for that one head SHA, and only when the diff is eligible (*Eligibility for `merge.pr_only_workflow`*) |
 | `priority.transition` | `{item_id, transition}` | the gen_saas server, at click time | one `promote`, `restore` or `dismiss` of one priority item (*Priority index*) |
-| `calendar.rsvp` | `{event_id, response}` | the gen_saas server, at click time | one RSVP, `response`, on one event in the owner's own primary calendar, sent with `sendUpdates=all`; the event must be in that owner's synced set for the owner-local day. Single use, and it expires at the event's end (*The `calendar.rsvp` class*) |
+| `calendar.rsvp` | `{event_id, response}` | the gen_saas server, at click time | one RSVP, `response`, on one event in the owner's own primary calendar, sent with `sendUpdates=all`; the event must be in that owner's synced set for the owner-local day. Single use; its click window closes at the earlier of 12 hours after the post and the event's end (*The `calendar.rsvp` class*) |
 
 **Later (2026-09-28):** `merge.pr_only_workflow` was built to pass the exit 4
 a workflow edit raised. Under `~/.claude/CLAUDE.md` → *Owner approval policy*
@@ -3625,11 +3625,10 @@ re-scoping or closing; the class stays ratified until the owner retires it.
 - `item_id` is a UUID. `transition` is one of `promote`, `restore`, `dismiss`.
 - `event_id` is a Google Calendar event id, matching
   `\A[A-Za-z0-9_-]{1,1024}\z`. It is case-sensitive and never folded, so the
-  canonical binding carries it exactly as Google returned it. It MUST also
-  name an event in the owner's synced set for the owner-local day (DND-447's
-  calendar adapter, read owner-scoped). A well-formed id outside that set is
-  `target_invalid` naming `event_not_in_day`, the same answer for another
-  owner's event and for an id that names nothing, so existence never leaks.
+  canonical binding carries it exactly as Google returned it. Whether it names
+  an event in the owner's synced set for the day is not part of this typed
+  check, which reads nothing: it is checked when the grant is created and
+  again at click time (*The `calendar.rsvp` class*).
 - `response` is one of `accepted`, `tentative`, `declined`: the Google
   attendee `responseStatus` values for Going, Maybe and Not going. Any other
   value, `needsAction` included, is `target_invalid` naming `response`.
@@ -3742,37 +3741,53 @@ NOT ELIGIBLE until DND-788 removes its `workflow_dispatch` trigger.
 The morning digest's RSVP buttons (*Morning digest*, Phase B;
 `ai/docs/morning-digest-v2.md` → *RSVP*). The implementing ticket is
 DND-1745, which waits on the grant click path (DND-563 T2, T3 and T4). This
-class differs from the others in five ways:
+class differs from the others in these ways:
 
-- **Only the server creates it.** The server's own digest send inserts one
-  `pending` grant per button it offers: three per meeting, one per
-  `response`. `owner_approval_request` refuses the class as
+- **Only the server creates it.** The server's own digest send creates the
+  grants. `owner_approval_request` refuses the class as
   `class_not_requestable`, with a `Fix:` saying the digest offers these
   buttons. No session can request an RSVP grant.
+- **Creation order.** For each meeting it offers buttons for, the send
+  inserts three `pending` grants, one per `response`, then posts the digest,
+  then stamps the digest's `{channel, ts}` on every one of them. A failed post
+  sets them all `void`. It offers no button for an event outside the owner's
+  synced set for the owner-local day, or for an event that has already
+  ended: that meeting keeps its Phase A link only.
 - **A button is an approval, and there is no Decline.** Each button carries a
-  version-3 token for its own grant with `d` = `approve`. An unclicked grant
-  stays `pending` (*Grant states*) until it is pruned. *The approval message*
-  does not describe these buttons: the digest is the message, and DND-1745
-  defines its buttons. The digest's `{channel, ts}` is a grant message, so
-  `slack_update` and `slack_delete` on it are refused with
+  version-3 token for its own grant with `d` = `approve`. *The approval
+  message* does not describe these buttons: the digest is the message, and
+  DND-1745 defines its buttons. The digest's `{channel, ts}` is stamped on its
+  grants, so `slack_update` and `slack_delete` on it are refused with
   `approval_message_immutable`.
-- **It expires at the event's end.** The click window closes at the earlier of
-  12 hours after the post and the event's end. The row's `click_expires_at`
-  and the token's `x` both carry that instant. A click after it expires the
-  grant (*The click*, the window step).
+- **There is no requester.** The token's `machine` and `inbox` name no
+  session (DND-1745 pins their encoding), and *The click*'s route step routes
+  nothing for this class: the server acts alone, and no session is told.
+- **The click window closes at the earlier of 12 hours after the post and the
+  event's end.** The row's `click_expires_at` and the token's `x` both carry
+  that instant. An all-day event ends at 00:00 owner-local time on its
+  (exclusive) end date, in the owner's fleet policy time zone (*Morning
+  digest* → *Schedule*). A click after the window expires the grant, and the
+  update says the window closed and points to Phase A. Nobody asks again.
+- **Siblings are decided together.** Approving one grant moves its two
+  `pending` siblings (same digest message, same `event_id`) to `void` in the
+  same transaction, under one lock on that event's grants for that message.
+  So two fast clicks serialize: the second finds its grant `void` and gets
+  "already decided". One digest sends at most one RSVP per meeting. A later
+  change of mind goes through the owner's web session (Phase A).
 - **It is single use, consumed by the server at click time.** It has no
   redeem call: a redeem answers `not_consumable` (*Redeem*). After an
   approving click the server re-checks the target, then writes the owner's
   own attendee `responseStatus` on that event in the owner's own primary
-  calendar, with `sendUpdates=all`. Success moves the grant `redeemed`. The
-  final update replaces the meeting's buttons with the recorded choice. Its
-  sibling grants are never clicked and stay `pending`. A later change of mind
-  goes through the owner's web session (Phase A).
+  calendar, with `sendUpdates=all`. Success moves the grant `redeemed`.
 - **The target is re-checked at click time.** The event must still be in the
   owner's synced set for the owner-local day, read owner-scoped. When it is
   not, or Google refuses the write, nothing is written, the grant stays
-  `approved`, the failure is logged with a `Fix:`, and the final update says
-  the RSVP failed. That mirrors `priority.transition`'s refusal.
+  `approved`, and the failure is logged with a `Fix:`. That mirrors
+  `priority.transition`'s refusal.
+- **Updates touch one meeting.** Every update the click path makes for this
+  class (expired, recorded, failed) replaces only that meeting's buttons in
+  the digest, never the rest of the message: the recorded choice on success,
+  or the failure and the Phase A link.
 
 **The organizer notification is authorized by the click** (owner approval
 policy item 3, reaching another person; `~/.claude/CLAUDE.md` → *Owner
@@ -3820,8 +3835,8 @@ is `base64url(JSON) . base64url(HMAC-SHA256(key, <first segment>))`, and its
 JSON is the **version-1 fields**: `v` (the version), `acct`, `machine`, `inbox`
 and `nonce`, a random value the server mints for each post it stamps. The
 version, like every field, is inside the tagged segment. For a grant token the `nonce` is the one
-minted for the grant and stored on its row, so every button of one approval
-message carries the same nonce. Version 3 is the version-1 fields plus these:
+minted for the grant and stored on its row, so every button of one grant
+carries the same nonce. Version 3 is the version-1 fields plus these:
 
 | Field | Meaning |
 | --- | --- |
@@ -3856,8 +3871,8 @@ A grant is in exactly one state:
 
 | Transition | Who | When |
 | --- | --- | --- |
-| created `pending` | the server, in `owner_approval_request` | before the post |
-| `pending` → `void` | the server | the post failed |
+| created `pending` | the server, in `owner_approval_request`, or its digest send for `calendar.rsvp` | before the post |
+| `pending` → `void` | the server | the post failed, or a sibling `calendar.rsvp` grant was approved (*The `calendar.rsvp` class*) |
 | `pending` → `approved` | the click handler | a verified owner click on Approve, inside the click window |
 | `pending` → `declined` | the click handler | a verified owner click on Decline, inside the click window |
 | `pending` → `expired` | the click handler | a verified owner click after the click window closed |
@@ -3871,7 +3886,8 @@ A grant is in exactly one state:
   event. Superseded by T5's code (DND-595), where the 200 waits for the
   receipt and the transition does not.
 
-- **The click window** is 12 hours from the post. It is checked on the server's
+- **The click window** is 12 hours from the post; for `calendar.rsvp` it
+  closes earlier at the event's end (*The `calendar.rsvp` class*). It is checked on the server's
   clock against the row's `click_expires_at` AND against the token's `x`. Both
   must hold. At the boundary instant the grant is expired.
 - **The redeem window** is 2 hours from the approving click
@@ -3882,7 +3898,9 @@ A grant is in exactly one state:
   owner and the open click window. Zero rows updated means another decision
   won: that click gets an ephemeral "already decided", and nothing else happens.
 - `declined`, `expired`, `void` and `redeemed` are final. A declined or expired
-  grant never becomes approved; the requester asks again.
+  grant never becomes approved; the requester asks again. For
+  `calendar.rsvp` there is no requester: the owner answers in the web session
+  (Phase A).
 - **A grant nobody clicks stays `pending`.** Nothing expires it without a click.
   That is harmless: only `approved` can be redeemed, a click after the window
   expires it, and the row is pruned with the rest (*Retention*).
@@ -3938,13 +3956,16 @@ grant stays `pending`. Then, for a version-3 token:
    `grant_binding_invalid`: logged with a `Fix:`, nothing changed, nothing
    routed.
 3. **Window.** Outside the click window the grant goes `expired`, and the
-   server updates the message to say so and to ask again.
+   server updates the message to say so and to ask again. For
+   `calendar.rsvp` it updates only that meeting (*The `calendar.rsvp`
+   class*).
 4. **Decide.** The atomic update of *Grant states*. It replaces the shipped path's
    claim and phase-1 `working…` update for a grant button.
 5. **Route the fact.** In the same transaction as the decision, the server
    routes one `slack.interaction.received` to the requester's `{machine,
    inbox}`, with `actor.is_owner: true` and `approval: {grant_id, decision}`
-   (*Payload fields and their types per event type*).
+   (*Payload fields and their types per event type*). A `calendar.rsvp`
+   grant has no requester, so this step routes nothing for it.
 6. **Server dispatch.** For an approved `priority.transition`, after the
    commit, the server calls the shipped `Athena.Priorities` `promote`,
    `restore` or `dismiss` as the owner's own user, loaded by the grant's owner.
@@ -3959,7 +3980,9 @@ grant stays `pending`. Then, for a version-3 token:
    failed.
 7. **Final update.** The server replaces the message with its outcome and no
    buttons: Approved or Declined, by whom, when, and for an approved merge grant
-   how long it is valid for that head. The update needs no session.
+   how long it is valid for that head. The update needs no session. For
+   `calendar.rsvp` it replaces only that meeting's buttons, with the recorded
+   choice or the failure (*The `calendar.rsvp` class*).
 
 **A verified token whose version the click handler does not handle is refused,
 never run down the shipped path.** The handler dispatches on the verified
@@ -4101,7 +4124,7 @@ redeems one.
 
 **Later (2026-10-02, DND-1744):** this said "exactly two consumers", the gate
 and `Athena.Priorities`. Superseded by the ratified `calendar.rsvp` class,
-whose consumer is the server's RSVP write (item 3).
+whose consumer is the server's RSVP write (consumer 3 below).
 
 1. **`integration-gate --owner-approval-grant <id>`**, through
    `ai/bin/owner-grant`.
@@ -4178,8 +4201,8 @@ whose consumer is the server's RSVP write (item 3).
    for `priority.transition`. There is no redeem call for this class, and the
    gate refuses it.
 3. **The server's RSVP write**, at click time (*The click*), for
-   `calendar.rsvp` (*The `calendar.rsvp` class*). It is the same owner-scoped
-   respond the `/priorities` RSVP uses. There is no redeem call for this
+   `calendar.rsvp` (*The `calendar.rsvp` class*). It is the owner-scoped
+   respond DND-1742 adds for the `/priorities` RSVP. There is no redeem call for this
    class, and the gate refuses it.
 
 **Why the merge consumer pins the base, and the binding does not.** The merge
@@ -4196,12 +4219,13 @@ Pass-2 gap 3; the decision is D27.
 | Operation | Who | Resource | Where checked | On denial |
 | --- | --- | --- | --- | --- |
 | Request an approval | an authenticated machine | the machine owner's own Slack app and owner DM; one allowlisted class and target | `Athena.OwnerApprovals.request/3`, before any write | `unknown_action_class`, `class_not_requestable`, `target_invalid`, `owner_slack_user_id_unset`, `slack_not_configured`, `rate_limited`, a refused derived-identity argument; each with a `Fix:` |
+| Create `calendar.rsvp` grants | the server's own digest send, for owner O only; never a session | O's events in O's synced set for the owner-local day, not yet ended | the digest send (DND-1745), reading events owner-scoped; `Athena.OwnerApprovals.request/3` refuses the class for any machine | `class_not_requestable`, with a `Fix:`; no button for an event outside the set |
 | Decide (click) | the Slack user equal to `owner_slack_user_id`, proven by Slack's signature | the grant named in the verified token, loaded with the app owner's id in the query | `Athena.SlackInteractions.handle_click/3`, then `Athena.OwnerApprovals.decide_by_click/3` | a non-owner is relayed and changes nothing; a bad binding is logged; an expired grant is marked expired; a decided grant answers "already decided" |
 | Redeem | the requesting machine only | the grant, loaded with the machine owner's id in the query | `Athena.OwnerApprovals.redeem/3` | the refusals of *Redeem* |
 | Read status | as redeem | as redeem | `Athena.OwnerApprovals.status/3` | `not_found` |
 | Update or delete an approval message | nobody but the server | the `{channel, ts}` of any grant | `Athena.Slack`, before any Slack call | `approval_message_immutable` |
 | Priority transition by grant | the server, after an approve | one item, loaded owner-scoped | the shipped `Athena.Priorities` owner functions | `not_found`; the grant stays `approved`, and the final update says so |
-| RSVP by grant | the server, after the owner's click on a digest button | one event in the grant owner's synced set for the owner-local day, read owner-scoped; only the owner's own attendee response on the owner's own primary calendar | the RSVP manager DND-1745 builds, the same respond the `/priorities` RSVP uses, re-checking the target before the write | nothing is written; the grant stays `approved`, and the final update says so |
+| RSVP by grant | the server, after the owner's click on a digest button | one event in the grant owner's synced set for the owner-local day, read owner-scoped; only the owner's own attendee response on the owner's own primary calendar | the RSVP manager DND-1745 builds, calling the respond DND-1742 adds, re-checking the target before the write | nothing is written; the grant stays `approved`, and the final update says so |
 
 - **Deny by default.** An unknown class, target key, status or reason is
   refused, never mapped to a permissive default.
@@ -4249,7 +4273,8 @@ Stated, not hidden:
   `main` lands only by the coordinator's fast-forward.
 - **The owner's Slack account is the trust root.** A compromised Slack session
   could approve an allowlisted class. The allowlist being low-risk is the
-  mitigation.
+  mitigation. With `calendar.rsvp` that includes sending RSVPs that reach
+  organizers and guests, at most one per meeting in that day's digest.
 - **The finest binding is the machine.** Machine tokens are per machine, not
   per session, so a sibling session on the requesting machine could redeem the
   identical binding. That is the same action on the same SHA.
