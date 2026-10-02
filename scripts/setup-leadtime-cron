@@ -50,9 +50,12 @@
 #
 # The runner's own --dry-run (DND-1728). After those checks pass, --check,
 # --install and --dry-run run the main checkout's runner with --dry-run
-# (read-only) and refuse with exit 2 when it refuses, quoting its reason and
-# its Fix:. It checks what this installer does not, such as the scripts/lib
-# files a tick loads (dbus-env.sh). --install refuses before any write.
+# and refuse with exit 2 when it refuses (or hangs past 300s), quoting its
+# reason and its Fix:. It checks what this installer does not, such as the
+# scripts/lib files a tick loads (dbus-env.sh). It is read-only while those
+# libs stay definition-only at top level: it loads them to check them, and a
+# lib that grows a top-level statement breaks that promise, here and in the
+# runner's dry run. --install refuses before any write.
 # --remove and --backup never run it.
 #
 # Cursor seeding (--install only; --dry-run prints the plan). Before the entry

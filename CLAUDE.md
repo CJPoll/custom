@@ -573,7 +573,8 @@ shipwright cron never writes Notion, so this is its own runner.
   so the runner copies them into a `--mcp-config`. A missing server, or the
   skill not landed in the main checkout, is exit 78 and counts as a failure.
   So does a `scripts/lib` file the tick sources (`mcp-preflight.sh`,
-  `dbus-env.sh`) that is missing or unloadable (DND-1603): it leaves a
+  `dbus-env.sh`) that is missing, unreadable, unloadable, or lacks a function
+  the tick calls (DND-1603, DND-1728): it leaves a
   `.failed` record, feeds the wedge counter and the one wedge alert, and the
   lead-time runner treats it the same. The shipwright runner does too, for
   `dbus-env.sh` and `shipwright-stale-dirt.sh`.
@@ -581,8 +582,9 @@ shipwright cron never writes Notion, so this is its own runner.
   (`--dry-run`, `--check`, `--remove`, `--backup <file>`). `--check`, the
   install, the installer's install `--dry-run` and the runner's `--dry-run`
   run the runner's own skill and MCP preflight
-  (`scripts/lib/mcp-preflight.sh`, DND-1571), so a green check means a tick
-  can start. The admiral that
+  (`scripts/lib/mcp-preflight.sh`, DND-1571). The installer's three then run
+  the runner's own `--dry-run`, which also checks the `scripts/lib` files a
+  tick loads (DND-1728), so a green check means a tick can start. The admiral that
   lands a change to it runs it in the main checkout and notifies the owner
   (`ai/CLAUDE.md` → *Owner approval policy*). State and per-run
   records are in `ai-artifacts/clustering/`. The wedge follows the shipwright's
@@ -669,7 +671,10 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   stale entry, and on any precondition that would make a tick exit 78: the
   skill, the repo list, or the runner's own MCP preflight
   (`scripts/lib/mcp-preflight.sh` in the main checkout, DND-1571), which
-  `--install`, its `--dry-run` and the runner's `--dry-run` run too. NOT
+  `--install`, its `--dry-run` and the runner's `--dry-run` run too. Last,
+  `--check`, `--install` and its `--dry-run` run the runner's own
+  `--dry-run`, which also checks the `scripts/lib` files a tick loads
+  (DND-1728). NOT
   REGISTERED (exit 2) and COULD NOT LOOK (exit 4) are told apart. The admiral that lands a change to it runs `--backup`,
   `--install` and `--check` in the main checkout right after the
   fast-forward, so there is no hour with no lead-time loop.
@@ -731,6 +736,14 @@ The durable fix, defense in depth:
   SIGTERM a wedged client. It still runs before `dbus-env.sh` is sourced, and
   nothing it starts (`inbox-client-capture`: `ss`, `/proc` reads, `kill`) is a
   D-Bus client, so the autolaunch reasoning above is unchanged.
+  **Later (2026-10-02, DND-1725, DND-1728):** this said the wrappers source
+  `dbus-env.sh` only after the lock, so `--dry-run` never loads it. Superseded
+  for `athena-shipwright-run.sh`, `athena-leadtime-run.sh` and
+  `athena-clustering-run.sh`: their `--dry-run` now sources it, before the
+  lock, to check that it loads and defines what the tick calls. A dry run
+  never calls `athena_dbus_env_setup` and starts no D-Bus client, so
+  autolaunch still cannot fire. That holds while `dbus-env.sh` stays
+  definition-only at top level.
 - **`scripts/reap-orphan-dbus`** — belt-and-suspenders. Kills orphaned
   autolaunch session daemons (comm `dbus-daemon`; argv has `--fork` + `--session`
   + `--syslog`/`--syslog-only`; NOT `--system`/`--nofork`/`--config-file`;

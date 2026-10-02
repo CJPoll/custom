@@ -76,17 +76,24 @@
 #   runs it last in --check, --install and --dry-run, so a green installer
 #   means the runner's own preflight passes, including checks the installer
 #   does not make itself (DND-1728: the libs a tick loads).
+#   A hang is capped at 300s (timeout's exit 124, reported like a refusal).
 #   Returns 0 when it exits 0. Otherwise returns 1 and sets
 #     CRON_DRY_WHY  "the runner's own --dry-run refuses (exit <n>): <its reason>"
 #     CRON_DRY_FIX  the runner's own Fix: line, else how to see why
 #   The runner inherits the caller's environment, so the seams an installer
 #   honours (LEADTIME_CLAUDE_JSON, CLUSTERING_CLAUDE_JSON) reach it too.
 cron_runner_dry_run() {
-  local runner="${1:-}" err rc=0
+  local runner="${1:-}" err rc=0 last
   CRON_DRY_WHY=""; CRON_DRY_FIX=""
-  err="$("${runner}" --dry-run 2>&1 >/dev/null </dev/null)" || rc=$?
+  # timeout only caps a hang (exit 124 is reported like any refusal).
+  err="$(timeout 300 "${runner}" --dry-run 2>&1 >/dev/null </dev/null)" || rc=$?
   [ "${rc}" -ne 0 ] || return 0
-  CRON_DRY_WHY="the runner's own --dry-run refuses (${runner} --dry-run, exit ${rc}): $(printf '%s\n' "${err}" | grep -v '^[[:space:]]*Fix: ' | grep -v '^[[:space:]]*$' | tail -n1 || true)"
+  last="$(printf '%s\n' "${err}" | grep -v '^[[:space:]]*Fix: ' | grep -v '^[[:space:]]*$' | tail -n1 || true)"
+  # The caller says what a refusal means for a tick; drop the runner's own
+  # wording of it so the line does not say it twice.
+  last="${last%; a tick would exit 78 and spawn no session.}"
+  [ "${rc}" -ne 124 ] || last="${last:-it did not finish within 300s}"
+  CRON_DRY_WHY="the runner's own --dry-run refuses (${runner} --dry-run, exit ${rc}): ${last:-no reason on stderr}"
   CRON_DRY_FIX="$(printf '%s\n' "${err}" | sed -n 's/^[[:space:]]*Fix: //p' | tail -n1 || true)"
   [ -n "${CRON_DRY_FIX}" ] || CRON_DRY_FIX="run ${runner} --dry-run by hand to see why."
   return 1

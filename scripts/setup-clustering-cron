@@ -41,16 +41,20 @@
 #
 # The runner's own --dry-run (DND-1728). After those checks pass, --check, the
 # install and --dry-run run the main checkout's runner with --dry-run
-# (read-only) and refuse with exit 2 when it refuses, quoting its reason and
-# its Fix:. It checks what this installer does not, such as the scripts/lib
-# files a tick loads (dbus-env.sh). --remove and --backup never run it.
+# and refuse with exit 2 when it refuses (or hangs past 300s), quoting its
+# reason and its Fix:. It checks what this installer does not, such as the
+# scripts/lib files a tick loads (dbus-env.sh). It is read-only while those
+# libs stay definition-only at top level: it loads them to check them, and a
+# lib that grows a top-level statement breaks that promise, here and in the
+# runner's dry run. --remove and --backup never run it.
 #
 # Environment: CLUSTERING_CLAUDE_JSON  Claude Code's config (the runner's seam)
 #
 # Exit codes: 0 ok · 1 entry missing (--check) or usage error · 2 a prerequisite
 # is missing (an MCP server NOT REGISTERED included), the runner's own
-# --dry-run refuses, or the current crontab could not be read · 4 COULD NOT LOOK: the MCP preflight could not read Claude
-# Code's config (or jq, or the preflight library, is missing)
+# --dry-run refuses, or the current crontab could not be read · 4 COULD NOT
+# LOOK: the MCP preflight could not read Claude Code's config (or jq, or the
+# preflight library, is missing)
 
 set -euo pipefail
 
