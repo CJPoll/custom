@@ -148,15 +148,16 @@ SUITE
 }
 
 write_unmodeled_unguarded() { # DND-1680: the guarded suite rewritten into a shape
-  # the scanner does not model (a stub written through a helper function), with
+  # the scanner does not model (a stub whose name is read from a variable), with
   # the helper dropped. Its stub still sits on PATH, unguarded.
   cat > "$1" <<'SUITE'
 #!/usr/bin/env bash
 set -uo pipefail
 TMP="$(mktemp -d)"
 mkdir -p "${TMP}/bin"
-mkstub() { printf '#!/bin/sh\necho {}\n' > "$1"; chmod +x "$1"; }
-mkstub "${TMP}/bin/gh"
+STUBNAME=gh
+printf '#!/bin/sh\necho {}\n' > "${TMP}/bin/${STUBNAME}"
+chmod +x "${TMP}/bin/${STUBNAME}"
 export PATH="${TMP}/bin:${PATH}"
 gh pr view 7
 SUITE
@@ -189,12 +190,68 @@ TMP="$(mktemp -d)"
 mkdir -p "${TMP}/bin"
 . "${HERE}/../../lib/forge-stub-guard.sh"
 fsg_arm "${TMP}/forge-guard"
-mkstub() { printf '#!/bin/sh\necho {}\n' > "$1"; chmod +x "$1"; }
-mkstub "${TMP}/bin/gh"
+STUBNAME=gh
+printf '#!/bin/sh\necho {}\n' > "${TMP}/bin/${STUBNAME}"
+chmod +x "${TMP}/bin/${STUBNAME}"
 fsg_require_stubs "${TMP}/bin" gh
 export PATH="${TMP}/bin:${PATH}"
 gh pr view 7
 fsg_verify || exit 1
+SUITE
+}
+
+write_helper_dir_unguarded() { # DND-1692: the stub written through a helper that takes the DIRECTORY
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+stub_git() { cat >"$1/git"; chmod +x "$1/git"; }
+d="$(mktemp -d)"; stub_git "$d" <<<'echo shim'
+PATH="$d:$PATH"
+SUITE
+}
+
+write_helper_path_unguarded() { # DND-1692: a multi-line helper that takes the whole PATH of the stub
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+B="$(mktemp -d)"
+mkstub() {
+  printf '#!/bin/sh\necho {}\n' > "$1"
+  chmod +x "$1"
+}
+mkstub "$B/gh"
+export PATH="$B:$PATH"
+SUITE
+}
+
+write_helper_dir_guarded() { # the helper-written git stub, converted: guard right behind it
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_make "$(mktemp -d)/g" git
+stub_git() { cat >"$1/git"; chmod +x "$1/git"; }
+d="$(mktemp -d)"; stub_git "$d" <<<'echo shim'
+fsg_require_stubs "$d" git
+PATH="$d:${FSG_DIR}:${PATH}"
+fsg_verify || exit 1
+SUITE
+}
+
+write_helper_not_a_stub() { # helpers that write other files; the PATH is real, no stub is written
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+note() { echo hi >"$1/notes"; }
+mark() { echo hi >"$1"; }
+d="$(mktemp -d)"; note "$d"; mark "$d/ghost"
+PATH="$d:$PATH"
+SUITE
+}
+
+write_helper_dir_off_path() { # a helper-written stub, directory chosen by env var, never on PATH
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+stub_git() { cat >"$1/git"; }
+d="$(mktemp -d)"; stub_git "$d" <<<'echo shim'
+export GIT_BIN="$d/git"
 SUITE
 }
 
@@ -273,6 +330,34 @@ run_check "${R}"
 if [ "${RC}" = 1 ] && has "ai/test/offpath/self-test.sh" && has "not the guard"; then
   ok "R9c. fsg_make whose guard never sits behind the shim on PATH is flagged"
 else bad "R9c. a guard off PATH is flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+
+echo "--- R11: a stub written through a helper function is seen (DND-1692) ---"
+R="$(mk_repo r11a ai/test/guarded/self-test.sh=write_guarded ai/test/helperdir/self-test.sh=write_helper_dir_unguarded)"
+run_check "${R}"
+if [ "${RC}" = 1 ] && has "ai/test/helperdir/self-test.sh" && has "git on PATH but never sources" && has "Fix:"; then
+  ok "R11a. stub_git() { cat >\"\$1/git\"; } called as stub_git \"\$d\", d on PATH, no helper: named, exit 1, with a Fix:"
+else bad "R11a. a helper-written git stub on PATH is flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+if has "ai/test/helperdir/self-test.sh:3"; then
+  ok "R11a2. the stub is counted at the call's line, not the definition's"
+else bad "R11a2. the stub is counted at the call's line" "out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+R="$(mk_repo r11b ai/test/guarded/self-test.sh=write_guarded ai/test/helperpath/self-test.sh=write_helper_path_unguarded)"
+run_check "${R}"
+if [ "${RC}" = 1 ] && has "ai/test/helperpath/self-test.sh" && has "gh on PATH but never sources"; then
+  ok "R11b. mkstub \"\$B/gh\" with > \"\$1\" inside (multi-line body), B on PATH, no helper: flagged"
+else bad "R11b. a helper-written gh stub on PATH is flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+R="$(mk_repo r11c ai/test/guarded/self-test.sh=write_guarded ai/test/helperok/self-test.sh=write_helper_dir_guarded)"
+run_check "${R}"
+if [ "${RC}" = 0 ] && ! has "ai/test/helperok/self-test.sh:"; then
+  ok "R11c. a helper-written git stub with the guard right behind it passes"
+else bad "R11c. a guarded helper-written stub passes" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+R="$(mk_repo r11d ai/test/guarded/self-test.sh=write_guarded ai/test/helpernone/self-test.sh=write_helper_not_a_stub)"
+run_check "${R}"
+if [ "${RC}" = 0 ]; then ok "R11d. a helper that writes files that are not stubbed tools is not flagged"
+else bad "R11d. a non-stub helper is not flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+R="$(mk_repo r11e ai/test/guarded/self-test.sh=write_guarded ai/test/helperoff/self-test.sh=write_helper_dir_off_path)"
+run_check "${R}"
+if [ "${RC}" = 0 ]; then ok "R11e. a helper-written stub whose directory never reaches PATH is not flagged"
+else bad "R11e. an off-PATH helper-written stub is not flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
 
 echo "--- R2: a suite that sources the helper, arms and verifies PASSES ---"
 R="$(mk_repo r2 ai/test/guarded/self-test.sh=write_guarded)"

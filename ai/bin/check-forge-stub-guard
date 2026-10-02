@@ -34,7 +34,15 @@
 #        directory D: a `>` / `>>` redirection target, or the destination
 #        (last operand) of cp, ln, install or mv, or a tee target. The name
 #        may be `$NAME` when a `for NAME in ...` loop in the file lists the
-#        tool; and
+#        tool. A write through a HELPER FUNCTION defined in the file
+#        (DND-1692, `name() { ... }` or `function name { ... }`, body to its
+#        closing brace) counts at the CALL's line, in two shapes: the body
+#        writes `"$N/<tool>"` (a positional parameter joined to a tool name or
+#        a loop variable listing one), so a call whose Nth argument is D
+#        stubs that tool in D (`stub_git() { cat >"$1/git"; }`, `stub_git
+#        "$d"`); or the body writes `"$N"`, so a call whose Nth argument is
+#        `D/<tool>` stubs that tool in D (`mkstub() { ... > "$1" ...; }`,
+#        `mkstub "$B/gh"`); and
 #     2. puts D on PATH: D is an element of a `PATH=` value (`export PATH=`,
 #        `env -i PATH=`, `PATH=... cmd` all included), or of any `NAME=`
 #        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`). For
@@ -82,9 +90,15 @@
 #   * A stub whose NAME is computed other than by a `for NAME in ...` loop
 #     that lists the tool on the `for` line itself (`for s in gh glab; do
 #     cat > "$D/$s"` IS modeled; a word list continued onto the next line
-#     is not): a helper function taking the name or the path (`stub "$D"
-#     gh`, `mkstub "$B/gh"` with `> "$1"` inside), a name read from a
-#     variable or a file.
+#     is not): a name read from a variable or a file, or passed to a helper
+#     function as its own argument (`stub "$D" gh` with `> "$1/$2"` inside).
+#   * A helper function beyond the two shapes named under WHAT IS FLAGGED: one
+#     that reaches its write through another function (a wrapper calling a
+#     writer), one invoked through `xargs`/`eval`/a variable, one whose body
+#     writes the parameter by `$@` or `${1:-...}`, or one defined in a file
+#     the suite sources. A function is matched by name wherever the name
+#     appears as a command word, ignoring shadowing and scope (an over-read:
+#     a false red, never a false green).
 #   * A loop's scope: `$NAME` written anywhere in the file counts as each
 #     tool any `for NAME in` loop lists, so a write after the loop can read
 #     as a stub (an over-read: a false red, never a false green).
@@ -121,7 +135,7 @@
 # THE LANDED BAR (DND-1680, per ~/dev/custom/CLAUDE.md -> "A check's own bar
 # must not live in the diff it is checking"). The scan above sees only the
 # shapes it models, so on its own a guarded suite rewritten into an unmodeled
-# shape (a stub written through a helper function, say) while dropping the
+# shape (a stub whose name is read from a variable, say) while dropping the
 # helper left the scan and passed. So the set of suites that stubbed a tool on
 # PATH is also read from what LANDED: ai/lib/landed.rb's points (the tip of
 # origin/main, proven against origin, and merge-base(HEAD, origin/main)), each
@@ -415,26 +429,114 @@ def stubbed_names(base, loops)
   var && loops.key?(var) ? loops[var] & STUBBED_TOOLS : []
 end
 
-# [[lineno, tool, dir]] for every stub of a STUBBED_TOOLS name the file writes.
-def stub_writes(lexed)
-  writes = []
-  loops = loop_values(lexed)
+# [[lineno, word]] for every file a line writes, as the word is spelled: a
+# redirection target, the last operand of cp/ln/install/mv, every tee operand.
+def write_targets(lexed)
+  targets = []
   lexed[:lines].each do |(n, line, flags)|
     # Redirections: `>`, `>>`, `>|`, `N>` -- never `>&`.
     code_matches(line, flags, />>?\|?/).each do |m|
       next if m.begin(0).positive? && line[m.begin(0) - 1] == ">" # second char of >>
       next if line[m.end(0)] == "&"
 
-      dir, base = split_path(word_at(line, m.end(0)))
-      stubbed_names(base, loops).each { |t| writes << [n, t, dir] }
+      targets << [n, word_at(line, m.end(0))]
     end
     # cp/ln/install/mv: the last operand of the command. tee: every operand.
     code_matches(line, flags, /(?<![\w.\/-])(cp|ln|install|mv|tee)(?=[ \t])/).each do |m|
       ops = args_from(line, m.end(0)).reject { |w| w.start_with?("-") }
-      dests = m[1] == "tee" ? ops : [ops.last].compact
-      dests.each do |w|
-        dir, base = split_path(w)
-        stubbed_names(base, loops).each { |t| writes << [n, t, dir] }
+      (m[1] == "tee" ? ops : [ops.last].compact).each { |w| targets << [n, w] }
+    end
+  end
+  targets
+end
+
+# [[lineno, tool, dir]] for every stub of a STUBBED_TOOLS name the file writes
+# directly, plus the stubs it writes through a helper function (helper_writes).
+def stub_writes(lexed)
+  loops = loop_values(lexed)
+  writes = write_targets(lexed).flat_map do |(n, word)|
+    dir, base = split_path(word)
+    stubbed_names(base, loops).map { |t| [n, t, dir] }
+  end
+  writes + helper_writes(lexed, loops)
+end
+
+# [[name, first_line, last_line]] for every shell function defined in code
+# (`name() {`, `function name {`), the body running to the brace that closes
+# the one the definition opens. A definition whose brace never opens (a
+# `name() ( ... )` subshell body) is not listed.
+FUNC_DEF = /\A\s*(?:function[ \t]+([A-Za-z_][\w-]*)|([A-Za-z_][\w-]*)[ \t]*\(\))/.freeze
+
+def function_spans(lexed)
+  spans = []
+  rows = lexed[:lines]
+  rows.each_with_index do |(n, line, flags), idx|
+    m = FUNC_DEF.match(line)
+    next unless m && code_at?(flags, m[0].index(/\S/))
+
+    depth = 0
+    opened = false
+    last = n
+    rows[idx..].each do |(n2, line2, flags2)|
+      (n2 == n ? m.end(0) : 0).upto(line2.size - 1) do |i|
+        next unless code_at?(flags2, i)
+
+        if line2[i] == "{"
+          depth += 1
+          opened = true
+        elsif line2[i] == "}"
+          depth -= 1
+        end
+        break if opened && depth <= 0
+      end
+      last = n2
+      break if opened && depth <= 0
+      break unless opened # no brace on the definition line: not a brace body
+    end
+    spans << [m[1] || m[2], n, last] if opened && depth <= 0
+  end
+  spans
+end
+
+# Stubs written through a helper function (DND-1692): [[lineno, tool, dir]] at
+# the CALL's line. Two shapes, over-read by design (a false red, never a false
+# green):
+#   * the body writes "$N/<tool>" (or "$N/$VAR" for a `for VAR in` loop that
+#     lists tools): a call whose Nth argument is D stubs <tool> in D;
+#   * the body writes "$N": a call whose Nth argument is "D/<tool>" stubs
+#     <tool> in D.
+def helper_writes(lexed, loops)
+  funcs = {}
+  targets = write_targets(lexed)
+  function_spans(lexed).each do |(name, first, last)|
+    targets.select { |(n, _w)| n.between?(first, last) }.each do |(_n, word)|
+      dir, base = split_path(word)
+      if (pm = dir.match(/\A\$([1-9])\z/))
+        stubbed_names(base, loops).each { |t| (funcs[name] ||= []) << [pm[1].to_i, :dir, t] }
+      elsif dir.empty? && (pm = base.match(/\A\$([1-9])\z/))
+        (funcs[name] ||= []) << [pm[1].to_i, :path, nil]
+      end
+    end
+  end
+  writes = []
+  funcs.each do |name, shapes|
+    re = /(?<![\w.\/$-])#{Regexp.escape(name)}(?=[ \t])/
+    lexed[:lines].each do |(n, line, flags)|
+      code_matches(line, flags, re).each do |m|
+        next if line[m.end(0)..] =~ /\A\s*\(\)/ # the definition, not a call
+
+        args = args_from(line, m.end(0)).map { |w| norm(w) }
+        shapes.uniq.each do |(pos, kind, tool)|
+          arg = args[pos - 1]
+          next if arg.nil?
+
+          if kind == :dir
+            writes << [n, tool, arg]
+          else
+            dir, base = split_path(arg)
+            stubbed_names(base, loops).each { |t| writes << [n, t, dir] }
+          end
+        end
       end
     end
   end
@@ -829,10 +931,10 @@ end
 
 RATCHET_FIX = "Fix: in each suite named, write its stubs in a shape this scanner " \
               "models (a direct write into the stub directory: `cat > \"$D/gh\"`, cp, " \
-              "ln, install, tee, or a `for NAME in gh ...` loop), and keep " \
+              "ln, install, tee, a `for NAME in gh ...` loop, or a helper function taking the directory or the path), and keep " \
               "#{HELPER_REL} sourced, fsg_arm or fsg_make naming every tool it stubbed " \
               "when it landed, and fsg_verify. A stub rewritten into an unmodeled shape " \
-              "(through a helper function, to a relative path) is still on PATH, so the " \
+              "(by a computed name, to a relative path) is still on PATH, so the " \
               "guard still has a job, and only a modeled shape lets this check see it. " \
               "A stub moved OFF PATH (written by a modeled write, chosen by an env var " \
               "such as ATHENA_GH_BIN) passes and is named, helper kept. A suite reported " \
@@ -1154,8 +1256,8 @@ def ratchet_self_test(fail_case)
   count = 0
   guard = ". \"$H/ai/lib/forge-stub-guard.sh\"\n"
   modeled = "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n"
-  # A stub written through a helper function: the scanner does not model it.
-  unmodeled = "mk() { echo x > \"$1\"; }\nmk \"$B/gh\"\nmk \"$B/glab\"\nPATH=\"$B:$PATH\"\n"
+  # A stub whose name is read from a variable: the scanner does not model it.
+  unmodeled = "n=gh\necho x > \"$B/$n\"\nn=glab\necho x > \"$B/$n\"\nPATH=\"$B:$PATH\"\n"
   write = lambda do |dir, files|
     files.each do |rel, body|
       path = File.join(dir, rel)
