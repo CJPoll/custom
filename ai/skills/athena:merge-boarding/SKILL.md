@@ -934,6 +934,13 @@ A git-ancestry probe (`--sha/--target`) is a **supplementary** check only,
 so ancestry alone reports a real squash merge as not-landed. `confirm-merged`
 exits 0 only when confirmed; treat exit 3 (could-not-determine) as NOT proof the
 merge failed — re-verify on the current head rather than trusting silence.
+The no-CI landing's clean rebase is the reverse case. You push a rebased SHA
+the PR never carried, so GitHub reads the PR `CLOSED`, never `MERGED`, and the
+forge probe alone exits 1. That push is a fast-forward, not a squash, so the
+pushed SHA's ancestry is exact proof. Pass both probes:
+`confirm-merged --pr <n> --sha <pushed SHA> --target origin/main --fetch`.
+Measured on #92 and #83 (2026-09-27), #181 (2026-09-28), #276 and #282
+(2026-10-02); each admiral re-derived it.
 Re-verify after any merge-forward, and reconcile on every wake — a dropped
 train-monitor notification is not evidence the merge failed.
 
