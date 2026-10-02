@@ -145,8 +145,10 @@ module JudgmentLabel
     return nil unless text.is_a?(String)
 
     # Unicode space separators read as a space and Unicode line breaks as a
-    # newline, so \s means the same ASCII set here and in the Elixir copy.
-    lead = text.scrub("?")[0, MENTION_SCAN_CHARS].gsub(/\p{Zs}/, " ").gsub(/[\u0085  ]/, "\n")
+    # newline. U+180E (Mongolian vowel separator) is in no \p{Zs} but the
+    # router's \s matches it (Elixir "u", OTP 28), so it reads as a space too
+    # [DND-1618]. Then \s means the same set here and in the Elixir copy.
+    lead = text.scrub("?")[0, MENTION_SCAN_CHARS].gsub(/[\p{Zs}\u180E]/, " ").gsub(/[\u0085  ]/, "\n")
     lead = lead.sub(MENTION_LEADING_USERS, "")
     match = MENTION_FORMS.lazy.map { |re| re.match(lead) }.find(&:itself)
     return nil unless match

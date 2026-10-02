@@ -772,6 +772,13 @@ VECTORS='[
 ruby_eq "mention: the parity vectors all read as the router reads them [DND-717, DND-1601]" \
   "93 ok" \
   "v = ${VECTORS}; bad = v.reject { |t, want| JudgmentLabel.session_mention(t) == want }; bad.empty? ? \"#{v.size} ok\" : bad.inspect"
+# The router's `\s` under the Elixir "u" flag (OTP 28, measured over every
+# codepoint) is exactly this set. Each must read as whitespace here too, in
+# front of "session:". U+180E is the one `\s` char that is neither ASCII
+# whitespace nor in \p{Zs}, so it needs its own mapping [DND-1618].
+ruby_eq "mention: every char the router's \\s matches reads as whitespace between name and session [DND-1618]" \
+  "0 of 26 differ" \
+  'set = [0x9, 0xA, 0xB, 0xC, 0xD, 0x20, 0x85, 0xA0, 0x1680, 0x180E, *0x2000..0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000]; bad = set.reject { |c| JudgmentLabel.session_mention("harness#{[c].pack("U")}session: x") == "harness" && JudgmentLabel.session_mention("harness:#{[c].pack("U")}x") == "harness" }; "#{bad.size} of #{set.size} differ" + (bad.empty? ? "" : " " + bad.map { |c| c.to_s(16) }.inspect)'
 ruby_eq "mention: the grammar is versioned, as the router's SessionMention.version/0 [DND-1601]" \
   "session-mention-v3" 'JudgmentLabel::MENTION_GRAMMAR'
 ruby_eq "mention: nil text is no mention" "nil" 'JudgmentLabel.session_mention(nil).inspect'
