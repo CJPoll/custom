@@ -383,6 +383,19 @@ The batch brief carries everything above for one Mission, plus:
 fast-forward of the tip, before `locked-merge` existed. It is history, not the
 pattern: land one ticket at a time, as above.
 
+### Add a ticket to a running captain
+
+Handing a running captain a second ticket, at any tier, follows *One ticket,
+one change* (*Batch Missions (tier 4)*). Never tell it to add the ticket "as
+a second commit" on its branch. The critic's `scope` rubric item (changes
+unrelated to the stated task) blocks that. Tell it to cut a new branch from its own head and open the
+second ticket as a stacked PR, with its own critic run (`--base <the first
+ticket's branch>`), its own `integration-gate`, and its own report section.
+Land them bottom first, per *Batch Missions (tier 4)*. Measured twice:
+gen_saas DND-324/345 (2026-09-23) and custom DND-1764/1765 (2026-10-02).
+Each time the admiral folded the ticket in, the critic blocked `[scope]`,
+and the captain split it into stacked PRs.
+
 
 ## Machine capacity gates every dispatch
 
