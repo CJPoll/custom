@@ -107,3 +107,59 @@ set's labels match DND-1590's two after runs case for case.
   label, 17 below, 6 of 19 HIGH judged below HIGH. LOW recall 48/172,
   MEDIUM precision 57/165, HIGH precision 13/55. So item 7 needs at most
   116 above and at least 118/281 right, and item 8 at most 8 HIGH below.
+
+**Later (2026-10-02):** v2 shipped and was kept by coordinator judgement
+(gen_saas #683). Its single-sample runs `3a82162e` (this set), `c035bcdb`
+(the second set) and `946decd4` (H) passed items 2-6 and 8 and missed 1
+(5/11) and 7 (139 above). The rest of this file is the v3 bar.
+
+## The bar for `ticket-severity-v3` (registered before any v3 run)
+
+Coordinator decision, recorded on DND-1600 before any v3 run:
+
+1. Every number is measured with `judgment-eval --repeat 3`.
+2. v3 is no worse than live v2 on every one of the 8 items above.
+3. On H, MEDIUM recall is at least 57/90 (v1's level).
+4. The live one-level-up cases on DND-1600 are added as labelled cases.
+
+**The live set L** (item 4). Every `ticket_severity` call a filer
+corrected after the eight in this set (strong `field_changed`, a
+correction, the payload kept), sent with the exact ticket state the live
+call sent and labelled with the correction: 25 calls (5 on v1, 20 on v2).
+Plus DND-1648 (filer LOW) and DND-1653 (filer MEDIUM), where Jev's value
+was set and the filer's level survives in prose only; their bodies are the
+page text with the Jev sentence removed. 27 cases: 26 one level up, 1 one
+level under (LOW 15, MEDIUM 12). L holds real ticket text, so it is
+machine-local and never committed:
+`~/.local/share/athena/evals/dnd-1600v3-live-corpus.jsonl` and
+`dnd-1600v3-live-labels.jsonl` beside it (sha256 `c3288991…` and
+`e1a3ba1e…`).
+
+**How a case is read with 3 samples.** A case's reading is the level at
+least 2 of its 3 samples gave. A case with no such level, or with any
+sample unscored, is n/a. An n/a case counts against the version it was
+measured on: it is not right, it counts as moved (item 3), and a HIGH- or
+CRITICAL-labelled n/a counts as below (items 5 and 8). It counts as
+neither above nor below in item 7's "above" count. Every n/a is reported
+by case, and `judgment-eval`'s own verdicts (match, miss, unstable) are
+reported too.
+
+**Comparison.** v2 and v3 are each run at `--repeat 3` on A (this set), B
+(the second set), H and L, with the same files. Each item is a number per
+version, and v3's must be no worse than v2's:
+
+| item | number compared |
+|---|---|
+| 1 | U (the 11 cases above) right; and U plus L's 26 one-level-up cases (37) right |
+| 2 | CRITICAL controls kept (of 5); cases labelled below CRITICAL read CRITICAL |
+| 3 | of the 16 v1-exact cases in A+B, how many moved; how many moved two levels |
+| 4 | `under-2`'s reading (not below MEDIUM) |
+| 5 | HIGH- or CRITICAL-labelled cases in A+B read below v1's reading |
+| 6 | A+B HIGH precision; A+B accuracy |
+| 7 | H cases read above their label; H right |
+| 8 | H HIGH-labelled cases read below HIGH |
+
+Plus bar item 3: H MEDIUM recall at least 57/90. L's accuracy, per-label
+recall and over/under counts are reported for both versions. v3 is
+measured as a candidate (`--question-set-version ticket-severity-v3`,
+DND-1608) before it is registered.
