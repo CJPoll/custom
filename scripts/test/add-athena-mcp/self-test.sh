@@ -47,6 +47,11 @@ assert_not_contains() { # desc haystack needle
 
 tmproot="$(mktemp -d)"
 trap 'rm -rf "${tmproot}"' EXIT
+# DND-1667: a guard leads PATH, behind each HOME's stub claude and in front of
+# the real one, so a stub that is missing or not executable fails the suite
+# instead of running the real claude CLI (ai/lib/forge-stub-guard.sh).
+. "${here}/../../../ai/lib/forge-stub-guard.sh"
+fsg_arm "${tmproot}/claude-guard" claude
 
 # ── the stand-in for Claude Code ─────────────────────────────────────────────
 # `claude mcp add|add-json|remove` edit $HOME/.claude.json the way the real CLI
@@ -114,6 +119,7 @@ make_home() {
   mkdir -p "${h}/.config/athena-inbox-client" "${h}/bin" "${h}/.local/bin"
   stub_claude "${h}/bin/claude"
   cp "${h}/bin/claude" "${h}/.local/bin/claude"
+  fsg_require_stubs "${h}/bin" claude >&2
   printf '%s' "${h}"
 }
 write_config() { # home token server_url  (empty token => no .token key)
@@ -285,6 +291,10 @@ set -e
 assert_eq "apply with an unsafe helper path exits non-zero" "1" "${rc}"
 assert_contains "apply with an unsafe helper path prints a Fix:" "${out}" "Fix:"
 assert_eq "apply with an unsafe helper path never calls mcp add" "" "$(grep ' add' "${argslog3}" || true)"
+
+# DND-1667: no claude call may have fallen through past its stub.
+if fsg_verify; then pass "no claude call fell through past its stub (DND-1667)"
+else fail "no claude call fell through past its stub (DND-1667)"; fi
 
 if [ "${fails}" -eq 0 ]; then
   echo "add-athena-mcp self-test: OK"

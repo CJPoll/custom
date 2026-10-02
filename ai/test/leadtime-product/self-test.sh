@@ -314,6 +314,12 @@ lp cut --repo prod --phase verify >/dev/null
 BRG="$(git -C "$LANES/$RUN_ID" rev-parse --abbrev-ref HEAD)"
 git -C "$R" update-ref -d "refs/heads/$BRG"
 GITSHIM="$TMP/gitshim"; mkdir -p "$GITSHIM"
+# DND-1667: a guard right behind the git shim, so a shim that is missing or not
+# executable fails the suite instead of reaching the real git
+# (ai/lib/forge-stub-guard.sh). fsg_make, not fsg_arm: the suite runs the real
+# git for its fixtures.
+. "${ROOT}/ai/lib/forge-stub-guard.sh"
+fsg_make "${TMP}/git-guard" git
 REAL_GIT="$(command -v git)"
 cat >"$GITSHIM/git" <<EOF
 #!/usr/bin/env bash
@@ -321,7 +327,8 @@ for a in "\$@"; do [ "\$a" = show-ref ] && { echo "fatal: shim" >&2; exit 128; }
 exec "$REAL_GIT" "\$@"
 EOF
 chmod +x "$GITSHIM/git"
-rc="$(PATH="$GITSHIM:$PATH" lp teardown)"
+fsg_require_stubs "$GITSHIM" git
+rc="$(PATH="$GITSHIM:$FSG_DIR:$PATH" lp teardown)"
 if [ "$rc" = 72 ] && grep -q "COULD NOT TELL (cannot read branch $BRG" "${TMP}/out" && ! grep -q 'already gone' "${TMP}/out" \
    && [ -d "$LANES/$RUN_ID" ] && [ -e "$LANES/$RUN_ID.meta" ]; then
   ok "a branch git cannot read: COULD NOT TELL, exit 72, worktree and meta kept, never 'already gone'"
@@ -420,7 +427,7 @@ git -C "$R" worktree add -q -b leadtime/prod-tail-dead "$LANES/$DEAD" origin/mai
 printf 'branch=leadtime/prod-tail-dead\nbootstrap=ran\n' >"$LANES/$DEAD.meta"
 echo x >"$LANES/$DEAD/x.txt"; git -C "$LANES/$DEAD" add x.txt; git "${G[@]}" -C "$LANES/$DEAD" commit -q -m dead
 : >"$LANES/$DEAD.lock"
-rc="$(PATH="$GITSHIM:$PATH" lp reap)"
+rc="$(PATH="$GITSHIM:$FSG_DIR:$PATH" lp reap)"
 if [ "$rc" = 0 ] && grep -q "lane=$BAD COULD NOT TELL (cannot read branch leadtime/prod-tail-bad" "${TMP}/out" \
    && [ -e "$LANES/$BAD.lock" ] && [ -e "$LANES/$BAD.meta" ] \
    && grep -q "lane=$DEAD STRANDED" "${TMP}/out" && [ ! -e "$LANES/$DEAD.lock" ] && [ ! -e "$LANES/$DEAD" ]; then
@@ -440,7 +447,7 @@ git -C "$R" update-ref -d refs/heads/leadtime/prod-tail-nometa
 git -C "$R" worktree add -q -b leadtime/prod-tail-lockless "$LANES/$LOCKLESS" origin/main
 printf 'branch=leadtime/prod-tail-lockless\nbootstrap=ran\n' >"$LANES/$LOCKLESS.meta"
 git -C "$R" update-ref -d refs/heads/leadtime/prod-tail-lockless
-rc1="$(PATH="$GITSHIM:$PATH" lp reap)"; out1="$(cat "${TMP}/out")"
+rc1="$(PATH="$GITSHIM:$FSG_DIR:$PATH" lp reap)"; out1="$(cat "${TMP}/out")"
 kept=no; [ -d "$LANES/$NOMETA" ] && [ -e "$LANES/$NOMETA.lock" ] && [ -d "$LANES/$LOCKLESS" ] && [ -e "$LANES/$LOCKLESS.meta" ] && kept=yes
 rc2="$(lp reap)"; out2="$(cat "${TMP}/out")"
 if [ "$rc1" = 0 ] && [ "$(grep -c 'COULD NOT TELL (cannot read branch' <<<"$out1")" = 2 ] && [ "$kept" = yes ] \
@@ -631,6 +638,10 @@ if grep -q $'^ai/lib/leadtime_product.rb\tlibrary' "${ROOT}/ai/guard-classificat
    && grep -q $'^ai/lib/leadtime_product_io.rb\tlibrary' "${ROOT}/ai/guard-classification.tsv"; then
   ok "both libs are classified in ai/guard-classification.tsv"
 else bad "classification" "a lib row is missing"; fi
+
+# DND-1667: no git call may have fallen through past its shim.
+if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
+else bad "no git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

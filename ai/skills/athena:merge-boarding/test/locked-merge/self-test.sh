@@ -369,7 +369,12 @@ names m3 "never rebase a published branch"
 fixture m8; commit_on_main m.txt m; mkdir -p "${TMP}/m8/shim"
 printf '#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = merge-tree ] && { echo "fatal: shim merge-tree failure" >&2; exit 128; }; done\nexec %s "$@"\n' "$(command -v git)" > "${TMP}/m8/shim/git"
 chmod +x "${TMP}/m8/shim/git"
-out="$(PATH="${TMP}/m8/shim:${PATH}" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m8.lock" 2>&1)"; rc=$?
+# DND-1667: a guard right behind the git shim, so a shim that is missing or
+# not executable fails the suite instead of reaching the real git. fsg_make,
+# not fsg_arm: the rest of the suite runs the real git for its fixtures.
+fsg_make "${TMP}/git-guard" git
+fsg_require_stubs "${TMP}/m8/shim" git
+out="$(PATH="${TMP}/m8/shim:${FSG_DIR}:${PATH}" "${TOOL}" --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/m8.lock" 2>&1)"; rc=$?
 expect m8 2; no_merge m8; names m8 "COULD NOT LOOK"; names m8 "shim merge-tree failure"
 # m9 a receipt base that is not in the object store: RECEIPT BASE UNKNOWN,
 # never RECEIPT FOR ANOTHER BASE.
@@ -522,8 +527,8 @@ chmod 700 "${TMP}/t6-ro"
 [ ! -e "${TMP}/t6-ro/telemetry" ] && ok "t6 nothing was written to the unwritable store" || bad "t6 unwritable store written"
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
-if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
-else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
+if fsg_verify; then ok "no gh/glab/git call fell through past its stub (DND-1647/DND-1667)"
+else bad "no gh/glab/git call fell through past its stub (DND-1647/DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 echo "locked-merge self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]

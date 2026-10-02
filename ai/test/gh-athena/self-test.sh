@@ -342,11 +342,18 @@ EV="$(landed "${S}")"
 # lands a commit on origin/main right after the real push): main moved, but
 # not by this push, so no landing.
 SHIM2="${TMP}/shim2"; mkdir -p "${SHIM2}"; REALGIT="$(command -v git)"
+# DND-1667: a guard right behind each git shim below, so a shim that is
+# missing or not executable fails the suite instead of reaching the real git
+# (ai/lib/forge-stub-guard.sh). fsg_make, not fsg_arm: the suite runs the
+# real git for its fixtures.
+. "${AI_DIR}/lib/forge-stub-guard.sh"
+fsg_make "${TMP}/git-guard" git
 origin_with_main p11; S="${TMP}/p11-store"
 OTHER="$(git --git-dir="${O}" commit-tree "$(git --git-dir="${O}" rev-parse main^{tree})" -p "$(git --git-dir="${O}" rev-parse main)" -m other)"
 printf '#!/bin/sh\n%s "$@"; rc=$?\nfor a in "$@"; do\n  if [ "$a" = push ]; then %s --git-dir=%s update-ref refs/heads/main %s; fi\ndone\nexit $rc\n' \
   "${REALGIT}" "${REALGIT}" "${O}" "${OTHER}" > "${SHIM2}/git"; chmod +x "${SHIM2}/git"
-OUT="$(cd "${W}" && PATH="${SHIM2}:${PATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:refs/heads/topic 2>&1)"; RC=$?
+fsg_require_stubs "${SHIM2}" git
+OUT="$(cd "${W}" && PATH="${SHIM2}:${FSG_DIR}:${PATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:refs/heads/topic 2>&1)"; RC=$?
 [ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${OTHER}" ] && [ "$(landed_n "${S}")" = 0 ] \
   && ok "25d. main moved by another actor during a topic push: no phantom landing" \
   || bad "25d. concurrent move read as a landing" "rc=${RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)' out='${OUT}'"
@@ -365,11 +372,12 @@ ghpush "${W}" "${S}" push -q origin HEAD:main
 # not become a phantom landing. The telemetry child never sees the auth header.
 SHIM="${TMP}/shim"; mkdir -p "${SHIM}"; REALGIT="$(command -v git)"
 printf '#!/bin/sh\nfor a in "$@"; do\n  if [ "$a" = --symref ]; then exit 128; fi\ndone\nexec %s "$@"\n' "${REALGIT}" > "${SHIM}/git"; chmod +x "${SHIM}/git"
+fsg_require_stubs "${SHIM}" git
 origin_with_main p10; S="${TMP}/p10-store"
-OUT="$(cd "${W}" && PATH="${SHIM}:${PATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:refs/heads/topic 2>&1)"; RC=$?
+OUT="$(cd "${W}" && PATH="${SHIM}:${FSG_DIR}:${PATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:refs/heads/topic 2>&1)"; RC=$?
 [ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && ok "25c. before unreadable, a push to another branch: no phantom landing" \
   || bad "25c. phantom landing" "rc=${RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)' out='${OUT}'"
-OUT="$(cd "${W}" && PATH="${SHIM}:${PATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:main 2>&1)"; RC=$?
+OUT="$(cd "${W}" && PATH="${SHIM}:${FSG_DIR}:${PATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:main 2>&1)"; RC=$?
 EV="$(landed "${S}")"
 [ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 1 ] && [ "$(jq -r '.attrs | has("before")' <<<"${EV}")" = false ] \
   && [ "$(jq -r .attrs.after <<<"${EV}")" = "${AFTER}" ] \
@@ -487,6 +495,10 @@ gha "${W}" push origin HEAD:main
 [ "${RC}" = 3 ] && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
   && ok "34. a malformed marker refuses as COULD NOT LOOK (not read as no red)" \
   || bad "34. malformed marker" "rc=${RC} err='${ERR}'"
+
+# DND-1667: no git call may have fallen through past its shim.
+if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
+else bad "no git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 echo "==================================================="

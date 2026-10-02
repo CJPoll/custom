@@ -114,8 +114,14 @@ mkfifo "${FG}/never-written"
 printf '#!/bin/bash\ntrap "" TERM\nprintf "%%s\\n" "$$" >> "%s"\ncat "%s" &\nprintf "%%s\\n" "$!" >> "%s"\nwait\n' \
   "${FG}/pids" "${FG}/never-written" "${FG}/pids" > "${FG}/bin/git"
 chmod +x "${FG}/bin/git"
+# DND-1667: a guard right behind the fake git, so a fake that is missing or not
+# executable fails the suite instead of reaching the real git
+# (ai/lib/forge-stub-guard.sh). fsg_make: only this PATH gets the guard.
+. "${ROOT}/ai/lib/forge-stub-guard.sh"
+fsg_make "${TMP}/git-guard" git
+fsg_require_stubs "${FG}/bin" git
 gone() { timeout 5 tail -s 0.1 --pid="$1" -f /dev/null; }
-PATH="${FG}/bin:${PATH}" caller "${LIB}" "${TMP}/s9" "athena_telemetry_emit --event merge.landed --attr via=push"
+PATH="${FG}/bin:${FSG_DIR}:${PATH}" caller "${LIB}" "${TMP}/s9" "athena_telemetry_emit --event merge.landed --attr via=push"
 eq "9 TERM-ignoring git: the caller exits 0, stdout its own" "${CODE}:${OUT}" "0:after"
 mapfile -t FGPIDS < <(cat "${FG}/pids" 2>/dev/null)
 eq "9 the fake git and its child both started" "${#FGPIDS[@]}" "2"
@@ -137,6 +143,10 @@ caller "${LIB}" "${TMP}/s7" 'x=$(athena_telemetry_seconds_since ""); y=$(athena_
 eq "7 no start or a bad one is no duration, never 0" "${OUT}" $'[][]\nafter'
 caller "${LIB}" "${TMP}/s8" 'n=$(athena_telemetry_now); [[ $n =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ ]] && echo now-ok'
 eq "8 now is ISO 8601 UTC with milliseconds" "${OUT}" $'now-ok\nafter'
+
+# DND-1667: no git call may have fallen through past the fake.
+if fsg_verify; then ok "no git call fell through past its stub (DND-1667)"
+else bad "no git call fell through past its stub (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 printf 'telemetry-shell self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"

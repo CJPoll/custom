@@ -88,6 +88,12 @@ REPO_ROOT="$(cd -- "${SCRIPTS}/.." && pwd -P)"
 # the "broken git" cases pass for the wrong reason.
 . "${REPO_ROOT}/ai/lib/agent-free-git.sh"
 REAL_GIT="$(agent_free_git)" || exit 1
+# DND-1667: a guard right behind each git stub dir below, so a stub that is
+# missing or not executable fails the suite instead of reaching the real git
+# (ai/lib/forge-stub-guard.sh). fsg_make, not fsg_arm: the fixtures run the
+# real git.
+. "${REPO_ROOT}/ai/lib/forge-stub-guard.sh"
+fsg_make "${TMP}/git-guard" git
 INBOX_REGISTRY="${REPO_ROOT}/ai/inbox/registry.json"
 install_inbox_registry() { # <root>
   local common
@@ -579,9 +585,10 @@ EOS
 
 r="$(new_repo)"; sdir="$(dirname "$r")/gitstub"
 stub_git_bare_status_fails "$sdir"
+fsg_require_stubs "$sdir" git
 printf 'shipwright edit\n' >"$r/ai/agents/ours.md"
 printf 'AGENT MID-EDIT\n'  >"$r/bystander.conf"
-o="$(cd "$r" && PATH="$sdir:$PATH" "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
+o="$(cd "$r" && PATH="$sdir:$FSG_DIR:$PATH" "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
 if [ "$rc" -eq 1 ] && grep -q 'Fix:' <<<"$o" \
    && grep -q 'nothing was measured' <<<"$o"; then
   ok "a failed whole-tree scan exits 1 naming that nothing was measured, not a silent clean notice"
@@ -620,8 +627,9 @@ EOS
 
 r="$(new_repo)"; sdir="$(dirname "$r")/gitstub2"
 stub_git_pathspec_status_fails "$sdir"
+fsg_require_stubs "$sdir" git
 printf 'shipwright edit\n' >"$r/ai/agents/ours.md"
-o="$(cd "$r" && PATH="$sdir:$PATH" "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
+o="$(cd "$r" && PATH="$sdir:$FSG_DIR:$PATH" "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
 if [ "$rc" -eq 1 ] && grep -q 'nothing was measured' <<<"$o"; then
   ok "a failed pathspec scan exits 1, never the exit-3 'you named the wrong paths'"
 else
@@ -2378,6 +2386,10 @@ if [ "$rc" -eq 0 ] && grep -q 'NOT snapshotted' "$a/runner.err" && grep -q 'Fix:
 else
   bad "missing slack-roots-tick is loud" "rc=$rc err=$(cat "$a/runner.err")"
 fi
+
+# DND-1667: no git call may have fallen through past a git stub.
+if fsg_verify; then ok "no git call fell through past its stub (DND-1667)"
+else bad "no git call fell through past its stub (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

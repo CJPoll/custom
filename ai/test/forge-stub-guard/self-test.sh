@@ -10,7 +10,9 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-LIB="$here/../../lib/forge-stub-guard.sh"
+# LIB_UNDER_TEST runs these cases against another copy (old-vs-new evidence).
+LIB="${LIB_UNDER_TEST:-}"
+[ -n "${LIB}" ] || LIB="$here/../../lib/forge-stub-guard.sh"
 if [ ! -f "${LIB}" ]; then
   echo "forge-stub-guard self-test: FAIL — ${LIB} is missing" >&2
   echo "Fix: restore ai/lib/forge-stub-guard.sh" >&2
@@ -26,7 +28,7 @@ trap 'rm -rf "${TMP}"' EXIT
 
 # The stand-in for the installed CLI: records argv, never touches a network.
 REAL="${TMP}/real"; mkdir -p "${REAL}"
-for t in gh glab; do
+for t in gh glab git docker curl claude; do
   printf '#!/bin/sh\nprintf "%%s %%s\\n" "${0##*/}" "$*" >> "%s/calls.log"\necho REAL-REACHED\nexit 0\n' "${REAL}" > "${REAL}/${t}"
   chmod +x "${REAL}/${t}"
 done
@@ -164,6 +166,87 @@ OUT="$( (. "${LIB}"; fsg_require_stubs "${D}/s" gh; echo "after") 2>&1)"; RC=$?
 [ "${RC}" = 1 ] && [[ "${OUT}" == *"is not a regular file"* && "${OUT}" == *"Fix:"* ]] \
   && ok "G8d. fsg_require_stubs on a directory named gh: exit 1, 'not a regular file'" \
   || bad "G8d. directory stub refused" "rc=${RC} out=${OUT}"
+
+# ---- DND-1667: git, docker, curl and claude stubs ---------------------------
+# A stand-in for the agent PATH git wrapper (ai/agent-bin/git, DND-775): it
+# records that it ran, then execs the git after it, as the real wrapper does.
+AGENT="${TMP}/agent-bin"; mkdir -p "${AGENT}"
+printf '#!/bin/sh\nprintf "agent-wrapper %%s\\n" "$*" >> "%s/calls.log"\nexec "%s/git" "$@"\n' "${REAL}" "${REAL}" > "${AGENT}/git"
+chmod +x "${AGENT}/git"
+
+# --- G14. fsg_make builds the guard and leaves PATH alone; FSG_DIR names it.
+D="$(casedir g14)"
+OUT="$( (PATH="${BASE_PATH}"; . "${LIB}"; fsg_make "${D}/guard" git
+  printf '%s|%s|' "${FSG_DIR}" "${PATH}"
+  [ -x "${D}/guard/git" ] && [ ! -e "${D}/guard/gh" ] && [ -f "${D}/guard/fallthrough.log" ] && printf 'built') 2>&1)"
+[ "${OUT}" = "${D}/guard|${BASE_PATH}|built" ] \
+  && ok "G14. fsg_make <dir> git builds only the git guard, sets FSG_DIR, and does not touch PATH" \
+  || bad "G14. fsg_make builds without touching PATH" "out=${OUT}"
+
+# --- G15. THE REGRESSION (DND-1667): a non-executable git stub, with the guard
+#     right behind it, never reaches the stand-in real git later on PATH; with
+#     the stand-in agent wrapper between them, and without it.
+for layout in "plain|${BASE_PATH}" "agent-wrapper|${AGENT}:${BASE_PATH}"; do
+  name="${layout%%|*}"; behind="${layout#*|}"
+  reset_real; D="$(casedir "g15-${name}")"; mkdir -p "${D}/stubs"
+  printf '#!/bin/sh\necho STUB-GIT\n' > "${D}/stubs/git"   # no chmod: the defect
+  ( PATH="${BASE_PATH}"; . "${LIB}"; fsg_make "${D}/guard" git
+    PATH="${D}/stubs:${FSG_DIR}:${behind}" git push origin main >"${D}/out" 2>"${D}/err"; echo "$?" >"${D}/rc"
+    fsg_verify 2>"${D}/verr"; echo "$?" >"${D}/vrc" ) 2>/dev/null
+  if [ "$(cat "${D}/rc" 2>/dev/null)" = 97 ] && [ -z "$(real_calls)" ] && grep -q 'Fix:' "${D}/err" \
+     && [ "$(cat "${D}/guard/fallthrough.log")" = "$(printf 'git\tpush origin main')" ] \
+     && [ "$(cat "${D}/vrc")" = 1 ]; then
+    ok "G15-${name}. a non-executable git stub: exit 97, logged, fsg_verify 1; neither the real git nor the wrapper ran"
+  else bad "G15-${name}. a non-executable git stub never reaches git" \
+    "rc=$(cat "${D}/rc" 2>/dev/null) vrc=$(cat "${D}/vrc" 2>/dev/null) real=$(real_calls) err=$(head -c 300 "${D}/err" 2>/dev/null)"; fi
+done
+
+# --- G16. Missing docker/curl/claude stubs answer the same way.
+for t in docker curl claude; do
+  reset_real; D="$(casedir "g16-${t}")"; mkdir -p "${D}/empty-stubs"
+  ( PATH="${BASE_PATH}"; . "${LIB}"; fsg_arm "${D}/guard2" "${t}"; PATH="${D}/empty-stubs:${PATH}"
+    "${t}" --version >/dev/null 2>"${D}/err2"; echo "$?" >"${D}/rc2" )
+  if [ "$(cat "${D}/rc2")" = 97 ] && [ -z "$(real_calls)" ] \
+     && [ "$(cat "${D}/guard2/fallthrough.log")" = "$(printf '%s\t--version' "${t}")" ]; then
+    ok "G16-${t}. a missing ${t} stub behind fsg_arm <dir> ${t}: exit 97, logged, the real ${t} NOT run"
+  else bad "G16-${t}. missing ${t} stub" "rc=$(cat "${D}/rc2") real=$(real_calls)"; fi
+done
+
+# --- G17. fsg_verify reads every guard directory armed in this shell.
+reset_real; D="$(casedir g17)"; mkdir -p "${D}/stubs"
+OUT="$( (PATH="${BASE_PATH}"; . "${LIB}"; fsg_make "${D}/git-guard" git; GG="${FSG_DIR}"
+  fsg_arm "${D}/forge-guard"
+  PATH="${D}/stubs:${GG}:${BASE_PATH}" git status >/dev/null 2>&1
+  fsg_verify; echo "vrc=$?") 2>&1)"
+[[ "${OUT}" == *"git	status"* && "${OUT}" == *"vrc=1" ]] && [ -z "$(real_calls)" ] \
+  && ok "G17. two guard dirs (fsg_make git, then fsg_arm gh glab): fsg_verify reports the git one" \
+  || bad "G17. fsg_verify reads every guard dir" "out=${OUT}"
+D="$(casedir g17b)"
+OUT="$( (. "${LIB}"; fsg_make "${D}/a" git; fsg_arm "${D}/b"; rm -f "${D}/a/fallthrough.log"
+  fsg_verify; echo "vrc=$?") 2>&1)"
+[[ "${OUT}" == *"could not measure"*"${D}/a/"* && "${OUT}" == *"vrc=1" ]] \
+  && ok "G17b. one of two guard logs lost: fsg_verify says could not measure for that one" \
+  || bad "G17b. lost log among two" "out=${OUT}"
+
+# --- G18. End to end: a suite built the DND-1667 way, its git stub not
+#     executable, FAILS, and the stand-in real git is never run.
+reset_real; D="$(casedir g18)"
+cat > "${D}/suite.sh" <<'SUITE'
+#!/usr/bin/env bash
+set -uo pipefail
+. "${FSG_LIB}"
+TMP="$1"; mkdir -p "${TMP}/gitshim"
+fsg_make "${TMP}/git-guard" git
+printf '#!/bin/sh\necho "fatal: shim" >&2; exit 128\n' > "${TMP}/gitshim/git"   # chmod +x forgotten
+out="$(PATH="${TMP}/gitshim:${FSG_DIR}:${PATH}" git rev-parse --show-toplevel 2>/dev/null)"
+[ -z "${out}" ] && echo "ok shim answered"   # passes either way: the shim or the guard
+fsg_verify || exit 1
+exit 0
+SUITE
+FSG_LIB="${LIB}" PATH="${BASE_PATH}" bash "${D}/suite.sh" "${D}/t" >"${D}/out" 2>"${D}/err"; RC=$?
+if [ "${RC}" = 1 ] && [ -z "$(real_calls)" ] && grep -q 'reached a tool past its stub' "${D}/err"; then
+  ok "G18. a converted suite whose git stub is not executable exits 1; the real git is never run"
+else bad "G18. converted suite fails on a non-executable git stub" "rc=${RC} real=$(real_calls) err=$(head -c 300 "${D}/err")"; fi
 
 printf '\nforge-stub-guard self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then

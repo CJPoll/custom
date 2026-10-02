@@ -99,6 +99,12 @@ else
 end
 RUBY
 chmod +x "${STUB_BIN}/claude"
+# DND-1667: a guard right behind the claude stub, so a stub that is missing or
+# not executable fails the suite instead of reaching a real claude CLI on
+# BASE_PATH (ai/lib/forge-stub-guard.sh).
+. "${SRC}/ai/lib/forge-stub-guard.sh"
+fsg_make "${TMP}/claude-guard" claude
+fsg_require_stubs "${STUB_BIN}" claude
 
 export CLAUDE_STUB_STATE="$STATE"
 export CLAUDE_CONFIG_DIR="${TMP}/claude-config"
@@ -107,7 +113,7 @@ export HOME="$FHOME"
 unset ATHENA_PRIVATE_ROOT ATHENA_OUTBOUND_WAIVE
 export XDG_STATE_HOME="${TMP}/state"
 BASE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-export PATH="${STUB_BIN}:${BASE_PATH}"
+export PATH="${STUB_BIN}:${FSG_DIR}:${BASE_PATH}"
 OVERLAY="${FHOME}/.config/athena/work"
 INST="${REPO}/scripts/setup-private-overlay"
 INST_WT="${WT}/scripts/setup-private-overlay"
@@ -377,6 +383,10 @@ if [ -z "$nonc" ] && [ "$(cat "${SRC}/ai/private-overlay/skeleton/overlay/slack.
    && [ "$(cat "${SRC}/ai/private-overlay/skeleton/overlay/notion.json")" = "{}" ]; then
   ok "26 the public skeleton holds no values (empty overlay files, comment-only patterns)"
 else bad "26 skeleton values" "patterns=$nonc"; fi
+
+# DND-1667: no claude call may have fallen through past its stub.
+if fsg_verify; then ok "no claude call fell through past its stub (DND-1667)"
+else bad "no claude call fell through past its stub (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 TOTAL=$((PASS+FAIL))
 if [ "$FAIL" = 0 ]; then

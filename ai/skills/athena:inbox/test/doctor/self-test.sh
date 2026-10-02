@@ -471,7 +471,13 @@ assert_eq "0644 token file -> server warn (credential not read)" warn "$(state_o
 # THE MISS for the curl-config rule on the health check: an unsafe token, base
 # or machine id is refused with its OWN finding -- never "could not be
 # reached" -- and curl is never run. (A curl shim that records any call.)
+# DND-1667: a guard sits right behind every curl shim, so a shim that is
+# missing or not executable fails the suite instead of reaching the real curl.
+# fsg_make, not fsg_arm: the guard goes only on the PATHs that hold a shim.
+. "${REPO}/ai/lib/forge-stub-guard.sh"
+fsg_make "${TMP}/curl-guard" curl
 HSHIM="${TMP}/hshim"; mkdir -p "${HSHIM}"; printf '#!/bin/sh\necho called >> "%s/called"\nprintf 200\n' "${HSHIM}" > "${HSHIM}/curl"; chmod +x "${HSHIM}/curl"
+fsg_require_stubs "${HSHIM}" curl
 chmod 600 "${TOKF}"
 for bad in 'tok"en' 'base' 'id'; do
   case "${bad}" in
@@ -480,7 +486,7 @@ for bad in 'tok"en' 'base' 'id'; do
     id)   printf 'usr-tok' > "${TOKF}"; export ATHENA_INBOX_DOCTOR_API_BASE="https://x" ATHENA_INBOX_DOCTOR_MACHINE_ID=$'m\nurl = "http://evil"' ;;
   esac
   rm -f "${HSHIM}/called"
-  RO="$(cd "${R2}" && PATH="${HSHIM}:${PATH}" doctor_check_server ".")"
+  RO="$(cd "${R2}" && PATH="${HSHIM}:${FSG_DIR}:${PATH}" doctor_check_server ".")"
   assert_contains "health check: an unsafe ${bad} is refused with its own finding" "contains a quote, backslash, whitespace or control character" "${RO}"
   assert_eq "health check: an unsafe ${bad} never runs curl" "no" "$([ -e "${HSHIM}/called" ] && echo yes || echo no)"
 done
@@ -774,13 +780,14 @@ case "${method}" in
 esac
 SHIMEOF
 chmod +x "${SHIM}/curl"
+fsg_require_stubs "${SHIM}" curl
 # A REAL-SHAPED session id: Hermes ids are base64, 28 chars, `=`-padded, and
 # may carry `+` and `/`. A fixture built the way the code expected ("sess-42")
 # is how the first client shipped refusing every real id (DND-312 hotfix).
 export SHIM_SID='k3Jz9vQm+Pq/7XbL2wYtR0aC5dE='
 export SHIM_LOG="${LV}/shim" SHIM_EXPECT_TOKEN="SEKRETTOKEN-abcdef-0123456789"
 export SHIM_RESULT='{"reachable":true,"basis":"recent_ack","last_ack_at":"2026-09-23T08:00:00Z","last_joined_at":null,"pending_deliveries":0,"unreachable_since":null}'
-RO="$(PATH="${SHIM}:${PATH}" doctor_check_server_reachability)"
+RO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" doctor_check_server_reachability)"
 assert_eq "protocol path: initialize/session/tools/call -> ok" ok "$(state_of "${RO}" server-reachability)"
 assert_contains "... 'checked, 0 pending'" "0 pending" "${RO}"
 assert_not_contains "the live protocol path is not marked canned" "CANNED" "${RO}"
@@ -790,21 +797,21 @@ assert_eq "every curl config was 0600" "600" "$(sort -u "${SHIM_LOG}.cfgmode")"
 # (The "ok" above already proves the base64 id was sent back verbatim: the shim
 # answers tools/call with 400 unless the config carries that exact header.)
 for badsid in 'ab"cd==' 'ab\\cd=='; do
-  RO="$(PATH="${SHIM}:${PATH}" SHIM_SID="${badsid}" doctor_check_server_reachability)"
+  RO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" SHIM_SID="${badsid}" doctor_check_server_reachability)"
   assert_contains "a server session id carrying [${badsid}] -> UNAVAILABLE, never written into curl's config" "cannot be sent back safely" "${RO}"
 done
 # An unsafe server_url HOST is refused with its own message, never "no server_url".
 printf '{"server_url":"wss://athe\\"na.example/machine/websocket","token":"SEKRETTOKEN-abcdef-0123456789","instances":{}}' > "${LV}/badhost.json"; chmod 600 "${LV}/badhost.json"
-RO="$(PATH="${SHIM}:${PATH}" ATHENA_INBOX_CLIENT_CONFIG="${LV}/badhost.json" doctor_check_server_reachability)"
+RO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" ATHENA_INBOX_CLIENT_CONFIG="${LV}/badhost.json" doctor_check_server_reachability)"
 assert_contains "an unsafe server_url host -> UNAVAILABLE naming the host" "server_url host contains a quote" "${RO}"
-RO="$(PATH="${SHIM}:${PATH}" SHIM_MODE=notool doctor_check_server_reachability)"
+RO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" SHIM_MODE=notool doctor_check_server_reachability)"
 assert_contains "protocol path: tool missing (DND-315 not deployed) -> UNAVAILABLE" "UNAVAILABLE" "${RO}"
 assert_contains "... with the server's own words" "Tool not found" "${RO}"
-RO="$(PATH="${SHIM}:${PATH}" SHIM_EXPECT_TOKEN=other doctor_check_server_reachability)"
+RO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" SHIM_EXPECT_TOKEN=other doctor_check_server_reachability)"
 assert_contains "protocol path: a refused token -> UNAVAILABLE naming the refusal" "refused the machine token" "${RO}"
 printf '{"server_url":"wss://athena.example/machine/websocket","token":"bad\\"tok","instances":{}}' > "${LV}/badtok.json"; chmod 600 "${LV}/badtok.json"
 : > "${SHIM_LOG}.argv"
-RO="$(PATH="${SHIM}:${PATH}" ATHENA_INBOX_CLIENT_CONFIG="${LV}/badtok.json" doctor_check_server_reachability)"
+RO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" ATHENA_INBOX_CLIENT_CONFIG="${LV}/badtok.json" doctor_check_server_reachability)"
 assert_contains "a token that cannot be quoted safely -> UNAVAILABLE, never sent" "cannot be sent safely" "${RO}"
 assert_eq "... and curl was never invoked" "" "$(cat "${SHIM_LOG}.argv")"
 
@@ -848,21 +855,21 @@ assert_eq "doctor_state_failed_deliveries: a count too large to compare -> na, n
 # The real protocol path: the SAME shim, asked for failed_deliveries by name.
 : > "${SHIM_LOG}.argv"; : > "${SHIM_LOG}.tools"
 export SHIM_FD_RESULT='{"unread_count":1,"failed_deliveries":[{"id":"cccc-3","cause":"machine-unreachable","count":1,"notified":true}]}'
-FO="$(PATH="${SHIM}:${PATH}" doctor_check_server_failed_deliveries)"
+FO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" doctor_check_server_failed_deliveries)"
 assert_eq "protocol path: failed_deliveries unread 1 -> warn" warn "$(state_of "${FO}" server-failed-deliveries)"
 assert_eq "... the tool called by name is failed_deliveries" "failed_deliveries" "$(cat "${SHIM_LOG}.tools")"
 assert_not_contains "... not marked canned" "CANNED" "${FO}"
 assert_not_contains "... the machine token is never in curl's argv" "SEKRETTOKEN" "$(cat "${SHIM_LOG}.argv")"
 assert_not_contains "... the machine token is never in a finding" "SEKRETTOKEN" "${FO}"
 export SHIM_FD_RESULT='{"unread_count":0,"failed_deliveries":[]}'
-FO="$(PATH="${SHIM}:${PATH}" doctor_check_server_failed_deliveries)"
+FO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" doctor_check_server_failed_deliveries)"
 assert_eq "protocol path: 0 unread -> ok" ok "$(state_of "${FO}" server-failed-deliveries)"
-FO="$(PATH="${SHIM}:${PATH}" SHIM_MODE=notool doctor_check_server_failed_deliveries)"
+FO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" SHIM_MODE=notool doctor_check_server_failed_deliveries)"
 assert_contains "protocol path: tool missing -> UNAVAILABLE with the server's words" "Tool not found: failed_deliveries" "${FO}"
-FO="$(PATH="${SHIM}:${PATH}" SHIM_EXPECT_TOKEN=other doctor_check_server_failed_deliveries)"
+FO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" SHIM_EXPECT_TOKEN=other doctor_check_server_failed_deliveries)"
 assert_contains "protocol path: a refused token -> UNAVAILABLE naming the refusal" "refused the machine token" "${FO}"
 : > "${SHIM_LOG}.argv"
-FO="$(PATH="${SHIM}:${PATH}" doctor_mcp_tool_call failed_deliveries 'not json' '')"; FRC=$?
+FO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" doctor_mcp_tool_call failed_deliveries 'not json' '')"; FRC=$?
 assert_eq "non-object tool arguments -> status 4 (unavailable)" 4 "${FRC}"
 assert_contains "... naming the refusal" "arguments for failed_deliveries are not a JSON object" "${FO}"
 assert_eq "... and curl was never invoked (no empty-body POST)" "" "$(cat "${SHIM_LOG}.argv")"
@@ -925,7 +932,7 @@ assert_contains "refused: a canned FAILED answer does not stand in for the refus
 # The real protocol path: the SAME shim, asked for refused_deliveries by name.
 : > "${SHIM_LOG}.argv"; : > "${SHIM_LOG}.tools"
 export SHIM_RD_RESULT='{"unread_count":1,"refused_deliveries":[{"id":"rrrr-3","cause":"target-bind","refusal":"target-machine-absent","machine_id":"m-lap","count":1,"notified":true}]}'
-RDO="$(PATH="${SHIM}:${PATH}" doctor_check_server_refused_deliveries)"
+RDO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" doctor_check_server_refused_deliveries)"
 assert_eq "protocol path: refused_deliveries unread 1 -> warn" warn "$(state_of "${RDO}" server-refused-deliveries)"
 assert_eq "... the tool called by name is refused_deliveries" "refused_deliveries" "$(cat "${SHIM_LOG}.tools")"
 assert_contains "... names the recipient machine" "machine m-lap" "${RDO}"
@@ -933,11 +940,11 @@ assert_not_contains "... not marked canned" "CANNED" "${RDO}"
 assert_not_contains "... the machine token is never in curl's argv" "SEKRETTOKEN" "$(cat "${SHIM_LOG}.argv")"
 assert_not_contains "... the machine token is never in a finding" "SEKRETTOKEN" "${RDO}"
 export SHIM_RD_RESULT='{"unread_count":0,"refused_deliveries":[]}'
-RDO="$(PATH="${SHIM}:${PATH}" doctor_check_server_refused_deliveries)"
+RDO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" doctor_check_server_refused_deliveries)"
 assert_eq "protocol path: refused 0 unread -> ok" ok "$(state_of "${RDO}" server-refused-deliveries)"
-RDO="$(PATH="${SHIM}:${PATH}" SHIM_MODE=notool doctor_check_server_refused_deliveries)"
+RDO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" SHIM_MODE=notool doctor_check_server_refused_deliveries)"
 assert_contains "protocol path: refused tool missing -> UNAVAILABLE with the server's words" "Tool not found: refused_deliveries" "${RDO}"
-RDO="$(PATH="${SHIM}:${PATH}" SHIM_EXPECT_TOKEN=other doctor_check_server_refused_deliveries)"
+RDO="$(PATH="${SHIM}:${FSG_DIR}:${PATH}" SHIM_EXPECT_TOKEN=other doctor_check_server_refused_deliveries)"
 assert_contains "protocol path: a refused token -> UNAVAILABLE naming the refusal" "refused the machine token" "${RDO}"
 printf '{"unread_count":7,"refused_deliveries":[' > "${RF}"
 for i in 1 2 3 4 5 6 7; do printf '{"id":"rid-%s","cause":"target-bind","refusal":"no-declared-channel","machine_id":"m","count":1}' "${i}" >> "${RF}"; [ "${i}" -lt 7 ] && printf ',' >> "${RF}"; done
@@ -1133,6 +1140,10 @@ SPOUT="$(cd "${SP_L}" && doctor_check_session_project 2>/dev/null)"
 assert_finding "no session signal -> ok, source cwd" "${SPOUT}" ok session-project "cwd"
 SPOUT="$(cd "${SP_L}" && CLAUDE_PROJECT_DIR=relative doctor_check_session_project 2>/dev/null)"
 assert_finding "an unusable CLAUDE_PROJECT_DIR -> fail" "${SPOUT}" fail session-project "relative"
+
+# DND-1667: no curl call may have fallen through past its shim.
+if fsg_verify; then ok "no curl call fell through past its shim (DND-1667)"
+else bad "no curl call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0

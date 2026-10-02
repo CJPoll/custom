@@ -99,6 +99,50 @@ out="$(PATH="$GITSHIM:$PATH" true)"
 SUITE
 }
 
+write_git_unguarded() { # DND-1667: a git shim on PATH with no helper
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+TMP="$(mktemp -d)"; mkdir -p "${TMP}/gitshim"
+cat > "${TMP}/gitshim/git" <<'EOF'
+#!/bin/sh
+echo "fatal: shim" >&2; exit 128
+EOF
+chmod +x "${TMP}/gitshim/git"
+out="$(PATH="${TMP}/gitshim:${PATH}" run_under_test)"
+SUITE
+}
+
+write_git_guarded() { # the same suite, guarded with fsg_make (git is also used for real)
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+TMP="$(mktemp -d)"; mkdir -p "${TMP}/gitshim"
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_make "${TMP}/git-guard" git
+cat > "${TMP}/gitshim/git" <<'EOF'
+#!/bin/sh
+echo "fatal: shim" >&2; exit 128
+EOF
+chmod +x "${TMP}/gitshim/git"
+fsg_require_stubs "${TMP}/gitshim" git
+out="$(PATH="${TMP}/gitshim:${FSG_DIR}:${PATH}" run_under_test)"
+fsg_verify || exit 1
+SUITE
+}
+
+write_git_guard_off_path() { # fsg_make, but the guard is never put behind the shim
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+TMP="$(mktemp -d)"; mkdir -p "${TMP}/gitshim"
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_make "${TMP}/git-guard" git
+printf '#!/bin/sh\nexit 128\n' > "${TMP}/gitshim/git"
+out="$(PATH="${TMP}/gitshim:${PATH}" run_under_test)"
+fsg_verify || exit 1
+SUITE
+}
+
 # mk_repo <name> <rel-path>=<writer>... : a fixture repo with each suite staged.
 mk_repo() {
   local r="${TMP}/$1" spec rel writer; shift
@@ -135,10 +179,26 @@ if [ "${RC}" = 1 ] && has "ai/test/loop/self-test.sh" && has "gh/glab on PATH bu
   ok "R1c. a loop-written gh/glab stub on PATH without the helper is flagged"
 else bad "R1c. loop-written stubs are flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
 
+echo "--- R9: a git shim on PATH without the helper FAILS (the DND-1667 defect) ---"
+R="$(mk_repo r9 ai/test/guarded/self-test.sh=write_guarded ai/test/gitshim/self-test.sh=write_git_unguarded \
+  ai/test/gitguarded/self-test.sh=write_git_guarded)"
+run_check "${R}"
+if [ "${RC}" = 1 ] && has "ai/test/gitshim/self-test.sh" && has "git on PATH but never sources" && has "Fix:"; then
+  ok "R9a. an unguarded git shim on PATH is named, exit 1, with a Fix:"
+else bad "R9a. an unguarded git shim on PATH is flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+if has "ai/test/gitguarded/self-test.sh:"; then
+  bad "R9b. a git shim guarded by fsg_make, guard right behind it, is not flagged" "out=$(printf '%s' "${OUT}" | head -c 400)"
+else ok "R9b. a git shim guarded by fsg_make, guard right behind it, is not flagged"; fi
+R="$(mk_repo r9c ai/test/guarded/self-test.sh=write_guarded ai/test/offpath/self-test.sh=write_git_guard_off_path)"
+run_check "${R}"
+if [ "${RC}" = 1 ] && has "ai/test/offpath/self-test.sh" && has "not the guard"; then
+  ok "R9c. fsg_make whose guard never sits behind the shim on PATH is flagged"
+else bad "R9c. a guard off PATH is flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+
 echo "--- R2: a suite that sources the helper, arms and verifies PASSES ---"
 R="$(mk_repo r2 ai/test/guarded/self-test.sh=write_guarded)"
 run_check "${R}"
-if [ "${RC}" = 0 ] && has "OK" && has "1 stubbing gh/glab on PATH"; then
+if [ "${RC}" = 0 ] && has "OK" && has "1 stubbing gh/glab/git/docker/curl/claude on PATH"; then
   ok "R2. exit 0; the OK line counts the suite that stubs on PATH"
 else bad "R2. a guarded suite passes" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
 

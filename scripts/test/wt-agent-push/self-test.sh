@@ -36,6 +36,12 @@ unset WT_AGENT_PUSH
 # --- fixtures ----------------------------------------------------------------
 shim="${tmp}/shim"; stubs="${tmp}/stubs"; mkdir -p "${shim}" "${stubs}"
 log="${tmp}/calls.log"
+# DND-1667: a guard right behind the git shim, so a shim that is missing or
+# not executable fails the suite instead of reaching the real git
+# (scripts/../ai/lib/forge-stub-guard.sh). fsg_make, not fsg_arm: the
+# fixtures run the real git.
+. "${scripts_dir}/../ai/lib/forge-stub-guard.sh"
+fsg_make "${tmp}/git-guard" git
 
 cat > "${shim}/git" <<EOF
 #!/usr/bin/env bash
@@ -43,8 +49,10 @@ cat > "${shim}/git" <<EOF
 # Drop this shim's own dir from PATH first. In an agent session real_git is the
 # agent-bin wrapper (ai/agent-bin/git), which execs the first OTHER git on PATH:
 # with the shim still on PATH that is this shim again, an exec loop that never
-# ends and hangs harness-gate.
+# ends and hangs harness-gate. The guard dir behind it goes too (DND-1667):
+# the guard answers only a call that never reached this shim.
 self_dir=":${shim}:"; PATH=":\${PATH}:"; PATH="\${PATH//"\${self_dir}"/:}"
+guard_dir=":${FSG_DIR}:"; PATH="\${PATH//"\${guard_dir}"/:}"
 PATH="\${PATH#:}"; PATH="\${PATH%:}"
 for a in "\$@"; do
   case "\$a" in
@@ -75,6 +83,7 @@ echo "gt \$*" >> "${log}"
 exit 0
 EOF
 chmod +x "${shim}/git" "${shim}/gt" "${stubs}/gh-athena" "${stubs}/glab-athena"
+fsg_require_stubs "${shim}" git
 
 # make_repo <dir> <origin-url> : a repo on branch feat with one commit.
 make_repo() {
@@ -94,7 +103,7 @@ in_wt() {
   while [ "$1" != -- ]; do envs+=("$1"); shift; done
   shift
   : > "${log}"
-  ( cd "${repo}" && env PATH="${shim}:${PATH}" WT_ATHENA_BIN_DIR="${stubs}" "${envs[@]}" \
+  ( cd "${repo}" && env PATH="${shim}:${FSG_DIR}:${PATH}" WT_ATHENA_BIN_DIR="${stubs}" "${envs[@]}" \
       bash -c '
         source "'"${lib}"'/pr.sh"
         source "'"${lib}"'/merge.sh"
@@ -197,7 +206,7 @@ if has "$out" "rc=3" && ! any_push && has "$err" "WT_AGENT_PUSH" && has "$err" "
 else fail "malformed signal [$out] err=[$err] log=[$(cat "${log}")]"; fi
 
 # --- 11. a missing wrapper is refused, not bypassed ---------------------------
-out="$(cd "${tmp}/r2" && : > "${log}" && env PATH="${shim}:${PATH}" WT_ATHENA_BIN_DIR="${tmp}/empty" WT_AGENT_PUSH=1 \
+out="$(cd "${tmp}/r2" && : > "${log}" && env PATH="${shim}:${FSG_DIR}:${PATH}" WT_ATHENA_BIN_DIR="${tmp}/empty" WT_AGENT_PUSH=1 \
   bash -c 'source "'"${lib}"'/pr.sh"; ( wt_git_push origin feat ); echo "rc=$?"' 2>"${tmp}/stderr")"
 err="$(cat "${tmp}/stderr")"
 if has "$out" "rc=3" && ! any_push && has "$err" "Fix:"; then
@@ -230,14 +239,14 @@ for fn in 'create_stack_prs false' 'push_stack false' 'push_stack true' 'create_
   else fail "agent: ${fn} [$out] err=[$err] log=[$(cat "${log}")]"; fi
 done
 
-out="$(cd "${tmp}/r2" && : > "${log}" && env PATH="${shim}:${PATH}" WT_AGENT_PUSH=1 \
+out="$(cd "${tmp}/r2" && : > "${log}" && env PATH="${shim}:${FSG_DIR}:${PATH}" WT_AGENT_PUSH=1 \
   "${scripts_dir}/wt-subcommands/wt-stack" push 2>"${tmp}/stderr"; echo "rc=$?")"
 err="$(cat "${tmp}/stderr")"
 if ! has "$out" "rc=0" && ! logged "gt " && has "$err" "Fix:"; then
   pass "agent: wt stack push is refused before gt submit"
 else fail "agent: wt stack push [$out] err=[$err] log=[$(cat "${log}")]"; fi
 
-out="$(cd "${tmp}/r2" && : > "${log}" && env PATH="${shim}:${PATH}" \
+out="$(cd "${tmp}/r2" && : > "${log}" && env PATH="${shim}:${FSG_DIR}:${PATH}" \
   "${scripts_dir}/wt-subcommands/wt-stack" push 2>"${tmp}/stderr"; echo "rc=$?")"
 if has "$out" "rc=0" && logged "gt submit --stack --no-interactive"; then
   pass "owner (no signal): wt stack push still runs gt submit"
@@ -289,6 +298,10 @@ raw="$(grep -rnE '(^|[^_[:alnum:]-])git([[:space:]]+-[^[:space:]]+)*[[:space:]]+
 if [ -z "$raw" ]; then
   pass "no raw \`git push\` in wt outside wt-lib/push.sh"
 else fail "raw git push outside push.sh: ${raw}"; fi
+
+# DND-1667: no git call may have fallen through past the shim.
+if fsg_verify; then pass "no git call fell through past its shim (DND-1667)"
+else fail "no git call fell through past its shim (DND-1667)"; fi
 
 echo "wt-agent-push: ${passes} passed, ${fails} failed"
 [ "${fails}" -eq 0 ]

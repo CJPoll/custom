@@ -114,6 +114,12 @@ case "${method}" in
 esac
 SH
 chmod +x "${SHIM}/bin/curl"
+# DND-1667: a guard sits behind the curl shim and in front of the real curl,
+# so a shim that is missing or not executable fails the suite instead of
+# reaching the network. Every curl in this suite is the shim's.
+. "${SKILL}/../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/curl-guard" curl
+fsg_require_stubs "${SHIM}/bin" curl
 export PATH="${SHIM}/bin:${PATH}"
 export SHIM_DIR="${SHIM}" SHIM_BEARER="${BEARER}"
 
@@ -1179,6 +1185,10 @@ assert_eq "--local and --routed together: no maildir written, nothing sent, no p
 shim_reset; send --local walt_ui-session x --to peer
 if [ "${RC}" -ne 0 ]; then ok "--local naming a channel this project does not declare: refused"; else bad "--local naming an undeclared channel: refused" "exit 0"; fi
 assert_eq "--local naming an undeclared channel: nothing sent" "|" "$(maildir_files)|$(calls)"
+
+# DND-1667: no curl call may have fallen through past its shim.
+if fsg_verify; then ok "no curl call fell through past its shim (DND-1667)"
+else bad "no curl call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 if [ "${FAIL}" -eq 0 ]; then

@@ -1,8 +1,9 @@
 #!/usr/bin/ruby
 # frozen_string_literal: true
 #
-# check-forge-stub-guard -- a test suite that puts a gh or glab stub on PATH
-# must source ai/lib/forge-stub-guard.sh, arm it, and verify it (DND-1666).
+# check-forge-stub-guard -- a test suite that puts a gh, glab, git, docker,
+# curl or claude stub on PATH must source ai/lib/forge-stub-guard.sh, arm it,
+# keep its guard right behind the stub, and verify it (DND-1666, DND-1667).
 #
 # WHY THIS EXISTS
 #
@@ -13,7 +14,9 @@
 # DND-1510). DND-1647 added ai/lib/forge-stub-guard.sh and converted the 10
 # suites that stubbed gh/glab on PATH. Nothing stopped a NEW suite from
 # stubbing on PATH without the helper, so the class could come back silently.
-# This check is that backstop.
+# This check is that backstop. DND-1667 widened it to git, docker, curl and
+# claude: a git stub that falls through can write a real repo, and a claude
+# stub that falls through makes a real model call.
 #
 # WHICH FILES
 #
@@ -25,15 +28,19 @@
 #
 # WHAT IS FLAGGED
 #
-#   A suite STUBS A FORGE CLI ON PATH when, in code (see WHAT IS CODE), it
-#     1. writes a file whose name is one of STUBBED_TOOLS (gh, glab) into a
+#   A suite STUBS A TOOL ON PATH when, in code (see WHAT IS CODE), it
+#     1. writes a file whose name is one of STUBBED_TOOLS (gh, glab, git,
+#        docker, curl, claude) into a
 #        directory D: a `>` / `>>` redirection target, or the destination
 #        (last operand) of cp, ln, install or mv, or a tee target. The name
 #        may be `$NAME` when a `for NAME in ...` loop in the file lists the
 #        tool; and
 #     2. puts D on PATH: D is an element of a `PATH=` value (`export PATH=`,
 #        `env -i PATH=`, `PATH=... cmd` all included), or of any `NAME=`
-#        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`).
+#        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`), with
+#        at least one element AFTER D. A D that is the value's last element
+#        (`PATH="${D}"`, a PATH of links) has nothing behind it to fall
+#        through to (DND-1667).
 #   D is compared as written, after removing quotes and spelling `${NAME}` as
 #   `$NAME`: `"${TMP}/bin"` and `$TMP/bin` are the same directory. The idiom
 #   `PATH="$D${PATH:+:$PATH}"` reads as `$D:$PATH`.
@@ -42,10 +49,16 @@
 #     * source the helper: `. X` or `source X` where X's basename is
 #       forge-stub-guard.sh, or X is `$VAR` and VAR is assigned such a path in
 #       the same file;
-#     * call fsg_arm, and, when fsg_arm names its tools, name every tool the
-#       suite stubs on PATH (fsg_arm's default is gh glab);
+#     * call fsg_arm or fsg_make, naming between them every tool the suite
+#       stubs on PATH (the default with no names is gh glab);
 #     * call fsg_verify (a guard whose exit 97 the suite swallowed is caught
-#       only there).
+#       only there);
+#     * keep the guard right behind the stub (DND-1667): in every PATH value
+#       that puts D on PATH, the element after D is `$FSG_DIR` (or a variable
+#       assigned exactly `$FSG_DIR`), or `$PATH` when fsg_arm guards that
+#       tool (fsg_arm puts its guard at the front of PATH). Or the suite calls
+#       `fsg_require_stubs D <tool>`, for a PATH layout that is itself under
+#       test and cannot hold a guard (ai/test/agent-bin-git).
 #   Each missing piece is reported with the stub write's line.
 #
 #   A gh stub that is never put on PATH (chosen by an env var such as
@@ -75,18 +88,20 @@
 #     `ln -t "$B" "$S/gh"`).
 #   * D put on PATH through a variable whose value does not itself hold
 #     `$PATH` (`P="$D"; PATH="$P:$PATH"`), or through `PATH+=`.
-#   * The ORDER the helper requires (fsg_arm before the suite's own PATH
-#     prepend; fsg_verify last), and whether fsg_verify's status is counted.
+#   * The ORDER in time the helper requires (fsg_arm before the suite's own
+#     PATH prepend, so `$PATH` holds the guard; fsg_verify last), whether
+#     fsg_verify's status is counted, and whether a stub fsg_require_stubs
+#     proved executable is removed later.
 #   * Code inside `bash -c '...'` (single-quoted, so read as data).
 #   * Non-shell test code (a Ruby `--self-test` that stubs gh on PATH): the
 #     helper is a shell library and such code cannot source it.
-#   * A call to the real CLI by absolute path (the helper cannot see it
-#     either).
+#   * A call to the real tool by absolute path (the helper cannot see it
+#     either), and a stub's own deliberate pass-through to the real tool.
 #
 # A file that cannot be read, or whose heredoc or quote never closes, is a
 # FAILURE ("could not scan"), never a pass. So is a discovery git cannot answer
 # (COULD NOT LOOK), and one that finds no test shell file or no suite stubbing
-# a forge CLI on PATH (FOUND NOTHING): this repo has both, so zero means the
+# a tool on PATH (FOUND NOTHING): this repo has both, so zero means the
 # scan is broken.
 #
 # THERE IS NO SUPPRESSION MARKER: an inline "ignore" comment is writable by the
@@ -100,8 +115,8 @@
 # unmodeled shape (above) while dropping the helper lowers the count with no
 # red. Only the floor (zero is FOUND NOTHING) is enforced.
 #
-# EXTENDING THE TOOL LIST: STUBBED_TOOLS below. DND-1667 (other tools' PATH
-# stubs, same helper) adds names there; fsg_arm takes the same names.
+# EXTENDING THE TOOL LIST: STUBBED_TOOLS below; fsg_arm and fsg_make take the
+# same names. Convert every suite the widened check flags in the same change.
 #
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 
@@ -114,9 +129,11 @@ require_relative "../lib/first_party"
 
 REPO = File.expand_path("../..", __dir__)
 
-# The forge CLIs a suite may not stub on PATH without the helper. fsg_arm's
-# default guard set is the same list.
-STUBBED_TOOLS = %w[gh glab].freeze
+# The tools a suite may not stub on PATH without the helper: the forge CLIs
+# (DND-1647/DND-1666), and git, docker, curl and claude (DND-1667: a git stub
+# that falls through can write a real repo; a claude stub that falls through
+# makes a real model call). fsg_arm's default guard set is the forge CLIs only.
+STUBBED_TOOLS = %w[gh glab git docker curl claude].freeze
 FSG_DEFAULT_TOOLS = %w[gh glab].freeze
 HELPER_BASENAME = "forge-stub-guard.sh"
 HELPER_REL = "ai/lib/#{HELPER_BASENAME}"
@@ -131,19 +148,23 @@ USAGE = <<~TXT.freeze
     ai/bin/check-forge-stub-guard --self-test   deterministic, hermetic suite
     ai/bin/check-forge-stub-guard --help        this text
 
-  Exit 0 = every suite that stubs a forge CLI on PATH is guarded. Exit 1 = at
+  Exit 0 = every suite that stubs a tool on PATH is guarded. Exit 1 = at
   least one is not (each named), a file could not be scanned, or discovery
   could not run or found nothing. Exit 2 = usage error.
 TXT
 
 FIX_TEXT = "Fix: in each suite named above, source the helper and use it the " \
-           "DND-1647 way: `. \"<path-to>/#{HELPER_REL}\"`, then `fsg_arm " \
-           "\"${TMP}/forge-guard\"` BEFORE the suite prepends its stub directory " \
-           "to PATH (so PATH reads stub, guard, real CLI), `fsg_require_stubs " \
-           "<stub_dir> <name>...` once the stubs exist, and `fsg_verify` at the end " \
-           "with a non-zero return counted as a failure. A suite that builds PATH " \
-           "itself must put \"${FSG_DIR}\" right behind its stub directory. See " \
-           "#{HELPER_REL}'s header and ai/test/lead-time/self-test.sh. There is no " \
+           "DND-1647/DND-1667 way: `. \"<path-to>/#{HELPER_REL}\"`, then either " \
+           "`fsg_arm \"${TMP}/forge-guard\" <tool>...` BEFORE the suite prepends " \
+           "its stub directory to PATH (so PATH reads stub, guard, real tool; for " \
+           "a tool the suite never runs for real), or `fsg_make " \
+           "\"${TMP}/git-guard\" git` and every PATH that holds the stub written " \
+           "as \"<stub_dir>:${FSG_DIR}:${PATH}\" (for a tool the suite also runs " \
+           "for real, such as git). Then `fsg_require_stubs <stub_dir> <name>...` " \
+           "once the stubs exist, and `fsg_verify` at the end with a non-zero " \
+           "return counted as a failure. See #{HELPER_REL}'s header, " \
+           "ai/test/lead-time/self-test.sh (fsg_arm) and " \
+           "ai/test/leadtime-product/self-test.sh (fsg_make). There is no " \
            "suppression marker."
 
 # ---------------------------------------------------------------------------
@@ -371,17 +392,25 @@ def stub_writes(lexed)
   writes
 end
 
-# Every directory the file puts on PATH (normalized), from `PATH=` values and
-# from any `NAME=` value that holds `$PATH`.
-def path_dirs(lexed)
-  dirs = []
-  lexed[:lines].each do |(_n, line, flags)|
+# [[lineno, elems]] for every PATH value in the file (normalized and split on
+# ':'): `PATH=` values and any `NAME=` value that holds `$PATH`.
+def path_values(lexed)
+  vals = []
+  lexed[:lines].each do |(n, line, flags)|
     code_matches(line, flags, /(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)=/).each do |m|
       elems = norm(word_at(line, m.end(0))).split(":")
-      dirs.concat(elems) if m[1] == "PATH" || elems.include?("$PATH")
+      vals << [n, elems] if m[1] == "PATH" || elems.include?("$PATH")
     end
   end
-  dirs.uniq
+  vals
+end
+
+# Every directory a PATH value puts on PATH with another element AFTER it
+# (DND-1667). A directory that is the last element has nothing behind it for a
+# missing stub to fall through to (`PATH="${D}"`, a PATH of links), so a stub
+# there cannot reach a real tool.
+def path_dirs(lexed)
+  path_values(lexed).flat_map { |(_n, elems)| elems[0..-2] }.uniq
 end
 
 # { sourced:, armed:, arm_tools:, verified: } for the helper's use in the file.
@@ -390,6 +419,8 @@ def helper_use(lexed)
   sourced = false
   armed = false
   arm_tools = []
+  global_tools = []
+  required = []
   verified = false
   lexed[:lines].each do |(_n, line, flags)|
     code_matches(line, flags, /(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)=/).each do |m|
@@ -403,16 +434,59 @@ def helper_use(lexed)
       target = assigns[var].to_s if var
       sourced = true if File.basename(target) == HELPER_BASENAME
     end
-    code_matches(line, flags, /(?<![\w-])fsg_arm(?![\w-])/).each do |m|
+    code_matches(line, flags, /(?<![\w-])fsg_(arm|make)(?![\w-])/).each do |m|
       next if line[m.end(0)..] =~ /\A\s*\(\)/ # a definition, not a call
 
       armed = true
       words = args_from(line, m.end(0)).map { |w| norm(w) }
-      arm_tools.concat(words.size > 1 ? words[1..] : FSG_DEFAULT_TOOLS)
+      tools = words.size > 1 ? words[1..] : FSG_DEFAULT_TOOLS
+      arm_tools.concat(tools)
+      global_tools.concat(tools) if m[1] == "arm"
     end
     verified = true unless code_matches(line, flags, /(?<![\w-])fsg_verify(?![\w-])/).empty?
+    code_matches(line, flags, /(?<![\w-])fsg_require_stubs(?![\w-])/).each do |m|
+      next if line[m.end(0)..] =~ /\A\s*\(\)/
+
+      words = args_from(line, m.end(0)).map { |w| norm(w) }
+      words[1..].to_a.each { |t| required << [words[0], t] } unless words.empty?
+    end
   end
-  { sourced: sourced, armed: armed, arm_tools: arm_tools.uniq, verified: verified }
+  guard_spellings = ["$FSG_DIR"] + assigns.select { |_k, v| v == "$FSG_DIR" }.keys.map { |k| "$#{k}" }
+  { sourced: sourced, armed: armed, arm_tools: arm_tools.uniq, global_tools: global_tools.uniq,
+    verified: verified, guard_spellings: guard_spellings, required: required.uniq }
+end
+
+# Problems with where the guard sits (DND-1667). For each PATH value that puts
+# a stub's directory D on PATH, the element right after D must be the guard
+# directory (`$FSG_DIR`, or a variable assigned exactly `$FSG_DIR`), or `$PATH`
+# when fsg_arm put that tool's guard at the front of PATH. Anything else lets a
+# missing stub fall through to whatever that element holds. The one other
+# answer: `fsg_require_stubs D tool` proves that stub exists and is executable
+# before it is used, for a PATH layout that is itself under test and cannot
+# take a guard in it (ai/test/agent-bin-git: the wrapper searches PATH after
+# its own entry).
+def order_problems(lexed, on_path, use)
+  problems = []
+  values = path_values(lexed)
+  on_path.each do |(_n, tool, dir)|
+    next if use[:required].include?([dir, tool])
+    next unless use[:arm_tools].include?(tool) # reported as unguarded already
+
+    values.each do |(ln, elems)|
+      elems.each_with_index do |e, i|
+        next unless e == dir && i < elems.size - 1
+
+        nxt = elems[i + 1]
+        next if use[:guard_spellings].include?(nxt)
+        next if nxt == "$PATH" && use[:global_tools].include?(tool)
+
+        problems << "line #{ln} puts #{dir} (a #{tool} stub) on PATH with #{nxt} " \
+                    "after it, not the guard: write \"#{dir}:${FSG_DIR}:...\"" \
+                    "#{use[:global_tools].include?(tool) ? '' : " (fsg_make does not put the #{tool} guard on PATH)"}"
+      end
+    end
+  end
+  problems.uniq
 end
 
 # => { on_path: [[lineno, tool, dir]], problems: [String], open: why-or-nil }
@@ -427,13 +501,14 @@ def analyze(text)
     if !use[:sourced]
       problems << "stubs #{tools.join('/')} on PATH but never sources #{HELPER_REL}"
     else
-      problems << "sources #{HELPER_BASENAME} but never calls fsg_arm" unless use[:armed]
+      problems << "sources #{HELPER_BASENAME} but never calls fsg_arm or fsg_make" unless use[:armed]
       missing = use[:armed] ? tools - use[:arm_tools] : []
       unless missing.empty?
-        problems << "stubs #{missing.join('/')} on PATH but fsg_arm guards only " \
+        problems << "stubs #{missing.join('/')} on PATH but fsg_arm/fsg_make guard only " \
                     "#{use[:arm_tools].join(' ')}"
       end
       problems << "sources #{HELPER_BASENAME} but never calls fsg_verify" unless use[:verified]
+      problems.concat(order_problems(lexed, on_path, use)) if use[:armed]
     end
   end
   { on_path: on_path, problems: problems, open: lexed[:open] }
@@ -537,7 +612,7 @@ def run_check(root = REPO)
   warn "check-forge-stub-guard: FAILED -- #{flagged} of #{r[:on_path]} suite(s) " \
        "stubbing #{STUBBED_TOOLS.join('/')} on PATH (#{r[:suites]} test shell " \
        "suite(s) considered) are not guarded, so a missing or non-executable " \
-       "stub would fall through to the REAL forge CLI (DND-1647/DND-1666; " \
+       "stub would fall through to the REAL tool (DND-1647/DND-1666/DND-1667; " \
        "#{skipped_note(r)}):"
   r[:findings].each { |(rel, lines, p)| warn "  #{rel}:#{lines}: #{p}" }
   warn "  #{FIX_TEXT}"
@@ -580,8 +655,36 @@ def run_self_test
     ["for-loop over tool names writes each stub",
      "for s in gh glab gh-athena; do\n  cat > \"${T}/stubs/${s}\" <<EOF\nx\nEOF\ndone\nexport PATH=\"${T}/stubs:${PATH}\"\n",
      %w[gh glab], 1],
-    ["for-loop over non-forge names is not a forge stub",
-     "for s in git docker; do echo x > \"$B/$s\"; done\nPATH=\"$B:$PATH\"\n", [], 0],
+    # DND-1667: git, docker, curl and claude stubs are the same class.
+    ["for-loop over git docker writes each stub (DND-1667)",
+     "for s in git docker; do echo x > \"$B/$s\"; done\nPATH=\"$B:$PATH\"\n", %w[git docker], 1],
+    ["a git shim on PATH, no helper (DND-1667)", "echo x > \"$B/git\"\nPATH=\"$B:$PATH\"\n", %w[git], 1],
+    ["a curl stub on PATH, no helper", "cat > \"${S}/curl\" <<'EOF'\nx\nEOF\nexport PATH=\"${S}:${PATH}\"\n", %w[curl], 1],
+    ["a claude stub on PATH, no helper", "printf x > \"$S/claude\"\nPATH=\"$S:$PATH\" run\n", %w[claude], 1],
+    ["a docker stub on PATH, no helper", "cp \"$F/fake\" \"$S/docker\"\nPATH=\"$S:$PATH\"\n", %w[docker], 1],
+    ["a stub dir that is the LAST PATH element cannot fall through",
+     "ln -sf \"$REAL_GIT\" \"$B/git\"\nPATH=\"$B\" run\n", [], 0],
+    ["fsg_make git, guard right behind the stub dir",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_make \"$T/g\" git\necho x > \"$B/git\"\n" \
+     "PATH=\"$B:${FSG_DIR}:$PATH\" run\nfsg_verify\n", %w[git], 0],
+    ["fsg_make git, stub dir straight onto $PATH (guard never on PATH)",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_make \"$T/g\" git\necho x > \"$B/git\"\n" \
+     "PATH=\"$B:$PATH\" run\nfsg_verify\n", %w[git], 1],
+    ["fsg_arm git, stub dir onto $PATH (the guard leads $PATH)",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_arm \"$T/g\" git\necho x > \"$B/git\"\n" \
+     "PATH=\"$B:$PATH\" run\nfsg_verify\n", %w[git], 0],
+    ["fsg_arm git, but env -i PATH puts /usr/bin right behind the stub",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_arm \"$T/g\" git\necho x > \"$B/git\"\n" \
+     "env -i PATH=\"$B:/usr/bin\" run\nfsg_verify\n", %w[git], 1],
+    ["the guard dir kept in its own variable",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_make \"$T/g\" git\nGIT_GUARD=\"${FSG_DIR}\"\n" \
+     "fsg_arm \"$T/f\"\necho x > \"$B/git\"\nPATH=\"$B:$GIT_GUARD:$PATH\" run\nfsg_verify\n", %w[git], 0],
+    ["fsg_require_stubs answers for a layout under test",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_arm \"$T/g\" git\ncp w \"$W/git\"\n" \
+     "fsg_require_stubs \"$W\" git\nPATH=\"$W:$GDIR\" \"$W/git\"\nfsg_verify\n", %w[git], 0],
+    ["fsg_make naming git, docker stubbed",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_make \"$T/g\" git\necho x > \"$B/docker\"\n" \
+     "PATH=\"$B:${FSG_DIR}:$PATH\" run\nfsg_verify\n", %w[docker], 1],
     ["PATH=\"$B${PATH:+:$PATH}\" idiom", "echo x > \"$B/gh\"\nexport PATH=\"$B${PATH:+:$PATH}\"\n", %w[gh], 1],
     ["process substitution >(...) does not crash", "cmd 2> >(tee \"$L\") | x\nPATH=\"$B:$PATH\"\n", [], 0],
     ["a bare > at end of line does not crash", "printf x > \\\n  \"$B/gh\"\nPATH=\"$B:$PATH\"\n", [], 0],
@@ -614,7 +717,7 @@ def run_self_test
     # Not on PATH: no flag.
     ["stub chosen by env var, PATH holds another dir",
      "printf x > \"$FAKE/gh\"\nexport TOOL_GH=\"$FAKE/gh\"\nout=\"$(PATH=\"$SHIM:$PATH\" x)\"\n", [], 0],
-    ["PATH dir but no gh/glab stub (a git shim)", "echo x > \"$B/git\"\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["PATH dir but no stubbed-tool stub (a jq shim)", "echo x > \"$B/jq\"\nPATH=\"$B:$PATH\"\n", [], 0],
     ["gh-athena is not gh", "echo x > \"$B/gh-athena\"\nPATH=\"$B:$PATH\"\n", [], 0],
     ["2>&1 is not a write", "cmd 2>&1\nPATH=\"$B:$PATH\"\n", [], 0],
     ["stub write inside a heredoc body is data",

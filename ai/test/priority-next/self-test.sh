@@ -65,6 +65,12 @@ esac
 exit 0
 EOF
 chmod +x "${SHIMBIN}/curl"
+# DND-1667: a guard leads PATH, behind the curl shim and in front of the real
+# curl, so a shim that is missing or not executable fails the suite instead
+# of reaching the network (ai/lib/forge-stub-guard.sh).
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/curl-guard" curl
+fsg_require_stubs "${SHIMBIN}" curl
 
 CASE_N=0
 # setup_case: a fresh HOME with the athena MCP registered for a git repo, a
@@ -279,6 +285,10 @@ run next
 if [ "${RC}" -eq 0 ] && ! grep -q $'\033' <<<"${OUT}" && [ "$(grep -c '^title=' <<<"${OUT}")" -eq 1 ]; then
   ok "a title's control characters and newlines are stripped"
 else bad "a title's control characters and newlines are stripped" "out='$(printf '%q' "${OUT}")'"; fi
+
+# DND-1667: no curl call may have fallen through past its shim.
+if fsg_verify; then ok "no curl call fell through past its shim (DND-1667)"
+else bad "no curl call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 printf 'priority-next self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"

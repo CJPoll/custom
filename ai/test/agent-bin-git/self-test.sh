@@ -71,6 +71,12 @@ EOF
 WBIN="${TMP}/agent-bin"
 mkdir -p "${WBIN}"
 cp "${WRAPPER_SRC}" "${WBIN}/git"; chmod +x "${WBIN}/git"
+# DND-1667: every git this suite puts on PATH is proven executable before use
+# (ai/lib/forge-stub-guard.sh). The wrapper's own PATH layouts are what this
+# suite tests, so no guard goes inside them: the wrapper searches PATH after
+# its own entry, and a guard there would answer in place of the real git.
+. "${ROOT}/ai/lib/forge-stub-guard.sh"
+fsg_require_stubs "${WBIN}" git
 if [ "${AGENT_BIN_GIT_OFF:-}" = 1 ]; then
   echo "MODE: WRAPPER OFF PATH (fail-first baseline; every deny case should FAIL)"
   APATH="${BASEPATH}"
@@ -228,7 +234,7 @@ else
   if [ "${rc}" -eq 127 ] && [[ "${out}" == *"no real git on PATH"*"Fix:"* ]]; then
     ok "FT2. no real git on PATH: exit 127 with a Fix:"
   else bad "FT2. no real git" "rc=${rc} out=${out}"; fi
-  mkdir -p "${TMP}/wb2"; cp "${WBIN}/git" "${TMP}/wb2/git"
+  mkdir -p "${TMP}/wb2"; cp "${WBIN}/git" "${TMP}/wb2/git"; fsg_require_stubs "${TMP}/wb2" git
   out="$(PATH="${WBIN}:${TMP}/wb2" timeout 5 "${WBIN}/git" status 2>&1)"; rc=$?
   if [ "${rc}" -eq 127 ]; then ok "FT3. two wrapper copies and no real git: exit 127, no recursion"
   else bad "FT3. wrapper copies never exec each other in a loop" "rc=${rc} (124 = hung) out=$(printf '%s' "${out}" | head -c 200)"; fi
@@ -249,6 +255,7 @@ else
   printf '#!/bin/sh\nexec git.real "$@"\n' > "${TMP}/shim2/git"
   ln -s "${WBIN}/git" "${TMP}/shim2/git.real"
   chmod +x "${TMP}/shim/git" "${TMP}/shim2/git"
+  fsg_require_stubs "${TMP}/shim" git; fsg_require_stubs "${TMP}/shim2" git
   for s in shim shim2; do
     out="$(PATH="${TMP}/${s}:${WBIN}:${GDIR}" timeout 10 git --version 2>&1)"; rc=$?
     if [ "${rc}" -eq 0 ] && [[ "${out}" == "git version"* ]]; then
@@ -299,12 +306,12 @@ TB="${TMP}/tracebin"; mkdir -p "${TB}"
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/git.log"\nexit 0\n' "${TMP}" > "${TB}/git"
 printf '#!/bin/sh\nexit 0\n' > "${TB}/gh"; printf '#!/bin/sh\nexit 0\n' > "${TB}/docker"
 chmod +x "${TB}/git" "${TB}/gh" "${TB}/docker"
-# DND-1647: a guard stands behind every gh/glab stub on PATH, so a stub
-# that is missing or not executable fails the suite instead of reaching the
-# real CLI (ai/lib/forge-stub-guard.sh).
-. "${ROOT}/ai/lib/forge-stub-guard.sh"
-fsg_arm "${TMP}/forge-guard"
-fsg_require_stubs "${TB}" gh
+# DND-1647/DND-1667: a guard stands behind every gh/git/docker stub on PATH,
+# so a stub that is missing or not executable fails the suite instead of
+# reaching the real tool (ai/lib/forge-stub-guard.sh). From here on every git
+# the suite runs is "${G}" or a PATH it builds itself.
+fsg_arm "${TMP}/forge-guard" gh glab git docker
+fsg_require_stubs "${TB}" gh git docker
 FP="${TMP}/fp"; mkdir -p "${FP}/dir"
 printf 'FAIL one\npassed two\nstash word\n12\n' > "${FP}/f"; cp "${FP}/f" "${FP}/g"; cp "${FP}/f" "${FP}/dir/h"
 printf '[1,2]\n' > "${FP}/f.json"
@@ -350,9 +357,9 @@ fresh
 allowed "FP-git. git -C \"\$D\" log" sh -c 'D="$1"; git -C "$D" log -1 --oneline' _ "${WT}"
 allowed "FP-git. ls of \$(git --exec-path)/git-stash" sh -c 'ls -la "$(git --exec-path)/git-stash" >/dev/null 2>&1; true'
 
-# DND-1647: no gh/glab call may have fallen through past its stub.
-if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
-else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
+# DND-1647/DND-1667: no call may have fallen through past its stub.
+if fsg_verify; then ok "no gh/glab/git/docker call fell through past its stub (DND-1647/DND-1667)"
+else bad "no gh/glab/git/docker call fell through past its stub (DND-1647/DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 echo "==================================================="

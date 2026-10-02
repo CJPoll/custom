@@ -155,6 +155,12 @@ printf '%s' "$code"
 exit 0
 SHIMEOF
 chmod +x "${SHIMBIN}/curl"
+# DND-1667: a guard leads PATH, behind the curl shim and in front of the real
+# curl, so a shim that is missing or not executable fails the suite instead of
+# calling the real Slack API. Every curl in this suite is the shim's.
+. "${AI_DIR}/lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/curl-guard" curl
+fsg_require_stubs "${SHIMBIN}" curl
 
 # --- per-case fixture -------------------------------------------------------
 CASE_N=0
@@ -2458,6 +2464,10 @@ done
 if grep -qF '"text": "Your call (' "${EXAMPLE}"; then
   ok "doctrine: the worked owner-choice example has a 'Your call' button"
 else bad "doctrine: the worked owner-choice example has a 'Your call' button" "missing from ${EXAMPLE}"; fi
+
+# DND-1667: no curl call may have fallen through past its shim.
+if fsg_verify; then ok "no curl call fell through past its shim (DND-1667)"
+else bad "no curl call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 echo
 echo "-- DND-1619: every usage error carries a Fix: naming the invocation -------"

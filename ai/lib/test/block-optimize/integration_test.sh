@@ -170,6 +170,10 @@ expect "I2 the candidate's parent is origin/main" \
 expect "I-happy leaves no scratch worktree registered" '[ ! -d "${repo}/.git/worktrees" ] || [ -z "$(ls -A "${repo}/.git/worktrees")" ]'
 
 # --- the proposer path (stub claude on PATH). ---------------------------------
+# DND-1667: a guard leads PATH, so a claude stub that is missing or not
+# executable fails the suite instead of making a real model call.
+. "${here}/../../forge-stub-guard.sh"
+fsg_arm "${tmp}/tool-guard" claude
 stubbin="${tmp}/stubbin"
 mkdir -p "${stubbin}"
 cat > "${stubbin}/claude" <<EOF
@@ -181,6 +185,7 @@ cat "${tmp}/shared.diff"
 printf '\`\`\`\n'
 EOF
 chmod +x "${stubbin}/claude"
+fsg_require_stubs "${stubbin}" claude
 PATH="${stubbin}:${PATH}" run_bo out2 --case AE-18-refused-spawn-is-pause --evidence "${tmp}/evidence.txt"
 expect "I-proposer exits 0 (rc=${rc})" '[ "${rc}" = 0 ]'
 expect "I-proposer blast radius lists the captain render (a shared block changed)" \
@@ -244,6 +249,10 @@ expect "I-malformed says malformed" 'grep -q "malformed variant-eval JSON" "${tm
 run_bo out1 --case AE-18 --diff "${tmp}/good.diff"
 expect "I-usage a non-empty --out-dir exits 2 (rc=${rc})" '[ "${rc}" = 2 ]'
 expect "I-usage carries Fix:" 'grep -q "Fix:" "${tmp}/stderr"'
+
+# DND-1667: no claude call may have fallen through past its stub.
+if fsg_verify; then pass "no claude call fell through past its stub (DND-1667)"
+else fail "no claude call fell through past its stub (DND-1667)"; fi
 
 if [ "${failures}" -ne 0 ]; then
   echo "block-optimize integration: ${failures} check(s) FAILED" >&2
