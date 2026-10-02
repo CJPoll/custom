@@ -339,6 +339,7 @@ module LeadTimePhases
                   .select { |e| Match.attr(e, "exit_code") == 0 }
       run = runs.max_by { |e| Match.at(e) }
       sha = Landing.head_desc(landing)
+      # sha names the head-keyed receipt; gated names the key the run lookup used.
       gated = Landing.gated_desc(landing)
       rec = receipt.items.first && Util.time(receipt.items.first["recorded_at"])
       if run
