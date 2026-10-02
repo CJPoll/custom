@@ -11,8 +11,9 @@
 #                the forge, the tracker, or the remote in any invocation. The one
 #                local git write it may make is a fetch from origin: objects (the
 #                landed-bar checks via ai/lib/landed.rb, which moves no ref) or,
-#                for `confirm-merged --fetch` and ai/bin/lead-time, also the
-#                origin/* remote-tracking refs. Nothing is ever pushed.
+#                for tools such as `confirm-merged --fetch`, ai/bin/lead-time and
+#                ai/bin/ready-and-idle, also the origin/* remote-tracking refs.
+#                Nothing is ever pushed.
 #   idempotent   mutates LOCAL state deterministically; re-running yields the
 #                same result (no external/irreversible effect).
 #   destructive  mutates external or otherwise irreversible state (forge /
