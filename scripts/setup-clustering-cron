@@ -12,9 +12,11 @@
 # Usage:
 #   setup-clustering-cron [--schedule "<cron expr>"] [--dry-run]
 #   setup-clustering-cron --check          read-only: exit 0 if the entry is live and a tick could
-#                                          start (the skill is in the main checkout and the MCP
-#                                          preflight passes); 1 if the entry is not live,
-#                                          2 skill missing or NOT REGISTERED, 4 COULD NOT LOOK
+#                                          start (the skill is in the main checkout, the MCP
+#                                          preflight passes, and the runner's own --dry-run
+#                                          passes); 1 if the entry is not live, 2 skill missing,
+#                                          NOT REGISTERED, or the runner's --dry-run refuses,
+#                                          4 COULD NOT LOOK
 #   setup-clustering-cron --remove [--dry-run]
 #   setup-clustering-cron --backup <file>  snapshot the current crontab to <file>
 #   setup-clustering-cron --help
@@ -37,11 +39,17 @@
 # config missing, unreadable or not valid JSON. The install refuses before any
 # write. --remove and --backup never run it.
 #
+# The runner's own --dry-run (DND-1728). After those checks pass, --check, the
+# install and --dry-run run the main checkout's runner with --dry-run
+# (read-only) and refuse with exit 2 when it refuses, quoting its reason and
+# its Fix:. It checks what this installer does not, such as the scripts/lib
+# files a tick loads (dbus-env.sh). --remove and --backup never run it.
+#
 # Environment: CLUSTERING_CLAUDE_JSON  Claude Code's config (the runner's seam)
 #
 # Exit codes: 0 ok · 1 entry missing (--check) or usage error · 2 a prerequisite
-# is missing (an MCP server NOT REGISTERED included), or the current crontab
-# could not be read · 4 COULD NOT LOOK: the MCP preflight could not read Claude
+# is missing (an MCP server NOT REGISTERED included), the runner's own
+# --dry-run refuses, or the current crontab could not be read · 4 COULD NOT LOOK: the MCP preflight could not read Claude
 # Code's config (or jq, or the preflight library, is missing)
 
 set -euo pipefail
@@ -155,6 +163,7 @@ if [ "${CHECK}" -eq 1 ]; then
   if [ -n "${live}" ] && [ -x "${RUNNER}" ]; then
     [ -r "${SKILL_FILE}" ] || die 2 "${SKILL_MISSING_WHY}; every tick would exit 78" "${SKILL_MISSING_FIX}"
     [ "${mcp_rc}" -eq 0 ] || mcp_fail
+    cron_runner_dry_run "${RUNNER}" || die 2 "${CRON_DRY_WHY%.}; a tick would not start." "${CRON_DRY_FIX}"
     echo "OK: the epic-clustering cron entry is installed:"
     printf '%s\n' "${live}" | sed 's/^/  /'
     mcp_ok_line
@@ -203,6 +212,9 @@ fi
 # exits 78 is not an install (DND-1571).
 mcp_check || mcp_fail
 mcp_ok_line
+# The runner's own --dry-run, last: it also checks what this installer does
+# not, such as the scripts/lib files a tick loads (DND-1728).
+cron_runner_dry_run "${RUNNER}" || die 2 "${CRON_DRY_WHY%.}; a tick would not start." "${CRON_DRY_FIX} Nothing was written."
 
 line="${SCHEDULE} ${RUNNER}"
 if [ -n "${kept}" ]; then new="$(printf '%s\n%s' "${kept}" "${line}")"; else new="${line}"; fi

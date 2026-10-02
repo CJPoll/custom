@@ -754,6 +754,65 @@ else
   bad "remove mcp missing" "rc=$rc $(out)"
 fi
 
+# ===========================================================================
+case_ "setup-leadtime-cron — the runner's own --dry-run (DND-1728)"
+
+# The runner's dry run checks what this installer does not (the scripts/lib
+# files a tick loads). A stub runner stands in: it logs its argv, then exits as
+# the case says. Synthetic text only.
+STUB_LOG="${TMP}/stub-runner.args"
+stub_runner() { # <exit> — the stub refuses with a reason and a Fix: unless <exit> is 0
+  printf '#!/usr/bin/env bash\necho "$*" >>%q\n' "$STUB_LOG" >"$IRUN"
+  if [ "$1" != 0 ]; then
+    printf 'echo "athena-leadtime: /x/scripts/lib/dbus-env.sh could not be loaded, so D-Bus autolaunch cannot be suppressed; a tick would exit 78 and spawn no session." >&2\n' >>"$IRUN"
+    printf 'echo "  Fix: restore the synthetic lib." >&2\n' >>"$IRUN"
+  fi
+  printf 'exit %s\n' "$1" >>"$IRUN"
+  chmod +x "$IRUN"
+}
+ct="${TMP}/ct-dry"
+shipwright_cursors
+printf '# mine\n' >"$ct"
+stub_runner 0; rm -f "$STUB_LOG"
+rc="$(inst "$ct" -- --install)"
+rc2="$(inst "$ct" -- --check)"
+if [ "$rc" = 0 ] && [ "$rc2" = 0 ] && [ "$(grep -cx -- '--dry-run' "$STUB_LOG" 2>/dev/null)" = 2 ]; then
+  ok "--install and --check each run the runner's own --dry-run, and pass when it passes"
+else
+  bad "runner dry run passes" "rc=$rc rc2=$rc2 args=$(cat "$STUB_LOG" 2>&1) $(out)"
+fi
+stub_runner 78
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 2 ] && grep -qF "the runner's own --dry-run refuses (${IRUN} --dry-run, exit 78)" "${TMP}/inst.err" \
+   && grep -q 'dbus-env.sh could not be loaded' "${TMP}/inst.err" && grep -q 'Fix: restore the synthetic lib.' "${TMP}/inst.err" \
+   && ! grep -q '^OK' "${TMP}/inst.out"; then
+  ok "--check with a live entry is red (exit 2) when the runner's --dry-run refuses, quoting its reason and Fix:"
+else
+  bad "check runner dry run refuses" "rc=$rc $(out)"
+fi
+shipwright_cursors
+before="$(cat "$ct")"
+rc="$(inst "$ct" -- --install)"
+if [ "$rc" = 2 ] && [ "$(cat "$ct")" = "$before" ] && [ ! -e "$LT" ] && grep -q 'Nothing was written' "${TMP}/inst.err"; then
+  ok "--install is refused (exit 2) when the runner's --dry-run refuses: no crontab write, no cursor"
+else
+  bad "install runner dry run refuses" "rc=$rc ct=$(cat "$ct") lt=$(ls "$LT" 2>&1) $(out)"
+fi
+rc="$(inst "$ct" -- --dry-run)"
+if [ "$rc" = 2 ] && ! grep -q 'would install' "${TMP}/inst.out" && grep -q "runner's own --dry-run refuses" "${TMP}/inst.err"; then
+  ok "--dry-run is refused (exit 2) the same way, with no plan printed"
+else
+  bad "dry-run runner dry run refuses" "rc=$rc $(out)"
+fi
+rm -f "$STUB_LOG"
+rc="$(inst "$ct" -- --remove)"
+if [ "$rc" = 0 ] && [ ! -e "$STUB_LOG" ]; then
+  ok "--remove never runs the runner's --dry-run (removing must work on a broken machine)"
+else
+  bad "remove runs dry run" "rc=$rc args=$(cat "$STUB_LOG" 2>&1) $(out)"
+fi
+stub_runner 0
+
 if poisoned; then
   bad "no case reached the real crontab" "calls: $(cat "$POISON")"
 else

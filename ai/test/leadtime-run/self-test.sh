@@ -1326,6 +1326,52 @@ if [ "$rc" = 78 ] && [ -n "$rec" ] && grep -q 'does not define leadtime_mcp_pref
 else
   bad "empty preflight lib" "rc=$rc rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
+
+# --dry-run runs the tick's own lib check, not a readability test (DND-1728):
+# a lib that is present but does not load, loads without defining what the
+# tick calls, or cannot be read refuses the dry run the way it fails the tick.
+# lib_dry_case <lib> <label> <expected reason> <how to break it>
+lib_dry_case() {
+  local lib="$1" label="$2" want="$3" how="$4" c rc
+  c="$(new_case)"
+  RUNNER="$(sx_runner "$c")"
+  case "$how" in
+    return1) printf 'return 1\n' >"$c/sx/scripts/lib/$lib" ;;
+    empty)   : >"$c/sx/scripts/lib/$lib" ;;
+    conflict) printf '<<<<<<< HEAD\nf() {\n=======\n' >"$c/sx/scripts/lib/$lib" ;;
+    unreadable) chmod 000 "$c/sx/scripts/lib/$lib" ;;
+  esac
+  rc="$(run_runner "$c" -- --dry-run)"
+  if [ "$rc" = 78 ] && grep -q "scripts/lib/$lib $want" "$c/runner.err" && grep -q 'a tick would exit 78' "$c/runner.err" \
+     && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")" ] && ! grep -q 'MODE: lead-time' "$c/runner.out" \
+     && [ "$(invoked "$c")" = 0 ]; then
+    ok "--dry-run with $lib $label: exit 78 naming it ($want), Fix:, no brief, touches nothing"
+  else
+    bad "dry-run $lib $label" "rc=$rc err=$(cat "$c/runner.err")"
+  fi
+  chmod 644 "$c/sx/scripts/lib/$lib" 2>/dev/null || true
+}
+lib_dry_case dbus-env.sh 'that does not load' 'could not be loaded' return1
+lib_dry_case dbus-env.sh 'with a merge-conflict marker' 'could not be loaded' conflict
+lib_dry_case dbus-env.sh 'that defines nothing' 'loaded but does not define athena_dbus_env_setup' empty
+lib_dry_case mcp-preflight.sh 'that defines nothing' 'loaded but does not define leadtime_mcp_preflight' empty
+if [ "$(id -u)" != 0 ]; then
+  lib_dry_case dbus-env.sh 'unreadable' 'is unreadable' unreadable
+  lib_dry_case mcp-preflight.sh 'unreadable' 'is unreadable' unreadable
+fi
+
+# The tick names the same reason the dry run does: one check serves both.
+c="$(new_case)"
+RUNNER="$(sx_runner "$c")"
+: >"$c/sx/scripts/lib/dbus-env.sh"
+rc="$(run_runner "$c")"
+rec="$(newest "$c" failed)"
+if [ "$rc" = 78 ] && [ -n "$rec" ] && grep -q 'dbus-env.sh loaded but does not define athena_dbus_env_setup' "$rec" \
+   && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ]; then
+  ok "an empty dbus-env.sh (loads, defines nothing): the tick exits 78 with a .failed record naming the function, counted"
+else
+  bad "empty dbus lib tick" "rc=$rc rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
 RUNNER="$REAL_RUNNER"
 
 # ---------------------------------------------------------------------------------

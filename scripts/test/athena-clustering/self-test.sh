@@ -735,6 +735,36 @@ else
 fi
 git -C "$IR" checkout -q HEAD -- scripts/athena-clustering-run.sh >&2
 
+# DND-1728: the installer runs the runner's own --dry-run last, so a lib the
+# tick loads (dbus-env.sh) that does not load turns --check, --dry-run and the
+# install red. The runner is the real one; only its lib is broken.
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct")"
+rc2="$(inst "$ct" -- --check)"
+if [ "$rc" = 0 ] && [ "$rc2" = 0 ]; then
+  ok "control: with every lib intact the install and --check pass the runner's --dry-run"
+else
+  bad "runner dry run control" "rc=$rc rc2=$rc2 err=$(cat "${TMP}/inst.err")"
+fi
+printf 'return 1\n' >"$IR/scripts/lib/dbus-env.sh"
+rc="$(inst "$ct" -- --check)"
+if [ "$rc" = 2 ] && grep -qF "the runner's own --dry-run refuses (${IRUN} --dry-run, exit 78)" "${TMP}/inst.err" \
+   && grep -q 'dbus-env.sh could not be loaded' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" && ! grep -q '^OK' "${TMP}/inst.out"; then
+  ok "--check with a live entry is red (exit 2) when dbus-env.sh does not load, naming it with the runner's Fix:"
+else
+  bad "check unloadable dbus lib" "rc=$rc out=$(cat "${TMP}/inst.out") err=$(cat "${TMP}/inst.err")"
+fi
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" -- --dry-run)"
+rc2="$(inst "$ct")"
+if [ "$rc" = 2 ] && [ "$rc2" = 2 ] && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && ! grep -q 'would install' "${TMP}/inst.out" \
+   && grep -q 'dbus-env.sh could not be loaded' "${TMP}/inst.err"; then
+  ok "--dry-run and the install are refused (exit 2) when dbus-env.sh does not load; the crontab is untouched"
+else
+  bad "install unloadable dbus lib" "rc=$rc rc2=$rc2 ct=$(cat "$ct") err=$(cat "${TMP}/inst.err")"
+fi
+git -C "$IR" checkout -q HEAD -- scripts/lib/dbus-env.sh >&2
+
 # DND-1642: a main checkout that cannot be resolved is an error at its source.
 # A resolver answer the installer cannot enter used to fall through
 # `dirname "$(cd ... && pwd)"` to ".", so the runner became ./scripts/... and
@@ -945,6 +975,51 @@ if [ "$rc" = 78 ] && [ -n "$rec" ] && grep -q 'does not define clustering_mcp_pr
   ok "an empty mcp-preflight.sh (loads, defines nothing): exit 78, a .failed record, counted"
 else
   bad "empty preflight lib" "rc=$rc rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# --dry-run runs the tick's own lib check, not a readability test (DND-1728):
+# a lib that is present but does not load, loads without defining what the
+# tick calls, or cannot be read refuses the dry run the way it fails the tick.
+# lib_dry_case <lib> <label> <expected reason> <how to break it>
+lib_dry_case() {
+  local lib="$1" label="$2" want="$3" how="$4" c rc
+  c="$(new_case)"
+  RUNNER="$(sx_runner "$c")"
+  case "$how" in
+    return1) printf 'return 1\n' >"$c/sx/scripts/lib/$lib" ;;
+    empty)   : >"$c/sx/scripts/lib/$lib" ;;
+    conflict) printf '<<<<<<< HEAD\nf() {\n=======\n' >"$c/sx/scripts/lib/$lib" ;;
+    unreadable) chmod 000 "$c/sx/scripts/lib/$lib" ;;
+  esac
+  rc="$(run_runner "$c" -- --dry-run)"
+  if [ "$rc" = 78 ] && grep -q "scripts/lib/$lib $want" "$c/runner.err" && grep -q 'a tick would exit 78' "$c/runner.err" \
+     && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")" ] && [ ! -s "$c/runner.out" ] && [ "$(invoked "$c")" = 0 ]; then
+    ok "--dry-run with $lib $label: exit 78 naming it ($want), Fix:, no brief, touches nothing"
+  else
+    bad "dry-run $lib $label" "rc=$rc err=$(cat "$c/runner.err")"
+  fi
+  chmod 644 "$c/sx/scripts/lib/$lib" 2>/dev/null || true
+}
+lib_dry_case dbus-env.sh 'that does not load' 'could not be loaded' return1
+lib_dry_case dbus-env.sh 'with a merge-conflict marker' 'could not be loaded' conflict
+lib_dry_case dbus-env.sh 'that defines nothing' 'loaded but does not define athena_dbus_env_setup' empty
+lib_dry_case mcp-preflight.sh 'that defines nothing' 'loaded but does not define clustering_mcp_preflight' empty
+if [ "$(id -u)" != 0 ]; then
+  lib_dry_case dbus-env.sh 'unreadable' 'is unreadable' unreadable
+  lib_dry_case mcp-preflight.sh 'unreadable' 'is unreadable' unreadable
+fi
+
+# The tick names the same reason the dry run does: one check serves both.
+c="$(new_case)"
+RUNNER="$(sx_runner "$c")"
+: >"$c/sx/scripts/lib/dbus-env.sh"
+rc="$(run_runner "$c")"
+rec="$(newest "$c" failed)"
+if [ "$rc" = 78 ] && [ -n "$rec" ] && grep -q 'dbus-env.sh loaded but does not define athena_dbus_env_setup' "$rec" \
+   && [ "$(invoked "$c")" = 0 ]; then
+  ok "an empty dbus-env.sh (loads, defines nothing): the tick exits 78 with a .failed record naming the function"
+else
+  bad "empty dbus lib tick" "rc=$rc rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 RUNNER="$REAL_RUNNER"
 

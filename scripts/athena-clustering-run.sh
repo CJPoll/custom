@@ -67,9 +67,11 @@
 #       up (scripts/lib/mcp-preflight.sh, the check setup-clustering-cron
 #       shares): counted. --dry-run runs the same checks and exits 78 on
 #       the first that fails, touching nothing (DND-1571). A scripts/lib
-#       file the tick needs (mcp-preflight.sh, dbus-env.sh) missing or
-#       unloadable is 78 too, with a .failed record, counted like the
-#       rest (DND-1603)
+#       file the tick needs (mcp-preflight.sh, dbus-env.sh) missing,
+#       unreadable, unloadable, or lacking a function the tick calls is 78
+#       too, with a .failed record, counted like the rest (DND-1603).
+#       --dry-run runs the tick's own lib check, so it refuses on the same
+#       faults (DND-1728)
 #   71  flock failed for a reason other than "held" (a fault, never a skip)
 #   73  the state directory, lock or lane could not be created
 #   2   the repo is not a git checkout
@@ -113,9 +115,14 @@ OWNER_TZ="America/Denver"
 run_mcp_preflight() {
   local lib="${SCRIPT_DIR}/lib/mcp-preflight.sh"
   if ! declare -F clustering_mcp_preflight >/dev/null 2>&1; then
-    if [ ! -r "${lib}" ]; then
+    if [ ! -e "${lib}" ]; then
       MCP_PF_WHY="${lib} is missing, so the MCP servers cannot be checked; no session."
       MCP_PF_FIX="restore scripts/lib/mcp-preflight.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main."
+      return 1
+    fi
+    if [ ! -r "${lib}" ]; then
+      MCP_PF_WHY="${lib} is unreadable, so the MCP servers cannot be checked; no session."
+      MCP_PF_FIX="restore read permission on it (chmod u+r ${lib})."
       return 1
     fi
     # shellcheck source=scripts/lib/mcp-preflight.sh
@@ -131,6 +138,38 @@ run_mcp_preflight() {
     fi
   fi
   clustering_mcp_preflight "${CLAUDE_JSON}" "${MAIN_CHECKOUT}"
+}
+
+# load_dbus_lib — the ONE check of scripts/lib/dbus-env.sh, shared by the tick
+# and --dry-run, so a green dry run means the tick can load it (DND-1603,
+# DND-1728). A fault is a lib that is missing, unreadable, fails to load, or
+# loads without defining every function in DBUS_LIB_FNS (each one the tick
+# calls). Sets DBUS_LIB_WHY to the fault, or to "" when the lib is usable. It
+# never calls the lib: loading only defines functions while dbus-env.sh stays
+# definition-only at top level, so --dry-run stays read-only. The caller
+# decides what a fault means (the tick records and counts it; --dry-run
+# refuses).
+DBUS_LIB="${SCRIPT_DIR}/lib/dbus-env.sh"
+DBUS_LIB_FNS="athena_dbus_env_setup"
+DBUS_LIB_FIX="see what changed first (git -C ${SCRIPT_DIR%/scripts} status -- scripts/lib), then restore it (git checkout -- scripts/lib discards uncommitted edits there), restore read permission on an unreadable one (chmod u+r ${DBUS_LIB}), or fast-forward this checkout to main when the runner is newer than its libs."
+DBUS_LIB_WHY=""
+load_dbus_lib() {
+  local fn absent="" reason=""
+  if [ ! -e "${DBUS_LIB}" ]; then
+    reason="is missing"
+  elif [ ! -r "${DBUS_LIB}" ]; then
+    reason="is unreadable"
+  # shellcheck source=scripts/lib/dbus-env.sh
+  elif ! . "${DBUS_LIB}"; then
+    reason="could not be loaded"
+  else
+    for fn in ${DBUS_LIB_FNS}; do
+      declare -F "${fn}" >/dev/null || absent="${absent:+${absent} }${fn}"
+    done
+    [ -z "${absent}" ] || reason="loaded but does not define ${absent}"
+  fi
+  DBUS_LIB_WHY=""
+  [ -z "${reason}" ] || DBUS_LIB_WHY="${DBUS_LIB} ${reason}, so D-Bus autolaunch cannot be suppressed"
 }
 
 FAIL_ESCALATE="${CLUSTERING_FAIL_ESCALATE:-2}"
@@ -218,9 +257,10 @@ if [ "${DRY}" -eq 1 ]; then
     echo "  Fix: land the athena:epic-clustering skill (DND-982) on main and fast-forward ${MAIN_CHECKOUT}." >&2
     exit 78
   fi
-  if [ ! -r "${SCRIPT_DIR}/lib/dbus-env.sh" ]; then
-    echo "${ME}: ${SCRIPT_DIR}/lib/dbus-env.sh is missing; a tick would exit 78 and spawn no session." >&2
-    echo "  Fix: restore scripts/lib/dbus-env.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main." >&2
+  load_dbus_lib
+  if [ -n "${DBUS_LIB_WHY}" ]; then
+    echo "${ME}: ${DBUS_LIB_WHY}; a tick would exit 78 and spawn no session." >&2
+    echo "  Fix: ${DBUS_LIB_FIX}" >&2
     exit 78
   fi
   if ! run_mcp_preflight; then
@@ -263,21 +303,15 @@ printf 'pid=%s host=%s started=%s\n' "$$" "$(hostname 2>/dev/null || echo '?')" 
 
 # --- suppress D-Bus autolaunch (after arg parsing and the lock) ----------------
 # See ~/dev/custom/CLAUDE.md -> "Cron D-Bus autolaunch leak".
-# A missing or unloadable library is not fatal here: the tick has no record
-# machinery yet, so it is noted and the lane step records it, counts it and
-# exits 78 (DND-1603).
-DBUS_LIB_WHY=""
-if [ ! -r "${SCRIPT_DIR}/lib/dbus-env.sh" ]; then
-  DBUS_LIB_WHY="${SCRIPT_DIR}/lib/dbus-env.sh is missing, so D-Bus autolaunch cannot be suppressed; no session."
-# shellcheck source=scripts/lib/dbus-env.sh
-elif ! . "${SCRIPT_DIR}/lib/dbus-env.sh" || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
-  DBUS_LIB_WHY="${SCRIPT_DIR}/lib/dbus-env.sh could not be loaded, so D-Bus autolaunch cannot be suppressed; no session."
-else
+# A faulty library is not fatal here: the tick has no record machinery yet, so
+# load_dbus_lib (the check --dry-run runs) notes it and the lane step records
+# it, counts it and exits 78 (DND-1603).
+load_dbus_lib
+if [ -z "${DBUS_LIB_WHY}" ]; then
   athena_dbus_env_setup
-fi
-# Without the library, still suppress autolaunch for what runs before the tick
-# exits (an unconnectable address, as the library's own fallback does).
-if [ -n "${DBUS_LIB_WHY}" ]; then
+else
+  # Without the library, still suppress autolaunch for what runs before the
+  # tick exits (an unconnectable address, as the library's own fallback does).
   export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/nonexistent/athena-dbus-suppressed}"
 fi
 "${SCRIPT_DIR}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
@@ -512,8 +546,8 @@ fi
 # The MCP servers, through the one preflight --dry-run and the installer share
 # (scripts/lib/mcp-preflight.sh, DND-1571).
 if [ -n "${DBUS_LIB_WHY}" ]; then
-  # The cron-environment library, noted missing at the lock (DND-1603).
-  mcp_fail "${DBUS_LIB_WHY}" "restore scripts/lib/dbus-env.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main."
+  # The cron-environment library, its fault noted at the lock by load_dbus_lib (DND-1603, DND-1728).
+  mcp_fail "${DBUS_LIB_WHY}; no session." "${DBUS_LIB_FIX}"
 fi
 if ! run_mcp_preflight; then
   mcp_fail "${MCP_PF_WHY}" "${MCP_PF_FIX}"

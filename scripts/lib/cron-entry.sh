@@ -2,7 +2,8 @@
 # scripts/lib/cron-entry.sh — the ONE answer to "which crontab lines are ours"
 # (DND-1503) and the ONE crontab reader (DND-1638) for the cron installers:
 # setup-shipwright-cron, setup-clustering-cron, setup-leadtime-cron and
-# setup-athena-inbox-client.
+# setup-athena-inbox-client. Also the call of a runner's own --dry-run that
+# setup-clustering-cron and setup-leadtime-cron make (DND-1728).
 #
 # A line is OURS when it is not a comment and one of its whitespace-separated
 # fields IS the runner's absolute path. Nothing else is ours:
@@ -67,6 +68,29 @@
 #   or when scripts/lib/main-checkout.sh is missing beside this file.
 #   The resolver is main-checkout.sh's main_checkout, shared with the non-cron
 #   tools (setup-hooks, add-athena-mcp; DND-1720); this only renames its globals.
+
+# cron_runner_dry_run <runner>
+#   Runs the managed runner's own --dry-run, the read-only check of what a tick
+#   needs before it spawns a session (its skill, its MCP preflight, the
+#   scripts/lib files it loads), and discards the brief it prints. An installer
+#   runs it last in --check, --install and --dry-run, so a green installer
+#   means the runner's own preflight passes, including checks the installer
+#   does not make itself (DND-1728: the libs a tick loads).
+#   Returns 0 when it exits 0. Otherwise returns 1 and sets
+#     CRON_DRY_WHY  "the runner's own --dry-run refuses (exit <n>): <its reason>"
+#     CRON_DRY_FIX  the runner's own Fix: line, else how to see why
+#   The runner inherits the caller's environment, so the seams an installer
+#   honours (LEADTIME_CLAUDE_JSON, CLUSTERING_CLAUDE_JSON) reach it too.
+cron_runner_dry_run() {
+  local runner="${1:-}" err rc=0
+  CRON_DRY_WHY=""; CRON_DRY_FIX=""
+  err="$("${runner}" --dry-run 2>&1 >/dev/null </dev/null)" || rc=$?
+  [ "${rc}" -ne 0 ] || return 0
+  CRON_DRY_WHY="the runner's own --dry-run refuses (${runner} --dry-run, exit ${rc}): $(printf '%s\n' "${err}" | grep -v '^[[:space:]]*Fix: ' | grep -v '^[[:space:]]*$' | tail -n1 || true)"
+  CRON_DRY_FIX="$(printf '%s\n' "${err}" | sed -n 's/^[[:space:]]*Fix: //p' | tail -n1 || true)"
+  [ -n "${CRON_DRY_FIX}" ] || CRON_DRY_FIX="run ${runner} --dry-run by hand to see why."
+  return 1
+}
 
 _cron_entry_lib_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 if [ -r "${_cron_entry_lib_dir}/main-checkout.sh" ]; then

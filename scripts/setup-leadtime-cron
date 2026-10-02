@@ -14,8 +14,9 @@
 #   setup-leadtime-cron [--install] [--schedule "<cron expr>"] [--dry-run]
 #   setup-leadtime-cron --check          read-only: exit 0 if exactly one live entry runs the runner
 #                                        and a tick could start: the skill is in the main checkout,
-#                                        the repo list resolves, and the MCP preflight passes;
-#                                        prints that list and the MCP line
+#                                        the repo list resolves, the MCP preflight passes, and
+#                                        the runner's own --dry-run passes; prints that list
+#                                        and the MCP line
 #   setup-leadtime-cron --remove [--dry-run]
 #   setup-leadtime-cron --backup <file>  snapshot the current crontab to <file> (mode 600)
 #   setup-leadtime-cron --help
@@ -47,6 +48,13 @@
 # config missing, unreadable or not valid JSON). --install refuses before any
 # write. --remove and --backup never run it.
 #
+# The runner's own --dry-run (DND-1728). After those checks pass, --check,
+# --install and --dry-run run the main checkout's runner with --dry-run
+# (read-only) and refuse with exit 2 when it refuses, quoting its reason and
+# its Fix:. It checks what this installer does not, such as the scripts/lib
+# files a tick loads (dbus-env.sh). --install refuses before any write.
+# --remove and --backup never run it.
+#
 # Cursor seeding (--install only; --dry-run prints the plan). Before the entry
 # is written, each RESOLVED repo gets its first cursor in <main
 # checkout>/ai-artifacts/lead-time, unless one is already there (an existing
@@ -68,7 +76,7 @@
 #
 # Exit codes: 0 ok · 1 entry missing, duplicated or stale (--check), or a usage
 # error · 2 a prerequisite is missing, the repo list does not resolve, an MCP
-# server is NOT REGISTERED, the crontab could not be read or written, or a
+# server is NOT REGISTERED, the runner's own --dry-run refuses, the crontab could not be read or written, or a
 # cursor could not be written · 4 COULD NOT LOOK: the MCP preflight could not
 # read Claude Code's config (or jq, or the preflight library, is missing) · 5
 # refused: --install or --remove run from a linked worktree (DND-1643: 5 is the
@@ -268,6 +276,7 @@ if [ "${MODE}" = "check" ]; then
     [ -r "${SKILL_FILE}" ] || die 2 "${SKILL_MISSING_WHY}; every tick would exit 78" "${SKILL_MISSING_FIX}"
     [ "${RES_RC}" -eq 0 ] || res_fail 2
     [ "${mcp_rc}" -eq 0 ] || mcp_fail
+    cron_runner_dry_run "${RUNNER}" || die 2 "${CRON_DRY_WHY%.}; a tick would not start." "${CRON_DRY_FIX}"
     echo "OK: the lead-time improver cron entry is installed:"
     printf '%s\n' "${live}" | sed 's/^/  /'
     printf '%s\n' "${RES_TEXT}"
@@ -361,6 +370,9 @@ resolve_repos
 # The runner's MCP preflight, before any write: an entry whose every tick
 # exits 78 is not an install (DND-1571).
 mcp_check || mcp_fail
+# The runner's own --dry-run, last: it also checks what this installer does
+# not, such as the scripts/lib files a tick loads (DND-1728).
+cron_runner_dry_run "${RUNNER}" || die 2 "${CRON_DRY_WHY%.}; a tick would not start." "${CRON_DRY_FIX} Nothing was written."
 printf '%s\n' "${RES_TEXT}"
 mcp_ok_line
 repos="${RES_TSV}"
