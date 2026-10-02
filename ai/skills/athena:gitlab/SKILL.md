@@ -125,6 +125,11 @@ shared with `gh-athena git` and listed in `ai/lib/forge-git-passthrough.sh`.
 The `forge-identity-guard.sh` hook denies a plain `git push` to a gitlab.com
 remote before it runs, with a `Fix:` naming this form (DND-577).
 
+A push to `main` is also judged for its gate, as on GitHub: in a repo that
+declares one, it is refused (`NO RECEIPT`, exit 3) unless `integration-gate`
+covers the pushed commit (**athena:github** → *Pushing as Athena*, DND-1690).
+Run the gate; it is not an identity problem to escalate.
+
 An agent driving `wt` sets `WT_AGENT_PUSH=1` so `wt`'s own pushes take this
 path; see the header of `scripts/wt-lib/push.sh`.
 Graphite does not support GitLab, so an agent stacks with plain branches and

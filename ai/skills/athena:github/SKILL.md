@@ -117,8 +117,7 @@ commit is a clean rebase of a head it passed onto `origin/main` (DND-1690,
 keeping DND-1463). That is not an identity problem: run the gate, do not
 escalate it.
 
-The
-`forge-identity-guard.sh` hook denies a plain `git push` to a github.com or
+The `forge-identity-guard.sh` hook denies a plain `git push` to a github.com or
 gitlab.com remote (or one it cannot resolve) before it runs, with a `Fix:`
 naming this form (DND-577).
 

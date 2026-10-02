@@ -623,6 +623,52 @@ gha "${W}" push origin main
   && ok "43. a clean merge commit of origin/main and a gated head proceeds" \
   || bad "43. merge of a gated head" "rc=${RC} err='${ERR}'"
 
+# 44. The landed main is the PUSHED remote's: a clone whose remote is named
+# upstream (no origin/main at all) and a head that deletes the gate is still
+# judged against upstream/main, and refused.
+gated_origin g9
+U="${TMP}/g9-up"; git clone -q -o upstream "${O}" "${U}"
+git -C "${U}" rm -q ai/bin/harness-gate && git -C "${U}" commit -q -m "lane change"
+gha "${U}" push upstream HEAD:main
+is_gate_refusal && [[ "${ERR}" == *"ai/bin/harness-gate on ${B}"* ]] \
+  && ok "44. remote named upstream: judged on upstream/main, a gate-deleting head is refused" \
+  || bad "44. non-origin remote" "rc=${RC} err='${ERR}'"
+
+# 45. No landed main is known (a URL push, no tracking ref): the repo counts as
+# gated because the pushed commit's history held the gate, so deleting it in
+# the pushed commit does not escape the bar.
+gha "${U}" push "file://${O}" HEAD:main
+is_gate_refusal && [[ "${ERR}" == *"no landed main is known"* ]] \
+  && ok "45. URL push with no tracking ref: gate found in history, ungated head refused" \
+  || bad "45. URL push, no landed main" "rc=${RC} err='${ERR}'"
+
+# 46. A candidate gated head whose receipt cannot be read: COULD NOT LOOK,
+# never "no candidate covers it".
+gated_origin g10
+C="$(git -C "${W}" rev-parse --path-format=absolute --git-common-dir)"
+mkdir -p "${C}/integration-receipts"; printf '{not json\n' > "${C}/integration-receipts/${H}.json"
+move_origin_main "${W}"
+git -C "${W}" rebase -q origin/main
+gha "${W}" push origin HEAD:main
+[ "${RC}" = 3 ] && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"${H}"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && ok "46. an unreadable receipt on a candidate gated head refuses as COULD NOT LOOK" \
+  || bad "46. unreadable candidate receipt" "rc=${RC} err='${ERR}'"
+
+# 47. The cron shape: a LINKED WORKTREE lane with two commits, gated, then
+# rebased onto a main another actor moved. It lands by real push.
+gated_origin g11
+git -C "${W}" checkout -q main
+LANE="${TMP}/g11-lane"; git -C "${W}" worktree add -q -b leadtime/run-g11 "${LANE}" origin/main
+printf 'x\n' > "${LANE}/x.txt"; git -C "${LANE}" add x.txt; git -C "${LANE}" commit -q -m "lane one"
+printf 'y\n' > "${LANE}/y.txt"; git -C "${LANE}" add y.txt; git -C "${LANE}" commit -q -m "lane two"
+H2="$(git -C "${LANE}" rev-parse HEAD)"; pass_receipt "${LANE}" "${H2}" "${B}"
+move_origin_main "${LANE}"
+git -C "${LANE}" rebase -q origin/main; P="$(git -C "${LANE}" rev-parse HEAD)"
+ghpush "${LANE}" "${TMP}/g11-store" push -q origin HEAD:main
+[ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${P}" ] && [[ "${ERR}" == *"gated head ${H2}"* ]] \
+  && ok "47. linked-worktree lane, two commits, gated then rebased onto a moved main: lands" \
+  || bad "47. worktree lane rebase lands" "rc=${RC} err='${ERR}'"
+
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
 else bad "no git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi

@@ -500,16 +500,20 @@ fg_refuse_red_main() {
 # a receipt for exactly the pushed commit, or a clean rebase (or merge) of a
 # gated head onto the landed main (the DND-1463 rule, kept), or nothing new.
 #
-# The gate is the one declared on the LANDED main (refs/remotes/origin/main),
-# never the pushed commit, so a diff that deletes the gate cannot lift the bar
-# (~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the diff it
-# is checking"). Only with no landed main known (a first push) is the pushed
-# commit read. A repo that declares no gate is not judged. A receipt, store,
-# or object it cannot read refuses (COULD NOT LOOK). Every remote is judged,
-# not only origin: the receipt is about the commit, not the remote. Like the
-# red-main refusal it runs before the dry-run print, and it has no skip flag.
+# The landed main is the PUSHED remote's tracking ref (refs/remotes/<r>/main,
+# where <r> is the configured remote whose push URL is the one pushed to). The
+# gate is the one declared there, never on the pushed commit, so a diff that
+# deletes the gate cannot lift the bar (~/dev/custom/CLAUDE.md -> "A check's
+# own bar must not live in the diff it is checking"). With no landed main known
+# (a URL push, a first push, a narrowed fetch), the repo counts as gated if the
+# pushed commit's history EVER held a declared gate path (ir_gate_ever_declared),
+# and then only an exact receipt covers it. A repo that never declared one is
+# not judged. A receipt, store, or object it cannot read refuses (COULD NOT
+# LOOK). Every remote is judged, not only origin: the receipt is about the
+# commit. Like the red-main refusal it runs before the dry-run print, and it
+# has no skip flag.
 fg_refuse_ungated_main() {
-  local common gitdir cur src sha landed decl_at gate rc
+  local common gitdir cur src sha landed="" decl_at gate rc r u
   [ -n "$FG_PUSH_URL" ] || return 0
   common="$(git "${FG_PUSH_GLOB[@]}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
   [ -n "$common" ] || return 0
@@ -520,18 +524,31 @@ fg_refuse_ungated_main() {
     printf '%s: REFUSING `git push`: cannot load ai/lib/main-health.sh (and the integration receipt rules it loads), so whether the push to main was gated is unknown.\n  Fix: run %s from a full ~/dev/custom checkout (ai/bin and ai/lib side by side).\n' "$FG_TOOL" "$FG_TOOL" >&2
     exit 3
   fi
-  landed="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q 'refs/remotes/origin/main^{commit}' 2>/dev/null || true)"
+  # The pushed remote's name: the configured remote with FG_PUSH_URL as a push URL.
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    while IFS= read -r u; do
+      if [ "$u" = "$FG_PUSH_URL" ] && [ -z "$landed" ]; then
+        landed="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q "refs/remotes/${r}/main^{commit}" 2>/dev/null || true)"
+      fi
+    done < <(git "${FG_PUSH_GLOB[@]}" -c "$(fg_rewrite)" remote get-url --push --all "$r" 2>/dev/null || true)
+  done < <(git "${FG_PUSH_GLOB[@]}" remote 2>/dev/null || true)
   while IFS= read -r src; do
     [ -n "$src" ] || continue
     sha="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q "${src}^{commit}" 2>/dev/null || true)"
     # An unresolvable source fails in git itself; nothing lands.
     [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
     decl_at="${landed:-$sha}"
-    rc=0; gate="$(ir_declared_gate_on "$gitdir" "$decl_at")" || rc=$?
+    rc=0
+    if [ -n "$landed" ]; then
+      gate="$(ir_declared_gate_on "$gitdir" "$landed")" || rc=$?
+    else
+      gate="$(ir_gate_ever_declared "$gitdir" "$sha")" || rc=$?
+    fi
     case "$rc" in
       0) ;;
       1) continue ;;
-      *) printf '%s: REFUSING `git push` of %s to main: COULD NOT LOOK whether this repo declares a gate: %s is not in the object store under %s.\n  Fix: run `git fetch origin` in this checkout and retry. Could not look is not "no gate".\n' \
+      *) printf '%s: REFUSING `git push` of %s to main: COULD NOT LOOK whether this repo declares a gate: git cannot read %s under %s.\n  Fix: run `git fetch` for the remote you push to in this checkout and retry. Could not look is not "no gate".\n' \
            "$FG_TOOL" "$sha" "$decl_at" "$common" >&2
          exit 3 ;;
     esac
@@ -539,14 +556,14 @@ fg_refuse_ungated_main() {
     case "$rc" in
       0) case "$IR_COVER" in
            exact)  printf '%s: note: integration-gate passed exactly %s (%s)\n' "$FG_TOOL" "$sha" "$IR_RECEIPT" >&2 ;;
-           rebase) printf '%s: note: %s is a clean rebase of the gated head %s onto origin/main %s (%s); it lands with no re-gate (DND-1463)\n' \
+           rebase) printf '%s: note: %s is a clean rebase of the gated head %s onto the landed main %s (%s); it lands with no re-gate (DND-1463)\n' \
                      "$FG_TOOL" "$sha" "$IR_COVER_HEAD" "$landed" "$IR_RECEIPT" >&2 ;;
          esac ;;
-      1) printf '%s: REFUSING `git push` of %s to main: %s. This repo declares a gate (%s on %s), and %s.\n  Fix: %srun `~/dev/custom/ai/bin/integration-gate --with-critic --rebase` on the branch you are landing (it records the receipt), then push exactly the head its INTEGRATION OK line names, or a clean rebase of it onto a newer origin/main.\n' \
+      1) printf '%s: REFUSING `git push` of %s to main: %s. This repo declares a gate (%s on %s), and %s.\n  Fix: %srun `~/dev/custom/ai/bin/integration-gate --with-critic --rebase` on the branch you are landing (it records the receipt), then push exactly the head its INTEGRATION OK line names, or a clean rebase of it onto a newer main.\n' \
            "$FG_TOOL" "$sha" "$IR_KIND" "$gate" "$decl_at" "$IR_WHY" "${IR_HOW:+$IR_HOW }" >&2
          exit 3 ;;
-      *) printf '%s: REFUSING `git push` of %s to main: COULD NOT LOOK whether integration-gate covers it (%s). %s.\n  Fix: %srepair what it names and retry; if the receipt is gone, run `~/dev/custom/ai/bin/integration-gate --with-critic --rebase` on the branch and push the head its INTEGRATION OK line names.\n' \
-           "$FG_TOOL" "$sha" "$IR_KIND" "$IR_WHY" "${IR_HOW:+$IR_HOW }" >&2
+      *) printf '%s: REFUSING `git push` of %s to main: COULD NOT LOOK whether integration-gate covers it (%s). %s.\n  Fix: %s run `~/dev/custom/ai/bin/integration-gate --with-critic --rebase` on the branch and push the head its INTEGRATION OK line names.\n' \
+           "$FG_TOOL" "$sha" "$IR_KIND" "$IR_WHY" "${IR_HOW:-repair what it names and retry; if the receipt is gone,}" >&2
          exit 3 ;;
     esac
   done < <(mh_push_main_sources main "$cur" "${FG_PUSH_ARGS[@]}")

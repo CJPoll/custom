@@ -274,7 +274,10 @@ lane, that repo's declared gate: *The product lane*).
 The lane and the commit wrapper are `athena:shipwright-lane`. The bar and the
 push are `athena:merge-boarding` → *The merge bar*, its no-CI `~/dev/custom`
 landing. A cron run lands that way; a directly-spawned run opens a PR, per
-`athena:shipwright-lane`. A change in an improve repo other than custom
+`athena:shipwright-lane`. A cron run's push needs an `integration-gate`
+receipt for its head, so it runs the gate and judge before it pushes
+(`athena:shipwright-lane` → *Sync up*, DND-1690); `harness-gate` green alone
+is refused at the push. A change in an improve repo other than custom
 never lands in the run that makes it: *The product lane*.
 
 Every change, instrumentation change and revert lands with this trailer

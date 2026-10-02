@@ -206,6 +206,19 @@ if [ "${RC}" = 0 ] && [ "$(cat "${TMP}/out")" = kept ] && [ "$(cat "${TMP}/out2"
   ok "19. a caller's GIT_CONFIG_COUNT entry is kept and the header is appended"
 else bad "19. GIT_CONFIG_COUNT append" "out='$(cat "${TMP}/out")' out2='$(cat "${TMP}/out2")' err='$(cat "${TMP}/err")'"; fi
 
+# DND-1690: the passthrough is shared, so glab-athena refuses an ungated
+# push to main in a gated repo too (bin/prep-commit.sh declares the gate).
+O="${TMP}/gated-origin.git"; W="${TMP}/gated-wt"
+git init -q --bare -b main "${O}"
+git init -q -b main "${W}" && git -C "${W}" remote add origin "${O}"
+mkdir -p "${W}/bin"; printf '#!/bin/sh\nexit 0\n' > "${W}/bin/prep-commit.sh"
+git -C "${W}" add -A && git -C "${W}" commit -q -m base && git -C "${W}" push -q origin main
+git -C "${W}" checkout -q -b lane && git -C "${W}" commit -q --allow-empty -m "lane change"
+gla "${W}" push origin HEAD:main
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"NO RECEIPT"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"bin/prep-commit.sh"* ]]; then
+  ok "20. gated repo: an ungated push to main is refused (NO RECEIPT, Fix:), shared with gh-athena (DND-1690)"
+else bad "20. glab ungated push to main refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
 else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi

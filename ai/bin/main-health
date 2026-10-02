@@ -21,7 +21,9 @@
 # While the marker says RED, `gh-athena git push` (and glab-athena's) REFUSES a
 # push to main unless the pushed commit is a gated fix: it contains the red SHA
 # and integration-gate passed exactly it (ai/lib/forge-git-passthrough.sh ->
-# "Red-main refusal"; the reader is ai/lib/main-health.sh).
+# "Red-main refusal"; the reader is ai/lib/main-health.sh). On any main, in a
+# repo that declares a gate, it also refuses a push to main that
+# integration-gate does not cover ("Ungated-main refusal", DND-1690).
 #
 # Who runs check: the admiral, right after each ~/dev/custom landing and its
 # installers (ai/bin/landing-installers, DND-1664: a landed hook or inbox

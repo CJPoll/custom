@@ -1017,7 +1017,7 @@ and alerts once per red episode on harness-alerts. While it is red,
 contains the red SHA and has its own `INTEGRATION OK` receipt. On a green
 `main` too, it refuses a push to `main` whose commit integration-gate did not
 pass, unless it is a clean rebase of a head it passed (DND-1690). A cron lane
-therefore runs `integration-gate --with-critic` before it pushes.
+therefore runs `integration-gate --with-critic --rebase` before it pushes.
 `athena:merge-boarding` → the no-CI landing has the steps.
 
 **Later (2026-10-02, DND-1664):** the steps above went from the fast-forward

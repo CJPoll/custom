@@ -152,11 +152,24 @@ receipt for that exact commit. `gh-athena git push` refuses a push to main in
 this repo unless integration-gate passed exactly the pushed commit, or the
 pushed commit is a clean rebase of a head it passed onto a newer `origin/main`
 (DND-1690; the refusal says `NO RECEIPT` with a `Fix:`). That holds on a green
-main as well as a red one. On a RED gate or a critic BLOCK, fix the findings in
-one more commit and run it once more. If it is still not OK, do not push:
-journal it, and reset your lane to `origin/main` (`git reset --hard
-origin/main`, in your lane only) so the runner does not count it as a
-stranded push. Never `--critic-override` from a cron lane.
+main as well as a red one. Anything but exit 0 means do not push yet. By
+exit (`integration-gate --help` has the full list):
+
+- **1 (gate RED) or 3 (critic BLOCK or no verdict):** fix the findings in one
+  more commit and run it once more. Still not OK: journal it and reset your
+  lane to `origin/main` (`git reset --hard origin/main`, in your lane only),
+  so the runner does not count a rejected change as a stranded push.
+- **2:** read the line. `REBASE CONFLICT` follows *Sync down first*: journal
+  it, reset the lane as above, skip this run's edits. A refused tree
+  (uncommitted or untracked paths) means a path you meant to commit is not
+  committed: commit it through the wrapper, or remove it, and re-run.
+- **4 (blast radius):** only Cody clears it, so there is nothing to fix.
+  Journal it and leave the commits local; the runner keeps the stranded
+  branch, and an admiral lands it, as for an installer below.
+- **5 or 6 (receipt not written, gate not run):** an environment fault. Re-run
+  once; still failing, journal it and leave the commits local.
+
+Never `--critic-override` from a cron lane.
 
 **Later (2026-10-02, DND-1690):** this step pushed once "the gate is green",
 meaning `harness-gate`, with no receipt and no critic verdict. Superseded: the

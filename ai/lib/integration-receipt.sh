@@ -54,6 +54,27 @@ ir_declared_gate_on() {
   return 1
 }
 
+# ir_gate_ever_declared <repo-dir> <commit-sha> : prints the declared gate
+# path if any IR_DECLARED_GATES path is a blob on <commit-sha> or was ever
+# touched in its history (DND-1690: with no landed main to read the
+# declaration from, a commit that deletes the gate must not escape it).
+# Returns 0 when one is found, 1 when the history never held one, 2 when git
+# cannot read <commit-sha> -- "could not look" is never "no gate".
+ir_gate_ever_declared() {
+  local dir="$1" sha="$2" g hit rc=0
+  g="$(ir_declared_gate_on "$dir" "$sha")" || rc=$?
+  case "$rc" in
+    0) printf '%s\n' "$g"; return 0 ;;
+    1) ;;
+    *) return 2 ;;
+  esac
+  for g in "${IR_DECLARED_GATES[@]}"; do
+    hit="$(git -C "$dir" rev-list -1 "$sha" -- "$g" 2>/dev/null)" || return 2
+    if [ -n "$hit" ]; then printf '%s\n' "$g"; return 0; fi
+  done
+  return 1
+}
+
 # ir_store <git-common-dir> / ir_receipt_path <git-common-dir> <head-sha>
 ir_store() { printf '%s/integration-receipts' "$1"; }
 ir_receipt_path() { printf '%s/%s.json' "$(ir_store "$1")" "$2"; }
@@ -190,14 +211,17 @@ ir_read_receipt() {
 # receipt, the store or git cannot be read; IR_HOW may hold a first step. A
 # receipt it cannot read is a refusal, never a pass.
 #
-# Residuals, said out loud: <landed-sha> is the LOCAL tracking ref. A stale one
-# only refuses (the tree no longer matches); it cannot admit unlanded content,
-# because the pushed tree must equal <landed-sha> plus the gated change. A
-# rebase whose sequential result differs from the three-way merge (rare) is
-# refused; re-gate it. Like every receipt, this is local machine state.
+# Residuals, said out loud: <landed-sha> is the LOCAL tracking ref. A stale
+# (behind) one only refuses: the pushed tree must equal <landed-sha> plus the
+# gated change, and the commits it lacks are not in that sum. One moved AHEAD of
+# the remote by hand (`git update-ref` to an unlanded commit) is trusted: its
+# content then lands ungated. That is the same class as hand-writing a receipt
+# file, local state a process in this repo can forge; a diff cannot. A rebase
+# whose sequential result differs from the three-way merge (rare) is refused;
+# re-gate it.
 ir_push_covered() {
-  local common="$1" p="$2" m="$3" rc store f h line want ptree tree
-  local exact_why n_store=0 n_cand=0 cl="" conflicts=0
+  local common="$1" p="$2" m="$3" rc store f h line want ptree tree out
+  local exact_why n_store=0 n_cand=0 cl="" conflicts=0 other_base=0
   local -a heads=() cands=() commits=()
   local -A seen=() inrange=()
   IR_COVER="" IR_COVER_HEAD=""
@@ -207,32 +231,29 @@ ir_push_covered() {
   case "$IR_KIND" in *"COULD NOT LOOK"*) return 2 ;; esac
   exact_why="$IR_WHY"
   if [ -z "$m" ]; then
-    IR_KIND="NO RECEIPT" IR_HOW=""
-    IR_WHY="${exact_why}; and no landed main is known (no refs/remotes/origin/main), so no clean rebase of a gated head can be checked"
+    IR_KIND="NO RECEIPT" IR_HOW="fetch the remote you push to, so its main is known locally; then"
+    IR_WHY="${exact_why}; and no landed main is known for the pushed remote, so no clean rebase of a gated head can be checked"
     return 1
   fi
   git --git-dir="$common" merge-base --is-ancestor "$p" "$m" 2>/dev/null; rc=$?
   case "$rc" in
     0) IR_COVER=landed; return 0 ;;
     1) ;;
-    *) IR_KIND="COULD NOT LOOK" IR_HOW=""
-       IR_WHY="git merge-base --is-ancestor ${p} ${m} failed (exit ${rc}) under ${common}"
-       return 2 ;;
+    *) ir_could_not_look "git merge-base --is-ancestor ${p} ${m} failed (exit ${rc}) under ${common}"; return 2 ;;
   esac
   git --git-dir="$common" merge-base --is-ancestor "$m" "$p" 2>/dev/null; rc=$?
   case "$rc" in
     0) ;;
-    1) IR_KIND="NO RECEIPT" IR_HOW="git fetch origin and rebase onto origin/main; then"
+    1) IR_KIND="NO RECEIPT" IR_HOW="fetch, and rebase onto the landed main; then"
        IR_WHY="${exact_why}; and ${p} does not contain the landed main ${m}, so it cannot be a clean rebase of a gated head onto it"
        return 1 ;;
-    *) IR_KIND="COULD NOT LOOK" IR_HOW=""
-       IR_WHY="git merge-base --is-ancestor ${m} ${p} failed (exit ${rc}) under ${common}"
-       return 2 ;;
+    *) ir_could_not_look "git merge-base --is-ancestor ${m} ${p} failed (exit ${rc}) under ${common}"; return 2 ;;
   esac
   store="$(ir_store "$common")"
   if [ -e "$store" ]; then
     if [ ! -d "$store" ] || [ ! -r "$store" ] || [ ! -x "$store" ]; then
-      IR_KIND="RECEIPT UNREADABLE (COULD NOT LOOK)" IR_HOW="repair the permissions on ${store} (ls -ld '${store}'); then"
+      IR_KIND="RECEIPT UNREADABLE (COULD NOT LOOK)"
+      IR_HOW="repair the permissions on ${store} (ls -ld '${store}') and retry; if it is still refused,"
       IR_WHY="the receipt store ${store} exists but cannot be searched, so whether a gated head covers ${p} is unknown"
       return 2
     fi
@@ -244,36 +265,47 @@ ir_push_covered() {
       heads+=( "$h" ); n_store=$((n_store + 1))
     done
   fi
+  # Each read below is checked: a failed read is COULD NOT LOOK, never zero
+  # candidates (~/.claude/CLAUDE.md -> "A failed lookup must never look like
+  # an empty one").
   if [ "${#heads[@]}" -gt 0 ]; then
     if ! want="$(git --git-dir="$common" log -1 --format='%an%x09%ae%x09%at%x09%s' "$p" 2>/dev/null)"; then
-      IR_KIND="COULD NOT LOOK" IR_HOW="" IR_WHY="git log could not read ${p} under ${common}"
-      return 2
+      ir_could_not_look "git log could not read ${p} under ${common}"; return 2
     fi
     # Receipt heads still in the object store (a gc may have pruned some).
-    mapfile -t commits < <(printf '%s\n' "${heads[@]}" \
-      | git --git-dir="$common" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null \
-      | sed -n 's/^\([0-9a-f]\{40\}\) commit$/\1/p')
+    if ! out="$(printf '%s\n' "${heads[@]}" | git --git-dir="$common" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null)"; then
+      ir_could_not_look "git cat-file --batch-check over the ${n_store} receipt heads failed under ${common}"; return 2
+    fi
+    while IFS=' ' read -r h line; do
+      [ "$line" = commit ] && commits+=( "$h" )
+    done <<<"$out"
     if [ "${#commits[@]}" -gt 0 ]; then
+      if ! out="$(printf '%s\n' "${commits[@]}" | git --git-dir="$common" log --no-walk=unsorted --stdin --format='%H%x09%an%x09%ae%x09%at%x09%s' 2>/dev/null)"; then
+        ir_could_not_look "git log --no-walk over ${#commits[@]} receipt heads failed under ${common}"; return 2
+      fi
       while IFS= read -r line; do
         h="${line%%$'\t'*}"
         if [ "${line#*$'\t'}" = "$want" ] && [ -z "${seen[$h]:-}" ]; then seen[$h]=1; cands+=( "$h" ); fi
-      done < <(printf '%s\n' "${commits[@]}" \
-        | git --git-dir="$common" log --no-walk=unsorted --stdin --format='%H%x09%an%x09%ae%x09%at%x09%s' 2>/dev/null)
+      done <<<"$out"
     fi
-    while IFS= read -r h; do inrange[$h]=1; done \
-      < <(git --git-dir="$common" rev-list "${m}..${p}" 2>/dev/null)
+    if ! out="$(git --git-dir="$common" rev-list "${m}..${p}" 2>/dev/null)"; then
+      ir_could_not_look "git rev-list ${m}..${p} failed under ${common}"; return 2
+    fi
+    while IFS= read -r h; do [ -n "$h" ] && inrange[$h]=1; done <<<"$out"
     for h in "${heads[@]}"; do
       if [ -n "${inrange[$h]:-}" ] && [ -z "${seen[$h]:-}" ]; then seen[$h]=1; cands+=( "$h" ); fi
     done
   fi
   if ! ptree="$(git --git-dir="$common" rev-parse --verify -q "${p}^{tree}" 2>/dev/null)"; then
-    IR_KIND="COULD NOT LOOK" IR_HOW="" IR_WHY="git could not read the tree of ${p} under ${common}"
-    return 2
+    ir_could_not_look "git could not read the tree of ${p} under ${common}"; return 2
   fi
   for h in "${cands[@]}"; do
     n_cand=$((n_cand + 1))
     if ! ir_read_receipt "$common" "$h" "$m"; then
-      case "$IR_KIND" in *"COULD NOT LOOK"*) cl="${cl:+$cl; }${IR_WHY}" ;; esac
+      case "$IR_KIND" in
+        *"COULD NOT LOOK"*) cl="${cl:+$cl; }${IR_WHY}" ;;
+        *) other_base=$((other_base + 1)) ;;
+      esac
       continue
     fi
     tree="$(git --git-dir="$common" merge-tree --write-tree "$m" "$h" 2>/dev/null)"; rc=$?
@@ -287,11 +319,13 @@ ir_push_covered() {
     esac
   done
   if [ -n "$cl" ]; then
-    IR_KIND="COULD NOT LOOK" IR_HOW=""
-    IR_WHY="${exact_why}; and whether a gated head covers ${p} as a clean rebase onto ${m} is unknown: ${cl}"
+    ir_could_not_look "${exact_why}; and whether a gated head covers ${p} as a clean rebase onto ${m} is unknown: ${cl}"
     return 2
   fi
   IR_KIND="NO RECEIPT" IR_HOW=""
-  IR_WHY="${exact_why}; and no gated head covers it as a clean rebase onto the landed main ${m}: of ${n_store} other receipt(s) in ${store}, ${n_cand} candidate(s) (same author, date and subject as ${p}, or inside ${m}..${p}) were checked, ${conflicts} conflicting with ${m}, none giving ${p}'s tree"
+  IR_WHY="${exact_why}; and no gated head covers it as a clean rebase onto the landed main ${m}: of ${n_store} other receipt(s) in the store, ${n_cand} candidate(s) (same author, date and subject as ${p}, or inside ${m}..${p}) were checked: ${other_base} with no pass recorded on an ancestor of ${m}, ${conflicts} conflicting with ${m}, none giving ${p}'s tree"
   return 1
 }
+
+# ir_could_not_look <why> : set the COULD NOT LOOK outcome for ir_push_covered.
+ir_could_not_look() { IR_KIND="COULD NOT LOOK" IR_HOW="" IR_WHY="$1"; }
