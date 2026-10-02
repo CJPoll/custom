@@ -7104,8 +7104,8 @@ priorities page only. Superseded by DND-1598 (gen_saas #670, deployed
   line. It logs one warning per owner and cause, never one per item, naming
   the count and the cause's `Fix:` line. The row reads "Summary paused:
   <cause>, re-checked <time>".
-- **Budget, per owner.** 1,000 model calls and 2,000,000 tokens per UTC day,
-  and $20 per UTC month from metered tokens at configured prices, checked
+- **Budget, per owner.** 3,000 model calls and 6,000,000 tokens per UTC day,
+  and $60 per UTC month from metered tokens at configured prices, checked
   before each scheduled call against the ledger plus the call's estimate. A
   missing price, or an unpriced call already in the month, fails closed. At
   a cap no call is made, and the affected rows show the cap and when it
@@ -7116,6 +7116,12 @@ priorities page only. Superseded by DND-1598 (gen_saas #670, deployed
   drift. Raised by owner decision, relayed from Cody's laptop terminal turn
   of 2026-09-30 ("Raise caps"); evidence gen_saas #596 (`1100c1f9`,
   `config/config.exs`).
+
+  **Later (2026-10-02, DND-1675):** this bullet said 1,000 calls, 2,000,000
+  tokens and $20. Tripled by owner decision, Cody's terminal direction "You
+  can 3x all the caps you've set"; evidence gen_saas DND-1675 (`fd2ee700`):
+  `daily_generation_cap` 3000, `daily_token_cap` 6,000,000,
+  `monthly_cap_micro_usd` 60,000,000.
 - **The one-time backfill (DND-1395).** By owner decision, relayed from
   Cody's laptop terminal turn of 2026-09-30 ~14:35Z ("I don't care about
   the cost or cap for backfilling; please just get everything backfilled
