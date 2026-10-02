@@ -78,11 +78,19 @@ set -f; set -- ${SCHEDULE}; set +f
 
 command -v crontab >/dev/null 2>&1 || die 2 "crontab is not installed" "install cronie (the shipwright cron uses it too)."
 
-# The main checkout's runner, resolved through git's common dir.
-common="$(git -C "${SCRIPT_DIR}" rev-parse --git-common-dir 2>/dev/null || true)"
-case "${common}" in ''|/*) ;; *) common="${SCRIPT_DIR}/${common}" ;; esac
-[ -n "${common}" ] || die 2 "${SCRIPT_DIR} is not inside a git checkout" "run the copy in ~/dev/custom/scripts/."
-MAIN_CHECKOUT="$(dirname -- "$(cd -- "${common}" && pwd -P)")"
+# The shared crontab helpers: which lines are ours (DND-1503), the one crontab
+# reader (DND-1638) and the main-checkout resolver (DND-1639, DND-1642). This
+# installer's own copy; sourced before the resolver runs.
+CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
+[ -r "${CRON_ENTRY_LIB}" ] || die 2 "${CRON_ENTRY_LIB} is missing; without it no crontab line can be told apart as ours" \
+  "restore scripts/lib/cron-entry.sh (fast-forward this checkout to a main that has it), then re-run. Nothing was written."
+# shellcheck source=scripts/lib/cron-entry.sh
+. "${CRON_ENTRY_LIB}"
+
+# The main checkout's runner. A resolution failure exits 2 with a Fix: at its
+# source (cron_main_checkout), never a relative path found later.
+cron_main_checkout "${SCRIPT_DIR}" setup-clustering-cron || exit 2
+MAIN_CHECKOUT="${CRON_MAIN_CHECKOUT}"
 RUNNER="${MAIN_CHECKOUT}/scripts/athena-clustering-run.sh"
 SKILL_FILE="${MAIN_CHECKOUT}/ai/skills/athena:epic-clustering/SKILL.md"
 SKILL_MISSING_WHY="the athena:epic-clustering skill is not in the main checkout (${SKILL_FILE})"
@@ -126,15 +134,6 @@ mcp_ok_line() {
 # replace every other entry with ours. The reader is scripts/lib/cron-entry.sh's
 # cron_read_crontab (DND-1638), shared by every cron installer.
 read_crontab() { cron_read_crontab setup-clustering-cron || exit 2; }
-
-# Which lines are ours: scripts/lib/cron-entry.sh (DND-1503), this installer's
-# own copy. An uncommented line with a field that IS the runner path; a
-# commented line or a longer path (<runner>.bak) is kept and never counts.
-CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
-[ -r "${CRON_ENTRY_LIB}" ] || die 2 "${CRON_ENTRY_LIB} is missing; without it no crontab line can be told apart as ours" \
-  "restore scripts/lib/cron-entry.sh (fast-forward this checkout to a main that has it), then re-run. Nothing was written."
-# shellcheck source=scripts/lib/cron-entry.sh
-. "${CRON_ENTRY_LIB}"
 
 # live_lines — the crontab lines on stdin that are ours.
 live_lines() { cron_entry_lines "${RUNNER}" ours; }

@@ -78,32 +78,35 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 
+# The shared crontab helpers (DND-1503 which lines are ours, DND-1638 the one
+# crontab reader, DND-1639/DND-1642 the main-checkout resolver). Sourced before
+# the runner path is resolved.
+CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
+[ -r "$CRON_ENTRY_LIB" ] || {
+  echo "error: $CRON_ENTRY_LIB is missing; without it no crontab line can be told apart as ours." >&2
+  echo "  Fix: restore scripts/lib/cron-entry.sh (fast-forward this checkout to a main that has it), then re-run." >&2
+  exit 2
+}
+# shellcheck source=scripts/lib/cron-entry.sh
+. "$CRON_ENTRY_LIB"
+
 # The crontab entry must name the MAIN checkout's runner, never a worktree's.
 # Captains run this from `~/.local/worktrees/custom/<branch>`; `wt` deletes that
 # path on cleanup, and cron would then fire a job pointing at a file that no
-# longer exists — silently, forever, with nothing supervising the inbox client
-# and no artifact anywhere. That is the 2026-09-17 outage class, which
-# `scripts/setup-hooks` already fixed for hook wiring; the resolver below is
-# deliberately the same one (a worktree's --git-common-dir IS the main
-# checkout's .git). Falls back to SCRIPT_DIR outside git.
-#
-# `--check` inherits this, which is the point: run from a worktree it reports
-# on the entries that are actually installed, rather than reporting OK on
-# doomed ones.
-main_checkout_dir() {
-  local common parent
-  common="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)" \
-    || { printf '%s\n' "$SCRIPT_DIR"; return 0; }
-  [ -n "$common" ] || { printf '%s\n' "$SCRIPT_DIR"; return 0; }
-  case "$common" in /*) ;; *) common="${SCRIPT_DIR}/${common}" ;; esac
-  parent="$(dirname -- "$common")"
-  if [ -d "${parent}/scripts" ]; then
-    (cd -- "${parent}/scripts" && pwd -P)
-  else
-    printf '%s\n' "$SCRIPT_DIR"
-  fi
-}
-RUNNER_DIR="${ATHENA_INBOX_CLIENT_RUNNER_DIR:-$(main_checkout_dir)}"
+# longer exists, silently, forever, with nothing supervising the inbox client
+# (the 2026-09-17 outage class, fixed for hook wiring in `scripts/setup-hooks`).
+# The resolver is scripts/lib/cron-entry.sh's cron_main_checkout, shared with the
+# other cron installers: a resolution failure exits 2 with a Fix: at its source,
+# never a silent fallback to this copy's own directory (DND-1642).
+# `--check` inherits this: run from a worktree it reports on the entries that
+# are actually installed, rather than reporting OK on doomed ones.
+# ATHENA_INBOX_CLIENT_RUNNER_DIR (a test seam) skips the resolver.
+if [ -n "${ATHENA_INBOX_CLIENT_RUNNER_DIR:-}" ]; then
+  RUNNER_DIR="$ATHENA_INBOX_CLIENT_RUNNER_DIR"
+else
+  cron_main_checkout "$SCRIPT_DIR" setup-athena-inbox-client || exit 2
+  RUNNER_DIR="${CRON_MAIN_CHECKOUT}/scripts"
+fi
 RUNNER="${RUNNER_DIR}/athena-inbox-client-run.sh"
 SELF_TEST="${SCRIPT_DIR}/test/athena-inbox-client/self-test.sh"
 LAUNCHER="${ATHENA_INBOX_CLIENT_LAUNCHER:-${HOME}/.local/bin/athena-inbox-client}"
@@ -197,18 +200,6 @@ put_crontab() {
        "confirm with 'scripts/setup-athena-inbox-client --check'." >&2
   exit 2
 }
-
-# Which lines are ours: scripts/lib/cron-entry.sh (DND-1503). An uncommented
-# line with a field that IS the runner's absolute path. A commented-out entry,
-# or a longer path such as <runner>.bak, is not ours and is kept.
-CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
-[ -r "$CRON_ENTRY_LIB" ] || {
-  echo "error: $CRON_ENTRY_LIB is missing; without it no crontab line can be told apart as ours." >&2
-  echo "  Fix: restore scripts/lib/cron-entry.sh (fast-forward this checkout to a main that has it), then re-run." >&2
-  exit 2
-}
-# shellcheck source=scripts/lib/cron-entry.sh
-. "$CRON_ENTRY_LIB"
 
 # Everything in the crontab that is NOT one of our entries, blank lines dropped.
 # Non-zero (with the lib's Fix: already on stderr) when the lines could not be

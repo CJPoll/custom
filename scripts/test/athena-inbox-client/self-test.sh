@@ -586,6 +586,25 @@ else
       "could not create a git worktree fixture at ${CASE_DIR}/wt"
 fi
 
+# DND-1642: with no runner-dir override, a main checkout that cannot be resolved
+# is an error at its source (exit 2, Fix:, nothing written). It used to fall
+# back silently to the installer's own directory, which in a worktree is the
+# vanishing path this case exists to prevent. Synthetic PATH stub.
+mkdir -p "${CASE_DIR}/badgit"
+printf '#!/bin/sh\ncase "$*" in *--git-common-dir*|*--git-dir*) echo /nonexistent-dnd1642/.git; exit 0 ;; esac\nexec %s "$@"\n' "$(command -v git)" >"${CASE_DIR}/badgit/git"
+chmod +x "${CASE_DIR}/badgit/git"
+printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
+before="$(cat "${FAKE_CRONTAB}")"
+err="$(PATH="${CASE_DIR}/badgit:${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+       bash "${MAIN}/scripts/setup-athena-inbox-client" --install 2>&1 >/dev/null)"; rc=$?
+if [ "$rc" = 2 ] && grep -q 'cannot enter' <<<"$err" && grep -q 'Fix:' <<<"$err" \
+   && [ "$(cat "${FAKE_CRONTAB}")" = "$before" ]; then
+  ok "an unresolvable main checkout is exit 2 with a Fix: and writes nothing, not a silent fallback (DND-1642)"
+else
+  bad "an unresolvable main checkout is exit 2 with a Fix: and writes nothing" \
+      "rc=$rc stderr=${err} crontab=$(cat "${FAKE_CRONTAB}")"
+fi
+
 # A FAILED crontab write must fail the install loudly. Without a status check
 # the script (which runs without `set -e`) falls through to "installed:" and
 # exits 0 — claiming success while leaving the client unscheduled, which is the

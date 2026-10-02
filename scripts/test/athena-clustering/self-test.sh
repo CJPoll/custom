@@ -735,6 +735,23 @@ else
 fi
 git -C "$IR" checkout -q HEAD -- scripts/athena-clustering-run.sh >&2
 
+# DND-1642: a main checkout that cannot be resolved is an error at its source.
+# A resolver answer the installer cannot enter used to fall through
+# `dirname "$(cd ... && pwd)"` to ".", so the runner became ./scripts/... and
+# the refusal came later, if at all. Synthetic: a PATH stub, never a real repo.
+mkdir -p "${TMP}/badgit"
+REAL_GIT="$(command -v git)"
+printf '#!/bin/sh\ncase "$*" in *--git-common-dir*|*--git-dir*) echo /nonexistent-dnd1642/.git; exit 0 ;; esac\nexec %s "$@"\n' "$REAL_GIT" >"${TMP}/badgit/git"
+chmod +x "${TMP}/badgit/git"
+printf '0 * * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" "PATH=${TMP}/badgit:${PATH}" -- --dry-run)"
+if [ "$rc" = 2 ] && grep -q 'cannot enter' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && ! grep -qF './scripts/' "${TMP}/inst.out" "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
+  ok "an unenterable git dir is exit 2 naming the cause with a Fix:, never a relative runner (DND-1642)"
+else
+  bad "unresolvable main checkout" "rc=$rc out=$(cat "${TMP}/inst.out") err=$(cat "${TMP}/inst.err")"
+fi
+
 case_ 'setup-clustering-cron — which lines are ours (DND-1503)'
 
 # Not ours, each kept byte for byte: a commented-out entry, a longer runner
