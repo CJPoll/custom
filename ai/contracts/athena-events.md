@@ -1464,9 +1464,9 @@ GitLab `walt_ui` project (owner decision OQ-10, 2026-09-24); GitHub is not a
 source.
 
 1. **Payload schema** — exactly `entity_id`, `host`, `project_path`, `mr_iid`,
-   `url`, `title`, `state` and `revision`, each a scalar string, and for
-   `forge.review.commented` also `trigger`, a scalar string, `commented` or
-   `mentioned` (DND-1350) (*Payload fields and their types per event type*). `host` and `project_path` come
+   `url`, `title`, `state` and `revision`, each a scalar string (*Payload
+   fields and their types per event type*). `forge.review.commented` also
+   carries `trigger`, a scalar string, `commented` or `mentioned` (DND-1350). `host` and `project_path` come
    from the hook the request verified against, and `url` is built from them,
    never from the body. The payload never holds the merge request's
    description, diff, comments, commit messages, author, assignees or
@@ -6456,7 +6456,8 @@ the event's trigger. A write that leaves it open keeps the stronger of the
 stored and incoming triggers (`review_requested` > `mentioned` >
 `commented`), as does one that leaves an owner-closed item closed. A close
 carries no trigger and keeps the stored one. A row with no stored trigger
-takes the incoming one on such a write. The column is nullable, never
+takes the incoming one on a write that leaves the item open or
+owner-closed. The column is nullable, never
 backfilled, and refused on any source but `forge_review`, so a row indexed
 before DND-1350 holds `null` until an event next writes it. The row reads
 "Review activity" meanwhile.
