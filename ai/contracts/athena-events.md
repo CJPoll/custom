@@ -6521,7 +6521,19 @@ binding in gen_saas (DND-436); DND-763 tracks the rest of that drift.
   `Athena.PerRow.run/2`. One failing obligation never stops the others, and the
   next pass still runs. A transient failure is retried under a bounded budget.
   A personal ticket whose project stays `unavailable` is one (*Domain and
-  owner-only items*).
+  owner-only items*). The budget also bounds an obligation whose crash could
+  not be settled: when settling a crashed obligation raises too, the attempt is
+  still spent (`Ingest.record_settle_crash/3`, gen_saas DND-1412, #614), so a
+  pending obligation, which holds later closes on its subject (*A close never
+  overtakes the event that creates its item*), cannot outlive its budget while
+  the store works. The spend is guarded on the attempts the row was read
+  with, so a crash-settle that did commit is not counted twice. At the budget
+  the obligation fails `retries-exhausted`, with its index-failure record when
+  that write works, else without it (*A skip is counted, and a failure is
+  recorded and reported*). When the spend itself raises, or the unrecorded end
+  at the budget does, the row is left as it was and retried when next due: two
+  writes failing back to back is a brief store fault, and it must not spend the
+  whole budget.
 - **A close never overtakes the event that creates its item** (DND-1384).
   The sweeper drains obligations by when they are due, oldest record first
   only among those due together. So an event that would create an item and
@@ -6578,7 +6590,18 @@ binding in gen_saas (DND-436); DND-763 tracks the rest of that drift.
   because the payload may carry a field the boundary refuses. A failure is
   reported to the owner the way a failed-delivery row is (*Terminal delivery
   failure — the failed-delivery store* → *Reported, not merely stored*). The
-  page shows unread failures apart from an empty index.
+  page shows unread failures apart from an empty index. One exception
+  (DND-1412): an obligation that reached `retries-exhausted` through a failing
+  crash-settle, and whose index-failure record write then raised too, still
+  ends `failed:retries-exhausted` without the record. It is logged at error
+  with a `Fix:`, and the owner report does not show it.
+
+  **Later (2026-10-02, DND-1801):** this bullet had no exception: every failure
+  went to the index-failure record and the owner report. Superseded in one case
+  by DND-1412 (gen_saas #614, `33e4a4b4`): when the record write itself raises
+  at the end of a crash-settle's budget, the obligation ends without it (also
+  stated in *A supervised sweeper drains the obligations*). Ending it, logged,
+  is what keeps the pending row from holding every later close on its subject.
 
 **Idempotency is per (event, item).** The obligation's grain is the event
 (its `idempotency_key`) and the item it resolves to. Ingest is an upsert on the
