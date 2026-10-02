@@ -194,10 +194,11 @@ def suite_rows(suite, status, conclusion, started)
   JOBS.map { |j| suite_row(j, suite, status, conclusion, started) }
 end
 
-def ci_run(id, suite, status, conclusion, created, event: "pull_request", workflow_id: 256_531_677, sha: SHA)
+def ci_run(id, suite, status, conclusion, created, event: "pull_request", workflow_id: 256_531_677, sha: SHA,
+           started: created)
   { "id" => id, "name" => "CI", "path" => ".github/workflows/ci.yml", "head_sha" => sha, "event" => event,
-    "status" => status, "conclusion" => conclusion, "created_at" => created, "check_suite_id" => suite,
-    "workflow_id" => workflow_id }
+    "status" => status, "conclusion" => conclusion, "created_at" => created, "run_started_at" => started,
+    "check_suite_id" => suite, "workflow_id" => workflow_id }
 end
 
 def runs_of(*runs) = { "total_count" => runs.size, "workflow_runs" => runs }
@@ -237,9 +238,10 @@ check("S4 an older cancelled run while the newer run still runs is pending, not 
   css(rows, runs_of(newer, OLD_CANCELLED)).state == :pending
 end
 check("S5 an older red run is not superseded by a newer run that is only skipped (it proves nothing)") do
+  newer_skipped = ci_run(36_998_704_873, NEW_SUITE, "completed", "skipped", "2026-10-02T11:01:25Z")
   rows = [suite_row("Test", OLD_SUITE, "completed", "failure", "2026-10-02T11:01:24Z"),
           suite_row("Test", NEW_SUITE, "completed", "skipped", "2026-10-02T11:13:17Z")]
-  s = css(rows, runs_of(NEW_SUCCESS, OLD_CANCELLED))
+  s = css(rows, runs_of(newer_skipped, OLD_CANCELLED))
   s.state == :failure && s.failed.include?("Test(failure)")
 end
 check("S6 a push run and a pull_request run of one workflow are both current: neither supersedes the other") do
@@ -264,10 +266,52 @@ check("S9 a non-Actions app's runs are judged on their own (no workflow run orde
           suite_row("lint", 2, "completed", "success", "2026-10-02T11:13:17Z", app: app)]
   css(rows, runs_of).state == :failure
 end
-check("S10 runs from more than one suite need the runs list; one suite per check does not") do
+check("S10 runs from more than one suite, or a red Actions row, need the runs list; one green suite does not") do
   !W.needs_runs?(TCS, JSON.parse(checks_body(NEW_ROWS))) &&
     W.needs_runs?(TCS, JSON.parse(checks_body(NEW_ROWS + OLD_ROWS))) &&
+    W.needs_runs?(TCS, JSON.parse(checks_body(OLD_ROWS))) &&
+    !W.needs_runs?(TCS, JSON.parse(checks_body([check_row("lint", "completed", "failure")]))) &&
     !W.needs_runs?(TWS, JSON.parse(checks_body(NEW_ROWS + OLD_ROWS)))
+end
+check("S16 the cancelled run's rows while the newer run is queued with no check-runs yet: pending, not failure") do
+  queued = ci_run(36_998_704_873, NEW_SUITE, "queued", nil, "2026-10-02T11:01:25Z")
+  css(OLD_ROWS, runs_of(queued, OLD_CANCELLED)).state == :pending
+end
+check("S17 a cancelled row whose newer run has not created that job yet: pending, not failure") do
+  newer = ci_run(36_998_704_873, NEW_SUITE, "in_progress", nil, "2026-10-02T11:01:25Z")
+  rows = [suite_row("Build", NEW_SUITE, "completed", "success", "2026-10-02T11:09:23Z"),
+          suite_row("Build", OLD_SUITE, "completed", "cancelled", "2026-10-02T11:01:24Z"),
+          suite_row("Test", OLD_SUITE, "completed", "cancelled", "2026-10-02T11:01:24Z")]
+  css(rows, runs_of(newer, OLD_CANCELLED)).state == :pending
+end
+check("S18 a cancelled row whose newer run completed without that job is judged: failure") do
+  rows = [suite_row("Build", NEW_SUITE, "completed", "success", "2026-10-02T11:09:23Z"),
+          suite_row("Test", OLD_SUITE, "completed", "cancelled", "2026-10-02T11:01:24Z")]
+  s = css(rows, runs_of(NEW_SUCCESS, OLD_CANCELLED))
+  s.state == :failure && s.failed == ["Test(cancelled)"]
+end
+check("S19 an older run re-run after the newer one is the current run (its start time moved): its failure counts") do
+  rerun = ci_run(36_998_703_158, OLD_SUITE, "completed", "failure", "2026-10-02T11:01:24Z",
+                 started: "2026-10-02T12:00:00Z")
+  rows = [suite_row("Test", OLD_SUITE, "completed", "failure", "2026-10-02T12:00:05Z"),
+          suite_row("Test", NEW_SUITE, "completed", "success", "2026-10-02T11:13:17Z")]
+  s = css(rows, runs_of(NEW_SUCCESS, rerun))
+  s.state == :failure && s.failed == ["Test(failure)"] && !s.summary.include?("superseded")
+end
+check("S20 a run with no readable start time orders nothing: its rows are judged on their own") do
+  untimed = OLD_CANCELLED.merge("run_started_at" => nil, "created_at" => nil)
+  css(NEW_ROWS + OLD_ROWS, runs_of(NEW_SUCCESS, untimed)).state == :failure
+end
+check("S21 while the newer run runs, an older suite's green rows are judged and only its red rows wait") do
+  newer = ci_run(36_998_704_873, NEW_SUITE, "in_progress", nil, "2026-10-02T11:01:25Z")
+  rows = [suite_row("Build", NEW_SUITE, "in_progress", nil, "2026-10-02T11:09:23Z"),
+          suite_row("Build", OLD_SUITE, "completed", "success", "2026-10-02T11:01:24Z"),
+          suite_row("Test", NEW_SUITE, "in_progress", nil, "2026-10-02T11:09:23Z"),
+          suite_row("Test", OLD_SUITE, "completed", "cancelled", "2026-10-02T11:01:24Z")]
+  sorted = W.supersede(rows, W.runs_by_suite!(runs_of(newer, OLD_CANCELLED)))
+  sorted[:awaiting].map { |r| r["name"] } == ["Test"] &&
+    sorted[:judged].map { |r| [r["name"], r["status"]] }.sort ==
+      [["Build", "completed"], ["Build", "in_progress"], ["Test", "in_progress"]]
 end
 check("S11 a runs body with no workflow_runs array is unreadable, never no runs") do
   (css(NEW_ROWS + OLD_ROWS, { "message" => "x" }) rescue $!).is_a?(W::Unreadable)
@@ -304,6 +348,15 @@ check("WS4 by --workflow, a red push run is not hidden by a newer green pull_req
   push = ci_run(1003, OLD_SUITE, "completed", "failure", "2026-10-02T11:01:24Z", event: "push")
   s = W.judge(TWS, runs_of(push, NEW_SUCCESS))
   s.state == :failure && s.summary.include?("1003")
+end
+check("WS6 by --workflow, a run with no readable time is unreadable, never the oldest") do
+  untimed = NEW_SUCCESS.merge("run_started_at" => nil, "created_at" => nil)
+  (W.judge(TWS, runs_of(OLD_CANCELLED, untimed)) rescue $!).is_a?(W::Unreadable)
+end
+check("WS7 by --workflow, an older run re-run last is the current run") do
+  rerun = ci_run(36_998_703_158, OLD_SUITE, "completed", "failure", "2026-10-02T11:01:24Z",
+                 started: "2026-10-02T12:00:00Z")
+  W.judge(TWS, runs_of(rerun, NEW_SUCCESS)).state == :failure
 end
 check("WS5 by --workflow, a pending newest run is pending even when an older run is cancelled") do
   newer = ci_run(36_998_704_873, NEW_SUITE, "in_progress", nil, "2026-10-02T11:01:25Z")

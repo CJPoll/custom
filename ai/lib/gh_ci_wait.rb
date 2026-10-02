@@ -187,25 +187,36 @@ module GhCiWait
   #     push run and a pull_request run of one workflow are both current, and
   #     two workflows with a same-named job never fold.
   #   * Within an identity the runs are grouped by check suite; the suite of
-  #     the newest workflow run (created_at, then run id) is current, and every
-  #     run in it is judged.
+  #     the newest workflow run is current, and every run in it is judged.
+  #     Newest is by run_started_at (a re-run moves it, as a re-run moves the
+  #     guard's check-run start times), then run id.
   #   * Older suites' runs are superseded only when every current run of that
   #     identity completed SUCCESS (a newer skipped or neutral run proves
   #     nothing). While a current run is still open they await it (pending);
   #     once the current runs completed without that, they are judged.
+  #   * A newer run of the same workflow and event that is still open, with no
+  #     check-run of this check yet (queued, or a `needs:` job not created),
+  #     holds the check's non-green rows as awaiting: the waiter does not call
+  #     FAILED on a run that is about to be replaced. Once that run completes
+  #     without the check, the rows are judged, as the guard judges them.
   #   * A row whose identity cannot be read (no name, suite or app; a
-  #     non-Actions app; an Actions suite the runs list does not hold) is
-  #     judged on its own, never folded. This is stricter than the guard, which
-  #     orders a non-Actions app's suites by start time.
+  #     non-Actions app; an Actions suite the runs list does not hold, or whose
+  #     run has no readable time) is judged on its own, never folded. This is
+  #     stricter than the guard, which orders a non-Actions app's suites by
+  #     start time.
 
   # needs_runs?(target, body) -> true when some (app, check name) has runs
-  # from more than one check suite, so only the runs list can tell which is
-  # current. Otherwise nothing can be superseded and one read is enough.
+  # from more than one check suite, or an Actions check-run completed without
+  # success: only the runs list can tell whether a newer run replaces it.
+  # Otherwise nothing can be superseded and one read is enough.
   def needs_runs?(target, body)
     return false unless target.mode == :checks
 
-    check_rows!(body).group_by { |r| [r.dig("app", "id"), r["name"]] }
-                     .any? { |_, rs| rs.map { |r| r.dig("check_suite", "id") }.uniq.size > 1 }
+    rows = check_rows!(body)
+    return true if rows.any? { |r| r.dig("app", "slug") == "github-actions" && r["status"] == "completed" && !green?(r) }
+
+    rows.group_by { |r| [r.dig("app", "id"), r["name"]] }
+        .any? { |_, rs| rs.map { |r| r.dig("check_suite", "id") }.uniq.size > 1 }
   end
 
   # runs_by_suite!(runs_body) -> { check_suite_id => run }.
@@ -227,9 +238,13 @@ module GhCiWait
 
     alone, keyed = rows.partition { |r| check_identity(r, by_suite).nil? }
     out[:judged].concat(alone)
-    keyed.group_by { |r| check_identity(r, by_suite) }.each_value do |group|
+    keyed.group_by { |r| check_identity(r, by_suite) }.each do |(_app, workflow_id, event, _name), group|
       suites = group.group_by { |r| r.dig("check_suite", "id") }
                     .sort_by { |suite, _| run_order(by_suite.fetch(suite)) }
+      if newer_open_run?(by_suite, workflow_id, event, by_suite.fetch(suites.last.first))
+        group.each { |r| (green?(r) ? out[:judged] : out[:awaiting]) << r }
+        next
+      end
       current = suites.last.last
       out[:judged].concat(current)
       older = suites[0...-1].flat_map(&:last)
@@ -253,16 +268,34 @@ module GhCiWait
 
     run = by_suite[suite]
     return nil unless run && run["workflow_id"].is_a?(Integer) && run["event"].is_a?(String) && !run["event"].empty?
+    return nil unless run_time(run)
 
     [app, run["workflow_id"], run["event"], name]
+  end
+
+  # A run of that workflow and event, newer than `current`, still open.
+  def newer_open_run?(by_suite, workflow_id, event, current)
+    by_suite.each_value.any? do |run|
+      run["workflow_id"] == workflow_id && run["event"] == event && run["status"] != "completed" &&
+        run_time(run) && (run_order(run) <=> run_order(current)) == 1
+    end
   end
 
   def green?(row)
     row["status"] == "completed" && SUCCESS_CONCLUSIONS.include?(row["conclusion"])
   end
 
+  TIME_RE = /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/.freeze
+
+  # The run's start time (a re-run moves it), else its creation time; nil when
+  # neither is a whole-second UTC time, so a missing time never orders a run.
+  def run_time(run)
+    [run["run_started_at"], run["created_at"]].find { |t| t.is_a?(String) && t.match?(TIME_RE) }
+  end
+
+  # Sort key: callers check run_time first (check_identity, workflow_runs!).
   def run_order(run)
-    [run["created_at"].to_s, run["id"].to_i]
+    [run_time(run).to_s, run["id"].to_i]
   end
 
   # "; superseded by a newer run of the same check: run 1 CI pull_request (a(cancelled), ...)"
@@ -311,7 +344,13 @@ module GhCiWait
                         "the newest run may be on another page"
     end
 
-    runs.select { |r| r["head_sha"] == sha && workflow_match?(r, workflow) }
+    matched = runs.select { |r| r["head_sha"] == sha && workflow_match?(r, workflow) }
+    untimed = matched.reject { |r| run_time(r) }
+    unless untimed.empty?
+      raise Unreadable, "runs #{untimed.map { |r| r['id'] }.join(', ')} have no readable run_started_at or " \
+                        "created_at, so which run is newest is unknown"
+    end
+    matched
   end
 
   # workflow_state(body, target) -> State of the workflow on the sha: the

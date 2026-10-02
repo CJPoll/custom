@@ -200,8 +200,21 @@ check("MS4 an unreadable runs body is COULD-NOT-LOOK naming the runs list") do
   o = run(rig)
   o.verdict == :could_not_look && o.line.include?("workflow_runs")
 end
-check("MS5 a lone cancelled run (one suite) is FAILED on one read") do
-  rig = Rig.new([checks(sr("Test", 1, "cancelled"))])
+check("MS5 a lone cancelled run with no newer run is FAILED, after reading the runs list") do
+  lone = ok("total_count" => 1, "workflow_runs" => [wr(10, 1, "cancelled", "2026-10-02T11:01:24Z")])
+  rig = Rig.new([checks(sr("Test", 1, "cancelled")), lone])
+  o = run(rig)
+  o.verdict == :failed && rig.paths == [W.path_for(TC), W.runs_path_for(TC)]
+end
+check("MS6 a cancelled run whose newer run is queued with no check-runs waits, then the newer success is DONE") do
+  queued = ok("total_count" => 2, "workflow_runs" => [wr(20, 2, nil, "2026-10-02T11:01:25Z").merge("status" => "queued"),
+                                                       wr(10, 1, "cancelled", "2026-10-02T11:01:24Z")])
+  rig = Rig.new([checks(sr("Test", 1, "cancelled")), queued, TWO_SUITES, WF_RUNS])
+  o = run(rig)
+  o.verdict == :done && rig.sleeps == [60] && rig.log.any? { |l| l.include?("await") }
+end
+check("MS7 a red check from a non-Actions app is FAILED on one read (no runs list can supersede it)") do
+  rig = Rig.new([checks(cr("lint", "completed", "failure"))])
   o = run(rig)
   o.verdict == :failed && rig.paths == [W.path_for(TC)]
 end
