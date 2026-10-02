@@ -47,6 +47,15 @@ if [ "$rc" = 2 ] && [ -z "${MAIN_CHECKOUT}" ] && grep -q '^who: .* not inside a 
 else
   bad "outside any git checkout: exit 2 with Fix: and no main checkout" "rc=$rc main=${MAIN_CHECKOUT} err=$(cat "${T}/err")"
 fi
+SG="${T}/sep-work"
+git init -q -b main --separate-git-dir "${T}/sep-gitdir" "$SG" >&2
+MAIN_CHECKOUT=stale
+main_checkout "$SG" 2>"${T}/err"; rc=$?
+if [ "$rc" = 2 ] && [ -z "${MAIN_CHECKOUT}" ] && grep -q 'not <checkout>/.git' "${T}/err" && grep -q 'Fix:' "${T}/err"; then
+  ok "a --separate-git-dir repo: exit 2 with Fix:, never the git dir's parent"
+else
+  bad "a --separate-git-dir repo: exit 2 with Fix:" "rc=$rc main=${MAIN_CHECKOUT} err=$(cat "${T}/err")"
+fi
 MAIN_CHECKOUT=stale
 main_checkout "${T}/does-not-exist" 2>"${T}/err"; rc=$?
 if [ "$rc" = 2 ] && [ -z "${MAIN_CHECKOUT}" ] && grep -q 'Fix:' "${T}/err"; then

@@ -129,7 +129,14 @@ def main_checkout_dir(dir = REPO_DIR)
     raise MainCheckoutError, "'#{dir}' is not inside a git checkout (git common dir #{common.inspect})"
   end
 
-  File.dirname(File.realpath(common))
+  common = File.realpath(common)
+  # Only <checkout>/.git has the checkout as its parent; a --separate-git-dir
+  # repo's parent is a well-formed wrong key (same rule as main-checkout.sh).
+  unless File.basename(common) == ".git"
+    raise MainCheckoutError, "the git common dir of '#{dir}' is #{common.inspect}, not <checkout>/.git"
+  end
+
+  File.dirname(common)
 rescue SystemCallError => e
   raise MainCheckoutError, "cannot resolve the git common dir of '#{dir}' (#{common.inspect}): #{e.message}"
 end
@@ -152,7 +159,9 @@ def settings_path
 end
 
 # Expand a registry (repo-relative) script path to the absolute command string
-# settings.json stores, for the canonical (main) checkout.
+# settings.json stores, for the canonical (main) checkout. The default `dir`
+# (and the `dirs = checkout_dirs` defaults below) raise MainCheckoutError when
+# there is no main checkout; the live path passes them explicitly, from run().
 def abs_script(rel, dir = main_checkout_dir)
   File.join(dir, rel)
 end
@@ -1501,6 +1510,17 @@ def self_test
     end
     check.call("main_checkout_dir(non-git) raises MainCheckoutError naming the dir",
                raised.to_s.include?("not inside a git checkout") && raised.to_s.include?(d))
+    sep = File.join(d, "sep-work")
+    sep_ok = system("git", "init", "-q", "--separate-git-dir", File.join(d, "sep-gitdir"), sep,
+                    out: File::NULL, err: File::NULL)
+    raised = begin
+      main_checkout_dir(sep)
+      nil
+    rescue MainCheckoutError => e
+      e.message
+    end
+    check.call("main_checkout_dir(--separate-git-dir repo) raises, never the git dir's parent",
+               sep_ok && raised.to_s.include?("not <checkout>/.git"))
     require "fileutils"
     FileUtils.mkdir_p(File.join(d, "ai"))
     FileUtils.cp_r(File.join(REPO_DIR, "ai", "hooks"), File.join(d, "ai", "hooks"))

@@ -91,7 +91,8 @@ resolve_hooks_repo_dir() {
   fi
   # shellcheck source=scripts/lib/main-checkout.sh
   . "$MAIN_CHECKOUT_LIB"
-  main_checkout "$SCRIPT_DIR" setup-hooks || { echo "setup-hooks: nothing was written." >&2; exit 2; }
+  # main_checkout prints the cause and its Fix:; nothing has been written yet.
+  main_checkout "$SCRIPT_DIR" setup-hooks || exit 2
   HOOKS_REPO_DIR="$MAIN_CHECKOUT"
 }
 SETTINGS="${HOOKS_SETTINGS_FILE:-${HOME}/.claude/settings.json}"
@@ -1005,7 +1006,7 @@ PY6
     fi
     rm -f "${nogit}/scripts/lib/main-checkout.sh"
     ngrc=0
-    ngerr="$(env -u HOOKS_REGISTRY_FILE HOOKS_SETTINGS_FILE="$ngset" bash "${nogit}/scripts/setup-hooks" --install 2>&1 >/dev/null)" || ngrc=$?
+    ngerr="$(env -u HOOKS_REGISTRY_FILE GIT_CEILING_DIRECTORIES="$tmp" HOOKS_SETTINGS_FILE="$ngset" bash "${nogit}/scripts/setup-hooks" --install 2>&1 >/dev/null)" || ngrc=$?
     if [ "$ngrc" = 2 ] && grep -q 'main-checkout.sh' <<<"$ngerr" && grep -q 'Fix:' <<<"$ngerr" && cmp -s "$ngset" "${ngset}.orig"; then
       echo "  ok   a copy without scripts/lib/main-checkout.sh is exit 2 with Fix:, settings unchanged"
     else

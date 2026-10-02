@@ -15,7 +15,8 @@
 #     MAIN_CHECKOUT_IN_WORKTREE  1 when <script-dir> is in a linked worktree, else 0
 #   <who> prefixes the error line (default main_checkout).
 #   Returns 0; 2 with a Fix: on stderr, and MAIN_CHECKOUT empty, when
-#   <script-dir> is not inside a git checkout or its git dirs cannot be entered.
+#   <script-dir> is not inside a git checkout, its git dirs cannot be entered,
+#   or its common dir is not <checkout>/.git (a --separate-git-dir repo).
 #   A resolution failure is never answered with a fallback directory: the
 #   caller's own directory is exactly the worktree path this exists to avoid.
 
@@ -35,6 +36,15 @@ main_checkout() {
     echo "  Fix: run the copy in the main checkout's scripts/ (e.g. ~/dev/custom/scripts/)." >&2
     return 2
   }
+  # The main checkout is the common dir's parent only when the common dir IS
+  # <checkout>/.git. A --separate-git-dir repo's parent is somewhere else
+  # entirely: a well-formed wrong key, so it is refused, never used.
+  case "${common}" in
+    */.git) ;;
+    *) echo "${who}: the git common dir of '${dir}' is '${common}', not <checkout>/.git, so its main checkout cannot be derived from it" >&2
+       echo "  Fix: run the copy in a main checkout whose git dir is its own .git (e.g. ~/dev/custom/scripts/)." >&2
+       return 2 ;;
+  esac
   MAIN_CHECKOUT="$(dirname -- "${common}")"
   [ "${gitdir}" = "${common}" ] || MAIN_CHECKOUT_IN_WORKTREE=1
   return 0

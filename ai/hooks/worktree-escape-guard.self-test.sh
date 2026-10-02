@@ -351,7 +351,7 @@ REPO="$(cd -- "${HERE}/../.." && pwd -P)"
 # shellcheck source=ai/test/lib/landed-fixture.bash
 . "${REPO}/ai/test/lib/landed-fixture.bash"
 FIX="${TMP}/hooks-fixture"
-landed_fixture "${REPO}" "${FIX}" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks \
+landed_fixture "${REPO}" "${FIX}" scripts/setup-hooks scripts/lib/main-checkout.sh ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks \
   || bad "build the setup-hooks fixture repo" "landed_fixture failed; see its Fix: above"
 SETTINGS="${TMP}/settings.json"
 printf '{}\n' > "${SETTINGS}"

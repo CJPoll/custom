@@ -144,8 +144,9 @@ fi
 # path on cleanup, and cron would then fire a job pointing at a file that no
 # longer exists, silently, forever, with nothing supervising the inbox client
 # (the 2026-09-17 outage class, fixed for hook wiring in `scripts/setup-hooks`).
-# The resolver is scripts/lib/cron-entry.sh's cron_main_checkout, shared with the
-# other cron installers: a resolution failure exits 2 with a Fix: at its source,
+# The resolver is scripts/lib/cron-entry.sh's cron_main_checkout (a wrapper over
+# scripts/lib/main-checkout.sh, DND-1720), shared with the other cron
+# installers: a resolution failure exits 2 with a Fix: at its source,
 # never a silent fallback to this copy's own directory (DND-1642).
 # `--check` inherits this: run from a worktree it reports on the entries that
 # are actually installed, rather than reporting OK on doomed ones.

@@ -223,7 +223,7 @@ REPO_ROOT="$(CDPATH= cd "$(dirname "$HOOK")/../.." && pwd -P)"
 FIXTURE="${SANDBOX}/hooks-fixture"
 INSTALL_OUT=$(
   . "${REPO_ROOT}/ai/test/lib/landed-fixture.bash" &&
-  landed_fixture "$REPO_ROOT" "$FIXTURE" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks &&
+  landed_fixture "$REPO_ROOT" "$FIXTURE" scripts/setup-hooks scripts/lib/main-checkout.sh ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/hooks &&
   printf '{}\n' > "${SANDBOX}/installed.json" &&
   HOOKS_SETTINGS_FILE="${SANDBOX}/installed.json" "${FIXTURE}/scripts/setup-hooks" --install 2>&1 &&
   SETTINGS="${SANDBOX}/installed.json" python3 - <<'PY'
