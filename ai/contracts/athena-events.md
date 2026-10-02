@@ -972,6 +972,7 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `title` — the merge request's title | string | scalar |
 | | `state` — `opened`, `merged` or `closed` | string | scalar |
 | | `revision` — the merge request's `updated_at`, ISO 8601 UTC: the family's ordering revision | string | scalar |
+| | `request` (`forge.review.requested` only, DND-1415) — `new` when this event asks for the owner's review (the `open` action, the owner added as a reviewer, or GitLab's re-request: the owner's reviewer entry turning `re_requested`), else `refresh`. It is the ingress classifier's decision, never read from the body. A payload stored before DND-1415 has none and reads as `refresh` | string | scalar |
 | | `trigger` (`forge.review.commented` only, DND-1350) — `commented` or `mentioned`: which rule made the comment the owner's | string | scalar |
 | `forge.token.expiring` (the forge token family, *Declared families beyond the first pass*) | `entity_id` — `forge_token:<host>:<project_path>:<token_id>`, the access token | string | scalar |
 | | `host` — the hook's forge host, never the body's | string | scalar |
@@ -1491,7 +1492,10 @@ source.
    `gitlab:<hook_id>:<delivery id>:<kind>`, where the delivery id is GitLab's
    `Idempotency-Key` (stable across GitLab's own retries of one trigger), else
    its `X-Gitlab-Event-UUID`, each only when it is a UUID; with neither it is
-   `<entity_id>:<kind>:<revision>`. The ingress routes each key once, through
+   `<entity_id>:<kind>:<revision>`, which does not include `request`: with no
+   delivery id, a `new` and a `refresh` delivery at the same `updated_at`
+   dedupe to whichever arrives first, the same one-second tie the forge
+   paragraph of *States* accepts (DND-1415). The ingress routes each key once, through
    the event store's seen-check (*Idempotency is per (event, rule)*), so a
    redelivery converges on the first event. A key is compared whole and
    never split, and both shapes are unambiguous although `:` is their
@@ -1528,7 +1532,20 @@ first, so a change to a closed request never reads as a new review:
   reviewer → the same event, but only to close an existing item (*Comments
   (DND-1337)* → *A finish closes the owner's item*); otherwise
   `not-owner-reviewer`;
-- `opened`, with the owner added as a reviewer, or still one → `forge.review.requested`;
+- `opened`, with the owner added as a reviewer, or still one → `forge.review.requested`.
+  Its `request` is `new` for the `open` action, the owner added, or GitLab's
+  re-request of the owner's review (the owner's reviewer entry `re_requested`
+  now and not before), read in either change shape (`{previous, current}` or
+  `[previous, current]`). Any other update is `refresh`, including a
+  reopened merge request (the `reopen` action) and a reviewer change with an
+  entry whose id cannot be read: doubt reads as the safe side (DND-1415).
+  GitLab sends a merge request event for every update, so a push is a
+  `refresh`, never a new ask.
+
+  **Later (2026-10-02, DND-1415):** this bullet routed every such event as
+  `forge.review.requested` and did not say whether the request was new. A
+  re-request after the owner completed the item looked the same as a push, so
+  it refreshed the done item silently.
 - `opened`, with the owner removed as a reviewer → `forge.review.removed`;
 - anything else is a counted skip (`not-owner-reviewer`, `not-merge-request`,
   `malformed`, `unhandled-state`), and no event.
@@ -6966,22 +6983,24 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | `active` → `done` | the re-sync, when the item left its subscription's scope, or its page read answers not found | `closed_by: source_out_of_scope` |
 | `done` → `active` (reopen) | ingest, for `closed_by` `source_status` or `source_out_of_scope`, on an event whose revision is later than the row's and whose status is non-terminal | |
 | `done` → `active` (reopen) | ingest, for `closed_by: source_deleted`, on `notion.ticket.undeleted` only | |
-| `done` → `active` (reopen) | ingest, for `closed_by: owner` on a `forge_review` item, on a `forge.review.commented` whose revision is strictly later than the row's and whose status class is `open` (declared and not terminal, DND-995; DND-1351) | |
+| `done` → `active` (reopen) | ingest, for `closed_by: owner` on a `forge_review` item, on a `forge.review.commented`, or a `forge.review.requested` with `request: new` (DND-1415), whose revision is strictly later than the row's and whose status class is `open` (declared and not terminal, DND-995; DND-1351) | |
 | `dismissed` → `active` (reopen) | ingest, for a `forge_review` item, on a `forge.review.commented` with `trigger: mentioned` whose revision is strictly later than the row's and whose status class is `open` (DND-1351) | |
 
 - **Ingest never undoes a completed lease, and undoes an owner's decision
-  only on news for the owner** (D60, D62, DND-1351). It never promotes and
+  only on news for the owner** (D60, D62, DND-1351, DND-1415). It never promotes and
   never reopens an item closed by `lease_complete`. It reopens an owner
-  decision only on a `forge.review.commented` whose revision is strictly later
-  than the row's and whose status class is `open`: a comment or a mention
-  reopens an item closed by `owner`, and only a mention (`trigger: mentioned`)
+  decision only on a `forge.review.commented`, or a `forge.review.requested`
+  whose `request` is `new` (DND-1415), whose revision is strictly later than
+  the row's and whose status class is `open`: a comment, a mention or a new
+  review request reopens an item closed by `owner`, and only a mention (`trigger: mentioned`)
   reopens a `dismissed` one. A dismissal says the thread is not the owner's;
   only a comment addressed to them by name says it is again. The row's
   `source_revision` is at least the information the owner decided on (an
   owner action never changes it), so an equal, older, missing or unparseable
   revision never reopens: the source wins on new information, the owner on
-  the same information, as for a restore. A `forge.review.requested` never
-  reopens an owner decision, and no other source carries news. The reopen is
+  the same information, as for a restore. A `forge.review.requested` whose
+  `request` is `refresh` (or absent) never reopens an owner decision, and a
+  new request never reopens a dismissal. No other source carries news. The reopen is
   not a restore: it writes no `restored_from`, and the item takes the
   reopening event's `forge_trigger`. Two windows are accepted. A comment the
   owner already read on the forge, still owed to the index when they closed
@@ -6997,6 +7016,11 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   `owner`." Superseded by decisions D60 and D62 (epic "Athena: unified
   priorities"), shipped in gen_saas #600 (`8074e777`): once the owner marked a
   merge request's row done, later comments and mentions updated it silently.
+
+  **Later (2026-10-02, DND-1415):** this bullet read "A
+  `forge.review.requested` never reopens an owner decision." Superseded: a
+  re-request after the owner completed the item refreshed it silently, so the
+  owner never saw the new ask. Shipped in gen_saas #616 (`54e296f4`).
 - **A reopen needs evidence newer than the close.** Redelivery and reordering
   are normal (*Idempotency is per (event, item)*). So an update whose revision
   equals the row's, or that has none, never reopens a `source_status` close.
@@ -7030,9 +7054,10 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   `forge.review.requested` whose `revision` is strictly newer than the row's
   reopens a `source_status` close, like any other, and so does a
   `forge.review.commented` (DND-1337); neither ever reopens a
-  `lease_complete` close, and only a `forge.review.commented` also reopens an
-  owner decision, at a strictly newer revision (*Ingest never undoes a
-  completed lease*, above; a `requested` never does). GitLab's `updated_at`
+  `lease_complete` close. A `forge.review.commented`, and a
+  `forge.review.requested` whose `request` is `new` (DND-1415), also reopen an
+  owner decision at a strictly newer revision (*Ingest never undoes a
+  completed lease*, above). A `refresh` never does. GitLab's `updated_at`
   has one-second precision, so a removal and a re-request in the same second
   tie: the re-request does not reopen, and the item shows again on the merge
   request's next change. That is the safe direction of *A close needs an
