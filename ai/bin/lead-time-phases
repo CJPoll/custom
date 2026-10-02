@@ -110,8 +110,25 @@ HELP = <<~TXT
   in full), and the n/a reasons carry it. A joined row records
   gated_head_source. Rows ingested before this are not re-derived.
 
+  No gate before the final integration run (DND-1819). Verify is the
+  captain's time between the first gate run and the final integration
+  attempt. When the unit's first gate run is the one inside its final
+  integration run, that window is empty: verify is a measured 0 that
+  starts where it ends (the run's start in the with-critic flow, the PASS
+  in the standalone flow, which then stands before the first gate run),
+  and implement ends there too, so the phases still telescope. Both cells
+  carry a `basis` naming the shape; the row's gate_first anchor stays the
+  real first gate run. Two neighbouring shapes are n/a with a reason
+  naming them, never "invalid": a first gate run after a final run with no
+  recorded end (inside cannot be told), and, standalone, a PASS before a
+  first gate run that ran before the final run (the captain gated after
+  the PASS, so no PASS ends verify). Rows ingested before this are not
+  re-derived.
+
   A phase whose anchor is missing is null with a reason; one whose anchors
-  are out of order is "invalid" with a reason. Never 0, never negative.
+  are out of order in any other way (a gate run before the dispatch stamp,
+  a first gate run after the final run ended) is "invalid" with a reason.
+  Never 0 for a missing input, never negative.
 
   Origin (DND-1531). Telemetry is machine-local, so --ingest records where
   each improve landing was worked:

@@ -1124,6 +1124,127 @@ end
 sq_l = landing.merge("landed_via" => "merge", "landed_commit" => "1" * 40, "gated_head" => HEAD)
 check("X5 a merge landing is left as it was") { rb_resolve(sq_l, RB_RUNS, S.empty("x")) == sq_l }
 
+# ── DND-1819: no gate ran before the final integration run ─────────────────
+# Verify is the captain's time between the first gate run and the final
+# integration attempt. When the unit's first gate run is the one inside its
+# final integration run, no gate ran before that attempt: the window is
+# empty, and verify is a measured 0 that starts where it ends (the run's
+# start in the with-critic flow, the PASS in the standalone flow). The recorded
+# gate_first anchor is kept as it was; the cells say which shape they read.
+
+# A fresh landing: a check block above (X4) reassigns the top-level `l`.
+vl = landing
+
+VW = [
+  ev("integration_gate.run", "2026-10-01T04:00:00Z", duration_s: 300.0, attrs: WC_RUN),
+  ev("harness_gate.run", "2026-10-01T04:00:05Z", duration_s: 280.0, attrs: { "ok" => true, "run_id" => "v1" }),
+  ev("critic.round", "2026-10-01T04:00:06Z", duration_s: 45.0, attrs: { "verdict" => "pass" }),
+].freeze
+va = fixture { anchors(wl, S.ok(VW + [PUSH])) }
+vp = fixture { L::Phases.compute(va) }
+check("V1 with-critic, first gate inside the final run: the flow is with_critic") { L::Phases.flow(va) == "with_critic" }
+check("V1 verify is a measured 0, not invalid") do
+  vp.dig("verify", "s") == 0 && !vp["verify"].key?("invalid") && !vp["verify"].key?("na_reason")
+end
+check("V1 the verify cell names the shape") { vp.dig("verify", "basis").to_s.include?("inside its final integration run") }
+check("V1 implement ends at the final run's start") { vp.dig("implement", "s") == 3 * 3600 }
+check("V1 the implement cell names the shape") { vp.dig("implement", "basis").to_s.include?("inside its final integration run") }
+check("V1 integrate, queue and merge read as in W1") do
+  vp.dig("integrate", "s") == 300 && vp.dig("queue", "s") == 25 * 60 && vp.dig("merge", "s") == 5
+end
+check("V1 the phases sum to landing - dispatch exactly") do
+  L::PHASES.all? { |p| vp.dig(p, "s").is_a?(Integer) } &&
+    vp.values.sum { |c| c["s"] } == (wl["landed_at"] - wl["start"]).to_i
+end
+check("V1 the recorded gate_first anchor is the real first gate run") { va["gate_first"].at == t("2026-10-01T04:00:05Z") }
+vg = fixture { L::Counters.verify_gate_runs(landing: wl, events: S.ok(VW + [PUSH]), anchors: va) }
+check("V1 gate_runs_s is a measured 0.0 (no gate run inside an empty verify)") { vg["gate_runs_s"].eql?(0.0) }
+vrow = fixture do
+  L::Ledger.improve_row(repo: "custom", landing: wl, anchors: va, counters: {}, telemetry_status: :ok,
+                        ingested_at: t("2026-10-01T06:00:00Z"), origin: L::Origin.local("x"), verify_gate_runs: vg)
+end
+check("V1 the ledger row carries verify 0 with its basis and the gate split") do
+  vrow.dig("phases", "verify", "s") == 0 && vrow.dig("phases", "verify", "gate_runs_s") == 0.0 &&
+    vrow.dig("phases", "verify", "basis").is_a?(String) && vrow.dig("anchors", "gate_first", "at") == "2026-10-01T04:00:05Z"
+end
+check("V1 the summary counts verify as measured") do
+  v = L::Stats.summarize([vrow])["phases"]["verify"]
+  v["n"] == 1 && v["n_na"].zero? && v["sum_s"].zero?
+end
+
+# The standalone flow: the PASS stood before the run, and the first gate run
+# is inside it, so the PASS is before gate_first.
+VS = [
+  ev("critic.round", "2026-10-01T03:59:00Z", duration_s: 30.0, attrs: { "verdict" => "pass" }),
+  ev("integration_gate.run", "2026-10-01T04:00:00Z", duration_s: 300.0,
+                             attrs: { "exit_code" => 0, "outcome" => "ok", "with_critic" => false }),
+  ev("harness_gate.run", "2026-10-01T04:00:04Z", duration_s: 280.0, attrs: { "ok" => true, "run_id" => "v2" }),
+].freeze
+sa = fixture { anchors(vl, S.ok(VS)) }
+sp = fixture { L::Phases.compute(sa) }
+check("V2 standalone, PASS before a first gate inside the final run: the flow is standalone") { L::Phases.flow(sa) == "standalone" }
+check("V2 verify is a measured 0, not invalid") do
+  sp.dig("verify", "s") == 0 && !sp["verify"].key?("invalid") && sp.dig("verify", "basis").to_s.include?("inside its final integration run")
+end
+check("V2 implement ends at the PASS, queue = the PASS -> the run's start") do
+  sp.dig("implement", "s") == (t("2026-10-01T03:59:30Z") - t("2026-10-01T01:00:00Z")).to_i && sp.dig("queue", "s") == 30
+end
+check("V2 the phases sum to landing - dispatch exactly") do
+  L::PHASES.all? { |p| sp.dig(p, "s").is_a?(Integer) } &&
+    sp.values.sum { |c| c["s"] } == (vl["landed_at"] - vl["start"]).to_i
+end
+sg = fixture { L::Counters.verify_gate_runs(landing: vl, events: S.ok(VS), anchors: sa) }
+check("V2 gate_runs_s is a measured 0.0") { sg["gate_runs_s"] == 0.0 }
+
+# The standalone flow, PASS before a first gate run that is NOT inside the
+# final run: the captain gated after the PASS. No PASS follows the first gate,
+# so verify has no end: n/a naming the shape, never invalid, never 0.
+VS3 = [
+  ev("critic.round", "2026-10-01T03:00:00Z", duration_s: 30.0, attrs: { "verdict" => "pass" }),
+  ev("harness_gate.run", "2026-10-01T03:30:00Z", duration_s: 100.0, attrs: { "ok" => true, "run_id" => "v3" }),
+  ev("integration_gate.run", "2026-10-01T04:00:00Z", duration_s: 300.0,
+                             attrs: { "exit_code" => 0, "outcome" => "ok", "with_critic" => false }),
+].freeze
+s3 = fixture { L::Phases.compute(anchors(vl, S.ok(VS3))) }
+check("V3 standalone, PASS before a first gate outside the run: verify is n/a, not invalid") do
+  s3.dig("verify", "s").nil? && !s3["verify"].key?("invalid")
+end
+check("V3 the reason names the shape") do
+  r = s3.dig("verify", "na_reason").to_s
+  r.include?("critic PASS") && r.include?("before the first gate run") && !r.start_with?("invalid")
+end
+check("V3 implement and queue read as before") do
+  s3.dig("implement", "s") == 9000 && s3.dig("queue", "s") == (t("2026-10-01T04:00:00Z") - t("2026-10-01T03:00:30Z")).to_i
+end
+s3g = fixture { L::Counters.verify_gate_runs(landing: vl, events: S.ok(VS3), anchors: anchors(vl, S.ok(VS3))) }
+check("V3 gate_runs_s carries verify's n/a reason") do
+  s3g["gate_runs_s"].nil? && s3g["gate_runs_na"].to_s.include?("before the first gate run")
+end
+
+# With-critic, the first gate run after the final run's start, whose end is
+# not recorded: whether it is inside cannot be told. n/a naming that, never
+# invalid.
+VW4 = [ev("integration_gate.run", "2026-10-01T04:00:00Z", attrs: WC_RUN)] + VW[1..]
+w4 = fixture { L::Phases.compute(anchors(wl, S.ok(VW4 + [PUSH]))) }
+check("V4 first gate after a final run with no recorded end: verify is n/a, not invalid") do
+  w4.dig("verify", "s").nil? && !w4["verify"].key?("invalid") && w4.dig("verify", "na_reason").to_s.include?("no recorded end")
+end
+
+# Not these shapes: the rows that were measured before stay as they were.
+check("V5 a normal with-critic row is unchanged and carries no basis") do
+  L::Phases.compute(wa) == wp && wp.values.none? { |c| c.key?("basis") } && wp.dig("verify", "s") == 7200
+end
+check("V5 a normal standalone row is unchanged and carries no basis") do
+  L::Phases.compute(anchors(vl, S.ok(FULL))) == ph && ph.values.none? { |c| c.key?("basis") }
+end
+check("V5 a gate before the dispatch stamp stays invalid (another shape)") { L::Phases.compute(anchors(vl, S.ok(early)))["implement"]["invalid"] == true }
+# A first gate run after the final run ENDED is not inside it: left as it was.
+VW6 = [VW[0], VW[2], ev("harness_gate.run", "2026-10-01T04:10:00Z", duration_s: 60.0, attrs: { "ok" => true, "run_id" => "v6" })]
+w6 = fixture { L::Phases.compute(anchors(wl, S.ok(VW6 + [PUSH]))) }
+check("V6 a first gate run after the final run ended is not this shape: verify stays invalid") do
+  w6.dig("verify", "invalid") == true && !w6["verify"].key?("basis")
+end
+
 if $failures.empty?
   puts "lead-time-phases: #{$checks} checks passed"
   exit 0

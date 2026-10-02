@@ -25,9 +25,11 @@
 #
 # Each phase is whole seconds, or null with `na_reason` when an anchor is
 # missing, or null with `invalid: true` when its anchors are out of order.
-# Never 0 for a missing input, never negative. Anchors are floored to whole
-# seconds BEFORE subtraction, so the five phases telescope: their sum equals
-# landed - dispatch exactly.
+# One out-of-order shape is not invalid: a first gate run inside the final
+# integration run means no gate ran before it, so verify is a measured 0
+# (DND-1819, Phases.effective). Never 0 for a missing input, never
+# negative. Anchors are floored to whole seconds BEFORE subtraction, so the
+# five phases telescope: their sum equals landed - dispatch exactly.
 #
 # A source the IO side read is a Source: status :ok (found), :empty (looked,
 # nothing for this key) or :could_not_look (with a reason). "could not look"
@@ -607,13 +609,73 @@ module LeadTimePhases
     # phase -> [start anchor, end anchor] for the flow.
     def anchor_map(anchors) = flow(anchors) == "with_critic" ? WITH_CRITIC_PHASE_ANCHORS : PHASE_ANCHORS
 
-    # anchors: {name => Anchor} -> {phase => {"s"=>Integer|nil, "na_reason"=>.., "invalid"=>true}}
+    # anchors: {name => Anchor} -> {phase => {"s"=>Integer|nil, "na_reason"=>.., "invalid"=>true,
+    # "basis"=>..}}. "basis" is set only on a cell that read a derived anchor
+    # (DND-1819, see effective).
     def compute(anchors)
+      eff, notes = effective(anchors)
       anchor_map(anchors).to_h do |phase, (from, to)|
-        a = anchors.fetch(from)
-        b = anchors.fetch(to)
-        [phase, value(a, b, from, to)]
+        note = notes[phase]
+        next [phase, { "s" => nil, "na_reason" => note[:na] }] if note&.key?(:na)
+
+        cell = value(eff.fetch(from), eff.fetch(to), from, to)
+        [phase, note && !cell["s"].nil? ? cell.merge("basis" => note[:basis]) : cell]
       end
+    end
+
+    # DND-1819. Verify is the captain's time between the first gate run and
+    # the final integration attempt. When no gate ran before that attempt,
+    # gate_first (the earliest gate run) is out of order with verify's end:
+    #   - it is inside the final integration run: the window is empty, so
+    #     verify is a measured 0 that starts where it ends (the run's start in
+    #     the with-critic flow, the PASS in the standalone flow), and
+    #     implement ends there too. The phases still telescope.
+    #   - it is after a final run whose end is not recorded: "inside" cannot
+    #     be told, so verify is n/a naming that.
+    #   - standalone, the PASS came before a first gate run that ran before
+    #     the final run: the captain gated after the PASS, and no PASS ends
+    #     verify, so verify is n/a naming that.
+    # Any other order (a gate before the dispatch stamp, a first gate after
+    # the final run ended) is left to value's "invalid".
+    # -> [anchors with gate_first derived (or as given), {phase => {basis:} | {na:}}]
+    def effective(anchors)
+      g = anchors["gate_first"]
+      s = anchors["integrate_start"]
+      return [anchors, {}] unless g&.at && s&.at
+
+      to = anchor_map(anchors).fetch("verify")[1]
+      vend = anchors.fetch(to)
+      return [anchors, standalone_pass_first(g, vend, s)] if to == "critic_pass" && vend.at && vend.at < g.at && g.at < s.at
+      return [anchors, {}] unless g.at >= s.at
+
+      e = anchors["integrate_end"]
+      return [anchors, { "verify" => { na: unknown_end(g, s) } }] unless e&.at
+      return [anchors, {}] if g.at > e.at || vend.at.nil?
+
+      first_gate_inside(anchors, g, s, e, to, vend)
+    end
+
+    def first_gate_inside(anchors, g, s, e, to, vend)
+      shape = "the unit's first gate run (#{Util.iso(g.at)}) is inside its final integration run " \
+              "(#{Util.iso(s.at)} -> #{Util.iso(e.at)}): no gate ran before it"
+      derived = Anchors.found(vend.at, "#{to}: #{shape}")
+      notes = {
+        "verify" => { basis: "0: #{shape}, so no time passed between the first gate and the final integration attempt" },
+        "implement" => { basis: "ends at #{to} (#{Util.iso(vend.at)}), not the first gate run: #{shape}" },
+      }
+      [anchors.merge("gate_first" => derived), notes]
+    end
+
+    def unknown_end(g, s)
+      "the unit's first gate run (#{Util.iso(g.at)}) is after its final integration run's start " \
+        "(#{Util.iso(s.at)}), and that run has no recorded end, so whether the gate run is inside it " \
+        "cannot be told"
+    end
+
+    def standalone_pass_first(g, pass, s)
+      { "verify" => { na: "the critic PASS (#{Util.iso(pass.at)}) is before the first gate run " \
+                          "(#{Util.iso(g.at)}), which is before the final integration run (#{Util.iso(s.at)}): " \
+                          "the captain gated after the PASS, so no PASS ends verify" } }
     end
 
     def value(a, b, from, to)
@@ -657,11 +719,14 @@ module LeadTimePhases
     # -> {"gate_runs_s"=>Float} or {"gate_runs_s"=>nil, "gate_runs_na"=>why}
     def verify_gate_runs(landing:, events:, anchors:)
       from, to = Phases.anchor_map(anchors).fetch("verify")
-      cell = Phases.value(anchors.fetch(from), anchors.fetch(to), from, to)
+      cell = Phases.compute(anchors).fetch("verify")
       return gate_runs_na("verify n/a: #{cell['na_reason']}") if cell["s"].nil?
 
-      lo = anchors.fetch(from).at
-      hi = anchors.fetch(to).at
+      # The anchors verify was read from (DND-1819: a derived start when no
+      # gate ran before the final integration run, so the window is empty).
+      eff, = Phases.effective(anchors)
+      lo = eff.fetch(from).at
+      hi = eff.fetch(to).at
       # A run starting before lo cannot exist (gate_first is the first run),
       # and one starting in hi's own second is left out (hi is floored).
       runs = Match.for_unit(events.items, landing, GATE_RUN_EVENTS).select { |e| Match.at(e) < hi }
@@ -671,7 +736,7 @@ module LeadTimePhases
                             "for #{Landing.unit_desc(landing)}")
       end
       wall = runs.select { |e| e["duration_s"].is_a?(Numeric) }
-                 .sum { |e| [[Match.end_of(e), hi].min - [Match.at(e), lo].max, 0].max }
+                 .sum(0.0) { |e| [[Match.end_of(e), hi].min - [Match.at(e), lo].max, 0].max }
       { "gate_runs_s" => wall.round(3) }
     end
 

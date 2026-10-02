@@ -174,6 +174,40 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    `phase_flow` and `verify.gate_runs_s`; `--summary` adds the code time no
    phase holds (`unattributed`) and the rows per flow (`flows`). The
    normative description is `ai/bin/lead-time-phases --help`.
+
+   **Later (2026-10-02, DND-1819):** "an anchor out of order makes the
+   phase `invalid`" also caught a landing whose first gate run is the one
+   inside its final integration run. Such a unit ran no gate before that
+   run, so `gate_first` fell after the run's start (with-critic, e.g.
+   DND-1790) or after the PASS (standalone, e.g. DND-1800), and `verify`
+   read `invalid`: all 9 invalid verify cells in a scratch re-ingest of
+   custom since 2026-10-02T13:00Z (40 rows) were this shape. Verify is the captain's time
+   between the first gate run and the final integration attempt, and here
+   that window is empty. Every input is recorded (the gate runs, the run's
+   start and end), and they show no gate ran before the final attempt, so
+   `verify` is a **measured 0**, not n/a: a genuinely zero-length phase,
+   per *The same question, asked of a PLAN*. It starts where it ends (the
+   run's start, or the PASS), and `implement` ends there too, so the five
+   still telescope. Both cells carry a `basis` naming the shape; the
+   row's `gate_first` anchor stays the real first gate run. Two
+   neighbouring shapes are n/a with a reason naming them, never `invalid`:
+   a first gate run after a final run with no recorded end, and a
+   standalone PASS before a first gate run that ran before the final run.
+   Rows are frozen at ingest and are not re-derived, as for DND-1501 and
+   DND-1809: the window turns over in about a day, and no experiment is
+   pending on `verify` or `implement` (the only pending custom one,
+   `custom:queue:8a04d3747ea4`, is on `queue`, which this does not touch).
+   **The series breaks here for `verify` and `implement`:** before it,
+   such a landing's `verify` is n/a (`invalid`) and its `implement` runs to
+   the first gate run inside the integration run, a few seconds into it
+   (or, standalone, past the PASS); after it, `verify` is 0 and
+   `implement` ends at the run's start (or the PASS). Judge no experiment
+   on those two phases across this landing. On the same 40 rows: verify
+   `invalid` 9 → 0 and verify n/a 17 → 8; `implement` moved on 8 of them
+   (3 to 7 s shorter with-critic, 34 s on DND-1800). Over the last 20:
+   verify n/a 9 → 6, all 6 now unticketed landings. `unattributed` rose
+   1083 → 1129 s, because the old `implement` counted the seconds inside
+   the integration run twice, once in `implement` and once in `integrate`.
 6. **Rolling window, typical and slow.** The ledger keeps every measured
    landing. The summary reports, per phase, over the last 20 landings: n
    measured, n n/a, median, p90, and the summed time. The biggest contributor
