@@ -1016,8 +1016,8 @@ RUNNER="$(sx_runner "$c")"
 rc="$(run_runner "$c")"
 rec="$(newest "$c" failed)"
 if [ "$rc" = 78 ] && [ -n "$rec" ] && grep -q 'dbus-env.sh loaded but does not define athena_dbus_env_setup' "$rec" \
-   && [ "$(invoked "$c")" = 0 ]; then
-  ok "an empty dbus-env.sh (loads, defines nothing): the tick exits 78 with a .failed record naming the function"
+   && [ "$(cat "$(sd "$c")/consecutive-failures" 2>/dev/null || echo 0)" = 1 ] && [ "$(invoked "$c")" = 0 ]; then
+  ok "an empty dbus-env.sh (loads, defines nothing): the tick exits 78 with a .failed record naming the function, counted"
 else
   bad "empty dbus lib tick" "rc=$rc rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
