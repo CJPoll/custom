@@ -165,6 +165,9 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
              f="$(git rev-parse --git-path logs/HEAD)"; awk -v b="$b" '$2 != b' "$f" >"$f.t" && mv "$f.t" "$f"
              summary; exit 0 ;;
   noreflog-land) : >"$LEADTIME_RECEIPT"; own_land own.txt; rm -f "$(git rev-parse --git-path logs/HEAD)"; summary; exit 0 ;;
+  delete-refused) : >"$LEADTIME_RECEIPT"; b="$(git symbolic-ref --short HEAD)"; echo "$b" >"$d/refused-branch"
+             # a held ref lock: teardown's `git branch -D` is refused (DND-1715)
+             : >"$(git rev-parse --path-format=absolute --git-common-dir)/refs/heads/$b.lock"; summary; exit 0 ;;
   product-*)
     # A product repo's lane (DND-1540), through the real tool the brief names.
     : >"$LEADTIME_RECEIPT"
@@ -720,6 +723,63 @@ if [ "$rc" = 72 ] && [ "$(fails "$c")" = 1 ] && [ -n "$cb" ] && [ "$(cat "$cref"
   ok "own lane branch ref corrupt: COULD NOT TELL, exit 72, counted, the record and Fix: name the unreadable ref, the ref left as found"
 else
   bad "own lane corrupt ref" "rc=$rc fails=$(fails "$c") ref=$(cat "$cref" 2>&1) run=$(cat "$run" 2>/dev/null) failed=$(cat "$failed" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# ---------------------------------------------------------------------------------
+case_ '11b. a refused branch delete is reported, never counted (DND-1715)'
+
+# The run's own lane landed (no commits), but `git branch -D` is refused (a held
+# ref lock). The branch is kept and named in stderr, the .run and the
+# .branch-kept record, each with the delete to run. The tick stays a clean
+# success: exit 0, the failure counter cleared (owner rule: never wedge the
+# lead-time cron over hygiene).
+c="$(new_case)"; echo delete-refused >"$c/mode"
+echo 1 >"$(mkdir -p "$(sd "$c")" && printf '%s' "$(sd "$c")")/consecutive-failures"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"; kept="$(newest "$c" branch-kept)"
+rb="$(cat "$c/refused-branch" 2>/dev/null)"
+if [ "$rc" = 0 ] && [ "$(fails "$c")" = 0 ] && [ -z "$(newest "$c" failed)" ] && [ -n "$rb" ] \
+   && git -C "$c/repo" show-ref --verify --quiet "refs/heads/$rb" && [ "$(lane_dirs "$c")" = 0 ] \
+   && grep -q 'outcome=ok exit=0' "$run" \
+   && grep -q "branch=$rb (branch $rb KEPT (delete REFUSED" "$run" \
+   && grep -q "^branch_delete: .*$rb.*Fix: git -C $c/repo branch -D $rb" "$run" \
+   && [ -n "$kept" ] && grep -q "Fix: git -C $c/repo branch -D $rb" "$kept" \
+   && grep -q "could not delete branch $rb" "$c/runner.err" \
+   && grep -q "Fix:.*git -C $c/repo branch -D $rb" "$c/runner.err"; then
+  ok "own lane: a refused branch -D keeps the branch, names it with a Fix: in stderr, .run and .branch-kept; exit 0, counter cleared"
+else
+  bad "own lane delete refused" "rc=$rc fails=$(fails "$c") branch=$rb run=$(cat "$run" 2>/dev/null) kept=$(cat "$kept" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+# A healthy run says so: a .run with no refusal reads branch_delete=ok, so an
+# absent line is never mistaken for a clean delete.
+c="$(new_case)"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -qx 'branch_delete=ok' "$run" && [ -z "$(newest "$c" branch-kept)" ]; then
+  ok "a run whose deletes all succeeded records branch_delete=ok and leaves no .branch-kept record"
+else
+  bad "delete ok line" "rc=$rc run=$(cat "$run" 2>/dev/null)"
+fi
+# A dead lane's landed branch whose delete is refused: kept and named; the reap
+# counts exactly as a reap always does, never once more for the refusal: with a
+# failing session that is 2 (the corpse and the tick), as in case 12.
+c="$(new_case)"; echo fail >"$c/mode"
+mkdir -p "$(lanes "$c")"
+git -C "$c/repo" worktree add -q -b leadtime/run-heldref "$(lanes "$c")/run-heldref" origin/main
+: >"$(lanes "$c")/run-heldref.lock"
+: >"$c/repo/.git/refs/heads/leadtime/run-heldref.lock"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"; kept="$(newest "$c" branch-kept)"
+if [ "$rc" = 7 ] && [ "$(fails "$c")" = 2 ] && [ ! -e "$(lanes "$c")/run-heldref" ] \
+   && git -C "$c/repo" show-ref --verify --quiet refs/heads/leadtime/run-heldref \
+   && grep -q 'reaped dead lane run-heldref' "$c/runner.err" \
+   && grep -q "could not delete branch leadtime/run-heldref (reaped dead run)" "$c/runner.err" \
+   && grep -q "Fix:.*branch -D leadtime/run-heldref" "$c/runner.err" \
+   && [ -n "$kept" ] && grep -q 'leadtime/run-heldref' "$kept" \
+   && grep -q '^branch_delete: .*leadtime/run-heldref' "$run"; then
+  ok "reap: a refused delete of a dead lane's branch is named with a Fix: in stderr, .branch-kept and .run; counted exactly as any reap (2 with the failing tick)"
+else
+  bad "reap delete refused" "rc=$rc fails=$(fails "$c") run=$(cat "$run" 2>/dev/null) kept=$(cat "$kept" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 # ---------------------------------------------------------------------------------

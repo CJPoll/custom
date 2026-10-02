@@ -957,6 +957,46 @@ else
   bad "reap corrupt ref" "rc=$rc ref=$(cat "$cref" 2>&1) err=$(cat "$a/runner.err")"
 fi
 
+# A landed lane whose `git branch -D` is refused (a held ref lock; DND-1715).
+# The exit was dropped (`|| true`), so the branch stayed with nothing past the
+# tick log. It is kept and named, with the delete to run, in stderr and the
+# tick's own runs/<ts>.branch-kept record. A refused delete is hygiene, never
+# an outcome: the tick exits 0 and the failure counter is cleared, not bumped.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'b="$(git symbolic-ref --short HEAD)"; printf "%s\n" "$b" >"$d/refused-branch"; : >"$(git rev-parse --path-format=absolute --git-common-dir)/refs/heads/$b.lock"'
+mkdir -p "$r/ai-artifacts/shipwright"; echo 1 >"$r/ai-artifacts/shipwright/consecutive-failures"
+rc="$(run_runner "$r")"
+rb="$(cat "$a/refused-branch" 2>/dev/null)"
+kept="$(find "$r/ai-artifacts/shipwright/runs" -maxdepth 1 -name '*.branch-kept' 2>/dev/null | head -n1)"
+if [ "$rc" = 0 ] && [ -n "$rb" ] && git -C "$r" show-ref --verify --quiet "refs/heads/$rb" \
+   && [ -z "$(run_worktrees "$r")" ] \
+   && [ ! -e "$r/ai-artifacts/shipwright/consecutive-failures" ] \
+   && grep -q "could not delete branch $rb" "$a/runner.err" \
+   && grep -q "Fix:.*git -C $r branch -D $rb" "$a/runner.err" \
+   && [ -n "$kept" ] && grep -q "Fix: git -C $r branch -D $rb" "$kept"; then
+  ok "a refused branch -D keeps the branch, names it with a Fix: in stderr and runs/<ts>.branch-kept; exit 0, counter cleared"
+else
+  bad "own lane delete refused" "rc=$rc branch=$rb counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null) kept=$(cat "$kept" 2>/dev/null) err=$(cat "$a/runner.err")"
+fi
+
+# The reaper names a dead lane's refused delete too, and never counts it: a
+# dead SPAWNED corpse is not counted, so the counter stays absent.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+make_corpse "$r" "run-heldref" "spawned"
+: >"$r/.git/refs/heads/shipwright/run-heldref.lock"
+rc="$(run_runner "$r")"
+kept="$(find "$r/ai-artifacts/shipwright/runs" -maxdepth 1 -name '*.branch-kept' 2>/dev/null | head -n1)"
+if [ "$rc" = 0 ] && git -C "$r" show-ref --verify --quiet refs/heads/shipwright/run-heldref \
+   && [ ! -e "$(lanes_dir "$r")/run-heldref/.git" ] \
+   && [ ! -e "$r/ai-artifacts/shipwright/consecutive-failures" ] \
+   && grep -q "could not delete branch shipwright/run-heldref (reaped dead spawned run)" "$a/runner.err" \
+   && grep -q "Fix:.*branch -D shipwright/run-heldref" "$a/runner.err" \
+   && [ -n "$kept" ] && grep -q 'shipwright/run-heldref' "$kept"; then
+  ok "reap: a refused delete of a dead lane's branch is named with a Fix: in stderr and .branch-kept, and never counted"
+else
+  bad "reap delete refused" "rc=$rc counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null) kept=$(cat "$kept" 2>/dev/null) err=$(cat "$a/runner.err")"
+fi
+
 # ---------------------------------------------------------------------------
 case_ 'athena-shipwright-run.sh — with an origin, only LANDED work reaches the main checkout (DND-1008)'
 
