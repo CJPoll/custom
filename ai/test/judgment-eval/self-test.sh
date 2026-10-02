@@ -378,14 +378,15 @@ eq "the DND-1600 fixture dry run reports no join miss" "${ERR}" ""
 eq "the DND-1600 fixture dry run sends nothing" "$(requests)" "${n}"
 
 # The committed ticket_security measurement fixture (DND-1697): the four
-# owner overrides of ticket-security-v1 (quality gates read as security
-# controls), paraphrased, plus nine kept security controls. It is the
-# before/after set for ticket-security-v2, judged on the bar its README
-# registered before any v2 run, so it must keep joining: 13 cases.
+# filer overrides of ticket-security-v1 (quality gates read as security
+# controls), paraphrased, plus nine kept security controls and five of them
+# with their self-labels removed. It is the before/after set for
+# ticket-security-v2, judged on the bar its README committed before any v2
+# run, so it must keep joining: 18 cases.
 TSS="${HERE}/fixtures/ticket-security-dnd-1697"
 run --use-case ticket_security --labels "${TSS}/labels.jsonl" --corpus "${TSS}/corpus.jsonl" --dry-run
 eq "the DND-1697 ticket_security fixture dry-runs clean" "${RC}" "0"
-has "the DND-1697 fixture joins all 13 cases, none 4 and security 9" "${OUT}" "cases: 13 (none 4, security 9)"
+has "the DND-1697 fixture joins all 18 cases, none 4 and security 14" "${OUT}" "cases: 18 (none 4, security 14)"
 has "the DND-1697 fixture excludes no proposed label" "${OUT}" "proposed excluded: 0"
 eq "the DND-1697 fixture dry run reports no join miss" "${ERR}" ""
 eq "the DND-1697 fixture dry run sends nothing" "$(requests)" "${n}"
