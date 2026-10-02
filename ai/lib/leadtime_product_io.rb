@@ -658,6 +658,20 @@ module LeadTimeProductIO
       # The landing failed, but the branch it kept is still named and counted.
       journal_kept(m, s, kept)
       return ["could not act: #{e.message} Fix: #{e.fix}; #{kept}", false, 1]
+    rescue StandardError
+      # Not a P::Error (an Errno from a store write, say). The exception goes on
+      # unchanged, so the tick's outcome is what it was; only the kept branch's
+      # journal line, computed in the ensure above, is saved before it leaves.
+      # The journal write is best-effort: its own failure must not replace the
+      # exception being raised.
+      if kept
+        begin
+          journal_kept(m, s, kept)
+        rescue SystemCallError
+          nil
+        end
+      end
+      raise
     end
     # Never delete a lock a live process holds. Removing it after the unlock
     # is safe here only because the runner's single-run lock serialises every

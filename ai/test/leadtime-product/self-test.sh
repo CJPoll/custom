@@ -720,6 +720,37 @@ if [ "$rc" = 0 ] && head -1 "${TMP}/out" | grep -qx 'product_prs=1 landed=none u
   ok "an unreadable landing branch when the landing raises: named on the could-not-act line, journaled, counted; never dropped with the exception"
 else bad "landing raises, branch unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 
+# The same, when the landing raises something that is not a P::Error (DND-1704:
+# an Errno from a store write). The kept-branch line was computed in the ensure
+# and then lost with the exception. It is journaled before the exception goes on,
+# and the exception itself is unchanged (same class, same message): the tick's
+# outcome is not altered, only the record of the kept branch survives it.
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN"
+REF7="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/refs/heads/$BR7"
+REF7="$REF7" /usr/bin/ruby - "$ROOT" "$MAN" >"${TMP}/out" 2>"${TMP}/err" <<'RUBY'
+root, man = ARGV
+require File.join(root, "ai/lib/leadtime_product_io")
+module LeadTimeProductIO
+  def self.merge(*)
+    File.write(ENV.fetch("REF7"), "not-a-sha\n")
+    raise Errno::EACCES, "injected store write"
+  end
+end
+m = LeadTimeProductIO.load_manifest(man)
+begin
+  LeadTimeProductIO.sweep(m, gate_timeout: 1500, budget_s: 3480)
+  puts "NO RAISE"
+rescue Errno::EACCES => e
+  puts "RAISED #{e.class}: #{e.message}"
+end
+RUBY
+rc=$?
+if [ "$rc" = 0 ] && grep -qx 'RAISED Errno::EACCES: Permission denied - injected store write' "${TMP}/out" \
+   && grep -q "pr=#7 landing branch $BR7 KEPT: COULD NOT TELL" "$S/journal.md" && [ "$(cat "$REF7")" = not-a-sha ]; then
+  ok "a foreign exception out of the landing: the kept-branch line is journaled and the exception goes on unchanged"
+else bad "landing raises foreign, branch kept" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err") journal=$(cat "$S/journal.md" 2>/dev/null)"; fi
+
 # The same class before the landing lane is cut: a local landing branch git
 # cannot read is never read as absent (which tried `worktree add -b` and failed
 # with git's own words). Nothing is gated, the ref is untouched, it is named
