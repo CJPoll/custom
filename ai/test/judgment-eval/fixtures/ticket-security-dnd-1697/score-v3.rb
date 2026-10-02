@@ -1,6 +1,7 @@
 # DND-1697 v3: score the ticket-security-v3 bar's held-out items from two
 # `judgment-eval --repeat 3` run files (see README.md -> The ticket-security-v3 bar).
 # Usage: ruby score-v3.rb V1_RUNFILE V3_RUNFILE LABELS
+# V3_RUNFILE is a run of ticket-security-v3 or a later candidate (v4).
 #
 # Per case, only the verdict `match` (every sample gave the label) is right;
 # `miss` and `unstable` are not. A case with no measured verdict in at least
@@ -43,8 +44,8 @@ def load_run(path, want_version, labels)
     rescue SystemCallError, JSON::ParserError => e
       refuse("cannot read run file #{path}: #{e.message}. Fix: pass a run file judgment-eval wrote")
     end
-  unless run["question_set_version"] == want_version
-    refuse("#{path} is #{run['question_set_version'].inspect}, expected #{want_version}. " \
+  unless want_version.match?(run["question_set_version"].to_s)
+    refuse("#{path} is #{run['question_set_version'].inspect}, expected #{want_version.source}. " \
            "Fix: pass the v1 run first and the v3 run second")
   end
   verdicts = run["verdicts"]
@@ -65,8 +66,10 @@ def load_run(path, want_version, labels)
   [run, verdicts.to_h { |v| [v["case_id"], v["verdict"]] }]
 end
 
-r1, v1 = load_run(v1_path, "ticket-security-v1", labels)
-r3, v3 = load_run(v3_path, "ticket-security-v3", labels)
+# The v3 bar covers v3 and every later candidate (v4: DND-1697, the last
+# iteration, by coordinator decision); the baseline is always v1.
+r1, v1 = load_run(v1_path, /\Aticket-security-v1\z/, labels)
+r3, v3 = load_run(v3_path, /\Aticket-security-v([3-9]|[1-9]\d+)\z/, labels)
 unless r1["labels_sha256"].is_a?(String) && r1["labels_sha256"] == r3["labels_sha256"]
   refuse("the runs name different labels files (labels_sha256 #{r1['labels_sha256'].inspect} vs #{r3['labels_sha256'].inspect}). " \
          "Fix: measure both versions against the same labels file")

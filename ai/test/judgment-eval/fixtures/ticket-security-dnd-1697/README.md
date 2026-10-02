@@ -196,3 +196,11 @@ sample. Verdicts: match 280, miss 41, unstable 3, n/a 0.
 
 The v1 baseline for the 18-case set is the `--repeat 3` one above (runs
 `cdadd151`, `a08b2685`, `149ec8d2`).
+
+**Later (2026-10-02):** v3 failed the bar on items 2 and 3. It lost
+held-out DND-1003 and DND-1119, and made 34/293 false security calls. By
+coordinator decision, ticket-security-v4 is the last iteration. It is
+judged on the SAME v3 bar, unchanged, against the same v1 `--repeat 3`
+baselines; this note is committed before any v4 run. `score-v3.rb` scores
+a v4 run as it scores a v3 one (`ticket-security-v3` or later as the
+second run file).
