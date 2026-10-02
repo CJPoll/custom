@@ -967,11 +967,14 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
       res = AgentStashEnv::Result.new(:active, [], 0)
     end
   end
+  ahead_line = nil
   if ahead_desc
     bar = "#{ahead_desc}, ahead of the pinned bar (#{bar})"
-    out.puts "#{tag}: ahead of the pinned bar — the live env equals the env #{ahead_desc} declares, a commit " \
-             "that landed after harness-gate pinned origin/main; it differs from the pinned bar only by that " \
-             "newer commit (not drift)."
+    # DND-1599: printed only after a passing verdict. Printed first, "ahead"
+    # read as the verdict above a runtime FAIL.
+    ahead_line = "#{tag}: ahead of the pinned bar — the live env equals the env #{ahead_desc} declares, a " \
+                 "commit that landed after harness-gate pinned origin/main; it differs from the pinned bar " \
+                 "only by that newer commit (not drift)."
   end
   if res.state == :drift
     err.puts "  note: #{ahead_note}" if ahead_note
@@ -1000,6 +1003,7 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
   if problems.empty? && path_problem.nil?
     out.puts "#{tag}: ACTIVE — settings values match #{bar}; hook script, `git hook list` (agentstash), " \
              "wrapper and CLAUDE_ENV_FILE PATH line verified. OK."
+    out.puts "  note: #{ahead_line}" if ahead_line
     notes.each { |n| out.puts "  note: #{n}" }
     return EXIT_OK
   end
@@ -1008,8 +1012,10 @@ def run_agent_stash_env(path: settings_path, main: main_checkout_dir, root: REPO
     (problems + [path_problem].compact).each { |l| err.puts "  - #{l}" }
     return EXIT_FAIL
   end
-  report_session_path(path_problem, env, tag: tag, main: main, snapshot: session_snapshot, now: now.call,
-                                                      out: out, err: err)
+  code = report_session_path(path_problem, env, tag: tag, main: main, snapshot: session_snapshot, now: now.call,
+                                                out: out, err: err)
+  out.puts "  note: #{ahead_line}" if ahead_line && code == EXIT_OK
+  code
 rescue JSON::ParserError, SystemCallError => e
   err.puts "#{tag}: COULD NOT MEASURE — #{e.message.lines.first.to_s.strip}. " \
            "Fix: repair the file named above (registry or settings JSON) and re-run; this is not a pass."
@@ -1300,6 +1306,16 @@ def agent_stash_env_self_test(check)
     code, text = run.call(full, landed_env: no_env, newer_env: newer.call(registry["env"]))
     check.call("env: pin predates the env, live env equals the newer main's -> ACTIVE, named ahead, exit 0",
                code.zero? && text.include?("ahead of the pinned bar") && text.include?("ACTIVE"))
+    # DND-1599: the ahead note is never the first word on a failing run.
+    FileUtils.mv(File.join(main, AgentStashEnv::HOOK_REL), File.join(dir, "hook.aside"))
+    code, text = run.call(full, landed_env: no_env, newer_env: newer.call(registry["env"]))
+    FileUtils.mv(File.join(dir, "hook.aside"), File.join(main, AgentStashEnv::HOOK_REL))
+    check.call("env: ahead but a runtime check fails -> exit 1, no ahead verdict line, FAIL comes first",
+               code == EXIT_FAIL && text.include?("FAIL") && !text.include?("ahead of the pinned bar —") &&
+               !text.lines.first.include?("ahead"))
+    code, text = run.call(full, landed_env: no_env, newer_env: newer.call(registry["env"]))
+    check.call("env: ahead and passing -> the ACTIVE verdict comes before the ahead note",
+               code.zero? && text.index("ACTIVE") < text.index("ahead of the pinned bar —"))
     code, text = run.call(full, landed_env: no_env, newer_env: newer.call(nil))
     check.call("env: pin predates the env, the newer main declares none -> still FAIL, says why",
                code == EXIT_FAIL && text.include?("declares no agent-stash env") && !text.include?("ACTIVE"))
