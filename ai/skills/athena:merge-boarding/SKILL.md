@@ -460,15 +460,38 @@ another fleet.
 `scripts/wt-preflight` already asserts your branch is not behind `origin/main`
 when it is **created**. This is the same assertion when it **lands**.
 
-**Before boarding or merging any MR, from the Mission's worktree, run:**
+**Before boarding or merging any MR, with the Mission's worktree as the cwd,
+run the main checkout's copy:**
 
 ```
-ai/skills/athena:merge-boarding/scripts/integration-gate \
+cd <the Mission's worktree> && ~/dev/custom/ai/bin/integration-gate \
     [--target origin/main] [--since <baseline main SHA>] [--gate '<cmd>']
 ```
 
-`~/dev/custom/ai/bin/integration-gate` runs the same script (a shim, DND-752).
-Either path is correct in a brief.
+That path is a shim (DND-752) for
+`ai/skills/athena:merge-boarding/scripts/integration-gate`. Name it in a brief,
+never the worktree's own copy.
+
+**The judges are the landed ones (DND-1796).** When the gated repo is
+`~/dev/custom` itself, the gate script, the libs it sources, `blast-radius`,
+its manifest (`ai/blast-radius/surfaces.json`) and the owner verifiers
+(`ai/lib/owner_turn.rb`, `ai/lib/owner_click.rb`) are what the target holds,
+read out of git. A copy of the gate whose content differs from the target's
+re-executes the main checkout's copy when that one is the target's, and
+otherwise refuses (exit 2). `blast-radius` runs from the target's `ai/` tree,
+materialised into a temp dir. A judge the target lacks is exit 2, never the
+branch's copy. A branch that edits the gate itself still lands, judged by the
+landed gate. The residual: a check only runs in the copy the caller starts,
+and a branch's own copy can drop it. So run the main checkout's path above.
+Another repo (gen_saas) cannot edit these judges in its diff; its gate uses
+the copies beside the script.
+
+**Later (2026-10-02, DND-1796):** this said to run the gate "from the
+Mission's worktree" as `ai/skills/athena:merge-boarding/scripts/integration-gate`,
+and "Either path is correct in a brief". Superseded: from a custom worktree that
+ran the branch's own gate, `blast-radius`, manifest and owner verifiers. One
+commit that dropped a held surface from the manifest read `BLAST-RADIUS COLD`
+under its own classifier and HOT, exit 4, under the landed one.
 
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that

@@ -1766,6 +1766,105 @@ for sm in sm1 sm2; do
   fi
 done
 
+# ---------------------------------------------------------------- DND-1796
+# THE JUDGES COME FROM THE LANDED TARGET. When the gated branch is in the repo
+# that holds the gate (custom gating custom), the classifier, its manifest, the
+# owner verifiers and the gate script itself are what the TARGET holds, read
+# out of git. Before DND-1796 they were the copies beside the running script,
+# i.e. the branch's own when run from its worktree: one commit that dropped a
+# held surface from the manifest read COLD and landed its own exit 4.
+# landed_layout <dir> -- a custom-like repo whose main commit holds REAL
+# copies of the gate, its shim, its libs, blast-radius, its manifest and the
+# owner verifiers (a symlink would resolve to this checkout's files, which a
+# fixture branch cannot edit). No declared gate is copied (harness-gate would
+# run for real), so each case passes a stub --gate.
+DND1796_REPO="$(cd "${ROOT}/../../.." && pwd)"
+landed_layout() {
+  mkdir -p "$1/ai/skills/athena:merge-boarding/scripts" "$1/ai/bin" "$1/ai/blast-radius"
+  cp "$GATE" "$1/ai/skills/athena:merge-boarding/scripts/integration-gate"
+  cp -R "${DND1796_REPO}/ai/lib" "$1/ai/lib"
+  cp "${DND1796_REPO}/ai/blast-radius/surfaces.json" "$1/ai/blast-radius/surfaces.json"
+  for b in integration-gate blast-radius test-slot critic-review; do cp "${DND1796_REPO}/ai/bin/${b}" "$1/ai/bin/${b}"; done
+  ( cd "$1" && git init -q -b main . && git add -A && git commit -qm layout \
+    && printf '/g.sh\n/GATE_RAN\n' >> .git/info/exclude )
+}
+# landed_branch <layout> <worktree> -- a feature worktree of the layout.
+landed_branch() { ( cd "$1" && git worktree add -q -b "$(basename "$2")" "$2" ); stub_gate_green "$2/GATE_RAN" "$2/g.sh"; }
+LBG=ai/skills/athena:merge-boarding/scripts/integration-gate
+printf '.surfaces |= map(select(.class != "owner-approval-policy"))\n' > "${TMP}/lb-narrow.jq"
+
+# lb1: a branch that narrows the manifest (drops the held owner-approval-policy
+# surface) and so touches a file that surface holds. The landed manifest holds
+# it: HOT, exit 4, no OK line, no receipt -- by every path the gate is invoked.
+L="${TMP}/lb1-layout"; landed_layout "$L"; W="${TMP}/lb1-wt"; landed_branch "$L" "$W"
+( cd "$W" && jq -f "${TMP}/lb-narrow.jq" ai/blast-radius/surfaces.json > m.json && mv m.json ai/blast-radius/surfaces.json \
+  && git commit -qam 'narrow the manifest' )
+record_pass "$W"
+for via in "${W}/${LBG}" "${W}/ai/bin/integration-gate" "${L}/ai/bin/integration-gate"; do
+  out="$( cd "$W" && "$via" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
+  label="lb1 (${via#"${TMP}"/})"
+  [ "$rc" -eq 4 ] && grep -q 'BLAST-RADIUS HOT' <<<"$out" && ok "${label} a narrowed manifest is still HOT, exit 4" \
+    || bad "${label} expected exit 4 BLAST-RADIUS HOT, got $rc" "$out"
+  grep -q 'INTEGRATION OK' <<<"$out" && bad "${label} printed INTEGRATION OK" "$out" || ok "${label} no INTEGRATION OK"
+  grep -q "landed on main" <<<"$out" && ok "${label} says the judges are the landed ones" || bad "${label} does not name the landed judges" "$out"
+done
+[ ! -e "$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/$(git -C "$W" rev-parse HEAD).json" ] \
+  && ok "lb1 no receipt for the HOT head" || bad "lb1 a receipt was written for a HOT head"
+
+# lb2: a branch that rewrites the owner-turn verifier to accept any record.
+# The landed verifier refuses the bogus --owner-approval (exit 2), so the
+# branch cannot approve its own hold.
+L="${TMP}/lb2-layout"; landed_layout "$L"; W="${TMP}/lb2-wt"; landed_branch "$L" "$W"
+( cd "$W" && sed -i 's/^  def check(ref, words, dir: default_dir)$/&\n    return [:verified, words]/' ai/lib/owner_turn.rb \
+  && grep -q 'return \[:verified, words\]' ai/lib/owner_turn.rb && git commit -qam 'accept any record' ) \
+  || bad "lb2 fixture: could not rewrite owner_turn.rb"
+record_pass "$W"
+BOGUS="session:${FX_SID}/aaaaaaaa-0000-0000-0000-00000000dead quote:I approve this"
+out="$( cd "$W" && HOME="$FIXTURE_HOME" "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" --owner-approval "$BOGUS" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q "not the owner's own words" <<<"$out" && ok "lb2 the landed verifier refuses a bogus --owner-approval (exit 2)" \
+  || bad "lb2 expected exit 2 from the landed verifier, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "lb2 the branch's verifier approved its own hold" "$out" || ok "lb2 no INTEGRATION OK"
+
+# lb3: a branch that edits the gate script itself. The landed copy (the main
+# checkout's, whose content is the TARGET's) is re-executed and writes the
+# receipt; the branch's copy never prints the OK line. A legitimate gate
+# change still lands, judged by the landed gate.
+L="${TMP}/lb3-layout"; landed_layout "$L"; W="${TMP}/lb3-wt"; landed_branch "$L" "$W"
+( cd "$W" && sed -i 's/^OK_LINE="INTEGRATION OK /OK_LINE="BRANCH-COPY INTEGRATION OK /' "$LBG" \
+  && grep -q 'BRANCH-COPY' "$LBG" && git commit -qam 'edit the gate' ) || bad "lb3 fixture: could not edit the gate"
+record_pass "$W"
+out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
+head_sha="$(git -C "$W" rev-parse HEAD)"
+[ "$rc" -eq 0 ] && grep -q "^INTEGRATION OK ${head_sha} " <<<"$out" && ok "lb3 a gate-editing branch lands, judged by the landed gate" \
+  || bad "lb3 expected exit 0 with the landed OK line, got $rc" "$out"
+grep -q 'BRANCH-COPY' <<<"$out" && bad "lb3 the branch's own gate wrote the verdict" "$out" || ok "lb3 the branch's gate copy did not write the verdict"
+grep -q 're-executing the landed copy' <<<"$out" && ok "lb3 says it re-executed the landed copy" || bad "lb3 no re-exec line" "$out"
+jq -e '.integration_ok_line | startswith("INTEGRATION OK ")' \
+  "$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${head_sha}.json" >/dev/null 2>&1 \
+  && ok "lb3 the receipt was written by the landed copy" || bad "lb3 receipt missing or written by the branch's copy"
+# lb3b: ...and when the main checkout's copy is not the TARGET's either, there
+# is no landed copy to run: exit 2 with Fix:, no OK line, no receipt.
+printf '\n# local edit\n' >> "${L}/${LBG}"
+out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q '^Fix:' <<<"$out" && grep -q 'no landed copy' <<<"$out" && ok "lb3b no landed copy to run: exit 2 with Fix:" \
+  || bad "lb3b expected exit 2 naming no landed copy, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "lb3b printed INTEGRATION OK" "$out" || ok "lb3b no INTEGRATION OK"
+( cd "$L" && git checkout -q -- "$LBG" )
+
+# lb4: the TARGET does not hold blast-radius (the branch adds it). A landed
+# classifier that cannot be materialised is an ERROR with Fix:, never a fall
+# back to the branch's copy and never a pass.
+L="${TMP}/lb4-layout"; landed_layout "$L"
+( cd "$L" && git rm -q ai/bin/blast-radius && git commit -qm 'no classifier' )
+W="${TMP}/lb4-wt"; landed_branch "$L" "$W"
+( cd "$W" && cp "${DND1796_REPO}/ai/bin/blast-radius" ai/bin/blast-radius && git add ai/bin/blast-radius && git commit -qm 'add classifier' )
+record_pass "$W"
+out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q '^Fix:' <<<"$out" && grep -q 'ai/bin/blast-radius' <<<"$out" && ok "lb4 a classifier missing on the TARGET is exit 2 with Fix:" \
+  || bad "lb4 expected exit 2 naming the missing classifier, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "lb4 fell back to the branch's classifier" "$out" || ok "lb4 no INTEGRATION OK"
+[ ! -f "${W}/GATE_RAN" ] && ok "lb4 the gate did not run on an unjudgeable head" || bad "lb4 ran the gate before finding no classifier"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -9,9 +9,18 @@
 # (2026-09-22-harness-gensaas-api), DND-558 and the DND-804 admiral
 # (2026-09-24-harness-epics-ab). DND-752.
 #
-# This is a shim, not a symlink: the real script finds critic-review and
-# blast-radius relative to its own BASH_SOURCE, so it must run from its own
-# path. It forwards argv and stdin unchanged, `--help` included.
+# This is a shim, not a symlink: the real script finds test-slot through its
+# own checkout's git common dir and critic-review beside its own BASH_SOURCE,
+# so it must run from its own path. It forwards argv and stdin unchanged,
+# `--help` included.
+#
+# Which copy judges (DND-1796): in ~/dev/custom gating ~/dev/custom, the real
+# script, its libs, blast-radius, its manifest and the owner verifiers are the
+# integration TARGET's, read out of git, whichever checkout this shim is in. A
+# copy of the script that differs from the target re-executes the main
+# checkout's copy (when that one is the target's) or refuses. Name THIS path in
+# the main checkout, ~/dev/custom/ai/bin/integration-gate, in a brief: it is
+# landed code, while a worktree's copy is whatever its branch holds.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

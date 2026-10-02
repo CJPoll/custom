@@ -34,7 +34,13 @@
 # compose stack, it also has teardown-stack record that worktree's stack
 # marker in the worktree's own git dir (DND-1576), outside every working tree.
 #
-# Run: ai/skills/athena:merge-boarding/scripts/integration-gate [--target <ref>]
+# In the repo that holds it, it judges a head with the LANDED judges (DND-1796,
+# step 3a'): this script and its libs must be the target's (else it re-execs
+# the main checkout's copy, or refuses), and blast-radius, its manifest and
+# the owner verifiers run from the target's ai/ tree, read out of git.
+#
+# Run: ~/dev/custom/ai/bin/integration-gate [--target <ref>], with the
+#   Mission's worktree as the cwd (the main checkout's shim; landed code).
 # Self-test: ai/skills/athena:merge-boarding/test/self-test.sh
 set -uo pipefail
 
@@ -69,7 +75,8 @@ OVERRIDE_STATE=""
 OWNER_APPROVAL=""
 SLOT_WAIT=""
 REBASE=0
-# The argv as given, for the re-run inside the test slot (DND-1064).
+# The argv as given, for the re-run inside the test slot (DND-1064) and the
+# re-exec of the landed copy (DND-1796).
 ORIG_ARGS=( "$@" )
 
 # A usage error in the parse below (exit 2) must still leave no pass for the
@@ -118,6 +125,17 @@ locked-merge requires it. Any other
 outcome removes a receipt for that head, a usage error (exit 2) included; a
 usage error that cannot remove it still exits 2 and says so, never 5. There is
 no flag that skips it.
+
+The judges are the LANDED ones (DND-1796). When the gated repo is the one
+that holds this script, this script and the libs it sources must be
+blob-equal to the target's: a copy that differs re-executes the main
+checkout's copy, inside the same slot, when that one is the target's, and
+otherwise refuses (exit 2). blast-radius, its manifest and the owner
+verifiers run from the target's ai/ tree, read out of git into a temp dir,
+never a branch's or a working tree's. A judge the target lacks or git cannot
+read is exit 2, never the branch's copy. Another repo's diff cannot reach
+them, so there they resolve beside this script. Run the main checkout's
+~/dev/custom/ai/bin/integration-gate: a check runs only in the copy started.
 
 Once the gate has run (green or RED), it runs `teardown-stack --record
 --worktree <root>`: in a linked worktree with a compose stack up, that
@@ -235,7 +253,10 @@ Exit codes: 0 integration OK | 1 gate RED on the integrated head
               working tree is not HEAD (uncommitted or untracked paths,
               before the gate or left by it; ignored files do not count) /
               the main checkout's ai/bin/test-slot cannot be found or run,
-              or its outcome temp dir cannot be created (gate not run)
+              or its outcome temp dir cannot be created (gate not run) /
+              no landed judge: this copy differs from the target and no
+              copy that is the target's exists, or the target's
+              blast-radius cannot be materialised (DND-1796)
             3 no green critic verdict on the integrated head
             4 merging performs a real-world action -- owner's call, not the
               fleet's (see --owner-approval)
@@ -271,6 +292,9 @@ while [ $# -gt 0 ]; do
        exit 2 ;;
   esac
 done
+# --since as the caller gave it; a --rebase may set SINCE later (DND-1796
+# carries that into the re-exec of the landed copy).
+ARG_SINCE="$SINCE"
 
 # --- telemetry: one integration_gate.run per invocation (DND-1475) ----------
 # The lead-time ledger reads `queue` (to this run's start) and `integrate`
@@ -595,7 +619,11 @@ if [ "$IN_SLOT" -eq 1 ]; then
 else
   IG_TEL_EMIT=1
 fi
-unset INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC INTEGRATION_GATE_FACTS
+# DND-1796: set only on the re-exec of the landed copy (step 3a'), so that copy
+# never re-executes again. A forged marker can only make a run refuse.
+LANDED_REEXEC=0
+[ "$IN_SLOT" -eq 1 ] && [ "${INTEGRATION_GATE_LANDED_REEXEC:-}" = 1 ] && LANDED_REEXEC=1
+unset INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC INTEGRATION_GATE_FACTS INTEGRATION_GATE_LANDED_REEXEC
 
 if [ "$IN_SLOT" -eq 0 ]; then
   # A tree `git status` cannot even read (a corrupt object) is left for the run
@@ -780,6 +808,7 @@ esac
 RECEIPT_DIR="$(ir_store "$COMMON_DIR")"
 RECEIPT="$(ir_receipt_path "$COMMON_DIR" "$HEAD_SHA")"
 RECEIPT_TMP=""
+LANDED_TMP=""
 # A run that does not end in INTEGRATION OK leaves no pass for its head. The
 # up-front removal covers a run that is killed; the EXIT trap covers a pass
 # another run recorded for this head while this one went RED.
@@ -797,6 +826,7 @@ clear_receipt_on_failure() {
   [ -n "$CRITIC_LOG" ] && rm -f "$CRITIC_LOG" 2>/dev/null
   [ -n "$SLOT_TMP" ] && rm -rf "$SLOT_TMP" 2>/dev/null
   [ -n "$RECEIPT_TMP" ] && rm -f "$RECEIPT_TMP" 2>/dev/null
+  [ -n "$LANDED_TMP" ] && rm -rf "$LANDED_TMP" 2>/dev/null
   [ "$rc" -ne 0 ] && rm -f "$RECEIPT" 2>/dev/null
   return "$rc"
 }
@@ -815,6 +845,100 @@ if [ -z "$BASE_SHA" ]; then
   echo "${PROG}: HEAD and '${TARGET}' share no merge base (unrelated histories)." >&2
   echo "Fix: confirm you are in the right worktree and that '${TARGET}' is this repo's integration target." >&2
   exit 2
+fi
+
+# --- 3a'. the judges are the LANDED ones, read out of git (DND-1796) -------
+# ~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the diff it is
+# checking". When the gated repo is the repo that holds this script (custom
+# gating custom), a branch can edit its own judges: this script and the libs
+# it sources, blast-radius, its manifest (ai/blast-radius/surfaces.json) and
+# the owner verifiers (ai/lib/owner_turn.rb, ai/lib/owner_click.rb). They
+# used to resolve beside the running script, so from the Mission's worktree
+# they were the branch's copies: a commit that dropped a held surface from the
+# manifest read COLD and cleared its own exit 4 (probe, 2026-10-02). Now:
+#   - this script and its libs must BE the target's (blob-equal to
+#     TARGET_SHA). If not, the main checkout's copy is re-executed when it is
+#     blob-equal to the target, inside the same slot; otherwise exit 2. So a
+#     branch that edits the gate is judged, and its receipt written, by the
+#     landed gate.
+#   - blast-radius runs from the target's ai/ tree, materialised from git into
+#     a private temp dir, so its manifest and verifiers resolve beside it as
+#     landed. Neither the branch's tree nor any checkout's working tree is read.
+# A path the target lacks, or an object git cannot read, is an ERROR (exit 2),
+# never a fall back to the branch's copy and never a pass.
+# A gated repo that does NOT hold this script (gen_saas gated by custom's
+# gate) cannot edit these judges in its diff, so they still resolve beside
+# the script there.
+# Residual, said out loud: this check runs in whichever copy the caller starts.
+# A branch whose own copy drops the check defeats it when a caller runs that
+# copy. The main checkout's ~/dev/custom/ai/bin/integration-gate is landed
+# code, which is why the briefs and athena:merge-boarding name that path.
+# SELF_DIR is <top>/ai/skills/athena:merge-boarding/scripts: four levels up.
+SELF_TOP="$(cd "${SELF_DIR}/../../../.." 2>/dev/null && pwd -P)"
+IG_SELF_REL="ai/skills/athena:merge-boarding/scripts/integration-gate"
+IG_SELF_PATHS=( "$IG_SELF_REL" ai/lib/integration-receipt.sh ai/lib/proc-stat.sh ai/lib/telemetry-emit.sh )
+JUDGE_SAME_REPO=0
+[ "$(realpath -e "$COMMON_DIR" 2>/dev/null)" = "$(realpath -e "$SELF_COMMON" 2>/dev/null)" ] && JUDGE_SAME_REPO=1
+# landed_copy_check <checkout top> -- 0 when every IG_SELF_PATHS file under
+# <top> is blob-equal to TARGET_SHA's; 1 when one differs (named in
+# LC_DIFFERS); 2 when the target lacks one (named in LC_MISSING).
+landed_copy_check() {
+  local p want have
+  LC_DIFFERS=""; LC_MISSING=""
+  for p in "${IG_SELF_PATHS[@]}"; do
+    if ! want="$(git rev-parse -q --verify "${TARGET_SHA}:${p}" 2>/dev/null)"; then
+      LC_MISSING="${LC_MISSING} ${p}"; continue
+    fi
+    have="$(git hash-object -- "${1}/${p}" 2>/dev/null)"
+    [ "$have" = "$want" ] || LC_DIFFERS="${LC_DIFFERS} ${p}"
+  done
+  [ -n "$LC_MISSING" ] && return 2
+  [ -n "$LC_DIFFERS" ] && return 1
+  return 0
+}
+if [ "$JUDGE_SAME_REPO" -eq 1 ]; then
+  LC_RC=0; landed_copy_check "$SELF_TOP" || LC_RC=$?
+  if [ "$LC_RC" -eq 2 ]; then
+    echo "${PROG}: ${TARGET} ($(short "$TARGET_SHA")) does not hold:${LC_MISSING}. There is no landed gate to judge this head with." >&2
+    echo "Fix: a gate the branch adds is not a landed one. Land the gate on ${TARGET} first, or check that --target names this repo's integration target (git log -1 ${TARGET} -- ${IG_SELF_REL}). The branch's copy never judges itself (DND-1796)." >&2
+    exit 2
+  fi
+  if [ "$LC_RC" -eq 1 ]; then
+    MAIN_TOP="$(dirname "$(realpath -e "$SELF_COMMON")")"
+    SELF_DIFFERS="$LC_DIFFERS"
+    if [ "$LANDED_REEXEC" -eq 0 ] && [ "$MAIN_TOP" != "$SELF_TOP" ] && landed_copy_check "$MAIN_TOP"; then
+      echo "${PROG}: this copy (${SELF_TOP}) differs from ${TARGET} ($(short "$TARGET_SHA")) in:${SELF_DIFFERS}; re-executing the landed copy ${MAIN_TOP}/${IG_SELF_REL}, whose content is the target's (DND-1796)"
+      REEXEC_ARGS=( "${ORIG_ARGS[@]}" )
+      [ "$SINCE" != "$ARG_SINCE" ] && REEXEC_ARGS+=( --since "$SINCE" )
+      # Still inside the slot this run holds: the markers that say so go with
+      # it (the held-slot check in section 1b re-verifies them).
+      exec env INTEGRATION_GATE_IN_SLOT=1 INTEGRATION_GATE_LANDED_REEXEC=1 INTEGRATION_GATE_FACTS="${IG_FACTS}" \
+        INTEGRATION_GATE_PRESTARTED_CRITIC="${PRESTARTED}" \
+        bash "${MAIN_TOP}/${IG_SELF_REL}" "${REEXEC_ARGS[@]}"
+    fi
+    echo "${PROG}: there is no landed copy of this gate to run: this copy (${SELF_TOP}) differs from ${TARGET} ($(short "$TARGET_SHA")) in:${SELF_DIFFERS}, and so does the main checkout's (${MAIN_TOP}${LC_DIFFERS:+, in:${LC_DIFFERS}})." >&2
+    echo "Fix: bring the main checkout to the target (git -C '${MAIN_TOP}' merge --ff-only ${TARGET}; restore any local edit to the paths above), then run ${MAIN_TOP}/ai/bin/integration-gate from this worktree. A gate that differs from the target never writes the receipt that lands it (DND-1796)." >&2
+    exit 2
+  fi
+  LANDED_TMP="$(mktemp -d "${TMPDIR:-/tmp}/integration-gate-landed.XXXXXX")" || {
+    LANDED_TMP=""
+    echo "${PROG}: cannot create a private temp dir for the landed judges." >&2
+    echo "Fix: make ${TMPDIR:-/tmp} writable, then re-run. Nothing was judged." >&2
+    exit 2
+  }
+  LANDED_ERR="$( { git archive --format=tar "$TARGET_SHA" ai | tar -x -C "$LANDED_TMP"; printf ' rc=%s/%s' "${PIPESTATUS[0]}" "${PIPESTATUS[1]}"; } 2>&1 )"
+  BLAST="${LANDED_TMP}/ai/bin/blast-radius"
+  if [ "${LANDED_ERR##* rc=}" != "0/0" ] || [ ! -x "$BLAST" ] || [ ! -f "${LANDED_TMP}/ai/blast-radius/surfaces.json" ]; then
+    echo "${PROG}: cannot materialise the landed blast-radius from ${TARGET} ($(short "$TARGET_SHA")): need ai/bin/blast-radius (executable) and ai/blast-radius/surfaces.json in its ai/ tree. git archive | tar said:${LANDED_ERR}" >&2
+    echo "Fix: the classifier that judges this head is the one on ${TARGET}; check it is there (git ls-tree ${TARGET} ai/bin/blast-radius ai/blast-radius/surfaces.json) and that the object store is readable (git fsck). A classifier the branch adds or edits never judges itself, and 'could not materialise' is never a pass (DND-1796)." >&2
+    exit 2
+  fi
+  echo "${PROG}: judging the blast radius with ai/bin/blast-radius, its manifest and the owner verifiers as landed on ${TARGET} ($(short "$TARGET_SHA")), read out of git; never this branch's copies (DND-1796)"
+  JUDGE_EDITS="$(git diff --name-only "$TARGET_SHA" HEAD -- ai/bin/blast-radius ai/blast-radius ai/lib 2>/dev/null)"
+  if [ -n "$JUDGE_EDITS" ]; then
+    echo "${PROG}: NOTE this branch edits judge code; the landed copies judge it, not these:"
+    printf '%s\n' "$JUDGE_EDITS" | sed 's/^/    /'
+  fi
 fi
 
 # --- 3b. resolve the gate from the LANDED target (DND-479) ---------------
@@ -1235,7 +1359,11 @@ fi
 # AWS KMS key -- and the documented bar would have merged it, because nothing
 # in the bar asked. This step asks the missing question. It is ADDITIVE: it can
 # only ever REFUSE a merge the old bar allowed, never permit one it refused.
-BLAST="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/blast-radius"
+# Which copy: in the repo that holds this script, the TARGET's, materialised
+# in step 3a' (DND-1796). Only for another repo, the one beside this script.
+if [ "$JUDGE_SAME_REPO" -eq 0 ]; then
+  BLAST="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/blast-radius"
+fi
 if [ ! -x "$BLAST" ]; then
   echo "${PROG}: cannot locate blast-radius (expected ${BLAST})." >&2
   echo "Fix: run this script from its committed path under ~/dev/custom so the blast-radius classifier resolves. A classifier that cannot be found is an ERROR, never a pass -- 'no surface touched' and 'nothing was checked' must never read the same." >&2
