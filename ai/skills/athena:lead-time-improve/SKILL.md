@@ -222,40 +222,6 @@ it. Read its top `na_reasons` first:
   supply a missing event), and time fixes it. The action is then `no action`:
   "measurement maturing: <phase> n/a on <n_na> pre-emitter landings".
 
-**Escalate what stays unmeasurable (DND-1806).** Every run, on every improve
-repo whose summary you read in step 3, save that JSON (exit 0 only) to a file
-named for this run and repo, and run `unmeasurable observe --repo R --run
-<run id> --summary-file <file>`. It counts the consecutive runs on which the
-biggest phase is unmeasurable (`n_na > n`), per repo and phase, in
-`unmeasurable.json`. A measurable phase resets its count. With a hand-off
-ticket recorded, it reads that ticket's Status from DND Tickets each run. At
-3 runs with the ticket open, once per episode, it notes the escalation on
-the ticket, sets Path = Promoted, and sends ONE `leadtime-unmeasurable`
-harness-alert naming the repo, phase, ticket and run count. The episode ends
-when the ticket lands (Done or Ready for Release) or the phase becomes
-measurable. Put each `journal:` line it prints in this run's journal as
-written. Then act on its outcome:
-
-- **COUNTING** (with a ticket), **ESCALATED**, **ESCALATED-EARLIER**: the
-  gap is handed off and the ticket was read open this run. Journal the line;
-  this phase needs no second hand-off. Pick the run's action as usual.
-- **NO-HANDOFF** or **HANDOFF-CLOSED**: 3 runs unmeasurable and nothing open
-  fixes it. `no action` is not allowed: this run's action is the
-  instrumentation change, or ONE architect (step 5.3) to file the hand-off.
-- **HANDOFF-LANDED**: its fix landed. If the top n/a reason predates the
-  fix's emitter, "measurement maturing" as above. If it does not, the fix
-  did not fire: that is a new finding, handed off as in NO-HANDOFF.
-- **COULD-NOT-LOOK** (exit 3): the ticket could not be read or promoted, or
-  the alert was not delivered. Journal it as "could not look: <its reason>",
-  never as "already handed off". The next run retries the step that failed.
-- Exit 2 (a summary for another repo, a missing phase, a bad ticket): a
-  refusal, journaled with its Fix:. Nothing was counted.
-
-Whenever a run hands an unmeasurable phase off to a ticket (an architect
-files it), record it the same run: `unmeasurable handoff --repo R --phase P
---ticket DND-N`. A hand-off the journal names that `unmeasurable status`
-does not hold is recorded the same way before `observe`.
-
 Otherwise the biggest phase is the target of a **change**, unless
 `experiment list --repo R` shows a `change` on it that is PENDING or owes a
 REVERT, or, for a repo other than custom, an improver PR on it is pending
@@ -284,6 +250,61 @@ certainty. Read SETTLING as a pending change on the phase:
 
 A phase each revert or inconclusive sends back to SETTLING waits each time.
 That is correct: it has no clean baseline. The journal line shows it.
+
+#### Escalate what stays unmeasurable (DND-1806)
+
+Every run, on every improve repo whose summary you read in step 3, save that
+JSON (exit 0 only) to a file named for this run and repo, and run
+`unmeasurable observe --repo R --run <run id> --summary-file <file>`. Do it
+before you choose the action: its outcome can decide it. Its `--help` is
+the full rule; in short:
+
+- It counts, per repo and phase in `unmeasurable.json`, the runs on which a
+  phase is unmeasurable (`n_na > n`) and either the biggest or dark (no
+  measured row, so the summary can never pick it). A run that does not
+  count the phase holds its count, so the runs need not be adjacent. A
+  measurable run resets it.
+- On a counted run with a hand-off ticket recorded, it reads that ticket
+  from DND Tickets.
+- At 3 counted runs with the ticket open, once per episode, it sets Path =
+  Promoted, notes the escalation on the ticket, and sends ONE
+  `leadtime-unmeasurable` harness-alert naming the repo, phase, ticket and
+  run count. The episode ends when the ticket lands (Done or Ready for
+  Release) or the phase becomes measurable.
+
+Put each `journal:` line it prints in this run's journal as written. Then
+act on its outcome:
+
+- **ESCALATED**, **ESCALATED-EARLIER**, or **COUNTING** naming a ticket: the
+  gap is handed off and the ticket was read open this run. This phase needs
+  no second hand-off. Pick the run's action as usual.
+- **COUNTING** with no ticket: the choice rule above applies as usual. If
+  your action hands the gap off, record the ticket (below).
+- **NO-HANDOFF** (3 counted runs with no open hand-off, or with one that
+  landed and left the phase unmeasurable) or **HANDOFF-CLOSED** (the
+  hand-off was cancelled or won't-fixed, at any count): `no action` is not
+  allowed. This run's action is the instrumentation change, or ONE
+  architect (step 5.3) to file the hand-off.
+- **HANDOFF-LANDED**: its fix landed less than 3 counted runs ago. If the
+  top n/a reason predates the fix's emitter, "measurement maturing" as
+  above. If it does not, the fix did not fire: a new finding, handed off as
+  in NO-HANDOFF.
+- **COULD-NOT-LOOK** (exit 3): the ticket could not be read or promoted, or
+  the alert was not delivered. Journal it as "could not look: <its
+  reason>", never as "already handed off". The next run retries the failed
+  step. Pick the run's action as usual; a NO-HANDOFF it hid shows next run.
+- **MEASURABLE**, **MEASURED**, **NO-ROWS**, **NO-PHASE**: journal the line;
+  nothing to escalate.
+- Exit 2 (a summary for another repo, a missing phase, a bad ticket): a
+  refusal, journaled with its Fix:. Nothing was counted.
+
+Whenever a run hands an unmeasurable phase off to a ticket (an architect
+files it), record it the same run: `unmeasurable handoff --repo R --phase P
+--ticket DND-N`. A hand-off the journal names that `unmeasurable status`
+does not hold is recorded the same way before `observe`.
+
+The residual: this escalation fires only on a run that calls `observe`.
+Nothing outside this skill checks that the call happened.
 
 ### 5. Act once
 

@@ -2913,8 +2913,8 @@ also reports:
   lead-time cron writer*.
   The lead-time run's own session is a fifth sender on that side
   (DND-1806): `athena:lead-time-improve`'s `unmeasurable` tool sends ONE
-  `leadtime-unmeasurable` message per episode in which a repo's biggest
-  phase stays unmeasurable for 3 runs with its hand-off ticket open. It sends
+  `leadtime-unmeasurable` message per escalation episode
+  (`athena:lead-time-improve` → *Escalate what stays unmeasurable*). It sends
   through `ai/lib/harness-alert-send.sh`, like the runner. Its `re:` is the
   episode's `<run>.unmeasurable.<repo>.<phase>` record in
   `ai-artifacts/lead-time/runs/`; it names no capture, so retention ignores

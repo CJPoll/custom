@@ -137,7 +137,7 @@ check("run 3: the note names DND-1806 and the run") { writes.find { |r| r["path"
 check("run 3: sends ONE harness-alerts message, slug leadtime-unmeasurable", sends.inspect) { sends.size == 1 && sends[0].end_with?("-leadtime-unmeasurable.md") }
 body = sends.empty? ? "" : File.read(File.join(SENT, sends[0]))
 check("run 3: the alert names the repo, the phase, the ticket and the run count", body) do
-  ["repo: custom", "phase: queue", "ticket: DND-9001", "consecutive_runs: 3", "Fix:"].all? { |w| body.include?(w) }
+  ["repo: custom", "phase: queue", "ticket: DND-9001", "counted_runs: 3", "Fix:"].all? { |w| body.include?(w) }
 end
 record = body[/^record: (.*)$/, 1].to_s
 check("run 3: the alert's record exists in the state dir's runs/", record) { record.start_with?(File.join(STATE, "runs")) && File.read(record).include?("runs=3") }

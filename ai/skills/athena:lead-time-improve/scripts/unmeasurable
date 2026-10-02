@@ -34,20 +34,24 @@ HELP = <<~TXT
     unmeasurable --help
 
   The lead-time improver's escalation for a phase it cannot measure
-  (DND-1806). State: <state>/unmeasurable.json, the consecutive-run count
-  per repo and phase.
+  (DND-1806). State: <state>/unmeasurable.json, the run count per repo and
+  phase (with <state>/unmeasurable.json.lock).
 
   observe   one run's look at R. F is `ai/bin/lead-time-phases --summary
             --repo R --json`, saved to a file. ID is this run's id (the cron
             lane's run-<utc>-<pid>, from your brief); the same ID twice
-            counts once. A phase is unmeasurable when n_na > n. On a run
-            where the biggest phase is unmeasurable the count goes up; a
-            measurable phase resets it. With a hand-off ticket recorded, the
-            run reads it from DND Tickets. At #{U::THRESHOLD} runs with the ticket
-            open, ONCE per episode: a note on the ticket, Path = Promoted,
-            and ONE harness-alerts message (slug #{U::SLUG}, re: a record in
+            counts once. A phase is unmeasurable when n_na > n. A run counts
+            a phase that is unmeasurable and either the biggest or dark (no
+            measured row, so it can never be the biggest). A run that does
+            not count it holds the count; a measurable run resets it. On a
+            counted run with a hand-off ticket recorded, it reads the ticket
+            from DND Tickets. At #{U::THRESHOLD} counted runs with the ticket open,
+            ONCE per episode: Path = Promoted, a note on the ticket, and ONE
+            harness-alerts message (slug #{U::SLUG}, re: a record in
             <state>/runs/). The episode ends when the ticket lands (Done or
-            Ready for Release) or the phase becomes measurable.
+            Ready for Release) or the phase becomes measurable. A landed
+            ticket that left the phase unmeasurable for #{U::THRESHOLD} more runs is
+            NO-HANDOFF: a new hand-off is owed.
   handoff   record the ticket a run handed R's phase off to (P is one of
             #{U::PHASES.join(', ')}). A new ticket opens a new episode.
   status    print the state, as JSON. Read-only.
@@ -57,7 +61,7 @@ HELP = <<~TXT
       journal: <the line to put in the run's journal>
   Outcomes: COUNTING, NO-HANDOFF, ESCALATED, ESCALATED-EARLIER,
   HANDOFF-LANDED, HANDOFF-CLOSED, COULD-NOT-LOOK, MEASURABLE, MEASURED,
-  NO-PHASE.
+  NO-ROWS, NO-PHASE.
 
   Environment:
     LEAD_TIME_STATE_DIR               the state dir (default <main checkout>/ai-artifacts/lead-time)
@@ -103,12 +107,15 @@ class AlertPort
       File.chmod(0o600, f.path)
       f.write(body)
       f.flush
-      script = 'set -u; . "$1" || exit 4; shift; harness_alert_deliver "$@"'
+      # Exit 9: the helper itself would not load (harness_alert_deliver's own
+      # codes are 0, 4, 5 and send-mail's).
+      script = 'set -u; . "$1" || { echo "cannot load $1" >&2; exit 9; }; shift; harness_alert_deliver "$@"'
       out, err, st = Open3.capture3("bash", "-c", script, "unmeasurable-alert", @helper, @send_mail, CHECKOUT, "20", "3",
                                     "--local", "harness-alerts-detector", slug, "--to", "custom", "--re", record,
                                     "--body-file", f.path, stdin_data: "")
       unless st.success?
-        raise M::PortError, "harness-alerts send exited #{st.exitstatus}: #{err.lines.first(2).join(' ').strip}"
+        how = st.exitstatus.nil? ? "was killed by signal #{st.termsig}" : "exited #{st.exitstatus}"
+        raise M::PortError, "harness-alerts send #{how}: #{err.lines.first(2).join(' ').strip}"
       end
 
       name = out.lines.last.to_s.strip

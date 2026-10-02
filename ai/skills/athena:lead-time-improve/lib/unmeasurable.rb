@@ -11,10 +11,11 @@
 # "The fact that something is not measurable that could meaningfully help us
 # improve lead time is a red flag."
 #
-# The rule here: count the consecutive runs on which a phase is the biggest
-# and unmeasurable, per repo and phase. At THRESHOLD, if its hand-off ticket
-# is open, the episode escalates once: a note on the ticket, Path Promoted,
-# and ONE harness-alerts message. The episode ends when the ticket lands or
+# The rule here: count the runs on which a phase is unmeasurable and either
+# the biggest or dark (no measured row at all), per repo and phase. A run
+# that does not count it holds the count; a measurable run resets it. At
+# THRESHOLD, if its hand-off ticket is open, the episode escalates once:
+# Path Promoted, a note on the ticket, and ONE harness-alerts message. The episode ends when the ticket lands or
 # the phase becomes measurable; then the count resets.
 module LeadTimeUnmeasurable
   # A summary, ref or argument that cannot be trusted. Never read as empty.
@@ -75,6 +76,7 @@ module LeadTimeUnmeasurable
     phases = summary["phases"]
     raise Invalid, "the summary has no phases object" unless phases.is_a?(Hash)
 
+    dark = []
     out = PHASES.to_h do |p|
       row = phases[p]
       raise Invalid, "the summary has no phase #{p}" unless row.is_a?(Hash)
@@ -83,9 +85,17 @@ module LeadTimeUnmeasurable
       na = row["n_na"]
       raise Invalid, "phase #{p}: n and n_na must be whole numbers (got #{n.inspect}, #{na.inspect})" unless n.is_a?(Integer) && na.is_a?(Integer)
 
+      dark << p if n.zero? && na.positive?
       [p, measure(n, na)]
     end
-    { biggest: biggest_phase(summary["biggest"]), phases: out }
+    { biggest: biggest_phase(summary["biggest"]), phases: out, dark: dark }
+  end
+
+  # Does this phase's unmeasurable run count? When it is the biggest, or when
+  # it is dark: no measured row at all, so it has no summed time and the
+  # summary can never pick it as the biggest, however large it really is.
+  def counts?(measures, phase)
+    measures[:biggest] == phase || measures[:dark].include?(phase)
   end
 
   # The choice rule (SKILL.md step 4): more n/a rows than measured ones.
@@ -108,14 +118,16 @@ module LeadTimeUnmeasurable
     phase
   end
 
-  # advance(entry, run:, measure:, biggest:) -> [new entry, event]. Pure.
-  #   measured           -> count and episode reset (:measurable when there
-  #                         was something to reset)
-  #   unmeasured+biggest -> one more run (once per run id): :counted
-  #   anything else      -> held: not biggest this run, or no rows at all.
-  #                         Holding, never resetting, keeps a phase that
-  #                         flaps in and out of biggest from hiding its gap.
-  def advance(entry, run:, measure:, biggest:)
+  # advance(entry, run:, measure:, counts:) -> [new entry, event]. Pure.
+  # counts: counts?(measures, phase), the biggest or a dark phase.
+  #   measured          -> count and episode reset (:measurable when there
+  #                        was something to reset)
+  #   unmeasured+counts -> one more run (once per run id): :counted
+  #   anything else     -> held: not counted this run, or no rows at all.
+  #                        Holding, never resetting, keeps a phase that
+  #                        flaps in and out of biggest from hiding its gap,
+  #                        so the runs counted need not be adjacent.
+  def advance(entry, run:, measure:, counts:)
     e = deep_copy(entry)
     case measure
     when :measured
@@ -125,7 +137,7 @@ module LeadTimeUnmeasurable
       e["last_run"] = run
       [e, had ? :measurable : nil]
     when :unmeasured
-      return [e, nil] unless biggest
+      return [e, nil] unless counts
 
       e["runs"] += 1 unless e["last_run"] == run
       e["last_run"] = run
@@ -151,17 +163,23 @@ module LeadTimeUnmeasurable
   def steps(episode, path)
     ep = episode || {}
     owed = []
-    owed << :note unless ep["noted"]
     owed << :promote if ep["promoted"].nil? && path != PROMOTED
+    owed << :note unless ep["noted"]
     owed << :alert if ep["alerted"].nil?
     owed
   end
 
-  def ticket_note(repo:, phase:, runs:, run:)
-    "Promoted by the lead-time improver (DND-1806), run #{run}: #{phase} on #{repo} has been the biggest " \
-      "lead-time phase and unmeasurable (more n/a rows than measured) for #{runs} consecutive improver runs, " \
-      "and this hand-off has not landed. Owner, Cody, 2026-10-02: \"The fact that something is not measurable " \
-      "that could meaningfully help us improve lead time is a red flag.\""
+  # The note follows the promotion, so it never claims one that did not
+  # happen. promoted: "yes", "already" or nil (it failed this run).
+  def ticket_note(repo:, phase:, runs:, run:, promoted:)
+    what = case promoted
+           when "yes" then "Promoted to Path Promoted by the lead-time improver"
+           when "already" then "Escalated by the lead-time improver (it was already Path Promoted)"
+           else "Escalated by the lead-time improver; its Path promotion failed and the next run retries it"
+           end
+    "#{what} (DND-1806), run #{run}: #{phase} on #{repo} has been unmeasurable (more n/a rows than measured) " \
+      "on #{runs} improver runs, and this hand-off has not landed. Owner, Cody, 2026-10-02: \"The fact that " \
+      "something is not measurable that could meaningfully help us improve lead time is a red flag.\""
   end
 
   def alert_body(repo:, phase:, ticket:, runs:, run:, promoted:, record:)
@@ -171,14 +189,14 @@ module LeadTimeUnmeasurable
             else "#{ticket} could NOT be promoted this run (see the record); the next improver run retries it."
             end
     <<~TXT
-      The lead-time improver cannot measure #{phase} on #{repo}: it has been the biggest lead-time phase and unmeasurable for #{runs} consecutive runs (run #{run}), and its hand-off ticket #{ticket} has not landed (DND-1806).
+      The lead-time improver cannot measure #{phase} on #{repo}: it has been unmeasurable on #{runs} counted runs (run #{run}), and its hand-off ticket #{ticket} has not landed (DND-1806).
       #{promo}
       This is a report. The record named in re: is the authority.
 
       repo: #{repo}
       phase: #{phase}
       ticket: #{ticket}
-      consecutive_runs: #{runs}
+      counted_runs: #{runs}
       threshold: #{THRESHOLD}
       run: #{run}
       record: #{record}

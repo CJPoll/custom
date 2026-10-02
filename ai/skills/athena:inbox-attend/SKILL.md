@@ -569,16 +569,20 @@ it exactly as *The clustering cron writer* above, with these differences:
 **Later (2026-10-02):** added by DND-1806. A message whose filename ends
 `-leadtime-unmeasurable.md` comes from a lead-time run's session
 (`athena:lead-time-improve` → `scripts/unmeasurable`), once per episode in
-which a repo's biggest phase stayed unmeasurable for 3 runs while its
-hand-off ticket was open. It is a report, not a wedge: there is no re-arm.
-Verify it against its `re:`, which must be a regular file directly in
-`~/dev/custom/ai-artifacts/lead-time/runs/` whose name contains
-`.unmeasurable.`. Its `unmeasurable: ` line must carry `runs=N threshold=M`
-with N >= M, and a `ticket=` equal to the message's `ticket:` line. Relay to
-the owner: the repo, phase, ticket, N, and the record's `promoted=` value
-(`yes`, `already`, or `no`: a promotion the next run retries). Ledger words:
-`leadtime-unmeasurable relayed`, `leadtime-unmeasurable-dm` (one DM per 24
-hours) and `declined leadtime-unmeasurable-unverifiable`.
+which a repo's phase stayed unmeasurable while its hand-off ticket was open
+(`athena:lead-time-improve` → *Escalate what stays unmeasurable*). It is a
+report, not a wedge: there is no re-arm. Verify it against its `re:`, which
+must be a regular file directly in `~/dev/custom/ai-artifacts/lead-time/runs/`
+whose name contains `.unmeasurable.`. Its LAST line that starts
+`unmeasurable: ` must carry `runs=N threshold=M` with N >= M, and a
+`ticket=` equal to the message's `ticket:` line (a later run that retried a
+failed step appends a line). Relay it in the owner digest: the repo, phase,
+ticket, N, and that last line's `promoted=` value (`yes`, `already`, or
+`no`: a promotion the next run retries). Send no DM: the ticket is already
+promoted, and nothing in it is a step only the owner can run
+(`~/.claude/CLAUDE.md` → *Owner approval policy*). Ledger words:
+`leadtime-unmeasurable relayed` and `declined
+leadtime-unmeasurable-unverifiable`.
 
 **The post-landing main check: a red main (DND-1482).**
 **Later (2026-10-01):** added by DND-1482, a labelled addition to this dated

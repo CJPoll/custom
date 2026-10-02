@@ -15,8 +15,9 @@
 #
 # Every outcome is a line the run journals verbatim. A port failure is
 # COULD-NOT-LOOK (exit 3), never "already handed off"; the step it failed is
-# retried next run, and a step that succeeded is never repeated in its
-# episode.
+# retried next run. The state is saved after each step that succeeds, inside
+# the store's lock, so a step done is never repeated in its episode even when
+# a later step or the process fails.
 
 require_relative "unmeasurable"
 require_relative "unmeasurable_store"
@@ -41,15 +42,15 @@ class LeadTimeUnmeasurableManager
     U.repo_name(repo)
     U.phase_name(phase)
     U.ticket_ref(ticket)
-    entries = @store.load
-    k = U.key(repo, phase)
-    entry = entries[k] || U.blank_entry
-    return :unchanged if entry["ticket"] == ticket
+    @store.transaction do |entries, save|
+      k = U.key(repo, phase)
+      entry = entries[k] || U.blank_entry
+      next :unchanged if entry["ticket"] == ticket
 
-    entry = U.deep_copy(entry).merge("ticket" => ticket, "ticket_landed" => false, "episode" => nil)
-    entries[k] = entry
-    @store.save(entries)
-    :recorded
+      entries[k] = U.deep_copy(entry).merge("ticket" => ticket, "ticket_landed" => false, "episode" => nil)
+      save.call
+      :recorded
+    end
   end
 
   # One run's observation of repo's summary. -> {code:, lines: [line...]}
@@ -58,129 +59,149 @@ class LeadTimeUnmeasurableManager
     U.repo_name(repo)
     U.run_id(run)
     m = U.measures(summary, repo)
-    entries = @store.load
     lines = []
-    U::PHASES.each do |phase|
-      k = U.key(repo, phase)
-      entry, event = U.advance(entries[k] || U.blank_entry, run: run, measure: m[:phases][phase], biggest: m[:biggest] == phase)
-      case event
-      when :measurable
-        lines << line(repo, phase, entry, nil, "MEASURABLE", "#{phase} is measurable on #{repo} again: the count reset and any episode ended")
-      when :counted
-        entry, ln = escalate(entry, repo, phase, run)
-        lines << ln
+    @store.transaction do |entries, save|
+      U::PHASES.each do |phase|
+        k = U.key(repo, phase)
+        entry, event = U.advance(entries[k] || U.blank_entry, run: run, measure: m[:phases][phase], counts: U.counts?(m, phase))
+        next unless entries.key?(k) || event
+
+        entries[k] = entry
+        save.call
+        case event
+        when :measurable
+          lines << line(repo, phase, entry, nil, "MEASURABLE", "#{phase} is measurable on #{repo} again: the count reset and any episode ended")
+        when :counted
+          lines << escalate(entries, k, save, repo, phase, run)
+        end
       end
-      entries[k] = entry if entries.key?(k) || event
     end
-    if m[:biggest] && lines.none? { |l| l[:phase] == m[:biggest] }
-      lines << line(repo, m[:biggest], entries[U.key(repo, m[:biggest])] || U.blank_entry, nil, "MEASURED",
-                    "#{m[:biggest]} (the biggest phase) is measurable on #{repo}: nothing to escalate")
-    end
-    lines << line(repo, "none", U.blank_entry, nil, "NO-PHASE", "no phase is the biggest on #{repo} (tail or none): nothing counted") if m[:biggest].nil?
-    @store.save(entries)
+    lines.concat(biggest_lines(repo, m, lines))
     { code: lines.any? { |l| l[:outcome] == "COULD-NOT-LOOK" } ? 3 : 0, lines: lines }
   end
 
-  # -> entries for repo (or all)
+  # -> entries for repo (or all). Read-only: no lock taken, nothing written.
   def status(repo: nil)
     entries = @store.load
-    repo ? entries.select { |k, _| k.start_with?("#{repo}/") } : entries
+    return entries unless repo
+
+    U.repo_name(repo)
+    entries.select { |k, _| k.start_with?("#{repo}/") }
   end
 
   private
+
+  def biggest_lines(repo, m, lines)
+    big = m[:biggest]
+    return [line(repo, "none", U.blank_entry, nil, "NO-PHASE", "no phase is the biggest on #{repo} (tail or none): the biggest counts nothing this run")] if big.nil?
+    return [] if lines.any? { |l| l[:phase] == big }
+    return [line(repo, big, U.blank_entry, nil, "NO-ROWS", "#{big} (the biggest phase) has no rows on #{repo} this window: nothing counted")] if m[:phases][big] == :empty
+
+    [line(repo, big, U.blank_entry, nil, "MEASURED", "#{big} (the biggest phase) is measurable on #{repo}: nothing to escalate")]
+  end
 
   def line(repo, phase, entry, status, outcome, journal)
     { repo: repo, phase: phase, runs: entry["runs"], ticket: entry["ticket"], status: status, outcome: outcome, journal: journal }
   end
 
-  def counted(phase, repo, runs) = "#{phase} unmeasurable on #{repo} for #{runs} consecutive run(s) (escalates at #{U::THRESHOLD})"
+  def counted(phase, repo, runs) = "#{phase} unmeasurable on #{repo} on #{runs} counted run(s) (escalates at #{U::THRESHOLD})"
 
-  # The phase was the biggest and unmeasurable this run. -> [entry, line]
-  def escalate(entry, repo, phase, run)
+  def owed_handoff(phase, repo, runs, why)
+    "#{counted(phase, repo, runs)} and #{why}: no action is not allowed; the hand-off is this run's action " \
+      "(instrumentation, or an architect files it; then record it with unmeasurable handoff)"
+  end
+
+  # The phase counted this run. Updates entries[k] (saving after each step)
+  # and returns its line.
+  def escalate(entries, key, save, repo, phase, run)
+    entry = entries[key]
     ticket = entry["ticket"]
     runs = entry["runs"]
     if ticket.nil?
-      return [entry, line(repo, phase, entry, nil, "COUNTING", "#{counted(phase, repo, runs)}; no hand-off ticket is recorded")] if runs < U::THRESHOLD
+      return line(repo, phase, entry, nil, "COUNTING", "#{counted(phase, repo, runs)}; no hand-off ticket is recorded") if runs < U::THRESHOLD
 
-      return [entry, line(repo, phase, entry, nil, "NO-HANDOFF",
-                          "#{counted(phase, repo, runs)} and no hand-off ticket is recorded: the hand-off is this run's action " \
-                          "(an architect files it; then record it with unmeasurable handoff)")]
+      return line(repo, phase, entry, nil, "NO-HANDOFF", owed_handoff(phase, repo, runs, "no hand-off ticket is recorded"))
     end
     if entry["ticket_landed"]
-      return [entry, line(repo, phase, entry, nil, "HANDOFF-LANDED", landed_text(phase, repo, ticket, runs))]
+      return line(repo, phase, entry, nil, "HANDOFF-LANDED", landed_text(phase, repo, ticket, runs)) if runs < U::THRESHOLD
+
+      return line(repo, phase, entry, nil, "NO-HANDOFF", owed_handoff(phase, repo, runs, "its hand-off #{ticket} landed without making it measurable"))
     end
 
     begin
       facts = @notion.ticket(ticket)
       state = U.ticket_state(facts[:status])
     rescue PortError, U::Invalid => e
-      return [entry, line(repo, phase, entry, nil, "COULD-NOT-LOOK",
-                          "#{counted(phase, repo, runs)}; could not look: cannot read hand-off #{ticket} (#{e.message}), " \
-                          "so its state is unknown this run; the next run reads it again")]
+      return line(repo, phase, entry, nil, "COULD-NOT-LOOK",
+                  "#{counted(phase, repo, runs)}; could not look: cannot read hand-off #{ticket} (#{e.message}), " \
+                  "so its state is unknown this run; the next run reads it again")
     end
     status = facts[:status]
     case state
     when :landed
-      entry = U.deep_copy(entry).merge("ticket_landed" => true, "runs" => 0, "episode" => nil)
-      [entry, line(repo, phase, entry, status, "HANDOFF-LANDED", landed_text(phase, repo, ticket, 0))]
+      entries[key] = entry = U.deep_copy(entry).merge("ticket_landed" => true, "runs" => 0, "episode" => nil)
+      save.call
+      line(repo, phase, entry, status, "HANDOFF-LANDED", landed_text(phase, repo, ticket, 0))
     when :closed
-      [entry, line(repo, phase, entry, status, "HANDOFF-CLOSED",
-                   "#{counted(phase, repo, runs)}; hand-off #{ticket} is #{status} without landing, so #{phase} is not handed off: " \
-                   "a new hand-off is owed (then record it with unmeasurable handoff)")]
+      line(repo, phase, entry, status, "HANDOFF-CLOSED",
+           "#{counted(phase, repo, runs)}; hand-off #{ticket} is #{status} without landing, so #{phase} is not handed off: " \
+           "a new hand-off is this run's action (then record it with unmeasurable handoff)")
     else
-      return [entry, line(repo, phase, entry, status, "COUNTING", "#{counted(phase, repo, runs)}; hand-off #{ticket} read open this run (Status #{status})")] if runs < U::THRESHOLD
+      return line(repo, phase, entry, status, "COUNTING", "#{counted(phase, repo, runs)}; hand-off #{ticket} read open this run (Status #{status})") if runs < U::THRESHOLD
 
-      run_steps(entry, repo, phase, run, facts)
+      run_steps(entries, key, save, repo, phase, run, facts)
     end
   end
 
   def landed_text(phase, repo, ticket, runs)
-    "hand-off #{ticket} landed; #{phase} still unmeasurable on #{repo} (#{runs} run(s) since the episode ended): " \
-      "measurement maturing if its n/a rows predate the fix, else the fix did not fire and that is a new finding to hand off " \
-      "(then record it with unmeasurable handoff)"
+    "hand-off #{ticket} landed; #{phase} still unmeasurable on #{repo} (#{runs} run(s) counted since): " \
+      "measurement maturing if its n/a rows predate the fix; at #{U::THRESHOLD} a new hand-off is owed"
   end
 
-  def run_steps(entry, repo, phase, run, facts)
-    entry = U.deep_copy(entry)
+  def run_steps(entries, key, save, repo, phase, run, facts)
+    entry = entries[key] = U.deep_copy(entries[key])
     ticket = entry["ticket"]
     runs = entry["runs"]
-    ep = entry["episode"] ||= { "since" => run, "noted" => false, "promoted" => nil, "alerted" => nil }
+    ep = entry["episode"] ||= { "since" => run, "noted" => false, "promoted" => nil, "alerted" => nil, "record" => nil }
     owed = U.steps(ep, facts[:path])
     ep["promoted"] = "already" if ep["promoted"].nil? && facts[:path] == U::PROMOTED
+    save.call
     done = []
     failed = []
     owed.each do |step|
       case step
-      when :note
-        @notion.note(facts[:id], U.ticket_note(repo: repo, phase: phase, runs: runs, run: run))
-        ep["noted"] = true
-        done << "noted on the ticket"
       when :promote
         @notion.promote(facts[:id])
         ep["promoted"] = "yes"
         done << "promoted #{ticket} to Path Promoted"
+      when :note
+        @notion.note(facts[:id], U.ticket_note(repo: repo, phase: phase, runs: runs, run: run, promoted: ep["promoted"]))
+        ep["noted"] = true
+        done << "noted on the ticket"
       when :alert
-        record = write_record(repo, phase, ticket, runs, run, ep)
-        body = U.alert_body(repo: repo, phase: phase, ticket: ticket, runs: runs, run: run, promoted: ep["promoted"], record: record)
-        ep["alerted"] = @alert.send_alert(U::SLUG, record, body)
+        ep["record"] = write_record(repo, phase, ticket, runs, run, ep)
+        body = U.alert_body(repo: repo, phase: phase, ticket: ticket, runs: runs, run: run, promoted: ep["promoted"], record: ep["record"])
+        ep["alerted"] = @alert.send_alert(U::SLUG, ep["record"], body)
         done << "alerted on harness-alerts (#{ep['alerted']})"
       end
+      save.call
     rescue PortError, SystemCallError => e
       failed << "#{step} failed: #{e.message}"
     end
+    refresh_record(repo, phase, ticket, runs, run, ep) if ep["alerted"] && !done.empty? && !owed.include?(:alert)
     head = "#{counted(phase, repo, runs)}; hand-off #{ticket} open (Status #{facts[:status]})"
     done.unshift("#{ticket} was already Path Promoted") if owed.include?(:note) && ep["promoted"] == "already"
     if failed.any?
-      return [entry, line(repo, phase, entry, facts[:status], "COULD-NOT-LOOK",
-                          "#{head}: escalation (DND-1806) incomplete, could not look: #{failed.join('; ')}" \
-                          "#{done.empty? ? '' : "; done: #{done.join(', ')}"}; the next run retries what failed")]
+      return line(repo, phase, entry, facts[:status], "COULD-NOT-LOOK",
+                  "#{head}: escalation (DND-1806) incomplete, could not look: #{failed.join('; ')}" \
+                  "#{done.empty? ? '' : "; done: #{done.join(', ')}"}; the next run retries what failed")
     end
     if owed.empty?
-      return [entry, line(repo, phase, entry, facts[:status], "ESCALATED-EARLIER",
-                          "#{head}: escalated in run #{ep['since']} (alert #{ep['alerted']}); no repeat until #{ticket} lands or #{phase} is measurable")]
+      return line(repo, phase, entry, facts[:status], "ESCALATED-EARLIER",
+                  "#{head}: escalated in run #{ep['since']} (alert #{ep['alerted']}); no repeat until #{ticket} lands or #{phase} is measurable")
     end
 
-    [entry, line(repo, phase, entry, facts[:status], "ESCALATED", "#{head}: escalated (DND-1806): #{done.join(', ')}")]
+    line(repo, phase, entry, facts[:status], "ESCALATED", "#{head}: escalated (DND-1806): #{done.join(', ')}")
   end
 
   def write_record(repo, phase, ticket, runs, run, ep)
@@ -189,5 +210,16 @@ class LeadTimeUnmeasurableManager
     File.write(path, U.record_text(repo: repo, phase: phase, ticket: ticket, runs: runs, run: run,
                                    promoted: ep["promoted"], noted: ep["noted"]))
     path
+  end
+
+  # A step retried after the alert (a promotion that failed then) appends its
+  # result to the alert's record, which the inbox reader relays from.
+  def refresh_record(repo, phase, ticket, runs, run, ep)
+    return unless ep["record"] && File.file?(ep["record"])
+
+    File.write(ep["record"], U.record_text(repo: repo, phase: phase, ticket: ticket, runs: runs, run: run,
+                                           promoted: ep["promoted"], noted: ep["noted"]), mode: "a")
+  rescue SystemCallError
+    nil
   end
 end

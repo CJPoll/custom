@@ -60,27 +60,30 @@ check("measures: a phase whose n is not an integer is refused") do
   s["phases"]["queue"]["n"] = "5"
   raises?(U::Invalid) { U.measures(s, "custom") }
 end
+dm = U.measures(summary(counts: { "verify" => [0, 20] }), "custom")
+check("measures: a phase with no measured row and some n/a rows is dark") { dm[:dark] == ["verify"] }
+check("counts?: a dark phase counts though it is not the biggest") { U.counts?(dm, "verify") && U.counts?(dm, "queue") && !U.counts?(dm, "implement") }
 check("measures: a tail biggest is no phase to count") { U.measures(summary(biggest: "tail"), "custom")[:biggest].nil? }
 check("measures: a null biggest is no phase to count") { U.measures(summary(biggest: nil), "custom")[:biggest].nil? }
 check("measures: a biggest that names no known phase is refused") { raises?(U::Invalid) { U.measures(summary(biggest: "lunch"), "custom") } }
 
 # ── domain: advance (the count across runs) ─────────────────────────────────
 e0 = U.blank_entry
-e1, ev1 = U.advance(e0, run: "r1", measure: :unmeasured, biggest: true)
+e1, ev1 = U.advance(e0, run: "r1", measure: :unmeasured, counts: true)
 check("advance: an unmeasured biggest phase counts one run") { e1["runs"] == 1 && ev1 == :counted && e1["last_run"] == "r1" }
-e1b, = U.advance(e1, run: "r1", measure: :unmeasured, biggest: true)
+e1b, = U.advance(e1, run: "r1", measure: :unmeasured, counts: true)
 check("advance: the same run observed twice counts once (idempotent per run)") { e1b["runs"] == 1 }
-e2, = U.advance(e1, run: "r2", measure: :unmeasured, biggest: true)
+e2, = U.advance(e1, run: "r2", measure: :unmeasured, counts: true)
 check("advance: a second run counts two") { e2["runs"] == 2 }
-eh, evh = U.advance(e2, run: "r3", measure: :unmeasured, biggest: false)
+eh, evh = U.advance(e2, run: "r3", measure: :unmeasured, counts: false)
 check("advance: unmeasured but not the biggest holds the count, never resets it") { eh["runs"] == 2 && evh.nil? }
-ee, eve = U.advance(e2, run: "r3", measure: :empty, biggest: true)
+ee, eve = U.advance(e2, run: "r3", measure: :empty, counts: true)
 check("advance: a window with no rows holds the count") { ee["runs"] == 2 && eve.nil? }
 with_ep = e2.merge("runs" => 4, "ticket" => "DND-9001", "episode" => { "since" => "r3", "alerted" => "x.md" })
-em, evm = U.advance(with_ep, run: "r5", measure: :measured, biggest: true)
+em, evm = U.advance(with_ep, run: "r5", measure: :measured, counts: true)
 check("advance: a measured phase ends the episode and resets the count") { em["runs"].zero? && em["episode"].nil? && evm == :measurable }
 check("advance: ... and keeps the hand-off ticket") { em["ticket"] == "DND-9001" }
-_, evq = U.advance(U.blank_entry, run: "r1", measure: :measured, biggest: true)
+_, evq = U.advance(U.blank_entry, run: "r1", measure: :measured, counts: true)
 check("advance: a measured phase with nothing to reset is no event") { evq.nil? }
 check("advance: never mutates its input") { e1["runs"] == 1 && with_ep["runs"] == 4 }
 
@@ -95,7 +98,7 @@ check("ticket state: In Progress, Todo, Backlog, Parked are open") { %w[In\ Prog
 check("ticket state: no status is refused, never read as open") { raises?(U::Invalid) { U.ticket_state(nil) } && raises?(U::Invalid) { U.ticket_state("") } }
 
 # ── domain: escalation steps ────────────────────────────────────────────────
-check("steps: a fresh episode notes, promotes and alerts") { U.steps(nil, "Off") == %i[note promote alert] }
+check("steps: a fresh episode promotes, then notes, then alerts") { U.steps(nil, "Off") == %i[promote note alert] }
 check("steps: an already Promoted ticket is noted and alerted, not patched") { U.steps(nil, "Promoted") == %i[note alert] }
 check("steps: an episode done in an earlier run does nothing") do
   U.steps({ "noted" => true, "promoted" => "yes", "alerted" => "a.md" }, "Promoted").empty?
@@ -112,10 +115,12 @@ end
 
 body = U.alert_body(repo: "custom", phase: "queue", ticket: "DND-9001", runs: 3, run: "run-x", promoted: "yes", record: "/s/runs/x")
 check("alert body: names the repo, the phase, the ticket and the run count") do
-  ["custom", "queue", "DND-9001", "3 consecutive"].all? { |w| body.include?(w) }
+  ["custom", "queue", "DND-9001", "3 counted runs"].all? { |w| body.include?(w) }
 end
 check("alert body: carries Fix:") { body.include?("Fix:") }
-note = U.ticket_note(repo: "custom", phase: "queue", runs: 3, run: "run-x")
+note = U.ticket_note(repo: "custom", phase: "queue", runs: 3, run: "run-x", promoted: "yes")
+failed_note = U.ticket_note(repo: "custom", phase: "queue", runs: 3, run: "run-x", promoted: nil)
+check("ticket note: never claims a promotion that failed") { failed_note.include?("promotion failed") && !failed_note.include?("Promoted to Path") }
 check("ticket note: names the phase, repo, count, run and DND-1806") { ["queue", "custom", "3", "run-x", "DND-1806"].all? { |w| note.include?(w) } }
 
 # ── store ───────────────────────────────────────────────────────────────────
@@ -130,6 +135,28 @@ Dir.mktmpdir("unmeasurable-store-") do |dir|
   check("store: a corrupt file is could-not-look, never an empty state") { raises?(LeadTimeUnmeasurableStore::Unreadable) { store.load } }
   File.write(path, JSON.generate({ "version" => 99, "entries" => {} }))
   check("store: an unknown version is could-not-look") { raises?(LeadTimeUnmeasurableStore::Unreadable) { store.load } }
+  [{ "runs" => nil }, { "runs" => "2" }, { "ticket" => "XYZ-1" }, { "ticket_landed" => nil }, { "episode" => [] }].each do |bad|
+    File.write(path, JSON.generate({ "version" => 1, "entries" => { "custom/queue" => U.blank_entry.merge(bad) } }))
+    check("store: an entry with #{bad.keys.first}=#{bad.values.first.inspect} is could-not-look, never a crash") do
+      raises?(LeadTimeUnmeasurableStore::Unreadable) { store.load }
+    end
+  end
+  File.delete(path)
+  locked = store.transaction { |entries, save| entries["custom/merge"] = U.blank_entry.merge("runs" => 1); save.call; :done }
+  check("store: a transaction returns its block's value and saves through save") { locked == :done && store.load["custom/merge"]["runs"] == 1 }
+  check("store: a transaction leaves its lock file beside the state") { File.exist?("#{path}.lock") }
+end
+Dir.mktmpdir("unmeasurable-store-") do |dir|
+  sub = File.join(dir, "noread")
+  Dir.mkdir(sub)
+  File.write(File.join(sub, "unmeasurable.json"), JSON.generate({ "version" => 1, "entries" => {} }))
+  File.chmod(0o000, sub)
+  unless File.readable?(sub) # root reads anyway; the case needs a non-root user
+    check("store: a state file it may not reach is could-not-look, never an empty state (File.exist? would say false)") do
+      raises?(LeadTimeUnmeasurableStore::Unreadable) { LeadTimeUnmeasurableStore.new(File.join(sub, "unmeasurable.json")).load }
+    end
+  end
+  File.chmod(0o700, sub)
 end
 
 # ── manager, against fake ports ─────────────────────────────────────────────
@@ -230,13 +257,17 @@ Dir.mktmpdir("unmeasurable-mgr-") do |dir|
   r6 = mgr.observe(repo: "custom", run: "run-6", summary: summary)
   r7 = mgr.observe(repo: "custom", run: "run-7", summary: summary)
   r8 = mgr.observe(repo: "custom", run: "run-8", summary: summary)
-  check("manager: after landing, still-unmeasurable runs count again but never re-escalate a landed ticket") do
-    [r6, r7, r8].all? { |r| outcome(r)[:outcome] == "HANDOFF-LANDED" } && outcome(r8)[:runs] == 3 &&
+  check("manager: after landing, still-unmeasurable runs count again and never re-escalate the landed ticket") do
+    [r6, r7].all? { |r| outcome(r)[:outcome] == "HANDOFF-LANDED" } && outcome(r7)[:runs] == 2 &&
       alert.sent.size == 1 && notion.calls.count { |c| c.first == :promote } == 1
   end
   check("manager: ... and the landed ticket is not re-read") { notion.calls.count { |c| c.first == :read } == reads_before }
-  check("manager: ... the journal says a new hand-off is needed unless the n/a rows predate the fix") do
-    outcome(r8)[:journal].include?("landed") && outcome(r8)[:journal].include?("measurement maturing")
+  check("manager: ... below the threshold the journal allows measurement maturing") do
+    outcome(r7)[:journal].include?("landed") && outcome(r7)[:journal].include?("measurement maturing")
+  end
+  check("manager: 3 runs after a landing that left it unmeasurable: NO-HANDOFF, so maturing cannot repeat forever") do
+    outcome(r8)[:outcome] == "NO-HANDOFF" && outcome(r8)[:runs] == 3 && outcome(r8)[:journal].include?("landed without making it measurable") &&
+      outcome(r8)[:journal].include?("no action is not allowed") && alert.sent.size == 1
   end
 
   mgr.handoff(repo: "custom", phase: "queue", ticket: "DND-9002")
@@ -334,6 +365,52 @@ Dir.mktmpdir("unmeasurable-mgr-") do |dir|
     mgr.handoff(repo: "custom", phase: "queue", ticket: "DND-1")
     mgr.handoff(repo: "custom", phase: "queue", ticket: "DND-1") == :unchanged
   end
+end
+
+Dir.mktmpdir("unmeasurable-mgr-") do |dir|
+  notion = FakeNotion.new
+  alert = FakeAlert.new
+  mgr = manager(dir, notion, alert)
+  mgr.handoff(repo: "custom", phase: "verify", ticket: "DND-9003")
+  dark = summary(counts: { "verify" => [0, 20] })
+  r = nil
+  3.times { |i| r = mgr.observe(repo: "custom", run: "run-#{i}", summary: dark) }
+  check("manager: a dark phase (no measured row) escalates though queue is the biggest") do
+    outcome(r, "verify")[:outcome] == "ESCALATED" && alert.sent.size == 1 && outcome(r, "queue")[:runs] == 3
+  end
+end
+
+# A step done is saved before the next one runs: a crash after the promotion
+# (an error no port rescues) must not repeat it next run.
+class CrashingNotion < FakeNotion
+  attr_accessor :crash
+
+  def note(page_id, text)
+    raise "simulated crash after the promotion" if crash
+
+    super
+  end
+end
+Dir.mktmpdir("unmeasurable-mgr-") do |dir|
+  notion = CrashingNotion.new
+  alert = FakeAlert.new
+  mgr = manager(dir, notion, alert)
+  mgr.handoff(repo: "custom", phase: "queue", ticket: "DND-9001")
+  2.times { |i| mgr.observe(repo: "custom", run: "run-#{i}", summary: summary) }
+  notion.crash = true
+  crashed = begin
+    mgr.observe(repo: "custom", run: "run-2", summary: summary)
+    false
+  rescue RuntimeError
+    true
+  end
+  notion.crash = false
+  r = mgr.observe(repo: "custom", run: "run-3", summary: summary)
+  check("manager: a crash after the promotion keeps it: the next run notes and alerts, and never promotes twice") do
+    crashed && outcome(r)[:outcome] == "ESCALATED" && notion.calls.count { |c| c.first == :promote } == 1 &&
+      notion.calls.count { |c| c.first == :note } == 1 && alert.sent.size == 1
+  end
+  check("manager: status refuses a malformed repo name rather than print nothing") { raises?(U::Invalid) { mgr.status(repo: "a/b") } }
 end
 
 puts "unmeasurable_test: #{$checks - $failures.size}/#{$checks} passed"

@@ -55,7 +55,14 @@ class LeadTimeUnmeasurableNotion
     body = { "properties" => { "Path" => { "select" => { "name" => LeadTimeUnmeasurable::PROMOTED } } } }
     reply = NotionRead.request("PATCH", "#{origin}/v1/pages/#{page_id}", token, body)
     raise PortError, "no answer from Notion to the Path PATCH (curl exit #{reply[:curl_rc]})" unless reply[:curl_rc].zero?
-    raise PortError, "Notion answered HTTP #{reply[:status]} to the Path PATCH on #{page_id}" unless reply[:status] == 200
+    unless reply[:status] == 200
+      message = begin
+        JSON.parse(reply[:body])["message"].to_s[0, 200]
+      rescue JSON::ParserError, TypeError
+        ""
+      end
+      raise PortError, "Notion answered HTTP #{reply[:status]} to the Path PATCH on #{page_id}: #{message}"
+    end
 
     true
   rescue NotionRead::Error => e

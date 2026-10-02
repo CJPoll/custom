@@ -327,14 +327,15 @@ Each `improve`-mode run does these steps in order:
    20:30Z run, and nothing escalated until the owner promoted it by hand.
    Owner, Cody, 2026-10-02 20:35Z: "Lead time is our highest priority epic.
    The fact that something is not measurable that could meaningfully help us
-   improve lead time is a red flag." Each run now calls
-   `athena:lead-time-improve`'s `scripts/unmeasurable observe` with the
-   summary. It counts consecutive unmeasurable runs per repo and phase in
-   `unmeasurable.json` and reads the hand-off ticket's Status each run. At 3
-   runs with the ticket open it promotes the ticket (Path Promoted, with a
-   note) and sends ONE `leadtime-unmeasurable` harness-alert per episode. The
-   episode ends when the ticket lands or the phase becomes measurable. A
-   ticket it cannot read is "could not look", never "already handed off".
+   improve lead time is a red flag." The skill now has each run call
+   `scripts/unmeasurable observe` with the summary. It counts unmeasurable
+   runs per repo and phase in `unmeasurable.json` and reads the hand-off
+   ticket on each counted run. At 3 counted runs with the ticket open it
+   promotes the ticket and sends ONE `leadtime-unmeasurable` harness-alert
+   per episode. A ticket it cannot read is "could not look", never "already
+   handed off". The rule's home is `athena:lead-time-improve` → *Escalate
+   what stays unmeasurable*. Residual: it fires only on a run whose session
+   calls the tool.
 4. **Act once:**
    - land one small, safety-preserving harness change; or
    - land one instrumentation change; or
