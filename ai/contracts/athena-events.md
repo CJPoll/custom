@@ -6911,8 +6911,14 @@ threshold waiver of 2026-10-01 (quoted in `ai/contracts/athena-judgments.md`
 ### Item summaries
 
 An **item summary** is one to five sentences a model writes about an item for
-the owner to read on the priorities page (DND-1157). It is derived content, so
-this subsection is its boundary.
+the owner to read on the priorities page and beside each mission on the fleet
+page (DND-1157, DND-1598). It is derived content, so this subsection is its
+boundary.
+
+**Later (2026-10-01, DND-1627):** this said an item summary is shown on the
+priorities page only. Superseded by DND-1598 (gen_saas #670, deployed
+2026-10-01): the fleet page's mission rows show the same cached summary
+(*Where it shows*).
 
 - **Sources.** Only `notion_personal`, `notion_work` and `slack_ask` items
   may have one. Every other source is refused by name, whatever the owner's
@@ -6982,6 +6988,28 @@ this subsection is its boundary.
   Slack asks recorded no text to summarize. A DM ask with no stored text is
   now summarized from its text read live
   (`Athena.Priorities.Summaries.SlackText`).
+- **Where it shows** (DND-1598, gen_saas #670). The priorities page, and the
+  fleet page's mission rows, which show the summary of the ticket the mission
+  works. The fleet page reads the cache the priorities page fills and
+  generates nothing: it is a read of `priority_item_summaries`, never a
+  trigger for a sweep, a model call or a ledger row. The read is
+  `Athena.Priorities.ticket_summaries/3`, called as the page's own viewer
+  through the fleet's cross-subdomain adapter, ONE batched lookup per page
+  read (the matching items in one query, their summary rows in one more),
+  none when no row names a ticket. A row finds its item by the item's
+  `source_ref`, `<source>:<ticket number>` (*Item identity and `source_ref`*),
+  in the tracker the mission reported, or in either Notion source when it
+  named none. The view is built the way the priorities page builds it, under
+  the same owner gate and the owner's enabled sources, so a source the owner
+  turned off shows no text on either page. Every row says why it has no
+  text, never a blank: no summary generated yet (or the ticket is not in the
+  owner's index), not a ticket ref, two tickets match (a row with no tracker
+  that both Notion sources index), no ticket, or the read failed. A failed
+  read is never shown as no summary.
+
+  This path is read-only and owner-scoped (*Access control*). Another owner's
+  item answers as an absent one. It adds no source, no stored text and no
+  call to the rules above.
 - **Provider and custody.** The Anthropic Messages API, with the model named
   in server config, under the owner's key held in `Athena.Secrets` as
   `(owner_id, :anthropic_api_key)`, account-wide. The owner stores it on the
@@ -7314,6 +7342,7 @@ writes: action `owner_dm`, no machine, a body hash, never a body.
 | View the priorities page | the logged-in owner | only the owner's items, their summaries, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
 | Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or, for promote, restore and dismiss only, an owner approval grant of class `priority.transition`, executed by the server at click time | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the grant path logs the refusal, the grant stays `approved`, and the approval message says so |
 | Build and send the morning digest | the server, for owner O; no caller | O's `proposed` and `active` items; O's own Slack app; recipient O's `owner_slack_user_id` | `Athena.Digest`: items through `list_ranked/2` with O's user (the `owner_id` filter plus RBAC `read`); `Athena.Slack.owner_dm/3` selects the app by `owner_id` and reads the recipient from it, with no recipient argument | nothing is sent; the cause is recorded on O's send log and shown on O's `/priorities` |
+| View a mission's cached summary on the fleet page (DND-1598) | the logged-in owner | the owner's own items' cached summaries, for the tickets the page's missions name; no generation | `Athena.Priorities.ticket_summaries/3` through `Athena.Fleet.PrioritySummariesAdapter`: items read through `OwnerStore` with an `owner_id` = viewer filter plus RBAC `read` in the query; any actor but a `%User{}` is refused | another owner's item answers as no item; a refused read shows "Summary unavailable", never a blank |
 | Generate an item summary | the server's summary sweeper, for each item's own owner; no caller | one owner's open items of an enabled summary source | `Athena.Priorities.Summaries`: the item loaded by id and `owner_id` in the query, checked against the source allow-list and the owner's enabled sources, and re-checked in the write transaction; a Notion body read only through `Athena.NotionEvents.index_page_text/4` under the owner's own binding; a Slack DM's text read only through `Athena.Priorities.live_ask_text/3`, as the owner's own Slack app, for an item of that owner (any other pair is `not_found` with no Slack call) | the item is skipped and counted; nothing is read or written for another owner |
 | Run the one-time summary backfill (DND-1395) | an operator on the host, over `rpc`, through `Athena.Priorities.SummaryBackfill.start/0`; no web, machine-token or MCP path reaches it | every owner's open items of that owner's enabled summary sources, each owner worked separately; no daily or monthly cap | `Athena.Priorities.Summaries.backfill/1`: owners one at a time, each only while its gate is open (key stored, model priced, no latch or account pause), and each item through the same per-item path as the sweeper (loaded by id and `owner_id`, checked against the allow-list and that owner's enabled sources, re-checked in the write transaction, bodies read as in the row above). `start` keeps only the pause option, so an rpc cannot swap the config, prices or clock | a second start while one runs is `already_running`; an owner whose gate is closed is skipped and counted; an unpriced call is `price_unknown`, and nothing is read or written for another owner |
 | Read the last digest day | the logged-in owner | the owner's own `digest_sends` rows | `Athena.Digest.latest_send/1`: an `owner_id` = viewer filter in the query | none shown ("none yet") |
