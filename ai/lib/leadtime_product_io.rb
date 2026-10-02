@@ -749,12 +749,16 @@ module LeadTimeProductIO
       branch = out.strip if code.zero? && !out.strip.empty?
       return [:stranded, nil, "COULD NOT TELL: #{dir} records no branch and has none checked out; the lane is KEPT"] unless branch
     end
+    # Read the tip BEFORE anything is removed: a tip git cannot read raises
+    # with the worktree, stack, lock and meta all intact, so the next tick
+    # can reach the lane again and judge it (the lockless reap finds a lane
+    # by its directory; a lane with no meta has its branch only in it).
+    tip = branch && Git.branch_tip(rl.path, branch)
     if STACK_STATES.include?(meta["bootstrap"])
       Run.call([Cmd.teardown_stack, "--worktree", dir, "--parked", why], chdir: "/", timeout: TEARDOWN_CAP)
     end
     had_worktree = File.exist?(dir)
     Git.remove_worktree(rl.path, dir) if had_worktree
-    tip = branch && Git.branch_tip(rl.path, branch)
     unless tip
       verdict, detail = P.no_branch_ref(lane: File.basename(dir), branch: branch, had_worktree: had_worktree)
       return [verdict, branch, detail]

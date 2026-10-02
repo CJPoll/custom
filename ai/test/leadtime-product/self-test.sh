@@ -322,8 +322,9 @@ exec "$REAL_GIT" "\$@"
 EOF
 chmod +x "$GITSHIM/git"
 rc="$(PATH="$GITSHIM:$PATH" lp teardown)"
-if [ "$rc" = 72 ] && grep -q "COULD NOT TELL (cannot read branch $BRG" "${TMP}/out" && ! grep -q 'already gone' "${TMP}/out"; then
-  ok "a branch git cannot read: COULD NOT TELL, exit 72, never 'already gone'"
+if [ "$rc" = 72 ] && grep -q "COULD NOT TELL (cannot read branch $BRG" "${TMP}/out" && ! grep -q 'already gone' "${TMP}/out" \
+   && [ -d "$LANES/$RUN_ID" ] && [ -e "$LANES/$RUN_ID.meta" ]; then
+  ok "a branch git cannot read: COULD NOT TELL, exit 72, worktree and meta kept, never 'already gone'"
 else bad "branch unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 release_holders
 
@@ -394,6 +395,30 @@ if [ "$rc" = 0 ] && grep -q "lane=$BAD COULD NOT TELL (cannot read branch leadti
    && grep -q "lane=$DEAD STRANDED" "${TMP}/out" && [ ! -e "$LANES/$DEAD.lock" ] && [ ! -e "$LANES/$DEAD" ]; then
   ok "reap: an unreadable branch is COULD NOT TELL with its lock and meta kept; the next dead lane is still reaped"
 else bad "reap unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+
+# "Kept for the next tick" must be reachable by the next tick: two lanes whose
+# branch git cannot read on tick 1 are judged on tick 2, never "no lane cut".
+#   NOMETA: locked, cut before its meta was written (its branch is only in its
+#           worktree's HEAD);
+#   LOCKLESS: no lock (found by its directory), meta records its branch.
+new_repo
+NOMETA="run-20260930T113000Z-20"; LOCKLESS="run-20260930T113000Z-21"
+git -C "$R" worktree add -q -b leadtime/prod-tail-nometa "$LANES/$NOMETA" origin/main
+git -C "$R" update-ref -d refs/heads/leadtime/prod-tail-nometa
+: >"$LANES/$NOMETA.lock"
+git -C "$R" worktree add -q -b leadtime/prod-tail-lockless "$LANES/$LOCKLESS" origin/main
+printf 'branch=leadtime/prod-tail-lockless\nbootstrap=ran\n' >"$LANES/$LOCKLESS.meta"
+git -C "$R" update-ref -d refs/heads/leadtime/prod-tail-lockless
+rc1="$(PATH="$GITSHIM:$PATH" lp reap)"; out1="$(cat "${TMP}/out")"
+kept=no; [ -d "$LANES/$NOMETA" ] && [ -e "$LANES/$NOMETA.lock" ] && [ -d "$LANES/$LOCKLESS" ] && [ -e "$LANES/$LOCKLESS.meta" ] && kept=yes
+rc2="$(lp reap)"; out2="$(cat "${TMP}/out")"
+if [ "$rc1" = 0 ] && [ "$(grep -c 'COULD NOT TELL (cannot read branch' <<<"$out1")" = 2 ] && [ "$kept" = yes ] \
+   && [ "$rc2" = 0 ] \
+   && grep -qx "product_reaped: repo=prod lane=$NOMETA lane $NOMETA cut, worktree removed; branch leadtime/prod-tail-nometa already gone (nothing to keep)" <<<"$out2" \
+   && grep -qx "product_reaped: repo=prod lane=$LOCKLESS (lockless) lane $LOCKLESS cut, worktree removed; branch leadtime/prod-tail-lockless already gone (nothing to keep)" <<<"$out2" \
+   && ! grep -q 'no lane cut' <<<"$out2" && [ ! -e "$LANES/$NOMETA" ] && [ ! -e "$LANES/$NOMETA.lock" ] && [ ! -e "$LANES/$LOCKLESS" ]; then
+  ok "reap twice: an unreadable lane keeps its worktree, lock and meta on tick 1 and is judged on tick 2 (locked no-meta and lockless), never 'no lane cut'"
+else bad "reap two ticks" "rc1=$rc1 kept=$kept out1=$out1 | rc2=$rc2 out2=$out2 err=$(cat "${TMP}/err")"; fi
 
 echo "== sweep"
 new_repo; open_one
