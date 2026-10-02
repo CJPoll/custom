@@ -6481,22 +6481,21 @@ carried as `payload.trigger`. A write that creates or reopens the item takes
 the event's trigger. Every other write of an indexed item keeps the stronger of
 the stored and incoming triggers (`review_requested` > `mentioned` >
 `commented`): one that leaves it open, and one that leaves it `dismissed` or
-`done`, whatever the `done`'s `closed_by` (`owner`, `lease_complete`,
-`source_status` or `source_deleted`; a forge item never has
-`source_out_of_scope`). A row with no stored trigger takes the incoming one on those
+`done`, whatever the `done`'s `closed_by` (`owner`, `lease_complete` or
+`source_status`: the forge family has no delete event and no read, so a forge
+item is never closed `source_deleted` or `source_out_of_scope`). A row with no stored trigger takes the incoming one on those
 writes. A close event (`forge.review.removed`, `merged`, `closed`) carries no
 trigger and keeps the stored one. A write with no trigger of its own (a source
 delete, a re-sync close, an owner or lease close) does not touch the column,
-and a `stale` event writes nothing. The column is nullable, never
+and an event whose `revision` is older than the row's writes nothing. The column is nullable, never
 backfilled, and refused on any source but `forge_review`, so a row indexed
 before DND-1350 holds `null` until an event next writes it. The row reads
 "Review activity" meanwhile.
 
-**Later (2026-10-02):** the note above said a write that leaves "an
+**Later (2026-10-02, DND-1782):** the note above said a write that leaves "an
 owner-closed item closed" keeps the stronger trigger. "Owner-closed" was never
 defined (it meant a `dismissed` or owner-closed `done` item), and the note
-was silent on an item left `done` by `source_status`, `lease_complete` or
-`source_deleted`: a `forge.review.requested` that does not reopen it (the
+was silent on an item left `done` by `source_status` or `lease_complete`: a `forge.review.requested` that does not reopen it (the
 reopen rows of *States*), a same-second re-request tie, a pointer update on a
 closed item. All of those keep the stronger trigger, as an owner close does. Only a create, or a
 write the state machine reports as `reopened`, takes the incoming trigger
