@@ -353,6 +353,7 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/hooks/inbox-untrusted-guard.sh" => "ai/hooks/inbox-untrusted-guard.self-test.sh",
   "ai/hooks/workflow-phase-guard.sh"  => "ai/hooks/workflow-phase-guard.self-test.sh",
   "ai/hooks/worktree-escape-guard.sh" => "ai/hooks/worktree-escape-guard.self-test.sh",
+  "ai/hooks/scratch-rm-guard.sh" => "ai/hooks/scratch-rm-guard.self-test.sh",
   "ai/skills/athena:epic-clustering/scripts/epic-clustering" =>
     "ai/skills/athena:epic-clustering/test/self-test.sh",
   "ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" =>

@@ -78,6 +78,9 @@ expect "rm -rf the scratchpad" deny "rm -rf ${SP}"
 expect "rm -r the session dir above it" deny "rm -r ${SID_DIR}"
 expect "rm -rf the claude tmp root" deny "rm -rf ${BASE}"
 expect "rm --recursive /tmp" deny "rm --recursive --force /tmp"
+expect "flags after the path (GNU permutes)" deny "rm ${SID_DIR} -rf"
+expect "abbreviated --rec" deny "rm --rec ${SID_DIR}"
+expect "-- ends options: a later -rf is a path" allow "rm -- ${SID_DIR} -rf"
 
 echo "== find and xargs: denied =="
 expect "find -delete in the scratchpad" deny "find ${SP} -name 'dnd-1601-*' -delete"
@@ -101,7 +104,45 @@ expect "test-slot wrapper" deny "test-slot --label t -- rm -f ${SP}/x*"
 expect "inside a command substitution" deny "echo \$(rm -f ${SP}/x*)"
 expect "after && in a chain" deny "true && rm -f ${SP}/x* || true"
 
+expect "rm of a substitution listing by glob" deny "rm -f \$(ls ${SP}/dnd-1601-*)"
+expect "rm of a substitution running find" deny "rm -f \$(find ${SP} -name 'dnd-1601-*')"
+expect "rm of a backtick substitution" deny "rm -f \`ls ${SP}/x-*\`"
+expect "trap clean-up by glob" deny "trap 'rm -f ${SP}/dnd-1653-*' EXIT"
+expect "find -exec sh -c rm" deny "find ${SP} -name 'x*' -exec sh -c 'rm \"\$1\"' _ {} \\;"
+expect "find -execdir rm" deny "find ${SP} -name 'x*' -execdir rm {} +"
+expect "find -ok shred" deny "find ${SP} -name 'x*' -ok shred -u {} \\;"
+expect "xargs -0 rm" deny "find ${SP} -name 'x*' -print0 | xargs -0 rm -f"
+expect "xargs -I{} rm" deny "ls ${SP}/x-* | xargs -I{} rm -f {}"
+expect "xargs -r rm" deny "ls ${SP}/x-* | xargs -r rm"
+expect "dash -c" deny "dash -c 'rm -f ${SP}/x*'"
+expect "heredoc with <<- fed to sh" deny "sh <<-EOF
+	rm -f ${SP}/x*
+	EOF"
+expect "nohup wrapper" deny "nohup rm -f ${SP}/x*"
+expect "nice -n wrapper" deny "nice -n 5 rm -f ${SP}/x*"
+expect "ionice -c wrapper" deny "ionice -c 3 rm -f ${SP}/x*"
+expect "setsid wrapper" deny "setsid rm -f ${SP}/x*"
+expect "stdbuf -oL wrapper" deny "stdbuf -oL rm -f ${SP}/x*"
+expect "doas -u wrapper" deny "doas -u me rm -f ${SP}/x*"
+expect "exec wrapper" deny "exec rm -f ${SP}/x*"
+expect "builtin/command wrapper" deny "command rm -f ${SP}/x*"
+expect "time -o wrapper" deny "time -o /dev/null rm -f ${SP}/x*"
+expect "pushd then a relative glob" deny "pushd ${SP} && rm -f x*"
+expect "a heredoc commit message does not hide a later rm" deny "git commit -m \"\$(cat <<'EOF'
+Don't do it.
+EOF
+)\" && rm -f ${SP}/dnd-*"
+
+echo '== $TMPDIR is a scratchpad root too =='
+export TMPDIR="${TMP}/tmpdir-root"
+expect "glob under a TMPDIR scratchpad" deny "rm -f ${TMPDIR}/claude-${U}/slug/sid/scratchpad/x*"
+unset TMPDIR
+
 echo "== a path the hook cannot resolve is never 'not the scratchpad' =="
+expect "find from an unknown start into xargs rm" deny "find \"\$SRG_SELFTEST_UNSET_VAR\" -name 'dnd-*' | xargs rm -f"
+expect "find . after an unresolvable cd into xargs rm" deny "cd \"\$SRG_SELFTEST_UNSET_VAR\" && find . -name 'dnd-*' | xargs rm -f"
+expect "ls of an unresolved glob into xargs rm" deny "ls \"\$SRG_SELFTEST_UNSET_VAR\"/dnd-* | xargs rm -f"
+expect "for over an unresolved glob" deny "for f in \"\$SRG_SELFTEST_UNSET_VAR\"/dnd-*; do rm \"\$f\"; done"
 expect "unknown variable before a glob" deny "rm -f \"\$SRG_SELFTEST_UNSET_VAR\"/dnd-*"
 run "rm -f \"\$SRG_SELFTEST_UNSET_VAR\"/dnd-*"
 if reason | grep -q 'could not resolve'; then ok "unresolved deny names the miss"; else bad "unresolved deny names the miss" "${OUT}"; fi
@@ -116,6 +157,8 @@ mkdir -p "${LSP}" && ln -s "${LSP}" "${TMP}/link"
 export CLAUDE_CODE_TMPDIR="${ROOT}"
 expect "glob through a symlink to a scratchpad" deny "rm -f ${TMP}/link/dnd-*"
 expect "exact path through the symlink" allow "rm -f ${TMP}/link/dnd-1653-a.log"
+expect "rm -rf link/ deletes the target's contents" deny "rm -rf ${TMP}/link/"
+expect "rm -rf link removes only the link" allow "rm -rf ${TMP}/link"
 unset CLAUDE_CODE_TMPDIR
 expect "same symlink without that root is not a scratchpad" allow "rm -f ${TMP}/link/dnd-*"
 
@@ -136,6 +179,11 @@ expect "find -delete elsewhere" allow "find /home/x/build -name '*.o' -delete"
 expect "find | xargs cat" allow "find ${SP} -name 'x-*' | xargs cat"
 expect "find then a separate xargs rm" allow "find ${SP} -name x; printf a | xargs rm -f"
 expect "ls a glob, read only" allow "ls ${SP}/*.log"
+expect "cd inside a subshell does not leak" allow "(cd ${SP} && ls) && rm -f *.o"
+expect "popd restores the directory" allow "pushd ${SP} && ls && popd && rm -f *.o"
+expect "rm of a substitution listing elsewhere" allow "rm -f \$(ls /home/x/build/*.o)"
+expect "rm -rf of a mktemp substitution" allow "rm -rf \"\$(mktemp -d)\""
+expect "trap clean-up by exact path" allow "trap 'rm -f ${SP}/dnd-1653-a.log' EXIT"
 
 echo "== text that only mentions a delete: allowed (no DND-786 false fire) =="
 expect "quoted grep pattern" allow "grep 'rm -f ${SP}/*' notes.txt"
@@ -154,6 +202,12 @@ expect "command -v rm" allow "command -v rm"
 expect "printf of a find -delete" allow "printf '%s\n' 'find ${SP} -delete'"
 
 echo "== hook contract =="
+run "rm -f ${SP}/x* \"unterminated"
+if [ "${RC}" -eq 0 ] && [ "$(decision)" = "allow" ] && printf '%s' "${OUT}" | grep -q 'NOT' && printf '%s' "${OUT}" | grep -q 'Fix:'; then
+  ok "an unparsable rm command is allowed loudly with Fix:"
+else
+  bad "an unparsable rm command is allowed loudly with Fix:" "rc=${RC} ${OUT}"
+fi
 run "rm -f ${SP}/*" "/home/x" "Edit"
 if [ "$(decision)" = "allow" ] && [ "${RC}" -eq 0 ]; then ok "non-Bash tool passes"; else bad "non-Bash tool passes" "${OUT}"; fi
 OUT=$(printf 'not json' | "${HOOK}" 2>/dev/null); RC=$?

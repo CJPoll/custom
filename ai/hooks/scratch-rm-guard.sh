@@ -22,14 +22,29 @@
 #   * `find` with `-delete`, or `-exec`/`-execdir`/`-ok`/`-okdir` running
 #     rm/unlink/shred, whose start path is in, is, or is above a scratchpad.
 #   * `xargs rm` in a pipeline fed by a `find` or a glob that reaches a
-#     scratchpad (`find <sp> -name 'x-*' | xargs rm`, `ls <sp>/x-* | xargs rm`).
+#     scratchpad (`find <sp> -name 'x-*' | xargs rm`, `ls <sp>/x-* | xargs rm`),
+#     and `rm $(...)` whose substitution lists names the same way
+#     (`rm $(ls <sp>/x-*)`).
 #   * `for v in <glob reaching a scratchpad>; do rm "$v"; done`: the loop
 #     variable carries the glob.
+#   * `find ... -exec sh -c '<script running rm>'` counts as a deleting find.
+#     `find` ignores -maxdepth: `find /tmp -maxdepth 1 ... -delete` is denied
+#     though it cannot reach a scratchpad (an accepted false positive).
 #   * a glob delete whose path the hook CANNOT resolve (a variable it cannot
 #     see, a command substitution, a relative path after an unresolvable
-#     `cd`). An unresolved path is never read as "not a scratchpad"
+#     `cd`), and the same unresolved source feeding `xargs rm`, `rm $(...)`
+#     or a `for` loop. An unresolved path is never read as "not a scratchpad"
 #     (~/.claude/CLAUDE.md -> A failed lookup must never look like an empty
 #     one). The Fix: says to spell the path literally.
+#
+# DECISION -- an unresolved RECURSIVE rm with no glob (`rm -rf "$tmpdir"`,
+# `$tmpdir` from an earlier `$(...)`) is allowed with an `unresolved` log
+# line. Denying it would deny the common clean-up of a mktemp directory in
+# every session; the DND-1621 cause was a glob, and a glob with an unresolved
+# path IS denied. Variables resolve from the same command's assignments, then
+# from the hook's own environment. That is Claude Code's environment; a
+# variable the Bash tool's shell snapshot sets to a different value is
+# resolved to the hook's value (a residual).
 #
 # ALLOWED: an exact-path `rm` (recursive or not) of a file or subdirectory
 # INSIDE a scratchpad; every delete outside the scratchpads; a quoted glob
@@ -45,10 +60,12 @@
 # protects every session's scratchpad, and no session id is computed (a key
 # computed wrongly would match nothing and pass).
 #
-# PARSED: `;` `&&` `||` `|` `&` newlines, subshells, `$( )` and backticks (run
-# as commands too), comments, heredocs (body is data, except when fed to
-# sh/bash/zsh/dash with no script argument), `sh|bash|zsh|dash -c SCRIPT` and
-# `eval` (recursively), `cd`/`pushd`/`popd`, VAR=value and export assignments,
+# PARSED: `;` `&&` `||` `|` `&` newlines, subshells (a `cd` inside one does not
+# leak out), `$( )` and backticks (run as commands too; a heredoc inside `$( )`
+# is data), comments, heredocs (body is data, except when fed to
+# sh/bash/zsh/dash with no script argument), `sh|bash|zsh|dash -c SCRIPT`,
+# `eval` and `trap` (recursively), `cd` and a `pushd`/`popd` stack, VAR=value
+# and export assignments,
 # `$(mktemp ...)` (a path in $TMPDIR or /tmp), and these wrappers: env,
 # timeout, nice, ionice, nohup, command, exec, builtin, setsid, time, stdbuf,
 # sudo, doas, test-slot, xargs.
@@ -56,13 +73,15 @@
 # NOT A SANDBOX. Not caught (examples, not an inventory): an interpreter
 # (`python -c "shutil.rmtree(...)"`, `perl -e unlink`), `while read f; do rm
 # "$f"; done < <(find ...)`, a wrapper not listed above, `git clean` in a repo
-# under a scratchpad, and a glob qualifier `(N)`.
+# under a scratchpad, a glob qualifier `(N)`, an array assignment
+# (`f=(<sp>/x-*); rm "${f[@]}"`), and a nested subshell opened as `((`.
 #
 # FAILURE MODE: hot-loaded into every session. An input it cannot evaluate
-# (non-JSON stdin, no python3, a checker crash) is ALLOWED with a visible
-# systemMessage and a log line -- loud, never silent. Every deny and every
-# unresolved/unparsed case is appended to
-# ${XDG_STATE_HOME:-~/.local/state}/athena/scratch-rm-guard.log.
+# (non-JSON stdin, no python3, a checker crash, a command that mentions
+# rm/unlink/find and does not parse) is ALLOWED with a visible systemMessage
+# and a log line -- loud, never silent. Appended to
+# ${XDG_STATE_HOME:-~/.local/state}/athena/scratch-rm-guard.log: every deny,
+# every unparsed text, and every unresolved recursive rm (allowed, above).
 #
 # --self-test runs ai/hooks/scratch-rm-guard.self-test.sh.
 
@@ -184,10 +203,14 @@ def classify(pattern, cwd):
         if cwd is None:
             raise Unresolved("relative path %r with an unknown working directory" % unescape(pattern))
         pattern = escape(cwd) + "/" + pattern
+    # `link/` and `link/.` name the directory a symlink points to: rm -r there
+    # deletes the target's contents.
+    through = pattern.endswith("/") or pattern.endswith("/.")
     comps = [c for c in os.path.normpath(pattern).split("/") if c]
     # Resolve symlinks in the literal prefix. For a path with no glob, stop at
     # its parent: rm of a symlink removes the link, not what it points to.
-    k = next((i for i, c in enumerate(comps) if comp_is_glob(c)), max(len(comps) - 1, 0))
+    k = next((i for i, c in enumerate(comps) if comp_is_glob(c)),
+             len(comps) if through else max(len(comps) - 1, 0))
     real = os.path.realpath("/" + "/".join(unescape(c) for c in comps[:k]))
     comps = [escape(c) for c in real.split("/") if c] + comps[k:]
     best = "none"
@@ -221,12 +244,39 @@ NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 def find_close(text, i, open_ch, close_ch):
     """Index of the close matching an already-open bracket; text[i] is the
-    first char inside. Quotes are honoured. -1 if it never closes."""
+    first char inside. Quotes and heredoc bodies are honoured (an apostrophe
+    in a `$(cat <<'EOF' ... EOF)` commit message is data). -1 if it never
+    closes."""
     depth, n = 1, len(text)
+    heredocs = []   # [(delimiter, strip_tabs)] waiting for the next newline
     while i < n:
         c = text[i]
         if c == "\\":
             i += 2
+            continue
+        if c == "\n" and heredocs:
+            i += 1
+            while heredocs and i < n:
+                j = text.find("\n", i)
+                line = text[i:j] if j >= 0 else text[i:]
+                i = j + 1 if j >= 0 else n
+                delim, strip = heredocs[0]
+                if (line.lstrip("\t") if strip else line) == delim:
+                    heredocs.pop(0)
+            continue
+        if text.startswith("<<", i) and not text.startswith("<<<", i):
+            j = i + 2
+            strip = j < n and text[j] == "-"
+            j += 1 if strip else 0
+            while j < n and text[j] in " \t":
+                j += 1
+            k = j
+            while k < n and text[k] not in " \t\n;&|()<>":
+                k += 1
+            delim = text[j:k].replace("'", "").replace('"', "").replace("\\", "")
+            if delim:
+                heredocs.append((delim, strip))
+            i = k
             continue
         if c == "'":
             j = text.find("'", i + 1)
@@ -418,7 +468,9 @@ def tokenize(text, heredocs=True):
     return toks
 
 def split_commands(toks):
-    """[(words, heredoc_bodies, sep_after)] simple commands."""
+    """[(words, heredoc_bodies, sep_after)] simple commands. A subshell's
+    `(` and `)` are kept as (None, None, "(" | ")") markers, so a `cd` inside
+    one does not leak out."""
     cmds, words, bodies, skip = [], [], [], False
     for t in toks:
         if t.kind == "heredoc":
@@ -428,6 +480,8 @@ def split_commands(toks):
             if t.value in SEPS:
                 if words or bodies:
                     cmds.append((words, bodies, t.value))
+                if t.value in ("(", ")"):
+                    cmds.append((None, None, t.value))
                 words, bodies, skip = [], [], False
             elif t.value in REDIRS:
                 skip = True   # the next word is a redirection target, not an argument
@@ -442,7 +496,8 @@ def split_commands(toks):
 
 # ---------------------------------------------------------------- evaluate
 class Tainted:
-    """A loop variable bound to a glob that reaches a scratchpad."""
+    """A loop variable bound to a glob that reaches a scratchpad (pattern),
+    or to a glob whose path is unresolved (pattern None)."""
     def __init__(self, pattern):
         self.pattern = pattern
 
@@ -461,7 +516,7 @@ def mktemp_path(script):
         cmds = split_commands(tokenize(script))
     except ValueError:
         return None
-    if len(cmds) != 1 or not cmds[0][0]:
+    if len(cmds) != 1 or not cmds[0][0]:   # a marker has words None
         return None
     words = [plain(w, {}, None) for w in cmds[0][0]]
     if words[0] != "mktemp" or any(w is None for w in words):
@@ -489,7 +544,11 @@ def resolve(segs, env, cwd):
         elif kind == "var":
             v = var_value(s[1], env, cwd)
             if isinstance(v, Tainted):
-                parts.append(v.pattern); glob = True
+                glob = True
+                if v.pattern is None:
+                    unknown = True
+                else:
+                    parts.append(v.pattern)
             elif v is UNKNOWN:
                 unknown = True
             elif s[2]:
@@ -573,7 +632,24 @@ def strip_options(words, env, cwd, short_val, long_val):
 class State:
     def __init__(self, env, cwd, depth):
         self.env, self.cwd, self.depth = env, cwd, depth
-        self.pipe_source = None   # a description, while the current pipeline is fed from a scratchpad
+        self.dirs = []            # the pushd stack
+        # (kind, description) while the current pipeline is fed names from a
+        # scratchpad ("scratch") or from a place the hook cannot resolve
+        # ("unresolved"); every source this script set, in `listed`.
+        self.pipe_source = None
+        self.listed = []
+
+WARNINGS = []   # parts of the command not checked; emitted when nothing denies
+
+def set_source(st, kind, desc):
+    st.listed.append((kind, desc))
+    if st.pipe_source is None or st.pipe_source[0] != "scratch":
+        st.pipe_source = (kind, desc)
+
+def deny_source(tool, src, why):
+    if src[0] == "scratch":
+        deny_glob(tool, "names from %s" % src[1], why)
+    deny_unresolved(tool, "names from %s" % src[1])
 
 def chdir(st, segs):
     if segs is None:
@@ -625,10 +701,46 @@ def reaches(pat, glob, st, recursive):
         return recursive
     return False
 
+def rm_operands(args, st):
+    """(operands, recursive). GNU rm permutes its argv, so an option counts
+    wherever it sits before `--` (`rm <dir> -rf` is recursive)."""
+    words, recursive, ended = [], False, False
+    for w in args:
+        v = plain(w, st.env, st.cwd)
+        if not ended and v == "--":
+            ended = True
+        elif not ended and v is not None and v.startswith("-") and v != "-":
+            if v.startswith("--"):
+                # GNU accepts a unique prefix: --rec, --recursive.
+                if len(v) >= 3 and "--recursive".startswith(v):
+                    recursive = True
+            elif "r" in v[1:] or "R" in v[1:]:
+                recursive = True
+        else:
+            words.append(w)
+    return words, recursive
+
+def sub_source(segs, st):
+    """The scratchpad (or unresolved) source a `$( )` in this word lists
+    names from: `rm $(ls <sp>/x-*)`, `rm $(find <sp> -name 'x-*')`."""
+    found = None
+    for s in segs:
+        if s[0] != "sub" or mktemp_path(s[1]) is not None or st.depth >= MAX_DEPTH:
+            continue
+        inner = State(dict(st.env), st.cwd, st.depth + 1)
+        check_text(s[1], inner)
+        for src in inner.listed:
+            if src[0] == "scratch":
+                return src
+            found = found or src
+    return found
+
 def check_rm(tool, args, st):
-    words, opts = strip_options(args, st.env, st.cwd, "", set())
-    recursive = any(k in opts for k in ("-r", "-R", "--recursive"))
+    words, recursive = rm_operands(args, st)
     for w in words:
+        src = sub_source(w, st)
+        if src:
+            deny_source(tool, src, "A command substitution lists files by pattern.")
         pat, glob = resolve(w, st.env, st.cwd)
         try:
             if pat is None:
@@ -665,6 +777,14 @@ def find_starts(args, st):
             nv = plain(words[i + 1], st.env, st.cwd)
             if nv is not None and os.path.basename(nv) in DELETERS:
                 deletes = True
+            elif nv is not None and os.path.basename(nv) in SHELLS:
+                # `-exec sh -c 'rm "$1"' _ {} +`: a script that deletes.
+                for later in words[i + 2:]:
+                    lv = plain(later, st.env, st.cwd)
+                    if lv in (";", "+"):
+                        break
+                    if lv is not None and re.search(r"(^|[\s;&|(`])(rm|unlink|shred)\s", lv):
+                        deletes = True
     return starts or [[("lit", ".", False)]], deletes
 
 def find_reaches(starts, st):
@@ -685,23 +805,26 @@ def check_find(args, st):
     except Unresolved as e:
         if deletes:
             deny_unresolved("find", str(e))
+        set_source(st, "unresolved", "a find whose start path the hook cannot see")
         return
     if hit and deletes:
         deny_glob("find", "start path %s" % hit, "find deletes every match under its start path.")
     if hit:
-        st.pipe_source = "find from %s" % hit
+        set_source(st, "scratch", "find from %s" % hit)
 
 def note_glob_source(words, st):
     """A pipeline stage that lists scratchpad files by glob (`ls <sp>/x-*`)."""
     for w in words:
         pat, glob = resolve(w, st.env, st.cwd)
-        if pat is None or not glob:
+        if not glob:
             continue
         try:
+            if pat is None:
+                raise Unresolved("unresolved")
             if classify(pat, st.cwd) != "none":
-                st.pipe_source = "a glob %s" % show(pat)
+                set_source(st, "scratch", "a glob %s" % show(pat))
         except Unresolved:
-            pass
+            set_source(st, "unresolved", "a glob whose path the hook cannot see")
 
 def run_script(script, st, label):
     if st.depth >= MAX_DEPTH:
@@ -730,12 +853,16 @@ def check_command(words, bodies, st):
         st.env[name] = UNKNOWN
         for w in words[3:]:
             pat, glob = resolve(w, st.env, st.cwd)
-            if pat is not None and glob:
-                try:
-                    if classify(pat, st.cwd) != "none":
-                        st.env[name] = Tainted(pat)
-                except Unresolved:
-                    pass
+            if not glob:
+                continue
+            try:
+                if pat is None:
+                    raise Unresolved("unresolved")
+                if classify(pat, st.cwd) != "none":
+                    st.env[name] = Tainted(pat)
+                    break
+            except Unresolved:
+                st.env[name] = Tainted(None)
         return
     # wrappers
     while head is not None and os.path.basename(head) in WRAPPERS:
@@ -764,8 +891,8 @@ def check_command(words, bodies, st):
                 return
             nxt = plain(words[0], st.env, st.cwd)
             if nxt is not None and os.path.basename(nxt) in DELETERS and st.pipe_source:
-                deny_glob("xargs %s" % os.path.basename(nxt), "names from %s" % st.pipe_source,
-                          "xargs deletes every name the pipeline lists.")
+                deny_source("xargs %s" % os.path.basename(nxt), st.pipe_source,
+                            "xargs deletes every name the pipeline lists.")
         if not words:
             return
         head = plain(words[0], st.env, st.cwd)
@@ -780,10 +907,17 @@ def check_command(words, bodies, st):
                 if m:
                     v = plain([("lit", w[0][1][m.end():], w[0][2])] + list(w[1:]), st.env, st.cwd)
                     st.env[m.group(1)] = UNKNOWN if v is None else v
-    elif base in ("cd", "pushd"):
+    elif base == "cd":
+        chdir(st, args[0] if args else None)
+    elif base == "pushd":
+        st.dirs.append(st.cwd)
         chdir(st, args[0] if args else None)
     elif base == "popd":
-        st.cwd = None
+        st.cwd = st.dirs.pop() if st.dirs else None
+    elif base == "trap":
+        script = plain(args[0], st.env, st.cwd) if args else None
+        if script and not script.startswith("-"):
+            run_script(script, st, "trap")
     elif base in ("rm", "unlink"):
         check_rm(base, args, st)
     elif base == "find":
@@ -828,8 +962,20 @@ def check_text(text, st):
         toks = tokenize(text)
     except ValueError as e:
         log("unparsed", "%s: %s" % (e, text[:300]))
+        if re.search(r"\b(rm|unlink|find)\b", text):
+            WARNINGS.append("could not parse a command that mentions rm/unlink/find (%s), so it was NOT "
+                            "checked for a glob delete in a session scratchpad. Fix: if it deletes "
+                            "scratchpad files, delete each by its exact path; if it is a parse gap, "
+                            "fix ai/hooks/scratch-rm-guard.sh" % e)
         return
+    saved = []   # subshell scopes: a `cd` inside `( ... )` does not leak out
     for words, bodies, sep in split_commands(toks):
+        if words is None:
+            if sep == "(":
+                saved.append((st.cwd, dict(st.env), list(st.dirs)))
+            elif saved:
+                st.cwd, st.env, st.dirs = saved.pop()
+            continue
         for script in subs_of(words):
             run_script(script, st, "$( )")
         check_command(words, bodies, st)
@@ -867,6 +1013,11 @@ def main():
         allow_warn("the checker crashed (%s: %s), so this call was NOT checked for a glob delete in a "
                    "session scratchpad. Fix: reproduce with this call's stdin and fix "
                    "ai/hooks/scratch-rm-guard.sh." % (type(e).__name__, str(e)[:200]), kind="crashed")
+    if WARNINGS:
+        msg = "; ".join(dict.fromkeys(WARNINGS))
+        emit({"systemMessage": "scratch-rm-guard: " + msg,
+              "hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                     "additionalContext": "scratch-rm-guard: " + msg}})
     emit({})
 
 main()
