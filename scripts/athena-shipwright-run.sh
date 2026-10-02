@@ -432,6 +432,11 @@ if [ ! -r "${__wrapper_dir}/lib/shipwright-stale-dirt.sh" ]; then
 elif ! . "${__wrapper_dir}/lib/shipwright-stale-dirt.sh"; then
   LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/shipwright-stale-dirt.sh (could not be loaded); "
 fi
+# Without dbus-env.sh, still suppress autolaunch for what runs before the tick
+# exits (an unconnectable address, as the library's own fallback does).
+case "${LIB_FAULTS}" in
+  *lib/dbus-env.sh*) export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/nonexistent/athena-dbus-suppressed}" ;;
+esac
 "${__wrapper_dir}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
 
 # Record who holds it, for the message above in the NEXT tick. Written to the

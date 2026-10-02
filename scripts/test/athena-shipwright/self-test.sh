@@ -2469,6 +2469,39 @@ for lib in dbus-env.sh shipwright-stale-dirt.sh; do
     bad "$lib wedge" "rc=$rc3 wedged=$(newest_wedged "$r")"
   fi
 done
+
+# The wedge alert still goes out once when a lib is the missing file (it is why
+# wedge_track has its own state reader), and a lib that is present but does not
+# load is the same fault.
+cat >"$TMP/lib-sw-send-mail" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$(dirname "$0")/lib-sw-send-calls"
+echo "athena:inbox: delivered 0001-fake.md"
+EOF
+chmod +x "$TMP/lib-sw-send-mail"
+rm -f "$TMP/lib-sw-send-calls"
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+RUNNER="$(sx_runner "$a" shipwright-stale-dirt.sh)"
+for _ in 1 2 3 4; do
+  next_second; run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2 SHIPWRIGHT_SEND_MAIL="$TMP/lib-sw-send-mail" >/dev/null
+done
+if [ "$(grep -c 'shipwright-wedged' "$TMP/lib-sw-send-calls" 2>/dev/null || echo 0)" = 1 ]; then
+  ok "a missing stale-dirt lib: the wedged lane sends ONE shipwright-wedged alert, then none"
+else
+  bad "wedge alert with the lib missing" "sends=$(cat "$TMP/lib-sw-send-calls" 2>&1) err=$(cat "$a/runner.err")"
+fi
+for lib in dbus-env.sh shipwright-stale-dirt.sh; do
+  r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+  RUNNER="$(sx_runner "$a" "$lib")"
+  printf 'return 1\n' >"$a/sx/scripts/lib/$lib"
+  rc="$(run_runner "$r")"
+  rec="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.failed' 2>/dev/null | sort | tail -n1)"
+  if [ "$rc" = 78 ] && [ ! -e "$a/claude-was-invoked" ] && [ -n "$rec" ] && grep -q "$lib (could not be loaded)" "$rec"; then
+    ok "an unloadable $lib: exit 78, a .failed record saying could not be loaded, no session"
+  else
+    bad "unloadable $lib" "rc=$rc rec=$( [ -n "$rec" ] && cat "$rec") err=$(cat "$a/runner.err")"
+  fi
+done
 RUNNER="$REAL_RUNNER"
 
 # DND-1667: no git call may have fallen through past a git stub.

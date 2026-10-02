@@ -1315,6 +1315,17 @@ if [ "$rc" = 78 ] && [ -n "$rec" ] && grep -q 'dbus-env.sh could not be loaded' 
 else
   bad "unloadable lib" "rc=$rc rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
+# A truncated mcp-preflight.sh loads (exit 0) and defines nothing.
+c="$(new_case)"
+RUNNER="$(sx_runner "$c" mcp-preflight.sh)"
+: >"$c/sx/scripts/lib/mcp-preflight.sh"
+rc="$(run_runner "$c")"
+rec="$(newest "$c" failed)"
+if [ "$rc" = 78 ] && [ -n "$rec" ] && grep -q 'does not define leadtime_mcp_preflight' "$rec" && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ]; then
+  ok "an empty mcp-preflight.sh (loads, defines nothing): exit 78, a .failed record, counted"
+else
+  bad "empty preflight lib" "rc=$rc rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
 RUNNER="$REAL_RUNNER"
 
 # ---------------------------------------------------------------------------------

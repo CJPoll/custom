@@ -449,6 +449,11 @@ run_mcp_preflight() {
       MCP_PF_FIX="read the error above; restore scripts/lib/mcp-preflight.sh (git checkout -- scripts/lib), or fast-forward it to main."
       return 1
     }
+    if ! declare -F leadtime_mcp_preflight >/dev/null 2>&1; then
+      MCP_PF_WHY="${lib} loaded but does not define leadtime_mcp_preflight, so the MCP servers cannot be checked; no session."
+      MCP_PF_FIX="restore scripts/lib/mcp-preflight.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main."
+      return 1
+    fi
   fi
   leadtime_mcp_preflight "${CLAUDE_JSON}" "${MAIN_CHECKOUT}"
 }
@@ -512,6 +517,11 @@ elif ! . "${SCRIPT_DIR}/lib/dbus-env.sh" || ! declare -F athena_dbus_env_setup >
   DBUS_LIB_WHY="${SCRIPT_DIR}/lib/dbus-env.sh could not be loaded, so D-Bus autolaunch cannot be suppressed; no session."
 else
   athena_dbus_env_setup
+fi
+# Without the library, still suppress autolaunch for what runs before the tick
+# exits (an unconnectable address, as the library's own fallback does).
+if [ -n "${DBUS_LIB_WHY}" ]; then
+  export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/nonexistent/athena-dbus-suppressed}"
 fi
 "${SCRIPT_DIR}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
 # The athena MCP authenticates through its headersHelper; never an env token.
