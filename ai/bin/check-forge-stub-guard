@@ -88,6 +88,9 @@
 #     `ln -t "$B" "$S/gh"`).
 #   * D put on PATH through a variable whose value does not itself hold
 #     `$PATH` (`P="$D"; PATH="$P:$PATH"`), or through `PATH+=`.
+#   * A PATH whose last element is D, grown later by appending
+#     (`PATH="$D"; PATH="$PATH:/usr/bin"`): the first value reads as D with
+#     nothing behind it.
 #   * The ORDER in time the helper requires (fsg_arm before the suite's own
 #     PATH prepend, so `$PATH` holds the guard; fsg_verify last), whether
 #     fsg_verify's status is counted, and whether a stub fsg_require_stubs
