@@ -858,6 +858,71 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+case_ 'athena-clustering-run.sh — a missing scripts/lib file is recorded, counted, alerted (DND-1603)'
+
+# sx_runner <case> [<lib file to omit>...] — a copy of the runner beside its
+# libs and the alert sender, in a fixture tree, minus the named lib files.
+sx_runner() {
+  local c="$1" l; shift
+  mkdir -p "$c/sx/scripts/lib" "$c/sx/ai/lib"
+  cp -- "$RUNNER" "${SCRIPTS}/reap-orphan-dbus" "$c/sx/scripts/"
+  cp -- "${SCRIPTS}"/lib/*.sh "$c/sx/scripts/lib/"
+  cp -- "${REPO_ROOT}/ai/lib/harness-alert-send.sh" "$c/sx/ai/lib/"
+  for l in "$@"; do rm -f -- "$c/sx/scripts/lib/$l"; done
+  printf '%s' "$c/sx/scripts/athena-clustering-run.sh"
+}
+cat >"$TMP/lib-send-mail" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$(dirname "$0")/lib-send-calls"
+echo "athena:inbox: delivered 0001-fake.md"
+EOF
+chmod +x "$TMP/lib-send-mail"
+
+REAL_RUNNER="$RUNNER"
+c="$(new_case)"
+RUNNER="$(sx_runner "$c")"
+rc="$(run_runner "$c" CLUSTERING_SEND_MAIL="$TMP/lib-send-mail")"
+if [ "$rc" = 0 ] && [ "$(invoked "$c")" = 1 ]; then
+  ok "control: the fixture copy with every lib present runs a healthy tick"
+else
+  bad "control copy" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+
+for lib in mcp-preflight.sh dbus-env.sh; do
+  c="$(new_case)"
+  RUNNER="$(sx_runner "$c" "$lib")"
+  rm -f "$TMP/lib-send-calls"
+  r1="$(run_runner "$c" CLUSTERING_FAIL_ESCALATE=2 CLUSTERING_SEND_MAIL="$TMP/lib-send-mail")"
+  rec="$(newest "$c" failed)"
+  if [ "$r1" = 78 ] && [ "$(invoked "$c")" = 0 ] && [ "$(cat "$(sd "$c")/consecutive-failures" 2>/dev/null || echo 0)" = 1 ] \
+     && [ -n "$rec" ] && grep -q "scripts/lib/$lib" "$rec" && grep -q "scripts/lib/$lib" "$c/runner.err" \
+     && grep -q 'Fix:' "$c/runner.err"; then
+    ok "$lib missing: exit 78, a .failed record naming it, the wedge counter at 1, Fix:, no session"
+  else
+    bad "$lib missing" "rc=$r1 rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
+  fi
+  r2="$(run_runner "$c" CLUSTERING_FAIL_ESCALATE=2 CLUSTERING_SEND_MAIL="$TMP/lib-send-mail")"
+  r3="$(run_runner "$c" CLUSTERING_FAIL_ESCALATE=2 CLUSTERING_SEND_MAIL="$TMP/lib-send-mail")"
+  if [ "$r2" = 78 ] && [ "$r3" = 75 ] && [ -n "$(newest "$c" wedged)" ] \
+     && [ "$(grep -c 'clustering-wedged' "$TMP/lib-send-calls" 2>/dev/null || echo 0)" = 1 ] && [ "$(invoked "$c")" = 0 ]; then
+    ok "$lib missing: it wedges at the threshold and sends ONE clustering-wedged alert, like any counted failure"
+  else
+    bad "$lib wedge" "r2=$r2 r3=$r3 wedged=$(newest "$c" wedged) sends=$(cat "$TMP/lib-send-calls" 2>&1)"
+  fi
+done
+
+c="$(new_case)"
+RUNNER="$(sx_runner "$c" mcp-preflight.sh)"
+rc="$(run_runner "$c" -- --dry-run)"
+if [ "$rc" = 78 ] && grep -q 'scripts/lib/mcp-preflight.sh is missing' "$c/runner.err" && grep -q 'a tick would exit 78' "$c/runner.err" \
+   && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")" ] && [ ! -s "$c/runner.out" ]; then
+  ok "--dry-run with mcp-preflight.sh missing: exit 78 with Fix:, no brief, touches nothing"
+else
+  bad "dry-run lib missing" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+RUNNER="$REAL_RUNNER"
+
+# ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || {
   printf 'Fix: read each FAIL line above; it names the guarantee that broke. Re-run with: bash scripts/test/athena-clustering/self-test.sh\n' >&2

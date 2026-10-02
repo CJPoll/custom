@@ -572,6 +572,11 @@ shipwright cron never writes Notion, so this is its own runner.
   lane, and the Notion/Athena MCP servers are registered on the main checkout,
   so the runner copies them into a `--mcp-config`. A missing server, or the
   skill not landed in the main checkout, is exit 78 and counts as a failure.
+  So does a `scripts/lib` file the tick sources (`mcp-preflight.sh`,
+  `dbus-env.sh`) that is missing or unloadable (DND-1603): it leaves a
+  `.failed` record, feeds the wedge counter and the one wedge alert, and the
+  lead-time runner treats it the same. The shipwright runner does too, for
+  `dbus-env.sh` and `shipwright-stale-dirt.sh`.
 - **Install / restore / verify:** `scripts/setup-clustering-cron`
   (`--dry-run`, `--check`, `--remove`, `--backup <file>`). `--check`, the
   install, the installer's install `--dry-run` and the runner's `--dry-run`

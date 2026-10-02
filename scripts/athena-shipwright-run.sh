@@ -88,6 +88,9 @@
 #       sends ONE harness-alert naming it (DND-834). Cron mail is not delivered
 #       on every machine, so neither depends on it. The exit stays 75 even when
 #       the record or the alert fails; each failure is loud with a Fix: line.
+#   78  a scripts/lib file this tick needs (dbus-env.sh, shipwright-stale-dirt.sh)
+#       is missing or unloadable: no session. It leaves <ts>.failed in runs/ and
+#       counts toward the wedge like any unsuccessful outcome (DND-1603)
 #   69  EX_UNAVAILABLE: the session did NO work — it never left its liveness
 #       receipt, so it never reached the model (usually a provider usage limit,
 #       credits, or auth). That is any receipt-less, commit-less session that
@@ -411,11 +414,24 @@ fi
 # after the --help/DRY_RUN early exits and the single-run lock, so it runs only
 # for an actual run.
 __wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+# A missing or unloadable library is not fatal here: no record machinery exists
+# yet, so it is noted in LIB_FAULTS and the tick records it, counts it and exits
+# 78 right after the wedge check (DND-1603).
+LIB_FAULTS=""
+if [ ! -r "${__wrapper_dir}/lib/dbus-env.sh" ]; then
+  LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/dbus-env.sh (missing); "
 # shellcheck source=scripts/lib/dbus-env.sh
-. "${__wrapper_dir}/lib/dbus-env.sh"
-athena_dbus_env_setup
+elif ! . "${__wrapper_dir}/lib/dbus-env.sh" 2>/dev/null || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
+  LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/dbus-env.sh (could not be loaded); "
+else
+  athena_dbus_env_setup
+fi
+if [ ! -r "${__wrapper_dir}/lib/shipwright-stale-dirt.sh" ]; then
+  LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/shipwright-stale-dirt.sh (missing); "
 # shellcheck source=scripts/lib/shipwright-stale-dirt.sh
-. "${__wrapper_dir}/lib/shipwright-stale-dirt.sh"
+elif ! . "${__wrapper_dir}/lib/shipwright-stale-dirt.sh" 2>/dev/null; then
+  LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/shipwright-stale-dirt.sh (could not be loaded); "
+fi
 "${__wrapper_dir}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
 
 # Record who holds it, for the message above in the NEXT tick. Written to the
@@ -669,15 +685,24 @@ wedge_send() {
   return "${rc}"
 }
 
+# wedge_state_get <state-file> <key> — a value from the key=value state file.
+# The runner's own copy, not scripts/lib/shipwright-stale-dirt.sh's: the wedge
+# record and its alert must work when that library is the missing file
+# (DND-1603).
+wedge_state_get() {
+  [ -r "$1" ] || return 0
+  sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1
+}
+
 # wedge_track <tick> <failures> — write this tick's wedge record, open or
 # continue the episode, and send the episode's one alert when it is due. Always
 # returns 0: it reports on the wedge, it never decides it.
 wedge_track() {
   local tick="$1" failures="$2" record episode first alerted mt last_log name="" err tmp
   record="${LOG_DIR}/${tick}.wedged"
-  episode="$(sd_state_get "${WEDGE_STATE}" episode)"
-  first="$(sd_state_get "${WEDGE_STATE}" first_wedged)"
-  alerted="$(sd_state_get "${WEDGE_STATE}" alerted)"
+  episode="$(wedge_state_get "${WEDGE_STATE}" episode)"
+  first="$(wedge_state_get "${WEDGE_STATE}" first_wedged)"
+  alerted="$(wedge_state_get "${WEDGE_STATE}" alerted)"
   # An older runner stored "exit 0, no delivered line" as sent under `?`. It
   # was never confirmed, so it is retried (DND-1513).
   [ "${alerted}" != '?' ] || alerted=""
@@ -847,6 +872,23 @@ if [ "${failures}" -ge "${FAIL_ESCALATE}" ]; then
   # runs/ and alerts once per episode (DND-834; see "the wedge record" above).
   wedge_track "${ts}" "${failures}"
   exit 75
+fi
+
+# A scripts/lib file this tick needs is missing or unloadable (DND-1603). That
+# is an unsuccessful outcome like any other: a record in runs/, a count toward
+# the wedge (and so the one wedge alert), and no session. It sits after the
+# wedge check so a lane that stays broken still wedges and alerts.
+if [ -n "${LIB_FAULTS}" ]; then
+  lib_failed="${LOG_DIR}/${ts}.failed"
+  {
+    echo "athena-shipwright: run ${ts} could not start: a library the runner needs is missing or unloadable."
+    echo "libs=${LIB_FAULTS%; }"
+    echo "classification=failure (counted toward the wedge)"
+  } >"${lib_failed}" || true
+  bump_fail
+  echo "athena-shipwright: ${LIB_FAULTS%; } — no session. Counted as an unsuccessful outcome. Record: ${lib_failed}" >&2
+  echo "  Fix: restore the named file(s) under scripts/lib in this checkout (git checkout -- scripts/lib), or fast-forward it to main. This outcome feeds the wedge counter ${FAIL_COUNT}." >&2
+  exit 78
 fi
 
 # --- 4. yield to a live editor in the MAIN CHECKOUT (economy, not safety) ----

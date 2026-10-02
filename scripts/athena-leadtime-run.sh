@@ -147,7 +147,9 @@
 #       up (scripts/lib/mcp-preflight.sh, the check setup-leadtime-cron
 #       shares): counted. --dry-run runs the same checks in the same order
 #       and exits 78 on the first that fails, touching nothing (DND-1571).
-#       The preflight library itself missing is 78 too, before any record
+#       A scripts/lib file the tick needs (mcp-preflight.sh, dbus-env.sh)
+#       missing or unloadable is 78 too, with a .failed record, counted
+#       like the rest (DND-1603)
 #   *   the session's own non-zero exit (124 on timeout): counted
 
 set -euo pipefail
@@ -176,17 +178,13 @@ done
 REPO="${LEADTIME_REPO:-${SCRIPT_DIR}/..}"
 CLAUDE="${LEADTIME_CLAUDE:-${HOME}/.local/bin/claude}"
 CLAUDE_JSON="${LEADTIME_CLAUDE_JSON:-${HOME}/.claude.json}"
-# The one MCP preflight (DND-1571), shared with --dry-run and the installer.
-# It also holds the servers this loop needs, so the list checked and the list
-# copied into the session's --mcp-config are one variable.
-if [ ! -r "${SCRIPT_DIR}/lib/mcp-preflight.sh" ]; then
-  echo "${ME}: ${SCRIPT_DIR}/lib/mcp-preflight.sh is missing, so the MCP servers cannot be checked; no session." >&2
-  echo "  Fix: restore scripts/lib/mcp-preflight.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main." >&2
-  exit 78
-fi
-# shellcheck source=scripts/lib/mcp-preflight.sh
-. "${SCRIPT_DIR}/lib/mcp-preflight.sh"
-REQUIRED_MCP="${LEADTIME_MCP_REQUIRED}"
+# The one MCP preflight (DND-1571), shared with --dry-run and the installer. It
+# also holds the servers this loop needs (LEADTIME_MCP_REQUIRED), so the list
+# checked and the list copied into the session's --mcp-config are one variable.
+# It is loaded where it is first used (run_mcp_preflight below), never here: a
+# missing library must reach the tick's precondition path, which writes the
+# .failed record, counts it toward the wedge and alerts once per episode
+# (DND-1603). Exiting here left no trace at all.
 
 TIMEOUT="${LEADTIME_TIMEOUT:-50m}"
 case "${TIMEOUT}" in
@@ -434,7 +432,26 @@ SKILL_WHY="the athena:lead-time-improve skill is not in the main checkout (${SKI
 SKILL_FIX="land the skill (DND-1478) on main and fast-forward ${MAIN_CHECKOUT}; the next tick runs."
 # run_mcp_preflight — this runner's call of the one MCP preflight
 # (scripts/lib/mcp-preflight.sh, DND-1571); sets MCP_PF_*.
-run_mcp_preflight() { leadtime_mcp_preflight "${CLAUDE_JSON}" "${MAIN_CHECKOUT}"; }
+# A library that is not there is a failed preflight like any other: it sets
+# MCP_PF_WHY and MCP_PF_FIX and returns 1, so --dry-run and the tick's
+# precondition path (which records and counts) both handle it (DND-1603).
+run_mcp_preflight() {
+  local lib="${SCRIPT_DIR}/lib/mcp-preflight.sh"
+  if ! declare -F leadtime_mcp_preflight >/dev/null 2>&1; then
+    if [ ! -r "${lib}" ]; then
+      MCP_PF_WHY="${lib} is missing, so the MCP servers cannot be checked; no session."
+      MCP_PF_FIX="restore scripts/lib/mcp-preflight.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main."
+      return 1
+    fi
+    # shellcheck source=scripts/lib/mcp-preflight.sh
+    . "${lib}" || {
+      MCP_PF_WHY="${lib} could not be loaded, so the MCP servers cannot be checked; no session."
+      MCP_PF_FIX="read the error above; restore scripts/lib/mcp-preflight.sh (git checkout -- scripts/lib), or fast-forward it to main."
+      return 1
+    }
+  fi
+  leadtime_mcp_preflight "${CLAUDE_JSON}" "${MAIN_CHECKOUT}"
+}
 
 # --dry-run checks what the tick's preconditions (6) check, in the same order,
 # so a rendered brief means a tick can start (DND-1571).
@@ -482,9 +499,18 @@ printf 'pid=%s host=%s started=%s\n' "$$" "$(hostname 2>/dev/null || echo '?')" 
 
 # --- suppress D-Bus autolaunch (after arg parsing and the lock) ----------------
 # See ~/dev/custom/CLAUDE.md -> "Cron D-Bus autolaunch leak".
+# A missing or unloadable library is not fatal here: the tick has no record
+# machinery yet, so it is noted and precondition (6) records it, counts it and
+# exits 78 (DND-1603).
+DBUS_LIB_WHY=""
+if [ ! -r "${SCRIPT_DIR}/lib/dbus-env.sh" ]; then
+  DBUS_LIB_WHY="${SCRIPT_DIR}/lib/dbus-env.sh is missing, so D-Bus autolaunch cannot be suppressed; no session."
 # shellcheck source=scripts/lib/dbus-env.sh
-. "${SCRIPT_DIR}/lib/dbus-env.sh"
-athena_dbus_env_setup
+elif ! . "${SCRIPT_DIR}/lib/dbus-env.sh" 2>/dev/null || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
+  DBUS_LIB_WHY="${SCRIPT_DIR}/lib/dbus-env.sh could not be loaded, so D-Bus autolaunch cannot be suppressed; no session."
+else
+  athena_dbus_env_setup
+fi
 "${SCRIPT_DIR}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
 # The athena MCP authenticates through its headersHelper; never an env token.
 unset ATHENA_MCP_BEARER
@@ -832,6 +858,10 @@ if [ "${RES_RC}" -ne 0 ]; then
   precondition_fail "$(res_why); no repo has a mode, so no session; counted as an unsuccessful outcome." \
     "$(res_fix)" "${res_lines[@]}"
 fi
+# The cron-environment library, noted missing at the lock (DND-1603).
+if [ -n "${DBUS_LIB_WHY}" ]; then
+  precondition_fail "${DBUS_LIB_WHY}" "restore scripts/lib/dbus-env.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main."
+fi
 # The MCP servers, through the one preflight --dry-run and the installer share
 # (scripts/lib/mcp-preflight.sh, DND-1571).
 if ! run_mcp_preflight; then
@@ -840,7 +870,7 @@ fi
 servers="${MCP_PF_SERVERS}"
 # Only the servers the run needs; --strict-mcp-config below keeps every other
 # configured server and connector out of the session.
-mcp_config="$(jq -c --arg names "${REQUIRED_MCP}" \
+mcp_config="$(jq -c --arg names "${LEADTIME_MCP_REQUIRED}" \
   '($names | split(" ")) as $want | {mcpServers: with_entries(select(.key as $k | $want | index($k)))}' \
   <<<"${servers}")"
 

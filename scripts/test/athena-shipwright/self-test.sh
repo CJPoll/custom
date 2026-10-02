@@ -2428,6 +2428,49 @@ else
   bad "missing slack-roots-tick is loud" "rc=$rc err=$(cat "$a/runner.err")"
 fi
 
+# ---------------------------------------------------------------------------
+# DND-1603: a scripts/lib file the runner sources must not be a silent exit.
+# The runner's own libs cannot be removed in place, so each case runs a copy of
+# the runner beside a copy of its libs, minus the one under test.
+sx_runner() { # <aux dir> [<lib file to omit>...] -> prints the copy's path
+  local a="$1" l; shift
+  mkdir -p "$a/sx/scripts/lib" "$a/sx/ai/lib"
+  cp -- "$RUNNER" "${SCRIPTS}/reap-orphan-dbus" "$a/sx/scripts/"
+  cp -- "${SCRIPTS}"/lib/*.sh "$a/sx/scripts/lib/"
+  cp -- "${REPO_ROOT}/ai/lib/harness-alert-send.sh" "$a/sx/ai/lib/"
+  for l in "$@"; do rm -f -- "$a/sx/scripts/lib/$l"; done
+  printf '%s' "$a/sx/scripts/athena-shipwright-run.sh"
+}
+REAL_RUNNER="$RUNNER"
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+RUNNER="$(sx_runner "$a")"
+rc="$(run_runner "$r")"
+if [ "$rc" = 0 ] && [ -e "$a/claude-was-invoked" ]; then
+  ok "control: the fixture copy with every lib present runs a healthy tick"
+else
+  bad "control copy" "rc=$rc err=$(cat "$a/runner.err")"
+fi
+for lib in dbus-env.sh shipwright-stale-dirt.sh; do
+  r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+  RUNNER="$(sx_runner "$a" "$lib")"
+  rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+  rec="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.failed' 2>/dev/null | sort | tail -n1)"
+  if [ "$rc" = 78 ] && [ ! -e "$a/claude-was-invoked" ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null || echo 0)" = 1 ] \
+     && [ -n "$rec" ] && grep -q "scripts/lib/$lib" "$rec" && grep -q "scripts/lib/$lib" "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+    ok "$lib missing: exit 78, a .failed record naming it, the wedge counter at 1, Fix:, no session"
+  else
+    bad "$lib missing" "rc=$rc rec=$( [ -n "$rec" ] && cat "$rec") err=$(cat "$a/runner.err")"
+  fi
+  next_second; run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2 >/dev/null
+  next_second; rc3="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+  if [ "$rc3" = 75 ] && [ -n "$(newest_wedged "$r")" ] && [ ! -e "$a/claude-was-invoked" ]; then
+    ok "$lib missing: the lane wedges at the threshold like any counted failure"
+  else
+    bad "$lib wedge" "rc=$rc3 wedged=$(newest_wedged "$r")"
+  fi
+done
+RUNNER="$REAL_RUNNER"
+
 # DND-1667: no git call may have fallen through past a git stub.
 if fsg_verify; then ok "no git call fell through past its stub (DND-1667)"
 else bad "no git call fell through past its stub (DND-1667)" "see the forge-stub-guard FAIL above"; fi

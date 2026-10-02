@@ -1243,6 +1243,66 @@ else
 fi
 
 # ---------------------------------------------------------------------------------
+case_ '14b. a missing scripts/lib file is a recorded, counted, alerted failure (DND-1603)'
+
+# sx_runner <case> [<lib file to omit>...] — a copy of the runner beside its
+# libs and the alert sender, in a fixture tree, minus the named lib files.
+# Prints the copy's path. The runner's own libs cannot be removed in place.
+sx_runner() {
+  local c="$1" l; shift
+  mkdir -p "$c/sx/scripts/lib" "$c/sx/ai/lib"
+  cp -- "${REPO_ROOT}/scripts/athena-leadtime-run.sh" "${REPO_ROOT}/scripts/reap-orphan-dbus" "$c/sx/scripts/"
+  cp -- "${REPO_ROOT}"/scripts/lib/*.sh "$c/sx/scripts/lib/"
+  cp -- "${REPO_ROOT}/ai/lib/harness-alert-send.sh" "$c/sx/ai/lib/"
+  for l in "$@"; do rm -f -- "$c/sx/scripts/lib/$l"; done
+  printf '%s' "$c/sx/scripts/athena-leadtime-run.sh"
+}
+
+REAL_RUNNER="$RUNNER"
+c="$(new_case)"
+RUNNER="$(sx_runner "$c")"
+rc="$(run_runner "$c")"
+if [ "$rc" = 0 ] && [ "$(invoked "$c")" = 1 ]; then
+  ok "control: the fixture copy with every lib present runs a healthy tick"
+else
+  bad "control copy" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+
+for lib in mcp-preflight.sh dbus-env.sh; do
+  c="$(new_case)"
+  RUNNER="$(sx_runner "$c" "$lib")"
+  r1="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=2)"
+  rec="$(newest "$c" failed)"
+  if [ "$r1" = 78 ] && [ "$(invoked "$c")" = 0 ] && [ "$(fails "$c")" = 1 ] && [ -n "$rec" ] \
+     && grep -q "scripts/lib/$lib" "$rec" && grep -q "scripts/lib/$lib" "$c/runner.err" \
+     && grep -q 'Fix:' "$c/runner.err" && [ "$(lane_dirs "$c")" = 0 ]; then
+    ok "$lib missing: exit 78, a .failed record naming it, the wedge counter at 1, Fix:, no session"
+  else
+    bad "$lib missing" "rc=$r1 fails=$(fails "$c") rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
+  fi
+  r2="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=2)"
+  r3="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=2)"
+  wedged="$(newest "$c" wedged)"
+  if [ "$r2" = 78 ] && [ "$r3" = 75 ] && [ -n "$wedged" ] && [ "$(sends "$c" leadtime-wedged)" = 1 ] \
+     && [ "$(invoked "$c")" = 0 ]; then
+    ok "$lib missing: it wedges at the threshold and sends ONE leadtime-wedged alert, like any counted failure"
+  else
+    bad "$lib wedge" "r2=$r2 r3=$r3 wedged=$wedged sends=$(cat "$c/send.log")"
+  fi
+done
+
+c="$(new_case)"
+RUNNER="$(sx_runner "$c" mcp-preflight.sh)"
+rc="$(run_runner "$c" -- --dry-run)"
+if [ "$rc" = 78 ] && grep -q 'scripts/lib/mcp-preflight.sh is missing' "$c/runner.err" && grep -q 'a tick would exit 78' "$c/runner.err" \
+   && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")" ] && ! grep -q 'MODE: lead-time' "$c/runner.out"; then
+  ok "--dry-run with mcp-preflight.sh missing: exit 78 with Fix:, no brief, touches nothing"
+else
+  bad "dry-run lib missing" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+RUNNER="$REAL_RUNNER"
+
+# ---------------------------------------------------------------------------------
 case_ '15. classification'
 
 if grep -q $'^scripts/athena-leadtime-run.sh\tguard' "${REPO_ROOT}/ai/guard-classification.tsv"; then
