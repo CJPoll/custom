@@ -199,6 +199,32 @@ check("blocks past the first 100 are appended in order, the Jev lines still last
   rc.zero? && appends.size == 1 && appends[0]["body"]["children"].last(2).map { |b| b["paragraph"]["rich_text"].map { |t| t["text"]["content"] }.join } == [CL, PATHL]
 end
 
+puts "== partial writes"
+reset!
+spec("append.json", { "status" => 502, "body" => {} })
+rc, out, err = run("--title", "Long", "--body-file", long, "--properties-file", PROPS_F, "--lines-file", LINES)
+check("[critic] a failed append is FILED, INCOMPLETE naming DND-N, never MAY BE FILED, with one create only", "rc #{rc} out #{out} err #{err}") do
+  rc == 3 && err.include?("FILED, INCOMPLETE: DND-1669") && err.include?("Fix: do not file it again") && !err.include?("MAY BE FILED") &&
+    requests.count { |x| x["method"] == "POST" && x["path"] == "/v1/pages" } == 1 && requests.count { |x| x["method"] == "PATCH" } == 1
+end
+reset!
+spec("create.json", { "status" => 200, "body" => { "object" => "page" } })
+rc, _out, err = run(*ARGS)
+check("[critic] a create answered with no page id is MAY BE FILED, exit 3, and nothing more is sent", "rc #{rc} err #{err}") do
+  rc == 3 && err.include?("MAY BE FILED: Notion answered the create with no page id") && requests.size == 1
+end
+require_relative "../../../../lib/notion_write"
+before = requests.size
+refused = begin
+  NotionWrite.write("http://127.0.0.1:#{port}", TOKEN, "GET", "/v1/pages", nil)
+  nil
+rescue NotionWrite::Refused => e
+  e
+end
+check("[critic] the write client refuses any other request before sending it (NotionWrite::Refused, the class ticket-file reads as NOT FILED)") do
+  refused && refused.message.include?("only creates pages and appends blocks") && requests.size == before
+end
+
 puts "== dry run and help"
 reset!
 rc, out, = run(*ARGS, "--dry-run")
