@@ -62,7 +62,9 @@
 # own exit status does not matter. In an agent session that tool is an asdf
 # shim, which exits 126 under a scratch HOME (DND-1203). The sentinel execs
 # the next tool on PATH, so a check that keeps its PATH behaves as it would
-# without it. It fires on any machine, lane or agent session. A check that
+# without it; a version manager's `system` fallback that leads back to the
+# sentinel resolves to the next tool, never an exec loop (DND-1726). It fires
+# on any machine, lane or agent session. A check that
 # deletes its sentinel, or a gate HOME that is not absolute, fails the check as
 # "could not measure", never as clean.
 #

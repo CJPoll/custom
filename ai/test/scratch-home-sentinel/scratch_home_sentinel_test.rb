@@ -28,6 +28,8 @@ def check(label, cond, detail = nil)
     puts "  ok   #{label}"
   else
     $fail += 1
+    # An exec loop prints thousands of lines: keep the detail readable.
+    detail = "(#{detail.lines.size} lines; last 400 chars) ...#{detail[-400..]}" if detail && detail.size > 1500
     puts "  FAIL #{label}#{detail ? " -- #{detail}" : ''}"
   end
 end
@@ -160,6 +162,56 @@ Dir.mktmpdir("scratch-home-sentinel-test") do |root|
   status, out, v, = run_suite(root, "cd #{cwd_tool.shellescape} && PATH=\"${PATH%%:*}:\" ruby",
                               home: home, base_path: base_path)
   check("PATH: a trailing empty entry (cwd) is searched, as bash does", out.include?("from-cwd"), out)
+
+  # --- a version manager's `system` fallback (DND-1726) -------------------
+  # asdf with `ruby system` (~/.tool-versions here) execs the first `ruby` on
+  # PATH outside its own shims dir. With the sentinel first on PATH that is
+  # the sentinel again, which used to exec the shim again: an exec loop in one
+  # pid that burned CPU until the gate's timeout. `timeout 5` only caps that
+  # hang; rc=124 is the regression.
+  sys_root = File.join(root, "fake-asdf-system")
+  sys_shims = File.join(sys_root, "shims")
+  sys_bin = File.join(sys_root, "bin")
+  FileUtils.mkdir_p([sys_shims, sys_bin])
+  File.write(File.join(sys_shims, "ruby"), <<~SH)
+    #!/bin/bash
+    # Like asdf's `system` version: exec the first ruby on PATH outside this dir.
+    echo "shim-hit" >&2
+    here=$(cd -P -- "${0%/*}" && pwd)
+    IFS=: read -ra entries <<< "$PATH"
+    for d in "${entries[@]}"; do
+      [ "$(cd -P -- "$d" 2>/dev/null && pwd)" = "$here" ] && continue
+      [ -x "$d/ruby" ] && exec "$d/ruby" "$@"
+    done
+    echo "shim: no system ruby" >&2; exit 127
+  SH
+  File.write(File.join(sys_bin, "ruby"), <<~SH)
+    #!/bin/bash
+    echo "system-ruby $*"
+    # A child run of the tool through PATH is a new chain: it goes through the shim again.
+    [ "${1-}" = nest ] && ruby child
+    exit 0
+  SH
+  File.chmod(0o755, File.join(sys_shims, "ruby"))
+  File.chmod(0o755, File.join(sys_bin, "ruby"))
+  sys_path = "#{sys_shims}:#{sys_bin}:/usr/bin:/bin"
+
+  status, out, v, = run_suite(root, "timeout 5 ruby x; echo rc=$?", home: home, base_path: sys_path)
+  check("system fallback: the shim's re-entry resolves the next tool, no exec loop (rc=0, not 124)",
+        out.include?("system-ruby x") && out.include?("rc=0") && out.scan("shim-hit").size == 1 && v.empty?,
+        "#{out} #{v.inspect}")
+  status, out, v, = run_suite(root, "HOME=\"$scratch\" timeout 5 ruby x; echo rc=$?", home: home, base_path: sys_path)
+  check("system fallback: under a scratch HOME it resolves and is logged once",
+        out.include?("system-ruby x") && out.include?("rc=0") && v.is_a?(Array) && v.map(&:tool) == ["ruby"],
+        "#{out} #{v.inspect}")
+  status, out, v, = run_suite(root, "timeout 5 ruby nest; echo rc=$?", home: home, base_path: sys_path)
+  check("system fallback: a child process's own run of the tool goes through the shim again",
+        out.include?("system-ruby nest") && out.include?("system-ruby child") && out.include?("rc=0") &&
+        out.scan("shim-hit").size == 2 && v.empty?, "#{out} #{v.inspect}")
+  status, out, v, = run_suite(root, "PATH=\"${PATH%%:*}:#{sys_shims}\" /usr/bin/timeout 5 ruby x; echo rc=$?",
+                              home: home, base_path: sys_path)
+  check("system fallback: nothing beyond the shim exits 127 fast with a Fix: (no loop)",
+        out.include?("rc=127") && out.include?("Fix:") && out.include?("DND-1726"), "#{out} #{v.inspect}")
 
   # --- a sentinel that is gone cannot read as "no violation" --------------
   _status, _out, v, dir = run_suite(root, "rm -rf \"${PATH%%:*}\"", home: home, base_path: base_path)

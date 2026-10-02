@@ -35,7 +35,21 @@
 # itself with its own stub first; a call with HOME set back to the real home.
 #
 # A sentinel never execs another sentinel (a nested gate's, or its own
-# directory under a second spelling): it skips them, so no PATH shape loops.
+# directory under a second spelling): it skips them.
+#
+# A version manager's `system` fallback leads back to the sentinel (DND-1726).
+# asdf with `ruby system` (this machine's ~/.tool-versions) execs the first
+# `ruby` on PATH outside its shims dir, and that is the sentinel, which used to
+# exec the shim again: an exec loop in one pid that burned CPU until the gate's
+# timeout killed the check (DND-1697's judgment-eval, 1295 s). The sentinel
+# records its exec chain in HARNESS_GATE_SENTINEL_CHAIN (pid, tool, sentinel,
+# the tools exec'd so far). An exec keeps the pid, so a run under the same pid
+# is a re-entry: it skips the tools already exec'd, logs nothing more, and
+# execs the next one, which is what the manager meant by `system`. With
+# nothing left it exits 127 with a Fix:. A child process has another pid and
+# starts a fresh chain, so it goes through the shim as it would without the
+# sentinel. Named limit: a tool that exec()s the same tool name through PATH
+# in its own pid also skips the tools already exec'd (it never loops).
 #
 # A sentinel directory, script or log that is gone after the check (a check
 # that deleted it) FAILS the check as "could not measure", never as clean.
@@ -64,6 +78,8 @@ module ScratchHomeSentinel
   ].freeze
   LOG = "violations"
   SCRIPT = ".sentinel"
+  # The env var a sentinel records its exec chain in (DND-1726).
+  CHAIN = "HARNESS_GATE_SENTINEL_CHAIN"
 
   Violation = Struct.new(:tool, :home, :cwd)
 
@@ -108,7 +124,22 @@ module ScratchHomeSentinel
       physical_home=#{physical_home.shellescape}
       self=${0%/*}
       name=${0##*/}
-      if [ "${HOME-}" != "$real_home" ] && [ "${HOME-}" != "$physical_home" ]; then
+      # Re-entry in the same exec chain (DND-1726): a version manager's `system`
+      # fallback execs the first <name> on PATH outside its shims dir, which is
+      # this sentinel again. An exec keeps the pid, so a chain recorded under
+      # this pid, name and sentinel means the tools exec'd before resolved back
+      # here: skip them, or sentinel and shim exec each other forever. A child
+      # process has another pid and starts a fresh chain.
+      reentry=
+      visited=()
+      if [ -n "${#{CHAIN}-}" ]; then
+        mapfile -t chain <<< "${#{CHAIN}%$'\\n'}"
+        if [ "${chain[0]-}" = "$$" ] && [ "${chain[1]-}" = "$name" ] && [ "${chain[2]-}" -ef "$0" ]; then
+          reentry=1
+          visited=("${chain[@]:3}")
+        fi
+      fi
+      if [ -z "$reentry" ] && [ "${HOME-}" != "$real_home" ] && [ "${HOME-}" != "$physical_home" ]; then
         here=$(cd -P -- "${HOME:-/nonexistent-home}" 2>/dev/null && pwd)
         if [ "$here" != "$physical_home" ]; then
           printf '%s\\t%s\\t%s\\n' "$name" "${HOME-(unset)}" "$PWD" >> "$self/#{LOG}"
@@ -126,8 +157,17 @@ module ScratchHomeSentinel
         # Never exec another sentinel (a nested gate's): two sentinels that
         # each exec the other's first would loop forever. This one has logged.
         [ -e "$d/#{SCRIPT}" ] && [ "$d/$name" -ef "$d/#{SCRIPT}" ] && continue
-        if [ -f "$d/$name" ] && [ -x "$d/$name" ]; then exec "$d/$name" "$@"; fi
+        [ -f "$d/$name" ] && [ -x "$d/$name" ] || continue
+        for v in "${visited[@]}"; do [ "$d/$name" -ef "$v" ] && continue 2; done
+        printf -v #{CHAIN} '%s\\n' "$$" "$name" "$0" "${visited[@]}" "$d/$name"
+        export #{CHAIN}
+        exec "$d/$name" "$@"
       done
+      if [ -n "$reentry" ]; then
+        printf 'harness-gate sentinel: %s resolved back to the sentinel through %s, and nothing else on PATH provides it (DND-1726)\\n' "$name" "${visited[*]}" >&2
+        printf 'Fix: that is a version manager falling back to a system %s that is not installed; call the tool by absolute path (harness Ruby is /usr/bin/ruby), or set the version manager to an installed version.\\n' "$name" >&2
+        exit 127
+      fi
       printf 'harness-gate sentinel: %s not found on PATH beyond %s\\n' "$name" "$self" >&2
       printf 'Fix: this check removed the directory that provides %s from PATH but kept the sentinel directory; build PATH from a fixed list instead, or keep the provider on it.\\n' "$name" >&2
       exit 127
