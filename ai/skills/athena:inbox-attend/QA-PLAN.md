@@ -151,9 +151,17 @@ runner.
     transcript, not a `-p` cost line) before any cost-tiering decision — #47
     decision 4, re-measured on the attended-session shape. **[runner]**
 21. **The thinking status is a courtesy that never blocks the reply** (DND-682).
-    For a Slack DM or thread message it will reply to, the attendant sets
-    `athena:slack/bin/status` in that same conversation first, with generic
-    text and no message content. A failed status call is named in the turn
-    output and the ledger (`status-failed <slack-error>`) and the reply still
-    goes out. Procedure: `athena:inbox-attend` → *Show that Athena is
-    thinking*. **[judgment]**
+    For each owner Slack DM or thread line, `read-inbox` sets
+    `athena:slack/bin/status` in that conversation after its ack, with generic
+    text and no message content (`athena:inbox` → `bin/read-inbox` → *The
+    thinking status*); asserted by `athena:inbox`'s self-test, cases T-1 to
+    T-10. A failed status call is a named stderr line with a `Fix:`, never
+    changes the read's exit or ack, and is named in the turn output and the
+    ledger (`status-failed <slack-error>`); the reply still goes out.
+    Procedure: `athena:inbox-attend` → *Show that Athena is thinking*.
+    **[waiter]** for the set, **[judgment]** for keep-alive and clear.
+
+    **Later (2026-10-02, DND-1783):** this read "the attendant sets
+    `athena:slack/bin/status` in that same conversation first", a
+    **[judgment]** step. Superseded: nothing enforced it, and on 2026-10-02
+    about a dozen owner replies went out with no status.

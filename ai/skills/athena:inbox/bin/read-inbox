@@ -84,6 +84,8 @@ LIB="$(dirname "${HERE}")/lib"
 . "${LIB}/lock.sh"
 # shellcheck source=/dev/null
 . "${LIB}/inbox.sh"
+# shellcheck source=/dev/null
+. "${LIB}/thinking.sh"
 
 usage() { sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" | grep -v '^#--- end usage ---$' | sed 's/^# \{0,1\}//'; }
 
@@ -428,5 +430,19 @@ case "${KIND}" in
                '.messages[] | select(.from != $id) | .name')
     ;;
 esac
+
+# ============================================================================
+# THE THINKING STATUS (DND-1783). After the ack, never before it.
+#
+# Each owner DM/thread line just delivered gets "Athena is thinking…" in its
+# conversation (lib/thinking.sh), so the owner sees the session working without
+# the attendant having to remember a step. It runs only where the ack ran (not
+# on --peek), only on a Slack-producer log channel, and AFTER the ack: a slow
+# or failed status call can never delay the ack or turn into a re-delivery.
+# Every failure is a named stderr line with a Fix:, and it never changes RC.
+# ============================================================================
+if [ "${KIND}" = "log" ] && [ "${PRODUCER}" = "slack" ]; then
+  printf '%s' "${READ}" | thinking_set
+fi
 
 exit "${RC}"

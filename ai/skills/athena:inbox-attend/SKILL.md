@@ -98,6 +98,12 @@ is the brief, not the message.
    message you will reply to, set the thinking status right here, after the
    read and before the re-arm and before any thinking — *Show that Athena is
    thinking* below.
+
+   **Later (2026-10-02):** DND-1783 supersedes the paragraph above. The read
+   sets the status itself: `read-inbox` does it for each owner DM/thread line
+   it delivers (`athena:inbox` → `bin/read-inbox` → *The thinking status*).
+   Do not run `bin/status` by hand after the read; read its stderr for a
+   failure line instead.
 3. **Re-arm the waiter NOW — right after reading and acking, before you reply
    or investigate.** Launch `athena:inbox/bin/inbox-wait` with
    `run_in_background` so the next doorbell wakes you again (`athena:inbox` →
@@ -170,6 +176,21 @@ this section is one labelled addition. Owner request: Slack should show
   reply over it.
 
 The script and its failure modes: `athena:slack` → *The thinking status*.
+
+**Later (2026-10-02):** DND-1783 supersedes the *When* and *First* bullets
+above. `read-inbox` now sets the status for each owner DM/thread line it
+delivers, after its ack (`athena:inbox` → `bin/read-inbox` → *The thinking
+status*), because the step was a thing to remember and nothing enforced it:
+on 2026-10-02 about a dozen owner replies went out with no status. It sets it
+for every owner DM/thread line, not only ones you will reply to. So:
+
+- **Do not run `bin/status` after the read.** It is already set.
+- **Keep it alive** and **end it** as above: those stay yours. A wake that ends
+  with no reply in a conversation the read set clears it with `--clear`.
+- **A failure** is printed by `read-inbox` on stderr: an `athena:inbox: the
+  thinking status was not set …` line with a `Fix:`. Handle it as the failure
+  bullet above says: name it, add the `status-failed` ledger line, reply
+  anyway.
 
 ## What you may do (tiers)
 

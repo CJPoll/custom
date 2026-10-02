@@ -339,6 +339,33 @@ not a dedupe across changes: a new delivery of the same entity is a separate
 line. A line with no `delivery_id` (written before the server stamped one) is
 never collapsed.
 
+**The thinking status (DND-1783).** A read that acks a Slack-producer `log`
+channel then sets "Athena is thinking…" in each conversation where the batch
+holds an owner DM/thread line. It calls `athena:slack/bin/status` (the one
+home of the Slack call; `athena:slack` → *The thinking status*) once per
+conversation, on the thread's parent ts, with the default text and never
+message content. Rules, in `lib/thinking.sh`:
+
+- **Which lines.** The sender is the owner id from
+  `ai/bin/private-overlay get slack .people.owner.user_id`. The kind is `im` or
+  `mpim`, or `channel`, `mention` or `thread_reply` with a `thread_ts`. A
+  top-level channel post, a `slack.interaction` line, any other sender, and
+  `--peek` set nothing.
+- **When.** After the ack, so a slow or failed call can never delay the ack or
+  cause a re-delivery. Each call is capped at 30 s.
+- **A failure never stops the read.** An owner id that does not resolve, a
+  failed or timed-out call, and a malformed channel or ts each print a named
+  `athena:inbox:` line on stderr with a `Fix:`, and leave the exit status and
+  stdout (the `--json` document) unchanged. A batch with no DM/thread line from
+  anyone looks nothing up and prints nothing.
+- **Test seam.** `ATHENA_INBOX_STATUS_BIN` replaces the status tool. The
+  self-test points it at a stub and `ATHENA_PRIVATE_ROOT` at a synthetic
+  overlay, so no test calls Slack or reads the machine's overlay.
+
+Keeping the status alive during long work, and clearing it when no reply
+follows, stay the attendant's: `athena:inbox-attend` → *Show that Athena is
+thinking*.
+
 ### `bin/send-mail`
 
 ```

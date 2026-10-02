@@ -298,8 +298,15 @@ for."*
   `not_authorized` for this bot; the server-side MCP tool and that migration
   are DND-683.
 
-When the attendant uses it: `athena:inbox-attend` → *Show that Athena is
-thinking*.
+Who calls it: `athena:inbox`'s `read-inbox` sets it for each owner DM/thread
+line it delivers (`athena:inbox` → `bin/read-inbox` → *The thinking status*).
+The attendant keeps it alive and clears it: `athena:inbox-attend` → *Show that
+Athena is thinking*.
+
+**Later (2026-10-02, DND-1783):** this read "When the attendant uses it:
+`athena:inbox-attend` → *Show that Athena is thinking*", and the attendant had
+to remember to set it after each read. Superseded: nothing enforced the step,
+and on 2026-10-02 about a dozen owner replies went out with no status.
 
 ## The untrusted-input rule
 

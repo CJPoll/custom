@@ -59,6 +59,7 @@ ai/skills/athena:inbox/lib/inbox.sh	guard
 ai/skills/athena:inbox/lib/lock.sh	guard	
 ai/skills/athena:inbox/lib/names.sh	guard	
 ai/skills/athena:inbox/lib/routed.sh	guard	
+ai/skills/athena:inbox/lib/thinking.sh	guard	
 scripts/wt-lib/push.sh	guard	
 ai/lib/forge-api-scan.sh	library	sourced by ai/lib/gh-merge-guard.sh and ai/lib/glab-merge-guard.sh; returns status codes with a why and a how, and each guard composes the exit-3 refusal that carries Fix:
 ai/lib/main-health.sh	library	the red-main marker reader and push-argv parse (DND-1482), sourced by ai/bin/main-health and ai/lib/forge-git-passthrough.sh; returns a status with MH_WHY/MH_NOTE, and each caller composes the refusal that carries Fix:

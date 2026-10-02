@@ -97,6 +97,35 @@ unset CLAUDE_PROJECT_DIR CLAUDE_PID
 # session's mark. Cases that test the mark set it themselves.
 unset CLAUDE_CODE_SESSION_ID
 
+# THE THINKING STATUS IS STUBBED FOR THE WHOLE SUITE (DND-1783). A non-peek
+# `read-inbox` of a Slack channel calls athena:slack's bin/status for each
+# owner DM/thread line, and resolves the owner id from the private overlay.
+# Left real, a fixture line that matched the machine's real owner would make a
+# live Slack call, and every case would read this machine's overlay. So every
+# case runs against a stub that records its argv, and a synthetic overlay whose
+# owner is UFAKE00001.
+STATUS_STUB="${TMP}/status-stub"
+STATUS_CALLS="${TMP}/status-calls.log"
+cat > "${STATUS_STUB}" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STATUS_CALLS}"
+if [ "${STATUS_STUB_RC:-0}" -ne 0 ]; then
+  printf 'athena-slack: status failed: assistant.threads.setStatus: channel_not_found\n' >&2
+  printf 'Fix: synthetic stub failure.\n' >&2
+  exit "${STATUS_STUB_RC}"
+fi
+printf 'status set on %s/%s: is thinking\n' "$1" "$2"
+STUB
+chmod +x "${STATUS_STUB}"
+export STATUS_CALLS
+export ATHENA_INBOX_STATUS_BIN="${STATUS_STUB}"
+OVERLAY_ROOT="${TMP}/overlay-root"
+mkdir -p "${OVERLAY_ROOT}/overlay"
+chmod 700 "${OVERLAY_ROOT}"
+printf '{"kind":"athena-private-overlay","schema":1}\n' > "${OVERLAY_ROOT}/athena-overlay.json"
+printf '{"people":{"owner":{"user_id":"UFAKE00001"}}}\n' > "${OVERLAY_ROOT}/overlay/slack.json"
+export ATHENA_PRIVATE_ROOT="${OVERLAY_ROOT}"
+
 # A case directory + a private inbox root + a private registry, per case.
 CASE_N=0
 setup_case() {
@@ -4828,6 +4857,116 @@ setup_session_case
 in_session "${NOREPO}" "CLAUDE_PROJECT_DIR=${UPROJ}" "${BIN}/read-inbox" slack
 assert_eq "S-6 read-inbox: the session project has no entry -> refused" "1" "$([ "${SRC}" -ne 0 ] && echo 1 || echo 0)"
 assert_contains "S-6 read-inbox: ... naming the repo key that matched nothing" "${UKEY}" "${SERR}"
+
+echo
+echo "== DND-1783: read-inbox sets the thinking status for owner DM/thread lines =="
+
+# The attendant used to have to remember athena:slack's bin/status after each
+# read, and on 2026-10-02 it did not, all day. read-inbox now sets it itself,
+# for each owner DM/thread line it delivers, the way it acks: never on --peek.
+# Every case runs against the suite's stub (STATUS_CALLS) and synthetic owner
+# UFAKE00001; nothing here calls Slack.
+
+# thinking_case <lines...>: a slack log channel holding exactly these lines,
+# and an empty stub log.
+thinking_case() {
+  setup_log_case
+  printf '%s\n' "$@" > "${LINBOX}"
+  : > "${STATUS_CALLS}"
+}
+status_calls() { cat "${STATUS_CALLS}" 2>/dev/null; }
+
+OWNER_IM='{"v":1,"ts":"1790000001.000100","channel":"DFAKE0001","user":"UFAKE00001","kind":"im","event_id":"EvT1","text":"owner dm"}'
+OWNER_IM_REPLY='{"v":1,"ts":"1790000003.000300","channel":"DFAKE0001","user":"UFAKE00001","kind":"im","thread_ts":"1790000001.000100","event_id":"EvT2","text":"owner dm thread reply"}'
+OWNER_THREAD='{"v":1,"ts":"1790000005.000500","channel":"CFAKE0001","user":"UFAKE00001","kind":"thread_reply","thread_ts":"1790000004.000400","event_id":"EvT3","text":"owner thread reply"}'
+PEER_IM='{"v":1,"ts":"1790000006.000600","channel":"DFAKE0002","user":"UFAKE00002","kind":"im","event_id":"EvT4","text":"peer dm"}'
+OWNER_CHANNEL='{"v":1,"ts":"1790000007.000700","channel":"CFAKE0002","user":"UFAKE00001","kind":"channel","event_id":"EvT5","text":"owner top-level channel post"}'
+OWNER_CLICK='{"v":1,"ts":"1790000008.000800","channel":"DFAKE0001","user":"UFAKE00001","kind":"slack.interaction","thread_ts":"1790000008.000800","event_id":"EvT6","text":"click"}'
+
+# T-1 the hit: a top-level owner DM sets the status on its own ts.
+thinking_case "${OWNER_IM}"
+OUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack 2>&1)"; RC=$?
+assert_eq "T-1 read-inbox exits 0" "0" "${RC}"
+assert_eq "T-1 a top-level owner DM sets the status on <channel> <its ts>" \
+  "DFAKE0001 1790000001.000100" "$(status_calls)"
+
+# T-2 a reply in a DM thread, and in a channel thread, sets it on the PARENT.
+thinking_case "${OWNER_IM_REPLY}" "${OWNER_THREAD}"
+( cd "${LPROJ}" && "${BIN}/read-inbox" slack >/dev/null 2>&1 )
+assert_eq "T-2 thread replies set the status on the thread's parent ts" \
+  "$(printf 'DFAKE0001 1790000001.000100\nCFAKE0001 1790000004.000400')" "$(status_calls)"
+
+# T-3 one conversation is set once, however many lines it has in the batch.
+thinking_case "${OWNER_IM}" "${OWNER_IM_REPLY}"
+( cd "${LPROJ}" && "${BIN}/read-inbox" slack >/dev/null 2>&1 )
+assert_eq "T-3 two lines in one thread set the status once" \
+  "DFAKE0001 1790000001.000100" "$(status_calls)"
+
+# T-4 the misses: a non-owner DM, an owner's top-level channel post (no
+#     thread), and a slack.interaction line set nothing.
+thinking_case "${PEER_IM}" "${OWNER_CHANNEL}" "${OWNER_CLICK}"
+OUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack 2>&1)"; RC=$?
+assert_eq "T-4 read-inbox exits 0 on the misses" "0" "${RC}"
+assert_eq "T-4 non-owner, non-thread and interaction lines set no status" "" "$(status_calls)"
+assert_not_contains "T-4 and print no status failure" "thinking status" "${OUT}"
+
+# T-5 --peek reads without acking, so it sets nothing either.
+thinking_case "${OWNER_IM}"
+( cd "${LPROJ}" && "${BIN}/read-inbox" slack --peek >/dev/null 2>&1 )
+assert_eq "T-5 --peek sets no status" "" "$(status_calls)"
+
+# T-6 --json sets it too, and keeps stdout one JSON document.
+thinking_case "${OWNER_IM}"
+JOUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --json 2>/dev/null)"
+assert_eq "T-6 --json sets the status" "DFAKE0001 1790000001.000100" "$(status_calls)"
+assert_eq "T-6 --json stdout is still exactly one JSON document" "1" \
+  "$(printf '%s' "${JOUT}" | jq -s 'length' 2>/dev/null)"
+
+# T-7 a FAILED status is visible and never stops the read or the ack.
+thinking_case "${OWNER_IM}"
+( cd "${LPROJ}" && STATUS_STUB_RC=1 "${BIN}/read-inbox" slack >"${CASE_DIR}/t7.out" 2>"${CASE_DIR}/t7.err" ); RC=$?
+OUT="$(cat "${CASE_DIR}/t7.out")"; ERR="$(cat "${CASE_DIR}/t7.err")"
+assert_eq "T-7 a failed status leaves read-inbox's exit at 0" "0" "${RC}"
+assert_contains "T-7 the body is still delivered" "owner dm" "${OUT}"
+assert_contains "T-7 the failure is named" "thinking status was not set on DFAKE0001/1790000001.000100" "${ERR}"
+assert_contains "T-7 with the status tool's own error" "channel_not_found" "${ERR}"
+assert_contains "T-7 and a Fix:" "Fix:" "${ERR}"
+assert_eq "T-7 the batch was still acked" "0" \
+  "$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --json --peek 2>/dev/null | jq -r '.messages | length')"
+
+# T-8 an owner id that does not resolve sets nothing, says so, and still acks.
+thinking_case "${OWNER_IM}"
+OUT="$(cd "${LPROJ}" && ATHENA_PRIVATE_ROOT="${TMP}/no-such-overlay" "${BIN}/read-inbox" slack 2>&1)"; RC=$?
+assert_eq "T-8 an unresolved owner id leaves read-inbox's exit at 0" "0" "${RC}"
+assert_eq "T-8 ... sets no status (never a guess)" "" "$(status_calls)"
+assert_contains "T-8 ... names the failure" "thinking status was not set" "${OUT}"
+assert_contains "T-8 ... with the resolver's own line" "private-overlay: MALFORMED" "${OUT}"
+assert_eq "T-8 the batch was still acked" "0" \
+  "$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --json --peek 2>/dev/null | jq -r '.messages | length')"
+
+# T-9 a batch with no DM/thread candidate never looks the owner up, so a
+#     machine with no overlay reads its non-DM traffic with no noise.
+thinking_case "${OWNER_CHANNEL}"
+OUT="$(cd "${LPROJ}" && ATHENA_PRIVATE_ROOT="${TMP}/no-such-overlay" "${BIN}/read-inbox" slack 2>&1)"
+assert_not_contains "T-9 no candidate line: no owner lookup failure printed" "thinking status" "${OUT}"
+
+# T-10 domain: thinking_targets on the remaining kinds, and candidate mode.
+# shellcheck source=/dev/null
+. "${LIB}/thinking.sh"
+TDOC='{"messages":[
+  {"kind":"mpim","channel":"GFAKE0001","user":"UFAKE00001","ts":"1790000010.1"},
+  {"kind":"mention","channel":"CFAKE0003","user":"UFAKE00001","ts":"1790000012.1","thread_ts":"1790000011.1"},
+  {"kind":"mention","channel":"CFAKE0004","user":"UFAKE00001","ts":"1790000013.1"},
+  {"kind":"im","channel":"DFAKE0002","user":"UFAKE00002","ts":"1790000014.1"}]}'
+assert_eq "T-10 owner mode: an mpim and a threaded mention qualify, a top-level mention does not" \
+  "$(printf 'GFAKE0001\t1790000010.1\nCFAKE0003\t1790000011.1')" \
+  "$(printf '%s' "${TDOC}" | thinking_targets UFAKE00001)"
+assert_eq "T-10 candidate mode (no owner) counts every sender's DM/thread line" "3" \
+  "$(printf '%s' "${TDOC}" | thinking_targets | wc -l | tr -d ' ')"
+assert_ok "T-10 a Slack channel id and ts are a valid target" thinking_valid_target DFAKE0001 1790000001.000100
+if thinking_valid_target "D1;rm" 1790000001.1 || thinking_valid_target DFAKE0001 100; then
+  bad "T-10 a malformed channel or ts is refused before any call" "accepted"
+else ok "T-10 a malformed channel or ts is refused before any call"; fi
 
 echo
 if [ "${FAIL}" -eq 0 ]; then
