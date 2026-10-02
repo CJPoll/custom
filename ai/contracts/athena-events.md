@@ -6126,6 +6126,8 @@ build by name:
   (*The storage boundary*);
 - DND-1767, DND-1768, DND-1769 and DND-1770: calendar tools and the approval
   path (*Calendar management*);
+- DND-1765 and DND-1766: the stored, encrypted `meeting.join_url` (*The
+  storage boundary*; *Calendar management* → *Zoom links*);
 - DND-1157: item summaries (*Item summaries*);
 - DND-1395: work Notion summaries and the one-time summary backfill (*Item
   summaries*).
@@ -6458,6 +6460,7 @@ closed list. The list has three parts:
    | `slack_thread_ts` | `slack_ask` | the thread's `ts`, or `null` when the message is not in a thread |
    | `starts_at` | `meeting` | the meeting's start time |
    | `self_response` | `meeting` | the owner's own response (`accepted`, `tentative`, `declined`, `needsAction`), or `null` when the owner is not on the guest list (DND-1742) |
+   | `join_url` | `meeting` | the meeting's Zoom join URL, passcode included, **encrypted at rest**; `null` when no Zoom link is found (DND-1765) |
 
 **Later (2026-10-02):** list 2 did not name `forge_trigger`. DND-1350
 (gen_saas #593, `0bc5d220`) adds it: why a `forge_review` item is the
@@ -6484,15 +6487,45 @@ before DND-1350 holds `null` until an event next writes it. The row reads
 | `slack_ask` | `source_ref`, `url` (a link built from the ids alone) | `message_text`, `slack_thread_ts` |
 | `forge_review` | `source_ref`, `url`, `title`, `status`, `source_revision` | none |
 | `forge_token` | `source_ref`, `url`, `title`, `status`, `due_on`, `source_revision` | none |
-| `meeting` | `source_ref`, `url`, `title` | `starts_at`, `self_response` |
+| `meeting` | `source_ref`, `url`, `title` | `starts_at`, `self_response`, `join_url` |
 | `manual` | `source_ref`, `url`, `title`, `source_priority`, `due_on` | none |
 
-**Later (2026-10-02, DND-1764):** the `meeting` row's permissive fields were
-`starts_at` alone, so the owner's stored response (DND-1742, Google's
-`responseStatus` for the attendee marked `self`) was refused by name. It is
-now the permissive field `self_response`: one closed value about the owner,
-never another guest's. No `join_url` is added here (DND-1765, owner decision
-OD-2).
+**Later (2026-10-02, DND-1764, DND-1765):** the `meeting` row's permissive
+fields were `starts_at` alone, so the owner's stored response and a meeting's
+Zoom link were refused by name. Superseded twice. DND-1764 adds
+`self_response`, the owner's own response (DND-1742, Google's
+`responseStatus` for the attendee marked `self`): one closed value about the
+owner, never another guest's. DND-1765 adds `join_url`, by owner decision
+OD-2 (`ai/docs/calendar-management.md` → *3. Zoom links*). Cody, Slack DM,
+2026-10-02 ~16:39Z: "Yes, store the zoom link including passcode, but
+encrypt the value at rest in the db."
+
+**`meeting.join_url` is encrypted at rest.** Its rules:
+
+- **What it holds.** The first valid Zoom link the sync extracts from the
+  event (*Calendar management* → *Zoom links*), query string and passcode
+  kept, at most 2,048 characters. It is extracted at the calendar adapter
+  boundary; the description, location and conference data it was read from
+  are still dropped there.
+- **Encrypted at rest.** The column holds ciphertext only. The value is
+  encrypted before it is written, under a key held outside the app database,
+  with the envelope encryption of *Secret custody*. It is decrypted only in
+  memory, for the item's own owner, to render that owner's `/priorities`
+  (and the digest, once DND-1771 declares it there). It is not one of *Secret custody*'s secrets: the owner sees it on
+  every render, not once.
+- **Never logged or copied.** No log line, index obligation, skip count,
+  index-failure record, inbox line, `calendar_changes` row or item summary
+  holds it. A `forbidden-field` or failure record names the field, never its
+  value.
+- **An unreadable value is shown as unreadable.** A value that cannot be
+  decrypted renders "Zoom link unavailable", never ciphertext and never a
+  silent blank, and the sync's next write replaces it.
+- **Removal** follows *Removing a permissive field* below: the column is
+  nulled and dropped, and the extraction stops.
+- **Never a Google Meet link.** No `hangoutLink`, `conferenceData` value or
+  `meet.google.com` URL is ever stored in the index, or shown on
+  `/priorities` or in the digest. The extraction rules reject
+  them by construction.
 
 **Later (2026-09-28):** the `forge_review` row listed no `source_revision`.
 DND-439 adds it: the merge request's `updated_at`, the family's ordering
@@ -7576,15 +7609,45 @@ Nine tools: two reads, six writes, one status read.
   `hangoutLink` or `conferenceData`. No write requests a Meet conference, so
   Google adds none. A Meet link passed as a Zoom link is `not_a_zoom_link`,
   and one in a `location` argument is `invalid_argument`. A returned
-  `location` has its Meet URLs removed (`calendar_event`). Showing an
-  extracted Zoom link (`join_url`) is not declared here: it waits on owner
-  decision OD-2 (DND-1765).
+  `location` has its Meet URLs removed (`calendar_event`). The only meeting
+  link any surface offers is `join_url`, a Zoom URL (*Zoom links*).
 - **Dormant until connected.** `not_configured`, `not_connected` and `revoked`
   carry DND-447's `Fix:` text (`Athena.Calendar.Refusal`).
 - **Today stays current.** After a write is applied to an event that starts in
   the owner's local today, the server runs its calendar sync for today, so
   `/priorities` shows it. A failed sync does not fail the write; the sync
   records its own outcome.
+
+#### Zoom links
+
+`Athena.Calendar.ZoomLink` (Domain, pure) extracts and validates a Zoom join
+link. Design: `ai/docs/calendar-management.md` → *3. Zoom links*.
+
+- **Sources, in order:** `conferenceData.entryPoints[]` with
+  `entryPointType: "video"`, then `location`, then `description`. The first
+  valid link wins. Reading these is not returning them: no surface returns
+  `conferenceData` or the description, and only `calendar_event` returns the
+  location.
+- **Valid** means: scheme `https`; host `zoom.us`, `zoomgov.com`, or a
+  subdomain of either (`us02web.zoom.us`, `<company>.zoom.us`); path starting
+  `/j/`, `/w/`, `/s/` or `/my/`; at most 2,048 characters; and it passes the
+  index's `FieldCheck.http_url/1`. The query string, passcode included, is
+  kept.
+- **Finding a URL in text:** a URL is a maximal run of non-space characters
+  starting `https://`. Description HTML is read for `href` values and plain
+  URLs. `&amp;` becomes `&`. Trailing `.,;:)>"'` is trimmed.
+- **Everything else is rejected,** so Google Meet is excluded by
+  construction: `meet.google.com`, `hangoutLink`, a Google redirect
+  (`google.com/url?q=`), `zoom.us.evil.example`, `http://zoom.us/...`. Each
+  has a test.
+- **Where it shows.** On `/priorities`, a **Join Zoom** link per meeting with
+  a stored `join_url` (DND-1766); the title still links to the Google
+  Calendar event (`htmlLink`), never to Meet. In the MCP reads, as
+  `EventSummary.join_url`. In the digest's meetings section, once DND-1771
+  declares it in *Morning digest*.
+- **Stored** as the permissive field `meeting.join_url`, encrypted at rest
+  (*The storage boundary*). The sync stores it; a page load decrypts it and
+  never calls Google.
 
 #### Arguments and return shapes
 
@@ -7595,13 +7658,14 @@ Nine tools: two reads, six writes, one status read.
  "starts_at": "2026-10-05T15:00:00-06:00", "ends_at": "2026-10-05T15:30:00-06:00",
  "all_day": false, "html_link": "https://www.google.com/calendar/event?eid=...",
  "self_response": "accepted", "organizer_is_owner": true, "other_guests": 3,
- "recurring": true}
+ "recurring": true, "join_url": "https://us02web.zoom.us/j/81234567890?pwd=..."}
 ```
 
 `self_response` is `accepted`, `tentative`, `declined`, `needsAction`, or
-`null` when the owner is not on the guest list. Cancelled events are not
-listed. The shape is closed: DND-1765 adds `join_url` once the owner decides
-OD-2, and nothing else is added without amending this subsection.
+`null` when the owner is not on the guest list. `join_url` is `null` when no
+Zoom link is found (*Zoom links*); a read extracts it from the event it reads
+from Google, never from the stored column. Cancelled events are not listed.
+The shape is closed: nothing is added without amending this subsection.
 
 - **`calendar_events {from, to}`** → `{"window": {"from", "to"}, "count": n,
   "events": [EventSummary]}`. Both bounds are required, and `to - from` is at
