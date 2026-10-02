@@ -115,6 +115,32 @@ ruby_eq "the window-incomplete line counts, names, and says n/a, never a score [
 ruby_eq "no line when nothing was excluded [DND-1483]" \
   "nil" \
   'JudgmentEval.window_incomplete_line([]).inspect'
+# DND-1637: one sample per case let a near-zero-confidence answer that flips
+# between runs decide a keep/revert bar. A verdict needs >= 2 samples that
+# all scored and all gave the same answer; answers that differ are unstable.
+VS='s = ->(id, p, c) { {"case_id" => id, "outcome" => "scored", "predicted" => p, "confidence" => c} }; L = {"a" => "blocks", "b" => "does_not_block", "c" => "blocks", "d" => "blocks"}'
+ruby_eq "verdicts: a flipped low-confidence sample is unstable, never a match or a miss [DND-1637]" \
+  "unstable" \
+  "${VS}; JudgmentEval.case_verdicts({\"b\" => \"does_not_block\"}, [[s.(\"b\", \"blocks\", 0.09)], [s.(\"b\", \"does_not_block\", 0.02)], [s.(\"b\", \"blocks\", 0.11)]]).first[:verdict]"
+ruby_eq "verdicts: every sample agreeing decides match or miss [DND-1637]" \
+  "a:match c:miss" \
+  "${VS}; JudgmentEval.case_verdicts({\"a\" => \"blocks\", \"c\" => \"blocks\"}, [[s.(\"a\", \"blocks\", 0.98), s.(\"c\", \"does_not_block\", 0.6)], [s.(\"a\", \"blocks\", 0.97), s.(\"c\", \"does_not_block\", 0.64)]]).map { |v| \"#{v[:case_id]}:#{v[:verdict]}\" }.join(\" \")"
+ruby_eq "verdicts: misses that disagree on the answer are unstable, not a stable miss [DND-1637]" \
+  "unstable" \
+  "${VS}; JudgmentEval.case_verdicts({\"x\" => \"LOW\"}, [[s.(\"x\", \"MEDIUM\", 0.5)], [s.(\"x\", \"HIGH\", 0.5)]]).first[:verdict]"
+ruby_eq "verdicts: one sample alone decides nothing (n/a) [DND-1637]" \
+  "n/a" \
+  "${VS}; JudgmentEval.case_verdicts({\"a\" => \"blocks\"}, [[s.(\"a\", \"blocks\", 0.98)]]).first[:verdict]"
+ruby_eq "verdicts: an unscored or absent sample is n/a, never wrong [DND-1637]" \
+  "a:n/a:blocks 0.98|unscored timeout d:n/a:blocks 0.90|absent" \
+  "${VS}; JudgmentEval.case_verdicts({\"a\" => \"blocks\", \"d\" => \"blocks\"}, [[s.(\"a\", \"blocks\", 0.98), s.(\"d\", \"blocks\", 0.9)], [{\"case_id\" => \"a\", \"outcome\" => \"unscored\", \"reason\" => \"timeout\"}]]).map { |v| [v[:case_id], v[:verdict], v[:answers].join(\"|\")].join(\":\") }.join(\" \")"
+ruby_eq "verdict lines: a count line, then one line per case with every answer [DND-1637]" \
+  "per-case verdicts over 2 samples: match 1, miss 0, unstable 1, n/a 0|  a (blocks): match [blocks 0.98, blocks 0.97]|  b (does_not_block): unstable [blocks 0.09, does_not_block 0.02]" \
+  "${VS}; JudgmentEval.verdict_lines(JudgmentEval.case_verdicts({\"a\" => \"blocks\", \"b\" => \"does_not_block\"}, [[s.(\"a\", \"blocks\", 0.98), s.(\"b\", \"blocks\", 0.09)], [s.(\"a\", \"blocks\", 0.97), s.(\"b\", \"does_not_block\", 0.02)]]), 2).join(\"|\")"
+ruby_eq "verdict lines: one sample per case computes no verdict and says how to get one [DND-1637]" \
+  "per-case verdicts: not computed (1 sample per case; an answer near confidence 0 can flip between runs). For a keep/revert bar, re-run with --repeat 3 (DND-1637)." \
+  "JudgmentEval.verdict_lines([], 1).join(\"|\")"
+
 ruby_eq "labels: a repeated id is refused" \
   "InputError: L:2 repeats id of line 1" \
   'JudgmentEval.parse_labels(%({"id":"a","label":"x","provenance":"proposed"}\n{"id":"a","label":"y","provenance":"proposed"}\n), "L")'
@@ -397,6 +423,49 @@ run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/co
 eq "a run that scored cases exits 0" "${RC}" "0"
 has "a label under 10 cases prints n/a (n=7, needs 10) [ticket]" "${OUT}" "duplicate: n/a (n=7, needs 10)"
 has "it prints how to apply the run" "${OUT}" "--apply 5f0c3a1e-8b2d-4c6f-9a7e-1d2b3c4d5e6f"
+has "a one-sample run computes no per-case verdict and names --repeat [DND-1637]" "${OUT}" "per-case verdicts: not computed (1 sample per case"
+
+# DND-1637: --repeat N runs the same cases N times, each its own server run,
+# and a case whose answers differ is unstable. The fake answers c2 (related)
+# with related 0.02 in sample 1 and unrelated 0.09 in sample 2 (the
+# DND-1607 live-2 shape), and c1 / c3 the same way both times.
+sample() { # sample RUN_ID C2_PREDICTED C2_CONF
+  printf '{"status":200,"body":{"data":{"eval_run_id":"%s","use_case":"finding_triage","question_set_version":"v1","model":"jev-1.13.0","results":[{"case_id":"c1","outcome":"scored","predicted":"duplicate","confidence":0.95},{"case_id":"c2","outcome":"scored","predicted":"%s","confidence":%s},{"case_id":"c3","outcome":"scored","predicted":"duplicate","confidence":0.7}],"report":%s}}}' "$1" "$2" "$3" "${report}"
+}
+R1=11111111-1111-4111-8111-111111111111
+R2=22222222-2222-4222-8222-222222222222
+respond "[$(sample "${R1}" related 0.02),$(sample "${R2}" unrelated 0.09)]"
+rm -f "${XDG_DATA_HOME}/athena/evals/runs/"*-finding_triage.json
+n="$(requests)"
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --repeat 2
+eq "--repeat 2 exits 0 [DND-1637]" "${RC}" "0"
+eq "--repeat 2 sends the cases twice [DND-1637]" "$(requests)" "$((n + 2))"
+eq "each sample starts its own server run (no eval_run_id) [DND-1637]" "$(sed -n "$((n + 1)),$((n + 2))p" "${TMP}/server.log" | jq -r '.body.eval_run_id // "none"' | tr '\n' ' ')" "none none "
+eq "each sample sends the same cases [DND-1637]" "$(sed -n "$((n + 1)),$((n + 2))p" "${TMP}/server.log" | jq -c '[.body.cases[].case_id]' | sort -u)" '["c1","c2","c3"]'
+has "the flipped low-confidence case is unstable, not a match [DND-1637]" "${OUT}" "  c2 (related): unstable [related 0.02, unrelated 0.09]"
+has "an agreeing correct case is a match [DND-1637]" "${OUT}" "  c1 (duplicate): match [duplicate 0.95, duplicate 0.95]"
+has "an agreeing wrong case is a miss [DND-1637]" "${OUT}" "  c3 (unrelated): miss [duplicate 0.70, duplicate 0.70]"
+has "the verdict count line counts the unstable case apart [DND-1637]" "${OUT}" "per-case verdicts over 2 samples: match 1, miss 1, unstable 1, n/a 0"
+has "the run names each sample's run id [DND-1637]" "${OUT}" "sample 2 of 2: finding_triage run ${R2}"
+has "the apply line names sample 1's run [DND-1637]" "${OUT}" "apply with: judgment-eval --apply ${R1} (sample 1)"
+run_file="$(find "${XDG_DATA_HOME}/athena/evals/runs" -maxdepth 1 -type f -name '*-finding_triage.json' | head -n 1)"
+eq "the run file keeps sample 1 at the top level (old readers unchanged) [DND-1637]" "$(jq -r '.eval_run_id + " " + (.results | length | tostring)' "${run_file}")" "${R1} 3"
+eq "the run file records every sample's run id [DND-1637]" "$(jq -c '[.samples[].eval_run_id]' "${run_file}")" "[\"${R1}\",\"${R2}\"]"
+eq "the run file records each case's verdict [DND-1637]" "$(jq -c '.verdicts | map({(.case_id): .verdict}) | add' "${run_file}")" '{"c1":"match","c2":"unstable","c3":"miss"}'
+eq "the run file records the planned sample count [DND-1637]" "$(jq -r '.repeat' "${run_file}")" "2"
+
+# A later sample that stops leaves every case n/a: one sample decides nothing.
+respond "[$(sample "${R1}" related 0.02),{\"status\":500,\"body\":{\"error\":\"internal_error\"}}]"
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --repeat 2
+eq "a stopped later sample exits with the stop code [DND-1637]" "${RC}" "5"
+has "a stopped later sample leaves every case n/a [DND-1637]" "${OUT}" "per-case verdicts over 2 samples: match 0, miss 0, unstable 0, n/a 3"
+has "a stopped later sample says which sample stopped [DND-1637]" "${ERR}" "stopped in sample 2 of 2"
+
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --repeat 6
+eq "--repeat above 5 is usage (2) [DND-1637]" "${RC}" "2"
+has "the --repeat refusal carries Fix: [DND-1637]" "${ERR}" "Fix: "
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --repeat 3 --dry-run
+has "--dry-run prints the judged-call cost of the repeat [DND-1637]" "${OUT}" "samples: 3 per case (9 judged calls)"
 
 # The use case's question set has not shipped yet.
 respond '{"status":409,"body":{"error":"question_set_unavailable","fix":"use case finding_triage has no question set on this server yet. Fix: it ships with DND-713."}}'

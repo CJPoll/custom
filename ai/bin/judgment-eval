@@ -39,7 +39,7 @@ HARNESS = File.expand_path("../..", __dir__)
 
 USAGE = <<~EOF
   Usage: judgment-eval --use-case U --labels FILE --corpus FILE [--content-domain D]
-                       [--batch-size N] [--pause S] [--inbox-root DIR] [--bot-id B]
+                       [--batch-size N] [--pause S] [--repeat N] [--inbox-root DIR] [--bot-id B]
                        [--dry-run]
          judgment-eval --apply RUN_ID [--dry-run]
          judgment-eval --help
@@ -89,7 +89,23 @@ USAGE = <<~EOF
     --batch-size N      cases per request, 1..50 (default 50)
     --pause S           seconds between batches (default 60: the server allows
                         60 judged calls per minute)
-    --inbox-root DIR    slack_routing only: where the Slack inbox lines live
+    --repeat N          samples per case, 1..5 (default 1; DND-1637). Each
+                        sample is its own server run of the same cases, so
+                        N samples cost N judged calls per case (printed as
+                        "samples: N per case (K judged calls)"). With N >= 2
+                        each case gets a verdict: match (every sample gave
+                        the label), miss (every sample gave the same other
+                        answer), unstable (the answers differ), or n/a (a
+                        sample unscored, absent, or never taken). An answer
+                        near confidence 0 can flip between identical runs,
+                        so one sample decides nothing: with N = 1 no verdict
+                        is computed. Use 3 for a keep/revert bar: a case
+                        that flips half the time reads unstable in 75% of
+                        3-sample runs (50% at 2, 94% at 5 for 5x the cost),
+                        and one flipped sample of 3 can never read as a
+                        match or a miss. Calibration runs (--apply) need
+                        none; apply sample 1's run.
+    --inbox-root DIR   slack_routing only: where the Slack inbox lines live
                         (default $ATHENA_INBOX_ROOT, else ~/.local/share/athena).
                         Every *-slack.jsonl directly under it is read, each
                         with its rotated generation *-slack.jsonl.1 (one
@@ -410,6 +426,8 @@ module Manager
     opts = opts.merge(owner: Effects.owner_id) if opts[:use_case] == "slack_routing"
     loaded = load_cases(opts)
     report_join(loaded, out, err)
+    # Every sample is a paid judge call per case: print the cost up front.
+    out.puts "samples: #{opts[:repeat]} per case (#{opts[:repeat] * loaded[:cases].size} judged calls)"
     inbox = opts[:use_case] == "slack_routing" ? gather_candidates(opts, loaded[:cases], out) : nil
     if opts[:dry_run]
       out.puts "context: not built (dry run)" if inbox
@@ -427,9 +445,26 @@ module Manager
     batches = JudgmentEval.batches(cases, opts[:batch_size])
     loaded = loaded.merge(context: context)
     started = Time.now.utc
+    # DND-1637: each sample is its own server run of the same cases. A sample
+    # that stops ends the run; the samples not taken leave every case n/a.
+    samples = []
+    opts[:repeat].times do |k|
+      samples << run_sample(opts, batches, origin, token, k.zero?)
+      break if samples.last[:stopped]
+    end
+    token = nil
+    finish_eval(opts, loaded, batches.size, started, samples, out, err)
+  ensure
+    token = nil
+  end
+
+  # run_sample -> {run_id:, results:, response:, sent:, stopped:}. The first
+  # batch names no eval_run_id, so the server starts a new run per sample.
+  # The pause runs before every request but the run's very first.
+  def run_sample(opts, batches, origin, token, first_sample)
     state = { run_id: nil, results: [], response: nil, sent: 0, stopped: nil }
     batches.each_with_index do |batch, i|
-      Effects.pause(opts[:pause]) if i.positive? && opts[:pause].positive?
+      Effects.pause(opts[:pause]) if (i.positive? || !first_sample) && opts[:pause].positive?
       body = { "use_case" => opts[:use_case], "cases" => batch }
       body["eval_run_id"] = state[:run_id] if state[:run_id]
       reply = Effects.request("POST", "#{origin}/api/v1/judgments/eval", token, body)
@@ -444,26 +479,55 @@ module Manager
       state[:response] = data
       state[:sent] += 1
     end
-    token = nil
-    finish_eval(opts, loaded, batches.size, started, state, out, err)
-  ensure
-    token = nil
+    state
   end
 
-  def finish_eval(opts, loaded, batch_count, started, state, out, err)
+  # verdicts(opts, loaded, samples) -> the per-case verdicts, or nil for one
+  # sample per case. A sample never taken counts as one with no results, so
+  # its every case is absent and n/a: a verdict never rests on fewer samples
+  # than were planned.
+  def verdicts(opts, loaded, samples)
+    return nil if opts[:repeat] < JudgmentEval::MIN_SAMPLES
+
+    labels = loaded[:cases].to_h { |c| [c["case_id"], c["label"]] }
+    extra = context_results(loaded[:context])
+    taken = samples.map { |s| s[:results] + extra }
+    JudgmentEval.case_verdicts(labels, taken + Array.new(opts[:repeat] - samples.size) { [] })
+  end
+
+  def sample_header(opts, k, state, batch_count)
+    data = state[:response]
+    which = opts[:repeat] > 1 ? "sample #{k + 1} of #{opts[:repeat]}: " : "#{PROG}: "
+    "#{which}#{opts[:use_case]} run #{data['eval_run_id']} (question set #{data['question_set_version']}, model #{data['model']}): " \
+      "#{state[:results].size} cases in #{state[:sent]} of #{batch_count} batch(es)"
+  end
+
+  def finish_eval(opts, loaded, batch_count, started, samples, out, err)
+    state = samples.first
     data = state[:response]
     run_path = nil
     if data
-      doc = run_doc(opts, loaded, batch_count, started, state)
+      verdicts = verdicts(opts, loaded, samples)
+      doc = run_doc(opts, loaded, batch_count, started, samples, verdicts)
       run_path = Effects.write_run_file("#{started.strftime('%Y%m%dT%H%M%SZ')}-#{opts[:use_case]}.json", doc)
-      out.puts "#{PROG}: #{opts[:use_case]} run #{data['eval_run_id']} (question set #{data['question_set_version']}, model #{data['model']}): " \
-               "#{state[:results].size} cases in #{state[:sent]} of #{batch_count} batch(es)"
-      JudgmentEval.summary_lines(data["report"]).each { |line| out.puts line }
+      samples.each_with_index do |s, k|
+        next unless s[:response]
+
+        out.puts sample_header(opts, k, s, batch_count)
+        JudgmentEval.summary_lines(s[:response]["report"]).each { |line| out.puts line }
+      end
       context = loaded[:context]
       JudgmentEval.context_lines(context[:built], context[:unavailable]).each { |line| out.puts line } if context
+      JudgmentEval.verdict_lines(verdicts || [], opts[:repeat]).each { |line| out.puts line }
       out.puts "run file: #{run_path}"
     end
-    return stopped(state[:stopped], state[:sent], batch_count, err) if state[:stopped]
+    halted = samples.index { |s| s[:stopped] }
+    if halted
+      if opts[:repeat] > 1
+        err.puts "#{PROG}: stopped in sample #{halted + 1} of #{opts[:repeat]}; a verdict needs every sample, so the cases it left unanswered are n/a."
+      end
+      return stopped(samples[halted][:stopped], samples[halted][:sent], batch_count, err)
+    end
 
     report = data["report"]
     if JudgmentEval.only_not_configured?(report)
@@ -474,11 +538,14 @@ module Manager
       err.puts "#{PROG}: nothing was scored (every case fell back; reasons above). Fix: resolve the named reasons, then re-run; no threshold can be chosen from this run."
       return 3
     end
-    out.puts "apply with: #{PROG} --apply #{data['eval_run_id']}"
+    out.puts "apply with: #{PROG} --apply #{data['eval_run_id']}#{opts[:repeat] > 1 ? ' (sample 1)' : ''}"
     0
   end
 
-  def run_doc(opts, loaded, batch_count, started, state)
+  # The top level is sample 1, in the shape it had before --repeat, so an old
+  # reader of the run file reads what it always did.
+  def run_doc(opts, loaded, batch_count, started, samples, verdicts)
+    state = samples.first
     data = state[:response]
     {
       "eval_run_id" => data["eval_run_id"], "use_case" => opts[:use_case],
@@ -491,8 +558,23 @@ module Manager
       "join_missing" => loaded[:joined][:missing],
       "batches" => { "planned" => batch_count, "sent" => state[:sent], "stopped" => state[:stopped] && state[:stopped][:line] },
       "labels" => loaded[:cases].to_h { |c| [c["case_id"], c["label"]] },
-      "results" => state[:results] + context_results(loaded[:context]), "report" => data["report"]
-    }.merge(context_doc(loaded[:context]))
+      "results" => state[:results] + context_results(loaded[:context]), "report" => data["report"],
+      "repeat" => opts[:repeat]
+    }.merge(context_doc(loaded[:context])).merge(samples_doc(samples, verdicts))
+  end
+
+  # samples_doc -> every sample's run id, batches, results and report, and
+  # each case's verdict (DND-1637). Empty for one sample per case.
+  def samples_doc(samples, verdicts)
+    return {} if verdicts.nil?
+
+    {
+      "samples" => samples.map do |s|
+        { "eval_run_id" => s[:run_id], "batches_sent" => s[:sent], "stopped" => s[:stopped] && s[:stopped][:line],
+          "results" => s[:results], "report" => s[:response] && s[:response]["report"] }
+      end,
+      "verdicts" => verdicts.map { |v| v.transform_keys(&:to_s) }
+    }
   end
 
   # ── slack_routing context (DND-1048) ─────────────────────────────────────
@@ -710,7 +792,7 @@ end
 SPEC = {
   "--help" => :switch, "-h" => :switch, "--use-case" => :value, "--labels" => :value, "--corpus" => :value,
   "--content-domain" => :value, "--batch-size" => :integer, "--pause" => :integer, "--dry-run" => :switch,
-  "--apply" => :value, "--inbox-root" => :value, "--bot-id" => :value
+  "--apply" => :value, "--inbox-root" => :value, "--bot-id" => :value, "--repeat" => :integer
 }.freeze
 
 def parse_options(argv)
@@ -719,7 +801,7 @@ def parse_options(argv)
     help: raw["--help"] || raw["-h"], use_case: raw["--use-case"], labels: raw["--labels"], corpus: raw["--corpus"],
     content_domain: raw["--content-domain"], batch_size: raw.fetch("--batch-size", JudgmentEval::MAX_BATCH),
     pause: raw.fetch("--pause", 60), dry_run: raw["--dry-run"] || false, apply: raw["--apply"],
-    inbox_root: raw["--inbox-root"], bot_id: raw["--bot-id"], given: raw.keys
+    inbox_root: raw["--inbox-root"], bot_id: raw["--bot-id"], repeat: raw.fetch("--repeat", 1), given: raw.keys
   }
 rescue StrictArgv::UsageError => e
   fail!(2, e.message, "run #{PROG} --help for the flags")
@@ -735,6 +817,9 @@ def validate_eval!(opts)
   end
   fail!(2, "--batch-size must be 1..#{JudgmentEval::MAX_BATCH}", "the server takes at most #{JudgmentEval::MAX_BATCH} cases per call") unless (1..JudgmentEval::MAX_BATCH).cover?(opts[:batch_size])
   fail!(2, "--pause must be 0..3600", "pass seconds between batches") unless (0..3600).cover?(opts[:pause])
+  unless (1..JudgmentEval::MAX_REPEAT).cover?(opts[:repeat])
+    fail!(2, "--repeat must be 1..#{JudgmentEval::MAX_REPEAT}", "pass 3 for a keep/revert bar (every sample is a paid judge call per case)")
+  end
   if opts[:bot_id] && !/\AB[A-Z0-9]{2,30}\z/.match?(opts[:bot_id])
     fail!(2, "--bot-id #{JudgmentEval.safe(opts[:bot_id])} is not a Slack bot id", "pass the app's bot id (B...)")
   end

@@ -246,6 +246,69 @@ module JudgmentEval
     report.fetch("scored").zero? && report.fetch("unscored").keys == ["not_configured"]
   end
 
+  # ── per-case verdicts over repeated samples (DND-1637) ─────────────────────
+  #
+  # One sample per case let an answer near confidence 0, which flips between
+  # identical runs, decide a keep/revert bar as a win or a loss. A verdict now
+  # needs at least MIN_SAMPLES samples, every one scored and every one the
+  # same answer:
+  #   match    -- every sample gave the label
+  #   miss     -- every sample gave the same answer, not the label
+  #   unstable -- the samples' answers differ (a flip; never a match or miss)
+  #   n/a      -- fewer than MIN_SAMPLES samples, or one unscored or absent
+  #               (unscored is not wrong, and one sample decides nothing)
+  # No confidence floor and no threshold: agreement alone decides.
+  MIN_SAMPLES = 2
+  MAX_REPEAT = 5
+  VERDICTS = %w[match miss unstable n/a].freeze
+
+  # case_verdicts(labels, samples) -> [{case_id:, label:, verdict:, answers:}]
+  # labels: {case_id => label}; samples: one results array per sample run.
+  # Ordered by case_id. answers names each sample's answer, in sample order.
+  def case_verdicts(labels, samples)
+    by_sample = samples.map { |results| results.to_h { |r| [r["case_id"], r] } }
+    labels.keys.sort.map do |case_id|
+      picks = by_sample.map { |s| s[case_id] }
+      label = labels[case_id]
+      { case_id: case_id, label: label, verdict: verdict(label, picks), answers: picks.map { |r| answer_text(r) } }
+    end
+  end
+
+  def verdict(label, picks)
+    return "n/a" if picks.size < MIN_SAMPLES || !picks.all? { |r| scored?(r) }
+
+    predicted = picks.map { |r| r["predicted"] }.uniq
+    return "unstable" if predicted.size > 1
+
+    predicted.first == label ? "match" : "miss"
+  end
+
+  def scored?(result)
+    result.is_a?(Hash) && result["outcome"] == "scored" && result["predicted"].is_a?(String)
+  end
+
+  def answer_text(result)
+    return "absent" unless result.is_a?(Hash)
+    return "unscored #{safe(result['reason'])}" unless scored?(result)
+
+    conf = result["confidence"]
+    answer = safe(result["predicted"])
+    conf.is_a?(Numeric) ? format("%s %.2f", answer, conf) : "#{answer} (no confidence)"
+  end
+
+  # verdict_lines(verdicts, repeat) -> lines. One sample per case computes no
+  # verdict at all, and says how to get one.
+  def verdict_lines(verdicts, repeat)
+    if repeat < MIN_SAMPLES
+      return ["per-case verdicts: not computed (1 sample per case; an answer near confidence 0 can flip between runs). " \
+              "For a keep/revert bar, re-run with --repeat 3 (DND-1637)."]
+    end
+
+    counts = VERDICTS.map { |v| "#{v} #{verdicts.count { |x| x[:verdict] == v }}" }.join(", ")
+    ["per-case verdicts over #{repeat} samples: #{counts}"] +
+      verdicts.map { |v| "  #{v[:case_id]} (#{v[:label]}): #{v[:verdict]} [#{v[:answers].join(', ')}]" }
+  end
+
   def uuid?(value)
     value.is_a?(String) && UUID.match?(value)
   end

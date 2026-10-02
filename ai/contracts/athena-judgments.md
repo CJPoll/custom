@@ -659,6 +659,15 @@ run where every case fell back reports `scored: 0`, never a precision of 0.
 - **What a run stores**: the caller's opaque case id, the owner's label, and
   the chosen label with its confidence, or the unscored reason. Never the
   input.
+- **Per-case verdicts need repeated samples** (DND-1637, harness side only).
+  An answer near confidence 0 can flip between identical runs, so one sample
+  per case never decides a keep/revert bar. `judgment-eval --repeat N` runs
+  the same cases N times, each its own server run. A case is `match` or
+  `miss` only when at least two samples all scored and all gave the same
+  answer; differing answers are `unstable`; an unscored, absent or untaken
+  sample is `n/a`. One sample computes no verdict. A bar names how it reads
+  `unstable`, and is measured with `--repeat 3` (the tool's `--help` gives
+  the cost and why 3). Thresholds are unchanged: apply one sample's run.
 - **The curve.** For label L at threshold t, the routed cases are those the
   judgment labelled L with confidence at least t. Precision is correct over
   routed; coverage is correct over the scored cases the owner labelled L (the
