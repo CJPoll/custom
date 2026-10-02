@@ -1722,6 +1722,16 @@ def main(argv)
 
   return usage unless repo && (id || since)
 
+  # DND-1646: a --pr/--mr that is not a positive integer is refused here, at
+  # argv time. It used to reach the forge, which said not found, and the tool
+  # blamed the forge (exit 3). Exit 1 like every other usage error.
+  if id && !id.match?(/\A[1-9][0-9]*\z/)
+    flag = opts.key?("--pr") ? "--pr" : "--mr"
+    warn "lead-time: usage error — #{flag} takes a PR/MR number, got #{id.inspect}."
+    warn "Fix: pass #{flag} as a positive integer with no sign, '#', or leading zero (e.g. #{flag} 123)."
+    return 1
+  end
+
   # DND-1009: a --since that is not a date or a zoned time is refused here, at
   # argv time, before the repo or the forge is touched. It used to reach the
   # forge scan and raise a raw Time.xmlschema backtrace.

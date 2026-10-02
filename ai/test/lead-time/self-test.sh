@@ -145,6 +145,36 @@ for bad_since in yesterday 2026-09-30T22:00:00 2026-02-31; do
   fi
 done
 
+# 2d'. DND-1646: --pr/--mr is a positive integer, refused at argv time. A
+#      branch name or "#12" used to reach the forge, which said not found, and
+#      the tool blamed the forge (exit 3). The stub records every call, so the
+#      assertion is that the forge was never invoked, and the repo never reached.
+CALLBIN="${TMP}/callbin"
+CALLLOG="${TMP}/forge-calls"
+mkdir -p "${CALLBIN}"
+printf '#!/bin/sh\necho called >>"%s"\necho "fake: not found" >&2\nexit 1\n' "${CALLLOG}" >"${CALLBIN}/gh"
+chmod +x "${CALLBIN}/gh"
+fsg_require_stubs "${CALLBIN}" gh
+for flag in --pr --mr; do
+  for bad_id in abc my-branch '#12' 0 012 1.5 +5 ""; do
+    rm -f "${CALLLOG}"
+    PATH="${CALLBIN}:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" "${flag}" "${bad_id}" >"${TMP}/id-out" 2>"${TMP}/id-err" </dev/null
+    ID_CODE=$?
+    if [ "${ID_CODE}" -eq 1 ] && grep -q 'Fix:' "${TMP}/id-err" && grep -q -- "${flag}" "${TMP}/id-err" \
+       && [ ! -e "${CALLLOG}" ] && [ ! -s "${TMP}/id-out" ]; then
+      ok "${flag} '${bad_id}' is refused (exit 1, Fix: naming the flag), forge never called"
+    else
+      bad "${flag} '${bad_id}' is refused" "code=${ID_CODE} forge_called=$([ -e "${CALLLOG}" ] && echo yes || echo no) err=$(head -c 240 "${TMP}/id-err")"
+    fi
+  done
+done
+run --repo "${NOREPO}" --pr abc
+if [ "${CODE}" -eq 1 ] && ! grep -q 'not a git worktree' <<<"${ERR}"; then
+  ok "a non-integer --pr is refused before the repo is checked"
+else
+  bad "a non-integer --pr is refused before the repo is checked" "code=${CODE} err=$(head -c 240 <<<"${ERR}")"
+fi
+
 # 2e. DND-1489: a malformed argument and a legitimate not-found must not share
 #     an exit code, or a caller cannot tell them apart. A requested PR the
 #     forge reports does not exist is exit 2; a malformed --since is exit 1.
