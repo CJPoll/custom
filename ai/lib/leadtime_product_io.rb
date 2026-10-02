@@ -87,6 +87,18 @@ module LeadTimeProductIO
       code.zero? ? out.strip : nil
     end
 
+    # A branch's tip, or nil only when refs/heads/<branch> is absent. A ref
+    # git could not read raises CouldNotLook: never read as "already gone".
+    def branch_tip(dir, branch)
+      tip = rev(dir, "refs/heads/#{branch}")
+      return tip if tip
+
+      _, code = call(dir, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}")
+      return nil if code == 1
+
+      raise CouldNotLook.new("cannot read branch #{branch} in #{dir} (git show-ref exit #{code})", "check the repo is intact ('git -C #{dir} show-ref #{branch}'); the branch is kept.")
+    end
+
     # true / false; nil when git could not tell (never read as "not landed").
     def ancestor?(dir, commit, ref)
       _, code = call(dir, "merge-base", "--is-ancestor", commit, ref)
@@ -724,8 +736,9 @@ module LeadTimeProductIO
 
   # ── a lane's end: teardown (this run's) and reap (a dead run's) ──────────
 
-  # -> [:none|:delete|:awaiting|:stranded, branch, detail]
+  # -> [:none|:gone|:delete|:awaiting|:stranded, branch, detail]
   def retire_lane(m, rl, dir, why)
+    had_meta = File.exist?("#{dir}.meta")
     meta = Meta.read("#{dir}.meta")
     branch = meta["branch"]
     if branch.nil? && File.directory?(dir)
@@ -739,10 +752,14 @@ module LeadTimeProductIO
     if STACK_STATES.include?(meta["bootstrap"])
       Run.call([Cmd.teardown_stack, "--worktree", dir, "--parked", why], chdir: "/", timeout: TEARDOWN_CAP)
     end
-    Git.remove_worktree(rl.path, dir) if File.exist?(dir)
-    return [:none, nil, "no lane cut"] unless branch && Git.rev(rl.path, "refs/heads/#{branch}")
+    had_worktree = File.exist?(dir)
+    Git.remove_worktree(rl.path, dir) if had_worktree
+    tip = branch && Git.branch_tip(rl.path, branch)
+    unless tip
+      verdict, detail = P.no_branch_ref(lane: File.basename(dir), branch: branch, worktree: had_worktree, meta: had_meta)
+      return [verdict, branch, detail]
+    end
 
-    tip = Git.rev(rl.path, "refs/heads/#{branch}")
     on_main = Git.ancestor?(rl.path, tip, "refs/remotes/origin/main") == true
     rec = Store.states(m.state_dir).reverse.find { |st| st.repo == rl.name && st.branch == branch }
     verdict = P.retire(tip: tip, on_main: on_main, recorded_head: rec&.head)

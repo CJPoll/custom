@@ -63,7 +63,10 @@ HELP = <<~TXT
               per PR.
     teardown  retire this run's lanes: work on origin/main -> removed; the tip
               pushed on a recorded improver PR -> awaiting landing; anything
-              else -> STRANDED, branch kept (exit 72).
+              else -> STRANDED, branch kept (exit 72). A lane that was cut
+              but whose branch is already gone says so, naming the lane and
+              the branch; "none (no lane cut)" means nothing was cut. A branch
+              git cannot read is COULD NOT TELL, kept (exit 72).
 
   Forge: GitHub only (locked-merge is GitHub-only); a GitLab R is refused.
 

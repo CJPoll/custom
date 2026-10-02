@@ -389,6 +389,18 @@ module LeadTimeProduct
     :stranded
   end
 
+  # A lane with no branch ref in R to judge -> [verdict, detail]. :none only
+  # when nothing was cut (no worktree and no meta); a lane that was cut and
+  # whose branch is already gone is :gone, naming the lane and the branch, so
+  # "never cut" and "cut, branch gone" never read the same (DND-1640).
+  def no_branch_ref(lane:, branch:, worktree:, meta:)
+    return [:none, "no lane cut"] unless worktree || meta
+
+    wt = worktree ? "worktree removed" : "worktree already gone"
+    what = branch ? "branch #{branch} already gone" : "its meta records no branch"
+    [:gone, "lane #{lane} cut, #{wt}; #{what} (nothing to keep)"]
+  end
+
   # ── reporting ──────────────────────────────────────────────────────────────
 
   def summary(open_n, landed)

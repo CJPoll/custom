@@ -281,6 +281,55 @@ new_repo
 rc="$(lp teardown)"
 [ "$rc" = 0 ] && grep -q 'none (no lane cut)' "${TMP}/out" && ok "no lane cut: teardown says so, exit 0" || bad "teardown none" "rc=$rc"
 
+# A cut lane whose branch ref is already gone (DND-1640): the lane dir and its
+# meta exist, refs/heads/<branch> does not. Never read as "no lane cut".
+new_repo
+hold_lock "$LANES/$RUN_ID.lock"
+lp cut --repo prod --phase verify >/dev/null
+BRG="$(git -C "$LANES/$RUN_ID" rev-parse --abbrev-ref HEAD)"
+git -C "$R" update-ref -d "refs/heads/$BRG"
+rc="$(lp teardown)"
+if [ "$rc" = 0 ] && grep -qx "product_lane: repo=prod lane $RUN_ID cut, worktree removed; branch $BRG already gone (nothing to keep)" "${TMP}/out" \
+   && ! grep -q 'no lane cut' "${TMP}/out" && [ ! -e "$LANES/$RUN_ID" ] && [ ! -e "$LANES/$RUN_ID.meta" ]; then
+  ok "a cut lane whose branch ref is gone: names the lane and the branch, never 'no lane cut'; worktree and meta removed"
+else bad "branch gone" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+release_holders
+
+# A branch git cannot read is never reported as "already gone": a git that
+# fails show-ref (exit 128) is COULD NOT TELL, kept, counted (exit 72).
+new_repo
+hold_lock "$LANES/$RUN_ID.lock"
+lp cut --repo prod --phase verify >/dev/null
+BRG="$(git -C "$LANES/$RUN_ID" rev-parse --abbrev-ref HEAD)"
+git -C "$R" update-ref -d "refs/heads/$BRG"
+GITSHIM="$TMP/gitshim"; mkdir -p "$GITSHIM"
+REAL_GIT="$(command -v git)"
+cat >"$GITSHIM/git" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = show-ref ] && { echo "fatal: shim" >&2; exit 128; }; done
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$GITSHIM/git"
+rc="$(PATH="$GITSHIM:$PATH" lp teardown)"
+if [ "$rc" = 72 ] && grep -q "COULD NOT TELL (cannot read branch $BRG" "${TMP}/out" && ! grep -q 'already gone' "${TMP}/out"; then
+  ok "a branch git cannot read: COULD NOT TELL, exit 72, never 'already gone'"
+else bad "branch unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+release_holders
+
+# The same with the worktree already removed: only the meta is left.
+new_repo
+hold_lock "$LANES/$RUN_ID.lock"
+lp cut --repo prod --phase verify >/dev/null
+BRG="$(git -C "$LANES/$RUN_ID" rev-parse --abbrev-ref HEAD)"
+git -C "$R" worktree remove --force "$LANES/$RUN_ID"
+git -C "$R" branch -D -q "$BRG"
+rc="$(lp teardown)"
+if [ "$rc" = 0 ] && grep -qx "product_lane: repo=prod lane $RUN_ID cut, worktree already gone; branch $BRG already gone (nothing to keep)" "${TMP}/out" \
+   && ! grep -q 'no lane cut' "${TMP}/out" && [ ! -e "$LANES/$RUN_ID.meta" ]; then
+  ok "meta only, branch gone: says the worktree was already gone, never 'no lane cut'"
+else bad "meta only branch gone" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+release_holders
+
 # A lane cut before its meta was written (a run that died between the two).
 new_repo
 git -C "$R" worktree add -q -b leadtime/prod-verify-nometa "$LANES/$RUN_ID" origin/main

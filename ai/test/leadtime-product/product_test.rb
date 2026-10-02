@@ -287,6 +287,26 @@ check("R2 tip pushed on an open improver PR: awaiting landing") { P.retire(tip: 
 check("R3 a commit after the push: stranded") { P.retire(tip: H2, on_main: false, recorded_head: H1) == :stranded }
 check("R4 never pushed: stranded") { P.retire(tip: H1, on_main: false, recorded_head: nil) == :stranded }
 
+# A lane with no branch ref in R to judge (DND-1640): "never cut" and "cut,
+# branch already gone" must not read the same.
+LANE = "run-20261001T123000Z-4242"
+def no_ref(branch:, worktree:, meta:) = P.no_branch_ref(lane: LANE, branch: branch, worktree: worktree, meta: meta)
+check("R5 no worktree and no meta: none, 'no lane cut'") do
+  no_ref(branch: nil, worktree: false, meta: false) == [:none, "no lane cut"]
+end
+check("R6 a cut lane whose branch ref is gone: names the lane and the branch, never 'no lane cut'") do
+  v, d = no_ref(branch: "leadtime/prod-verify-x", worktree: true, meta: true)
+  v == :gone && d == "lane #{LANE} cut, worktree removed; branch leadtime/prod-verify-x already gone (nothing to keep)"
+end
+check("R7 meta only (worktree already gone), branch ref gone: says the worktree was already gone") do
+  v, d = no_ref(branch: "leadtime/prod-verify-x", worktree: false, meta: true)
+  v == :gone && d == "lane #{LANE} cut, worktree already gone; branch leadtime/prod-verify-x already gone (nothing to keep)"
+end
+check("R8 meta that records no branch, no worktree: cut, no branch recorded, never 'no lane cut'") do
+  v, d = no_ref(branch: nil, worktree: false, meta: true)
+  v == :gone && d == "lane #{LANE} cut, worktree already gone; its meta records no branch (nothing to keep)"
+end
+
 # ── summary and PR body ──────────────────────────────────────────────────────
 
 check("Y1 summary with nothing: product_prs=0 landed=none") { P.summary(0, []) == "product_prs=0 landed=none" }
