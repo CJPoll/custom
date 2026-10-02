@@ -166,23 +166,31 @@ evidence below is read from what the machine is already doing.
    recall whose hold rate stays under 25% (the owner may set another budget).
    Per machine. Fewer than 10 failure events on a machine is "not enough
    events", recorded as `n/a`, never a threshold.
-4. **The threshold goes to the owner.** Moving the gate's bar is item 5 of
+4. **Compare with today's bar.** For the same minutes, report the hold rate
+   and failure recall of `loadavg > 12` beside the chosen threshold's, so the
+   owner sees whether the new bar is looser or tighter, and by how much.
+5. **The threshold goes to the owner.** Moving the gate's bar is item 5 of
    *Owner approval policy*; it stays with Cody.
 
-## Recommendation (provisional; DND-1688)
+## Recommendation (metric only; the bar is DND-1688)
+
+**This document moves no bar.** The live gate stays `loadavg > 12` until
+DND-1688 lands, with the owner's approval of a threshold that DND-1687's
+analysis picks. Moving the bar is the owner's (*Owner approval policy*, item
+5).
 
 - **Metric: system PSI cpu `some` avg60**, with memory `full` avg60 and io
   `full` avg60 as additional hold conditions. It measures waiting, which is
   the harm, and it is a percentage, so it ports across core counts and
   counts the laptop runners' load as the pressure it is.
-- **Provisional thresholds: hold while cpu some avg60 > 15, or memory full
-  avg60 > 2, or io full avg60 > 5.** 15 is near the cpu some avg60 that
-  coincided with load 15-19 tonight, where today's gate already holds, so it
-  is not looser than the current bar on the one evidence point we have. The
-  memory and io numbers are conservative guesses. All three are replaced by
-  DND-1687's numbers.
-- **Until DND-1688 lands, the gate stays `loadavg > 12`.** Nothing here
-  changes the live bar.
+- **Starting hypothesis for the analysis, not a proposed bar:** cpu some
+  avg60 > 15, memory full avg60 > 2, io full avg60 > 5. These are where
+  DND-1687 starts its threshold sweep, nothing more. One night of readings
+  cannot show how any of them compares with `loadavg > 12`. The two readings
+  above already disagree: at 04:40Z load1 was 12.92 (today's gate holds) and
+  cpu some avg60 was 12.28 (a `> 15` gate would clear). The two also average
+  over different windows. How a PSI bar compares with today's is one of the
+  things DND-1687 must report, from the logged data.
 - **How the gate reads it.** A helper, `ai/bin/capacity-gate`: exit 0 clear,
   1 hold (naming each reading and threshold), 3 could not read (hold, with
   `Fix:`). An unreadable or absent `/proc/pressure` holds; it never reads as
