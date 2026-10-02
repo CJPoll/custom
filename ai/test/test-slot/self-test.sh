@@ -488,6 +488,38 @@ d	e"
   t eq "$(parent_state 100 x "$host")" unknown
   t eq "$(parent_state 1 1 '')" unknown
   t eq "$(parent_state 100 100 '')" alive
+  # DND-1658: scan_unslotted over a fixture /proc. A heavy run whose environ
+  # cannot be told (mid-exec: bounds 0 0, or equal bounds with start_code 0)
+  # is unknown, never unslotted; a settled one is told by its bytes.
+  fx="$(mktemp -d "$W/slotfx.XXXXXX")"
+  slot_fake() { # slot_fake PID ENV_START ENV_END ENVIRON [START_CODE]
+    local d="$fx/$1" i cols="" sc="${5:-4194304}"
+    mkdir -p "$d"
+    for i in $(seq 4 49); do
+      case "$i" in 22) cols="$cols 100" ;; 26) cols="$cols $sc" ;; *) cols="$cols 0" ;; esac
+    done
+    printf '%s (fake) S%s %s %s 0\n' "$1" "$cols" "$2" "$3" >"$d/stat"
+    printf 'Name:\tfake\nUid:\t%s\t%s\t%s\t%s\n' "$UID" "$UID" "$UID" "$UID" >"$d/status"
+    printf '%b' "$4" >"$d/environ"
+    printf 'prep-commit.sh\0' >"$d/cmdline"
+  }
+  SLOTENV='ATHENA_TEST_SLOT_HELD=/p:1\0HOME=/x\0'   # 35 bytes
+  slot_fake 5301 0 0 ''                              # mid-exec, bounds unset
+  slot_fake 5302 1000 1000 '' 0                      # mid-walk: equal bounds, start_code 0
+  slot_fake 5303 1000 1035 "$SLOTENV"                # settled, slotted
+  slot_fake 5304 1000 1008 'HOME=/x\0'               # settled, no marker
+  slot_fake 5305 1000 1000 '' 4194304                # exec over, empty environment
+  slot_fake 5306 1000 1035 'HOME=/x\0ATHENA_TEST_SLOT_HELD\0/p:1\0'  # marker torn mid-rewrite
+  PROC_ROOT="$fx"
+  ENV_SETTLE_S=0.2
+  su="$(scan_unslotted)"
+  sstate() { awk -F'\t' -v p="$1" '$1 == p { print $2 }' <<<"$su"; }
+  t eq "$(sstate 5301)" unknown
+  t eq "$(sstate 5302)" unknown
+  t eq "$(sstate 5303)" ""
+  t eq "$(sstate 5304)" unslotted
+  t eq "$(sstate 5305)" unslotted
+  t eq "$(sstate 5306)" unknown
   exit "$f"
 )
 if [ $? -eq 0 ]; then ok; else bad helpers "pure helper cases failed (see above)"; fi

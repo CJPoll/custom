@@ -879,9 +879,9 @@ is_heavy_argv() {
 # unslotted_state NS_SELF NS_PID ENV_RC — classify a heavy run for --status:
 #   container  it lives in another pid namespace (docker does not pass our env
 #              in, so its slot cannot be read; never counted as unslotted)
-#   slotted    its environ carries ATHENA_TEST_SLOT_HELD (grep rc 0)
-#   unslotted  its environ lacks it (grep rc 1)
-#   unknown    its environ could not be read (never read as slotted)
+#   slotted    its environ carries ATHENA_TEST_SLOT_HELD (slot_env_rc 0)
+#   unslotted  its settled environ lacks it (slot_env_rc 1)
+#   unknown    its environ could not be told (mid-exec, unreadable; DND-1658): never slotted, never unslotted
 unslotted_state() {
   if [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ]; then
     printf 'container\n'
@@ -1890,14 +1890,42 @@ restore_deleted_output() {
 
 # ============================================================ status
 
+PROC_ROOT=/proc # the process table scan_unslotted reads (the self-test points it at a fixture)
+ENV_SETTLE_S=5  # how long a run whose environ cannot be told yet is re-read before it is unknown
+
+# slot_env_rc PID — does PID's environ carry ATHENA_TEST_SLOT_HELD? 0 yes, 1 no,
+# 2 could not tell. A bare read of /proc/<pid>/environ is not an answer while
+# the process is inside execve: it reads EMPTY, and an empty environ lacks the
+# marker (DND-1658, the DND-1016 class). So the read is
+# scripts/lib/proc-env-scan.awk's, accepted only when the kernel's env bounds
+# bracket it. Every way of not settling is 2, which the caller reads as
+# unknown, never as unslotted.
+slot_env_rc() {
+  local pid=$1 awk_file out rc
+  awk_file="${TS_LIB:+$TS_LIB/../../scripts/lib/proc-env-scan.awk}"
+  if [ -z "$awk_file" ] || [ ! -r "$awk_file" ] || ! command -v gawk >/dev/null 2>&1; then
+    return 2
+  fi
+  # Not readable by us (a non-dumpable process: root owns its /proc files):
+  # the scan would skip it as "no", so it is told here as unknown.
+  [ -r "$PROC_ROOT/$pid/environ" ] || return 2
+  out=$(gawk -b -f "$awk_file" -v mode=var -v needle=ATHENA_TEST_SLOT_HELD \
+    -v uid="$(id -u)" -v since=0 -v settle_s="$ENV_SETTLE_S" -v root="$PROC_ROOT" \
+    "$PROC_ROOT/$pid" 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] || return 2
+  [ -n "$out" ] && return 0
+  return 1
+}
+
 scan_unslotted() { # prints "pid<TAB>state<TAB>cwd<TAB>cmd", state unslotted|unknown|container
   local d pid stat rest ppid cwd cmd st env_rc ns_self ns_pid
   local -A matched=() parent=()
   local -a argv
   ns_self=$(readlink /proc/self/ns/pid 2>/dev/null)
-  for d in /proc/[0-9]*; do
+  for d in "$PROC_ROOT"/[0-9]*; do
     [ -O "$d" ] || continue
-    pid=${d#/proc/}
+    pid=${d#"$PROC_ROOT"/}
     [ "$pid" = "$$" ] && continue
     argv=()
     mapfile -d '' -t argv <"$d/cmdline" 2>/dev/null || continue
@@ -1911,12 +1939,12 @@ scan_unslotted() { # prints "pid<TAB>state<TAB>cwd<TAB>cmd", state unslotted|unk
   done
   for pid in "${!matched[@]}"; do
     [ -n "${matched[${parent[$pid]}]+x}" ] && continue
-    grep -qza '^ATHENA_TEST_SLOT_HELD=' "/proc/$pid/environ" 2>/dev/null
+    slot_env_rc "$pid"
     env_rc=$?
-    ns_pid=$(readlink "/proc/$pid/ns/pid" 2>/dev/null)
+    ns_pid=$(readlink "$PROC_ROOT/$pid/ns/pid" 2>/dev/null)
     st=$(unslotted_state "$ns_self" "$ns_pid" "$env_rc")
     [ "$st" = slotted ] && continue
-    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
+    cwd=$(readlink "$PROC_ROOT/$pid/cwd" 2>/dev/null || echo "?")
     cmd=$(one_line "${matched[$pid]}")
     printf '%s\t%s\t%s\t%s\n' "$pid" "$st" "$cwd" "${cmd:0:200}"
   done | sort -n

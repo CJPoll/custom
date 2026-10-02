@@ -11,6 +11,8 @@
 #   mode tag    ATHENA_REAP_TAGS (a comma-separated list) holds <needle> as a
 #               whole element
 #   mode exact  the environment holds the entry <needle> (VAR=value) exactly
+#   mode var    the environment holds a variable named <needle> (no '=', any
+#               value, empty included): test-slot --status (DND-1658)
 #   uid         only processes whose REAL uid is this are considered
 #   since       only processes started at or after this starttime (clock
 #               ticks since boot, field 22 of /proc/<pid>/stat): a process
@@ -170,6 +172,8 @@ function classify(pid,    b0, b1, f, e, r, n, hit, torn, got, list, st, saved_rs
     if (e == var_name) torn = 1             # our entry, its '=' read as NUL
     if (mode == "exact") {
       if (e == needle) hit = 1
+    } else if (mode == "var") {
+      if (substr(e, 1, length(needle) + 1) == needle "=") hit = 1
     } else if (substr(e, 1, 17) == "ATHENA_REAP_TAGS=") {
       list = "," substr(e, 18) ","
       if (index(list, "," needle ",") > 0) hit = 1
@@ -193,11 +197,12 @@ function classify(pid,    b0, b1, f, e, r, n, hit, torn, got, list, st, saved_rs
 
 BEGIN {
   if (length("\303\251") != 2) die(2, "gawk is counting characters, not bytes, so the byte count cannot be checked against the kernel's bounds.", "invoke it as gawk -b -f proc-env-scan.awk ...")
-  if (mode != "tag" && mode != "exact") die(2, "mode must be tag or exact, got '" mode "'.", "pass -v mode=tag or -v mode=exact.")
+  if (mode != "tag" && mode != "exact" && mode != "var") die(2, "mode must be tag, exact or var, got '" mode "'.", "pass -v mode=tag, -v mode=exact or -v mode=var.")
+  if (mode == "var" && needle !~ /^[A-Za-z_][A-Za-z0-9_]*$/) die(2, "mode var needs a bare variable NAME, got '" needle "'.", "pass -v needle=<VAR> with no '=' and no value.")
   if (needle == "") die(2, "empty needle; an empty key would match nothing and read as 'none left'.", "pass -v needle=<tag or VAR=value>.")
   if (mode == "exact" && index(needle, "=") < 2) die(2, "mode exact needs a VAR=value needle, got '" needle "'; without a name, a torn read of it cannot be recognized.", "pass -v needle=<VAR>=<value>.")
   # The bare name our entry shows while it is mid-rewrite (its '=' a NUL).
-  var_name = (mode == "exact") ? substr(needle, 1, index(needle, "=") - 1) : "ATHENA_REAP_TAGS"
+  var_name = (mode == "exact") ? substr(needle, 1, index(needle, "=") - 1) : (mode == "var") ? needle : "ATHENA_REAP_TAGS"
   if (uid !~ /^[0-9]+$/) die(2, "uid must be a number, got '" uid "'.", "pass -v uid=\"$(id -u)\".")
   if (since !~ /^[0-9]+$/) die(2, "since must be a starttime in clock ticks, got '" since "'.", "pass the caller's own starttime (field 22 of /proc/<pid>/stat).")
   if (root == "") root = "/proc"

@@ -472,6 +472,34 @@ else
   bad "S15 mode exact: the needle's entry read mid-rewrite is UNKNOWN, exit 4" "rc=${SRC} out=${SO} err=${SE}"
 fi
 
+# DND-1658 mode var: a variable by NAME, any value, found whole; absent is a
+# plain 'no'; torn mid-rewrite is UNKNOWN.
+var_scan() { # var_scan <pid>
+  SO="$(gawk -b -f "${SCAN}" -v mode=var -v needle=DND_V -v uid="${UID}" -v since=0 -v settle_s=0.2 \
+        -v root="${TMP}/fakeproc" "${TMP}/fakeproc/$1" 2>"${TMP}/scan.err")"; SRC=$?; SE="$(cat "${TMP}/scan.err")"
+}
+fake_proc 4271 1000 1016 'HOME=/x\0DND_V=v\0'   # 16 bytes
+var_scan 4271
+if [ "${SRC}" -eq 0 ] && [ "${SO}" = 4271 ] && [ -z "${SE}" ]; then
+  ok "S15 mode var: a variable found by name with any value"
+else
+  bad "S15 mode var: found by name" "rc=${SRC} out=${SO} err=${SE}"
+fi
+fake_proc 4272 1000 1008 'HOME=/x\0'
+var_scan 4272
+if [ "${SRC}" -eq 0 ] && [ -z "${SO}" ] && [ -z "${SE}" ]; then
+  ok "S15 mode var: a settled environment without the name is a plain 'no'"
+else
+  bad "S15 mode var: absent is 'no'" "rc=${SRC} out=${SO} err=${SE}"
+fi
+fake_proc 4273 1000 1016 'HOME=/x\0DND_V\0v\0'   # 16 bytes
+var_scan 4273
+if [ "${SRC}" -eq 4 ] && [ -z "${SO}" ] && grep -q 'pid 4273 .*UNKNOWN' <<<"${SE}"; then
+  ok "S15 mode var: the name read mid-rewrite is UNKNOWN, exit 4"
+else
+  bad "S15 mode var: mid-rewrite is UNKNOWN" "rc=${SRC} out=${SO} err=${SE}"
+fi
+
 # S18 (DND-1616): a process name may hold a newline (and ") "), and the scan
 # reads EVERY pid's stat before it knows whose the process is. Read one line
 # at a time, the stat of `x) Z (<newline>y` ends inside the name: 4 fields, so
