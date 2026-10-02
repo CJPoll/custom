@@ -35,11 +35,23 @@
 # missing from 58 of 300 plain `grep -z` scans. So a read is an answer only
 # when the kernel's own bounds for the environment (env_start and env_end,
 # fields 50-51 of /proc/<pid>/stat) are set, are the same before and after the
-# read, and span exactly the bytes read. Bounds of 0 0, or two equal bounds
-# (the kernel sets env_end = env_start before it walks the new environment),
-# mean the process may be mid-exec: "cannot tell yet", which is re-read every
-# 0.05s (bounded by settle_s), never counted as "no". Equal bounds that are
-# still the same on a re-read are a genuinely empty environment.
+# read, and span exactly the bytes read. Bounds of 0 0 mean the process is
+# mid-exec: "cannot tell yet", which is re-read every 0.05s (bounded by
+# settle_s), never counted as "no".
+#
+# Two equal bounds are decided by state, not by time (DND-1626). They are an
+# empty environment, or an exec inside its environment walk:
+# create_elf_tables() sets env_end = env_start, walks the strings, then sets
+# env_end. start_code (field 26) tells them apart. mm_alloc() zeroes the new
+# mm, and load_elf_binary() sets mm->start_code only after create_elf_tables()
+# returns, so the walk always runs with start_code 0. Sources, Linux v6.18:
+# fs/binfmt_elf.c (create_elf_tables, load_elf_binary), kernel/fork.c
+# (mm_alloc), fs/proc/array.c (do_task_stat prints start_code and the bounds
+# of one mm in one read). Equal bounds with start_code 0 are "cannot tell yet"
+# however long they last (an exec preempted mid-walk), and end as UNKNOWN;
+# with start_code set, the exec is over and the environment is empty. (This
+# replaced a re-read 0.05s later, a wall-clock verdict: a walk preempted for
+# that long read as "empty", so a tagged process read as untagged.)
 #
 # A settled read can still be torn (DND-1202). After the exec, the new program
 # owns that memory and may rewrite it in place: bash's startup writes a NUL
@@ -63,13 +75,14 @@
 #     skipped at once, never listed: a tagged ssh-agent or sudo is not found
 #     (the same as before DND-1016, when its read failed EACCES). A harness
 #     suite starts none;
-#   * the "equal bounds, still equal on a re-read" rule assumes a re-exec
-#     lands at a new, randomized stack address. With ASLR off
-#     (randomize_va_space=0, or setarch -R) a process re-exec'ing itself
-#     between the two reads could read as "empty". It also assumes the
-#     kernel's walk of a new environment (microseconds) is not descheduled
-#     for the whole 0.05s between the two reads; under PREEMPT a preempted
-#     walk could read as "empty". Not observed in 26k scans (DND-1202);
+#   * the equal-bounds rule reads the ELF loader's order. A program whose
+#     lowest executable segment maps at address 0 (possible only with
+#     vm.mmap_min_addr=0) shows start_code 0 forever: equal bounds there are
+#     named UNKNOWN (exit 4), loud, never "no". A process that rewrites its
+#     own bounds with prctl(PR_SET_MM) is outside the rule. do_task_stat reads
+#     start_code before the bounds with no barrier; on x86 loads are not
+#     reordered, and on a weakly ordered CPU the read could in theory pair a
+#     set start_code with a stale env_end;
 #   * a process that keeps the needle's entry torn (its '=' a NUL) for longer
 #     than settle_s is named UNKNOWN (exit 4): loud, never "no".
 #
@@ -86,7 +99,8 @@ function die(code, msg, fix) {
   exit code
 }
 
-# stat_of(pid) -- 1 and ST_STATE, ST_START, ST_E0, ST_E1 set; 0 when gone.
+# stat_of(pid) -- 1 and ST_STATE, ST_START, ST_CODE, ST_E0, ST_E1 set; 0 when
+# gone. All five come from one read of the file, so they describe one mm.
 # The WHOLE file is one record (DND-1616): a process name may hold a newline
 # as well as ") ", and every pid's stat is read before the scan knows whose
 # the process is. Read one line at a time, `x) Z (<newline>y` (proc-state's
@@ -110,7 +124,8 @@ function stat_of(pid,    f, line, n, fld, saved_rs, r) {
   n = split(line, fld, " ")
   if (n < 49) die(3, "/proc/" pid "/stat has " n + 2 " fields; env_start/env_end (fields 50-51, Linux 3.5+) are missing, so a mid-exec read cannot be told from an untagged one.",
                   "run on Linux 3.5 or later; this scan must not fall back to an unbracketed read.")
-  ST_STATE = fld[1]; ST_START = fld[20] + 0; ST_E0 = fld[48]; ST_E1 = fld[49]
+  ST_STATE = fld[1]; ST_START = fld[20] + 0; ST_CODE = fld[24] + 0
+  ST_E0 = fld[48]; ST_E1 = fld[49]
   return 1
 }
 
@@ -139,12 +154,12 @@ function classify(pid,    b0, b1, f, e, r, n, hit, torn, got, list, st, saved_rs
   if (b0 == b1) {
     # Equal bounds are ALSO a mid-exec state: the kernel sets env_end =
     # env_start before it walks the new environment, and only then sets
-    # env_end. So equal bounds are an empty environment only when a re-read
-    # at least 0.05s later still shows the same ones (an exec's window is
-    # microseconds, and a re-exec lands at a new, randomized address).
-    if ((pid in seen_empty) && seen_empty[pid] == ST_START ":" b0) return 1
-    seen_empty[pid] = ST_START ":" b0
-    return 2
+    # env_end. Told apart by state, not by time (DND-1626): start_code (field
+    # 26) is 0 in the new mm until load_elf_binary sets it, after that walk.
+    # 0 is "cannot tell yet" however long it lasts; set, the exec is over and
+    # the environment is empty.
+    if (ST_CODE == 0) return 2
+    return 1
   }
   f = root "/" pid "/environ"
   saved_rs = RS; RS = "\0"

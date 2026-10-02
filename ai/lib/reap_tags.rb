@@ -21,6 +21,7 @@
 # Ruby 2.7 compatible (no endless methods, no pattern matching).
 
 require "securerandom"
+require_relative "proc_state"
 
 module ReapTags
   VAR = "ATHENA_REAP_TAGS"
@@ -85,7 +86,7 @@ module ReapTags
   # the same way.
   # scripts/lib/proc-env-scan.awk applies the same rule for shell readers, and
   # its header states the limits (a non-dumpable process cannot be read and
-  # is skipped; the equal-bounds rule assumes ASLR).
+  # is skipped; equal bounds are decided by start_code, DND-1626).
   #
   # `since` defaults to this process's own start, read from the real /proc
   # even when `proc_root` points at a fixture.
@@ -93,12 +94,11 @@ module ReapTags
                   since: own_starttime, settle: DEFAULT_SETTLE_S)
     found = []
     unknown = []
-    seen_empty = {}
     Dir.glob(File.join(proc_root, "[0-9]*")).each do |dir|
       pid = File.basename(dir).to_i
       next if exclude.include?(pid)
 
-      case classify(pid, tag, proc_root, uid, since, seen_empty)
+      case classify(pid, tag, proc_root, uid, since)
       when :match then found << pid
       when :unknown then unknown << pid
       end
@@ -107,7 +107,7 @@ module ReapTags
     until unknown.empty? || monotonic >= deadline
       sleep SETTLE_POLL_S
       unknown = unknown.select do |pid|
-        verdict = classify(pid, tag, proc_root, uid, since, seen_empty)
+        verdict = classify(pid, tag, proc_root, uid, since)
         found << pid if verdict == :match
         verdict == :unknown
       end
@@ -122,10 +122,10 @@ module ReapTags
                         "scan could not look, so it did not report 'none left'.", found: found)
   end
 
-  # [state, starttime, env_start, env_end] from /proc/<pid>/stat, or nil when
-  # the process is gone. Raises when the line is not the kernel's format or
-  # this kernel has no env bounds: a scan that cannot tell mid-exec from
-  # untagged must not run at all.
+  # [state, starttime, env_start, env_end, start_code] from /proc/<pid>/stat,
+  # all from one read (one mm), or nil when the process is gone. Raises when
+  # the line is not the kernel's format or this kernel has no env bounds: a
+  # scan that cannot tell mid-exec from untagged must not run at all.
   def stat_fields(pid, proc_root)
     path = File.join(proc_root, pid.to_s, "stat")
     line = begin
@@ -133,16 +133,15 @@ module ReapTags
     rescue SystemCallError, IOError
       return nil
     end
-    cut = line.rindex(") ")
-    raise ScanError, "#{path} is not in the kernel's format (no \") \" after the comm). Fix: run on Linux with /proc mounted." unless cut
+    f = ProcState.stat_fields(line)
+    raise ScanError, "#{path} is not in the kernel's format (no \") \" after the comm). Fix: run on Linux with /proc mounted." unless f
 
-    f = line.byteslice((cut + 2)..-1).split(" ")
     if f.size < 49
       raise ScanError, "#{proc_root}/#{pid}/stat has #{f.size + 2} fields; env_start/env_end (fields 50-51, " \
                        "Linux 3.5+) are missing. Fix: run on Linux 3.5 or later; the reap must not fall back " \
                        "to an unbracketed read."
     end
-    [f[0], f[19].to_i, f[47].to_i, f[48].to_i]
+    [f[0], f[19].to_i, f[47].to_i, f[48].to_i, f[23].to_i]
   end
 
   def real_uid(pid, proc_root)
@@ -155,9 +154,9 @@ module ReapTags
   end
 
   # :match, :no (or cannot be ours), or :unknown (cannot tell yet).
-  def classify(pid, tag, proc_root, uid, since, seen_empty)
+  def classify(pid, tag, proc_root, uid, since)
     s = stat_fields(pid, proc_root) or return :no
-    state, start, b0, b1 = s
+    state, start, b0, b1, start_code = s
     return :no if %w[Z X x].include?(state) || start < since || real_uid(pid, proc_root) != uid
 
     path = File.join(proc_root, pid.to_s, "environ")
@@ -172,16 +171,14 @@ module ReapTags
     return :no if owner != uid
     return :unknown if b0.zero? && b1.zero? # mid-exec: no bounds yet
 
-    if b0 == b1
-      # Equal bounds are ALSO mid-exec (the kernel sets env_end = env_start
-      # before it walks the new environment): empty only if a re-read at
-      # least SETTLE_POLL_S later still shows the same ones.
-      key = "#{start}:#{b0}"
-      return :no if seen_empty[pid] == key
+    # Equal bounds are ALSO mid-exec: create_elf_tables sets env_end =
+    # env_start, walks the new environment, then sets env_end. Decided by
+    # state, not time (DND-1626): start_code is 0 in the new mm until
+    # load_elf_binary sets it after that walk. 0 is "cannot tell yet" however
+    # long it lasts; set, the exec is over and the environment is empty.
+    # Kernel sources: scripts/lib/proc-env-scan.awk's header.
+    return(start_code.zero? ? :unknown : :no) if b0 == b1
 
-      seen_empty[pid] = key
-      return :unknown
-    end
     env = begin
       File.binread(path)
     rescue SystemCallError, IOError

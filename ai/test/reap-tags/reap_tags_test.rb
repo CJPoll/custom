@@ -15,6 +15,8 @@
 # kernel and bash were measured to show:
 #   zero_bounds   env_start/env_end 0 0, before the kernel lays out the stack
 #   equal_bounds  env_start == env_end, before the kernel walks the new env
+#                 (start_code still 0: load_elf_binary sets it only after
+#                 create_elf_tables has walked the environment, DND-1626)
 #   exec_in_read  the bounds change between the two stat reads around the read
 #   short_read    fewer bytes than the bounds span (a read cut at a page)
 #   unreadable    environ cannot be opened although the bounds are settled
@@ -40,6 +42,7 @@ TAG = ReapTags.new_tag("selftest-exec-window")
 VAR = ReapTags::VAR
 PID = 4210
 BASE = 1000
+EXEC_DONE = 4_194_304 # a start_code: the exec has finished
 
 # One fixture pid under <root>/<pid>. `present(state)` writes the files the
 # scanner reads for that state. exec_in_read is the one state that changes
@@ -65,8 +68,9 @@ class FakeProc
     FileUtils.chmod(0o644, environ) if File.exist?(environ)
     case state
     when :settled then write(env, BASE, BASE + env.bytesize)
-    when :zero_bounds then write("", 0, 0)
-    when :equal_bounds then write("", BASE, BASE)
+    when :zero_bounds then write("", 0, 0, start_code: 0)
+    when :equal_bounds then write("", BASE, BASE, start_code: 0)
+    when :empty_env then write("", BASE, BASE)
     when :short_read then write(env[0, 8], BASE, BASE + env.bytesize)
     when :torn
       torn = "HOME=/x\0#{VAR}\0other,#{TAG}\0"
@@ -100,8 +104,11 @@ class FakeProc
 
   private
 
-  def write(env, b0, b1)
-    File.write(File.join(@dir, "stat"), "#{@pid} (fake) S#{' 0' * 18} 100#{' 0' * 27} #{b0} #{b1} 0\n")
+  # start_code is stat field 26: 0 in a new mm until load_elf_binary finishes,
+  # the text address once it has (EXEC_DONE).
+  def write(env, b0, b1, start_code: EXEC_DONE)
+    File.write(File.join(@dir, "stat"),
+               "#{@pid} (fake) S#{' 0' * 18} 100#{' 0' * 3} #{start_code}#{' 0' * 23} #{b0} #{b1} 0\n")
     File.binwrite(environ, env)
   end
 end
@@ -179,10 +186,10 @@ TRANSIENT.each do |state|
 end
 
 # 3. A state that never clears within the settle window is UNKNOWN: the scan
-#    raises naming the pid and a Fix:, never returns "none left". (Equal
-#    bounds that stay equal are a genuinely empty environment, so that state
-#    is excluded here by design.)
-(TRANSIENT - %i[equal_bounds exec_in_read]).each do |state|
+#    raises naming the pid and a Fix:, never returns "none left". Equal
+#    bounds with start_code 0 are mid-exec however long they last (an exec
+#    preempted inside its environment walk), so they are included (DND-1626).
+(TRANSIENT - %i[exec_in_read]).each do |state|
   root, fake = fresh("#{state}-stuck")
   found, err = scan_through(root, fake, [state] * 100, settle: 0.2)
   check("#{state} that never clears: UNKNOWN naming the pid, with a Fix:",
@@ -190,12 +197,15 @@ end
         "found=#{found} err=#{err.inspect}")
 end
 
-# 4. Equal bounds still equal on a re-read: a genuinely empty environment, a
-#    plain "no" with no error.
+# 4. Equal bounds after the exec has finished (start_code set): a genuinely
+#    empty environment, decided from that state on the first read. No re-read
+#    is needed, so the state shown next is never consulted (DND-1626: the old
+#    rule waited one poll and read whatever came next).
 root, fake = fresh("empty")
-found, err = scan_through(root, fake, %i[equal_bounds equal_bounds equal_bounds])
-check("equal bounds still equal on a re-read: empty environment, a plain no", found.empty? && err.nil?,
-      "found=#{found} err=#{err.inspect}")
+found, err = scan_through(root, fake, %i[empty_env settled])
+check("equal bounds with the exec finished: empty environment, a plain no from state, no re-read",
+      found.empty? && err.nil? && fake.shown == [:empty_env],
+      "found=#{found} err=#{err.inspect} shown=#{fake.shown}")
 
 # 5. Only OUR entry torn is "cannot tell": a process caught importing another
 #    variable, with ours whole and untagged, is a plain "no".

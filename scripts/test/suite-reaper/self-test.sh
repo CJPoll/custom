@@ -33,7 +33,8 @@
 #       "none left".
 #   S15 scripts/lib/proc-env-scan.awk on a fixture /proc: settled bounds find
 #       the tag; 0 0 that never settles and a short read are UNKNOWN (exit 4);
-#       equal bounds still equal on a re-read are an empty environment; the
+#       equal bounds are an empty environment once the exec has finished
+#       (start_code set) and UNKNOWN while it has not (DND-1626); the
 #       needle's own entry read torn ('=' a NUL, bash mid-import) is UNKNOWN,
 #       another variable torn is not (DND-1202).
 #   S16 a non-dumpable process (0 0 forever) is skipped at once, not waited out.
@@ -385,13 +386,15 @@ fi
 # S15: the scan's verdicts on a fixture /proc (root=), one state each, so the
 # rule is pinned without racing a real exec. fake_proc <pid> <env_start>
 # <env_end> <environ-bytes> writes a stat line in the kernel's shape (fields
-# 50-51 are the env bounds), a status with our uid, and the environ.
+# 50-51 are the env bounds, field 26 is start_code), a status with our uid,
+# and the environ. start_code defaults to a text address (the exec has
+# finished); 0 is a new mm load_elf_binary has not finished (DND-1626).
 SCAN="${REPO}/scripts/lib/proc-env-scan.awk"
-fake_proc() { # fake_proc <pid> <env_start> <env_end> <environ> [<comm> [<uid>]]
-  local d="${TMP}/fakeproc/$1" i f="" comm="${5:-fake}" u="${6:-${UID}}"
+fake_proc() { # fake_proc <pid> <env_start> <env_end> <environ> [<comm> [<uid> [<start_code>]]]
+  local d="${TMP}/fakeproc/$1" i f="" comm="${5:-fake}" u="${6:-${UID}}" sc="${7:-4194304}"
   mkdir -p "${d}"
   for i in $(seq 4 49); do
-    case "${i}" in 22) f="${f} 100" ;; *) f="${f} 0" ;; esac
+    case "${i}" in 22) f="${f} 100" ;; 26) f="${f} ${sc}" ;; *) f="${f} 0" ;; esac
   done
   printf '%s (%s) S%s %s %s 0\n' "$1" "${comm}" "${f}" "$2" "$3" >"${d}/stat"
   printf 'Name:\tfake\nUid:\t%s\t%s\t%s\t%s\n' "${u}" "${u}" "${u}" "${u}" >"${d}/status"
@@ -428,9 +431,20 @@ fi
 fake_proc 4204 1000 1000 ''
 scan_fake 4204
 if [ "${SRC}" -eq 0 ] && [ -z "${SO}" ] && [ -z "${SE}" ]; then
-  ok "S15 equal bounds still equal on a re-read: an empty environment, 'no' with no warning"
+  ok "S15 equal bounds with the exec finished (start_code set): an empty environment, 'no' with no warning"
 else
-  bad "S15 equal bounds still equal on a re-read: an empty environment" "rc=${SRC} out=${SO} err=${SE}"
+  bad "S15 equal bounds with the exec finished: an empty environment" "rc=${SRC} out=${SO} err=${SE}"
+fi
+# DND-1626: equal bounds with start_code still 0 are an exec inside its
+# environment walk (create_elf_tables sets env_end = env_start, walks, then
+# sets env_end; load_elf_binary sets start_code only after). However long that
+# state lasts (a preempted walk), it is "cannot tell yet", never "no".
+fake_proc 4210 1000 1000 '' fake "${UID}" 0
+scan_fake 4210
+if [ "${SRC}" -eq 4 ] && [ -z "${SO}" ] && grep -q 'pid 4210 .*UNKNOWN' <<<"${SE}"; then
+  ok "S15 equal bounds mid-exec (start_code 0) that never settle: UNKNOWN, exit 4, never 'no'"
+else
+  bad "S15 equal bounds mid-exec (start_code 0): UNKNOWN, exit 4" "rc=${SRC} out=${SO} err=${SE}"
 fi
 # DND-1202: settled bounds, but the program is rewriting its environment in
 # place (bash writes a NUL over each entry's '=' while it imports it), so our
