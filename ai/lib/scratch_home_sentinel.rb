@@ -43,13 +43,21 @@
 # exec the shim again: an exec loop in one pid that burned CPU until the gate's
 # timeout killed the check (DND-1697's judgment-eval, 1295 s). The sentinel
 # records its exec chain in HARNESS_GATE_SENTINEL_CHAIN (pid, tool, sentinel,
-# the tools exec'd so far). An exec keeps the pid, so a run under the same pid
-# is a re-entry: it skips the tools already exec'd, logs nothing more, and
-# execs the next one, which is what the manager meant by `system`. With
-# nothing left it exits 127 with a Fix:. A child process has another pid and
-# starts a fresh chain, so it goes through the shim as it would without the
-# sentinel. Named limit: a tool that exec()s the same tool name through PATH
-# in its own pid also skips the tools already exec'd (it never loops).
+# argv, and the entries it exec'd from a PATH dir named `shims`). An exec
+# keeps the pid, and the fallback passes the same arguments, so a run with the
+# same pid, tool, sentinel and argv is a re-entry: it skips those shims, logs
+# nothing more, and execs the next tool, which is what the manager meant by
+# `system`. With nothing left it exits 127 with a Fix:. A child process (new
+# pid) or a re-exec with other arguments starts a fresh chain and goes
+# through the shim as it would without the sentinel. Only a shim is skipped,
+# so a real tool that re-execs itself still gets itself. The variable is
+# inherited by every tool and child the check runs.
+# Named limits: a tool that exec()s the same name through PATH, in its own
+# pid, with identical arguments, skips the shim on that second pass (under an
+# asdf real version it would get the next tool on PATH, not the shim's
+# version). A version manager whose shim dir is not named `shims` is not
+# skipped, so its `system` fallback still loops. A recycled pid that matches
+# a stale chain on tool, sentinel and argv is read as a re-entry.
 #
 # A sentinel directory, script or log that is gone after the check (a check
 # that deleted it) FAILS the check as "could not measure", never as clean.
@@ -119,24 +127,30 @@ module ScratchHomeSentinel
       #!/bin/bash
       # harness-gate scratch-HOME sentinel (DND-1316, ai/lib/scratch_home_sentinel.rb).
       # Logs a PATH-resolved run of this tool under a HOME that is not the gate's,
-      # then execs the next one on PATH. It never changes what the caller gets.
+      # then execs the next one on PATH. Its only change to what the caller gets:
+      # a shim that resolves back here (DND-1726) is skipped, never exec'd again.
       real_home=#{real_home.shellescape}
       physical_home=#{physical_home.shellescape}
       self=${0%/*}
       name=${0##*/}
       # Re-entry in the same exec chain (DND-1726): a version manager's `system`
-      # fallback execs the first <name> on PATH outside its shims dir, which is
-      # this sentinel again. An exec keeps the pid, so a chain recorded under
-      # this pid, name and sentinel means the tools exec'd before resolved back
-      # here: skip them, or sentinel and shim exec each other forever. A child
-      # process has another pid and starts a fresh chain.
+      # fallback execs the first <name> on PATH outside its shims dir, with the
+      # same arguments, and that is this sentinel again. An exec keeps the pid,
+      # so a chain recorded under this pid, name, sentinel and argv means the
+      # shims exec'd before resolved back here: skip them, or sentinel and shim
+      # exec each other forever. A child process (another pid) or a re-exec with
+      # other arguments starts a fresh chain.
+      me=$0
+      [[ $me == /* ]] || me=$PWD/$me
+      printf -v argv '%q ' "$@"
       reentry=
       visited=()
       if [ -n "${#{CHAIN}-}" ]; then
         mapfile -t chain <<< "${#{CHAIN}%$'\\n'}"
-        if [ "${chain[0]-}" = "$$" ] && [ "${chain[1]-}" = "$name" ] && [ "${chain[2]-}" -ef "$0" ]; then
+        if [ "${chain[0]-}" = "$$" ] && [ "${chain[1]-}" = "$name" ] && [ "${chain[2]-}" -ef "$me" ] &&
+           [ "${chain[3]-}" = "$argv" ]; then
           reentry=1
-          visited=("${chain[@]:3}")
+          visited=("${chain[@]:4}")
         fi
       fi
       if [ -z "$reentry" ] && [ "${HOME-}" != "$real_home" ] && [ "${HOME-}" != "$physical_home" ]; then
@@ -159,13 +173,18 @@ module ScratchHomeSentinel
         [ -e "$d/#{SCRIPT}" ] && [ "$d/$name" -ef "$d/#{SCRIPT}" ] && continue
         [ -f "$d/$name" ] && [ -x "$d/$name" ] || continue
         for v in "${visited[@]}"; do [ "$d/$name" -ef "$v" ] && continue 2; done
-        printf -v #{CHAIN} '%s\\n' "$$" "$name" "$0" "${visited[@]}" "$d/$name"
+        # Only a shim is recorded, so only a shim is ever skipped: a real tool
+        # that re-execs itself still gets itself, as it would without the sentinel.
+        shim=()
+        base=${d%/}
+        [ "${base##*/}" = shims ] && shim=("$d/$name")
+        printf -v #{CHAIN} '%s\\n' "$$" "$name" "$me" "$argv" "${visited[@]}" "${shim[@]}"
         export #{CHAIN}
         exec "$d/$name" "$@"
       done
       if [ -n "$reentry" ]; then
         printf 'harness-gate sentinel: %s resolved back to the sentinel through %s, and nothing else on PATH provides it (DND-1726)\\n' "$name" "${visited[*]}" >&2
-        printf 'Fix: that is a version manager falling back to a system %s that is not installed; call the tool by absolute path (harness Ruby is /usr/bin/ruby), or set the version manager to an installed version.\\n' "$name" >&2
+        printf 'Fix: that is a version manager falling back to a system %s that is not installed; call the tool by absolute path (for Ruby, /usr/bin/ruby), or set the version manager to an installed version.\\n' "$name" >&2
         exit 127
       fi
       printf 'harness-gate sentinel: %s not found on PATH beyond %s\\n' "$name" "$self" >&2

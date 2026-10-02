@@ -190,6 +190,8 @@ Dir.mktmpdir("scratch-home-sentinel-test") do |root|
     echo "system-ruby $*"
     # A child run of the tool through PATH is a new chain: it goes through the shim again.
     [ "${1-}" = nest ] && ruby child
+    # A re-exec of the tool through PATH with other arguments, in this pid.
+    [ "${1-}" = again ] && exec ruby again2
     exit 0
   SH
   File.chmod(0o755, File.join(sys_shims, "ruby"))
@@ -208,6 +210,24 @@ Dir.mktmpdir("scratch-home-sentinel-test") do |root|
   check("system fallback: a child process's own run of the tool goes through the shim again",
         out.include?("system-ruby nest") && out.include?("system-ruby child") && out.include?("rc=0") &&
         out.scan("shim-hit").size == 2 && v.empty?, "#{out} #{v.inspect}")
+  status, out, v, = run_suite(root, "timeout 5 ruby again; echo rc=$?", home: home, base_path: sys_path)
+  check("system fallback: a same-pid re-exec with other arguments goes through the shim again",
+        out.include?("system-ruby again2") && out.include?("rc=0") && out.scan("shim-hit").size == 2,
+        "#{out} #{v.inspect}")
+  # A real tool (not in a `shims` dir) that re-execs itself with the same
+  # arguments still gets itself: only a shim is ever skipped.
+  self_dir = File.join(root, "selfexec")
+  FileUtils.mkdir_p(self_dir)
+  File.write(File.join(self_dir, "ruby"), <<~SH)
+    #!/bin/bash
+    if [ -z "${SELFEXEC_DONE-}" ]; then export SELFEXEC_DONE=1; echo first-pass; exec ruby "$@"; fi
+    echo "self-ruby $*"
+  SH
+  File.chmod(0o755, File.join(self_dir, "ruby"))
+  status, out, v, = run_suite(root, "timeout 5 ruby x; echo rc=$?", home: home,
+                                                                     base_path: "#{self_dir}:/usr/bin:/bin")
+  check("system fallback: a real tool's same-argv re-exec gets itself, not the next tool",
+        out.include?("first-pass") && out.include?("self-ruby x") && out.include?("rc=0"), out)
   status, out, v, = run_suite(root, "PATH=\"${PATH%%:*}:#{sys_shims}\" /usr/bin/timeout 5 ruby x; echo rc=$?",
                               home: home, base_path: sys_path)
   check("system fallback: nothing beyond the shim exits 127 fast with a Fix: (no loop)",
