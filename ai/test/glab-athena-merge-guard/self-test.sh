@@ -78,8 +78,8 @@ fsg_arm "${TMP}/forge-guard"
 fsg_require_stubs "${TMP}/bin" glab
 export PATH="${TMP}/bin:${PATH}"
 
-# Shapes measured on amby_ai/walt_ui !1473 (2026-09-26): the open MR's head
-# pipeline is a merged-results pipeline on refs/merge-requests/1473/merge, whose
+# Shapes measured on example-group/example-app !4242 (2026-09-26): the open MR's head
+# pipeline is a merged-results pipeline on refs/merge-requests/4242/merge, whose
 # commit's parents are [target, head].
 HEAD_SHA="4cc5665184c838efca81646c61b461e72e6ea145"
 MERGE_SHA="e8feb98c3218bbc35a684bcd047ada5d94e0f176"
@@ -90,8 +90,8 @@ reset_fx() { rm -f "${FX}"/* "${STUB_READS}" "${STUB_EXECS}"; : > "${STUB_READS}
 
 # mr_json <status> [pipeline sha] [pipeline ref] [head] [iid] -> an MR object.
 mr_json() {
-  printf '{"iid":%s,"project_id":80626362,"sha":"%s","web_url":"https://gitlab.com/amby_ai/walt_ui/-/merge_requests/%s","head_pipeline":{"id":2884842816,"sha":"%s","ref":"%s","status":"%s"}}\n' \
-    "${5:-1473}" "${4:-${HEAD_SHA}}" "${5:-1473}" "${2:-${MERGE_SHA}}" "${3:-refs/merge-requests/1473/merge}" "$1"
+  printf '{"iid":%s,"project_id":7000001,"sha":"%s","web_url":"https://gitlab.com/example-group/example-app/-/merge_requests/%s","head_pipeline":{"id":9000000001,"sha":"%s","ref":"%s","status":"%s"}}\n' \
+    "${5:-4242}" "${4:-${HEAD_SHA}}" "${5:-4242}" "${2:-${MERGE_SHA}}" "${3:-refs/merge-requests/4242/merge}" "$1"
 }
 # green_fx : every read answers "passed merged-results pipeline on the head".
 green_fx() {
@@ -131,87 +131,87 @@ echo
 
 echo "--- mr merge: the pin and the passed head pipeline ---"
 reset_fx; green_fx
-expect_refused M1 "mr merge with no --sha is refused, naming the head" "${HEAD_SHA}" mr merge 1473 --yes
+expect_refused M1 "mr merge with no --sha is refused, naming the head" "${HEAD_SHA}" mr merge 4242 --yes
 reset_fx; green_fx
-expect_ran M2 "mr merge --sha <head> with a passed merged-results pipeline runs" any mr merge 1473 --sha "${HEAD_SHA}" --yes
+expect_ran M2 "mr merge --sha <head> with a passed merged-results pipeline runs" any mr merge 4242 --sha "${HEAD_SHA}" --yes
 if [[ "$(reads)" == *"repository/commits/${MERGE_SHA}"* ]]; then ok "M2b. the merged-results commit was read to tie the pipeline to the head"
 else bad "M2b. merged-results commit read" "$(detail)"; fi
 reset_fx; green_fx
-expect_refused M3 "mr merge --sha <not the head> is refused" "not the MR's head" mr merge 1473 --sha "${OTHER_SHA}" --yes
+expect_refused M3 "mr merge --sha <not the head> is refused" "not the MR's head" mr merge 4242 --sha "${OTHER_SHA}" --yes
 reset_fx; status_fx running
-expect_refused M4 "a running head pipeline is refused (auto-merge default)" "'running', not success" mr merge 1473 --sha "${HEAD_SHA}" --yes
+expect_refused M4 "a running head pipeline is refused (auto-merge default)" "'running', not success" mr merge 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; status_fx running
-expect_refused M4b "a running head pipeline is refused with --auto-merge" "'running', not success" mr merge 1473 --sha "${HEAD_SHA}" --auto-merge --yes
+expect_refused M4b "a running head pipeline is refused with --auto-merge" "'running', not success" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge --yes
 reset_fx; status_fx running
-expect_refused M4c "a running head pipeline is refused with --when-pipeline-succeeds" "'running', not success" mr merge 1473 --sha "${HEAD_SHA}" --when-pipeline-succeeds --yes
+expect_refused M4c "a running head pipeline is refused with --when-pipeline-succeeds" "'running', not success" mr merge 4242 --sha "${HEAD_SHA}" --when-pipeline-succeeds --yes
 reset_fx; status_fx failed
-expect_refused M5 "a failed head pipeline is refused" "'failed', not success" mr merge 1473 --sha "${HEAD_SHA}" --yes
+expect_refused M5 "a failed head pipeline is refused" "'failed', not success" mr merge 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
-printf '{"iid":1473,"project_id":80626362,"sha":"%s","head_pipeline":null}\n' "${HEAD_SHA}" > "${FX}/mrview.out"
-expect_refused M6 "no head pipeline is refused" "has no head pipeline" mr merge 1473 --sha "${HEAD_SHA}" --yes
+printf '{"iid":4242,"project_id":7000001,"sha":"%s","head_pipeline":null}\n' "${HEAD_SHA}" > "${FX}/mrview.out"
+expect_refused M6 "no head pipeline is refused" "has no head pipeline" mr merge 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx; mr_json success "${HEAD_SHA}" "feature-branch" > "${FX}/mrview.out"
-expect_ran M7 "a passed pipeline ON the head (branch pipeline) runs" any mr merge 1473 --sha "${HEAD_SHA}" --yes
+expect_ran M7 "a passed pipeline ON the head (branch pipeline) runs" any mr merge 4242 --sha "${HEAD_SHA}" --yes
 if [[ "$(reads)" != *"repository/commits"* ]]; then ok "M7b. no commit read when the pipeline sha is the head"
 else bad "M7b. unexpected commit read" "$(detail)"; fi
 reset_fx; green_fx
 printf '{"id":"%s","parent_ids":["%s","%s"]}\n' "${MERGE_SHA}" "${TARGET_SHA}" "${OTHER_SHA}" > "${FX}/commit.out"
-expect_refused M8 "a merged-results commit whose 2nd parent is not the head is refused" "do not end in head" mr merge 1473 --sha "${HEAD_SHA}" --yes
-reset_fx; green_fx; mr_json success "216e40abc081b59f341d2d1de2fdd12facee7772" "refs/merge-requests/1473/train" > "${FX}/mrview.out"
-expect_refused M9 "a merge-train head pipeline cannot be tied and is refused" "cannot be tied" mr merge 1473 --sha "${HEAD_SHA}" --yes
+expect_refused M8 "a merged-results commit whose 2nd parent is not the head is refused" "do not end in head" mr merge 4242 --sha "${HEAD_SHA}" --yes
+reset_fx; green_fx; mr_json success "216e40abc081b59f341d2d1de2fdd12facee7772" "refs/merge-requests/4242/train" > "${FX}/mrview.out"
+expect_refused M9 "a merge-train head pipeline cannot be tied and is refused" "cannot be tied" mr merge 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx; fx commit '' 1 'glab: 404 Commit Not Found'
-expect_refused M10 "a failed commit read is refused" "could not read the merged-results commit" mr merge 1473 --sha "${HEAD_SHA}" --yes
+expect_refused M10 "a failed commit read is refused" "could not read the merged-results commit" mr merge 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; fx mrview '' 1 'glab: 404 Not Found'
-expect_refused M11 "a failed MR read is refused" "could not read the MR" mr merge 1473 --sha "${HEAD_SHA}" --yes
+expect_refused M11 "a failed MR read is refused" "could not read the MR" mr merge 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
-expect_refused M12 "mr accept (merge's alias) with no --sha is refused" "no sha was given" mr accept 1473 --yes
+expect_refused M12 "mr accept (merge's alias) with no --sha is refused" "no sha was given" mr accept 4242 --yes
 reset_fx; green_fx
-expect_refused M13 "--repo before the subcommand, no --sha, is refused" "no sha was given" --repo amby_ai/walt_ui mr merge 1473 --yes
+expect_refused M13 "--repo before the subcommand, no --sha, is refused" "no sha was given" --repo example-group/example-app mr merge 4242 --yes
 reset_fx; green_fx
-expect_refused M13b "mr -R <repo> merge, no --sha, is refused" "no sha was given" mr -R amby_ai/walt_ui merge 1473
-if [[ "$(reads)" == *"mr view 1473 -R amby_ai/walt_ui -F json"* ]]; then ok "M13c. the MR is read in the -R project"
+expect_refused M13b "mr -R <repo> merge, no --sha, is refused" "no sha was given" mr -R example-group/example-app merge 4242
+if [[ "$(reads)" == *"mr view 4242 -R example-group/example-app -F json"* ]]; then ok "M13c. the MR is read in the -R project"
 else bad "M13c. -R carried into the read" "$(detail)"; fi
 reset_fx; green_fx
-expect_ran M14 "--sha=<head> with combined short flags runs" any mr merge 1473 "--sha=${HEAD_SHA}" -sdy
+expect_ran M14 "--sha=<head> with combined short flags runs" any mr merge 4242 "--sha=${HEAD_SHA}" -sdy
 reset_fx; green_fx
-expect_ran M14b "--sha <head> --auto-merge with a passed pipeline runs" any mr merge 1473 --sha "${HEAD_SHA}" --auto-merge --yes
+expect_ran M14b "--sha <head> --auto-merge with a passed pipeline runs" any mr merge 4242 --sha "${HEAD_SHA}" --auto-merge --yes
 reset_fx; green_fx
-expect_refused M15 "an unknown mr merge flag is refused" "--bogus" mr merge 1473 --sha "${HEAD_SHA}" --bogus
+expect_refused M15 "an unknown mr merge flag is refused" "--bogus" mr merge 4242 --sha "${HEAD_SHA}" --bogus
 reset_fx; green_fx
-expect_refused M16 "--sha given twice is refused" "2 times" mr merge 1473 --sha "${OTHER_SHA}" --sha "${HEAD_SHA}"
+expect_refused M16 "--sha given twice is refused" "2 times" mr merge 4242 --sha "${OTHER_SHA}" --sha "${HEAD_SHA}"
 reset_fx; green_fx
 expect_refused M17 "mr merge --help gets no short-circuit (judged, refused with no pin)" "no sha was given" mr merge --help
 reset_fx; green_fx
-expect_refused M23 "--help then --help=false (pflag: last wins, so it merges) is refused" "no sha was given" mr merge 1473 --help --help=false --yes
+expect_refused M23 "--help then --help=false (pflag: last wins, so it merges) is refused" "no sha was given" mr merge 4242 --help --help=false --yes
 reset_fx; green_fx
-expect_refused M24 "-h then --help=0 is refused" "no sha was given" mr merge 1473 -h --help=0 --yes
+expect_refused M24 "-h then --help=0 is refused" "no sha was given" mr merge 4242 -h --help=0 --yes
 reset_fx; green_fx
-expect_refused M18 "an unknown flag before the subcommand is refused" "comes before the subcommand" --bogus x mr merge 1473 --sha "${HEAD_SHA}"
-reset_fx; green_fx; printf '{"iid":1473,"sha":"%s","head_pipeline":{"status":"success"}}\n' "${HEAD_SHA}" > "${FX}/mrview.out"
-expect_refused M19 "an MR read with no project_id is refused" "no usable sha" mr merge 1473 --sha "${HEAD_SHA}"
+expect_refused M18 "an unknown flag before the subcommand is refused" "comes before the subcommand" --bogus x mr merge 4242 --sha "${HEAD_SHA}"
+reset_fx; green_fx; printf '{"iid":4242,"sha":"%s","head_pipeline":{"status":"success"}}\n' "${HEAD_SHA}" > "${FX}/mrview.out"
+expect_refused M19 "an MR read with no project_id is refused" "no usable sha" mr merge 4242 --sha "${HEAD_SHA}"
 reset_fx; green_fx
 printf '{"id":"%s","parent_ids":["%s"]}\n' "${MERGE_SHA}" "${HEAD_SHA}" > "${FX}/commit.out"
-expect_refused M20 "a merged-results commit with one parent is refused" "do not end in head" mr merge 1473 --sha "${HEAD_SHA}"
+expect_refused M20 "a merged-results commit with one parent is refused" "do not end in head" mr merge 4242 --sha "${HEAD_SHA}"
 reset_fx; green_fx
 expect_ran M21 "no selector: the current branch's MR, pinned and green, runs" any mr merge --sha "${HEAD_SHA}" --yes
 if [[ "$(reads)" == *"mr view -F json"* ]]; then ok "M21b. the current-branch MR was read"; else bad "M21b. current-branch read" "$(detail)"; fi
 reset_fx; green_fx
-expect_refused M22 "mr merge -R<repo> attached, no --sha, is refused" "no sha was given" mr merge -Ramby_ai/walt_ui 1473
+expect_refused M22 "mr merge -R<repo> attached, no --sha, is refused" "no sha was given" mr merge -Rexample-group/example-app 4242
 # A flag cluster before the subcommand whose meaning differs between the
 # guard's flag table and cobra's command walk (critic round 3). Measured, glab
 # 1.112: `glab mr -ym merge x --help` prints mr merge's help, so cobra routes
-# `mr -ym merge 1473` to merge (-ym is dropped from the walk), and merge's pflag
-# parse then reads -y as yes and -m as the message 1473: the current branch's MR
+# `mr -ym merge 4242` to merge (-ym is dropped from the walk), and merge's pflag
+# parse then reads -y as yes and -m as the message 4242: the current branch's MR
 # merges with no pin. The mr-merge table instead reads `m` as taking `merge`.
 for cl in -ym -sm -dm -rm -hm; do
   reset_fx; green_fx
-  expect_refused "M25${cl}" "mr ${cl} merge 1473 (a cluster before the subcommand) is refused" "before the subcommand" mr "${cl}" merge 1473
+  expect_refused "M25${cl}" "mr ${cl} merge 4242 (a cluster before the subcommand) is refused" "before the subcommand" mr "${cl}" merge 4242
 done
 reset_fx; green_fx
-expect_refused M26 "mr -h merge 1473 --sha <head> (help before the subcommand) is refused" "before the subcommand" mr -h merge 1473 --sha "${HEAD_SHA}" --yes
+expect_refused M26 "mr -h merge 4242 --sha <head> (help before the subcommand) is refused" "before the subcommand" mr -h merge 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
-expect_refused M27 "-y before mr, then merge, is refused" "before the subcommand" -y mr merge 1473 --sha "${HEAD_SHA}"
+expect_refused M27 "-y before mr, then merge, is refused" "before the subcommand" -y mr merge 4242 --sha "${HEAD_SHA}"
 reset_fx; green_fx
-expect_refused M28 "a cluster before mr merge, with a pin, is still refused" "before the subcommand" mr -ym merge 1473 --sha "${HEAD_SHA}"
+expect_refused M28 "a cluster before mr merge, with a pin, is still refused" "before the subcommand" mr -ym merge 4242 --sha "${HEAD_SHA}"
 # The class, not the listed sites: EVERY short flag, every two-letter cluster of
 # them, and every long flag in the tables, placed before `merge` and before
 # `mr`, must be refused. Only -R/--repo forms may sit there (M29-M31).
@@ -226,26 +226,26 @@ M32_WORDS+=" --message --sha --squash-message --auto-merge --when-pipeline-succe
 for w in ${M32_WORDS}; do
   for shape in pre-merge pre-mr; do
     reset_fx; green_fx
-    if [ "${shape}" = pre-merge ]; then run mr "${w}" merge 1473 --sha "${HEAD_SHA}" --yes
-    else run "${w}" mr merge 1473 --sha "${HEAD_SHA}" --yes; fi
+    if [ "${shape}" = pre-merge ]; then run mr "${w}" merge 4242 --sha "${HEAD_SHA}" --yes
+    else run "${w}" mr merge 4242 --sha "${HEAD_SHA}" --yes; fi
     refused || M32_BAD+=" ${shape}:${w}"
   done
 done
 if [ -z "${M32_BAD}" ]; then ok "M32. every non-repo flag spelling before the subcommand is refused ($(wc -w <<<"${M32_WORDS}") spellings x 2 shapes)"
 else bad "M32. flag spellings before the subcommand that were not refused" "${M32_BAD}"; fi
 reset_fx; green_fx
-expect_ran M29 "--repo <repo> before the subcommand, pinned and green, runs" any --repo amby_ai/walt_ui mr merge 1473 --sha "${HEAD_SHA}" --yes
+expect_ran M29 "--repo <repo> before the subcommand, pinned and green, runs" any --repo example-group/example-app mr merge 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
-expect_ran M30 "mr --repo=<repo> merge, pinned and green, runs" any mr --repo=amby_ai/walt_ui merge 1473 --sha "${HEAD_SHA}" --yes
+expect_ran M30 "mr --repo=<repo> merge, pinned and green, runs" any mr --repo=example-group/example-app merge 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
-expect_ran M31 "mr -R<repo> merge (attached), pinned and green, runs" any mr -Ramby_ai/walt_ui merge 1473 --sha "${HEAD_SHA}" --yes
+expect_ran M31 "mr -R<repo> merge (attached), pinned and green, runs" any mr -Rexample-group/example-app merge 4242 --sha "${HEAD_SHA}" --yes
 
 echo
 echo "--- api: the REST merge route is refused outright ---"
 reset_fx; green_fx
-expect_refused A1 "PUT projects/:id/merge_requests/<iid>/merge" "REST merge" api -X PUT "projects/:id/merge_requests/1473/merge"
+expect_refused A1 "PUT projects/:id/merge_requests/<iid>/merge" "REST merge" api -X PUT "projects/:id/merge_requests/4242/merge"
 reset_fx
-expect_refused A2 "--method=put, encoded project, query string" "REST merge" api --method=put "projects/amby_ai%2Fwalt_ui/merge_requests/1473/merge?sha=${HEAD_SHA}"
+expect_refused A2 "--method=put, encoded project, query string" "REST merge" api --method=put "projects/example-group%2Fexample-app/merge_requests/4242/merge?sha=${HEAD_SHA}"
 reset_fx
 expect_refused A3 "-XPUT full URL with api/v4" "REST merge" api -XPUT "https://gitlab.com/api/v4/projects/1/merge_requests/2/merge"
 reset_fx
@@ -273,72 +273,72 @@ expect_refused A14 "GET with a _method field" "REST merge" api -X GET -f "_metho
 # glab dispatches `glab -R g/r api …` to api (measured, glab 1.112), so a word
 # before `api` must not hide the call from the api judgment.
 reset_fx
-expect_refused A15 "-R <repo> before api" "is not the first word" -R amby_ai/walt_ui api -X PUT "projects/1/merge_requests/2/merge"
+expect_refused A15 "-R <repo> before api" "is not the first word" -R example-group/example-app api -X PUT "projects/1/merge_requests/2/merge"
 reset_fx
-expect_refused A16 "--repo=<repo> before api" "is not the first word" --repo=amby_ai/walt_ui api -X PUT "projects/1/merge_requests/2/merge"
+expect_refused A16 "--repo=<repo> before api" "is not the first word" --repo=example-group/example-app api -X PUT "projects/1/merge_requests/2/merge"
 reset_fx
 expect_refused A17 "-X PUT before api" "PUT" -X PUT api "projects/1/merge_requests/2/merge"
 reset_fx
 expect_refused A18 "-- before api" "REFUSING" -- api -X PUT "projects/1/merge_requests/2/merge"
 reset_fx
-expect_refused A19 "-R <repo> before api, train boarding with no pin" "is not the first word" -R amby_ai/walt_ui api -X POST "projects/:id/merge_trains/merge_requests/1473"
+expect_refused A19 "-R <repo> before api, train boarding with no pin" "is not the first word" -R example-group/example-app api -X POST "projects/:id/merge_trains/merge_requests/4242"
 reset_fx
-expect_refused A20 "-R <repo> before api, REST merge by a field (default POST)" "is not the first word" -R amby_ai/walt_ui api "projects/1/merge_requests/2/merge" -f "sha=${HEAD_SHA}"
+expect_refused A20 "-R <repo> before api, REST merge by a field (default POST)" "is not the first word" -R example-group/example-app api "projects/1/merge_requests/2/merge" -f "sha=${HEAD_SHA}"
 reset_fx; green_fx
-expect_refused A21 "-R <repo> before api, train boarding with a wrong pin (default POST)" "is not the first word" -R amby_ai/walt_ui api "projects/:id/merge_trains/merge_requests/1473" -f "sha=${OTHER_SHA}"
+expect_refused A21 "-R <repo> before api, train boarding with a wrong pin (default POST)" "is not the first word" -R example-group/example-app api "projects/:id/merge_trains/merge_requests/4242" -f "sha=${OTHER_SHA}"
 
 echo
 echo "--- api: merge-train boarding is the guarded path ---"
 reset_fx; green_fx
-expect_refused T1 "boarding with no sha field is refused" "no sha was given" api -X POST "projects/:id/merge_trains/merge_requests/1473"
+expect_refused T1 "boarding with no sha field is refused" "no sha was given" api -X POST "projects/:id/merge_trains/merge_requests/4242"
 reset_fx; green_fx
-expect_ran T2 "boarding with -f sha=<head>, passed pipeline, runs" any api -X POST "projects/:id/merge_trains/merge_requests/1473" -f "sha=${HEAD_SHA}"
-if [[ "$(reads)" == *"api projects/:id/merge_requests/1473"* ]]; then ok "T2b. the MR was read in the same project"
+expect_ran T2 "boarding with -f sha=<head>, passed pipeline, runs" any api -X POST "projects/:id/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}"
+if [[ "$(reads)" == *"api projects/:id/merge_requests/4242"* ]]; then ok "T2b. the MR was read in the same project"
 else bad "T2b. MR read endpoint" "$(detail)"; fi
 reset_fx; green_fx
-expect_refused T3 "boarding with a sha that is not the head" "not the MR's head" api -X POST "projects/:id/merge_trains/merge_requests/1473" -f "sha=${OTHER_SHA}"
+expect_refused T3 "boarding with a sha that is not the head" "not the MR's head" api -X POST "projects/:id/merge_trains/merge_requests/4242" -f "sha=${OTHER_SHA}"
 reset_fx; status_fx running
-expect_refused T4 "boarding while the head pipeline runs" "'running', not success" api -X POST "projects/:id/merge_trains/merge_requests/1473" -f "sha=${HEAD_SHA}"
+expect_refused T4 "boarding while the head pipeline runs" "'running', not success" api -X POST "projects/:id/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}"
 reset_fx; green_fx; printf '%s' "${HEAD_SHA}" > "${TMP}/sha.txt"
-expect_refused T5 "the sha field read from a file" "read from a file" api -X POST "projects/:id/merge_trains/merge_requests/1473" -F "sha=@${TMP}/sha.txt"
+expect_refused T5 "the sha field read from a file" "read from a file" api -X POST "projects/:id/merge_trains/merge_requests/4242" -F "sha=@${TMP}/sha.txt"
 reset_fx; green_fx
-expect_refused T6 "a query string on the train endpoint" "query string" api -X POST "projects/:id/merge_trains/merge_requests/1473?sha=${HEAD_SHA}"
+expect_refused T6 "a query string on the train endpoint" "query string" api -X POST "projects/:id/merge_trains/merge_requests/4242?sha=${HEAD_SHA}"
 reset_fx; green_fx; printf '{"sha":"%s"}' "${HEAD_SHA}" > "${TMP}/body.json"
-expect_refused T7 "--input body on the train endpoint" "--input or --form" api -X POST "projects/:id/merge_trains/merge_requests/1473" --input "${TMP}/body.json"
+expect_refused T7 "--input body on the train endpoint" "--input or --form" api -X POST "projects/:id/merge_trains/merge_requests/4242" --input "${TMP}/body.json"
 reset_fx; green_fx
-expect_refused T8 "sha given twice" "2 times" api -X POST "projects/:id/merge_trains/merge_requests/1473" -f "sha=${OTHER_SHA}" -f "sha=${HEAD_SHA}"
+expect_refused T8 "sha given twice" "2 times" api -X POST "projects/:id/merge_trains/merge_requests/4242" -f "sha=${OTHER_SHA}" -f "sha=${HEAD_SHA}"
 reset_fx; green_fx
-expect_refused T9 "PUT on a car" "not the boarding call" api -X PUT "projects/:id/merge_trains/merge_requests/1473" -f "sha=${HEAD_SHA}"
+expect_refused T9 "PUT on a car" "not the boarding call" api -X PUT "projects/:id/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}"
 reset_fx
-expect_ran T10 "DELETE a car (take it off the train) runs with no reads" none api -X DELETE "projects/:id/merge_trains/merge_requests/1473"
+expect_ran T10 "DELETE a car (take it off the train) runs with no reads" none api -X DELETE "projects/:id/merge_trains/merge_requests/4242"
 reset_fx
-expect_ran T11 "GET a car runs with no reads" none api "projects/:id/merge_trains/merge_requests/1473"
+expect_ran T11 "GET a car runs with no reads" none api "projects/:id/merge_trains/merge_requests/4242"
 reset_fx; green_fx
-expect_ran T12 "auto_merge=true plus the pin, passed pipeline, runs" any api -X POST "projects/:id/merge_trains/merge_requests/1473" -f auto_merge=true -f "sha=${HEAD_SHA}"
+expect_ran T12 "auto_merge=true plus the pin, passed pipeline, runs" any api -X POST "projects/:id/merge_trains/merge_requests/4242" -f auto_merge=true -f "sha=${HEAD_SHA}"
 reset_fx; green_fx
-expect_ran T13 "an encoded project path" any api -X POST "projects/amby_ai%2Fwalt_ui/merge_trains/merge_requests/1473" -f "sha=${HEAD_SHA}"
-if [[ "$(reads)" == *"api projects/amby_ai%2Fwalt_ui/merge_requests/1473"* ]]; then ok "T13b. the encoded project was re-encoded for the MR read"
+expect_ran T13 "an encoded project path" any api -X POST "projects/example-group%2Fexample-app/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}"
+if [[ "$(reads)" == *"api projects/example-group%2Fexample-app/merge_requests/4242"* ]]; then ok "T13b. the encoded project was re-encoded for the MR read"
 else bad "T13b. encoded project read" "$(detail)"; fi
-reset_fx; green_fx; mr_json success > "${FX}/mrapi.out"; mr_json success "${MERGE_SHA}" "refs/merge-requests/1473/merge" "${HEAD_SHA}" 99 > "${FX}/mrapi.out"
-expect_refused T14 "the MR read back is a different iid" "is not !1473" api -X POST "projects/:id/merge_trains/merge_requests/1473" -f "sha=${HEAD_SHA}"
+reset_fx; green_fx; mr_json success > "${FX}/mrapi.out"; mr_json success "${MERGE_SHA}" "refs/merge-requests/4242/merge" "${HEAD_SHA}" 99 > "${FX}/mrapi.out"
+expect_refused T14 "the MR read back is a different iid" "is not !4242" api -X POST "projects/:id/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}"
 reset_fx; fx mrapi '' 1 'glab: 404 Not Found'
-expect_refused T15 "a failed MR read" "could not read !1473" api -X POST "projects/:id/merge_trains/merge_requests/1473" -f "sha=${HEAD_SHA}"
+expect_refused T15 "a failed MR read" "could not read !4242" api -X POST "projects/:id/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}"
 reset_fx; green_fx
-expect_refused T16 "DELETE with a method-override header" "not the boarding call" api -X DELETE -H "X-HTTP-Method-Override: POST" "projects/:id/merge_trains/merge_requests/1473"
+expect_refused T16 "DELETE with a method-override header" "not the boarding call" api -X DELETE -H "X-HTTP-Method-Override: POST" "projects/:id/merge_trains/merge_requests/4242"
 reset_fx; green_fx
-expect_ran T17 "no method, sha field -> POST, guarded, runs" any api "projects/:id/merge_trains/merge_requests/1473" -f "sha=${HEAD_SHA}"
+expect_ran T17 "no method, sha field -> POST, guarded, runs" any api "projects/:id/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}"
 reset_fx; green_fx
-expect_ran T18 "--hostname is carried into the MR read" any api --hostname gitlab.com -X POST "projects/:id/merge_trains/merge_requests/1473" -f "sha=${HEAD_SHA}"
-if [[ "$(reads)" == *"api --hostname gitlab.com projects/:id/merge_requests/1473"* ]]; then ok "T18b. hostname in the read"
+expect_ran T18 "--hostname is carried into the MR read" any api --hostname gitlab.com -X POST "projects/:id/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}"
+if [[ "$(reads)" == *"api --hostname gitlab.com projects/:id/merge_requests/4242"* ]]; then ok "T18b. hostname in the read"
 else bad "T18b. hostname in the read" "$(detail)"; fi
 reset_fx; green_fx
-expect_refused T19 "a _method field on the train endpoint" "_method" api -X POST "projects/:id/merge_trains/merge_requests/1473" -f "sha=${HEAD_SHA}" -f "_method=PUT"
+expect_refused T19 "a _method field on the train endpoint" "_method" api -X POST "projects/:id/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}" -f "_method=PUT"
 reset_fx; green_fx; status_fx failed
-expect_refused T20 "boarding with a failed head pipeline" "'failed', not success" api "projects/:id/merge_trains/merge_requests/1473" -F "sha=${HEAD_SHA}"
+expect_refused T20 "boarding with a failed head pipeline" "'failed', not success" api "projects/:id/merge_trains/merge_requests/4242" -F "sha=${HEAD_SHA}"
 
 echo
 echo "--- api graphql: mergeRequestAccept is refused wherever the query comes from ---"
-Q='mutation { mergeRequestAccept(input: {projectPath: "amby_ai/walt_ui", iid: "1473", sha: "x"}) { errors } }'
+Q='mutation { mergeRequestAccept(input: {projectPath: "example-group/example-app", iid: "4242", sha: "x"}) { errors } }'
 reset_fx
 expect_refused G1 "inline -f query" "mergeRequestAccept" api graphql -f "query=${Q}"
 reset_fx; printf '%s' "${Q}" > "${TMP}/q.graphql"
@@ -394,37 +394,37 @@ expect_refused C2 "mr create --auto-merge is refused" "--auto-merge" mr create -
 reset_fx
 expect_refused C3 "mr new (create's alias) --auto-merge=true is refused" "--auto-merge" mr new --fill --auto-merge=true --yes
 reset_fx
-expect_refused C4 "mr -R <repo> create --auto-merge is refused" "--auto-merge" mr -R amby_ai/walt_ui create --fill --auto-merge
+expect_refused C4 "mr -R <repo> create --auto-merge is refused" "--auto-merge" mr -R example-group/example-app create --fill --auto-merge
 reset_fx
-expect_refused C5 "--auto-merge on another subcommand is refused" "--auto-merge" mr update 1473 --auto-merge
+expect_refused C5 "--auto-merge on another subcommand is refused" "--auto-merge" mr update 4242 --auto-merge
 
 echo
 echo "--- negatives: reads and non-merge writes pass as-is, with no extra reads ---"
-reset_fx; expect_ran N1 "mr view" none mr view 1473
+reset_fx; expect_ran N1 "mr view" none mr view 4242
 reset_fx; expect_ran N2 "mr create" none mr create --fill --yes --target-branch main
-reset_fx; expect_ran N3 "mr note whose text says merge" none mr note 1473 --message "please merge"
-reset_fx; expect_ran N4 "api GET an MR" none api "projects/:id/merge_requests/1473"
-reset_fx; expect_ran N5 "api POST approve" none api -X POST "projects/:id/merge_requests/1473/approve"
+reset_fx; expect_ran N3 "mr note whose text says merge" none mr note 4242 --message "please merge"
+reset_fx; expect_ran N4 "api GET an MR" none api "projects/:id/merge_requests/4242"
+reset_fx; expect_ran N5 "api POST approve" none api -X POST "projects/:id/merge_requests/4242/approve"
 reset_fx; expect_ran N6 "api GET the active train" none api "projects/:id/merge_trains?scope=active"
-reset_fx; expect_ran N7 "api POST a note" none api -X POST "projects/:id/merge_requests/1473/notes" -f "body=merge soon"
-reset_fx; expect_ran N8 "api POST cancel auto-merge" none api -X POST "projects/:id/merge_requests/1473/cancel_merge_when_pipeline_succeeds"
-reset_fx; expect_ran N9 "api GET merge_ref" none api "projects/:id/merge_requests/1473/merge_ref"
+reset_fx; expect_ran N7 "api POST a note" none api -X POST "projects/:id/merge_requests/4242/notes" -f "body=merge soon"
+reset_fx; expect_ran N8 "api POST cancel auto-merge" none api -X POST "projects/:id/merge_requests/4242/cancel_merge_when_pipeline_succeeds"
+reset_fx; expect_ran N9 "api GET merge_ref" none api "projects/:id/merge_requests/4242/merge_ref"
 reset_fx; expect_ran N10 "ci status" none ci status
-reset_fx; expect_ran N11 "api PUT MR labels" none api -X PUT "projects/:id/merge_requests/1473" -f "labels=Auto-Deploy"
+reset_fx; expect_ran N11 "api PUT MR labels" none api -X PUT "projects/:id/merge_requests/4242" -f "labels=Auto-Deploy"
 reset_fx; expect_ran N12 "mr list" none mr list
-reset_fx; expect_ran N13 "api POST a pipeline for the MR" none api -X POST "projects/:id/merge_requests/1473/pipelines"
+reset_fx; expect_ran N13 "api POST a pipeline for the MR" none api -X POST "projects/:id/merge_requests/4242/pipelines"
 reset_fx; expect_ran N14 "mr create whose title says merge" none mr create --title merge --description "merge accept api" --yes
 reset_fx; expect_ran N15 "help mr merge" none help mr merge
 
 echo
 echo "--- the dry-run seam ---"
 reset_fx; green_fx
-OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 1473 --sha "${HEAD_SHA}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: would exec glab mr merge 1473 --sha ${HEAD_SHA}"* ]] && [ ! -s "${STUB_EXECS}" ] && [ -s "${STUB_READS}" ]; then
+OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 4242 --sha "${HEAD_SHA}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: would exec glab mr merge 4242 --sha ${HEAD_SHA}"* ]] && [ ! -s "${STUB_EXECS}" ] && [ -s "${STUB_READS}" ]; then
   ok "D1. dry-run runs the guard's reads and execs nothing"
 else bad "D1. dry-run seam" "$(detail)"; fi
 reset_fx; green_fx
-OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 1473 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 4242 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
 if refused; then ok "D2. dry-run still refuses"; else bad "D2. dry-run refusal" "$(detail)"; fi
 
 # DND-1647: no gh/glab call may have fallen through past its stub.

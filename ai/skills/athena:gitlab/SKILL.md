@@ -14,7 +14,7 @@ token at call time and execs `glab`.
 | | Acts as | Use it for |
 |---|---|---|
 | **plain `glab`** (Cody's OAuth, `~/.config/glab-cli/config.yml`) | Cody Poll | **reads** — `mr view`, `ci status`, `api` GETs, issue/pipeline queries |
-| **`glab-athena` wrapper** (`athena-amby`, Maintainer in `amby_ai`) | the Athena bot | **writes** — MR create, comment, approve, thread replies/resolves, label PUTs, pipeline triggers, job retries/cancels, merge-train boarding, merges |
+| **`glab-athena` wrapper** (`athena-amby`, Maintainer in the work GitLab group) | the Athena bot | **writes** — MR create, comment, approve, thread replies/resolves, label PUTs, pipeline triggers, job retries/cancels, merge-train boarding, merges |
 
 Writing through plain `glab` puts **Cody's name** on actions Athena took. That
 is the one thing this wrapper exists to prevent, so: **every GitLab write that

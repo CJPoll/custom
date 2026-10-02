@@ -2,7 +2,7 @@
 
 The GitLab mirror of the self-hosted GitHub runner: a dedicated `gitlab-runner`
 user with its **own rootless dockerd**, an OpenRC-supervised `gitlab-runner run`,
-registered as a **project runner** on `gitlab.com/amby_ai/walt_ui`, with
+registered as a **project runner** on the work GitLab project, with
 gitlab.com **shared runners as fallback**. Architecture decided in DND-177.
 
 The committed files (`scripts/setup-gitlab-runner*`, `system-files/*gitlab-runner*`)

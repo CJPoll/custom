@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run glab (or curl via `glab-athena api ...`) AS the Athena GitLab service
-# account (athena-amby, amby_ai group). Token read at call time from a 600
+# account (athena-amby, in the work GitLab group). Token read at call time from a 600
 # file; never in argv or config. Use for writes that should be attributed to
 # Athena (MR create/comment/approve, merge-train boarding, merges). Reads may
 # keep using the owner's OAuth glab. Every merge path is judged by the merge
@@ -8,7 +8,7 @@
 #
 # Owner-run repair: `glab-athena refresh` mints a fresh PAT for the athena-amby
 # service account and writes it to the token file. It uses the OWNER's plain
-# `glab` (Cody's OAuth session, group owner of amby_ai) to mint, so it works
+# `glab` (Cody's OAuth session, group owner of the work GitLab group) to mint, so it works
 # even when the current Athena token is expired/revoked (chicken-and-egg).
 # `refresh` is OWNER-GATED: it uses the owner's glab session. Agents never run it:
 # the `glab-athena refresh` deny in ai/hooks/forge-auth-guard.sh blocks it in
@@ -27,9 +27,19 @@ if [ "${1:-}" = refresh ]; then
 
 	# Resolve group + service-account ids dynamically (owner OAuth glab, not the
 	# Athena token) so a renamed/renumbered account doesn't brick the script.
-	GROUP_ID="$(glab api "groups/amby_ai" | jq -r '.id')"
+	# The group's name is a work value: it is read from the private overlay
+	# (overlay/gitlab.json .group), never written here (DND-1668, contract
+	# athena-private-overlay.md -> Consumer obligation). A failed read is
+	# reported with the resolver's own Fix: and nothing is guessed.
+	PO_BIN="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/private-overlay"
+	GROUP_NAME="$("$PO_BIN" get gitlab .group)" || {
+		echo "glab-athena refresh: the work GitLab group name is not readable from the private overlay (gitlab .group); nothing was minted." >&2
+		echo "Fix: add {\"group\": \"<work GitLab group path>\"} to overlay/gitlab.json in the private overlay, then run refresh again." >&2
+		exit 1
+	}
+	GROUP_ID="$(glab api "groups/$GROUP_NAME" | jq -r '.id')"
 	[ -n "$GROUP_ID" ] && [ "$GROUP_ID" != null ] || {
-		echo "glab-athena refresh: could not resolve amby_ai group id (is the owner glab logged in?)" >&2
+		echo "glab-athena refresh: could not resolve the group id for $GROUP_NAME (is the owner glab logged in?)" >&2
 		exit 1
 	}
 	SA_ID="$(glab api "groups/$GROUP_ID/service_accounts" \

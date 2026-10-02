@@ -165,7 +165,7 @@ echo "-- the preflight: GitLab (the per-forge asymmetry) -----------------------
 
 # 3d. The same alias tolerance on the GitLab side: gitlab.com-work is gitlab.com.
 setup_case
-run_preflight "git@gitlab.com-work:amby_ai/walt_ui.git" "/nonexistent/gh" "$(make_shim glab_healthy)"
+run_preflight "git@gitlab.com-work:example-group/example-app.git" "/nonexistent/gh" "$(make_shim glab_healthy)"
 if [[ "${RC}" == 0 && -z "${OUT}" ]] && grep -q 'api user' "${ARGV}"; then
   ok "gitlab ssh-alias host (gitlab.com-work): classified as gitlab, passes via 'api user'"
 else bad "gitlab alias host classified as gitlab" "rc=${RC} out='${OUT}' argv='$(cat "${ARGV}")'"; fi
@@ -175,7 +175,7 @@ else bad "gitlab alias host classified as gitlab" "rc=${RC} out='${OUT}' argv='$
 #    health probe here. A healthy GitLab wrapper passes silently, and the argv
 #    proves the probe was `api user` — the asymmetry with case 3 is deliberate.
 setup_case
-run_preflight "ssh://git@gitlab.com/amby_ai/walt_ui.git" "/nonexistent/gh" "$(make_shim glab_healthy)"
+run_preflight "ssh://git@gitlab.com/example-group/example-app.git" "/nonexistent/gh" "$(make_shim glab_healthy)"
 if [[ "${RC}" == 0 && -z "${OUT}" && -z "${ERR}" ]] && grep -q 'api user' "${ARGV}"; then
   ok "healthy gitlab: passes silently and probes with 'api user'"
 else bad "healthy gitlab: passes silently via 'api user'" "rc=${RC} out='${OUT}' err='${ERR}' argv='$(cat "${ARGV}")'"; fi
@@ -186,7 +186,7 @@ else bad "healthy gitlab: passes silently via 'api user'" "rc=${RC} out='${OUT}'
 #    the remedy is to escalate, and the output must NOT tell the agent to run
 #    the refresh itself.
 setup_case
-run_preflight "git@gitlab.com:amby_ai/walt_ui.git" "/nonexistent/gh" "$(make_shim glab_broken)"
+run_preflight "git@gitlab.com:example-group/example-app.git" "/nonexistent/gh" "$(make_shim glab_broken)"
 if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix: the athena-amby token needs refreshing, which is OWNER-GATED"* ]] \
    && [[ "${ERR}" == *"escalate to your admiral"* ]] && [[ "${ERR}" != *"glab-athena refresh"* ]]; then
   ok "gitlab broken: refuses with a Fix: line that escalates (never 'run the refresh')"
@@ -198,7 +198,7 @@ else bad "gitlab broken: refuses with an escalate Fix: line, no self-refresh" "r
 #     let MRs be opened as the owner — the exact failure this guard exists to
 #     stop. The preflight must REFUSE, asserting the resolved identity IS Athena.
 setup_case
-run_preflight "git@gitlab.com:amby_ai/walt_ui.git" "/nonexistent/gh" "$(make_shim glab_wrong_identity)"
+run_preflight "git@gitlab.com:example-group/example-app.git" "/nonexistent/gh" "$(make_shim glab_wrong_identity)"
 if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"athena-amby"* ]]; then
   ok "gitlab authenticates as the owner, not athena-amby: refuses"
 else bad "gitlab wrong identity: refuses" "rc=${RC} err='${ERR}'"; fi

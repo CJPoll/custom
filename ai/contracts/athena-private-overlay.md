@@ -126,6 +126,7 @@ Keys in use (DND-704), with where each is used:
 | `notion` | `.work.ticket_prefix` | the work tickets' `ID` prefix (2-10 upper-case letters) | same |
 | `notion` | `.work.in_progress_property` | name of the work Tickets date property holding the dispatch stamp | same |
 | `notion` | `.work.first_dispatch_from` | array of status names a move to `In Progress` from which is a first dispatch | same |
+| `gitlab` | `.group` | the work GitLab group path (string) | `ai/bin/glab-athena refresh` (resolves the group id to mint the service-account token; DND-1668) |
 | `notion` | `.vip_person_ids` | array of notion-work person ids | declared as the VIP seed in `athena-events.md`; the server keeps its own copy in its config |
 
 The Athena bot's own Slack user and bot ids are not overlay keys: `athena:slack`
@@ -169,7 +170,7 @@ A consumer that needs a work value reads it with `ai/bin/private-overlay get`.
 `--help`; `--dry-run` previews `--init`, `--install` and `--remove`.
 
 **Skeleton.** `ai/private-overlay/skeleton/` is the public template: the
-marker, `overlay/slack.json` and `overlay/notion.json` as empty objects,
+marker, `overlay/slack.json`, `overlay/notion.json` and `overlay/gitlab.json` as empty objects,
 `outbound/patterns.tsv` with comments only, `.claude-plugin/marketplace.json`
 (marketplace `custom-work`), `plugins/work/.claude-plugin/plugin.json`, a
 synthetic `work:overlay-probe` skill for the plugin-loading measurement, and a

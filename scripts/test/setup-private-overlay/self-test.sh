@@ -380,7 +380,8 @@ if [ "$RC" = 1 ] && has "Fix:" "$OUT"; then ok "25 unknown argument: exit 1 with
 #     and patterns.tsv holds comments only.
 nonc="$(grep -v -e '^#' -e '^$' "${SRC}/ai/private-overlay/skeleton/outbound/patterns.tsv")"
 if [ -z "$nonc" ] && [ "$(cat "${SRC}/ai/private-overlay/skeleton/overlay/slack.json")" = "{}" ] \
-   && [ "$(cat "${SRC}/ai/private-overlay/skeleton/overlay/notion.json")" = "{}" ]; then
+   && [ "$(cat "${SRC}/ai/private-overlay/skeleton/overlay/notion.json")" = "{}" ] \
+   && [ "$(cat "${SRC}/ai/private-overlay/skeleton/overlay/gitlab.json")" = "{}" ]; then
   ok "26 the public skeleton holds no values (empty overlay files, comment-only patterns)"
 else bad "26 skeleton values" "patterns=$nonc"; fi
 

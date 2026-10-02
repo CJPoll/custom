@@ -16,8 +16,8 @@ code), with the final tests:
     reads nothing.
   - Green: every pass-through case: N1–N15, G10–G12, T10–T13, T17, T18, M2,
     M7, M7b, M14, M14b, M17 and M21.
-  - The incident shape, M1: `rc=0 out=stub: ran mr merge 1473 --yes err=''
-    execs=mr merge 1473 --yes`. An unpinned merge reached glab with no check.
+  - The incident shape, M1: `rc=0 out=stub: ran mr merge 4242 --yes err=''
+    execs=mr merge 4242 --yes`. An unpinned merge reached glab with no check.
 - The same 32/67 split on the rebase base f10b4dc (glab-athena and its libs
   did not change between the two).
 - Hook suite, against f10b4dc's hook (it carries DND-741's cases too):
@@ -29,7 +29,7 @@ hook `RESULT: 177 passed, 0 failed`.
 
 ## Critic round (2cf200c): argv the guard read differently from glab
 
-The critic found `mr merge 1473 --help --help=false --yes` went to glab
+The critic found `mr merge 4242 --help --help=false --yes` went to glab
 unjudged. The guard short-circuited on `--help`, and pflag lets the later
 `--help=false` switch help off, so glab merges. This is kind 1 under
 athena:critic-convergence: the defect was present from the first commit. Its
@@ -42,7 +42,7 @@ Fix: drop the help short-circuit, read the command from the flag-aware
 positional parse, and refuse any word before `api`. Evidence, from the final
 tests on 2cf200c's code: `RESULT: 99 passed, 9 failed` (M17, M23, M24, A15,
 A16, A18–A21). A20 shows the real pass-through:
-`rc=0 out=stub: ran -R amby_ai/walt_ui api projects/1/merge_requests/2/merge -f
+`rc=0 out=stub: ran -R example-group/example-app api projects/1/merge_requests/2/merge -f
 sha=…`. Fixed: 108/0. Class-closed assertion: `grep -c HELP
 ai/lib/glab-merge-guard.sh` gives 0. The only early `return 0` in `glmg_guard`
 comes after `glmg_api_guard` has judged the call. gh does not share the second
@@ -54,13 +54,13 @@ fails with "unknown command" (measured). The gh-athena merge-guard suite
 
 ## Critic round (fb0baa7): a flag cluster before the subcommand
 
-The critic found `glab-athena mr -ym merge 1473` went to glab unjudged. The
+The critic found `glab-athena mr -ym merge 4242` went to glab unjudged. The
 guard read the words before the subcommand with the `mr merge` flag table, so
-`-m` took `merge` and the command read as `mr 1473`. Cobra finds the command
+`-m` took `merge` and the command read as `mr 4242`. Cobra finds the command
 with its own walk (`stripFlags`), where a flag word longer than two characters
 is dropped alone. Measured on glab 1.112: `glab mr -ym merge x --help` prints
 `mr merge`'s help, and so do `-dm`, `-h`, `-Rg/r` and `--repo=g/r` in that
-spot. `mr merge` then reads `-y` as yes and `-m 1473` as the message, and merges
+spot. `mr merge` then reads `-y` as yes and `-m 4242` as the message, and merges
 the current branch's MR with no pin.
 
 Kind 1 under athena:critic-convergence: the pre-subcommand parse has used the
@@ -85,7 +85,7 @@ schedules a merge on an unpinned head. `mr update` has no such flag. So
 
 Evidence on the unfixed code (e9d9247's guard, with the new cases):
 `RESULT: 111 passed, 12 failed`. M25-ym shows the pass-through:
-`rc=0 out=stub:\ ran\ mr\ -ym\ merge\ 1473 … execs=mr\ -ym\ merge\ 1473`, and
+`rc=0 out=stub:\ ran\ mr\ -ym\ merge\ 4242 … execs=mr\ -ym\ merge\ 4242`, and
 C2 `rc=0 … execs=mr\ create\ --fill\ --auto-merge\ --yes`. Fixed: `RESULT: 124
 passed, 0 failed`. Mutation S15 below turns the new cases red.
 
@@ -115,7 +115,7 @@ mutation turns at least one named case red.
 S12 is a real defect the suite caught during development.
 `fci_scrub_env` removes every `GLAB_*` variable, so the first cut read
 `GLAB_ATHENA_MERGE_DRY_RUN` after the scrub, and the seam executed instead of
-printing. D1 went red: `out=stub: ran mr merge 1473 --sha …`.
+printing. D1 went red: `out=stub: ran mr merge 4242 --sha …`.
 
 ## Mutations of the shared lib (`ai/lib/forge-api-scan.sh`)
 

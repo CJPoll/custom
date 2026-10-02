@@ -90,7 +90,7 @@ The GitLab mirror of the self-hosted GitHub runner (DND-177): a dedicated
 and a supervise-daemon service (`gitlab-runner`) running `gitlab-runner run` **as
 that user** — a deliberate divergence from GitLab's default root packaging,
 required so the docker executor hits the user's rootless socket. It's a **project
-runner** on `gitlab.com/amby_ai/walt_ui` with gitlab.com shared runners as
+runner** on the work GitLab project with gitlab.com shared runners as
 fallback; `privileged = false`; image builds run via rootless BuildKit
 (`moby/buildkit:rootless`) so the same untagged job runs on both the self-hosted
 runner and SaaS. `scripts/setup-gitlab-runner{-user,-docker,}` install these

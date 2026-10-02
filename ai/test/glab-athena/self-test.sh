@@ -79,9 +79,9 @@ echo "wrapper: ${WRAPPER}"
 echo
 
 echo "--- HIT: an SSH-form origin is rewritten to HTTPS with the PAT header ---"
-R="$(new_repo scp 'git@gitlab.com:amby_ai/walt_ui.git')"
+R="$(new_repo scp 'git@gitlab.com:example-group/example-app.git')"
 gla "${R}" push origin HEAD
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/amby_ai/walt_ui.git"* ]] \
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/example-group/example-app.git"* ]] \
   && [[ "${OUT}" == *"[credential.helper=]"* ]] \
   && [[ "${OUT}" == *"[core.askPass=]"* ]] \
   && [[ "${OUT}" == *"[url.https://gitlab.com/.insteadOf=git@gitlab.com:]"* ]] \
@@ -95,45 +95,45 @@ if [[ "${OUT}${ERR}" != *"${FAKE_TOKEN}"* ]] && [[ "${OUT}${ERR}" != *"${B64}"* 
 else bad "2. dry-run leaks the PAT or puts the header on argv" "out='${OUT}'"; fi
 
 gla "${R}" push
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/amby_ai/walt_ui.git"* ]]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/example-group/example-app.git"* ]]; then
   ok "3. bare \`push\` resolves the default remote (origin) and rewrites it"
 else bad "3. default-remote push rewritten" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 gla "${R}" push -u origin HEAD:refs/heads/feature
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/amby_ai/walt_ui.git"* ]]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/example-group/example-app.git"* ]]; then
   ok "3b. \`push -u origin HEAD:<ref>\` rewrites"
 else bad "3b. push -u rewritten" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 echo
 echo "--- MISS: a remote the rewrite cannot cover is REFUSED with a Fix: ---"
-R="$(new_repo sshurl 'ssh://git@gitlab.com/amby_ai/walt_ui.git')"
+R="$(new_repo sshurl 'ssh://git@gitlab.com/example-group/example-app.git')"
 gla "${R}" push origin HEAD
 is_refusal && [[ "${ERR}" == *"gitlab.com"* ]] && [[ "${ERR}" == *"athena-amby"* ]] \
   && ok "4. ssh://git@gitlab.com/ origin -> refused (exit 3, Fix:, escalate, names athena-amby)" \
   || bad "4. ssh:// origin refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
-R="$(new_repo pushurl 'https://gitlab.com/amby_ai/walt_ui.git')"
-git -C "${R}" config remote.origin.pushurl 'ssh://git@gitlab.com/amby_ai/walt_ui.git'
+R="$(new_repo pushurl 'https://gitlab.com/example-group/example-app.git')"
+git -C "${R}" config remote.origin.pushurl 'ssh://git@gitlab.com/example-group/example-app.git'
 gla "${R}" push origin HEAD
 is_refusal && ok "5. https origin with an ssh:// pushurl override -> refused" \
   || bad "5. pushurl override refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
-R="$(new_repo pushinsteadof 'https://gitlab.com/amby_ai/walt_ui.git')"
+R="$(new_repo pushinsteadof 'https://gitlab.com/example-group/example-app.git')"
 gla "${R}" -c 'url.git@gitlab.com:.pushInsteadOf=https://gitlab.com/' push origin HEAD
 is_refusal && ok "6. a pushInsteadOf that forces SSH -> refused" \
   || bad "6. pushInsteadOf-to-SSH refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
-R="$(new_repo literal 'https://gitlab.com/amby_ai/walt_ui.git')"
-gla "${R}" push ssh://git@gitlab.com:22/amby_ai/other.git HEAD
+R="$(new_repo literal 'https://gitlab.com/example-group/example-app.git')"
+gla "${R}" push ssh://git@gitlab.com:22/example-group/other.git HEAD
 is_refusal && ok "7. a literal ssh://...:22 URL argument -> refused" \
   || bad "7. literal ssh:// refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
-gla "${R}" push http://gitlab.com/amby_ai/other.git HEAD
+gla "${R}" push http://gitlab.com/example-group/other.git HEAD
 is_refusal && ok "8. a literal http:// (non-TLS) URL -> refused" \
   || bad "8. literal http:// refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
-R="$(new_repo pushremote 'https://gitlab.com/amby_ai/walt_ui.git')"
-git -C "${R}" remote add sshr 'ssh://git@gitlab.com/amby_ai/walt_ui.git'
+R="$(new_repo pushremote 'https://gitlab.com/example-group/example-app.git')"
+git -C "${R}" remote add sshr 'ssh://git@gitlab.com/example-group/example-app.git'
 git -C "${R}" config branch.main.pushRemote sshr
 gla "${R}" push
 is_refusal && ok "9. branch.<cur>.pushRemote -> an ssh:// remote -> refused" \
@@ -143,7 +143,7 @@ gla "${TMP}" -C "${R}" push sshr HEAD
 is_refusal && ok "10. \`-C <repo> push\` from outside the repo -> refused (global opts replayed)" \
   || bad "10. -C push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
-R="$(new_repo alias 'ssh://git@gitlab.com/amby_ai/walt_ui.git')"
+R="$(new_repo alias 'ssh://git@gitlab.com/example-group/example-app.git')"
 gla "${R}" -c alias.p=push p origin HEAD
 is_refusal && ok "11. a git alias expanding to push -> refused" \
   || bad "11. alias to push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
@@ -152,12 +152,12 @@ gla "${R}" -c 'alias.sp=!git push' sp
 is_refusal && [[ "${ERR}" == *"shell alias"* ]] && ok "12. a shell alias (!...) -> refused" \
   || bad "12. shell alias refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
-R="$(new_repo submod 'https://gitlab.com/amby_ai/walt_ui.git')"
+R="$(new_repo submod 'https://gitlab.com/example-group/example-app.git')"
 gla "${R}" push --recurse-submodules=on-demand origin HEAD
 is_refusal && ok "13. \`push --recurse-submodules=on-demand\` -> refused" \
   || bad "13. recursive push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
-R="$(new_repo notoken 'git@gitlab.com:amby_ai/walt_ui.git')"
+R="$(new_repo notoken 'git@gitlab.com:example-group/example-app.git')"
 ( cd "${R}" && GITLAB_ATHENA_TOKEN_FILE="${TMP}/no-such-token" GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD ) \
   >"${TMP}/out" 2>"${TMP}/err"; RC=$?; OUT="$(cat "${TMP}/out")"; ERR="$(cat "${TMP}/err")"
 is_refusal && [[ "${ERR}" == *"token file"* ]] && [[ "${ERR}" == *"refresh"* ]] \
@@ -166,13 +166,13 @@ is_refusal && [[ "${ERR}" == *"token file"* ]] && [[ "${ERR}" == *"refresh"* ]] 
 
 echo
 echo "--- NEGATIVE: what must pass untouched ---"
-R="$(new_repo https 'https://gitlab.com/amby_ai/walt_ui.git')"
+R="$(new_repo https 'https://gitlab.com/example-group/example-app.git')"
 gla "${R}" push origin HEAD
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/amby_ai/walt_ui.git"* ]] && [ -z "${ERR}" ]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/example-group/example-app.git"* ]] && [ -z "${ERR}" ]; then
   ok "15. an HTTPS origin is untouched (same URL, no refusal)"
 else bad "15. HTTPS origin untouched" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
-R="$(new_repo status-only 'ssh://git@gitlab.com/amby_ai/walt_ui.git')"
+R="$(new_repo status-only 'ssh://git@gitlab.com/example-group/example-app.git')"
 gla "${R}" status --short
 if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: exec git"* ]] && [ -z "${ERR}" ]; then
   ok "16. a non-network command (status) is not refused, even with an ssh:// origin"
@@ -181,7 +181,7 @@ else bad "16. non-network command passes" "rc=${RC} out='${OUT}' err='${ERR}'"; 
 # A REAL exec (no dry-run) to a local bare remote whose path contains
 # gitlab.com: the injected options do not break a real push, and a local path
 # is never mistaken for gitlab.com.
-BARE="${TMP}/src/gitlab.com/amby_ai/r.git"; mkdir -p "$(dirname "${BARE}")"
+BARE="${TMP}/src/gitlab.com/example-group/r.git"; mkdir -p "$(dirname "${BARE}")"
 git init -q --bare "${BARE}"
 R="$(new_repo real "${BARE}")"
 ( cd "${R}" && "${WRAPPER}" git push -q origin HEAD:refs/heads/landed ) >"${TMP}/out" 2>"${TMP}/err"; RC=$?
@@ -191,7 +191,7 @@ else bad "17. real local push lands" "rc=${RC} err='$(cat "${TMP}/err")'"; fi
 
 # A REAL exec of a local command: git itself must see the oauth2 PAT header for
 # https://gitlab.com/ (proves the env channel is wired, not just printed).
-R="$(new_repo hdr 'git@gitlab.com:amby_ai/walt_ui.git')"
+R="$(new_repo hdr 'git@gitlab.com:example-group/example-app.git')"
 ( cd "${R}" && "${WRAPPER}" git config --get-all http.https://gitlab.com/.extraheader ) >"${TMP}/out" 2>"${TMP}/err"; RC=$?
 if [ "${RC}" = 0 ] && [ "$(cat "${TMP}/out")" = "AUTHORIZATION: basic ${B64}" ]; then
   ok "18. real exec: git sees the oauth2:<PAT> basic header for https://gitlab.com/"
@@ -218,6 +218,37 @@ gla "${W}" push origin HEAD:main
 if [ "${RC}" = 3 ] && [[ "${ERR}" == *"NO RECEIPT"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"bin/prep-commit.sh"* ]]; then
   ok "20. gated repo: an ungated push to main is refused (NO RECEIPT, Fix:), shared with gh-athena (DND-1690)"
 else bad "20. glab ungated push to main refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# DND-1668: the work GitLab group name is a work value. `refresh` reads it from
+# the private overlay (gitlab .group) and never from a literal in the wrapper.
+RB="${TMP}/refreshbin"; mkdir -p "${RB}"
+printf '#!/bin/sh\necho "$*" >> "%s/glab.args"\necho "{\\"id\\": null}"\n' "${TMP}" > "${RB}/glab"
+chmod +x "${RB}/glab"
+run_refresh() { # <overlay-root-or-empty>
+  rm -f "${TMP}/glab.args"
+  local root="${TMP}/no-such-overlay"
+  [ -z "$1" ] || root="$1"
+  OUT="$(env ATHENA_PRIVATE_ROOT="${root}" PATH="${RB}:${PATH}" "${WRAPPER}" refresh 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+run_refresh ""
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"private overlay"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -e "${TMP}/glab.args" ]; then
+  ok "21. refresh with no overlay: refused with Fix:, glab never called (DND-1668)"
+else bad "21. refresh, overlay absent" "rc=${RC} err='${ERR}' args='$(cat "${TMP}/glab.args" 2>/dev/null)'"; fi
+
+OV="${TMP}/overlay-root"; mkdir -p "${OV}/overlay"; chmod 700 "${OV}"
+printf '{"kind":"athena-private-overlay","schema":1}\n' > "${OV}/athena-overlay.json"
+printf '{}\n' > "${OV}/overlay/gitlab.json"
+run_refresh "${OV}"
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -e "${TMP}/glab.args" ]; then
+  ok "22. refresh with the overlay present but no gitlab .group: refused with Fix:, glab never called (DND-1668)"
+else bad "22. refresh, key missing" "rc=${RC} err='${ERR}'"; fi
+
+printf '{"group":"synthetic-group"}\n' > "${OV}/overlay/gitlab.json"
+run_refresh "${OV}"
+if [[ "$(cat "${TMP}/glab.args" 2>/dev/null)" == "api groups/synthetic-group" ]] && [[ "${ERR}" == *"synthetic-group"* ]]; then
+  ok "23. refresh looks the group up by the overlay's value (DND-1668)"
+else bad "23. refresh, overlay value used" "rc=${RC} err='${ERR}' args='$(cat "${TMP}/glab.args" 2>/dev/null)'"; fi
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"

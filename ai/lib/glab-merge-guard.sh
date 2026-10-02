@@ -11,7 +11,7 @@
 # CI, GitLab stops some of that; on one that does not, nothing did. And no
 # setting pins the head a merge was checked on.
 #
-# Measured 2026-09-26 (read-only, as athena-amby), amby_ai/walt_ui:
+# Measured 2026-09-26 (read-only, as athena-amby), the work GitLab project:
 # only_allow_merge_if_pipeline_succeeds=true, merge_trains_enabled=true,
 # merge_trains_skip_train_allowed=false, allow_merge_on_skipped_pipeline=false.
 # So on walt_ui GitLab itself refuses a merge whose pipeline has not passed, and
@@ -50,7 +50,7 @@
 #   * its sha IS the head (a branch or detached MR pipeline); or
 #   * its ref is refs/merge-requests/<iid>/merge (a merged-results pipeline) and
 #     its commit has exactly two parents, the second being the head. Measured on
-#     walt_ui !1473 / !1478: the open MR's head pipeline is this kind, its sha is
+#     walt_ui !4242 / !4243: the open MR's head pipeline is this kind, its sha is
 #     the merge commit, and parent_ids = [target, head].
 # A merge-train pipeline (refs/merge-requests/<iid>/train) is not tied: its
 # second parent is a squash commit, not the head. It is refused, with a Fix to
@@ -67,8 +67,8 @@
 # Cobra accepts flags before the subcommand (`glab --repo g/r mr merge 5`,
 # measured), so the command is read from the positional words, not argv[0].
 # But cobra finds those words with its own walk, not any command's flag table:
-# `glab mr -ym merge 1473` routes to merge (measured, glab 1.112) and then
-# merges the current branch's MR with -m 1473 as the message. So before the
+# `glab mr -ym merge 4242` routes to merge (measured, glab 1.112) and then
+# merges the current branch's MR with -m 4242 as the message. So before the
 # command path, only -R/--repo is allowed when any word could be a merge (see
 # glmg_prepath_flag). glab also dispatches `glab -R g/r api …` to api
 # (measured), so `api` must be the first word; anything before it is refused.
@@ -195,7 +195,7 @@ glmg_cli_opt() {
 # `mr`. Cobra finds it by its own walk (stripFlags), which is not any command's
 # flag table: a two-character `-x` or a `--flag` with no `=` that the level
 # does not know as a boolean takes the next word; every other flag word is
-# dropped alone; `--` ends the walk. So `mr -ym merge 1473` routes to merge
+# dropped alone; `--` ends the walk. So `mr -ym merge 4242` routes to merge
 # (measured, glab 1.112), while the mr-merge table reads `-m` as taking
 # `merge`. Before the path, only -R/--repo parse the same both ways (a value
 # flag at every level, measured): `-R v`, `--repo v`, `-Rv`, `-R=v`,
