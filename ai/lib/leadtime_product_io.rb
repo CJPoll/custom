@@ -112,6 +112,17 @@ module LeadTimeProductIO
                              "Recover it, then repair or delete the ref by hand; the branch is kept.")
     end
 
+    # Delete a branch, or raise CouldNotLook: a delete git refused is never read
+    # as done (DND-1702). A branch that is gone after the failure is done.
+    def delete_branch(dir, branch)
+      out, code = call(dir, "branch", "-D", branch)
+      return if code.zero? || branch_tip(dir, branch).nil?
+
+      raise CouldNotLook.new("cannot delete branch #{branch} in #{dir} (git branch -D exit #{code}: #{out.lines.last.to_s.strip})",
+                             "see why git refused ('git -C #{dir} branch -D #{branch}'; a stale '<ref>.lock' file under refs/heads, or the branch " \
+                             "checked out in another worktree); then delete it by hand. The branch is kept, and the next run retries it.")
+    end
+
     # true / false; nil when git could not tell (never read as "not landed").
     def ancestor?(dir, commit, ref)
       _, code = call(dir, "merge-base", "--is-ancestor", commit, ref)
@@ -771,8 +782,8 @@ module LeadTimeProductIO
     ["landed #{sha[0, 12]}; deploy pending", true, false]
   end
 
-  # -> nil, or the line naming a landing branch git could not read: it is
-  # KEPT (never deleted, never skipped in silence) with its Fix: (DND-1677).
+  # -> nil, or the line naming a landing branch git could not read (DND-1677) or
+  # could not delete (DND-1702): it is KEPT (never skipped in silence) with its Fix:.
   def retire_land_lane(m, rl, dir, merged:, keep_branch:)
     meta = Meta.read("#{dir}.meta")
     if STACK_STATES.include?(meta["bootstrap"]) && !merged
@@ -783,7 +794,7 @@ module LeadTimeProductIO
     kept = nil
     if branch && !keep_branch
       begin
-        Git.call(rl.path, "branch", "-D", branch) if Git.branch_tip(rl.path, branch)
+        Git.delete_branch(rl.path, branch) if Git.branch_tip(rl.path, branch)
       rescue CouldNotLook => e
         kept = "landing branch #{branch} KEPT: COULD NOT TELL (#{e.message}). Fix: #{e.fix}"
       end
@@ -825,9 +836,9 @@ module LeadTimeProductIO
     rec = Store.states(m.state_dir).reverse.find { |st| st.repo == rl.name && st.branch == branch }
     verdict = P.retire(tip: tip, on_main: on_main, recorded_head: rec&.head)
     case verdict
-    when :delete then Git.call(rl.path, "branch", "-D", branch)
+    when :delete then Git.delete_branch(rl.path, branch)
                       [verdict, branch, "removed (work on origin/main)"]
-    when :awaiting then Git.call(rl.path, "branch", "-D", branch)
+    when :awaiting then Git.delete_branch(rl.path, branch)
                         [verdict, branch, "awaiting landing on PR ##{rec.pr} (#{tip[0, 12]} pushed)"]
     else [verdict, branch, "STRANDED: branch #{branch} KEPT (#{tip[0, 12]} is not the head of a recorded improver PR: unpushed, or pushed with no PR opened)"]
     end

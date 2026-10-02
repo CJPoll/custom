@@ -278,6 +278,25 @@ rc="$(lp teardown)"
 [ "$rc" = 72 ] && grep -q 'STRANDED' "${TMP}/out" && ok "a commit made after the push: STRANDED, exit 72" || bad "commit after push" "rc=$rc out=$(cat "${TMP}/out")"
 release_holders
 
+# The end-of-run teardown's :awaiting arm (DND-1702): a branch git cannot delete
+# is COULD NOT TELL, kept, exit 72 (counted), with a Fix:; never "removed".
+new_repo
+hold_lock "$LANES/$RUN_ID.lock"
+lp cut --repo prod --phase verify >/dev/null
+lane_commit pushed.txt
+echo evidence >"$TMP/evidence.md"
+lp pr --repo prod --title t --body-file "$TMP/evidence.md" >/dev/null
+BRD="$(git -C "$LANES/$RUN_ID" rev-parse --abbrev-ref HEAD)"
+REFD="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/refs/heads/$BRD"
+: >"$REFD.lock"
+rc="$(lp teardown)"
+if [ "$rc" = 72 ] && grep -q "COULD NOT TELL (cannot delete branch $BRD" "${TMP}/out" && grep -q "branch kept. Fix: .*branch -D $BRD" "${TMP}/out" \
+   && ! grep -q 'awaiting landing' "${TMP}/out" && [ -e "$REFD" ]; then
+  ok "teardown, a pushed branch git cannot delete: COULD NOT TELL with a Fix:, exit 72, branch kept; never reported as awaiting landing"
+else bad "teardown delete fails" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+rm -f "$REFD.lock"
+release_holders
+
 new_repo
 rc="$(lp teardown)"
 [ "$rc" = 0 ] && grep -q 'none (no lane cut)' "${TMP}/out" && ok "no lane cut: teardown says so, exit 0" || bad "teardown none" "rc=$rc"
@@ -414,6 +433,24 @@ if [ "$rc" = 0 ] && [ ! -e "$LANES/$DEAD" ] && [ ! -e "$LANES/$DEAD.lock" ] && g
   ok "reap: a dead lane (lock free) is removed, its unpushed branch kept, its stack torn down; a live (held) lane is untouched"
 else bad "reap" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 release_holders
+
+# The reap's :delete arm (DND-1702): a dead lane whose work is on origin/main
+# but whose branch git cannot delete is named COULD NOT TELL with a Fix:; its
+# lock and meta stay, so the next tick retries the delete.
+new_repo
+DEADD="run-20260930T113000Z-21"
+git -C "$R" worktree add -q -b leadtime/prod-tail-del "$LANES/$DEADD" origin/main
+printf 'branch=leadtime/prod-tail-del\nbootstrap=ran\n' >"$LANES/$DEADD.meta"
+: >"$LANES/$DEADD.lock"
+REFD="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/refs/heads/leadtime/prod-tail-del"
+: >"$REFD.lock"
+rc="$(lp reap)"
+if [ "$rc" = 0 ] && grep -q "lane=$DEADD COULD NOT TELL (cannot delete branch leadtime/prod-tail-del" "${TMP}/out" \
+   && grep -q "Fix: .*branch -D leadtime/prod-tail-del" "${TMP}/out" && ! grep -q 'removed (work on origin/main)' "${TMP}/out" \
+   && [ -e "$REFD" ] && [ -e "$LANES/$DEADD.lock" ] && [ -e "$LANES/$DEADD.meta" ]; then
+  ok "reap, a merged branch git cannot delete: COULD NOT TELL with a Fix:, lock and meta kept for the next tick; never 'removed'"
+else bad "reap delete fails" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+rm -f "$REFD.lock"
 
 # One dead lane whose branch git cannot read never stops the reap (DND-1640):
 # it is named COULD NOT TELL with its lock and meta kept for the next tick,
@@ -633,6 +670,25 @@ if [ "$rc" = 0 ] && head -1 "${TMP}/out" | grep -qx 'product_prs=0 landed=prod#7
   ok "an unreadable landing branch after a landing: KEPT, named with a Fix: (ref, reflog), journaled, counted unreadable_branches=1; never skipped silently"
 else bad "landing branch unreadable" "rc=$rc ref=$(cat "$REF7" 2>/dev/null) out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 rm -f "$FAKE/locked-merge-hook"
+
+# A landing branch git could not DELETE (DND-1702). retire_land_lane dropped
+# `git branch -D`'s exit, so a failed delete left the branch behind with no
+# word. A held ref lock makes the real git refuse the delete. It is KEPT,
+# named with a Fix:, journaled and counted, like an unreadable one; the landing
+# still counts and the sweep exits 0 (a failed delete never fails the tick).
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN" "$(printf 'd%.0s' {1..40})"
+REF7="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/refs/heads/$BR7"
+printf '#!/usr/bin/env bash\n: >"%s.lock"\n' "$REF7" >"$FAKE/locked-merge-hook"; chmod +x "$FAKE/locked-merge-hook"
+rc="$(lp sweep)"
+if [ "$rc" = 0 ] && head -1 "${TMP}/out" | grep -qx 'product_prs=0 landed=prod#7 unreadable_branches=1' \
+   && grep -q "pr=#7 landed .*; landing branch $BR7 KEPT: COULD NOT TELL (cannot delete branch $BR7" "${TMP}/out" \
+   && grep -q "Fix: .*git -C $R branch -D $BR7" "${TMP}/out" \
+   && grep -q "pr=#7 landing branch $BR7 KEPT: COULD NOT TELL (cannot delete" "$S/journal.md" \
+   && [ -e "$REF7" ] && [ ! -e "$LANES/$RUN_ID-land" ] && [ ! -e "$LANES/$RUN_ID-land.meta" ]; then
+  ok "a landing branch git cannot delete: KEPT, named with a Fix:, journaled, counted unreadable_branches=1, exit 0; never dropped silently"
+else bad "landing branch delete fails" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err") journal=$(cat "$S/journal.md" 2>/dev/null)"; fi
+rm -f "$FAKE/locked-merge-hook" "$REF7.lock"
 
 # The same, when the landing then raises (a read inside it could not be made):
 # the kept branch is not dropped with the exception. It is named on the PR's
