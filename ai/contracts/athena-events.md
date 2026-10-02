@@ -7294,20 +7294,23 @@ then the per-domain lists, and meetings now come from DND-447's calendar
 adapter. The buttons wait on `calendar.rsvp`, not DND-440.
 
 **Sections, in order.** Each section is always present. An empty one carries
-a one-line reason, so an empty section never reads as a missing one. The
-header names the window of section 2.
+a one-line reason, so an empty section never reads as a missing one. Section
+2's header names its window.
 
 1. **Needs your attention.** The **owner queue**: `proposed` items and
    `active` `owner_only` items, in rank order, at most 10, then "and N more".
    The section header links `/priorities`. Empty reason: "Nothing needs you."
-   A ticket moved to `Needs Attention` is assigned to the owner, so the index
-   marks it `owner_only` and it lands here through the existing Notion ingest.
+   A ticket moved to `Needs Attention` is `owner_only` (see that rule in
+   *Item states*' classification), so it lands here through the existing
+   Notion ingest.
    Won't-fix notices are not part of the digest: each stays its own DM, sent
    only when a candidate exists.
 2. **Overnight.** What was completed in the window, as a status report.
    - **Window:** from the previous successful send for this owner to now.
      With no previous send, the last 24 h. Capped at 72 h, so Monday covers
-     the weekend. Empty reason: "No work completed since <time>."
+     the weekend. When the cap truncates a longer gap, the header says so
+     ("window capped at 72 h"). Empty reason: "No work completed since
+     <time>."
    - **Sources**, both server-side: fleet registry missions whose status
      reached done or merged in the window (with the admiral run's session and
      `scope_label`); and priority-index Notion items whose state moved to
@@ -7325,9 +7328,14 @@ header names the window of section 2.
    time, the linked title, a **prep** line and the **RSVP** links. Empty
    reasons: "No meetings today." and "Calendar not connected: <cause>".
    - **Prep line:** at most 200 characters, from the Jev use case
-     `meeting_prep` (`ai/contracts/athena-judgments.md`), or "No prep found.".
-     The event description is read at digest time and passed to the judgment.
-     It is never stored. An unavailable judgment renders "prep: not judged
+     `meeting_prep`, or "No prep found.". The use case is not yet declared in
+     `ai/contracts/athena-judgments.md`, and it reads a field DND-447's OQ-5
+     excluded (the event description), so the prep line is pending that
+     declaration and an owner amendment (DND-1743). The event description is
+     read at digest time and passed to the judgment. It is never stored; the
+     judgment record keeps its input hash and output only. Until the owner
+     amends OQ-5, the prep line is "No prep found.". An
+     unavailable judgment renders "prep: not judged
      (<cause>)", never a blank.
    - **RSVP, Phase A (links):** each meeting links to
      `/priorities#meeting-<id>`, where the owner picks Going, Maybe or Not
@@ -7341,15 +7349,26 @@ header names the window of section 2.
    present even when empty), each with its reason ids, then a footer link to
    `/priorities`.
 
-When every section is empty the digest sends one line, "Nothing needs you
-today.", never silence; only the header and the footer link stay.
+The digest always sends all four sections, each with its reason when empty,
+so a failed calendar ("Calendar not connected: <cause>") never reads as a quiet
+day. It is never silence.
+
+**Later (2026-10-02, DND-1739):** this said an empty index sent one line,
+"Nothing needs you today.", replacing the owner-queue and per-domain sections,
+with only the header and the footer link kept. Superseded: every section is
+present with its own empty reason, so one section's failure stays visible.
 
 **What it reads.** Only the owner's own rows, every query filtering
 `owner_id`. Items come through the owner read path
 (`Athena.Priorities.list_ranked/2` with the owner's user, which also checks
-RBAC `read`) and read `proposed` and `active` items, plus the done items and
-fleet missions of section 2 through their owner-scoped read paths, never the
-machine-token report path.
+RBAC `read`). Sections 1 and 4 read `proposed` and `active` items. Section 2
+reads done items and fleet missions, and section 3 reads synced meetings,
+each through an owner-scoped read path and never the machine-token report
+path.
+
+**Later (2026-10-02, DND-1739):** this said the digest reads `proposed` and
+`active` items "and nothing else". Superseded by sections 2 and 3, which read
+done items, fleet missions and meetings.
 
 **Stored metadata only** (*The storage boundary*). A row is the source label,
 the item's ref linked to its `url`, the title and the reason ids. A
@@ -7379,11 +7398,11 @@ recipient. There is no inbox fallback either: the server holds the bot token
 (`interactive_blocks_refused`), as the click path does. It stamps no return
 address, so no click from a digest can be routed. Phase B's RSVP buttons
 (section 3) lift this only after the owner ratifies `calendar.rsvp` and the
-grant click path exists.
+grant click path exists (DND-563 T2, T3 and T4; T3 and its epic are Parked).
 
 **Later (2026-10-02, DND-1739):** this said no click can be routed "until
-DND-440 adds that path". DND-440 shipped the `priority.transition` class
-only. A digest button needs its own class, `calendar.rsvp`.
+DND-440 adds that path". DND-440 is the surface that requests
+`priority.transition` grants (*Owner approval grants*). A digest button needs its own class, `calendar.rsvp`.
 
 **Schedule.** The owner's settings live on their priority rules, edited in the
 rules editor:
