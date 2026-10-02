@@ -3318,6 +3318,53 @@ def self_test_core
     end
   end
 
+  # 6h. DND-1693: the REPO's own .gitignore, with no help from a global
+  #     excludes file, must ignore every machine-local runtime state path the
+  #     harness writes inside a checkout. Before the fix `ai-artifacts/` was
+  #     ignored only by the owner's ~/.config/git/gitignore, so on a machine
+  #     or a hermetic git config without that line, 6f's refusal fired on
+  #     every gate run in a main checkout holding cron state. One sample per
+  #     writer (the shipwright, lead-time, clustering and slack-roots runners,
+  #     and fleet coordination reports); a new in-checkout writer adds a row.
+  Dir.mktmpdir("harness-gate-selftest-runtime-ignore") do |fixture_root|
+    git = ->(*args) { Open3.capture3("git", "-C", fixture_root, *args) }
+    git.call("init", "-q")
+    git.call("config", "user.email", "a@b.c")
+    git.call("config", "user.name", "test")
+    # The host's global excludes must not supply the rule under test.
+    git.call("config", "core.excludesFile", File::NULL)
+    repo_gitignore = File.join(CUSTOM_DIR, ".gitignore")
+    File.write(File.join(fixture_root, ".gitignore"), File.read(repo_gitignore))
+    git.call("add", ".gitignore")
+    git.call("commit", "-q", "-m", "repo .gitignore")
+
+    runtime_samples = %w[
+      ai-artifacts/shipwright/cursor.txt
+      ai-artifacts/lead-time/runs/20261002T000000Z.run
+      ai-artifacts/clustering/consecutive-failures
+      ai-artifacts/slack-roots/runs/20261002T000000Z.propose
+      ai-artifacts/coordination/2026-10-02-run/reports/X-1-report.md
+    ]
+    runtime_samples.each do |rel|
+      path = File.join(fixture_root, rel)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "x\n")
+    end
+    # The miss must be observable: a sentinel the .gitignore does not cover
+    # proves the listing ran and reads this tree.
+    File.write(File.join(fixture_root, "sentinel.txt"), "x\n")
+
+    unchecked, = untracked_files(fixture_root)
+    leaked = runtime_samples & unchecked.to_a
+    unless leaked.empty? && unchecked == ["sentinel.txt"]
+      warn "self-test: FAIL — 6h: with no global excludes, the repo .gitignore " \
+           "(#{repo_gitignore}) must ignore the harness's runtime state; " \
+           "untracked, un-ignored: #{unchecked.inspect} (runtime state leaked: " \
+           "#{leaked.inspect}; expected only [\"sentinel.txt\"])"
+      ok = false
+    end
+  end
+
   # 6g. The untracked listing fails LOUD when git cannot answer, never as
   #     "zero untracked" (the 6e fake git fails every ls-files).
   Dir.mktmpdir("harness-gate-selftest-untracked-git-fail") do |fixture_root|

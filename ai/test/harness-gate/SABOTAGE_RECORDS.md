@@ -71,3 +71,30 @@ before the run and restored by `cp` after.
 **Not protected by a behavioural test:** the wrong-tree refusal running
 before the untracked preflight on a real run. The suite drives `run_gate` on
 a fixture only as a dry run, which reaches neither ordering.
+
+---
+
+## 2026-10-02 — DND-1693: the repo .gitignore ignores runtime state itself
+
+- **Code under test:** the repo's own `.gitignore` (the `ai-artifacts/` rule),
+  read through `untracked_files` in `ai/bin/harness-gate` in a fixture whose
+  `core.excludesFile` is `/dev/null`, so no global excludes file can help.
+- **Suite run:** `ruby ai/bin/harness-gate --self-test --group core`
+- **Baseline:** `harness-gate: self-test OK (group core; 177 checks declared,
+  114 of them discovered self-test suites)`
+- **Regression (before the fix):** case 6h with `.gitignore` as on
+  origin/main cc41d1ec: `6h: with no global excludes, the repo .gitignore
+  (...) must ignore the harness's runtime state; untracked, un-ignored:
+  ["ai-artifacts/clustering/consecutive-failures", ...,
+  "ai-artifacts/shipwright/cursor.txt", ..., "sentinel.txt"]`, with all five
+  runtime samples leaked.
+
+| # | Mutation | Case | Failure string |
+|---|---|---|---|
+| M1 | `.gitignore`: delete the `ai-artifacts/` line (the unfixed tree) | 6h | `6h: with no global excludes, the repo .gitignore (...) must ignore the harness's runtime state` (5 samples leaked) |
+| M2 | `.gitignore`: narrow `ai-artifacts/` to `ai-artifacts/shipwright/` | 6h | the same string, 4 samples leaked (lead-time, clustering, slack-roots, coordination) |
+
+Each mutation took the group to `harness-gate: self-test FAILED (group core)`
+(rc 1). M2 was applied by a script that aborts when the target line is absent,
+and restored by `cp`. The `sentinel.txt` sample guards the other direction: a
+listing that read nothing, or a rule that ignored everything, also fails 6h.

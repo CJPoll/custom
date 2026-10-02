@@ -1,5 +1,12 @@
 .claude
 
+# Machine-local runtime state, never committed: the shipwright, lead-time,
+# clustering and slack-roots runners' state and run records, and fleet
+# coordination briefs and reports. Ignored here, not only in a user's global
+# excludes, so harness-gate's untracked-file refusal (DND-1689) does not fire
+# on a machine or a hermetic git config without that global line (DND-1693).
+ai-artifacts/
+
 # Claude Code managed-skills sync cache (vendored plugin skills; not harness source)
 ai/skills/synced/
 
