@@ -19,6 +19,9 @@
 # carry an app_id, a count, and that many well-formed routes is an mcp-error,
 # never "count=0".
 
+# shellcheck source=/dev/null
+. "$(dirname "${BASH_SOURCE[0]}")/mcp_refusal.sh"
+
 # The reason tokens. `mcp-error:<text>` is the one open-ended token.
 TOPIC_ROUTE_REASONS="usage no-token mcp-unregistered mcp-error not-found refused invalid project-unresolved"
 
@@ -68,13 +71,9 @@ topic_route_list_args() {
 }
 
 # _topic_route_error_text <json-rpc-message> -- the error text, or nothing.
-_topic_route_error_text() {
-  printf '%s' "$1" | jq -r '
-      if (.result.isError // false) then
-        ([.result.content[]? | .text? // empty] | join(" ") | if . == "" then "a tool error" else . end)
-      elif .error then (.error.message // "an MCP error" | tostring)
-      else empty end' 2>/dev/null
-}
+# The shape is lib/mcp_refusal.sh's, shared with claim.sh (DND-1661): only an
+# Error.execution (-32000) or an isError result is a refusal.
+_topic_route_error_text() { mcp_refusal_text "$1"; }
 
 # topic_route_error <json-rpc-message>
 # Status 0 and a reason token on stdout when the answer is NOT a success:
@@ -91,7 +90,15 @@ topic_route_error() {
     printf 'mcp-error:no-answer\n'; return 0
   fi
   err="$(_topic_route_error_text "${msg}")"
-  [ -n "${err}" ] || return 1
+  if [ -z "${err}" ]; then
+    # Not a refusal. A JSON-RPC error of any other code is still an error
+    # (a protocol fault), never "no error": the render functions would then
+    # report it as a malformed reply.
+    if printf '%s' "${msg}" | jq -e 'has("error")' >/dev/null 2>&1; then
+      printf 'mcp-error:server-error\n'; return 0
+    fi
+    return 1
+  fi
   err="$(printf '%s' "${err}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   case "${err}" in
     "not found") printf 'not-found\n' ;;

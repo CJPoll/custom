@@ -29,6 +29,9 @@
 # its own reason token, and a key that could not be computed is its own reason,
 # never folded into `not-found`.
 
+# shellcheck source=/dev/null
+. "$(dirname "${BASH_SOURCE[0]}")/mcp_refusal.sh"
+
 # The reason tokens, one per distinct cause. `mcp-error:<text>` is the one
 # open-ended token: its suffix is the transport's or the server's own words.
 CLAIM_REASONS="no-registry-entry registry-error no-slack-channel ambiguous-slack-channel no-identity no-token mcp-unregistered mcp-error not-found refused already-claimed invalid cwd-project-mismatch project-unresolved"
@@ -49,14 +52,8 @@ claim_oneline() {
 # server shape works and the landing order of a server change does not
 # matter. A JSON-RPC error with any other code is a protocol error, never a
 # refusal: claim_parse_result reports it as mcp-error, whatever its message.
-CLAIM_EXECUTION_ERROR_CODE=-32000
-_claim_refusal_text() {
-  printf '%s' "$1" | jq -r --argjson code "${CLAIM_EXECUTION_ERROR_CODE}" '
-      if (.result.isError // false) then
-        ([.result.content[]? | .text? // empty] | join(" ") | if . == "" then "a tool error" else . end)
-      elif (.error | type) == "object" and .error.code == $code then (.error.message // "an MCP error" | tostring)
-      else empty end' 2>/dev/null
-}
+# The shape itself is lib/mcp_refusal.sh's, shared with topic_route.sh (DND-1661).
+_claim_refusal_text() { mcp_refusal_text "$1"; }
 
 # claim_refusal_kind <text>
 #

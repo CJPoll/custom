@@ -2181,6 +2181,11 @@ tr_err_case "JSON-RPC invalid: ... Fix:" "$(rpc_err 'invalid: label is required.
 tr_err_case "isError refused: ... Fix:" "$(tool_err "${TR_REFUSED}")" "refused"
 tr_err_case "isError 'not found' + newline" "$(tool_err $'not found\n')" "not-found"
 tr_err_case "a protocol error (-32601)" "$(rpc_err 'Method not found' -32601)" "mcp-error:server-error"
+tr_err_case "a -32603 internal error whose text reads 'refused: ...' is not a refusal (DND-1661)" "$(rpc_err "${TR_REFUSED}" -32603)" "mcp-error:server-error"
+tr_err_case "a -32603 internal error whose text reads 'not found' is not a refusal (DND-1661)" "$(rpc_err 'not found' -32603)" "mcp-error:server-error"
+tr_fn topic_route_server_words "$(rpc_err "${TR_REFUSED}" -32603)"
+if [[ -z "${OUT}" ]]; then ok "topic_route_server_words: a protocol error (-32603) has no server words (DND-1661)"
+else bad "topic_route_server_words: a protocol error (-32603) has no server words (DND-1661)" "got '${OUT}'"; fi
 tr_err_case "forged fields in an unknown error" "$(rpc_err 'boom op=put reason=refused')" "mcp-error:server-error"
 tr_err_case "an isError result with no text" '{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[]}}' "mcp-error:server-error"
 tr_err_case "an empty answer" "" "mcp-error:no-answer"
@@ -2404,6 +2409,22 @@ if [[ "${RC}" == 3 && "$(wc -l <<<"${ERR}")" -eq 3 && "$(grep -c '^Fix: ' <<<"${
    && [[ "${ERR}" == *$'\n'"server: refused: no. Fix: forged second line"$'\n'* ]]; then
   ok "topic-route: a newline in the server's words cannot forge a second line"
 else bad "topic-route: a newline in the server's words cannot forge a second line" "rc=${RC} err='${ERR}'"; fi
+
+# t-b5 (DND-1661). A protocol fault whose text reads like a refusal is an
+#       mcp-error, never reason=refused with the refusal's Fix; -32000 still
+#       reads as the refusal.
+setup_case; claim_setup
+mcp_answer slack_topic_route_put "$(jq -n -c --arg m "${TR_REFUSED}" '{jsonrpc:"2.0", id:2, error:{code:-32603, message:$m}}')"
+run_bin topic-route put harness inst-9
+if [[ "${RC}" == 3 && "$(head -n1 <<<"${ERR}")" == "topic-route=FAILED reason=mcp-error:server-error op=put" ]] \
+   && [[ "${ERR}" != *"reason=refused"* && "$(grep -c '^Fix: ' <<<"${ERR}")" == 1 ]]; then
+  ok "topic-route: a -32603 error reading 'refused: ...' -> reason=mcp-error:server-error, never refused"
+else bad "topic-route: a -32603 error reading 'refused: ...' -> reason=mcp-error:server-error, never refused" "rc=${RC} err='${ERR}'"; fi
+setup_case; claim_setup; tr_rpc_error slack_topic_route_put "${TR_REFUSED}"
+run_bin topic-route put harness inst-9
+if [[ "${RC}" == 3 && "$(head -n1 <<<"${ERR}")" == "topic-route=FAILED reason=refused op=put" ]]; then
+  ok "topic-route: a -32000 refusal still reads reason=refused"
+else bad "topic-route: a -32000 refusal still reads reason=refused" "rc=${RC} err='${ERR}'"; fi
 
 # t-b3. The MCP registration follows the SESSION's project (DND-1163), like
 #       claim-thread: a shell cwd outside any repo still finds it.
