@@ -6818,9 +6818,18 @@ It is false for everything else.
 
 **A rules edit re-derives the owner's stored items** (DND-1256). An item's
 `owner_only` and state are derived at ingest from the owner's rules of that
-moment. When the owner edits the rules, the same transaction re-derives every
-one of the owner's live items, in any state, under the new rules, and rescores
-the open ones. A derivation reads what the row stores, never the source:
+moment. When the owner edits the rules, the owner's live items, in any state,
+are re-derived under the new rules and the open ones rescored. The edit's own
+transaction writes the rules row and nothing else. After it commits, the pass
+runs in batches of 100 items, ordered by id. Each batch is its own transaction:
+it takes the rules row `FOR SHARE` first and re-derives its items under the
+rules stored at that moment, so an edit made mid-pass wins for the rest of the
+pass. A batch that fails stops the pass and the edit answers
+`{:error, {:refresh_incomplete, reason}}`; the rules are already saved and the
+committed batches stay. The pass is not durable across a node death: a node
+that dies mid-pass leaves the rows not yet reached on their old derived
+fields until their next write or the re-sync (DND-1721). A derivation reads
+what the row stores, never the source:
 
 - **`owner_person_ids` → `owner_only`**, by the same derivation ingest uses
   (above). A `notion_work` item re-derives from its stored `assignee`. A
@@ -6842,6 +6851,13 @@ the open ones. A derivation reads what the row stores, never the source:
 - **Not re-derived:** `domain`, `domain_basis` and `project`. Their only rules
   input is `notion_project_domains`, which lives in the fleet policy, not in
   the rules; an edit of that map reclassifies nothing (above).
+
+**Later (2026-10-02, DND-1587):** this bullet said "the same transaction
+re-derives every one of the owner's live items" and rescores the open ones.
+Superseded by DND-1587 (gen_saas #728, `6f99cd49`): one transaction for the
+whole index made an ingest wait for the whole pass, so the edit commits the
+rules alone and the re-derive runs after it, batch by batch
+(`Athena.Priorities.update_rules/3`, `refresh_items/4`, `refresh_batch/4`).
 
 An ingest reads the rules row under a share lock taken before its item lock,
 so an ingest racing an edit either finishes first and is re-derived by the
