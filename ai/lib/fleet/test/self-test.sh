@@ -110,7 +110,12 @@ eq "throttle key: top level"        "$(fleet_throttle_key s1 "")" "s1.main"
 check "due: no stamp"               fleet_seen_due 1000 ""
 check "due: exactly 60 s"           fleet_seen_due 1060 1000
 check "not due: 59 s"               bash -c '. "$0"; ! fleet_seen_due 1059 1000' "${LIB}/domain.sh"
-check "due: stamp in the future"    fleet_seen_due 1000 5000
+check "due: stamp a full interval or more in the future (a clock stepped back)" fleet_seen_due 1000 5000
+check "due: stamp exactly 60 s in the future" fleet_seen_due 1000 1060
+# DND-1652: a stamp written a second after the injected now (a second boundary
+# between `date +%s` and the write) must not open the throttle.
+check "[DND-1652] not due: stamp 1 s in the future" bash -c '. "$0"; ! fleet_seen_due 1000 1001' "${LIB}/domain.sh"
+check "[DND-1652] not due: stamp 59 s in the future" bash -c '. "$0"; ! fleet_seen_due 1000 1059' "${LIB}/domain.sh"
 
 eq "outcome 202"                    "$(fleet_outcome 0 202)" "ok"
 eq "outcome 422"                    "$(fleet_outcome 0 422)" "refused"
@@ -373,6 +378,16 @@ fleet_throttle_claim "s1.a1" "${now}"; eq "throttle: second claim inside 60 s is
 fleet_throttle_claim "s1.a2" "${now}"; eq "throttle: another agent in the same session is independent" "$?" "0"
 touch -d "@$((now - 61))" "${XDG_STATE_HOME}/athena/fleet/seen/s1.a1.stamp"
 fleet_throttle_claim "s1.a1" "${now}"; eq "throttle: due again after 60 s" "$?" "0"
+# DND-1652: the stamp's mtime is the INJECTED now, never the wall clock at the
+# write. An injected time far from the wall clock makes the two distinguishable.
+past=$((now - 1000))
+fleet_throttle_claim "s1.a4" "${past}"; eq "[DND-1652] throttle: claim at an injected time" "$?" "0"
+eq "[DND-1652] throttle: the stamp's mtime is the injected now" "$(fleet_mtime "${XDG_STATE_HOME}/athena/fleet/seen/s1.a4.stamp")" "${past}"
+fleet_throttle_claim "s1.a4" "${past}"; eq "[DND-1652] throttle: a second claim at the same injected now is refused" "$?" "1"
+# The boundary state the flake hit, built directly: the stamp one second ahead
+# of the injected now.
+touch -d "@$((now + 1))" "${XDG_STATE_HOME}/athena/fleet/seen/s1.a1.stamp"
+fleet_throttle_claim "s1.a1" "${now}"; eq "[DND-1652] throttle: a stamp 1 s in the future of now is refused" "$?" "1"
 ( exec 9>>"${XDG_STATE_HOME}/athena/fleet/seen/s1.a3.stamp"; flock 9; fleet_throttle_claim "s1.a3" "${now}"; exit $? )
 eq "throttle: a claim held by a concurrent caller is refused" "$?" "1"
 ( export XDG_STATE_HOME=relative/state; fleet_throttle_claim "s1.a1" "${now}" ); eq "throttle: relative XDG_STATE_HOME is refused (2)" "$?" "2"

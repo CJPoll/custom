@@ -353,6 +353,9 @@ fleet_throttle_claim() {
       fleet_seen_due "${now}" "$(fleet_mtime "${stamp}")" || exit 1
     fi
     printf '%s\n' "${now}" > "${stamp}" || exit 2
+    # The mtime is the claimed now, never the wall clock at the write: the next
+    # check compares it against its own injected now (DND-1652).
+    touch -d "@${now}" -- "${stamp}" || exit 2
     exit 0
   )
   rc=$?

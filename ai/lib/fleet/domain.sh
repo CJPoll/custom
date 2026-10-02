@@ -296,15 +296,19 @@ fleet_throttle_key() {
 }
 
 # fleet_seen_due <now-epoch> <stamp-mtime-epoch-or-empty> [interval]
-# Status 0 = a report is due. Due when there is no stamp, when the stamp is at
-# least <interval> seconds old, or when it is in the future (a clock stepped
-# back must not silence the reporter until the clock catches up).
+# Status 0 = a report is due. Due when there is no stamp, or when the stamp is
+# at least <interval> seconds away from now in EITHER direction.
+# A stamp less than <interval> in the future is NOT due (DND-1652): a second
+# boundary or a small clock skew between the stamping caller and this one must
+# not open the throttle. A stamp further in the future is due, so a clock
+# stepped back far never silences the reporter until it catches up. The
+# silence is bounded: a stamp under <interval> ahead stops being refused once
+# now reaches stamp + interval, under 2 x <interval> from now.
 fleet_seen_due() {
   local now="$1" stamp="${2:-}" interval="${3:-${FLEET_SEEN_INTERVAL_S}}" age
   [ -n "${stamp}" ] || return 0
   age=$(( now - stamp ))
-  [ "${age}" -lt 0 ] && return 0
-  [ "${age}" -ge "${interval}" ]
+  [ "${age}" -ge "${interval}" ] || [ "${age}" -le "-${interval}" ]
 }
 
 # fleet_outcome <curl-exit> <http-code>
