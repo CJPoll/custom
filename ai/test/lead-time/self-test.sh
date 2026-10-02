@@ -156,7 +156,7 @@ printf '#!/bin/sh\necho called >>"%s"\necho "fake: not found" >&2\nexit 1\n' "${
 chmod +x "${CALLBIN}/gh"
 fsg_require_stubs "${CALLBIN}" gh
 for flag in --pr --mr; do
-  for bad_id in abc my-branch '#12' 0 012 1.5 +5 ""; do
+  for bad_id in abc my-branch '#12' 0 012 1.5 +5 "" ' 1' '٣' $'1\n'; do
     rm -f "${CALLLOG}"
     PATH="${CALLBIN}:${PATH}" /usr/bin/ruby "$bin" --repo "${GHREPO}" "${flag}" "${bad_id}" >"${TMP}/id-out" 2>"${TMP}/id-err" </dev/null
     ID_CODE=$?
