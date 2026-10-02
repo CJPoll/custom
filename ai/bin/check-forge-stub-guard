@@ -37,10 +37,10 @@
 #        tool; and
 #     2. puts D on PATH: D is an element of a `PATH=` value (`export PATH=`,
 #        `env -i PATH=`, `PATH=... cmd` all included), or of any `NAME=`
-#        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`), with
-#        at least one element AFTER D. A D that is the value's last element
-#        (`PATH="${D}"`, a PATH of links) has nothing behind it to fall
-#        through to (DND-1667).
+#        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`), beside
+#        at least one other element (an empty one too: `PATH="${D}:"` adds
+#        the cwd). A value whose SOLE element is D (`PATH="${D}"`, a PATH of
+#        links) holds nothing to fall through to (DND-1667).
 #   D is compared as written, after removing quotes and spelling `${NAME}` as
 #   `$NAME`: `"${TMP}/bin"` and `$TMP/bin` are the same directory. The idiom
 #   `PATH="$D${PATH:+:$PATH}"` reads as `$D:$PATH`.
@@ -56,9 +56,12 @@
 #     * keep the guard right behind the stub (DND-1667): in every PATH value
 #       that puts D on PATH, the element after D is `$FSG_DIR` (or a variable
 #       assigned exactly `$FSG_DIR`), or `$PATH` when fsg_arm guards that
-#       tool (fsg_arm puts its guard at the front of PATH). Or the suite calls
-#       `fsg_require_stubs D <tool>`, for a PATH layout that is itself under
-#       test and cannot hold a guard (ai/test/agent-bin-git).
+#       tool (fsg_arm puts its guard at the front of PATH). D is never the
+#       last of several elements: what comes before it can hold the real tool,
+#       which then answers first. One exception, for a PATH layout that is
+#       itself under test and cannot hold a guard (ai/test/agent-bin-git): the
+#       suite calls `fsg_require_stubs D <tool>`, and `$PATH` is neither right
+#       after D nor before a last-placed D.
 #   Each missing piece is reported with the stub write's line.
 #
 #   A gh stub that is never put on PATH (chosen by an env var such as
@@ -401,19 +404,21 @@ def path_values(lexed)
   vals = []
   lexed[:lines].each do |(n, line, flags)|
     code_matches(line, flags, /(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)=/).each do |m|
-      elems = norm(word_at(line, m.end(0))).split(":")
+      # -1 keeps an empty element: `PATH="$D:"` puts the cwd on PATH too.
+      elems = norm(word_at(line, m.end(0))).split(":", -1)
       vals << [n, elems] if m[1] == "PATH" || elems.include?("$PATH")
     end
   end
   vals
 end
 
-# Every directory a PATH value puts on PATH with another element AFTER it
-# (DND-1667). A directory that is the last element has nothing behind it for a
-# missing stub to fall through to (`PATH="${D}"`, a PATH of links), so a stub
-# there cannot reach a real tool.
+# Every directory a PATH value puts on PATH beside at least one other element
+# (DND-1667). A value whose SOLE element is the directory (`PATH="${D}"`, a
+# PATH of links) holds nothing a missing stub could fall through to, so a stub
+# there cannot reach a real tool. Any other element, before or after the
+# directory, can hold the real tool.
 def path_dirs(lexed)
-  path_values(lexed).flat_map { |(_n, elems)| elems[0..-2] }.uniq
+  path_values(lexed).select { |(_n, elems)| elems.size > 1 }.flat_map { |(_n, elems)| elems }.uniq
 end
 
 # { sourced:, armed:, arm_tools:, verified: } for the helper's use in the file.
@@ -463,25 +468,40 @@ end
 # a stub's directory D on PATH, the element right after D must be the guard
 # directory (`$FSG_DIR`, or a variable assigned exactly `$FSG_DIR`), or `$PATH`
 # when fsg_arm put that tool's guard at the front of PATH. Anything else lets a
-# missing stub fall through to whatever that element holds. The one other
-# answer: `fsg_require_stubs D tool` proves that stub exists and is executable
-# before it is used, for a PATH layout that is itself under test and cannot
-# take a guard in it (ai/test/agent-bin-git: the wrapper searches PATH after
-# its own entry).
+# missing stub fall through to whatever that element holds. D as the LAST of
+# several elements is a problem too: whatever comes before it can hold the
+# real tool, which then answers ahead of the stub. The one other answer:
+# `fsg_require_stubs D tool` proves that stub exists and is executable before
+# it is used, for a PATH layout that is itself under test and cannot take a
+# guard in it (ai/test/agent-bin-git: the wrapper searches PATH after its own
+# entry). It answers only where `$PATH` is NOT right after D (nor before a
+# last-placed D), so a suite cannot swap the guard for it on an ordinary
+# `D:$PATH`.
 def order_problems(lexed, on_path, use)
   problems = []
   values = path_values(lexed)
   on_path.each do |(_n, tool, dir)|
-    next if use[:required].include?([dir, tool])
     next unless use[:arm_tools].include?(tool) # reported as unguarded already
 
+    proven = use[:required].include?([dir, tool])
     values.each do |(ln, elems)|
-      elems.each_with_index do |e, i|
-        next unless e == dir && i < elems.size - 1
+      next if elems.size < 2
 
+      elems.each_with_index do |e, i|
+        next unless e == dir
+
+        if i == elems.size - 1
+          next if proven && !elems[0...i].include?("$PATH")
+
+          problems << "line #{ln} puts #{dir} (a #{tool} stub) LAST on PATH, behind " \
+                      "#{elems[i - 1]}, which can hold the real #{tool}: put the stub " \
+                      "first, as \"#{dir}:${FSG_DIR}:...\""
+          next
+        end
         nxt = elems[i + 1]
         next if use[:guard_spellings].include?(nxt)
         next if nxt == "$PATH" && use[:global_tools].include?(tool)
+        next if proven && nxt != "$PATH"
 
         problems << "line #{ln} puts #{dir} (a #{tool} stub) on PATH with #{nxt} " \
                     "after it, not the guard: write \"#{dir}:${FSG_DIR}:...\"" \
@@ -665,8 +685,21 @@ def run_self_test
     ["a curl stub on PATH, no helper", "cat > \"${S}/curl\" <<'EOF'\nx\nEOF\nexport PATH=\"${S}:${PATH}\"\n", %w[curl], 1],
     ["a claude stub on PATH, no helper", "printf x > \"$S/claude\"\nPATH=\"$S:$PATH\" run\n", %w[claude], 1],
     ["a docker stub on PATH, no helper", "cp \"$F/fake\" \"$S/docker\"\nPATH=\"$S:$PATH\"\n", %w[docker], 1],
-    ["a stub dir that is the LAST PATH element cannot fall through",
+    ["a stub dir that is the SOLE PATH element cannot fall through",
      "ln -sf \"$REAL_GIT\" \"$B/git\"\nPATH=\"$B\" run\n", [], 0],
+    ["a stub dir LAST behind $PATH, no helper (the real tool answers first)",
+     "echo x > \"$B/gh\"\nPATH=\"$PATH:$B\"\n", %w[gh], 1],
+    ["a stub dir LAST behind /usr/bin, no helper", "echo x > \"$B/gh\"\nexport PATH=\"/usr/bin:$B\"\n", %w[gh], 1],
+    ["a trailing ':' puts the cwd on PATH behind the stub dir", "echo x > \"$B/gh\"\nPATH=\"$B:\"\n", %w[gh], 1],
+    ["fsg_arm gh, stub dir LAST behind $PATH",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_arm \"$T/g\"\necho x > \"$B/gh\"\nPATH=\"$PATH:$B\"\nfsg_verify\n",
+     %w[gh], 1],
+    ["fsg_require_stubs does not stand in for the guard on D:$PATH",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_make \"$T/g\" git\necho x > \"$B/git\"\n" \
+     "fsg_require_stubs \"$B\" git\nPATH=\"$B:$PATH\" run\nfsg_verify\n", %w[git], 1],
+    ["fsg_require_stubs does not answer a D placed after $PATH",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_make \"$T/g\" git\necho x > \"$B/git\"\n" \
+     "fsg_require_stubs \"$B\" git\nPATH=\"$PATH:$B\" run\nfsg_verify\n", %w[git], 1],
     ["fsg_make git, guard right behind the stub dir",
      ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_make \"$T/g\" git\necho x > \"$B/git\"\n" \
      "PATH=\"$B:${FSG_DIR}:$PATH\" run\nfsg_verify\n", %w[git], 0],

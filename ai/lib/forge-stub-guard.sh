@@ -59,7 +59,10 @@
 # What it cannot see (named, not hidden): a call to the real tool by absolute
 # path (/usr/bin/git), a PATH the suite rebuilds without "${FSG_DIR}", and a
 # stub's own pass-through to the real tool (a git shim that ends in
-# `exec "${REAL_GIT}"` is the suite's choice).
+# `exec "${REAL_GIT}"` is the suite's choice). And FSG_DIRS lives in the
+# arming shell only: a fsg_verify run in a child process after two arms reads
+# only the last guard's log (FSG_DIR, which is exported). Verify in the shell
+# that armed.
 
 FSG_LOG=fallthrough.log
 FSG_FIX='make the stub exist and executable (`chmod +x <stub_dir>/<name>`), or stub this call; a stubbed suite must never reach the real tool. Do not take the guard directory off PATH to get past this.'
