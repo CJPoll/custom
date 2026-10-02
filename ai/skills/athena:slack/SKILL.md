@@ -340,6 +340,12 @@ Slack is scannable, not prose. Keep every idea; cut the words.
 - Short sentences (~10 words). One idea per line.
 - Lead with the answer, then support it.
 - Bullets over paragraphs; a number goes on its own line.
+- Numbered items are a sequence, a priority, or reply options ("reply 1 or
+  3"). Everything else is bullets. Items in one list share one shape: each
+  starts with a verb, or none does
+  ([Google: lists](https://developers.google.com/style/lists)).
+- Bold is for section labels and option names, not mid-sentence emphasis
+  ([Google: accessibility](https://developers.google.com/style/accessibility)).
 
 Cody, verbatim (2026-09-22): *"keep all the same ideas and thoughts, but reduce
 the number of words-per-sentence significantly … wordy and not terribly

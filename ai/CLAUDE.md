@@ -552,6 +552,14 @@ It applies to chat, reports, PR bodies, commit messages, and skill/agent prose.
   carries meaning.
 - Shortening a draft is not the same as removing content — say all of it, in
   fewer words. When in doubt, this is [[athena:remove-claude-isms]].
+- **Short, not choppy.** Keep the word that links two facts (because, so,
+  but). Three bare sentences that hide why one follows from another fail the
+  reader as surely as one long sentence
+  ([Google: tone](https://developers.google.com/style/tone)).
+- **Dates and times are exact and UTC.** Full dates (`2026-09-28`, never
+  `09-28`), exact times (`22:24Z`, never `22:2xZ`). The house rule keeps UTC
+  over Google's 12-hour clock; the rest follows
+  [Google: dates and times](https://developers.google.com/style/dates-times).
 
 ## A failed lookup must never look like an empty one
 

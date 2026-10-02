@@ -290,6 +290,15 @@ was written on.
   - **Prefer citing a mechanism by section name over restating it.** A citation
     follows an amendment; a restatement goes stale. This is the same reason the
     first convention above cites steps by name rather than by number.
+- **A living normative document is timeless.** No now, new, currently, soon,
+  or "does not yet" for standing behavior. Name the date or the ticket
+  instead, or use a *Later* label. Describe behavior in the present tense,
+  never with a hypothetical "would". Point by section name, never "above" or
+  "below". Headings use sentence case. A task heading starts with a bare
+  verb ("Install the hook"), not an -ing form.
+  ([Google: timeless](https://developers.google.com/style/timeless-documentation),
+  [tense](https://developers.google.com/style/tense),
+  [headings](https://developers.google.com/style/headings))
 
 ## Guard/error messages are written for the LLM
 
