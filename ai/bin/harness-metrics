@@ -221,7 +221,11 @@ def fold(acc, o, prev_t, agent = false, prev_o = nil)
       end
     end
   end
-  t || prev_t
+  # The gap anchor only moves forward. Compaction writes an isCompactSummary
+  # record stamped BEFORE the records it follows; anchoring on it made the next
+  # record read as a stall (2026-10-01: both counted agent gaps of that day).
+  return prev_t if t.nil? || (prev_t && t < prev_t)
+  t
 end
 
 # `cutoff` is a Time (or nil). Nil means "recency not computed" — the recent_*
@@ -578,6 +582,32 @@ def run_self_test
           { "type" => "assistant", "message" => {} }),
       "nil prior tolerated by sync-tool" =>
         !synchronous_tool_gap?(nil, { "type" => "assistant", "message" => {} }),
+      # A record whose timestamp runs BACKWARD must not become the gap anchor.
+      # Compaction writes an isCompactSummary record stamped before the records
+      # it follows; anchoring on it read the next record as a 761s/904s stall
+      # (2026-10-01, gen_saas captains a9ac678c, a8890cf8). Contiguous records,
+      # so zero gaps of any kind.
+      "backward timestamp is not a gap anchor" => (
+        bf = File.join(dir, "agent-backward.jsonl")
+        File.write(bf, [
+          { "type" => "assistant", "timestamp" => "2026-09-16T00:20:00.000Z", "message" => {} },
+          { "type" => "user", "timestamp" => "2026-09-16T00:07:19.000Z", "isCompactSummary" => true,
+            "message" => { "role" => "user", "content" => "This session is being continued" } },
+          { "type" => "attachment", "timestamp" => "2026-09-16T00:20:02.000Z",
+            "attachment" => { "type" => "compact_file_reference" } },
+        ].map { |l| JSON.generate(l) }.join("\n") + "\n")
+        rb = build_report(parse_files([bf]), {})
+        rb["stall_gaps"].zero? && rb["agent_stall_gaps"].zero?),
+      "a real gap after a backward timestamp still counts" => (
+        bf2 = File.join(dir, "agent-backward-then-stall.jsonl")
+        File.write(bf2, [
+          { "type" => "assistant", "timestamp" => "2026-09-16T00:20:00.000Z", "message" => {} },
+          { "type" => "user", "timestamp" => "2026-09-16T00:07:19.000Z", "isCompactSummary" => true,
+            "message" => { "role" => "user", "content" => "This session is being continued" } },
+          { "type" => "assistant", "timestamp" => "2026-09-16T00:30:00.000Z", "message" => {} },
+        ].map { |l| JSON.generate(l) }.join("\n") + "\n")
+        rb2 = build_report(parse_files([bf2]), {})
+        rb2["agent_stall_gaps"] == 1),
       # cost = 10/1e6*1 + 20/1e6*2 + 5/1e6*0.1 + 7/1e6*0.5 = 0.0000000535
       "cost derived"        => (r["cost"]["usd"] >= 0.0 && r["cost"]["priced"] == true),
       # new_user_turn? edge cases: string user msg is a fresh turn; a user record
