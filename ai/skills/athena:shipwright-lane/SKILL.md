@@ -139,8 +139,33 @@ whole-second cursor re-selects the last artifact on every future run
 
 This step is the **cron path**; a directly-spawned run instead opens a PR
 from its own named branch and does not push to main. After the run's commits
-are in and the gate is green, push as Athena with an explicit refspec,
-through the wrapper (`athena:github` → *Pushing as Athena*):
+are in and `harness-gate` is green, **record the receipt** the push needs. Run
+*Sync down first* again (so `origin/main` is current), then, from your lane:
+
+```
+~/dev/custom/ai/bin/integration-gate --with-critic --rebase
+```
+
+It takes its own test slot (never wrap it in `test-slot`) and runs the gate
+and the standing judge on the lane's head. On `INTEGRATION OK` it records the
+receipt for that exact commit. `gh-athena git push` refuses a push to main in
+this repo unless integration-gate passed exactly the pushed commit, or the
+pushed commit is a clean rebase of a head it passed onto a newer `origin/main`
+(DND-1690; the refusal says `NO RECEIPT` with a `Fix:`). That holds on a green
+main as well as a red one. On a RED gate or a critic BLOCK, fix the findings in
+one more commit and run it once more. If it is still not OK, do not push:
+journal it, and reset your lane to `origin/main` (`git reset --hard
+origin/main`, in your lane only) so the runner does not count it as a
+stranded push. Never `--critic-override` from a cron lane.
+
+**Later (2026-10-02, DND-1690):** this step pushed once "the gate is green",
+meaning `harness-gate`, with no receipt and no critic verdict. Superseded: the
+wrapper checked a receipt only while main was red, and on a green main a lane
+pushed `bcfd66b6` ungated and main went red (DND-1685). A receipt for the
+pushed commit is now required at the push itself.
+
+Then push as Athena with an explicit refspec, through the wrapper
+(`athena:github` → *Pushing as Athena*):
 
 ```
 GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= \
@@ -153,6 +178,9 @@ landing on main, and the remote rejects a non-fast-forward. If the push is
 rejected because the remote moved under you, re-run *Sync down first* and
 push again (bounded: at most a couple of attempts); if it still fails,
 journal it and leave the commits local for the owner rather than forcing.
+A clean rebase keeps the receipt's cover; if the wrapper then refuses with
+`NO RECEIPT`, the rebase changed the tree, so run integration-gate again
+before the next attempt.
 If the wrapper refuses with exit 3 and `RED MAIN`, `origin/main` is red
 (`ai/bin/main-health`, DND-1482) and only a gated fix may land: journal it,
 leave the commits local, and do not retry this run.

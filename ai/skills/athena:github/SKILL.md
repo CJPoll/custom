@@ -107,7 +107,17 @@ refuses a shell alias and a push that recurses into submodules outright. It
 does **not** see an `~/.ssh/config` Host alias for github.com, `ext::`
 transports, `clone --recurse-submodules`, git-lfs, or other subcommands; the
 header of `ai/lib/forge-git-passthrough.sh` (shared with `glab-athena git`)
-lists these. Handle a refusal by the rule in the next section. The
+lists these. Handle a refusal by the rule in the next section.
+
+A push to `main` is also judged for its gate. While `ai/bin/main-health`
+records main RED, only a gated fix lands (DND-1482). On any main, in a repo
+that declares a gate, the push is refused (`NO RECEIPT`, exit 3, `Fix:`)
+unless `integration-gate` passed exactly the pushed commit, or the pushed
+commit is a clean rebase of a head it passed onto `origin/main` (DND-1690,
+keeping DND-1463). That is not an identity problem: run the gate, do not
+escalate it.
+
+The
 `forge-identity-guard.sh` hook denies a plain `git push` to a github.com or
 gitlab.com remote (or one it cannot resolve) before it runs, with a `Fix:`
 naming this form (DND-577).

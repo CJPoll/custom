@@ -26,6 +26,10 @@
 #   * fg_refuse_red_main (DND-1482): a push to main is refused while
 #     ai/bin/main-health has recorded origin/main RED, unless it lands a gated
 #     fix. Also exit 3 with a Fix: line. See "Red-main refusal" below.
+#   * fg_refuse_ungated_main (DND-1690): in a repo that declares a gate, a push
+#     to main is refused, on a green main too, unless integration-gate covers
+#     the pushed commit. Also exit 3 with a Fix: line. See "Ungated-main
+#     refusal" below.
 #
 # Residual (NOT checked; each still runs): an ~/.ssh/config Host alias for the
 # forge host (`myalias:owner/repo`); ext:: transports; `clone
@@ -487,6 +491,68 @@ fg_refuse_red_main() {
   return 0
 }
 
+# ---- Ungated-main refusal (DND-1690) -----------------------------------------
+# A push whose destination is main, in a repo that DECLARES a gate, is REFUSED
+# (exit 3) unless integration-gate covers the pushed commit, on a green main as
+# much as a red one. Before this, only a red main was checked (above), and a
+# cron lane pushed bcfd66b6 to a green main with no receipt; main went red
+# (DND-1685). The decision is ir_push_covered in ai/lib/integration-receipt.sh:
+# a receipt for exactly the pushed commit, or a clean rebase (or merge) of a
+# gated head onto the landed main (the DND-1463 rule, kept), or nothing new.
+#
+# The gate is the one declared on the LANDED main (refs/remotes/origin/main),
+# never the pushed commit, so a diff that deletes the gate cannot lift the bar
+# (~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the diff it
+# is checking"). Only with no landed main known (a first push) is the pushed
+# commit read. A repo that declares no gate is not judged. A receipt, store,
+# or object it cannot read refuses (COULD NOT LOOK). Every remote is judged,
+# not only origin: the receipt is about the commit, not the remote. Like the
+# red-main refusal it runs before the dry-run print, and it has no skip flag.
+fg_refuse_ungated_main() {
+  local common gitdir cur src sha landed decl_at gate rc
+  [ -n "$FG_PUSH_URL" ] || return 0
+  common="$(git "${FG_PUSH_GLOB[@]}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+  [ -n "$common" ] || return 0
+  gitdir="$(git "${FG_PUSH_GLOB[@]}" rev-parse --absolute-git-dir 2>/dev/null)" || gitdir="$common"
+  cur="$(git "${FG_PUSH_GLOB[@]}" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+  # shellcheck source=main-health.sh
+  if ! . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/main-health.sh" 2>/dev/null; then
+    printf '%s: REFUSING `git push`: cannot load ai/lib/main-health.sh (and the integration receipt rules it loads), so whether the push to main was gated is unknown.\n  Fix: run %s from a full ~/dev/custom checkout (ai/bin and ai/lib side by side).\n' "$FG_TOOL" "$FG_TOOL" >&2
+    exit 3
+  fi
+  landed="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q 'refs/remotes/origin/main^{commit}' 2>/dev/null || true)"
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    sha="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q "${src}^{commit}" 2>/dev/null || true)"
+    # An unresolvable source fails in git itself; nothing lands.
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
+    decl_at="${landed:-$sha}"
+    rc=0; gate="$(ir_declared_gate_on "$gitdir" "$decl_at")" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) continue ;;
+      *) printf '%s: REFUSING `git push` of %s to main: COULD NOT LOOK whether this repo declares a gate: %s is not in the object store under %s.\n  Fix: run `git fetch origin` in this checkout and retry. Could not look is not "no gate".\n' \
+           "$FG_TOOL" "$sha" "$decl_at" "$common" >&2
+         exit 3 ;;
+    esac
+    rc=0; ir_push_covered "$common" "$sha" "$landed" || rc=$?
+    case "$rc" in
+      0) case "$IR_COVER" in
+           exact)  printf '%s: note: integration-gate passed exactly %s (%s)\n' "$FG_TOOL" "$sha" "$IR_RECEIPT" >&2 ;;
+           rebase) printf '%s: note: %s is a clean rebase of the gated head %s onto origin/main %s (%s); it lands with no re-gate (DND-1463)\n' \
+                     "$FG_TOOL" "$sha" "$IR_COVER_HEAD" "$landed" "$IR_RECEIPT" >&2 ;;
+         esac ;;
+      1) printf '%s: REFUSING `git push` of %s to main: %s. This repo declares a gate (%s on %s), and %s.\n  Fix: %srun `~/dev/custom/ai/bin/integration-gate --with-critic --rebase` on the branch you are landing (it records the receipt), then push exactly the head its INTEGRATION OK line names, or a clean rebase of it onto a newer origin/main.\n' \
+           "$FG_TOOL" "$sha" "$IR_KIND" "$gate" "$decl_at" "$IR_WHY" "${IR_HOW:+$IR_HOW }" >&2
+         exit 3 ;;
+      *) printf '%s: REFUSING `git push` of %s to main: COULD NOT LOOK whether integration-gate covers it (%s). %s.\n  Fix: %srepair what it names and retry; if the receipt is gone, run `~/dev/custom/ai/bin/integration-gate --with-critic --rebase` on the branch and push the head its INTEGRATION OK line names.\n' \
+           "$FG_TOOL" "$sha" "$IR_KIND" "$IR_WHY" "${IR_HOW:+$IR_HOW }" >&2
+         exit 3 ;;
+    esac
+  done < <(mh_push_main_sources main "$cur" "${FG_PUSH_ARGS[@]}")
+  return 0
+}
+
 # fg_git_exec <basic-user> <token> <git args...> : run (or, under FG_DRY_RUN=1,
 # print) git with the bot's HTTPS basic-auth header for FG_HOST and every owner
 # credential source removed. The header reaches git through the environment
@@ -498,6 +564,7 @@ fg_git_exec() {
   local user="$1" token="$2" header auth_key a n
   shift 2
   fg_refuse_red_main
+  fg_refuse_ungated_main
   auth_key="http.https://$FG_HOST/.extraheader"
   header="AUTHORIZATION: basic $(printf '%s:%s' "$user" "$token" | openssl base64 -A)"
   n="${GIT_CONFIG_COUNT:-0}"

@@ -496,6 +496,133 @@ gha "${W}" push origin HEAD:main
   && ok "34. a malformed marker refuses as COULD NOT LOOK (not read as no red)" \
   || bad "34. malformed marker" "rc=${RC} err='${ERR}'"
 
+echo
+echo "--- DND-1690: in a gated repo a push to main needs a receipt, on a GREEN main too ---"
+# gated_origin <name> : a bare origin whose main (B) declares a gate
+# (ai/bin/harness-gate), and a clone W on a lane-shaped branch
+# (shipwright/run-<name>) with one more commit H. No red marker anywhere.
+# Sets O, W, B, H.
+gated_origin() {
+  O="${TMP}/$1-origin.git"; W="${TMP}/$1-wt"
+  git init -q --bare -b main "${O}"
+  git init -q -b main "${W}" && git -C "${W}" remote add origin "${O}"
+  mkdir -p "${W}/ai/bin"; printf '#!/bin/sh\nexit 0\n' > "${W}/ai/bin/harness-gate"
+  printf 'a\n' > "${W}/a.txt"; printf 'b\n' > "${W}/b.txt"
+  git -C "${W}" add -A && git -C "${W}" commit -q -m base
+  git -C "${W}" push -q origin main 2>/dev/null
+  B="$(git -C "${W}" rev-parse HEAD)"
+  git -C "${W}" checkout -q -b "shipwright/run-$1"
+  printf 'b2\n' > "${W}/b.txt"; git -C "${W}" commit -q -am "lane change"
+  H="$(git -C "${W}" rev-parse HEAD)"
+}
+# move_origin_main <work dir> : another actor lands a commit touching a.txt on
+# origin's main; the work dir then fetches it (as the lane's sync down does).
+move_origin_main() {
+  local o="${TMP}/mover-$$-${RANDOM}"
+  git clone -q "${O}" "${o}" && printf 'a2\n' > "${o}/a.txt" \
+    && git -C "${o}" commit -q -am "other landing" && git -C "${o}" push -q origin main
+  git -C "$1" fetch -q origin
+  M="$(git -C "$1" rev-parse origin/main)"
+}
+is_gate_refusal() { [ "${RC}" = 3 ] && [[ "${ERR}" == *"NO RECEIPT"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && [[ "${ERR}" == *"integration-gate --with-critic"* ]]; }
+
+# 35. THE DEFECT: main is green (no marker), the lane's head has no receipt.
+# Before DND-1690 this landed (bcfd66b6). Now it is refused, origin unmoved.
+gated_origin g1
+ghpush "${W}" "${TMP}/g1-store" push -q origin HEAD:main
+is_gate_refusal && [ "$(git --git-dir="${O}" rev-parse main)" = "${B}" ] && [[ "${ERR}" == *"${H}"* ]] \
+  && ok "35. green main, gated repo, lane head with no receipt: push to main refused (NO RECEIPT, Fix:), origin unmoved" \
+  || bad "35. ungated lane push to a green main refused" "rc=${RC} err='${ERR}' main=$(git --git-dir="${O}" rev-parse main)"
+
+# 35b. The dry-run seam judges it too, and the explicit refs/heads/main spelling.
+gha "${W}" push origin "${H}:refs/heads/main"
+is_gate_refusal && ok "35b. <sha>:refs/heads/main refused before the dry-run print" \
+  || bad "35b. dry-run push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# 36. The lane-shaped push that PASSES: integration-gate's receipt for exactly
+# the head (as `integration-gate --with-critic --rebase` writes it).
+pass_receipt "${W}" "${H}" "${B}"
+ghpush "${W}" "${TMP}/g1-store" push -q origin HEAD:main
+[ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${H}" ] && [[ "${ERR}" == *"integration-gate passed exactly ${H}"* ]] \
+  && ok "36. lane head with its own receipt: lands on main, with a note naming the receipt" \
+  || bad "36. receipted lane push lands" "rc=${RC} err='${ERR}'"
+
+# 37. DND-1463, kept: H gated on B; origin main moved to M; the clean rebase
+# P of H onto M has no receipt of its own and lands as the gated head.
+gated_origin g2; pass_receipt "${W}" "${H}" "${B}"
+move_origin_main "${W}"
+git -C "${W}" rebase -q origin/main; P="$(git -C "${W}" rev-parse HEAD)"
+ghpush "${W}" "${TMP}/g2-store" push -q origin HEAD:main
+[ "${RC}" = 0 ] && [ "${P}" != "${H}" ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${P}" ] \
+  && [[ "${ERR}" == *"clean rebase of the gated head ${H}"* ]] \
+  && ok "37. clean rebase of a gated head onto a moved main lands with no re-gate (DND-1463)" \
+  || bad "37. clean rebase of a gated head lands" "rc=${RC} p=${P} err='${ERR}'"
+
+# 38. The same rebase with an UNGATED commit on top is refused: its tree is
+# not the gated head's change on M.
+gated_origin g3; pass_receipt "${W}" "${H}" "${B}"
+move_origin_main "${W}"
+git -C "${W}" rebase -q origin/main
+printf 'sneak\n' > "${W}/c.txt"; git -C "${W}" add c.txt; git -C "${W}" commit -q -m "lane change"
+gha "${W}" push origin HEAD:main
+is_gate_refusal && [[ "${ERR}" == *"candidate"* ]] \
+  && ok "38. a rebased head plus an ungated commit is refused, and the refusal counts the candidates it checked" \
+  || bad "38. ungated commit on a rebased head refused" "rc=${RC} err='${ERR}'"
+
+# 39. A receipt for the pushed head that cannot be read is COULD NOT LOOK,
+# never a pass.
+gated_origin g4
+C="$(git -C "${W}" rev-parse --path-format=absolute --git-common-dir)"
+mkdir -p "${C}/integration-receipts"; printf '{not json\n' > "${C}/integration-receipts/${H}.json"
+gha "${W}" push origin HEAD:main
+[ "${RC}" = 3 ] && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && ok "39. an unreadable receipt for the pushed head refuses as COULD NOT LOOK" \
+  || bad "39. unreadable receipt" "rc=${RC} err='${ERR}'"
+
+# 40. The gate is read on the LANDED main, not the pushed head: a head that
+# deletes the gate script is still refused.
+gated_origin g5
+git -C "${W}" rm -q ai/bin/harness-gate && git -C "${W}" commit -q -m "lane change"
+gha "${W}" push origin HEAD:main
+is_gate_refusal && ok "40. a head that deletes the declared gate is still refused (the bar is origin/main's)" \
+  || bad "40. gate read from the landed main" "rc=${RC} err='${ERR}'"
+
+# 41. A receipt whose recorded base is not an ancestor of origin/main does
+# not cover a rebase onto it, even when the head contains that base: the
+# base H here is unlanded lane work, so the gate never judged it against main.
+gated_origin g6
+printf 'c\n' > "${W}/c.txt"; git -C "${W}" add c.txt; git -C "${W}" commit -q -m "second lane change"
+pass_receipt "${W}" "$(git -C "${W}" rev-parse HEAD)" "${H}"
+move_origin_main "${W}"
+git -C "${W}" rebase -q origin/main
+gha "${W}" push origin HEAD:main
+is_gate_refusal && ok "41. a gated head whose receipt base is not an ancestor of origin/main does not cover the rebase" \
+  || bad "41. receipt for another base" "rc=${RC} err='${ERR}'"
+
+# 42. What is not a landing on main proceeds with no receipt: a push to the
+# lane branch, a --dry-run push to main, and a push of what main already is.
+gated_origin g7
+gha "${W}" push origin HEAD:refs/heads/shipwright/run-g7
+[ "${RC}" = 0 ] && ok "42. gated repo: an ungated push to a non-main branch proceeds" \
+  || bad "42. branch push blocked" "rc=${RC} err='${ERR}'"
+gha "${W}" push --dry-run origin HEAD:main
+[ "${RC}" = 0 ] && ok "42b. gated repo: a --dry-run push to main proceeds (it lands nothing)" \
+  || bad "42b. dry-run push blocked" "rc=${RC} err='${ERR}'"
+gha "${W}" push origin "${B}:main"
+[ "${RC}" = 0 ] && ok "42c. gated repo: pushing the commit origin/main already is proceeds (nothing new lands)" \
+  || bad "42c. up-to-date push blocked" "rc=${RC} err='${ERR}'"
+
+# 43. A merge commit of the landed main and a gated head (the `wt merge`
+# shape) lands: its tree is the clean merge of the gated head onto main.
+gated_origin g8; pass_receipt "${W}" "${H}" "${B}"
+move_origin_main "${W}"
+git -C "${W}" checkout -q -B main origin/main && git -C "${W}" merge -q --no-edit "${H}"
+gha "${W}" push origin main
+[ "${RC}" = 0 ] && [[ "${ERR}" == *"${H}"* ]] \
+  && ok "43. a clean merge commit of origin/main and a gated head proceeds" \
+  || bad "43. merge of a gated head" "rc=${RC} err='${ERR}'"
+
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
 else bad "no git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi

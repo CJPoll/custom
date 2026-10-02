@@ -82,7 +82,12 @@ The landing, as Cody confirmed it (2026-10-01):
 3. A **clean** rebase lands with no re-gate: push the rebased head
    fast-forward (`gh-athena git push origin <sha>:main`), still under the
    lock, then release it. The pushed SHA is not the reported one; the clean
-   rebase carries the reported head's gate and verdict. Hold the lock around
+   rebase carries the reported head's gate and verdict. `gh-athena` checks
+   that at the push (DND-1690): in a repo that declares a gate it refuses a
+   push to main (`NO RECEIPT`, exit 3) unless integration-gate passed exactly
+   the pushed commit, or the pushed tree is the clean merge of a head it
+   passed onto `origin/main`. So fetch before the rebase, as above: the
+   wrapper reads `origin/main` locally. Hold the lock around
    the fetch, rebase and push only, never around a gate. Before the push, run
    `~/dev/custom/ai/bin/landing-installers --dry-run --from <step 2's SHA>
    --to <the head>`. If it names an installer and nothing authorizes you to

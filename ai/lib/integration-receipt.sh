@@ -16,6 +16,9 @@
 #     (DND-1463).
 #   * main-health.sh (ai/lib/) reads a landed tip's receipt with
 #     ir_read_receipt.
+#   * forge-git-passthrough.sh (ai/lib/, behind every `gh-athena git push`
+#     and `glab-athena git push`) asks ir_push_covered whether a push to main
+#     in a gated repo is covered by a receipt (DND-1690).
 #   * test-slot (ai/bin/) asks ir_declared_gate_on whether the command it runs
 #     is the caller's declared gate, for its gate.run telemetry (DND-1530).
 #
@@ -152,4 +155,143 @@ ir_read_receipt() {
   fi
   IR_RECORDED_AT="$r_at" IR_TARGET="$r_target" IR_BASE="$r_base"
   return 0
+}
+
+# ---- Push-to-main coverage (DND-1690) ----------------------------------------
+# ir_push_covered <git-common-dir> <pushed-sha> <landed-sha or ""> : may
+# <pushed-sha> become the default branch of a repo that declares a gate?
+# <landed-sha> is the landed main as last fetched (refs/remotes/origin/main),
+# or empty when none is known.
+#
+# Why: `gh-athena git push` checked a receipt only while main was RED
+# (DND-1482). On a green main a cron lane pushed bcfd66b6 with no receipt and
+# no critic verdict, and main went red (DND-1685). Now every push to main in a
+# gated repo needs one of:
+#   exact   a pass receipt for exactly <pushed-sha>. integration-gate refuses a
+#           dirty tree, so the gated tree IS the pushed tree. That also closes
+#           DND-1689's staged-subset gap: the receipt is keyed on the commit.
+#   rebase  <pushed-sha> contains <landed-sha>, and its tree equals the clean
+#           merge (git merge-tree) of a gated head H onto <landed-sha>, where
+#           H's receipt was recorded against <landed-sha> or an ancestor of it.
+#           That is the owner's DND-1463 rule: a clean rebase of a gated head
+#           onto a moved main lands with no re-gate. A merge commit of
+#           <landed-sha> and H qualifies the same way.
+#   landed  <pushed-sha> is <landed-sha> or an ancestor of it: nothing new
+#           lands.
+# Candidates for H: receipt heads whose commit has <pushed-sha>'s author,
+# author date and subject (what a rebase keeps), plus receipt heads inside
+# <landed-sha>..<pushed-sha> (a merge). Each candidate is checked in full; the
+# identity only picks which ones.
+#
+# Returns 0 and sets IR_COVER (exact|rebase|landed) and IR_COVER_HEAD (the
+# gated head, for exact and rebase; IR_RECEIPT is its receipt). Returns 1 with
+# IR_KIND "NO RECEIPT" and IR_WHY naming how many receipts and candidates it
+# looked at, so a miss is never silent. Returns 2 (COULD NOT LOOK) when a
+# receipt, the store or git cannot be read; IR_HOW may hold a first step. A
+# receipt it cannot read is a refusal, never a pass.
+#
+# Residuals, said out loud: <landed-sha> is the LOCAL tracking ref. A stale one
+# only refuses (the tree no longer matches); it cannot admit unlanded content,
+# because the pushed tree must equal <landed-sha> plus the gated change. A
+# rebase whose sequential result differs from the three-way merge (rare) is
+# refused; re-gate it. Like every receipt, this is local machine state.
+ir_push_covered() {
+  local common="$1" p="$2" m="$3" rc store f h line want ptree tree
+  local exact_why n_store=0 n_cand=0 cl="" conflicts=0
+  local -a heads=() cands=() commits=()
+  local -A seen=() inrange=()
+  IR_COVER="" IR_COVER_HEAD=""
+  if ir_read_receipt "$common" "$p" "$p"; then
+    IR_COVER=exact IR_COVER_HEAD="$p"; return 0
+  fi
+  case "$IR_KIND" in *"COULD NOT LOOK"*) return 2 ;; esac
+  exact_why="$IR_WHY"
+  if [ -z "$m" ]; then
+    IR_KIND="NO RECEIPT" IR_HOW=""
+    IR_WHY="${exact_why}; and no landed main is known (no refs/remotes/origin/main), so no clean rebase of a gated head can be checked"
+    return 1
+  fi
+  git --git-dir="$common" merge-base --is-ancestor "$p" "$m" 2>/dev/null; rc=$?
+  case "$rc" in
+    0) IR_COVER=landed; return 0 ;;
+    1) ;;
+    *) IR_KIND="COULD NOT LOOK" IR_HOW=""
+       IR_WHY="git merge-base --is-ancestor ${p} ${m} failed (exit ${rc}) under ${common}"
+       return 2 ;;
+  esac
+  git --git-dir="$common" merge-base --is-ancestor "$m" "$p" 2>/dev/null; rc=$?
+  case "$rc" in
+    0) ;;
+    1) IR_KIND="NO RECEIPT" IR_HOW="git fetch origin and rebase onto origin/main; then"
+       IR_WHY="${exact_why}; and ${p} does not contain the landed main ${m}, so it cannot be a clean rebase of a gated head onto it"
+       return 1 ;;
+    *) IR_KIND="COULD NOT LOOK" IR_HOW=""
+       IR_WHY="git merge-base --is-ancestor ${m} ${p} failed (exit ${rc}) under ${common}"
+       return 2 ;;
+  esac
+  store="$(ir_store "$common")"
+  if [ -e "$store" ]; then
+    if [ ! -d "$store" ] || [ ! -r "$store" ] || [ ! -x "$store" ]; then
+      IR_KIND="RECEIPT UNREADABLE (COULD NOT LOOK)" IR_HOW="repair the permissions on ${store} (ls -ld '${store}'); then"
+      IR_WHY="the receipt store ${store} exists but cannot be searched, so whether a gated head covers ${p} is unknown"
+      return 2
+    fi
+    for f in "$store"/*.json; do
+      [ -e "$f" ] || continue
+      h="${f##*/}"; h="${h%.json}"
+      [[ "$h" =~ ^[0-9a-f]{40}$ ]] || continue
+      [ "$h" = "$p" ] && continue
+      heads+=( "$h" ); n_store=$((n_store + 1))
+    done
+  fi
+  if [ "${#heads[@]}" -gt 0 ]; then
+    if ! want="$(git --git-dir="$common" log -1 --format='%an%x09%ae%x09%at%x09%s' "$p" 2>/dev/null)"; then
+      IR_KIND="COULD NOT LOOK" IR_HOW="" IR_WHY="git log could not read ${p} under ${common}"
+      return 2
+    fi
+    # Receipt heads still in the object store (a gc may have pruned some).
+    mapfile -t commits < <(printf '%s\n' "${heads[@]}" \
+      | git --git-dir="$common" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null \
+      | sed -n 's/^\([0-9a-f]\{40\}\) commit$/\1/p')
+    if [ "${#commits[@]}" -gt 0 ]; then
+      while IFS= read -r line; do
+        h="${line%%$'\t'*}"
+        if [ "${line#*$'\t'}" = "$want" ] && [ -z "${seen[$h]:-}" ]; then seen[$h]=1; cands+=( "$h" ); fi
+      done < <(printf '%s\n' "${commits[@]}" \
+        | git --git-dir="$common" log --no-walk=unsorted --stdin --format='%H%x09%an%x09%ae%x09%at%x09%s' 2>/dev/null)
+    fi
+    while IFS= read -r h; do inrange[$h]=1; done \
+      < <(git --git-dir="$common" rev-list "${m}..${p}" 2>/dev/null)
+    for h in "${heads[@]}"; do
+      if [ -n "${inrange[$h]:-}" ] && [ -z "${seen[$h]:-}" ]; then seen[$h]=1; cands+=( "$h" ); fi
+    done
+  fi
+  if ! ptree="$(git --git-dir="$common" rev-parse --verify -q "${p}^{tree}" 2>/dev/null)"; then
+    IR_KIND="COULD NOT LOOK" IR_HOW="" IR_WHY="git could not read the tree of ${p} under ${common}"
+    return 2
+  fi
+  for h in "${cands[@]}"; do
+    n_cand=$((n_cand + 1))
+    if ! ir_read_receipt "$common" "$h" "$m"; then
+      case "$IR_KIND" in *"COULD NOT LOOK"*) cl="${cl:+$cl; }${IR_WHY}" ;; esac
+      continue
+    fi
+    tree="$(git --git-dir="$common" merge-tree --write-tree "$m" "$h" 2>/dev/null)"; rc=$?
+    case "$rc" in
+      0) tree="${tree%%$'\n'*}"
+         if [ "$tree" = "$ptree" ]; then
+           IR_COVER=rebase IR_COVER_HEAD="$h"; return 0
+         fi ;;
+      1) conflicts=$((conflicts + 1)) ;;
+      *) cl="${cl:+$cl; }git merge-tree --write-tree ${m} ${h} failed (exit ${rc})" ;;
+    esac
+  done
+  if [ -n "$cl" ]; then
+    IR_KIND="COULD NOT LOOK" IR_HOW=""
+    IR_WHY="${exact_why}; and whether a gated head covers ${p} as a clean rebase onto ${m} is unknown: ${cl}"
+    return 2
+  fi
+  IR_KIND="NO RECEIPT" IR_HOW=""
+  IR_WHY="${exact_why}; and no gated head covers it as a clean rebase onto the landed main ${m}: of ${n_store} other receipt(s) in ${store}, ${n_cand} candidate(s) (same author, date and subject as ${p}, or inside ${m}..${p}) were checked, ${conflicts} conflicting with ${m}, none giving ${p}'s tree"
+  return 1
 }
