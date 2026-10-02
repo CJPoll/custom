@@ -3024,6 +3024,17 @@ under-encrypted**:
   Yes → KMS. No (it only names a thing) → plaintext config. An implementer MUST
   NOT encrypt an ID "to be safe" (breaking rule inspection) nor log a token "it's
   just config" (a breach).
+- **The one owner-chosen exception: `meeting.join_url`.** It is not a secret
+  by the test above, yet the owner chose to keep it encrypted at rest (OD-2).
+  It is envelope-encrypted under its own key, never the secrets master key,
+  and shown to the owner on every render (*The storage boundary* →
+  *`meeting.join_url` is encrypted at rest*). Any other non-secret encrypted
+  at rest is added here by name first.
+
+  **Later (2026-10-02, DND-1765):** this list said only actual secrets are
+  KMS envelope-encrypted, with no exception. Superseded by owner decision
+  OD-2 (Cody, 2026-10-02): "store the zoom link including passcode, but
+  encrypt the value at rest in the db."
 
 ### Secret custody
 
@@ -6490,15 +6501,19 @@ before DND-1350 holds `null` until an event next writes it. The row reads
 | `meeting` | `source_ref`, `url`, `title` | `starts_at`, `self_response`, `join_url` |
 | `manual` | `source_ref`, `url`, `title`, `source_priority`, `due_on` | none |
 
-**Later (2026-10-02, DND-1764, DND-1765):** the `meeting` row's permissive
-fields were `starts_at` alone, so the owner's stored response and a meeting's
-Zoom link were refused by name. Superseded twice. DND-1764 adds
-`self_response`, the owner's own response (DND-1742, Google's
-`responseStatus` for the attendee marked `self`): one closed value about the
-owner, never another guest's. DND-1765 adds `join_url`, by owner decision
-OD-2 (`ai/docs/calendar-management.md` → *3. Zoom links*). Cody, Slack DM,
-2026-10-02 ~16:39Z: "Yes, store the zoom link including passcode, but
-encrypt the value at rest in the db."
+**Later (2026-10-02, DND-1764):** the `meeting` row's permissive fields were
+`starts_at` alone, so the owner's stored response (DND-1742, Google's
+`responseStatus` for the attendee marked `self`) was refused by name. It is
+now the permissive field `self_response`: one closed value about the owner,
+never another guest's. No `join_url` is added here (DND-1765, owner decision
+OD-2).
+
+**Later (2026-10-02, DND-1765):** the label above said no `join_url` is
+added, pending owner decision OD-2 (`ai/docs/calendar-management.md` → *3.
+Zoom links*). Superseded by the owner's answer, Cody, Slack DM, 2026-10-02
+~16:39Z: "Yes, store the zoom link including passcode, but encrypt the value
+at rest in the db." The `meeting` row gains `join_url`, under the rules
+below.
 
 **`meeting.join_url` is encrypted at rest.** Its rules:
 
@@ -6508,24 +6523,35 @@ encrypt the value at rest in the db."
   boundary; the description, location and conference data it was read from
   are still dropped there.
 - **Encrypted at rest.** The column holds ciphertext only. The value is
-  encrypted before it is written, under a key held outside the app database,
-  with the envelope encryption of *Secret custody*. It is decrypted only in
-  memory, for the item's own owner, to render that owner's `/priorities`
-  (and the digest, once DND-1771 declares it there). It is not one of *Secret custody*'s secrets: the owner sees it on
-  every render, not once.
+  encrypted before it is written, by envelope encryption under a KMS key of
+  its own, never the master key of *Secret custody*. Each ciphertext is bound
+  to its owner, item and field (`{owner_id, item_id, "meeting.join_url"}` as
+  the encryption context), so a value copied to another row or owner does not
+  decrypt. The key's policy lets the sync write and the page runtime read,
+  and grants neither any key that unwraps a secret. It is decrypted only in
+  memory, inside the owner-scoped read of the owner's own item, to render
+  that owner's `/priorities` (and the digest, once DND-1771 declares it
+  there). It is not one of *Secret custody*'s secrets: the owner sees it on
+  every render, not once (*Config vs secret — the encryption boundary*).
 - **Never logged or copied.** No log line, index obligation, skip count,
   index-failure record, inbox line, `calendar_changes` row or item summary
   holds it. A `forbidden-field` or failure record names the field, never its
-  value.
+  value. A digest that shows the link sends it in the owner's own Slack DM;
+  DND-1771 names that copy here when it declares the link in *Morning
+  digest*, and until then no digest carries it.
 - **An unreadable value is shown as unreadable.** A value that cannot be
   decrypted renders "Zoom link unavailable", never ciphertext and never a
-  silent blank, and the sync's next write replaces it.
+  silent blank. The sync writes `join_url` on every sync of a meeting, so
+  the next sync replaces it.
 - **Removal** follows *Removing a permissive field* below: the column is
-  nulled and dropped, and the extraction stops.
+  nulled and dropped, and the sync stops storing it. The MCP reads'
+  `EventSummary.join_url` is read live from Google and stored nowhere
+  (*Calendar management* → *Zoom links*); removing the stored field does not
+  remove it.
 - **Never a Google Meet link.** No `hangoutLink`, `conferenceData` value or
   `meet.google.com` URL is ever stored in the index, or shown on
-  `/priorities` or in the digest. The extraction rules reject
-  them by construction.
+  `/priorities` or in the digest. The extraction rules reject them by
+  construction.
 
 **Later (2026-09-28):** the `forge_review` row listed no `source_revision`.
 DND-439 adds it: the merge request's `updated_at`, the family's ordering
