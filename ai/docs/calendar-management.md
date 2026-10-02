@@ -200,7 +200,7 @@ does.
 ```
 
 `approval_url` appears only in the answer to the write that proposed it, never
-from `calendar_change`. `state` is `proposed`, `applied`, `rejected`,
+from `calendar_change`. `state` is `proposed`, `applying`, `applied`, `rejected`,
 `expired`, `stale` or `failed`.
 
 ### Refusals
@@ -285,16 +285,28 @@ approval link.
   match, a bad or expired token. It shows the event, the full diff, each
   address reached, and marks addresses outside the organizer's email domain
   as **external**.
-- **Approve.** In one transaction, the row is locked and must be `proposed`.
-  The server reads the event again and checks that the owner is still the
-  organizer and that the etag still matches. A changed event marks the row
-  `stale` and applies nothing (Fix: ask the session to propose it again). Then
-  it PATCHes or inserts with `sendUpdates=all` and marks the row `applied`. A
-  Google failure marks it `failed` with the closed cause. A token is spent
-  once: the second Approve finds no `proposed` row.
-- **Reject** marks the row `rejected`. **Expiry** is read, not scheduled: a
-  row stored as `proposed` past `proposed_at + 24h` reads `expired`. Its
-  stored state stays `proposed`.
+- **Live means unexpired.** Approve and Reject each decrypt the token again
+  with its 24-hour max age, and require the row's computed state to be
+  `proposed`: stored `proposed` and `now < proposed_at + 24h` on the injected
+  clock. A page loaded just before expiry and submitted just after is refused
+  as `not_found`.
+- **Approve.** In a short transaction, the row is locked, checked live, and
+  set to `applying`; the transaction commits. No database lock is held across
+  a Google call. The server then reads the event again and checks that the
+  owner is still the organizer and that the etag still matches. A changed
+  event marks the row `stale` and applies nothing (Fix: ask the session to
+  propose it again). Then it PATCHes or inserts with `sendUpdates=all` and
+  marks the row `applied`. A Google failure marks it `failed` with the closed
+  cause. A token is spent once: the second Approve finds no live `proposed`
+  row. A row left `applying` (the node died mid-call) reads `failed
+  (interrupted)` and is never retried by itself, because the write may have
+  reached Google.
+- **Reject** marks a live row `rejected`. **Expiry** is read, not
+  scheduled: a row stored as `proposed` past `proposed_at + 24h` reads
+  `expired`. Its stored state stays `proposed`.
+- **`decided_at`** is set whenever a row reaches `applied`, `rejected`,
+  `stale` or `failed`, a direct apply included (its `decided_at` is its
+  `proposed_at`).
 - **An expired link shows `not_found`** on the page, like every other token
   mismatch, so the page never says whether a change exists. `calendar_change`
   and the digest show the `expired` state.
