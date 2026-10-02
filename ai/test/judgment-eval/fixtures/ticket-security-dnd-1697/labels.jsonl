@@ -1,0 +1,13 @@
+{"id": "override-1-lead-time-config-resolver", "label": "none", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "override-2-test-stubs-fall-through", "label": "none", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "override-3-push-without-gate-receipt", "label": "none", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "override-4-stub-check-misses-helpers", "label": "none", "provenance": "tracker_record", "labeler": "filer-override", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "control-1-token-in-crash-report", "label": "security", "provenance": "tracker_record", "labeler": "tracker", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "control-2-minted-token-in-assign", "label": "security", "provenance": "tracker_record", "labeler": "tracker", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "control-3-secret-guard-skips-double-underscore", "label": "security", "provenance": "tracker_record", "labeler": "tracker", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "control-4-sandbox-push-via-alias", "label": "security", "provenance": "tracker_record", "labeler": "tracker", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "control-5-identity-guard-misses-close", "label": "security", "provenance": "tracker_record", "labeler": "tracker", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "control-6-stash-guard-backtick-verb", "label": "security", "provenance": "tracker_record", "labeler": "tracker", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "control-7-installer-guard-missing", "label": "security", "provenance": "tracker_record", "labeler": "tracker", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "control-8-preauth-body-parse", "label": "security", "provenance": "tracker_record", "labeler": "tracker", "labeled_at": "2026-10-02T12:00:00Z"}
+{"id": "control-9-escaper-bidi-spoofing", "label": "security", "provenance": "tracker_record", "labeler": "tracker", "labeled_at": "2026-10-02T12:00:00Z"}
