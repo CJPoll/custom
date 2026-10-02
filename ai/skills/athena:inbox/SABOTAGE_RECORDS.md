@@ -1616,3 +1616,26 @@ A bug fix, so the evidence is the unfixed code going red, not a mutation.
 - **After:** `VERDICT: PASS (896 cases)`; doctor `VERDICT: PASS (380 cases)`,
   including the new could-not-look case (an unsearchable directory is a `fail`
   "could not be examined", never `never-delivered`).
+
+## DND-1428 (2026-10-02): the waiter's arm is level-triggered
+
+A bug fix, so the evidence is the unfixed code going red, plus one mutation.
+
+- **Code under test:** `bin/inbox-wait` (the watch-then-count arm and its
+  handshake), `lib/inbox.sh` (`inbox_pending_at_arm`, `_INBOX_PENDING_JQ`,
+  `last_change_epoch` on both count docs), `lib/fs.sh` (`fs_ctime_epoch`, the
+  wait-mark reader and writer), `lib/names.sh` (`names_valid_session_id`, the
+  `wait-marks/` reservation).
+- **Suite run:** `bash test/self-test.sh` (cases L-0 .. L-16, and W-12/W-13
+  for the new `mkfifo` prerequisite).
+- **Before the fix** (the unfixed `bin/inbox-wait`): `VERDICT: FAIL (11 of 950
+  cases)`. The defining failure: `FAIL L-1 mail delivered between the read and
+  the arm wakes the arm at once (0), not the budget (75)` -- `expected [0], got
+  [75]`. L-3 (maildir) failed the same way.
+- **After:** `VERDICT: PASS (985 cases)`.
+- **Mutation, ctime -> mtime** (`stat -c %Z` -> `stat -c %Y` in
+  `fs_ctime_epoch`): `VERDICT: FAIL (2 of 985 cases)`, `FAIL L-14 a message
+  written before the mark but delivered after it wakes the arm (0)` --
+  `expected [0], got [75]`. That is the case the delivery-time comparison
+  exists for: a maildir message's mtime is its write into `tmp/`, so an mtime
+  comparison hides a message linked into place after the mark.

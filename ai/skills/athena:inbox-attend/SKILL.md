@@ -104,7 +104,9 @@ is the brief, not the message.
    *How to arm it*). Do it here, not last: a wake that turns into a long reply
    or investigation drops a re-arm left for the end, and the session goes deaf
    until it happens to look again. The mail is already read and acked (step 2),
-   so the re-armed waiter will not re-fire on it; re-arm even when there was
+   so the re-armed waiter will not re-fire on it (a ticket-lane channel you left
+   unread re-fires at most once more, on this re-arm: `athena:inbox` → *How to
+   arm it*); re-arm even when there was
    nothing to reply to (a quiet or peer wake rings the bell too). Do **not**
    re-arm if you were refused the consumer lock (step 2): another session is the
    attendant, and re-arming would only re-wake you to the same refusal.

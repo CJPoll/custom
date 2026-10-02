@@ -158,9 +158,14 @@ names_valid_log_path() {
 # count other tenants' registry entries as unread mail; once a reader exists it
 # would render them. Configuration and message surfaces share a root; they do
 # not share a namespace.
+#
+# `wait-marks/` is reserved the same way (DND-1428): it holds the waiter's
+# per-session watermarks, and a maildir namespace there would have the
+# designated consumer provisioning channel directories inside the waiter's
+# state.
 names_reserved_prefix() {
   case "${1}" in
-    projects|projects/*) return 0 ;;
+    projects|projects/*|wait-marks|wait-marks/*) return 0 ;;
   esac
   return 1
 }

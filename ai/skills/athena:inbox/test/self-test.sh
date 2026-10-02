@@ -301,11 +301,11 @@ assert_refused "A-4 a maildir namespace escaping the root is rejected too" \
 # counting slice that would count other tenants' registry entries as unread
 # mail; once a reader exists it would render them. Configuration and message
 # surfaces share a root; they do not share a namespace.
-for p in "projects/x.jsonl" "projects/nested/x.jsonl"; do
+for p in "projects/x.jsonl" "projects/nested/x.jsonl" "wait-marks/x.jsonl"; do
   assert_refused "a log path inside the reserved projects/ is rejected: [${p}]" \
     descriptor_validate "{\"v\":1,\"repo\":\"/r/.git\",\"channels\":{\"a\":{\"kind\":\"log\",\"path\":\"${p}\"}}}"
 done
-for ns in "projects" "projects/sub"; do
+for ns in "projects" "projects/sub" "wait-marks" "wait-marks/sub"; do
   assert_refused "a maildir namespace inside the reserved projects/ is rejected: [${ns}]" \
     descriptor_validate "{\"v\":1,\"repo\":\"/r/.git\",\"channels\":{\"m\":{\"kind\":\"maildir\",\"namespace\":\"${ns}\",\"read\":\"a\",\"write\":\"b\",\"identity\":\"athena\"}}}"
 done
@@ -3651,11 +3651,18 @@ assert_contains "L-1 and marks it as pending when the waiter armed" \
 # still block for its budget and exit 75. A waiter that wakes on every arm is
 # a spin loop with an LLM turn inside it.
 ( cd "${LREPO}" && "${BIN}/read-inbox" slack ) >/dev/null 2>&1
-arm_waiter "${LREPO}" 1
+export CLAUDE_CODE_SESSION_ID="00000000-0000-4000-8000-000000000012"
+arm_waiter "${LREPO}" 3
 reap_waiter
 assert_eq "L-2 a read-to-arm with nothing unread still blocks to its budget (75), no false wake" \
   "75" "${WAIT_RC}"
 assert_not_contains "L-2 and it names no channel as pending" "pending-at-arm" "$(cat "${WAIT_OUT}")"
+# Not vacuous: the mark is written only after the watch is established and the
+# count ran, so its presence proves this 75 came from a level check that found
+# nothing, not from a budget that expired before the check.
+assert_ok "L-2 and the level check ran on that arm (it wrote the session's mark)" \
+  test -f "${ATHENA_INBOX_ROOT}/wait-marks/${CLAUDE_CODE_SESSION_ID}"
+unset CLAUDE_CODE_SESSION_ID
 
 # The maildir kind goes through the same count: an unread message already in
 # the read directory wakes the arm.
@@ -3671,19 +3678,20 @@ assert_not_contains "L-3 and the wake still carries no peer-chosen filename" \
   "synthetic.md" "$(cat "${WAIT_OUT}")"
 
 # A POSITION THAT CANNOT BE READ IS NOT ZERO UNREAD. A NUL byte in the log
-# file makes the count refuse (fs_assert_no_nul). Reading that as "quiet" and
-# blocking would be the failed lookup that looks like an empty one, so the arm
-# must report it with a Fix: and return the fault status -- never block, never
-# exit 0 with nothing named.
+# file makes the count refuse (fs_assert_no_nul). The arm names it with a
+# Fix:, at the arm and again at the exit, and keeps watching EVERY channel: a
+# fault exit would have the caller re-arm once and stop, taking the wake down
+# for all channels over one broken one.
 setup_case
 UREPO="$(make_repo unreadable)"
 register unreadable "${UREPO}" '{"slack": {"kind":"log","path":"u-slack.jsonl"}}'
 printf 'a\000b\n' > "${ATHENA_INBOX_ROOT}/u-slack.jsonl"
-ERR="$(cd "${UREPO}" && ATHENA_INBOX_WAIT_BUDGET=5 timeout 20 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
-assert_eq "L-4 an unreadable channel position is a fault (1), not a quiet block (75) and not a wake (0)" \
-  "1" "${RC}"
-assert_contains "L-4 and names the channel it could not count" "slack" "${ERR}"
+ERR="$(cd "${UREPO}" && ATHENA_INBOX_WAIT_BUDGET=2 timeout 20 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+assert_eq "L-4 an unreadable channel position is not a wake (0) and does not stop the watch: it blocks to its budget (75)" \
+  "75" "${RC}"
+assert_contains "L-4 and names the channel it could not count" "could not read the unread position of: slack" "${ERR}"
 assert_contains "L-4 and carries a Fix:" "Fix:" "${ERR}"
+assert_contains "L-4 and names it again at the exit" "uncounted-at-arm: slack" "${ERR}"
 
 # Unreadable AND pending: the pending mail still wakes (0) -- the broken
 # channel must not hide real mail on another one -- and the unreadable one is
@@ -3698,45 +3706,89 @@ assert_eq "L-5 pending mail on one channel wakes the arm even when another is un
 assert_contains "L-5 and names the pending channel" "pending-at-arm: ok-chan" "${OUT}"
 assert_contains "L-5 and still reports the unreadable channel, with a Fix:" "Fix:" "$(cat "${TMP}/l5-err")"
 
+# AN UNREADABLE CHANNEL NEVER ADVANCES THE MARK. Mail that landed on it while
+# nobody watched was never announced; moving the mark past it would hide it for
+# good once the channel is repaired.
+export CLAUDE_CODE_SESSION_ID="00000000-0000-4000-8000-000000000013"
+mkdir -p "${ATHENA_INBOX_ROOT}/wait-marks" && chmod 700 "${ATHENA_INBOX_ROOT}/wait-marks"
+printf '1000\n' > "${ATHENA_INBOX_ROOT}/wait-marks/${CLAUDE_CODE_SESSION_ID}"
+( cd "${UREPO}" && ATHENA_INBOX_WAIT_BUDGET=5 timeout 20 "${BIN}/inbox-wait" ) >/dev/null 2>&1
+assert_eq "L-13 an arm that could not count a channel leaves the session's mark where it was" \
+  "1000" "$(cat "${ATHENA_INBOX_ROOT}/wait-marks/${CLAUDE_CODE_SESSION_ID}")"
+unset CLAUDE_CODE_SESSION_ID
+
 # THE WATERMARK: LEVEL-TRIGGERED MUST NOT MEAN WAKE-ON-EVERY-ARM. A
 # ticket-lane trigger (walt_ui's `flaky`) is deliberately left unacked while an
 # admiral drains. A pure level check would wake every arm on it, for hours. The
 # session's watermark (when its previous waiter started watching) lets a
 # delivery wake at most once more after it was announced, and never forever.
+#
+# AN INJECTED CLOCK, NOT A SLEEP. A fixture's ctime is always "now", so "this
+# was delivered before the mark" needs the waiter's clock to be ahead of the
+# fixture's. A `date` shim adds a fixed skew to `date -u +%s` (the one form
+# fs_now_epoch uses) and hands every other call to the real date(1). The skews
+# are hundreds of seconds, so no verdict depends on how fast this machine runs.
+CLOCK_DIR="${TMP}/clock-shim"
+mkdir -p "${CLOCK_DIR}"
+REAL_DATE="$(command -v date)"
+printf '#!/bin/sh\nif [ "$#" -eq 2 ] && [ "$1" = "-u" ] && [ "$2" = "+%%s" ]; then\n  echo $(( $(%s -u +%%s) + ${ATHENA_TEST_CLOCK_SKEW:-0} ))\nelse\n  exec %s "$@"\nfi\n' \
+  "${REAL_DATE}" "${REAL_DATE}" > "${CLOCK_DIR}/date"
+chmod +x "${CLOCK_DIR}/date"
+# arm_skewed <repo> <budget> <skew-seconds>
+arm_skewed() {
+  WAIT_OUT="${TMP}/waiter-out"; WAIT_ERR="${TMP}/waiter-err"
+  ( cd "$1" && PATH="${CLOCK_DIR}:${PATH}" ATHENA_TEST_CLOCK_SKEW="$3" \
+      ATHENA_INBOX_WAIT_BUDGET="$2" exec "${BIN}/inbox-wait" ) \
+    >"${WAIT_OUT}" 2>"${WAIT_ERR}" &
+  WAIT_CHILD=$!
+}
+
 setup_case
 MREPO="$(make_repo marked)"
 register marked "${MREPO}" '{"flaky": {"kind":"log","path":"m-flaky.jsonl"}}'
 lv_line EvM1 1792.0001 > "${ATHENA_INBOX_ROOT}/m-flaky.jsonl"
-touch -d '1 hour ago' "${ATHENA_INBOX_ROOT}/m-flaky.jsonl"
 export CLAUDE_CODE_SESSION_ID="00000000-0000-4000-8000-000000001428"
 MARK_FILE="${ATHENA_INBOX_ROOT}/wait-marks/${CLAUDE_CODE_SESSION_ID}"
 
-arm_waiter "${MREPO}" 5
+arm_skewed "${MREPO}" 5 100
 reap_waiter
 assert_eq "L-6 a session's FIRST arm wakes for unread it was never woken for" "0" "${WAIT_RC}"
 assert_contains "L-6 and names it as pending" "pending-at-arm: flaky" "$(cat "${WAIT_OUT}")"
 assert_eq "L-6 the arm records the session's watermark, 0600" "600" "$(stat -c '%a' "${MARK_FILE}" 2>/dev/null)"
 assert_eq "L-6 in a 0700 directory" "700" "$(stat -c '%a' "${ATHENA_INBOX_ROOT}/wait-marks" 2>/dev/null)"
+MARK_1="$(cat "${MARK_FILE}" 2>/dev/null)"
 
 # Left unread on purpose, nothing new: the next arm blocks. This is the case
-# that would be a spin loop without the mark.
-arm_waiter "${MREPO}" 1
+# that would be a spin loop without the mark. The mark must have MOVED, which
+# proves the level check ran on this arm rather than the budget expiring first.
+arm_skewed "${MREPO}" 5 200
 reap_waiter
 assert_eq "L-7 unread mail the session was already woken for does NOT wake the next arm (75)" "75" "${WAIT_RC}"
+assert_not_contains "L-7 and names nothing as pending" "pending-at-arm" "$(cat "${WAIT_OUT}")"
+assert_eq "L-7 and the level check ran on that arm (the mark moved)" "moved" \
+  "$([ -n "${MARK_1}" ] && [ "$(cat "${MARK_FILE}")" != "${MARK_1}" ] && echo moved || echo same)"
 
-# A new delivery between arms, its ring lost, wakes the next arm: the mark
-# never hides mail that arrived after the previous waiter started watching.
+# A MARK IN THE FUTURE (the clock stepped back) is not trusted: it would hide
+# mail delivered before it. The real-clock arm reads the skewed mark as future,
+# says so, and wakes.
+arm_waiter "${MREPO}" 5
+reap_waiter
+assert_eq "L-12 a future watermark is not trusted: the arm wakes on unread mail (0)" "0" "${WAIT_RC}"
+assert_contains "L-12 and says the mark was in the future" "in the future" "$(cat "${WAIT_ERR}")"
+
+# A new delivery after the previous arm started watching, its ring lost,
+# wakes the next arm: the mark never hides mail that arrived after it.
 lv_line EvM2 1792.0002 >> "${ATHENA_INBOX_ROOT}/m-flaky.jsonl"
 touch "${ATHENA_INBOX_ROOT}/m-flaky.event"
 arm_waiter "${MREPO}" 5
 reap_waiter
-assert_eq "L-8 a delivery after the previous arm wakes the next arm, mark or no mark (0)" "0" "${WAIT_RC}"
+assert_eq "L-8 a delivery after the previous arm started watching wakes the next arm (0)" "0" "${WAIT_RC}"
 assert_contains "L-8 and names the channel" "pending-at-arm: flaky" "$(cat "${WAIT_OUT}")"
 
 # The mark is per SESSION: another session on the same project has not been
 # woken for anything yet, so it is.
 CLAUDE_CODE_SESSION_ID="00000000-0000-4000-8000-000000000002"
-arm_waiter "${MREPO}" 5
+arm_skewed "${MREPO}" 5 300
 reap_waiter
 assert_eq "L-9 another session's first arm still wakes for the same unread mail (marks are per session)" \
   "0" "${WAIT_RC}"
@@ -3744,10 +3796,10 @@ assert_eq "L-9 another session's first arm still wakes for the same unread mail 
 # An unreadable mark is said, and read as NO mark (wake), never as "nothing new".
 CLAUDE_CODE_SESSION_ID="00000000-0000-4000-8000-000000001428"
 printf 'not-an-epoch\n' > "${MARK_FILE}"
-arm_waiter "${MREPO}" 5
+arm_skewed "${MREPO}" 5 400
 reap_waiter
 assert_eq "L-10 an unreadable watermark wakes the arm rather than hiding unread mail" "0" "${WAIT_RC}"
-assert_contains "L-10 and says so, with a Fix:" "watermark" "$(cat "${WAIT_ERR}")"
+assert_contains "L-10 and says so" "watermark" "$(cat "${WAIT_ERR}")"
 assert_contains "L-10 and carries a Fix:" "Fix:" "$(cat "${WAIT_ERR}")"
 
 # A malformed session id never becomes a path.
@@ -3758,7 +3810,53 @@ assert_eq "L-11 a malformed session id wakes on unread (no mark), never names a 
 assert_contains "L-11 and says the id is unusable" "not a usable watermark key" "$(cat "${WAIT_ERR}")"
 assert_eq "L-11 and writes nothing outside wait-marks/" "absent" \
   "$([ -e "${ATHENA_INBOX_ROOT}/escape" ] && echo present || echo absent)"
+
+# WHAT IS COMPARED IS THE DELIVERY, NOT THE WRITE. A maildir message is written
+# into tmp/ and linked into the read directory later; its mtime keeps the
+# write time. A message staged before the mark and delivered after it must
+# wake the arm. Compared by mtime it would be suppressed: the loss this ticket
+# exists to close.
+setup_case
+DREPO="$(make_repo delivered)"
+register delivered "${DREPO}" '{"mail": {"kind":"maildir","namespace":"agent-mail/dpeer","read":"from-server","write":"to-server","identity":"athena"}}'
+export CLAUDE_CODE_SESSION_ID="00000000-0000-4000-8000-000000000014"
+arm_waiter "${DREPO}" 2                                 # writes the session's mark
+reap_waiter
+D_MD="${ATHENA_INBOX_ROOT}/agent-mail/dpeer/from-server"
+printf -- '---\nfrom: peer\nto: athena\nsent_at: 2026-10-02T15:35:02Z\n---\n\nsynthetic\n' \
+  > "${D_MD}/tmp/20261002T153502Z-001-staged.md"
+touch -d '1 hour ago' "${D_MD}/tmp/20261002T153502Z-001-staged.md"
+mv "${D_MD}/tmp/20261002T153502Z-001-staged.md" "${D_MD}/20261002T153502Z-001-staged.md"
+arm_waiter "${DREPO}" 5
+reap_waiter
+assert_eq "L-14 a message written before the mark but delivered after it wakes the arm (0)" "0" "${WAIT_RC}"
+assert_contains "L-14 and names the channel" "pending-at-arm: mail" "$(cat "${WAIT_OUT}")"
+
+# A MARK THAT CANNOT BE WRITTEN is the fault status, not a wake: every later
+# arm would fall back to the old mark and wake again without bound. The mail
+# found waiting is still named.
+rm -rf "${ATHENA_INBOX_ROOT}/wait-marks"; : > "${ATHENA_INBOX_ROOT}/wait-marks"
+arm_waiter "${DREPO}" 5
+reap_waiter
+assert_eq "L-15 a watermark that cannot be written is the fault status (1)" "1" "${WAIT_RC}"
+assert_contains "L-15 and names the pending mail anyway" "pending-at-arm: mail" "$(cat "${WAIT_OUT}")"
+assert_contains "L-15 and carries a Fix:" "Fix:" "$(cat "${WAIT_ERR}")"
 unset CLAUDE_CODE_SESSION_ID
+
+# NO STRAY PROCESS AND NO LEFTOVER FIFO after a pending-at-arm wake: that path
+# kills the watch itself. The waiter's own temp dirs are mktemp -d under TMPDIR,
+# so a private TMPDIR makes "nothing left behind" checkable.
+setup_case
+SREPO="$(make_repo stray)"
+register stray "${SREPO}" '{"slack": {"kind":"log","path":"s-slack.jsonl"}}'
+lv_line EvS1 1793.0001 > "${ATHENA_INBOX_ROOT}/s-slack.jsonl"
+S_TMPDIR="${CASE_DIR}/waiter-tmp"; mkdir -p "${S_TMPDIR}"
+( cd "${SREPO}" && TMPDIR="${S_TMPDIR}" ATHENA_INBOX_WAIT_BUDGET=30 timeout 40 "${BIN}/inbox-wait" ) >/dev/null 2>&1; RC=$?
+assert_eq "L-16 the pending wake returns 0" "0" "${RC}"
+assert_eq "L-16 and leaves no FIFO directory or temp file behind" "0" \
+  "$(find "${S_TMPDIR}" -mindepth 1 | wc -l)"
+assert_eq "L-16 and leaves no inotifywait watching this case's doorbell" "0" \
+  "$(pgrep -fc -- "${ATHENA_INBOX_ROOT}/s-slack.event" 2>/dev/null || true)"
 
 echo
 echo "== DND-187 / 1. Domain: the writer's half of lib/maildir.sh =="

@@ -331,6 +331,16 @@ fs_mtime_epoch() {
   stat -c %Y "$1" 2>/dev/null || return 1
 }
 
+# fs_ctime_epoch <path>  (DND-1428)
+# The inode CHANGE time: an append, and also the link(2)/rename(2) that
+# DELIVERS a maildir message. mtime is not enough for that: a message written
+# into tmp/ keeps its write time when it is linked into place later, so mtime
+# can predate the delivery it is meant to date.
+fs_ctime_epoch() {
+  [ -e "$1" ] || return 1
+  stat -c %Z "$1" 2>/dev/null || return 1
+}
+
 # --- atomic state write -----------------------------------------------------
 
 # fs_write_state <path> <json>
@@ -416,6 +426,10 @@ fs_write_wait_mark() {
   tmp="${path}.tmp.$$"
   ( umask 077; printf '%s\n' "$2" > "${tmp}" ) || return 1
   mv -f "${tmp}" "${path}" || { rm -f "${tmp}" 2>/dev/null; return 1; }
+  # RETENTION: one small file per session, so marks untouched for 30 days (a
+  # session long gone) are pruned here, best-effort. A pruned live session's
+  # next arm has no mark and wakes on every unread channel once: safe.
+  find "${dir}" -maxdepth 1 -type f -mtime +30 -delete 2>/dev/null || true
 }
 
 # --- retention: rotate and sweep --------------------------------------------

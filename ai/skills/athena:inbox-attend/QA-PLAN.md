@@ -70,16 +70,27 @@ runner.
    runner), never silent exit. **[waiter] [runner]**
 7. **A doorbell rung while unarmed is recovered, never silently dropped.** The
    `.event` doorbell can be bumped while no waiter is armed — between wakes, or
-   before startup. The next arm re-checks `inbox-status` from the unadvanced
-   on-disk offset, so the mail is handled on the next wake rather than lost, and
-   the waiter's exit-code contract keeps "a bell rang" (0), "quiet budget" (75),
-   and "faulted" (1/2) distinct, so silence is never read as success. **[waiter]**
+   before startup. The next arm is level-triggered: once its watch is
+   established it counts unread from the unadvanced on-disk offset (the count
+   `inbox-status` uses) and exits 0 at once, naming the channel
+   (`pending-at-arm:`), so the mail is handled on that wake rather than lost.
+   The waiter's exit-code contract keeps "rang or pending at arm" (0), "quiet
+   budget" (75), and "faulted" (1/2) distinct, so silence is never read as
+   success. **[waiter]**
+
+   **Later (2026-10-02):** this said "The next arm re-checks `inbox-status`".
+   No arm did: the waiter was edge-triggered, and a bell rung between the read
+   and the re-arm was lost until an unrelated ring (DND-1428, measured twice).
+   Superseded by the level-triggered arm above.
 
 ## Survive transients; re-arm; do not spin
 
 8. **A watcher/inotify fault is survived, not fatal and not silent.** A transient
    watch fault re-arms (bounded), logs the fault, and writes no stop/wedge
-   marker — a dead watch is not quiet. **[waiter] [runner]**
+   marker — a dead watch is not quiet. A channel whose unread position cannot be
+   counted at arm is not a watch fault: the waiter names it
+   (`uncounted-at-arm:`, with a `Fix:`) and keeps watching every channel.
+   **[waiter] [runner]**
 9. **A single transient handler failure does not kill the loop.** It backs off, the
    next wake succeeds, and the failure streak resets. **[runner]**
 10. **No busy-spin; the wait is bounded and blocking.** The waiter blocks on a

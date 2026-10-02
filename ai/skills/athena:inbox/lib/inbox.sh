@@ -384,11 +384,17 @@ _inbox_count_log() {
   # (like `kind`). A never-delivered warning that names the wrong producer
   # sends the reader to the wrong place to fix it, so the discriminator travels
   # with the count rather than being guessed downstream.
+  # `last_change_epoch` (DND-1428): the inbox file's ctime, which every append
+  # moves. The waiter compares it against its session watermark; null when the
+  # live file does not exist (a rotated, quiet channel has nothing new).
+  local changed="null"
+  changed="$(fs_ctime_epoch "${inbox}" 2>/dev/null)" || changed="null"
   printf '%s' "${scan}" | jq -e -c \
     --argjson never "${never}" --argjson stale "${stale}" --argjson sbad "${state_bad}" \
-    --arg producer "${producer}" \
+    --arg producer "${producer}" --argjson changed "${changed}" \
     '{new: .new, unreadable: .unreadable, never_delivered: $never,
-      offset_reset: $stale, state_unreadable: $sbad, producer: $producer}'
+      offset_reset: $stale, state_unreadable: $sbad, producer: $producer,
+      last_change_epoch: $changed}'
 }
 
 # _inbox_count_maildir <resolved-paths>
@@ -406,17 +412,29 @@ _inbox_count_maildir() {
   # `maildir_is_unread` is a NAME predicate and deliberately stays one, so the
   # "is it actually a message file" half lives here, where the filesystem is.
   # A subdirectory that is not `tmp` would otherwise count as a message.
+  # `last_change_epoch` (DND-1428): the newest ctime among the unread messages.
+  # ctime, not mtime: the link(2)/rename(2) that delivers a message moves its
+  # ctime, while its mtime stays at the earlier write into tmp/. Null when
+  # nothing is unread, or when a ctime could not be read (the waiter then wakes
+  # rather than trusting a partial answer).
+  local changed=0 c ctime_ok=1
   while IFS= read -r -d '' name; do
     maildir_is_unread "${name}" || continue
     [ -f "${read_dir}/${name}" ] || continue
     [ -L "${read_dir}/${name}" ] && continue
     n=$((n + 1))
+    if c="$(fs_ctime_epoch "${read_dir}/${name}")"; then
+      [ "${c}" -gt "${changed}" ] && changed="${c}"
+    else
+      ctime_ok=0
+    fi
   done < <(fs_list_dir_z "${read_dir}")
+  { [ "${n}" -gt 0 ] && [ "${ctime_ok}" -eq 1 ]; } || changed="null"
 
   # Again counts only: the FILENAMES are peer-chosen prose and never leave
   # this function.
-  jq -n -c --argjson n "${n}" --argjson never "${never}" \
-    '{unread: $n, never_delivered: $never}'
+  jq -n -c --argjson n "${n}" --argjson never "${never}" --argjson changed "${changed}" \
+    '{unread: $n, never_delivered: $never, last_change_epoch: $changed}'
 }
 
 # inbox_repo_key [cwd]
@@ -631,13 +649,13 @@ inbox_status_json() {
 }
 
 # _INBOX_PENDING_JQ (DND-1428): classify one status document's channels for the
-# waiter's arm. It reads ONLY the normalized `count` that _INBOX_COUNT_JQ put on
-# each channel, and the freshness age inbox_status_json already merged, so the
-# arm and inbox-status share one count and one position rule (offset vs size
-# for a log, the unread set for a maildir). Emits one `<verdict>\t<name>` line
-# per channel that matters:
-#   pending     count > 0 AND the channel's last delivery is at or after
-#               $mark - 2 (or there is no mark, or its age is unknown);
+# waiter's arm. It reads ONLY fields inbox_status_json already computed -- the
+# normalized `count` that _INBOX_COUNT_JQ put on each channel, and the count
+# doc's `last_change_epoch` -- so the arm and inbox-status share one count and
+# one position rule (offset vs size for a log, the unread set for a maildir).
+# Emits one `<verdict>\t<name>` line per channel that matters:
+#   pending     count > 0 AND (no mark, or no change time, or the channel last
+#               changed at or after $mark - 1);
 #   unreadable  count null and NOT a never-delivered log: the position could
 #               not be read, which is never "zero unread".
 # A never-delivered log channel (no inbox file has ever existed) is skipped: it
@@ -650,18 +668,24 @@ inbox_status_json() {
 # it was announced; a session that left it unread did so on purpose (a
 # ticket-lane trigger stays unacked while an admiral drains). Without the mark
 # that channel would wake every arm, for hours: a spin loop with an LLM turn in
-# it. The comparison is biased toward waking: the delivery epoch is estimated
-# as `$now - age`, where `$now` is read AFTER the ages were (so the estimate is
-# never earlier than the truth), the 2s slack covers the seconds granularity,
-# and a missing age wakes. A wrong guess costs one extra wake, never a lost one.
+# it.
+#
+# WHAT IS COMPARED IS THE DELIVERY, NOT THE WRITE. `last_change_epoch` is a
+# ctime: an append for a log, the link(2)/rename(2) into the read directory for
+# a maildir message. A maildir message's mtime is its earlier write into tmp/,
+# so an mtime comparison would suppress a message staged before the mark and
+# linked after it -- the exact loss this check exists to close. The comparison
+# is biased toward waking: the mark is taken before the watch starts, the 1s
+# slack covers the seconds granularity, and a missing change time wakes. A
+# wrong guess costs an extra wake, never a lost one.
 # shellcheck disable=SC2034
 _INBOX_PENDING_JQ='
   .channels[]
   | if (.count | type) == "number" then
       (if .count > 0
           and ($mark == null
-               or ((.last_delivery_age_s | type) != "number")
-               or (($now - .last_delivery_age_s) >= ($mark - 2)))
+               or ((.last_change_epoch | type) != "number")
+               or (.last_change_epoch >= ($mark - 1)))
        then "pending\t\(.name)" else empty end)
     elif (.kind == "log" and (.never_delivered // false) and ((.error // false) | not)) then empty
     else "unreadable\t\(.name)"
@@ -677,23 +701,35 @@ inbox_now_epoch() { fs_now_epoch; }
 # session's channels have unread mail the session has not yet been woken for,
 # and which could not be counted. It is inbox_status_json, the same count
 # inbox-status reports, classified by _INBOX_PENDING_JQ -- never a second copy
-# of the position logic.
+# of the position logic. (inbox_status_json also runs the retention sweep, as
+# every inbox-status count does; the arm inherits that, gated as it is there.)
 #
 # The session's watermark (fs.sh -> fs_read_wait_mark) is read first and
 # replaced by <watch-started-epoch> after: the caller MUST pass a time taken
 # before its watch was started, so the next arm treats everything since as
-# possibly unannounced. The key is CLAUDE_CODE_SESSION_ID. No session id means
-# no mark (every unread channel wakes: correct, only noisier). A malformed id
-# or an unreadable mark is said on stderr and treated the same way -- never as
-# "nothing new since".
+# possibly unannounced. The key is CLAUDE_CODE_SESSION_ID.
+#
+# WHEN THE MARK IS NOT USED, AND WHY EACH IS BOUNDED:
+#   * no session id (a plain shell, a test): no mark, every unread channel
+#     wakes. No Claude session arms without one.
+#   * a malformed id, an unreadable mark, or a mark in the future (the clock
+#     stepped back): said on stderr, treated as no mark for THIS arm, and
+#     replaced by this arm's mark -- so it costs one extra wake, once.
+#   * a channel that could not be counted: the mark is NOT advanced. Mail that
+#     landed on it while nobody watched was never announced, so moving the
+#     mark past it would hide it for good once the channel is repaired.
+#   * the mark cannot be written: status 3. Every later arm would fall back to
+#     the old mark and wake again on mail left unread on purpose, without
+#     bound, so the caller treats it as a fault rather than a wake.
 #
 # Prints `pending\t<name>` / `unreadable\t<name>` lines (nothing when nothing
-# needs a wake). Status 0 when it produced a classification, 1 when the status
+# needs a wake). Status 0 when it produced a classification; 1 when the status
 # document itself could not be built (a refusal has gone to stderr with its
-# Fix:). A per-channel count failure is NOT status 1: inbox_status_json still
-# emits the document, and that channel comes back as `unreadable`.
+# Fix:); 3 when it classified (lines printed) but could not write the mark. A
+# per-channel count failure is NOT status 1: inbox_status_json still emits the
+# document, and that channel comes back as `unreadable`.
 inbox_pending_at_arm() {
-  local project="${1:-.}" started="${2:-}" sid="${CLAUDE_CODE_SESSION_ID:-}" mark="" doc now out
+  local project="${1:-.}" started="${2:-}" sid="${CLAUDE_CODE_SESSION_ID:-}" mark="" doc out now
   case "${started}" in
     ''|*[!0-9]*)
       inbox_fail "inbox_pending_at_arm was given no watch-start epoch" \
@@ -707,21 +743,32 @@ inbox_pending_at_arm() {
   fi
   if [ -n "${sid}" ] && ! mark="$(fs_read_wait_mark "${sid}")"; then
     inbox_fail "the waiter's watermark $(fs_wait_mark_path "${sid}") could not be read, so this arm wakes on every unread channel" \
-      "delete that file; the next arm writes a fresh one. Waking on every unread channel is safe, only noisier."
+      "nothing to do if this arm rewrites it; if it recurs, delete that file. Waking on every unread channel is safe, only noisier."
+    mark=""
+  fi
+  now="$(fs_now_epoch)"
+  if [ -n "${mark}" ] && [ "${mark}" -gt "${now}" ]; then
+    inbox_fail "the waiter's watermark is in the future (${mark} > ${now}; the clock stepped back), so this arm wakes on every unread channel" \
+      "nothing to do: this arm replaces it. A future mark would otherwise hide mail delivered before it."
     mark=""
   fi
 
   doc="$(inbox_status_json "${project}")"
   [ -n "${doc}" ] || return 1
-  now="$(fs_now_epoch)"
-  out="$(printf '%s' "${doc}" | jq -r --argjson now "${now}" \
+  out="$(printf '%s' "${doc}" | jq -r \
     --argjson mark "${mark:-null}" "${_INBOX_PENDING_JQ}")" || return 1
-
-  if [ -n "${sid}" ] && ! fs_write_wait_mark "${sid}" "${started}"; then
-    inbox_fail "could not write the waiter's watermark $(fs_wait_mark_path "${sid}")" \
-      "check that the inbox root is writable and wait-marks/ is a 0700 directory, not a symlink. Until it is written the next arm falls back to the older mark: more wakes, never fewer."
-  fi
   [ -z "${out}" ] || printf '%s\n' "${out}"
+
+  [ -n "${sid}" ] || return 0
+  case "${out}" in
+    unreadable$'\t'*|*$'\n'unreadable$'\t'*) return 0 ;;   # keep the old mark
+  esac
+  if ! fs_write_wait_mark "${sid}" "${started}"; then
+    inbox_fail "could not write the waiter's watermark $(fs_wait_mark_path "${sid}")" \
+      "check that the inbox root is writable and wait-marks/ is a 0700 directory, not a symlink, then re-arm. Without it every arm would wake again on mail left unread on purpose."
+    return 3
+  fi
+  return 0
 }
 
 # ============================================================================

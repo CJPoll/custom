@@ -194,6 +194,9 @@ The contract would be ambiguous without saying who creates what, so:
 - The **root** is created at `0700` on first use, by whichever tool touches it
   first. `projects/` is created at `0700` by a reader or by the owner's setup
   script — never by a writer, which is prohibited from touching it.
+  `wait-marks/` is created at `0700` by the waiter on its first arm in a
+  session that has a session key, and pruned by it (marks untouched for 30
+  days).
 - A **registry entry is never created implicitly.** The owner (or a setup
   script run on the owner's behalf) authors it; a reader that finds no entry
   reports zero channels and creates nothing, because a fabricated entry would
@@ -581,7 +584,8 @@ normal.
   surface is. Containment is checked before any I/O.
 - **`projects/` is reserved.** No channel `path` or `namespace` may resolve
   inside it. Configuration and message surfaces share a root; they do not share
-  a namespace.
+  a namespace. **`wait-marks/` is reserved the same way**: it holds the
+  waiter's per-session watermarks (*Waiter rules*).
 
   **Why the registry lives inside the root at all**, when the machine token
   does not (`~/.config/athena-inbox-client/config.json`): the root is the one
@@ -718,7 +722,7 @@ values the reader still has no schema for.
   needs its own rejection or the reservation has no enforcement point. A
   `maildir` channel declaring `"namespace": "projects"` would otherwise pass
   every other check and have message directories provisioned inside the tenancy
-  directory.
+  directory. The same rejection applies to **`wait-marks/`**.
 - **A registry entry whose `v` is not `1` is a hard error**, naming the version
   found. Skip-and-count applies to `log` *lines*, never to an entry: a
   configuration file a tool does not understand cannot be "counted separately"
@@ -833,7 +837,8 @@ through `<write>/tmp/`; the peer writes through `<read>/tmp/`. Neither side ever
 stages in the other's.
 
 A writer MUST NOT create any file matching `*.state.json`, `*.consumer.lock`,
-or `*.jsonl.1` under the root, and MUST NOT create anything under `projects/`.
+or `*.jsonl.1` under the root, and MUST NOT create anything under `projects/`
+or `wait-marks/`.
 Those are the reader's and the owner's, and a writer that touches them corrupts
 consumption state, retained evidence, or tenancy it cannot see.
 
@@ -2109,8 +2114,17 @@ type is reliable, so watch the union.**
 The normative watch set is therefore:
 
 ```bash
-timeout "$BUDGET" inotifywait -qq -e attrib,modify,close_write,move_self,delete_self "${EVENT_FILES[@]}"
+timeout "$BUDGET" inotifywait -e attrib,modify,close_write,move_self,delete_self "${EVENT_FILES[@]}"
 ```
+
+Without `-q`: inotifywait then prints `Watches established.` on stderr once
+every watch is registered, which is the handshake the level-triggered arm
+waits for before it counts unread (*Waiter rules*). `bin/inbox-wait` adds
+`--format '%w%f'` so the wake can name the doorbell that fired.
+
+**Later (2026-10-02):** this command read `inotifywait -qq …`. Superseded by
+DND-1428: `-qq` prints nothing, so a waiter following it could never learn
+when its watch was established, and could not meet the level-triggered rule.
 
 **Waiter rules**
 
@@ -2125,18 +2139,28 @@ timeout "$BUDGET" inotifywait -qq -e attrib,modify,close_write,move_self,delete_
   unread. The check MUST run only after the watch is established — every
   writer appends before it rings, so a delivery is then either counted or rung
   on a watched bell. A position that cannot be read is NOT zero unread: the
-  waiter names it with a `Fix:` and, with nothing else pending, exits with the
-  fault status rather than block.
-  **The level check MUST NOT wake every arm on mail the session leaves unread
+  waiter names it with a `Fix:` at the arm and again at its exit. It MUST NOT
+  stop watching over it, because one broken channel would then take the wake
+  down for every channel (the outcome the doorbell rule below forbids for one
+  missing `.event`), and it MUST NOT wake on it, because nothing can date its
+  mail and it would wake every arm.
+- **The level check MUST NOT wake every arm on mail the session leaves unread
   on purpose** (a ticket-lane trigger stays unacked while an admiral drains).
-  So a waiter records, per session, when it started watching (a watermark),
-  and an unread channel wakes the next arm only when its last delivery is at or
-  after that mark. Mail older than the mark was counted or rung while a waiter
-  of that session watched, so it was announced. The comparison is biased
-  toward waking: a missing age, a missing or unreadable mark, or no session
-  key all wake. The watermark is `<root>/wait-marks/<session-id>` (directory
-  `0700`, file `0600`), keyed by `CLAUDE_CODE_SESSION_ID`; it is waiter
-  state, never consumption state, and advances nothing.
+  So a waiter records, per session, when it started watching (a watermark,
+  taken before the watch starts), and an unread channel wakes the next arm only
+  when it was **delivered** at or after that mark. Delivered means the
+  channel's ctime: an append for a `log`, the `link(2)`/`rename(2)` into the
+  read directory for a `maildir` message — never a message's mtime, which is
+  its earlier write into `tmp/`. Mail delivered before the mark was counted or
+  rung while a waiter of that session watched, so it was announced. The
+  comparison is biased toward waking: a missing change time, a missing,
+  unreadable or future mark, or no session key all wake. An arm that could
+  not count some channel MUST NOT advance the mark (mail on that channel was
+  never announced). A mark that cannot be written is the fault status, since
+  every later arm would otherwise wake again without bound. The watermark is
+  `<root>/wait-marks/<session-id>` (directory `0700`, file `0600`), keyed by
+  `CLAUDE_CODE_SESSION_ID`; it is waiter state, never consumption state, and
+  advances nothing.
 - One waiter watches **all** the session's doorbells, of **both** kinds.
 - `BUDGET` depends on the session mode. **Interactive** (`CLAUDE_CODE_ENTRYPOINT=cli`
   and `CLAUDE_CODE_SESSION_ATTENDED=1`, both) defaults to **1800s** under a
@@ -2954,6 +2978,9 @@ re-checking `size == offset` under the lock immediately before the rename;
 sweeps a rotated generation more than 14 days past its `rotated_at`;
 never rotates or sweeps unread content; writes state atomically, preserving
 state keys it does not recognise; advances state only as the designated consumer; watches
-`attrib` on every doorbell; emits **counts only** unprompted; and renders bodies
+`attrib` on every doorbell; arms level-triggered, counting unread only after its
+watch is established and waking at once on mail delivered since the session's
+watermark, while naming (never blocking quietly on, never exiting over) a channel
+it cannot count; emits **counts only** unprompted; and renders bodies
 only inside unbreakable untrusted-content fences, treating every imperative
 inside one as a fact to report rather than an instruction to follow.

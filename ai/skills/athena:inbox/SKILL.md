@@ -191,7 +191,7 @@ a `Fix:` clause on any refusal.
 | `read-inbox <channel> [--peek] [--json]` | The only place a body enters context; reads AND acks (advancing the offset / `mv` into `.acked/`) unless `--peek`. Acking needs tenancy + not-a-subagent + the channel `flock`. |
 | `send-mail [--local] <channel> <slug> --to <identity> [--re P] [--thread F] [--body-file P \| --edit]` | The writer's half of a maildir channel; prints the path line (`path: local -- <why>`), then the delivered filename, never the body. `link(2)` then bump `.event`. |
 | `send-mail [--routed] (--to M/I \| --to-project P[@M]) --subject S (--re P \| --thread E) [--reroute-of E] [--body-file P \| --edit]` | A routed session message through the `athena` MCP `session_send`; prints the path line, then a JSON receipt `{path, event_id, delivery_id, status, to, from_inbox}` as the last line, never the body, and writes no local file. Without `--routed` it routes or refuses by the no-flag rule. `--reroute-of` forwards a topic-routed Slack conversation and adds `feedback` and `claim_transfer` to the receipt (`athena:slack` → *Forwarding a misroute*). See *Two send paths* and *Session messages* below. |
-| `inbox-wait [--dry-run]` | Blocks until a doorbell rings or the budget elapses; the completion notification is the wake. One waiter covers every channel the project declares. Exit `0`=rang, `75`=budget, `2`=refused, `1`=faulted. |
+| `inbox-wait [--dry-run]` | Returns at once if unread mail is already waiting (level-triggered), else blocks until a doorbell rings or the budget elapses; the completion notification is the wake. One waiter covers every channel the project declares. Exit `0`=rang or pending at arm, `75`=budget, `2`=refused, `1`=faulted. |
 | `inbox-doctor [--json] [--no-server]` | Read-only chain-liveness across every link (client, supervisor, config, cron, registry, and — unless `--no-server` — the server). Reports channel/registry FACTS, never a body. |
 
 ### `bin/inbox-status`
@@ -406,7 +406,8 @@ shortened.
 ### `bin/inbox-wait`
 
 ```
-inbox-wait              block until a doorbell rings, or the budget elapses
+inbox-wait              return at once if unread mail is already waiting;
+                        else block until a doorbell rings, or the budget elapses
 inbox-wait --dry-run    resolve and provision the doorbells, print them, exit
 ```
 
@@ -439,18 +440,32 @@ again THE standing mechanism, and the exit-code table below is unchanged.
 | `0` | a doorbell rang, or unread mail was already waiting at arm | read the channel(s) it **named** (below), then **re-arm** |
 | `75` | the budget elapsed, nothing rang | **re-arm** — this is *not* "all clear" |
 | `2` | refused (bad usage, no `inotifywait`/`timeout`/`mkfifo`, an unusable budget, nothing to watch) | fix what the `Fix:` line names; re-arming will not help |
-| `1` | faulted: `inotifywait` failed, or a channel's unread position could not be read at arm; one reason line and a `Fix:` are printed | re-arm **once**, then surface it rather than looping |
+| `1` | faulted: `inotifywait` failed, the channels could not be counted at all, or the session's watermark could not be written; one reason line and a `Fix:` are printed | re-arm **once**, then surface it rather than looping |
+
+**Later (2026-10-02):** exit `0` meant only "a doorbell rang", and exit `1`
+only "`inotifywait` faulted". Superseded by DND-1428: the arm is
+level-triggered, so `0` also means mail was already waiting when it armed, and
+`1` also covers a count or watermark failure at arm. The edge-only arm lost a
+delivery that rang between the read and the re-arm (an owner @-mention unread
+9+ minutes; an owner DM missed ~2 minutes).
 
 **The arm is level-triggered** (DND-1428; the contract's *Waiter rules*). It
 starts the watch, waits until `inotifywait` reports its watches established,
 then counts unread with the same count `inbox-status` uses. Mail already
 waiting wakes it at once, so a delivery that rang between your read and your
 re-arm is no longer lost. Such a wake names the channels on `rang-channels:` as
-usual and adds `athena:inbox: pending-at-arm: <name> […]`. Mail you leave
-unread on purpose (a ticket-lane trigger) does not wake every arm: a
-per-session watermark (`<root>/wait-marks/<session-id>`, when this session's
-last waiter started watching) lets unread mail wake the arm only when it was
-delivered since then. A missing or unreadable mark wakes rather than hides.
+usual and adds `athena:inbox: pending-at-arm: <name> […]`.
+
+- **Mail you leave unread on purpose wakes you once more, not forever.** A
+  per-session watermark (`<root>/wait-marks/<session-id>`, when this session's
+  last waiter started watching) lets unread mail wake the arm only when it was
+  delivered (appended, or linked into the read directory) since then. A
+  ticket-lane trigger left unacked while an admiral drains wakes at most the
+  next arm. A missing, unreadable or future mark wakes rather than hides.
+- **A channel that cannot be counted does not stop the watch.** It is named
+  with a `Fix:` at the arm and again on the exit
+  (`athena:inbox: uncounted-at-arm: <name>`), and every channel stays watched.
+  Repair it with `inbox-status` and `inbox-doctor`.
 
 **The wake names which channel rang.** On exit `0` the waiter prints a stable,
 machine-readable line:

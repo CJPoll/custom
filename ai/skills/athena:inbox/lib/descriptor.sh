@@ -229,8 +229,8 @@ _descriptor_validate_log() {
   # check the contract names, so it runs too and on the same text.
   names_resolve_in_root "/" "${path}" >/dev/null || return 1
   if names_reserved_prefix "${path}"; then
-    inbox_fail "log channel \"${chan}\" declares a path inside the reserved projects/ directory" \
-      "move channel \"${chan}\"'s \"path\" out of projects/; that directory holds the tenancy registry, and a message surface there would read and be read as configuration."
+    inbox_fail "log channel \"${chan}\" declares a path inside a reserved directory (projects/ or wait-marks/)" \
+      "move channel \"${chan}\"'s \"path\" out of projects/ and wait-marks/; they hold the tenancy registry and the waiter's watermarks, and a message surface there would read and be read as configuration."
     return 1
   fi
 
@@ -310,8 +310,8 @@ _descriptor_validate_maildir() {
   fi
   names_resolve_in_root "/" "${val}" >/dev/null || return 1
   if names_reserved_prefix "${val}"; then
-    inbox_fail "maildir channel \"${chan}\" declares a namespace inside the reserved projects/ directory" \
-      "move channel \"${chan}\"'s \"namespace\" out of projects/; that directory holds the tenancy registry, and pointing a maildir at it would count other projects' registry entries as unread mail."
+    inbox_fail "maildir channel \"${chan}\" declares a namespace inside a reserved directory (projects/ or wait-marks/)" \
+      "move channel \"${chan}\"'s \"namespace\" out of projects/ and wait-marks/; they hold the tenancy registry and the waiter's watermarks, and pointing a maildir at either would count that state as unread mail."
     return 1
   fi
 
