@@ -6478,15 +6478,29 @@ closed list. The list has three parts:
 owner's, so its row can say "Reviewer requested", "Mentioned you" or "New
 comment". It is the event type, and for a comment the classifier's decision
 carried as `payload.trigger`. A write that creates or reopens the item takes
-the event's trigger. A write that leaves it open keeps the stronger of the
-stored and incoming triggers (`review_requested` > `mentioned` >
-`commented`), as does one that leaves an owner-closed item closed. A close
-carries no trigger and keeps the stored one. A row with no stored trigger
-takes the incoming one on a write that leaves the item open or
-owner-closed. The column is nullable, never
+the event's trigger. Every other write of an indexed item keeps the stronger of
+the stored and incoming triggers (`review_requested` > `mentioned` >
+`commented`): one that leaves it open, and one that leaves it closed, whatever
+its `closed_by` (`owner`, `lease_complete`, `source_status` or
+`source_deleted`). A row with no stored trigger takes the incoming one on those
+writes. A close event (`forge.review.removed`, `merged`, `closed`) carries no
+trigger and keeps the stored one. A write with no trigger of its own (a source
+delete, a re-sync close, an owner or lease close) does not touch the column,
+and a `stale` event writes nothing. The column is nullable, never
 backfilled, and refused on any source but `forge_review`, so a row indexed
 before DND-1350 holds `null` until an event next writes it. The row reads
 "Review activity" meanwhile.
+
+**Later (2026-10-02):** the note above said a write that leaves "an
+owner-closed item closed" keeps the stronger trigger. "Owner-closed" was never
+defined, and the note was silent on an item left closed by `source_status`,
+`lease_complete` or `source_deleted`: a `forge.review.requested` that does not
+reopen it (it reopens only a `source_status` close, on a strictly newer
+revision), a same-second re-request tie, a pointer update on a closed item. All
+of those keep the stronger trigger, as an owner close does. Only a create, or a
+write the state machine reports as `reopened`, takes the incoming trigger
+outright (`Athena.Priorities.derived/4` and `transition/1` in `priorities.ex`;
+`ForgeTrigger.resolve/3`).
 
 **Each source has a closed allow-list.**
 
