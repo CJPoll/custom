@@ -648,6 +648,38 @@ out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; 
 [ "$rc" -eq 2 ] && ok "c26 exit 2 (behind target)" || bad "c26 expected exit 2, got $rc" "$out"
 if [ -e "$rf" ]; then bad "c26 a passing receipt survived a refused run"; else ok "c26 refused run removed the stale receipt"; fi
 
+# ---------------------------------------------------------------- case 26b
+# DND-1656: a USAGE ERROR in the argument parse (exit 2) also removes a stale
+# pass for the head; --help (and a clean run's parse) writes nothing.
+R="${TMP}/c26b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+plant_c26b() { mkdir -p "$(dirname "$rf")"; printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s"}\n' "$head_sha" > "$rf"; }
+for ue in "--target" "--bogus-flag" "--gate" "--slot-wait-timeout abc"; do
+  plant_c26b
+  # shellcheck disable=SC2086
+  out="$( cd "$R" && "$GATE" $ue 2>&1 )"; rc=$?
+  [ "$rc" -eq 2 ] && ok "c26b '${ue}' exits 2" || bad "c26b '${ue}' expected exit 2, got $rc" "$out"
+  grep -q 'Fix:' <<<"$out" && ok "c26b '${ue}' carries Fix:" || bad "c26b '${ue}' lacks Fix:" "$out"
+  if [ -e "$rf" ]; then bad "c26b a passing receipt survived usage error '${ue}'" "$out"; else ok "c26b usage error '${ue}' removed the stale receipt"; fi
+done
+# A valid flag before the bad one, and another head's receipt is left alone.
+plant_c26b; other_rf="$(dirname "$rf")/0000000000000000000000000000000000000000.json"; printf '{}\n' > "$other_rf"
+out="$( cd "$R" && "$GATE" --no-fetch --bogus-flag 2>&1 )"; rc=$?
+{ [ "$rc" -eq 2 ] && [ ! -e "$rf" ] && [ -e "$other_rf" ]; } && ok "c26b valid-then-bad flag clears only this head's receipt" || bad "c26b valid-then-bad rc=$rc" "$out"
+# An unwritable store: still exit 2 (never 5), with a Fix: naming the store.
+plant_c26b; chmod 555 "$(dirname "$rf")"
+out="$( cd "$R" && "$GATE" --target 2>&1 )"; rc=$?
+chmod 755 "$(dirname "$rf")"
+{ [ "$rc" -eq 2 ] && grep -q 'could not remove the earlier receipt' <<<"$out"; } && ok "c26b unremovable receipt: exit stays 2, says so" || bad "c26b unremovable rc=$rc" "$out"
+plant_c26b
+out="$( cd "$R" && "$GATE" --help 2>&1 )"; rc=$?
+{ [ "$rc" -eq 0 ] && [ -e "$rf" ]; } && ok "c26b --help exits 0 and writes nothing" || bad "c26b --help rc=$rc or touched the receipt" "$out"
+# A usage error with no resolvable head (outside a repo) still exits 2, no crash.
+NOREPO="${TMP}/c26b-norepo"; mkdir -p "$NOREPO"
+out="$( cd "$NOREPO" && GIT_CEILING_DIRECTORIES="$TMP" "$GATE" --target 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c26b usage error outside a repo still exits 2" || bad "c26b outside repo expected 2, got $rc" "$out"
+
 # ---------------------------------------------------------------- case 27
 # A --critic-override is recorded in the receipt, with the state it overrode.
 R="${TMP}/c27"; new_repo "$R"

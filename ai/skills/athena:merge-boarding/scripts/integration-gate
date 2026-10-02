@@ -70,6 +70,26 @@ REBASE=0
 # The argv as given, for the re-run inside the test slot (DND-1064).
 ORIG_ARGS=( "$@" )
 
+# A usage error in the parse below (exit 2) must still leave no pass for the
+# head (DND-1656), yet the parse itself stays write-free so --help writes
+# nothing. So the removal rides an EXIT trap that acts ONLY on exit 2, and the
+# trap is replaced by the telemetry trap once the parse is done. The exit code
+# stays 2 even if the removal fails (it says so loudly instead).
+ig_usage_clear_receipt() {
+  local head common receipt
+  head="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)" || return 0
+  [ -n "$head" ] || return 0
+  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  case "$common" in /*) ;; *) return 0 ;; esac
+  receipt="$(ir_receipt_path "$common" "$head")"
+  if ! rm -f "$receipt" 2>/dev/null; then
+    echo "${PROG}: could not remove the earlier receipt ${receipt}." >&2
+    echo "Fix: make $(dirname "$receipt") writable and re-run; a stale pass this usage error could not clear would outlive its result." >&2
+  fi
+  return 0
+}
+trap 'rc=$?; [ "$rc" -eq 2 ] && ig_usage_clear_receipt' EXIT
+
 usage() {
   cat <<'EOF'
 Usage: integration-gate [--target <ref>] [--since <ref>] [--gate '<cmd>']
@@ -93,7 +113,9 @@ the upstream range its interaction review covered (critic_upstream_range; the
 OK line then says CRITIC CARRIED + INTERACTION), the
 blast-radius verdict, the INTEGRATION OK line, and a UTC timestamp.
 locked-merge requires it. Any other
-outcome removes a receipt for that head. There is no flag that skips it.
+outcome removes a receipt for that head, a usage error (exit 2) included; a
+usage error that cannot remove it still exits 2 and says so, never 5. There is
+no flag that skips it.
 
 Once the gate has run (green or RED), it runs `teardown-stack --record
 --worktree <root>`: in a linked worktree with a compose stack up, that
@@ -300,8 +322,9 @@ trap 'ig_emit_run $?' EXIT
 # first, so a missing test-slot left an earlier pass standing). The run inside
 # the slot repeats this harmlessly, and removes (and checks) again for the
 # head it gates. Two refusals still come earlier, by necessity: a usage error
-# in the argument parse (which must stay write-free so --help writes nothing,
-# and which never chose a gate run), and a missing receipt library (above),
+# in the argument parse (which stays write-free so --help writes nothing, and
+# clears the head's receipt from its own EXIT trap on exit 2, DND-1656), and a
+# missing receipt library (above),
 # without which the receipt's path is unknown.
 HEAD0="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)"
 if [ -n "$HEAD0" ]; then
