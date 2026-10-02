@@ -109,7 +109,7 @@ module LeadTimeProductIO
       raise CouldNotLook.new("cannot read branch #{branch} in #{dir} (#{why})",
                              "check the ref ('git -C #{dir} show-ref --exists refs/heads/#{branch}'; exit 129 means git predates --exists: " \
                              "upgrade to git >= 2.43); its last tip is in its reflog ('git -C #{dir} rev-parse --git-path logs/refs/heads/#{branch}'). " \
-                             "Recover it, then repair or delete the ref by hand; the lane and its branch are kept.")
+                             "Recover it, then repair or delete the ref by hand; the branch is kept.")
     end
 
     # true / false; nil when git could not tell (never read as "not landed").
@@ -515,10 +515,13 @@ module LeadTimeProductIO
   end
 
   # -> [summary line, detail lines, stopped repos]. At most ONE landing per sweep.
+  # The summary counts each landing branch git could not read (kept, named in
+  # its detail line with a Fix:), so the runner's .run shows it (DND-1677).
   def sweep(m, gate_timeout:, budget_s:)
     budget = Budget.new(budget_s)
     lines = []
     landed = []
+    unreadable = 0
     attempted = false
     names = m.repos.map(&:name)
     Store.states(m.state_dir).each do |s|
@@ -555,8 +558,9 @@ module LeadTimeProductIO
             lines << "#{tag} open: CI green; waits (one landing per run)"
           else
             attempted = true
-            line, ok = land(m, rl, s, gate_timeout: gate_timeout, budget: budget)
+            line, ok, kept_unreadable = land(m, rl, s, gate_timeout: gate_timeout, budget: budget)
             landed << "#{s.repo}##{s.pr}" if ok
+            unreadable += kept_unreadable
             lines << "#{tag} #{line}"
           end
         end
@@ -565,7 +569,7 @@ module LeadTimeProductIO
       end
     end
     stopped = m.repos.filter_map { |rl| (why = Store.stopped(m.state_dir, rl.name)) && [rl.name, why] }
-    [P.summary(P.open_count(Store.states(m.state_dir)), landed), lines, stopped]
+    [P.summary(P.open_count(Store.states(m.state_dir)), landed, unreadable), lines, stopped]
   end
 
   def close_pr(m, rl, s, reason)
@@ -610,36 +614,44 @@ module LeadTimeProductIO
 
   # Land one green PR in a landing lane: integration-gate --with-critic (R's
   # declared gate and the standing judge), then locked-merge (with R's idle
-  # post-merge workflow), then confirm-merged. -> [detail, landed?].
+  # post-merge workflow), then confirm-merged.
+  # -> [detail, landed?, landing branches kept because git could not read them].
   def land(m, rl, s, gate_timeout:, budget:)
     idle = begin
       P.idle_args(rl.idle_workflow)
     rescue P::Error => e
       Store.journal(m.state_dir, now, "repo=#{s.repo} pr=##{s.pr} not landed: #{e.message}")
-      return ["open: #{e.message} Fix: #{e.fix}", false]
+      return ["open: #{e.message} Fix: #{e.fix}", false, 0]
     end
     need = MIN_BOOTSTRAP + MIN_GATE + MERGE_CAP + CONFIRM_CAP + TEARDOWN_CAP
-    return ["open: CI green, but #{budget.left}s of the sweep budget is left (a landing needs #{need}s); the next run lands it", false] if budget.left < need
+    return ["open: CI green, but #{budget.left}s of the sweep budget is left (a landing needs #{need}s); the next run lands it", false, 0] if budget.left < need
 
     FileUtils.mkdir_p(rl.lanes_dir, mode: 0o700)
     dir = File.join(rl.lanes_dir, "#{m.run_id}-land")
     lock = "#{dir}.lock"
     result = nil
+    kept = nil
     held = Locks.with(lock) do
       result = land_in(m, rl, s, dir, gate_timeout, budget, idle)
     ensure
-      retire_land_lane(m, rl, dir, merged: result ? result[1] == true : false, keep_branch: result ? result[2] == true : false)
+      kept = retire_land_lane(m, rl, dir, merged: result ? result[1] == true : false, keep_branch: result ? result[2] == true : false)
     end
     # Never delete a lock a live process holds. Removing it after the unlock
     # is safe here only because the runner's single-run lock serialises every
     # tick: no other process can be waiting on this file.
-    return ["open: the landing lane lock #{lock} is held by a live process; the next run retries", false] if held == :held
+    return ["open: the landing lane lock #{lock} is held by a live process; the next run retries", false, 0] if held == :held
 
     FileUtils.rm_f(lock)
-    result.first(2)
+    line, ok, _, unreadable = result
+    unreadable = unreadable.to_i
+    if kept
+      line = "#{line}; #{kept}"
+      unreadable += 1
+    end
+    [line, ok, unreadable]
   end
 
-  # -> [detail, landed?, keep_branch?]
+  # -> [detail, landed?, keep_branch?, unreadable branches (0 or 1; omitted is 0)]
   def land_in(m, rl, s, dir, gate_timeout, budget, idle)
     if idle.any?
       hold = P.base_deploy_hold(Forge.json([Cmd.gh, "run", "list", "--workflow", idle.last, "--branch", "main", "--limit", "5",
@@ -649,6 +661,15 @@ module LeadTimeProductIO
         return ["LINE STOPPED: #{hold}", false, false]
       end
     end
+    # The local landing branch is read before any fetch: a ref git cannot
+    # read is never "absent" (that cut a lane with `worktree add -b` over
+    # it), and it also fails the fetch, which would name the wrong cause.
+    local = begin
+      Git.branch_tip(rl.path, s.branch)
+    rescue CouldNotLook => e
+      return ["open: local branch #{s.branch} KEPT: COULD NOT TELL (#{e.message}); nothing gated, the next run retries. Fix: #{e.fix}",
+              false, true, 1]
+    end
     Git.fetch_main(rl.path)
     _, code = Git.call(rl.path, "fetch", "--quiet", "origin", "+refs/heads/#{s.branch}:refs/remotes/origin/#{s.branch}")
     return ["open: could not fetch #{s.branch}; the next run retries", false, false] unless code.zero?
@@ -656,7 +677,6 @@ module LeadTimeProductIO
     remote = Git.rev(rl.path, "refs/remotes/origin/#{s.branch}")
     return ["open: origin's #{s.branch} is at #{remote.to_s[0, 12]}, not the recorded head", false, false] unless remote == s.head
 
-    local = Git.rev(rl.path, "refs/heads/#{s.branch}")
     if local && local != s.head
       return ["open: a local branch #{s.branch} holds #{local[0, 12]}; not clobbered, the next run retries", false, true]
     end
@@ -736,6 +756,8 @@ module LeadTimeProductIO
     ["landed #{sha[0, 12]}; deploy pending", true, false]
   end
 
+  # -> nil, or the line naming a landing branch git could not read: it is
+  # KEPT (never deleted, never skipped in silence) with its Fix: (DND-1677).
   def retire_land_lane(m, rl, dir, merged:, keep_branch:)
     meta = Meta.read("#{dir}.meta")
     if STACK_STATES.include?(meta["bootstrap"]) && !merged
@@ -743,8 +765,16 @@ module LeadTimeProductIO
     end
     Git.remove_worktree(rl.path, dir) if File.exist?(dir)
     branch = meta["branch"]
-    Git.call(rl.path, "branch", "-D", branch) if branch && !keep_branch && Git.rev(rl.path, "refs/heads/#{branch}")
+    kept = nil
+    if branch && !keep_branch
+      begin
+        Git.call(rl.path, "branch", "-D", branch) if Git.branch_tip(rl.path, branch)
+      rescue CouldNotLook => e
+        kept = "landing branch #{branch} KEPT: COULD NOT TELL (#{e.message}). Fix: #{e.fix}"
+      end
+    end
     FileUtils.rm_f("#{dir}.meta")
+    kept
   end
 
   # ── a lane's end: teardown (this run's) and reap (a dead run's) ──────────
@@ -803,7 +833,7 @@ module LeadTimeProductIO
       "product_lane: repo=#{rl.name} #{detail}"
     rescue P::Error => e
       stranded = true
-      "product_lane: repo=#{rl.name} COULD NOT TELL (#{e.message}); branch kept. Fix: #{e.fix}"
+      "product_lane: repo=#{rl.name} COULD NOT TELL (#{e.message}); lane and branch kept. Fix: #{e.fix}"
     end
     [lines, stranded]
   end
@@ -849,6 +879,6 @@ module LeadTimeProductIO
     _, _, detail = retire_lane(m, rl, dir, why)
     [detail, true]
   rescue P::Error => e
-    ["COULD NOT TELL (#{e.message}); branch kept. Fix: #{e.fix}", false]
+    ["COULD NOT TELL (#{e.message}); lane and branch kept. Fix: #{e.fix}", false]
   end
 end

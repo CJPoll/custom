@@ -311,6 +311,8 @@ end
 
 check("Y1 summary with nothing: product_prs=0 landed=none") { P.summary(0, []) == "product_prs=0 landed=none" }
 check("Y2 summary names each landing as R#n") { P.summary(2, %w[prod#7 prod#9]) == "product_prs=2 landed=prod#7,prod#9" }
+check("Y2b summary counts landing branches git could not read") { P.summary(1, %w[prod#7], 2) == "product_prs=1 landed=prod#7 unreadable_branches=2" }
+check("Y2c summary with none unreadable is unchanged") { P.summary(1, [], 0) == "product_prs=1 landed=none" }
 check("B1 PR body is the evidence with no trailer today (DND-1529 hook)") do
   P.pr_body("evidence here\n\n", nil) == "evidence here\n"
 end

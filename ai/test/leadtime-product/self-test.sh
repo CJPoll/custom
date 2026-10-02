@@ -95,6 +95,7 @@ for t in locked-merge confirm-merged teardown-stack; do
   cat >"$FAKE/$t" <<EOF
 #!/usr/bin/env bash
 printf '$t %s\n' "\$*" >>"\$FAKE/calls"
+[ -x "\$FAKE/$t-hook" ] && "\$FAKE/$t-hook"
 cat "\$FAKE/$t-out" 2>/dev/null
 exit "\$(cat "\$FAKE/$t-rc" 2>/dev/null || echo 0)"
 EOF
@@ -614,6 +615,39 @@ pr_json 7 OPEN "$(printf 'f%.0s' {1..40})" "$GREEN"
 lp sweep >/dev/null
 [ "$(called integration-gate)" = 0 ] && grep -q 'head moved' "${TMP}/out" \
   && ok "a PR head the run did not push is never landed" || bad "head moved" "out=$(cat "${TMP}/out")"
+
+# A landing branch git cannot read (DND-1677). The landing lane's branch is
+# deleted only when it can be read; a ref holding garbage was skipped with no
+# word, so it accumulated unseen. It is KEPT, named with a Fix: (the ref and its
+# reflog), and counted on the summary line. The landing itself still counts.
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN" "$(printf 'd%.0s' {1..40})"
+REF7="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/refs/heads/$BR7"
+printf '#!/usr/bin/env bash\nprintf "not-a-sha\\n" >"%s"\n' "$REF7" >"$FAKE/locked-merge-hook"; chmod +x "$FAKE/locked-merge-hook"
+rc="$(lp sweep)"
+if [ "$rc" = 0 ] && head -1 "${TMP}/out" | grep -qx 'product_prs=0 landed=prod#7 unreadable_branches=1' \
+   && grep -q "pr=#7 landed .*; landing branch $BR7 KEPT: COULD NOT TELL (cannot read branch $BR7" "${TMP}/out" \
+   && grep -q "Fix: .*show-ref --exists refs/heads/$BR7.*logs/refs/heads/$BR7" "${TMP}/out" \
+   && [ "$(cat "$REF7")" = not-a-sha ] && [ ! -e "$LANES/$RUN_ID-land" ] && [ ! -e "$LANES/$RUN_ID-land.meta" ]; then
+  ok "an unreadable landing branch after a landing: KEPT, named with a Fix: (ref, reflog), counted unreadable_branches=1; never skipped silently"
+else bad "landing branch unreadable" "rc=$rc ref=$(cat "$REF7" 2>/dev/null) out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+rm -f "$FAKE/locked-merge-hook"
+
+# The same class before the landing lane is cut: a local landing branch git
+# cannot read is never read as absent (which tried `worktree add -b` and failed
+# with git's own words). Nothing is gated, the ref is untouched, it is named
+# with its Fix: and counted.
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN"
+REF7="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/refs/heads/$BR7"
+mkdir -p "$(dirname -- "$REF7")"; printf 'not-a-sha\n' >"$REF7"
+rc="$(lp sweep)"
+if [ "$rc" = 0 ] && head -1 "${TMP}/out" | grep -qx 'product_prs=1 landed=none unreadable_branches=1' \
+   && grep -q "pr=#7 open: local branch $BR7 KEPT: COULD NOT TELL (cannot read branch $BR7" "${TMP}/out" \
+   && grep -q "Fix: .*logs/refs/heads/$BR7" "${TMP}/out" \
+   && [ "$(called integration-gate)" = 0 ] && [ "$(cat "$REF7")" = not-a-sha ] && [ ! -e "$LANES/$RUN_ID-land" ]; then
+  ok "an unreadable local landing branch before the lane is cut: KEPT, named with a Fix:, counted; no gate, never read as absent"
+else bad "local branch unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err") calls=$(cat "$FAKE/calls")"; fi
 
 new_repo
 printf '{"event":"opened","at":"x","repo":"prod","pr":3,"url":"u","phase":"p","branch":"b","head":"h","run_id":"r"}\nnot json\n' >"$S/product-prs.jsonl"

@@ -58,7 +58,12 @@ HELP = <<~TXT
               startup_failure) stops R's line and records a revert owed
               (<state>/product-line-stopped.<R>; the owner re-arms with rm), as
               does a failed base deploy or locked-merge's WARN base deploy.
-              Prints "product_prs=<open n> landed=<R#n,...|none>", then one
+              A landing branch git cannot read is never deleted and never
+              skipped in silence: it is KEPT, COULD NOT TELL with a Fix: in its
+              PR's line, and counted; the sweep still exits 0 (one bad ref
+              never fails the tick).
+              Prints "product_prs=<open n> landed=<R#n,...|none>" (plus
+              " unreadable_branches=<n>" when any was kept), then one
               "product_line=STOPPED <R>: <why>" per stopped line, then one line
               per PR.
     teardown  retire this run's lanes: work on origin/main -> removed; the tip

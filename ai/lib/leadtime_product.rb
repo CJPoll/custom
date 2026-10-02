@@ -412,8 +412,11 @@ module LeadTimeProduct
 
   # ── reporting ──────────────────────────────────────────────────────────────
 
-  def summary(open_n, landed)
-    "product_prs=#{open_n} landed=#{landed.empty? ? 'none' : landed.join(',')}"
+  # unreadable: landing branches kept because git could not read them
+  # (DND-1677); named only when nonzero, so a healthy line is unchanged.
+  def summary(open_n, landed, unreadable = 0)
+    line = "product_prs=#{open_n} landed=#{landed.empty? ? 'none' : landed.join(',')}"
+    unreadable.positive? ? "#{line} unreadable_branches=#{unreadable}" : line
   end
 
   # The PR body: the run's evidence, then the experiment trailer block when

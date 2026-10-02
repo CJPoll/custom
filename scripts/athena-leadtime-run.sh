@@ -79,7 +79,9 @@
 #                       origin/main: <n> <sha>..., or UNKNOWN), ff= (the
 #                       main-checkout fast-forward), product_prs=<open n>
 #                       landed=<R#n,...|none> (DND-1540; 0 and none with no
-#                       product repo) and its product_*: lines, the prune
+#                       product repo; " unreadable_branches=<n>" when the
+#                       sweep kept a landing branch git could not read,
+#                       DND-1677) and its product_*: lines, the prune
 #                       result and the summary
 #   runs/<ts>.product.json  the product manifest (only with a product repo or store)
 #   consecutive-failures  the wedge counter; `rm` it to re-arm a wedged lane
