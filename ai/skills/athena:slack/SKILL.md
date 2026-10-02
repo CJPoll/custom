@@ -1,6 +1,6 @@
 ---
 name: athena:slack
-description: Act in Slack as Athena's own bot identity (not Cody's account) — post, reply in threads, DM, react, upload, and read channels, threads and the bot's own inbox of DMs and mentions. Use whenever the task is to say something in Slack as the agent, to check what Slack has sent Athena, or to follow up on the one-line "new Slack DM(s)/mention(s)" notice from the polling hook. Also use whenever Athena needs a person in Slack to give information (Block Kit buttons are the default, sent through the athena MCP slack tools), or when a `slack.interaction` click line arrives in the inbox.
+description: Act in Slack as Athena's own bot identity (not Cody's account) — post, reply in threads, DM, react, upload, and read channels, threads and the bot's own inbox of DMs and mentions. Use whenever the task is to say something in Slack as the agent, to check what Slack has sent Athena, or to follow up on the one-line "new Slack DM(s)/mention(s)" notice from the polling hook. Also use whenever Athena needs a person in Slack to give information (Block Kit buttons are the default, sent through the athena MCP slack tools), when running a discussion queue over Slack (one queue message, edited in place), or when a `slack.interaction` click line arrives in the inbox.
 ---
 
 # athena:slack
@@ -446,6 +446,37 @@ options that names the recommendation, e.g. `Your call (Yes)`. Give it the
 recommended option's `value` and its own `action_id`, so the relay can say the
 owner deferred. See the worked example in `athena:slack:interactive-messages`.
 
+**Discussion queue: one message, edited in place.** Cody, verbatim
+(2026-10-02, in a Slack thread, relayed by the walt_ui session): *"When running a discussion queue
+over slack, please favor editing the discussion queue message over creating
+new messages for each discussion item."* When several decisions are queued in
+one conversation:
+
+- **Post ONE queue message.** It lists every item, marks the current one, and
+  carries the current item's question and buttons.
+- **After each decision, `slack_update` that same `{channel, ts}`.** Strike
+  the decided item through and record its decision inline. Put the next item's
+  question and buttons in place, passing `inbox_name` again so the new
+  buttons are stamped. Never post a new message per item.
+- **Give each item's buttons their own `action_id`s**, e.g.
+  `<topic>_q<n>_<choice>`. A click on a stale render then cannot pass for the
+  current item.
+- **The queue message is the record of decisions.** If per-item messages were
+  already posted, fold their decisions into it, then delete them.
+- **People's discussion replies still go in the thread.** Only the queue
+  itself is edited in place.
+- **`read-inbox` can hide a repeat click (DND-1785).** A `slack.interaction`
+  line carries no `event_id`, and the clicked message's `ts` survives edits.
+  The Slack log channel dedupes on `event_id` or `channel+ts`, so every click
+  after the first on the queue message reads as "nothing new". Until DND-1785
+  keys interaction lines on `delivery_id`, check the raw Slack log for
+  `slack.interaction` lines on the queue message's `ts`. Measured 2026-10-02:
+  the second click on one queue message was dropped this way.
+
+This overrides the two-phase table's *One step of several* row for a queue.
+Measured 2026-10-02: a five-question queue posted one message per item, and
+Cody asked for the single edited message instead.
+
 A won't-fix notice is not a decision request; its veto buttons still mark the
 recommended one: [[athena:ticket-management]] → *Promote and won't-fix*.
 
@@ -503,7 +534,7 @@ DND-549, phase 1 runs only for a terminal button, and the table's
 | The click was… | The session sends… | Because… |
 |---|---|---|
 | **Terminal** — it settles the question (approve, reject, pick one) | `slack_update` on the posted `{channel, ts}`: the original content with the controls gone and a one-line outcome, plus a new `text` | the message must end showing the outcome, not `working…` |
-| **One step of several** | a thread reply (`slack_post` with `thread_ts` = the posted `ts`) or `slack_ephemeral` to the clicker. New controls go in a fresh post or a `slack_update` (with `inbox_name` again), which re-stamps them | the next question needs its own place; the first message keeps its record |
+| **One step of several** | a thread reply (`slack_post` with `thread_ts` = the posted `ts`) or `slack_ephemeral` to the clicker. New controls go in a fresh post or a `slack_update` (with `inbox_name` again), which re-stamps them. A discussion queue only updates its one message (*Discussion queue*, above) | the next question needs its own place; the first message keeps its record |
 | **Informational** — "show details", "why?", posted with `"athena_terminal": false` | `slack_ephemeral` only, to the clicker (`user` = the line's `actor.user_id`) | only the clicker asked; the server ran no phase 1, so the shared message is still live as it is |
 
 Rules that apply to every row:
@@ -912,7 +943,7 @@ cached identity missing `team_id` (not just `bot_id`), and claim-thread
 crashing or exiting a code it never documents; and `topic-route` (DND-1538):
 its exact tool arguments, both server error shapes, the always-printed count
 line, refusals with the server's Fix, usage errors with no call, and the
-machine token staying off argv. Seven
+machine token staying off argv. Eight
 text-presence cases keep the owner's decision-question rules in this file and
 the "your call" button in the worked example; they cannot check a sent message. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
 each of them.

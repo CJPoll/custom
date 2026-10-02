@@ -387,6 +387,16 @@ returned to `VERDICT: PASS (117 cases)`.
 
 After each row the suite returned to `VERDICT: PASS (124 cases)`.
 
+**2026-10-02 — discussion queue (owner rule).** Case 84 gained an eighth
+needle, `**Discussion queue: one message, edited in place.**`. Baseline
+`VERDICT: PASS (332 cases)`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S103 | the heading shortened to `**Discussion queue.**` | 1 | `FAIL doctrine: athena:slack carries decision rule '**Discussion queue: one message, edited in place.**'` |
+
+The suite then returned to `VERDICT: PASS (332 cases)`.
+
 ## Thread claim on post/dm (DND-491, 2026-09-27)
 
 - **Code under test:** `bin/claim-thread`, `lib/claim.sh`,

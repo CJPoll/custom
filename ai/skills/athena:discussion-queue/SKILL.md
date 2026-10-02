@@ -25,6 +25,9 @@ don't include things you can and should decide yourself. Sources:
 Give a **brief one-line enumeration** of the queue first, so the user sees the
 scope and can reorder or drop items — then work it **one at a time**.
 
+Over Slack, the queue is one message edited in place, not a message per item:
+[[athena:slack]] → *Discussion queue: one message, edited in place*.
+
 ## 2. For each item — one at a time
 
 Do not advance to the next item until the current one is decided.

@@ -2456,7 +2456,7 @@ DOCTRINE="${ROOT}/SKILL.md"
 EXAMPLE="$(dirname "${ROOT}")/athena:slack:interactive-messages/SKILL.md"
 for needle in "### Asking the owner for a decision" "5–15 words" \
               "**Background**" "**Why it matters**" "**Recommendation**" \
-              "Your call ("; do
+              "Your call (" "**Discussion queue: one message, edited in place.**"; do
   if grep -qF -- "${needle}" "${DOCTRINE}"; then
     ok "doctrine: athena:slack carries decision rule '${needle}'"
   else bad "doctrine: athena:slack carries decision rule '${needle}'" "missing from ${DOCTRINE}"; fi
