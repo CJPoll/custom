@@ -6862,7 +6862,10 @@ rules alone and the re-derive runs after it, batch by batch
 An ingest reads the rules row under a share lock taken before its item lock,
 so an ingest racing an edit either finishes first and is re-derived by the
 edit, or reads the edited rules. Neither leaves `owner_only` or the state
-derived from the old rules.
+derived from the old rules, provided the pass completes. A pass that stops on
+`refresh_incomplete`, or a node that dies mid-pass (DND-1721), leaves the rows
+not yet reached on the old rules, an ingest that finished before the edit
+included, until their next write or the re-sync.
 
 ### Ranking
 
