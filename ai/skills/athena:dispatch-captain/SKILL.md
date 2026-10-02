@@ -27,6 +27,8 @@ a Mission is unblocked and has a free slot (worktree already created via
    `~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref <TICKET>`.
    It also stamps the dispatch date, the start `ai/bin/lead-time` measures from
    ([[athena:ticket-management]] → *The transitions an orchestrator performs*).
+   It never touches `Assignee` (its `--help`), so set Athena with the
+   connector unless the ticket already has it.
    A work ticket needs the private overlay; with none it exits 3 and writes
    nothing, so make the move with the notion-work connector and say in the
    state log that the ticket has no lead-time start.
@@ -373,8 +375,9 @@ The batch brief carries everything above for one Mission, plus:
   line, the PR URL (forge repos), files changed, and its own proposed findings.
   A STUCK ticket holds every ticket stacked above it; its section says so.
 - **The Notion transitions, per ticket.** Move each ticket to `In Progress` with
-  Athena as `Assignee` at dispatch, through `mark-in-progress` (step 1 above),
-  so every ticket in the batch gets its lead-time stamp. In a forge repo, the captain's `In Review`
+  Athena as `Assignee` at dispatch (step 1 above: `mark-in-progress` for the
+  status, the connector for `Assignee`), so every ticket in the batch gets its
+  lead-time stamp. In a forge repo, the captain's `In Review`
   rule (or "set NO Notion status at all") applies to each ticket as its own PR
   opens. You move each ticket on its own landing.
 
