@@ -344,8 +344,14 @@ how such tier-4 tickets get that captain cheaply. Do not batch any other tier.
     --with-critic --rebase` on that head, then push. Its report's gate and
     PASS were judged against the ticket below, so they do not cover main,
     and `gh-athena` refuses the push `NO RECEIPT` without the re-gate.
-    Measured 2026-10-02 (DND-1800+1801+1812): both stacked tickets were
-    refused and re-gated.
+    Measured 2026-10-02 (DND-1800+1801+1812): DND-1801's push was refused;
+    both stacked tickets were re-gated.
+
+    **Later (2026-10-02, DND-1817):** this bullet read "A forge repo,
+    `~/dev/custom` included: `locked-merge` squash-merges one PR", with no
+    re-gate for a stacked ticket. Superseded: `locked-merge` exits 4 in
+    custom (no CI), and the stacked receipt does not cover main, so
+    DND-1801's push was refused `NO RECEIPT`.
   - **Any other forge repo:** `locked-merge` squash-merges one
     PR into that PR's own base. So after ticket N lands, retarget PR N+1 to
     the MR target branch (`gh-athena pr edit <n> --base <branch>`, as in
