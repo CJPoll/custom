@@ -181,15 +181,23 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    run, so `gate_first` fell after the run's start (with-critic, e.g.
    DND-1790) or after the PASS (standalone, e.g. DND-1800), and `verify`
    read `invalid`: all 9 invalid verify cells in a scratch re-ingest of
-   custom since 2026-10-02T13:00Z (40 rows) were this shape. Verify is the captain's time
-   between the first gate run and the final integration attempt, and here
-   that window is empty. Every input is recorded (the gate runs, the run's
-   start and end), and they show no gate ran before the final attempt, so
-   `verify` is a **measured 0**, not n/a: a genuinely zero-length phase,
-   per *The same question, asked of a PLAN*. It starts where it ends (the
-   run's start, or the PASS), and `implement` ends there too, so the five
-   still telescope. Both cells carry a `basis` naming the shape; the
-   row's `gate_first` anchor stays the real first gate run. Two
+   custom since 2026-10-02T13:00Z (40 rows) were this shape. Verify is
+   the captain's time between the first gate run and the final
+   integration attempt, and here that window is empty. The inputs that
+   decide it are read, not absent: the unit's gate runs (a store that
+   could not be read is n/a, never this), and the run's start and end.
+   They show no gate run recorded before the final attempt, so `verify` is
+   a **measured 0**, not n/a: a genuinely zero-length phase, per *The
+   same question, asked of a PLAN*. It starts where it ends (the run's
+   start, or the PASS), and `implement` ends there too, so the five still
+   telescope. Each measured cell that reads that start carries a `basis`
+   naming the shape; the row's `gate_first` anchor stays the real first
+   gate run. Residual: `gate_first` is the first local gate run recorded
+   for the unit. A gate run that left no local event (run on another
+   machine, or a failed telemetry write, which the summary counts as
+   write-failures) reads as none, so such a row reads 0 here where it read
+   `invalid` before. Every `gate_first` anchor carries this residual
+   already; the verify `basis` names it on the row. Two
    neighbouring shapes are n/a with a reason naming them, never `invalid`:
    a first gate run after a final run with no recorded end, and a
    standalone PASS before a first gate run that ran before the final run.

@@ -1245,6 +1245,49 @@ check("V6 a first gate run after the final run ended is not this shape: verify s
   w6.dig("verify", "invalid") == true && !w6["verify"].key?("basis")
 end
 
+# Review round: the boundaries and the guards.
+# A first gate in the run's own second already read verify 0 (with-critic):
+# left exactly as it was, no basis.
+VW7 = [VW[0], ev("harness_gate.run", "2026-10-01T04:00:00.700Z", duration_s: 280.0, attrs: { "ok" => true }), VW[2]]
+w7 = fixture { L::Phases.compute(anchors(wl, S.ok(VW7 + [PUSH]))) }
+check("V7 with-critic, first gate in the run's own second: verify 0, no basis (as before)") do
+  w7.dig("verify", "s").zero? && w7.values.none? { |c| c.key?("basis") } && w7.dig("implement", "s") == 3 * 3600
+end
+# Standalone, the same second: the PASS is before it, so it is this shape.
+VS8 = [VS[0], VS[1], ev("harness_gate.run", "2026-10-01T04:00:00.700Z", duration_s: 280.0, attrs: { "ok" => true })]
+s8 = fixture { L::Phases.compute(anchors(vl, S.ok(VS8))) }
+check("V8 standalone, first gate in the run's own second: verify a measured 0 with its basis") do
+  s8.dig("verify", "s").zero? && s8.dig("verify", "basis").is_a?(String) && s8.dig("queue", "s") == 30
+end
+# A first gate run in the run's last second is inside it.
+VW9 = [VW[0], ev("harness_gate.run", "2026-10-01T04:05:00Z", duration_s: 1.0, attrs: { "ok" => true }), VW[2]]
+w9 = fixture { L::Phases.compute(anchors(wl, S.ok(VW9 + [PUSH]))) }
+check("V9 a first gate run at the final run's end second is inside it: verify 0") do
+  w9.dig("verify", "s").zero? && w9.dig("verify", "basis").is_a?(String)
+end
+# Standalone with no PASS and the first gate inside the run: verify is n/a
+# with the PASS's own reason (never the derived anchor, never invalid).
+VS10 = VS[1..]
+s10 = fixture { L::Phases.compute(anchors(vl, S.ok(VS10))) }
+check("V10 standalone, no PASS, first gate inside the run: verify n/a with the no-PASS reason") do
+  s10.dig("verify", "s").nil? && !s10["verify"].key?("invalid") && s10.dig("verify", "na_reason").include?("no critic PASS")
+end
+# Standalone, a PASS, and a final run with no recorded end.
+VS11 = [VS[0], VS[1].merge("duration_s" => nil), VS[2]]
+s11 = fixture { L::Phases.compute(anchors(vl, S.ok(VS11))) }
+check("V11 standalone, first gate after a final run with no recorded end: verify n/a naming it") do
+  s11.dig("verify", "s").nil? && !s11["verify"].key?("invalid") && s11.dig("verify", "na_reason").include?("no recorded end")
+end
+# Standalone, PASS before a first gate run that is before the dispatch stamp:
+# a re-dispatch shape, left invalid.
+late = landing(start: "2026-10-01T03:40:00Z")
+VS12 = [ev("critic.round", "2026-10-01T03:00:00Z", duration_s: 30.0, attrs: { "verdict" => "pass" }),
+        ev("harness_gate.run", "2026-10-01T03:30:00Z", duration_s: 100.0, attrs: { "ok" => true }), VS[1]]
+s12 = fixture { L::Phases.compute(anchors(late, S.ok(VS12))) }
+check("V12 standalone, a first gate run before the dispatch stamp stays invalid") do
+  s12.dig("verify", "invalid") == true && s12.dig("implement", "invalid") == true
+end
+
 if $failures.empty?
   puts "lead-time-phases: #{$checks} checks passed"
   exit 0

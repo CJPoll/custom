@@ -25,10 +25,11 @@
 #
 # Each phase is whole seconds, or null with `na_reason` when an anchor is
 # missing, or null with `invalid: true` when its anchors are out of order.
-# One out-of-order shape is not invalid: a first gate run inside the final
-# integration run means no gate ran before it, so verify is a measured 0
-# (DND-1819, Phases.effective). Never 0 for a missing input, never
-# negative. Anchors are floored to whole seconds BEFORE subtraction, so the
+# Three out-of-order shapes are not invalid (DND-1819,
+# Phases.effective_anchors): a first gate run inside the final integration
+# run means no gate ran before it, so verify is a measured 0; two
+# neighbouring shapes are n/a with a reason naming them. Never 0 for a
+# missing input, never negative. Anchors are floored to whole seconds BEFORE subtraction, so the
 # five phases telescope: their sum equals landed - dispatch exactly.
 #
 # A source the IO side read is a Source: status :ok (found), :empty (looked,
@@ -610,16 +611,17 @@ module LeadTimePhases
     def anchor_map(anchors) = flow(anchors) == "with_critic" ? WITH_CRITIC_PHASE_ANCHORS : PHASE_ANCHORS
 
     # anchors: {name => Anchor} -> {phase => {"s"=>Integer|nil, "na_reason"=>.., "invalid"=>true,
-    # "basis"=>..}}. "basis" is set only on a cell that read a derived anchor
-    # (DND-1819, see effective).
+    # "basis"=>..}}. "basis" is set on a measured or invalid cell that read
+    # the derived verify start (DND-1819, see effective_anchors).
     def compute(anchors)
-      eff, notes = effective(anchors)
+      eff, notes = effective_anchors(anchors)
       anchor_map(anchors).to_h do |phase, (from, to)|
         note = notes[phase]
         next [phase, { "s" => nil, "na_reason" => note[:na] }] if note&.key?(:na)
 
         cell = value(eff.fetch(from), eff.fetch(to), from, to)
-        [phase, note && !cell["s"].nil? ? cell.merge("basis" => note[:basis]) : cell]
+        read_derived = note && (!cell["s"].nil? || cell["invalid"])
+        [phase, read_derived ? cell.merge("basis" => note[:basis]) : cell]
       end
     end
 
@@ -637,45 +639,67 @@ module LeadTimePhases
     #     verify, so verify is n/a naming that.
     # Any other order (a gate before the dispatch stamp, a first gate after
     # the final run ended) is left to value's "invalid".
-    # -> [anchors with gate_first derived (or as given), {phase => {basis:} | {na:}}]
-    def effective(anchors)
-      g = anchors["gate_first"]
-      s = anchors["integrate_start"]
-      return [anchors, {}] unless g&.at && s&.at
+    # Residual: gate_first is the first LOCAL gate run recorded for the unit.
+    # A gate run that left no such event (run on another machine, a failed
+    # telemetry write: the summary's write-failures) reads as "no gate ran
+    # before", so verify reads 0 here where it read invalid before. Every
+    # gate_first anchor carries the same residual; the basis names it.
+    # -> [anchors with gate_first replaced by the derived verify start (or as
+    #     given), {phase => {basis:} | {na:}}]
+    def effective_anchors(anchors)
+      gate = anchors["gate_first"]
+      start = anchors["integrate_start"]
+      return [anchors, {}] unless gate&.at && start&.at
 
-      to = anchor_map(anchors).fetch("verify")[1]
-      vend = anchors.fetch(to)
-      return [anchors, standalone_pass_first(g, vend, s)] if to == "critic_pass" && vend.at && vend.at < g.at && g.at < s.at
-      return [anchors, {}] unless g.at >= s.at
+      verify_end_name = anchor_map(anchors).fetch("verify")[1]
+      verify_end = anchors.fetch(verify_end_name)
+      return [anchors, standalone_pass_first(gate, verify_end, start)] if pass_before_gate_before_run?(anchors, verify_end_name)
+      # A first gate in the run's own second already reads verify 0 in the
+      # with-critic flow: left as it was.
+      return [anchors, {}] if gate.at < start.at || (gate.at == start.at && verify_end_name == "integrate_start")
+      # No PASS (standalone): verify is n/a with the PASS's own reason.
+      return [anchors, {}] if verify_end.at.nil?
 
-      e = anchors["integrate_end"]
-      return [anchors, { "verify" => { na: unknown_end(g, s) } }] unless e&.at
-      return [anchors, {}] if g.at > e.at || vend.at.nil?
+      fin = anchors["integrate_end"]
+      return [anchors, { "verify" => { na: unknown_end(gate, start) } }] unless fin&.at
+      return [anchors, {}] if gate.at > fin.at
 
-      first_gate_inside(anchors, g, s, e, to, vend)
+      first_gate_inside(anchors, [gate, start, fin], verify_end_name, verify_end)
     end
 
-    def first_gate_inside(anchors, g, s, e, to, vend)
-      shape = "the unit's first gate run (#{Util.iso(g.at)}) is inside its final integration run " \
-              "(#{Util.iso(s.at)} -> #{Util.iso(e.at)}): no gate ran before it"
-      derived = Anchors.found(vend.at, "#{to}: #{shape}")
+    # Standalone: PASS < first gate < the final run's start, and the gate is
+    # not before the dispatch stamp (that order stays invalid).
+    def pass_before_gate_before_run?(anchors, verify_end_name)
+      gate = anchors["gate_first"].at
+      pass = anchors[verify_end_name].at
+      dispatch = anchors["dispatch"]&.at
+      verify_end_name == "critic_pass" && pass && pass < gate && gate < anchors["integrate_start"].at &&
+        (dispatch.nil? || dispatch <= gate)
+    end
+
+    def first_gate_inside(anchors, (gate, start, fin), verify_end_name, verify_end)
+      shape = "the unit's first recorded gate run (#{Util.iso(gate.at)}) is inside its final integration " \
+              "run (#{Util.iso(start.at)} -> #{Util.iso(fin.at)}): no gate run was recorded before it"
+      derived = Anchors.found(verify_end.at, "#{verify_end_name}: #{shape}")
       notes = {
-        "verify" => { basis: "0: #{shape}, so no time passed between the first gate and the final integration attempt" },
-        "implement" => { basis: "ends at #{to} (#{Util.iso(vend.at)}), not the first gate run: #{shape}" },
+        "verify" => { basis: "0: #{shape}, so no time passed between the first gate and the final integration " \
+                             "attempt (a gate run with no local event, e.g. on another machine, is not seen)" },
+        "implement" => { basis: "ends at #{verify_end_name} (#{Util.iso(verify_end.at)}), not the first gate " \
+                                "run: #{shape}" },
       }
       [anchors.merge("gate_first" => derived), notes]
     end
 
-    def unknown_end(g, s)
-      "the unit's first gate run (#{Util.iso(g.at)}) is after its final integration run's start " \
-        "(#{Util.iso(s.at)}), and that run has no recorded end, so whether the gate run is inside it " \
+    def unknown_end(gate, start)
+      "the unit's first gate run (#{Util.iso(gate.at)}) is after its final integration run's start " \
+        "(#{Util.iso(start.at)}), and that run has no recorded end, so whether the gate run is inside it " \
         "cannot be told"
     end
 
-    def standalone_pass_first(g, pass, s)
+    def standalone_pass_first(gate, pass, start)
       { "verify" => { na: "the critic PASS (#{Util.iso(pass.at)}) is before the first gate run " \
-                          "(#{Util.iso(g.at)}), which is before the final integration run (#{Util.iso(s.at)}): " \
-                          "the captain gated after the PASS, so no PASS ends verify" } }
+                          "(#{Util.iso(gate.at)}), which is before the final integration run " \
+                          "(#{Util.iso(start.at)}): the captain gated after the PASS, so no PASS ends verify" } }
     end
 
     def value(a, b, from, to)
@@ -724,7 +748,7 @@ module LeadTimePhases
 
       # The anchors verify was read from (DND-1819: a derived start when no
       # gate ran before the final integration run, so the window is empty).
-      eff, = Phases.effective(anchors)
+      eff, = Phases.effective_anchors(anchors)
       lo = eff.fetch(from).at
       hi = eff.fetch(to).at
       # A run starting before lo cannot exist (gate_first is the first run),

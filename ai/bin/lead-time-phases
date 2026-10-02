@@ -116,14 +116,19 @@ HELP = <<~TXT
   integration run, that window is empty: verify is a measured 0 that
   starts where it ends (the run's start in the with-critic flow, the PASS
   in the standalone flow, which then stands before the first gate run),
-  and implement ends there too, so the phases still telescope. Both cells
-  carry a `basis` naming the shape; the row's gate_first anchor stays the
-  real first gate run. Two neighbouring shapes are n/a with a reason
-  naming them, never "invalid": a first gate run after a final run with no
-  recorded end (inside cannot be told), and, standalone, a PASS before a
-  first gate run that ran before the final run (the captain gated after
-  the PASS, so no PASS ends verify). Rows ingested before this are not
-  re-derived.
+  and implement ends there too, so the phases still telescope. Each
+  measured (or invalid) cell that reads that start carries a `basis`
+  naming the shape; the row's gate_first anchor stays the real first gate
+  run. A first gate in the run's own second already read verify 0 in the
+  with-critic flow and is left as it was. Two neighbouring shapes are n/a
+  with a reason naming them, never "invalid": a first gate run after a
+  final run with no recorded end (inside cannot be told), and, standalone,
+  a PASS before a first gate run that ran before the final run (the
+  captain gated after the PASS, so no PASS ends verify). Residual: the
+  first gate run is the first LOCAL one recorded for the unit, so a gate
+  run that left no local event (another machine, a failed telemetry write,
+  counted in write-failures) reads as none, and verify reads 0; the basis
+  says so. Rows ingested before this are not re-derived.
 
   A phase whose anchor is missing is null with a reason; one whose anchors
   are out of order in any other way (a gate run before the dispatch stamp,
