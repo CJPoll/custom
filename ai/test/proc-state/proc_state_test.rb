@@ -98,6 +98,27 @@ begin
     end
   end
 
+  # R-6 (DND-1625): the pure parse every Ruby reader shares, on a FIXTURE
+  # stat whose comm holds a newline and ") ". No process is started.
+  odd = "4242 (x) Z 7 9\n) T) S 1 4242 4242 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 555 1000 10\n"
+  if ProcState.respond_to?(:stat_fields)
+    f = ProcState.stat_fields(odd)
+    check("R-6 stat_fields takes the fields after the LAST \") \": state S", f&.first == "S", f.inspect)
+    check("R-6 stat_fields: pgrp 4242 and starttime 555", f && f[2] == "4242" && f[19] == "555", f.inspect)
+    check("R-6 stat_fields: no ') ' is nil, never a guess", ProcState.stat_fields("88 (broken S 1 88 88\n").nil?)
+    check("R-6 stat_fields: empty is nil", ProcState.stat_fields("").nil?)
+  else
+    check("R-6 ProcState.stat_fields exists", false, "undefined")
+  end
+
+  # R-7 (DND-1625): harness-gate's SIGTERM self-test judged its fixture
+  # processes with File.read(stat)[/\) (\S)/, 1], the FIRST ") ", which reads
+  # the fixture above as a zombie. It now asks ProcState, the shared rule.
+  hg = File.read(File.expand_path("../../bin/harness-gate", __dir__))
+  check("R-7 harness-gate has no first-\") \" stat parse", !hg.include?('/stat")[/\) (\S)/'))
+  check("R-7 harness-gate reads its fixture's state through ProcState.fields",
+        hg.include?("ProcState.fields(hp)&.first"))
+
   # R-4: malformed input is an error, never "gone".
   ["", nil, "abc", "0", "-5", "12x"].each do |bad|
     raised = begin
