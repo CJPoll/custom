@@ -283,7 +283,29 @@ ig_emit_run() {
 }
 trap 'ig_emit_run $?' EXIT
 
-# --- 0. the machine test-slot pool (DND-486) -------------------------------
+# --- 0a. clear the head's receipt before any refusal ------------------------
+# A run that does not end in INTEGRATION OK leaves no pass for its head, and
+# that includes a run refused or killed before (or during) the queue wait.
+# So the receipt for the head it starts on goes FIRST, before any refusal:
+# the test-slot refusals in section 0 included (DND-1504: they used to come
+# first, so a missing test-slot left an earlier pass standing). The run inside
+# the slot repeats this harmlessly, and removes (and checks) again for the
+# head it gates. Only a missing receipt library (above) comes earlier: without
+# it the receipt's path is unknown.
+HEAD0="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)"
+if [ -n "$HEAD0" ]; then
+  OUTER_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  case "$OUTER_COMMON" in
+    /*) OUTER_RECEIPT="$(ir_receipt_path "$OUTER_COMMON" "$HEAD0")"
+        if ! rm -f "$OUTER_RECEIPT" 2>/dev/null; then
+          echo "${PROG}: could not remove the earlier receipt ${OUTER_RECEIPT}." >&2
+          echo "Fix: make $(dirname "$OUTER_RECEIPT") writable (ls -ld '$(dirname "$OUTER_RECEIPT")') and re-run. A stale pass this run cannot clear would outlive its result." >&2
+          exit 5
+        fi ;;
+  esac
+fi
+
+# --- 0. the machine test-slot pool (DND-486)-------------------------------
 # The gate is the heaviest run an admiral starts, and ~23 unbounded heavy runs
 # at once took this box to load 54 and flaked timing-sensitive suites (DND-473).
 # So the gate runs inside test-slot, which bounds heavy runs per machine.
@@ -518,22 +540,6 @@ fi
 unset INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC INTEGRATION_GATE_FACTS
 
 if [ "$IN_SLOT" -eq 0 ]; then
-  HEAD0="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)"
-  # A run that does not end in INTEGRATION OK leaves no pass for its head, and
-  # that includes a run refused or killed before (or during) the queue wait.
-  # So the receipt for the head it queues with goes FIRST, before any refusal.
-  # The run inside the slot removes (and checks) again for the head it gates.
-  if [ -n "$HEAD0" ]; then
-    OUTER_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
-    case "$OUTER_COMMON" in
-      /*) OUTER_RECEIPT="$(ir_receipt_path "$OUTER_COMMON" "$HEAD0")"
-          if ! rm -f "$OUTER_RECEIPT" 2>/dev/null; then
-            echo "${PROG}: could not remove the earlier receipt ${OUTER_RECEIPT}." >&2
-            echo "Fix: make $(dirname "$OUTER_RECEIPT") writable (ls -ld '$(dirname "$OUTER_RECEIPT")') and re-run. A stale pass this run cannot clear would outlive its result." >&2
-            exit 5
-          fi ;;
-    esac
-  fi
   # A tree `git status` cannot even read (a corrupt object) is left for the run
   # inside the slot, which names the exact failure; only a readable dirty tree
   # is refused here, before it costs a queue wait.

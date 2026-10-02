@@ -1107,6 +1107,120 @@ out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate"
 [ "$rc" -eq 2 ] && grep -q 'cannot load .*integration-receipt.sh' <<<"$out" && grep -q '^Fix:' <<<"$out" && [ ! -f "${R}/GATE_RAN" ] \
   && ok "s12 a missing receipt library is exit 2 with Fix:, gate not run" || bad "s12 missing library expected exit 2 naming it, got $rc" "$out"
 
+# s14..s16 (DND-1504): exit 6 from a test-slot that reports TIMEOUT, at both
+# places integration-gate calls it, and the outer-only refusal of a missing
+# test-slot. s2 and s11 reach exit 6 only through the real test-slot and a
+# 1 s wait; these use a fake that reports TIMEOUT at once, so no case depends
+# on a clock or on load (DND-1222). The fake lives in the layout's main
+# checkout, the one test-slot integration-gate resolves, and logs each call,
+# so every case asserts the fake was the one called: a fake that went missing
+# would be exit 2 here, never a silent fall-through to the real test-slot.
+# Each case first plants a passing receipt for its head: a run that does not
+# end in INTEGRATION OK must leave none, planted or written.
+#
+# fake_slot <path> <mode> <call log> <pool dir> -- a test-slot that answers
+# --weight-of with 1 and, per mode:
+#   outer-timeout  every run call: outcome "timeout", exit 75, CMD not run.
+#   inner-timeout  the first run call holds slot <pool dir>:1 (a real flock,
+#                  so integration-gate's slot_really_held accepts it) and
+#                  runs CMD; a run call made while that slot is held (the
+#                  gate's own call, from inside the slot) times out.
+# Log lines: "weigh", "run" (CMD ran), "timeout-0" (a timeout outside a held
+# slot), "timeout-1" (a timeout inside one).
+fake_slot() {
+  { printf '#!/usr/bin/env bash\nmode=%q log=%q pool=%q\n' "$2" "$3" "$4"
+    cat <<'FAKE'
+out=""; weigh=0
+while [ $# -gt 0 ] && [ "$1" != -- ]; do
+  case "$1" in
+    --weight-of) weigh=1; shift ;;
+    --outcome-file) out="$2"; shift 2 ;;
+    --label|--pool|--wait-timeout|--weight) shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ "${1-}" = -- ] && shift
+if [ "$weigh" -eq 1 ]; then echo weigh >>"$log"; echo 1; exit 0; fi
+held=0; [ -n "${ATHENA_TEST_SLOT_HELD:-}" ] && held=1
+if [ "$mode" = outer-timeout ] || { [ "$mode" = inner-timeout ] && [ "$held" -eq 1 ]; }; then
+  echo "timeout-${held}" >>"$log"
+  [ -n "$out" ] && echo timeout >"$out"
+  echo "test-slot: TIMEOUT (fake): no slot within the wait" >&2
+  exit 75
+fi
+echo run >>"$log"
+mkdir -p "$pool"; exec 9>"$pool/slot-1.lock"; flock -x 9
+ATHENA_TEST_SLOT_HELD="$pool:1" "$@"; rc=$?
+[ -n "$out" ] && echo "ran exit=$rc" >"$out"
+exit "$rc"
+FAKE
+  } >"$1"; chmod +x "$1"
+}
+# plant_receipt <repo> -- a passing receipt for HEAD, as an earlier OK left it.
+plant_receipt() {
+  local rf; rf="$(receipt_of "$1" "$(git -C "$1" rev-parse HEAD)")"
+  mkdir -p "$(dirname "$rf")"
+  printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s"}\n' "$(git -C "$1" rev-parse HEAD)" >"$rf"
+  printf '%s' "$rf"
+}
+SLOT_FIX_FULL="Fix: the machine's heavy-test slot pool stayed full"
+
+# s14: the OUTER call (the slot integration-gate takes first) reports TIMEOUT.
+L="${TMP}/s14-layout"; layout_copy "$L"
+fake_slot "$L/ai/bin/test-slot" outer-timeout "${TMP}/s14.calls" "${TMP}/s14-pool"
+R="${TMP}/s14"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+rf="$(plant_receipt "$R")"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 6 ] && ok "s14 a TIMEOUT on the outer slot is exit 6" || bad "s14 expected exit 6, got $rc" "$out"
+grep -q "GATE NOT RUN on $(git -C "$R" rev-parse --short=12 HEAD): no machine test slot within the wait window" <<<"$out" \
+  && ok "s14 says GATE NOT RUN on the head, no slot within the wait" || bad "s14 missing the GATE NOT RUN line" "$out"
+grep -qF "$SLOT_FIX_FULL" <<<"$out" && ok "s14 Fix: says the slot pool stayed full" || bad "s14 Fix: does not name the full pool" "$out"
+grep -qE 'INTEGRATION OK|gate RED' <<<"$out" && bad "s14 read a TIMEOUT as OK or RED" "$out" || ok "s14 neither OK nor RED"
+grep -q 'running gate on the integrated head' <<<"$out" && bad "s14 the run inside the slot started" "$out" || ok "s14 nothing ran inside the slot"
+[ ! -f "${R}/GATE_RAN" ] && ok "s14 the gate did not run" || bad "s14 the gate ran despite the TIMEOUT"
+[ ! -e "$rf" ] && ok "s14 no receipt for the head (the planted pass is gone)" || bad "s14 a receipt survived exit 6" "$(cat "$rf")"
+[ "$(grep -cx 'timeout-0' "${TMP}/s14.calls" 2>/dev/null)" = 1 ] && ! grep -qx run "${TMP}/s14.calls" \
+  && ok "s14 the fake test-slot was called, once, and timed out" || bad "s14 the fake test-slot was not the one called (calls: $(tr '\n' ' ' <"${TMP}/s14.calls" 2>/dev/null))" "$out"
+
+# s15: the outer slot is taken; the gate's own call, from inside the slot,
+# reports TIMEOUT. The same exit 6, from the second place it is raised.
+L="${TMP}/s15-layout"; layout_copy "$L"
+fake_slot "$L/ai/bin/test-slot" inner-timeout "${TMP}/s15.calls" "${TMP}/s15-pool"
+R="${TMP}/s15"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+rf="$(plant_receipt "$R")"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 6 ] && ok "s15 a TIMEOUT on the gate's own slot call is exit 6" || bad "s15 expected exit 6, got $rc" "$out"
+grep -q 'running gate on the integrated head' <<<"$out" && ok "s15 the run inside the slot reached the gate step" || bad "s15 the inner run never reached the gate step" "$out"
+grep -q "GATE NOT RUN on $(git -C "$R" rev-parse --short HEAD): no machine test slot within the wait window" <<<"$out" \
+  && ok "s15 says GATE NOT RUN on the head, no slot within the wait" || bad "s15 missing the GATE NOT RUN line" "$out"
+grep -qF "$SLOT_FIX_FULL" <<<"$out" && ok "s15 Fix: says the slot pool stayed full" || bad "s15 Fix: does not name the full pool" "$out"
+grep -qE 'INTEGRATION OK|gate RED' <<<"$out" && bad "s15 read a TIMEOUT as OK or RED" "$out" || ok "s15 neither OK nor RED"
+[ ! -f "${R}/GATE_RAN" ] && ok "s15 the gate did not run" || bad "s15 the gate ran despite the TIMEOUT"
+[ ! -e "$rf" ] && ok "s15 no receipt for the head (the planted pass is gone)" || bad "s15 a receipt survived exit 6" "$(cat "$rf")"
+[ "$(grep -x -e run -e 'timeout-[01]' "${TMP}/s15.calls" 2>/dev/null | tr '\n' ' ')" = 'run timeout-1 ' ] \
+  && ok "s15 the fake test-slot ran the outer slot, then timed out the gate's call" || bad "s15 unexpected test-slot calls: $(tr '\n' ' ' <"${TMP}/s15.calls" 2>/dev/null)" "$out"
+
+# s16: test-slot absent from the main checkout. The refusal comes before the
+# slot wait and its cleanup trap, so it must still leave no pass for the head.
+L="${TMP}/s16-layout"; layout_copy "$L"
+R="${TMP}/s16"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+rf="$(plant_receipt "$R")"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "s16 exit 2 when test-slot is absent" || bad "s16 expected exit 2, got $rc" "$out"
+grep -qF "Fix: the main checkout's ai/bin/test-slot is missing (${L}/ai/bin/test-slot)" <<<"$out" \
+  && ok "s16 Fix: names the missing test-slot path" || bad "s16 Fix: does not name ${L}/ai/bin/test-slot" "$out"
+grep -q 'taking a machine test slot' <<<"$out" && bad "s16 went on to take a slot" "$out" || ok "s16 refused before any slot"
+grep -qE 'INTEGRATION OK|gate RED|GATE NOT RUN' <<<"$out" && bad "s16 reported a gate result" "$out" || ok "s16 reports no gate result"
+[ ! -f "${R}/GATE_RAN" ] && ok "s16 the gate never ran unslotted" || bad "s16 the gate ran without a slot"
+[ ! -e "$rf" ] && ok "s16 no receipt for the head (the planted pass is gone)" || bad "s16 a planted pass survived the exit-2 refusal" "$(cat "$rf")"
+# ...and the same for a script checkout whose main checkout cannot be named.
+L="${TMP}/s16-nogit"; layout_copy "$L"; rm -rf "$L/.git"
+R="${TMP}/s16b"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+rf="$(plant_receipt "$R")"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q 'cannot locate the main checkout' <<<"$out" && ok "s16 an unresolvable script checkout is exit 2" || bad "s16 no-git layout expected exit 2, got $rc" "$out"
+[ ! -e "$rf" ] && ok "s16 no receipt after the unresolvable-checkout refusal" || bad "s16 a planted pass survived the unresolvable-checkout refusal" "$(cat "$rf")"
+
 # s13: integration-gate holds its gate as `bash -c`, so it names a declared
 # gate to test-slot in ATHENA_TEST_SLOT_GATE_RUN, and test-slot writes that
 # run's gate.run (DND-1530): lead time's implement/verify anchor on the first
