@@ -281,6 +281,17 @@ new_repo
 rc="$(lp teardown)"
 [ "$rc" = 0 ] && grep -q 'none (no lane cut)' "${TMP}/out" && ok "no lane cut: teardown says so, exit 0" || bad "teardown none" "rc=$rc"
 
+# A lane the runner reserved and nobody cut (DND-1640): its meta is the
+# runner's reservation (origin, pid, run_id; no branch) and there is no
+# worktree. That is "none (no lane cut)", never a cut lane.
+new_repo
+printf 'origin=cron\npid=4242\nrun_id=%s\n' "$RUN_ID" >"$LANES/$RUN_ID.meta"
+rc="$(lp teardown)"
+if [ "$rc" = 0 ] && grep -qx 'product_lane: repo=prod none (no lane cut)' "${TMP}/out" && ! grep -q ' cut,' "${TMP}/out" \
+   && [ ! -e "$LANES/$RUN_ID.meta" ]; then
+  ok "a reserved lane never cut (reservation meta only): none (no lane cut), exit 0"
+else bad "reserved never cut" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+
 # A cut lane whose branch ref is already gone (DND-1640): the lane dir and its
 # meta exist, refs/heads/<branch> does not. Never read as "no lane cut".
 new_repo
@@ -363,6 +374,26 @@ if [ "$rc" = 0 ] && [ ! -e "$LANES/$DEAD" ] && [ ! -e "$LANES/$DEAD.lock" ] && g
   ok "reap: a dead lane (lock free) is removed, its unpushed branch kept, its stack torn down; a live (held) lane is untouched"
 else bad "reap" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 release_holders
+
+# One dead lane whose branch git cannot read never stops the reap (DND-1640):
+# it is named COULD NOT TELL with its lock and meta kept for the next tick,
+# and the dead lane after it is still reaped.
+new_repo
+BAD="run-20260930T113000Z-10"; DEAD="run-20260930T113000Z-11"
+git -C "$R" worktree add -q -b leadtime/prod-tail-bad "$LANES/$BAD" origin/main
+printf 'branch=leadtime/prod-tail-bad\nbootstrap=ran\n' >"$LANES/$BAD.meta"
+git -C "$R" update-ref -d refs/heads/leadtime/prod-tail-bad
+: >"$LANES/$BAD.lock"
+git -C "$R" worktree add -q -b leadtime/prod-tail-dead "$LANES/$DEAD" origin/main
+printf 'branch=leadtime/prod-tail-dead\nbootstrap=ran\n' >"$LANES/$DEAD.meta"
+echo x >"$LANES/$DEAD/x.txt"; git -C "$LANES/$DEAD" add x.txt; git "${G[@]}" -C "$LANES/$DEAD" commit -q -m dead
+: >"$LANES/$DEAD.lock"
+rc="$(PATH="$GITSHIM:$PATH" lp reap)"
+if [ "$rc" = 0 ] && grep -q "lane=$BAD COULD NOT TELL (cannot read branch leadtime/prod-tail-bad" "${TMP}/out" \
+   && [ -e "$LANES/$BAD.lock" ] && [ -e "$LANES/$BAD.meta" ] \
+   && grep -q "lane=$DEAD STRANDED" "${TMP}/out" && [ ! -e "$LANES/$DEAD.lock" ] && [ ! -e "$LANES/$DEAD" ]; then
+  ok "reap: an unreadable branch is COULD NOT TELL with its lock and meta kept; the next dead lane is still reaped"
+else bad "reap unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 
 echo "== sweep"
 new_repo; open_one

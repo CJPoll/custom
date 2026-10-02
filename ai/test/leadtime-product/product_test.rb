@@ -289,22 +289,22 @@ check("R4 never pushed: stranded") { P.retire(tip: H1, on_main: false, recorded_
 
 # A lane with no branch ref in R to judge (DND-1640): "never cut" and "cut,
 # branch already gone" must not read the same.
-LANE = "run-20261001T123000Z-4242"
-def no_ref(branch:, worktree:, meta:) = P.no_branch_ref(lane: LANE, branch: branch, worktree: worktree, meta: meta)
-check("R5 no worktree and no meta: none, 'no lane cut'") do
-  no_ref(branch: nil, worktree: false, meta: false) == [:none, "no lane cut"]
+R_LANE = "run-20261001T123000Z-4242"
+def no_ref(branch:, had_worktree:) = P.no_branch_ref(lane: R_LANE, branch: branch, had_worktree: had_worktree)
+check("R5 no branch recorded and no worktree (reserved, never cut): none (no lane cut)") do
+  no_ref(branch: nil, had_worktree: false) == [:none, "none (no lane cut)"]
 end
 check("R6 a cut lane whose branch ref is gone: names the lane and the branch, never 'no lane cut'") do
-  v, d = no_ref(branch: "leadtime/prod-verify-x", worktree: true, meta: true)
-  v == :gone && d == "lane #{LANE} cut, worktree removed; branch leadtime/prod-verify-x already gone (nothing to keep)"
+  v, d = no_ref(branch: "leadtime/prod-verify-x", had_worktree: true)
+  v == :gone && d == "lane #{R_LANE} cut, worktree removed; branch leadtime/prod-verify-x already gone (nothing to keep)"
 end
-check("R7 meta only (worktree already gone), branch ref gone: says the worktree was already gone") do
-  v, d = no_ref(branch: "leadtime/prod-verify-x", worktree: false, meta: true)
-  v == :gone && d == "lane #{LANE} cut, worktree already gone; branch leadtime/prod-verify-x already gone (nothing to keep)"
+check("R7 worktree already gone, branch ref gone: says the worktree was already gone") do
+  v, d = no_ref(branch: "leadtime/prod-verify-x", had_worktree: false)
+  v == :gone && d == "lane #{R_LANE} cut, worktree already gone; branch leadtime/prod-verify-x already gone (nothing to keep)"
 end
-check("R8 meta that records no branch, no worktree: cut, no branch recorded, never 'no lane cut'") do
-  v, d = no_ref(branch: nil, worktree: false, meta: true)
-  v == :gone && d == "lane #{LANE} cut, worktree already gone; its meta records no branch (nothing to keep)"
+check("R8 a worktree that names no branch: stranded, COULD NOT TELL, never 'no lane cut' or 'nothing to keep'") do
+  v, d = no_ref(branch: nil, had_worktree: true)
+  v == :stranded && d.include?("COULD NOT TELL: lane #{R_LANE}") && !d.include?("no lane cut") && !d.include?("nothing to keep")
 end
 
 # ── summary and PR body ──────────────────────────────────────────────────────

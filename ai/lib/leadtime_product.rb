@@ -389,16 +389,25 @@ module LeadTimeProduct
     :stranded
   end
 
-  # A lane with no branch ref in R to judge -> [verdict, detail]. :none only
-  # when nothing was cut (no worktree and no meta); a lane that was cut and
-  # whose branch is already gone is :gone, naming the lane and the branch, so
-  # "never cut" and "cut, branch gone" never read the same (DND-1640).
-  def no_branch_ref(lane:, branch:, worktree:, meta:)
-    return [:none, "no lane cut"] unless worktree || meta
+  # A lane with no branch ref in R to judge -> [verdict, detail] (DND-1640).
+  # `branch` is the one its meta records (or its worktree has checked out);
+  # had_worktree says whether its worktree existed before removal.
+  #
+  # A lane is cut only by `cut`, which records its branch. The runner's
+  # reservation meta (origin, pid, run_id) records none, so no branch and no
+  # worktree is a lane reserved and never cut: :none. A branch recorded but
+  # absent from R is a lane that WAS cut and whose branch is already gone:
+  # :gone, naming the lane and the branch, so the two never read the same. A
+  # worktree with no branch to name cannot say what R may hold: :stranded.
+  def no_branch_ref(lane:, branch:, had_worktree:)
+    if branch.nil?
+      return [:none, "none (no lane cut)"] unless had_worktree
 
-    wt = worktree ? "worktree removed" : "worktree already gone"
-    what = branch ? "branch #{branch} already gone" : "its meta records no branch"
-    [:gone, "lane #{lane} cut, #{wt}; #{what} (nothing to keep)"]
+      return [:stranded, "COULD NOT TELL: lane #{lane} had a worktree but names no branch; check R's leadtime/ branches"]
+    end
+
+    wt = had_worktree ? "worktree removed" : "worktree already gone"
+    [:gone, "lane #{lane} cut, #{wt}; branch #{branch} already gone (nothing to keep)"]
   end
 
   # ── reporting ──────────────────────────────────────────────────────────────

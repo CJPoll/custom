@@ -96,7 +96,8 @@ module LeadTimeProductIO
       _, code = call(dir, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}")
       return nil if code == 1
 
-      raise CouldNotLook.new("cannot read branch #{branch} in #{dir} (git show-ref exit #{code})", "check the repo is intact ('git -C #{dir} show-ref #{branch}'); the branch is kept.")
+      why = code.zero? ? "it exists but does not resolve to a commit" : "git show-ref exit #{code}"
+      raise CouldNotLook.new("cannot read branch #{branch} in #{dir} (#{why})", "check the repo is intact ('git -C #{dir} show-ref #{branch}'); the branch is kept.")
     end
 
     # true / false; nil when git could not tell (never read as "not landed").
@@ -738,7 +739,6 @@ module LeadTimeProductIO
 
   # -> [:none|:gone|:delete|:awaiting|:stranded, branch, detail]
   def retire_lane(m, rl, dir, why)
-    had_meta = File.exist?("#{dir}.meta")
     meta = Meta.read("#{dir}.meta")
     branch = meta["branch"]
     if branch.nil? && File.directory?(dir)
@@ -756,7 +756,7 @@ module LeadTimeProductIO
     Git.remove_worktree(rl.path, dir) if had_worktree
     tip = branch && Git.branch_tip(rl.path, branch)
     unless tip
-      verdict, detail = P.no_branch_ref(lane: File.basename(dir), branch: branch, worktree: had_worktree, meta: had_meta)
+      verdict, detail = P.no_branch_ref(lane: File.basename(dir), branch: branch, had_worktree: had_worktree)
       return [verdict, branch, detail]
     end
 
@@ -806,22 +806,33 @@ module LeadTimeProductIO
         next if own_lane?(m, rid)
 
         dir = File.join(rl.lanes_dir, rid)
+        read = nil
         got = Locks.with(lock) do
-          _, _, detail = retire_lane(m, rl, dir, "reaped dead lead-time lane #{rid}")
+          detail, read = reap_one(m, rl, dir, "reaped dead lead-time lane #{rid}")
           lines << "product_reaped: repo=#{rl.name} lane=#{rid} #{detail}"
         end
-        next if got == :held
+        next if got == :held || !read
 
         FileUtils.rm_f([lock, "#{dir}.meta"])
       end
       Dir.glob(File.join(rl.lanes_dir, "run-*")).select { |d| File.directory?(d) }.sort.each do |dir|
         next if File.exist?("#{dir}.lock") || own_lane?(m, File.basename(dir))
 
-        _, _, detail = retire_lane(m, rl, dir, "reaped lockless lead-time lane")
-        FileUtils.rm_f("#{dir}.meta")
+        detail, read = reap_one(m, rl, dir, "reaped lockless lead-time lane")
+        FileUtils.rm_f("#{dir}.meta") if read
         lines << "product_reaped: repo=#{rl.name} lane=#{File.basename(dir)} (lockless) #{detail}"
       end
     end
     lines
+  end
+
+  # One dead lane -> [detail, read?]. A lane whose state could not be read is
+  # named and kept (its lock and meta stay for the next tick), and the reap
+  # goes on to the next lane: one unreadable lane never stops the others.
+  def reap_one(m, rl, dir, why)
+    _, _, detail = retire_lane(m, rl, dir, why)
+    [detail, true]
+  rescue P::Error => e
+    ["COULD NOT TELL (#{e.message}); branch kept", false]
   end
 end

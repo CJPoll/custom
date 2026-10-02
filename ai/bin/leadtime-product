@@ -65,8 +65,11 @@ HELP = <<~TXT
               pushed on a recorded improver PR -> awaiting landing; anything
               else -> STRANDED, branch kept (exit 72). A lane that was cut
               but whose branch is already gone says so, naming the lane and
-              the branch; "none (no lane cut)" means nothing was cut. A branch
-              git cannot read is COULD NOT TELL, kept (exit 72).
+              the branch; "none (no lane cut)" means no lane was cut (none
+              reserved, or only the runner's reservation). A branch git
+              cannot read is COULD NOT TELL, kept (exit 72). reap prints the
+              same details; there an unreadable lane is COULD NOT TELL with
+              its lock and meta kept, and the reap goes on to the next lane.
 
   Forge: GitHub only (locked-merge is GitHub-only); a GitLab R is refused.
 
