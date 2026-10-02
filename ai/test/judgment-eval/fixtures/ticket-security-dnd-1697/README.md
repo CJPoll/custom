@@ -158,11 +158,16 @@ Reading the items against the tools:
 - Item 3's held-out part is a count and a rate. A false security call is a
   `none` case whose verdict is not `match`. v3 may make at most 31, and at
   most 31/291 of the `none` cases measured in both runs.
-- n/a keeps the rule above: re-run that set once; a second n/a is "could
-  not measure", reported, never scored.
+- n/a keeps the rules above. A case with no measured verdict in either run
+  is named and left out of both versions' counts. When it could hide a lost
+  case (v1 did not measure a miss there and v3 did not match), the result is
+  "could not measure": re-run that set once; a second one is reported,
+  never scored.
 
-`score-v3.rb` scores items 2 and 3 on H from two `--repeat 3` run files. It
-refuses a run without per-case verdicts:
+`score-v3.rb` scores items 2 and 3 on H from two `--repeat 3` run files.
+It exits 0 on PASS, 1 on FAIL and 3 on COULD NOT MEASURE. It refuses
+(exit 2) a run without per-case verdicts, runs in the wrong order, and two
+runs made from different labels files:
 
 ```
 ruby ai/test/judgment-eval/fixtures/ticket-security-dnd-1697/score-v3.rb \

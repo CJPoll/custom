@@ -393,55 +393,91 @@ eq "the DND-1697 fixture dry run sends nothing" "$(requests)" "${n}"
 
 # The ticket-security-v3 held-out scorer (DND-1697 v3): per-case verdicts
 # from two --repeat 3 run files. Only `match` is right; unstable counts as a
-# miss; a case without a verdict in either run is n/a, named, and makes the
-# result COULD NOT MEASURE rather than a pass.
+# miss. An n/a case that could hide a lost case makes the result COULD NOT
+# MEASURE (exit 3), never a pass; FAIL exits 1, PASS 0, a refused input 2.
 SV3="${TSS}/score-v3.rb"
 V3D="${TMP}/dnd1697v3"
 mkdir -p "${V3D}"
-# mkrun FILE VERSION REPEAT "case:label:verdict ..." -- a synthetic run file.
+# mkrun FILE VERSION REPEAT "case:label:verdict ..." [SHA] -- a synthetic run file.
 mkrun() {
   ruby -rjson -e '
-    file, version, repeat, spec = ARGV
+    file, version, repeat, spec, sha = ARGV
     verdicts = spec.split.map { |s| id, label, v = s.split(":"); { "case_id" => id, "label" => label, "verdict" => v } }
     run = { "eval_run_id" => "00000000-0000-4000-8000-000000000000", "question_set_version" => version,
-            "model" => "jev-test", "repeat" => repeat.to_i, "candidate" => version != "ticket-security-v1" }
+            "model" => "jev-test", "repeat" => repeat.to_i, "candidate" => version != "ticket-security-v1",
+            "labels_sha256" => sha || "sha-a" }
     run["verdicts"] = verdicts if repeat.to_i >= 2
     File.write(file, JSON.generate(run))' "$@"
 }
+sv3() { OUT="$(ruby "${SV3}" "$@" 2>&1)"; RC=$?; }
 printf '%s\n' '{"id":"a","label":"security"}' '{"id":"b","label":"none"}' '{"id":"c","label":"none"}' '{"id":"d","label":"security"}' > "${V3D}/labels.jsonl"
 mkrun "${V3D}/v1.json" ticket-security-v1 3 "a:security:match b:none:match c:none:miss d:security:unstable"
 mkrun "${V3D}/v3.json" ticket-security-v3 3 "a:security:match b:none:match c:none:match d:security:miss"
-OUT="$(ruby "${SV3}" "${V3D}/v1.json" "${V3D}/v3.json" "${V3D}/labels.jsonl" 2>&1)"; RC=$?
-eq "score-v3: a clean comparison exits 0" "${RC}" "0"
+sv3 "${V3D}/v1.json" "${V3D}/v3.json" "${V3D}/labels.jsonl"
+eq "score-v3: a passing comparison exits 0" "${RC}" "0"
 has "score-v3: no case v1 matches is lost" "${OUT}" "item 2: cases v1 matches that v3 does not: 0 -> PASS"
 has "score-v3: false security counts unstable and miss, v1 1 of 2, v3 0 of 2" "${OUT}" "item 3 (held-out): none cases not matched: v1 1/2, v3 0/2 -> PASS"
 has "score-v3: a miss v1 already had is no regression" "${OUT}" "result: PASS"
 
 mkrun "${V3D}/v3-lost.json" ticket-security-v3 3 "a:security:unstable b:none:match c:none:match d:security:match"
-OUT="$(ruby "${SV3}" "${V3D}/v1.json" "${V3D}/v3-lost.json" "${V3D}/labels.jsonl" 2>&1)"
+sv3 "${V3D}/v1.json" "${V3D}/v3-lost.json" "${V3D}/labels.jsonl"
 has "score-v3: an unstable case v1 matched is a lost case, named" "${OUT}" "item 2: cases v1 matches that v3 does not: 1 (a) -> FAIL"
 has "score-v3: a lost case fails the result" "${OUT}" "result: FAIL"
+eq "score-v3: FAIL exits 1" "${RC}" "1"
 
+# b (v1 match) is n/a under v3: it could hide a lost case. d is absent from
+# v3 but v1 measured it unstable, so v3 cannot be worse there.
 mkrun "${V3D}/v3-na.json" ticket-security-v3 3 "a:security:match b:none:n/a c:none:match"
-OUT="$(ruby "${SV3}" "${V3D}/v1.json" "${V3D}/v3-na.json" "${V3D}/labels.jsonl" 2>&1)"
-has "score-v3: n/a and absent cases are named" "${OUT}" "n/a (no verdict in either run, left out of both): 2 (b, d)"
-has "score-v3: an n/a case makes the result could-not-measure, never a pass" "${OUT}" "result: COULD NOT MEASURE"
+sv3 "${V3D}/v1.json" "${V3D}/v3-na.json" "${V3D}/labels.jsonl"
+has "score-v3: n/a and absent cases are named" "${OUT}" "n/a (no measured verdict in at least one run, left out of both): 2 (b, d)"
+has "score-v3: only an n/a that could hide a lost case is named as such" "${OUT}" "n/a that could hide a lost case: 1 (b)"
+has "score-v3: such an n/a makes the result could-not-measure, never a pass" "${OUT}" "result: COULD NOT MEASURE"
+eq "score-v3: COULD NOT MEASURE exits 3" "${RC}" "3"
+
+mkrun "${V3D}/v3-na-benign.json" ticket-security-v3 3 "a:security:match b:none:match c:none:match"
+sv3 "${V3D}/v1.json" "${V3D}/v3-na-benign.json" "${V3D}/labels.jsonl"
+has "score-v3: an n/a v1 already missed is left out and still passes" "${OUT}" "result: PASS"
 
 mkrun "${V3D}/v3-r1.json" ticket-security-v3 1 ""
-OUT="$(ruby "${SV3}" "${V3D}/v1.json" "${V3D}/v3-r1.json" "${V3D}/labels.jsonl" 2>&1)"; RC=$?
+sv3 "${V3D}/v1.json" "${V3D}/v3-r1.json" "${V3D}/labels.jsonl"
 eq "score-v3: a run with no per-case verdicts is refused (exit 2)" "${RC}" "2"
 has "score-v3: the refusal says to measure with --repeat 3" "${OUT}" "Fix: measure with judgment-eval --repeat 3"
 
-# The absolute part of item 3: at most 31 false security calls, and at most
-# 31/291 of the none cases measured.
+sv3 "${V3D}/v3.json" "${V3D}/v1.json" "${V3D}/labels.jsonl"
+eq "score-v3: swapped runs are refused (exit 2)" "${RC}" "2"
+has "score-v3: the swap refusal names the order" "${OUT}" "Fix: pass the v1 run first and the v3 run second"
+
+mkrun "${V3D}/v3-sha.json" ticket-security-v3 3 "a:security:match b:none:match c:none:match d:security:match" sha-b
+sv3 "${V3D}/v1.json" "${V3D}/v3-sha.json" "${V3D}/labels.jsonl"
+eq "score-v3: runs against different labels files are refused (exit 2)" "${RC}" "2"
+has "score-v3: the labels refusal carries Fix:" "${OUT}" "Fix: measure both versions against the same labels file"
+
+mkrun "${V3D}/v3-relabel.json" ticket-security-v3 3 "a:none:match b:none:match c:none:match d:security:match"
+sv3 "${V3D}/v1.json" "${V3D}/v3-relabel.json" "${V3D}/labels.jsonl"
+eq "score-v3: a verdict scored against another label is refused (exit 2)" "${RC}" "2"
+
+sv3 "${V3D}/v1.json" "${V3D}/missing.json" "${V3D}/labels.jsonl"
+eq "score-v3: a missing run file is refused (exit 2), not a backtrace" "${RC}" "2"
+has "score-v3: the missing-file refusal carries Fix:" "${OUT}" "Fix: pass a run file judgment-eval wrote"
+
+# Item 3 is a count and a rate: at most 31 false security calls, and at most
+# 31/291 of the none cases measured in both runs.
 ruby -e 'puts (1..300).map { |i| %({"id":"n#{i}","label":"none"}) }' > "${V3D}/labels-300.jsonl"
 mkrun "${V3D}/v1-300.json" ticket-security-v1 3 "$(ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 40 ? "miss" : "match"}" }.join(" ")')"
 mkrun "${V3D}/v3-31.json" ticket-security-v3 3 "$(ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 31 ? "unstable" : "match"}" }.join(" ")')"
 mkrun "${V3D}/v3-32.json" ticket-security-v3 3 "$(ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 32 ? "miss" : "match"}" }.join(" ")')"
-OUT="$(ruby "${SV3}" "${V3D}/v1-300.json" "${V3D}/v3-31.json" "${V3D}/labels-300.jsonl" 2>&1)"
-has "score-v3: 31 false security calls of 300 passes item 3" "${OUT}" "item 3 (held-out): none cases not matched: v1 40/300, v3 31/300 -> PASS"
-OUT="$(ruby "${SV3}" "${V3D}/v1-300.json" "${V3D}/v3-32.json" "${V3D}/labels-300.jsonl" 2>&1)"
-has "score-v3: 32 false security calls fails item 3" "${OUT}" "item 3 (held-out): none cases not matched: v1 40/300, v3 32/300 -> FAIL"
+sv3 "${V3D}/v1-300.json" "${V3D}/v3-31.json" "${V3D}/labels-300.jsonl"
+has "score-v3: 31 false security calls of 300 is within item 3" "${OUT}" "item 3 (held-out): none cases not matched: v1 40/300, v3 31/300 -> PASS"
+sv3 "${V3D}/v1-300.json" "${V3D}/v3-32.json" "${V3D}/labels-300.jsonl"
+has "score-v3: 32 false security calls fails item 3 on the count" "${OUT}" "item 3 (held-out): none cases not matched: v1 40/300, v3 32/300 -> FAIL"
+ruby -e 'puts (1..200).map { |i| %({"id":"m#{i}","label":"none"}) }' > "${V3D}/labels-200.jsonl"
+mkrun "${V3D}/v1-200.json" ticket-security-v1 3 "$(ruby -e 'puts (1..200).map { |i| "m#{i}:none:#{i <= 30 ? "miss" : "match"}" }.join(" ")')"
+mkrun "${V3D}/v3-200-21.json" ticket-security-v3 3 "$(ruby -e 'puts (1..200).map { |i| "m#{i}:none:#{i <= 21 ? "miss" : "match"}" }.join(" ")')"
+mkrun "${V3D}/v3-200-22.json" ticket-security-v3 3 "$(ruby -e 'puts (1..200).map { |i| "m#{i}:none:#{i <= 22 ? "miss" : "match"}" }.join(" ")')"
+sv3 "${V3D}/v1-200.json" "${V3D}/v3-200-21.json" "${V3D}/labels-200.jsonl"
+has "score-v3: 21 of 200 is within the 31/291 rate" "${OUT}" "item 3 (held-out): none cases not matched: v1 30/200, v3 21/200 -> PASS"
+sv3 "${V3D}/v1-200.json" "${V3D}/v3-200-22.json" "${V3D}/labels-200.jsonl"
+has "score-v3: 22 of 200 fails on the rate alone (22 <= 31, 22/200 > 31/291)" "${OUT}" "item 3 (held-out): none cases not matched: v1 30/200, v3 22/200 -> FAIL"
 
 printf '{"id":"zz","label":"x","provenance":"owner_confirmed"}\n' > "${TMP}/labels-none.jsonl"
 run --use-case finding_triage --labels "${TMP}/labels-none.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --dry-run
