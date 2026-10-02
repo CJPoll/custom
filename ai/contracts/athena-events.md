@@ -1466,12 +1466,19 @@ source.
 1. **Payload schema** — exactly `entity_id`, `host`, `project_path`, `mr_iid`,
    `url`, `title`, `state` and `revision`, each a scalar string (*Payload
    fields and their types per event type*). `forge.review.commented` also
-   carries `trigger`, a scalar string, `commented` or `mentioned` (DND-1350). `host` and `project_path` come
+   carries `trigger`, a scalar string, `commented` or `mentioned` (DND-1350).
+   `host` and `project_path` come
    from the hook the request verified against, and `url` is built from them,
    never from the body. The payload never holds the merge request's
    description, diff, comments, commit messages, author, assignees or
    reviewer list. For `commented`, the comment's text and the author and
    reviewer ids are read to classify it and are stored nowhere.
+
+   **Later (2026-10-02):** this item said every `forge.review.*` payload is
+   exactly the eight fields. Superseded for `forge.review.commented` by
+   DND-1350 (gen_saas #593, `0bc5d220`): it carries a ninth, `trigger`, which
+   tells the index why the comment is the owner's (*Comments (DND-1337)*,
+   below). The other four types are unchanged.
 2. **Identity field** — `payload.entity_id`
    (`forge:<host>:<project_path>:<mr_iid>`, the priority index's `source_ref`
    for the item); it is the `subject` of the dedupe window.
