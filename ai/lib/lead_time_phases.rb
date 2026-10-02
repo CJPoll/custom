@@ -137,6 +137,10 @@ module LeadTimePhases
     # landed commit, which is what the row is named by.
     def head_desc(landing) = Util.short(landing["gated_head"] || landing["landed_commit"])
 
+    # The key Match.for_gated searched by: the head for a push landing, else
+    # (a merge landing) the unit (DND-1511).
+    def gated_desc(landing) = landed_is_gated_head?(landing) ? head_desc(landing) : unit_desc(landing)
+
     # Set each ticketed landing's "after": the previous landing of the same
     # ticket (from the ledger's prior rows or this batch), so a ticket that
     # lands twice never counts the first landing's events again.
@@ -335,15 +339,16 @@ module LeadTimePhases
                   .select { |e| Match.attr(e, "exit_code") == 0 }
       run = runs.max_by { |e| Match.at(e) }
       sha = Landing.head_desc(landing)
+      gated = Landing.gated_desc(landing)
       rec = receipt.items.first && Util.time(receipt.items.first["recorded_at"])
       if run
         start = found(Match.at(run), "telemetry integration_gate.run")
         return [start, found(Match.end_of(run), "telemetry integration_gate.run")] if run["duration_s"].is_a?(Numeric)
         return [start, found(rec, "integration receipt")] if rec
 
-        return [start, missing("integration_gate.run on #{sha} has no duration and no receipt")]
+        return [start, missing("integration_gate.run on #{gated} has no duration and no receipt")]
       end
-      no_run = telemetry_miss(events, "no integration_gate.run on #{sha}")
+      no_run = telemetry_miss(events, "no integration_gate.run on #{gated}")
       return [missing("#{no_run} (the receipt gives the end only)"), found(rec, "integration receipt")] if rec
 
       rec_why = receipt.could_not_look? ? "receipt: could not look (#{receipt.reason})" : "no integration receipt for #{sha}"
@@ -428,7 +433,7 @@ module LeadTimePhases
       return { "check_walls" => walls, "top_checks" => top(walls), "top_checks_source" => source } if walls
 
       sha = Landing.head_desc(landing)
-      tel = Anchors.telemetry_miss(events, "no harness_gate.check on #{sha}")
+      tel = Anchors.telemetry_miss(events, "no harness_gate.check on #{Landing.gated_desc(landing)}")
       tim = timings.could_not_look? ? "timings: could not look (#{timings.reason})" : "no timings rows for #{sha}"
       why = "#{tel}; #{tim}"
       { "top_checks" => nil, "top_checks_na" => why, "check_walls_na" => why }

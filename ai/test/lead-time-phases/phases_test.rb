@@ -151,6 +151,24 @@ merged = landing(commit: OTHER).merge("landed_via" => "merge", "gated_head" => n
 ph_m = L::Phases.compute(anchors(merged, S.ok(FULL)))
 check("R3 a merge landing joins integration by unit, not the squash sha") { ph_m["integrate"]["s"] == 300 }
 
+# DND-1511: a miss names the key its lookup used. A ticketed merge row looks
+# gate runs up by unit (for_gated), so its reason names the unit, not the sha.
+no_integ_m = FULL.reject { |e| e["event"] == "integration_gate.run" }
+ph_mm = L::Phases.compute(anchors(merged, S.ok(no_integ_m)))
+check("R3b ticketed merge, no gate run: the reason names the unit") do
+  ph_mm["integrate"]["na_reason"].include?("no integration_gate.run on DND-9001") &&
+    !ph_mm["integrate"]["na_reason"].include?("no integration_gate.run on #{OTHER[0, 8]}")
+end
+unt_m = landing(ticket: nil, start: nil, commit: OTHER).merge("landed_via" => "merge", "gated_head" => HEAD)
+ph_um = L::Phases.compute(anchors(unt_m, S.ok(no_integ_m.map { |e| e.merge("unit" => "some-branch") })))
+check("R3c unticketed merge, no gate run: the reason names the gated head") do
+  ph_um["integrate"]["na_reason"].include?("no integration_gate.run on head #{HEAD[0, 8]}")
+end
+c_m = L::Counters.compute(landing: merged, events: S.ok([]), timings: S.could_not_look("no timings file"))
+check("R3d ticketed merge, no gate check: the telemetry reason names the unit") do
+  c_m["top_checks_na"].include?("no harness_gate.check on DND-9001")
+end
+
 nodur = FULL.map { |e| e["event"] == "test_slot.wait" ? e.merge("duration_s" => nil) : e }
 c_nd = L::Counters.compute(landing: l, events: S.ok(nodur), timings: S.empty("none"))
 check("R4 a wait with no duration is null with a reason, never 0") do
