@@ -6238,7 +6238,15 @@ binding in gen_saas (DND-436); DND-763 tracks the rest of that drift.
     `forbidden-field` (*The storage boundary*), `malformed-payload`,
     `project-unresolved` and `policy-unreadable` (both *Domain and owner-only
     items*), and `retries-exhausted`. The re-sync adds `resync-failed`
-    (*Re-sync*).
+    (*Re-sync*) and, for a run that could not read the source, one run-level
+    cause: `binding-unusable`, `listing-failed` or `listing-mismatch`.
+
+    **Later (2026-10-01, DND-1606):** this list ended at `resync-failed`, the
+    re-sync's only cause, so an incomplete run failed every item under it.
+    Superseded by DND-1578 (gen_saas #666, deployed 2026-10-01): an incomplete
+    run records ONE failure under its own reason (*Re-sync* → *An incomplete run
+    is one failure*), and the cause check admits the three reasons
+    (`ResyncPlan.incomplete_reasons/0`).
 - **A skip is counted, and a failure is recorded and reported**
   (`~/.claude/CLAUDE.md` → *A failed lookup must never look like an empty
   one*). Skips are counted per (owner, event type, cause), and the priorities
@@ -6307,7 +6315,9 @@ departures (*Poller (fallback only)*), so the index cannot rely on it.
   the ingress's identity-only delete event (*Sender verification and payload
   completeness*), a race this section does not change. A transient read failure
   is retried under a bounded budget. After that the item fails with
-  `resync-failed` in the index-failure record, and it stays as it was.
+  `resync-failed` in the index-failure record, and it stays as it was. This is
+  a page read in a complete run; a run that could not list the databases at
+  all is *An incomplete run is one failure*, below.
 
   **Later (2026-09-27):** DND-897 (gen_saas #472): this bullet said a page
   the source reports "archived, trashed or definitively not found" closes
@@ -6316,6 +6326,29 @@ departures (*Poller (fallback only)*), so the index cannot rely on it.
   integration's sight, so a moved ticket closed `source_deleted`, which only
   `notion.ticket.undeleted` reopens, and moving it back never reopened it. The
   implementation recorded that as a residual (DND-762); this removes it.
+- **An incomplete run is one failure** (DND-1578, gen_saas #666;
+  `ResyncPlan.mode/2`, `recorded_failures/2`). A run is incomplete when it
+  could not read every bound database: a binding is disabled or its
+  subscription is not active (`binding-unusable`), a listing failed
+  (`listing-failed`), or the listings do not cover exactly the bound
+  databases (`listing-mismatch`). It reads no page, decides no item and closes
+  none. Its run row still counts every item as failed and carries the
+  `incomplete_reason`, but the index-failure record holds ONE failure for the
+  run under that reason, never one per item, since no item failed on its own.
+  The owner's notice counts runs, not events, and names the fix for the
+  reason. A complete run still records each failed item under its own cause
+  (`resync-failed`, or the name an event would have failed by).
+- **The next run that read the source resolves what it no longer finds true.**
+  A run that listed every bound database completely, or found no binding left
+  (`ResyncPlan.resolved_causes/2`), marks read each unread re-sync record of
+  its own (owner, source) that it did not record again and that was last
+  recorded before it started: `resync-failed` and the three run-level reasons
+  only, never a cause an event named, which stays for the owner
+  (`ObligationStore.resolve_resync_failures/5`). A resolved record leaves the
+  page's unread list and is never emailed. A later recurrence opens a new
+  episode whose count and first time start over. An incomplete run, or a run
+  with no item (which lists no database), resolves nothing. Another owner's
+  or another source's run never resolves it.
 - **Each run is recorded on its own,** per (owner, source): when it ran, how
   many items it read, how many it closed, and how many failed. A run that read
   zero items still records that. The priorities page shows each source's last
