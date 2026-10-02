@@ -407,6 +407,7 @@ if [ "$rc" = 2 ] && ! grep -q '^OK' "${TMP}/inst.out" \
 else
   bad "check runner dry run refuses" "rc=$rc $(out)"
 fi
+stub_runner 78
 rc="$(INST="$WT/scripts/setup-shipwright-cron" inst "$ct" --check)"
 if [ "$rc" = 2 ] && grep -qF "$RUN --dry-run" "${TMP}/inst.err"; then
   ok "from a linked worktree, --check runs the MAIN checkout's runner --dry-run"
@@ -421,9 +422,11 @@ else
   bad "check missing beats dry run" "rc=$rc $(out)"
 fi
 cp "$ct" "${TMP}/ct-dry.orig"; rm -f "${ct}.calls"
-rc="$(inst "$ct")"
+# A broken spool, so a dry run placed after the spool repair would reach sudo.
+rc="$(FAKE_CRONTAB_FAIL='"/var/spool/cron/crontabs" is not a directory, bailing out' inst "$ct")"
 if [ "$rc" = 2 ] && grep -q "runner's own --dry-run refuses" "${TMP}/inst.err" && grep -q 'Nothing was written' "${TMP}/inst.err" \
-   && cmp -s "$ct" "${TMP}/ct-dry.orig" && ! grep -qx -- '-' "${ct}.calls" 2>/dev/null && ! compgen -G "${TMP}/*.sudo" >/dev/null; then
+   && cmp -s "$ct" "${TMP}/ct-dry.orig" && [ ! -e "${ct}.calls" ] && ! grep -q 'repairing' "${TMP}/inst.out" \
+   && ! compgen -G "${TMP}/*.sudo" >/dev/null; then
   ok "install refuses (exit 2) before any write, the spool repair included, when the runner's --dry-run refuses"
 else
   bad "install runner dry run refuses" "rc=$rc $(out) ct=$(cat "$ct") calls=$(cat "${ct}.calls" 2>&1)"

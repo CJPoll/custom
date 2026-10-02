@@ -36,7 +36,8 @@
 #   --schedule "<expr>"  Five-field cron schedule (default: "0 * * * *" = hourly)
 #   --check              Read-only: exit 0 if the entry is live and the runner's
 #                        own --dry-run passes; 1 if the entry is not live; 2 if
-#                        the runner's --dry-run refuses
+#                        the runner is missing, its --dry-run refuses, or the
+#                        crontab could not be read
 #   --remove             Remove the shipwright crontab entry and exit
 #   --backup <file>      Snapshot the current crontab to <file> (mode 600)
 #   --dry-run            Print what would happen; change nothing
@@ -160,6 +161,11 @@ if [ "${CHECK:-0}" -eq 1 ]; then
   if [ -n "$live" ] && [ -z "$stale" ]; then
     # The runner's own --dry-run, last: it checks what this installer does
     # not, such as the scripts/lib files a tick loads (DND-1729).
+    [ -x "$RUNNER" ] || {
+      echo "setup-shipwright-cron: the entry is installed, but the runner is not found or not executable: $RUNNER; every tick would fail." >&2
+      echo "  Fix: fast-forward ${MAIN_CHECKOUT} to a main that carries scripts/athena-shipwright-run.sh (or chmod +x it), then re-run." >&2
+      exit 2
+    }
     if ! DRY_RUN=1 cron_runner_dry_run "$RUNNER"; then
       echo "setup-shipwright-cron: the entry is installed, but ${CRON_DRY_WHY%.}; a tick would not start." >&2
       echo "  Fix: ${CRON_DRY_FIX}" >&2

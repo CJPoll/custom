@@ -73,7 +73,8 @@
 #   Runs the managed runner's own --dry-run, the read-only check of what a tick
 #   needs before it spawns a session (its skill, its MCP preflight, the
 #   scripts/lib files it loads), and discards the brief it prints. An installer
-#   runs it last in --check, --install and --dry-run, so a green installer
+#   runs it in --check (last), --install and --dry-run (before any write;
+#   setup-shipwright-cron before its root spool repair), so a green installer
 #   means the runner's own preflight passes, including checks the installer
 #   does not make itself (DND-1728: the libs a tick loads).
 #   A hang is capped at 300s (timeout's exit 124, reported like a refusal).
