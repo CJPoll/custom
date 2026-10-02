@@ -635,6 +635,8 @@ eq "a commit whose trailer names another measured repo is refused for this one: 
 has "... naming what its trailer says" "$(err)" "trailer(s) name gen_saas verify phase, not custom verify phase"
 CN="$(commit 2026-10-06T22:00:00Z "fixture: the next verify change" "$(tr "custom verify phase")")"
 eq "confounded does not block its phase: a new change records, exit 0" "$(sc1 rec verify phase "${CN}" change)" "0"
+has "... and record warns that it will read confounded, naming the trailer in its baseline (DND-1622)" "$(err)" \
+  "warning: custom:verify:${CN:0:12} will read confounded: ${CO:0:12} (gen_saas verify phase"
 
 echo "== not confounded"
 # Inside the window (the 8th, 01:00-21:00): a trailer on another phase, a
@@ -668,6 +670,52 @@ eq "... nothing written by any refusal" "$(grep -c '"type":"record"' "${STATEC2}
 eq "the git adapter reads a bad repo path as could not look, never as no trailer" \
   "$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.trailer_commits(ARGV[1], "2026-10-01T00:00:00Z"); puts s.could_not_look? ? "could_not_look" : "ok"' \
      "${HERE}/../lib/experiment_git.rb" "${TMP}/no-such-repo")" "could_not_look"
+
+# ── settling: a clean baseline before a change lands (DND-1622) ─────────────
+echo "== settling"
+# STATEC1's ledger lands hourly on the 6th; at noon on the 7th the would-be
+# before-set is 12:00-21:00 on the 6th. Inside it on custom's main: CO (the
+# laptop's gen_saas verify change, 13:00) and CN (custom verify, 22:00 is
+# after the last landing, so it needs all K).
+eq "test 10: settling --json over trailered commits: exit 0" "$(sc1 run settling --repo custom --phase verify --json)" "0"
+has "... the domain verdict: SETTLING" "$(out)" '"verdict":"SETTLING"'
+has "... naming each confounder" "$(out)" "\"commit\":\"${CO}\""
+has "... the latest, and the landings still needed" "$(out)" "\"latest\":{\"commit\":\"${CN}\""
+has "... all K, since none has landed after it" "$(out)" '"needed":10'
+has "... the metric defaults to phase" "$(out)" '"metric":"phase"'
+eq "settling as text: exit 0" "$(sc1 run settling --repo custom --phase verify)" "0"
+has "... one verdict line" "$(out)" "experiment settling: custom verify phase SETTLING"
+has "... clean after N more" "$(out)" "clean after 10 more comparable landings"
+NREC="$(grep -c . "${STATEC1}/experiments.jsonl")"
+sc1 run settling --repo custom --phase verify >/dev/null 2>&1
+eq "settling writes nothing to the store" "$(grep -c . "${STATEC1}/experiments.jsonl")" "${NREC}"
+eq "another phase on the same fixture: exit 0" "$(sc1 run settling --repo custom --phase implement)" "0"
+has "... CLEAN (no implement trailer in its window)" "$(out)" "experiment settling: custom implement phase CLEAN"
+STATES="${TMP}/states"
+mkdir -p "${STATES}"
+# July: no fixture commit lands near it.
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATES}/ledger.jsonl" "$(printf 'c%.0s' $(seq 40))" 500 2026-07-01T00:00:00Z
+eq "no trailer in the window: exit 0" "$(LEAD_TIME_STATE_DIR="${STATES}" LEAD_TIME_EXPERIMENT_NOW=2026-07-02T00:00:00Z run settling --repo custom --phase verify --json)" "0"
+has "... CLEAN" "$(out)" '"verdict":"CLEAN"'
+eq "five landings before now: exit 0" "$(LEAD_TIME_STATE_DIR="${STATES}" LEAD_TIME_EXPERIMENT_NOW=2026-07-01T05:30:00Z run settling --repo custom --phase verify)" "0"
+has "... SHORT, with how many more reach K" "$(out)" "SHORT: before-set n=5 of K=10"
+# The malformed trailer CM (the 8th, 14:00) sits in this window.
+eq "a malformed trailer in the window: exit 0" "$(sc2 run settling --repo custom --phase verify)" "0"
+has "... named as malformed, not counted (the miss)" "$(out)" "${CM:0:12} has a malformed Lead-time-experiment trailer \"custom\" (no phase after custom); it names no phase, so it is not counted as a confounder"
+eq "test 11: an unreadable repo (no main): exit 3" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/nomain.json" run settling --repo custom --phase verify)" "3"
+has "... could not look, never CLEAN" "$(err)" "could not look for confounders"
+has "... with Fix:" "$(err)" "Fix:"
+lacks "... no verdict printed" "$(out)" "CLEAN"
+eq "no ledger: exit 3" "$(LEAD_TIME_STATE_DIR="${TMP}/no-state" run settling --repo custom --phase verify)" "3"
+has "... could not look, with the ingest Fix" "$(err)" "lead-time-phases --ingest"
+eq "settling with no --phase: exit 2" "$(run settling --repo custom)" "2"
+has "... with Fix:" "$(err)" "Fix:"
+eq "settling --metric na_share: exit 2 (instrumentation never waits)" "$(sc1 run settling --repo custom --phase verify --metric na_share)" "2"
+has "... saying why, with Fix:" "$(err)" "never confounded"
+eq "settling on a watch repo: exit 2" "$(run settling --repo gen_saas --phase verify)" "2"
+eq "test 12: settling --help: exit 0" "$(run settling --repo custom --phase verify --help)" "0"
+has "... on stdout, naming the verdicts" "$(out)" "SETTLING"
+eq "... nothing on stderr (no reads)" "$(err)" ""
 
 # ── tail: a product change judged on landing -> post-merge run (DND-1613) ───
 echo "== tail"

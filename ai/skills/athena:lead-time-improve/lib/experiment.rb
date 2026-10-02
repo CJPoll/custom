@@ -923,4 +923,84 @@ module LeadTimeExperiment
              "(unconfounded it read #{v['status']}: #{v['reason']})"
     v.merge("status" => "confounded", "reason" => reason, "confounders" => confounders)
   end
+
+  # ── settling: a clean baseline before a change lands (DND-1622) ──────────
+  # judge's window reaches back over the whole before-set (confounders), so a
+  # change landed while a same-phase trailer sits inside its would-be
+  # before-set is confounded with certainty. settling answers, BEFORE the
+  # change lands, what judge would say of a change landed at `now` with no
+  # new trailers. It reuses sides, window and confounders, so the window, K
+  # and the exemptions are judge's own, never a copy.
+  #
+  # commits: [[sha, committer Time, message]], as confounders takes them.
+  # -> {"verdict" => CLEAN | SETTLING | SHORT, "confounded" => bool (what judge
+  #     would read), "confounders", "latest", "after_latest", "needed",
+  #     "short_by", "before" => {n, from, to} | nil, "before_na", "window",
+  #     "malformed" => [{commit, value, why}], ...}
+  #   SHORT     fewer than K comparable landings before now (judge can never
+  #             settle such a baseline but inconclusive); any confounder is
+  #             still named
+  #   SETTLING  a full before-set with a confounder: clean after `needed`
+  #             more comparable landings follow the latest one
+  #   CLEAN     a full before-set and no confounder
+  # Raises UsageError for an unknown phase or metric, and for na_share: an
+  # instrumentation change is never confounded, so it never waits.
+  SETTLING_SHA = "0" * 40
+
+  def settling(rows, commits, phase:, metric:, now:)
+    m = Metric.parse(metric, phase: phase)
+    if m.na_share?
+      raise UsageError, "settling checks a change's baseline; an instrumentation change (#{NA_SHARE}) is never " \
+                        "confounded, so it never waits"
+    end
+
+    s = sides(rows, metric: m, exclude: [], boundary: now)
+    from, to = window(s, now)
+    # A synthetic change on the phase, landed at now: no commit of its own.
+    probe = { "kind" => "change", "phase" => phase, "commit" => SETTLING_SHA }
+    found = confounders(probe, commits, from: from, to: to)
+    settling_result(s, found, from, to, m)
+  end
+
+  def settling_result(sides, found, from, to, metric)
+    before = sides[:before]
+    confs = found[:confounders]
+    n = before ? before.size : 0
+    latest = confs.last
+    after_latest = latest ? (before || []).count { |r| at(r) > Time.iso8601(latest["at"]) } : n
+    verdict = if n < K then "SHORT"
+              elsif confs.empty? then "CLEAN"
+              else "SETTLING"
+              end
+    { "verdict" => verdict, "phase" => metric.phase, "metric" => metric.name, "k" => K, "confounded" => !confs.empty?,
+      "confounders" => confs, "latest" => latest, "after_latest" => after_latest,
+      "needed" => latest ? K - after_latest : 0, "short_by" => K - n,
+      "before" => before && { "n" => n, "from" => before.first["landed_at"], "to" => before.last["landed_at"] },
+      "before_na" => sides[:before_na], "window" => [from.utc.iso8601, to.utc.iso8601],
+      "malformed" => found[:malformed].map { |sha, v, why| { "commit" => sha, "value" => v, "why" => why } } }
+  end
+
+  # The settling report as text: one verdict line, then one line per
+  # malformed trailer (named, never counted, never dropped).
+  def settling_text(repo, s)
+    head = "experiment settling: #{repo} #{s['phase']} #{s['metric']} #{s['verdict']}"
+    base = s["before"] ? "before-set n=#{s['before']['n']} of K=#{s['k']} (#{s['before']['from']} .. #{s['before']['to']})" : "no before-set (#{s['before_na']})"
+    names = s["confounders"].map { |c| confounder_text(c) }.join(", ")
+    body = case s["verdict"]
+           when "CLEAN" then "#{base}; no same-phase trailer in the window #{s['window'].join(' .. ')}"
+           when "SETTLING"
+             "#{base}; confounder(s) in the window: #{names}; #{s['after_latest']} comparable landing(s) after " \
+             "#{s['latest']['commit'][0, 12]}: clean after #{s['needed']} more comparable landings"
+           else
+             conf = s["confounders"].empty? ? "" : "; confounder(s) in the window, judge would read confounded: #{names}"
+             "#{base}: #{s['short_by']} more comparable landing(s) to reach K; judge cannot settle a short " \
+               "baseline but inconclusive#{conf}"
+           end
+    lines = ["#{head}: #{body}"]
+    s["malformed"].each do |m|
+      lines << "experiment settling: #{m['commit'][0, 12]} has a malformed #{T::KEY} trailer #{m['value'].inspect} " \
+               "(#{m['why']}); it names no phase, so it is not counted as a confounder"
+    end
+    lines.join("\n")
+  end
 end

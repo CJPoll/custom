@@ -286,6 +286,27 @@ Each `improve`-mode run does these steps in order:
    --metric` records it, and `pr` refuses a lane with no commit carrying
    it), because locked-merge's squash keeps commit messages, not the PR
    body.
+
+   **Later (2026-10-01, DND-1622):** the window above reaches back over the
+   whole before-set, so a same-phase change or revert that settled inside it
+   confounds the next change on that phase with certainty. `record` runs
+   after the landing, and its blocker refuses only a PENDING change or an
+   owed REVERT, so a predecessor settled as `reverted` or `inconclusive` let
+   a doomed change land. The window is kept as it is. A read-only
+   `experiment settling --repo R --phase P [--metric M]` now runs before a
+   change lands. It builds the before-set a change recorded now would get,
+   with judge's own `sides`, `window` and `confounders`. It reports CLEAN,
+   SETTLING (each confounder, and "clean after N more comparable landings")
+   or SHORT (fewer than K). Could not look is exit 3, never CLEAN. The
+   skill's pick step reads SETTLING as a pending change on the phase.
+   `record` still records, and warns when the trailer is already inside its
+   baseline. Two options were rejected. (a) Counting only trailers after
+   the experiment's own landing would judge a baseline that straddles a
+   same-phase change, so it measures two systems; that loosens the confound
+   guard, a quality bar (`~/.claude/CLAUDE.md` → *Owner approval policy*,
+   item 5). (c) A baseline built only from landings after the predecessor
+   still needs K = 10 of them, so it is (b); shortening it means lowering K,
+   a bar move too. No threshold, K or guard moved.
 5. **Journal** in `ai-artifacts/lead-time/journal.md`, with a *Decisions /
    Won't-change* section the next run honours.
 

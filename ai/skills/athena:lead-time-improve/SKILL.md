@@ -53,6 +53,7 @@ ai/bin/lead-time-phases --summary --repo R --json
 <skill>/scripts/experiment record --repo R [--change-repo C] --phase P --metric M --commit SHA --kind change|instrumentation --hypothesis-file F    # SHA carries "Lead-time-experiment: R P M"
 <skill>/scripts/experiment list --repo R
 <skill>/scripts/experiment decline --repo R --id ID --constraint safety-checks|bug-fix --reason-file F
+<skill>/scripts/experiment settling --repo R --phase P [--metric M] [--json]    # read-only: CLEAN | SETTLING | SHORT
 ```
 
 Each answers `--help`. Read an exit code before its output:
@@ -221,6 +222,26 @@ REVERT, or, for a repo other than custom, an improver PR on it is pending
 experiment <id> open", or "PR R#n open"), or instrumentation on
 another phase if one qualifies by the rule above. Never start a second change
 on a phase with one pending: two changes confound each other.
+
+Before a change on that phase, check its baseline is clean (DND-1622):
+`experiment settling --repo R --phase P --metric M`, with the phase and
+metric the change will be recorded on. Judge's confound window reaches back
+over the whole before-set, so a same-phase trailer inside it (a settled
+predecessor's change, or its revert) confounds the next change with
+certainty. Read the verdict as a pending change on the phase:
+
+- **CLEAN**: the phase is a change target.
+- **SETTLING**: not a target this run. The action is `no action` ("<phase>
+  baseline settling after <sha>: N more landings", from its line), or
+  instrumentation on another phase if one qualifies by the rule above.
+- **SHORT**: fewer than K=10 comparable landings. A SHORT that names a
+  confounder is read as SETTLING. One that names none is a target, and judge
+  settles its short baseline as it does today.
+- **exit 3** (could not look): no change on that phase this run. Journal the
+  reason it printed. It is never CLEAN.
+
+A phase each revert or inconclusive sends back to SETTLING waits each time.
+That is correct: it has no clean baseline. The journal line shows it.
 
 ### 5. Act once
 

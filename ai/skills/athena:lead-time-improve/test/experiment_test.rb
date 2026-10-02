@@ -1224,6 +1224,141 @@ check("record_error: a tail record parses; a tail record on another metric is ma
   X.record_error(rec).nil? && X.record_error(rec.merge("metric" => "lead")).to_s.include?("tail")
 end
 
+# ── settling: a clean baseline before a change lands (DND-1622) ────────────
+# The before-set a change recorded at `now` would get, and the confounders
+# judge would find in it. now = RECORDED; ten600 lands at -1h..-10h.
+
+SET_NOW = t(RECORDED)
+REVERT_MSG = "Revert x\n\nThis reverts commit #{THIRD_SHA}.\n\nLead-time-experiment: custom verify phase\n"
+
+def settle(rows, commits, metric: "phase", phase: "verify")
+  X.settling(rows, commits, phase: phase, metric: metric, now: SET_NOW)
+end
+
+check("settling 1: a revert commit inside the would-be before-set: SETTLING, named, needed = K - after_count") do
+  s = settle(ten600, [tc(OTHER_SHA, -5, REVERT_MSG)])
+  s["verdict"] == "SETTLING" && s["confounders"].map { |c| c["commit"] } == [OTHER_SHA] &&
+    s["latest"]["commit"] == OTHER_SHA && s["after_latest"] == 4 && s["needed"] == 6 && s["confounded"]
+end
+
+check("settling 2: a predecessor change (settled inconclusive) inside the before-set: SETTLING") do
+  s = settle(ten600, [tc(OTHER_SHA, -2.5, "y\n\nLead-time-experiment: custom verify phase\n")])
+  s["verdict"] == "SETTLING" && s["after_latest"] == 2 && s["needed"] == 8
+end
+
+check("settling 3: the latest same-phase trailer older than the before-set's first landing: CLEAN") do
+  older = settle(ten600, [tc(OTHER_SHA, -11, REVERT_MSG)])
+  # K landings have followed the trailer: the oldest of fifteen is outside the last ten
+  fifteen = settle(before_rows([600] * 15), [tc(OTHER_SHA, -12, REVERT_MSG)])
+  older["verdict"] == "CLEAN" && older["confounders"].empty? && older["needed"].zero? &&
+    fifteen["verdict"] == "CLEAN" && fifteen["before"]["n"] == 10 && !fifteen["confounded"]
+end
+
+check("settling 4: a same-phase na_share (instrumentation) trailer inside: CLEAN") do
+  settle(ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom verify na_share\n")])["verdict"] == "CLEAN"
+end
+
+check("settling 5: another phase's trailer inside: CLEAN") do
+  settle(ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom queue phase\n")])["verdict"] == "CLEAN"
+end
+
+check("settling 6: the same phase from another measured repo's trailer: SETTLING (one harness serves every repo)") do
+  s = settle(ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: gen_saas verify phase\n")])
+  s["verdict"] == "SETTLING" && s["confounders"][0]["repo"] == "gen_saas"
+end
+
+check("settling 7: fewer than K comparable landings: SHORT, and a confounder is still named") do
+  short = settle(before_rows([600] * 6), [tc(OTHER_SHA, -3, REVERT_MSG)])
+  none = settle([], [])
+  short["verdict"] == "SHORT" && short["before"]["n"] == 6 && short["short_by"] == 4 &&
+    short["confounders"].map { |c| c["commit"] } == [OTHER_SHA] && short["confounded"] &&
+    none["verdict"] == "SHORT" && none["before"].nil? && none["before_na"].include?("no before-set") &&
+    none["short_by"] == X::K && !none["confounded"]
+end
+
+check("settling: the window is [first before-set landing, now], as judge's for a change landing at now") do
+  s = settle(ten600, [])
+  s["window"] == [(SET_NOW - (10 * 3600)).utc.iso8601, SET_NOW.utc.iso8601]
+end
+
+check("settling: a confounder later than the newest landing needs all K") do
+  s = settle(ten600, [tc(OTHER_SHA, -0.5, REVERT_MSG)])
+  s["verdict"] == "SETTLING" && s["after_latest"].zero? && s["needed"] == X::K
+end
+
+check("settling: an unknown phase or metric is a usage error, as record's parse is") do
+  [["phase", "nope"], ["nope", "verify"]].all? do |m, p|
+    settle(ten600, [], metric: m, phase: p)
+    false
+  rescue X::UsageError
+    true
+  end
+end
+
+check("settling: na_share is refused: an instrumentation change is never confounded, so it never waits") do
+  settle(ten600, [], metric: "na_share")
+  false
+rescue X::UsageError => e
+  e.message.include?("instrumentation")
+end
+
+# What judge says of a change recorded at `now` (landing at now) with no new
+# trailers: the same functions judge's manager calls, in the same order.
+def judged_at_now(rows, commits, phase: "verify", metric: "phase")
+  e = exp(phase: phase, metric: metric, recorded_at: SET_NOW.utc.iso8601).merge("commit" => LANDING)
+  landed = rows + [row(0, verify: 600, sha: LANDING)]
+  split = X.split(e, landed)
+  m = X::Metric.parse(metric, phase: phase)
+  s = X.sides(landed, metric: m, exclude: split[:exclude], boundary: split[:boundary])
+  v = X.judge(e, before: s[:before], after: s[:after], guards_before: nil, guards_after: nil, now: SET_NOW)
+  from, to = X.window(s, split[:boundary])
+  X.confound(v, X.confounders(e, commits, from: from, to: to)[:confounders], phase: phase)
+end
+
+check("settling 8: agreement: SETTLING <=> judge reads confounded, over every fixture") do
+  fixtures = [
+    [ten600, [tc(OTHER_SHA, -5, REVERT_MSG)]],
+    [ten600, [tc(OTHER_SHA, -2.5, "y\n\nLead-time-experiment: custom verify phase\n")]],
+    [ten600, [tc(OTHER_SHA, -11, REVERT_MSG)]],
+    [ten600, [tc(OTHER_SHA, -10, REVERT_MSG)]], # the window's first edge is inside
+    [ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom verify na_share\n")]],
+    [ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom queue phase\n")]],
+    [ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: gen_saas verify phase\n")]],
+    [ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom\n")]],
+    [ten600, []],
+    [before_rows([600] * 15), [tc(OTHER_SHA, -12, REVERT_MSG)]],
+    [before_rows([600] * 6), [tc(OTHER_SHA, -3, REVERT_MSG)]],
+    [before_rows([600] * 6), []],
+  ]
+  fixtures.all? do |rows, commits|
+    s = settle(rows, commits)
+    confounded = judged_at_now(rows, commits)["status"] == "confounded"
+    # Where the before-set is full, the verdict itself agrees; on SHORT the
+    # `confounded` field carries it (judge never reaches keep/revert there).
+    s["confounded"] == confounded && (s["verdict"] == "SHORT" || ((s["verdict"] == "SETTLING") == confounded))
+  end
+end
+
+check("settling 9: the miss: a malformed trailer is reported as malformed, never a confounder, never dropped") do
+  s = settle(ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom\n")])
+  s["verdict"] == "CLEAN" && s["confounders"].empty? &&
+    s["malformed"] == [{ "commit" => OTHER_SHA, "value" => "custom", "why" => "no phase after custom" }]
+end
+
+check("settling: text names each confounder, the latest, and the landings still needed") do
+  txt = X.settling_text("custom", settle(ten600, [tc(OTHER_SHA, -5, REVERT_MSG)]))
+  txt.start_with?("experiment settling: custom verify phase SETTLING") && txt.include?(OTHER_SHA[0, 12]) &&
+    txt.include?("clean after 6 more comparable landings")
+end
+
+check("settling: text for CLEAN, SHORT and a malformed trailer") do
+  clean = X.settling_text("custom", settle(ten600, []))
+  short = X.settling_text("custom", settle(before_rows([600] * 6), []))
+  bad = X.settling_text("custom", settle(ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom\n")]))
+  clean.include?("CLEAN") && clean.include?("n=10 of K=10") && short.include?("SHORT") && short.include?("4 more") &&
+    bad.include?("malformed") && bad.include?("not counted as a confounder")
+end
+
 # ── store ───────────────────────────────────────────────────────────────────
 
 Dir.mktmpdir("experiment-store-") do |dir|
