@@ -39,7 +39,10 @@
 #
 # Usage:
 #   scripts/athena-shipwright-run.sh          # normal (timer) invocation
-#   DRY_RUN=1 scripts/athena-shipwright-run.sh  # print the brief and exit
+#   DRY_RUN=1 scripts/athena-shipwright-run.sh  # check the libs a tick loads,
+#                                               # then print the brief and exit
+#                                               # (read-only: no lane, lock or
+#                                               # state write; 78 on a lib fault)
 #
 # Environment (test seams + the documented override):
 #   SHIPWRIGHT_ALLOW_DIRTY=1  run even though the main checkout is dirty (below)
@@ -91,6 +94,10 @@
 #   78  a scripts/lib file this tick needs (dbus-env.sh, shipwright-stale-dirt.sh)
 #       is missing or unloadable: no session. It leaves <ts>.failed in runs/ and
 #       counts toward the wedge like any unsuccessful outcome (DND-1603)
+#       DRY_RUN=1 runs the same lib check and exits 78 on the same faults,
+#       naming each lib with a Fix:, but writes no record and counts nothing
+#       (DND-1725). A lib that loads without defining every function the
+#       tick calls is a fault too.
 #   69  EX_UNAVAILABLE: the session did NO work — it never left its liveness
 #       receipt, so it never reached the model (usually a provider usage limit,
 #       credits, or auth). That is any receipt-less, commit-less session that
@@ -312,8 +319,6 @@ classify_block() { # <log> <bytes> <skip> -> the matched signature in <bytes> of
   tail -c "+$(( ${3:-0} + 1 ))" -- "$1" 2>/dev/null | head -c "${2:-0}" 2>/dev/null | grep -m1 -i -E -o "${BLOCK_PATTERNS}" 2>/dev/null || true
 }
 
-mkdir -p "${LOG_DIR}"
-
 # --- failure-counter helpers -------------------------------------------------
 read_count() { # <path>
   local n=0
@@ -354,10 +359,55 @@ case "${1:-}" in
     exit 0 ;;
 esac
 
+# --- the libraries a tick loads (DND-1603, DND-1725) -------------------------
+#
+# One check, shared by the tick and DRY_RUN, so a green dry run means a tick can
+# start. A lib is a fault when it is missing, unreadable, fails to load, or
+# loads without defining every function the tick calls. Each fault is appended
+# to LIB_FAULTS as "<path> (<reason>); ". Loading only defines functions: it
+# runs nothing, so the dry run stays free of side effects. The caller decides
+# what a fault means (the tick records and counts it; the dry run refuses).
+__wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+RUNNER_LIBS=(
+  "dbus-env.sh:athena_dbus_env_setup"
+  "shipwright-stale-dirt.sh:sd_measure sd_state_get sd_next_streak sd_display_paths"
+)
+LIB_FAULTS=""
+load_runner_libs() {
+  local entry file fns path fn absent
+  LIB_FAULTS=""
+  for entry in "${RUNNER_LIBS[@]}"; do
+    file="${entry%%:*}"; fns="${entry#*:}"; path="${__wrapper_dir}/lib/${file}"
+    if [ ! -e "${path}" ]; then
+      LIB_FAULTS="${LIB_FAULTS}${path} (missing); "; continue
+    elif [ ! -r "${path}" ]; then
+      LIB_FAULTS="${LIB_FAULTS}${path} (unreadable); "; continue
+    fi
+    # shellcheck source=/dev/null
+    if ! . "${path}"; then
+      LIB_FAULTS="${LIB_FAULTS}${path} (could not be loaded); "; continue
+    fi
+    absent=""
+    for fn in ${fns}; do
+      declare -F "${fn}" >/dev/null 2>&1 || absent="${absent:+${absent} }${fn}"
+    done
+    [ -z "${absent}" ] || LIB_FAULTS="${LIB_FAULTS}${path} (does not define ${absent}); "
+  done
+}
+
 if [ "${DRY_RUN:-0}" = "1" ]; then
+  load_runner_libs
+  if [ -n "${LIB_FAULTS}" ]; then
+    echo "athena-shipwright: ${LIB_FAULTS%; }; a tick would exit 78 and spawn no session." >&2
+    echo "  Fix: restore the named file(s) under scripts/lib in this checkout (git checkout -- scripts/lib), or fast-forward it to main." >&2
+    exit 78
+  fi
   printf '%s\n' "${BRIEF}"
   exit 0
 fi
+
+# Created only past the dry run, which writes nothing.
+mkdir -p "${LOG_DIR}"
 
 # Everything below needs git. Without it there is nowhere to make a lane, so
 # fail loudly rather than invent a location.
@@ -413,29 +463,15 @@ fi
 # autolaunches, and best-effort reap orphans earlier runs left behind. Placed
 # after the --help/DRY_RUN early exits and the single-run lock, so it runs only
 # for an actual run.
-__wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
 # A missing or unloadable library is not fatal here: no record machinery exists
-# yet, so it is noted in LIB_FAULTS and the tick records it, counts it and exits
-# 78 right after the wedge check (DND-1603).
-LIB_FAULTS=""
-if [ ! -r "${__wrapper_dir}/lib/dbus-env.sh" ]; then
-  LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/dbus-env.sh (missing); "
-# shellcheck source=scripts/lib/dbus-env.sh
-elif ! . "${__wrapper_dir}/lib/dbus-env.sh" || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
-  LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/dbus-env.sh (could not be loaded); "
-else
-  athena_dbus_env_setup
-fi
-if [ ! -r "${__wrapper_dir}/lib/shipwright-stale-dirt.sh" ]; then
-  LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/shipwright-stale-dirt.sh (missing); "
-# shellcheck source=scripts/lib/shipwright-stale-dirt.sh
-elif ! . "${__wrapper_dir}/lib/shipwright-stale-dirt.sh" || ! declare -F sd_measure >/dev/null 2>&1; then
-  LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/shipwright-stale-dirt.sh (could not be loaded); "
-fi
-# Without dbus-env.sh, still suppress autolaunch for what runs before the tick
-# exits (an unconnectable address, as the library's own fallback does).
+# yet, so load_runner_libs noted it in LIB_FAULTS and the tick records it,
+# counts it and exits 78 right after the wedge check (DND-1603).
+load_runner_libs
 case "${LIB_FAULTS}" in
+  # Without dbus-env.sh, still suppress autolaunch for what runs before the
+  # tick exits (an unconnectable address, as the library's own fallback does).
   *lib/dbus-env.sh*) export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/nonexistent/athena-dbus-suppressed}" ;;
+  *) athena_dbus_env_setup ;;
 esac
 "${__wrapper_dir}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
 

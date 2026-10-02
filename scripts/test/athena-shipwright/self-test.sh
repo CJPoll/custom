@@ -2508,11 +2508,79 @@ RUNNER="$(sx_runner "$a" shipwright-stale-dirt.sh)"
 : >"$a/sx/scripts/lib/shipwright-stale-dirt.sh"
 rc="$(run_runner "$r")"
 rec="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.failed' 2>/dev/null | sort | tail -n1)"
-if [ "$rc" = 78 ] && [ ! -e "$a/claude-was-invoked" ] && [ -n "$rec" ] && grep -q 'shipwright-stale-dirt.sh (could not be loaded)' "$rec"; then
+if [ "$rc" = 78 ] && [ ! -e "$a/claude-was-invoked" ] && [ -n "$rec" ] && grep -q 'shipwright-stale-dirt.sh (does not define sd_measure' "$rec"; then
   ok "an empty shipwright-stale-dirt.sh (loads, defines nothing): exit 78, a .failed record, no session"
 else
   bad "empty stale-dirt lib" "rc=$rc rec=$( [ -n "$rec" ] && cat "$rec") err=$(cat "$a/runner.err")"
 fi
+# A lib that loads and defines SOME of what the tick calls is the same fault:
+# every function the tick calls is checked, not only the first (DND-1725).
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+RUNNER="$(sx_runner "$a")"
+printf 'unset -f sd_state_get\n' >>"$a/sx/scripts/lib/shipwright-stale-dirt.sh"
+rc="$(run_runner "$r")"
+rec="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.failed' 2>/dev/null | sort | tail -n1)"
+if [ "$rc" = 78 ] && [ ! -e "$a/claude-was-invoked" ] && [ -n "$rec" ] && grep -q 'shipwright-stale-dirt.sh (does not define sd_state_get)' "$rec"; then
+  ok "a stale-dirt lib missing sd_state_get: exit 78, a .failed record naming the function, no session"
+else
+  bad "partial stale-dirt lib" "rc=$rc rec=$( [ -n "$rec" ] && cat "$rec") err=$(cat "$a/runner.err")"
+fi
+
+# DND-1725: DRY_RUN=1 checks the same libs the tick loads, so a green dry run
+# means a tick can start. It stays read-only: no state dir, no lock, no lane,
+# and no D-Bus reaper run.
+sx_dry() { # <repo> -> rc; out/err beside the repo
+  local a; a="$(aux "$1")"
+  env DRY_RUN=1 SHIPWRIGHT_REPO="$1" SHIPWRIGHT_CLAUDE="${a}/stub-claude" \
+    "$RUNNER" >"${a}/runner.out" 2>"${a}/runner.err"
+  echo $?
+}
+sx_stub_reaper() { # <aux dir> — the copy's reaper only records that it ran
+  printf '#!/usr/bin/env bash\n: >"%s/reaper-ran"\n' "$1" >"$1/sx/scripts/reap-orphan-dbus"
+  chmod +x "$1/sx/scripts/reap-orphan-dbus"
+}
+dry_untouched() { # <repo> — true when the dry run wrote nothing and started nothing
+  local a; a="$(aux "$1")"
+  [ ! -e "$1/ai-artifacts" ] && [ ! -e "$a/claude-was-invoked" ] && [ ! -e "$a/reaper-ran" ] \
+    && [ "$(git -C "$1" worktree list --porcelain | grep -c '^worktree ')" = 1 ]
+}
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+RUNNER="$(sx_runner "$a")"; sx_stub_reaper "$a"
+rc="$(sx_dry "$r")"
+if [ "$rc" = 0 ] && grep -q 'Sync your tree' "$a/runner.out" && dry_untouched "$r"; then
+  ok "DRY_RUN=1 with every lib present: exit 0, the brief, and nothing written or started"
+else
+  bad "dry run control" "rc=$rc out=$(cat "$a/runner.out") err=$(cat "$a/runner.err") state=$(ls -a "$r/ai-artifacts" 2>&1)"
+fi
+dry_case() { # <label> <lib> <expected reason> <mutator: missing|unreadable|unloadable|empty|partial>
+  local label="$1" lib="$2" why="$3" how="$4" rc r a f
+  r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+  RUNNER="$(sx_runner "$a")"; sx_stub_reaper "$a"
+  f="$a/sx/scripts/lib/$lib"
+  case "$how" in
+    missing)    rm -f -- "$f" ;;
+    unreadable) chmod 000 -- "$f" ;;
+    unloadable) printf 'return 1\n' >"$f" ;;
+    empty)      : >"$f" ;;
+    partial)    printf 'unset -f sd_display_paths\n' >>"$f" ;;
+  esac
+  rc="$(sx_dry "$r")"
+  if [ "$rc" = 78 ] && grep -qF "scripts/lib/$lib ($why)" "$a/runner.err" && grep -q 'Fix:' "$a/runner.err" \
+     && [ ! -s "$a/runner.out" ] && dry_untouched "$r"; then
+    ok "DRY_RUN=1, $label: exit 78 naming $lib ($why), a Fix:, no brief, nothing written or started"
+  else
+    bad "dry run, $label" "rc=$rc out=$(cat "$a/runner.out") err=$(cat "$a/runner.err") state=$(ls -a "$r/ai-artifacts" 2>&1)"
+  fi
+  chmod 644 -- "$f" 2>/dev/null || true
+}
+for lib in dbus-env.sh shipwright-stale-dirt.sh; do
+  dry_case "$lib missing" "$lib" missing missing
+  dry_case "$lib unreadable" "$lib" unreadable unreadable
+  dry_case "$lib fails to load" "$lib" 'could not be loaded' unloadable
+done
+dry_case "dbus-env.sh loads but defines nothing" dbus-env.sh 'does not define athena_dbus_env_setup' empty
+dry_case "shipwright-stale-dirt.sh loads but defines nothing" shipwright-stale-dirt.sh 'does not define sd_measure sd_state_get sd_next_streak sd_display_paths' empty
+dry_case "shipwright-stale-dirt.sh lacks sd_display_paths" shipwright-stale-dirt.sh 'does not define sd_display_paths' partial
 RUNNER="$REAL_RUNNER"
 
 # DND-1667: no git call may have fallen through past a git stub.
