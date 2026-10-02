@@ -972,7 +972,7 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `title` — the merge request's title | string | scalar |
 | | `state` — `opened`, `merged` or `closed` | string | scalar |
 | | `revision` — the merge request's `updated_at`, ISO 8601 UTC: the family's ordering revision | string | scalar |
-| | `request` (`forge.review.requested` only, DND-1415) — `new` when this event asks for the owner's review (the `open` action, the owner added as a reviewer, or GitLab's re-request: the owner's reviewer entry turning `re_requested`), else `refresh`. It is the ingress classifier's decision, never read from the body. A payload stored before DND-1415 has none and reads as `refresh` | string | scalar |
+| | `request` (`forge.review.requested` only, DND-1415) — `new` when this event asks for the owner's review (the `open` action, the owner added as a reviewer, or GitLab's re-request: the owner's reviewer entry turning `re_requested`), else `refresh`. It is the ingress classifier's decision, never read from the body. A payload stored before DND-1415 has none and reads as `refresh`; any other value fails the mapper as `malformed-payload` naming `request` | string | scalar |
 | | `trigger` (`forge.review.commented` only, DND-1350) — `commented` or `mentioned`: which rule made the comment the owner's | string | scalar |
 | `forge.token.expiring` (the forge token family, *Declared families beyond the first pass*) | `entity_id` — `forge_token:<host>:<project_path>:<token_id>`, the access token | string | scalar |
 | | `host` — the hook's forge host, never the body's | string | scalar |
@@ -1494,8 +1494,10 @@ source.
    its `X-Gitlab-Event-UUID`, each only when it is a UUID; with neither it is
    `<entity_id>:<kind>:<revision>`, which does not include `request`: with no
    delivery id, a `new` and a `refresh` delivery at the same `updated_at`
-   dedupe to whichever arrives first, the same one-second tie the forge
-   paragraph of *States* accepts (DND-1415). The ingress routes each key once, through
+   share a key, and whichever arrives first wins. A `new` that arrives after
+   a `refresh` is dropped as seen, so its reopen waits for the merge
+   request's next change. That is a missed reopen, accepted, a window of
+   the kind the forge paragraph of *States* accepts (DND-1415). The ingress routes each key once, through
    the event store's seen-check (*Idempotency is per (event, rule)*), so a
    redelivery converges on the first event. A key is compared whole and
    never split, and both shapes are unambiguous although `:` is their
@@ -1579,7 +1581,8 @@ until their next comment.
 A comment at a strictly newer revision than the item row's, on an open merge
 request, is news for the owner (D60, DND-1351): it reopens an item the owner
 completed, and a mention (`trigger: mentioned`) also reopens one the owner
-dismissed (*Priority index* → *States*). A comment on a merged, closed or
+dismissed (*Priority index* → *States*). A new review request reopens an
+owner completion too, never a dismissal (DND-1415). A comment on a merged, closed or
 locked merge request raises nothing, so it never reopens the source close its
 finish made. A mention on the owner's own merge request, or one they review,
 is `trigger: commented` (DND-1350), so it reopens an owner completion but not
