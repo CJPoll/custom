@@ -53,6 +53,9 @@ tools:
   # what it does; readOnly is the accurate class.
   check-bin-help:          { class: readOnly, reason: check }
   check-forge-stub-guard:  { class: readOnly, reason: check }
+  # shipwright-artifacts lists coordination artifacts newer than the
+  # shipwright's cursor and prints the next cursor; it writes nothing.
+  shipwright-artifacts:    { class: readOnly, reason: read }
   check-generic-skills:    { class: readOnly, reason: check }
   check-guard-messages:    { class: readOnly, reason: check }
   check-hooks-registered:  { class: readOnly, reason: check }

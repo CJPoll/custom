@@ -159,45 +159,20 @@ lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
    anything, abort-not-force on an unclean conflict, and use the SSH-denied
    cron fallback rather than reading an auth gap as a conflict:
    **[[athena:shipwright-lane]]** → *Sync down first*.
-1. **Set the cursor.** Read `cursor.txt` from `$SHIPWRIGHT_STATE_DIR` (the
-   timestamp of the last artifact you processed).
+1. **Set the cursor and select.** Run `ai/bin/shipwright-artifacts`. It reads
+   `cursor.txt` from `$SHIPWRIGHT_STATE_DIR` (else the main checkout's), lists
+   the coordination artifacts newer than it, and prints the `next cursor:`.
+   Exit 3 is damaged state (`journal.md` present, `cursor.txt` absent), an
+   unparseable cursor or a missing root: **Stop.** Do not mine, do not commit;
+   report its line. A first run (no journal either) lists everything. Mine only
+   what it lists, plus anything the journal explicitly re-opened: never
+   re-litigate artifacts you already mined. "0 newer" is a real zero; its line
+   names the newest file overall, so the comparison is visible.
 
-   **A missing cursor is not a cursor at epoch.** (**Later (2026-09-19):** this
-   step said "treat a missing file as process everything". Superseded, because
-   once you run in a worktree the state directory can be *the wrong directory*
-   rather than a first run: `ai-artifacts/` is gitignored, so any
-   tree-relative resolution lands somewhere empty, and "process everything" and
-   "process nothing" then both report a healthy run — the silent-success class
-   `8d805c7` forbids, *a failed lookup must never look like an empty one*.)
-   Decide which case you are in before mining anything:
-   - **`journal.md` is absent too** → a genuine first run. Process everything.
-   - **`journal.md` is present but `cursor.txt` is not** → your state is
-     damaged or you are reading the wrong directory. **Stop.** Do not mine, do
-     not commit. Report: the path you resolved, whether `$SHIPWRIGHT_STATE_DIR`
-     was set, and what the main checkout's
-     `ai-artifacts/shipwright` actually contains.
-   - **Neither is where you expected** → resolve the main checkout explicitly
-     (`dirname "$(git rev-parse --git-common-dir)"`) and look again before
-     concluding anything.
-
-   Consider only
-   coordination runs and reports newer than the cursor, plus anything the
-   journal explicitly re-opened. You are incremental — never re-litigate
-   artifacts you have already mined. **Select with a reference file, never
-   `-newermt`.** `find` on this box is `bfs` (4.1.1), not GNU findutils, and it
-   REJECTS a nanosecond-precision timestamp — exactly the precision step 7 tells
-   you to write the cursor at. `find ... -newermt "$(cat cursor.txt)"` therefore
-   dies with `bfs: error: Invalid timestamp` and emits NOTHING on stdout, so a
-   `| wc -l` reads `0` — indistinguishable from "no new artifacts" and a silent
-   false-negative that skips a whole run's evidence. Instead materialize the
-   cursor as a file and compare against it:
-   `touch -d "@$(cat cursor.txt)" /tmp/cursor-ref` (or `-d "$(cat cursor.txt)"`
-   for an ISO cursor), then
-   `find ai-artifacts/coordination -type f -newer /tmp/cursor-ref`. Corroborate a
-   zero result before trusting it — `find ai-artifacts/coordination -type f
-   -printf '%T@ %p\n' | sort -n | tail -5` shows the newest artifacts and their
-   raw mtimes, so "nothing newer" is a comparison you can see rather than an
-   empty stream you assumed.
+   **Later (2026-10-02):** this step held the procedure as prose: the three
+   state cases, and selecting with `touch -d` plus `find -newer` because this
+   box's `find` (bfs) rejects a nanosecond `-newermt` and prints nothing.
+   Superseded by the script (owner note N2), which compares in-process.
 2. **Extract friction.** From each new report/state log, pull every concrete
    point of friction: a divergence from the plan, an assumption forced by
    missing context, a tool that was named but absent (e.g.
@@ -260,7 +235,7 @@ lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
    wrapper — never a catch-all pathspec, never another path riding along:
    **[[athena:shipwright-lane]]** → *Commit only through the wrapper, naming
    every path*. Append a journal entry (format below) and advance
-   `cursor.txt` per that section's sub-second-precision rule.
+   `cursor.txt` to the `next cursor:` step 1 printed (full sub-second mtime).
 8. **Sync up.** Cron path only — a directly-spawned run opens a PR instead
    (see *Where you run*) and never pushes to main. Push as Athena with an
    explicit refspec, bounded retry (at most a couple of attempts) on a moved

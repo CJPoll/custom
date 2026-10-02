@@ -105,7 +105,7 @@ BUDGETS = {
   "admiral"     => 500,   # target delivered by the admiral-500 stage-4 resident trim
   "captain"     => 760,
   "architect"   => 560,
-  "shipwright"  => 720,
+  "shipwright"  => 500,   # owner note N2 target, reached 2026-10-02
   "diff-critic" => 140,
 }.freeze
 

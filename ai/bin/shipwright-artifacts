@@ -1,0 +1,164 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# shipwright-artifacts -- list the coordination artifacts newer than the
+# athena-shipwright's cursor, and the cursor to write once they are mined.
+#
+# Why a script: the shipwright template carried this as ~40 lines of resident
+# prose (owner note N2, 2026-10-02: move crystallized procedure out of agent
+# definitions into callable scripts). The procedure had two traps, both of the
+# "a failed lookup must never look like an empty one" class:
+#   * `find -newermt "$(cat cursor.txt)"`: find on this box is bfs, which
+#     REJECTS a nanosecond timestamp, prints nothing on stdout, and so reads as
+#     "no new artifacts";
+#   * a missing cursor.txt beside a present journal.md is damaged state or the
+#     wrong directory (ai-artifacts/ is gitignored, so a worktree-relative path
+#     resolves to an empty one), never "process everything".
+# Here the comparison is in-process (File.mtime, nanoseconds, against the
+# parsed cursor), and the three state cases are three outcomes.
+#
+# Usage:
+#   shipwright-artifacts [--state-dir DIR] [--root DIR]
+#   shipwright-artifacts --help
+#
+#   --state-dir DIR  the shipwright state dir (default $SHIPWRIGHT_STATE_DIR,
+#                    else <main checkout>/ai-artifacts/shipwright)
+#   --root DIR       the tree to scan (default <main checkout>/ai-artifacts/
+#                    coordination)
+#
+# The main checkout is the parent of the realpath of `git rev-parse
+# --git-common-dir`, so a worktree resolves its main checkout.
+#
+# Output (stdout): one line per artifact newer than the cursor, oldest first,
+# `<mtime> <path>`; then a summary line naming the state dir, the cursor, the
+# root, how many files were considered and how many are newer, and the newest
+# file overall; then `next cursor: <mtime>` (the newest newer file's mtime at
+# nanosecond precision) or `next cursor: unchanged`.
+#
+# Exit codes:
+#   0  listed (a first run lists everything; zero newer is a real zero, and the
+#      summary shows the newest file overall so it can be seen to be older)
+#   2  usage error
+#   3  could not look: damaged state (journal.md present, cursor.txt absent),
+#      an unreadable or unparseable cursor, or a missing root. Each names the
+#      path it resolved and carries a Fix:. Stop; do not mine.
+#
+# Read-only. Deliberately gem-free (stdlib only).
+
+require "time"
+require_relative "../lib/strict_argv"
+
+module ShipwrightArtifacts
+  CLI_SPEC = { "--state-dir" => :value, "--root" => :value, "--help" => :switch }.freeze
+  STAMP = "%Y-%m-%dT%H:%M:%S.%N%:z"
+
+  class CouldNotLook < StandardError
+    attr_reader :fix
+
+    def initialize(message, fix)
+      super(message)
+      @fix = fix
+    end
+  end
+
+  module_function
+
+  def help
+    # Skip the shebang, the magic comment and the blank line after it.
+    File.read(__FILE__).lines.drop(3).take_while { |l| l.start_with?("#") }
+        .map { |l| l.sub(/\A# ?/, "") }.join
+  end
+
+  def main_checkout(cwd = Dir.pwd)
+    out = IO.popen(["git", "-C", cwd, "rev-parse", "--git-common-dir"], err: File::NULL, &:read)
+    common = out.to_s.strip
+    if !$?.success? || common.empty?
+      raise CouldNotLook.new("could not resolve the main checkout from #{cwd} (git rev-parse --git-common-dir failed)",
+                             "run from inside the custom repo, or pass --state-dir and --root.")
+    end
+    File.dirname(File.realpath(File.expand_path(common, cwd)))
+  end
+
+  # A cursor is an ISO-8601 time (fractional seconds allowed) or an epoch.
+  def parse_cursor(text, path)
+    t = text.strip
+    return Time.at(Rational(t)) if t.match?(/\A\d+(\.\d+)?\z/)
+
+    Time.iso8601(t)
+  rescue ArgumentError
+    raise CouldNotLook.new("cursor #{path} does not parse as a time: #{t.inspect}",
+                           "write the newest mined artifact's mtime there, e.g. " \
+                           "`date -d \"$(stat -c %y <file>)\" +%Y-%m-%dT%H:%M:%S.%N%:z`.")
+  end
+
+  # -> [:first_run, nil] or [:cursor, Time]. Raises CouldNotLook on damage.
+  def state(dir, env_set)
+    cursor = File.join(dir, "cursor.txt")
+    journal = File.join(dir, "journal.md")
+    if File.exist?(cursor)
+      text = begin
+        File.read(cursor)
+      rescue SystemCallError => e
+        raise CouldNotLook.new("cursor #{cursor} is unreadable (#{e.class})", "check its mode and owner.")
+      end
+      return [:cursor, parse_cursor(text, cursor)]
+    end
+    return [:first_run, nil] unless File.exist?(journal)
+
+    listing = Dir.children(dir).sort.join(", ")
+    raise CouldNotLook.new(
+      "DAMAGED STATE: #{journal} exists but #{cursor} does not " \
+      "(SHIPWRIGHT_STATE_DIR #{env_set ? 'set' : 'unset'}; #{dir} holds: #{listing})",
+      "Stop: do not mine and do not commit. Report this line. If the dir is wrong, " \
+      "pass --state-dir <main checkout>/ai-artifacts/shipwright."
+    )
+  end
+
+  def files(root)
+    unless File.directory?(root)
+      raise CouldNotLook.new("root #{root} is not a directory",
+                             "pass --root <main checkout>/ai-artifacts/coordination.")
+    end
+    Dir.glob("**/*", File::FNM_DOTMATCH, base: root)
+       .map { |rel| File.join(root, rel) }
+       .select { |p| File.file?(p) }
+       .map { |p| [File.mtime(p), p] }
+       .sort
+  end
+
+  def run(argv, env, out, err)
+    opts = StrictArgv.parse(argv, CLI_SPEC)
+    if opts["--help"]
+      raise StrictArgv::UsageError, "--help takes no other argument" if opts.size > 1
+
+      out.print help
+      return 0
+    end
+    env_dir = env["SHIPWRIGHT_STATE_DIR"].to_s
+    main = nil
+    resolve = -> { main ||= main_checkout }
+    dir = opts["--state-dir"] || (env_dir.empty? ? File.join(resolve.call, "ai-artifacts", "shipwright") : env_dir)
+    root = opts["--root"] || File.join(resolve.call, "ai-artifacts", "coordination")
+    kind, cursor = state(dir, !env_dir.empty?)
+    all = files(root)
+    newer = kind == :first_run ? all : all.select { |(m, _)| m > cursor }
+    newer.each { |(m, p)| out.puts "#{m.strftime(STAMP)} #{p}" }
+    newest = all.last
+    out.puts "shipwright-artifacts: state #{dir}; cursor " \
+             "#{kind == :first_run ? 'none (first run: journal.md absent too)' : cursor.strftime(STAMP)}; " \
+             "root #{root}: #{all.size} considered, #{newer.size} newer; newest overall " \
+             "#{newest ? "#{newest[0].strftime(STAMP)} #{newest[1]}" : 'none'}"
+    out.puts(newer.empty? ? "next cursor: unchanged" : "next cursor: #{newer.last[0].strftime(STAMP)}")
+    0
+  rescue StrictArgv::UsageError => e
+    err.puts "shipwright-artifacts: usage error: #{e.message}"
+    err.puts "  Fix: use only --state-dir DIR, --root DIR, or --help alone (see --help)."
+    2
+  rescue CouldNotLook => e
+    err.puts "shipwright-artifacts: COULD NOT LOOK: #{e.message}"
+    err.puts "  Fix: #{e.fix}"
+    3
+  end
+end
+
+exit ShipwrightArtifacts.run(ARGV, ENV, $stdout, $stderr) if $PROGRAM_NAME == __FILE__
