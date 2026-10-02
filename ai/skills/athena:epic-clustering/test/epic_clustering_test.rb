@@ -485,6 +485,38 @@ check("cli: the digest's slack fallback text escapes --session, so it cannot pin
   code.zero? && line.start_with?("slack text: &lt;!here&gt; s:") && !line.include?("<!here>")
 end
 
+check("cli: digest --blocks-out writes the Block Kit draft and prints the text (DND-1738: both go to the run record)") do
+  Dir.mktmpdir do |d|
+    f = File.join(d, "DND-1738-digest.blocks.json")
+    out, _, code = run("digest", "--from-json", File.join(FIX, "pass.json"), "--now", NOW, "--no-bodies",
+                       "--blocks-out", f)
+    blocks = JSON.parse(File.read(f))
+    code.zero? && out.include?("DRAFT") && blocks.is_a?(Array) && !blocks.empty?
+  end
+end
+
+# SKILL.md sections, split on "## " headings.
+def skill_section(title)
+  text = File.read(File.expand_path("../SKILL.md", HERE))
+  text.split(/^## /).find { |s| s.start_with?(title) }.to_s
+end
+
+check("SKILL: the daily digest is written to the run record, never posted to Slack (DND-1738)") do
+  # A "**Later (" paragraph records superseded text; it is not an instruction.
+  s = skill_section("The daily digest").split(/\n\s*\n/).reject { |p| p.lstrip.start_with?("**Later (") }.join("\n\n")
+  !s.empty? && !s.include?("slack_post") && s.include?("$CLUSTERING_DIGEST") && !s.include?("owner_dm")
+end
+
+check("SKILL: won't-fix notices are still sent, one per closure, through the top-level session") do
+  s = skill_section("Won't-fix notices")
+  !s.empty? && s.include?("notice --ticket") && s.include?("SendMessage") && s.include?("posts it")
+end
+
+check("SKILL: the description no longer says the pass sends the owner a daily digest") do
+  desc = File.read(File.expand_path("../SKILL.md", HERE))[/^description: .*$/].to_s
+  !desc.empty? && !desc.match?(/send[^.]*daily[^.]*digest/i)
+end
+
 check("cli: notice writes Block Kit JSON to --blocks-out and prints the fallback text; request is gone") do
   Dir.mktmpdir do |d|
     f = File.join(d, "DND-982-notice.json")

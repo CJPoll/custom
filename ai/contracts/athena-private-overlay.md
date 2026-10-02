@@ -120,7 +120,7 @@ Keys in use (DND-704), with where each is used:
 | `slack` | `.people.owner.user_id` | Slack user id | `athena:slack` (owner DM, click check), `athena:ticket-management` (Needs Attention DM), `ai/bin/judgment-label`, `ai/bin/judgment-eval` (`--use-case slack_routing`) |
 | `slack` | `.people` | `{alias: {user_id, name}}` | `athena:slack` → *Reading the workspace* |
 | `slack` | `.channels` | `{name: channel id}` | `athena:slack` → *Reading the workspace* |
-| `slack` | `.channels.owner_dm` | DM channel id | `athena:epic-clustering` (the daily digest) |
+| `slack` | `.channels.owner_dm` | DM channel id | no reader since DND-1738 (it was `athena:epic-clustering`'s daily digest, now written to the run record); kept for the owner's DM |
 | `notion` | `.work.owner_person_id` | notion-work person id | `athena:ticket-management`, `athena:flaky-ticket` (after the roster) |
 | `notion` | `.work.tickets_data_source` | work Tickets data source id | `mark-in-progress`, `ai/bin/lead-time` (the work tracker's dispatch stamp, DND-1341; `ai/lib/dispatch_trackers.rb`) |
 | `notion` | `.work.ticket_prefix` | the work tickets' `ID` prefix (2-10 upper-case letters) | same |

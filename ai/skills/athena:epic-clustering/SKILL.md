@@ -1,6 +1,6 @@
 ---
 name: athena:epic-clustering
-description: The 12-hourly cross-epic clustering pass an athena-architect runs over open epics — move cohesive clusters of movable tickets (never Features, the critical path, blockers, promoted or tier-1 security tickets, or anything wired to them) into a matching or new epic with before/after proof, merge near-duplicates (C3), close already-fixed tickets by their own repro (C4), flag stale In Progress and thin ticket bodies, and send the owner's daily tier-4 digest and won't-fix notices (notify-only, with a veto) by Block Kit. Use when an admiral requests a clustering pass, when the 12h cron spawns one, or when an epic's open Path=Off count exceeds its open on-path count.
+description: The 12-hourly cross-epic clustering pass an athena-architect runs over open epics — move cohesive clusters of movable tickets (never Features, the critical path, blockers, promoted or tier-1 security tickets, or anything wired to them) into a matching or new epic with before/after proof, merge near-duplicates (C3), close already-fixed tickets by their own repro (C4), flag stale In Progress and thin ticket bodies, write the daily tier-4 digest to the run record (never to the owner), and send won't-fix notices (notify-only, with a veto) by Block Kit. Use when an admiral requests a clustering pass, when the 12h cron spawns one, or when an epic's open Path=Off count exceeds its open on-path count.
 ---
 
 # athena:epic-clustering
@@ -37,7 +37,24 @@ properties* say. This skill does not restate them.
 - **No move waits for Cody.** What needs his approval is
   `~/.claude/CLAUDE.md` → *Owner approval policy*; this pass's writes are
   not on it. Bulk ticket changes are notify-after there: step 13's summary
-  and the digest carry them. A never-movable ticket never moves in this pass.
+  and the digest carry them, in the run record (*The daily digest*). A
+  never-movable ticket never moves in this pass.
+- **Nothing goes to Cody unless it needs Cody** (DND-1738). Owner, Cody,
+  2026-10-02: "I guess I found the morning digest itself helpful; it's the
+  epic clustering message I don't know what to do with." So the counts, the
+  digest and the summary go to the run record. What does need Cody arrives
+  two ways, and no other:
+  - **A ticket this pass moves to `Needs Attention`** gets no DM from the
+    pass. The move assigns it to Cody, and gen_saas's priority index marks
+    it `owner_only`, so it appears in the server's 07:00 morning digest
+    ("Needs your attention") and on /priorities
+    (`ai/docs/morning-digest-v2.md` → *1. Needs your attention*). The
+    [[athena:ticket-management]] *Needs Attention DM* does not fire for this
+    pass's moves; write the exact step onto the ticket body as that rule
+    says.
+  - **A won't-fix notice** stays its own DM, one per closure, sent only when
+    one exists (*Won't-fix notices*). Its veto is verified by the session
+    that posts it, so it cannot fold into a server-posted digest.
 
 ## The helper
 
@@ -140,9 +157,16 @@ admiral working them.
     proof compares like with like.
 12. **Sweep each touched epic's status** ([[athena:ticket-management]] →
     *Keep tickets, epics and projects current*).
-13. **Send one batched summary** to Cody: what moved where, what C3 merged,
-    what C4 closed, and the proof counts per epic. Write the same content as
-    the pass summary JSON for the digest (shape in `--help`).
+13. **Write one batched summary**: what moved where, what C3 merged, what C4
+    closed, and the proof counts per epic. Write the same content as the pass
+    summary JSON for the digest (shape in `--help`). It goes to whoever asked
+    for the pass: on a cron pass, your final line (the runner keeps it as
+    `runs/<ts>.summary`) and, on the morning run, the digest's run record. It
+    is never sent to Cody.
+
+    **Later (2026-10-02, DND-1738):** this step sent the summary to Cody.
+    Superseded by the owner's words under *Who runs it, and when*: the
+    counts are bookkeeping, and they go to the run record.
 
 ## Ticket hygiene (flag only)
 
@@ -163,6 +187,16 @@ tickets, which should be worked on once higher-priority tickets are taken care
 of. In the daily digest, also include a list of won't-fix candidates (if any).
 It's ok for there not to be any."
 
+The digest is the run's record, not a message. Owner, Cody, 2026-10-02
+(DND-1738): "I guess I found the morning digest itself helpful; it's the epic
+clustering message I don't know what to do with." The morning digest the owner
+reads is the gen_saas server's (`ai/docs/morning-digest-v2.md`). This one goes
+to the file the cron names in `$CLUSTERING_DIGEST`
+(`ai-artifacts/clustering/runs/<ts>.digest.md`), with its Block Kit in
+`$CLUSTERING_DIGEST_BLOCKS`; the runner names both in the run's `.run`
+record. A pass with no `$CLUSTERING_DIGEST` (an evening run, or a pass a
+session asked for) writes no digest.
+
 1. `digest --started IDS --pass-summary FILE --blocks-out FILE`. It holds:
    - the tier-4 queue by project and Area, with counts by Kind × Severity;
    - the next 10 in work order: next-mission's tier-4 order
@@ -174,25 +208,18 @@ It's ok for there not to be any."
    - the pass summary: moved, merged (C3), closed as fixed (C4);
    - status hygiene and ticket hygiene.
 2. Read the draft. Prune a won't-fix candidate whose value is plain.
-3. Resolve Cody's DM channel id:
-   `~/dev/custom/ai/bin/private-overlay get slack .channels.owner_dm`. A non-zero
-   exit means the digest is not posted: report the resolver's stderr line and
-   its `Fix:` (`ai/contracts/athena-private-overlay.md` → *Consumer obligation*).
-   Post it with `mcp__athena__slack_post` to that DM, `text`
-   plus the `blocks` array and `inbox_name` = `custom-slack.jsonl`, per
-   [[athena:slack]] → *Sending one: the athena MCP, never `bin/*`*. It carries
-   no buttons. The post claims its own thread for that inbox, so Cody's
-   replies route to this project's Slack inbox. Check the reply's `claim`:
-   `claimed` or `already_yours` is done; `already_claimed` means another
-   inbox holds the DM thread, so note it in the pass summary; on `skipped`,
-   follow its `fix`
-   (usually `mcp__athena__slack_thread_claim` with `thread_ts` = the returned
-   `ts`), never re-post. The statuses: `ai/contracts/athena-events.md` →
-   *`slack_post` claims the thread it posts in*.
+3. Write the run record. Run step 1 with `--blocks-out
+   "$CLUSTERING_DIGEST_BLOCKS"` and its stdout redirected to
+   `"$CLUSTERING_DIGEST"`, then remove any candidate you pruned in step 2
+   from both files. Check that both files are non-empty. Do not post the digest to Slack and do not DM it to anyone. A
+   file you could not write is said in your final line; the runner records a
+   missing digest as `digest: MISSING` in the `.run` record.
 
-   **Later (2026-10-01, DND-1558):** this step posted without `inbox_name`
-   and then claimed the thread with a separate `slack_thread_claim` call.
-   Superseded: gen_saas PR #653 made `slack_post` claim its own thread.
+   **Later (2026-10-02, DND-1738):** this step resolved Cody's DM channel
+   (`private-overlay get slack .channels.owner_dm`) and posted the digest
+   there with `mcp__athena__slack_post`, claiming its thread (DND-1558).
+   Superseded by the owner's words above: the digest goes to the run record
+   only.
 4. Close the candidates you kept, one notice each (*Won't-fix notices*
    below). List them under `wont_fix` in the next pass summary, so the next
    digest names them.

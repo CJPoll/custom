@@ -7,9 +7,12 @@
 # spawns ONE athena-architect, and the architect runs one pass of the
 # athena:epic-clustering skill. The architect owns epic writes; the shipwright
 # cron is harness-only and never writes Notion, so this is a separate runner.
-# The morning run (owner timezone America/Denver) also sends the daily digest.
+# The morning run (owner timezone America/Denver) also writes the daily digest
+# to its run record, runs/<ts>.digest.md. It is never sent to the owner
+# (DND-1738).
 #
-# Where the run happens. The pass writes Notion and Slack only. It does no git
+# Where the run happens. The pass writes Notion, its won't-fix notices, and its
+# run-record files. It does no git
 # work, so its lane is a private scratch directory, not a worktree:
 # <state>/lanes/run-<ts>, created per run and removed after it. The session
 # never starts in the main checkout. Claude Code resolves local-scope MCP
@@ -32,11 +35,14 @@
 #   runs/<ts>.receipt   the session reached the model runs/<ts>.failed   an unsuccessful outcome
 #   runs/<ts>.blocked   the session never started     runs/<ts>.wedged   a wedged tick
 #   runs/<ts>.locked    skipped: a run was in flight
-#   runs/<ts>.run       every tick that spawned a session: its outcome, and
+#   runs/<ts>.run       every tick that spawned a session: its outcome, the
+#                       digest's (written, MISSING, or not due and why), and
 #                       whether its harness-lane drain request (DND-987) was sent
+#   runs/<ts>.digest.md the morning run's daily digest text (DND-1738)
+#   runs/<ts>.digest.blocks.json  the same digest as Block Kit
 #   consecutive-failures  the wedge counter; `rm` it to re-arm a wedged lane
 #   consecutive-blocked   the blocked streak; clears when a session reaches the model
-#   digest-last-day       the America/Denver date the last digest run succeeded
+#   digest-last-day       the America/Denver date a run last wrote the digest
 #
 # Environment (test seams and overrides):
 #   CLUSTERING_REPO           a checkout of the harness repo (default: this script's)
@@ -226,12 +232,18 @@ DIGEST=0
 if [ "${owner_hour#0}" -lt 12 ] && [ "${last_digest}" != "${owner_day}" ]; then
   DIGEST=1
 fi
+# DND-1738: the digest is the run's record, never an owner DM. Owner, Cody,
+# 2026-10-02: "I guess I found the morning digest itself helpful; it's the
+# epic clustering message I don't know what to do with." The session gets the
+# record's paths in CLUSTERING_DIGEST and CLUSTERING_DIGEST_BLOCKS (set only
+# when the digest is due); finish() names them in the .run record.
+DIGEST_REC_HINT="${LOG_DIR}/<ts>.digest.md"
 if [ "${DIGEST}" -eq 1 ]; then
-  digest_clause="This is the morning run (${OWNER_TZ}, ${owner_day}): after the pass's moves, also send the daily digest the skill defines."
+  digest_clause="This is the morning run (${OWNER_TZ}, ${owner_day}): after the pass's moves, write the daily digest the skill defines to its run record: the text to the file named by \$CLUSTERING_DIGEST (${DIGEST_REC_HINT}) and its Block Kit to \$CLUSTERING_DIGEST_BLOCKS. Do not post the digest to Slack or send it to anyone: it goes to the run record only."
 elif [ "${owner_hour#0}" -lt 12 ]; then
-  digest_clause="The daily digest for ${owner_day} (${OWNER_TZ}) was already sent today. Do NOT send the daily digest."
+  digest_clause="The daily digest for ${owner_day} (${OWNER_TZ}) was already written today. Do NOT write the daily digest."
 else
-  digest_clause="This is NOT the morning run (${OWNER_TZ}, ${owner_day}). Do NOT send the daily digest."
+  digest_clause="This is NOT the morning run (${OWNER_TZ}, ${owner_day}). Do NOT write the daily digest."
 fi
 BRIEF="First, before anything else, run exactly this one Bash command: \
 touch \"\$CLUSTERING_RECEIPT\" — it is the runner's liveness receipt. Then you \
@@ -240,9 +252,10 @@ agent (Agent tool, subagent_type: athena-architect) with this brief, and do \
 nothing else yourself: 'Run one clustering pass now: load the \
 athena:epic-clustering skill and follow it. This is the scheduled 12h pass from \
 the clustering cron, with no human present. ${digest_clause} Your writes are \
-Notion and Slack, as the skill directs: make no commits, pushes or file edits in \
-any repository. Finish with ONE line: what moved, merged, and closed, and \
-whether the digest was sent.' When it finishes, write its one line verbatim to \
+Notion, the won't-fix notices the skill sends, and the run-record files this \
+brief names: make no commits, pushes or edits to tracked files in any \
+repository. Finish with ONE line: what moved, merged, and closed, and \
+whether the digest was written.' When it finishes, write its one line verbatim to \
 the file named by \$CLUSTERING_SUMMARY with one Bash command, print it, and stop."
 
 # The skill the architect runs. Without it the architect can only report that
@@ -322,6 +335,15 @@ log="${LOG_DIR}/${ts}.log"
 RECEIPT="${LOG_DIR}/${ts}.receipt"
 SUMMARY="${LOG_DIR}/${ts}.summary"
 export CLUSTERING_RECEIPT="${RECEIPT}" CLUSTERING_SUMMARY="${SUMMARY}"
+# The digest's run record (DND-1738). Only a session asked for the digest gets
+# its paths; any other session sees neither variable.
+DIGEST_REC="${LOG_DIR}/${ts}.digest.md"
+DIGEST_BLOCKS="${LOG_DIR}/${ts}.digest.blocks.json"
+if [ "${DIGEST}" -eq 1 ]; then
+  export CLUSTERING_DIGEST="${DIGEST_REC}" CLUSTERING_DIGEST_BLOCKS="${DIGEST_BLOCKS}"
+else
+  unset CLUSTERING_DIGEST CLUSTERING_DIGEST_BLOCKS
+fi
 
 
 # --- counter helpers -----------------------------------------------------------
@@ -572,6 +594,30 @@ status=0
     --mcp-config "${LANE}/mcp.json" -p "${BRIEF}" 9>&- ) >"${log}" 2>&1 || status=$?
 
 # --- 6. classify, then finish ------------------------------------------------------
+# The digest's outcome, for the .run record (DND-1738). A digest that was due
+# and is not there is MISSING, said in the record and on stderr, never a
+# silent skip; the day is then not stamped, so a re-run before noon Denver
+# writes it.
+DIGEST_WRITTEN=0
+if [ "${DIGEST}" -eq 0 ]; then
+  if [ "${owner_hour#0}" -lt 12 ]; then
+    DIGEST_LINES="digest: not due (already written for ${owner_day} ${OWNER_TZ}; see ${DIGEST_DAY})"
+  else
+    DIGEST_LINES="digest: not due (evening run, ${owner_day} ${OWNER_TZ})"
+  fi
+elif [ -s "${DIGEST_REC}" ]; then
+  DIGEST_WRITTEN=1
+  DIGEST_LINES="digest: written ${DIGEST_REC}"
+  if [ -s "${DIGEST_BLOCKS}" ]; then
+    DIGEST_LINES="${DIGEST_LINES}"$'\n'"digest_blocks: ${DIGEST_BLOCKS}"
+  else
+    DIGEST_LINES="${DIGEST_LINES}"$'\n'"digest_blocks: MISSING ${DIGEST_BLOCKS}"
+  fi
+else
+  DIGEST_LINES="digest: MISSING ${DIGEST_REC} (due this morning; the session wrote none)"
+  echo "${ME}: run ${ts}: the daily digest was due but is MISSING (${DIGEST_REC} absent or empty); ${DIGEST_DAY} not stamped." >&2
+  echo "  Fix: read ${log}; the architect should write the digest to \$CLUSTERING_DIGEST (athena:epic-clustering -> The daily digest). A re-run before noon ${OWNER_TZ} writes it." >&2
+fi
 # finish <exit> <outcome> — every tick that spawned a session ends here. It
 # writes runs/<ts>.run and sends ONE harness-lane drain request re: it
 # (DND-987, the W10 harness lane: a clustering pass may have reordered its
@@ -582,6 +628,7 @@ finish() {
   {
     printf '%s: run %s outcome=%s exit=%s\n' "${ME}" "${ts}" "${outcome}" "${rc}"
     printf 'log=%s\n' "${log}"
+    printf '%s\n' "${DIGEST_LINES}"
   } >"${run}" 2>/dev/null || true
   body="$(new_body)" && {
     printf 'The epic-clustering cron finished a run (outcome %s, exit %s). This is a drain request for the harness lane (DND-987).\n' "${outcome}" "${rc}"
@@ -637,7 +684,7 @@ if [ ! -s "${SUMMARY}" ]; then
 fi
 
 reset_fail
-if [ "${DIGEST}" -eq 1 ]; then
+if [ "${DIGEST_WRITTEN}" -eq 1 ]; then
   printf '%s\n' "${owner_day}" >"${DIGEST_DAY}"
 fi
 echo "${ME}: run ${ts} ok: $(head -n1 "${SUMMARY}")" >&2

@@ -90,6 +90,7 @@ d="$(dirname "$0")"
 echo x >>"$d/claude-invoked"
 printf '%s\n' "$@" >"$d/claude-args"
 pwd -P >"$d/claude-cwd"
+printf '%s\n%s\n' "${CLUSTERING_DIGEST-unset}" "${CLUSTERING_DIGEST_BLOCKS-unset}" >"$d/claude-digest-env"
 if [ -e /proc/self/fd/9 ]; then echo open >"$d/claude-fd9"; else echo closed >"$d/claude-fd9"; fi
 prev=""
 for a in "$@"; do
@@ -97,7 +98,13 @@ for a in "$@"; do
   prev="$a"
 done
 case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
-  ok)        : >"$CLUSTERING_RECEIPT"; echo "moved 2, merged 1, closed 0" >"$CLUSTERING_SUMMARY"; exit 0 ;;
+  ok)        : >"$CLUSTERING_RECEIPT"; echo "moved 2, merged 1, closed 0" >"$CLUSTERING_SUMMARY"
+             # DND-1738: a morning pass writes the digest to its run record.
+             if [ -n "${CLUSTERING_DIGEST:-}" ]; then
+               echo "Daily digest 2026-09-27" >"$CLUSTERING_DIGEST"; echo '[]' >"$CLUSTERING_DIGEST_BLOCKS"
+             fi
+             exit 0 ;;
+  nodigest)  : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0" >"$CLUSTERING_SUMMARY"; exit 0 ;;
   fail)      : >"$CLUSTERING_RECEIPT"; echo "the pass fell over"; exit 7 ;;
   nosummary) : >"$CLUSTERING_RECEIPT"; exit 0 ;;
   blocked0)  exit 0 ;;
@@ -148,11 +155,19 @@ if [ "$rc" = 0 ] && grep -q 'athena:epic-clustering' "$c/runner.out" && grep -q 
 else
   bad "--dry-run morning" "rc=$rc out=$(cat "$c/runner.out") err=$(cat "$c/runner.err")"
 fi
+# DND-1738: the morning digest goes to the run record, never to the owner's DM.
+if grep -qF '$CLUSTERING_DIGEST' "$c/runner.out" && grep -qF "$(sd "$c")/runs/<ts>.digest.md" "$c/runner.out" \
+   && ! grep -qi 'slack_post' "$c/runner.out" && grep -q 'Do not post the digest' "$c/runner.out"; then
+  ok "the morning brief names the digest's run-record path and gives no slack_post instruction (DND-1738)"
+else
+  bad "dry-run morning digest record" "out=$(cat "$c/runner.out")"
+fi
 
 rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING" DRY_RUN=1)"
-if [ "$rc" = 0 ] && grep -q 'NOT the morning run' "$c/runner.out" && grep -q 'Do NOT send the daily digest' "$c/runner.out" \
+if [ "$rc" = 0 ] && grep -q 'NOT the morning run' "$c/runner.out" && grep -q 'Do NOT write the daily digest' "$c/runner.out" \
+   && ! grep -qF '$CLUSTERING_DIGEST' "$c/runner.out" && ! grep -qi 'slack_post' "$c/runner.out" \
    && [ ! -e "$(sd "$c")" ]; then
-  ok "DRY_RUN=1 at 19:00 Denver prints the evening brief (no digest)"
+  ok "DRY_RUN=1 at 19:00 Denver prints the evening brief (no digest, no run-record path)"
 else
   bad "dry-run evening" "rc=$rc out=$(cat "$c/runner.out") err=$(cat "$c/runner.err")"
 fi
@@ -221,11 +236,48 @@ if grep -q 'daily digest' "$c/claude-args" && [ "$(cat "$(sd "$c")/digest-last-d
 else
   bad "digest bookkeeping" "day=$(cat "$(sd "$c")/digest-last-day" 2>&1) runs=$(ls "$(sd "$c")/runs" 2>&1)"
 fi
+# DND-1738: the digest is the run's record, named in its .run record.
+run_rec="$(newest "$c" run)"; dg="$(sed -n 1p "$c/claude-digest-env")"; dgb="$(sed -n 2p "$c/claude-digest-env")"
+case "$dg" in
+  "$(sd "$c")"/runs/*.digest.md)
+    if [ "$dgb" = "${dg%.md}.blocks.json" ] && [ -s "$dg" ] && [ -s "$dgb" ] \
+       && grep -qx "digest: written ${dg}" "$run_rec" && grep -qx "digest_blocks: ${dgb}" "$run_rec" \
+       && [ "${run_rec%.run}.digest.md" = "$dg" ]; then
+      ok "a morning session gets runs/<ts>.digest.md (+ .blocks.json) for its digest; the .run record names both"
+    else
+      bad "digest run record" "dg=$dg dgb=$dgb run=$(cat "$run_rec" 2>&1)"
+    fi ;;
+  *) bad "digest path" "CLUSTERING_DIGEST=$dg run=$(cat "$run_rec" 2>&1)" ;;
+esac
 rc="$(run_runner "$c")"
-if [ "$rc" = 0 ] && grep -q 'already sent today' "$c/claude-args" && ! grep -q 'also send the daily digest' "$c/claude-args"; then
-  ok "a second morning run on the same Denver day does not send the digest again"
+run_rec="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -q 'already written today' "$c/claude-args" && ! grep -qF '$CLUSTERING_DIGEST' "$c/claude-args" \
+   && [ "$(sed -n 1p "$c/claude-digest-env")" = unset ] && grep -q '^digest: not due (already written ' "$run_rec"; then
+  ok "a second morning run on the same Denver day does not write the digest again, and its .run says so"
 else
-  bad "digest once per day" "rc=$rc args=$(tail -c 600 "$c/claude-args")"
+  bad "digest once per day" "rc=$rc args=$(tail -c 600 "$c/claude-args") run=$(cat "$run_rec" 2>&1)"
+fi
+
+# A morning session that writes no digest: never a silent skip.
+c="$(new_case)"; echo nodigest >"$c/mode"
+rc="$(run_runner "$c")"
+run_rec="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -q '^digest: MISSING ' "$run_rec" && grep -q 'digest.*MISSING' "$c/runner.err" \
+   && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")/digest-last-day" ]; then
+  ok "a morning run whose digest was not written says MISSING in .run and on stderr (Fix:), and does not stamp the day"
+else
+  bad "digest missing" "rc=$rc run=$(cat "$run_rec" 2>&1) err=$(cat "$c/runner.err") day=$(cat "$(sd "$c")/digest-last-day" 2>&1)"
+fi
+
+# An evening run: no digest asked for, and the .run record says why.
+c="$(new_case)"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
+run_rec="$(newest "$c" run)"
+if [ "$rc" = 0 ] && [ "$(sed -n 1p "$c/claude-digest-env")" = unset ] && grep -q '^digest: not due (evening run' "$run_rec" \
+   && [ -z "$(find "$(sd "$c")/runs" -name '*.digest.md')" ] && [ ! -e "$(sd "$c")/digest-last-day" ]; then
+  ok "an evening run asks for no digest and its .run record says not due"
+else
+  bad "evening digest" "rc=$rc run=$(cat "$run_rec" 2>&1) env=$(cat "$c/claude-digest-env" 2>&1)"
 fi
 
 drain_count() { find "${ALERTS}" -maxdepth 1 -type f -name '*-harness-lane-drain.md' 2>/dev/null | grep -c . || true; }

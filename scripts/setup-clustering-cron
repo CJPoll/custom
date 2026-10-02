@@ -23,7 +23,7 @@
 #
 # Schedule: default "0 7,19 * * *". Cron reads it in the machine's local time,
 # which here is America/Denver, so the runs are 07:00 (the morning run, which
-# also sends the daily digest) and 19:00 Denver all year. cronie follows DST:
+# also writes the daily digest to its run record) and 19:00 Denver all year. cronie follows DST:
 # that is 13:00 and 01:00 UTC under MDT (March to November) and 14:00 and 02:00
 # UTC under MST. Neither time falls in the 02:00 changeover hour, so no run is
 # skipped or doubled on a DST day. On a machine in another timezone, pass a

@@ -568,8 +568,18 @@ shipwright cron never writes Notion, so this is its own runner.
 
 - **Schedule:** `0 7,19 * * *` in machine-local time (America/Denver here), so
   07:00 and 19:00 Denver. That is 13:00/01:00 UTC under MDT and 14:00/02:00 UTC
-  under MST; cronie follows DST. The run before Denver noon also sends the daily
-  digest, once per Denver day.
+  under MST; cronie follows DST. The run before Denver noon also writes the
+  daily digest to its run record, `runs/<ts>.digest.md`, once per Denver day.
+  The `.run` record names it, or says `digest: MISSING`. Nothing from the pass
+  reaches the owner unless it needs the owner: a won't-fix notice is its own
+  DM, and a `Needs Attention` ticket shows in the gen_saas server's morning
+  digest (`athena:epic-clustering` → *Who runs it, and when*).
+
+  **Later (2026-10-02, DND-1738):** the morning run also sent the daily
+  digest to the owner's DM. Superseded by the owner: "I guess I found the
+  morning digest itself helpful; it's the epic clustering message I don't
+  know what to do with." The counts are bookkeeping; the morning digest the
+  owner reads is the server's (`ai/docs/morning-digest-v2.md`).
 - **Fragility:** the same as the shipwright's. It is a per-user crontab line,
   so a crontab reset stops it silently. The session is launched from a scratch
   lane, and the Notion/Athena MCP servers are registered on the main checkout,
