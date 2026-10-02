@@ -13,7 +13,9 @@
 #
 # READ ONLY: #read admits a data source query, a block-children list (with an
 # optional cursor) and a page retrieve, and refuses any other request BEFORE
-# it is sent. There is no write path here.
+# it is sent. There is no write path here. ai/lib/notion_write.rb
+# (scripts/ticket-file, DND-1669) reuses #request, the curl transport, behind
+# its own two-request allowlist; #read never sends a write.
 #
 # TRANSIENT ERRORS: every request runs through NotionRetry
 # (ai/lib/notion_retry.rb), the one retry policy NextMissionNotion's

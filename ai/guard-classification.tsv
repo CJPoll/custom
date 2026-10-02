@@ -95,6 +95,7 @@ ai/lib/blocking_corpus.rb	library	pure domain required by ai/bin/ticket-corpus f
 ai/lib/ticket_corpus.rb	library	pure domain required by ai/bin/ticket-corpus (DND-1055); raises TicketCorpus::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/triage_corpus.rb	library	pure domain required by ai/bin/triage-corpus (DND-714); raises TriageCorpus::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/notion_read.rb	library	read-only Notion client required by ai/bin/triage-corpus, scripts/ticket-reclassify, scripts/ticket-classify --epic, ai/bin/judgment-feedback scan-tickets and scripts/ticket-provenance-check (DND-714, extracted by DND-1056; DND-1057; DND-1469; DND-1354); raises NotionRead::Error carrying the fix, and each caller prints the failure line with Fix:
+ai/lib/notion_write.rb	library	narrow Notion write client required by scripts/ticket-file (DND-1669): creates a page and appends blocks, refuses any other request before it is sent, never retries; raises NotionRead::Error carrying the fix, and the script prints the failure line with Fix:
 ai/lib/notion_retry.rb	library	the one Notion retry policy (DND-1649), required by ai/lib/notion_read.rb and ai/lib/next_mission_notion.rb; it decides and never raises, and each caller raises its own error carrying the Fix:
 ai/lib/tool_sandbox/policy.rb	library	pure sandbox policy required by ai/bin/tool-sandbox (DND-1426); returns [:error, reason] or raises ArgumentError naming the bad input, and the bin prints the exit-2/125 refusal that carries Fix:
 ai/lib/tool_sandbox/host.rb	library	host-facts and exec adapter required by ai/bin/tool-sandbox (DND-1426); returns facts and exit statuses, never exits, and the bin prints every refusal with Fix:
@@ -115,6 +116,7 @@ ai/skills/athena:ticket-management/lib/blocking.rb	library	pure Path rules requi
 ai/skills/athena:ticket-management/lib/classify.rb	library	pure answer rules required by scripts/ticket-classify and scripts/ticket-reclassify (DND-1054/1056); raises ArgumentError naming the field at fault, and each script prints the refusal that carries Fix:
 ai/skills/athena:ticket-management/lib/reclassify.rb	library	pure domain required by scripts/ticket-reclassify (DND-1056); returns skip reasons and reply verdicts, never exits, and the script prints every failure with Fix:
 ai/skills/athena:ticket-management/lib/provenance_lines.rb	library	pure Jev-line rules required by scripts/ticket-classify --lines-out and scripts/ticket-provenance-check (DND-1354); raises ArgumentError naming what is wrong with a lines file, and the check prints the usage refusal that carries Fix:
+ai/skills/athena:ticket-management/lib/ticket_filing.rb	library	pure filing rules required by scripts/ticket-file (DND-1669); raises TicketFiling::Refused carrying the fix, and the script prints the refusal with Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering_fixture.rb	library	offline fixture source required by scripts/epic-clustering --from-json (DND-982); raises FixtureError or NextMissionNotion::ReadError naming the miss, and the script prints the exit-3 refusal that carries Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering_view.rb	library	rendering required by scripts/epic-clustering (DND-982); raises EpicClustering::DataError naming the bad input, and the script prints the refusal that carries Fix:
 ai/skills/athena:epic-clustering/lib/epic_clustering_c3_feedback.rb	library	pure C3 feedback rules required by scripts/epic-clustering c3-feedback (DND-1468); raises ArgumentError naming the pair at fault, and the script prints the usage refusal that carries Fix:
@@ -181,6 +183,7 @@ ai/skills/athena:slack/bin/whoami	tool	Slack Web API action wrapper; fails only 
 ai/skills/athena:ticket-management/scripts/finding-triage	guard	
 ai/skills/athena:ticket-management/scripts/mark-in-progress	guard	
 ai/skills/athena:ticket-management/scripts/ticket-classify	guard	
+ai/skills/athena:ticket-management/scripts/ticket-file	guard	
 ai/skills/athena:ticket-management/scripts/ticket-reclassify	guard	
 ai/skills/athena:ticket-management/scripts/ticket-provenance-check	guard	
 

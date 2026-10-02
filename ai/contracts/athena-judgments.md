@@ -1322,12 +1322,25 @@ athena:ticket-management → *Filing a ticket* (the Classify bullet).
   Filers pasted paraphrases of the `Jev classification:` line, which lose its
   `calls`, its judged labels and often its values. `ticket-classify
   --lines-out FILE` writes the `Jev` lines it printed to FILE, byte for byte
-  (emptied, with a stderr line, when none was printed). After filing,
-  `scripts/ticket-provenance-check --ref DND-N --lines-file FILE` reads the
-  ticket (Notion reads only) and compares the body's LAST line of each prefix
-  with FILE: exit 0 verbatim, 4 missing or not verbatim (its `Fix:` names the
-  one paragraph to append), 3 unreadable, 2 usage. An empty FILE or an id that
-  matches no ticket is usage, never a pass.
+  (emptied, with a stderr line, when none was printed). The filer never
+  pastes it: `scripts/ticket-file` is the filing path (DND-1669). It takes the
+  body, a properties file, FILE and finding-triage's saved output, refuses a
+  body holding a `Jev` line or an advisory (exit 2, nothing written), creates
+  the page (`ai/lib/notion_write.rb`: create a page, append blocks, nothing
+  else, never retried) with each line of FILE as its own paragraph LAST, reads
+  it back and exits 0 only when the page is what it wrote; exit 4 names DND-N
+  and each difference, exit 3 says what may already exist.
+  `scripts/ticket-provenance-check --ref DND-N --lines-file FILE` reads a
+  filed ticket (Notion reads only) and compares the body's LAST line of each
+  prefix with FILE: exit 0 verbatim, 4 missing or not verbatim (its `Fix:`
+  names the one paragraph to append), 3 unreadable, 2 usage. An empty FILE or
+  an id that matches no ticket is usage, never a pass.
+
+  **Later (2026-10-02, DND-1669):** the filer pasted FILE's lines into a
+  hand-built page and then ran `ticket-provenance-check`. Superseded by
+  `ticket-file`: both steps were opt-in, and 2 of 5 tickets filed after
+  DND-1354 landed (DND-1648, DND-1653) carried prose instead of the lines,
+  losing their call ids.
 - **Every reader reads a known paraphrase, or counts it by reason**
   (DND-1354). `TicketCorpus.read_line` is the one parser
   (`ai/lib/ticket_corpus.rb`). A paraphrase that keeps all three values, one
@@ -1482,7 +1495,8 @@ with it.
       fallback as a classification, and its `proof` counts an unreadable page
       as a mismatch.
 - [ ] A filed ticket's `Jev` lines come from `ticket-classify --lines-out`
-      and are checked by `ticket-provenance-check`; every reader recovers a
+      and are written by `ticket-file`, which reads the page back before it
+      exits 0; every reader recovers a
       lossless paraphrase and counts every other broken line by reason,
       never as absent.
 - [ ] A question set with several questions defines its eval case unit; a

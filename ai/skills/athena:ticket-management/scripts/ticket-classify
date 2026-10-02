@@ -79,9 +79,9 @@ USAGE = <<~EOF
     --lines-out FILE also write the Jev lines printed (the "Jev
                      classification:" line, and with --epic the "Jev path:"
                      line), byte for byte, one per line, to FILE (0600;
-                     replaced each run). Paste FILE's lines into the ticket
-                     body unchanged, then run ticket-provenance-check --ref
-                     DND-N --lines-file FILE (DND-1354). On exit 3 with no
+                     replaced each run). File the ticket with ticket-file
+                     --lines-file FILE, which writes the lines and checks
+                     them (DND-1354, DND-1669). On exit 3 with no
                      line printed, FILE is emptied and stderr says so. Not
                      with --json, and never the --body-file.
 

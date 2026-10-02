@@ -1,0 +1,255 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# ticket-file -- file a DND ticket with its Jev lines written by the tool,
+# byte for byte, and prove it by reading the page back (DND-1669).
+#
+# DND-1354 made the lines machine-written (ticket-classify --lines-out) and
+# added ticket-provenance-check, but the page itself was a hand-built MCP
+# call and the check a step to remember. Filers still paraphrased the lines,
+# and a paraphrase loses the call ids judgment-feedback scan-tickets records
+# against. This is the filing path: it takes the files the other tools wrote,
+# creates the page, appends every block, reads the page back and compares,
+# and only then exits 0. The procedure is athena:ticket-management -> *Filing
+# a ticket*.
+#
+# WRITES: one page in the DND Tickets data source, and its blocks, through
+# ai/lib/notion_write.rb (create a page, append blocks; nothing else, never
+# retried). READS the page back through ai/lib/notion_read.rb. Nothing else is
+# written anywhere.
+#
+# Buckets: DOMAIN (pure: ../lib/ticket_filing.rb; ../lib/provenance_lines.rb,
+# ../lib/triage_advisory.rb and ai/lib/ticket_corpus.rb are the readers'
+# parsers), EFFECTS (the input files; Notion through notion_write.rb and
+# notion_read.rb), MANAGER (plan, create, append, read back, verify) and
+# FRAMEWORK (argv).
+#
+# NO TOKEN TOUCHES ARGV OR THE ENVIRONMENT: it is written into a curl config
+# that curl reads on STDIN. No token is ever printed.
+#
+# Deliberately gem-free (stdlib only).
+
+require "json"
+require_relative "../../../lib/strict_argv"
+require_relative "../../../lib/notion_read"
+require_relative "../../../lib/notion_write"
+require_relative "../lib/ticket_filing"
+
+PROG = "ticket-file"
+TICKETS_DATA_SOURCE = "219349da-87fb-8063-8f36-000b362fbd60"
+# Notion takes at most 100 blocks per create or append.
+BATCH = 100
+
+USAGE = <<~EOF
+  Usage: ticket-file --title TITLE --body-file FILE --properties-file FILE
+                     --lines-file FILE [--triage-file FILE] [--no-jev-lines]
+                     [--dry-run]
+         ticket-file --help
+
+  File a DND ticket (DND Tickets, notion-personal) with its Jev lines
+  written by this tool, byte for byte, then read the page back and prove it
+  (DND-1669). Use it instead of creating the page by hand.
+
+    --title TITLE          the ticket's title (one line)
+    --body-file FILE       the body you wrote: impact, cause, fix. Each
+                           non-blank line becomes one paragraph. It must hold
+                           NO "Jev classification:" or "Jev path:" line and no
+                           pasted advisory: those come from the files below.
+    --properties-file FILE a JSON object of Notion property values: Kind,
+                           Severity (not on a Feature), Security, Path, Area,
+                           and any others (Found while, Epic, Status), e.g.
+                           {"Kind": {"select": {"name": "Bug"}}, ...}.
+                           Not Name (that is --title).
+    --lines-file FILE      the file `ticket-classify --lines-out FILE` wrote.
+                           Each line becomes its own paragraph, LAST.
+    --triage-file FILE     finding-triage's output, saved as printed (a
+                           finding). Written under the heading
+                           "Jev advisory (not a decision)", one paragraph per
+                           line.
+    --no-jev-lines         ticket-classify printed no line (exit 3), so the
+                           lines file is empty. Put its unavailable line in
+                           the body instead.
+    --dry-run              check every input and print what would be filed;
+                           write nothing
+
+  Prints on success:
+    filed: DND-N <url>
+    verified: DND-N's page is what was written (<k> Jev lines, advisory <call>)
+
+  Exit codes:
+    0  filed and verified (or a dry run whose inputs are all good)
+    2  usage, or an input refused (a Jev line typed into the body, a
+       paraphrased lines file, a missing property); NOTHING was written
+    3  Notion failed. The line says what may already exist: "NOT FILED"
+       (nothing was created), "MAY BE FILED" (the create failed after it was
+       sent: search the tracker for the title before filing again), or
+       "FILED, INCOMPLETE" / "FILED, UNVERIFIED" naming DND-N
+    4  filed, but the page read back is not what was written: the line names
+       DND-N and each difference
+
+  The Notion token is the file the notion-personal MCP entry names; it is fed
+  to curl on stdin, never argv. Environment (optional, tests):
+  TICKET_FILE_NOTION_API (a loopback URL), TICKET_FILE_PACE_S (seconds
+  between Notion reads, default 0.34).
+EOF
+
+class Failure < StandardError
+  attr_reader :code
+
+  def initialize(code, line)
+    super(line)
+    @code = code
+  end
+end
+
+def usage!(what, fix)
+  raise Failure.new(2, "#{PROG}: #{what}. Fix: #{fix}")
+end
+
+# ── EFFECTS ──────────────────────────────────────────────────────────────────
+
+module Effects
+  module_function
+
+  def read_file(flag, path)
+    usage!("#{flag} #{path} does not exist", "pass the file") unless File.file?(path)
+    usage!("#{flag} #{path} is not readable", "check its permissions") unless File.readable?(path)
+    File.read(path, encoding: "UTF-8").scrub
+  end
+
+  def read_json(flag, path)
+    JSON.parse(read_file(flag, path))
+  rescue JSON::ParserError => e
+    usage!("#{flag} #{path} is not JSON (#{e.message[0, 80]})", "write a JSON object of Notion property values")
+  end
+
+  def pace
+    value = ENV["TICKET_FILE_PACE_S"].to_s
+    /\A\d{1,2}(\.\d{1,3})?\z/.match?(value) ? value.to_f : 0.34
+  end
+
+  def credentials
+    NotionRead.credentials(ENV["TICKET_FILE_NOTION_API"])
+  rescue NotionRead::Error => e
+    raise Failure.new(3, "#{PROG}: NOT FILED: #{e.message}. Fix: #{e.fix.sub(/\.\z/, '')}; then run #{PROG} again")
+  end
+end
+
+# ── MANAGER ──────────────────────────────────────────────────────────────────
+
+module Manager
+  module_function
+
+  def run(opts, out)
+    plan = build_plan(opts)
+    return dry_run(opts, plan, out) if opts[:dry_run]
+
+    origin, token = Effects.credentials
+    page = create(origin, token, plan)
+    ref = ref_of(page)
+    append_rest(origin, token, page, ref, plan)
+    out.puts "filed: #{ref} #{page['url']}"
+    read = read_back(origin, token, page, ref, opts)
+    problems = TicketFiling.verify(plan[:blocks].map { |b| TicketFiling.block_text(b) }, read, plan[:lines], opts[:triage_text])
+    return verified(out, ref, plan, opts) if problems.empty?
+
+    out.puts "FILED, NOT VERBATIM: #{ref}: #{problems.join('; ')}. Fix: do not file it again; " \
+             "run ticket-provenance-check --ref #{ref} --lines-file #{opts[:lines_file]} and append what its Fix: names"
+    4
+  end
+
+  def build_plan(opts)
+    TicketFiling.plan(title: opts[:title], body: Effects.read_file("--body-file", opts[:body_file]),
+                      lines_text: Effects.read_file("--lines-file", opts[:lines_file]), triage_text: opts[:triage_text],
+                      properties: Effects.read_json("--properties-file", opts[:properties_file]), allow_no_lines: opts[:no_jev_lines])
+  rescue TicketFiling::Refused => e
+    usage!("REFUSED, nothing written: #{e.message}", e.fix)
+  end
+
+  def dry_run(opts, plan, out)
+    out.puts "DRY RUN: would file #{opts[:title].inspect}: #{plan[:blocks].size} blocks, #{plan[:lines].size} Jev lines last, " \
+             "#{opts[:triage_text] ? 'the advisory under its heading' : 'no advisory'}; nothing written"
+    0
+  end
+
+  def create(origin, token, plan)
+    NotionWrite.create_page(origin, token, TICKETS_DATA_SOURCE, plan[:properties], plan[:blocks].first(BATCH))
+  rescue NotionRead::Error => e
+    # A 4xx means Notion refused the request: nothing was created. Anything
+    # else (no answer, a 5xx, a body that is not JSON) may follow a create.
+    status = e.status.to_i
+    if status.between?(400, 499)
+      raise Failure.new(3, "#{PROG}: NOT FILED: #{e.message}. Fix: #{e.fix.sub(/\.\z/, '')}; nothing was created, so run #{PROG} again once fixed")
+    end
+
+    raise Failure.new(3, "#{PROG}: MAY BE FILED: #{e.message}. Fix: search DND Tickets for the title before filing again; " \
+                         "if it exists, run ticket-provenance-check --ref DND-N on it")
+  end
+
+  def ref_of(page)
+    id = page.dig("properties", "ID", "unique_id")
+    id.is_a?(Hash) && id["prefix"] == "DND" && id["number"].is_a?(Integer) ? "DND-#{id['number']}" : "page #{page['id']}"
+  end
+
+  def append_rest(origin, token, page, ref, plan)
+    rest = plan[:blocks].drop(BATCH)
+    rest.each_slice(BATCH).with_index do |slice, i|
+      NotionWrite.append(origin, token, page["id"], slice)
+    rescue NotionRead::Error => e
+      raise Failure.new(3, "#{PROG}: FILED, INCOMPLETE: #{ref} #{page['url']}: append #{i + 1} failed (#{e.message}); " \
+                           "its last blocks, the Jev lines among them, may be missing. Fix: do not file it again; append the missing " \
+                           "blocks to #{ref} and run ticket-provenance-check --ref #{ref}")
+    end
+  end
+
+  def read_back(origin, token, page, ref, opts)
+    NotionRead.children_all(origin, token, page["id"], pace: Effects.pace).map { |b| TicketFiling.block_text(b) }.compact
+  rescue NotionRead::Error => e
+    raise Failure.new(3, "#{PROG}: FILED, UNVERIFIED: #{ref} #{page['url']}: the read-back failed (#{e.message}). " \
+                         "Fix: do not file it again; run ticket-provenance-check --ref #{ref} --lines-file #{opts[:lines_file]}")
+  end
+
+  def verified(out, ref, plan, opts)
+    advisory = if opts[:triage_text].nil? then "none"
+               else
+                 parsed = TriageAdvisory.parse(opts[:triage_text])
+                 parsed[:status] == :linked ? "call #{parsed[:call]}" : parsed[:status].to_s
+               end
+    out.puts "verified: #{ref}'s page is what was written (#{plan[:lines].size} Jev lines, advisory #{advisory})"
+    0
+  end
+end
+
+# ── FRAMEWORK ────────────────────────────────────────────────────────────────
+
+SPEC = { "--help" => :switch, "-h" => :switch, "--title" => :value, "--body-file" => :value, "--properties-file" => :value,
+         "--lines-file" => :value, "--triage-file" => :value, "--no-jev-lines" => :switch, "--dry-run" => :switch }.freeze
+
+def parse_options(argv)
+  raw = StrictArgv.parse(argv, SPEC)
+  %w[--title --body-file --properties-file --lines-file].each do |flag|
+    usage!("#{flag} is required", "run #{PROG} --help for the flags") if raw[flag].nil?
+  end
+  triage = raw["--triage-file"] && Effects.read_file("--triage-file", raw["--triage-file"])
+  { title: raw["--title"], body_file: raw["--body-file"], properties_file: raw["--properties-file"], lines_file: raw["--lines-file"],
+    triage_text: triage, no_jev_lines: raw.fetch("--no-jev-lines", false), dry_run: raw.fetch("--dry-run", false) }
+rescue StrictArgv::UsageError => e
+  usage!(e.message, "run #{PROG} --help for the flags")
+end
+
+def main(argv)
+  if argv.include?("--help") || argv.include?("-h")
+    $stdout.puts USAGE
+    return 0
+  end
+
+  Manager.run(parse_options(argv), $stdout)
+rescue Failure => e
+  $stderr.puts e.message
+  e.code
+rescue StandardError => e
+  $stderr.puts "#{PROG}: UNEXPECTED ERROR: #{e.class}. Fix: search DND Tickets for the title before filing again, and report it with the command you ran"
+  3
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

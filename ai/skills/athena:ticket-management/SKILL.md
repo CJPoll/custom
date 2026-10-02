@@ -398,16 +398,12 @@ Changing one needs a new question-set version there.
   - **State the impact now in the body.** A trailing `Source:`/`Context:`
     block is not sent (DND-1590), so the incident a finding came from never
     stands in for its own impact.
-  - **The lines are data, never prose.** Each line of `<LINES>` goes into the
-    body as its own paragraph, copied from the file byte for byte. Never
-    summarize, reformat or retype it: a paraphrase loses the call ids the
-    feedback scan records against (DND-1354).
-  - **Check after filing:**
-    `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-provenance-check --ref DND-N --lines-file <LINES>`.
-    On exit 4, append the paragraph its `Fix:` names and run it again until
-    exit 0. Exit 2 on an empty `<LINES>` means nothing was printed to paste.
-  - **Exit 0:** set the three properties exactly as printed, and paste the
-    `Jev classification:` line into the body. The one exception: a value
+  - **The lines are data, never prose.** You never paste them. `ticket-file`
+    (the next bullet) writes each line of `<LINES>` as its own paragraph,
+    byte for byte, and refuses a body that holds a Jev line. A paraphrase
+    loses the call ids the feedback scan records against (DND-1354,
+    DND-1669).
+  - **Exit 0:** set the three properties exactly as printed. The one exception: a value
     with source `jev` that you judge wrong. File your own value instead,
     with the line unchanged. That is the report: the shipwright's
     `scan-tickets` records it against the line's `calls`
@@ -415,7 +411,8 @@ Changing one needs a new question-set version there.
     scan's record would replace yours.
   - **Exit 3:** the classification is unavailable. File with your own values,
     and write the first line (it ends
-    `Fix: file the ticket as today; this is advisory.`) into the body instead.
+    `Fix: file the ticket as today; this is advisory.`) into the body, and
+    pass `--no-jev-lines` to `ticket-file` (`<LINES>` is empty).
   - **Exit 2:** a usage error. Fix the command and rerun.
   - **A finding on an epic's work** (any Kind but Feature) adds
     `--epic <epic page id>`, `--found-while DND-N` when it was found while
@@ -424,8 +421,7 @@ Changing one needs a new question-set version there.
     prints how many candidates it considered, `Path: <value> (<source>)`,
     `Blocks: DND-N` or `Blocks: none`, and a `Jev path:` line. Set `Path`,
     wire `Depends On`↔`Blocks` onto exactly the printed ticket (no edge on
-    `none`), and paste the `Jev path:` line (also in `<LINES>`) under the
-    classification line, the same way.
+    `none`). The `Jev path:` line is in `<LINES>`; `ticket-file` writes it.
     If you judge a `jev` Path or edge wrong, set your own and leave the line
     as it is: `scan-tickets` records it against the line's `call`. Record by
     hand (`judgment-feedback record --call <call> --correct
@@ -438,6 +434,23 @@ Changing one needs a new question-set version there.
     read-only client (contract `ai/contracts/athena-judgments.md` → *Ticket
     classification: the harness script*). For a finding, run *Before filing
     a finding* first: triage, then classify.
+- **File it with `ticket-file`, never a hand-built page** (DND-1669). Write
+  the properties you decided to a JSON file of Notion property values
+  (`Kind`, `Severity`, `Security`, `Path`, `Area`, plus `Found while`,
+  `Epic`, `Status` as they apply), then run
+  `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-file --title "<TITLE>" --body-file <FILE> --properties-file <PROPS> --lines-file <LINES> [--triage-file <TRIAGE>]`.
+  It creates the page, writes the body, the advisory and the Jev lines,
+  reads the page back and compares. Wire `Depends On`↔`Blocks` once it
+  prints the id.
+  - **Exit 0** prints `filed: DND-N` and `verified:`. Nothing to check by hand.
+  - **Exit 2** wrote nothing. Fix what it names (a Jev line typed into the
+    body, an edited `<LINES>`, a missing property) and rerun.
+  - **Exit 3** says what may exist: `NOT FILED` (rerun), `MAY BE FILED`
+    (search for the title before filing again), or `FILED, INCOMPLETE` /
+    `FILED, UNVERIFIED` naming DND-N (never file it again).
+  - **Exit 4** filed DND-N, but it read back different. Run
+    `scripts/ticket-provenance-check --ref DND-N --lines-file <LINES>` and
+    append the paragraph its `Fix:` names until it exits 0.
 - **Dedupe first (one root cause, one ticket).** Search open tickets in the
   same `Area` for the same root cause, by subsystem keyword and `Found while`.
   On a match, append the new site and its evidence to that ticket instead. A
@@ -554,8 +567,10 @@ harness script*):
    `~/dev/custom/ai/skills/athena:ticket-management/scripts/finding-triage --title "<TITLE>" --body-file <FILE> --project <athena|harness|walt_ui|dnd|lms|admiral>`.
    It searches the DND tracker for candidates itself (same project, open or edited
    in the last 90 days, at most 20) and prints how many it considered, even 0.
-2. **Paste its output verbatim** into the new ticket body under a heading
-   **"Jev advisory (not a decision)"**. That includes an unavailable line.
+2. **Save its output to a file, as printed** (`> <TRIAGE>`), and pass it to
+   `ticket-file --triage-file <TRIAGE>` (*Filing a ticket*). It writes the
+   output under the heading **"Jev advisory (not a decision)"**, line for
+   line, an unavailable line included. Never paste or retype it.
 3. **The filer decides.** A `duplicate` or `related` line is advice to check the
    named ticket, never a verdict. The advisory never blocks filing.
    **When the advice is wrong, record it** (DND-1468), per athena:judgment-feedback
@@ -633,6 +648,8 @@ exit leaves the assignment undone: report the resolver's stderr line and its
   silently cuts inputs around ~2,000 bytes → a JSON parse error), so a
   normal-length ticket/sub-page BODY cannot be created through it in one call —
   it is fine for the page's properties (title, relations) and a short body only.
+  (A DND ticket is never made this way: `ticket-file` files it, per
+  *Filing a ticket*.)
   For a full-length body, create the page with its properties via `API-post-page`
   then write the body in chunks with `API-patch-block-children`; or fall back to
   `curl` with the connection's token and a `Notion-Version: 2022-06-28` header
