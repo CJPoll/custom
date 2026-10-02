@@ -122,23 +122,55 @@ check("a blank title is refused") { r && r.message.include?("title") }
 r = refusal(triage_text: "\n")
 check("an empty triage file is refused: an unavailable advisory still prints a line") { r && r.message.include?("triage") }
 
+r = refusal(body: "Impact: x.\n### Jev advisory (not a decision)\n")
+check("a body opening a line with the advisory heading (markdown marks included) is refused") { r && r.message.include?("body line 2 starts a pasted finding-triage advisory") }
+check("prose that only mentions the advisory heading mid-line is not refused") do
+  TF.plan(**DEFAULTS.merge(body: "Impact: the Jev advisory (not a decision) block lost its call id.\n"))
+end
+r = refusal(body: "Impact: x.\ncall: 00000000-0000-4000-8000-000000000005\nJev advisory (not a decision): question set finding-triage-v1, model m, mode on\n")
+check("a body holding a call line followed by the advisory header is refused") { r && r.message.include?("body line 2") }
+
+def classes(problems) = problems.map(&:first).uniq.sort
+
 puts "== verify: the read-back"
 written = texts(plan)
 check("an exact read-back verifies") { TF.verify(written, written, plan[:lines], TRIAGE).empty? }
 check("a read-back that differs only in surrounding whitespace verifies") { TF.verify(written, written.map { |t| " #{t} " }, plan[:lines], TRIAGE).empty? }
 mangled = written.map { |t| t == CL ? "Jev classification: Kind Bug, Severity LOW, Security none (jev)." : t }
 problems = TF.verify(written, mangled, plan[:lines], TRIAGE)
-check("[regression] a read-back whose classification line is not the one written fails, naming the line") do
-  problems.any? { |p| p.include?("Jev classification: line is not the one ticket-classify printed") }
+check("[regression] a read-back whose classification line is not the one written fails, naming the line, as :jev") do
+  problems.any? { |c, p| c == :jev && p.include?("Jev classification: line is not the one ticket-classify printed") }
 end
 dropped = written.reject { |t| t == PATHL }
 problems = TF.verify(written, dropped, plan[:lines], TRIAGE)
-check("a read-back missing the Jev path: line fails as missing") { problems.any? { |p| p.include?("no Jev path: line") } }
+check("a read-back missing the Jev path: line fails as missing") { problems.any? { |c, p| c == :jev && p.include?("no Jev path: line") } }
 no_call = written.map { |t| t.start_with?("call: ") ? "call: (see the advisory)" : t }
 problems = TF.verify(written, no_call, plan[:lines], TRIAGE)
-check("[regression] a read-back whose advisory lost its call id fails, naming the advisory") { problems.any? { |p| p.include?("advisory") } }
+check("[regression] a read-back whose advisory lost its call id fails as :advisory, and Jev lines still pass") do
+  classes(problems) == %i[advisory blocks]
+end
 problems = TF.verify(written, written + ["an extra block"], plan[:lines], TRIAGE)
-check("a read-back with an extra block fails (the page is not what was written)") { problems.any? { |p| p.include?("blocks") } }
+check("a read-back with an extra block fails as :blocks") { classes(problems) == [:blocks] && problems[0][1].include?("blocks") }
+two = written.each_with_index.map { |t, i| [0, 1].include?(i) ? "#{t} changed" : t }
+problems = TF.verify(written, two, plan[:lines], TRIAGE)
+check("every differing block is named, not only the first") { problems.any? { |_c, p| p.include?("block(s) 1, 2 ") } }
+
+puts "== repair: the Fix: follows the problem class"
+files = { body: "/s/body.txt", lines: "/s/lines.txt", triage: "/s/triage.txt" }
+fix = TF.repair(%i[jev blocks], ref: "DND-7", files: files)
+check("a Jev problem names ticket-provenance-check with the lines file") do
+  fix.start_with?("do not file it again; run ticket-provenance-check --ref DND-7 --lines-file /s/lines.txt")
+end
+fix = TF.repair(%i[advisory blocks], ref: "DND-7", files: files)
+check("[review] an advisory problem names re-appending the advisory, never provenance-check (which cannot see it)") do
+  fix.include?("each line of /s/triage.txt") && !fix.include?("ticket-provenance-check")
+end
+fix = TF.repair(%i[blocks], ref: "DND-7", files: files)
+check("a body problem names the body file and the hand correction") { fix.include?("compare DND-7's body with /s/body.txt") && !fix.include?("provenance") }
+fix = TF.repair(%i[jev blocks], ref: "DND-7", files: files.merge(lines: nil))
+check("[review] under --no-jev-lines the provenance-check step is left out") { !fix.include?("ticket-provenance-check") }
+fix = TF.repair(%i[jev], ref: nil, files: files)
+check("with no DND id the step never prints an invalid --ref") { !fix.include?("--ref") && fix.include?("/s/lines.txt") }
 
 puts
 puts "ticket-file domain: #{$checks - $failures.size} passed, #{$failures.size} failed"

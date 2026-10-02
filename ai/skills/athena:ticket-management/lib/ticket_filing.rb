@@ -91,6 +91,10 @@ module TicketFiling
     props
   end
 
+  # A line opening with markdown marks (a heading, a quote, a bullet,
+  # emphasis) before its text.
+  MARKS = /\A[\s#>*_`+-]*/
+
   def check_body(body)
     lines = body.to_s.split("\n").map(&:rstrip).reject { |l| l.strip.empty? }
     lines.each_with_index do |l, i|
@@ -99,11 +103,13 @@ module TicketFiling
         raise Refused.new("body line #{i + 1} starts with #{p.inspect}: a Jev line typed into the body",
                           "delete it from the body; ticket-file writes the lines from --lines-file, byte for byte")
       end
-      if l.include?(ADVISORY_HEADING)
-        raise Refused.new("body line #{i + 1} holds the finding-triage advisory",
-                          "delete the advisory from the body and pass finding-triage's output with --triage-file")
-      end
       raise Refused.new("body line #{i + 1} is too long for one block", "split it") if l.length > CHUNK * MAX_ITEMS
+    end
+    advisory = [lines.each_index.find { |i| lines[i].sub(MARKS, "").start_with?(ADVISORY_HEADING) },
+                TriageAdvisory.advisory_starts(lines).first].compact.min
+    if advisory
+      raise Refused.new("body line #{advisory + 1} starts a pasted finding-triage advisory",
+                        "delete the advisory from the body and pass finding-triage's output with --triage-file")
     end
     raise Refused.new("the body is empty", "write the impact, cause and fix in --body-file") if lines.empty?
 
@@ -177,27 +183,55 @@ module TicketFiling
 
   # ── verify ────────────────────────────────────────────────────────────────
 
-  # verify(written, read, lines, triage_text) -> problems (strings); empty
-  # means the page is what was written. written and read are block texts,
-  # in order. Surrounding whitespace is not part of a line.
+  # verify(written, read, lines, triage_text) -> problems, each
+  # [class, text] with class :blocks (the page's blocks are not the ones
+  # written), :jev (a Jev line is missing or changed) or :advisory (the
+  # advisory reads differently). Empty means the page is what was written.
+  # written and read are block texts, in order. Surrounding whitespace is not
+  # part of a line.
   def verify(written, read, lines, triage_text)
     problems = []
     w = written.map { |t| t.to_s.strip }
     r = read.map { |t| t.to_s.strip }
     if w.size != r.size
-      problems << "the page has #{r.size} blocks, #{w.size} were written"
-    elsif (i = w.each_index.find { |k| w[k] != r[k] })
-      problems << "block #{i + 1} read back is not the text written"
+      problems << [:blocks, "the page has #{r.size} blocks, #{w.size} were written"]
+    else
+      differ = w.each_index.reject { |k| w[k] == r[k] }.map { |k| k + 1 }
+      problems << [:blocks, "block(s) #{differ.join(', ')} read back are not the text written"] unless differ.empty?
     end
     body_lines = r.flat_map { |t| t.split("\n") }
     ProvenanceLines.compare(lines, body_lines).each do |line, verdict|
       name = ProvenanceLines.prefix(line).strip
-      problems << "the page has no #{name} line" if verdict == :missing
-      problems << "the page's last #{name} line is not the one ticket-classify printed" if verdict == :differs
+      problems << [:jev, "the page has no #{name} line"] if verdict == :missing
+      problems << [:jev, "the page's last #{name} line is not the one ticket-classify printed"] if verdict == :differs
     end
     if triage_text && TriageAdvisory.parse(r.join("\n")) != TriageAdvisory.parse(triage_text)
-      problems << "the page's advisory does not read as finding-triage's output (its call line or questions differ)"
+      problems << [:advisory, "the page's advisory does not read as finding-triage's output (its call line or questions differ)"]
     end
     problems
+  end
+
+  # repair(problems, ref:, files:) -> the Fix: for a filed page that read
+  # back different, one step per problem class. files: {body:, lines:,
+  # triage:} paths; lines nil under --no-jev-lines. ref is DND-N, or nil when
+  # Notion named no DND id. Never "file it again": the page exists.
+  def repair(classes, ref:, files:)
+    who = ref || "the page"
+    steps = []
+    if classes.include?(:jev) && files[:lines]
+      steps << if ref
+                 "run ticket-provenance-check --ref #{ref} --lines-file #{files[:lines]} and append the paragraph its Fix: names"
+               else
+                 "append each line of #{files[:lines]} to the page as its own paragraph, copied from the file"
+               end
+    end
+    if classes.include?(:advisory) && files[:triage]
+      steps << "append the heading \"#{ADVISORY_HEADING}\" and each line of #{files[:triage]} as its own paragraph, copied from the file"
+    end
+    if classes.include?(:blocks)
+      sources = [files[:body], files[:triage]].compact.join(" and ")
+      steps << "compare #{who}'s body with #{sources} and correct each differing paragraph by hand"
+    end
+    "do not file it again; #{steps.join('; then ')}"
   end
 end

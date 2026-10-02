@@ -84,8 +84,10 @@ USAGE = <<~EOF
        (nothing was created), "MAY BE FILED" (the create failed after it was
        sent: search the tracker for the title before filing again), or
        "FILED, INCOMPLETE" / "FILED, UNVERIFIED" naming DND-N
-    4  filed, but the page read back is not what was written: the line names
-       DND-N and each difference
+    4  filed, but the page read back is not what was written: the stderr
+       line names DND-N, each difference, and a Fix: for each kind (a Jev
+       line: ticket-provenance-check; the advisory: append it again from
+       the triage file; a body paragraph: correct it by hand)
 
   The Notion token is the file the notion-personal MCP entry names; it is fed
   to curl on stdin, never argv. Environment (optional, tests):
@@ -140,22 +142,38 @@ end
 module Manager
   module_function
 
-  def run(opts, out)
+  def run(opts, out, err)
     plan = build_plan(opts)
     return dry_run(opts, plan, out) if opts[:dry_run]
 
     origin, token = Effects.credentials
     page = create(origin, token, plan)
-    ref = ref_of(page)
-    append_rest(origin, token, page, ref, plan)
-    out.puts "filed: #{ref} #{page['url']}"
-    read = read_back(origin, token, page, ref, opts)
-    problems = TicketFiling.verify(plan[:blocks].map { |b| TicketFiling.block_text(b) }, read, plan[:lines], opts[:triage_text])
-    return verified(out, ref, plan, opts) if problems.empty?
+    after_create(origin, token, page, plan, opts, out, err)
+  end
 
-    out.puts "FILED, NOT VERBATIM: #{ref}: #{problems.join('; ')}. Fix: do not file it again; " \
-             "run ticket-provenance-check --ref #{ref} --lines-file #{opts[:lines_file]} and append what its Fix: names"
+  # Everything after Notion created the page: every failure from here on
+  # names the page, never "search for the title".
+  def after_create(origin, token, page, plan, opts, out, err)
+    ref = ref_of(page)
+    label = ref || "page #{page['id']}"
+    append_rest(origin, token, page, label, ref, plan, opts)
+    out.puts "filed: #{label} #{page['url']}"
+    read = read_back(origin, token, page, label, ref, plan, opts)
+    problems = TicketFiling.verify(plan[:blocks].map { |b| TicketFiling.block_text(b) }, read, plan[:lines], opts[:triage_text])
+    return verified(out, label, plan, opts) if problems.empty?
+
+    err.puts "#{PROG}: FILED, NOT VERBATIM: #{label}: #{problems.map(&:last).join('; ')}. " \
+             "Fix: #{TicketFiling.repair(problems.map(&:first), ref: ref, files: files(opts, plan))}"
     4
+  rescue Failure
+    raise
+  rescue StandardError => e
+    raise Failure.new(3, "#{PROG}: FILED, UNVERIFIED: #{label || "page #{page.inspect[0, 80]}"}: #{e.class} after the create. " \
+                         "Fix: #{TicketFiling.repair(%i[jev blocks], ref: ref, files: files(opts, plan))}")
+  end
+
+  def files(opts, plan)
+    { body: opts[:body_file], lines: plan[:lines].empty? ? nil : opts[:lines_file], triage: opts[:triage_file] }
   end
 
   def build_plan(opts)
@@ -173,7 +191,13 @@ module Manager
   end
 
   def create(origin, token, plan)
-    NotionWrite.create_page(origin, token, TICKETS_DATA_SOURCE, plan[:properties], plan[:blocks].first(BATCH))
+    page = NotionWrite.create_page(origin, token, TICKETS_DATA_SOURCE, plan[:properties], plan[:blocks].first(BATCH))
+    return page if page.is_a?(Hash) && page["id"].is_a?(String)
+
+    raise Failure.new(3, "#{PROG}: MAY BE FILED: Notion answered the create with no page id. " \
+                         "Fix: search DND Tickets for the title before filing again; if it exists, run ticket-provenance-check --ref DND-N on it")
+  rescue NotionWrite::Refused => e
+    raise Failure.new(3, "#{PROG}: NOT FILED: #{e.message}. Fix: #{e.fix.sub(/\.\z/, '')}; nothing was sent")
   rescue NotionRead::Error => e
     # A 4xx means Notion refused the request: nothing was created. Anything
     # else (no answer, a 5xx, a body that is not JSON) may follow a create.
@@ -186,39 +210,41 @@ module Manager
                          "if it exists, run ticket-provenance-check --ref DND-N on it")
   end
 
+  # ref_of(page) -> "DND-N", or nil when Notion named no DND id.
   def ref_of(page)
     id = page.dig("properties", "ID", "unique_id")
-    id.is_a?(Hash) && id["prefix"] == "DND" && id["number"].is_a?(Integer) ? "DND-#{id['number']}" : "page #{page['id']}"
+    id.is_a?(Hash) && id["prefix"] == "DND" && id["number"].is_a?(Integer) ? "DND-#{id['number']}" : nil
   end
 
-  def append_rest(origin, token, page, ref, plan)
+  def append_rest(origin, token, page, label, ref, plan, opts)
     rest = plan[:blocks].drop(BATCH)
     rest.each_slice(BATCH).with_index do |slice, i|
       NotionWrite.append(origin, token, page["id"], slice)
     rescue NotionRead::Error => e
-      raise Failure.new(3, "#{PROG}: FILED, INCOMPLETE: #{ref} #{page['url']}: append #{i + 1} failed (#{e.message}); " \
-                           "its last blocks, the Jev lines among them, may be missing. Fix: do not file it again; append the missing " \
-                           "blocks to #{ref} and run ticket-provenance-check --ref #{ref}")
+      raise Failure.new(3, "#{PROG}: FILED, INCOMPLETE: #{label} #{page['url']}: append #{i + 1} failed (#{e.message}); " \
+                           "its last blocks, the Jev lines among them, may be missing. " \
+                           "Fix: #{TicketFiling.repair(%i[jev blocks], ref: ref, files: files(opts, plan))}")
     end
   end
 
-  def read_back(origin, token, page, ref, opts)
+  def read_back(origin, token, page, label, ref, plan, opts)
     NotionRead.children_all(origin, token, page["id"], pace: Effects.pace).map { |b| TicketFiling.block_text(b) }.compact
   rescue NotionRead::Error => e
-    raise Failure.new(3, "#{PROG}: FILED, UNVERIFIED: #{ref} #{page['url']}: the read-back failed (#{e.message}). " \
-                         "Fix: do not file it again; run ticket-provenance-check --ref #{ref} --lines-file #{opts[:lines_file]}")
+    raise Failure.new(3, "#{PROG}: FILED, UNVERIFIED: #{label} #{page['url']}: the read-back failed (#{e.message}). " \
+                         "Fix: #{TicketFiling.repair(%i[jev blocks], ref: ref, files: files(opts, plan))}")
   end
 
-  def verified(out, ref, plan, opts)
+  def verified(out, label, plan, opts)
     advisory = if opts[:triage_text].nil? then "none"
                else
                  parsed = TriageAdvisory.parse(opts[:triage_text])
                  parsed[:status] == :linked ? "call #{parsed[:call]}" : parsed[:status].to_s
                end
-    out.puts "verified: #{ref}'s page is what was written (#{plan[:lines].size} Jev lines, advisory #{advisory})"
+    out.puts "verified: #{label}'s page is what was written (#{plan[:lines].size} Jev lines, advisory #{advisory})"
     0
   end
 end
+
 
 # ── FRAMEWORK ────────────────────────────────────────────────────────────────
 
@@ -232,7 +258,7 @@ def parse_options(argv)
   end
   triage = raw["--triage-file"] && Effects.read_file("--triage-file", raw["--triage-file"])
   { title: raw["--title"], body_file: raw["--body-file"], properties_file: raw["--properties-file"], lines_file: raw["--lines-file"],
-    triage_text: triage, no_jev_lines: raw.fetch("--no-jev-lines", false), dry_run: raw.fetch("--dry-run", false) }
+    triage_text: triage, triage_file: raw["--triage-file"], no_jev_lines: raw.fetch("--no-jev-lines", false), dry_run: raw.fetch("--dry-run", false) }
 rescue StrictArgv::UsageError => e
   usage!(e.message, "run #{PROG} --help for the flags")
 end
@@ -243,7 +269,7 @@ def main(argv)
     return 0
   end
 
-  Manager.run(parse_options(argv), $stdout)
+  Manager.run(parse_options(argv), $stdout, $stderr)
 rescue Failure => e
   $stderr.puts e.message
   e.code

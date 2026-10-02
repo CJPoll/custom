@@ -26,6 +26,9 @@ module NotionWrite
     ["PATCH", %r{\A/v1/blocks/#{NotionRead::UUID}/children\z}]
   ].freeze
 
+  # A request this client refused before sending it: nothing reached Notion.
+  class Refused < NotionRead::Error; end
+
   module_function
 
   def write?(method, path)
@@ -33,12 +36,16 @@ module NotionWrite
   end
 
   # write(origin, token, method, path, body) -> parsed JSON, or raises
-  # NotionRead::Error (status set when Notion answered).
+  # Refused (nothing sent) or NotionRead::Error (status set when Notion
+  # answered).
   def write(origin, token, method, path, body)
-    raise NotionRead::Error.new("refused a Notion #{method} #{path}: this client only creates pages and appends blocks", "this is a bug in the caller") unless write?(method, path)
+    raise Refused.new("refused a Notion #{method} #{path}: this client only creates pages and appends blocks", "this is a bug in the caller") unless write?(method, path)
 
     reply = NotionRead.request(method, "#{origin}#{path}", token, body)
-    raise NotionRead::Error.new("could not reach Notion (curl exit #{reply[:curl_rc]})", "check the network") if reply[:curl_rc] != 0
+    if reply[:curl_rc] != 0
+      raise NotionRead::Error.new("no answer from Notion to #{method} #{path} (curl exit #{reply[:curl_rc]}: unreachable, or timed out after the request was sent)",
+                                  "check the network")
+    end
     unless reply[:status] == 200
       message = begin
         JSON.parse(reply[:body])["message"].to_s

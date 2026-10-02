@@ -448,9 +448,11 @@ Changing one needs a new question-set version there.
   - **Exit 3** says what may exist: `NOT FILED` (rerun), `MAY BE FILED`
     (search for the title before filing again), or `FILED, INCOMPLETE` /
     `FILED, UNVERIFIED` naming DND-N (never file it again).
-  - **Exit 4** filed DND-N, but it read back different. Run
-    `scripts/ticket-provenance-check --ref DND-N --lines-file <LINES>` and
-    append the paragraph its `Fix:` names until it exits 0.
+  - **Exit 4** filed DND-N, but it read back different. Do what its `Fix:`
+    names for each difference: a Jev line goes through
+    `scripts/ticket-provenance-check --ref DND-N --lines-file <LINES>` until
+    it exits 0; a lost advisory is appended again from `<TRIAGE>`; a body
+    paragraph is corrected by hand.
 - **Dedupe first (one root cause, one ticket).** Search open tickets in the
   same `Area` for the same root cause, by subsystem keyword and `Found while`.
   On a match, append the new site and its evidence to that ticket instead. A

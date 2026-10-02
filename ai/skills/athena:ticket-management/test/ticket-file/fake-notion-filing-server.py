@@ -14,6 +14,8 @@ read.json ({"status": N, "body": {...}}) answers that request with it instead
 (an append or create is then NOT stored); mangle.json ({"from": S, "to": T})
 replaces S with T in every block text read back (Notion storing something
 other than what was sent); number.json ({"number": N}) is the next ID.
+A create or append over Notion's limits (100 children, 2000 UTF-16 units
+per rich_text item) is answered 400, as Notion answers it.
 ANY other method or path is logged "unexpected": true and answered 405.
 
 While each request is in flight it scans every other process's
@@ -82,7 +84,22 @@ def cursor(index):
     return "c0000000-0000-4000-8000-%012d" % index
 
 
+def over_limit(body):
+    """Notion's own limits: 100 children per request, 2000 characters per
+    rich_text item. A request over either is refused 400, as Notion does."""
+    children = (body or {}).get("children", [])
+    if len(children) > 100:
+        return {"status": 400, "body": {"message": "body.children.length should be <= 100"}}
+    for b in children:
+        for i in b.get(b.get("type"), {}).get("rich_text", []):
+            if len(i.get("text", {}).get("content", "").encode("utf-16-le")) // 2 > 2000:
+                return {"status": 400, "body": {"message": "text.content.length should be <= 2000"}}
+    return None
+
+
 def route(method, path, body):
+    if method in ("POST", "PATCH") and over_limit(body):
+        return over_limit(body)
     if method == "POST" and path == "/v1/pages":
         s = spec("create.json")
         if s:

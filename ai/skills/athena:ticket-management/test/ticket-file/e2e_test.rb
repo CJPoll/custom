@@ -160,10 +160,17 @@ end
 puts "== Notion stored something else, or failed"
 reset!
 spec("mangle.json", { "from" => '"severity":{"reason"', "to" => '"severity": {"reason"' })
-rc, out, = run(*ARGS)
-check("[regression] a page whose classification line reads back changed exits 4 naming DND-N and the line", "rc #{rc} out #{out}") do
-  rc == 4 && out.include?("FILED, NOT VERBATIM: DND-1669:") && out.include?("Jev classification: line is not the one ticket-classify printed") &&
-    out.include?("Fix: do not file it again")
+rc, out, err = run(*ARGS)
+check("[regression] a page whose classification line reads back changed exits 4 naming DND-N and the line, on stderr", "rc #{rc} out #{out} err #{err}") do
+  rc == 4 && err.include?("ticket-file: FILED, NOT VERBATIM: DND-1669:") && err.include?("Jev classification: line is not the one ticket-classify printed") &&
+    err.include?("Fix: do not file it again; run ticket-provenance-check --ref DND-1669 --lines-file #{LINES}") && out.include?("filed: DND-1669")
+end
+reset!
+spec("mangle.json", { "from" => "call: 00000000-0000-4000-8000-000000000005", "to" => "call: unavailable" })
+rc, _out, err = run(*ARGS)
+check("[review] an advisory that lost its call id exits 4 and its Fix: re-appends the advisory, not provenance-check", "rc #{rc} err #{err}") do
+  rc == 4 && err.include?("advisory does not read as finding-triage's output") && err.include?("each line of #{TRIAGE_F}") &&
+    !err.include?("ticket-provenance-check")
 end
 reset!
 spec("create.json", { "status" => 400, "body" => { "message" => "validation failed" } })
@@ -184,7 +191,8 @@ end
 
 puts "== a long body (more than one create's worth of blocks)"
 reset!
-long = file("long-body.txt", (1..150).map { |i| "Line #{i} of a synthetic body." }.join("\n"))
+wide = "w#{"\u{1F600}" * 2500}w" # 5002 UTF-16 units: over the 2000 per item a fake enforces
+long = file("long-body.txt", ((1..150).map { |i| "Line #{i} of a synthetic body." } + [wide]).join("\n"))
 rc, out, = run("--title", "Long", "--body-file", long, "--properties-file", PROPS_F, "--lines-file", LINES)
 check("blocks past the first 100 are appended in order, the Jev lines still last, and it verifies", "rc #{rc} out #{out}") do
   appends = requests.select { |x| x["method"] == "PATCH" }
