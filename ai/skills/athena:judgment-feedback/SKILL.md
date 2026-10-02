@@ -151,17 +151,22 @@ Run once per shipwright cron run, after the report mining. The state lives in
    minutes apart.
 
    **Count across runs, not per run.** A cluster's count is every distinct
-   call journaled for it since its question-set version went live, the
-   watched ones included. The cursor makes each run read only new rows, so
-   a cluster that gains one call an hour never reaches 3 inside one run.
-   Journal a watched cluster's call ids, and add them to the next run's
-   count. Leave out a call whose ticket was later set back to Jev's answer
-   (DND-1799: no tool withdraws that report). Measured 2026-10-02:
-   ticket-kind-v2 hardening->bug reached 5 calls on 5 subjects over five
-   runs, each journaled "below 3, watched".
+   call journaled for it under its question-set version, the watched ones
+   included. The cursor makes each run read only new rows, so a cluster
+   that gains one call an hour never reaches 3 inside one run. Journal each
+   watched call as `<call8> (<subject_ref suffix>)`, so a later run can
+   re-check the distinct-subject rule, and add them to the next run's
+   count. Leave out a call you know was contradicted: its ticket was later
+   set back to Jev's answer, as a state log or the ticket shows. No scan
+   reports that (DND-1799: no tool withdraws the report), so name each
+   exclusion in the journal. Measured 2026-10-02: ticket-kind-v2
+   hardening->bug reached 5 calls on 5 subjects over four runs, each
+   journaled "below 3, watched".
 5. **Diagnose from the payloads, in session only.** Read the qualifying rows'
-   `request` (what Jev was sent) and answers: rerun `list` with the same
-   `--after`, no `--seen-file`, and `--with-payloads`, and read only the
+   `request` (what Jev was sent) and answers: rerun `list` with `--after`
+   at the cursor journaled by the run before the cluster's earliest call
+   (this run's `--after` when every call is new), no `--seen-file`, and
+   `--with-payloads`, and read only the
    qualifying ids' rows in session, never into a file the journal or a
    commit carries. Ask what in the request misled
    it: a criterion that does not separate the two labels, missing context, a
