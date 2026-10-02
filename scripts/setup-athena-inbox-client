@@ -90,24 +90,6 @@ CRON_ENTRY_LIB="${SCRIPT_DIR}/lib/cron-entry.sh"
 # shellcheck source=scripts/lib/cron-entry.sh
 . "$CRON_ENTRY_LIB"
 
-# The crontab entry must name the MAIN checkout's runner, never a worktree's.
-# Captains run this from `~/.local/worktrees/custom/<branch>`; `wt` deletes that
-# path on cleanup, and cron would then fire a job pointing at a file that no
-# longer exists, silently, forever, with nothing supervising the inbox client
-# (the 2026-09-17 outage class, fixed for hook wiring in `scripts/setup-hooks`).
-# The resolver is scripts/lib/cron-entry.sh's cron_main_checkout, shared with the
-# other cron installers: a resolution failure exits 2 with a Fix: at its source,
-# never a silent fallback to this copy's own directory (DND-1642).
-# `--check` inherits this: run from a worktree it reports on the entries that
-# are actually installed, rather than reporting OK on doomed ones.
-# ATHENA_INBOX_CLIENT_RUNNER_DIR (a test seam) skips the resolver.
-if [ -n "${ATHENA_INBOX_CLIENT_RUNNER_DIR:-}" ]; then
-  RUNNER_DIR="$ATHENA_INBOX_CLIENT_RUNNER_DIR"
-else
-  cron_main_checkout "$SCRIPT_DIR" setup-athena-inbox-client || exit 2
-  RUNNER_DIR="${CRON_MAIN_CHECKOUT}/scripts"
-fi
-RUNNER="${RUNNER_DIR}/athena-inbox-client-run.sh"
 SELF_TEST="${SCRIPT_DIR}/test/athena-inbox-client/self-test.sh"
 LAUNCHER="${ATHENA_INBOX_CLIENT_LAUNCHER:-${HOME}/.local/bin/athena-inbox-client}"
 
@@ -156,6 +138,27 @@ if [ "$MODE" = "self-test" ]; then
        "'scripts/setup-athena-inbox-client --self-test'." >&2
   exit 1
 fi
+
+# The crontab entry must name the MAIN checkout's runner, never a worktree's.
+# Captains run this from `~/.local/worktrees/custom/<branch>`; `wt` deletes that
+# path on cleanup, and cron would then fire a job pointing at a file that no
+# longer exists, silently, forever, with nothing supervising the inbox client
+# (the 2026-09-17 outage class, fixed for hook wiring in `scripts/setup-hooks`).
+# The resolver is scripts/lib/cron-entry.sh's cron_main_checkout, shared with the
+# other cron installers: a resolution failure exits 2 with a Fix: at its source,
+# never a silent fallback to this copy's own directory (DND-1642).
+# `--check` inherits this: run from a worktree it reports on the entries that
+# are actually installed, rather than reporting OK on doomed ones.
+# ATHENA_INBOX_CLIENT_RUNNER_DIR (a test seam) skips the resolver.
+if [ -n "${ATHENA_INBOX_CLIENT_RUNNER_DIR:-}" ]; then
+  RUNNER_DIR="$ATHENA_INBOX_CLIENT_RUNNER_DIR"
+else
+  cron_main_checkout "$SCRIPT_DIR" setup-athena-inbox-client || exit 2
+  RUNNER_DIR="${CRON_MAIN_CHECKOUT}/scripts"
+fi
+RUNNER="${RUNNER_DIR}/athena-inbox-client-run.sh"
+# Resolved after argument parsing and the self-test path, so --help and
+# --self-test answer without a git checkout.
 
 # ---- crontab access --------------------------------------------------------
 command -v crontab >/dev/null 2>&1 || {

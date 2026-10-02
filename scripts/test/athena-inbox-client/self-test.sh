@@ -595,14 +595,22 @@ printf '#!/bin/sh\ncase "$*" in *--git-common-dir*|*--git-dir*) echo /nonexisten
 chmod +x "${CASE_DIR}/badgit/git"
 printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
 before="$(cat "${FAKE_CRONTAB}")"
-err="$(PATH="${CASE_DIR}/badgit:${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+err="$(env -u ATHENA_INBOX_CLIENT_RUNNER_DIR PATH="${CASE_DIR}/badgit:${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
        bash "${MAIN}/scripts/setup-athena-inbox-client" --install 2>&1 >/dev/null)"; rc=$?
 if [ "$rc" = 2 ] && grep -q 'cannot enter' <<<"$err" && grep -q 'Fix:' <<<"$err" \
-   && [ "$(cat "${FAKE_CRONTAB}")" = "$before" ]; then
+   && ! grep -qF './scripts/' <<<"$err" && [ "$(cat "${FAKE_CRONTAB}")" = "$before" ]; then
   ok "an unresolvable main checkout is exit 2 with a Fix: and writes nothing, not a silent fallback (DND-1642)"
 else
   bad "an unresolvable main checkout is exit 2 with a Fix: and writes nothing" \
       "rc=$rc stderr=${err} crontab=$(cat "${FAKE_CRONTAB}")"
+fi
+
+# --help answers (exit 0) even where no main checkout resolves.
+out="$(PATH="${CASE_DIR}/badgit:${PATH}" env -u ATHENA_INBOX_CLIENT_RUNNER_DIR bash "${MAIN}/scripts/setup-athena-inbox-client" --help 2>&1)"; rc=$?
+if [ "$rc" = 0 ] && grep -q 'ATHENA_INBOX_CLIENT_RUNNER_DIR' <<<"$out"; then
+  ok "--help answers with exit 0 even when the main checkout cannot be resolved (DND-1642)"
+else
+  bad "--help answers with exit 0 when the main checkout cannot be resolved" "rc=$rc out=${out}"
 fi
 
 # A FAILED crontab write must fail the install loudly. Without a status check
