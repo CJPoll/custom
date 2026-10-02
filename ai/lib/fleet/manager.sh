@@ -135,13 +135,13 @@ fleet_record_mission_status() {
 
 # fleet_claim_seen <session_id> <agent_id-or-empty>
 # Status 0 = a seen report is due and now claimed; 1 = not due; 2 = the stamp
-# directory is unusable, which is LOGGED (a silent 2 would silence every seen
+# directory or the stamp itself cannot be written, which is LOGGED (a silent 2 would silence every seen
 # report with no trace).
 fleet_claim_seen() {
   local rc=0
   fleet_throttle_claim "$(fleet_throttle_key "$1" "$2")" "$(date +%s)" || rc=$?
   if [ "${rc}" -eq 2 ]; then
-    fleet_record_failure "$1" seen "fleet-report hook: the throttle stamp directory $(fleet_seen_dir 2>/dev/null || printf '(unresolvable)') is unusable, so no seen report was sent. Fix: make it writable, or set XDG_STATE_HOME to an absolute, writable path." 2>/dev/null
+    fleet_record_failure "$1" seen "fleet-report hook: a throttle stamp in $(fleet_seen_dir 2>/dev/null || printf '(unresolvable)') could not be created or written, so no seen report was sent. Fix: make it writable, or set XDG_STATE_HOME to an absolute, writable path." 2>/dev/null
   fi
   return "${rc}"
 }

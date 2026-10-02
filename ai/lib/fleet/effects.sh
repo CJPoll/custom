@@ -339,7 +339,8 @@ fleet_mtime() {
 # Status 0 = this caller claimed the report and stamped it; 1 = not due (or a
 # concurrent caller holds the claim). The check and the stamp happen under an
 # flock on the stamp, so two parallel tool calls in one agent cannot both pass.
-# Status 2 = the stamp directory cannot be resolved or created.
+# Status 2 = the stamp directory cannot be resolved or created, or the stamp
+# (its content or its mtime) cannot be written.
 fleet_throttle_claim() {
   local key="$1" now="$2" dir stamp rc
   dir="$(fleet_seen_dir)" || return 2
