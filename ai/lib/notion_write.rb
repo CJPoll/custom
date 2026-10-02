@@ -1,15 +1,19 @@
 # frozen_string_literal: true
 
 # ai/lib/notion_write.rb -- the narrow Notion WRITE client (Side Effects)
-# behind scripts/ticket-file (DND-1669): create a page in a data source, and
-# append blocks to a page. Nothing else.
+# behind scripts/ticket-file (DND-1669) and athena:lead-time-improve's
+# scripts/unmeasurable (DND-1806): create a page, append blocks to a page,
+# and set one allow-listed select property on a page. Nothing else.
 #
-# #write admits exactly two requests and refuses any other BEFORE it is sent:
+# #write admits exactly three requests and refuses any other BEFORE it is sent:
 #   POST  /v1/pages                     create a page
 #   PATCH /v1/blocks/<uuid>/children    append blocks
-# Neither is retried. Both are non-idempotent: a 5xx after Notion stored the
-# page would file it twice. A failure raises NotionRead::Error and the caller
-# says what may already exist.
+#   PATCH /v1/pages/<uuid>              set ONE select property, only to a
+#                                       value SELECTS lists (today: Path =
+#                                       Promoted); any other body is refused
+# None is retried. The first two are non-idempotent: a 5xx after Notion
+# stored the page would file it twice. A failure raises NotionRead::Error and
+# the caller says what may already exist.
 #
 # It shares NotionRead's transport (curl, the token on STDIN, never argv or
 # the environment) and its credentials (the file the notion-personal MCP entry
@@ -21,25 +25,46 @@ require "json"
 require_relative "notion_read"
 
 module NotionWrite
+  PAGE_PATCH = %r{\A/v1/pages/#{NotionRead::UUID}\z}.freeze
   WRITES = [
     ["POST", %r{\A/v1/pages\z}],
-    ["PATCH", %r{\A/v1/blocks/#{NotionRead::UUID}/children\z}]
+    ["PATCH", %r{\A/v1/blocks/#{NotionRead::UUID}/children\z}],
+    ["PATCH", PAGE_PATCH]
   ].freeze
+  # The select properties a page PATCH may set, and the values it may set
+  # them to. Path = Promoted is the lead-time improver's escalation (DND-1806).
+  SELECTS = { "Path" => ["Promoted"].freeze }.freeze
 
   # A request this client refused before sending it: nothing reached Notion.
   class Refused < NotionRead::Error; end
 
   module_function
 
-  def write?(method, path)
-    WRITES.any? { |m, re| m == method && re.match?(path) }
+  def write?(method, path, body = nil)
+    return false unless WRITES.any? { |m, re| m == method && re.match?(path) }
+    return select_patch?(body) if method == "PATCH" && PAGE_PATCH.match?(path)
+
+    true
+  end
+
+  # A page PATCH body sets exactly one allow-listed select to an allowed
+  # value, and nothing else (no archive, no other property, no other type).
+  def select_patch?(body)
+    return false unless body.is_a?(Hash) && body.keys == ["properties"]
+
+    props = body["properties"]
+    return false unless props.is_a?(Hash) && props.size == 1
+
+    name, value = props.first
+    value.is_a?(Hash) && value.keys == ["select"] && value["select"].is_a?(Hash) &&
+      value["select"].keys == ["name"] && SELECTS.fetch(name, []).include?(value["select"]["name"])
   end
 
   # write(origin, token, method, path, body) -> parsed JSON, or raises
   # Refused (nothing sent) or NotionRead::Error (status set when Notion
   # answered).
   def write(origin, token, method, path, body)
-    raise Refused.new("refused a Notion #{method} #{path}: this client only creates pages and appends blocks", "this is a bug in the caller") unless write?(method, path)
+    raise Refused.new("refused a Notion #{method} #{path}: this client only creates pages and appends blocks, and sets one allow-listed select value (SELECTS)", "this is a bug in the caller") unless write?(method, path, body)
 
     reply = NotionRead.request(method, "#{origin}#{path}", token, body)
     if reply[:curl_rc] != 0
@@ -69,5 +94,11 @@ module NotionWrite
   # append(origin, token, page_id, children) -> Notion's answer.
   def append(origin, token, page_id, children)
     write(origin, token, "PATCH", "/v1/blocks/#{page_id}/children", { "children" => children })
+  end
+
+  # set_select(origin, token, page_id, property, value) -> the page. Only a
+  # property and value SELECTS allows; anything else is Refused unsent.
+  def set_select(origin, token, page_id, property, value)
+    write(origin, token, "PATCH", "/v1/pages/#{page_id}", { "properties" => { property => { "select" => { "name" => value } } } })
   end
 end

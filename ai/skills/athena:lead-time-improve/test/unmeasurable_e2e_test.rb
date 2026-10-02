@@ -171,6 +171,25 @@ code, out, err = tool(E2, "observe", "--repo", "custom", "--run", "run-1", "--su
 check("Notion refuses the read: COULD-NOT-LOOK, exit 3", out) { code == 3 && out.include?("outcome=COULD-NOT-LOOK") }
 check("... never 'already handed off', and the Fix: says so", out + err) { !out.include?("already handed off") && err.include?("Fix:") }
 
+# A promotion Notion refuses.
+STATE3 = File.join(DIR, "state3")
+FileUtils.mkdir_p(STATE3)
+E3 = env_for(STATE3, port)
+tool(E3, "handoff", "--repo", "custom", "--phase", "queue", "--ticket", "DND-9001")
+write_tickets({ "9001" => { "id" => PAGE, "status" => "In Progress", "path" => "Off" }, "fail_patch" => 403 })
+sent_before = sends.size
+3.times { |i| tool(E3, "observe", "--repo", "custom", "--run", "p-#{i}", "--summary-file", SUM) }
+code, out, = tool(E3, "observe", "--repo", "custom", "--run", "p-3", "--summary-file", SUM)
+last = sends.last.to_s
+check("Notion refuses the Path PATCH: COULD-NOT-LOOK, exit 3, naming Notion's answer", out) do
+  code == 3 && out.include?("outcome=COULD-NOT-LOOK") && out.include?("promote failed") && out.include?("403")
+end
+check("... Path stays Off, the note says the promotion failed, and ONE alert says it could NOT be promoted") do
+  note = writes.reverse.find { |r| r["path"].start_with?("/v1/blocks/") }.to_json
+  JSON.parse(File.read(TICKETS))["9001"]["path"] == "Off" && note.include?("promotion failed") &&
+    sends.size == sent_before + 1 && File.read(File.join(SENT, last)).include?("could NOT be promoted")
+end
+
 # Refusals: the lookup's other side.
 code, _, err = tool(E2, "observe", "--repo", "custom", "--run", "run-2", "--summary-file", summary_file("other", repo: "gen_saas"))
 check("a summary for another repo: refused, exit 2, nothing counted", err) do

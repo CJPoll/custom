@@ -5,7 +5,7 @@ Usage: fake-notion-tickets-server.py <port-file> <log-file> <tickets-json> <toke
 
 <tickets-json> is re-read on every request, so a test flips a ticket's state
 by rewriting it: {"<number>": {"id": <uuid>, "status": <name>, "path": <name|null>},
-"fail": <http status or absent>}. Every request is logged as one JSON line:
+"fail": <http status or absent>, "fail_patch": <http status for a page PATCH, or absent>}. Every request is logged as one JSON line:
 {"method", "path", "body"}. Only the three calls the tool may make are
 answered; anything else is 400, so a widened write shows up as a failure.
 """
@@ -70,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.answer(200, {"results": [page(number, t)] if t else [], "has_more": False})
         m = re.fullmatch(r"/v1/pages/(" + UUID + ")", self.path)
         if method == "PATCH" and m:
+            if doc.get("fail_patch"):
+                return self.answer(int(doc["fail_patch"]), {"message": "injected patch failure"})
             if body != {"properties": {"Path": {"select": {"name": "Promoted"}}}}:
                 return self.answer(400, {"message": "unexpected page PATCH body"})
             for number, t in doc.items():

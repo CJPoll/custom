@@ -317,7 +317,8 @@ tools:
   # no file: it compares a filed ticket's Jev lines with a local file.
   skills/athena:ticket-management/scripts/ticket-provenance-check: { class: readOnly, reason: check }
   # ticket-file (DND-1669) creates a ticket page in DND Tickets and appends
-  # its blocks (ai/lib/notion_write.rb refuses any other request), then reads
+  # its blocks (ai/lib/notion_write.rb refuses any other request but one
+  # allow-listed select value, which ticket-file never sends), then reads
   # it back: tracker state.
   skills/athena:ticket-management/scripts/ticket-file: { class: destructive, reason: tracker }
   # DND-775: the agent PATH git wrapper. It refuses stash-list writes, then

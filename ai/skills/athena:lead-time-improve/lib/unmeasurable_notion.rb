@@ -7,9 +7,9 @@
 #   promote(page_id)     PATCH /v1/pages/<id>  body: Path = Promoted, only
 #   note(page_id, text)  PATCH /v1/blocks/<id>/children  one paragraph
 #
-# The read goes through NotionRead (its allowlist and retry policy), the
-# note through NotionWrite.append, and the promotion through NotionRead's
-# curl transport with a body this file builds and nothing else may widen.
+# The read goes through NotionRead (its allowlist and retry policy); the
+# note and the promotion through NotionWrite (append, and set_select, which
+# refuses any page PATCH but an allow-listed select value before sending).
 # The token is NotionRead's: the file the notion-personal MCP entry names,
 # fed to curl on stdin, never argv or the environment.
 #
@@ -50,20 +50,7 @@ class LeadTimeUnmeasurableNotion
   end
 
   def promote(page_id)
-    page_id = uuid(page_id)
-    origin, token = creds
-    body = { "properties" => { "Path" => { "select" => { "name" => LeadTimeUnmeasurable::PROMOTED } } } }
-    reply = NotionRead.request("PATCH", "#{origin}/v1/pages/#{page_id}", token, body)
-    raise PortError, "no answer from Notion to the Path PATCH (curl exit #{reply[:curl_rc]})" unless reply[:curl_rc].zero?
-    unless reply[:status] == 200
-      message = begin
-        JSON.parse(reply[:body])["message"].to_s[0, 200]
-      rescue JSON::ParserError, TypeError
-        ""
-      end
-      raise PortError, "Notion answered HTTP #{reply[:status]} to the Path PATCH on #{page_id}: #{message}"
-    end
-
+    NotionWrite.set_select(*creds, uuid(page_id), "Path", LeadTimeUnmeasurable::PROMOTED)
     true
   rescue NotionRead::Error => e
     raise PortError, "#{e.message} (#{e.fix})"

@@ -123,6 +123,29 @@ failed_note = U.ticket_note(repo: "custom", phase: "queue", runs: 3, run: "run-x
 check("ticket note: never claims a promotion that failed") { failed_note.include?("promotion failed") && !failed_note.include?("Promoted to Path") }
 check("ticket note: names the phase, repo, count, run and DND-1806") { ["queue", "custom", "3", "run-x", "DND-1806"].all? { |w| note.include?(w) } }
 
+# ── the write client's allowlist for the promotion (ai/lib/notion_write.rb) ─
+require_relative "../../../lib/notion_write"
+PG = "c0000000-0000-4000-8000-000000009001"
+ok_body = { "properties" => { "Path" => { "select" => { "name" => "Promoted" } } } }
+check("NotionWrite: a page PATCH setting Path = Promoted is admitted") { NotionWrite.write?("PATCH", "/v1/pages/#{PG}", ok_body) }
+[
+  ["another Path value", { "properties" => { "Path" => { "select" => { "name" => "Off" } } } }],
+  ["another property", { "properties" => { "Status" => { "select" => { "name" => "Promoted" } } } }],
+  ["two properties", { "properties" => { "Path" => { "select" => { "name" => "Promoted" } }, "Severity" => { "select" => { "name" => "LOW" } } } }],
+  ["an archive", { "archived" => true }],
+  ["properties plus an archive", ok_body.merge("archived" => true)],
+  ["a non-select type", { "properties" => { "Path" => { "status" => { "name" => "Promoted" } } } }],
+  ["no body", nil]
+].each do |what, body|
+  check("NotionWrite: a page PATCH with #{what} is refused before it is sent") { !NotionWrite.write?("PATCH", "/v1/pages/#{PG}", body) }
+end
+check("NotionWrite: set_select of a value SELECTS does not list raises Refused, nothing sent") do
+  raises?(NotionWrite::Refused) { NotionWrite.set_select("http://127.0.0.1:9", "t", PG, "Path", "Off") }
+end
+check("NotionWrite: the two earlier writes are still admitted") do
+  NotionWrite.write?("POST", "/v1/pages", {}) && NotionWrite.write?("PATCH", "/v1/blocks/#{PG}/children", {})
+end
+
 # ── store ───────────────────────────────────────────────────────────────────
 Dir.mktmpdir("unmeasurable-store-") do |dir|
   path = File.join(dir, "unmeasurable.json")
