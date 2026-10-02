@@ -570,10 +570,10 @@ shipwright cron never writes Notion, so this is its own runner.
   07:00 and 19:00 Denver. That is 13:00/01:00 UTC under MDT and 14:00/02:00 UTC
   under MST; cronie follows DST. The run before Denver noon also writes the
   daily digest to its run record, `runs/<ts>.digest.md`, once per Denver day.
-  The `.run` record names it, or says `digest: MISSING`. Nothing from the pass
-  reaches the owner unless it needs the owner: a won't-fix notice is its own
-  DM, and a `Needs Attention` ticket shows in the gen_saas server's morning
-  digest (`athena:epic-clustering` → *Who runs it, and when*).
+  The `.run` record names it, or says `digest: MISSING`. No bookkeeping from
+  the pass reaches the owner. What needs the owner still does: a won't-fix
+  notice is its own DM, and a `Needs Attention` move sends its usual one-line
+  DM (`athena:epic-clustering` → *Who runs it, and when*).
 
   **Later (2026-10-02, DND-1738):** the morning run also sent the daily
   digest to the owner's DM. Superseded by the owner: "I guess I found the

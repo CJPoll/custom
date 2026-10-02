@@ -612,11 +612,13 @@ elif [ -s "${DIGEST_REC}" ]; then
     DIGEST_LINES="${DIGEST_LINES}"$'\n'"digest_blocks: ${DIGEST_BLOCKS}"
   else
     DIGEST_LINES="${DIGEST_LINES}"$'\n'"digest_blocks: MISSING ${DIGEST_BLOCKS}"
+    echo "${ME}: run ${ts}: the digest text was written but its Block Kit is MISSING (${DIGEST_BLOCKS} absent or empty)." >&2
+    echo "  Fix: read ${log}; the architect should pass --blocks-out \"\$CLUSTERING_DIGEST_BLOCKS\" (athena:epic-clustering -> The daily digest). The text record stands." >&2
   fi
 else
-  DIGEST_LINES="digest: MISSING ${DIGEST_REC} (due this morning; the session wrote none)"
+  DIGEST_LINES="digest: MISSING ${DIGEST_REC} (due this morning; no digest file was written; see this run's outcome)"
   echo "${ME}: run ${ts}: the daily digest was due but is MISSING (${DIGEST_REC} absent or empty); ${DIGEST_DAY} not stamped." >&2
-  echo "  Fix: read ${log}; the architect should write the digest to \$CLUSTERING_DIGEST (athena:epic-clustering -> The daily digest). A re-run before noon ${OWNER_TZ} writes it." >&2
+  echo "  Fix: read ${log}. If the session failed or was blocked, that is the cause; otherwise the architect should write the digest to \$CLUSTERING_DIGEST (athena:epic-clustering -> The daily digest). A re-run before noon ${OWNER_TZ} writes it." >&2
 fi
 # finish <exit> <outcome> — every tick that spawned a session ends here. It
 # writes runs/<ts>.run and sends ONE harness-lane drain request re: it

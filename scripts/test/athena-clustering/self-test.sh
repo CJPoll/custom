@@ -241,7 +241,7 @@ run_rec="$(newest "$c" run)"; dg="$(sed -n 1p "$c/claude-digest-env")"; dgb="$(s
 case "$dg" in
   "$(sd "$c")"/runs/*.digest.md)
     if [ "$dgb" = "${dg%.md}.blocks.json" ] && [ -s "$dg" ] && [ -s "$dgb" ] \
-       && grep -qx "digest: written ${dg}" "$run_rec" && grep -qx "digest_blocks: ${dgb}" "$run_rec" \
+       && grep -qxF "digest: written ${dg}" "$run_rec" && grep -qxF "digest_blocks: ${dgb}" "$run_rec" \
        && [ "${run_rec%.run}.digest.md" = "$dg" ]; then
       ok "a morning session gets runs/<ts>.digest.md (+ .blocks.json) for its digest; the .run record names both"
     else

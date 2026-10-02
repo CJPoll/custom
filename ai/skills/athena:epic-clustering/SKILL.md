@@ -34,24 +34,26 @@ properties* say. This skill does not restate them.
 - **On the trigger:** an epic's open `Path` = `Off` count exceeds its open
   on-path count (`Critical`, `Blocking`, `Promoted`). `read` prints it per
   epic.
-- **No move waits for Cody.** What needs his approval is
+- **No move waits for Cody.** What needs their approval is
   `~/.claude/CLAUDE.md` → *Owner approval policy*; this pass's writes are
-  not on it. Bulk ticket changes are notify-after there: step 13's summary
-  and the digest carry them, in the run record (*The daily digest*). A
-  never-movable ticket never moves in this pass.
-- **Nothing goes to Cody unless it needs Cody** (DND-1738). Owner, Cody,
-  2026-10-02: "I guess I found the morning digest itself helpful; it's the
-  epic clustering message I don't know what to do with." So the counts, the
-  digest and the summary go to the run record. What does need Cody arrives
-  two ways, and no other:
-  - **A ticket this pass moves to `Needs Attention`** gets no DM from the
-    pass. The move assigns it to Cody, and gen_saas's priority index marks
-    it `owner_only`, so it appears in the server's 07:00 morning digest
-    ("Needs your attention") and on /priorities
-    (`ai/docs/morning-digest-v2.md` → *1. Needs your attention*). The
-    [[athena:ticket-management]] *Needs Attention DM* does not fire for this
-    pass's moves; write the exact step onto the ticket body as that rule
-    says.
+  not on it. Bulk ticket changes are notify-after there. This pass records
+  them in the run record (step 13, *The daily digest*), which is not an
+  owner digest: nothing here lists them in one. Whether the run record
+  meets that duty is the owner's call (policy item 6). A never-movable
+  ticket never moves in this pass.
+
+  **Later (2026-10-02, DND-1738):** this bullet said step 13's summary and
+  the digest carry the bulk changes to Cody. Superseded: neither is sent to
+  Cody any more (next bullet).
+- **No bookkeeping goes to Cody** (DND-1738). Owner, Cody, 2026-10-02: "I
+  guess I found the morning digest itself helpful; it's the epic clustering
+  message I don't know what to do with." So the counts, the digest and the
+  pass summary go to the run record. What needs Cody still reaches them:
+  - **A ticket this pass moves to `Needs Attention`** follows
+    [[athena:ticket-management]] unchanged, its *Needs Attention DM* to Cody
+    included: one line, phrased as the ask. It also shows in the gen_saas
+    server's morning digest, "Needs your attention"
+    (`ai/docs/morning-digest-v2.md` → *1. Needs your attention*).
   - **A won't-fix notice** stays its own DM, one per closure, sent only when
     one exists (*Won't-fix notices*). Its veto is verified by the session
     that posts it, so it cannot fold into a server-posted digest.
@@ -210,10 +212,11 @@ session asked for) writes no digest.
 2. Read the draft. Prune a won't-fix candidate whose value is plain.
 3. Write the run record. Run step 1 with `--blocks-out
    "$CLUSTERING_DIGEST_BLOCKS"` and its stdout redirected to
-   `"$CLUSTERING_DIGEST"`, then remove any candidate you pruned in step 2
-   from both files. Check that both files are non-empty. Do not post the digest to Slack and do not DM it to anyone. A
-   file you could not write is said in your final line; the runner records a
-   missing digest as `digest: MISSING` in the `.run` record.
+   `"$CLUSTERING_DIGEST"`. Then append one line per candidate you pruned in
+   step 2 to `"$CLUSTERING_DIGEST"`: `pruned: DND-N: <why>`. Check that both
+   files are non-empty. Do not post the digest to Slack and do not DM it to
+   anyone. Say in your final line if you could not write a file; the runner
+   records a missing digest as `digest: MISSING` in the `.run` record.
 
    **Later (2026-10-02, DND-1738):** this step resolved Cody's DM channel
    (`private-overlay get slack .channels.owner_dm`) and posted the digest

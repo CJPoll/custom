@@ -491,7 +491,8 @@ check("cli: digest --blocks-out writes the Block Kit draft and prints the text (
     out, _, code = run("digest", "--from-json", File.join(FIX, "pass.json"), "--now", NOW, "--no-bodies",
                        "--blocks-out", f)
     blocks = JSON.parse(File.read(f))
-    code.zero? && out.include?("DRAFT") && blocks.is_a?(Array) && !blocks.empty?
+    code.zero? && out.include?("DRAFT") && blocks.is_a?(Array) && !blocks.empty? &&
+      !out.include?("slack_post") && out.include?("run's record")
   end
 end
 
@@ -514,7 +515,7 @@ end
 
 check("SKILL: the description no longer says the pass sends the owner a daily digest") do
   desc = File.read(File.expand_path("../SKILL.md", HERE))[/^description: .*$/].to_s
-  !desc.empty? && !desc.match?(/send[^.]*daily[^.]*digest/i)
+  !desc.empty? && !desc.match?(/send[^.]*daily[^.]*digest/i) && desc.match?(/digest to the run record/)
 end
 
 check("cli: notice writes Block Kit JSON to --blocks-out and prints the fallback text; request is gone") do
