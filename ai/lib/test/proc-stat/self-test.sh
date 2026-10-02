@@ -87,6 +87,10 @@ out="$(proc_stat_field "${MISSING}" 3)"; rc=$?
 [ "${rc}" -eq 1 ] && [ -z "${out}" ] && ok "PS-11 a missing stat is 1 for a field read too" || bad "PS-11 missing stat field read" "rc=${rc}"
 out="$(proc_stat_field "${NOCLOSE}" 3)"; rc=$?
 [ "${rc}" -eq 2 ] && ok "PS-12 a malformed stat is 2 for a field read" || bad "PS-12 malformed stat field read" "rc=${rc}"
+TRUNC="${T}/trunc.stat"
+printf '99 (cut) ' >"${TRUNC}"
+proc_stat_rest "${TRUNC}"; rc=$?
+[ "${rc}" -eq 2 ] && [ -z "${PROC_STAT_REST}" ] && ok "PS-13 a stat with nothing after the last \") \" is 2, never an empty read"   || bad "PS-13 a stat with nothing after the last \") \"" "rc=${rc} rest='${PROC_STAT_REST}'"
 
 else
   bad "PS-0 the shared library exists" "${LIB} is missing, so PS-1..PS-12 did not run"
@@ -111,8 +115,21 @@ nosite "SITE-1b integration-gate has no line-oriented sed over a stat file" "${I
 site   "SITE-2 inbox-client-capture reads starttime with proc_stat_field" "${CAP}" 'proc_stat_field "/proc/\$\{p\}/stat" 20'
 nosite "SITE-2b inbox-client-capture has no line-oriented sed over a stat file" "${CAP}" "sed [^|]*/proc/[^ ]*/stat"
 # test-slot runs with no ai/lib beside it (its self-test G10), so it spells
-# the same rule inline: a whole-file read (-d '') of its own stat.
-site   "SITE-3 test-slot's read_ppid reads its own stat whole" "${TS}" "read -r -d '' stat; \\} 2>/dev/null </proc/self/stat"
+# the same rule inline. SITE-3 runs read_ppid ITSELF, lifted out of test-slot,
+# on the fixture: the parse that carries the fix is exercised, not matched.
+rp="$(sed -n '/^read_ppid() {$/,/^}$/p' "${TS}")"
+if [ -z "${rp}" ]; then
+  bad "SITE-3 test-slot defines read_ppid" "no 'read_ppid() {' ... '}' block in ${TS}"
+else
+  CUR_PPID="unset"
+  eval "${rp}"
+  read_ppid "${FIX}"
+  [ "${CUR_PPID}" = "1" ] && ok "SITE-3 test-slot's read_ppid reads ppid 1 from the odd fixture (not the comm's 7)"     || bad "SITE-3 test-slot's read_ppid on the odd fixture" "CUR_PPID='${CUR_PPID}' (want 1)"
+  read_ppid "${NOCLOSE}"
+  [ -z "${CUR_PPID}" ] && ok "SITE-3c read_ppid on a stat with no \") \" is empty (unreadable), never a guess"     || bad "SITE-3c read_ppid on a malformed stat" "CUR_PPID='${CUR_PPID}'"
+  read_ppid
+  [ "${CUR_PPID}" = "${PPID}" ] && ok "SITE-3d read_ppid with no argument reads this shell's own parent"     || bad "SITE-3d read_ppid default" "CUR_PPID='${CUR_PPID}' PPID='${PPID}'"
+fi
 nosite "SITE-3b test-slot has no single-line read of /proc/self/stat" "${TS}" "read -r [a-z_]+ [^<]*</proc/self/stat"
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

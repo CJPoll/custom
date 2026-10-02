@@ -1399,10 +1399,12 @@ write_outcome() { # write_outcome KIND [EXIT]
 # read WHOLE (-d '') and parsed after the LAST ") ": a name holding a newline
 # or ") " is never misread (DND-1625). This is ai/lib/proc-stat.sh's rule,
 # spelled inline because test-slot also runs with no ai/lib beside it.
+# [STAT] defaults to /proc/self/stat; ai/lib/test/proc-stat/self-test.sh
+# passes a fixture to run this exact parse.
 read_ppid() {
-  local stat=""
+  local stat="" src=${1:-/proc/self/stat}
   CUR_PPID=""
-  { IFS= read -r -d '' stat; } 2>/dev/null </proc/self/stat
+  { IFS= read -r -d '' stat; } 2>/dev/null <"$src"
   case $stat in *") "*) ;; *) return 0 ;; esac
   stat=${stat##*) }
   read -r _ CUR_PPID _ <<<"$stat"

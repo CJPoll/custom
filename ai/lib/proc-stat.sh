@@ -11,8 +11,9 @@
 # scripts/test/lib/proc-state.bash already follow; the shell callers share it
 # here instead of each spelling it again.
 #
-# Callers: integration-gate (the pre-started critic's pgrp), inbox-client-
-# capture (a client's start time), and test-slot (its own parent pid).
+# Callers: integration-gate (the pre-started critic's pgrp) and inbox-client-
+# capture (a client's start time). test-slot's read_ppid follows the same rule
+# inline, because test-slot also runs with no ai/lib beside it.
 #
 # Neither function forks: both read with the `read` builtin, so they can be
 # called in the main shell (test-slot reads /proc/self/stat and needs /proc/self
@@ -34,6 +35,7 @@ proc_stat_rest() {
   case "${s}" in *") "*) ;; *) return 2 ;; esac
   s="${s##*) }"
   s="${s%$'\n'}"
+  [ -n "${s}" ] || return 2
   case "${s}" in *$'\n'*) return 2 ;; esac
   PROC_STAT_REST="${s}"
   return 0
