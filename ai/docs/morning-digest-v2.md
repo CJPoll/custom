@@ -216,6 +216,11 @@ Test lists are on the tickets. DND-1737 depends on all eight. Every test is func
    only an event in today's synced set, `sendUpdates=all`, consumer the server
    at click time, single use, expires at the event's end. Policy item 6: only
    the owner's own words, or a verified click on that one question.
+
+   **Later (2026-10-02):** done. The owner ratified the class at about
+   14:09Z by a verified click (DND-1744 holds the record). The row and its
+   rules are in `ai/contracts/athena-events.md` → *Action classes* and *The
+   `calendar.rsvp` class*.
 4. **Unpark the grant click path** (DND-563 T3, and the epic) if Phase B is
    wanted soon. T3 is Parked, so DND-1745 cannot start.
 
