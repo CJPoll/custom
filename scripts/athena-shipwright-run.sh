@@ -421,7 +421,7 @@ LIB_FAULTS=""
 if [ ! -r "${__wrapper_dir}/lib/dbus-env.sh" ]; then
   LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/dbus-env.sh (missing); "
 # shellcheck source=scripts/lib/dbus-env.sh
-elif ! . "${__wrapper_dir}/lib/dbus-env.sh" 2>/dev/null || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
+elif ! . "${__wrapper_dir}/lib/dbus-env.sh" || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
   LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/dbus-env.sh (could not be loaded); "
 else
   athena_dbus_env_setup
@@ -429,7 +429,7 @@ fi
 if [ ! -r "${__wrapper_dir}/lib/shipwright-stale-dirt.sh" ]; then
   LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/shipwright-stale-dirt.sh (missing); "
 # shellcheck source=scripts/lib/shipwright-stale-dirt.sh
-elif ! . "${__wrapper_dir}/lib/shipwright-stale-dirt.sh" 2>/dev/null; then
+elif ! . "${__wrapper_dir}/lib/shipwright-stale-dirt.sh"; then
   LIB_FAULTS="${LIB_FAULTS}${__wrapper_dir}/lib/shipwright-stale-dirt.sh (could not be loaded); "
 fi
 "${__wrapper_dir}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true

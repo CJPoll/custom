@@ -213,6 +213,11 @@ if [ "${DRY}" -eq 1 ]; then
     echo "  Fix: land the athena:epic-clustering skill (DND-982) on main and fast-forward ${MAIN_CHECKOUT}." >&2
     exit 78
   fi
+  if [ ! -r "${SCRIPT_DIR}/lib/dbus-env.sh" ]; then
+    echo "${ME}: ${SCRIPT_DIR}/lib/dbus-env.sh is missing; a tick would exit 78 and spawn no session." >&2
+    echo "  Fix: restore scripts/lib/dbus-env.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main." >&2
+    exit 78
+  fi
   if ! run_mcp_preflight; then
     echo "${ME}: ${MCP_PF_WHY%.}; a tick would exit 78 and spawn no session." >&2
     echo "  Fix: ${MCP_PF_FIX}" >&2
@@ -260,7 +265,7 @@ DBUS_LIB_WHY=""
 if [ ! -r "${SCRIPT_DIR}/lib/dbus-env.sh" ]; then
   DBUS_LIB_WHY="${SCRIPT_DIR}/lib/dbus-env.sh is missing, so D-Bus autolaunch cannot be suppressed; no session."
 # shellcheck source=scripts/lib/dbus-env.sh
-elif ! . "${SCRIPT_DIR}/lib/dbus-env.sh" 2>/dev/null || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
+elif ! . "${SCRIPT_DIR}/lib/dbus-env.sh" || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
   DBUS_LIB_WHY="${SCRIPT_DIR}/lib/dbus-env.sh could not be loaded, so D-Bus autolaunch cannot be suppressed; no session."
 else
   athena_dbus_env_setup

@@ -463,6 +463,8 @@ if [ "${DRY}" -eq 1 ]; then
   }
   [ -r "${SKILL_FILE}" ] || dry_refuse "${SKILL_WHY}" "${SKILL_FIX}"
   [ "${RES_RC}" -eq 0 ] || dry_refuse "$(res_why)" "$(res_fix)"
+  [ -r "${SCRIPT_DIR}/lib/dbus-env.sh" ] || dry_refuse "${SCRIPT_DIR}/lib/dbus-env.sh is missing, so D-Bus autolaunch cannot be suppressed" \
+    "restore scripts/lib/dbus-env.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main."
   run_mcp_preflight || dry_refuse "${MCP_PF_WHY%.}" "${MCP_PF_FIX}"
   build_brief
   printf '%s\n' "${BRIEF}"
@@ -506,7 +508,7 @@ DBUS_LIB_WHY=""
 if [ ! -r "${SCRIPT_DIR}/lib/dbus-env.sh" ]; then
   DBUS_LIB_WHY="${SCRIPT_DIR}/lib/dbus-env.sh is missing, so D-Bus autolaunch cannot be suppressed; no session."
 # shellcheck source=scripts/lib/dbus-env.sh
-elif ! . "${SCRIPT_DIR}/lib/dbus-env.sh" 2>/dev/null || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
+elif ! . "${SCRIPT_DIR}/lib/dbus-env.sh" || ! declare -F athena_dbus_env_setup >/dev/null 2>&1; then
   DBUS_LIB_WHY="${SCRIPT_DIR}/lib/dbus-env.sh could not be loaded, so D-Bus autolaunch cannot be suppressed; no session."
 else
   athena_dbus_env_setup

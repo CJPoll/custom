@@ -1291,14 +1291,29 @@ for lib in mcp-preflight.sh dbus-env.sh; do
   fi
 done
 
+for lib in mcp-preflight.sh dbus-env.sh; do
+  c="$(new_case)"
+  RUNNER="$(sx_runner "$c" "$lib")"
+  rc="$(run_runner "$c" -- --dry-run)"
+  if [ "$rc" = 78 ] && grep -q "scripts/lib/$lib is missing" "$c/runner.err" && grep -q 'a tick would exit 78' "$c/runner.err" \
+     && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")" ] && ! grep -q 'MODE: lead-time' "$c/runner.out"; then
+    ok "--dry-run with $lib missing: exit 78 with Fix:, no brief, touches nothing"
+  else
+    bad "dry-run $lib missing" "rc=$rc err=$(cat "$c/runner.err")"
+  fi
+done
+
+# A lib that is present but does not load (here: it returns non-zero) is the
+# same fault, and the record says so.
 c="$(new_case)"
-RUNNER="$(sx_runner "$c" mcp-preflight.sh)"
-rc="$(run_runner "$c" -- --dry-run)"
-if [ "$rc" = 78 ] && grep -q 'scripts/lib/mcp-preflight.sh is missing' "$c/runner.err" && grep -q 'a tick would exit 78' "$c/runner.err" \
-   && grep -q 'Fix:' "$c/runner.err" && [ ! -e "$(sd "$c")" ] && ! grep -q 'MODE: lead-time' "$c/runner.out"; then
-  ok "--dry-run with mcp-preflight.sh missing: exit 78 with Fix:, no brief, touches nothing"
+RUNNER="$(sx_runner "$c" dbus-env.sh)"
+printf 'return 1\n' >"$c/sx/scripts/lib/dbus-env.sh"
+rc="$(run_runner "$c")"
+rec="$(newest "$c" failed)"
+if [ "$rc" = 78 ] && [ -n "$rec" ] && grep -q 'dbus-env.sh could not be loaded' "$rec" && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ]; then
+  ok "an unloadable dbus-env.sh: exit 78, a .failed record saying could not be loaded, counted"
 else
-  bad "dry-run lib missing" "rc=$rc err=$(cat "$c/runner.err")"
+  bad "unloadable lib" "rc=$rc rec=$(cat "$rec" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 RUNNER="$REAL_RUNNER"
 
