@@ -7507,7 +7507,7 @@ implementing tickets cite the subsection they build by name: DND-1767 (the
 reads), DND-1768 (the owner-only writes and the change log), DND-1769 (the
 approval path, `calendar_invite`, `calendar_uninvite`, `calendar_change`) and
 DND-1770 (`calendar_rsvp`). None of these tools, the `calendar_changes` table
-or the approval page exists yet (gen_saas `origin/main` `613aedb9`, read
+or the approval page exists on gen_saas `origin/main` `613aedb9` (read
 2026-10-02). Every sentence about them is an obligation on its implementer.
 
 **The calendar is not the index.** These tools write the owner's primary
@@ -7574,9 +7574,11 @@ Nine tools: two reads, six writes, one status read.
   not the organizer. Otherwise `not_an_attendee`.
 - **Never a Google Meet link.** No tool, page or digest returns or shows
   `hangoutLink` or `conferenceData`. No write requests a Meet conference, so
-  Google adds none. A Meet link passed as a Zoom link is `not_a_zoom_link`.
-  Showing an extracted Zoom link (`join_url`) is not declared here: it waits
-  on owner decision OD-2 (DND-1765).
+  Google adds none. A Meet link passed as a Zoom link is `not_a_zoom_link`,
+  and one in a `location` argument is `invalid_argument`. A returned
+  `location` has its Meet URLs removed (`calendar_event`). Showing an
+  extracted Zoom link (`join_url`) is not declared here: it waits on owner
+  decision OD-2 (DND-1765).
 - **Dormant until connected.** `not_configured`, `not_connected` and `revoked`
   carry DND-447's `Fix:` text (`Athena.Calendar.Refusal`).
 - **Today stays current.** After a write is applied to an event that starts in
@@ -7607,13 +7609,17 @@ OD-2, and nothing else is added without amending this subsection.
   nothing. More than 250 events is `too_many_events`.
 - **`calendar_event {event_id}`** → `EventSummary` plus `"location":
   string|null`, `"guests_omitted": bool` and `"guests": [{"email", "response",
-  "organizer", "optional"}]`. The description is never returned.
+  "organizer", "optional"}]`. The description is never returned. In
+  `location`, every `meet.google.com` URL is replaced by `[Google Meet link
+  removed]`.
 - **`calendar_create {claude_session_id, title, starts_at, ends_at, location?,
   description?, guests?, zoom_url?}`** → `{"result": "created", "event":
   EventSummary}`, or `{"result": "pending_approval", "change": Change}` when
   `guests` is not empty. `zoom_url` is checked as in `calendar_attach_zoom`
   and written to `location`, so `location` and `zoom_url` together are
-  `invalid_argument`. The event's time zone is the owner's fleet-policy zone.
+  `invalid_argument`. A `location` argument, here or in `calendar_update`,
+  holding a `meet.google.com` URL is `invalid_argument`. The event's time
+  zone is the owner's fleet-policy zone.
 - **`calendar_update {claude_session_id, event_id, title?, location?,
   starts_at?, ends_at?}`** → `{"result": "updated", "event": EventSummary}` or
   `pending_approval`. At least one field. `starts_at` and `ends_at` come
@@ -7818,11 +7824,15 @@ approval link.
   bullet now says where each reach ends, and that the sync is the only index
   write a calendar call causes.
 - **Negative tests for every calendar row,** one per `On denial` cell:
-  another owner's machine, an unbound session, an event not on the owner's
-  primary calendar, a non-organizer, a non-guest RSVP, another owner's change
-  id and token, a mismatched token digest, an expired token, a page loaded
-  before expiry and submitted after, a second Approve with a spent token, and
-  a logged-in non-owner. No machine-token path reaches Approve or Reject.
+  no calendar access (`not_configured`, `not_connected`, `revoked`), another
+  owner's machine, an unbound session, an event not on the owner's primary
+  calendar, a non-organizer, a non-guest RSVP, another owner's change id and
+  token, a mismatched token digest, an expired token, a page loaded before
+  expiry and submitted after, a second Approve with a spent token, an event
+  whose etag changed before Approve (`stale`, nothing applied), an event gone
+  at Approve (`failed`, `event_gone`), a Google failure at Approve (`failed`),
+  and a logged-in non-owner. No machine-token path reaches Approve or
+  Reject.
 - **Every query is owner-scoped in the query itself, not by RBAC alone.** An
   aggregate RBAC `read` or `update` admits anyone holding a role on the row,
   so it never replaces the `owner_id` filter (gen_saas DND-434 and DND-441
