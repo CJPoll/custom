@@ -38,6 +38,25 @@ slack_die() {
   exit 1
 }
 
+# slack_usage_die <usage-line> -- a usage error: prints the expected argv and a
+# Fix: line (~/dev/custom/CLAUDE.md -> "Guard/error messages are written for the
+# LLM"), exits 2. Makes no Slack call. The Fix: names the bin so the agent can
+# run `<bin> --help` for the full usage.
+slack_usage_die() {
+  _ud_bin="${0##*/}"
+  printf 'usage: %s\n' "$1" >&2
+  printf 'Fix: re-run %s with the argument shape above (quote any text as one argument); %s --help prints the full usage.\n' "$_ud_bin" "$_ud_bin" >&2
+  exit 2
+}
+
+# slack_refuse_die <what-is-wrong> <fix> -- a refusal that is not an argv-shape
+# error (an empty message, a missing file): says what is wrong, then Fix:, exit 2.
+slack_refuse_die() {
+  printf '%s: %s\n' "${0##*/}" "$1" >&2
+  printf 'Fix: %s\n' "$2" >&2
+  exit 2
+}
+
 # Prints a script's header comment -- its usage block -- on STDOUT. Each bin
 # calls it from a `-h|--help` branch placed BEFORE slack_need_tools and any
 # argument parsing, so help never touches the token, the network, or stdin

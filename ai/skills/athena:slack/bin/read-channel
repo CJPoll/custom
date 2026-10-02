@@ -20,8 +20,7 @@ slack_need_tools
 slack_tmp_init
 
 usage() {
-  printf 'usage: read-channel <channel_id|#name> [--since <ts>] [--before <ts>] [--limit N] [--json]\n' >&2
-  exit 2
+  slack_usage_die 'read-channel <channel_id|#name> [--since <ts>] [--before <ts>] [--limit N] [--json]'
 }
 
 [ "$#" -ge 1 ] || usage

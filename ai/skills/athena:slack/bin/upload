@@ -17,8 +17,7 @@ slack_need_tools
 slack_tmp_init
 
 usage() {
-  printf 'usage: upload <channel_id|#name> <file> [--title T] [--thread_ts TS] [--comment C]\n' >&2
-  exit 2
+  slack_usage_die 'upload <channel_id|#name> <file> [--title T] [--thread_ts TS] [--comment C]'
 }
 [ "$#" -ge 2 ] || usage
 CHAN_ARG="$1"; FILE="$2"; shift 2
@@ -31,14 +30,14 @@ while [ "$#" -gt 0 ]; do
     *) usage ;;
   esac
 done
-[ -f "$FILE" ] || { printf 'upload: no such file: %s\n' "$FILE" >&2; exit 2; }
+[ -f "$FILE" ] || slack_refuse_die "no such file: $FILE" 'pass the path of an existing file as the second argument.'
 
 BASENAME="$(basename "$FILE")"
 if [ -z "$TITLE" ]; then TITLE="$BASENAME"; fi
 # `wc -c` is POSIX; `stat` differs between GNU and BSD, which is exactly the
 # kind of difference that would only show up on someone else's laptop.
 LENGTH="$(wc -c < "$FILE" | tr -d ' ')"
-[ "$LENGTH" -gt 0 ] || { printf 'upload: refusing to upload an empty file\n' >&2; exit 2; }
+[ "$LENGTH" -gt 0 ] || slack_refuse_die 'refusing to upload an empty file' 'write the content to the file first, or upload a non-empty file.'
 
 CHANNEL="$(slack_resolve_channel "$CHAN_ARG")"
 

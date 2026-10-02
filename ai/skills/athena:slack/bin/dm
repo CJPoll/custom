@@ -24,8 +24,7 @@ case "${1:-}" in -h|--help) slack_help "$0"; exit 0 ;; esac
 slack_need_tools
 
 usage() {
-  printf 'usage: dm <user_id> [text] [--thread_ts <ts>] [--no-claim]\n' >&2
-  exit 2
+  slack_usage_die 'dm <user_id> [text] [--thread_ts <ts>] [--no-claim]'
 }
 
 [ "$#" -ge 1 ] || usage
@@ -43,11 +42,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if [ -z "$TEXT" ]; then TEXT="$(cat)"; fi
-[ -n "$TEXT" ] || { printf 'dm: refusing to send an empty message\n' >&2; exit 2; }
+[ -n "$TEXT" ] || slack_refuse_die 'refusing to send an empty message' 'pass the message as the text argument or on stdin: dm <user_id> <text>.'
 
 case "$USER_ID" in
   U*|W*) ;;
-  *) printf 'dm: first argument must be a user id (U...), not a name\n' >&2; exit 2 ;;
+  *) slack_refuse_die 'first argument must be a user id (U...), not a name' 'pass the Slack user id (U... or W...) as the first argument; look it up with the Slack user search if you only have a name.' ;;
 esac
 
 OPEN="$(slack_post conversations.open "$(jq -n --arg u "$USER_ID" '{users: $u}')")"

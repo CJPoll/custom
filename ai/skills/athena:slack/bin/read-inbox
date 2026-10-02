@@ -45,7 +45,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --json) AS_JSON=true; shift ;;
     --peek) PEEK=true; shift ;;
-    *) printf 'usage: read-inbox [--json] [--peek]\n' >&2; exit 2 ;;
+    *) slack_usage_die 'read-inbox [--json] [--peek]' ;;
   esac
 done
 

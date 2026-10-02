@@ -19,10 +19,10 @@ MEMBER_ONLY=false
 AS_JSON=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --types) [ "$#" -ge 2 ] || { printf 'channels: --types needs a value\n' >&2; exit 2; }; TYPES="$2"; shift 2 ;;
+    --types) [ "$#" -ge 2 ] || slack_refuse_die '--types needs a value' 'pass a comma-separated list: channels --types im,mpim.'; TYPES="$2"; shift 2 ;;
     --member) MEMBER_ONLY=true; shift ;;
     --json) AS_JSON=true; shift ;;
-    *) printf 'usage: channels [--types <csv>] [--member] [--json]\n' >&2; exit 2 ;;
+    *) slack_usage_die 'channels [--types <csv>] [--member] [--json]' ;;
   esac
 done
 

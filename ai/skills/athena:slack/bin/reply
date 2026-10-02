@@ -47,8 +47,7 @@ case "${1:-}" in -h|--help) slack_help "$0"; exit 0 ;; esac
 slack_need_tools
 
 usage() {
-  printf 'usage: reply <channel_id|#name> <thread_ts> [text] [--broadcast] [--no-claim] [--reroute-of <event_id>]\n' >&2
-  exit 2
+  slack_usage_die 'reply <channel_id|#name> <thread_ts> [text] [--broadcast] [--no-claim] [--reroute-of <event_id>]'
 }
 
 reroute_usage() {
@@ -88,7 +87,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$NPOS" -ge 2 ] || usage
 if [ -z "$TEXT" ]; then TEXT="$(cat)"; fi
-[ -n "$TEXT" ] || { printf 'reply: refusing to send an empty message\n' >&2; exit 2; }
+[ -n "$TEXT" ] || slack_refuse_die 'refusing to send an empty message' 'pass the reply as the text argument or on stdin: reply <channel> <thread_ts> <text>.'
 
 CHANNEL="$(slack_resolve_channel "$CHAN_ARG")"
 BODY="$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" --arg tt "$THREAD_TS" \

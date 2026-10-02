@@ -2460,5 +2460,37 @@ if grep -qF '"text": "Your call (' "${EXAMPLE}"; then
 else bad "doctrine: the worked owner-choice example has a 'Your call' button" "missing from ${EXAMPLE}"; fi
 
 echo
+echo "-- DND-1619: every usage error carries a Fix: naming the invocation -------"
+
+# A bad invocation of any bin prints the usage line AND a Fix: line, exits 2,
+# and makes no Slack call. The tool classification in guard-classification.tsv
+# says these bins fail only on a usage error that prints the expected argv; this
+# pins that the failure also tells the agent how to correct it.
+ue_case() { # ue_case <bin> <args...>
+  local name="$1"; shift
+  setup_case
+  run_bin_stdin "" "${name}" "$@"
+  if [[ "${RC}" == 2 && "${ERR}" == *"Fix:"* && "${ERR}" == *"${name}"* ]] && ! any_curl; then
+    ok "usage error: ${name} $* prints Fix:, exit 2, no Slack call"
+  else bad "usage error: ${name} $* prints Fix:, exit 2, no Slack call" "rc=${RC} err='${ERR}'"; fi
+}
+for name in react post delete permalink read-thread read-channel update upload dm reply status; do
+  ue_case "${name}"
+done
+ue_case channels --bogus
+ue_case channels --types
+ue_case read-inbox --bogus
+ue_case post "${ENG_CHANNEL}" --bogus
+ue_case react "${ENG_CHANNEL}" 1.2
+ue_case post "${ENG_CHANNEL}"
+ue_case dm U0FAKEUSER1
+ue_case update "${ENG_CHANNEL}" 1.2
+ue_case reply "${ENG_CHANNEL}" 1.2
+ue_case dm somebody hi
+ue_case upload "${ENG_CHANNEL}" "${TMP}/dnd-1619-no-such-file"
+: > "${TMP}/dnd-1619-empty-file"
+ue_case upload "${ENG_CHANNEL}" "${TMP}/dnd-1619-empty-file"
+
+echo
 if [[ "${FAIL}" -eq 0 ]]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi
 echo "VERDICT: FAIL (${FAIL} of $((PASS+FAIL)) cases)"; exit 1
