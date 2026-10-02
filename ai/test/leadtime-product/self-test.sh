@@ -634,6 +634,35 @@ if [ "$rc" = 0 ] && head -1 "${TMP}/out" | grep -qx 'product_prs=0 landed=prod#7
 else bad "landing branch unreadable" "rc=$rc ref=$(cat "$REF7" 2>/dev/null) out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 rm -f "$FAKE/locked-merge-hook"
 
+# The same, when the landing then raises (a read inside it could not be made):
+# the kept branch is not dropped with the exception. It is named on the PR's
+# "could not act" line, journaled and counted. The raise is injected at the
+# merge step, through the library, with the gate and lane real.
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN"
+REF7="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/refs/heads/$BR7"
+REF7="$REF7" /usr/bin/ruby - "$ROOT" "$MAN" >"${TMP}/out" 2>"${TMP}/err" <<'RUBY'
+root, man = ARGV
+require File.join(root, "ai/lib/leadtime_product_io")
+module LeadTimeProductIO
+  def self.merge(*)
+    File.write(ENV.fetch("REF7"), "not-a-sha\n")
+    raise CouldNotLook.new("injected read failure", "injected fix")
+  end
+end
+m = LeadTimeProductIO.load_manifest(man)
+summary, lines, = LeadTimeProductIO.sweep(m, gate_timeout: 1500, budget_s: 3480)
+puts summary
+lines.each { |l| puts l }
+RUBY
+rc=$?
+if [ "$rc" = 0 ] && head -1 "${TMP}/out" | grep -qx 'product_prs=1 landed=none unreadable_branches=1' \
+   && grep -q "pr=#7 could not act: injected read failure Fix: injected fix; landing branch $BR7 KEPT: COULD NOT TELL (cannot read branch $BR7" "${TMP}/out" \
+   && grep -q "Fix: .*logs/refs/heads/$BR7" "${TMP}/out" \
+   && grep -q "pr=#7 landing branch $BR7 KEPT: COULD NOT TELL" "$S/journal.md" && [ "$(cat "$REF7")" = not-a-sha ]; then
+  ok "an unreadable landing branch when the landing raises: named on the could-not-act line, journaled, counted; never dropped with the exception"
+else bad "landing raises, branch unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+
 # The same class before the landing lane is cut: a local landing branch git
 # cannot read is never read as absent (which tried `worktree add -b` and failed
 # with git's own words). Nothing is gated, the ref is untouched, it is named
