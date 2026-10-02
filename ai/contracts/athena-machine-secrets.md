@@ -147,6 +147,30 @@ Agents check a secret by name, path, mode, owner, length, or prefix *count*.
   as a structure instead: Ruby's `ENV.keys`, or `/proc/<pid>/environ` split on
   NUL.
 
+## The owner page shows the last 4
+
+The server-side owner page (gen_saas `/secrets`, ADR 18 rule 1) shows the last 4
+characters of each secret stored through it. This is intended. It is a
+fingerprint, so the owner can tell two stored keys apart and see that a
+rotation took. It is not a way to read the secret back. Server-side storage is
+otherwise out of scope (*Scope*); this section fixes only what that page may
+reveal about a value, so a reader implementing from this contract knows the
+limit. The limits, as ADR 18 and `Athena.Secrets.Last4` set them:
+
+- **Fixed length.** Exactly 4 characters, never more. A page MUST NOT show a
+  longer suffix, a prefix, a length, or a hash.
+- **Never for a short value.** A value under 16 characters keeps no last 4. The
+  page shows "not shown". 4 characters of a short value are too large a
+  fraction of it.
+- **Rewritten on every store.** A rotation replaces the last 4, so the page
+  never shows the old one. A row stored before ADR 18 has none.
+- **It is the only part shown.** The full value is never shown back, logged or
+  put in telemetry.
+
+This is about the owner page only. It does not relax *Inspect by metadata
+only*: an agent never prints any part of a secret value, the last 4 included.
+The page stores the last 4 as plaintext beside the encrypted value.
+
 ## Adding a secret
 
 1. `install -d -m 700` the scope directory.
