@@ -7,8 +7,12 @@
 # hand only reads.
 #
 # Classes, ordered least -> most restrictive:
-#   readOnly     observes/analyzes; cannot mutate the repo, forge, tracker, or
-#                remote in any invocation.
+#   readOnly     observes/analyzes; cannot mutate the working tree, any branch,
+#                the forge, the tracker, or the remote in any invocation. The one
+#                local git write it may make is a fetch from origin: objects (the
+#                landed-bar checks via ai/lib/landed.rb, which moves no ref) or,
+#                for `confirm-merged --fetch` and ai/bin/lead-time, also the
+#                origin/* remote-tracking refs. Nothing is ever pushed.
 #   idempotent   mutates LOCAL state deterministically; re-running yields the
 #                same result (no external/irreversible effect).
 #   destructive  mutates external or otherwise irreversible state (forge /
@@ -43,7 +47,8 @@ classes:
 
 tools:
   # --- readOnly: observe/analyze only (writes, if any, stay inside temp/self-test
-  #     sandboxes; no repo/forge/tracker/remote mutation in any invocation) ---
+  #     sandboxes; the only repo write is a fetch from origin, per the class
+  #     definition above; no forge/tracker/remote mutation in any invocation) ---
   admiral-report-watch:    { class: readOnly, reason: watch }
   blast-radius:            { class: readOnly, reason: check }
   check-agent-size:        { class: readOnly, reason: check }
