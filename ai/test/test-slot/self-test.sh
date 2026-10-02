@@ -344,7 +344,7 @@ d	e"
   t eq "$(unwrap_index env A=1 nice x y)" 3
   # Pool routing by COMMAND.
   t eq "$(infer_pool timeout 1500 /h/dev/custom/ai/bin/critic-review --base main)" model
-  for m in admiral-eval critic-eval variant-eval block-optimize; do t eq "$(infer_pool "ai/bin/$m" --run)" model; done
+  for m in admiral-eval critic-eval variant-eval block-optimize judgment-eval; do t eq "$(infer_pool "ai/bin/$m" --run)" model; done
   t eq "$(infer_pool timeout 1500 ./ai/bin/harness-gate)" cpu
   t eq "$(infer_pool echo critic-review)" cpu
   # DND-1365: an interpreter running a script (ruby/bash/sh/dash/zsh SCRIPT)
@@ -450,6 +450,30 @@ d	e"
   t eval '! eval_calls "" ai/bin/block-optimize --self-test >/dev/null'
   t eval '! eval_calls "" ai/bin/critic-review --base main >/dev/null'
   t eval '! eval_calls "" ./ai/bin/harness-gate >/dev/null'
+  # DND-1410 (fail-first): judgment-eval is a model-call job. It sends one
+  # batch request at a time and the server judges JUDGMENT_SERVER_CONCURRENCY
+  # (4) of that batch's cases at once, so it queues in the MODEL pool and
+  # weighs min(--batch-size, 4). Before the fix it queued in the cpu pool at
+  # the cpu default (8 of 24 units) for a job that uses almost no local CPU.
+  t eq "$(infer_pool ai/bin/judgment-eval --use-case ticket_blocking --labels l --corpus c)" model
+  t eq "$(infer_pool timeout 1500 ruby /h/dev/custom/ai/bin/judgment-eval --use-case ticket_kind)" model
+  t eq "$(eval_calls '' ai/bin/judgment-eval --use-case ticket_blocking --labels l --corpus c)" 4
+  t eq "$(eval_calls '' ruby ai/bin/judgment-eval --use-case ticket_kind --batch-size 2 --labels l --corpus c)" 2
+  t eq "$(eval_calls '' ai/bin/judgment-eval --batch-size 1 --use-case ticket_kind)" 1
+  t eq "$(eval_calls '' ai/bin/judgment-eval --batch-size 50 --use-case ticket_kind)" 4
+  t eq "$(eval_calls '' ai/bin/judgment-eval --batch-size 004 --use-case ticket_kind)" 4
+  t eq "$(eval_calls '' ai/bin/judgment-eval --use-case ticket_kind --repeat 3)" 4
+  # judgment-eval ignores ATHENA_EVAL_CONCURRENCY and takes no --concurrency.
+  t eq "$(eval_calls 9 ai/bin/judgment-eval --use-case ticket_kind --batch-size 3)" 3
+  # A batch size it refuses (0, 51, not digits) weighs the most it can run.
+  t eq "$(eval_calls '' ai/bin/judgment-eval --use-case ticket_kind --batch-size 0)" 4
+  t eq "$(eval_calls '' ai/bin/judgment-eval --use-case ticket_kind --batch-size x)" 4
+  t eq "$(eval_calls '' ai/bin/judgment-eval --use-case ticket_kind --batch-size)" 4
+  # No judged call: a dry run, an --apply (a PUT, no model call), --help.
+  t eval '! eval_calls "" ai/bin/judgment-eval --use-case ticket_kind --dry-run >/dev/null'
+  t eval '! eval_calls "" ai/bin/judgment-eval --apply 0a0a0a0a-0000-4000-8000-000000000000 >/dev/null'
+  t eval '! eval_calls "" ai/bin/judgment-eval --help >/dev/null'
+  t eq "$JUDGMENT_SERVER_CONCURRENCY" 4
   # The measured budget formula and the undeclared default (its N=3 share).
   t eq "$(cpu_budget 16)" 24
   t eq "$(cpu_budget 8)" 12
@@ -1641,6 +1665,10 @@ check 50-explicit-weight eq "$(wo50 --weight 3 -- bin/prep-commit.sh)" 3
 check 50-model-eval eq "$(wo50 -- ruby ai/bin/admiral-eval --run --concurrency 4)" 4
 check 50-model-critic eq "$(wo50 -- ai/bin/critic-review --base main)" 1
 check 50-pool-flag eq "$(wo50 --pool model -- bin/prep-commit.sh)" 1
+# DND-1410: the ticket's argv resolves to the model pool at its call weight.
+check 50-judgment-eval eq "$(wo50 -- ai/bin/judgment-eval --use-case ticket_blocking --labels l --corpus c)" 4
+check 50-judgment-eval-dry-run eq "$(wo50 -- ai/bin/judgment-eval --use-case ticket_blocking --dry-run)" 1
+check 50-judgment-eval-cpu-explicit eq "$(wo50 --pool cpu -- ai/bin/judgment-eval --use-case ticket_blocking)" 8
 wo50 -- sh -c ': > "$1"' _ "$W/p50.ran" >/dev/null
 check 50-cmd-never-runs absent "$W/p50.ran"
 check 50-no-pool-created absent "$POOL"

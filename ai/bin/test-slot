@@ -23,13 +23,14 @@
 #              budget/3 (8), which is exactly its pre-DND-1006 share of N=3,
 #              so a caller that never says --weight sees the old concurrency.
 #   model pool budget = 8 model calls in flight. Model-in-loop evals
-#              (admiral-eval, critic-eval, variant-eval, block-optimize) and
-#              critic-review are network- and model-bound, so they queue here
-#              and never hold CPU units. They are routed here by name; any
+#              (admiral-eval, critic-eval, variant-eval, block-optimize,
+#              judgment-eval) and critic-review are network- and
+#              model-bound, so they queue here and never hold CPU units. They are routed here by name; any
 #              other run by --pool model. An eval weighs the model calls it
 #              keeps in flight (DND-1358, eval_calls): a K-concurrency
 #              admiral-eval or critic-eval K, variant-eval 2K (both sides
-#              at once), block-optimize 4; any other model run weighs 1.
+#              at once), block-optimize 4, judgment-eval min(--batch-size,
+#              4) (DND-1410); any other model run weighs 1.
 # BASIS (recorded passively from real traffic; DND-1222 forbids generating
 # load to measure it, so the DND-489 bench was NOT re-run):
 #   * 0.5 core per unit: harness-gate at W=8 on heads 423674a7 and 0d08cb1d
@@ -181,10 +182,11 @@
 #     HARNESS_GATE_JOBS, else min(8, nproc/2), as harness-gate resolves it);
 #     any other cpu run weighs the cpu default (budget/3). In the model pool
 #     an eval weighs its model calls in flight (eval_calls, DND-1358: its
-#     --concurrency K or ATHENA_EVAL_CONCURRENCY, variant-eval 2K); any
-#     other model run weighs 1.
+#     --concurrency K or ATHENA_EVAL_CONCURRENCY, variant-eval 2K,
+#     judgment-eval min(--batch-size, 4)); any other model run weighs 1.
 #   --pool cpu|model: default model for a critic-review, admiral-eval,
-#     critic-eval, variant-eval or block-optimize COMMAND, else cpu.
+#     critic-eval, variant-eval, block-optimize or judgment-eval COMMAND,
+#     else cpu.
 #
 #   Exit codes:
 #     <CMD's own code>  CMD ran (including 128+n when a signal killed it)
@@ -357,7 +359,7 @@ MODEL_BUDGET=8
 MODEL_DEFAULT_WEIGHT=1
 MODEL_BUDGET_BASIS="8 model calls in flight; the account sustained 23 concurrent sessions 2026-09-27..30"
 # COMMANDs that queue in the model pool unless --pool says otherwise.
-MODEL_COMMANDS=" critic-review admiral-eval critic-eval variant-eval block-optimize "
+MODEL_COMMANDS=" critic-review admiral-eval critic-eval variant-eval block-optimize judgment-eval "
 # The evals' model calls in flight (eval_calls, DND-1358), restated from
 # ai/lib/eval_pool.rb (RANGE, DEFAULT, ENV_VAR) and ai/bin/variant-eval
 # (DEFAULT_SIDE_CONCURRENCY); the self-test pins them to those sources.
@@ -365,6 +367,14 @@ EVAL_MAX_CONCURRENCY=16
 EVAL_DEFAULT_CONCURRENCY=4
 EVAL_ENV=ATHENA_EVAL_CONCURRENCY
 VARIANT_SIDE_CONCURRENCY=2
+# judgment-eval's model calls in flight (DND-1410): it sends one batch request
+# at a time, and the Athena server judges this many of the batch's cases at
+# once (gen_saas apps/athena/lib/athena/judgments/evals.ex, @concurrency 4).
+# That file is in another repo, so no self-test can pin it: a change there
+# needs this restatement changed with it. Residual: when judgment-eval's own
+# request timeout ends a run mid-batch, the slot is freed while the server
+# still finishes up to this many calls (its per-case deadline plus grace).
+JUDGMENT_SERVER_CONCURRENCY=4
 # harness-gate's own worker default (ai/bin/harness-gate gate_jobs):
 # min(max(nproc/2, 1), HARNESS_GATE_MAX_JOBS).
 HARNESS_GATE_MAX_JOBS=8
@@ -431,9 +441,11 @@ dash, zsh) runs.
   --weight UNITS        units to hold (default: a harness-gate's worker count,
                         else budget/3 in the cpu pool; in the model pool an
                         eval's model calls in flight (its --concurrency K,
-                        variant-eval 2K), else 1)
+                        variant-eval 2K, judgment-eval min(--batch-size,
+                        4)), else 1)
   --pool cpu|model      default model for critic-review, admiral-eval,
-                        critic-eval, variant-eval, block-optimize; else cpu
+                        critic-eval, variant-eval, block-optimize,
+                        judgment-eval; else cpu
   --exclusive           BENCH ONLY: hold the whole cpu budget while CMD runs
   --status              show the budget, holders, waiters, UNSLOTTED runs
   --weight-of           print the units `test-slot -- CMD` would hold; run nothing
@@ -750,18 +762,27 @@ wrapped_env() {
 #     --concurrency K, else its per-side default (it ignores the env var).
 #     Weight 2K.
 #   block-optimize: runs variant-eval --corpus full at that default. 2K.
+#   judgment-eval (DND-1410): one batch request in flight at a time (its
+#     --repeat samples run one after another), and the server judges
+#     JUDGMENT_SERVER_CONCURRENCY of the batch's cases at once, so the
+#     weight is min(--batch-size, that). It reads no ATHENA_EVAL_CONCURRENCY
+#     and takes no --concurrency. A batch size that is not plain digits in
+#     1..50 is refused by judgment-eval before any call; it weighs the most
+#     it could run. --dry-run, --apply (a PUT, no judged call) and --help
+#     make no model call.
 # A K that is not plain digits in EvalPool's range weighs the most an eval can
 # run, EVAL_MAX_CONCURRENCY (per side for variant-eval). The eval parses K
 # with Ruby's Integer(raw, 10), which also takes " 12", "+12" or "1_2", so it
 # may run such a K; or it refuses it and exits 2 before any call. Either way
 # the weight is never below the calls. The scan does not skip a value flag's
 # value: every eval's StrictArgv refuses a value starting with `-`, so a
-# `--run` or `--corpus` word is always the flag itself. Prints nothing, returning 1, when the
-# COMMAND is not one of these or will make no model call (no --run, a
-# deterministic corpus, --self-test, --help); the caller falls back to the
-# pool's default weight. The caller clamps a weight over the budget.
+# `--run`, `--corpus`, `--batch-size`, `--dry-run` or `--apply` word is
+# always the flag itself. Prints nothing, returning 1, when the COMMAND is
+# not one of these or will make no model call (no --run, a deterministic
+# corpus, judgment-eval's --dry-run or --apply, --self-test, --help); the
+# caller falls back to the pool's default weight. The caller clamps a weight over the budget.
 eval_calls() {
-  local cur=$1 i j a cmd k="" dflt mult=1 model=0
+  local cur=$1 i j a cmd k="" dflt mult=1 model=0 bs="" nocall=0
   shift
   local -a v=("$@")
   i=$(unwrap_index "$@")
@@ -774,9 +795,18 @@ eval_calls() {
       --run) model=1 ;;
       --concurrency) k=${v[j + 1]:-} ;;
       --corpus) [ "${v[j + 1]:-}" = full ] && model=1 ;;
+      --batch-size) bs=${v[j + 1]:-x} ;;
+      --dry-run | --apply) nocall=1 ;;
     esac
   done
   case $cmd in
+    judgment-eval)
+      ((nocall)) && return 1
+      k=$JUDGMENT_SERVER_CONCURRENCY
+      if [[ $bs =~ ^[0-9]{1,6}$ ]] && ((10#$bs >= 1 && 10#$bs < k)); then k=$((10#$bs)); fi
+      printf '%s\n' "$k"
+      return 0
+      ;;
     admiral-eval | critic-eval)
       ((model)) || return 1
       dflt=$EVAL_DEFAULT_CONCURRENCY
