@@ -36,7 +36,9 @@ require_relative "private_overlay_resolver"
 #      different head. The PR number is as the button states it: only the
 #      repo and the head are checked.
 #   5. No later owner click on the same message chose otherwise. A hold or
-#      reject after the approve is the owner's last word, and it wins.
+#      reject after the approve is the owner's last word, and it wins. A
+#      rival click that cannot be ordered refuses. The check is per
+#      message: a hold on a different DM does not reverse this one.
 #
 # Every refusal names what it looked at (the files, how many lines, clicks and
 # unparsable lines it read) and carries a Fix:, so "no such click" never
@@ -59,7 +61,7 @@ module OwnerClick
   SLUG = %r{[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+}.freeze
   ASK_VERB = "approve-exit4"
   ASK_VALUE_RE = /\A#{ASK_VERB} (#{SLUG})#([1-9][0-9]{0,9})@([0-9a-f]{40})\z/.freeze
-  ACTION_TS_RE = /\A([0-9]+)\.([0-9]+)\z/.freeze
+  ACTION_TS_RE = /\A([0-9]+)\.([0-9]{1,9})\z/.freeze
   OWNER_ID_RE = /\A[A-Z0-9]+\z/.freeze
   CHANNEL = "session"
   CHANNEL_PATH_RE = /\A[A-Za-z0-9_.-]+\.jsonl\z/.freeze
@@ -193,10 +195,19 @@ module OwnerClick
               "being gated (#{head}). A push or a rebase makes a new head, and it needs its own click"]
     end
 
-    later = clicks.find do |c|
+    rivals = clicks.select do |c|
       owner_click?(c, owner_id) && c["channel"] == line["channel"] && c["ts"] == line["ts"] &&
-        c["value"] != line["value"] && (t = action_time(c["action_ts"])) && (t <=> at) == 1
+        c["value"] != line["value"]
     end
+    # A rival that cannot be ordered might be the owner's later hold: refuse
+    # rather than read it as "no reversal".
+    undated = rivals.find { |c| action_time(c["action_ts"]).nil? }
+    if undated
+      return [:refused, :unverifiable,
+              "another owner click on the same message (#{undated['action_id'].inspect}) has an action_ts " \
+              "that cannot be ordered, so whether it reversed click #{delivery_id} cannot be told"]
+    end
+    later = rivals.find { |c| (action_time(c["action_ts"]) <=> at) == 1 }
     if later
       return [:refused, :superseded,
               "the owner clicked #{later['action_id'].inspect} on the same message after click " \
@@ -273,7 +284,7 @@ module OwnerClick
     regdir = File.join(root, "projects")
     return [nil, "the inbox registry #{regdir} does not exist"] unless File.directory?(regdir)
 
-    entries, malformed = registry_entries(regdir, key)
+    entries, malformed = registry_entries(regdir, key, env)
     # A malformed entry is a hard error for the inbox reader (athena:inbox
     # descriptor_validate), so it is one here too: it might be this repo's.
     if malformed.positive?
@@ -299,8 +310,16 @@ module OwnerClick
     [files, nil]
   end
 
+  # A registry `repo` MAY be written ~/...; expand it against the HOME the
+  # caller passed, never the process's own.
+  def expand_repo(path, env)
+    home = env["HOME"].to_s
+    path = home + path[1..] if path.start_with?("~/") && home.start_with?("/")
+    File.expand_path(path)
+  end
+
   # -> [[entry, ...], malformed_count] claiming the repo key.
-  def registry_entries(regdir, key)
+  def registry_entries(regdir, key, env)
     malformed = 0
     entries = Dir.glob(File.join(regdir, "*.json")).sort.filter_map do |f|
       doc = JSON.parse(File.read(f))
@@ -309,7 +328,7 @@ module OwnerClick
         next nil
       end
 
-      repo = File.expand_path(doc["repo"])
+      repo = expand_repo(doc["repo"], env)
       real = File.exist?(repo) ? File.realpath(repo) : repo
       real == key ? doc : nil
     rescue JSON::ParserError, EncodingError

@@ -3562,7 +3562,11 @@ def self_test
                                                   "action_ts" => "1700000200.000000" }),
       # 18 holds, then 19 (same message, later) approves: the approve stands.
       click_line.call(18, value: "hold", extra: { "ts" => "1700000000.000019", "entity_id" => "slack:DFAKE00001:1700000000.000019" }),
-      click_line.call(19, extra: { "action_ts" => "1700000200.000000" })
+      click_line.call(19, extra: { "action_ts" => "1700000200.000000" }),
+      # 20 approves; 21 (same message) cannot be ordered: it might be a later hold.
+      click_line.call(20),
+      click_line.call(21, value: "hold", extra: { "ts" => "1700000000.000020", "entity_id" => "slack:DFAKE00001:1700000000.000020",
+                                                  "action_ts" => "soon" })
     ]
     File.write(File.join(inbox, "proj-session.jsonl"),
                session_lines.map { |j| JSON.dump(j) }.join("\n") + "\n" + "\xFF\xFE not utf-8 \xC3\n".b, mode: "wb")
@@ -3605,6 +3609,7 @@ def self_test
      ["a click delivered to the Slack channel, not the session channel", did.call(12), "not in the session channel"],
      ["a delivery id the session channel never received", did.call(99), "not in the session channel"],
      ["an approve the owner reversed by a later click on the same message", did.call(16), "reversed by a later owner click"],
+     ["an approve beside an owner click on that message that cannot be ordered", did.call(20), "cannot be ordered"],
      ["a malformed click record", "click:not-a-uuid", "cannot be verified"]].each do |label, rec, want|
       rec = "click:#{rec}" unless rec.start_with?("click:")
       out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", rec], env: click_env)
