@@ -87,3 +87,12 @@ This set, `--repeat 3`, runs `3c11eef3`, `3216cffa`, `2232edbb`
 | override-3 | none | miss: security 0.31, 0.22, 0.36 |
 | override-4 | none | miss: security 0.32, 0.45, 0.43 |
 | control-1..9 | security | match, confidence 0.99 to 1.00 |
+
+H, `--repeat 1`, run `08ce8aee` (07:21Z to 07:27Z, after the bar was
+committed): scored 323, unscored 1 (`rate_limited_local`, DND-1381, n/a).
+`security` cases judged `security`: 26/27. `none` cases judged `security`:
+43/296. So item 3 needs at least 25, and item 4 at most 43.
+
+Items 3 and 4 are scored by `dnd-1697-score-h.rb V1_RUN V2_RUN LABELS`,
+machine-local beside H (it reads run files, which hold no input): a case
+unscored in either run is n/a, named, and left out of both counts.
