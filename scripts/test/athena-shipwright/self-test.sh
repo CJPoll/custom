@@ -2502,6 +2502,17 @@ for lib in dbus-env.sh shipwright-stale-dirt.sh; do
     bad "unloadable $lib" "rc=$rc rec=$( [ -n "$rec" ] && cat "$rec") err=$(cat "$a/runner.err")"
   fi
 done
+# A truncated lib loads (exit 0) and defines nothing.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+RUNNER="$(sx_runner "$a" shipwright-stale-dirt.sh)"
+: >"$a/sx/scripts/lib/shipwright-stale-dirt.sh"
+rc="$(run_runner "$r")"
+rec="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.failed' 2>/dev/null | sort | tail -n1)"
+if [ "$rc" = 78 ] && [ ! -e "$a/claude-was-invoked" ] && [ -n "$rec" ] && grep -q 'shipwright-stale-dirt.sh (could not be loaded)' "$rec"; then
+  ok "an empty shipwright-stale-dirt.sh (loads, defines nothing): exit 78, a .failed record, no session"
+else
+  bad "empty stale-dirt lib" "rc=$rc rec=$( [ -n "$rec" ] && cat "$rec") err=$(cat "$a/runner.err")"
+fi
 RUNNER="$REAL_RUNNER"
 
 # DND-1667: no git call may have fallen through past a git stub.
