@@ -100,8 +100,10 @@ HELP = <<~TXT
            a message git cannot show is exit 3. Records already in the
            store are not re-validated.
            When a same-phase trailer already sits inside the record's
-           baseline, record still records and prints one warning line
-           naming it: judge will read the change confounded (DND-1622).
+           confound window (as judge computes it from the ledger so far),
+           record still records and prints one warning line naming it:
+           judge will read the change confounded (DND-1622). A log it
+           cannot read is a warning too; the record stands.
            --phase tail (DND-1613): a product change (R's own CI/CD and
            deploy, lever product) judged on tail, landing -> post-merge run,
            with --metric phase only. A landing counts on tail only when
@@ -187,7 +189,8 @@ HELP = <<~TXT
            now would get (the last K=10 comparable landings of R on the
            metric, default phase) and looks for confounders exactly as
            judge does, in the window from that before-set's first landing
-           to now. One verdict:
+           to now (or to the latest ledgered landing after now, as judge's
+           window reaches). One verdict:
              CLEAN     a full before-set and no same-phase trailer in it
              SETTLING  a same-phase trailer (a change or a revert, any
                        measured repo) sits inside it: names each one, the
@@ -508,10 +511,11 @@ module Record
   end
 
   # One warning line when a same-phase trailer already sits inside the
-  # record's baseline (DND-1622): judge will read it confounded, and
-  # `experiment settling` would have said SETTLING before it landed. The
-  # record stands either way: refusing after the landing only leaves an
-  # unrecorded change. Judge's own split, sides, window and confounders.
+  # record's confound window, as judge computes it from the ledger so far
+  # (DND-1622): judge will read it confounded. One in the before-set is what
+  # `experiment settling` names before a change lands. The record stands
+  # either way: refusing after the landing only leaves an unrecorded change.
+  # Judge's own split, sides, window and confounders.
   def warn_confounded(row, rows, repo, res, now)
     return if row["kind"] == "instrumentation"
 
@@ -524,8 +528,9 @@ module Record
     return if confs.empty?
 
     warn "experiment: warning: #{row['id']} will read confounded: #{confs.map { |c| X.confounder_text(c) }.join(', ')} " \
-         "inside its baseline; experiment settling would have said SETTLING before it landed"
-  rescue Refusal => e
+         "inside its window (the before-set's first landing to the after-set's last)"
+  rescue StandardError => e
+    # The row is already appended: nothing here may change record's exit.
     warn "experiment: warning: #{row['id']} is recorded, but whether its baseline is clean is unknown: #{e.message}"
   end
 
@@ -1055,18 +1060,16 @@ module Settling
     repo = Setup.improve_repo(env, opts["--repo"], res)
     metric = opts["--metric"] || "phase"
     phase = opts["--phase"]
-    verdict([], [], phase, metric, now) # a usage error before any read
+    usage { X.settling_metric(phase, metric) } # before any read
     rows = Setup.ledger_rows(Setup.state_dir(env), repo.name)
-    # The window depends on the ledger alone, so a first pass with no
-    # commits finds where the logs must be read from.
-    from = Time.iso8601(verdict(rows, [], phase, metric, now)["window"].first)
-    s = verdict(rows, Confound.commits(repo, res, from), phase, metric, now)
+    from, = X.settling_window(rows, phase: phase, metric: metric, now: now)
+    s = X.settling(rows, Confound.commits(repo, res, from), phase: phase, metric: metric, now: now)
     puts opts["--json"] ? JSON.generate({ "repo" => repo.name, "now" => now.utc.iso8601 }.merge(s)) : X.settling_text(repo.name, s)
     0
   end
 
-  def verdict(rows, commits, phase, metric, now)
-    X.settling(rows, commits, phase: phase, metric: metric, now: now)
+  def usage
+    yield
   rescue X::UsageError => e
     refuse(2, e.message, "see experiment --help for the phases and metrics; settling checks a change's duration metric")
   end

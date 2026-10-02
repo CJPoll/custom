@@ -619,6 +619,8 @@ mkdir -p "${STATEC1}"
 sc1() { LEAD_TIME_STATE_DIR="${STATEC1}" LEAD_TIME_EXPERIMENT_NOW=2026-10-07T12:00:00Z "$@"; }
 FID="custom:verify:${CF:0:12}"
 eq "record the change: exit 0" "$(sc1 rec verify phase "${CF}" change)" "0"
+has "... the ledger already holds its after-set, so record warns now that CO will confound it (DND-1622)" "$(err)" \
+  "warning: ${FID} will read confounded: ${CO:0:12} (gen_saas verify phase"
 eq "judge: exit 0" "$(sc1 run judge --repo custom)" "0"
 has "regression: two trailers on one phase inside the window: CONFOUNDED" "$(out)" "${FID} CONFOUNDED kind=change"
 has "... naming the other commit, its trailer and when it landed" "$(out)" "${CO:0:12} (gen_saas verify phase, 2026-10-06T13:00:00Z)"
@@ -652,6 +654,7 @@ mkdir -p "${STATEC2}"
 /usr/bin/ruby "${HERE}/make_ledger.rb" "${STATEC2}/ledger.jsonl" "${CV}" 500 2026-10-08T00:00:00Z
 sc2() { LEAD_TIME_STATE_DIR="${STATEC2}" LEAD_TIME_EXPERIMENT_NOW=2026-10-09T12:00:00Z "$@"; }
 eq "record: exit 0" "$(sc2 rec verify phase "${CV}" change)" "0"
+lacks "... judge will read it unconfounded, so record prints no confound warning (DND-1622)" "$(err)" "will read confounded"
 eq "judge: exit 0" "$(sc2 run judge --repo custom)" "0"
 has "a trailer on another phase, and its own revert, have no effect: KEEP" "$(out)" "custom:verify:${CV:0:12} KEEP"
 has "... 0 confounded" "$(out)" "0 confounded"
@@ -713,6 +716,21 @@ has "... with Fix:" "$(err)" "Fix:"
 eq "settling --metric na_share: exit 2 (instrumentation never waits)" "$(sc1 run settling --repo custom --phase verify --metric na_share)" "2"
 has "... saying why, with Fix:" "$(err)" "never confounded"
 eq "settling on a watch repo: exit 2" "$(run settling --repo gen_saas --phase verify)" "2"
+# record's warning reads the same logs; one it cannot read leaves the record
+# standing (exit 0, the row written) and says the baseline is unknown. Here
+# the measured repo is a gen_saas checkout with no main.
+XNGS="${TMP}/xn/gen_saas"
+mkdir -p "${XNGS}"
+env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "${XNGS}" init -q -b main
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${XNGS}\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/xn.json"
+STATEXN="${TMP}/statexn"
+mkdir -p "${STATEXN}"
+gs_ledger "${STATEXN}/ledger.jsonl" "$(printf 'd%.0s' $(seq 40))" 500 2026-10-02T00:00:00Z
+eq "record with a confound log it cannot read: still exit 0" \
+  "$(LEAD_TIME_STATE_DIR="${STATEXN}" ATHENA_LEADTIME_CONFIG="${TMP}/xn.json" LEAD_TIME_EXPERIMENT_NOW=2026-10-03T12:00:00Z run record --repo gen_saas --change-repo custom --phase verify --metric phase --commit "${XC}" --kind change --hypothesis-file "${HYP}")" "0"
+has "... warning that whether its baseline is clean is unknown" "$(err)" "gen_saas:verify:${XC:0:12} is recorded, but whether its baseline is clean is unknown"
+has "... the row is in the store" "$(cat "${STATEXN}/experiments.jsonl")" "\"id\":\"gen_saas:verify:${XC:0:12}\""
+eq "settling against that repo: exit 3, never CLEAN" "$(LEAD_TIME_STATE_DIR="${STATEXN}" ATHENA_LEADTIME_CONFIG="${TMP}/xn.json" run settling --repo gen_saas --phase verify)" "3"
 eq "test 12: settling --help: exit 0" "$(run settling --repo custom --phase verify --help)" "0"
 has "... on stdout, naming the verdicts" "$(out)" "SETTLING"
 eq "... nothing on stderr (no reads)" "$(err)" ""

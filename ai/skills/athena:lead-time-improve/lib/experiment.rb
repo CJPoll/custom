@@ -948,18 +948,29 @@ module LeadTimeExperiment
   SETTLING_SHA = "0" * 40
 
   def settling(rows, commits, phase:, metric:, now:)
-    m = Metric.parse(metric, phase: phase)
-    if m.na_share?
-      raise UsageError, "settling checks a change's baseline; an instrumentation change (#{NA_SHARE}) is never " \
-                        "confounded, so it never waits"
-    end
-
+    m = settling_metric(phase, metric)
     s = sides(rows, metric: m, exclude: [], boundary: now)
     from, to = window(s, now)
     # A synthetic change on the phase, landed at now: no commit of its own.
     probe = { "kind" => "change", "phase" => phase, "commit" => SETTLING_SHA }
     found = confounders(probe, commits, from: from, to: to)
     settling_result(s, found, from, to, m)
+  end
+
+  # The metric settling checks: a change's. Raises UsageError for an unknown
+  # phase or metric, and for na_share.
+  def settling_metric(phase, metric)
+    m = Metric.parse(metric, phase: phase)
+    return m unless m.na_share?
+
+    raise UsageError, "settling checks a change's baseline; an instrumentation change (#{NA_SHARE}) is never " \
+                      "confounded, so it never waits"
+  end
+
+  # [from, to]: the confound window settling reads, which depends on the
+  # ledger alone, so a caller knows how far back to read the logs.
+  def settling_window(rows, phase:, metric:, now:)
+    window(sides(rows, metric: settling_metric(phase, metric), exclude: [], boundary: now), now)
   end
 
   def settling_result(sides, found, from, to, metric)
@@ -992,7 +1003,11 @@ module LeadTimeExperiment
              "#{base}; confounder(s) in the window: #{names}; #{s['after_latest']} comparable landing(s) after " \
              "#{s['latest']['commit'][0, 12]}: clean after #{s['needed']} more comparable landings"
            else
-             conf = s["confounders"].empty? ? "" : "; confounder(s) in the window, judge would read confounded: #{names}"
+             conf = if s["confounders"].empty? then ""
+                    else
+                      "; confounder(s) in the window, judge would read confounded: #{names}; clean after " \
+                        "#{s['needed']} more comparable landings"
+                    end
              "#{base}: #{s['short_by']} more comparable landing(s) to reach K; judge cannot settle a short " \
                "baseline but inconclusive#{conf}"
            end

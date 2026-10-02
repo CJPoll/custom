@@ -228,15 +228,16 @@ Before a change on that phase, check its baseline is clean (DND-1622):
 metric the change will be recorded on. Judge's confound window reaches back
 over the whole before-set, so a same-phase trailer inside it (a settled
 predecessor's change, or its revert) confounds the next change with
-certainty. Read the verdict as a pending change on the phase:
+certainty. Read SETTLING as a pending change on the phase:
 
 - **CLEAN**: the phase is a change target.
 - **SETTLING**: not a target this run. The action is `no action` ("<phase>
   baseline settling after <sha>: N more landings", from its line), or
   instrumentation on another phase if one qualifies by the rule above.
 - **SHORT**: fewer than K=10 comparable landings. A SHORT that names a
-  confounder is read as SETTLING. One that names none is a target, and judge
-  settles its short baseline as it does today.
+  confounder is read as SETTLING; its line gives "clean after N more". One
+  that names none is a target, and judge handles its short baseline as it
+  does today: pending for 7 days, then inconclusive, never keep or revert.
 - **exit 3** (could not look): no change on that phase this run. Journal the
   reason it printed. It is never CLEAN.
 

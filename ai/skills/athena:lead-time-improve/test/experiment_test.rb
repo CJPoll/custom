@@ -1281,6 +1281,16 @@ check("settling: the window is [first before-set landing, now], as judge's for a
   s["window"] == [(SET_NOW - (10 * 3600)).utc.iso8601, SET_NOW.utc.iso8601]
 end
 
+check("settling: a confounder exactly at the first before-set landing is inside; that landing does not count after it") do
+  s = settle(ten600, [tc(OTHER_SHA, -10, REVERT_MSG)])
+  s["verdict"] == "SETTLING" && s["after_latest"] == 9 && s["needed"] == 1
+end
+
+check("settling_window: the window settling reads its logs from, from the ledger alone") do
+  X.settling_window(ten600, phase: "verify", metric: "phase", now: SET_NOW) ==
+    [SET_NOW - (10 * 3600), SET_NOW]
+end
+
 check("settling: a confounder later than the newest landing needs all K") do
   s = settle(ten600, [tc(OTHER_SHA, -0.5, REVERT_MSG)])
   s["verdict"] == "SETTLING" && s["after_latest"].zero? && s["needed"] == X::K
@@ -1355,7 +1365,10 @@ check("settling: text for CLEAN, SHORT and a malformed trailer") do
   clean = X.settling_text("custom", settle(ten600, []))
   short = X.settling_text("custom", settle(before_rows([600] * 6), []))
   bad = X.settling_text("custom", settle(ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom\n")]))
+  short_conf = X.settling_text("custom", settle(before_rows([600] * 6), [tc(OTHER_SHA, -3, REVERT_MSG)]))
   clean.include?("CLEAN") && clean.include?("n=10 of K=10") && short.include?("SHORT") && short.include?("4 more") &&
+    !short.include?("clean after") && short_conf.include?("judge would read confounded") &&
+    short_conf.include?("clean after 8 more comparable landings") &&
     bad.include?("malformed") && bad.include?("not counted as a confounder")
 end
 

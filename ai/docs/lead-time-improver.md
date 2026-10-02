@@ -292,15 +292,16 @@ Each `improve`-mode run does these steps in order:
    confounds the next change on that phase with certainty. `record` runs
    after the landing, and its blocker refuses only a PENDING change or an
    owed REVERT, so a predecessor settled as `reverted` or `inconclusive` let
-   a doomed change land. The window is kept as it is. A read-only
+   a doomed change land. The chosen option, (b), keeps the window as it is
+   and waits for a clean baseline before a change starts. A read-only
    `experiment settling --repo R --phase P [--metric M]` now runs before a
    change lands. It builds the before-set a change recorded now would get,
    with judge's own `sides`, `window` and `confounders`. It reports CLEAN,
    SETTLING (each confounder, and "clean after N more comparable landings")
    or SHORT (fewer than K). Could not look is exit 3, never CLEAN. The
    skill's pick step reads SETTLING as a pending change on the phase.
-   `record` still records, and warns when the trailer is already inside its
-   baseline. Two options were rejected. (a) Counting only trailers after
+   `record` still records, and warns when a same-phase trailer is already
+   inside its window. Two options were rejected. (a) Counting only trailers after
    the experiment's own landing would judge a baseline that straddles a
    same-phase change, so it measures two systems; that loosens the confound
    guard, a quality bar (`~/.claude/CLAUDE.md` → *Owner approval policy*,
