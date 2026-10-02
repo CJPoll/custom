@@ -391,6 +391,58 @@ has "the DND-1697 fixture excludes no proposed label" "${OUT}" "proposed exclude
 eq "the DND-1697 fixture dry run reports no join miss" "${ERR}" ""
 eq "the DND-1697 fixture dry run sends nothing" "$(requests)" "${n}"
 
+# The ticket-security-v3 held-out scorer (DND-1697 v3): per-case verdicts
+# from two --repeat 3 run files. Only `match` is right; unstable counts as a
+# miss; a case without a verdict in either run is n/a, named, and makes the
+# result COULD NOT MEASURE rather than a pass.
+SV3="${TSS}/score-v3.rb"
+V3D="${TMP}/dnd1697v3"
+mkdir -p "${V3D}"
+# mkrun FILE VERSION REPEAT "case:label:verdict ..." -- a synthetic run file.
+mkrun() {
+  ruby -rjson -e '
+    file, version, repeat, spec = ARGV
+    verdicts = spec.split.map { |s| id, label, v = s.split(":"); { "case_id" => id, "label" => label, "verdict" => v } }
+    run = { "eval_run_id" => "00000000-0000-4000-8000-000000000000", "question_set_version" => version,
+            "model" => "jev-test", "repeat" => repeat.to_i, "candidate" => version != "ticket-security-v1" }
+    run["verdicts"] = verdicts if repeat.to_i >= 2
+    File.write(file, JSON.generate(run))' "$@"
+}
+printf '%s\n' '{"id":"a","label":"security"}' '{"id":"b","label":"none"}' '{"id":"c","label":"none"}' '{"id":"d","label":"security"}' > "${V3D}/labels.jsonl"
+mkrun "${V3D}/v1.json" ticket-security-v1 3 "a:security:match b:none:match c:none:miss d:security:unstable"
+mkrun "${V3D}/v3.json" ticket-security-v3 3 "a:security:match b:none:match c:none:match d:security:miss"
+OUT="$(ruby "${SV3}" "${V3D}/v1.json" "${V3D}/v3.json" "${V3D}/labels.jsonl" 2>&1)"; RC=$?
+eq "score-v3: a clean comparison exits 0" "${RC}" "0"
+has "score-v3: no case v1 matches is lost" "${OUT}" "item 2: cases v1 matches that v3 does not: 0 -> PASS"
+has "score-v3: false security counts unstable and miss, v1 1 of 2, v3 0 of 2" "${OUT}" "item 3 (held-out): none cases not matched: v1 1/2, v3 0/2 -> PASS"
+has "score-v3: a miss v1 already had is no regression" "${OUT}" "result: PASS"
+
+mkrun "${V3D}/v3-lost.json" ticket-security-v3 3 "a:security:unstable b:none:match c:none:match d:security:match"
+OUT="$(ruby "${SV3}" "${V3D}/v1.json" "${V3D}/v3-lost.json" "${V3D}/labels.jsonl" 2>&1)"
+has "score-v3: an unstable case v1 matched is a lost case, named" "${OUT}" "item 2: cases v1 matches that v3 does not: 1 (a) -> FAIL"
+has "score-v3: a lost case fails the result" "${OUT}" "result: FAIL"
+
+mkrun "${V3D}/v3-na.json" ticket-security-v3 3 "a:security:match b:none:n/a c:none:match"
+OUT="$(ruby "${SV3}" "${V3D}/v1.json" "${V3D}/v3-na.json" "${V3D}/labels.jsonl" 2>&1)"
+has "score-v3: n/a and absent cases are named" "${OUT}" "n/a (no verdict in either run, left out of both): 2 (b, d)"
+has "score-v3: an n/a case makes the result could-not-measure, never a pass" "${OUT}" "result: COULD NOT MEASURE"
+
+mkrun "${V3D}/v3-r1.json" ticket-security-v3 1 ""
+OUT="$(ruby "${SV3}" "${V3D}/v1.json" "${V3D}/v3-r1.json" "${V3D}/labels.jsonl" 2>&1)"; RC=$?
+eq "score-v3: a run with no per-case verdicts is refused (exit 2)" "${RC}" "2"
+has "score-v3: the refusal says to measure with --repeat 3" "${OUT}" "Fix: measure with judgment-eval --repeat 3"
+
+# The absolute part of item 3: at most 31 false security calls, and at most
+# 31/291 of the none cases measured.
+ruby -e 'puts (1..300).map { |i| %({"id":"n#{i}","label":"none"}) }' > "${V3D}/labels-300.jsonl"
+mkrun "${V3D}/v1-300.json" ticket-security-v1 3 "$(ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 40 ? "miss" : "match"}" }.join(" ")')"
+mkrun "${V3D}/v3-31.json" ticket-security-v3 3 "$(ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 31 ? "unstable" : "match"}" }.join(" ")')"
+mkrun "${V3D}/v3-32.json" ticket-security-v3 3 "$(ruby -e 'puts (1..300).map { |i| "n#{i}:none:#{i <= 32 ? "miss" : "match"}" }.join(" ")')"
+OUT="$(ruby "${SV3}" "${V3D}/v1-300.json" "${V3D}/v3-31.json" "${V3D}/labels-300.jsonl" 2>&1)"
+has "score-v3: 31 false security calls of 300 passes item 3" "${OUT}" "item 3 (held-out): none cases not matched: v1 40/300, v3 31/300 -> PASS"
+OUT="$(ruby "${SV3}" "${V3D}/v1-300.json" "${V3D}/v3-32.json" "${V3D}/labels-300.jsonl" 2>&1)"
+has "score-v3: 32 false security calls fails item 3" "${OUT}" "item 3 (held-out): none cases not matched: v1 40/300, v3 32/300 -> FAIL"
+
 printf '{"id":"zz","label":"x","provenance":"owner_confirmed"}\n' > "${TMP}/labels-none.jsonl"
 run --use-case finding_triage --labels "${TMP}/labels-none.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --dry-run
 eq "no label joining the corpus is exit 1, never an empty run" "${RC}" "1"

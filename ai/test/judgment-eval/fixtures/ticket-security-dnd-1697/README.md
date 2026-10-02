@@ -124,3 +124,50 @@ case). `security` cases judged `security`: 26/27. `none` cases judged
 `security`: 43/296. If v2's run leaves no other case unscored, item 3 needs
 at least 25 and item 4 at most 43; otherwise the scorer recomputes both
 over the cases scored in both runs.
+
+**Later (2026-10-02):** ticket-security-v2 was measured against the bar
+above and failed item 1 (override-1 and override-2 unstable). It also lost
+one held-out security case, DND-1063. It stays a deployed, unregistered
+candidate. The sections below add the v3 bar; nothing above changes.
+
+## The ticket-security-v3 bar (committed before any v3 run)
+
+Fixed on the ticket by coordinator decision and recorded there by the
+admiral, 2026-10-02, before any v3 run:
+
+1. Every number is measured with `judgment-eval --repeat 3`, v1 baselines
+   included. v1 is re-measured on the held-out set H at `--repeat 3` before
+   any v3 run (the v2 pass had H at `--repeat 1`).
+2. On H, v3 is no worse than v1 on EVERY case, DND-1063 included.
+3. v2's gains are kept: on H, false security calls at or below 31/291, and
+   override-3 and override-4 match.
+4. All 14 controls (control-1..9, untagged-3..7) match.
+
+How unstable cases count: a case matches only when all 3 samples give its
+label. A case whose samples disagree counts as a miss for the version
+measured, on every set.
+
+Register v3 only if all four hold. If v3 misses the bar but is strictly no
+worse than v1 everywhere, the admiral reports to the coordinator before
+deciding.
+
+Reading the items against the tools:
+
+- "No worse on a case" (item 2): every case v1 matches, v3 matches. A case
+  v1 misses or holds unstable cannot get worse, since both read as a miss.
+- Item 3's held-out part is a count and a rate. A false security call is a
+  `none` case whose verdict is not `match`. v3 may make at most 31, and at
+  most 31/291 of the `none` cases measured in both runs.
+- n/a keeps the rule above: re-run that set once; a second n/a is "could
+  not measure", reported, never scored.
+
+`score-v3.rb` scores items 2 and 3 on H from two `--repeat 3` run files. It
+refuses a run without per-case verdicts:
+
+```
+ruby ai/test/judgment-eval/fixtures/ticket-security-dnd-1697/score-v3.rb \
+  <v1 H run file> <v3 H run file> ~/.local/share/athena/evals/ticket-security-labels.jsonl
+```
+
+Item 3's override part and item 4 read from the 18-case run's per-case
+verdicts.
