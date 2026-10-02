@@ -103,6 +103,11 @@
 #       a session that exits non-zero, or one whose commits could not be landed
 #       on main (a "stranded" branch), or one whose lane branch ref git cannot
 #       read (COULD NOT TELL, kept as found), counts as an unsuccessful outcome
+#
+# A lane branch whose work is safe but whose `git branch -D` is refused (a held
+# ref lock, a corrupt ref) is KEPT and named, with the delete to run, in stderr
+# and runs/<ts>.branch-kept (DND-1715). That is hygiene, never an outcome: it
+# never changes the exit and never feeds the wedge counter.
 
 set -euo pipefail
 
@@ -464,6 +469,28 @@ commit_published() { # commit-ish
   [ -n "$(git -C "${MAIN_CHECKOUT}" for-each-ref --contains "$1" --format='%(refname)' refs/remotes/origin 2>/dev/null)" ]
 }
 
+# delete_lane_branch <branch> <context> — `git branch -D` a lane branch whose
+# work is safe (landed or published). A refused delete (a held ref lock, a
+# corrupt ref) used to be dropped (`|| true`), so the branch stayed with nothing
+# past the tick log and lane branches piled up unseen (DND-1715). Now the branch
+# is KEPT and named, with the delete to run, in stderr and in this tick's own
+# record runs/<ts>.branch-kept. The record is written at once, so it survives a
+# reap in a subshell and every exit path. A refused delete is hygiene, never an
+# outcome: it returns 0, never changes the exit and never feeds the wedge.
+delete_lane_branch() {
+  local br="$1" ctx="$2" rc=0 fix
+  git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${log}" 2>&1 || rc=$?
+  [ "${rc}" -eq 0 ] && return 0
+  fix="git -C ${MAIN_CHECKOUT} branch -D ${br}"
+  if ! printf '%s: branch %s KEPT: git branch -D exit %s; the reason is in %s. Fix: %s\n' \
+      "${ctx}" "${br}" "${rc}" "${log}" "${fix}" >>"${LOG_DIR}/${ts}.branch-kept" 2>/dev/null; then
+    echo "athena-shipwright: could not write ${LOG_DIR}/${ts}.branch-kept; this stderr is the only record of the kept branch." >&2
+  fi
+  echo "athena-shipwright: could not delete branch ${br} (${ctx}): git branch -D exit ${rc}. Its work is safe (landed or on origin), so nothing is lost; the branch is KEPT. Not counted as a failure. Record: ${LOG_DIR}/${ts}.branch-kept" >&2
+  echo "  Fix: read ${log} for the reason (for a held ref lock, confirm nothing is writing to ${MAIN_CHECKOUT} and remove the stale refs/heads/${br}.lock), then run '${fix}'." >&2
+  return 0
+}
+
 # Remove one lane's worktree, and delete its branch unless the branch is
 # stranded (then keep it and say how to recover). Used by both the reaper (for a
 # dead predecessor) and normal teardown. Returns 1 for a stranded branch. A
@@ -487,7 +514,7 @@ retire_lane() { # run-id worktree-path context-label
     return 2
   fi
   if commit_reachable "${br}" || commit_published "${br}"; then
-    git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${log}" 2>&1 || true
+    delete_lane_branch "${br}" "${ctx}"
     return 0
   fi
   echo "athena-shipwright: kept stranded branch ${br} (${ctx}); its commits are neither landed (origin/main; ${MAIN_BRANCH} when there is no origin) nor on any origin branch." >&2
@@ -1025,7 +1052,7 @@ if ! flock -n 8; then
   echo "athena-shipwright: the fresh lane lock ${LANE_LOCK} is already held; refusing to run." >&2
   echo "  Fix: this should be impossible for a unique run id. Check for a stale process holding it ('fuser -v ${LANE_LOCK}') and for a duplicate SHIPWRIGHT_RUN_ID." >&2
   git -C "${MAIN_CHECKOUT}" worktree remove --force "${WORKTREE}" >>"${log}" 2>&1 || rm -rf "${WORKTREE}"
-  git -C "${MAIN_CHECKOUT}" branch -D "${BRANCH}" >>"${log}" 2>&1 || true
+  delete_lane_branch "${BRANCH}" "lane lock already held"
   rm -f "${LANE_LOCK}" "${LANE_META}"
   exit 1
 fi

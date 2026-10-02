@@ -18,7 +18,9 @@
 # reaped at the start of a tick by that lock, never by a pid. A lane whose
 # commits are not on origin/main is STRANDED: its branch is kept, never
 # deleted, and the tick counts as unsuccessful. So is one whose branch ref git
-# cannot read (COULD NOT TELL), which is never read as "no branch". After the session the main
+# cannot read (COULD NOT TELL), which is never read as "no branch". A landed
+# lane whose `git branch -D` is refused keeps its branch too, named with the
+# delete to run, but that is never an outcome (DND-1715). After the session the main
 # checkout is fast-forwarded only to the run's OWN newest commit, once it is on
 # origin/main (DND-1008), never forced. The run's own commits are the ones its
 # lane's HEAD reflog records it making, never every commit its lane holds: a
@@ -82,7 +84,13 @@
 #                       product repo; " unreadable_branches=<n>" when the
 #                       sweep kept a landing branch git could not read,
 #                       DND-1677) and its product_*: lines, the prune
-#                       result and the summary
+#                       result, branch_delete=ok or one branch_delete: line
+#                       per kept branch (below), and the summary
+#   runs/<ts>.branch-kept  one line per landed lane branch whose `git branch -D`
+#                       was refused this tick (a held ref lock, a corrupt ref),
+#                       with git's exit and the Fix: delete to run. Written at
+#                       the refusal, on any exit path. Never counted, never
+#                       changes the exit (DND-1715)
 #   runs/<ts>.product.json  the product manifest (only with a product repo or store)
 #   consecutive-failures  the wedge counter; `rm` it to re-arm a wedged lane
 #   consecutive-blocked   the blocked streak; clears when a session reaches the model
@@ -660,6 +668,33 @@ commit_landed() { # commit-ish
   git -C "${MAIN_CHECKOUT}" merge-base --is-ancestor "$1" refs/remotes/origin/main 2>/dev/null
 }
 
+# delete_lane_branch <branch> <context> — `git branch -D` a lane branch whose
+# work is on origin/main. A refused delete (a held ref lock, a corrupt ref) used
+# to be dropped (`|| true`), so the branch stayed with nothing past the git log
+# and lane branches piled up unseen (DND-1715). Now the branch is KEPT and named,
+# with the delete to run, in stderr and in this tick's runs/<ts>.branch-kept,
+# which finish copies into the .run. The record is written at once, so it
+# survives a reap in a subshell and every early exit. A refused delete is
+# hygiene, never an outcome: it returns 0, never changes the exit and never
+# feeds the wedge (owner rule: never pause the lead-time cron).
+# LAST_DELETE_REFUSED says whether the last call was refused.
+LAST_DELETE_REFUSED=0
+delete_lane_branch() {
+  local br="$1" ctx="$2" rc=0 fix
+  LAST_DELETE_REFUSED=0
+  git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${GIT_LOG}" 2>&1 || rc=$?
+  [ "${rc}" -eq 0 ] && return 0
+  LAST_DELETE_REFUSED=1
+  fix="git -C ${MAIN_CHECKOUT} branch -D ${br}"
+  if ! printf '%s: branch %s KEPT: git branch -D exit %s; the reason is in %s. Fix: %s\n' \
+      "${ctx}" "${br}" "${rc}" "${GIT_LOG}" "${fix}" >>"${LOG_DIR}/${ts}.branch-kept" 2>/dev/null; then
+    echo "${ME}: could not write ${LOG_DIR}/${ts}.branch-kept; this stderr is the only record of the kept branch." >&2
+  fi
+  echo "${ME}: could not delete branch ${br} (${ctx}): git branch -D exit ${rc}. Its commits are on origin/main, so nothing is lost; the branch is KEPT. Not counted as a failure. Record: ${LOG_DIR}/${ts}.branch-kept" >&2
+  echo "  Fix: read the end of ${GIT_LOG} for the reason (for a held ref lock, confirm nothing is writing to ${MAIN_CHECKOUT} and remove the stale refs/heads/${br}.lock), then run '${fix}'." >&2
+  return 0
+}
+
 # retire_lane <run-id> <context> — remove one lane's worktree, and delete its
 # branch unless its commits are not on origin/main (then keep it, say how to
 # recover, and return 1). The branch is never deleted while it holds work. A
@@ -680,7 +715,7 @@ retire_lane() {
     return 2
   fi
   if commit_landed "${br}"; then
-    git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${GIT_LOG}" 2>&1 || true
+    delete_lane_branch "${br}" "${ctx}"
     return 0
   fi
   echo "${ME}: kept STRANDED branch ${br} (${ctx}); its commits are not on origin/main." >&2
@@ -1144,7 +1179,8 @@ LANE_RESULT="removed"
 lane_rc=0
 retire_lane "${RUN_ID}" "run ${ts}" || lane_rc=$?
 case "${lane_rc}" in
-  0) ;;
+  0) [ "${LAST_DELETE_REFUSED}" -eq 0 ] \
+       || LANE_RESULT="branch ${BRANCH} KEPT (delete REFUSED: its commits are on origin/main; see branch_delete)" ;;
   2) STRANDED=1; LANE_UNREADABLE=1
      LANE_RESULT="branch ${BRANCH} KEPT (COULD NOT TELL: git cannot read its ref)" ;;
   *) STRANDED=1
@@ -1186,6 +1222,11 @@ finish() {
     printf '%s\n' "${PRODUCT_LINE}"
     [ -z "${PRODUCT_DETAIL}" ] || printf '%s\n' "${PRODUCT_DETAIL}"
     printf 'prune=%s\n' "${PRUNE_RESULT}"
+    if [ -s "${LOG_DIR}/${ts}.branch-kept" ]; then
+      sed 's/^/branch_delete: /' -- "${LOG_DIR}/${ts}.branch-kept"
+    else
+      printf 'branch_delete=ok\n'
+    fi
     if [ -s "${SUMMARY}" ]; then
       sed 's/^/summary: /' -- "${SUMMARY}"
     else
