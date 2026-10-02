@@ -473,25 +473,29 @@ That path is a shim (DND-752) for
 never the worktree's own copy.
 
 **The judges are the landed ones (DND-1796).** When the gated repo is
-`~/dev/custom` itself, the gate script, the libs it sources, `blast-radius`,
-its manifest (`ai/blast-radius/surfaces.json`) and the owner verifiers
-(`ai/lib/owner_turn.rb`, `ai/lib/owner_click.rb`) are what the target holds,
-read out of git. A copy of the gate whose content differs from the target's
-re-executes the main checkout's copy when that one is the target's, and
-otherwise refuses (exit 2). `blast-radius` runs from the target's `ai/` tree,
-materialised into a temp dir. A judge the target lacks is exit 2, never the
-branch's copy. A branch that edits the gate itself still lands, judged by the
-landed gate. The residual: a check only runs in the copy the caller starts,
-and a branch's own copy can drop it. So run the main checkout's path above.
-Another repo (gen_saas) cannot edit these judges in its diff; its gate uses
-the copies beside the script.
+`~/dev/custom` itself, the copy of `integration-gate` you start never judges.
+Inside the slot it reads the target's `ai/` tree out of git into a temp dir
+and re-executes the target's copy of itself from there. So
+`integration-gate`, the libs it sources, `blast-radius`, its manifest
+(`ai/blast-radius/surfaces.json`), the owner verifiers (`ai/lib/owner_turn.rb`,
+`ai/lib/owner_click.rb`) and `critic-review` are the target's. No checkout's
+working tree is read, the main checkout's included. A judge the
+`--with-critic` pre-start ran from a checkout whose `critic-review` or
+`ai/lib` is not the target's is stopped, and the landed judge runs. A judge
+the target lacks, or an object git cannot read, is exit 2, never the branch's
+copy. A branch that edits `integration-gate` itself still lands, judged by the
+landed copy. The residual: this runs in the copy the caller starts, and a
+branch's own copy can drop it; a critic receipt is a file any process can
+write. So run the main checkout's path above. Another repo (gen_saas) cannot
+edit these judges in its diff; its gate uses the copies beside the script.
 
 **Later (2026-10-02, DND-1796):** this said to run the gate "from the
 Mission's worktree" as `ai/skills/athena:merge-boarding/scripts/integration-gate`,
-and "Either path is correct in a brief". Superseded: from a custom worktree that
-ran the branch's own gate, `blast-radius`, manifest and owner verifiers. One
-commit that dropped a held surface from the manifest read `BLAST-RADIUS COLD`
-under its own classifier and HOT, exit 4, under the landed one.
+and "Either path is correct in a brief". Superseded: run from a custom
+worktree, that path ran the branch's own gate, `blast-radius`, manifest and
+owner verifiers. One commit that dropped a held surface from the manifest read
+`BLAST-RADIUS COLD` under its own classifier and HOT, exit 4, under the landed
+one.
 
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that
@@ -503,7 +507,8 @@ exists on `origin/main` is the repo's declared gate, and it always runs. Omit
 `; true` or a trailing `&` — is refused (exit 2). "The gate already ran on this
 head" is not a reason to skip it: the integrated head is the one being judged.
 (DND-479: `--gate true` on gen_saas PR #337 printed `INTEGRATION OK` exactly like
-a real run.) A branch that edits its own gate still runs its own copy, but the
+a real run.) A branch that edits its own declared gate (`harness-gate`) still
+runs its own copy, but the
 run warns and the OK line says `EDITED BY THIS BRANCH` — review that diff.
 
 **`--target` does not retarget the gate's own stages.** A stacked branch whose

@@ -1825,10 +1825,10 @@ out="$( cd "$W" && HOME="$FIXTURE_HOME" "${W}/${LBG}" --target main --no-fetch -
   || bad "lb2 expected exit 2 from the landed verifier, got $rc" "$out"
 grep -q 'INTEGRATION OK' <<<"$out" && bad "lb2 the branch's verifier approved its own hold" "$out" || ok "lb2 no INTEGRATION OK"
 
-# lb3: a branch that edits the gate script itself. The landed copy (the main
-# checkout's, whose content is the TARGET's) is re-executed and writes the
-# receipt; the branch's copy never prints the OK line. A legitimate gate
-# change still lands, judged by the landed gate.
+# lb3: a branch that edits the gate script itself. The TARGET's copy,
+# materialised from git, is re-executed and writes the receipt; the branch's
+# copy never prints the OK line. A legitimate gate change still lands, judged
+# by the landed gate.
 L="${TMP}/lb3-layout"; landed_layout "$L"; W="${TMP}/lb3-wt"; landed_branch "$L" "$W"
 ( cd "$W" && sed -i 's/^OK_LINE="INTEGRATION OK /OK_LINE="BRANCH-COPY INTEGRATION OK /' "$LBG" \
   && grep -q 'BRANCH-COPY' "$LBG" && git commit -qam 'edit the gate' ) || bad "lb3 fixture: could not edit the gate"
@@ -1842,14 +1842,45 @@ grep -q 're-executing the landed copy' <<<"$out" && ok "lb3 says it re-executed 
 jq -e '.integration_ok_line | startswith("INTEGRATION OK ")' \
   "$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${head_sha}.json" >/dev/null 2>&1 \
   && ok "lb3 the receipt was written by the landed copy" || bad "lb3 receipt missing or written by the branch's copy"
-# lb3b: ...and when the main checkout's copy is not the TARGET's either, there
-# is no landed copy to run: exit 2 with Fix:, no OK line, no receipt.
-printf '\n# local edit\n' >> "${L}/${LBG}"
-out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
-[ "$rc" -eq 2 ] && grep -q '^Fix:' <<<"$out" && grep -q 'no landed copy' <<<"$out" && ok "lb3b no landed copy to run: exit 2 with Fix:" \
-  || bad "lb3b expected exit 2 naming no landed copy, got $rc" "$out"
-grep -q 'INTEGRATION OK' <<<"$out" && bad "lb3b printed INTEGRATION OK" "$out" || ok "lb3b no INTEGRATION OK"
+# lb3b: ...and a main checkout whose working tree holds a local edit to the
+# gate is not landed code either: run through its shim, the TARGET's copy
+# from git still judges, never the edited file.
+sed -i 's/^OK_LINE="INTEGRATION OK /OK_LINE="MAIN-DIRTY INTEGRATION OK /' "${L}/${LBG}"
+mkdir -p "${TMP}/lb3b-tmp"
+out="$( cd "$W" && TMPDIR="${TMP}/lb3b-tmp" "${L}/ai/bin/integration-gate" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q "^INTEGRATION OK ${head_sha} " <<<"$out" && ok "lb3b a dirty main checkout's gate is not what judges" \
+  || bad "lb3b expected exit 0 with the landed OK line, got $rc" "$out"
+grep -qE 'MAIN-DIRTY|BRANCH-COPY' <<<"$out" && bad "lb3b a working-tree copy wrote the verdict" "$out" || ok "lb3b neither working-tree copy wrote the verdict"
 ( cd "$L" && git checkout -q -- "$LBG" )
+left="$(find "${TMP}/lb3b-tmp" -maxdepth 1 -name 'integration-gate-landed.*')"
+[ -z "$left" ] && ok "lb3b the landed copy removed its materialised tree" || bad "lb3b a materialised landed tree was left behind" "$left"
+
+# lb3c: the re-exec marker outside a held slot is refused, never honoured.
+out="$( cd "$W" && INTEGRATION_GATE_LANDED_REEXEC=1 INTEGRATION_GATE_SCRIPT_COMMON="${L}/.git" "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q '^Fix:' <<<"$out" && ! grep -q 'INTEGRATION OK' <<<"$out" && ok "lb3c a forged re-exec marker is refused (exit 2)" \
+  || bad "lb3c expected exit 2 for a forged marker, got $rc" "$out"
+
+# lb5: --rebase on a gate-editing branch behind the target: the rebase runs,
+# then the landed copy (of the NEW target) judges the rebased head.
+L="${TMP}/lb5-layout"; landed_layout "$L"; W="${TMP}/lb5-wt"; landed_branch "$L" "$W"
+( cd "$W" && sed -i 's/^OK_LINE="INTEGRATION OK /OK_LINE="BRANCH-COPY INTEGRATION OK /' "$LBG" && git commit -qam 'edit the gate' )
+( cd "$L" && echo m > m.txt && git add m.txt && git commit -qm 'main moves' )
+main_sha="$(git -C "$L" rev-parse main)"
+out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --rebase --gate "${W}/g.sh" --critic-override 'fixture: no judge' 2>&1 )"; rc=$?
+head_sha="$(git -C "$W" rev-parse HEAD)"
+[ "$rc" -eq 0 ] && grep -q "^INTEGRATION OK ${head_sha} " <<<"$out" && grep -q 'rebased' <<<"$out" \
+  && ok "lb5 --rebase then the landed copy judges the rebased head" || bad "lb5 expected exit 0 after a rebase, got $rc" "$out"
+grep -q 'BRANCH-COPY' <<<"$out" && bad "lb5 the branch's gate wrote the verdict" "$out" || ok "lb5 the branch's gate did not write the verdict"
+[ "$(jq -r .base "$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${head_sha}.json" 2>/dev/null)" = "$main_sha" ] \
+  && ok "lb5 the receipt names the moved target as its base" || bad "lb5 receipt base is not the moved target"
+
+# lb6: --with-critic, and the branch edits critic-review. The judge the
+# branch's copy started beside the slot wait is stopped; the landed one runs.
+L="${TMP}/lb6-layout"; landed_layout "$L"; W="${TMP}/lb6-wt"; landed_branch "$L" "$W"
+( cd "$W" && printf '\n# branch edit\n' >> ai/bin/critic-review && git commit -qam 'edit the critic' )
+out="$( cd "$W" && TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/critic-pass" "${W}/${LBG}" --target main --no-fetch --with-critic --gate "${W}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$out" && ok "lb6 --with-critic lands with the landed judge" || bad "lb6 expected exit 0, got $rc" "$out"
+grep -q 'stopped the judge this copy started' <<<"$out" && ok "lb6 the branch's pre-started judge was stopped" || bad "lb6 the branch's judge was adopted" "$out"
 
 # lb4: the TARGET does not hold blast-radius (the branch adds it). A landed
 # classifier that cannot be materialised is an ERROR with Fix:, never a fall

@@ -15,12 +15,12 @@
 # `--help` included.
 #
 # Which copy judges (DND-1796): in ~/dev/custom gating ~/dev/custom, the real
-# script, its libs, blast-radius, its manifest and the owner verifiers are the
-# integration TARGET's, read out of git, whichever checkout this shim is in. A
-# copy of the script that differs from the target re-executes the main
-# checkout's copy (when that one is the target's) or refuses. Name THIS path in
-# the main checkout, ~/dev/custom/ai/bin/integration-gate, in a brief: it is
-# landed code, while a worktree's copy is whatever its branch holds.
+# script reads the integration TARGET's ai/ tree out of git and re-executes the
+# target's copy of itself, so the gate, its libs, blast-radius, its manifest,
+# the owner verifiers and critic-review are the target's, whichever checkout
+# this shim is in. That step runs in the copy started, so name THIS path in the
+# main checkout, ~/dev/custom/ai/bin/integration-gate, in a brief: it is landed
+# code, while a worktree's copy is whatever its branch holds.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +28,7 @@ REAL="${HERE}/../skills/athena:merge-boarding/scripts/integration-gate"
 
 if [ ! -x "${REAL}" ]; then
   echo "integration-gate: the real script is missing or not executable: ${REAL}" >&2
-  echo "Fix: run this from a complete ~/dev/custom checkout (or worktree) that has ai/skills/athena:merge-boarding/scripts/integration-gate, or call that path directly." >&2
+  echo "Fix: run ~/dev/custom/ai/bin/integration-gate (the main checkout's shim, landed code), or call ~/dev/custom/ai/skills/athena:merge-boarding/scripts/integration-gate directly." >&2
   exit 127
 fi
 
