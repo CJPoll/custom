@@ -896,10 +896,17 @@ end
 gs = fixture { L::Counters.verify_gate_runs(landing: wl, events: S.ok(WC + [PUSH]), anchors: wa) }
 check("W11 gate_runs_s sums the gate runs inside verify, the final run's excluded") { gs["gate_runs_s"] == 280.0 }
 gs_std = fixture { L::Counters.verify_gate_runs(landing: l, events: S.ok(FULL), anchors: anchors(l, S.ok(FULL))) }
-check("W11 standalone: a run is clipped at verify's end") do
+check("W11 standalone: runs wholly inside verify are summed whole") do
   # verify 02:00:00 -> 03:20:45: runs 100 + 120.5 + 90 all end inside it.
   gs_std["gate_runs_s"] == 310.5
 end
+# A run that starts inside verify and ends after it: only its part inside
+# verify (03:20:00 -> 03:20:45, 45 s of its 100 s) is summed.
+straddle = FULL + [ev("harness_gate.run", "2026-10-01T03:20:00Z", duration_s: 100.0, attrs: { "ok" => true, "run_id" => "r4" })]
+gs_clip = fixture do
+  L::Counters.verify_gate_runs(landing: l, events: S.ok(straddle), anchors: anchors(l, S.ok(straddle)))
+end
+check("W11 a run that straddles verify's end is clipped to it") { gs_clip["gate_runs_s"] == 355.5 }
 nodur_g = WC.map { |e| e["at"] == "2026-10-01T03:00:05Z" ? e.merge("duration_s" => nil) : e }
 gs_nd = fixture { L::Counters.verify_gate_runs(landing: wl, events: S.ok(nodur_g), anchors: anchors(wl, S.ok(nodur_g + [PUSH]))) }
 check("W12 a gate run inside verify with no duration: null with a reason, never summed as 0") do
