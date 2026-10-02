@@ -784,11 +784,29 @@ assert_eq "DND-1785 the same button clicked by two users counts twice" "2" "$(jq
 # must never fall back to channel:ts, which would collapse it onto any other
 # click or message on that message and drop it silently.
 for broken in '.action_ts = null' 'del(.action_ts)' '.action_ts = ""' '.actor.user_id = null' \
-              'del(.actor)' '.actor = "UFAKE00001"' '.action_ts = "1788.1\n001"' '.channel = ""'; do
+              'del(.actor)' '.actor = "UFAKE00001"' '.action_ts = "1788.1\n001"' '.channel = ""' \
+              '.action_ts = "1788.1001:UFAKE00001"' '.actor.user_id = 7'; do
   res="$(printf '%s\n' "$(jq -c "${broken}" <<<"${CK1}")" | logchan_scan 0 "1" "" "")"
   assert_eq "DND-1785 a click with no computable identity [${broken}] is unreadable, not counted" \
     "0 1" "$(jq -r '"\(.new) \(.unreadable)"' <<<"${res}")"
 done
+# The `:` delimiter is refused in a member, so two different tuples can never
+# join to one key: (action_ts "a:U", user "X") and (action_ts "a", user "U:X").
+assert_eq "DND-1785 logchan_click_key refuses a member carrying the : delimiter" "1" \
+  "$(logchan_click_key D01 1788.0001 1788.1001:UFAKE00001 X >/dev/null 2>&1; echo $?)"
+assert_eq "DND-1785 logchan_click_key refuses an empty member" "1" \
+  "$(logchan_click_key D01 1788.0001 '' UFAKE00001 >/dev/null 2>&1; echo $?)"
+# A click line that also carries an `event_id` (none does today) and a broken
+# tuple has no click key but is still keyed on its event_id, as the contract
+# says: the line is read once, never collapsed onto channel:ts.
+res="$(printf '%s\n' "$(jq -c '.event_id = "EvFAKE1" | del(.action_ts)' <<<"${CK1}")" | logchan_scan 0 "1" "" "D01:1788.0001")"
+assert_eq "DND-1785 a broken click with an event_id is keyed on the event_id, not channel:ts" \
+  "1 EvFAKE1 " "$(jq -r '"\(.new) \(.messages[0].event_id) \(.messages[0].dedupe_key)"' <<<"${res}")"
+# A `kind` that is not the string "slack.interaction" is not a click: the line
+# is an ordinary message and keeps the message key.
+res="$(printf '%s\n' "$(jq -c '.kind = ["slack.interaction"]' <<<"${CK1}")" | logchan_scan 0 "1" "" "")"
+assert_eq "DND-1785 a non-string kind is not a click (message key)" "D01:1788.0001" \
+  "$(jq -r '.messages[0].dedupe_key' <<<"${res}")"
 
 # D-18: the seen-sets live in a file rewritten on every ack, so unbounded
 # growth is its own failure mode.

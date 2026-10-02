@@ -57,7 +57,7 @@ DESCRIPTOR_MAILDIR_KEYS='["kind","namespace","read","write","identity","stale_af
 # `event_id`, `channel+ts` and `channel+ts+action_ts+user_id` are the ONLY
 # recognised dedupe members, because they are the only keys the reference
 # reader (logchan.sh -> logchan_scan) actually computes. The third is a
-# `slack.interaction` click's key (DND-1785, logchan_click_key). A dedupe member
+# `slack.interaction` click key (DND-1785, built by logchan_scan). A dedupe member
 # the reader does not compute is refused so a reader never silently dedupes on
 # nothing.
 DESCRIPTOR_DEDUPE_MEMBERS='["event_id","channel+ts","channel+ts+action_ts+user_id"]'

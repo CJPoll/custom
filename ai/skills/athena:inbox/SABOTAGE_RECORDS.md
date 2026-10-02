@@ -1654,7 +1654,8 @@ A bug fix, so the evidence is the unfixed code going red, plus one mutation.
   is the click tuple, not the message's channel:ts` -- `expected
   [slack:interaction:D01:1788.0001:1788.1001:UFAKE00001], got
   [D01:1788.0001]`.
-- **After:** `VERDICT: PASS (1047 cases)`.
+- **After:** `VERDICT: PASS (1047 cases)`; `VERDICT: PASS (1053 cases)` after
+  the review round added the `:`-delimiter, event_id and non-string-kind cases.
 - **Mutation, click branch off** (`if $o.kind == "slack.interaction" then` ->
   `if false then`, so a click falls back to `channel:ts`): `VERDICT: FAIL (17
   of 1047 cases)`, first `FAIL DND-1785 two distinct clicks on ONE message are

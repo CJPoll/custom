@@ -649,7 +649,7 @@ tenants MAY use the same channel name for different surfaces.
 |---|---|---|---|
 | `kind` | yes | `"log"` | |
 | `path` | yes | string | Inbox filename, **relative to the root**. Grammar below. |
-| `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`, `channel+ts+action_ts+user_id` (a `slack.interaction` click, *Reader obligations*). |
+| `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`, `channel+ts+action_ts+user_id` (a `slack.interaction` click; added by DND-1785, see *Reader obligations*). |
 | `schema_v` | no | array of integer | Line versions this reader understands. Defaults to `[1]`. |
 | `producer` | no | string | Which producer's line schema feeds this channel. `"slack"` (the default when absent) is the Slack-receiver schema; `"platform"` — the event-platform state-change schema — is ingested as of DND-260 (a keyless change stream). Any other value is refused. See *The inbox as an event-platform delivery adapter*. |
 | `stale_after_s` | no | integer ≥ 0, or null | Staleness threshold in seconds: a last delivery older than this is reported `STALE`. Absent → **1800**. `0` or `null` disables it (a channel that is legitimately quiet for long stretches). Any other value is refused. |
@@ -950,7 +950,8 @@ the one place the field is defined; every other section defers here.
   → *A failed lookup must never look like an empty one*).
 - **The producer MUST stamp it** on every platform line and refuse to encode a
   line without one. A Slack-producer line's identity stays `event_id` /
-  `channel:ts`; a `delivery_id` on it is ignored.
+  `channel:ts`, or a click's tuple key (*Reader obligations*); a `delivery_id`
+  on it is ignored.
 
 **Later (2026-09-23):** platform lines carried **no** frame identity:
 `delivery_id` rode only `session.message` lines, as a reference, and the reader
@@ -975,7 +976,8 @@ topic-judgment fallback. The field is optional and additive:
 
 - **Absent** means a line written before the producer stamped the field. It is
   read and counted normally.
-- **Not a dedupe key.** Slack identity stays `event_id` / `channel:ts`.
+- **Not a dedupe key.** Slack identity stays `event_id` / `channel:ts`, or a
+  click's tuple key (*Reader obligations*).
 - A reader MAY display it and MUST NOT fail on it, on an unknown value, or on
   its absence. It is Slack-producer only; a platform line carries none.
 
@@ -1123,12 +1125,15 @@ Consequences, all normative:
     idempotency key `athena-events.md` → *`slack.interaction.received` is a
     transient event* defines — held in the same `seen_keys` set. Two clicks on
     one message are two keys and both are delivered; one click delivered twice
-    is one key and is delivered once. The prefix keeps a click key from ever
-    equalling a message key, so a click and the message it sits on never
-    suppress each other. A click line missing any member, or carrying a
-    non-string, empty, or newline/tab-bearing one, has **no** key: it is
-    unreadable, and the reader MUST NOT fall back to `channel:ts`, which would
-    drop it silently onto another click. The registry declares this family as
+    is one key and is delivered once. The prefix keeps a click key apart from
+    the `channel:ts` of any Slack message (a Slack `ts` never contains `:`),
+    so a click and the message it sits on never suppress each other. A click
+    line missing any member, or carrying a non-string, empty, or
+    newline/tab/`:`-bearing one, has **no** click key, and the reader MUST NOT
+    fall back to `channel:ts`, which would drop it silently onto another
+    click. With no `event_id` either (no click line carries one) it is
+    unreadable. A `:` is refused because it is the key's delimiter: admitted,
+    two different tuples could join to one key. The registry declares this family as
     the `dedupe` member `channel+ts+action_ts+user_id`. The API backstop never
     sees a click, so it keeps keying messages on `channel:ts`, and it MUST keep
     the click keys it finds in `seen_keys` when it rewrites the state file.
@@ -1147,7 +1152,7 @@ Consequences, all normative:
 - **A consumer of forwarded `athena-events` change-events MUST be idempotent** —
   the `athena-events` change-event stream is **at-least-once**
   (`ai/contracts/athena-events.md` → *Idempotency is per (event, rule)*). The
-  inbox `dedupe_key` family (the `event_id` and `channel:ts` seen-sets above, held
+  inbox `dedupe_key` family (the `event_id` and `seen_keys` seen-sets above, held
   in the *State file*) discharges this for inbox-delivered notify consumers; a
   state-based consumer discharges it by acting on carried current state + source
   re-query. This is the consumer half of the bilateral at-least-once obligation
@@ -1617,7 +1622,7 @@ silent-drop class this facility exists to end.
 A **notify** consumer delivered through a `log` channel discharges its
 idempotency obligation via the **existing** inbox mechanism, exactly as C-1's
 *Reader obligations* consumer-idempotency clause states — the `event_id` /
-`channel:ts` seen-sets held in the *State file*. That clause states the
+`seen_keys` seen-sets held in the *State file*. That clause states the
 obligation once; this subsection references it and does **not** restate it.
 
 - There is **no** platform-supplied per-`(event, rule)` `dedupe_key` line field

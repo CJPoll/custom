@@ -39,12 +39,19 @@ logchan_dedupe_key() {
 # click's identity is {channel, ts, action_ts, user_id}, and this is the
 # event-level idempotency key ai/contracts/athena-events.md -> "slack.
 # interaction.received is a transient event" defines for it. Its
-# `slack:interaction:` prefix keeps it from ever equalling a message's
-# `channel:ts`, so a click and the message it sits on never suppress each
-# other. logchan_scan builds the same string in jq; this is its shell form and
-# its single statement of the shape.
+# `slack:interaction:` prefix keeps it apart from the `channel:ts` of any
+# Slack message (a Slack `ts` never contains `:`), so a click and the message
+# it sits on never suppress each other. The reader does NOT call this:
+# logchan_scan builds the key in jq, with the same members and the same
+# refusals. This shell form mirrors it for tests and callers. A member that is
+# empty, or carries the `:` delimiter, a newline or a tab, is refused.
 logchan_click_key() {
-  [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ -n "$4" ] || return 1
+  local m
+  for m in "$1" "$2" "$3" "$4"; do
+    case "${m}" in
+      ''|*:*|*$'\n'*|*$'\t'*) return 1 ;;
+    esac
+  done
   printf 'slack:interaction:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4"
 }
 
@@ -83,7 +90,7 @@ logchan_split_complete() {
 # it is the channel-level marker resolved from the registry entry, not a per-line
 # field (DND-260). "slack" is the reference reader's original schema, unchanged:
 # a line's identity is `event_id` (intra-file) and `channel:ts` (cross-source),
-# or for a `slack.interaction` click its tuple key (logchan_click_key), and a
+# or for a `slack.interaction` click its tuple key (the shape logchan_click_key mirrors), and a
 # line carrying neither is unreadable. "platform" is the event-platform
 # inbox-adapter schema: each line is a routed STATE-CHANGE event carrying
 # `entity_id` plus current fields (a delete carries `entity_id` only) and NO
@@ -271,12 +278,15 @@ logchan_scan() {
             # A CLICK IS NOT ITS MESSAGE (DND-1785). A `slack.interaction` line
             # carries the `channel`/`ts` of the clicked message, so `channel:ts`
             # would give every click on one message the same key and drop all
-            # but the first. Its key is the click tuple (logchan_click_key).
-            # Every member must be a non-empty string; one that is missing or
-            # mistyped leaves the line with NO key -- it never falls back to
-            # `channel:ts`, which would silently collapse it onto another
-            # click -- and with no `event_id` either it is unreadable.
-            (def nonempty: if type == "string" and . != "" then . else null end;
+            # but the first. Its key is the click tuple (the shape logchan_click_key mirrors).
+            # Every member must be a non-empty string with no `:` (the key
+            # delimiter: admitted, two different tuples could join to one key).
+            # One that is missing or malformed leaves the line with NO key --
+            # it never falls back to `channel:ts`, which would silently
+            # collapse it onto another click -- and with no `event_id` either
+            # it is unreadable.
+            (def nonempty: if type == "string" and . != "" and (test(":") | not)
+                           then . else null end;
              if $o.kind == "slack.interaction" then
                [($o.channel | nonempty), ($o.ts | nonempty),
                 ($o.action_ts | nonempty),
