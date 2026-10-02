@@ -316,7 +316,8 @@ admiral following this bar **exactly and correctly** would have merged it; only
 a captain choosing to read a workflow file nobody told it to read prevented
 that. `integration-gate` now asks the question for you.
 
-**Exit 4 means merging does something only Cody's verified words clear**
+**Exit 4 means merging does something only Cody's verified decision clears**:
+Cody's words in a terminal turn, or Cody's click on the decision DM
 (`~/.claude/CLAUDE.md` → *Owner approval policy* → *What still holds
 mechanically*). The output names each
 declared surface the diff touches, whether it holds (`hold:`), and whether
@@ -345,7 +346,11 @@ your own care substitutes for it. So on exit 4:
    (copy the `BLAST-RADIUS HOT` block verbatim), and the exact decision you need.
 3. **Request the go**: send Cody a Block Kit decision DM (`~/.claude/CLAUDE.md`
    → *Owner approval policy* → *Asking, and what counts as approval*). Do not
-   wait silently.
+   wait silently. The DM names the PR and the full head SHA, and its approve
+   button's `value` is `approve-exit4 <owner>/<repo>#<pr>@<full head sha>`,
+   posted with `inbox_name` set to this session's own `session` inbox
+   (`athena:slack` → *Asking the owner for a decision*). That button is what
+   the gate can verify.
 4. List it in your final report per [[athena:admiral-final-report]].
 
 **Later (2026-09-28):** exit 4 fired for every declared surface, deploy-workflow
@@ -375,6 +380,22 @@ relays the reference, never a paraphrase. A record passed on a head nothing
 holds is refused (exit 2), so drop it there. The record prints into the
 `INTEGRATION OK` line and the receipt; copy the line into your state log and
 name it in the final report.
+
+**Or merge on the owner's click:** re-run with
+`integration-gate --owner-approval 'click:<delivery_id>'`, the `delivery_id`
+of the owner's `slack.interaction` line on this session's `session` channel
+(`read-inbox --json`). `blast-radius` reads that line itself and refuses, with
+a `Fix:`, a click relayed from another session or channel, a non-owner click,
+a click on another message, a click for another head, and a record it cannot
+verify (`integration-gate --help`). The click names one head: a gate that
+rebased gates a new head, which needs a new DM and a new click. This clears
+every hold, the approval rules' own surface included.
+
+**Later (2026-10-02, DND-1784):** exit 4 was cleared only by "Cody's verified
+words", the terminal-turn record, so a click-decided exit 4 waited for typed
+words. Superseded by owner decision, Cody, terminal turn
+2026-10-02T17:45:26Z: "Gate accepts a verified owner click, without
+hesitation."
 
 **A captain's `Blast radius: IRREVERSIBLE` is yours to judge**, even when
 `integration-gate` exits 0. It flags what the classifier cannot see

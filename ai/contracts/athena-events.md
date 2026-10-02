@@ -3679,8 +3679,16 @@ binding presented at redeem.
 (gen_saas `apps/athena/lib/athena/owner_approvals/action_class.ex`, and its
 test) is the `owner-approval-policy` surface in `ai/blast-radius/surfaces.json`
 (T6). A change that widens it is HOT wherever deploy-on-merge automation is
-confirmed, and **no class is eligible to cover that surface**. A button can
-never approve a widening of what buttons can approve.
+confirmed, and **no class is eligible to cover that surface**. The owner's
+verified click on a decision DM still clears it, as it clears any exit 4
+(`integration-gate --owner-approval 'click:<delivery_id>'`). That is the
+owner's own decision on one named PR and head, not a grant.
+
+**Later (2026-10-02, DND-1784):** this said "A button can never approve a
+widening of what buttons can approve." Superseded by owner decision, Cody,
+terminal turn 2026-10-02T17:45:26Z: "Gate accepts a verified owner click,
+without hesitation." The owner chose that a verified click clears every
+hold, this surface included. Grant eligibility is unchanged.
 
 #### Eligibility for `merge.pr_only_workflow`
 

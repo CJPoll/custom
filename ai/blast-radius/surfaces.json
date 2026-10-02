@@ -37,12 +37,13 @@
   "surfaces": [
     {
       "class": "owner-approval-policy",
-      "why": "merging changes WHAT NEEDS THE OWNER'S APPROVAL (KEEP 6): the owner approval grant allowlist, the approval table, or the classifier and verifier that enforce them. A button can never approve a widening of what buttons can approve, so no grant class covers this surface.",
+      "why": "merging changes WHAT NEEDS THE OWNER'S APPROVAL (KEEP 6): the owner approval grant allowlist, the approval table, or the classifier and verifiers that enforce them. No owner approval grant class covers this surface. The owner's verified click (--owner-approval click:<delivery_id>, ai/lib/owner_click.rb) clears it like any other hold: owner decision, Cody, 2026-10-02 (DND-1784), \"Gate accepts a verified owner click, without hesitation.\"",
       "patterns": [
         "**/athena/owner_approvals/action_class.ex",
         "**/athena/owner_approvals/action_class_test.exs",
         "ai/blast-radius/**",
         "ai/bin/blast-radius",
+        "ai/lib/owner_click.rb",
         "ai/lib/owner_turn.rb"
       ],
       "hold": "always"

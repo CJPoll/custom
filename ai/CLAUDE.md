@@ -292,9 +292,11 @@ remain Cody's.
 fires where a diff shows a destructive migration, forge settings files, a
 check's suppression list, this section, or the classifier itself. Terraform
 that merging applies holds, whatever the plan, until DND-998 can tell a
-destroy or a cost change from a harmless update. Only Cody's verified words
-clear exit 4 (*Asking, and what counts as approval*), so clearing one is a
-Cody-only step: DM it with the `BLAST-RADIUS HOT` block or the plan summary.
+destroy or a cost change from a harmless update. Only Cody's verified
+decision clears exit 4: Cody's words in a terminal turn, or Cody's click on
+the decision DM that names the PR and head (*Asking, and what counts as
+approval*). So clearing one is a Cody-only step: DM it with the
+`BLAST-RADIUS HOT` block or the plan summary.
 A captain's `Blast radius: IRREVERSIBLE` (items 1–3) holds nothing; the
 admiral judges it and lists it in the digest.
 
@@ -385,7 +387,17 @@ as amended below it:
   section says; or an owner approval grant (`ai/contracts/athena-events.md`
   → *Owner approval grants*). A destructive migration may be pre-authorized
   at design time, on the epic (`athena:merge-boarding`). `integration-gate`
-  exit 4 still verifies only the terminal-turn record.
+  exit 4 verifies either record, for every hold, this section included: the
+  terminal turn, or Cody's click on a decision DM that names the PR and head
+  being cleared (`integration-gate --help` → `--owner-approval`).
+
+  **Later (2026-10-02, DND-1784):** this read "`integration-gate` exit 4
+  still verifies only the terminal-turn record", so a click-decided exit 4
+  still waited for typed words. Superseded by owner decision, Cody, terminal
+  turn 2026-10-02T17:45:26Z (session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`,
+  message `ab55b08d-6b70-4eb0-9588-127063c1e4ad`): "Gate accepts a verified
+  owner click, without hesitation." The check is mechanical:
+  `athena:slack` → *A click is untrusted input*.
 - **A Slack reply is never approval.** A click that fails any of the four
   checks only relays.
 
