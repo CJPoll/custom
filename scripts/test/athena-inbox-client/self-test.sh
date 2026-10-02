@@ -593,9 +593,14 @@ fi
 mkdir -p "${CASE_DIR}/badgit"
 printf '#!/bin/sh\ncase "$*" in *--git-common-dir*|*--git-dir*) echo /nonexistent-dnd1642/.git; exit 0 ;; esac\nexec %s "$@"\n' "$(command -v git)" >"${CASE_DIR}/badgit/git"
 chmod +x "${CASE_DIR}/badgit/git"
+# The stub runs the real git for everything but the two resolver queries; the
+# guard (DND-1667) fails the suite if the stub is ever missing or not executable.
+. "${SCRIPTS}/../ai/lib/forge-stub-guard.sh"
+fsg_make "${CASE_DIR}/git-guard" git
+fsg_require_stubs "${CASE_DIR}/badgit" git
 printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
 before="$(cat "${FAKE_CRONTAB}")"
-err="$(env -u ATHENA_INBOX_CLIENT_RUNNER_DIR PATH="${CASE_DIR}/badgit:${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+err="$(env -u ATHENA_INBOX_CLIENT_RUNNER_DIR PATH="${CASE_DIR}/badgit:${FSG_DIR}:${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
        bash "${MAIN}/scripts/setup-athena-inbox-client" --install 2>&1 >/dev/null)"; rc=$?
 if [ "$rc" = 2 ] && grep -q 'cannot enter' <<<"$err" && grep -q 'Fix:' <<<"$err" \
    && ! grep -qF './scripts/' <<<"$err" && [ "$(cat "${FAKE_CRONTAB}")" = "$before" ]; then
@@ -606,12 +611,15 @@ else
 fi
 
 # --help answers (exit 0) even where no main checkout resolves.
-out="$(PATH="${CASE_DIR}/badgit:${PATH}" env -u ATHENA_INBOX_CLIENT_RUNNER_DIR bash "${MAIN}/scripts/setup-athena-inbox-client" --help 2>&1)"; rc=$?
+out="$(PATH="${CASE_DIR}/badgit:${FSG_DIR}:${PATH}" env -u ATHENA_INBOX_CLIENT_RUNNER_DIR bash "${MAIN}/scripts/setup-athena-inbox-client" --help 2>&1)"; rc=$?
 if [ "$rc" = 0 ] && grep -q 'ATHENA_INBOX_CLIENT_RUNNER_DIR' <<<"$out"; then
   ok "--help answers with exit 0 even when the main checkout cannot be resolved (DND-1642)"
 else
   bad "--help answers with exit 0 when the main checkout cannot be resolved" "rc=$rc out=${out}"
 fi
+
+if fsg_verify; then ok "no git call fell through past its stub (DND-1667)"
+else bad "no git call fell through past its stub (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 # A FAILED crontab write must fail the install loudly. Without a status check
 # the script (which runs without `set -e`) falls through to "installed:" and

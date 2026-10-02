@@ -744,7 +744,7 @@ REAL_GIT="$(command -v git)"
 printf '#!/bin/sh\ncase "$*" in *--git-common-dir*|*--git-dir*) echo /nonexistent-dnd1642/.git; exit 0 ;; esac\nexec %s "$@"\n' "$REAL_GIT" >"${TMP}/badgit/git"
 chmod +x "${TMP}/badgit/git"
 printf '0 * * * * /opt/other-job\n' >"$ct"
-rc="$(inst "$ct" "PATH=${TMP}/badgit:${PATH}" -- --dry-run)"
+rc="$(inst "$ct" "PATH=${TMP}/badgit:${BIN}:${PATH}" -- --dry-run)"
 if [ "$rc" = 2 ] && grep -q 'cannot enter' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
    && ! grep -qF './scripts/' "${TMP}/inst.out" "${TMP}/inst.err" && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ]; then
   ok "an unenterable git dir is exit 2 naming the cause with a Fix:, never a relative runner (DND-1642)"
