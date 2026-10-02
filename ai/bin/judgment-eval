@@ -40,7 +40,7 @@ HARNESS = File.expand_path("../..", __dir__)
 USAGE = <<~EOF
   Usage: judgment-eval --use-case U --labels FILE --corpus FILE [--content-domain D]
                        [--batch-size N] [--pause S] [--repeat N] [--inbox-root DIR] [--bot-id B]
-                       [--dry-run]
+                       [--question-set-version V] [--dry-run]
          judgment-eval --apply RUN_ID [--dry-run]
          judgment-eval --help
 
@@ -115,6 +115,20 @@ USAGE = <<~EOF
     --bot-id B          slack_routing only: the Slack app's bot id, needed when
                         the owner has more than one Slack app (the server
                         refuses to guess)
+    --question-set-version V
+                        score a CANDIDATE question-set version the server
+                        carries but has not registered (DND-1608), so the
+                        acceptance number exists before the version
+                        deploys. V is sent in every batch body; the server
+                        scores that set under eval:<U> only (no product
+                        call, no feedback) and never applies the run. The
+                        server's answer must name V: any other version, an
+                        old server refusing the key, or a candidate the
+                        server cannot load, stops the run (exit 5) with
+                        its Fix:. It never falls back to the deployed set.
+                        A candidate run prints no apply line and the run
+                        file says "candidate": true. Omit the flag to
+                        evaluate the deployed set, as before.
     --dry-run           validate the files and the join, print the counts, and
                         stop. Reads no token and makes no network call. For
                         slack_routing it prints the context candidate counts
@@ -468,8 +482,10 @@ module Manager
       Effects.pause(opts[:pause]) if (i.positive? || !first_sample) && opts[:pause].positive?
       body = { "use_case" => opts[:use_case], "cases" => batch }
       body["eval_run_id"] = state[:run_id] if state[:run_id]
+      body["question_set_version"] = opts[:question_set_version] if opts[:question_set_version]
       reply = Effects.request("POST", "#{origin}/api/v1/judgments/eval", token, body)
       outcome = classify(reply)
+      outcome = candidate_mismatch(opts, outcome) if outcome[:kind] == :ok
       if outcome[:kind] != :ok
         state[:stopped] = outcome
         break
@@ -481,6 +497,19 @@ module Manager
       state[:sent] += 1
     end
     state
+  end
+
+  # candidate_mismatch(opts, outcome) -> outcome. A candidate eval (DND-1608)
+  # is only as good as the server's answer naming that candidate: a server that
+  # ignored the key answers its deployed version, and that number is not the
+  # candidate's. Stop rather than print it.
+  def candidate_mismatch(opts, outcome)
+    want = opts[:question_set_version]
+    got = outcome[:data]["question_set_version"]
+    return outcome if want.nil? || got == want
+
+    fail_outcome(5, "asked to score question set #{want} but the server answered for #{JudgmentEval.safe(got.to_s)}, so this is not the candidate's number",
+                 "the server ignored question_set_version (it predates DND-1608?); deploy it, or drop --question-set-version to evaluate the deployed set")
   end
 
   # verdicts(opts, loaded, samples) -> the per-case verdicts, or nil for one
@@ -538,6 +567,10 @@ module Manager
       return 3
     end
     later_unscored_lines(samples, opts[:repeat], err)
+    if opts[:question_set_version]
+      out.puts "candidate run: question set #{opts[:question_set_version]} is not the deployed set, so this run is never applied; register and deploy it, then evaluate the deployed set to calibrate"
+      return 0
+    end
     out.puts "apply with#{opts[:repeat] > 1 ? " (sample 1's run)" : ''}: #{PROG} --apply #{data['eval_run_id']}"
     0
   end
@@ -583,7 +616,8 @@ module Manager
       "batches" => { "planned" => batch_count, "sent" => state[:sent], "stopped" => state[:stopped] && state[:stopped][:line] },
       "labels" => loaded[:cases].to_h { |c| [c["case_id"], c["label"]] },
       "results" => state[:results] + context_results(loaded[:context]), "report" => data["report"],
-      "repeat" => opts[:repeat]
+      "repeat" => opts[:repeat],
+      "candidate" => !opts[:question_set_version].nil?
     }.merge(context_doc(loaded[:context])).merge(samples_doc(samples, verdicts))
   end
 
@@ -816,7 +850,8 @@ end
 SPEC = {
   "--help" => :switch, "-h" => :switch, "--use-case" => :value, "--labels" => :value, "--corpus" => :value,
   "--content-domain" => :value, "--batch-size" => :integer, "--pause" => :integer, "--dry-run" => :switch,
-  "--apply" => :value, "--inbox-root" => :value, "--bot-id" => :value, "--repeat" => :integer
+  "--apply" => :value, "--inbox-root" => :value, "--bot-id" => :value, "--repeat" => :integer,
+  "--question-set-version" => :value
 }.freeze
 
 def parse_options(argv)
@@ -825,7 +860,8 @@ def parse_options(argv)
     help: raw["--help"] || raw["-h"], use_case: raw["--use-case"], labels: raw["--labels"], corpus: raw["--corpus"],
     content_domain: raw["--content-domain"], batch_size: raw.fetch("--batch-size", JudgmentEval::MAX_BATCH),
     pause: raw.fetch("--pause", 60), dry_run: raw["--dry-run"] || false, apply: raw["--apply"],
-    inbox_root: raw["--inbox-root"], bot_id: raw["--bot-id"], repeat: raw.fetch("--repeat", 1), given: raw.keys
+    inbox_root: raw["--inbox-root"], bot_id: raw["--bot-id"], repeat: raw.fetch("--repeat", 1),
+    question_set_version: raw["--question-set-version"], given: raw.keys
   }
 rescue StrictArgv::UsageError => e
   fail!(2, e.message, "run #{PROG} --help for the flags")
@@ -843,6 +879,9 @@ def validate_eval!(opts)
   fail!(2, "--pause must be 0..3600", "pass seconds between batches") unless (0..3600).cover?(opts[:pause])
   unless (1..JudgmentEval::MAX_REPEAT).cover?(opts[:repeat])
     fail!(2, "--repeat must be 1..#{JudgmentEval::MAX_REPEAT}", "pass 3 for a keep/revert bar (every sample is a paid judge call per case)")
+  end
+  if opts[:question_set_version] && !/\A[A-Za-z0-9_.-]{1,64}\z/.match?(opts[:question_set_version])
+    fail!(2, "--question-set-version #{JudgmentEval.safe(opts[:question_set_version])} is not a version identifier", "pass a version such as ticket-blocking-v3 (letters, digits, _ . -)")
   end
   if opts[:bot_id] && !/\AB[A-Z0-9]{2,30}\z/.match?(opts[:bot_id])
     fail!(2, "--bot-id #{JudgmentEval.safe(opts[:bot_id])} is not a Slack bot id", "pass the app's bot id (B...)")

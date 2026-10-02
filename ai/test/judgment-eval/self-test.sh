@@ -861,6 +861,58 @@ eq "another use case needs no overlay (--dry-run exits 0)" "${RC}" "0"
 lacks "another use case never reads the overlay" "${ERR}" "private-overlay"
 
 # ---------------------------------------------------------------------------
+echo "== candidate question-set version [DND-1608]"
+
+LAST_BODY() { tail -n 1 "${TMP}/server.log" | jq -c '.body'; }
+
+respond '{"auto":"not_configured"}'
+: > "${TMP}/server.log"
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0
+eq "no --question-set-version: the body carries no question_set_version (old server shape unchanged)" \
+  "$(tail -n 1 "${TMP}/server.log" | jq -c '.body | has("question_set_version")')" "false"
+
+: > "${TMP}/server.log"
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --question-set-version test-v2
+eq "a candidate eval sends question_set_version in every batch body" \
+  "$(tail -n 1 "${TMP}/server.log" | jq -r '.body.question_set_version')" "test-v2"
+has "a candidate eval names the candidate it scored" "${OUT}" "question set test-v2"
+respond '{"status":200,"body":{"data":{"eval_run_id":"11111111-1111-4111-8111-111111111111","use_case":"finding_triage","question_set_version":"test-v2","model":"jev-1.13.0","results":[{"case_id":"c1","outcome":"scored","predicted":"duplicate","confidence":0.9}],"report":{"cases":1,"scored":1,"unscored":{},"labels":[]}}}}'
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --question-set-version test-v2
+eq "a scored candidate eval exits 0" "${RC}" "0"
+has "a candidate eval says it is a candidate and will not apply" "${OUT}" "candidate run"
+lacks "a candidate eval prints no apply line" "${OUT}" "apply with"
+RUNFILE="$(printf '%s\n' "${OUT}" | sed -n 's/^run file: //p')"
+eq "the run file records the candidate" "$(jq -r '.candidate' "${RUNFILE}")" "true"
+
+# A server that ignores the key answers its deployed version: the eval must
+# stop, never present that as the candidate's number.
+respond '{"status":200,"body":{"data":{"eval_run_id":"11111111-1111-4111-8111-111111111111","use_case":"finding_triage","question_set_version":"v1","model":"jev-1.13.0","results":[{"case_id":"c1","outcome":"scored","predicted":"duplicate","confidence":0.9}],"report":{"cases":1,"scored":1,"unscored":{},"labels":[]}}}}'
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --question-set-version test-v2
+eq "a server answering another version than the candidate stops (exit 5)" "${RC}" "5"
+has "the version mismatch names both versions" "${ERR}" "test-v2"
+has "the version mismatch names the answered version" "${ERR}" "v1"
+has "the version mismatch carries Fix:" "${ERR}" "Fix: "
+
+# An old server's closed schema refuses the unknown key: surfaced, never dropped.
+respond '{"status":422,"body":{"error":"unprocessable_entity","fix":"the body has unlisted keys question_set_version. Fix: send only use_case, eval_run_id, content_domain, cases."}}'
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --question-set-version test-v2
+eq "an old server refusing the key is exit 5, no fallback to the deployed set" "${RC}" "5"
+has "the refusal prints the server's Fix:" "${ERR}" "unlisted keys question_set_version"
+
+# A server refusing a candidate it cannot load (the new shape).
+respond '{"status":422,"body":{"error":"unprocessable_entity","fix":"finding_triage has no question set version test-v9 on this server. Fix: ship the candidate."}}'
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0 --question-set-version test-v9
+eq "a candidate the server cannot load is exit 5" "${RC}" "5"
+has "the unloadable-candidate refusal names it" "${ERR}" "test-v9"
+respond '{"auto":"not_configured"}'
+
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --question-set-version 'bad version'
+eq "a malformed --question-set-version is usage (2)" "${RC}" "2"
+has "the malformed-version usage error carries Fix:" "${ERR}" "Fix: "
+run --apply 11111111-1111-4111-8111-111111111111 --question-set-version test-v2 --dry-run
+eq "--apply refuses --question-set-version (usage 2)" "${RC}" "2"
+
+# ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then
   echo "judgment-eval self-test: FAILED"

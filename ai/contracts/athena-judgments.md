@@ -596,6 +596,14 @@ upgrade is a deliberate re-eval and a change to this section, never a drift.
 label).** A change to a question set's criteria text is a new version, and it
 invalidates the old thresholds.
 
+**A candidate version can be measured before it deploys.** An eval body may
+carry `question_set_version`. The deployed version runs the deployed set. A
+version the server carries but has not registered (`QuestionSets.candidates/0`)
+runs that candidate under `eval:<use case>`: no product call, no feedback. Any
+other version is a refusal, never a score against the deployed set. A candidate
+run is never applied. `judgment-eval --question-set-version V` drives it and
+stops when the answer names another version.
+
 **Every threshold carries its provenance**: the eval run that produced it
 (`eval_run_id`, owned by the same owner), the Wilson 95% lower bound on
 precision, the coverage and the case count. A threshold without an eval run

@@ -107,7 +107,7 @@ def not_configured(body):
         "data": {
             "eval_run_id": body.get("eval_run_id", RUN_ID),
             "use_case": body.get("use_case"),
-            "question_set_version": "v1",
+            "question_set_version": body.get("question_set_version", "v1"),
             "model": "jev-1.13.0",
             "results": results,
             "report": {"cases": len(cases), "scored": 0, "unscored": {"not_configured": len(cases)}, "labels": []},
