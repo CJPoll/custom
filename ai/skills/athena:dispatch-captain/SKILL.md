@@ -386,6 +386,10 @@ pattern: land one ticket at a time, as above.
 
 ## Machine capacity gates every dispatch
 
+**Later (2026-10-02):** the load threshold below was credited "(owner,
+2026-09-26)". Superseded: the owner's words that day name no number. 12 is a
+provisional coordinator default until DND-1688 replaces it.
+
 **Later (2026-09-26):** this section was *A `CONTENTION:` line lowers the cap
 for the rest of the run*. Its *Not a probe* bullet forbade sampling load at
 dispatch time, and a `CONTENTION:` line lowered one repo's cap. Superseded by
@@ -400,8 +404,9 @@ below it, these rules decide.
 
 - **Hold while the machine is loaded.** Before each dispatch's step 1 (initial,
   refill, resume re-dispatch), after `fleet-control check` exits 0, read the
-  1-min load: `cut -d' ' -f1 /proc/loadavg`. Over **12** (owner, 2026-09-26):
-  do not dispatch. Keep the Mission `QUEUED`, log `Load <value> -> holding`, and
+  1-min load: `cut -d' ' -f1 /proc/loadavg`. Over **12** (a provisional
+  coordinator default, not the owner's number; calibration is DND-1686..1688,
+  `ai/docs/capacity-gate-metric.md`): do not dispatch. Keep the Mission `QUEUED`, log `Load <value> -> holding`, and
   re-read on your next sweep. At or under 12, dispatch and log `Load <value>` on
   the dispatch line. A load you cannot read is not load 0: hold, and tell the
   session that launched you.
