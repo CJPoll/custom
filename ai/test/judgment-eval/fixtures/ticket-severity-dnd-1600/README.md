@@ -188,3 +188,34 @@ the v1 runs of record above (`a16c9454`, `b8729379`).
   HIGH.
 - H per label: LOW recall 63/172, precision 63/82; MEDIUM 48/90, 48/137;
   HIGH 14/19, 14/61.
+
+**Later (2026-10-02):** `ticket-severity-v3` measured as a candidate
+(`--repeat 3`, `jev-1.13.0`; runs `014d843f` A, `6481f987` B, `fe7cdcac` L,
+`e065da3f` H). It missed the bar and was not strictly no worse than v2, so
+it was not registered.
+
+| item | v2 | v3 |
+|---|---|---|
+| 1 | U 4/11; U+L-up 7/37 | 5/11; 24/37 |
+| 2 | 5/5; 0 | 5/5; 0 |
+| 3 | 1 moved; 0 two | 2 moved (`OVR-2`, `OVR-4`); 0 two |
+| 4 | `under-2` HIGH | MEDIUM |
+| 5 | 0 | 1 (`OVR-2`) |
+| 6 | 7/13; 21/29 | 5/9; 19/29 |
+| 7 | 133 above; 125/281 | 122 above; 141/281 |
+| 8 | 5 | 4 |
+| bar 3 | 48/90 | 53/90 |
+
+`ticket-severity-v4` (coordinator decision, the last iteration) is v3
+plus three clause fixes aimed at the four controls v3 moved down:
+
+1. Demand computed against a configured limit counts as HIGH exhaustion
+   (`OVR-2`).
+2. A test that has already turned main or a gate red is HIGH, even when a
+   re-run cleared it (`under-2`).
+3. LOW's "not reached" does not cover a test that can flake today or an
+   unchecked production capacity question (`under-1`, `OVR-4`).
+
+v4 is measured against this same v3 bar, unchanged: the same files, the
+same 2-of-3 reading rule, and the v2 baseline above. It is a candidate
+only and is not registered here.
