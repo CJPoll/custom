@@ -552,13 +552,14 @@ with_hung_git do |tmp, git, _bin, fifo|
 end
 
 with_store do |dir, _tmp|
-  with_hung_git do |tmp, _git, bin, fifo|
-    old_path = ENV["PATH"]
-    begin
-      ENV["PATH"] = "#{bin}:#{old_path}"
+  with_hung_git do |tmp, git, _bin, fifo|
+    # The hung git is named by absolute path, never put on PATH (DND-1691): a
+    # missing or non-executable stub could then fall through to the real git.
+    # emit's own GitContext.read call runs with the stub's path in place of "git".
+    read = T::GitContext.method(:read)
+    done = line = nil
+    with_stub(T::GitContext, :read, ->(d, **kw) { read.call(d, **kw, git: git) }) do
       done, line = bounded(fifo) { T.emit("telemetry.probe", repo_dir: tmp, env: env_for(dir)) }
-    ensure
-      ENV["PATH"] = old_path
     end
     check("miss: an emit behind a hung git returns its line, the unit unresolved") do
       done && line.is_a?(Hash) && line["unit"].nil? && line["unit_source"] == "none" && line["repo"].nil?

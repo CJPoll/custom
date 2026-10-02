@@ -26,6 +26,18 @@
 #   .bash extension, or a shebang naming sh, bash, zsh, ksh or dash). An
 #   untracked suite is read once it is staged.
 #
+# RUBY SUITES (DND-1691)
+#
+#   The helper is a shell library, so a Ruby suite cannot use it. A tracked Ruby
+#   test file (.rb or a ruby shebang) that writes a STUBBED_TOOLS file AND puts
+#   anything on PATH is refused outright, with a Fix: naming the guarded route
+#   (name the stub by absolute path through a seam; no PATH entry, nothing to
+#   fall through to). Why a refusal and not a Ruby port of the helper: no Ruby
+#   suite needs a PATH stub, and a second guard implementation would be a second
+#   thing to keep in step. The rule, its shapes and what it does not model are
+#   under "Ruby suites" in the code. It reads the working tree each run; there
+#   is no landed set to ratchet, since the refusal has no guarded shape to lose.
+#
 # WHAT IS FLAGGED
 #
 #   A suite STUBS A TOOL ON PATH when, in code (see WHAT IS CODE), it
@@ -122,8 +134,9 @@
 #     fsg_verify's status is counted, and whether a stub fsg_require_stubs
 #     proved executable is removed later.
 #   * Code inside `bash -c '...'` (single-quoted, so read as data).
-#   * Non-shell test code (a Ruby `--self-test` that stubs gh on PATH): the
-#     helper is a shell library and such code cannot source it.
+#   * Non-test, non-shell code (a Ruby `--self-test` inside ai/bin that stubs gh
+#     on PATH): not a tracked test path. Ruby TEST suites are covered by a
+#     refusal instead (see RUBY SUITES below).
 #   * A call to the real tool by absolute path (the helper cannot see it
 #     either), and a stub's own deliberate pass-through to the real tool.
 #
@@ -733,6 +746,87 @@ def analyze(text)
 end
 
 # ---------------------------------------------------------------------------
+# Ruby suites (DND-1691)
+#
+# forge-stub-guard.sh is a shell library: a Ruby suite cannot source it, so a
+# Ruby suite that stubs a tool on PATH has no guard to use. The rule is a
+# refusal, not a port of the helper: a Ruby suite may not put a stub on PATH.
+# It names the stub by path instead (a `git:` / `bin:` seam the code under test
+# takes, or a stub of the Ruby method that runs the tool), so PATH lookup is
+# never involved and nothing can fall through to the real tool.
+#
+# A Ruby suite is a tracked test path (ai/lib/first_party.rb `test_path?`)
+# that is not shell and is Ruby (.rb, or a ruby shebang). It is flagged when,
+# in code (whole-line `#` comments and =begin/=end blocks are dropped), it
+#   1. puts something on PATH: `ENV["PATH"] =` (also ||= and +=), `ENV.store` /
+#      `ENV.update` / `ENV.merge!` naming PATH, a `"PATH" =>` env hash, or a
+#      `"PATH=` string; and
+#   2. writes a file whose name is one of STUBBED_TOOLS: a `File.join(...,
+#      "<tool>")` or a string ending `/<tool>`, in a file that also writes
+#      (File.write/open/symlink/chmod, IO.write, FileUtils.cp/ln/mv/install,
+#      or a .write( call).
+# Not modeled (named): a stub whose name is computed, a PATH put through a
+# helper or a spawned `env`, and a suite with no .rb extension and no ruby
+# shebang. An over-read is a false red, never a false green. There is no
+# suppression marker, and no landed ratchet: the rule is read from the working
+# tree on every run, and a refusal has no guarded shape to lose.
+
+RUBY_SHEBANG = %r{\A#!\s*\S*(?:/|\s)(?:env\s+)?ruby\b}.freeze
+RUBY_EXT = /\.rb\z/.freeze
+RUBY_PUT_PATH = /ENV\s*\[\s*["']PATH["']\s*\]\s*(?:\|\||\+)?=(?!=)|ENV\s*\.\s*(?:store|update|merge!)\b[^\n]*PATH|["']PATH["']\s*=>|["']PATH=/.freeze
+RUBY_WRITE = /\bFile\s*\.\s*(?:write|binwrite|open|symlink|chmod)\b|\bIO\s*\.\s*(?:write|binwrite)\b|\bFileUtils\s*\.\s*(?:cp|cp_r|ln|ln_s|ln_sf|mv|install|touch)\b|\.write\(/.freeze
+RUBY_TOOL_NAME = STUBBED_TOOLS.map { |t| Regexp.escape(t) }.join("|")
+RUBY_STUB_NAME = %r{File\s*\.\s*join\([^\n]*,\s*["'](#{RUBY_TOOL_NAME})["']\s*\)|/(#{RUBY_TOOL_NAME})["']}.freeze
+
+RUBY_FIX_TEXT = "Fix: a Ruby suite cannot source #{HELPER_REL}, so do not put a stub on PATH " \
+                "from Ruby. Name the stub by path instead: pass the stub's absolute path " \
+                "through a seam the code under test takes (`git: path`, `bin: path`), or stub " \
+                "the Ruby method that runs the tool (ai/test/telemetry/telemetry_test.rb " \
+                "wraps T::GitContext.read to call it with the hung git's path). With no PATH " \
+                "entry there is nothing to fall through to. If the PATH layout itself is " \
+                "under test, write the suite as a shell suite that sources the helper. " \
+                "There is no suppression marker."
+
+def ruby_file?(rel, text)
+  rel =~ RUBY_EXT || text.lines.first.to_s =~ RUBY_SHEBANG ? true : false
+end
+
+def ruby_code_lines(text)
+  in_block = false
+  text.each_line.with_index(1).filter_map do |raw, n|
+    if in_block
+      in_block = false if raw.start_with?("=end")
+      next
+    end
+    if raw.start_with?("=begin")
+      in_block = true
+      next
+    end
+    next if raw.lstrip.start_with?("#")
+
+    [n, raw]
+  end
+end
+
+# => [[lineno, tool], ...] the stub writes of a Ruby suite that also puts
+# something on PATH; [] when it does not. Lineno is the stub name's line.
+def ruby_analyze(text)
+  code = ruby_code_lines(text)
+  return [] unless code.any? { |(_n, l)| l =~ RUBY_PUT_PATH }
+  return [] unless code.any? { |(_n, l)| l =~ RUBY_WRITE }
+
+  code.filter_map do |(n, l)|
+    m = l.match(RUBY_STUB_NAME)
+    [n, m[1] || m[2]] if m
+  end
+end
+
+def ruby_problem(tool)
+  "a Ruby suite that stubs #{tool} on PATH (it writes a #{tool} file and sets PATH); " \
+    "#{HELPER_BASENAME} is a shell library and cannot guard it"
+end
+
+# ---------------------------------------------------------------------------
 # Repository scan
 
 # => { suites: Integer, on_path: Integer, findings: [[rel, lines, problem]],
@@ -741,6 +835,7 @@ end
 #      tracked: [rel] (every path git lists) }
 def scan(root)
   suites = 0
+  ruby_suites = 0
   on_path = 0
   skipped = []
   findings = []
@@ -761,6 +856,11 @@ def scan(root)
       text = text.scrub unless text.valid_encoding?
     rescue SystemCallError, IOError => e
       unreadable << [rel, e.message]
+      next
+    end
+    if !shell_file?(rel, text) && ruby_file?(rel, text)
+      ruby_suites += 1
+      ruby_analyze(text).each { |(ln, tool)| findings << [rel, ln.to_s, ruby_problem(tool)] }
       next
     end
     next unless shell_file?(rel, text)
@@ -784,7 +884,7 @@ def scan(root)
     r[:problems].each { |p| findings << [rel, lines, p] }
   end
   { suites: suites, on_path: on_path, findings: findings, unreadable: unreadable,
-    skipped: skipped, files: files, tracked: tracked }
+    skipped: skipped, files: files, tracked: tracked, ruby_suites: ruby_suites }
 end
 
 # ---------------------------------------------------------------------------
@@ -1013,7 +1113,7 @@ def run_check(root = REPO, landed: nil)
   if r[:findings].empty? && rr && rr[:findings].empty?
     puts "check-forge-stub-guard: OK -- #{r[:suites]} test shell suite(s) " \
          "considered, #{r[:on_path]} stubbing #{STUBBED_TOOLS.join('/')} on PATH, all guarded by " \
-         "#{HELPER_BASENAME}; 0 flagged; #{skipped_note(r)}; #{ratchet_note(rr)}."
+         "#{HELPER_BASENAME}; #{r[:ruby_suites]} Ruby test suite(s) read, none stubbing a tool on PATH; 0 flagged; #{skipped_note(r)}; #{ratchet_note(rr)}."
     return 0
   end
 
@@ -1025,7 +1125,8 @@ def run_check(root = REPO, landed: nil)
          "stub would fall through to the REAL tool (DND-1647/DND-1666/DND-1667; " \
          "#{skipped_note(r)}):"
     r[:findings].each { |(rel, lines, p)| warn "  #{rel}:#{lines}: #{p}" }
-    warn "  #{FIX_TEXT}"
+    warn "  #{FIX_TEXT}" if r[:findings].any? { |(_rel, _l, p)| !p.start_with?("a Ruby suite") }
+    warn "  #{RUBY_FIX_TEXT}" if r[:findings].any? { |(_rel, _l, p)| p.start_with?("a Ruby suite") }
   end
   if unmeasured
     warn "check-forge-stub-guard: FAILED -- could not measure the landed bar (DND-1680):"
@@ -1043,6 +1144,25 @@ end
 
 # ---------------------------------------------------------------------------
 # Self-test
+
+RUBY_BAD_FIXTURE = <<~'RB'
+  require "tmpdir"
+  Dir.mktmpdir do |tmp|
+    git = File.join(tmp, "git")
+    File.write(git, "#!/bin/sh\nexit 0\n")
+    File.chmod(0o755, git)
+    ENV["PATH"] = "#{tmp}:#{ENV['PATH']}"
+  end
+RB
+RUBY_GOOD_FIXTURE = <<~'RB'
+  require "tmpdir"
+  Dir.mktmpdir do |tmp|
+    git = File.join(tmp, "git")
+    File.write(git, "#!/bin/sh\nexit 0\n")
+    File.chmod(0o755, git)
+    run_with(git: git)
+  end
+RB
 
 def run_self_test
   ok = true
@@ -1195,6 +1315,31 @@ def run_self_test
                    "helper default #{default.inspect}, check #{FSG_DEFAULT_TOOLS.inspect}")
   end
 
+  # DND-1691: Ruby suites. [name, text, want [[line, tool]...]]
+  ruby_cases = [
+    ["ENV PATH prepend + a git file written", RUBY_BAD_FIXTURE, [[3, "git"]]],
+    ["ENV PATH ||= is a PATH put", "File.write(File.join(d, \"gh\"), \"x\")\nENV[\"PATH\"] ||= d\n", [[1, "gh"]]],
+    ["a \"PATH\" => env hash is a PATH put",
+     "FileUtils.cp(src, \"\#{b}/docker\")\nOpen3.capture3({ \"PATH\" => b }, \"x\")\n", [[1, "docker"]]],
+    ["ENV.store naming PATH is a PATH put", "File.write(\"\#{b}/curl\", \"x\")\nENV.store(\"PATH\", b)\n", [[1, "curl"]]],
+    ["an explicit-path stub with no PATH put passes", RUBY_GOOD_FIXTURE, []],
+    ["a PATH put with no stub file passes", "ENV[\"PATH\"] = \"/usr/bin\"\nFile.write(x, \"y\")\n", []],
+    ["a stub file with no write call passes", "g = File.join(d, \"git\")\nENV[\"PATH\"] = d\n", []],
+    ["a commented PATH put does not count", "# ENV[\"PATH\"] = d\nFile.write(File.join(d, \"git\"), \"x\")\n", []],
+    ["a =begin block is not code", "=begin\nENV[\"PATH\"] = d\n=end\nFile.write(File.join(d, \"git\"), \"x\")\n", []],
+    ["== is not a PATH put", "File.write(File.join(d, \"git\"), \"x\")\nx if ENV[\"PATH\"] == d\n", []],
+  ]
+  ruby_cases.each do |(name, text, want)|
+    count += 1
+    got = ruby_analyze(text)
+    fail_case.call("ruby: #{name}", "want #{want.inspect}, got #{got.inspect}") unless got == want
+  end
+  count += 1
+  unless ruby_file?("ai/test/x/y_test.rb", "") && ruby_file?("ai/test/x/run", "#!/usr/bin/env ruby\n") &&
+         !ruby_file?("ai/test/x/run", "#!/bin/sh\n")
+    fail_case.call("ruby_file? reads .rb and a ruby shebang", "misclassified")
+  end
+
   open_cases = [
     ["unclosed heredoc", "cat <<EOF\nnever closed\n", "heredoc"],
     ["unclosed single quote", "echo 'never closed\n", "single quote"],
@@ -1220,6 +1365,9 @@ def run_self_test
       "ai/bin/tool" => bad,                   # not a test path
       "ai/test/rb/self-test.rb" => "#!/usr/bin/ruby\n#{bad}", # not shell
       "ai/test/open/self-test.sh" => "#!/bin/bash\ncat <<EOF\n",
+      # DND-1691: Ruby suites. One stubs git on PATH, one names the stub by path.
+      "ai/test/rubybad/bad_test.rb" => RUBY_BAD_FIXTURE,
+      "ai/test/rubygood/good_test.rb" => RUBY_GOOD_FIXTURE,
     }.each do |rel, body|
       FileUtils.mkdir_p(File.dirname(File.join(dir, rel)))
       File.write(File.join(dir, rel), body)
@@ -1234,7 +1382,8 @@ def run_self_test
     end
     count += 1
     got = r[:findings].map(&:first).uniq.sort
-    want = ["ai/hooks/x.self-test.sh", "ai/test/bad/self-test.sh", "ai/test/noext/run"]
+    want = ["ai/hooks/x.self-test.sh", "ai/test/bad/self-test.sh", "ai/test/noext/run",
+            "ai/test/rubybad/bad_test.rb"]
     fail_case.call("tree scan findings", "want #{want}, got #{got}") unless got == want
     count += 1
     unless r[:unreadable].map(&:first) == ["ai/test/open/self-test.sh"]
