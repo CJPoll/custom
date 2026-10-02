@@ -290,8 +290,10 @@ trap 'ig_emit_run $?' EXIT
 # the test-slot refusals in section 0 included (DND-1504: they used to come
 # first, so a missing test-slot left an earlier pass standing). The run inside
 # the slot repeats this harmlessly, and removes (and checks) again for the
-# head it gates. Only a missing receipt library (above) comes earlier: without
-# it the receipt's path is unknown.
+# head it gates. Two refusals still come earlier, by necessity: a usage error
+# in the argument parse (which must stay write-free so --help writes nothing,
+# and which never chose a gate run), and a missing receipt library (above),
+# without which the receipt's path is unknown.
 HEAD0="$(git rev-parse --verify -q "HEAD^{commit}" 2>/dev/null)"
 if [ -n "$HEAD0" ]; then
   OUTER_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
@@ -305,7 +307,7 @@ if [ -n "$HEAD0" ]; then
   esac
 fi
 
-# --- 0. the machine test-slot pool (DND-486)-------------------------------
+# --- 0. the machine test-slot pool (DND-486) ------------------------------
 # The gate is the heaviest run an admiral starts, and ~23 unbounded heavy runs
 # at once took this box to load 54 and flaked timing-sensitive suites (DND-473).
 # So the gate runs inside test-slot, which bounds heavy runs per machine.

@@ -1156,12 +1156,15 @@ exit "$rc"
 FAKE
   } >"$1"; chmod +x "$1"
 }
-# plant_receipt <repo> -- a passing receipt for HEAD, as an earlier OK left it.
+# plant_receipt <repo> -- a passing receipt for HEAD, as an earlier OK left
+# it; sets rf to its path. Not a $(...) helper, so a failed plant is counted:
+# a plant that did not land would make every "no receipt" check below pass
+# without testing anything.
 plant_receipt() {
-  local rf; rf="$(receipt_of "$1" "$(git -C "$1" rev-parse HEAD)")"
+  rf="$(receipt_of "$1" "$(git -C "$1" rev-parse HEAD)")"
   mkdir -p "$(dirname "$rf")"
   printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s"}\n' "$(git -C "$1" rev-parse HEAD)" >"$rf"
-  printf '%s' "$rf"
+  [ -s "$rf" ] || bad "fixture: receipt not planted at ${rf}"
 }
 SLOT_FIX_FULL="Fix: the machine's heavy-test slot pool stayed full"
 
@@ -1169,7 +1172,7 @@ SLOT_FIX_FULL="Fix: the machine's heavy-test slot pool stayed full"
 L="${TMP}/s14-layout"; layout_copy "$L"
 fake_slot "$L/ai/bin/test-slot" outer-timeout "${TMP}/s14.calls" "${TMP}/s14-pool"
 R="${TMP}/s14"; slot_repo "$R" "touch '${R}/GATE_RAN'"
-rf="$(plant_receipt "$R")"
+plant_receipt "$R"
 out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
 [ "$rc" -eq 6 ] && ok "s14 a TIMEOUT on the outer slot is exit 6" || bad "s14 expected exit 6, got $rc" "$out"
 grep -q "GATE NOT RUN on $(git -C "$R" rev-parse --short=12 HEAD): no machine test slot within the wait window" <<<"$out" \
@@ -1183,11 +1186,14 @@ grep -q 'running gate on the integrated head' <<<"$out" && bad "s14 the run insi
   && ok "s14 the fake test-slot was called, once, and timed out" || bad "s14 the fake test-slot was not the one called (calls: $(tr '\n' ' ' <"${TMP}/s14.calls" 2>/dev/null))" "$out"
 
 # s15: the outer slot is taken; the gate's own call, from inside the slot,
-# reports TIMEOUT. The same exit 6, from the second place it is raised.
+# reports TIMEOUT. The same exit 6, from the second place it is raised. The
+# real test-slot re-enters a held cpu slot at once and never times out there,
+# so this branch is defensive: it covers a test-slot that drifts from that
+# contract. s15 does not claim the real test-slot behaves this way.
 L="${TMP}/s15-layout"; layout_copy "$L"
 fake_slot "$L/ai/bin/test-slot" inner-timeout "${TMP}/s15.calls" "${TMP}/s15-pool"
 R="${TMP}/s15"; slot_repo "$R" "touch '${R}/GATE_RAN'"
-rf="$(plant_receipt "$R")"
+plant_receipt "$R"
 out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
 [ "$rc" -eq 6 ] && ok "s15 a TIMEOUT on the gate's own slot call is exit 6" || bad "s15 expected exit 6, got $rc" "$out"
 grep -q 'running gate on the integrated head' <<<"$out" && ok "s15 the run inside the slot reached the gate step" || bad "s15 the inner run never reached the gate step" "$out"
@@ -1204,7 +1210,7 @@ grep -qE 'INTEGRATION OK|gate RED' <<<"$out" && bad "s15 read a TIMEOUT as OK or
 # slot wait and its cleanup trap, so it must still leave no pass for the head.
 L="${TMP}/s16-layout"; layout_copy "$L"
 R="${TMP}/s16"; slot_repo "$R" "touch '${R}/GATE_RAN'"
-rf="$(plant_receipt "$R")"
+plant_receipt "$R"
 out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && ok "s16 exit 2 when test-slot is absent" || bad "s16 expected exit 2, got $rc" "$out"
 grep -qF "Fix: the main checkout's ai/bin/test-slot is missing (${L}/ai/bin/test-slot)" <<<"$out" \
@@ -1216,7 +1222,7 @@ grep -qE 'INTEGRATION OK|gate RED|GATE NOT RUN' <<<"$out" && bad "s16 reported a
 # ...and the same for a script checkout whose main checkout cannot be named.
 L="${TMP}/s16-nogit"; layout_copy "$L"; rm -rf "$L/.git"
 R="${TMP}/s16b"; slot_repo "$R" "touch '${R}/GATE_RAN'"
-rf="$(plant_receipt "$R")"
+plant_receipt "$R"
 out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && grep -q 'cannot locate the main checkout' <<<"$out" && ok "s16 an unresolvable script checkout is exit 2" || bad "s16 no-git layout expected exit 2, got $rc" "$out"
 [ ! -e "$rf" ] && ok "s16 no receipt after the unresolvable-checkout refusal" || bad "s16 a planted pass survived the unresolvable-checkout refusal" "$(cat "$rf")"
