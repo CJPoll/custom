@@ -87,7 +87,10 @@ The landing, as Cody confirmed it (2026-10-01):
    push to main (`NO RECEIPT`, exit 3) unless integration-gate passed exactly
    the pushed commit, or the pushed tree is the clean merge of a head it
    passed onto `origin/main`. So fetch before the rebase, as above: the
-   wrapper reads `origin/main` locally. Hold the lock around
+   wrapper reads `origin/main` locally. A stacked ticket's report head was
+   gated against the ticket below, so it is never covered: re-gate it
+   ([[athena:dispatch-captain]] → *Batch Missions (tier 4)* → the
+   `~/dev/custom` landing). Hold the lock around
    the fetch, rebase and push only, never around a gate. Before the push, run
    `~/dev/custom/ai/bin/landing-installers --dry-run --from <step 2's SHA>
    --to <the head>`. If it names an installer and nothing authorizes you to

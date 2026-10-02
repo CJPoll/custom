@@ -337,7 +337,16 @@ how such tier-4 tickets get that captain cheaply. Do not batch any other tier.
     system*): fast-forward main to ticket 1's head, then to ticket 2's, each
     after its own `integration-gate`. The heads already stack, so nothing is
     rebased.
-  - **A forge repo, `~/dev/custom` included:** `locked-merge` squash-merges one
+  - **`~/dev/custom`** lands each ticket by the no-CI landing
+    ([[athena:merge-boarding]] → *The merge bar*), not `locked-merge`. Ticket
+    1 lands by its clean rebase. Each ticket above it: `git rebase --onto
+    origin/main <old head SHA of the ticket below>`, then `integration-gate
+    --with-critic --rebase` on that head, then push. Its report's gate and
+    PASS were judged against the ticket below, so they do not cover main,
+    and `gh-athena` refuses the push `NO RECEIPT` without the re-gate.
+    Measured 2026-10-02 (DND-1800+1801+1812): both stacked tickets were
+    refused and re-gated.
+  - **Any other forge repo:** `locked-merge` squash-merges one
     PR into that PR's own base. So after ticket N lands, retarget PR N+1 to
     the MR target branch (`gh-athena pr edit <n> --base <branch>`, as in
     [[athena:captain-return]]). Then rebase it onto the landed squash with
