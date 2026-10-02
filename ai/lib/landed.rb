@@ -436,12 +436,30 @@ module Landed
         raise Unreadable.new([[label, "git cat-file --batch: #{blob[0, 12]} could not be read (#{header.inspect})"]])
       end
 
-      texts[blob] = out.byteslice(nl + 1, size.to_i)
+      text = out.byteslice(nl + 1, size.to_i)
+      unless text && text.bytesize == size.to_i && out.getbyte(nl + 1 + size.to_i) == 10
+        raise Unreadable.new([[label, "git cat-file --batch: #{blob[0, 12]} came back truncated"]])
+      end
+
+      texts[blob] = text
       pos = nl + 1 + size.to_i + 1
     end
     texts
   rescue Errno::ENOENT
     raise Unreadable.new([[label, "git executable not found on PATH"]])
+  rescue Errno::EPIPE
+    raise Unreadable.new([[label, "git cat-file --batch exited before reading every blob sha"]])
+  end
+
+  # Every path whose working-tree content differs from the commit sha's tree
+  # (`git diff --name-only <sha>`: edited, added, or deleted since). Where a
+  # landed file's content may have moved to. Raises Unreadable when the diff
+  # cannot run.
+  def changed_paths(root, sha, label)
+    out, ok = git_read(root, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", sha, "--")
+    raise Unreadable.new([[label, "#{sha[0, 12]}: git diff --name-only failed"]]) unless ok
+
+    out.split("\0").reject(&:empty?)
   end
 
   # Reads path at every landed point and yields (text, label, sha) for each

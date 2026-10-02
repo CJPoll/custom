@@ -3,7 +3,10 @@
 #
 # Source this from a suite that runs a check whose bar is what LANDED on origin
 # (ai/lib/landed.rb: check-inbox-registry, check-hooks-registered) and asserts
-# that the check agrees with an installer run from the same tree. Run against
+# that the check agrees with an installer run from the same tree. A suite may
+# also land one tree and stage a change on top (landed_fixture_land, then
+# edit), to test a landed-versus-branch ratchet hermetically
+# (ai/test/check-forge-stub-guard/self-test.sh, DND-1680). Run against
 # the real checkout, such a suite measures the branch's copy against the REAL
 # origin/main's copy. So it goes red on any branch that edits the registry (the
 # edit is pending until it lands, by design), and it reads the real origin over
@@ -14,8 +17,8 @@
 # bare origin there as main. In the fixture, "what landed" is the tree under
 # test, so the suite asserts what it always meant to (installer and check
 # agree), with no network and no real origin. The landed-versus-branch cases
-# live in the checks' own suites (ai/test/check-*-registered/self-test.sh),
-# not here.
+# live in the checks' own suites (ai/test/check-*-registered/self-test.sh,
+# ai/test/check-forge-stub-guard/self-test.sh), not here.
 #
 # The fixture's git runs with no global or system config, so the owner's hooks,
 # signing and aliases stay out of it. A gate pin (ATHENA_LANDED_PIN_*) is keyed
