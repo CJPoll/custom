@@ -6122,6 +6122,10 @@ build by name:
   approval grants*);
 - DND-446: the morning digest (*Morning digest*);
 - DND-447 and DND-449: meetings and meeting catch-up;
+- DND-1742: the owner's RSVP on `/priorities` and the stored `self_response`
+  (*The storage boundary*);
+- DND-1767, DND-1768, DND-1769 and DND-1770: calendar tools and the approval
+  path (*Calendar management*);
 - DND-1157: item summaries (*Item summaries*);
 - DND-1395: work Notion summaries and the one-time summary backfill (*Item
   summaries*).
@@ -6453,6 +6457,7 @@ closed list. The list has three parts:
    | `message_text` | `slack_ask` | the message's text |
    | `slack_thread_ts` | `slack_ask` | the thread's `ts`, or `null` when the message is not in a thread |
    | `starts_at` | `meeting` | the meeting's start time |
+   | `self_response` | `meeting` | the owner's own response (`accepted`, `tentative`, `declined`, `needsAction`), or `null` when the owner is not on the guest list (DND-1742) |
 
 **Later (2026-10-02):** list 2 did not name `forge_trigger`. DND-1350
 (gen_saas #593, `0bc5d220`) adds it: why a `forge_review` item is the
@@ -6479,8 +6484,15 @@ before DND-1350 holds `null` until an event next writes it. The row reads
 | `slack_ask` | `source_ref`, `url` (a link built from the ids alone) | `message_text`, `slack_thread_ts` |
 | `forge_review` | `source_ref`, `url`, `title`, `status`, `source_revision` | none |
 | `forge_token` | `source_ref`, `url`, `title`, `status`, `due_on`, `source_revision` | none |
-| `meeting` | `source_ref`, `url`, `title` | `starts_at` |
+| `meeting` | `source_ref`, `url`, `title` | `starts_at`, `self_response` |
 | `manual` | `source_ref`, `url`, `title`, `source_priority`, `due_on` | none |
+
+**Later (2026-10-02, DND-1764):** the `meeting` row's permissive fields were
+`starts_at` alone, so the owner's stored response (DND-1742, Google's
+`responseStatus` for the attendee marked `self`) was refused by name. It is
+now the permissive field `self_response`: one closed value about the owner,
+never another guest's. No `join_url` is added here (DND-1765, owner decision
+OD-2).
 
 **Later (2026-09-28):** the `forge_review` row listed no `source_revision`.
 DND-439 adds it: the merge request's `updated_at`, the family's ordering
@@ -6575,6 +6587,9 @@ field.
 - **Mission pointers are a separate schema.** *Mission pointers are metadata
   only* keeps its own closed list, which refuses labels and assignees. This
   section does not change it.
+- **Calendar changes are a separate schema.** `calendar_changes` keeps its own
+  closed column list (*Calendar management* → *The approval path*). It holds
+  no guest address and no proposed value, and it widens nothing here.
 
 **Removing a permissive field.** When the owner pulls one back, the change
 does three things:
@@ -7483,6 +7498,278 @@ writes: action `owner_dm`, no machine, a body hash, never a body.
 **Each owner is its own boundary.** The scheduler runs each owner in
 `Athena.PerRow.run/2`. One owner's failure never stops another's digest.
 
+### Calendar management
+
+A session manages the owner's Google calendar through nine `athena` MCP tools
+(DND-1761). Design: `ai/docs/calendar-management.md` (sections *1. The tool
+surface* and *2. Reaching other people*, and *Access control*). The
+implementing tickets cite the subsection they build by name: DND-1767 (the
+reads), DND-1768 (the owner-only writes and the change log), DND-1769 (the
+approval path, `calendar_invite`, `calendar_uninvite`, `calendar_change`) and
+DND-1770 (`calendar_rsvp`). None of these tools, the `calendar_changes` table
+or the approval page exists yet (gen_saas `origin/main` `613aedb9`, read
+2026-10-02). Every sentence about them is an obligation on its implementer.
+
+**The calendar is not the index.** These tools write the owner's primary
+Google calendar and the `calendar_changes` log. None of them writes an index
+row. A `meeting` item changes only through the server's own calendar sync
+(DND-447), mapped through *The storage boundary*.
+
+#### The tools
+
+Nine tools: two reads, six writes, one status read.
+
+| Tool | Does | Reaches other people |
+| --- | --- | --- |
+| `calendar_events` | lists events in a window | never |
+| `calendar_event` | one event, with its guest list | never |
+| `calendar_create` | creates an event (title, times, location, description, guests, Zoom link) | when it has guests |
+| `calendar_update` | changes title, location, or start and end (reschedule) | when the event has other guests |
+| `calendar_invite` | adds guests | always |
+| `calendar_uninvite` | removes guests | always |
+| `calendar_attach_zoom` | puts a pasted Zoom link on an event | when the event has other guests |
+| `calendar_rsvp` | the owner's own response: accepted, tentative, declined | the organizer, always |
+| `calendar_change` | the state of a change waiting for approval | never |
+
+- **Reads are apart from writes,** so a Claude Code permission rule can allow
+  the reads and deny the writes.
+- **There is no tool with an `op` argument.** Each tool keeps its own closed
+  schema and its own refusals.
+- **Reschedule is `calendar_update` with `starts_at` and `ends_at`.**
+- **No `notify` or `sendUpdates` argument.** The server decides whether a call
+  reaches anyone, from the event as Google holds it now (*Reaching other
+  people*). A caller cannot opt out of the approval.
+- **Not built:** deleting or cancelling an event, editing a whole recurring
+  series, editing a description after creation, and any calendar other than
+  the owner's primary one.
+
+#### Rules every tool shares
+
+- **Caller.** A session on one of the owner's machines, through the machine
+  token. The calendar is the machine owner's primary calendar, through
+  DND-447's credentials (`Secrets.with_secret/4`). No argument names an owner
+  or a calendar. An argument naming an owner or a machine is refused, as for
+  fleet reports (*Fleet identity: owner and machine are stamped from the
+  token*).
+- **Write tools take `claude_session_id`.** It must be a fleet session bound
+  to the calling machine, as the lease tools require. An unknown session, or
+  one bound to another machine, is `not_found`. It attributes the change in
+  `calendar_changes` and the digest.
+- **Closed schema on the raw arguments.** An unknown key is
+  `invalid_argument` naming the key.
+- **Event ids** are the ids `calendar_events` returns. For a recurring event
+  that is one occurrence's id; a write changes that occurrence only. Before
+  every write the server reads the event from the owner's primary calendar.
+  An id not there is `not_found`.
+- **Times** are RFC 3339 with an offset (`2026-10-05T15:00:00-06:00`). A time
+  with no offset is `invalid_argument` naming the field. `ends_at` must be
+  after `starts_at`, at most 24 hours later. All-day events are read but not
+  created.
+- **Organizer-only writes.** `calendar_update`, `calendar_invite`,
+  `calendar_uninvite` and `calendar_attach_zoom` need the owner to be the
+  organizer (`organizer.self`). Otherwise `not_organizer`.
+- **Guest-only RSVP.** `calendar_rsvp` needs the owner on the guest list and
+  not the organizer. Otherwise `not_an_attendee`.
+- **Never a Google Meet link.** No tool, page or digest returns or shows
+  `hangoutLink` or `conferenceData`. No write requests a Meet conference, so
+  Google adds none. A Meet link passed as a Zoom link is `not_a_zoom_link`.
+  Showing an extracted Zoom link (`join_url`) is not declared here: it waits
+  on owner decision OD-2 (DND-1765).
+- **Dormant until connected.** `not_configured`, `not_connected` and `revoked`
+  carry DND-447's `Fix:` text (`Athena.Calendar.Refusal`).
+- **Today stays current.** After a write is applied to an event that starts in
+  the owner's local today, the server runs its calendar sync for today, so
+  `/priorities` shows it. A failed sync does not fail the write; the sync
+  records its own outcome.
+
+#### Arguments and return shapes
+
+`EventSummary`:
+
+```json
+{"event_id": "abc123_20261005T210000Z", "title": "Weekly sync",
+ "starts_at": "2026-10-05T15:00:00-06:00", "ends_at": "2026-10-05T15:30:00-06:00",
+ "all_day": false, "html_link": "https://www.google.com/calendar/event?eid=...",
+ "self_response": "accepted", "organizer_is_owner": true, "other_guests": 3,
+ "recurring": true}
+```
+
+`self_response` is `accepted`, `tentative`, `declined`, `needsAction`, or
+`null` when the owner is not on the guest list. Cancelled events are not
+listed. The shape is closed: DND-1765 adds `join_url` once the owner decides
+OD-2, and nothing else is added without amending this subsection.
+
+- **`calendar_events {from, to}`** → `{"window": {"from", "to"}, "count": n,
+  "events": [EventSummary]}`. Both bounds are required, and `to - from` is at
+  most 31 days. The window is echoed, so an empty list says which window found
+  nothing. More than 250 events is `too_many_events`.
+- **`calendar_event {event_id}`** → `EventSummary` plus `"location":
+  string|null`, `"guests_omitted": bool` and `"guests": [{"email", "response",
+  "organizer", "optional"}]`. The description is never returned.
+- **`calendar_create {claude_session_id, title, starts_at, ends_at, location?,
+  description?, guests?, zoom_url?}`** → `{"result": "created", "event":
+  EventSummary}`, or `{"result": "pending_approval", "change": Change}` when
+  `guests` is not empty. `zoom_url` is checked as in `calendar_attach_zoom`
+  and written to `location`, so `location` and `zoom_url` together are
+  `invalid_argument`. The event's time zone is the owner's fleet-policy zone.
+- **`calendar_update {claude_session_id, event_id, title?, location?,
+  starts_at?, ends_at?}`** → `{"result": "updated", "event": EventSummary}` or
+  `pending_approval`. At least one field. `starts_at` and `ends_at` come
+  together. There is no `description`: a session cannot read the description,
+  so it may not overwrite it.
+- **`calendar_invite {claude_session_id, event_id, guests}`** and
+  **`calendar_uninvite {claude_session_id, event_id, guests}`** → always
+  `pending_approval`. `guests` holds 1 to 20 addresses, lowercased and
+  de-duplicated. A malformed address is `invalid_argument` naming it. Inviting
+  a current guest is `already_a_guest`; uninviting someone not on the list is
+  `not_a_guest`, each naming the address. The organizer cannot be uninvited.
+- **`calendar_attach_zoom {claude_session_id, event_id, zoom_url, replace?}`**
+  → `updated` or `pending_approval`. `zoom_url` must pass the Zoom rules
+  (`Athena.Calendar.ZoomLink.valid?/1`; design *3. Zoom links* → *Extraction
+  rules*); anything else, a Meet link included, is `not_a_zoom_link`. The link
+  goes in `location`: an empty location becomes the URL; a location without a
+  Zoom link becomes `<url> · <old location>`; a location that already holds a
+  Zoom link is `zoom_already_attached` unless `replace: true`, which swaps
+  that link only. The description is never touched.
+- **`calendar_rsvp {claude_session_id, event_id, response}`** → `{"result":
+  "responded", "event_id", "response"}`. `response` is `accepted`,
+  `tentative` or `declined`. It PATCHes only the owner's own attendee entry,
+  with `attendeesOmitted: true` and `sendUpdates=all`.
+- **`calendar_change {change_id}`** → `Change`.
+
+`Change`:
+
+```json
+{"change_id": "uuid", "kind": "invite", "event_id": "...", "title": "Weekly sync",
+ "summary": "invite 2 guests to Weekly sync (Mon 15:00)", "reaches": 5,
+ "state": "proposed", "approval_url": "https://<athena host>/calendar/changes/<id>?t=<token>",
+ "expires_at": "2026-10-03T16:00:00Z"}
+```
+
+`approval_url` appears only in the answer to the write that proposed it, never
+from `calendar_change`. `state` is `proposed`, `applying`, `applied`,
+`rejected`, `expired`, `stale` or `failed`.
+
+#### Refusals
+
+Each is a tool error, `<code>: <sentence> Fix: <step>`.
+
+| Code | When | Fix |
+| --- | --- | --- |
+| `not_configured`, `not_connected`, `revoked` | no calendar access | DND-447's: store the client on /secrets, connect at /oauth/google/start |
+| `invalid_argument` | unknown key, missing field, bad time, bad address, bad combination | names the field and the expected form |
+| `not_found` | no such event on the owner's primary calendar, no such change for this owner, or an unknown session | call `calendar_events` for a current id; call from the session's own machine |
+| `not_organizer` | update, invite, uninvite, attach Zoom on an event someone else organizes | ask the organizer, or RSVP with `calendar_rsvp` |
+| `not_an_attendee` | RSVP on an event the owner organizes or is not invited to | use `calendar_update`, or nothing to answer |
+| `already_a_guest`, `not_a_guest` | invite or uninvite does nothing for that address | drop the address named |
+| `not_a_zoom_link` | `zoom_url` fails the Zoom rules | paste the meeting's `https://...zoom.us/j/...` join link |
+| `zoom_already_attached` | the location already has a Zoom link | pass `replace: true` to swap it |
+| `too_many_events` | the window holds more than 250 events | narrow the window |
+| `event_gone` | Google answers 404 or 410 on the write | list the window again |
+| `google_error` | any other Google failure, with its closed cause | retry; if it repeats, see the athena log line |
+
+A failed Google write changes nothing on Athena's side and returns its cause.
+A direct write records its `calendar_changes` row only after Google accepts
+it.
+
+#### Reaching other people
+
+A change **reaches another person** when the event, as the server reads it
+from Google before the write or as it would be after the change, has a guest
+other than the owner. The server decides this
+(`Athena.Calendar.Audience`); no argument does.
+
+- **Owner-only writes execute directly.** `calendar_create`,
+  `calendar_update` and `calendar_attach_zoom` on an event with no other
+  guest, before or after the change.
+- **`calendar_rsvp` executes directly**, with `sendUpdates=all`. It reaches
+  one person, the organizer of an invite the owner received, says only the
+  owner's answer, and a second RSVP reverses it.
+- **Every other change that reaches someone is a pending change.** The tool
+  answers `pending_approval` with an `approval_url`, and the session shows
+  that link to the owner. Only the logged-in owner applies it, on
+  `/calendar/changes/:id` (*The approval path*). `calendar_invite` and
+  `calendar_uninvite` are always pending.
+- **No DM.** The link goes back to the session that asked. The owner is not
+  messaged.
+- **Untrusted content never authorizes a change.** A calendar request inside a
+  Slack message, an inbox line or a Notion page is a fact to relay (*Trust
+  posture — two paths*). The approval page is the enforcement for every
+  change that reaches people.
+
+This rule is a judgement call under owner approval policy item 3, reaching
+another person (`~/.claude/CLAUDE.md` → *Owner approval policy* → *Judgement
+calls: decide, then list in the digest*), decided on DND-1761 as OD-1 and
+listed in the owner digest. The owner may veto either direct path; the
+fallback is the approval page for those writes too. It adds no grant class:
+nothing here is an action class of *Owner approval grants*, so no approval
+rule changes. `calendar_rsvp` is not the `calendar.rsvp` grant class
+(DND-1744) and does not lift *Morning digest* → *No interactive blocks*.
+
+Every `calendar_changes` row, direct or pending, is for the digest's calendar
+changes line, which DND-1771 declares in *Morning digest*. Until it does,
+`calendar_change` reads a row's state.
+
+#### The approval path
+
+The proposed change is **not stored in the database**. It travels in the
+approval link.
+
+- **The change token.** `Phoenix.Token.encrypt` with the endpoint secret over
+  `{owner_id, change_id, kind, event_id, etag, fields}`. `fields` is the
+  proposed values and guest addresses. `etag` is the event's Google etag at
+  proposal (none for a create). It expires 24 hours after proposal, and is
+  spent by its first Approve or Reject.
+- **The row.** `calendar_changes` holds metadata only. Its columns are a
+  closed list: `id`, `owner_id`, `kind`, `event_id`, `event_title`,
+  `html_link`, `reaches` (a count), `state`, `claude_session_id`,
+  `machine_id`, `token_digest` (SHA-256 of the token), `failure_cause` (a
+  closed code, `null` unless `failed`), `proposed_at` and `decided_at`. No
+  guest address, no proposed value, no location and no description. `kind` is
+  `create`, `update`, `invite`, `uninvite`, `attach_zoom` or `rsvp`. A
+  directly applied write gets a row too, stored `applied`.
+- **The page.** `/calendar/changes/:id?t=<token>`, the `:browser` pipeline,
+  login and CSRF required. It decrypts the token, then loads the row by `id`
+  and the logged-in `owner_id` in the query. Every mismatch answers the same
+  `not_found`: a token for another owner, a row for another owner, a digest
+  that does not match, a bad or expired token. It shows the event, the full
+  diff and each address reached, and marks an address outside the
+  organizer's email domain as **external**.
+- **Live means unexpired.** Approve and Reject each decrypt the token again
+  with its 24-hour max age, and require the row's computed state to be
+  `proposed`: stored `proposed` and `now < proposed_at + 24h` on the injected
+  clock. A page loaded before expiry and submitted after is `not_found`.
+- **Approve.** In a short transaction, the row is locked, checked live, set
+  to `applying` and stamped `decided_at`; the transaction commits. No
+  database lock is held across a Google call. The server then reads the event
+  again and checks that the owner is still the organizer and that the etag
+  still matches. A changed event marks the row `stale` and applies nothing
+  (Fix: ask the session to propose it again). Otherwise it PATCHes or inserts
+  with `sendUpdates=all` and marks the row `applied`. A Google failure marks
+  it `failed` with its `failure_cause`. A second Approve finds no live
+  `proposed` row.
+- **Approving a create** has no event to re-read and no etag. It inserts the
+  event from the token's fields with `sendUpdates=all`.
+- **Reject** marks a live row `rejected` and stamps `decided_at`.
+- **Read-only states.** Nothing is scheduled. A row stored `proposed` past
+  `proposed_at + 24h` reads `expired`. A row stored `applying` more than 5
+  minutes after its `decided_at` reads `failed (interrupted)`, and is never
+  retried by itself, because the write may have reached Google. The stored
+  state does not change.
+- **`decided_at`** is the owner's Approve or Reject time. A direct apply's
+  `decided_at` is its `proposed_at`. A stored `proposed` row has none.
+- **An expired link shows `not_found`** on the page, like every other token
+  mismatch, so the page never says whether a change exists. `calendar_change`
+  shows the `expired` state.
+- **Retention.** Each new `calendar_changes` row first deletes the same
+  owner's rows matching `coalesce(decided_at, proposed_at + interval '24
+  hours') < now - interval '30 days'`. No periodic worker.
+- **Where the content lives.** The token carries the change's content. It
+  lives in the calling session's transcript and in the URL, on the owner's
+  own machines. The request log records the path, and the token in it is
+  encrypted. The database never holds a guest address or a proposed value,
+  so *The storage boundary* does not widen.
+
 ### Access control
 
 | Operation | Who | Resource | Where checked | On denial |
@@ -7495,17 +7782,35 @@ writes: action `owner_dm`, no machine, a body hash, never a body.
 | Run the one-time summary backfill (DND-1395) | an operator on the host, over `rpc`, through `Athena.Priorities.SummaryBackfill.start/0`; no web, machine-token or MCP path reaches it | every owner's open items of that owner's enabled summary sources, each owner worked separately; no daily or monthly cap | `Athena.Priorities.Summaries.backfill/1`: owners one at a time, each only while its gate is open (key stored, model priced, no latch or account pause), and each item through the same per-item path as the sweeper (loaded by id and `owner_id`, checked against the allow-list and that owner's enabled sources, re-checked in the write transaction, bodies read as in the row above). `start` keeps only the pause option, so an rpc cannot swap the config, prices or clock | a second start while one runs is `already_running`; an owner whose gate is closed is skipped and counted; an unpriced call is `price_unknown`, and nothing is read or written for another owner |
 | Read the last digest day | the logged-in owner | the owner's own `digest_sends` rows | `Athena.Digest.latest_send/1`: an `owner_id` = viewer filter in the query | none shown ("none yet") |
 | `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
+| `calendar_events`, `calendar_event` (*Calendar management*) | a machine token | the machine owner's primary calendar | `Athena.Calendar.Management` `list/3`, `get/3`: the owner from the calling machine; the Google call uses only that owner's credentials | `not_configured`, `not_connected`, `revoked`; `not_found` |
+| Owner-only writes (`calendar_create`, `calendar_update`, `calendar_attach_zoom` reaching nobody) and `calendar_rsvp` | a machine token and a fleet session bound to that machine | an event on the owner's primary calendar; the owner as organizer (writes) or as guest (RSVP) | `Athena.Calendar.Management` write functions, all before any write: the session binding, then the event read, then the organizer or guest check, then `Audience` | `not_found`, `not_organizer`, `not_an_attendee` |
+| Writes that reach others (`calendar_create`, `calendar_update`, `calendar_attach_zoom` with other guests; `calendar_invite`, `calendar_uninvite`) | the same caller proposes; only the logged-in owner applies | as above | proposal: `Athena.Calendar.Management`, as above; apply: `approve_change/3`, the row loaded by `id` and `owner_id` in the query under lock, the token digest compared, the event re-read and its etag compared | proposal: the refusals above; apply: `not_found` (existence never disclosed), `stale`, `failed` |
+| View, approve or reject a calendar change on `/calendar/changes/:id` | the logged-in owner: web session, CSRF | the owner's own `calendar_changes` row and its token | `Athena.UI.Pages.CalendarChange` → `Management.show_change/3`, `approve_change/3`, `reject_change/3`: the token decrypted, the row loaded by `id` and the viewer's `owner_id` in the query | `not_found` for every mismatch: another owner's row or token, a bad digest, a bad or expired token, a logged-in non-owner |
+| `calendar_change` | a machine token | the machine owner's `calendar_changes` rows | `Management.change/3`: an `owner_id` = the machine's owner filter in the query | `not_found` |
 
 - **Deny by default.** A machine token reaches the index only through the three
   lease tools. No machine-token path promotes, restores, dismisses, overrides,
-  lists, or reads a `proposed` item, a failure or another owner's item.
+  lists, or reads a `proposed` item, a failure or another owner's item. The
+  calendar tools (*Calendar management*) write the owner's Google calendar and
+  the `calendar_changes` log, never the index. No calendar argument selects an
+  owner, a calendar or a `sendUpdates` value, and an event not on the owner's
+  primary calendar is `not_found`.
+
+  **Later (2026-10-02, DND-1764):** this bullet ended at "another owner's
+  item", when the lease tools were the machine token's only reach into the
+  owner's data in this section. The calendar tools add a second reach, into
+  the calendar and not the index, so the bullet now says where each one ends.
+- **Negative tests for every calendar row:** another owner's machine, an
+  unbound session, a non-organizer, another owner's change id and token, and
+  a logged-in non-owner.
 - **Every query is owner-scoped in the query itself, not by RBAC alone.** An
   aggregate RBAC `read` or `update` admits anyone holding a role on the row,
   so it never replaces the `owner_id` filter (gen_saas DND-434 and DND-441
   added that filter to the fleet reads and to `set_control` for exactly
   this reason). Every read and write of items, index obligations, skip counts,
   the index-failure record, re-sync runs, subscription bindings, rules, item
-  summaries and the summary call ledger filters by `owner_id`. The two
+  summaries, the summary call ledger and `calendar_changes` filters by
+  `owner_id`. The two
   exceptions are the summary sweeper's own system reads: the list of owners
   it visits, and the ledger prune past 35 days. Ingest and the re-sync write only to the owner
   stamped from the authenticated ingress (*The event*), or to the item's own
