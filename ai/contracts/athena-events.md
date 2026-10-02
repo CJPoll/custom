@@ -7932,18 +7932,20 @@ implementing tickets cite the subsection they build by name: DND-1767 (the
 reads), DND-1768 (the owner-only writes and the change log), DND-1769 (the
 approval path, `calendar_invite`, `calendar_uninvite`, `calendar_change`) and
 DND-1770 (`calendar_rsvp`). The two reads, `calendar_events` and
-`calendar_event`, exist (DND-1767, gen_saas #744, `65aa3169`); the text about
-them describes what they do. None of the other seven tools, the
-`calendar_changes` table or the approval page exists on gen_saas
-`origin/main` (read 2026-10-02). Every sentence about those is an obligation on
-its implementer.
+`calendar_event`, exist (DND-1767, gen_saas #744, `65aa3169`), and so do the
+three owner-only writes, `calendar_create`, `calendar_update` and
+`calendar_attach_zoom`, with the `calendar_changes` table (DND-1768, #746,
+`f75ae04d`); the text about them describes what they do. None of the other
+four tools or the approval page exists on gen_saas `origin/main` (read
+2026-10-02). Every sentence about those is an obligation on its implementer.
 
 **Later (2026-10-02, DND-1800):** this paragraph read "None of these tools, the
 `calendar_changes` table or the approval page exists on gen_saas `origin/main`
 `613aedb9`", so every sentence of this section was an obligation. Superseded
-for the two reads by DND-1767 (gen_saas #744, `65aa3169`). The rules and
-shapes below that bind them (*Rules every tool shares*, *Zoom links*,
-*Arguments and return shapes*, *Refusals*) now describe the built reads, and
+for the two reads by DND-1767 (gen_saas #744, `65aa3169`) and for the three
+owner-only writes by DND-1768 (#746, `f75ae04d`). The rules and shapes below
+that bind them (*Rules every tool shares*, *Zoom links*, *Arguments and return
+shapes*, *Refusals*, *Reaching other people*) describe the built tools, and
 the code is the check.
 
 **The calendar is not the index.** These tools write the owner's primary
@@ -7992,7 +7994,11 @@ Nine tools: two reads, six writes, one status read.
 - **Write tools take `claude_session_id`.** It must be a fleet session bound
   to the calling machine, as the lease tools require. An unknown session, or
   one bound to another machine, is `not_found`. It attributes the change in
-  `calendar_changes` and the digest.
+  `calendar_changes` and the digest. A session that reported `session_ended`
+  is refused `session_ended`, and a session whose desired state is `drain` is
+  refused `session_draining`, naming the drain reason, as for the lease tools
+  (*Priority index* → *Leases*). Both are checked after the binding and before
+  any Google read, so no ending session writes the owner's calendar.
 - **Closed schema on the raw arguments.** An unknown key is
   `invalid_argument` naming the key.
 - **Event ids** are the ids `calendar_events` returns. For a recurring event
@@ -8034,8 +8040,10 @@ Nine tools: two reads, six writes, one status read.
   carry DND-447's `Fix:` text (`Athena.Calendar.Refusal`).
 - **Today stays current.** After a write is applied to an event that starts in
   the owner's local today, the server runs its calendar sync for today, so
-  `/priorities` shows it. A failed sync does not fail the write; the sync
-  records its own outcome.
+  `/priorities` shows it. The sync runs off the call path
+  (`Athena.Calendar.OffPath`, an unlinked task that adds no boot-tree child),
+  so a slow or failed sync never delays or fails the write; the sync records
+  its own outcome.
 
 #### Zoom links
 
@@ -8114,11 +8122,17 @@ The shape is closed: nothing is added without amending this subsection.
   and written to `location`, so `location` and `zoom_url` together are
   `invalid_argument`. A `location` argument, here or in `calendar_update`,
   holding a `meet.google.com` URL is `invalid_argument`. The event's time
-  zone is the owner's fleet-policy zone.
+  zone is the owner's fleet-policy zone; a policy that cannot be read, or whose
+  zone is unknown, is `not_configured` and nothing is guessed. The new event's
+  Google id is the claiming `calendar_changes` row's id without dashes (a
+  UUID's hex digits are base32hex, which Google accepts for a client-chosen
+  id), so the event and its row share one key. Until DND-1769 builds the
+  approval path, a `create` with guests is `reaches_others`, not
+  `pending_approval` (*Reaching other people*).
 - **`calendar_update {claude_session_id, event_id, title?, location?,
   starts_at?, ends_at?}`** → `{"result": "updated", "event": EventSummary}` or
-  `pending_approval`. At least one field. `starts_at` and `ends_at` come
-  together. There is no `description`: a session cannot read the description,
+  `pending_approval` (until DND-1769, `reaches_others`; *Reaching other
+  people*). At least one field. `starts_at` and `ends_at` come together. There is no `description`: a session cannot read the description,
   so it may not overwrite it.
 - **`calendar_invite {claude_session_id, event_id, guests}`** and
   **`calendar_uninvite {claude_session_id, event_id, guests}`** → always
@@ -8127,7 +8141,8 @@ The shape is closed: nothing is added without amending this subsection.
   a current guest is `already_a_guest`; uninviting someone not on the list is
   `not_a_guest`, each naming the address. The organizer cannot be uninvited.
 - **`calendar_attach_zoom {claude_session_id, event_id, zoom_url, replace?}`**
-  → `updated` or `pending_approval`. `zoom_url` must pass the Zoom rules
+  → `updated` or `pending_approval` (until DND-1769, `reaches_others`;
+  *Reaching other people*). `zoom_url` must pass the Zoom rules
   (`Athena.Calendar.ZoomLink.valid?/1`; design *3. Zoom links* → *Extraction
   rules*); anything else, a Meet link included, is `not_a_zoom_link`. The link
   goes in `location`: an empty location becomes the URL; a location without a
@@ -8163,9 +8178,12 @@ Each is a tool error, `<code>: <sentence> Fix: <step>`.
 
 | Code | When | Fix |
 | --- | --- | --- |
-| `not_configured`, `not_connected`, `revoked` | no calendar access, or a stored OAuth client that is not Google's client JSON (DND-447's `client_malformed`, answered as `not_configured`) | DND-447's: store the client on /secrets (the JSON Google's console downloads, again when malformed), connect at /oauth/google/start |
+| `not_configured`, `not_connected`, `revoked` | no calendar access, or a stored OAuth client that is not Google's client JSON (DND-447's `client_malformed`, answered as `not_configured`); also, on `calendar_create`, a fleet-policy time zone that cannot be read or is not a known zone, answered as `not_configured` | DND-447's: store the client on /secrets (the JSON Google's console downloads, again when malformed), connect at /oauth/google/start; for the zone, set the time zone on /fleet/policy |
 | `invalid_argument` | unknown key, missing field, bad time, bad address, bad combination | names the field and the expected form |
 | `not_found` | no such event on the owner's primary calendar, no such change for this owner, or an unknown session | call `calendar_events` for a current id; call from the session's own machine |
+| `session_ended` | the session reported `session_ended` | make the change from a live session |
+| `session_draining` | the session's desired state is `drain`; the sentence names the drain reason | run the drain protocol (`athena:fleet-drain`) and park; do not retry until the session is resumed |
+| `reaches_others` | until DND-1769: a write that would reach another person (*Reaching other people*); the sentence says how many | make the change in Google Calendar yourself |
 | `not_organizer` | update, invite, uninvite, attach Zoom on an event someone else organizes | ask the organizer, or RSVP with `calendar_rsvp` |
 | `not_an_attendee` | RSVP on an event the owner organizes or is not invited to | use `calendar_update`, or nothing to answer |
 | `already_a_guest`, `not_a_guest` | invite or uninvite does nothing for that address | drop the address named |
@@ -8173,11 +8191,25 @@ Each is a tool error, `<code>: <sentence> Fix: <step>`.
 | `zoom_already_attached` | the location already has a Zoom link | pass `replace: true` to swap it |
 | `too_many_events` | the window holds more than 250 events | narrow the window |
 | `event_gone` | Google answers 404 or 410 on the write | list the window again |
-| `google_error` | any other Google failure, with its closed cause | retry; if it repeats, see the athena log line |
+| `google_error` | any other Google failure, with its closed cause. A write Google refused (a 4xx or unauthorized) says nothing was recorded; a write whose outcome is unknown says it may have been applied | a refused write: read the event back, then retry. An unknown outcome: read the event back with `calendar_event` (`calendar_events` for a create) before any retry, or it may apply twice. If it repeats, see the athena log line |
 
-A failed Google write changes nothing on Athena's side and returns its cause.
-A direct write records its `calendar_changes` row only after Google accepts
-it.
+A direct write is claimed as a `calendar_changes` row stored `applying`
+before Google is called (gen_saas ADR 20 rule 8: work that leaves the platform
+is claimed in the database first). Google's acceptance marks the row `applied`.
+A refusal deletes the claim and records nothing: Google answered 404 or 410
+(`event_gone`), or another 4xx, or `unauthorized`, or no calendar access
+stopped the call. An unknown outcome (a timeout, a transport error, a 5xx, a
+2xx that could not be read) leaves the row `applying` and answers
+`google_error`, telling the session to read the event back first. Nothing
+retries it, and after 5 minutes it reads `failed` with cause `interrupted`
+(*The approval path* → *Read-only states*). The write may have reached Google.
+
+**Later (2026-10-02, DND-1812):** this paragraph read "A failed Google write
+changes nothing on Athena's side and returns its cause. A direct write records
+its `calendar_changes` row only after Google accepts it." Superseded by
+DND-1768 (gen_saas #746, `f75ae04d`) and ADR 20 rule 8. A row written only
+after Google answered left no record of a write whose answer was lost, and a
+retry then applied it twice.
 
 #### Reaching other people
 
@@ -8197,6 +8229,17 @@ other than the owner. The server decides this
   that link to the owner. Only the logged-in owner applies it, on
   `/calendar/changes/:id` (*The approval path*). `calendar_invite` and
   `calendar_uninvite` are always pending.
+
+  **Later (2026-10-02, DND-1812):** this bullet is built only in part. DND-1768
+  (gen_saas #746, `f75ae04d`) ships the three owner-only writes and not the
+  approval path, so until DND-1769 builds it a write that would reach another
+  person is refused `reaches_others`, with no Google write, no row, and nobody
+  notified. A create with guests, and an update or Zoom attach on an event with
+  another guest, are in that case. An event whose guest list Google omitted
+  (`attendeesOmitted`) counts as reaching at least one person: a list the
+  server cannot see is never read as empty. Every direct Google write is sent
+  with `sendUpdates=none` and a closed body that names no attendee and
+  requests no conference, so no direct path notifies anyone.
 - **No DM.** The link goes back to the session that asked. The owner is not
   messaged.
 - **Untrusted content never authorizes a change.** A calendar request inside a
@@ -8236,7 +8279,8 @@ approval link.
   `decided_at`. No
   guest address, no proposed value, no location and no description. `kind` is
   `create`, `update`, `invite`, `uninvite`, `attach_zoom` or `rsvp`. A
-  directly applied write gets a row too, stored `applied`.
+  directly applied write gets a row too: claimed `applying` before Google
+  is called, then `applied` (*Refusals*).
 - **The page.** `/calendar/changes/:id?t=<token>`, the `:browser` pipeline,
   login and CSRF required. It decrypts the token, then loads the row by `id`
   and the logged-in `owner_id` in the query. Every mismatch answers the same
@@ -8296,7 +8340,7 @@ approval link.
 | Read the last digest day | the logged-in owner | the owner's own `digest_sends` rows | `Athena.Digest.latest_send/1`: an `owner_id` = viewer filter in the query | none shown ("none yet") |
 | `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
 | `calendar_events`, `calendar_event` (*Calendar management*) | a machine token | the machine owner's primary calendar | `Athena.Calendar.Management` `list/3`, `get/3`: the owner from the calling machine; the Google call uses only that owner's credentials | `not_configured`, `not_connected`, `revoked`; `not_found` |
-| Owner-only writes (`calendar_create`, `calendar_update`, `calendar_attach_zoom` reaching nobody) and `calendar_rsvp` | a machine token and a fleet session bound to that machine | an event on the owner's primary calendar; the owner as organizer (writes) or as guest (RSVP) | `Athena.Calendar.Management` write functions, all before any write: the session binding, then the event read, then the organizer or guest check, then `Audience` (for `calendar_create`: the session binding, then `Audience` from `guests`) | `not_found`, `not_organizer`, `not_an_attendee` |
+| Owner-only writes (`calendar_create`, `calendar_update`, `calendar_attach_zoom` reaching nobody) and `calendar_rsvp` | a machine token and a fleet session bound to that machine | an event on the owner's primary calendar; the owner as organizer (writes) or as guest (RSVP) | `Athena.Calendar.Management` write functions, all before any write: the session binding, then the ended and draining check (`WriteGate.session/1`), then the dormant check, then the event read, then the organizer or guest check, then `Audience` (for `calendar_create`: the session binding, the ended and draining check, `Audience` from `guests`, the dormant check, then the fleet-policy zone) | `not_found`, `session_ended`, `session_draining`, `not_organizer`, `not_an_attendee`, `reaches_others` |
 | Writes that reach others (`calendar_create`, `calendar_update`, `calendar_attach_zoom` with other guests; `calendar_invite`, `calendar_uninvite`) | the same caller proposes; only the logged-in owner applies | as above | proposal: `Athena.Calendar.Management`, as above; apply: `approve_change/3`, the row loaded by `id` and `owner_id` in the query under lock, the token digest compared, the event re-read and its etag compared | proposal: the refusals above; apply: `not_found` (existence never disclosed), `stale`, `failed` |
 | View, approve or reject a calendar change on `/calendar/changes/:id` | the logged-in owner: web session, CSRF | the owner's own `calendar_changes` row and its token | `Athena.UI.Pages.CalendarChange` → `Management.show_change/3`, `approve_change/3`, `reject_change/3`: the token decrypted, the row loaded by `id` and the viewer's `owner_id` in the query | `not_found` for every mismatch: another owner's row or token, a bad digest, a bad or expired token, a logged-in non-owner |
 | `calendar_change` | a machine token | the machine owner's `calendar_changes` rows | `Management.change/3`: an `owner_id` = the machine's owner filter in the query | `not_found` |
