@@ -32,9 +32,18 @@ HELP = <<~TXT
        be an absolute path to a valid file; anything else is an error.
     2. Else ${XDG_CONFIG_HOME:-$HOME/.config}/athena/lead-time-repos.json,
        the machine-local override. Absent: the tracked
-       ai/config/lead-time-repos.json (source=default). Present: it replaces
-       the tracked file whole (source=override); there is no merge. It must
-       be a regular file owned by you and not group/other-writable.
+       ai/config/lead-time-repos.json (source=default). Present
+       (source=override): its repo list, window and improvement_epic replace
+       the tracked file's, so it can change a repo's mode or path, and a repo
+       it leaves out stays out. Each repo entry it lists INHERITS every
+       optional key (product_epic, idle_workflow) the tracked default declares
+       for the same repo name and the entry omits (DND-1672), so a field later
+       added to the tracked default reaches every machine. A key the entry
+       declares wins. Output names each inherited key ("inherited", and
+       "(tracked default)" in the table) and the file it came from
+       (inherits_from). The tracked default must then parse too, or the
+       override is refused. It must be a regular file owned by you and not
+       group/other-writable. ATHENA_LEADTIME_CONFIG inherits nothing.
 
   Schema: {"repos":[{"name","path","mode":"improve|watch",
   "product_epic"?,"idle_workflow"?}], "window":N, "improvement_epic":"..."}.
@@ -53,9 +62,10 @@ HELP = <<~TXT
   telemetry label), is an error. Zero repos left is an error.
 
   Output: one line per repo and one per skip; --json prints
-  {"source","path","window","improvement_epic","repos":[{name,path,mode,
-  product_epic,product_epic_source,idle_workflow}],"skipped":[{name,path,reason}],
-  "considered"}.
+  {"source","path","inherits_from","window","improvement_epic","repos":[{name,
+  path,mode,product_epic,product_epic_source,idle_workflow,inherited}],
+  "skipped":[{name,path,reason}],"considered"}. inherits_from is null unless
+  the override inherited from the tracked default; inherited lists the keys.
 
   --repo-path NAME prints one CHANGE repo's path (DND-1528): the repo a
   change landed in, which need not be a measured repo (experiment record
@@ -91,11 +101,15 @@ def fail_with(code, what, fix)
 end
 
 def table(res)
-  lines = ["lead-time-repos: source=#{res.source} path=#{res.path} window=#{res.window} improvement_epic=#{res.improvement_epic}"]
+  inherits = res.inherits_from ? " inherits_from=#{res.inherits_from}" : ""
+  lines = ["lead-time-repos: source=#{res.source} path=#{res.path}#{inherits} window=#{res.window} " \
+           "improvement_epic=#{res.improvement_epic}"]
   width = (res.repos.map(&:name) + res.skipped.map(&:name)).map(&:size).max
   res.repos.each do |r|
-    epic = r.product_epic_source == "repo" ? r.product_epic : "#{r.product_epic} (improvement_epic)"
-    lines << "  repo     #{r.name.ljust(width)}  #{r.mode.ljust(7)}  #{r.path}  product_epic=#{epic}"
+    from = ->(key) { r.inherited.to_a.include?(key) ? " (tracked default)" : "" }
+    epic = r.product_epic_source == "repo" ? "#{r.product_epic}#{from.call('product_epic')}" : "#{r.product_epic} (improvement_epic)"
+    idle = r.idle_workflow ? "#{r.idle_workflow}#{from.call('idle_workflow')}" : "undeclared"
+    lines << "  repo     #{r.name.ljust(width)}  #{r.mode.ljust(7)}  #{r.path}  product_epic=#{epic}  idle_workflow=#{idle}"
   end
   res.skipped.each { |s| lines << "  skipped  #{s.name.ljust(width)}  #{s.reason}" }
   lines << "lead-time-repos: #{res.considered} considered, #{res.repos.size} resolved, #{res.skipped.size} skipped"

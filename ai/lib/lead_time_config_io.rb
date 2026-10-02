@@ -8,7 +8,8 @@
 #   Files.read   the chosen config file's text
 #   Git.probe    one configured repo path -> Probe (exists, git top, common dir)
 #   resolve      the one resolution every reader uses: candidate -> locate ->
-#                read -> parse -> probe each repo -> Resolution
+#                read (and, for the per-user override, the tracked default it
+#                inherits from) -> parse -> probe each repo -> Resolution
 #   own_repo     the runner's own repo (this file's checkout) -> OwnRepo
 #                (DND-1528)
 #   repo_path    a change repo's path: Resolution#path_for with own_repo
@@ -118,13 +119,23 @@ module LeadTimeConfigIO
     res.path_for(name, own)
   end
 
+  # SIDE EFFECT: the tracked default as the override's inheritance source
+  # (DND-1672), or nil when the location does not inherit. A tracked default
+  # that cannot be read or parsed is an error, never "nothing to inherit".
+  def inheritance(location, tracked, home)
+    return nil unless location.inherits
+
+    C.inheritable(Files.read(C::Location.new(path: tracked, source: "default")), home: home, path: tracked)
+  end
+
   # MANAGER: the one resolution. -> LeadTimeConfig::Resolution, or raises
   # LeadTimeConfig::Error. A Resolution may hold zero repos; callers that need
   # one call require_any! (ai/bin/lead-time-repos) or find (a --repo reader).
   def resolve(env, tracked: TRACKED, euid: Process.euid)
     cand = C.candidate(env)
     location = C.locate(cand, Files.facts(cand.path), tracked: tracked, euid: euid)
-    parsed = C.parse(Files.read(location), home: env["HOME"].to_s, path: location.path)
+    home = env["HOME"].to_s
+    parsed = C.parse(Files.read(location), home: home, path: location.path, inherit: inheritance(location, tracked, home))
     probes = parsed.repos.to_h { |r| [r.name, Git.probe(r.path)] }
     C.resolve(location, parsed, probes)
   end

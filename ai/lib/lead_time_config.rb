@@ -11,7 +11,12 @@
 #      to a valid file, or an error. Never a fall-through.
 #   2. Else ${XDG_CONFIG_HOME:-$HOME/.config}/athena/lead-time-repos.json.
 #      Absent: the tracked ai/config/lead-time-repos.json (source=default).
-#      Present: it REPLACES the tracked file whole (source=override).
+#      Present: its repo list, window and epic replace the tracked file's
+#      (source=override), and each repo entry it lists inherits every optional
+#      key (REPO_OPTIONAL) the tracked default declares for the same repo name
+#      and the entry omits (DND-1672). The entry's own keys win; a repo the
+#      override drops stays dropped. ATHENA_LEADTIME_CONFIG inherits nothing:
+#      it is authoritative.
 #   3. An override that cannot be stat'd, is not a regular file, is not owned
 #      by this user, or is group/other-writable is an error, never "no
 #      override".
@@ -69,17 +74,27 @@ module LeadTimeConfig
   # could not be found; error then says why.
   OwnRepo = Struct.new(:path, :label, :error, keyword_init: true)
 
-  Repo = Struct.new(:name, :path, :mode, :product_epic, :product_epic_source, :idle_workflow, keyword_init: true) do
+  # inherited: the optional keys this entry took from the tracked default
+  # (DND-1672), in REPO_OPTIONAL order; empty when it inherited nothing.
+  Repo = Struct.new(:name, :path, :mode, :product_epic, :product_epic_source, :idle_workflow, :inherited,
+                    keyword_init: true) do
     def to_h = { "name" => name, "path" => path, "mode" => mode, "product_epic" => product_epic,
-                 "product_epic_source" => product_epic_source, "idle_workflow" => idle_workflow }
+                 "product_epic_source" => product_epic_source, "idle_workflow" => idle_workflow,
+                 "inherited" => inherited || [] }
   end
-  Parsed = Struct.new(:repos, :window, :improvement_epic, keyword_init: true)
+  # inherits_from: the Inheritance's path when parse was given one, else nil.
+  Parsed = Struct.new(:repos, :window, :improvement_epic, :inherits_from, keyword_init: true)
   # kind: :env (ATHENA_LEADTIME_CONFIG) | :xdg (the per-user override path)
   Candidate = Struct.new(:kind, :path, keyword_init: true)
   # What the IO side saw at a candidate path. present: lstat found an entry.
   # stat_error: set when it is present but stat (following links) failed.
   FileFacts = Struct.new(:present, :regular, :uid, :mode, :stat_error, keyword_init: true)
-  Location = Struct.new(:path, :source, keyword_init: true)
+  # inherits: true for the per-user override only; its repo entries then
+  # inherit from the tracked default (DND-1672).
+  Location = Struct.new(:path, :source, :inherits, keyword_init: true)
+  # The tracked default as an inheritance source (DND-1672): its path, and per
+  # repo name the optional keys it declares, as written.
+  Inheritance = Struct.new(:path, :entries, keyword_init: true)
   # What the IO side saw at a repo's path. exists follows symlinks; symlink is
   # lstat's answer. git_error is set when `git rev-parse` refused.
   Probe = Struct.new(:path, :exists, :symlink, :directory, :realpath, :git_error, :toplevel, :common_dir,
@@ -88,7 +103,9 @@ module LeadTimeConfig
     def to_h = { "name" => name, "path" => path, "reason" => reason }
   end
 
-  Resolution = Struct.new(:source, :path, :window, :improvement_epic, :repos, :skipped, :considered,
+  # inherits_from: the tracked default's path when the repo entries inherited
+  # from it (the per-user override), else nil.
+  Resolution = Struct.new(:source, :path, :inherits_from, :window, :improvement_epic, :repos, :skipped, :considered,
                           keyword_init: true) do
     # -> the Repo; raises Skipped (configured, not here) or NotConfigured.
     def find(name)
@@ -149,7 +166,7 @@ module LeadTimeConfig
     end
 
     def to_h
-      { "source" => source, "path" => path, "window" => window, "improvement_epic" => improvement_epic,
+      { "source" => source, "path" => path, "inherits_from" => inherits_from, "window" => window, "improvement_epic" => improvement_epic,
         "repos" => repos.map(&:to_h), "skipped" => skipped.map(&:to_h), "considered" => considered }
     end
   end
@@ -195,7 +212,7 @@ module LeadTimeConfig
   # -> Location, or raises Error. facts: FileFacts at candidate.path.
   def locate(candidate, facts, tracked:, euid:)
     unless facts.present
-      return Location.new(path: tracked, source: "default") if candidate.kind == :xdg
+      return Location.new(path: tracked, source: "default", inherits: false) if candidate.kind == :xdg
 
       raise Error.new("#{ENV_PATH}=#{candidate.path} does not exist", "point #{ENV_PATH} at an existing config file, or unset it")
     end
@@ -216,13 +233,15 @@ module LeadTimeConfig
                       "chmod go-w #{candidate.path}")
     end
 
-    Location.new(path: candidate.path, source: "override")
+    Location.new(path: candidate.path, source: "override", inherits: candidate.kind == :xdg)
   end
 
   # ── schema ────────────────────────────────────────────────────────────────
 
-  # -> Parsed, or raises Error naming the file and what is wrong.
-  def parse(text, home:, path:)
+  # -> Parsed, or raises Error naming the file and what is wrong. inherit: an
+  # Inheritance (the tracked default) whose optional keys fill each repo entry
+  # that omits them (DND-1672), or nil.
+  def parse(text, home:, path:, inherit: nil)
     doc = JSON.parse(text)
     bad!(path, "the config is not a JSON object") unless doc.is_a?(Hash)
 
@@ -236,19 +255,34 @@ module LeadTimeConfig
     repos = doc["repos"]
     bad!(path, "repos must be a non-empty list") unless repos.is_a?(Array) && !repos.empty?
 
-    parsed = repos.each_with_index.map { |r, i| repo(path, r, i, home, epic) }
+    parsed = repos.each_with_index.map { |r, i| repo(path, r, i, home, epic, inherit) }
     dup = parsed.map(&:name).tally.find { |_, n| n > 1 }
     bad!(path, "repo #{dup[0].inspect} is listed #{dup[1]} times") if dup
 
-    Parsed.new(repos: parsed, window: window, improvement_epic: epic)
+    Parsed.new(repos: parsed, window: window, improvement_epic: epic, inherits_from: inherit&.path)
   rescue JSON::ParserError => e
     bad!(path, "the config is not valid JSON (#{e.message.lines.first.to_s.strip})")
   end
 
-  def repo(path, entry, index, home, improvement_epic)
+  # -> Inheritance from the tracked default's text. The text is parsed in full
+  # first, so a tracked default that does not parse is an Error naming it,
+  # never "nothing to inherit".
+  def inheritable(text, home:, path:)
+    parse(text, home: home, path: path)
+    entries = JSON.parse(text)["repos"].to_h { |r| [r["name"], r.slice(*REPO_OPTIONAL)] }
+    Inheritance.new(path: path, entries: entries)
+  end
+
+  def repo(path, entry, index, home, improvement_epic, inherit = nil)
     bad!(path, "repos[#{index}] is not an object") unless entry.is_a?(Hash)
 
     name = entry["name"]
+    inherited = []
+    if inherit && name.is_a?(String)
+      extra = inherit.entries.fetch(name, {}).reject { |k, _| entry.key?(k) }
+      inherited = REPO_OPTIONAL.select { |k| extra.key?(k) }
+      entry = entry.merge(extra)
+    end
     keys!(path, entry, REPO_KEYS, REPO_OPTIONAL, "repos[#{index}] (#{name.inspect})")
     bad!(path, "repos[#{index}] name #{name.inspect} is not a plain name") unless name.is_a?(String) && NAME_RE.match?(name)
 
@@ -267,7 +301,7 @@ module LeadTimeConfig
       bad!(path, "repo #{name.inspect} idle_workflow #{idle.inspect} must be a workflow file name (post-merge.yml) or \"none\", or absent")
     end
     Repo.new(name: name, path: expand(path, entry["path"], name, home), mode: mode,
-             product_epic: product, product_epic_source: source, idle_workflow: idle)
+             product_epic: product, product_epic_source: source, idle_workflow: idle, inherited: inherited)
   end
 
   def nonblank?(value) = value.is_a?(String) && !value.strip.empty?
@@ -352,7 +386,8 @@ module LeadTimeConfig
       skip = presence(r, probe)
       skip ? skipped << skip : repos << r
     end
-    Resolution.new(source: location.source, path: location.path, window: parsed.window,
+    Resolution.new(source: location.source, path: location.path, inherits_from: parsed.inherits_from,
+                   window: parsed.window,
                    improvement_epic: parsed.improvement_epic, repos: repos, skipped: skipped,
                    considered: parsed.repos.size)
   end

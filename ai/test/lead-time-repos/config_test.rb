@@ -92,7 +92,7 @@ check("D2 no override file: the tracked default, source=default") do
   l = C.locate(XDG, facts(present: false), tracked: TRACKED, euid: EUID)
   l.source == "default" && l.path == TRACKED
 end
-check("D2 an override present replaces the tracked file: source=override, its path") do
+check("D2 an override present is read in place of the tracked file: source=override, its path") do
   l = C.locate(XDG, facts, tracked: TRACKED, euid: EUID)
   l.source == "override" && l.path == XDG.path
 end
@@ -175,6 +175,55 @@ check("S4 the tracked default parses unchanged") { seed.repos.map { |r| [r.name,
 check("S4 tracked paths expand ~/dev/<name>") { seed.repos.map(&:path) == %w[/home/u/dev/custom /home/u/dev/gen_saas /home/u/dev/walt_ui] }
 check("S4 tracked window is 20, and no repo names a product_epic") { seed.window == 20 && seed.repos.all? { |r| r.product_epic_source == "improvement_epic" } }
 
+# ── inheritance: an override entry over the tracked default (DND-1672) ──────
+
+check("I0 only the per-user override inherits; the default and ATHENA_LEADTIME_CONFIG do not") do
+  C.locate(XDG, facts, tracked: TRACKED, euid: EUID).inherits &&
+    !C.locate(XDG, facts(present: false), tracked: TRACKED, euid: EUID).inherits &&
+    !C.locate(ENVC, facts, tracked: TRACKED, euid: EUID).inherits
+end
+base = C.inheritable(doc([repo("a", idle_workflow: "none", product_epic: "pe"), repo("b", idle_workflow: "post-merge.yml"),
+                          repo("gone", idle_workflow: "none")]), home: "/home/u", path: TRACKED)
+def over(repos, inherit) = C.parse(doc(repos), home: "/home/u", path: "/o.json", inherit: inherit)
+check("I1 an omitted idle_workflow is the tracked default's, never nil (the DND-1672 regression)") do
+  r = over([repo("a", "improve")], base).repos.first
+  r.idle_workflow == "none" && r.inherited.include?("idle_workflow")
+end
+check("I1 an omitted product_epic is the tracked default's, sourced to the repo") do
+  r = over([repo("a")], base).repos.first
+  r.product_epic == "pe" && r.product_epic_source == "repo" && r.inherited == %w[product_epic idle_workflow]
+end
+check("I2 a field the override declares wins, and is not named inherited") do
+  r = over([repo("b", idle_workflow: "none")], base).repos.first
+  r.idle_workflow == "none" && r.inherited.empty?
+end
+check("I2 the override's mode and path win: an override still changes a repo's mode") do
+  r = over([repo("b", "improve", path: "/elsewhere/b")], base).repos.first
+  r.mode == "improve" && r.path == "/elsewhere/b" && r.idle_workflow == "post-merge.yml"
+end
+check("I3 a repo the override drops does not come back") { over([repo("a")], base).repos.map(&:name) == %w[a] }
+check("I3 a repo only the override names inherits nothing") do
+  r = over([repo("new")], base).repos.first
+  r.idle_workflow.nil? && r.inherited.empty? && r.product_epic_source == "improvement_epic"
+end
+# One valid sample per optional repo key. A key added to REPO_OPTIONAL without
+# a sample here fails I4, so its inheritance is proven when it is added.
+OPTIONAL_SAMPLE = { "product_epic" => "pe", "idle_workflow" => "none" }.freeze
+check("I4 every optional repo key is inheritable, so a field added later cannot vanish on a machine") do
+  every = C.inheritable(doc([repo("a", **OPTIONAL_SAMPLE.transform_keys(&:to_sym))]), home: "/home/u", path: TRACKED)
+  r = over([repo("a")], every).repos.first
+  OPTIONAL_SAMPLE.keys.sort == C::REPO_OPTIONAL.sort && r.inherited.sort == C::REPO_OPTIONAL.sort
+end
+check("I5 a tracked default that does not parse is an error naming the tracked file, never 'nothing to inherit'") do
+  e = raised { C.inheritable("{nope", home: "/home/u", path: TRACKED) }
+  e && e.message.include?(TRACKED)
+end
+check("I6 no inheritance: every repo's inherited list is empty") { parse(doc([repo("a")])).repos.first.inherited == [] }
+check("I7 the tracked default itself parses as an inheritance source") do
+  C.inheritable(File.read(File.expand_path("../../config/lead-time-repos.json", __dir__)), home: "/home/u", path: "seed")
+   .entries["custom"] == { "idle_workflow" => "none" }
+end
+
 # ── presence ────────────────────────────────────────────────────────────────
 
 A = C::Repo.new(name: "custom", path: "/src/custom", mode: "improve", product_epic: "e", product_epic_source: "improvement_epic")
@@ -236,8 +285,8 @@ end
 check("R4 a missing probe is an error, never a silent skip") { raised { C.resolve(LOC, three, all_here.except("gen_saas")) }&.message.to_s.include?("gen_saas") }
 check("R5 to_h carries the --json shape") do
   h = res.to_h
-  h.keys == %w[source path window improvement_epic repos skipped considered] &&
-    h["repos"].first.keys == %w[name path mode product_epic product_epic_source idle_workflow] &&
+  h.keys == %w[source path inherits_from window improvement_epic repos skipped considered] &&
+    h["repos"].first.keys == %w[name path mode product_epic product_epic_source idle_workflow inherited] &&
     h["skipped"].first.keys == %w[name path reason] && h["considered"] == 3
 end
 

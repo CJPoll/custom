@@ -89,18 +89,38 @@ has "the table names the source" "${OUT}" "source=default"
 has "the table counts" "${OUT}" "3 considered, 3 resolved, 0 skipped"
 [ -e "${H}/.config" ] && bad "a run writes no override" "${H}/.config exists" || ok "a run writes no override"
 
-echo "== override present: replaces the tracked file whole"
+echo "== override present: its repo list, window and epic replace the tracked ones"
 write_ovr "{\"repos\":[{\"name\":\"gen_saas\",\"path\":\"~/dev/gen_saas\",\"mode\":\"improve\",\"product_epic\":\"prod-epic\"}],\"window\":7,\"improvement_epic\":\"harness-epic\"}"
 run -- --json
 eq "an override exits 0" "${CODE}" "0"
 eq "source=override, its path" "$(jq_r '[j["source"], j["path"]].join(",")')" "override,${OVR}"
-eq "only the override's repos, no merge" "$(jq_r 'j["repos"].map { |r| r["name"] + ":" + r["mode"] }.join(",")')" "gen_saas:improve"
+eq "only the override's repos: no tracked repo is added" "$(jq_r 'j["repos"].map { |r| r["name"] + ":" + r["mode"] }.join(",")')" "gen_saas:improve"
 eq "its window and epic" "$(jq_r '[j["window"], j["improvement_epic"]].join(",")')" "7,harness-epic"
 eq "product_epic present is carried" "$(jq_r 'r = j["repos"][0]; [r["product_epic"], r["product_epic_source"]].join(",")')" "prod-epic,repo"
 run --
 has "the table prints the override path" "${OUT}" "source=override path=${OVR}"
 run XDG_CONFIG_HOME="${TMP}/elsewhere" -- --json
 eq "XDG_CONFIG_HOME moves the override path (none there: default)" "$(jq_r 'j["source"]')" "default"
+
+# DND-1672: the tracked default declares idle_workflow "none" for custom and
+# "post-merge.yml" for gen_saas. An override entry that omits a field the
+# tracked default declares for the same repo inherits it, and says so; a field
+# the override declares wins; a repo the override drops stays dropped.
+echo "== override inherits per-repo fields the tracked default declares (DND-1672)"
+write_ovr "{\"repos\":[{\"name\":\"custom\",\"path\":\"~/dev/custom\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"~/dev/gen_saas\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"harness-epic\"}"
+run -- --json
+eq "an override with an omitted field exits 0" "${CODE}" "0"
+eq "custom's omitted idle_workflow is the tracked default's, never nil" "$(jq_r 'j["repos"][0]["idle_workflow"].inspect')" '"none"'
+eq "... and is named as inherited" "$(jq_r 'j["repos"][0]["inherited"].join(",")')" "idle_workflow"
+eq "the override's own idle_workflow wins over the tracked one" "$(jq_r 'j["repos"][1]["idle_workflow"]')" "none"
+eq "... and nothing is inherited for it" "$(jq_r 'j["repos"][1]["inherited"].size')" "0"
+eq "the override still changes a repo's mode" "$(jq_r 'j["repos"][1]["mode"]')" "improve"
+eq "a repo the override drops does not come back" "$(jq_r 'j["repos"].map { |r| r["name"] }.join(",")')" "custom,gen_saas"
+run --
+has "the table names the inherited field and where it came from" "${OUT}" "idle_workflow=none (tracked default)"
+GOOD_ENV="$(cfg envonly.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"~/dev/custom\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+run ATHENA_LEADTIME_CONFIG="${GOOD_ENV}" -- --json
+eq "ATHENA_LEADTIME_CONFIG stays authoritative: nothing inherited" "$(jq_r '[j["repos"][0]["idle_workflow"].inspect, j["repos"][0]["inherited"].size].join(",")')" "nil,0"
 
 echo "== override refused (exit 2, Fix:), never read as no override"
 refused() { # DESC EXPECT-IN-ERR
