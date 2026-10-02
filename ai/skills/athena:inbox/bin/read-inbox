@@ -58,6 +58,13 @@
 # and must dedupe re-delivered bytes by each message's stable id (maildir:
 # `name`; slack log: `ts`; platform: `entity_id` + event id). See SKILL.md ->
 # bin/read-inbox -> "At-least-once across its own crash".
+# ============================ THE THINKING STATUS ==========================
+#
+# An acking read of a Slack channel then sets "Athena is thinking…" in each
+# conversation holding an owner DM/thread line (DND-1783; lib/thinking.sh).
+# That is a Slack write, with generic text and never message content. A
+# failure is a named stderr line with a Fix: and never changes the exit
+# status, stdout or the ack. --peek sets nothing.
 #--- end usage ---
 set -uo pipefail
 
@@ -436,12 +443,19 @@ esac
 #
 # Each owner DM/thread line just delivered gets "Athena is thinking…" in its
 # conversation (lib/thinking.sh), so the owner sees the session working without
-# the attendant having to remember a step. It runs only where the ack ran (not
-# on --peek), only on a Slack-producer log channel, and AFTER the ack: a slow
-# or failed status call can never delay the ack or turn into a re-delivery.
+# the attendant having to remember a step. It runs only on an acking read (not
+# --peek; also when the ack itself failed, since the bodies were shown), only
+# on a Slack-producer log channel, and AFTER the ack: a slow or failed status
+# call can never delay the ack or turn into a re-delivery.
+#
+# THE CONSUMER LOCK IS RELEASED FIRST. lib/lock.sh's fd is inherited across
+# exec, so a status call (and its curl) run while it is held would keep the
+# lock held, and refuse every other session's read, until Slack answered.
+# Releasing is idempotent: the EXIT trap's second release does nothing.
 # Every failure is a named stderr line with a Fix:, and it never changes RC.
 # ============================================================================
 if [ "${KIND}" = "log" ] && [ "${PRODUCER}" = "slack" ]; then
+  inbox_release_consumer
   printf '%s' "${READ}" | thinking_set
 fi
 

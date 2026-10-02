@@ -189,8 +189,11 @@ for every owner DM/thread line, not only ones you will reply to. So:
   with no reply in a conversation the read set clears it with `--clear`.
 - **A failure** is printed by `read-inbox` on stderr: an `athena:inbox: the
   thinking status was not set …` line with a `Fix:`. Handle it as the failure
-  bullet above says: name it, add the `status-failed` ledger line, reply
-  anyway.
+  bullet above says: name it, add a ledger line, reply anyway. The ledger line
+  is `<utc-ts> <channel>:<thread_ts> status-failed <reason>`, keyed on the
+  conversation the line names. `<reason>` is the Slack error code when the
+  line carries one, else `owner-unresolved`, `timeout` or `malformed-target`.
+  You may set the status by hand for that conversation before replying.
 
 ## What you may do (tiers)
 

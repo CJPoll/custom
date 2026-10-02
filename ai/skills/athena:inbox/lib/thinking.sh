@@ -16,10 +16,11 @@
 #                     place the Slack call lives) for each target.
 #
 # THE STATUS IS A COURTESY; THE READ IS THE JOB. Every failure here -- an owner
-# id that does not resolve, a status call that fails or hangs, a line whose
-# channel or ts is malformed -- prints a named stderr line with a Fix: and
-# RETURNS 0. It never changes read-inbox's exit status, never writes stdout
-# (stdout is the --json document), and never runs before the ack.
+# id that does not resolve or is malformed, a status call that fails or times
+# out, a line whose channel or ts is malformed -- prints a named stderr line
+# with a Fix: and RETURNS 0. It never changes read-inbox's exit status, never
+# writes stdout (stdout is the --json document), and runs only after the ack
+# and after the consumer lock is released.
 #
 # The status text is the tool's default, never message content: everyone in
 # the conversation sees it.
@@ -34,9 +35,9 @@
 # thinking_targets [<owner-id>]   (stdin: the read document)
 # Prints one "<channel>\t<thread parent ts>" line per conversation, deduped,
 # for the owner's lines, in batch order (first line of each conversation
-# first). With no owner id it prints the CANDIDATES (every
-# qualifying line, any sender), so the caller can tell "no DM/thread line in
-# this batch" from "there were some, and the owner could not be resolved".
+# first). With no owner id it prints the CANDIDATES (every qualifying line,
+# any sender), so the caller can tell "no DM/thread line in this batch" from
+# "there were some, and the owner could not be resolved".
 thinking_targets() {
   local owner="${1-}"
   jq -r --arg owner "${owner}" '
@@ -58,10 +59,20 @@ thinking_valid_target() {
   [[ "$1" =~ ^[CDG][A-Z0-9]+$ ]] && [[ "$2" =~ ^[0-9]+\.[0-9]+$ ]]
 }
 
+# thinking_valid_owner <id> -- a Slack user id, by shape. A well-formed but
+# WRONG key would match no line and read as "the owner sent nothing"; a
+# malformed one is refused, named, where it is produced.
+thinking_valid_owner() {
+  [[ "$1" =~ ^[UW][A-Z0-9]+$ ]]
+}
+
 # The status tool, and the overlay resolver. ATHENA_INBOX_STATUS_BIN replaces
 # the status tool (the test seam: the suite points it at a stub, so no test
-# ever calls Slack). Both defaults are resolved through the PHYSICAL path, so a
-# read through the ~/.claude/skills symlink finds the same tree.
+# ever calls Slack). Both defaults are resolved through the PHYSICAL path of
+# this file, so a read through the ~/.claude/skills symlink (which links the
+# whole ai/skills directory) finds ai/skills/athena:slack and ai/bin in the
+# same tree. A per-skill symlink would resolve elsewhere; that fails loudly as
+# the named "did not resolve" line below, never silently.
 _thinking_skills_dir() { (cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P); }
 thinking_status_bin() {
   if [ -n "${ATHENA_INBOX_STATUS_BIN:-}" ]; then
@@ -72,26 +83,44 @@ thinking_status_bin() {
 }
 thinking_overlay_bin() { printf '%s/bin/private-overlay\n' "$(dirname "$(_thinking_skills_dir)")"; }
 
+# The by-hand fallback every Fix: below names. It is the one place the command
+# is documented.
+_THINKING_BY_HAND='set it by hand before replying, with athena:slack/bin/status <channel> <thread_ts> (athena:slack -> The thinking status), and log status-failed in the attend ledger (athena:inbox-attend -> Show that Athena is thinking)'
+
 # thinking_set   (stdin: the read document)
 # Sets the status on each owner conversation in the batch. Always returns 0.
+#
+# Each call is capped at THINKING_CALL_TIMEOUT_S seconds (the status tool waits
+# out a 429's Retry-After). After the first timeout the rest of the batch is
+# skipped and named, so one slow Slack cannot hold the read N times over.
+THINKING_CALL_TIMEOUT_S=30
 thinking_set() {
-  local doc candidates owner owner_err status_bin targets ch ts err rc bad=0
+  local doc candidates owner owner_err status_bin targets ch ts err rc
+  local bad=0 skipped=0 timed_out=0
   doc="$(cat)"
   candidates="$(printf '%s' "${doc}" | thinking_targets "" 2>/dev/null)" || {
     printf 'athena:inbox: the thinking status was not set: the read document could not be scanned for DM/thread lines.\n' >&2
-    printf '  Fix: the read and the ack are unaffected. Set it by hand with athena:slack/bin/status <channel> <thread_ts> before replying (athena:inbox-attend -> Show that Athena is thinking).\n' >&2
+    printf '  Fix: the read and the ack are unaffected; %s.\n' "${_THINKING_BY_HAND}" >&2
     return 0
   }
   # No DM/thread line from anyone: nothing to set, and no owner lookup, so a
   # machine with no overlay reads its other traffic without noise.
   [ -n "${candidates}" ] || return 0
 
+  if ! command -v timeout >/dev/null 2>&1; then
+    printf 'athena:inbox: the thinking status was not set: `timeout` is not on PATH, and the status call is never run unbounded after a read.\n' >&2
+    printf '  Fix: install coreutils (timeout). The read and the ack are unaffected; %s.\n' "${_THINKING_BY_HAND}" >&2
+    return 0
+  fi
+
   owner_err="$(mktemp)" || owner_err=/dev/null
-  if ! owner="$("$(thinking_overlay_bin)" get slack .people.owner.user_id 2>"${owner_err}")" || [ -z "${owner}" ]; then
-    printf 'athena:inbox: the thinking status was not set for %s DM/thread conversation(s): the owner'"'"'s Slack id did not resolve, so no line can be told to be the owner'"'"'s.\n' \
-      "$(printf '%s\n' "${candidates}" | wc -l | tr -d ' ')" >&2
+  if ! owner="$("$(thinking_overlay_bin)" get slack .people.owner.user_id 2>"${owner_err}" </dev/null)" \
+     || ! thinking_valid_owner "${owner}"; then
+    printf 'athena:inbox: the thinking status was not set for %s DM/thread conversation(s): the owner'"'"'s Slack id %s, so no line can be told to be the owner'"'"'s.\n' \
+      "$(printf '%s\n' "${candidates}" | wc -l | tr -d ' ')" \
+      "$([ -s "${owner_err}" ] && printf 'did not resolve' || printf 'resolved to a value that is not a Slack user id (U... or W...)')" >&2
     sed 's/^/  /' "${owner_err}" >&2 2>/dev/null
-    printf '  Fix: resolve the overlay error above (ai/bin/private-overlay get slack .people.owner.user_id must print the id). The read and the ack are unaffected; set the status by hand before replying (athena:inbox-attend -> Show that Athena is thinking).\n' >&2
+    printf '  Fix: make ai/bin/private-overlay get slack .people.owner.user_id print the owner'"'"'s Slack user id (see any error above). The read and the ack are unaffected; %s.\n' "${_THINKING_BY_HAND}" >&2
     [ "${owner_err}" = /dev/null ] || rm -f "${owner_err}"
     return 0
   fi
@@ -102,27 +131,33 @@ thinking_set() {
   status_bin="$(thinking_status_bin)"
 
   while IFS=$'\t' read -r ch ts; do
+    if [ "${timed_out}" -eq 1 ]; then
+      skipped=$((skipped + 1))
+      continue
+    fi
     if ! thinking_valid_target "${ch}" "${ts}"; then
       bad=$((bad + 1))
       continue
     fi
-    # Bounded: the status tool retries a 429 on Slack's Retry-After, and the
-    # read has already been delivered and acked by the time this runs.
-    if command -v timeout >/dev/null 2>&1; then
-      err="$(timeout 30 "${status_bin}" "${ch}" "${ts}" 2>&1 >/dev/null)"; rc=$?
-    else
-      err="$("${status_bin}" "${ch}" "${ts}" 2>&1 >/dev/null)"; rc=$?
-    fi
+    # stdin is /dev/null: the tool must never read the remaining targets.
+    err="$(timeout "${THINKING_CALL_TIMEOUT_S}" "${status_bin}" "${ch}" "${ts}" 2>&1 >/dev/null </dev/null)"; rc=$?
     [ "${rc}" -eq 0 ] && continue
-    [ "${rc}" -ne 124 ] || err="timed out after 30s${err:+; ${err}}"
+    if [ "${rc}" -eq 124 ]; then
+      timed_out=1
+      err="timed out after ${THINKING_CALL_TIMEOUT_S}s${err:+; ${err}}"
+    fi
     printf 'athena:inbox: the thinking status was not set on %s/%s (status exit %s).\n' "${ch}" "${ts}" "${rc}" >&2
     [ -z "${err}" ] || printf '%s\n' "${err}" | sed 's/^/  /' >&2
-    printf '  Fix: resolve the status tool'"'"'s error above (%s). The read and the ack are unaffected; reply as normal, and log it per athena:inbox-attend -> Show that Athena is thinking.\n' "${status_bin}" >&2
+    printf '  Fix: resolve the status tool'"'"'s error above (%s). The read and the ack are unaffected; reply as normal, and log status-failed in the attend ledger (athena:inbox-attend -> Show that Athena is thinking).\n' "${status_bin}" >&2
   done <<<"${targets}"
 
+  if [ "${skipped}" -gt 0 ]; then
+    printf 'athena:inbox: the thinking status was not set on %s more owner conversation(s): skipped after the timeout above.\n' "${skipped}" >&2
+    printf '  Fix: the read and the ack are unaffected; %s.\n' "${_THINKING_BY_HAND}" >&2
+  fi
   if [ "${bad}" -gt 0 ]; then
     printf 'athena:inbox: the thinking status was not set for %s owner line(s) whose channel or ts is not a Slack id/ts.\n' "${bad}" >&2
-    printf '  Fix: the producer wrote a malformed channel or ts; run inbox-doctor. The read and the ack are unaffected; set the status by hand with athena:slack/bin/status if you reply there.\n' >&2
+    printf '  Fix: the producer wrote a malformed channel or ts; run inbox-doctor. The read and the ack are unaffected; %s.\n' "${_THINKING_BY_HAND}" >&2
   fi
   return 0
 }

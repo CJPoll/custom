@@ -109,6 +109,9 @@ STATUS_CALLS="${TMP}/status-calls.log"
 cat > "${STATUS_STUB}" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${STATUS_CALLS}"
+if [ -n "${STATUS_LOCK_PROBE:-}" ]; then
+  if flock -n "${STATUS_LOCK_PROBE}" true; then echo free; else echo held; fi >> "${STATUS_CALLS}.lock"
+fi
 if [ "${STATUS_STUB_RC:-0}" -ne 0 ]; then
   printf 'athena-slack: status failed: assistant.threads.setStatus: channel_not_found\n' >&2
   printf 'Fix: synthetic stub failure.\n' >&2
@@ -4967,6 +4970,55 @@ assert_ok "T-10 a Slack channel id and ts are a valid target" thinking_valid_tar
 if thinking_valid_target "D1;rm" 1790000001.1 || thinking_valid_target DFAKE0001 100; then
   bad "T-10 a malformed channel or ts is refused before any call" "accepted"
 else ok "T-10 a malformed channel or ts is refused before any call"; fi
+if thinking_valid_owner UFAKE00001 && ! thinking_valid_owner "not-an-id" && ! thinking_valid_owner ""; then
+  ok "T-10 the owner id must be a Slack user id"
+else bad "T-10 the owner id must be a Slack user id" "shape check accepted or refused the wrong value"; fi
+
+# T-11 the consumer lock is free while the status call runs. The lock's fd is
+#      inherited across exec, so a call made while it was held kept every other
+#      session's read refused until Slack answered.
+thinking_case "${OWNER_IM}"
+rm -f "${STATUS_CALLS}.lock"
+( cd "${LPROJ}" && STATUS_LOCK_PROBE="${LLOCK}" "${BIN}/read-inbox" slack >/dev/null 2>&1 )
+assert_eq "T-11 the consumer lock is released before the status call" "free" \
+  "$(cat "${STATUS_CALLS}.lock" 2>/dev/null)"
+
+# T-12 an owner line whose channel is not a Slack id is refused, counted, and
+#      never sent; the read still acks.
+thinking_case '{"v":1,"ts":"1790000020.1","channel":"not-a-channel","user":"UFAKE00001","kind":"im","event_id":"EvT12","text":"bad channel"}'
+OUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack 2>&1)"; RC=$?
+assert_eq "T-12 a malformed channel leaves read-inbox's exit at 0" "0" "${RC}"
+assert_eq "T-12 ... is never sent to the status tool" "" "$(status_calls)"
+assert_contains "T-12 ... and is counted in a named line" "1 owner line(s) whose channel or ts is not a Slack id/ts" "${OUT}"
+assert_not_contains "T-12 ... which never echoes the malformed value" "not-a-channel/" "${OUT}"
+
+# T-13 --json with a FAILED status: the failure is on stderr, stdout is still
+#      exactly one JSON document.
+thinking_case "${OWNER_IM}"
+( cd "${LPROJ}" && STATUS_STUB_RC=1 "${BIN}/read-inbox" slack --json >"${CASE_DIR}/t13.out" 2>"${CASE_DIR}/t13.err" )
+assert_eq "T-13 --json stdout stays one JSON document when the status fails" "1" \
+  "$(jq -s 'length' < "${CASE_DIR}/t13.out" 2>/dev/null)"
+assert_contains "T-13 ... and the failure goes to stderr" "thinking status was not set" "$(cat "${CASE_DIR}/t13.err")"
+
+# T-14 a valid overlay with no owner key, and one whose owner value is not a
+#      Slack user id: both set nothing and say which.
+NOKEY_ROOT="${TMP}/overlay-nokey"
+mkdir -p "${NOKEY_ROOT}/overlay"; chmod 700 "${NOKEY_ROOT}"
+cp "${OVERLAY_ROOT}/athena-overlay.json" "${NOKEY_ROOT}/"
+printf '{"people":{}}\n' > "${NOKEY_ROOT}/overlay/slack.json"
+thinking_case "${OWNER_IM}"
+OUT="$(cd "${LPROJ}" && ATHENA_PRIVATE_ROOT="${NOKEY_ROOT}" "${BIN}/read-inbox" slack 2>&1)"; RC=$?
+assert_eq "T-14 KEY_NOT_FOUND leaves read-inbox's exit at 0" "0" "${RC}"
+assert_eq "T-14 KEY_NOT_FOUND sets no status" "" "$(status_calls)"
+assert_contains "T-14 KEY_NOT_FOUND is named with the resolver's line" "KEY_NOT_FOUND" "${OUT}"
+BADID_ROOT="${TMP}/overlay-badid"
+mkdir -p "${BADID_ROOT}/overlay"; chmod 700 "${BADID_ROOT}"
+cp "${OVERLAY_ROOT}/athena-overlay.json" "${BADID_ROOT}/"
+printf '{"people":{"owner":{"user_id":"cody"}}}\n' > "${BADID_ROOT}/overlay/slack.json"
+thinking_case "${OWNER_IM}"
+OUT="$(cd "${LPROJ}" && ATHENA_PRIVATE_ROOT="${BADID_ROOT}" "${BIN}/read-inbox" slack 2>&1)"
+assert_eq "T-14 a malformed owner id sets no status" "" "$(status_calls)"
+assert_contains "T-14 ... and says the value is not a Slack user id" "not a Slack user id" "${OUT}"
 
 echo
 if [ "${FAIL}" -eq 0 ]; then

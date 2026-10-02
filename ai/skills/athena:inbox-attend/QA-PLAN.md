@@ -154,12 +154,13 @@ runner.
     For each owner Slack DM or thread line, `read-inbox` sets
     `athena:slack/bin/status` in that conversation after its ack, with generic
     text and no message content (`athena:inbox` → `bin/read-inbox` → *The
-    thinking status*); asserted by `athena:inbox`'s self-test, cases T-1 to
-    T-10. A failed status call is a named stderr line with a `Fix:`, never
-    changes the read's exit or ack, and is named in the turn output and the
-    ledger (`status-failed <slack-error>`); the reply still goes out.
-    Procedure: `athena:inbox-attend` → *Show that Athena is thinking*.
-    **[waiter]** for the set, **[judgment]** for keep-alive and clear.
+    thinking status*). The set is asserted by `athena:inbox`'s self-test,
+    cases T-1 to T-14 (the file that holds the `[waiter]` cases). A failed
+    status call is a named stderr line with a `Fix:`, never changes the read's
+    exit or ack, and is named in the turn output and the ledger
+    (`status-failed <reason>`); the reply still goes out. Procedure:
+    `athena:inbox-attend` → *Show that Athena is thinking*. **[judgment]** for
+    keep-alive and clear.
 
     **Later (2026-10-02, DND-1783):** this read "the attendant sets
     `athena:slack/bin/status` in that same conversation first", a
