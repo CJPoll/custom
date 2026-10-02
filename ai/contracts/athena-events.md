@@ -972,6 +972,7 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `title` — the merge request's title | string | scalar |
 | | `state` — `opened`, `merged` or `closed` | string | scalar |
 | | `revision` — the merge request's `updated_at`, ISO 8601 UTC: the family's ordering revision | string | scalar |
+| | `trigger` (`forge.review.commented` only, DND-1350) — `commented` or `mentioned`: which rule made the comment the owner's | string | scalar |
 | `forge.token.expiring` (the forge token family, *Declared families beyond the first pass*) | `entity_id` — `forge_token:<host>:<project_path>:<token_id>`, the access token | string | scalar |
 | | `host` — the hook's forge host, never the body's | string | scalar |
 | | `project_path` — the hook's project path, never the body's | string | scalar |
@@ -1463,8 +1464,9 @@ GitLab `walt_ui` project (owner decision OQ-10, 2026-09-24); GitHub is not a
 source.
 
 1. **Payload schema** — exactly `entity_id`, `host`, `project_path`, `mr_iid`,
-   `url`, `title`, `state` and `revision`, each a scalar string (*Payload
-   fields and their types per event type*). `host` and `project_path` come
+   `url`, `title`, `state` and `revision`, each a scalar string, and for
+   `forge.review.commented` also `trigger`, a scalar string, `commented` or
+   `mentioned` (DND-1350) (*Payload fields and their types per event type*). `host` and `project_path` come
    from the hook the request verified against, and `url` is built from them,
    never from the body. The payload never holds the merge request's
    description, diff, comments, commit messages, author, assignees or
@@ -1549,6 +1551,14 @@ costs are accepted, each an extra item, never a missed one. A mention
 inside code or a quote matches, though GitLab does not notify for it. And
 after the owner renames their GitLab account, the old username stays bound
 until their next comment.
+
+The payload's `trigger` says which rule matched (DND-1350): `commented` when
+the owner's id is the merge request's `author_id` or one of its
+`reviewer_ids` (checked first, so a mention on such a merge request is
+`commented` and its text is not read), `mentioned` when only the mention
+matched. A `commented` payload stored before DND-1350 has no `trigger` and
+reads as `commented`. Any other value fails the index obligation
+`malformed-payload`, naming `trigger`.
 
 **A finish closes the owner's item** (DND-1377). A merge request that
 merges or closes closes the owner's `forge_review` item for it, whatever
@@ -6413,7 +6423,9 @@ closed list. The list has three parts:
    `status`, `source_priority`, `due_on` and `source_revision`.
 2. **Server-derived fields**, computed by the server, never copied from
    content: `domain`, `domain_basis`, `project`, `asker_ref` (a Slack user id),
-   `owner_only`, `state`, `closed_by`, `score`, `reasons`, `scored_at`,
+   `forge_trigger` (a `forge_review` item's reason: `review_requested`,
+   `mentioned` or `commented`, from the event type and the ingress
+   classifier's decision, never content), `owner_only`, `state`, `closed_by`, `score`, `reasons`, `scored_at`,
    `override`, `lease_session_id`, `leased_at`, the judgment fields
    `judged_urgency`, `judged_importance`, `judged_confidence` (the lower of
    the two confidences), `judged_model`, `judged_revision`, `judged_at`,
@@ -6434,6 +6446,20 @@ closed list. The list has three parts:
    | `message_text` | `slack_ask` | the message's text |
    | `slack_thread_ts` | `slack_ask` | the thread's `ts`, or `null` when the message is not in a thread |
    | `starts_at` | `meeting` | the meeting's start time |
+
+**Later (2026-10-02):** list 2 did not name `forge_trigger`. DND-1350
+(gen_saas #593, `0bc5d220`) adds it: why a `forge_review` item is the
+owner's, so its row can say "Reviewer requested", "Mentioned you" or "New
+comment". It is the event type, and for a comment the classifier's decision
+carried as `payload.trigger`. A write that creates or reopens the item takes
+the event's trigger. A write that leaves it open keeps the stronger of the
+stored and incoming triggers (`review_requested` > `mentioned` >
+`commented`), as does one that leaves an owner-closed item closed. A close
+carries no trigger and keeps the stored one. A row with no stored trigger
+takes the incoming one on such a write. The column is nullable, never
+backfilled, and refused on any source but `forge_review`, so a row indexed
+before DND-1350 holds `null` until an event next writes it. The row reads
+"Review activity" meanwhile.
 
 **Each source has a closed allow-list.**
 
