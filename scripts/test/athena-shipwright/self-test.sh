@@ -2542,6 +2542,7 @@ sx_stub_reaper() { # <aux dir> — the copy's reaper only records that it ran
 dry_untouched() { # <repo> — true when the dry run wrote nothing and started nothing
   local a; a="$(aux "$1")"
   [ ! -e "$1/ai-artifacts" ] && [ ! -e "$a/claude-was-invoked" ] && [ ! -e "$a/reaper-ran" ] \
+    && [ ! -e "$1/.git/shipwright-lanes" ] \
     && [ "$(git -C "$1" worktree list --porcelain | grep -c '^worktree ')" = 1 ]
 }
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
@@ -2561,6 +2562,7 @@ dry_case() { # <label> <lib> <expected reason> <mutator: missing|unreadable|unlo
     missing)    rm -f -- "$f" ;;
     unreadable) chmod 000 -- "$f" ;;
     unloadable) printf 'return 1\n' >"$f" ;;
+    conflicted) printf '<<<<<<< HEAD\n' >>"$f" ;;
     empty)      : >"$f" ;;
     partial)    printf 'unset -f sd_display_paths\n' >>"$f" ;;
   esac
@@ -2577,11 +2579,28 @@ for lib in dbus-env.sh shipwright-stale-dirt.sh; do
   dry_case "$lib missing" "$lib" missing missing
   dry_case "$lib unreadable" "$lib" unreadable unreadable
   dry_case "$lib fails to load" "$lib" 'could not be loaded' unloadable
+  dry_case "$lib carries a merge-conflict marker" "$lib" 'could not be loaded' conflicted
 done
 dry_case "dbus-env.sh loads but defines nothing" dbus-env.sh 'does not define athena_dbus_env_setup' empty
 dry_case "shipwright-stale-dirt.sh loads but defines nothing" shipwright-stale-dirt.sh 'does not define sd_measure sd_state_get sd_next_streak sd_display_paths' empty
 dry_case "shipwright-stale-dirt.sh lacks sd_display_paths" shipwright-stale-dirt.sh 'does not define sd_display_paths' partial
 RUNNER="$REAL_RUNNER"
+
+# RUNNER_LIBS must name every lib function the runner calls, or a call added
+# later goes unchecked by both the tick and the dry run. Lib functions are the
+# public sd_* and athena_dbus_* names; the libs' own helpers (sd__*, _athena_*)
+# are called only inside the libs.
+listed="$(sed -n '/^RUNNER_LIBS=(/,/^)/p' -- "$RUNNER")"
+called="$(sed '/^RUNNER_LIBS=(/,/^)/d' -- "$RUNNER" | grep -oE '\b(sd_[a-z][a-z_]*|athena_dbus_[a-z_]+)\b' | sort -u)"
+unlisted=""
+for fn in $called; do
+  grep -qw -- "$fn" <<<"$listed" || unlisted="${unlisted} ${fn}"
+done
+if [ -n "$called" ] && [ -z "$unlisted" ]; then
+  ok "RUNNER_LIBS names every lib function the runner calls ($(tr '\n' ' ' <<<"$called"))"
+else
+  bad "RUNNER_LIBS is complete" "called=[$(tr '\n' ' ' <<<"$called")] unlisted=[${unlisted# }]"
+fi
 
 # DND-1667: no git call may have fallen through past a git stub.
 if fsg_verify; then ok "no git call fell through past its stub (DND-1667)"

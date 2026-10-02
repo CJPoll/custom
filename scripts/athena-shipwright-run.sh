@@ -92,7 +92,7 @@
 #       on every machine, so neither depends on it. The exit stays 75 even when
 #       the record or the alert fails; each failure is loud with a Fix: line.
 #   78  a scripts/lib file this tick needs (dbus-env.sh, shipwright-stale-dirt.sh)
-#       is missing or unloadable: no session. It leaves <ts>.failed in runs/ and
+#       is missing, unreadable or unloadable: no session. It leaves <ts>.failed in runs/ and
 #       counts toward the wedge like any unsuccessful outcome (DND-1603)
 #       DRY_RUN=1 runs the same lib check and exits 78 on the same faults,
 #       naming each lib with a Fix:, but writes no record and counts nothing
@@ -365,7 +365,9 @@ esac
 # start. A lib is a fault when it is missing, unreadable, fails to load, or
 # loads without defining every function the tick calls. Each fault is appended
 # to LIB_FAULTS as "<path> (<reason>); ". Loading only defines functions: it
-# runs nothing, so the dry run stays free of side effects. The caller decides
+# runs nothing, so the dry run stays free of side effects. That holds while both
+# libs stay definition-only at top level; a lib that grows a top-level statement
+# breaks the dry run's read-only promise. The caller decides
 # what a fault means (the tick records and counts it; the dry run refuses).
 __wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
 RUNNER_LIBS=(
@@ -373,6 +375,7 @@ RUNNER_LIBS=(
   "shipwright-stale-dirt.sh:sd_measure sd_state_get sd_next_streak sd_display_paths"
 )
 LIB_FAULTS=""
+LIB_FIX="see what changed first (git -C ${MAIN_CHECKOUT} status -- scripts/lib), then restore the named file(s) (git checkout -- scripts/lib discards uncommitted edits there), restore read permission on an unreadable one (chmod u+r <file>), or fast-forward this checkout to main when the runner is newer than its libs."
 load_runner_libs() {
   local entry file fns path fn absent
   LIB_FAULTS=""
@@ -389,7 +392,7 @@ load_runner_libs() {
     fi
     absent=""
     for fn in ${fns}; do
-      declare -F "${fn}" >/dev/null 2>&1 || absent="${absent:+${absent} }${fn}"
+      declare -F "${fn}" >/dev/null || absent="${absent:+${absent} }${fn}"
     done
     [ -z "${absent}" ] || LIB_FAULTS="${LIB_FAULTS}${path} (does not define ${absent}); "
   done
@@ -399,7 +402,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   load_runner_libs
   if [ -n "${LIB_FAULTS}" ]; then
     echo "athena-shipwright: ${LIB_FAULTS%; }; a tick would exit 78 and spawn no session." >&2
-    echo "  Fix: restore the named file(s) under scripts/lib in this checkout (git checkout -- scripts/lib), or fast-forward it to main." >&2
+    echo "  Fix: ${LIB_FIX}" >&2
     exit 78
   fi
   printf '%s\n' "${BRIEF}"
@@ -922,13 +925,13 @@ fi
 if [ -n "${LIB_FAULTS}" ]; then
   lib_failed="${LOG_DIR}/${ts}.failed"
   {
-    echo "athena-shipwright: run ${ts} could not start: a library the runner needs is missing or unloadable."
+    echo "athena-shipwright: run ${ts} could not start: a library the runner needs is missing, unreadable, unloadable, or lacks a function the tick calls."
     echo "libs=${LIB_FAULTS%; }"
     echo "classification=failure (counted toward the wedge)"
   } >"${lib_failed}" || true
   bump_fail
   echo "athena-shipwright: ${LIB_FAULTS%; } — no session. Counted as an unsuccessful outcome. Record: ${lib_failed}" >&2
-  echo "  Fix: restore the named file(s) under scripts/lib in this checkout (git checkout -- scripts/lib), or fast-forward it to main. This outcome feeds the wedge counter ${FAIL_COUNT}." >&2
+  echo "  Fix: ${LIB_FIX} This outcome feeds the wedge counter ${FAIL_COUNT}." >&2
   exit 78
 fi
 
