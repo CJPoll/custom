@@ -132,6 +132,39 @@ OUT="$( (. "${LIB}"; fsg_arm "${D}/file/guard"; echo "after") 2>&1)"; RC=$?
   && ok "G10. an unwritable guard directory: exit 1 with a Fix:" \
   || bad "G10. unwritable guard dir refused" "rc=${RC} out=${OUT}"
 
+# --- G11. A relative guard directory is refused: after any cd PATH would no
+#     longer find it, and a call would reach the real CLI unlogged.
+D="$(casedir g11)"
+OUT="$(cd "${D}" && (PATH="${BASE_PATH}"; . "${LIB}"; fsg_arm guard; echo "after") 2>&1)"; RC=$?
+[ "${RC}" = 1 ] && [[ "${OUT}" == *"not an absolute path"* && "${OUT}" == *"Fix:"* && "${OUT}" != *after* ]] \
+  && [ ! -e "${D}/guard" ] \
+  && ok "G11. a relative guard directory: exit 1 with a Fix:, nothing armed" \
+  || bad "G11. relative guard dir refused" "rc=${RC} out=${OUT}"
+
+# --- G12. A guard directory holding ':' (the PATH separator) is refused.
+OUT="$( (. "${LIB}"; fsg_arm "${TMP}/a:b"; echo "after") 2>&1)"; RC=$?
+[ "${RC}" = 1 ] && [[ "${OUT}" == *"contains ':'"* && "${OUT}" == *"Fix:"* && "${OUT}" != *after* ]] \
+  && ok "G12. a guard directory with ':': exit 1 with a Fix:" \
+  || bad "G12. colon guard dir refused" "rc=${RC} out=${OUT}"
+
+# --- G13. Under `env -i PATH=<stubs>:${FSG_DIR}:...` (forge-token-isolation's
+#     shape) the guard still logs: it finds its log through $0, not FSG_DIR.
+reset_real; D="$(casedir g13)"; mkdir -p "${D}/stubs"
+OUT="$( (PATH="${BASE_PATH}"; . "${LIB}"; fsg_arm "${D}/guard"
+  env -i PATH="${D}/stubs:${FSG_DIR}:${BASE_PATH}" gh api user >/dev/null 2>&1; echo "rc=$?"
+  fsg_verify >/dev/null 2>&1; echo "vrc=$?") 2>&1)"
+[ "${OUT}" = "$(printf 'rc=97\nvrc=1')" ] && [ -z "$(real_calls)" ] \
+  && [ "$(cat "${D}/guard/fallthrough.log")" = "$(printf 'gh\tapi user')" ] \
+  && ok "G13. under env -i the guard still logs, exits 97, and the real gh is NOT run" \
+  || bad "G13. env -i guard" "out=${OUT} real=$(real_calls)"
+
+# --- G8d. A declared stub that is a directory is "not a regular file".
+D="$(casedir g8d)"; mkdir -p "${D}/s/gh"
+OUT="$( (. "${LIB}"; fsg_require_stubs "${D}/s" gh; echo "after") 2>&1)"; RC=$?
+[ "${RC}" = 1 ] && [[ "${OUT}" == *"is not a regular file"* && "${OUT}" == *"Fix:"* ]] \
+  && ok "G8d. fsg_require_stubs on a directory named gh: exit 1, 'not a regular file'" \
+  || bad "G8d. directory stub refused" "rc=${RC} out=${OUT}"
+
 printf '\nforge-stub-guard self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then
   echo "Fix: ai/lib/forge-stub-guard.sh must put a guard behind every gh/glab stub that logs and exits 97 without running the real CLI, fsg_verify must return 1 on any logged call or a lost log, and fsg_require_stubs must exit 1 on a missing or non-executable stub." >&2

@@ -303,7 +303,7 @@ chmod +x "${TB}/git" "${TB}/gh" "${TB}/docker"
 # that is missing or not executable fails the suite instead of reaching the
 # real CLI (ai/lib/forge-stub-guard.sh).
 . "${ROOT}/ai/lib/forge-stub-guard.sh"
-fsg_arm "${TMP}/forge-guard" gh
+fsg_arm "${TMP}/forge-guard"
 fsg_require_stubs "${TB}" gh
 FP="${TMP}/fp"; mkdir -p "${FP}/dir"
 printf 'FAIL one\npassed two\nstash word\n12\n' > "${FP}/f"; cp "${FP}/f" "${FP}/g"; cp "${FP}/f" "${FP}/dir/h"
