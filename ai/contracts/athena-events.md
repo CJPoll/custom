@@ -7281,25 +7281,75 @@ in Notion per `athena:ticket-management`.
 ### Morning digest
 
 Once per local day the server sends each owner one Slack DM summarising what
-needs them (DND-446; owner decision OQ-11: 07:00 America/Denver). It is v1 of
-the digest: links only. One-click buttons come with DND-440.
+needs them (DND-446; owner decision OQ-11: 07:00 America/Denver). Design:
+`ai/docs/morning-digest-v2.md` (DND-1737). The digest is links only. It has
+no buttons until the `calendar.rsvp` grant class is ratified (*No interactive
+blocks* below).
 
-**What it reads.** Only the owner's own items, through the owner read path
-(`Athena.Priorities.list_ranked/2` with the owner's user): the query filters
-`owner_id` and checks RBAC `read`. It reads `proposed` and `active` items and
-nothing else. It shows:
+**Later (2026-10-02, DND-1739):** this said "It is v1 of the digest: links
+only. One-click buttons come with DND-440." It said the digest held an owner
+queue, per-domain lists and an empty meetings slot awaiting DND-447.
+Superseded by digest v2 (DND-1737): three sections in the owner's order,
+then the per-domain lists, and meetings now come from DND-447's calendar
+adapter. The buttons wait on `calendar.rsvp`, not DND-440.
 
-- the **owner queue**: `proposed` items and `active` `owner_only` items, in
-  rank order, at most 10, then "and N more";
-- the top N (the owner's setting, default 5) **leasable** `active` items per
-  domain (`work`, `blend`, `personal`, each present even when empty), each with
-  its reason ids;
-- a meetings slot, left out until DND-447 fills it;
-- a footer link to `/priorities`.
+**Sections, in order.** Each section is always present. An empty one carries
+a one-line reason, so an empty section never reads as a missing one. The
+header names the window of section 2.
 
-An empty index sends one line, "Nothing needs you today.", never silence.
-That line replaces the owner-queue and per-domain sections; only the header
-and the footer link stay.
+1. **Needs your attention.** The **owner queue**: `proposed` items and
+   `active` `owner_only` items, in rank order, at most 10, then "and N more".
+   The section header links `/priorities`. Empty reason: "Nothing needs you."
+   A ticket moved to `Needs Attention` is assigned to the owner, so the index
+   marks it `owner_only` and it lands here through the existing Notion ingest.
+   Won't-fix notices are not part of the digest: each stays its own DM, sent
+   only when a candidate exists.
+2. **Overnight.** What was completed in the window, as a status report.
+   - **Window:** from the previous successful send for this owner to now.
+     With no previous send, the last 24 h. Capped at 72 h, so Monday covers
+     the weekend. Empty reason: "No work completed since <time>."
+   - **Sources**, both server-side: fleet registry missions whose status
+     reached done or merged in the window (with the admiral run's session and
+     `scope_label`); and priority-index Notion items whose state moved to
+     `done` in the window, with their `Epic` relation.
+   - **Grouping:** session, then epic, then ticket. A done ticket with no
+     fleet mission goes under "Outside a fleet run". A ticket with no epic
+     goes under "No epic". Each ticket is its ref linked to its `url`, plus
+     its title.
+   - **Join key:** the Notion page id. A mission's `lookup` and an index
+     item's `source_ref` both resolve to it. A mission whose lookup does not
+     resolve is counted and named ("2 missions not matched"), never dropped.
+   - **Still running:** one line per session ("3 missions still running").
+3. **Today's meetings.** The owner's `meeting` items (DND-447, synced from the
+   owner's primary calendar for the owner-local day). Each shows the local
+   time, the linked title, a **prep** line and the **RSVP** links. Empty
+   reasons: "No meetings today." and "Calendar not connected: <cause>".
+   - **Prep line:** at most 200 characters, from the Jev use case
+     `meeting_prep` (`ai/contracts/athena-judgments.md`), or "No prep found.".
+     The event description is read at digest time and passed to the judgment.
+     It is never stored. An unavailable judgment renders "prep: not judged
+     (<cause>)", never a blank.
+   - **RSVP, Phase A (links):** each meeting links to
+     `/priorities#meeting-<id>`, where the owner picks Going, Maybe or Not
+     going in their own web session.
+   - **RSVP, Phase B (Slack buttons)** need the `calendar.rsvp` grant class
+     (DND-1744; consumer the server at click time). They are **not part of
+     v2** until the owner ratifies that class. Until then *No interactive
+     blocks* holds.
+4. **Up next.** After section 3: the top N (the owner's setting, default 5)
+   **leasable** `active` items per domain (`work`, `blend`, `personal`, each
+   present even when empty), each with its reason ids, then a footer link to
+   `/priorities`.
+
+When every section is empty the digest sends one line, "Nothing needs you
+today.", never silence; only the header and the footer link stay.
+
+**What it reads.** Only the owner's own rows, every query filtering
+`owner_id`. Items come through the owner read path
+(`Athena.Priorities.list_ranked/2` with the owner's user, which also checks
+RBAC `read`) and read `proposed` and `active` items, plus the done items and
+fleet missions of section 2 through their owner-scoped read paths, never the
+machine-token report path.
 
 **Stored metadata only** (*The storage boundary*). A row is the source label,
 the item's ref linked to its `url`, the title and the reason ids. A
@@ -7327,7 +7377,13 @@ recipient. There is no inbox fallback either: the server holds the bot token
 
 **No interactive blocks.** `owner_dm/3` refuses any interactive element
 (`interactive_blocks_refused`), as the click path does. It stamps no return
-address, so no click from a digest can be routed until DND-440 adds that path.
+address, so no click from a digest can be routed. Phase B's RSVP buttons
+(section 3) lift this only after the owner ratifies `calendar.rsvp` and the
+grant click path exists.
+
+**Later (2026-10-02, DND-1739):** this said no click can be routed "until
+DND-440 adds that path". DND-440 shipped the `priority.transition` class
+only. A digest button needs its own class, `calendar.rsvp`.
 
 **Schedule.** The owner's settings live on their priority rules, edited in the
 rules editor:
@@ -7378,7 +7434,7 @@ writes: action `owner_dm`, no machine, a body hash, never a body.
 | --- | --- | --- | --- | --- |
 | View the priorities page | the logged-in owner | only the owner's items, their summaries, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
 | Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or, for promote, restore and dismiss only, an owner approval grant of class `priority.transition`, executed by the server at click time | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the grant path logs the refusal, the grant stays `approved`, and the approval message says so |
-| Build and send the morning digest | the server, for owner O; no caller | O's `proposed` and `active` items; O's own Slack app; recipient O's `owner_slack_user_id` | `Athena.Digest`: items through `list_ranked/2` with O's user (the `owner_id` filter plus RBAC `read`); `Athena.Slack.owner_dm/3` selects the app by `owner_id` and reads the recipient from it, with no recipient argument | nothing is sent; the cause is recorded on O's send log and shown on O's `/priorities` |
+| Build and send the morning digest | the server, for owner O; no caller | O's `proposed` and `active` items, O's items done and O's fleet missions finished in the window, O's synced meetings; O's own Slack app; recipient O's `owner_slack_user_id` | `Athena.Digest`: items through `list_ranked/2` with O's user (the `owner_id` filter plus RBAC `read`), and the overnight and meeting reads through owner-scoped read paths that filter `owner_id`; `Athena.Slack.owner_dm/3` selects the app by `owner_id` and reads the recipient from it, with no recipient argument | nothing is sent; the cause is recorded on O's send log and shown on O's `/priorities` |
 | View a mission's cached summary on the fleet page (DND-1598) | the logged-in owner | the owner's own items' cached summaries, for the tickets the page's missions name; no generation | `Athena.Priorities.ticket_summaries/3` through `Athena.Fleet.PrioritySummariesAdapter`: items read through `OwnerStore` with an `owner_id` = viewer filter plus RBAC `read` in the query; any actor but a `%User{}` is refused | another owner's item answers as no item; a refused read shows "Summary unavailable", never a blank |
 | Generate an item summary | the server's summary sweeper, for each item's own owner; no caller | one owner's open items of an enabled summary source | `Athena.Priorities.Summaries`: the item loaded by id and `owner_id` in the query, checked against the source allow-list and the owner's enabled sources, and re-checked in the write transaction; a Notion body read only through `Athena.NotionEvents.index_page_text/4` under the owner's own binding; a Slack DM's text read only through `Athena.Priorities.live_ask_text/3`, as the owner's own Slack app, for an item of that owner (any other pair is `not_found` with no Slack call) | the item is skipped and counted; nothing is read or written for another owner |
 | Run the one-time summary backfill (DND-1395) | an operator on the host, over `rpc`, through `Athena.Priorities.SummaryBackfill.start/0`; no web, machine-token or MCP path reaches it | every owner's open items of that owner's enabled summary sources, each owner worked separately; no daily or monthly cap | `Athena.Priorities.Summaries.backfill/1`: owners one at a time, each only while its gate is open (key stored, model priced, no latch or account pause), and each item through the same per-item path as the sweeper (loaded by id and `owner_id`, checked against the allow-list and that owner's enabled sources, re-checked in the write transaction, bodies read as in the row above). `start` keeps only the pause option, so an rpc cannot swap the config, prices or clock | a second start while one runs is `already_running`; an owner whose gate is closed is skipped and counted; an unpriced call is `price_unknown`, and nothing is read or written for another owner |
