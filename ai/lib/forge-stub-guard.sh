@@ -85,6 +85,12 @@ fsg_make() {
       echo "  Fix: pass fsg_arm/fsg_make a directory whose path has no ':'." >&2
       exit 1 ;;
   esac
+  case ":${FSG_DIRS:-}:" in
+    *":${dir}:"*)
+      echo "forge-stub-guard: FAIL — the guard directory '${dir}' is already armed in this shell; arming it again would empty its log and lose any fall-through already recorded (DND-1667)." >&2
+      echo "  Fix: give each fsg_arm/fsg_make call its own directory, e.g. \"\${TMP}/git-guard\" and \"\${TMP}/forge-guard\", naming every tool that guard needs in one call." >&2
+      exit 1 ;;
+  esac
   if [ -z "${dir}" ] || ! mkdir -p "${dir}" || ! : > "${dir}/${FSG_LOG}"; then
     echo "forge-stub-guard: FAIL — could not create the guard directory '${dir}' (DND-1647)." >&2
     echo "  Fix: pass fsg_arm/fsg_make a writable directory inside the suite's mktemp -d." >&2
@@ -141,17 +147,17 @@ fsg_require_stubs() {
 
 # fsg_verify
 fsg_verify() {
-  local dirs="${FSG_DIRS:-${FSG_DIR:-}}" d rc=0 old_ifs="${IFS}"
+  local dirs="${FSG_DIRS:-${FSG_DIR:-}}" rest d rc=0
   if [ -z "${dirs}" ]; then
     echo "forge-stub-guard: FAIL — could not measure: no guard directory was armed (FSG_DIR unset), so whether a stub fell through is unknown (DND-1647)." >&2
     echo "  Fix: call fsg_arm or fsg_make before the tests and do not delete its directory before fsg_verify." >&2
     return 1
   fi
-  IFS=:
-  # shellcheck disable=SC2086 # split on ':' on purpose; fsg_make refuses a dir holding ':'
-  set -- ${dirs}
-  IFS="${old_ifs}"
-  for d in "$@"; do
+  # Walk the ':'-joined list by expansion: no IFS change and no globbing
+  # (fsg_make refuses a directory holding ':').
+  rest="${dirs}:"
+  while [ -n "${rest}" ]; do
+    d="${rest%%:*}"; rest="${rest#*:}"
     if [ ! -f "${d}/${FSG_LOG}" ]; then
       echo "forge-stub-guard: FAIL — could not measure: the guard log '${d}/${FSG_LOG}' is gone, so whether a stub fell through is unknown (DND-1647)." >&2
       echo "  Fix: call fsg_arm or fsg_make before the tests and do not delete its directory before fsg_verify." >&2

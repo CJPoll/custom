@@ -188,10 +188,10 @@ OUT="$( (PATH="${BASE_PATH}"; . "${LIB}"; fsg_make "${D}/guard" git
 #     the stand-in agent wrapper between them, and without it.
 for layout in "plain|${BASE_PATH}" "agent-wrapper|${AGENT}:${BASE_PATH}"; do
   name="${layout%%|*}"; behind="${layout#*|}"
-  reset_real; D="$(casedir "g15-${name}")"; mkdir -p "${D}/stubs"
-  printf '#!/bin/sh\necho STUB-GIT\n' > "${D}/stubs/git"   # no chmod: the defect
+  reset_real; D="$(casedir "g15-${name}")"; mkdir -p "${D}/gitstubs"
+  printf '#!/bin/sh\necho STUB-GIT\n' > "${D}/gitstubs/git"   # no chmod: the defect
   ( PATH="${BASE_PATH}"; . "${LIB}"; fsg_make "${D}/guard" git
-    PATH="${D}/stubs:${FSG_DIR}:${behind}" git push origin main >"${D}/out" 2>"${D}/err"; echo "$?" >"${D}/rc"
+    PATH="${D}/gitstubs:${FSG_DIR}:${behind}" git push origin main >"${D}/out" 2>"${D}/err"; echo "$?" >"${D}/rc"
     fsg_verify 2>"${D}/verr"; echo "$?" >"${D}/vrc" ) 2>/dev/null
   if [ "$(cat "${D}/rc" 2>/dev/null)" = 97 ] && [ -z "$(real_calls)" ] && grep -q 'Fix:' "${D}/err" \
      && [ "$(cat "${D}/guard/fallthrough.log")" = "$(printf 'git\tpush origin main')" ] \
@@ -213,10 +213,10 @@ for t in docker curl claude; do
 done
 
 # --- G17. fsg_verify reads every guard directory armed in this shell.
-reset_real; D="$(casedir g17)"; mkdir -p "${D}/stubs"
+reset_real; D="$(casedir g17)"; mkdir -p "${D}/gitstubs"
 OUT="$( (PATH="${BASE_PATH}"; . "${LIB}"; fsg_make "${D}/git-guard" git; GG="${FSG_DIR}"
   fsg_arm "${D}/forge-guard"
-  PATH="${D}/stubs:${GG}:${BASE_PATH}" git status >/dev/null 2>&1
+  PATH="${D}/gitstubs:${GG}:${BASE_PATH}" git status >/dev/null 2>&1
   fsg_verify; echo "vrc=$?") 2>&1)"
 [[ "${OUT}" == *"git	status"* && "${OUT}" == *"vrc=1" ]] && [ -z "$(real_calls)" ] \
   && ok "G17. two guard dirs (fsg_make git, then fsg_arm gh glab): fsg_verify reports the git one" \
@@ -247,6 +247,36 @@ FSG_LIB="${LIB}" PATH="${BASE_PATH}" bash "${D}/suite.sh" "${D}/t" >"${D}/out" 2
 if [ "${RC}" = 1 ] && [ -z "$(real_calls)" ] && grep -q 'reached a tool past its stub' "${D}/err"; then
   ok "G18. a converted suite whose git stub is not executable exits 1; the real git is never run"
 else bad "G18. converted suite fails on a non-executable git stub" "rc=${RC} real=$(real_calls) err=$(head -c 300 "${D}/err")"; fi
+
+# --- G19. The guard never answers a shim's legitimate pass-through through the
+#     REAL agent PATH git wrapper (ai/agent-bin/git, a copy): the shim execs the
+#     wrapper, the wrapper takes the first git after its OWN entry, and the
+#     guard sits before that entry. The stand-in real git answers; the guard
+#     log stays empty.
+reset_real; D="$(casedir g19)"; mkdir -p "${D}/gitstubs" "${D}/agent-bin"
+cp "${here}/../../agent-bin/git" "${D}/agent-bin/git"; chmod +x "${D}/agent-bin/git"
+printf '#!/bin/sh\nexec "%s/agent-bin/git" "$@"\n' "${D}" > "${D}/gitstubs/git"; chmod +x "${D}/gitstubs/git"
+( PATH="${BASE_PATH}"; . "${LIB}"; fsg_make "${D}/guard" git
+  # The wrapper's own layout is under test, so it is proven, not guarded.
+  fsg_require_stubs "${D}/agent-bin" git
+  env -u ATHENA_AGENT_GIT_SEEN PATH="${D}/gitstubs:${FSG_DIR}:${D}/agent-bin:${BASE_PATH}" git --version \
+    >"${D}/out" 2>"${D}/err"; echo "$?" >"${D}/rc"
+  fsg_verify 2>"${D}/verr"; echo "$?" >"${D}/vrc" )
+if [ "$(cat "${D}/rc")" = 0 ] && [ "$(real_calls)" = "git --version" ] && [ ! -s "${D}/guard/fallthrough.log" ] \
+   && [ "$(cat "${D}/vrc")" = 0 ]; then
+  ok "G19. a shim passing through the agent git wrapper reaches the git after the wrapper's entry, never the guard"
+else bad "G19. pass-through via the agent wrapper skips the guard" \
+  "rc=$(cat "${D}/rc") real=$(real_calls) log=$(cat "${D}/guard/fallthrough.log") err=$(head -c 300 "${D}/err")"; fi
+
+# --- G20. Arming one guard directory twice is refused: the second arm would
+#     empty the log the first one filled.
+D="$(casedir g20)"
+OUT="$( (. "${LIB}"; fsg_make "${D}/guard" git; printf 'x\n' >> "${D}/guard/fallthrough.log"
+  fsg_arm "${D}/guard" gh; echo "after") 2>&1)"; RC=$?
+[ "${RC}" = 1 ] && [[ "${OUT}" == *"already armed"* && "${OUT}" == *"Fix:"* && "${OUT}" != *after* ]] \
+  && [ -s "${D}/guard/fallthrough.log" ] \
+  && ok "G20. re-arming a guard directory: exit 1 with a Fix:, its log kept" \
+  || bad "G20. re-arm refused" "rc=${RC} out=${OUT}"
 
 printf '\nforge-stub-guard self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then

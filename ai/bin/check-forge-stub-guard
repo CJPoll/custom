@@ -37,10 +37,12 @@
 #        tool; and
 #     2. puts D on PATH: D is an element of a `PATH=` value (`export PATH=`,
 #        `env -i PATH=`, `PATH=... cmd` all included), or of any `NAME=`
-#        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`), beside
-#        at least one other element (an empty one too: `PATH="${D}:"` adds
-#        the cwd). A value whose SOLE element is D (`PATH="${D}"`, a PATH of
-#        links) holds nothing to fall through to (DND-1667).
+#        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`). For
+#        git, docker, curl and claude (DND-1667) D must sit beside at least
+#        one other element (an empty one too: `PATH="${D}:"` adds the cwd):
+#        a value whose SOLE element is D (`PATH="${D}"`, a PATH of links)
+#        holds nothing to fall through to. gh and glab keep the bar DND-1666
+#        landed with, where any element counts.
 #   D is compared as written, after removing quotes and spelling `${NAME}` as
 #   `$NAME`: `"${TMP}/bin"` and `$TMP/bin` are the same directory. The idiom
 #   `PATH="$D${PATH:+:$PATH}"` reads as `$D:$PATH`.
@@ -55,7 +57,8 @@
 #       only there);
 #     * keep the guard right behind the stub (DND-1667): in every PATH value
 #       that puts D on PATH, the element after D is `$FSG_DIR` (or a variable
-#       assigned exactly `$FSG_DIR`), or `$PATH` when fsg_arm guards that
+#       assigned exactly `$FSG_DIR`) read where the closest fsg_arm/fsg_make
+#       above it names that tool, or `$PATH` when fsg_arm guards that
 #       tool (fsg_arm puts its guard at the front of PATH). D is never the
 #       last of several elements: what comes before it can hold the real tool,
 #       which then answers first. One exception, for a PATH layout that is
@@ -91,9 +94,11 @@
 #     `ln -t "$B" "$S/gh"`).
 #   * D put on PATH through a variable whose value does not itself hold
 #     `$PATH` (`P="$D"; PATH="$P:$PATH"`), or through `PATH+=`.
-#   * A PATH whose last element is D, grown later by appending
-#     (`PATH="$D"; PATH="$PATH:/usr/bin"`): the first value reads as D with
-#     nothing behind it.
+#   * For git, docker, curl and claude: a PATH whose sole element is D, grown
+#     later by appending (`PATH="$D"; PATH="$PATH:/usr/bin"`): the first value
+#     reads as D with nothing behind it, and the second never names D.
+#   * Which arm a `$FSG_DIR` read belongs to, beyond file order: a function
+#     defined above every arm call and run later is not refused.
 #   * The ORDER in time the helper requires (fsg_arm before the suite's own
 #     PATH prepend, so `$PATH` holds the guard; fsg_verify last), whether
 #     fsg_verify's status is counted, and whether a stub fsg_require_stubs
@@ -141,6 +146,8 @@ REPO = File.expand_path("../..", __dir__)
 # makes a real model call). fsg_arm's default guard set is the forge CLIs only.
 STUBBED_TOOLS = %w[gh glab git docker curl claude].freeze
 FSG_DEFAULT_TOOLS = %w[gh glab].freeze
+# The tools DND-1666 landed with; their bar is kept exactly (see analyze).
+LANDED_TOOLS = %w[gh glab].freeze
 HELPER_BASENAME = "forge-stub-guard.sh"
 HELPER_REL = "ai/lib/#{HELPER_BASENAME}"
 
@@ -416,7 +423,8 @@ end
 # (DND-1667). A value whose SOLE element is the directory (`PATH="${D}"`, a
 # PATH of links) holds nothing a missing stub could fall through to, so a stub
 # there cannot reach a real tool. Any other element, before or after the
-# directory, can hold the real tool.
+# directory, can hold the real tool. Applied to the DND-1667 tools only; gh
+# and glab keep the landed bar (see analyze).
 def path_dirs(lexed)
   path_values(lexed).select { |(_n, elems)| elems.size > 1 }.flat_map { |(_n, elems)| elems }.uniq
 end
@@ -430,12 +438,15 @@ def helper_use(lexed)
   global_tools = []
   required = []
   verified = false
-  lexed[:lines].each do |(_n, line, flags)|
+  arms = []           # [[lineno, tools]] in file order
+  guard_vars = {}     # "$VAR" => lineno of its `VAR="$FSG_DIR"`
+  lexed[:lines].each do |(n, line, flags)|
     code_matches(line, flags, /(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)=/).each do |m|
       assigns[m[1]] = norm(word_at(line, m.end(0)))
+      guard_vars["$#{m[1]}"] = n if assigns[m[1]] == "$FSG_DIR"
     end
   end
-  lexed[:lines].each do |(_n, line, flags)|
+  lexed[:lines].each do |(n, line, flags)|
     code_matches(line, flags, /(?<![^\s;&|(])(?:\.|source)[ \t]+/).each do |m|
       target = norm(word_at(line, m.end(0)))
       var = target[/\A\$([A-Za-z_][A-Za-z0-9_]*)\z/, 1]
@@ -450,6 +461,7 @@ def helper_use(lexed)
       tools = words.size > 1 ? words[1..] : FSG_DEFAULT_TOOLS
       arm_tools.concat(tools)
       global_tools.concat(tools) if m[1] == "arm"
+      arms << [n, tools]
     end
     verified = true unless code_matches(line, flags, /(?<![\w-])fsg_verify(?![\w-])/).empty?
     code_matches(line, flags, /(?<![\w-])fsg_require_stubs(?![\w-])/).each do |m|
@@ -459,9 +471,22 @@ def helper_use(lexed)
       words[1..].to_a.each { |t| required << [words[0], t] } unless words.empty?
     end
   end
-  guard_spellings = ["$FSG_DIR"] + assigns.select { |_k, v| v == "$FSG_DIR" }.keys.map { |k| "$#{k}" }
+  guard_spellings = ["$FSG_DIR"] + guard_vars.keys
   { sourced: sourced, armed: armed, arm_tools: arm_tools.uniq, global_tools: global_tools.uniq,
-    verified: verified, guard_spellings: guard_spellings, required: required.uniq }
+    verified: verified, guard_spellings: guard_spellings, required: required.uniq,
+    arms: arms, guard_vars: guard_vars }
+end
+
+# The tools the guard named by `spelling` holds, read at line `ln`: the
+# arm call closest above the point FSG_DIR was read (line `ln` for
+# `$FSG_DIR`, the assignment line for a variable holding it). nil when no
+# arm call is above it (a function defined before the suite arms): unknown,
+# not refused. A lexical reading, so a call order that differs from the file
+# order is not modeled.
+def guard_tools_at(use, spelling, ln)
+  at = spelling == "$FSG_DIR" ? ln : use[:guard_vars][spelling]
+  arm = use[:arms].select { |(n, _t)| n <= at }.last
+  arm && arm[1]
 end
 
 # Problems with where the guard sits (DND-1667). For each PATH value that puts
@@ -499,7 +524,16 @@ def order_problems(lexed, on_path, use)
           next
         end
         nxt = elems[i + 1]
-        next if use[:guard_spellings].include?(nxt)
+        if use[:guard_spellings].include?(nxt)
+          held = guard_tools_at(use, nxt, ln)
+          next if held.nil? || held.include?(tool)
+
+          problems << "line #{ln} puts #{dir} (a #{tool} stub) on PATH in front of " \
+                      "#{nxt}, but that guard holds only #{held.join(' ')}: a missing " \
+                      "#{tool} stub falls through it. Keep each guard's FSG_DIR in its " \
+                      "own variable right after its fsg_make/fsg_arm"
+          next
+        end
         next if nxt == "$PATH" && use[:global_tools].include?(tool)
         next if proven && nxt != "$PATH"
 
@@ -516,7 +550,13 @@ end
 def analyze(text)
   lexed = lex(text)
   dirs = path_dirs(lexed)
-  on_path = stub_writes(lexed).select { |(_n, _t, dir)| !dir.empty? && dirs.include?(dir) }
+  # gh/glab keep the landed DND-1666 bar exactly: any PATH element counts, a
+  # sole one included. The sole-element exemption is for the tools DND-1667
+  # added, so widening the check never narrows what it already enforced.
+  all_dirs = path_values(lexed).flat_map { |(_n, elems)| elems }.uniq
+  on_path = stub_writes(lexed).select do |(_n, t, dir)|
+    !dir.empty? && (LANDED_TOOLS.include?(t) ? all_dirs : dirs).include?(dir)
+  end
   problems = []
   unless on_path.empty?
     use = helper_use(lexed)
@@ -685,8 +725,15 @@ def run_self_test
     ["a curl stub on PATH, no helper", "cat > \"${S}/curl\" <<'EOF'\nx\nEOF\nexport PATH=\"${S}:${PATH}\"\n", %w[curl], 1],
     ["a claude stub on PATH, no helper", "printf x > \"$S/claude\"\nPATH=\"$S:$PATH\" run\n", %w[claude], 1],
     ["a docker stub on PATH, no helper", "cp \"$F/fake\" \"$S/docker\"\nPATH=\"$S:$PATH\"\n", %w[docker], 1],
-    ["a stub dir that is the SOLE PATH element cannot fall through",
+    ["a git stub dir that is the SOLE PATH element cannot fall through",
      "ln -sf \"$REAL_GIT\" \"$B/git\"\nPATH=\"$B\" run\n", [], 0],
+    ["gh keeps the landed bar: a sole-element PATH still counts",
+     "echo x > \"$B/gh\"\nPATH=\"$B\" run\n", %w[gh], 1],
+    ["gh keeps the landed bar: a sole-element PATH grown later by appending",
+     "echo x > \"$B/gh\"\nPATH=\"$B\"\nPATH=\"$PATH:/usr/bin\"\n", %w[gh], 1],
+    ["$FSG_DIR read after a second arm names the wrong guard",
+     ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_make \"$T/g\" git\nfsg_arm \"$T/f\"\necho x > \"$B/git\"\n" \
+     "PATH=\"$B:${FSG_DIR}:$PATH\" run\nfsg_verify\n", %w[git], 1],
     ["a stub dir LAST behind $PATH, no helper (the real tool answers first)",
      "echo x > \"$B/gh\"\nPATH=\"$PATH:$B\"\n", %w[gh], 1],
     ["a stub dir LAST behind /usr/bin, no helper", "echo x > \"$B/gh\"\nexport PATH=\"/usr/bin:$B\"\n", %w[gh], 1],
