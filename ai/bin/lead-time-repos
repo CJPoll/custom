@@ -42,6 +42,10 @@ HELP = <<~TXT
   idle_workflow (DND-1540) is the post-merge workflow file a product-repo
   landing must find idle (locked-merge --require-idle-workflow), or "none";
   ai/bin/leadtime-product lands nothing in a repo that does not declare it.
+  idle_workflow also declares post-merge CI for the tail summary
+  (lead-time-phases --summary, DND-1614): a file means the repo has it, so a
+  0 tail with no post-merge run is n/a; "none" means it has none, so a 0
+  tail is measured; absent, the summary infers it from the window.
 
   Presence: a configured path that does not exist is SKIPPED, named with its
   reason, and counted. A path that exists but is not the top of a git

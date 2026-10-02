@@ -1,7 +1,7 @@
 {
   "repos": [
-    { "name": "custom", "path": "~/dev/custom", "mode": "improve" },
-    { "name": "gen_saas", "path": "~/dev/gen_saas", "mode": "watch" },
+    { "name": "custom", "path": "~/dev/custom", "mode": "improve", "idle_workflow": "none" },
+    { "name": "gen_saas", "path": "~/dev/gen_saas", "mode": "watch", "idle_workflow": "post-merge.yml" },
     { "name": "walt_ui", "path": "~/dev/walt_ui", "mode": "watch" }
   ],
   "window": 20,

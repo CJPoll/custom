@@ -135,6 +135,18 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    A dirty PASS never counts. A ticket's events are bounded below by its
    previous landing, and telemetry is scoped to the repo it was written in.
    The normative description is `ai/bin/lead-time-phases --help`.
+
+   **Later (2026-10-01, DND-1614):** the same rule now holds for `tail` in a
+   repo that has post-merge CI. Whether it has CI was inferred from the window
+   (a landing with a measured nonzero tail), so a CI repo whose post-merge
+   runs all failed for a whole window read as measured zeros, "as in custom".
+   The repo's `idle_workflow` (DND-1540) now declares it: a workflow file
+   makes every 0 tail with no post-merge run n/a with a reason naming the
+   declaration; `"none"` keeps measured zeros and warns when a landing has a
+   run; absent keeps the window inference, and the reason says it was
+   inferred. The tracked config declares custom `"none"` and gen_saas
+   `post-merge.yml`. The normative description is
+   `ai/bin/lead-time-phases --help`.
 6. **Rolling window, typical and slow.** The ledger keeps every measured
    landing. The summary reports, per phase, over the last 20 landings: n
    measured, n n/a, median, p90, and the summed time. The biggest contributor

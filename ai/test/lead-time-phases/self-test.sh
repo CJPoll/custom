@@ -39,6 +39,12 @@ else
   bad "lead-time-phases --self-test" "$(cat "${TMP}/lib.out")"
 fi
 
+echo "== help: idle_workflow also declares post-merge CI (DND-1614)"
+has "lead-time-phases --help says idle_workflow declares post-merge CI for the tail" \
+  "$(/usr/bin/ruby "${BIN}" --help 2>&1)" "(ai/bin/lead-time-repos) also declares it for the tail"
+has "lead-time-repos --help says the same" "$(/usr/bin/ruby "${ROOT}/ai/bin/lead-time-repos" --help 2>&1)" \
+  "idle_workflow also declares post-merge CI for the tail summary"
+
 # ── fixtures ────────────────────────────────────────────────────────────────
 HEAD_PUSH="$(printf 'a%.0s' $(seq 40))"
 HEAD_PR="$(printf 'b%.0s' $(seq 40))"
@@ -374,6 +380,25 @@ has "the biggest contributor is tail, lever product" "${OUT}" "biggest contribut
 run "${TEL_EMPTY}" --summary --repo gen_saas --json
 JSON_GS="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); b = j["biggest"]; t = j.dig("totals", "tail"); puts [b["phase"], b["lever"], b["sum_s"], t["n"], t["n_na"]].join(",")')"
 eq "--json: tail, product, 14400 s over 2 measured, the no-run landing n/a (never 0)" "${JSON_GS}" "tail,product,14400,2,1"
+tail_ci() { printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'c = JSON.parse($stdin.read)["tail_ci"]; puts [c["source"], c["value"], c["mismatch"]].join(",")'; }
+eq "--json with no idle_workflow: tail_ci is inferred from the window (DND-1614)" "$(tail_ci)" "inferred,true,"
+
+echo "== summary: the repo's idle_workflow declares its post-merge CI (DND-1614)"
+printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"post-merge.yml"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${TMP}/repos-gs-ci.json"
+CONFIG="${TMP}/repos-gs-ci.json"
+run "${TEL_EMPTY}" --summary --repo gen_saas --json
+eq "a declared workflow: summary exits 0" "${CODE}" "0"
+eq "--json: tail_ci is declared, true" "$(tail_ci)" "declared,true,"
+has "the no-run landing's n/a reason names the declaration" "${OUT}" "gen_saas declares post-merge CI (idle_workflow post-merge.yml)"
+printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"none"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${TMP}/repos-gs-none.json"
+CONFIG="${TMP}/repos-gs-none.json"
+run "${TEL_EMPTY}" --summary --repo gen_saas --json
+eq "--json: a declared none with post-merge runs carries the mismatch" "$(tail_ci)" "declared,false,2"
+run "${TEL_EMPTY}" --summary --repo gen_saas
+has "the table prints the mismatch warning" "${OUT}" "idle_workflow none, but 2 landing(s) in the window have a post-merge run: fix the repo's entry"
+CONFIG="${GS_CONFIG}"
+run "${TEL_EMPTY}" --summary --repo gen_saas
+lacks "no declaration: no mismatch warning" "${OUT}" "idle_workflow none, but"
 CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
 
 echo "== ingest + summary: landings worked on another machine are foreign (DND-1531)"

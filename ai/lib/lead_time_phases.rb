@@ -27,6 +27,7 @@
 
 require "json"
 require "time"
+require_relative "lead_time_config"
 
 module LeadTimePhases
   SCHEMA = 1
@@ -667,6 +668,75 @@ module LeadTimePhases
     end
   end
 
+  # A post-merge CI declaration that is not one: never read as absent.
+  class DeclarationError < StandardError; end
+
+  # Whether a repo has post-merge CI (DND-1614). The repo's idle_workflow
+  # (DND-1540, validated by ai/lib/lead_time_config.rb) is the one home of
+  # that fact: a workflow file declares CI, "none" declares none. Only a repo
+  # that declares nothing falls back to Stats.post_merge_ci?, the window
+  # inference. A declaration is nil (absent) or a Declared.
+  module TailCI
+    Declared = Struct.new(:value, :workflow, :repo, keyword_init: true)
+    INFERRED = "post-merge CI is inferred from the window; declare idle_workflow in the repo's lead-time " \
+               "config (ai/bin/lead-time-repos) to make it a fact"
+
+    module_function
+
+    # -> nil (absent) or a Declared. Raises DeclarationError on any other
+    # value: a value the config validator would refuse reaching here is a
+    # fault, and reading it as absent would hide it.
+    def declare(idle_workflow, repo)
+      return nil if idle_workflow.nil?
+      return Declared.new(value: false, workflow: "none", repo: repo) if idle_workflow == "none"
+      if idle_workflow.is_a?(String) && LeadTimeConfig::IDLE_WORKFLOW_RE.match?(idle_workflow)
+        return Declared.new(value: true, workflow: idle_workflow, repo: repo)
+      end
+
+      raise DeclarationError, "idle_workflow #{idle_workflow.inspect} for #{repo} is not a workflow file name, " \
+                              "\"none\" or absent, so whether #{repo} has post-merge CI is unknown"
+    end
+
+    def declared?(decl) = !decl.nil? && decl.value == true
+    # true, false, or nil (absent).
+    def declared_value(decl) = decl&.value
+
+    # The post-merge CI fact: the declaration, else the window inference.
+    def ci?(decl, rows) = decl ? decl.value : Stats.post_merge_ci?(rows)
+
+    def declared_desc(decl)
+      return "#{decl.repo} declares post-merge CI (idle_workflow #{decl.workflow})" if decl.value
+
+      "#{decl.repo} declares no post-merge CI (idle_workflow none)"
+    end
+
+    # The n/a reason of a 0 tail with no post-merge run, in a repo that
+    # declares post-merge CI. end_kind nil: a row ingested before DND-1532.
+    def declared_na(decl, end_kind)
+      kind = end_kind || "none recorded: the row was ingested before DND-1532"
+      "tail: #{declared_desc(decl)}, but lead-time found no successful post-merge run for the landing " \
+        "(end kind #{kind})"
+    end
+
+    # The landings in the window that have a post-merge run: one found at a
+    # deploy or pipeline end, or a nonzero tail (only such an end gives one).
+    def with_run(rows)
+      rows.count do |r|
+        Stats::TAIL_RUN_ENDS.include?(r["tail_end"]) || (r["tail_s"].is_a?(Numeric) && r["tail_s"].positive?)
+      end
+    end
+
+    # -> {"source"=>"declared"|"inferred", "value"=>bool[, "mismatch"=>N]}.
+    # mismatch: a repo that declares none, with N landings that have a run.
+    def report(decl, rows)
+      return { "source" => "inferred", "value" => Stats.post_merge_ci?(rows) } unless decl
+
+      out = { "source" => "declared", "value" => decl.value }
+      n = decl.value ? 0 : with_run(rows)
+      n.positive? ? out.merge("mismatch" => n) : out
+    end
+  end
+
   module Stats
     TOP_REASONS = 3
     ISO_RE = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/.freeze
@@ -704,11 +774,12 @@ module LeadTimePhases
       end
     end
 
-    def totals(rows)
-      ci = post_merge_ci?(rows)
+    # decl: a TailCI.declare result (nil: absent, the window inference).
+    def totals(rows, decl = nil)
+      ci = TailCI.ci?(decl, rows)
       TOTALS.to_h do |name, key|
         cells = rows.map do |r|
-          next tail_cell(r, ci) if name == "tail"
+          next tail_cell(r, ci, decl) if name == "tail"
 
           r[key].nil? ? [nil, generic(r["lead_na_reason"] || "#{name}: not measured", r)] : [r[key], nil]
         end
@@ -727,14 +798,16 @@ module LeadTimePhases
     # pick_end). "merge" means it found none, and the tail reads 0.
     TAIL_RUN_ENDS = %w[deploy pipeline].freeze
 
-    # -> [seconds or nil, reason or nil]. In a window with post-merge CI, a 0
-    # tail with no post-merge run found (end kind "merge", or a row ingested
-    # before tail_end was kept) is not a measured 0: it is n/a with why. In a
-    # window that shows none (custom) a 0 tail is a measured 0, as before.
-    def tail_cell(row, ci)
+    # -> [seconds or nil, reason or nil]. With post-merge CI (declared, or
+    # inferred from the window when the repo declares nothing), a 0 tail with
+    # no post-merge run found (end kind "merge", or a row ingested before
+    # tail_end was kept) is not a measured 0: it is n/a with why. With none, a
+    # 0 tail is a measured 0. decl: a TailCI.declare result, nil when absent.
+    def tail_cell(row, ci, decl = nil)
       s = row["tail_s"]
       return [nil, generic(row["lead_na_reason"] || "tail: not measured", row)] if s.nil?
       return [s, nil] unless ci && s.zero? && !TAIL_RUN_ENDS.include?(row["tail_end"])
+      return [nil, TailCI.declared_na(decl, row["tail_end"])] if TailCI.declared?(decl)
 
       why = if row["tail_end"].nil?
               "tail: 0 with no end kind in the ledger row (ingested before DND-1532), so a 0 cannot be told " \
@@ -743,7 +816,7 @@ module LeadTimePhases
               "tail: lead-time found no successful post-merge CI run for the landing (end kind " \
                 "#{row['tail_end']}), where other landings in the window have one"
             end
-      [nil, why]
+      [nil, "#{why}; #{TailCI::INFERRED}"]
     end
 
     # Where the fix for each biggest-contributor candidate lands: a phase is
@@ -754,25 +827,41 @@ module LeadTimePhases
     # Whether tail competes: only with a measured nonzero tail in the window.
     # A tail with no measured nonzero value (all 0, all n/a, or a mix) never
     # does.
-    # -> {"tail_candidate"=>bool[, "tail_reason"=>why]}
-    def tail_candidacy(tail_stats)
+    # -> {"tail_candidate"=>bool[, "tail_reason"=>why]}. decl: a
+    # TailCI.declare result, nil when absent (the window inference).
+    def tail_candidacy(tail_stats, decl = nil)
       sum = tail_stats["sum_s"]
       return { "tail_candidate" => true } if sum&.positive?
 
-      why = if sum.nil?
-              "tail not measured in the window (#{tail_stats['n_na']} n/a)"
-            else
-              "no measured nonzero tail in the window: lead-time found no successful post-merge run for any " \
-                "of its #{tail_stats['n']} measured landing(s) (expected with no post-merge CI, as in custom)"
-            end
-      { "tail_candidate" => false, "tail_reason" => why }
+      { "tail_candidate" => false, "tail_reason" => no_tail_reason(tail_stats, decl) }
+    end
+
+    # Why tail is not a candidate: nothing measured, or measured zeros only.
+    def no_tail_reason(tail_stats, decl)
+      declared = TailCI.declared_value(decl)
+      if tail_stats["sum_s"].nil?
+        why = "tail not measured in the window (#{tail_stats['n_na']} n/a)"
+        return declared ? "#{why}: #{TailCI.declared_desc(decl)}" : why
+      end
+
+      n = tail_stats["n"]
+      case declared
+      when true
+        "no measured nonzero tail in the window: each of its #{n} measured landing(s) had a post-merge run " \
+          "that ended at the landing (#{TailCI.declared_desc(decl)})"
+      when false
+        "no measured nonzero tail in the window: #{TailCI.declared_desc(decl)}"
+      else
+        "no measured nonzero tail in the window: lead-time found no successful post-merge run for any " \
+          "of its #{n} measured landing(s) (no post-merge CI seen; #{TailCI::INFERRED})"
+      end
     end
 
     # The candidate with the largest sum: the five phases, then tail when it
     # is a candidate. Ties go to the earlier candidate, so a phase beats tail.
-    def biggest(phase_stats, tail_stats)
+    def biggest(phase_stats, tail_stats, decl = nil)
       cands = PHASES.filter_map { |p| (s = phase_stats[p]["sum_s"]) && [p, s] }
-      tail = tail_candidacy(tail_stats)
+      tail = tail_candidacy(tail_stats, decl)
       cands << ["tail", tail_stats["sum_s"]] if tail["tail_candidate"]
       best = cands.reduce(nil) { |b, c| b.nil? || c[1] > b[1] ? c : b }
       return { "phase" => nil, "reason" => "no phase measured in the window" }.merge(tail) unless best
@@ -782,17 +871,22 @@ module LeadTimePhases
 
     # Foreign landings (DND-1531) are out of the phase stats and the biggest
     # pick; the forge totals (lead, code, tail) still include them.
-    def summarize(rows)
+    # idle_workflow: the repo's declared post-merge workflow, "none", or nil
+    # (absent: the window inference), DND-1614. Anything else raises
+    # DeclarationError. repo: the name the reasons use (default: the rows').
+    def summarize(rows, idle_workflow: nil, repo: nil)
+      decl = TailCI.declare(idle_workflow, repo || rows.first&.dig("repo") || "the repo")
       local = rows.reject { |r| Origin.foreign?(r) }
       ph = phases(local)
-      tot = totals(rows)
+      tot = totals(rows, decl)
       org = origins(rows)
-      big = biggest(ph, totals(local)["tail"])
+      big = biggest(ph, totals(local, decl)["tail"], decl)
       if big["phase"].nil? && local.empty? && !rows.empty?
         big["reason"] = "every landing in the window was worked on another machine (foreign: #{org['foreign']})"
       end
       { "rows" => rows.size, "foreign" => org["judged"].zero? ? nil : org["foreign"],
-        "origin" => org.except("judged"), "phases" => ph, "biggest" => big, "totals" => tot }
+        "origin" => org.except("judged"), "phases" => ph, "biggest" => big, "totals" => tot,
+        "tail_ci" => TailCI.report(decl, rows) }
     end
 
     # Where the window's landings were worked. foreign_units names each

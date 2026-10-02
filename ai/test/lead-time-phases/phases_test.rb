@@ -505,6 +505,95 @@ check("T6 nothing measured at all: no biggest, no lever, a reason") do
   b["phase"].nil? && !b.key?("lever") && b["reason"]
 end
 
+# ── tail reads the repo's declared post-merge CI (DND-1614) ────────────────
+# idle_workflow (DND-1540) declares it: a workflow file is CI, "none" is no
+# CI, absent falls back to the window inference above. Synthetic repo names.
+WF = "post-merge.yml"
+all_merge = (1..5).map { |i| row(i).merge("repo" => "prod", "tail_s" => 0, "tail_end" => "merge") }
+dcl = L::Stats.summarize(all_merge, idle_workflow: WF, repo: "prod")
+dclt = dcl["totals"]["tail"]
+check("D1 declared CI, every tail 0 with a merge end: every tail cell is n/a") do
+  dclt.values_at("n", "n_na", "sum_s") == [0, 5, nil]
+end
+check("D1 its reason names the declaration") do
+  r = dclt["na_reasons"].first
+  r["count"] == 5 && r["reason"].include?("prod declares post-merge CI (idle_workflow #{WF})") &&
+    r["reason"].include?("end kind merge")
+end
+check("D1 tail is not a candidate, and tail_reason says it was not measured") do
+  dcl["biggest"]["tail_candidate"] == false && dcl["biggest"]["tail_reason"].include?("not measured") &&
+    dcl["biggest"]["tail_reason"].include?("idle_workflow #{WF}")
+end
+check("D1 --json carries tail_ci declared true") { dcl["tail_ci"] == { "source" => "declared", "value" => true } }
+check("D1 the biggest pick is a phase (verify), never the unmeasured tail") do
+  dcl["biggest"].values_at("phase", "lever") == ["verify", "harness"]
+end
+
+no_end = all_merge.first(4) + [row(5).merge("repo" => "prod", "tail_s" => 0)]
+check("D2 declared CI, a 0 tail with no tail_end: n/a with the declared reason") do
+  reasons = L::Stats.summarize(no_end, idle_workflow: WF, repo: "prod")["totals"]["tail"]["na_reasons"]
+  reasons.all? { |x| x["reason"].include?("declares post-merge CI") } &&
+    reasons.any? { |x| x["reason"].include?("ingested before DND-1532") }
+end
+
+check("D3 declared CI, a mixed window: the same cells as the inference") do
+  decl = L::Stats.summarize(no_deploy, idle_workflow: WF, repo: "prod")["totals"]["tail"]
+  inf = L::Stats.summarize(no_deploy)["totals"]["tail"]
+  decl.values_at("n", "n_na", "median", "p90", "sum_s") == inf.values_at("n", "n_na", "median", "p90", "sum_s")
+end
+check("D3 declared CI, a 0 tail whose deploy run was found is a measured 0") do
+  L::Stats.summarize(zero_deploy, idle_workflow: WF, repo: "prod")["totals"]["tail"]["n"] == 5
+end
+
+none = L::Stats.summarize(custom_rows, idle_workflow: "none", repo: "custom")
+check("D4 declared none, all zeros: measured zeros") { none["totals"]["tail"].values_at("n", "n_na", "sum_s") == [5, 0, 0] }
+check("D4 tail_reason names the declaration, not 'as in custom'") do
+  why = none["biggest"]["tail_reason"]
+  none["biggest"]["tail_candidate"] == false && why.include?("custom declares no post-merge CI (idle_workflow none)") &&
+    !why.include?("as in custom")
+end
+check("D4 no mismatch warning") { none["tail_ci"] == { "source" => "declared", "value" => false } }
+check("D4 declared none, a merge-end 0 stays measured (never n/a)") do
+  L::Stats.summarize(all_merge, idle_workflow: "none", repo: "prod")["totals"]["tail"].values_at("n", "n_na") == [5, 0]
+end
+
+one_run = custom_rows.first(4) + [row(5).merge("tail_s" => 600, "tail_end" => "deploy")]
+mis = L::Stats.summarize(one_run, idle_workflow: "none", repo: "custom")
+check("D5 declared none with a nonzero tail: it stays measured") do
+  mis["totals"]["tail"].values_at("n", "n_na", "sum_s") == [5, 0, 600]
+end
+check("D5 the mismatch counts the landings with a post-merge run") do
+  mis["tail_ci"] == { "source" => "declared", "value" => false, "mismatch" => 1 }
+end
+
+check("D6 absent: the same numbers, n/a counts and candidacy as before") do
+  [custom_rows, gs_rows, no_deploy, pre, na_tail].all? do |rs|
+    a = L::Stats.summarize(rs)
+    b = L::Stats.summarize(rs, idle_workflow: nil, repo: "custom")
+    a["totals"] == b["totals"] && a["biggest"] == b["biggest"]
+  end
+end
+check("D6 absent, no nonzero tail: the reason says the fact was inferred") do
+  why = cst["biggest"]["tail_reason"]
+  why.include?("inferred") && why.include?("idle_workflow")
+end
+check("D6 absent, inferred CI: the n/a reason says the fact was inferred") do
+  ndt["na_reasons"].first["reason"].include?("inferred")
+end
+check("D6 absent: tail_ci is inferred, with the inferred value") do
+  cst["tail_ci"] == { "source" => "inferred", "value" => false } && gst["tail_ci"] == { "source" => "inferred", "value" => true }
+end
+
+# The miss: a value that is not a declaration is a fault, never read as absent.
+["", "deploy", "../x.yml", " none", 7, true, :none, []].each do |bad|
+  check("D7 an unrecognised CI declaration #{bad.inspect} raises, never reads as absent") do
+    L::Stats.summarize(custom_rows, idle_workflow: bad, repo: "custom")
+    false
+  rescue L::DeclarationError => e
+    e.message.include?("idle_workflow") && e.message.include?(bad.inspect)
+  end
+end
+
 # ── origin: a landing worked on another machine is foreign (DND-1531) ──────
 # Telemetry is machine-local. Foreign needs positive evidence: a dispatch
 # stamp, a readable store already recording dispatches at that instant (its
