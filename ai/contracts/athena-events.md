@@ -6547,11 +6547,14 @@ below.
   nulled and dropped, and the sync stops storing it. The MCP reads'
   `EventSummary.join_url` is read live from Google and stored nowhere
   (*Calendar management* → *Zoom links*); removing the stored field does not
-  remove it.
-- **Never a Google Meet link.** No `hangoutLink`, `conferenceData` value or
-  `meet.google.com` URL is ever stored in the index, or shown on
-  `/priorities` or in the digest. The extraction rules reject them by
-  construction.
+  remove it. The field's KMS key and its policy are retired with the column.
+  When DND-1771 declares the digest link, it also grants the digest runtime
+  decrypt on that key.
+- **Never a Google Meet link.** `hangoutLink`, the `conferenceData` object
+  and any `meet.google.com` URL are never stored in the index, or shown on
+  `/priorities` or in the digest. The one value taken from `conferenceData`
+  is a Zoom URL from an entry point that passes the Zoom rules, stored as
+  `join_url`; the extraction rules reject every Meet URL by construction.
 
 **Later (2026-09-28):** the `forge_review` row listed no `source_revision`.
 DND-439 adds it: the merge request's `updated_at`, the family's ordering
@@ -7632,7 +7635,9 @@ Nine tools: two reads, six writes, one status read.
 - **Guest-only RSVP.** `calendar_rsvp` needs the owner on the guest list and
   not the organizer. Otherwise `not_an_attendee`.
 - **Never a Google Meet link.** No tool, page or digest returns or shows
-  `hangoutLink` or `conferenceData`. No write requests a Meet conference, so
+  `hangoutLink`, the `conferenceData` object or a Meet URL. A validated Zoom
+  URL from a `conferenceData` entry point may be returned and shown, as
+  `join_url` (*Zoom links*). No write requests a Meet conference, so
   Google adds none. A Meet link passed as a Zoom link is `not_a_zoom_link`,
   and one in a `location` argument is `invalid_argument`. A returned
   `location` has its Meet URLs removed (`calendar_event`). The only meeting
