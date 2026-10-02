@@ -13,7 +13,8 @@
 # (DND-1521).
 #
 # BUCKETS.
-#   claim_parse_result, claim_reason_fix, claim_pick_slack_channel -- Domain:
+#   claim_parse_result, claim_refusal_kind, claim_server_words,
+#   claim_reason_fix, claim_pick_slack_channel -- Domain:
 #     pure string-in / string-out, tested directly.
 #   claim_resolve_inbox -- Side Effect: reads git and the inbox registry through
 #     athena:inbox's own adapters (fs.sh, inbox.sh), never a second copy of the
@@ -38,15 +39,56 @@ claim_oneline() {
   printf '%s' "$1" | LC_ALL=C tr '\000-\037\177' ' ' | cut -c1-80
 }
 
+# _claim_refusal_text <json-rpc-message>
+#
+# DOMAIN. The server's refusal text, or nothing when the answer carries no
+# error. The athena server sends a refusal as Hermes' Error.execution: a
+# JSON-RPC `error` whose message is the text (DND-1645). An `isError` tool
+# result carrying the text is read the same way, so either server shape works
+# and the landing order of a server change does not matter.
+_claim_refusal_text() {
+  printf '%s' "$1" | jq -r '
+      if (.result.isError // false) then
+        ([.result.content[]? | .text? // empty] | join(" ") | if . == "" then "a tool error" else . end)
+      elif .error then (.error.message // "an MCP error" | tostring)
+      else empty end' 2>/dev/null
+}
+
+# claim_refusal_kind <text>
+#
+# DOMAIN. One refusal text as a reason token, by EXACT token: the token alone,
+# or the token followed by a colon (the server writes `<token>: ... Fix: ...`).
+#   not found          -> not-found     (exactly that text, no colon)
+#   refused[: ...]     -> refused
+#   already_claimed[: ...] -> already-claimed
+#   invalid[: ...]     -> invalid
+#   anything else      -> mcp-error:<text>, so `already_claimedX`, `not found
+#                         here` or a protocol error's `Invalid params` is never
+#                         read as a refusal.
+claim_refusal_kind() {
+  local err
+  # Trim edge whitespace so "not found\n" still reads as exactly "not found".
+  err="$(printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  case "${err}" in
+    "not found")                        printf 'not-found\n' ;;
+    refused|refused:*)                  printf 'refused\n' ;;
+    already_claimed|already_claimed:*)  printf 'already-claimed\n' ;;
+    invalid|invalid:*)                  printf 'invalid\n' ;;
+    *)                                  printf 'mcp-error:%s\n' "$(claim_oneline "${err}")" ;;
+  esac
+}
+
 # claim_parse_result <json-rpc-message>
 #
 # DOMAIN. The tools/call answer for slack_thread_claim, as one status token on
 # stdout:
 #   claimed | already_yours                  -- the claim holds (success)
 #   not-found | refused | already-claimed | invalid
-#                                            -- the server's refusal, by kind
+#                                            -- the server's refusal, by kind,
+#                                               from a JSON-RPC error or an
+#                                               isError result alike
 #   mcp-error:<words>                        -- anything else. An empty body,
-#                                               non-JSON, a JSON-RPC error, or a
+#                                               non-JSON, a protocol error, or a
 #                                               result with no known status is
 #                                               NEVER read as claimed and NEVER
 #                                               read as not-found.
@@ -56,24 +98,9 @@ claim_parse_result() {
   if [ -z "${msg}" ] || ! printf '%s' "${msg}" | jq -e 'type == "object"' >/dev/null 2>&1; then
     printf 'mcp-error:no-answer\n'; return 1
   fi
-  err="$(printf '%s' "${msg}" | jq -r '
-      if (.result.isError // false) then ([.result.content[]? | .text? // empty] | join(" ") | if . == "" then "a tool error" else . end)
-      else empty end' 2>/dev/null)"
+  err="$(_claim_refusal_text "${msg}")"
   if [ -n "${err}" ]; then
-    # Trim edge whitespace so "not found\n" still reads as exactly "not found".
-    err="$(printf '%s' "${err}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    case "${err}" in
-      "not found")          printf 'not-found\n' ;;
-      refused:*)            printf 'refused\n' ;;
-      already_claimed:*)    printf 'already-claimed\n' ;;
-      invalid:*)            printf 'invalid\n' ;;
-      *)                    printf 'mcp-error:%s\n' "$(claim_oneline "${err}")" ;;
-    esac
-    return 1
-  fi
-  err="$(printf '%s' "${msg}" | jq -r 'if .error then (.error.message // "an MCP error" | tostring) else empty end' 2>/dev/null)"
-  if [ -n "${err}" ]; then
-    printf 'mcp-error:%s\n' "$(claim_oneline "${err}")"; return 1
+    claim_refusal_kind "${err}"; return 1
   fi
   status="$(printf '%s' "${msg}" | jq -r '
       (.result.structuredContent // (.result.content[0].text | fromjson? // null)) as $r
@@ -86,12 +113,13 @@ claim_parse_result() {
 }
 
 # claim_server_words <json-rpc-message>
-# DOMAIN. The server's own refusal words (an isError tool result's text) as one
-# bounded line, or nothing. claim-thread prints them as `server: ...` beside a
-# refusal: they are the server's Fix, never message content.
+# DOMAIN. The server's own refusal words (a JSON-RPC error's message, or an
+# isError tool result's text) as one bounded line, or nothing. claim-thread
+# prints them as `server: ...` beside a refusal: they are the server's Fix,
+# never message content.
 claim_server_words() {
   local err
-  err="$(printf '%s' "$1" | jq -r 'if (.result.isError // false) then ([.result.content[]? | .text? // empty] | join(" ")) else empty end' 2>/dev/null)"
+  err="$(_claim_refusal_text "$1")"
   [ -n "${err}" ] || return 0
   claim_oneline "${err}"; printf '\n'
 }

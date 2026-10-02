@@ -542,3 +542,12 @@ DND-1605: a session that forwarded a misrouted owner DM posted its note with a p
 | S97 | `--reroute-of` parses its event_id but no longer sets `CLAIM=false` | 2 | `FAIL reply '--reroute-of EVFAKE00001 CFAKE00001 1790.5 forwarded' (a forward note): claim=skipped, no MCP call, exit 0` / `FAIL reply 'CFAKE00001 1790.5 forwarded --reroute-of EVFAKE00001' (a forward note): ...` |
 
 After the restore the suite returned to `VERDICT: PASS (282 cases)`.
+
+DND-1645: the athena server sends every `slack_thread_claim` refusal as Hermes' Error.execution, a JSON-RPC `error` whose message is the text. `claim_parse_result` classified refusals only from an `isError` result, so `already_claimed` (and `not found`, `refused:`, `invalid:`) read as `reason=mcp-error:<text>` with the MCP Fix, and `--already-claimed-ok` never applied. The suite's fake had answered in the `isError` shape the server never sends. Red before the fix: `VERDICT: FAIL (12 of 298 cases)`, e.g. `FAIL claim-thread --already-claimed-ok: a JSON-RPC already_claimed -> stdout outcome, exit 0` with `rc=3 err='claim=FAILED reason=mcp-error:already_claimed: this thread is claimed by another inbox. Fix: replies will rout ...'`. Both mutations below applied together (exact anchors, each asserted once), one run, restored with `cp`: `VERDICT: FAIL (16 of 298 cases)`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S98 | `_claim_refusal_text` drops the JSON-RPC `.error` branch | 14 | `FAIL claim_parse_result: JSON-RPC error already_claimed: ... -> already-claimed` / `FAIL claim-thread: a JSON-RPC already_claimed -> reason=already-claimed, transfer Fix, exit 3` (`reason=mcp-error:no-status-in-result`) / `FAIL claim_server_words: a JSON-RPC error's message is the server's words` / `FAIL claim_parse_result: Invalid params (a protocol error) is not invalid -> mcp-error:Invalid params` |
+| S99 | `claim_refusal_kind` drops the bare `already_claimed` token (colon form only) | 2 | `FAIL claim_parse_result: a bare already_claimed token (tool error) -> already-claimed` / `... (JSON-RPC error) -> already-claimed` |
+
+After the restore the suite returned to `VERDICT: PASS (298 cases)`.

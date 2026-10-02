@@ -1406,6 +1406,25 @@ parse_case "a result with no status" '{"jsonrpc":"2.0","id":2,"result":{"content
 parse_case "an unknown status" "$(ok_msg released)" "mcp-error:unexpected-status released"
 parse_case "a JSON-RPC error" '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}' "mcp-error:Method not found"
 parse_case "an unrecognised tool error, multi-line" "$(err_msg $'boom\nsecond line')" "mcp-error:boom second line"
+# u4b. DND-1645: the athena server (Hermes Error.execution) sends every refusal
+#      as a JSON-RPC `error` whose message is the text, not as an isError
+#      result. Both shapes go through one classifier, by exact token: the
+#      token alone, or the token followed by a colon. A protocol error whose
+#      text is not a token stays an mcp-error.
+rpc_err_msg() { jq -n -c --arg t "$1" --argjson c "${2:--32000}" '{jsonrpc:"2.0", id:2, error:{code:$c, message:$t, data:{}}}'; }
+parse_case "JSON-RPC error already_claimed: ..." "$(rpc_err_msg 'already_claimed: this thread is claimed by another inbox. Fix: replies will route to that inbox; claim only threads your session started.')" "already-claimed"
+parse_case "JSON-RPC error 'not found'" "$(rpc_err_msg 'not found')" "not-found"
+parse_case "JSON-RPC error refused: ..." "$(rpc_err_msg 'refused: slack_thread_claim does not accept owner. Fix: remove the owner argument.')" "refused"
+parse_case "JSON-RPC error invalid: ..." "$(rpc_err_msg 'invalid: thread_ts must be digits.digits')" "invalid"
+parse_case "a bare already_claimed token (tool error)" "$(err_msg 'already_claimed')" "already-claimed"
+parse_case "a bare already_claimed token (JSON-RPC error)" "$(rpc_err_msg 'already_claimed')" "already-claimed"
+parse_case "already_claimedX is not the token" "$(rpc_err_msg 'already_claimedX: no')" "mcp-error:already_claimedX: no"
+parse_case "'not found here' is not the token" "$(rpc_err_msg 'not found here')" "mcp-error:not found here"
+parse_case "Invalid params (a protocol error) is not invalid" "$(rpc_err_msg 'Invalid params' -32602)" "mcp-error:Invalid params"
+claim_fn claim_server_words "$(rpc_err_msg 'already_claimed: held. Fix: ask the holder.')"
+if [[ "${OUT}" == "already_claimed: held. Fix: ask the holder." ]]; then
+  ok "claim_server_words: a JSON-RPC error's message is the server's words"
+else bad "claim_server_words: a JSON-RPC error's message is the server's words" "got '${OUT}' rc=${RC}"; fi
 
 # u5. claim_reason_fix: every reason has its own non-empty Fix text.
 setup_case
@@ -1584,6 +1603,33 @@ run_bin claim-thread D0DMCHAN 1.2 --already-claimed-ok
 if [[ "${RC}" == 3 && "${ERR}" == *"claim=FAILED reason=not-found "* && -z "${OUT}" ]]; then
   ok "claim-thread --already-claimed-ok: any other refusal is still claim=FAILED, exit 3"
 else bad "claim-thread --already-claimed-ok: any other refusal is still claim=FAILED, exit 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+# c5c. DND-1645: the server's real refusal shape, a JSON-RPC error (Hermes
+#      Error.execution). already_claimed is reason=already-claimed with the
+#      transfer Fix (never mcp-error), and --already-claimed-ok makes it exit 0.
+#      not found / refused / invalid keep their own reasons in that shape too.
+claim_rpc_err_answer() { # claim_rpc_err_answer <message>
+  mcp_answer slack_thread_claim "$(jq -n -c --arg t "$1" '{jsonrpc:"2.0", id:2, error:{code:-32000, message:$t, data:{}}}')"
+}
+HERMES_HELD='already_claimed: this thread is claimed by another inbox. Fix: replies will route to that inbox; claim only threads your session started.'
+setup_case; claim_setup; claim_rpc_err_answer "${HERMES_HELD}"
+run_bin claim-thread D0DMCHAN 1.2
+if [[ "${RC}" == 3 && "${ERR}" == *"claim=FAILED reason=already-claimed "* && "${ERR}" != *"mcp-error"* \
+      && "${ERR}" == *"reroute_of_event_id"* && "${ERR}" == *"server: already_claimed: this thread"* && -z "${OUT}" ]]; then
+  ok "claim-thread: a JSON-RPC already_claimed -> reason=already-claimed, transfer Fix, exit 3"
+else bad "claim-thread: a JSON-RPC already_claimed -> reason=already-claimed, transfer Fix, exit 3" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+setup_case; claim_setup; claim_rpc_err_answer "${HERMES_HELD}"
+run_bin claim-thread D0DMCHAN 1.2 --already-claimed-ok
+if [[ "${RC}" == 0 && "${OUT}" == "claim=already_claimed holder=another-inbox inbox=cproj-slack.jsonl source=cwd" && -z "${ERR}" ]]; then
+  ok "claim-thread --already-claimed-ok: a JSON-RPC already_claimed -> stdout outcome, exit 0"
+else bad "claim-thread --already-claimed-ok: a JSON-RPC already_claimed -> stdout outcome, exit 0" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+for pair in "not found|not-found|3" "refused: inbox_name is not live. Fix: lookup_inbox|refused|3" "invalid: thread_ts must be digits.digits|invalid|2"; do
+  IFS='|' read -r words want code <<<"${pair}"
+  setup_case; claim_setup; claim_rpc_err_answer "${words}"
+  run_bin claim-thread D0DMCHAN 1.2 --already-claimed-ok
+  if [[ "${RC}" == "${code}" && "${ERR}" == *"claim=FAILED reason=${want} "* && -z "${OUT}" ]]; then
+    ok "claim-thread: a JSON-RPC '${words%%:*}' -> reason=${want}, exit ${code}"
+  else bad "claim-thread: a JSON-RPC '${words%%:*}' -> reason=${want}, exit ${code}" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+done
 setup_case; claim_setup
 run_bin claim-thread D0DMCHAN 1.2 --loud
 if [[ "${RC}" == 2 && "${ERR}" == *"reason=invalid"* && "${ERR}" == *"Fix:"* && -z "$(mcp_calls)" ]]; then
