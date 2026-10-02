@@ -492,7 +492,8 @@ and only then, it records the pass at
 `<git common dir>/integration-receipts/<head-sha>.json` (head, the target SHA it
 contained, gate and source, any override or owner approval, blast radius, the OK
 line, UTC time). Every other exit removes the receipt for that head, and a
-receipt it cannot write is exit 5 with no OK line. `locked-merge` requires the
+receipt error is exit 5 with no OK line: a stale receipt it cannot remove (before
+the gate runs, so no gate ran) or a receipt it cannot write after a green gate. `locked-merge` requires the
 receipt (*Landing onto a moving main*).
 
 **Later (2026-10-01, DND-1463):** this paragraph and the `--with-critic` one

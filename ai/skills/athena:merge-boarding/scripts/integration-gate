@@ -28,7 +28,9 @@
 # word (gen_saas #468 merged past a RED gate because a prep script printed
 # READY without reading the exit code). Every run that does not end in
 # INTEGRATION OK removes any receipt for its head, so a stale pass cannot
-# outlive a later RED. After the gate runs, in a linked worktree that runs a
+# outlive a later RED. A receipt it cannot remove (before the gate runs) or
+# cannot write (after a green gate) is exit 5; only the second follows a gate.
+# After the gate runs, in a linked worktree that runs a
 # compose stack, it also has teardown-stack record that worktree's stack
 # marker in the worktree's own git dir (DND-1576), outside every working tree.
 #
@@ -220,8 +222,13 @@ Exit codes: 0 integration OK | 1 gate RED on the integrated head
             3 no green critic verdict on the integrated head
             4 merging performs a real-world action -- owner's call, not the
               fleet's (see --owner-approval)
-            5 gate green but the receipt could not be written or a stale
-              one could not be removed (no INTEGRATION OK is printed)
+            5 receipt error, no INTEGRATION OK printed. Either a stale
+              receipt for the head could not be removed (raised BEFORE the
+              gate runs: no gate ran, nothing passed), or the receipt could
+              not be written after a green gate (the gate passed, but the
+              pass is not recorded and locked-merge will refuse the head).
+              Read the message to tell them apart; a usage error that
+              cannot remove it still exits 2, never 5
             6 gate NOT RUN: no machine test slot within the wait, or
               test-slot left no outcome (neither OK nor RED; re-run)
 EOF

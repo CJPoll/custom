@@ -710,7 +710,8 @@ grep -q '^Fix:' <<<"$out" && ok "c28 carries a Fix: line" || bad "c28 missing Fi
 # --help documents the receipt and exit 5.
 hout="$("$GATE" --help 2>/dev/null)"
 grep -q 'integration-receipts' <<<"$hout" && ok "c29 --help names the receipt store" || bad "c29 --help lacks the receipt" "$hout"
-grep -q '5 gate green but the receipt' <<<"$hout" && ok "c29 --help documents exit 5" || bad "c29 --help lacks exit 5" "$hout"
+grep -q '5 receipt error, no INTEGRATION OK printed' <<<"$hout" && ok "c29 --help documents exit 5" || bad "c29 --help lacks exit 5" "$hout"
+grep -q 'BEFORE the' <<<"$hout" && grep -q 'after a green gate' <<<"$hout" && ok "c29 --help names both exit 5 cases" || bad "c29 --help exit 5 lacks a case" "$hout"
 
 # ---------------------------------------------------------------- case 30
 # DND-1011: the gate runs in the WORKING TREE, but the receipt certifies the
