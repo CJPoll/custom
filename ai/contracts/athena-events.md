@@ -1559,6 +1559,15 @@ inside code or a quote matches, though GitLab does not notify for it. And
 after the owner renames their GitLab account, the old username stays bound
 until their next comment.
 
+A comment at a strictly newer revision than the item row's, on an open merge
+request, is news for the owner (D60, DND-1351): it reopens an item the owner
+completed, and a mention (`trigger: mentioned`) also reopens one the owner
+dismissed (*Priority index* → *States*). A comment on a merged, closed or
+locked merge request raises nothing, so it never reopens the source close its
+finish made. A mention on the owner's own merge request, or one they review,
+is `trigger: commented` (DND-1350), so it reopens an owner completion but not
+a dismissal.
+
 The payload's `trigger` says which rule matched (DND-1350): `commented` when
 the owner's id is the merge request's `author_id` or one of its
 `reviewer_ids` (checked first, so a mention on such a merge request is
@@ -6946,11 +6955,37 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | `active` → `done` | the re-sync, when the item left its subscription's scope, or its page read answers not found | `closed_by: source_out_of_scope` |
 | `done` → `active` (reopen) | ingest, for `closed_by` `source_status` or `source_out_of_scope`, on an event whose revision is later than the row's and whose status is non-terminal | |
 | `done` → `active` (reopen) | ingest, for `closed_by: source_deleted`, on `notion.ticket.undeleted` only | |
+| `done` → `active` (reopen) | ingest, for `closed_by: owner` on a `forge_review` item, on a `forge.review.commented` whose revision is strictly later than the row's and whose status class is `open` (declared and not terminal, DND-995) (DND-1351) | |
+| `dismissed` → `active` (reopen) | ingest, for a `forge_review` item, on a `forge.review.commented` with `trigger: mentioned` whose revision is strictly later than the row's and whose status class is `open` (DND-1351) | |
 
-- **Ingest never undoes an owner's decision or a completed lease.** It never
-  promotes, never restores a dismissed item, and never reopens an item closed
-  by `lease_complete` or `owner`. On those items it still updates the
-  pointer fields.
+- **Ingest never undoes a completed lease, and undoes an owner's decision
+  only on news for the owner** (D60, D62, DND-1351). It never promotes and
+  never reopens an item closed by `lease_complete`. It reopens an owner
+  decision only on a `forge.review.commented` whose revision is strictly later
+  than the row's and whose status class is `open`: a comment or a mention
+  reopens an item closed by `owner`, and only a mention (`trigger: mentioned`)
+  reopens a `dismissed` one. A dismissal says the thread is not the owner's;
+  only a comment addressed to them by name says it is again. The row's
+  `source_revision` is at least the information the owner decided on (an
+  owner action never changes it), so an equal, older, missing or unparseable
+  revision never reopens: the source wins on new information, the owner on
+  the same information, as for a restore. A `forge.review.requested` never
+  reopens an owner decision, and no other source carries news. The reopen is
+  not a restore: it writes no `restored_from`, and the item takes the
+  reopening event's `forge_trigger`. Two windows are accepted. A comment the
+  owner already read on the forge, still owed to the index when they closed
+  the item, reopens it when it lands. And during a deploy overlap (gen_saas
+  ADR 20, rule 8) a release without this rule can apply a comment as a plain
+  update and move the row's revision forward, so that one comment does not
+  reopen; the next newer one does. On every other owner decision ingest still
+  updates the pointer fields.
+
+  **Later (2026-10-02, DND-1351):** this bullet read "Ingest never undoes an
+  owner's decision or a completed lease. It never promotes, never restores a
+  dismissed item, and never reopens an item closed by `lease_complete` or
+  `owner`." Superseded by decisions D60 and D62 (epic "Athena: unified
+  priorities"), shipped in gen_saas #600 (`8074e777`): once the owner marked a
+  merge request's row done, later comments and mentions updated it silently.
 - **A reopen needs evidence newer than the close.** Redelivery and reordering
   are normal (*Idempotency is per (event, item)*). So an update whose revision
   equals the row's, or that has none, never reopens a `source_status` close.
@@ -6983,8 +7018,10 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   request is already addressed to the owner and has nothing to promote (*created `active`*, above). A
   `forge.review.requested` whose `revision` is strictly newer than the row's
   reopens a `source_status` close, like any other, and so does a
-  `forge.review.commented` (DND-1337); neither ever reopens an
-  `owner` or `lease_complete` close. GitLab's `updated_at` has one-second
+  `forge.review.commented` (DND-1337); neither ever reopens a
+  `lease_complete` close, and only a `forge.review.commented` also reopens an
+  owner decision, at a strictly newer revision (*Ingest never undoes a
+  completed lease*, above; a `requested` never does). GitLab's `updated_at` has one-second
   precision, so a removal and a re-request in the same second tie: the
   re-request does not reopen, and the item shows again on the merge
   request's next change. That is the safe direction of *A close needs an
@@ -7065,7 +7102,10 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   by the server at click time (*Owner approval grants*). No machine token can
   do these: a machine may only request the grant, and the owner's click decides
   it. No message content can either: a Slack ask, an inbox line or a fleet
-  report informs, and never authorizes (*Trust posture — two paths*).
+  report informs, and never authorizes (*Trust posture — two paths*). A news
+  reopen of a `forge_review` item (*States*) is not a restore: it is ingest
+  applying the source's newer information, like a `source_status` reopen, and
+  authorizes nothing.
 
   **Later (2026-09-26):** DND-563 T1. This bullet named "a verified Slack click
   by the owner" as the second owner path, "whose action dispatch DND-440
