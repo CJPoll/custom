@@ -31,3 +31,23 @@ were added in the review round).
 | M6 the landed main is read only from origin, not the pushed remote | 44 |
 | M7 with no landed main, the gate is read on the pushed commit only, not its history | 45 |
 | M8 an unreadable candidate receipt is skipped as not covering | 46 |
+
+## DND-1809: ir_push_covered lists every covering head
+
+The lead-time ledger joins a clean-rebase push landing to its gated head by
+`ir_push_covered`, and must refuse to guess when two heads cover it. Case 48
+was added first. On the unfixed lib (it stopped at the first cover and set no
+list) it was red:
+
+```
+  FAIL  48. every covering head listed
+        cov='0|rebase| |7ba2cb92…:…/integration-receipts/7ba2cb92….json' want heads='7ba2cb92… b5713533… '
+RESULT: 73 passed, 1 failed
+```
+
+After: `RESULT: 74 passed, 0 failed`. The guard's own answer (covered, the
+first cover as `IR_COVER_HEAD`) is unchanged: cases 35-47 stay green.
+
+| Mutation | Red cases |
+|---|---|
+| M9 drop the re-read that restores `IR_RECEIPT` to the first cover's | 48 |

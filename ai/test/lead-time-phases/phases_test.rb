@@ -952,6 +952,141 @@ check("W14 a foreign row is out of unattributed, as out of the phase stats") do
   un_f["unattributed"]["n"].zero? && un_f["unattributed"]["sum_s"].nil?
 end
 
+# ── DND-1809: a clean-rebase push landing joins its gated head ─────────────
+# The admiral rebases a gated head onto a moved main and pushes: the landed
+# commit is not the head integration-gate, the critic and the receipt are
+# keyed on. The gated head is found from recorded data only: the push's
+# merge.landed `before` (the pre-push main) and the integration receipt's
+# clean-rebase cover (ir_push_covered, read by the IO side into `cover`),
+# else the ticket's only gated head. Two candidates, or none, is a named
+# miss that says which keys it searched.
+
+RB_LANDED = "e" * 40   # the commit the push landed
+RB_GATED = "f" * 40    # the head integration-gate passed, before the rebase
+RB_GATED2 = "8" * 40   # a second head of the same change, gated again
+RB_BEFORE = "9" * 40   # main before the push
+RB_RUNS = WC.map { |e| e.merge("head" => RB_GATED) }.freeze
+RB_PUSH = ev("merge.landed", "2026-10-01T04:30:00Z", head: RB_LANDED, duration_s: 4.0,
+                                                    attrs: { "via" => "push", "after" => RB_LANDED,
+                                                             "before" => RB_BEFORE }).freeze
+NO_LANDED_RECEIPT = S.empty("no receipt for eeeeeeee")
+
+def rb_landing(ticket: "DND-9001") = landing(ticket: ticket, landed: WC_LANDED, commit: RB_LANDED)
+
+def rb_cover(kind, heads) = S.ok([{ "cover" => kind, "heads" => heads, "onto" => RB_BEFORE }])
+
+def rb_resolve(l, events, cover, receipt: NO_LANDED_RECEIPT)
+  L::PushJoin.resolve(l, events: S.ok(events), cover: cover, landed_receipt: receipt)
+end
+
+check("X0 the pre-push main is the before of the push's own merge.landed") do
+  L::PushJoin.before_of(rb_landing, S.ok(RB_RUNS + [RB_PUSH])) == RB_BEFORE
+end
+check("X0 no merge.landed for the landed commit: no pre-push main") do
+  L::PushJoin.before_of(rb_landing, S.ok(RB_RUNS)).nil?
+end
+
+# X1: the regression. One gated head covers the landing.
+x1 = fixture { rb_resolve(rb_landing, RB_RUNS + [RB_PUSH], rb_cover("rebase", [RB_GATED])) }
+check("X1 a clean-rebase push landing joins its gated head") { x1["gated_head"] == RB_GATED }
+check("X1 and says how it was joined") do
+  x1["gated_head_source"].to_s.include?("clean-rebase cover") && x1["gated_head_source"].include?(RB_BEFORE[0, 8])
+end
+x1a = fixture { anchors(x1, S.ok(RB_RUNS + [RB_PUSH])) }
+x1p = fixture { L::Phases.compute(x1a) }
+check("X1 its run joins: every phase is measured") { L::PHASES.all? { |p| x1p.dig(p, "s").is_a?(Integer) } }
+check("X1 integrate is the gated run's duration") { x1p.dig("integrate", "s") == 300 }
+check("X1 the PASS inside the run reads as with_critic, not standalone") { L::Phases.flow(x1a) == "with_critic" }
+check("X1 the landing start is the push on the landed commit") do
+  x1a["land_start"]&.at == t("2026-10-01T04:30:00Z") && x1p.dig("merge", "s") == 5
+end
+x1r = fixture do
+  L::Ledger.improve_row(repo: "custom", landing: x1, anchors: x1a, counters: {}, telemetry_status: :ok,
+                        ingested_at: t("2026-10-02T00:00:00Z"), origin: { "origin" => "local" })
+end
+check("X1 the row records the gated head and how it was found") do
+  x1r["landed_commit"] == RB_LANDED && x1r["gated_head"] == RB_GATED &&
+    x1r["gated_head_source"] == x1["gated_head_source"] && !x1r.key?("gated_head_miss")
+end
+
+# Unfixed, the landed commit was the only key: integrate is n/a.
+x1old = fixture { L::Phases.compute(anchors(rb_landing, S.ok(RB_RUNS + [RB_PUSH]))) }
+check("X1 (control) unresolved, the landed commit joins no run") { x1old.dig("integrate", "s").nil? }
+
+# X2: ambiguity is n/a with a reason, never a guess.
+x2 = fixture { rb_resolve(rb_landing, RB_RUNS + [RB_PUSH], rb_cover("rebase", [RB_GATED, RB_GATED2])) }
+check("X2 two covering heads: no gated head is chosen") { x2["gated_head"] == RB_LANDED && x2["gated_head_source"].nil? }
+check("X2 the miss names both candidates") do
+  m = x2["gated_head_miss"].to_s
+  m.include?("ambiguous") && m.include?(RB_GATED[0, 8]) && m.include?(RB_GATED2[0, 8])
+end
+x2p = fixture { L::Phases.compute(anchors(x2, S.ok(RB_RUNS + [RB_PUSH]))) }
+check("X2 integrate is n/a and its reason carries the ambiguity") do
+  x2p.dig("integrate", "s").nil? && x2p.dig("integrate", "na_reason").to_s.include?("ambiguous")
+end
+two_runs = RB_RUNS + [ev("integration_gate.run", "2026-10-01T04:10:00Z", head: RB_GATED2, duration_s: 10.0,
+                         attrs: WC_RUN)]
+x2t = fixture { rb_resolve(rb_landing, two_runs, S.empty("no gated head covers it")) }
+check("X2 the ticket fallback with two gated heads is ambiguous too") do
+  x2t["gated_head"] == RB_LANDED && x2t["gated_head_miss"].to_s.include?("ambiguous") &&
+    x2t["gated_head_miss"].include?("DND-9001")
+end
+
+# X3: no gated head names the keys it searched.
+x3 = fixture { rb_resolve(rb_landing, [RB_PUSH], S.empty("no gated head covers it as a clean rebase")) }
+check("X3 nothing found: the landed commit stays the key") { x3["gated_head"] == RB_LANDED && x3["gated_head_source"].nil? }
+check("X3 the miss names the landed commit, the pre-push main and the ticket it searched") do
+  m = x3["gated_head_miss"].to_s
+  m.include?(RB_LANDED[0, 8]) && m.include?(RB_BEFORE[0, 8]) && m.include?("DND-9001")
+end
+check("X3 the cover's own reason is kept in full") do
+  x3["gated_head_search"].to_s.include?("no gated head covers it as a clean rebase")
+end
+x3p = fixture { L::Phases.compute(anchors(x3, S.ok([RB_PUSH]))) }
+check("X3 integrate's n/a names the key and the search") do
+  r = x3p.dig("integrate", "na_reason").to_s
+  r.include?("no integration_gate.run on #{RB_LANDED[0, 8]}") && r.include?(x3["gated_head_miss"])
+end
+x3u = fixture { rb_resolve(rb_landing(ticket: nil), [], S.empty("x")) }
+check("X3 unticketed, no merge.landed: the miss says both") do
+  m = x3u["gated_head_miss"].to_s
+  m.include?("unticketed") && m.include?("no merge.landed")
+end
+x3c = fixture { rb_resolve(rb_landing, [RB_PUSH], S.could_not_look("jq is not on PATH")) }
+check("X3 a cover that could not be read says so, never 'none'") do
+  x3c["gated_head_search"].to_s.include?("could not look (jq is not on PATH)")
+end
+
+# X4: the other joins.
+x4 = fixture { rb_resolve(rb_landing, [RB_PUSH], rb_cover("exact", [RB_LANDED])) }
+check("X4 an exact cover: the landed commit IS the gated head") do
+  x4["gated_head"] == RB_LANDED && x4["gated_head_source"].to_s.include?("exact")
+end
+x4r = fixture { rb_resolve(rb_landing, [RB_PUSH], S.empty("x"), receipt: S.ok([{ "head" => RB_LANDED }])) }
+check("X4 a receipt for the landed commit joins it, before any fallback") do
+  x4r["gated_head"] == RB_LANDED && x4r["gated_head_source"].to_s.include?("receipt")
+end
+on_landed = [ev("integration_gate.run", "2026-10-01T04:00:00Z", head: RB_LANDED, duration_s: 9.0, attrs: WC_RUN)]
+x4n = fixture { rb_resolve(rb_landing, on_landed + RB_RUNS, S.empty("x")) }
+check("X4 a run on the landed commit itself joins it, before the ticket fallback") do
+  x4n["gated_head"] == RB_LANDED && x4n["gated_head_source"].to_s.include?("integration_gate.run")
+end
+x4t = fixture { rb_resolve(rb_landing, RB_RUNS + [RB_PUSH], S.empty("no cover")) }
+check("X4 the ticket fallback: the ticket's one gated head joins") do
+  x4t["gated_head"] == RB_GATED && x4t["gated_head_source"].to_s.include?("DND-9001")
+end
+check("X4 a red run's head is no candidate") do
+  red = [ev("integration_gate.run", "2026-10-01T03:59:00Z", head: RB_GATED2, duration_s: 1.0,
+            attrs: { "exit_code" => 1 })]
+  rb_resolve(rb_landing, RB_RUNS + red, S.empty("no cover"))["gated_head"] == RB_GATED
+end
+check("X4 a run before the ticket's previous landing is no candidate") do
+  l = rb_landing.merge("after" => t("2026-10-01T04:01:00Z"))
+  rb_resolve(l, RB_RUNS, S.empty("no cover"))["gated_head"] == RB_LANDED
+end
+sq_l = landing.merge("landed_via" => "merge", "landed_commit" => "1" * 40, "gated_head" => HEAD)
+check("X5 a merge landing is left as it was") { rb_resolve(sq_l, RB_RUNS, S.empty("x")) == sq_l }
+
 if $failures.empty?
   puts "lead-time-phases: #{$checks} checks passed"
   exit 0

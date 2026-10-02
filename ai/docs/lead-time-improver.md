@@ -276,6 +276,31 @@ Each `improve`-mode run does these steps in order:
    --since WHEN --rejoin`: it replaces only merge rows ledgered with no gated
    head, keeps any row whose fresh copy lost a measurement, and appends each
    original to `ledger-replaced.jsonl` first.
+
+   **Later (2026-10-02, DND-1809):** a push landing's gated head was its
+   landed commit, and the run was matched by head only. After an admiral's
+   clean rebase onto a moved main (the DND-1463 rule), the pushed sha is
+   new, so the run, the verdicts and the receipt never joined: integrate,
+   queue and merge read n/a, and a PASS inside the run read as standalone
+   (DND-1776 ran on 2cd924e7 and landed be2aaf23; DND-1790 ran on 011c65db
+   and landed 3c558bac). Ingest now joins a push landing to the head that
+   was gated, from recorded data only, in this order: the landed commit
+   itself (its receipt, or a run on it); the receipts' clean-rebase cover
+   (`ir_push_covered` in `ai/lib/integration-receipt.sh`, the push guard's
+   own rule, onto the `before` of the push's `merge.landed`); the ticket's
+   one gated head. Two candidates, or none, joins nothing: the landed commit
+   stays the key, and the row's `gated_head_miss` and `gated_head_search`
+   say what was searched. A joined row records `gated_head_source`. Rows are
+   still frozen at ingest and `--rejoin` still covers merge rows only, so
+   this measures from the landing on. A re-derive would rewrite `integrate`
+   on rows the experiment ledger has already read (a custom integrate
+   experiment is in it). The old pushes were point events, so their queue
+   and merge would stay n/a anyway. Series break: from this landing on, a
+   clean-rebase push row reads `integrate` and its with-critic flow, where
+   the same landing read n/a and standalone before. Measured on a scratch
+   re-ingest of custom since 2026-10-02T13:00Z (38 rows): integrate n/a
+   6 → 1. All 10 push rows joined (5 by their own receipt, 5 by the
+   clean-rebase cover), with no ambiguity and no miss.
 2. **Judge pending experiments first.** An experiment whose comparable
    after-set has reached K is judged before anything new starts.
 3. **Pick the biggest contributor** from the window summary. If that phase is

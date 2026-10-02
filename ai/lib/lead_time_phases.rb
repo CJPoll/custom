@@ -161,8 +161,14 @@ module LeadTimePhases
     def head_desc(landing) = Util.short(landing["gated_head"] || landing["landed_commit"])
 
     # The key Match.for_gated searched by: the head for a push landing, else
-    # (a merge landing) the unit (DND-1511).
-    def gated_desc(landing) = landed_is_gated_head?(landing) ? head_desc(landing) : unit_desc(landing)
+    # (a merge landing) the unit (DND-1511). A push landing PushJoin could
+    # not join to a gated head also says what it searched (DND-1809).
+    def gated_desc(landing)
+      return unit_desc(landing) unless landed_is_gated_head?(landing)
+
+      miss = landing["gated_head_miss"]
+      miss ? "#{head_desc(landing)} (#{miss})" : head_desc(landing)
+    end
 
     # Set each ticketed landing's "after": the previous landing of the same
     # ticket (from the ledger's prior rows or this batch), so a ticket that
@@ -268,6 +274,117 @@ module LeadTimePhases
     end
 
     def attr(event, key) = (event["attrs"].is_a?(Hash) ? event["attrs"] : {})[key]
+
+    # A successful integration_gate.run (exit 0).
+    def ok_run?(event) = event["event"] == "integration_gate.run" && attr(event, "exit_code") == 0
+  end
+
+  # DND-1809. A push landing's commit is the head integration-gate gated only
+  # when the admiral pushed that head as it was. After a clean rebase onto a
+  # moved main (the DND-1463 rule), the pushed commit is new, and the run,
+  # the critic verdicts, the receipt and the timings are all keyed on the
+  # head that was gated. PushJoin finds that head from recorded data, in
+  # this order, and only a provable match counts:
+  #   1. the landed commit itself: a receipt for it (the IO side's exact
+  #      cover, or its receipt), or an integration_gate.run on it;
+  #   2. the clean-rebase cover: the gated heads whose clean merge onto the
+  #      pre-push main gives the landed tree (ir_push_covered in
+  #      ai/lib/integration-receipt.sh, the rule gh-athena's push guard uses;
+  #      the IO side runs it, with the pre-push main from the push's own
+  #      merge.landed `before`);
+  #   3. the ticket: the heads of the ticket's successful
+  #      integration_gate.runs in this landing's span.
+  # One head joins. Two or more is ambiguous, and none is a miss: the landed
+  # commit stays the key (nothing that joined before stops joining), and
+  # gated_head_miss says, in short, which keys were searched;
+  # gated_head_search keeps the full detail. Never a guess.
+  module PushJoin
+    module_function
+
+    # The pre-push main: the `before` of a merge.landed push of the landed
+    # commit, or nil (a push gh-athena did not make, or before DND-1475).
+    # Two pushes of one commit with different befores is no answer.
+    def before_of(landing, events)
+      befores = events.items.select do |e|
+        e["event"] == "merge.landed" && Match.attr(e, "via") == "push" && e["head"] == landing["landed_commit"]
+      end.filter_map { |e| Match.attr(e, "before") }.select { |b| b.is_a?(String) && b.match?(SHA_RE) }.uniq
+      befores.size == 1 ? befores.first : nil
+    end
+
+    # events: a Source (this repo's phase events). cover: a Source from the
+    # IO side, items [{"cover" => "exact"|"rebase"|"landed", "heads" => [sha],
+    # "onto" => pre-push main or nil}]. landed_receipt: the receipt Source
+    # for the landed commit. -> the landing, with gated_head and either
+    # gated_head_source, or gated_head_miss and gated_head_search.
+    def resolve(landing, events:, cover:, landed_receipt:)
+      return landing unless Landing.landed_is_gated_head?(landing)
+
+      commit = landing["landed_commit"]
+      found = cover.status == :ok ? cover.items.first : nil
+      exact = found&.dig("cover") == "exact"
+      if exact || !landed_receipt.items.empty?
+        how = exact ? "ir_push_covered's exact cover" : "its receipt file"
+        return joined(landing, commit, "an integration receipt for the landed commit (#{how})")
+      end
+
+      if Match.in_span(events.items, landing).any? { |e| e["event"] == "integration_gate.run" && e["head"] == commit }
+        return joined(landing, commit, "an integration_gate.run on the landed commit")
+      end
+
+      onto = found&.dig("onto") || before_of(landing, events)
+      heads = found&.dig("cover") == "rebase" ? Array(found["heads"]).uniq : []
+      onto_desc = onto ? "onto #{Util.short(onto)}" : "(no merge.landed before for #{Util.short(commit)})"
+      return joined(landing, heads.first, "the integration receipt's clean-rebase cover #{onto_desc}") if heads.size == 1
+      if heads.size > 1
+        return missed(landing, "ambiguous: #{heads.size} gated heads each give its tree as a clean rebase " \
+                               "#{onto_desc} (#{shorts(heads)})", cover_detail(cover))
+      end
+
+      by_ticket(landing, events, onto_desc, cover_detail(cover))
+    end
+
+    def by_ticket(landing, events, onto_desc, detail)
+      commit = Util.short(landing["landed_commit"])
+      searched = "no receipt or integration_gate.run on #{commit}, no clean-rebase cover #{onto_desc}"
+      unit = landing["ticket"]
+      unless unit
+        why = Anchors.no_unit(landing, "unticketed: no ticket to fall back to")
+        return missed(landing, "no gated head: #{searched}; #{why}", detail)
+      end
+      heads = Match.for_unit(events.items, landing, "integration_gate.run").select { |e| Match.ok_run?(e) }
+                   .map { |e| e["head"] }.select { |h| h.is_a?(String) && h.match?(SHA_RE) }.uniq
+      if heads.size == 1
+        return joined(landing, heads.first, "#{unit}'s only gated head (its one successful integration_gate.run " \
+                                            "head; #{searched})")
+      end
+      if heads.size > 1
+        return missed(landing, "ambiguous: #{searched}, and #{unit} has #{heads.size} gated heads " \
+                               "(#{shorts(heads)})", detail)
+      end
+
+      ticket = Anchors.telemetry_miss(events, "no successful integration_gate.run for #{unit}")
+      missed(landing, "no gated head: #{searched}; #{ticket}", detail)
+    end
+
+    def cover_detail(cover)
+      what = case cover.status
+             when :could_not_look then "could not look (#{cover.reason})"
+             when :ok then "#{cover.items.first&.dig('cover')} (no gated head)"
+             else cover.reason.to_s
+             end
+      "clean-rebase cover: #{what}"
+    end
+
+    def shorts(heads) = heads.map { |h| Util.short(h) }.join(", ")
+
+    def joined(landing, head, source)
+      landing.merge("gated_head" => head, "gated_head_na" => nil, "gated_head_source" => source)
+             .reject { |k, _| %w[gated_head_miss gated_head_search].include?(k) }
+    end
+
+    def missed(landing, miss, detail)
+      landing.merge("gated_head_miss" => miss, "gated_head_search" => "#{miss}; #{detail}")
+    end
   end
 
   module Anchors
@@ -424,7 +541,7 @@ module LeadTimePhases
     def land_start(landing, events, integ_end)
       locks = Match.for_gated(events.items, landing, "merge.lock_wait")
                    .map { |e| [Match.at(e), "telemetry merge.lock_wait"] }
-      pushes = Match.for_gated(events.items, landing, "merge.landed")
+      pushes = landing_pushes(landing, events)
                     .select { |e| Match.attr(e, "via") == "push" && e["duration_s"].is_a?(Numeric) }
                     .map { |e| [Match.at(e), "telemetry merge.landed (the push start)"] }
       cands = (locks + pushes).select { |t, _| integ_end.at.nil? || Util.floor(t) >= integ_end.at }
@@ -434,6 +551,16 @@ module LeadTimePhases
                                      "and no timed merge.landed push after integration ended (a gh-athena push " \
                                      "to main records its start from DND-1501 on; the custom ff landing's " \
                                      "hand-held lock writes no merge.lock_wait until DND-1370)"))
+    end
+
+    # The merge.landed events of this landing. A push records head = the
+    # pushed commit, which after a clean rebase is not the gated head
+    # (DND-1809), so a push landing's are matched on either.
+    def landing_pushes(landing, events)
+      return Match.for_gated(events.items, landing, "merge.landed") unless Landing.landed_is_gated_head?(landing)
+
+      keys = [landing["gated_head"], landing["landed_commit"]].compact
+      Match.in_span(events.items, landing).select { |e| e["event"] == "merge.landed" && keys.include?(e["head"]) }
     end
   end
 
@@ -692,7 +819,11 @@ module LeadTimePhases
         "tail_end" => landing["tail_end"],
         "lead_na_reason" => landing["lead_na_reason"], "ingested_at" => Util.iso(ingested_at) }
         .merge(landing["gated_head"] ? {} : { "gated_head_na" => landing["gated_head_na"] })
+        .merge(landing.slice(*PUSH_JOIN_FIELDS).compact)
     end
+
+    # How PushJoin joined a push landing, or what it searched (DND-1809).
+    PUSH_JOIN_FIELDS = %w[gated_head_source gated_head_miss gated_head_search].freeze
 
     # An improve-mode merge landing ledgered with no gated head: the rows
     # DND-1490's --rejoin may replace, once each.

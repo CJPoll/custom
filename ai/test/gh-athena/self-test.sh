@@ -675,6 +675,27 @@ ghpush "${LANE}" "${TMP}/g11-store" push -q origin HEAD:main
   && ok "47. linked-worktree lane, two commits, gated then rebased onto a moved main: lands" \
   || bad "47. worktree lane rebase lands" "rc=${RC} err='${ERR}'"
 
+# 48. DND-1809: ir_push_covered lists EVERY gated head that covers a clean
+# rebase (IR_COVER_HEADS), so the lead-time ledger can refuse to guess when
+# two do. H and H2 are one change gated twice (same author, author date,
+# subject and tree; only the committer date differs). The push guard's own
+# answer is unchanged: covered, IR_COVER_HEAD the first cover, and
+# IR_RECEIPT that head's receipt.
+gated_origin g12; pass_receipt "${W}" "${H}" "${B}"
+H2="$(GIT_COMMITTER_DATE=2026-10-01T00:00:09Z git -C "${W}" commit -q --amend --no-edit && git -C "${W}" rev-parse HEAD)"
+pass_receipt "${W}" "${H2}" "${B}"
+move_origin_main "${W}"
+git -C "${W}" rebase -q origin/main; P="$(git -C "${W}" rev-parse HEAD)"
+C="$(git -C "${W}" rev-parse --path-format=absolute --git-common-dir)"
+COV="$(bash -c '. "$1" && ir_push_covered "$2" "$3" "$4"; printf "%s|%s|%s|%s\n" "$?" "$IR_COVER" "$(printf "%s\n" "${IR_COVER_HEADS[@]}" | sort | tr "\n" " ")" "$IR_COVER_HEAD:$IR_RECEIPT"' \
+  _ "${AI_DIR}/lib/integration-receipt.sh" "${C}" "${P}" "${M}")"
+WANT_HEADS="$(printf '%s\n' "${H}" "${H2}" | sort | tr '\n' ' ')"
+FIRST="${COV##*|}"; FIRST="${FIRST%%:*}"
+[ "${H}" != "${H2}" ] && [[ "${COV}" == "0|rebase|${WANT_HEADS}|"* ]] \
+  && [[ "${COV}" == *"|${FIRST}:${C}/integration-receipts/${FIRST}.json" ]] \
+  && ok "48. two gated heads of one change both cover the rebase: IR_COVER_HEADS lists both; IR_RECEIPT is the first cover's (DND-1809)" \
+  || bad "48. every covering head listed" "cov='${COV}' want heads='${WANT_HEADS}'"
+
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
 else bad "no git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi

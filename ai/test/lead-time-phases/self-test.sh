@@ -450,6 +450,69 @@ has "MISS: and says the emitter was not yet recording" "$(row_field "${HEAD_PUSH
 eq "a dispatch after the store's first one is still foreign" "$(row_field "${HEAD_BARE}" origin)" "foreign"
 CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
 
+echo "== ingest: a clean-rebase push landing joins its gated run (DND-1809)"
+# A real repo: G is gated on main M0 and its receipt is keyed on G. Main
+# moves to M1; the admiral cherry-picks G onto M1 (a clean rebase keeps the
+# author, author date and subject) and pushes L. gh-athena records the push
+# as merge.landed head L, before M1. A later unticketed push N has no gated
+# head anywhere: its row must say what it searched.
+RB="${TMP}/rebase/custom"
+GITC=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=f@example.invalid
+      GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=f@example.invalid GIT_AUTHOR_DATE=2026-10-01T01:30:00Z
+      GIT_COMMITTER_DATE=2026-10-01T01:30:00Z git -C "${RB}")
+mkdir -p "${RB}" && "${GENV[@]}" git init -q -b main "${RB}" || { echo "FAIL git init"; echo "  Fix: install git"; exit 1; }
+rb_commit() { printf '%s\n' "$2" >"${RB}/$1" && "${GITC[@]}" add "$1" && "${GITC[@]}" commit -q -m "$3"; }
+rb_commit a.txt one "DND-9200: base" && RB_M0="$("${GITC[@]}" rev-parse HEAD)"
+"${GITC[@]}" checkout -q -b dnd-9201-change
+rb_commit b.txt two "DND-9201: the change" && RB_G="$("${GITC[@]}" rev-parse HEAD)"
+"${GITC[@]}" checkout -q main
+rb_commit c.txt three "DND-9202: main moved" && RB_M1="$("${GITC[@]}" rev-parse HEAD)"
+"${GITC[@]}" cherry-pick "${RB_G}" >/dev/null && RB_L="$("${GITC[@]}" rev-parse HEAD)"
+rb_commit d.txt four "an unticketed change" && RB_N="$("${GITC[@]}" rev-parse HEAD)"
+mkdir -p "${RB}/.git/integration-receipts"
+printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s","base":"%s","target_ref":"main","recorded_at":"2026-10-01T04:05:00Z"}\n' \
+  "${RB_G}" "${RB_M0}" >"${RB}/.git/integration-receipts/${RB_G}.json"
+TEL_RB="${TMP}/telemetry-rebase"
+mkdir -p "${TEL_RB}" && chmod 700 "${TEL_RB}"
+rb_ev() { printf '{"v":1,"event":"%s","at":"%s","duration_s":%s,"unit":"DND-9201","unit_source":"branch","repo":"custom","head":"%s","host":"h","pid":1,"attrs":%s}\n' "$@"; }
+{
+  rb_ev harness_gate.run 2026-10-01T02:00:00.000Z 100 "${RB_G}" '{"ok":true,"run_id":"g1"}'
+  rb_ev integration_gate.run 2026-10-01T04:00:00.000Z 300 "${RB_G}" '{"exit_code":0,"outcome":"ok","with_critic":true}'
+  rb_ev critic.round 2026-10-01T04:00:03.000Z 45 "${RB_G}" '{"verdict":"pass"}'
+  rb_ev merge.landed 2026-10-01T04:30:00.000Z 4 "${RB_L}" "{\"via\":\"push\",\"after\":\"${RB_L}\",\"before\":\"${RB_M1}\"}"
+} >"${TEL_RB}/2026-10-01.jsonl"
+cat >"${TMP}/rows-rebase.json" <<JSON
+[
+  {"pr": null, "ticket": "DND-9201", "landed_via": "push", "landed_commit": "${RB_L}", "commits": ["${RB_L}"],
+   "merged": "2026-10-01T04:30:05Z", "closed_at": "2026-10-01T04:30:05Z", "start": "2026-10-01T01:00:00Z",
+   "lead_seconds": 12605, "code_seconds": 12605, "tail_seconds": 0, "unmeasured_reason": null},
+  {"pr": null, "ticket": null, "landed_via": "push", "landed_commit": "${RB_N}", "commits": ["${RB_N}"],
+   "merged": "2026-10-01T05:00:00Z", "closed_at": "2026-10-01T05:00:00Z", "start": null, "lead_seconds": null,
+   "code_seconds": null, "tail_seconds": null, "unmeasured_reason": "start: no ticket"}
+]
+JSON
+cat >"${TMP}/repos-rebase.json" <<JSON
+{ "repos": [ { "name": "custom", "path": "${RB}", "mode": "improve" } ], "window": 20, "improvement_epic": "epic-id" }
+JSON
+CONFIG_SAVE="${CONFIG}"; STATE_SAVE="${STATE}"
+CONFIG="${TMP}/repos-rebase.json"; STATE="${TMP}/state-rebase"
+ROWS="${TMP}/rows-rebase.json" run "${TEL_RB}" --ingest --repo custom --since 2026-10-01
+eq "the rebase ingest exits 0" "${CODE}" "0"
+eq "the landing's gated head is the head that was gated, not the pushed commit" "$(row_field "${RB_L}" gated_head)" "${RB_G}"
+has "the row says it joined by the receipt's clean-rebase cover" "$(row_field "${RB_L}" gated_head_source)" \
+  "clean-rebase cover onto ${RB_M1:0:8}"
+eq "integrate is the gated run's duration" "$(row_field "${RB_L}" phases.integrate.s)" "300"
+eq "the PASS inside the run is a with-critic flow, not standalone" "$(row_field "${RB_L}" phase_flow)" "with_critic"
+eq "queue = run end -> the push start" "$(row_field "${RB_L}" phases.queue.s)" "1500"
+eq "merge = the push start -> the landing" "$(row_field "${RB_L}" phases.merge.s)" "5"
+eq "MISS: a landing with no gated head keeps its own commit as the key" "$(row_field "${RB_N}" gated_head)" "${RB_N}"
+has "MISS: and names what it searched" "$(row_field "${RB_N}" gated_head_miss)" \
+  "no receipt or integration_gate.run on ${RB_N:0:8}, no clean-rebase cover (no merge.landed before for ${RB_N:0:8})"
+has "MISS: the cover's own reason is kept" "$(row_field "${RB_N}" gated_head_search)" "clean-rebase cover: NO RECEIPT:"
+has "MISS: integrate's n/a carries the search" "$(row_field "${RB_N}" phases.integrate.na_reason)" \
+  "no integration_gate.run on ${RB_N:0:8} (no gated head:"
+CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
+
 echo "== summary: no ledger is not an empty ledger"
 STATE="${TMP}/state-none" run "${TEL_EMPTY}" --summary --repo custom
 has "no ledger is named as such" "${OUT}" "no ledger at"

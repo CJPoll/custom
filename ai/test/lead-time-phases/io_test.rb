@@ -118,6 +118,16 @@ Dir.mktmpdir("ltp-io-") do |tmp|
   File.write(File.join(common, "integration-receipts", "#{'d' * 40}.json"), "{")
   check("I3 an unreadable receipt: could not look") { IO_::ReceiptReader.read(common, "d" * 40).status == :could_not_look }
 
+  # ── PushCover (DND-1809): ir_push_covered, run in a bash child ──
+  check("I3c no common dir: could not look") { IO_::PushCover.read(nil, HEAD, nil).status == :could_not_look }
+  no_main = IO_::PushCover.read(common, HEAD, nil)
+  check("I3c no gated head and no pre-push main: empty, naming why") do
+    no_main.status == :empty && no_main.reason.include?("no landed main is known")
+  end
+  check("I3c an unreadable receipt for the pushed commit: could not look, never empty") do
+    IO_::PushCover.read(common, "d" * 40, nil).status == :could_not_look
+  end
+
   # ── VerdictReader ──
   check("I4 a relative common dir: could not look") { IO_::VerdictReader.read("repo.git", HEAD).status == :could_not_look }
   check("I4 no receipt in any store: empty, naming the stores searched") do

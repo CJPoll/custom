@@ -206,6 +206,45 @@ module LeadTimePhasesIO
     end
   end
 
+  # Which gated heads cover a push landing (DND-1809): ir_push_covered in
+  # ai/lib/integration-receipt.sh, the one copy of the rule gh-athena's push
+  # guard uses (an exact receipt, or a gated head whose clean merge onto the
+  # pre-push main gives the landed tree, matched by author, author date and
+  # subject). Run read-only in a bash child.
+  module PushCover
+    LIB = File.expand_path("integration-receipt.sh", __dir__)
+    # $1 the lib, $2 common dir, $3 pushed sha, $4 pre-push main (or "").
+    # Prints: rc, IR_COVER, the covering heads (space-separated), IR_WHY.
+    SCRIPT = <<~'SH'
+      . "$1" || exit 9
+      rc=0
+      ir_push_covered "$2" "$3" "$4" || rc=$?
+      printf '%s\n%s\n%s\n%s\n' "$rc" "$IR_COVER" "${IR_COVER_HEADS[*]}" "${IR_KIND:+$IR_KIND: }$IR_WHY"
+    SH
+
+    module_function
+
+    # -> Source: ok [{"cover", "heads", "onto"}]; empty(why) when no gated
+    # head covers it; could_not_look(why) when the rule could not be run.
+    def read(common, landed, before)
+      return Source.could_not_look("no git common dir") unless common
+      return Source.could_not_look("#{LIB} is missing") unless File.file?(LIB)
+
+      out, err, st = Open3.capture3("bash", "-c", SCRIPT, "ir-push-covered", LIB, common, landed, before.to_s)
+      return Source.could_not_look("could not load #{LIB} (#{err.strip.lines.first.to_s.strip})") if st.exitstatus == 9
+
+      rc, cover, heads, why = out.split("\n", 4).map(&:to_s)
+      why = why.to_s.strip
+      case rc
+      when "0" then Source.ok([{ "cover" => cover, "heads" => heads.split, "onto" => before }])
+      when "1" then Source.empty(why)
+      else Source.could_not_look(why.empty? ? "ir_push_covered exited #{rc.inspect} (#{err.strip})" : why)
+      end
+    rescue SystemCallError => e
+      Source.could_not_look("bash could not run (#{e.message})")
+    end
+  end
+
   # Every critic-verdicts store of the repo, for one sha.
   module VerdictReader
     module_function

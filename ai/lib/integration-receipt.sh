@@ -205,7 +205,12 @@ ir_read_receipt() {
 # identity only picks which ones.
 #
 # Returns 0 and sets IR_COVER (exact|rebase|landed) and IR_COVER_HEAD (the
-# gated head, for exact and rebase; IR_RECEIPT is its receipt). Returns 1 with
+# gated head, for exact and rebase; IR_RECEIPT is its receipt). IR_COVER_HEADS
+# lists EVERY gated head that covers <pushed-sha>: the one for exact, each
+# candidate giving its tree for rebase, none for landed. The lead-time ledger
+# joins a push landing to its gated head by this rule, and refuses to guess
+# when two heads cover it (DND-1809). IR_COVER_HEAD is the first of them, the
+# one this function returned before. Returns 1 with
 # IR_KIND "NO RECEIPT" and IR_WHY naming how many receipts and candidates it
 # looked at, so a miss is never silent. Returns 2 (COULD NOT LOOK) when a
 # receipt, the store or git cannot be read; IR_HOW may hold a first step. A
@@ -222,11 +227,11 @@ ir_read_receipt() {
 ir_push_covered() {
   local common="$1" p="$2" m="$3" rc store f h line want ptree tree out
   local exact_why n_store=0 n_cand=0 cl="" conflicts=0 other_base=0
-  local -a heads=() cands=() commits=()
+  local -a heads=() cands=() commits=() covers=()
   local -A seen=() inrange=()
-  IR_COVER="" IR_COVER_HEAD=""
+  IR_COVER="" IR_COVER_HEAD="" IR_COVER_HEADS=()
   if ir_read_receipt "$common" "$p" "$p"; then
-    IR_COVER=exact IR_COVER_HEAD="$p"; return 0
+    IR_COVER=exact IR_COVER_HEAD="$p" IR_COVER_HEADS=( "$p" ); return 0
   fi
   case "$IR_KIND" in *"COULD NOT LOOK"*) return 2 ;; esac
   exact_why="$IR_WHY"
@@ -311,13 +316,19 @@ ir_push_covered() {
     tree="$(git --git-dir="$common" merge-tree --write-tree "$m" "$h" 2>/dev/null)"; rc=$?
     case "$rc" in
       0) tree="${tree%%$'\n'*}"
-         if [ "$tree" = "$ptree" ]; then
-           IR_COVER=rebase IR_COVER_HEAD="$h"; return 0
-         fi ;;
+         [ "$tree" = "$ptree" ] && covers+=( "$h" ) ;;
       1) conflicts=$((conflicts + 1)) ;;
       *) cl="${cl:+$cl; }git merge-tree --write-tree ${m} ${h} failed (exit ${rc})" ;;
     esac
   done
+  # Every candidate is checked, so IR_COVER_HEADS is complete. A cover found
+  # still wins over a candidate that could not be read, as it did when the
+  # loop stopped at the first cover. The re-read restores IR_RECEIPT and the
+  # other receipt fields to the first cover's, which later reads overwrote.
+  if [ "${#covers[@]}" -gt 0 ]; then
+    ir_read_receipt "$common" "${covers[0]}" "$m" || true
+    IR_COVER=rebase IR_COVER_HEAD="${covers[0]}" IR_COVER_HEADS=( "${covers[@]}" ); return 0
+  fi
   if [ -n "$cl" ]; then
     ir_could_not_look "${exact_why}; and whether a gated head covers ${p} as a clean rebase onto ${m} is unknown: ${cl}"
     return 2
