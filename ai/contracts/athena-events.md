@@ -7908,9 +7908,20 @@ surface* and *2. Reaching other people*, and *Access control*). The
 implementing tickets cite the subsection they build by name: DND-1767 (the
 reads), DND-1768 (the owner-only writes and the change log), DND-1769 (the
 approval path, `calendar_invite`, `calendar_uninvite`, `calendar_change`) and
-DND-1770 (`calendar_rsvp`). None of these tools, the `calendar_changes` table
-or the approval page exists on gen_saas `origin/main` `613aedb9` (read
-2026-10-02). Every sentence about them is an obligation on its implementer.
+DND-1770 (`calendar_rsvp`). The two reads, `calendar_events` and
+`calendar_event`, exist (DND-1767, gen_saas #744, `65aa3169`); the text about
+them describes what they do. None of the other seven tools, the
+`calendar_changes` table or the approval page exists on gen_saas
+`origin/main` (read 2026-10-02). Every sentence about those is an obligation on
+its implementer.
+
+**Later (2026-10-02, DND-1800):** this paragraph read "None of these tools, the
+`calendar_changes` table or the approval page exists on gen_saas `origin/main`
+`613aedb9`", so every sentence of this section was an obligation. Superseded
+for the two reads by DND-1767 (gen_saas #744, `65aa3169`). The rules and
+shapes below that bind them (*Rules every tool shares*, *Zoom links*,
+*Arguments and return shapes*, *Refusals*) now describe the built reads, and
+the code is the check.
 
 **The calendar is not the index.** These tools write the owner's primary
 Google calendar and the `calendar_changes` log. No tool writes an index row
@@ -7964,7 +7975,10 @@ Nine tools: two reads, six writes, one status read.
 - **Event ids** are the ids `calendar_events` returns. For a recurring event
   that is one occurrence's id; a write changes that occurrence only. Before
   every write the server reads the event from the owner's primary calendar.
-  An id not there is `not_found`.
+  An id not there is `not_found`. An `event_id` that is not a string of 1 to
+  1,024 letters, digits, `_` or `-` is `invalid_argument` naming `event_id`,
+  before any Google call, so no id carries a path segment into the Google
+  URL.
 - **Times** are RFC 3339 with an offset (`2026-10-05T15:00:00-06:00`). A time
   with no offset is `invalid_argument` naming the field. `ends_at` must be
   after `starts_at`, at most 24 hours later. All-day events are read but not
@@ -7979,9 +7993,20 @@ Nine tools: two reads, six writes, one status read.
   URL from a `conferenceData` entry point may be returned and shown, as
   `join_url` (*Zoom links*). No write requests a Meet conference, so
   Google adds none. A Meet link passed as a Zoom link is `not_a_zoom_link`,
-  and one in a `location` argument is `invalid_argument`. A returned
-  `location` has its Meet URLs removed (`calendar_event`). The only meeting
+  and one in a `location` argument is `invalid_argument`. A returned `title`
+  (both reads) or `location` (`calendar_event`) has every word naming
+  `meet.google.com` replaced by `[Google Meet link removed]`: the whole word,
+  with or without a scheme, in any case, percent-decoded up to three times, so
+  a Google redirect wrapping a Meet link goes with it. The only meeting
   link any surface offers is `join_url`, a Zoom URL (*Zoom links*).
+
+  **Later (2026-10-02, DND-1800):** this bullet said "A returned `location`
+  has its Meet URLs removed (`calendar_event`)", and the *Arguments and return
+  shapes* bullet said every `meet.google.com` URL in it is replaced. Superseded
+  by DND-1767 (gen_saas #744, `65aa3169`): `title` is scrubbed too, in both
+  reads, and the scrub replaces the whole word that names the host
+  (`Athena.Calendar.MeetLink`), not only a URL. Left in the `title`, a Meet URL
+  would have been a Meet link on a surface the rule forbids.
 - **Dormant until connected.** `not_configured`, `not_connected` and `revoked`
   carry DND-447's `Fix:` text (`Athena.Calendar.Refusal`).
 - **Today stays current.** After a write is applied to an event that starts in
@@ -8001,12 +8026,17 @@ link. Design: `ai/docs/calendar-management.md` → *3. Zoom links*.
   location.
 - **Valid** means: scheme `https`; host `zoom.us`, `zoomgov.com`, or a
   subdomain of either (`us02web.zoom.us`, `<company>.zoom.us`); path starting
-  `/j/`, `/w/`, `/s/` or `/my/`; at most 2,048 characters; and it passes the
-  index's `FieldCheck.http_url/1`. The query string, passcode included, is
-  kept.
+  `/j/`, `/w/`, `/s/` or `/my/`; at most 2,048 characters; it passes the
+  index's `FieldCheck.http_url/1`; and it names `meet.google.com` nowhere,
+  in any case, percent-decoded up to three times. A Meet URL in its query, or
+  a comma-joined Meet URL the scan reads as one run, rejects it. The query
+  string, passcode included, is kept.
 - **Finding a URL in text:** a URL is a maximal run of non-space characters
-  starting `https://`. Description HTML is read for `href` values and plain
-  URLs. `&amp;` becomes `&`. Trailing `.,;:)>"'` is trimmed.
+  starting `https://`. The description is HTML: its `href` values are read
+  first, then its plain URLs, read from the text with every HTML tag replaced
+  by a space, so a URL ends where its tag begins. `location` is plain text:
+  no tag is replaced there. `&amp;` becomes `&`. Trailing `.,;:)>"'` is
+  trimmed.
 - **Everything else is rejected,** so Google Meet is excluded by
   construction: `meet.google.com`, `hangoutLink`, a Google redirect
   (`google.com/url?q=`), `zoom.us.evil.example`, `http://zoom.us/...`. Each
@@ -8032,21 +8062,28 @@ link. Design: `ai/docs/calendar-management.md` → *3. Zoom links*.
  "recurring": true, "join_url": "https://us02web.zoom.us/j/81234567890?pwd=..."}
 ```
 
-`self_response` is `accepted`, `tentative`, `declined`, `needsAction`, or
+`starts_at` and `ends_at` are Google's `dateTime`, offset included, or its
+`date` (`2026-10-05`) when `all_day`; `ends_at` is `null` when Google sends no
+end. `recurring` is true for an occurrence of a series or the series itself.
+`other_guests` counts guests other than the owner; rooms and other resources
+are not guests, here or in `calendar_event`'s `guests`. `self_response` is
+`accepted`, `tentative`, `declined`, `needsAction`, or
 `null` when the owner is not on the guest list. `join_url` is `null` when no
 Zoom link is found (*Zoom links*); a read extracts it from the event it reads
 from Google, never from the stored column. Cancelled events are not listed.
 The shape is closed: nothing is added without amending this subsection.
 
 - **`calendar_events {from, to}`** → `{"window": {"from", "to"}, "count": n,
-  "events": [EventSummary]}`. Both bounds are required, and `to - from` is at
-  most 31 days. The window is echoed, so an empty list says which window found
+  "events": [EventSummary]}`. Both bounds are required, RFC 3339 with an offset, `to` is after `from`, and
+  `to - from` is at most 31 days. An event is listed when it overlaps the
+  window. The window is echoed, so an empty list says which window found
   nothing. More than 250 events is `too_many_events`.
 - **`calendar_event {event_id}`** → `EventSummary` plus `"location":
   string|null`, `"guests_omitted": bool` and `"guests": [{"email", "response",
-  "organizer", "optional"}]`. The description is never returned. In
-  `location`, every `meet.google.com` URL is replaced by `[Google Meet link
-  removed]`.
+  "organizer", "optional"}]`. The description is never returned. In `location`
+  and `title`, every word naming `meet.google.com` is replaced by `[Google Meet
+  link removed]` (*Rules every tool shares* → *Never a Google Meet link*).
+  `guests` leaves out rooms and other resources.
 - **`calendar_create {claude_session_id, title, starts_at, ends_at, location?,
   description?, guests?, zoom_url?}`** → `{"result": "created", "event":
   EventSummary}`, or `{"result": "pending_approval", "change": Change}` when
@@ -8103,7 +8140,7 @@ Each is a tool error, `<code>: <sentence> Fix: <step>`.
 
 | Code | When | Fix |
 | --- | --- | --- |
-| `not_configured`, `not_connected`, `revoked` | no calendar access | DND-447's: store the client on /secrets, connect at /oauth/google/start |
+| `not_configured`, `not_connected`, `revoked` | no calendar access, or a stored OAuth client that is not Google's client JSON (DND-447's `client_malformed`, answered as `not_configured`) | DND-447's: store the client on /secrets (the JSON Google's console downloads, again when malformed), connect at /oauth/google/start |
 | `invalid_argument` | unknown key, missing field, bad time, bad address, bad combination | names the field and the expected form |
 | `not_found` | no such event on the owner's primary calendar, no such change for this owner, or an unknown session | call `calendar_events` for a current id; call from the session's own machine |
 | `not_organizer` | update, invite, uninvite, attach Zoom on an event someone else organizes | ask the organizer, or RSVP with `calendar_rsvp` |
