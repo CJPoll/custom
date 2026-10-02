@@ -149,6 +149,16 @@ Run once per shipwright cron run, after the report mining. The state lives in
    the same ticket edit under its own reporter. Measured: call `c7755a30…`
    had two identical `field_changed` rows, from two machines' scans three
    minutes apart.
+
+   **Count across runs, not per run.** A cluster's count is every distinct
+   call journaled for it since its question-set version went live, the
+   watched ones included. The cursor makes each run read only new rows, so
+   a cluster that gains one call an hour never reaches 3 inside one run.
+   Journal a watched cluster's call ids, and add them to the next run's
+   count. Leave out a call whose ticket was later set back to Jev's answer
+   (DND-1799: no tool withdraws that report). Measured 2026-10-02:
+   ticket-kind-v2 hardening->bug reached 5 calls on 5 subjects over five
+   runs, each journaled "below 3, watched".
 5. **Diagnose from the payloads, in session only.** Read the qualifying rows'
    `request` (what Jev was sent) and answers: rerun `list` with the same
    `--after`, no `--seen-file`, and `--with-payloads`, and read only the
