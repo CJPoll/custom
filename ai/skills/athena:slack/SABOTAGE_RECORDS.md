@@ -560,3 +560,11 @@ Review round (critic BLOCK [tests]: bare `refused` / `invalid` untested; code-re
 | S101 | `claim_refusal_kind` drops the bare `refused` and `invalid` tokens | 2 | `FAIL claim_parse_result: a bare refused token (JSON-RPC error) -> refused` / `FAIL claim_parse_result: a bare invalid token (JSON-RPC error) -> invalid` |
 
 After the restore the suite returned to `VERDICT: PASS (302 cases)`.
+
+DND-1661: `topic_route.sh` kept its own copy of the refusal reader and read a JSON-RPC error of ANY code as a server refusal, so a -32603 whose text read `refused: ...` printed `reason=refused` and the refusal's Fix. `claim.sh` and `topic_route.sh` now share `lib/mcp_refusal.sh` (-32000 or an `isError` result); any other code is `mcp-error:server-error`. Red before the fix (unfixed code): `FAIL topic_route_error: a -32603 internal error whose text reads 'refused: ...' is not a refusal` / `FAIL topic_route_server_words: a protocol error (-32603) has no server words`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S102 | `mcp_refusal_text` (the shared reader) drops the `.error.code == $code` test | 6 | `FAIL claim_parse_result: 'not found' under a protocol code (-32601) is not a refusal` / `FAIL topic_route_error: a -32603 internal error whose text reads 'refused: ...' is not a refusal (DND-1661)` / `FAIL topic-route: a -32603 error reading 'refused: ...' -> reason=mcp-error:server-error, never refused` |
+
+After the restore the suite returned to `VERDICT: PASS (307 cases)`.
