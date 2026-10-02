@@ -71,12 +71,16 @@ eq "[DND-484 test 5] ... one drain notice, not one per poll" "$(grep -c 'desired
   timeout 30 "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" --interval 1 --budget 600 >/dev/null 2>"${TMP}/uerr"; echo "$?" > "${TMP}/rc" )
 eq "[DND-484 test 5] headless: a budget at the 600s ceiling is refused (exit 2)" "$(cat "${TMP}/rc")" 2
 has "[DND-484 test 5] ... with Fix:" "$(cat "${TMP}/uerr")" "Fix:"
+# DND-1719: the poll below must not take that refusal (it says "--budget 600s")
+# for the waiter's budget line. When it did, it killed the waiter before the
+# line was written, and the verdict turned on scheduling.
+if fw_budget_line_seen "${TMP}/uerr"; then
+  bad "[DND-1719] the 600s refusal is not read as the waiter's budget line" "$(cat "${TMP}/uerr")"
+else
+  ok "[DND-1719] the 600s refusal is not read as the waiter's budget line"
+fi
 ( export CLAUDE_CODE_ENTRYPOINT=sdk-cli CLAUDE_CODE_SESSION_ATTENDED=0 FLEET_WAIT_INTERVAL_S=1; unset CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
-  # The waiter is killed as soon as it prints its budget line; the 60 s timeout
-  # and the poll bound are hang caps only (DND-1007: they were 5 s).
-  timeout 60 "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" >/dev/null 2>"${TMP}/uerr" & p=$!
-  for i in $(seq 1 1200); do grep -q 'budget' "${TMP}/uerr" 2>/dev/null && break; sleep 0.05; done
-  kill "${p}" 2>/dev/null; wait "${p}" 2>/dev/null )
+  fw_until_budget_line "${TMP}/uerr" )
 has "[DND-484 test 5] headless default budget is the inbox policy's 540s" "$(cat "${TMP}/uerr")" "budget 540s, ceiling 600s, mode headless"
 
 # The trap: a waiter killed mid-request leaves no curl behind.
@@ -104,6 +108,36 @@ eq "wait: ... and no descendant (its curl included) survives it" "${left}" ""
 [ -n "${left}" ] && kill ${left} 2>/dev/null
 touch "${TMP}/hold-trap"
 fleet_respond "{\"status\":200,\"body\":${DRAIN_B}}"
+
+# DND-1719: a client that is gone before its answer is written (the killed
+# waiter's curl above) is not a fake-server error. The server used to print a
+# BrokenPipeError traceback for it, which filled a failing run's tail and hid
+# the real FAIL detail. Made deterministic: a second fake server, its stderr
+# kept apart; the client resets the connection (SO_LINGER 0) while the answer
+# is held, the answer is released only after that, and the test waits on the
+# server's own "answered" marker.
+GONE="${TMP}/gone"
+mkdir -p "${GONE}"
+printf '{"status":200,"hold_file":"%s/release","answered_file":"%s/answered","body":{}}\n' "${GONE}" "${GONE}" > "${GONE}/responses.json"
+python3 "${FAKE}" "${GONE}/port" "${GONE}/server.log" "${GONE}/responses.json" "${TMP}/token" 2>"${GONE}/server.err" &
+GONE_PID=$!
+for i in $(seq 1 1200); do [ -s "${GONE}/port" ] && break; sleep 0.05; done
+timeout 60 python3 - "$(cat "${GONE}/port")" "${GONE}/server.log" <<'PY'
+import os, socket, struct, sys, time
+port, log = int(sys.argv[1]), sys.argv[2]
+s = socket.create_connection(("127.0.0.1", port))
+s.sendall(b"GET /api/v1/fleet/sessions/x/control HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+# The request is logged before the held answer; close only once it is.
+while not (os.path.exists(log) and os.path.getsize(log) > 0):
+    time.sleep(0.05)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+s.close()
+PY
+touch "${GONE}/release"
+for i in $(seq 1 1200); do [ -e "${GONE}/answered" ] && break; sleep 0.05; done
+check "[DND-1719] fixture: the server tried to answer a client that was gone" test -e "${GONE}/answered"
+kill "${GONE_PID}" 2>/dev/null; wait "${GONE_PID}" 2>/dev/null
+eq "[DND-1719] a client gone before its answer is not a fake-server error" "$(cat "${GONE}/server.err")" ""
 
 # Without pgrep the trap cannot list the poll's tree: wait refuses to start
 # (exit 1, Fix:), while check -- which the drain guard runs -- does not need it.

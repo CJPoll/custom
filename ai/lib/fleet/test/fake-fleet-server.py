@@ -83,6 +83,14 @@ def hold(path):
         time.sleep(0.05)
 
 
+# With "answered_file": PATH in the spec, PATH is created once the answer has
+# been written or abandoned (DND-1719). A test that must see what the server
+# did with an answer waits on PATH, never on a clock.
+def answered(path):
+    if path:
+        open(path, "w").close()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -124,11 +132,18 @@ class Handler(BaseHTTPRequestHandler):
         else:
             ctype = "text/html"
         data = payload.encode()
-        self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # The client is gone (a killed waiter's curl): nobody is left to
+            # answer, and that is not a server error (DND-1719).
+            self.close_connection = True
+        finally:
+            answered(spec.get("answered_file"))
 
 
 server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

@@ -16,3 +16,26 @@ fw() {
   ERR="$(cat "${TMP}/werr")"
   HITS=$(( $(fleet_log_count) - before ))
 }
+
+# fw_budget_line_seen <file> -- 0 if <file> holds the waiter's own budget line
+# (bin/fleet-control prints it first, as "fleet-control: wait: budget ...").
+# The bare word "budget" also matched a --budget refusal (DND-1719).
+fw_budget_line_seen() { grep -q '^fleet-control: wait: budget [0-9]' "$1" 2>/dev/null; }
+
+# fw_until_budget_line <file> <args...> -- start the waiter for session B with
+# its stderr in <file>, kill it once it has printed its budget line, and wait
+# for it. <file> is emptied HERE, before the waiter starts: the waiter's own 2>
+# runs in the child, so until then the poll could read an earlier case's
+# output (DND-1719). The 60 s timeout and the poll bound are hang caps only
+# (DND-1007); a waiter that exits ends the poll at once.
+fw_until_budget_line() {
+  local f="$1" p i; shift
+  : > "${f}"
+  timeout 60 "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" "$@" >/dev/null 2>"${f}" & p=$!
+  for i in $(seq 1 1200); do
+    fw_budget_line_seen "${f}" && break
+    kill -0 "${p}" 2>/dev/null || break
+    sleep 0.05
+  done
+  kill "${p}" 2>/dev/null; wait "${p}" 2>/dev/null
+}
