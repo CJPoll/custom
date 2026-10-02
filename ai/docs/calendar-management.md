@@ -77,7 +77,7 @@ role the owner plays.
   arguments, the checks and the tests. The tool's description says
   "reschedule" so a session finds it.
 - **RSVP is its own tool.** The owner acts as a guest there, never as the
-  organizer, and its approval rule differs (decision 2).
+  organizer, and its approval rule differs (*2. Reaching other people*).
 - **Attach Zoom is its own tool.** It validates a Zoom URL and refuses
   anything else, Google Meet included.
 - **Not one tool with an `op` argument.** An op union cannot keep a closed
@@ -89,7 +89,8 @@ role the owner plays.
   not help anyway: the guests' copies still change.
 
 Not built: deleting or cancelling an event, editing a whole recurring series,
-editing a description after creation (decision 1's argument rules), and
+editing a description after creation (*Arguments and return shapes* →
+`calendar_update`), and
 choosing a calendar other than the owner's primary one.
 
 ### Rules every tool shares
@@ -117,8 +118,8 @@ choosing a calendar other than the owner's primary one.
   not the organizer. Otherwise `not_an_attendee`.
 - **Never a Google Meet link.** No tool returns `hangoutLink` or
   `conferenceData`. No write requests a Meet conference, so Google adds none.
-  The only meeting link any surface shows is `join_url`, a Zoom URL (decision
-  3).
+  The only meeting link any surface shows is `join_url`, a Zoom URL
+  (*3. Zoom links* → *Extraction rules*).
 - **Dormant until connected.** `not_configured`, `not_connected` and `revoked`
   carry DND-447's `Fix:` text (`Athena.Calendar.Refusal`).
 - **Today stays current.** After a write is applied to an event that starts in
@@ -174,7 +175,8 @@ a current guest is `already_a_guest`; uninviting someone not on the list is
 
 **`calendar_attach_zoom {claude_session_id, event_id, zoom_url, replace?}`** →
 `updated` or `pending_approval`. `zoom_url` must pass `ZoomLink.valid?/1`
-(decision 3); anything else, a Meet link included, is `not_a_zoom_link`. The
+(*3. Zoom links* → *Extraction rules*); anything else, a Meet link included,
+is `not_a_zoom_link`. The
 link goes in `location`: an empty location becomes the URL; a location without
 a Zoom link becomes `<url> · <old location>`; a location that already holds a
 Zoom link is `zoom_already_attached` unless `replace: true`, which swaps that
@@ -235,7 +237,7 @@ item 3 (`~/.claude/CLAUDE.md` → *Owner approval policy*).
 | Grant class (`calendar.change`, like `calendar.rsvp`) | a Slack button | needs DND-563 T2 to T4, and T3 is Parked. It is an item 6 change. And the target is a guest list and new field values, which is free-form content: *Owner approval grants* → *Action classes* says "No class declares a free-form field" |
 | Per-call owner OK on the web | the owner sees exactly who is reached; works now; no rule change | one click per reaching change |
 
-### Decision (judgement under item 3, listed in the digest)
+### OD-1: decided as a judgement call under item 3, listed in the digest
 
 - **Changes that reach nobody execute directly.** An event with no other guest
   before or after the change: create, update, reschedule, attach Zoom.
@@ -291,9 +293,17 @@ approval link.
   Google failure marks it `failed` with the closed cause. A token is spent
   once: the second Approve finds no `proposed` row.
 - **Reject** marks the row `rejected`. **Expiry** is read, not scheduled: a
-  `proposed` row past `proposed_at + 24h` reads `expired`.
-- **Retention.** Each new proposal deletes the owner's own terminal rows older
-  than 30 days. No new periodic worker.
+  row stored as `proposed` past `proposed_at + 24h` reads `expired`. Its
+  stored state stays `proposed`.
+- **An expired link shows `not_found`** on the page, like every other token
+  mismatch, so the page never says whether a change exists. `calendar_change`
+  and the digest show the `expired` state.
+- **Retention.** Each new `calendar_changes` row, proposed or applied, first
+  deletes the same owner's rows matching
+  `decided_at < now - 30 days OR (state = 'proposed' AND proposed_at < now - 24 hours - 30 days)`.
+  The second clause is the expired proposals, which never get a
+  `decided_at`. No new periodic worker. An owner who makes no calendar change
+  for a long time keeps their last rows; they are small and metadata only.
 
 The token carries the change's content; it lives in the calling session's
 transcript and in the URL, on the owner's own machines. Phoenix's request log
@@ -474,9 +484,10 @@ for `meeting`. DND-1764 adds it as the permissive field `self_response`.
    Recommended: yes, `join_url` with its passcode, one permissive field on
    `meeting`. Blocks the Join Zoom link on `/priorities` and in the digest
    only.
-2. **Reaching other people** is decided as a judgement call under item 3 and
-   listed in the digest, not an ask: direct for owner-only writes and MCP
-   RSVPs, Cody's web OK for the rest. Cody may veto either direct path.
+2. **OD-1, reaching other people**, is decided as a judgement call under
+   item 3 and listed in the digest, not an ask: direct for owner-only writes
+   and MCP RSVPs, Cody's web OK for the rest. Cody may veto either direct
+   path.
 3. **No grant class** is proposed, so no item 6 change. A `calendar.change`
    class for Slack buttons stays open to Cody, and is not recommended.
 4. **Pasted Zoom links**, no Zoom account, is decided under item 2 (no cost).
