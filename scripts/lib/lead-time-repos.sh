@@ -32,7 +32,6 @@
 #     LT_RES_DETAIL  on unreadable: jq's error, one line
 #   On LT_RES_RC 0 only (all empty otherwise, so a half-read list is never
 #   left behind):
-#     LT_RES_JSON         the resolver's --json, as printed
 #     LT_RES_SOURCE       .source (default | override)
 #     LT_RES_PATH         .path, the config file it read
 #     LT_RES_CONSIDERED   .considered
@@ -46,8 +45,12 @@
 #     LT_RES_TEXT         the printable list: a header naming the source and
 #                         file, one padded line per repo, one per skip, counts
 #
-# Every value is flattened onto one line (newline, carriage return and the US
-# separator become a space), so a value can never shift a field.
+# Every value is flattened onto one line (newline, carriage return, tab and
+# the US separator become a space), so a value can never shift a field.
+#
+# It is stricter than the two jq readers it replaced in one way: a repo whose
+# name, mode or path is not a non-empty string is refused as unreadable. The
+# resolver's --help schema never prints one.
 #
 # A failed or malformed resolution is an error at its source, never an empty
 # list (~/.claude/CLAUDE.md -> "A failed lookup must never look like an empty
@@ -60,7 +63,7 @@
 #   skip US name US reason
 # Any shape it cannot vouch for is error(), so jq exits non-zero.
 LT_REPOS_JQ='
-def one: if . == null then "" else tostring end | gsub("[\n\r\u001f]"; " ");
+def one: if . == null then "" else tostring end | gsub("[\n\r\t\u001f]"; " ");
 def need_str($k): if (.[$k] | type) == "string" and (.[$k] | length) > 0 then . else error("a repo has no string \($k)") end;
 if type != "object" then error("not a JSON object")
 elif (.repos | type) != "array" or (.repos | length) == 0 then error("no resolved repos")
@@ -73,7 +76,7 @@ else . end
 | join("\u001f")'
 
 lt_repos_reset() {
-  LT_RES_JSON=""; LT_RES_SOURCE=""; LT_RES_PATH=""; LT_RES_CONSIDERED=""
+  LT_RES_SOURCE=""; LT_RES_PATH=""; LT_RES_CONSIDERED=""
   LT_RES_REPOS=""; LT_RES_NAMES=""; LT_RES_DESC=""; LT_RES_TSV=""
   LT_RES_SKIPPED=""; LT_RES_SKIPPED_RUN=""; LT_RES_TEXT=""
 }
@@ -86,7 +89,7 @@ lt_repos_pad() {
 }
 
 lt_repos_resolve() {
-  local resolver="$1" out err_file stream rc=0
+  local resolver="${1:-}" out err_file stream rc=0
   local us=$'\x1f' tag a b c d nrepo=0 nskip=0 line skips_text=""
   LT_RES_RC=0; LT_RES_FAULT="none"; LT_RES_RAN="not run"; LT_RES_ERR=""; LT_RES_DETAIL=""
   lt_repos_reset
@@ -139,6 +142,5 @@ lt_repos_resolve() {
     LT_RES_RC=1; LT_RES_FAULT="unreadable"; LT_RES_DETAIL="no repo record was read from the resolver's --json"
     return 0
   fi
-  LT_RES_JSON="${out}"
   return 0
 }

@@ -647,6 +647,29 @@ if [ "$rc" = 2 ] && grep -qF "$IR/scripts/lib/lead-time-repos.sh is missing from
 else
   bad "reader lib missing (check)" "rc=$rc $(out)"
 fi
+# Present but defining nothing (a truncated file): refused, naming the function.
+cp "$IR/scripts/lib/lead-time-repos.sh" "${TMP}/repos-lib.aside"
+: >"$IR/scripts/lib/lead-time-repos.sh"
+rc="$(inst "$ct" -- --check)"
+cp "${TMP}/repos-lib.aside" "$IR/scripts/lib/lead-time-repos.sh"
+if [ "$rc" = 2 ] && grep -qF "$IR/scripts/lib/lead-time-repos.sh could not be loaded or does not define lt_repos_resolve" "${TMP}/inst.err" \
+   && grep -q 'Fix: restore scripts/lib/lead-time-repos.sh' "${TMP}/inst.err" && ! grep -q '^OK' "${TMP}/inst.out"; then
+  ok "--check with an empty --json reader lib: exit 2 naming lt_repos_resolve, Fix:, never OK"
+else
+  bad "reader lib empty (check)" "rc=$rc $(out)"
+fi
+# Present but unreadable is its own fault, never reported as missing.
+if [ "$(id -u)" != 0 ]; then
+  chmod 000 "$IR/scripts/lib/lead-time-repos.sh"
+  rc="$(inst "$ct" -- --check)"
+  chmod 644 "$IR/scripts/lib/lead-time-repos.sh"
+  if [ "$rc" = 2 ] && grep -qF "$IR/scripts/lib/lead-time-repos.sh is unreadable" "${TMP}/inst.err" \
+     && grep -qF 'Fix: restore read permission on it (chmod u+r' "${TMP}/inst.err" && ! grep -q 'is missing' "${TMP}/inst.err"; then
+    ok "--check with the --json reader lib unreadable: exit 2, says unreadable (not missing), Fix: chmod"
+  else
+    bad "reader lib unreadable (check)" "rc=$rc $(out)"
+  fi
+fi
 
 # ===========================================================================
 case_ 'setup-leadtime-cron — the runner MCP preflight (DND-1571)'

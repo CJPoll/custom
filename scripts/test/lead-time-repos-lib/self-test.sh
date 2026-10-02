@@ -47,7 +47,7 @@ json() { cat >"${tmp}/$1.json"; printf '%s' "${tmp}/$1.json"; }
 
 # all_empty — every on-success variable is empty: no half-read list survives.
 all_empty() {
-  [ -z "${LT_RES_JSON}${LT_RES_SOURCE}${LT_RES_PATH}${LT_RES_CONSIDERED}${LT_RES_REPOS}" ] \
+  [ -z "${LT_RES_SOURCE}${LT_RES_PATH}${LT_RES_CONSIDERED}${LT_RES_REPOS}" ] \
     && [ -z "${LT_RES_NAMES}${LT_RES_DESC}${LT_RES_TSV}${LT_RES_SKIPPED}${LT_RES_SKIPPED_RUN}${LT_RES_TEXT}" ]
 }
 
@@ -80,7 +80,6 @@ want_text="Repos (ai/bin/lead-time-repos: source=override /cfg/lead-time-repos.j
   skipped ghost: not checked out here
   3 considered, 2 resolved, 1 skipped"
 eq "healthy: printable text" "${want_text}" "${LT_RES_TEXT}"
-eq "healthy: the --json is kept as printed" "$(cat "${j}")" "${LT_RES_JSON}"
 
 # --- 2. no skip: the .run form says none; a long name still gets a space -----
 j="$(json noskip <<'EOF'
@@ -91,6 +90,7 @@ lt_repos_resolve "$(fake noskip 0 "${j}")"
 eq "no skip: RC 0" 0 "${LT_RES_RC}"
 eq "no skip: skipped empty" "" "${LT_RES_SKIPPED}"
 eq "no skip: .run form none" none "${LT_RES_SKIPPED_RUN}"
+eq "no idle_workflow key: its field is empty" "averyverylongname${US}improve${US}/p${US}" "${LT_RES_REPOS}"
 eq "no skip: a name past the column keeps one space" "  averyverylongname improve /p" "$(printf '%s\n' "${LT_RES_TEXT}" | sed -n 2p)"
 
 # --- 3. a value with a newline or the field separator never shifts a field ---
@@ -156,7 +156,13 @@ cp "${tmp}/healthy" "${tmp}/noexec"; chmod -x "${tmp}/noexec"
 lt_repos_resolve "${tmp}/noexec"
 eq "resolver not executable: fault resolver-missing" resolver-missing "${LT_RES_FAULT}"
 lt_repos_resolve ""
-eq "no resolver path at all: fault resolver-missing" resolver-missing "${LT_RES_FAULT}"
+eq "an empty resolver path: fault resolver-missing" resolver-missing "${LT_RES_FAULT}"
+out="$("${BASH}" -c 'set -euo pipefail; . "$1"; lt_repos_resolve; echo "$LT_RES_FAULT"' _ "${helper}" 2>&1)"
+eq "no argument at all, under set -u: fault resolver-missing, no abort" resolver-missing "${out}"
+# A tab in a value is flattened too, so the name<TAB>mode lines cannot shift.
+printf '{"source":"default","path":"/c","repos":[{"name":"a\\tb","path":"/p","mode":"watch"}],"considered":1}\n' >"${tmp}/tab.json"
+lt_repos_resolve "$(fake tab 0 "${tmp}/tab.json")"
+eq "a tab in a name is flattened in the tsv" "a b"$'\t'"watch" "${LT_RES_TSV}"
 # A PATH holding everything but jq.
 mkdir -p "${tmp}/nojq"
 for c in mktemp cat rm tr; do ln -s "$(command -v "$c")" "${tmp}/nojq/$c"; done
